@@ -12,7 +12,7 @@ DATA = $(wildcard $(EXTENSION)--*--*.sql) $(EXTENSION)--3.0.sql
 
 PGFILEDESC = "pg_lake_table - foreign data wrapper for data lakes"
 
-PG_CPPFLAGS = -I$(libpq_srcdir) -Iinclude -I../pg_extension_base/include -I../pg_lake_engine/include -I../pg_lake_iceberg/include -I../avro/lang/c/src
+PG_CPPFLAGS = -I$(libpq_srcdir) -Iinclude -I../pg_extension_base/include -I../pg_lake_engine/include -I../pg_lake_iceberg/include
 SHLIB_LINK_INTERNAL = $(libpq)
 
 UNAME_S := $(shell uname -s)

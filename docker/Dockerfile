@@ -266,16 +266,7 @@ FROM base AS pg_lake_postgres
 
 # Install pg_lake
 RUN cd pg_lake && \
-    make install-pg_extension_base && \
-    make install-pg_map && \
-    make install-pg_extension_updater && \
-    make install-pg_lake_engine && \
-    make install-avro && \
-    make install-pg_lake_iceberg && \
-    make install-pg_lake_table && \
     make install-pg_lake_spatial && \
-    make install-pg_lake_copy && \
-    make install-pg_lake && \
     make install-pg_lake_benchmark
 
 RUN initdb -D $PGBASEDIR/pgsql-$PG_MAJOR/data -U postgres --locale=C.UTF-8 --data-checksums
@@ -286,5 +277,4 @@ FROM base AS pgduck_server
 ARG PGCOMPAT_BUILD_CONFIG=Release
 
 # Install pgduck_server
-RUN cd pg_lake/duckdb_pglake && make && make install && rm -r build
-RUN cd pg_lake/pgduck_server && make && make install
+RUN make install-pgduck_server

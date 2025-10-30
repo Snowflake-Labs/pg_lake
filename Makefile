@@ -1,47 +1,56 @@
 # when adding a new extension, add to this list to get the standard targets supported
-EXT_TARGETS = pg_extension_base pg_map pg_extension_updater pg_lake_engine pg_lake_copy pg_lake_table pg_lake_iceberg pg_lake_spatial pg_lake pg_lake_benchmark
+EXTENSION_TARGETS = pg_extension_base pg_map pg_extension_updater pg_lake_engine pg_lake_copy pg_lake_table pg_lake_iceberg pg_lake_spatial pg_lake pg_lake_benchmark
 DUCK_TARGETS = pgduck_server duckdb_pglake
-ALL_TARGETS = $(DUCK_TARGETS) avro $(EXT_TARGETS)
+ALL_TARGETS = $(DUCK_TARGETS) avro $(EXTENSION_TARGETS)
 
 # generated phony targets
-ACTION_LIST = clean install uninstall check installcheck
-PHONY_TARGETS = $(foreach target, $(ALL_TARGETS), $(target) $(foreach action, $(ACTION_LIST), $(action)-$(target))) installcheck-postgres installcheck-postgres-with_extensions_created
+ACTION_LIST = clean install install-fast uninstall check installcheck
+PHONY_TARGETS = $(foreach target, $(ALL_TARGETS), $(target) $(foreach action, $(ACTION_LIST), $(action)-$(target)))
 
 # if you want to override a target's specific implementation from the default, you must add it to this list
-CUSTOM_TARGETS = check-pg_lake_engine installcheck-pg_lake_engine check-pg_extension_updater installcheck-pg_extension_updater install-avro check-avro clean-avro uninstall-avro check-duckdb_pglake
+CUSTOM_TARGETS = check-pg_lake_engine installcheck-pg_lake_engine check-pg_extension_updater installcheck-pg_extension_updater check-avro clean-avro uninstall-avro check-duckdb_pglake \
+				 $(foreach target, $(ALL_TARGETS), install-$(target))
+
+FORCE_DUCKDB_BUILD ?= 1
 
 # other phony targets go here
-.PHONY: all install installcheck clean check submodules fast install-fast uninstall check-indent reindent ci-cached install-ci-cached clean-ci-cached
-.PHONY: cmake-avro
+.PHONY: all fast install install-fast installcheck clean check submodules uninstall check-indent reindent installcheck-postgres installcheck-postgres-with_extensions_created
 .PHONY: $(ALL_TARGETS)
 .PHONY: $(PHONY_TARGETS)
 
 # top-level targets defined in terms of our variables
-all: submodules $(ALL_TARGETS)
-install: $(addprefix install-,$(ALL_TARGETS))
+all: pg_lake
+	FORCE_DUCKDB_BUILD=1 $(MAKE) pgduck_server
+install: install-pg_lake
+	FORCE_DUCKDB_BUILD=1 $(MAKE) install-pgduck_server
+fast: pg_lake
+	FORCE_DUCKDB_BUILD=0 $(MAKE) pgduck_server
+install-fast: install-pg_lake
+	FORCE_DUCKDB_BUILD=0 $(MAKE) install-pgduck_server
 clean: $(addprefix clean-,$(ALL_TARGETS))
 check-local: $(addprefix check-,$(ALL_TARGETS))
 check-upgrade: check-pg_lake_table-upgrade
 check-e2e: check-pg_lake_table-e2e
 check: check-local check-e2e
 installcheck: installcheck-local installcheck-e2e
-installcheck-local: installcheck-postgres installcheck-postgres-with_extensions_created installcheck-pgduck_server $(addprefix installcheck-,$(EXT_TARGETS))
+installcheck-local: installcheck-postgres installcheck-postgres-with_extensions_created installcheck-pgduck_server $(addprefix installcheck-,$(EXTENSION_TARGETS))
 installcheck-e2e: installcheck-pg_lake_table-e2e
 uninstall: $(addprefix uninstall-,$(ALL_TARGETS))
 
 # variables needed for additional targets
 PG_CONFIG ?= pg_config
 PG_LIBDIR := $(shell $(PG_CONFIG) --libdir)
+PKGINCLUDEDIR := $(shell $(PG_CONFIG) --pkgincludedir)
 PG_MAJOR_VERSION := $(shell $(PG_CONFIG) --version | cut -f2 -d' ' | cut -f 1 -d.)
 
 # Detect operating system
 UNAME_S := $(shell uname -s)
 
 # List of targets for indent checks
-INDENT_TARGETS = pgduck_server $(EXT_TARGETS)
+INDENT_TARGETS = pgduck_server $(EXTENSION_TARGETS)
 TYPEDEFS = /tmp/typedefs-$(PG_MAJOR_VERSION).list
 
-CMAKE_AVRO_ARGS = -DCMAKE_INSTALL_PREFIX=avrolib -DCMAKE_BUILD_TYPE=RelWithDebInfo 
+CMAKE_AVRO_ARGS = -DCMAKE_INSTALL_PREFIX=avrolib -DCMAKE_BUILD_TYPE=RelWithDebInfo
 
 # Conditionally set the library name
 ifeq ($(UNAME_S),Linux)
@@ -51,18 +60,6 @@ ifeq ($(UNAME_S),Darwin)
     LIB_NAME = libduckdb.dylib
     CMAKE_AVRO_ARGS += -DSNAPPY_INCLUDE_DIRS=/opt/homebrew/opt/snappy/include/
 endif
-
-fast:
-	cp $(PG_LIBDIR)/$(LIB_NAME) duckdb_pglake/$(LIB_NAME)
-	$(foreach extension, pgduck_server $(EXT_TARGETS), $(MAKE) -j 16 -C $(extension); )
-
-install-fast: fast
-	$(foreach target, $(ALL_TARGETS), $(MAKE) -C $(target) install; )
-
-# Steps to avoid (re)building duckdb_pglake and avro -- XXX should these be EXT_TARGETS?
-ci-cached: pgduck_server_no_deps pg_extension_base pg_map pg_extension_updater pg_lake_copy pg_lake_iceberg pg_lake_table pg_lake_spatial pg_lake_benchmark
-install-ci-cached: install-pgduck_server_no_deps install-duckdb_pglake install-pg_extension_base install-pg_map install-pg_extension_updater install-pg_lake_engine install-pg_lake_copy install-pg_lake_table install-pg_lake_iceberg install-pg_lake_spatial install-pg_lake install-pg_lake_benchmark
-clean-ci-cached: clean-pgduck_server clean-pg_extension_base clean-pg_map clean-pg_extension_updater clean-pg_lake_engine clean-pg_lake_copy clean-pg_lake_iceberg clean-pg_lake_spatial clean-pg_lake_table clean-pg_lake clean-pg_lake_benchmark
 
 # style/indent-related changes
 
@@ -94,35 +91,79 @@ submodules:
 pg_map:
 	$(MAKE) -C pg_map
 
+install-pg_map: pg_map
+	$(MAKE) -C pg_map install
+
 pg_extension_updater:
 	$(MAKE) -C pg_extension_updater
 
-pg_extension_base: pg_map pg_extension_updater
+install-pg_extension_updater: pg_extension_updater
+	$(MAKE) -C pg_extension_updater install
+
+pg_extension_base:
 	$(MAKE) -C pg_extension_base
 
-pg_lake_engine: pg_extension_base avro install-avro-local
+install-pg_extension_base: pg_extension_base
+	$(MAKE) -C pg_extension_base install
+
+pg_lake_engine: install-avro pg_extension_base pg_map pg_extension_updater
 	$(MAKE) -C pg_lake_engine
 
-pg_lake_table: pg_lake_engine pg_lake_iceberg install-avro-local
-	$(MAKE) -C pg_lake_table
+install-pg_lake_engine: install-pg_extension_base install-pg_map install-pg_extension_updater pg_lake_engine
+	$(MAKE) -C pg_lake_engine install
 
 pg_lake_copy: pg_lake_engine
 	$(MAKE) -C pg_lake_copy
 
-pg_lake_iceberg: pg_lake_engine install-avro-local
+install-pg_lake_copy: install-pg_lake_engine pg_lake_copy
+	$(MAKE) -C pg_lake_copy install
+
+pg_lake_iceberg: pg_lake_engine
 	$(MAKE) -C pg_lake_iceberg
 
-pg_lake_spatial: pg_lake_engine
+install-pg_lake_iceberg: install-pg_lake_engine pg_lake_iceberg
+	$(MAKE) -C pg_lake_iceberg install
+
+pg_lake_table: pg_lake_iceberg
+	$(MAKE) -C pg_lake_table
+
+install-pg_lake_table: install-pg_lake_iceberg pg_lake_table
+	$(MAKE) -C pg_lake_table install
+
+pg_lake: pg_lake_table pg_lake_copy
+	$(MAKE) -C pg_lake
+
+install-pg_lake: install-pg_lake_table install-pg_lake_copy pg_lake
+	$(MAKE) -C pg_lake install
+
+pg_lake_spatial: pg_lake
 	$(MAKE) -C pg_lake_spatial
 
-pg_lake: pg_lake_table
-	$(MAKE) -C pg_lake
+install-pg_lake_spatial: install-pg_lake pg_lake_spatial
+	$(MAKE) -C pg_lake_spatial install
+
+pg_lake_benchmark: pg_lake
+	$(MAKE) -C pg_lake_benchmark
+
+install-pg_lake_benchmark: install-pg_lake pg_lake_benchmark
+	$(MAKE) -C pg_lake_benchmark install
+
+duckdb_pglake:
+	@if [ $(FORCE_DUCKDB_BUILD) -eq 0 ] && [ -f $(PG_LIBDIR)/$(LIB_NAME) ]; then \
+		cp $(PG_LIBDIR)/$(LIB_NAME) duckdb_pglake/$(LIB_NAME); \
+	else \
+		$(MAKE) submodules; \
+		$(MAKE) -C duckdb_pglake; \
+	fi
+
+install-duckdb_pglake: duckdb_pglake
+	$(MAKE) -C duckdb_pglake install
 
 pgduck_server: duckdb_pglake
 	$(MAKE) -C pgduck_server
 
-duckdb_pglake: submodules
-	$(MAKE) -C duckdb_pglake
+install-pgduck_server: install-duckdb_pglake pgduck_server
+	$(MAKE) -C pgduck_server install
 
 ## Overridden targets; basically the ones in CUSTOM_TARGETS above
 check-pg_lake_engine:
@@ -142,32 +183,34 @@ check-duckdb_pglake:
 
 
 # other avro stuff managed here
-cmake-avro: submodules
+avro:
+ifeq ("$(wildcard avro/lang/c/build)","")
+	$(MAKE) submodules
+	cd avro && (patch -l -p1 -N < ../avro.patch || [ $$? -eq 1 ]; ) && cd ..
 	mkdir -p avro/lang/c/build
-	cd avro/lang/c/build && cmake .. $(CMAKE_AVRO_ARGS)
+	# builds and installs into local avrolib directory 
+	cd avro/lang/c/build && \
+	cmake .. $(CMAKE_AVRO_ARGS) && $(MAKE) -j8 && $(MAKE) install
+endif
 
-avro: cmake-avro
-	cd avro && (patch -l -p1 -N < ../avro.patch || [ $$? -eq 1 ]; )
-	$(MAKE) -C avro/lang/c/build
-
-install-avro-local: avro
-	# we install the library into a local directory and link statically against avro
-	$(MAKE) -C avro/lang/c/build install
-
-install-avro: install-avro-local
+install-avro: avro
 	install avro/lang/c/build/avrolib/lib*/libavro.* $(DESTDIR)$(PG_LIBDIR)
+	install -d $(DESTDIR)$(PKGINCLUDEDIR)/avro
+	install avro/lang/c/build/avrolib/include/avro/* $(DESTDIR)$(PKGINCLUDEDIR)/avro
+	install avro/lang/c/build/avrolib/include/avro.h $(DESTDIR)$(PKGINCLUDEDIR)
 
 check-avro: avro
 	$(MAKE) -C avro/lang/c/build test
 
 clean-avro:
 ifneq ("$(wildcard avro/lang/c/build)","")
-	make -C avro/lang/c/build clean
+	$(MAKE) -C avro/lang/c/build clean
 	rm -r avro/lang/c/build
 endif
 
 uninstall-avro:
 	rm -f $(PG_LIBDIR)/libavro.*
+	rm -rf $(PKGINCLUDEDIR)/avro*
 
 ## Other targets
 check-isolation_pg_lake_table:
@@ -188,14 +231,6 @@ installcheck-postgres:
 installcheck-postgres-with_extensions_created:
 	$(PG_REGRESS_DIR)/pg_regress --host localhost --inputdir=$(PG_REGRESS_DIR) --outputdir=$(PG_REGRESS_DIR) --expecteddir=$(PG_REGRESS_DIR) --schedule=$(PG_REGRESS_DIR)/parallel_schedule --dlpath=$(PG_REGRESS_DIR) --load-extension="pg_map" --load-extension="pg_extension_base" --load-extension="pg_lake_engine" --load-extension="pg_lake_iceberg" --load-extension="btree_gist" --load-extension="pg_lake_table" --load-extension="pg_lake_copy" --load-extension="pg_lake" --load-extension="pg_lake_benchmark"
 # --load-extension="postgis" --load-extension="pg_lake_spatial"
-
-# do not build dependencies, used in the CI with caching
-# we do depend on submodules to use duckdb.h
-pgduck_server_no_deps: submodules
-	$(MAKE) -C pgduck_server
-
-install-pgduck_server_no_deps: pgduck_server_no_deps
-	$(MAKE) -C pgduck_server install
 
 # sub-directories follows this version, so when updating
 # make sure to update them as well

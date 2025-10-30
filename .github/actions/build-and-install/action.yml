@@ -15,6 +15,7 @@ runs:
       shell: bash
       run: |
         echo "PGDIR=/home/postgres/pgsql-${{ inputs.pg_version }}" >> $GITHUB_ENV
+        echo "PG_LIBDIR=/home/postgres/pgsql-${{ inputs.pg_version }}/lib" >> $GITHUB_ENV
         echo "PATH=/home/postgres/pgsql-${{ inputs.pg_version }}/bin:$PATH" >> $GITHUB_ENV
         echo "PG_REGRESS_DIR=/home/postgres/pgsql-${{ inputs.pg_version }}/regress" >> $GITHUB_ENV
 
@@ -45,7 +46,7 @@ runs:
       with:
         key: duckdb_pglake-${{ inputs.container_os }}-${{ hashFiles('duckdb_pglake/src/**', 'duckdb_pglake/Makefile', 'duckdb_pglake/patches/**', 'duckdb_pglake/extension_config.cmake', 'duckdb_pglake/CMakeLists.txt') }}
         path: |
-          duckdb_pglake/libduckdb.so
+          ${{ env.PG_LIBDIR }}/libduckdb.so
 
     - uses: actions/cache@v4
       id: cache_polaris
@@ -56,26 +57,26 @@ runs:
           /home/postgres/pgsql-${{ inputs.pg_version }}/bin/polaris-admin.jar
           /home/postgres/pgsql-${{ inputs.pg_version }}/bin/polaris-server.jar
 
-    - name: Compile and install without duckdb_pglake cache
-      if: steps.cache_libduckdb.outputs.cache-hit != 'true'
+    - name: Compile and install all extensions and pgduck_server
       shell: bash
       run: |
         export PGCOMPAT_BUILD_CONFIG=Release
 
-        # Build duckdb_pglake
-        make -j 16 && make install
+        if [ -f "${{ env.PG_LIBDIR }}/libduckdb.so" ]; then
+          echo "Using cached libduckdb.so"
+          export FORCE_DUCKDB_BUILD=0;
+        else
+          echo "Building libduckdb.so"
+          export FORCE_DUCKDB_BUILD=1;
+        fi
+
+        make install-pgduck_server && make install-pg_lake_spatial && make install-pg_lake_benchmark
 
     - name: Build Polaris if not already in the cache
       if: steps.cache_polaris.outputs.cache-hit != 'true'
       shell: bash
       run: |
         make -j16 install-rest_catalog
-
-    - name: Compile and install with duckdb_pglake cache
-      if: steps.cache_libduckdb.outputs.cache-hit == 'true'
-      shell: bash
-      run: |
-        make ci-cached -j 16 && make install-ci-cached
 
     - name: Install the test extensions
       shell: bash

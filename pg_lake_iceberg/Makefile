@@ -7,7 +7,7 @@ DATA = $(wildcard $(EXTENSION)--*--*.sql) $(EXTENSION)--3.0.sql
 LIB_AVRO_PATH = $(abspath ../avro/lang/c/build/avrolib/lib)
 LIB64_AVRO_PATH = $(abspath ../avro/lang/c/build/avrolib/lib64)
 
-PG_CPPFLAGS = -I$(libpq_srcdir) -Iinclude -std=gnu99 -g -I../pg_lake_engine/include -I../avro/lang/c/src
+PG_CPPFLAGS = -I$(libpq_srcdir) -Iinclude -std=gnu99 -g -I../pg_lake_engine/include
 SHLIB_LINK_INTERNAL = $(libpq)
 PG_LDFLAGS  = -L$(LIB_AVRO_PATH) -L$(LIB64_AVRO_PATH) -Wl,-rpath,$(LIB_AVRO_PATH) -Wl,-rpath,$(LIB64_AVRO_PATH) -lavro -lcurl
 
