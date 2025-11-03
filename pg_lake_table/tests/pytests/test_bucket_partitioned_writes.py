@@ -8,6 +8,7 @@ N_ROWS = 64
 SCHEMA = "test_part_writes_bucket"
 PARTITION_COL = "v"
 
+
 # ---------- helper: random table name ---------- #
 def _rand_table(prefix):  # e.g. myprefix_d1f2a3b4
     return f"{prefix}_{uuid_mod.uuid4().hex[:8]}"
@@ -67,6 +68,7 @@ CASES = [
     ("uuid", "UUID", False, True),  # no uuid in spark
 ]
 
+
 # ---------- the test itself ---------- #
 @pytest.mark.parametrize("case_id,col_type,compare_with_spark, quote_filter", CASES)
 def test_bucket_partition_write(
@@ -123,7 +125,10 @@ def test_bucket_partition_write(
     assert len(files) > 0  # at least one file written
 
     for path, id, row_count in files:
-        rows_in_file = run_query(f"SELECT count(*) FROM '{path}'", pgduck_conn,)[
+        rows_in_file = run_query(
+            f"SELECT count(*) FROM '{path}'",
+            pgduck_conn,
+        )[
             0
         ][0]
 

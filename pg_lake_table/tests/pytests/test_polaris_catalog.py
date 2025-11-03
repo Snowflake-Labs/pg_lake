@@ -22,6 +22,7 @@ from pyiceberg.expressions import EqualTo
 from pyiceberg.partitioning import PartitionSpec, PartitionField
 import json
 
+
 # pg_conn is to start Polaris server
 def test_polaris_catalog_running(pg_conn, s3, polaris_session, installcheck):
 

@@ -3,24 +3,23 @@ This pytest script is designed to validate the consistency between
 data accessed via pure duckdb and PGDuckServer. The testing process
 is outlined as follows:
 
-	1. `setup_table()`: This function is responsible for creating and loading a table in duckdb.
-		It sets the initial testing environment by preparing the data schema and populating the table with data.
+        1. `setup_table()`: This function is responsible for creating and loading a table in duckdb.
+                It sets the initial testing environment by preparing the data schema and populating the table with data.
 
-	2. `export_import_database()`: Following the setup, this function is tasked with recreating the database
-		initialized by `setup_table()`, but with a significant change: it operates over PGDuckServer. As a result,
-		by the completion of this step, there are two identical tables in terms of schema and data. One is
-		accessible through pure duckdb, and the other through PGDuckServer.
+        2. `export_import_database()`: Following the setup, this function is tasked with recreating the database
+                initialized by `setup_table()`, but with a significant change: it operates over PGDuckServer. As a result,
+                by the completion of this step, there are two identical tables in terms of schema and data. One is
+                accessible through pure duckdb, and the other through PGDuckServer.
 
-	3. Test functions (prefixed with `test_`): Each of these functions conducts specific data type
-	   fetches from both the pure duckdb and PGDuckServer. The primary objective here is to compare
-	   the outputs from both sources. This comparison is crucial for ensuring that PGDuckServer replicates
-	   the results from pure duckdb accurately, maintaining consistency in data handling and retrieval across
-	   both platforms.
+        3. Test functions (prefixed with `test_`): Each of these functions conducts specific data type
+           fetches from both the pure duckdb and PGDuckServer. The primary objective here is to compare
+           the outputs from both sources. This comparison is crucial for ensuring that PGDuckServer replicates
+           the results from pure duckdb accurately, maintaining consistency in data handling and retrieval across
+           both platforms.
 
 The tests aim to affirm the reliability and compatibility of PGDuckServer with duckdb by ensuring that data
 fetched from both sources remains consistent across various data types and query operations.
 """
-
 
 import pytest
 import duckdb

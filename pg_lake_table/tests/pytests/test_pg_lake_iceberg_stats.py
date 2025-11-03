@@ -228,7 +228,7 @@ def test_create_iceberg_table_default_stats_escape(
         pg_conn,
     )
 
-    text_val = """This is a ''test'' string that испанч боб новости дейская dsmpeople.ru/real-estate=0&state=201307051938 includes "double quotes" and ''single quotes'' to check how escape characters are handled. It also includes a newline \n, a carriage return \r, and a tab \t ∑, ∞, ∇, ∂, ∫, ≈, ℵ 🂡 (playing card) \u200B (zero-width space), \u2066 (left-to-right isolate), \u2067 (right-to-left isolate) ``` character.Additionally, let''s include some Unicode characters: ✓, ©, ™, and emojis 😊, 🚀 to check UTF-8 compatibility."""
+    text_val = """This is a ''test'' string that испанч боб новости дейская dsmpeople.ru/real-estate=0&state=201307051938 includes "double quotes" and ''single quotes'' to check how escape characters are handled. It also includes a newline \n, a carriage return \r, and a tab \t ∑, ∞, ∇, ∂, ∫, ≈, ℵ 🂡 (playing card) \u200b (zero-width space), \u2066 (left-to-right isolate), \u2067 (right-to-left isolate) ``` character.Additionally, let''s include some Unicode characters: ✓, ©, ™, and emojis 😊, 🚀 to check UTF-8 compatibility."""
 
     # insert data
     run_command(

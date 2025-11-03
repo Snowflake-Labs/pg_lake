@@ -513,7 +513,7 @@ def test_create_iceberg_table_partition_by(
     pg_conn, extension, s3, with_default_location
 ):
 
-    for (transform_text, expected_spec) in COLUMN_TRANSFORMS:
+    for transform_text, expected_spec in COLUMN_TRANSFORMS:
         run_command(
             f"""
             CREATE TABLE test_create_iceberg_table_partition_by (col_short int2, col_int int4, col_bigint int8, col_text text,

@@ -119,6 +119,7 @@ pg_queries = [
     """select not a from (values(true)) t(a) group by rollup(not a) having not not a;""",
 ]
 
+
 # queries are taken from postgres commit https://github.com/postgres/postgres/commit/247dea8
 def test_grouping_sets_pushdown2(pg_conn, with_default_location):
     run_command(

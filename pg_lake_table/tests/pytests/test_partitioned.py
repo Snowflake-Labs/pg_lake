@@ -14,9 +14,9 @@ def create_partitioned_tables(s3, pg_conn, extension):
     parquet_url = {}
 
     for part in range(1, 4):
-        parquet_url[
-            part
-        ] = f"s3://{TEST_BUCKET}/test_partitioned_tables/part{part}.parquet"
+        parquet_url[part] = (
+            f"s3://{TEST_BUCKET}/test_partitioned_tables/part{part}.parquet"
+        )
 
         run_command(
             f"""

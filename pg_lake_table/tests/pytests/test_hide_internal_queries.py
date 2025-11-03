@@ -1,6 +1,7 @@
 import pytest
 from utils_pytest import *
 
+
 # we hide our internal queries from pg_stat_statements, pgaudit and autoexplain
 # we make sure the mechanics are not broken, so test with pg_stat_statements
 def test_hide_queries(pg_conn, superuser_conn, s3, extension, with_default_location):

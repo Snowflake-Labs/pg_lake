@@ -5,6 +5,7 @@ from utils_pytest import *
 
 LATEST_PG_EXT_BASE = "1.6"
 
+
 # We mock a "new dependency" scenario, by first creating an old version
 # and then manipulating the catalogs to force remove the existing
 # dependency.

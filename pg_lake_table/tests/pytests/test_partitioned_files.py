@@ -1,6 +1,7 @@
 import pytest
 from utils_pytest import *
 
+
 # we use superuser_conn because we access a GUC that requires
 # superuser, otherwise should be fine to run with pg_conn
 def test_max_open_files(superuser_conn, s3, extension, with_default_location):

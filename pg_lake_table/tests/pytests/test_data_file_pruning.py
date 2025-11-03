@@ -52,7 +52,7 @@ pruning_data = [
             ("2023-01-02 00:00:00+00", "2023-01-01 00:00:00+00"),
             ("2023-01-02 00:00:00+00", "2023-01-02 00:00:00+00"),
         ],
-    )
+    ),
     # we currently do not store statistics for UUID, once we do, uncomment
     # (True, "uuid", "prune_uuid", [('550e8400-e29b-41d4-a716-446655440000', '550e8400-e29b-41d4-a716-446655440000'), ('550e8400-e29b-41d4-a716-446655440000', '123e4567-e89b-12d3-a456-426614174000'), ('123e4567-e89b-12d3-a456-426614174000', '550e8400-e29b-41d4-a716-446655440000'), ('123e4567-e89b-12d3-a456-426614174000', '123e4567-e89b-12d3-a456-426614174000')]),
 ]
@@ -314,6 +314,7 @@ no_pruning_data = [
         [("a:1", "a:1"), ("a:1", "b:2"), ("b:2", "a:1"), ("b:2", "b:2")],
     ),
 ]
+
 
 # this test aims to ensure some common data types that are not supported for pruning
 # but still works fine in general

@@ -50,7 +50,7 @@ def test_pg_lake_serde_numeric(
         ("-12345678901234567890.123456789012345678", 38, 18),
     ]
 
-    for (num, precision, scale) in numerics:
+    for num, precision, scale in numerics:
         assert precision >= scale, "Precision must be greater than or equal to scale"
 
         pg_query = f"SELECT lake_iceberg.serde_value('{num}'::numeric({precision}, {scale}), 'decimal({precision}, {scale})');"
@@ -107,7 +107,7 @@ def test_pg_lake_serde_floating(
         ("double", "float8", "inf"),
     ]
 
-    for (iceberg_type, pg_type, value) in inf_values:
+    for iceberg_type, pg_type, value in inf_values:
         pg_query = (
             f"SELECT lake_iceberg.serde_value('{value}'::{pg_type}, '{iceberg_type}');"
         )
@@ -123,7 +123,7 @@ def test_pg_lake_serde_floating(
         ("float", "float4", -3.4028235e38),
     ]
 
-    for (iceberg_type, pg_type, value) in values:
+    for iceberg_type, pg_type, value in values:
         pg_query = (
             f"SELECT lake_iceberg.serde_value({value}::{pg_type}, '{iceberg_type}');"
         )
@@ -173,7 +173,7 @@ def test_pg_lake_serde(
         ("string", "jsonb", '{"key": "value with \\n newline and \\"quotes\\""}'),
     ]
 
-    for (iceberg_type, pg_type, value) in values:
+    for iceberg_type, pg_type, value in values:
         pg_query = (
             f"SELECT lake_iceberg.serde_value('{value}'::{pg_type}, '{iceberg_type}');"
         )
@@ -233,7 +233,7 @@ def test_pg_lake_serde_temporal(
         ("timestamp", "timestamp", "1970-01-01 13:15:30"),
     ]
 
-    for (iceberg_type, pg_type, value) in values:
+    for iceberg_type, pg_type, value in values:
         pg_query = (
             f"SELECT lake_iceberg.serde_value('{value}'::{pg_type}, '{iceberg_type}');"
         )
@@ -279,7 +279,7 @@ def test_pg_lake_serde_temporal(
         ),
     ]
 
-    for (iceberg_type, pg_type, value, expected) in timestamptz_values:
+    for iceberg_type, pg_type, value, expected in timestamptz_values:
         pg_query = (
             f"SELECT lake_iceberg.serde_value('{value}'::{pg_type}, '{iceberg_type}');"
         )

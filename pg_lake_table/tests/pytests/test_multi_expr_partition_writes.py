@@ -7,6 +7,7 @@ SCHEMA = "test_part_writes_multi_expr"
 PART_A_WIDTH = 10  # truncate(10 , a)
 PART_B_WIDTH = 2  # truncate( 2 , b)
 
+
 # ─── helpers ────────────────────────────────────────────────────────────────
 def _rand_table(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:8]}"

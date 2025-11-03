@@ -2,6 +2,7 @@ from utils_pytest import *
 import itertools
 import server_params
 
+
 # don't accept 'catalog_name', 'catalog_namespace', 'catalog_table_name'
 # for catalog='object_store' tables
 def test_writable_object_store_catalog_options(

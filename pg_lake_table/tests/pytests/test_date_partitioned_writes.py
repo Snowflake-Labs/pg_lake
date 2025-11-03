@@ -158,7 +158,7 @@ def test_calendar_partition_write(
         f"WHERE table_name = '{tbl}'::regclass;",
         pg_conn,
     )
-    for (path, id, row_count) in files:
+    for path, id, row_count in files:
         res = run_query(
             f"SELECT count(DISTINCT {part_expr}), count(*) FROM '{path}'",
             pgduck_conn,
