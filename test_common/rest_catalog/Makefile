@@ -10,7 +10,7 @@ include $(PGXS)
 
 # change to trigger CI cache
 # for Polaris version changes
-JAR_VERSION=1.1.0
+JAR_VERSION=1.2.0
 
 # Polaris build and install
 all:
@@ -18,8 +18,8 @@ all:
 
 install:
 	cp polaris/gradlew $(PG_BINDIR)/. && \
-	cp polaris/runtime/admin/build/polaris-admin-$(JAR_VERSION)-incubating-SNAPSHOT-runner.jar $(PG_BINDIR)/polaris-admin.jar && \
-	cp polaris/runtime/server/build/polaris-server-$(JAR_VERSION)-incubating-SNAPSHOT-runner.jar $(PG_BINDIR)/polaris-server.jar
+	cp polaris/runtime/admin/build/polaris-admin-$(JAR_VERSION)-incubating-runner.jar $(PG_BINDIR)/polaris-admin.jar && \
+	cp polaris/runtime/server/build/polaris-server-$(JAR_VERSION)-incubating-runner.jar $(PG_BINDIR)/polaris-server.jar
 
 clean:
 	cd polaris && ./gradlew clean

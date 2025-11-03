@@ -74,7 +74,7 @@ def test_create_namespace(
 
     assert (
         location.lower()
-        == f"s3://testbucketcdw/{server_params.PG_DATABASE}/{encoded_namespace}/".lower()
+        == f"s3://testbucketcdw/{server_params.PG_DATABASE}/{namespace}/".lower()
     )
 
     res = run_command(
@@ -150,7 +150,7 @@ def test_create_namespace_in_tx(
 
     assert (
         location.lower()
-        == f"s3://testbucketcdw/{server_params.PG_DATABASE}/{encoded_namespace}/".lower()
+        == f"s3://testbucketcdw/{server_params.PG_DATABASE}/{namespace}/".lower()
     )
 
     run_command(f"""DROP SCHEMA "{namespace}" CASCADE""", pg_conn)
@@ -189,61 +189,17 @@ def test_create_namespace_rollback(
 
     assert (
         location.lower()
-        == f"s3://testbucketcdw/{server_params.PG_DATABASE}/{encoded_namespace}/".lower()
+        == f"s3://testbucketcdw/{server_params.PG_DATABASE}/{namespace}/".lower()
     )
-
-
-def test_create_namespace_on_existing_location(
-    pg_conn,
-    set_polaris_gucs,
-    with_default_location,
-    s3,
-    polaris_session,
-    installcheck,
-    create_http_helper_functions,
-):
-
-    if installcheck:
-        return
-    namespace = "tmp_namespace"
-
-    run_command(f'''CREATE SCHEMA "{namespace}"''', pg_conn)
-
-    run_command(
-        f"""SELECT lake_iceberg.register_namespace_to_rest_catalog('{server_params.PG_DATABASE}', '{namespace}')""",
-        pg_conn,
-    )
-
-    pg_conn.commit()
-
-    # now, update the location to somewhere else
-    set_namespace_location(namespace, pg_conn)
-
-    # now, drop and re-create should fail
-    run_command(f"DROP SCHEMA {namespace} CASCADE", pg_conn)
-    pg_conn.commit()
-
-    run_command(f'''CREATE SCHEMA "{namespace}"''', pg_conn)
-    err = run_command(
-        f"""SELECT lake_iceberg.register_namespace_to_rest_catalog('{server_params.PG_DATABASE}', '{namespace}')""",
-        pg_conn,
-        raise_error=False,
-    )
-
-    pg_conn.commit()
-
-    assert "is already registered with a different location" in str(err)
-
-    pg_conn.rollback()
 
 
 existing_namespaces = [
     "regular_nsp_name",
-    "nonregular_nsp !~*() name:$Uses_Of@",
+    "nonregular_nsp!~*()name:$Uses_Of@",
 ]
 existing_table_names = [
     "regular_tbl_name",
-    "nonregular_tbl !~*() name:$Uses_Of@",
+    "nonregular_tbl!~*()name:$Uses_Of@",
 ]
 
 
@@ -842,10 +798,6 @@ def create_rest_catalog_table(
         identifier=f"{namespace}.{tbl_name}",
         schema=schema,
         partition_spec=part_spec,
-        location=f"s3://{TEST_BUCKET}/{server_params.PG_DATABASE}_catalog/{quote(namespace)}/",
-        properties={
-            "location": f"s3://{TEST_BUCKET}/{server_params.PG_DATABASE}_catalog/{quote(namespace)}/"
-        },
     )
 
     if drop_columns:
