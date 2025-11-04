@@ -2,8 +2,6 @@ services:
   pg_lake-postgres:
     build:
       context: .
-      ssh:
-        - default
       dockerfile: Dockerfile
       target: pg_lake_postgres
       args:
@@ -11,10 +9,10 @@ services:
         - BASE_IMAGE_TAG=9
     container_name: pg_lake
     volumes:
-      - ${USERPROFILE}${HOME}/.ssh:/postgres/.ssh:ro
-      - ${USERPROFILE}${HOME}/.ssh/known_hosts:/postgres/.ssh/known_hosts:rw
-      - ${USERPROFILE}${HOME}/.gitconfig:/postgres/.gitconfig:ro
-      - ${USERPROFILE}${HOME}/.aws:/postgres/.aws:rw
+      - ${USERPROFILE}${HOME}/.ssh:/home/postgres/.ssh:ro
+      - ${USERPROFILE}${HOME}/.ssh/known_hosts:/home/postgres/.ssh/known_hosts:rw
+      - ${USERPROFILE}${HOME}/.gitconfig:/home/postgres/.gitconfig:ro
+      - ${USERPROFILE}${HOME}/.aws:/home/postgres/.aws:rw
       - ./scripts/entrypoint-postgres.sh:/entrypoint-postgres.sh
       - ./scripts/init-postgres.sql:/init-postgres.sql
       - pgduck-unix-socket-volume:/home/postgres/pgduck_socket_dir
@@ -39,8 +37,6 @@ services:
   pgduck-server:
     build:
       context: .
-      ssh:
-        - default
       dockerfile: Dockerfile
       target: pgduck_server
       args:
