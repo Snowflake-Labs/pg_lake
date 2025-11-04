@@ -4,14 +4,13 @@
 
 At a high level, `pg_lake` lets you:
 
-- Create and modify [**Iceberg**](https://iceberg.apache.org/) tables directly from PostgreSQL, with full transactional guarantees and query them from other engines
-- Query and import data from [**Parquet**](https://parquet.apache.org/), **CSV**, **JSON**, and **Iceberg** files stored in S3 or other compatible object stores 
-- Export query results back to S3 in **Parquet**, **CSV**, or **JSON** formats using COPY commands
-- Read **geospatial formats** supported by GDAL, such as **GeoJSON** and **Shapefiles**  
-- Use compression transparently with **.gz** and **.zst**  
-- Use the built-in [**map** type](./pg_map/README.md) for semi-structured or key–value data  
-- Combine **heap**, **Iceberg**, and external **Parquet/CSV/JSON** files in the same SQL queries and modifications — all with full transactional guarantees and no SQL limitations  
-- **Infer table columns and types** from external data sources such as **Iceberg**, **Parquet**, **JSON**, and **CSV** files
+- **Create and modify [Iceberg](https://iceberg.apache.org/)** tables directly from PostgreSQL, with full transactional guarantees and query them from other engines
+- **Query and import data files in object storage** in [Parquet](https://parquet.apache.org/), CSV, JSON, and Iceberg format
+- **Export query results back to object storage** in Parquet, CSV, or JSON formats using COPY commands
+- **Read geospatial formats** supported by GDAL, such as GeoJSON and Shapefiles
+- **Use the built-in [map type](./pg_map/README.md)** for semi-structured or key–value data  
+- **Combine heap, Iceberg, and external Parquet/CSV/JSON** files in the same SQL queries and modifications — all with full transactional guarantees and no SQL limitations  
+- **Infer table columns and types** from external data sources such as Iceberg, Parquet, JSON, and CSV files
 - **Leverage DuckDB’s query engine** underneath for fast execution without leaving Postgres  
 
 ## Setting up `pg_lake`
