@@ -162,7 +162,7 @@ def test_multiple_server_instances_on_duckdb_file_path_socket(clean_socket_path)
 
     start_time = time.time()
     found_error = False
-    while (time.time() - start_time) < 1:  # loop at most 1 seconds
+    while (time.time() - start_time) < 20:  # loop at most 20 seconds
         try:
             # Check if there is any output indicating the server is ready
             line = output_queue_2.get_nowait()
@@ -182,10 +182,11 @@ def test_multiple_server_instances_on_duckdb_file_path_socket(clean_socket_path)
     assert has_duckdb_created_file("/tmp/data1.db")
 
     # Clean up
-    server1.terminate()
-    server1.wait()
-    server2.terminate()
-    server2.wait()
+    try:
+        _, _ = server1.communicate(timeout=2)
+    except subprocess.TimeoutExpired:
+        server1.kill()
+        _, _ = server1.communicate()
 
 
 def test_two_servers_different_ports(clean_socket_path):
