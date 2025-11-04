@@ -1,8 +1,9 @@
 # External extensions to link into libduckdb
 duckdb_extension_load(httpfs
     GIT_URL https://github.com/duckdb/duckdb-httpfs
-    GIT_TAG c93303d2654d1725db3e9f4dbe1c053586f9f3f2
-    INCLUDE_DIR extension/httpfs/include
+    GIT_TAG 6b683b1d0b8df3596c65fea97952425ec9469d9a
+    INCLUDE_DIR src/include
+    ADD_PATCHES
 )
 
 # Extension from this repo
