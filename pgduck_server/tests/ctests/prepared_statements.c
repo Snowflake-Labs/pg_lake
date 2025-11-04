@@ -442,7 +442,7 @@ testBindError()
 
 	const char *errorMsg = PQerrorMessage(conn);
 
-	if (strstr(errorMsg, "failed to bind parameter") == NULL)
+	if (strstr(errorMsg, "Can not bind to parameter") == NULL)
 		return EXIT_FAILURE;
 
 	PQclear(res);

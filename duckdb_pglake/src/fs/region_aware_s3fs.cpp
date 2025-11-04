@@ -125,13 +125,21 @@ RegionAwareS3FileSystem::List(const string &urlPattern, bool isGlob, FileOpener 
 				/* optimistically list the files, even if we don't know region */
 				return s3fs.List(urlPattern, isGlob, opener);
 		}
-		catch (HTTPException &ex)
+		catch (Exception &ex)
 		{
 			/* wuh oh, something went wrong, could it be the region? */
 			ErrorData error(ex);
 
-			/* a 400 error usually indicates wrong region */
-			if (error.Message().find("HTTP 400") != std::string::npos)
+			if (error.Type() != ExceptionType::HTTP)
+				throw;
+
+			/*
+			 * Slightly hacky to check for error messages, but we don't get
+			 * detailed error codes.
+			 */
+			if (error.Message().find("HTTP 400") != std::string::npos ||
+				error.Message().find("no list response") != std::string::npos ||
+				error.Message().find("301") != std::string::npos)
 			{
 				PGDUCK_SERVER_DEBUG("Glob failed: %s", error.Message().c_str());
 
@@ -244,17 +252,21 @@ RegionAwareS3FileSystem::OpenFile(const string &url,
 			/* optimistically list the files, even if we don't know region */
 			return s3fs.OpenFile(url, openFlags, opener);
 	}
-	catch (HTTPException &ex)
+	catch (Exception &ex)
 	{
 		/* wuh oh, something went wrong, could it be the region? */
 		ErrorData error(ex);
+
+		if (error.Type() != ExceptionType::HTTP)
+			throw;
 
 		/*
 		 * A 400 error usually indicates wrong region, we get slightly different
 		 * errors for GET and PUT.
 		 */
 		if (error.Message().find("HTTP 400") == std::string::npos &&
-			error.Message().find("400 (Bad Request)") == std::string::npos)
+			error.Message().find("400 (Bad Request)") == std::string::npos &&
+			error.Message().find("301") == std::string::npos)
 			throw;
 
 		PGDUCK_SERVER_DEBUG("OpenFile failed: %s", error.Message().c_str());

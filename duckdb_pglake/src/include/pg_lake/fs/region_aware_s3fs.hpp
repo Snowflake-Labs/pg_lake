@@ -107,7 +107,7 @@ public:
 		return s3fs.GetFileSize(handle);
 	}
 
-	time_t GetLastModifiedTime(FileHandle &handle) override {
+	timestamp_t GetLastModifiedTime(FileHandle &handle) override {
 		return s3fs.GetLastModifiedTime(handle);
 	}
 

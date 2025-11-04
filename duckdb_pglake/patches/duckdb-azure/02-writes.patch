@@ -1,5 +1,5 @@
 diff --git a/src/azure_blob_filesystem.cpp b/src/azure_blob_filesystem.cpp
-index ee19c8c..b38e2a3 100644
+index 774b9e2..3462b94 100644
 --- a/src/azure_blob_filesystem.cpp
 +++ b/src/azure_blob_filesystem.cpp
 @@ -8,6 +8,7 @@
@@ -47,68 +47,15 @@ index ee19c8c..b38e2a3 100644
  	return std::move(handle);
  }
  
-@@ -100,7 +112,14 @@ bool AzureBlobStorageFileSystem::CanHandleFile(const string &fpath) {
- 	return fpath.rfind(PATH_PREFIX, 0) * fpath.rfind(SHORT_PATH_PREFIX, 0) == 0;
- }
- 
--vector<OpenFileInfo> AzureBlobStorageFileSystem::Glob(const string &path, FileOpener *opener) {
-+
-+/*
-+ * List is a PgLake-specific function for giving more details in
-+ * file listing.
-+ */
-+vector<OpenFileInfo>
-+AzureBlobStorageFileSystem::List(const string &path, bool is_glob, FileOpener *opener)
-+{
- 	if (opener == nullptr) {
- 		throw InternalException("Cannot do Azure storage Glob without FileOpener");
- 	}
-@@ -110,8 +129,9 @@ vector<OpenFileInfo> AzureBlobStorageFileSystem::Glob(const string &path, FileOp
- 
- 	// Azure matches on prefix, not glob pattern, so we take a substring until the first wildcard
- 	auto first_wildcard_pos = azure_url.path.find_first_of("*[\\");
--	if (first_wildcard_pos == string::npos) {
--		return {path};
-+	if (first_wildcard_pos == string::npos && is_glob) {
-+      OpenFileInfo info(path);
-+		return {info};
- 	}
- 
- 	string shared_path = azure_url.path.substr(0, first_wildcard_pos);
-@@ -141,18 +161,23 @@ vector<OpenFileInfo> AzureBlobStorageFileSystem::Glob(const string &path, FileOp
- 		result.reserve(result.size() + res.Blobs.size());
- 
- 		// Ensure that the retrieved element match the expected pattern
--		for (const auto &key : res.Blobs) {
--			vector<string> key_splits = StringUtil::Split(key.Name, "/");
-+		for (const auto &blob : res.Blobs) {
-+			vector<string> key_splits = StringUtil::Split(blob.Name, "/");
- 			bool is_match = Match(key_splits.begin(), key_splits.end(), pattern_splits.begin(), pattern_splits.end());
- 
--			if (is_match) {
--				auto result_full_url = path_result_prefix + '/' + key.Name;
-+			if (is_match && blob.BlobSize > 0) {
-+				auto result_full_url = path_result_prefix + '/' + blob.Name;
- 				OpenFileInfo info(result_full_url);
--				info.extended_info = make_shared_ptr<ExtendedOpenFileInfo>();
--				auto &options = info.extended_info->options;
--				options.emplace("file_size", Value::BIGINT(key.BlobSize));
--				options.emplace("last_modified", Value::TIMESTAMP(Timestamp::FromTimeT(
--				                                     AzureStorageFileSystem::ToTimeT(key.Details.LastModified))));
-+                if (!is_glob)
-+                  {
-+                    info.extended_info = make_shared_ptr<ExtendedOpenFileInfo>();
-+                    auto &options = info.extended_info->options;
-+                    
-+                    options.emplace("file_size", Value::BIGINT(blob.BlobSize));
-+                    options.emplace("last_modified", Value::TIMESTAMP(Timestamp::FromTimeT(
-+						AzureStorageFileSystem::ToTimeT(blob.Details.LastModified))));
-+                    options.emplace("etag", std::move(blob.Details.ETag.ToString()));
-+                  }
+@@ -153,6 +165,7 @@ vector<OpenFileInfo> AzureBlobStorageFileSystem::Glob(const string &path, FileOp
+ 				options.emplace("file_size", Value::BIGINT(key.BlobSize));
+ 				options.emplace("last_modified", Value::TIMESTAMP(
+ 				                                     AzureStorageFileSystem::ToTimestamp(key.Details.LastModified)));
++				options.emplace("etag", Value(key.Details.ETag.ToString()));
  				result.push_back(info);
  			}
  		}
-@@ -168,6 +193,7 @@ vector<OpenFileInfo> AzureBlobStorageFileSystem::Glob(const string &path, FileOp
+@@ -168,6 +181,7 @@ vector<OpenFileInfo> AzureBlobStorageFileSystem::Glob(const string &path, FileOp
  	return result;
  }
  
@@ -116,7 +63,7 @@ index ee19c8c..b38e2a3 100644
  void AzureBlobStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
  	auto &hfh = handle.Cast<AzureBlobStorageFileHandle>();
  
-@@ -222,4 +248,111 @@ shared_ptr<AzureContextState> AzureBlobStorageFileSystem::CreateStorageContext(o
+@@ -218,4 +232,111 @@ shared_ptr<AzureContextState> AzureBlobStorageFileSystem::CreateStorageContext(o
  	                                              azure_read_options);
  }
  
@@ -229,19 +176,10 @@ index ee19c8c..b38e2a3 100644
 +
  } // namespace duckdb
 diff --git a/src/azure_dfs_filesystem.cpp b/src/azure_dfs_filesystem.cpp
-index 5feb445..372e3f6 100644
+index cd7a0db..f70fe53 100644
 --- a/src/azure_dfs_filesystem.cpp
 +++ b/src/azure_dfs_filesystem.cpp
-@@ -29,7 +29,7 @@ inline static bool IsDfsScheme(const string &fpath) {
- }
- 
- static void Walk(const Azure::Storage::Files::DataLake::DataLakeFileSystemClient &fs, const std::string &path,
--                 const string &path_pattern, std::size_t end_match, std::vector<OpenFileInfo> *out_result) {
-+                 const string &path_pattern, std::size_t end_match, bool is_glob, std::vector<OpenFileInfo> *out_result) {
- 	auto directory_client = fs.GetDirectoryClient(path);
- 
- 	bool recursive = false;
-@@ -45,40 +45,56 @@ static void Walk(const Azure::Storage::Files::DataLake::DataLakeFileSystemClient
+@@ -45,40 +45,51 @@ static void Walk(const Azure::Storage::Files::DataLake::DataLakeFileSystemClient
  	}
  
  	Azure::Storage::Files::DataLake::ListPathsOptions options;
@@ -269,7 +207,7 @@ index 5feb445..372e3f6 100644
 +							}
 +							Walk(fs, elt.Name, path_pattern,
 +								 std::min(path_pattern.length(), path_pattern.find('/', end_match + 1)),
-+								 is_glob, out_result);
++								 out_result);
  						}
 -						Walk(fs, elt.Name, path_pattern,
 -						     std::min(path_pattern.length(), path_pattern.find('/', end_match + 1)), out_result);
@@ -277,18 +215,13 @@ index 5feb445..372e3f6 100644
 +				} else {
 +					// File
 +					if (Glob(elt.Name.data(), elt.Name.length(), path_pattern.data(), path_pattern.length())) {
-+                      OpenFileInfo info(elt.Name);
-+
-+						/* for glob we only care about the name */
-+                      if (!is_glob)
-+                        {
-+                          info.extended_info = make_shared_ptr<ExtendedOpenFileInfo>();
-+                          auto &options = info.extended_info->options;
-+                          options.emplace("file_size", Value::BIGINT(elt.FileSize));
-+                          options.emplace("last_modified", Value::TIMESTAMP(Timestamp::FromString(elt.LastModified.ToString())));
-+                          options.emplace("etag", elt.ETag);
-+                        }
-+
++						OpenFileInfo info(elt.Name);
++						info.extended_info = make_shared_ptr<ExtendedOpenFileInfo>();
++						auto &options = info.extended_info->options;
++						options.emplace("file_size", Value::BIGINT(elt.FileSize));
++						options.emplace("last_modified", Value::TIMESTAMP(
++															 AzureStorageFileSystem::ToTimestamp(elt.LastModified)));
++						options.emplace("etag", Value(elt.ETag));
 +						out_result->push_back(info);
  					}
  				}
@@ -303,8 +236,8 @@ index 5feb445..372e3f6 100644
 -					info.extended_info = make_shared_ptr<ExtendedOpenFileInfo>();
 -					auto &options = info.extended_info->options;
 -					options.emplace("file_size", Value::BIGINT(elt.FileSize));
--					options.emplace("last_modified", Value::TIMESTAMP(Timestamp::FromTimeT(
--					                                     AzureStorageFileSystem::ToTimeT(elt.LastModified))));
+-					options.emplace("last_modified", Value::TIMESTAMP(
+-					                                     AzureStorageFileSystem::ToTimestamp(elt.LastModified)));
 -					out_result->push_back(info);
 -				}
 +				break;
@@ -325,7 +258,7 @@ index 5feb445..372e3f6 100644
  	}
  }
  
-@@ -97,7 +113,7 @@ AzureDfsContextState::GetDfsFileSystemClient(const std::string &file_system_name
+@@ -97,7 +108,7 @@ AzureDfsContextState::GetDfsFileSystemClient(const std::string &file_system_name
  AzureDfsStorageFileHandle::AzureDfsStorageFileHandle(AzureDfsStorageFileSystem &fs, const OpenFileInfo &info,
                                                       FileOpenFlags flags, const AzureReadOptions &read_options,
                                                       Azure::Storage::Files::DataLake::DataLakeFileClient client)
@@ -334,7 +267,7 @@ index 5feb445..372e3f6 100644
  }
  
  //////// AzureDfsStorageFileSystem ////////
-@@ -112,12 +128,23 @@ unique_ptr<AzureFileHandle> AzureDfsStorageFileSystem::CreateHandle(const OpenFi
+@@ -112,12 +123,23 @@ unique_ptr<AzureFileHandle> AzureDfsStorageFileSystem::CreateHandle(const OpenFi
  	auto parsed_url = ParseUrl(info.path);
  	auto storage_context = GetOrCreateStorageContext(opener, info.path, parsed_url);
  	auto file_system_client = storage_context->As<AzureDfsContextState>().GetDfsFileSystemClient(parsed_url.container);
@@ -360,66 +293,15 @@ index 5feb445..372e3f6 100644
  	return std::move(handle);
  }
  
-@@ -125,7 +152,15 @@ bool AzureDfsStorageFileSystem::CanHandleFile(const string &fpath) {
- 	return IsDfsScheme(fpath);
- }
- 
--vector<OpenFileInfo> AzureDfsStorageFileSystem::Glob(const string &path, FileOpener *opener) {
-+
-+/*
-+ * List returns a list of files that match the wildcard pattern in the path.
-+ *
-+ * If is_glob is true, only the url will be set.
-+ */
-+vector<OpenFileInfo>
-+AzureDfsStorageFileSystem::List(const string &path, bool is_glob, FileOpener *opener)
-+{
- 	if (opener == nullptr) {
- 		throw InternalException("Cannot do Azure storage Glob without FileOpener");
- 	}
-@@ -135,7 +170,8 @@ vector<OpenFileInfo> AzureDfsStorageFileSystem::Glob(const string &path, FileOpe
- 	// If path does not contains any wildcard, we assume that an absolute path therefor nothing to do
+@@ -145,6 +167,7 @@ vector<OpenFileInfo> AzureDfsStorageFileSystem::Glob(const string &path, FileOpe
  	auto first_wildcard_pos = azure_url.path.find_first_of("*[\\");
  	if (first_wildcard_pos == string::npos) {
--		return {path};
-+      OpenFileInfo info(path);
-+		return {info};
+ 		return {path};
++
  	}
  
  	// The path contains wildcard try to list file with the minimum calls
-@@ -153,7 +189,7 @@ vector<OpenFileInfo> AzureDfsStorageFileSystem::Glob(const string &path, FileOpe
- 	     // pattern to match
- 	     azure_url.path, std::min(azure_url.path.length(), azure_url.path.find('/', index_root_dir + 1)),
- 	     // output result
--	     &result);
-+	     is_glob, &result);
- 
- 	if (!result.empty()) {
- 		const auto path_result_prefix =
-@@ -179,6 +215,22 @@ void AzureDfsStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
- 	}
- }
- 
-+/*
-+ * FileExists returns whether the given file exists by trying to open it.
-+ */
-+bool AzureDfsStorageFileSystem::FileExists(const string &path, optional_ptr<FileOpener> opener) {
-+	try {
-+		auto handle = OpenFile(path, FileFlags::FILE_FLAGS_READ, opener);
-+		auto &sfh = handle->Cast<AzureDfsStorageFileHandle>();
-+		if (sfh.length == 0) {
-+			return false;
-+		}
-+		return true;
-+	} catch (...) {
-+		return false;
-+	};
-+}
-+
- void AzureDfsStorageFileSystem::ReadRange(AzureFileHandle &handle, idx_t file_offset, char *buffer_out,
-                                           idx_t buffer_out_len) {
- 	auto &afh = handle.Cast<AzureDfsStorageFileHandle>();
-@@ -195,7 +247,7 @@ void AzureDfsStorageFileSystem::ReadRange(AzureFileHandle &handle, idx_t file_of
+@@ -204,7 +227,7 @@ void AzureDfsStorageFileSystem::ReadRange(AzureFileHandle &handle, idx_t file_of
  		auto res = afh.file_client.DownloadTo((uint8_t *)buffer_out, buffer_out_len, options);
  
  	} catch (const Azure::Storage::StorageException &e) {
@@ -428,7 +310,7 @@ index 5feb445..372e3f6 100644
  		                  e.ErrorCode, e.ReasonPhrase);
  	}
  }
-@@ -209,4 +261,83 @@ shared_ptr<AzureContextState> AzureDfsStorageFileSystem::CreateStorageContext(op
+@@ -218,4 +241,83 @@ shared_ptr<AzureContextState> AzureDfsStorageFileSystem::CreateStorageContext(op
  	                                             azure_read_options);
  }
  
@@ -513,12 +395,12 @@ index 5feb445..372e3f6 100644
 +
  } // namespace duckdb
 diff --git a/src/azure_extension.cpp b/src/azure_extension.cpp
-index 5ce0b8d..9bb6528 100644
+index d0758e2..2b0f2d1 100644
 --- a/src/azure_extension.cpp
 +++ b/src/azure_extension.cpp
-@@ -10,8 +10,8 @@ namespace duckdb {
- static void LoadInternal(DatabaseInstance &instance) {
+@@ -9,8 +9,8 @@ static void LoadInternal(ExtensionLoader &loader) {
  	// Load filesystem
+ 	auto &instance = loader.GetDatabaseInstance();
  	auto &fs = instance.GetFileSystem();
 -	fs.RegisterSubSystem(make_uniq<AzureBlobStorageFileSystem>());
 -	fs.RegisterSubSystem(make_uniq<AzureDfsStorageFileSystem>());
@@ -526,19 +408,21 @@ index 5ce0b8d..9bb6528 100644
 +	fs.RegisterSubSystem(make_uniq<AzureDfsStorageFileSystem>(BufferManager::GetBufferManager(instance)));
  
  	// Load Secret functions
- 	CreateAzureSecretFunctions::Register(instance);
+ 	CreateAzureSecretFunctions::Register(loader);
 diff --git a/src/azure_filesystem.cpp b/src/azure_filesystem.cpp
-index d7ed201..5a4cd0b 100644
+index e1689c7..41fbc70 100644
 --- a/src/azure_filesystem.cpp
 +++ b/src/azure_filesystem.cpp
-@@ -1,12 +1,17 @@
+@@ -1,14 +1,19 @@
  #include "azure_filesystem.hpp"
+ 
 +#include "duckdb/common/enums/memory_tag.hpp"
  #include "duckdb/common/exception.hpp"
  #include "duckdb/common/shared_ptr.hpp"
 +#include "duckdb/common/thread.hpp"
  #include "duckdb/common/types/value.hpp"
  #include "duckdb/main/client_context.hpp"
+ 
  #include <azure/storage/common/storage_exception.hpp>
 +#include <thread>
  
@@ -549,7 +433,7 @@ index d7ed201..5a4cd0b 100644
  AzureContextState::AzureContextState(const AzureReadOptions &read_options)
      : read_options(read_options), is_valid(true) {
  }
-@@ -26,6 +31,11 @@ AzureFileHandle::AzureFileHandle(AzureStorageFileSystem &fs, const OpenFileInfo
+@@ -28,6 +33,11 @@ AzureFileHandle::AzureFileHandle(AzureStorageFileSystem &fs, const OpenFileInfo
        length(0), last_modified(0),
        // Read info
        buffer_available(0), buffer_idx(0), file_offset(0), buffer_start(0), buffer_end(0),
@@ -561,7 +445,7 @@ index d7ed201..5a4cd0b 100644
        // Options
        read_options(read_options) {
  	if (!flags.RequireParallelAccess() && !flags.DirectIO()) {
-@@ -75,10 +85,6 @@ unique_ptr<FileHandle> AzureStorageFileSystem::OpenFileExtended(const OpenFileIn
+@@ -77,10 +87,6 @@ unique_ptr<FileHandle> AzureStorageFileSystem::OpenFileExtended(const OpenFileIn
                                                                  optional_ptr<FileOpener> opener) {
  	D_ASSERT(flags.Compression() == FileCompressionType::UNCOMPRESSED);
  
@@ -572,8 +456,8 @@ index d7ed201..5a4cd0b 100644
  	auto handle = CreateHandle(info, flags, opener);
  	return std::move(handle);
  }
-@@ -103,10 +109,6 @@ void AzureStorageFileSystem::Seek(FileHandle &handle, idx_t location) {
- 	sfh.file_offset = location;
+@@ -110,10 +116,6 @@ idx_t AzureStorageFileSystem::SeekPosition(FileHandle &handle) {
+ 	return afh.file_offset;
  }
  
 -void AzureStorageFileSystem::FileSync(FileHandle &handle) {
@@ -583,21 +467,10 @@ index d7ed201..5a4cd0b 100644
  // TODO: this code is identical to HTTPFS, look into unifying it
  void AzureStorageFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) {
  	auto &hfh = handle.Cast<AzureFileHandle>();
-@@ -179,6 +181,40 @@ int64_t AzureStorageFileSystem::Read(FileHandle &handle, void *buffer, int64_t n
+@@ -186,6 +188,29 @@ int64_t AzureStorageFileSystem::Read(FileHandle &handle, void *buffer, int64_t n
  	return nr_bytes;
  }
  
-+
-+/*
-+ * Glob returns a list of files matching a wildcard. It is implemented using the List
-+ * function which can also give more file details.
-+ */
-+vector<OpenFileInfo> AzureStorageFileSystem::Glob(const string &path, FileOpener *opener) {
-+	/* get all the file details */
-+	bool isGlob = true;
-+	return List(path, isGlob, opener);
-+}
-+
 +
 +/*
 + * ListFiles performs a callback on each of the files returned by a glob operation.
@@ -624,8 +497,8 @@ index d7ed201..5a4cd0b 100644
  shared_ptr<AzureContextState> AzureStorageFileSystem::GetOrCreateStorageContext(optional_ptr<FileOpener> opener,
                                                                                  const string &path,
                                                                                  const AzureParsedUrl &parsed_url) {
-@@ -233,4 +269,165 @@ time_t AzureStorageFileSystem::ToTimeT(const Azure::DateTime &dt) {
- 	return std::chrono::system_clock::to_time_t(time_point);
+@@ -241,4 +266,165 @@ timestamp_t AzureStorageFileSystem::ToTimestamp(const Azure::DateTime &dt) {
+ 	return timestamp_t(micros);
  }
  
 +void AzureStorageFileSystem::FileSync(FileHandle &handle) {
@@ -791,7 +664,7 @@ index d7ed201..5a4cd0b 100644
 +
  } // namespace duckdb
 diff --git a/src/include/azure_blob_filesystem.hpp b/src/include/azure_blob_filesystem.hpp
-index f009e13..8093b2b 100644
+index f009e13..ed0b9de 100644
 --- a/src/include/azure_blob_filesystem.hpp
 +++ b/src/include/azure_blob_filesystem.hpp
 @@ -7,6 +7,7 @@
@@ -802,7 +675,7 @@ index f009e13..8093b2b 100644
  #include <string>
  
  namespace duckdb {
-@@ -26,20 +27,29 @@ class AzureBlobStorageFileSystem;
+@@ -26,20 +27,31 @@ class AzureBlobStorageFileSystem;
  class AzureBlobStorageFileHandle : public AzureFileHandle {
  public:
  	AzureBlobStorageFileHandle(AzureBlobStorageFileSystem &fs, const OpenFileInfo &info, FileOpenFlags flags,
@@ -810,6 +683,7 @@ index f009e13..8093b2b 100644
 -	~AzureBlobStorageFileHandle() override = default;
 +	                           const AzureReadOptions &read_options, Azure::Storage::Blobs::BlockBlobClient blob_client);
 +	~AzureBlobStorageFileHandle() override;
++
 +	void Close() override;
  
  public:
@@ -819,7 +693,7 @@ index f009e13..8093b2b 100644
  
  class AzureBlobStorageFileSystem : public AzureStorageFileSystem {
  public:
--	vector<OpenFileInfo> Glob(const string &path, FileOpener *opener = nullptr) override;
+ 	vector<OpenFileInfo> Glob(const string &path, FileOpener *opener = nullptr) override;
 +	explicit AzureBlobStorageFileSystem(BufferManager &buffer_manager) : AzureStorageFileSystem(buffer_manager) {
 +	}
  
@@ -836,21 +710,20 @@ index f009e13..8093b2b 100644
  	string GetName() const override {
  		return "AzureBlobStorageFileSystem";
  	}
-@@ -54,6 +64,9 @@ public:
+@@ -54,6 +66,8 @@ public:
  	static const string PATH_PREFIX;
  	static const string SHORT_PATH_PREFIX;
  
-+	vector<OpenFileInfo> List(const string &glob_pattern, bool is_glob, FileOpener *opener) override;
 +	void UploadBuffer(AzureFileHandle &file_handle, shared_ptr<AzureWriteBuffer> write_buffer) override;
 +	void FinalizeMultipartUpload(AzureFileHandle &file_handle) override;
  protected:
  	// From AzureFilesystem
  	const string &GetContextPrefix() const override {
 diff --git a/src/include/azure_dfs_filesystem.hpp b/src/include/azure_dfs_filesystem.hpp
-index 0e4d39c..ec86500 100644
+index 3552bb5..5d8452c 100644
 --- a/src/include/azure_dfs_filesystem.hpp
 +++ b/src/include/azure_dfs_filesystem.hpp
-@@ -30,16 +30,28 @@ public:
+@@ -31,15 +31,27 @@ public:
  	AzureDfsStorageFileHandle(AzureDfsStorageFileSystem &fs, const OpenFileInfo &info, FileOpenFlags flags,
  	                          const AzureReadOptions &read_options,
  	                          Azure::Storage::Files::DataLake::DataLakeFileClient client);
@@ -866,26 +739,23 @@ index 0e4d39c..ec86500 100644
  
  class AzureDfsStorageFileSystem : public AzureStorageFileSystem {
  public:
--	vector<OpenFileInfo> Glob(const string &path, FileOpener *opener = nullptr) override;
 +	explicit AzureDfsStorageFileSystem(BufferManager &buffer_manager) : AzureStorageFileSystem(buffer_manager) {
 +	}
 +
+ 	vector<OpenFileInfo> Glob(const string &path, FileOpener *opener = nullptr) override;
 +	void RemoveFile(const string &filename, optional_ptr<FileOpener> opener = nullptr) override;
- 
++
 +	// should perhaps check the actual directory status, but there is no convenient functio for that
 +	bool DirectoryExists(const string &directory, optional_ptr<FileOpener> opener = nullptr) override {
 +		return true;
 +	}
-+
-+	bool FileExists(const string &filename, optional_ptr<FileOpener> opener = nullptr) override;
+ 
  	bool CanHandleFile(const string &fpath) override;
  	string GetName() const override {
- 		return "AzureDfsStorageFileSystem";
-@@ -48,6 +60,10 @@ public:
+@@ -51,6 +63,9 @@ public:
  	// From AzureFilesystem
  	void LoadRemoteFileInfo(AzureFileHandle &handle) override;
  
-+	vector<OpenFileInfo> List(const string &glob_pattern, bool is_glob, FileOpener *opener) override;
 +	void UploadBuffer(AzureFileHandle &file_handle, shared_ptr<AzureWriteBuffer> write_buffer) override;
 +	void FinalizeMultipartUpload(AzureFileHandle &file_handle) override;
 +
@@ -893,7 +763,7 @@ index 0e4d39c..ec86500 100644
  	static const string SCHEME;
  	static const string PATH_PREFIX;
 diff --git a/src/include/azure_filesystem.hpp b/src/include/azure_filesystem.hpp
-index 32c26bf..dc8e5bb 100644
+index 3089663..96bf32a 100644
 --- a/src/include/azure_filesystem.hpp
 +++ b/src/include/azure_filesystem.hpp
 @@ -6,9 +6,11 @@
@@ -946,7 +816,7 @@ index 32c26bf..dc8e5bb 100644
  
  protected:
  	AzureFileHandle(AzureStorageFileSystem &fs, const OpenFileInfo &info, FileOpenFlags flags,
-@@ -72,15 +98,54 @@ public:
+@@ -72,11 +98,48 @@ public:
  	idx_t buffer_start;
  	idx_t buffer_end;
  
@@ -995,15 +865,9 @@ index 32c26bf..dc8e5bb 100644
  	// FS methods
  	duckdb::unique_ptr<FileHandle> OpenFile(const string &path, FileOpenFlags flags,
  	                                        optional_ptr<FileOpener> opener = nullptr) override;
- 
-+	vector<OpenFileInfo> Glob(const string &path, FileOpener *opener = nullptr) override;
-+
- 	void Read(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) override;
- 	int64_t Read(FileHandle &handle, void *buffer, int64_t nr_bytes) override;
- 	bool CanSeek() override {
-@@ -96,12 +161,22 @@ public:
- 	time_t GetLastModifiedTime(FileHandle &handle) override;
+@@ -97,6 +160,10 @@ public:
  	void Seek(FileHandle &handle, idx_t location) override;
+ 	idx_t SeekPosition(FileHandle &handle) override;
  	void FileSync(FileHandle &handle) override;
 +	bool ListFiles(const string &directory, const std::function<void(const string &, bool)> &callback,
 +                   FileOpener *opener = nullptr) override;
@@ -1012,25 +876,29 @@ index 32c26bf..dc8e5bb 100644
  
  	bool LoadFileInfo(AzureFileHandle &handle);
  
- 	string PathSeparator(const string &path) override {
+@@ -104,6 +171,12 @@ public:
  		return "/";
  	}
+ 
 +	BufferHandle Allocate(idx_t part_size, uint16_t max_threads);
 +	void FlushAllBuffers(AzureFileHandle &handle);
 +
-+	virtual vector<OpenFileInfo> List(const string &glob_pattern, bool is_glob, FileOpener *opener) = 0;
 +	virtual void FinalizeMultipartUpload(AzureFileHandle &file_handle) = 0;
 +	virtual void UploadBuffer(AzureFileHandle &file_handle, shared_ptr<AzureWriteBuffer> write_buffer) = 0;
- 
++
  protected:
  	unique_ptr<FileHandle> OpenFileExtended(const OpenFileInfo &info, FileOpenFlags flags,
-@@ -126,6 +201,9 @@ protected:
+ 	                                        optional_ptr<FileOpener> opener) override;
+@@ -127,6 +200,9 @@ protected:
  
  public:
- 	static time_t ToTimeT(const Azure::DateTime &dt);
+ 	static timestamp_t ToTimestamp(const Azure::DateTime &dt);
 +
 +	static void NotifyUploadsInProgress(AzureFileHandle &file_handle);
 +	void FlushBuffer(AzureFileHandle &handle, shared_ptr<AzureWriteBuffer> write_buffer);
  };
  
  } // namespace duckdb
+-- 
+2.49.0
+

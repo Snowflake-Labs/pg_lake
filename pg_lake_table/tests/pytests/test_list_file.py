@@ -251,12 +251,12 @@ def test_list_details(pg_conn, s3, extension):
     assert result[0] == [
         prefix + "/large.csv",
         707,
-        '"aae2c56c9c41725d2b54b8815ff75abc-1"',
+        '"81d51ab47a013964a866395b6921e30d"',
     ]
     assert result[1] == [
         prefix + "/small.csv",
         14,
-        '"e77085dfbc543952c6a25325dc2b8175-1"',
+        '"18a74ddc08d592acc32079bdedf76b99"',
     ]
 
     result = run_query(

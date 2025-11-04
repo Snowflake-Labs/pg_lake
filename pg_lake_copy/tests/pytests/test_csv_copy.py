@@ -946,7 +946,7 @@ def test_force_quote(pg_conn, duckdb_conn, s3, tmp_path):
 
     with open(local_csv_path, "r") as csv_file:
         lines = csv_file.readlines()
-        assert lines[0] == "a,b,c\n"
+        assert lines[0] == '"a","b","c"\n'
         assert lines[1] == '"1","hello","2"\n'
         assert lines[2] == '"2","hello","3"\n'
 
@@ -962,7 +962,7 @@ def test_force_quote(pg_conn, duckdb_conn, s3, tmp_path):
 
     with open(local_csv_path, "r") as csv_file:
         lines = csv_file.readlines()
-        assert lines[0] == "a,b,c\n"
+        assert lines[0] == '"a",b,"c"\n'
         assert lines[1] == '"1",hello,"2"\n'
         assert lines[2] == '"2",hello,"3"\n'
 

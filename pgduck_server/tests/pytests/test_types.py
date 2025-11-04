@@ -433,7 +433,7 @@ def test_blob(setup_table, duckdb_conn, pg_conn, tmp_path):
     )
 
     query = "SELECT blob_col FROM duckdb_supported_types_table WHERE blob_col IS NOT NULL ORDER BY blob_col"
-    expected = [("\\x00",), ("\\x",), ("\\xdeadbeaf",)]
+    expected = [("\\x",), ("\\x00",), ("\\xdeadbeaf",)]
     pg_results = perform_query_on_cursor(query, pg_conn)
     print(pg_results)
 

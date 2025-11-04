@@ -23,7 +23,7 @@ namespace duckdb {
 
 class DuckdbPglakeExtension : public Extension {
 public:
-	void Load(DuckDB &db) override;
+	void Load(ExtensionLoader &db) override;
 	std::string Name() override;
 };
 

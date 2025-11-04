@@ -62,10 +62,6 @@ unique_ptr<HTTPFileHandle> PgLakeS3FileSystem::CreateHandle(const OpenFileInfo &
 															 optional_ptr<FileOpener> opener)
 {
 	optional_ptr<ClientContext> context = opener->TryGetClientContext();
-	auto db = opener->TryGetDatabase();
-	auto &http_util = HTTPUtil::Get(*db);
-	unique_ptr<HTTPParams> params;
-	params = http_util.InitializeParameters(*context, fileInfo.path);
 
 	FileOpenerInfo info = {fileInfo.path};
 	S3AuthParams auth_params = S3AuthParams::ReadFrom(opener, info);
@@ -73,6 +69,15 @@ unique_ptr<HTTPFileHandle> PgLakeS3FileSystem::CreateHandle(const OpenFileInfo &
 	// Scan the query string for any s3 authentication parameters
 	auto parsed_s3_url = S3UrlParse(fileInfo.path, auth_params);
 	ReadQueryParams(parsed_s3_url.query_param, auth_params);
+
+	// Work around incomplete change made in https://github.com/duckdb/duckdb-httpfs/pull/83/files
+	// The endpoint is not adapted to the s3_region query parameter, which we rely on for
+	// region injection.
+	if (StringUtil::EndsWith(auth_params.endpoint, ".amazonaws.com"))
+		auth_params.endpoint = StringUtil::Format("s3.%s.amazonaws.com", auth_params.region);
+
+	auto http_util = HTTPFSUtil::GetHTTPUtil(opener);
+	auto params = http_util->InitializeParameters(opener, info);
 
 	return duckdb::make_uniq<PgLakeS3FileHandle>(*this, fileInfo.path, flags, context,
 												  params,
@@ -389,9 +394,6 @@ IsPgLakeManagedStorageBucket(optional_ptr<ClientContext> context, string prefix,
  * SetEncryptionFields determines the encryption and customer_key_id for a given
  * request. In particular, it sets the customer_key_id option for writes to the
  * managed storage bucket if a key ID is configured.
- *
- * We also always use AES256 for S3, in case it is required by an IAM policy.
- * Using AES256 is anyway the default.
  */
 static void
 SetEncryptionFields(PgLakeS3FileHandle &s3Handle, ParsedS3Url &parsed_s3_url,
@@ -476,7 +478,7 @@ PgLakeS3FileSystem::PutRequest(FileHandle &handle, string url, HTTPHeaders heade
 		SetEncryptionFields(s3Handle, parsed_s3_url, encryption, customer_key_id);
 
 	auto headers = create_s3_header(parsed_s3_url.path, http_params, parsed_s3_url.host, "s3", "PUT", auth_params, "",
-	                                "", payload_hash, content_type, "", customer_key_id);
+	                                "", payload_hash, content_type, "", encryption, customer_key_id);
 	return HTTPFileSystem::PutRequest(handle, http_url, headers, buffer_in, buffer_in_len);
 }
 
@@ -604,14 +606,15 @@ ParseOpenFileInfo(string &awsResponse, bool isGlob, vector<OpenFileInfo> &result
 		/* construct file metadata */
 		OpenFileInfo fileDesc(path);
 
-		/* for glob we only care about the name */
+		fileDesc.extended_info = make_shared_ptr<ExtendedOpenFileInfo>();
+		auto &options = fileDesc.extended_info->options;
+		auto timestampStr = ParseXmlValue(xmlFragment, "LastModified");
+		options.emplace("file_size", Value::BIGINT(std::stol(ParseXmlValue(xmlFragment, "Size"))));
+		options.emplace("last_modified", Value::TIMESTAMP(Timestamp::FromCString(timestampStr.c_str(), timestampStr.length())));
+
+		/* for pg_lake list we also want etag */
 		if (!isGlob)
 		{
-			fileDesc.extended_info = make_shared_ptr<ExtendedOpenFileInfo>();
-			auto &options = fileDesc.extended_info->options;
-
-			options.emplace("file_size", Value::BIGINT(std::stol(ParseXmlValue(xmlFragment, "Size"))));
-			options.emplace("last_modified", Value::TIMESTAMP(Timestamp::FromString(ParseXmlValue(xmlFragment, "LastModified"))));
 			auto etag = ParseXmlValue(xmlFragment, "ETag");
 			UnescapeEtag(etag, "&quot;");
 			UnescapeEtag(etag, "&#34;");
@@ -669,6 +672,12 @@ PgLakeS3FileSystem::List(const string &glob_pattern, bool is_glob, FileOpener *o
 
 	ReadQueryParams(parsed_s3_url.query_param, s3_auth_params);
 
+	// Work around incomplete change made in https://github.com/duckdb/duckdb-httpfs/pull/83/files
+	// The endpoint is not adapted to the s3_region query parameter, which we rely on for
+	// region injection.
+	if (StringUtil::EndsWith(s3_auth_params.endpoint, ".amazonaws.com"))
+		s3_auth_params.endpoint = StringUtil::Format("s3.%s.amazonaws.com", s3_auth_params.region);
+
 	// Do main listobjectsv2 request
 	vector<OpenFileInfo> s3_file_descs;
 	string main_continuation_token;
@@ -678,9 +687,11 @@ PgLakeS3FileSystem::List(const string &glob_pattern, bool is_glob, FileOpener *o
 		if (context->interrupted)
 			throw InterruptException();
 
-		// main listobject call, may
 		string response_str = AWSListObjectV2::Request(shared_path, *http_params, s3_auth_params,
 		                                               main_continuation_token, HTTPState::TryGetState(opener).get());
+		if (response_str.empty())
+			throw HTTPException("no list response (most likely the wrong region)");
+
 		main_continuation_token = AWSListObjectV2::ParseContinuationToken(response_str);
 		ParseOpenFileInfo(response_str, is_glob, s3_file_descs);
 

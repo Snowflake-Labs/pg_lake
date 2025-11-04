@@ -16,7 +16,6 @@
  */
 
 #include "duckdb.hpp"
-#include "duckdb/main/extension_util.hpp"
 
 #include "pg_lake/query_listener.hpp"
 #include "pg_lake/utility_functions.hpp"
@@ -146,7 +145,7 @@ SleepScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
  * RegisterFunctions registers the SQL utility functions.
  */
 void
-PgLakeUtilityFunctions::RegisterFunctions(DatabaseInstance &instance)
+PgLakeUtilityFunctions::RegisterFunctions(ExtensionLoader &loader)
 {
 	/* pg_lake_stat_activity function definition */
 	{
@@ -157,7 +156,7 @@ PgLakeUtilityFunctions::RegisterFunctions(DatabaseInstance &instance)
 			TableFunction({},
 						  StatActivityExec, StatActivityBind));
 
-	    ExtensionUtil::RegisterFunction(instance, pg_lake_stat_activity);
+	    loader.RegisterFunction(pg_lake_stat_activity);
 	}
 
 	/* pg_lake_sleep function definition */
@@ -168,7 +167,7 @@ PgLakeUtilityFunctions::RegisterFunctions(DatabaseInstance &instance)
 						   LogicalType::BOOLEAN,
 						   SleepScalarFun);
 
-		ExtensionUtil::RegisterFunction(instance, pg_lake_sleep);
+		loader.RegisterFunction(pg_lake_sleep);
 	}
 }
 
