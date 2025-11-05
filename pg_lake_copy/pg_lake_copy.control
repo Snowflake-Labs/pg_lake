@@ -1,5 +1,5 @@
 comment = 'Copy to/from data lake files'
-default_version = '3.0'
+default_version = '3.1'
 module_pathname = '$libdir/pg_lake_copy'
 relocatable = false
 schema = pg_catalog

@@ -1,6 +1,6 @@
 # pg_lake_spatial extension
 comment = 'Geospatial file format support'
-default_version = '3.0'
+default_version = '3.1'
 module_pathname = '$libdir/pg_lake_spatial'
 relocatable = false
 schema = pg_catalog

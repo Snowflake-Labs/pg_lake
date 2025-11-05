@@ -1,5 +1,5 @@
 comment = 'Query engine for data lake queries'
-default_version = '3.0'
+default_version = '3.1'
 module_pathname = '$libdir/pg_lake_engine'
 relocatable = false
 schema = pg_catalog

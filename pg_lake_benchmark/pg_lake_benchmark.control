@@ -1,6 +1,6 @@
 # pg_lake_benchmark extension
 comment = 'Benchmark for PgLake and Iceberg tables'
-default_version = '3.0'
+default_version = '3.1'
 module_pathname = '$libdir/pg_lake_benchmark'
 relocatable = false
 schema = pg_catalog

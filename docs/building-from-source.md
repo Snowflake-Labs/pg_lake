@@ -353,3 +353,17 @@ We use the following for simplicity:
    CREATE TABLE t_iceberg(a int) USING iceberg;
    ```
 
+## Automatically Bumping Extension Versions
+
+To bump all PostgreSQL extensions in the repo to a new version:
+
+```bash
+python tools/bump_extension_versions.py 3.0
+```
+
+What it does:
+
+   - Finds all folders containing a `.control` file.
+   - Updates the `default_version` field in each control file.
+   - Creates a new SQL stub for version upgrade (e.g., `pg_lake_engine--2.4--3.0.sql`).
+

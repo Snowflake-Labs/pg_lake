@@ -1,4 +1,4 @@
-default_version = '1.2'
+default_version = '3.1'
 module_pathname = '$libdir/pg_map'
 relocatable = false
 schema = pg_catalog
