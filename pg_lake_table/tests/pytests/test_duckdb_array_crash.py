@@ -7,9 +7,13 @@ from utils_pytest import *
 
 def test_duckdb_array_crash(extension, pg_conn, s3):
     # setup test tables
+    location = f"s3://{TEST_BUCKET}/test_duckdb_array_crash/"
+
     run_command(
-        """
+        f"""
     DROP TABLE IF EXISTS t1, t2;
+
+    SET pg_lake_table.default_location_prefix = '{location}';
 
     CREATE TABLE t1 (
         id SERIAL,
@@ -23,6 +27,8 @@ def test_duckdb_array_crash(extension, pg_conn, s3):
         company_name TEXT,
         hierarchy_array TEXT[]
     ) USING iceberg;
+
+    RESET pg_lake_table.default_location_prefix;
 
     -- Insert a few thousand rows
     INSERT INTO t1 (name, shipper_account_id)
