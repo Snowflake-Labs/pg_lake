@@ -258,8 +258,7 @@ ENV VCPKG_TOOLCHAIN_PATH="/home/postgres/vcpkg/scripts/buildsystems/vcpkg.cmake"
 FROM dev_base AS base
 
 # Clone pg_lake project
-RUN mkdir -p -m 0700 ~/.ssh && ssh-keyscan github.com >> ~/.ssh/known_hosts && \
-    git clone git@github.com:snowflake-labs/pg_lake.git \
+RUN git clone https://github.com/snowflake-labs/pg_lake.git \
       --branch ${PG_LAKE_REF} --recurse-submodules /home/postgres/pg_lake
 
 ############## pg_lake_postgres ##############
