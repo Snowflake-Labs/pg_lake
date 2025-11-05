@@ -96,7 +96,9 @@ export VCPKG_TOOLCHAIN_PATH="$(pwd)/vcpkg/scripts/buildsystems/vcpkg.cmake"
 
 # install pg_lake extensions
 git clone https://github.com/snowflake-labs/pg_lake.git && \
-cd pg_lake/duckdb_pglake && make && make install && \
+cd pg_lake && \
+git submodule update --init --recursive && \
+cd duckdb_pglake && make && make install && \
 cd .. && make install-avro-local && make fast && make install-fast
 ```
 
