@@ -1366,6 +1366,37 @@ GetBaseWorkerRegistrationList(void)
 
 
 /*
+ * IsWorkerRegistered returns whether the given worker is registered.
+ */
+static bool
+IsWorkerRegistered(int32 workerId)
+{
+	PushActiveSnapshot(GetTransactionSnapshot());
+	SPI_connect();
+
+	int			argCount = 1;
+	Oid			argTypes[] = {INT4OID};
+	Datum		argValues[] = {Int32GetDatum(workerId)};
+	const char *argNulls = " ";
+	bool		readOnly = true;
+	long		limit = 0;
+
+	SPI_execute_with_args("select worker_id "
+						  "from " PG_EXTENSION_BASE_SCHEMA_NAME ".workers "
+						  "where worker_id = $1",
+						  argCount, argTypes, argValues, argNulls,
+						  readOnly, limit);
+
+	bool		isWorkerRegistered = SPI_processed > 0;
+
+	SPI_finish();
+	PopActiveSnapshot();
+
+	return isWorkerRegistered;
+}
+
+
+/*
  * StartBaseWorker starts a base worker in the current database.
  *
  * We specify an extension and entry-point function that the base worker
@@ -1809,7 +1840,7 @@ PgExtensionBaseWorkerMain(Datum arg)
 
 	char	   *extensionName = get_extension_name(extensionId);
 
-	if (extensionName == NULL)
+	if (extensionName == NULL || !IsWorkerRegistered(workerId))
 	{
 		/*
 		 * The extension was dropped just after the base worker started. The
@@ -1819,8 +1850,8 @@ PgExtensionBaseWorkerMain(Datum arg)
 
 		RemoveBaseWorkerEntry(databaseId, workerId);
 
-		ereport(LOG, (errmsg("pg extension base worker %d in database %s belongs to "
-							 "an extension that was dropped or not created, exiting ",
+		ereport(LOG, (errmsg("pg extension base worker %d in database %s was dropped "
+							 "or not created, exiting ",
 							 workerId, databaseName)));
 
 		CommitTransactionCommand();
