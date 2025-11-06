@@ -79,6 +79,20 @@ There are some important settings that should be adjusted, especially on product
 - `--init_file_path <path>`: Execute all statements in this file on start-up
 - `--cache_dir`: Specify the directory to use to cache remote files (from S3)
 
+Note that if you want to make adjustments to duckdb settings, you can use the `--init_file_path` approach OR you can
+connect to the running pgduck_server and make changes. For example:
+
+```
+$ psql -h /tmp -p 5332
+psql (17.5, server 16.4.DuckPG)
+Type "help" for help.
+
+postgres=> set global threads = 16;
+SET
+```
+
+The connection above is to the pgduck_server on its port (default 5332), NOT to the postgres/pg_lake server. 
+
 
 #### Connecting `pg_lake` to s3 (or compatible)
 
