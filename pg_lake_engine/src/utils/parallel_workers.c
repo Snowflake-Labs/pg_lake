@@ -40,21 +40,6 @@
 /* this should probably live in extension_base */
 
 static bool JobIsComplete(AttachedWorker * worker);
-static int	CountAvailableWorkers(void);
-
-/*
- * Postgres does not expose this struct outside of the bgworker.c file, but it
- * has been stable and we validate that max_worker_processes matches
- * total_slots so maybe safe enough.
- */
-typedef struct InternalBackgroundWorkerArray
-{
-	int			total_slots;
-	uint32		parallel_register_count;
-	/* uint32		parallel_terminate_count; */
-	/* BackgroundWorkerSlot slot[FLEXIBLE_ARRAY_MEMBER]; */
-}			InternalBackgroundWorkerArray;
-
 
 /*
  * RunCommandsInParallel runs a list of commands in parallel, using at
@@ -69,36 +54,6 @@ RunCommandsInParallel(List *commands,
 		return;
 
 	Assert(requestedWorkerCount >= 1);
-
-	int			availableWorkers = CountAvailableWorkers();
-
-	/* bare minimum? */
-	if (availableWorkers < 1)
-	{
-		/*
-		 * Is this recoverable? should we consider sleep/polling for a while
-		 * before totally giving up, or better to fail fast and have the user
-		 * reconfigure?
-		 */
-		ereport(ERROR, (errmsg("not enough background workers"),
-						errhint("raise max_parallel_workers")));
-	}
-
-	/*
-	 * Cap to our theoretical maximum; no guarantees these will stay available
-	 * the whole time with concurrent operations, but at least indicative that
-	 * they might be.
-	 */
-
-	if (requestedWorkerCount > availableWorkers)
-	{
-		ereport(LOG, (errmsg("requested %d jobs but only %d were available; "
-							 "using the smaller number",
-							 requestedWorkerCount,
-							 availableWorkers)));
-
-		requestedWorkerCount = availableWorkers;
-	}
 
 	AttachedWorker **workers = palloc0(sizeof(AttachedWorker *) * requestedWorkerCount);
 
@@ -240,45 +195,4 @@ JobIsComplete(AttachedWorker * worker)
 	ReadFromAttachedWorker(worker, wait);
 
 	return !IsAttachedWorkerRunning(worker);
-}
-
-
-/*
- * Count how many free background workers there are at this exact moment.  Not
- * a guarantee these will stay available, but we know this *was* available, so
- * likelier than not we'll be able to eventually use this many.  Serves as an
- * upper bound for worker pool size.
- */
-static int
-CountAvailableWorkers()
-{
-	int			available = 0;
-	bool		found = false;
-
-	/* hacky way of getting the shared slot array  */
-	InternalBackgroundWorkerArray *backgroundWorkerData =
-		ShmemInitStruct("Background Worker Data",
-						BackgroundWorkerShmemSize(),
-						&found);
-
-	/* sanity checking that we're looking at the expected struct */
-
-	Assert(found && backgroundWorkerData);
-	Assert(backgroundWorkerData->total_slots == max_worker_processes);
-
-	LWLockAcquire(BackgroundWorkerLock, LW_SHARED);
-
-	/*
-	 * Since we don't care if a background worker is terminated or running, we
-	 * only need the number of slots that are currently available.  (The
-	 * number of *active* bgworkers are the registered - terminated, but
-	 * that's not what we are looking for.)
-	 */
-
-	available = backgroundWorkerData->total_slots -
-		backgroundWorkerData->parallel_register_count;
-
-	LWLockRelease(BackgroundWorkerLock);
-
-	return available;
 }
