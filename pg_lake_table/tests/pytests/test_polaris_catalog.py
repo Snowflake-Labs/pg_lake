@@ -98,7 +98,7 @@ def test_create_namespace(
         pg_conn,
         raise_error=False,
     )
-    assert "rest catalog iceberg tables are read only" in str(res)
+    assert "writable REST catalog iceberg tables do not" in str(res)
     pg_conn.rollback()
 
     res = run_command(
@@ -106,7 +106,7 @@ def test_create_namespace(
         pg_conn,
         raise_error=False,
     )
-    assert "rest catalog iceberg tables are read only" in str(res)
+    assert "writable REST catalog iceberg tables do not" in str(res)
     pg_conn.rollback()
 
     run_command(f"""DROP SCHEMA "{namespace}" CASCADE""", pg_conn)

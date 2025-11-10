@@ -656,18 +656,19 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 
 	bool		hasRestCatalogOption = HasRestCatalogTableOption(createStmt->options);
 	bool		hasObjectStoreCatalogOption = HasObjectStoreCatalogTableOption(createStmt->options);
-	bool		hasExternalCatalogReadOnlyOption = HasReadOnlyOption(createStmt->options);
 
-	/*
-	 * Read-only external catalog tables are a special case of Iceberg tables.
-	 * They are recognized as Iceberg tables, but are not registered in any
-	 * internal catalogs (e.g., lake_iceberg.tables). Instead, the table is
-	 * created only in PostgreSQL’s system catalogs. When the table is
-	 * queried, its metadata is fetched on demand from the external catalog.
-	 */
-	if ((hasObjectStoreCatalogOption ||
-		 (hasRestCatalogOption && hasExternalCatalogReadOnlyOption)))
+	if (hasObjectStoreCatalogOption || hasRestCatalogOption)
 	{
+		/*
+		 * Read-only external catalog tables are a special case of Iceberg
+		 * tables. They are recognized as Iceberg tables, but are not
+		 * registered in any internal catalogs (e.g., lake_iceberg.tables).
+		 * Instead, the table is created only in PostgreSQL’s system
+		 * catalogs. When the table is queried, its metadata is fetched on
+		 * demand from the external catalog.
+		 */
+		bool		hasExternalCatalogReadOnlyOption = HasReadOnlyOption(createStmt->options);
+
 		char	   *metadataLocation = NULL;
 		char	   *catalogNamespace = NULL;
 		char	   *catalogTableName = NULL;
@@ -725,7 +726,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 			catalogName = catalogNameProvided;
 		}
 
-		if (hasRestCatalogOption)
+		if (hasRestCatalogOption && hasExternalCatalogReadOnlyOption)
 		{
 			ErrorIfRestNamespaceDoesNotExist(catalogName, catalogNamespace);
 
@@ -742,7 +743,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 																	   catalogTableName);
 		}
 
-		if (hasObjectStoreCatalogOption && !hasExternalCatalogReadOnlyOption)
+		if (!hasExternalCatalogReadOnlyOption)
 		{
 			/*
 			 * For writable object store catalog tables, we need to continue
@@ -757,11 +758,11 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 				catalogNameProvided != NULL)
 			{
 				ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-								errmsg("writable object store catalog iceberg tables do not "
-									   "allow explicit catalog options")));
+								errmsg("writable %s catalog iceberg tables do not "
+									   "allow explicit catalog options", hasObjectStoreCatalogOption ? "object store" : "REST")));
 			}
 		}
-		else if (createStmt->base.tableElts == NIL)
+		else if (createStmt->base.tableElts == NIL && hasExternalCatalogReadOnlyOption)
 		{
 			List	   *dataFileColumns =
 				DescribeColumnsFromIcebergMetadataURI(metadataLocation, false);
