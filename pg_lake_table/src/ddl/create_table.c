@@ -659,6 +659,8 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 
 	if (hasObjectStoreCatalogOption || hasRestCatalogOption)
 	{
+		Oid			namespaceId = RangeVarGetAndCheckCreationNamespace(createStmt->base.relation, NoLock, NULL);
+
 		/*
 		 * Read-only external catalog tables are a special case of Iceberg
 		 * tables. They are recognized as Iceberg tables, but are not
@@ -684,8 +686,6 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		 */
 		if (catalogNamespaceProvided == NULL && hasExternalCatalogReadOnlyOption)
 		{
-			Oid			namespaceId = RangeVarGetAndCheckCreationNamespace(createStmt->base.relation, NoLock, NULL);
-
 			catalogNamespace = get_namespace_name(namespaceId);
 
 			/* add catalog_namespace table options */
@@ -760,6 +760,30 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 				ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 								errmsg("writable %s catalog iceberg tables do not "
 									   "allow explicit catalog options", hasObjectStoreCatalogOption ? "object store" : "REST")));
+			}
+
+			if (hasRestCatalogOption)
+			{
+				/*
+				 * For writable rest catalog iceberg tables, we register the
+				 * namespace in the rest catalog. We do that early in the
+				 * command processing so that any errors in the registration
+				 * are caught before we create the actual table.
+				 *
+				 * Note that registering a namespace is not a transactional
+				 * operation from pg_lake's perspective. If the subsequent
+				 * table creation fails, the namespace registration will
+				 * remain. We accept that tradeoff for simplicity as
+				 * re-registering an existing namespace is a no-op. For a
+				 * writable rest catalog iceberg table, the namespace is
+				 * always the table's schema name. Similarly, the catalog name
+				 * is always the database name. We normally encode that in
+				 * GetRestCatalogName() etc., but here we need to do it early
+				 * before the table is created.
+				 */
+				RegisterNamespaceToRestCatalog(get_database_name(MyDatabaseId),
+											   get_namespace_name(namespaceId),
+											   hasExternalCatalogReadOnlyOption);
 			}
 		}
 		else if (createStmt->base.tableElts == NIL && hasExternalCatalogReadOnlyOption)

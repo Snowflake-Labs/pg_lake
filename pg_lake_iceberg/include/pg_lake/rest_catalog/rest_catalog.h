@@ -38,6 +38,7 @@ extern PGDLLEXPORT void RegisterNamespaceToRestCatalog(const char *catalogName, 
 													   bool hasRestCatalogReadOnlyOption);
 extern PGDLLEXPORT void ErrorIfRestNamespaceDoesNotExist(const char *catalogName, const char *namespaceName);
 extern PGDLLEXPORT IcebergCatalogType GetIcebergCatalogType(Oid relationId);
+extern PGDLLEXPORT char *GetRestCatalogName(Oid relationId);
 extern PGDLLEXPORT char *GetRestCatalogNamespace(Oid relationId);
 extern PGDLLEXPORT char *GetRestCatalogTableName(Oid relationId);
 extern PGDLLEXPORT bool HasRestCatalogTableOption(List *options);

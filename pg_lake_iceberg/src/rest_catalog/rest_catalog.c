@@ -44,7 +44,6 @@ char	   *RestCatalogClientSecret = NULL;
 static void CreateNamespaceOnRestCatalog(const char *catalogName, const char *namespaceName);
 static char *EncodeBasicAuth(const char *clientId, const char *clientSecret);
 static char *JsonbGetStringByPath(const char *jsonb_text, int nkeys,...);
-static char *GetRestCatalogName(Oid relationId);
 static List *PostHeadersWithAuth(void);
 static List *GetHeadersWithAuth(void);
 static void ReportHTTPError(HttpResult httpResult, int level);
@@ -582,7 +581,7 @@ HasReadOnlyOption(List *options)
 * as the catalog name in the external catalog. Writable rest catalog tables
 * use the current database name as the catalog name.
 */
-static char *
+char *
 GetRestCatalogName(Oid relationId)
 {
 	IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
