@@ -488,55 +488,75 @@ GetIcebergCatalogType(Oid relationId)
 
 
 /*
-* Users can provide different names for the table and the catalog names.
-* This function first checks if users provided a custom catalog table name.
-* If so, returns that, otherwise returns Postgres table name.
+* Readable rest catalog tables always use the catalog_table_name option
+* as the table name in the external catalog. Writable rest catalog tables
+* use the Postgres table name as the catalog table name.
 */
 char *
 GetRestCatalogTableName(Oid relationId)
 {
-	Assert(GetIcebergCatalogType(relationId) == REST_CATALOG_READ_ONLY ||
-		   GetIcebergCatalogType(relationId) == REST_CATALOG_READ_WRITE);
+	IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
 
-	ForeignTable *foreignTable = GetForeignTable(relationId);
-	List	   *options = foreignTable->options;
+	Assert(catalogType == REST_CATALOG_READ_ONLY ||
+		   catalogType == REST_CATALOG_READ_WRITE);
 
-	char	   *catalogTableName = GetStringOption(options, "catalog_table_name", false);
+	if (catalogType == REST_CATALOG_READ_ONLY)
+	{
+		ForeignTable *foreignTable = GetForeignTable(relationId);
+		List	   *options = foreignTable->options;
 
-	/* user provided the custom catalog table name */
-	if (!catalogTableName)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("catalog_table_name option is required for rest catalog iceberg tables")));
+		char	   *catalogTableName = GetStringOption(options, "catalog_table_name", false);
 
-	return catalogTableName;
+		/* user provided the custom catalog table name */
+		if (!catalogTableName)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("catalog_table_name option is required for rest catalog iceberg tables")));
 
+		return catalogTableName;
+	}
+	else
+	{
+		/* for writable rest catalog tables, we use the Postgres table name */
+		return get_rel_name(relationId);
+	}
 }
 
 
 /*
-* Users can provide different names for the table and the catalog names.
-* This function first checks if users provided a custom catalog namespace.
-* If so, returns that, otherwise returns Postgres schema name.
+* Readable rest catalog tables always use the catalog_namespace option
+* as the namespace in the external catalog. Writable rest catalog tables
+* use the Postgres schema name as the namespace.
 */
 char *
 GetRestCatalogNamespace(Oid relationId)
 {
-	Assert(GetIcebergCatalogType(relationId) == REST_CATALOG_READ_ONLY ||
-		   GetIcebergCatalogType(relationId) == REST_CATALOG_READ_WRITE);
+	IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
 
-	ForeignTable *foreignTable = GetForeignTable(relationId);
-	List	   *options = foreignTable->options;
+	Assert(catalogType == REST_CATALOG_READ_ONLY ||
+		   catalogType == REST_CATALOG_READ_WRITE);
 
-	char	   *catalogNamespace = GetStringOption(options, "catalog_namespace", false);
+	if (catalogType == REST_CATALOG_READ_ONLY)
+	{
 
-	/* user provided the custom catalog namespace */
-	if (!catalogNamespace)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("catalog_namespace option is required for rest catalog iceberg tables")));
+		ForeignTable *foreignTable = GetForeignTable(relationId);
+		List	   *options = foreignTable->options;
 
-	return catalogNamespace;
+		char	   *catalogNamespace = GetStringOption(options, "catalog_namespace", false);
+
+		/* user provided the custom catalog namespace */
+		if (!catalogNamespace)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("catalog_namespace option is required for rest catalog iceberg tables")));
+
+		return catalogNamespace;
+	}
+	else
+	{
+		/* for writable rest catalog tables, we use the Postgres schema name */
+		return get_namespace_name(get_rel_namespace(relationId));
+	}
 }
 
 bool
@@ -558,14 +578,21 @@ HasReadOnlyOption(List *options)
 
 
 /*
-* Users can provide different names for the catalog. If not provided,
-* we use the database name as the catalog name.
+* Readable rest catalog tables always use the catalog_name option
+* as the catalog name in the external catalog. Writable rest catalog tables
+* use the current database name as the catalog name.
 */
 static char *
 GetRestCatalogName(Oid relationId)
 {
-	if (relationId != InvalidOid)
+	IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
+
+	Assert(catalogType == REST_CATALOG_READ_ONLY ||
+		   catalogType == REST_CATALOG_READ_WRITE);
+
+	if (catalogType == REST_CATALOG_READ_ONLY)
 	{
+
 		Assert(GetIcebergCatalogType(relationId) == REST_CATALOG_READ_ONLY ||
 			   GetIcebergCatalogType(relationId) == REST_CATALOG_READ_WRITE);
 
@@ -575,8 +602,12 @@ GetRestCatalogName(Oid relationId)
 		char	   *catalogName = GetStringOption(options, "catalog_name", false);
 
 		/* user provided the custom catalog name */
-		if (catalogName)
-			return catalogName;
+		if (!catalogName)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("catalog_name option is required for rest catalog iceberg tables")));
+
+		return catalogName;
 	}
 
 	return get_database_name(MyDatabaseId);
