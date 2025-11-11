@@ -1052,7 +1052,9 @@ GetMetadataLocationPrefixForRelationId(Oid relationId)
 	}
 	else
 	{
-		char	   *metadataLocation = GetIcebergCatalogMetadataLocation(relationId, false);
+		IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
+
+		char	   *metadataLocation = catalogType == REST_CATALOG_READ_WRITE ? GetMetadataLocationForRestCatalogForIcebergTable(relationId) : GetIcebergCatalogMetadataLocation(relationId, false);
 		IcebergTableMetadata *metadata = ReadIcebergTableMetadata(metadataLocation);
 
 		/* cast (const char *) to (char *) */

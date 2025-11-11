@@ -944,6 +944,29 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 	 */
 	Assert(list_length(GetRestrictedColumnDefList(columnDefList)) == list_length(columnDefList));
 
+
+	if (hasRestCatalogOption)
+	{
+		/* this code-path only deals with writable rest catalog tables */
+		Assert(!HasReadOnlyOption(createStmt->options));
+
+		/*
+		 * We have to start staging create table for writable rest catalog
+		 * tables here, because initial staging allows us to get the vended
+		 * credentials for this transaction. For example, if the rest catalog
+		 * table is created via CTAS, the CTAS command may need to read/write
+		 * data to S3 using the vended credentials. Also note that staging
+		 * consists of two steps: 1.
+		 * StartStagingCreateRestCatalogIcebergTable: which creates the table
+		 * in the rest catalog with a "staging" status. 2.
+		 * FinalizeStagingCreateRestCatalogIcebergTable: which finalizes the
+		 * table creation in the rest catalog after the local table creation
+		 * is successful in post-commit.
+		 */
+		StartStageRestCatalogIcebergTableCreate(relationId);
+	}
+
+
 	List	   *ddlOps = NIL;
 
 	IcebergDDLOperation *createDDLOp = palloc0(sizeof(IcebergDDLOperation));

@@ -157,16 +157,33 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 
 	Assert(!ShouldSkipMetadataChangeToIceberg(metadataOperationTypes));
 #endif
+	IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
+	bool		writableRestCatalogTable = catalogType == REST_CATALOG_READ_WRITE;
 
 	/* read the iceberg metadata for the table */
 	bool		forUpdate = true;
 	char	   *metadataPath = GetIcebergCatalogMetadataLocation(relationId, forUpdate);
-
 	bool		createNewTable = HasCreateTableOperation(metadataOperations);
 
-	IcebergTableMetadata *metadata = (createNewTable) ?
-		GenerateInitialIcebergTableMetadata(relationId) :
-		ReadIcebergTableMetadata(metadataPath);
+	IcebergTableMetadata *metadata = NULL;
+
+	if (writableRestCatalogTable && !createNewTable)
+	{
+		/*
+		 * Writable rest catalog iceberg tables have their metadata updated in
+		 * the catalog itself. We fetch the metadata from the rest catalog. If
+		 * new table, we generate initial metadata below.
+		 */
+		metadataPath = GetMetadataLocationForRestCatalogForIcebergTable(relationId);
+		metadata = ReadIcebergTableMetadata(metadataPath);
+	}
+	else
+	{
+		metadata = (createNewTable) ?
+			GenerateInitialIcebergTableMetadata(relationId) :
+			ReadIcebergTableMetadata(metadataPath);
+	}
+
 
 	int64_t		prevLastUpdatedMs = metadata->last_updated_ms;
 
@@ -184,6 +201,11 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 	if (builder->createTable || builder->regenerateSchema)
 	{
 		AppendCurrentPostgresSchema(relationId, metadata, builder->schema);
+
+		/*
+		 * TODO: Create RestCatalogRequest for updating the schema in the
+		 * writable rest catalog iceberg table.
+		 */
 	}
 
 	if (builder->createTable || builder->regeneratePartitionSpec)
@@ -197,6 +219,11 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 			IcebergPartitionSpec *newSpec = lfirst(newSpecCell);
 
 			AppendPartitionSpec(metadata, newSpec);
+
+			/*
+			 * TODO: Create RestCatalogRequest for updating the partitioning
+			 * in the writable rest catalog iceberg table.
+			 */
 		}
 	}
 
@@ -216,6 +243,11 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 		UpdateLatestSnapshot(metadata, newSnapshot);
 
 		createNewSnapshot = true;
+
+		/*
+		 * TODO: Create RestCatalogRequest for setting the current_snapshot_id
+		 * in the writable rest catalog iceberg table.
+		 */
 	}
 
 	/* if we need to expire old snapshots, we do it here */
@@ -225,12 +257,37 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 			RemoveOldSnapshotsFromMetadata(relationId, metadata, isVerbose);
 
 		if (expiredSnapshots)
+		{
 			createNewSnapshot = true;
+
+			/*
+			 * TODO: Create RestCatalogRequest for removing old snapshots in
+			 * the writable rest catalog iceberg table.
+			 */
+		}
 	}
 
 	/* if there were no changes to the Iceberg table, we are done */
 	if (!createNewSnapshot && !createNewTable)
 		return;
+
+	if (writableRestCatalogTable)
+	{
+
+		if (createNewSnapshot)
+		{
+			/*
+			 * TODO: Create RestCatalogRequest for adding the new snapshot in
+			 * the writable rest catalog iceberg table.
+			 */
+		}
+
+		/*
+		 * We are done, writable rest catalog iceberg tables have their
+		 * metadata updated in the catalog itself.
+		 */
+		return;
+	}
 
 	/* add the new snapshot to the snapshot log */
 	GenerateSnapshotLogEntries(metadata);

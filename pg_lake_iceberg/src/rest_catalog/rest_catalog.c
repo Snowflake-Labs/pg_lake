@@ -26,6 +26,9 @@
 #include "utils/jsonb.h"
 #include "utils/lsyscache.h"
 
+#include "pg_lake/iceberg/api/table_schema.h"
+#include "pg_lake/iceberg/metadata_spec.h"
+
 #include "pg_lake/http/http_client.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
@@ -34,6 +37,7 @@
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/util/url_encode.h"
 #include "pg_lake/util/rel_utils.h"
+
 
 /* determined by GUC */
 char	   *RestCatalogHost = "http://localhost:8181";
@@ -44,9 +48,176 @@ char	   *RestCatalogClientSecret = NULL;
 static void CreateNamespaceOnRestCatalog(const char *catalogName, const char *namespaceName);
 static char *EncodeBasicAuth(const char *clientId, const char *clientSecret);
 static char *JsonbGetStringByPath(const char *jsonb_text, int nkeys,...);
-static List *PostHeadersWithAuth(void);
 static List *GetHeadersWithAuth(void);
-static void ReportHTTPError(HttpResult httpResult, int level);
+static char *AppendIcebergPartitionSpecForRestCatalogStage(List *partitionSpecs);
+
+/*
+* StartStageRestCatalogIcebergTableCreate stages the creation of an iceberg table
+* in the rest catalog. On any failure, an error is raised. If the table exists,
+* an error is raised as well.
+*
+* As per REST catalog spec, we need to provide an empty schema when creating
+* a table. The schema will be updated when we make this table visible/committed.
+* The main reason for staging early is to be able to get the vended credentials
+* for writable tables.
+*/
+void
+StartStageRestCatalogIcebergTableCreate(Oid relationId)
+{
+	const char *catalogName = GetRestCatalogName(relationId);
+	const char *namespaceName = GetRestCatalogNamespace(relationId);
+	const char *relationName = GetRestCatalogTableName(relationId);
+
+	StringInfo	body = makeStringInfo();
+
+	appendStringInfoChar(body, '{');	/* start body */
+	appendJsonString(body, "name", relationName);
+
+	appendStringInfoString(body, ", ");
+	appendJsonKey(body, "schema");
+
+	appendStringInfoChar(body, '{');	/* start schema object */
+
+	appendJsonString(body, "type", "struct");
+	appendStringInfoString(body, ", ");
+	appendJsonKey(body, "fields");
+	appendStringInfoString(body, "[]"); /* empty fields array, we don't know
+										 * the schema yet */
+
+	appendStringInfoChar(body, '}');	/* close schema object */
+	appendStringInfoString(body, ", ");
+
+	appendJsonString(body, "stage-create", "true");
+
+	appendStringInfoChar(body, '}');	/* close body */
+
+	char	   *postUrl =
+		psprintf(REST_CATALOG_TABLES, RestCatalogHost,
+				 URLEncodePath(catalogName), URLEncodePath(namespaceName));
+	List	   *headers = PostHeadersWithAuth();
+
+	/*
+	 * TODO: Should we make this configurable? Some object stores may require
+	 * different headers or authentication methods.
+	 */
+	char	   *vendedCreds = pstrdup("X-Iceberg-Access-Delegation: vended-credentials");
+
+	headers = lappend(headers, vendedCreds);
+
+	HttpResult	httpResult = HttpPost(postUrl, body->data, headers);
+
+	if (httpResult.status != 200)
+	{
+		ReportHTTPError(httpResult, ERROR);
+	}
+}
+
+
+/*
+* FinishStageRestCatalogIcebergTableCreateRestRequest creates the REST catalog
+* request to finalize the staging of an iceberg table creation in the rest
+* catalog.
+*/
+char *
+FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSchema * dataFileSchema, List *partitionSpecs)
+{
+	StringInfo	body = makeStringInfo();
+
+	appendStringInfoChar(body, '{');
+
+	appendJsonKey(body, "requirements");
+	appendStringInfoChar(body, '[');	/* start requirements array */
+	appendStringInfoChar(body, '{');	/* start requirements element */
+
+	appendJsonString(body, "type", "assert-create");
+
+	appendStringInfoChar(body, '}');	/* close requirements element */
+	appendStringInfoChar(body, ']');	/* close requirements array */
+
+	appendStringInfoChar(body, ',');
+
+	appendJsonKey(body, "updates");
+	appendStringInfoChar(body, '[');	/* start updates array */
+	appendStringInfoChar(body, '{');	/* start updates element */
+
+	appendJsonString(body, "action", "add-schema");
+
+	appendStringInfoChar(body, ',');
+
+	int			lastColumnId = 0;
+	IcebergTableSchema *newSchema =
+		RebuildIcebergSchemaFromDataFileSchema(relationId, dataFileSchema, &lastColumnId);
+	int			schemaCount = 1;
+
+	AppendIcebergTableSchemaForRestCatalogStage(body, newSchema, schemaCount);
+	appendStringInfoChar(body, '}');	/* close updates element */
+
+	appendStringInfoChar(body, ',');
+	appendStringInfoChar(body, '{');	/* start add-sort-order */
+	appendJsonString(body, "action", "add-sort-order");
+	appendStringInfoString(body, ", ");
+	appendJsonKey(body, "sort-order");
+	appendStringInfoChar(body, '{');	/* start sort-order object */
+	appendJsonInt32(body, "order-id", 0);
+	appendStringInfoString(body, ", ");
+	appendJsonKey(body, "fields");
+	appendStringInfoString(body, "[]"); /* empty fields array */
+	appendStringInfoChar(body, '}');	/* finish sort-order object */
+	appendStringInfoChar(body, '}');	/* finish add-sort-order */
+	appendStringInfoChar(body, ',');
+	appendStringInfoChar(body, '{');	/* start add-sort-order */
+	appendJsonString(body, "action", "set-default-sort-order");
+	appendStringInfoString(body, ", ");
+	appendJsonInt32(body, "sort-order-id", 0);
+	appendStringInfoChar(body, '}');	/* finish add-sort-order */
+
+	appendStringInfoString(body, ", ");
+	appendStringInfoChar(body, '{');	/* start set-location */
+	appendJsonString(body, "action", "set-location");
+	appendStringInfoChar(body, ',');
+
+	/* construct location */
+	StringInfo	location = makeStringInfo();
+	const char *catalogName = GetRestCatalogName(relationId);
+	const char *namespaceName = GetRestCatalogNamespace(relationId);
+	const char *relationName = GetRestCatalogTableName(relationId);
+
+	appendStringInfo(location, "%s/%s/%s/%s/%d", IcebergDefaultLocationPrefix, catalogName, namespaceName, relationName, relationId);
+	appendJsonString(body, "location", location->data);
+	appendStringInfoChar(body, '}');	/* end set-location */
+
+	/* add partition spec */
+	appendStringInfoChar(body, ',');
+
+	ListCell   *partitionSpecCell = NULL;
+
+	foreach(partitionSpecCell, partitionSpecs)
+	{
+		IcebergPartitionSpec *spec = (IcebergPartitionSpec *) lfirst(partitionSpecCell);
+
+		appendStringInfoChar(body, '{');	/* start add-partition-spec */
+		appendJsonString(body, "action", "add-spec");
+		appendStringInfoString(body, ", ");
+
+		appendStringInfoString(body, AppendIcebergPartitionSpecForRestCatalogStage(list_make1(spec)));
+
+		appendStringInfoChar(body, '}');	/* finish add-partition-spec */
+		appendStringInfoString(body, ", ");
+	}
+
+	if (list_length(partitionSpecs) == 0)
+		appendStringInfoChar(body, ',');
+
+	appendStringInfoChar(body, '{');	/* start set-default-spec */
+	appendJsonString(body, "action", "set-default-spec");
+	appendStringInfoString(body, ", ");
+	appendJsonInt32(body, "spec-id", -1);	/* -1 means latest */
+	appendStringInfoChar(body, '}');	/* finish set-default-spec */
+	appendStringInfoChar(body, ']');	/* end updates array */
+	appendStringInfoChar(body, '}');
+
+	return body->data;
+}
 
 
 /*
@@ -199,7 +370,7 @@ char *
 GetMetadataLocationFromRestCatalog(const char *restCatalogName, const char *namespaceName, const char *relationName)
 {
 	char	   *getUrl =
-		psprintf(GET_REST_CATALOG_METADATA_LOCATION,
+		psprintf(REST_CATALOG_TABLE,
 				 RestCatalogHost, URLEncodePath(restCatalogName), URLEncodePath(namespaceName), URLEncodePath(relationName));
 
 	List	   *headers = GetHeadersWithAuth();
@@ -257,7 +428,7 @@ CreateNamespaceOnRestCatalog(const char *catalogName, const char *namespaceName)
 /*
 * Creates the headers for a POST request with authentication.
 */
-static List *
+List *
 PostHeadersWithAuth(void)
 {
 	return list_make3(psprintf("Authorization: Bearer %s", RestCatalogFetchAccessToken()),
@@ -285,7 +456,7 @@ GetHeadersWithAuth(void)
 *    "code": 400
 *  }
 */
-static void
+void
 ReportHTTPError(HttpResult httpResult, int level)
 {
 	/*
@@ -610,4 +781,32 @@ GetRestCatalogName(Oid relationId)
 	}
 
 	return get_database_name(MyDatabaseId);
+}
+
+
+
+static char *
+AppendIcebergPartitionSpecForRestCatalogStage(List *partitionSpecs)
+{
+	StringInfo	command = makeStringInfo();
+
+	ListCell   *partitionSpecCell = NULL;
+
+	foreach(partitionSpecCell, partitionSpecs)
+	{
+		IcebergPartitionSpec *spec = (IcebergPartitionSpec *) lfirst(partitionSpecCell);
+
+		appendJsonKey(command, "spec");
+		appendStringInfoString(command, "{");
+
+		/* append spec-id */
+		appendJsonInt32(command, "spec-id", spec->spec_id);
+
+		/* Append fields */
+		appendStringInfoString(command, ", \"fields\":");
+		AppendIcebergPartitionSpecFields(command, spec->fields, spec->fields_length);
+
+		appendStringInfoString(command, "}");
+	}
+	return command->data;
 }
