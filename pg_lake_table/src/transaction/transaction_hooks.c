@@ -64,6 +64,7 @@ IcebergXactCallback(XactEvent event, void *arg)
 		case XACT_EVENT_ABORT:
 			{
 				ResetTrackedIcebergMetadataOperation();
+				ResetRestCatalogRequests();
 				break;
 			}
 		case XACT_EVENT_PRE_PREPARE:
@@ -79,6 +80,8 @@ IcebergXactCallback(XactEvent event, void *arg)
 		case XACT_EVENT_COMMIT:
 		case XACT_EVENT_PARALLEL_COMMIT:
 			{
+				PostAllRestCatalogRequests();
+				ResetRestCatalogRequests();
 				break;
 			}
 	}
