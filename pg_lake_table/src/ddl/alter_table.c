@@ -23,6 +23,7 @@
 #include "catalog/heap.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_class.h"
+#include "catalog/pg_inherits.h"
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
 #include "commands/tablecmds.h"
@@ -113,6 +114,7 @@ typedef struct PgLakeDDL
 static bool Allowed(Node *arg);
 static bool Disallowed(Node *arg);
 static bool DisallowedAddColumnWithUnsupportedConstraints(Node *arg);
+static void PropagateSchemaChangesToChildren(Oid parentRelationId, List *schemaDDLOperations);
 
 PgLakeAlterTableHookType PgLakeAlterTableHook = NULL;
 PgLakeAlterTableRenameColumnHookType PgLakeAlterTableRenameColumnHook = NULL;
@@ -327,11 +329,35 @@ ProcessAlterTable(ProcessUtilityParams * processUtilityParams, void *arg)
 
 	ApplyDDLChanges(relationId, schemaDDLOperations);
 
+	if (list_length(schemaDDLOperations) > 0)
+		PropagateSchemaChangesToChildren(relationId, schemaDDLOperations);
+
 	if (PgLakeAlterTableHook)
 		PgLakeAlterTableHook(relationId, alterStmt);
 
 	/* called parent ProcessUtility, so we are done */
 	return true;
+}
+
+
+static void
+PropagateSchemaChangesToChildren(Oid parentRelationId, List *schemaDDLOperations)
+{
+	List	   *children = find_all_inheritors(parentRelationId, NoLock, NULL);
+	ListCell   *lc;
+
+	foreach(lc, children)
+	{
+		Oid			childOid = lfirst_oid(lc);
+
+		if (childOid == parentRelationId)
+			continue;
+
+		if (!IsPgLakeIcebergForeignTableById(childOid))
+			continue;
+
+		ApplyDDLChanges(childOid, schemaDDLOperations);
+	}
 }
 
 
