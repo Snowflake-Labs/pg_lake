@@ -42,7 +42,8 @@
 
 static void ApplyDDLCatalogChanges(Oid relationId, List *ddlOperations,
 								   List **droppedColumns, char **metadataLocation,
-								   IcebergPartitionSpec * *partitionSpec);
+								   IcebergPartitionSpec * *partitionSpec,
+								   bool *isIcebergTableCreated);
 static bool DDLsRequireIcebergSchemaChange(List *ddlOperations);
 
 
@@ -56,12 +57,11 @@ ApplyDDLChanges(Oid relationId, List *ddlOperations)
 	List	   *droppedColumns = NIL;
 
 	char	   *metadataLocation = NULL;
+	bool		isIcebergTableCreated = false;
 
 	IcebergPartitionSpec *partitionSpec = NULL;
 
-	ApplyDDLCatalogChanges(relationId, ddlOperations, &droppedColumns, &metadataLocation, &partitionSpec);
-
-	bool		isIcebergTableCreated = metadataLocation != NULL;
+	ApplyDDLCatalogChanges(relationId, ddlOperations, &droppedColumns, &metadataLocation, &partitionSpec, &isIcebergTableCreated);
 	bool		isPartitionByChange = partitionSpec != NULL;
 
 	if (isIcebergTableCreated)
@@ -90,8 +90,11 @@ ApplyDDLChanges(Oid relationId, List *ddlOperations)
 static void
 ApplyDDLCatalogChanges(Oid relationId, List *ddlOperations,
 					   List **droppedColumns, char **metadataLocation,
-					   IcebergPartitionSpec * *partitionSpec)
+					   IcebergPartitionSpec * *partitionSpec,
+					   bool *isIcebergTableCreated)
 {
+	*isIcebergTableCreated = false;
+
 	ListCell   *ddlOperationCell = NULL;
 
 	foreach(ddlOperationCell, ddlOperations)
@@ -107,8 +110,12 @@ ApplyDDLCatalogChanges(Oid relationId, List *ddlOperations,
 						 errmsg("cannot create the same iceberg table multiple times")));
 			}
 
+			*isIcebergTableCreated = true;
+
 			/* register the table */
-			*metadataLocation = GenerateInitialIcebergTableMetadataPath(relationId);
+			IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
+
+			*metadataLocation = catalogType == REST_CATALOG_READ_WRITE ? NULL : GenerateInitialIcebergTableMetadataPath(relationId);
 			InsertInternalIcebergCatalogTable(relationId, *metadataLocation, ddlOperation->hasCustomLocation);
 
 			/* register mappings for new columns */
@@ -121,6 +128,17 @@ ApplyDDLCatalogChanges(Oid relationId, List *ddlOperations,
 		}
 		else if (ddlOperation->type == DDL_TABLE_DROP)
 		{
+			IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
+
+			if (catalogType == REST_CATALOG_READ_WRITE)
+			{
+				/*
+				 * TODO: Handle dropping of writable rest catalog iceberg
+				 * tables here.
+				 */
+				return;
+			}
+
 			/*
 			 * This is not an expected case, either user manually messed with
 			 * the catalog or we have a bug. Still, we should not fail the
