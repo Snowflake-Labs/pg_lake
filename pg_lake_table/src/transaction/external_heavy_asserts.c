@@ -31,6 +31,7 @@
 #include "pg_lake/fdw/snapshot.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/parquet/leaf_field.h"
+#include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/transaction/transaction_hooks.h"
 
@@ -101,6 +102,14 @@ ExternalHeavyAssertsOnIcebergMetadataChange(void)
 		/* relation is dropped */
 		if (!RelationExistsInTheIcebergCatalog(relationId))
 			continue;
+
+		IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
+
+		if (catalogType == REST_CATALOG_READ_WRITE)
+		{
+			/* TODO: should be trivial to extend */
+			continue;
+		}
 
 		if (opTracker->relationDataFileChanged)
 		{

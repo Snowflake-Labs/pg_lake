@@ -62,7 +62,7 @@ InsertInternalIcebergCatalogTable(Oid relationId, const char *metadataLocation, 
 
 	DECLARE_SPI_ARGS(3);
 	SPI_ARG_VALUE(1, OIDOID, relationId, false);
-	SPI_ARG_VALUE(2, TEXTOID, metadataLocation, false);
+	SPI_ARG_VALUE(2, TEXTOID, metadataLocation, metadataLocation == NULL);
 	SPI_ARG_VALUE(3, BOOLOID, hasCustomLocation, false);
 
 	SPI_START();
@@ -475,7 +475,7 @@ bool
 RelationExistsInTheIcebergCatalog(Oid relationId)
 {
 	bool		forUpdate = false;
-	char	   *columnName = "metadata_location";
+	char	   *columnName = "table_name";
 	bool		errorIfNotFound = false;
 
 	char	   *metadataLocation =
