@@ -43,10 +43,13 @@ services:
         - BASE_IMAGE_OS=almalinux
         - BASE_IMAGE_TAG=9
     container_name: pgduck-server
+    environment:
+      AWS_SHARED_CREDENTIALS_FILE: /home/postgres/.aws/credentials
+      AWS_CONFIG_FILE: /home/postgres/.aws/config        
     volumes:
       - ./scripts/entrypoint-pgduck-server.sh:/entrypoint-pgduck-server.sh
       - ./scripts/init-pgduck-server.sql:/init-pgduck-server.sql
-      - ${USERPROFILE}${HOME}/.aws:/root/.aws:ro
+      - ${USERPROFILE}${HOME}/.aws:/home/postgres/.aws:ro
       - pgduck-unix-socket-volume:/home/postgres/pgduck_socket_dir
       - pg-18-tmp-dir-volume:/home/postgres/pgsql-18/data/base/pgsql_tmp
       - pg-17-tmp-dir-volume:/home/postgres/pgsql-17/data/base/pgsql_tmp
