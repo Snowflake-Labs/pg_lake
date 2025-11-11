@@ -163,6 +163,8 @@ static Node *RewriteFuncExprArrayLength(Node *node, void *context);
 static Node *RewriteFuncExprPostgisBytea(Node *node, void *context);
 static Node *RewriteFuncExprTrigonometry(Node *node, void *context);
 static Node *RewriteFuncExprJsonbArrayLength(Node *node, void *context);
+static Node *RewriteFuncExprEncode(Node *node, void *context);
+static Node *RewriteFuncExprDecode(Node *node, void *context);
 static Node *RewriteFuncExprToZeroOrNullConst(Node *node, void *context);
 static Node *RewriteFuncExprPostgisTransform(Node *node, void *context);
 static Node *RewriteFuncExprPostgisTransformGeometry(Node *node, void *context);
@@ -315,6 +317,14 @@ static FunctionCallRewriteRuleByName BuiltinFunctionCallRewriteRulesByName[] =
 	/* jsonb functions */
 	{
 		"pg_catalog", "jsonb_array_length", RewriteFuncExprJsonbArrayLength, 0
+	},
+
+	/* encode/decode functions */
+	{
+		"pg_catalog", "encode", RewriteFuncExprEncode, 0
+	},
+	{
+		"pg_catalog", "decode", RewriteFuncExprDecode, 0
 	},
 
 };
@@ -1491,6 +1501,122 @@ RewriteFuncExprJsonbArrayLength(Node *node, void *context)
 									  makeString("json_array_length"));
 
 	funcExpr->funcid = LookupFuncName(funcName, argCount, argTypes, false);
+
+	return (Node *) funcExpr;
+}
+
+
+/*
+ * RewriteFuncExprEncode rewrites encode(bytea, 'base64|hex') function calls into
+ * to_base64(bytea) or to_hex(bytea) function calls.
+ */
+static Node *
+RewriteFuncExprEncode(Node *node, void *context)
+{
+	FuncExpr   *funcExpr = castNode(FuncExpr, node);
+	const int	argCount = list_length(funcExpr->args);
+
+	if (argCount != 2)
+		return node;
+
+	Node	   *formatArg = lsecond(funcExpr->args);
+
+	/* we only handle base64 encoding for now */
+	if (!IsA(formatArg, Const))
+		return node;
+
+	Const	   *formatConst = (Const *) formatArg;
+
+	if (formatConst->constisnull ||
+		formatConst->consttype != TEXTOID)
+	{
+		return node;
+	}
+
+	char	   *formatText = TextDatumGetCString(formatConst->constvalue);
+
+	if (strcasecmp(formatText, "base64") != 0 && strcasecmp(formatText, "hex") != 0)
+		return node;
+
+	/* rewrite to to_base64(bytea) */
+	List	   *funcName;
+
+	if (strcasecmp(formatText, "base64") == 0)
+	{
+		funcName = list_make2(makeString(PG_LAKE_INTERNAL_NSP),
+							  makeString("to_base64"));
+	}
+	else
+	{
+		funcName = list_make2(makeString(PG_LAKE_INTERNAL_NSP),
+							  makeString("to_hex"));
+	}
+
+	Oid			argTypes[] = {BYTEAOID};
+
+	funcExpr->funcid =
+		LookupFuncName(funcName, 1, argTypes, false);
+
+	/* remove the second argument */
+	funcExpr->args = list_make1(linitial(funcExpr->args));
+
+	return (Node *) funcExpr;
+}
+
+
+/*
+ * RewriteFuncExprDecode rewrites decode(text, 'base64|hex') function calls into
+ * from_base64(text) or from_hex(text) function calls.
+ */
+static Node *
+RewriteFuncExprDecode(Node *node, void *context)
+{
+	FuncExpr   *funcExpr = castNode(FuncExpr, node);
+	const int	argCount = list_length(funcExpr->args);
+
+	if (argCount != 2)
+		return node;
+
+	Node	   *formatArg = lsecond(funcExpr->args);
+
+	/* we only handle base64 decoding for now */
+	if (!IsA(formatArg, Const))
+		return node;
+
+	Const	   *formatConst = (Const *) formatArg;
+
+	if (formatConst->constisnull ||
+		formatConst->consttype != TEXTOID)
+	{
+		return node;
+	}
+
+	char	   *formatText = TextDatumGetCString(formatConst->constvalue);
+
+	if (strcasecmp(formatText, "base64") != 0 && strcasecmp(formatText, "hex") != 0)
+		return node;
+
+	/* rewrite to from_base64(text) */
+	List	   *funcName;
+
+	if (strcasecmp(formatText, "base64") == 0)
+	{
+		funcName = list_make2(makeString(PG_LAKE_INTERNAL_NSP),
+							  makeString("from_base64"));
+	}
+	else
+	{
+		funcName = list_make2(makeString(PG_LAKE_INTERNAL_NSP),
+							  makeString("from_hex"));
+	}
+
+	Oid			argTypes[] = {TEXTOID};
+
+	funcExpr->funcid =
+		LookupFuncName(funcName, 1, argTypes, false);
+
+	/* remove the second argument */
+	funcExpr->args = list_make1(linitial(funcExpr->args));
 
 	return (Node *) funcExpr;
 }

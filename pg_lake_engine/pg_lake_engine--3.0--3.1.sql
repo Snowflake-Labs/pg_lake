@@ -1,2 +1,23 @@
--- Upgrade script for pg_lake_engine from 3.0 to 3.1
+CREATE FUNCTION __lake__internal__nsp__.to_base64(bytea)
+ RETURNS text
+ LANGUAGE C
+ IMMUTABLE PARALLEL SAFE STRICT
+AS 'MODULE_PATHNAME', $function$pg_lake_internal_dummy_function$function$;
 
+CREATE FUNCTION __lake__internal__nsp__.from_base64(text)
+ RETURNS bytea
+ LANGUAGE C
+ IMMUTABLE PARALLEL SAFE STRICT
+AS 'MODULE_PATHNAME', $function$pg_lake_internal_dummy_function$function$;
+
+CREATE FUNCTION __lake__internal__nsp__.to_hex(bytea)
+ RETURNS text
+ LANGUAGE C
+ IMMUTABLE PARALLEL SAFE STRICT
+AS 'MODULE_PATHNAME', $function$pg_lake_internal_dummy_function$function$;
+
+CREATE FUNCTION __lake__internal__nsp__.from_hex(text)
+ RETURNS bytea
+ LANGUAGE C
+ IMMUTABLE PARALLEL SAFE STRICT
+AS 'MODULE_PATHNAME', $function$pg_lake_internal_dummy_function$function$;

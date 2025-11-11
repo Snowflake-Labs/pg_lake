@@ -38,6 +38,8 @@
 #include "pg_lake/pgduck/shippable_builtin_functions.h"
 
 static bool IsConcatShippable(Node *node);
+static bool IsEncodeShippable(Node *node);
+static bool IsDecodeShippable(Node *node);
 static bool IsArrayLengthShippable(Node *node);
 static bool IsCast(Node *node);
 static bool IsConvertibleToChar(Node *node);
@@ -428,6 +430,10 @@ static const PGDuckShippableFunction ShippableBuiltinProcs[] =
 	{"json_array_length", 'f', 1, {"json"}, NULL},
 	{"jsonb_array_length", 'f', 1, {"jsonb"}, NULL},
 
+	/* encode/decode functions */
+	{"encode", 'f', 2, {"bytea", "text"}, IsEncodeShippable},
+	{"decode", 'f', 2, {"text", "text"}, IsDecodeShippable},
+
 	/* trim() */
 };
 
@@ -496,6 +502,68 @@ IsConcatShippable(Node *node)
 
 	/* shippable parameters for concat */
 	return true;
+}
+
+
+/*
+ * IsEncodeShippable returns whether encode is used with 'base64' or 'hex' format.
+ */
+static bool
+IsEncodeShippable(Node *node)
+{
+	FuncExpr   *funcExpr PG_USED_FOR_ASSERTS_ONLY = castNode(FuncExpr, node);
+
+	Assert(list_length(funcExpr->args) == 2);
+
+	Const	   *formatConst;
+
+	/* format must be a non-null Const */
+	if (!GetConstArg(node, 1, &formatConst))
+		return false;
+
+	if (formatConst->constisnull || formatConst->consttype != TEXTOID)
+		return false;
+
+	text	   *formatText = DatumGetTextP(formatConst->constvalue);
+	char	   *formatCStr = text_to_cstring(formatText);
+
+	bool		result = (pg_strcasecmp(formatCStr, "base64") == 0) ||
+		(pg_strcasecmp(formatCStr, "hex") == 0);
+
+	pfree(formatCStr);
+
+	return result;
+}
+
+
+/*
+ * IsDecodeShippable returns whether decode is used with 'base64' or 'hex' format.
+ */
+static bool
+IsDecodeShippable(Node *node)
+{
+	FuncExpr   *funcExpr PG_USED_FOR_ASSERTS_ONLY = castNode(FuncExpr, node);
+
+	Assert(list_length(funcExpr->args) == 2);
+
+	Const	   *formatConst;
+
+	/* format must be a non-null Const */
+	if (!GetConstArg(node, 1, &formatConst))
+		return false;
+
+	if (formatConst->constisnull || formatConst->consttype != TEXTOID)
+		return false;
+
+	text	   *formatText = DatumGetTextP(formatConst->constvalue);
+	char	   *formatCStr = text_to_cstring(formatText);
+
+	bool		result = (pg_strcasecmp(formatCStr, "base64") == 0) ||
+		(pg_strcasecmp(formatCStr, "hex") == 0);
+
+	pfree(formatCStr);
+
+	return result;
 }
 
 
