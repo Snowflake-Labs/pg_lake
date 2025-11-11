@@ -40,6 +40,7 @@ uninstall: $(addprefix uninstall-,$(ALL_TARGETS))
 # variables needed for additional targets
 PG_CONFIG ?= pg_config
 PG_LIBDIR := $(shell $(PG_CONFIG) --libdir)
+PKGINCLUDEDIR := $(shell $(PG_CONFIG) --pkgincludedir)
 PG_MAJOR_VERSION := $(shell $(PG_CONFIG) --version | cut -f2 -d' ' | cut -f 1 -d.)
 
 # Detect operating system
@@ -105,10 +106,10 @@ pg_extension_base:
 install-pg_extension_base: pg_extension_base
 	$(MAKE) -C pg_extension_base install
 
-pg_lake_engine: avro pg_extension_base pg_map pg_extension_updater
+pg_lake_engine: install-avro pg_extension_base pg_map pg_extension_updater
 	$(MAKE) -C pg_lake_engine
 
-install-pg_lake_engine: install-avro install-pg_extension_base install-pg_map install-pg_extension_updater pg_lake_engine
+install-pg_lake_engine: install-pg_extension_base install-pg_map install-pg_extension_updater pg_lake_engine
 	$(MAKE) -C pg_lake_engine install
 
 pg_lake_copy: pg_lake_engine
@@ -192,6 +193,9 @@ endif
 
 install-avro: avro
 	install avro/lang/c/build/avrolib/lib*/libavro.* $(DESTDIR)$(PG_LIBDIR)
+	install -d $(DESTDIR)$(PKGINCLUDEDIR)/avro
+	install avro/lang/c/build/avrolib/include/avro/* $(DESTDIR)$(PKGINCLUDEDIR)/avro
+	install avro/lang/c/build/avrolib/include/avro.h $(DESTDIR)$(PKGINCLUDEDIR)
 
 check-avro: avro
 	$(MAKE) -C avro/lang/c/build test
@@ -204,6 +208,7 @@ endif
 
 uninstall-avro:
 	rm -f $(PG_LIBDIR)/libavro.*
+	rm -rf $(PKGINCLUDEDIR)/avro*
 
 ## Other targets
 check-isolation_pg_lake_table:
