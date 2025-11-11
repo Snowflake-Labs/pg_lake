@@ -4,21 +4,29 @@ DUCK_TARGETS = pgduck_server duckdb_pglake
 ALL_TARGETS = $(DUCK_TARGETS) avro $(EXTENSION_TARGETS)
 
 # generated phony targets
-ACTION_LIST = clean install uninstall check installcheck
+ACTION_LIST = clean install install-fast uninstall check installcheck
 PHONY_TARGETS = $(foreach target, $(ALL_TARGETS), $(target) $(foreach action, $(ACTION_LIST), $(action)-$(target)))
 
 # if you want to override a target's specific implementation from the default, you must add it to this list
 CUSTOM_TARGETS = check-pg_lake_engine installcheck-pg_lake_engine check-pg_extension_updater installcheck-pg_extension_updater check-avro clean-avro uninstall-avro check-duckdb_pglake \
 				 $(foreach target, $(ALL_TARGETS), install-$(target))
 
+FORCE_DUCKDB_BUILD ?= 1
+
 # other phony targets go here
-.PHONY: all install installcheck clean check submodules uninstall check-indent reindent installcheck-postgres installcheck-postgres-with_extensions_created
+.PHONY: all fast install install-fast installcheck clean check submodules uninstall check-indent reindent installcheck-postgres installcheck-postgres-with_extensions_created
 .PHONY: $(ALL_TARGETS)
 .PHONY: $(PHONY_TARGETS)
 
 # top-level targets defined in terms of our variables
-all: submodules $(ALL_TARGETS)
-install: install-pgduck_server install-pg_lake
+all: submodules pg_lake
+	FORCE_DUCKDB_BUILD=1 $(MAKE) pgduck_server
+fast: submodules pg_lake
+	FORCE_DUCKDB_BUILD=0 $(MAKE) pgduck_server
+install: install-pg_lake
+	FORCE_DUCKDB_BUILD=1 $(MAKE) install-pgduck_server
+install-fast: install-pg_lake
+	FORCE_DUCKDB_BUILD=0 $(MAKE) install-pgduck_server
 clean: $(addprefix clean-,$(ALL_TARGETS))
 check-local: $(addprefix check-,$(ALL_TARGETS))
 check-upgrade: check-pg_lake_table-upgrade
@@ -140,8 +148,7 @@ install-pg_lake_benchmark: install-pg_lake pg_lake_benchmark
 	$(MAKE) -C pg_lake_benchmark install
 
 duckdb_pglake: submodules
-	# skip duckdb_pglake build if duckdb_pglake library already exists in PG_LIBDIR
-	if [ -f $(PG_LIBDIR)/$(LIB_NAME) ]; then \
+	@if [ $(FORCE_DUCKDB_BUILD) -eq 0 ] && [ -f $(PG_LIBDIR)/$(LIB_NAME) ]; then \
 		cp $(PG_LIBDIR)/$(LIB_NAME) duckdb_pglake/$(LIB_NAME); \
 	else \
 		$(MAKE) -C duckdb_pglake; \

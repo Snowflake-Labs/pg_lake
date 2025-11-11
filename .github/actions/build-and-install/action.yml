@@ -61,6 +61,15 @@ runs:
       shell: bash
       run: |
         export PGCOMPAT_BUILD_CONFIG=Release
+
+        if [ -f "${{ env.PG_LIBDIR }}/libduckdb.so" ]; then
+          echo "Using cached libduckdb.so"
+          export FORCE_DUCKDB_BUILD=0;
+        else
+          echo "Building libduckdb.so"
+          export FORCE_DUCKDB_BUILD=1;
+        fi
+
         make install-pgduck_server && make install-pg_lake_spatial && make install-pg_lake_benchmark
 
     - name: Build Polaris if not already in the cache
