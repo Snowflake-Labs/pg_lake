@@ -207,7 +207,7 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 
 		AppendCurrentPostgresSchema(relationId, metadata, builder->schema);
 
-		if (builder->regenerateSchema)
+		if (builder->regenerateSchema && writableRestCatalogTable)
 		{
 			RestCatalogRequest *request = GetAddSchemaCatalogRequest(relationId, builder->schema);
 
