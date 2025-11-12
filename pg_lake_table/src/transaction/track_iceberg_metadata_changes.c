@@ -271,7 +271,6 @@ PostAllRestCatalogRequests(void)
 		appendStringInfoString(batchRequestBody, "\"requirements\":[],");
 		appendStringInfoString(batchRequestBody, " \"updates\":[");
 
-
 		ListCell   *requestCell = NULL;
 
 		foreach(requestCell, requestPerTable->tableModifyRequests)
@@ -280,6 +279,11 @@ PostAllRestCatalogRequests(void)
 
 			appendStringInfoString(batchRequestBody, request->body);
 
+			bool		lastRequest = (requestCell == list_tail(requestPerTable->tableModifyRequests));
+			if (!lastRequest)
+			{
+				appendStringInfoChar(batchRequestBody, ',');
+			}
 		}
 
 		appendStringInfoChar(batchRequestBody, ']');	/* close updates array */
@@ -474,7 +478,8 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 		request->body = pstrdup(body);
 		requestPerTable->createTableRequests = list_make1(request);
 	}
-	else if (operationType == REST_CATALOG_ADD_SNAPSHOT)
+	else if (operationType == REST_CATALOG_ADD_SNAPSHOT || 
+			 operationType == REST_CATALOG_ADD_SCHEMA)
 	{
 		request->body = pstrdup(body);
 		requestPerTable->tableModifyRequests = lappend(requestPerTable->tableModifyRequests, request);

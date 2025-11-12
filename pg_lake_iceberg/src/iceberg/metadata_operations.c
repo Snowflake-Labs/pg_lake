@@ -204,10 +204,15 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 
 	if (builder->createTable || builder->regenerateSchema)
 	{
-		if (builder->schema != NULL)
-			AppendCurrentPostgresSchema(relationId, metadata, builder->schema);
-		else
-			metadata->current_schema_id = builder->schemaId;
+
+		AppendCurrentPostgresSchema(relationId, metadata, builder->schema);
+
+		if (builder->regenerateSchema)
+		{
+			RestCatalogRequest *request = GetAddSchemaCatalogRequest(relationId, builder->schema);
+
+			restCatalogRequests = lappend(restCatalogRequests, request);
+		}
 	}
 
 	if (builder->createTable || builder->regeneratePartitionSpec)
