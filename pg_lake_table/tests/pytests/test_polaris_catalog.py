@@ -144,6 +144,184 @@ def test_writable_rest_basic_flow(
     pg_conn.commit()
 
 
+def test_writable_rest_ddl(
+    pg_conn, s3, polaris_session, set_polaris_gucs, with_default_location, installcheck
+):
+
+    if installcheck:
+        return
+
+    run_command(f"""CREATE SCHEMA test_writable_rest_ddl""", pg_conn)
+    run_command(
+        f"""CREATE TABLE test_writable_rest_ddl.writable_rest USING iceberg WITH (catalog='rest') AS SELECT 100 AS a""",
+        pg_conn,
+    )
+    run_command(
+        f"""CREATE TABLE test_writable_rest_ddl.writable_rest_2 USING iceberg WITH (catalog='rest') AS SELECT 1000 AS a""",
+        pg_conn,
+    )
+
+    pg_conn.commit()
+
+    # a DDL to a single table
+    run_command(
+        "ALTER TABLE test_writable_rest_ddl.writable_rest ADD COLUMN b INT", pg_conn
+    )
+    pg_conn.commit()
+    run_command(
+        f"""CREATE TABLE test_writable_rest_ddl.readable_rest_1() USING iceberg WITH (catalog='rest', read_only=True, catalog_table_name='writable_rest')""",
+        pg_conn,
+    )
+
+    columns = run_query(
+        "SELECT attname FROM pg_attribute WHERE attrelid = 'test_writable_rest_ddl.readable_rest_1'::regclass and attnum > 0 ORDER BY attnum ASC",
+        pg_conn,
+    )
+    assert len(columns) == 2
+    assert columns[0][0] == "a"
+    assert columns[1][0] == "b"
+
+    # multiple DDLs to a single table
+    # a DDL to a single table
+    run_command(
+        """
+                  ALTER TABLE test_writable_rest_ddl.writable_rest ADD COLUMN c INT;
+                  ALTER TABLE test_writable_rest_ddl.writable_rest ADD COLUMN d INT;
+                """,
+        pg_conn,
+    )
+    pg_conn.commit()
+    run_command(
+        f"""CREATE TABLE test_writable_rest_ddl.readable_rest_2() USING iceberg WITH (catalog='rest', read_only=True, catalog_table_name='writable_rest')""",
+        pg_conn,
+    )
+
+    columns = run_query(
+        "SELECT attname FROM pg_attribute WHERE attrelid = 'test_writable_rest_ddl.readable_rest_2'::regclass and attnum > 0 ORDER BY attnum ASC",
+        pg_conn,
+    )
+    assert len(columns) == 4
+    assert columns[0][0] == "a"
+    assert columns[1][0] == "b"
+    assert columns[2][0] == "c"
+    assert columns[3][0] == "d"
+
+    # multiple DDLs to multiple tables
+    run_command(
+        """
+                  ALTER TABLE test_writable_rest_ddl.writable_rest ADD COLUMN e INT;
+                  ALTER TABLE test_writable_rest_ddl.writable_rest ADD COLUMN f INT;
+
+                  ALTER TABLE test_writable_rest_ddl.writable_rest_2 ADD COLUMN b INT;
+                  ALTER TABLE test_writable_rest_ddl.writable_rest_2 ADD COLUMN c INT;
+
+                """,
+        pg_conn,
+    )
+    pg_conn.commit()
+    run_command(
+        f"""CREATE TABLE test_writable_rest_ddl.readable_rest_3() USING iceberg WITH (catalog='rest', read_only=True, catalog_table_name='writable_rest')""",
+        pg_conn,
+    )
+
+    columns = run_query(
+        "SELECT attname FROM pg_attribute WHERE attrelid = 'test_writable_rest_ddl.readable_rest_3'::regclass and attnum > 0 ORDER BY attnum ASC",
+        pg_conn,
+    )
+    assert len(columns) == 6
+    assert columns[0][0] == "a"
+    assert columns[1][0] == "b"
+    assert columns[2][0] == "c"
+    assert columns[3][0] == "d"
+    assert columns[4][0] == "e"
+    assert columns[5][0] == "f"
+
+    run_command(
+        f"""CREATE TABLE test_writable_rest_ddl.readable_rest_4() USING iceberg WITH (catalog='rest', read_only=True, catalog_table_name='writable_rest_2')""",
+        pg_conn,
+    )
+
+    columns = run_query(
+        "SELECT attname FROM pg_attribute WHERE attrelid = 'test_writable_rest_ddl.readable_rest_4'::regclass and attnum > 0 ORDER BY attnum ASC",
+        pg_conn,
+    )
+    assert len(columns) == 3
+    assert columns[0][0] == "a"
+    assert columns[1][0] == "b"
+    assert columns[2][0] == "c"
+
+    # modify table and DDL on a single table
+    run_command(
+        """
+                  ALTER TABLE test_writable_rest_ddl.writable_rest ADD COLUMN g INT;
+                  INSERT INTO test_writable_rest_ddl.writable_rest (a,g) VALUES (101,101);
+                """,
+        pg_conn,
+    )
+    pg_conn.commit()
+    run_command(
+        f"""CREATE TABLE test_writable_rest_ddl.readable_rest_5() USING iceberg WITH (catalog='rest', read_only=True, catalog_table_name='writable_rest')""",
+        pg_conn,
+    )
+
+    columns = run_query(
+        "SELECT attname FROM pg_attribute WHERE attrelid = 'test_writable_rest_ddl.readable_rest_5'::regclass and attnum > 0 ORDER BY attnum ASC",
+        pg_conn,
+    )
+    assert len(columns) == 7
+    assert columns[0][0] == "a"
+    assert columns[1][0] == "b"
+    assert columns[2][0] == "c"
+    assert columns[3][0] == "d"
+    assert columns[4][0] == "e"
+    assert columns[5][0] == "f"
+    assert columns[6][0] == "g"
+
+    # make sure modification is also successful
+    res = run_query(
+        "SELECT count(*) FROM test_writable_rest_ddl.readable_rest_5", pg_conn
+    )
+    assert res == [[2]]
+
+    # one table modified, the other has DDL
+    # modify table and DDL on a single table
+    run_command(
+        """
+                  ALTER TABLE test_writable_rest_ddl.writable_rest_2 ADD COLUMN d INT;
+                  INSERT INTO test_writable_rest_ddl.writable_rest (a,g) VALUES (101,101);
+                """,
+        pg_conn,
+    )
+    pg_conn.commit()
+    run_command(
+        f"""CREATE TABLE test_writable_rest_ddl.readable_rest_6() USING iceberg WITH (catalog='rest', read_only=True, catalog_table_name='writable_rest_2')""",
+        pg_conn,
+    )
+    run_command(
+        f"""CREATE TABLE test_writable_rest_ddl.readable_rest_7() USING iceberg WITH (catalog='rest', read_only=True, catalog_table_name='writable_rest')""",
+        pg_conn,
+    )
+
+    columns = run_query(
+        "SELECT attname FROM pg_attribute WHERE attrelid = 'test_writable_rest_ddl.readable_rest_6'::regclass and attnum > 0 ORDER BY attnum ASC",
+        pg_conn,
+    )
+    assert len(columns) == 4
+    assert columns[0][0] == "a"
+    assert columns[1][0] == "b"
+    assert columns[2][0] == "c"
+    assert columns[3][0] == "d"
+
+    # make sure modification is also successful
+    res = run_query(
+        "SELECT count(*) FROM test_writable_rest_ddl.readable_rest_7", pg_conn
+    )
+    assert res == [[3]]
+
+    run_command(f"""DROP SCHEMA test_writable_rest_ddl CASCADE""", pg_conn)
+    pg_conn.commit()
+
+
 namespaces = [
     "regular_name",
     "regular..!!**(());;//??::@@&&==++$$,,#name",
