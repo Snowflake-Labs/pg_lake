@@ -204,10 +204,12 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 	{
 		AppendCurrentPostgresSchema(relationId, metadata, builder->schema);
 
-		/*
-		 * TODO: Create RestCatalogRequest for updating the schema in the
-		 * writable rest catalog iceberg table.
-		 */
+		if (builder->regenerateSchema)
+		{
+			RestCatalogRequest *request = GetAddSchemaCatalogRequest(relationId, builder->schema);
+
+			restCatalogRequests = lappend(restCatalogRequests, request);
+		}
 	}
 
 	if (builder->createTable || builder->regeneratePartitionSpec)
