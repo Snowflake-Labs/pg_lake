@@ -81,6 +81,46 @@ dnf -y install \
     gcc-c++
 ```
 
+## Install build dependencies for MacOS
+
+```bash
+xcode-select --install
+brew update
+brew install \
+    cmake \
+    ninja \
+    readline \
+    zlib \
+    libxml2 \
+    libxslt \
+    icu4c \
+    openssl@3 \
+    geos \
+    proj \
+    gdal \
+    json-c \
+    protobuf-c \
+    lz4 \
+    xz \
+    snappy \
+    jansson \
+    curl \
+    libtool \
+    flex \
+    bison \
+    diffutils \
+    jq \
+    ossp-uuid \
+    perl
+
+# --- Configure environment variables for compilers ---
+export PATH="/opt/homebrew/opt/bison/bin:/opt/homebrew/opt/flex/bin:$PATH"
+export LDFLAGS="-L/opt/homebrew/opt/icu4c/lib -L/opt/homebrew/opt/openssl@3/lib"
+export CPPFLAGS="-I/opt/homebrew/opt/icu4c/include -I/opt/homebrew/opt/openssl@3/include"
+export PKG_CONFIG_PATH="/opt/homebrew/opt/icu4c/lib/pkgconfig:/opt/homebrew/opt/openssl@3/lib/pkgconfig"
+
+```
+
 ## pg_lake build and install steps
 After installing os specific build dependencies, you can follow below steps. The first time you build `pg_lake`, you'll need to build `duckdb_pglake` (a DuckDB extension). Unfortunately, building a DuckDB extension also involves building DuckDB, which can take a while. Additionally, building `pg_lake` requires `vcpkg` to manage dependencies for DuckDB extensions.
 
