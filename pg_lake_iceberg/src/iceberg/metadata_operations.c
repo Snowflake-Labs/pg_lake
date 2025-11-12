@@ -148,9 +148,11 @@ static void DeleteInProgressManifests(Oid relationId, List *manifests);
  * ApplyIcebergMetadataChanges applies the given metadata operations to the
  * iceberg metadata for the given relation.
  */
-void
+List *
 ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allTransforms, bool isVerbose)
 {
+	List	   *restCatalogRequests = NIL;
+
 	Assert(metadataOperations != NIL);
 
 #ifdef USE_ASSERT_CHECKING
@@ -244,10 +246,13 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 
 		createNewSnapshot = true;
 
-		/*
-		 * TODO: Create RestCatalogRequest for setting the current_snapshot_id
-		 * in the writable rest catalog iceberg table.
-		 */
+		if (writableRestCatalogTable)
+		{
+			RestCatalogRequest *request =
+				GetAddSnapshotCatalogRequest(newSnapshot, relationId);
+
+			restCatalogRequests = lappend(restCatalogRequests, request);
+		}
 	}
 
 	/* if we need to expire old snapshots, we do it here */
@@ -269,24 +274,18 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 
 	/* if there were no changes to the Iceberg table, we are done */
 	if (!createNewSnapshot && !createNewTable)
-		return;
+	{
+		Assert(restCatalogRequests == NIL);
+		return restCatalogRequests;
+	}
 
 	if (writableRestCatalogTable)
 	{
-
-		if (createNewSnapshot)
-		{
-			/*
-			 * TODO: Create RestCatalogRequest for adding the new snapshot in
-			 * the writable rest catalog iceberg table.
-			 */
-		}
-
 		/*
 		 * We are done, writable rest catalog iceberg tables have their
 		 * metadata updated in the catalog itself.
 		 */
-		return;
+		return restCatalogRequests;
 	}
 
 	/* add the new snapshot to the snapshot log */
@@ -327,6 +326,13 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 	}
 
 	TriggerCatalogExportIfObjectStoreTable(relationId);
+
+	/*
+	 * for a non-writable rest table, we should not have any rest catalog
+	 * requests
+	 */
+	Assert(restCatalogRequests == NIL);
+	return restCatalogRequests;
 }
 
 

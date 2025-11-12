@@ -35,6 +35,7 @@ def test_polaris_catalog_running(pg_conn, s3, polaris_session, installcheck):
     assert resp.ok, f"Polaris is not running: {resp.status_code} {resp.text}"
 
 
+# fetch_data_files_used
 def test_writable_rest_basic_flow(
     pg_conn, s3, polaris_session, set_polaris_gucs, with_default_location, installcheck
 ):
@@ -44,7 +45,16 @@ def test_writable_rest_basic_flow(
 
     run_command(f"""CREATE SCHEMA test_writable_rest_basic_flow""", pg_conn)
     run_command(
-        f"""CREATE TABLE test_writable_rest_basic_flow.writable_rest(a int) USING iceberg WITH (catalog='rest')""",
+        f"""CREATE TABLE test_writable_rest_basic_flow.writable_rest USING iceberg WITH (catalog='rest') AS SELECT 100 AS a""",
+        pg_conn,
+    )
+    run_command(
+        f"""CREATE TABLE test_writable_rest_basic_flow.writable_rest_2 USING iceberg WITH (catalog='rest') AS SELECT 1000 AS a""",
+        pg_conn,
+    )
+
+    run_command(
+        f"""CREATE TABLE test_writable_rest_basic_flow.unrelated_table(a int) USING iceberg""",
         pg_conn,
     )
 
@@ -55,12 +65,80 @@ def test_writable_rest_basic_flow(
         pg_conn,
     )
 
+    run_command(
+        f"""CREATE TABLE test_writable_rest_basic_flow.readable_rest_2() USING iceberg WITH (catalog='rest', read_only=True, catalog_table_name='writable_rest_2')""",
+        pg_conn,
+    )
+
     columns = run_query(
         "SELECT attname FROM pg_attribute WHERE attrelid = 'test_writable_rest_basic_flow.readable_rest'::regclass and attnum > 0",
         pg_conn,
     )
     assert len(columns) == 1
     assert columns[0][0] == "a"
+
+    columns = run_query(
+        "SELECT attname FROM pg_attribute WHERE attrelid = 'test_writable_rest_basic_flow.readable_rest_2'::regclass and attnum > 0",
+        pg_conn,
+    )
+    assert len(columns) == 1
+    assert columns[0][0] == "a"
+
+    run_command(
+        f"""INSERT INTO test_writable_rest_basic_flow.writable_rest VALUES (101)""",
+        pg_conn,
+    )
+
+    run_command(
+        f"""INSERT INTO test_writable_rest_basic_flow.writable_rest_2 VALUES (1001)""",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    res = run_query(
+        "SELECT * FROM test_writable_rest_basic_flow.readable_rest ORDER BY a ASC",
+        pg_conn,
+    )
+    assert len(res) == 2
+    assert res[0][0] == 100
+    assert res[1][0] == 101
+
+    res = run_query(
+        "SELECT * FROM test_writable_rest_basic_flow.readable_rest_2 ORDER BY a ASC",
+        pg_conn,
+    )
+    assert len(res) == 2
+    assert res[0][0] == 1000
+    assert res[1][0] == 1001
+
+    # now, each table modified twice in the same tx
+    run_command(
+        f"""
+            INSERT INTO test_writable_rest_basic_flow.writable_rest VALUES (102);
+            INSERT INTO test_writable_rest_basic_flow.writable_rest VALUES (103);
+
+            INSERT INTO test_writable_rest_basic_flow.writable_rest_2 VALUES (1002);
+            INSERT INTO test_writable_rest_basic_flow.writable_rest_2 VALUES (1003);
+
+            INSERT INTO test_writable_rest_basic_flow.unrelated_table VALUES (2000);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    res = run_query(
+        "SELECT * FROM test_writable_rest_basic_flow.readable_rest ORDER BY 1 ASC",
+        pg_conn,
+    )
+    assert len(res) == 4
+    assert res == [[100], [101], [102], [103]]
+
+    res = run_query(
+        "SELECT * FROM test_writable_rest_basic_flow.readable_rest_2 ORDER BY 1 ASC",
+        pg_conn,
+    )
+    assert len(res) == 4
+    assert res == [[1000], [1001], [1002], [1003]]
 
     run_command(f"""DROP SCHEMA test_writable_rest_basic_flow CASCADE""", pg_conn)
     pg_conn.commit()

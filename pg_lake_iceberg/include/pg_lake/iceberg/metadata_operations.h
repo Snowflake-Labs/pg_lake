@@ -19,6 +19,6 @@
 
 #include "nodes/pg_list.h"
 
-extern PGDLLEXPORT void ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allTransforms, bool isVerbose);
+extern PGDLLEXPORT List *ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allTransforms, bool isVerbose);
 extern PGDLLEXPORT bool ShouldSkipMetadataChangeToIceberg(List *metadataOperationTypes);
 extern PGDLLEXPORT List *GetMetadataOperationTypes(List *metadataOperations);

@@ -21,6 +21,7 @@
 #include "pg_lake/http/http_client.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_lake/parquet/field.h"
+#include "pg_lake/iceberg/api/snapshot.h"
 
 extern PGDLLEXPORT char *RestCatalogHost;
 extern char *RestCatalogClientId;
@@ -36,6 +37,26 @@ extern char *RestCatalogClientSecret;
 
 #define REST_CATALOG_AUTH_TOKEN_PATH "%s/api/catalog/v1/oauth/tokens"
 
+#define REST_CATALOG_TRANSACTION_COMMIT "%s/api/catalog/v1/%s/transactions/commit"
+
+typedef enum RestCatalogOperationType
+{
+	REST_CATALOG_CREATE_TABLE = 0,
+	REST_CATALOG_ADD_SNAPSHOT = 1,
+	REST_CATALOG_ADD_SCHEMA = 2,
+	REST_CATALOG_ADD_PARTITION = 3,
+}			RestCatalogOperationType;
+
+
+typedef struct RestCatalogRequest
+{
+	Oid			relationId;
+	RestCatalogOperationType operationType;
+
+	char	   *createTableBody;
+	char	   *addSnapshotBody;
+}			RestCatalogRequest;
+
 extern PGDLLEXPORT char *RestCatalogFetchAccessToken(void);
 extern PGDLLEXPORT void RegisterNamespaceToRestCatalog(const char *catalogName, const char *namespaceName);
 extern PGDLLEXPORT void StartStageRestCatalogIcebergTableCreate(Oid relationId);
@@ -50,3 +71,4 @@ extern PGDLLEXPORT char *GetMetadataLocationFromRestCatalog(const char *restCata
 extern PGDLLEXPORT char *GetMetadataLocationForRestCatalogForIcebergTable(Oid relationId);
 extern PGDLLEXPORT void ReportHTTPError(HttpResult httpResult, int level);
 extern PGDLLEXPORT List *PostHeadersWithAuth(void);
+extern PGDLLEXPORT RestCatalogRequest * GetAddSnapshotCatalogRequest(IcebergSnapshot * newSnapshot, Oid relationId);
