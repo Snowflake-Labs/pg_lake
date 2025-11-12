@@ -37,6 +37,7 @@
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/util/url_encode.h"
 #include "pg_lake/util/rel_utils.h"
+#include "pg_lake/iceberg/temporal_utils.h"
 
 
 /* determined by GUC */
@@ -809,4 +810,44 @@ AppendIcebergPartitionSpecForRestCatalogStage(List *partitionSpecs)
 		appendStringInfoString(command, "}");
 	}
 	return command->data;
+}
+
+
+
+/*
+* GetAddSnapshotCatalogRequest creates a RestCatalogRequest to add a snapshot
+* to the rest catalog for the given new snapshot.
+*/
+RestCatalogRequest *
+GetAddSnapshotCatalogRequest(IcebergSnapshot * newSnapshot, Oid relationId)
+{
+	StringInfo	body = makeStringInfo();
+
+	appendStringInfoString(body,
+						   "{\"action\":\"add-snapshot\",\"snapshot\":{");
+
+	appendStringInfo(body, "\"snapshot-id\":%lld", newSnapshot->snapshot_id);
+	if (newSnapshot->parent_snapshot_id > 0)
+		appendStringInfo(body, ",\"parent-snapshot-id\":%lld", newSnapshot->parent_snapshot_id);
+
+	/* TODO: Polaris doesn't accept 0 sequence number */
+	appendStringInfo(body, ",\"sequence-number\":%lld", newSnapshot->sequence_number == 0 ? 1 : newSnapshot->sequence_number);
+	appendStringInfo(body, ",\"timestamp-ms\":%ld", (long) (PostgresTimestampToIcebergTimestampMs()));	/* coarse ms */
+	appendStringInfo(body, ",\"manifest-list\":\"%s\"", newSnapshot->manifest_list);
+	appendStringInfoString(body, ",\"summary\":{\"operation\": \"append\"}");
+
+	if (newSnapshot->schema_id > 0)
+		appendStringInfo(body, ",\"schema-id\":%d", newSnapshot->schema_id);
+
+	appendStringInfoString(body, "}}, ");	/* end add-snapshot */
+
+	appendStringInfo(body, "{\"action\":\"set-snapshot-ref\", \"type\":\"branch\", \"ref-name\":\"main\", \"snapshot-id\":%lld}", newSnapshot->snapshot_id);
+
+	RestCatalogRequest *request = palloc0(sizeof(RestCatalogRequest));
+
+	request->relationId = relationId;
+	request->operationType = REST_CATALOG_ADD_SNAPSHOT;
+	request->addSnapshotBody = body->data;
+
+	return request;
 }
