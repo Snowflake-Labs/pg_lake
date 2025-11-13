@@ -224,10 +224,13 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 
 			AppendPartitionSpec(metadata, newSpec);
 
-			/*
-			 * TODO: Create RestCatalogRequest for updating the partitioning
-			 * in the writable rest catalog iceberg table.
-			 */
+			if (builder->regeneratePartitionSpec && writableRestCatalogTable)
+			{
+				RestCatalogRequest *request =
+					GetAddPartitionCatalogRequest(relationId, list_make1(newSpec));
+
+				restCatalogRequests = lappend(restCatalogRequests, request);
+			}
 		}
 	}
 

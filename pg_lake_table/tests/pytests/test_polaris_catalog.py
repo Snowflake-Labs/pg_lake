@@ -145,7 +145,14 @@ def test_writable_rest_basic_flow(
 
 
 def test_writable_rest_ddl(
-    pg_conn, s3, polaris_session, set_polaris_gucs, with_default_location, installcheck
+    pg_conn,
+    s3,
+    polaris_session,
+    set_polaris_gucs,
+    with_default_location,
+    installcheck,
+    create_http_helper_functions,
+    superuser_conn,
 ):
 
     if installcheck:
@@ -158,6 +165,11 @@ def test_writable_rest_ddl(
     )
     run_command(
         f"""CREATE TABLE test_writable_rest_ddl.writable_rest_2 USING iceberg WITH (catalog='rest') AS SELECT 1000 AS a""",
+        pg_conn,
+    )
+
+    run_command(
+        f"""CREATE TABLE test_writable_rest_ddl.writable_rest_3 USING iceberg WITH (catalog='rest', partition_by='a') AS SELECT 10000 AS a UNION SELECT 10001 as a""",
         pg_conn,
     )
 
@@ -180,6 +192,10 @@ def test_writable_rest_ddl(
     assert len(columns) == 2
     assert columns[0][0] == "a"
     assert columns[1][0] == "b"
+
+    assert_metadata_on_pg_catalog_and_rest_matches(
+        "test_writable_rest_ddl", "writable_rest_3", superuser_conn, installcheck
+    )
 
     # multiple DDLs to a single table
     # a DDL to a single table
@@ -206,6 +222,20 @@ def test_writable_rest_ddl(
     assert columns[2][0] == "c"
     assert columns[3][0] == "d"
 
+    # run multiple partition changes on a single table
+    run_command(
+        """
+        ALTER TABLE test_writable_rest_ddl.writable_rest_3 OPTIONS (SET partition_by 'bucket(10,a)');
+        ALTER TABLE test_writable_rest_ddl.writable_rest_3 OPTIONS (SET partition_by 'truncate(20,a)');
+                """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    assert_metadata_on_pg_catalog_and_rest_matches(
+        "test_writable_rest_ddl", "writable_rest_3", superuser_conn, installcheck
+    )
+
     # multiple DDLs to multiple tables
     run_command(
         """
@@ -214,6 +244,9 @@ def test_writable_rest_ddl(
 
                   ALTER TABLE test_writable_rest_ddl.writable_rest_2 ADD COLUMN b INT;
                   ALTER TABLE test_writable_rest_ddl.writable_rest_2 ADD COLUMN c INT;
+
+                  ALTER TABLE test_writable_rest_ddl.writable_rest_3 OPTIONS (SET partition_by 'truncate(30,a)');
+                  ALTER TABLE test_writable_rest_ddl.writable_rest_3 OPTIONS (SET partition_by 'truncate(40,a)');
 
                 """,
         pg_conn,
@@ -250,15 +283,26 @@ def test_writable_rest_ddl(
     assert columns[1][0] == "b"
     assert columns[2][0] == "c"
 
+    assert_metadata_on_pg_catalog_and_rest_matches(
+        "test_writable_rest_ddl", "writable_rest_3", superuser_conn, installcheck
+    )
+
     # modify table and DDL on a single table
     run_command(
         """
                   ALTER TABLE test_writable_rest_ddl.writable_rest ADD COLUMN g INT;
                   INSERT INTO test_writable_rest_ddl.writable_rest (a,g) VALUES (101,101);
+                  ALTER TABLE test_writable_rest_ddl.writable_rest OPTIONS (ADD partition_by 'truncate(30,a)');
+
                 """,
         pg_conn,
     )
     pg_conn.commit()
+
+    assert_metadata_on_pg_catalog_and_rest_matches(
+        "test_writable_rest_ddl", "writable_rest", superuser_conn, installcheck
+    )
+
     run_command(
         f"""CREATE TABLE test_writable_rest_ddl.readable_rest_5() USING iceberg WITH (catalog='rest', read_only=True, catalog_table_name='writable_rest')""",
         pg_conn,
@@ -1110,6 +1154,136 @@ def create_rest_catalog_table(
     iceberg_table.append(data)
 
     return iceberg_table
+
+
+# TODO: extend this to cover all the metadata
+# currently it only does partitions
+# This is a variation of ExternalHeavyAssertsOnIcebergMetadataChange() in source code
+# we cannot apply that function to REST catalog tables, as changes happen in Post-commit
+
+
+def assert_metadata_on_pg_catalog_and_rest_matches(
+    namespace, table_name, superuser_conn, installcheck
+):
+
+    metadata = get_rest_table_metadata(
+        namespace, table_name, superuser_conn, installcheck
+    )
+
+    # 1) default-spec-id check
+    catalog_default_spec_id = run_query(
+        f"select default_spec_id "
+        f"from lake_iceberg.tables_internal "
+        f"WHERE table_name = '{namespace}.{table_name}'::regclass;",
+        superuser_conn,
+    )[0][0]
+
+    metadata_default_spec_id = metadata["metadata"]["default-spec-id"]
+
+    assert catalog_default_spec_id == metadata_default_spec_id, (
+        f"default-spec-ids don't match: "
+        f"catalog={catalog_default_spec_id}, metadata={metadata_default_spec_id}"
+    )
+
+    # 2) partition spec id checks
+    specs = metadata["metadata"].get("partition-specs", [])
+    metadata_spec_ids = sorted(spec["spec-id"] for spec in specs)
+
+    catalog_specs_rows = run_query(
+        f"""
+        SELECT spec_id
+        FROM lake_table.partition_specs
+        WHERE table_name = '{namespace}.{table_name}'::regclass
+        ORDER BY spec_id
+        """,
+        superuser_conn,
+    )
+    catalog_spec_ids = [row[0] for row in catalog_specs_rows]
+
+    assert catalog_spec_ids == metadata_spec_ids, (
+        f"partition spec ids don't match: "
+        f"catalog={catalog_spec_ids}, metadata={metadata_spec_ids}"
+    )
+
+    # 3) partition fields check
+    catalog_fields_rows = run_query(
+        f"""
+        SELECT spec_id,
+               source_field_id,
+               partition_field_id,
+               partition_field_name,
+               transform_name
+        FROM lake_table.partition_fields
+        WHERE table_name = '{namespace}.{table_name}'::regclass
+        ORDER BY spec_id, partition_field_id
+        """,
+        superuser_conn,
+    )
+
+    # spec_id -> field listesi (dict)
+    catalog_fields_by_spec = {}
+    for (
+        spec_id,
+        source_field_id,
+        partition_field_id,
+        partition_field_name,
+        transform_name,
+    ) in catalog_fields_rows:
+        catalog_fields_by_spec.setdefault(spec_id, []).append(
+            {
+                "source-id": source_field_id,
+                "field-id": partition_field_id,
+                "name": partition_field_name,
+                "transform": transform_name,
+            }
+        )
+
+    for spec in specs:
+        spec_id = spec["spec-id"]
+
+        metadata_fields = [
+            {
+                "source-id": f["source-id"],
+                "field-id": f["field-id"],
+                "name": f["name"],
+                "transform": f["transform"],
+            }
+            for f in spec.get("fields", [])
+        ]
+
+        metadata_fields_sorted = sorted(metadata_fields, key=lambda f: f["field-id"])
+        catalog_fields_sorted = sorted(
+            catalog_fields_by_spec.get(spec_id, []),
+            key=lambda f: f["field-id"],
+        )
+
+        assert catalog_fields_sorted == metadata_fields_sorted, (
+            f"partition fields don't match for spec_id {spec_id}: "
+            f"catalog={catalog_fields_sorted}, metadata={metadata_fields_sorted}"
+        )
+
+
+def get_rest_table_metadata(
+    encoded_namespace, encoded_table_name, pg_conn, installcheck
+):
+    if installcheck:
+        return
+    url = f"http://{server_params.POLARIS_HOSTNAME}:{server_params.POLARIS_PORT}/api/catalog/v1/{server_params.PG_DATABASE}/namespaces/{encoded_namespace}/tables/{encoded_table_name}"
+    token = get_polaris_access_token()
+
+    res = run_query(
+        f"""
+        SELECT *
+        FROM lake_iceberg.test_http_get(
+         '{url}',
+         ARRAY['Authorization: Bearer {token}']);
+        """,
+        pg_conn,
+    )
+    assert res[0][0] == 200
+    status, json_str, headers = res[0]
+
+    return json.loads(json_str)
 
 
 def get_namespace_location(encoded_namespace, pg_conn, installcheck):
