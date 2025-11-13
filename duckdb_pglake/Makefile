@@ -142,6 +142,11 @@ patch_duckdb:
 	while read -r patch; do \
 	patch -l -p1 -N < "$$patch" || [ $$? -eq 1 ]; \
 	done
+	# checking for any rejected patches
+	echo "#### hunks rejected:"
+	cat $(find . -name '*.rej')
+	echo "#### done with hunks rejected"
+
 
 format:
 	find src/ -iname *.hpp -o -iname *.cpp | xargs clang-format --sort-includes=0 -style=file -i
