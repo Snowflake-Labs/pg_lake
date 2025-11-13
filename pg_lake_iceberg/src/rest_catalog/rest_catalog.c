@@ -18,6 +18,8 @@
 #include "postgres.h"
 #include "miscadmin.h"
 
+#include <inttypes.h>
+
 #include "common/base64.h"
 #include "commands/dbcommands.h"
 #include "foreign/foreign.h"
@@ -759,7 +761,6 @@ AppendIcebergPartitionSpecForRestCatalogStage(List *partitionSpecs)
 }
 
 
-
 /*
 * GetAddSnapshotCatalogRequest creates a RestCatalogRequest to add a snapshot
 * to the rest catalog for the given new snapshot.
@@ -772,12 +773,12 @@ GetAddSnapshotCatalogRequest(IcebergSnapshot * newSnapshot, Oid relationId)
 	appendStringInfoString(body,
 						   "{\"action\":\"add-snapshot\",\"snapshot\":{");
 
-	appendStringInfo(body, "\"snapshot-id\":%lld", newSnapshot->snapshot_id);
+	appendStringInfo(body, "\"snapshot-id\":%" PRId64, newSnapshot->snapshot_id);
 	if (newSnapshot->parent_snapshot_id > 0)
-		appendStringInfo(body, ",\"parent-snapshot-id\":%lld", newSnapshot->parent_snapshot_id);
+		appendStringInfo(body, ",\"parent-snapshot-id\":%" PRId64, newSnapshot->parent_snapshot_id);
 
 	/* TODO: Polaris doesn't accept 0 sequence number */
-	appendStringInfo(body, ",\"sequence-number\":%lld", newSnapshot->sequence_number == 0 ? 1 : newSnapshot->sequence_number);
+	appendStringInfo(body, ",\"sequence-number\":%" PRId64, newSnapshot->sequence_number == 0 ? 1 : newSnapshot->sequence_number);
 	appendStringInfo(body, ",\"timestamp-ms\":%ld", (long) (PostgresTimestampToIcebergTimestampMs()));	/* coarse ms */
 	appendStringInfo(body, ",\"manifest-list\":\"%s\"", newSnapshot->manifest_list);
 	appendStringInfoString(body, ",\"summary\":{\"operation\": \"append\"}");
@@ -827,6 +828,36 @@ GetAddSchemaCatalogRequest(Oid relationId, DataFileSchema * dataFileSchema)
 
 	request->relationId = relationId;
 	request->operationType = REST_CATALOG_ADD_SCHEMA;
+	request->body = body->data;
+
+	return request;
+}
+
+
+/*
+ * GetAddPartitionCatalogRequest creates a RestCatalogRequest that adds a
+ * partition spec and sets it as the default (spec-id = -1 means "last added").
+ */
+RestCatalogRequest *
+GetAddPartitionCatalogRequest(Oid relationId, List *partitionSpecs)
+{
+	StringInfo	body = makeStringInfo();
+
+	/* add-spec */
+	appendStringInfoString(body, "{\"action\":\"add-spec\",");
+
+	char	   *bodyPart = AppendIcebergPartitionSpecForRestCatalogStage(partitionSpecs);
+
+	appendStringInfoString(body, bodyPart);
+	appendStringInfoChar(body, '}');
+
+	/* set-default-spec to the one we just added */
+	appendStringInfoString(body, ", {\"action\":\"set-default-spec\",\"spec-id\":-1}");
+
+	RestCatalogRequest *request = palloc0(sizeof(RestCatalogRequest));
+
+	request->relationId = relationId;
+	request->operationType = REST_CATALOG_ADD_PARTITION;
 	request->body = body->data;
 
 	return request;

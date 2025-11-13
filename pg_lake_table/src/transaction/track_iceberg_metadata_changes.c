@@ -480,7 +480,8 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 		requestPerTable->createTableRequests = list_make1(request);
 	}
 	else if (operationType == REST_CATALOG_ADD_SNAPSHOT ||
-			 operationType == REST_CATALOG_ADD_SCHEMA)
+			 operationType == REST_CATALOG_ADD_SCHEMA ||
+			 operationType == REST_CATALOG_ADD_PARTITION)
 	{
 		request->body = pstrdup(body);
 		requestPerTable->tableModifyRequests = lappend(requestPerTable->tableModifyRequests, request);
