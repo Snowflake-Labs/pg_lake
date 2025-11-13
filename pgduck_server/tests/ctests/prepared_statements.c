@@ -460,7 +460,7 @@ testBindError()
 
 	errorMsg = PQerrorMessage(conn);
 
-	if (strstr(errorMsg, "incorrect number of parameters") == NULL)
+	if (strstr(errorMsg, "Can not bind to parameter number") == NULL)
 		return EXIT_FAILURE;
 
 	PQclear(res);
