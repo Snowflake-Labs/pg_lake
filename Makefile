@@ -87,7 +87,8 @@ reindent: typedefs
 	pipenv run black $(INDENT_TARGETS)
 
 submodules:
-	git submodule update --init --recursive
+	git submodule init
+	git submodule update
 
 ## module declarations; each extension should have its dependencies spelled out here
 pg_map:
