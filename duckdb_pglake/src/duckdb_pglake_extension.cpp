@@ -20,8 +20,9 @@
 #include "duckdb.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/main/capi/capi_internal.hpp"
-#include "duckdb/main/extension_util.hpp"
+#include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/scalar_function_catalog_entry.hpp"
+#include "duckdb/catalog/default/default_schemas.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/cast_helpers.hpp"
 #include "duckdb/common/types/date.hpp"
@@ -35,6 +36,7 @@
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/function/scalar/string_common.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/main/extension_helper.hpp"
 
 #include "httpfs.hpp"
 #include "s3fs.hpp"
@@ -56,8 +58,10 @@
 /* whether to show DEBUG logs */
 bool PgLakePgcompatIsOutputVerbose = false;
 
-/* not declared in azure_extension.hpp */
-extern "C" void azure_init(duckdb::DatabaseInstance &db);
+// new explicit entrypoints
+extern "C" void azure_duckdb_cpp_init(duckdb::ExtensionLoader &loader);
+extern "C" void postgres_scanner_duckdb_cpp_init(duckdb::ExtensionLoader &loader);
+
 
 namespace duckdb {
 
@@ -184,8 +188,19 @@ PgLakeGeometryToHexWKB(shared_ptr<DatabaseInstance> db, string_t input)
 		if (st_ashexwkb == nullptr)
 		{
 			/* retrieve the st_ashexwkb function pointer once */
-			ScalarFunctionCatalogEntry& catalogEntry = ExtensionUtil::GetFunction(*db, "st_ashexwkb");
-			ScalarFunctionSet scalarFunctionSet = catalogEntry.functions;
+			Catalog &systemCatalog = Catalog::GetSystemCatalog(*db);
+			CatalogTransaction data = CatalogTransaction::GetSystemTransaction(*db);
+			SchemaCatalogEntry &schema = systemCatalog.GetSchema(data, DEFAULT_SCHEMA);
+			optional_ptr<CatalogEntry> catalogEntry =
+				schema.GetEntry(data, CatalogType::SCALAR_FUNCTION_ENTRY, "st_ashexwkb");
+
+			if (!catalogEntry)
+				throw InvalidInputException("Function with name st_ashexwkb not found");
+
+			ScalarFunctionCatalogEntry& scalarFunctionCatalogEntry =
+				catalogEntry->Cast<ScalarFunctionCatalogEntry>();
+
+			ScalarFunctionSet scalarFunctionSet = scalarFunctionCatalogEntry.functions;
 			ScalarFunction scalarFunction = scalarFunctionSet.GetFunctionByOffset(0);
 			st_ashexwkb = scalarFunction.function;
 		}
@@ -231,29 +246,35 @@ PgLakeGeometryToHexWKB(shared_ptr<DatabaseInstance> db, string_t input)
 
 
 
-static void LoadInternal(DatabaseInstance &instance) {
+static void LoadInternal(ExtensionLoader &loader) {
+
+	/* dependent extensions to override -- XXX helper with autoload, maybe? */
+	azure_duckdb_cpp_init(loader);
+	postgres_scanner_duckdb_cpp_init(loader);
+
     /* Register functions */
     auto to_date_function = ScalarFunction("to_date", {LogicalType::DOUBLE}, LogicalType::DATE, ToDateScalarFun);
-    ExtensionUtil::RegisterFunction(instance, to_date_function);
+    loader.RegisterFunction(to_date_function);
 
 	auto nullify_any_type = ScalarFunction("nullify_any_type", {LogicalType::ANY}, LogicalType::SQLNULL, NullifyAnyType);
-	ExtensionUtil::RegisterFunction(instance, nullify_any_type);
+	loader.RegisterFunction(nullify_any_type);
 
 	auto throw_internal_error = ScalarFunction("pg_lake_throw_internal_error", {LogicalType::VARCHAR}, LogicalType::SQLNULL, ThrowInternalError);
-	ExtensionUtil::RegisterFunction(instance, throw_internal_error);
+	loader.RegisterFunction(throw_internal_error);
 
     auto lake_nth_suffix = ScalarFunction("lake_nth_suffix", {LogicalType::INTEGER}, LogicalType::VARCHAR, NthSuffixScalarFun);
-    ExtensionUtil::RegisterFunction(instance, lake_nth_suffix);
+    loader.RegisterFunction(lake_nth_suffix);
 
 	ScalarFunctionSet substr("substring_pg");
 	substr.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::BIGINT}, LogicalType::VARCHAR, SubstringPG));
 	substr.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT}, LogicalType::VARCHAR, SubstringPG));
-	ExtensionUtil::RegisterFunction(instance, substr);
+	loader.RegisterFunction(substr);
 
-	PgLakeUtilityFunctions::RegisterFunctions(instance);
-	PgLakeFileSystemFunctions::RegisterFunctions(instance);
+	PgLakeUtilityFunctions::RegisterFunctions(loader);
+	PgLakeFileSystemFunctions::RegisterFunctions(loader);
 
 	/* Replace the S3 and HTTP file system with wrappers */
+	auto &instance = loader.GetDatabaseInstance();
 	auto &fs = instance.GetFileSystem();
 
 	fs.UnregisterSubSystem("S3FileSystem");
@@ -293,11 +314,10 @@ static void LoadInternal(DatabaseInstance &instance) {
 
 }
 
-void DuckdbPglakeExtension::Load(DuckDB &db) {
-	azure_init(*db.instance);
-	postgres_scanner_init(*db.instance);
-	LoadInternal(*db.instance);
+void DuckdbPglakeExtension::Load(ExtensionLoader &loader) {
+	LoadInternal(loader);
 }
+
 std::string DuckdbPglakeExtension::Name() {
 	return "duckdb_pglake";
 }
@@ -306,9 +326,8 @@ std::string DuckdbPglakeExtension::Name() {
 
 extern "C" {
 
-DUCKDB_EXTENSION_API void duckdb_pglake_init(duckdb::DatabaseInstance &db) {
-    duckdb::DuckDB db_wrapper(db);
-    db_wrapper.LoadExtension<duckdb::DuckdbPglakeExtension>();
+DUCKDB_CPP_EXTENSION_ENTRY(duckdb_pglake, loader) {
+	LoadInternal(loader);
 }
 
 DUCKDB_EXTENSION_API const char *duckdb_pglake_version() {
