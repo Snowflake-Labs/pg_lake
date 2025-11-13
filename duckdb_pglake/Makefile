@@ -126,6 +126,7 @@ release: patch_duckdb
 # patch exit code 1 means the patch is already applied, since we might run this multiple times, be robust
 patch_duckdb:
 	echo "current submodule refs"
+	patch -v
 	git submodule status
 	cd duckdb && git checkout -f . && \
 	find ../patches/duckdb -type f -name '*.patch' -print | xargs -0 printf '%s ' | \
