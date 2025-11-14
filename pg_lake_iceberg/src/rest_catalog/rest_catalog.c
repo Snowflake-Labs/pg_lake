@@ -41,7 +41,7 @@ char	   *RestCatalogClientId = NULL;
 char	   *RestCatalogClientSecret = NULL;
 
 
-static void CreateNamespaceOnRestCatalog(const char *catalogName, const char *namespaceName, const char *allowedLocation);
+static void CreateNamespaceOnRestCatalog(const char *catalogName, const char *namespaceName);
 static char *EncodeBasicAuth(const char *clientId, const char *clientSecret);
 static char *JsonbGetStringByPath(const char *jsonb_text, int nkeys,...);
 static char *GetRestCatalogName(Oid relationId);
@@ -60,11 +60,6 @@ static void ReportHTTPError(HttpResult httpResult, int level);
 void
 RegisterNamespaceToRestCatalog(const char *catalogName, const char *namespaceName, bool hasRestCatalogReadOnlyOption)
 {
-	/* Rest catalog restricts writing to this location for the given namespace */
-	const char *allowedLocation =
-		psprintf("%s/%s/%s", IcebergDefaultLocationPrefix, URLEncodePath(catalogName),
-				 URLEncodePath(namespaceName));
-
 	/*
 	 * First, we need to check if the namespace already exists in Rest Catalog
 	 * via a GET request.
@@ -88,39 +83,7 @@ RegisterNamespaceToRestCatalog(const char *catalogName, const char *namespaceNam
 				/*
 				 * Does not exists, we'll create it.
 				 */
-				CreateNamespaceOnRestCatalog(catalogName, namespaceName, allowedLocation);
-				break;
-			}
-
-			/* namespace already exists */
-		case 200:
-			{
-				/*
-				 * Verify allowed location matches, otherwise raise an error.
-				 * We raise error because we use the location as the place
-				 * where tables are stored. So, we cannot afford to have
-				 * different locations for the same namespace.
-				 */
-				char	   *serverAllowedLocation =
-					JsonbGetStringByPath(httpResult.body, 2, "properties", "location");
-
-				/*
-				 * Compare by ignoring the trailing `/` char that the server
-				 * might have for internal iceberg tables. For external ones,
-				 * we don't have any control over.
-				 */
-				if (!hasRestCatalogReadOnlyOption &&
-					(strlen(serverAllowedLocation) - strlen(allowedLocation) > 1 ||
-					 strncmp(serverAllowedLocation, allowedLocation, strlen(allowedLocation)) != 0))
-				{
-					ereport(ERROR,
-							(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
-							 errmsg("namespace \"%s\" is already registered with a different location",
-									namespaceName),
-							 errdetail_internal("Expected location: %s, but got: %s",
-												allowedLocation, serverAllowedLocation)));
-				}
-
+				CreateNamespaceOnRestCatalog(catalogName, namespaceName);
 				break;
 			}
 
@@ -221,7 +184,7 @@ GetMetadataLocationFromRestCatalog(const char *restCatalogName, const char *name
 * an error is raised.
 */
 static void
-CreateNamespaceOnRestCatalog(const char *catalogName, const char *namespaceName, const char *allowedLocation)
+CreateNamespaceOnRestCatalog(const char *catalogName, const char *namespaceName)
 {
 	/* POST create */
 	StringInfoData body;
@@ -240,7 +203,6 @@ CreateNamespaceOnRestCatalog(const char *catalogName, const char *namespaceName,
 	appendJsonKey(&body, "properties");
 
 	appendStringInfoChar(&body, '{');	/* start properties object */
-	appendJsonString(&body, "location", allowedLocation);
 	appendStringInfoChar(&body, '}');	/* close properties object */
 
 	appendStringInfoChar(&body, '}');	/* close body */

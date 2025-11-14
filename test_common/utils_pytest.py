@@ -214,7 +214,9 @@ def start_polaris_server_in_background():
             "CLIENT_ID": "client_id",
             "CLIENT_SECRET": "client_secret",
             "AWS_ROLE_ARN": AWS_ROLE_ARN,
-            "STORAGE_LOCATION": f"s3://{TEST_BUCKET}",
+            # todo: this polaris server only works for the default database
+            # in the regression tests.
+            "STORAGE_LOCATION": f"s3://{TEST_BUCKET}/{server_params.PG_DATABASE}",
             "POLARIS_HOSTNAME": server_params.POLARIS_HOSTNAME,
             "POLARIS_PORT": str(server_params.POLARIS_PORT),
             "POLARIS_PRINCIPAL_CREDS_FILE": server_params.POLARIS_PRINCIPAL_CREDS_FILE,
@@ -908,6 +910,9 @@ def create_mock_s3():
     # Extract the KeyId from the response
     server_params.MANAGED_STORAGE_CMK_ID = response["KeyMetadata"]["KeyId"]
 
+    # Setting up STS + assume-role is not strictly required for Polaris version 1.2+
+    # But we prefer to keep for now, as that's more closer to production workloads
+
     # Create IAM role + STS assume-role
     # required for Polaris
     iam = boto3.client(
@@ -1431,6 +1436,7 @@ def create_iceberg_rest_catalog(namespace):
             "oauth2-server-uri": oauth_token_url,  # token endpoint
             "scope": "PRINCIPAL_ROLE:ALL",  # typical Polaris scope
             "credential": f"{client_id}:{client_secret}",  # "id:secret"
+
             # S3/Moto settings (same as your JDBC helper)
             "s3.endpoint": f"http://localhost:{MOTO_PORT}",
             "s3.access-key-id": TEST_AWS_ACCESS_KEY_ID,
@@ -1443,15 +1449,6 @@ def create_iceberg_rest_catalog(namespace):
         catalog.create_namespace(f"{namespace}")
     except NamespaceAlreadyExistsError:
         pass  # ignore only this case
-
-    # this seems like a bug in pyiceberg, we need to
-    # update the location to get it reflected
-    catalog.update_namespace_properties(
-        f"{namespace}",
-        updates={
-            "location": f"s3://{TEST_BUCKET}/{server_params.PG_DATABASE}_catalog/{quote(namespace)}"
-        },
-    )
 
     return catalog
 
