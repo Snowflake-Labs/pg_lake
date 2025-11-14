@@ -223,13 +223,15 @@ AddIcebergSnapshotToMetadata(IcebergTableMetadata * metadata, IcebergSnapshot * 
  * It only does the in-memory operation, the caller is responsible for
  * persisting the changes.
  */
-bool
+List *
 RemoveOldSnapshotsFromMetadata(Oid relationId, IcebergTableMetadata * metadata, bool isVerbose)
 {
+	List	   *expiredSnapshotIds = NIL;
+
 	if (metadata->snapshots_length == 0)
 	{
 		/* no snapshots yet, not possible to trigger, but let's be defensive */
-		return false;
+		return expiredSnapshotIds;
 	}
 
 	/*
@@ -250,7 +252,7 @@ RemoveOldSnapshotsFromMetadata(Oid relationId, IcebergTableMetadata * metadata, 
 
 	if (expiredSnapshotCount == 0)
 		/* no snapshots to expire */
-		return false;
+		return expiredSnapshotIds;
 
 	/* we might expire all snapshots, always retain at least 1 snapshot */
 	if (nonExpiredSnapshotCount == 0)
@@ -271,6 +273,11 @@ RemoveOldSnapshotsFromMetadata(Oid relationId, IcebergTableMetadata * metadata, 
 
 	for (int snapshotIndex = 0; snapshotIndex < expiredSnapshotCount; snapshotIndex++)
 	{
+		int64_t    *expiredSnapshotIdPtr = palloc(sizeof(int64_t));
+
+		*expiredSnapshotIdPtr = expiredSnapshots[snapshotIndex].snapshot_id;
+		expiredSnapshotIds = lappend(expiredSnapshotIds, expiredSnapshotIdPtr);
+
 		ereport(isVerbose ? INFO : DEBUG1,
 				(errmsg("expiring snapshot %" PRId64 " from %s",
 						expiredSnapshots[snapshotIndex].snapshot_id,
@@ -282,7 +289,7 @@ RemoveOldSnapshotsFromMetadata(Oid relationId, IcebergTableMetadata * metadata, 
 	metadata->snapshots = nonExpiredSnapshots;
 	metadata->snapshots_length = nonExpiredSnapshotCount;
 
-	return true;
+	return expiredSnapshotIds;
 }
 
 
