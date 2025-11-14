@@ -862,3 +862,40 @@ GetAddPartitionCatalogRequest(Oid relationId, List *partitionSpecs)
 
 	return request;
 }
+
+/*
+ * GetRemoveSnapshotCatalogRequest creates a RestCatalogRequest that removes
+ * a list of snapshots from the REST catalog.
+ */
+RestCatalogRequest *
+GetRemoveSnapshotCatalogRequest(List *removedSnapshotIds, Oid relationId)
+{
+	StringInfo	body = makeStringInfo();
+	bool		first = true;
+
+	appendStringInfoString(body,
+						   "{\"action\":\"remove-snapshots\",\"snapshot-ids\":[");
+	ListCell   *lc;
+
+	foreach(lc, removedSnapshotIds)
+	{
+		int64_t		snapshotId = *((int64_t *) lfirst(lc));
+
+		if (!first)
+			appendStringInfoChar(body, ',');
+
+		appendStringInfo(body, "%" PRId64, snapshotId);
+
+		first = false;
+	}
+
+	appendStringInfoString(body, "]}");
+
+	RestCatalogRequest *request = palloc0(sizeof(RestCatalogRequest));
+
+	request->relationId = relationId;
+	request->operationType = REST_CATALOG_REMOVE_SNAPSHOT;
+	request->body = body->data;
+
+	return request;
+}

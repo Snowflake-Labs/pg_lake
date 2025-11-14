@@ -479,10 +479,15 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 	}
 	else if (operationType == REST_CATALOG_ADD_SNAPSHOT ||
 			 operationType == REST_CATALOG_ADD_SCHEMA ||
-			 operationType == REST_CATALOG_ADD_PARTITION)
+			 operationType == REST_CATALOG_ADD_PARTITION ||
+			 operationType == REST_CATALOG_REMOVE_SNAPSHOT)
 	{
 		request->body = pstrdup(body);
 		requestPerTable->tableModifyRequests = lappend(requestPerTable->tableModifyRequests, request);
+	}
+	else
+	{
+		elog(ERROR, "unsupported rest catalog operation type: %d", operationType);
 	}
 
 	MemoryContextSwitchTo(oldContext);
