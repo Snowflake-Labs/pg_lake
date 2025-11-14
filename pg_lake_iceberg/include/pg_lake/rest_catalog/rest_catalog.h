@@ -53,8 +53,7 @@ typedef struct RestCatalogRequest
 	Oid			relationId;
 	RestCatalogOperationType operationType;
 
-	char	   *createTableBody;
-	char	   *addSnapshotBody;
+	char	   *body;
 }			RestCatalogRequest;
 
 extern PGDLLEXPORT char *RestCatalogFetchAccessToken(void);
