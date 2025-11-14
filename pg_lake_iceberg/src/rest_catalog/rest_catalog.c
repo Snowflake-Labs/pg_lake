@@ -87,42 +87,6 @@ RegisterNamespaceToRestCatalog(const char *catalogName, const char *namespaceNam
 				break;
 			}
 
-			/* namespace already exists */
-		case 200:
-			{
-				/*
-				 * Verify allowed location matches, otherwise raise an error.
-				 * We raise error because we use the default location as the
-				 * place where tables are stored. So, we cannot afford to have
-				 * different locations for the same namespace.
-				 */
-				char	   *serverAllowedLocation =
-					JsonbGetStringByPath(httpResult.body, 2, "properties", "location");
-
-				const char *defaultAllowedLocation =
-					psprintf("%s/%s/%s", IcebergDefaultLocationPrefix, catalogName, namespaceName);
-
-
-				/*
-				 * Compare by ignoring the trailing `/` char that the server
-				 * might have for internal iceberg tables. For external ones,
-				 * we don't have any control over.
-				 */
-				if (!hasRestCatalogReadOnlyOption &&
-					(strlen(serverAllowedLocation) - strlen(defaultAllowedLocation) > 1 ||
-					 strncmp(serverAllowedLocation, defaultAllowedLocation, strlen(defaultAllowedLocation)) != 0))
-				{
-					ereport(ERROR,
-							(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
-							 errmsg("namespace \"%s\" is already registered with a different location",
-									namespaceName),
-							 errdetail_internal("Expected location: %s, but got: %s",
-												defaultAllowedLocation, serverAllowedLocation)));
-				}
-
-				break;
-			}
-
 		default:
 			{
 				/*
