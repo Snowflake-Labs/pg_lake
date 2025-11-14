@@ -851,3 +851,37 @@ GetAddSnapshotCatalogRequest(IcebergSnapshot * newSnapshot, Oid relationId)
 
 	return request;
 }
+
+
+/*
+ * GetAddSchemaCatalogRequest creates a RestCatalogRequest that adds a schema
+ * to the table and sets it as the current schema (schema-id = -1 means
+ * "the last added schema" per the REST spec).
+ */
+RestCatalogRequest *
+GetAddSchemaCatalogRequest(Oid relationId, DataFileSchema * dataFileSchema)
+{
+	StringInfo	body = makeStringInfo();
+
+	/* add-schema */
+	appendStringInfoString(body, "{\"action\":\"add-schema\",");
+
+	int			lastColumnId = 0;
+	IcebergTableSchema *newSchema =
+		RebuildIcebergSchemaFromDataFileSchema(relationId, dataFileSchema, &lastColumnId);
+
+	int			schemaCount = 1;
+
+	AppendIcebergTableSchemaForRestCatalogStage(body, newSchema, schemaCount);
+
+	/* set-current-schema to the one we just added */
+	appendStringInfoString(body, "}, {\"action\":\"set-current-schema\",\"schema-id\":-1}");
+
+	RestCatalogRequest *request = palloc0(sizeof(RestCatalogRequest));
+
+	request->relationId = relationId;
+	request->operationType = REST_CATALOG_ADD_SCHEMA;
+	request->body = body->data;
+
+	return request;
+}
