@@ -263,17 +263,20 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 	/* if we need to expire old snapshots, we do it here */
 	if (builder->expireOldSnapshots)
 	{
-		bool		expiredSnapshots =
+		List	   *expiredSnapshotIds =
 			RemoveOldSnapshotsFromMetadata(relationId, metadata, isVerbose);
 
-		if (expiredSnapshots)
+		if (expiredSnapshotIds != NIL)
 		{
 			createNewSnapshot = true;
 
-			/*
-			 * TODO: Create RestCatalogRequest for removing old snapshots in
-			 * the writable rest catalog iceberg table.
-			 */
+			if (writableRestCatalogTable)
+			{
+				RestCatalogRequest *request =
+					GetRemoveSnapshotCatalogRequest(expiredSnapshotIds, relationId);
+
+				restCatalogRequests = lappend(restCatalogRequests, request);
+			}
 		}
 	}
 
