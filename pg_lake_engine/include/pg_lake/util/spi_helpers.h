@@ -30,6 +30,7 @@
 /* SPI macros for setting parameters */
 #define DATUMIZE_TEXTOID(Value) CStringGetTextDatum(Value)
 #define DATUMIZE_TEXTARRAYOID(Value) PointerGetDatum(Value)
+#define DATUMIZE_CHAROID(Value) CharGetDatum(Value)
 #define DATUMIZE_BOOLOID(Value) BoolGetDatum(Value)
 #define DATUMIZE_OIDOID(Value) ObjectIdGetDatum(Value)
 #define DATUMIZE_INT2OID(Value) Int16GetDatum(Value)
@@ -96,6 +97,7 @@
 /* SPI macros for reading results */
 #define DEDATUMIZE_TEXTOID(Value) TextDatumGetCString(Value)
 #define DEDATUMIZE_TEXTARRAYOID(Value) DatumGetArrayTypeP(Value)
+#define DEDATUMIZE_CHAROID(Value) DatumGetChar(Value)
 #define DEDATUMIZE_BOOLOID(Value) DatumGetBool(Value)
 #define DEDATUMIZE_OIDOID(Value) DatumGetObjectId(Value)
 #define DEDATUMIZE_INT2OID(Value) DatumGetInt16(Value)
