@@ -57,7 +57,7 @@
 #include "pg_lake/iceberg/data_file_stats.h"
 #include "pg_lake/iceberg/partitioning/partition.h"
 #include "pg_lake/iceberg/temporal_utils.h"
-#include "pg_lake/pg_version_compat/pg_version_compat.h"
+#include "pg_extension_base/pg_compat.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/iceberg/hash_utils.h"
 #include "pg_lake/pgduck/map.h"
