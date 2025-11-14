@@ -2135,17 +2135,18 @@ RewriteFuncExprTrigonometry(Node *node, void *context)
 			elog(ERROR, "unexpected function ID in rewrite %d", funcExpr->funcid);
 	}
 
-	FuncExpr   *degreesExpr = makeNode(FuncExpr);
+	FuncExpr   *radiansExpr = makeNode(FuncExpr);
 
-	degreesExpr->funcid = F_DEGREES;
-	degreesExpr->funcresulttype = funcExpr->funcresulttype;
-	degreesExpr->funcretset = false;
-	degreesExpr->funcvariadic = false;
-	degreesExpr->funcformat = COERCE_EXPLICIT_CALL;
-	degreesExpr->location = -1;
-	degreesExpr->args = list_make1(node);
+	radiansExpr->funcid = F_RADIANS;
+	radiansExpr->funcresulttype = funcExpr->funcresulttype;
+	radiansExpr->funcretset = false;
+	radiansExpr->funcvariadic = false;
+	radiansExpr->funcformat = COERCE_EXPLICIT_CALL;
+	radiansExpr->location = -1;
+	radiansExpr->args = funcExpr->args;
 
-	return (Node *) degreesExpr;
+	funcExpr->args = list_make1((Node *) radiansExpr);
+	return (Node *) funcExpr;
 }
 
 
