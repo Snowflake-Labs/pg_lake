@@ -90,7 +90,7 @@
 #include "pg_lake/partitioning/partition_spec_catalog.h"
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/permissions/roles.h"
-#include "pg_lake/pg_version_compat/pg_version_compat.h"
+#include "pg_extension_base/pg_compat.h"
 #include "pg_lake/pgduck/array_conversion.h"
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/pgduck/explain.h"

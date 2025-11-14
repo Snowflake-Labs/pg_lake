@@ -54,7 +54,7 @@
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/fdw/utils.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
-#include "pg_lake/pg_version_compat/pg_version_compat.h"
+#include "pg_extension_base/pg_compat.h"
 #include "pg_lake/pgduck/read_data.h"
 #include "pg_lake/pgduck/rewrite_query.h"
 #include "pg_lake/parsetree/options.h"

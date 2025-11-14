@@ -49,7 +49,7 @@
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/transaction/transaction_hooks.h"
 #include "pg_lake/util/injection_points.h"
-#include "pg_lake/pg_version_compat/pg_version_compat.h"
+#include "pg_extension_base/pg_compat.h"
 #include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
