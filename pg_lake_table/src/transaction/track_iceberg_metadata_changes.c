@@ -216,7 +216,7 @@ PostAllRestCatalogRequests(void)
 						 URLEncodePath(requestPerTable->catalogNamespace),
 						 URLEncodePath(requestPerTable->catalogTableName));
 
-			HttpResult	httpResult = HttpPost(url, request->createTableBody, PostHeadersWithAuth());
+			HttpResult	httpResult = HttpPost(url, request->body, PostHeadersWithAuth());
 
 			if (httpResult.status != 200)
 			{
@@ -278,10 +278,8 @@ PostAllRestCatalogRequests(void)
 		{
 			RestCatalogRequest *request = (RestCatalogRequest *) lfirst(requestCell);
 
-			if (request->operationType == REST_CATALOG_ADD_SNAPSHOT)
-			{
-				appendStringInfoString(batchRequestBody, request->addSnapshotBody);
-			}
+			appendStringInfoString(batchRequestBody, request->body);
+
 		}
 
 		appendStringInfoChar(batchRequestBody, ']');	/* close updates array */
@@ -302,7 +300,7 @@ PostAllRestCatalogRequests(void)
 		char	   *url = psprintf(REST_CATALOG_TRANSACTION_COMMIT, RestCatalogHost, catalogName);
 		HttpResult	httpResult = HttpPost(url, batchRequestBody->data, PostHeadersWithAuth());
 
-		if (httpResult.status != 200)
+		if (httpResult.status != 204)
 		{
 			ReportHTTPError(httpResult, WARNING);
 		}
@@ -473,12 +471,12 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 
 	if (operationType == REST_CATALOG_CREATE_TABLE)
 	{
-		request->createTableBody = pstrdup(body);
+		request->body = pstrdup(body);
 		requestPerTable->createTableRequests = list_make1(request);
 	}
 	else if (operationType == REST_CATALOG_ADD_SNAPSHOT)
 	{
-		request->addSnapshotBody = pstrdup(body);
+		request->body = pstrdup(body);
 		requestPerTable->tableModifyRequests = lappend(requestPerTable->tableModifyRequests, request);
 	}
 
@@ -587,7 +585,7 @@ ApplyTrackedIcebergMetadataChanges(void)
 				RestCatalogRequest *request = lfirst(requestCell);
 
 				RecordRestCatalogRequestInTx(relationId, request->operationType,
-											 request->addSnapshotBody);
+											 request->body);
 			}
 
 		}
