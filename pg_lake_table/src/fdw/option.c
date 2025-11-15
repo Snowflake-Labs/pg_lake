@@ -835,12 +835,6 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 		!readOnlyExternalCatalogTable)
 		icebergCatalogType = OBJECT_STORE_READ_WRITE;
 
-	if (catalog == ForeignTableRelationId &&
-		icebergCatalogType == REST_CATALOG_READ_WRITE)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("rest catalog iceberg tables are read only, use CREATE TABLE ... WITH (catalog = 'rest', read_only=true) to create a read-only table")));
-
 	if (catalog == ForeignTableRelationId && locationProvided == false &&
 		(icebergCatalogType == POSTGRES_CATALOG || icebergCatalogType == OBJECT_STORE_READ_WRITE))
 		ereport(ERROR,
@@ -857,8 +851,7 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 
 	if (catalog == ForeignTableRelationId)
 	{
-		if (icebergCatalogType == REST_CATALOG_READ_ONLY || icebergCatalogType == REST_CATALOG_READ_WRITE ||
-			icebergCatalogType == OBJECT_STORE_READ_ONLY)
+		if (icebergCatalogType == REST_CATALOG_READ_ONLY || icebergCatalogType == OBJECT_STORE_READ_ONLY)
 		{
 			/*
 			 * catalog_namespace, catalog_table_name and catalog_name is
@@ -887,17 +880,17 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 			if (catalogNamespace)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("\"catalog_namespace\" option is only valid for catalog=\"rest\"")));
+						 errmsg("\"catalog_namespace\" option is only valid for writable catalog=\"rest\"")));
 
 			if (catalogTableName)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("\"catalog_table_name\" option is only valid for catalog=\"rest\"")));
+						 errmsg("\"catalog_table_name\" option is only valid for writable catalog=\"rest\"")));
 
 			if (catalogName)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("\"catalog_name\" option is only valid for catalog=\"rest\"")));
+						 errmsg("\"catalog_name\" option is only valid for writable catalog=\"rest\"")));
 
 		}
 	}

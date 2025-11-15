@@ -62,7 +62,7 @@ def test_create_namespace(
     pg_conn.commit()
 
     run_command(
-        f"""SELECT lake_iceberg.register_namespace_to_rest_catalog('{server_params.PG_DATABASE}', '{namespace}')""",
+        f"""CREATE TABLE "{namespace}".tbl(a int) USING iceberg WITH (catalog='rest');""",
         pg_conn,
     )
     pg_conn.commit()
@@ -98,7 +98,7 @@ def test_create_namespace(
         pg_conn,
         raise_error=False,
     )
-    assert "rest catalog iceberg tables are read only" in str(res)
+    assert "writable REST catalog iceberg tables do not" in str(res)
     pg_conn.rollback()
 
     res = run_command(
@@ -106,7 +106,7 @@ def test_create_namespace(
         pg_conn,
         raise_error=False,
     )
-    assert "rest catalog iceberg tables are read only" in str(res)
+    assert "writable REST catalog iceberg tables do not" in str(res)
     pg_conn.rollback()
 
     run_command(f"""DROP SCHEMA "{namespace}" CASCADE""", pg_conn)
@@ -132,13 +132,13 @@ def test_create_namespace_in_tx(
     run_command(f'''CREATE SCHEMA "{namespace}_2"''', pg_conn)
 
     run_command(
-        f"""SELECT lake_iceberg.register_namespace_to_rest_catalog('{server_params.PG_DATABASE}', '{namespace}')""",
+        f"""CREATE TABLE "{namespace}".tbl(a int) USING iceberg WITH (catalog='rest');""",
         pg_conn,
     )
     pg_conn.commit()
 
     run_command(
-        f"""SELECT lake_iceberg.register_namespace_to_rest_catalog('{server_params.PG_DATABASE}', '{namespace}_2')""",
+        f"""CREATE TABLE "{namespace}_2".tbl(a int) USING iceberg WITH (catalog='rest');""",
         pg_conn,
     )
     pg_conn.commit()
@@ -176,7 +176,7 @@ def test_create_namespace_rollback(
     run_command(f'''CREATE SCHEMA "{namespace}"''', pg_conn)
 
     run_command(
-        f"""SELECT lake_iceberg.register_namespace_to_rest_catalog('{server_params.PG_DATABASE}', '{namespace}')""",
+        f"""CREATE TABLE "{namespace}".tbl(a int) USING iceberg WITH (catalog='rest');""",
         pg_conn,
     )
 

@@ -656,18 +656,21 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 
 	bool		hasRestCatalogOption = HasRestCatalogTableOption(createStmt->options);
 	bool		hasObjectStoreCatalogOption = HasObjectStoreCatalogTableOption(createStmt->options);
-	bool		hasExternalCatalogReadOnlyOption = HasReadOnlyOption(createStmt->options);
 
-	/*
-	 * Read-only external catalog tables are a special case of Iceberg tables.
-	 * They are recognized as Iceberg tables, but are not registered in any
-	 * internal catalogs (e.g., lake_iceberg.tables). Instead, the table is
-	 * created only in PostgreSQL’s system catalogs. When the table is
-	 * queried, its metadata is fetched on demand from the external catalog.
-	 */
-	if ((hasObjectStoreCatalogOption ||
-		 (hasRestCatalogOption && hasExternalCatalogReadOnlyOption)))
+	if (hasObjectStoreCatalogOption || hasRestCatalogOption)
 	{
+		Oid			namespaceId = RangeVarGetAndCheckCreationNamespace(createStmt->base.relation, NoLock, NULL);
+
+		/*
+		 * Read-only external catalog tables are a special case of Iceberg
+		 * tables. They are recognized as Iceberg tables, but are not
+		 * registered in any internal catalogs (e.g., lake_iceberg.tables).
+		 * Instead, the table is created only in PostgreSQL’s system
+		 * catalogs. When the table is queried, its metadata is fetched on
+		 * demand from the external catalog.
+		 */
+		bool		hasExternalCatalogReadOnlyOption = HasReadOnlyOption(createStmt->options);
+
 		char	   *metadataLocation = NULL;
 		char	   *catalogNamespace = NULL;
 		char	   *catalogTableName = NULL;
@@ -683,8 +686,6 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		 */
 		if (catalogNamespaceProvided == NULL && hasExternalCatalogReadOnlyOption)
 		{
-			Oid			namespaceId = RangeVarGetAndCheckCreationNamespace(createStmt->base.relation, NoLock, NULL);
-
 			catalogNamespace = get_namespace_name(namespaceId);
 
 			/* add catalog_namespace table options */
@@ -725,7 +726,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 			catalogName = catalogNameProvided;
 		}
 
-		if (hasRestCatalogOption)
+		if (hasRestCatalogOption && hasExternalCatalogReadOnlyOption)
 		{
 			ErrorIfRestNamespaceDoesNotExist(catalogName, catalogNamespace);
 
@@ -742,7 +743,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 																	   catalogTableName);
 		}
 
-		if (hasObjectStoreCatalogOption && !hasExternalCatalogReadOnlyOption)
+		if (!hasExternalCatalogReadOnlyOption)
 		{
 			/*
 			 * For writable object store catalog tables, we need to continue
@@ -757,11 +758,35 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 				catalogNameProvided != NULL)
 			{
 				ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-								errmsg("writable object store catalog iceberg tables do not "
-									   "allow explicit catalog options")));
+								errmsg("writable %s catalog iceberg tables do not "
+									   "allow explicit catalog options", hasObjectStoreCatalogOption ? "object store" : "REST")));
+			}
+
+			if (hasRestCatalogOption)
+			{
+				/*
+				 * For writable rest catalog iceberg tables, we register the
+				 * namespace in the rest catalog. We do that early in the
+				 * command processing so that any errors in the registration
+				 * are caught before we create the actual table.
+				 *
+				 * Note that registering a namespace is not a transactional
+				 * operation from pg_lake's perspective. If the subsequent
+				 * table creation fails, the namespace registration will
+				 * remain. We accept that tradeoff for simplicity as
+				 * re-registering an existing namespace is a no-op. For a
+				 * writable rest catalog iceberg table, the namespace is
+				 * always the table's schema name. Similarly, the catalog name
+				 * is always the database name. We normally encode that in
+				 * GetRestCatalogName() etc., but here we need to do it early
+				 * before the table is created.
+				 */
+				RegisterNamespaceToRestCatalog(get_database_name(MyDatabaseId),
+											   get_namespace_name(namespaceId),
+											   hasExternalCatalogReadOnlyOption);
 			}
 		}
-		else if (createStmt->base.tableElts == NIL)
+		else if (createStmt->base.tableElts == NIL && hasExternalCatalogReadOnlyOption)
 		{
 			List	   *dataFileColumns =
 				DescribeColumnsFromIcebergMetadataURI(metadataLocation, false);
