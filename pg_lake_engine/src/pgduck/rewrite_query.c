@@ -313,6 +313,12 @@ static FunctionCallRewriteRuleByName BuiltinFunctionCallRewriteRulesByName[] =
 	{
 		"pg_catalog", "timestamptz", RewriteFuncExprCast, 0
 	},
+	{
+		"pg_catalog", "time", RewriteFuncExprCast, 0
+	},
+	{
+		"pg_catalog", "timetz", RewriteFuncExprCast, 0
+	},
 
 	/* jsonb functions */
 	{

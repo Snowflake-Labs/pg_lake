@@ -16,6 +16,16 @@ import pytest
 # Time operators
 test_cases = [
     (
+        "time",
+        'WHERE col_time = "time"(col_timestamp)',
+        "WHERE (col_time = (col_timestamp)::time without time zone)",
+    ),
+    (
+        "time",
+        'WHERE col_time = "time"(col_timetz)',
+        "WHERE (col_time = (col_timetz)::time without time zone)",
+    ),
+    (
         "time_eq",
         "WHERE col_time = '12:00:00'::time",
         "WHERE (col_time = '12:00:00'::time without time zone)",

@@ -15,6 +15,16 @@ import pytest
 
 # timetz operators, do not print the whole expected expression as that depends on the timezone of the server
 test_cases = [
+    (
+        "timetz",
+        "WHERE col_timetz = timetz(col_timestamptz)",
+        "WHERE (col_timetz = (col_timestamptz)::time with time zone)",
+    ),
+    (
+        "timetz",
+        "WHERE col_timetz = timetz(col_time)",
+        "WHERE (col_timetz = (col_time)::time with time zone)",
+    ),
     ("timetz_eq", "WHERE col_timetz = '12:00:00+00'::timetz", "WHERE (col_timetz = "),
     ("timetz_ne", "WHERE col_timetz <> '13:00:00+00'::timetz", "WHERE (col_timetz <> "),
     ("timetz_lt", "WHERE col_timetz < '14:00:00'::timetz", "WHERE (col_timetz < "),

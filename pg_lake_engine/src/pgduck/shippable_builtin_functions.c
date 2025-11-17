@@ -218,13 +218,17 @@ static const PGDuckShippableFunction ShippableBuiltinProcs[] =
 	 */
 	{"bpchar", 'f', 3, {"bpchar", "int4", "bool"}, IsCast},
 
-	/* date <-> timestamp <-> timestamptz casts */
+	/* date <-> timestamp <-> timestamptz <-> time <-> timetz casts */
 	{"date", 'f', 1, {"timestamp"}, NULL},
 	{"date", 'f', 1, {"timestamptz"}, NULL},
 	{"timestamp", 'f', 1, {"date"}, NULL},
 	{"timestamp", 'f', 1, {"timestamptz"}, NULL},
 	{"timestamptz", 'f', 1, {"date"}, NULL},
 	{"timestamptz", 'f', 1, {"timestamp"}, NULL},
+	{"time", 'f', 1, {"timetz"}, NULL},
+	{"time", 'f', 1, {"timestamp"}, NULL},
+	{"timetz", 'f', 1, {"time"}, NULL},
+	{"timetz", 'f', 1, {"timestamptz"}, NULL},
 
 	{"length", 'f', 1, {"text"}, NULL},
 
