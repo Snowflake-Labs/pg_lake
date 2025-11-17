@@ -57,7 +57,7 @@ static void ReportHTTPError(HttpResult httpResult, int level);
 * allowed locations as part of the namespace.
 */
 void
-RegisterNamespaceToRestCatalog(const char *catalogName, const char *namespaceName, bool hasRestCatalogReadOnlyOption)
+RegisterNamespaceToRestCatalog(const char *catalogName, const char *namespaceName)
 {
 	/*
 	 * First, we need to check if the namespace already exists in Rest Catalog
@@ -107,8 +107,7 @@ RegisterNamespaceToRestCatalog(const char *catalogName, const char *namespaceNam
 				 * might have for internal iceberg tables. For external ones,
 				 * we don't have any control over.
 				 */
-				if (!hasRestCatalogReadOnlyOption &&
-					(strlen(serverAllowedLocation) - strlen(defaultAllowedLocation) > 1 ||
+				if ((strlen(serverAllowedLocation) - strlen(defaultAllowedLocation) > 1 ||
 					 strncmp(serverAllowedLocation, defaultAllowedLocation, strlen(defaultAllowedLocation)) != 0))
 				{
 					ereport(DEBUG1,
