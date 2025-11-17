@@ -1,4 +1,4 @@
-# pg_lake: Postgres for Iceberg and Data lakes
+# pg_lake: Postgres for Iceberg and Data lakes   
 
 `pg_lake` integrates Iceberg and data lake files into Postgres. With the `pg_lake` extensions, you can use Postgres as a stand-alone lakehouse system that supports transactions and fast queries on Iceberg tables, and can directly work with raw data files in object stores like S3.
 
