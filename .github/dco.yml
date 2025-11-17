@@ -1,26 +1,5 @@
 require:
   signoff: true
 
-message: |
-  Thank you for your contribution!
-  
-  This project uses the Developer Certificate of Origin (DCO).
-  DCO is a simple way for you to confirm that you wrote your code
-  and that you have the right to contribute it.
-  
-  You can read more here:
-  https://developercertificate.org/
-
-  Your commit is missing a "Signed-off-by" line.
-
-  Please fix it by running:
-
-      git commit --amend -s
-      git push --force
-
-  If your PR has multiple commits:
-
-      git rebase --signoff main
-      git push --force
-
-  After fixing, the DCO check will turn green and you can merge.
+require:
+  members: false
