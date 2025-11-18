@@ -226,12 +226,10 @@ AddIcebergSnapshotToMetadata(IcebergTableMetadata * metadata, IcebergSnapshot * 
 List *
 RemoveOldSnapshotsFromMetadata(Oid relationId, IcebergTableMetadata * metadata, bool isVerbose)
 {
-	List	   *expiredSnapshotIds = NIL;
-
 	if (metadata->snapshots_length == 0)
 	{
 		/* no snapshots yet, not possible to trigger, but let's be defensive */
-		return expiredSnapshotIds;
+		return NIL;
 	}
 
 	/*
@@ -252,7 +250,7 @@ RemoveOldSnapshotsFromMetadata(Oid relationId, IcebergTableMetadata * metadata, 
 
 	if (expiredSnapshotCount == 0)
 		/* no snapshots to expire */
-		return expiredSnapshotIds;
+		return NIL;
 
 	/* we might expire all snapshots, always retain at least 1 snapshot */
 	if (nonExpiredSnapshotCount == 0)
@@ -271,6 +269,8 @@ RemoveOldSnapshotsFromMetadata(Oid relationId, IcebergTableMetadata * metadata, 
 		nonExpiredSnapshotCount = 1;
 	}
 
+	List	   *expiredSnapshotIds = NIL;
+
 	for (int snapshotIndex = 0; snapshotIndex < expiredSnapshotCount; snapshotIndex++)
 	{
 		int64_t    *expiredSnapshotIdPtr = palloc(sizeof(int64_t));
@@ -286,8 +286,14 @@ RemoveOldSnapshotsFromMetadata(Oid relationId, IcebergTableMetadata * metadata, 
 
 	DeleteUnreferencedFiles(relationId, metadata, expiredSnapshots, expiredSnapshotCount, nonExpiredSnapshots, nonExpiredSnapshotCount);
 
-	metadata->snapshots = nonExpiredSnapshots;
-	metadata->snapshots_length = nonExpiredSnapshotCount;
+	IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
+	bool		writableRestCatalogTable = catalogType == REST_CATALOG_READ_WRITE;
+
+	if (!writableRestCatalogTable)
+	{
+		metadata->snapshots = nonExpiredSnapshots;
+		metadata->snapshots_length = nonExpiredSnapshotCount;
+	}
 
 	return expiredSnapshotIds;
 }
