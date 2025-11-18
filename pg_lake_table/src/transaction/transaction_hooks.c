@@ -68,6 +68,7 @@ IcebergXactCallback(XactEvent event, void *arg)
 				break;
 			}
 		case XACT_EVENT_PRE_PREPARE:
+		case XACT_EVENT_PREPARE:
 			{
 				if (HasAnyTrackedIcebergMetadataChanges())
 					ereport(ERROR,
@@ -76,7 +77,6 @@ IcebergXactCallback(XactEvent event, void *arg)
 				break;
 			}
 
-		case XACT_EVENT_PREPARE:
 		case XACT_EVENT_COMMIT:
 		case XACT_EVENT_PARALLEL_COMMIT:
 			{
