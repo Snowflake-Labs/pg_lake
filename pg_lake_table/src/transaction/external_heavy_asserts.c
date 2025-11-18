@@ -107,7 +107,12 @@ ExternalHeavyAssertsOnIcebergMetadataChange(void)
 
 		if (catalogType == REST_CATALOG_READ_WRITE)
 		{
-			/* TODO: should be trivial to extend */
+			/*
+			 * We apply changes for writable rest catalog table in
+			 * Post-commit, so it is not possible to read catalogs at that
+			 * point. Instead, we implement a similar check in python
+			 * regression tests.
+			 */
 			continue;
 		}
 

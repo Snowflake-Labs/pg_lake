@@ -39,6 +39,12 @@
 #include "pg_lake/json/json_utils.h"
 #include "pg_lake/util/url_encode.h"
 
+/*
+* Represents the rest catalog requests per table within a transaction.
+* We can commit all DDL/DML requests in a single Post-request to the REST
+* catalog, except for the create table requests, which need to be done
+* first with a different API call.
+*/
 typedef struct RestCatalogRequestPerTable
 {
 	Oid			relationId;

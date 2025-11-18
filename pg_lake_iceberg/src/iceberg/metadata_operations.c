@@ -183,7 +183,8 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 	{
 		metadata = GenerateInitialIcebergTableMetadata(relationId);
 
-		metadata->last_sequence_number = 0;
+		/* Polaris expects the sequence number start from 1 */
+		metadata->last_sequence_number = !writableRestCatalogTable ? 0 : 1;
 		metadata->last_updated_ms = PostgresTimestampToIcebergTimestampMs();
 	}
 	else if (writableRestCatalogTable)
@@ -197,8 +198,8 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 
 		/*
 		 * metadata for writable rest catalog is intended to be read-only in
-		 * the rest of the function, given the authoritative source is the
-		 * rest catalog.
+		 * the remaining of the function, given the authoritative source is
+		 * the rest catalog.
 		 */
 		metadata = ReadIcebergTableMetadata(metadataPath);
 	}
