@@ -169,6 +169,15 @@ GetBaseRestrictInfoForRelation(List *relationRestrictionsList, int uniqueRelatio
 }
 
 
+/*
+ * CreateFullTableScanForRelation convenience function for scanning a whole table.
+ */
+PgLakeTableScan *
+CreateFullTableScanForRelation(Oid relationId)
+{
+	return CreateTableScanForRelation(relationId, 0, NIL, false, false);
+}
+
 
 /*
  * CreateTableScanForRelation creates a table scan for the given relation.
@@ -253,6 +262,8 @@ CreateTableScanForRelation(Oid relationId, int uniqueRelationIdentifier, List *b
 
 			positionDeleteScans = lappend(positionDeleteScans, positionDeleteScan);
 		}
+
+		path = GetIcebergCatalogMetadataLocation(relationId, false);
 	}
 	else if (icebergCatalogType == REST_CATALOG_READ_ONLY ||
 			 icebergCatalogType == OBJECT_STORE_READ_ONLY ||
@@ -370,6 +381,9 @@ CreateTableScanForRelation(Oid relationId, int uniqueRelationIdentifier, List *b
 	tableScan->positionDeleteScans = positionDeleteScans;
 	tableScan->childScans = childScans;
 	tableScan->isUpdateDelete = isResultRelation;
+
+	/* informational: keep which path the scan was based on */
+	tableScan->sourcePath = path;
 
 	return tableScan;
 }
@@ -692,4 +706,55 @@ SnapshotFilesScanned(PgLakeScanSnapshot * scanSnapshot, int *dataFileScans,
 		*dataFileScans += curDataFileScans;
 		*deleteFileScans += curDeleteFileScans;
 	}
+}
+
+
+/*
+ * GetIcebergMetadataLocation returns the current metadata location
+ * for any kind of Iceberg table.
+ */
+char *
+GetIcebergMetadataLocation(Oid relationId)
+{
+	ForeignTable *foreignTable = GetForeignTable(relationId);
+	List	   *options = foreignTable->options;
+
+	PgLakeTableType tableType = GetPgLakeTableType(relationId);
+	IcebergCatalogType icebergCatalogType = GetIcebergCatalogType(relationId);
+
+	char	   *path = GetStringOption(options, "path", false);
+
+	CopyDataFormat sourceFormat;
+	CopyDataCompression sourceCompression;
+
+	FindDataFormatAndCompression(tableType, path, options,
+								 &sourceFormat, &sourceCompression);
+
+	if (icebergCatalogType == POSTGRES_CATALOG ||
+		icebergCatalogType == OBJECT_STORE_READ_WRITE)
+	{
+		path = GetIcebergCatalogMetadataLocation(relationId, false);
+	}
+	else if (icebergCatalogType == REST_CATALOG_READ_WRITE ||
+			 icebergCatalogType == REST_CATALOG_READ_ONLY)
+	{
+		path = GetMetadataLocationForRestCatalogForIcebergTable(relationId);
+	}
+	else if (icebergCatalogType == OBJECT_STORE_READ_ONLY)
+	{
+		path = GetMetadataLocationFromExternalObjectStoreCatalogForTable(relationId);
+	}
+	else if (sourceFormat == DATA_FORMAT_ICEBERG)
+	{
+		path = GetStringOption(options, "path", true);
+	}
+	else
+	{
+		ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						errmsg("%s is not an Iceberg table",
+							   get_rel_name(relationId))));
+
+	}
+
+	return path;
 }

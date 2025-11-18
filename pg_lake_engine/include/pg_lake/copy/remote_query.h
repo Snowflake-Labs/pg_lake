@@ -17,4 +17,4 @@
 
 #pragma once
 
-extern PGDLLEXPORT int64 CopyFromRemoteQuery(Oid relationId, char *query);
+extern PGDLLEXPORT int64 CopyFromRemoteQuery(Oid relationId, char *query, bool isFreeze);

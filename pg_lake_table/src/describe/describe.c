@@ -409,8 +409,12 @@ MakeSimpleColumnName(char *columnName, CopyDataFormat format)
 	 * However, we don't want to do this for JSON format, as the column names
 	 * are used as keys in the JSON object and we want to preserve the
 	 * original case.
+	 *
+	 * We also want to make sure we use the correct case for Iceberg because
+	 * other parts of the code depend on that.
 	 */
-	if (pg_is_ascii(columnName) && format != DATA_FORMAT_JSON)
+	if (pg_is_ascii(columnName) &&
+		(format != DATA_FORMAT_JSON && format != DATA_FORMAT_ICEBERG))
 		columnName = asc_tolower(columnName, strlen(columnName));
 	else
 		columnName = pstrdup(columnName);

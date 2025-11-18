@@ -31,6 +31,7 @@
 
 #include "access/relation.h"
 #include "commands/dbcommands.h"
+#include "nodes/makefuncs.h"
 #include "pg_lake/copy/remote_query.h"
 #include "pg_lake/csv/csv_options.h"
 #include "pg_lake/pgduck/client.h"
@@ -52,7 +53,7 @@ static bool ReceiveCopyData(PGconn *conn, StringInfo buffer);
  * server and then copies it into a local relation from the temporary file.
  */
 int64
-CopyFromRemoteQuery(Oid relationId, char *query)
+CopyFromRemoteQuery(Oid relationId, char *query, bool useFreeze)
 {
 	volatile int64 rowsProcessed = 0L;
 
@@ -103,6 +104,13 @@ CopyFromRemoteQuery(Oid relationId, char *query)
 	/* use default CSV options for transmit */
 	bool		includeHeader = false;
 	List	   *copyOptions = InternalCSVOptions(includeHeader);
+
+	if (useFreeze)
+	{
+		DefElem *freezeOption = makeDefElem("freeze", (Node *) makeBoolean(true), -1);
+
+		copyOptions = lappend(copyOptions, freezeOption);
+	}
 
 	/* use pgduck_server TRANSMIT command to output CSV */
 	char	   *transmitCommand = psprintf("TRANSMIT %s", query);
