@@ -42,7 +42,8 @@
 
 static void ApplyDDLCatalogChanges(Oid relationId, List *ddlOperations,
 								   List **droppedColumns, char **metadataLocation,
-								   IcebergPartitionSpec * *partitionSpec);
+								   IcebergPartitionSpec * *partitionSpec,
+								   bool *tableDropped);
 static bool DDLsRequireIcebergSchemaChange(List *ddlOperations);
 
 
@@ -58,8 +59,9 @@ ApplyDDLChanges(Oid relationId, List *ddlOperations)
 	char	   *metadataLocation = NULL;
 
 	IcebergPartitionSpec *partitionSpec = NULL;
+	bool		tableDropped = false;
 
-	ApplyDDLCatalogChanges(relationId, ddlOperations, &droppedColumns, &metadataLocation, &partitionSpec);
+	ApplyDDLCatalogChanges(relationId, ddlOperations, &droppedColumns, &metadataLocation, &partitionSpec, &tableDropped);
 
 	bool		isIcebergTableCreated = metadataLocation != NULL;
 	bool		isPartitionByChange = partitionSpec != NULL;
@@ -75,6 +77,8 @@ ApplyDDLChanges(Oid relationId, List *ddlOperations)
 	 */
 	else if (DDLsRequireIcebergSchemaChange(ddlOperations))
 		TrackIcebergMetadataChangesInTx(relationId, list_make1_int(TABLE_DDL));
+	else if (tableDropped)
+		TrackIcebergMetadataChangesInTx(relationId, list_make1_int(TABLE_DROP));
 }
 
 
@@ -90,7 +94,8 @@ ApplyDDLChanges(Oid relationId, List *ddlOperations)
 static void
 ApplyDDLCatalogChanges(Oid relationId, List *ddlOperations,
 					   List **droppedColumns, char **metadataLocation,
-					   IcebergPartitionSpec * *partitionSpec)
+					   IcebergPartitionSpec * *partitionSpec,
+					   bool *tableDropped)
 {
 	ListCell   *ddlOperationCell = NULL;
 
@@ -121,6 +126,8 @@ ApplyDDLCatalogChanges(Oid relationId, List *ddlOperations,
 		}
 		else if (ddlOperation->type == DDL_TABLE_DROP)
 		{
+			*tableDropped = true;
+
 			/*
 			 * This is not an expected case, either user manually messed with
 			 * the catalog or we have a bug. Still, we should not fail the

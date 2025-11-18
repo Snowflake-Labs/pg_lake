@@ -97,7 +97,8 @@ typedef enum TableMetadataOperationType
 	DATA_FILE_ADD_ROW_ID_MAPPING = 9,
 	TABLE_PARTITION_BY = 10,
 	TABLE_CREATE = 11,
-}			TableMetadataOperationType;
+	TABLE_DROP = 12
+} TableMetadataOperationType;
 
 struct IcebergPartitionSpec;
 struct Partition;

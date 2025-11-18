@@ -1032,6 +1032,7 @@ ShouldSkipMetadataChangeToIceberg(List *metadataOperationTypes)
 			case EXPIRE_OLD_SNAPSHOTS:
 			case TABLE_CREATE:
 			case TABLE_DDL:
+			case TABLE_DROP:
 			case TABLE_PARTITION_BY:
 				{
 					return false;

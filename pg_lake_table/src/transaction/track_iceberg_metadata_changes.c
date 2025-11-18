@@ -183,6 +183,9 @@ RecordIcebergMetadataOperation(Oid relationId, TableMetadataOperationType operat
 		case TABLE_CREATE:
 			opTracker->relationCreated = true;
 			break;
+		case TABLE_DROP:
+			opTracker->relationDropped = true;
+			break;
 		case TABLE_DDL:
 			opTracker->relationAltered = true;
 			break;
@@ -266,7 +269,7 @@ ApplyTrackedIcebergMetadataChanges(void)
 		Oid			relationId = opTracker->relationId;
 
 		/* relation is dropped */
-		if (!RelationExistsInTheIcebergCatalog(relationId))
+		if (opTracker->relationDropped)
 			continue;
 
 		List	   *allTransforms = AllPartitionTransformList(relationId);

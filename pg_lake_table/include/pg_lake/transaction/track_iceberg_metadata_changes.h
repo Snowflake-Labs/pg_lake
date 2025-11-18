@@ -25,6 +25,7 @@ typedef struct TableMetadataOperationTracker
 	Oid			relationId;
 
 	bool		relationCreated;
+	bool		relationDropped;
 	bool		relationAltered;
 	bool		relationPartitionByChanged;
 	bool		relationDataFileChanged;
