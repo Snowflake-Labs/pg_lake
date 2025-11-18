@@ -52,7 +52,7 @@ static void CreateNamespaceOnRestCatalog(const char *catalogName, const char *na
 static char *EncodeBasicAuth(const char *clientId, const char *clientSecret);
 static char *JsonbGetStringByPath(const char *jsonb_text, int nkeys,...);
 static List *GetHeadersWithAuth(void);
-static char *AppendIcebergPartitionSpecForRestCatalogStage(List *partitionSpecs);
+static char *AppendIcebergPartitionSpecForRestCatalog(List *partitionSpecs);
 
 /*
 * StartStageRestCatalogIcebergTableCreate stages the creation of an iceberg table
@@ -67,8 +67,6 @@ static char *AppendIcebergPartitionSpecForRestCatalogStage(List *partitionSpecs)
 void
 StartStageRestCatalogIcebergTableCreate(Oid relationId)
 {
-	const char *catalogName = GetRestCatalogName(relationId);
-	const char *namespaceName = GetRestCatalogNamespace(relationId);
 	const char *relationName = GetRestCatalogTableName(relationId);
 
 	StringInfo	body = makeStringInfo();
@@ -94,6 +92,9 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId)
 
 	appendStringInfoChar(body, '}');	/* close body */
 
+	const char *catalogName = GetRestCatalogName(relationId);
+	const char *namespaceName = GetRestCatalogNamespace(relationId);
+
 	char	   *postUrl =
 		psprintf(REST_CATALOG_TABLES, RestCatalogHost,
 				 URLEncodePath(catalogName), URLEncodePath(namespaceName));
@@ -101,7 +102,8 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId)
 
 	/*
 	 * TODO: Should we make this configurable? Some object stores may require
-	 * different headers or authentication methods.
+	 * different headers or authentication methods. TODO: We currently do not
+	 * use vended credentials, but should we?
 	 */
 	char	   *vendedCreds = pstrdup("X-Iceberg-Access-Delegation: vended-credentials");
 
@@ -152,7 +154,7 @@ FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSche
 		RebuildIcebergSchemaFromDataFileSchema(relationId, dataFileSchema, &lastColumnId);
 	int			schemaCount = 1;
 
-	AppendIcebergTableSchemaForRestCatalogStage(body, newSchema, schemaCount);
+	AppendIcebergTableSchemaForRestCatalog(body, newSchema, schemaCount);
 	appendStringInfoChar(body, '}');	/* close updates element */
 
 	appendStringInfoChar(body, ',');
@@ -202,7 +204,7 @@ FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSche
 		appendJsonString(body, "action", "add-spec");
 		appendStringInfoString(body, ", ");
 
-		appendStringInfoString(body, AppendIcebergPartitionSpecForRestCatalogStage(list_make1(spec)));
+		appendStringInfoString(body, AppendIcebergPartitionSpecForRestCatalog(list_make1(spec)));
 
 		appendStringInfoChar(body, '}');	/* finish add-partition-spec */
 		appendStringInfoString(body, ", ");
@@ -733,9 +735,12 @@ GetRestCatalogName(Oid relationId)
 }
 
 
-
+/*
+* Appends the given IcebergPartitionSpec list as JSON to the given StringInfo, specifically
+* for use in Rest Catalog requests.
+*/
 static char *
-AppendIcebergPartitionSpecForRestCatalogStage(List *partitionSpecs)
+AppendIcebergPartitionSpecForRestCatalog(List *partitionSpecs)
 {
 	StringInfo	command = makeStringInfo();
 
@@ -777,8 +782,7 @@ GetAddSnapshotCatalogRequest(IcebergSnapshot * newSnapshot, Oid relationId)
 	if (newSnapshot->parent_snapshot_id > 0)
 		appendStringInfo(body, ",\"parent-snapshot-id\":%" PRId64, newSnapshot->parent_snapshot_id);
 
-	/* TODO: Polaris doesn't accept 0 sequence number */
-	appendStringInfo(body, ",\"sequence-number\":%" PRId64, newSnapshot->sequence_number == 0 ? 1 : newSnapshot->sequence_number);
+	appendStringInfo(body, ",\"sequence-number\":%" PRId64, newSnapshot->sequence_number);
 	appendStringInfo(body, ",\"timestamp-ms\":%ld", (long) (PostgresTimestampToIcebergTimestampMs()));	/* coarse ms */
 	appendStringInfo(body, ",\"manifest-list\":\"%s\"", newSnapshot->manifest_list);
 	appendStringInfoString(body, ",\"summary\":{\"operation\": \"append\"}");
@@ -819,7 +823,7 @@ GetAddSchemaCatalogRequest(Oid relationId, DataFileSchema * dataFileSchema)
 
 	int			schemaCount = 1;
 
-	AppendIcebergTableSchemaForRestCatalogStage(body, newSchema, schemaCount);
+	AppendIcebergTableSchemaForRestCatalog(body, newSchema, schemaCount);
 
 	/* set-current-schema to the one we just added */
 	appendStringInfoString(body, "}, {\"action\":\"set-current-schema\",\"schema-id\":-1}");
@@ -846,7 +850,7 @@ GetAddPartitionCatalogRequest(Oid relationId, List *partitionSpecs)
 	/* add-spec */
 	appendStringInfoString(body, "{\"action\":\"add-spec\",");
 
-	char	   *bodyPart = AppendIcebergPartitionSpecForRestCatalogStage(partitionSpecs);
+	char	   *bodyPart = AppendIcebergPartitionSpecForRestCatalog(partitionSpecs);
 
 	appendStringInfoString(body, bodyPart);
 	appendStringInfoChar(body, '}');

@@ -249,7 +249,7 @@ AppendIcebergTableSchemas(StringInfo command, IcebergTableSchema * schemas, size
 * API calls.
 */
 void
-AppendIcebergTableSchemaForRestCatalogStage(StringInfo command, IcebergTableSchema * schemas, size_t schemas_length)
+AppendIcebergTableSchemaForRestCatalog(StringInfo command, IcebergTableSchema * schemas, size_t schemas_length)
 {
 	appendStringInfoString(command, "\"schema\":");
 
