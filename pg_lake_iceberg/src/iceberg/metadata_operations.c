@@ -194,6 +194,12 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 		 * catalog.
 		 */
 		metadataPath = GetMetadataLocationForRestCatalogForIcebergTable(relationId);
+
+		/*
+		 * metadata for writable rest catalog is intended to be read-only in
+		 * the rest of the function, given the authoritative source is the
+		 * rest catalog.
+		 */
 		metadata = ReadIcebergTableMetadata(metadataPath);
 	}
 	else
