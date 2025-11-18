@@ -45,7 +45,8 @@ typedef enum RestCatalogOperationType
 	REST_CATALOG_ADD_SNAPSHOT = 1,
 	REST_CATALOG_ADD_SCHEMA = 2,
 	REST_CATALOG_ADD_PARTITION = 3,
-	REST_CATALOG_REMOVE_SNAPSHOT = 4
+	REST_CATALOG_REMOVE_SNAPSHOT = 4,
+	REST_CATALOG_DROP_TABLE = 5
 } RestCatalogOperationType;
 
 
@@ -71,6 +72,7 @@ extern PGDLLEXPORT char *GetMetadataLocationFromRestCatalog(const char *restCata
 extern PGDLLEXPORT char *GetMetadataLocationForRestCatalogForIcebergTable(Oid relationId);
 extern PGDLLEXPORT void ReportHTTPError(HttpResult httpResult, int level);
 extern PGDLLEXPORT List *PostHeadersWithAuth(void);
+extern PGDLLEXPORT List *DeleteHeadersWithAuth(void);
 extern PGDLLEXPORT RestCatalogRequest * GetAddSnapshotCatalogRequest(IcebergSnapshot * newSnapshot, Oid relationId);
 extern PGDLLEXPORT RestCatalogRequest * GetAddSchemaCatalogRequest(Oid relationId, DataFileSchema * dataFileSchema);
 extern PGDLLEXPORT RestCatalogRequest * GetAddPartitionCatalogRequest(Oid relationId, List *partitionSpec);

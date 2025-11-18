@@ -440,6 +440,19 @@ PostHeadersWithAuth(void)
 					  pstrdup("Content-Type: application/json"));
 }
 
+
+
+/*
+* Creates the headers for a DELETE request with authentication.
+*/
+List *
+DeleteHeadersWithAuth(void)
+{
+	return list_make1(psprintf("Authorization: Bearer %s", RestCatalogFetchAccessToken()));
+}
+
+
+
 /*
 * Creates the headers for a GET request with authentication.
 */

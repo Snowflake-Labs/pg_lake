@@ -53,7 +53,9 @@ typedef struct RestCatalogRequestPerTable
 	char	   *catalogNamespace;
 	char	   *catalogTableName;
 
-	List	   *createTableRequests;
+	RestCatalogRequest *createTableRequest;
+	RestCatalogRequest *dropTableRequest;
+
 	List	   *tableModifyRequests;
 }			RestCatalogRequestPerTable;
 
@@ -207,13 +209,17 @@ PostAllRestCatalogRequests(void)
 
 	while ((requestPerTable = hash_seq_search(&status)) != NULL)
 	{
-		ListCell   *requestCell = NULL;
+		RestCatalogRequest *createTableRequest = requestPerTable->createTableRequest;
+		RestCatalogRequest *dropTableRequest = requestPerTable->dropTableRequest;
 
-		foreach(requestCell, requestPerTable->createTableRequests)
+		if (createTableRequest != NULL || dropTableRequest != NULL)
 		{
-			RestCatalogRequest *request = (RestCatalogRequest *) lfirst(requestCell);
-
-			Assert(request->operationType == REST_CATALOG_CREATE_TABLE);
+			/*
+			 * We can only have one create or one drop table request per
+			 * table. If a table is created and dropped in the same
+			 * transaction, we skip both requests.
+			 */
+			Assert(createTableRequest == NULL || dropTableRequest == NULL);
 
 			const char *url =
 				psprintf(REST_CATALOG_TABLE,
@@ -222,16 +228,37 @@ PostAllRestCatalogRequests(void)
 						 URLEncodePath(requestPerTable->catalogNamespace),
 						 URLEncodePath(requestPerTable->catalogTableName));
 
-			HttpResult	httpResult = HttpPost(url, request->body, PostHeadersWithAuth());
-
-			if (httpResult.status != 200)
+			if (createTableRequest != NULL)
 			{
-				ReportHTTPError(httpResult, WARNING);
+				HttpResult	httpResult = HttpPost(url, createTableRequest->body, PostHeadersWithAuth());
 
-				/*
-				 * Ouch, something failed. Should we stop sending the
-				 * requests?
-				 */
+				if (httpResult.status != 200)
+				{
+					ReportHTTPError(httpResult, WARNING);
+
+					/*
+					 * Ouch, something failed. Should we stop sending the
+					 * requests?
+					 */
+				}
+			}
+			else if (dropTableRequest != NULL)
+			{
+				HttpResult	httpResult = HttpDelete(url, DeleteHeadersWithAuth());
+
+				if (httpResult.status != 204)
+				{
+					ReportHTTPError(httpResult, WARNING);
+
+					/*
+					 * Ouch, something failed. Should we stop sending the
+					 * requests?
+					 */
+				}
+			}
+			else
+			{
+				pg_unreachable();
 			}
 		}
 	}
@@ -483,7 +510,11 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 	if (operationType == REST_CATALOG_CREATE_TABLE)
 	{
 		request->body = pstrdup(body);
-		requestPerTable->createTableRequests = list_make1(request);
+		requestPerTable->createTableRequest = request;
+	}
+	else if (operationType == REST_CATALOG_DROP_TABLE)
+	{
+		requestPerTable->dropTableRequest = request;
 	}
 	else if (operationType == REST_CATALOG_ADD_SNAPSHOT ||
 			 operationType == REST_CATALOG_ADD_SCHEMA ||
@@ -538,7 +569,16 @@ ApplyTrackedIcebergMetadataChanges(void)
 
 		/* relation is dropped */
 		if (!RelationExistsInTheIcebergCatalog(relationId))
+		{
+			/*
+			 * if created and dropped in the same tx, treat as no-op and skip
+			 * all
+			 */
+			if (!opTracker->relationCreated)
+				RecordRestCatalogRequestInTx(relationId, REST_CATALOG_DROP_TABLE, NULL);
+
 			continue;
+		}
 
 		List	   *allTransforms = AllPartitionTransformList(relationId);
 
