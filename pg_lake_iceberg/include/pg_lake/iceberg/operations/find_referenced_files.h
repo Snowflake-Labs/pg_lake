@@ -24,5 +24,6 @@
 extern PGDLLEXPORT List *FindUnreferencedFilesForSnapshots(IcebergSnapshot * prevSnapshots, int prevSnapshotCount,
 														   IcebergSnapshot * currentSnapshots, int currentSnapshotCount);
 extern PGDLLEXPORT List *IcebergFindAllReferencedFiles(char *metadataPath);
+extern PGDLLEXPORT List *FindUnreferencedFilesAmongHTABs(HTAB *prevReferencedFileHash, HTAB *currentReferencedFileHash);
 extern PGDLLEXPORT bool AppendFileToHash(const char *path, HTAB *referencedFilesHash);
 extern PGDLLEXPORT HTAB *CreateFilesHash(void);

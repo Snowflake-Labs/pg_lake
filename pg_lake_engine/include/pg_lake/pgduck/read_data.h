@@ -58,5 +58,6 @@ extern PGDLLEXPORT char *ReadDataSourceQuery(List *dataFilePaths,
 											 int flags);
 
 extern PGDLLEXPORT char *CopyOptionsToReadCSVParams(List *copyOptions);
+extern PGDLLEXPORT char *PathListToString(List *paths);
 
 #endif

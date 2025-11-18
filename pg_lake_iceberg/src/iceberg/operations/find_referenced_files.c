@@ -54,7 +54,6 @@ PG_FUNCTION_INFO_V1(find_unreferenced_files_via_snapshot_ids);
 static void IcebergMetadataAddAllReferencedFiles(char *metadataPath, HTAB *fileHash);
 static void IcebergSnapshotAddAllReferencedFiles(IcebergSnapshot * snapshot, HTAB *fileHash);
 static List *FindUnreferencedFiles(List *prevMetadataList, char *currentMetadataPath);
-static List *FindUnreferencedFilesAmongHTABs(HTAB *prevReferencedFileHash, HTAB *currentReferencedFileHash);
 static IcebergSnapshot * GetIcebergSnapshotsViaSnapshotIdList(IcebergTableMetadata * metadata, List *snapshotIdList);
 
 /*
@@ -331,7 +330,7 @@ FindUnreferencedFilesForSnapshots(IcebergSnapshot * prevSnapshots, int prevSnaps
 * FindUnreferencedFilesAmongHTABs finds all the files that are not referenced in the
 * current hash table but are referenced in the previous hash table.
 */
-static List *
+List *
 FindUnreferencedFilesAmongHTABs(HTAB *prevReferencedFileHash, HTAB *currentReferencedFileHash)
 {
 	List	   *unreferencedFiles = NIL;

@@ -59,6 +59,9 @@ typedef struct PgLakeTableScan
 	List	   *childScans;
 
 	bool		isUpdateDelete;
+
+	/* for dynamic paths, remember what this scan was based on */
+	char	   *sourcePath;
 }			PgLakeTableScan;
 
 /*
@@ -77,10 +80,13 @@ PgLakeScanSnapshot *CreatePgLakeScanSnapshot(List *rteList,
 											 bool includeChildren,
 											 Oid resultRelationId);
 PgLakeTableScan *GetTableScanByRelationId(PgLakeScanSnapshot * snapshot, Oid relationId);
-List	   *GetFileScanPathList(List *fileScans, uint64 *rowCount, bool skipFullScans);
 void		SnapshotFilesScanned(PgLakeScanSnapshot * scanSnapshot, int *dataFileScans, int *deleteFileScans);
 void		CreateTableScanForIcebergMetadata(Oid relationId,
 											  IcebergTableMetadata * metadata,
 											  List *baseRestrictInfoList,
 											  List **fileScans,
 											  List **positionDeleteScans);
+
+extern PGDLLEXPORT List *GetFileScanPathList(List *fileScans, uint64 *rowCount, bool skipFullScans);
+extern PGDLLEXPORT PgLakeTableScan *CreateFullTableScanForRelation(Oid relationId);
+extern PGDLLEXPORT char *GetIcebergMetadataLocation(Oid relationId);
