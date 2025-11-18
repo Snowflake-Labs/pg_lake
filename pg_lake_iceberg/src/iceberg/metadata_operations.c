@@ -164,39 +164,46 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 	IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
 	bool		writableRestCatalogTable = catalogType == REST_CATALOG_READ_WRITE;
 
+	int64_t		prevLastUpdatedMs = 0;
+
 	/* read the iceberg metadata for the table */
 	bool		forUpdate = true;
+
+	/*
+	 * Although writable rest catalog iceberg tables have their metadata
+	 * location stored in the rest catalog itself, we still need to read the
+	 * pg_lake metadata as forUpdate=true acquires necessary locks to prevent
+	 * concurrent updates.
+	 */
 	char	   *metadataPath = GetIcebergMetadataLocation(relationId, forUpdate);
 	bool		createNewTable = HasCreateTableOperation(metadataOperations);
-
+	
 	IcebergTableMetadata *metadata = NULL;
+	if (createNewTable)
+	{
+		metadata = GenerateInitialIcebergTableMetadata(relationId);
 
-	if (writableRestCatalogTable && !createNewTable)
+		metadata->last_sequence_number = 0;
+		metadata->last_updated_ms = PostgresTimestampToIcebergTimestampMs();
+	}
+	else if (writableRestCatalogTable)
 	{
 		/*
 		 * Writable rest catalog iceberg tables have their metadata updated in
-		 * the catalog itself. We fetch the metadata from the rest catalog. If
-		 * new table, we generate initial metadata below.
+		 * the REST catalog itself. We fetch the metadata from the rest
+		 * catalog.
 		 */
 		metadataPath = GetMetadataLocationForRestCatalogForIcebergTable(relationId);
 		metadata = ReadIcebergTableMetadata(metadataPath);
 	}
 	else
 	{
-		metadata = (createNewTable) ?
-			GenerateInitialIcebergTableMetadata(relationId) :
-			ReadIcebergTableMetadata(metadataPath);
+		metadata = ReadIcebergTableMetadata(metadataPath);
+
+		prevLastUpdatedMs = metadata->last_updated_ms;
+		metadata->last_sequence_number = metadata->last_sequence_number + 1;
+		metadata->last_updated_ms = PostgresTimestampToIcebergTimestampMs();
 	}
-
-
-	int64_t		prevLastUpdatedMs = metadata->last_updated_ms;
-
-	/*
-	 * prepare to use a new sequence number (might not be committed if there's
-	 * no change)
-	 */
-	metadata->last_sequence_number = createNewTable ? 0 : metadata->last_sequence_number + 1;
-	metadata->last_updated_ms = PostgresTimestampToIcebergTimestampMs();
 
 	IcebergSnapshotBuilder *builder = CreateIcebergSnapshotBuilder(metadata, metadataOperations);
 
@@ -204,10 +211,11 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 
 	if (builder->createTable || builder->regenerateSchema)
 	{
-
-		AppendCurrentPostgresSchema(relationId, metadata, builder->schema);
-
-		if (builder->regenerateSchema && writableRestCatalogTable)
+		if (!writableRestCatalogTable)
+		{
+			AppendCurrentPostgresSchema(relationId, metadata, builder->schema);
+		}
+		else if (builder->regenerateSchema)
 		{
 			RestCatalogRequest *request = GetAddSchemaCatalogRequest(relationId, builder->schema);
 
@@ -225,9 +233,9 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 		{
 			IcebergPartitionSpec *newSpec = lfirst(newSpecCell);
 
-			AppendPartitionSpec(metadata, newSpec);
-
-			if (builder->regeneratePartitionSpec && writableRestCatalogTable)
+			if (!writableRestCatalogTable)
+				AppendPartitionSpec(metadata, newSpec);
+			else if (builder->regeneratePartitionSpec)
 			{
 				RestCatalogRequest *request =
 					GetAddPartitionCatalogRequest(relationId, list_make1(newSpec));
@@ -249,13 +257,14 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 
 	if (newSnapshot != NULL)
 	{
-		/* update metadata's snapshot */
-		UpdateLatestSnapshot(metadata, newSnapshot);
-
 		createNewSnapshot = true;
 
-		if (writableRestCatalogTable)
+		/* update metadata's snapshot */
+		if (!writableRestCatalogTable)
+			UpdateLatestSnapshot(metadata, newSnapshot);
+		else
 		{
+			newSnapshot->sequence_number = metadata->last_sequence_number + 1;
 			RestCatalogRequest *request =
 				GetAddSnapshotCatalogRequest(newSnapshot, relationId);
 
@@ -307,7 +316,10 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 	 * metadata log for new tables.
 	 */
 	if (!createNewTable)
+	{
+		Assert(prevLastUpdatedMs != 0);
 		AdjustAndRetainMetadataLogs(metadata, metadataPath, metadata->snapshots_length, prevLastUpdatedMs);
+	}
 
 	int			version = metadata->last_sequence_number;
 
