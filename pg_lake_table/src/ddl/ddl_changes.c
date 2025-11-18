@@ -128,17 +128,6 @@ ApplyDDLCatalogChanges(Oid relationId, List *ddlOperations,
 		}
 		else if (ddlOperation->type == DDL_TABLE_DROP)
 		{
-			IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
-
-			if (catalogType == REST_CATALOG_READ_WRITE)
-			{
-				/*
-				 * TODO: Handle dropping of writable rest catalog iceberg
-				 * tables here.
-				 */
-				return;
-			}
-
 			/*
 			 * This is not an expected case, either user manually messed with
 			 * the catalog or we have a bug. Still, we should not fail the

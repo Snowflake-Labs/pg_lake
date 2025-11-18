@@ -212,15 +212,16 @@ PostAllRestCatalogRequests(void)
 		RestCatalogRequest *createTableRequest = requestPerTable->createTableRequest;
 		RestCatalogRequest *dropTableRequest = requestPerTable->dropTableRequest;
 
-		if (createTableRequest != NULL || dropTableRequest != NULL)
+		if (createTableRequest != NULL && dropTableRequest != NULL)
 		{
 			/*
-			 * We can only have one create or one drop table request per
-			 * table. If a table is created and dropped in the same
-			 * transaction, we skip both requests.
+			 * table is created and dropped in the same transaction, skip both
+			 * requests, essentially a no-op.
 			 */
-			Assert(createTableRequest == NULL || dropTableRequest == NULL);
-
+			continue;
+		}
+		else if (createTableRequest != NULL || dropTableRequest != NULL)
+		{
 			const char *url =
 				psprintf(REST_CATALOG_TABLE,
 						 RestCatalogHost,
@@ -282,7 +283,17 @@ PostAllRestCatalogRequests(void)
 	{
 		/* TODO: can we ever have multiple catalogs? */
 		catalogName = requestPerTable->catalogName;
-		if (requestPerTable->tableModifyRequests == NIL)
+
+		if (requestPerTable->createTableRequest != NULL &&
+			requestPerTable->dropTableRequest != NULL)
+		{
+			/*
+			 * table is created and dropped in the same transaction, nothing
+			 * post to do for this table to the REST catalog.
+			 */
+			continue;
+		}
+		else if (requestPerTable->tableModifyRequests == NIL)
 		{
 			/*
 			 * no modifications to send for this table
@@ -569,16 +580,7 @@ ApplyTrackedIcebergMetadataChanges(void)
 
 		/* relation is dropped */
 		if (!RelationExistsInTheIcebergCatalog(relationId))
-		{
-			/*
-			 * if created and dropped in the same tx, treat as no-op and skip
-			 * all
-			 */
-			if (!opTracker->relationCreated)
-				RecordRestCatalogRequestInTx(relationId, REST_CATALOG_DROP_TABLE, NULL);
-
 			continue;
-		}
 
 		List	   *allTransforms = AllPartitionTransformList(relationId);
 
