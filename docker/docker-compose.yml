@@ -1,24 +1,14 @@
 services:
   pg_lake-postgres:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: pg_lake_postgres
-      args:
-        - BASE_IMAGE_OS=almalinux
-        - BASE_IMAGE_TAG=9
+    image: pg_lake:local
     container_name: pg_lake
+    ports:
+      - "5432:5432"
     volumes:
-      - ${USERPROFILE}${HOME}/.ssh:/home/postgres/.ssh:ro
-      - ${USERPROFILE}${HOME}/.ssh/known_hosts:/home/postgres/.ssh/known_hosts:rw
-      - ${USERPROFILE}${HOME}/.gitconfig:/home/postgres/.gitconfig:ro
-      - ${USERPROFILE}${HOME}/.aws:/home/postgres/.aws:rw
       - ./scripts/entrypoint-postgres.sh:/entrypoint-postgres.sh
       - ./scripts/init-postgres.sql:/init-postgres.sql
       - pgduck-unix-socket-volume:/home/postgres/pgduck_socket_dir
-      - pg-18-tmp-dir-volume:/home/postgres/pgsql-18/data/base/pgsql_tmp
-      - pg-17-tmp-dir-volume:/home/postgres/pgsql-17/data/base/pgsql_tmp
-      - pg-16-tmp-dir-volume:/home/postgres/pgsql-16/data/base/pgsql_tmp
+      - pg-shared-tmp-dir-volume:/home/postgres/pgsql-${PG_MAJOR:-18}/data/base/pgsql_tmp
     entrypoint: ["/entrypoint-postgres.sh"]
     restart: unless-stopped
     healthcheck:
@@ -35,25 +25,17 @@ services:
       - pgduck-server
 
   pgduck-server:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: pgduck_server
-      args:
-        - BASE_IMAGE_OS=almalinux
-        - BASE_IMAGE_TAG=9
+    image: pgduck-server:local
     container_name: pgduck-server
-    environment:
-      AWS_SHARED_CREDENTIALS_FILE: /home/postgres/.aws/credentials
-      AWS_CONFIG_FILE: /home/postgres/.aws/config        
+    # NOTE: pgduck-server only listens on Unix sockets, not TCP
+    # To access DuckDB from the host, connect via pg_lake-postgres container which shares the Unix socket
+    # Example: psql -h localhost -p 5432 -U postgres -c "SELECT * FROM duckdb_fdw.some_table"
+    # IMPORTANT: Both containers must share the same temp directory volume so pgduck_server can access temp files
     volumes:
       - ./scripts/entrypoint-pgduck-server.sh:/entrypoint-pgduck-server.sh
       - ./scripts/init-pgduck-server.sql:/init-pgduck-server.sql
-      - ${USERPROFILE}${HOME}/.aws:/home/postgres/.aws:ro
       - pgduck-unix-socket-volume:/home/postgres/pgduck_socket_dir
-      - pg-18-tmp-dir-volume:/home/postgres/pgsql-18/data/base/pgsql_tmp
-      - pg-17-tmp-dir-volume:/home/postgres/pgsql-17/data/base/pgsql_tmp
-      - pg-16-tmp-dir-volume:/home/postgres/pgsql-16/data/base/pgsql_tmp
+      - pg-shared-tmp-dir-volume:/home/postgres/pgsql-${PG_MAJOR:-18}/data/base/pgsql_tmp
     entrypoint: ["/entrypoint-pgduck-server.sh"]
     restart: unless-stopped
     healthcheck:
@@ -67,23 +49,21 @@ services:
     cap_add:
       - SYS_PTRACE
     depends_on:
-      - minio
+      - localstack
 
-  minio:
-    image: minio/minio
-    container_name: minio
+  localstack:
+    container_name: "${LOCALSTACK_DOCKER_NAME:-localstack-main}"
+    image: localstack/localstack
+    ports:
+      - "127.0.0.1:4566:4566"            # LocalStack Gateway
+      - "127.0.0.1:4510-4559:4510-4559"  # external services port range
+    environment:
+      # LocalStack configuration: https://docs.localstack.cloud/references/configuration/
+      - DEBUG=${DEBUG:-0}
     volumes:
-        - ./scripts/entrypoint-minio.sh:/entrypoint-minio.sh
-    entrypoint: ["/entrypoint-minio.sh"]
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "http://localhost:9000"]
-      interval: 6s
-      timeout: 2s
-      retries: 3
+      - "${LOCALSTACK_VOLUME_DIR:-./.volume}:/var/lib/localstack"
+      - "${PWD}/scripts/init-s3.sh:/etc/localstack/init/ready.d/init-s3.sh" 
 
 volumes:
   pgduck-unix-socket-volume:
-  pg-18-tmp-dir-volume:
-  pg-17-tmp-dir-volume:
-  pg-16-tmp-dir-volume:
+  pg-shared-tmp-dir-volume:  # Shared temp directory for both PostgreSQL and pgduck_server
