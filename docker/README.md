@@ -37,9 +37,8 @@ task compose:logs
 
 ## 📚 Documentation
 
-- **[LOCAL_DEV.md](./LOCAL_DEV.md)** - Quick reference for local development ⭐ **Start here**
+- **[LOCAL_DEV.md](./LOCAL_DEV.md)** - Complete local development guide ⭐ **Start here**
 - **[TASKFILE.md](./TASKFILE.md)** - Detailed Task documentation
-- **[QUICKSTART.md](./QUICKSTART.md)** - Quick reference card
 
 ## 🎯 Common Commands
 

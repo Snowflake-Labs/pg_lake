@@ -1,16 +1,16 @@
-# Local Development with Task
+# pg_lake Local Development Guide
 
-Simple guide for building and running pg_lake locally.
+Complete guide for building, running, and developing pg_lake locally.
 
-## Prerequisites
+## 🚀 Quick Start (3 Steps)
 
-- Docker Desktop with at least **16GB RAM** allocated (pgduck_server/DuckDB compilation is memory-intensive)
-  - Configure: Docker Desktop → Settings → Resources → Memory
-- [Task](https://taskfile.dev/installation/) runner
+### 1. Prerequisites
 
-## Quick Start (3 steps)
-
-### 1. Install Task
+- Docker Desktop (with Docker Compose)
+  - **Minimum**: 8GB RAM allocated to Docker
+  - **Recommended**: 16GB RAM allocated to Docker (required for pgduck_server compilation)
+  - Configure in: Docker Desktop → Settings → Resources → Memory
+- [Task](https://taskfile.dev/installation/) - Task runner
 
 ```bash
 # macOS
@@ -20,7 +20,9 @@ brew install go-task
 sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b /usr/local/bin
 ```
 
-### 2. Build & Start Services
+**Note**: Tasks run in silent mode by default for cleaner output. Use `task -v <task-name>` to see verbose output when debugging.
+
+### 2. Build and Start Everything
 
 ```bash
 cd docker
@@ -29,75 +31,48 @@ cd docker
 task compose:up
 ```
 
-This will:
+This single command will:
 
-- Build `pg_lake:local` and `pgduck-server:local` images
-- Start all services with docker-compose
-- Services will be available on default ports
+- Build `pg_lake:local` and `pgduck-server:local` images for your architecture
+- Start PostgreSQL with pg_lake extensions
+- Start pgduck_server (DuckDB integration)
+- Start LocalStack (S3-compatible storage)
 
-### 3. View Logs
-
-```bash
-# View all logs
-task compose:logs
-
-# Or use docker-compose directly
-docker-compose logs -f pg_lake-postgres
-docker-compose logs -f pgduck-server
-```
-
-## Connecting to Databases
-
-### Connect to PostgreSQL (from host)
-
-PostgreSQL is exposed on port 5432 and accessible from your host machine:
+### 3. Connect and Test
 
 ```bash
-# Using psql from host
+# Connect to PostgreSQL from your host
 psql -h localhost -p 5432 -U postgres
 
-# Create an Iceberg table
-psql -h localhost -p 5432 -U postgres -c "CREATE TABLE test(id int, name text) USING iceberg;"
+# Create a test Iceberg table
+CREATE TABLE test(id int, name text) USING iceberg;
+
+# Insert some data
+INSERT INTO test VALUES (1, 'Alice'), (2, 'Bob');
+
+# Query it
+SELECT * FROM test;
 ```
 
-### Connect to DuckDB via pgduck_server
-
-**Important**: `pgduck_server` only listens on Unix sockets (not TCP), so you cannot connect directly from the host.
-
-The `pg_lake-postgres` container shares the Unix socket with `pgduck_server`:
+**Verify Iceberg files in S3:**
 
 ```bash
-# Exec into the pg_lake container
-docker exec -it pg_lake bash
+# View the Iceberg table files stored in LocalStack S3 (no AWS CLI needed!)
+task s3:list
 
-# Connect to pgduck_server via Unix socket
-psql -h /home/postgres/pgduck_socket_dir -p 5332 -U postgres
-
-# Or directly from host using docker exec
-docker exec -it pg_lake psql -h /home/postgres/pgduck_socket_dir -p 5332 -U postgres
+# You should see files like:
+# 📦 S3 Bucket Contents (s3://testbucket/pg_lake/):
+#
+# ├── data_0.parquet
+# ├── 00000-6f561147-24ab-449d-922a-713d6adbb4ff.metadata.json
+# ├── 00001-bf29575f-3fbd-4fe0-96c7-8666706d4625.metadata.json
+# ├── 9f6a9c61-76ab-49ed-b336-3a27e786d1e4-m0.avro
+# ├── snap-745562050065240723-1-9f6a9c61-76ab-49ed-b336-3a27e786d1e4.avro
 ```
 
-### Connection Architecture
+---
 
-```mermaid
-Host Machine
-    │
-    ├─► Port 5432 (TCP) ───► pg_lake-postgres container
-    │                              │
-    │                              └─► Unix Socket ───► pgduck-server container
-    │
-    └─► Cannot connect directly to pgduck-server (Unix socket only)
-
-```
-
-Both containers share:
-
-- `pgduck-unix-socket-volume` - Unix socket for PostgreSQL protocol communication
-- `pg-shared-tmp-dir-volume` - Temporary files for data exchange
-
-## Available Commands
-
-**Note**: All tasks run in silent mode by default for clean output. Add `-v` flag to see verbose output for debugging: `task -v <task-name>`
+## 📋 Common Tasks
 
 ### Docker Compose Management
 
@@ -114,14 +89,18 @@ task compose:teardown
 # Restart services
 task compose:restart
 
-# View logs
+# View logs (all services)
 task compose:logs
+
+# View logs (specific service)
+task compose:logs SERVICE=pg_lake-postgres
+task compose:logs SERVICE=pgduck-server
 
 # Debug mode (verbose output)
 task -v compose:up
 ```
 
-### Build Only (without starting)
+### Build Management
 
 ```bash
 # Build images for local docker-compose
@@ -129,41 +108,96 @@ task build:local
 
 # Build with specific PostgreSQL version
 task build:local PG_MAJOR=17
+task build:local PG_MAJOR=16
 
 # Build with different base OS
 task build:local BASE_IMAGE_OS=debian BASE_IMAGE_TAG=12
+
+# Rebuild after code changes
+task build:local
+task compose:restart
 ```
 
-### Direct Docker Commands
-
-After building with Task, you can use standard docker-compose commands:
+### Image Management
 
 ```bash
-cd docker
+# List images with architecture
+task images:list
 
-# Start services
-docker-compose up -d
-
-# Stop services
-docker-compose down
-
-# View logs
-docker-compose logs -f
-
-# Check status
-docker-compose ps
-
-# Execute commands in containers (see "Connecting to Databases" section for more details)
-docker-compose exec pg_lake-postgres psql -U postgres
-docker-compose exec pg_lake-postgres psql -h /home/postgres/pgduck_socket_dir -p 5332 -U postgres
+# Clean up images
+task images:clean
 ```
 
-## Build Details
+### S3 / LocalStack
 
-### What gets built?
+```bash
+# View S3 bucket contents (Iceberg files)
+task s3:list
+```
 
-- **pg_lake:local** - PostgreSQL with pg_lake extensions
-- **pgduck-server:local** - pgduck server with DuckDB integration
+---
+
+## 🔌 Connecting to Databases
+
+### PostgreSQL (from host)
+
+PostgreSQL is exposed on port 5432 and accessible from your host machine:
+
+```bash
+# Using psql from host
+psql -h localhost -p 5432 -U postgres
+
+# Or with docker-compose
+docker-compose exec pg_lake-postgres psql -U postgres
+```
+
+### DuckDB via pgduck_server
+
+**Important**: `pgduck_server` only listens on Unix sockets (not TCP), so you cannot connect directly from the host.
+
+The `pg_lake-postgres` container shares the Unix socket with `pgduck_server`:
+
+```bash
+# Connect via Unix socket from pg_lake container
+docker exec -it pg_lake psql -h /home/postgres/pgduck_socket_dir -p 5332 -U postgres
+
+# Or exec into container first
+docker exec -it pg_lake bash
+psql -h /home/postgres/pgduck_socket_dir -p 5332 -U postgres
+
+# Test DuckDB version
+docker exec -it pg_lake psql -h /home/postgres/pgduck_socket_dir -p 5332 -U postgres -c "select version() as duckdb_version;"
+```
+
+Should show something like:
+
+```
+ duckdb_version
+----------------
+ v1.3.2
+(1 row)
+```
+
+### Connection Architecture
+
+```
+Host Machine
+    │
+    ├─► Port 5432 (TCP) ───► pg_lake-postgres container
+    │                              │
+    │                              └─► Unix Socket ───► pgduck-server container
+    │
+    └─► Cannot connect directly to pgduck-server (Unix socket only)
+```
+
+Both containers share:
+
+- `pgduck-unix-socket-volume` - Unix socket for PostgreSQL protocol communication
+- `pg-shared-tmp-dir-volume` - Temporary files for data exchange
+
+---
+
+## ⚙️ Configuration
 
 ### Default Configuration
 
@@ -185,9 +219,21 @@ task build:local PG_MAJOR=16
 PG_MAJOR=16 docker-compose up -d
 ```
 
-## Environment Variables
+### Environment Variables
 
-## Using AWS CLI with LocalStack (Optional)
+Create a `.env` file in the `docker` directory:
+
+```env
+# PostgreSQL Version (16, 17, or 18)
+PG_MAJOR=18
+
+# AWS Profile for LocalStack (optional)
+AWS_PROFILE=localstack
+```
+
+---
+
+## 🔧 AWS CLI with LocalStack (Optional)
 
 By default, use `task s3:list` to view S3 contents (no AWS CLI installation needed).
 
@@ -212,16 +258,6 @@ aws_access_key_id = test
 aws_secret_access_key = test
 ```
 
-Create a `.env` file in the `docker` directory:
-
-```env
-# PostgreSQL Version (16, 17, or 18)
-PG_MAJOR=18
-
-# AWS Profile for LocalStack
-AWS_PROFILE=localstack
-```
-
 ### Usage
 
 ```bash
@@ -241,7 +277,9 @@ aws s3 ls
 
 **Note**: The `task s3:list` command uses `docker exec` internally, so it works without any AWS CLI setup on your host.
 
-## Troubleshooting
+---
+
+## 🐛 Troubleshooting
 
 ### Build fails with memory error
 
@@ -260,11 +298,13 @@ sysctl hw.memsize
 free -h
 
 # Alternative: Build images separately to reduce peak memory usage
+cd docker  # Make sure you're in the docker directory
+
 # Build pg_lake first
-docker buildx build --target pg_lake_postgres --load -t pg_lake:local .
+docker buildx build --target pg_lake_postgres --load -t pg_lake:local -f Dockerfile .
 
 # Then build pgduck_server
-docker buildx build --target pgduck_server --load -t pgduck-server:local .
+docker buildx build --target pgduck_server --load -t pgduck-server:local -f Dockerfile .
 ```
 
 ### Images not found when starting docker-compose
@@ -275,6 +315,9 @@ task build:local
 
 # Verify images exist
 docker images | grep "pg_lake\|pgduck-server"
+
+# Or list all pg_lake images with details
+task images:list
 ```
 
 ### Services won't start
@@ -283,8 +326,10 @@ docker images | grep "pg_lake\|pgduck-server"
 # Check logs
 task compose:logs
 
-# Check if ports are already in use
+# Check container status
 docker-compose ps
+
+# Check if ports are already in use
 lsof -i :5432  # PostgreSQL port
 lsof -i :4566  # LocalStack port
 ```
@@ -332,7 +377,9 @@ task setup
 task build:local
 ```
 
-## Development
+---
+
+## 💻 Development Workflows
 
 ### Making changes to Dockerfile
 
@@ -353,42 +400,66 @@ task compose:logs
 ### Testing different configurations
 
 ```bash
-# Test PostgreSQL 17
-task build:local PG_MAJOR=17
-PG_MAJOR=17 docker-compose up -d
-
-# Test with Debian base
+# Test with Debian base (instead of default AlmaLinux)
 task build:local BASE_IMAGE_OS=debian BASE_IMAGE_TAG=12
 docker-compose up -d
+
+# Note: For testing different PostgreSQL versions, see "Change PostgreSQL Version" 
+# section in Configuration above
 ```
 
-## Image Sizes
+### Using Direct Docker Commands
 
-After optimization, expect these approximate sizes:
-
-- **pg_lake:local** - ~1.2GB (down from ~4GB)
-- **pgduck-server:local** - ~800MB (down from ~3GB)
-
-## Additional Resources
-
-- [Taskfile Documentation](./TASKFILE.md) - Full Task reference
-- [Docker Compose Docs](https://docs.docker.com/compose/)
-- [Dockerfile](./Dockerfile) - Build configuration
-
-## Common Tasks Reference
+After building with Task, you can use standard docker-compose commands:
 
 ```bash
-# Development cycle
-task compose:up          # Build + Start
-task compose:logs        # View logs
-task compose:restart     # Restart services
-task compose:down        # Stop services
+cd docker
 
-# Build only
-task build:local         # Build for local use
-task build:local PG_MAJOR=17  # Specific version
+# Start services
+docker-compose up -d
 
-# Cleanup
-task clean               # Remove buildx builder
-docker-compose down -v   # Remove all containers and volumes
+# Stop services
+docker-compose down
+
+# View logs
+docker-compose logs -f
+
+# Check status
+docker-compose ps
+
+# Execute commands in containers
+docker-compose exec pg_lake-postgres psql -U postgres
+docker-compose exec pg_lake-postgres psql -h /home/postgres/pgduck_socket_dir -p 5332 -U postgres
 ```
+
+---
+
+## 📊 Build Details
+
+### What gets built?
+
+- **pg_lake:local** - PostgreSQL with pg_lake extensions
+- **pgduck-server:local** - pgduck server with DuckDB integration
+
+---
+
+## 💡 Tips
+
+- Images are tagged as `pg_lake:local` and `pgduck-server:local`
+
+- For publishing images to registries, see [TASKFILE.md](./TASKFILE.md)
+
+- Use `task -v <command>` for verbose output when debugging
+
+- Container names vs service names:
+  - Service name: `pg_lake-postgres` (use with `docker-compose exec`)
+  - Container name: `pg_lake` (use with `docker exec`)
+
+---
+
+## 📚 Additional Resources
+
+- [TASKFILE.md](./TASKFILE.md) - Complete Task reference with publishing workflows
+- [Dockerfile](./Dockerfile) - Image build configuration
+- [docker-compose.yml](./docker-compose.yml) - Service configuration
+- [README.md](./README.md) - Architecture overview and optimizations
