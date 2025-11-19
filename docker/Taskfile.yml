@@ -1,0 +1,380 @@
+version: "3"
+
+vars:
+    REGISTRY: '{{.REGISTRY | default "ghcr.io"}}'
+    IMAGE_OWNER: '{{.IMAGE_OWNER | default (env "DOCKER_HUB_USERNAME")}}'
+    VERSION: '{{.VERSION | default "latest"}}'
+    PG_MAJOR: '{{.PG_MAJOR | default "18"}}'
+    PLATFORMS: '{{.PLATFORMS | default "linux/amd64,linux/arm64"}}'
+    BASE_IMAGE_OS: '{{.BASE_IMAGE_OS | default "almalinux"}}'
+    BASE_IMAGE_TAG: '{{.BASE_IMAGE_TAG | default "9"}}'
+
+tasks:
+    setup:
+        desc: Setup Docker buildx for multi-platform builds (per PG_MAJOR version)
+        silent: true
+        cmds:
+            - docker buildx create --name pg_lake_builder_pg{{.PG_MAJOR}} --use --bootstrap || docker buildx use
+              pg_lake_builder_pg{{.PG_MAJOR}}
+            - docker buildx inspect --bootstrap
+        status:
+            - docker buildx inspect pg_lake_builder_pg{{.PG_MAJOR}}
+
+    build:pg-lake-postgres:
+        desc: Build pg_lake_postgres image for multiple platforms
+        silent: true
+        cmds:
+            - task: setup
+              vars: { PG_MAJOR: "{{.PG_MAJOR}}" }
+            - |
+                docker buildx build \
+                  --builder pg_lake_builder_pg{{.PG_MAJOR}} \
+                  --platform {{.PLATFORMS}} \
+                  --target pg_lake_postgres \
+                  --build-arg PG_MAJOR={{.PG_MAJOR}} \
+                  --build-arg BASE_IMAGE_OS={{.BASE_IMAGE_OS}} \
+                  --build-arg BASE_IMAGE_TAG={{.BASE_IMAGE_TAG}} \
+                  -t {{.REGISTRY}}/{{.IMAGE_OWNER}}/pg_lake:{{.VERSION}}-pg{{.PG_MAJOR}}-{{.BASE_IMAGE_OS}} \
+                  -t {{.REGISTRY}}/{{.IMAGE_OWNER}}/pg_lake:{{.VERSION}}-pg{{.PG_MAJOR}} \
+                  {{if eq .PUSH "true"}}--push{{end}} \
+                  -f Dockerfile \
+                  --progress=plain \
+                  .
+        vars:
+            PUSH: '{{.PUSH | default "false"}}'
+
+    build:pgduck-server:
+        desc: Build pgduck_server image for multiple platforms
+        silent: true
+        cmds:
+            - task: setup
+              vars: { PG_MAJOR: "{{.PG_MAJOR}}" }
+            - |
+                docker buildx build \
+                  --builder pg_lake_builder_pg{{.PG_MAJOR}} \
+                  --platform {{.PLATFORMS}} \
+                  --target pgduck_server \
+                  --build-arg PG_MAJOR={{.PG_MAJOR}} \
+                  --build-arg BASE_IMAGE_OS={{.BASE_IMAGE_OS}} \
+                  --build-arg BASE_IMAGE_TAG={{.BASE_IMAGE_TAG}} \
+                  -t {{.REGISTRY}}/{{.IMAGE_OWNER}}/pgduck-server:{{.VERSION}}-pg{{.PG_MAJOR}}-{{.BASE_IMAGE_OS}} \
+                  -t {{.REGISTRY}}/{{.IMAGE_OWNER}}/pgduck-server:{{.VERSION}}-pg{{.PG_MAJOR}} \
+                  {{if eq .PUSH "true"}}--push{{end}} \
+                  -f Dockerfile \
+                  --progress=plain \
+                  .
+        vars:
+            PUSH: '{{.PUSH | default "false"}}'
+
+    build:all:
+        desc: Build all images for multiple platforms
+        silent: true
+        cmds:
+            - task: setup
+              vars: { PG_MAJOR: "{{.PG_MAJOR}}" }
+            - task: build:pg-lake-postgres
+              vars:
+                  {
+                      PG_MAJOR: "{{.PG_MAJOR}}",
+                      VERSION: "{{.VERSION}}",
+                      PUSH: "{{.PUSH}}",
+                      BASE_IMAGE_OS: "{{.BASE_IMAGE_OS}}",
+                      BASE_IMAGE_TAG: "{{.BASE_IMAGE_TAG}}",
+                      PLATFORMS: "{{.PLATFORMS}}",
+                  }
+            - task: build:pgduck-server
+              vars:
+                  {
+                      PG_MAJOR: "{{.PG_MAJOR}}",
+                      VERSION: "{{.VERSION}}",
+                      PUSH: "{{.PUSH}}",
+                      BASE_IMAGE_OS: "{{.BASE_IMAGE_OS}}",
+                      BASE_IMAGE_TAG: "{{.BASE_IMAGE_TAG}}",
+                      PLATFORMS: "{{.PLATFORMS}}",
+                  }
+
+    push:pg-lake-postgres:
+        desc: Build and push pg_lake_postgres image
+        silent: true
+        cmds:
+            - task: build:pg-lake-postgres
+              vars:
+                  {
+                      PG_MAJOR: "{{.PG_MAJOR}}",
+                      VERSION: "{{.VERSION}}",
+                      PUSH: "true",
+                      BASE_IMAGE_OS: "{{.BASE_IMAGE_OS}}",
+                      BASE_IMAGE_TAG: "{{.BASE_IMAGE_TAG}}",
+                      PLATFORMS: "{{.PLATFORMS}}",
+                  }
+
+    push:pgduck-server:
+        desc: Build and push pgduck_server image
+        silent: true
+        cmds:
+            - task: build:pgduck-server
+              vars:
+                  {
+                      PG_MAJOR: "{{.PG_MAJOR}}",
+                      VERSION: "{{.VERSION}}",
+                      PUSH: "true",
+                      BASE_IMAGE_OS: "{{.BASE_IMAGE_OS}}",
+                      BASE_IMAGE_TAG: "{{.BASE_IMAGE_TAG}}",
+                      PLATFORMS: "{{.PLATFORMS}}",
+                  }
+
+    push:all:
+        desc: Build and push all images
+        silent: true
+        cmds:
+            - task: build:all
+              vars:
+                  {
+                      PG_MAJOR: "{{.PG_MAJOR}}",
+                      VERSION: "{{.VERSION}}",
+                      PUSH: "true",
+                      BASE_IMAGE_OS: "{{.BASE_IMAGE_OS}}",
+                      BASE_IMAGE_TAG: "{{.BASE_IMAGE_TAG}}",
+                      PLATFORMS: "{{.PLATFORMS}}",
+                  }
+
+    build:all-pg-versions:
+        desc: Build all images for PostgreSQL 16, 17, and 18
+        silent: true
+        cmds:
+            - task: build:all
+              vars: { PG_MAJOR: "16", VERSION: "{{.VERSION}}", PUSH: "{{.PUSH}}" }
+            - task: build:all
+              vars: { PG_MAJOR: "17", VERSION: "{{.VERSION}}", PUSH: "{{.PUSH}}" }
+            - task: build:all
+              vars: { PG_MAJOR: "18", VERSION: "{{.VERSION}}", PUSH: "{{.PUSH}}" }
+
+    push:all-pg-versions:
+        desc: Build and push all images for PostgreSQL 16, 17, and 18
+        silent: true
+        cmds:
+            - task: build:all-pg-versions
+              vars:
+                  {
+                      VERSION: "{{.VERSION}}",
+                      PUSH: "true",
+                      BASE_IMAGE_OS: "{{.BASE_IMAGE_OS}}",
+                      BASE_IMAGE_TAG: "{{.BASE_IMAGE_TAG}}",
+                      PLATFORMS: "{{.PLATFORMS}}",
+                  }
+
+    clean:
+        desc: Remove all buildx builders (all PG versions)
+        silent: true
+        cmds:
+            - docker buildx rm pg_lake_builder_pg16 || true
+            - docker buildx rm pg_lake_builder_pg17 || true
+            - docker buildx rm pg_lake_builder_pg18 || true
+            - docker buildx rm pg_lake_builder || true
+            - echo "✅ All buildx builders removed"
+        ignore_error: true
+
+    clean:builder:
+        desc: Remove buildx builder for specific PG_MAJOR version
+        silent: true
+        cmds:
+            - docker buildx rm pg_lake_builder_pg{{.PG_MAJOR}} || true
+            - echo "✅ Buildx builder for PG {{.PG_MAJOR}} removed"
+        ignore_error: true
+
+    clean:cache:
+        desc: Clean buildx cache (all builders)
+        silent: true
+        cmds:
+            - docker buildx prune -af
+            - echo "✅ All buildx caches cleared"
+
+    clean:cache-version:
+        desc: Clean buildx cache for specific PG_MAJOR version
+        silent: true
+        cmds:
+            - docker buildx use pg_lake_builder_pg{{.PG_MAJOR}} 2>/dev/null && docker buildx prune -f || echo "Builder
+              pg_lake_builder_pg{{.PG_MAJOR}} not found"
+            - echo "✅ Cache for PG {{.PG_MAJOR}} cleared"
+
+    clean:all:
+        desc: Remove all builders, caches, and local images
+        silent: true
+        cmds:
+            - task: clean
+            - task: clean:cache
+            - task: images:clean
+            - echo "🧹 Complete cleanup finished"
+
+    login:dockerhub:
+        desc: Login to Docker Hub Container Registry
+        silent: true
+        cmds:
+            - echo "$DOCKER_HUB_TOKEN" | docker login docker.io -u $DOCKER_HUB_USERNAME --password-stdin
+        preconditions:
+            - sh: '[ ! -z "$DOCKER_HUB_TOKEN" ]'
+              msg: "DOCKER_HUB_TOKEN environment variable must be set"
+            - sh: '[ ! -z "$DOCKER_HUB_USERNAME" ]'
+              msg: "DOCKER_HUB_USERNAME environment variable must be set"
+
+    login:ghcr:
+        desc: Login to GitHub Container Registry
+        silent: true
+        cmds:
+            - echo "$GITHUB_TOKEN" | docker login ghcr.io -u $GITHUB_ACTOR --password-stdin
+        preconditions:
+            - sh: '[ ! -z "$GITHUB_TOKEN" ]'
+              msg: "GITHUB_TOKEN environment variable must be set"
+            - sh: '[ ! -z "$GITHUB_ACTOR" ]'
+              msg: "GITHUB_ACTOR environment variable must be set"
+
+    build:local:
+        desc: Build images for local docker-compose (single platform)
+        silent: true
+        cmds:
+            - task: setup
+              vars: { PG_MAJOR: "{{.PG_MAJOR}}" }
+            - |
+                docker buildx build \
+                  --builder pg_lake_builder_pg{{.PG_MAJOR}} \
+                  --platform linux/{{ARCH}} \
+                  --target pg_lake_postgres \
+                  --build-arg PG_MAJOR={{.PG_MAJOR}} \
+                  --build-arg BASE_IMAGE_OS={{.BASE_IMAGE_OS}} \
+                  --build-arg BASE_IMAGE_TAG={{.BASE_IMAGE_TAG}} \
+                  -t pg_lake:local-pg{{.PG_MAJOR}}-{{.BASE_IMAGE_OS}} \
+                  -t pg_lake:local-pg{{.PG_MAJOR}} \
+                  -t pg_lake:local \
+                  --load \
+                  -f Dockerfile \
+                  --progress=plain \
+                  .
+            - |
+                docker buildx build \
+                  --builder pg_lake_builder_pg{{.PG_MAJOR}} \
+                  --platform linux/{{ARCH}} \
+                  --target pgduck_server \
+                  --build-arg PG_MAJOR={{.PG_MAJOR}} \
+                  --build-arg BASE_IMAGE_OS={{.BASE_IMAGE_OS}} \
+                  --build-arg BASE_IMAGE_TAG={{.BASE_IMAGE_TAG}} \
+                  -t pgduck-server:local-pg{{.PG_MAJOR}}-{{.BASE_IMAGE_OS}} \
+                  -t pgduck-server:local-pg{{.PG_MAJOR}} \
+                  -t pgduck-server:local \
+                  --load \
+                  -f Dockerfile \
+                  --progress=plain \
+                  .
+        vars:
+            ARCH:
+                sh: uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/'
+
+    # TODO:need to make muslc with duckdb extensions build
+    # build:local-alpine:
+    #     desc: Build images with Alpine Linux (experimental - builds DuckDB extensions from source)
+    #     silent: true
+    #     cmds:
+    #         - task: setup
+    #           vars: { PG_MAJOR: "{{.PG_MAJOR}}" }
+    #         - |
+    #             docker buildx build \
+    #               --builder pg_lake_builder_pg{{.PG_MAJOR}} \
+    #               --platform linux/{{ARCH}} \
+    #               --target pg_lake_postgres \
+    #               --build-arg PG_MAJOR={{.PG_MAJOR}} \
+    #               -t pg_lake:alpine-pg{{.PG_MAJOR}} \
+    #               -t pg_lake:alpine \
+    #               -t pg_lake:local \
+    #               --load \
+    #               -f Dockerfile.alpine \
+    #               --progress=plain \
+    #               .
+    #         - |
+    #             docker buildx build \
+    #               --builder pg_lake_builder_pg{{.PG_MAJOR}} \
+    #               --platform linux/{{ARCH}} \
+    #               --target pgduck_server \
+    #               --build-arg PG_MAJOR={{.PG_MAJOR}} \
+    #               -t pgduck-server:alpine-pg{{.PG_MAJOR}} \
+    #               -t pgduck-server:alpine \
+    #               -t pgduck-server:local \
+    #               --load \
+    #               -f Dockerfile.alpine \
+    #               --progress=plain \
+    #               .
+    #     vars:
+    #         ARCH:
+    #             sh: uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/'
+
+    compose:up:
+        desc: Build images and start docker-compose
+        silent: true
+        cmds:
+            - task: build:local
+              vars: { PG_MAJOR: "{{.PG_MAJOR}}" }
+            - PG_MAJOR={{.PG_MAJOR}} docker-compose up -d
+            - echo "Services started! Check logs with 'docker-compose logs -f'"
+
+    compose:down:
+        desc: Stop and remove docker-compose services
+        silent: true
+        cmds:
+            - PG_MAJOR={{.PG_MAJOR}} docker-compose down
+
+    compose:logs:
+        desc: View docker-compose logs (optionally for specific SERVICE)
+        silent: true
+        cmds:
+            - PG_MAJOR={{.PG_MAJOR}} docker-compose logs -f {{.SERVICE}}
+
+    compose:restart:
+        desc: Restart docker-compose services
+        silent: true
+        cmds:
+            - PG_MAJOR={{.PG_MAJOR}} docker-compose restart
+
+    compose:teardown:
+        desc: Stop services and remove volumes (complete cleanup)
+        silent: true
+        cmds:
+            - PG_MAJOR={{.PG_MAJOR}} docker-compose down --volumes
+            - echo "⚠️  All services stopped and volumes removed"
+
+    images:list:
+        desc: List all built pg_lake images with architecture
+        silent: true
+        cmds:
+            - |
+                echo "📦 pg_lake and pgduck-server images:"
+                echo ""
+                printf "%-30s %-15s %-15s %-12s %-20s\n" "REPOSITORY:TAG" "IMAGE ID" "ARCHITECTURE" "SIZE" "CREATED"
+                printf "%-30s %-15s %-15s %-12s %-20s\n" "------------------------------" "---------------" "---------------" "------------" "--------------------"
+                docker images --format "{{"{{"}}.Repository}}\t{{"{{"}}.Tag}}\t{{"{{"}}.ID}}\t{{"{{"}}.Size}}\t{{"{{"}}.CreatedSince}}" | grep -E "(pg_lake|pgduck-server)" | while IFS=$'\t' read -r repo tag id size created; do
+                  arch=$(docker inspect "$id" --format='{{"{{"}}.Architecture}}')
+                  printf "%-30s %-15s %-15s %-12s %-20s\n" "$repo:$tag" "${id:0:12}" "$arch" "$size" "$created"
+                done || echo "No pg_lake images found"
+
+    images:clean:
+        desc: Remove all local pg_lake images
+        silent: true
+        cmds:
+            - docker rmi --force $(docker images -q pg_lake) 2>/dev/null || echo "No pg_lake images to remove"
+            - docker rmi --force $(docker images -q pgduck-server) 2>/dev/null || echo "No pgduck-server images to
+              remove"
+            - task: images:list
+
+    s3:list:
+        desc: List S3 bucket contents (LocalStack)
+        silent: true
+        cmds:
+            - |
+                echo "📦 S3 Bucket Contents (s3://testbucket/pg_lake/):"
+                echo ""
+                docker exec localstack-main awslocal s3 ls s3://testbucket/pg_lake/ --recursive | \
+                  awk '{print $4}' | \
+                  sort | \
+                  awk -F/ '{
+                    depth = NF - 1
+                    for(i=1; i<depth; i++) printf "│   "
+                    if(depth > 0) printf "├── "
+                    print $NF
+                  }' || echo "No objects found or LocalStack not running"

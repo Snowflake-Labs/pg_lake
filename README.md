@@ -101,7 +101,7 @@ The connection above is to the pgduck_server on its port (default 5332), NOT to 
 Once you set up the credential chain, you should set the `pg_lake_iceberg.default_location_prefix`. This is the location where Iceberg tables are stored:
 
 ```sql
-SET pg_lake_iceberg.default_location_prefix TO 's3://testbucketpglake';
+SET pg_lake_iceberg.default_location_prefix TO 's3://testbucket/pglake';
 ```
 
 You can also set the credentials on `pgduck_server` for [local development with `minio`](docs/building-from-source.md#running-s3-compatible-service-minio-locally).
@@ -137,7 +137,7 @@ SELECT table_name, metadata_location FROM iceberg_tables;
 
     table_name     |                                                metadata_location
 -------------------+--------------------------------------------------------------------------------------------------------------------
- iceberg_test      | s3://testbucketpglake/postgres/public/test/435029/metadata/00001-f0c6e20a-fd1c-4645-87c9-c0c64b92992b.metadata.json
+ iceberg_test      | s3://testbucket/pglake/postgres/public/test/435029/metadata/00001-f0c6e20a-fd1c-4645-87c9-c0c64b92992b.metadata.json
 ```
 
 ### COPY to/from S3
@@ -148,11 +148,11 @@ You can import or export data directly using `COPY` in **Parquet**, **CSV**, or 
 ```sql
 -- Copy data from Postgres to S3 with format parquet
 -- Read from any data source, including iceberg tables, heap tables or any query results
-COPY (SELECT * FROM iceberg_test) TO 's3://testbucketpglake/parquet_data/iceberg_test.parquet';
+COPY (SELECT * FROM iceberg_test) TO 's3://testbucket/pglake/parquet_data/iceberg_test.parquet';
 
 -- Copy back from S3 to any table in Postgres
 -- This example copies into an iceberg table, but could be heap table as well
-COPY iceberg_test FROM 's3://testbucketpglake/parquet_data/iceberg_test.parquet';
+COPY iceberg_test FROM 's3://testbucket/pglake/parquet_data/iceberg_test.parquet';
 ```
 
 ### Create foreign table for files on s3
@@ -163,7 +163,7 @@ You can create a foreign table directly from a file or set of files without havi
 -- use the files under the path, can use * for all files
 CREATE FOREIGN TABLE parquet_table() 
 SERVER pg_lake 
-OPTIONS (path 's3://testbucketpglake/parquet_data/*.parquet');
+OPTIONS (path 's3://testbucket/pglake/parquet_data/*.parquet');
 
 -- note that we infer the columns from the file
 \d parquet_table
@@ -173,7 +173,7 @@ OPTIONS (path 's3://testbucketpglake/parquet_data/*.parquet');
  key    | integer |           |          |         | 
  val    | text    |           |          |         | 
 Server: pg_lake
-FDW options: (path 's3://testbucketpglake/parquet_data/*.parquet')
+FDW options: (path 's3://testbucket/pglake/parquet_data/*.parquet')
 
 -- and, query it
 select count(*) from parquet_table;

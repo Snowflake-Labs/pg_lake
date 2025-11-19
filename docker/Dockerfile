@@ -9,7 +9,6 @@ ARG BASE_IMAGE_TAG
 
 # Set environment variables for non-interactive installations and PostgreSQL/PostGIS versions
 ENV PG_LAKE_REF=main
-ENV PG_MAJOR=18
 ARG PG16_VERSION=16.10
 ARG PG17_VERSION=17.6
 ARG PG18_VERSION=18.0
@@ -243,13 +242,11 @@ RUN git clone https://github.com/citusdata/pg_cron.git && \
     make install PG_CONFIG=$PGBASEDIR/pgsql-18/bin/pg_config && make clean PG_CONFIG=$PGBASEDIR/pgsql-18/bin/pg_config && \
     cd .. && rm -rf pg_cron
 
-ENV PATH=/home/postgres/pgsql-$PG_MAJOR/bin:$PATH
-
 # Install vcpkg as postgres user
 ARG VCPKG_VERSION=2025.01.13
 
 RUN git clone https://github.com/Microsoft/vcpkg.git -b $VCPKG_VERSION /home/postgres/vcpkg && \
-	./vcpkg/bootstrap-vcpkg.sh && \
+    ./vcpkg/bootstrap-vcpkg.sh && \
     ./vcpkg/vcpkg install azure-identity-cpp azure-storage-blobs-cpp azure-storage-files-datalake-cpp openssl
 
 ENV VCPKG_TOOLCHAIN_PATH="/home/postgres/vcpkg/scripts/buildsystems/vcpkg.cmake"
@@ -259,22 +256,151 @@ FROM dev_base AS base
 
 # Clone pg_lake project
 RUN git clone https://github.com/snowflake-labs/pg_lake.git \
-      --branch ${PG_LAKE_REF} --recurse-submodules /home/postgres/pg_lake
+    --branch ${PG_LAKE_REF} --recurse-submodules /home/postgres/pg_lake
 
-############## pg_lake_postgres ##############
-FROM base AS pg_lake_postgres
+############## pg_lake_builder - Build all pg_lake extensions ##############
+FROM base AS pg_lake_builder
 
-# Install pg_lake
+# need to redefine ARGs in each stage
+ARG PG_MAJOR=18
+
+# Set environment variables for the selected PostgreSQL version
+ENV PG_MAJOR=${PG_MAJOR}
+ENV PATH=/home/postgres/pgsql-${PG_MAJOR}/bin:$PATH
+
+# Install pg_lake extensions (build happens here, not in final image)
 RUN cd pg_lake && \
     make install-pg_lake_spatial && \
     make install-pg_lake_benchmark
 
-RUN initdb -D $PGBASEDIR/pgsql-$PG_MAJOR/data -U postgres --locale=C.UTF-8 --data-checksums
+############## pgduck_builder - Build duckdb_pglake and pgduck_server ##############
+FROM base AS pgduck_builder
 
-############## pg_duck_server ##############
-FROM base AS pgduck_server
-
+# need to redefine ARGs in each stage
+ARG PG_MAJOR=18
 ARG PGCOMPAT_BUILD_CONFIG=Release
 
-# Install pgduck_server
-RUN make install-pgduck_server
+# Set environment variables for the selected PostgreSQL version
+ENV PG_MAJOR=${PG_MAJOR}
+ENV PATH=/home/postgres/pgsql-${PG_MAJOR}/bin:$PATH
+
+# Install pgduck_server (build happens here, not in final image)
+RUN cd pg_lake && \
+    make install-pgduck_server && \
+    rm -r duckdb_pglake/build
+
+############## runtime_base - Minimal runtime environment ##############
+ARG BASE_IMAGE_OS="almalinux"
+ARG BASE_IMAGE_TAG="9"
+FROM ${BASE_IMAGE_OS}:${BASE_IMAGE_TAG} AS runtime_base
+
+# need to redefine ARGs in each stage
+ARG BASE_IMAGE_OS
+ARG BASE_IMAGE_TAG
+
+# Install ONLY runtime libraries (no -devel packages, no build tools)
+RUN if [ "$BASE_IMAGE_OS" = "almalinux" ]; then \
+    dnf -y update && \
+    dnf -y install epel-release && \
+    dnf config-manager --enable crb && \
+    dnf -y install --allowerasing \
+    ca-certificates \
+    readline \
+    zlib \
+    sudo \
+    nano \
+    libxml2 \
+    libxslt \
+    libicu \
+    openssl \
+    geos \
+    proj \
+    gdal \
+    json-c \
+    protobuf-c \
+    uuid \
+    lz4 \
+    xz \
+    snappy \
+    perl \
+    jansson \
+    libcurl && \
+    dnf clean all; \
+    fi
+
+RUN if [ "$BASE_IMAGE_OS" = "debian" ]; then \
+    apt-get update \
+    && apt-get install -y \
+    libreadline8 \
+    zlib1g \
+    libxml2 \
+    libxslt1.1 \
+    libicu72 \
+    libssl3 \
+    libgeos-c1v5 \
+    libproj25 \
+    libgdal32 \
+    libjson-c5 \
+    libprotobuf-c1 \
+    uuid-runtime \
+    libossp-uuid16 \
+    liblz4-1 \
+    liblzma5 \
+    libsnappy1v5 \
+    perl \
+    libjansson4 \
+    libcurl4 \
+    curl \
+    sudo \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*; \
+    fi
+
+# Create the postgres user with UID 1001
+RUN useradd -u 1001 -m -s /bin/bash postgres
+RUN echo "postgres ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers.d/postgres
+USER 1001:1001
+WORKDIR /home/postgres
+
+ENV PGBASEDIR=/home/postgres
+
+############## pg_lake_postgres - Final runtime image (COPY ONLY) ##############
+FROM runtime_base AS pg_lake_postgres
+
+# need to redefine ARGs in each stage
+ARG PG_MAJOR=18
+
+# Set environment variables for runtime
+ENV PG_MAJOR=${PG_MAJOR}
+ENV PATH=/home/postgres/pgsql-${PG_MAJOR}/bin:$PATH
+
+# Copy PostgreSQL binaries and libraries for the selected version from dev_base
+COPY --from=dev_base --chown=postgres:postgres /home/postgres/pgsql-${PG_MAJOR} /home/postgres/pgsql-${PG_MAJOR}
+
+# Copy pg_lake extensions from pg_lake_builder (they're already installed to pgsql-* directories)
+# We need to copy the updated lib and share directories with pg_lake extensions
+COPY --from=pg_lake_builder --chown=postgres:postgres /home/postgres/pgsql-${PG_MAJOR}/lib /home/postgres/pgsql-${PG_MAJOR}/lib
+COPY --from=pg_lake_builder --chown=postgres:postgres /home/postgres/pgsql-${PG_MAJOR}/share /home/postgres/pgsql-${PG_MAJOR}/share
+
+# Initialize database (lightweight operation, doesn't compile anything)
+RUN initdb -D $PGBASEDIR/pgsql-${PG_MAJOR}/data -U postgres --locale=C.UTF-8 --data-checksums
+
+############## pgduck_server - Final runtime image (COPY ONLY) ##############
+FROM runtime_base AS pgduck_server
+
+# need to redefine ARGs in each stage
+ARG PG_MAJOR=18
+
+# Set environment variables for runtime
+ENV PG_MAJOR=${PG_MAJOR}
+ENV PATH=/home/postgres/pgsql-${PG_MAJOR}/bin:$PATH
+
+# Copy PostgreSQL binaries and libraries for the selected version
+COPY --from=dev_base --chown=postgres:postgres /home/postgres/pgsql-${PG_MAJOR}/bin /home/postgres/pgsql-${PG_MAJOR}/bin
+COPY --from=dev_base --chown=postgres:postgres /home/postgres/pgsql-${PG_MAJOR}/lib /home/postgres/pgsql-${PG_MAJOR}/lib
+COPY --from=dev_base --chown=postgres:postgres /home/postgres/pgsql-${PG_MAJOR}/share /home/postgres/pgsql-${PG_MAJOR}/share
+
+# Copy pgduck_server binaries and libraries from pgduck_builder
+# Note: duckdb_pglake installs libduckdb.so (not duckdb_pglake.so)
+COPY --from=pgduck_builder --chown=postgres:postgres /home/postgres/pgsql-${PG_MAJOR}/bin/ /home/postgres/pgsql-${PG_MAJOR}/bin/
+COPY --from=pgduck_builder --chown=postgres:postgres /home/postgres/pgsql-${PG_MAJOR}/lib/ /home/postgres/pgsql-${PG_MAJOR}/lib/
+COPY --from=pgduck_builder --chown=postgres:postgres /home/postgres/pgsql-${PG_MAJOR}/share/ /home/postgres/pgsql-${PG_MAJOR}/share/
