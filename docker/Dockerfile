@@ -365,14 +365,12 @@ FROM runtime_base AS pgduck_server
 ARG PG_MAJOR=18
 
 # Copy PostgreSQL binaries and libraries for the selected version
-COPY --from=dev_base --chown=postgres:postgres /home/postgres/pgsql-${PG_MAJOR}/bin/psql /home/postgres/pgsql-${PG_MAJOR}/bin/psql
-COPY --from=dev_base --chown=postgres:postgres /home/postgres/pgsql-${PG_MAJOR}/bin/pg_config /home/postgres/pgsql-${PG_MAJOR}/bin/pg_config
-COPY --from=dev_base --chown=postgres:postgres /home/postgres/pgsql-${PG_MAJOR}/bin/initdb /home/postgres/pgsql-${PG_MAJOR}/bin/initdb
+COPY --from=dev_base --chown=postgres:postgres /home/postgres/pgsql-${PG_MAJOR}/bin /home/postgres/pgsql-${PG_MAJOR}/bin
 COPY --from=dev_base --chown=postgres:postgres /home/postgres/pgsql-${PG_MAJOR}/lib /home/postgres/pgsql-${PG_MAJOR}/lib
 COPY --from=dev_base --chown=postgres:postgres /home/postgres/pgsql-${PG_MAJOR}/share /home/postgres/pgsql-${PG_MAJOR}/share
 
 # Copy pgduck_server binaries and libraries from pgduck_builder
 # Note: duckdb_pglake installs libduckdb.so (not duckdb_pglake.so)
-COPY --from=pgduck_builder --chown=postgres:postgres /home/postgres/pgsql-${PG_MAJOR}/bin/pgduck_server /home/postgres/pgsql-${PG_MAJOR}/bin/pgduck_server
+COPY --from=pgduck_builder --chown=postgres:postgres /home/postgres/pgsql-${PG_MAJOR}/bin/ /home/postgres/pgsql-${PG_MAJOR}/bin/
 COPY --from=pgduck_builder --chown=postgres:postgres /home/postgres/pgsql-${PG_MAJOR}/lib/ /home/postgres/pgsql-${PG_MAJOR}/lib/
 COPY --from=pgduck_builder --chown=postgres:postgres /home/postgres/pgsql-${PG_MAJOR}/share/ /home/postgres/pgsql-${PG_MAJOR}/share/
