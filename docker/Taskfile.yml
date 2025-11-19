@@ -139,24 +139,6 @@ tasks:
             - sh: '[ ! -z "$GITHUB_ACTOR" ]'
               msg: "GITHUB_ACTOR environment variable must be set"
 
-    test:pg-lake-postgres:
-        desc: Test pg_lake_postgres image locally
-        silent: true
-        cmds:
-            - |
-                docker run --rm \
-                  {{.REGISTRY}}/{{.IMAGE_OWNER}}/pg_lake:{{.VERSION}} \
-                  psql --version
-
-    test:pgduck-server:
-        desc: Test pgduck_server image locally
-        silent: true
-        cmds:
-            - |
-                docker run --rm \
-                  {{.REGISTRY}}/{{.IMAGE_OWNER}}/pgduck-server:{{.VERSION}} \
-                  psql --version
-
     build:local:
         desc: Build images for local docker-compose (single platform)
         silent: true
