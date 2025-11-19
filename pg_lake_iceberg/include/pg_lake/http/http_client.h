@@ -34,6 +34,8 @@ typedef struct
 	const char *errorMsg;		/* error message */
 }			HttpResult;
 
+extern bool HttpClientTraceTraffic;
+
 /* plain C API (no PostgreSQL types) */
 extern PGDLLEXPORT HttpResult HttpGet(const char *url, List *headers);
 extern PGDLLEXPORT HttpResult HttpHead(const char *url, List *headers);

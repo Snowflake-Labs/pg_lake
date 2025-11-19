@@ -139,6 +139,18 @@ _PG_init(void)
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 
+
+	DefineCustomBoolVariable(
+							 "pg_lake_iceberg.http_client_trace_traffic",
+							 gettext_noop("When set to true, HTTP client logging is enabled."),
+							 NULL,
+							 &HttpClientTraceTraffic,
+							 false,
+							 PGC_USERSET,
+							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
+
 	DefineCustomStringVariable("pg_lake_iceberg.default_location_prefix",
 							   gettext_noop("Specifies the default location prefix for "
 											"iceberg tables. This is used when the location "

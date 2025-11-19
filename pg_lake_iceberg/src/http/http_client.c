@@ -31,6 +31,8 @@
 #include "utils/memutils.h"
 #include "pg_lake/http/http_client.h"
 
+#include <string.h>
+#include <ctype.h>
 #include <curl/curl.h>
 
 /* 5 second */
@@ -70,6 +72,8 @@ static void CurlGlobalCleanup(int code, Datum arg);
 static void CurlCleanup(CURL * curl, struct curl_slist *headerList);
 static HttpResult CurlReturnError(CURL * curl, struct curl_slist *headerList,
 								  CURLcode curlCode, const char *errorMsg);
+static const char *HttpRequestMethodToString(HttpMethod method);
+static char *RedactSensitiveJson(char *s);
 
 #define CURL_SETOPT(curl, opt, value) do { \
 	curlCode = curl_easy_setopt((curl), (opt), (value)); \
@@ -80,6 +84,9 @@ static HttpResult CurlReturnError(CURL * curl, struct curl_slist *headerList,
 	} while (0);
 
 static bool curlInitialized = false;
+
+
+bool		HttpClientTraceTraffic = false;
 
 
 /*
@@ -447,6 +454,21 @@ HttpCommonNoThrows(HttpMethod method, const char *url, const char *postData, con
 	struct curl_slist *curlHeaders = NULL;
 	CURLcode	curlCode = CURLE_OK;
 
+	if (HttpClientTraceTraffic && message_level_is_interesting(INFO))
+	{
+		StringInfo	postDataInfo = NULL;
+
+		if (postData)
+		{
+			postDataInfo = makeStringInfo();
+			appendStringInfo(postDataInfo, ", body: {%s}", postData);
+		}
+
+		ereport(INFO, (errmsg("making %s request to URL %s%s",
+							  HttpRequestMethodToString(method), url,
+							  postDataInfo ? RedactSensitiveJson(postDataInfo->data) : "")));
+	}
+
 	if (!CheckMinCurlVersion(curl_version_info(CURLVERSION_NOW)))
 		return CurlReturnError(curl, curlHeaders, CURLE_FAILED_INIT, "pg_lake_iceberg requires Curl version 7.20.0 or higher");
 
@@ -508,5 +530,127 @@ HttpCommonNoThrows(HttpMethod method, const char *url, const char *postData, con
 
 	ereport(DEBUG4, (errmsg("libcurl request completed successfully")));
 
+	if (HttpClientTraceTraffic && message_level_is_interesting(INFO))
+	{
+		ereport(INFO, (errmsg("received response with status code %ld, body: %s",
+							  res.status, res.body ? RedactSensitiveJson(res.body) : "<empty>")));
+	}
+
 	return res;
+}
+
+
+static const char *
+HttpRequestMethodToString(HttpMethod method)
+{
+	switch (method)
+	{
+		case HTTP_GET:
+			return "GET";
+		case HTTP_HEAD:
+			return "HEAD";
+		case HTTP_POST:
+			return "POST";
+		case HTTP_PUT:
+			return "PUT";
+		case HTTP_DELETE:
+			return "DELETE";
+		default:
+			return "UNKNOWN";
+	}
+}
+
+
+/*
+ * RedactSensitiveJson
+ *   In-place redaction of token-looking values in JSON-ish text.
+ */
+static char *
+RedactSensitiveJson(char *input)
+{
+	if (input == NULL)
+		return "NULL";
+
+	/*
+	 * Never touch the original input string, make a copy to redact.
+	 */
+	char	   *copyOfinput = pstrdup(input);
+
+	const char *keys[] = {
+		"\"access_token\"",
+		"\"refresh_token\"",
+		"\"id_token\"",
+		"\"session_token\"",
+		"\"token\"",
+		"\"client_secret\"",
+		"\"authorization\"",
+		"\"Authorization\""
+	};
+	const int	keyCount = sizeof(keys) / sizeof(keys[0]);
+
+	for (int i = 0; i < keyCount; i++)
+	{
+		const char *key = keys[i];
+		char	   *p = copyOfinput;
+
+		while ((p = strstr(p, key)) != NULL)
+		{
+			/* Move to the colon after the key */
+			char	   *colon = strchr(p + strlen(key), ':');
+
+			if (colon == NULL)
+			{
+				/* No colon? then this isn't a key-value pair, skip */
+				p += strlen(key);
+				continue;
+			}
+
+			char	   *v = colon + 1;	/* start of value (maybe spaces /
+										 * quote) */
+
+			/* Skip whitespace */
+			while (*v && isspace((unsigned char) *v))
+				v++;
+
+			int			quoted = 0;
+
+			if (!v)
+				return copyOfinput;
+
+			if (*v == '"')
+			{
+				quoted = 1;
+				v++;			/* move to first character of value */
+			}
+
+			char	   *q = v;
+
+			if (quoted)
+			{
+				/* Redact until the closing quote */
+				while (*q && *q != '"')
+				{
+					*q = '*';
+					q++;
+				}
+			}
+			else
+			{
+				/* Redact until comma, closing brace, or whitespace */
+				while (*q &&
+					   *q != ',' &&
+					   *q != '}' &&
+					   !isspace((unsigned char) *q))
+				{
+					*q = '*';
+					q++;
+				}
+			}
+
+			/* Continue search after the value we just redacted */
+			p = q;
+		}
+	}
+
+	return copyOfinput;
 }
