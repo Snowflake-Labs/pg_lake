@@ -799,10 +799,7 @@ GetAddSnapshotCatalogRequest(IcebergSnapshot * newSnapshot, Oid relationId)
 	appendStringInfo(body, ",\"timestamp-ms\":%ld", (long) (PostgresTimestampToIcebergTimestampMs()));	/* coarse ms */
 	appendStringInfo(body, ",\"manifest-list\":\"%s\"", newSnapshot->manifest_list);
 	appendStringInfoString(body, ",\"summary\":{\"operation\": \"append\"}");
-
-	if (newSnapshot->schema_id > 0)
-		appendStringInfo(body, ",\"schema-id\":%d", newSnapshot->schema_id);
-
+	appendStringInfo(body, ",\"schema-id\":%d", newSnapshot->schema_id);
 	appendStringInfoString(body, "}}, ");	/* end add-snapshot */
 
 	appendStringInfo(body, "{\"action\":\"set-snapshot-ref\", \"type\":\"branch\", \"ref-name\":\"main\", \"snapshot-id\":%lld}", newSnapshot->snapshot_id);
