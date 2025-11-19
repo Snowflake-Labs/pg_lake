@@ -37,7 +37,14 @@ def test_polaris_catalog_running(pg_conn, s3, polaris_session, installcheck):
 
 # fetch_data_files_used
 def test_writable_rest_basic_flow(
-    pg_conn, s3, polaris_session, set_polaris_gucs, with_default_location, installcheck
+    pg_conn,
+    superuser_conn,
+    s3,
+    polaris_session,
+    set_polaris_gucs,
+    with_default_location,
+    installcheck,
+    create_http_helper_functions,
 ):
 
     if installcheck:
@@ -140,6 +147,35 @@ def test_writable_rest_basic_flow(
     assert len(res) == 4
     assert res == [[1000], [1001], [1002], [1003]]
 
+    # positional delete
+    run_command(
+        f"""
+            INSERT INTO test_writable_rest_basic_flow.writable_rest SELECT i FROM generate_series(0,100)i;
+            """,
+        pg_conn,
+    )
+    pg_conn.commit()
+    run_command(
+        f"""
+            DELETE FROM test_writable_rest_basic_flow.writable_rest WHERE a = 15;
+            """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # copy-on-write
+    run_command(
+        f"""
+            UPDATE test_writable_rest_basic_flow.writable_rest SET a = a + 1 WHERE a > 10;
+            """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    assert_metadata_on_pg_catalog_and_rest_matches(
+        "test_writable_rest_basic_flow", "writable_rest", superuser_conn
+    )
+
     run_command(f"""DROP SCHEMA test_writable_rest_basic_flow CASCADE""", pg_conn)
     pg_conn.commit()
 
@@ -194,7 +230,7 @@ def test_writable_rest_ddl(
     assert columns[1][0] == "b"
 
     assert_metadata_on_pg_catalog_and_rest_matches(
-        "test_writable_rest_ddl", "writable_rest_3", superuser_conn, installcheck
+        "test_writable_rest_ddl", "writable_rest_3", superuser_conn
     )
 
     # multiple DDLs to a single table
@@ -233,7 +269,7 @@ def test_writable_rest_ddl(
     pg_conn.commit()
 
     assert_metadata_on_pg_catalog_and_rest_matches(
-        "test_writable_rest_ddl", "writable_rest_3", superuser_conn, installcheck
+        "test_writable_rest_ddl", "writable_rest_3", superuser_conn
     )
 
     # multiple DDLs to multiple tables
@@ -284,7 +320,7 @@ def test_writable_rest_ddl(
     assert columns[2][0] == "c"
 
     assert_metadata_on_pg_catalog_and_rest_matches(
-        "test_writable_rest_ddl", "writable_rest_3", superuser_conn, installcheck
+        "test_writable_rest_ddl", "writable_rest_3", superuser_conn
     )
 
     # modify table and DDL on a single table
@@ -300,7 +336,7 @@ def test_writable_rest_ddl(
     pg_conn.commit()
 
     assert_metadata_on_pg_catalog_and_rest_matches(
-        "test_writable_rest_ddl", "writable_rest", superuser_conn, installcheck
+        "test_writable_rest_ddl", "writable_rest", superuser_conn
     )
 
     run_command(
@@ -366,19 +402,17 @@ def test_writable_rest_ddl(
     pg_conn.commit()
 
 
-# TODO: extend this to cover all the metadata
-# currently it only does partitions
-# This is a variation of ExternalHeavyAssertsOnIcebergMetadataChange() in source code
-# we cannot apply that function to REST catalog tables, as changes happen in Post-commit
-
-
 def assert_metadata_on_pg_catalog_and_rest_matches(
-    namespace, table_name, superuser_conn, installcheck
+    namespace, table_name, superuser_conn
 ):
+    metadata = get_rest_table_metadata(namespace, table_name, superuser_conn)
 
-    metadata = get_rest_table_metadata(
-        namespace, table_name, superuser_conn, installcheck
-    )
+    assert_data_files_match(namespace, table_name, superuser_conn, metadata)
+    assert_schemas_equal(namespace, table_name, superuser_conn, metadata)
+    assert_partitions_equal(namespace, table_name, superuser_conn, metadata)
+
+
+def assert_partitions_equal(namespace, table_name, superuser_conn, metadata):
 
     # 1) default-spec-id check
     catalog_default_spec_id = run_query(
@@ -473,11 +507,194 @@ def assert_metadata_on_pg_catalog_and_rest_matches(
         )
 
 
-def get_rest_table_metadata(
-    encoded_namespace, encoded_table_name, pg_conn, installcheck
-):
-    if installcheck:
-        return
+def assert_schemas_equal(namespace, table_name, superuser_conn, metadata):
+    """
+    Compares a list of Iceberg-like schema dicts (with 'fields') to a list of rows
+    shaped as [id, name, required, type]. Ignores ordering and normalizes type names.
+    """
+
+    def norm_type(t: str) -> str:
+        t = str(t).strip().lower()
+        aliases = {
+            # common synonyms
+            "int": "integer",
+            "integer": "integer",
+            "long": "bigint",
+            "bigint": "bigint",
+            "short": "smallint",
+            "smallint": "smallint",
+            "bool": "boolean",
+            "boolean": "boolean",
+            "float": "float",
+            "double": "double",
+            "str": "string",
+            "string": "string",
+            "timestamp_tz": "timestamp_tz",
+            "timestamptz": "timestamp_tz",
+            "timestamp": "timestamp",
+            "date": "date",
+            "time": "time",
+            "uuid": "uuid",
+            "binary": "binary",
+            "decimal": "decimal",
+        }
+        return aliases.get(t, t)
+
+    # schema checks
+    schemas = metadata["metadata"].get("schemas", [])
+    last_schema = [schemas[-1]]
+
+    catalog_schemas_rows = run_query(
+        f"""
+        SELECT 
+            f.field_id, a.attname, a.attnotnull, f.field_pg_type
+        FROM
+            lake_table.field_id_mappings f JOIN pg_attribute a ON (a.attrelid = f.table_name and a.attnum=f.pg_attnum) 
+        WHERE table_name = '{namespace}.{table_name}'::regclass
+        """,
+        superuser_conn,
+    )
+
+    # Normalize/flatten the 'schemas' into rows
+    schema_rows = []
+    for s in last_schema or []:
+        for f in s.get("fields", []):
+            schema_rows.append(
+                [
+                    int(f["id"]),
+                    str(f["name"]),
+                    bool(f["required"]),
+                    norm_type(f["type"]),
+                ]
+            )
+
+    # Normalize the catalog rows
+    cat_rows = []
+    for r in catalog_schemas_rows or []:
+        cat_rows.append(
+            [
+                int(r[0]),
+                str(r[1]),
+                bool(r[2]),
+                norm_type(r[3]),
+            ]
+        )
+
+    # Sort by (id, name) for deterministic, order-insensitive comparison
+    schema_rows_sorted = sorted(schema_rows, key=lambda x: (x[0], x[1]))
+    cat_rows_sorted = sorted(cat_rows, key=lambda x: (x[0], x[1]))
+
+    assert schema_rows_sorted == cat_rows_sorted, (
+        "Schema mismatch.\n"
+        f"From schemas: {schema_rows_sorted}\n"
+        f"From catalog: {cat_rows_sorted}"
+    )
+
+
+def assert_data_files_match(namespace, table_name, superuser_conn, metadata):
+
+    metadata_location = metadata["metadata-location"]
+
+    data_files_metadata = pg_lake_iceberg_files(superuser_conn, metadata_location)
+
+    data_files_pg_catalog_agg = run_query(
+        f"""
+            SELECT
+              f.path,
+              COALESCE(
+                jsonb_object_agg(
+                  dfcs.field_id::text,
+                  to_jsonb(dfcs.lower_bound)
+                ) FILTER (WHERE dfcs.field_id IS NOT NULL),
+                '{{}}'::jsonb
+              ) AS lower_bounds,
+              COALESCE(
+                jsonb_object_agg(
+                  dfcs.field_id::text,
+                  to_jsonb(dfcs.upper_bound)
+                ) FILTER (WHERE dfcs.field_id IS NOT NULL),
+                '{{}}'::jsonb
+              ) AS upper_bounds
+            FROM lake_table.files f
+            LEFT JOIN lake_table.data_file_column_stats dfcs
+              ON dfcs.table_name = f.table_name
+             AND dfcs.path = f.path
+            WHERE f.table_name = '{namespace}.{table_name}'::regclass
+            GROUP BY f.path
+            ORDER BY f.path;
+            """,
+        superuser_conn,
+    )
+
+    def canon_json(v):
+        # Parse stringified JSON into Python types first
+        if not isinstance(v, (dict, list)):
+            v = json.loads(str(v))
+
+        def coerce(x):
+            # Recurse first
+            if isinstance(x, list):
+                return [coerce(i) for i in x]
+            if isinstance(x, dict):
+                return {str(k): coerce(val) for k, val in x.items()}
+
+            # Coerce leaf values so "100" and 100 compare equal
+            if isinstance(x, str):
+                s = x.strip()
+                if s.lower() in ("true", "false"):
+                    return s.lower() == "true"
+                try:
+                    d = Decimal(s)
+                    # Prefer ints when exact; otherwise use Decimal->float conservatively
+                    return int(d) if d == d.to_integral_value() else float(d)
+                except InvalidOperation:
+                    return s
+
+            if isinstance(x, (int, float)):
+                try:
+                    d = Decimal(str(x))
+                    return int(d) if d == d.to_integral_value() else float(d)
+                except InvalidOperation:
+                    return x
+
+            # Leave booleans/None and other scalars as-is
+            return x
+
+        coerced = coerce(v)
+        return json.dumps(coerced, sort_keys=True, separators=(",", ":"))
+
+    # Left: from pg_lake_read_data_file_stats (ignore seq at index 1)
+    left = sorted(
+        (str(r[0]).strip(), canon_json(r[2]), canon_json(r[3]))
+        for r in (data_files_metadata or [])
+    )
+    # Right: from the aggregated SQL above
+    right = sorted(
+        (str(r[0]).strip(), canon_json(r[1]), canon_json(r[2]))
+        for r in (data_files_pg_catalog_agg or [])
+    )
+
+    assert left == right, (
+        "Data file column stats mismatch.\n"
+        f"Only in metadata: {sorted(set(left) - set(right))[:5]}\n"
+        f"Only in pg_catalog: {sorted(set(right) - set(left))[:5]}"
+    )
+
+
+def pg_lake_iceberg_files(superuser_conn, metadata_location):
+    datafile_paths = run_query(
+        f"""
+        SELECT * FROM lake_iceberg.data_file_stats('{metadata_location}');
+
+""",
+        superuser_conn,
+    )
+
+    return datafile_paths
+
+
+def get_rest_table_metadata(encoded_namespace, encoded_table_name, pg_conn):
+
     url = f"http://{server_params.POLARIS_HOSTNAME}:{server_params.POLARIS_PORT}/api/catalog/v1/{server_params.PG_DATABASE}/namespaces/{encoded_namespace}/tables/{encoded_table_name}"
     token = get_polaris_access_token()
 
@@ -623,6 +840,7 @@ def create_http_helper_functions(superuser_conn, extension):
         DROP TYPE lake_iceberg.http_result;
         DROP FUNCTION IF EXISTS lake_iceberg.url_encode_path;
         DROP FUNCTION IF EXISTS lake_iceberg.register_namespace_to_rest_catalog;
+        DROP FUNCTION IF EXISTS lake_iceberg.datafile_paths_from_table_metadata;
                 """,
         superuser_conn,
     )
