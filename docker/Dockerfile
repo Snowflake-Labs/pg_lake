@@ -7,9 +7,8 @@ FROM ${BASE_IMAGE_OS}:${BASE_IMAGE_TAG} AS dev_base
 ARG BASE_IMAGE_OS
 ARG BASE_IMAGE_TAG
 
-# Set environment variables for non-interactive installations and PostgreSQL/PostGIS versions
-ENV PG_LAKE_REF=main
-ENV PG_MAJOR=18
+# Build arguments (can be overridden at build time)
+ARG PG_MAJOR=18
 ARG PG16_VERSION=16.10
 ARG PG17_VERSION=17.6
 ARG PG18_VERSION=18.0
@@ -17,6 +16,10 @@ ARG POSTGIS_VERSION=3.6.0
 ARG PGAUDIT16_VERSION=REL_16_STABLE
 ARG PGAUDIT17_VERSION=REL_17_STABLE
 ARG PGAUDIT18_VERSION=REL_18_STABLE
+
+# Set environment variables from build args
+ENV PG_MAJOR=${PG_MAJOR}
+ENV PG_LAKE_REF=main
 
 # Install build dependencies
 RUN if [ "$BASE_IMAGE_OS" = "almalinux" ]; then \
