@@ -29,6 +29,7 @@ extern void *ApplyBucketTransformToColumn(IcebergPartitionTransform * transform,
 										  size_t *bucketSize);
 extern List *CurrentPartitionTransformList(Oid relationId);
 extern List *AllPartitionTransformList(Oid relationId);
+extern List *PartitionTransformListForSourceFields(Oid relationId, HTAB *sourceFieldsHash);
 extern List *GetPartitionTransformsFromSpecFields(Oid relationId, List *specFields);
 extern void *DeserializePartitionValueFromPGText(IcebergPartitionTransform * transform,
 												 const char *valueText, size_t *valueLength);

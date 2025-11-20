@@ -182,7 +182,6 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 {
 	List	   *retainedDataFiles = NIL;
 	List	   *columnsUsedInFilters = ColumnsUsedInRestrictions(relationId, baseRestrictInfoList);
-	List	   *partitionTransforms = AllPartitionTransformList(relationId);
 	PgLakeTableProperties tableProperties = GetPgLakeTableProperties(relationId);
 
 	if ((!EnableDataFilePruning && !EnablePartitionPruning) ||
@@ -230,6 +229,9 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 
 	AddFieldIdsUsedInQuery(fieldIdsUsedInQuery, relationId, tableProperties, columnsUsedInFilters);
 
+	/* get partition transforms for the fields used in the query */
+	List	   *partitionTransforms = PartitionTransformListForSourceFields(relationId, fieldIdsUsedInQuery);
+
 	int			dataFileCount = list_length(dataFiles);
 
 	for (int dataFileIndex = 0; dataFileIndex < dataFileCount; ++dataFileIndex)
@@ -254,6 +256,7 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 			char	   *dataFilePath = (char *) ((DataFile *) dataFile)->file_path;
 
 			columnStats = GetRemoteParquetColumnStats(dataFilePath, leafFields);
+			partition = CopyPartition(&dataFile->partition);
 		}
 		else
 		{

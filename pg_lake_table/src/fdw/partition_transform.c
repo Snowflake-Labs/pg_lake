@@ -25,7 +25,9 @@
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/fdw/schema_operations/field_id_mapping_catalog.h"
+#include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/iceberg/api/partitioning.h"
+#include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/iceberg/iceberg_type_binary_serde.h"
 #include "pg_lake/iceberg/iceberg_type_numeric_binary_serde.h"
@@ -35,6 +37,7 @@
 #include "pg_lake/iceberg/hash_utils.h"
 #include "pg_lake/iceberg/truncate_utils.h"
 #include "pg_lake/util/numeric.h"
+#include "pg_lake/util/rel_utils.h"
 
 static PartitionField * ApplyPartitionTransformToTuple(IcebergPartitionTransform * transform,
 													   TupleTableSlot *slot);
@@ -63,6 +66,8 @@ static void ParseTransformName(const char *name, IcebergPartitionTransformType *
 static bool ParseBracketUintSize(const char *name, const char *prefix, size_t *outVal);
 static void *DatumToPartitionValue(IcebergPartitionTransform * transform, Datum columnValue, bool isNull,
 								   size_t *valuelength);
+static List *AllPartitionSpecFieldsForExternalIcebergTable(char *metadataPath);
+static List *GetAllPartitionSpecFields(Oid relationId);
 
 /*
  * ComputePartitionTupleForTuple applies relative partition transforms
@@ -125,17 +130,93 @@ CurrentPartitionTransformList(Oid relationId)
 List *
 AllPartitionTransformList(Oid relationId)
 {
-	List	   *partitionFields = GetAllIcebergSpecPartitionFieldsFromCatalog(relationId);
-
-	if (partitionFields == NIL)
-	{
-		/* not partitioned */
-		return NIL;
-	}
+	List	   *partitionFields = GetAllPartitionSpecFields(relationId);
 
 	return GetPartitionTransformsFromSpecFields(relationId, partitionFields);
 }
 
+
+/*
+ * PartitionTransformListForSourceFields gets the partition transforms for only the fields
+ * present in the sourceFieldsHash.
+ */
+List *
+PartitionTransformListForSourceFields(Oid relationId, HTAB *sourceFieldsHash)
+{
+	List	   *partitionFields = GetAllPartitionSpecFields(relationId);
+
+	List	   *filteredPartitionFields = NIL;
+	ListCell   *filteredPartitionFieldCell = NULL;
+
+	foreach(filteredPartitionFieldCell, partitionFields)
+	{
+		IcebergPartitionSpecField *specField = lfirst(filteredPartitionFieldCell);
+
+		bool		found = false;
+
+		hash_search(sourceFieldsHash, &specField->source_id, HASH_FIND, &found);
+
+		if (found)
+		{
+			filteredPartitionFields = lappend(filteredPartitionFields, specField);
+		}
+	}
+
+	return GetPartitionTransformsFromSpecFields(relationId, filteredPartitionFields);
+}
+
+
+/*
+ * GetAllPartitionSpecFields gets all the partition spec fields for the given
+ * relationId.
+ */
+static List *
+GetAllPartitionSpecFields(Oid relationId)
+{
+	List	   *partitionFields = NIL;
+
+	if (IsInternalIcebergTable(relationId))
+	{
+		/* internal iceberg table, get from catalog */
+		partitionFields = GetAllIcebergSpecPartitionFieldsFromCatalog(relationId);
+	}
+	else if (IsExternalIcebergTable(relationId))
+	{
+		/* external iceberg table, get from remote metadata */
+		char	   *currentMetadataPath = GetIcebergMetadataLocation(relationId, false);
+
+		partitionFields = AllPartitionSpecFieldsForExternalIcebergTable(currentMetadataPath);
+	}
+
+	return partitionFields;
+}
+
+
+/*
+ * AllPartitionSpecFieldsForExternalIcebergTable gets all the partition spec fields
+ * for the external Iceberg table.
+ */
+static List *
+AllPartitionSpecFieldsForExternalIcebergTable(char *metadataPath)
+{
+	IcebergTableMetadata *metadata = ReadIcebergTableMetadata(metadataPath);
+
+	List	   *allPartitionFields = NIL;
+
+	for (int specIdx = 0; specIdx < metadata->partition_specs_length; specIdx++)
+	{
+		IcebergPartitionSpec *spec = &metadata->partition_specs[specIdx];
+
+		for (int partitionFieldIdx = 0; partitionFieldIdx < spec->fields_length; partitionFieldIdx++)
+		{
+			IcebergPartitionSpecField *field = &spec->fields[partitionFieldIdx];
+
+			allPartitionFields = lappend(allPartitionFields, field);
+		}
+	}
+
+	return allPartitionFields;
+}
 
 
 /*
@@ -184,7 +265,19 @@ GetPartitionTransformFromSpecField(Oid relationId, IcebergPartitionSpecField * s
 		GetAttributeForFieldId(relationId, specField->source_id);
 	transform->columnName = get_attname(relationId, transform->attnum, false);
 	transform->pgType = GetAttributePGType(relationId, transform->attnum);
-	transform->sourceField = GetRegisteredFieldForAttribute(relationId, transform->attnum);
+
+	if (IsInternalIcebergTable(relationId))
+	{
+		transform->sourceField = GetRegisteredFieldForAttribute(relationId, transform->attnum);
+	}
+	else
+	{
+		Assert(IsExternalIcebergTable(relationId));
+
+		DataFileSchema *schema = GetDataFileSchemaForTable(relationId);
+
+		transform->sourceField = GetDataFileSchemaFieldById(schema, specField->source_id);
+	}
 
 	/* parse transform name */
 	ParseTransformName(transform->transformName,
