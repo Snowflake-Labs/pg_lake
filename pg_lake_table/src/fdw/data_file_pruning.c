@@ -54,6 +54,7 @@
 #include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/iceberg/api/table_schema.h"
+#include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/data_file_stats.h"
 #include "pg_lake/iceberg/partitioning/partition.h"
 #include "pg_lake/iceberg/temporal_utils.h"
@@ -183,11 +184,9 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 	List	   *columnsUsedInFilters = ColumnsUsedInRestrictions(relationId, baseRestrictInfoList);
 	List	   *partitionTransforms = AllPartitionTransformList(relationId);
 	PgLakeTableProperties tableProperties = GetPgLakeTableProperties(relationId);
-	PgLakeTableType tableType = tableProperties.tableType;
-	IcebergCatalogType icebergCatalogType = GetIcebergCatalogType(relationId);
 
 	if ((!EnableDataFilePruning && !EnablePartitionPruning) ||
-		!IsInternalOrExternalIcebergTable(tableProperties))
+		!IsIcebergTable(relationId))
 	{
 		/*
 		 * User disabled or no columns used in filters, so we cannot prune any
@@ -239,9 +238,7 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 		List	   *columnStats = NIL;
 		Partition  *partition = NULL;
 
-		if (tableType == PG_LAKE_ICEBERG_TABLE_TYPE &&
-			(icebergCatalogType == POSTGRES_CATALOG || icebergCatalogType == REST_CATALOG_READ_WRITE ||
-			 icebergCatalogType == OBJECT_STORE_READ_WRITE))
+		if (IsInternalIcebergTable(relationId))
 		{
 			TableDataFile *tableDataFile = (TableDataFile *) list_nth(dataFiles, dataFileIndex);
 
@@ -249,10 +246,7 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 			columnStats = tableDataFile->stats.columnStats;
 			partition = tableDataFile->partition;
 		}
-		else if ((tableType == PG_LAKE_TABLE_TYPE && tableProperties.format == DATA_FORMAT_ICEBERG) ||
-				 (tableType == PG_LAKE_ICEBERG_TABLE_TYPE &&
-				  (icebergCatalogType == REST_CATALOG_READ_ONLY ||
-				   icebergCatalogType == OBJECT_STORE_READ_ONLY)))
+		else if (IsExternalIcebergTable(relationId))
 		{
 			DataFile   *dataFile = (DataFile *) list_nth(dataFiles, dataFileIndex);
 
@@ -334,7 +328,6 @@ AddFieldIdsUsedInQuery(HTAB *fieldIdsUsedInQuery, Oid relationId, PgLakeTablePro
 					   List *columnsUsedInFilters)
 {
 	PgLakeTableType tableType = tableProperties.tableType;
-	IcebergCatalogType icebergCatalogType = GetIcebergCatalogType(relationId);
 
 	List	   *attrNos = NIL;
 	ListCell   *columnCell = NULL;
@@ -350,9 +343,7 @@ AddFieldIdsUsedInQuery(HTAB *fieldIdsUsedInQuery, Oid relationId, PgLakeTablePro
 	/* fetch the field mappings for all columns in a single catalog lookup */
 	List	   *fields = NIL;
 
-	if (tableType == PG_LAKE_ICEBERG_TABLE_TYPE &&
-		(icebergCatalogType == POSTGRES_CATALOG || icebergCatalogType == REST_CATALOG_READ_WRITE ||
-		 icebergCatalogType == OBJECT_STORE_READ_WRITE))
+	if (IsInternalIcebergTable(relationId))
 	{
 		fields = GetRegisteredFieldForAttributes(relationId, attrNos);
 
@@ -362,9 +353,7 @@ AddFieldIdsUsedInQuery(HTAB *fieldIdsUsedInQuery, Oid relationId, PgLakeTablePro
 		 */
 		Assert(list_length(fields) == list_length(columnsUsedInFilters));
 	}
-	else if ((tableType == PG_LAKE_TABLE_TYPE && tableProperties.format == DATA_FORMAT_ICEBERG) ||
-			 (tableType == PG_LAKE_ICEBERG_TABLE_TYPE && (icebergCatalogType == REST_CATALOG_READ_ONLY ||
-														  icebergCatalogType == OBJECT_STORE_READ_ONLY)))
+	else if (IsExternalIcebergTable(relationId))
 	{
 		fields = GetExternalIcebergFieldsForAttributes(relationId, columnsUsedInFilters);
 

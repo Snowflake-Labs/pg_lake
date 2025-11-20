@@ -51,7 +51,6 @@
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/metadata_operations.h"
-#include "pg_lake/fdw/utils.h"
 #include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/partitioning/partition_spec_catalog.h"

@@ -18,19 +18,23 @@
 #include "postgres.h"
 #include "miscadmin.h"
 
-#include "catalog/namespace.h"
-#include "pg_lake/iceberg/catalog.h"
-#include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/extensions/pg_lake_iceberg.h"
+#include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/object_store_catalog/object_store_catalog.h"
+#include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_lake/util/spi_helpers.h"
+#include "catalog/namespace.h"
 #include "commands/dbcommands.h"
+#include "foreign/foreign.h"
 #include "utils/lsyscache.h"
 #include "utils/guc.h"
 
 
 char	   *IcebergDefaultLocationPrefix = NULL;
 
+static char *GetIcebergCatalogMetadataLocation(Oid relationId, bool forUpdate);
+static char *GetIcebergExternalMetadataLocation(Oid relationId);
 static char *GetIcebergCatalogMetadataLocationInternal(Oid relationId, bool isPrevMetadata, bool forUpdate);
 static char *GetIcebergCatalogColumnInternal(Oid relationId, char *columnName, bool forUpdate, bool errorIfNotFound);
 static void ErrorIfSameTableExistsInExternalCatalog(Oid relationId);
@@ -342,17 +346,87 @@ GetAllInternalIcebergRelationIds(void)
 
 
 /*
+ * GetIcebergMetadataLocation returns the metadata location for a iceberg table
+ * from either the catalog table for internal tables or metadata for external tables.
+ * Throws error if the record is not found.
+ *
+ * If the metadata row for the table is going to be updated, the caller should
+ * pass forUpdate as true.
+ */
+char *
+GetIcebergMetadataLocation(Oid relationId, bool forUpdate)
+{
+	Assert(IsIcebergTable(relationId));
+
+	if (IsInternalIcebergTable(relationId))
+	{
+		return GetIcebergCatalogMetadataLocation(relationId, forUpdate);
+	}
+	else
+	{
+		if (forUpdate)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("Updating iceberg metadata is not supported for external Iceberg tables")));
+
+		return GetIcebergExternalMetadataLocation(relationId);
+	}
+}
+
+
+/*
 * GetIcebergCatalogMetadataLocation returns the metadata location for a table
 * in the iceberg catalog table. Throws error if the record is not found.
 *
 * If the metadata row for the table is going to be updated, the caller should
 * pass forUpdate as true.
 */
-char *
+static char *
 GetIcebergCatalogMetadataLocation(Oid relationId, bool forUpdate)
 {
+	Assert(IsInternalIcebergTable(relationId));
+
 	return GetIcebergCatalogMetadataLocationInternal(relationId, false, forUpdate);
 }
+
+
+/*
+ * GetIcebergExternalMetadataLocation returns the metadata location for an external iceberg table.
+ */
+static char *
+GetIcebergExternalMetadataLocation(Oid relationId)
+{
+	PgLakeTableProperties tableProperties = GetPgLakeTableProperties(relationId);
+
+	IcebergCatalogType icebergCatalogType = GetIcebergCatalogType(relationId);
+
+	char	   *currentMetadataPath = NULL;
+
+	if (icebergCatalogType == REST_CATALOG_READ_ONLY)
+	{
+		currentMetadataPath = GetMetadataLocationForRestCatalogForIcebergTable(relationId);
+	}
+	else if (icebergCatalogType == OBJECT_STORE_READ_ONLY)
+	{
+		currentMetadataPath = GetMetadataLocationFromExternalObjectStoreCatalogForTable(relationId);
+	}
+	else if (tableProperties.tableType == PG_LAKE_TABLE_TYPE && tableProperties.format == DATA_FORMAT_ICEBERG)
+	{
+		Assert(icebergCatalogType == NONE_CATALOG);
+
+		currentMetadataPath = GetForeignTablePath(relationId);
+	}
+	else
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("unsupported iceberg external table type for relation %s",
+						get_rel_name(relationId))));
+	}
+
+	return currentMetadataPath;
+}
+
 
 /*
 * GetIcebergCatalogPreviousMetadataLocation returns the previous metadata location for a table

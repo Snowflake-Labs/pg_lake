@@ -40,7 +40,6 @@
 #include "pg_lake/fdw/pg_lake_table.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/fdw/schema_operations/field_id_mapping_catalog.h"
-#include "pg_lake/fdw/utils.h"
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/iceberg/catalog.h"
@@ -49,6 +48,7 @@
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/transaction/transaction_hooks.h"
 #include "pg_lake/util/injection_points.h"
+#include "pg_lake/util/rel_utils.h"
 #include "pg_extension_base/pg_compat.h"
 #include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
@@ -962,6 +962,11 @@ VacuumRegisterMissingFields(Oid relationId)
 		return;
 	}
 
+	if (!IsInternalIcebergTable(relationId))
+	{
+		return;
+	}
+
 	MemoryContext savedContext = CurrentMemoryContext;
 
 	if (!ActiveSnapshotSet())
@@ -1052,7 +1057,7 @@ GetMetadataLocationPrefixForRelationId(Oid relationId)
 	}
 	else
 	{
-		char	   *metadataLocation = GetIcebergCatalogMetadataLocation(relationId, false);
+		char	   *metadataLocation = GetIcebergMetadataLocation(relationId, false);
 		IcebergTableMetadata *metadata = ReadIcebergTableMetadata(metadataLocation);
 
 		/* cast (const char *) to (char *) */

@@ -76,7 +76,7 @@ TrackIcebergMetadataChangesInTx(Oid relationId, List *metadataOperationTypes)
 	 */
 	bool		forUpdate = true;
 
-	GetIcebergCatalogMetadataLocation(relationId, forUpdate);
+	GetIcebergMetadataLocation(relationId, forUpdate);
 
 	ListCell   *operationCell = NULL;
 
@@ -487,7 +487,7 @@ GetLastPushedIcebergMetadata(const TableMetadataOperationTracker * opTracker)
 		return NULL;
 
 	/* read the most recently pushed iceberg metadata for the table */
-	char	   *metadataPath = GetIcebergCatalogMetadataLocation(opTracker->relationId, false);
+	char	   *metadataPath = GetIcebergMetadataLocation(opTracker->relationId, false);
 
 	return ReadIcebergTableMetadata(metadataPath);
 }

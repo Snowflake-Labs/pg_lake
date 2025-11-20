@@ -19,7 +19,8 @@
 #define PG_LAKE_COPY_FORMAT_H
 
 #include "commands/copy.h"
-#include "pg_lake/util/rel_utils.h"
+#include "pg_lake/util/catalog_type.h"
+#include "pg_lake/util/table_type.h"
 
 #define S3_URL_PREFIX "s3://"
 #define GCS_URL_PREFIX "gs://"

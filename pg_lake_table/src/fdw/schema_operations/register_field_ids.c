@@ -237,21 +237,16 @@ CreatePostgresColumnMappingsForColumnDefs(Oid relationId, List *columnDefList, b
 List *
 CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(Oid relationId)
 {
-	char	   *currentMetadataPath = NULL;
 	IcebergCatalogType icebergCatalogType = GetIcebergCatalogType(relationId);
 
-	if (icebergCatalogType == REST_CATALOG_READ_ONLY)
-	{
-		currentMetadataPath = GetMetadataLocationForRestCatalogForIcebergTable(relationId);
-	}
-	else if (icebergCatalogType == OBJECT_STORE_READ_ONLY)
-	{
-		currentMetadataPath = GetMetadataLocationFromExternalObjectStoreCatalogForTable(relationId);
-	}
-	else
-	{
-		currentMetadataPath = GetIcebergCatalogMetadataLocation(relationId, true);
-	}
+	/*
+	 * we extract column mappings to make sure remote catalog schema matches
+	 * the schema in our catalog for external tables. Otherwise, we prepare
+	 * for creating field id mappings
+	 */
+	bool		forUpdate = (IsInternalIcebergTable(relationId)) ? true : false;
+
+	char	   *currentMetadataPath = GetIcebergMetadataLocation(relationId, forUpdate);
 
 	DataFileSchema *schema = GetDataFileSchemaForExternalIcebergTable(currentMetadataPath);
 

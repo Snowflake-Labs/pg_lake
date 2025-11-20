@@ -80,7 +80,6 @@
 #include "pg_lake/fdw/shippable.h"
 #include "pg_lake/fdw/snapshot.h"
 #include "pg_lake/fdw/update_tracking.h"
-#include "pg_lake/fdw/utils.h"
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/fdw/multi_data_file_dest.h"
 #include "pg_lake/iceberg/catalog.h"
@@ -100,6 +99,7 @@
 #include "pg_lake/planner/restriction_collector.h"
 #include "pg_lake/storage/local_storage.h"
 #include "pg_lake/util/item_pointer_utils.h"
+#include "pg_lake/util/rel_utils.h"
 #include "pg_lake/util/string_utils.h"
 
 /* Default CPU cost to start up a foreign query. */
