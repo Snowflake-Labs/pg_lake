@@ -85,7 +85,7 @@ def test_reserialize_via_spark(
     installcheck,
     spark_session,
     superuser_conn,
-    extension,
+    iceberg_extension,
     s3,
     spark_table_metadata_location,
     create_reserialize_helper_functions,

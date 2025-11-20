@@ -229,8 +229,5 @@ FindPartitionTransformById(List *transforms, int32_t partitionFieldId)
 			return transform;
 	}
 
-	ereport(ERROR,
-			(errcode(ERRCODE_INTERNAL_ERROR),
-			 errmsg("could not find partition transform for field id %d",
-					partitionFieldId)));
+	return NULL;
 }

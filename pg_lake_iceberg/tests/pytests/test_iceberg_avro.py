@@ -7,7 +7,7 @@ from utils_pytest import *
 
 
 def test_iceberg_table_with_large_avro_allocs(
-    pg_conn, superuser_conn, extension, with_default_location, app_user
+    pg_conn, superuser_conn, iceberg_extension, with_default_location, app_user
 ):
     # 63 characters is the maximum length of a column name in PostgreSQL
     table_name = "".join(random.choices(string.ascii_lowercase, k=63))
@@ -149,7 +149,7 @@ def test_iceberg_table_with_large_avro_allocs(
 
 
 def test_manifest_file_with_dot_field_name(
-    pg_conn, superuser_conn, s3, extension, create_reserialize_helper_functions
+    pg_conn, superuser_conn, s3, iceberg_extension, create_reserialize_helper_functions
 ):
     key = "sample_avro/dot-field-name.avro"
     local_manifest_path = sample_avro_filepath(f"dot-field-name.avro")
