@@ -162,6 +162,7 @@ static Node *RewriteFuncExprCardinality(Node *node, void *context);
 static Node *RewriteFuncExprArrayLength(Node *node, void *context);
 static Node *RewriteFuncExprPostgisBytea(Node *node, void *context);
 static Node *RewriteFuncExprTrigonometry(Node *node, void *context);
+static Node *RewriteFuncExprInverseTrigonometry(Node *node, void *context);
 static Node *RewriteFuncExprJsonbArrayLength(Node *node, void *context);
 static Node *RewriteFuncExprEncode(Node *node, void *context);
 static Node *RewriteFuncExprDecode(Node *node, void *context);
@@ -258,16 +259,16 @@ static FunctionCallRewriteRuleByName BuiltinFunctionCallRewriteRulesByName[] =
 
 	/* degree variants of trigonometry functions */
 	{
-		"pg_catalog", "acosd", RewriteFuncExprTrigonometry, 0
+		"pg_catalog", "acosd", RewriteFuncExprInverseTrigonometry, 0
 	},
 	{
-		"pg_catalog", "asind", RewriteFuncExprTrigonometry, 0
+		"pg_catalog", "asind", RewriteFuncExprInverseTrigonometry, 0
 	},
 	{
-		"pg_catalog", "atand", RewriteFuncExprTrigonometry, 0
+		"pg_catalog", "atand", RewriteFuncExprInverseTrigonometry, 0
 	},
 	{
-		"pg_catalog", "atan2d", RewriteFuncExprTrigonometry, 0
+		"pg_catalog", "atan2d", RewriteFuncExprInverseTrigonometry, 0
 	},
 	{
 		"pg_catalog", "cosd", RewriteFuncExprTrigonometry, 0
@@ -2095,10 +2096,57 @@ RewriteFuncExprCardinality(Node *node, void *context)
 
 /*
  * RewriteFuncExprTrigonometry rewrites several trigonometry
- * function calls by adding a degrees(..) call.
+ * function calls by adding a radians(..) call.
  */
 static Node *
 RewriteFuncExprTrigonometry(Node *node, void *context)
+{
+	FuncExpr   *funcExpr = castNode(FuncExpr, node);
+
+	/* find the no degrees variant */
+	switch (funcExpr->funcid)
+	{
+		case F_COSD:
+			funcExpr->funcid = F_COS;
+			break;
+
+		case F_COTD:
+			funcExpr->funcid = F_COT;
+			break;
+
+		case F_SIND:
+			funcExpr->funcid = F_SIN;
+			break;
+
+		case F_TAND:
+			funcExpr->funcid = F_TAN;
+			break;
+
+		default:
+			elog(ERROR, "unexpected function ID in rewrite %d", funcExpr->funcid);
+	}
+
+	FuncExpr   *radiansExpr = makeNode(FuncExpr);
+
+	radiansExpr->funcid = F_RADIANS;
+	radiansExpr->funcresulttype = funcExpr->funcresulttype;
+	radiansExpr->funcretset = false;
+	radiansExpr->funcvariadic = false;
+	radiansExpr->funcformat = COERCE_EXPLICIT_CALL;
+	radiansExpr->location = -1;
+	radiansExpr->args = funcExpr->args;
+
+	funcExpr->args = list_make1((Node *) radiansExpr);
+	return (Node *) funcExpr;
+}
+
+
+/*
+ * RewriteFuncExprInverseTrigonometry rewrites several inverse
+ * trigonometry function calls by adding a degrees(..) call.
+ */
+static Node *
+RewriteFuncExprInverseTrigonometry(Node *node, void *context)
 {
 	FuncExpr   *funcExpr = castNode(FuncExpr, node);
 
@@ -2121,22 +2169,6 @@ RewriteFuncExprTrigonometry(Node *node, void *context)
 			funcExpr->funcid = F_ATAN2;
 			break;
 
-		case F_COSD:
-			funcExpr->funcid = F_COS;
-			break;
-
-		case F_COTD:
-			funcExpr->funcid = F_COT;
-			break;
-
-		case F_SIND:
-			funcExpr->funcid = F_SIN;
-			break;
-
-		case F_TAND:
-			funcExpr->funcid = F_TAN;
-			break;
-
 		default:
 			elog(ERROR, "unexpected function ID in rewrite %d", funcExpr->funcid);
 	}
@@ -2153,7 +2185,6 @@ RewriteFuncExprTrigonometry(Node *node, void *context)
 
 	return (Node *) degreesExpr;
 }
-
 
 
 /*

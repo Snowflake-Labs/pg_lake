@@ -76,53 +76,73 @@ test_agg_cases = [
     ("trunc(double)", "WHERE trunc(col_double) = 1.0", "trunc(", True),
     ("trunc(numeric)", "WHERE trunc(col_numeric) = 1.0", "trunc(", True),
     # Trigonometry operators, input must be in the range [-1,1]
-    ("acos", "WHERE abs(col_double) < 1 and acos(col_double) > 0", "acos(", True),
+    (
+        "acos",
+        "WHERE abs(col_double)<1 and abs(acos(col_double) - 0.988432) < 0.001",
+        "acos(",
+        True,
+    ),
     (
         "acosd",
-        "WHERE abs(col_double) < 1 and acosd(col_double) > 0",
+        "WHERE abs(col_double)<1 and abs(acosd(col_double) - 56.63298) < 0.001",
         "degrees(acos(",
         True,
     ),
-    ("asin", "WHERE abs(col_double) < 1 and asin(col_double) < 0", "asin(", True),
+    (
+        "asin",
+        "WHERE abs(col_double)<1 and abs(asin(col_double) - 0.582364) < 0.001",
+        "asin(",
+        True,
+    ),
     (
         "asind",
-        "WHERE abs(col_double) < 1 and asind(col_double) < 0",
+        "WHERE abs(col_double)<1 and abs(asind(col_double) - 33.36701) < 0.001",
         "degrees(asin(",
         True,
     ),
-    ("atan", "WHERE abs(col_double) < 1 and atan(col_double) < 0", "atan(", True),
+    (
+        "atan",
+        "WHERE abs(atan(col_double) - 0.5028432) < 0.001",
+        "atan(",
+        True,
+    ),
     (
         "atand",
-        "WHERE abs(col_double) < 1 and atand(col_double) < 0",
+        "WHERE abs(atand(col_double) - 28.81079) < 0.001",
         "degrees(atan(",
         True,
     ),
-    ("atan2", "WHERE abs(col_double) < 1 and atan2(col_double, 1) < 0", "atan2(", True),
+    (
+        "atan2",
+        "WHERE abs(atan2(col_double, 1) - 0.5028432) < 0.001",
+        "atan2(",
+        True,
+    ),
     (
         "atan2d",
-        "WHERE abs(col_double) < 1 and atan2d(col_double, 1) < 0",
+        "WHERE abs(atan2d(col_double, 1) - 28.810793) < 0.001",
         "degrees(atan2(",
         True,
     ),
-    ("cos", "WHERE abs(col_double) < 1 and cos(col_double) > 0", "cos(", True),
+    ("cos", "WHERE abs(cos(col_double) - 0.8525245) < 0.001", "cos(", True),
     (
         "cosd",
-        "WHERE abs(col_double) < 1 and cosd(col_double) > 0",
-        "degrees(cos(",
+        "WHERE abs(cosd(col_double) - 0.999953) < 0.001",
+        "cos(radians(",
         True,
     ),
-    ("sin", "WHERE abs(col_double) < 1 and sin(col_double) < 0", "sin(", True),
+    ("sin", "WHERE abs(sin(col_double) - 0.522687) < 0.001", "sin(", True),
     (
         "sind",
-        "WHERE abs(col_double) < 1 and sind(col_double) < 0",
-        "degrees(sin(",
+        "WHERE abs(sind(col_double) - 0.00959) < 0.001",
+        "sin(radians(",
         True,
     ),
-    ("tan", "WHERE abs(col_double) < 1 and tan(col_double) < 0", "tan(", True),
+    ("tan", "WHERE abs(tan(col_double) - 0.61310) < 0.001", "tan(", True),
     (
         "tand",
-        "WHERE abs(col_double) < 1 and tand(col_double) < 0",
-        "degrees(tan(",
+        "WHERE abs(tand(col_double) - 0.00959) < 0.001",
+        "tan(radians(",
         True,
     ),
 ]
@@ -165,6 +185,8 @@ def create_math_pushdown_table(pg_conn, s3, extension):
 					SELECT 1, 1, 1, 1.1, 1.1,  1.1, 1.1, 1.1
 					 	UNION ALL
 					SELECT -1, -1, -100, -1.1, -0.1,  2.2, 2.2, 2.2
+						UNION ALL
+					SELECT -1, -1, -100, -1.1, 0.55,  2.2, 2.2, 2.2
 						UNION ALL
 					SELECT 1561, 223123, -100123, -111.111111, -12222.1222222, 21231.2123123, 4534652.2456456, 4.2
 				) TO '{url}' WITH (FORMAT 'parquet');
