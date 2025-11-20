@@ -22,6 +22,16 @@ This directory contains a Taskfile for building and pushing multi-platform Docke
    - **Why**: DuckDB compilation in pgduck_server is very memory-intensive
    - **Configure**: Docker Desktop → Settings → Resources → Memory
 
+## Build Architecture
+
+This Taskfile uses **per-version buildx builders** to prevent cache conflicts:
+
+- **PG 16**: Uses `pg_lake_builder_pg16`
+- **PG 17**: Uses `pg_lake_builder_pg17`
+- **PG 18**: Uses `pg_lake_builder_pg18`
+
+Each builder maintains its own isolated cache, allowing you to build and switch between PostgreSQL versions without cache conflicts. Builders are created automatically on first use.
+
 ## Available Tasks
 
 Run `task --list` to see all available tasks:
@@ -150,6 +160,34 @@ task compose:logs SERVICE=pg_lake-postgres
 # Restart services
 task compose:restart
 ```
+
+### Cache Management
+
+Each PostgreSQL version (16, 17, 18) uses its own isolated buildx builder to prevent cache conflicts:
+
+```bash
+# Clear cache for specific PostgreSQL version
+task clean:cache-version PG_MAJOR=17
+
+# Clear all buildx caches (all versions)
+task clean:cache
+
+# Remove builder for specific version
+task clean:builder PG_MAJOR=17
+
+# Remove all builders (all PG versions)
+task clean
+
+# Nuclear option: remove everything (builders + caches + local images)
+task clean:all
+```
+
+**When to use each:**
+- `clean:cache-version` - Rebuild one PG version from scratch
+- `clean:cache` - Clear all caches but keep builders
+- `clean:builder` - Remove a specific version's builder
+- `clean` - Remove all builders (they'll be recreated on next build)
+- `clean:all` - Complete cleanup when you want to start fresh
 
 ### Image Management
 
@@ -348,9 +386,27 @@ docker buildx build --target pgduck_server --platform linux/arm64 --load -t pgdu
 ### Multi-platform build issues
 
 ```bash
-# Clean and recreate buildx builder
+# Clean all buildx builders and recreate for specific PG version
 task clean
-task setup
+task setup PG_MAJOR=17
+
+# Or clean cache for specific version
+task clean:cache-version PG_MAJOR=17
+```
+
+### Cache conflicts between PostgreSQL versions
+
+If you get cache errors when switching between PostgreSQL versions:
+
+```bash
+# Clear cache for specific version
+task clean:cache-version PG_MAJOR=17
+
+# Or clear all caches
+task clean:cache
+
+# Nuclear option: remove everything and start fresh
+task clean:all
 ```
 
 ### Authentication issues with registries
@@ -404,15 +460,11 @@ task images:list
 # 1. Build multi-platform for registry
 task build:all VERSION=v3.1.0-rc1
 
-# 2. Test the images
-task test:pg-lake-postgres
-task test:pgduck-server
-
-# 3. Push to registry
+# 2. Push to registry
 task login:dockerhub
 task push:all VERSION=v3.1.0-rc1
 
-# 4. Build and push all PostgreSQL versions
+# 3. Build and push all PostgreSQL versions
 task push:all-pg-versions VERSION=v3.1.0
 ```
 
@@ -450,14 +502,16 @@ task push:all-pg-versions VERSION=v3.1.0
 
 - `s3:list` - List S3 bucket contents (LocalStack) in tree format
 
-### Test Tasks
+### Clean Tasks
 
-- `test:pg-lake-postgres` - Test pg_lake_postgres image
-- `test:pgduck-server` - Test pgduck_server image
+- `clean` - Remove all buildx builders (PG 16, 17, 18)
+- `clean:builder` - Remove buildx builder for specific PG_MAJOR version
+- `clean:cache` - Clean buildx cache for all builders
+- `clean:cache-version` - Clean buildx cache for specific PG_MAJOR version
+- `clean:all` - Remove all builders, caches, and local images (complete cleanup)
 
 ### Utility Tasks
 
-- `setup` - Setup Docker buildx builder
-- `clean` - Remove buildx builder
+- `setup` - Setup Docker buildx builder for specific PG_MAJOR version
 - `login:dockerhub` - Login to Docker Hub
 - `login:ghcr` - Login to GitHub Container Registry

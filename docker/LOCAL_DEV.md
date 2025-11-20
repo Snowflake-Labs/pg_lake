@@ -22,13 +22,36 @@ sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b /usr/local/b
 
 **Note**: Tasks run in silent mode by default for cleaner output. Use `task -v <task-name>` to see verbose output when debugging.
 
-### 2. Build and Start Everything
+### 2. Available Variables
+
+You can customize builds using these variables:
+
+| Variable | Default | Description | Example |
+|----------|---------|-------------|---------|
+| `PG_MAJOR` | `18` | PostgreSQL major version (16, 17, or 18) | `PG_MAJOR=17` |
+| `BASE_IMAGE_OS` | `almalinux` | Base OS (almalinux or debian) | `BASE_IMAGE_OS=debian` |
+| `BASE_IMAGE_TAG` | `9` | Base OS version tag | `BASE_IMAGE_TAG=12` |
+| `VERSION` | `latest` | Image version tag (for registry) | `VERSION=v1.0.0` |
+
+### 3. Build and Start Everything
 
 ```bash
 cd docker
 
-# Build images and start all services
+# Build images and start all services (default: PostgreSQL 18)
 task compose:up
+
+# Build images and start all services for PostgreSQL 17
+task compose:up PG_MAJOR=17
+
+# Build images and start all services for PostgreSQL 16
+task compose:up PG_MAJOR=16
+
+# Build with Debian base OS
+task compose:up BASE_IMAGE_OS=debian BASE_IMAGE_TAG=12
+
+# Build PostgreSQL 17 with Debian
+task compose:up PG_MAJOR=17 BASE_IMAGE_OS=debian BASE_IMAGE_TAG=12
 ```
 
 This single command will:
@@ -38,7 +61,7 @@ This single command will:
 - Start pgduck_server (DuckDB integration)
 - Start LocalStack (S3-compatible storage)
 
-### 3. Connect and Test
+### 4. Connect and Test
 
 ```bash
 # Connect to PostgreSQL from your host
@@ -77,8 +100,11 @@ task s3:list
 ### Docker Compose Management
 
 ```bash
-# Start everything (builds if needed)
+# Start everything (builds if needed, default PG 18)
 task compose:up
+
+# Start with specific PostgreSQL version
+task compose:up PG_MAJOR=17
 
 # Stop all services
 task compose:down
@@ -86,8 +112,8 @@ task compose:down
 # Stop services and remove volumes (complete cleanup)
 task compose:teardown
 
-# Restart services
-task compose:restart
+# Restart services (use same PG_MAJOR as when started)
+task compose:restart PG_MAJOR=17
 
 # View logs (all services)
 task compose:logs
@@ -97,7 +123,7 @@ task compose:logs SERVICE=pg_lake-postgres
 task compose:logs SERVICE=pgduck-server
 
 # Debug mode (verbose output)
-task -v compose:up
+task -v compose:up PG_MAJOR=17
 ```
 
 ### Build Management
@@ -171,7 +197,7 @@ docker exec -it pg_lake psql -h /home/postgres/pgduck_socket_dir -p 5332 -U post
 
 Should show something like:
 
-```
+```sql
  duckdb_version
 ----------------
  v1.3.2
@@ -180,7 +206,7 @@ Should show something like:
 
 ### Connection Architecture
 
-```
+```text
 Host Machine
     │
     ├─► Port 5432 (TCP) ───► pg_lake-postgres container
@@ -210,13 +236,15 @@ Both containers share:
 ### Change PostgreSQL Version
 
 ```bash
-# Build with PostgreSQL 17
+# Recommended: Use compose:up (handles both build and start)
+task compose:up PG_MAJOR=17
+
+# Or manually: Build with PostgreSQL 17 then start
 task build:local PG_MAJOR=17
 PG_MAJOR=17 docker-compose up -d
 
 # Build with PostgreSQL 16
-task build:local PG_MAJOR=16
-PG_MAJOR=16 docker-compose up -d
+task compose:up PG_MAJOR=16
 ```
 
 ### Environment Variables
@@ -338,7 +366,7 @@ lsof -i :4566  # LocalStack port
 
 If you see errors like:
 
-```
+```text
 ERROR: IO Error: Cannot open file "/home/postgres/pgsql-18/data/base/pgsql_tmp/pgsql_tmp.pg_lake_iceberg_XXX.0": No such file or directory
 ```
 
@@ -387,11 +415,14 @@ task build:local
 # 1. Edit Dockerfile
 vim Dockerfile
 
-# 2. Rebuild images
-task build:local
+# 2. Rebuild images (specify PG version if not using default)
+task build:local PG_MAJOR=17
 
 # 3. Restart services with new images
-docker-compose up -d
+task compose:restart PG_MAJOR=17
+
+# Or rebuild and restart in one command
+task compose:up PG_MAJOR=17
 
 # 4. Check logs
 task compose:logs
@@ -445,7 +476,17 @@ docker-compose exec pg_lake-postgres psql -h /home/postgres/pgduck_socket_dir -p
 
 ## 💡 Tips
 
-- Images are tagged as `pg_lake:local` and `pgduck-server:local`
+- **Always specify `PG_MAJOR`** when working with non-default PostgreSQL versions:
+
+  ```bash
+  task compose:up PG_MAJOR=17
+  task compose:down PG_MAJOR=17
+  task compose:logs PG_MAJOR=17
+  ```
+
+- Images are tagged as `pg_lake:local-pg{VERSION}` and `pgduck-server:local-pg{VERSION}`
+  - Default: `pg_lake:local-pg18`, `pgduck-server:local-pg18`
+  - PG 17: `pg_lake:local-pg17`, `pgduck-server:local-pg17`
 
 - For publishing images to registries, see [TASKFILE.md](./TASKFILE.md)
 
@@ -454,6 +495,11 @@ docker-compose exec pg_lake-postgres psql -h /home/postgres/pgduck_socket_dir -p
 - Container names vs service names:
   - Service name: `pg_lake-postgres` (use with `docker-compose exec`)
   - Container name: `pg_lake` (use with `docker exec`)
+
+- Each PostgreSQL version uses its own buildx builder for isolated caching:
+  - PG 16: `pg_lake_builder_pg16`
+  - PG 17: `pg_lake_builder_pg17`
+  - PG 18: `pg_lake_builder_pg18`
 
 ---
 

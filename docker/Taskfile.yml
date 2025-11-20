@@ -11,13 +11,14 @@ vars:
 
 tasks:
     setup:
-        desc: Setup Docker buildx for multi-platform builds
+        desc: Setup Docker buildx for multi-platform builds (per PG_MAJOR version)
         silent: true
         cmds:
-            - docker buildx create --name pg_lake_builder --use --bootstrap || docker buildx use pg_lake_builder
+            - docker buildx create --name pg_lake_builder_pg{{.PG_MAJOR}} --use --bootstrap || docker buildx use
+              pg_lake_builder_pg{{.PG_MAJOR}}
             - docker buildx inspect --bootstrap
         status:
-            - docker buildx inspect pg_lake_builder
+            - docker buildx inspect pg_lake_builder_pg{{.PG_MAJOR}}
 
     build:pg-lake-postgres:
         desc: Build pg_lake_postgres image for multiple platforms
@@ -26,6 +27,7 @@ tasks:
         cmds:
             - |
                 docker buildx build \
+                  --builder pg_lake_builder_pg{{.PG_MAJOR}} \
                   --platform {{.PLATFORMS}} \
                   --target pg_lake_postgres \
                   --build-arg PG_MAJOR={{.PG_MAJOR}} \
@@ -47,6 +49,7 @@ tasks:
         cmds:
             - |
                 docker buildx build \
+                  --builder pg_lake_builder_pg{{.PG_MAJOR}} \
                   --platform {{.PLATFORMS}} \
                   --target pgduck_server \
                   --build-arg PG_MAJOR={{.PG_MAJOR}} \
@@ -67,30 +70,70 @@ tasks:
         deps: [setup]
         cmds:
             - task: build:pg-lake-postgres
-              vars: { PUSH: "{{.PUSH}}" }
+              vars:
+                  {
+                      PG_MAJOR: "{{.PG_MAJOR}}",
+                      VERSION: "{{.VERSION}}",
+                      PUSH: "{{.PUSH}}",
+                      BASE_IMAGE_OS: "{{.BASE_IMAGE_OS}}",
+                      BASE_IMAGE_TAG: "{{.BASE_IMAGE_TAG}}",
+                      PLATFORMS: "{{.PLATFORMS}}",
+                  }
             - task: build:pgduck-server
-              vars: { PUSH: "{{.PUSH}}" }
+              vars:
+                  {
+                      PG_MAJOR: "{{.PG_MAJOR}}",
+                      VERSION: "{{.VERSION}}",
+                      PUSH: "{{.PUSH}}",
+                      BASE_IMAGE_OS: "{{.BASE_IMAGE_OS}}",
+                      BASE_IMAGE_TAG: "{{.BASE_IMAGE_TAG}}",
+                      PLATFORMS: "{{.PLATFORMS}}",
+                  }
 
     push:pg-lake-postgres:
         desc: Build and push pg_lake_postgres image
         silent: true
         cmds:
             - task: build:pg-lake-postgres
-              vars: { PUSH: "true" }
+              vars:
+                  {
+                      PG_MAJOR: "{{.PG_MAJOR}}",
+                      VERSION: "{{.VERSION}}",
+                      PUSH: "true",
+                      BASE_IMAGE_OS: "{{.BASE_IMAGE_OS}}",
+                      BASE_IMAGE_TAG: "{{.BASE_IMAGE_TAG}}",
+                      PLATFORMS: "{{.PLATFORMS}}",
+                  }
 
     push:pgduck-server:
         desc: Build and push pgduck_server image
         silent: true
         cmds:
             - task: build:pgduck-server
-              vars: { PUSH: "true" }
+              vars:
+                  {
+                      PG_MAJOR: "{{.PG_MAJOR}}",
+                      VERSION: "{{.VERSION}}",
+                      PUSH: "true",
+                      BASE_IMAGE_OS: "{{.BASE_IMAGE_OS}}",
+                      BASE_IMAGE_TAG: "{{.BASE_IMAGE_TAG}}",
+                      PLATFORMS: "{{.PLATFORMS}}",
+                  }
 
     push:all:
         desc: Build and push all images
         silent: true
         cmds:
             - task: build:all
-              vars: { PUSH: "true" }
+              vars:
+                  {
+                      PG_MAJOR: "{{.PG_MAJOR}}",
+                      VERSION: "{{.VERSION}}",
+                      PUSH: "true",
+                      BASE_IMAGE_OS: "{{.BASE_IMAGE_OS}}",
+                      BASE_IMAGE_TAG: "{{.BASE_IMAGE_TAG}}",
+                      PLATFORMS: "{{.PLATFORMS}}",
+                  }
 
     build:all-pg-versions:
         desc: Build all images for PostgreSQL 16, 17, and 18
@@ -108,14 +151,57 @@ tasks:
         silent: true
         cmds:
             - task: build:all-pg-versions
-              vars: { PUSH: "true" }
+              vars:
+                  {
+                      VERSION: "{{.VERSION}}",
+                      PUSH: "true",
+                      BASE_IMAGE_OS: "{{.BASE_IMAGE_OS}}",
+                      BASE_IMAGE_TAG: "{{.BASE_IMAGE_TAG}}",
+                      PLATFORMS: "{{.PLATFORMS}}",
+                  }
 
     clean:
-        desc: Remove buildx builder
+        desc: Remove all buildx builders (all PG versions)
         silent: true
         cmds:
+            - docker buildx rm pg_lake_builder_pg16 || true
+            - docker buildx rm pg_lake_builder_pg17 || true
+            - docker buildx rm pg_lake_builder_pg18 || true
             - docker buildx rm pg_lake_builder || true
+            - echo "✅ All buildx builders removed"
         ignore_error: true
+
+    clean:builder:
+        desc: Remove buildx builder for specific PG_MAJOR version
+        silent: true
+        cmds:
+            - docker buildx rm pg_lake_builder_pg{{.PG_MAJOR}} || true
+            - echo "✅ Buildx builder for PG {{.PG_MAJOR}} removed"
+        ignore_error: true
+
+    clean:cache:
+        desc: Clean buildx cache (all builders)
+        silent: true
+        cmds:
+            - docker buildx prune -af
+            - echo "✅ All buildx caches cleared"
+
+    clean:cache-version:
+        desc: Clean buildx cache for specific PG_MAJOR version
+        silent: true
+        cmds:
+            - docker buildx use pg_lake_builder_pg{{.PG_MAJOR}} 2>/dev/null && docker buildx prune -f || echo "Builder
+              pg_lake_builder_pg{{.PG_MAJOR}} not found"
+            - echo "✅ Cache for PG {{.PG_MAJOR}} cleared"
+
+    clean:all:
+        desc: Remove all builders, caches, and local images
+        silent: true
+        cmds:
+            - task: clean
+            - task: clean:cache
+            - task: images:clean
+            - echo "🧹 Complete cleanup finished"
 
     login:dockerhub:
         desc: Login to Docker Hub Container Registry
@@ -146,6 +232,7 @@ tasks:
         cmds:
             - |
                 docker buildx build \
+                  --builder pg_lake_builder_pg{{.PG_MAJOR}} \
                   --platform linux/{{ARCH}} \
                   --target pg_lake_postgres \
                   --build-arg PG_MAJOR={{.PG_MAJOR}} \
@@ -159,6 +246,7 @@ tasks:
                   .
             - |
                 docker buildx build \
+                  --builder pg_lake_builder_pg{{.PG_MAJOR}} \
                   --platform linux/{{ARCH}} \
                   --target pgduck_server \
                   --build-arg PG_MAJOR={{.PG_MAJOR}} \
@@ -179,32 +267,33 @@ tasks:
         silent: true
         cmds:
             - task: build:local
-            - docker-compose up -d
+              vars: { PG_MAJOR: "{{.PG_MAJOR}}" }
+            - PG_MAJOR={{.PG_MAJOR}} docker-compose up -d
             - echo "Services started! Check logs with 'docker-compose logs -f'"
 
     compose:down:
         desc: Stop and remove docker-compose services
         silent: true
         cmds:
-            - docker-compose down
+            - PG_MAJOR={{.PG_MAJOR}} docker-compose down
 
     compose:logs:
         desc: View docker-compose logs (optionally for specific SERVICE)
         silent: true
         cmds:
-            - docker-compose logs -f {{.SERVICE}}
+            - PG_MAJOR={{.PG_MAJOR}} docker-compose logs -f {{.SERVICE}}
 
     compose:restart:
         desc: Restart docker-compose services
         silent: true
         cmds:
-            - docker-compose restart
+            - PG_MAJOR={{.PG_MAJOR}} docker-compose restart
 
     compose:teardown:
         desc: Stop services and remove volumes (complete cleanup)
         silent: true
         cmds:
-            - docker-compose down --volumes
+            - PG_MAJOR={{.PG_MAJOR}} docker-compose down --volumes
             - echo "⚠️  All services stopped and volumes removed"
 
     images:list:
