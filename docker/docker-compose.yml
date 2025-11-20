@@ -1,6 +1,7 @@
 services:
   pg_lake-postgres:
     image: pg_lake:local
+    pull_policy: if_not_present
     container_name: pg_lake
     ports:
       - "5432:5432"
@@ -26,6 +27,7 @@ services:
 
   pgduck-server:
     image: pgduck-server:local
+    pull_policy: if_not_present
     container_name: pgduck-server
     # NOTE: pgduck-server only listens on Unix sockets, not TCP
     # To access DuckDB from the host, connect via pg_lake-postgres container which shares the Unix socket
@@ -54,6 +56,7 @@ services:
   localstack:
     container_name: "${LOCALSTACK_DOCKER_NAME:-localstack-main}"
     image: localstack/localstack
+    pull_policy: if_not_present
     ports:
       - "127.0.0.1:4566:4566"            # LocalStack Gateway
       - "127.0.0.1:4510-4559:4510-4559"  # external services port range
