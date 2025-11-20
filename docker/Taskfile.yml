@@ -1,7 +1,7 @@
 version: "3"
 
 vars:
-    REGISTRY: '{{.REGISTRY | default "docker.io"}}'
+    REGISTRY: '{{.REGISTRY | default "ghcr.io"}}'
     IMAGE_OWNER: '{{.IMAGE_OWNER | default (env "DOCKER_HUB_USERNAME")}}'
     VERSION: '{{.VERSION | default "latest"}}'
     PG_MAJOR: '{{.PG_MAJOR | default "18"}}'
@@ -23,8 +23,9 @@ tasks:
     build:pg-lake-postgres:
         desc: Build pg_lake_postgres image for multiple platforms
         silent: true
-        deps: [setup]
         cmds:
+            - task: setup
+              vars: { PG_MAJOR: "{{.PG_MAJOR}}" }
             - |
                 docker buildx build \
                   --builder pg_lake_builder_pg{{.PG_MAJOR}} \
@@ -33,9 +34,9 @@ tasks:
                   --build-arg PG_MAJOR={{.PG_MAJOR}} \
                   --build-arg BASE_IMAGE_OS={{.BASE_IMAGE_OS}} \
                   --build-arg BASE_IMAGE_TAG={{.BASE_IMAGE_TAG}} \
+                  -t {{.REGISTRY}}/{{.IMAGE_OWNER}}/pg_lake:{{.VERSION}}-pg{{.PG_MAJOR}}-{{.BASE_IMAGE_OS}} \
                   -t {{.REGISTRY}}/{{.IMAGE_OWNER}}/pg_lake:{{.VERSION}}-pg{{.PG_MAJOR}} \
-                  -t {{.REGISTRY}}/{{.IMAGE_OWNER}}/pg_lake:{{.VERSION}} \
-                  {{if eq .PUSH "true"}}--push{{else}}--load{{end}} \
+                  {{if eq .PUSH "true"}}--push{{end}} \
                   -f Dockerfile \
                   --progress=plain \
                   .
@@ -45,8 +46,9 @@ tasks:
     build:pgduck-server:
         desc: Build pgduck_server image for multiple platforms
         silent: true
-        deps: [setup]
         cmds:
+            - task: setup
+              vars: { PG_MAJOR: "{{.PG_MAJOR}}" }
             - |
                 docker buildx build \
                   --builder pg_lake_builder_pg{{.PG_MAJOR}} \
@@ -55,9 +57,9 @@ tasks:
                   --build-arg PG_MAJOR={{.PG_MAJOR}} \
                   --build-arg BASE_IMAGE_OS={{.BASE_IMAGE_OS}} \
                   --build-arg BASE_IMAGE_TAG={{.BASE_IMAGE_TAG}} \
+                  -t {{.REGISTRY}}/{{.IMAGE_OWNER}}/pgduck-server:{{.VERSION}}-pg{{.PG_MAJOR}}-{{.BASE_IMAGE_OS}} \
                   -t {{.REGISTRY}}/{{.IMAGE_OWNER}}/pgduck-server:{{.VERSION}}-pg{{.PG_MAJOR}} \
-                  -t {{.REGISTRY}}/{{.IMAGE_OWNER}}/pgduck-server:{{.VERSION}} \
-                  {{if eq .PUSH "true"}}--push{{else}}--load{{end}} \
+                  {{if eq .PUSH "true"}}--push{{end}} \
                   -f Dockerfile \
                   --progress=plain \
                   .
@@ -67,8 +69,9 @@ tasks:
     build:all:
         desc: Build all images for multiple platforms
         silent: true
-        deps: [setup]
         cmds:
+            - task: setup
+              vars: { PG_MAJOR: "{{.PG_MAJOR}}" }
             - task: build:pg-lake-postgres
               vars:
                   {
@@ -228,8 +231,9 @@ tasks:
     build:local:
         desc: Build images for local docker-compose (single platform)
         silent: true
-        deps: [setup]
         cmds:
+            - task: setup
+              vars: { PG_MAJOR: "{{.PG_MAJOR}}" }
             - |
                 docker buildx build \
                   --builder pg_lake_builder_pg{{.PG_MAJOR}} \
@@ -238,6 +242,7 @@ tasks:
                   --build-arg PG_MAJOR={{.PG_MAJOR}} \
                   --build-arg BASE_IMAGE_OS={{.BASE_IMAGE_OS}} \
                   --build-arg BASE_IMAGE_TAG={{.BASE_IMAGE_TAG}} \
+                  -t pg_lake:local-pg{{.PG_MAJOR}}-{{.BASE_IMAGE_OS}} \
                   -t pg_lake:local-pg{{.PG_MAJOR}} \
                   -t pg_lake:local \
                   --load \
@@ -252,6 +257,7 @@ tasks:
                   --build-arg PG_MAJOR={{.PG_MAJOR}} \
                   --build-arg BASE_IMAGE_OS={{.BASE_IMAGE_OS}} \
                   --build-arg BASE_IMAGE_TAG={{.BASE_IMAGE_TAG}} \
+                  -t pgduck-server:local-pg{{.PG_MAJOR}}-{{.BASE_IMAGE_OS}} \
                   -t pgduck-server:local-pg{{.PG_MAJOR}} \
                   -t pgduck-server:local \
                   --load \
@@ -261,6 +267,43 @@ tasks:
         vars:
             ARCH:
                 sh: uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/'
+
+    # TODO:need to make muslc with duckdb extensions build
+    # build:local-alpine:
+    #     desc: Build images with Alpine Linux (experimental - builds DuckDB extensions from source)
+    #     silent: true
+    #     cmds:
+    #         - task: setup
+    #           vars: { PG_MAJOR: "{{.PG_MAJOR}}" }
+    #         - |
+    #             docker buildx build \
+    #               --builder pg_lake_builder_pg{{.PG_MAJOR}} \
+    #               --platform linux/{{ARCH}} \
+    #               --target pg_lake_postgres \
+    #               --build-arg PG_MAJOR={{.PG_MAJOR}} \
+    #               -t pg_lake:alpine-pg{{.PG_MAJOR}} \
+    #               -t pg_lake:alpine \
+    #               -t pg_lake:local \
+    #               --load \
+    #               -f Dockerfile.alpine \
+    #               --progress=plain \
+    #               .
+    #         - |
+    #             docker buildx build \
+    #               --builder pg_lake_builder_pg{{.PG_MAJOR}} \
+    #               --platform linux/{{ARCH}} \
+    #               --target pgduck_server \
+    #               --build-arg PG_MAJOR={{.PG_MAJOR}} \
+    #               -t pgduck-server:alpine-pg{{.PG_MAJOR}} \
+    #               -t pgduck-server:alpine \
+    #               -t pgduck-server:local \
+    #               --load \
+    #               -f Dockerfile.alpine \
+    #               --progress=plain \
+    #               .
+    #     vars:
+    #         ARCH:
+    #             sh: uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/'
 
     compose:up:
         desc: Build images and start docker-compose

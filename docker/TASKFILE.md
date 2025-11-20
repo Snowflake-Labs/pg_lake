@@ -32,6 +32,26 @@ This Taskfile uses **per-version buildx builders** to prevent cache conflicts:
 
 Each builder maintains its own isolated cache, allowing you to build and switch between PostgreSQL versions without cache conflicts. Builders are created automatically on first use.
 
+### Cache Behavior Notes
+
+**Single-platform builds** (e.g., `build:local`):
+- Uses `--load` to load images directly into Docker
+- Cache is stored per-builder instance
+- Faster for local development
+- Images immediately available in `docker images`
+
+**Multi-platform builds** (e.g., `build:all`, `build:pg-lake-postgres`):
+- Builds for multiple architectures (amd64, arm64)
+- **Without PUSH=true**: Builds to cache only (images not loaded locally)
+- **With PUSH=true**: Builds and pushes to registry
+- Cannot use `--load` with multiple platforms (Docker limitation)
+- Cache is shared across architectures within the same builder
+
+**Important**: 
+- Use `task build:local` for local development (single platform, loads to Docker)
+- Use `task build:all` for testing multi-arch builds (cache only, verifies build works)
+- Use `task push:all` to build and publish to registry (multi-arch, available for deployment)
+
 ## Available Tasks
 
 Run `task --list` to see all available tasks:
@@ -101,11 +121,14 @@ task build:pg-lake-postgres
 # Build pgduck_server for registry
 task build:pgduck-server
 
-# Build both images
+# Build both images (multi-platform, builds to cache only - doesn't push or load)
 task build:all
 
 # Build for specific PostgreSQL version
 task build:all PG_MAJOR=17
+
+# Note: Multi-platform builds without PUSH=true only populate the build cache.
+# Images won't be available locally or in registry until you push them.
 ```
 
 ### Build Multi-Platform Images
@@ -409,6 +432,17 @@ task clean:cache
 task clean:all
 ```
 
+**Note for multi-platform builds**: If building for multiple architectures and encountering cache issues, you may need to clear the specific builder's cache:
+
+```bash
+# Clear and rebuild for multi-platform
+task clean:cache-version PG_MAJOR=17
+task build:all PG_MAJOR=17 PUSH=false
+
+# Or push directly to registry (recommended for multi-arch)
+task push:all PG_MAJOR=17
+```
+
 ### Authentication issues with registries
 
 ```bash
@@ -472,10 +506,10 @@ task push:all-pg-versions VERSION=v3.1.0
 
 ### Build Tasks
 
-- `build:local` - Build images for local development (auto-detects architecture)
-- `build:pg-lake-postgres` - Build pg_lake_postgres for registry (multi-platform)
-- `build:pgduck-server` - Build pgduck_server for registry (multi-platform)
-- `build:all` - Build all images
+- `build:local` - Build images for local development (auto-detects architecture, loads to Docker)
+- `build:pg-lake-postgres` - Build pg_lake_postgres for registry (multi-platform, cache only unless PUSH=true)
+- `build:pgduck-server` - Build pgduck_server for registry (multi-platform, cache only unless PUSH=true)
+- `build:all` - Build all images (multi-platform, cache only unless PUSH=true)
 - `build:all-pg-versions` - Build for PostgreSQL 16, 17, and 18
 
 ### Push Tasks

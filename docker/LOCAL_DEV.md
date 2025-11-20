@@ -399,11 +399,17 @@ task compose:up
 ### Clean up Docker buildx
 
 ```bash
-# If builds are failing, reset buildx
-task clean
-task setup
-task build:local
+# If builds are failing, reset buildx for specific version
+task clean:cache-version PG_MAJOR=17
+task setup PG_MAJOR=17
+task build:local PG_MAJOR=17
+
+# Or complete cleanup (all versions)
+task clean:all
+task build:local PG_MAJOR=17
 ```
+
+**Note**: Multi-platform builds maintain separate cache but share the same builder. If experiencing cache issues with multi-arch builds, clear the cache for the specific PostgreSQL version rather than removing the builder.
 
 ---
 
@@ -471,6 +477,31 @@ docker-compose exec pg_lake-postgres psql -h /home/postgres/pgduck_socket_dir -p
 
 - **pg_lake:local** - PostgreSQL with pg_lake extensions
 - **pgduck-server:local** - pgduck server with DuckDB integration
+
+### Build Architecture
+
+**Single-platform (local) builds:**
+
+- Builds only for your system's architecture (auto-detected)
+- Uses `--load` to load images directly into Docker
+- Faster and suitable for local development
+
+**Multi-platform builds:**
+
+- Builds for multiple architectures (amd64, arm64)
+- Requires `--push` to registry (cannot use `--load`)
+- Used for publishing images
+- See [TASKFILE.md](./TASKFILE.md) for multi-platform build tasks
+
+**Cache Isolation:**
+
+Each PostgreSQL version uses its own buildx builder:
+
+- PG 16: `pg_lake_builder_pg16`
+- PG 17: `pg_lake_builder_pg17`
+- PG 18: `pg_lake_builder_pg18`
+
+This prevents cache conflicts when switching between versions.
 
 ---
 
