@@ -353,9 +353,6 @@ COPY --from=dev_base --chown=postgres:postgres /home/postgres/pgsql-${PG_MAJOR} 
 COPY --from=pg_lake_builder --chown=postgres:postgres /home/postgres/pgsql-${PG_MAJOR}/lib /home/postgres/pgsql-${PG_MAJOR}/lib
 COPY --from=pg_lake_builder --chown=postgres:postgres /home/postgres/pgsql-${PG_MAJOR}/share /home/postgres/pgsql-${PG_MAJOR}/share
 
-# Copy regress test files (needed for some tests)
-COPY --from=dev_base --chown=postgres:postgres /home/postgres/pgsql-${PG_MAJOR}/regress /home/postgres/pgsql-${PG_MAJOR}/regress
-
 # Initialize database (lightweight operation, doesn't compile anything)
 RUN initdb -D $PGBASEDIR/pgsql-$PG_MAJOR/data -U postgres --locale=C.UTF-8 --data-checksums
 
