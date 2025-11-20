@@ -1,0 +1,18 @@
+{
+  "name": "site-selection-frontend",
+  "version": "1.0.0",
+  "description": "Frontend map interface for Site Selection Demo",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "maplibre-gl": "^4.1.0"
+  },
+  "devDependencies": {
+    "vite": "^5.1.0"
+  }
+}
+

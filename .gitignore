@@ -39,3 +39,7 @@ delete_old_cluster.sh
 **/isolation/output
 **/isolation/isolation.conf
 pg_lake_iceberg/logs/polaris.log
+node_modules/
+.DS_Store
+.env
+.env.local

@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Site Selection Demo - PostGIS + pg_lake + Overture Maps</title>
+    <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-content">
+                <h1>🎯 Site Selection Tool</h1>
+                <p class="subtitle">PostGIS + pg_lake + Overture Maps + MapLibre</p>
+            </div>
+            <div class="header-stats" id="stats">
+                <div class="stat">
+                    <span class="stat-label">Company Stores</span>
+                    <span class="stat-value" id="store-count">—</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Overture POIs</span>
+                    <span class="stat-value" id="poi-count">—</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-section">
+                <h2>Map Layers</h2>
+                <label class="layer-toggle">
+                    <input type="checkbox" id="toggle-stores" checked>
+                    <span>🏪 Company Stores</span>
+                </label>
+                <label class="layer-toggle">
+                    <input type="checkbox" id="toggle-service-areas" checked>
+                    <span>📍 Service Areas</span>
+                </label>
+                <label class="layer-toggle">
+                    <input type="checkbox" id="toggle-competitors" checked>
+                    <span>🏬 Competitors (Overture)</span>
+                </label>
+            </div>
+
+            <div class="sidebar-section">
+                <h2>Analysis Tool</h2>
+                <button id="analyze-mode-btn" class="btn btn-primary">
+                    📌 Click Map to Analyze Site
+                </button>
+                <p class="hint">Click anywhere on the map to analyze potential store locations</p>
+            </div>
+
+            <div class="sidebar-section" id="analysis-results" style="display: none;">
+                <h2>Site Analysis</h2>
+                <div id="analysis-content"></div>
+            </div>
+
+            <div class="sidebar-section">
+                <h2>🌎 Load Overture Data</h2>
+                <p class="hint">Load POIs from Overture Maps via pg_lake for any visible area</p>
+                <button id="load-overture-btn" class="btn btn-secondary">
+                    Load Overture Data for Current View
+                </button>
+                <div id="load-status" class="status-message"></div>
+            </div>
+
+            <div class="sidebar-section">
+                <h2>About</h2>
+                <p class="about-text">
+                    This demo showcases:
+                    <ul>
+                        <li><strong>Local Data:</strong> Company stores in PostGIS</li>
+                        <li><strong>Remote Data:</strong> Overture Maps via pg_lake</li>
+                        <li><strong>Hybrid Analysis:</strong> Combining both datasets</li>
+                    </ul>
+                </p>
+            </div>
+        </aside>
+
+        <!-- Map -->
+        <main class="map-container">
+            <div id="map"></div>
+            <div class="map-overlay" id="map-message" style="display: none;">
+                <p id="map-message-text"></p>
+            </div>
+        </main>
+    </div>
+
+    <script type="module" src="./main.js"></script>
+</body>
+</html>
+
