@@ -52,8 +52,7 @@ initial_metadata_for_table(PG_FUNCTION_ARGS)
 	partitionSpec->fields_length = 0;
 	partitionSpec->fields = NULL;
 
-	IcebergTableMetadata *metadata =
-		GenerateEmptyTableMetadata(foreignTableOid, location);
+	IcebergTableMetadata *metadata = GenerateEmptyTableMetadata(location);
 
 	AppendCurrentPostgresSchema(foreignTableOid, metadata, schema);
 	AppendPartitionSpec(metadata, partitionSpec);

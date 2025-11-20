@@ -389,8 +389,6 @@ ProcessPgLakeCopyFrom(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 	if (PgLakeCopyValidityCheckHook)
 		PgLakeCopyValidityCheckHook(relationId);
 
-	ErrorIfReadOnlyIcebergTable(relationId);
-
 	/* check read-only transaction and parallel mode */
 	if (XactReadOnly)
 	{
@@ -634,7 +632,7 @@ IsCopyFromPushdownable(Relation relation, List *columnNameList,
 	/*
 	 * All of this only works for writable pg_lake tables.
 	 */
-	if (!IsAnyWritableLakeTable(relationId))
+	if (!IsWritablePgLakeTable(relationId) && !IsWritableIcebergTable(relationId))
 		return false;
 
 	bool		allowDefaultConsts = false;

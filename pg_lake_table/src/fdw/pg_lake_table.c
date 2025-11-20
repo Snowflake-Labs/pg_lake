@@ -80,7 +80,6 @@
 #include "pg_lake/fdw/shippable.h"
 #include "pg_lake/fdw/snapshot.h"
 #include "pg_lake/fdw/update_tracking.h"
-#include "pg_lake/fdw/utils.h"
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/fdw/multi_data_file_dest.h"
 #include "pg_lake/iceberg/catalog.h"
@@ -100,6 +99,7 @@
 #include "pg_lake/planner/restriction_collector.h"
 #include "pg_lake/storage/local_storage.h"
 #include "pg_lake/util/item_pointer_utils.h"
+#include "pg_lake/util/rel_utils.h"
 #include "pg_lake/util/string_utils.h"
 
 /* Default CPU cost to start up a foreign query. */
@@ -515,6 +515,7 @@ static void ErrorIfSystemColumnUsed(Oid relationId, AttrNumber attnum);
 static bool AdjustUniqueRelationIdentifiersViaAlias(Node *node, void *context);
 static bool IsSimpleDelete(ModifyTableState *mtstate, Relation resultRel);
 static void ShutdownPgLakeScan(ForeignScanState *node);
+static void ErrorIfTruncateReadOnlyLakeTable(Oid relationId);
 
 
 /*
@@ -2551,7 +2552,7 @@ postgresIsForeignRelUpdatable(Relation rel)
 	 * By default, all pg_lake foreign tables are assumed not writable. This
 	 * can be overridden by a per-table setting.
 	 */
-	if (!IsAnyWritableLakeTable(relationId))
+	if (!IsWritablePgLakeTable(relationId) && !IsWritableIcebergTable(relationId))
 		return 0;
 
 	int			writeFlags = (1 << CMD_INSERT);
@@ -3359,8 +3360,6 @@ create_foreign_modify(Relation rel,
 {
 	CmdType		operation = mtstate->operation;
 	Oid			relationId = RelationGetRelid(rel);
-
-	ErrorIfReadOnlyIcebergTable(relationId);
 
 	/* extra checks */
 	if (PgLakeModifyValidityCheckHook)
@@ -4412,7 +4411,7 @@ postgresExecForeignTruncate(List *relations,
 		Relation	relation = lfirst(relationCell);
 		Oid			relationId = RelationGetRelid(relation);
 
-		ErrorIfReadOnlyIcebergTable(relationId);
+		ErrorIfTruncateReadOnlyLakeTable(relationId);
 
 		/* extra checks */
 		if (PgLakeModifyValidityCheckHook)
@@ -5788,4 +5787,18 @@ ShutdownPgLakeScan(ForeignScanState *node)
 	EState	   *estate = node->ss.ps.state;
 
 	estate->es_processed += fsstate->skippableRows;
+}
+
+
+/*
+ * ErrorIfTruncateReadOnlyLakeTable
+ *		Raise an error if trying to TRUNCATE a read-only lake table.
+ */
+static void
+ErrorIfTruncateReadOnlyLakeTable(Oid relationId)
+{
+	if (!IsWritablePgLakeTable(relationId) && !IsWritableIcebergTable(relationId))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("TRUNCATE on read-only lake tables is not supported")));
 }
