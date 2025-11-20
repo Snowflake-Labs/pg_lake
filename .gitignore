@@ -40,3 +40,4 @@ delete_old_cluster.sh
 **/isolation/isolation.conf
 pg_lake_iceberg/logs/polaris.log
 .volume/
+Dockerfile.alpine
