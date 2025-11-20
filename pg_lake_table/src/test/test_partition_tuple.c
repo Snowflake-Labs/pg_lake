@@ -187,6 +187,10 @@ get_partition_summary(PG_FUNCTION_ARGS)
 			/* corresponding transform for partition spec field */
 			IcebergPartitionTransform *transform = FindPartitionTransformById(manifestTransforms, specField->field_id);
 
+			/* unexpected but better than crash */
+			if (transform == NULL)
+				ereport(ERROR, (errmsg("could not find partition transform for field %" PRId32, specField->field_id)));
+
 			PGType		sourceType = transform->pgType;
 
 			values[0] = Int32GetDatum(manifest->sequence_number);

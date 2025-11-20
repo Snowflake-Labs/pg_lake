@@ -164,7 +164,7 @@ def test_pg_lake_iceberg_table_reserialize_data_file_stats_from_metadata(
 def test_pg_lake_iceberg_table_read_data_file_stats_from_catalog(
     pg_lake_table_metadata_location,
     pg_conn,
-    extension,
+    iceberg_extension,
     s3,
     create_helper_functions,
 ):
@@ -588,7 +588,7 @@ def test_pg_lake_iceberg_table_special_numerics(
 
 def test_pg_lake_iceberg_table_add_drop_columns(
     pg_conn,
-    extension,
+    iceberg_extension,
     s3,
     create_helper_functions,
     with_default_location,
@@ -671,7 +671,7 @@ def test_pg_lake_iceberg_table_add_drop_columns(
 
 def test_pg_lake_iceberg_table_uuid_column(
     pg_conn,
-    extension,
+    iceberg_extension,
     s3,
     create_helper_functions,
     with_default_location,
@@ -704,7 +704,7 @@ def test_pg_lake_iceberg_table_uuid_column(
 
 def test_pg_lake_iceberg_table_bytea_column(
     pg_conn,
-    extension,
+    iceberg_extension,
     s3,
     create_helper_functions,
     with_default_location,
@@ -738,7 +738,7 @@ def test_pg_lake_iceberg_table_bytea_column(
 
 def test_pg_lake_iceberg_table_serial_column(
     pg_conn,
-    extension,
+    iceberg_extension,
     s3,
     create_helper_functions,
     with_default_location,
@@ -769,7 +769,7 @@ def test_pg_lake_iceberg_table_serial_column(
 
 def test_pg_lake_iceberg_table_random_values(
     pg_conn,
-    extension,
+    iceberg_extension,
     s3,
     create_helper_functions,
     with_default_location,
@@ -864,7 +864,7 @@ def test_pg_lake_iceberg_table_random_values(
 def test_pg_lake_iceberg_table_complex_values(
     superuser_conn,
     enable_stats_for_nested_types,
-    extension,
+    iceberg_extension,
     s3,
     create_helper_functions,
     with_default_location,
@@ -1166,7 +1166,12 @@ def spark_table_metadata_location(installcheck, spark_session):
 
 @pytest.fixture(scope="function")
 def enable_stats_for_nested_types(
-    installcheck, extension, app_user, pg_conn, superuser_conn, with_default_location
+    installcheck,
+    iceberg_extension,
+    app_user,
+    pg_conn,
+    superuser_conn,
+    with_default_location,
 ):
     run_command_outside_tx(
         [
@@ -1194,7 +1199,7 @@ def enable_stats_for_nested_types(
 @pytest.fixture(scope="function")
 def pg_lake_table_metadata_location(
     installcheck,
-    extension,
+    iceberg_extension,
     app_user,
     pg_conn,
     superuser_conn,
