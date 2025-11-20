@@ -55,31 +55,6 @@ def superuser_conn(postgres):
     conn.close()
 
 
-@pytest.fixture(scope="session")
-def iceberg_extension(postgres):
-    superuser_conn = open_pg_conn()
-
-    run_command(
-        f"""
-        CREATE EXTENSION IF NOT EXISTS pg_lake_iceberg CASCADE;
-    """,
-        superuser_conn,
-    )
-    superuser_conn.commit()
-
-    yield
-    superuser_conn.rollback()
-
-    run_command(
-        f"""
-        DROP EXTENSION pg_lake_iceberg CASCADE;
-    """,
-        superuser_conn,
-    )
-    superuser_conn.commit()
-    superuser_conn.close()
-
-
 @pytest.fixture(scope="module")
 def pgduck_conn(postgres):
     conn = psycopg2.connect(

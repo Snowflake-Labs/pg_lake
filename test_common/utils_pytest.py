@@ -2884,3 +2884,289 @@ def table_partition_specs(pg_conn, table_name):
 
     metadata = run_query(pg_query, pg_conn)[0][0]
     return metadata["partition-specs"]
+
+@pytest.fixture(scope="function")
+def adjust_object_store_settings(superuser_conn):
+    superuser_conn.autocommit = True
+
+    # catalog=object_store requires the IcebergDefaultLocationPrefix set
+    # and accessible by other sessions (e.g., push catalog worker),
+    # and with_default_location only does a session level
+    run_command(
+        f"""ALTER SYSTEM SET pg_lake_iceberg.object_store_catalog_location_prefix = 's3://{TEST_BUCKET}';""",
+        superuser_conn,
+    )
+
+    # to be able to read the same tables that we write, use the same prefix
+    run_command(
+        f"""
+        ALTER SYSTEM SET pg_lake_iceberg.internal_object_store_catalog_prefix = 'tmp';
+        """,
+        superuser_conn,
+    )
+
+    run_command(
+        f"""
+		ALTER SYSTEM SET pg_lake_iceberg.external_object_store_catalog_prefix = 'tmp';
+        """,
+        superuser_conn,
+    )
+
+    superuser_conn.autocommit = False
+
+    run_command("SELECT pg_reload_conf()", superuser_conn)
+
+    # unfortunate, but Postgres requires a bit of time before
+    # bg workers get the reload
+    run_command("SELECT pg_sleep(0.1)", superuser_conn)
+    superuser_conn.commit()
+    yield
+
+    superuser_conn.autocommit = True
+    run_command(
+        f"""
+        ALTER SYSTEM RESET pg_lake_iceberg.object_store_catalog_location_prefix;
+        """,
+        superuser_conn,
+    )
+    run_command(
+        f"""
+        ALTER SYSTEM RESET pg_lake_iceberg.internal_object_store_catalog_prefix;
+	   """,
+        superuser_conn,
+    )
+    run_command(
+        f"""
+     	ALTER SYSTEM RESET pg_lake_iceberg.external_object_store_catalog_prefix;
+        """,
+        superuser_conn,
+    )
+    superuser_conn.autocommit = False
+
+    run_command("SELECT pg_reload_conf()", superuser_conn)
+    superuser_conn.commit()
+
+def wait_until_object_store_writable_table_pushed(
+    superuser_conn, table_namespace, table_name
+):
+
+    cmd_1 = f"""SELECT metadata_location FROM lake_iceberg.list_object_store_tables(current_database()) WHERE catalog_table_name = '{table_name}' and catalog_namespace='{table_namespace}'"""
+    cmd_2 = f"""SELECT metadata_location FROM iceberg_tables WHERE table_name='{table_name}' and table_namespace ilike '%{table_namespace}%'"""
+
+    cnt = 0
+
+    while True:
+        run_command("SELECT pg_sleep(0.1)", superuser_conn)
+        cnt += 1
+        # up to 4 seconds
+        # the default is 1 second
+        if cnt == 40:
+            break
+
+        res1 = run_query(cmd_1, superuser_conn)
+        if res1 is None or len(res1) == 0:
+            continue
+
+        res2 = run_query(cmd_2, superuser_conn)
+
+        if res2 == res1:
+            return
+    dbname = run_query("SELECT current_database()", superuser_conn)
+
+    res1 = run_query(
+        "SELECT *  FROM lake_iceberg.list_object_store_tables(current_database())",
+        superuser_conn,
+    )
+    res2 = run_query(
+        "SELECT * FROM iceberg_tables",
+        superuser_conn,
+    )
+    assert (
+        False
+    ), f"failed to refresh object catalog table {dbname}: {str(res1)}: {str(res2)}"
+
+
+def wait_until_object_store_writable_table_removed(
+    superuser_conn, table_namespace, table_name
+):
+
+    cmd = f"""SELECT * FROM lake_iceberg.list_object_store_tables(current_database()) WHERE catalog_table_name = '{table_name}' and catalog_namespace='{table_namespace}'"""
+
+    cnt = 0
+
+    while True:
+        run_command("SELECT pg_sleep(0.1)", superuser_conn)
+        cnt += 1
+        # up to 4 seconds
+        # the default is 1 second
+        if cnt == 40:
+            break
+
+        res = run_query(cmd, superuser_conn)
+        if res is None or len(res) == 0:
+            return
+
+    # Give a nice assertion error
+    dbname = run_query("SELECT current_database()", superuser_conn)
+    res = run_query(
+        "SELECT *  FROM lake_iceberg.list_object_store_tables(current_database())",
+        superuser_conn,
+    )
+    assert False, f"failed to refresh object catalog table {dbname}: {str(res)}"
+
+
+@pytest.fixture(scope="module")
+def set_polaris_gucs(
+    superuser_conn,
+    iceberg_extension,
+    installcheck,
+    credentials_file: str = server_params.POLARIS_PRINCIPAL_CREDS_FILE,
+):
+    if not installcheck:
+
+        creds = json.loads(Path(credentials_file).read_text())
+        client_id = creds["credentials"]["clientId"]
+        client_secret = creds["credentials"]["clientSecret"]
+
+        run_command_outside_tx(
+            [
+                f"""ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_host TO '{server_params.POLARIS_HOSTNAME}:{server_params.POLARIS_PORT}'""",
+                f"""ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_id TO '{client_id}'""",
+                f"""ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_secret TO '{client_secret}'""",
+                "SELECT pg_reload_conf()",
+            ],
+            superuser_conn,
+        )
+
+    yield
+
+    if not installcheck:
+
+        run_command_outside_tx(
+            [
+                f"""ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_host""",
+                f"""ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_id""",
+                f"""ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_secret""",
+                "SELECT pg_reload_conf()",
+            ],
+            superuser_conn,
+        )
+
+@pytest.fixture(scope="module")
+def create_http_helper_functions(superuser_conn, iceberg_extension):
+    run_command(
+        f"""
+       CREATE TYPE lake_iceberg.http_result AS (
+            status        int,
+            body          text,
+            resp_headers  text
+        );
+
+        CREATE OR REPLACE FUNCTION lake_iceberg.test_http_get(
+                url     text,
+                headers text[] DEFAULT NULL)
+        RETURNS lake_iceberg.http_result
+        AS 'pg_lake_iceberg', 'test_http_get'
+        LANGUAGE C;
+
+
+        -- HEAD
+        CREATE OR REPLACE FUNCTION lake_iceberg.test_http_head(
+                url     text,
+                headers text[] DEFAULT NULL)
+        RETURNS lake_iceberg.http_result
+        AS 'pg_lake_iceberg', 'test_http_head'
+        LANGUAGE C;
+
+        -- POST
+        CREATE OR REPLACE FUNCTION lake_iceberg.test_http_post(
+                url     text,
+                body    text,
+                headers text[] DEFAULT NULL)
+        RETURNS lake_iceberg.http_result
+        AS 'pg_lake_iceberg', 'test_http_post'
+        LANGUAGE C;
+
+        -- PUT
+        CREATE OR REPLACE FUNCTION lake_iceberg.test_http_put(
+                url     text,
+                body    text,
+                headers text[] DEFAULT NULL)
+        RETURNS lake_iceberg.http_result
+        AS 'pg_lake_iceberg', 'test_http_put'
+        LANGUAGE C;
+
+        -- DELETE
+        CREATE OR REPLACE FUNCTION lake_iceberg.test_http_delete(
+                url     text,
+                headers text[] DEFAULT NULL)
+        RETURNS lake_iceberg.http_result
+        AS 'pg_lake_iceberg', 'test_http_delete'
+        LANGUAGE C;
+
+        -- URL encode function
+        CREATE OR REPLACE FUNCTION lake_iceberg.url_encode(input TEXT)
+        RETURNS text
+         LANGUAGE C
+         IMMUTABLE STRICT
+        AS 'pg_lake_iceberg', $function$url_encode_path$function$;
+
+        CREATE OR REPLACE FUNCTION lake_iceberg.url_encode_path(metadataUri TEXT)
+        RETURNS text
+         LANGUAGE C
+         IMMUTABLE STRICT
+        AS 'pg_lake_iceberg', $function$url_encode_path$function$;
+
+        CREATE OR REPLACE FUNCTION lake_iceberg.register_namespace_to_rest_catalog(TEXT,TEXT)
+        RETURNS void
+         LANGUAGE C
+         VOLATILE STRICT
+        AS 'pg_lake_iceberg', $function$register_namespace_to_rest_catalog$function$;
+
+""",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    yield
+
+    run_command(
+        """
+        DROP FUNCTION IF EXISTS lake_iceberg.url_encode;
+        DROP FUNCTION IF EXISTS lake_iceberg.test_http_get;
+        DROP FUNCTION IF EXISTS lake_iceberg.test_http_head;
+        DROP FUNCTION IF EXISTS lake_iceberg.test_http_post;
+        DROP FUNCTION IF EXISTS lake_iceberg.test_http_put;
+        DROP FUNCTION IF EXISTS lake_iceberg.test_http_delete;
+        DROP TYPE lake_iceberg.http_result;
+        DROP FUNCTION IF EXISTS lake_iceberg.url_encode_path;
+        DROP FUNCTION IF EXISTS lake_iceberg.register_namespace_to_rest_catalog;
+                """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+
+@pytest.fixture(scope="session")
+def iceberg_extension(postgres):
+    superuser_conn = open_pg_conn()
+
+    run_command(
+        f"""
+        CREATE EXTENSION IF NOT EXISTS pg_lake_iceberg CASCADE;
+    """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    yield
+    superuser_conn.rollback()
+
+    run_command(
+        f"""
+        DROP EXTENSION IF EXISTS pg_lake_iceberg CASCADE;
+    """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+    superuser_conn.close()

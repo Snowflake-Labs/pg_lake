@@ -249,12 +249,10 @@ SetManifestPartitionSummary(IcebergManifest * manifest, List *manifestEntries, L
 	{
 		int32_t		partitionFieldId = firstDataFile->partition.fields[partitionFieldIdx].field_id;
 
-		IcebergPartitionTransform *partitionTransform =
-			FindPartitionTransformById(transforms, partitionFieldId);
+		bool		errorIfMissing = true;
 
-		/* unexpected but better than crash */
-		if (partitionTransform == NULL)
-			ereport(ERROR, (errmsg("Could not find partition transform for field %d", partitionFieldId)));
+		IcebergPartitionTransform *partitionTransform =
+			FindPartitionTransformById(transforms, partitionFieldId, errorIfMissing);
 
 		PGType		resultPgType = partitionTransform->resultPgType;
 		Field	   *resultField = PostgresTypeToIcebergField(resultPgType, false, NULL);

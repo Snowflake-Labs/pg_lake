@@ -185,7 +185,9 @@ get_partition_summary(PG_FUNCTION_ARGS)
 			IcebergPartitionSpecField *specField = list_nth(manifestPartitionFields, summaryIdx);
 
 			/* corresponding transform for partition spec field */
-			IcebergPartitionTransform *transform = FindPartitionTransformById(manifestTransforms, specField->field_id);
+			bool		errorIfMissing = true;
+
+			IcebergPartitionTransform *transform = FindPartitionTransformById(manifestTransforms, specField->field_id, errorIfMissing);
 
 			PGType		sourceType = transform->pgType;
 

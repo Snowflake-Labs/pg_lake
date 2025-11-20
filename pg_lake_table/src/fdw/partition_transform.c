@@ -25,7 +25,9 @@
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/fdw/schema_operations/field_id_mapping_catalog.h"
+#include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/iceberg/api/partitioning.h"
+#include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/iceberg/iceberg_type_binary_serde.h"
 #include "pg_lake/iceberg/iceberg_type_numeric_binary_serde.h"
@@ -35,6 +37,7 @@
 #include "pg_lake/iceberg/hash_utils.h"
 #include "pg_lake/iceberg/truncate_utils.h"
 #include "pg_lake/util/numeric.h"
+#include "pg_lake/util/rel_utils.h"
 
 static PartitionField * ApplyPartitionTransformToTuple(IcebergPartitionTransform * transform,
 													   TupleTableSlot *slot);
@@ -204,17 +207,10 @@ CurrentPartitionTransformList(Oid relationId)
 List *
 AllPartitionTransformList(Oid relationId)
 {
-	List	   *partitionFields = GetAllIcebergSpecPartitionFieldsFromCatalog(relationId);
-
-	if (partitionFields == NIL)
-	{
-		/* not partitioned */
-		return NIL;
-	}
+	List	   *partitionFields = GetAllPartitionSpecFields(relationId);
 
 	return GetPartitionTransformsFromSpecFields(relationId, partitionFields);
 }
-
 
 
 /*
@@ -263,7 +259,19 @@ GetPartitionTransformFromSpecField(Oid relationId, IcebergPartitionSpecField * s
 		GetAttributeForFieldId(relationId, specField->source_id);
 	transform->columnName = get_attname(relationId, transform->attnum, false);
 	transform->pgType = GetAttributePGType(relationId, transform->attnum);
-	transform->sourceField = GetRegisteredFieldForAttribute(relationId, transform->attnum);
+
+	if (IsInternalIcebergTable(relationId))
+	{
+		transform->sourceField = GetRegisteredFieldForAttribute(relationId, transform->attnum);
+	}
+	else
+	{
+		Assert(IsExternalIcebergTable(relationId));
+
+		DataFileSchema *schema = GetDataFileSchemaForTable(relationId);
+
+		transform->sourceField = GetDataFileSchemaFieldById(schema, specField->source_id);
+	}
 
 	/* parse transform name */
 	ParseTransformName(transform->transformName,

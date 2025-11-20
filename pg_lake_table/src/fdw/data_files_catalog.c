@@ -456,8 +456,10 @@ FillPartitionFieldFromCatalog(TableDataFile * dataFile, List *partitionTransform
 	partitionField->field_id = partitionFieldId;
 	partitionField->field_name = pstrdup(partitionFieldName);
 
+	bool		errorIfMissing = true;
+
 	IcebergPartitionTransform *partitionTransform =
-		FindPartitionTransformById(partitionTransforms, partitionFieldId);
+		FindPartitionTransformById(partitionTransforms, partitionFieldId, errorIfMissing);
 
 	partitionField->value_type = GetTransformResultAvroType(partitionTransform);
 
@@ -1331,8 +1333,11 @@ AddDataFilePartitionValueToCatalog(Oid relationId, int32 partitionSpecId, int64 
 	for (size_t fieldIndex = 0; fieldIndex < partition->fields_length; fieldIndex++)
 	{
 		PartitionField *partitionField = &partition->fields[fieldIndex];
+
+		bool		errorIfMissing = true;
+
 		IcebergPartitionTransform *transform =
-			FindPartitionTransformById(transforms, partitionField->field_id);
+			FindPartitionTransformById(transforms, partitionField->field_id, errorIfMissing);
 
 		const char *partitionValue =
 			SerializePartitionValueToPGText(partitionField->value,

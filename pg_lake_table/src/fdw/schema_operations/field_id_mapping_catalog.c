@@ -41,12 +41,14 @@
 #include "pg_lake/fdw/schema_operations/field_id_mapping_catalog.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/iceberg/api/table_metadata.h"
+#include "pg_lake/iceberg/api/table_schema.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/parquet/leaf_field.h"
 #include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/serialize.h"
 #include "pg_lake/util/array_utils.h"
+#include "pg_lake/util/rel_utils.h"
 #include "pg_lake/util/spi_helpers.h"
 
 static DataFileSchemaField * CreateRegisteredFieldForAttribute(Oid relationId, int spiIndex);
@@ -54,6 +56,8 @@ static void InsertFieldMapping(Oid relationId, int attrIcebergFieldId,
 							   AttrNumber pg_attnum, PGType pgType,
 							   const char *writeDefault, const char *initialDefault,
 							   int parentFieldId);
+static AttrNumber GetAttributeForFieldIdForInternalIcebergTable(Oid relationId, int fieldId);
+static AttrNumber GetAttributeForFieldIdForExternalIcebergTable(char *metadataPath, Oid relationId, int fieldId);
 
 #ifdef USE_ASSERT_CHECKING
 static List *GetAllRegisteredAttnumsForTopLevelColumns(Oid relationId);
@@ -245,6 +249,28 @@ GetRegisteredFieldForAttribute(Oid relationId, AttrNumber attrNo)
 AttrNumber
 GetAttributeForFieldId(Oid relationId, int fieldId)
 {
+	if (IsInternalIcebergTable(relationId))
+	{
+		return GetAttributeForFieldIdForInternalIcebergTable(relationId, fieldId);
+	}
+	else
+	{
+		Assert(IsExternalIcebergTable(relationId));
+
+		char	   *currentMetadataPath = GetIcebergMetadataLocation(relationId, false);
+
+		return GetAttributeForFieldIdForExternalIcebergTable(currentMetadataPath, relationId, fieldId);
+	}
+}
+
+
+/*
+* GetAttributeForFieldIdForInternalIcebergTable gets the attribute number for a given field ID
+* for internal Iceberg tables from catalog.
+*/
+static AttrNumber
+GetAttributeForFieldIdForInternalIcebergTable(Oid relationId, int fieldId)
+{
 	DECLARE_SPI_ARGS(2);
 
 	SPI_ARG_VALUE(1, OIDOID, relationId, false);
@@ -279,6 +305,58 @@ GetAttributeForFieldId(Oid relationId, int fieldId)
 	return attrNo;
 }
 
+
+/*
+* GetAttributeForFieldIdForExternalIcebergTable gets the attribute number for a given field ID
+* for external Iceberg tables from iceberg metadata.
+ */
+static AttrNumber
+GetAttributeForFieldIdForExternalIcebergTable(char *metadataPath, Oid relationId, int fieldId)
+{
+	DataFileSchema *schema = GetDataFileSchemaForExternalIcebergTable(metadataPath);
+
+	DataFileSchemaField *schemaField = GetDataFileSchemaFieldById(schema, fieldId);
+
+	/*
+	 * searching attribute number by name is safe here as we do not allow
+	 * modifications to external tables
+	 */
+	char	   *attrName = pstrdup(schemaField->name);
+
+	DECLARE_SPI_ARGS(2);
+
+	SPI_ARG_VALUE(1, OIDOID, relationId, false);
+	SPI_ARG_VALUE(2, TEXTOID, attrName, false);
+
+	SPI_START();
+
+	/*
+	 * Although this is a read-only query, we need the execution to use the
+	 * current transaction's snapshot (e.g., GetTransactionSnapshot()) to get
+	 * the snapshot that the current transaction modified.
+	 *
+	 * So we trick the SPI_EXECUTE function to think that the query is not
+	 * read-only and read the transaction snapshot.
+	 */
+	bool		readOnly = false;
+
+	SPI_EXECUTE("SELECT attnum FROM pg_attribute "
+				"WHERE attrelid OPERATOR(pg_catalog.=) $1 "
+				"AND attname OPERATOR(pg_catalog.=) $2 "
+				"AND NOT attisdropped", readOnly);
+
+	/* there is a primary key on these filters */
+	Assert(SPI_processed == 1);
+
+	bool		isNull = false;
+	AttrNumber	attrNo = GET_SPI_VALUE(INT2OID, 0, 1, &isNull);
+
+	Assert(!isNull);
+
+	SPI_END();
+
+	return attrNo;
+}
 
 
 /*
