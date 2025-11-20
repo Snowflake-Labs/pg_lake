@@ -1,0 +1,38 @@
+# Git
+.git
+.gitignore
+.gitmodules
+
+# Documentation
+*.md
+!README.md
+TASKFILE.md
+
+# Task files
+Taskfile.yml
+
+# Docker files
+docker-compose.yml
+.dockerignore
+
+# CI/CD
+../.github
+
+# Build artifacts
+*.tar.gz
+*.zip
+
+# Logs
+*.log
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
