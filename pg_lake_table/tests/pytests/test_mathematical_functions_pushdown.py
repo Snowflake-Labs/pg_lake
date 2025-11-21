@@ -145,6 +145,24 @@ test_agg_cases = [
         "tan(radians(",
         True,
     ),
+    (
+        "asinh",
+        "WHERE col_double > 1 and abs(asinh(col_double) - 0.9503469) < 0.001",
+        "asinh(",
+        True,
+    ),
+    (
+        "acosh",
+        "WHERE col_double > 1 and abs(acosh(col_double) - 0.4435682) < 0.001",
+        "acosh(",
+        True,
+    ),
+    (
+        "atanh",
+        "WHERE abs(col_double)<1 and abs(atanh(col_double) - 0.6183813) < 0.001",
+        "atanh(",
+        True,
+    ),
 ]
 
 
