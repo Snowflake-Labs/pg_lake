@@ -43,6 +43,7 @@ typedef struct IcebergPartitionSpecHashEntry
 extern void UpdateDefaultPartitionSpecId(Oid relationId, int specId);
 extern void InsertPartitionSpecAndPartitionFields(Oid relationId, IcebergPartitionSpec * spec);
 extern int	GetLargestSpecId(Oid relationId);
+extern List *GetAllIcebergPartitionSpecIds(Oid relationId);
 extern PGDLLEXPORT int GetCurrentSpecId(Oid relationId);
 extern int	GetLargestPartitionFieldId(Oid relationId);
 extern IcebergPartitionSpecField * GetIcebergPartitionFieldFromCatalog(Oid relationId, int fieldId);
