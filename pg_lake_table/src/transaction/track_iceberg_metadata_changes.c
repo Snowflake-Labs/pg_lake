@@ -530,7 +530,8 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 	else if (operationType == REST_CATALOG_ADD_SNAPSHOT ||
 			 operationType == REST_CATALOG_ADD_SCHEMA ||
 			 operationType == REST_CATALOG_ADD_PARTITION ||
-			 operationType == REST_CATALOG_REMOVE_SNAPSHOT)
+			 operationType == REST_CATALOG_REMOVE_SNAPSHOT ||
+			 operationType == REST_CATALOG_SET_DEFAULT_PARTITION_ID)
 	{
 		request->body = pstrdup(body);
 		requestPerTable->tableModifyRequests = lappend(requestPerTable->tableModifyRequests, request);

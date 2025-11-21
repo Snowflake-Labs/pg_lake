@@ -250,6 +250,14 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 				restCatalogRequests = lappend(restCatalogRequests, request);
 			}
 		}
+
+		if (writableRestCatalogTable && builder->regeneratePartitionSpec)
+		{
+			RestCatalogRequest *request =
+				GetSetPartitionDefaultIdCatalogRequest(relationId, builder->defaultSpecId);
+
+			restCatalogRequests = lappend(restCatalogRequests, request);
+		}
 	}
 
 	/* whether to create a new version of the Iceberg table */

@@ -46,7 +46,8 @@ typedef enum RestCatalogOperationType
 	REST_CATALOG_ADD_SCHEMA = 2,
 	REST_CATALOG_ADD_PARTITION = 3,
 	REST_CATALOG_REMOVE_SNAPSHOT = 4,
-	REST_CATALOG_DROP_TABLE = 5
+	REST_CATALOG_DROP_TABLE = 5,
+	REST_CATALOG_SET_DEFAULT_PARTITION_ID = 6
 } RestCatalogOperationType;
 
 
@@ -76,4 +77,5 @@ extern PGDLLEXPORT List *DeleteHeadersWithAuth(void);
 extern PGDLLEXPORT RestCatalogRequest * GetAddSnapshotCatalogRequest(IcebergSnapshot * newSnapshot, Oid relationId);
 extern PGDLLEXPORT RestCatalogRequest * GetAddSchemaCatalogRequest(Oid relationId, DataFileSchema * dataFileSchema);
 extern PGDLLEXPORT RestCatalogRequest * GetAddPartitionCatalogRequest(Oid relationId, List *partitionSpec);
+extern PGDLLEXPORT RestCatalogRequest * GetSetPartitionDefaultIdCatalogRequest(Oid relationId, int specId);
 extern PGDLLEXPORT RestCatalogRequest * GetRemoveSnapshotCatalogRequest(List *removedSnapshotIds, Oid relationId);
