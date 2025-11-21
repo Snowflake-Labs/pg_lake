@@ -75,6 +75,37 @@ inline void ThrowInternalError(DataChunk &args, ExpressionState &state, Vector &
 	throw InternalException(str);
 }
 
+
+inline void AcoshPG(DataChunk &args, ExpressionState &state, Vector &result)
+{
+	auto &input_vector = args.data[0];
+
+	UnaryExecutor::Execute<double, double>(
+		input_vector, result, args.size(),
+		[&](double value) {
+			if (value < 1.0) {
+				throw InvalidInputException("input is out of range");
+			}
+			return std::acosh(value);
+		});
+}
+
+
+inline void AtanhPG(DataChunk &args, ExpressionState &state, Vector &result)
+{
+	auto &input_vector = args.data[0];
+
+	UnaryExecutor::Execute<double, double>(
+		input_vector, result, args.size(),
+		[&](double value) {
+			if (value < -1.0 || value > 1.0) {
+				throw InvalidInputException("input is out of range");
+			}
+			return std::atanh(value);
+		});
+}
+
+
 /*
 * Postgres and DuckDB have different behavior for the SUBSTRING function when
 * the length or offset is negative. This function implements the Postgres
@@ -235,6 +266,12 @@ static void LoadInternal(DatabaseInstance &instance) {
     /* Register functions */
     auto to_date_function = ScalarFunction("to_date", {LogicalType::DOUBLE}, LogicalType::DATE, ToDateScalarFun);
     ExtensionUtil::RegisterFunction(instance, to_date_function);
+
+    auto acosh_function = ScalarFunction("acosh_pg", {LogicalType::DOUBLE}, LogicalType::DOUBLE, AcoshPG);
+    ExtensionUtil::RegisterFunction(instance, acosh_function);
+
+	auto atanh_function = ScalarFunction("atanh_pg", {LogicalType::DOUBLE}, LogicalType::DOUBLE, AtanhPG);
+	ExtensionUtil::RegisterFunction(instance, atanh_function);
 
 	auto nullify_any_type = ScalarFunction("nullify_any_type", {LogicalType::ANY}, LogicalType::SQLNULL, NullifyAnyType);
 	ExtensionUtil::RegisterFunction(instance, nullify_any_type);
