@@ -125,28 +125,21 @@ release: patch_duckdb
 
 # patch exit code 1 means the patch is already applied, since we might run this multiple times, be robust
 patch_duckdb:
-	echo "current submodule refs"
-	patch -v
-	git submodule status
-	cd duckdb && git reset --hard && git checkout -f . && \
+	cd duckdb && \
 	find ../patches/duckdb -type f -name '*.patch' -print | xargs -0 printf '%s ' | \
 	while read -r patch; do \
 	patch -l -p1 -N < "$$patch" || [ $$? -eq 1 ]; \
 	done
-	cd duckdb-postgres && git reset --hard && git checkout -f . && \
+	cd duckdb-postgres && \
 	find ../patches/duckdb-postgres -type f -name '*.patch' -print | xargs -0 printf '%s ' | \
 	while read -r patch; do \
 	patch -l -p1 -N < "$$patch" || [ $$? -eq 1 ]; \
 	done
-	cd duckdb-azure && git reset --hard && git checkout -f . && \
+	cd duckdb-azure && \
 	find ../patches/duckdb-azure -type f -name '*.patch' -print | xargs -0 printf '%s ' | \
 	while read -r patch; do \
 	patch -l -p1 -N < "$$patch" || [ $$? -eq 1 ]; \
 	done
-	# checking for any rejected patches
-	echo "#### hunks rejected:"
-	cat $(find . -name '*.rej')
-	echo "#### done with hunks rejected"
 
 
 format:
