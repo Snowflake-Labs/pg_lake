@@ -398,6 +398,19 @@ def test_writable_rest_ddl(
     )
     assert res == [[3]]
 
+    # Dropping partition by should be fine
+    run_command(
+        """
+                  ALTER TABLE test_writable_rest_ddl.writable_rest_3 OPTIONS (DROP partition_by);
+
+                """,
+        pg_conn,
+    )
+    pg_conn.commit()
+    assert_metadata_on_pg_catalog_and_rest_matches(
+        "test_writable_rest_ddl", "writable_rest_3", superuser_conn
+    )
+
     run_command(f"""DROP SCHEMA test_writable_rest_ddl CASCADE""", pg_conn)
     pg_conn.commit()
 
