@@ -415,6 +415,92 @@ def test_writable_rest_ddl(
     pg_conn.commit()
 
 
+def test_writable_rest_vacuum(
+    pg_conn,
+    superuser_conn,
+    s3,
+    polaris_session,
+    set_polaris_gucs,
+    with_default_location,
+    installcheck,
+    create_http_helper_functions,
+):
+
+    if installcheck:
+        return
+
+    run_command(f"""CREATE SCHEMA test_writable_rest_vacuum""", pg_conn)
+    run_command(
+        f"""CREATE TABLE test_writable_rest_vacuum.writable_rest USING iceberg WITH (catalog='rest', autovacuum_enabled=False) AS SELECT 100 AS a""",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command("SET pg_lake_iceberg.enable_manifest_merge_on_write = off", pg_conn)
+    run_command("SET pg_lake_iceberg.manifest_min_count_to_merge = 2", pg_conn)
+    run_command("SET pg_lake_table.vacuum_compact_min_input_files TO 2", pg_conn)
+
+    for i in range(0, 3):
+        run_command(
+            f"""
+            INSERT INTO test_writable_rest_vacuum.writable_rest
+            SELECT s FROM generate_series(1,10) s;
+        """,
+            pg_conn,
+        )
+        pg_conn.commit()
+
+    run_command_outside_tx(
+        [
+            "SET pg_lake_engine.orphaned_file_retention_period TO 180000",
+            "SET pg_lake_iceberg.max_snapshot_age TO 0",
+            f"VACUUM FULL test_writable_rest_vacuum.writable_rest",
+        ],
+        superuser_conn,
+    )
+
+    # make sure manifest compaction happens
+    manifests = get_current_manifests(
+        pg_conn, "test_writable_rest_vacuum", "writable_rest"
+    )
+    assert manifests == [[5, 0, 1, 31, 0, 0, 0, 0]]
+
+    # make sure snapshot expiration happens
+    # VACUUM pushes one more snapshot, so we end up with 2 snapshotss
+    metadata = get_rest_table_metadata(
+        "test_writable_rest_vacuum", "writable_rest", superuser_conn
+    )
+    snapshots = metadata["metadata"]["snapshots"]
+    assert len(snapshots) == 2
+
+    file_paths_q = run_query(
+        f"SELECT path FROM lake_engine.deletion_queue WHERE table_name = 'test_writable_rest_vacuum.writable_rest'::regclass",
+        superuser_conn,
+    )
+    assert len(file_paths_q) == 12
+
+    run_command_outside_tx(
+        [
+            "SET pg_lake_engine.orphaned_file_retention_period TO 0",
+            f"VACUUM FULL test_writable_rest_vacuum.writable_rest",
+        ],
+        superuser_conn,
+    )
+    file_paths_q = run_query(
+        f"SELECT path FROM lake_engine.deletion_queue WHERE table_name = 'test_writable_rest_vacuum.writable_rest'::regclass",
+        superuser_conn,
+    )
+    assert len(file_paths_q) == 0
+
+    run_command("RESET pg_lake_iceberg.enable_manifest_merge_on_write", pg_conn)
+    run_command("RESET pg_lake_iceberg.manifest_min_count_to_merge", pg_conn)
+    run_command("RESET pg_lake_iceberg.max_snapshot_age", superuser_conn)
+    run_command("RESET pg_lake_iceberg.orphaned_file_retention_period", superuser_conn)
+
+    run_command("DROP SCHEMA test_writable_rest_vacuum CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 def assert_metadata_on_pg_catalog_and_rest_matches(
     namespace, table_name, superuser_conn
 ):
@@ -726,6 +812,24 @@ def get_rest_table_metadata(encoded_namespace, encoded_table_name, pg_conn):
     return json.loads(json_str)
 
 
+def get_current_manifests(pg_conn, tbl_namespace, tbl_name):
+    metadata = get_rest_table_metadata(tbl_namespace, tbl_name, pg_conn)
+    metadata_location = metadata["metadata-location"]
+    manifests = run_query(
+        f"""SELECT sequence_number, partition_spec_id,
+                                   added_files_count, added_rows_count,
+                                   existing_files_count, existing_rows_count,
+                                   deleted_files_count, deleted_rows_count
+                              FROM lake_iceberg.current_manifests('{metadata_location}')
+                              ORDER BY sequence_number, partition_spec_id,
+                                 added_files_count, added_rows_count,
+                                 existing_files_count, existing_rows_count,
+                                 deleted_files_count, deleted_rows_count ASC""",
+        pg_conn,
+    )
+    return manifests
+
+
 @pytest.fixture(scope="module")
 def set_polaris_gucs(
     superuser_conn,
@@ -835,6 +939,28 @@ def create_http_helper_functions(superuser_conn, extension):
          VOLATILE STRICT
         AS 'pg_lake_iceberg', $function$register_namespace_to_rest_catalog$function$;
 
+
+        CREATE OR REPLACE FUNCTION lake_iceberg.current_manifests(
+                tableMetadataPath TEXT
+        ) RETURNS TABLE(
+                manifest_path TEXT,
+                manifest_length BIGINT,
+                partition_spec_id INT,
+                manifest_content TEXT,
+                sequence_number BIGINT,
+                min_sequence_number BIGINT,
+                added_snapshot_id BIGINT,
+                added_files_count INT,
+                existing_files_count INT,
+                deleted_files_count INT,
+                added_rows_count BIGINT,
+                existing_rows_count BIGINT,
+                deleted_rows_count BIGINT)
+          LANGUAGE C
+          IMMUTABLE STRICT
+        AS 'pg_lake_iceberg', $function$current_manifests$function$;
+
+
 """,
         superuser_conn,
     )
@@ -854,6 +980,7 @@ def create_http_helper_functions(superuser_conn, extension):
         DROP FUNCTION IF EXISTS lake_iceberg.url_encode_path;
         DROP FUNCTION IF EXISTS lake_iceberg.register_namespace_to_rest_catalog;
         DROP FUNCTION IF EXISTS lake_iceberg.datafile_paths_from_table_metadata;
+        DROP FUNCTION IF EXISTS lake_iceberg.current_manifests;
                 """,
         superuser_conn,
     )
