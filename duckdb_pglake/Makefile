@@ -128,17 +128,17 @@ patch_duckdb:
 	echo "current submodule refs"
 	patch -v
 	git submodule status
-	cd duckdb && git checkout -f . && \
+	cd duckdb && git reset --hard && git checkout -f . && \
 	find ../patches/duckdb -type f -name '*.patch' -print | xargs -0 printf '%s ' | \
 	while read -r patch; do \
 	patch -l -p1 -N < "$$patch" || [ $$? -eq 1 ]; \
 	done
-	cd duckdb-postgres && git checkout -f . && \
+	cd duckdb-postgres && git reset --hard && git checkout -f . && \
 	find ../patches/duckdb-postgres -type f -name '*.patch' -print | xargs -0 printf '%s ' | \
 	while read -r patch; do \
 	patch -l -p1 -N < "$$patch" || [ $$? -eq 1 ]; \
 	done
-	cd duckdb-azure && git checkout -f . && \
+	cd duckdb-azure && git reset --hard && git checkout -f . && \
 	find ../patches/duckdb-azure -type f -name '*.patch' -print | xargs -0 printf '%s ' | \
 	while read -r patch; do \
 	patch -l -p1 -N < "$$patch" || [ $$? -eq 1 ]; \
