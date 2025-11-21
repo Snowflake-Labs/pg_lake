@@ -212,6 +212,15 @@ ApplyDDLCatalogChanges(Oid relationId, List *ddlOperations,
 			List	   *parsedTransforms = ddlOperation->parsedTransforms;
 			List	   *analyzedTransforms = AnalyzeIcebergTablePartitionBy(relationId, parsedTransforms);
 
+			*partitionSpec = GetPartitionSpecIfAlreadyExist(relationId, analyzedTransforms);
+			if (*partitionSpec != NULL)
+			{
+				/* update lake_iceberg.internal_tables specId */
+				UpdateDefaultPartitionSpecId(relationId, (*partitionSpec)->spec_id);
+
+				return;
+			}
+
 			/*
 			 * creatint a new spec, get the largest spec and we'll increment
 			 * it if needed when assigning

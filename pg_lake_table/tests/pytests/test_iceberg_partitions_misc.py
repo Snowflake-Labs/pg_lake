@@ -1,6 +1,183 @@
 from utils_pytest import *
 
 
+# show that re-setting the same partition spec
+# doesn't add a new spec, instead re-uses
+def test_re_set_partition_fields(
+    extension, s3, with_default_location, pg_conn, superuser_conn
+):
+
+    run_command(f"""CREATE SCHEMA test_re_set_partition_fields;""", pg_conn)
+
+    run_command(
+        "CREATE TABLE test_re_set_partition_fields.tbl(key int, value text) USING iceberg",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # when there are no partitions, the default spec-id is used, and there are no corresponding entries
+    # in partition_specs
+    default_spec_id = run_query(
+        "SELECT default_spec_id FROM lake_iceberg.tables_internal WHERE table_name = 'test_re_set_partition_fields.tbl'::regclass",
+        superuser_conn,
+    )
+    assert default_spec_id[0][0] == 0
+    assert (
+        default_table_partition_spec_id(pg_conn, "test_re_set_partition_fields", "tbl")
+        == 0
+    )
+    assert (
+        len(table_partition_specs(pg_conn, "test_re_set_partition_fields", "tbl")) == 1
+    )
+
+    # now, add a spec, and make sure it is pushed
+    run_command(
+        f"ALTER TABLE test_re_set_partition_fields.tbl OPTIONS (ADD partition_by 'key')",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    default_spec_id = run_query(
+        "SELECT default_spec_id FROM lake_iceberg.tables_internal WHERE table_name = 'test_re_set_partition_fields.tbl'::regclass",
+        superuser_conn,
+    )
+    assert default_spec_id[0][0] == 1
+    assert (
+        default_table_partition_spec_id(pg_conn, "test_re_set_partition_fields", "tbl")
+        == 1
+    )
+    assert (
+        len(table_partition_specs(pg_conn, "test_re_set_partition_fields", "tbl")) == 2
+    )
+
+    # now, drop the spec, and make sure it is pushed
+    run_command(
+        f"ALTER TABLE test_re_set_partition_fields.tbl OPTIONS (DROP partition_by)",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    default_spec_id = run_query(
+        "SELECT default_spec_id FROM lake_iceberg.tables_internal WHERE table_name = 'test_re_set_partition_fields.tbl'::regclass",
+        superuser_conn,
+    )
+    assert default_spec_id[0][0] == 0
+    assert (
+        default_table_partition_spec_id(pg_conn, "test_re_set_partition_fields", "tbl")
+        == 0
+    )
+    assert (
+        len(table_partition_specs(pg_conn, "test_re_set_partition_fields", "tbl")) == 2
+    )
+
+    # now, add another partition spec
+    run_command(
+        f"ALTER TABLE test_re_set_partition_fields.tbl OPTIONS (ADD partition_by 'bucket(10, key)')",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    default_spec_id = run_query(
+        "SELECT default_spec_id FROM lake_iceberg.tables_internal WHERE table_name = 'test_re_set_partition_fields.tbl'::regclass",
+        superuser_conn,
+    )
+    assert default_spec_id[0][0] == 2
+    assert (
+        default_table_partition_spec_id(pg_conn, "test_re_set_partition_fields", "tbl")
+        == 2
+    )
+    assert (
+        len(table_partition_specs(pg_conn, "test_re_set_partition_fields", "tbl")) == 3
+    )
+
+    # setting back to existing one should not push a new id
+    # now, add a spec, and make sure it is pushed
+    run_command(
+        f"ALTER TABLE test_re_set_partition_fields.tbl OPTIONS (SET partition_by 'key')",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    default_spec_id = run_query(
+        "SELECT default_spec_id FROM lake_iceberg.tables_internal WHERE table_name = 'test_re_set_partition_fields.tbl'::regclass",
+        superuser_conn,
+    )
+    assert default_spec_id[0][0] == 1
+    assert (
+        default_table_partition_spec_id(pg_conn, "test_re_set_partition_fields", "tbl")
+        == 1
+    )
+    assert (
+        len(table_partition_specs(pg_conn, "test_re_set_partition_fields", "tbl")) == 3
+    )
+
+    # a spec with two fields swapped are considered separate specs
+    run_command(
+        f"ALTER TABLE test_re_set_partition_fields.tbl OPTIONS (SET partition_by 'truncate(100, key), bucket(50, value)')",
+        pg_conn,
+    )
+    run_command(
+        f"ALTER TABLE test_re_set_partition_fields.tbl OPTIONS (SET partition_by 'bucket(50, value), truncate(100, key)')",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    default_spec_id = run_query(
+        "SELECT default_spec_id FROM lake_iceberg.tables_internal WHERE table_name = 'test_re_set_partition_fields.tbl'::regclass",
+        superuser_conn,
+    )
+    assert default_spec_id[0][0] == 4
+    assert (
+        default_table_partition_spec_id(pg_conn, "test_re_set_partition_fields", "tbl")
+        == 4
+    )
+    assert (
+        len(table_partition_specs(pg_conn, "test_re_set_partition_fields", "tbl")) == 5
+    )
+
+    run_command(
+        f"ALTER TABLE test_re_set_partition_fields.tbl OPTIONS (SET partition_by 'truncate(100, key), bucket(50, value)')",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    default_spec_id = run_query(
+        "SELECT default_spec_id FROM lake_iceberg.tables_internal WHERE table_name = 'test_re_set_partition_fields.tbl'::regclass",
+        superuser_conn,
+    )
+    assert default_spec_id[0][0] == 3
+    assert (
+        default_table_partition_spec_id(pg_conn, "test_re_set_partition_fields", "tbl")
+        == 3
+    )
+    assert (
+        len(table_partition_specs(pg_conn, "test_re_set_partition_fields", "tbl")) == 5
+    )
+
+    # finally, drop the spec and finish the test
+    run_command(
+        f"ALTER TABLE test_re_set_partition_fields.tbl OPTIONS (DROP partition_by)",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    default_spec_id = run_query(
+        "SELECT default_spec_id FROM lake_iceberg.tables_internal WHERE table_name = 'test_re_set_partition_fields.tbl'::regclass",
+        superuser_conn,
+    )
+    assert default_spec_id[0][0] == 0
+    assert (
+        default_table_partition_spec_id(pg_conn, "test_re_set_partition_fields", "tbl")
+        == 0
+    )
+    assert (
+        len(table_partition_specs(pg_conn, "test_re_set_partition_fields", "tbl")) == 5
+    )
+
+    run_command(f"""DROP SCHEMA test_re_set_partition_fields CASCADE;""", pg_conn)
+    pg_conn.commit()
+
+
 def test_ddl_with_identity_partitions(extension, s3, with_default_location, pg_conn):
     run_command(f"""CREATE SCHEMA test_ddl_with_partitions;""", pg_conn)
 
@@ -455,3 +632,26 @@ def test_partition_by_with_collation(extension, s3, with_default_location, pg_co
 
     run_command("DROP COLLATION s_coll;", pg_conn)
     pg_conn.commit()
+
+
+def table_metadata(pg_conn, table_namespace, table_name):
+    metadata_location = run_query(
+        f"SELECT metadata_location FROM iceberg_tables WHERE table_name = '{table_name}' and table_namespace = '{table_namespace}'",
+        pg_conn,
+    )[0][0]
+
+    pg_query = f"SELECT * FROM lake_iceberg.metadata('{metadata_location}')"
+
+    metadata = run_query(pg_query, pg_conn)[0][0]
+
+    return metadata
+
+
+def table_partition_specs(pg_conn, table_namespace, table_name):
+    metadata = table_metadata(pg_conn, table_namespace, table_name)
+    return metadata["partition-specs"]
+
+
+def default_table_partition_spec_id(pg_conn, table_namespace, table_name):
+    metadata = table_metadata(pg_conn, table_namespace, table_name)
+    return metadata["default-spec-id"]

@@ -28,6 +28,7 @@ extern void *ApplyBucketTransformToColumn(IcebergPartitionTransform * transform,
 										  Datum columnValue, bool isNull,
 										  size_t *bucketSize);
 extern List *CurrentPartitionTransformList(Oid relationId);
+extern IcebergPartitionSpec * GetPartitionSpecIfAlreadyExist(Oid relationId, List *partitionTransforms);
 extern List *AllPartitionTransformList(Oid relationId);
 extern List *GetPartitionTransformsFromSpecFields(Oid relationId, List *specFields);
 extern void *DeserializePartitionValueFromPGText(IcebergPartitionTransform * transform,
