@@ -63,6 +63,7 @@ static void ParseTransformName(const char *name, IcebergPartitionTransformType *
 static bool ParseBracketUintSize(const char *name, const char *prefix, size_t *outVal);
 static void *DatumToPartitionValue(IcebergPartitionTransform * transform, Datum columnValue, bool isNull,
 								   size_t *valuelength);
+static bool PartitionTransformsEqual(IcebergPartitionSpec * spec, List *partitionTransforms);
 
 /*
  * ComputePartitionTupleForTuple applies relative partition transforms
@@ -89,6 +90,77 @@ ComputePartitionTupleForTuple(List *transforms, TupleTableSlot *slot)
 
 	return partition;
 }
+
+
+/*
+* If a partition spec with the given partition transforms already exists
+* for the given relation, returns the partition spec. Otherwise, it
+* returns -1.
+*/
+IcebergPartitionSpec *
+PartitionAlreadyExistsInTable(Oid relationId, List *partitionTransforms)
+{
+	HTAB	   *allSpecs = GetAllPartitionSpecsFromCatalog(relationId);
+
+	HASH_SEQ_STATUS currentSpecsStatus;
+
+	hash_seq_init(&currentSpecsStatus, allSpecs);
+	IcebergPartitionSpecHashEntry *currentSpec = NULL;
+
+	while ((currentSpec = hash_seq_search(&currentSpecsStatus)) != NULL)
+	{
+		if (PartitionTransformsEqual(currentSpec->spec, partitionTransforms))
+		{
+			IcebergPartitionSpec *foundSpec = currentSpec->spec;
+
+			hash_seq_term(&currentSpecsStatus);
+
+			return foundSpec;
+		}
+	}
+
+	return NULL;
+}
+
+/*
+* PartitionTransformsEqual compares the given partition spec
+* with the given list of partition transforms. It returns true
+* if they are equal, false otherwise.
+*/
+static bool
+PartitionTransformsEqual(IcebergPartitionSpec * spec, List *partitionTransforms)
+{
+	if (spec->fields_length != list_length(partitionTransforms))
+		return false;
+
+	for (int i = 0; i < spec->fields_length; i++)
+	{
+		IcebergPartitionSpecField *specField = &spec->fields[i];
+		IcebergPartitionTransform *transform = list_nth(partitionTransforms, i);
+
+		/*
+		 * Normally, the name check should be sufficient, as we currently do
+		 * not allow renaming any column that is used in partitioning, see
+		 * ErrorIfColumnEverUsedInIcebergPartitionSpec(). Still, let's be
+		 * defensive and also check source field ids.
+		 */
+		if (specField->source_id != transform->sourceField->id)
+			return false;
+
+		/*
+		 * This like a_bucket_10, c_year, etc., so we it includes both the
+		 * column name, the transform type and the parameters to
+		 * bucket/truncate transforms.
+		 */
+		if (strcasecmp(specField->name, transform->partitionFieldName) != 0)
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
 
 
 /*
