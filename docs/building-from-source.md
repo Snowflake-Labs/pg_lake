@@ -153,6 +153,11 @@ brew install $USER/local-cmake/cmake@3.31.1
 
 pg_lake is supported with PostgreSQL 16, 17 and 18.
 
+You might need to configure Postgres with necessary args and flags. Below is an example for Postgres 18 on MacOS, with debugging flags and needed libraries:
+```
+./configure --prefix=$HOME/pgsql/18 --enable-cassert --enable-debug --enable-injection-points CFLAGS="-ggdb -O0 -fno-omit-frame-pointer" CPPFLAGS="-g -O0" --with-lz4 --with-icu --with-zstd --with-libxslt --with-libxml --with-readline --with-openssl --with-includes=/opt/homebrew/include/ --with-libraries=/opt/homebrew/lib PG_SYSROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
+```
+
 To create a new PostgreSQL database directory, run initdb: 
 
 ```bash
@@ -165,9 +170,9 @@ Success. You can now start the database server using:
     pg_ctl -D $HOME/pgsql/18/datastore -l logfile start
 ```
 
-To set up PgLake, you need to add `pg_extension_base` to shared_preload_libraries, which will load other modules as needed.
+To set up PgLake, you need to add `pg_extension_base` to `shared_preload_libraries`, which will load other modules as needed.
 ```
-shared_preload_libraries = 'pg_extension_base'
+echo "shared_preload_libraries = 'pg_extension_base'" >> ~/<path_to_conf_file>/postgresql.conf
 ```
 
 ### Using `pg_lake`
@@ -229,8 +234,9 @@ You need to follow below instructions to successfully run all tests locally:
 
 - You need to install `pipenv` with >= python3.11 to run tests. Be careful to install correct python version if not exists e.g. ```apt install python3.11```. Then you should make sure you use it while creating pipenv environment. (e.g. ```pipenv --python 3.11```)
 - You need to have `pgaudit` extension installed
-- You need to install `jdk11` and `jdbc driver for Postgres`, then export `JDBC_DRIVER_PATH`. (required to run tests where we verify pg_lake_iceberg table results on spark)
+- You need to install `jdk21` and `jdbc driver for Postgres`, then export `JDBC_DRIVER_PATH`. (required to run tests where we verify pg_lake_iceberg table results on spark)
 - You need to have JAVA 21 (or higher) installed to run tests with Polaris catalog
+- You need to have `pg_cron` installed.
 
 Build PostgreSQL from source:
 
@@ -267,6 +273,14 @@ git clone git@github.com:pgaudit/pgaudit.git
 cd pgaudit
 make USE_PGXS=1 install
 ``` 
+
+Build pg_cron:
+
+```bash
+git clone https://github.com/citusdata/pg_cron.git
+cd pg_cron
+make install
+```
 
 Azure tests use azurite, which needs to be installed via npm.
 
@@ -344,8 +358,10 @@ We have so far avoided regular SQL regression tests. The reason is that we found
 
 2. **Start the `minio` Server**:
    ```bash
-   minio server start
+   minio server /tmp/data
    ```
+
+To remove leftovers from the previous run if needed, you can first run: `rm -rf /tmp/data`
 
 3. **Access `minio` UI**:
    Open your browser and go to [http://localhost:9000/](http://localhost:9000/).
@@ -365,6 +381,8 @@ We use the following for simplicity:
    [profile minio]
    region = us-east-1
    services = testing-minio
+   aws_access_key_id = testkey
+   aws_secret_access_key = testpassword
    ```
 
 6. **Create a Bucket in `minio` UI**:
