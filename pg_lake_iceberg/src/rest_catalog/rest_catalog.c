@@ -865,9 +865,6 @@ GetAddPartitionCatalogRequest(Oid relationId, List *partitionSpecs)
 	appendStringInfoString(body, bodyPart);
 	appendStringInfoChar(body, '}');
 
-	/* set-default-spec to the one we just added */
-	appendStringInfoString(body, ", {\"action\":\"set-default-spec\",\"spec-id\":-1}");
-
 	RestCatalogRequest *request = palloc0(sizeof(RestCatalogRequest));
 
 	request->relationId = relationId;
@@ -876,6 +873,29 @@ GetAddPartitionCatalogRequest(Oid relationId, List *partitionSpecs)
 
 	return request;
 }
+
+
+/*
+ * GetAddPartitionCatalogRequest creates a RestCatalogRequest that adds a
+ * partition spec and sets it as the default (spec-id = -1 means "last added").
+ */
+RestCatalogRequest *
+GetSetPartitionDefaultIdCatalogRequest(Oid relationId, int specId)
+{
+	StringInfo	body = makeStringInfo();
+
+	/* set-default-spec to the one we just added */
+	appendStringInfo(body, "{\"action\":\"set-default-spec\",\"spec-id\":%d}", specId);
+
+	RestCatalogRequest *request = palloc0(sizeof(RestCatalogRequest));
+
+	request->relationId = relationId;
+	request->operationType = REST_CATALOG_SET_DEFAULT_PARTITION_ID;
+	request->body = body->data;
+
+	return request;
+}
+
 
 /*
  * GetRemoveSnapshotCatalogRequest creates a RestCatalogRequest that removes

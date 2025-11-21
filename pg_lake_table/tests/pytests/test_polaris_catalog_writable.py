@@ -282,7 +282,7 @@ def test_writable_rest_ddl(
                   ALTER TABLE test_writable_rest_ddl.writable_rest_2 ADD COLUMN c INT;
 
                   ALTER TABLE test_writable_rest_ddl.writable_rest_3 OPTIONS (SET partition_by 'truncate(30,a)');
-                  ALTER TABLE test_writable_rest_ddl.writable_rest_3 OPTIONS (SET partition_by 'truncate(40,a)');
+                  ALTER TABLE test_writable_rest_ddl.writable_rest_3 OPTIONS (SET partition_by 'truncate(20,a)');
 
                 """,
         pg_conn,
