@@ -127,9 +127,7 @@ release: patch_duckdb
 patch_duckdb:
 	echo "current submodule refs"
 	patch -v
-	git clean -xfd
-    git submodule update --recursive --init
-
+	git submodule status
 	cd duckdb && git reset --hard && git checkout -f . && \
 	find ../patches/duckdb -type f -name '*.patch' -print | xargs -0 printf '%s ' | \
 	while read -r patch; do \
