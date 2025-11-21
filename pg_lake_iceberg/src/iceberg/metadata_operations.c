@@ -146,9 +146,11 @@ static void DeleteInProgressManifests(Oid relationId, List *manifests);
  * ApplyIcebergMetadataChanges applies the given metadata operations to the
  * iceberg metadata for the given relation.
  */
-void
+List *
 ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allTransforms, bool isVerbose)
 {
+	List	   *restCatalogRequests = NIL;
+
 	Assert(metadataOperations != NIL);
 
 #ifdef USE_ASSERT_CHECKING
@@ -157,25 +159,57 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 
 	Assert(!ShouldSkipMetadataChangeToIceberg(metadataOperationTypes));
 #endif
+	IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
+	bool		writableRestCatalogTable = catalogType == REST_CATALOG_READ_WRITE;
+
+	int64_t		prevLastUpdatedMs = 0;
 
 	/* read the iceberg metadata for the table */
 	bool		forUpdate = true;
-	char	   *metadataPath = GetIcebergCatalogMetadataLocation(relationId, forUpdate);
-
-	bool		createNewTable = HasCreateTableOperation(metadataOperations);
-
-	IcebergTableMetadata *metadata = (createNewTable) ?
-		GenerateInitialIcebergTableMetadata(relationId) :
-		ReadIcebergTableMetadata(metadataPath);
-
-	int64_t		prevLastUpdatedMs = metadata->last_updated_ms;
 
 	/*
-	 * prepare to use a new sequence number (might not be committed if there's
-	 * no change)
+	 * Although writable rest catalog iceberg tables have their metadata
+	 * location stored in the rest catalog itself, we still need to read the
+	 * pg_lake metadata as forUpdate=true acquires necessary locks to prevent
+	 * concurrent updates.
 	 */
-	metadata->last_sequence_number = createNewTable ? 0 : metadata->last_sequence_number + 1;
-	metadata->last_updated_ms = PostgresTimestampToIcebergTimestampMs();
+	char	   *metadataPath = GetIcebergCatalogMetadataLocation(relationId, forUpdate);
+	bool		createNewTable = HasCreateTableOperation(metadataOperations);
+
+	IcebergTableMetadata *metadata = NULL;
+
+	if (createNewTable)
+	{
+		metadata = GenerateInitialIcebergTableMetadata(relationId);
+
+		/* Polaris expects the sequence number start from 1 */
+		metadata->last_sequence_number = !writableRestCatalogTable ? 0 : 1;
+		metadata->last_updated_ms = PostgresTimestampToIcebergTimestampMs();
+	}
+	else if (writableRestCatalogTable)
+	{
+		/*
+		 * Writable rest catalog iceberg tables have their metadata updated in
+		 * the REST catalog itself. We fetch the metadata from the rest
+		 * catalog.
+		 */
+		metadataPath = GetMetadataLocationForRestCatalogForIcebergTable(relationId);
+
+		/*
+		 * metadata for writable rest catalog is intended to be read-only in
+		 * the remaining of the function, given the authoritative source is
+		 * the rest catalog.
+		 */
+		metadata = ReadIcebergTableMetadata(metadataPath);
+	}
+	else
+	{
+		metadata = ReadIcebergTableMetadata(metadataPath);
+
+		prevLastUpdatedMs = metadata->last_updated_ms;
+		metadata->last_sequence_number = metadata->last_sequence_number + 1;
+		metadata->last_updated_ms = PostgresTimestampToIcebergTimestampMs();
+	}
 
 	IcebergSnapshotBuilder *builder = CreateIcebergSnapshotBuilder(metadata, metadataOperations);
 
@@ -183,7 +217,16 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 
 	if (builder->createTable || builder->regenerateSchema)
 	{
-		AppendCurrentPostgresSchema(relationId, metadata, builder->schema);
+		if (!writableRestCatalogTable)
+		{
+			AppendCurrentPostgresSchema(relationId, metadata, builder->schema);
+		}
+		else if (builder->regenerateSchema)
+		{
+			RestCatalogRequest *request = GetAddSchemaCatalogRequest(relationId, builder->schema);
+
+			restCatalogRequests = lappend(restCatalogRequests, request);
+		}
 	}
 
 	if (builder->createTable || builder->regeneratePartitionSpec)
@@ -196,7 +239,23 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 		{
 			IcebergPartitionSpec *newSpec = lfirst(newSpecCell);
 
-			AppendPartitionSpec(metadata, newSpec);
+			if (!writableRestCatalogTable)
+				AppendPartitionSpec(metadata, newSpec);
+			else if (builder->regeneratePartitionSpec)
+			{
+				RestCatalogRequest *request =
+					GetAddPartitionCatalogRequest(relationId, list_make1(newSpec));
+
+				restCatalogRequests = lappend(restCatalogRequests, request);
+			}
+		}
+
+		if (writableRestCatalogTable && builder->regeneratePartitionSpec)
+		{
+			RestCatalogRequest *request =
+				GetSetPartitionDefaultIdCatalogRequest(relationId, builder->defaultSpecId);
+
+			restCatalogRequests = lappend(restCatalogRequests, request);
 		}
 	}
 
@@ -212,25 +271,56 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 
 	if (newSnapshot != NULL)
 	{
-		/* update metadata's snapshot */
-		UpdateLatestSnapshot(metadata, newSnapshot);
-
 		createNewSnapshot = true;
+
+		/* update metadata's snapshot */
+		if (!writableRestCatalogTable)
+			UpdateLatestSnapshot(metadata, newSnapshot);
+		else
+		{
+			newSnapshot->sequence_number = metadata->last_sequence_number + 1;
+			RestCatalogRequest *request =
+				GetAddSnapshotCatalogRequest(newSnapshot, relationId);
+
+			restCatalogRequests = lappend(restCatalogRequests, request);
+		}
 	}
 
 	/* if we need to expire old snapshots, we do it here */
 	if (builder->expireOldSnapshots)
 	{
-		bool		expiredSnapshots =
+		List	   *expiredSnapshotIds =
 			RemoveOldSnapshotsFromMetadata(relationId, metadata, isVerbose);
 
-		if (expiredSnapshots)
+		if (expiredSnapshotIds != NIL)
+		{
 			createNewSnapshot = true;
+
+			if (writableRestCatalogTable)
+			{
+				RestCatalogRequest *request =
+					GetRemoveSnapshotCatalogRequest(expiredSnapshotIds, relationId);
+
+				restCatalogRequests = lappend(restCatalogRequests, request);
+			}
+		}
 	}
 
 	/* if there were no changes to the Iceberg table, we are done */
 	if (!createNewSnapshot && !createNewTable)
-		return;
+	{
+		Assert(restCatalogRequests == NIL);
+		return restCatalogRequests;
+	}
+
+	if (writableRestCatalogTable)
+	{
+		/*
+		 * We are done, writable rest catalog iceberg tables have their
+		 * metadata updated in the catalog itself.
+		 */
+		return restCatalogRequests;
+	}
 
 	/* add the new snapshot to the snapshot log */
 	GenerateSnapshotLogEntries(metadata);
@@ -240,7 +330,10 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 	 * metadata log for new tables.
 	 */
 	if (!createNewTable)
+	{
+		Assert(prevLastUpdatedMs != 0);
 		AdjustAndRetainMetadataLogs(metadata, metadataPath, metadata->snapshots_length, prevLastUpdatedMs);
+	}
 
 	int			version = metadata->last_sequence_number;
 
@@ -270,6 +363,13 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 	}
 
 	TriggerCatalogExportIfObjectStoreTable(relationId);
+
+	/*
+	 * for a non-writable rest table, we should not have any rest catalog
+	 * requests
+	 */
+	Assert(restCatalogRequests == NIL);
+	return restCatalogRequests;
 }
 
 

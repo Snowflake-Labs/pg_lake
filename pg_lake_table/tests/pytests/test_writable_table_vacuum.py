@@ -747,7 +747,7 @@ def test_vacuum_iceberg_identity_partitioned_table(
         expected_data_files_cnt=11,
     )
 
-    # add same partition_by and insert with a new spec (we could have used existing spec but we always create a new one)
+    # add same partition_by and insert with the existing spec
     run_command(
         f"""
         ALTER TABLE {table_name} OPTIONS (ADD partition_by 'id');
@@ -761,8 +761,8 @@ def test_vacuum_iceberg_identity_partitioned_table(
     assert_partition_values_and_data_files(
         pg_conn,
         table_name,
-        expected_partition_values_cnt=20,
-        expected_data_files_cnt=21,
+        expected_partition_values_cnt=10,
+        expected_data_files_cnt=11,
     )
 
     # set new partition_by and insert with a new spec
@@ -779,8 +779,8 @@ def test_vacuum_iceberg_identity_partitioned_table(
     assert_partition_values_and_data_files(
         pg_conn,
         table_name,
-        expected_partition_values_cnt=30,
-        expected_data_files_cnt=31,
+        expected_partition_values_cnt=20,
+        expected_data_files_cnt=21,
     )
 
     # sanity check on table
@@ -839,7 +839,7 @@ def test_vacuum_iceberg_truncate_partitioned_table(
         expected_data_files_cnt=10,
     )
 
-    # add same partition_by and insert with a new spec (we could have used existing spec but we always create a new one)
+    # add same partition_by and insert with a the old spec
     run_command(
         f"""
         ALTER TABLE {table_name} OPTIONS (ADD partition_by 'truncate(1,id)');
@@ -854,8 +854,8 @@ def test_vacuum_iceberg_truncate_partitioned_table(
     assert_partition_values_and_data_files(
         pg_conn,
         table_name,
-        expected_partition_values_cnt=18,
-        expected_data_files_cnt=19,
+        expected_partition_values_cnt=9,
+        expected_data_files_cnt=10,
     )
 
     # set new partition_by and insert with a new spec
@@ -873,8 +873,8 @@ def test_vacuum_iceberg_truncate_partitioned_table(
     assert_partition_values_and_data_files(
         pg_conn,
         table_name,
-        expected_partition_values_cnt=27,
-        expected_data_files_cnt=28,
+        expected_partition_values_cnt=18,
+        expected_data_files_cnt=19,
     )
 
     # sanity check on table
@@ -933,7 +933,7 @@ def test_vacuum_iceberg_bucket_partitioned_table(
         expected_data_files_cnt=9,
     )
 
-    # add same partition_by and insert with a new spec (we could have used existing spec but we always create a new one)
+    # add same partition_by and insert with a the existing spec
     run_command(
         f"""
         ALTER TABLE {table_name} OPTIONS (ADD partition_by 'bucket(100,id)');
@@ -947,8 +947,8 @@ def test_vacuum_iceberg_bucket_partitioned_table(
     assert_partition_values_and_data_files(
         pg_conn,
         table_name,
-        expected_partition_values_cnt=16,
-        expected_data_files_cnt=17,
+        expected_partition_values_cnt=8,
+        expected_data_files_cnt=9,
     )
 
     # set new partition_by and insert with a new spec
@@ -965,8 +965,8 @@ def test_vacuum_iceberg_bucket_partitioned_table(
     assert_partition_values_and_data_files(
         pg_conn,
         table_name,
-        expected_partition_values_cnt=24,
-        expected_data_files_cnt=25,
+        expected_partition_values_cnt=16,
+        expected_data_files_cnt=17,
     )
 
     # sanity check on table
@@ -1034,7 +1034,7 @@ def test_vacuum_iceberg_year_partitioned_table(
         expected_data_files_cnt=11,
     )
 
-    # add same partition_by and insert with a new spec (we could have used existing spec but we always create a new one)
+    # add same partition_by and insert with the old spec
     run_command(
         f"""
         ALTER TABLE {table_name} OPTIONS (ADD partition_by 'year(a)');
@@ -1053,8 +1053,8 @@ def test_vacuum_iceberg_year_partitioned_table(
     assert_partition_values_and_data_files(
         pg_conn,
         table_name,
-        expected_partition_values_cnt=20,
-        expected_data_files_cnt=21,
+        expected_partition_values_cnt=10,
+        expected_data_files_cnt=11,
     )
 
     # set new partition_by and insert with a new spec
@@ -1076,8 +1076,8 @@ def test_vacuum_iceberg_year_partitioned_table(
     assert_partition_values_and_data_files(
         pg_conn,
         table_name,
-        expected_partition_values_cnt=30,
-        expected_data_files_cnt=31,
+        expected_partition_values_cnt=20,
+        expected_data_files_cnt=21,
     )
 
     # sanity check on table
@@ -1136,7 +1136,7 @@ def test_vacuum_iceberg_multi_partitioned_table(
         expected_data_files_cnt=11,
     )
 
-    # add same partition_by and insert with a new spec (we could have used existing spec but we always create a new one)
+    # add same partition_by and insert with the same spec
     run_command(
         f"""
         ALTER TABLE {table_name} OPTIONS (ADD partition_by 'truncate(1,id), bucket(100,value)');
@@ -1151,8 +1151,8 @@ def test_vacuum_iceberg_multi_partitioned_table(
     assert_partition_values_and_data_files(
         pg_conn,
         table_name,
-        expected_partition_values_cnt=40,
-        expected_data_files_cnt=21,
+        expected_partition_values_cnt=20,
+        expected_data_files_cnt=11,
     )
 
     # set new partition_by and insert with a new spec
@@ -1170,8 +1170,8 @@ def test_vacuum_iceberg_multi_partitioned_table(
     assert_partition_values_and_data_files(
         pg_conn,
         table_name,
-        expected_partition_values_cnt=42,
-        expected_data_files_cnt=22,
+        expected_partition_values_cnt=22,
+        expected_data_files_cnt=12,
     )
 
     # sanity check on table

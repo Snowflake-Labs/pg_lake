@@ -689,6 +689,7 @@ VacuumCompactDataFiles(Oid relationId, bool isFull, bool isVerbose)
 			RollbackAndReleaseCurrentSubTransaction();
 
 			ResetTrackedIcebergMetadataOperation();
+			ResetRestCatalogRequests();
 
 			/* continue unless it was a cancellation */
 			if (edata->sqlerrcode != ERRCODE_QUERY_CANCELED)
@@ -757,6 +758,7 @@ VacuumCompactMetadata(Oid relationId, bool isVerbose)
 		RollbackAndReleaseCurrentSubTransaction();
 
 		ResetTrackedIcebergMetadataOperation();
+		ResetRestCatalogRequests();
 
 		/* continue unless it was a cancellation */
 		if (edata->sqlerrcode != ERRCODE_QUERY_CANCELED)
@@ -842,6 +844,7 @@ VacuumRemoveDeletionQueueRecords(Oid relationId, bool isFull, bool isVerbose)
 			RollbackAndReleaseCurrentSubTransaction();
 
 			ResetTrackedIcebergMetadataOperation();
+			ResetRestCatalogRequests();
 
 			/* continue unless it was a cancellation */
 			if (edata->sqlerrcode != ERRCODE_QUERY_CANCELED)
@@ -920,6 +923,7 @@ VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose)
 			RollbackAndReleaseCurrentSubTransaction();
 
 			ResetTrackedIcebergMetadataOperation();
+			ResetRestCatalogRequests();
 
 			/* continue unless it was a cancellation */
 			if (edata->sqlerrcode != ERRCODE_QUERY_CANCELED)
@@ -1005,6 +1009,7 @@ VacuumRegisterMissingFields(Oid relationId)
 		RollbackAndReleaseCurrentSubTransaction();
 
 		ResetTrackedIcebergMetadataOperation();
+		ResetRestCatalogRequests();
 
 		/* continue unless it was a cancellation */
 		if (edata->sqlerrcode != ERRCODE_QUERY_CANCELED)
@@ -1052,7 +1057,9 @@ GetMetadataLocationPrefixForRelationId(Oid relationId)
 	}
 	else
 	{
-		char	   *metadataLocation = GetIcebergCatalogMetadataLocation(relationId, false);
+		IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
+
+		char	   *metadataLocation = catalogType == REST_CATALOG_READ_WRITE ? GetMetadataLocationForRestCatalogForIcebergTable(relationId) : GetIcebergCatalogMetadataLocation(relationId, false);
 		IcebergTableMetadata *metadata = ReadIcebergTableMetadata(metadataLocation);
 
 		/* cast (const char *) to (char *) */
