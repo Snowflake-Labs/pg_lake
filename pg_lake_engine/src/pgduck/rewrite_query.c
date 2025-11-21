@@ -163,6 +163,7 @@ static Node *RewriteFuncExprArrayLength(Node *node, void *context);
 static Node *RewriteFuncExprPostgisBytea(Node *node, void *context);
 static Node *RewriteFuncExprTrigonometry(Node *node, void *context);
 static Node *RewriteFuncExprInverseTrigonometry(Node *node, void *context);
+static Node *RewriteFuncExprHyperbolic(Node *node, void *context);
 static Node *RewriteFuncExprJsonbArrayLength(Node *node, void *context);
 static Node *RewriteFuncExprEncode(Node *node, void *context);
 static Node *RewriteFuncExprDecode(Node *node, void *context);
@@ -281,6 +282,14 @@ static FunctionCallRewriteRuleByName BuiltinFunctionCallRewriteRulesByName[] =
 	},
 	{
 		"pg_catalog", "tand", RewriteFuncExprTrigonometry, 0
+	},
+
+	/* hyperbolic functions */
+	{
+		"pg_catalog", "acosh", RewriteFuncExprHyperbolic, 0
+	},
+	{
+		"pg_catalog", "atanh", RewriteFuncExprHyperbolic, 0
 	},
 
 	/* explicit calls to cast functions */
@@ -2184,6 +2193,38 @@ RewriteFuncExprInverseTrigonometry(Node *node, void *context)
 	degreesExpr->args = list_make1(node);
 
 	return (Node *) degreesExpr;
+}
+
+
+/*
+ * RewriteFuncExprHyperbolic rewrites acosh(..) and atanh(...) function calls
+ * into acosh_pg(..) and atanh_pg(..) function calls.
+ */
+static Node *
+RewriteFuncExprHyperbolic(Node *node, void *context)
+{
+	FuncExpr   *funcExpr = castNode(FuncExpr, node);
+	List *funcName;
+
+	switch (funcExpr->funcid)
+	{
+		case F_ACOSH:
+			funcName = list_make2(makeString(PG_LAKE_INTERNAL_NSP), makeString("acosh_pg"));
+			break;
+		
+		case F_ATANH:
+			funcName = list_make2(makeString(PG_LAKE_INTERNAL_NSP), makeString("atanh_pg"));
+			break;
+
+		default:
+			elog(ERROR, "unexpected function ID in rewrite %d", funcExpr->funcid);
+	}
+
+	Oid argTypes[] = {FLOAT8OID};
+	int argCount = 1;
+	funcExpr->funcid = LookupFuncName(funcName, argCount, argTypes, false);
+
+	return (Node *) funcExpr;
 }
 
 
