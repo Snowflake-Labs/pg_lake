@@ -8,7 +8,7 @@ ARG BASE_IMAGE_OS
 ARG BASE_IMAGE_TAG
 
 # Set environment variables for non-interactive installations and PostgreSQL/PostGIS versions
-ENV PG_LAKE_REF=main
+ENV PG_LAKE_REF=pgguru/duckdb-1.4.1
 ENV PG_MAJOR=18
 ARG PG16_VERSION=16.10
 ARG PG17_VERSION=17.6
