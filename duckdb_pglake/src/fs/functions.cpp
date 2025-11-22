@@ -16,7 +16,6 @@
  */
 
 #include "duckdb.hpp"
-#include "duckdb/main/extension_util.hpp"
 
 #include "pg_lake/fs/file_cache_manager.hpp"
 #include "pg_lake/fs/file_utils.hpp"
@@ -476,12 +475,12 @@ static void ListFilesExec(ClientContext &context, TableFunctionInput &data_p, Da
 		}
 		else if (abfs.CanHandleFile(globPattern))
 		{
-			functionData.files = abfs.List(functionData.globPattern, false, opener);
+			functionData.files = abfs.Glob(functionData.globPattern, opener);
 			functionData.hasDetails = true;
 		}
 		else if (adfs.CanHandleFile(globPattern))
 		{
-			functionData.files = adfs.List(functionData.globPattern, false, opener);
+			functionData.files = adfs.Glob(functionData.globPattern, opener);
 			functionData.hasDetails = true;
 		}
 		else
@@ -667,7 +666,7 @@ GetManagedStorageRegionScalarFun(DataChunk &args, ExpressionState &state, Vector
  * RegisterFunctions registers the pg_lake file system SQL functions.
  */
 void
-PgLakeFileSystemFunctions::RegisterFunctions(DatabaseInstance &instance)
+PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
 {
 	/* pg_lake_cache_file function definition */
 	{
@@ -683,7 +682,7 @@ PgLakeFileSystemFunctions::RegisterFunctions(DatabaseInstance &instance)
 			TableFunction({LogicalTypeId::VARCHAR, LogicalTypeId::BOOLEAN},
 						  CacheFileExec, CacheFileBind));
 
-	    ExtensionUtil::RegisterFunction(instance, pg_lake_cache_file);
+	    loader.RegisterFunction(pg_lake_cache_file);
 	}
 
 	/* pg_lake_cache_file_local_path(text) function definition */
@@ -693,7 +692,7 @@ PgLakeFileSystemFunctions::RegisterFunctions(DatabaseInstance &instance)
 						   {LogicalType::VARCHAR},
 						   LogicalType::VARCHAR,
 						   CacheFileLocalPathScalarFun);
-	    ExtensionUtil::RegisterFunction(instance, pg_lake_cache_file_local_path);
+	    loader.RegisterFunction(pg_lake_cache_file_local_path);
 	}
 
 
@@ -706,7 +705,7 @@ PgLakeFileSystemFunctions::RegisterFunctions(DatabaseInstance &instance)
 			TableFunction({LogicalTypeId::VARCHAR},
 						  UncacheFileExec, UncacheFileBind));
 
-	    ExtensionUtil::RegisterFunction(instance, pg_lake_uncache_file);
+	    loader.RegisterFunction(pg_lake_uncache_file);
 	}
 
 	/* pg_lake_manage_cache function definition */
@@ -718,7 +717,7 @@ PgLakeFileSystemFunctions::RegisterFunctions(DatabaseInstance &instance)
 			TableFunction({LogicalTypeId::BIGINT},
 						  ManageCacheExec, ManageCacheBind));
 
-	    ExtensionUtil::RegisterFunction(instance, pg_lake_manage_cache);
+	    loader.RegisterFunction(pg_lake_manage_cache);
 	}
 
 	/* pg_lake_list_cache function definition */
@@ -730,7 +729,7 @@ PgLakeFileSystemFunctions::RegisterFunctions(DatabaseInstance &instance)
 			TableFunction({},
 						  ListCacheExec, ListCacheBind));
 
-	    ExtensionUtil::RegisterFunction(instance, pg_lake_list_cache);
+	    loader.RegisterFunction(pg_lake_list_cache);
 	}
 
 	/* pg_lake_list_files function definition */
@@ -742,7 +741,7 @@ PgLakeFileSystemFunctions::RegisterFunctions(DatabaseInstance &instance)
 			TableFunction({LogicalType::VARCHAR},
 						  ListFilesExec, ListFilesBind));
 
-	    ExtensionUtil::RegisterFunction(instance, pg_lake_list_files);
+	    loader.RegisterFunction(pg_lake_list_files);
 	}
 
 
@@ -754,7 +753,7 @@ PgLakeFileSystemFunctions::RegisterFunctions(DatabaseInstance &instance)
 						   LogicalType::BIGINT,
 						   FileSizeScalarFun);
 
-        ExtensionUtil::RegisterFunction(instance, pg_lake_file_size);
+        loader.RegisterFunction(pg_lake_file_size);
 	}
 
 	/* pg_lake_remove_file function definition */
@@ -765,7 +764,7 @@ PgLakeFileSystemFunctions::RegisterFunctions(DatabaseInstance &instance)
 						   LogicalType::BOOLEAN,
 						   RemoveFileScalarFun);
 
-		ExtensionUtil::RegisterFunction(instance, pg_lake_remove_file);
+		loader.RegisterFunction(pg_lake_remove_file);
 	}
 
 	/* pg_lake_test_add_s3_express(text) function definition */
@@ -775,7 +774,7 @@ PgLakeFileSystemFunctions::RegisterFunctions(DatabaseInstance &instance)
 						   {LogicalType::VARCHAR},
 						   LogicalType::VARCHAR,
 						   AddS3ExpressRegionEndpointScalarFun);
-	    ExtensionUtil::RegisterFunction(instance, pg_lake_test_add_s3_express);
+	    loader.RegisterFunction(pg_lake_test_add_s3_express);
 	}
 
 	/* pg_lake_copy_file function definition */
@@ -787,7 +786,7 @@ PgLakeFileSystemFunctions::RegisterFunctions(DatabaseInstance &instance)
 			TableFunction({LogicalTypeId::VARCHAR, LogicalTypeId::VARCHAR},
 						  CopyFileExec, CopyFileBind));
 
-	    ExtensionUtil::RegisterFunction(instance, pg_lake_copy_file);
+	    loader.RegisterFunction(pg_lake_copy_file);
 	}
 
 	/* pg_lake_file_exists function definition */
@@ -798,7 +797,7 @@ PgLakeFileSystemFunctions::RegisterFunctions(DatabaseInstance &instance)
 						   LogicalType::BOOLEAN,
 						   FileExistsScalarFun);
 
-		ExtensionUtil::RegisterFunction(instance, pg_lake_file_exists);
+		loader.RegisterFunction(pg_lake_file_exists);
 	}
 
 	/* pg_lake_get_bucket_region function definition */
@@ -809,7 +808,7 @@ PgLakeFileSystemFunctions::RegisterFunctions(DatabaseInstance &instance)
 						   LogicalType::VARCHAR,
 						   GetBucketRegionScalarFun);
 
-		ExtensionUtil::RegisterFunction(instance, pg_lake_get_bucket_region);
+		loader.RegisterFunction(pg_lake_get_bucket_region);
 	}
 
 	/* pg_lake_get_managed_storage_region function definition */
@@ -820,11 +819,11 @@ PgLakeFileSystemFunctions::RegisterFunctions(DatabaseInstance &instance)
 						   LogicalType::VARCHAR,
 						   GetManagedStorageRegionScalarFun);
 
-		ExtensionUtil::RegisterFunction(instance, pg_lake_get_managed_storage_region);
+		loader.RegisterFunction(pg_lake_get_managed_storage_region);
 	}
 
 	/* Add settings */
-	auto &config = DBConfig::GetConfig(instance);
+	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
 	config.AddExtensionOption(CACHE_DIR_SETTING, "PgLake Cache Directory", LogicalType::VARCHAR);
 	config.AddExtensionOption(CACHE_ON_WRITE_MAX_SIZE, "PgLake cache-on-write max size", LogicalType::BIGINT);
 	config.AddExtensionOption(PG_LAKE_REGION_SETTING, "The region of the server", LogicalType::VARCHAR);

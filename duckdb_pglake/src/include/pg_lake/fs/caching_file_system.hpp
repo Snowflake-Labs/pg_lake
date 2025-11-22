@@ -250,7 +250,7 @@ public:
 		return wrappedHandle.file_system.GetFileSize(wrappedHandle);
 	}
 
-	time_t GetLastModifiedTime(FileHandle &handle) override {
+	timestamp_t GetLastModifiedTime(FileHandle &handle) override {
 		CachingFSFileHandle &pg_lakeHandle = (CachingFSFileHandle &) handle;
 		FileHandle &wrappedHandle = *pg_lakeHandle.wrappedHandle;
 

@@ -22,7 +22,7 @@ namespace duckdb {
 class PgLakeFileSystemFunctions {
 public:
 
-	static void RegisterFunctions(DatabaseInstance &instance);
+	static void RegisterFunctions(ExtensionLoader &loader);
 };
 
 } // namespace duckdb

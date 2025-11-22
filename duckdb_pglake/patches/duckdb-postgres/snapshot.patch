@@ -1,8 +1,8 @@
 diff --git a/src/include/postgres_scanner.hpp b/src/include/postgres_scanner.hpp
-index 4101949..52902b0 100644
+index 0f9cda7..9f93468 100644
 --- a/src/include/postgres_scanner.hpp
 +++ b/src/include/postgres_scanner.hpp
-@@ -47,6 +47,8 @@ public:
+@@ -48,6 +48,8 @@ public:
  	bool use_text_protocol = false;
  	idx_t max_threads = 1;
  
@@ -35,7 +35,7 @@ index 700db2f..c7c5101 100644
  	init_global = scan_function.init_global;
  	init_local = scan_function.init_local;
 diff --git a/src/postgres_scanner.cpp b/src/postgres_scanner.cpp
-index 1431028..dfda2b7 100644
+index bb4136f..2530172 100644
 --- a/src/postgres_scanner.cpp
 +++ b/src/postgres_scanner.cpp
 @@ -67,9 +67,10 @@ private:
@@ -60,9 +60,9 @@ index 1431028..dfda2b7 100644
  		if (!in_recovery) {
  			gstate.snapshot = result->GetString(0, 1);
  		}
-@@ -178,6 +178,15 @@ static unique_ptr<FunctionData> PostgresBind(ClientContext &context, TableFuncti
- 	bind_data->schema_name = input.inputs[1].GetValue<string>();
+@@ -182,6 +182,15 @@ static unique_ptr<FunctionData> PostgresBind(ClientContext &context, TableFuncti
  	bind_data->table_name = input.inputs[2].GetValue<string>();
+ 	bind_data->attach_path = bind_data->dsn;
  
 +	for (auto &kv : input.named_parameters) {
 +		if (kv.second.IsNull()) {
@@ -73,10 +73,10 @@ index 1431028..dfda2b7 100644
 +		}
 +	}
 +
- 	auto con = PostgresConnection::Open(bind_data->dsn);
+ 	auto con = PostgresConnection::Open(bind_data->dsn, bind_data->attach_path);
  	auto version = con.GetPostgresVersion();
  	// query the table schema so we can interpret the bits in the pages
-@@ -311,6 +320,9 @@ static unique_ptr<GlobalTableFunctionState> PostgresInitGlobalState(ClientContex
+@@ -315,6 +324,9 @@ static unique_ptr<GlobalTableFunctionState> PostgresInitGlobalState(ClientContex
  	auto &bind_data = input.bind_data->Cast<PostgresBindData>();
  	auto result = make_uniq<PostgresGlobalState>(PostgresMaxThreads(context, input.bind_data.get()));
  	auto pg_catalog = bind_data.GetCatalog();
@@ -86,16 +86,16 @@ index 1431028..dfda2b7 100644
  	if (pg_catalog) {
  		auto &transaction = Transaction::Get(context, *pg_catalog).Cast<PostgresTransaction>();
  		auto &con =
-@@ -319,7 +331,7 @@ static unique_ptr<GlobalTableFunctionState> PostgresInitGlobalState(ClientContex
+@@ -323,7 +335,7 @@ static unique_ptr<GlobalTableFunctionState> PostgresInitGlobalState(ClientContex
  	} else {
- 		auto con = PostgresConnection::Open(bind_data.dsn);
+ 		auto con = PostgresConnection::Open(bind_data.dsn, bind_data.attach_path);
  		if (bind_data.use_transaction) {
 -			PostgresScanConnect(con, string());
 +			PostgresScanConnect(con, result->snapshot);
  		}
  		result->SetConnection(std::move(con));
  	}
-@@ -555,6 +567,8 @@ PostgresScanFunction::PostgresScanFunction()
+@@ -559,6 +571,8 @@ PostgresScanFunction::PostgresScanFunction()
  	get_bind_info = PostgresGetBindInfo;
  	projection_pushdown = true;
  	global_initialization = TableFunctionInitialization::INITIALIZE_ON_SCHEDULE;
@@ -104,7 +104,7 @@ index 1431028..dfda2b7 100644
  }
  
  PostgresScanFunctionFilterPushdown::PostgresScanFunctionFilterPushdown()
-@@ -570,6 +584,8 @@ PostgresScanFunctionFilterPushdown::PostgresScanFunctionFilterPushdown()
+@@ -574,6 +588,8 @@ PostgresScanFunctionFilterPushdown::PostgresScanFunctionFilterPushdown()
  	projection_pushdown = true;
  	filter_pushdown = true;
  	global_initialization = TableFunctionInitialization::INITIALIZE_ON_SCHEDULE;
