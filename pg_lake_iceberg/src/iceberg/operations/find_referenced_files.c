@@ -109,7 +109,7 @@ find_all_referenced_files_via_snapshot_ids(PG_FUNCTION_ARGS)
 
 	HTAB	   *fileHash = CreateFilesHash();
 
-	char	   *currentMetadataPath = GetIcebergCatalogMetadataLocation(relationId, false);
+	char	   *currentMetadataPath = GetIcebergMetadataLocation(relationId, false);
 	IcebergTableMetadata *metadata = ReadIcebergTableMetadata(currentMetadataPath);
 
 	ListCell   *snapshotIdCell = NULL;
@@ -202,7 +202,7 @@ find_unreferenced_files_via_snapshot_ids(PG_FUNCTION_ARGS)
 	List	   *prevSnapshotIdList = Int64ArrayToList(prevSnapshotIds);
 	List	   *currentSnapshotIdList = Int64ArrayToList(currentSnapshotIds);
 
-	char	   *currentMetadataPath = GetIcebergCatalogMetadataLocation(relationId, false);
+	char	   *currentMetadataPath = GetIcebergMetadataLocation(relationId, false);
 	IcebergTableMetadata *metadata = ReadIcebergTableMetadata(currentMetadataPath);
 
 	IcebergSnapshot *prevSnapshots = GetIcebergSnapshotsViaSnapshotIdList(metadata, prevSnapshotIdList);

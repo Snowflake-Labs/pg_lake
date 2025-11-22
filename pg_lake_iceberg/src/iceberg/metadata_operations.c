@@ -160,7 +160,7 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 
 	/* read the iceberg metadata for the table */
 	bool		forUpdate = true;
-	char	   *metadataPath = GetIcebergCatalogMetadataLocation(relationId, forUpdate);
+	char	   *metadataPath = GetIcebergMetadataLocation(relationId, forUpdate);
 
 	bool		createNewTable = HasCreateTableOperation(metadataOperations);
 

@@ -40,10 +40,10 @@
 #include "utils/lsyscache.h"
 #include "utils/ruleutils.h"
 
-#include "pg_lake/fdw/utils.h"
 #include "pg_lake/pgduck/rewrite_query.h"
 #include "pg_lake/fdw/pg_lake_table.h"
 #include "pg_lake/planner/restriction_collector.h"
+#include "pg_lake/util/rel_utils.h"
 
 
 /*

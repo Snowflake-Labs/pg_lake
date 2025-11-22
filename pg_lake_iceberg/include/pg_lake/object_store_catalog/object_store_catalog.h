@@ -14,7 +14,6 @@ extern PGDLLEXPORT char *InternalObjectStorePrefix;
 extern PGDLLEXPORT void InitObjectStoreCatalog(void);
 extern PGDLLEXPORT void ExportIcebergCatalogIfChanged(void);
 extern PGDLLEXPORT const char *GetObjectStoreDefaultLocationPrefix(void);
-extern PGDLLEXPORT bool HasObjectStoreCatalogTableOption(List *options);
 extern PGDLLEXPORT char *GetMetadataLocationFromExternalObjectStoreCatalogForTable(Oid relationId);
 extern PGDLLEXPORT void ErrorIfExternalObjectStoreCatalogDoesNotExist(const char *catalogName);
 extern PGDLLEXPORT char *GetTableMetadataLocationFromExternalObjectStoreCatalog(const char *catalogName, const char *catalogNamespace, const char *catalogTableName);
