@@ -500,6 +500,78 @@ def test_writable_rest_vacuum(
     run_command("DROP SCHEMA test_writable_rest_vacuum CASCADE", pg_conn)
     pg_conn.commit()
 
+    # ensure dropping schema drops the table properly
+    ensure_table_dropped("test_writable_rest_vacuum", "writable_rest", superuser_conn)
+
+
+def test_writable_drop_table(
+    pg_conn,
+    superuser_conn,
+    s3,
+    polaris_session,
+    set_polaris_gucs,
+    with_default_location,
+    installcheck,
+    create_http_helper_functions,
+):
+
+    if installcheck:
+        return
+
+    # test 1: Create table, commit, drop table, ensure table removed from the catalog
+    run_command(f"""CREATE SCHEMA test_writable_drop_table""", pg_conn)
+    run_command(
+        f"""CREATE TABLE test_writable_drop_table.writable_rest USING iceberg WITH (catalog='rest', autovacuum_enabled=False) AS SELECT 100 AS a""",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command("DROP TABLE test_writable_drop_table.writable_rest", pg_conn)
+
+    # make sure, before the commit, the table is there
+    metadata = get_rest_table_metadata(
+        "test_writable_drop_table", "writable_rest", superuser_conn
+    )
+    assert metadata is not None
+
+    # make sure, after the commit, the table is gone
+    pg_conn.commit()
+    ensure_table_dropped("test_writable_drop_table", "writable_rest", superuser_conn)
+
+    # now create two tables, drop one in the same tx, other at the end of the tx
+    run_command(
+        f"""
+        CREATE TABLE test_writable_drop_table.writable_rest_1 USING iceberg WITH (catalog='rest', autovacuum_enabled=False) AS SELECT 100 AS a;
+        CREATE TABLE test_writable_drop_table.writable_rest_2 (a int) USING iceberg WITH (catalog='rest', autovacuum_enabled=False);
+
+        ALTER TABLE test_writable_drop_table.writable_rest_2 ADD COLUMN b INT;
+        ALTER TABLE test_writable_drop_table.writable_rest_2 ADD COLUMN c INT;
+        
+        INSERT INTO test_writable_drop_table.writable_rest_1 VALUES (1);
+        INSERT INTO test_writable_drop_table.writable_rest_2 VALUES (1, 2, 3);
+
+        ALTER TABLE test_writable_drop_table.writable_rest_2 DROP COLUMN c;
+        ALTER TABLE test_writable_drop_table.writable_rest_2 OPTIONS (ADD partition_by 'truncate(10, b)');
+
+        INSERT INTO test_writable_drop_table.writable_rest_2 VALUES (1, 2);
+
+        DROP TABLE test_writable_drop_table.writable_rest_2;
+        """,
+        pg_conn,
+    )
+
+    # before table creation committed, none should exist
+    ensure_table_dropped("test_writable_drop_table", "writable_rest_1", superuser_conn)
+    ensure_table_dropped("test_writable_drop_table", "writable_rest_2", superuser_conn)
+
+    pg_conn.commit()
+
+    metadata = get_rest_table_metadata(
+        "test_writable_drop_table", "writable_rest_1", superuser_conn
+    )
+    assert metadata is not None
+    ensure_table_dropped("test_writable_drop_table", "writable_rest_2", superuser_conn)
+
 
 def assert_metadata_on_pg_catalog_and_rest_matches(
     namespace, table_name, superuser_conn
@@ -792,6 +864,29 @@ def pg_lake_iceberg_files(superuser_conn, metadata_location):
     return datafile_paths
 
 
+def ensure_table_dropped(encoded_namespace, encoded_table_name, pg_conn):
+
+    url = f"http://{server_params.POLARIS_HOSTNAME}:{server_params.POLARIS_PORT}/api/catalog/v1/{server_params.PG_DATABASE}/namespaces/{encoded_namespace}/tables/{encoded_table_name}"
+    token = get_polaris_access_token()
+
+    try:
+        res = run_query(
+            f"""
+            SELECT *
+            FROM lake_iceberg.test_http_head(
+             '{url}',
+             ARRAY['Authorization: Bearer {token}']);
+            """,
+            pg_conn,
+        )
+
+        # should throw error, so never get here
+        assert False
+    except Exception as e:
+        assert "404" in str(e)
+        pg_conn.rollback()
+
+
 def get_rest_table_metadata(encoded_namespace, encoded_table_name, pg_conn):
 
     url = f"http://{server_params.POLARIS_HOSTNAME}:{server_params.POLARIS_PORT}/api/catalog/v1/{server_params.PG_DATABASE}/namespaces/{encoded_namespace}/tables/{encoded_table_name}"
@@ -806,6 +901,7 @@ def get_rest_table_metadata(encoded_namespace, encoded_table_name, pg_conn):
         """,
         pg_conn,
     )
+
     assert res[0][0] == 200
     status, json_str, headers = res[0]
 
