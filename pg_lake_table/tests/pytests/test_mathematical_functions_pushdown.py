@@ -154,13 +154,13 @@ test_agg_cases = [
     (
         "acosh",
         "WHERE col_double > 1 and abs(acosh(col_double) - 0.4435682) < 0.001",
-        "acosh(",
+        "acosh_pg(",
         True,
     ),
     (
         "atanh",
         "WHERE abs(col_double)<1 and abs(atanh(col_double) - 0.6183813) < 0.001",
-        "atanh(",
+        "atanh_pg(",
         True,
     ),
 ]
