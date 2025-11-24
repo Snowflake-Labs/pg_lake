@@ -56,7 +56,9 @@ extern PGDLLEXPORT char *GetIcebergCatalogMetadataLocation(Oid relationId, bool 
 extern PGDLLEXPORT char *GetIcebergCatalogPreviousMetadataLocation(Oid relationId, bool forUpdate);
 extern PGDLLEXPORT void UpdateExternalCatalogMetadataLocation(char *catalogName, char *schemaName, char *tableName, const char *metadataLocation,
 															  const char *previousMetadataLocation);
-extern PGDLLEXPORT void UpdateInternalCatalogMetadataLocation(Oid relationId, const char *metadataLocation, const char *previousMetadataLocation);
+extern PGDLLEXPORT void UpdateInternalCatalogState(Oid relationId, const char *metadataLocation,
+												   const char *previousMetadataLocation,
+												   int64_t snapshotId);
 extern PGDLLEXPORT void UpdateAllInternalIcebergTablesToReadOnly(void);
 extern PGDLLEXPORT const char *GetIcebergDefaultLocationPrefix(void);
 extern PGDLLEXPORT bool IcebergTablesCatalogExists(void);

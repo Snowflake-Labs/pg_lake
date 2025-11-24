@@ -256,7 +256,7 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 
 	/* finally, update the table metadata and catalog */
 	UploadTableMetadataToURI(metadata, newMetadataPath);
-	UpdateInternalCatalogMetadataLocation(relationId, newMetadataPath, (createNewTable) ? NULL : metadataPath);
+	UpdateInternalCatalogState(relationId, newMetadataPath, (createNewTable) ? NULL : metadataPath, newSnapshot ? newSnapshot->snapshot_id : 0);
 
 	if (previousMetadataPath)
 	{

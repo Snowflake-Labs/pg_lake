@@ -592,13 +592,13 @@ UpdateExternalCatalogMetadataLocation(char *catalogName, char *schemaName, char 
 }
 
 /*
-* UpdateInternalCatalogMetadataLocation updates the metadata location for a table
-* in the iceberg catalog table.
+* UpdateInternalCatalogState updates the metadata location, snapshot id
+* for a table in the iceberg catalog table.
 * It is used for convenience when the relationId is already known.
 */
 void
-UpdateInternalCatalogMetadataLocation(Oid relationId, const char *metadataLocation,
-									  const char *previousMetadataLocation)
+UpdateInternalCatalogState(Oid relationId, const char *metadataLocation,
+						   const char *previousMetadataLocation, int64_t snapshotId)
 {
 	/* switch to schema owner */
 	Oid			savedUserId = InvalidOid;
@@ -611,14 +611,16 @@ UpdateInternalCatalogMetadataLocation(Oid relationId, const char *metadataLocati
 
 	appendStringInfo(query,
 					 "update %s "
-					 " set metadata_location = $1, previous_metadata_location = $2 "
-					 " where table_name OPERATOR(pg_catalog.=) $3",
+					 " set metadata_location = $1, previous_metadata_location = $2, "
+					 " snapshot_id = $3 "
+					 " where table_name OPERATOR(pg_catalog.=) $4",
 					 ICEBERG_INTERNAL_CATALOG_TABLE_QUALIFIED);
 
-	DECLARE_SPI_ARGS(3);
+	DECLARE_SPI_ARGS(4);
 	SPI_ARG_VALUE(1, TEXTOID, metadataLocation, false);
 	SPI_ARG_VALUE(2, TEXTOID, previousMetadataLocation, (previousMetadataLocation == NULL));
-	SPI_ARG_VALUE(3, OIDOID, relationId, false);
+	SPI_ARG_VALUE(3, INT8OID, snapshotId, false);
+	SPI_ARG_VALUE(4, OIDOID, relationId, false);
 
 	SPI_START();
 
