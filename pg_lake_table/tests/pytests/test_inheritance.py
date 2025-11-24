@@ -144,6 +144,7 @@ def test_pg_child(s3, pg_conn, extension, with_default_location):
 
     pg_conn.rollback()
 
+
 def test_schema_propagation(s3, pg_conn, extension, with_default_location):
     # 1. add column should propagate
     run_command(
@@ -170,7 +171,6 @@ def test_schema_propagation(s3, pg_conn, extension, with_default_location):
 
     pg_conn.rollback()
 
-
     # 2. rename column should propagate
     run_command(
         """
@@ -193,8 +193,7 @@ def test_schema_propagation(s3, pg_conn, extension, with_default_location):
     assert result[0]["new_name"] == "child1"
 
     pg_conn.rollback()
-    
-    
+
     # 3. drop column should not propagate
     run_command(
         """
