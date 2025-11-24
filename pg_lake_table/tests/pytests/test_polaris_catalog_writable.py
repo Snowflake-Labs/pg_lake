@@ -572,6 +572,110 @@ def test_writable_drop_table(
     assert metadata is not None
     ensure_table_dropped("test_writable_drop_table", "writable_rest_2", superuser_conn)
 
+    run_command("DROP SCHEMA test_writable_drop_table CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+# fetch_data_files_used
+def test_different_table_types(
+    pg_conn,
+    superuser_conn,
+    s3,
+    polaris_session,
+    set_polaris_gucs,
+    with_default_location,
+    installcheck,
+    create_http_helper_functions,
+    adjust_object_store_settings,
+):
+
+    if installcheck:
+        return
+
+    run_command(f"""CREATE SCHEMA test_different_table_types""", pg_conn)
+    run_command(
+        f"""CREATE TABLE test_different_table_types.writable_rest USING iceberg WITH (catalog='rest') AS SELECT 1 AS a""",
+        pg_conn,
+    )
+    run_command(
+        f"""CREATE TABLE test_different_table_types.writable_object_store USING iceberg WITH (catalog='object_store') AS SELECT 2 AS a""",
+        pg_conn,
+    )
+
+    run_command(
+        f"""CREATE TABLE test_different_table_types.postgres_catalog_iceberg_test USING iceberg AS SELECT 3 as a""",
+        pg_conn,
+    )
+
+    run_command(
+        f"""CREATE TABLE test_different_table_types.heap_test AS SELECT 4 as a""",
+        pg_conn,
+    )
+
+    pg_conn.commit()
+
+    run_command(
+        f"""CREATE TABLE test_different_table_types.readable_rest() USING iceberg WITH (catalog='rest', read_only=True, catalog_table_name='writable_rest')""",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"""CREATE TABLE test_different_table_types.writable_rest_2 USING iceberg WITH (catalog='rest') AS 
+
+            SELECT * FROM test_different_table_types.writable_rest
+                UNION ALL
+            SELECT * FROM test_different_table_types.writable_object_store
+                UNION ALL
+            SELECT * FROM test_different_table_types.postgres_catalog_iceberg_test
+                UNION ALL
+            SELECT * FROM test_different_table_types.heap_test
+                UNION ALL
+            SELECT * FROM test_different_table_types.readable_rest
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    res = run_query(
+        "SELECT * FROM test_different_table_types.writable_rest_2 ORDER BY a DESC",
+        pg_conn,
+    )
+    assert res == [[4], [3], [2], [1], [1]]
+
+    run_command(
+        """
+        UPDATE test_different_table_types.writable_rest_2 bar SET a = foo.a + 1 
+            FROM (  SELECT * FROM test_different_table_types.writable_rest
+                        UNION ALL
+                    SELECT * FROM test_different_table_types.writable_object_store
+                        UNION ALL
+                    SELECT * FROM test_different_table_types.postgres_catalog_iceberg_test
+                        UNION ALL
+                    SELECT * FROM test_different_table_types.heap_test
+                        UNION ALL
+                    SELECT * FROM test_different_table_types.readable_rest
+
+            ) as foo WHERE foo.a = bar.a """,
+        pg_conn,
+    )
+
+    res = run_query(
+        "SELECT * FROM test_different_table_types.writable_rest_2 ORDER BY a DESC",
+        pg_conn,
+    )
+    assert res == [[5], [4], [3], [2], [2]]
+
+    pg_conn.commit()
+    res = run_query(
+        "SELECT * FROM test_different_table_types.writable_rest_2 ORDER BY a DESC",
+        pg_conn,
+    )
+    assert res == [[5], [4], [3], [2], [2]]
+
+    run_command(f"""DROP SCHEMA test_different_table_types CASCADE""", pg_conn)
+    pg_conn.commit()
+
 
 def assert_metadata_on_pg_catalog_and_rest_matches(
     namespace, table_name, superuser_conn
@@ -1101,4 +1205,66 @@ def grant_access_to_tables_internal(
         f"""REVOKE SELECT ON lake_iceberg.tables_internal FROM {app_user};""",
         superuser_conn,
     )
+    superuser_conn.commit()
+
+
+@pytest.fixture(scope="function")
+def adjust_object_store_settings(superuser_conn):
+    superuser_conn.autocommit = True
+
+    # catalog=object_store requires the IcebergDefaultLocationPrefix set
+    # and accessible by other sessions (e.g., push catalog worker),
+    # and with_default_location only does a session level
+    run_command(
+        f"""ALTER SYSTEM SET pg_lake_iceberg.object_store_catalog_location_prefix = 's3://{TEST_BUCKET}';""",
+        superuser_conn,
+    )
+
+    # to be able to read the same tables that we write, use the same prefix
+    run_command(
+        f"""
+        ALTER SYSTEM SET pg_lake_iceberg.internal_object_store_catalog_prefix = 'tmp';
+        """,
+        superuser_conn,
+    )
+
+    run_command(
+        f"""
+        ALTER SYSTEM SET pg_lake_iceberg.external_object_store_catalog_prefix = 'tmp';
+        """,
+        superuser_conn,
+    )
+
+    superuser_conn.autocommit = False
+
+    run_command("SELECT pg_reload_conf()", superuser_conn)
+
+    # unfortunate, but Postgres requires a bit of time before
+    # bg workers get the reload
+    run_command("SELECT pg_sleep(0.1)", superuser_conn)
+    superuser_conn.commit()
+    yield
+
+    superuser_conn.autocommit = True
+    run_command(
+        f"""
+        ALTER SYSTEM RESET pg_lake_iceberg.object_store_catalog_location_prefix;
+        """,
+        superuser_conn,
+    )
+    run_command(
+        f"""
+        ALTER SYSTEM RESET pg_lake_iceberg.internal_object_store_catalog_prefix;
+       """,
+        superuser_conn,
+    )
+    run_command(
+        f"""
+        ALTER SYSTEM RESET pg_lake_iceberg.external_object_store_catalog_prefix;
+        """,
+        superuser_conn,
+    )
+    superuser_conn.autocommit = False
+
+    run_command("SELECT pg_reload_conf()", superuser_conn)
     superuser_conn.commit()
