@@ -19,57 +19,16 @@
 
 #include "nodes/primnodes.h"
 
-/* distinguish tables with "server pg_lake" vs "server pg_lake_iceberg" */
-typedef enum PgLakeTableType
-{
-	PG_LAKE_INVALID_TABLE_TYPE,
-	PG_LAKE_TABLE_TYPE,
-	PG_LAKE_ICEBERG_TABLE_TYPE
-}			PgLakeTableType;
+#include "pg_lake/copy/copy_format.h"
+#include "pg_lake/util/catalog_type.h"
+#include "pg_lake/util/table_type.h"
 
-
-typedef enum IcebergCatalogType
-{
-	NOT_ICEBERG_TABLE = 0,
-
-	/* catalog='postgres' */
-	POSTGRES_CATALOG = 1,
-
-	/*
-	 * catalog='rest', read_only=True Always treat like external iceberg
-	 * table, read the metadata location from the external catalog and never
-	 * modify.
-	 */
-	REST_CATALOG_READ_ONLY = 2,
-
-	/*
-	 * catalog='rest', read_only=False Treat like internal iceberg table, use
-	 * all the catalog tables like lake_table.files.
-	 */
-	REST_CATALOG_READ_WRITE = 3,
-
-	/*
-	 * Similar to REST_CATALOG_READ_ONLY, but using an object store compatible
-	 * API instead of a REST catalog server.
-	 */
-	OBJECT_STORE_READ_ONLY = 4,
-
-	/*
-	 * Similar to REST_CATALOG_READ_WRITE, but using an object store
-	 * compatible API instead of a REST catalog server.
-	 */
-	OBJECT_STORE_READ_WRITE = 5
-} IcebergCatalogType;
-
-struct PgLakeTableProperties;
 
 #define PG_LAKE_SERVER_NAME "pg_lake"
 #define PG_LAKE_ICEBERG_SERVER_NAME "pg_lake_iceberg"
 
 extern PGDLLEXPORT bool IsAnyLakeForeignTableById(Oid foreignTableId);
 extern PGDLLEXPORT char *GetQualifiedRelationName(Oid relationId);
-extern PGDLLEXPORT const char *PgLakeTableTypeToName(PgLakeTableType tableType);
-extern PGDLLEXPORT PgLakeTableType GetPgLakeTableType(Oid foreignTableId);
 extern PGDLLEXPORT char *GetPgLakeForeignServerName(Oid foreignTableId);
 extern PGDLLEXPORT PgLakeTableType GetPgLakeTableTypeViaServerName(char *serverName);
 extern PGDLLEXPORT bool IsPgLakeForeignTableById(Oid foreignTableId);
@@ -79,8 +38,12 @@ extern PGDLLEXPORT bool IsAnyWritableLakeTable(Oid foreignTableId);
 extern PGDLLEXPORT bool IsPgLakeIcebergServerName(const char *serverName);
 extern PGDLLEXPORT char *GetWritableTableLocation(Oid relationId, char **queryArguments);
 extern PGDLLEXPORT void EnsureTableOwner(Oid relationId);
-extern PGDLLEXPORT struct PgLakeTableProperties GetPgLakeTableProperties(Oid relationId);
-extern PGDLLEXPORT bool IsInternalOrExternalIcebergTable(struct PgLakeTableProperties properties);
+extern PGDLLEXPORT bool IsAnyLakeForeignTable(RangeTblEntry *rte);
+extern PGDLLEXPORT CopyDataFormat GetForeignTableFormat(Oid foreignTableId);
+extern PGDLLEXPORT char *GetForeignTablePath(Oid foreignTableId);
+extern PGDLLEXPORT void ErrorIfTypeUnsupportedForIcebergTables(Oid typeOid, int32 typmod, char *columnName);
+extern PGDLLEXPORT void ErrorIfTypeUnsupportedNumericForIcebergTables(int32 typmod, char *columnName);
+extern PGDLLEXPORT PgLakeTableProperties GetPgLakeTableProperties(Oid relationId);
 
 /* range var help */
 extern PGDLLEXPORT List *MakeNameListFromRangeVar(const RangeVar *rel);

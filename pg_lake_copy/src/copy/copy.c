@@ -634,7 +634,7 @@ IsCopyFromPushdownable(Relation relation, List *columnNameList,
 	/*
 	 * All of this only works for writable pg_lake tables.
 	 */
-	if (!IsAnyWritableLakeTable(relationId))
+	if (!IsWritablePgLakeTable(relationId) && !IsWritableIcebergTable(relationId))
 		return false;
 
 	bool		allowDefaultConsts = false;

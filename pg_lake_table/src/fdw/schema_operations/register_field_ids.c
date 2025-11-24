@@ -237,21 +237,16 @@ CreatePostgresColumnMappingsForColumnDefs(Oid relationId, List *columnDefList, b
 List *
 CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(Oid relationId)
 {
-	char	   *currentMetadataPath = NULL;
 	IcebergCatalogType icebergCatalogType = GetIcebergCatalogType(relationId);
 
-	if (icebergCatalogType == REST_CATALOG_READ_ONLY)
-	{
-		currentMetadataPath = GetMetadataLocationForRestCatalogForIcebergTable(relationId);
-	}
-	else if (icebergCatalogType == OBJECT_STORE_READ_ONLY)
-	{
-		currentMetadataPath = GetMetadataLocationFromExternalObjectStoreCatalogForTable(relationId);
-	}
-	else
-	{
-		currentMetadataPath = GetIcebergCatalogMetadataLocation(relationId, true);
-	}
+	/*
+	 * we extract column mappings to make sure remote catalog schema matches
+	 * the schema in our catalog for external tables. Otherwise, we prepare
+	 * for creating field id mappings for internal tables.
+	 */
+	bool		forUpdate = (IsInternalIcebergTable(relationId)) ? true : false;
+
+	char	   *currentMetadataPath = GetIcebergMetadataLocation(relationId, forUpdate);
 
 	DataFileSchema *schema = GetDataFileSchemaForExternalIcebergTable(currentMetadataPath);
 
@@ -302,58 +297,20 @@ CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(Oid relationId)
 static DataFileSchema *
 GetDataFileSchemaForTableInternal(Oid relationId)
 {
-	PgLakeTableType tableType = GetPgLakeTableType(relationId);
+	if (!IsIcebergTable(relationId))
+		return NULL;
 
-	switch (tableType)
+	if (IsInternalIcebergTable(relationId))
 	{
-		case PG_LAKE_ICEBERG_TABLE_TYPE:
-			{
-				if (GetIcebergCatalogType(relationId) == REST_CATALOG_READ_ONLY)
-				{
-					char	   *path = GetMetadataLocationForRestCatalogForIcebergTable(relationId);
+		return GetDataFileSchemaForInternalIcebergTable(relationId);
+	}
+	else
+	{
+		Assert(IsExternalIcebergTable(relationId));
 
-					return GetDataFileSchemaForExternalIcebergTable(path);
-				}
-				else if (GetIcebergCatalogType(relationId) == OBJECT_STORE_READ_ONLY)
-				{
-					char	   *path = GetMetadataLocationFromExternalObjectStoreCatalogForTable(relationId);
+		char	   *path = GetIcebergMetadataLocation(relationId, false);
 
-					return GetDataFileSchemaForExternalIcebergTable(path);
-				}
-				else
-				{
-					return GetDataFileSchemaForInternalIcebergTable(relationId);
-				}
-				break;
-			}
-		case PG_LAKE_TABLE_TYPE:
-			{
-				/* get the table type and format */
-				ForeignTable *foreignTable = GetForeignTable(relationId);
-				List	   *options = foreignTable->options;
-				DefElem    *pathOption = GetOption(options, "path");
-
-				char	   *path = pathOption != NULL ? defGetString(pathOption) : NULL;
-				CopyDataFormat format = DATA_FORMAT_INVALID;
-				CopyDataCompression compression = DATA_COMPRESSION_INVALID;
-
-				FindDataFormatAndCompression(tableType, path, options,
-											 &format, &compression);
-
-				if (tableType == PG_LAKE_TABLE_TYPE && format == DATA_FORMAT_ICEBERG)
-				{
-					return GetDataFileSchemaForExternalIcebergTable(path);
-				}
-				else
-				{
-					return NULL;
-				}
-
-				break;
-			}
-
-		default:
-			return NULL;
+		return GetDataFileSchemaForExternalIcebergTable(path);
 	}
 }
 
@@ -406,58 +363,20 @@ GetLeafFieldsForExternalIcebergTable(char *metadataPath)
 List *
 GetLeafFieldsForTable(Oid relationId)
 {
-	PgLakeTableType tableType = GetPgLakeTableType(relationId);
+	if (!IsIcebergTable(relationId))
+		return NULL;
 
-	switch (tableType)
+	if (IsInternalIcebergTable(relationId))
 	{
-		case PG_LAKE_ICEBERG_TABLE_TYPE:
-			{
-				if (GetIcebergCatalogType(relationId) == REST_CATALOG_READ_ONLY)
-				{
-					char	   *path = GetMetadataLocationForRestCatalogForIcebergTable(relationId);
+		return GetLeafFieldsForInternalIcebergTable(relationId);
+	}
+	else
+	{
+		Assert(IsExternalIcebergTable(relationId));
 
-					return GetLeafFieldsForExternalIcebergTable(path);
-				}
-				else if (GetIcebergCatalogType(relationId) == OBJECT_STORE_READ_ONLY)
-				{
-					char	   *path = GetMetadataLocationFromExternalObjectStoreCatalogForTable(relationId);
+		char	   *path = GetIcebergMetadataLocation(relationId, false);
 
-					return GetLeafFieldsForExternalIcebergTable(path);
-				}
-				else
-				{
-					return GetLeafFieldsForInternalIcebergTable(relationId);
-				}
-				break;
-			}
-		case PG_LAKE_TABLE_TYPE:
-			{
-				/* get the table type and format */
-				ForeignTable *foreignTable = GetForeignTable(relationId);
-				List	   *options = foreignTable->options;
-				DefElem    *pathOption = GetOption(options, "path");
-
-				char	   *path = pathOption != NULL ? defGetString(pathOption) : NULL;
-				CopyDataFormat format = DATA_FORMAT_INVALID;
-				CopyDataCompression compression = DATA_COMPRESSION_INVALID;
-
-				FindDataFormatAndCompression(tableType, path, options,
-											 &format, &compression);
-
-				if (tableType == PG_LAKE_TABLE_TYPE && format == DATA_FORMAT_ICEBERG)
-				{
-					return GetLeafFieldsForExternalIcebergTable(path);
-				}
-				else
-				{
-					return NULL;
-				}
-
-				break;
-			}
-
-		default:
-			return NULL;
+		return GetLeafFieldsForExternalIcebergTable(path);
 	}
 }
 

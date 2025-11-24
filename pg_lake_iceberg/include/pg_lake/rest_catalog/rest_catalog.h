@@ -36,12 +36,9 @@ extern char *RestCatalogClientSecret;
 extern PGDLLEXPORT char *RestCatalogFetchAccessToken(void);
 extern PGDLLEXPORT void RegisterNamespaceToRestCatalog(const char *catalogName, const char *namespaceName);
 extern PGDLLEXPORT void ErrorIfRestNamespaceDoesNotExist(const char *catalogName, const char *namespaceName);
-extern PGDLLEXPORT IcebergCatalogType GetIcebergCatalogType(Oid relationId);
 extern PGDLLEXPORT char *GetRestCatalogName(Oid relationId);
 extern PGDLLEXPORT char *GetRestCatalogNamespace(Oid relationId);
 extern PGDLLEXPORT char *GetRestCatalogTableName(Oid relationId);
-extern PGDLLEXPORT bool HasRestCatalogTableOption(List *options);
-extern PGDLLEXPORT bool HasReadOnlyOption(List *options);
 extern PGDLLEXPORT bool IsReadOnlyRestCatalogIcebergTable(Oid relationId);
 extern PGDLLEXPORT char *GetMetadataLocationFromRestCatalog(const char *restCatalogName, const char *namespaceName,
 															const char *relationName);

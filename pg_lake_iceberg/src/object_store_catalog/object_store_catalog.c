@@ -239,19 +239,6 @@ CatalogNeedsExport(void)
 
 
 /*
-* HasObjectStoreCatalogTableOption returns true if the options contain
-* catalog='object_store'.
-*/
-bool
-HasObjectStoreCatalogTableOption(List *options)
-{
-	char	   *catalog = GetStringOption(options, "catalog", false);
-
-	return catalog ? strncasecmp(catalog, "object_store", strlen("object_store")) == 0 : false;
-}
-
-
-/*
 * GetObjectStoreCatalogInfoFromCatalog sets the catalog name, namespace and table name
 * from the foreign table options for the given relationId.
 */

@@ -41,7 +41,6 @@
 #include "pg_lake/cleanup/deletion_queue.h"
 #include "pg_lake/fdw/data_files_catalog.h"
 #include "pg_lake/fdw/data_file_stats_catalog.h"
-#include "pg_lake/fdw/utils.h"
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/fdw/schema_operations/field_id_mapping_catalog.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
@@ -50,6 +49,7 @@
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/metadata_operations.h"
 #include "pg_lake/iceberg/operations/find_referenced_files.h"
+#include "pg_lake/util/rel_utils.h"
 #include "pg_lake/util/spi_helpers.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
@@ -241,7 +241,7 @@ DropTableAccessHook(ObjectAccessType access, Oid classId, Oid objectId,
 			RemoveAllDataFilesFromTable(objectId);
 		}
 	}
-	else if (GetPgLakeTableType(objectId) == PG_LAKE_ICEBERG_TABLE_TYPE)
+	else if (IsWritableIcebergTable(objectId))
 	{
 		if (isColumn)
 		{
@@ -455,7 +455,7 @@ static bool
 MarkAllReferencedFilesForDeletion(Oid relationId)
 {
 	TimestampTz orphanedAt = GetCurrentTransactionStartTimestamp();
-	char	   *metadataLocation = GetIcebergCatalogMetadataLocation(relationId, true);
+	char	   *metadataLocation = GetIcebergMetadataLocation(relationId, true);
 	MemoryContext savedContext = CurrentMemoryContext;
 	List	   *allFiles = NIL;
 	volatile bool success = true;

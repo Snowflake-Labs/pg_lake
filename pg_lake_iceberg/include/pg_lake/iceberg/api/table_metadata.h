@@ -28,7 +28,7 @@
 extern PGDLLEXPORT int IcebergMaxSnapshotAge;
 
 /* write api */
-extern PGDLLEXPORT IcebergTableMetadata * GenerateEmptyTableMetadata(Oid foreignTableOid, char *location);
+extern PGDLLEXPORT IcebergTableMetadata * GenerateEmptyTableMetadata(char *location);
 extern PGDLLEXPORT char *GenerateInitialIcebergTableMetadataPath(Oid relationId);
 extern PGDLLEXPORT IcebergTableMetadata * GenerateInitialIcebergTableMetadata(Oid relationId);
 extern PGDLLEXPORT char *GenerateRemoteMetadataFilePath(int version, const char *location, char *queryArguments);

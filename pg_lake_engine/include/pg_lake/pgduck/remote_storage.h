@@ -38,7 +38,6 @@ typedef struct RemoteFileDesc
 
 extern PGDLLEXPORT int64 GetRemoteFileSize(char *path);
 extern PGDLLEXPORT int64 GetRemoteParquetFileRowCount(char *path);
-extern PGDLLEXPORT List *GetRemoteParquetColumnStats(char *path, List *leafFields);
 extern PGDLLEXPORT List *ListRemoteFileDescriptions(char *pattern);
 extern PGDLLEXPORT List *ListRemoteFileNames(char *pattern);
 extern PGDLLEXPORT bool RemoteFileExists(char *path);

@@ -141,7 +141,7 @@ get_partition_summary(PG_FUNCTION_ARGS)
 	}
 
 	bool		forUpdate = false;
-	char	   *metadataUri = GetIcebergCatalogMetadataLocation(relationId, forUpdate);
+	char	   *metadataUri = GetIcebergMetadataLocation(relationId, forUpdate);
 
 	IcebergTableMetadata *metadata = ReadIcebergTableMetadata(metadataUri);
 

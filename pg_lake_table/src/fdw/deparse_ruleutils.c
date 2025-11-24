@@ -39,7 +39,6 @@
 #include "pg_lake/extensions/pg_lake_engine.h"
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/fdw/deparse_ruleutils.h"
-#include "pg_lake/fdw/utils.h"
 #include "pg_lake/parsetree/rte.h"
 #include "pg_lake/pgduck/rewrite_query.h"
 #include "pg_lake/planner/restriction_collector.h"

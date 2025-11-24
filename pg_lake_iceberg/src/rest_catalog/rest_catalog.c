@@ -449,42 +449,6 @@ EncodeBasicAuth(const char *clientId, const char *clientSecret)
 }
 
 
-IcebergCatalogType
-GetIcebergCatalogType(Oid relationId)
-{
-	if (!IsPgLakeIcebergForeignTableById(relationId))
-		return NOT_ICEBERG_TABLE;
-
-	ForeignTable *foreignTable = GetForeignTable(relationId);
-	List	   *options = foreignTable->options;
-
-	bool		hasRestCatalogOption = HasRestCatalogTableOption(options);
-	bool		hasObjectStoreCatalogOption = HasObjectStoreCatalogTableOption(options);
-	bool		hasReadOnlyOption = HasReadOnlyOption(options);
-
-	if (hasRestCatalogOption && hasReadOnlyOption)
-	{
-		return REST_CATALOG_READ_ONLY;
-	}
-	else if (hasRestCatalogOption && !hasReadOnlyOption)
-	{
-		return REST_CATALOG_READ_WRITE;
-	}
-	else if (hasObjectStoreCatalogOption && hasReadOnlyOption)
-	{
-		return OBJECT_STORE_READ_ONLY;
-	}
-	else if (hasObjectStoreCatalogOption && !hasReadOnlyOption)
-	{
-		return OBJECT_STORE_READ_WRITE;
-	}
-	else
-	{
-		return POSTGRES_CATALOG;
-	}
-}
-
-
 /*
 * Readable rest catalog tables always use the catalog_table_name option
 * as the table name in the external catalog. Writable rest catalog tables
@@ -555,23 +519,6 @@ GetRestCatalogNamespace(Oid relationId)
 		/* for writable rest catalog tables, we use the Postgres schema name */
 		return get_namespace_name(get_rel_namespace(relationId));
 	}
-}
-
-bool
-HasRestCatalogTableOption(List *options)
-{
-	char	   *catalog = GetStringOption(options, "catalog", false);
-
-	return catalog ? strncasecmp(catalog, "rest", strlen("rest")) == 0 : false;
-}
-
-
-bool
-HasReadOnlyOption(List *options)
-{
-	char	   *readOnly = GetStringOption(options, "read_only", false);
-
-	return readOnly ? strncasecmp(readOnly, "true", strlen("true")) == 0 : false;
 }
 
 

@@ -33,47 +33,9 @@
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/extensions/pg_lake_iceberg.h"
 #include "pg_lake/extensions/pg_lake_table.h"
-#include "pg_lake/util/rel_utils.h"
 #include "pg_lake/parsetree/options.h"
+#include "pg_lake/util/rel_utils.h"
 
-/* mapping of pg_lake table type name to enum */
-typedef struct PgLakeTableTypeName
-{
-	char	   *name;
-	PgLakeTableType tableType;
-}			PgLakeTableTypeName;
-
-static PgLakeTableTypeName PgLakeTableTypeNames[] =
-{
-	{
-		PG_LAKE_ICEBERG_SERVER_NAME, PG_LAKE_ICEBERG_TABLE_TYPE
-	},
-	{
-		PG_LAKE_SERVER_NAME, PG_LAKE_TABLE_TYPE
-	},
-	{
-		NULL, PG_LAKE_INVALID_TABLE_TYPE
-	},
-};
-
-
-
-
-/*
-* GetPgLakeTableType - get the type of the pg_lake table.
-*/
-PgLakeTableType
-GetPgLakeTableType(Oid foreignTableId)
-{
-	char	   *serverName = GetPgLakeForeignServerName(foreignTableId);
-
-	if (serverName == NULL)
-	{
-		return PG_LAKE_INVALID_TABLE_TYPE;
-	}
-
-	return GetPgLakeTableTypeViaServerName(serverName);
-}
 
 PgLakeTableType
 GetPgLakeTableTypeViaServerName(char *serverName)
@@ -132,6 +94,7 @@ IsAnyWritableLakeTable(Oid foreignTableId)
 	return tableType == PG_LAKE_ICEBERG_TABLE_TYPE ||
 		(writableOption != NULL ? defGetBoolean(writableOption) : false);
 }
+
 
 /*
 * IsAnyLakeForeignTableById - check if the table is a lake table.
@@ -256,25 +219,31 @@ GetQualifiedRelationName(Oid relationId)
 	return quote_qualified_identifier(namespaceName, relationName);
 }
 
-/*
- * PgLakeTableTypeToName - convert the PgLakeTableType to a string.
- */
-const char *
-PgLakeTableTypeToName(PgLakeTableType tableType)
-{
-	const char *name = NULL;
 
-	for (int tableTypeIndex = 0; PgLakeTableTypeNames[tableTypeIndex].name != NULL; tableTypeIndex++)
+/*
+* GetForeignTablePath - get the path option for the foreign table.
+*/
+char *
+GetForeignTablePath(Oid foreignTableId)
+{
+	ForeignTable *fTable = GetForeignTable(foreignTableId);
+	ListCell   *cell;
+
+	foreach(cell, fTable->options)
 	{
-		if (PgLakeTableTypeNames[tableTypeIndex].tableType == tableType)
+		DefElem    *defel = (DefElem *) lfirst(cell);
+
+		if (strcmp(defel->defname, "path") == 0)
 		{
-			name = PgLakeTableTypeNames[tableTypeIndex].name;
-			break;
+			return defGetString(defel);
 		}
 	}
 
-	return name;
+	ereport(ERROR,
+			(errcode(ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION),
+			 errmsg("path option not found for foreign table %u", foreignTableId)));
 }
+
 
 /*
  * GetWritableTableLocation returns the location of a writable table.
@@ -325,6 +294,82 @@ EnsureTableOwner(Oid relationId)
 	}
 }
 
+
+/*
+ * MakeNameListFromRangeVar makes a namelist from a RangeVar. Its behaviour
+ * should be the exact opposite of postgres' makeRangeVarFromNameList.
+ */
+List *
+MakeNameListFromRangeVar(const RangeVar *rel)
+{
+	if (rel->catalogname != NULL)
+	{
+		Assert(rel->schemaname != NULL);
+		Assert(rel->relname != NULL);
+		return list_make3(makeString(rel->catalogname),
+						  makeString(rel->schemaname),
+						  makeString(rel->relname));
+	}
+	else if (rel->schemaname != NULL)
+	{
+		Assert(rel->relname != NULL);
+		return list_make2(makeString(rel->schemaname),
+						  makeString(rel->relname));
+	}
+	else
+	{
+		Assert(rel->relname != NULL);
+		return list_make1(makeString(rel->relname));
+	}
+}
+
+
+bool
+IsAnyLakeForeignTable(RangeTblEntry *rte)
+{
+	if (rte->rtekind != RTE_RELATION ||
+		rte->relkind != RELKIND_FOREIGN_TABLE)
+	{
+		return false;
+	}
+
+	return IsAnyLakeForeignTableById(rte->relid);
+}
+
+
+/*
+* GetForeignTableFormat - get the underlying file format for the foreign table.
+*/
+CopyDataFormat
+GetForeignTableFormat(Oid foreignTableId)
+{
+	PgLakeTableType tableType = GetPgLakeTableType(foreignTableId);
+
+	if (tableType == PG_LAKE_ICEBERG_TABLE_TYPE)
+	{
+		/* iceberg tables are always parquet */
+		return DATA_FORMAT_PARQUET;
+	}
+
+	ForeignTable *fTable = GetForeignTable(foreignTableId);
+	ListCell   *cell;
+
+	foreach(cell, fTable->options)
+	{
+		DefElem    *defel = (DefElem *) lfirst(cell);
+
+		if (strcmp(defel->defname, "format") == 0)
+		{
+			return NameToCopyDataFormat(defGetString(defel));
+		}
+	}
+
+	ereport(ERROR,
+			(errcode(ERRCODE_FDW_UNABLE_TO_CREATE_EXECUTION),
+			 errmsg("format option not found for foreign table %u", foreignTableId)));
+}
+
+
 /*
  * GetPgLakeTableProperties returns the format, compression, options and
  * table type of a pg_lake table.
@@ -357,46 +402,4 @@ GetPgLakeTableProperties(Oid relationId)
 	};
 
 	return result;
-}
-
-
-/*
-* IsInternalOrExternalIcebergTable - check if the table is an internal or
-* external iceberg table.
-*/
-bool
-IsInternalOrExternalIcebergTable(PgLakeTableProperties properties)
-{
-	PgLakeTableType tableType = properties.tableType;
-
-	return tableType == PG_LAKE_ICEBERG_TABLE_TYPE ||
-		(tableType == PG_LAKE_TABLE_TYPE && properties.format == DATA_FORMAT_ICEBERG);
-}
-
-/*
- * MakeNameListFromRangeVar makes a namelist from a RangeVar. Its behaviour
- * should be the exact opposite of postgres' makeRangeVarFromNameList.
- */
-List *
-MakeNameListFromRangeVar(const RangeVar *rel)
-{
-	if (rel->catalogname != NULL)
-	{
-		Assert(rel->schemaname != NULL);
-		Assert(rel->relname != NULL);
-		return list_make3(makeString(rel->catalogname),
-						  makeString(rel->schemaname),
-						  makeString(rel->relname));
-	}
-	else if (rel->schemaname != NULL)
-	{
-		Assert(rel->relname != NULL);
-		return list_make2(makeString(rel->schemaname),
-						  makeString(rel->relname));
-	}
-	else
-	{
-		Assert(rel->relname != NULL);
-		return list_make1(makeString(rel->relname));
-	}
 }

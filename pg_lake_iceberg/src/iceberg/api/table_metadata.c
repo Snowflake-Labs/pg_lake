@@ -79,23 +79,14 @@ static bool SnapshotAgeExceeded(IcebergSnapshot * snapshot, int64_t currentTimeM
 
 /*
 * GenerateEmptyTableMetadata generates an empty iceberg table metadata
-* for the given create statement and location.
+* for the given location.
 *
 * We closely follow the reference implementation (spark) for empty
 * table metadata generation.
 */
 IcebergTableMetadata *
-GenerateEmptyTableMetadata(Oid foreignTableOid, char *location)
+GenerateEmptyTableMetadata(char *location)
 {
-	PgLakeTableType tableType = GetPgLakeTableType(foreignTableOid);
-
-	if (tableType != PG_LAKE_ICEBERG_TABLE_TYPE)
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("table is not an iceberg table")));
-	}
-
 	IcebergTableMetadata *metadata = palloc0(sizeof(IcebergTableMetadata));
 
 	metadata->format_version = 2;
@@ -352,8 +343,7 @@ GenerateInitialIcebergTableMetadata(Oid relationId)
 {
 	char	   *queryArguments = "";
 	char	   *location = GetWritableTableLocation(relationId, &queryArguments);
-	IcebergTableMetadata *metadata =
-		GenerateEmptyTableMetadata(relationId, location);
+	IcebergTableMetadata *metadata = GenerateEmptyTableMetadata(location);
 
 	return metadata;
 }

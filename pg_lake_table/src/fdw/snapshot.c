@@ -31,7 +31,6 @@
 #include "pg_lake/iceberg/api/table_schema.h"
 #include "pg_lake/fdw/data_files_catalog.h"
 #include "pg_lake/fdw/snapshot.h"
-#include "pg_lake/fdw/utils.h"
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/pgduck/map.h"
 #include "pg_lake/parsetree/options.h"
@@ -43,6 +42,7 @@
 #include "pg_lake/fdw/data_file_pruning.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/fdw/schema_operations/field_id_mapping_catalog.h"
+#include "pg_lake/util/rel_utils.h"
 #include "foreign/foreign.h"
 #include "nodes/execnodes.h"
 #include "nodes/pg_list.h"
@@ -177,27 +177,10 @@ static PgLakeTableScan *
 CreateTableScanForRelation(Oid relationId, int uniqueRelationIdentifier, List *baseRestrictInfoList,
 						   bool includeChildren, bool isResultRelation)
 {
-	ForeignTable *foreignTable = GetForeignTable(relationId);
-	List	   *options = foreignTable->options;
-	DefElem    *writableOption = GetOption(options, "writable");
-
-	bool		isWritable =
-		writableOption != NULL ? defGetBoolean(writableOption) : false;
-	CopyDataFormat sourceFormat;
-	CopyDataCompression sourceCompression;
-	PgLakeTableType tableType = GetPgLakeTableType(relationId);
-	IcebergCatalogType icebergCatalogType = GetIcebergCatalogType(relationId);
-	char	   *path = GetStringOption(options, "path", false);
-
-	FindDataFormatAndCompression(tableType, path, options,
-								 &sourceFormat, &sourceCompression);
-
 	List	   *fileScans = NIL;
 	List	   *positionDeleteScans = NIL;
 
-	if (isWritable || icebergCatalogType == POSTGRES_CATALOG ||
-		icebergCatalogType == REST_CATALOG_READ_WRITE ||
-		icebergCatalogType == OBJECT_STORE_READ_WRITE)
+	if (IsWritablePgLakeTable(relationId) || IsInternalIcebergTable(relationId))
 	{
 		/*
 		 * Read only the data files, do not yet include the deletion files.
@@ -254,50 +237,31 @@ CreateTableScanForRelation(Oid relationId, int uniqueRelationIdentifier, List *b
 			positionDeleteScans = lappend(positionDeleteScans, positionDeleteScan);
 		}
 	}
-	else if (icebergCatalogType == REST_CATALOG_READ_ONLY ||
-			 icebergCatalogType == OBJECT_STORE_READ_ONLY ||
-			 sourceFormat == DATA_FORMAT_ICEBERG)
+	else if (IsExternalIcebergTable(relationId))
 	{
-		IcebergTableMetadata *metadata = NULL;
+		char	   *path = GetIcebergMetadataLocation(relationId, false);
+
+		IcebergTableMetadata *metadata = ReadIcebergTableMetadata(path);
 
 		/*
-		 * For read-only external catalog Iceberg tables, we need to get the
-		 * metadata location from the external catalog.
+		 * We cannot afford to have a different schema between the Postgres
+		 * catalogs and the iceberg catalog.
 		 */
-		if (icebergCatalogType == REST_CATALOG_READ_ONLY)
-		{
-			path = GetMetadataLocationForRestCatalogForIcebergTable(relationId);
-			metadata = ReadIcebergTableMetadata(path);
+		IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
 
-			/*
-			 * We cannot afford to have a different schema between the
-			 * Postgres catalogs and the iceberg catalog.
-			 */
+		if (catalogType == REST_CATALOG_READ_ONLY ||
+			catalogType == OBJECT_STORE_READ_ONLY)
 			ErrorIfSchemasDoNotMatch(relationId, metadata);
-		}
-		else if (icebergCatalogType == OBJECT_STORE_READ_ONLY)
-		{
-			path = GetMetadataLocationFromExternalObjectStoreCatalogForTable(relationId);
-			metadata = ReadIcebergTableMetadata(path);
-
-			/*
-			 * We cannot afford to have a different schema between the
-			 * Postgres catalogs and the iceberg catalog.
-			 */
-			ErrorIfSchemasDoNotMatch(relationId, metadata);
-		}
-		else
-		{
-			path = GetStringOption(options, "path", true);
-			metadata = ReadIcebergTableMetadata(path);
-		}
 
 		CreateTableScanForIcebergMetadata(relationId, metadata, baseRestrictInfoList, &fileScans, &positionDeleteScans);
 	}
 	else
 	{
+		ForeignTable *foreignTable = GetForeignTable(relationId);
+		List	   *options = foreignTable->options;
+
 		/* error if path is missing */
-		path = GetStringOption(options, "path", true);
+		char	   *path = GetStringOption(options, "path", true);
 
 		/* for wildcard paths, check if we have a _filename filter */
 		if (EnableDataFilePruning &&

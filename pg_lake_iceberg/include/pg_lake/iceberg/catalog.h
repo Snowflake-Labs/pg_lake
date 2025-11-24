@@ -19,6 +19,8 @@
 
 #include "nodes/primnodes.h"
 
+#include "pg_lake/util/rel_utils.h"
+
 /*
  * Default location prefix for pg_lake_iceberg tables. Used when the location
  * option is not specified at "CREATE FOREIGN SERVER pg_lake_iceberg OPTIONS ()".
@@ -52,7 +54,7 @@ extern PGDLLEXPORT void DeleteExternalIcebergCatalogTable(char *catalogName, cha
 extern PGDLLEXPORT void DeleteInternalIcebergCatalogTable(Oid relationId);
 
 extern PGDLLEXPORT List *GetAllInternalIcebergRelationIds(void);
-extern PGDLLEXPORT char *GetIcebergCatalogMetadataLocation(Oid relationId, bool forUpdate);
+extern PGDLLEXPORT char *GetIcebergMetadataLocation(Oid relationId, bool forUpdate);
 extern PGDLLEXPORT char *GetIcebergCatalogPreviousMetadataLocation(Oid relationId, bool forUpdate);
 extern PGDLLEXPORT void UpdateExternalCatalogMetadataLocation(char *catalogName, char *schemaName, char *tableName, const char *metadataLocation,
 															  const char *previousMetadataLocation);
@@ -66,3 +68,4 @@ extern PGDLLEXPORT void ErrorIfReadOnlyExternalCatalogIcebergTable(Oid relationI
 extern PGDLLEXPORT bool IsReadOnlyIcebergTable(Oid relationId);
 extern PGDLLEXPORT bool RelationExistsInTheIcebergCatalog(Oid relationId);
 extern PGDLLEXPORT bool HasCustomLocation(Oid relationId);
+extern PGDLLEXPORT bool IsWritableIcebergTable(Oid relationId);

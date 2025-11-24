@@ -154,7 +154,7 @@ ExternalHeavyAssertsOnIcebergMetadataChange(void)
 static void
 EnsureIcebergPartitionMetadataInSync(Oid relationId, int currentSpecId, int largestSpecId, int largestPartitionFieldId)
 {
-	char	   *currentMetadataPath = GetIcebergCatalogMetadataLocation(relationId, false);
+	char	   *currentMetadataPath = GetIcebergMetadataLocation(relationId, false);
 	IcebergTableMetadata *metadata = ReadIcebergTableMetadata(currentMetadataPath);
 
 	if (metadata->default_spec_id != currentSpecId)
@@ -285,7 +285,7 @@ AssertInternalAndExternalIcebergStatsMatchForAllDataFiles(Oid relationId, bool d
 	}
 
 	/* fetch external data files and convert them to TableDataFile */
-	char	   *metadataPath = GetIcebergCatalogMetadataLocation(relationId, false);
+	char	   *metadataPath = GetIcebergMetadataLocation(relationId, false);
 	IcebergTableMetadata *metadata = ReadIcebergTableMetadata(metadataPath);
 
 	List	   *externalDataFiles = NIL;
@@ -734,7 +734,7 @@ ErrorIfIcebergMetadataIsOutOfSync(Oid relationId, List *fileScans,
 	 * regular Postgres relation locks.
 	 */
 	bool		forUpdate = false;
-	char	   *metadataPath = GetIcebergCatalogMetadataLocation(relationId, forUpdate);
+	char	   *metadataPath = GetIcebergMetadataLocation(relationId, forUpdate);
 	IcebergTableMetadata *metadata = ReadIcebergTableMetadata(metadataPath);
 
 	List	   *icebergMetadataFileScans = NIL;
@@ -791,7 +791,7 @@ static void
 AssertInternalAndExternalTableSchemaMatch(Oid relationId, DataFileSchema * internalSchema)
 {
 
-	char	   *metadataPath = GetIcebergCatalogMetadataLocation(relationId, false);
+	char	   *metadataPath = GetIcebergMetadataLocation(relationId, false);
 	DataFileSchema *externalSchema = GetDataFileSchemaForExternalIcebergTable(metadataPath);
 
 	if (internalSchema->nfields != externalSchema->nfields)
@@ -884,7 +884,7 @@ FieldCompare(const ListCell *a, const ListCell *b)
 static void
 AssertInternalAndExternalLeafFieldsMatch(Oid relationId, List *internalLeafFields)
 {
-	char	   *metadataPath = GetIcebergCatalogMetadataLocation(relationId, false);
+	char	   *metadataPath = GetIcebergMetadataLocation(relationId, false);
 	List	   *externalLeafFields = GetLeafFieldsForExternalIcebergTable(metadataPath);
 
 	int			internalLeafFieldsCount = list_length(internalLeafFields);
