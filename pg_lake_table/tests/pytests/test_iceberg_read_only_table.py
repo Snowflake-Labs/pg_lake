@@ -15,19 +15,31 @@ def test_read_only_flag(pg_conn, superuser_conn, s3, extension, with_default_loc
     superuser_conn.commit()
 
     commands = [
-        "INSERT INTO test_read_only_flag.test VALUES (1)",
-        f"COPY test_read_only_flag.test FROM '{url}'",
-        "DELETE FROM test_read_only_flag.test",
-        "UPDATE test_read_only_flag.test SET a = a +1",
-        "TRUNCATE test_read_only_flag.test",
-        "ALTER TABLE test_read_only_flag.test ADD COLUMN c1 INT",
-        "ALTER TABLE test_read_only_flag.test DROP COLUMN a",
-        "ALTER TABLE test_read_only_flag.test RENAME COLUMN a TO b",
+        ("INSERT INTO test_read_only_flag.test VALUES (1)", "does not allow inserts"),
+        (f"COPY test_read_only_flag.test FROM '{url}'", "does not allow inserts"),
+        ("DELETE FROM test_read_only_flag.test", "does not allow deletes"),
+        ("UPDATE test_read_only_flag.test SET a = a +1", "does not allow updates"),
+        (
+            "TRUNCATE test_read_only_flag.test",
+            "modifications on read-only iceberg tables are not supported",
+        ),
+        (
+            "ALTER TABLE test_read_only_flag.test ADD COLUMN c1 INT",
+            "modifications on read-only iceberg tables are not supported",
+        ),
+        (
+            "ALTER TABLE test_read_only_flag.test DROP COLUMN a",
+            "modifications on read-only iceberg tables are not supported",
+        ),
+        (
+            "ALTER TABLE test_read_only_flag.test RENAME COLUMN a TO b",
+            "modifications on read-only iceberg tables are not supported",
+        ),
     ]
 
-    for command in commands:
-        error = run_command(command, pg_conn, raise_error=False)
-        assert 'iceberg table "test" is read-only' in str(error)
+    for cmd, cmd_error in commands:
+        error = run_command(cmd, pg_conn, raise_error=False)
+        assert cmd_error in str(error)
         pg_conn.rollback()
 
     run_command(
@@ -64,7 +76,7 @@ def test_read_only_flag_multiple_dbs(
     error = run_command(
         "INSERT INTO t1 VALUES (1)", con_db_with_extension, raise_error=False
     )
-    assert 'iceberg table "t1" is read-only' in str(error)
+    assert "does not allow inserts" in str(error)
 
     con_db_with_extension.close()
 
@@ -98,7 +110,7 @@ def test_read_only_flag_vacuum(
     for command in commands:
         run_command(command, pg_conn)
         assert len(pg_conn.notices) > 0
-        assert 'WARNING:  iceberg table "test" is read-only' in pg_conn.notices[0]
+        assert 'WARNING:  lake table "test" is read-only' in pg_conn.notices[0]
         pg_conn.rollback()
 
     run_command(

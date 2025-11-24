@@ -37,7 +37,6 @@ static char *GetIcebergExternalMetadataLocation(Oid relationId);
 static char *GetIcebergCatalogMetadataLocationInternal(Oid relationId, bool isPrevMetadata, bool forUpdate);
 static char *GetIcebergCatalogColumnInternal(Oid relationId, char *columnName, bool forUpdate, bool errorIfNotFound);
 static void ErrorIfSameTableExistsInExternalCatalog(Oid relationId);
-static bool ReportIfReadOnlyIcebergTable(Oid relationId, int logLevel);
 
 /*
  * InsertExternalIcebergCatalogTable inserts a record into the Iceberg
@@ -490,56 +489,11 @@ GetIcebergCatalogPreviousMetadataLocation(Oid relationId, bool forUpdate)
 void
 ErrorIfReadOnlyIcebergTable(Oid relationId)
 {
-	ReportIfReadOnlyIcebergTable(relationId, ERROR);
-
-	ErrorIfReadOnlyExternalCatalogIcebergTable(relationId);
-}
-
-/*
-* WarnIfReadOnlyIcebergTable checks if the iceberg table is read-only and
-* throws a warning if it is.
-*/
-bool
-WarnIfReadOnlyIcebergTable(Oid relationId)
-{
-	return ReportIfReadOnlyIcebergTable(relationId, WARNING);
-}
-
-/*
-* Similar to ErrorIfReadOnlyExternalCatalogIcebergTable, but for external
-* catalog iceberg tables, namely rest catalog and object catalog tables.
-*/
-void
-ErrorIfReadOnlyExternalCatalogIcebergTable(Oid relationId)
-{
-	IcebergCatalogType icebergCatalogType = GetIcebergCatalogType(relationId);
-
-	if (icebergCatalogType == REST_CATALOG_READ_ONLY ||
-		icebergCatalogType == OBJECT_STORE_READ_ONLY)
-		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg("modifications on read-only external catalog iceberg tables are not supported")));
-}
-
-
-/*
-* ReportIfReadOnlyIcebergTable checks if the iceberg table is read-only and
-* reports an logLevel if it is.
-*
-* For non-error cases, it returns true if the table is read-only.
-*/
-static bool
-ReportIfReadOnlyIcebergTable(Oid relationId, int logLevel)
-{
-	bool		readOnly = IsReadOnlyIcebergTable(relationId);
-
-	if (readOnly)
+	if (IsReadOnlyIcebergTable(relationId))
 	{
-		ereport(logLevel,
-				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				 errmsg("iceberg table \"%s\" is read-only", get_rel_name(relationId))));
+		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg("modifications on read-only iceberg tables are not supported")));
 	}
-
-	return readOnly;
 }
 
 /*
@@ -555,36 +509,6 @@ GetIcebergCatalogMetadataLocationInternal(Oid relationId, bool isPrevMetadata, b
 	return GetIcebergCatalogColumnInternal(relationId, columnName, forUpdate, errorIfNotFound);
 }
 
-
-/*
-* IsReadOnlyIcebergTable checks if the iceberg table is read-only and
-* returns true if it is.
-*/
-bool
-IsReadOnlyIcebergTable(Oid relationId)
-{
-	if (GetPgLakeTableType(relationId) != PG_LAKE_ICEBERG_TABLE_TYPE)
-	{
-		/* read-only feature is only applicable for pg_lake_iceberg tables */
-		return false;
-	}
-
-	bool		forUpdate = false;
-	char	   *columnName = "read_only";
-	bool		errorIfNotFound = false;
-
-
-	char	   *readOnlyValue =
-		GetIcebergCatalogColumnInternal(relationId, columnName, forUpdate, errorIfNotFound);
-
-	if (readOnlyValue != NULL && pg_strcasecmp(readOnlyValue, "t") == 0)
-	{
-		/* let the caller know that this is a read-only table for non-errors */
-		return true;
-	}
-
-	return false;
-}
 
 
 /*
@@ -854,4 +778,14 @@ IsWritableIcebergTable(Oid relationId)
 	}
 
 	return (pg_strcasecmp(readOnlyValue, "f") == 0);
+}
+
+
+/*
+ * IsReadOnlyIcebergTable - check if the iceberg table is read-only.
+ */
+bool
+IsReadOnlyIcebergTable(Oid relationId)
+{
+	return IsIcebergTable(relationId) && !IsWritableIcebergTable(relationId);
 }

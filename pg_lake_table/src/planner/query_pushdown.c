@@ -1368,8 +1368,6 @@ QueryPushdownBeginScan(CustomScanState *node, EState *estate, int eflags)
 	 */
 	if (scanState->insertIntoRelid != InvalidOid)
 	{
-		ErrorIfReadOnlyIcebergTable(scanState->insertIntoRelid);
-
 		/*
 		 * INSERT .. SELECT pushdown is replaced with a COPY (SELECT ..) TO
 		 * ..; query. Given COPY doesn't support parameters, we have to

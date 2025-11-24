@@ -526,8 +526,6 @@ VacuumLakeTables(ProcessUtilityParams * utilityParams)
 										 get_rel_name(relationId))));
 			}
 
-			ErrorIfReadOnlyExternalCatalogIcebergTable(relationId);
-
 			continue;
 		}
 
@@ -563,8 +561,13 @@ VacuumLakeTables(ProcessUtilityParams * utilityParams)
 	{
 		Oid			relationId = lfirst_oid(relationIdCell);
 
-		if (WarnIfReadOnlyIcebergTable(relationId))
+		/* skip read only lake tables */
+		if (!IsWritablePgLakeTable(relationId) && !IsWritableIcebergTable(relationId))
 		{
+			ereport(WARNING,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("lake table \"%s\" is read-only", get_rel_name(relationId))));
+
 			/* let other tables VACUUMed */
 			continue;
 		}

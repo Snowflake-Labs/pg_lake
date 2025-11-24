@@ -2551,7 +2551,7 @@ postgresIsForeignRelUpdatable(Relation rel)
 	 * By default, all pg_lake foreign tables are assumed not writable. This
 	 * can be overridden by a per-table setting.
 	 */
-	if (!IsAnyWritableLakeTable(relationId))
+	if (!IsWritablePgLakeTable(relationId) && !IsWritableIcebergTable(relationId))
 		return 0;
 
 	int			writeFlags = (1 << CMD_INSERT);
@@ -3359,8 +3359,6 @@ create_foreign_modify(Relation rel,
 {
 	CmdType		operation = mtstate->operation;
 	Oid			relationId = RelationGetRelid(rel);
-
-	ErrorIfReadOnlyIcebergTable(relationId);
 
 	/* extra checks */
 	if (PgLakeModifyValidityCheckHook)

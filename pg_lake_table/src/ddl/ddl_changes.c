@@ -141,15 +141,14 @@ ApplyDDLCatalogChanges(Oid relationId, List *ddlOperations,
 			}
 
 			/*
-			 * We intentionally do not call ErrorIfReadOnlyIcebergTable here
-			 * because users might want to get rid-of the iceberg table on
-			 * forks. If we ever remove the remote files with DROP TABLE, we
-			 * should call ErrorIfReadOnlyIcebergTable here.
+			 * We intentionally do not throw error here because users might
+			 * want to get rid-of the iceberg table on forks. If we ever
+			 * remove the remote files with DROP TABLE, we should throw error.
 			 *
 			 * Also, for read-only tables, we will not mark the files for
 			 * deletion.
 			 */
-			if (!IsReadOnlyIcebergTable(relationId))
+			if (IsWritableIcebergTable(relationId))
 			{
 				/*
 				 * metadata is not pushed yet if table is created in current

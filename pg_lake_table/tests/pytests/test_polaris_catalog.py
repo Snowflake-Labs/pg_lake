@@ -307,10 +307,7 @@ def test_register_existing_table(
         pg_conn,
         raise_error=False,
     )
-    assert (
-        "modifications on read-only external catalog iceberg tables are not supported"
-        in str(err)
-    )
+    assert "does not allow inserts" in str(err)
     pg_conn.rollback()
 
     # CTAS not supported
@@ -319,10 +316,7 @@ def test_register_existing_table(
         pg_conn,
         raise_error=False,
     )
-    assert (
-        "modifications on read-only external catalog iceberg tables are not supported"
-        in str(err)
-    )
+    assert "does not allow inserts" in str(err)
     pg_conn.rollback()
 
     # should be able to re-create
@@ -421,30 +415,38 @@ def test_register_existing_table(
 
     # we cannot modify the table
     cmds = [
-        f"""INSERT INTO "{namespace}"."{tbl_name}" (city) VALUES ('Istanbul')""",
-        f'''DELETE FROM "{namespace}"."{tbl_name}"''',
-        f"""UPDATE "{namespace}"."{tbl_name}" SET city = 'Istanbul' """,
-        f'''TRUNCATE "{namespace}"."{tbl_name}"''',
-        f'''INSERT INTO "{namespace}"."{tbl_name}" SELECT * FROM "{namespace}"."{tbl_name}"''',
-        f"""ALTER TABLE "{namespace}"."{tbl_name}" ADD COLUMN x INT""",
+        (
+            f"""INSERT INTO "{namespace}"."{tbl_name}" (city) VALUES ('Istanbul')""",
+            "does not allow inserts",
+        ),
+        (f'''DELETE FROM "{namespace}"."{tbl_name}"''', "does not allow deletes"),
+        (
+            f"""UPDATE "{namespace}"."{tbl_name}" SET city = 'Istanbul' """,
+            "does not allow updates",
+        ),
+        (
+            f'''TRUNCATE "{namespace}"."{tbl_name}"''',
+            "modifications on read-only iceberg tables are not supported",
+        ),
+        (
+            f'''INSERT INTO "{namespace}"."{tbl_name}" SELECT * FROM "{namespace}"."{tbl_name}"''',
+            "does not allow inserts",
+        ),
+        (
+            f"""ALTER TABLE "{namespace}"."{tbl_name}" ADD COLUMN x INT""",
+            "modifications on read-only iceberg tables are not supported",
+        ),
     ]
-    for cmd in cmds:
+    for cmd, cmd_error in cmds:
         err = run_command(cmd, pg_conn, raise_error=False)
-        assert (
-            "modifications on read-only external catalog iceberg tables are not supported"
-            in str(err)
-        )
+        assert cmd_error in str(err)
         pg_conn.rollback()
 
     pg_conn.autocommit = True
 
-    err = run_command(
-        f'''VACUUM "{namespace}"."{tbl_name}"''', pg_conn, raise_error=False
-    )
-    assert (
-        "modifications on read-only external catalog iceberg tables are not supported"
-        in str(err)
-    )
+    pg_conn.notices.clear()
+    run_command(f'''VACUUM "{namespace}"."{tbl_name}"''', pg_conn)
+    assert any("WARNING:" in notice for notice in pg_conn.notices)
     pg_conn.rollback()
 
     pg_conn.autocommit = False

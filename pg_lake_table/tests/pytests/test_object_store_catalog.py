@@ -553,10 +553,7 @@ def test_unsupported_modifications_for_read_only(
         pg_conn,
         raise_error=False,
     )
-    assert (
-        "modifications on read-only external catalog iceberg tables are not supported"
-        in str(res)
-    )
+    assert "does not allow inserts" in str(res)
     pg_conn.rollback()
 
     res = run_command(
@@ -571,20 +568,29 @@ def test_unsupported_modifications_for_read_only(
 
     # we cannot modify the table
     cmds = [
-        f"""INSERT INTO object_store_sc2.tbl_1 (a) VALUES (1)""",
-        f"""DELETE FROM object_store_sc2.tbl_1""",
-        f"""UPDATE object_store_sc2.tbl_1 SET a = 11111 """,
-        f"""TRUNCATE object_store_sc2.tbl_1""",
-        f"""INSERT INTO object_store_sc2.tbl_1 SELECT * FROM object_store_sc2.tbl_1""",
-        f"""ALTER TABLE object_store_sc2.tbl_1 ADD COLUMN x INT""",
-        f"""ALTER TABLE object_store_sc2.tbl_1 SET (catalog_table_name='xx')""",
+        ("INSERT INTO object_store_sc2.tbl_1 (a) VALUES (1)", "does not allow inserts"),
+        ("DELETE FROM object_store_sc2.tbl_1", "does not allow deletes"),
+        ("UPDATE object_store_sc2.tbl_1 SET a = 11111 ", "does not allow updates"),
+        (
+            "TRUNCATE object_store_sc2.tbl_1",
+            "modifications on read-only iceberg tables are not supported",
+        ),
+        (
+            "INSERT INTO object_store_sc2.tbl_1 SELECT * FROM object_store_sc2.tbl_1",
+            "does not allow inserts",
+        ),
+        (
+            "ALTER TABLE object_store_sc2.tbl_1 ADD COLUMN x INT",
+            "modifications on read-only iceberg tables are not supported",
+        ),
+        (
+            "ALTER TABLE object_store_sc2.tbl_1 SET (catalog_table_name='xx')",
+            "modifications on read-only iceberg tables are not supported",
+        ),
     ]
-    for cmd in cmds:
+    for cmd, cmd_error in cmds:
         err = run_command(cmd, pg_conn, raise_error=False)
-        assert (
-            "modifications on read-only external catalog iceberg tables are not supported"
-            in str(err)
-        )
+        assert cmd_error in str(err)
         pg_conn.rollback()
 
     res = run_command(

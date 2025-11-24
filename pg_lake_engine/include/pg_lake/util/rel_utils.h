@@ -34,7 +34,6 @@ extern PGDLLEXPORT PgLakeTableType GetPgLakeTableTypeViaServerName(char *serverN
 extern PGDLLEXPORT bool IsPgLakeForeignTableById(Oid foreignTableId);
 extern PGDLLEXPORT bool IsPgLakeIcebergForeignTableById(Oid foreignTableId);
 extern PGDLLEXPORT bool IsPgLakeServerName(const char *serverName);
-extern PGDLLEXPORT bool IsAnyWritableLakeTable(Oid foreignTableId);
 extern PGDLLEXPORT bool IsPgLakeIcebergServerName(const char *serverName);
 extern PGDLLEXPORT char *GetWritableTableLocation(Oid relationId, char **queryArguments);
 extern PGDLLEXPORT void EnsureTableOwner(Oid relationId);
