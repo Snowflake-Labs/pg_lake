@@ -18,8 +18,6 @@ services:
       timeout: 2s
       start_period: 20s
       retries: 3
-    env_file:
-      - .env
     cap_add:
       - SYS_PTRACE
     depends_on:
@@ -46,8 +44,6 @@ services:
       timeout: 2s
       start_period: 20s
       retries: 3
-    env_file:
-      - .env
     cap_add:
       - SYS_PTRACE
     depends_on:
