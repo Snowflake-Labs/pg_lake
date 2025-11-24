@@ -708,3 +708,45 @@ IcebergTablesCatalogExists(void)
 
 	return get_relname_relid(ICEBERG_INTERNAL_CATALOG_TABLE_NAME, namespaceId) != InvalidOid;
 }
+
+
+/*
+* GetLastCommittedIcebergSnapshotIdForRelation returns the last committed
+* snapshot id for the given relation id from the iceberg catalog table.
+*/
+int64_t
+GetLastCommittedIcebergSnapshotIdForRelation(Oid relationId)
+{
+	int64_t		snapshotId = 0;
+	StringInfo	query = makeStringInfo();
+
+	appendStringInfo(query,
+					 "SELECT snapshot_id FROM %s WHERE table_name OPERATOR(pg_catalog.=) $1",
+					 ICEBERG_INTERNAL_CATALOG_TABLE_QUALIFIED);
+
+	DECLARE_SPI_ARGS(1);
+	SPI_ARG_VALUE(1, OIDOID, relationId, false);
+
+	SPI_START_EXTENSION_OWNER(PgLakeIceberg);
+
+	bool		readOnly = true;
+
+	SPI_EXECUTE(query->data, readOnly);
+
+	if (SPI_processed == 0)
+	{
+		elog(ERROR, "Iceberg table catalog record not found for relation %s.%s",
+			 get_namespace_name(get_rel_namespace(relationId)),
+			 get_rel_name(relationId));
+	}
+
+	bool isNull = false;
+	snapshotId = GET_SPI_VALUE(INT8OID, 0, 1, &isNull);
+
+	/* we always set this as part of the transaction */
+	Assert (!isNull);
+
+	SPI_END();
+
+	return snapshotId;
+}

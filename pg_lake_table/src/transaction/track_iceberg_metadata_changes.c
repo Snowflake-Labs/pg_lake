@@ -40,14 +40,13 @@
 static void ApplyTrackedIcebergMetadataChanges(void);
 static void RecordIcebergMetadataOperation(Oid relationId, TableMetadataOperationType operationType);
 static void InitTableMetadataTrackerHashIfNeeded(void);
-static HTAB *CreateDataFilesHashForMetadata(IcebergTableMetadata * metadata);
-static void FindChangedFilesSinceMetadata(HTAB *currentFilesMap, IcebergTableMetadata * metadata,
+static HTAB *CreateDataFilesHashForSnapshot(IcebergSnapshot * iceSnapshot);
+static void FindChangedFilesSinceSnapshot(HTAB *currentFilesMap, IcebergSnapshot * iceSnapshot,
 										  List **addedFiles, List **removedFilePaths);
 static HTAB *CreatePartitionSpecsHashForMetadata(IcebergTableMetadata * metadata);
 static List *FindNewPartitionSpecsSinceMetadata(HTAB *currentSpecs, IcebergTableMetadata * metadata);
-static IcebergTableMetadata * GetLastPushedIcebergMetadata(const TableMetadataOperationTracker * opTracker);
-static List *GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
-										   List *allTransforms);
+static IcebergTableMetadata * GetLastPushedIcebergMetadata(Oid relationId);
+static List *GetDataFileMetadataOperations(Oid relationId, bool relationCreatedInTx, List *allTransforms, int64_t snapshotId);
 static List *GetDDLMetadataOperations(const TableMetadataOperationTracker * opTracker);
 static void DeleteInProgressAddedFiles(Oid relationId, List *addedFiles);
 static int	ComparePartitionSpecsById(const ListCell *a, const ListCell *b);
@@ -284,7 +283,11 @@ ApplyTrackedIcebergMetadataChanges(void)
 		/* apply all data file operations at once */
 		if (opTracker->relationDataFileChanged)
 		{
-			List	   *dataFileOps = GetDataFileMetadataOperations(opTracker, allTransforms);
+			List	   *dataFileOps =
+				GetDataFileMetadataOperations(opTracker->relationId,
+											  opTracker->relationCreated,
+											  allTransforms,
+											  GetLastCommittedIcebergSnapshotIdForRelation(relationId));
 
 			metadataOperations = list_concat(metadataOperations, dataFileOps);
 		}
@@ -320,18 +323,17 @@ ApplyTrackedIcebergMetadataChanges(void)
 
 
 /*
- * CreateDataFilesHashForMetadata creates and populates a hash table of data files
- * from the given Iceberg table metadata.
+ * CreateDataFilesHashForSnapshot creates and populates a hash table of data files
+ * from the given Iceberg table metadata and snapshot ID.
  */
 static HTAB *
-CreateDataFilesHashForMetadata(IcebergTableMetadata * metadata)
+CreateDataFilesHashForSnapshot(IcebergSnapshot * iceSnapshot)
 {
 	HTAB	   *dataFilesMap = CreateFilesHash();
 
-	if (metadata == NULL)
+	if (iceSnapshot == NULL)
 		return dataFilesMap;
 
-	IcebergSnapshot *iceSnapshot = GetCurrentSnapshot(metadata, true);
 	List	   *dataFiles = FetchDataFilesFromSnapshot(iceSnapshot, NULL, IsManifestEntryStatusScannable, NULL);
 
 	ListCell   *fileCell = NULL;
@@ -348,19 +350,19 @@ CreateDataFilesHashForMetadata(IcebergTableMetadata * metadata)
 
 
 /*
- * FindChangedFilesSinceMetadata identifies added and removed files by comparing
- * the current state of data files with the state recorded in the provided metadata.
+ * FindChangedFilesSinceSnapshot identifies added and removed files by comparing
+ * the current state of data files with the state recorded in the provided snapshot.
  * It populates the addedFiles and removedFilePaths lists with the respective files.
  *
- * addedFiles: file info, wrapped in `TableDataFile` struct, for the files that are added since the metadata
- * removedFilePaths: file paths, which are added before the current tx, that are removed since the metadata
+ * addedFiles: file info, wrapped in `TableDataFile` struct, for the files that are added since the snapshot
+ * removedFilePaths: file paths, which are added before the current tx, that are removed since the snapshot
  */
 static void
-FindChangedFilesSinceMetadata(HTAB *currentFilesMap, IcebergTableMetadata * metadata,
+FindChangedFilesSinceSnapshot(HTAB *currentFilesMap, IcebergSnapshot * snapshot,
 							  List **addedFiles, List **removedFilePaths)
 {
 	/* create metadata's data files */
-	HTAB	   *metadataDataFilesMap = CreateDataFilesHashForMetadata(metadata);
+	HTAB	   *metadataDataFilesMap = CreateDataFilesHashForSnapshot(snapshot);
 
 	/* find added files */
 	HASH_SEQ_STATUS currentFilesStatus;
@@ -480,14 +482,10 @@ FindNewPartitionSpecsSinceMetadata(HTAB *currentSpecs, IcebergTableMetadata * me
  * for the specified relation. It returns NULL if no metadata is found.
  */
 static IcebergTableMetadata *
-GetLastPushedIcebergMetadata(const TableMetadataOperationTracker * opTracker)
+GetLastPushedIcebergMetadata(Oid relationId)
 {
-	/* table is just created, no metadata is pushed yet */
-	if (opTracker->relationCreated)
-		return NULL;
-
 	/* read the most recently pushed iceberg metadata for the table */
-	char	   *metadataPath = GetIcebergCatalogMetadataLocation(opTracker->relationId, false);
+	char	   *metadataPath = GetIcebergCatalogMetadataLocation(relationId, false);
 
 	return ReadIcebergTableMetadata(metadataPath);
 }
@@ -498,8 +496,7 @@ GetLastPushedIcebergMetadata(const TableMetadataOperationTracker * opTracker)
  * in the specified relation.
  */
 static List *
-GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
-							  List *allTransforms)
+GetDataFileMetadataOperations(Oid relationId, bool relationCreatedInTx, List *allTransforms, int64_t snapshotId)
 {
 	/*
 	 * get current state of data files, which are not applied to metadata yet,
@@ -511,17 +508,20 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 	char	   *orderBy = NULL;
 	Snapshot	snapshot = GetActiveSnapshot();
 
-	HTAB	   *currentFilesMap = GetTableDataFilesByPathHashFromCatalog(opTracker->relationId, dataOnly, newFilesOnly,
+	HTAB	   *currentFilesMap = GetTableDataFilesByPathHashFromCatalog(relationId, dataOnly, newFilesOnly,
 																		 forUpdate, orderBy, snapshot, allTransforms);
 
 	/* get last pushed metadata */
-	IcebergTableMetadata *lastMetadata = GetLastPushedIcebergMetadata(opTracker);
+	IcebergTableMetadata *lastMetadata =
+		relationCreatedInTx ? NULL : GetLastPushedIcebergMetadata(relationId);
 
 	/* find added and removed files since metadata */
 	List	   *addedFiles = NIL;
 	List	   *removedFilePaths = NIL;
 
-	FindChangedFilesSinceMetadata(currentFilesMap, lastMetadata, &addedFiles, &removedFilePaths);
+	IcebergSnapshot *iceSnapshot = lastMetadata ? GetIcebergSnapshotViaId(lastMetadata, snapshotId) : NULL;
+
+	FindChangedFilesSinceSnapshot(currentFilesMap, iceSnapshot, &addedFiles, &removedFilePaths);
 
 	/*
 	 * We have found the new files that are added since the last metadata
@@ -531,7 +531,7 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 	 * would still be in-progress queue to be removed later. Files that are
 	 * added in rollbacked subtransactions would also be in-progress queue.
 	 */
-	DeleteInProgressAddedFiles(opTracker->relationId, addedFiles);
+	DeleteInProgressAddedFiles(relationId, addedFiles);
 
 	List	   *metadataOperations = NIL;
 
@@ -583,7 +583,7 @@ GetDDLMetadataOperations(const TableMetadataOperationTracker * opTracker)
 
 	if (opTracker->relationCreated || opTracker->relationPartitionByChanged)
 	{
-		IcebergTableMetadata *lastMetadata = GetLastPushedIcebergMetadata(opTracker);
+		IcebergTableMetadata *lastMetadata = GetLastPushedIcebergMetadata(opTracker->relationId);
 
 		HTAB	   *currentSpecs = GetAllPartitionSpecsFromCatalog(opTracker->relationId);
 

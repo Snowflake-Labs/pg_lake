@@ -68,3 +68,4 @@ extern PGDLLEXPORT void ErrorIfReadOnlyExternalCatalogIcebergTable(Oid relationI
 extern PGDLLEXPORT bool IsReadOnlyIcebergTable(Oid relationId);
 extern PGDLLEXPORT bool RelationExistsInTheIcebergCatalog(Oid relationId);
 extern PGDLLEXPORT bool HasCustomLocation(Oid relationId);
+extern PGDLLEXPORT int64_t GetLastCommittedIcebergSnapshotIdForRelation(Oid relationId);
