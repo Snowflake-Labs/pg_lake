@@ -254,7 +254,7 @@ SetManifestPartitionSummary(IcebergManifest * manifest, List *manifestEntries, L
 
 		/* unexpected but better than crash */
 		if (partitionTransform == NULL)
-			ereport(ERROR, (errmsg("Could not find partition transform for field %d", partitionFieldId)));
+			ereport(ERROR, (errmsg("could not find partition transform for field %" PRId32, partitionFieldId)));
 
 		PGType		resultPgType = partitionTransform->resultPgType;
 		Field	   *resultField = PostgresTypeToIcebergField(resultPgType, false, NULL);

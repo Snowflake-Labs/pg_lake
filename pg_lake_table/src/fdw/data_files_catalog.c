@@ -459,6 +459,10 @@ FillPartitionFieldFromCatalog(TableDataFile * dataFile, List *partitionTransform
 	IcebergPartitionTransform *partitionTransform =
 		FindPartitionTransformById(partitionTransforms, partitionFieldId);
 
+	/* unexpected but better than crash */
+	if (partitionTransform == NULL)
+		ereport(ERROR, (errmsg("could not find partition transform for field %" PRId32, (int32_t) partitionFieldId)));
+
 	partitionField->value_type = GetTransformResultAvroType(partitionTransform);
 
 	partitionField->value = DeserializePartitionValueFromPGText(partitionTransform, valueText,
@@ -1333,6 +1337,10 @@ AddDataFilePartitionValueToCatalog(Oid relationId, int32 partitionSpecId, int64 
 		PartitionField *partitionField = &partition->fields[fieldIndex];
 		IcebergPartitionTransform *transform =
 			FindPartitionTransformById(transforms, partitionField->field_id);
+
+		/* unexpected but better than crash */
+		if (transform == NULL)
+			ereport(ERROR, (errmsg("could not find partition transform for field %" PRId32, partitionField->field_id)));
 
 		const char *partitionValue =
 			SerializePartitionValueToPGText(partitionField->value,
