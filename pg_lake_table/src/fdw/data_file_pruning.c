@@ -325,6 +325,7 @@ CreateFieldIdMappingHash(void)
 }
 
 
+
 /*
 * AddFieldIdsUsedInQuery adds the fieldIds for the columns used in the filters
 * to the fieldIdsToUseInBounds hash table.
@@ -446,7 +447,8 @@ AddFieldIdsUsedInQuery(HTAB *fieldIdsUsedInQuery, Oid relationId, PgLakeTablePro
 		 * We currently do not support data file pruning for columns with
 		 * collations.
 		 */
-		if (collation == InvalidOid || collation == DEFAULT_COLLATION_OID ||
+		if (collation == InvalidOid ||
+			(collation == DEFAULT_COLLATION_OID && DEFAULT_COLLATION_OID == C_COLLATION_OID) ||
 			collation == C_COLLATION_OID)
 		{
 			entry->columnBoundInclusiveUpper =
