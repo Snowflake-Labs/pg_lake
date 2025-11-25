@@ -200,12 +200,16 @@ CachingFileSystem::ShouldCacheOnWrite(CachingFSFileHandle &pg_lakeHandle, int64_
 	int64_t cacheOnWriteMaxAllowedSize = setting.GetValue<uint64_t>();
 	if (pg_lakeHandle.cacheOnWriteWrittenBytes + additionalByteCount >= cacheOnWriteMaxAllowedSize)
 	{
-		PGDUCK_SERVER_DEBUG("Total bytes will be written (%" PRId64 ") is greater than "
-							"pg_lake_cache_on_write_max_size (%" PRId64 "). "
-							"Disabling cache-on-write for this file %s%s.",
-							pg_lakeHandle.cacheOnWriteWrittenBytes + additionalByteCount,
-							cacheOnWriteMaxAllowedSize,
-							pg_lakeHandle.cacheOnWritePath.c_str(), ".pgl-stage");
+		PGDUCK_SERVER_DEBUG(
+			"Total number of bytes that will be written (%" PRId64 ") is greater than "
+			"pg_lake_cache_on_write_max_size (%" PRId64 "). "
+			"Disabling cache-on-write for this file %s%s.",
+			pg_lakeHandle.cacheOnWriteWrittenBytes + additionalByteCount,
+			cacheOnWriteMaxAllowedSize,
+			pg_lakeHandle.cacheOnWritePath.c_str(),
+			".pgl-stage"
+		);
+
 		return false;
 	}
 
