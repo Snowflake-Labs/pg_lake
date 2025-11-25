@@ -27,16 +27,16 @@ task compose:logs
   - Minimal runtime images with only necessary binaries
   - Fixed vcpkg network issues with retry logic
 
-- **Taskfile.yml** - Build automation
-  - Local single-platform builds
-  - Multi-platform builds for publishing
-  - Docker Compose integration
-  - Helper tasks for common operations
-
 - **docker-compose.yml** - Local development stack
   - pg_lake-postgres (PostgreSQL with pg_lake extensions)
   - pgduck-server (DuckDB integration)
   - [localstack](https://localstack.cloud/) (S3-compatible storage)
+
+- **Taskfile.yml** - Build automation
+  - Local single-platform single PostgreSQL version builds
+  - Multi-platform builds for publishing
+  - Docker Compose integration
+  - Helper tasks for common operations
 
 ## 📚 Documentation
 
@@ -103,7 +103,7 @@ docker-compose exec pgduck-server psql -p 5332 -h /home/postgres/pgduck_socket_d
 
 ### Key Optimizations
 
-✅ **Single PostgreSQL Version**: Builds only PG 16, 17, or 18 (not all 3)  
+✅ **Single Runner PostgreSQL Version**: Builds only PG 16, 17, or 18 (not all 3)  
 ✅ **Separate Build Stages**: Compilation happens in builder stages  
 ✅ **Minimal Runtime**: Final images contain only binaries and libraries  
 ✅ **Network Retry Logic**: Handles vcpkg download failures  
