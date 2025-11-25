@@ -21,10 +21,12 @@
 *   execution and statistics of the data files.
 */
 #include "postgres.h"
+#include "miscadmin.h"
 
 #include "catalog/pg_am_d.h"
 #include "catalog/pg_index.h"
 #include "catalog/pg_collation_d.h"
+#include "catalog/pg_database.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_opfamily.h"
 #include "commands/defrem.h"
@@ -123,6 +125,7 @@ static OpExpr *MakeOpExpression(Var *variable, int16 strategyNumber);
 static NullTest *MakeIsNullExpression(Var *variable);
 static Oid	GetOperatorByType(Oid typeId, Oid accessMethodId, int16 strategyNumber);
 static HTAB *TryCreateBatchFilterHash(List *baseRestrictInfoList, Var *filenameCol);
+static bool IsMyDBCollationIsC(void);
 
 /* partition pruning functions */
 static Expr *PartitionFieldBoundConstraint(PartitionField * partitionField,
@@ -448,7 +451,7 @@ AddFieldIdsUsedInQuery(HTAB *fieldIdsUsedInQuery, Oid relationId, PgLakeTablePro
 		 * collations.
 		 */
 		if (collation == InvalidOid ||
-			(collation == DEFAULT_COLLATION_OID && DEFAULT_COLLATION_OID == C_COLLATION_OID) ||
+			(collation == DEFAULT_COLLATION_OID && IsMyDBCollationIsC()) ||
 			collation == C_COLLATION_OID)
 		{
 			entry->columnBoundInclusiveUpper =
@@ -487,6 +490,27 @@ AddFieldIdsUsedInQuery(HTAB *fieldIdsUsedInQuery, Oid relationId, PgLakeTablePro
 			entry->typLen = -1;
 		}
 	}
+}
+
+
+static bool
+IsMyDBCollationIsC(void)
+{
+	bool		collateIsC = false;
+	const char *collate;
+	HeapTuple	tp;
+	Datum		datum;
+
+	tp = SearchSysCache1(DATABASEOID, ObjectIdGetDatum(MyDatabaseId));
+	if (!HeapTupleIsValid(tp))
+		elog(ERROR, "cache lookup failed for database %u", MyDatabaseId);
+	datum = SysCacheGetAttrNotNull(DATABASEOID, tp,
+								   Anum_pg_database_datcollate);
+	collate = TextDatumGetCString(datum);
+	collateIsC = pg_strcasecmp(collate, "C") == 0;
+	ReleaseSysCache(tp);
+
+	return collateIsC;
 }
 
 
