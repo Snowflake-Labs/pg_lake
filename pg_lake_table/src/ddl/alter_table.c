@@ -176,7 +176,7 @@ static const PgLakeDDL PgLakeDDLs[] = {
 	ALTER_TABLE_DDL(AT_EnableTrigUser, Allowed, Allowed),
 	ALTER_TABLE_DDL(AT_DisableTrigUser, Allowed, Allowed),
 	ALTER_SCHEMA_DDL(OBJECT_TABLE, DisallowedForWritableRestSetSchema, Allowed),
-	ALTER_SCHEMA_DDL(OBJECT_FOREIGN_TABLE, DisallowedForWritableRestRenameTable, Allowed),
+	ALTER_SCHEMA_DDL(OBJECT_FOREIGN_TABLE, DisallowedForWritableRestSetSchema, Allowed),
 	RENAME_TABLE_DDL(OBJECT_TABLE, DisallowedForWritableRestRenameTable, Allowed),
 	RENAME_TABLE_DDL(OBJECT_FOREIGN_TABLE, DisallowedForWritableRestRenameTable, Allowed),
 };
