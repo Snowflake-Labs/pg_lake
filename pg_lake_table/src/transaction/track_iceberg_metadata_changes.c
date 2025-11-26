@@ -103,12 +103,15 @@ TrackIcebergMetadataChangesInTx(Oid relationId, List *metadataOperationTypes)
 		return;
 
 	/*
-	 * we might also defer acquiring locks to precommit hook but let's keep
-	 * them here to prevent any subtle bug
+	 * We might also defer acquiring locks to precommit hook but let's keep
+	 * them here to prevent any subtle bug. We call
+	 * GetIcebergCatalogMetadataLocation() to acquire the necessary locks, not
+	 * for the actual metadata location as our serialization of iceberg
+	 * metadata changes relies on those locks.
 	 */
 	bool		forUpdate = true;
 
-	GetIcebergMetadataLocation(relationId, forUpdate);
+	GetIcebergCatalogMetadataLocation(relationId, forUpdate);
 
 	ListCell   *operationCell = NULL;
 

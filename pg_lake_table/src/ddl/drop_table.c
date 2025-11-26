@@ -463,7 +463,7 @@ MarkAllReferencedFilesForDeletion(Oid relationId)
 	TimestampTz orphanedAt = GetCurrentTransactionStartTimestamp();
 	char	   *metadataLocation = GetIcebergMetadataLocation(relationId, true);
 	MemoryContext savedContext = CurrentMemoryContext;
-	
+
 	List	   *allFiles = NIL;
 	volatile bool success = true;
 

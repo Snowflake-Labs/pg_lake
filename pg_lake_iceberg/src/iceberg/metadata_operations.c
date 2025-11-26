@@ -173,12 +173,16 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 	 * Although writable rest catalog iceberg tables have their metadata
 	 * location stored in the rest catalog itself, we still need to read the
 	 * pg_lake metadata as forUpdate=true acquires necessary locks to prevent
-	 * concurrent updates.
+	 * concurrent updates. To achieve this, we use
+	 * GetIcebergCatalogMetadataLocation function as that's the common
+	 * practice in the code.
 	 */
-	char	   *metadataPath = GetIcebergMetadataLocation(relationId, forUpdate);
+	char	   *metadataPath = GetIcebergCatalogMetadataLocation(relationId, forUpdate);
+
 	bool		createNewTable = HasCreateTableOperation(metadataOperations);
-	
+
 	IcebergTableMetadata *metadata = NULL;
+
 	if (createNewTable)
 	{
 		metadata = GenerateInitialIcebergTableMetadata(relationId);
@@ -205,6 +209,7 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 	}
 	else
 	{
+		metadataPath = GetIcebergMetadataLocation(relationId, false);
 		metadata = ReadIcebergTableMetadata(metadataPath);
 
 		prevLastUpdatedMs = metadata->last_updated_ms;

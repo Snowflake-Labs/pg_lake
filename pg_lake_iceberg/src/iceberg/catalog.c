@@ -33,7 +33,6 @@
 
 char	   *IcebergDefaultLocationPrefix = NULL;
 
-static char *GetIcebergCatalogMetadataLocation(Oid relationId, bool forUpdate);
 static char *GetIcebergExternalMetadataLocation(Oid relationId);
 static char *GetIcebergCatalogMetadataLocationInternal(Oid relationId, bool isPrevMetadata, bool forUpdate);
 static char *GetIcebergCatalogColumnInternal(Oid relationId, char *columnName, bool forUpdate, bool errorIfNotFound);
@@ -360,7 +359,37 @@ GetIcebergMetadataLocation(Oid relationId, bool forUpdate)
 
 	if (IsInternalIcebergTable(relationId))
 	{
-		return GetIcebergCatalogMetadataLocation(relationId, forUpdate);
+		IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
+
+		/*
+		 * We always get the metadata location from the iceberg catalog table
+		 * for internal iceberg tables.
+		 *
+		 * Writable rest catalog iceberg tables are a bit different. They are
+		 * internal iceberg tables, all their metadata is stored in our
+		 * catalogs, such as data files, column stats, etc. However, their
+		 * metadata location is stored in the rest catalog itself. So, we need
+		 * to fetch the metadata location from the rest catalog for those
+		 * tables, see below.
+		 *
+		 * But we still need to acquire locks on the iceberg catalog table row
+		 * for internal iceberg tables to prevent concurrent updates. So, we
+		 * call GetIcebergCatalogMetadataLocation().
+		 */
+		char	   *metadataLocation = GetIcebergCatalogMetadataLocation(relationId, forUpdate);
+
+		if (catalogType == REST_CATALOG_READ_WRITE)
+		{
+			/*
+			 * our internal catalog never stores metadata location for
+			 * writable rest catalog tables
+			 */
+			Assert(metadataLocation == NULL);
+
+			metadataLocation = GetIcebergExternalMetadataLocation(relationId);
+		}
+
+		return metadataLocation;
 	}
 	else
 	{
@@ -381,7 +410,7 @@ GetIcebergMetadataLocation(Oid relationId, bool forUpdate)
 * If the metadata row for the table is going to be updated, the caller should
 * pass forUpdate as true.
 */
-static char *
+char *
 GetIcebergCatalogMetadataLocation(Oid relationId, bool forUpdate)
 {
 	Assert(IsInternalIcebergTable(relationId));
@@ -402,7 +431,7 @@ GetIcebergExternalMetadataLocation(Oid relationId)
 
 	char	   *currentMetadataPath = NULL;
 
-	if (icebergCatalogType == REST_CATALOG_READ_ONLY)
+	if (icebergCatalogType == REST_CATALOG_READ_ONLY || icebergCatalogType == REST_CATALOG_READ_WRITE)
 	{
 		currentMetadataPath = GetMetadataLocationForRestCatalogForIcebergTable(relationId);
 	}
