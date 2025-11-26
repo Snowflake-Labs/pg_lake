@@ -415,6 +415,10 @@ def test_writable_rest_ddl(
     pg_conn.commit()
 
 
+@pytest.mark.parametrize(
+    "vacuum_syntax",
+    ["table", "iceberg"],
+)
 def test_writable_rest_vacuum(
     pg_conn,
     superuser_conn,
@@ -424,6 +428,7 @@ def test_writable_rest_vacuum(
     with_default_location,
     installcheck,
     create_http_helper_functions,
+    vacuum_syntax,
 ):
 
     if installcheck:
@@ -477,15 +482,25 @@ def test_writable_rest_vacuum(
         f"SELECT path FROM lake_engine.deletion_queue WHERE table_name = 'test_writable_rest_vacuum.writable_rest'::regclass",
         superuser_conn,
     )
-    assert len(file_paths_q) == 12
+    assert len(file_paths_q) == 17
 
-    run_command_outside_tx(
-        [
-            "SET pg_lake_engine.orphaned_file_retention_period TO 0",
-            f"VACUUM FULL test_writable_rest_vacuum.writable_rest",
-        ],
-        superuser_conn,
-    )
+    if vacuum_syntax == "table":
+        run_command_outside_tx(
+            [
+                "SET pg_lake_engine.orphaned_file_retention_period TO 0",
+                f"VACUUM FULL test_writable_rest_vacuum.writable_rest",
+            ],
+            superuser_conn,
+        )
+    else:
+        run_command_outside_tx(
+            [
+                "SET pg_lake_engine.orphaned_file_retention_period TO 0",
+                f"VACUUM (FULL, ICEBERG)",
+            ],
+            superuser_conn,
+        )
+
     file_paths_q = run_query(
         f"SELECT path FROM lake_engine.deletion_queue WHERE table_name = 'test_writable_rest_vacuum.writable_rest'::regclass",
         superuser_conn,
