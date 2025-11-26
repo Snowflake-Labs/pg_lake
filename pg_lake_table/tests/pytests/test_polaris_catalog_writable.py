@@ -2873,6 +2873,10 @@ def test_not_null_drop_and_add(
     set_polaris_gucs,
     create_http_helper_functions,
 ):
+
+    if installcheck:
+        return
+
     run_command("CREATE SCHEMA ddl_demo;", pg_conn)
 
     # Create table with NOT NULL column
@@ -3014,6 +3018,10 @@ def test_rest_rename_col(
     set_polaris_gucs,
     create_http_helper_functions,
 ):
+
+    if installcheck:
+        return
+
     run_command("CREATE SCHEMA ddl_demo;", pg_conn)
 
     # Create table with NOT NULL column
