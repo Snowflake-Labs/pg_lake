@@ -709,7 +709,8 @@ def test_writable_savepoints_truncate(
     installcheck,
     create_http_helper_functions,
 ):
-
+    if installcheck:
+        return
     run_command(f"""CREATE SCHEMA test_writable_savepoints_truncate""", pg_conn)
 
     run_command(
@@ -848,6 +849,8 @@ def test_complex_transaction(
     installcheck,
     create_http_helper_functions,
 ):
+    if installcheck:
+        return
     # ----- Setup: schema and tables -----
     run_command("DROP SCHEMA IF EXISTS tx_demo CASCADE;", pg_conn)
     run_command("CREATE SCHEMA tx_demo;", pg_conn)
@@ -1178,6 +1181,8 @@ def test_sequences_serial_and_generated_columns(
     create_http_helper_functions,
     catalog,
 ):
+    if installcheck:
+        return
     # ---------- Setup ----------
     run_command("DROP SCHEMA IF EXISTS seq_demo CASCADE;", pg_conn)
     run_command("CREATE SCHEMA seq_demo;", pg_conn)
@@ -1814,6 +1819,8 @@ def test_rest_iceberg_types_array(
     set_polaris_gucs,
     create_http_helper_functions,
 ):
+    if installcheck:
+        return
     run_command(
         """
                 CREATE SCHEMA test_iceberg_array_types;
@@ -2244,6 +2251,8 @@ def test_rest_iceberg_types_composite(
     set_polaris_gucs,
     create_http_helper_functions,
 ):
+    if installcheck:
+        return
     run_command(
         """
                 CREATE SCHEMA test_iceberg_composite_types;
@@ -2519,6 +2528,8 @@ def test_rest_iceberg_types_converted_to_string(
     set_polaris_gucs,
     create_http_helper_functions,
 ):
+    if installcheck:
+        return
     run_command("CREATE EXTENSION IF NOT EXISTS hstore;", pg_conn)
 
     run_command(
@@ -2664,6 +2675,8 @@ def test_rest_iceberg_map_type(
     set_polaris_gucs,
     create_http_helper_functions,
 ):
+    if installcheck:
+        return
     create_map_type("int", "text")
     run_command(
         """

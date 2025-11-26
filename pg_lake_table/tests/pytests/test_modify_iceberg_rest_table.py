@@ -28,6 +28,9 @@ def test_writable_iceberg_table(
     create_test_helper_functions,
     create_http_helper_functions,
 ):
+    if installcheck:
+        return
+
     # make sure that we can on iceberg tables with the
     # default value of the setting
     # note that we use non-default setting in the tests
