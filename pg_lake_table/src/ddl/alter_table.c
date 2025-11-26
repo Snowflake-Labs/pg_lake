@@ -18,6 +18,7 @@
 #include "postgres.h"
 #include "miscadmin.h"
 
+#include "access/heapam.h"
 #include "access/table.h"
 #include "access/tableam.h"
 #include "catalog/heap.h"
@@ -37,6 +38,7 @@
 #include "utils/rel.h"
 #include "utils/typcache.h"
 #include "utils/inval.h"
+#include "utils/fmgroids.h"
 
 #include "pg_lake/access_method/access_method.h"
 #include "pg_lake/data_file/data_files.h"
@@ -112,6 +114,8 @@ typedef struct PgLakeDDL
 static bool Allowed(Node *arg);
 static bool Disallowed(Node *arg);
 static bool DisallowedAddColumnWithUnsupportedConstraints(Node *arg);
+static bool DisallowedForWritableRestRenameTable(Node *arg);
+static bool DisallowedForWritableRestSetSchema(Node *arg);
 
 PgLakeAlterTableHookType PgLakeAlterTableHook = NULL;
 PgLakeAlterTableRenameColumnHookType PgLakeAlterTableRenameColumnHook = NULL;
@@ -171,10 +175,10 @@ static const PgLakeDDL PgLakeDDLs[] = {
 	ALTER_TABLE_DDL(AT_DisableTrigAll, Allowed, Allowed),
 	ALTER_TABLE_DDL(AT_EnableTrigUser, Allowed, Allowed),
 	ALTER_TABLE_DDL(AT_DisableTrigUser, Allowed, Allowed),
-	ALTER_SCHEMA_DDL(OBJECT_TABLE, Allowed, Allowed),
-	ALTER_SCHEMA_DDL(OBJECT_FOREIGN_TABLE, Allowed, Allowed),
-	RENAME_TABLE_DDL(OBJECT_TABLE, Allowed, Allowed),
-	RENAME_TABLE_DDL(OBJECT_FOREIGN_TABLE, Allowed, Allowed),
+	ALTER_SCHEMA_DDL(OBJECT_TABLE, DisallowedForWritableRestSetSchema, Allowed),
+	ALTER_SCHEMA_DDL(OBJECT_FOREIGN_TABLE, DisallowedForWritableRestRenameTable, Allowed),
+	RENAME_TABLE_DDL(OBJECT_TABLE, DisallowedForWritableRestRenameTable, Allowed),
+	RENAME_TABLE_DDL(OBJECT_FOREIGN_TABLE, DisallowedForWritableRestRenameTable, Allowed),
 };
 
 #define N_PG_LAKE_DDLS (sizeof(PgLakeDDLs) / sizeof(PgLakeDDLs[0]))
@@ -205,6 +209,8 @@ static bool HasPartitionByAdded(AlterTableStmt *alterStmt);
 static bool HasPartitionByDropped(AlterTableStmt *alterStmt);
 static bool HasOnlyCatalogAlterTableOptions(AlterTableStmt *alterStmt);
 static void ErrorIfUnsupportedTableOptionChange(AlterTableStmt *alterStmt, List *allowedOptions);
+static void ErrorIfAnyRestCatalogTablesInSchema(const char *schemaName);
+
 
 /*
  * ProcessAlterTable is used in cases where we want to preempt the error
@@ -610,6 +616,13 @@ PostProcessRenameWritablePgLakeTable(ProcessUtilityParams * params, void *arg)
 	}
 
 	RenameStmt *renameStmt = (RenameStmt *) plannedStmt->utilityStmt;
+
+	if (renameStmt->renameType == OBJECT_SCHEMA)
+	{
+		/* we are in post-process, use new name */
+		ErrorIfAnyRestCatalogTablesInSchema(renameStmt->newname);
+		return;
+	}
 
 	if (renameStmt->renameType != OBJECT_COLUMN &&
 		renameStmt->renameType != OBJECT_ATTRIBUTE &&
@@ -1028,6 +1041,58 @@ Disallowed(Node *arg)
 
 
 /*
+* We have not yet implemented table renames in REST catalog.
+*/
+static bool
+DisallowedForWritableRestRenameTable(Node *arg)
+{
+	RenameStmt *renameStmt = (RenameStmt *) arg;
+
+	/* only disallow RENAME TABLE/FOREIGN TABLE for writable rest catalog */
+	if (renameStmt->renameType == OBJECT_TABLE ||
+		renameStmt->renameType == OBJECT_FOREIGN_TABLE)
+	{
+
+		Oid			namespaceId =
+			RangeVarGetAndCheckCreationNamespace(renameStmt->relation, NoLock, NULL);
+
+		/* we are in the post-process, so should use new name */
+		const char *relationName = renameStmt->newname;
+
+		Oid			relationId = get_relname_relid(relationName, namespaceId);
+		IcebergCatalogType icebergCatalogType = GetIcebergCatalogType(relationId);
+
+		return (icebergCatalogType != REST_CATALOG_READ_WRITE);
+	}
+
+	return false;
+}
+
+/*
+* We have not yet implemented schema changes in REST catalog.
+*/
+static bool
+DisallowedForWritableRestSetSchema(Node *arg)
+{
+	AlterObjectSchemaStmt *alterSchemaStmt = (AlterObjectSchemaStmt *) arg;
+
+	Oid			namespaceId = get_namespace_oid(alterSchemaStmt->newschema, alterSchemaStmt->missing_ok);
+
+	/* if not validOid, let Postgres handle */
+	if (!OidIsValid(namespaceId))
+	{
+		return false;
+	}
+
+	Oid			relationId = get_relname_relid(alterSchemaStmt->relation->relname, namespaceId);
+
+	IcebergCatalogType icebergCatalogType = GetIcebergCatalogType(relationId);
+
+	return (icebergCatalogType != REST_CATALOG_READ_WRITE);
+}
+
+
+/*
  * ErrorIfUnsupportedSetAccessMethod checks ALTER TABLE on non-pg_lake
  * tables for possible issues involving Iceberg.
  */
@@ -1098,6 +1163,8 @@ DisallowedAddColumnWithUnsupportedConstraints(Node *arg)
 
 	return true;
 }
+
+
 
 /*
  * AlterTableAddColumnHasMutableDefault returns true if ALTER TABLE .. ADD COLUMN
@@ -1396,4 +1463,43 @@ HasPartitionByDropped(AlterTableStmt *alterStmt)
 	HasPartitionByChanged(alterStmt, &partitionByAdded, &partitionByDropped);
 
 	return partitionByDropped;
+}
+
+
+static void
+ErrorIfAnyRestCatalogTablesInSchema(const char *schemaName)
+{
+	Oid			namespaceId = get_namespace_oid(schemaName, false);
+
+	Relation	classRel = table_open(RelationRelationId, AccessShareLock);
+	HeapTuple	tuple;
+
+	ScanKeyData key[1];
+
+	ScanKeyInit(&key[0],
+				Anum_pg_class_relnamespace,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(namespaceId));
+
+	/* get all the relations present in the specified schema */
+	TableScanDesc scan = table_beginscan_catalog(classRel, 1, key);
+
+	while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
+	{
+		Form_pg_class relForm = (Form_pg_class) GETSTRUCT(tuple);
+		Oid			relid = relForm->oid;
+
+		IcebergCatalogType icebergCatalogType = GetIcebergCatalogType(relid);
+
+		if (icebergCatalogType == REST_CATALOG_READ_WRITE)
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot rename schema \"%s\" because it contains "
+							"an iceberg table with rest catalog \"%s\"", schemaName, get_rel_name(relid))));
+		}
+	}
+
+	table_endscan(scan);
+	table_close(classRel, AccessShareLock);
 }

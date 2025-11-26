@@ -11,7 +11,7 @@ from test_writable_iceberg_common import *
     "manifest_min_count_to_merge, target_manifest_size_kb, max_snapshot_age_params ",
     manifest_snapshot_settings,
 )
-def test_writable_iceberg_table(
+def test_writable_rest_iceberg_table(
     installcheck,
     install_iceberg_to_duckdb,
     spark_session,

@@ -2862,6 +2862,278 @@ def test_rest_iceberg_map_type(
     pg_conn.commit()
 
 
+def test_not_null_drop_and_add(
+    pg_conn,
+    installcheck,
+    s3,
+    extension,
+    create_types_helper_functions,
+    with_default_location,
+    polaris_session,
+    set_polaris_gucs,
+    create_http_helper_functions,
+):
+    run_command("CREATE SCHEMA ddl_demo;", pg_conn)
+
+    # Create table with NOT NULL column
+    run_command(
+        """
+        CREATE TABLE ddl_demo.nn_table (
+            id   INT NOT NULL,
+            name TEXT NOT NULL
+        ) USING iceberg WITH (catalog='rest');
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # get the metadata location from the catalog
+    metadata = get_rest_table_metadata("ddl_demo", "nn_table", pg_conn)
+    metadata_path = metadata["metadata-location"]
+
+    # make sure we write the version properly to the metadata.json
+    assert metadata_path.split("/")[-1].startswith("00000-")
+
+    data = read_s3_operations(s3, metadata_path)
+
+    # Parse the JSON data
+    parsed_data = json.loads(data)
+    # Access specific fields
+    fields = parsed_data["schemas"][0]["fields"]
+
+    expected_fields = [
+        {"id": 1, "name": "id", "required": True, "type": "int"},
+        {"id": 2, "name": "name", "required": True, "type": "string"},
+    ]
+
+    # Extract the actual fields from the parsed JSON data
+    actual_fields = fields
+
+    # Verify that the actual fields match the expected fields
+    assert len(actual_fields) == len(expected_fields), "Field count mismatch"
+
+    for expected, actual in zip(expected_fields, actual_fields):
+        assert (
+            expected["id"] == actual["id"]
+        ), f"ID mismatch: expected {expected['id']} but got {actual['id']}"
+        assert (
+            expected["name"] == actual["name"]
+        ), f"Name mismatch: expected {expected['name']} but got {actual['name']}"
+        assert (
+            expected["required"] == actual["required"]
+        ), f"Required mismatch: expected {expected['required']} but got {actual['required']}"
+
+        # Recursively compare the 'type' field
+        compare_fields(expected["type"], actual["type"])
+
+        if expected.get("write-default") is not None:
+            assert (
+                expected["write-default"] == actual["write-default"]
+            ), f"write-default mismatch: expected {expected['write-default']} but got {actual['write-default']}"
+        elif actual.get("write-default") is not None:
+            assert False, "unexpected write-default"
+
+    run_command(
+        """ 
+        ALTER TABLE ddl_demo.nn_table ALTER COLUMN name DROP NOT NULL,  ALTER COLUMN id DROP NOT NULL;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # get the metadata location from the catalog
+    metadata = get_rest_table_metadata("ddl_demo", "nn_table", pg_conn)
+    metadata_path = metadata["metadata-location"]
+
+    # make sure we write the version properly to the metadata.json
+    assert metadata_path.split("/")[-1].startswith("00001-")
+
+    data = read_s3_operations(s3, metadata_path)
+
+    # Parse the JSON data
+    parsed_data = json.loads(data)
+    # Access specific fields
+    fields = parsed_data["schemas"][1]["fields"]
+
+    expected_fields = [
+        {"id": 1, "name": "id", "required": False, "type": "int"},
+        {"id": 2, "name": "name", "required": False, "type": "string"},
+    ]
+
+    # Extract the actual fields from the parsed JSON data
+    actual_fields = fields
+
+    # Verify that the actual fields match the expected fields
+    assert len(actual_fields) == len(expected_fields), "Field count mismatch"
+
+    for expected, actual in zip(expected_fields, actual_fields):
+        assert (
+            expected["id"] == actual["id"]
+        ), f"ID mismatch: expected {expected['id']} but got {actual['id']}"
+        assert (
+            expected["name"] == actual["name"]
+        ), f"Name mismatch: expected {expected['name']} but got {actual['name']}"
+        assert (
+            expected["required"] == actual["required"]
+        ), f"Required mismatch: expected {expected['required']} but got {actual['required']}"
+
+        # Recursively compare the 'type' field
+        compare_fields(expected["type"], actual["type"])
+
+        if expected.get("write-default") is not None:
+            assert (
+                expected["write-default"] == actual["write-default"]
+            ), f"write-default mismatch: expected {expected['write-default']} but got {actual['write-default']}"
+        elif actual.get("write-default") is not None:
+            assert False, "unexpected write-default"
+
+    # sanity check
+    err = run_command(
+        """ 
+        ALTER TABLE ddl_demo.nn_table ALTER COLUMN name SET NOT NULL;
+        """,
+        pg_conn,
+        raise_error=False,
+    )
+
+    assert "SET NOT NULL command not supported for pg_lake_iceberg tables" in str(err)
+    pg_conn.rollback()
+
+    run_command("DROP SCHEMA ddl_demo CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_rest_rename_col(
+    pg_conn,
+    installcheck,
+    s3,
+    extension,
+    create_types_helper_functions,
+    with_default_location,
+    polaris_session,
+    set_polaris_gucs,
+    create_http_helper_functions,
+):
+    run_command("CREATE SCHEMA ddl_demo;", pg_conn)
+
+    # Create table with NOT NULL column
+    run_command(
+        """
+        CREATE TABLE ddl_demo.nn_table (
+            id   INT NOT NULL,
+            name TEXT NOT NULL
+        ) USING iceberg WITH (catalog='rest');
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        """ 
+        ALTER TABLE ddl_demo.nn_table RENAME COLUMN id TO id_new;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # get the metadata location from the catalog
+    metadata = get_rest_table_metadata("ddl_demo", "nn_table", pg_conn)
+    metadata_path = metadata["metadata-location"]
+
+    # make sure we write the version properly to the metadata.json
+    assert metadata_path.split("/")[-1].startswith("00001-")
+
+    data = read_s3_operations(s3, metadata_path)
+
+    # Parse the JSON data
+    parsed_data = json.loads(data)
+    # Access specific fields
+    fields = parsed_data["schemas"][1]["fields"]
+
+    expected_fields = [
+        {"id": 1, "name": "id_new", "required": True, "type": "int"},
+        {"id": 2, "name": "name", "required": True, "type": "string"},
+    ]
+
+    # Extract the actual fields from the parsed JSON data
+    actual_fields = fields
+
+    # Verify that the actual fields match the expected fields
+    assert len(actual_fields) == len(expected_fields), "Field count mismatch"
+
+    for expected, actual in zip(expected_fields, actual_fields):
+        assert (
+            expected["id"] == actual["id"]
+        ), f"ID mismatch: expected {expected['id']} but got {actual['id']}"
+        assert (
+            expected["name"] == actual["name"]
+        ), f"Name mismatch: expected {expected['name']} but got {actual['name']}"
+        assert (
+            expected["required"] == actual["required"]
+        ), f"Required mismatch: expected {expected['required']} but got {actual['required']}"
+
+        # Recursively compare the 'type' field
+        compare_fields(expected["type"], actual["type"])
+
+        if expected.get("write-default") is not None:
+            assert (
+                expected["write-default"] == actual["write-default"]
+            ), f"write-default mismatch: expected {expected['write-default']} but got {actual['write-default']}"
+        elif actual.get("write-default") is not None:
+            assert False, "unexpected write-default"
+
+    # rename table is disallowed
+    err = run_command(
+        "ALTER TABLE ddl_demo.nn_table RENAME TO nn_table_2", pg_conn, raise_error=False
+    )
+    assert "ALTER TABLE RENAME command not supported for pg_lake_iceberg tables" in str(
+        err
+    )
+    pg_conn.rollback()
+
+    err = run_command(
+        "ALTER FOREIGN TABLE ddl_demo.nn_table RENAME TO nn_table_2",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "ALTER TABLE RENAME command not supported for pg_lake_iceberg tables" in str(
+        err
+    )
+    pg_conn.rollback()
+
+    # set schema to a non-existing schema
+    err = run_command(
+        "ALTER TABLE ddl_demo.nn_table SET SCHEMA not_existing_schema",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "does not exist" in str(err)
+    pg_conn.rollback()
+
+    run_command("CREATE SCHEMA one_another_schema_for_ddl", pg_conn)
+    pg_conn.commit()
+    err = run_command(
+        "ALTER TABLE ddl_demo.nn_table SET SCHEMA one_another_schema_for_ddl",
+        pg_conn,
+        raise_error=False,
+    )
+    assert (
+        "ALTER TABLE SET SCHEMA command not supported for pg_lake_iceberg tables"
+        in str(err)
+    )
+    pg_conn.rollback()
+
+    # we cannot also rename ddl_demo as it contains at least one rest catalog table
+    err = run_command(
+        "ALTER SCHEMA ddl_demo RENAME TO ddl_demo_new", pg_conn, raise_error=False
+    )
+    assert "because it contains an iceberg table with rest catalog" in str(err)
+    pg_conn.rollback()
+
+    run_command("DROP SCHEMA ddl_demo, one_another_schema_for_ddl CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
 def assert_metadata_on_pg_catalog_and_rest_matches(
     namespace, table_name, superuser_conn
 ):
