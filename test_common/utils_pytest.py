@@ -1941,26 +1941,28 @@ def file_sort_key(file_entry):
 # then compare results
 # this should be called after VACUUM which triggers removal of
 # unreferenced files
-def assert_iceberg_s3_file_consistency(pg_conn, s3, table_namespace, table_name):
+def assert_iceberg_s3_file_consistency(pg_conn, s3, table_namespace, table_name, metadata_location=None, current_metadata_path=None, prev_metadata_path=None):
 
     files_via_s3_list = iceberg_s3_list_all_files_for_table(
-        pg_conn, s3, table_namespace, table_name
+        pg_conn, s3, table_namespace, table_name, metadata_location
     )
 
-    current_metadata_location = run_query(
-        f"SELECT metadata_location FROM iceberg_tables WHERE table_name = '{table_name}' and table_namespace = '{table_namespace}'",
-        pg_conn,
-    )[0][0]
+    if current_metadata_path is None:
+        current_metadata_path = run_query(
+            f"SELECT metadata_location FROM iceberg_tables WHERE table_name = '{table_name}' and table_namespace = '{table_namespace}'",
+            pg_conn,
+        )[0][0]
     files_via_current_iceberg_metadata = iceberg_get_referenced_files_metadata_path(
-        pg_conn, current_metadata_location
+        pg_conn, current_metadata_path
     )
 
-    prev_metadata_location = run_query(
-        f"SELECT previous_metadata_location FROM iceberg_tables WHERE table_name = '{table_name}' and table_namespace = '{table_namespace}'",
-        pg_conn,
-    )[0][0]
-    if prev_metadata_location:
-        files_via_current_iceberg_metadata.append(prev_metadata_location)
+    if prev_metadata_path is None:
+        prev_metadata_path = run_query(
+            f"SELECT previous_metadata_location FROM iceberg_tables WHERE table_name = '{table_name}' and table_namespace = '{table_namespace}'",
+            pg_conn,
+        )[0][0]
+    if prev_metadata_path:
+        files_via_current_iceberg_metadata.append(prev_metadata_path)
 
     # Apply normalization
     normalized_s3 = set([normalize_dictrow(row) for row in files_via_s3_list])
@@ -2002,20 +2004,22 @@ def iceberg_get_referenced_files_metadata_path(pg_conn, metadata_location):
     return referenced_files
 
 
-def iceberg_s3_list_all_files_for_table(pg_conn, s3, table_namespace, table_name):
+def iceberg_s3_list_all_files_for_table(pg_conn, s3, table_namespace, table_name, table_location=None):
 
-    metadata_location = run_query(
-        f"SELECT metadata_location FROM iceberg_tables WHERE table_name = '{table_name}' and table_namespace = '{table_namespace}'",
-        pg_conn,
-    )[0][0]
-    metadata_json = read_s3_operations(s3, metadata_location)
-    metadata_json = json.loads(metadata_json)
-    table_location = metadata_json["location"]
+    if table_location is None:
+        metadata_location = run_query(
+            f"SELECT metadata_location FROM iceberg_tables WHERE table_name = '{table_name}' and table_namespace = '{table_namespace}'",
+            pg_conn,
+        )[0][0]
+        metadata_json = read_s3_operations(s3, metadata_location)
+        metadata_json = json.loads(metadata_json)
+        table_location = metadata_json["location"]
 
     all_files = run_query(
         f"SELECT path FROM lake_file.list('{table_location}/**')", pg_conn
     )
-
+    print("iceberg_s3_list_all_files_for_table: table_location=", table_location)
+    print("iceberg_s3_list_all_files_for_table: all_files=", all_files)
     return all_files
 
 
@@ -2139,7 +2143,6 @@ def installcheck(request):
 def isolationtester(request):
     return request.config.getoption("--isolationtester")
 
-
 def compare_results_with_reference_iceberg_implementations(
     installcheck,
     pg_conn,
@@ -2148,16 +2151,20 @@ def compare_results_with_reference_iceberg_implementations(
     table_name,
     table_namespace,
     query,
+    metadata_location = None,
 ):
-
-    if table_namespace is not None:
-        get_metadata_location_query = f"SELECT metadata_location FROM iceberg_tables WHERE table_name = '{table_name}' and table_namespace = '{table_namespace}'"
-        metadata_location = run_query(get_metadata_location_query, pg_conn)[0][0]
+    if metadata_location is not None:
+        # already provided
+        pass
     else:
-        get_metadata_location_query = f"SELECT metadata_location FROM iceberg_tables WHERE table_name = '{table_name}'"
-        locations = run_query(get_metadata_location_query, pg_conn)
-        assert len(locations) == 1, "use a different table name"
-        metadata_location = locations[0][0]
+        if table_namespace is not None:
+            get_metadata_location_query = f"SELECT metadata_location FROM iceberg_tables WHERE table_name = '{table_name}' and table_namespace = '{table_namespace}'"
+            metadata_location = run_query(get_metadata_location_query, pg_conn)[0][0]
+        else:
+            get_metadata_location_query = f"SELECT metadata_location FROM iceberg_tables WHERE table_name = '{table_name}'"
+            locations = run_query(get_metadata_location_query, pg_conn)
+            assert len(locations) == 1, "use a different table name"
+            metadata_location = locations[0][0]
 
     if spark_session is not None:
         compare_results_with_pyspark(

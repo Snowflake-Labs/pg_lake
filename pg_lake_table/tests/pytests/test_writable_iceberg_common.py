@@ -223,3 +223,45 @@ def create_iceberg_table(pg_conn, with_default_location, generate_table_name):
         f"DROP SCHEMA {TABLE_NAMESPACE}, {TABLE_NAMESPACE}_tmp CASCADE", pg_conn
     )
     pg_conn.commit()
+
+
+@pytest.fixture
+def create_iceberg_rest_table(
+    pg_conn,
+    with_default_location,
+    generate_table_name,
+    polaris_session,
+    set_polaris_gucs,
+):
+    table_name = generate_table_name  # Get the generated table name
+
+    # Create schema and table
+    run_command(f"CREATE SCHEMA {TABLE_NAMESPACE}", pg_conn)
+    run_command(
+        f"CREATE TABLE {TABLE_NAMESPACE}.{table_name} (drop_col_1 INT, id_old bigint, drop_col_2 INT) USING iceberg WITH (catalog='rest')",
+        pg_conn,
+    )
+
+    # adding/dropping column triggers a new schema generation, so make the test
+    # slightly more complicated
+    run_command(
+        f"ALTER TABLE {TABLE_NAMESPACE}.{table_name} DROP COLUMN drop_col_2, ADD COLUMN value text, DROP COLUMN drop_col_1",
+        pg_conn,
+    )
+    run_command(
+        f"ALTER TABLE {TABLE_NAMESPACE}.{table_name} RENAME COLUMN id_old TO id",
+        pg_conn,
+    )
+    run_command(
+        f"ALTER FOREIGN TABLE {TABLE_NAMESPACE}.{table_name} OPTIONS (ADD autovacuum_enabled 'false')",
+        pg_conn,
+    )
+
+    pg_conn.commit()
+
+    yield table_name  # Yield the table name for further operations in the test
+
+    # Rollback and clean up after test
+    pg_conn.rollback()
+    run_command(f"DROP SCHEMA {TABLE_NAMESPACE} CASCADE", pg_conn)
+    pg_conn.commit()

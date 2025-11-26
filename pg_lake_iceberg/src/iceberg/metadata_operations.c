@@ -321,6 +321,9 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 
 	if (writableRestCatalogTable)
 	{
+		if (metadataPath)
+			InsertDeletionQueueRecord(metadataPath, relationId, GetCurrentTransactionStartTimestamp());
+
 		/*
 		 * We are done, writable rest catalog iceberg tables have their
 		 * metadata updated in the catalog itself.
