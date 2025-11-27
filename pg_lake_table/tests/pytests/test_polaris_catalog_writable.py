@@ -3142,6 +3142,629 @@ def test_rest_rename_col(
     pg_conn.commit()
 
 
+def test_add_drop_columns(
+    pg_conn,
+    superuser_conn,
+    installcheck,
+    s3,
+    extension,
+    create_types_helper_functions,
+    with_default_location,
+    polaris_session,
+    set_polaris_gucs,
+    create_http_helper_functions,
+):
+    if installcheck:
+        return
+    run_command("CREATE SCHEMA ddl_demo;", pg_conn)
+    run_command(
+        """
+        CREATE TABLE ddl_demo.ad_table (
+            id INT,
+            val TEXT
+        ) USING iceberg WITH (catalog='rest');
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # Insert some rows
+    run_command(
+        """
+        INSERT INTO ddl_demo.ad_table (id, val)
+        VALUES (1, 'a'), (2, 'b');
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    rows = run_query(
+        """
+        SELECT id, val FROM ddl_demo.ad_table ORDER BY id;
+    """,
+        pg_conn,
+    )
+    assert rows == [
+        [1, "a"],
+        [2, "b"],
+    ]
+
+    # Add a new column (no default)
+    run_command(
+        """
+        ALTER TABLE ddl_demo.ad_table
+        ADD COLUMN extra INT;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    rows = run_query(
+        """
+        SELECT id, val, extra FROM ddl_demo.ad_table ORDER BY id;
+    """,
+        pg_conn,
+    )
+    # Existing rows get NULL in the new column
+    assert rows == [
+        [1, "a", None],
+        [2, "b", None],
+    ]
+
+    # Update new column a bit
+    run_command(
+        """
+        UPDATE ddl_demo.ad_table
+        SET extra = 10
+        WHERE id = 1;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    rows = run_query(
+        """
+        SELECT id, val, extra FROM ddl_demo.ad_table ORDER BY id;
+    """,
+        pg_conn,
+    )
+    assert rows == [
+        [1, "a", 10],
+        [2, "b", None],
+    ]
+
+    # Now drop the column again
+    run_command(
+        """
+        ALTER TABLE ddl_demo.ad_table
+        DROP COLUMN val;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    rows = run_query(
+        """
+        SELECT id, extra FROM ddl_demo.ad_table ORDER BY id;
+    """,
+        pg_conn,
+    )
+    # Data in original columns is still correct
+    assert rows == [
+        [1, 10],
+        [2, None],
+    ]
+
+    run_command("DROP SCHEMA ddl_demo CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_add_column_with_check_constraint(
+    pg_conn,
+    superuser_conn,
+    installcheck,
+    s3,
+    extension,
+    create_types_helper_functions,
+    with_default_location,
+    polaris_session,
+    set_polaris_gucs,
+    create_http_helper_functions,
+):
+    if installcheck:
+        return
+
+    run_command("CREATE SCHEMA ddl_demo;", pg_conn)
+
+    run_command(
+        """
+        CREATE TABLE ddl_demo.check_table (
+            id INT, amount INT
+        ) USING iceberg WITH (catalog='rest');
+    """,
+        pg_conn,
+    )
+
+    # Initial data
+    run_command(
+        """
+        INSERT INTO ddl_demo.check_table (id)
+        VALUES (1), (2);
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    rows = run_query(
+        "SELECT id, amount FROM ddl_demo.check_table ORDER BY id;",
+        pg_conn,
+    )
+    assert rows == [
+        [1, None],
+        [2, None],
+    ]
+
+    # Add column with CHECK constraint
+    run_command(
+        """
+        ALTER TABLE ddl_demo.check_table
+        ADD CONSTRAINT my_table_amount_check CHECK (amount >= 0);
+    """,
+        pg_conn,
+    )
+
+    # Existing rows get NULL (NULL passes CHECK)
+    rows = run_query(
+        "SELECT id, amount FROM ddl_demo.check_table ORDER BY id;",
+        pg_conn,
+    )
+    assert rows == [
+        [1, None],
+        [2, None],
+    ]
+
+    # Insert valid row
+    run_command(
+        """
+        INSERT INTO ddl_demo.check_table (id, amount)
+        VALUES (3, 10);
+    """,
+        pg_conn,
+    )
+
+    rows = run_query(
+        "SELECT id, amount FROM ddl_demo.check_table ORDER BY id;",
+        pg_conn,
+    )
+    assert rows == [
+        [1, None],
+        [2, None],
+        [3, 10],
+    ]
+
+    # Insert invalid row
+    err = run_command(
+        """
+        INSERT INTO ddl_demo.check_table (id, amount)
+        VALUES (3, -10);
+    """,
+        pg_conn,
+        raise_error=False,
+    )
+    assert "violates check constraint" in str(err)
+    pg_conn.rollback()
+
+    assert_metadata_on_pg_catalog_and_rest_matches(
+        "ddl_demo", "check_table", superuser_conn
+    )
+
+    run_command("DROP SCHEMA ddl_demo CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_rest_add_column_with_default_and_drop_default(
+    pg_conn,
+    superuser_conn,
+    installcheck,
+    s3,
+    extension,
+    create_types_helper_functions,
+    with_default_location,
+    polaris_session,
+    set_polaris_gucs,
+    create_http_helper_functions,
+):
+
+    if installcheck:
+        return
+
+    run_command("CREATE SCHEMA ddl_demo;", pg_conn)
+    run_command(
+        """
+        CREATE TABLE ddl_demo.default_table (
+            id INT
+        ) USING iceberg WITH (catalog='rest');
+    """,
+        pg_conn,
+    )
+
+    # Initial rows
+    run_command(
+        """
+        INSERT INTO ddl_demo.default_table (id)
+        VALUES (1), (2);
+    """,
+        pg_conn,
+    )
+
+    rows = run_query(
+        "SELECT id FROM ddl_demo.default_table ORDER BY id;",
+        pg_conn,
+    )
+    assert rows == [
+        [1],
+        [2],
+    ]
+    pg_conn.commit()
+
+    # Iceberg V2 (and hence the current versions of Polaris)
+    # does not support
+    err = run_command(
+        """
+        ALTER TABLE ddl_demo.default_table
+        ADD COLUMN status TEXT DEFAULT 'new';
+    """,
+        pg_conn,
+        raise_error=False,
+    )
+    assert "ALTER TABLE ADD COLUMN command not supported" in str(err)
+    pg_conn.rollback()
+
+    run_command("DROP SCHEMA ddl_demo CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_set_default_on_one_column_drop_default_on_another(
+    pg_conn,
+    superuser_conn,
+    installcheck,
+    s3,
+    extension,
+    create_types_helper_functions,
+    with_default_location,
+    polaris_session,
+    set_polaris_gucs,
+    create_http_helper_functions,
+):
+
+    if installcheck:
+        return
+
+    run_command("CREATE SCHEMA ddl_demo;", pg_conn)
+
+    run_command(
+        """
+        CREATE TABLE ddl_demo.mixed_default_table (
+            col_with_default    INT DEFAULT 42,
+            col_without_default INT
+        ) USING iceberg WITH (catalog='rest');
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # Set DEFAULT on the first column
+    run_command(
+        """
+        ALTER TABLE ddl_demo.mixed_default_table
+        ALTER COLUMN col_without_default SET DEFAULT 43;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # Drop DEFAULT on the second column (even though it has none)
+    # This should be a no-op and must not fail
+    run_command(
+        """
+        ALTER TABLE ddl_demo.mixed_default_table
+        ALTER COLUMN col_with_default DROP DEFAULT;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # get the metadata location from the catalog
+    metadata = get_rest_table_metadata("ddl_demo", "mixed_default_table", pg_conn)
+    metadata_path = metadata["metadata-location"]
+
+    # make sure we write the version properly to the metadata.json
+    assert metadata_path.split("/")[-1].startswith("00002-")
+
+    data = read_s3_operations(s3, metadata_path)
+
+    # Parse the JSON data
+    parsed_data = json.loads(data)
+    # Access specific fields
+    fields = parsed_data["schemas"][2]["fields"]
+
+    expected_fields = [
+        {"id": 1, "name": "col_with_default", "required": False, "type": "int"},
+        {
+            "id": 2,
+            "name": "col_without_default",
+            "required": False,
+            "type": "int",
+            "write-default": 43,
+        },
+    ]
+
+    # Extract the actual fields from the parsed JSON data
+    actual_fields = fields
+
+    # Verify that the actual fields match the expected fields
+    assert len(actual_fields) == len(expected_fields), "Field count mismatch"
+
+    for expected, actual in zip(expected_fields, actual_fields):
+        assert (
+            expected["id"] == actual["id"]
+        ), f"ID mismatch: expected {expected['id']} but got {actual['id']}"
+        assert (
+            expected["name"] == actual["name"]
+        ), f"Name mismatch: expected {expected['name']} but got {actual['name']}"
+        assert (
+            expected["required"] == actual["required"]
+        ), f"Required mismatch: expected {expected['required']} but got {actual['required']}"
+
+        # Recursively compare the 'type' field
+        compare_fields(expected["type"], actual["type"])
+
+        if expected.get("write-default") is not None:
+            assert (
+                expected["write-default"] == actual["write-default"]
+            ), f"write-default mismatch: expected {expected['write-default']} but got {actual['write-default']}"
+        elif actual.get("write-default") is not None:
+            assert False, "unexpected write-default"
+
+    run_command("DROP SCHEMA ddl_demo CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+# TODO: If you re-use the same schema, Polaris expects
+# you to provide the same `schema-id` with the previous schema
+# So, if we do `alter table .. add column a` followed by
+# `alter table .. drop column a`, we are back with the same schema, but
+# we don't provide the same schema-id, hence breaking the REST catalog
+# remove `no` prefix once that is fixed
+def no_test_add_drop_same_schema_breaks(
+    pg_conn,
+    installcheck,
+    s3,
+    extension,
+    create_types_helper_functions,
+    with_default_location,
+    polaris_session,
+    set_polaris_gucs,
+    create_http_helper_functions,
+):
+    if installcheck:
+        return
+
+    run_command("CREATE SCHEMA ddl_demo;", pg_conn)
+    run_command(
+        """
+        CREATE TABLE ddl_demo.ad_table (
+            id INT,
+            val TEXT
+        ) USING iceberg WITH (catalog='rest');
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+    metadata = get_rest_table_metadata("ddl_demo", "ad_table", pg_conn)
+    metadata_path = metadata["metadata-location"]
+    print(metadata_path)
+
+    # Insert some rows
+    run_command(
+        """
+        INSERT INTO ddl_demo.ad_table (id, val)
+        VALUES (1, 'a'), (2, 'b');
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    metadata = get_rest_table_metadata("ddl_demo", "ad_table", pg_conn)
+    metadata_path = metadata["metadata-location"]
+    print(metadata_path)
+
+    rows = run_query(
+        """
+        SELECT id, val FROM ddl_demo.ad_table ORDER BY id;
+    """,
+        pg_conn,
+    )
+    assert rows == [
+        [1, "a"],
+        [2, "b"],
+    ]
+
+    # Add a new column (no default)
+    run_command(
+        """
+        ALTER TABLE ddl_demo.ad_table
+        ADD COLUMN extra INT;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    metadata = get_rest_table_metadata("ddl_demo", "ad_table", pg_conn)
+    metadata_path = metadata["metadata-location"]
+    print(metadata_path)
+
+    rows = run_query(
+        """
+        SELECT id, val, extra FROM ddl_demo.ad_table ORDER BY id;
+    """,
+        pg_conn,
+    )
+    # Existing rows get NULL in the new column
+    assert rows == [
+        [1, "a", None],
+        [2, "b", None],
+    ]
+
+    # Update new column a bit
+    run_command(
+        """
+        UPDATE ddl_demo.ad_table
+        SET extra = 10
+        WHERE id = 1;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    metadata = get_rest_table_metadata("ddl_demo", "ad_table", pg_conn)
+    metadata_path = metadata["metadata-location"]
+    print(metadata_path)
+
+    rows = run_query(
+        """
+        SELECT id, val, extra FROM ddl_demo.ad_table ORDER BY id;
+    """,
+        pg_conn,
+    )
+    assert rows == [
+        [1, "a", 10],
+        [2, "b", None],
+    ]
+
+    # Now drop the column again
+    run_command(
+        """
+        ALTER TABLE ddl_demo.ad_table
+        DROP COLUMN extra;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    metadata = get_rest_table_metadata("ddl_demo", "ad_table", pg_conn)
+    metadata_path = metadata["metadata-location"]
+    print(metadata_path)
+
+    rows = run_query(
+        """
+        SELECT id, val FROM ddl_demo.ad_table ORDER BY id;
+    """,
+        pg_conn,
+    )
+    # Data in original columns is still correct
+    assert rows == [
+        [1, "a"],
+        [2, "b"],
+    ]
+
+    run_command("DROP SCHEMA ddl_demo CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+# the comments in no_test_add_drop_same_schema_breaks applies as-is
+def no_test_rest_rename_col_same_name(
+    pg_conn,
+    installcheck,
+    s3,
+    extension,
+    create_types_helper_functions,
+    with_default_location,
+    polaris_session,
+    set_polaris_gucs,
+    create_http_helper_functions,
+):
+
+    if installcheck:
+        return
+
+    run_command("CREATE SCHEMA ddl_demo;", pg_conn)
+
+    # Create table with NOT NULL column
+    run_command(
+        """
+        CREATE TABLE ddl_demo.nn_table (
+            id   INT NOT NULL,
+            name TEXT NOT NULL
+        ) USING iceberg WITH (catalog='rest');
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        """ 
+        ALTER TABLE ddl_demo.nn_table RENAME COLUMN id TO id_new;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        """ ALTER TABLE ddl_demo.nn_table RENAME COLUMN id_new TO id;""", pg_conn
+    )
+    pg_conn.commit()
+
+    # get the metadata location from the catalog
+    metadata = get_rest_table_metadata("ddl_demo", "nn_table", pg_conn)
+    metadata_path = metadata["metadata-location"]
+
+    # make sure we write the version properly to the metadata.json
+    assert metadata_path.split("/")[-1].startswith("00001-")
+
+    data = read_s3_operations(s3, metadata_path)
+
+    # Parse the JSON data
+    parsed_data = json.loads(data)
+    # Access specific fields
+    fields = parsed_data["schemas"][1]["fields"]
+
+    expected_fields = [
+        {"id": 1, "name": "id", "required": True, "type": "int"},
+        {"id": 2, "name": "name", "required": True, "type": "string"},
+    ]
+
+    # Extract the actual fields from the parsed JSON data
+    actual_fields = fields
+
+    # Verify that the actual fields match the expected fields
+    assert len(actual_fields) == len(expected_fields), "Field count mismatch"
+
+    for expected, actual in zip(expected_fields, actual_fields):
+        assert (
+            expected["id"] == actual["id"]
+        ), f"ID mismatch: expected {expected['id']} but got {actual['id']}"
+        assert (
+            expected["name"] == actual["name"]
+        ), f"Name mismatch: expected {expected['name']} but got {actual['name']}"
+        assert (
+            expected["required"] == actual["required"]
+        ), f"Required mismatch: expected {expected['required']} but got {actual['required']}"
+
+        # Recursively compare the 'type' field
+        compare_fields(expected["type"], actual["type"])
+
+        if expected.get("write-default") is not None:
+            assert (
+                expected["write-default"] == actual["write-default"]
+            ), f"write-default mismatch: expected {expected['write-default']} but got {actual['write-default']}"
+        elif actual.get("write-default") is not None:
+            assert False, "unexpected write-default"
+
+    run_command("DROP SCHEMA ddl_demo CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
 def assert_metadata_on_pg_catalog_and_rest_matches(
     namespace, table_name, superuser_conn
 ):

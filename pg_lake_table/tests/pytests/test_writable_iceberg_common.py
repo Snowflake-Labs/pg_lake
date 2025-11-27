@@ -232,7 +232,10 @@ def create_iceberg_rest_table(
     generate_table_name,
     polaris_session,
     set_polaris_gucs,
+    installcheck,
 ):
+    if installcheck:
+        return
     table_name = generate_table_name  # Get the generated table name
 
     # Create schema and table
