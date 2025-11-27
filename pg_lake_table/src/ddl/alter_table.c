@@ -205,6 +205,7 @@ static bool HasPartitionByAdded(AlterTableStmt *alterStmt);
 static bool HasPartitionByDropped(AlterTableStmt *alterStmt);
 static bool HasOnlyCatalogAlterTableOptions(AlterTableStmt *alterStmt);
 static void ErrorIfUnsupportedTableOptionChange(AlterTableStmt *alterStmt, List *allowedOptions);
+static void ErrorIfAlterReadOnlyIcebergTable(Oid relationId);
 
 /*
  * ProcessAlterTable is used in cases where we want to preempt the error
@@ -228,8 +229,7 @@ ProcessAlterTable(ProcessUtilityParams * processUtilityParams, void *arg)
 
 	Oid			relationId = AlterTableLookupRelation(alterStmt, NoLock);
 
-	if (!IsWritablePgLakeTable(relationId) &&
-		!IsPgLakeIcebergForeignTableById(relationId))
+	if (!IsWritablePgLakeTable(relationId) && !IsIcebergTable(relationId))
 	{
 		/* for non-pg_lake tables, error when using SET ACCESS METHOD iceberg */
 		ErrorIfUnsupportedSetAccessMethod(alterStmt);
@@ -272,8 +272,7 @@ ProcessAlterTable(ProcessUtilityParams * processUtilityParams, void *arg)
 
 	}
 
-	/* check whether we are accepting writes for this table */
-	ErrorIfReadOnlyIcebergTable(relationId);
+	ErrorIfAlterReadOnlyIcebergTable(relationId);
 
 	ErrorIfUnsupportedTypeAddedForIcebergTables(alterStmt);
 
@@ -634,13 +633,12 @@ PostProcessRenameWritablePgLakeTable(ProcessUtilityParams * params, void *arg)
 
 	Oid			relationId = get_relname_relid(relationName, namespaceId);
 
-	if (!IsWritablePgLakeTable(relationId) &&
-		!IsPgLakeIcebergForeignTableById(relationId))
+	if (!IsWritablePgLakeTable(relationId) && !IsIcebergTable(relationId))
 	{
 		return;
 	}
 
-	ErrorIfReadOnlyIcebergTable(relationId);
+	ErrorIfAlterReadOnlyIcebergTable(relationId);
 
 	PgLakeTableType tableType = GetPgLakeTableType(relationId);
 
@@ -706,13 +704,12 @@ PostProcessAlterWritablePgLakeTableSchema(ProcessUtilityParams * params, void *a
 
 	Oid			relationId = get_relname_relid(alterSchemaStmt->relation->relname, namespaceId);
 
-	if (!IsWritablePgLakeTable(relationId) &&
-		!IsPgLakeIcebergForeignTableById(relationId))
+	if (!IsWritablePgLakeTable(relationId) && !IsIcebergTable(relationId))
 	{
 		return;
 	}
 
-	ErrorIfReadOnlyIcebergTable(relationId);
+	ErrorIfAlterReadOnlyIcebergTable(relationId);
 
 	PgLakeTableType tableType = GetPgLakeTableType(relationId);
 
@@ -1367,6 +1364,20 @@ ErrorIfUnsupportedTableOptionChange(AlterTableStmt *alterStmt, List *allowedOpti
 	}
 }
 
+
+/*
+ * ErrorIfAlterReadOnlyIcebergTable throws an error if an attempt is made to
+ * alter a read-only lake table.
+ */
+static void
+ErrorIfAlterReadOnlyIcebergTable(Oid relationId)
+{
+	if (IsReadOnlyIcebergTable(relationId))
+	{
+		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg("ALTER TABLE is not supported for read-only iceberg tables")));
+	}
+}
 
 
 /*
