@@ -52,6 +52,7 @@
 #include "utils/typcache.h"
 
 static PgLakeTableScan * CreateTableScanForRelation(Oid relationId,
+													Snapshot snapshot,
 													int uniqueRelationIdentifier,
 													List *baseRestrictInfoList,
 													bool includeChildren,
@@ -81,6 +82,13 @@ CreatePgLakeScanSnapshot(List *rteList,
 						 bool includeChildren,
 						 Oid resultRelationId)
 {
+	/*
+	 * Make sure: a) We see the concurrent changes that might have happened on
+	 * the data_files catalog b) We have a consistent view of multiple tables
+	 * if the query involves multiple tables.
+	 */
+	Snapshot	postgresSnapshot = GetTransactionSnapshot();
+
 	List	   *tableScans = NIL;
 
 	ListCell   *relationCell = NULL;
@@ -116,7 +124,8 @@ CreatePgLakeScanSnapshot(List *rteList,
 		}
 
 		PgLakeTableScan *tableScan =
-			CreateTableScanForRelation(relationId, uniqueRelationIdentifier,
+			CreateTableScanForRelation(relationId, postgresSnapshot,
+									   uniqueRelationIdentifier,
 									   baseRestrictInfoList,
 									   includeChildren && rte->inh,
 									   isResultRelation);
@@ -174,7 +183,7 @@ GetBaseRestrictInfoForRelation(List *relationRestrictionsList, int uniqueRelatio
  * CreateTableScanForRelation creates a table scan for the given relation.
  */
 static PgLakeTableScan *
-CreateTableScanForRelation(Oid relationId, int uniqueRelationIdentifier, List *baseRestrictInfoList,
+CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelationIdentifier, List *baseRestrictInfoList,
 						   bool includeChildren, bool isResultRelation)
 {
 	List	   *fileScans = NIL;
@@ -187,7 +196,6 @@ CreateTableScanForRelation(Oid relationId, int uniqueRelationIdentifier, List *b
 		 * We'll calculate the deletion files based on the pruned data files
 		 * using the same snapshot.
 		 */
-		Snapshot	snapshot = GetActiveSnapshot();
 		bool		dataOnly = true;
 		bool		newFilesOnly = false;
 		List	   *dataFiles =
@@ -317,7 +325,8 @@ CreateTableScanForRelation(Oid relationId, int uniqueRelationIdentifier, List *b
 			 * hierarchy?
 			 */
 			PgLakeTableScan *childScan =
-				CreateTableScanForRelation(childId, childRelationIdentifier,
+				CreateTableScanForRelation(childId, snapshot,
+										   childRelationIdentifier,
 										   baseRestrictInfoList,
 										   includeChildren,
 										   isResultRelation);

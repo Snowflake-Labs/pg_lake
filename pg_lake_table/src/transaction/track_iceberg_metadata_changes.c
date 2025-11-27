@@ -511,7 +511,7 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 	bool		newFilesOnly = false;
 	bool		forUpdate = false;
 	char	   *orderBy = NULL;
-	Snapshot	snapshot = GetActiveSnapshot();
+	Snapshot	snapshot = GetTransactionSnapshot();
 
 	HTAB	   *currentFilesMap = GetTableDataFilesByPathHashFromCatalog(opTracker->relationId, dataOnly, newFilesOnly,
 																		 forUpdate, orderBy, snapshot, allTransforms);
