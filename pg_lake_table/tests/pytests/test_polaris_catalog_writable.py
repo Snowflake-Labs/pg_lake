@@ -3530,6 +3530,69 @@ def test_set_default_on_one_column_drop_default_on_another(
     pg_conn.commit()
 
 
+def test_rest_autovacuum(
+    pg_conn,
+    superuser_conn,
+    installcheck,
+    s3,
+    extension,
+    create_types_helper_functions,
+    with_default_location,
+    polaris_session,
+    set_polaris_gucs,
+    create_http_helper_functions,
+    set_auto_vacuum_params,
+):
+
+    if installcheck:
+        return
+
+    # make sure that there are frequent enough autovacuum
+    result = run_query(
+        """
+        SELECT current_setting('pg_lake_iceberg.autovacuum_naptime');
+    """,
+        pg_conn,
+    )
+    assert result[0][0] == "1s"
+
+    run_command("CREATE SCHEMA test_rest_autovacuum;", pg_conn)
+    run_command(
+        "CREATE TABLE test_rest_autovacuum.test_rest_autovacuum(a int) USING iceberg WITH (catalog='rest')",
+        pg_conn,
+    )
+
+    for i in range(0, 6):
+        run_command(
+            "INSERT INTO test_rest_autovacuum.test_rest_autovacuum VALUES (1)", pg_conn
+        )
+        pg_conn.commit()
+
+    # wait at most 5 seconds
+    compacted = False
+    for i in range(0, 5):
+        metadata = get_rest_table_metadata(
+            "test_rest_autovacuum", "test_rest_autovacuum", pg_conn
+        )
+        metadata_path = metadata["metadata-location"]
+
+        result = run_query(
+            f"""
+            SELECT count(*) FROM lake_iceberg.files('{metadata_path}')
+        """,
+            pg_conn,
+        )
+        if result[0][0] == 1:
+            compacted = True
+            break
+        else:
+            run_command("SELECT pg_sleep(1)", pg_conn)
+
+    assert compacted, "autovacuum failed on rest catalog table"
+    run_command("DROP SCHEMA test_rest_autovacuum CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
 # TODO: If you re-use the same schema, Polaris expects
 # you to provide the same `schema-id` with the previous schema
 # So, if we do `alter table .. add column a` followed by
@@ -4422,3 +4485,25 @@ def compare_fields(expected, actual):
         assert (
             expected == actual
         ), f"Value mismatch: expected {expected} but got {actual}"
+
+
+# run tests faster
+@pytest.fixture(autouse=True, scope="function")
+def set_auto_vacuum_params(superuser_conn):
+    run_command_outside_tx(
+        [
+            "ALTER SYSTEM SET pg_lake_table.vacuum_compact_min_input_files = 1;",
+            "ALTER SYSTEM SET pg_lake_iceberg.autovacuum_naptime TO '1s';",
+            "SELECT pg_reload_conf()",
+        ],
+        superuser_conn,
+    )
+    yield
+    run_command_outside_tx(
+        [
+            "ALTER SYSTEM RESET pg_lake_table.vacuum_compact_min_input_files;",
+            "ALTER SYSTEM RESET pg_lake_iceberg.autovacuum_naptime",
+            "SELECT pg_reload_conf()",
+        ],
+        superuser_conn,
+    )
