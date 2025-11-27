@@ -52,6 +52,7 @@
 #include "pg_lake/util/rel_utils.h"
 #include "pg_lake/util/spi_helpers.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
+#include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/parsetree/options.h"
 #include "utils/lsyscache.h"
@@ -293,6 +294,11 @@ DropTableAccessHook(ObjectAccessType access, Oid classId, Oid objectId,
 			ApplyDDLChanges(objectId, list_make1(ddlOperation));
 
 			TriggerCatalogExportIfObjectStoreTable(objectId);
+
+			IcebergCatalogType catalogType = GetIcebergCatalogType(objectId);
+
+			if (catalogType == REST_CATALOG_READ_WRITE)
+				RecordRestCatalogRequestInTx(objectId, REST_CATALOG_DROP_TABLE, NULL);
 		}
 	}
 	else if (get_rel_type_id(objectId) != InvalidOid && subId != 0)
@@ -457,6 +463,7 @@ MarkAllReferencedFilesForDeletion(Oid relationId)
 	TimestampTz orphanedAt = GetCurrentTransactionStartTimestamp();
 	char	   *metadataLocation = GetIcebergMetadataLocation(relationId, true);
 	MemoryContext savedContext = CurrentMemoryContext;
+
 	List	   *allFiles = NIL;
 	volatile bool success = true;
 

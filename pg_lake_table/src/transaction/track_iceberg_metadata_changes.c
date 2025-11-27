@@ -32,14 +32,37 @@
 #include "pg_lake/iceberg/operations/manifest_merge.h"
 #include "pg_lake/iceberg/partitioning/spec_generation.h"
 #include "pg_lake/partitioning/partition_spec_catalog.h"
+#include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/transaction/transaction_hooks.h"
 #include "pg_lake/util/injection_points.h"
+#include "pg_lake/json/json_utils.h"
+#include "pg_lake/util/url_encode.h"
 
+/*
+* Represents the rest catalog requests per table within a transaction.
+* We can commit all DDL/DML requests in a single Post-request to the REST
+* catalog, except for the create table requests, which need to be done
+* first with a different API call.
+*/
+typedef struct RestCatalogRequestPerTable
+{
+	Oid			relationId;
+
+	char	   *catalogName;
+	char	   *catalogNamespace;
+	char	   *catalogTableName;
+
+	RestCatalogRequest *createTableRequest;
+	RestCatalogRequest *dropTableRequest;
+
+	List	   *tableModifyRequests;
+}			RestCatalogRequestPerTable;
 
 static void ApplyTrackedIcebergMetadataChanges(void);
 static void RecordIcebergMetadataOperation(Oid relationId, TableMetadataOperationType operationType);
 static void InitTableMetadataTrackerHashIfNeeded(void);
+static void InitRestCatalogRequestsHashIfNeeded(void);
 static HTAB *CreateDataFilesHashForMetadata(IcebergTableMetadata * metadata);
 static void FindChangedFilesSinceMetadata(HTAB *currentFilesMap, IcebergTableMetadata * metadata,
 										  List **addedFiles, List **removedFilePaths);
@@ -52,12 +75,19 @@ static List *GetDDLMetadataOperations(const TableMetadataOperationTracker * opTr
 static void DeleteInProgressAddedFiles(Oid relationId, List *addedFiles);
 static int	ComparePartitionSpecsById(const ListCell *a, const ListCell *b);
 
+static char *IdentifierJson(const char *namespaceFlat, const char *tableName);
+
+
 
 /*
  * Hash table to track iceberg metadata operations per relation within a transaction.
  */
 static HTAB *TrackedIcebergMetadataOperationsHash = NULL;
 
+/*
+* Hash table to track rest catalog requests per relation within a transaction.
+*/
+static HTAB *RestCatalogRequestsHash = NULL;
 
 /*
  * TrackIcebergMetadataChangesInTx tracks metadata changes for a given relation
@@ -71,12 +101,15 @@ TrackIcebergMetadataChangesInTx(Oid relationId, List *metadataOperationTypes)
 		return;
 
 	/*
-	 * we might also defer acquiring locks to precommit hook but let's keep
-	 * them here to prevent any subtle bug
+	 * We might also defer acquiring locks to precommit hook but let's keep
+	 * them here to prevent any subtle bug. We call
+	 * GetIcebergCatalogMetadataLocation() to acquire the necessary locks, not
+	 * for the actual metadata location as our serialization of iceberg
+	 * metadata changes relies on those locks.
 	 */
 	bool		forUpdate = true;
 
-	GetIcebergMetadataLocation(relationId, forUpdate);
+	GetIcebergCatalogMetadataLocation(relationId, forUpdate);
 
 	ListCell   *operationCell = NULL;
 
@@ -145,6 +178,204 @@ ResetTrackedIcebergMetadataOperation(void)
 	TrackedIcebergMetadataOperationsHash = NULL;
 }
 
+
+void
+ResetRestCatalogRequests(void)
+{
+	RestCatalogRequestsHash = NULL;
+}
+
+void
+PostAllRestCatalogRequests(void)
+{
+	if (RestCatalogRequestsHash == NULL)
+	{
+		return;
+	}
+
+	/*
+	 * We need to iterate over the RestCatalogRequestsHash twice: 1. First, we
+	 * need to post the create table requests to create the iceberg tables in
+	 * the rest catalog. 2. Then, we need to post all the other modifications
+	 * (like adding snapshots, partition specs, etc.)
+	 *
+	 * This is because the create table requests need to be completed before
+	 * we can add snapshots to the tables. And, REST API does not support
+	 * batching requests of create table and anything else.
+	 */
+	HASH_SEQ_STATUS status;
+
+	hash_seq_init(&status, RestCatalogRequestsHash);
+	RestCatalogRequestPerTable *requestPerTable = NULL;
+
+	while ((requestPerTable = hash_seq_search(&status)) != NULL)
+	{
+		RestCatalogRequest *createTableRequest = requestPerTable->createTableRequest;
+		RestCatalogRequest *dropTableRequest = requestPerTable->dropTableRequest;
+
+		if (createTableRequest != NULL && dropTableRequest != NULL)
+		{
+			/*
+			 * table is created and dropped in the same transaction, skip both
+			 * requests, essentially a no-op.
+			 */
+			continue;
+		}
+		else if (createTableRequest != NULL || dropTableRequest != NULL)
+		{
+			const char *url =
+				psprintf(REST_CATALOG_TABLE,
+						 RestCatalogHost,
+						 URLEncodePath(requestPerTable->catalogName),
+						 URLEncodePath(requestPerTable->catalogNamespace),
+						 URLEncodePath(requestPerTable->catalogTableName));
+
+			if (createTableRequest != NULL)
+			{
+				HttpResult	httpResult = HttpPost(url, createTableRequest->body, PostHeadersWithAuth());
+
+				if (httpResult.status != 200)
+				{
+					ReportHTTPError(httpResult, WARNING);
+
+					/*
+					 * Ouch, something failed. Should we stop sending the
+					 * requests?
+					 */
+				}
+			}
+			else if (dropTableRequest != NULL)
+			{
+				HttpResult	httpResult = HttpDelete(url, DeleteHeadersWithAuth());
+
+				if (httpResult.status != 204)
+				{
+					ReportHTTPError(httpResult, WARNING);
+
+					/*
+					 * Ouch, something failed. Should we stop sending the
+					 * requests?
+					 */
+				}
+			}
+			else
+			{
+				pg_unreachable();
+			}
+		}
+	}
+
+	/*
+	 * Now that all create table requests have been posted, we can post all
+	 * the other modifications. All table modifications are sent in a single
+	 * HTTP request to ensure atomicity.
+	 */
+	char	   *catalogName = NULL;
+	bool		hasRestCatalogChanges = false;
+	StringInfo	batchRequestBody = makeStringInfo();
+
+	appendStringInfo(batchRequestBody, "{");	/* start msg body  */
+	appendJsonKey(batchRequestBody, "table-changes");
+	appendStringInfo(batchRequestBody, "[");	/* start array of changes */
+
+	hash_seq_init(&status, RestCatalogRequestsHash);
+
+	while ((requestPerTable = hash_seq_search(&status)) != NULL)
+	{
+		/* TODO: can we ever have multiple catalogs? */
+		catalogName = requestPerTable->catalogName;
+
+		if (requestPerTable->createTableRequest != NULL &&
+			requestPerTable->dropTableRequest != NULL)
+		{
+			/*
+			 * table is created and dropped in the same transaction, nothing
+			 * post to do for this table to the REST catalog.
+			 */
+			continue;
+		}
+		else if (requestPerTable->tableModifyRequests == NIL)
+		{
+			/*
+			 * no modifications to send for this table
+			 */
+			continue;
+		}
+
+		if (hasRestCatalogChanges)
+		{
+			appendStringInfoChar(batchRequestBody, ',');	/* separate previous
+															 * table change */
+		}
+
+		appendStringInfoChar(batchRequestBody, '{');	/* start per-table json
+														 * object */
+		appendJsonKey(batchRequestBody, "identifier");
+		appendStringInfo(batchRequestBody, "%s", IdentifierJson(requestPerTable->catalogNamespace, requestPerTable->catalogTableName));
+		appendStringInfoChar(batchRequestBody, ',');
+		appendStringInfoString(batchRequestBody, "\"requirements\":[],");
+		appendStringInfoString(batchRequestBody, " \"updates\":[");
+
+		ListCell   *requestCell = NULL;
+
+		foreach(requestCell, requestPerTable->tableModifyRequests)
+		{
+			RestCatalogRequest *request = (RestCatalogRequest *) lfirst(requestCell);
+
+			appendStringInfoString(batchRequestBody, request->body);
+
+			bool		lastRequest = (requestCell == list_tail(requestPerTable->tableModifyRequests));
+
+			if (!lastRequest)
+			{
+				appendStringInfoChar(batchRequestBody, ',');
+			}
+		}
+
+		appendStringInfoChar(batchRequestBody, ']');	/* close updates array */
+		appendStringInfoChar(batchRequestBody, '}');	/* close per-table json
+														 * object */
+
+		/*
+		 * We have at least one change to send for this table
+		 */
+		hasRestCatalogChanges = true;
+	}
+
+	if (hasRestCatalogChanges)
+	{
+		appendStringInfoChar(batchRequestBody, ']');	/* close table-changes */
+		appendStringInfoChar(batchRequestBody, '}');	/* close json body */
+
+		char	   *url = psprintf(REST_CATALOG_TRANSACTION_COMMIT, RestCatalogHost, catalogName);
+		HttpResult	httpResult = HttpPost(url, batchRequestBody->data, PostHeadersWithAuth());
+
+		if (httpResult.status != 204)
+		{
+			ReportHTTPError(httpResult, WARNING);
+		}
+	}
+}
+
+
+/*
+ * IdentifierJson creates a JSON representation of an iceberg table identifier
+ * given its namespace and table name.
+ */
+static char *
+IdentifierJson(const char *namespaceFlat, const char *tableName)
+{
+	StringInfoData out;
+
+	initStringInfo(&out);
+	appendStringInfoChar(&out, '{');
+	appendStringInfoString(&out, "\"namespace\":");
+	appendStringInfo(&out, "[\"%s\"]", namespaceFlat);
+	appendStringInfoString(&out, ",\"name\":");
+	appendStringInfo(&out, "\"%s\"", tableName);
+	appendStringInfoChar(&out, '}');
+	return out.data;
+}
 
 /*
  * RecordIcebergMetadataOperation records a metadata operation for a relation.
@@ -230,6 +461,90 @@ InitTableMetadataTrackerHashIfNeeded(void)
 	}
 }
 
+/*
+ * InitTableMetadataTrackerHashIfNeeded is a helper function to manage the initialization
+ * of the hash. We allocate the hash and entries in TopTransactionContext.
+ */
+static void
+InitRestCatalogRequestsHashIfNeeded(void)
+{
+	if (RestCatalogRequestsHash == NULL)
+	{
+		HASHCTL		ctl;
+
+		MemSet(&ctl, 0, sizeof(ctl));
+		ctl.keysize = sizeof(Oid);
+		ctl.entrysize = sizeof(RestCatalogRequestPerTable);
+		ctl.hash = oid_hash;
+		ctl.hcxt = TopTransactionContext;
+
+		RestCatalogRequestsHash = hash_create("Rest Catalog Requests",
+											  32, &ctl,
+											  HASH_ELEM | HASH_FUNCTION | HASH_CONTEXT);
+	}
+}
+
+
+/*
+* RecordRestCatalogRequestInTx records a REST catalog request to be sent at post-commit.
+*/
+void
+RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationType,
+							 const char *body)
+{
+	InitRestCatalogRequestsHashIfNeeded();
+
+	bool		isFound = false;
+	RestCatalogRequestPerTable *requestPerTable =
+		hash_search(RestCatalogRequestsHash,
+					&relationId, HASH_ENTER, &isFound);
+
+	if (!isFound)
+	{
+		memset(requestPerTable, 0, sizeof(RestCatalogRequestPerTable));
+		requestPerTable->relationId = relationId;
+
+		requestPerTable->catalogName = MemoryContextStrdup(TopTransactionContext, GetRestCatalogName(relationId));
+		requestPerTable->catalogNamespace = MemoryContextStrdup(TopTransactionContext, GetRestCatalogNamespace(relationId));
+		requestPerTable->catalogTableName = MemoryContextStrdup(TopTransactionContext, GetRestCatalogTableName(relationId));
+	}
+
+	/*
+	 * Always allocate in TopTransactionContext as we need this in
+	 * post-commit.
+	 */
+	MemoryContext oldContext = MemoryContextSwitchTo(TopTransactionContext);
+
+	RestCatalogRequest *request = palloc0(sizeof(RestCatalogRequest));
+
+	request->operationType = operationType;
+
+	if (operationType == REST_CATALOG_CREATE_TABLE)
+	{
+		request->body = pstrdup(body);
+		requestPerTable->createTableRequest = request;
+	}
+	else if (operationType == REST_CATALOG_DROP_TABLE)
+	{
+		requestPerTable->dropTableRequest = request;
+	}
+	else if (operationType == REST_CATALOG_ADD_SNAPSHOT ||
+			 operationType == REST_CATALOG_ADD_SCHEMA ||
+			 operationType == REST_CATALOG_ADD_PARTITION ||
+			 operationType == REST_CATALOG_REMOVE_SNAPSHOT ||
+			 operationType == REST_CATALOG_SET_DEFAULT_PARTITION_ID)
+	{
+		request->body = pstrdup(body);
+		requestPerTable->tableModifyRequests = lappend(requestPerTable->tableModifyRequests, request);
+	}
+	else
+	{
+		elog(ERROR, "unsupported rest catalog operation type: %d", operationType);
+	}
+
+	MemoryContextSwitchTo(oldContext);
+}
+
 
 /*
  * ConsumeTrackedIcebergMetadataChanges consumes the tracked metadata operations and
@@ -279,6 +594,19 @@ ApplyTrackedIcebergMetadataChanges(void)
 			List	   *ddlOps = GetDDLMetadataOperations(opTracker);
 
 			metadataOperations = list_concat(metadataOperations, ddlOps);
+
+			if (opTracker->relationCreated &&
+				GetIcebergCatalogType(relationId) == REST_CATALOG_READ_WRITE)
+			{
+				TableMetadataOperation *createOp = linitial(metadataOperations);
+
+				char	   *body =
+					FinishStageRestCatalogIcebergTableCreateRestRequest(relationId,
+																		createOp->schema,
+																		createOp->partitionSpecs);
+
+				RecordRestCatalogRequestInTx(relationId, REST_CATALOG_CREATE_TABLE, body);
+			}
 		}
 
 		/* apply all data file operations at once */
@@ -310,7 +638,19 @@ ApplyTrackedIcebergMetadataChanges(void)
 		}
 
 		if (metadataOperations != NIL)
-			ApplyIcebergMetadataChanges(relationId, metadataOperations, allTransforms, true);
+		{
+			List	   *restRequests = ApplyIcebergMetadataChanges(relationId, metadataOperations, allTransforms, true);
+			ListCell   *requestCell = NULL;
+
+			foreach(requestCell, restRequests)
+			{
+				RestCatalogRequest *request = lfirst(requestCell);
+
+				RecordRestCatalogRequestInTx(relationId, request->operationType,
+											 request->body);
+			}
+
+		}
 	}
 
 	INJECTION_POINT_COMPAT("after-apply-iceberg-changes");
