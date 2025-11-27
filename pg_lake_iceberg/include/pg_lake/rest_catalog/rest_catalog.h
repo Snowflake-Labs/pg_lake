@@ -22,6 +22,8 @@
 #include "pg_lake/util/rel_utils.h"
 
 extern char *RestCatalogHost;
+extern char *RestCatalogOauthHost;
+extern char *RestCatalogOauthPath;
 extern char *RestCatalogClientId;
 extern char *RestCatalogClientSecret;
 
