@@ -50,6 +50,8 @@ static List *GetDataFileMetadataOperations(const TableMetadataOperationTracker *
 										   List *allTransforms);
 static List *GetDDLMetadataOperations(const TableMetadataOperationTracker * opTracker);
 static void DeleteInProgressAddedFiles(Oid relationId, List *addedFiles);
+static bool AreSchemasEqual(IcebergTableSchema * existingSchema, DataFileSchema * newSchema);
+static int32_t GetSchemaIdForIcebergTableIfExists(const TableMetadataOperationTracker * opTracker, DataFileSchema * schema);
 static int	ComparePartitionSpecsById(const ListCell *a, const ListCell *b);
 
 
@@ -596,7 +598,7 @@ GetDDLMetadataOperations(const TableMetadataOperationTracker * opTracker)
 		TableMetadataOperation *createOp = palloc0(sizeof(TableMetadataOperation));
 
 		createOp->type = TABLE_CREATE;
-		createOp->schema = schema;
+		createOp->newSchema = schema;
 		createOp->partitionSpecs = newPartitionSpecs;
 		createOp->defaultSpecId = defaultSpecId;
 
@@ -611,10 +613,30 @@ GetDDLMetadataOperations(const TableMetadataOperationTracker * opTracker)
 
 	if (opTracker->relationAltered)
 	{
+		/*
+		 * When a table is altered, its schema has changed. However, it might
+		 * have been set to an existing schema in the iceberg metadata, if so,
+		 * use that schemaId.
+		 */
 		TableMetadataOperation *ddlOp = palloc0(sizeof(TableMetadataOperation));
 
 		ddlOp->type = TABLE_DDL;
-		ddlOp->schema = schema;
+
+		int32_t		existingSchemaId =
+			GetSchemaIdForIcebergTableIfExists(opTracker, schema);
+
+		if (existingSchemaId != -1)
+		{
+			ddlOp->ddlSchemaEffect = DDL_EFFECT_SET_EXISTING_SCHEMA;
+			ddlOp->existingSchemaId = existingSchemaId;
+			ddlOp->newSchema = NULL;
+		}
+		else
+		{
+			ddlOp->ddlSchemaEffect = DDL_EFFECT_ADD_SCHEMA;
+			ddlOp->newSchema = schema;
+			ddlOp->existingSchemaId = -1;
+		}
 
 		operations = lappend(operations, ddlOp);
 	}
@@ -644,4 +666,53 @@ ComparePartitionSpecsById(const ListCell *a, const ListCell *b)
 	IcebergPartitionSpec *specB = lfirst(b);
 
 	return pg_cmp_s32(specA->spec_id, specB->spec_id);
+}
+
+
+/*
+* GetSchemaIdForIcebergTableIfExists checks if the given schema already exists
+ * in the iceberg table metadata. If it exists, it returns the schema ID, otherwise -1.
+*/
+static int32_t
+GetSchemaIdForIcebergTableIfExists(const TableMetadataOperationTracker * opTracker, DataFileSchema * schema)
+{
+	IcebergTableMetadata *metadata = GetLastPushedIcebergMetadata(opTracker);
+
+	if (metadata == NULL)
+		return -1;
+
+	IcebergTableSchema *schemas = metadata->schemas;
+
+	for (int schemaIndex = 0; schemaIndex < metadata->schemas_length; schemaIndex++)
+	{
+		IcebergTableSchema *existingSchema = &schemas[schemaIndex];
+
+		if (AreSchemasEqual(existingSchema, schema))
+			return schemas[schemaIndex].schema_id;
+
+	}
+
+	return -1;
+}
+
+
+/*
+* AreSchemasEqual compares two schemas for equality.
+*/
+static bool
+AreSchemasEqual(IcebergTableSchema * existingSchema, DataFileSchema * newSchema)
+{
+	if (existingSchema->fields_length != newSchema->nfields)
+		return false;
+
+	for (size_t i = 0; i < existingSchema->fields_length; i++)
+	{
+		DataFileSchemaField *existingField = &existingSchema->fields[i];
+		DataFileSchemaField *newField = &newSchema->fields[i];
+
+		if (!SchemaFieldsEquivalent(existingField, newField))
+			return false;
+	}
+
+	return true;
 }

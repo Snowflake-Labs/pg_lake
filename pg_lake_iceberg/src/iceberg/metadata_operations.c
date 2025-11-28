@@ -82,7 +82,7 @@ typedef struct IcebergSnapshotBuilder
 	/* whether to apply manifest compaction */
 	bool		applyManifestCompaction;
 
-	/* a DDL has changed the iceberg schema */
+	/* a DDL has changed the iceberg schema or set to an existing schema */
 	bool		regenerateSchema;
 
 	/* a DDL has changed partition specs */
@@ -96,8 +96,10 @@ typedef struct IcebergSnapshotBuilder
 	/* whether to expire old snapshots */
 	bool		expireOldSnapshots;
 
-	/* up-to-date schema for table */
+	/* new schema */
 	DataFileSchema *schema;
+	/* a DDL has set to an existing schema */
+	int32_t		schemaId;
 
 	/* snapshot operation */
 	SnapshotOperation operation;
@@ -183,7 +185,10 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 
 	if (builder->createTable || builder->regenerateSchema)
 	{
-		AppendCurrentPostgresSchema(relationId, metadata, builder->schema);
+		if (builder->schema != NULL)
+			AppendCurrentPostgresSchema(relationId, metadata, builder->schema);
+		else
+			metadata->current_schema_id = builder->schemaId;
 	}
 
 	if (builder->createTable || builder->regeneratePartitionSpec)
@@ -588,7 +593,7 @@ ProcessIcebergMetadataOperations(Oid relationId, List *metadataOperations,
 					Assert(!builder->createTable);
 
 					builder->createTable = true;
-					builder->schema = operation->schema;
+					builder->schema = operation->newSchema;
 					builder->partitionSpecs = operation->partitionSpecs;
 					builder->defaultSpecId = operation->defaultSpecId;
 
@@ -604,14 +609,33 @@ ProcessIcebergMetadataOperations(Oid relationId, List *metadataOperations,
 					 */
 					Assert(!builder->regenerateSchema);
 
+					builder->regenerateSchema = true;
+
 					/*
 					 * We are requested to update the table schema, and we'll
 					 * handle this operation in
 					 * TrackIcebergMetadataChangesInTx().
 					 */
 
-					builder->regenerateSchema = true;
-					builder->schema = operation->schema;
+					if (operation->ddlSchemaEffect == DDL_EFFECT_ADD_SCHEMA)
+					{
+						/* these two are mutually exclusive */
+						Assert(operation->existingSchemaId == -1);
+						Assert(operation->newSchema != NULL);
+
+						builder->schema = operation->newSchema;
+					}
+					else if (operation->ddlSchemaEffect == DDL_EFFECT_SET_EXISTING_SCHEMA)
+					{
+						/* these two are mutually exclusive */
+						Assert(operation->existingSchemaId != -1);
+						Assert(operation->newSchema == NULL);
+						builder->schemaId = operation->existingSchemaId;
+					}
+					else
+					{
+						ereport(ERROR, (errmsg("Unsupported DDL schema effect: %d", operation->ddlSchemaEffect)));
+					}
 
 					break;
 				}

@@ -76,6 +76,7 @@ static void SetSnapshotReference(IcebergTableMetadata * metadata, uint64_t snaps
 static void GroupExpiredSnapshots(IcebergTableMetadata * metadata, IcebergSnapshot * expiredSnapshots, int *expiredSnapshotCount,
 								  IcebergSnapshot * nonExpiredSnapshots, int *nonExpiredSnapshotCount);
 static bool SnapshotAgeExceeded(IcebergSnapshot * snapshot, int64_t currentTimeMs, int maxAge);
+static int32_t MaxSchemaId(IcebergTableSchema * schemas, size_t schemasLength);
 
 /*
 * GenerateEmptyTableMetadata generates an empty iceberg table metadata
@@ -544,7 +545,6 @@ void
 AppendCurrentPostgresSchema(Oid relationId, IcebergTableMetadata * metadata,
 							DataFileSchema * schema)
 {
-	int			currentSchemaId = metadata->current_schema_id;
 	int			currentSchemaLength = metadata->schemas_length;
 
 	IcebergTableSchema *newSchema = RebuildIcebergSchemaFromDataFileSchema(relationId, schema, &metadata->last_column_id);
@@ -560,12 +560,32 @@ AppendCurrentPostgresSchema(Oid relationId, IcebergTableMetadata * metadata,
 	}
 
 	/* first schema should always start with id=0 */
-	newSchema->schema_id = (currentSchemaLength == 0) ? 0 : currentSchemaId + 1;
+	newSchema->schema_id = (currentSchemaLength == 0) ? 0 : MaxSchemaId(metadata->schemas, currentSchemaLength) + 1;
 	metadata->schemas[currentSchemaLength] = *newSchema;
 	metadata->schemas_length = currentSchemaLength + 1;
 	metadata->current_schema_id = newSchema->schema_id;
 }
 
+
+/*
+* MaxSchemaId finds the maximum schema ID from the given schemas.
+*/
+static int32_t
+MaxSchemaId(IcebergTableSchema * schemas, size_t schemasLength)
+{
+	int32_t		maxSchemaId = -1;
+
+	for (size_t i = 0; i < schemasLength; i++)
+	{
+		if (schemas[i].schema_id > maxSchemaId)
+		{
+			maxSchemaId = schemas[i].schema_id;
+		}
+	}
+
+	Assert(maxSchemaId != -1);
+	return maxSchemaId;
+}
 
 /*
 * AppendPartitionSpec appends given partition spec to the metadata.

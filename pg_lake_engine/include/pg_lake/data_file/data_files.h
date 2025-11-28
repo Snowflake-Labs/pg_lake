@@ -102,6 +102,24 @@ typedef enum TableMetadataOperationType
 struct IcebergPartitionSpec;
 struct Partition;
 
+
+/*
+* When a schema is set back to an existing schema in iceberg metadata,
+* we use DDL_EFFECT_SET_EXISTING_SCHEMA to indicate which effect the
+* DDL has. An example would be ALTER TABLE .. ADD COLUMN x; followed by
+* ALTER TABLE .. DROP COLUMN x; which results in the same schema as before.
+* In all other cases, we use DDL_EFFECT_ADD_SCHEMA as that'd mean there is
+* no existing schema to set to, and we should add a new schema.
+* ps: This is especially important for REST catalog/Polaris, where it rejects
+* identical schema addition.
+*/
+typedef enum DDLSchemaEffect
+{
+	DDL_EFFECT_NONE = 0,
+	DDL_EFFECT_ADD_SCHEMA = 1,
+	DDL_EFFECT_SET_EXISTING_SCHEMA = 2,
+}			DDLSchemaEffect;
+
 /*
  * TableMetadataOperation represents an operation on table metadata.
  */
@@ -125,8 +143,13 @@ typedef struct TableMetadataOperation
 	/* for a new deletion file, from which data file are we deleting? */
 	char	   *deletedFrom;
 
-	/* relevant to TABLE_DDL event, up-to-date schema */
-	DataFileSchema *schema;
+	/*
+	 * newSchema and existingSchemaId are mutually exclusive, set according to
+	 * ddlSchemaEffect.
+	 */
+	DDLSchemaEffect ddlSchemaEffect;
+	DataFileSchema *newSchema;
+	int32_t		existingSchemaId;
 
 	/* for multi-delete, which files we are deleting from */
 	List	   *deleteStats;

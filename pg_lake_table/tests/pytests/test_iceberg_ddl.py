@@ -834,28 +834,9 @@ def test_set_drop_default(pg_conn, s3, with_default_location):
                 },
             ],
         },
-        {
-            "type": "struct",
-            "schema-id": 3,
-            "fields": [
-                {
-                    "id": 1,
-                    "name": "a",
-                    "type": "int",
-                    "required": False,
-                    "write-default": 10,
-                },
-                {"id": 2, "name": "b", "type": "int", "required": False},
-                {
-                    "id": 3,
-                    "name": "c",
-                    "type": "int",
-                    "required": False,
-                    "write-default": 25,
-                },
-            ],
-        },
     ]
+    default_schema_id = returned_json["current-schema-id"]
+    assert default_schema_id == 2
 
     # now, drop defaults and show that's reflected in the metadata
     run_command(
@@ -878,20 +859,11 @@ def test_set_drop_default(pg_conn, s3, with_default_location):
         pg_conn,
     )[0][0]
     returned_json = normalize_json(read_s3_operations(s3, metadata_location))
-    last_schema = returned_json["schemas"][-1]
-    assert last_schema == {
-        "type": "struct",
-        "schema-id": 6,
-        "fields": [
-            {"id": 1, "name": "a", "type": "int", "required": False},
-            {"id": 2, "name": "b", "type": "int", "required": False},
-            {"id": 3, "name": "c", "type": "int", "required": False},
-        ],
-    }
 
-    # make sure the schema ids are expected
-    assert returned_json["current-schema-id"] == 6
-    assert returned_json["snapshots"][-1]["schema-id"] == 6
+    # return back to the initial schema
+    default_schema_id = returned_json["current-schema-id"]
+    assert default_schema_id == 0
+    assert returned_json["snapshots"][-1]["schema-id"] == default_schema_id
 
     run_command("DROP SCHEMA set_drop_default CASCADE", pg_conn)
     pg_conn.commit()
@@ -1528,6 +1500,130 @@ def test_interval(pg_conn, s3, with_default_location):
     assert "not yet supported" in error
 
     pg_conn.rollback()
+
+
+def test_use_same_schema_when_needed(pg_conn, s3, with_default_location):
+
+    run_command("CREATE SCHEMA test_use_same_schema_when_needed", pg_conn)
+    pg_conn.commit()
+
+    # add & drop column gets back to the same schema-id
+    run_command(
+        "CREATE TABLE test_use_same_schema_when_needed.tbl1(a int) USING iceberg",
+        pg_conn,
+    )
+    pg_conn.commit()
+    schema_id_1 = get_current_schema_id(
+        pg_conn, s3, "test_use_same_schema_when_needed", "tbl1"
+    )
+
+    # sanity check
+    assert schema_id_1 == 0
+
+    # add column
+    run_command(
+        "ALTER TABLE test_use_same_schema_when_needed.tbl1 ADD COLUMN b INT", pg_conn
+    )
+    pg_conn.commit()
+
+    schema_id_2 = get_current_schema_id(
+        pg_conn, s3, "test_use_same_schema_when_needed", "tbl1"
+    )
+
+    # sanity check
+    assert schema_id_2 == 1
+
+    # drop column
+    run_command(
+        "ALTER TABLE test_use_same_schema_when_needed.tbl1 DROP COLUMN b", pg_conn
+    )
+    pg_conn.commit()
+
+    schema_id_3 = get_current_schema_id(
+        pg_conn, s3, "test_use_same_schema_when_needed", "tbl1"
+    )
+
+    # sanity check
+    assert schema_id_3 == 0
+    assert schema_id_3 == schema_id_1
+
+    # adding a new column with the same name yields a different schema id
+    run_command(
+        "ALTER TABLE test_use_same_schema_when_needed.tbl1 ADD COLUMN b INT", pg_conn
+    )
+    pg_conn.commit()
+    schema_id_4 = get_current_schema_id(
+        pg_conn, s3, "test_use_same_schema_when_needed", "tbl1"
+    )
+    assert schema_id_4 == 2
+
+    # but then dropping it goes back to schema 0
+    run_command(
+        "ALTER TABLE test_use_same_schema_when_needed.tbl1 DROP COLUMN b", pg_conn
+    )
+    pg_conn.commit()
+    schema_id_5 = get_current_schema_id(
+        pg_conn, s3, "test_use_same_schema_when_needed", "tbl1"
+    )
+    assert schema_id_5 == 0
+
+    # now, test with rename
+    # renaming the first column triggers a new schema
+    run_command(
+        "ALTER TABLE test_use_same_schema_when_needed.tbl1 RENAME COLUMN a TO b",
+        pg_conn,
+    )
+    pg_conn.commit()
+    schema_id_5 = get_current_schema_id(
+        pg_conn, s3, "test_use_same_schema_when_needed", "tbl1"
+    )
+    assert schema_id_5 == 3
+
+    # now, get back to the initial schema
+    run_command(
+        "ALTER TABLE test_use_same_schema_when_needed.tbl1 RENAME COLUMN b TO a",
+        pg_conn,
+    )
+    pg_conn.commit()
+    schema_id_6 = get_current_schema_id(
+        pg_conn, s3, "test_use_same_schema_when_needed", "tbl1"
+    )
+    assert schema_id_6 == 0
+
+    # now, adding a default triggers a new schema
+    run_command(
+        "ALTER TABLE test_use_same_schema_when_needed.tbl1 ALTER COLUMN a SET DEFAULT 42;",
+        pg_conn,
+    )
+    pg_conn.commit()
+    schema_id_7 = get_current_schema_id(
+        pg_conn, s3, "test_use_same_schema_when_needed", "tbl1"
+    )
+    assert schema_id_7 == 4
+
+    # now, get back to the initial schema
+    run_command(
+        "ALTER TABLE test_use_same_schema_when_needed.tbl1 ALTER COLUMN a DROP DEFAULT;",
+        pg_conn,
+    )
+    pg_conn.commit()
+    schema_id_8 = get_current_schema_id(
+        pg_conn, s3, "test_use_same_schema_when_needed", "tbl1"
+    )
+    assert schema_id_8 == 0
+
+    run_command("DROP SCHEMA test_use_same_schema_when_needed CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def get_current_schema_id(pg_conn, s3, namespace, name):
+
+    metadata_location = run_query(
+        f"SELECT metadata_location FROM iceberg_tables WHERE table_name = '{name}' and table_namespace='{namespace}'",
+        pg_conn,
+    )[0][0]
+    returned_json = normalize_json(read_s3_operations(s3, metadata_location))
+    return returned_json["current-schema-id"]
 
 
 def filter_files_by_prefix(files, prefix):
