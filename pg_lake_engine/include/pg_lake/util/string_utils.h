@@ -33,7 +33,7 @@ extern PGDLLEXPORT char *EscapedStringLiteral(const char *val);
 extern PGDLLEXPORT char *ReverseStringSearch(const char *haystack, const char *needle);
 extern PGDLLEXPORT int32_t AdjustAnyCharTypmod(int32_t typmod, int32_t newLength);
 extern PGDLLEXPORT int32_t GetAnyCharLengthFrom(int32_t typmod);
-
+extern PGDLLEXPORT bool PgStrcasecmpNullable(const char *a, const char *b);
 
 #define RangeVarQuoteIdentifier(rv) \
 	(((rv)->schemaname != NULL) ?							  \

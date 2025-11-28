@@ -21,6 +21,7 @@
 
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/parquet/leaf_field.h"
+#include "pg_lake/util/string_utils.h"
 
 static FieldStructElement * DeepCopyFieldStructElement(FieldStructElement * structElementField);
 static Field * DeepCopyField(const Field * field);
@@ -145,3 +146,40 @@ pg_cmp_s32(int32 a, int32 b)
 	return (a > b) - (a < b);
 }
 #endif
+
+
+
+/*
+* SchemaFieldsEquivalent compares two DataFileSchemaField structs for equivalence.
+* It returns true if they are equivalent, false otherwise.
+* Note that we do not compare the field->type here, as we do not allow changing
+* the type of any field in the schema, including nested types.
+*/
+bool
+SchemaFieldsEquivalent(DataFileSchemaField * fieldA, DataFileSchemaField * fieldB)
+{
+	if (fieldA->id != fieldB->id)
+		return false;
+
+	if (!PgStrcasecmpNullable(fieldA->name, fieldB->name))
+		return false;
+
+	if (fieldA->required != fieldB->required)
+		return false;
+
+	if (!PgStrcasecmpNullable(fieldA->doc, fieldB->doc))
+		return false;
+
+	if (!PgStrcasecmpNullable(fieldA->writeDefault, fieldB->writeDefault))
+		return false;
+
+	if (!PgStrcasecmpNullable(fieldA->initialDefault, fieldB->initialDefault))
+		return false;
+
+	/*
+	 * We don't allow changing any of the types of the fields in the schema,
+	 * including the fields of nested types. So we don't need to compare
+	 * anything about the field->type here.
+	 */
+	return true;
+}

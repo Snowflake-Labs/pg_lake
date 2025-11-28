@@ -245,3 +245,19 @@ GetAnyCharLengthFrom(int32_t typmod)
 
 	return typmod - VARHDRSZ;
 }
+
+
+/*
+* PgStrcasecmpNullable compares two strings for equality, treating NULLs as equal.
+*/
+bool
+PgStrcasecmpNullable(const char *a, const char *b)
+{
+	if (a == NULL && b == NULL)
+		return true;
+
+	if (a == NULL || b == NULL)
+		return false;
+
+	return pg_strcasecmp(a, b) == 0;
+}
