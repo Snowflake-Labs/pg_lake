@@ -309,6 +309,7 @@ duckdb_global_init(char *databaseFilePath,
 	const char *createS3Secret =
 		"CREATE SECRET s3default ("
 		"TYPE S3, PROVIDER CREDENTIAL_CHAIN, "
+		"VALIDATION 'none', "
 		"ENDPOINT 's3.amazonaws.com'"
 		")";
 
@@ -318,6 +319,7 @@ duckdb_global_init(char *databaseFilePath,
 	const char *createGCSSecret =
 		"CREATE SECRET gcsdefault ("
 		"TYPE GCS, PROVIDER CREDENTIAL_CHAIN, "
+		"VALIDATION 'none', "
 		"ENDPOINT 'storage.googleapis.com'"
 		")";
 
