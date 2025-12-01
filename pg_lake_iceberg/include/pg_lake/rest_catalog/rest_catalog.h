@@ -57,6 +57,12 @@ typedef struct RestCatalogRequest
 	Oid			relationId;
 	RestCatalogOperationType operationType;
 
+	/*
+	 * For each request, holds the "action" part of the request body. We
+	 * concatenate all requests from multiple tables into a single transaction
+	 * commit request. The only exception is CREATE/DROP table, where body
+	 * holds the full request body.
+	 */
 	char	   *body;
 }			RestCatalogRequest;
 

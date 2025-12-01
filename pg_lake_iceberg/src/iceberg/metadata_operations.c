@@ -168,16 +168,7 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 
 	/* read the iceberg metadata for the table */
 	bool		forUpdate = true;
-
-	/*
-	 * Although writable rest catalog iceberg tables have their metadata
-	 * location stored in the rest catalog itself, we still need to read the
-	 * pg_lake metadata as forUpdate=true acquires necessary locks to prevent
-	 * concurrent updates. To achieve this, we use
-	 * GetIcebergCatalogMetadataLocation function as that's the common
-	 * practice in the code.
-	 */
-	char	   *metadataPath = GetIcebergCatalogMetadataLocation(relationId, forUpdate);
+	char	   *metadataPath = NULL;
 
 	bool		createNewTable = HasCreateTableOperation(metadataOperations);
 
@@ -185,20 +176,28 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 
 	if (createNewTable)
 	{
+		/*
+		 * For new tables, except for the writable rest catalog tables, we had
+		 * already generated the initial metadata and have the metadata path
+		 * inserted to the catalog. For writable rest catalog tables, the
+		 * metadata path is managed by the rest catalog itself and has not
+		 * been set yet. We still set metadata for writable rest catalog
+		 * tables, to keep the code simple, even though it won't be used for
+		 * actual metadata purposes, but only simple bookkeeping such as
+		 * last_sequence_number.
+		 */
+		metadataPath =
+			!writableRestCatalogTable ? GetIcebergMetadataLocation(relationId, forUpdate) : NULL;
+
 		metadata = GenerateInitialIcebergTableMetadata(relationId);
 
 		/* Polaris expects the sequence number start from 1 */
 		metadata->last_sequence_number = !writableRestCatalogTable ? 0 : 1;
 		metadata->last_updated_ms = PostgresTimestampToIcebergTimestampMs();
 	}
-	else if (writableRestCatalogTable)
+	else
 	{
-		/*
-		 * Writable rest catalog iceberg tables have their metadata updated in
-		 * the REST catalog itself. We fetch the metadata from the rest
-		 * catalog.
-		 */
-		metadataPath = GetMetadataLocationForRestCatalogForIcebergTable(relationId);
+		metadataPath = GetIcebergMetadataLocation(relationId, forUpdate);
 
 		/*
 		 * metadata for writable rest catalog is intended to be read-only in
@@ -206,15 +205,17 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 		 * the rest catalog.
 		 */
 		metadata = ReadIcebergTableMetadata(metadataPath);
-	}
-	else
-	{
-		metadataPath = GetIcebergMetadataLocation(relationId, false);
-		metadata = ReadIcebergTableMetadata(metadataPath);
 
-		prevLastUpdatedMs = metadata->last_updated_ms;
-		metadata->last_sequence_number = metadata->last_sequence_number + 1;
-		metadata->last_updated_ms = PostgresTimestampToIcebergTimestampMs();
+		/*
+		 * for writable rest catalog tables, the metadata state is on the REST
+		 * catalog itself, we should not modify the in-memory metadata here.
+		 */
+		if (!writableRestCatalogTable)
+		{
+			prevLastUpdatedMs = metadata->last_updated_ms;
+			metadata->last_sequence_number = metadata->last_sequence_number + 1;
+			metadata->last_updated_ms = PostgresTimestampToIcebergTimestampMs();
+		}
 	}
 
 	IcebergSnapshotBuilder *builder = CreateIcebergSnapshotBuilder(metadata, metadataOperations);
@@ -223,39 +224,37 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 
 	if (builder->createTable || builder->regenerateSchema)
 	{
-		if (builder->regenerateSchema)
+		if (!writableRestCatalogTable)
 		{
-			if (!writableRestCatalogTable)
+			if (builder->schema != NULL)
 			{
-				if (builder->schema != NULL)
-				{
-					AppendCurrentPostgresSchema(relationId, metadata, builder->schema);
-				}
-				else if (builder->schemaId >= 0 && !writableRestCatalogTable)
-				{
-					metadata->current_schema_id = builder->schemaId;
-				}
-				else
-					pg_unreachable();
+				AppendCurrentPostgresSchema(relationId, metadata, builder->schema);
+			}
+			else if (builder->schemaId >= 0)
+			{
+				metadata->current_schema_id = builder->schemaId;
 			}
 			else
-			{
-				if (builder->schema != NULL)
-				{
-					RestCatalogRequest *request = GetAddSchemaCatalogRequest(relationId, builder->schema);
-
-					restCatalogRequests = lappend(restCatalogRequests, request);
-				}
-				else if (builder->schemaId >= 0)
-				{
-					RestCatalogRequest *request = GetSetCurrentSchemaCatalogRequest(relationId, builder->schemaId);
-
-					restCatalogRequests = lappend(restCatalogRequests, request);
-				}
-				else
-					pg_unreachable();
-			}
+				pg_unreachable();
 		}
+		else if (builder->regenerateSchema)
+		{
+			if (builder->schema != NULL)
+			{
+				RestCatalogRequest *request = GetAddSchemaCatalogRequest(relationId, builder->schema);
+
+				restCatalogRequests = lappend(restCatalogRequests, request);
+			}
+			else if (builder->schemaId >= 0)
+			{
+				RestCatalogRequest *request = GetSetCurrentSchemaCatalogRequest(relationId, builder->schemaId);
+
+				restCatalogRequests = lappend(restCatalogRequests, request);
+			}
+			else
+				pg_unreachable();
+		}
+
 	}
 	if (builder->createTable || builder->regeneratePartitionSpec)
 	{

@@ -357,13 +357,13 @@ GetIcebergMetadataLocation(Oid relationId, bool forUpdate)
 {
 	Assert(IsIcebergTable(relationId));
 
-	if (IsInternalIcebergTable(relationId))
-	{
-		IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
+	IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
 
+	if (IsExternalIcebergTable(relationId) || catalogType == REST_CATALOG_READ_WRITE)
+	{
 		/*
-		 * We always get the metadata location from the iceberg catalog table
-		 * for internal iceberg tables.
+		 * We get the metadata location from the iceberg catalog table for
+		 * internal iceberg tables, except for REST_CATALOG_READ_WRITE.
 		 *
 		 * Writable rest catalog iceberg tables are a bit different. They are
 		 * internal iceberg tables, all their metadata is stored in our
@@ -371,34 +371,26 @@ GetIcebergMetadataLocation(Oid relationId, bool forUpdate)
 		 * metadata location is stored in the rest catalog itself. So, we need
 		 * to fetch the metadata location from the rest catalog for those
 		 * tables, see below.
-		 *
-		 * But we still need to acquire locks on the iceberg catalog table row
-		 * for internal iceberg tables to prevent concurrent updates. So, we
-		 * call GetIcebergCatalogMetadataLocation().
 		 */
-		char	   *metadataLocation = GetIcebergCatalogMetadataLocation(relationId, forUpdate);
-
-		if (catalogType == REST_CATALOG_READ_WRITE)
-		{
-			/*
-			 * our internal catalog never stores metadata location for
-			 * writable rest catalog tables
-			 */
-			Assert(metadataLocation == NULL);
-
-			metadataLocation = GetIcebergExternalMetadataLocation(relationId);
-		}
-
-		return metadataLocation;
-	}
-	else
-	{
-		if (forUpdate)
+		if (forUpdate && catalogType != REST_CATALOG_READ_WRITE)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("Updating iceberg metadata is not supported for external Iceberg tables")));
+		else if (forUpdate && catalogType == REST_CATALOG_READ_WRITE)
+		{
+			/*
+			 * But we still need to acquire locks on the iceberg catalog table
+			 * row for internal iceberg tables to prevent concurrent updates.
+			 * So, we call GetIcebergCatalogMetadataLocation().
+			 */
+			LockIcebergPgLakeCatalogForUpdate(relationId);
+		}
 
 		return GetIcebergExternalMetadataLocation(relationId);
+	}
+	else
+	{
+		return GetIcebergCatalogMetadataLocation(relationId, forUpdate);
 	}
 }
 
@@ -416,6 +408,32 @@ GetIcebergCatalogMetadataLocation(Oid relationId, bool forUpdate)
 	Assert(IsInternalIcebergTable(relationId));
 
 	return GetIcebergCatalogMetadataLocationInternal(relationId, false, forUpdate);
+}
+
+
+/*
+* LockIcebergPgLakeCatalogForUpdate acquires necessary locks on the
+* iceberg catalog table row for the given relation to serialize concurrent
+* updates. Note that normally GetIcebergCatalogMetadataLocation() already does
+* the trick for us. This function is only needed in cases where we need to
+* acquire the locks but don't have the metadata location itself, such as
+* writable rest catalog iceberg tables.
+*/
+void
+LockIcebergPgLakeCatalogForUpdate(Oid relationId)
+{
+	/*
+	 * We don't actually need the metadata location here. We just need to
+	 * acquire the necessary locks on the iceberg catalog table row to
+	 * serialize concurrent updates.
+	 *
+	 * Note that we cannot skip reading the actual metadata location and
+	 * returning it here as other callers might depend on the returned value.
+	 * So, we call GetIcebergCatalogMetadataLocation() as usual.
+	 */
+	bool		forUpdate = true;
+
+	GetIcebergCatalogMetadataLocationInternal(relationId, false, forUpdate);
 }
 
 
@@ -581,10 +599,10 @@ RelationExistsInTheIcebergCatalog(Oid relationId)
 	char	   *columnName = "table_name";
 	bool		errorIfNotFound = false;
 
-	char	   *columnNameInCatalog =
+	char	   *tableName =
 		GetIcebergCatalogColumnInternal(relationId, columnName, forUpdate, errorIfNotFound);
 
-	return columnNameInCatalog != NULL;
+	return tableName != NULL;
 }
 
 
