@@ -223,18 +223,40 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 
 	if (builder->createTable || builder->regenerateSchema)
 	{
-		if (!writableRestCatalogTable)
+		if (builder->regenerateSchema)
 		{
-			AppendCurrentPostgresSchema(relationId, metadata, builder->schema);
-		}
-		else if (builder->regenerateSchema)
-		{
-			RestCatalogRequest *request = GetAddSchemaCatalogRequest(relationId, builder->schema);
+			if (!writableRestCatalogTable)
+			{
+				if (builder->schema != NULL)
+				{
+					AppendCurrentPostgresSchema(relationId, metadata, builder->schema);
+				}
+				else if (builder->schemaId >= 0 && !writableRestCatalogTable)
+				{
+					metadata->current_schema_id = builder->schemaId;
+				}
+				else
+					pg_unreachable();
+			}
+			else
+			{
+				if (builder->schema != NULL)
+				{
+					RestCatalogRequest *request = GetAddSchemaCatalogRequest(relationId, builder->schema);
 
-			restCatalogRequests = lappend(restCatalogRequests, request);
+					restCatalogRequests = lappend(restCatalogRequests, request);
+				}
+				else if (builder->schemaId >= 0)
+				{
+					RestCatalogRequest *request = GetSetCurrentSchemaCatalogRequest(relationId, builder->schemaId);
+
+					restCatalogRequests = lappend(restCatalogRequests, request);
+				}
+				else
+					pg_unreachable();
+			}
 		}
 	}
-
 	if (builder->createTable || builder->regeneratePartitionSpec)
 	{
 		metadata->default_spec_id = builder->defaultSpecId;

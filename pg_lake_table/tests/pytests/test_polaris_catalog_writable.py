@@ -3699,13 +3699,7 @@ def test_ddl_partition_same_tx(
     pg_conn.commit()
 
 
-# TODO: If you re-use the same schema, Polaris expects
-# you to provide the same `schema-id` with the previous schema
-# So, if we do `alter table .. add column a` followed by
-# `alter table .. drop column a`, we are back with the same schema, but
-# we don't provide the same schema-id, hence breaking the REST catalog
-# remove `no` prefix once that is fixed
-def no_test_add_drop_same_schema_breaks(
+def test_add_drop_same_schema_breaks(
     pg_conn,
     installcheck,
     s3,
@@ -3842,7 +3836,7 @@ def no_test_add_drop_same_schema_breaks(
 
 
 # the comments in no_test_add_drop_same_schema_breaks applies as-is
-def no_test_rest_rename_col_same_name(
+def test_rest_rename_col_same_name(
     pg_conn,
     installcheck,
     s3,
@@ -3879,11 +3873,6 @@ def no_test_rest_rename_col_same_name(
     )
     pg_conn.commit()
 
-    run_command(
-        """ ALTER TABLE ddl_demo.nn_table RENAME COLUMN id_new TO id;""", pg_conn
-    )
-    pg_conn.commit()
-
     # get the metadata location from the catalog
     metadata = get_rest_table_metadata("ddl_demo", "nn_table", pg_conn)
     metadata_path = metadata["metadata-location"]
@@ -3895,8 +3884,34 @@ def no_test_rest_rename_col_same_name(
 
     # Parse the JSON data
     parsed_data = json.loads(data)
+
+    # push a new schema and set
+    current_schema_id = parsed_data["current-schema-id"]
+    assert current_schema_id == 1
+
+    run_command(
+        """ ALTER TABLE ddl_demo.nn_table RENAME COLUMN id_new TO id;""", pg_conn
+    )
+    pg_conn.commit()
+
+    # get the metadata location from the catalog
+    metadata = get_rest_table_metadata("ddl_demo", "nn_table", pg_conn)
+    metadata_path = metadata["metadata-location"]
+
+    # make sure we write the version properly to the metadata.json
+    assert metadata_path.split("/")[-1].startswith("00002-")
+
+    data = read_s3_operations(s3, metadata_path)
+
+    # Parse the JSON data
+    parsed_data = json.loads(data)
+
+    # set back to the initial schema
+    current_schema_id = parsed_data["current-schema-id"]
+    assert current_schema_id == 0
+
     # Access specific fields
-    fields = parsed_data["schemas"][1]["fields"]
+    fields = parsed_data["schemas"][0]["fields"]
 
     expected_fields = [
         {"id": 1, "name": "id", "required": True, "type": "int"},

@@ -847,6 +847,27 @@ GetAddSchemaCatalogRequest(Oid relationId, DataFileSchema * dataFileSchema)
 	return request;
 }
 
+/*
+ * GetSetCurrentSchemaCatalogRequest creates a RestCatalogRequest that sets
+ * the current schema to the given schema ID.
+ */
+RestCatalogRequest *
+GetSetCurrentSchemaCatalogRequest(Oid relationId, int32_t schemaId)
+{
+	StringInfo	body = makeStringInfo();
+
+	/* set-current-schema to the given schema ID */
+	appendStringInfo(body, "{\"action\":\"set-current-schema\",\"schema-id\":%d}", schemaId);
+
+	RestCatalogRequest *request = palloc0(sizeof(RestCatalogRequest));
+
+	request->relationId = relationId;
+	request->operationType = REST_CATALOG_SET_CURRENT_SCHEMA;
+	request->body = body->data;
+
+	return request;
+}
+
 
 /*
  * GetAddPartitionCatalogRequest creates a RestCatalogRequest that adds a

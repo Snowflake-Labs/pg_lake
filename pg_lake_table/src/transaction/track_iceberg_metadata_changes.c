@@ -648,6 +648,7 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 	}
 	else if (operationType == REST_CATALOG_ADD_SNAPSHOT ||
 			 operationType == REST_CATALOG_ADD_SCHEMA ||
+			 operationType == REST_CATALOG_SET_CURRENT_SCHEMA ||
 			 operationType == REST_CATALOG_ADD_PARTITION ||
 			 operationType == REST_CATALOG_REMOVE_SNAPSHOT ||
 			 operationType == REST_CATALOG_SET_DEFAULT_PARTITION_ID)
@@ -720,7 +721,7 @@ ApplyTrackedIcebergMetadataChanges(void)
 
 				char	   *body =
 					FinishStageRestCatalogIcebergTableCreateRestRequest(relationId,
-																		createOp->schema,
+																		createOp->newSchema,
 																		createOp->partitionSpecs);
 
 				RecordRestCatalogRequestInTx(relationId, REST_CATALOG_CREATE_TABLE, body);
