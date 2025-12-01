@@ -39,6 +39,8 @@
 #include "pg_lake/json/json_utils.h"
 #include "pg_lake/util/url_encode.h"
 
+#define ONE_MB (1 * 1024 * 1024)
+
 /*
 * Represents the rest catalog requests per table within a transaction.
 * We can commit all DDL/DML requests in a single Post-request to the REST
@@ -49,12 +51,26 @@ typedef struct RestCatalogRequestPerTable
 {
 	Oid			relationId;
 
+	bool		isValid;
+
 	char	   *catalogName;
 	char	   *catalogNamespace;
 	char	   *catalogTableName;
 
+	/*
+	 * We do URL-encoding of the catalog, namespace and table names to
+	 * construct the identifiers used in REST API calls.
+	 */
+	char	   *urlEncodedCatalogName;
+	char	   *urlEncodedCatalogNamespace;
+	char	   *urlEncodedCatalogTableName;
+
+	char	   *tableRestUrl;
+	char	   *tableIdentifier;
+
 	RestCatalogRequest *createTableRequest;
 	RestCatalogRequest *dropTableRequest;
+
 
 	List	   *tableModifyRequests;
 }			RestCatalogRequestPerTable;
@@ -90,6 +106,10 @@ static HTAB *TrackedIcebergMetadataOperationsHash = NULL;
 * Hash table to track rest catalog requests per relation within a transaction.
 */
 static HTAB *RestCatalogRequestsHash = NULL;
+
+
+/* some pre-allocated memory so we don't palloc() ever in XACT_COMMIT  */
+static MemoryContext PgLakeXactCommitContext = NULL;
 
 /*
  * TrackIcebergMetadataChangesInTx tracks metadata changes for a given relation
@@ -185,8 +205,15 @@ void
 ResetRestCatalogRequests(void)
 {
 	RestCatalogRequestsHash = NULL;
+	PgLakeXactCommitContext = NULL;
 }
 
+
+/*
+* PostAllRestCatalogRequests posts all the tracked REST catalog requests
+* to the REST catalog at transaction commit time. This is called at post-commit
+* hook, meaning that ERRORS here will be FATAL, so not acceptable.
+*/
 void
 PostAllRestCatalogRequests(void)
 {
@@ -194,6 +221,12 @@ PostAllRestCatalogRequests(void)
 	{
 		return;
 	}
+
+	/*
+	 * Switch to PgLakeXactCommitContext to avoid palloc() in XACT_COMMIT, as
+	 * PgLakeXactCommitContext is pre-allocated before.
+	 */
+	MemoryContext oldContext = MemoryContextSwitchTo(PgLakeXactCommitContext);
 
 	/*
 	 * We need to iterate over the RestCatalogRequestsHash twice: 1. First, we
@@ -212,6 +245,17 @@ PostAllRestCatalogRequests(void)
 
 	while ((requestPerTable = hash_seq_search(&status)) != NULL)
 	{
+		if (!requestPerTable->isValid)
+		{
+			/*
+			 * Might only happen if an OOM happened during adding this request
+			 * to the hash table.
+			 */
+			elog(WARNING, "Skipping invalid REST catalog request for relation %u",
+				 requestPerTable->relationId);
+			continue;
+		}
+
 		RestCatalogRequest *createTableRequest = requestPerTable->createTableRequest;
 		RestCatalogRequest *dropTableRequest = requestPerTable->dropTableRequest;
 
@@ -225,16 +269,11 @@ PostAllRestCatalogRequests(void)
 		}
 		else if (createTableRequest != NULL || dropTableRequest != NULL)
 		{
-			const char *url =
-				psprintf(REST_CATALOG_TABLE,
-						 RestCatalogHost,
-						 URLEncodePath(requestPerTable->catalogName),
-						 URLEncodePath(requestPerTable->catalogNamespace),
-						 URLEncodePath(requestPerTable->catalogTableName));
-
 			if (createTableRequest != NULL)
 			{
-				HttpResult	httpResult = HttpPost(url, createTableRequest->body, PostHeadersWithAuth());
+				HttpResult	httpResult =
+					HttpPost(requestPerTable->tableRestUrl,
+							 createTableRequest->body, PostHeadersWithAuth());
 
 				if (httpResult.status != 200)
 				{
@@ -248,7 +287,9 @@ PostAllRestCatalogRequests(void)
 			}
 			else if (dropTableRequest != NULL)
 			{
-				HttpResult	httpResult = HttpDelete(url, DeleteHeadersWithAuth());
+				HttpResult	httpResult =
+					HttpDelete(requestPerTable->tableRestUrl,
+							   DeleteHeadersWithAuth());
 
 				if (httpResult.status != 204)
 				{
@@ -284,6 +325,17 @@ PostAllRestCatalogRequests(void)
 
 	while ((requestPerTable = hash_seq_search(&status)) != NULL)
 	{
+		if (!requestPerTable->isValid)
+		{
+			/*
+			 * Might only happen if an OOM happened during adding this request
+			 * to the hash table.
+			 */
+			elog(WARNING, "Skipping invalid REST catalog request for relation %u",
+				 requestPerTable->relationId);
+			continue;
+		}
+
 		/* TODO: can we ever have multiple catalogs? */
 		catalogName = requestPerTable->catalogName;
 
@@ -313,7 +365,7 @@ PostAllRestCatalogRequests(void)
 		appendStringInfoChar(batchRequestBody, '{');	/* start per-table json
 														 * object */
 		appendJsonKey(batchRequestBody, "identifier");
-		appendStringInfo(batchRequestBody, "%s", IdentifierJson(requestPerTable->catalogNamespace, requestPerTable->catalogTableName));
+		appendStringInfo(batchRequestBody, "%s", requestPerTable->tableIdentifier);
 		appendStringInfoChar(batchRequestBody, ',');
 		appendStringInfoString(batchRequestBody, "\"requirements\":[],");
 		appendStringInfoString(batchRequestBody, " \"updates\":[");
@@ -331,6 +383,12 @@ PostAllRestCatalogRequests(void)
 			if (!lastRequest)
 			{
 				appendStringInfoChar(batchRequestBody, ',');
+			}
+
+			if (message_level_is_interesting(DEBUG2))
+			{
+				elog(DEBUG2, "REST Catalog Request Body size reached: %d bytes",
+					 batchRequestBody->len);
 			}
 		}
 
@@ -357,6 +415,11 @@ PostAllRestCatalogRequests(void)
 			ReportHTTPError(httpResult, WARNING);
 		}
 	}
+
+	/*
+	 * Switch back to old context from PgLakeXactCommitContext.
+	 */
+	MemoryContextSwitchTo(oldContext);
 }
 
 
@@ -472,12 +535,41 @@ InitRestCatalogRequestsHashIfNeeded(void)
 {
 	if (RestCatalogRequestsHash == NULL)
 	{
+		/*
+		 * They always updated together.
+		 */
+		Assert(PgLakeXactCommitContext == NULL);
+
+		/*
+		 * First alloate 1MB memory context to avoid palloc() in XACT_COMMIT
+		 * as much as possible. Only with very large REST catalog requests we
+		 * might need to palloc() in XACT_COMMIT, which is still better than
+		 * always palloc()ing in XACT_COMMIT, reducing the risk of OOM
+		 * significantly. These very large requests might happen when there
+		 * are many tables modified in a single transaction, likely > 100
+		 * tables. We allocate in TopTransactionContext to preserve the
+		 * context until the end of the transaction, and let it be cleaned up
+		 * automatically at transaction end.
+		 */
+		PgLakeXactCommitContext =
+			AllocSetContextCreateInternal(TopTransactionContext,
+										  "PgLakeXactCommitContext",
+										  ONE_MB, ONE_MB, ONE_MB);
+		Assert(MemoryContextMemAllocated(PgLakeXactCommitContext, true) == ONE_MB);
+
 		HASHCTL		ctl;
 
 		MemSet(&ctl, 0, sizeof(ctl));
 		ctl.keysize = sizeof(Oid);
 		ctl.entrysize = sizeof(RestCatalogRequestPerTable);
 		ctl.hash = oid_hash;
+
+		/*
+		 * We prefer to allocate everything in TopTransactionContext, not in
+		 * PgLakeXactCommitContext, because we preserve
+		 * PgLakeXactCommitContext mostly for REST API request bodies to avoid
+		 * palloc() in XACT_COMMIT.
+		 */
 		ctl.hcxt = TopTransactionContext;
 
 		RestCatalogRequestsHash = hash_create("Rest Catalog Requests",
@@ -501,14 +593,38 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 		hash_search(RestCatalogRequestsHash,
 					&relationId, HASH_ENTER, &isFound);
 
-	if (!isFound)
+	if (!isFound || !requestPerTable->isValid)
 	{
 		memset(requestPerTable, 0, sizeof(RestCatalogRequestPerTable));
 		requestPerTable->relationId = relationId;
 
-		requestPerTable->catalogName = MemoryContextStrdup(TopTransactionContext, GetRestCatalogName(relationId));
-		requestPerTable->catalogNamespace = MemoryContextStrdup(TopTransactionContext, GetRestCatalogNamespace(relationId));
-		requestPerTable->catalogTableName = MemoryContextStrdup(TopTransactionContext, GetRestCatalogTableName(relationId));
+		requestPerTable->catalogName =
+			MemoryContextStrdup(TopTransactionContext, GetRestCatalogName(relationId));
+		requestPerTable->catalogNamespace =
+			MemoryContextStrdup(TopTransactionContext, GetRestCatalogNamespace(relationId));
+		requestPerTable->catalogTableName =
+			MemoryContextStrdup(TopTransactionContext, GetRestCatalogTableName(relationId));
+
+		requestPerTable->urlEncodedCatalogName =
+			MemoryContextStrdup(TopTransactionContext, URLEncodePath(GetRestCatalogName(relationId)));
+		requestPerTable->urlEncodedCatalogNamespace =
+			MemoryContextStrdup(TopTransactionContext, URLEncodePath(GetRestCatalogNamespace(relationId)));
+		requestPerTable->urlEncodedCatalogTableName =
+			MemoryContextStrdup(TopTransactionContext, URLEncodePath(GetRestCatalogTableName(relationId)));
+
+		requestPerTable->tableRestUrl =
+			MemoryContextStrdup(TopTransactionContext, psprintf(REST_CATALOG_TABLE,
+																RestCatalogHost,
+																requestPerTable->urlEncodedCatalogName,
+																requestPerTable->urlEncodedCatalogNamespace,
+																requestPerTable->urlEncodedCatalogTableName));
+
+		requestPerTable->tableIdentifier =
+			MemoryContextStrdup(TopTransactionContext,
+								IdentifierJson(requestPerTable->catalogNamespace,
+											   requestPerTable->catalogTableName));
+
+		requestPerTable->isValid = true;
 	}
 
 	/*

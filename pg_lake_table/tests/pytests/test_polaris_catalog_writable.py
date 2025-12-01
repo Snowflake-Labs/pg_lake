@@ -3593,6 +3593,112 @@ def test_rest_autovacuum(
     pg_conn.commit()
 
 
+def test_ddl_partition_same_tx(
+    pg_conn,
+    superuser_conn,
+    installcheck,
+    s3,
+    extension,
+    create_types_helper_functions,
+    with_default_location,
+    polaris_session,
+    set_polaris_gucs,
+    create_http_helper_functions,
+):
+
+    if installcheck:
+        return
+
+    run_command("CREATE SCHEMA ddl_demo;", pg_conn)
+
+    # Create table with NOT NULL column
+    run_command(
+        """
+        CREATE TABLE ddl_demo.part_ddl_same (
+            "id of ddl"  INT NOT NULL,
+            name TEXT NOT NULL,
+            age INT NOT NULL
+        ) USING iceberg WITH (catalog='rest');
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # add a column, set partition in the same tx
+    # insert a row and then drop partition by
+    # insert another row
+
+    run_command(
+        """
+            ALTER TABLE ddl_demo.part_ddl_same ADD COLUMN \"second id of ddl\" INT;
+
+            
+            INSERT INTO ddl_demo.part_ddl_same VALUES (1, 1, '1', 1);
+
+            ALTER TABLE ddl_demo.part_ddl_same ADD COLUMN \"part_col\" INT;
+            INSERT INTO ddl_demo.part_ddl_same VALUES (2, 2, '2', 2, 2);
+
+            ALTER TABLE ddl_demo.part_ddl_same OPTIONS (ADD partition_by '\"part_col\"');
+            INSERT INTO ddl_demo.part_ddl_same VALUES (3, 3, '3', 3, 3);
+
+            ALTER TABLE ddl_demo.part_ddl_same OPTIONS (DROP partition_by);
+            INSERT INTO ddl_demo.part_ddl_same VALUES (4, 4, '4', 4, 4);
+            
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    assert_metadata_on_pg_catalog_and_rest_matches(
+        "ddl_demo", "part_ddl_same", superuser_conn
+    )
+
+    # end to end test
+    for i in range(2, 5):
+        print(i)
+        res = run_query(
+            f'SELECT "id of ddl" FROM ddl_demo.part_ddl_same WHERE "part_col" = {i}',
+            pg_conn,
+        )
+        print(res)
+        assert res[0][0] == i
+
+    # get the metadata location from the catalog
+    metadata = get_rest_table_metadata("ddl_demo", "part_ddl_same", pg_conn)
+    metadata_path = metadata["metadata-location"]
+
+    # make sure we write the version properly to the metadata.json
+    assert metadata_path.split("/")[-1].startswith("00001-")
+
+    data = read_s3_operations(s3, metadata_path)
+
+    # Parse the JSON data
+    parsed_data = json.loads(data)
+
+    # Access specific fields
+    fields = parsed_data["schemas"][1]["fields"]
+    assert len(fields) == 5
+
+    assert parsed_data["last-partition-id"] == 1000
+    assert parsed_data["default-spec-id"] == 0
+
+    specs = parsed_data["partition-specs"]
+
+    assert len(specs) == 2
+    assert specs[0]["spec-id"] == 0
+    assert len(specs[0]["fields"]) == 0
+
+    assert specs[1]["spec-id"] == 1
+    assert len(specs[1]["fields"]) == 1
+    assert (specs[1]["fields"][0]["transform"]) == "identity"
+    assert (specs[1]["fields"][0]["name"]) == "part_col"
+    assert (specs[1]["fields"][0]["source-id"]) == 5
+    assert (specs[1]["fields"][0]["field-id"]) == 1000
+
+    run_command("DROP SCHEMA ddl_demo CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
 # TODO: If you re-use the same schema, Polaris expects
 # you to provide the same `schema-id` with the previous schema
 # So, if we do `alter table .. add column a` followed by

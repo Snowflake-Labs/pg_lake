@@ -581,10 +581,10 @@ RelationExistsInTheIcebergCatalog(Oid relationId)
 	char	   *columnName = "table_name";
 	bool		errorIfNotFound = false;
 
-	char	   *metadataLocation =
+	char	   *columnNameInCatalog =
 		GetIcebergCatalogColumnInternal(relationId, columnName, forUpdate, errorIfNotFound);
 
-	return metadataLocation != NULL;
+	return columnNameInCatalog != NULL;
 }
 
 

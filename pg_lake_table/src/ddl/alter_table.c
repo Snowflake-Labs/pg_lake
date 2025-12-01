@@ -206,7 +206,7 @@ static char *AddColumnToString(AlterTableCmd *cmd);
 static bool AlterTableHasSerialPseudoType(AlterTableCmd *cmd);
 static bool AlterTableAddColumnHasAnyUnsupportedConstraint(AlterTableCmd *cmd);
 static bool AlterTableAddColumnHasMutableDefault(AlterTableCmd *cmd);
-static bool AlterTableAddColumnDefaultForRestTable(Oid relationId, AlterTableCmd *cmd);
+static bool IsAlterTableAddColumnDefaultForRestTable(Oid relationId, AlterTableCmd *cmd);
 static void ErrorIfUnsupportedTypeAddedForIcebergTables(AlterTableStmt *alterStmt);
 static List *CreateDDLOperationsForAlterTable(AlterTableStmt *alterStmt);
 static void HandleIcebergOptionsChanges(Oid relationId, AlterTableStmt *alterStmt);
@@ -623,7 +623,8 @@ PostProcessRenameWritablePgLakeTable(ProcessUtilityParams * params, void *arg)
 
 	RenameStmt *renameStmt = (RenameStmt *) plannedStmt->utilityStmt;
 
-	if (renameStmt->renameType == OBJECT_SCHEMA)
+	if (renameStmt->renameType == OBJECT_SCHEMA &&
+		IsExtensionCreated(PgLakeIceberg))
 	{
 		/* we are in post-process, use new name */
 		ErrorIfAnyRestCatalogTablesInSchema(renameStmt->newname);
@@ -1159,7 +1160,7 @@ DisallowedAddColumnWithUnsupportedConstraints(Node *arg, Oid relationId)
 		return false;
 	}
 
-	if (AlterTableAddColumnDefaultForRestTable(relationId, cmd))
+	if (IsAlterTableAddColumnDefaultForRestTable(relationId, cmd))
 	{
 		return false;
 	}
@@ -1177,8 +1178,13 @@ DisallowedAddColumnWithUnsupportedConstraints(Node *arg, Oid relationId)
 	return true;
 }
 
+
+/*
+* IsAlterTableAddColumnDefaultForRestTable returns true if ALTER TABLE .. ADD COLUMN
+* has a DEFAULT constraint and the table is a REST catalog iceberg table.
+*/
 static bool
-AlterTableAddColumnDefaultForRestTable(Oid relationId, AlterTableCmd *cmd)
+IsAlterTableAddColumnDefaultForRestTable(Oid relationId, AlterTableCmd *cmd)
 {
 	Assert(cmd->subtype == AT_AddColumn);
 
@@ -1508,6 +1514,10 @@ HasPartitionByDropped(AlterTableStmt *alterStmt)
 }
 
 
+/*
+* ErrorIfAnyRestCatalogTablesInSchema throws an error if there are any
+* iceberg tables with REST catalog in the specified schema.
+*/
 static void
 ErrorIfAnyRestCatalogTablesInSchema(const char *schemaName)
 {
