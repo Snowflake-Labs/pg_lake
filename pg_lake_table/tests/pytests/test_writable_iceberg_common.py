@@ -235,7 +235,7 @@ def create_iceberg_rest_table(
     installcheck,
 ):
     if installcheck:
-        return
+        yield
     table_name = generate_table_name  # Get the generated table name
 
     # Create schema and table
