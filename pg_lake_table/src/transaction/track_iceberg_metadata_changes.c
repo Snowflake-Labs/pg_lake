@@ -541,7 +541,7 @@ InitRestCatalogRequestsHashIfNeeded(void)
 		Assert(PgLakeXactCommitContext == NULL);
 
 		/*
-		 * First alloate 1MB memory context to avoid palloc() in XACT_COMMIT
+		 * First allocate 1MB memory context to avoid palloc() in XACT_COMMIT
 		 * as much as possible. Only with very large REST catalog requests we
 		 * might need to palloc() in XACT_COMMIT, which is still better than
 		 * always palloc()ing in XACT_COMMIT, reducing the risk of OOM
