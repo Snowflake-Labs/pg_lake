@@ -35,11 +35,11 @@
 #include <ctype.h>
 #include <curl/curl.h>
 
-/* 5 second */
-#define CONNECT_TIMEOUT_MS  5000
-
 /* 20 seconds */
-#define TOTAL_TIMEOUT_MS   20000
+#define CONNECT_TIMEOUT_MS  20000
+
+/* 180 seconds */
+#define TOTAL_TIMEOUT_MS   180000
 
 
 typedef enum
