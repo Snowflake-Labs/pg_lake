@@ -66,7 +66,6 @@ typedef struct RestCatalogRequest
 	char	   *body;
 }			RestCatalogRequest;
 
-extern PGDLLEXPORT char *RestCatalogFetchAccessToken(void);
 extern PGDLLEXPORT void RegisterNamespaceToRestCatalog(const char *catalogName, const char *namespaceName);
 extern PGDLLEXPORT void StartStageRestCatalogIcebergTableCreate(Oid relationId);
 extern PGDLLEXPORT char *FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSchema * dataFileSchema, List *partitionSpecs);
