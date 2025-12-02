@@ -25,6 +25,8 @@
 #include "utils/builtins.h"
 #include "utils/jsonb.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
+#include "utils/timestamp.h"
 
 #include "pg_lake/http/http_client.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
@@ -40,7 +42,11 @@ char	   *RestCatalogHost = "http://localhost:8181";
 char	   *RestCatalogClientId = NULL;
 char	   *RestCatalogClientSecret = NULL;
 
+char	   *RestCatalogAccessToken = NULL;
+TimestampTz RestCatalogAccessTokenExpiry = 0;
 
+static char *GetRestCatalogAccessToken(void);
+static void FetchRestCatalogAccessToken(char **accessToken, int *expiresIn);
 static void CreateNamespaceOnRestCatalog(const char *catalogName, const char *namespaceName);
 static char *EncodeBasicAuth(const char *clientId, const char *clientSecret);
 static char *JsonbGetStringByPath(const char *jsonb_text, int nkeys,...);
@@ -259,7 +265,7 @@ CreateNamespaceOnRestCatalog(const char *catalogName, const char *namespaceName)
 static List *
 PostHeadersWithAuth(void)
 {
-	return list_make3(psprintf("Authorization: Bearer %s", RestCatalogFetchAccessToken()),
+	return list_make3(psprintf("Authorization: Bearer %s", GetRestCatalogAccessToken()),
 					  pstrdup("Accept: application/json"),
 					  pstrdup("Content-Type: application/json"));
 }
@@ -270,7 +276,7 @@ PostHeadersWithAuth(void)
 static List *
 GetHeadersWithAuth(void)
 {
-	return list_make2(psprintf("Authorization: Bearer %s", RestCatalogFetchAccessToken()),
+	return list_make2(psprintf("Authorization: Bearer %s", GetRestCatalogAccessToken()),
 					  pstrdup("Accept: application/json"));
 }
 
@@ -310,12 +316,46 @@ ReportHTTPError(HttpResult httpResult, int level)
 			 type ? errhint("The rest catalog returned error type: %s", type) : 0));
 }
 
+
+/*
+* Gets an access token from rest catalog using client credentials that are
+* configured via GUC variables. Caches the token until it is about to expire.
+*/
+static char *
+GetRestCatalogAccessToken(void)
+{
+	/*
+	 * Calling initial time or token will expire in 1 minute, fetch a new
+	 * token
+	 */
+	if (RestCatalogAccessTokenExpiry == 0 ||
+		GetCurrentTimestamp() >= RestCatalogAccessTokenExpiry - 60 * 1000000)
+	{
+		if (RestCatalogAccessToken)
+			pfree(RestCatalogAccessToken);
+
+		char	   *accessToken = NULL;
+		int			expiresIn = 0;
+
+		FetchRestCatalogAccessToken(&accessToken, &expiresIn);
+
+		RestCatalogAccessToken = MemoryContextStrdup(TopMemoryContext, accessToken);
+		RestCatalogAccessTokenExpiry = GetCurrentTimestamp() + expiresIn * 1000000; /* expiresIn is in
+																					 * seconds */
+	}
+
+	Assert(RestCatalogAccessToken != NULL);
+
+	return RestCatalogAccessToken;
+}
+
+
 /*
 * Fetches an access token from rest catalog using client credentials that are
 * configured via GUC variables.
 */
-char *
-RestCatalogFetchAccessToken(void)
+static void
+FetchRestCatalogAccessToken(char **accessToken, int *expiresIn)
 {
 	if (!RestCatalogHost || !*RestCatalogHost)
 		ereport(ERROR, (errmsg("pg_lake_iceberg.rest_catalog_host should be set")));
@@ -350,8 +390,8 @@ RestCatalogFetchAccessToken(void)
 	if (!httpResponse.body || !*httpResponse.body)
 		ereport(ERROR, (errmsg("Rest Catalog OAuth token response body is empty")));
 
-
-	return JsonbGetStringByPath(httpResponse.body, 1, "access_token");
+	*accessToken = JsonbGetStringByPath(httpResponse.body, 1, "access_token");
+	*expiresIn = atoi(JsonbGetStringByPath(httpResponse.body, 1, "expires_in"));
 }
 
 

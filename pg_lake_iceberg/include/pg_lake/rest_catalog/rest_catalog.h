@@ -33,7 +33,6 @@ extern char *RestCatalogClientSecret;
 #define REST_CATALOG_AUTH_TOKEN_PATH "%s/api/catalog/v1/oauth/tokens"
 #define GET_REST_CATALOG_METADATA_LOCATION "%s/api/catalog/v1/%s/namespaces/%s/tables/%s"
 
-extern PGDLLEXPORT char *RestCatalogFetchAccessToken(void);
 extern PGDLLEXPORT void RegisterNamespaceToRestCatalog(const char *catalogName, const char *namespaceName);
 extern PGDLLEXPORT void ErrorIfRestNamespaceDoesNotExist(const char *catalogName, const char *namespaceName);
 extern PGDLLEXPORT char *GetRestCatalogName(Oid relationId);
