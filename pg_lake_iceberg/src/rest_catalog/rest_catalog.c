@@ -49,6 +49,10 @@ char	   *RestCatalogHost = "http://localhost:8181";
 char	   *RestCatalogClientId = NULL;
 char	   *RestCatalogClientSecret = NULL;
 
+
+/*
+* Should always be accessed via GetRestCatalogAccessToken()
+*/
 char	   *RestCatalogAccessToken = NULL;
 TimestampTz RestCatalogAccessTokenExpiry = 0;
 
@@ -454,7 +458,7 @@ PostHeadersWithAuth(void)
 List *
 DeleteHeadersWithAuth(void)
 {
-	return list_make1(psprintf("Authorization: Bearer %s", RestCatalogFetchAccessToken()));
+	return list_make1(psprintf("Authorization: Bearer %s", GetRestCatalogAccessToken()));
 }
 
 
@@ -515,10 +519,13 @@ GetRestCatalogAccessToken(void)
 {
 	/*
 	 * Calling initial time or token will expire in 1 minute, fetch a new
-	 * token
+	 * token.
 	 */
+	TimestampTz now = GetCurrentTimestamp();
+	const int	MINUTE_IN_MSECS = 60 * 1000;
+
 	if (RestCatalogAccessTokenExpiry == 0 ||
-		GetCurrentTimestamp() >= RestCatalogAccessTokenExpiry - 60 * 1000000)
+		!TimestampDifferenceExceeds(now, RestCatalogAccessTokenExpiry, MINUTE_IN_MSECS))
 	{
 		if (RestCatalogAccessToken)
 			pfree(RestCatalogAccessToken);
@@ -528,9 +535,12 @@ GetRestCatalogAccessToken(void)
 
 		FetchRestCatalogAccessToken(&accessToken, &expiresIn);
 
+		/* Polaris default is 3600 seconds */
+		Assert(expiresIn > 0);
+
 		RestCatalogAccessToken = MemoryContextStrdup(TopMemoryContext, accessToken);
-		RestCatalogAccessTokenExpiry = GetCurrentTimestamp() + expiresIn * 1000000; /* expiresIn is in
-																					 * seconds */
+		RestCatalogAccessTokenExpiry = now + (int64_t) expiresIn * 1000000; /* expiresIn is in
+																			 * seconds */
 	}
 
 	Assert(RestCatalogAccessToken != NULL);
@@ -634,11 +644,27 @@ JsonbGetStringByPath(const char *jsonb_text, int nkeys,...)
 		}
 		else
 		{
-			if (val->type != jbvString)
-				ereport(ERROR, (errmsg("leaf \"%s\" is not a string", key)));
+			if (!(val->type == jbvString || val->type == jbvNumeric))
+				ereport(ERROR, (errmsg("leaf \"%s\" is not a string or numeric", key)));
 
 			va_end(variableArgList);
-			return pnstrdup(val->val.string.val, val->val.string.len);
+
+			if (val->type == jbvString)
+				return pnstrdup(val->val.string.val, val->val.string.len);
+			else
+			{
+				bool		haveError = false;
+
+				int			valInt = numeric_int4_opt_error(val->val.numeric,
+															&haveError);
+
+				if (haveError)
+				{
+					ereport(ERROR, (errmsg("integer out of range")));
+				}
+
+				return psprintf("%d", valInt);
+			}
 		}
 	}
 
