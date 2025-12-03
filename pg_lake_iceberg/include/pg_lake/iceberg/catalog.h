@@ -62,10 +62,7 @@ extern PGDLLEXPORT void UpdateInternalCatalogMetadataLocation(Oid relationId, co
 extern PGDLLEXPORT void UpdateAllInternalIcebergTablesToReadOnly(void);
 extern PGDLLEXPORT const char *GetIcebergDefaultLocationPrefix(void);
 extern PGDLLEXPORT bool IcebergTablesCatalogExists(void);
-extern PGDLLEXPORT void ErrorIfReadOnlyIcebergTable(Oid relationId);
-extern PGDLLEXPORT bool WarnIfReadOnlyIcebergTable(Oid relationId);
-extern PGDLLEXPORT void ErrorIfReadOnlyExternalCatalogIcebergTable(Oid relationId);
-extern PGDLLEXPORT bool IsReadOnlyIcebergTable(Oid relationId);
 extern PGDLLEXPORT bool RelationExistsInTheIcebergCatalog(Oid relationId);
 extern PGDLLEXPORT bool HasCustomLocation(Oid relationId);
 extern PGDLLEXPORT bool IsWritableIcebergTable(Oid relationId);
+extern PGDLLEXPORT bool IsReadOnlyIcebergTable(Oid relationId);
