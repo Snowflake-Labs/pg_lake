@@ -165,10 +165,10 @@ install-duckdb_pglake: duckdb_pglake
 		$(MAKE) -C duckdb_pglake install; \
 	fi
 
-pgduck_server: duckdb_pglake
+pgduck_server: install-duckdb_pglake
 	$(MAKE) -C pgduck_server
 
-install-pgduck_server: install-duckdb_pglake pgduck_server
+install-pgduck_server: pgduck_server
 	$(MAKE) -C pgduck_server install
 
 ## Overridden targets; basically the ones in CUSTOM_TARGETS above
