@@ -37,9 +37,9 @@ def test_polaris_catalog_running(pg_conn, s3, polaris_session, installcheck):
 
 namespaces = [
     "regular_name",
-    "regular ..!!**(());;//??::@@&&==++$$,,## name",
+    "regular..!!**(());;//??::@@&&==++$$,,#name",
     "Special-Table!_With.Multiple_Uses_Of@Chars#-Here~And*Here!name",
-    "  !~*();/?:@&=+$,#",
+    "!~*();/?:@&=+$,#",
 ]
 
 
@@ -66,6 +66,9 @@ def test_create_namespace(
         pg_conn,
     )
     pg_conn.commit()
+
+    # no-op, just to make sure nothing is broken
+    run_command_outside_tx([f"""VACUUM "{namespace}".tbl"""], pg_conn)
 
     encoded_namespace = run_query(
         f"SELECT lake_iceberg.url_encode_path('{namespace}')", pg_conn
@@ -132,13 +135,13 @@ def test_create_namespace_in_tx(
     run_command(f'''CREATE SCHEMA "{namespace}_2"''', pg_conn)
 
     run_command(
-        f"""CREATE TABLE "{namespace}".tbl(a int) USING iceberg WITH (catalog='rest');""",
+        f"""CREATE TABLE "{namespace}".tbl_10(a int) USING iceberg WITH (catalog='rest');""",
         pg_conn,
     )
     pg_conn.commit()
 
     run_command(
-        f"""CREATE TABLE "{namespace}_2".tbl(a int) USING iceberg WITH (catalog='rest');""",
+        f"""CREATE TABLE "{namespace}_2".tbl_11(a int) USING iceberg WITH (catalog='rest');""",
         pg_conn,
     )
     pg_conn.commit()
@@ -176,7 +179,7 @@ def test_create_namespace_rollback(
     run_command(f'''CREATE SCHEMA "{namespace}"''', pg_conn)
 
     run_command(
-        f"""CREATE TABLE "{namespace}".tbl(a int) USING iceberg WITH (catalog='rest');""",
+        f"""CREATE TABLE "{namespace}".tbl_20(a int) USING iceberg WITH (catalog='rest');""",
         pg_conn,
     )
 

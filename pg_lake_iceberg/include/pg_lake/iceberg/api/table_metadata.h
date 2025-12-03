@@ -35,7 +35,7 @@ extern PGDLLEXPORT char *GenerateRemoteMetadataFilePath(int version, const char 
 extern PGDLLEXPORT void UploadTableMetadataToURI(IcebergTableMetadata * tableMetadata, char *metadataURI);
 extern PGDLLEXPORT void AdjustAndRetainMetadataLogs(IcebergTableMetadata * metadata, char *prevMetadataPath, size_t snapshotLogLength, int64_t prev_last_updated_ms);
 extern PGDLLEXPORT void UpdateLatestSnapshot(IcebergTableMetadata * tableMetadata, IcebergSnapshot * newSnapshot);
-extern PGDLLEXPORT bool RemoveOldSnapshotsFromMetadata(Oid relationId, IcebergTableMetadata * metadata, bool isVerbose);
+extern PGDLLEXPORT List *RemoveOldSnapshotsFromMetadata(Oid relationId, IcebergTableMetadata * metadata, bool isVerbose);
 extern PGDLLEXPORT void GenerateSnapshotLogEntries(IcebergTableMetadata * metadata);
 extern PGDLLEXPORT int FindLargestPartitionFieldId(IcebergPartitionSpec * newSpec);
 extern PGDLLEXPORT void AppendCurrentPostgresSchema(Oid relationId, IcebergTableMetadata * metadata,

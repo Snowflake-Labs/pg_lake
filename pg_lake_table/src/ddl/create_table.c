@@ -76,6 +76,7 @@
 #include "pg_lake/planner/dbt.h"
 #include "pg_lake/query/execute.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
+#include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 
 
@@ -964,6 +965,39 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 	 * columnDefList is already the restricted list.
 	 */
 	Assert(list_length(GetRestrictedColumnDefList(columnDefList)) == list_length(columnDefList));
+
+
+	if (hasRestCatalogOption)
+	{
+		/* this code-path only deals with writable rest catalog tables */
+		Assert(!HasReadOnlyOption(createStmt->options));
+
+		/*
+		 * We have to start staging create table for writable rest catalog
+		 * tables here, because initial staging allows us to get the vended
+		 * credentials for this transaction. For example, if the rest catalog
+		 * table is created via CTAS, the CTAS command may need to read/write
+		 * data to S3 using the vended credentials. Also note that staging
+		 * consists of two steps: 1.
+		 * StartStagingCreateRestCatalogIcebergTable: which creates the table
+		 * in the rest catalog with a "staging" status. 2.
+		 * FinalizeStagingCreateRestCatalogIcebergTable: which finalizes the
+		 * table creation in the rest catalog after the local table creation
+		 * is successful in post-commit.
+		 */
+		StartStageRestCatalogIcebergTableCreate(relationId);
+
+		/*
+		 * Record the create table operation in the rest catalog. Note that
+		 * this is not the final registration of the table in the tx, we'll
+		 * update this record in
+		 * FinalizeStagingCreateRestCatalogIcebergTableCreate. We prefer to
+		 * record it here such if table is dropped before commit, we can track
+		 * the creation of the table properly.
+		 */
+		RecordRestCatalogRequestInTx(relationId, REST_CATALOG_CREATE_TABLE, "");
+	}
+
 
 	List	   *ddlOps = NIL;
 

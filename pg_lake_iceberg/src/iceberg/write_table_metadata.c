@@ -34,7 +34,6 @@ static void AppendProperties(StringInfo command, Property * properties, size_t p
 static void AppendField(StringInfo command, Field * field);
 static void AppendIcebergStructFields(StringInfo command, FieldStructElement * fields, size_t fields_length);
 static void AppendIcebergTableSchemas(StringInfo command, IcebergTableSchema * schemas, size_t schemas_length);
-static void AppendIcebergPartitionSpecFields(StringInfo command, IcebergPartitionSpecField * fields, size_t fields_length);
 static void AppendIcebergPartitionSpecs(StringInfo command, IcebergPartitionSpec * specs, size_t specs_length);
 static void AppendIcebergSnapshots(StringInfo command, IcebergSnapshot * snapshots, size_t snapshots_length);
 static void AppendIcebergSnapshotLogEntries(StringInfo command, IcebergSnapshotLogEntry * entries, size_t entries_length);
@@ -243,6 +242,47 @@ AppendIcebergTableSchemas(StringInfo command, IcebergTableSchema * schemas, size
 
 	appendStringInfoString(command, "]");
 }
+
+
+/*
+* Similar to AppendIcebergTableSchemas, but specifically for Rest Catalog stage
+* API calls.
+*/
+void
+AppendIcebergTableSchemaForRestCatalog(StringInfo command, IcebergTableSchema * schemas, size_t schemas_length)
+{
+	appendStringInfoString(command, "\"schema\":");
+
+	for (size_t i = 0; i < schemas_length; i++)
+	{
+		appendStringInfoString(command, "{");
+
+		/* append type */
+		appendJsonString(command, "type", schemas[i].type);
+
+		if (schemas[i].identifier_field_ids_length > 0)
+		{
+			appendStringInfoString(command, ", ");
+			appendStringInfoString(command, "\"identifier-field-ids\":");
+			AppendIntArray(command, schemas[i].identifier_field_ids,
+						   schemas[i].identifier_field_ids_length);
+		}
+
+		/* Append fields */
+		appendStringInfoString(command, ", ");
+
+		appendStringInfoString(command, "\"fields\":");
+		AppendIcebergStructFields(command, schemas[i].fields, schemas[i].fields_length);
+
+		appendStringInfoString(command, "}");
+
+		if (i < schemas_length - 1)
+		{
+			appendStringInfoString(command, ", ");
+		}
+	}
+}
+
 
 static void
 AppendIcebergPartitionSpecs(StringInfo command, IcebergPartitionSpec * specs, size_t specs_length)
@@ -681,7 +721,7 @@ AppendIcebergStructFields(StringInfo command, FieldStructElement * fields, size_
 }
 
 
-static void
+void
 AppendIcebergPartitionSpecFields(StringInfo command, IcebergPartitionSpecField * fields, size_t fields_length)
 {
 	appendStringInfoString(command, "[");

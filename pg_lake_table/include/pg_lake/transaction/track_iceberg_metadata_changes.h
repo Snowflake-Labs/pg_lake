@@ -19,6 +19,7 @@
 
 #include "postgres.h"
 #include "access/hash.h"
+#include "pg_lake/rest_catalog/rest_catalog.h"
 
 typedef struct TableMetadataOperationTracker
 {
@@ -32,9 +33,14 @@ typedef struct TableMetadataOperationTracker
 	bool		relationSnapshotExpirationRequested;
 }			TableMetadataOperationTracker;
 
+
 extern PGDLLEXPORT void ConsumeTrackedIcebergMetadataChanges(void);
+extern PGDLLEXPORT void PostAllRestCatalogRequests(void);
 extern PGDLLEXPORT void TrackIcebergMetadataChangesInTx(Oid relationId, List *metadataOperationTypes);
+extern PGDLLEXPORT void RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationType,
+													 const char *body);
 extern PGDLLEXPORT void ResetTrackedIcebergMetadataOperation(void);
+extern PGDLLEXPORT void ResetRestCatalogRequests(void);
 extern PGDLLEXPORT HTAB *GetTrackedIcebergMetadataOperations(void);
 extern PGDLLEXPORT bool HasAnyTrackedIcebergMetadataChanges(void);
 extern PGDLLEXPORT bool IsIcebergTableCreatedInCurrentTransaction(Oid relation);
