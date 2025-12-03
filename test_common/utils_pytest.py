@@ -890,6 +890,28 @@ def create_mock_s3():
         CreateBucketConfiguration={"LocationConstraint": TEST_AWS_REGION},
     )
 
+    # allow public reads to our test bucket
+    client.put_bucket_policy(
+        Bucket=TEST_BUCKET,
+        Policy=json.dumps(
+            {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Sid": "PublicReadGetObject",
+                        "Effect": "Allow",
+                        "Principal": "*",
+                        "Action": "s3:GetObject",
+                        "Resource": f"arn:aws:s3:::{TEST_BUCKET}/*",
+                    }
+                ],
+            }
+        ),
+    )
+
+    s3_client.put_bucket_policy(
+        Bucket=BUCKET_NAME, Policy=json.dumps(public_read_policy)
+    )
     # Create a customer-managed key
     kms_client = create_kms_client()
     response = kms_client.create_key(
