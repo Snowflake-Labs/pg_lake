@@ -722,6 +722,62 @@ def test_iceberg_multiple_dbs(
     superuser_conn.autocommit = False
 
 
+def test_create_table_with_default_location_object_store(
+    pg_conn,
+    superuser_conn,
+    s3,
+    extension,
+    with_default_location,
+    adjust_object_store_settings,
+):
+    dbname = run_query("SELECT current_database()", pg_conn)[0][0]
+    run_command(
+        "CREATE SCHEMA test_create_table_with_default_location_object_store", pg_conn
+    )
+    run_command(
+        f"""CREATE TABLE test_create_table_with_default_location_object_store.tbl (a int, b int)
+                    USING iceberg WITH (catalog='object_store')""",
+        pg_conn,
+    )
+    pg_conn.commit()
+    wait_until_object_store_writable_table_pushed(
+        pg_conn, "test_create_table_with_default_location_object_store", "tbl"
+    )
+
+    # assert metadata location
+    result = run_query(
+        """SELECT metadata_location FROM iceberg_tables
+                           WHERE table_namespace = 'test_create_table_with_default_location_object_store' and table_name = 'tbl'
+                       """,
+        pg_conn,
+    )
+    first_table_metadata_location = result[0][0]
+
+    table_oid = run_query(
+        """SELECT oid FROM pg_class
+                            WHERE oid = 'test_create_table_with_default_location_object_store.tbl'::regclass
+                          """,
+        pg_conn,
+    )[0][0]
+
+    prefix = run_query(
+        "SHOW pg_lake_iceberg.internal_object_store_catalog_prefix", superuser_conn
+    )[0][0]
+    superuser_conn.commit()
+
+    assert (
+        f"s3://{TEST_BUCKET}/{prefix}/tables/{dbname}/test_create_table_with_default_location_object_store/tbl/{table_oid}"
+        in first_table_metadata_location
+    )
+
+    # drop the table and create it again
+    run_command(
+        "DROP SCHEMA test_create_table_with_default_location_object_store CASCADE",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+
 def test_complex_types_object_store(
     pg_conn, s3, extension, with_default_location, adjust_object_store_settings
 ):

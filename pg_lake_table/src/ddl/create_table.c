@@ -822,7 +822,40 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 	}
 
 	DefElem    *locationOption = GetOption(createStmt->options, "location");
-	const char *defaultLocationPrefix = GetIcebergDefaultLocationPrefix();
+	char	   *defaultLocationPrefix = GetIcebergDefaultLocationPrefix();
+
+	if (hasObjectStoreCatalogOption)
+	{
+		const char *objectStoreCatalogLocationPrefix = GetObjectStoreDefaultLocationPrefix();
+
+		if (objectStoreCatalogLocationPrefix == NULL)
+		{
+			ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+							errmsg("object store catalog iceberg tables require "
+								   "pg_lake_iceberg.object_store_catalog_location_prefix "
+								   "to be set")));
+		}
+
+		if (InternalObjectStorePrefix == NULL)
+		{
+			ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+							errmsg("object store catalog iceberg tables require "
+								   "pg_lake_iceberg.internal_iceberg_storage_prefix "
+								   "to be set")));
+		}
+
+		/* here we only deal with writable tables */
+		Assert(!HasReadOnlyOption(createStmt->options));
+
+		/*
+		 * For hasObjectStoreCatalogOption, we also append
+		 * InternalObjectStorePrefix/tables to the location
+		 */
+		defaultLocationPrefix = psprintf("%s/%s/%s",
+										 defaultLocationPrefix,
+										 InternalObjectStorePrefix,
+										 "tables");
+	}
 
 	/*
 	 * We will set the location by using the default location prefix when user
@@ -840,19 +873,6 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		createStmt->options = lappend(createStmt->options, defaultPlaceholder);
 	}
 
-
-	if (hasObjectStoreCatalogOption)
-	{
-		const char *objectStoreCatalogLocationPrefix = GetObjectStoreDefaultLocationPrefix();
-
-		if (objectStoreCatalogLocationPrefix == NULL)
-		{
-			ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-							errmsg("object store catalog iceberg tables require "
-								   "pg_lake_iceberg.object_store_catalog_location_prefix "
-								   "to be set")));
-		}
-	}
 
 	/*
 	 * Our CREATE FOREIGN TABLE statement is fully ready for execution, so we

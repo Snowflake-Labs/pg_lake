@@ -740,7 +740,7 @@ UpdateAllInternalIcebergTablesToReadOnly(void)
  * GetIcebergDefaultLocationPrefix returns the default location prefix
  * for iceberg tables. Trailing slash is removed, if present.
  */
-const char *
+char *
 GetIcebergDefaultLocationPrefix(void)
 {
 	if (IcebergDefaultLocationPrefix == NULL)
