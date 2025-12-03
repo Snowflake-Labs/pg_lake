@@ -909,9 +909,6 @@ def create_mock_s3():
         ),
     )
 
-    s3_client.put_bucket_policy(
-        Bucket=BUCKET_NAME, Policy=json.dumps(public_read_policy)
-    )
     # Create a customer-managed key
     kms_client = create_kms_client()
     response = kms_client.create_key(
