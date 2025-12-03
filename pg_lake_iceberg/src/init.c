@@ -237,20 +237,11 @@ _PG_init(void)
 							   GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							   NULL, NULL, NULL);
 
-    DefineCustomStringVariable("pg_lake_iceberg.rest_catalog_oauth_host",
+    DefineCustomStringVariable("pg_lake_iceberg.rest_catalog_oauth_host_path",
 							   NULL,
 							   NULL,
-							   &RestCatalogOauthHost,
-							   "http://localhost:8181",
-							   PGC_SUSET,
-							   GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
-							   NULL, NULL, NULL);
-
-    DefineCustomStringVariable("pg_lake_iceberg.rest_catalog_oauth_path",
-							   NULL,
-							   NULL,
-							   &RestCatalogOauthPath,
-							   "%s/api/catalog/v1/oauth/tokens",
+							   &RestCatalogOauthHostPath,
+							   "http://localhost:8181/api/catalog/v1/oauth/tokens",
 							   PGC_SUSET,
 							   GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							   NULL, NULL, NULL);
