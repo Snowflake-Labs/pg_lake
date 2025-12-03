@@ -143,3 +143,76 @@ def test_pg_child(s3, pg_conn, extension, with_default_location):
     assert full_plan["Node Type"] == "Append"
 
     pg_conn.rollback()
+
+
+def test_schema_propagation(s3, pg_conn, extension, with_default_location):
+    # 1. add column should propagate
+    run_command(
+        """
+        create table parent (id bigint, value text) using iceberg;
+        create table child1 (id bigint, value text) using iceberg;
+        alter table child1 inherit parent;
+        insert into parent values (1, 'parent');
+        insert into child1 values (2, 'child1');
+        alter table parent add column z int default 10;
+        """,
+        pg_conn,
+    )
+
+    result = run_query("select * from parent", pg_conn)
+    assert len(result) == 2
+    assert len(result[0]) == 3
+    assert result[0]["z"] == 10
+
+    result = run_query("select * from child1", pg_conn)
+    assert len(result) == 1
+    assert len(result[0]) == 3
+    assert result[0]["z"] == 10
+
+    pg_conn.rollback()
+
+    # 2. rename column should propagate
+    run_command(
+        """
+        create table parent (id bigint, old_name text) using iceberg;
+        create table child1 (id bigint, old_name text) using iceberg;
+        alter table child1 inherit parent;
+        insert into parent values (1, 'parent');
+        insert into child1 values (2, 'child1');
+        alter table parent rename column old_name to new_name;
+        """,
+        pg_conn,
+    )
+
+    result = run_query("select id, new_name from parent order by id", pg_conn)
+    assert len(result) == 2
+    assert result[0]["new_name"] == "parent"
+
+    result = run_query("select id, new_name from child1", pg_conn)
+    assert len(result) == 1
+    assert result[0]["new_name"] == "child1"
+
+    pg_conn.rollback()
+
+    # 3. drop column should not propagate
+    run_command(
+        """
+        create table parent (id bigint, value text, z int) using iceberg;
+        create table child1 (id bigint, value text, z int) using iceberg;
+        alter table child1 inherit parent;
+        insert into parent values (1, 'parent', 10);
+        insert into child1 values (2, 'child1', 20);
+        alter table parent drop column z;
+        """,
+        pg_conn,
+    )
+
+    result = run_query("select * from parent", pg_conn)
+    assert len(result) == 2
+    assert len(result[0]) == 2
+
+    result = run_query("select * from child1", pg_conn)
+    assert len(result) == 1
+    assert len(result[0]) == 3
+
+    pg_conn.rollback()
