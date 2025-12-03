@@ -7,8 +7,7 @@ trap "echo 'Caught termination signal. Exiting...'; exit 0" SIGINT SIGTERM
 sudo chown -R postgres:postgres /home/postgres/pgduck_socket_dir
 
 # Start pgduck_server
-cd /home/postgres/pg_lake/pgduck_server
-./pgduck_server --cache_dir ~/cache --unix_socket_directory ~/pgduck_socket_dir --unix_socket_group postgres --init_file_path /init-pgduck-server.sql &
+pgduck_server --cache_dir ~/cache --unix_socket_directory ~/pgduck_socket_dir --unix_socket_group postgres --init_file_path /init-pgduck-server.sql &
 pgduck_server_pid=$!
 
 wait $pgduck_server_pid

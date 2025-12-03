@@ -70,22 +70,13 @@ AZURITE_CONNECTION_STRING = "DefaultEndpointsProtocol=http;AccountName=devstorea
 
 log_level = os.getenv("LOG_MIN_MESSAGES", "notice")
 
-# this is not a very generic function, could easily
-# break if we move files around
-# but it is at least used in a single place
+
 def get_pgduck_server_path():
-    # for installcheck we assume this binary is in path
-    if "INSTALLCHECK" in os.environ:
-        pgduck_server = subprocess.run(
-            ["which", "pgduck_server"], capture_output=True, text=True
-        ).stdout.rstrip()
-        # error if not found?
-        return Path(pgduck_server)
-
-    base_dir = Path(__file__).resolve().parent.parent
-    pgduck_server_path = base_dir / "pgduck_server/pgduck_server"
-
-    return pgduck_server_path
+    pgduck_server = subprocess.run(
+        ["which", "pgduck_server"], capture_output=True, text=True
+    ).stdout.rstrip()
+    # error if not found?
+    return Path(pgduck_server)
 
 
 def get_polaris_server_path():
@@ -1436,7 +1427,6 @@ def create_iceberg_rest_catalog(namespace):
             "oauth2-server-uri": oauth_token_url,  # token endpoint
             "scope": "PRINCIPAL_ROLE:ALL",  # typical Polaris scope
             "credential": f"{client_id}:{client_secret}",  # "id:secret"
-
             # S3/Moto settings (same as your JDBC helper)
             "s3.endpoint": f"http://localhost:{MOTO_PORT}",
             "s3.access-key-id": TEST_AWS_ACCESS_KEY_ID,

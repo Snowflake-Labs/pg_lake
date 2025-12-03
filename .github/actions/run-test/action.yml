@@ -90,11 +90,6 @@ runs:
           chmod 755 /home/postgres/pgsql-${{ inputs.from_pg_version }}/lib/*.so
         fi
 
-    - name: Move pgduck_server to local path
-      shell: bash
-      run: |
-        cp $(pg_config --bindir)/pgduck_server ./pgduck_server/pgduck_server
-
     - uses: actions/cache@v4
       name: Cache pipenv
       with:

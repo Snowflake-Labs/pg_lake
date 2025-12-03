@@ -7,20 +7,21 @@ PG_CONFIG ?= pg_config
 
 # Get LIBDIR INCLUDE_DIR from pg_config
 PG_LIBDIR := $(shell $(PG_CONFIG) --libdir)
-PG_PKGLIBDIR := -L$(shell $(PG_CONFIG) --pkglibdir)
-PG_INCLUDE_DIR = $(shell $(PG_CONFIG) --includedir)
+PG_INCLUDEDIR = $(shell $(PG_CONFIG) --includedir)
 
 # PGXS: Locates PostgreSQL extension building infrastructure using 'pg_config'.
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 
 # compile with C11 option to use modern C
-PG_CPPFLAGS = -std=c11 -I$(PG_INCLUDE_DIR)
+PG_CPPFLAGS = -std=c11 -I$(PG_INCLUDEDIR) -g
+
+PG_LDFLAGS  = -L$(PG_LIBDIR) -lpq -lpgcommon -lduckdb -Wl,-rpath,$(PG_LIBDIR)
 
 include ../../../shared.mk
 
 # Rule to compile the test code
 $(TEST_EXEC): $(TEST_OBJECTS)
-	$(CC) -o $@ $^ $(LDFLAGS) $(PG_PKGLIBDIR) -lpq -lpgcommon -g
+	$(CC) -o $@ $^ $(PG_CPPFLAGS) $(PG_LDFLAGS)
 
 clean:
 	rm -f $(TEST_OBJECTS) $(TEST_EXEC)

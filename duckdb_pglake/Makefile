@@ -105,10 +105,19 @@ $(LIB_NAME):
 	$(MAKE) release
 
 install: $(LIB_NAME)
-	cp $(LIB_NAME) $(DESTDIR)$(PG_LIBDIR)/$(LIB_NAME)
+	install $(LIB_NAME) $(DESTDIR)$(PG_LIBDIR)/$(LIB_NAME)
+	install -d $(DESTDIR)$(PG_INCLUDEDIR)/duckdb
+	install -d duckdb/src/include/duckdb/* $(DESTDIR)$(PG_INCLUDEDIR)/duckdb
+	install duckdb/src/include/duckdb.h $(DESTDIR)$(PG_INCLUDEDIR)
+	install duckdb/src/include/duckdb.hpp $(DESTDIR)$(PG_INCLUDEDIR)
+	install duckdb/src/include/duckdb_extension.h $(DESTDIR)$(PG_INCLUDEDIR)
 
 uninstall:
-	rm -f $(PG_LIBDIR)/$(LIB_NAME)
+	rm -f $(DESTDIR)$(PG_LIBDIR)/$(LIB_NAME)
+	rm -rf $(DESTDIR)$(PG_INCLUDEDIR)/duckdb
+	rm -f $(DESTDIR)$(PG_INCLUDEDIR)/duckdb.h
+	rm -f $(DESTDIR)$(PG_INCLUDEDIR)/duckdb.hpp
+	rm -f $(DESTDIR)$(PG_INCLUDEDIR)/duckdb_extension.h
 
 debug: patch_duckdb
 	mkdir -p  build/debug

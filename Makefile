@@ -11,7 +11,7 @@ PHONY_TARGETS = $(foreach target, $(ALL_TARGETS), $(target) $(foreach action, $(
 CUSTOM_TARGETS = check-pg_lake_engine installcheck-pg_lake_engine check-pg_extension_updater installcheck-pg_extension_updater check-avro clean-avro uninstall-avro check-duckdb_pglake \
 				 $(foreach target, $(ALL_TARGETS), install-$(target))
 
-FORCE_DUCKDB_BUILD ?= 1
+DUCKDB_BUILD_USE_CACHE ?= 0
 
 # other phony targets go here
 .PHONY: all fast install install-fast installcheck clean check submodules uninstall check-indent reindent installcheck-postgres installcheck-postgres-with_extensions_created
@@ -20,13 +20,13 @@ FORCE_DUCKDB_BUILD ?= 1
 
 # top-level targets defined in terms of our variables
 all: pg_lake
-	FORCE_DUCKDB_BUILD=1 $(MAKE) pgduck_server
+	DUCKDB_BUILD_USE_CACHE=0 $(MAKE) pgduck_server
 install: install-pg_lake
-	FORCE_DUCKDB_BUILD=1 $(MAKE) install-pgduck_server
+	DUCKDB_BUILD_USE_CACHE=0 $(MAKE) install-pgduck_server
 fast: pg_lake
-	FORCE_DUCKDB_BUILD=0 $(MAKE) pgduck_server
+	DUCKDB_BUILD_USE_CACHE=1 $(MAKE) pgduck_server
 install-fast: install-pg_lake
-	FORCE_DUCKDB_BUILD=0 $(MAKE) install-pgduck_server
+	DUCKDB_BUILD_USE_CACHE=1 $(MAKE) install-pgduck_server
 clean: $(addprefix clean-,$(ALL_TARGETS))
 check-local: $(addprefix check-,$(ALL_TARGETS))
 check-upgrade: check-pg_lake_table-upgrade
@@ -40,7 +40,7 @@ uninstall: $(addprefix uninstall-,$(ALL_TARGETS))
 # variables needed for additional targets
 PG_CONFIG ?= pg_config
 PG_LIBDIR := $(shell $(PG_CONFIG) --libdir)
-PKGINCLUDEDIR := $(shell $(PG_CONFIG) --pkgincludedir)
+PG_INCLUDEDIR := $(shell $(PG_CONFIG) --includedir)
 PG_MAJOR_VERSION := $(shell $(PG_CONFIG) --version | cut -f2 -d' ' | cut -f 1 -d.)
 
 # Detect operating system
@@ -149,15 +149,21 @@ install-pg_lake_benchmark: install-pg_lake pg_lake_benchmark
 	$(MAKE) -C pg_lake_benchmark install
 
 duckdb_pglake:
-	@if [ $(FORCE_DUCKDB_BUILD) -eq 0 ] && [ -f $(PG_LIBDIR)/$(LIB_NAME) ]; then \
-		cp $(PG_LIBDIR)/$(LIB_NAME) duckdb_pglake/$(LIB_NAME); \
+	@if [ $(DUCKDB_BUILD_USE_CACHE) -eq 1 ] && [ -f $(PG_LIBDIR)/$(LIB_NAME) ] && [ -f $(PG_INCLUDEDIR)/duckdb.h ]; then \
+		echo "Using cached DuckDB library at $(PG_LIBDIR)/$(LIB_NAME)"; \
 	else \
+		echo "Building DuckDB library"; \
 		$(MAKE) submodules; \
 		$(MAKE) -C duckdb_pglake; \
 	fi
 
 install-duckdb_pglake: duckdb_pglake
-	$(MAKE) -C duckdb_pglake install
+	@if [ $(DUCKDB_BUILD_USE_CACHE) -eq 1 ] && [ -f $(PG_LIBDIR)/$(LIB_NAME) ] && [ -f $(PG_INCLUDEDIR)/duckdb.h ]; then \
+		echo "Using cached DuckDB library at $(PG_LIBDIR)/$(LIB_NAME)"; \
+	else \
+		echo "Installing DuckDB library to $(PG_LIBDIR)/$(LIB_NAME)"; \
+		$(MAKE) -C duckdb_pglake install; \
+	fi
 
 pgduck_server: duckdb_pglake
 	$(MAKE) -C pgduck_server
@@ -195,9 +201,9 @@ endif
 
 install-avro: avro
 	install avro/lang/c/build/avrolib/lib*/libavro.* $(DESTDIR)$(PG_LIBDIR)
-	install -d $(DESTDIR)$(PKGINCLUDEDIR)/avro
-	install avro/lang/c/build/avrolib/include/avro/* $(DESTDIR)$(PKGINCLUDEDIR)/avro
-	install avro/lang/c/build/avrolib/include/avro.h $(DESTDIR)$(PKGINCLUDEDIR)
+	install -d $(DESTDIR)$(PG_INCLUDEDIR)/avro
+	install avro/lang/c/build/avrolib/include/avro/* $(DESTDIR)$(PG_INCLUDEDIR)/avro
+	install avro/lang/c/build/avrolib/include/avro.h $(DESTDIR)$(PG_INCLUDEDIR)
 
 check-avro: avro
 	$(MAKE) -C avro/lang/c/build test
@@ -210,7 +216,7 @@ endif
 
 uninstall-avro:
 	rm -f $(PG_LIBDIR)/libavro.*
-	rm -rf $(PKGINCLUDEDIR)/avro*
+	rm -rf $(PG_INCLUDEDIR)/avro*
 
 ## Other targets
 check-isolation_pg_lake_table:

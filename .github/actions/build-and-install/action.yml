@@ -16,6 +16,7 @@ runs:
       run: |
         echo "PGDIR=/home/postgres/pgsql-${{ inputs.pg_version }}" >> $GITHUB_ENV
         echo "PG_LIBDIR=/home/postgres/pgsql-${{ inputs.pg_version }}/lib" >> $GITHUB_ENV
+        echo "PG_INCLUDEDIR=/home/postgres/pgsql-${{ inputs.pg_version }}/include" >> $GITHUB_ENV
         echo "PATH=/home/postgres/pgsql-${{ inputs.pg_version }}/bin:$PATH" >> $GITHUB_ENV
         echo "PG_REGRESS_DIR=/home/postgres/pgsql-${{ inputs.pg_version }}/regress" >> $GITHUB_ENV
 
@@ -47,6 +48,10 @@ runs:
         key: duckdb_pglake-${{ inputs.container_os }}-${{ hashFiles('duckdb_pglake/src/**', 'duckdb_pglake/Makefile', 'duckdb_pglake/patches/**', 'duckdb_pglake/extension_config.cmake', 'duckdb_pglake/CMakeLists.txt') }}
         path: |
           ${{ env.PG_LIBDIR }}/libduckdb.so
+          ${{ env.PG_INCLUDEDIR }}/duckdb
+          ${{ env.PG_INCLUDEDIR }}/duckdb.h
+          ${{ env.PG_INCLUDEDIR }}/duckdb.hpp
+          ${{ env.PG_INCLUDEDIR }}/duckdb_extension.h
 
     - uses: actions/cache@v4
       id: cache_polaris
@@ -62,12 +67,10 @@ runs:
       run: |
         export PGCOMPAT_BUILD_CONFIG=Release
 
-        if [ -f "${{ env.PG_LIBDIR }}/libduckdb.so" ]; then
-          echo "Using cached libduckdb.so"
-          export FORCE_DUCKDB_BUILD=0;
+        if [ -f "${{ env.PG_LIBDIR }}/libduckdb.so" -a -f "${{ env.PG_INCLUDEDIR }}/duckdb.h" ]; then
+          export DUCKDB_BUILD_USE_CACHE=1;
         else
-          echo "Building libduckdb.so"
-          export FORCE_DUCKDB_BUILD=1;
+          export DUCKDB_BUILD_USE_CACHE=0;
         fi
 
         make install-pgduck_server && make install-pg_lake_spatial && make install-pg_lake_benchmark
