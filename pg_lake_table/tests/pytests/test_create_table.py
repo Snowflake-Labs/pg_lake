@@ -219,7 +219,7 @@ def test_create_table_with_default_location(
     )[0][0]
 
     assert (
-        f"s3://{TEST_BUCKET}/{dbname}/public/test_create_table_with_default_location/{table_oid}"
+        f"s3://{TEST_BUCKET}/frompg/tables/{dbname}/public/test_create_table_with_default_location/{table_oid}"
         in first_table_metadata_location
     )
 
@@ -275,7 +275,7 @@ def test_create_table_with_default_location(
     )[0][0]
 
     assert (
-        f"s3://{TEST_BUCKET}/{dbname}/public/test_create_table_with_default_location/{table_oid}"
+        f"s3://{TEST_BUCKET}/frompg/tables/{dbname}/public/test_create_table_with_default_location/{table_oid}"
         in second_table_metadata_location
     )
 
@@ -333,7 +333,7 @@ def test_create_table_with_default_location_override(
         pg_conn,
     )
     assert (
-        f"s3://{TEST_BUCKET}/test_create_table_with_default_location_override/{dbname}/public/test_create_table_with_default_location"
+        f"s3://{TEST_BUCKET}/test_create_table_with_default_location_override/frompg/tables/{dbname}/public/test_create_table_with_default_location"
         in result[0][0]
     )
 

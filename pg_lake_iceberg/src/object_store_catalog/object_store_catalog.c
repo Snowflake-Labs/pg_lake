@@ -22,8 +22,6 @@
 #include "pg_lake/storage/local_storage.h"
 
 char	   *ObjectStoreCatalogLocationPrefix = NULL;
-char	   *ExternalObjectStorePrefix = "fromsf";
-char	   *InternalObjectStorePrefix = "frompg";
 
 PG_FUNCTION_INFO_V1(list_object_store_tables);
 PG_FUNCTION_INFO_V1(trigger_object_store_catalog_generation);
@@ -496,16 +494,16 @@ GetExternalObjectStoreCatalogFilePath(const char *catalogName)
 				 errdetail("Set the GUC to use catalog=object_store.")));
 	}
 
-	if (ExternalObjectStorePrefix == NULL)
+	if (ExternalIcebergStoragePrefix == NULL)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				 errmsg("pg_lake_iceberg.external_object_store_prefix is not set"),
+				 errmsg("pg_lake_iceberg.external_iceberg_storage_prefix is not set"),
 				 errdetail("Set the GUC to use catalog=object_store.")));
 	}
 
-	return psprintf("%s/_catalog/%s/%s.json", defaultPrefix,
-					ExternalObjectStorePrefix, URLEncodePath(catalogName));
+	return psprintf("%s/%s/catalog/%s.json", defaultPrefix,
+					ExternalIcebergStoragePrefix, URLEncodePath(catalogName));
 }
 
 static char *
@@ -521,16 +519,16 @@ GetInternalObjectStoreCatalogFilePath(const char *catalogName)
 				 errdetail("Set the GUC to use catalog=object_store.")));
 	}
 
-	if (InternalObjectStorePrefix == NULL)
+	if (InternalIcebergStoragePrefix == NULL)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				 errmsg("pg_lake_iceberg.internal_object_store_prefix is not set"),
+				 errmsg("pg_lake_iceberg.internal_iceberg_storage_prefix is not set"),
 				 errdetail("Set the GUC to use catalog=object_store.")));
 	}
 
-	return psprintf("%s/_catalog/%s/%s.json", defaultPrefix,
-					InternalObjectStorePrefix, URLEncodePath(catalogName));
+	return psprintf("%s/%s/catalog/%s.json", defaultPrefix,
+					InternalIcebergStoragePrefix, URLEncodePath(catalogName));
 }
 
 /*

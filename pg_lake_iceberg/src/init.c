@@ -98,19 +98,19 @@ _PG_init(void)
 							 0,
 							 NULL, NULL, NULL);
 
-	DefineCustomStringVariable("pg_lake_iceberg.external_object_store_catalog_prefix",
+	DefineCustomStringVariable("pg_lake_iceberg.external_iceberg_storage_prefix",
 							   gettext_noop("Specifies the prefix used for the object store catalog files for external tables."),
 							   NULL,
-							   &ExternalObjectStorePrefix,
+							   &ExternalIcebergStoragePrefix,
 							   "fromsf",
 							   PGC_SIGHUP,
 							   GUC_NO_SHOW_ALL | GUC_SUPERUSER_ONLY | GUC_NOT_IN_SAMPLE,
 							   NULL, NULL, NULL);
 
-	DefineCustomStringVariable("pg_lake_iceberg.internal_object_store_catalog_prefix",
+	DefineCustomStringVariable("pg_lake_iceberg.internal_iceberg_storage_prefix",
 							   gettext_noop("Specifies the prefix used for the object store catalog files for internal tables."),
 							   NULL,
-							   &InternalObjectStorePrefix,
+							   &InternalIcebergStoragePrefix,
 							   "frompg",
 							   PGC_SIGHUP,
 							   GUC_NO_SHOW_ALL | GUC_SUPERUSER_ONLY | GUC_NOT_IN_SAMPLE,

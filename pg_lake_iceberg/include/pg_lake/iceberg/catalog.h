@@ -28,6 +28,9 @@
 extern char *IcebergDefaultLocationPrefix;
 
 
+extern PGDLLEXPORT char *ExternalIcebergStoragePrefix;
+extern PGDLLEXPORT char *InternalIcebergStoragePrefix;
+
 /*
 * From the external view perspective, the pg_catalog.iceberg_tables
 * (and pg_lake_iceberg.tables) includes both the internal and

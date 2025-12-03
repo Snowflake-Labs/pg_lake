@@ -33,6 +33,9 @@
 
 char	   *IcebergDefaultLocationPrefix = NULL;
 
+char	   *ExternalIcebergStoragePrefix = "fromsf";
+char	   *InternalIcebergStoragePrefix = "frompg";
+
 static char *GetIcebergCatalogMetadataLocation(Oid relationId, bool forUpdate);
 static char *GetIcebergExternalMetadataLocation(Oid relationId);
 static char *GetIcebergCatalogMetadataLocationInternal(Oid relationId, bool isPrevMetadata, bool forUpdate);
@@ -739,6 +742,8 @@ UpdateAllInternalIcebergTablesToReadOnly(void)
 /*
  * GetIcebergDefaultLocationPrefix returns the default location prefix
  * for iceberg tables. Trailing slash is removed, if present.
+ * We always append InternalIcebergStoragePrefix/tables to the returned value as that's
+ * distinctive for tables created by Postgres/pg_lake itself.
  */
 const char *
 GetIcebergDefaultLocationPrefix(void)
@@ -748,6 +753,7 @@ GetIcebergDefaultLocationPrefix(void)
 		return NULL;
 	}
 
+	char	   *locationPrefix = IcebergDefaultLocationPrefix;
 	size_t		len = strlen(IcebergDefaultLocationPrefix);
 
 	if (len > 0 && IcebergDefaultLocationPrefix[len - 1] == '/')
@@ -757,10 +763,19 @@ GetIcebergDefaultLocationPrefix(void)
 
 		locationPrefixRemovedTrailingSlash[len - 1] = '\0';
 
-		return locationPrefixRemovedTrailingSlash;
+		locationPrefix = locationPrefixRemovedTrailingSlash;
 	}
 
-	return IcebergDefaultLocationPrefix;
+	if (InternalIcebergStoragePrefix == NULL)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("pg_lake_iceberg.internal_iceberg_storage_prefix is not set"),
+				 errdetail("Set the GUC to use catalog=object_store.")));
+	}
+
+	/* always append InternalIcebergStoragePrefix/tables */
+	return psprintf("%s/%s/tables", locationPrefix, InternalIcebergStoragePrefix);
 }
 
 

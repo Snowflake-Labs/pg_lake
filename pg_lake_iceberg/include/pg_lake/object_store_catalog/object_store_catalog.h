@@ -8,8 +8,6 @@
 extern PGDLLEXPORT bool EnableObjectStoreCatalog;
 
 extern PGDLLEXPORT char *ObjectStoreCatalogLocationPrefix;
-extern PGDLLEXPORT char *ExternalObjectStorePrefix;
-extern PGDLLEXPORT char *InternalObjectStorePrefix;
 
 extern PGDLLEXPORT void InitObjectStoreCatalog(void);
 extern PGDLLEXPORT void ExportIcebergCatalogIfChanged(void);

@@ -978,14 +978,14 @@ def adjust_object_store_settings(superuser_conn):
     # to be able to read the same tables that we write, use the same prefix
     run_command(
         f"""
-        ALTER SYSTEM SET pg_lake_iceberg.internal_object_store_catalog_prefix = 'tmp';
+        ALTER SYSTEM SET pg_lake_iceberg.internal_iceberg_storage_prefix = 'tmp';
         """,
         superuser_conn,
     )
 
     run_command(
         f"""
-		ALTER SYSTEM SET pg_lake_iceberg.external_object_store_catalog_prefix = 'tmp';
+		ALTER SYSTEM SET pg_lake_iceberg.external_iceberg_storage_prefix = 'tmp';
         """,
         superuser_conn,
     )
@@ -1009,13 +1009,13 @@ def adjust_object_store_settings(superuser_conn):
     )
     run_command(
         f"""
-        ALTER SYSTEM RESET pg_lake_iceberg.internal_object_store_catalog_prefix;
+        ALTER SYSTEM RESET pg_lake_iceberg.internal_iceberg_storage_prefix;
 	   """,
         superuser_conn,
     )
     run_command(
         f"""
-     	ALTER SYSTEM RESET pg_lake_iceberg.external_object_store_catalog_prefix;
+     	ALTER SYSTEM RESET pg_lake_iceberg.external_iceberg_storage_prefix;
         """,
         superuser_conn,
     )
