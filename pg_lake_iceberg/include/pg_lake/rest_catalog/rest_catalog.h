@@ -31,6 +31,7 @@ extern char *RestCatalogClientSecret;
 #define REST_CATALOG_NAMESPACE_NAME "%s/api/catalog/v1/%s/namespaces/%s"
 #define REST_CATALOG_NAMESPACE "%s/api/catalog/v1/%s/namespaces"
 
+#define REST_CATALOG_AUTH_TOKEN_PATH "%s/api/catalog/v1/oauth/tokens"
 #define GET_REST_CATALOG_METADATA_LOCATION "%s/api/catalog/v1/%s/namespaces/%s/tables/%s"
 
 extern PGDLLEXPORT char *RestCatalogFetchAccessToken(void);

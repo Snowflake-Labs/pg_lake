@@ -325,6 +325,12 @@ RestCatalogFetchAccessToken(void)
 	if (!RestCatalogClientSecret || !*RestCatalogClientSecret)
 		ereport(ERROR, (errmsg("pg_lake_iceberg.rest_catalog_client_secret should be set")));
 
+    char *accessTokenUrl = RestCatalogOauthHostPath;
+
+    /* if pg_lake_iceberg.rest_catalog_oauth_host_path is not set, use Polaris' default oauth token endpoint */
+    if (*accessTokenUrl == '\0')
+        accessTokenUrl = psprintf(REST_CATALOG_AUTH_TOKEN_PATH, RestCatalogHost);
+
 	/* Build Authorization: Basic <base64(clientId:clientSecret)> */
 	char	   *encodedAuth = EncodeBasicAuth(RestCatalogClientId, RestCatalogClientSecret);
 	char	   *authHeader = psprintf("Authorization: Basic %s", encodedAuth);
@@ -339,7 +345,7 @@ RestCatalogFetchAccessToken(void)
 	headers = lappend(headers, "Content-Type: application/x-www-form-urlencoded");
 
 	/* POST */
-	HttpResult	httpResponse = HttpPost(RestCatalogOauthHostPath, body, headers);
+	HttpResult	httpResponse = HttpPost(accessTokenUrl, body, headers);
 
 	if (httpResponse.status != 200)
 		ereport(ERROR,

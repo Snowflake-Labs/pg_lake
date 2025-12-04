@@ -241,7 +241,7 @@ _PG_init(void)
 							   NULL,
 							   NULL,
 							   &RestCatalogOauthHostPath,
-							   "http://localhost:8181/api/catalog/v1/oauth/tokens",
+							   "",
 							   PGC_SUSET,
 							   GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							   NULL, NULL, NULL);
