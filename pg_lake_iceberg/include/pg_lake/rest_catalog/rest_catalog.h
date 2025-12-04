@@ -67,6 +67,8 @@ typedef struct RestCatalogRequest
 	char	   *body;
 }			RestCatalogRequest;
 
+
+#define REST_CATALOG_AUTH_TOKEN_PATH "%s/api/catalog/v1/oauth/tokens"
 #define GET_REST_CATALOG_METADATA_LOCATION "%s/api/catalog/v1/%s/namespaces/%s/tables/%s"
 
 extern PGDLLEXPORT void RegisterNamespaceToRestCatalog(const char *catalogName, const char *namespaceName);
