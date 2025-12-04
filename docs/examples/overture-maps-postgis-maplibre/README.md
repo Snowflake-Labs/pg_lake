@@ -1,6 +1,6 @@
-# pg_lake for Overture Maps + PostGIS + MapLibre Example
+# pg_lake for Overture Maps and PostGIS with MapLibre 
 
-> **A small sample app demonstrating pg_lake's ability to query remote Parquet data from object storage alongside local PostGIS data.**
+**A small sample app demonstrating pg_lake's ability to query remote Parquet data from object storage alongside local PostGIS data.**
 
 This example showcases a retail site selection tool that combines:
 
@@ -102,7 +102,7 @@ npm run dev
 
 The API will be available at **http://localhost:3001**
 
-**Available Endpoints:**
+Available Endpoints:
 - `GET /health` - Health check
 - `GET /api/stores` - Get all company stores (GeoJSON)
 - `GET /api/service-areas` - Get service area polygons
@@ -147,9 +147,9 @@ The app will be available at **http://localhost:5173**
 3. pg_lake will query Overture Maps S3 bucket and load POIs for that area
 4. Competitor locations will appear on the map
 
-## 🗄️ Database Schema
+#### Database Schema
 
-### Local Schema (Your Data)
+### Local Schema 
 
 ```sql
 local.stores
@@ -223,144 +223,6 @@ This function demonstrates pg_lake's core capability: it uses pg_lake's foreign 
 
 This pattern allows you to work with massive datasets in object storage while keeping your database small and queries fast.
 
-## 🧪 Testing the Stack
-
-### 1. Test Database Connection
-
-```bash
-psql "$DATABASE_URL" -c "SELECT COUNT(*) FROM stores;"
-```
-
-### 2. Test Site Analysis
-
-```bash
-curl -X POST http://localhost:3001/api/analyze-site \
-  -H "Content-Type: application/json" \
-  -d '{"latitude": 37.7749, "longitude": -122.4194, "radius": 1.0}'
-```
-
-### 3. Test pg_lake (Overture Loading)
-
-```bash
-curl -X POST http://localhost:3001/api/load-overture-data \
-  -H "Content-Type: application/json" \
-  -d '{"latitude": 37.7749, "longitude": -122.4194, "radius": 5.0}'
-```
-
-## 📊 Demo Scenarios
-
-### Scenario 1: San Francisco Expansion
-
-```sql
--- Find optimal location in SF
-SELECT * FROM local.analyze_site(37.7899, -122.4082, 1.0); -- North Beach
-
--- Load Overture data for SF
-SELECT overture.load_area_data(37.7749, -122.4194, 10.0);
-
--- Check competitor density
-SELECT 
-    category_main,
-    COUNT(*) as count
-FROM overture.places
-WHERE ST_DWithin(
-    geom::geography,
-    ST_MakePoint(-122.4194, 37.7749)::geography,
-    5000 -- 5km
-)
-GROUP BY category_main
-ORDER BY count DESC;
-```
-
-### Scenario 2: Cross-City Comparison
-
-Compare store performance and competitor saturation across cities:
-
-```sql
-SELECT 
-    s.city,
-    COUNT(DISTINCT s.id) as our_stores,
-    AVG(s.annual_revenue) as avg_revenue,
-    (
-        SELECT COUNT(*)
-        FROM overture.places p
-        WHERE p.category_main IN ('food_and_drink', 'restaurant')
-        AND ST_DWithin(s.geom::geography, p.geom::geography, 5000)
-    ) as nearby_competitors
-FROM local.stores s
-GROUP BY s.city
-ORDER BY avg_revenue DESC;
-```
-
-## 🎨 Customization
-
-### Change Map Style
-
-Edit `frontend/main.js` line 14-35 to use different base maps:
-
-```javascript
-// Use Mapbox streets (requires API key)
-style: 'https://api.mapbox.com/styles/v1/mapbox/streets-v11',
-
-// Or use Maptiler (requires API key)
-style: `https://api.maptiler.com/maps/streets/style.json?key=${YOUR_KEY}`,
-```
-
-### Modify Analysis Radius
-
-Edit `frontend/main.js` line 285:
-
-```javascript
-body: JSON.stringify({ latitude: lat, longitude: lng, radius: 2.0 }) // 2 miles
-```
-
-### Add More Overture Themes
-
-pg_lake can query other Overture themes (buildings, roads, etc.):
-
-```sql
--- Query buildings from Overture
-SELECT 
-    data->>'id' as id,
-    (data->>'height')::numeric as height,
-    ST_GeomFromGeoJSON(data->'geometry'::text) as geom
-FROM iceberg_scan(
-    's3://overturemaps-us-west-2/release/2024-10-23.0/theme=buildings',
-    aws_region => 'us-west-2'
-)
-LIMIT 1000;
-```
-
-## 🐛 Troubleshooting
-
-### Database Connection Issues
-
-```bash
-# Test connection
-psql "$DATABASE_URL" -c "SELECT version();"
-```
-
-### pg_lake Not Found
-
-The database may not have pg_lake installed yet. The demo includes fallback sample data, but to use real Overture data:
-
-```sql
--- Check if pg_lake is installed
-SELECT * FROM pg_available_extensions WHERE name = 'pg_lake';
-```
-
-### CORS Issues
-
-If the frontend can't connect to the backend, check:
-1. Backend is running on port 3001
-2. Frontend is making requests to correct URL
-3. CORS is enabled in `backend/server.js`
-
-### Map Not Loading
-
-1. Check browser console for errors
-2. Ensure MapLibre GL JS is loaded: `npm install` in frontend/
-3. Check network tab for failed tile requests
 
 ## 📚 Resources
 
@@ -369,35 +231,5 @@ If the frontend can't connect to the backend, check:
 - [PostGIS Documentation](https://postgis.net/documentation/)
 - [MapLibre GL JS](https://maplibre.org/maplibre-gl-js-docs/)
 
-## 🤝 Contributing
 
-This is a demo project. Feel free to:
-- Add more analysis metrics
-- Integrate additional Overture themes
-- Improve the UI
-- Add more sophisticated site scoring algorithms
-
-## 📝 License
-
-MIT
-
-## 🎯 Key pg_lake Features Demonstrated
-
-This example showcases several pg_lake capabilities:
-
-1. **Remote Parquet Scanning**: Query Overture Maps Parquet files directly from S3 without ETL
-2. **Spatial Predicates**: Use PostGIS functions to filter remote data during scan
-3. **Hybrid Queries**: Join local PostGIS tables with remote Parquet data in single queries
-4. **On-Demand Loading**: Materialize only needed subsets of large remote datasets
-5. **Standard PostgreSQL Interface**: Everything works through familiar SQL and psql
-
-## 📖 Learn More
-
-- [pg_lake Documentation](https://github.com/Snowflake-Labs/pg_lake)
-- [Overture Maps](https://overturemaps.org/)
-- [PostGIS Documentation](https://postgis.net/)
-
-## 📝 License
-
-This example is provided as-is for demonstration purposes.
 
