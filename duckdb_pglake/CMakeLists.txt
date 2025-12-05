@@ -13,6 +13,8 @@ find_path(PG_INCLUDEDIR libpq-fe.h REQUIRED)
 find_package(azure-identity-cpp CONFIG)
 find_package(azure-storage-blobs-cpp CONFIG)
 find_package(azure-storage-files-datalake-cpp CONFIG)
+find_package(ZLIB REQUIRED)
+find_package(AWSSDK REQUIRED COMPONENTS core sso sts identity-management)
 
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED True)

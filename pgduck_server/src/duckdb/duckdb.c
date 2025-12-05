@@ -250,12 +250,6 @@ duckdb_global_init(char *databaseFilePath,
 	if (run_command_on_duckdb("LOAD icu") == DuckDBError)
 		return DUCKDB_INITIALIZATION_ERROR;
 
-	/*
-	 * aws is not a built-in module
-	 */
-	if (allowExtensionInstall && run_command_on_duckdb("INSTALL aws") == DuckDBError)
-		return DUCKDB_INITIALIZATION_ERROR;
-
 	if (run_command_on_duckdb("LOAD aws") == DuckDBError)
 		return DUCKDB_INITIALIZATION_ERROR;
 

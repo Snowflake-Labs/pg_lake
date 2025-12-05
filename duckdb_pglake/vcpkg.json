@@ -3,6 +3,13 @@
     "azure-identity-cpp",
     "azure-storage-blobs-cpp",
     "azure-storage-files-datalake-cpp",
-    "openssl"
+    "openssl",
+    "vcpkg-cmake",
+    "zlib",
+    {
+      "name": "aws-sdk-cpp",
+      "features": [ "sso", "sts" , "identity-management"]
+    },
+    "curl"
   ]
 }
