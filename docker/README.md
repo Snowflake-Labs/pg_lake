@@ -75,25 +75,25 @@ docker-compose exec pgduck-server psql -p 5332 -h /home/postgres/pgduck_socket_d
 │  dev_base   │  Build tools + PostgreSQL compilation
 └──────┬──────┘
        │
-       ├──────────────────┬──────────────────┐
-       │                  │                  │
+       ├─────────────────┬─────────────────┐
+       │                 │                 │
 ┌──────▼──────┐   ┌──────▼──────┐   ┌──────▼──────┐
 │    base     │   │    base     │   │ runtime_base│
 │ (pg_lake    │   │ (pg_lake    │   │  (minimal   │
 │   source)   │   │   source)   │   │  runtime)   │
 └──────┬──────┘   └──────┬──────┘   └──────┬──────┘
-       │                  │                  │
+       │                 │                 │
 ┌──────▼──────┐   ┌──────▼──────┐          │
 │ pg_lake_    │   │  pgduck_    │          │
 │  builder    │   │  builder    │          │
 │ (compile    │   │ (compile    │          │
 │ extensions) │   │  pgduck)    │          │
 └──────┬──────┘   └──────┬──────┘          │
-       │                  │                  │
-       └────────┬─────────┴─────────────────┘
+       │                 │                 │
+       └────────┬────────┴─────────────────┘
                 │
-       ┌────────┴─────────┐
-       │                  │
+       ┌────────┴────────┐
+       │                 │
 ┌──────▼──────┐   ┌──────▼──────┐
 │  pg_lake_   │   │  pgduck_    │
 │  postgres   │   │  server     │
