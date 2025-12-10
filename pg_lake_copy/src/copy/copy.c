@@ -389,8 +389,6 @@ ProcessPgLakeCopyFrom(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 	if (PgLakeCopyValidityCheckHook)
 		PgLakeCopyValidityCheckHook(relationId);
 
-	ErrorIfReadOnlyIcebergTable(relationId);
-
 	/* check read-only transaction and parallel mode */
 	if (XactReadOnly)
 	{

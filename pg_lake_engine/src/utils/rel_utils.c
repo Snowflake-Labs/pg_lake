@@ -81,22 +81,6 @@ GetPgLakeForeignServerName(Oid foreignTableId)
 
 
 /*
-* IsAnyWritableLakeTable - check if the table is writable.
-*/
-bool
-IsAnyWritableLakeTable(Oid foreignTableId)
-{
-	ForeignTable *foreignTable = GetForeignTable(foreignTableId);
-	List	   *options = foreignTable->options;
-	DefElem    *writableOption = GetOption(options, "writable");
-	PgLakeTableType tableType = GetPgLakeTableType(foreignTableId);
-
-	return tableType == PG_LAKE_ICEBERG_TABLE_TYPE ||
-		(writableOption != NULL ? defGetBoolean(writableOption) : false);
-}
-
-
-/*
 * IsAnyLakeForeignTableById - check if the table is a lake table.
 */
 bool
