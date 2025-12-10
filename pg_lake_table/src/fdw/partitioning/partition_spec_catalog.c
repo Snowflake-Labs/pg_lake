@@ -22,6 +22,7 @@
 #include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/fdw/data_files_catalog.h"
 #include "pg_lake/iceberg/api/partitioning.h"
+#include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/partitioning/spec_generation.h"
 #include "pg_lake/iceberg/partitioning/partition.h"
 #include "pg_lake/partitioning/partition_spec_catalog.h"
@@ -32,7 +33,8 @@ static void InsertIcebergPartitionSpec(Oid relationId,
 static void InsertIcebergPartitionField(Oid relationId,
 										int specId,
 										IcebergPartitionSpecField * field);
-
+static List *GetAllPartitionSpecFieldsForExternalIcebergTable(char *metadataPath);
+static List *GetAllPartitionSpecFieldsForInternalIcebergTable(Oid relationId);
 
 
 /*
@@ -283,12 +285,12 @@ GetIcebergSpecPartitionFieldsFromCatalog(Oid relationId, int specId)
 
 
 /*
-* GetAllIcebergSpecPartitionFieldsFromCatalog reads the partition field
+* GetAllPartitionSpecFieldsForInternalIcebergTable reads the partition field
 * from the lake_table.partition_fields table for the given
 * relation.
 */
 List *
-GetAllIcebergSpecPartitionFieldsFromCatalog(Oid relationId)
+GetAllPartitionSpecFieldsForInternalIcebergTable(Oid relationId)
 {
 	MemoryContext currentMemoryContext = CurrentMemoryContext;
 
@@ -437,6 +439,33 @@ InsertIcebergPartitionField(Oid relationId, int specId, IcebergPartitionSpecFiel
 
 
 /*
+ * GetAllPartitionSpecFieldsForExternalIcebergTable gets all the partition spec fields
+ * for the external Iceberg table.
+ */
+static List *
+GetAllPartitionSpecFieldsForExternalIcebergTable(char *metadataPath)
+{
+	IcebergTableMetadata *metadata = ReadIcebergTableMetadata(metadataPath);
+
+	List	   *allPartitionFields = NIL;
+
+	for (int specIdx = 0; specIdx < metadata->partition_specs_length; specIdx++)
+	{
+		IcebergPartitionSpec *spec = &metadata->partition_specs[specIdx];
+
+		for (int partitionFieldIdx = 0; partitionFieldIdx < spec->fields_length; partitionFieldIdx++)
+		{
+			IcebergPartitionSpecField *field = &spec->fields[partitionFieldIdx];
+
+			allPartitionFields = lappend(allPartitionFields, field);
+		}
+	}
+
+	return allPartitionFields;
+}
+
+
+/*
 * For a given relationId and path, this function returns the partition
 * information for the data file. If used for write-path, the partition
 * transforms should only include the current partition transforms. If used
@@ -506,6 +535,10 @@ GetDataFilePartition(Oid relationId, List *partitionTransforms, const char *path
 		/* prepare the partition field */
 		IcebergPartitionTransform *partitionTransform =
 			FindPartitionTransformById(partitionTransforms, partitionFieldId);
+
+		/* unexpected but better than crash */
+		if (partitionTransform == NULL)
+			ereport(ERROR, (errmsg("could not find partition transform for field %" PRId32, (int32_t) partitionFieldId)));
 
 		partitionField->value_type = GetTransformResultAvroType(partitionTransform);
 
@@ -624,6 +657,32 @@ GetAllPartitionSpecsFromCatalog(Oid relationId)
 	SPI_END();
 
 	return specsHash;
+}
+
+
+/*
+ * GetAllPartitionSpecFields gets all the partition spec fields for the given
+ * relationId.
+ */
+List *
+GetAllPartitionSpecFields(Oid relationId)
+{
+	List	   *partitionFields = NIL;
+
+	if (IsInternalIcebergTable(relationId))
+	{
+		/* internal iceberg table, get from catalog */
+		partitionFields = GetAllPartitionSpecFieldsForInternalIcebergTable(relationId);
+	}
+	else if (IsExternalIcebergTable(relationId))
+	{
+		/* external iceberg table, get from remote metadata */
+		char	   *currentMetadataPath = GetIcebergMetadataLocation(relationId, false);
+
+		partitionFields = GetAllPartitionSpecFieldsForExternalIcebergTable(currentMetadataPath);
+	}
+
+	return partitionFields;
 }
 
 

@@ -48,7 +48,7 @@ extern PGDLLEXPORT int GetCurrentSpecId(Oid relationId);
 extern int	GetLargestPartitionFieldId(Oid relationId);
 extern IcebergPartitionSpecField * GetIcebergPartitionFieldFromCatalog(Oid relationId, int fieldId);
 extern List *GetIcebergSpecPartitionFieldsFromCatalog(Oid relationId, int specId);
-extern List *GetAllIcebergSpecPartitionFieldsFromCatalog(Oid relationId);
+extern List *GetAllPartitionSpecFields(Oid relationId);
 extern Partition * GetDataFilePartition(Oid relationId, List *partitionTransforms,
 										const char *path, int32 *partitionSpecId);
 extern HTAB *GetAllPartitionSpecsFromCatalog(Oid relationId);

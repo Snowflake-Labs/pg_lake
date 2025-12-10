@@ -160,11 +160,15 @@ partition_by = [
 @pytest.mark.parametrize("partition_type, partition_by", partition_by)
 @pytest.mark.parametrize("needs_quote, column_type, table_name, rows", pruning_data)
 def test_simple_data_pruning_for_data_types(
+    installcheck,
     s3,
     disable_data_file_pruning,
     pg_conn,
     extension,
     with_default_location,
+    adjust_object_store_settings,
+    polaris_session,
+    set_polaris_gucs,
     partition_type,
     partition_by,
     needs_quote,
@@ -172,6 +176,9 @@ def test_simple_data_pruning_for_data_types(
     table_name,
     rows,
 ):
+
+    if installcheck:
+        return
 
     if "identity" in partition_type:
         # we support all types for identity columns
@@ -222,154 +229,308 @@ def test_simple_data_pruning_for_data_types(
     # Create table and insert rows
     create_table_sql = f"""
         CREATE SCHEMA test_data_file_pruning;
+
         CREATE TABLE test_data_file_pruning.{table_name} (
             col1 {column_type},
             col2 {column_type}
         ) USING iceberg WITH (autovacuum_enabled='False', partition_by='{partition_by}');
 
+        CREATE TABLE test_data_file_pruning.{table_name}_object_store (
+            col1 {column_type},
+            col2 {column_type}
+        ) USING iceberg WITH (catalog='object_store', autovacuum_enabled='False', partition_by='{partition_by}');
+
+        CREATE TABLE test_data_file_pruning.{table_name}_rest (
+            col1 {column_type},
+            col2 {column_type}
+        ) USING iceberg WITH (catalog='rest', autovacuum_enabled='False', partition_by='{partition_by}');
     """
     # Run the SQL command using the connection
     run_command(create_table_sql, pg_conn)
+    pg_conn.commit()
 
     # rows is a list/tuple of values like "(1,'a')" etc.
     values_sql = ",".join(str(row) for row in rows)  # comma between each row
-    insert_command = (
-        f"INSERT INTO test_data_file_pruning.{table_name} VALUES {values_sql};"
+    run_command(
+        f"""INSERT INTO test_data_file_pruning.{table_name} VALUES {values_sql};
+                    INSERT INTO test_data_file_pruning.{table_name}_object_store VALUES {values_sql};
+                    INSERT INTO test_data_file_pruning.{table_name}_rest VALUES {values_sql};""",
+        pg_conn,
     )
-    run_command(insert_command, pg_conn)
+    pg_conn.commit()
+
+    wait_until_object_store_writable_table_pushed(
+        pg_conn, "test_data_file_pruning", f"{table_name}_object_store"
+    )
+
+    metadata_location = run_query(
+        f"SELECT metadata_location FROM iceberg_tables WHERE table_name = '{table_name}' and table_namespace = 'test_data_file_pruning';",
+        pg_conn,
+    )[0][0]
+
+    # now, create the same iceberg table using pg_lake
+    # we'd like to make sure pruning works in the same way for
+    # pg_lake tables as well
+    run_command(
+        f"""CREATE FOREIGN TABLE test_data_file_pruning.{table_name}_external ()
+            SERVER pg_lake OPTIONS (path '{metadata_location}');
+                    
+            CREATE TABLE test_data_file_pruning.{table_name}_object_store_read_only ()
+            USING iceberg WITH (catalog='object_store', read_only=True, catalog_table_name='{table_name}_object_store');
+            
+            -- CREATE TABLE test_data_file_pruning.{table_name}_rest_read_only ()
+            -- USING iceberg WITH (catalog='rest', read_only=True, catalog_table_name='{table_name}_rest');
+            """,
+        pg_conn,
+    )
 
     # this should hit two files, prune two files
     value = f"'{rows[0][0]}'" if needs_quote else f"{rows[0][0]}"
 
-    results = run_query(
-        f"{explain_prefix} SELECT * FROM test_data_file_pruning.{table_name} WHERE col1 = {value}",
-        pg_conn,
-    )
-    assert fetch_data_files_used(results) == "2"
+    for tbl_name in [
+        f"{table_name}",
+        f"{table_name}_external",
+        f"{table_name}_object_store",
+        f"{table_name}_object_store_read_only",
+        f"{table_name}_rest",
+        # f"{table_name}_rest_read_only",
+    ]:
+        results = run_query(
+            f"{explain_prefix} SELECT * FROM test_data_file_pruning.{tbl_name} WHERE col1 = {value}",
+            pg_conn,
+        )
+        assert fetch_data_files_used(results) == "2"
 
     # this should hit one file, prune 3 files
     value_1 = f"'{rows[1][0]}'" if needs_quote else f"{rows[1][0]}"
     value_2 = f"'{rows[1][1]}'" if needs_quote else f"{rows[1][1]}"
 
-    results = run_query(
-        f"{explain_prefix} SELECT * FROM test_data_file_pruning.{table_name} WHERE col1 = {value_1} AND col2 = {value_2}",
-        pg_conn,
-    )
-    assert fetch_data_files_used(results) == "1"
+    for tbl_name in [
+        f"{table_name}",
+        f"{table_name}_external",
+        f"{table_name}_object_store",
+        f"{table_name}_object_store_read_only",
+        f"{table_name}_rest",
+        # f"{table_name}_rest_read_only",
+    ]:
+        results = run_query(
+            f"{explain_prefix} SELECT * FROM test_data_file_pruning.{table_name} WHERE col1 = {value_1} AND col2 = {value_2}",
+            pg_conn,
+        )
+        assert fetch_data_files_used(results) == "1"
 
     # this shouldn't prune any files
     value_1 = f"'{rows[0][0]}'" if needs_quote else f"{rows[0][0]}"
     value_2 = f"'{rows[2][0]}'" if needs_quote else f"{rows[2][0]}"
-    results = run_query(
-        f"{explain_prefix} SELECT * FROM test_data_file_pruning.{table_name} WHERE col1 = {value_1} OR col1 = {value_2}",
-        pg_conn,
-    )
-    assert fetch_data_files_used(results) == "4"
+    for tbl_name in [
+        f"{table_name}",
+        f"{table_name}_external",
+        f"{table_name}_object_store",
+        f"{table_name}_object_store_read_only",
+        f"{table_name}_rest",
+        # f"{table_name}_rest_read_only",
+    ]:
+        results = run_query(
+            f"{explain_prefix} SELECT * FROM test_data_file_pruning.{tbl_name} WHERE col1 = {value_1} OR col1 = {value_2}",
+            pg_conn,
+        )
+        assert fetch_data_files_used(results) == "4"
 
     # this should prune two files
     value_1 = f"'{rows[0][0]}'" if needs_quote else f"{rows[0][0]}"
     value_2 = value_1
-    results = run_query(
-        f"{explain_prefix} SELECT * FROM test_data_file_pruning.{table_name} WHERE col1 = {value_1} OR col1 = {value_2}",
-        pg_conn,
-    )
-    assert fetch_data_files_used(results) == "2"
+    for tbl_name in [
+        f"{table_name}",
+        f"{table_name}_external",
+        f"{table_name}_object_store",
+        f"{table_name}_object_store_read_only",
+        f"{table_name}_rest",
+        # f"{table_name}_rest_read_only",
+    ]:
+        results = run_query(
+            f"{explain_prefix} SELECT * FROM test_data_file_pruning.{tbl_name} WHERE col1 = {value_1} OR col1 = {value_2}",
+            pg_conn,
+        )
+        assert fetch_data_files_used(results) == "2"
 
     # we don't prune based on NULL values
-    results = run_query(
-        f"{explain_prefix} SELECT * FROM test_data_file_pruning.{table_name} WHERE col1 IS NULL and col2 IS NULL",
-        pg_conn,
-    )
-    assert fetch_data_files_used(results) == "4"
+    for tbl_name in [
+        f"{table_name}",
+        f"{table_name}_external",
+        f"{table_name}_object_store",
+        f"{table_name}_object_store_read_only",
+        f"{table_name}_rest",
+        # f"{table_name}_rest_read_only",
+    ]:
+        results = run_query(
+            f"{explain_prefix} SELECT * FROM test_data_file_pruning.{table_name} WHERE col1 IS NULL and col2 IS NULL",
+            pg_conn,
+        )
+        assert fetch_data_files_used(results) == "4"
 
     # we don't prune based on NULL values
-    results = run_query(
-        f"{explain_prefix} SELECT * FROM test_data_file_pruning.{table_name} WHERE col1 IS NOT NULL and col2 IS NOT NULL",
-        pg_conn,
-    )
-    assert fetch_data_files_used(results) == "4"
+    for tbl_name in [
+        f"{table_name}",
+        f"{table_name}_external",
+        f"{table_name}_object_store",
+        f"{table_name}_object_store_read_only",
+        f"{table_name}_rest",
+        # f"{table_name}_rest_read_only",
+    ]:
+        results = run_query(
+            f"{explain_prefix} SELECT * FROM test_data_file_pruning.{table_name} WHERE col1 IS NOT NULL and col2 IS NOT NULL",
+            pg_conn,
+        )
+        assert fetch_data_files_used(results) == "4"
 
     # bucket partitioning only supported for
     # equality operators, so the following tests
     # are not suitable for that
     if "bucket" in partition_type:
+        run_command("DROP SCHEMA test_data_file_pruning CASCADE", pg_conn)
+        pg_conn.commit()
         return
 
     # we are effectively having col1=value1, so should prune 2 files
     value_1 = f"'{rows[0][0]}'" if needs_quote else f"{rows[0][0]}"
-    results = run_query(
-        f"{explain_prefix} SELECT *FROM test_data_file_pruning.{table_name} WHERE col1 >= {value_1} and col1 <= {value_1}",
-        pg_conn,
-    )
-    assert fetch_data_files_used(results) == "2"
+    for tbl_name in [
+        f"{table_name}",
+        f"{table_name}_external",
+        f"{table_name}_object_store",
+        f"{table_name}_object_store_read_only",
+        f"{table_name}_rest",
+        # f"{table_name}_rest_read_only",
+    ]:
+        results = run_query(
+            f"{explain_prefix} SELECT *FROM test_data_file_pruning.{table_name} WHERE col1 >= {value_1} and col1 <= {value_1}",
+            pg_conn,
+        )
+        assert fetch_data_files_used(results) == "2"
 
     # Normally, you might expect to see we prune 2 data files
     # however our implementation doesn't work with IS DISTINCT FROM
     value_1 = f"'{rows[0][0]}'" if needs_quote else f"{rows[0][0]}"
 
-    results = run_query(
-        f"{explain_prefix} SELECT *FROM test_data_file_pruning.{table_name} WHERE col1 IS DISTINCT FROM {value_1}",
-        pg_conn,
-    )
-    assert fetch_data_files_used(results) == "4"
+    for tbl_name in [
+        f"{table_name}",
+        f"{table_name}_external",
+        f"{table_name}_object_store",
+        f"{table_name}_object_store_read_only",
+        f"{table_name}_rest",
+        # f"{table_name}_rest_read_only",
+    ]:
+        results = run_query(
+            f"{explain_prefix} SELECT *FROM test_data_file_pruning.{table_name} WHERE col1 IS DISTINCT FROM {value_1}",
+            pg_conn,
+        )
+        assert fetch_data_files_used(results) == "4"
 
     # we should not prune any files given we cover all values for the col1
     value_1 = f"'{rows[0][0]}'" if needs_quote else f"{rows[0][0]}"
     value_2 = f"'{rows[2][0]}'" if needs_quote else f"{rows[2][0]}"
 
-    results = run_query(
-        f"{explain_prefix} SELECT *FROM test_data_file_pruning.{table_name} WHERE col1 IN ({value_1}, {value_2})",
-        pg_conn,
-    )
-    assert fetch_data_files_used(results) == "4"
+    for tbl_name in [
+        f"{table_name}",
+        f"{table_name}_external",
+        f"{table_name}_object_store",
+        f"{table_name}_object_store_read_only",
+        f"{table_name}_rest",
+        # f"{table_name}_rest_read_only",
+    ]:
+        results = run_query(
+            f"{explain_prefix} SELECT *FROM test_data_file_pruning.{table_name} WHERE col1 IN ({value_1}, {value_2})",
+            pg_conn,
+        )
+        assert fetch_data_files_used(results) == "4"
 
     # we should not prune two files given we only cover one value
     value_1 = f"'{rows[0][0]}'" if needs_quote else f"{rows[0][0]}"
 
-    results = run_query(
-        f"{explain_prefix} SELECT *FROM test_data_file_pruning.{table_name} WHERE col1 = ANY(ARRAY[{value_1}]::{column_type}[])",
-        pg_conn,
-    )
-    assert fetch_data_files_used(results) == "2"
+    for tbl_name in [
+        f"{table_name}",
+        f"{table_name}_external",
+        f"{table_name}_object_store",
+        f"{table_name}_object_store_read_only",
+        f"{table_name}_rest",
+        # f"{table_name}_rest_read_only",
+    ]:
+        results = run_query(
+            f"{explain_prefix} SELECT *FROM test_data_file_pruning.{table_name} WHERE col1 = ANY(ARRAY[{value_1}]::{column_type}[])",
+            pg_conn,
+        )
+        assert fetch_data_files_used(results) == "2"
 
     # should prune 2 files given we only pick 1 value
     value_1 = f"'{rows[0][0]}'" if needs_quote else f"{rows[0][0]}"
 
-    results = run_query(
-        f"{explain_prefix} SELECT *FROM test_data_file_pruning.{table_name} WHERE col1 BETWEEN {value_1} and {value_1}",
-        pg_conn,
-    )
-    assert fetch_data_files_used(results) == "2"
+    for tbl_name in [
+        f"{table_name}",
+        f"{table_name}_external",
+        f"{table_name}_object_store",
+        f"{table_name}_object_store_read_only",
+        f"{table_name}_rest",
+        # f"{table_name}_rest_read_only",
+    ]:
+        results = run_query(
+            f"{explain_prefix} SELECT *FROM test_data_file_pruning.{table_name} WHERE col1 BETWEEN {value_1} and {value_1}",
+            pg_conn,
+        )
+        assert fetch_data_files_used(results) == "2"
 
     if "identity" in partition_type:
         # should prune two files that hits col1=value_1
         value_1 = f"'{rows[0][0]}'" if needs_quote else f"{rows[0][0]}"
 
-        results = run_query(
-            f"{explain_prefix} SELECT *FROM test_data_file_pruning.{table_name} WHERE col1 NOT BETWEEN {value_1} and {value_1}",
-            pg_conn,
-        )
-        assert fetch_data_files_used(results) == "2"
+        for tbl_name in [
+            f"{table_name}",
+            f"{table_name}_external",
+            f"{table_name}_object_store",
+            f"{table_name}_object_store_read_only",
+            f"{table_name}_rest",
+            # f"{table_name}_rest_read_only",
+        ]:
+            results = run_query(
+                f"{explain_prefix} SELECT *FROM test_data_file_pruning.{table_name} WHERE col1 NOT BETWEEN {value_1} and {value_1}",
+                pg_conn,
+            )
+            assert fetch_data_files_used(results) == "2"
 
         # Normally, you might expect to see we prune all data files
         # however our implementation doesn't work with NOT IN
         value_1 = f"'{rows[0][0]}'" if needs_quote else f"{rows[0][0]}"
         value_1 = f"'{rows[2][0]}'" if needs_quote else f"{rows[2][0]}"
-        results = run_query(
-            f"{explain_prefix} SELECT *FROM test_data_file_pruning.{table_name} WHERE col1 NOT IN ({value_1}, {value_2})",
-            pg_conn,
-        )
-        assert fetch_data_files_used(results) == "2"
+        for tbl_name in [
+            f"{table_name}",
+            f"{table_name}_external",
+            f"{table_name}_object_store",
+            f"{table_name}_object_store_read_only",
+            f"{table_name}_rest",
+            # f"{table_name}_rest_read_only",
+        ]:
+            results = run_query(
+                f"{explain_prefix} SELECT *FROM test_data_file_pruning.{table_name} WHERE col1 NOT IN ({value_1}, {value_2})",
+                pg_conn,
+            )
+            assert fetch_data_files_used(results) == "2"
 
         # we are effectively having WHERE false, so should prune all 4 files
         value_1 = f"'{rows[0][0]}'" if needs_quote else f"{rows[0][0]}"
-        results = run_query(
-            f"{explain_prefix} SELECT *FROM test_data_file_pruning.{table_name} WHERE col1 < {value_1} and col1 > {value_1}",
-            pg_conn,
-        )
-        assert fetch_data_files_used(results) == "0"
+        for tbl_name in [
+            f"{table_name}",
+            f"{table_name}_external",
+            f"{table_name}_object_store",
+            f"{table_name}_object_store_read_only",
+            f"{table_name}_rest",
+            # f"{table_name}_rest_read_only",
+        ]:
+            results = run_query(
+                f"{explain_prefix} SELECT *FROM test_data_file_pruning.{table_name} WHERE col1 < {value_1} and col1 > {value_1}",
+                pg_conn,
+            )
+            assert fetch_data_files_used(results) == "0"
 
-    pg_conn.rollback()
+    run_command("DROP SCHEMA test_data_file_pruning CASCADE", pg_conn)
+    pg_conn.commit()
 
 
 col_types = ["date", "timestamp", "timestamptz"]
