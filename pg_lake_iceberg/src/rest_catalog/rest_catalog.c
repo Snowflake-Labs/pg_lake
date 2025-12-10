@@ -46,7 +46,7 @@
 
 /* determined by GUC */
 char	   *RestCatalogHost = "http://localhost:8181";
-char       *RestCatalogOauthHostPath = "http://localhost:8181/api/catalog/v1/oauth/tokens";
+char       *RestCatalogOauthHostPath = "";
 char	   *RestCatalogClientId = NULL;
 char	   *RestCatalogClientSecret = NULL;
 
