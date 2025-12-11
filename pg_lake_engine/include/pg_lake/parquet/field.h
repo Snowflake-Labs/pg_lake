@@ -154,3 +154,4 @@ typedef FieldStruct DataFileSchema;
 typedef FieldStructElement DataFileSchemaField;
 
 extern PGDLLEXPORT DataFileSchema * DeepCopyDataFileSchema(const DataFileSchema * schema);
+extern PGDLLEXPORT Field * DeepCopyField(const Field * field);
