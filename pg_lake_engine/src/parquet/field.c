@@ -24,12 +24,11 @@
 #include "pg_lake/util/string_utils.h"
 
 static FieldStructElement * DeepCopyFieldStructElement(FieldStructElement * structElementField);
-static Field * DeepCopyField(const Field * field);
 
 /*
  * DeepCopyField deep copies a Field.
  */
-static Field *
+Field *
 DeepCopyField(const Field * field)
 {
 	Field	   *fieldCopy = palloc0(sizeof(Field));
