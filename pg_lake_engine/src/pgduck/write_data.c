@@ -25,6 +25,7 @@
 #include "common/string.h"
 #include "pg_lake/csv/csv_options.h"
 #include "pg_lake/copy/copy_format.h"
+#include "pg_lake/data_file/data_file_stats.h"
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/parquet/geoparquet.h"
@@ -47,6 +48,8 @@ static DuckDBTypeInfo ChooseDuckDBEngineTypeForWrite(PGType postgresType,
 													 CopyDataFormat destinationFormat);
 static void AppendFieldIdValue(StringInfo map, Field * field, int fieldId);
 static const char *ParquetVersionToString(ParquetVersion version);
+static void ParseDuckdbColumnMinMaxFromText(const char *input, List **names, List **mins, List **maxs);
+static List *GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields, DataFileSchema * schema);
 
 static DuckDBTypeInfo VARCHAR_TYPE =
 {
@@ -69,7 +72,9 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 				 CopyDataFormat destinationFormat,
 				 CopyDataCompression destinationCompression,
 				 List *formatOptions,
-				 DataFileSchema * schema)
+				 DataFileSchema * schema,
+				 List *leafFields,
+				 List **dataFileStats)
 {
 	StringInfoData command;
 
@@ -139,7 +144,9 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 					   formatOptions,
 					   queryHasRowIds,
 					   schema,
-					   csvTupleDesc);
+					   csvTupleDesc,
+					   leafFields,
+					   dataFileStats);
 }
 
 
@@ -156,9 +163,12 @@ WriteQueryResultTo(char *query,
 				   List *formatOptions,
 				   bool queryHasRowId,
 				   DataFileSchema * schema,
-				   TupleDesc queryTupleDesc)
+				   TupleDesc queryTupleDesc,
+				   List *leafFields,
+				   List **dataFileStats)
 {
 	StringInfoData command;
+	bool		useReturnStats = false;
 
 	initStringInfo(&command);
 
@@ -252,6 +262,9 @@ WriteQueryResultTo(char *query,
 
 				appendStringInfo(&command, ", parquet_version '%s'",
 								 ParquetVersionToString(DefaultParquetVersion));
+
+				appendStringInfo(&command, ", return_stats");
+				useReturnStats = true;
 
 				break;
 			}
@@ -386,27 +399,335 @@ WriteQueryResultTo(char *query,
 	/* end WITH options */
 	appendStringInfoString(&command, ")");
 
-	if (TargetRowGroupSizeMB > 0)
-	{
-		/*
-		 * preserve_insertion_order=false reduces memory consumption during
-		 * COPY <query> TO when an explicit ORDER BY not specified in the
-		 * query. It is helpful for csv and json formats as well but for
-		 * simplicity we use the same setting TargetRowGroupSizeMB for all
-		 * formats.
-		 */
-		List	   *commands = list_make3("SET preserve_insertion_order TO 'false';",
-										  command.data,
-										  "RESET preserve_insertion_order;");
+	PGDuckConnection *pgDuckConn = GetPGDuckConnection();
+	int64		rowsAffected = -1;
+	PGresult   *result;
+	bool		disablePreserveInsertionOrder = TargetRowGroupSizeMB > 0;
 
-		List	   *rowsAffected = ExecuteCommandsInPGDuck(commands);
-
-		return list_nth_int(rowsAffected, 1);
-	}
-	else
+	PG_TRY();
 	{
-		return ExecuteCommandInPGDuck(command.data);
+		if (disablePreserveInsertionOrder)
+		{
+			result = ExecuteQueryOnPGDuckConnection(pgDuckConn, "SET preserve_insertion_order TO 'false';");
+			CheckPGDuckResult(pgDuckConn, result);
+			PQclear(result);
+		}
+
+		result = ExecuteQueryOnPGDuckConnection(pgDuckConn, command.data);
+		CheckPGDuckResult(pgDuckConn, result);
+
+		if (useReturnStats && dataFileStats != NULL)
+		{
+			/* DuckDB returns COPY 0 when return_stats is used. */
+			*dataFileStats = GetDataFileStatsListFromPGResult(result, leafFields, schema, &rowsAffected);
+		}
+		else
+		{
+			char	   *commandTuples = PQcmdTuples(result);
+
+			rowsAffected = atol(commandTuples);
+		}
+
+		PQclear(result);
+
+		if (disablePreserveInsertionOrder)
+		{
+			result = ExecuteQueryOnPGDuckConnection(pgDuckConn, "RESET preserve_insertion_order;");
+			CheckPGDuckResult(pgDuckConn, result);
+			PQclear(result);
+		}
 	}
+	PG_FINALLY();
+	{
+		ReleasePGDuckConnection(pgDuckConn);
+	}
+	PG_END_TRY();
+
+	return rowsAffected;
+}
+
+
+List *
+GetDataFileStatsListFromPGResult(PGresult *result, List *leafFields, DataFileSchema * schema, int *totalRowCount)
+{
+	List	   *statsList = NIL;
+
+	int			rowCount = PQntuples(result);
+	int			columnCount = PQnfields(result);
+	*totalRowCount = 0;
+
+	for (int r = 0; r < rowCount; r++)
+	{
+		DataFileStats *fileStats = palloc0(sizeof(DataFileStats));
+
+		for (int c = 0; c < columnCount; c++)
+		{
+			char	   *colName = PQfname(result, c);
+			char	   *val = PQgetvalue(result, r, c);
+
+			if (strcmp(colName, "column_statistics") == 0)
+			{
+				List	   *names = NIL;
+				List	   *mins = NIL;
+				List	   *maxs = NIL;
+
+				ParseDuckdbColumnMinMaxFromText(val, &names, &mins, &maxs);
+				fileStats->columnStats = GetDataFileColumnStatsList(names, mins, maxs, leafFields, schema);
+			}
+			else if (strcmp(colName, "file_size_bytes") == 0)
+			{
+				fileStats->fileSize = atoll(val);
+			}
+			else if (strcmp(colName, "count") == 0)
+			{
+				fileStats->rowCount = atoll(val);
+				*totalRowCount += fileStats->rowCount;
+			}
+			else if (strcmp(colName, "filename") == 0)
+			{
+				fileStats->dataFilePath = pstrdup(val);
+			}
+		}
+
+		statsList = lappend(statsList, fileStats);
+	}
+
+	return statsList;
+}
+
+
+static void
+ParseDuckdbColumnMinMaxFromText(const char *input, List **names, List **mins, List **maxs)
+{
+	input = PgLakeReplaceText(pstrdup(input), "\"", "");
+	input = PgLakeReplaceText(pstrdup(input), "\\", "");
+
+	char	   *ptr = (char *) input + 1;
+
+	while (*ptr != '\0')
+	{
+		/* skip whitespace and commas */
+		while (*ptr == ' ' || *ptr == '\n' || *ptr == '\t' || *ptr == ',')
+		{
+			ptr++;
+		}
+
+		if (*ptr == '\0' || *ptr == '}')
+		{
+			break;
+		}
+
+		if (*ptr != '(')
+		{
+			ereport(ERROR,
+					(errmsg("invalid duckdb column min/max format: expected '(' at position %ld", ptr - input)));
+		}
+
+		ptr++;
+
+		/* parse column name */
+		char	   *nameStart = ptr;
+
+		while (*ptr != ',' && *ptr != '\0')
+		{
+			ptr++;
+		}
+
+		if (*ptr == '\0')
+		{
+			ereport(ERROR,
+					(errmsg("invalid duckdb column min/max format: unexpected end of input while parsing column name")));
+		}
+
+		size_t		nameLen = ptr - nameStart;
+
+		char	   *columnName = pnstrdup(nameStart, nameLen);
+
+		ptr++;
+
+		/* skip whitespace */
+		while (*ptr == ' ' || *ptr == '\n' || *ptr == '\t')
+		{
+			ptr++;
+		}
+
+		if (*ptr != '{')
+		{
+			ereport(ERROR,
+					(errmsg("invalid duckdb column min/max format: expected '{' at position %ld", ptr - input)));
+		}
+
+		ptr++;
+
+		char	   *minValue = NULL;
+		char	   *maxValue = NULL;
+
+		/* parse key-value pairs inside the braces */
+		while (*ptr != '}' && *ptr != '\0')
+		{
+			/* skip whitespace and commas */
+			while (*ptr == ' ' || *ptr == '\n' || *ptr == '\t' || *ptr == ',')
+			{
+				ptr++;
+			}
+
+			if (*ptr == '}')
+			{
+				break;
+			}
+
+			if (*ptr != '(')
+			{
+				ereport(ERROR,
+						(errmsg("invalid duckdb column min/max format: expected '(' at position %ld", ptr - input)));
+			}
+
+			ptr++;
+
+			/* parse key */
+			char	   *keyStart = ptr;
+
+			while (*ptr != ',' && *ptr != '\0')
+			{
+				ptr++;
+			}
+
+			if (*ptr == '\0')
+			{
+				ereport(ERROR,
+						(errmsg("invalid duckdb column min/max format: unexpected end of input while parsing key")));
+			}
+
+			size_t		keyLen = ptr - keyStart;
+			char	   *key = pnstrdup(keyStart, keyLen);
+
+			ptr++;
+
+			/* parse value */
+			char	   *valueStart = ptr;
+
+			while (*ptr != ')' && *ptr != '\0')
+			{
+				ptr++;
+			}
+
+			if (*ptr == '\0')
+			{
+				ereport(ERROR,
+						(errmsg("invalid duckdb column min/max format: unexpected end of input while parsing value")));
+			}
+
+			size_t		valueLen = ptr - valueStart;
+			char	   *value = pnstrdup(valueStart, valueLen);
+
+			if (pg_strcasecmp(key, "min") == 0)
+			{
+				minValue = value;
+			}
+			else if (pg_strcasecmp(key, "max") == 0)
+			{
+				maxValue = value;
+			}
+			else
+			{
+				/* ignore other keys */
+				pfree(value);
+			}
+			pfree(key);
+			ptr++;
+		}
+
+		if (minValue != NULL || maxValue != NULL)
+		{
+			*mins = lappend(*mins, minValue);
+			*maxs = lappend(*maxs, maxValue);
+			*names = lappend(*names, columnName);
+		}
+
+		if (*ptr != '}')
+		{
+			ereport(ERROR,
+					(errmsg("invalid duckdb column min/max format: expected '}' at position %ld", ptr - input)));
+		}
+
+		ptr++;
+
+		/* skip whitespace */
+		while (*ptr == ' ' || *ptr == '\n' || *ptr == '\t')
+		{
+			ptr++;
+		}
+
+		if (*ptr != ')')
+		{
+			ereport(ERROR,
+					(errmsg("invalid duckdb column min/max format: expected ')' at position %ld", ptr - input)));
+		}
+
+		ptr++;
+	}
+}
+
+
+static List *
+GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields, DataFileSchema * schema)
+{
+	List	   *columnStatsList = NIL;
+
+	for (int i = 0; i < schema->nfields; i++)
+	{
+		DataFileSchemaField *field = &schema->fields[i];
+		const char *fieldName = field->name;
+		int			fieldId = field->id;
+
+		ListCell   *nameCell = NULL;
+		int			nameIndex = -1;
+
+		for (int index = 0; index < list_length(names); index++)
+		{
+			char	   *name = list_nth(names, index);
+
+			if (strcmp(name, fieldName) == 0)
+			{
+				nameIndex = index;
+				break;
+			}
+		}
+
+		if (nameIndex == -1)
+		{
+			continue;
+		}
+
+		LeafField  *leafField = NULL;
+		ListCell   *leafCell = NULL;
+
+		foreach(leafCell, leafFields)
+		{
+			LeafField  *lf = lfirst(leafCell);
+
+			if (lf->fieldId == fieldId)
+			{
+				leafField = lf;
+				break;
+			}
+		}
+
+		if (leafField != NULL && nameIndex < list_length(names))
+		{
+			char	   *minStr = list_nth(mins, nameIndex);
+			char	   *maxStr = list_nth(maxs, nameIndex);
+
+			DataFileColumnStats *colStats = palloc0(sizeof(DataFileColumnStats));
+
+			colStats->leafField = *leafField;
+			colStats->lowerBoundText = pstrdup(minStr);
+			colStats->upperBoundText = pstrdup(maxStr);
+			columnStatsList = lappend(columnStatsList, colStats);
+		}
+	}
+
+	return columnStatsList;
 }
 
 

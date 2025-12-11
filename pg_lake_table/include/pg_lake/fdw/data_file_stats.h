@@ -54,3 +54,4 @@ extern PGDLLEXPORT DataFileColumnStats * CreateDataFileColumnStats(int fieldId, 
 																   char *lowerBoundText,
 																   char *upperBoundText);
 extern PGDLLEXPORT void ApplyColumnStatsMode(Oid relationId, List *columnStats);
+extern PGDLLEXPORT void ApplyColumnStatsModeForAllFileStats(Oid relationId, List *dataFileStats);

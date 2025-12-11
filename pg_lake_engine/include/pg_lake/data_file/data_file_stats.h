@@ -43,6 +43,8 @@ typedef struct DataFileColumnStats
   */
 typedef struct DataFileStats
 {
+	char	   *dataFilePath;
+
 	/* number of bytes in the file */
 	int64		fileSize;
 
@@ -61,3 +63,5 @@ typedef struct DataFileStats
 	/* for a new data file with row IDs, the start of the range */
 	int64		rowIdStart;
 }			DataFileStats;
+
+extern PGDLLEXPORT DataFileStats * DeepCopyDataFileStats(const DataFileStats * stats);

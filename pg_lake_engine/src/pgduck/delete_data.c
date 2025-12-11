@@ -54,7 +54,9 @@ PerformDeleteFromParquet(char *sourcePath,
 						 char *destinationPath,
 						 CopyDataCompression destinationCompression,
 						 DataFileSchema * schema,
-						 ReadDataStats * stats)
+						 ReadDataStats * stats,
+						 List *leafFields,
+						 DataFileStats * *newFileStats)
 {
 	const char *remainderQuery =
 		DeleteFromParquetQuery(sourcePath, positionDeleteFiles, deletionFilePath, schema, stats);
@@ -91,10 +93,32 @@ PerformDeleteFromParquet(char *sourcePath,
 		appendStringInfoString(&command, "}");
 	}
 
+	appendStringInfoString(&command, ", return_stats");
+
 	/* end WITH options */
 	appendStringInfoString(&command, ")");
 
-	ExecuteCommandInPGDuck(command.data);
+	PGDuckConnection *pgDuckConn = GetPGDuckConnection();
+
+	PG_TRY();
+	{
+		PGresult   *result = ExecuteQueryOnPGDuckConnection(pgDuckConn, command.data);
+
+		CheckPGDuckResult(pgDuckConn, result);
+
+		int rowsAffected;
+		List	   *dataFileStats = GetDataFileStatsListFromPGResult(result, leafFields, schema, &rowsAffected);
+
+		Assert(dataFileStats != NIL);
+		*newFileStats = DeepCopyDataFileStats((DataFileStats *) linitial(dataFileStats));
+
+		PQclear(result);
+	}
+	PG_FINALLY();
+	{
+		ReleasePGDuckConnection(pgDuckConn);
+	}
+	PG_END_TRY();
 }
 
 

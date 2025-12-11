@@ -144,6 +144,30 @@ ApplyColumnStatsMode(Oid relationId, List *columnStats)
 }
 
 
+void
+ApplyColumnStatsModeForAllFileStats(Oid relationId, List *dataFileStats)
+{
+	ColumnStatsConfig columnStatsConfig = GetColumnStatsConfig(relationId);
+
+	ListCell   *dataFileStatsCell = NULL;
+
+	foreach(dataFileStatsCell, dataFileStats)
+	{
+		DataFileStats *dataFileStats = lfirst(dataFileStatsCell);
+
+		ListCell   *columnStatsCell = NULL;
+		foreach(columnStatsCell, dataFileStats->columnStats)
+		{
+			DataFileColumnStats *columnStats = lfirst(columnStatsCell);
+			char	  **lowerBoundText = &columnStats->lowerBoundText;
+			char	  **upperBoundText = &columnStats->upperBoundText;
+
+			ApplyColumnStatsModeForType(columnStatsConfig, columnStats->leafField.pgType, lowerBoundText, upperBoundText);
+		}
+	}
+}
+
+
 /*
  * GetColumnStatsConfig returns the column stats config for the given
  * relation.

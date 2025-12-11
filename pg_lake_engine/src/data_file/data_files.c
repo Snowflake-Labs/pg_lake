@@ -19,6 +19,8 @@
 #include "pg_lake/data_file/data_files.h"
 #include "pg_lake/util/string_utils.h"
 
+static LeafField DeepCopyLeafField(const LeafField * leafField);
+
 /*
  * AddDataFileOperation creates a TableMetadataOperation for adding a new data
  * file.
@@ -109,4 +111,59 @@ AddRowIdMappingOperation(const char *dataFilePath, List *rowIdRanges)
 	operation->rowIdRanges = rowIdRanges;
 
 	return operation;
+}
+
+/*
+ * DeepCopyDataFileStats deep copies a DataFileSchema.
+ */
+DataFileStats *
+DeepCopyDataFileStats(const DataFileStats * stats)
+{
+	DataFileStats *copiedStats = palloc0(sizeof(DataFileStats));
+
+	copiedStats->dataFilePath = pstrdup(stats->dataFilePath);
+	copiedStats->fileSize = stats->fileSize;
+	copiedStats->rowCount = stats->rowCount;
+	copiedStats->deletedRowCount = stats->deletedRowCount;
+	copiedStats->creationTime = stats->creationTime;
+	copiedStats->rowIdStart = stats->rowIdStart;
+
+	/* Deep copy column stats list */
+	if (stats->columnStats != NULL)
+	{
+		copiedStats->columnStats = NIL;
+		ListCell   *cell = NULL;
+
+		foreach(cell, stats->columnStats)
+		{
+			DataFileColumnStats *colStats = lfirst(cell);
+			DataFileColumnStats *copiedColStats = palloc0(sizeof(DataFileColumnStats));
+
+			copiedColStats->leafField = DeepCopyLeafField(&colStats->leafField);
+			copiedColStats->lowerBoundText = pstrdup(colStats->lowerBoundText);
+			copiedColStats->upperBoundText = pstrdup(colStats->upperBoundText);
+
+			copiedStats->columnStats = lappend(copiedStats->columnStats, copiedColStats);
+		}
+	}
+
+	return copiedStats;
+}
+
+
+/*
+ * DeepCopyLeafField deep copies a LeafField.
+ */
+static LeafField
+DeepCopyLeafField(const LeafField * leafField)
+{
+	LeafField  *copiedLeafField = palloc0(sizeof(LeafField));
+
+	copiedLeafField->fieldId = leafField->fieldId;
+	copiedLeafField->field = DeepCopyField(leafField->field);
+	copiedLeafField->duckTypeName = pstrdup(leafField->duckTypeName);
+	copiedLeafField->level = leafField->level;
+	copiedLeafField->pgType = leafField->pgType;
+
+	return *copiedLeafField;
 }
