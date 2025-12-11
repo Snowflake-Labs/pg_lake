@@ -688,9 +688,6 @@ VacuumCompactDataFiles(Oid relationId, bool isFull, bool isVerbose)
 
 			RollbackAndReleaseCurrentSubTransaction();
 
-			ResetTrackedIcebergMetadataOperation();
-			ResetRestCatalogRequests();
-
 			/* continue unless it was a cancellation */
 			if (edata->sqlerrcode != ERRCODE_QUERY_CANCELED)
 				edata->elevel = WARNING;
@@ -756,9 +753,6 @@ VacuumCompactMetadata(Oid relationId, bool isVerbose)
 		FlushErrorState();
 
 		RollbackAndReleaseCurrentSubTransaction();
-
-		ResetTrackedIcebergMetadataOperation();
-		ResetRestCatalogRequests();
 
 		/* continue unless it was a cancellation */
 		if (edata->sqlerrcode != ERRCODE_QUERY_CANCELED)
@@ -843,9 +837,6 @@ VacuumRemoveDeletionQueueRecords(Oid relationId, bool isFull, bool isVerbose)
 
 			RollbackAndReleaseCurrentSubTransaction();
 
-			ResetTrackedIcebergMetadataOperation();
-			ResetRestCatalogRequests();
-
 			/* continue unless it was a cancellation */
 			if (edata->sqlerrcode != ERRCODE_QUERY_CANCELED)
 				edata->elevel = WARNING;
@@ -921,9 +912,6 @@ VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose)
 			FlushErrorState();
 
 			RollbackAndReleaseCurrentSubTransaction();
-
-			ResetTrackedIcebergMetadataOperation();
-			ResetRestCatalogRequests();
 
 			/* continue unless it was a cancellation */
 			if (edata->sqlerrcode != ERRCODE_QUERY_CANCELED)
@@ -1012,9 +1000,6 @@ VacuumRegisterMissingFields(Oid relationId)
 		FlushErrorState();
 
 		RollbackAndReleaseCurrentSubTransaction();
-
-		ResetTrackedIcebergMetadataOperation();
-		ResetRestCatalogRequests();
 
 		/* continue unless it was a cancellation */
 		if (edata->sqlerrcode != ERRCODE_QUERY_CANCELED)
