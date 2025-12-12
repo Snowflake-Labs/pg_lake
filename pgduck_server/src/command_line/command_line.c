@@ -60,6 +60,7 @@ print_usage()
 	printf(" --port <port>                 		Specify the port number, default is %d\n", DEFAULT_PORT);
 	printf(" --max_clients <max_clients>		Specify the maximum allowed clients, default is %d\n", DEFAULT_MAX_CLIENTS);
 	printf(" --memory_limit=<memory_limit>		Optionally specify the maximum memory of pgduck_server similar to DuckDB's memory_limit, the default is 80 percent of the system memory\n");
+	printf(" --continue_on_oom                  If out of memory error occurs, continue operating\n");
 	printf(" --cache_on_write_max_size=<size>   Optionally specify the maximum allowed cache size on write\n");
 	printf(" --duckdb_database_file_path <path>	Specify the database file path for DuckDB, default is %s\n", DEFAULT_DUCKDB_DATABASE_FILE_PATH);
 	printf(" --check_cli_params_only       		Only check the cli arguments, do not run the server\n");
@@ -87,6 +88,7 @@ parse_arguments(int argc, char *argv[])
 		.port = DEFAULT_PORT,
 		.max_clients = DEFAULT_MAX_CLIENTS,
 		.memory_limit = NULL,
+		.continue_on_oom = false,
 		.cache_on_write_max_size = DEFAULT_CACHE_ON_WRITE_MAX_SIZE,
 		.duckdb_database_file_path = DEFAULT_DUCKDB_DATABASE_FILE_PATH,
 		.init_file_path = NULL,
@@ -109,6 +111,7 @@ parse_arguments(int argc, char *argv[])
 		{"port", required_argument, NULL, 'P'},
 		{"max_clients", required_argument, NULL, 'M'},
 		{"memory_limit", required_argument, NULL, 'l'},
+		{"continue_on_oom", no_argument, NULL, 'O'},
 		{"cache_on_write_max_size", required_argument, NULL, 'L'},
 		{"duckdb_database_file_path", required_argument, NULL, 'D'},
 		{"cache_dir", required_argument, NULL, 'C'},
@@ -143,6 +146,9 @@ parse_arguments(int argc, char *argv[])
 			case 'l':
 				if (optarg)
 					options.memory_limit = strdup(optarg);
+				break;
+			case 'O':
+				options.continue_on_oom = true;
 				break;
 			case 'm':
 				{

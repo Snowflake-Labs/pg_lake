@@ -88,7 +88,9 @@
 	 (status) == DUCKDB_FATAL_ERROR || \
 	 (status) == DUCKDB_OUT_OF_MEMORY_ERROR)
 
-#define IS_FATAL_DUCKDB_ERROR(status) ((status) == DUCKDB_FATAL_ERROR)
+#define IS_FATAL_DUCKDB_STATUS(status) \
+	((status) == DUCKDB_FATAL_ERROR || \
+	 (oom_is_fatal && (status) == DUCKDB_OUT_OF_MEMORY_ERROR))
 
 /* The main functions that implement PG protocol */
 static int	pgsession_send_auth_ok(PGSession * pgSession);
@@ -115,6 +117,9 @@ static int	process_bind_message(PGSession * pgSession, StringInfo inputMessage);
 static int	process_execute_message(PGSession * pgSession, StringInfo inputMessage);
 
 static bool is_transmit_query(const char *queryString);
+
+/* global flag on whether to exit on OOM */
+int			oom_is_fatal = true;
 
 /*
  * Per-client entrance point for the pgsession logic.
@@ -406,7 +411,7 @@ process_query_message(PGSession * pgSession, StringInfo inputMessage)
 		pfree(errorMessage);
 
 		/* we report the error above, but need to terminate afterwards */
-		if (IS_FATAL_DUCKDB_ERROR(status))
+		if (IS_FATAL_DUCKDB_STATUS(status))
 			exit(EXIT_FAILURE);
 
 		return sentErrorMsg;

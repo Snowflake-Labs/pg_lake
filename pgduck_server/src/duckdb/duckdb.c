@@ -72,7 +72,10 @@
 #define TRANSMIT_QUOTE_CHAR '"'
 #define TRANSMIT_END_OF_LINE_CHAR '\n'
 
-#define IS_FATAL_DUCKDB_ERROR(error) ((error) == DUCKDB_ERROR_FATAL || (error) == DUCKDB_ERROR_INTERNAL)
+#define IS_FATAL_DUCKDB_ERROR(error) \
+	((error) == DUCKDB_ERROR_FATAL || \
+	 (error) == DUCKDB_ERROR_INTERNAL || \
+	 (oom_is_fatal && (error) == DUCKDB_ERROR_OUT_OF_MEMORY))
 
 typedef struct DuckDBResultColumn
 {
