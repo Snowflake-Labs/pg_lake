@@ -91,5 +91,6 @@ size_t		BaseWorkerSharedMemorySize(void);
 extern PGDLLEXPORT int32 RegisterBaseWorker(char *workerName, Oid entryPointFunctionId,
 											Oid extensionId);
 extern PGDLLEXPORT int32 DeregisterBaseWorker(char *workerName);
+extern PGDLLEXPORT int32 DeregisterBaseWorkerById(int32 workerId);
 
 #endif
