@@ -2029,12 +2029,6 @@ RegisterBaseWorker(char *workerName, Oid entryPointFunctionId, Oid extensionId)
 						errmsg("function must have internal return type")));
 	}
 
-	if (!creating_extension)
-	{
-		ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-						errmsg("can only register workers from extensions")));
-	}
-
 	int32		workerId = InsertBaseWorkerRegistration(workerName,
 														extensionId,
 														entryPointFunctionId);
