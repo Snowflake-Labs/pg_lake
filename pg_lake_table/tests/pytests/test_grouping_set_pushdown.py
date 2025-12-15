@@ -125,7 +125,7 @@ def test_grouping_sets_pushdown2(pg_conn, with_default_location):
     run_command(
         """create table gstest5(id integer, v integer) USING iceberg;
                    insert into gstest5 select i, i from generate_series(1,5)i;
-                   
+
                    create table gstest5_pg(id integer, v integer);
                    insert into gstest5_pg select i, i from generate_series(1,5)i;""",
         pg_conn,
@@ -144,3 +144,28 @@ def test_grouping_sets_pushdown2(pg_conn, with_default_location):
             assert_remote_query_contains_expression(query, "ROLLUP", pg_conn), query
         else:
             assert False
+
+
+def test_grouping_sets_pushdown_bool(pg_conn, with_default_location):
+    run_command(
+        """
+        CREATE TABLE test_grouping_issue USING iceberg as
+        SELECT
+              gs,
+              (random() < 0.8) AS success
+              FROM generate_series(1, 1000) gs
+        """,
+        pg_conn,
+    )
+
+    query = """
+    select true as tool_boolean, sum(gs), avg(gs), grouping(true)
+    from test_grouping_issue
+    group by rollup(1)
+    """
+
+    assert_query_results_on_tables(
+        query, pg_conn, ["test_grouping_issue", "test_grouping_issue"]
+    )
+
+    pg_conn.rollback()
