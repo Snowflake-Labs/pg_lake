@@ -63,13 +63,26 @@ def test_create_deregister_worker(superuser_conn):
 
     assert count_pg_extension_base_workers(superuser_conn) == 0
 
-    # register adhoc worker, get id
-    worker_id = run_query(
-        "SELECT extension_base.register_worker('pg_extension_base_test_scheduler_main_worker', 'extension_base_scheduler.main_worker')",
-        superuser_conn,
-    )[0][0]
+    run_command(
+        "DROP EXTENSION pg_extension_base_test_scheduler CASCADE", superuser_conn
+    )
     superuser_conn.commit()
 
+
+def test_create_deregister_worker_id(superuser_conn):
+    run_command(
+        "CREATE EXTENSION pg_extension_base_test_scheduler CASCADE", superuser_conn
+    )
+    superuser_conn.commit()
+    time.sleep(0.1)
+
+    assert count_pg_extension_base_workers(superuser_conn) == 1
+
+    # get id from UDF
+    worker_id = run_query(
+        "SELECT worker_id FROM extension_base.workers WHERE worker_name = 'pg_extension_base_test_scheduler_main_worker'",
+        superuser_conn,
+    )[0][0]
     assert worker_id > 0
 
     time.sleep(0.1)
@@ -99,6 +112,7 @@ def test_create_deregister_worker(superuser_conn):
         "DROP EXTENSION pg_extension_base_test_scheduler CASCADE", superuser_conn
     )
     superuser_conn.commit()
+    time.sleep(0.1)
 
 
 def test_create_drop_pg_extension_base(superuser_conn):
