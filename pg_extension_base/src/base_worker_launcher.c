@@ -2081,9 +2081,22 @@ RegisterBaseWorker(char *workerName, Oid entryPointFunctionId, Oid extensionId)
 Datum
 pg_extension_base_deregister_worker(PG_FUNCTION_ARGS)
 {
-	char	   *workerName = text_to_cstring(PG_GETARG_TEXT_P(0));
+	Oid			argtype = get_fn_expr_argtype(fcinfo->flinfo, 0);
 
-	DeregisterBaseWorker(workerName);
+	if (argtype == INT4OID)
+	{
+		DeregisterBaseWorkerById(PG_GETARG_INT32(0));
+	}
+	else if (argtype == TEXTOID)
+	{
+		char	   *workerName = text_to_cstring(PG_GETARG_TEXT_P(0));
+
+		DeregisterBaseWorker(workerName);
+	}
+	else
+	{
+		ereport(ERROR, (errmsg("unrecognized argument type")));
+	}
 
 	PG_RETURN_VOID();
 }
