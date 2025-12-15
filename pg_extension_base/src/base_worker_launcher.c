@@ -1978,6 +1978,12 @@ PgExtensionBaseWorkerSharedMemoryExit(int code, Datum arg)
 Datum
 pg_extension_base_register_worker(PG_FUNCTION_ARGS)
 {
+	if (!creating_extension)
+	{
+		ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						errmsg("can only register workers from extensions")));
+	}
+
 	char	   *workerName = text_to_cstring(PG_GETARG_TEXT_P(0));
 	Oid			entryPointFunctionId = PG_GETARG_OID(1);
 
