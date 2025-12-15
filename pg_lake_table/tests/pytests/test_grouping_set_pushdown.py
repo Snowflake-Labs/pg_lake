@@ -153,7 +153,10 @@ def test_grouping_sets_pushdown_bool(pg_conn, with_default_location):
         SELECT
               gs,
               (random() < 0.8) AS success
-              FROM generate_series(1, 1000) gs
+              FROM generate_series(1, 1000) gs;
+
+        CREATE TABLE test_grouping_issue AS
+        SELECT * FROM test_grouping_issue;
         """,
         pg_conn,
     )
@@ -165,7 +168,10 @@ def test_grouping_sets_pushdown_bool(pg_conn, with_default_location):
     """
 
     assert_query_results_on_tables(
-        query, pg_conn, ["test_grouping_issue", "test_grouping_issue"]
+        query,
+        pg_conn,
+        ["test_grouping_issue", "test_grouping_issue"],
+        ["test_grouping_issue_pg", "test_grouping_issue_pg"],
     )
 
     pg_conn.rollback()
