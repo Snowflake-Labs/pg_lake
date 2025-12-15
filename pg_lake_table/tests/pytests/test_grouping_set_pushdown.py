@@ -155,7 +155,7 @@ def test_grouping_sets_pushdown_bool(pg_conn, with_default_location):
               (random() < 0.8) AS success
               FROM generate_series(1, 1000) gs;
 
-        CREATE TABLE test_grouping_issue AS
+        CREATE TABLE test_grouping_issue_pg AS
         SELECT * FROM test_grouping_issue;
         """,
         pg_conn,
