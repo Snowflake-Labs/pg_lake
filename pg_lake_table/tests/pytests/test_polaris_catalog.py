@@ -382,6 +382,10 @@ def test_register_existing_table(
     )
     iceberg_table.append(data)
 
+    # make sure to get new metadata location
+    # in a new tx
+    pg_conn.commit()
+
     # make sure we can follow the changes
     if set_search_path:
         res = run_query(
@@ -407,6 +411,10 @@ def test_register_existing_table(
         [{"city": "city_5", f"""lat lat""": 99.0, "long": 88.0}]
     )
     iceberg_table.overwrite(updated, overwrite_filter=EqualTo("city", "city_5"))
+
+    # make sure to get new metadata location
+    # in a new tx
+    pg_conn.commit()
 
     # make sure we can follow the changes
     res = run_query(
@@ -629,6 +637,7 @@ def test_register_existing_table_renames(
         pg_conn,
     )
     assert len(res) == 5
+    pg_conn.commit()
 
     rename_rest_catalog_table(
         pg_conn,
@@ -689,6 +698,101 @@ def test_register_existing_table_renames(
 
     run_command(f"""DROP SCHEMA "{catalog_namespace_name}_pg" CASCADE""", pg_conn)
     pg_conn.commit()
+    nuke_rest_catalog(rest_catalog, catalog_namespace_name)
+
+
+def test_metadata_fetch(
+    pg_conn,
+    set_polaris_gucs,
+    with_default_location,
+    s3,
+    polaris_session,
+    installcheck,
+    create_http_helper_functions,
+    grant_access_to_tables_internal,
+):
+
+    if installcheck:
+        return
+
+    catalog_namespace_name = "tmp_namespace_rename"
+    rest_catalog = create_iceberg_rest_catalog(catalog_namespace_name)
+    run_command(f"""CREATE SCHEMA "{catalog_namespace_name}_pg" """, pg_conn)
+
+    catalog_table_name = f"tmp_table_rename"
+    iceberg_table = create_rest_catalog_table(
+        catalog_table_name,
+        f"{catalog_namespace_name}",
+        rest_catalog,
+        False,
+        False,
+    )
+
+    run_command(
+        f"""CREATE TABLE "{catalog_namespace_name}_pg"."{catalog_namespace_name}_pg"() USING iceberg WITH (catalog='rest', read_only=True, catalog_name='{server_params.PG_DATABASE}', catalog_namespace='{catalog_namespace_name}', catalog_table_name='{catalog_table_name}')""",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # Clear any existing notices
+    pg_conn.notices.clear()
+    run_command("set pg_lake_iceberg.http_client_trace_traffic to true", pg_conn)
+
+    # running multiple commands in read-committed mode fetches metadata only once per statement
+    stmt_cnt = 3
+    for _ in range(0, stmt_cnt):
+        res = run_query(
+            f"""
+                SELECT * FROM "{catalog_namespace_name}_pg"."{catalog_namespace_name}_pg";
+                 """,
+            pg_conn,
+        )
+
+    fetch_cnt = 0
+    for line in pg_conn.notices:
+        print(line)
+        if "making GET request to URL" in str(
+            line
+        ) and f"{catalog_namespace_name}" in str(line):
+            fetch_cnt += 1
+
+    # we executed 3 statements
+    assert fetch_cnt == stmt_cnt
+    pg_conn.commit()
+
+    # now, the same test with REPEATABLE READ and SERIALIZABLE
+    tx_mode = ["REPEATABLE READ", "SERIALIZABLE"]
+    for m in tx_mode:
+
+        pg_conn.notices.clear()
+
+        run_command(f"BEGIN TRANSACTION ISOLATION LEVEL {m}", pg_conn)
+
+        stmt_cnt = 3
+        for _ in range(0, stmt_cnt):
+            res = run_query(
+                f"""
+                    SELECT * FROM "{catalog_namespace_name}_pg"."{catalog_namespace_name}_pg";
+                     """,
+                pg_conn,
+            )
+
+        fetch_cnt = 0
+        for line in pg_conn.notices:
+            print(line)
+            if "making GET request to URL" in str(
+                line
+            ) and f"{catalog_namespace_name}" in str(line):
+                fetch_cnt += 1
+
+        # we executed 3 statements but only fetch once given
+        # the isolation levels
+        assert fetch_cnt == 1
+        pg_conn.commit()
+
+    run_command(f"""DROP SCHEMA "{catalog_namespace_name}_pg" CASCADE""", pg_conn)
+    pg_conn.commit()
+    run_command("reset pg_lake_iceberg.http_client_trace_traffic", pg_conn)
     nuke_rest_catalog(rest_catalog, catalog_namespace_name)
 
 
