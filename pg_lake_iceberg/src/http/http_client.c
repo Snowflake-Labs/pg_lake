@@ -584,7 +584,11 @@ RedactSensitiveJson(char *input)
 		"\"token\"",
 		"\"client_secret\"",
 		"\"authorization\"",
-		"\"Authorization\""
+		"\"Authorization\"",
+		"\"s3.access-key-id\"",
+		"\"s3.secret-access-key\"",
+		"\"s3.session-token\"",
+		"\"storage-credentials\""
 	};
 	const int	keyCount = sizeof(keys) / sizeof(keys[0]);
 
