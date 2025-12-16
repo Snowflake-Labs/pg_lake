@@ -164,3 +164,4 @@ clean:
 	rm -rf build
 	rm -rf testext
 	rm -f libduckdb.so
+	rm -f .patches_applied
