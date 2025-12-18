@@ -50,6 +50,7 @@ static void AppendFieldIdValue(StringInfo map, Field * field, int fieldId);
 static const char *ParquetVersionToString(ParquetVersion version);
 static void ParseDuckdbColumnMinMaxFromText(const char *input, List **names, List **mins, List **maxs);
 static List *GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields, DataFileSchema * schema);
+static bool ShouldSkipStatisticsForField(LeafField *leafField);
 
 static DuckDBTypeInfo VARCHAR_TYPE =
 {
@@ -58,7 +59,7 @@ static DuckDBTypeInfo VARCHAR_TYPE =
 
 int			TargetRowGroupSizeMB = DEFAULT_TARGET_ROW_GROUP_SIZE_MB;
 int			DefaultParquetVersion = PARQUET_VERSION_V1;
-
+bool		EnableStatsCollectionForNestedTypes = false;
 
 /*
  * ConvertCSVFileTo copies and converts a CSV file at source path to
@@ -448,7 +449,7 @@ WriteQueryResultTo(char *query,
 
 
 List *
-GetDataFileStatsListFromPGResult(PGresult *result, List *leafFields, DataFileSchema * schema, int *totalRowCount)
+GetDataFileStatsListFromPGResult(PGresult *result, List *leafFields, DataFileSchema * schema, int64 *totalRowCount)
 {
 	List	   *statsList = NIL;
 
@@ -680,8 +681,6 @@ GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields
 		DataFileSchemaField *field = &schema->fields[i];
 		const char *fieldName = field->name;
 		int			fieldId = field->id;
-
-		ListCell   *nameCell = NULL;
 		int			nameIndex = -1;
 
 		for (int index = 0; index < list_length(names); index++)
@@ -707,7 +706,7 @@ GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields
 		{
 			LeafField  *lf = lfirst(leafCell);
 
-			if (lf->fieldId == fieldId)
+			if (lf->fieldId == fieldId && !ShouldSkipStatisticsForField(lf))
 			{
 				leafField = lf;
 				break;
@@ -729,6 +728,43 @@ GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields
 	}
 
 	return columnStatsList;
+}
+
+
+static bool
+ShouldSkipStatisticsForField(LeafField *leafField)
+{
+	Field	   *field = leafField->field;
+	PGType		pgType = leafField->pgType;
+
+	Oid			pgTypeOid = pgType.postgresTypeOid;
+
+	if (IsGeometryTypeId(pgType.postgresTypeOid))
+	{
+		return true;
+	}
+	else if (strcmp(field->field.scalar.typeName, "string") == 0 &&
+			 pgType.postgresTypeOid != TEXTOID &&
+			 pgTypeOid != VARCHAROID &&
+			 pgTypeOid != BPCHAROID &&
+			 pgTypeOid != CHAROID)
+	{
+		return true;
+	}
+	else if (pgTypeOid == BYTEAOID)
+	{
+		return true;
+	}
+	else if (pgTypeOid == UUIDOID)
+	{
+		return true;
+	}
+	else if (leafField->level != 1)
+	{
+		return !EnableStatsCollectionForNestedTypes;
+	}
+
+	return false;
 }
 
 

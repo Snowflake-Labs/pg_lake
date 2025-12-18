@@ -106,7 +106,7 @@ PerformDeleteFromParquet(char *sourcePath,
 
 		CheckPGDuckResult(pgDuckConn, result);
 
-		int rowsAffected;
+		int64 rowsAffected;
 		List	   *dataFileStats = GetDataFileStatsListFromPGResult(result, leafFields, schema, &rowsAffected);
 
 		Assert(dataFileStats != NIL);
