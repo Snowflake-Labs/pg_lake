@@ -35,6 +35,7 @@ typedef enum ParquetVersion
 
 /* pg_lake_table.default_parquet_version */
 extern PGDLLEXPORT int DefaultParquetVersion;
+extern PGDLLEXPORT bool EnableStatsCollectionForNestedTypes;
 
 extern PGDLLEXPORT void ConvertCSVFileTo(char *csvFilePath,
 										 TupleDesc tupleDesc,
@@ -60,4 +61,4 @@ extern PGDLLEXPORT void AppendFields(StringInfo map, DataFileSchema * schema);
 extern PGDLLEXPORT List *GetDataFileStatsListFromPGResult(PGresult *result,
 														  List *leafFields,
 														  DataFileSchema * schema,
-														  int *totalRowCount);
+														  int64 *totalRowCount);
