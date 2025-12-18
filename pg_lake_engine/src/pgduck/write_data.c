@@ -465,7 +465,7 @@ GetDataFileStatsListFromPGResult(PGresult *result, List *leafFields, DataFileSch
 			char	   *colName = PQfname(result, c);
 			char	   *val = PQgetvalue(result, r, c);
 
-			if (strcmp(colName, "column_statistics") == 0)
+			if (schema != NULL && strcmp(colName, "column_statistics") == 0)
 			{
 				List	   *names = NIL;
 				List	   *mins = NIL;
@@ -674,6 +674,7 @@ GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields
 {
 	List	   *columnStatsList = NIL;
 
+	Assert(schema != NULL);
 	for (int i = 0; i < schema->nfields; i++)
 	{
 		DataFileSchemaField *field = &schema->fields[i];
