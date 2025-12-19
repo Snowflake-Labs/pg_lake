@@ -170,6 +170,38 @@ GetLeafFieldsForIcebergSchema(IcebergTableSchema * schema)
 
 
 /*
+ * GetDataFileSchemaFieldById gets the DataFileSchemaField for the given
+ * iceberg field id.
+ */
+DataFileSchemaField *
+GetDataFileSchemaFieldById(DataFileSchema * schema, int fieldId)
+{
+	DataFileSchemaField *schemaField = NULL;
+
+	for (size_t fieldIdx = 0; fieldIdx < schema->nfields; fieldIdx++)
+	{
+		DataFileSchemaField *field = &schema->fields[fieldIdx];
+
+		if (field->id == fieldId)
+		{
+			schemaField = field;
+			break;
+		}
+	}
+
+	if (schemaField == NULL)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("field ID %d not found",
+						fieldId)));
+	}
+
+	return schemaField;
+}
+
+
+/*
  * GetLeafFieldsForField returns the leaf fields for the given field.
  * It recursively traverses the field tree and collects all leaf fields, and
  * "level" is the current level of the field in the tree.

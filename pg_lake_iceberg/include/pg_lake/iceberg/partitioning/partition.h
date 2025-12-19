@@ -26,4 +26,4 @@ extern PGDLLEXPORT Partition * CopyPartition(Partition * partition);
 extern PGDLLEXPORT void AppendPartitionField(Partition * partition, PartitionField * partitionField);
 extern PGDLLEXPORT uint64 ComputePartitionKey(const Partition * partition);
 extern PGDLLEXPORT uint64 ComputeSpecPartitionKey(int32_t partitionSpecId, const Partition * partition);
-extern PGDLLEXPORT IcebergPartitionTransform * FindPartitionTransformById(List *transforms, int32_t partitionFieldId);
+extern PGDLLEXPORT IcebergPartitionTransform * FindPartitionTransformById(List *transforms, int32_t partitionFieldId, bool errorIfMissing);

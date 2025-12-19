@@ -217,7 +217,7 @@ ComputeSpecPartitionKey(int32_t partitionSpecId, const Partition * partition)
  * FindPartitionTransformById finds a partition transform by partition field id.
  */
 IcebergPartitionTransform *
-FindPartitionTransformById(List *transforms, int32_t partitionFieldId)
+FindPartitionTransformById(List *transforms, int32_t partitionFieldId, bool errorIfMissing)
 {
 	ListCell   *cell = NULL;
 
@@ -229,8 +229,11 @@ FindPartitionTransformById(List *transforms, int32_t partitionFieldId)
 			return transform;
 	}
 
-	ereport(ERROR,
-			(errcode(ERRCODE_INTERNAL_ERROR),
-			 errmsg("could not find partition transform for field id %d",
-					partitionFieldId)));
+	if (errorIfMissing)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("could not find partition transform for field id %d",
+						partitionFieldId)));
+
+	return NULL;
 }

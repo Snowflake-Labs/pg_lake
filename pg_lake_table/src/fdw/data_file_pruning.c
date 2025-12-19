@@ -46,6 +46,7 @@
 #include "utils/syscache.h"
 #include "utils/lsyscache.h"
 
+#include "pg_extension_base/pg_compat.h"
 #include "pg_lake/extensions/pg_lake_engine.h"
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/fdw/schema_operations/field_id_mapping_catalog.h"
@@ -58,7 +59,7 @@
 #include "pg_lake/iceberg/data_file_stats.h"
 #include "pg_lake/iceberg/partitioning/partition.h"
 #include "pg_lake/iceberg/temporal_utils.h"
-#include "pg_extension_base/pg_compat.h"
+#include "pg_lake/partitioning/partition_spec_catalog.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/iceberg/hash_utils.h"
 #include "pg_lake/pgduck/map.h"
@@ -105,13 +106,14 @@ static HTAB *CreateFieldIdMappingHash(void);
 static void AddFieldIdsUsedInQuery(HTAB *fieldIdsToUseInBounds, Oid relationId,
 								   PgLakeTableProperties tableProperties,
 								   List *columnsUsedInFilters);
+static List *GetPartitionSpecFieldsUsedInQuery(Oid relationId, HTAB *fieldIdsToUseInBounds);
 static List *GetExternalIcebergFieldsForAttributes(Oid relationId, List *attrNos);
 static List *GetColumnBoundConstraints(Oid relationId, HTAB *fieldIdCache, List *columnStats,
-									   List *partitionTransforms, Partition * partition);
+									   List *partitionTransformsUsedInQuery, Partition * partition);
 static List *GetColumnBoundConstraintsFromColumnStats(Oid relationId, List *columnStats,
 													  ColumnToFieldIdMapping * entry);
-static List *GetColumnBoundConstraintsFromPartitions(Oid relationId, ColumnToFieldIdMapping * entry,
-													 List *partitionTransforms, Partition * partition);
+static List *GetColumnBoundConstraintsFromPartition(Oid relationId, ColumnToFieldIdMapping * entry,
+													List *partitionTransformsUsedInQuery, Partition * partition);
 static void StripAllImplicitCoercionsInList(List *baseRestrictInfoList);
 static Node *StripAllImplicitCoercions(Node *expr);
 static Node *StripAllImplicitCoercionsMutator(Node *node, void *context);
@@ -157,7 +159,7 @@ static OpExpr *CreateConstraintWithEquality(OpExpr *eqOp, bool constByVal, int16
 static char *TruncateUpperBoundForText(char *upperBound, size_t truncateLen);
 static bytea *TruncateUpperBoundForBytea(bytea *data, int truncateLen);
 static List *ExtendClausesForBucketPartitioning(Partition * partition,
-												List *partitionTransforms,
+												List *partitionTransformsUsedInQuery,
 												HTAB *fieldIdMapping,
 												List *baseRestrictInfoList);
 static List *ExtendBaseRestrictInfoForBucketPartition(List *baseRestrictInfoList,
@@ -182,7 +184,6 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 {
 	List	   *retainedDataFiles = NIL;
 	List	   *columnsUsedInFilters = ColumnsUsedInRestrictions(relationId, baseRestrictInfoList);
-	List	   *partitionTransforms = AllPartitionTransformList(relationId);
 	PgLakeTableProperties tableProperties = GetPgLakeTableProperties(relationId);
 
 	if ((!EnableDataFilePruning && !EnablePartitionPruning) ||
@@ -230,6 +231,10 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 
 	AddFieldIdsUsedInQuery(fieldIdsUsedInQuery, relationId, tableProperties, columnsUsedInFilters);
 
+	/* get partition transforms for the fields used in the query */
+	List	   *partitionFieldsUsedInQuery = GetPartitionSpecFieldsUsedInQuery(relationId, fieldIdsUsedInQuery);
+	List	   *partitionTransformsUsedInQuery = GetPartitionTransformsFromSpecFields(relationId, partitionFieldsUsedInQuery);
+
 	int			dataFileCount = list_length(dataFiles);
 
 	for (int dataFileIndex = 0; dataFileIndex < dataFileCount; ++dataFileIndex)
@@ -254,6 +259,7 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 			char	   *dataFilePath = (char *) ((DataFile *) dataFile)->file_path;
 
 			columnStats = GetRemoteParquetColumnStats(dataFilePath, leafFields);
+			partition = &(dataFile->partition);
 		}
 		else
 		{
@@ -266,7 +272,7 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 		/* calculate bound constraints */
 		columnBoundConstraints =
 			GetColumnBoundConstraints(relationId, fieldIdsUsedInQuery, columnStats,
-									  partitionTransforms, partition);
+									  partitionTransformsUsedInQuery, partition);
 
 		bool		includeDataFile = false;
 
@@ -274,7 +280,7 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 		{
 			/* for bucket partitioning, we add some extra synthetic filters */
 			List	   *extendedClauses =
-				ExtendClausesForBucketPartitioning(partition, partitionTransforms,
+				ExtendClausesForBucketPartitioning(partition, partitionTransformsUsedInQuery,
 												   fieldIdsUsedInQuery,
 												   clauses);
 
@@ -292,6 +298,36 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 	}
 
 	return retainedDataFiles;
+}
+
+
+/*
+ * GetPartitionSpecFieldsUsedInQuery gets the partition spec fields that are
+ * used in the query filters.
+ */
+static List *
+GetPartitionSpecFieldsUsedInQuery(Oid relationId, HTAB *fieldIdsToUseInBounds)
+{
+	List	   *partitionFields = GetAllPartitionSpecFields(relationId);
+
+	List	   *filteredPartitionFields = NIL;
+	ListCell   *filteredPartitionFieldCell = NULL;
+
+	foreach(filteredPartitionFieldCell, partitionFields)
+	{
+		IcebergPartitionSpecField *specField = lfirst(filteredPartitionFieldCell);
+
+		bool		found = false;
+
+		hash_search(fieldIdsToUseInBounds, &specField->source_id, HASH_FIND, &found);
+
+		if (found)
+		{
+			filteredPartitionFields = lappend(filteredPartitionFields, specField);
+		}
+	}
+
+	return filteredPartitionFields;
 }
 
 
@@ -479,7 +515,7 @@ AddFieldIdsUsedInQuery(HTAB *fieldIdsUsedInQuery, Oid relationId, PgLakeTablePro
 */
 static List *
 GetColumnBoundConstraints(Oid relationId, HTAB *fieldIdMapping, List *columnStats,
-						  List *partitionTransforms, Partition * partition)
+						  List *partitionTransformsUsedInQuery, Partition * partition)
 {
 	List	   *constraintList = NIL;
 
@@ -498,7 +534,6 @@ GetColumnBoundConstraints(Oid relationId, HTAB *fieldIdMapping, List *columnStat
 	hash_seq_init(&status, fieldIdMapping);
 	while ((entry = hash_seq_search(&status)) != NULL)
 	{
-
 		if (EnableDataFilePruning)
 		{
 			List	   *columnStatsBoundConstraints =
@@ -512,15 +547,13 @@ GetColumnBoundConstraints(Oid relationId, HTAB *fieldIdMapping, List *columnStat
 		if (EnablePartitionPruning)
 		{
 			List	   *partitionBoundConstraints =
-				GetColumnBoundConstraintsFromPartitions(relationId,
-														entry,
-														partitionTransforms,
-														partition);
+				GetColumnBoundConstraintsFromPartition(relationId,
+													   entry,
+													   partitionTransformsUsedInQuery,
+													   partition);
 
 			constraintList = list_concat(constraintList, partitionBoundConstraints);
 		}
-
-
 	}
 
 	return constraintList;
@@ -618,13 +651,13 @@ GetColumnBoundConstraintsFromColumnStats(Oid relationId, List *columnStats,
 
 
 /*
-* GetColumnBoundConstraintsFromPartitions returns the constraints for the
+* GetColumnBoundConstraintsFromPartition returns the constraints for the
 * columns used in the query. The constraints are based on the partition
 * statistics stored in iceberg metadata.
 */
 static List *
-GetColumnBoundConstraintsFromPartitions(Oid relationId, ColumnToFieldIdMapping * entry,
-										List *partitionTransforms, Partition * partition)
+GetColumnBoundConstraintsFromPartition(Oid relationId, ColumnToFieldIdMapping * entry,
+									   List *partitionTransformsUsedInQuery, Partition * partition)
 {
 	List	   *constraintList = NIL;
 	int			partitionFieldCount = partition ? partition->fields_length : 0;
@@ -633,18 +666,18 @@ GetColumnBoundConstraintsFromPartitions(Oid relationId, ColumnToFieldIdMapping *
 	{
 		PartitionField *partitionField = &partition->fields[partitionFieldIndex];
 
-		IcebergPartitionTransform *partitionTransform =
-			FindPartitionTransformById(partitionTransforms, partitionField->field_id);
+		bool		errorIfMissing = false;
 
-		/* unexpected but better than crash */
-		if (partitionTransform == NULL)
-			elog(ERROR, "Could not find partition transform for field %d", partitionField->field_id);
+		IcebergPartitionTransform *partitionTransform =
+			FindPartitionTransformById(partitionTransformsUsedInQuery, partitionField->field_id, errorIfMissing);
 
 		/* skip if the partition field is not used in the query */
-		if (partitionTransform->sourceField->id != entry->fieldId)
-		{
+		if (partitionTransform == NULL)
 			continue;
-		}
+
+		/* skip if transform's sourceId does not match the entry's fieldId */
+		if (partitionTransform->sourceField->id != entry->fieldId)
+			continue;
 
 		Expr	   *boundsConstraint =
 			PartitionFieldBoundConstraint(partitionField, partitionTransform, entry);
@@ -1760,7 +1793,7 @@ GetSyntheticBucketForPartitionField(PartitionField * partitionField,
 * where partition_col is the column that is used for bucket partition transforms.
 */
 static List *
-ExtendClausesForBucketPartitioning(Partition * partition, List *partitionTransforms,
+ExtendClausesForBucketPartitioning(Partition * partition, List *partitionTransformsUsedInQuery,
 								   HTAB *fieldIdMapping, List *clauses)
 {
 	List	   *syntheticClauseList = NIL;
@@ -1771,8 +1804,14 @@ ExtendClausesForBucketPartitioning(Partition * partition, List *partitionTransfo
 	{
 		PartitionField *partitionField = &partition->fields[partitionFieldIndex];
 
+		bool		errorIfMissing = false;
+
 		IcebergPartitionTransform *partitionTransform =
-			FindPartitionTransformById(partitionTransforms, partitionField->field_id);
+			FindPartitionTransformById(partitionTransformsUsedInQuery, partitionField->field_id, errorIfMissing);
+
+		/* skip if the partition field is not used in the query */
+		if (partitionTransform == NULL)
+			continue;
 
 		if (partitionTransform->type != PARTITION_TRANSFORM_BUCKET)
 		{
