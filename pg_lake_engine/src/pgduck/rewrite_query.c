@@ -286,10 +286,19 @@ static FunctionCallRewriteRuleByName BuiltinFunctionCallRewriteRulesByName[] =
 
 	/* hyperbolic functions */
 	{
+		"pg_catalog", "sinh", RewriteFuncExprHyperbolic, 0
+	},
+	{
 		"pg_catalog", "acosh", RewriteFuncExprHyperbolic, 0
 	},
 	{
+		"pg_catalog", "cosh", RewriteFuncExprHyperbolic, 0
+	},
+	{
 		"pg_catalog", "atanh", RewriteFuncExprHyperbolic, 0
+	},
+	{
+		"pg_catalog", "tanh", RewriteFuncExprHyperbolic, 0
 	},
 
 	/* explicit calls to cast functions */
@@ -2208,12 +2217,24 @@ RewriteFuncExprHyperbolic(Node *node, void *context)
 
 	switch (funcExpr->funcid)
 	{
+		case F_SINH:
+			funcName = list_make2(makeString(PG_LAKE_INTERNAL_NSP), makeString("sinh_pg"));
+			break;
+
 		case F_ACOSH:
 			funcName = list_make2(makeString(PG_LAKE_INTERNAL_NSP), makeString("acosh_pg"));
 			break;
 		
+	    case F_COSH:
+			funcName = list_make2(makeString(PG_LAKE_INTERNAL_NSP), makeString("cosh_pg"));
+			break;
+		
 		case F_ATANH:
 			funcName = list_make2(makeString(PG_LAKE_INTERNAL_NSP), makeString("atanh_pg"));
+			break;
+
+		case F_TANH:
+			funcName = list_make2(makeString(PG_LAKE_INTERNAL_NSP), makeString("tanh_pg"));
 			break;
 
 		default:

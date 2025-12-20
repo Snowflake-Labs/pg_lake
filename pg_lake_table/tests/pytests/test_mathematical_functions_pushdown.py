@@ -146,15 +146,33 @@ test_agg_cases = [
         True,
     ),
     (
+        "sinh",
+        "WHERE abs(sinh(col_double) - 0.5781516) < 0.001",
+        "sinh_pg(",
+        True,
+    ),
+    (
         "asinh",
         "WHERE col_double > 1 and abs(asinh(col_double) - 0.9503469) < 0.001",
         "asinh(",
         True,
     ),
     (
+        "cosh",
+        "WHERE abs(cosh(col_double) - 1.1551014) < 0.001",
+        "cosh_pg(",
+        True,
+    ),
+    (
         "acosh",
         "WHERE col_double > 1 and abs(acosh(col_double) - 0.4435682) < 0.001",
         "acosh_pg(",
+        True,
+    ),
+    (
+        "tanh",
+        "WHERE abs(tanh(col_double) - 0.5005202) < 0.001",
+        "tanh_pg(",
         True,
     ),
     (
