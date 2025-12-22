@@ -535,7 +535,7 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 									 deleteFile, newDataFilePath, compression,
 									 schema, &stats, GetLeafFieldsForTable(relationId), &newFileStats);
 
-			ApplyColumnStatsModeForAllFileStats(relationId, newFileStats);
+			ApplyColumnStatsModeForAllFileStats(relationId, list_make1(newFileStats));
 
 			int64		newRowCount = liveRowCount - deletedRowCount;
 
