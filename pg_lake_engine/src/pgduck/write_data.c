@@ -264,11 +264,8 @@ WriteQueryResultTo(char *query,
 				appendStringInfo(&command, ", parquet_version '%s'",
 								 ParquetVersionToString(DefaultParquetVersion));
 
-				if (schema != NULL)
-				{
-					appendStringInfo(&command, ", return_stats");
-					useReturnStats = true;
-				}
+				appendStringInfo(&command, ", return_stats");
+				useReturnStats = true;
 
 				break;
 			}
