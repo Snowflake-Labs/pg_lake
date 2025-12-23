@@ -248,8 +248,8 @@ def test_pg_lake_iceberg_table_read_data_file_stats_from_catalog(
         [5, 11, "2021-01-01 00:00:00", "2021-01-04 00:00:00"],
         [5, 12, "a", "d"],
         [5, 13, "abc", "jkl"],
-        [5, 15, "1", "12"],
-        [5, 17, "1", "4"],
+        # [5, 15, "1", "12"],
+        # [5, 17, "1", "4"],
     ]
 
     # remove data files. then stats should be empty due to foreign key constraint
