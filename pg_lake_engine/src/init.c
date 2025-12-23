@@ -175,7 +175,7 @@ _PG_init(void)
 										  "still get into stats problems with nested types due to parsing "
 										  "discrepancies between Postgres and DuckDB."),
 							 NULL,
-							 &EnableStatsCollectionForNestedTypes,
+							 &DeprecatedEnableStatsCollectionForNestedTypes,
 							 false,
 							 PGC_SUSET,
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,

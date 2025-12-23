@@ -1355,13 +1355,9 @@ ShouldSkipStatistics(LeafField * leafField)
 	{
 		/*
 		 * We currently do not support pruning on array, map, and composite
-		 * types. But still, you can get into stats problems with nested types
-		 * due to the way DuckDB parses commas in the array. For example, if
-		 * you have array['hello', 'world', 'abc,def'], the lower bound
-		 * becomes 'abc' not 'abc,def'. So, be careful when enabling nested
-		 * types.
+		 * types. So there's no need to collect stats for them.
 		 */
-		return !EnableStatsCollectionForNestedTypes;
+		return true;
 	}
 
 	return false;
