@@ -59,7 +59,7 @@ static DuckDBTypeInfo VARCHAR_TYPE =
 
 int			TargetRowGroupSizeMB = DEFAULT_TARGET_ROW_GROUP_SIZE_MB;
 int			DefaultParquetVersion = PARQUET_VERSION_V1;
-bool		EnableStatsCollectionForNestedTypes = false;
+bool		DeprecatedEnableStatsCollectionForNestedTypes = false;
 
 /*
  * ConvertCSVFileTo copies and converts a CSV file at source path to
@@ -761,7 +761,7 @@ ShouldSkipStatisticsForField(LeafField *leafField)
 	}
 	else if (leafField->level != 1)
 	{
-		return !EnableStatsCollectionForNestedTypes;
+		return true;
 	}
 
 	return false;
