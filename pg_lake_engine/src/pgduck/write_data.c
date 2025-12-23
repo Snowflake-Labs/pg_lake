@@ -19,18 +19,23 @@
  * Functions for generating query for writing data via pgduck server.
  */
 #include "postgres.h"
+#include "fmgr.h"
 
 #include "access/tupdesc.h"
+#include "catalog/pg_type.h"
 #include "commands/defrem.h"
 #include "common/string.h"
+#include "executor/executor.h"
 #include "pg_lake/csv/csv_options.h"
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/data_file/data_file_stats.h"
+#include "pg_lake/extensions/pg_map.h"
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/parquet/geoparquet.h"
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/pgduck/client.h"
+#include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/pgduck/read_data.h"
 #include "pg_lake/pgduck/type.h"
@@ -49,8 +54,11 @@ static DuckDBTypeInfo ChooseDuckDBEngineTypeForWrite(PGType postgresType,
 static void AppendFieldIdValue(StringInfo map, Field * field, int fieldId);
 static const char *ParquetVersionToString(ParquetVersion version);
 static void ParseDuckdbColumnMinMaxFromText(const char *input, List **names, List **mins, List **maxs);
+static void ExtractMinMaxForAllColumns(Datum map, List **names, List **mins, List **maxs);
+static void ExtractMinMaxForColumn(Datum map, const char *colName, List **names, List **mins, List **maxs);
+static char *UnescapeDoubleQuotes(const char *s);
 static List *GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields, DataFileSchema * schema);
-static bool ShouldSkipStatisticsForField(LeafField *leafField);
+static bool ShouldSkipStatisticsForField(LeafField * leafField);
 
 static DuckDBTypeInfo VARCHAR_TYPE =
 {
@@ -455,6 +463,7 @@ GetDataFileStatsListFromPGResult(PGresult *result, List *leafFields, DataFileSch
 
 	int			rowCount = PQntuples(result);
 	int			columnCount = PQnfields(result);
+
 	*totalRowCount = 0;
 
 	for (int r = 0; r < rowCount; r++)
@@ -497,176 +506,200 @@ GetDataFileStatsListFromPGResult(PGresult *result, List *leafFields, DataFileSch
 }
 
 
+/*
+ * ExtractMinMaxFromStatsMapDatum extracts min and max values from given stats map
+ * of type map(varchar,varchar).
+ */
 static void
-ParseDuckdbColumnMinMaxFromText(const char *input, List **names, List **mins, List **maxs)
+ExtractMinMaxForColumn(Datum map, const char *colName, List **names, List **mins, List **maxs)
 {
-	input = PgLakeReplaceText(pstrdup(input), "\"", "");
-	input = PgLakeReplaceText(pstrdup(input), "\\", "");
+	ArrayType  *elementsArray = DatumGetArrayTypeP(map);
 
-	char	   *ptr = (char *) input + 1;
+	if (elementsArray == NULL)
+		return;
 
-	while (*ptr != '\0')
+	uint32		numElements = ArrayGetNItems(ARR_NDIM(elementsArray), ARR_DIMS(elementsArray));
+
+	if (numElements == 0)
+		return;
+
+	char	   *minText = NULL;
+	char	   *maxText = NULL;
+
+	ArrayIterator arrayIterator = array_create_iterator(elementsArray, 0, NULL);
+	Datum		elemDatum;
+	bool		isNull = false;
+
+	while (array_iterate(arrayIterator, &elemDatum, &isNull))
 	{
-		/* skip whitespace and commas */
-		while (*ptr == ' ' || *ptr == '\n' || *ptr == '\t' || *ptr == ',')
+		if (isNull)
+			continue;
+
+		HeapTupleHeader tupleHeader = DatumGetHeapTupleHeader(elemDatum);
+		bool		statsKeyIsNull = false;
+		bool		statsValIsNull = false;
+
+		Datum		statsKeyDatum = GetAttributeByNum(tupleHeader, 1, &statsKeyIsNull);
+		Datum		statsValDatum = GetAttributeByNum(tupleHeader, 2, &statsValIsNull);
+
+		/* skip entries without a key or value */
+		if (statsKeyIsNull || statsValIsNull)
+			continue;
+
+		char	   *statsKey = TextDatumGetCString(statsKeyDatum);
+
+		if (strcmp(statsKey, "min") == 0)
 		{
-			ptr++;
+			Assert(minText == NULL);
+			minText = TextDatumGetCString(statsValDatum);
 		}
-
-		if (*ptr == '\0' || *ptr == '}')
+		else if (strcmp(statsKey, "max") == 0)
 		{
-			break;
+			Assert(maxText == NULL);
+			maxText = TextDatumGetCString(statsValDatum);
 		}
+	}
 
-		if (*ptr != '(')
+	if (minText != NULL || maxText != NULL)
+	{
+		*names = lappend(*names, pstrdup(colName));
+		*mins = lappend(*mins, minText);
+		*maxs = lappend(*maxs, maxText);
+	}
+
+	array_free_iterator(arrayIterator);
+}
+
+
+/*
+ * UnescapeDoubleQuotes unescapes any doubled quotes.
+ * e.g. "ab\"\"cd\"\"ee" becomes "ab\"cd\"ee"
+ */
+static char *
+UnescapeDoubleQuotes(const char *s)
+{
+	if (s == NULL)
+		return NULL;
+
+	char		doubleQuote = '"';
+
+	int			len = strlen(s);
+
+	if (len >= 2 && (s[0] == doubleQuote && s[len - 1] == doubleQuote))
+	{
+		/* Allocate worst-case length (without surrounding quotes) + 1 */
+		char	   *out = palloc((len - 1) * sizeof(char));
+		int			oi = 0;
+
+		for (int i = 1; i < len - 1; i++)
 		{
-			ereport(ERROR,
-					(errmsg("invalid duckdb column min/max format: expected '(' at position %ld", ptr - input)));
-		}
-
-		ptr++;
-
-		/* parse column name */
-		char	   *nameStart = ptr;
-
-		while (*ptr != ',' && *ptr != '\0')
-		{
-			ptr++;
-		}
-
-		if (*ptr == '\0')
-		{
-			ereport(ERROR,
-					(errmsg("invalid duckdb column min/max format: unexpected end of input while parsing column name")));
-		}
-
-		size_t		nameLen = ptr - nameStart;
-
-		char	   *columnName = pnstrdup(nameStart, nameLen);
-
-		ptr++;
-
-		/* skip whitespace */
-		while (*ptr == ' ' || *ptr == '\n' || *ptr == '\t')
-		{
-			ptr++;
-		}
-
-		if (*ptr != '{')
-		{
-			ereport(ERROR,
-					(errmsg("invalid duckdb column min/max format: expected '{' at position %ld", ptr - input)));
-		}
-
-		ptr++;
-
-		char	   *minValue = NULL;
-		char	   *maxValue = NULL;
-
-		/* parse key-value pairs inside the braces */
-		while (*ptr != '}' && *ptr != '\0')
-		{
-			/* skip whitespace and commas */
-			while (*ptr == ' ' || *ptr == '\n' || *ptr == '\t' || *ptr == ',')
+			/* Handle "" */
+			if (s[i] == doubleQuote && i + 1 < len - 1 && s[i + 1] == doubleQuote)
 			{
-				ptr++;
-			}
-
-			if (*ptr == '}')
-			{
-				break;
-			}
-
-			if (*ptr != '(')
-			{
-				ereport(ERROR,
-						(errmsg("invalid duckdb column min/max format: expected '(' at position %ld", ptr - input)));
-			}
-
-			ptr++;
-
-			/* parse key */
-			char	   *keyStart = ptr;
-
-			while (*ptr != ',' && *ptr != '\0')
-			{
-				ptr++;
-			}
-
-			if (*ptr == '\0')
-			{
-				ereport(ERROR,
-						(errmsg("invalid duckdb column min/max format: unexpected end of input while parsing key")));
-			}
-
-			size_t		keyLen = ptr - keyStart;
-			char	   *key = pnstrdup(keyStart, keyLen);
-
-			ptr++;
-
-			/* parse value */
-			char	   *valueStart = ptr;
-
-			while (*ptr != ')' && *ptr != '\0')
-			{
-				ptr++;
-			}
-
-			if (*ptr == '\0')
-			{
-				ereport(ERROR,
-						(errmsg("invalid duckdb column min/max format: unexpected end of input while parsing value")));
-			}
-
-			size_t		valueLen = ptr - valueStart;
-			char	   *value = pnstrdup(valueStart, valueLen);
-
-			if (pg_strcasecmp(key, "min") == 0)
-			{
-				minValue = value;
-			}
-			else if (pg_strcasecmp(key, "max") == 0)
-			{
-				maxValue = value;
+				out[oi++] = doubleQuote;
+				i++;			/* skip the doubled quote */
 			}
 			else
 			{
-				/* ignore other keys */
-				pfree(value);
+				out[oi++] = s[i];
 			}
-			pfree(key);
-			ptr++;
 		}
 
-		if (minValue != NULL || maxValue != NULL)
-		{
-			*mins = lappend(*mins, minValue);
-			*maxs = lappend(*maxs, maxValue);
-			*names = lappend(*names, columnName);
-		}
-
-		if (*ptr != '}')
-		{
-			ereport(ERROR,
-					(errmsg("invalid duckdb column min/max format: expected '}' at position %ld", ptr - input)));
-		}
-
-		ptr++;
-
-		/* skip whitespace */
-		while (*ptr == ' ' || *ptr == '\n' || *ptr == '\t')
-		{
-			ptr++;
-		}
-
-		if (*ptr != ')')
-		{
-			ereport(ERROR,
-					(errmsg("invalid duckdb column min/max format: expected ')' at position %ld", ptr - input)));
-		}
-
-		ptr++;
+		out[oi] = '\0';
+		return out;
 	}
+
+	return pstrdup(s);
+}
+
+
+/*
+ * ExtractMinMaxFromStatsMapDatum extracts min and max values from given stats map
+ * of type map(text,text).
+ */
+static void
+ExtractMinMaxForAllColumns(Datum map, List **names, List **mins, List **maxs)
+{
+	ArrayType  *elementsArray = DatumGetArrayTypeP(map);
+
+	if (elementsArray == NULL)
+		return;
+
+	uint32		numElements = ArrayGetNItems(ARR_NDIM(elementsArray), ARR_DIMS(elementsArray));
+
+	if (numElements == 0)
+		return;
+
+	ArrayIterator arrayIterator = array_create_iterator(elementsArray, 0, NULL);
+	Datum		elemDatum;
+	bool		isNull = false;
+
+	while (array_iterate(arrayIterator, &elemDatum, &isNull))
+	{
+		if (isNull)
+			continue;
+
+		HeapTupleHeader tupleHeader = DatumGetHeapTupleHeader(elemDatum);
+		bool		colNameIsNull = false;
+		bool		colStatsIsNull = false;
+
+		Datum		colNameDatum = GetAttributeByNum(tupleHeader, 1, &colNameIsNull);
+		Datum		colStatsDatum = GetAttributeByNum(tupleHeader, 2, &colStatsIsNull);
+
+		/* skip entries without a key or value */
+		if (colNameIsNull || colStatsIsNull)
+			continue;
+
+		char	   *colName = TextDatumGetCString(colNameDatum);
+
+		/*
+		 * pg_map text key is escaped for double quotes. We need to unescape
+		 * them.
+		 */
+		char	   *unescapedColName = UnescapeDoubleQuotes(colName);
+
+		ExtractMinMaxForColumn(colStatsDatum, unescapedColName, names, mins, maxs);
+	}
+
+	array_free_iterator(arrayIterator);
+}
+
+
+/*
+ * ParseDuckdbColumnMinMaxFromText parses COPY .. TO .parquet WITH (return_stats)
+ * output text to map(text, map(text,text)).
+ * e.g. { 'id_col' => {'min' => '12', 'max' => 23, ...},
+ * 		  'name_col' => {'min' => 'aykut', 'max' => 'onder', ...},
+ *         ...
+ * 		}
+ */
+static void
+ParseDuckdbColumnMinMaxFromText(const char *input, List **names, List **mins, List **maxs)
+{
+	/*
+	 * e.g. { 'id_col' => {'min' => '12', 'max' => 23, ...}, 'name_col' =>
+	 * {'min' => 'aykut', 'max' => 'onder', ...}, ... }
+	 */
+	Oid			returnStatsMapId = GetOrCreatePGMapType("MAP(TEXT,MAP(TEXT,TEXT))");
+
+	if (returnStatsMapId == InvalidOid)
+		ereport(ERROR, (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+						errmsg("unexpected return_stats result %s", input)));
+
+	/* parse result into map above */
+	Oid			typinput;
+	Oid			typioparam;
+
+	getTypeInputInfo(returnStatsMapId, &typinput, &typioparam);
+
+	Datum		statsMapDatum = OidInputFunctionCall(typinput, pstrdup(input), typioparam, -1);
+
+	/*
+	 * extract min and max for each column: iterate the underlying map datum
+	 * directly to avoid invoking the set-returning `entries()` function in a
+	 * non-SRF context.
+	 */
+	ExtractMinMaxForAllColumns(statsMapDatum, names, mins, maxs);
 }
 
 
@@ -732,7 +765,7 @@ GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields
 
 
 static bool
-ShouldSkipStatisticsForField(LeafField *leafField)
+ShouldSkipStatisticsForField(LeafField * leafField)
 {
 	Field	   *field = leafField->field;
 	PGType		pgType = leafField->pgType;
