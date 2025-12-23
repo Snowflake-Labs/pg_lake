@@ -33,3 +33,6 @@ CREATE FUNCTION __lake__internal__nsp__.from_hex(text)
  LANGUAGE C
  IMMUTABLE PARALLEL SAFE STRICT
 AS 'MODULE_PATHNAME', $function$pg_lake_internal_dummy_function$function$;
+
+SELECT map_type.create('TEXT','TEXT');
+SELECT map_type.create('TEXT','map_type.key_text_val_text');
