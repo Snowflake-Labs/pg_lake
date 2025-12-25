@@ -26,8 +26,12 @@ def test_cmk_encryption(pg_conn, s3, extension, installcheck):
 
     # Confirm that the object in managed storage is using CMK
     response = s3.head_object(Bucket=MANAGED_STORAGE_BUCKET, Key=key)
-    assert response["ServerSideEncryption"] == "aws:kms"
-    assert response["SSEKMSKeyId"] == server_params.MANAGED_STORAGE_CMK_ID
+    assert (
+        response.get("ServerSideEncryption") == "aws:kms"
+    ), f"Expected ServerSideEncryption 'aws:kms', got: {response}"
+    assert (
+        response.get("SSEKMSKeyId") == server_params.MANAGED_STORAGE_CMK_ID
+    ), f"Expected SSEKMSKeyId '{server_params.MANAGED_STORAGE_CMK_ID}', got: {response}"
 
     # Confirm that the object out managed storage is not using CMK
     response = s3.head_object(Bucket=TEST_BUCKET, Key=key)
