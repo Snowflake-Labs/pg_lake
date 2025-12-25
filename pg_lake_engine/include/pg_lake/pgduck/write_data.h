@@ -18,6 +18,7 @@
 #pragma once
 
 #include "access/tupdesc.h"
+#include "libpq-fe.h"
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/parquet/field.h"
 #include "nodes/pg_list.h"
@@ -34,6 +35,7 @@ typedef enum ParquetVersion
 
 /* pg_lake_table.default_parquet_version */
 extern PGDLLEXPORT int DefaultParquetVersion;
+extern PGDLLEXPORT bool DeprecatedEnableStatsCollectionForNestedTypes;
 
 extern PGDLLEXPORT void ConvertCSVFileTo(char *csvFilePath,
 										 TupleDesc tupleDesc,
@@ -42,7 +44,9 @@ extern PGDLLEXPORT void ConvertCSVFileTo(char *csvFilePath,
 										 CopyDataFormat destinationFormat,
 										 CopyDataCompression destinationCompression,
 										 List *formatOptions,
-										 DataFileSchema * schema);
+										 DataFileSchema * schema,
+										 List *leafFields,
+										 List **dataFileStats);
 extern PGDLLEXPORT int64 WriteQueryResultTo(char *query,
 											char *destinationPath,
 											CopyDataFormat destinationFormat,
@@ -50,5 +54,11 @@ extern PGDLLEXPORT int64 WriteQueryResultTo(char *query,
 											List *formatOptions,
 											bool queryHasRowId,
 											DataFileSchema * schema,
-											TupleDesc queryTupleDesc);
+											TupleDesc queryTupleDesc,
+											List *leafFields,
+											List **dataFileStats);
 extern PGDLLEXPORT void AppendFields(StringInfo map, DataFileSchema * schema);
+extern PGDLLEXPORT List *GetDataFileStatsListFromPGResult(PGresult *result,
+														  List *leafFields,
+														  DataFileSchema * schema,
+														  int64 *totalRowCount);

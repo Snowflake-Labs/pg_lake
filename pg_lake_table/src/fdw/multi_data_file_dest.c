@@ -234,6 +234,10 @@ FlushChildDestReceiver(MultiDataFileUploadDestReceiver * self)
 
 		copyModification->partitionSpecId = self->currentPartitionSpecId;
 		copyModification->partition = modification->partition;
+		if (modification->fileStats != NULL)
+		{
+			copyModification->fileStats = DeepCopyDataFileStats(modification->fileStats);
+		}
 
 		/*
 		 * If caller of dest receiver is assigning rowids itself,

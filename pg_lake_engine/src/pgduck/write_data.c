@@ -19,17 +19,23 @@
  * Functions for generating query for writing data via pgduck server.
  */
 #include "postgres.h"
+#include "fmgr.h"
 
 #include "access/tupdesc.h"
+#include "catalog/pg_type.h"
 #include "commands/defrem.h"
 #include "common/string.h"
+#include "executor/executor.h"
 #include "pg_lake/csv/csv_options.h"
 #include "pg_lake/copy/copy_format.h"
+#include "pg_lake/data_file/data_file_stats.h"
+#include "pg_lake/extensions/pg_map.h"
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/parquet/geoparquet.h"
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/pgduck/client.h"
+#include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/pgduck/read_data.h"
 #include "pg_lake/pgduck/type.h"
@@ -47,6 +53,12 @@ static DuckDBTypeInfo ChooseDuckDBEngineTypeForWrite(PGType postgresType,
 													 CopyDataFormat destinationFormat);
 static void AppendFieldIdValue(StringInfo map, Field * field, int fieldId);
 static const char *ParquetVersionToString(ParquetVersion version);
+static void ParseDuckdbColumnMinMaxFromText(const char *input, List **names, List **mins, List **maxs);
+static void ExtractMinMaxForAllColumns(Datum map, List **names, List **mins, List **maxs);
+static void ExtractMinMaxForColumn(Datum map, const char *colName, List **names, List **mins, List **maxs);
+static char *UnescapeDoubleQuotes(const char *s);
+static List *GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields, DataFileSchema * schema);
+static bool ShouldSkipStatisticsForField(LeafField * leafField);
 
 static DuckDBTypeInfo VARCHAR_TYPE =
 {
@@ -55,7 +67,7 @@ static DuckDBTypeInfo VARCHAR_TYPE =
 
 int			TargetRowGroupSizeMB = DEFAULT_TARGET_ROW_GROUP_SIZE_MB;
 int			DefaultParquetVersion = PARQUET_VERSION_V1;
-
+bool		DeprecatedEnableStatsCollectionForNestedTypes = false;
 
 /*
  * ConvertCSVFileTo copies and converts a CSV file at source path to
@@ -69,7 +81,9 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 				 CopyDataFormat destinationFormat,
 				 CopyDataCompression destinationCompression,
 				 List *formatOptions,
-				 DataFileSchema * schema)
+				 DataFileSchema * schema,
+				 List *leafFields,
+				 List **dataFileStats)
 {
 	StringInfoData command;
 
@@ -139,7 +153,9 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 					   formatOptions,
 					   queryHasRowIds,
 					   schema,
-					   csvTupleDesc);
+					   csvTupleDesc,
+					   leafFields,
+					   dataFileStats);
 }
 
 
@@ -156,9 +172,12 @@ WriteQueryResultTo(char *query,
 				   List *formatOptions,
 				   bool queryHasRowId,
 				   DataFileSchema * schema,
-				   TupleDesc queryTupleDesc)
+				   TupleDesc queryTupleDesc,
+				   List *leafFields,
+				   List **dataFileStats)
 {
 	StringInfoData command;
+	bool		useReturnStats = false;
 
 	initStringInfo(&command);
 
@@ -252,6 +271,9 @@ WriteQueryResultTo(char *query,
 
 				appendStringInfo(&command, ", parquet_version '%s'",
 								 ParquetVersionToString(DefaultParquetVersion));
+
+				appendStringInfo(&command, ", return_stats");
+				useReturnStats = true;
 
 				break;
 			}
@@ -386,27 +408,396 @@ WriteQueryResultTo(char *query,
 	/* end WITH options */
 	appendStringInfoString(&command, ")");
 
-	if (TargetRowGroupSizeMB > 0)
+	PGDuckConnection *pgDuckConn = GetPGDuckConnection();
+	int64		rowsAffected = -1;
+	PGresult   *result;
+	bool		disablePreserveInsertionOrder = TargetRowGroupSizeMB > 0;
+
+	PG_TRY();
 	{
+		if (disablePreserveInsertionOrder)
+		{
+			result = ExecuteQueryOnPGDuckConnection(pgDuckConn, "SET preserve_insertion_order TO 'false';");
+			CheckPGDuckResult(pgDuckConn, result);
+			PQclear(result);
+		}
+
+		result = ExecuteQueryOnPGDuckConnection(pgDuckConn, command.data);
+		CheckPGDuckResult(pgDuckConn, result);
+
+		if (useReturnStats && dataFileStats != NULL)
+		{
+			/* DuckDB returns COPY 0 when return_stats is used. */
+			*dataFileStats = GetDataFileStatsListFromPGResult(result, leafFields, schema, &rowsAffected);
+		}
+		else
+		{
+			char	   *commandTuples = PQcmdTuples(result);
+
+			rowsAffected = atol(commandTuples);
+		}
+
+		PQclear(result);
+
+		if (disablePreserveInsertionOrder)
+		{
+			result = ExecuteQueryOnPGDuckConnection(pgDuckConn, "RESET preserve_insertion_order;");
+			CheckPGDuckResult(pgDuckConn, result);
+			PQclear(result);
+		}
+	}
+	PG_FINALLY();
+	{
+		ReleasePGDuckConnection(pgDuckConn);
+	}
+	PG_END_TRY();
+
+	return rowsAffected;
+}
+
+
+List *
+GetDataFileStatsListFromPGResult(PGresult *result, List *leafFields, DataFileSchema * schema, int64 *totalRowCount)
+{
+	List	   *statsList = NIL;
+
+	int			rowCount = PQntuples(result);
+	int			columnCount = PQnfields(result);
+
+	*totalRowCount = 0;
+
+	for (int r = 0; r < rowCount; r++)
+	{
+		DataFileStats *fileStats = palloc0(sizeof(DataFileStats));
+
+		for (int c = 0; c < columnCount; c++)
+		{
+			char	   *colName = PQfname(result, c);
+			char	   *val = PQgetvalue(result, r, c);
+
+			if (schema != NULL && strcmp(colName, "column_statistics") == 0)
+			{
+				List	   *names = NIL;
+				List	   *mins = NIL;
+				List	   *maxs = NIL;
+
+				ParseDuckdbColumnMinMaxFromText(val, &names, &mins, &maxs);
+				fileStats->columnStats = GetDataFileColumnStatsList(names, mins, maxs, leafFields, schema);
+			}
+			else if (strcmp(colName, "file_size_bytes") == 0)
+			{
+				fileStats->fileSize = atoll(val);
+			}
+			else if (strcmp(colName, "count") == 0)
+			{
+				fileStats->rowCount = atoll(val);
+				*totalRowCount += fileStats->rowCount;
+			}
+			else if (strcmp(colName, "filename") == 0)
+			{
+				fileStats->dataFilePath = pstrdup(val);
+			}
+		}
+
+		statsList = lappend(statsList, fileStats);
+	}
+
+	return statsList;
+}
+
+
+/*
+ * ExtractMinMaxFromStatsMapDatum extracts min and max values from given stats map
+ * of type map(varchar,varchar).
+ */
+static void
+ExtractMinMaxForColumn(Datum map, const char *colName, List **names, List **mins, List **maxs)
+{
+	ArrayType  *elementsArray = DatumGetArrayTypeP(map);
+
+	if (elementsArray == NULL)
+		return;
+
+	uint32		numElements = ArrayGetNItems(ARR_NDIM(elementsArray), ARR_DIMS(elementsArray));
+
+	if (numElements == 0)
+		return;
+
+	char	   *minText = NULL;
+	char	   *maxText = NULL;
+
+	ArrayIterator arrayIterator = array_create_iterator(elementsArray, 0, NULL);
+	Datum		elemDatum;
+	bool		isNull = false;
+
+	while (array_iterate(arrayIterator, &elemDatum, &isNull))
+	{
+		if (isNull)
+			continue;
+
+		HeapTupleHeader tupleHeader = DatumGetHeapTupleHeader(elemDatum);
+		bool		statsKeyIsNull = false;
+		bool		statsValIsNull = false;
+
+		Datum		statsKeyDatum = GetAttributeByNum(tupleHeader, 1, &statsKeyIsNull);
+		Datum		statsValDatum = GetAttributeByNum(tupleHeader, 2, &statsValIsNull);
+
+		/* skip entries without a key or value */
+		if (statsKeyIsNull || statsValIsNull)
+			continue;
+
+		char	   *statsKey = TextDatumGetCString(statsKeyDatum);
+
+		if (strcmp(statsKey, "min") == 0)
+		{
+			Assert(minText == NULL);
+			minText = TextDatumGetCString(statsValDatum);
+		}
+		else if (strcmp(statsKey, "max") == 0)
+		{
+			Assert(maxText == NULL);
+			maxText = TextDatumGetCString(statsValDatum);
+		}
+	}
+
+	if (minText != NULL || maxText != NULL)
+	{
+		*names = lappend(*names, pstrdup(colName));
+		*mins = lappend(*mins, minText);
+		*maxs = lappend(*maxs, maxText);
+	}
+
+	array_free_iterator(arrayIterator);
+}
+
+
+/*
+ * UnescapeDoubleQuotes unescapes any doubled quotes.
+ * e.g. "ab\"\"cd\"\"ee" becomes "ab\"cd\"ee"
+ */
+static char *
+UnescapeDoubleQuotes(const char *s)
+{
+	if (s == NULL)
+		return NULL;
+
+	char		doubleQuote = '"';
+
+	int			len = strlen(s);
+
+	if (len >= 2 && (s[0] == doubleQuote && s[len - 1] == doubleQuote))
+	{
+		/* Allocate worst-case length (without surrounding quotes) + 1 */
+		char	   *out = palloc((len - 1) * sizeof(char));
+		int			oi = 0;
+
+		for (int i = 1; i < len - 1; i++)
+		{
+			/* Handle "" */
+			if (s[i] == doubleQuote && i + 1 < len - 1 && s[i + 1] == doubleQuote)
+			{
+				out[oi++] = doubleQuote;
+				i++;			/* skip the doubled quote */
+			}
+			else
+			{
+				out[oi++] = s[i];
+			}
+		}
+
+		out[oi] = '\0';
+		return out;
+	}
+
+	return pstrdup(s);
+}
+
+
+/*
+ * ExtractMinMaxFromStatsMapDatum extracts min and max values from given stats map
+ * of type map(text,text).
+ */
+static void
+ExtractMinMaxForAllColumns(Datum map, List **names, List **mins, List **maxs)
+{
+	ArrayType  *elementsArray = DatumGetArrayTypeP(map);
+
+	if (elementsArray == NULL)
+		return;
+
+	uint32		numElements = ArrayGetNItems(ARR_NDIM(elementsArray), ARR_DIMS(elementsArray));
+
+	if (numElements == 0)
+		return;
+
+	ArrayIterator arrayIterator = array_create_iterator(elementsArray, 0, NULL);
+	Datum		elemDatum;
+	bool		isNull = false;
+
+	while (array_iterate(arrayIterator, &elemDatum, &isNull))
+	{
+		if (isNull)
+			continue;
+
+		HeapTupleHeader tupleHeader = DatumGetHeapTupleHeader(elemDatum);
+		bool		colNameIsNull = false;
+		bool		colStatsIsNull = false;
+
+		Datum		colNameDatum = GetAttributeByNum(tupleHeader, 1, &colNameIsNull);
+		Datum		colStatsDatum = GetAttributeByNum(tupleHeader, 2, &colStatsIsNull);
+
+		/* skip entries without a key or value */
+		if (colNameIsNull || colStatsIsNull)
+			continue;
+
+		char	   *colName = TextDatumGetCString(colNameDatum);
+
 		/*
-		 * preserve_insertion_order=false reduces memory consumption during
-		 * COPY <query> TO when an explicit ORDER BY not specified in the
-		 * query. It is helpful for csv and json formats as well but for
-		 * simplicity we use the same setting TargetRowGroupSizeMB for all
-		 * formats.
+		 * pg_map text key is escaped for double quotes. We need to unescape
+		 * them.
 		 */
-		List	   *commands = list_make3("SET preserve_insertion_order TO 'false';",
-										  command.data,
-										  "RESET preserve_insertion_order;");
+		char	   *unescapedColName = UnescapeDoubleQuotes(colName);
 
-		List	   *rowsAffected = ExecuteCommandsInPGDuck(commands);
-
-		return list_nth_int(rowsAffected, 1);
+		ExtractMinMaxForColumn(colStatsDatum, unescapedColName, names, mins, maxs);
 	}
-	else
+
+	array_free_iterator(arrayIterator);
+}
+
+
+/*
+ * ParseDuckdbColumnMinMaxFromText parses COPY .. TO .parquet WITH (return_stats)
+ * output text to map(text, map(text,text)).
+ * e.g. { 'id_col' => {'min' => '12', 'max' => 23, ...},
+ * 		  'name_col' => {'min' => 'aykut', 'max' => 'onder', ...},
+ *         ...
+ * 		}
+ */
+static void
+ParseDuckdbColumnMinMaxFromText(const char *input, List **names, List **mins, List **maxs)
+{
+	/*
+	 * e.g. { 'id_col' => {'min' => '12', 'max' => 23, ...}, 'name_col' =>
+	 * {'min' => 'aykut', 'max' => 'onder', ...}, ... }
+	 */
+	Oid			returnStatsMapId = GetOrCreatePGMapType("MAP(TEXT,MAP(TEXT,TEXT))");
+
+	if (returnStatsMapId == InvalidOid)
+		ereport(ERROR, (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+						errmsg("unexpected return_stats result %s", input)));
+
+	/* parse result into map above */
+	Oid			typinput;
+	Oid			typioparam;
+
+	getTypeInputInfo(returnStatsMapId, &typinput, &typioparam);
+
+	Datum		statsMapDatum = OidInputFunctionCall(typinput, pstrdup(input), typioparam, -1);
+
+	/*
+	 * extract min and max for each column: iterate the underlying map datum
+	 * directly to avoid invoking the set-returning `entries()` function in a
+	 * non-SRF context.
+	 */
+	ExtractMinMaxForAllColumns(statsMapDatum, names, mins, maxs);
+}
+
+
+static List *
+GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields, DataFileSchema * schema)
+{
+	List	   *columnStatsList = NIL;
+
+	Assert(schema != NULL);
+	for (int i = 0; i < schema->nfields; i++)
 	{
-		return ExecuteCommandInPGDuck(command.data);
+		DataFileSchemaField *field = &schema->fields[i];
+		const char *fieldName = field->name;
+		int			fieldId = field->id;
+		int			nameIndex = -1;
+
+		for (int index = 0; index < list_length(names); index++)
+		{
+			char	   *name = list_nth(names, index);
+
+			if (strcmp(name, fieldName) == 0)
+			{
+				nameIndex = index;
+				break;
+			}
+		}
+
+		if (nameIndex == -1)
+		{
+			continue;
+		}
+
+		LeafField  *leafField = NULL;
+		ListCell   *leafCell = NULL;
+
+		foreach(leafCell, leafFields)
+		{
+			LeafField  *lf = lfirst(leafCell);
+
+			if (lf->fieldId == fieldId && !ShouldSkipStatisticsForField(lf))
+			{
+				leafField = lf;
+				break;
+			}
+		}
+
+		if (leafField != NULL && nameIndex < list_length(names))
+		{
+			char	   *minStr = list_nth(mins, nameIndex);
+			char	   *maxStr = list_nth(maxs, nameIndex);
+
+			DataFileColumnStats *colStats = palloc0(sizeof(DataFileColumnStats));
+
+			colStats->leafField = *leafField;
+			colStats->lowerBoundText = pstrdup(minStr);
+			colStats->upperBoundText = pstrdup(maxStr);
+			columnStatsList = lappend(columnStatsList, colStats);
+		}
 	}
+
+	return columnStatsList;
+}
+
+
+static bool
+ShouldSkipStatisticsForField(LeafField * leafField)
+{
+	Field	   *field = leafField->field;
+	PGType		pgType = leafField->pgType;
+
+	Oid			pgTypeOid = pgType.postgresTypeOid;
+
+	if (IsGeometryTypeId(pgType.postgresTypeOid))
+	{
+		return true;
+	}
+	else if (strcmp(field->field.scalar.typeName, "string") == 0 &&
+			 pgType.postgresTypeOid != TEXTOID &&
+			 pgTypeOid != VARCHAROID &&
+			 pgTypeOid != BPCHAROID &&
+			 pgTypeOid != CHAROID)
+	{
+		return true;
+	}
+	else if (pgTypeOid == BYTEAOID)
+	{
+		return true;
+	}
+	else if (pgTypeOid == UUIDOID)
+	{
+		return true;
+	}
+	else if (leafField->level != 1)
+	{
+		return true;
+	}
+
+	return false;
 }
 
 
