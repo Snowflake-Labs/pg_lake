@@ -41,4 +41,3 @@ delete_old_cluster.sh
 pg_lake_iceberg/logs/polaris.log
 .volume/
 Dockerfile.alpine
-/duckdb_pglake/.patches_applied

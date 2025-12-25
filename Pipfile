@@ -19,7 +19,7 @@ pyspark = {extras = ["sql"], version = "==3.5.3"}
 pytest-postgresql = "~=7.0"
 psycopg-binary = "~=3.2"
 sqlalchemy = "~=2.0"
-duckdb = "==1.4.2"
+duckdb = "==1.4.3"
 
 [dev-packages]
 black = "==25.9.0"
