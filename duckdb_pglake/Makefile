@@ -132,11 +132,7 @@ release: patch_duckdb
 
 #### Misc
 
-# we assume that any modified files in these subdirs indicate that we have
-# already been patched.  This does mean if you have updated updating the patches here you
-# will need to reset the repositories so the new patches will be picked up.
-
-.patches_applied: $(shell find patches -type f -name '*.patch')
+patch_duckdb: $(shell find patches -type f -name '*.patch')
 	for patchdir in duckdb duckdb-postgres duckdb-azure; do \
 		(cd $$patchdir && \
 		git checkout -f . && \
@@ -146,10 +142,12 @@ release: patch_duckdb
 			git apply --ignore-whitespace "$$patch"; \
 		done;) \
 	done
-	touch .patches_applied
 
-patch_duckdb: .patches_applied
-
+clean_patches:
+	for patchdir in duckdb duckdb-postgres duckdb-azure; do \
+		(cd $$patchdir && \
+		git checkout -f . ); \
+	done
 
 format:
 	find src/ -iname *.hpp -o -iname *.cpp | xargs clang-format --sort-includes=0 -style=file -i
@@ -160,7 +158,7 @@ pull:
 	git submodule init
 	git submodule update --recursive --remote
 
-clean:
+clean: clean_patches
 	rm -rf build
 	rm -rf testext
 	rm -f libduckdb.so

@@ -212,6 +212,8 @@ clean-avro:
 ifneq ("$(wildcard avro/lang/c/build)","")
 	$(MAKE) -C avro/lang/c/build clean
 	rm -r avro/lang/c/build
+	# clean patches 	
+	cd avro && git checkout -f .
 endif
 
 uninstall-avro:
