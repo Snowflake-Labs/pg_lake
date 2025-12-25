@@ -79,6 +79,16 @@ inline void ThrowInternalError(DataChunk &args, ExpressionState &state, Vector &
 	throw InternalException(str);
 }
 
+inline void SinhPG(DataChunk &args, ExpressionState &state, Vector &result)
+{
+	auto &input_vector = args.data[0];
+
+	UnaryExecutor::Execute<double, double>(
+		input_vector, result, args.size(),
+		[&](double value) {
+			return std::sinh(value);
+		});
+}
 
 inline void AcoshPG(DataChunk &args, ExpressionState &state, Vector &result)
 {
@@ -94,6 +104,16 @@ inline void AcoshPG(DataChunk &args, ExpressionState &state, Vector &result)
 		});
 }
 
+inline void CoshPG(DataChunk &args, ExpressionState &state, Vector &result)
+{
+	auto &input_vector = args.data[0];
+
+	UnaryExecutor::Execute<double, double>(
+		input_vector, result, args.size(),
+		[&](double value) {
+			return std::cosh(value);
+		});
+}
 
 inline void AtanhPG(DataChunk &args, ExpressionState &state, Vector &result)
 {
@@ -108,6 +128,19 @@ inline void AtanhPG(DataChunk &args, ExpressionState &state, Vector &result)
 			return std::atanh(value);
 		});
 }
+
+inline void TanhPG(DataChunk &args, ExpressionState &state, Vector &result)
+{
+	auto &input_vector = args.data[0];
+
+	UnaryExecutor::Execute<double, double>(
+		input_vector, result, args.size(),
+		[&](double value) {
+			return std::tanh(value);
+		});
+}
+
+
 
 
 /*
@@ -287,11 +320,20 @@ static void LoadInternal(ExtensionLoader &loader) {
     auto to_date_function = ScalarFunction("to_date", {LogicalType::DOUBLE}, LogicalType::DATE, ToDateScalarFun);
     loader.RegisterFunction(to_date_function);
 
+	auto sinh_function = ScalarFunction("sinh_pg", {LogicalType::DOUBLE}, LogicalType::DOUBLE, SinhPG);
+    loader.RegisterFunction(sinh_function);
+
     auto acosh_function = ScalarFunction("acosh_pg", {LogicalType::DOUBLE}, LogicalType::DOUBLE, AcoshPG);
     loader.RegisterFunction(acosh_function);
 
+	auto cosh_function = ScalarFunction("cosh_pg", {LogicalType::DOUBLE}, LogicalType::DOUBLE, CoshPG);
+    loader.RegisterFunction(cosh_function);
+
 	auto atanh_function = ScalarFunction("atanh_pg", {LogicalType::DOUBLE}, LogicalType::DOUBLE, AtanhPG);
 	loader.RegisterFunction(atanh_function);
+
+	auto tanh_function = ScalarFunction("tanh_pg", {LogicalType::DOUBLE}, LogicalType::DOUBLE, TanhPG);
+    loader.RegisterFunction(tanh_function);
 
 	auto nullify_any_type = ScalarFunction("nullify_any_type", {LogicalType::ANY}, LogicalType::SQLNULL, NullifyAnyType);
 	loader.RegisterFunction(nullify_any_type);
