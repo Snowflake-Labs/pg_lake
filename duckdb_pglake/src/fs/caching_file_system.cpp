@@ -44,7 +44,7 @@ namespace duckdb {
  * as the return value goes out of scope on the caller side.
  */
 unique_ptr<FileHandle>
-CachingFileSystem::OpenFile(const string &fullUrl,
+PGLakeCachingFileSystem::OpenFile(const string &fullUrl,
 							FileOpenFlags openFlags,
 							optional_ptr<FileOpener> opener)
 {
@@ -185,7 +185,7 @@ CachingFileSystem::OpenFile(const string &fullUrl,
 * return true; otherwise, return false.
 */
 bool
-CachingFileSystem::ShouldCacheOnWrite(CachingFSFileHandle &pg_lakeHandle, int64_t additionalByteCount)
+PGLakeCachingFileSystem::ShouldCacheOnWrite(CachingFSFileHandle &pg_lakeHandle, int64_t additionalByteCount)
 {
 	if (pg_lakeHandle.cacheOnWriteHandle == nullptr)
 		return false;
@@ -221,7 +221,7 @@ CachingFileSystem::ShouldCacheOnWrite(CachingFSFileHandle &pg_lakeHandle, int64_
 * file cache lock.
 */
 void
-CachingFileSystem::CleanUpCacheOnWriteFile(CachingFSFileHandle &pg_lakeHandle)
+PGLakeCachingFileSystem::CleanUpCacheOnWriteFile(CachingFSFileHandle &pg_lakeHandle)
 {
 	if (pg_lakeHandle.cacheOnWriteHandle != nullptr)
 	{
@@ -251,7 +251,7 @@ CachingFileSystem::CleanUpCacheOnWriteFile(CachingFSFileHandle &pg_lakeHandle)
  * them.
  */
 vector<OpenFileInfo>
-CachingFileSystem::Glob(const string &urlPattern, FileOpener *opener)
+PGLakeCachingFileSystem::Glob(const string &urlPattern, FileOpener *opener)
 {
 	if (StringUtil::StartsWith(urlPattern, NO_CACHE_PREFIX))
 	{
@@ -274,7 +274,7 @@ CachingFileSystem::Glob(const string &urlPattern, FileOpener *opener)
  * with some modifications to avoid showing nocache prefix.
  */
 bool
-CachingFileSystem::ListFiles(const string &directory,
+PGLakeCachingFileSystem::ListFiles(const string &directory,
 							 const std::function<void(const string &, bool)> &callback,
 							 FileOpener *opener)
 {
@@ -302,7 +302,7 @@ CachingFileSystem::ListFiles(const string &directory,
  * removal from the remote file system.
  */
 void
-CachingFileSystem::RemoveFile(const string &filename,
+PGLakeCachingFileSystem::RemoveFile(const string &filename,
 							  optional_ptr<FileOpener> opener)
 {
 	optional_ptr<ClientContext> context = opener->TryGetClientContext();

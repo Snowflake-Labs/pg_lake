@@ -28,7 +28,7 @@ namespace duckdb {
 
 
 /*
- * CachingFSFileHandle is the FileHandle returned by CachingFileSystem::OpenFile.
+ * CachingFSFileHandle is the FileHandle returned by PGLakeCachingFileSystem::OpenFile.
  *
  * It wraps around a remote file handle or a LocalFileSystem handle.
  */
@@ -109,11 +109,11 @@ public:
 };
 
 /*
- * CachingFileSystem is a wrapper around S3FileSystem that replaces
+ * PGLakeCachingFileSystem is a wrapper around S3FileSystem that replaces
  * the original to be able to intercept and modify certain calls. In
  * particular we use OpenFile to implement caching.
  */
-class CachingFileSystem : public FileSystem {
+class PGLakeCachingFileSystem : public FileSystem {
 public:
 	/* remote file system */
     unique_ptr<FileSystem> remoteFs;
@@ -121,7 +121,7 @@ public:
 	/* local file system (mainly for convenience) */
     LocalFileSystem localfs;
 
-	CachingFileSystem(unique_ptr<FileSystem> remoteFsParam)
+	PGLakeCachingFileSystem(unique_ptr<FileSystem> remoteFsParam)
 	{
 		remoteFs = std::move(remoteFsParam);
 	}

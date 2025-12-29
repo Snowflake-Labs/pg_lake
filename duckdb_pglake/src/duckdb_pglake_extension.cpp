@@ -316,35 +316,35 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	fs.UnregisterSubSystem("S3FileSystem");
 	fs.RegisterSubSystem(
-		make_uniq<CachingFileSystem>(
+		make_uniq<PGLakeCachingFileSystem>(
 			make_uniq<RegionAwareS3FileSystem>(BufferManager::GetBufferManager(instance))
 		)
 	);
 
 	fs.UnregisterSubSystem("AzureBlobStorageFileSystem");
 	fs.RegisterSubSystem(
-		make_uniq<CachingFileSystem>(
+		make_uniq<PGLakeCachingFileSystem>(
 			make_uniq<AzureBlobStorageFileSystem>(BufferManager::GetBufferManager(instance))
 		)
 	);
 
 	fs.UnregisterSubSystem("AzureDfsStorageFileSystem");
 	fs.RegisterSubSystem(
-		make_uniq<CachingFileSystem>(
+		make_uniq<PGLakeCachingFileSystem>(
 			make_uniq<AzureDfsStorageFileSystem>(BufferManager::GetBufferManager(instance))
 		)
 	);
 
 	fs.UnregisterSubSystem("HTTPFileSystem");
 	fs.RegisterSubSystem(
-		make_uniq<CachingFileSystem>(
+		make_uniq<PGLakeCachingFileSystem>(
 			make_uniq<HTTPFileSystem>()
 		)
 	);
 
 	fs.UnregisterSubSystem("HuggingFaceFileSystem");
 	fs.RegisterSubSystem(
-		make_uniq<CachingFileSystem>(
+		make_uniq<PGLakeCachingFileSystem>(
 			make_uniq<HuggingFaceFileSystem>()
 		)
 	);
