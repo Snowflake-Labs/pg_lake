@@ -157,13 +157,21 @@ PGLakeCachingFileSystem::OpenFile(const string &fullUrl,
 				* local file handle for the cache file, so we can write to it.
 				*/
 				string cacheFileDir = FileUtils::ExtractDirName(cacheFilePath);
-				FileUtils::EnsureLocalDirectoryExists(*context, cacheFileDir);
+				bool directoryExists = FileUtils::EnsureLocalDirectoryExists(*context, cacheFileDir);
 
-				cacheOnWriteHandle =
-					localfs.OpenFile(cacheFilePath + cacheManager->STAGING_SUFFIX,
-									 FileOpenFlags::FILE_FLAGS_WRITE | FileOpenFlags::FILE_FLAGS_FILE_CREATE);
+				if (directoryExists)
+				{
+					cacheOnWriteHandle =
+						localfs.OpenFile(cacheFilePath + cacheManager->STAGING_SUFFIX,
+										FileOpenFlags::FILE_FLAGS_WRITE | FileOpenFlags::FILE_FLAGS_FILE_CREATE);
 
-				cacheOnWritePath = cacheFilePath;
+					cacheOnWritePath = cacheFilePath;
+				}
+				else
+				{
+					PGDUCK_SERVER_DEBUG("cannot use local cache for %s because the cache directory cannot "
+										"be created", cacheFilePath.c_str());
+				}
 			}
 		}
 	}

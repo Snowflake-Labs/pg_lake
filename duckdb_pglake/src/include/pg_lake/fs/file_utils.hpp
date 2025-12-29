@@ -31,7 +31,7 @@ public:
 
 	static string ExtractDirName(const string &path);
 	static string ExtractFileName(const string &path);
-	static void EnsureLocalDirectoryExists(ClientContext &context, string dir_path);
+	static bool EnsureLocalDirectoryExists(ClientContext &context, string dir_path);
 	static int64_t CopyFile(ClientContext &context, string &source_path, string &destination_path);
 	static string GetMD5Base64(const char *buffer, idx_t bufferLength);
 
