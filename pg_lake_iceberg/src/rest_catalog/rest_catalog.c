@@ -46,7 +46,7 @@
 
 /* determined by GUC */
 char	   *RestCatalogHost = "http://localhost:8181";
-char       *RestCatalogOauthHostPath = "";
+char	   *RestCatalogOauthHostPath = "";
 char	   *RestCatalogClientId = NULL;
 char	   *RestCatalogClientSecret = NULL;
 
@@ -120,7 +120,7 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId)
 
 	headers = lappend(headers, vendedCreds);
 
-	HttpResult	httpResult = HttpPost(postUrl, body->data, headers);
+	HttpResult	httpResult = HttpWithRetry(HTTP_POST, postUrl, body->data, headers, 3);
 
 	if (httpResult.status != 200)
 	{
@@ -254,7 +254,7 @@ RegisterNamespaceToRestCatalog(const char *catalogName, const char *namespaceNam
 		psprintf(REST_CATALOG_NAMESPACE_NAME,
 				 RestCatalogHost, URLEncodePath(catalogName),
 				 URLEncodePath(namespaceName));
-	HttpResult	httpResult = HttpGet(getUrl, GetHeadersWithAuth());
+	HttpResult	httpResult = HttpWithRetry(HTTP_GET, getUrl, NULL, GetHeadersWithAuth(), 3);
 
 	switch (httpResult.status)
 	{
@@ -341,7 +341,7 @@ ErrorIfRestNamespaceDoesNotExist(const char *catalogName, const char *namespaceN
 		psprintf(REST_CATALOG_NAMESPACE_NAME,
 				 RestCatalogHost, URLEncodePath(catalogName),
 				 URLEncodePath(namespaceName));
-	HttpResult	httpResult = HttpGet(getUrl, GetHeadersWithAuth());
+	HttpResult	httpResult = HttpWithRetry(HTTP_GET, getUrl, NULL, GetHeadersWithAuth(), 3);
 
 
 	/* namespace not found */
@@ -389,7 +389,7 @@ GetMetadataLocationFromRestCatalog(const char *restCatalogName, const char *name
 				 RestCatalogHost, URLEncodePath(restCatalogName), URLEncodePath(namespaceName), URLEncodePath(relationName));
 
 	List	   *headers = GetHeadersWithAuth();
-	HttpResult	hr = HttpGet(getUrl, headers);
+	HttpResult	hr = HttpWithRetry(HTTP_GET, getUrl, NULL, headers, 3);
 
 	if (hr.status != 200)
 	{
@@ -432,7 +432,7 @@ CreateNamespaceOnRestCatalog(const char *catalogName, const char *namespaceName)
 		psprintf(REST_CATALOG_NAMESPACE, RestCatalogHost,
 				 URLEncodePath(catalogName));
 
-	HttpResult	httpResult = HttpPost(postUrl, body.data, PostHeadersWithAuth());
+	HttpResult	httpResult = HttpWithRetry(HTTP_POST, postUrl, body.data, PostHeadersWithAuth(), 3);
 
 	if (httpResult.status != 200)
 	{
@@ -564,11 +564,14 @@ FetchRestCatalogAccessToken(char **accessToken, int *expiresIn)
 	if (!RestCatalogClientSecret || !*RestCatalogClientSecret)
 		ereport(ERROR, (errmsg("pg_lake_iceberg.rest_catalog_client_secret should be set")));
 
-    char *accessTokenUrl = RestCatalogOauthHostPath;
+	char	   *accessTokenUrl = RestCatalogOauthHostPath;
 
-    /* if pg_lake_iceberg.rest_catalog_oauth_host_path is not set, use Polaris' default oauth token endpoint */
-    if (*accessTokenUrl == '\0')
-        accessTokenUrl = psprintf(REST_CATALOG_AUTH_TOKEN_PATH, RestCatalogHost);
+	/*
+	 * if pg_lake_iceberg.rest_catalog_oauth_host_path is not set, use
+	 * Polaris' default oauth token endpoint
+	 */
+	if (*accessTokenUrl == '\0')
+		accessTokenUrl = psprintf(REST_CATALOG_AUTH_TOKEN_PATH, RestCatalogHost);
 
 	/* Build Authorization: Basic <base64(clientId:clientSecret)> */
 	char	   *encodedAuth = EncodeBasicAuth(RestCatalogClientId, RestCatalogClientSecret);
@@ -584,7 +587,7 @@ FetchRestCatalogAccessToken(char **accessToken, int *expiresIn)
 	headers = lappend(headers, "Content-Type: application/x-www-form-urlencoded");
 
 	/* POST */
-	HttpResult	httpResponse = HttpPost(accessTokenUrl, body, headers);
+	HttpResult	httpResponse = HttpWithRetry(HTTP_POST, accessTokenUrl, body, headers, 3);
 
 	if (httpResponse.status != 200)
 		ereport(ERROR,

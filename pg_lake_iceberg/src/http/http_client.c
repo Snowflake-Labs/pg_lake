@@ -33,6 +33,7 @@
 
 #include <string.h>
 #include <ctype.h>
+#include <unistd.h>
 #include <curl/curl.h>
 
 /* 20 seconds */
@@ -42,16 +43,11 @@
 #define TOTAL_TIMEOUT_MS   180000
 
 
-typedef enum
-{
-	HTTP_GET,
-	HTTP_HEAD,
-	HTTP_POST,
-	HTTP_PUT,
-	HTTP_DELETE
-}			HttpMethod;
-
-
+static HttpResult HttpGet(const char *url, List *headers);
+static HttpResult HttpHead(const char *url, List *headers);
+static HttpResult HttpPost(const char *url, const char *body, List *headers);
+static HttpResult HttpDelete(const char *url, List *headers);
+static HttpResult HttpPut(const char *url, const char *body, List *headers);
 static HttpResult HttpCommonNoThrows(HttpMethod method, const char *url, const char *postData,
 									 const List *headers);
 static bool CheckMinCurlVersion(const curl_version_info_data * versionInfo);
@@ -276,6 +272,57 @@ CurlReturnError(CURL * curl, struct curl_slist *headerList,
 	errorRes.errorMsg = errorMsg;
 
 	return errorRes;
+}
+
+
+/*
+ * HttpWithRetry sends given http request with at max retryCount if the response status is retriable.
+ */
+HttpResult
+HttpWithRetry(HttpMethod method, const char *url, const char *body, List *headers, int retryCount)
+{
+	HttpResult	result;
+
+	if (method == HTTP_GET)
+	{
+		Assert(body == NULL);
+		result = HttpGet(url, headers);
+	}
+	else if (method == HTTP_HEAD)
+	{
+		Assert(body == NULL);
+		result = HttpHead(url, headers);
+	}
+	else if (method == HTTP_POST)
+	{
+		result = HttpPost(url, body, headers);
+	}
+	else if (method == HTTP_PUT)
+	{
+		result = HttpPut(url, body, headers);
+	}
+	else if (method == HTTP_DELETE)
+	{
+		Assert(body == NULL);
+		result = HttpDelete(url, headers);
+	}
+	else
+	{
+		pg_unreachable();
+	}
+
+	/* throttling */
+	if (result.status == 429 && retryCount > 1)
+	{
+		/*
+		 * retry after 5 seconds to prevent throttling. todo: retry with
+		 * backoff
+		 */
+		sleep(5);
+		return HttpWithRetry(method, url, body, headers, retryCount - 1);
+	}
+
+	return result;
 }
 
 

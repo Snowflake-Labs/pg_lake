@@ -272,8 +272,8 @@ PostAllRestCatalogRequests(void)
 			if (createTableRequest != NULL)
 			{
 				HttpResult	httpResult =
-					HttpPost(requestPerTable->tableRestUrl,
-							 createTableRequest->body, PostHeadersWithAuth());
+					HttpWithRetry(HTTP_POST, requestPerTable->tableRestUrl,
+								  createTableRequest->body, PostHeadersWithAuth(), 3);
 
 				if (httpResult.status != 200)
 				{
@@ -288,8 +288,8 @@ PostAllRestCatalogRequests(void)
 			else if (dropTableRequest != NULL)
 			{
 				HttpResult	httpResult =
-					HttpDelete(requestPerTable->tableRestUrl,
-							   DeleteHeadersWithAuth());
+					HttpWithRetry(HTTP_DELETE, requestPerTable->tableRestUrl,
+								  NULL, DeleteHeadersWithAuth(), 3);
 
 				if (httpResult.status != 204)
 				{
@@ -408,7 +408,7 @@ PostAllRestCatalogRequests(void)
 		appendStringInfoChar(batchRequestBody, '}');	/* close json body */
 
 		char	   *url = psprintf(REST_CATALOG_TRANSACTION_COMMIT, RestCatalogHost, catalogName);
-		HttpResult	httpResult = HttpPost(url, batchRequestBody->data, PostHeadersWithAuth());
+		HttpResult	httpResult = HttpWithRetry(HTTP_POST, url, batchRequestBody->data, PostHeadersWithAuth(), 3);
 
 		if (httpResult.status != 204)
 		{

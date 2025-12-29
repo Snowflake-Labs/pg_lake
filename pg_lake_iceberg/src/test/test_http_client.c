@@ -41,7 +41,7 @@ test_http_get(PG_FUNCTION_ARGS)
 
 	List	   *headers = extract_headers(fcinfo, 1);
 
-	HttpResult	r = HttpGet(url, headers);
+	HttpResult	r = HttpWithRetry(HTTP_GET, url, NULL, headers, 3);
 
 	PG_RETURN_DATUM(build_http_result(fcinfo, &r));
 }
@@ -54,7 +54,7 @@ test_http_head(PG_FUNCTION_ARGS)
 
 	List	   *headers = extract_headers(fcinfo, 1);
 
-	HttpResult	r = HttpHead(url, headers);
+	HttpResult	r = HttpWithRetry(HTTP_HEAD, url, NULL, headers, 3);
 
 	PG_RETURN_DATUM(build_http_result(fcinfo, &r));
 }
@@ -67,7 +67,7 @@ test_http_delete(PG_FUNCTION_ARGS)
 
 	List	   *headers = extract_headers(fcinfo, 1);
 
-	HttpResult	r = HttpDelete(url, headers);
+	HttpResult	r = HttpWithRetry(HTTP_DELETE, url, NULL, headers, 3);
 
 	PG_RETURN_DATUM(build_http_result(fcinfo, &r));
 }
@@ -81,7 +81,7 @@ test_http_post(PG_FUNCTION_ARGS)
 
 	List	   *headers = extract_headers(fcinfo, 2);
 
-	HttpResult	r = HttpPost(url, body, headers);
+	HttpResult	r = HttpWithRetry(HTTP_POST, url, body, headers, 3);
 
 	PG_RETURN_DATUM(build_http_result(fcinfo, &r));
 }
@@ -94,7 +94,7 @@ test_http_put(PG_FUNCTION_ARGS)
 
 	List	   *headers = extract_headers(fcinfo, 2);
 
-	HttpResult	r = HttpPut(url, body, headers);
+	HttpResult	r = HttpWithRetry(HTTP_PUT, url, body, headers, 3);
 
 	PG_RETURN_DATUM(build_http_result(fcinfo, &r));
 }
