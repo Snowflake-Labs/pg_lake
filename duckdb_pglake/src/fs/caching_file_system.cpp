@@ -161,11 +161,22 @@ PGLakeCachingFileSystem::OpenFile(const string &fullUrl,
 
 				if (directoryExists)
 				{
-					cacheOnWriteHandle =
-						localfs.OpenFile(cacheFilePath + cacheManager->STAGING_SUFFIX,
-										FileOpenFlags::FILE_FLAGS_WRITE | FileOpenFlags::FILE_FLAGS_FILE_CREATE);
+					try
+					{
+						cacheOnWriteHandle =
+							localfs.OpenFile(cacheFilePath + cacheManager->STAGING_SUFFIX,
+											FileOpenFlags::FILE_FLAGS_WRITE | FileOpenFlags::FILE_FLAGS_FILE_CREATE);
+						cacheOnWritePath = cacheFilePath;
 
-					cacheOnWritePath = cacheFilePath;
+					}
+					catch (Exception &ex)
+					{
+						ErrorData error(ex);
+
+						PGDUCK_SERVER_DEBUG("cannot use local cache for %s because the file "
+											"cannot be opened for write: %s", cacheFilePath.c_str(), error.Message().c_str());
+						cacheOnWriteHandle = nullptr;
+					}
 				}
 				else
 				{
