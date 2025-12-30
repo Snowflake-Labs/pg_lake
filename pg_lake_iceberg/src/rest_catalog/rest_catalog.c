@@ -30,18 +30,18 @@
 #include "utils/memutils.h"
 #include "utils/timestamp.h"
 
-#include "pg_lake/iceberg/api/table_schema.h"
-#include "pg_lake/iceberg/metadata_spec.h"
-
+#include "pg_extension_base/base_workers.h"
 #include "pg_lake/http/http_client.h"
-#include "pg_lake/object_store_catalog/object_store_catalog.h"
-#include "pg_lake/rest_catalog/rest_catalog.h"
+#include "pg_lake/iceberg/api/table_schema.h"
 #include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/iceberg/metadata_spec.h"
+#include "pg_lake/iceberg/temporal_utils.h"
 #include "pg_lake/json/json_utils.h"
+#include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "pg_lake/parsetree/options.h"
+#include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/util/url_encode.h"
 #include "pg_lake/util/rel_utils.h"
-#include "pg_lake/iceberg/temporal_utils.h"
 
 
 /* determined by GUC */
@@ -52,12 +52,12 @@ char	   *RestCatalogClientSecret = NULL;
 
 
 /*
-* Should always be accessed via GetRestCatalogAccessToken()
+* Should always be accessed via GetOrFetchRestCatalogAccessToken()
 */
 char	   *RestCatalogAccessToken = NULL;
 TimestampTz RestCatalogAccessTokenExpiry = 0;
 
-static char *GetRestCatalogAccessToken(void);
+static char *GetOrFetchRestCatalogAccessToken(bool force);
 static void FetchRestCatalogAccessToken(char **accessToken, int *expiresIn);
 static void CreateNamespaceOnRestCatalog(const char *catalogName, const char *namespaceName);
 static char *EncodeBasicAuth(const char *clientId, const char *clientSecret);
@@ -120,7 +120,7 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId)
 
 	headers = lappend(headers, vendedCreds);
 
-	HttpResult	httpResult = HttpWithRetry(HTTP_POST, postUrl, body->data, headers, 3);
+	HttpResult	httpResult = SendHttpRequest(HTTP_POST, postUrl, body->data, headers, ShouldRetryPolarisRequest, 3);
 
 	if (httpResult.status != 200)
 	{
@@ -254,7 +254,7 @@ RegisterNamespaceToRestCatalog(const char *catalogName, const char *namespaceNam
 		psprintf(REST_CATALOG_NAMESPACE_NAME,
 				 RestCatalogHost, URLEncodePath(catalogName),
 				 URLEncodePath(namespaceName));
-	HttpResult	httpResult = HttpWithRetry(HTTP_GET, getUrl, NULL, GetHeadersWithAuth(), 3);
+	HttpResult	httpResult = SendHttpRequest(HTTP_GET, getUrl, NULL, GetHeadersWithAuth(), ShouldRetryPolarisRequest, 3);
 
 	switch (httpResult.status)
 	{
@@ -341,7 +341,7 @@ ErrorIfRestNamespaceDoesNotExist(const char *catalogName, const char *namespaceN
 		psprintf(REST_CATALOG_NAMESPACE_NAME,
 				 RestCatalogHost, URLEncodePath(catalogName),
 				 URLEncodePath(namespaceName));
-	HttpResult	httpResult = HttpWithRetry(HTTP_GET, getUrl, NULL, GetHeadersWithAuth(), 3);
+	HttpResult	httpResult = SendHttpRequest(HTTP_GET, getUrl, NULL, GetHeadersWithAuth(), ShouldRetryPolarisRequest, 3);
 
 
 	/* namespace not found */
@@ -389,7 +389,7 @@ GetMetadataLocationFromRestCatalog(const char *restCatalogName, const char *name
 				 RestCatalogHost, URLEncodePath(restCatalogName), URLEncodePath(namespaceName), URLEncodePath(relationName));
 
 	List	   *headers = GetHeadersWithAuth();
-	HttpResult	hr = HttpWithRetry(HTTP_GET, getUrl, NULL, headers, 3);
+	HttpResult	hr = SendHttpRequest(HTTP_GET, getUrl, NULL, headers, ShouldRetryPolarisRequest, 3);
 
 	if (hr.status != 200)
 	{
@@ -432,7 +432,7 @@ CreateNamespaceOnRestCatalog(const char *catalogName, const char *namespaceName)
 		psprintf(REST_CATALOG_NAMESPACE, RestCatalogHost,
 				 URLEncodePath(catalogName));
 
-	HttpResult	httpResult = HttpWithRetry(HTTP_POST, postUrl, body.data, PostHeadersWithAuth(), 3);
+	HttpResult	httpResult = SendHttpRequest(HTTP_POST, postUrl, body.data, PostHeadersWithAuth(), ShouldRetryPolarisRequest, 3);
 
 	if (httpResult.status != 200)
 	{
@@ -446,7 +446,7 @@ CreateNamespaceOnRestCatalog(const char *catalogName, const char *namespaceName)
 List *
 PostHeadersWithAuth(void)
 {
-	return list_make3(psprintf("Authorization: Bearer %s", GetRestCatalogAccessToken()),
+	return list_make3(psprintf("Authorization: Bearer %s", GetOrFetchRestCatalogAccessToken(false)),
 					  pstrdup("Accept: application/json"),
 					  pstrdup("Content-Type: application/json"));
 }
@@ -459,7 +459,7 @@ PostHeadersWithAuth(void)
 List *
 DeleteHeadersWithAuth(void)
 {
-	return list_make1(psprintf("Authorization: Bearer %s", GetRestCatalogAccessToken()));
+	return list_make1(psprintf("Authorization: Bearer %s", GetOrFetchRestCatalogAccessToken(false)));
 }
 
 
@@ -470,7 +470,7 @@ DeleteHeadersWithAuth(void)
 static List *
 GetHeadersWithAuth(void)
 {
-	return list_make2(psprintf("Authorization: Bearer %s", GetRestCatalogAccessToken()),
+	return list_make2(psprintf("Authorization: Bearer %s", GetOrFetchRestCatalogAccessToken(false)),
 					  pstrdup("Accept: application/json"));
 }
 
@@ -516,7 +516,7 @@ ReportHTTPError(HttpResult httpResult, int level)
 * configured via GUC variables. Caches the token until it is about to expire.
 */
 static char *
-GetRestCatalogAccessToken(void)
+GetOrFetchRestCatalogAccessToken(bool force)
 {
 	/*
 	 * Calling initial time or token will expire in 1 minute, fetch a new
@@ -525,7 +525,7 @@ GetRestCatalogAccessToken(void)
 	TimestampTz now = GetCurrentTimestamp();
 	const int	MINUTE_IN_MSECS = 60 * 1000;
 
-	if (RestCatalogAccessTokenExpiry == 0 ||
+	if (force || RestCatalogAccessTokenExpiry == 0 ||
 		!TimestampDifferenceExceeds(now, RestCatalogAccessTokenExpiry, MINUTE_IN_MSECS))
 	{
 		if (RestCatalogAccessToken)
@@ -587,7 +587,7 @@ FetchRestCatalogAccessToken(char **accessToken, int *expiresIn)
 	headers = lappend(headers, "Content-Type: application/x-www-form-urlencoded");
 
 	/* POST */
-	HttpResult	httpResponse = HttpWithRetry(HTTP_POST, accessTokenUrl, body, headers, 3);
+	HttpResult	httpResponse = SendHttpRequest(HTTP_POST, accessTokenUrl, body, headers, ShouldRetryPolarisRequest, 3);
 
 	if (httpResponse.status != 200)
 		ereport(ERROR,
@@ -1027,4 +1027,47 @@ GetRemoveSnapshotCatalogRequest(List *removedSnapshotIds, Oid relationId)
 	request->body = body->data;
 
 	return request;
+}
+
+
+/*
+ * ShouldRetryPolarisRequest checks if the given HTTP result status is retriable.
+ * If it is retriable, it performs necessary actions (like sleeping or refreshing token)
+ * and returns true. Otherwise, it returns false.
+ */
+bool
+ShouldRetryPolarisRequest(HttpResult result, int maxRetry, int retryNo)
+{
+	if (retryNo > maxRetry)
+		return false;
+
+	/* too many request, wait some time */
+	if (result.status == 429)
+	{
+		int			baseMs = 500;
+
+		LightSleep(BackoffSleepMs(baseMs, retryNo));
+		return true;
+	}
+
+	/* server unavailable, lets wait a bit more */
+	else if (result.status == 503)
+	{
+		int			baseMs = 5000;
+
+		LightSleep(BackoffSleepMs(baseMs, retryNo));
+		return true;
+	}
+
+	/* token expired, retry after refreshing token */
+	else if (result.status == 419)
+	{
+		bool		force = true;
+
+		GetOrFetchRestCatalogAccessToken(force);
+		return true;
+	}
+
+	/* successful or other error, return */
+	return false;
 }

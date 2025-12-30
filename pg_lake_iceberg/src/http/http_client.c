@@ -31,9 +31,9 @@
 #include "utils/memutils.h"
 #include "pg_lake/http/http_client.h"
 
+#include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
-#include <unistd.h>
 #include <curl/curl.h>
 
 /* 20 seconds */
@@ -43,10 +43,13 @@
 #define TOTAL_TIMEOUT_MS   180000
 
 
+static HttpResult SendHttpRequestInternal(HttpMethod method, const char *url, const char *body,
+										  List *headers, HttpRetryCallback retryCallback,
+										  int maxRetry, int retryNo);
 static HttpResult HttpGet(const char *url, List *headers);
 static HttpResult HttpHead(const char *url, List *headers);
-static HttpResult HttpPost(const char *url, const char *body, List *headers);
 static HttpResult HttpDelete(const char *url, List *headers);
+static HttpResult HttpPost(const char *url, const char *body, List *headers);
 static HttpResult HttpPut(const char *url, const char *body, List *headers);
 static HttpResult HttpCommonNoThrows(HttpMethod method, const char *url, const char *postData,
 									 const List *headers);
@@ -276,10 +279,23 @@ CurlReturnError(CURL * curl, struct curl_slist *headerList,
 
 
 /*
- * HttpWithRetry sends given http request with at max retryCount if the response status is retriable.
+ * SendHttpRequest sends an HTTP request with the given method, url, body, headers,
+ * and retry callback.
  */
 HttpResult
-HttpWithRetry(HttpMethod method, const char *url, const char *body, List *headers, int retryCount)
+SendHttpRequest(HttpMethod method, const char *url, const char *body,
+				List *headers, HttpRetryCallback retryCallback, int maxRetry)
+{
+	int			retryNo = 1;
+
+	return SendHttpRequestInternal(method, url, body, headers, retryCallback, maxRetry, retryNo);
+}
+
+
+static HttpResult
+SendHttpRequestInternal(HttpMethod method, const char *url, const char *body,
+						List *headers, HttpRetryCallback retryCallback,
+						int maxRetry, int retryNo)
 {
 	HttpResult	result;
 
@@ -311,15 +327,10 @@ HttpWithRetry(HttpMethod method, const char *url, const char *body, List *header
 		pg_unreachable();
 	}
 
-	/* throttling */
-	if (result.status == 429 && retryCount > 1)
+	/* retry logic */
+	if (retryCallback != NULL && retryCallback(result, maxRetry, retryNo))
 	{
-		/*
-		 * retry after 5 seconds to prevent throttling. todo: retry with
-		 * backoff
-		 */
-		sleep(5);
-		return HttpWithRetry(method, url, body, headers, retryCount - 1);
+		return SendHttpRequestInternal(method, url, body, headers, retryCallback, maxRetry, retryNo + 1);
 	}
 
 	return result;
@@ -327,16 +338,42 @@ HttpWithRetry(HttpMethod method, const char *url, const char *body, List *header
 
 
 /*
+ * BackoffSleepMs returns sleep duration in milliseconds
+ * for the current retry no.
+ */
+int
+BackoffSleepMs(int baseMs, int retryNo)
+{
+	/* Tune these as needed */
+	const int	maxMs = 10000;	/* cap at 10 s */
+
+	/* Exponential backoff: baseMs * 2^retryNo, capped */
+	long		delay = (long) baseMs << retryNo;
+
+	if (delay > maxMs)
+		delay = maxMs;
+
+	/* jitter: up to 50% of delay */
+	long		jitter = 0;
+
+	if (delay > 1)
+		jitter = rand() % (delay / 2);
+
+	return (int) (delay + jitter);
+}
+
+
+/*
  * HttpGet performs a simple HTTP GET request.
  * Returns an HttpResult with status, body, and headers.
  */
-HttpResult
+static HttpResult
 HttpGet(const char *url, List *headers)
 {
 	return HttpCommonNoThrows(HTTP_GET, url, NULL, headers);
 }
 
-HttpResult
+static HttpResult
 HttpHead(const char *url, List *headers)
 {
 	/* HEAD never carries a body */
@@ -347,26 +384,25 @@ HttpHead(const char *url, List *headers)
 * HttpPost performs a simple HTTP POST request.
  * Returns an HttpResult with status, body, and headers.
  */
-HttpResult
+static HttpResult
 HttpPost(const char *url, const char *body, List *headers)
 {
 	return HttpCommonNoThrows(HTTP_POST, url, body, headers);
 }
 
 
-HttpResult
+static HttpResult
 HttpPut(const char *url, const char *body, List *headers)
 {
 	return HttpCommonNoThrows(HTTP_PUT, url, body, headers);
 }
 
 
-HttpResult
+static HttpResult
 HttpDelete(const char *url, List *headers)
 {
 	return HttpCommonNoThrows(HTTP_DELETE, url, NULL, headers);
 }
-
 
 
 /* CurlResponseBodyWriteCallback grows response body from libcurl buffer. */

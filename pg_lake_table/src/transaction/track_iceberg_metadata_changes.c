@@ -272,8 +272,8 @@ PostAllRestCatalogRequests(void)
 			if (createTableRequest != NULL)
 			{
 				HttpResult	httpResult =
-					HttpWithRetry(HTTP_POST, requestPerTable->tableRestUrl,
-								  createTableRequest->body, PostHeadersWithAuth(), 3);
+					SendHttpRequest(HTTP_POST, requestPerTable->tableRestUrl,
+									createTableRequest->body, PostHeadersWithAuth(), ShouldRetryPolarisRequest, 3);
 
 				if (httpResult.status != 200)
 				{
@@ -288,8 +288,8 @@ PostAllRestCatalogRequests(void)
 			else if (dropTableRequest != NULL)
 			{
 				HttpResult	httpResult =
-					HttpWithRetry(HTTP_DELETE, requestPerTable->tableRestUrl,
-								  NULL, DeleteHeadersWithAuth(), 3);
+					SendHttpRequest(HTTP_DELETE, requestPerTable->tableRestUrl,
+									NULL, DeleteHeadersWithAuth(), ShouldRetryPolarisRequest, 3);
 
 				if (httpResult.status != 204)
 				{
@@ -408,7 +408,7 @@ PostAllRestCatalogRequests(void)
 		appendStringInfoChar(batchRequestBody, '}');	/* close json body */
 
 		char	   *url = psprintf(REST_CATALOG_TRANSACTION_COMMIT, RestCatalogHost, catalogName);
-		HttpResult	httpResult = HttpWithRetry(HTTP_POST, url, batchRequestBody->data, PostHeadersWithAuth(), 3);
+		HttpResult	httpResult = SendHttpRequest(HTTP_POST, url, batchRequestBody->data, PostHeadersWithAuth(), ShouldRetryPolarisRequest, 3);
 
 		if (httpResult.status != 204)
 		{

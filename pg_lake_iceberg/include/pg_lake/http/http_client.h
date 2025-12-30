@@ -45,5 +45,10 @@ typedef struct
 
 extern bool HttpClientTraceTraffic;
 
+/* Callback function to determine if a request should be retried */
+typedef bool (*HttpRetryCallback) (HttpResult result, int maxRetry, int retryNo);
+
 /* plain C API (no PostgreSQL types) */
-extern PGDLLEXPORT HttpResult HttpWithRetry(HttpMethod method, const char *url, const char *body, List *headers, int retryCount);
+extern PGDLLEXPORT HttpResult SendHttpRequest(HttpMethod method, const char *url, const char *body,
+											  List *headers, HttpRetryCallback retryCallback, int maxRetry);
+extern PGDLLEXPORT int BackoffSleepMs(int baseMs, int retryNo);
