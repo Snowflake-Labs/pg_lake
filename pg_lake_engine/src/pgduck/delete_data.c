@@ -110,7 +110,7 @@ PerformDeleteFromParquet(char *sourcePath,
 		List	   *dataFileStats = GetDataFileStatsListFromPGResult(result, leafFields, schema, &rowsAffected);
 
 		Assert(dataFileStats != NIL);
-		*newFileStats = DeepCopyDataFileStats((DataFileStats *) linitial(dataFileStats));
+		*newFileStats = linitial(dataFileStats);
 
 		PQclear(result);
 	}
