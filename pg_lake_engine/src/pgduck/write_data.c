@@ -177,7 +177,6 @@ WriteQueryResultTo(char *query,
 				   List **dataFileStats)
 {
 	StringInfoData command;
-	bool		useReturnStats = false;
 
 	initStringInfo(&command);
 
@@ -273,7 +272,6 @@ WriteQueryResultTo(char *query,
 								 ParquetVersionToString(DefaultParquetVersion));
 
 				appendStringInfo(&command, ", return_stats");
-				useReturnStats = true;
 
 				break;
 			}
@@ -425,7 +423,7 @@ WriteQueryResultTo(char *query,
 		result = ExecuteQueryOnPGDuckConnection(pgDuckConn, command.data);
 		CheckPGDuckResult(pgDuckConn, result);
 
-		if (useReturnStats && dataFileStats != NULL)
+		if (destinationFormat == DATA_FORMAT_PARQUET && dataFileStats != NULL)
 		{
 			/* DuckDB returns COPY 0 when return_stats is used. */
 			*dataFileStats = GetDataFileStatsListFromPGResult(result, leafFields, schema, &rowsAffected);
@@ -467,41 +465,41 @@ GetDataFileStatsListFromPGResult(PGresult *result, List *leafFields, DataFileSch
 {
 	List	   *statsList = NIL;
 
-	int			rowCount = PQntuples(result);
-	int			columnCount = PQnfields(result);
+	int			resultRowCount = PQntuples(result);
+	int			resultColumnCount = PQnfields(result);
 
 	*totalRowCount = 0;
 
-	for (int r = 0; r < rowCount; r++)
+	for (int resultRowIndex = 0; resultRowIndex < resultRowCount; resultRowIndex++)
 	{
 		DataFileStats *fileStats = palloc0(sizeof(DataFileStats));
 
-		for (int c = 0; c < columnCount; c++)
+		for (int resultColIndex = 0; resultColIndex < resultColumnCount; resultColIndex++)
 		{
-			char	   *colName = PQfname(result, c);
-			char	   *val = PQgetvalue(result, r, c);
+			char	   *resultColName = PQfname(result, resultColIndex);
+			char	   *resultValue = PQgetvalue(result, resultRowIndex, resultColIndex);
 
-			if (schema != NULL && strcmp(colName, "column_statistics") == 0)
+			if (schema != NULL && strcmp(resultColName, "column_statistics") == 0)
 			{
 				List	   *names = NIL;
 				List	   *mins = NIL;
 				List	   *maxs = NIL;
 
-				ParseDuckdbColumnMinMaxFromText(val, &names, &mins, &maxs);
+				ParseDuckdbColumnMinMaxFromText(resultValue, &names, &mins, &maxs);
 				fileStats->columnStats = GetDataFileColumnStatsList(names, mins, maxs, leafFields, schema);
 			}
-			else if (strcmp(colName, "file_size_bytes") == 0)
+			else if (strcmp(resultColName, "file_size_bytes") == 0)
 			{
-				fileStats->fileSize = atoll(val);
+				fileStats->fileSize = atoll(resultValue);
 			}
-			else if (strcmp(colName, "count") == 0)
+			else if (strcmp(resultColName, "count") == 0)
 			{
-				fileStats->rowCount = atoll(val);
+				fileStats->rowCount = atoll(resultValue);
 				*totalRowCount += fileStats->rowCount;
 			}
-			else if (strcmp(colName, "filename") == 0)
+			else if (strcmp(resultColName, "filename") == 0)
 			{
-				fileStats->dataFilePath = pstrdup(val);
+				fileStats->dataFilePath = pstrdup(resultValue);
 			}
 		}
 
@@ -566,7 +564,7 @@ ExtractMinMaxForColumn(Datum map, const char *colName, List **names, List **mins
 		}
 	}
 
-	if (minText != NULL || maxText != NULL)
+	if (minText != NULL && maxText != NULL)
 	{
 		*names = lappend(*names, pstrdup(colName));
 		*mins = lappend(*mins, minText);
@@ -719,25 +717,25 @@ GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields
 	List	   *columnStatsList = NIL;
 
 	Assert(schema != NULL);
-	for (int i = 0; i < schema->nfields; i++)
+	for (int fieldIndex = 0; fieldIndex < schema->nfields; fieldIndex++)
 	{
-		DataFileSchemaField *field = &schema->fields[i];
+		DataFileSchemaField *field = &schema->fields[fieldIndex];
 		const char *fieldName = field->name;
 		int			fieldId = field->id;
-		int			nameIndex = -1;
+		int			nameIndexFound = -1;
 
-		for (int index = 0; index < list_length(names); index++)
+		for (int nameIndex = 0; nameIndex < list_length(names); nameIndex++)
 		{
-			char	   *name = list_nth(names, index);
+			char	   *name = list_nth(names, nameIndex);
 
 			if (strcmp(name, fieldName) == 0)
 			{
-				nameIndex = index;
+				nameIndexFound = nameIndex;
 				break;
 			}
 		}
 
-		if (nameIndex == -1)
+		if (nameIndexFound == -1)
 		{
 			continue;
 		}
@@ -756,10 +754,10 @@ GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields
 			}
 		}
 
-		if (leafField != NULL && nameIndex < list_length(names))
+		if (leafField != NULL)
 		{
-			char	   *minStr = list_nth(mins, nameIndex);
-			char	   *maxStr = list_nth(maxs, nameIndex);
+			char	   *minStr = list_nth(mins, nameIndexFound);
+			char	   *maxStr = list_nth(maxs, nameIndexFound);
 
 			DataFileColumnStats *colStats = palloc0(sizeof(DataFileColumnStats));
 

@@ -34,5 +34,6 @@ CREATE FUNCTION __lake__internal__nsp__.from_hex(text)
  IMMUTABLE PARALLEL SAFE STRICT
 AS 'MODULE_PATHNAME', $function$pg_lake_internal_dummy_function$function$;
 
+-- Register map types, will be used for parsing DuckDB maps
 SELECT map_type.create('TEXT','TEXT');
 SELECT map_type.create('TEXT','map_type.key_text_val_text');
