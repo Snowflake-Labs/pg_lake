@@ -456,6 +456,12 @@ WriteQueryResultTo(char *query,
 }
 
 
+/*
+ * GetDataFileStatsListFromPGResult extracts DataFileStats list from the
+ * given PGresult of COPY .. TO ... WITH (return_stats).
+ *
+ * It also returns the total row count via totalRowCount output parameter.
+ */
 List *
 GetDataFileStatsListFromPGResult(PGresult *result, List *leafFields, DataFileSchema * schema, int64 *totalRowCount)
 {
@@ -703,6 +709,10 @@ ParseDuckdbColumnMinMaxFromText(const char *input, List **names, List **mins, Li
 }
 
 
+/*
+ * GetDataFileColumnStatsList builds DataFileColumnStats list from given
+ * names, mins, maxs lists and schema.
+ */
 static List *
 GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields, DataFileSchema * schema)
 {
@@ -764,6 +774,10 @@ GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields
 }
 
 
+/*
+ * ShouldSkipStatisticsForField determines whether statistics should be
+ * skipped for the given leaf field.
+ */
 static bool
 ShouldSkipStatisticsForField(LeafField * leafField)
 {
