@@ -4,6 +4,7 @@ SOURCES := $(wildcard src/*.c) $(wildcard src/*/*.c) $(wildcard src/*/*/*.c)
 OBJS := $(patsubst %.c,%.o,$(sort $(SOURCES)))
 DATA = $(wildcard $(EXTENSION)--*--*.sql) $(EXTENSION)--3.0.sql
 
+PG_CONFIG ?= pg_config
 PG_LIBDIR := $(shell $(PG_CONFIG) --libdir)
 
 PG_CPPFLAGS = -I$(libpq_srcdir) -Iinclude -std=gnu99 -g -I../pg_lake_engine/include -I../pg_extension_base/include
@@ -17,7 +18,6 @@ endif
 
 JDBC_DRIVER_PATH ?= /usr/share/java/postgresql.jar
 
-PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 USE_PGXS=1
 include $(PGXS)

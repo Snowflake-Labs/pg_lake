@@ -43,14 +43,7 @@
 #define TOTAL_TIMEOUT_MS   180000
 
 
-static HttpResult SendHttpRequestInternal(HttpMethod method, const char *url, const char *body,
-										  List *headers, HttpRetryCallback retryCallback,
-										  int maxRetry, int retryNo);
-static HttpResult HttpGet(const char *url, List *headers);
-static HttpResult HttpHead(const char *url, List *headers);
-static HttpResult HttpDelete(const char *url, List *headers);
-static HttpResult HttpPost(const char *url, const char *body, List *headers);
-static HttpResult HttpPut(const char *url, const char *body, List *headers);
+static HttpResult SendHttpRequestInternal(HttpMethod method, const char *url, const char *body, List *headers);
 static HttpResult HttpCommonNoThrows(HttpMethod method, const char *url, const char *postData,
 									 const List *headers);
 static bool CheckMinCurlVersion(const curl_version_info_data * versionInfo);
@@ -279,23 +272,34 @@ CurlReturnError(CURL * curl, struct curl_slist *headerList,
 
 
 /*
- * SendHttpRequest sends an HTTP request with the given method, url, body, headers,
+ * SendHttpRequestWithRetry sends an HTTP request with the given method, url, body, headers,
  * and retry callback.
  */
 HttpResult
-SendHttpRequest(HttpMethod method, const char *url, const char *body,
-				List *headers, HttpRetryCallback retryCallback, int maxRetry)
+SendHttpRequestWithRetry(HttpMethod method, const char *url, const char *body,
+						 List *headers, HttpRetryFn retryFn, int maxRetry)
 {
-	int			retryNo = 1;
+	if (maxRetry < 1)
+		ereport(ERROR, (errmsg("maxRetry must be at least 1")));
 
-	return SendHttpRequestInternal(method, url, body, headers, retryCallback, maxRetry, retryNo);
+	HttpResult	result;
+
+	for (int retryNo = 1; retryNo <= maxRetry; retryNo++)
+	{
+		result = SendHttpRequestInternal(method, url, body, headers);
+
+		if (retryFn != NULL && retryFn(result, maxRetry, retryNo))
+			continue;
+		else
+			break;
+	}
+
+	return result;
 }
 
 
 static HttpResult
-SendHttpRequestInternal(HttpMethod method, const char *url, const char *body,
-						List *headers, HttpRetryCallback retryCallback,
-						int maxRetry, int retryNo)
+SendHttpRequestInternal(HttpMethod method, const char *url, const char *body, List *headers)
 {
 	HttpResult	result;
 
@@ -327,39 +331,28 @@ SendHttpRequestInternal(HttpMethod method, const char *url, const char *body,
 		pg_unreachable();
 	}
 
-	/* retry logic */
-	if (retryCallback != NULL && retryCallback(result, maxRetry, retryNo))
-	{
-		return SendHttpRequestInternal(method, url, body, headers, retryCallback, maxRetry, retryNo + 1);
-	}
-
 	return result;
 }
 
 
 /*
- * BackoffSleepMs returns sleep duration in milliseconds
- * for the current retry no.
+ * LinearBackoffSleepMs returns sleep duration in milliseconds
+ * for the current retry no using linear backoff with jitter.
  */
 int
-BackoffSleepMs(int baseMs, int retryNo)
+LinearBackoffSleepMs(int baseMs, int retryNo)
 {
-	/* Tune these as needed */
 	const int	maxMs = 10000;	/* cap at 10 s */
 
-	/* Exponential backoff: baseMs * 2^retryNo, capped */
-	long		delay = (long) baseMs << retryNo;
+	int			sleepMs = baseMs * retryNo;
 
-	if (delay > maxMs)
-		delay = maxMs;
+	if (sleepMs > maxMs)
+		sleepMs = maxMs;
 
-	/* jitter: up to 50% of delay */
-	long		jitter = 0;
+	/* add some jitter up to baseMs */
+	sleepMs += (rand() % baseMs);
 
-	if (delay > 1)
-		jitter = rand() % (delay / 2);
-
-	return (int) (delay + jitter);
+	return sleepMs;
 }
 
 
@@ -367,13 +360,13 @@ BackoffSleepMs(int baseMs, int retryNo)
  * HttpGet performs a simple HTTP GET request.
  * Returns an HttpResult with status, body, and headers.
  */
-static HttpResult
+HttpResult
 HttpGet(const char *url, List *headers)
 {
 	return HttpCommonNoThrows(HTTP_GET, url, NULL, headers);
 }
 
-static HttpResult
+HttpResult
 HttpHead(const char *url, List *headers)
 {
 	/* HEAD never carries a body */
@@ -384,21 +377,21 @@ HttpHead(const char *url, List *headers)
 * HttpPost performs a simple HTTP POST request.
  * Returns an HttpResult with status, body, and headers.
  */
-static HttpResult
+HttpResult
 HttpPost(const char *url, const char *body, List *headers)
 {
 	return HttpCommonNoThrows(HTTP_POST, url, body, headers);
 }
 
 
-static HttpResult
+HttpResult
 HttpPut(const char *url, const char *body, List *headers)
 {
 	return HttpCommonNoThrows(HTTP_PUT, url, body, headers);
 }
 
 
-static HttpResult
+HttpResult
 HttpDelete(const char *url, List *headers)
 {
 	return HttpCommonNoThrows(HTTP_DELETE, url, NULL, headers);

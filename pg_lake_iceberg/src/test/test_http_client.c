@@ -20,7 +20,7 @@
 #include "funcapi.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
-#include "pg_lake/rest_catalog/rest_catalog.h"
+#include "pg_lake/http/http_client.h"
 #include "pg_lake/util/array_utils.h"
 
 PG_FUNCTION_INFO_V1(test_http_get);
@@ -41,7 +41,7 @@ test_http_get(PG_FUNCTION_ARGS)
 
 	List	   *headers = extract_headers(fcinfo, 1);
 
-	HttpResult	r = SendHttpRequest(HTTP_GET, url, NULL, headers, ShouldRetryPolarisRequest, 3);
+	HttpResult	r = HttpGet(url, headers);
 
 	PG_RETURN_DATUM(build_http_result(fcinfo, &r));
 }
@@ -54,7 +54,7 @@ test_http_head(PG_FUNCTION_ARGS)
 
 	List	   *headers = extract_headers(fcinfo, 1);
 
-	HttpResult	r = SendHttpRequest(HTTP_HEAD, url, NULL, headers, ShouldRetryPolarisRequest, 3);
+	HttpResult	r = HttpHead(url, headers);
 
 	PG_RETURN_DATUM(build_http_result(fcinfo, &r));
 }
@@ -67,7 +67,7 @@ test_http_delete(PG_FUNCTION_ARGS)
 
 	List	   *headers = extract_headers(fcinfo, 1);
 
-	HttpResult	r = SendHttpRequest(HTTP_DELETE, url, NULL, headers, ShouldRetryPolarisRequest, 3);
+	HttpResult	r = HttpDelete(url, headers);
 
 	PG_RETURN_DATUM(build_http_result(fcinfo, &r));
 }
@@ -81,7 +81,7 @@ test_http_post(PG_FUNCTION_ARGS)
 
 	List	   *headers = extract_headers(fcinfo, 2);
 
-	HttpResult	r = SendHttpRequest(HTTP_POST, url, body, headers, ShouldRetryPolarisRequest, 3);
+	HttpResult	r = HttpPost(url, body, headers);
 
 	PG_RETURN_DATUM(build_http_result(fcinfo, &r));
 }
@@ -94,7 +94,7 @@ test_http_put(PG_FUNCTION_ARGS)
 
 	List	   *headers = extract_headers(fcinfo, 2);
 
-	HttpResult	r = SendHttpRequest(HTTP_PUT, url, body, headers, ShouldRetryPolarisRequest, 3);
+	HttpResult	r = HttpPut(url, body, headers);
 
 	PG_RETURN_DATUM(build_http_result(fcinfo, &r));
 }
