@@ -23,7 +23,7 @@ def server_state():
 
 
 @pytest.fixture(scope="session")
-def pgduck_server(installcheck, server_state):
+def pgduck_server(installcheck, server_state, s3):
 
     if installcheck:
         yield None
@@ -45,7 +45,7 @@ def pgduck_server(installcheck, server_state):
 
 
 @pytest.fixture(scope="session")
-def postgres(installcheck, server_state):
+def postgres(installcheck, server_state, s3):
     if installcheck:
         # re-running installcheck might cause different results otherwise
         remove_duckdb_cache()
