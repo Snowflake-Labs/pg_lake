@@ -3104,6 +3104,16 @@ def create_http_helper_functions(superuser_conn, iceberg_extension):
         AS 'pg_lake_iceberg', 'test_http_delete'
         LANGUAGE C;
 
+        -- http with retry
+         CREATE OR REPLACE FUNCTION lake_iceberg.test_http_with_retry(
+                method text,
+                url     text,
+                body    text DEFAULT NULL,
+                headers text[] DEFAULT NULL)
+        RETURNS lake_iceberg.http_result
+        AS 'pg_lake_iceberg', 'test_http_with_retry'
+        LANGUAGE C;
+
         -- URL encode function
         CREATE OR REPLACE FUNCTION lake_iceberg.url_encode(input TEXT)
         RETURNS text
@@ -3138,6 +3148,7 @@ def create_http_helper_functions(superuser_conn, iceberg_extension):
         DROP FUNCTION IF EXISTS lake_iceberg.test_http_post;
         DROP FUNCTION IF EXISTS lake_iceberg.test_http_put;
         DROP FUNCTION IF EXISTS lake_iceberg.test_http_delete;
+        DROP FUNCTION IF EXISTS lake_iceberg.test_http_with_retry;
         DROP TYPE lake_iceberg.http_result;
         DROP FUNCTION IF EXISTS lake_iceberg.url_encode_path;
         DROP FUNCTION IF EXISTS lake_iceberg.register_namespace_to_rest_catalog;

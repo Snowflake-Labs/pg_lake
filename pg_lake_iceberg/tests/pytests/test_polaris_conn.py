@@ -74,9 +74,10 @@ def test_polaris_catalog_test_namespace_and_policy(
     res = run_query(
         f"""
         SELECT *
-        FROM lake_iceberg.test_http_get(
+        FROM lake_iceberg.test_http_with_retry(
+         'GET',
          '{url}',
-         ARRAY['Authorization: Bearer {token}']);
+         headers => ARRAY['Authorization: Bearer {token}']);
         """,
         pg_conn,
     )

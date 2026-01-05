@@ -43,7 +43,7 @@
 #define TOTAL_TIMEOUT_MS   180000
 
 
-static HttpResult SendHttpRequestInternal(HttpMethod method, const char *url, const char *body, List *headers);
+static HttpResult SendHttpRequest(HttpMethod method, const char *url, const char *body, List *headers);
 static HttpResult HttpCommonNoThrows(HttpMethod method, const char *url, const char *postData,
 									 const List *headers);
 static bool CheckMinCurlVersion(const curl_version_info_data * versionInfo);
@@ -279,16 +279,15 @@ HttpResult
 SendHttpRequestWithRetry(HttpMethod method, const char *url, const char *body,
 						 List *headers, HttpRetryFn retryFn, int maxRetry)
 {
-	if (maxRetry < 1)
-		ereport(ERROR, (errmsg("maxRetry must be at least 1")));
+	Assert(maxRetry > 0);
 
 	HttpResult	result;
 
 	for (int retryNo = 1; retryNo <= maxRetry; retryNo++)
 	{
-		result = SendHttpRequestInternal(method, url, body, headers);
+		result = SendHttpRequest(method, url, body, headers);
 
-		if (retryFn != NULL && retryFn(result, maxRetry, retryNo))
+		if (retryFn != NULL && retryFn(result.status, maxRetry, retryNo))
 			continue;
 		else
 			break;
@@ -299,7 +298,7 @@ SendHttpRequestWithRetry(HttpMethod method, const char *url, const char *body,
 
 
 static HttpResult
-SendHttpRequestInternal(HttpMethod method, const char *url, const char *body, List *headers)
+SendHttpRequest(HttpMethod method, const char *url, const char *body, List *headers)
 {
 	HttpResult	result;
 

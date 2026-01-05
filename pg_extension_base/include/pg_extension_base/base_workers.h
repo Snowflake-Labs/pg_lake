@@ -18,6 +18,8 @@
 #ifndef WORKER_LAUNCHER_H
 #define WORKER_LAUNCHER_H
 
+#include <signal.h>
+
 /*
  * Simplify wrapping operations in a transaction from a background
  * worker using macros

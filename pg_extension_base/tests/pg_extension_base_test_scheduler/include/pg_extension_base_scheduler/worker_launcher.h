@@ -18,6 +18,8 @@
 #ifndef WORKER_LAUNCHER_H
 #define WORKER_LAUNCHER_H
 
+#include <signal.h>
+
 extern volatile sig_atomic_t ReloadRequested;
 extern volatile sig_atomic_t TerminationRequested;
 

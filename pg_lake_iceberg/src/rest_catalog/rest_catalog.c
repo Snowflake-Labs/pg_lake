@@ -1038,12 +1038,15 @@ GetRemoveSnapshotCatalogRequest(List *removedSnapshotIds, Oid relationId)
 
 /*
  * SendRequestToRestCatalog sends an HTTP request to the rest catalog
- * with retry logic for retriable errors, attempting up to maxRetry times.
+ * with retry logic for retriable errors, attempting up to MAX_HTTP_RETRY_FOR_REST_CATALOG
+ * times.
  */
 HttpResult
 SendRequestToRestCatalog(HttpMethod method, const char *url, const char *body, List *headers)
 {
-	return SendHttpRequestWithRetry(method, url, body, headers, ShouldRetryRequestToRestCatalog, 3);
+	const int	MAX_HTTP_RETRY_FOR_REST_CATALOG = 3;
+
+	return SendHttpRequestWithRetry(method, url, body, headers, ShouldRetryRequestToRestCatalog, MAX_HTTP_RETRY_FOR_REST_CATALOG);
 }
 
 
@@ -1053,7 +1056,7 @@ SendRequestToRestCatalog(HttpMethod method, const char *url, const char *body, L
  * and returns true. Otherwise, it returns false.
  */
 bool
-ShouldRetryRequestToRestCatalog(HttpResult result, int maxRetry, int retryNo)
+ShouldRetryRequestToRestCatalog(long status, int maxRetry, int retryNo)
 {
 	if (retryNo > maxRetry)
 		return false;
@@ -1063,16 +1066,22 @@ ShouldRetryRequestToRestCatalog(HttpResult result, int maxRetry, int retryNo)
 	const int	TOKEN_EXPIRED_STATUS = 419;
 
 	/* too many request, wait some time */
-	if (result.status == TOO_MANY_REQUEST_STATUS)
+	if (status == TOO_MANY_REQUEST_STATUS)
 	{
 		int			baseMs = 500;
 
+		/*
+		 * LightSleep reacts to signals, and can easily throw an error (e.g.,
+		 * cancel backend). This function can be called at post-commit hook,
+		 * so normally we wouldn't want any errors to happen, but then
+		 * Postgres already prevents post-commit backends to receive signals.
+		 */
 		LightSleep(LinearBackoffSleepMs(baseMs, retryNo));
 		return true;
 	}
 
 	/* server unavailable, lets wait a bit more */
-	else if (result.status == SERVER_UNAVAILABLE_STATUS)
+	else if (status == SERVER_UNAVAILABLE_STATUS)
 	{
 		int			baseMs = 5000;
 
@@ -1081,7 +1090,7 @@ ShouldRetryRequestToRestCatalog(HttpResult result, int maxRetry, int retryNo)
 	}
 
 	/* token expired, retry after refreshing token */
-	else if (result.status == TOKEN_EXPIRED_STATUS)
+	else if (status == TOKEN_EXPIRED_STATUS)
 	{
 		/*
 		 * We normally refresh the token only when it is about to expire
