@@ -100,7 +100,7 @@ static List *ApplyInsertFile(Relation rel, char *insertFile, int64 rowCount,
 static List *ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount,
 							 int64 liveRowCount, char *deleteFile, int64 deletedRowCount);
 static List *GetDataFilePathsFromStatsList(List *dataFileStats);
-static List *FindGeneratedDataFiles(Oid relationId, List *dataFileStats,
+static List *GetNewFileOpsFromFileStats(Oid relationId, List *dataFileStats,
 									int32 partitionSpecId, Partition * partition, int64 rowCount,
 									bool isVerbose, List **newFiles);
 static bool ShouldRewriteAfterDeletions(int64 sourceRowCount, uint64 totalDeletedRowCount);
@@ -341,11 +341,12 @@ GetDataFilePathsFromStatsList(List *dataFileStats)
 
 
 /*
- * FindGeneratedDataFiles gets the list of newly written data files (could
- * be multiple when file_size_bytes is specified) and adds them to the metadata.
+ * GetNewFileOpsFromFileStats gets the list of newly written data files (could
+ * be multiple when file_size_bytes is specified) with their file stats
+ * and adds them to the metadata operations list to be returned.
  */
 static List *
-FindGeneratedDataFiles(Oid relationId, List *dataFileStats, int32 partitionSpecId, Partition * partition,
+GetNewFileOpsFromFileStats(Oid relationId, List *dataFileStats, int32 partitionSpecId, Partition * partition,
 					   int64 rowCount, bool isVerbose, List **newFiles)
 {
 	*newFiles = NIL;
@@ -1006,7 +1007,7 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 
 	/* find which files were generated */
 	List	   *newFiles = NIL;
-	List	   *newFileOps = FindGeneratedDataFiles(relationId, dataFileStats,
+	List	   *newFileOps = GetNewFileOpsFromFileStats(relationId, dataFileStats,
 													partitionSpecId, partition,
 													rowCount,
 													isVerbose, &newFiles);
