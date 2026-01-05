@@ -192,7 +192,7 @@ check-duckdb_pglake:
 avro:
 ifeq ("$(wildcard avro/lang/c/build)","")
 	$(MAKE) submodules
-	cd avro && (patch -l -p1 -N < ../avro.patch || [ $$? -eq 1 ]; ) && cd ..
+	cd avro && git checkout -f . && git apply --ignore-whitespace ../avro.patch
 	mkdir -p avro/lang/c/build
 	# builds and installs into local avrolib directory 
 	cd avro/lang/c/build && \
