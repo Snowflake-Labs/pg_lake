@@ -168,19 +168,6 @@ _PG_init(void)
 							GUC_UNIT_S | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
 
-	DefineCustomBoolVariable(
-							 "pg_lake_iceberg.enable_stats_collection_for_nested_types",
-							 gettext_noop("When set to true, stats collection is enabled for nested types."
-										  "We currently do not support pruning for nested types, but you can "
-										  "still get into stats problems with nested types due to parsing "
-										  "discrepancies between Postgres and DuckDB."),
-							 NULL,
-							 &DeprecatedEnableStatsCollectionForNestedTypes,
-							 false,
-							 PGC_SUSET,
-							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
-
 	if (QueryEngineEnabled)
 	{
 		InitializePgLakeEngineIdCache();

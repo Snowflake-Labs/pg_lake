@@ -67,7 +67,6 @@ static DuckDBTypeInfo VARCHAR_TYPE =
 
 int			TargetRowGroupSizeMB = DEFAULT_TARGET_ROW_GROUP_SIZE_MB;
 int			DefaultParquetVersion = PARQUET_VERSION_V1;
-bool		DeprecatedEnableStatsCollectionForNestedTypes = false;
 
 /*
  * ConvertCSVFileTo copies and converts a CSV file at source path to
@@ -613,7 +612,7 @@ UnescapeDoubleQuotes(const char *s)
 		return out;
 	}
 
-	return pstrdup(s);
+	return s;
 }
 
 

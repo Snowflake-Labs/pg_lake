@@ -35,7 +35,6 @@ typedef enum ParquetVersion
 
 /* pg_lake_table.default_parquet_version */
 extern PGDLLEXPORT int DefaultParquetVersion;
-extern PGDLLEXPORT bool DeprecatedEnableStatsCollectionForNestedTypes;
 
 extern PGDLLEXPORT void ConvertCSVFileTo(char *csvFilePath,
 										 TupleDesc tupleDesc,
