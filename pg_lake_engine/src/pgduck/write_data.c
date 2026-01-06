@@ -721,8 +721,8 @@ GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields
 		const char *fieldName = field->name;
 		int			fieldId = field->id;
 
-		int			nameIndexFound = FindIndexInStringList(names, fieldName);
-		if (nameIndexFound == -1)
+		int			nameIndex = FindIndexInStringList(names, fieldName);
+		if (nameIndex == -1)
 		{
 			ereport(DEBUG3, (errmsg("field with name %s not found in stats output, skipping", fieldName)));
 			continue;
@@ -732,8 +732,8 @@ GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields
 
 		if (leafField != NULL)
 		{
-			char	   *minStr = list_nth(mins, nameIndexFound);
-			char	   *maxStr = list_nth(maxs, nameIndexFound);
+			char	   *minStr = list_nth(mins, nameIndex);
+			char	   *maxStr = list_nth(maxs, nameIndex);
 
 			DataFileColumnStats *colStats = palloc0(sizeof(DataFileColumnStats));
 
