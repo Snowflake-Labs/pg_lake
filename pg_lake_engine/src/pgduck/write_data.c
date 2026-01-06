@@ -58,6 +58,8 @@ static void ExtractMinMaxForAllColumns(Datum map, List **names, List **mins, Lis
 static void ExtractMinMaxForColumn(Datum map, const char *colName, List **names, List **mins, List **maxs);
 static char *UnescapeDoubleQuotes(const char *s);
 static List *GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields, DataFileSchema * schema);
+static LeafField *FindLeafFieldWithId(List *leafFields, int fieldId);
+static int FindIndexInStringList(List *names, const char *targetName);
 static bool ShouldSkipStatisticsForField(LeafField * leafField);
 
 static DuckDBTypeInfo VARCHAR_TYPE =
@@ -718,37 +720,15 @@ GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields
 		DataFileSchemaField *field = &schema->fields[fieldIndex];
 		const char *fieldName = field->name;
 		int			fieldId = field->id;
-		int			nameIndexFound = -1;
 
-		for (int nameIndex = 0; nameIndex < list_length(names); nameIndex++)
-		{
-			char	   *name = list_nth(names, nameIndex);
-
-			if (strcmp(name, fieldName) == 0)
-			{
-				nameIndexFound = nameIndex;
-				break;
-			}
-		}
-
+		int			nameIndexFound = FindIndexInStringList(names, fieldName);
 		if (nameIndexFound == -1)
 		{
+			ereport(DEBUG3, (errmsg("field with name %s not found in stats output, skipping", fieldName)));
 			continue;
 		}
 
-		LeafField  *leafField = NULL;
-		ListCell   *leafCell = NULL;
-
-		foreach(leafCell, leafFields)
-		{
-			LeafField  *lf = lfirst(leafCell);
-
-			if (lf->fieldId == fieldId && !ShouldSkipStatisticsForField(lf))
-			{
-				leafField = lf;
-				break;
-			}
-		}
+		LeafField  *leafField = FindLeafFieldWithId(leafFields, fieldId);
 
 		if (leafField != NULL)
 		{
@@ -765,6 +745,55 @@ GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields
 	}
 
 	return columnStatsList;
+}
+
+
+/*
+ * FindLeafFieldWithId finds the leaf field with given id in a list of leaf fields.
+ * Returns NULL if not found.
+ */
+static LeafField *
+FindLeafFieldWithId(List *leafFields, int fieldId)
+{
+	ListCell   *cell = NULL;
+
+	foreach(cell, leafFields)
+	{
+		LeafField  *lf = lfirst(cell);
+
+		if (lf->fieldId == fieldId)
+		{
+			if (ShouldSkipStatisticsForField(lf))
+			{
+				ereport(DEBUG3, (errmsg("skipping statistics for field id %d", fieldId)));
+				return NULL;
+			}
+
+			return lf;
+		}
+	}
+
+	ereport(DEBUG3, (errmsg("leaf field with id %d not found in leaf fields, skipping", fieldId)));
+	return NULL;
+}
+
+
+/*
+ * FindIndexInStringList finds the index of targetName in names list.
+ * Returns -1 if not found.
+ */
+static int
+FindIndexInStringList(List *names, const char *targetName)
+{
+	for(int index = 0; index < list_length(names); index++)
+	{
+		if (strcmp(list_nth(names, index), targetName) == 0)
+		{
+			return index;
+		}
+	}
+
+	return -1;
 }
 
 
