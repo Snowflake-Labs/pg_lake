@@ -531,13 +531,19 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 			uint64		existingDeletedRowCount = sourceRowCount - liveRowCount;
 
 			ReadDataStats stats = {sourceRowCount, existingDeletedRowCount};
-			DataFileStats *newFileStats = NULL;
 
+			List	   *dataFileStats = NIL;
+			List	   *leafFields = GetLeafFieldsForTable(relationId);
+			ColumnStatsCollector columnStatsCollector = (ColumnStatsCollector)
+			{
+				.leafFields = leafFields,
+				.dataFileStats = &dataFileStats
+			};
 			PerformDeleteFromParquet(sourcePath, existingPositionDeletes,
 									 deleteFile, newDataFilePath, compression,
-									 schema, &stats, GetLeafFieldsForTable(relationId), &newFileStats);
+									 schema, &stats, &columnStatsCollector);
 
-			ApplyColumnStatsModeForAllFileStats(relationId, list_make1(newFileStats));
+			ApplyColumnStatsModeForAllFileStats(relationId, columnStatsCollector.dataFileStats);
 
 			int64		newRowCount = liveRowCount - deletedRowCount;
 
@@ -553,9 +559,10 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 			Partition  *partition = GetDataFilePartition(relationId, transforms, sourcePath,
 														 &partitionSpecId);
 
+			Assert(columnStatsCollector.dataFileStats != NIL);
 			/* store the new file in the metadata */
 			TableMetadataOperation *addOperation =
-				AddDataFileOperation(newDataFilePath, CONTENT_DATA, newFileStats, partition, partitionSpecId);
+				AddDataFileOperation(newDataFilePath, CONTENT_DATA, linitial(columnStatsCollector.dataFileStats), partition, partitionSpecId);
 
 			metadataOperations = lappend(metadataOperations, addOperation);
 		}

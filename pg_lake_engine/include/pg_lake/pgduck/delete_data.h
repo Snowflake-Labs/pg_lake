@@ -22,6 +22,7 @@
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/pgduck/read_data.h"
+#include "pg_lake/pgduck/write_data.h"
 #include "pg_lake/data_file/data_file_stats.h"
 
 extern PGDLLEXPORT void PerformDeleteFromParquet(char *sourceDataFilePath,
@@ -31,5 +32,4 @@ extern PGDLLEXPORT void PerformDeleteFromParquet(char *sourceDataFilePath,
 												 CopyDataCompression destinationCompression,
 												 DataFileSchema * schema,
 												 ReadDataStats * stats,
-												 List *leafFields,
-												 DataFileStats * *newFileStats);
+												 ColumnStatsCollector *statsCollector);

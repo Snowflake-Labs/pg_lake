@@ -55,8 +55,7 @@ PerformDeleteFromParquet(char *sourcePath,
 						 CopyDataCompression destinationCompression,
 						 DataFileSchema * schema,
 						 ReadDataStats * stats,
-						 List *leafFields,
-						 DataFileStats * *newFileStats)
+						 ColumnStatsCollector *statsCollector)
 {
 	const char *remainderQuery =
 		DeleteFromParquetQuery(sourcePath, positionDeleteFiles, deletionFilePath, schema, stats);
@@ -107,10 +106,7 @@ PerformDeleteFromParquet(char *sourcePath,
 		CheckPGDuckResult(pgDuckConn, result);
 
 		int64 rowsAffected;
-		List	   *dataFileStats = GetDataFileStatsListFromPGResult(result, leafFields, schema, &rowsAffected);
-
-		Assert(dataFileStats != NIL);
-		*newFileStats = linitial(dataFileStats);
+		statsCollector->dataFileStats = GetDataFileStatsListFromPGResult(result, statsCollector->leafFields, schema, &rowsAffected);
 
 		PQclear(result);
 	}
