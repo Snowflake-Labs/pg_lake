@@ -260,6 +260,12 @@ PrepareCSVInsertion(Oid relationId, char *insertCSV, int64 rowCount,
 	InsertInProgressFileRecordExtended(dataFilePrefix, isPrefix, deferDeletion);
 
 	List	   *dataFileStats = NIL;
+	List	   *leafFields = GetLeafFieldsForTable(relationId);
+	ColumnStatsCollector columnStatsCollector = (ColumnStatsCollector)
+	{
+		.leafFields = leafFields,
+		.dataFileStats = &dataFileStats
+	};
 
 	/* convert insert file to a new file in table format */
 	ConvertCSVFileTo(insertCSV,
@@ -270,8 +276,7 @@ PrepareCSVInsertion(Oid relationId, char *insertCSV, int64 rowCount,
 					 compression,
 					 options,
 					 schema,
-					 GetLeafFieldsForTable(relationId),
-					 &dataFileStats);
+					 &columnStatsCollector);
 
 	ApplyColumnStatsModeForAllFileStats(relationId, dataFileStats);
 
@@ -579,7 +584,7 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 
 			/* write the deletion file */
 			ConvertCSVFileTo(deleteFile, deleteTupleDesc, -1, deletionFilePath,
-							 DATA_FORMAT_PARQUET, compression, copyOptions, schema, NULL, NULL);
+							 DATA_FORMAT_PARQUET, compression, copyOptions, schema, NULL);
 
 			ereport(WriteLogLevel, (errmsg("adding deletion file %s with " INT64_FORMAT " rows ",
 										   deletionFilePath, deletedRowCount)));
@@ -980,6 +985,12 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 
 	/* perform compaction */
 	List	   *dataFileStats = NIL;
+	List	   *leafFields = GetLeafFieldsForTable(relationId);
+	ColumnStatsCollector columnStatsCollector = (ColumnStatsCollector)
+	{
+		.leafFields = leafFields,
+		.dataFileStats = &dataFileStats
+	};
 	int64		rowCount =
 		WriteQueryResultTo(readQuery,
 						   newDataFilePath,
@@ -989,8 +1000,7 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 						   queryHasRowId,
 						   schema,
 						   queryTupleDesc,
-						   GetLeafFieldsForTable(relationId),
-						   &dataFileStats);
+						   &columnStatsCollector);
 
 	if (rowCount == 0)
 	{

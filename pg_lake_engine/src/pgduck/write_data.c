@@ -81,8 +81,7 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 				 CopyDataCompression destinationCompression,
 				 List *formatOptions,
 				 DataFileSchema * schema,
-				 List *leafFields,
-				 List **dataFileStats)
+				 ColumnStatsCollector * statsCollector)
 {
 	StringInfoData command;
 
@@ -153,8 +152,7 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 					   queryHasRowIds,
 					   schema,
 					   csvTupleDesc,
-					   leafFields,
-					   dataFileStats);
+					   statsCollector);
 }
 
 
@@ -172,8 +170,7 @@ WriteQueryResultTo(char *query,
 				   bool queryHasRowId,
 				   DataFileSchema * schema,
 				   TupleDesc queryTupleDesc,
-				   List *leafFields,
-				   List **dataFileStats)
+				   ColumnStatsCollector * statsCollector)
 {
 	StringInfoData command;
 
@@ -422,10 +419,10 @@ WriteQueryResultTo(char *query,
 		result = ExecuteQueryOnPGDuckConnection(pgDuckConn, command.data);
 		CheckPGDuckResult(pgDuckConn, result);
 
-		if (destinationFormat == DATA_FORMAT_PARQUET && dataFileStats != NULL)
+		if (destinationFormat == DATA_FORMAT_PARQUET && statsCollector != NULL && statsCollector->dataFileStats != NULL)
 		{
 			/* DuckDB returns COPY 0 when return_stats is used. */
-			*dataFileStats = GetDataFileStatsListFromPGResult(result, leafFields, schema, &rowsAffected);
+			*statsCollector->dataFileStats = GetDataFileStatsListFromPGResult(result, statsCollector->leafFields, schema, &rowsAffected);
 		}
 		else
 		{

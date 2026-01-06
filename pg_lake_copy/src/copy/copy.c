@@ -916,7 +916,7 @@ ProcessPgLakeCopyTo(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 	 */
 	ConvertCSVFileTo(tempCSVPath, tupleDesc, maximumLineLength,
 					 destinationPath, destinationFormat, destinationCompression,
-					 copyStmt->options, schema, NULL, NULL);
+					 copyStmt->options, schema, NULL);
 
 	if (IsCopyToStdout(copyStmt))
 	{

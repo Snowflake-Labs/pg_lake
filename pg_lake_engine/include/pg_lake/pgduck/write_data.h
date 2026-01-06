@@ -33,6 +33,12 @@ typedef enum ParquetVersion
 	PARQUET_VERSION_V2 = 2
 } ParquetVersion;
 
+typedef struct ColumnStatsCollector
+{
+	List *leafFields;
+	List **dataFileStats;
+} ColumnStatsCollector;
+
 /* pg_lake_table.default_parquet_version */
 extern PGDLLEXPORT int DefaultParquetVersion;
 
@@ -44,8 +50,7 @@ extern PGDLLEXPORT void ConvertCSVFileTo(char *csvFilePath,
 										 CopyDataCompression destinationCompression,
 										 List *formatOptions,
 										 DataFileSchema * schema,
-										 List *leafFields,
-										 List **dataFileStats);
+										 ColumnStatsCollector * statsCollector);
 extern PGDLLEXPORT int64 WriteQueryResultTo(char *query,
 											char *destinationPath,
 											CopyDataFormat destinationFormat,
@@ -54,8 +59,7 @@ extern PGDLLEXPORT int64 WriteQueryResultTo(char *query,
 											bool queryHasRowId,
 											DataFileSchema * schema,
 											TupleDesc queryTupleDesc,
-											List *leafFields,
-											List **dataFileStats);
+											ColumnStatsCollector * statsCollector);
 extern PGDLLEXPORT void AppendFields(StringInfo map, DataFileSchema * schema);
 extern PGDLLEXPORT List *GetDataFileStatsListFromPGResult(PGresult *result,
 														  List *leafFields,
