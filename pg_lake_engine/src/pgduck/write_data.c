@@ -58,7 +58,6 @@ static void ExtractMinMaxForAllColumns(Datum map, List **names, List **mins, Lis
 static void ExtractMinMaxForColumn(Datum map, const char *colName, List **names, List **mins, List **maxs);
 static char *UnescapeDoubleQuotes(const char *s);
 static List *GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields, DataFileSchema * schema);
-static LeafField *FindLeafFieldWithId(List *leafFields, int fieldId);
 static int FindIndexInStringList(List *names, const char *targetName);
 static bool ShouldSkipStatisticsForField(LeafField * leafField);
 
@@ -728,20 +727,28 @@ GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields
 			continue;
 		}
 
-		LeafField  *leafField = FindLeafFieldWithId(leafFields, fieldId);
+		LeafField  *leafField = FindLeafField(leafFields, fieldId);
 
-		if (leafField != NULL)
+		if (leafField == NULL)
 		{
-			char	   *minStr = list_nth(mins, nameIndex);
-			char	   *maxStr = list_nth(maxs, nameIndex);
-
-			DataFileColumnStats *colStats = palloc0(sizeof(DataFileColumnStats));
-
-			colStats->leafField = *leafField;
-			colStats->lowerBoundText = pstrdup(minStr);
-			colStats->upperBoundText = pstrdup(maxStr);
-			columnStatsList = lappend(columnStatsList, colStats);
+			ereport(DEBUG3, (errmsg("leaf field with id %d not found in leaf fields, skipping", fieldId)));
+			continue;
 		}
+		else if(ShouldSkipStatisticsForField(leafField))
+		{
+			ereport(DEBUG3, (errmsg("skipping statistics for field with id %d", fieldId)));
+			continue;
+		}
+
+		char	   *minStr = list_nth(mins, nameIndex);
+		char	   *maxStr = list_nth(maxs, nameIndex);
+
+		DataFileColumnStats *colStats = palloc0(sizeof(DataFileColumnStats));
+
+		colStats->leafField = *leafField;
+		colStats->lowerBoundText = pstrdup(minStr);
+		colStats->upperBoundText = pstrdup(maxStr);
+		columnStatsList = lappend(columnStatsList, colStats);
 	}
 
 	return columnStatsList;
@@ -749,31 +756,19 @@ GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields
 
 
 /*
- * FindLeafFieldWithId finds the leaf field with given id in a list of leaf fields.
- * Returns NULL if not found.
- */
-static LeafField *
-FindLeafFieldWithId(List *leafFields, int fieldId)
+* FindLeafField finds the leaf field with the given fieldId.
+*/
+LeafField *
+FindLeafField(List *leafFieldList, int fieldId)
 {
-	ListCell   *cell = NULL;
-
-	foreach(cell, leafFields)
+	foreach_ptr(LeafField, leafField, leafFieldList)
 	{
-		LeafField  *lf = lfirst(cell);
-
-		if (lf->fieldId == fieldId)
+		if (leafField->fieldId == fieldId)
 		{
-			if (ShouldSkipStatisticsForField(lf))
-			{
-				ereport(DEBUG3, (errmsg("skipping statistics for field id %d", fieldId)));
-				return NULL;
-			}
-
-			return lf;
+			return leafField;
 		}
 	}
 
-	ereport(DEBUG3, (errmsg("leaf field with id %d not found in leaf fields, skipping", fieldId)));
 	return NULL;
 }
 

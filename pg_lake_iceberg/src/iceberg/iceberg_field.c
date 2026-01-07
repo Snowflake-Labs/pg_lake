@@ -178,7 +178,6 @@ static char *PostgresBaseTypeIdToIcebergTypeName(PGType pgType);
 static IcebergTypeInfo * GetIcebergTypeInfoFromTypeName(const char *typeName);
 static const char *GetIcebergJsonSerializedConstDefaultIfExists(const char *attrName, Field * field, Node *defaultExpr);
 static List *FetchRowGroupStats(PGDuckConnection * pgDuckConn, List *fieldIdList, char *path);
-static LeafField * FindLeafField(List *leafFieldList, int fieldId);
 static char *PrepareRowGroupStatsMinMaxQuery(List *rowGroupStatList);
 static char *SerializeTextArrayTypeToPgDuck(ArrayType *array);
 static ArrayType *ReadArrayFromText(char *arrayText);
@@ -1092,28 +1091,6 @@ FetchRowGroupStats(PGDuckConnection * pgDuckConn, List *fieldIdList, char *path)
 	PQclear(result);
 
 	return rowGroupStatsList;
-}
-
-
-/*
-* FindLeafField finds the leaf field with the given fieldId.
-*/
-static LeafField *
-FindLeafField(List *leafFieldList, int fieldId)
-{
-	ListCell   *lc;
-
-	foreach(lc, leafFieldList)
-	{
-		LeafField  *leafField = lfirst(lc);
-
-		if (leafField->fieldId == fieldId)
-		{
-			return leafField;
-		}
-	}
-
-	return NULL;
 }
 
 

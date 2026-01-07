@@ -65,3 +65,4 @@ extern PGDLLEXPORT List *GetDataFileStatsListFromPGResult(PGresult *result,
 														  List *leafFields,
 														  DataFileSchema * schema,
 														  int64 *totalRowCount);
+extern PGDLLEXPORT LeafField *FindLeafField(List *leafFieldList, int fieldId);
