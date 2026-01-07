@@ -17,9 +17,8 @@
 
 #include "postgres.h"
 #include "pg_lake/data_file/data_files.h"
+#include "pg_lake/parquet/leaf_field.h"
 #include "pg_lake/util/string_utils.h"
-
-static LeafField DeepCopyLeafField(const LeafField * leafField);
 
 /*
  * AddDataFileOperation creates a TableMetadataOperation for adding a new data
@@ -148,22 +147,4 @@ DeepCopyDataFileStats(const DataFileStats * stats)
 	}
 
 	return copiedStats;
-}
-
-
-/*
- * DeepCopyLeafField deep copies a LeafField.
- */
-static LeafField
-DeepCopyLeafField(const LeafField * leafField)
-{
-	LeafField  *copiedLeafField = palloc0(sizeof(LeafField));
-
-	copiedLeafField->fieldId = leafField->fieldId;
-	copiedLeafField->field = DeepCopyField(leafField->field);
-	copiedLeafField->duckTypeName = pstrdup(leafField->duckTypeName);
-	copiedLeafField->level = leafField->level;
-	copiedLeafField->pgType = leafField->pgType;
-
-	return *copiedLeafField;
 }

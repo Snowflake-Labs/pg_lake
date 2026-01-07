@@ -21,6 +21,7 @@
 #include "libpq-fe.h"
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/parquet/field.h"
+#include "pg_lake/parquet/leaf_field.h"
 #include "nodes/pg_list.h"
 
 /* pg_lake_table.target_row_group_size_mb */
