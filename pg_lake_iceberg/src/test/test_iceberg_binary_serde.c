@@ -24,6 +24,7 @@
 #include "pg_lake/iceberg/iceberg_type_binary_serde.h"
 #include "pg_lake/parquet/leaf_field.h"
 #include "pg_lake/pgduck/type.h"
+#include "pg_lake/pgduck/write_data.h"
 #include "pg_lake/util/numeric.h"
 
 #include "utils/builtins.h"

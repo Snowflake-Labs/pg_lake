@@ -66,3 +66,5 @@ extern PGDLLEXPORT List *GetDataFileStatsListFromPGResult(PGresult *result,
 														  DataFileSchema * schema,
 														  int64 *totalRowCount);
 extern PGDLLEXPORT LeafField *FindLeafField(List *leafFieldList, int fieldId);
+extern PGDLLEXPORT bool ShouldSkipStatistics(LeafField * leafField);
+extern PGDLLEXPORT bool PGTypeRequiresConversionToIcebergString(Field * field, PGType pgType);

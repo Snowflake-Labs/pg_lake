@@ -59,7 +59,6 @@ static void ExtractMinMaxForColumn(Datum map, const char *colName, List **names,
 static char *UnescapeDoubleQuotes(const char *s);
 static List *GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields, DataFileSchema * schema);
 static int FindIndexInStringList(List *names, const char *targetName);
-static bool ShouldSkipStatisticsForField(LeafField * leafField);
 
 static DuckDBTypeInfo VARCHAR_TYPE =
 {
@@ -734,7 +733,7 @@ GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields
 			ereport(DEBUG3, (errmsg("leaf field with id %d not found in leaf fields, skipping", fieldId)));
 			continue;
 		}
-		else if(ShouldSkipStatisticsForField(leafField))
+		else if(ShouldSkipStatistics(leafField))
 		{
 			ereport(DEBUG3, (errmsg("skipping statistics for field with id %d", fieldId)));
 			continue;
@@ -793,43 +792,82 @@ FindIndexInStringList(List *names, const char *targetName)
 
 
 /*
- * ShouldSkipStatisticsForField determines whether statistics should be
- * skipped for the given leaf field.
- */
-static bool
-ShouldSkipStatisticsForField(LeafField * leafField)
+* ShouldSkipStatistics returns true if the statistics should be skipped for the
+* given leaf field.
+*/
+bool
+ShouldSkipStatistics(LeafField * leafField)
 {
 	Field	   *field = leafField->field;
 	PGType		pgType = leafField->pgType;
 
 	Oid			pgTypeOid = pgType.postgresTypeOid;
 
-	if (IsGeometryTypeId(pgType.postgresTypeOid))
+	if (PGTypeRequiresConversionToIcebergString(field, pgType))
 	{
-		return true;
-	}
-	else if (strcmp(field->field.scalar.typeName, "string") == 0 &&
-			 pgType.postgresTypeOid != TEXTOID &&
-			 pgTypeOid != VARCHAROID &&
-			 pgTypeOid != BPCHAROID &&
-			 pgTypeOid != CHAROID)
-	{
-		return true;
+		if (!(pgTypeOid == VARCHAROID || pgTypeOid == BPCHAROID ||
+			  pgTypeOid == CHAROID))
+		{
+			/*
+			 * Although there are no direct equivalents of these types on
+			 * Iceberg, it is pretty safe to support pruning on these types.
+			 */
+			return true;
+		}
 	}
 	else if (pgTypeOid == BYTEAOID)
 	{
+		/*
+		 * parquet_metadata function sometimes returns a varchar repr of blob,
+		 * which cannot be properly deserialized by Postgres. (when there is
+		 * "\" or nonprintable chars in the blob ) See issue Old repo:
+		 * issues/957
+		 */
 		return true;
 	}
 	else if (pgTypeOid == UUIDOID)
 	{
+		/*
+		 * DuckDB does not keep statistics for UUID type. We should skip
+		 * statistics for UUID type.
+		 */
 		return true;
 	}
 	else if (leafField->level != 1)
 	{
+		/*
+		 * We currently do not support pruning on array, map, and composite
+		 * types. So there's no need to collect stats for them.
+		 */
 		return true;
 	}
 
 	return false;
+}
+
+
+/*
+ * PGTypeRequiresConversionToIcebergString returns true if the given Postgres type
+ * requires conversion to Iceberg string.
+ * Some of the Postgres types cannot be directly mapped to an Iceberg type.
+ * e.g. custom types like hstore
+ */
+bool
+PGTypeRequiresConversionToIcebergString(Field * field, PGType pgType)
+{
+	/*
+	 * We treat geometry as binary within the Iceberg schema, which is encoded
+	 * as a hexadecimal string according to the spec. As it happens, the
+	 * Postgres output function of geometry produces a hexadecimal WKB string,
+	 * so we can use the regular text output function to convert to an Iceberg
+	 * value.
+	 */
+	if (IsGeometryTypeId(pgType.postgresTypeOid))
+	{
+		return true;
+	}
+
+	return strcmp(field->field.scalar.typeName, "string") == 0 && pgType.postgresTypeOid != TEXTOID;
 }
 
 
