@@ -53,10 +53,10 @@ static DuckDBTypeInfo ChooseDuckDBEngineTypeForWrite(PGType postgresType,
 													 CopyDataFormat destinationFormat);
 static void AppendFieldIdValue(StringInfo map, Field * field, int fieldId);
 static const char *ParquetVersionToString(ParquetVersion version);
-static void ParseDuckdbColumnMinMaxFromText(const char *input, List **names, List **mins, List **maxs);
+static void ParseDuckdbColumnMinMaxFromText(char *input, List **names, List **mins, List **maxs);
 static void ExtractMinMaxForAllColumns(Datum map, List **names, List **mins, List **maxs);
 static void ExtractMinMaxForColumn(Datum map, const char *colName, List **names, List **mins, List **maxs);
-static char *UnescapeDoubleQuotes(const char *s);
+static const char *UnescapeDoubleQuotes(const char *s);
 static List *GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields, DataFileSchema * schema);
 static int FindIndexInStringList(List *names, const char *targetName);
 
@@ -575,7 +575,7 @@ ExtractMinMaxForColumn(Datum map, const char *colName, List **names, List **mins
  * UnescapeDoubleQuotes unescapes any doubled quotes.
  * e.g. "ab\"\"cd\"\"ee" becomes "ab\"cd\"ee"
  */
-static char *
+static const char *
 UnescapeDoubleQuotes(const char *s)
 {
 	if (s == NULL)
@@ -656,7 +656,7 @@ ExtractMinMaxForAllColumns(Datum map, List **names, List **mins, List **maxs)
 		 * pg_map text key is escaped for double quotes. We need to unescape
 		 * them.
 		 */
-		char	   *unescapedColName = UnescapeDoubleQuotes(colName);
+		const char *unescapedColName = UnescapeDoubleQuotes(colName);
 
 		ExtractMinMaxForColumn(colStatsDatum, unescapedColName, names, mins, maxs);
 	}
@@ -674,7 +674,7 @@ ExtractMinMaxForAllColumns(Datum map, List **names, List **mins, List **maxs)
  * 		}
  */
 static void
-ParseDuckdbColumnMinMaxFromText(const char *input, List **names, List **mins, List **maxs)
+ParseDuckdbColumnMinMaxFromText(char *input, List **names, List **mins, List **maxs)
 {
 	/*
 	 * e.g. { 'id_col' => {'min' => '12', 'max' => 23, ...}, 'name_col' =>
@@ -692,7 +692,7 @@ ParseDuckdbColumnMinMaxFromText(const char *input, List **names, List **mins, Li
 
 	getTypeInputInfo(returnStatsMapId, &typinput, &typioparam);
 
-	Datum		statsMapDatum = OidInputFunctionCall(typinput, pstrdup(input), typioparam, -1);
+	Datum		statsMapDatum = OidInputFunctionCall(typinput, input, typioparam, -1);
 
 	/*
 	 * extract min and max for each column: iterate the underlying map datum
