@@ -760,8 +760,11 @@ GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields
 LeafField *
 FindLeafField(List *leafFieldList, int fieldId)
 {
-	foreach_ptr(LeafField, leafField, leafFieldList)
+	ListCell   *cell = NULL;
+	foreach(cell, leafFieldList)
 	{
+		LeafField  *leafField = (LeafField *) lfirst(cell);
+
 		if (leafField->fieldId == fieldId)
 		{
 			return leafField;
