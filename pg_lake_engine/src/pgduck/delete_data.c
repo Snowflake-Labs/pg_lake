@@ -98,7 +98,7 @@ PerformDeleteFromParquet(char *sourcePath,
 	appendStringInfoString(&command, ")");
 
 	PGDuckConnection *pgDuckConn = GetPGDuckConnection();
-	ColumnStatsCollector *result = NULL;
+	ColumnStatsCollector *statsCollector = NULL;
 
 	PG_TRY();
 	{
@@ -106,7 +106,7 @@ PerformDeleteFromParquet(char *sourcePath,
 
 		CheckPGDuckResult(pgDuckConn, result);
 
-		result = GetDataFileStatsListFromPGResult(result, leafFields, schema);
+		statsCollector = GetDataFileStatsListFromPGResult(result, leafFields, schema);
 
 		PQclear(result);
 	}
@@ -116,7 +116,7 @@ PerformDeleteFromParquet(char *sourcePath,
 	}
 	PG_END_TRY();
 
-	return result;
+	return statsCollector;
 }
 
 

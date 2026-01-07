@@ -455,7 +455,7 @@ WriteQueryResultTo(char *query,
  * GetDataFileStatsListFromPGResult extracts DataFileStats list from the
  * given PGresult of COPY .. TO ... WITH (return_stats).
  *
- * It also returns the total row count via totalRowCount output parameter.
+ * It returns the collector object that contains the total row count and data file statistics.
  */
 ColumnStatsCollector *
 GetDataFileStatsListFromPGResult(PGresult *result, List *leafFields, DataFileSchema * schema)
