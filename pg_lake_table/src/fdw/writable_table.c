@@ -259,26 +259,21 @@ PrepareCSVInsertion(Oid relationId, char *insertCSV, int64 rowCount,
 
 	InsertInProgressFileRecordExtended(dataFilePrefix, isPrefix, deferDeletion);
 
-	List	   *dataFileStats = NIL;
 	List	   *leafFields = GetLeafFieldsForTable(relationId);
-	ColumnStatsCollector columnStatsCollector = (ColumnStatsCollector)
-	{
-		.leafFields = leafFields,
-		.dataFileStats = &dataFileStats
-	};
 
 	/* convert insert file to a new file in table format */
-	ConvertCSVFileTo(insertCSV,
-					 tupleDescriptor,
-					 maximumLineSize,
-					 dataFilePrefix,
-					 format,
-					 compression,
-					 options,
-					 schema,
-					 &columnStatsCollector);
+	ColumnStatsCollector *statsCollector =
+		ConvertCSVFileTo(insertCSV,
+						 tupleDescriptor,
+						 maximumLineSize,
+						 dataFilePrefix,
+						 format,
+						 compression,
+						 options,
+						 schema,
+						 leafFields);
 
-	ApplyColumnStatsModeForAllFileStats(relationId, dataFileStats);
+	ApplyColumnStatsModeForAllFileStats(relationId, statsCollector->dataFileStats);
 
 	if (!splitFilesBySize)
 	{
@@ -298,13 +293,13 @@ PrepareCSVInsertion(Oid relationId, char *insertCSV, int64 rowCount,
 	 * files from in-progress
 	 */
 	if (isPrefix && deferDeletion)
-		ReplaceInProgressPrefixPathWithFullPaths(dataFilePrefix, GetDataFilePathsFromStatsList(dataFileStats));
+		ReplaceInProgressPrefixPathWithFullPaths(dataFilePrefix, GetDataFilePathsFromStatsList(statsCollector->dataFileStats));
 
 	/* build a DataFileModification for each new data file */
 	List	   *modifications = NIL;
 	ListCell   *dataFileStatsCell = NULL;
 
-	foreach(dataFileStatsCell, dataFileStats)
+	foreach(dataFileStatsCell, statsCollector->dataFileStats)
 	{
 		DataFileStats *stats = lfirst(dataFileStatsCell);
 
@@ -532,18 +527,12 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 
 			ReadDataStats stats = {sourceRowCount, existingDeletedRowCount};
 
-			List	   *dataFileStats = NIL;
 			List	   *leafFields = GetLeafFieldsForTable(relationId);
-			ColumnStatsCollector columnStatsCollector = (ColumnStatsCollector)
-			{
-				.leafFields = leafFields,
-				.dataFileStats = &dataFileStats
-			};
-			PerformDeleteFromParquet(sourcePath, existingPositionDeletes,
-									 deleteFile, newDataFilePath, compression,
-									 schema, &stats, &columnStatsCollector);
+			ColumnStatsCollector *statsCollector = PerformDeleteFromParquet(sourcePath, existingPositionDeletes,
+																			deleteFile, newDataFilePath, compression,
+																			schema, &stats, leafFields);
 
-			ApplyColumnStatsModeForAllFileStats(relationId, *columnStatsCollector.dataFileStats);
+			ApplyColumnStatsModeForAllFileStats(relationId, statsCollector->dataFileStats);
 
 			int64		newRowCount = liveRowCount - deletedRowCount;
 
@@ -559,7 +548,7 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 			Partition  *partition = GetDataFilePartition(relationId, transforms, sourcePath,
 														 &partitionSpecId);
 
-			List *newFileStatsList = *columnStatsCollector.dataFileStats;
+			List *newFileStatsList = statsCollector->dataFileStats;
 			Assert(newFileStatsList != NIL);
 
 			/*
@@ -599,7 +588,7 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 
 			/* write the deletion file */
 			ConvertCSVFileTo(deleteFile, deleteTupleDesc, -1, deletionFilePath,
-							 DATA_FORMAT_PARQUET, compression, copyOptions, schema, NULL);
+							 DATA_FORMAT_PARQUET, compression, copyOptions, schema, NIL);
 
 			ereport(WriteLogLevel, (errmsg("adding deletion file %s with " INT64_FORMAT " rows ",
 										   deletionFilePath, deletedRowCount)));
@@ -999,14 +988,8 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 	InsertInProgressFileRecordExtended(newDataFilePath, isPrefix, deferDeletion);
 
 	/* perform compaction */
-	List	   *dataFileStats = NIL;
 	List	   *leafFields = GetLeafFieldsForTable(relationId);
-	ColumnStatsCollector columnStatsCollector = (ColumnStatsCollector)
-	{
-		.leafFields = leafFields,
-		.dataFileStats = &dataFileStats
-	};
-	int64		rowCount =
+	ColumnStatsCollector *statsCollector =
 		WriteQueryResultTo(readQuery,
 						   newDataFilePath,
 						   properties.format,
@@ -1015,9 +998,9 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 						   queryHasRowId,
 						   schema,
 						   queryTupleDesc,
-						   &columnStatsCollector);
+						   leafFields);
 
-	if (rowCount == 0)
+	if (statsCollector->totalRowCount == 0)
 	{
 		TimestampTz orphanedAt = GetCurrentTransactionStartTimestamp();
 
@@ -1028,14 +1011,14 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 		return NIL;
 	}
 
-	ApplyColumnStatsModeForAllFileStats(relationId, dataFileStats);
+	ApplyColumnStatsModeForAllFileStats(relationId, statsCollector->dataFileStats);
 
 	/* find which files were generated */
 	List	   *newFiles = NIL;
-	List	   *newFileOps = GetNewFileOpsFromFileStats(relationId, dataFileStats,
-													partitionSpecId, partition,
-													rowCount,
-													isVerbose, &newFiles);
+	List	   *newFileOps = GetNewFileOpsFromFileStats(relationId, statsCollector->dataFileStats,
+														partitionSpecId, partition,
+														statsCollector->totalRowCount,
+														isVerbose, &newFiles);
 
 	/*
 	 * when we defer deletion of in-progress files, we need to replace the

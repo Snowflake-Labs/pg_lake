@@ -36,36 +36,35 @@ typedef enum ParquetVersion
 
 typedef struct ColumnStatsCollector
 {
-	List *leafFields;
-	List **dataFileStats;
+	int64 totalRowCount;
+	List *dataFileStats;
 } ColumnStatsCollector;
 
 /* pg_lake_table.default_parquet_version */
 extern PGDLLEXPORT int DefaultParquetVersion;
 
-extern PGDLLEXPORT void ConvertCSVFileTo(char *csvFilePath,
-										 TupleDesc tupleDesc,
-										 int maxLineSize,
-										 char *destinationPath,
-										 CopyDataFormat destinationFormat,
-										 CopyDataCompression destinationCompression,
-										 List *formatOptions,
-										 DataFileSchema * schema,
-										 ColumnStatsCollector * statsCollector);
-extern PGDLLEXPORT int64 WriteQueryResultTo(char *query,
-											char *destinationPath,
-											CopyDataFormat destinationFormat,
-											CopyDataCompression destinationCompression,
-											List *formatOptions,
-											bool queryHasRowId,
-											DataFileSchema * schema,
-											TupleDesc queryTupleDesc,
-											ColumnStatsCollector * statsCollector);
-extern PGDLLEXPORT void AppendFields(StringInfo map, DataFileSchema * schema);
-extern PGDLLEXPORT List *GetDataFileStatsListFromPGResult(PGresult *result,
-														  List *leafFields,
+extern PGDLLEXPORT ColumnStatsCollector *ConvertCSVFileTo(char *csvFilePath,
+														  TupleDesc tupleDesc,
+														  int maxLineSize,
+														  char *destinationPath,
+														  CopyDataFormat destinationFormat,
+														  CopyDataCompression destinationCompression,
+														  List *formatOptions,
 														  DataFileSchema * schema,
-														  int64 *totalRowCount);
+														  List *leafFields);
+extern PGDLLEXPORT ColumnStatsCollector *WriteQueryResultTo(char *query,
+															char *destinationPath,
+															CopyDataFormat destinationFormat,
+															CopyDataCompression destinationCompression,
+															List *formatOptions,
+															bool queryHasRowId,
+															DataFileSchema * schema,
+															TupleDesc queryTupleDesc,
+															List *leafFields);
+extern PGDLLEXPORT void AppendFields(StringInfo map, DataFileSchema * schema);
+extern PGDLLEXPORT ColumnStatsCollector *GetDataFileStatsListFromPGResult(PGresult *result,
+																		  List *leafFields,
+																		  DataFileSchema * schema);
 extern PGDLLEXPORT LeafField *FindLeafField(List *leafFieldList, int fieldId);
 extern PGDLLEXPORT bool ShouldSkipStatistics(LeafField * leafField);
 extern PGDLLEXPORT bool PGTypeRequiresConversionToIcebergString(Field * field, PGType pgType);

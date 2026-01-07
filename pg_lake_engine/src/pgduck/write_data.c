@@ -74,14 +74,14 @@ int			DefaultParquetVersion = PARQUET_VERSION_V1;
  *
  * The CSV was generated using COPY ... TO '<csvFilePath>'
  */
-void
+ColumnStatsCollector *
 ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 				 char *destinationPath,
 				 CopyDataFormat destinationFormat,
 				 CopyDataCompression destinationCompression,
 				 List *formatOptions,
 				 DataFileSchema * schema,
-				 ColumnStatsCollector * statsCollector)
+				 List *leafFields)
 {
 	StringInfoData command;
 
@@ -144,15 +144,15 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 
 	bool		queryHasRowIds = false;
 
-	WriteQueryResultTo(command.data,
-					   destinationPath,
-					   destinationFormat,
-					   destinationCompression,
-					   formatOptions,
-					   queryHasRowIds,
-					   schema,
-					   csvTupleDesc,
-					   statsCollector);
+	return WriteQueryResultTo(command.data,
+							  destinationPath,
+							  destinationFormat,
+							  destinationCompression,
+							  formatOptions,
+							  queryHasRowIds,
+							  schema,
+							  csvTupleDesc,
+							  leafFields);
 }
 
 
@@ -161,7 +161,7 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
  * destinationPath. There may be multiple files if file_size_bytes
  * is specified in formatOptions.
  */
-int64
+ColumnStatsCollector *
 WriteQueryResultTo(char *query,
 				   char *destinationPath,
 				   CopyDataFormat destinationFormat,
@@ -170,7 +170,7 @@ WriteQueryResultTo(char *query,
 				   bool queryHasRowId,
 				   DataFileSchema * schema,
 				   TupleDesc queryTupleDesc,
-				   ColumnStatsCollector * statsCollector)
+				   List *leafFields)
 {
 	StringInfoData command;
 
@@ -403,9 +403,9 @@ WriteQueryResultTo(char *query,
 	appendStringInfoString(&command, ")");
 
 	PGDuckConnection *pgDuckConn = GetPGDuckConnection();
-	int64		rowsAffected = -1;
 	PGresult   *result;
 	bool		disablePreserveInsertionOrder = TargetRowGroupSizeMB > 0;
+	ColumnStatsCollector *statsCollector = NULL;
 
 	PG_TRY();
 	{
@@ -419,16 +419,17 @@ WriteQueryResultTo(char *query,
 		result = ExecuteQueryOnPGDuckConnection(pgDuckConn, command.data);
 		CheckPGDuckResult(pgDuckConn, result);
 
-		if (destinationFormat == DATA_FORMAT_PARQUET && statsCollector != NULL && statsCollector->dataFileStats != NULL)
+		if (destinationFormat == DATA_FORMAT_PARQUET && leafFields != NIL)
 		{
 			/* DuckDB returns COPY 0 when return_stats is used. */
-			*statsCollector->dataFileStats = GetDataFileStatsListFromPGResult(result, statsCollector->leafFields, schema, &rowsAffected);
+			statsCollector = GetDataFileStatsListFromPGResult(result, leafFields, schema);
 		}
 		else
 		{
 			char	   *commandTuples = PQcmdTuples(result);
-
-			rowsAffected = atol(commandTuples);
+			statsCollector = palloc0(sizeof(ColumnStatsCollector));
+			statsCollector->totalRowCount = atoll(commandTuples);
+			statsCollector->dataFileStats = NIL;
 		}
 
 		PQclear(result);
@@ -446,7 +447,7 @@ WriteQueryResultTo(char *query,
 	}
 	PG_END_TRY();
 
-	return rowsAffected;
+	return statsCollector;
 }
 
 
@@ -456,15 +457,14 @@ WriteQueryResultTo(char *query,
  *
  * It also returns the total row count via totalRowCount output parameter.
  */
-List *
-GetDataFileStatsListFromPGResult(PGresult *result, List *leafFields, DataFileSchema * schema, int64 *totalRowCount)
+ColumnStatsCollector *
+GetDataFileStatsListFromPGResult(PGresult *result, List *leafFields, DataFileSchema * schema)
 {
 	List	   *statsList = NIL;
 
 	int			resultRowCount = PQntuples(result);
 	int			resultColumnCount = PQnfields(result);
-
-	*totalRowCount = 0;
+	int64 totalRowCount = 0;
 
 	for (int resultRowIndex = 0; resultRowIndex < resultRowCount; resultRowIndex++)
 	{
@@ -491,7 +491,7 @@ GetDataFileStatsListFromPGResult(PGresult *result, List *leafFields, DataFileSch
 			else if (strcmp(resultColName, "count") == 0)
 			{
 				fileStats->rowCount = atoll(resultValue);
-				*totalRowCount += fileStats->rowCount;
+				totalRowCount += fileStats->rowCount;
 			}
 			else if (strcmp(resultColName, "filename") == 0)
 			{
@@ -502,7 +502,11 @@ GetDataFileStatsListFromPGResult(PGresult *result, List *leafFields, DataFileSch
 		statsList = lappend(statsList, fileStats);
 	}
 
-	return statsList;
+	ColumnStatsCollector *statsResult = palloc0(sizeof(ColumnStatsCollector));
+	statsResult->totalRowCount = totalRowCount;
+	statsResult->dataFileStats = statsList;
+
+	return statsResult;
 }
 
 
