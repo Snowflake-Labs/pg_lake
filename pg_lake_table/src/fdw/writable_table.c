@@ -559,10 +559,18 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 			Partition  *partition = GetDataFilePartition(relationId, transforms, sourcePath,
 														 &partitionSpecId);
 
-			Assert(*columnStatsCollector.dataFileStats != NIL);
+			List *newFileStatsList = *columnStatsCollector.dataFileStats;
+			Assert(newFileStatsList != NIL);
+
+			/*
+			 * while deleting from parquet, we do not add file_size_bytes option to COPY command,
+			 * so we can assume that we'll have only a single file. 
+			 */
+			DataFileStats *newFileStats = linitial(newFileStatsList);
+
 			/* store the new file in the metadata */
 			TableMetadataOperation *addOperation =
-				AddDataFileOperation(newDataFilePath, CONTENT_DATA, linitial(*columnStatsCollector.dataFileStats), partition, partitionSpecId);
+				AddDataFileOperation(newDataFilePath, CONTENT_DATA, newFileStats, partition, partitionSpecId);
 
 			metadataOperations = lappend(metadataOperations, addOperation);
 		}
