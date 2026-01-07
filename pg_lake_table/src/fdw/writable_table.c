@@ -543,7 +543,7 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 									 deleteFile, newDataFilePath, compression,
 									 schema, &stats, &columnStatsCollector);
 
-			ApplyColumnStatsModeForAllFileStats(relationId, columnStatsCollector.dataFileStats);
+			ApplyColumnStatsModeForAllFileStats(relationId, *(columnStatsCollector.dataFileStats));
 
 			int64		newRowCount = liveRowCount - deletedRowCount;
 
@@ -562,7 +562,7 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 			Assert(columnStatsCollector.dataFileStats != NIL);
 			/* store the new file in the metadata */
 			TableMetadataOperation *addOperation =
-				AddDataFileOperation(newDataFilePath, CONTENT_DATA, linitial(columnStatsCollector.dataFileStats), partition, partitionSpecId);
+				AddDataFileOperation(newDataFilePath, CONTENT_DATA, linitial(*(columnStatsCollector.dataFileStats)), partition, partitionSpecId);
 
 			metadataOperations = lappend(metadataOperations, addOperation);
 		}

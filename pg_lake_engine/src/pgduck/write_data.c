@@ -839,8 +839,10 @@ ShouldSkipStatistics(LeafField * leafField)
 	else if (leafField->level != 1)
 	{
 		/*
-		 * We currently do not support pruning on array, map, and composite
-		 * types. So there's no need to collect stats for them.
+		 * We currently do not support pruning on array, map and composite
+		 * types. So there's no need to collect stats for them. Note that
+		 * in the past we did collect, and have some tests commented out,
+		 * such as skippedtest_pg_lake_iceberg_table_complex_values.
 		 */
 		return true;
 	}
