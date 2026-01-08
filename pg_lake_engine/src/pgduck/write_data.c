@@ -402,9 +402,28 @@ WriteQueryResultTo(char *query,
 	/* end WITH options */
 	appendStringInfoString(&command, ")");
 
+	bool		disablePreserveInsertionOrder = TargetRowGroupSizeMB > 0;
+	return ExecuteCopyCommandOnPGDuckConnection(command.data,
+												leafFields,
+												schema,
+												disablePreserveInsertionOrder,
+												destinationFormat);
+}
+
+
+/*
+ * ExecuteCopyCommandOnPGDuckConnection executes the given COPY command on
+ * a PGDuck connection and returns a ColumnStatsCollector.
+ */
+ColumnStatsCollector *
+ExecuteCopyCommandOnPGDuckConnection(char *copyCommand,
+									 List *leafFields,
+									 DataFileSchema * schema,
+									 bool disablePreserveInsertionOrder,
+									 CopyDataFormat destinationFormat)
+{
 	PGDuckConnection *pgDuckConn = GetPGDuckConnection();
 	PGresult   *result;
-	bool		disablePreserveInsertionOrder = TargetRowGroupSizeMB > 0;
 	ColumnStatsCollector *statsCollector = NULL;
 
 	PG_TRY();
@@ -416,7 +435,7 @@ WriteQueryResultTo(char *query,
 			PQclear(result);
 		}
 
-		result = ExecuteQueryOnPGDuckConnection(pgDuckConn, command.data);
+		result = ExecuteQueryOnPGDuckConnection(pgDuckConn, copyCommand);
 		CheckPGDuckResult(pgDuckConn, result);
 
 		if (destinationFormat == DATA_FORMAT_PARQUET)

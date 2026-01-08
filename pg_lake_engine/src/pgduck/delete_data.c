@@ -97,26 +97,11 @@ PerformDeleteFromParquet(char *sourcePath,
 	/* end WITH options */
 	appendStringInfoString(&command, ")");
 
-	PGDuckConnection *pgDuckConn = GetPGDuckConnection();
-	ColumnStatsCollector *statsCollector = NULL;
-
-	PG_TRY();
-	{
-		PGresult   *result = ExecuteQueryOnPGDuckConnection(pgDuckConn, command.data);
-
-		CheckPGDuckResult(pgDuckConn, result);
-
-		statsCollector = GetDataFileStatsListFromPGResult(result, leafFields, schema);
-
-		PQclear(result);
-	}
-	PG_FINALLY();
-	{
-		ReleasePGDuckConnection(pgDuckConn);
-	}
-	PG_END_TRY();
-
-	return statsCollector;
+	return ExecuteCopyCommandOnPGDuckConnection(command.data,
+												leafFields,
+												schema,
+												false,
+												DATA_FORMAT_PARQUET);
 }
 
 

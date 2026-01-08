@@ -65,6 +65,11 @@ extern PGDLLEXPORT void AppendFields(StringInfo map, DataFileSchema * schema);
 extern PGDLLEXPORT ColumnStatsCollector *GetDataFileStatsListFromPGResult(PGresult *result,
 																		  List *leafFields,
 																		  DataFileSchema * schema);
+extern PGDLLEXPORT ColumnStatsCollector *ExecuteCopyCommandOnPGDuckConnection(char *copyCommand,
+																			  List *leafFields,
+																			  DataFileSchema * schema,
+																			  bool disablePreserveInsertionOrder,
+																			  CopyDataFormat destinationFormat);
 extern PGDLLEXPORT LeafField *FindLeafField(List *leafFieldList, int fieldId);
 extern PGDLLEXPORT bool ShouldSkipStatistics(LeafField * leafField);
 extern PGDLLEXPORT bool PGTypeRequiresConversionToIcebergString(Field * field, PGType pgType);
