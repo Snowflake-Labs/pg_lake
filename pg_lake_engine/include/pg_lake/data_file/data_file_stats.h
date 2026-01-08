@@ -18,10 +18,12 @@
 #pragma once
 
 #include "postgres.h"
+#include "libpq-fe.h"
 #include "nodes/pg_list.h"
 #include "datatype/timestamp.h"
 
 #include "pg_lake/parquet/leaf_field.h"
+
 
  /*
   * DataFileColumnStats stores column statistics for a data file.
@@ -64,4 +66,36 @@ typedef struct DataFileStats
 	int64		rowIdStart;
 }			DataFileStats;
 
+/*
+ * ColumnStatsMode describes the mode of column stats.
+ * - When truncate mode (default) is used, the column stats are truncated
+ *   to the given length.
+ * - When none mode is used, the column stats are not collected.
+ */
+typedef enum ColumnStatsMode
+{
+	COLUMN_STATS_MODE_TRUNCATE = 0,
+	COLUMN_STATS_MODE_NONE = 1,
+}			ColumnStatsMode;
+
+/*
+ * ColumnStatsConfig describes the configuration for column stats.
+ * - mode: the mode of column stats.
+ * - truncateLen: the length to truncate the column stats in truncate mode.
+ */
+typedef struct ColumnStatsConfig
+{
+	ColumnStatsMode mode;
+
+	/* used for truncate mode */
+	size_t		truncateLen;
+}			ColumnStatsConfig;
+
 extern PGDLLEXPORT DataFileStats * DeepCopyDataFileStats(const DataFileStats * stats);
+extern PGDLLEXPORT List *GetDataFileStatsFromCopyWithReturnStatsResult(PGresult *result,
+																	   List *leafFields,
+																	   DataFileSchema * schema,
+																	   int64 *totalRowCount);
+extern PGDLLEXPORT void ApplyColumnStatsMode(ColumnStatsConfig columnStatsConfig, List *dataFileStats);
+extern PGDLLEXPORT ColumnStatsConfig * GetColumnStatsConfig(Oid relationId);
+extern PGDLLEXPORT bool ShouldSkipStatistics(LeafField * leafField);

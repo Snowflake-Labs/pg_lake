@@ -27,14 +27,12 @@
 #include "commands/sequence.h"
 #include "pg_lake/csv/csv_options.h"
 #include "pg_lake/data_file/data_files.h"
-#include "pg_lake/data_file/data_file_stats.h"
+#include "pg_lake/data_file/remote_data_file_stats.h"
 #include "pg_lake/extensions/pg_lake_table.h"
 #include "pg_lake/extensions/extension_ids.h"
 #include "pg_lake/extensions/pg_lake_engine.h"
 #include "pg_lake/fdw/catalog/row_id_mappings.h"
-#include "pg_lake/fdw/data_file_stats.h"
 #include "pg_lake/fdw/data_files_catalog.h"
-#include "pg_lake/fdw/data_file_stats.h"
 #include "pg_lake/fdw/data_file_stats_catalog.h"
 #include "pg_lake/fdw/schema_operations/field_id_mapping_catalog.h"
 #include "pg_lake/fdw/writable_table.h"
@@ -96,7 +94,9 @@ static bool ColumnStatAlreadyAdded(List *columnStats, int64 fieldId);
 static bool PartitionFieldAlreadyAdded(Partition * partition, int64 fieldId);
 static void CreateTxDataFileIdsTempTableIfNotExists(void);
 static void InsertDataFileIdIntoTransactionTable(int64 fileId);
-
+static DataFileColumnStats * CreateDataFileColumnStats(int fieldId, PGType pgType,
+													   char *lowerBoundText,
+													   char *upperBoundText);
 
 /*
  * GetTableDataFilesFromCatalog returns a list of TableDataFile for each data and deletion file
@@ -1364,4 +1364,35 @@ AddDataFilePartitionValueToCatalog(Oid relationId, int32 partitionSpecId, int64 
 	SPI_END();
 
 	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
+}
+
+
+/*
+ * CreateDataFileColumnStats creates a new DataFileColumnStats from the given
+ * parameters.
+ */
+DataFileColumnStats *
+CreateDataFileColumnStats(int fieldId, PGType pgType, char *lowerBoundText, char *upperBoundText)
+{
+	DataFileColumnStats *columnStats = palloc0(sizeof(DataFileColumnStats));
+
+	columnStats->leafField.fieldId = fieldId;
+	columnStats->lowerBoundText = lowerBoundText;
+	columnStats->upperBoundText = upperBoundText;
+	columnStats->leafField.pgType = pgType;
+
+	bool		forAddColumn = false;
+	int			subFieldIndex = fieldId;
+
+	Field	   *field = PostgresTypeToIcebergField(pgType, forAddColumn, &subFieldIndex);
+
+	Assert(field->type == FIELD_TYPE_SCALAR);
+
+	columnStats->leafField.field = field;
+
+	const char *duckTypeName = IcebergTypeNameToDuckdbTypeName(field->field.scalar.typeName);
+
+	columnStats->leafField.duckTypeName = duckTypeName;
+
+	return columnStats;
 }

@@ -28,7 +28,7 @@
 #include "executor/executor.h"
 #include "pg_lake/csv/csv_options.h"
 #include "pg_lake/copy/copy_format.h"
-#include "pg_lake/data_file/data_file_stats.h"
+#include "pg_lake/data_file/remote_data_file_stats.h"
 #include "pg_lake/extensions/pg_map.h"
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/parquet/field.h"
@@ -38,6 +38,7 @@
 #include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/pgduck/read_data.h"
+#include "pg_lake/pgduck/remote_storage.h"
 #include "pg_lake/pgduck/type.h"
 #include "pg_lake/pgduck/write_data.h"
 #include "pg_lake/util/numeric.h"
@@ -53,12 +54,6 @@ static DuckDBTypeInfo ChooseDuckDBEngineTypeForWrite(PGType postgresType,
 													 CopyDataFormat destinationFormat);
 static void AppendFieldIdValue(StringInfo map, Field * field, int fieldId);
 static const char *ParquetVersionToString(ParquetVersion version);
-static void ParseDuckdbColumnMinMaxFromText(char *input, List **names, List **mins, List **maxs);
-static void ExtractMinMaxForAllColumns(Datum map, List **names, List **mins, List **maxs);
-static void ExtractMinMaxForColumn(Datum map, const char *colName, List **names, List **mins, List **maxs);
-static const char *UnescapeDoubleQuotes(const char *s);
-static List *GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields, DataFileSchema * schema);
-static int FindIndexInStringList(List *names, const char *targetName);
 
 static DuckDBTypeInfo VARCHAR_TYPE =
 {
@@ -81,7 +76,8 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 				 CopyDataCompression destinationCompression,
 				 List *formatOptions,
 				 DataFileSchema * schema,
-				 List *leafFields)
+				 List *leafFields,
+				 ColumnStatsConfig * columnStatsConfig)
 {
 	StringInfoData command;
 
@@ -152,7 +148,8 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 							  queryHasRowIds,
 							  schema,
 							  csvTupleDesc,
-							  leafFields);
+							  leafFields,
+							  columnStatsConfig);
 }
 
 
@@ -170,7 +167,8 @@ WriteQueryResultTo(char *query,
 				   bool queryHasRowId,
 				   DataFileSchema * schema,
 				   TupleDesc queryTupleDesc,
-				   List *leafFields)
+				   List *leafFields,
+				   ColumnStatsConfig * columnStatsConfig)
 {
 	StringInfoData command;
 
@@ -402,32 +400,41 @@ WriteQueryResultTo(char *query,
 	/* end WITH options */
 	appendStringInfoString(&command, ")");
 
-	bool		disablePreserveInsertionOrder = TargetRowGroupSizeMB > 0;
-	return ExecuteCopyCommandOnPGDuckConnection(command.data,
-												leafFields,
-												schema,
-												disablePreserveInsertionOrder,
-												destinationFormat);
+	ColumnStatsCollector *statsCollector = ExecuteCopyToCommand(&command,
+																destinationPath,
+																destinationFormat,
+																destinationCompression,
+																formatOptions,
+																schema,
+																leafFields,
+																columnStatsConfig);
+
+	return statsCollector;
 }
 
 
 /*
- * ExecuteCopyCommandOnPGDuckConnection executes the given COPY command on
- * a PGDuck connection and returns a ColumnStatsCollector.
+ * ExecuteCopyToCommand executes COPY TO command and returns statistics for all generated files.
  */
 ColumnStatsCollector *
-ExecuteCopyCommandOnPGDuckConnection(char *copyCommand,
-									 List *leafFields,
-									 DataFileSchema * schema,
-									 bool disablePreserveInsertionOrder,
-									 CopyDataFormat destinationFormat)
+ExecuteCopyToCommand(StringInfo command,
+					 char *destinationPath,
+					 CopyDataFormat format,
+					 CopyDataCompression compression,
+					 List *formatOptions,
+					 DataFileSchema * schema,
+					 List *leafFields,
+					 ColumnStatsConfig * columnStatsConfig)
 {
+	ColumnStatsCollector *statsCollector = palloc0(sizeof(ColumnStatsCollector));
+
 	PGDuckConnection *pgDuckConn = GetPGDuckConnection();
-	PGresult   *result;
-	ColumnStatsCollector *statsCollector = NULL;
 
 	PG_TRY();
 	{
+		bool		disablePreserveInsertionOrder = (format == DATA_FORMAT_PARQUET) && TargetRowGroupSizeMB > 0;
+		PGresult   *result;
+
 		if (disablePreserveInsertionOrder)
 		{
 			result = ExecuteQueryOnPGDuckConnection(pgDuckConn, "SET preserve_insertion_order TO 'false';");
@@ -435,21 +442,38 @@ ExecuteCopyCommandOnPGDuckConnection(char *copyCommand,
 			PQclear(result);
 		}
 
-		result = ExecuteQueryOnPGDuckConnection(pgDuckConn, copyCommand);
+		result = ExecuteQueryOnPGDuckConnection(pgDuckConn, command->data);
 		CheckPGDuckResult(pgDuckConn, result);
 
-		if (destinationFormat == DATA_FORMAT_PARQUET)
+		/* return_stats is only supported for parquet format */
+		if (format == DATA_FORMAT_PARQUET)
 		{
 			/* DuckDB returns COPY 0 when return_stats is used. */
-			statsCollector = GetDataFileStatsListFromPGResult(result, leafFields, schema);
+			statsCollector->dataFileStats = GetDataFileStatsFromCopyWithReturnStatsResult(result, leafFields, schema,
+																						  &statsCollector->rowsAffected);
 		}
 		else
 		{
 			char	   *commandTuples = PQcmdTuples(result);
-			statsCollector = palloc0(sizeof(ColumnStatsCollector));
-			statsCollector->totalRowCount = atoll(commandTuples);
-			statsCollector->dataFileStats = NIL;
+
+			statsCollector->rowsAffected = atol(commandTuples);
+
+			List	   *outputFiles = ListRemoteFileNames(destinationPath);
+
+			ListCell   *outputFileCell = NULL;
+
+			foreach(outputFileCell, outputFiles)
+			{
+				char	   *outputFile = lfirst(outputFileCell);
+
+				DataFileStats *fileStats = GetRemoteDataFileStatsForTable(outputFile, format, compression, formatOptions, NIL);
+
+				statsCollector->dataFileStats = lappend(statsCollector->dataFileStats, fileStats);
+			}
 		}
+
+		if (columnStatsConfig != NULL)
+			ApplyColumnStatsMode(*columnStatsConfig, statsCollector->dataFileStats);
 
 		PQclear(result);
 
@@ -467,435 +491,6 @@ ExecuteCopyCommandOnPGDuckConnection(char *copyCommand,
 	PG_END_TRY();
 
 	return statsCollector;
-}
-
-
-/*
- * GetDataFileStatsListFromPGResult extracts DataFileStats list from the
- * given PGresult of COPY .. TO ... WITH (return_stats).
- *
- * It returns the collector object that contains the total row count and data file statistics.
- */
-ColumnStatsCollector *
-GetDataFileStatsListFromPGResult(PGresult *result, List *leafFields, DataFileSchema * schema)
-{
-	List	   *statsList = NIL;
-
-	int			resultRowCount = PQntuples(result);
-	int			resultColumnCount = PQnfields(result);
-	int64 totalRowCount = 0;
-
-	for (int resultRowIndex = 0; resultRowIndex < resultRowCount; resultRowIndex++)
-	{
-		DataFileStats *fileStats = palloc0(sizeof(DataFileStats));
-
-		for (int resultColIndex = 0; resultColIndex < resultColumnCount; resultColIndex++)
-		{
-			char	   *resultColName = PQfname(result, resultColIndex);
-			char	   *resultValue = PQgetvalue(result, resultRowIndex, resultColIndex);
-
-			if (schema != NULL && strcmp(resultColName, "column_statistics") == 0)
-			{
-				List	   *names = NIL;
-				List	   *mins = NIL;
-				List	   *maxs = NIL;
-
-				ParseDuckdbColumnMinMaxFromText(resultValue, &names, &mins, &maxs);
-				fileStats->columnStats = GetDataFileColumnStatsList(names, mins, maxs, leafFields, schema);
-			}
-			else if (strcmp(resultColName, "file_size_bytes") == 0)
-			{
-				fileStats->fileSize = atoll(resultValue);
-			}
-			else if (strcmp(resultColName, "count") == 0)
-			{
-				fileStats->rowCount = atoll(resultValue);
-				totalRowCount += fileStats->rowCount;
-			}
-			else if (strcmp(resultColName, "filename") == 0)
-			{
-				fileStats->dataFilePath = pstrdup(resultValue);
-			}
-		}
-
-		statsList = lappend(statsList, fileStats);
-	}
-
-	ColumnStatsCollector *statsCollector = palloc0(sizeof(ColumnStatsCollector));
-	statsCollector->totalRowCount = totalRowCount;
-	statsCollector->dataFileStats = statsList;
-
-	return statsCollector;
-}
-
-
-/*
- * ExtractMinMaxFromStatsMapDatum extracts min and max values from given stats map
- * of type map(varchar,varchar).
- */
-static void
-ExtractMinMaxForColumn(Datum map, const char *colName, List **names, List **mins, List **maxs)
-{
-	ArrayType  *elementsArray = DatumGetArrayTypeP(map);
-
-	if (elementsArray == NULL)
-		return;
-
-	uint32		numElements = ArrayGetNItems(ARR_NDIM(elementsArray), ARR_DIMS(elementsArray));
-
-	if (numElements == 0)
-		return;
-
-	char	   *minText = NULL;
-	char	   *maxText = NULL;
-
-	ArrayIterator arrayIterator = array_create_iterator(elementsArray, 0, NULL);
-	Datum		elemDatum;
-	bool		isNull = false;
-
-	while (array_iterate(arrayIterator, &elemDatum, &isNull))
-	{
-		if (isNull)
-			continue;
-
-		HeapTupleHeader tupleHeader = DatumGetHeapTupleHeader(elemDatum);
-		bool		statsKeyIsNull = false;
-		bool		statsValIsNull = false;
-
-		Datum		statsKeyDatum = GetAttributeByNum(tupleHeader, 1, &statsKeyIsNull);
-		Datum		statsValDatum = GetAttributeByNum(tupleHeader, 2, &statsValIsNull);
-
-		/* skip entries without a key or value */
-		if (statsKeyIsNull || statsValIsNull)
-			continue;
-
-		char	   *statsKey = TextDatumGetCString(statsKeyDatum);
-
-		if (strcmp(statsKey, "min") == 0)
-		{
-			Assert(minText == NULL);
-			minText = TextDatumGetCString(statsValDatum);
-		}
-		else if (strcmp(statsKey, "max") == 0)
-		{
-			Assert(maxText == NULL);
-			maxText = TextDatumGetCString(statsValDatum);
-		}
-	}
-
-	if (minText != NULL && maxText != NULL)
-	{
-		*names = lappend(*names, pstrdup(colName));
-		*mins = lappend(*mins, minText);
-		*maxs = lappend(*maxs, maxText);
-	}
-
-	array_free_iterator(arrayIterator);
-}
-
-
-/*
- * UnescapeDoubleQuotes unescapes any doubled quotes.
- * e.g. "ab\"\"cd\"\"ee" becomes "ab\"cd\"ee"
- */
-static const char *
-UnescapeDoubleQuotes(const char *s)
-{
-	if (s == NULL)
-		return NULL;
-
-	char		doubleQuote = '"';
-
-	int			len = strlen(s);
-
-	if (len >= 2 && (s[0] == doubleQuote && s[len - 1] == doubleQuote))
-	{
-		/* Allocate worst-case length (without surrounding quotes) + 1 */
-		char	   *out = palloc((len - 1) * sizeof(char));
-		int			oi = 0;
-
-		for (int i = 1; i < len - 1; i++)
-		{
-			/* Handle "" */
-			if (s[i] == doubleQuote && i + 1 < len - 1 && s[i + 1] == doubleQuote)
-			{
-				out[oi++] = doubleQuote;
-				i++;			/* skip the doubled quote */
-			}
-			else
-			{
-				out[oi++] = s[i];
-			}
-		}
-
-		out[oi] = '\0';
-		return out;
-	}
-
-	return s;
-}
-
-
-/*
- * ExtractMinMaxFromStatsMapDatum extracts min and max values from given stats map
- * of type map(text,text).
- */
-static void
-ExtractMinMaxForAllColumns(Datum map, List **names, List **mins, List **maxs)
-{
-	ArrayType  *elementsArray = DatumGetArrayTypeP(map);
-
-	if (elementsArray == NULL)
-		return;
-
-	uint32		numElements = ArrayGetNItems(ARR_NDIM(elementsArray), ARR_DIMS(elementsArray));
-
-	if (numElements == 0)
-		return;
-
-	ArrayIterator arrayIterator = array_create_iterator(elementsArray, 0, NULL);
-	Datum		elemDatum;
-	bool		isNull = false;
-
-	while (array_iterate(arrayIterator, &elemDatum, &isNull))
-	{
-		if (isNull)
-			continue;
-
-		HeapTupleHeader tupleHeader = DatumGetHeapTupleHeader(elemDatum);
-		bool		colNameIsNull = false;
-		bool		colStatsIsNull = false;
-
-		Datum		colNameDatum = GetAttributeByNum(tupleHeader, 1, &colNameIsNull);
-		Datum		colStatsDatum = GetAttributeByNum(tupleHeader, 2, &colStatsIsNull);
-
-		/* skip entries without a key or value */
-		if (colNameIsNull || colStatsIsNull)
-			continue;
-
-		char	   *colName = TextDatumGetCString(colNameDatum);
-
-		/*
-		 * pg_map text key is escaped for double quotes. We need to unescape
-		 * them.
-		 */
-		const char *unescapedColName = UnescapeDoubleQuotes(colName);
-
-		ExtractMinMaxForColumn(colStatsDatum, unescapedColName, names, mins, maxs);
-	}
-
-	array_free_iterator(arrayIterator);
-}
-
-
-/*
- * ParseDuckdbColumnMinMaxFromText parses COPY .. TO .parquet WITH (return_stats)
- * output text to map(text, map(text,text)).
- * e.g. { 'id_col' => {'min' => '12', 'max' => 23, ...},
- * 		  'name_col' => {'min' => 'aykut', 'max' => 'onder', ...},
- *         ...
- * 		}
- */
-static void
-ParseDuckdbColumnMinMaxFromText(char *input, List **names, List **mins, List **maxs)
-{
-	/*
-	 * e.g. { 'id_col' => {'min' => '12', 'max' => 23, ...}, 'name_col' =>
-	 * {'min' => 'aykut', 'max' => 'onder', ...}, ... }
-	 */
-	Oid			returnStatsMapId = GetOrCreatePGMapType("MAP(TEXT,MAP(TEXT,TEXT))");
-
-	if (returnStatsMapId == InvalidOid)
-		ereport(ERROR, (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-						errmsg("unexpected return_stats result %s", input)));
-
-	/* parse result into map above */
-	Oid			typinput;
-	Oid			typioparam;
-
-	getTypeInputInfo(returnStatsMapId, &typinput, &typioparam);
-
-	Datum		statsMapDatum = OidInputFunctionCall(typinput, input, typioparam, -1);
-
-	/*
-	 * extract min and max for each column: iterate the underlying map datum
-	 * directly to avoid invoking the set-returning `entries()` function in a
-	 * non-SRF context.
-	 */
-	ExtractMinMaxForAllColumns(statsMapDatum, names, mins, maxs);
-}
-
-
-/*
- * GetDataFileColumnStatsList builds DataFileColumnStats list from given
- * names, mins, maxs lists and schema.
- */
-static List *
-GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields, DataFileSchema * schema)
-{
-	List	   *columnStatsList = NIL;
-
-	Assert(schema != NULL);
-	for (int fieldIndex = 0; fieldIndex < schema->nfields; fieldIndex++)
-	{
-		DataFileSchemaField *field = &schema->fields[fieldIndex];
-		const char *fieldName = field->name;
-		int			fieldId = field->id;
-
-		int			nameIndex = FindIndexInStringList(names, fieldName);
-		if (nameIndex == -1)
-		{
-			ereport(DEBUG3, (errmsg("field with name %s not found in stats output, skipping", fieldName)));
-			continue;
-		}
-
-		LeafField  *leafField = FindLeafField(leafFields, fieldId);
-
-		if (leafField == NULL)
-		{
-			ereport(DEBUG3, (errmsg("leaf field with id %d not found in leaf fields, skipping", fieldId)));
-			continue;
-		}
-		else if(ShouldSkipStatistics(leafField))
-		{
-			ereport(DEBUG3, (errmsg("skipping statistics for field with id %d", fieldId)));
-			continue;
-		}
-
-		char	   *minStr = list_nth(mins, nameIndex);
-		char	   *maxStr = list_nth(maxs, nameIndex);
-
-		DataFileColumnStats *colStats = palloc0(sizeof(DataFileColumnStats));
-
-		colStats->leafField = *leafField;
-		colStats->lowerBoundText = pstrdup(minStr);
-		colStats->upperBoundText = pstrdup(maxStr);
-		columnStatsList = lappend(columnStatsList, colStats);
-	}
-
-	return columnStatsList;
-}
-
-
-/*
-* FindLeafField finds the leaf field with the given fieldId.
-*/
-LeafField *
-FindLeafField(List *leafFieldList, int fieldId)
-{
-	ListCell   *cell = NULL;
-	foreach(cell, leafFieldList)
-	{
-		LeafField  *leafField = (LeafField *) lfirst(cell);
-
-		if (leafField->fieldId == fieldId)
-		{
-			return leafField;
-		}
-	}
-
-	return NULL;
-}
-
-
-/*
- * FindIndexInStringList finds the index of targetName in names list.
- * Returns -1 if not found.
- */
-static int
-FindIndexInStringList(List *names, const char *targetName)
-{
-	for(int index = 0; index < list_length(names); index++)
-	{
-		if (strcmp(list_nth(names, index), targetName) == 0)
-		{
-			return index;
-		}
-	}
-
-	return -1;
-}
-
-
-/*
-* ShouldSkipStatistics returns true if the statistics should be skipped for the
-* given leaf field.
-*/
-bool
-ShouldSkipStatistics(LeafField * leafField)
-{
-	Field	   *field = leafField->field;
-	PGType		pgType = leafField->pgType;
-
-	Oid			pgTypeOid = pgType.postgresTypeOid;
-
-	if (PGTypeRequiresConversionToIcebergString(field, pgType))
-	{
-		if (!(pgTypeOid == VARCHAROID || pgTypeOid == BPCHAROID ||
-			  pgTypeOid == CHAROID))
-		{
-			/*
-			 * Although there are no direct equivalents of these types on
-			 * Iceberg, it is pretty safe to support pruning on these types.
-			 */
-			return true;
-		}
-	}
-	else if (pgTypeOid == BYTEAOID)
-	{
-		/*
-		 * parquet_metadata function sometimes returns a varchar repr of blob,
-		 * which cannot be properly deserialized by Postgres. (when there is
-		 * "\" or nonprintable chars in the blob ) See issue Old repo:
-		 * issues/957
-		 */
-		return true;
-	}
-	else if (pgTypeOid == UUIDOID)
-	{
-		/*
-		 * DuckDB does not keep statistics for UUID type. We should skip
-		 * statistics for UUID type.
-		 */
-		return true;
-	}
-	else if (leafField->level != 1)
-	{
-		/*
-		 * We currently do not support pruning on array, map and composite
-		 * types. So there's no need to collect stats for them. Note that
-		 * in the past we did collect, and have some tests commented out,
-		 * such as skippedtest_pg_lake_iceberg_table_complex_values.
-		 */
-		return true;
-	}
-
-	return false;
-}
-
-
-/*
- * PGTypeRequiresConversionToIcebergString returns true if the given Postgres type
- * requires conversion to Iceberg string.
- * Some of the Postgres types cannot be directly mapped to an Iceberg type.
- * e.g. custom types like hstore
- */
-bool
-PGTypeRequiresConversionToIcebergString(Field * field, PGType pgType)
-{
-	/*
-	 * We treat geometry as binary within the Iceberg schema, which is encoded
-	 * as a hexadecimal string according to the spec. As it happens, the
-	 * Postgres output function of geometry produces a hexadecimal WKB string,
-	 * so we can use the regular text output function to convert to an Iceberg
-	 * value.
-	 */
-	if (IsGeometryTypeId(pgType.postgresTypeOid))
-	{
-		return true;
-	}
-
-	return strcmp(field->field.scalar.typeName, "string") == 0 && pgType.postgresTypeOid != TEXTOID;
 }
 
 

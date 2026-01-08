@@ -17,13 +17,16 @@
 
 #include "postgres.h"
 
+#include "pg_lake/csv/csv_options.h"
 #include "pg_lake/data_file/data_file_stats.h"
 #include "pg_lake/parquet/leaf_field.h"
 #include "pg_lake/permissions/roles.h"
 #include "pg_lake/pgduck/client.h"
+#include "pg_lake/pgduck/read_data.h"
 #include "pg_lake/pgduck/remote_storage.h"
 #include "pg_lake/permissions/roles.h"
 
+#include "commands/defrem.h"
 #include "utils/builtins.h"
 #include "utils/timestamp.h"
 
@@ -45,15 +48,84 @@ GetRemoteFileSize(char *path)
 
 
 /*
- * GetRemoteFileRowCount gets the number of rows in a remote Parquet file.
+ * GetRemoteFileRowCount gets the number of rows in a remote file.
  */
 int64
-GetRemoteParquetFileRowCount(char *path)
+GetRemoteFileRowCount(char *path, CopyDataFormat format, CopyDataCompression compression,
+					  List *formatOptions)
 {
-	char	   *query = psprintf("SELECT count(*) FROM read_parquet(%s)",
-								 quote_literal_cstr(path));
+	StringInfo	command = makeStringInfo();
 
-	char	   *rowCountStr = GetSingleValueFromPGDuck(query);
+	appendStringInfoString(command, "SELECT COUNT(*) FROM ");
+
+	switch (format)
+	{
+		case DATA_FORMAT_PARQUET:
+			appendStringInfo(command, "read_parquet(%s)", quote_literal_cstr(path));
+			break;
+
+		case DATA_FORMAT_CSV:
+			{
+				appendStringInfo(command, "read_csv(%s", quote_literal_cstr(path));
+
+				if (compression == DATA_COMPRESSION_SNAPPY)
+				{
+					ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+									errmsg("pg_lake_copy: snappy compression is not "
+										   "supported for CSV format")));
+				}
+
+				if (compression != DATA_COMPRESSION_NONE)
+				{
+					const char *compressionName =
+						CopyDataCompressionToName(compression);
+
+					appendStringInfo(command, ", compression=%s",
+									 quote_literal_cstr(compressionName));
+				}
+
+				List	   *csvOptions = NormalizedExternalCSVOptions(formatOptions);
+
+				appendStringInfoString(command, CopyOptionsToReadCSVParams(csvOptions));
+
+				appendStringInfo(command, ", max_line_size=%d", DUCKDB_MAX_SAFE_CSV_LINE_SIZE);
+
+				appendStringInfoString(command, ")");
+
+				break;
+			}
+		case DATA_FORMAT_JSON:
+			{
+				appendStringInfo(command, "read_json_auto(%s", quote_literal_cstr(path));
+
+				if (compression == DATA_COMPRESSION_SNAPPY)
+				{
+					ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+									errmsg("pg_lake_copy: snappy compression is not "
+										   "supported for JSON format")));
+				}
+
+				if (compression != DATA_COMPRESSION_NONE)
+				{
+					const char *compressionName =
+						CopyDataCompressionToName(compression);
+
+					appendStringInfo(command, ", compression=%s",
+									 quote_literal_cstr(compressionName));
+				}
+
+				appendStringInfoString(command, ")");
+
+				break;
+			}
+
+		default:
+			ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							errmsg("pg_lake: unknown data format %d", format)));
+			break;
+	}
+
+	char	   *rowCountStr = GetSingleValueFromPGDuck(command->data);
 	int64		rowCount = pg_strtoint64(rowCountStr);
 
 	return rowCount;

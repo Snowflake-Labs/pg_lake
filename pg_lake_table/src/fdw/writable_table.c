@@ -29,11 +29,11 @@
 #include "pg_lake/cleanup/in_progress_files.h"
 #include "pg_lake/data_file/data_files.h"
 #include "pg_lake/cleanup/deletion_queue.h"
+#include "pg_lake/data_file/remote_data_file_stats.h"
 #include "pg_lake/extensions/pg_lake_table.h"
 #include "pg_lake/fdw/catalog/row_id_mappings.h"
 #include "pg_lake/fdw/pg_lake_table.h"
 #include "pg_lake/fdw/data_files_catalog.h"
-#include "pg_lake/fdw/data_file_stats.h"
 #include "pg_lake/fdw/row_ids.h"
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/fdw/partition_transform.h"
@@ -101,8 +101,8 @@ static List *ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCoun
 							 int64 liveRowCount, char *deleteFile, int64 deletedRowCount);
 static List *GetDataFilePathsFromStatsList(List *dataFileStats);
 static List *GetNewFileOpsFromFileStats(Oid relationId, List *dataFileStats,
-									int32 partitionSpecId, Partition * partition, int64 rowCount,
-									bool isVerbose, List **newFiles);
+										int32 partitionSpecId, Partition * partition, int64 rowCount,
+										bool isVerbose, List **newFiles);
 static bool ShouldRewriteAfterDeletions(int64 sourceRowCount, uint64 totalDeletedRowCount);
 static CompactionDataFileHashEntry * GetPartitionWithMostEligibleFiles(Oid relationId, TimestampTz compactionStartTime,
 																	   bool forceMerge);
@@ -257,28 +257,19 @@ PrepareCSVInsertion(Oid relationId, char *insertCSV, int64 rowCount,
 	InsertInProgressFileRecordExtended(dataFilePrefix, isPrefix, deferDeletion);
 
 	List	   *leafFields = GetLeafFieldsForTable(relationId);
+	ColumnStatsConfig *columnStatsConfig = GetColumnStatsConfig(relationId);
 
 	/* convert insert file to a new file in table format */
-	ColumnStatsCollector *statsCollector =
-		ConvertCSVFileTo(insertCSV,
-						 tupleDescriptor,
-						 maximumLineSize,
-						 dataFilePrefix,
-						 format,
-						 compression,
-						 options,
-						 schema,
-						 leafFields);
-
-	ApplyColumnStatsModeForAllFileStats(relationId, statsCollector->dataFileStats);
-
-	if (!splitFilesBySize && statsCollector->dataFileStats == NIL)
-	{
-		DataFileStats *stats = palloc0(sizeof(DataFileStats));
-		stats->dataFilePath = dataFilePrefix;
-		stats->rowCount = rowCount;
-		statsCollector->dataFileStats = list_make1(stats);
-	}
+	ColumnStatsCollector *columnStatsCollector = ConvertCSVFileTo(insertCSV,
+																  tupleDescriptor,
+																  maximumLineSize,
+																  dataFilePrefix,
+																  format,
+																  compression,
+																  options,
+																  schema,
+																  leafFields,
+																  columnStatsConfig);
 
 	/*
 	 * when we defer deletion of in-progress files, we need to replace the
@@ -286,17 +277,18 @@ PrepareCSVInsertion(Oid relationId, char *insertCSV, int64 rowCount,
 	 * files from in-progress
 	 */
 	if (isPrefix && deferDeletion)
-		ReplaceInProgressPrefixPathWithFullPaths(dataFilePrefix, GetDataFilePathsFromStatsList(statsCollector->dataFileStats));
+		ReplaceInProgressPrefixPathWithFullPaths(dataFilePrefix, GetDataFilePathsFromStatsList(columnStatsCollector->dataFileStats));
 
 	/* build a DataFileModification for each new data file */
 	List	   *modifications = NIL;
 	ListCell   *dataFileStatsCell = NULL;
 
-	foreach(dataFileStatsCell, statsCollector->dataFileStats)
+	foreach(dataFileStatsCell, columnStatsCollector->dataFileStats)
 	{
 		DataFileStats *stats = lfirst(dataFileStatsCell);
 
 		DataFileModification *modification = palloc0(sizeof(DataFileModification));
+
 		modification->type = ADD_DATA_FILE;
 		modification->insertFile = stats->dataFilePath;
 		modification->insertedRowCount = stats->rowCount;
@@ -340,7 +332,7 @@ GetDataFilePathsFromStatsList(List *dataFileStats)
  */
 static List *
 GetNewFileOpsFromFileStats(Oid relationId, List *dataFileStats, int32 partitionSpecId, Partition * partition,
-					   int64 rowCount, bool isVerbose, List **newFiles)
+						   int64 rowCount, bool isVerbose, List **newFiles)
 {
 	*newFiles = NIL;
 
@@ -521,11 +513,10 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 			ReadDataStats stats = {sourceRowCount, existingDeletedRowCount};
 
 			List	   *leafFields = GetLeafFieldsForTable(relationId);
-			ColumnStatsCollector *statsCollector = PerformDeleteFromParquet(sourcePath, existingPositionDeletes,
-																			deleteFile, newDataFilePath, compression,
-																			schema, &stats, leafFields);
-
-			ApplyColumnStatsModeForAllFileStats(relationId, statsCollector->dataFileStats);
+			ColumnStatsConfig *columnStatsConfig = GetColumnStatsConfig(relationId);
+			ColumnStatsCollector *columnStatsCollector = PerformDeleteFromParquet(sourcePath, existingPositionDeletes,
+																				  deleteFile, newDataFilePath, compression,
+																				  schema, &stats, leafFields, columnStatsConfig);
 
 			int64		newRowCount = liveRowCount - deletedRowCount;
 
@@ -541,13 +532,16 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 			Partition  *partition = GetDataFilePartition(relationId, transforms, sourcePath,
 														 &partitionSpecId);
 
-			Assert(statsCollector->dataFileStats != NIL);
+			List	   *newFileStatsList = columnStatsCollector->dataFileStats;
+
+			Assert(newFileStatsList != NIL);
 
 			/*
-			 * while deleting from parquet, we do not add file_size_bytes option to COPY command,
-			 * so we can assume that we'll have only a single file. 
+			 * while deleting from parquet, we do not add file_size_bytes
+			 * option to COPY command, so we can assume that we'll have only a
+			 * single file.
 			 */
-			DataFileStats *newFileStats = linitial(statsCollector->dataFileStats);
+			DataFileStats *newFileStats = linitial(columnStatsCollector->dataFileStats);
 
 			/* store the new file in the metadata */
 			TableMetadataOperation *addOperation =
@@ -580,13 +574,12 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 
 			/* write the deletion file */
 			ConvertCSVFileTo(deleteFile, deleteTupleDesc, -1, deletionFilePath,
-							 DATA_FORMAT_PARQUET, compression, copyOptions, schema, NIL);
+							 DATA_FORMAT_PARQUET, compression, copyOptions, schema, NIL, NULL);
 
 			ereport(WriteLogLevel, (errmsg("adding deletion file %s with " INT64_FORMAT " rows ",
 										   deletionFilePath, deletedRowCount)));
 
-			DataFileStats *deletionFileStats = CreateDataFileStatsForTable(relationId, deletionFilePath,
-																		   deletedRowCount, 0, CONTENT_POSITION_DELETES);
+			DataFileStats *deletionFileStats = GetRemoteDataFileStatsForTable(deletionFilePath, DATA_FORMAT_PARQUET, compression, copyOptions, NIL);
 
 			/*
 			 * We are adding position delete file with the same partition
@@ -981,18 +974,20 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 
 	/* perform compaction */
 	List	   *leafFields = GetLeafFieldsForTable(relationId);
-	ColumnStatsCollector *statsCollector =
-		WriteQueryResultTo(readQuery,
-						   newDataFilePath,
-						   properties.format,
-						   properties.compression,
-						   options,
-						   queryHasRowId,
-						   schema,
-						   queryTupleDesc,
-						   leafFields);
+	ColumnStatsConfig *columnStatsConfig = GetColumnStatsConfig(relationId);
 
-	if (statsCollector->totalRowCount == 0)
+	ColumnStatsCollector *columnStatsCollector = WriteQueryResultTo(readQuery,
+																	newDataFilePath,
+																	properties.format,
+																	properties.compression,
+																	options,
+																	queryHasRowId,
+																	schema,
+																	queryTupleDesc,
+																	leafFields,
+																	columnStatsConfig);
+
+	if (columnStatsCollector->rowsAffected == 0)
 	{
 		TimestampTz orphanedAt = GetCurrentTransactionStartTimestamp();
 
@@ -1003,13 +998,11 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 		return NIL;
 	}
 
-	ApplyColumnStatsModeForAllFileStats(relationId, statsCollector->dataFileStats);
-
 	/* find which files were generated */
 	List	   *newFiles = NIL;
-	List	   *newFileOps = GetNewFileOpsFromFileStats(relationId, statsCollector->dataFileStats,
+	List	   *newFileOps = GetNewFileOpsFromFileStats(relationId, columnStatsCollector->dataFileStats,
 														partitionSpecId, partition,
-														statsCollector->totalRowCount,
+														columnStatsCollector->rowsAffected,
 														isVerbose, &newFiles);
 
 	/*

@@ -55,7 +55,8 @@ PerformDeleteFromParquet(char *sourcePath,
 						 CopyDataCompression destinationCompression,
 						 DataFileSchema * schema,
 						 ReadDataStats * stats,
-						 List *leafFields)
+						 List *leafFields,
+						 ColumnStatsConfig * columnStatsConfig)
 {
 	const char *remainderQuery =
 		DeleteFromParquetQuery(sourcePath, positionDeleteFiles, deletionFilePath, schema, stats);
@@ -97,11 +98,14 @@ PerformDeleteFromParquet(char *sourcePath,
 	/* end WITH options */
 	appendStringInfoString(&command, ")");
 
-	return ExecuteCopyCommandOnPGDuckConnection(command.data,
-												leafFields,
-												schema,
-												false,
-												DATA_FORMAT_PARQUET);
+	return ExecuteCopyToCommand(&command,
+								destinationPath,
+								DATA_FORMAT_PARQUET,
+								destinationCompression,
+								NIL,
+								schema,
+								leafFields,
+								columnStatsConfig);
 }
 
 

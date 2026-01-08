@@ -55,3 +55,4 @@ extern PGDLLEXPORT LeafField DeepCopyLeafField(const LeafField * leafField);
 #if PG_VERSION_NUM < 170000
 extern PGDLLEXPORT int pg_cmp_s32(int32 a, int32 b);
 #endif
+extern PGDLLEXPORT LeafField * FindLeafField(List *leafFieldList, int fieldId);

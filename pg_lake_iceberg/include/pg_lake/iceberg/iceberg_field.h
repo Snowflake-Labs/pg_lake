@@ -34,4 +34,3 @@ extern PGDLLEXPORT const char *IcebergTypeNameToDuckdbTypeName(const char *icebe
 extern PGDLLEXPORT DataFileSchema * CreatePositionDeleteDataFileSchema(void);
 extern PGDLLEXPORT const char *GetIcebergJsonSerializedDefaultExpr(TupleDesc tupdesc, AttrNumber attnum,
 																   FieldStructElement * structElementField);
-extern PGDLLEXPORT List *GetRemoteParquetColumnStats(char *path, List *leafFields);

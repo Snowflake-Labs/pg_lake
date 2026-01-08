@@ -20,6 +20,8 @@
 #include "datatype/timestamp.h"
 #include "nodes/pg_list.h"
 
+#include "pg_lake/copy/copy_format.h"
+
 /*
  * RemoteFileDesc holds a descriptions of a remote file.
  */
@@ -37,7 +39,9 @@ typedef struct RemoteFileDesc
 }			RemoteFileDesc;
 
 extern PGDLLEXPORT int64 GetRemoteFileSize(char *path);
-extern PGDLLEXPORT int64 GetRemoteParquetFileRowCount(char *path);
+extern PGDLLEXPORT int64 GetRemoteFileRowCount(char *path, CopyDataFormat format,
+											   CopyDataCompression compression,
+											   List *formatOptions);
 extern PGDLLEXPORT List *ListRemoteFileDescriptions(char *pattern);
 extern PGDLLEXPORT List *ListRemoteFileNames(char *pattern);
 extern PGDLLEXPORT bool RemoteFileExists(char *path);

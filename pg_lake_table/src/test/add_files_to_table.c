@@ -22,7 +22,7 @@
 
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/data_file/data_files.h"
-#include "pg_lake/fdw/data_file_stats.h"
+#include "pg_lake/data_file/remote_data_file_stats.h"
 #include "pg_lake/fdw/data_files_catalog.h"
 #include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/iceberg/catalog.h"
@@ -161,10 +161,7 @@ GenerateMetadataOperationList(Oid relationId, List *fileList, char *fileType)
 
 		if (strcmp(fileType, "DATA") == 0)
 		{
-			int64		rowCount = GetRemoteParquetFileRowCount(filePath);
-
-
-			DataFileStats *dataFileStats = CreateDataFileStatsForTable(relationId, filePath, rowCount, 0, CONTENT_DATA);
+			DataFileStats *dataFileStats = GetRemoteDataFileStatsForTable(filePath, DATA_FORMAT_PARQUET, DATA_COMPRESSION_NONE, NIL, NIL);
 
 			/* we don't support partitioned writes, and default spec id is 0 */
 			int32		partitionSpecId = 0;

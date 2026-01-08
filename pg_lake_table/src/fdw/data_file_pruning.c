@@ -47,6 +47,7 @@
 #include "utils/lsyscache.h"
 
 #include "pg_extension_base/pg_compat.h"
+#include "pg_lake/data_file/remote_data_file_stats.h"
 #include "pg_lake/extensions/pg_lake_engine.h"
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/fdw/schema_operations/field_id_mapping_catalog.h"
