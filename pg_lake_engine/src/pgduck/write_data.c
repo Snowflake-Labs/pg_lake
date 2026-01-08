@@ -419,7 +419,7 @@ WriteQueryResultTo(char *query,
 		result = ExecuteQueryOnPGDuckConnection(pgDuckConn, command.data);
 		CheckPGDuckResult(pgDuckConn, result);
 
-		if (destinationFormat == DATA_FORMAT_PARQUET && leafFields != NIL)
+		if (destinationFormat == DATA_FORMAT_PARQUET)
 		{
 			/* DuckDB returns COPY 0 when return_stats is used. */
 			statsCollector = GetDataFileStatsListFromPGResult(result, leafFields, schema);
@@ -502,11 +502,11 @@ GetDataFileStatsListFromPGResult(PGresult *result, List *leafFields, DataFileSch
 		statsList = lappend(statsList, fileStats);
 	}
 
-	ColumnStatsCollector *statsResult = palloc0(sizeof(ColumnStatsCollector));
-	statsResult->totalRowCount = totalRowCount;
-	statsResult->dataFileStats = statsList;
+	ColumnStatsCollector *statsCollector = palloc0(sizeof(ColumnStatsCollector));
+	statsCollector->totalRowCount = totalRowCount;
+	statsCollector->dataFileStats = statsList;
 
-	return statsResult;
+	return statsCollector;
 }
 
 
