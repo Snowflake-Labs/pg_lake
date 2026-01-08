@@ -263,10 +263,16 @@ FileCacheManager::CacheFile(ClientContext &context, string url, bool force, bool
 		{
 			PGDUCK_SERVER_LOG("Skipping to cache %s because it is modified concurrently", finalCacheFilePath.c_str());
 
-			return -1;
+			return LOCK_CANNOT_BE_ACQUIRED;
 		}
 
 		size = CacheFileInternal(context, url, force);
+		if (size == DIRECTORY_CANNOT_CREATED)
+		{
+			/* directory does not exist */
+			RemoveCacheFileActivityFromMapIfNeeded(finalCacheFilePath);
+			return DIRECTORY_CANNOT_CREATED;
+		}
 	}
 	catch(const std::exception& e)
 	{
@@ -321,7 +327,14 @@ FileCacheManager::CacheFileInternal(ClientContext &context, string url, bool for
 
 	/* create the directory if it does not exist */
 	string cacheFileDir = FileUtils::ExtractDirName(finalCacheFilePath);
-	FileUtils::EnsureLocalDirectoryExists(context, cacheFileDir);
+	bool directoryExists = FileUtils::EnsureLocalDirectoryExists(context, cacheFileDir);
+	if (!directoryExists)
+	{
+		PGDUCK_SERVER_DEBUG("cannot add file %s to cache as the cache directory cannot be created %s",
+						    finalCacheFilePath.c_str(), cacheFileDir.c_str());
+
+		return DIRECTORY_CANNOT_CREATED;
+	}
 
 	/* prefix the URL with nocache to prevent copying an already-cached file to itself */
 	string sourceUrl = NO_CACHE_PREFIX + url;
@@ -663,9 +676,13 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize)
 			bool waitForLock = false;
 
 			int64_t cached = CacheFile(context, cacheFile.url, force, waitForLock);
-			if (cached == -1)
+			if (cached == LOCK_CANNOT_BE_ACQUIRED)
 			{
 				action = SKIPPED_CONCURRENT_MODIFY;
+			}
+			else if (cached == DIRECTORY_CANNOT_CREATED)
+			{
+				action = SKIPPED_DIRECTORY_DOES_NOT_EXIST;
 			}
 
 			actions.push_back({

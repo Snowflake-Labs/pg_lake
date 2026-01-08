@@ -41,6 +41,9 @@ extern const string NO_CACHE_PREFIX;
 */
 const string CACHE_FILE_PREFIX = "pgl-cache.";
 
+/* special values for cache file return code */
+const int64_t LOCK_CANNOT_BE_ACQUIRED = -1;
+const int64_t DIRECTORY_CANNOT_CREATED = -2;
 
 /*
  * CacheItem represents a file in cache or the cache queue.
@@ -93,7 +96,8 @@ enum CacheActionType
 	REMOVED,
 	SKIPPED_TOO_OLD,
 	SKIPPED_TOO_LARGE,
-	SKIPPED_CONCURRENT_MODIFY
+	SKIPPED_CONCURRENT_MODIFY,
+	SKIPPED_DIRECTORY_DOES_NOT_EXIST
 };
 
 /*

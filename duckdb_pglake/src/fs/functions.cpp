@@ -315,6 +315,10 @@ static void ManageCacheExec(ClientContext &context, TableFunctionInput &data_p, 
 			case SKIPPED_CONCURRENT_MODIFY:
 				output.SetValue(2, rowInChunk, Value("skipped (cache file was modified concurrently)"));
 				break;
+			case SKIPPED_DIRECTORY_DOES_NOT_EXIST:
+				output.SetValue(2, rowInChunk, Value("skipped (cannot create directory)"));
+				break;
+
 		}
 
 		rowInChunk++;

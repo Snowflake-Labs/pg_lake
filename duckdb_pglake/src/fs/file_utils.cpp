@@ -73,12 +73,12 @@ FileUtils::ExtractFileName(const string &path)
  *
  * This pattern is copied from DuckDB code (e.g. LocalFileSecretStorage::WriteSecret)
  */
-void
+bool
 FileUtils::EnsureLocalDirectoryExists(ClientContext &context,
 									  string dirPath)
 {
 	if (dirPath.empty())
-		return;
+		return false;
 
 	LocalFileSystem fs;
 
@@ -98,11 +98,25 @@ FileUtils::EnsureLocalDirectoryExists(ClientContext &context,
 			/* keep appending each part to directoryPrefix */
 			directoryPrefix = directoryPrefix + split + separator;
 
-			if (!fs.DirectoryExists(directoryPrefix)) {
-				fs.CreateDirectory(directoryPrefix);
+			if (!fs.DirectoryExists(directoryPrefix))
+			{
+				try
+				{
+					fs.CreateDirectory(directoryPrefix);
+				}
+				catch (Exception &ex)
+				{
+					ErrorData error(ex);
+
+					PGDUCK_SERVER_LOG("Creating the directory %s failed with an error %s", dirPath.c_str(), error.Message().c_str());
+					return false;
+				}
 			}
 		}
 	}
+
+	/* either already exists or newly created */
+	return true;
 }
 
 
