@@ -15,15 +15,11 @@
  * limitations under the License.
  */
 
- /*
- * ExecuteCopyCommandOnPGDuckConnection executes the given COPY command on
- * a PGDuck connection and returns a ColumnStatsCollector.
- */
-
 #include "postgres.h"
 
 #include "executor/executor.h"
 #include "pg_lake/data_file/data_files.h"
+#include "pg_lake/data_file/data_file_stats.h"
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/pgduck/map.h"
@@ -38,6 +34,11 @@ static const char *UnescapeDoubleQuotes(const char *s);
 static List *GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields, DataFileSchema * schema);
 static int FindIndexInStringList(List *names, const char *targetName);
 
+
+/*
+ * ExecuteCopyCommandOnPGDuckConnection executes the given COPY command on
+ * a PGDuck connection and returns a ColumnStatsCollector.
+ */
 ColumnStatsCollector *
 ExecuteCopyCommandOnPGDuckConnection(char *copyCommand,
 									 List *leafFields,
@@ -401,27 +402,6 @@ GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields
 
 
 /*
-* FindLeafField finds the leaf field with the given fieldId.
-*/
-LeafField *
-FindLeafField(List *leafFieldList, int fieldId)
-{
-	ListCell   *cell = NULL;
-	foreach(cell, leafFieldList)
-	{
-		LeafField  *leafField = (LeafField *) lfirst(cell);
-
-		if (leafField->fieldId == fieldId)
-		{
-			return leafField;
-		}
-	}
-
-	return NULL;
-}
-
-
-/*
  * FindIndexInStringList finds the index of targetName in names list.
  * Returns -1 if not found.
  */
@@ -494,29 +474,4 @@ ShouldSkipStatistics(LeafField * leafField)
 	}
 
 	return false;
-}
-
-
-/*
- * PGTypeRequiresConversionToIcebergString returns true if the given Postgres type
- * requires conversion to Iceberg string.
- * Some of the Postgres types cannot be directly mapped to an Iceberg type.
- * e.g. custom types like hstore
- */
-bool
-PGTypeRequiresConversionToIcebergString(Field * field, PGType pgType)
-{
-	/*
-	 * We treat geometry as binary within the Iceberg schema, which is encoded
-	 * as a hexadecimal string according to the spec. As it happens, the
-	 * Postgres output function of geometry produces a hexadecimal WKB string,
-	 * so we can use the regular text output function to convert to an Iceberg
-	 * value.
-	 */
-	if (IsGeometryTypeId(pgType.postgresTypeOid))
-	{
-		return true;
-	}
-
-	return strcmp(field->field.scalar.typeName, "string") == 0 && pgType.postgresTypeOid != TEXTOID;
 }

@@ -34,6 +34,7 @@
 #pragma once
 
 #include "nodes/pg_list.h"
+#include "pg_lake/pgduck/type.h"
 
 /*
  * Reserved _row_id field ID used for Iceberg
@@ -155,3 +156,4 @@ typedef FieldStructElement DataFileSchemaField;
 
 extern PGDLLEXPORT DataFileSchema * DeepCopyDataFileSchema(const DataFileSchema * schema);
 extern PGDLLEXPORT Field * DeepCopyField(const Field * field);
+extern PGDLLEXPORT bool PGTypeRequiresConversionToIcebergString(Field * field, PGType pgType);

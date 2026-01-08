@@ -19,6 +19,7 @@
 
 #include "common/int.h"
 
+#include "pg_lake/extensions/postgis.h"
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/parquet/leaf_field.h"
 #include "pg_lake/util/string_utils.h"
@@ -181,4 +182,29 @@ SchemaFieldsEquivalent(DataFileSchemaField * fieldA, DataFileSchemaField * field
 	 * anything about the field->type here.
 	 */
 	return true;
+}
+
+
+/*
+ * PGTypeRequiresConversionToIcebergString returns true if the given Postgres type
+ * requires conversion to Iceberg string.
+ * Some of the Postgres types cannot be directly mapped to an Iceberg type.
+ * e.g. custom types like hstore
+ */
+bool
+PGTypeRequiresConversionToIcebergString(Field * field, PGType pgType)
+{
+	/*
+	 * We treat geometry as binary within the Iceberg schema, which is encoded
+	 * as a hexadecimal string according to the spec. As it happens, the
+	 * Postgres output function of geometry produces a hexadecimal WKB string,
+	 * so we can use the regular text output function to convert to an Iceberg
+	 * value.
+	 */
+	if (IsGeometryTypeId(pgType.postgresTypeOid))
+	{
+		return true;
+	}
+
+	return strcmp(field->field.scalar.typeName, "string") == 0 && pgType.postgresTypeOid != TEXTOID;
 }

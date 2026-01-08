@@ -80,7 +80,4 @@ extern PGDLLEXPORT ColumnStatsCollector *ExecuteCopyCommandOnPGDuckConnection(ch
 																			  DataFileSchema * schema,
 																			  bool disablePreserveInsertionOrder,
 																			  CopyDataFormat destinationFormat);
-extern PGDLLEXPORT LeafField *FindLeafField(List *leafFieldList, int fieldId);
 extern PGDLLEXPORT bool ShouldSkipStatistics(LeafField * leafField);
-extern PGDLLEXPORT bool PGTypeRequiresConversionToIcebergString(Field * field, PGType pgType);
-

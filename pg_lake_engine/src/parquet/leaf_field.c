@@ -39,3 +39,24 @@ DeepCopyLeafField(const LeafField * leafField)
 
 	return *copiedLeafField;
 }
+
+
+/*
+* FindLeafField finds the leaf field with the given fieldId.
+*/
+LeafField *
+FindLeafField(List *leafFieldList, int fieldId)
+{
+	ListCell   *cell = NULL;
+	foreach(cell, leafFieldList)
+	{
+		LeafField  *leafField = (LeafField *) lfirst(cell);
+
+		if (leafField->fieldId == fieldId)
+		{
+			return leafField;
+		}
+	}
+
+	return NULL;
+}
