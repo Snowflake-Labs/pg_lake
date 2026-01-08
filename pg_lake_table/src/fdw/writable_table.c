@@ -172,10 +172,7 @@ ApplyInsertFile(Relation rel, char *insertFile, int64 rowCount,
 	List	   *options = foreignTable->options;
 	bool		hasRowIds = GetBoolOption(options, "row_ids", false);
 
-	if (dataFileStats == NULL)
-	{
-		dataFileStats = CreateDataFileStatsForTable(relationId, insertFile, rowCount, 0, CONTENT_DATA);
-	}
+	Assert(dataFileStats != NULL);
 
 	List	   *metadataOperations = NIL;
 
