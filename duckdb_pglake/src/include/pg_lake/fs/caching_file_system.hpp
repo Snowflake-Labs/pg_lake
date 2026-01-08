@@ -183,17 +183,39 @@ public:
 		if (pg_lakeHandle.context->interrupted)
 			throw InterruptException();
 
+		bool cleanupCacheOnWriteFile = false;
+
 		if (ShouldCacheOnWrite(pg_lakeHandle, byteCount))
 		{
-			pg_lakeHandle.cacheOnWriteHandle->Write(buffer, byteCount);
-			pg_lakeHandle.cacheOnWriteWrittenBytes += byteCount;
+			try
+			{
+				pg_lakeHandle.cacheOnWriteHandle->Write(buffer, byteCount);
+				pg_lakeHandle.cacheOnWriteWrittenBytes += byteCount;
+			}
+			catch (Exception &ex)
+			{
+				cleanupCacheOnWriteFile = true;
+
+				ErrorData error(ex);
+
+				PGDUCK_SERVER_LOG("Cannot continue cache-on-write for file %s, "
+								  "failed with an error %s",
+								  pg_lakeHandle.cacheOnWritePath.c_str(),
+								  error.Message().c_str());
+			}
 		}
 		else if (pg_lakeHandle.cacheOnWriteHandle != nullptr)
 		{
+			cleanupCacheOnWriteFile = true;
+		}
+
+		if (cleanupCacheOnWriteFile)
+		{
 			/*
 			 * We are disabling (and removing) cache-on-write
-			 * for this  file as the total bytes written is
-			 * greater than pg_lake_cache_on_write_max_size.
+			 * for this file as either (a) the total bytes
+			 * written is greater than pg_lake_cache_on_write_max_size
+			 * (b) Write to cache failed, most likely disk is full
 			 */
 			CleanUpCacheOnWriteFile(pg_lakeHandle);
 		}
