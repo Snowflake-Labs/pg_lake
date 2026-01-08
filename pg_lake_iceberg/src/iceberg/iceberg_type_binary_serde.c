@@ -26,7 +26,6 @@
 #include "pg_lake/iceberg/iceberg_type_binary_serde.h"
 #include "pg_lake/iceberg/iceberg_type_numeric_binary_serde.h"
 #include "pg_lake/iceberg/utils.h"
-#include "pg_lake/pgduck/write_data.h"
 
 #include "port/pg_bswap.h"
 #include "utils/builtins.h"

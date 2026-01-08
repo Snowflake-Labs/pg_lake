@@ -139,6 +139,7 @@ _PG_init(void)
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 
+
 	DefineCustomBoolVariable(
 							 "pg_lake_iceberg.http_client_trace_traffic",
 							 gettext_noop("When set to true, HTTP client logging is enabled."),

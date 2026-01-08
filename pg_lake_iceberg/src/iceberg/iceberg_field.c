@@ -46,7 +46,6 @@
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/pgduck/serialize.h"
 #include "pg_lake/pgduck/type.h"
-#include "pg_lake/pgduck/write_data.h"
 #include "pg_lake/util/string_utils.h"
 
 #include "access/table.h"

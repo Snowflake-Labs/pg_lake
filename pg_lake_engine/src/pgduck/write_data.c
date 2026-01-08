@@ -19,23 +19,18 @@
  * Functions for generating query for writing data via pgduck server.
  */
 #include "postgres.h"
-#include "fmgr.h"
 
 #include "access/tupdesc.h"
-#include "catalog/pg_type.h"
 #include "commands/defrem.h"
 #include "common/string.h"
-#include "executor/executor.h"
 #include "pg_lake/csv/csv_options.h"
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/data_file/data_file_stats.h"
-#include "pg_lake/extensions/pg_map.h"
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/parquet/geoparquet.h"
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/pgduck/client.h"
-#include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/pgduck/read_data.h"
 #include "pg_lake/pgduck/type.h"
@@ -61,6 +56,7 @@ static DuckDBTypeInfo VARCHAR_TYPE =
 
 int			TargetRowGroupSizeMB = DEFAULT_TARGET_ROW_GROUP_SIZE_MB;
 int			DefaultParquetVersion = PARQUET_VERSION_V1;
+
 
 /*
  * ConvertCSVFileTo copies and converts a CSV file at source path to

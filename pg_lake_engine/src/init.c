@@ -42,7 +42,6 @@
 #include "pg_lake/extensions/extension_ids.h"
 #include "pg_lake/pgduck/cache_worker.h"
 #include "pg_lake/pgduck/client.h"
-#include "pg_lake/pgduck/write_data.h"
 #include "utils/guc.h"
 
 PG_MODULE_MAGIC;
