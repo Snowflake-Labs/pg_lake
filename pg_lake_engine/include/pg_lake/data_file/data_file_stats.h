@@ -22,6 +22,7 @@
 #include "datatype/timestamp.h"
 
 #include "pg_lake/parquet/leaf_field.h"
+#include "pg_lake/pgduck/client.h"
 
  /*
   * DataFileColumnStats stores column statistics for a data file.
@@ -64,4 +65,22 @@ typedef struct DataFileStats
 	int64		rowIdStart;
 }			DataFileStats;
 
+typedef struct ColumnStatsCollector
+{
+	int64 totalRowCount;
+	List *dataFileStats;
+} ColumnStatsCollector;
+
 extern PGDLLEXPORT DataFileStats * DeepCopyDataFileStats(const DataFileStats * stats);
+extern PGDLLEXPORT ColumnStatsCollector *GetDataFileStatsListFromPGResult(PGresult *result,
+																		  List *leafFields,
+																		  DataFileSchema * schema);
+extern PGDLLEXPORT ColumnStatsCollector *ExecuteCopyCommandOnPGDuckConnection(char *copyCommand,
+																			  List *leafFields,
+																			  DataFileSchema * schema,
+																			  bool disablePreserveInsertionOrder,
+																			  CopyDataFormat destinationFormat);
+extern PGDLLEXPORT LeafField *FindLeafField(List *leafFieldList, int fieldId);
+extern PGDLLEXPORT bool ShouldSkipStatistics(LeafField * leafField);
+extern PGDLLEXPORT bool PGTypeRequiresConversionToIcebergString(Field * field, PGType pgType);
+

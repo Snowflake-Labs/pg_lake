@@ -20,6 +20,7 @@
 #include "access/tupdesc.h"
 #include "libpq-fe.h"
 #include "pg_lake/copy/copy_format.h"
+#include "pg_lake/data_file/data_file_stats.h"
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/parquet/leaf_field.h"
 #include "nodes/pg_list.h"
@@ -33,12 +34,6 @@ typedef enum ParquetVersion
 	PARQUET_VERSION_V1 = 1,
 	PARQUET_VERSION_V2 = 2
 } ParquetVersion;
-
-typedef struct ColumnStatsCollector
-{
-	int64 totalRowCount;
-	List *dataFileStats;
-} ColumnStatsCollector;
 
 /* pg_lake_table.default_parquet_version */
 extern PGDLLEXPORT int DefaultParquetVersion;
@@ -62,14 +57,3 @@ extern PGDLLEXPORT ColumnStatsCollector *WriteQueryResultTo(char *query,
 															TupleDesc queryTupleDesc,
 															List *leafFields);
 extern PGDLLEXPORT void AppendFields(StringInfo map, DataFileSchema * schema);
-extern PGDLLEXPORT ColumnStatsCollector *GetDataFileStatsListFromPGResult(PGresult *result,
-																		  List *leafFields,
-																		  DataFileSchema * schema);
-extern PGDLLEXPORT ColumnStatsCollector *ExecuteCopyCommandOnPGDuckConnection(char *copyCommand,
-																			  List *leafFields,
-																			  DataFileSchema * schema,
-																			  bool disablePreserveInsertionOrder,
-																			  CopyDataFormat destinationFormat);
-extern PGDLLEXPORT LeafField *FindLeafField(List *leafFieldList, int fieldId);
-extern PGDLLEXPORT bool ShouldSkipStatistics(LeafField * leafField);
-extern PGDLLEXPORT bool PGTypeRequiresConversionToIcebergString(Field * field, PGType pgType);
