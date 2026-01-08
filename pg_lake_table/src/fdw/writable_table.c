@@ -272,16 +272,12 @@ PrepareCSVInsertion(Oid relationId, char *insertCSV, int64 rowCount,
 
 	ApplyColumnStatsModeForAllFileStats(relationId, statsCollector->dataFileStats);
 
-	if (!splitFilesBySize)
+	if (!splitFilesBySize && statsCollector->dataFileStats == NIL)
 	{
-		/* early return a single modification if not splitting files by size */
-		DataFileModification *modification = palloc0(sizeof(DataFileModification));
-		modification->type = ADD_DATA_FILE;
-		modification->insertFile = dataFilePrefix;
-		modification->insertedRowCount = rowCount;
-		modification->reservedRowIdStart = reservedRowIdStart;
-
-		return list_make1(modification);
+		DataFileStats *stats = palloc0(sizeof(DataFileStats));
+		stats->dataFilePath = dataFilePrefix;
+		stats->rowCount = rowCount;
+		statsCollector->dataFileStats = list_make1(stats);
 	}
 
 	/*
