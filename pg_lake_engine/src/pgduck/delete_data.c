@@ -97,11 +97,12 @@ PerformDeleteFromParquet(char *sourcePath,
 	/* end WITH options */
 	appendStringInfoString(&command, ")");
 
-	return ExecuteCopyCommandOnPGDuckConnection(command.data,
-												leafFields,
-												schema,
-												false,
-												DATA_FORMAT_PARQUET);
+	return ExecuteCopyToCommandOnPGDuckConnection(command.data,
+												  leafFields,
+												  schema,
+												  false,
+												  destinationPath,
+												  DATA_FORMAT_PARQUET);
 }
 
 

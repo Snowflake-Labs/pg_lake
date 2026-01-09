@@ -24,6 +24,35 @@
 #include "pg_lake/parquet/leaf_field.h"
 #include "pg_lake/pgduck/client.h"
 
+
+/*
+ * ColumnStatsMode describes the mode of column stats.
+ * - When truncate mode (default) is used, the column stats are truncated
+ *   to the given length.
+ * - When none mode is used, the column stats are not collected.
+ */
+typedef enum ColumnStatsMode
+{
+	COLUMN_STATS_MODE_TRUNCATE = 0,
+	COLUMN_STATS_MODE_NONE = 1,
+}			ColumnStatsMode;
+
+/*
+ * ColumnStatsConfig describes the configuration for column stats.
+ * - mode: the mode of column stats.
+ * - truncateLen: the length to truncate the column stats in truncate mode.
+ */
+typedef struct ColumnStatsConfig
+{
+	ColumnStatsMode mode;
+
+	/* used for truncate mode */
+	size_t		truncateLen;
+}			ColumnStatsConfig;
+
+
+
+
  /*
   * DataFileColumnStats stores column statistics for a data file.
   */
@@ -75,9 +104,15 @@ extern PGDLLEXPORT DataFileStats * DeepCopyDataFileStats(const DataFileStats * s
 extern PGDLLEXPORT StatsCollector * GetDataFileStatsListFromPGResult(PGresult *result,
 																	 List *leafFields,
 																	 DataFileSchema * schema);
-extern PGDLLEXPORT StatsCollector * ExecuteCopyCommandOnPGDuckConnection(char *copyCommand,
-																		 List *leafFields,
-																		 DataFileSchema * schema,
-																		 bool disablePreserveInsertionOrder,
-																		 CopyDataFormat destinationFormat);
+extern PGDLLEXPORT StatsCollector * ExecuteCopyToCommandOnPGDuckConnection(char *copyCommand,
+																		   List *leafFields,
+																		   DataFileSchema * schema,
+																		   bool disablePreserveInsertionOrder,
+																		   char *destinationPath,
+																		   CopyDataFormat destinationFormat);
 extern PGDLLEXPORT bool ShouldSkipStatistics(LeafField * leafField);
+extern PGDLLEXPORT DataFileStats * CreateDataFileStatsForDataFile(char *dataFilePath,
+																  int64 rowCount, int64 deletedRowCount,
+																  List *leafFields);
+extern PGDLLEXPORT void ApplyColumnStatsModeForAllFileStats(Oid relationId, List *dataFileStats);
+extern PGDLLEXPORT List *GetRemoteParquetColumnStats(char *path, List *leafFields);
