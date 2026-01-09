@@ -578,15 +578,20 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 
 			InsertInProgressFileRecordExtended(deletionFilePath, isPrefix, deferDeletion);
 
+			List *leafFields = GetLeafFieldsForTable(relationId);
 			/* write the deletion file */
-			ConvertCSVFileTo(deleteFile, deleteTupleDesc, -1, deletionFilePath,
-							 DATA_FORMAT_PARQUET, compression, copyOptions, schema, NIL);
+			ColumnStatsCollector *statsCollector =
+				ConvertCSVFileTo(deleteFile, deleteTupleDesc, -1, deletionFilePath,
+								 DATA_FORMAT_PARQUET, compression, copyOptions, schema, leafFields);
 
 			ereport(WriteLogLevel, (errmsg("adding deletion file %s with " INT64_FORMAT " rows ",
 										   deletionFilePath, deletedRowCount)));
 
-			DataFileStats *deletionFileStats = CreateDataFileStatsForTable(relationId, deletionFilePath,
-																		   deletedRowCount, 0, CONTENT_POSITION_DELETES);
+			/*
+			 * ConvertCSVFileTo() does not use file_bytes_size so we can assume single file 
+			 */
+            Assert(list_length(statsCollector->dataFileStats) == 1);
+			DataFileStats *deletionFileStats = linitial(statsCollector->dataFileStats);
 
 			/*
 			 * We are adding position delete file with the same partition
