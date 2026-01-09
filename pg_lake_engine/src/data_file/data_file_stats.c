@@ -20,6 +20,7 @@
 #include "executor/executor.h"
 #include "pg_lake/data_file/data_files.h"
 #include "pg_lake/data_file/data_file_stats.h"
+#include "pg_lake/extensions/pg_lake_engine.h"
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/pgduck/client.h"
@@ -111,6 +112,19 @@ ExecuteCopyToCommandOnPGDuckConnection(char *copyCommand,
 		{
 			char	   *commandTuples = PQcmdTuples(result);
 			int64		totalRowCount = atoll(commandTuples);
+
+#ifdef USE_ASSERT_CHECKING
+			if (EnableHeavyAsserts)
+			{
+				List	   *remoteFiles = ListRemoteFileNames(destinationPath);
+
+				if (list_length(remoteFiles) != 1)
+				{
+					ereport(ERROR, (errmsg("expected exactly one file at %s, found %d files",
+										   destinationPath, list_length(remoteFiles))));
+				}
+			}
+#endif
 
 			DataFileStats *fileStats = CreateDataFileStatsForDataFile(destinationPath,
 																	  totalRowCount,
