@@ -24,6 +24,7 @@
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/csv/csv_options.h"
 #include "pg_lake/csv/csv_writer.h"
+#include "pg_lake/data_file/data_file_stats.h"
 #include "pg_lake/fdw/data_files_catalog.h"
 #include "pg_lake/fdw/multi_data_file_dest.h"
 #include "pg_lake/fdw/writable_table.h"
@@ -234,6 +235,7 @@ FlushChildDestReceiver(MultiDataFileUploadDestReceiver * self)
 
 		copyModification->partitionSpecId = self->currentPartitionSpecId;
 		copyModification->partition = modification->partition;
+		copyModification->fileStats = DeepCopyDataFileStats(modification->fileStats);
 
 		/*
 		 * If caller of dest receiver is assigning rowids itself,

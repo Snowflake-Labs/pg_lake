@@ -51,6 +51,8 @@ typedef struct LeafField
 
 extern PGDLLEXPORT int LeafFieldCompare(const ListCell *a, const ListCell *b);
 extern PGDLLEXPORT bool SchemaFieldsEquivalent(DataFileSchemaField * fieldA, DataFileSchemaField * fieldB);
+extern PGDLLEXPORT LeafField DeepCopyLeafField(const LeafField * leafField);
+extern PGDLLEXPORT LeafField * FindLeafField(List *leafFieldList, int fieldId);
 #if PG_VERSION_NUM < 170000
 extern PGDLLEXPORT int pg_cmp_s32(int32 a, int32 b);
 #endif

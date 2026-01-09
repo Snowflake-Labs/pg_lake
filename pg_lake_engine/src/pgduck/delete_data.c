@@ -47,14 +47,15 @@ static char *DeleteFromParquetQuery(char *sourceDataFilePath,
  * PerformDeleteFromParquet applies a deletion CSV file to a Parquet file
  * and writes the new Parquet file to destinationPath.
  */
-void
+StatsCollector *
 PerformDeleteFromParquet(char *sourcePath,
 						 List *positionDeleteFiles,
 						 char *deletionFilePath,
 						 char *destinationPath,
 						 CopyDataCompression destinationCompression,
 						 DataFileSchema * schema,
-						 ReadDataStats * stats)
+						 ReadDataStats * stats,
+						 List *leafFields)
 {
 	const char *remainderQuery =
 		DeleteFromParquetQuery(sourcePath, positionDeleteFiles, deletionFilePath, schema, stats);
@@ -91,10 +92,17 @@ PerformDeleteFromParquet(char *sourcePath,
 		appendStringInfoString(&command, "}");
 	}
 
+	appendStringInfoString(&command, ", return_stats");
+
 	/* end WITH options */
 	appendStringInfoString(&command, ")");
 
-	ExecuteCommandInPGDuck(command.data);
+	return ExecuteCopyToCommandOnPGDuckConnection(command.data,
+												  leafFields,
+												  schema,
+												  false,
+												  destinationPath,
+												  DATA_FORMAT_PARQUET);
 }
 
 

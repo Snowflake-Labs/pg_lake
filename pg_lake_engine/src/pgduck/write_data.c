@@ -25,6 +25,7 @@
 #include "common/string.h"
 #include "pg_lake/csv/csv_options.h"
 #include "pg_lake/copy/copy_format.h"
+#include "pg_lake/data_file/data_file_stats.h"
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/parquet/geoparquet.h"
@@ -63,13 +64,14 @@ int			DefaultParquetVersion = PARQUET_VERSION_V1;
  *
  * The CSV was generated using COPY ... TO '<csvFilePath>'
  */
-void
+StatsCollector *
 ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 				 char *destinationPath,
 				 CopyDataFormat destinationFormat,
 				 CopyDataCompression destinationCompression,
 				 List *formatOptions,
-				 DataFileSchema * schema)
+				 DataFileSchema * schema,
+				 List *leafFields)
 {
 	StringInfoData command;
 
@@ -132,14 +134,15 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 
 	bool		queryHasRowIds = false;
 
-	WriteQueryResultTo(command.data,
-					   destinationPath,
-					   destinationFormat,
-					   destinationCompression,
-					   formatOptions,
-					   queryHasRowIds,
-					   schema,
-					   csvTupleDesc);
+	return WriteQueryResultTo(command.data,
+							  destinationPath,
+							  destinationFormat,
+							  destinationCompression,
+							  formatOptions,
+							  queryHasRowIds,
+							  schema,
+							  csvTupleDesc,
+							  leafFields);
 }
 
 
@@ -148,7 +151,7 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
  * destinationPath. There may be multiple files if file_size_bytes
  * is specified in formatOptions.
  */
-int64
+StatsCollector *
 WriteQueryResultTo(char *query,
 				   char *destinationPath,
 				   CopyDataFormat destinationFormat,
@@ -156,7 +159,8 @@ WriteQueryResultTo(char *query,
 				   List *formatOptions,
 				   bool queryHasRowId,
 				   DataFileSchema * schema,
-				   TupleDesc queryTupleDesc)
+				   TupleDesc queryTupleDesc,
+				   List *leafFields)
 {
 	StringInfoData command;
 
@@ -252,6 +256,8 @@ WriteQueryResultTo(char *query,
 
 				appendStringInfo(&command, ", parquet_version '%s'",
 								 ParquetVersionToString(DefaultParquetVersion));
+
+				appendStringInfo(&command, ", return_stats");
 
 				break;
 			}
@@ -386,27 +392,14 @@ WriteQueryResultTo(char *query,
 	/* end WITH options */
 	appendStringInfoString(&command, ")");
 
-	if (TargetRowGroupSizeMB > 0)
-	{
-		/*
-		 * preserve_insertion_order=false reduces memory consumption during
-		 * COPY <query> TO when an explicit ORDER BY not specified in the
-		 * query. It is helpful for csv and json formats as well but for
-		 * simplicity we use the same setting TargetRowGroupSizeMB for all
-		 * formats.
-		 */
-		List	   *commands = list_make3("SET preserve_insertion_order TO 'false';",
-										  command.data,
-										  "RESET preserve_insertion_order;");
+	bool		disablePreserveInsertionOrder = TargetRowGroupSizeMB > 0;
 
-		List	   *rowsAffected = ExecuteCommandsInPGDuck(commands);
-
-		return list_nth_int(rowsAffected, 1);
-	}
-	else
-	{
-		return ExecuteCommandInPGDuck(command.data);
-	}
+	return ExecuteCopyToCommandOnPGDuckConnection(command.data,
+												  leafFields,
+												  schema,
+												  disablePreserveInsertionOrder,
+												  destinationPath,
+												  destinationFormat);
 }
 
 

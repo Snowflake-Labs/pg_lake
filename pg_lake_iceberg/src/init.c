@@ -48,6 +48,8 @@ int			IcebergAutovacuumNaptime = 10 * 60;
 /* managed via pg_lake_iceberg.log_autovacuum_min_duration, 10 minutes */
 int			IcebergAutovacuumLogMinDuration = 600000;
 
+static bool DeprecatedEnableStatsCollectionForNestedTypes;
+
 static bool IcebergDefaultLocationCheckHook(char **newvalue, void **extra, GucSource source);
 
 /* function declarations */
@@ -133,7 +135,7 @@ _PG_init(void)
 										  "still get into stats problems with nested types due to parsing "
 										  "discrepancies between Postgres and DuckDB."),
 							 NULL,
-							 &EnableStatsCollectionForNestedTypes,
+							 &DeprecatedEnableStatsCollectionForNestedTypes,
 							 false,
 							 PGC_SUSET,
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
@@ -237,7 +239,7 @@ _PG_init(void)
 							   GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							   NULL, NULL, NULL);
 
-    DefineCustomStringVariable("pg_lake_iceberg.rest_catalog_oauth_host_path",
+	DefineCustomStringVariable("pg_lake_iceberg.rest_catalog_oauth_host_path",
 							   NULL,
 							   NULL,
 							   &RestCatalogOauthHostPath,

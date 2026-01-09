@@ -21,10 +21,10 @@
 #include "miscadmin.h"
 
 #include "pg_lake/data_file/data_files.h"
+#include "pg_lake/data_file/data_file_stats.h"
 #include "pg_lake/extensions/pg_lake_table.h"
 #include "pg_lake/fdw/data_files_catalog.h"
 #include "pg_lake/fdw/data_file_stats_catalog.h"
-#include "pg_lake/fdw/data_file_stats.h"
 #include "pg_lake/util/spi_helpers.h"
 
 #include "catalog/namespace.h"

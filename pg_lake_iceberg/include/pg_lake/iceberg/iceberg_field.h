@@ -23,16 +23,12 @@
 #include "pg_lake/pgduck/type.h"
 #include "pg_lake/parquet/leaf_field.h"
 
-extern bool EnableStatsCollectionForNestedTypes;
-
 extern PGDLLEXPORT PGType IcebergFieldToPostgresType(Field * field);
 extern PGDLLEXPORT Field * PostgresTypeToIcebergField(PGType pgType,
 													  bool forAddColumn,
 													  int *subFieldIndex);
 extern PGDLLEXPORT void EnsureIcebergField(Field * field);
 extern PGDLLEXPORT const char *IcebergTypeNameToDuckdbTypeName(const char *icebergTypeName);
-extern PGDLLEXPORT bool PGTypeRequiresConversionToIcebergString(Field * field, PGType pgType);
 extern PGDLLEXPORT DataFileSchema * CreatePositionDeleteDataFileSchema(void);
 extern PGDLLEXPORT const char *GetIcebergJsonSerializedDefaultExpr(TupleDesc tupdesc, AttrNumber attnum,
 																   FieldStructElement * structElementField);
-extern PGDLLEXPORT List *GetRemoteParquetColumnStats(char *path, List *leafFields);

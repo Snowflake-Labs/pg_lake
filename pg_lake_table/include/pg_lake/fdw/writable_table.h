@@ -76,6 +76,7 @@ typedef struct DataFileModification
 
 	/* if the caller already reserved a row ID range, where does it start? */
 	int64		reservedRowIdStart;
+	DataFileStats *fileStats;
 }			DataFileModification;
 
 

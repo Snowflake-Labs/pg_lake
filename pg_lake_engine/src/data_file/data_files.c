@@ -17,6 +17,7 @@
 
 #include "postgres.h"
 #include "pg_lake/data_file/data_files.h"
+#include "pg_lake/parquet/leaf_field.h"
 #include "pg_lake/util/string_utils.h"
 
 /*
@@ -109,4 +110,41 @@ AddRowIdMappingOperation(const char *dataFilePath, List *rowIdRanges)
 	operation->rowIdRanges = rowIdRanges;
 
 	return operation;
+}
+
+/*
+ * DeepCopyDataFileStats deep copies a DataFileSchema.
+ */
+DataFileStats *
+DeepCopyDataFileStats(const DataFileStats * stats)
+{
+	DataFileStats *copiedStats = palloc0(sizeof(DataFileStats));
+
+	copiedStats->dataFilePath = pstrdup(stats->dataFilePath);
+	copiedStats->fileSize = stats->fileSize;
+	copiedStats->rowCount = stats->rowCount;
+	copiedStats->deletedRowCount = stats->deletedRowCount;
+	copiedStats->creationTime = stats->creationTime;
+	copiedStats->rowIdStart = stats->rowIdStart;
+
+	/* Deep copy column stats list */
+	if (stats->columnStats != NULL)
+	{
+		copiedStats->columnStats = NIL;
+		ListCell   *cell = NULL;
+
+		foreach(cell, stats->columnStats)
+		{
+			DataFileColumnStats *colStats = lfirst(cell);
+			DataFileColumnStats *copiedColStats = palloc0(sizeof(DataFileColumnStats));
+
+			copiedColStats->leafField = DeepCopyLeafField(&colStats->leafField);
+			copiedColStats->lowerBoundText = colStats->lowerBoundText ? pstrdup(colStats->lowerBoundText) : NULL;
+			copiedColStats->upperBoundText = colStats->upperBoundText ? pstrdup(colStats->upperBoundText) : NULL;
+
+			copiedStats->columnStats = lappend(copiedStats->columnStats, copiedColStats);
+		}
+	}
+
+	return copiedStats;
 }
