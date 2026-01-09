@@ -369,7 +369,7 @@ GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields
 
 		int			nameIndex = fieldIndex;
 
-		LeafField  *leafField = FindLeafField(leafFields, fieldId);
+		LeafField  *leafField = list_nth(leafFields, fieldIndex);
 
 		if (leafField == NULL)
 		{
