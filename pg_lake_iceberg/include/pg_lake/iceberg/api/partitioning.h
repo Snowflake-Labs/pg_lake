@@ -19,6 +19,7 @@
 
 #include "postgres.h"
 
+#include "pg_lake/iceberg/metadata_spec.h"
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/pgduck/type.h"
 #include "access/attnum.h"
@@ -51,14 +52,7 @@ typedef struct IcebergPartitionTransform
 		size_t		truncateLen;
 	};
 
-	/* partition field id */
-	int32_t		partitionFieldId;
-
-	/* <columnName>_<transformName>, e.g. a_bucket */
-	const char *partitionFieldName;
-
-	/* transform name, e.g. bucket[3] */
-	const char *transformName;
+	IcebergPartitionSpecField *specField;
 
 	/* source field of the column to which transform applies */
 	DataFileSchemaField *sourceField;

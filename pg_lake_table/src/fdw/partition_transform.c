@@ -162,7 +162,7 @@ PartitionTransformsEqual(IcebergPartitionSpec * spec, List *partitionTransforms)
 		 * Iceberg does here:
 		 * https://github.com/apache/iceberg/blob/8b55ac834015ce664f879ecfe1e80a941a994420/api/src/main/java/org/apache/iceberg/PartitionSpec.java#L239-L259
 		 */
-		if (strcasecmp(specField->name, transform->partitionFieldName) != 0)
+		if (strcasecmp(specField->name, transform->specField->name) != 0)
 		{
 			return false;
 		}
@@ -251,9 +251,7 @@ GetPartitionTransformFromSpecField(Oid relationId, IcebergPartitionSpecField * s
 {
 	IcebergPartitionTransform *transform = palloc0(sizeof(IcebergPartitionTransform));
 
-	transform->partitionFieldId = specField->field_id;
-	transform->partitionFieldName = pstrdup(specField->name);
-	transform->transformName = pstrdup(specField->transform);
+	transform->specField = specField;
 
 	transform->attnum =
 		GetAttributeForFieldId(relationId, specField->source_id);
@@ -274,7 +272,7 @@ GetPartitionTransformFromSpecField(Oid relationId, IcebergPartitionSpecField * s
 	}
 
 	/* parse transform name */
-	ParseTransformName(transform->transformName,
+	ParseTransformName(transform->specField->transform,
 					   &transform->type,
 					   &transform->bucketCount,
 					   &transform->truncateLen);
@@ -413,8 +411,8 @@ ApplyPartitionTransformToTuple(IcebergPartitionTransform * transform, TupleTable
 {
 	PartitionField *field = palloc0(sizeof(PartitionField));
 
-	field->field_name = pstrdup(transform->partitionFieldName);
-	field->field_id = transform->partitionFieldId;
+	field->field_name = pstrdup(transform->specField->name);
+	field->field_id = transform->specField->field_id;
 
 	bool		isNull = false;
 	Datum		columnValue = slot_getattr(slot, transform->attnum, &isNull);
@@ -453,7 +451,7 @@ ApplyPartitionTransformToTuple(IcebergPartitionTransform * transform, TupleTable
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("applying transform %s is not yet support ",
-							transform->transformName)));
+							transform->specField->transform)));
 	}
 
 	field->value_type = GetTransformResultAvroType(transform);

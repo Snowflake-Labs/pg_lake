@@ -60,27 +60,7 @@ BuildPartitionSpecFromPartitionTransforms(Oid relationId, List *partitionTransfo
 	{
 		IcebergPartitionTransform *transform = lfirst(transformCell);
 
-		IcebergPartitionSpecField *field = palloc0(sizeof(IcebergPartitionSpecField));
-
-		field->source_id = transform->sourceField->id;
-
-		/*
-		 * We do not support partition transforms on multi columns (v3
-		 * feature), and to comply with the iceberg spec/reference
-		 * implementation for v2, we still fill the source_ids array.
-		 */
-		field->source_ids_length = 1;
-		field->source_ids = palloc0(sizeof(int) * field->source_ids_length);
-		field->source_ids[0] = transform->sourceField->id;
-
-		field->field_id = transform->partitionFieldId;
-
-		field->name = pstrdup(transform->partitionFieldName);
-		field->name_length = strlen(transform->partitionFieldName);
-		field->transform = pstrdup(transform->transformName);
-		field->transform_length = strlen(transform->transformName);
-
-		spec->fields[fieldIndex] = *field;
+		spec->fields[fieldIndex] = *(transform->specField);
 		fieldIndex++;
 	}
 
