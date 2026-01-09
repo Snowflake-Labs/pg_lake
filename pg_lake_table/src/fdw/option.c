@@ -33,6 +33,7 @@
 #include "catalog/pg_foreign_table.h"
 #include "commands/defrem.h"
 #include "commands/extension.h"
+#include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/partitioning/partition_by_parser.h"
 #include "pg_lake/permissions/roles.h"
 #include "pg_lake/copy/copy_format.h"
@@ -721,7 +722,7 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 			 * We only accept "rest" and "postgres" for now. If not provided,
 			 * assume "postgres" by default. Don't allow anything.
 			 */
-			if (strcmp(icebergCatalogName, "rest") == 0)
+			if (pg_strncasecmp(icebergCatalogName, REST_CATALOG_NAME, strlen(icebergCatalogName)) == 0)
 			{
 				/*
 				 * at this point, we cannot tell whether it's read only or
@@ -730,7 +731,7 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 				 */
 				icebergCatalogType = REST_CATALOG_READ_ONLY;
 			}
-			else if (strcmp(icebergCatalogName, "object_store") == 0)
+			else if (pg_strncasecmp(icebergCatalogName, OBJECT_STORE_CATALOG_NAME, strlen(icebergCatalogName)) == 0)
 			{
 
 				/*
@@ -740,13 +741,13 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 				 */
 				icebergCatalogType = OBJECT_STORE_READ_ONLY;
 			}
-			else if (strcmp(icebergCatalogName, "postgres") == 0)
+			else if (pg_strncasecmp(icebergCatalogName, POSTGRES_CATALOG_NAME, strlen(icebergCatalogName)) == 0)
 				icebergCatalogType = POSTGRES_CATALOG;
 			else
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 						 errmsg("invalid catalog option: %s", icebergCatalogName),
-						 errdetail("Only \"rest\" and \"postgres\" are supported for now.")));
+						 errdetail("Only " REST_CATALOG_NAME " and " POSTGRES_CATALOG_NAME " are supported for now.")));
 		}
 		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "read_only") == 0)
 		{

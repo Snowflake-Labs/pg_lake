@@ -52,11 +52,11 @@ def test_writable_rest_basic_flow(
 
     run_command(f"""CREATE SCHEMA test_writable_rest_basic_flow""", pg_conn)
     run_command(
-        f"""CREATE TABLE test_writable_rest_basic_flow.writable_rest USING iceberg WITH (catalog='rest') AS SELECT 100 AS a""",
+        f"""CREATE TABLE test_writable_rest_basic_flow.writable_rest USING iceberg WITH (catalog='REST') AS SELECT 100 AS a""",
         pg_conn,
     )
     run_command(
-        f"""CREATE TABLE test_writable_rest_basic_flow.writable_rest_2 USING iceberg WITH (catalog='rest') AS SELECT 1000 AS a""",
+        f"""CREATE TABLE test_writable_rest_basic_flow.writable_rest_2 USING iceberg WITH (catalog='rEst') AS SELECT 1000 AS a""",
         pg_conn,
     )
 
@@ -195,8 +195,9 @@ def test_writable_rest_ddl(
         return
 
     run_command(f"""CREATE SCHEMA test_writable_rest_ddl""", pg_conn)
+    run_command("SET pg_lake_iceberg.default_catalog TO 'rest'", pg_conn)
     run_command(
-        f"""CREATE TABLE test_writable_rest_ddl.writable_rest USING iceberg WITH (catalog='rest') AS SELECT 100 AS a""",
+        f"""CREATE TABLE test_writable_rest_ddl.writable_rest USING iceberg AS SELECT 100 AS a""",
         pg_conn,
     )
     run_command(
@@ -205,7 +206,7 @@ def test_writable_rest_ddl(
     )
 
     run_command(
-        f"""CREATE TABLE test_writable_rest_ddl.writable_rest_3 USING iceberg WITH (catalog='rest', partition_by='a') AS SELECT 10000 AS a UNION SELECT 10001 as a""",
+        f"""CREATE TABLE test_writable_rest_ddl.writable_rest_3 USING iceberg WITH (partition_by='a') AS SELECT 10000 AS a UNION SELECT 10001 as a""",
         pg_conn,
     )
 
@@ -217,7 +218,7 @@ def test_writable_rest_ddl(
     )
     pg_conn.commit()
     run_command(
-        f"""CREATE TABLE test_writable_rest_ddl.readable_rest_1() USING iceberg WITH (catalog='rest', read_only=True, catalog_table_name='writable_rest')""",
+        f"""CREATE TABLE test_writable_rest_ddl.readable_rest_1() USING iceberg WITH (read_only=True, catalog_table_name='writable_rest')""",
         pg_conn,
     )
 
@@ -244,7 +245,7 @@ def test_writable_rest_ddl(
     )
     pg_conn.commit()
     run_command(
-        f"""CREATE TABLE test_writable_rest_ddl.readable_rest_2() USING iceberg WITH (catalog='rest', read_only=True, catalog_table_name='writable_rest')""",
+        f"""CREATE TABLE test_writable_rest_ddl.readable_rest_2() USING iceberg WITH (read_only=True, catalog_table_name='writable_rest')""",
         pg_conn,
     )
 
@@ -289,7 +290,7 @@ def test_writable_rest_ddl(
     )
     pg_conn.commit()
     run_command(
-        f"""CREATE TABLE test_writable_rest_ddl.readable_rest_3() USING iceberg WITH (catalog='rest', read_only=True, catalog_table_name='writable_rest')""",
+        f"""CREATE TABLE test_writable_rest_ddl.readable_rest_3() USING iceberg WITH (read_only=True, catalog_table_name='writable_rest')""",
         pg_conn,
     )
 
@@ -306,7 +307,7 @@ def test_writable_rest_ddl(
     assert columns[5][0] == "f"
 
     run_command(
-        f"""CREATE TABLE test_writable_rest_ddl.readable_rest_4() USING iceberg WITH (catalog='rest', read_only=True, catalog_table_name='writable_rest_2')""",
+        f"""CREATE TABLE test_writable_rest_ddl.readable_rest_4() USING iceberg WITH (read_only=True, catalog_table_name='writable_rest_2')""",
         pg_conn,
     )
 
@@ -340,7 +341,7 @@ def test_writable_rest_ddl(
     )
 
     run_command(
-        f"""CREATE TABLE test_writable_rest_ddl.readable_rest_5() USING iceberg WITH (catalog='rest', read_only=True, catalog_table_name='writable_rest')""",
+        f"""CREATE TABLE test_writable_rest_ddl.readable_rest_5() USING iceberg WITH (read_only=True, catalog_table_name='writable_rest')""",
         pg_conn,
     )
 
@@ -374,11 +375,11 @@ def test_writable_rest_ddl(
     )
     pg_conn.commit()
     run_command(
-        f"""CREATE TABLE test_writable_rest_ddl.readable_rest_6() USING iceberg WITH (catalog='rest', read_only=True, catalog_table_name='writable_rest_2')""",
+        f"""CREATE TABLE test_writable_rest_ddl.readable_rest_6() USING iceberg WITH (read_only=True, catalog_table_name='writable_rest_2')""",
         pg_conn,
     )
     run_command(
-        f"""CREATE TABLE test_writable_rest_ddl.readable_rest_7() USING iceberg WITH (catalog='rest', read_only=True, catalog_table_name='writable_rest')""",
+        f"""CREATE TABLE test_writable_rest_ddl.readable_rest_7() USING iceberg WITH (read_only=True, catalog_table_name='writable_rest')""",
         pg_conn,
     )
 
@@ -413,6 +414,7 @@ def test_writable_rest_ddl(
 
     run_command(f"""DROP SCHEMA test_writable_rest_ddl CASCADE""", pg_conn)
     pg_conn.commit()
+    run_command("RESET pg_lake_iceberg.default_catalog", pg_conn)
 
 
 @pytest.mark.parametrize(
@@ -433,10 +435,11 @@ def test_writable_rest_vacuum(
 
     if installcheck:
         return
+    run_command("SET pg_lake_iceberg.default_catalog TO 'REST'", pg_conn)
 
     run_command(f"""CREATE SCHEMA test_writable_rest_vacuum""", pg_conn)
     run_command(
-        f"""CREATE TABLE test_writable_rest_vacuum.writable_rest USING iceberg WITH (catalog='rest', autovacuum_enabled=False) AS SELECT 100 AS a""",
+        f"""CREATE TABLE test_writable_rest_vacuum.writable_rest USING iceberg WITH (autovacuum_enabled=False) AS SELECT 100 AS a""",
         pg_conn,
     )
     pg_conn.commit()
@@ -517,6 +520,8 @@ def test_writable_rest_vacuum(
 
     # ensure dropping schema drops the table properly
     ensure_table_dropped("test_writable_rest_vacuum", "writable_rest", superuser_conn)
+
+    run_command("RESET pg_lake_iceberg.default_catalog", pg_conn)
 
 
 def test_writable_drop_table(

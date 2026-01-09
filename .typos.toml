@@ -21,6 +21,7 @@ extend-exclude = [
     "*.avro",
     "*.spec",
     "*.out",
+    "pg_lake_table/tests/pytests/test_object_store_catalog.py"
 ]
 
 [default.extend-identifiers]

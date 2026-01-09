@@ -8,7 +8,8 @@ def test_alter_table_set_schema(pg_conn, s3, extension, with_default_location):
     run_command("CREATE SCHEMA second_schema;", pg_conn)
 
     run_command(
-        "CREATE TABLE first_schema.test_table (a int, b int) USING iceberg", pg_conn
+        "CREATE TABLE first_schema.test_table (a int, b int) USING iceberg WITH (catalog='postgres')",
+        pg_conn,
     )
     run_command(
         "INSERT INTO first_schema.test_table SELECT i,i FROM generate_series(0,9)i",
@@ -70,7 +71,8 @@ def test_alter_table_rename(pg_conn, s3, extension, with_default_location):
     run_command("CREATE SCHEMA first_schema;", pg_conn)
 
     run_command(
-        "CREATE TABLE first_schema.test_table (a int, b int) USING iceberg", pg_conn
+        "CREATE TABLE first_schema.test_table (a int, b int) USING iceberg WITH (catalog='Postgres')",
+        pg_conn,
     )
     run_command(
         "INSERT INTO first_schema.test_table SELECT i,i FROM generate_series(0,9)i",
@@ -131,6 +133,7 @@ def test_alter_table_rename(pg_conn, s3, extension, with_default_location):
 
 
 def test_alter_schema_rename(pg_conn, s3, extension, with_default_location):
+    run_command("SET pg_lake_iceberg.default_catalog TO 'POSTGRES'", pg_conn)
 
     run_command("CREATE SCHEMA first_schema;", pg_conn)
 
@@ -179,12 +182,15 @@ def test_alter_schema_rename(pg_conn, s3, extension, with_default_location):
     assert results[0][0] == "second_schema"
 
     pg_conn.rollback()
+    run_command("RESET pg_lake_iceberg.default_catalog", pg_conn)
 
 
 def test_alter_database_rename(superuser_conn, s3, extension, with_default_location):
     location = f"s3://{TEST_BUCKET}/test_alter_database_rename/"
     dbname = "db_to_rename"
     superuser_conn.autocommit = True
+    run_command("SET pg_lake_iceberg.default_catalog TO 'postgres'", superuser_conn)
+
     run_command(f"CREATE DATABASE {dbname};", superuser_conn)
 
     conn_to_db = open_pg_conn_to_db(dbname)
@@ -210,6 +216,8 @@ def test_alter_database_rename(superuser_conn, s3, extension, with_default_locat
 
     superuser_conn.autocommit = True
     run_command(f"DROP DATABASE {dbname}_new WITH (FORCE);", superuser_conn)
+    run_command("RESET pg_lake_iceberg.default_catalog", superuser_conn)
+
     superuser_conn.autocommit = False
 
 

@@ -21,11 +21,18 @@
 
 #include "pg_lake/util/rel_utils.h"
 
+
 /*
  * Default location prefix for pg_lake_iceberg tables. Used when the location
  * option is not specified at "CREATE FOREIGN SERVER pg_lake_iceberg OPTIONS ()".
  */
 extern char *IcebergDefaultLocationPrefix;
+
+/*
+ * Default catalog pg_lake_iceberg tables. Used when the catalog
+ * option is not specified at "CREATE TABLE ... USING iceberg (catalog=)".
+ */
+extern PGDLLEXPORT char *IcebergDefaultCatalog;
 
 
 /*

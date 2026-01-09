@@ -76,7 +76,7 @@ HasRestCatalogTableOption(List *options)
 {
 	char	   *catalog = GetStringOption(options, "catalog", false);
 
-	return catalog ? strncasecmp(catalog, "rest", strlen("rest")) == 0 : false;
+	return catalog ? pg_strncasecmp(catalog, REST_CATALOG_NAME, strlen(catalog)) == 0 : false;
 }
 
 
@@ -89,7 +89,7 @@ HasObjectStoreCatalogTableOption(List *options)
 {
 	char	   *catalog = GetStringOption(options, "catalog", false);
 
-	return catalog ? strncasecmp(catalog, "object_store", strlen("object_store")) == 0 : false;
+	return catalog ? pg_strncasecmp(catalog, OBJECT_STORE_CATALOG_NAME, strlen(catalog)) == 0 : false;
 }
 
 
@@ -102,5 +102,5 @@ HasReadOnlyOption(List *options)
 {
 	char	   *readOnly = GetStringOption(options, "read_only", false);
 
-	return readOnly ? strncasecmp(readOnly, "true", strlen("true")) == 0 : false;
+	return readOnly ? pg_strncasecmp(readOnly, "true", strlen("true")) == 0 : false;
 }

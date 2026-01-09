@@ -17,6 +17,12 @@
 
 #pragma once
 
+/*
+* The allowed values for IcebergDefaultCatalog, case insensitive.
+*/
+#define POSTGRES_CATALOG_NAME "postgres"
+#define OBJECT_STORE_CATALOG_NAME "object_store"
+#define REST_CATALOG_NAME "rest"
 
 typedef enum IcebergCatalogType
 {

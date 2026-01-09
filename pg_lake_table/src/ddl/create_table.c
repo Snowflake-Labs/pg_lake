@@ -655,6 +655,15 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 	if (params->readOnlyTree)
 		createStmt = (CreateForeignTableStmt *) CopyUtilityStmt(params);
 
+	DefElem    *catalogOption = GetOption(createStmt->options, "catalog");
+
+	if (catalogOption == NULL)
+	{
+		DefElem    *defaultCatalog = makeDefElem("catalog", (Node *) makeString(IcebergDefaultCatalog), -1);
+
+		createStmt->options = lappend(createStmt->options, defaultCatalog);
+	}
+
 	bool		hasRestCatalogOption = HasRestCatalogTableOption(createStmt->options);
 	bool		hasObjectStoreCatalogOption = HasObjectStoreCatalogTableOption(createStmt->options);
 
@@ -760,7 +769,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 			{
 				ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 								errmsg("writable %s catalog iceberg tables do not "
-									   "allow explicit catalog options", hasObjectStoreCatalogOption ? "object store" : "REST")));
+									   "allow explicit catalog options", hasObjectStoreCatalogOption ? OBJECT_STORE_CATALOG_NAME : REST_CATALOG_NAME)));
 			}
 		}
 		else if (createStmt->base.tableElts == NIL && hasExternalCatalogReadOnlyOption)
@@ -813,15 +822,6 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		SetDefaultPrecisionAndScaleForUnboundedNumericColumns(createStmt->base.tableElts);
 	}
 
-	DefElem    *catalogOption = GetOption(createStmt->options, "catalog");
-
-	if (catalogOption == NULL)
-	{
-		DefElem    *defaultCatalog = makeDefElem("catalog", (Node *) makeString("postgres"), -1);
-
-		createStmt->options = lappend(createStmt->options, defaultCatalog);
-	}
-
 	DefElem    *locationOption = GetOption(createStmt->options, "location");
 	char	   *defaultLocationPrefix = GetIcebergDefaultLocationPrefix();
 
@@ -832,7 +832,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		if (objectStoreCatalogLocationPrefix == NULL)
 		{
 			ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-							errmsg("object store catalog iceberg tables require "
+							errmsg(OBJECT_STORE_CATALOG_NAME " catalog iceberg tables require "
 								   "pg_lake_iceberg.object_store_catalog_location_prefix "
 								   "to be set")));
 		}
@@ -840,7 +840,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		if (InternalObjectStorePrefix == NULL)
 		{
 			ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-							errmsg("object store catalog iceberg tables require "
+							errmsg(OBJECT_STORE_CATALOG_NAME " catalog iceberg tables require "
 								   "pg_lake_iceberg.internal_iceberg_storage_prefix "
 								   "to be set")));
 		}

@@ -31,7 +31,7 @@ def test_writable_object_store_catalog_options(
 
         err = run_command(query, pg_conn, raise_error=False)
         assert (
-            "writable object store catalog iceberg tables do not allow explicit"
+            "writable object_store catalog iceberg tables do not allow explicit"
             in str(err)
         )
         pg_conn.rollback()
@@ -54,7 +54,7 @@ def test_writable_object_store_without_default_location_guc(pg_conn, s3, extensi
 
     err = run_command(query, pg_conn, raise_error=False)
     assert (
-        "object store catalog iceberg tables require pg_lake_iceberg.object_store_catalog_location_prefix"
+        "object_store catalog iceberg tables require pg_lake_iceberg.object_store_catalog_location_prefix"
         in str(err)
     )
     pg_conn.rollback()
@@ -107,7 +107,7 @@ def test_read_only_object_store_with_non_existing_options(
         pg_conn,
         raise_error=False,
     )
-    assert "object store catalog does not exist for" in str(res)
+    assert "object_store catalog does not exist for" in str(res)
     pg_conn.rollback()
 
     # now, create the table in another schema
@@ -133,6 +133,7 @@ def test_read_only_object_store_with_non_existing_options(
 def test_read_only_object_store_read_write(
     pg_conn, s3, extension, with_default_location, adjust_object_store_settings
 ):
+    run_command("SET pg_lake_iceberg.default_catalog TO 'object_store'", pg_conn)
     run_command(
         f"""CREATE SCHEMA test_read_only_object_store_read_write""",
         pg_conn,
@@ -140,7 +141,7 @@ def test_read_only_object_store_read_write(
 
     # let's first create a writable table
     run_command(
-        f"""CREATE TABLE test_read_only_object_store_read_write.wrt_tbl(a INT) USING iceberg WITH (catalog='object_store')""",
+        f"""CREATE TABLE test_read_only_object_store_read_write.wrt_tbl(a INT) USING iceberg""",
         pg_conn,
     )
     pg_conn.commit()
@@ -151,7 +152,7 @@ def test_read_only_object_store_read_write(
 
     # now, let's create the reader table
     run_command(
-        f"""CREATE TABLE test_read_only_object_store_read_write.read_tbl(a INT) USING iceberg WITH (catalog='object_store', read_only=True, catalog_table_name = 'wrt_tbl')""",
+        f"""CREATE TABLE test_read_only_object_store_read_write.read_tbl(a INT) USING iceberg WITH (read_only=True, catalog_table_name = 'wrt_tbl')""",
         pg_conn,
     )
     pg_conn.commit()
@@ -230,16 +231,19 @@ def test_read_only_object_store_read_write(
         pg_conn,
     )
     pg_conn.commit()
+    run_command("RESET pg_lake_iceberg.default_catalog", pg_conn)
 
 
 # test all possible renames
 def test_object_catalog_renames(
     pg_conn, s3, extension, with_default_location, adjust_object_store_settings
 ):
+    run_command("SET pg_lake_iceberg.default_catalog TO 'OBJECT_STORE'", pg_conn)
+
     run_command(
         f"""
         CREATE SCHEMA object_store_sc1;
-        CREATE TABLE object_store_sc1.tbl(a int) USING iceberg WITH (catalog='object_store');
+        CREATE TABLE object_store_sc1.tbl(a int) USING iceberg;
         INSERT INTO object_store_sc1.tbl SELECT i FROM generate_series(0,99)i;
 
         	""",
@@ -334,6 +338,7 @@ def test_object_catalog_renames(
         pg_conn,
     )
     pg_conn.commit()
+    run_command("RESET pg_lake_iceberg.default_catalog", pg_conn)
 
 
 # two writers, and each writer has two readers
@@ -343,10 +348,10 @@ def test_multiple_readers_writers(
     run_command(
         f"""
         CREATE SCHEMA object_store_sc1;
-        CREATE TABLE object_store_sc1.tbl_1(a int) USING iceberg WITH (catalog='object_store');
+        CREATE TABLE object_store_sc1.tbl_1(a int) USING iceberg WITH (catalog='objecT_store');
         INSERT INTO object_store_sc1.tbl_1 SELECT i FROM generate_series(0,99)i;
 
-        CREATE TABLE object_store_sc1.tbl_2(a int) USING iceberg WITH (catalog='object_store');
+        CREATE TABLE object_store_sc1.tbl_2(a int) USING iceberg WITH (CATALOG='object_STORE');
         INSERT INTO object_store_sc1.tbl_2 SELECT i FROM generate_series(0,199)i;
 
         	""",

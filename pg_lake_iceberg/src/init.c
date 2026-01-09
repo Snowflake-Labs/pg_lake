@@ -51,6 +51,7 @@ int			IcebergAutovacuumLogMinDuration = 600000;
 static bool DeprecatedEnableStatsCollectionForNestedTypes;
 
 static bool IcebergDefaultLocationCheckHook(char **newvalue, void **extra, GucSource source);
+static bool IcebergDefaultCatalogCheckHook(char **newvalue, void **extra, GucSource source);
 
 /* function declarations */
 void		_PG_init(void);
@@ -164,6 +165,18 @@ _PG_init(void)
 							   PGC_SUSET,
 							   0,
 							   IcebergDefaultLocationCheckHook, NULL, NULL);
+
+	DefineCustomStringVariable("pg_lake_iceberg.default_catalog",
+							   gettext_noop("Specifies the default catalog for "
+											"iceberg tables. This is used when the catalog "
+											"option is not specified at \"CREATE TABLE "
+											".. USING iceberg\" statements."),
+							   NULL,
+							   &IcebergDefaultCatalog,
+							   "postgres",
+							   PGC_USERSET,
+							   0,
+							   IcebergDefaultCatalogCheckHook, NULL, NULL);
 
 	DefineCustomStringVariable("pg_lake_iceberg.object_store_catalog_location_prefix",
 							   gettext_noop("Specifies the location prefix for "
@@ -296,4 +309,21 @@ IcebergDefaultLocationCheckHook(char **newvalue, void **extra, GucSource source)
 	}
 
 	return true;
+}
+
+
+static bool
+IcebergDefaultCatalogCheckHook(char **newvalue, void **extra, GucSource source)
+{
+	char	   *newCatalog = *newvalue;
+
+	if (pg_strncasecmp(newCatalog, POSTGRES_CATALOG_NAME, strlen(newCatalog)) == 0 ||
+		pg_strncasecmp(newCatalog, REST_CATALOG_NAME, strlen(newCatalog)) == 0 ||
+		pg_strncasecmp(newCatalog, OBJECT_STORE_CATALOG_NAME, strlen(newCatalog)) == 0)
+		return true;
+
+	GUC_check_errdetail("pg_lake_iceberg: allowed iceberg catalog options are '" POSTGRES_CATALOG_NAME "', "
+						" '" REST_CATALOG_NAME "' and '" OBJECT_STORE_CATALOG_NAME "'");
+
+	return false;
 }

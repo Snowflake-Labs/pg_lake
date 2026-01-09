@@ -254,7 +254,7 @@ GetObjectStoreCatalogInfoFromCatalog(Oid relationId, char **catalogName, char **
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("catalog_name option is missing for object_store catalog iceberg table %s",
+				 errmsg("catalog_name option is missing for " OBJECT_STORE_CATALOG_NAME " catalog iceberg table %s",
 						get_rel_name(relationId))));
 	}
 
@@ -263,7 +263,7 @@ GetObjectStoreCatalogInfoFromCatalog(Oid relationId, char **catalogName, char **
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("catalog_namespace option is missing for object_store catalog iceberg table %s",
+				 errmsg("catalog_namespace option is missing for " OBJECT_STORE_CATALOG_NAME " catalog iceberg table %s",
 						get_rel_name(relationId))));
 	}
 
@@ -272,7 +272,7 @@ GetObjectStoreCatalogInfoFromCatalog(Oid relationId, char **catalogName, char **
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("catalog_table_name option is missing for object_store catalog iceberg table %s",
+				 errmsg("catalog_table_name option is missing for for " OBJECT_STORE_CATALOG_NAME " catalog iceberg table %s",
 						get_rel_name(relationId))));
 	}
 }
@@ -327,7 +327,11 @@ PushMetadataLocationToObjectStoreCatalog(void)
 					 "  lake_table.get_table_schema(c.table_name)"
 					 "  FROM lake_iceberg.tables_internal c"
 					 "  JOIN pg_foreign_table f ON (c.table_name = f.ftrelid)"
-					 "  WHERE 'catalog=object_store' = ANY (f.ftoptions)");
+					 "  WHERE EXISTS ("
+					 "		SELECT 1"
+					 "		FROM unnest(f.ftoptions) opt"
+					 "		WHERE LOWER(opt) = LOWER('catalog=" OBJECT_STORE_CATALOG_NAME "')"
+					 "		)");
 
 	/*
 	 * we don't use this param, but our SPI Apis rely on at least one arg, so
@@ -462,7 +466,7 @@ ErrorIfExternalObjectStoreCatalogDoesNotExist(const char *catalogName)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
-				 errmsg("object store catalog does not exist for \"%s\"", catalogName)));
+				 errmsg(OBJECT_STORE_CATALOG_NAME " catalog does not exist for \"%s\"", catalogName)));
 	}
 }
 
@@ -493,7 +497,7 @@ GetExternalObjectStoreCatalogFilePath(const char *catalogName)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("pg_lake_iceberg.object_store_catalog_location_prefix is not set"),
-				 errdetail("Set the GUC to use catalog=object_store.")));
+				 errdetail("Set the GUC to use catalog=" OBJECT_STORE_CATALOG_NAME)));
 	}
 
 	if (ExternalObjectStorePrefix == NULL)
@@ -501,7 +505,7 @@ GetExternalObjectStoreCatalogFilePath(const char *catalogName)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("pg_lake_iceberg.external_object_store_prefix is not set"),
-				 errdetail("Set the GUC to use catalog=object_store.")));
+				 errdetail("Set the GUC to use catalog=" OBJECT_STORE_CATALOG_NAME)));
 	}
 
 	return psprintf("%s/%s/%s/catalog.json", defaultPrefix,
@@ -518,7 +522,7 @@ GetInternalObjectStoreCatalogFilePath(const char *catalogName)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("pg_lake_iceberg.object_store_catalog_location_prefix is not set"),
-				 errdetail("Set the GUC to use catalog=object_store.")));
+				 errdetail("Set the GUC to use catalog=" OBJECT_STORE_CATALOG_NAME)));
 	}
 
 	if (InternalObjectStorePrefix == NULL)
@@ -526,7 +530,7 @@ GetInternalObjectStoreCatalogFilePath(const char *catalogName)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("pg_lake_iceberg.internal_object_store_prefix is not set"),
-				 errdetail("Set the GUC to use catalog=object_store.")));
+				 errdetail("Set the GUC to use catalog=" OBJECT_STORE_CATALOG_NAME)));
 	}
 
 	return psprintf("%s/%s/%s/catalog.json", defaultPrefix,
