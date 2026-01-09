@@ -30,7 +30,7 @@ LeafField
 DeepCopyLeafField(const LeafField * leafField)
 {
 	LeafField  *copiedLeafField = palloc0(sizeof(LeafField));
-	
+
 	copiedLeafField->fieldId = leafField->fieldId;
 	copiedLeafField->field = DeepCopyField(leafField->field);
 	copiedLeafField->duckTypeName = pstrdup(leafField->duckTypeName);
@@ -48,6 +48,7 @@ LeafField *
 FindLeafField(List *leafFieldList, int fieldId)
 {
 	ListCell   *cell = NULL;
+
 	foreach(cell, leafFieldList)
 	{
 		LeafField  *leafField = (LeafField *) lfirst(cell);

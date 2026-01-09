@@ -156,6 +156,7 @@ ApplyColumnStatsModeForAllFileStats(Oid relationId, List *dataFileStats)
 		DataFileStats *dataFileStats = lfirst(dataFileStatsCell);
 
 		ListCell   *columnStatsCell = NULL;
+
 		foreach(columnStatsCell, dataFileStats->columnStats)
 		{
 			DataFileColumnStats *columnStats = lfirst(columnStatsCell);

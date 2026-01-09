@@ -24,11 +24,11 @@
 #include "pg_lake/pgduck/read_data.h"
 #include "pg_lake/data_file/data_file_stats.h"
 
-extern PGDLLEXPORT StatsCollector *PerformDeleteFromParquet(char *sourceDataFilePath,
-																  List *positionDeleteFiles,
-																  char *deletionFilePath,
-																  char *destinationPath,
-																  CopyDataCompression destinationCompression,
-																  DataFileSchema * schema,
-																  ReadDataStats * stats,
-																  List *leafFields);
+extern PGDLLEXPORT StatsCollector * PerformDeleteFromParquet(char *sourceDataFilePath,
+															 List *positionDeleteFiles,
+															 char *deletionFilePath,
+															 char *destinationPath,
+															 CopyDataCompression destinationCompression,
+															 DataFileSchema * schema,
+															 ReadDataStats * stats,
+															 List *leafFields);

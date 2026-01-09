@@ -1257,4 +1257,3 @@ GetFieldMinMaxStats(PGDuckConnection * pgDuckConn, List *rowGroupStatList)
 	PQclear(result);
 	return columnStatsList;
 }
-

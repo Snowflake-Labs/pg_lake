@@ -139,8 +139,8 @@ DeepCopyDataFileStats(const DataFileStats * stats)
 			DataFileColumnStats *copiedColStats = palloc0(sizeof(DataFileColumnStats));
 
 			copiedColStats->leafField = DeepCopyLeafField(&colStats->leafField);
-			copiedColStats->lowerBoundText = colStats->lowerBoundText ? pstrdup(colStats->lowerBoundText): NULL;
-			copiedColStats->upperBoundText = colStats->upperBoundText ? pstrdup(colStats->upperBoundText): NULL;
+			copiedColStats->lowerBoundText = colStats->lowerBoundText ? pstrdup(colStats->lowerBoundText) : NULL;
+			copiedColStats->upperBoundText = colStats->upperBoundText ? pstrdup(colStats->upperBoundText) : NULL;
 
 			copiedStats->columnStats = lappend(copiedStats->columnStats, copiedColStats);
 		}

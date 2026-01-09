@@ -101,8 +101,8 @@ static List *ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCoun
 							 int64 liveRowCount, char *deleteFile, int64 deletedRowCount);
 static List *GetDataFilePathsFromStatsList(List *dataFileStats);
 static List *GetNewFileOpsFromFileStats(Oid relationId, List *dataFileStats,
-									int32 partitionSpecId, Partition * partition, int64 rowCount,
-									bool isVerbose, List **newFiles);
+										int32 partitionSpecId, Partition * partition, int64 rowCount,
+										bool isVerbose, List **newFiles);
 static bool ShouldRewriteAfterDeletions(int64 sourceRowCount, uint64 totalDeletedRowCount);
 static CompactionDataFileHashEntry * GetPartitionWithMostEligibleFiles(Oid relationId, TimestampTz compactionStartTime,
 																	   bool forceMerge);
@@ -275,6 +275,7 @@ PrepareCSVInsertion(Oid relationId, char *insertCSV, int64 rowCount,
 	if (!splitFilesBySize && statsCollector->dataFileStats == NIL)
 	{
 		DataFileStats *stats = palloc0(sizeof(DataFileStats));
+
 		stats->dataFilePath = dataFilePrefix;
 		stats->rowCount = rowCount;
 		statsCollector->dataFileStats = list_make1(stats);
@@ -297,6 +298,7 @@ PrepareCSVInsertion(Oid relationId, char *insertCSV, int64 rowCount,
 		DataFileStats *stats = lfirst(dataFileStatsCell);
 
 		DataFileModification *modification = palloc0(sizeof(DataFileModification));
+
 		modification->type = ADD_DATA_FILE;
 		modification->insertFile = stats->dataFilePath;
 		modification->insertedRowCount = stats->rowCount;
@@ -340,7 +342,7 @@ GetDataFilePathsFromStatsList(List *dataFileStats)
  */
 static List *
 GetNewFileOpsFromFileStats(Oid relationId, List *dataFileStats, int32 partitionSpecId, Partition * partition,
-					   int64 rowCount, bool isVerbose, List **newFiles)
+						   int64 rowCount, bool isVerbose, List **newFiles)
 {
 	*newFiles = NIL;
 
@@ -522,8 +524,8 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 
 			List	   *leafFields = GetLeafFieldsForTable(relationId);
 			StatsCollector *statsCollector = PerformDeleteFromParquet(sourcePath, existingPositionDeletes,
-																			deleteFile, newDataFilePath, compression,
-																			schema, &stats, leafFields);
+																	  deleteFile, newDataFilePath, compression,
+																	  schema, &stats, leafFields);
 
 			ApplyColumnStatsModeForAllFileStats(relationId, statsCollector->dataFileStats);
 
@@ -544,8 +546,9 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 			Assert(statsCollector->dataFileStats != NIL);
 
 			/*
-			 * while deleting from parquet, we do not add file_size_bytes option to COPY command,
-			 * so we can assume that we'll have only a single file. 
+			 * while deleting from parquet, we do not add file_size_bytes
+			 * option to COPY command, so we can assume that we'll have only a
+			 * single file.
 			 */
 			DataFileStats *newFileStats = linitial(statsCollector->dataFileStats);
 
@@ -578,7 +581,8 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 
 			InsertInProgressFileRecordExtended(deletionFilePath, isPrefix, deferDeletion);
 
-			List *leafFields = GetLeafFieldsForTable(relationId);
+			List	   *leafFields = GetLeafFieldsForTable(relationId);
+
 			/* write the deletion file */
 			StatsCollector *statsCollector =
 				ConvertCSVFileTo(deleteFile, deleteTupleDesc, -1, deletionFilePath,
@@ -588,9 +592,10 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 										   deletionFilePath, deletedRowCount)));
 
 			/*
-			 * ConvertCSVFileTo() does not use file_bytes_size so we can assume single file 
+			 * ConvertCSVFileTo() does not use file_bytes_size so we can
+			 * assume single file
 			 */
-            Assert(list_length(statsCollector->dataFileStats) == 1);
+			Assert(list_length(statsCollector->dataFileStats) == 1);
 			DataFileStats *deletionFileStats = linitial(statsCollector->dataFileStats);
 
 			/*

@@ -67,17 +67,17 @@ typedef struct DataFileStats
 
 typedef struct StatsCollector
 {
-	int64 totalRowCount;
-	List *dataFileStats;
-} StatsCollector;
+	int64		totalRowCount;
+	List	   *dataFileStats;
+}			StatsCollector;
 
 extern PGDLLEXPORT DataFileStats * DeepCopyDataFileStats(const DataFileStats * stats);
-extern PGDLLEXPORT StatsCollector *GetDataFileStatsListFromPGResult(PGresult *result,
-																		  List *leafFields,
-																		  DataFileSchema * schema);
-extern PGDLLEXPORT StatsCollector *ExecuteCopyCommandOnPGDuckConnection(char *copyCommand,
-																			  List *leafFields,
-																			  DataFileSchema * schema,
-																			  bool disablePreserveInsertionOrder,
-																			  CopyDataFormat destinationFormat);
+extern PGDLLEXPORT StatsCollector * GetDataFileStatsListFromPGResult(PGresult *result,
+																	 List *leafFields,
+																	 DataFileSchema * schema);
+extern PGDLLEXPORT StatsCollector * ExecuteCopyCommandOnPGDuckConnection(char *copyCommand,
+																		 List *leafFields,
+																		 DataFileSchema * schema,
+																		 bool disablePreserveInsertionOrder,
+																		 CopyDataFormat destinationFormat);
 extern PGDLLEXPORT bool ShouldSkipStatistics(LeafField * leafField);

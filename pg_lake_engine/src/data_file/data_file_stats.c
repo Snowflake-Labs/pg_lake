@@ -32,7 +32,7 @@ static void ExtractMinMaxForAllColumns(Datum map, List **names, List **mins, Lis
 static void ExtractMinMaxForColumn(Datum map, const char *colName, List **names, List **mins, List **maxs);
 static const char *UnescapeDoubleQuotes(const char *s);
 static List *GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields, DataFileSchema * schema);
-static int FindIndexInStringList(List *names, const char *targetName);
+static int	FindIndexInStringList(List *names, const char *targetName);
 
 
 /*
@@ -70,6 +70,7 @@ ExecuteCopyCommandOnPGDuckConnection(char *copyCommand,
 		else
 		{
 			char	   *commandTuples = PQcmdTuples(result);
+
 			statsCollector = palloc0(sizeof(StatsCollector));
 			statsCollector->totalRowCount = atoll(commandTuples);
 			statsCollector->dataFileStats = NIL;
@@ -107,7 +108,7 @@ GetDataFileStatsListFromPGResult(PGresult *result, List *leafFields, DataFileSch
 
 	int			resultRowCount = PQntuples(result);
 	int			resultColumnCount = PQnfields(result);
-	int64 totalRowCount = 0;
+	int64		totalRowCount = 0;
 
 	for (int resultRowIndex = 0; resultRowIndex < resultRowCount; resultRowIndex++)
 	{
@@ -146,6 +147,7 @@ GetDataFileStatsListFromPGResult(PGresult *result, List *leafFields, DataFileSch
 	}
 
 	StatsCollector *statsCollector = palloc0(sizeof(StatsCollector));
+
 	statsCollector->totalRowCount = totalRowCount;
 	statsCollector->dataFileStats = statsList;
 
@@ -367,6 +369,7 @@ GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields
 		int			fieldId = field->id;
 
 		int			nameIndex = FindIndexInStringList(names, fieldName);
+
 		if (nameIndex == -1)
 		{
 			ereport(DEBUG3, (errmsg("field with name %s not found in stats output, skipping", fieldName)));
@@ -380,7 +383,7 @@ GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields
 			ereport(DEBUG3, (errmsg("leaf field with id %d not found in leaf fields, skipping", fieldId)));
 			continue;
 		}
-		else if(ShouldSkipStatistics(leafField))
+		else if (ShouldSkipStatistics(leafField))
 		{
 			ereport(DEBUG3, (errmsg("skipping statistics for field with id %d", fieldId)));
 			continue;
@@ -408,7 +411,7 @@ GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields
 static int
 FindIndexInStringList(List *names, const char *targetName)
 {
-	for(int index = 0; index < list_length(names); index++)
+	for (int index = 0; index < list_length(names); index++)
 	{
 		if (strcmp(list_nth(names, index), targetName) == 0)
 		{
@@ -466,9 +469,9 @@ ShouldSkipStatistics(LeafField * leafField)
 	{
 		/*
 		 * We currently do not support pruning on array, map and composite
-		 * types. So there's no need to collect stats for them. Note that
-		 * in the past we did collect, and have some tests commented out,
-		 * such as skippedtest_pg_lake_iceberg_table_complex_values.
+		 * types. So there's no need to collect stats for them. Note that in
+		 * the past we did collect, and have some tests commented out, such as
+		 * skippedtest_pg_lake_iceberg_table_complex_values.
 		 */
 		return true;
 	}
