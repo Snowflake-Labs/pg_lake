@@ -543,7 +543,7 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 			Partition  *partition = GetDataFilePartition(relationId, transforms, sourcePath,
 														 &partitionSpecId);
 
-			Assert(statsCollector->dataFileStats != NIL);
+			Assert(list_length(statsCollector->dataFileStats) == 1);
 
 			/*
 			 * while deleting from parquet, we do not add file_size_bytes

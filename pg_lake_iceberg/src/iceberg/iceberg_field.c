@@ -59,8 +59,6 @@
 #include "utils/rel.h"
 #include "utils/typcache.h"
 
-bool		DeprecatedEnableStatsCollectionForNestedTypes = false;
-
 typedef enum IcebergType
 {
 	ICEBERG_TYPE_INVALID,

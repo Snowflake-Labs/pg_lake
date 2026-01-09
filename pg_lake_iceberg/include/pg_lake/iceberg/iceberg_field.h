@@ -23,8 +23,6 @@
 #include "pg_lake/pgduck/type.h"
 #include "pg_lake/parquet/leaf_field.h"
 
-extern bool DeprecatedEnableStatsCollectionForNestedTypes;
-
 extern PGDLLEXPORT PGType IcebergFieldToPostgresType(Field * field);
 extern PGDLLEXPORT Field * PostgresTypeToIcebergField(PGType pgType,
 													  bool forAddColumn,

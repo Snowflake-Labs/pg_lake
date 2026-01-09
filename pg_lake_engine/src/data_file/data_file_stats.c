@@ -35,7 +35,7 @@
 #include "utils/lsyscache.h"
 
 static void ParseDuckdbColumnMinMaxFromText(char *input, List **names, List **mins, List **maxs);
-static void ExtractMinMaxForAllColumns(Datum map, List **names, List **mins, List **maxs);
+static void ExtractMinMaxForAllColumns(Datum returnStatsMap, List **names, List **mins, List **maxs);
 static void ExtractMinMaxForColumn(Datum map, const char *colName, List **names, List **mins, List **maxs);
 static const char *UnescapeDoubleQuotes(const char *s);
 static List *GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields, DataFileSchema * schema);
@@ -271,7 +271,7 @@ ExtractMinMaxForColumn(Datum map, const char *colName, List **names, List **mins
 
 	if (minText != NULL && maxText != NULL)
 	{
-		*names = lappend(*names, pstrdup(colName));
+		*names = lappend(*names, colName);
 		*mins = lappend(*mins, minText);
 		*maxs = lappend(*maxs, maxText);
 	}
@@ -327,9 +327,9 @@ UnescapeDoubleQuotes(const char *s)
  * of type map(text,text).
  */
 static void
-ExtractMinMaxForAllColumns(Datum map, List **names, List **mins, List **maxs)
+ExtractMinMaxForAllColumns(Datum returnStatsMap, List **names, List **mins, List **maxs)
 {
-	ArrayType  *elementsArray = DatumGetArrayTypeP(map);
+	ArrayType  *elementsArray = DatumGetArrayTypeP(returnStatsMap);
 
 	if (elementsArray == NULL)
 		return;
@@ -393,7 +393,7 @@ ParseDuckdbColumnMinMaxFromText(char *input, List **names, List **mins, List **m
 
 	if (returnStatsMapId == InvalidOid)
 		ereport(ERROR, (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-						errmsg("unexpected return_stats result %s", input)));
+						errmsg("cannot find required map type for parsing return stats")));
 
 	/* parse result into map above */
 	Oid			typinput;
@@ -440,12 +440,12 @@ GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields
 
 		if (leafField == NULL)
 		{
-			ereport(DEBUG3, (errmsg("leaf field with id %d not found in leaf fields, skipping", fieldId)));
+			ereport(DEBUG3, (errmsg("leaf field with name %s not found in leaf fields, skipping", fieldName)));
 			continue;
 		}
 		else if (ShouldSkipStatistics(leafField))
 		{
-			ereport(DEBUG3, (errmsg("skipping statistics for field with id %d", fieldId)));
+			ereport(DEBUG3, (errmsg("skipping statistics for field with name %s", fieldName)));
 			continue;
 		}
 

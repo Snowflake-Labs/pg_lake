@@ -48,6 +48,8 @@ int			IcebergAutovacuumNaptime = 10 * 60;
 /* managed via pg_lake_iceberg.log_autovacuum_min_duration, 10 minutes */
 int			IcebergAutovacuumLogMinDuration = 600000;
 
+static bool DeprecatedEnableStatsCollectionForNestedTypes;
+
 static bool IcebergDefaultLocationCheckHook(char **newvalue, void **extra, GucSource source);
 
 /* function declarations */
