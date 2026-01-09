@@ -65,17 +65,17 @@ typedef struct DataFileStats
 	int64		rowIdStart;
 }			DataFileStats;
 
-typedef struct ColumnStatsCollector
+typedef struct StatsCollector
 {
 	int64 totalRowCount;
 	List *dataFileStats;
-} ColumnStatsCollector;
+} StatsCollector;
 
 extern PGDLLEXPORT DataFileStats * DeepCopyDataFileStats(const DataFileStats * stats);
-extern PGDLLEXPORT ColumnStatsCollector *GetDataFileStatsListFromPGResult(PGresult *result,
+extern PGDLLEXPORT StatsCollector *GetDataFileStatsListFromPGResult(PGresult *result,
 																		  List *leafFields,
 																		  DataFileSchema * schema);
-extern PGDLLEXPORT ColumnStatsCollector *ExecuteCopyCommandOnPGDuckConnection(char *copyCommand,
+extern PGDLLEXPORT StatsCollector *ExecuteCopyCommandOnPGDuckConnection(char *copyCommand,
 																			  List *leafFields,
 																			  DataFileSchema * schema,
 																			  bool disablePreserveInsertionOrder,

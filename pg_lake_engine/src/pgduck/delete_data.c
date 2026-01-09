@@ -47,7 +47,7 @@ static char *DeleteFromParquetQuery(char *sourceDataFilePath,
  * PerformDeleteFromParquet applies a deletion CSV file to a Parquet file
  * and writes the new Parquet file to destinationPath.
  */
-ColumnStatsCollector *
+StatsCollector *
 PerformDeleteFromParquet(char *sourcePath,
 						 List *positionDeleteFiles,
 						 char *deletionFilePath,

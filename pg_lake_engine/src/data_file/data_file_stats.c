@@ -37,9 +37,9 @@ static int FindIndexInStringList(List *names, const char *targetName);
 
 /*
  * ExecuteCopyCommandOnPGDuckConnection executes the given COPY command on
- * a PGDuck connection and returns a ColumnStatsCollector.
+ * a PGDuck connection and returns a StatsCollector.
  */
-ColumnStatsCollector *
+StatsCollector *
 ExecuteCopyCommandOnPGDuckConnection(char *copyCommand,
 									 List *leafFields,
 									 DataFileSchema * schema,
@@ -48,7 +48,7 @@ ExecuteCopyCommandOnPGDuckConnection(char *copyCommand,
 {
 	PGDuckConnection *pgDuckConn = GetPGDuckConnection();
 	PGresult   *result;
-	ColumnStatsCollector *statsCollector = NULL;
+	StatsCollector *statsCollector = NULL;
 
 	PG_TRY();
 	{
@@ -70,7 +70,7 @@ ExecuteCopyCommandOnPGDuckConnection(char *copyCommand,
 		else
 		{
 			char	   *commandTuples = PQcmdTuples(result);
-			statsCollector = palloc0(sizeof(ColumnStatsCollector));
+			statsCollector = palloc0(sizeof(StatsCollector));
 			statsCollector->totalRowCount = atoll(commandTuples);
 			statsCollector->dataFileStats = NIL;
 		}
@@ -100,7 +100,7 @@ ExecuteCopyCommandOnPGDuckConnection(char *copyCommand,
  *
  * It returns the collector object that contains the total row count and data file statistics.
  */
-ColumnStatsCollector *
+StatsCollector *
 GetDataFileStatsListFromPGResult(PGresult *result, List *leafFields, DataFileSchema * schema)
 {
 	List	   *statsList = NIL;
@@ -145,7 +145,7 @@ GetDataFileStatsListFromPGResult(PGresult *result, List *leafFields, DataFileSch
 		statsList = lappend(statsList, fileStats);
 	}
 
-	ColumnStatsCollector *statsCollector = palloc0(sizeof(ColumnStatsCollector));
+	StatsCollector *statsCollector = palloc0(sizeof(StatsCollector));
 	statsCollector->totalRowCount = totalRowCount;
 	statsCollector->dataFileStats = statsList;
 

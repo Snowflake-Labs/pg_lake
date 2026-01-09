@@ -259,7 +259,7 @@ PrepareCSVInsertion(Oid relationId, char *insertCSV, int64 rowCount,
 	List	   *leafFields = GetLeafFieldsForTable(relationId);
 
 	/* convert insert file to a new file in table format */
-	ColumnStatsCollector *statsCollector =
+	StatsCollector *statsCollector =
 		ConvertCSVFileTo(insertCSV,
 						 tupleDescriptor,
 						 maximumLineSize,
@@ -521,7 +521,7 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 			ReadDataStats stats = {sourceRowCount, existingDeletedRowCount};
 
 			List	   *leafFields = GetLeafFieldsForTable(relationId);
-			ColumnStatsCollector *statsCollector = PerformDeleteFromParquet(sourcePath, existingPositionDeletes,
+			StatsCollector *statsCollector = PerformDeleteFromParquet(sourcePath, existingPositionDeletes,
 																			deleteFile, newDataFilePath, compression,
 																			schema, &stats, leafFields);
 
@@ -580,7 +580,7 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 
 			List *leafFields = GetLeafFieldsForTable(relationId);
 			/* write the deletion file */
-			ColumnStatsCollector *statsCollector =
+			StatsCollector *statsCollector =
 				ConvertCSVFileTo(deleteFile, deleteTupleDesc, -1, deletionFilePath,
 								 DATA_FORMAT_PARQUET, compression, copyOptions, schema, leafFields);
 
@@ -986,7 +986,7 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 
 	/* perform compaction */
 	List	   *leafFields = GetLeafFieldsForTable(relationId);
-	ColumnStatsCollector *statsCollector =
+	StatsCollector *statsCollector =
 		WriteQueryResultTo(readQuery,
 						   newDataFilePath,
 						   properties.format,

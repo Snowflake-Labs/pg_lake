@@ -64,7 +64,7 @@ int			DefaultParquetVersion = PARQUET_VERSION_V1;
  *
  * The CSV was generated using COPY ... TO '<csvFilePath>'
  */
-ColumnStatsCollector *
+StatsCollector *
 ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 				 char *destinationPath,
 				 CopyDataFormat destinationFormat,
@@ -151,7 +151,7 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
  * destinationPath. There may be multiple files if file_size_bytes
  * is specified in formatOptions.
  */
-ColumnStatsCollector *
+StatsCollector *
 WriteQueryResultTo(char *query,
 				   char *destinationPath,
 				   CopyDataFormat destinationFormat,
