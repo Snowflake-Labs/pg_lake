@@ -46,6 +46,21 @@ typedef struct ReadDataStats
 	uint64		positionDeleteRowCount;
 }			ReadDataStats;
 
+/*
+ * ReadRowLocationMode reflects how we want to read filename and file_row_number.
+ *
+ * We sometimes need to read filename and file_row_number in order to
+ * join with it (e.g. for position deletes) and sometimes we also want
+ * it in the query result (e.g. for update/delete), so we distinguish
+ * 3 cases.
+ */
+typedef enum ReadRowLocationMode
+{
+	NO_ROW_LOCATION,
+	READ_ROW_LOCATION,
+	EMIT_ROW_LOCATION
+}			ReadRowLocationMode;
+
 
 extern PGDLLEXPORT char *ReadDataSourceQuery(List *dataFilePaths,
 											 List *positionDeletePaths,
@@ -56,6 +71,12 @@ extern PGDLLEXPORT char *ReadDataSourceQuery(List *dataFilePaths,
 											 DataFileSchema * schema,
 											 ReadDataStats * stats,
 											 int flags);
+extern PGDLLEXPORT char *TupleDescToProjectionList(TupleDesc tupleDesc,
+												   CopyDataFormat sourceFormat,
+												   List *formatOptions,
+												   ReadRowLocationMode readRowLocationMode,
+												   bool emitRowId,
+												   bool addCast);
 
 extern PGDLLEXPORT char *CopyOptionsToReadCSVParams(List *copyOptions);
 

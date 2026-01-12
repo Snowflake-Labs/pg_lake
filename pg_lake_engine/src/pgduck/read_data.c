@@ -39,22 +39,6 @@
 #include "utils/lsyscache.h"
 
 
-/*
- * ReadRowLocationMode reflects how we want to read filename and file_row_number.
- *
- * We sometimes need to read filename and file_row_number in order to
- * join with it (e.g. for position deletes) and sometimes we also want
- * it in the query result (e.g. for update/delete), so we distinguish
- * 3 cases.
- */
-typedef enum ReadRowLocationMode
-{
-	NO_ROW_LOCATION,
-	READ_ROW_LOCATION,
-	EMIT_ROW_LOCATION
-}			ReadRowLocationMode;
-
-
 static char *ReadDataSourceFunction(List *sourcePaths,
 									uint64 sourceRowCount,
 									CopyDataFormat sourceFormat,
@@ -70,12 +54,6 @@ static char *GetSchemaType(Field * mapping);
 static char *ReadEmptyDataSource(TupleDesc tupleDesc, CopyDataFormat format,
 								 bool preferVarchar,
 								 ReadRowLocationMode emitRowLocation);
-static char *TupleDescToProjectionList(TupleDesc tupleDesc,
-									   CopyDataFormat sourceFormat,
-									   List *formatOptions,
-									   ReadRowLocationMode readRowLocationMode,
-									   bool emitRowId,
-									   bool addCast);
 static char *TupleDescToDuckDBColumnsMap(TupleDesc tupleDesc,
 										 CopyDataFormat sourceFormat,
 										 bool preferVarchar,
@@ -914,7 +892,7 @@ TupleDescToAliasList(TupleDesc tupleDesc)
  * We add explicit casts for types that do not have an equivalent in
  * the source format.
  */
-static char *
+char *
 TupleDescToProjectionList(TupleDesc tupleDesc, CopyDataFormat sourceFormat,
 						  List *formatOptions,
 						  ReadRowLocationMode readRowLocationMode,
