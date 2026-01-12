@@ -350,6 +350,10 @@ static const PGDuckShippableFunction ShippableBuiltinProcs[] =
 	{"asinh", 'f', 1, {"float8"}, NULL},
 	{"acosh", 'f', 1, {"float8"}, NULL},
 	{"atanh", 'f', 1, {"float8"}, NULL},
+	{"sinh", 'f', 1, {"float8"}, NULL},
+	{"cosh", 'f', 1, {"float8"}, NULL},
+	{"tanh", 'f', 1, {"float8"}, NULL},
+
 
 	/* array functions */
 	{"array_append", 'f', 2, {"anycompatiblearray", "anycompatible"}, NULL},
