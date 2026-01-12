@@ -10,6 +10,14 @@ We developed the [pg_incremental](https://github.com/crunchydata/pg_incremental)
 
 It is possible to directly load log files into an Iceberg table using `COPY`. However, it can be convenient to still create a lake analytics table for the log files. By leaving the column list in the `create  foreign table` statement empty, the columns will be automatically detected from the existing log files. The `filename 'true'` option additionally adds a `_filename` column that will contain the source file name.
 
+Build pg_incremental:
+
+```bash
+git clone https://github.com/CrunchyData/pg_incremental.git
+cd pg_incremental
+make install
+```
+
 ```sql
 -- Create a table to query CSV logs, infer columns and add a _filename column
 create foreign table logs_csv () 

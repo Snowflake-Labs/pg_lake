@@ -242,6 +242,14 @@ RUN git clone https://github.com/citusdata/pg_cron.git && \
     make install PG_CONFIG=$PGBASEDIR/pgsql-18/bin/pg_config && make clean PG_CONFIG=$PGBASEDIR/pgsql-18/bin/pg_config && \
     cd .. && rm -rf pg_cron
 
+# Compile and install pg_incremental
+RUN git clone https://github.com/CrunchyData/pg_incremental.git && \
+    cd pg_incremental && \
+    make install PG_CONFIG=$PGBASEDIR/pgsql-16/bin/pg_config && make clean PG_CONFIG=$PGBASEDIR/pgsql-16/bin/pg_config && \
+    make install PG_CONFIG=$PGBASEDIR/pgsql-17/bin/pg_config && make clean PG_CONFIG=$PGBASEDIR/pgsql-17/bin/pg_config && \
+    make install PG_CONFIG=$PGBASEDIR/pgsql-18/bin/pg_config && make clean PG_CONFIG=$PGBASEDIR/pgsql-18/bin/pg_config && \
+    cd .. && rm -rf pg_incremental
+
 # Install vcpkg as postgres user
 ARG VCPKG_VERSION=2025.01.13
 
