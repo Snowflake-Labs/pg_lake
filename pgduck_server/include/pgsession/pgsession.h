@@ -180,4 +180,6 @@ typedef struct PGSession
 /* per-client entrance point for the pgsession logic */
 extern void *pgsession_handle_connection(void *input);
 
+extern int	oom_is_fatal;
+
 #endif							/* // PGDUCK_PG_SESSION_H */

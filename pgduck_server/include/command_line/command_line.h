@@ -36,6 +36,7 @@ typedef struct
 	unsigned int port;
 	unsigned int max_clients;
 	char	   *memory_limit;
+	bool		continue_on_oom;
 	int64_t		cache_on_write_max_size;
 
 	char	   *duckdb_database_file_path;
