@@ -256,7 +256,7 @@ ExtractMinMaxForColumn(Datum map, char *colName, List **names, List **mins, List
 
 	if (minText != NULL && maxText != NULL)
 	{
-		*names = lappend(*names, pstrdup(colName));
+		*names = lappend(*names, colName);
 		*mins = lappend(*mins, minText);
 		*maxs = lappend(*maxs, maxText);
 	}

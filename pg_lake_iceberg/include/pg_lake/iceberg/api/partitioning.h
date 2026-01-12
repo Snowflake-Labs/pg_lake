@@ -39,7 +39,8 @@ typedef enum IcebergPartitionTransformType
 	PARTITION_TRANSFORM_VOID
 }			IcebergPartitionTransformType;
 
-typedef struct IcebergPartitionTransform
+/* Represents a parsed partition transform from table's partition_by string option. */
+typedef struct ParsedIcebergPartitionTransform
 {
 	IcebergPartitionTransformType type;
 
@@ -52,13 +53,22 @@ typedef struct IcebergPartitionTransform
 		size_t		truncateLen;
 	};
 
-	IcebergPartitionSpecField *specField;
+	const char *columnName;
+}			ParsedIcebergPartitionTransform;
+
+/* Represents an analyzed partition transform with all necessary info. */
+typedef struct IcebergPartitionTransform
+{
+	/* parsed transform info */
+	ParsedIcebergPartitionTransform parsedTransform;
+
+	/* spec field info */
+	IcebergPartitionSpecField specField;
 
 	/* source field of the column to which transform applies */
-	DataFileSchemaField *sourceField;
+	DataFileSchemaField sourceField;
 
 	/* Postgres column info to which transform applies */
-	const char *columnName;
 	AttrNumber	attnum;
 	PGType		pgType;
 

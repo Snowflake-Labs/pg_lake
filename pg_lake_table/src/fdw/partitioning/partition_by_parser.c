@@ -43,12 +43,12 @@ static void SkipWhitespace(const char **ptr);
 static int	ParseInteger(const char **ptr);
 static char *ParseIdentifier(const char **ptr);
 static IcebergPartitionTransformType LookupTransformType(const char *str);
-static IcebergPartitionTransform * ParseOneTransform(const char **ptr);
+static ParsedIcebergPartitionTransform * ParseOneTransform(const char **ptr);
 static const char *NormalizeTransformColumnName(const char *colName);
 
 /* analyzer helpers */
-static void EnsureTransformSourceColumnExists(IcebergPartitionTransform * transform, Oid relationId);
-static void EnsureTransformSourceColumnScalar(IcebergPartitionTransform * transform, DataFileSchemaField * sourceField);
+static void EnsureTransformSourceColumnExists(ParsedIcebergPartitionTransform * parsedTransform, Oid relationId);
+static void EnsureTransformSourceColumnScalar(ParsedIcebergPartitionTransform * parsedTransform, DataFileSchemaField * sourceField);
 static void EnsureNoDuplicateTransforms(List *transforms);
 static void EnsureValidTypeForTransform(IcebergPartitionTransformType transformType, Oid typeOid);
 static void EnsureValidTypeForIdentityTransform(Oid typeOid);
@@ -84,7 +84,7 @@ ParseIcebergTablePartitionBy(Oid relationId)
 
 	Assert(partitionBy != NULL);
 
-	List	   *transforms = NIL;
+	List	   *parsedTransforms = NIL;
 
 	bool		seenComma = false;
 
@@ -109,9 +109,9 @@ ParseIcebergTablePartitionBy(Oid relationId)
 		}
 
 		/* Parse one transform */
-		IcebergPartitionTransform *transform = ParseOneTransform(&p);
+		ParsedIcebergPartitionTransform *parsedTransform = ParseOneTransform(&p);
 
-		transforms = lappend(transforms, transform);
+		parsedTransforms = lappend(parsedTransforms, parsedTransform);
 
 		/* after one transform, expect either comma or end of string */
 		SkipWhitespace(&p);
@@ -138,7 +138,7 @@ ParseIcebergTablePartitionBy(Oid relationId)
 		}
 	}
 
-	return transforms;
+	return parsedTransforms;
 }
 
 
@@ -159,10 +159,10 @@ IsIcebergTableWithDefaultPartitionSpec(Oid relationId)
  * Parse one transform from the current position of the string.
  * (ex: "year(col)", "bucket(mycol, 10)", or just "colName")
  */
-static IcebergPartitionTransform *
+static ParsedIcebergPartitionTransform *
 ParseOneTransform(const char **ptr)
 {
-	IcebergPartitionTransform *transform = palloc0(sizeof(IcebergPartitionTransform));
+	ParsedIcebergPartitionTransform *parsedTransform = palloc0(sizeof(ParsedIcebergPartitionTransform));
 
 	/* Step 1: parse a token => either transform name or column name. */
 	char	   *token = ParseIdentifier(ptr);
@@ -181,13 +181,13 @@ ParseOneTransform(const char **ptr)
 	if (**ptr == '(')
 	{
 		/* So 'token' is transform name (year, month, etc.) */
-		transform->type = LookupTransformType(token);
+		parsedTransform->type = LookupTransformType(token);
 
 		(*ptr)++;				/* skip '(' */
 		SkipWhitespace(ptr);
 
-		if (transform->type == PARTITION_TRANSFORM_BUCKET ||
-			transform->type == PARTITION_TRANSFORM_TRUNCATE)
+		if (parsedTransform->type == PARTITION_TRANSFORM_BUCKET ||
+			parsedTransform->type == PARTITION_TRANSFORM_TRUNCATE)
 		{
 			int			param = ParseInteger(ptr);
 
@@ -198,17 +198,17 @@ ParseOneTransform(const char **ptr)
 			{
 				(*ptr)++;
 
-				if (transform->type == PARTITION_TRANSFORM_BUCKET)
-					transform->bucketCount = (size_t) param;
+				if (parsedTransform->type == PARTITION_TRANSFORM_BUCKET)
+					parsedTransform->bucketCount = (size_t) param;
 				else
-					transform->truncateLen = (size_t) param;
+					parsedTransform->truncateLen = (size_t) param;
 			}
 			else
 			{
 				ereport(ERROR,
 						(errcode(ERRCODE_SYNTAX_ERROR),
 						 errmsg("expected comma after column name for \"%s\" transform",
-								(transform->type == PARTITION_TRANSFORM_BUCKET) ? "bucket" : "truncate")));
+								(parsedTransform->type == PARTITION_TRANSFORM_BUCKET) ? "bucket" : "truncate")));
 			}
 		}
 
@@ -217,7 +217,7 @@ ParseOneTransform(const char **ptr)
 		/* Next parse the column name inside parentheses. */
 		char	   *colName = ParseIdentifier(ptr);
 
-		transform->columnName = NormalizeTransformColumnName(colName);
+		parsedTransform->columnName = NormalizeTransformColumnName(colName);
 
 		SkipWhitespace(ptr);
 		if (**ptr == ')')
@@ -234,11 +234,11 @@ ParseOneTransform(const char **ptr)
 	else
 	{
 		/* The token is the column name; interpret as IDENTITY transform. */
-		transform->type = PARTITION_TRANSFORM_IDENTITY;
-		transform->columnName = NormalizeTransformColumnName(token);
+		parsedTransform->type = PARTITION_TRANSFORM_IDENTITY;
+		parsedTransform->columnName = NormalizeTransformColumnName(token);
 	}
 
-	return transform;
+	return parsedTransform;
 }
 
 
@@ -480,32 +480,38 @@ NormalizeTransformColumnName(const char *colName)
  * and also checks for duplicate transforms on the same source id in the partition spec.
  */
 List *
-AnalyzeIcebergTablePartitionBy(Oid relationId, List *transforms)
+AnalyzeIcebergTablePartitionBy(Oid relationId, List *parsedTransforms)
 {
 	int			largestPartitionFieldId = GetLargestPartitionFieldId(relationId);
 
-	/* analyze */
-	ListCell   *transformCell = NULL;
+	List	   *analyzedTransforms = NIL;
 
-	foreach(transformCell, transforms)
+	/* analyze */
+	ListCell   *parsedTransformCell = NULL;
+
+	foreach(parsedTransformCell, parsedTransforms)
 	{
-		IcebergPartitionTransform *transform = lfirst(transformCell);
+		ParsedIcebergPartitionTransform *parsedTransform = lfirst(parsedTransformCell);
 
 		/*
 		 * 1) Look up the column in the relation's TupleDesc. We do a
 		 * case-sensitive or case-insensitive match depending on your FDW's
 		 * requirements. Here we do an exact match.
 		 */
-		EnsureTransformSourceColumnExists(transform, relationId);
+		EnsureTransformSourceColumnExists(parsedTransform, relationId);
+
+		IcebergPartitionTransform *analyzedTransform = palloc0(sizeof(IcebergPartitionTransform));
+
+		analyzedTransform->parsedTransform = *parsedTransform;
 
 		/* set column no */
-		transform->attnum = get_attnum(relationId, transform->columnName);
+		analyzedTransform->attnum = get_attnum(relationId, parsedTransform->columnName);
 
 		Oid			collation = InvalidOid;
 
-		get_atttypetypmodcoll(relationId, transform->attnum,
-							  &transform->pgType.postgresTypeOid,
-							  &transform->pgType.postgresTypeMod,
+		get_atttypetypmodcoll(relationId, analyzedTransform->attnum,
+							  &analyzedTransform->pgType.postgresTypeOid,
+							  &analyzedTransform->pgType.postgresTypeMod,
 							  &collation);
 
 		/* set column type */
@@ -515,49 +521,47 @@ AnalyzeIcebergTablePartitionBy(Oid relationId, List *transforms)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("Columns with collation are not supported in partition_by: \"%s\"",
-							transform->columnName)));
+							parsedTransform->columnName)));
 		}
 
 		/* set result column type */
-		transform->resultPgType = GetTransformResultPGType(transform);
-
+		analyzedTransform->resultPgType = GetTransformResultPGType(analyzedTransform);
 		/* set source field id */
-		DataFileSchemaField *sourceField = GetRegisteredFieldForAttribute(relationId, transform->attnum);
+		DataFileSchemaField *sourceField = GetRegisteredFieldForAttribute(relationId, analyzedTransform->attnum);
 
 		/* 2) Check scalar column */
-		EnsureTransformSourceColumnScalar(transform, sourceField);
+		EnsureTransformSourceColumnScalar(parsedTransform, sourceField);
 
-		transform->sourceField = sourceField;
-
-		transform->specField = palloc0(sizeof(IcebergPartitionSpecField));
+		analyzedTransform->sourceField = *sourceField;
 
 		/* set transform name */
-		transform->specField->transform = GenerateTransformName(transform);
-		transform->specField->transform_length = strlen(transform->specField->transform);
+		analyzedTransform->specField.transform = GenerateTransformName(analyzedTransform);
+		analyzedTransform->specField.transform_length = strlen(analyzedTransform->specField.transform);
 
 		/* set partition field name */
-		transform->specField->name = GeneratePartitionFieldName(transform, relationId);
-		transform->specField->name_length = strlen(transform->specField->name);
+		analyzedTransform->specField.name = GeneratePartitionFieldName(analyzedTransform, relationId);
+		analyzedTransform->specField.name_length = strlen(analyzedTransform->specField.name);
 
 		/* set partition field id */
-		transform->specField->field_id = ++largestPartitionFieldId;
-
+		analyzedTransform->specField.field_id = ++largestPartitionFieldId;
 		/* set source field id */
-		transform->specField->source_id = sourceField->id;
-		transform->specField->source_ids_length = 1;
-		transform->specField->source_ids = palloc0(sizeof(int) * transform->specField->source_ids_length);
-		transform->specField->source_ids[0] = transform->specField->source_id;
+		analyzedTransform->specField.source_id = sourceField->id;
+		analyzedTransform->specField.source_ids_length = 1;
+		analyzedTransform->specField.source_ids = palloc0(sizeof(int) * analyzedTransform->specField.source_ids_length);
+		analyzedTransform->specField.source_ids[0] = analyzedTransform->specField.source_id;
 
 		/* 3) Check column type compatibility. */
-		EnsureValidTypeForTransform(transform->type, transform->pgType.postgresTypeOid);
+		EnsureValidTypeForTransform(analyzedTransform->parsedTransform.type, analyzedTransform->pgType.postgresTypeOid);
+	
+		analyzedTransforms = lappend(analyzedTransforms, analyzedTransform);
 	}
 
 	/*
-	 * 4) Check for duplicate transoforms on the same source id.
+	 * 4) Check for duplicate transforms on the same source id.
 	 */
-	EnsureNoDuplicateTransforms(transforms);
+	EnsureNoDuplicateTransforms(analyzedTransforms);
 
-	return transforms;
+	return analyzedTransforms;
 }
 
 
@@ -599,14 +603,14 @@ GetIcebergTablePartitionByOption(Oid relationId)
 static const char *
 GenerateTransformName(IcebergPartitionTransform * transform)
 {
-	switch (transform->type)
+	switch (transform->parsedTransform.type)
 	{
 		case PARTITION_TRANSFORM_IDENTITY:
 			return "identity";
 		case PARTITION_TRANSFORM_BUCKET:
-			return psprintf("bucket[%zu]", transform->bucketCount);
+			return psprintf("bucket[%zu]", transform->parsedTransform.bucketCount);
 		case PARTITION_TRANSFORM_TRUNCATE:
-			return psprintf("truncate[%zu]", transform->truncateLen);
+			return psprintf("truncate[%zu]", transform->parsedTransform.truncateLen);
 		case PARTITION_TRANSFORM_YEAR:
 			return "year";
 		case PARTITION_TRANSFORM_MONTH:
@@ -620,7 +624,7 @@ GenerateTransformName(IcebergPartitionTransform * transform)
 		default:
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("unknown partition transform type %d", transform->type)));
+					 errmsg("unknown partition transform type %d", transform->parsedTransform.type)));
 	}
 }
 
@@ -631,28 +635,28 @@ GenerateTransformName(IcebergPartitionTransform * transform)
 static const char *
 GeneratePartitionFieldName(IcebergPartitionTransform * transform, Oid relationId)
 {
-	switch (transform->type)
+	switch (transform->parsedTransform.type)
 	{
 		case PARTITION_TRANSFORM_IDENTITY:
-			return transform->columnName;
+			return transform->parsedTransform.columnName;
 		case PARTITION_TRANSFORM_BUCKET:
-			return psprintf("%s_bucket_%zu", transform->columnName, transform->bucketCount);
+			return psprintf("%s_bucket_%zu", transform->parsedTransform.columnName, transform->parsedTransform.bucketCount);
 		case PARTITION_TRANSFORM_TRUNCATE:
-			return psprintf("%s_trunc_%zu", transform->columnName, transform->truncateLen);
+			return psprintf("%s_trunc_%zu", transform->parsedTransform.columnName, transform->parsedTransform.truncateLen);
 		case PARTITION_TRANSFORM_YEAR:
-			return psprintf("%s_year", transform->columnName);
+			return psprintf("%s_year", transform->parsedTransform.columnName);
 		case PARTITION_TRANSFORM_MONTH:
-			return psprintf("%s_month", transform->columnName);
+			return psprintf("%s_month", transform->parsedTransform.columnName);
 		case PARTITION_TRANSFORM_DAY:
-			return psprintf("%s_day", transform->columnName);
+			return psprintf("%s_day", transform->parsedTransform.columnName);
 		case PARTITION_TRANSFORM_HOUR:
-			return psprintf("%s_hour", transform->columnName);
+			return psprintf("%s_hour", transform->parsedTransform.columnName);
 		case PARTITION_TRANSFORM_VOID:
-			return psprintf("%s_void", transform->columnName);
+			return psprintf("%s_void", transform->parsedTransform.columnName);
 		default:
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("unknown partition transform type %d", transform->type)));
+					 errmsg("unknown partition transform type %d", transform->parsedTransform.type)));
 	}
 }
 
@@ -662,7 +666,7 @@ GeneratePartitionFieldName(IcebergPartitionTransform * transform, Oid relationId
  * given transform exists in the relation. If it doesn't, it raises an error.
  */
 static void
-EnsureTransformSourceColumnExists(IcebergPartitionTransform * transform, Oid relationId)
+EnsureTransformSourceColumnExists(ParsedIcebergPartitionTransform * parsedTransform, Oid relationId)
 {
 	Relation	rel;
 	TupleDesc	desc;
@@ -684,7 +688,7 @@ EnsureTransformSourceColumnExists(IcebergPartitionTransform * transform, Oid rel
 		if (attr->attisdropped)
 			continue;			/* skip dropped columns */
 
-		if (strcmp(NameStr(attr->attname), transform->columnName) == 0)
+		if (strcmp(NameStr(attr->attname), parsedTransform->columnName) == 0)
 		{
 			foundCol = true;
 			break;
@@ -697,7 +701,7 @@ EnsureTransformSourceColumnExists(IcebergPartitionTransform * transform, Oid rel
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_COLUMN),
 				 errmsg("column \"%s\" does not exist in relation \"%s\"",
-						transform->columnName,
+						parsedTransform->columnName,
 						get_rel_name(relationId))));
 	}
 
@@ -714,7 +718,7 @@ GetTransformResultPGType(IcebergPartitionTransform * transform)
 	Oid			resultType = InvalidOid;
 	int32_t		resultTypMod = -1;
 
-	switch (transform->type)
+	switch (transform->parsedTransform.type)
 	{
 		case PARTITION_TRANSFORM_IDENTITY:
 			resultType = transform->pgType.postgresTypeOid;
@@ -752,7 +756,7 @@ GetTransformResultPGType(IcebergPartitionTransform * transform)
 		default:
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("unknown partition transform type %d", transform->type)));
+					 errmsg("unknown partition transform type %d", transform->parsedTransform.type)));
 			break;
 	}
 
@@ -783,10 +787,10 @@ AdjustTypmodForTruncateTransformIfNeeded(IcebergPartitionTransform * transform)
 	 * - bpchar(N): any smaller (< N) string will be space-padded to N.
 	 */
 	if ((pgType.postgresTypeOid == VARCHAROID || pgType.postgresTypeOid == BPCHAROID) &&
-		pgType.postgresTypeMod != -1 && GetAnyCharLengthFrom(pgType.postgresTypeMod) > transform->truncateLen)
+		pgType.postgresTypeMod != -1 && GetAnyCharLengthFrom(pgType.postgresTypeMod) > transform->parsedTransform.truncateLen)
 	{
 		resultTypMod = AdjustAnyCharTypmod(transform->pgType.postgresTypeMod,
-										   transform->truncateLen);
+										   transform->parsedTransform.truncateLen);
 	}
 	else
 	{
@@ -802,13 +806,13 @@ AdjustTypmodForTruncateTransformIfNeeded(IcebergPartitionTransform * transform)
  * given transform is a scalar type. If it isn't, it raises an error.
  */
 static void
-EnsureTransformSourceColumnScalar(IcebergPartitionTransform * transform, DataFileSchemaField * sourceField)
+EnsureTransformSourceColumnScalar(ParsedIcebergPartitionTransform * parsedTransform, DataFileSchemaField * sourceField)
 {
 	if (sourceField->type->type != FIELD_TYPE_SCALAR)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATATYPE_MISMATCH),
 				 errmsg("partition transform column \"%s\" must be a scalar type",
-						transform->columnName)));
+						parsedTransform->columnName)));
 }
 
 
@@ -827,12 +831,12 @@ EnsureNoDuplicateTransforms(List *transforms)
 		{
 			IcebergPartitionTransform *other = list_nth(transforms, j);
 
-			if (transform->type == other->type &&
-				transform->sourceField->id == other->sourceField->id)
+			if (transform->parsedTransform.type == other->parsedTransform.type &&
+				transform->sourceField.id == other->sourceField.id)
 				ereport(ERROR,
 						(errcode(ERRCODE_DUPLICATE_OBJECT),
 						 errmsg("\"%s\" transform on column \"%s\" appears multiple times in partition spec",
-								transform->specField->transform, transform->columnName)));
+								transform->specField.transform, transform->parsedTransform.columnName)));
 		}
 	}
 }
