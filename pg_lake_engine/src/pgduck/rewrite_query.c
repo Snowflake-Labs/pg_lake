@@ -2204,14 +2204,14 @@ static Node *
 RewriteFuncExprHyperbolic(Node *node, void *context)
 {
 	FuncExpr   *funcExpr = castNode(FuncExpr, node);
-	List *funcName;
+	List	   *funcName;
 
 	switch (funcExpr->funcid)
 	{
 		case F_ACOSH:
 			funcName = list_make2(makeString(PG_LAKE_INTERNAL_NSP), makeString("acosh_pg"));
 			break;
-		
+
 		case F_ATANH:
 			funcName = list_make2(makeString(PG_LAKE_INTERNAL_NSP), makeString("atanh_pg"));
 			break;
@@ -2220,8 +2220,9 @@ RewriteFuncExprHyperbolic(Node *node, void *context)
 			elog(ERROR, "unexpected function ID in rewrite %d", funcExpr->funcid);
 	}
 
-	Oid argTypes[] = {FLOAT8OID};
-	int argCount = 1;
+	Oid			argTypes[] = {FLOAT8OID};
+	int			argCount = 1;
+
 	funcExpr->funcid = LookupFuncName(funcName, argCount, argTypes, false);
 
 	return (Node *) funcExpr;

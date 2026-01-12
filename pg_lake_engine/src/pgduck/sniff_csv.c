@@ -33,7 +33,7 @@
  */
 void
 SniffCSV(char *url, CopyDataCompression compression, List *options,
-		 char **delimiter, char **quote, char **escape, bool *header)
+		 char **delimiter, char **quote, char **escape, bool *header, char **newLine)
 {
 	StringInfoData command;
 
@@ -45,7 +45,7 @@ SniffCSV(char *url, CopyDataCompression compression, List *options,
 		ereport(ERROR, (errmsg("couldn't find files at %s", url)));
 
 	appendStringInfo(&command,
-					 "SELECT Delimiter, Quote, Escape, HasHeader FROM sniff_csv(%s",
+					 "SELECT Delimiter, Quote, Escape, HasHeader, NewLineDelimiter FROM sniff_csv(%s",
 					 quote_literal_cstr((char *) linitial(outputFiles)));
 
 	if (compression != DATA_COMPRESSION_INVALID)
@@ -94,6 +94,12 @@ SniffCSV(char *url, CopyDataCompression compression, List *options,
 		*escape = pstrdup(rawValue);
 
 		*header = strcasecmp(PQgetvalue(result, 0, 3), "t") == 0;
+
+		rawValue = PQgetvalue(result, 0, 4);
+		if (strcmp(rawValue, "") == 0)
+			rawValue = "\\n";
+
+		*newLine = pstrdup(rawValue);
 
 		PQclear(result);
 	}

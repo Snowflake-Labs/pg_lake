@@ -435,9 +435,10 @@ SniffCSVOptions(char *url, CopyDataCompression compression, List *options)
 	char	   *quote = NULL;
 	char	   *escape = NULL;
 	bool		header = NULL;
+	char	   *newLine = NULL;
 
 	SniffCSV(url, compression, options,
-			 &delimiter, &quote, &escape, &header);
+			 &delimiter, &quote, &escape, &header, &newLine);
 
 	if (!HasOption((List *) options, "delimiter") && *delimiter != '\0')
 	{
@@ -467,6 +468,14 @@ SniffCSVOptions(char *url, CopyDataCompression compression, List *options)
 											   -1));
 	}
 
+	if (!HasOption((List *) options, "new_line"))
+	{
+		options = lappend(options, makeDefElem("new_line",
+											   (Node *) makeString(newLine),
+											   -1));
+	}
+
+
 	return options;
 }
 
@@ -479,6 +488,7 @@ static bool
 HasAllSniffCSVOptions(List *options)
 {
 	return HasOption(options, "delimiter") &&
+		HasOption(options, "new_line") &&
 		HasOption(options, "quote") &&
 		HasOption(options, "escape") &&
 		HasOption(options, "header");

@@ -73,12 +73,12 @@ NormalizedExternalCSVOptions(List *inputOptions)
 	char	   *quote = NULL;
 	char	   *escape = NULL;
 	char	   *nullStr = NULL;
+	char	   *newLineStr = NULL;
 	Node	   *forceQuote = NULL;
 
 	bool		hasHeader = false;
 	bool		hasQuote = false;
 	bool		hasEscape = false;
-	bool		hasNewLine = false;
 	bool		hasSkip = false;
 
 	if (!autoDetect)
@@ -90,11 +90,11 @@ NormalizedExternalCSVOptions(List *inputOptions)
 		delimiter = ",";
 		quote = "\"";
 		escape = "\"";
+		newLineStr = "\\n";
 		nullStr = "";
 		forceQuote = NULL;
 
 		/* not exposed to user */
-		hasNewLine = true;
 		hasSkip = true;
 	}
 
@@ -123,6 +123,10 @@ NormalizedExternalCSVOptions(List *inputOptions)
 		{
 			escape = defGetString(option);
 			hasEscape = true;
+		}
+		else if (strcmp(option->defname, "new_line") == 0)
+		{
+			newLineStr = defGetString(option);
 		}
 		else if (strcmp(option->defname, "null") == 0)
 		{
@@ -173,10 +177,9 @@ NormalizedExternalCSVOptions(List *inputOptions)
 		options = lappend(options,
 						  makeDefElem("force_quote", forceQuote, -1));
 
-	/* 'auto_detect = false' defaults - not exposed to user */
-	if (hasNewLine)
+	if (newLineStr != NULL)
 		options = lappend(options,
-						  makeDefElem("new_line", (Node *) makeString("\\n"), -1));
+						  makeDefElem("new_line", (Node *) makeString(newLineStr), -1));
 
 	if (hasSkip)
 		options = lappend(options,

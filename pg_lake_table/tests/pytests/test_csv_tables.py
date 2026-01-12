@@ -793,3 +793,46 @@ def test_s3_multiple_csv_file_sniff_detection(pg_conn, s3, extension):
     assert res[0][0] == 16
 
     pg_conn.rollback()
+
+
+def test_csv_with_windows_crlf_newlines(pg_conn, s3, extension, tmp_path):
+    """Test that CSV files with Windows-style CRLF (\\r\\n) line endings are properly handled"""
+    csv_key = "test_csv_crlf_newlines/data.csv"
+    csv_path = f"s3://{TEST_BUCKET}/{csv_key}"
+
+    # Create a CSV file with explicit Windows-style CRLF newlines
+    local_csv_path = tmp_path / "crlf_data.csv"
+    with open(local_csv_path, "wb") as csv_file:
+        # Write CSV with CRLF line endings (Windows style)
+        csv_file.write(b"id,name,value\r\n")
+        csv_file.write(b"1,alice,100\r\n")
+        csv_file.write(b"2,bob,200\r\n")
+        csv_file.write(b"3,charlie,300\r\n")
+
+    # Upload to S3
+    s3.upload_file(local_csv_path, TEST_BUCKET, csv_key)
+
+    # Create foreign table with column inference
+    run_command(
+        f"""
+        CREATE FOREIGN TABLE test_crlf_csv ()
+        SERVER pg_lake OPTIONS (path '{csv_path}', format 'csv', header 'true');
+        """,
+        pg_conn,
+    )
+
+    # Query the data and verify it's read correctly
+    result = run_query("SELECT * FROM test_crlf_csv ORDER BY id", pg_conn)
+
+    # Verify all rows are read correctly
+    assert len(result) == 3, f"Expected 3 rows, got {len(result)}"
+    assert result[0] == [1, "alice", 100], f"Row 1 mismatch: {result[0]}"
+    assert result[1] == [2, "bob", 200], f"Row 2 mismatch: {result[1]}"
+    assert result[2] == [3, "charlie", 300], f"Row 3 mismatch: {result[2]}"
+
+    # Verify aggregation works correctly
+    count_result = run_query("SELECT COUNT(*), SUM(value) FROM test_crlf_csv", pg_conn)
+    assert count_result[0] == [3, 600], f"Aggregation mismatch: {count_result[0]}"
+
+    # Cleanup
+    pg_conn.rollback()

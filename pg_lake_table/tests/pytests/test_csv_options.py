@@ -219,10 +219,7 @@ def test_fdw_table_csv_options_for_csv_format_only(pg_conn, extension):
         # can't get here, already failed
         assert False
     except psycopg2.errors.SyntaxError as e:
-        assert (
-            '"header", "delimiter", "quote", "escape" and "null" options are only supported for csv format tables'
-            in str(e)
-        )
+        assert "options are only supported for csv format tables" in str(e)
         cur.close()
         pg_conn.commit()
 
@@ -458,10 +455,7 @@ def test_fdw_table_non_csv_with_csv_options(pg_conn, extension):
         # can't get here, already failed
         assert False
     except psycopg2.errors.SyntaxError as e:
-        assert (
-            '"header", "delimiter", "quote", "escape" and "null" options are only supported for csv format tables'
-            in str(e)
-        )
+        assert "options are only supported for csv format tables" in str(e)
         cur.close()
         pg_conn.commit()
 

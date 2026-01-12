@@ -21,4 +21,4 @@
 #include "nodes/pg_list.h"
 
 extern PGDLLEXPORT void SniffCSV(char *url, CopyDataCompression compression, List *options,
-								 char **delimiter, char **quote, char **escape, bool *header);
+								 char **delimiter, char **quote, char **escape, bool *header, char **newLine);
