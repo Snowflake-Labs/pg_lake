@@ -15,10 +15,10 @@
  * limitations under the License.
  */
 
+#include <inttypes.h>
+
 #include "postgres.h"
 #include "miscadmin.h"
-
-#include <inttypes.h>
 
 #include "common/base64.h"
 #include "commands/dbcommands.h"
@@ -882,7 +882,7 @@ GetAddSnapshotCatalogRequest(IcebergSnapshot * newSnapshot, Oid relationId)
 	appendStringInfo(body, ",\"schema-id\":%d", newSnapshot->schema_id);
 	appendStringInfoString(body, "}}, ");	/* end add-snapshot */
 
-	appendStringInfo(body, "{\"action\":\"set-snapshot-ref\", \"type\":\"branch\", \"ref-name\":\"main\", \"snapshot-id\":%lld}", newSnapshot->snapshot_id);
+	appendStringInfo(body, "{\"action\":\"set-snapshot-ref\", \"type\":\"branch\", \"ref-name\":\"main\", \"snapshot-id\":" INT64_FORMAT "}", newSnapshot->snapshot_id);
 
 	RestCatalogRequest *request = palloc0(sizeof(RestCatalogRequest));
 

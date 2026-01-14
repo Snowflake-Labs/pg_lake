@@ -36,8 +36,8 @@
 
 static void ParseDuckdbColumnMinMaxFromText(char *input, List **names, List **mins, List **maxs);
 static void ExtractMinMaxForAllColumns(Datum returnStatsMap, List **names, List **mins, List **maxs);
-static void ExtractMinMaxForColumn(Datum map, const char *colName, List **names, List **mins, List **maxs);
-static const char *UnescapeDoubleQuotes(const char *s);
+static void ExtractMinMaxForColumn(Datum map, char *colName, List **names, List **mins, List **maxs);
+static char *UnescapeDoubleQuotes(char *s);
 static List *GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields, DataFileSchema * schema);
 static int	FindIndexInStringList(List *names, const char *targetName);
 static List *FetchRowGroupStats(PGDuckConnection * pgDuckConn, List *fieldIdList, char *path);
@@ -220,7 +220,7 @@ GetDataFileStatsListFromPGResult(PGresult *result, List *leafFields, DataFileSch
  * of type map(varchar,varchar).
  */
 static void
-ExtractMinMaxForColumn(Datum map, const char *colName, List **names, List **mins, List **maxs)
+ExtractMinMaxForColumn(Datum map, char *colName, List **names, List **mins, List **maxs)
 {
 	ArrayType  *elementsArray = DatumGetArrayTypeP(map);
 
@@ -284,8 +284,8 @@ ExtractMinMaxForColumn(Datum map, const char *colName, List **names, List **mins
  * UnescapeDoubleQuotes unescapes any doubled quotes.
  * e.g. "ab\"\"cd\"\"ee" becomes "ab\"cd\"ee"
  */
-static const char *
-UnescapeDoubleQuotes(const char *s)
+static char *
+UnescapeDoubleQuotes(char *s)
 {
 	if (s == NULL)
 		return NULL;
@@ -365,7 +365,7 @@ ExtractMinMaxForAllColumns(Datum returnStatsMap, List **names, List **mins, List
 		 * pg_map text key is escaped for double quotes. We need to unescape
 		 * them.
 		 */
-		const char *unescapedColName = UnescapeDoubleQuotes(colName);
+		char	   *unescapedColName = UnescapeDoubleQuotes(colName);
 
 		ExtractMinMaxForColumn(colStatsDatum, unescapedColName, names, mins, maxs);
 	}
