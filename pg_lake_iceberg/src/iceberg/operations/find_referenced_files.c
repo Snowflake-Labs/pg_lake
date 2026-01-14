@@ -118,7 +118,7 @@ find_all_referenced_files_via_snapshot_ids(PG_FUNCTION_ARGS)
 	foreach(snapshotIdCell, snapshotIdList)
 	{
 		int64	   *snapshotId = (int64 *) lfirst(snapshotIdCell);
-		IcebergSnapshot *snapshot = GetIcebergSnapshotViaId(metadata, *snapshotId);
+		IcebergSnapshot *snapshot = GetIcebergSnapshotViaId(metadata, *snapshotId, false);
 
 		IcebergSnapshotAddAllReferencedFiles(snapshot, fileHash);
 	}
@@ -249,7 +249,7 @@ GetIcebergSnapshotsViaSnapshotIdList(IcebergTableMetadata * metadata, List *snap
 	foreach(snapshotIdCell, snapshotIdList)
 	{
 		int64	   *snapshotId = (int64 *) lfirst(snapshotIdCell);
-		IcebergSnapshot *snapshot = GetIcebergSnapshotViaId(metadata, *snapshotId);
+		IcebergSnapshot *snapshot = GetIcebergSnapshotViaId(metadata, *snapshotId, false);
 
 		snapshots[snapshotIndex] = *snapshot;
 		snapshotIndex++;
