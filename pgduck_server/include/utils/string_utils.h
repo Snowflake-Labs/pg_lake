@@ -24,8 +24,10 @@
 #define STRING_UTILS_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 bool		string_to_int(const char *str, int *number);
+bool		string_to_int64(const char *str, int64_t *number);
 
 
 #endif							/* // STRING_UTILS_H */

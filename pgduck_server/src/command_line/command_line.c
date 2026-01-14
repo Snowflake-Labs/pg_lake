@@ -225,9 +225,9 @@ parse_arguments(int argc, char *argv[])
 				}
 			case 'L':
 				{
-					int			cache_on_write_max_size = 0;
+					int64_t		cache_on_write_max_size = 0;
 
-					if (!string_to_int(optarg, &cache_on_write_max_size))
+					if (!string_to_int64(optarg, &cache_on_write_max_size))
 					{
 						fprintf(stderr, "Error: cache_on_write_max_size should be an integer\n");
 						exit(EXIT_FAILURE);
