@@ -111,6 +111,16 @@ install: $(LIB_NAME)
 	install duckdb/src/include/duckdb.h $(DESTDIR)$(PG_INCLUDEDIR)
 	install duckdb/src/include/duckdb.hpp $(DESTDIR)$(PG_INCLUDEDIR)
 	install duckdb/src/include/duckdb_extension.h $(DESTDIR)$(PG_INCLUDEDIR)
+	# Install vcpkg OpenSSL libraries if using dynamic triplet
+ifneq ("${VCPKG_TARGET_TRIPLET}", "")
+ifeq ($(findstring dynamic,${VCPKG_TARGET_TRIPLET}),dynamic)
+	@if [ -f build/release/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/lib/libssl.so.3 ]; then \
+		echo "Installing vcpkg OpenSSL libraries..."; \
+		install build/release/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/lib/libssl.so.3 $(DESTDIR)$(PG_LIBDIR)/; \
+		install build/release/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/lib/libcrypto.so.3 $(DESTDIR)$(PG_LIBDIR)/; \
+	fi
+endif
+endif
 
 uninstall:
 	rm -f $(DESTDIR)$(PG_LIBDIR)/$(LIB_NAME)

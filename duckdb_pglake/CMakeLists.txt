@@ -6,6 +6,11 @@ set(TARGET_NAME duckdb_pglake)
 set(EXTENSION_NAME ${TARGET_NAME}_extension)
 set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 
+# Force use of system OpenSSL instead of vcpkg to avoid static linking
+# Set CMAKE_FIND_PACKAGE_PREFER_CONFIG to OFF to use FindOpenSSL.cmake from CMake
+set(CMAKE_FIND_PACKAGE_PREFER_CONFIG_BEFORE_OpenSSL OFF)
+set(OPENSSL_USE_STATIC_LIBS FALSE)
+# Look for OpenSSL in system paths first
 find_package(OpenSSL 3 REQUIRED)
 find_library(PG_LIBDIR pq REQUIRED)
 find_path(PG_INCLUDEDIR libpq-fe.h REQUIRED)
@@ -65,6 +70,8 @@ endif()
 target_link_libraries(${EXTENSION_NAME}
                       ${PG_LIBDIR}/${LIBPQ_NAME}
                       Azure::azure-identity Azure::azure-storage-blobs Azure::azure-storage-files-datalake)
+# Note: OpenSSL libraries are NOT linked here to avoid static linking.
+# OpenSSL symbols are available via libpq.so which already links to libssl.so
 target_include_directories(
   ${EXTENSION_NAME} PRIVATE Azure::azure-identity Azure::azure-storage-blobs
                             Azure::azure-storage-files-datalake)

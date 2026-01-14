@@ -1,0 +1,32 @@
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -1,5 +1,11 @@
+ include_directories(include ../third_party/fmt/include)
+ 
++# Find OpenSSL for dynamic linking (required by extensions)
++set(CMAKE_FIND_PACKAGE_PREFER_CONFIG OFF)
++set(OPENSSL_USE_STATIC_LIBS FALSE)
++find_package(OpenSSL 3 REQUIRED)
++message(STATUS "Found OpenSSL for dynamic linking: ${OPENSSL_LIBRARIES}")
++
+ if(AMALGAMATION_BUILD)
+   add_library(duckdb SHARED "${PROJECT_SOURCE_DIR}/src/amalgamation/duckdb.cpp")
+ 
+@@ -66,6 +72,8 @@ if(AMALGAMATION_BUILD)
+                  SOVERSION ${DUCKDB_MAJOR_VERSION}.${DUCKDB_MINOR_VERSION})
+   endif()
+   target_link_libraries(duckdb ${DUCKDB_SYSTEM_LIBS})
++  # Link OpenSSL dynamically to the shared library
++  target_link_libraries(duckdb PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+   link_threads(duckdb PUBLIC)
+   link_extension_libraries(duckdb PRIVATE)
+ 
+@@ -143,6 +151,8 @@ else()
+   endif()
+ 
+   target_link_libraries(duckdb PUBLIC ${DUCKDB_LINK_LIBS})
++  # Link OpenSSL dynamically to the shared library
++  target_link_libraries(duckdb PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+   link_threads(duckdb PUBLIC)
+   link_extension_libraries(duckdb PRIVATE)
+ 
