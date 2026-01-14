@@ -836,3 +836,186 @@ def test_csv_with_windows_crlf_newlines(pg_conn, s3, extension, tmp_path):
 
     # Cleanup
     pg_conn.rollback()
+
+
+def test_s3_csv_null_padding_with_missing_trailing_commas(pg_conn, s3, extension):
+    # Test null_padding with CSV that has missing trailing commas (common CSV issue)
+    url = f"s3://{TEST_BUCKET}/test_null_padding_missing_commas/data.csv"
+
+    # Manually construct CSV with missing trailing commas for NULL values
+    # This simulates a common CSV export issue where trailing empty fields omit commas
+    csv_content = """id,name,value
+1,Alice,A
+2,,B
+3,Charlie
+4"""
+
+    # Write the manually constructed CSV to S3
+    s3.put_object(
+        Bucket=TEST_BUCKET,
+        Key="test_null_padding_missing_commas/data.csv",
+        Body=csv_content,
+    )
+
+    # Create foreign table with null_padding enabled
+    run_command(
+        f"""
+        CREATE FOREIGN TABLE test_null_padding_missing_commas (
+            id int,
+            name text,
+            value text
+        ) SERVER pg_lake OPTIONS (
+            format 'csv',
+            path '{url}',
+            header 'true',
+            null_padding 'true'
+        );
+        """,
+        pg_conn,
+    )
+
+    result = run_query(
+        "SELECT * FROM test_null_padding_missing_commas ORDER BY id", pg_conn
+    )
+
+    # Verify that missing trailing commas are handled correctly as NULL
+    # Row 3 has missing value field (no comma after Charlie)
+    # Row 4 has missing name and value fields (no commas after 4)
+    expected = [
+        [1, "Alice", "A"],
+        [2, None, "B"],
+        [3, "Charlie", None],
+        [4, None, None],
+    ]
+    assert result == expected, f"Expected {expected}, got {result}"
+
+    pg_conn.rollback()
+
+
+def test_s3_csv_null_padding_with_empty_fields(pg_conn, s3, extension):
+    # Test null_padding with empty fields (commas present but fields empty)
+    url = f"s3://{TEST_BUCKET}/test_null_padding_empty/data.csv"
+
+    # Manually construct CSV with empty fields (commas present)
+    csv_content = """id,name,value
+1,Alice,A
+2,,B
+3,Charlie,
+4,,"""
+
+    # Write the manually constructed CSV to S3
+    s3.put_object(
+        Bucket=TEST_BUCKET, Key="test_null_padding_empty/data.csv", Body=csv_content
+    )
+
+    # Test with null_padding enabled
+    run_command(
+        f"""
+        CREATE FOREIGN TABLE test_null_padding_empty_enabled (
+            id int,
+            name text,
+            value text
+        ) SERVER pg_lake OPTIONS (
+            format 'csv',
+            path '{url}',
+            header 'true',
+            null_padding 'true'
+        );
+        """,
+        pg_conn,
+    )
+
+    # Test with null_padding disabled
+    run_command(
+        f"""
+        CREATE FOREIGN TABLE test_null_padding_empty_disabled (
+            id int,
+            name text,
+            value text
+        ) SERVER pg_lake OPTIONS (
+            format 'csv',
+            path '{url}',
+            header 'true',
+            null_padding 'false'
+        );
+        """,
+        pg_conn,
+    )
+
+    result_enabled = run_query(
+        "SELECT * FROM test_null_padding_empty_enabled ORDER BY id", pg_conn
+    )
+    result_disabled = run_query(
+        "SELECT * FROM test_null_padding_empty_disabled ORDER BY id", pg_conn
+    )
+
+    # Empty fields should be treated as NULL
+    expected = [
+        [1, "Alice", "A"],
+        [2, None, "B"],
+        [3, "Charlie", None],
+        [4, None, None],
+    ]
+    assert result_enabled == expected, f"Expected {expected}, got {result_enabled}"
+    assert result_disabled == expected, f"Expected {expected}, got {result_disabled}"
+
+    pg_conn.rollback()
+
+
+def test_s3_csv_null_padding_with_custom_null_and_padding(pg_conn, s3, extension):
+    # Test null_padding with custom NULL string and various padding scenarios
+    url = f"s3://{TEST_BUCKET}/test_null_padding_custom_null/data.csv"
+
+    # Manually construct CSV with custom NULL representation and whitespace
+    csv_content = """id,status,code
+1,active,A
+2,N/A,B
+3,inactive
+4,N/A"""
+
+    # Write the manually constructed CSV to S3
+    s3.put_object(
+        Bucket=TEST_BUCKET,
+        Key="test_null_padding_custom_null/data.csv",
+        Body=csv_content,
+    )
+
+    # Create foreign table with null_padding and custom null string
+    run_command(
+        f"""
+        CREATE FOREIGN TABLE test_null_padding_custom_null (
+            id int,
+            status text,
+            code text
+        ) SERVER pg_lake OPTIONS (
+            format 'csv',
+            path '{url}',
+            header 'true',
+            null 'N/A',
+            null_padding 'true'
+        );
+        """,
+        pg_conn,
+    )
+
+    result = run_query(
+        "SELECT * FROM test_null_padding_custom_null ORDER BY id", pg_conn
+    )
+
+    # Verify that custom NULL string is recognized
+    expected = [
+        [1, "active", "A"],
+        [2, None, "B"],
+        [3, "inactive", None],
+        [4, None, None],
+    ]
+    assert result == expected, f"Expected {expected}, got {result}"
+
+    # Verify NULL counts
+    null_count = run_query(
+        "SELECT COUNT(*) FROM test_null_padding_custom_null WHERE status IS NULL OR code IS NULL",
+        pg_conn,
+    )
+    assert null_count[0][0] == 3, "Expected 3 rows with NULL values"
+
+    pg_conn.rollback()

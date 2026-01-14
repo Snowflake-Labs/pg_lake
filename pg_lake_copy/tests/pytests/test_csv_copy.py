@@ -299,6 +299,46 @@ def test_invalid_type(pg_conn, duckdb_conn):
     pg_conn.rollback()
 
 
+def test_null_padding(pg_conn, duckdb_conn, s3):
+    csv_path = f"s3://{TEST_BUCKET}/test_null_padding/data.csv"
+
+    # Generate a CSV file with rows having fewer columns than expected
+    # First row has 3 columns, second row has only 1 column
+    csv_content = "1,2,3\n4\n"
+    s3.put_object(
+        Bucket=TEST_BUCKET, Key="test_null_padding/data.csv", Body=csv_content
+    )
+
+    # Create a table with 3 columns
+    run_command("CREATE TABLE test_null_padding (a int, b int, c int)", pg_conn)
+
+    # Copy with null_padding enabled to handle rows with fewer columns
+    run_command(
+        f"COPY test_null_padding FROM '{csv_path}' WITH (format 'csv', null_padding true)",
+        pg_conn,
+    )
+
+    # Verify data is correctly loaded with NULL padding
+    result = run_query("SELECT a, b, c FROM test_null_padding ORDER BY a", pg_conn)
+    assert len(result) == 2
+    assert result[0]["a"] == 1
+    assert result[0]["b"] == 2
+    assert result[0]["c"] == 3
+    assert result[1]["a"] == 4
+    assert result[1]["b"] == None
+    assert result[1]["c"] == None
+
+    # null_padding has no meaning for COPY TO
+    error = run_command(
+        f"COPY (SELECT 'abc' t, 1 as id) TO '{csv_path}' WITH (format 'csv', null_padding true)",
+        pg_conn,
+        raise_error=False,
+    )
+    assert 'invalid option "null_padding"' in error
+
+    pg_conn.rollback()
+
+
 def test_partially_invalid_type(pg_conn, duckdb_conn):
     csv_path = f"s3://{TEST_BUCKET}/test_partially_invalid_type/data.csv"
 

@@ -219,7 +219,10 @@ def test_fdw_table_csv_options_for_csv_format_only(pg_conn, extension):
         # can't get here, already failed
         assert False
     except psycopg2.errors.SyntaxError as e:
-        assert "options are only supported for csv format tables" in str(e)
+        assert (
+            '"header", "delimiter", "quote", "escape", "new_line", "null" and "null_padding" options are only supported for csv format tables'
+            in str(e)
+        )
         cur.close()
         pg_conn.commit()
 
@@ -455,7 +458,10 @@ def test_fdw_table_non_csv_with_csv_options(pg_conn, extension):
         # can't get here, already failed
         assert False
     except psycopg2.errors.SyntaxError as e:
-        assert "options are only supported for csv format tables" in str(e)
+        assert (
+            '"header", "delimiter", "quote", "escape", "new_line", "null" and "null_padding" options are only supported for csv format tables'
+            in str(e)
+        )
         cur.close()
         pg_conn.commit()
 
@@ -637,3 +643,51 @@ def test_fdw_table_single_char_options_boundary(pg_conn, extension):
 
     # cleanup
     run_command("DROP SCHEMA test_single_char_options_boundary_sc CASCADE", pg_conn)
+
+
+def test_fdw_table_null_padding_option_boolean(pg_conn, extension):
+    # table with valid boolean null_padding option
+    cur = pg_conn.cursor()
+    cur.execute(
+        """  CREATE FOREIGN TABLE test_null_padding_ft1 (
+                    id int,
+                    value text
+                ) SERVER pg_lake OPTIONS (format 'csv', null_padding 'true', path 's3://');"""
+    )
+    cur.close()
+
+    # table with non-boolean null_padding option
+    cur = pg_conn.cursor()
+    try:
+        cur.execute(
+            """  CREATE FOREIGN TABLE test_null_padding_ft2 (
+                        id int,
+                        value text
+                    ) SERVER pg_lake OPTIONS (format 'csv', null_padding 'yes', path 's3://');"""
+        )
+        assert False
+    except psycopg2.errors.SyntaxError as e:
+        assert "null_padding requires a Boolean value" in str(e)
+        cur.close()
+
+    pg_conn.rollback()
+
+
+def test_fdw_table_null_padding_csv_only(pg_conn, extension):
+    # table with null_padding option but json format
+    cur = pg_conn.cursor()
+    try:
+        cur.execute(
+            """  CREATE FOREIGN TABLE test_null_padding_json (
+                        id int,
+                        value text
+                    ) SERVER pg_lake OPTIONS (format 'json', null_padding 'true', path 's3://');"""
+        )
+        assert False
+    except psycopg2.errors.SyntaxError as e:
+        assert '"null_padding" options are only supported for csv format tables' in str(
+            e
+        )
+        cur.close()
+
+    pg_conn.rollback()

@@ -730,7 +730,8 @@ FindCopyFromWriteOptions(CopyDataFormat format, List *options)
 				strcmp(option->defname, "quote") == 0 ||
 				strcmp(option->defname, "escape") == 0 ||
 				strcmp(option->defname, "delimiter") == 0 ||
-				strcmp(option->defname, "null") == 0)
+				strcmp(option->defname, "null") == 0 ||
+				strcmp(option->defname, "null_padding") == 0)
 			{
 				/*
 				 * When we do the internal COPY .. FROM, we do so from an

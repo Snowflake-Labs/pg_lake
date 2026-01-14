@@ -75,11 +75,13 @@ NormalizedExternalCSVOptions(List *inputOptions)
 	char	   *nullStr = NULL;
 	char	   *newLineStr = NULL;
 	Node	   *forceQuote = NULL;
+	bool		nullPadding = false;
 
 	bool		hasHeader = false;
 	bool		hasQuote = false;
 	bool		hasEscape = false;
 	bool		hasSkip = false;
+	bool		hasNullPadding = false;
 
 	if (!autoDetect)
 	{
@@ -132,6 +134,11 @@ NormalizedExternalCSVOptions(List *inputOptions)
 		{
 			nullStr = defGetString(option);
 		}
+		else if (strcmp(option->defname, "null_padding") == 0)
+		{
+			nullPadding = defGetBoolean(option);
+			hasNullPadding = true;
+		}
 		else if (strcmp(option->defname, "force_quote") == 0)
 		{
 			forceQuote = copyObject(option->arg);
@@ -172,6 +179,10 @@ NormalizedExternalCSVOptions(List *inputOptions)
 	if (nullStr != NULL)
 		options = lappend(options,
 						  makeDefElem("null", (Node *) makeString(nullStr), -1));
+
+	if (hasNullPadding)
+		options = lappend(options,
+						  makeDefElem("null_padding", (Node *) makeBoolean(nullPadding), -1));
 
 	if (forceQuote != NULL)
 		options = lappend(options,

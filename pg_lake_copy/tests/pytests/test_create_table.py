@@ -148,6 +148,46 @@ def test_create_table_load_from(pg_conn, s3):
     pg_conn.rollback()
 
 
+def test_create_table_load_from_csv_null_padding(pg_conn, s3):
+    url = f"s3://{TEST_BUCKET}/test_create_table_load_from_csv_null_padding/data.csv"
+
+    # Generate a CSV file with rows having fewer columns than expected
+    csv_content = "1,2,3\n4\n5,6\n"
+    s3.put_object(
+        Bucket=TEST_BUCKET,
+        Key="test_create_table_load_from_csv_null_padding/data.csv",
+        Body=csv_content,
+    )
+
+    # Create table with load_from and null_padding option
+    # Note: header=false is needed because auto_detect is enabled by default for load_from
+    run_command(
+        f"""
+        CREATE TABLE load_from_null_padding (a int, b int, c int) WITH (load_from='{url}', format='csv', null_padding=true, header=false)
+    """,
+        pg_conn,
+    )
+
+    result = run_query(
+        """
+        SELECT a, b, c FROM load_from_null_padding ORDER BY a
+    """,
+        pg_conn,
+    )
+    assert len(result) == 3
+    assert result[0]["a"] == 1
+    assert result[0]["b"] == 2
+    assert result[0]["c"] == 3
+    assert result[1]["a"] == 4
+    assert result[1]["b"] == None
+    assert result[1]["c"] == None
+    assert result[2]["a"] == 5
+    assert result[2]["b"] == 6
+    assert result[2]["c"] == None
+
+    pg_conn.rollback()
+
+
 def test_create_table_load_from_explicit(pg_conn, duckdb_conn, azure):
     url = f"az://{TEST_BUCKET}/test_create_table_load_from_explicit/data.parquet"
     json = '{"hello":5}'

@@ -1338,6 +1338,13 @@ CopyOptionsToReadCSVParams(List *copyOptions)
 
 			appendStringInfo(&command, ", skip=" INT64_FORMAT, skip);
 		}
+		else if (strcmp(option->defname, "null_padding") == 0)
+		{
+			bool		null_padding = defGetBoolean(option);
+
+			appendStringInfo(&command, ", null_padding=%s",
+							 null_padding ? "true" : "false");
+		}
 	}
 
 	return command.data;

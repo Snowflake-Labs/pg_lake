@@ -309,6 +309,12 @@ pg_lake_table_validator(PG_FUNCTION_ARGS)
 			csvOptionProvided = true;
 		}
 
+		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "null_padding") == 0)
+		{
+			/* only accept boolean */
+			(void) defGetBoolean(def);
+			csvOptionProvided = true;
+		}
 		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "zip_path") == 0)
 		{
 			foundZipPath = true;
@@ -408,7 +414,7 @@ pg_lake_table_validator(PG_FUNCTION_ARGS)
 	if (copyDataFormat != DATA_FORMAT_CSV && csvOptionProvided)
 		ereport(ERROR,
 				(errcode(ERRCODE_SYNTAX_ERROR),
-				 errmsg("\"header\", \"delimiter\", \"quote\", \"escape\", \"new_line\" and \"null\" options "
+				 errmsg("\"header\", \"delimiter\", \"quote\", \"escape\", \"new_line\", \"null\" and \"null_padding\" options "
 						"are only supported for csv format tables")));
 
 	if (copyDataFormat == DATA_FORMAT_CSV)
@@ -497,6 +503,7 @@ InitPgLakeOptions(void)
 		{"escape", ForeignTableRelationId},
 		{"new_line", ForeignTableRelationId},
 		{"null", ForeignTableRelationId},
+		{"null_padding", ForeignTableRelationId},
 
 		/* whether the table is writable */
 		{"writable", ForeignTableRelationId},

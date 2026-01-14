@@ -39,5 +39,6 @@ delete_old_cluster.sh
 **/isolation/output
 **/isolation/isolation.conf
 pg_lake_iceberg/logs/polaris.log
+pg_lake_table/logs/
 .volume/
 Dockerfile.alpine
