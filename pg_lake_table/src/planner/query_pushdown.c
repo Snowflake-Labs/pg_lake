@@ -70,7 +70,6 @@
 #include "utils/lsyscache.h"
 #include "utils/ruleutils.h"
 #include "utils/typcache.h"
-#include "server/rewrite/rewriteManip.h"
 
 /*
  * IsShippableContext keeps context during the HasNotShippableExpression walker.
