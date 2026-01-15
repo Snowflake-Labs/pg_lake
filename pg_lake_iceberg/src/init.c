@@ -56,6 +56,14 @@ static bool IcebergDefaultCatalogCheckHook(char **newvalue, void **extra, GucSou
 /* function declarations */
 void		_PG_init(void);
 
+/* pg_lake_iceberg.rest_catalog_auth_type */
+static const struct config_enum_entry RestCatalogAuthTypeOptions[] = {
+	{"default", REST_CATALOG_AUTH_TYPE_DEFAULT, false},
+	{"horizon", REST_CATALOG_AUTH_TYPE_HORIZON, false},
+	{NULL, 0, false},
+};
+
+
 
 /*
  * _PG_init is the entry-point for pg_lake_iceberg.
@@ -243,6 +251,16 @@ _PG_init(void)
 							GUC_UNIT_KB,
 							NULL, NULL, NULL);
 
+	DefineCustomEnumVariable("pg_lake_iceberg.rest_catalog_auth_type",
+							 gettext_noop("Determines the format for the initial OAuth token requests."),
+							 NULL,
+							 &RestCatalogAuthType,
+							 REST_CATALOG_AUTH_TYPE_DEFAULT,
+							 RestCatalogAuthTypeOptions,
+							 PGC_SUSET,
+							 GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
 	DefineCustomStringVariable("pg_lake_iceberg.rest_catalog_host",
 							   NULL,
 							   NULL,
@@ -275,6 +293,15 @@ _PG_init(void)
 							   NULL,
 							   &RestCatalogClientSecret,
 							   NULL,
+							   PGC_SUSET,
+							   GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							   NULL, NULL, NULL);
+
+	DefineCustomStringVariable("pg_lake_iceberg.rest_catalog_scope",
+							   NULL,
+							   NULL,
+							   &RestCatalogScope,
+							   "PRINCIPAL_ROLE:ALL",
 							   PGC_SUSET,
 							   GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							   NULL, NULL, NULL);

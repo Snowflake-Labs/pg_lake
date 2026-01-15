@@ -23,10 +23,15 @@
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/iceberg/api/snapshot.h"
 
+#define REST_CATALOG_AUTH_TYPE_DEFAULT (0)
+#define REST_CATALOG_AUTH_TYPE_HORIZON (1)
+
 extern PGDLLEXPORT char *RestCatalogHost;
 extern char *RestCatalogOauthHostPath;
 extern char *RestCatalogClientId;
 extern char *RestCatalogClientSecret;
+extern char *RestCatalogScope;
+extern int	RestCatalogAuthType;
 
 #define REST_CATALOG_AUTH_TOKEN_PATH "%s/api/catalog/v1/oauth/tokens"
 
