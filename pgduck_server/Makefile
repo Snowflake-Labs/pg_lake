@@ -10,9 +10,11 @@ PG_INCLUDEDIR = $(shell $(PG_CONFIG) --includedir)
 # PGXS: Locates PostgreSQL extension building infrastructure using 'pg_config'.
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 
+PG_LAKE_DELTA_SUPPORT ?= 0
+
 # compile with C11 option to use modern C
 # use duckdb.h from the duckdb submodule
-PG_CPPFLAGS = -std=c11 -I$(PG_INCLUDEDIR) -Iinclude
+PG_CPPFLAGS = -std=c11 -I$(PG_INCLUDEDIR) -Iinclude -DPG_LAKE_DELTA_SUPPORT=$(PG_LAKE_DELTA_SUPPORT)
 
 # Add dependencies
 SHLIB_LINK_INTERNAL = $(libpq)

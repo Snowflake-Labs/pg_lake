@@ -38,8 +38,8 @@ static ColumnBound * CreateColumnBoundForLeafField(LeafField * leafField, char *
  */
 void
 SetIcebergDataFileStats(const DataFileStats * dataFileStats,
-						int64_t *recordCount,
-						int64_t *fileSizeInBytes,
+						int64_t * recordCount,
+						int64_t * fileSizeInBytes,
 						ColumnBound * *lowerBounds,
 						size_t *nLowerBounds,
 						ColumnBound * *upperBounds,

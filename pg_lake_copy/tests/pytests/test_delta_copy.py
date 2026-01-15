@@ -6,6 +6,10 @@ from fixtures.delta import *
 from utils_pytest import *
 
 
+@pytest.mark.skipif(
+    os.getenv("PG_LAKE_DELTA_SUPPORT") != "1",
+    reason="Delta support not enabled",
+)
 def test_delta_definition_from(pg_conn, sample_delta_table):
     run_command(
         f"""
@@ -31,6 +35,10 @@ def test_delta_definition_from(pg_conn, sample_delta_table):
     pg_conn.rollback()
 
 
+@pytest.mark.skipif(
+    os.getenv("PG_LAKE_DELTA_SUPPORT") != "1",
+    reason="Delta support not enabled",
+)
 def test_delta_load_from(pg_conn, sample_delta_table):
     run_command(
         f"""
@@ -48,6 +56,10 @@ def test_delta_load_from(pg_conn, sample_delta_table):
     pg_conn.rollback()
 
 
+@pytest.mark.skipif(
+    os.getenv("PG_LAKE_DELTA_SUPPORT") != "1",
+    reason="Delta support not enabled",
+)
 def test_delta_copy(pg_conn, sample_delta_table):
     run_command(
         f"""

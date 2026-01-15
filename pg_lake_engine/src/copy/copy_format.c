@@ -47,9 +47,11 @@ static CopyDataFormatName DataFormatNames[] =
 	{
 		"iceberg", DATA_FORMAT_ICEBERG
 	},
+#if PG_LAKE_DELTA_SUPPORT == 1
 	{
 		"delta", DATA_FORMAT_DELTA
 	},
+#endif
 	{
 		"gdal", DATA_FORMAT_GDAL
 	},

@@ -271,12 +271,15 @@ duckdb_global_init(char *databaseFilePath,
 	if (run_command_on_duckdb("LOAD spatial") == DuckDBError)
 		return DUCKDB_INITIALIZATION_ERROR;
 
+#if PG_LAKE_DELTA_SUPPORT == 1
+
 	/*
 	 * Load delta explicitly on start-up if extension install is disabled. We
 	 * cannot install it later so it must be there already.
 	 */
 	if (!allowExtensionInstall && run_command_on_duckdb("LOAD delta") == DuckDBError)
 		return DUCKDB_INITIALIZATION_ERROR;
+#endif
 
 	/*
 	 * Load function aliases/macros for pushdown. XXX If we get more than a

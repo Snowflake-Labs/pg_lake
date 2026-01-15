@@ -4,6 +4,10 @@ from fixtures.delta import *
 from datetime import datetime, date, timezone
 
 
+@pytest.mark.skipif(
+    os.getenv("PG_LAKE_DELTA_SUPPORT") != "1",
+    reason="Delta support not enabled",
+)
 def test_delta_pg_lake_table(pg_conn, sample_delta_table, extension):
     run_command(
         f"""
@@ -56,6 +60,10 @@ def test_delta_pg_lake_table(pg_conn, sample_delta_table, extension):
     pg_conn.rollback()
 
 
+@pytest.mark.skipif(
+    os.getenv("PG_LAKE_DELTA_SUPPORT") != "1",
+    reason="Delta support not enabled",
+)
 def test_delta_with_filename(pg_conn, sample_delta_table, extension):
 
     run_command(

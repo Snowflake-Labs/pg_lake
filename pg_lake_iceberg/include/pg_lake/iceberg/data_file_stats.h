@@ -23,8 +23,8 @@
 #include "pg_lake/iceberg/api.h"
 
 extern PGDLLEXPORT void SetIcebergDataFileStats(const DataFileStats * dataFileStats,
-												int64_t *recordCount,
-												int64_t *fileSizeInBytes,
+												int64_t * recordCount,
+												int64_t * fileSizeInBytes,
 												ColumnBound * *lowerBounds,
 												size_t *nLowerBounds,
 												ColumnBound * *upperBounds,

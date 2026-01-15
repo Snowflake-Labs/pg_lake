@@ -13,6 +13,7 @@ env:
   CDWREGIONTEST_ACCESS_KEY_ID: ${{ secrets.cdwregiontest_access_key_id }}
   CDWREGIONTEST_SECRET_ACCESS_KEY: ${{ secrets.cdwregiontest_secret_access_key }}
   ORG: snowflake-labs
+  PG_LAKE_DELTA_SUPPORT: 1
 
 jobs:
   build-image-almalinux:

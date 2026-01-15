@@ -134,6 +134,9 @@ export VCPKG_TOOLCHAIN_PATH="$(pwd)/vcpkg/scripts/buildsystems/vcpkg.cmake"
 
 # Make sure pg_config is in your PATH (e.g. export PATH=$HOME/pgsql-18/bin:$PATH):
 
+# Optionally, enable delta (read-only) support
+export PG_LAKE_DELTA_SUPPORT=1
+
 # install pg_lake extensions
 git clone --recurse-submodules https://github.com/snowflake-labs/pg_lake.git && \
 cd pg_lake && make install

@@ -34,6 +34,8 @@ The following formats are supported:
 | delta | External [**Delta Lake table**](https://docs.databricks.com/en/delta/index.html) | n/a | No |
 | log | Log files such as [**S3 logs**](https://docs.aws.amazon.com/AmazonS3/latest/userguide/ServerLogs.html) | n/a | Yes (for s3:) |
 
+Note: delta requires compiling pg\_lake with `export PG_LAKE_DELTA_SUPPORT=1`.
+
 ## Parquet format
 
 Parquet files are the most versatile format for importing and exporting data in `pg_lake`. They are self-describing in terms of column names, types, and compression, and use columnar storage.
