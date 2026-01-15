@@ -49,6 +49,7 @@ char	   *RestCatalogHost = "http://localhost:8181";
 char	   *RestCatalogOauthHostPath = "";
 char	   *RestCatalogClientId = NULL;
 char	   *RestCatalogClientSecret = NULL;
+char	   *RestCatalogSessionRole = NULL;
 
 
 /*
@@ -285,24 +286,27 @@ RegisterNamespaceToRestCatalog(const char *catalogName, const char *namespaceNam
 				char	   *serverAllowedLocation =
 					JsonbGetStringByPath(httpResult.body, 2, "properties", "location");
 
-				const char *defaultAllowedLocation =
-					psprintf("%s/%s/%s", IcebergDefaultLocationPrefix, catalogName, namespaceName);
-
-
-				/*
-				 * Compare by ignoring the trailing `/` char that the server
-				 * might have for internal iceberg tables. For external ones,
-				 * we don't have any control over.
-				 */
-				if ((strlen(serverAllowedLocation) - strlen(defaultAllowedLocation) > 1 ||
-					 strncmp(serverAllowedLocation, defaultAllowedLocation, strlen(defaultAllowedLocation)) != 0))
+				if (serverAllowedLocation)
 				{
-					ereport(DEBUG1,
-							(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
-							 errmsg("namespace \"%s\" is already registered with a different location than the default expected location based on default location prefix",
-									namespaceName),
-							 errdetail_internal("Expected location: %s, but got: %s",
-												defaultAllowedLocation, serverAllowedLocation)));
+					const char *defaultAllowedLocation =
+						psprintf("%s/%s/%s", IcebergDefaultLocationPrefix, catalogName, namespaceName);
+
+
+					/*
+					 * Compare by ignoring the trailing `/` char that the
+					 * server might have for internal iceberg tables. For
+					 * external ones, we don't have any control over.
+					 */
+					if ((strlen(serverAllowedLocation) - strlen(defaultAllowedLocation) > 1 ||
+						 strncmp(serverAllowedLocation, defaultAllowedLocation, strlen(defaultAllowedLocation)) != 0))
+					{
+						ereport(DEBUG1,
+								(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+								 errmsg("namespace \"%s\" is already registered with a different location than the default expected location based on default location prefix",
+										namespaceName),
+								 errdetail_internal("Expected location: %s, but got: %s",
+													defaultAllowedLocation, serverAllowedLocation)));
+					}
 				}
 
 				break;
@@ -396,7 +400,12 @@ GetMetadataLocationFromRestCatalog(const char *restCatalogName, const char *name
 		ReportHTTPError(hr, ERROR);
 	}
 
-	return JsonbGetStringByPath(hr.body, 1, "metadata-location");
+	char	   *metadataLocation = JsonbGetStringByPath(hr.body, 1, "metadata-location");
+
+	if (metadataLocation == NULL)
+		ereport(ERROR, (errmsg("key \"metadata-location\" missing in json response")));
+
+	return metadataLocation;
 }
 
 
@@ -542,9 +551,6 @@ GetRestCatalogAccessToken(bool forceRefreshToken)
 
 		FetchRestCatalogAccessToken(&accessToken, &expiresIn);
 
-		/* Polaris default is 3600 seconds */
-		Assert(expiresIn > 0);
-
 		RestCatalogAccessToken = MemoryContextStrdup(TopMemoryContext, accessToken);
 		RestCatalogAccessTokenExpiry = now + (int64_t) expiresIn * 1000000; /* expiresIn is in
 																			 * seconds */
@@ -565,8 +571,6 @@ FetchRestCatalogAccessToken(char **accessToken, int *expiresIn)
 {
 	if (!RestCatalogHost || !*RestCatalogHost)
 		ereport(ERROR, (errmsg("pg_lake_iceberg.rest_catalog_host should be set")));
-	if (!RestCatalogClientId || !*RestCatalogClientId)
-		ereport(ERROR, (errmsg("pg_lake_iceberg.rest_catalog_client_id should be set")));
 	if (!RestCatalogClientSecret || !*RestCatalogClientSecret)
 		ereport(ERROR, (errmsg("pg_lake_iceberg.rest_catalog_client_secret should be set")));
 
@@ -579,21 +583,39 @@ FetchRestCatalogAccessToken(char **accessToken, int *expiresIn)
 	if (*accessTokenUrl == '\0')
 		accessTokenUrl = psprintf(REST_CATALOG_AUTH_TOKEN_PATH, RestCatalogHost);
 
-	/* Build Authorization: Basic <base64(clientId:clientSecret)> */
-	char	   *encodedAuth = EncodeBasicAuth(RestCatalogClientId, RestCatalogClientSecret);
-	char	   *authHeader = psprintf("Authorization: Basic %s", encodedAuth);
-
 	/* Form-encoded body */
-	const char *body = "grant_type=client_credentials&scope=PRINCIPAL_ROLE:ALL";
+	StringInfoData body;
+
+	initStringInfo(&body);
+	appendStringInfo(&body, "grant_type=client_credentials");
+
+	if (RestCatalogSessionRole != NULL && *RestCatalogSessionRole != '\0')
+		appendStringInfo(&body, "&scope=session:role:%s", URLEncodePath(RestCatalogSessionRole));
+	else
+		appendStringInfo(&body, "&scope=PRINCIPAL_ROLE:ALL");
 
 	/* Headers */
 	List	   *headers = NIL;
 
-	headers = lappend(headers, authHeader);
+	if (RestCatalogClientId != NULL && *RestCatalogClientId != '\0')
+	{
+		/* Polaris style authentication */
+		/* Build Authorization: Basic <base64(clientId:clientSecret)> */
+		char	   *encodedAuth = EncodeBasicAuth(RestCatalogClientId, RestCatalogClientSecret);
+		char	   *authHeader = psprintf("Authorization: Basic %s", encodedAuth);
+
+		headers = lappend(headers, authHeader);
+	}
+	else
+	{
+		/* Horizon style authentication */
+		appendStringInfo(&body, "&client_secret=%s", URLEncodePath(RestCatalogClientSecret));
+	}
+
 	headers = lappend(headers, "Content-Type: application/x-www-form-urlencoded");
 
 	/* POST */
-	HttpResult	httpResponse = SendRequestToRestCatalog(HTTP_POST, accessTokenUrl, body, headers);
+	HttpResult	httpResponse = SendRequestToRestCatalog(HTTP_POST, accessTokenUrl, body.data, headers);
 
 	if (httpResponse.status != 200)
 		ereport(ERROR,
@@ -604,7 +626,16 @@ FetchRestCatalogAccessToken(char **accessToken, int *expiresIn)
 		ereport(ERROR, (errmsg("Rest Catalog OAuth token response body is empty")));
 
 	*accessToken = JsonbGetStringByPath(httpResponse.body, 1, "access_token");
-	*expiresIn = atoi(JsonbGetStringByPath(httpResponse.body, 1, "expires_in"));
+
+	if (*accessToken == NULL)
+		ereport(ERROR, (errmsg("key \"access_token\" missing in json response")));
+
+	char	   *expiresInStr = JsonbGetStringByPath(httpResponse.body, 1, "expires_in");
+
+	if (expiresInStr == NULL)
+		ereport(ERROR, (errmsg("key \"expires_in\" missing in json response")));
+
+	*expiresIn = atoi(expiresInStr);
 }
 
 
@@ -647,7 +678,7 @@ JsonbGetStringByPath(const char *jsonb_text, int nkeys,...)
 
 		val = findJsonbValueFromContainer(container, JB_FOBJECT, &keyVal);
 		if (val == NULL)
-			ereport(ERROR, (errmsg("key \"%s\" missing in json response", key)));
+			return NULL;
 
 		if (argIndex < nkeys - 1)
 		{
