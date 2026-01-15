@@ -77,6 +77,15 @@ def test_cache_on_write():
     assert_common_output(stderr, max_cache_on_write="1000")
 
 
+def test_cache_on_write_large_value():
+    # Test 10GB value (larger than INT_MAX ~2.1GB)
+    returncode, stdout, stderr = run_cli_command(
+        ["--cache_on_write_max_size", "10737418240"]
+    )
+    assert returncode == 0
+    assert_common_output(stderr, max_cache_on_write="10737418240")
+
+
 def test_no_extension_installation():
     returncode, stdout, stderr = run_cli_command(["--no_extension_install"])
     assert returncode == 0

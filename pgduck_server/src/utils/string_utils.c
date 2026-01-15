@@ -32,7 +32,7 @@
 #include "utils/string_utils.h"
 
 /*
- * converts given string to 64 bit integer value.
+ * converts given string to 32 bit integer value.
  * returns 0 upon failure and sets error flag.
  */
 bool
@@ -68,6 +68,48 @@ string_to_int(const char *str, int *number)
 		return false;
 	}
 	else if (n < INT_MIN || n > INT_MAX)
+	{
+		return false;
+	}
+
+	*number = n;
+
+	return true;
+}
+
+/*
+ * converts given string to 64 bit integer value.
+ * returns false upon failure.
+ */
+bool
+string_to_int64(const char *str, int64_t *number)
+{
+	char	   *endptr;
+	long long int n;
+
+	if (str == NULL)
+	{
+		return false;
+	}
+
+	if (number == NULL)
+	{
+		return false;
+	}
+
+	errno = 0;
+
+	n = strtoll(str, &endptr, 10);
+
+	if (str == endptr)
+	{
+		return false;
+	}
+	else if (errno != 0)
+	{
+		return false;
+	}
+	else if (*endptr != '\0')
 	{
 		return false;
 	}
