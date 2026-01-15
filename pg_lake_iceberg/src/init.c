@@ -279,6 +279,15 @@ _PG_init(void)
 							   GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							   NULL, NULL, NULL);
 
+	DefineCustomStringVariable("pg_lake_iceberg.rest_catalog_session_role",
+							   NULL,
+							   NULL,
+							   &RestCatalogSessionRole,
+							   NULL,
+							   PGC_SUSET,
+							   GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							   NULL, NULL, NULL);
+
 	AvroInit();
 }
 

@@ -27,6 +27,7 @@ extern PGDLLEXPORT char *RestCatalogHost;
 extern char *RestCatalogOauthHostPath;
 extern char *RestCatalogClientId;
 extern char *RestCatalogClientSecret;
+extern char *RestCatalogSessionRole;
 
 #define REST_CATALOG_AUTH_TOKEN_PATH "%s/api/catalog/v1/oauth/tokens"
 

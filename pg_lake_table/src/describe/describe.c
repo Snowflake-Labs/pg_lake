@@ -189,8 +189,6 @@ DescribeColumnsFromIcebergMetadataURI(char *uri, bool emitFilename)
 
 		char	   *columnName = pstrdup(field->name);
 
-		columnName = MakeSimpleColumnName(columnName, DATA_FORMAT_ICEBERG);
-
 		PGType		pgType = IcebergFieldToPostgresType(field->type);
 
 		Oid			typeOid = pgType.postgresTypeOid;
