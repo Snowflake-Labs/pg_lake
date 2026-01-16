@@ -6,6 +6,11 @@ duckdb_extension_load(httpfs
     ADD_PATCHES
 )
 
+duckdb_extension_load(aws
+    GIT_URL https://github.com/duckdb/duckdb-aws
+    GIT_TAG 55bf3621fb7db254b473c94ce6360643ca38fac0
+)
+
 # Extension from this repo
 duckdb_extension_load(duckdb_pglake
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}
