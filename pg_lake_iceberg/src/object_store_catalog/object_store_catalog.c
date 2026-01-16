@@ -15,7 +15,7 @@
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/util/url_encode.h"
 #include "pg_lake/pgduck/remote_storage.h"
-#include "pg_lake/util/spi_helpers.h"
+#include "pg_extension_base/spi_helpers.h"
 #include "pg_lake/util/s3_reader_utils.h"
 #include "pg_lake/util/s3_writer_utils.h"
 #include "pg_lake/extensions/pg_lake_iceberg.h"

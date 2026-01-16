@@ -21,7 +21,7 @@
 
 #include "pg_lake/benchmark.h"
 #include "pg_lake/pgduck/client.h"
-#include "pg_lake/util/spi_helpers.h"
+#include "pg_extension_base/spi_helpers.h"
 
 
 /*

@@ -73,7 +73,8 @@
 #include "pg_lake/extensions/pg_parquet.h"
 #include "pg_lake/extensions/pg_lake_replication.h"
 #include "pg_lake/extensions/postgis.h"
-#include "pg_lake/extensions/extension_ids.h"
+#include "pg_extension_base/extension_ids.h"
+#include "pg_extension_base/pg_extension_base_ids.h"
 #include "pg_lake/test/hide_lake_objects.h"
 
 

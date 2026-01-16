@@ -22,7 +22,7 @@
 
 #include "catalog/pg_type.h"
 #include "pg_lake/extensions/pg_lake_table.h"
-#include "pg_lake/extensions/extension_ids.h"
+#include "pg_extension_base/extension_ids.h"
 #include "nodes/pg_list.h"
 #include "parser/parse_func.h"
 #include "utils/builtins.h"

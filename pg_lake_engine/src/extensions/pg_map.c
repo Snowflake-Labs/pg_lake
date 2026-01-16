@@ -20,7 +20,7 @@
 #include "access/htup_details.h"
 #include "catalog/pg_proc.h"
 #include "pg_lake/extensions/pg_map.h"
-#include "pg_lake/extensions/extension_ids.h"
+#include "pg_extension_base/extension_ids.h"
 #include "parser/parse_func.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"

@@ -25,7 +25,7 @@
 #include "pg_lake/pgduck/read_data.h"
 #include "pg_lake/storage/local_storage.h"
 #include "pg_lake/util/plan_cache.h"
-#include "pg_lake/util/spi_helpers.h"
+#include "pg_extension_base/spi_helpers.h"
 #include "pg_lake/util/string_utils.h"
 #include "executor/spi.h"
 #include "utils/snapmgr.h"

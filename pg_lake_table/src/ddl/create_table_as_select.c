@@ -44,7 +44,7 @@
 #include "pg_lake/parsetree/columns.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/util/rel_utils.h"
-#include "pg_lake/util/spi_helpers.h"
+#include "pg_extension_base/spi_helpers.h"
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/planner/dbt.h"
 

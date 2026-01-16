@@ -27,7 +27,7 @@
 #include "catalog/pg_inherits.h"
 #include "pg_lake/duckdb/transform_query_to_duckdb.h"
 #include "pg_lake/extensions/pg_lake_table.h"
-#include "pg_lake/extensions/extension_ids.h"
+#include "pg_extension_base/extension_ids.h"
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/fdw/pg_lake_table.h"
 #include "pg_lake/fdw/deparse_ruleutils.h"

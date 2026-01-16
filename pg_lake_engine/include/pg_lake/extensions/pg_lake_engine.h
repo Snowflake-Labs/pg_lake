@@ -17,7 +17,7 @@
 
 #pragma once
 
-#include "pg_lake/extensions/extension_ids.h"
+#include "pg_extension_base/extension_ids.h"
 
 #define PG_LAKE_INTERNAL_NSP "__lake__internal__nsp__"
 #define PG_LAKE_ENGINE_NSP "lake_engine"

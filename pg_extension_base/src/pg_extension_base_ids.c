@@ -16,24 +16,24 @@
  */
 
 /*
- * Utility functions for pg_lake_benchmark extension OIDs.
+ * Cached extension IDs for pg_extension_base.
  */
 #include "postgres.h"
 
-#include "pg_lake/extensions/pg_lake_benchmark.h"
-#include "pg_extension_base/extension_ids.h"
+#include "pg_extension_base/pg_extension_base_ids.h"
 
 
 /*
- * Generic extension state.
+ * Cached extension state for pg_extension_base.
  */
-CachedExtensionIds *PgLakeBenchmark;
+CachedExtensionIds *PgExtensionBase;
+
 
 /*
- * Set up extension ID caching for pg_lake_benchmark.
+ * Set up extension ID caching for pg_extension_base.
  */
 void
-InitializePgLakeBenchmarkIdCache(void)
+InitializePgExtensionBaseCache(void)
 {
-	PgLakeBenchmark = CreateExtensionIdsCache(PG_LAKE_BENCHMARK, NULL, NULL);
+	PgExtensionBase = CreateExtensionIdsCache(PG_EXTENSION_BASE_NAME, NULL, NULL);
 }

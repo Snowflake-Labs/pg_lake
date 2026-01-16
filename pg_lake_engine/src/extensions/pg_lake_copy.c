@@ -21,7 +21,7 @@
 #include "postgres.h"
 
 #include "pg_lake/extensions/pg_lake_copy.h"
-#include "pg_lake/extensions/extension_ids.h"
+#include "pg_extension_base/extension_ids.h"
 
 
 /*

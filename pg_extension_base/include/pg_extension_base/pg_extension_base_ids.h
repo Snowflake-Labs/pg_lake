@@ -15,25 +15,13 @@
  * limitations under the License.
  */
 
-/*
- * Utility functions for pg_lake_benchmark extension OIDs.
- */
-#include "postgres.h"
+#pragma once
 
-#include "pg_lake/extensions/pg_extension_base.h"
-#include "pg_lake/extensions/extension_ids.h"
+#include "pg_extension_base/extension_ids.h"
 
+#define PG_EXTENSION_BASE_NAME "pg_extension_base"
 
-/*
- * Generic extension state.
- */
-CachedExtensionIds *PgExtensionBase;
+/* cached extension IDs for pg_extension_base */
+extern PGDLLEXPORT CachedExtensionIds *PgExtensionBase;
 
-/*
- * Set up extension ID caching for pg_extension_base.
- */
-void
-InitializePGExtensionBaseCache(void)
-{
-	PgExtensionBase = CreateExtensionIdsCache(PG_EXTENSION_BASE, NULL, NULL);
-}
+extern PGDLLEXPORT void InitializePgExtensionBaseCache(void);

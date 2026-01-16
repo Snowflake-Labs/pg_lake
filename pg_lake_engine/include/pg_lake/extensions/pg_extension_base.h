@@ -17,11 +17,6 @@
 
 #pragma once
 
-#include "pg_lake/extensions/extension_ids.h"
-
-#define PG_EXTENSION_BASE "pg_extension_base"
-
-/* cached extension IDs for pg_extension_base */
-extern PGDLLEXPORT CachedExtensionIds * PgExtensionBase;
-
-void		InitializePGExtensionBaseCache(void);
+/* pg_extension_base is now provided by pg_extension_base itself */
+#include "pg_extension_base/extension_ids.h"
+#include "pg_extension_base/pg_extension_base_ids.h"

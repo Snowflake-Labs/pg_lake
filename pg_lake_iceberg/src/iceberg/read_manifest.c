@@ -29,7 +29,7 @@
 #include "pg_lake/avro/avro_reader.h"
 #include "pg_lake/util/s3_reader_utils.h"
 #include "pg_lake/util/plan_cache.h"
-#include "pg_lake/util/spi_helpers.h"
+#include "pg_extension_base/spi_helpers.h"
 
 
 /* 63 is the identifier length limit in Postgres. */

@@ -20,7 +20,7 @@
 #include "pg_lake/csv/csv_options.h"
 #include "pg_lake/csv/csv_writer.h"
 #include "pg_lake/query/execute.h"
-#include "pg_lake/util/spi_helpers.h"
+#include "pg_extension_base/spi_helpers.h"
 #include "executor/executor.h"
 #include "optimizer/optimizer.h"
 #include "tcop/tcopprot.h"

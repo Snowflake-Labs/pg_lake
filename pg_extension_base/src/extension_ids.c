@@ -24,11 +24,10 @@
 #include "access/htup_details.h"
 #include "access/table.h"
 #include "catalog/objectaccess.h"
-#include "catalog/objectaccess.h"
 #include "catalog/pg_extension.h"
 #include "catalog/pg_type.h"
 #include "commands/extension.h"
-#include "pg_lake/extensions/extension_ids.h"
+#include "pg_extension_base/extension_ids.h"
 #include "parser/parse_func.h"
 #include "utils/catcache.h"
 #include "utils/fmgroids.h"
@@ -261,7 +260,7 @@ ExtensionSchemaId(CachedExtensionIds * extension)
 
 
 /*
- * ExtensionOwnerId returns the OID of the extension schema.
+ * ExtensionOwnerId returns the OID of the extension owner.
  */
 Oid
 ExtensionOwnerId(CachedExtensionIds * extension)

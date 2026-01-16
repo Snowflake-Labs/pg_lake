@@ -23,7 +23,7 @@
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/util/rel_utils.h"
-#include "pg_lake/util/spi_helpers.h"
+#include "pg_extension_base/spi_helpers.h"
 #include "catalog/namespace.h"
 #include "commands/dbcommands.h"
 #include "foreign/foreign.h"

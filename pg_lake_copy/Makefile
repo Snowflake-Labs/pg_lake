@@ -7,7 +7,7 @@ SOURCES := $(wildcard src/*.c) $(wildcard src/*/*.c)
 OBJS := $(patsubst %.c,%.o,$(sort $(SOURCES)))
 
 SHLIB_LINK = $(libpq)
-PG_CPPFLAGS = -I$(libpq_srcdir) -Iinclude -I../pg_lake_engine/include -I../pg_lake_iceberg/include -I../pg_lake_table/include -std=gnu99 -g -Wall -Wextra -Wno-unused-parameter -Werror
+PG_CPPFLAGS = -I$(libpq_srcdir) -Iinclude -I../pg_extension_base/include -I../pg_lake_engine/include -I../pg_lake_iceberg/include -I../pg_lake_table/include -std=gnu99 -g -Wall -Wextra -Wno-unused-parameter -Werror
 
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)

@@ -97,6 +97,7 @@
 #include "tcop/utility.h"
 
 #include "pg_extension_base/base_workers.h"
+#include "pg_extension_base/pg_extension_base_ids.h"
 #include "pg_extension_base/pg_compat.h"
 #include "pg_extension_base/spi_helpers.h"
 
@@ -402,6 +403,9 @@ InitializeBaseWorkerLauncher(void)
 		/* do not start workers during upgrade */
 		return;
 	}
+
+	/* initialize the extension IDs cache for pg_extension_base */
+	InitializePgExtensionBaseCache();
 
 	/* set up DDL hooks */
 	PreviousProcessUtility =
@@ -2199,11 +2203,14 @@ DeregisterBaseWorker_internal(int32 workerId)
 
 /*
  * InsertBaseWorkerRegistration inserts an entry into pg_extension_base.workers.
+ *
+ * We run as the extension owner to allow non-superusers who have been granted
+ * EXECUTE on register_worker to insert into the workers table.
  */
 static int32
 InsertBaseWorkerRegistration(char *workerName, Oid extensionId, Oid entryPointFunctionId)
 {
-	SPI_connect();
+	SPI_START_EXTENSION_OWNER(PgExtensionBase);
 
 	char	   *extensionName = get_extension_name(extensionId);
 
@@ -2243,7 +2250,7 @@ InsertBaseWorkerRegistration(char *workerName, Oid extensionId, Oid entryPointFu
 
 	int32		workerId = DatumGetInt32(workerIdDatum);
 
-	SPI_finish();
+	SPI_END();
 
 	return workerId;
 }
@@ -2274,11 +2281,14 @@ DatabaseIsTemplate(Oid databaseId)
 /*
  * DeleteBaseWorkerRegistrationByName deletes an entry from pg_extension_base.workers
  * by name.
+ *
+ * We run as the extension owner to allow non-superusers who have been granted
+ * EXECUTE on deregister_worker to delete from the workers table.
  */
 static int32
 DeleteBaseWorkerRegistrationByName(char *workerName)
 {
-	SPI_connect();
+	SPI_START_EXTENSION_OWNER(PgExtensionBase);
 
 	int			argCount = 1;
 	Oid			argTypes[] = {TEXTOID};
@@ -2306,7 +2316,7 @@ DeleteBaseWorkerRegistrationByName(char *workerName)
 
 	int32		workerId = DatumGetInt32(workerIdDatum);
 
-	SPI_finish();
+	SPI_END();
 
 	return workerId;
 }
@@ -2314,15 +2324,18 @@ DeleteBaseWorkerRegistrationByName(char *workerName)
 /*
  * DeleteBaseWorkerRegistrationById deletes an entry from pg_extension_base.workers
  * by id.
+ *
+ * We run as the extension owner to allow non-superusers who have been granted
+ * EXECUTE on deregister_worker to delete from the workers table.
  */
 static void
 DeleteBaseWorkerRegistrationById(int32 workerId)
 {
-	SPI_connect();
+	SPI_START_EXTENSION_OWNER(PgExtensionBase);
 
 	int			argCount = 1;
 	Oid			argTypes[] = {INT4OID};
-	Datum		argValues[] = {workerId};
+	Datum		argValues[] = {Int32GetDatum(workerId)};
 
 	const char *argNulls = " ";
 	bool		readOnly = false;
@@ -2336,7 +2349,7 @@ DeleteBaseWorkerRegistrationById(int32 workerId)
 	if (SPI_processed != 1)
 		ereport(ERROR, (errmsg("could not find worker id %d", workerId)));
 
-	SPI_finish();
+	SPI_END();
 }
 
 /*

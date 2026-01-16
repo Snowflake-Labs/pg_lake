@@ -27,7 +27,7 @@
 #include "pg_lake/iceberg/iceberg_type_json_serde.h"
 #include "pg_lake/json/json_utils.h"
 #include "pg_lake/pgduck/map.h"
-#include "pg_lake/util/spi_helpers.h"
+#include "pg_extension_base/spi_helpers.h"
 
 #include "access/tupdesc.h"
 #include "nodes/makefuncs.h"

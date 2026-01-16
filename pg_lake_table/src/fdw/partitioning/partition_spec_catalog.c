@@ -26,7 +26,7 @@
 #include "pg_lake/iceberg/partitioning/spec_generation.h"
 #include "pg_lake/iceberg/partitioning/partition.h"
 #include "pg_lake/partitioning/partition_spec_catalog.h"
-#include "pg_lake/util/spi_helpers.h"
+#include "pg_extension_base/spi_helpers.h"
 
 static void InsertIcebergPartitionSpec(Oid relationId,
 									   IcebergPartitionSpec * spec);

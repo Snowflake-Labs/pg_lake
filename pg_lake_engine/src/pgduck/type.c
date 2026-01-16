@@ -22,7 +22,7 @@
 #include "pg_lake/pgduck/parse_struct.h"
 #include "pg_lake/pgduck/type.h"
 #include "pg_lake/pgduck/map.h"
-#include "pg_lake/extensions/extension_ids.h"
+#include "pg_extension_base/extension_ids.h"
 #include "pg_lake/extensions/pg_map.h"
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/util/numeric.h"

@@ -30,7 +30,7 @@
 #include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/parse_struct.h"
 #include "pg_lake/pgduck/type.h"
-#include "pg_lake/util/spi_helpers.h"
+#include "pg_extension_base/spi_helpers.h"
 
 #include "access/table.h"
 #include "access/xlogutils.h"

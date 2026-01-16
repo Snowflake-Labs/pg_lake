@@ -17,7 +17,7 @@
 
 #pragma once
 
-#include "pg_lake/extensions/extension_ids.h"
+#include "pg_extension_base/extension_ids.h"
 
 #define PG_PARQUET "pg_parquet"
 

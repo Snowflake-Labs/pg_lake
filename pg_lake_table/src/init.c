@@ -29,7 +29,7 @@
 #include "pg_lake/ddl/utility_hook.h"
 #include "pg_lake/ddl/vacuum.h"
 #include "pg_lake/extensions/pg_lake_table.h"
-#include "pg_lake/extensions/extension_ids.h"
+#include "pg_extension_base/extension_ids.h"
 #include "pg_lake/fdw/pg_lake_table.h"
 #include "pg_lake/fdw/data_file_pruning.h"
 #include "pg_lake/fdw/shippable.h"

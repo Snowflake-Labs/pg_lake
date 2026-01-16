@@ -49,7 +49,7 @@
 #include "pg_lake/pgduck/serialize.h"
 #include "pg_lake/util/array_utils.h"
 #include "pg_lake/util/rel_utils.h"
-#include "pg_lake/util/spi_helpers.h"
+#include "pg_extension_base/spi_helpers.h"
 
 static DataFileSchemaField * CreateRegisteredFieldForAttribute(Oid relationId, int spiIndex);
 static void InsertFieldMapping(Oid relationId, int attrIcebergFieldId,

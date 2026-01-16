@@ -8,7 +8,7 @@ OBJS := $(patsubst %.c,%.o,$(sort $(SOURCES)))
 
 SHLIB_LINK_INTERNAL = $(libpq)
 
-PG_CPPFLAGS = -I$(libpq_srcdir) -Iinclude -I../pg_lake_engine/include -std=gnu99 -g
+PG_CPPFLAGS = -I$(libpq_srcdir) -Iinclude -I../pg_extension_base/include -I../pg_lake_engine/include -std=gnu99 -g
 
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)

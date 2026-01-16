@@ -25,7 +25,7 @@
 #include "catalog/pg_type.h"
 #include "commands/extension.h"
 #include "pg_lake/extensions/pg_lake_engine.h"
-#include "pg_lake/extensions/extension_ids.h"
+#include "pg_extension_base/extension_ids.h"
 #include "pg_lake/extensions/postgis.h"
 #include "parser/parse_func.h"
 #include "utils/inval.h"

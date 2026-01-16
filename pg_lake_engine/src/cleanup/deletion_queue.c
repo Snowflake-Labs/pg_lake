@@ -26,7 +26,7 @@
 #include "pg_lake/extensions/pg_lake_table.h"
 #include "pg_lake/pgduck/remote_storage.h"
 #include "pg_lake/util/array_utils.h"
-#include "pg_lake/util/spi_helpers.h"
+#include "pg_extension_base/spi_helpers.h"
 #include "pg_lake/util/string_utils.h"
 #include "datatype/timestamp.h"
 #include "storage/procarray.h"

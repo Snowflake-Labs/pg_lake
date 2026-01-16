@@ -26,7 +26,7 @@
 #include "pg_lake/pgduck/rewrite_query.h"
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/extensions/pg_lake_spatial.h"
-#include "pg_lake/extensions/extension_ids.h"
+#include "pg_extension_base/extension_ids.h"
 #include "parser/parse_func.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"

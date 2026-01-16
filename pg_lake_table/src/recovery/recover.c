@@ -25,7 +25,7 @@
 #include "pg_lake/extensions/pg_lake_iceberg.h"
 #include "pg_lake/extensions/pg_lake_table.h"
 #include "pg_lake/iceberg/catalog.h"
-#include "pg_lake/util/spi_helpers.h"
+#include "pg_extension_base/spi_helpers.h"
 #include "utils/builtins.h"
 
 
