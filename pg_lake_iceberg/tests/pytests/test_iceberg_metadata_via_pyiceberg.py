@@ -351,12 +351,9 @@ def test_iceberg_datafiles(
     spark_generated_iceberg_test,
     superuser_conn,
     s3,
-    pgduck_conn,
+    duckdb_conn,
 ):
-
-    # we use some test UDFs from duckdb's iceberg implementation
-    run_command("INSTALL iceberg", pgduck_conn)
-    run_command("LOAD iceberg", pgduck_conn)
+    install_duckdb_extension(duckdb_conn, "iceberg")
 
     iceberg_table_metadata_location = (
         "s3://"
@@ -364,24 +361,24 @@ def test_iceberg_datafiles(
         + "/spark_test/public/spark_generated_iceberg_test/metadata/00009-5c29aedb-463b-4b80-b0d5-c1d7fc957770.metadata.json"
     )
 
-    result = run_query(
+    duckdb_conn.execute(
         f"""
                        select file_path from iceberg_metadata('{iceberg_table_metadata_location}')
                         where manifest_content = 'DATA'
                         order by file_path;
                        """,
-        pgduck_conn,
     )
+    result = duckdb_conn.fetchall()
     duckdb_expected_data_files = [row[0] for row in result]
 
-    result = run_query(
+    duckdb_conn.execute(
         f"""
                        select file_path from iceberg_metadata('{iceberg_table_metadata_location}')
                         where manifest_content = 'DELETE'
                         order by file_path;
                        """,
-        pgduck_conn,
     )
+    result = duckdb_conn.fetchall()
     duckdb_expected_delete_files = [row[0] for row in result]
 
     pg_lake_expected_data_files = pg_lake_iceberg_datafile_paths(
