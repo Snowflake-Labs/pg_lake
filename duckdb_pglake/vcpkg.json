@@ -4,5 +4,10 @@
     "azure-storage-blobs-cpp",
     "azure-storage-files-datalake-cpp",
     "openssl"
-  ]
+  ],
+  "vcpkg-configuration": {
+    "overlay-ports": [
+      "./vcpkg_ports"
+    ]
+  }
 }
