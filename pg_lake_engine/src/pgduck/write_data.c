@@ -392,12 +392,9 @@ WriteQueryResultTo(char *query,
 	/* end WITH options */
 	appendStringInfoString(&command, ")");
 
-	bool		disablePreserveInsertionOrder = TargetRowGroupSizeMB > 0;
-
 	return ExecuteCopyToCommandOnPGDuckConnection(command.data,
 												  leafFields,
 												  schema,
-												  disablePreserveInsertionOrder,
 												  destinationPath,
 												  destinationFormat);
 }

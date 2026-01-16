@@ -107,7 +107,6 @@ extern PGDLLEXPORT StatsCollector * GetDataFileStatsListFromPGResult(PGresult *r
 extern PGDLLEXPORT StatsCollector * ExecuteCopyToCommandOnPGDuckConnection(char *copyCommand,
 																		   List *leafFields,
 																		   DataFileSchema * schema,
-																		   bool disablePreserveInsertionOrder,
 																		   char *destinationPath,
 																		   CopyDataFormat destinationFormat);
 extern PGDLLEXPORT bool ShouldSkipStatistics(LeafField * leafField);

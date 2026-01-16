@@ -83,7 +83,6 @@ StatsCollector *
 ExecuteCopyToCommandOnPGDuckConnection(char *copyCommand,
 									   List *leafFields,
 									   DataFileSchema * schema,
-									   bool disablePreserveInsertionOrder,
 									   char *destinationPath,
 									   CopyDataFormat destinationFormat)
 {
@@ -93,13 +92,6 @@ ExecuteCopyToCommandOnPGDuckConnection(char *copyCommand,
 
 	PG_TRY();
 	{
-		if (disablePreserveInsertionOrder)
-		{
-			result = ExecuteQueryOnPGDuckConnection(pgDuckConn, "SET preserve_insertion_order TO 'false';");
-			CheckPGDuckResult(pgDuckConn, result);
-			PQclear(result);
-		}
-
 		result = ExecuteQueryOnPGDuckConnection(pgDuckConn, copyCommand);
 		CheckPGDuckResult(pgDuckConn, result);
 
@@ -137,13 +129,6 @@ ExecuteCopyToCommandOnPGDuckConnection(char *copyCommand,
 		}
 
 		PQclear(result);
-
-		if (disablePreserveInsertionOrder)
-		{
-			result = ExecuteQueryOnPGDuckConnection(pgDuckConn, "RESET preserve_insertion_order;");
-			CheckPGDuckResult(pgDuckConn, result);
-			PQclear(result);
-		}
 	}
 	PG_FINALLY();
 	{
