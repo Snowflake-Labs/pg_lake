@@ -41,3 +41,10 @@ WITH text_text_map_name AS
  (SELECT map_type.create('TEXT','TEXT') AS name)
 SELECT map_type.create('TEXT', name) AS text_map_of_text
  FROM text_text_map_name;
+
+
+CREATE FUNCTION __lake__internal__nsp__.uuid_extract_timestamp_pg(uuid, integer)
+ RETURNS timestamp with time zone
+ LANGUAGE C
+ IMMUTABLE PARALLEL SAFE STRICT
+AS 'MODULE_PATHNAME', $function$pg_lake_internal_dummy_function$function$;

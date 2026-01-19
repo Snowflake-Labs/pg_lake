@@ -443,6 +443,14 @@ static const PGDuckShippableFunction ShippableBuiltinProcs[] =
 	{"encode", 'f', 2, {"bytea", "text"}, IsEncodeShippable},
 	{"decode", 'f', 2, {"text", "text"}, IsDecodeShippable},
 
+#if PG_VERSION_NUM >= 170000
+	{"uuid_extract_version", 'f', 1, {"uuid"}, NULL},
+	{"uuid_extract_timestamp", 'f', 1, {"uuid"}, NULL},
+#endif
+#if PG_VERSION_NUM >= 180000
+	{"uuidv7", 'f', 0, {}, NULL},
+#endif
+
 	/* trim() */
 };
 
