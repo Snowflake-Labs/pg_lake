@@ -21,6 +21,6 @@ def test_internal_schema(
     """,
         pg_conn,
     )[0][0]
-    assert result == 64
+    assert result == 65
 
     pg_conn.rollback()
