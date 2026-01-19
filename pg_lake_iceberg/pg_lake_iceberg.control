@@ -1,5 +1,5 @@
 comment = 'Iceberg implementation in Postgres'
-default_version = '3.2'
+default_version = '3.3'
 module_pathname = '$libdir/pg_lake_iceberg'
 relocatable = false
 schema = pg_catalog
