@@ -101,6 +101,7 @@
 #include "pg_lake/util/item_pointer_utils.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_lake/util/string_utils.h"
+#include "pg_lake/ducklake/catalog.h"
 
 /* Default CPU cost to start up a foreign query. */
 #define DEFAULT_FDW_STARTUP_COST	100.0
@@ -4416,7 +4417,29 @@ postgresExecForeignTruncate(List *relations,
 		if (PgLakeModifyValidityCheckHook)
 			PgLakeModifyValidityCheckHook(relationId);
 
-		RemoveAllDataFilesFromTable(relationId);
+		if (IsDucklakeTable(relationId))
+		{
+			/* Mark all data files as ended in DuckLake metadata */
+			DucklakeTableMetadata *metadata = DucklakeGetTableMetadata(relationId);
+
+			if (metadata)
+			{
+				DucklakeRemoveAllDataFiles(metadata->tableId);
+
+				/* Clean up allocated memory */
+				if (metadata->tableName)
+					pfree(metadata->tableName);
+				if (metadata->schemaName)
+					pfree(metadata->schemaName);
+				if (metadata->path)
+					pfree(metadata->path);
+				pfree(metadata);
+			}
+		}
+		else
+		{
+			RemoveAllDataFilesFromTable(relationId);
+		}
 	}
 }
 

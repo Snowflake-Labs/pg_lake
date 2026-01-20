@@ -53,6 +53,9 @@ static CopyDataFormatName DataFormatNames[] =
 	},
 #endif
 	{
+		"ducklake", DATA_FORMAT_DUCKLAKE
+	},
+	{
 		"gdal", DATA_FORMAT_GDAL
 	},
 	{

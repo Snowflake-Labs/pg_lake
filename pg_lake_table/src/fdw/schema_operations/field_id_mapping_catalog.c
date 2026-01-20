@@ -559,6 +559,61 @@ GetLeafFieldsForInternalIcebergTable(Oid relationId)
 
 
 /*
+ * GetLeafFieldsForDucklakeTable gets the leaf fields for a DuckLake table
+ * by querying pg_attribute and using column_order as the fieldId.
+ * This allows column stats to be collected during parquet writes.
+ */
+List *
+GetLeafFieldsForDucklakeTable(Oid relationId)
+{
+	List	   *leafFields = NIL;
+	Relation	rel;
+	TupleDesc	tupdesc;
+
+	rel = relation_open(relationId, AccessShareLock);
+	tupdesc = RelationGetDescr(rel);
+
+	for (int i = 0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+		/* Skip dropped columns and system columns */
+		if (attr->attisdropped || attr->attnum <= 0)
+			continue;
+
+		PGType		pgType = MakePGType(attr->atttypid, attr->atttypmod);
+
+		/*
+		 * For DuckLake tables, we use column_order (= attnum) as the fieldId.
+		 * This maps directly to lake_ducklake.column.column_order.
+		 */
+		int			fieldId = attr->attnum;
+
+		bool		forAddColumn = false;
+		int			subFieldIndex = fieldId;
+		Field	   *field = PostgresTypeToIcebergField(pgType, forAddColumn, &subFieldIndex);
+
+		if (field == NULL || field->type != FIELD_TYPE_SCALAR)
+			continue;
+
+		LeafField  *leafField = palloc0(sizeof(LeafField));
+
+		leafField->fieldId = fieldId;
+		leafField->field = field;
+		leafField->pgType = pgType;
+		leafField->duckTypeName = IcebergTypeNameToDuckdbTypeName(field->field.scalar.typeName);
+		leafField->level = 1;	/* top-level columns */
+
+		leafFields = lappend(leafFields, leafField);
+	}
+
+	relation_close(rel, AccessShareLock);
+
+	return leafFields;
+}
+
+
+/*
  * UpdateRegisteredFieldWriteDefaultForAttribute updates the write default value for a given column.
  */
 void

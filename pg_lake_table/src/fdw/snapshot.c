@@ -28,6 +28,7 @@
 #include "pg_lake/extensions/pg_lake_engine.h"
 #include "pg_lake/iceberg/api/datafile.h"
 #include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/ducklake/catalog.h"
 #include "pg_lake/iceberg/api/table_schema.h"
 #include "pg_lake/fdw/data_files_catalog.h"
 #include "pg_lake/fdw/snapshot.h"
@@ -189,7 +190,87 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 	List	   *fileScans = NIL;
 	List	   *positionDeleteScans = NIL;
 
-	if (IsWritablePgLakeTable(relationId) || IsInternalIcebergTable(relationId))
+	if (IsDucklakeTable(relationId))
+	{
+		/*
+		 * DuckLake tables: Read data files from DuckLake catalog
+		 */
+		List	   *dataFiles = NIL;
+		List	   *deleteFiles = NIL;
+
+		/*
+		 * Push an active snapshot if needed for SPI operations in catalog functions.
+		 * Check if we already have an active snapshot to avoid nested pushes.
+		 */
+		bool		pushedSnapshot = false;
+		if (!ActiveSnapshotSet())
+		{
+			PushActiveSnapshot(GetTransactionSnapshot());
+			pushedSnapshot = true;
+		}
+
+		/* Get current snapshot ID */
+		DucklakeSnapshot *ducklakeSnapshot = DucklakeGetCurrentSnapshot();
+		int64		snapshotId = ducklakeSnapshot->snapshotId;
+		pfree(ducklakeSnapshot);
+
+		/* Get table metadata */
+		DucklakeTableMetadata *tableMetadata = DucklakeGetTableMetadata(relationId);
+		if (!tableMetadata)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_TABLE),
+					 errmsg("DuckLake table metadata not found for relation %u", relationId)));
+
+		/* Get data files for this snapshot */
+		List	   *ducklakeDataFiles = DucklakeGetDataFiles(tableMetadata->tableId, snapshotId);
+
+		/* Convert DuckLake data files to TableDataFile format */
+		foreach_ptr(DucklakeDataFile, duckFile, ducklakeDataFiles)
+		{
+			TableDataFile *dataFile = palloc0(sizeof(TableDataFile));
+			dataFile->path = pstrdup(duckFile->path);
+			dataFile->stats.rowCount = duckFile->recordCount;
+			dataFile->stats.fileSize = duckFile->fileSizeBytes;
+			dataFile->stats.deletedRowCount = 0;
+			dataFiles = lappend(dataFiles, dataFile);
+		}
+
+		/* Get delete files for this snapshot */
+		List	   *ducklakeDeleteFiles = DucklakeGetDeleteFiles(tableMetadata->tableId, snapshotId);
+		foreach_ptr(DucklakeDeleteFile, duckDelFile, ducklakeDeleteFiles)
+		{
+			TableDataFile *deleteFile = palloc0(sizeof(TableDataFile));
+			deleteFile->path = pstrdup(duckDelFile->path);
+			deleteFile->stats.rowCount = duckDelFile->deleteCount;
+			deleteFile->stats.fileSize = duckDelFile->fileSizeBytes;
+			deleteFiles = lappend(deleteFiles, deleteFile);
+		}
+
+		/* Create file scans */
+		foreach_ptr(TableDataFile, dataFile, dataFiles)
+		{
+			PgLakeFileScan *fileScan = palloc0(sizeof(PgLakeFileScan));
+			fileScan->path = dataFile->path;
+			fileScan->rowCount = dataFile->stats.rowCount;
+			fileScan->deletedRowCount = dataFile->stats.deletedRowCount;
+			fileScan->allRowsMatch = false;
+			fileScans = lappend(fileScans, fileScan);
+		}
+
+		/* Create delete file scans */
+		foreach_ptr(TableDataFile, deleteFile, deleteFiles)
+		{
+			PgLakeFileScan *deleteScan = palloc0(sizeof(PgLakeFileScan));
+			deleteScan->path = deleteFile->path;
+			deleteScan->rowCount = deleteFile->stats.rowCount;
+			positionDeleteScans = lappend(positionDeleteScans, deleteScan);
+		}
+
+		/* Pop the snapshot if we pushed it */
+		if (pushedSnapshot)
+			PopActiveSnapshot();
+	}
+	else if (IsWritablePgLakeTable(relationId) || IsInternalIcebergTable(relationId))
 	{
 		/*
 		 * Read only the data files, do not yet include the deletion files.

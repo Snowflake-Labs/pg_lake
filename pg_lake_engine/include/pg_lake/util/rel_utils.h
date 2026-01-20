@@ -26,6 +26,7 @@
 
 #define PG_LAKE_SERVER_NAME "pg_lake"
 #define PG_LAKE_ICEBERG_SERVER_NAME "pg_lake_iceberg"
+#define PG_LAKE_DUCKLAKE_SERVER_NAME "pg_lake_ducklake"
 
 extern PGDLLEXPORT bool IsAnyLakeForeignTableById(Oid foreignTableId);
 extern PGDLLEXPORT char *GetQualifiedRelationName(Oid relationId);
@@ -33,8 +34,10 @@ extern PGDLLEXPORT char *GetPgLakeForeignServerName(Oid foreignTableId);
 extern PGDLLEXPORT PgLakeTableType GetPgLakeTableTypeViaServerName(char *serverName);
 extern PGDLLEXPORT bool IsPgLakeForeignTableById(Oid foreignTableId);
 extern PGDLLEXPORT bool IsPgLakeIcebergForeignTableById(Oid foreignTableId);
+extern PGDLLEXPORT bool IsPgLakeDucklakeForeignTableById(Oid foreignTableId);
 extern PGDLLEXPORT bool IsPgLakeServerName(const char *serverName);
 extern PGDLLEXPORT bool IsPgLakeIcebergServerName(const char *serverName);
+extern PGDLLEXPORT bool IsPgLakeDucklakeServerName(const char *serverName);
 extern PGDLLEXPORT char *GetWritableTableLocation(Oid relationId, char **queryArguments);
 extern PGDLLEXPORT void EnsureTableOwner(Oid relationId);
 extern PGDLLEXPORT bool IsAnyLakeForeignTable(RangeTblEntry *rte);

@@ -61,6 +61,7 @@
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/ducklake/catalog.h"
 #include "pg_lake/util/numeric.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_lake/util/url_encode.h"
@@ -104,6 +105,8 @@ static List *ExpandTableLikeClause(TableLikeClause *table_like_clause);
 static bool ProcessCreateLakeTable(ProcessUtilityParams * params);
 static bool ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params);
 static bool ProcessCreateIcebergTableFromCreateStmt(ProcessUtilityParams * params);
+static bool ProcessCreateDucklakeTableFromCreateStmt(ProcessUtilityParams * params);
+static bool ProcessCreateDucklakeTableFromForeignTableStmt(ProcessUtilityParams * params);
 static void ErrorIfNotInManagedStorageRegion(char *location);
 static void ErrorIfTypeUnsupportedForIcebergTablesInternal(Oid typeOid, int32 typmod, int level, char *columnName);
 static void ErrorIfLocationIsNotEmpty(const char *location);
@@ -144,12 +147,15 @@ CreatePgLakeTableCheckUnsupportedFeaturesPostProcess(ProcessUtilityParams * para
 	if (!IsCreateLakeTable(createStmt))
 	{
 		/* not a lake table */
+		elog(LOG, "Not a lake table, returning");
 		return;
 	}
 
 	PgLakeTableType tableType =
 		GetPgLakeTableTypeViaServerName(createStmt->servername);
 	List	   *options = createStmt->options;
+
+	elog(LOG, "Processing lake table type: %d", tableType);
 
 	/* Parquet and JSON/CSV have different rules */
 	if (IsJsonOrCSVBackedTable(tableType, options))
@@ -159,6 +165,18 @@ CreatePgLakeTableCheckUnsupportedFeaturesPostProcess(ProcessUtilityParams * para
 
 	/* cannot use geometry without pg_lake_spatial */
 	ErrorIfUsingGeometryWithoutSpatialAnalytics(createStmt->base.tableElts);
+
+	/* Register DuckLake tables in metadata catalog */
+	if (tableType == PG_LAKE_DUCKLAKE_TABLE_TYPE)
+	{
+		Oid			relationId = RangeVarGetRelid(createStmt->base.relation, NoLock, false);
+		char	   *schemaName = get_namespace_name(get_rel_namespace(relationId));
+		char	   *tableName = get_rel_name(relationId);
+		DefElem    *locationOption = GetOption(options, "location");
+		char	   *location = locationOption ? defGetString(locationOption) : NULL;
+
+		DucklakeRegisterTable(schemaName, tableName, location, relationId);
+	}
 }
 
 
@@ -367,6 +385,14 @@ ErrorIfUnsupportedLakeTable(CreateForeignTableStmt *createStmt)
 	char	   *location = locationOption != NULL ? defGetString(locationOption) : "";
 
 	bool		isWritable = GetBoolOption(createStmt->options, "writable", false);
+	PgLakeTableType tableType = GetPgLakeTableTypeViaServerName(createStmt->servername);
+
+	/* DuckLake tables are handled separately - they use location, not path */
+	if (tableType == PG_LAKE_DUCKLAKE_TABLE_TYPE)
+	{
+		/* DuckLake tables don't need path validation here */
+		return;
+	}
 
 	if (isWritable && createStmt->base.tableElts == NIL &&
 		createStmt->base.partbound == NULL)
@@ -538,6 +564,10 @@ ProcessCreatePgLakeTable(ProcessUtilityParams * params, void *arg)
 		{
 			return ProcessCreateIcebergTableFromForeignTableStmt(params);
 		}
+		else if (IsPgLakeDucklakeServerName(createStmt->servername))
+		{
+			return ProcessCreateDucklakeTableFromForeignTableStmt(params);
+		}
 		else if (IsPgLakeServerName(createStmt->servername))
 		{
 			return ProcessCreateLakeTable(params);
@@ -545,7 +575,11 @@ ProcessCreatePgLakeTable(ProcessUtilityParams * params, void *arg)
 	}
 	else if (IsA(plannedStmt->utilityStmt, CreateStmt))
 	{
-		return ProcessCreateIcebergTableFromCreateStmt(params);
+		bool processed = ProcessCreateIcebergTableFromCreateStmt(params);
+		if (processed)
+			return true;
+
+		return ProcessCreateDucklakeTableFromCreateStmt(params);
 	}
 
 	return false;
@@ -1048,6 +1082,21 @@ EnsureSupportedIcebergTableColumnDefinitions(List *columnDefList)
 
 
 /*
+ * EnsureSupportedDucklakeTableColumnDefinitions ensures that the given column
+ * definitions are supported for DuckLake tables.
+ */
+static void
+EnsureSupportedDucklakeTableColumnDefinitions(List *columnDefList)
+{
+#if PG_VERSION_NUM >= 180000
+	ErrorIfTableContainsVirtualColumns(columnDefList);
+#endif
+	ErrorIfTableContainsUnsupportedTypes(columnDefList);
+	ErrorIfWritableTableWithReservedColumnName(columnDefList, PG_LAKE_DUCKLAKE_TABLE_TYPE);
+}
+
+
+/*
  * ErrorIfLocationIsNotEmpty errors if the given location is not empty.
  */
 static void
@@ -1295,7 +1344,10 @@ IsCreateLakeTable(CreateForeignTableStmt *createStmt)
 	ForeignDataWrapper *foreignDataWrapper =
 		GetForeignDataWrapper(foreignServer->fdwid);
 
-	if (strncasecmp(foreignDataWrapper->fdwname, PG_LAKE_TABLE, strlen(PG_LAKE_TABLE)) != 0)
+	/* Check if it's any of our lake FDWs */
+	if (strncasecmp(foreignDataWrapper->fdwname, PG_LAKE_TABLE, strlen(PG_LAKE_TABLE)) != 0 &&
+		strncasecmp(foreignDataWrapper->fdwname, "pg_lake_iceberg", 15) != 0 &&
+		strncasecmp(foreignDataWrapper->fdwname, "pg_lake_ducklake", 16) != 0)
 	{
 		/* not our FDW */
 		return false;
@@ -1938,3 +1990,94 @@ ErrorIfNotInManagedStorageRegion(char *location)
 					errmsg("can only create Iceberg tables in region %s", managedStorageRegion),
 					errdetail("bucket is in region %s", bucketRegion)));
 }
+
+
+/*
+ * ProcessCreateDucklakeTableFromCreateStmt handles "CREATE TABLE USING pg_lake_ducklake"
+ * statements. Similar to Iceberg, we convert to "CREATE FOREIGN TABLE SERVER pg_lake_ducklake".
+ */
+static bool
+ProcessCreateDucklakeTableFromCreateStmt(ProcessUtilityParams * params)
+{
+	Assert(IsA(params->plannedStmt->utilityStmt, CreateStmt));
+
+	CreateStmt *createStmt =
+		(CreateStmt *) params->plannedStmt->utilityStmt;
+
+	if (creating_extension)
+	{
+		return false;
+	}
+
+	PgLakeTableType tableType = GetPgLakeTableTypeViaAccessMethod(createStmt->accessMethod);
+
+	if (tableType != PG_LAKE_DUCKLAKE_TABLE_TYPE)
+	{
+		/* not a ducklake table */
+		return false;
+	}
+
+	if (params->readOnlyTree)
+		createStmt = (CreateStmt *) CopyUtilityStmt(params);
+
+	createStmt->tableElts = ExpandTableElements(createStmt->tableElts);
+	EnsureSupportedDucklakeTableColumnDefinitions(createStmt->tableElts);
+
+	/* Convert to foreign table statement */
+	CreateForeignTableStmt *foreignTableStmt = makeNode(CreateForeignTableStmt);
+	foreignTableStmt->servername = PG_LAKE_DUCKLAKE_SERVER_NAME;
+	foreignTableStmt->options = createStmt->options;
+	foreignTableStmt->base = *createStmt;
+	foreignTableStmt->base.accessMethod = NULL;
+	foreignTableStmt->base.type = T_CreateForeignTableStmt;
+	foreignTableStmt->base.options = NIL;
+
+	params->plannedStmt->utilityStmt = (Node *) foreignTableStmt;
+	PgLakeCommonProcessUtility(params);
+	return true;
+}
+
+static bool
+ProcessCreateDucklakeTableFromForeignTableStmt(ProcessUtilityParams * params)
+{
+	Assert(IsA(params->plannedStmt->utilityStmt, CreateForeignTableStmt));
+
+	CreateForeignTableStmt *createStmt =
+		(CreateForeignTableStmt *) params->plannedStmt->utilityStmt;
+
+	if (!IsPgLakeDucklakeServerName(createStmt->servername))
+	{
+		return false;
+	}
+
+	/* we might adjust the parse tree */
+	if (params->readOnlyTree)
+		createStmt = (CreateForeignTableStmt *) CopyUtilityStmt(params);
+
+	/* Mark DuckLake tables as writable by default */
+	DefElem    *writableOption = GetOption(createStmt->options, "writable");
+
+	if (writableOption == NULL)
+	{
+		DefElem    *writable = makeDefElem("writable", (Node *) makeString("true"), -1);
+
+		createStmt->options = lappend(createStmt->options, writable);
+	}
+
+	/* Set default format to parquet if not specified */
+	DefElem    *formatOption = GetOption(createStmt->options, "format");
+
+	if (formatOption == NULL)
+	{
+		DefElem    *format = makeDefElem("format", (Node *) makeString("parquet"), -1);
+
+		createStmt->options = lappend(createStmt->options, format);
+	}
+
+	params->plannedStmt->utilityStmt = (Node *) createStmt;
+
+	/* Return false to let normal foreign table creation continue */
+	/* Calling PgLakeCommonProcessUtility here would cause infinite recursion */
+	return false;
+}
+

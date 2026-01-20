@@ -18,12 +18,13 @@
 #pragma once
 
 
-/* distinguish tables with "server pg_lake" vs "server pg_lake_iceberg" */
+/* distinguish tables with "server pg_lake" vs "server pg_lake_iceberg" vs "server pg_lake_ducklake" */
 typedef enum PgLakeTableType
 {
 	PG_LAKE_INVALID_TABLE_TYPE,
 	PG_LAKE_TABLE_TYPE,
-	PG_LAKE_ICEBERG_TABLE_TYPE
+	PG_LAKE_ICEBERG_TABLE_TYPE,
+	PG_LAKE_DUCKLAKE_TABLE_TYPE
 }			PgLakeTableType;
 
 
@@ -33,3 +34,4 @@ extern PGDLLEXPORT bool IsWritablePgLakeTable(Oid relationId);
 extern PGDLLEXPORT bool IsIcebergTable(Oid relationId);
 extern PGDLLEXPORT bool IsInternalIcebergTable(Oid relationId);
 extern PGDLLEXPORT bool IsExternalIcebergTable(Oid relationId);
+extern PGDLLEXPORT bool IsDucklakeTable(Oid relationId);

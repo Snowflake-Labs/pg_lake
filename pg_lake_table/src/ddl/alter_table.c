@@ -59,6 +59,8 @@
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "pg_lake/util/rel_utils.h"
+#include "pg_lake/util/table_type.h"
+#include "pg_lake/ducklake/catalog.h"
 
 
 typedef enum PgLakeDDLType
@@ -238,8 +240,9 @@ ProcessAlterTable(ProcessUtilityParams * processUtilityParams, void *arg)
 	}
 
 	Oid			relationId = AlterTableLookupRelation(alterStmt, NoLock);
+	bool		isDucklakeTable = IsDucklakeTable(relationId);
 
-	if (!IsWritablePgLakeTable(relationId) && !IsIcebergTable(relationId))
+	if (!IsWritablePgLakeTable(relationId) && !IsIcebergTable(relationId) && !isDucklakeTable)
 	{
 		/* for non-pg_lake tables, error when using SET ACCESS METHOD iceberg */
 		ErrorIfUnsupportedSetAccessMethod(alterStmt);
@@ -251,7 +254,7 @@ ProcessAlterTable(ProcessUtilityParams * processUtilityParams, void *arg)
 	 * catalog_table_name option. All other operations or any other DDLs are
 	 * disallowed.
 	 */
-	if (HasOnlyCatalogAlterTableOptions(alterStmt))
+	if (!isDucklakeTable && HasOnlyCatalogAlterTableOptions(alterStmt))
 	{
 		IcebergCatalogType icebergCatalogType = GetIcebergCatalogType(relationId);
 
@@ -282,14 +285,17 @@ ProcessAlterTable(ProcessUtilityParams * processUtilityParams, void *arg)
 
 	}
 
-	ErrorIfReadOnlyIcebergTable(relationId);
+	if (!isDucklakeTable)
+		ErrorIfReadOnlyIcebergTable(relationId);
 
-	ErrorIfUnsupportedTypeAddedForIcebergTables(alterStmt);
+	if (!isDucklakeTable)
+		ErrorIfUnsupportedTypeAddedForIcebergTables(alterStmt);
 
 	/* check whether we are accepting writes for this table */
 	PgLakeTableType tableType = GetPgLakeTableType(relationId);
 
-	ErrorIfUnsupportedAlterWritablePgLakeTableStmt(alterStmt, tableType);
+	if (!isDucklakeTable)
+		ErrorIfUnsupportedAlterWritablePgLakeTableStmt(alterStmt, tableType);
 
 	/* if there is an OPTIONS (...) subcommand, perform additional validation */
 	if (tableType == PG_LAKE_ICEBERG_TABLE_TYPE)
@@ -334,6 +340,39 @@ ProcessAlterTable(ProcessUtilityParams * processUtilityParams, void *arg)
 	}
 
 	ApplyDDLChanges(relationId, schemaDDLOperations);
+
+	/*
+	 * Handle DuckLake ALTER TABLE operations.
+	 * Update lake_ducklake.column table for ADD/DROP COLUMN.
+	 */
+	if (isDucklakeTable)
+	{
+		ListCell   *cmdCell;
+
+		foreach(cmdCell, alterStmt->cmds)
+		{
+			AlterTableCmd *cmd = lfirst(cmdCell);
+
+			if (cmd->subtype == AT_AddColumn)
+			{
+				ColumnDef  *colDef = castNode(ColumnDef, cmd->def);
+				int32		typmod = 0;
+				Oid			typeOid = InvalidOid;
+
+				typenameTypeIdAndMod(NULL, colDef->typeName, &typeOid, &typmod);
+
+				/* Convert PostgreSQL type to DuckLake type string */
+				char	   *duckType = format_type_be(typeOid);
+
+				DucklakeAddColumn(relationId, colDef->colname, duckType,
+								  !colDef->is_not_null);
+			}
+			else if (cmd->subtype == AT_DropColumn)
+			{
+				DucklakeDropColumn(relationId, cmd->name);
+			}
+		}
+	}
 
 	if (PgLakeAlterTableHook)
 		PgLakeAlterTableHook(relationId, alterStmt);
@@ -650,17 +689,21 @@ PostProcessRenameWritablePgLakeTable(ProcessUtilityParams * params, void *arg)
 	}
 
 	Oid			relationId = get_relname_relid(relationName, namespaceId);
+	bool		isDucklakeTable = IsDucklakeTable(relationId);
 
-	if (!IsWritablePgLakeTable(relationId) && !IsIcebergTable(relationId))
+	if (!IsWritablePgLakeTable(relationId) && !IsIcebergTable(relationId) && !isDucklakeTable)
 	{
 		return;
 	}
 
-	ErrorIfReadOnlyIcebergTable(relationId);
+	if (!isDucklakeTable)
+	{
+		ErrorIfReadOnlyIcebergTable(relationId);
 
-	PgLakeTableType tableType = GetPgLakeTableType(relationId);
+		PgLakeTableType tableType = GetPgLakeTableType(relationId);
 
-	ErrorIfUnsupportedRenameWritablePgLakeTableStmt(relationId, renameStmt, tableType);
+		ErrorIfUnsupportedRenameWritablePgLakeTableStmt(relationId, renameStmt, tableType);
+	}
 
 	bool		pgLakeTable = IsPgLakeIcebergForeignTableById(relationId);
 
@@ -683,6 +726,15 @@ PostProcessRenameWritablePgLakeTable(ProcessUtilityParams * params, void *arg)
 			  renameStmt->renameType == OBJECT_FOREIGN_TABLE))
 	{
 		TriggerCatalogExportIfObjectStoreTable(relationId);
+	}
+
+	/*
+	 * Handle DuckLake table column renames.
+	 * Update the column name in lake_ducklake.column table.
+	 */
+	if (isDucklakeTable && renameStmt->renameType == OBJECT_COLUMN)
+	{
+		DucklakeRenameColumn(relationId, renameStmt->subname, renameStmt->newname);
 	}
 }
 

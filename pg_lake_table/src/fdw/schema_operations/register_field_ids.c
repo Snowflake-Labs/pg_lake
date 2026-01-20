@@ -49,6 +49,7 @@
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/pgduck/remote_storage.h"
 #include "pg_lake/pgduck/serialize.h"
+#include "pg_lake/util/table_type.h"
 
 
 static DataFileSchema * GetDataFileSchemaForTableInternal(Oid relationId);
@@ -291,12 +292,79 @@ CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(Oid relationId)
 
 
 /*
+ * GetDataFileSchemaForDucklakeTable gets a table schema for a DuckLake table
+ * by reading pg_attribute. Field IDs are set to column attnum, which maps
+ * to column_order in lake_ducklake.column.
+ */
+static DataFileSchema *
+GetDataFileSchemaForDucklakeTable(Oid relationId)
+{
+	Relation	rel = relation_open(relationId, AccessShareLock);
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+
+	DataFileSchema *schema = palloc0(sizeof(DataFileSchema));
+
+	/* Count non-dropped columns first */
+	int			nonDroppedCount = 0;
+
+	for (int i = 0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+		if (!attr->attisdropped && attr->attnum > 0)
+			nonDroppedCount++;
+	}
+
+	schema->fields = palloc0(sizeof(DataFileSchemaField) * nonDroppedCount);
+	schema->nfields = 0;
+
+	for (int i = 0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+		/* Skip dropped columns and system columns */
+		if (attr->attisdropped || attr->attnum <= 0)
+			continue;
+
+		DataFileSchemaField *field = &schema->fields[schema->nfields];
+
+		/*
+		 * For DuckLake tables, we use attnum as the field ID.
+		 * This maps to column_order in lake_ducklake.column.
+		 */
+		field->id = attr->attnum;
+		field->name = pstrdup(NameStr(attr->attname));
+		field->required = attr->attnotnull;
+		field->doc = NULL;
+		field->writeDefault = NULL;
+		field->initialDefault = NULL;
+		field->duckSerializedInitialDefault = NULL;
+
+		PGType		pgType = MakePGType(attr->atttypid, attr->atttypmod);
+		bool		forAddColumn = false;
+		int			subFieldIndex = field->id;
+
+		field->type = PostgresTypeToIcebergField(pgType, forAddColumn, &subFieldIndex);
+
+		schema->nfields++;
+	}
+
+	relation_close(rel, AccessShareLock);
+
+	return schema;
+}
+
+
+/*
  * GetDataFileSchemaForTableInternal is helper function to get the schema for a given table.
  * It is used by GetDataFileSchemaForTable.
  */
 static DataFileSchema *
 GetDataFileSchemaForTableInternal(Oid relationId)
 {
+	if (IsDucklakeTable(relationId))
+		return GetDataFileSchemaForDucklakeTable(relationId);
+
 	if (!IsIcebergTable(relationId))
 		return NULL;
 
@@ -363,6 +431,9 @@ GetLeafFieldsForExternalIcebergTable(char *metadataPath)
 List *
 GetLeafFieldsForTable(Oid relationId)
 {
+	if (IsDucklakeTable(relationId))
+		return GetLeafFieldsForDucklakeTable(relationId);
+
 	if (!IsIcebergTable(relationId))
 		return NULL;
 

@@ -1,0 +1,6 @@
+comment = 'DuckLake implementation in Postgres'
+default_version = '3.2'
+module_pathname = '$libdir/pg_lake_ducklake'
+relocatable = false
+schema = pg_catalog
+requires = 'pg_lake_engine'

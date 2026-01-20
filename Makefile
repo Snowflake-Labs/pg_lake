@@ -1,5 +1,5 @@
 # when adding a new extension, add to this list to get the standard targets supported
-EXTENSION_TARGETS = pg_extension_base pg_map pg_extension_updater pg_lake_engine pg_lake_copy pg_lake_table pg_lake_iceberg pg_lake_spatial pg_lake pg_lake_benchmark
+EXTENSION_TARGETS = pg_extension_base pg_map pg_extension_updater pg_lake_engine pg_lake_copy pg_lake_table pg_lake_iceberg pg_lake_ducklake pg_lake_spatial pg_lake pg_lake_benchmark
 DUCK_TARGETS = pgduck_server duckdb_pglake
 ALL_TARGETS = $(DUCK_TARGETS) avro $(EXTENSION_TARGETS)
 
@@ -124,10 +124,16 @@ pg_lake_iceberg: pg_lake_engine
 install-pg_lake_iceberg: install-pg_lake_engine pg_lake_iceberg
 	$(MAKE) -C pg_lake_iceberg install
 
-pg_lake_table: pg_lake_iceberg
+pg_lake_ducklake: pg_lake_engine
+	$(MAKE) -C pg_lake_ducklake
+
+install-pg_lake_ducklake: install-pg_lake_engine pg_lake_ducklake
+	$(MAKE) -C pg_lake_ducklake install
+
+pg_lake_table: pg_lake_iceberg pg_lake_ducklake
 	$(MAKE) -C pg_lake_table
 
-install-pg_lake_table: install-pg_lake_iceberg pg_lake_table
+install-pg_lake_table: install-pg_lake_iceberg install-pg_lake_ducklake pg_lake_table
 	$(MAKE) -C pg_lake_table install
 
 pg_lake: pg_lake_table pg_lake_copy

@@ -38,6 +38,7 @@
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/fdw/partition_transform.h"
+#include "pg_lake/ducklake/catalog.h"
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/data_file_stats.h"
@@ -1260,6 +1261,68 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 							/* add the file ID to the transaction's temp table */
 							InsertDataFileIdIntoTransactionTable(fileId);
 					}
+
+					/* Add DuckLake-specific metadata immediately */
+					if (IsDucklakeTable(relationId))
+					{
+						DucklakeTableMetadata *metadata = DucklakeGetTableMetadata(relationId);
+
+						if (metadata)
+						{
+							if (operation->content == CONTENT_DATA)
+							{
+								/* Add data file to DuckLake catalog */
+								int64		ducklakeFileId = DucklakeAddDataFile(metadata->tableId,
+																				 operation->path,
+																				 operation->dataFileStats.rowCount,
+																				 operation->dataFileStats.fileSize,
+																				 operation->dataFileStats.rowIdStart);
+
+								/* Add column stats for this data file */
+								ListCell   *statCell;
+
+								foreach(statCell, columnStats)
+								{
+									DataFileColumnStats *stat = lfirst(statCell);
+
+									if (stat->lowerBoundText != NULL || stat->upperBoundText != NULL)
+									{
+										/*
+										 * For DuckLake tables, fieldId maps to column_order.
+										 * This works because DuckLake columns are created with
+										 * column_order = pg attnum, and for non-Iceberg tables
+										 * fieldId is also based on attnum.
+										 */
+										DucklakeAddFileColumnStats(ducklakeFileId,
+																   metadata->tableId,
+																   stat->leafField.fieldId,
+																   stat->lowerBoundText,
+																   stat->upperBoundText);
+									}
+								}
+							}
+							else if (operation->content == CONTENT_POSITION_DELETES)
+							{
+								/* Add delete file to DuckLake catalog */
+								/* We need to find the data_file_id for the source file */
+								/* For now, pass 0 for dataFileId - this needs to be fixed */
+								DucklakeAddDeleteFile(metadata->tableId,
+													  0,	/* dataFileId - TODO: look up from mapping */
+													  operation->path,
+													  operation->dataFileStats.rowCount,
+													  operation->dataFileStats.fileSize);
+							}
+
+							/* Clean up metadata */
+							if (metadata->tableName)
+								pfree(metadata->tableName);
+							if (metadata->schemaName)
+								pfree(metadata->schemaName);
+							if (metadata->path)
+								pfree(metadata->path);
+							pfree(metadata);
+						}
+					}
 					break;
 				}
 
@@ -1267,6 +1330,65 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 				AddDeletionFileMapping(relationId,
 									   operation->path,
 									   operation->deletedFrom);
+
+				/* Update DuckLake delete file with correct data_file_id */
+				if (IsDucklakeTable(relationId))
+				{
+					DucklakeTableMetadata *metadata = DucklakeGetTableMetadata(relationId);
+
+					if (metadata)
+					{
+						/* Look up the DuckLake data_file_id for the source file */
+						int			ret;
+						bool		isnull;
+						StringInfoData query;
+
+						initStringInfo(&query);
+						appendStringInfo(&query,
+										 "SELECT data_file_id FROM lake_ducklake.data_file "
+										 "WHERE table_id = %ld AND path = %s AND end_snapshot IS NULL",
+										 metadata->tableId,
+										 quote_literal_cstr(operation->deletedFrom));
+
+						SPI_connect();
+						ret = SPI_execute(query.data, true, 1);
+
+						if (ret == SPI_OK_SELECT && SPI_processed > 0)
+						{
+							int64		dataFileId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+																				  SPI_tuptable->tupdesc,
+																				  1, &isnull));
+
+							if (!isnull)
+							{
+								/* Update the delete file with the correct data_file_id */
+								StringInfoData updateQuery;
+
+								initStringInfo(&updateQuery);
+								appendStringInfo(&updateQuery,
+												 "UPDATE lake_ducklake.delete_file "
+												 "SET data_file_id = %ld "
+												 "WHERE table_id = %ld AND path = %s AND end_snapshot IS NULL",
+												 dataFileId,
+												 metadata->tableId,
+												 quote_literal_cstr(operation->path));
+
+								SPI_execute(updateQuery.data, false, 0);
+							}
+						}
+
+						SPI_finish();
+
+						/* Clean up metadata */
+						if (metadata->tableName)
+							pfree(metadata->tableName);
+						if (metadata->schemaName)
+							pfree(metadata->schemaName);
+						if (metadata->path)
+							pfree(metadata->path);
+						pfree(metadata);
+					}
+				}
 				break;
 
 			case DATA_FILE_ADD_ROW_ID_MAPPING:
@@ -1276,10 +1398,82 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 				break;
 
 			case DATA_FILE_REMOVE:
+				/* Remove from DuckLake catalog first if needed */
+				if (IsDucklakeTable(relationId))
+				{
+					DucklakeTableMetadata *metadata = DucklakeGetTableMetadata(relationId);
+
+					if (metadata)
+					{
+						/* Look up the DuckLake data_file_id for this path */
+						int			ret;
+						bool		isnull;
+						int64		dataFileId = -1;
+						StringInfoData query;
+
+						initStringInfo(&query);
+						appendStringInfo(&query,
+										 "SELECT data_file_id FROM lake_ducklake.data_file "
+										 "WHERE table_id = %ld AND path = %s AND end_snapshot IS NULL",
+										 metadata->tableId,
+										 quote_literal_cstr(operation->path));
+
+						SPI_connect();
+						ret = SPI_execute(query.data, true, 1);
+
+						if (ret == SPI_OK_SELECT && SPI_processed > 0)
+						{
+							dataFileId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+																	  SPI_tuptable->tupdesc,
+																	  1, &isnull));
+							if (isnull)
+								dataFileId = -1;
+						}
+
+						SPI_finish();
+
+						/* Mark the file as removed in DuckLake (outside SPI context) */
+						if (dataFileId >= 0)
+						{
+							DucklakeRemoveDataFile(dataFileId);
+						}
+
+						/* Clean up metadata */
+						if (metadata->tableName)
+							pfree(metadata->tableName);
+						if (metadata->schemaName)
+							pfree(metadata->schemaName);
+						if (metadata->path)
+							pfree(metadata->path);
+						pfree(metadata);
+					}
+				}
+
 				RemoveDataFileFromTable(relationId, operation->path);
 				break;
 			case DATA_FILE_REMOVE_ALL:
 			case DATA_FILE_DROP_TABLE:
+				/* Remove all files from DuckLake catalog first if needed */
+				if (IsDucklakeTable(relationId))
+				{
+					DucklakeTableMetadata *metadata = DucklakeGetTableMetadata(relationId);
+
+					if (metadata)
+					{
+						/* Mark all data files as removed in DuckLake */
+						DucklakeRemoveAllDataFiles(metadata->tableId);
+
+						/* Clean up metadata */
+						if (metadata->tableName)
+							pfree(metadata->tableName);
+						if (metadata->schemaName)
+							pfree(metadata->schemaName);
+						if (metadata->path)
+							pfree(metadata->path);
+						pfree(metadata);
+					}
+				}
+
 				RemoveAllDataFilesFromCatalog(relationId);
 				break;
 			case DATA_FILE_UPDATE_DELETED_ROW_COUNT:

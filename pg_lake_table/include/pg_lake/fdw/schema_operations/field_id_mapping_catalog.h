@@ -37,3 +37,4 @@ extern PGDLLEXPORT int GetLargestRegisteredFieldId(Oid relationId);
 extern PGDLLEXPORT void RegisterIcebergColumnMapping(Oid relationId, Field * field,
 													 AttrNumber attNo, int parentFieldId, PGType pgType,
 													 int fieldId, const char *writeDefault, const char *initialDefault);
+extern PGDLLEXPORT List *GetLeafFieldsForDucklakeTable(Oid relationId);

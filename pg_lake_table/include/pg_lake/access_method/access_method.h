@@ -22,9 +22,12 @@
 
 /* same name as fdw */
 #define PG_LAKE_ICEBERG_AM PG_LAKE_ICEBERG_SERVER_NAME
+#define PG_LAKE_DUCKLAKE_AM PG_LAKE_DUCKLAKE_SERVER_NAME
 
-/* we want to simply UX by allowing "USING iceberg" */
+/* we want to simply UX by allowing "USING iceberg" and "USING ducklake" */
 #define PG_LAKE_ICEBERG_AM_ALIAS "iceberg"
+#define PG_LAKE_DUCKLAKE_AM_ALIAS "ducklake"
 
 extern PGDLLEXPORT PgLakeTableType GetPgLakeTableTypeViaAccessMethod(const char *accessMethod);
 extern PGDLLEXPORT bool IsPgLakeIcebergAccessMethod(const char *accessMethod);
+extern PGDLLEXPORT bool IsPgLakeDucklakeAccessMethod(const char *accessMethod);

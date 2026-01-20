@@ -12,17 +12,21 @@ DATA = $(wildcard $(EXTENSION)--*--*.sql) $(EXTENSION)--3.0.sql
 
 PGFILEDESC = "pg_lake_table - foreign data wrapper for data lakes"
 
-PG_CPPFLAGS = -I$(libpq_srcdir) -Iinclude -I../pg_extension_base/include -I../pg_lake_engine/include -I../pg_lake_iceberg/include
+PG_CONFIG ?= pg_config
+PG_LIBDIR := $(shell $(PG_CONFIG) --libdir)
+
+PG_CPPFLAGS = -I$(libpq_srcdir) -Iinclude -I../pg_extension_base/include -I../pg_lake_engine/include -I../pg_lake_iceberg/include -I../pg_lake_ducklake/include
 SHLIB_LINK_INTERNAL = $(libpq)
 
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
 SHLIB_LINK += -undefined dynamic_lookup
+else
+# On Linux, allow undefined symbols from other extensions - they'll be resolved at runtime
+SHLIB_LINK += -Wl,--allow-shlib-undefined
 endif
 
 REGRESS = pg_lake_table
-
-PG_CONFIG ?= pg_config
 
 PG_ISOLATION_REGRESS_DIR := $(shell $(PG_CONFIG) --libdir)/pgxs/src/test/isolation
 

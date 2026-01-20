@@ -63,14 +63,17 @@ typedef struct PgLakeOption
  */
 static PgLakeOption * pg_lake_options;
 static PgLakeOption * pg_lake_iceberg_options;
+static PgLakeOption * pg_lake_ducklake_options;
 
 /*
  * Helper functions
  */
 static void InitPgLakeOptions(void);
 static void InitPgLakeIcebergOptions(void);
+static void InitPgLakeDucklakeOptions(void);
 static bool is_valid_option_pg_lake(const char *keyword, Oid context);
 static bool is_valid_option_pg_lake_iceberg(const char *keyword, Oid context);
+static bool is_valid_option_pg_lake_ducklake(const char *keyword, Oid context);
 
 #include "miscadmin.h"
 
@@ -82,6 +85,7 @@ static bool is_valid_option_pg_lake_iceberg(const char *keyword, Oid context);
  */
 PG_FUNCTION_INFO_V1(pg_lake_table_validator);
 PG_FUNCTION_INFO_V1(pg_lake_iceberg_validator);
+PG_FUNCTION_INFO_V1(pg_lake_ducklake_validator);
 
 Datum
 pg_lake_table_validator(PG_FUNCTION_ARGS)
@@ -229,7 +233,7 @@ pg_lake_table_validator(PG_FUNCTION_ARGS)
 			copyDataFormat = NameToCopyDataFormat(format);
 			if (copyDataFormat == DATA_FORMAT_INVALID)
 				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								errmsg("pg_lake_table: only csv, json, gdal, and parquet "
+								errmsg("pg_lake_table: only csv, json, gdal, parquet, and ducklake "
 									   "formats are currently supported for the \"format\" option.")));
 		}
 		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "header") == 0)
@@ -918,5 +922,167 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 
 		}
 	}
+	PG_RETURN_VOID();
+}
+
+
+/*
+ * Initialize DuckLake option lists.
+ */
+static void
+InitPgLakeDucklakeOptions(void)
+{
+	PgLakeOption *popt;
+
+	/* FDW-specific FDW options */
+	static const PgLakeOption fdw_options[] = {
+		{"location", ForeignTableRelationId},
+		{"autovacuum_enabled", ForeignTableRelationId},
+		{"partition_by", ForeignTableRelationId},
+		{"writable", ForeignTableRelationId},
+		{"format", ForeignTableRelationId},
+
+		{NULL, InvalidOid}
+	};
+
+	/* Prevent redundant initialization. */
+	if (pg_lake_ducklake_options)
+		return;
+
+	/*
+	 * Construct an array which consists of all valid options for
+	 * pg_lake_ducklake.
+	 */
+	pg_lake_ducklake_options = (PgLakeOption *) malloc(sizeof(fdw_options));
+	if (pg_lake_ducklake_options == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_OUT_OF_MEMORY),
+				 errmsg("out of memory")));
+
+	popt = pg_lake_ducklake_options;
+
+	/* Append FDW-specific options and dummy terminator. */
+	memcpy(popt, fdw_options, sizeof(fdw_options));
+}
+
+
+/*
+ * Check whether the given option is one of the valid pg_lake_ducklake options.
+ * context is the Oid of the catalog holding the object the option is for.
+ */
+static bool
+is_valid_option_pg_lake_ducklake(const char *keyword, Oid context)
+{
+	PgLakeOption *opt;
+
+	Assert(pg_lake_ducklake_options);	/* must be initialized already */
+
+	for (opt = pg_lake_ducklake_options; opt->keyword; opt++)
+	{
+		if (context == opt->optcontext && strcmp(opt->keyword, keyword) == 0)
+			return true;
+	}
+
+	return false;
+}
+
+
+Datum
+pg_lake_ducklake_validator(PG_FUNCTION_ARGS)
+{
+	/*
+	 * Check that the user has the necessary permissions. All ducklake tables
+	 * are writable.
+	 */
+	CheckURLWriteAccess();
+
+	List	   *options_list = untransformRelOptions(PG_GETARG_DATUM(0));
+	Oid			catalog = PG_GETARG_OID(1);
+
+	bool		locationProvided = false;
+
+	/* Build our options lists if we didn't yet. */
+	InitPgLakeDucklakeOptions();
+
+	/*
+	 * Check that only options supported by pg_lake_ducklake, and allowed for
+	 * the current object type, are given.
+	 */
+	ListCell   *cell;
+
+	foreach(cell, options_list)
+	{
+		DefElem    *def = (DefElem *) lfirst(cell);
+
+		if (!is_valid_option_pg_lake_ducklake(def->defname, catalog))
+		{
+			/*
+			 * Unknown option specified, complain about it. Provide a hint
+			 * with a valid option that looks similar, if there is one.
+			 */
+			PgLakeOption *opt;
+			const char *closest_match;
+			ClosestMatchState match_state;
+			bool		has_valid_options = false;
+
+			initClosestMatch(&match_state, def->defname, 4);
+			for (opt = pg_lake_ducklake_options; opt->keyword; opt++)
+			{
+				if (catalog == opt->optcontext)
+				{
+					has_valid_options = true;
+					updateClosestMatch(&match_state, opt->keyword);
+				}
+			}
+
+			closest_match = getClosestMatch(&match_state);
+			ereport(ERROR,
+					(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
+					 errmsg("invalid option \"%s\"", def->defname),
+					 has_valid_options ? closest_match ?
+					 errhint("Perhaps you meant the option \"%s\".",
+							 closest_match) : 0 :
+					 errhint("There are no valid options in this context.")));
+		}
+		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "location") == 0)
+		{
+			char	   *location = defGetString(def);
+
+			if (!IsSupportedURL(location))
+				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								errmsg("pg_lake_ducklake: only s3:// and gs:// "
+									   "URLs are currently supported for the \"location\" "
+									   "option.")));
+
+			char	   *charPointer = strchr(location, '?');
+
+			if (charPointer != NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("s3 configuration parameters are not allowed in the \"location\" "
+								"option for pg_lake_ducklake tables")));
+
+			locationProvided = true;
+		}
+		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "autovacuum_enabled") == 0)
+		{
+			/* only accept boolean */
+			(void) defGetBoolean(def);
+		}
+		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "partition_by") == 0)
+		{
+			/*
+			 * we only make sure partitionBy is a string, but we'll verify
+			 * whether the syntax and semantics of the partitionBy is correct
+			 * when the table is actually created.
+			 */
+		}
+	}
+
+	if (!locationProvided && catalog == ForeignTableRelationId)
+		ereport(ERROR,
+				(errcode(ERRCODE_SYNTAX_ERROR),
+				 errmsg("\"location\" option is required for pg_lake_ducklake tables")));
+
 	PG_RETURN_VOID();
 }

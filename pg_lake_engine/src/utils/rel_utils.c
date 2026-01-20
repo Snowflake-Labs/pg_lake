@@ -44,6 +44,10 @@ GetPgLakeTableTypeViaServerName(char *serverName)
 	{
 		return PG_LAKE_ICEBERG_TABLE_TYPE;
 	}
+	else if (IsPgLakeDucklakeServerName(serverName))
+	{
+		return PG_LAKE_DUCKLAKE_TABLE_TYPE;
+	}
 	else if (IsPgLakeServerName(serverName))
 	{
 		return PG_LAKE_TABLE_TYPE;
@@ -87,7 +91,8 @@ bool
 IsAnyLakeForeignTableById(Oid foreignTableId)
 {
 	return IsPgLakeForeignTableById(foreignTableId) ||
-		IsPgLakeIcebergForeignTableById(foreignTableId);
+		IsPgLakeIcebergForeignTableById(foreignTableId) ||
+		IsPgLakeDucklakeForeignTableById(foreignTableId);
 }
 
 /*
@@ -170,6 +175,47 @@ IsPgLakeIcebergServerName(const char *serverName)
 		return false;
 
 	return strncasecmp(serverName, PG_LAKE_ICEBERG_SERVER_NAME, strlen(PG_LAKE_ICEBERG_SERVER_NAME)) == 0;
+}
+
+/*
+ * Similar to IsPgLakeForeignTableById, but for ducklake.
+ */
+bool
+IsPgLakeDucklakeForeignTableById(Oid foreignTableId)
+{
+	bool		isPgLakeDucklakeForeignTable = false;
+
+	/*
+	 * We do not call GetForeignTable directly, since it errors for
+	 * non-foreign tables.
+	 */
+	HeapTuple	foreignTableTup = SearchSysCache1(FOREIGNTABLEREL,
+												  ObjectIdGetDatum(foreignTableId));
+
+	if (HeapTupleIsValid(foreignTableTup))
+	{
+		Form_pg_foreign_table tableForm =
+			(Form_pg_foreign_table) GETSTRUCT(foreignTableTup);
+
+		ForeignServer *foreignServer =
+			GetForeignServer(tableForm->ftserver);
+
+		if (IsPgLakeDucklakeServerName(foreignServer->servername))
+			isPgLakeDucklakeForeignTable = true;
+
+		ReleaseSysCache(foreignTableTup);
+	}
+
+	return isPgLakeDucklakeForeignTable;
+}
+
+bool
+IsPgLakeDucklakeServerName(const char *serverName)
+{
+	if (strlen(serverName) != strlen(PG_LAKE_DUCKLAKE_SERVER_NAME))
+		return false;
+
+	return strncasecmp(serverName, PG_LAKE_DUCKLAKE_SERVER_NAME, strlen(PG_LAKE_DUCKLAKE_SERVER_NAME)) == 0;
 }
 
 /*
