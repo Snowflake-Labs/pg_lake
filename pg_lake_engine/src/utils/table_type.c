@@ -40,6 +40,9 @@ static PgLakeTableTypeName PgLakeTableTypeNames[] =
 		PG_LAKE_ICEBERG_SERVER_NAME, PG_LAKE_ICEBERG_TABLE_TYPE
 	},
 	{
+		PG_LAKE_DUCKLAKE_SERVER_NAME, PG_LAKE_DUCKLAKE_TABLE_TYPE
+	},
+	{
 		PG_LAKE_SERVER_NAME, PG_LAKE_TABLE_TYPE
 	},
 	{
@@ -93,9 +96,16 @@ GetPgLakeTableType(Oid foreignTableId)
 bool
 IsWritablePgLakeTable(Oid relationId)
 {
-	if (!IsPgLakeForeignTableById(relationId))
+	if (!IsPgLakeForeignTableById(relationId) &&
+		!IsPgLakeDucklakeForeignTableById(relationId))
 	{
 		return false;
+	}
+
+	/* DuckLake tables are writable by default */
+	if (IsPgLakeDucklakeForeignTableById(relationId))
+	{
+		return true;
 	}
 
 	ForeignTable *table = GetForeignTable(relationId);
@@ -152,4 +162,25 @@ bool
 IsExternalIcebergTable(Oid relationId)
 {
 	return IsIcebergTable(relationId) && !IsInternalIcebergTable(relationId);
+}
+
+
+/*
+ * IsDucklakeTable - check if the table is a DuckLake table.
+ */
+bool
+IsDucklakeTable(Oid relationId)
+{
+	if (!IsPgLakeForeignTableById(relationId) &&
+		!IsPgLakeDucklakeForeignTableById(relationId))
+	{
+		return false;
+	}
+
+	PgLakeTableProperties properties = GetPgLakeTableProperties(relationId);
+
+	PgLakeTableType tableType = properties.tableType;
+
+	return tableType == PG_LAKE_DUCKLAKE_TABLE_TYPE ||
+		(tableType == PG_LAKE_TABLE_TYPE && properties.format == DATA_FORMAT_DUCKLAKE);
 }

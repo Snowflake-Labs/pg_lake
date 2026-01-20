@@ -54,6 +54,8 @@
 #include "pg_lake/pgduck/write_data.h"
 #include "pg_lake/pgduck/iceberg_validation.h"
 #include "pg_lake/transaction/track_iceberg_metadata_changes.h"
+#include "pg_lake/transaction/track_ducklake_changes.h"
+#include "pg_lake/ducklake/catalog.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_extension_base/spi_helpers.h"
 #include "pg_lake/util/string_utils.h"
@@ -306,6 +308,12 @@ PrepareCSVInsertion(Oid relationId, char *insertCSV, int64 rowCount,
 	foreach(dataFileStatsCell, statsCollector->dataFileStats)
 	{
 		DataFileStats *stats = lfirst(dataFileStatsCell);
+
+		/*
+		 * Note: DuckLake metadata is written in ApplyDataFileCatalogChanges()
+		 * when the DATA_FILE_ADD operation is processed. We don't need to
+		 * write it here to avoid duplicate entries.
+		 */
 
 		DataFileModification *modification = palloc0(sizeof(DataFileModification));
 
@@ -1364,6 +1372,17 @@ ApplyMetadataChanges(Oid relationId, List *metadataOperations)
 				break;
 			}
 
+		case PG_LAKE_DUCKLAKE_TABLE_TYPE:
+			{
+				ApplyDataFileCatalogChanges(relationId, metadataOperations);
+
+				/* Track DuckLake metadata changes for commit-time snapshot creation */
+				List	   *operationTypes = GetMetadataOperationTypes(metadataOperations);
+
+				TrackDucklakeMetadataChangesInTx(relationId, operationTypes);
+				break;
+			}
+
 		default:
 			ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 							errmsg("metadata changes not yet implemented for "
@@ -1580,6 +1599,7 @@ GetPossiblePositionDeleteFiles(Oid relationId, List *sourcePathList, Snapshot sn
 	{
 		case PG_LAKE_TABLE_TYPE:
 		case PG_LAKE_ICEBERG_TABLE_TYPE:
+		case PG_LAKE_DUCKLAKE_TABLE_TYPE:
 			return GetPossiblePositionDeleteFilesFromCatalog(relationId, sourcePathList, snapshot);
 
 		default:
