@@ -25,7 +25,6 @@
 #define DEFAULT_PGDUCK_SERVER_CONNINFO "host=/tmp port=5332"
 
 #define DEFAULT_DUCKDB_MAX_LINE_SIZE (2097152)
-#define DUCKDB_MAX_SAFE_CSV_LINE_SIZE 32000000
 
 /* settings */
 extern char *PgduckServerConninfo;

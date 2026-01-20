@@ -87,16 +87,6 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 
 	if (maxLineSize > 0)
 	{
-		if (maxLineSize >= DUCKDB_MAX_SAFE_CSV_LINE_SIZE)
-		{
-			/*
-			 * Sadly gotta abort here, since DuckDB has breakage in CSV lines
-			 * longer than 32MB, at least as of 1.1.
-			 */
-			ereport(ERROR, (errmsg("row exceeds maximum size of %d", DUCKDB_MAX_SAFE_CSV_LINE_SIZE),
-							errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED)));
-		}
-
 		/* use maxLineSize + 1 to include end-of-line */
 		appendStringInfo(&command, ", max_line_size=%d", maxLineSize + 1);
 	}

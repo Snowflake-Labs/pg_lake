@@ -2579,6 +2579,64 @@ def compare_fields(expected, actual):
         ), f"Value mismatch: expected {expected} but got {actual}"
 
 
+def test_iceberg_large_value(pg_conn, s3, extension, with_default_location):
+    location = f"s3://{TEST_BUCKET}/test_iceberg_large_value"
+
+    # Create a table with a text column
+    run_command(
+        f"""
+            CREATE SCHEMA test_iceberg_large_value;
+            CREATE FOREIGN TABLE test_iceberg_large_value.large_value_test (
+                id INTEGER,
+                large_text TEXT
+            ) SERVER pg_lake_iceberg OPTIONS (location '{location}');
+        """,
+        pg_conn,
+    )
+
+    # Create a large string (over 32,000,000 characters)
+    large_string_size = 33000000
+    # Use repeat to generate a large string efficiently
+    run_command(
+        f"""
+            INSERT INTO test_iceberg_large_value.large_value_test
+            VALUES (1, repeat('a', {large_string_size}));
+        """,
+        pg_conn,
+    )
+
+    for execution_type in ["vectorize", "pushdown"]:
+        if execution_type == "vectorize":
+            run_command(
+                "SET pg_lake_table.enable_full_query_pushdown TO true;",
+                pg_conn,
+            )
+        else:
+            run_command(
+                "SET pg_lake_table.enable_full_query_pushdown TO false;",
+                pg_conn,
+            )
+
+        # Verify the data was inserted and can be read back
+        results = run_query(
+            "SELECT id, length(large_text) FROM test_iceberg_large_value.large_value_test",
+            pg_conn,
+        )
+        assert len(results) == 1
+        assert results[0][0] == 1
+        assert results[0][1] == large_string_size
+
+        # Verify we can retrieve the actual data (just check first and last chars)
+        results = run_query(
+            "SELECT substring(large_text, 1, 1), substring(large_text, length(large_text), 1) FROM test_iceberg_large_value.large_value_test",
+            pg_conn,
+        )
+        assert results[0][0] == "a"
+        assert results[0][1] == "a"
+
+    pg_conn.rollback()
+
+
 @pytest.fixture(scope="module")
 def create_helper_functions(superuser_conn, app_user):
 
