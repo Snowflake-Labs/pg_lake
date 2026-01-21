@@ -123,6 +123,61 @@ GetTableDataFilesFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
 
 
 /*
+ * GetDucklakeDataFilesHash returns a hash of path => TableDataFile for
+ * a DuckLake table by querying lake_ducklake.data_file.
+ */
+static HTAB *
+GetDucklakeDataFilesHash(Oid relationId, bool dataOnly, int64 snapshotId)
+{
+	MemoryContext callerContext = CurrentMemoryContext;
+	HTAB	   *dataFilesHash = CreateDataFilesHash();
+	DucklakeTableMetadata *metadata = DucklakeGetTableMetadata(relationId);
+
+	if (!metadata)
+		return dataFilesHash;
+
+	/* Get data files from DuckLake catalog */
+	List	   *dataFiles = DucklakeGetDataFiles(metadata->tableId, snapshotId);
+	ListCell   *fileCell;
+
+	foreach(fileCell, dataFiles)
+	{
+		DucklakeDataFile *ducklakeFile = (DucklakeDataFile *) lfirst(fileCell);
+		bool		found;
+
+		/* Create TableDataFile from DucklakeDataFile */
+		TableDataFile *tableFile = hash_search(dataFilesHash,
+											   &ducklakeFile->path,
+											   HASH_ENTER,
+											   &found);
+
+		if (!found)
+		{
+			tableFile->path = pstrdup(ducklakeFile->path);
+			tableFile->fileId = ducklakeFile->dataFileId;
+			tableFile->content = CONTENT_DATA;	/* Assume data files for now */
+			tableFile->stats.rowCount = ducklakeFile->recordCount;
+			tableFile->stats.fileSize = ducklakeFile->fileSizeBytes;
+			tableFile->stats.deletedRowCount = 0;	/* DuckLake doesn't track this separately yet */
+			tableFile->stats.rowIdStart = ducklakeFile->rowIdStart;
+			tableFile->stats.columnStats = NIL;
+			tableFile->partition = NULL;
+		}
+	}
+
+	/* Clean up metadata */
+	if (metadata->tableName)
+		pfree(metadata->tableName);
+	if (metadata->schemaName)
+		pfree(metadata->schemaName);
+	if (metadata->path)
+		pfree(metadata->path);
+	pfree(metadata);
+
+	return dataFilesHash;
+}
+
+/*
  * GetTableDataFilesHashFromCatalog returns a hash of path => TableDataFile for
  * the given table.
  *
@@ -137,6 +192,14 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
 								 bool forUpdate, char *orderBy, Snapshot snapshot,
 								 List *partitionTransforms)
 {
+	/* Route to DuckLake metadata for DuckLake tables */
+	if (IsDucklakeTable(relationId))
+	{
+		/* For DuckLake tables, use the DuckLake catalog */
+		return GetDucklakeDataFilesHash(relationId, dataOnly, -1 /* current snapshot */);
+	}
+
+	/* For non-DuckLake tables, use lake_table metadata */
 	MemoryContext callerContext = CurrentMemoryContext;
 
 	HTAB	   *dataFilesHash = CreateDataFilesHash();
@@ -688,6 +751,38 @@ GetTableSizeFromCatalog(Oid relationId)
 {
 	int64		tableSize = 0;
 
+	/* Route to DuckLake metadata for DuckLake tables */
+	if (IsDucklakeTable(relationId))
+	{
+		DucklakeTableMetadata *metadata = DucklakeGetTableMetadata(relationId);
+
+		if (metadata)
+		{
+			List	   *dataFiles = DucklakeGetDataFiles(metadata->tableId, -1);
+			ListCell   *fileCell;
+
+			foreach(fileCell, dataFiles)
+			{
+				DucklakeDataFile *ducklakeFile = (DucklakeDataFile *) lfirst(fileCell);
+
+				tableSize += ducklakeFile->fileSizeBytes;
+			}
+
+			/* Clean up metadata */
+			if (metadata->tableName)
+				pfree(metadata->tableName);
+			if (metadata->schemaName)
+				pfree(metadata->schemaName);
+			if (metadata->path)
+				pfree(metadata->path);
+			pfree(metadata);
+		}
+
+		return tableSize;
+	}
+
+	/* For non-DuckLake tables, use lake_table metadata */
+
 	/* switch to schema owner, we assume callers checked permissions */
 	Oid			savedUserId = InvalidOid;
 	int			savedSecurityContext = 0;
@@ -1217,58 +1312,19 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 		{
 			case DATA_FILE_ADD:
 				{
-					int64		fileId = AddDataFileToTable(relationId,
-															operation->path,
-															operation->dataFileStats.rowCount,
-															operation->dataFileStats.fileSize,
-															operation->content,
-															operation->dataFileStats.rowIdStart);
-
-					/* add column stats only for data files */
-					List	   *columnStats = operation->dataFileStats.columnStats;
-
-					if (operation->content == CONTENT_DATA && columnStats != NIL)
-						AddDataFileColumnStatsToCatalog(relationId,
-														operation->path,
-														columnStats);
-
 					/*
-					 * Add partition values only for data files. Even if the
-					 * table is not partitioned, we record the partition spec
-					 * id as the table might be partitioned in the future.
-					 *
-					 * For non-partitioned tables, if the table has never been
-					 * partitioned, we record the partition spec id as 0,
-					 * which is the default spec id for non-partitioned
-					 * tables. If the table has been partitioned before, and
-					 * now it is not, we record the partition spec id as the
-					 * current/largest spec id.
+					 * For DuckLake tables, use only lake_ducklake metadata.
+					 * For other tables, use lake_table metadata.
 					 */
-					if (operation->partition != NULL &&
-						operation->partition->fields_length > 0 &&
-						(operation->content == CONTENT_DATA ||
-						 operation->content == CONTENT_POSITION_DELETES))
-					{
-						AddDataFilePartitionValueToCatalog(relationId,
-														   operation->partitionSpecId,
-														   fileId,
-														   operation->partition);
-					}
-
-					if (PgLakeAddDataFileHook)
-					{
-						if (operation->content == CONTENT_DATA && PgLakeAddDataFileHook())
-							/* add the file ID to the transaction's temp table */
-							InsertDataFileIdIntoTransactionTable(fileId);
-					}
-
-					/* Add DuckLake-specific metadata immediately */
 					if (IsDucklakeTable(relationId))
 					{
+						/* DuckLake tables: write only to lake_ducklake schema */
 						DucklakeTableMetadata *metadata = DucklakeGetTableMetadata(relationId);
 
 						if (metadata)
 						{
+							List	   *columnStats = operation->dataFileStats.columnStats;
+
 							if (operation->content == CONTENT_DATA)
 							{
 								/* Add data file to DuckLake catalog */
@@ -1321,6 +1377,54 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 							if (metadata->path)
 								pfree(metadata->path);
 							pfree(metadata);
+						}
+					}
+					else
+					{
+						/* Non-DuckLake tables: use lake_table metadata */
+						int64		fileId = AddDataFileToTable(relationId,
+																operation->path,
+																operation->dataFileStats.rowCount,
+																operation->dataFileStats.fileSize,
+																operation->content,
+																operation->dataFileStats.rowIdStart);
+
+						/* add column stats only for data files */
+						List	   *columnStats = operation->dataFileStats.columnStats;
+
+						if (operation->content == CONTENT_DATA && columnStats != NIL)
+							AddDataFileColumnStatsToCatalog(relationId,
+															operation->path,
+															columnStats);
+
+						/*
+						 * Add partition values only for data files. Even if the
+						 * table is not partitioned, we record the partition spec
+						 * id as the table might be partitioned in the future.
+						 *
+						 * For non-partitioned tables, if the table has never been
+						 * partitioned, we record the partition spec id as 0,
+						 * which is the default spec id for non-partitioned
+						 * tables. If the table has been partitioned before, and
+						 * now it is not, we record the partition spec id as the
+						 * current/largest spec id.
+						 */
+						if (operation->partition != NULL &&
+							operation->partition->fields_length > 0 &&
+							(operation->content == CONTENT_DATA ||
+							 operation->content == CONTENT_POSITION_DELETES))
+						{
+							AddDataFilePartitionValueToCatalog(relationId,
+															   operation->partitionSpecId,
+															   fileId,
+															   operation->partition);
+						}
+
+						if (PgLakeAddDataFileHook)
+						{
+							if (operation->content == CONTENT_DATA && PgLakeAddDataFileHook())
+								/* add the file ID to the transaction's temp table */
+								InsertDataFileIdIntoTransactionTable(fileId);
 						}
 					}
 					break;
@@ -1398,9 +1502,9 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 				break;
 
 			case DATA_FILE_REMOVE:
-				/* Remove from DuckLake catalog first if needed */
 				if (IsDucklakeTable(relationId))
 				{
+					/* DuckLake tables: remove only from lake_ducklake */
 					DucklakeTableMetadata *metadata = DucklakeGetTableMetadata(relationId);
 
 					if (metadata)
@@ -1432,7 +1536,7 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 
 						SPI_finish();
 
-						/* Mark the file as removed in DuckLake (outside SPI context) */
+						/* Mark the file as removed in DuckLake */
 						if (dataFileId >= 0)
 						{
 							DucklakeRemoveDataFile(dataFileId);
@@ -1448,14 +1552,17 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 						pfree(metadata);
 					}
 				}
-
-				RemoveDataFileFromTable(relationId, operation->path);
+				else
+				{
+					/* Non-DuckLake tables: remove from lake_table */
+					RemoveDataFileFromTable(relationId, operation->path);
+				}
 				break;
 			case DATA_FILE_REMOVE_ALL:
 			case DATA_FILE_DROP_TABLE:
-				/* Remove all files from DuckLake catalog first if needed */
 				if (IsDucklakeTable(relationId))
 				{
+					/* DuckLake tables: remove only from lake_ducklake */
 					DucklakeTableMetadata *metadata = DucklakeGetTableMetadata(relationId);
 
 					if (metadata)
@@ -1473,8 +1580,11 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 						pfree(metadata);
 					}
 				}
-
-				RemoveAllDataFilesFromCatalog(relationId);
+				else
+				{
+					/* Non-DuckLake tables: remove from lake_table */
+					RemoveAllDataFilesFromCatalog(relationId);
+				}
 				break;
 			case DATA_FILE_UPDATE_DELETED_ROW_COUNT:
 				UpdateDeletedRowCount(relationId,
