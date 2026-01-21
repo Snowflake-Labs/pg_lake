@@ -124,7 +124,7 @@ inline void SubstringPG(DataChunk &args, ExpressionState &state, Vector &result)
 	{
 		auto &length_vector = args.data[2];
 
-		TernaryExecutor::Execute<string_t, long, int64_t, string_t>(
+		TernaryExecutor::Execute<string_t, int64_t, int64_t, string_t>(
 			input_vector, offset_vector, length_vector, result, args.size(),
 			[&](string_t input_string, int64_t offset, int64_t length)
 		{
