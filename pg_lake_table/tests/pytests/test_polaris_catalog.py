@@ -7,6 +7,7 @@ from pyiceberg.types import (
     TimestampType,
     FloatType,
     IntegerType,
+    LongType,
     DoubleType,
     StringType,
     BinaryType,
@@ -892,3 +893,101 @@ def grant_access_to_tables_internal(
         superuser_conn,
     )
     superuser_conn.commit()
+
+
+def test_rest_catalog_uppercase_columns(
+    pg_conn,
+    s3,
+    polaris_session,
+    set_polaris_gucs,
+    with_default_location,
+    installcheck,
+):
+    """Test querying a REST catalog table with all uppercase column names using CREATE TABLE () syntax."""
+
+    if installcheck:
+        return
+
+    # Create a namespace for the test
+    namespace = "test_uppercase_columns"
+    rest_catalog = create_iceberg_rest_catalog(namespace)
+
+    # Define schema with all UPPERCASE column names
+    schema = Schema(
+        NestedField(1, "ID", LongType(), required=False),
+        NestedField(2, "NAME", StringType(), required=False),
+        NestedField(3, "VALUE", DoubleType(), required=False),
+    )
+
+    # Create the table in REST catalog
+    table_name = "uppercase_table"
+    iceberg_table = rest_catalog.create_table(
+        identifier=f"{namespace}.{table_name}",
+        schema=schema,
+    )
+
+    # Insert some data using PyArrow
+    data = pyarrow.Table.from_pylist(
+        [
+            {"ID": 1, "NAME": "Alice", "VALUE": 100.5},
+            {"ID": 2, "NAME": "Bob", "VALUE": 200.75},
+            {"ID": 3, "NAME": "Charlie", "VALUE": 300.25},
+        ]
+    )
+    iceberg_table.append(data)
+
+    # Create schema in PostgreSQL
+    run_command(f"""CREATE SCHEMA "{namespace}" """, pg_conn)
+    pg_conn.commit()
+
+    # Create table in PostgreSQL using CREATE TABLE () syntax to infer columns
+    run_command(
+        f"""
+        CREATE TABLE "{namespace}".test_uppercase ()
+        USING iceberg
+        WITH (
+            catalog='rest',
+            read_only=True,
+            catalog_table_name='{table_name}'
+        )
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # Verify the columns were correctly inferred
+    columns = run_query(
+        f"""
+        SELECT attname
+        FROM pg_attribute
+        WHERE attrelid = '"{namespace}".test_uppercase'::regclass
+        AND attnum > 0
+        ORDER BY attnum
+        """,
+        pg_conn,
+    )
+    assert len(columns) == 3
+    # PostgreSQL should have lowercased the column names (unless they were quoted)
+    # since Iceberg column names are case-sensitive, pg_lake should preserve them as-is
+    assert columns[0][0] == "ID"
+    assert columns[1][0] == "NAME"
+    assert columns[2][0] == "VALUE"
+
+    # Query the data
+    result = run_query(
+        f"""
+        SELECT "ID", "NAME", "VALUE"
+        FROM "{namespace}".test_uppercase
+        ORDER BY "ID"
+        """,
+        pg_conn,
+    )
+
+    assert len(result) == 3
+    assert result[0] == [1, "Alice", 100.5]
+    assert result[1] == [2, "Bob", 200.75]
+    assert result[2] == [3, "Charlie", 300.25]
+
+    # Clean up
+    rest_catalog.drop_table(f"{namespace}.{table_name}")
+    rest_catalog.drop_namespace(namespace)
