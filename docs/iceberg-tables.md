@@ -142,26 +142,21 @@ Whether or not you use batches or a staging table, it is important to regularly 
 
 ## Iceberg (Hidden) Partitioning
 
-If you’ve used Postgres' [**declarative partitioning**](https://www.postgresql.org/docs/current/ddl-partitioning.html), you already understand the goal: divide large tables into smaller parts based on column values like **`event_time`** or **`user_id`**, so queries can run faster and data stays manageable.
+Iceberg's hidden partitioning physically organizes data based on column values (like **`event_time`** or **`user_id`**) to accelerate queries and data management operations. Unlike PostgreSQL's [**declarative partitioning**](https://www.postgresql.org/docs/current/ddl-partitioning.html), which requires creating child tables manually, Iceberg partitioning is defined once at the table level and managed automatically.
 
-Iceberg takes the same idea — but handles it differently. Instead of creating child tables for each partition, you define partitioning at the table level using expressions like **`day(event_time)`** or **`bucket(16, user_id)`**, and Iceberg tables organize the data accordingly. Hence, in Iceberg terms, it is referred to as **`hidden`** partitioning.
+**Key benefits:**
+- **Automatic organization**: Define partitioning expressions like **`day(event_time)`** or **`bucket(16, user_id)`**, and Iceberg handles file organization
+- **Multi-column support**: Partition by multiple expressions simultaneously (e.g., by day and user bucket)
+- **Evolvable**: Change partitioning strategies without rewriting the table—new data uses the new layout while old data remains readable
+- **Fast metadata operations**: Deletes matching entire partitions skip data scanning entirely
 
-Hidden partitioning is also useful for managing retention — for example, deleting old data. When you run a **`DELETE`** with a filter that matches a full partition, pg_lake removes the associated data files — no scanning, just a fast metadata operation.
+Each partition stores data in one or more Parquet files. The query engine automatically tracks partition membership, and [**VACUUM**](#vacuuming-an-iceberg-table) merges small files over time to maintain performance.
 
-Each unique partition is stored in one or more parquet files. As you write data, the query engine tracks which data belongs to which partition — no need to create or manage partitions manually. Over time, if a partition has many small files, [**VACUUM**](#vacuuming-an-iceberg-table) will merge them into fewer, larger files to keep performance high.
+### Defining partitions
 
-Unlike Postgres' declarative partitioning, Iceberg's partitioning supports multi-expression partitioning. You can partition by both **`day(event_time)`** and **`bucket(user_id, 16)`** in the same table. There’s no need to nest partitions or create complex sub-table structures — it is all managed in metadata.
-
-Partitioning strategies in Iceberg are also evolvable. You can change or add/drop partition transforms (for example, switch from **`day(event_time)`** to **`month(event_time)`**) without rewriting the entire table or creating a new one. This allows your table layout to grow and adapt as usage patterns change, which is particularly useful in long-lived analytical workloads.
-
-Overall, Iceberg's hidden partitioning gives you the performance benefits of partitioning — but with much less manual work and more flexibility. You define your intent once, and pg_lake handles the rest.
-
-### Defining and evolving partitions
-
-To define partitioning for an Iceberg table, use the WITH`(partition_by = '...') `option when creating the table. You can also modify or drop the partitioning strategy later using `ALTER TABLE ... OPTIONS`.
+To define partitioning for an Iceberg table, use the `WITH (partition_by = '...')` option when creating the table.
 
 The following example defines two partition expressions:
-
 - `day(event_time)` for time-based filtering
 - `bucket(32, user_id)` for distributing data evenly by user and filtering by `user_id`
 
@@ -179,8 +174,13 @@ WITH (
 );
 ```
 
-You can change the partitioning strategy later without rewriting or recreating the table. Partition changes apply only to newly written data. Existing files retain their original layout, and Iceberg tracks partition history internally. This makes it easy to experiment and adapt as access patterns evolve. To change the partitioning:
+The `partition_by` option can be used with other Iceberg table options as well as with `CREATE TABLE AS`.
 
+### Evolving partitions
+
+You can change the partitioning strategy later without rewriting or recreating the table. Partition changes apply only to newly written data. Existing files retain their original layout, and Iceberg tracks partition history internally. This makes it easy to experiment and adapt as access patterns evolve.
+
+**Changing an existing partition strategy:**
 ```sql
 ALTER TABLE events 
 OPTIONS (
@@ -188,8 +188,7 @@ OPTIONS (
 );
 ```
 
-If your iceberg table was not partitioned at `CREATE TABLE` time, you can add it via using the `ADD` keyword instead of `SET`:
-
+**Adding partitioning to an unpartitioned table:**
 ```sql
 ALTER TABLE events
 OPTIONS (
@@ -197,8 +196,7 @@ OPTIONS (
 );
 ```
 
-To remove partitioning entirely:
-
+**Removing partitioning entirely:**
 ```sql
 ALTER TABLE events 
 OPTIONS (
@@ -206,7 +204,9 @@ OPTIONS (
 );
 ```
 
-You can inspect the current partitioning with `\d` in `psql`, look for `partition_by` in `FDW options`:
+### Inspecting partitions
+
+You can inspect the current partitioning with `\d` in `psql`. Look for `partition_by` in the `FDW options` section:
 
 ```sql
 \d events 
@@ -223,11 +223,11 @@ Server: pg_lake_iceberg
 FDW options: (partition_by 'day(event_time), bucket(32, user_id)', location 's3://mybucket/postgres/public/events/123085')
 ```
 
-`partition_by` option can be used with other Iceberg table options as well as with `CREATE TABLE AS`.
-
 ### Supported partition transforms
+
+Iceberg supports several transform functions that determine how data is partitioned. Choose the transform based on your data type and query patterns.
+
 | **Transform** | **Description** | **Supported types** |
-| --- | --- | --- |
 | **`col`** | Identity partitioning, stores the column’s value as-is. Useful for low-cardinality columns like **`region`** or **`status`**. | **`date`**, **`timestamp(tz)`**, **`time`**, **`int2`**, **`int4`**, **`int8`**, **`bool`**, **`float4`**, **`float8`**, **`numeric`**, **`text`**, **`varchar`**, **`bpchar`**, **`bytea`**, **`uuid`** |
 | **`year(col)`** | Extracts the year part of a date or timestamp. Good for coarse time partitioning. | **`date`**, **`timestamp(tz)`** |
 | **`month(col)`** | Extracts the year and month. Typically used for monthly aggregates or logs. | **`date`**, **`timestamp(tz)`** |
@@ -236,34 +236,20 @@ FDW options: (partition_by 'day(event_time), bucket(32, user_id)', location 's3:
 | **`bucket(N, col)`** | Hashes the column and assigns it to one of **`N`** evenly distributed buckets. | **`int2`**, **`int4`**, **`int8`**, **`numeric`**, **`text`**, **`varchar`**, **`char(C)`**, **`bytea`**, **`uuid`**, **`date`**, **`timestamp(tz)`**, **`time`** |
 | **`truncate(N, col)`** | Truncates the value to a multiple of **`N`** (for integers) or to a prefix of length **`N`** (for string and binary). | **`int2`**, **`int4`**, **`int8`**, **`text`**, **`varchar`**, **`char(C)`**, **`bytea`** |
 
-### Iceberg hidden partitioning best practices
-Partitioning can greatly improve query performance at scale — but it also introduces overhead, especially during writes and maintenance. If your table is small or mostly used with full-table scans, you might not benefit from partitioning.
-
-Below are some guidelines to help you get the most out of Iceberg’s hidden partitioning.
-
-- Writes to partitioned Iceberg tables are often **slower** than writes to non-partitioned tables. This is expected: The engine must evaluate partition expressions, organize data into the right partition files, and manage more metadata.
-- For datasets larger than **`~10GB`** — especially those queried with filters like **`WHERE event_time >= ...`** — partitioning allows the query engine to **skip most files**, dramatically reducing scan time. If your workload includes large scans with predictable filter conditions, partitioning can lead to significant end-to-end speedups.
-- More partitions mean more small files, which can **hurt performance** and increase operational overhead. Each distinct partition value results in a separate set of files. If you partition by high-cardinality columns (e.g. **`user_id`**, **`uuid`**, or **`event_time`**), Iceberg may create **thousands of tiny files**. This leads to:
-    - Slower write performance
-    - Increased metadata size
-    - Higher planning and listing overhead
-    - More frequent **`VACUUM`** needs to merge files
-
-Instead of **`user_id`**, prefer **`bucket(32, user_id)`** to spread users across a fixed number of partitions. Instead of partitioning by raw timestamp, use **`year(event_time)`** or **`month(event_time)`** depending on query patterns.
-
-- Let your common filter patterns guide your partitioning strategy. A few examples:
-    - **Time-based data** → **`year(event_time)`**, **`month(event_time)`**
-    - **User-specific queries** → **`bucket(32, user_id)`**
-    - **Region or category filters** → **`region`** or **`truncate(4, region)`**
-
 ### Partition pruning
-Partition pruning is how Iceberg avoids scanning unnecessary data files. When you filter by a partition column (or one of its transforms), only the matching partition files are read — the rest are skipped entirely. The pruning happens at the file level, using Iceberg’s metadata.
 
-For **`bucket`** transforms, only equality filters (e.g., **`=`**) trigger partition pruning. For the rest of the transforms, many more operators trigger pruning such as **`>`**, **`<`**, **`>=`**, **`<=`**, **`=`**, **`IN`**, **`ANY`** and **`BETWEEN`**.
+Partition pruning is how Iceberg avoids scanning unnecessary data files. When you filter by a partition column (or one of its transforms), only the matching partition files are read—the rest are skipped entirely. The pruning happens at the file level using Iceberg's metadata.
 
-You can confirm pruning by checking the **`Data Files Scanned:`** line in the output of **`EXPLAIN (verbose)`**. Fewer files scanned means better pruning.
+**Supported operators by transform:**
+- **Time transforms** (`year`, `month`, `day`, `hour`): `>`, `<`, `>=`, `<=`, `=`, `IN`, `ANY`, `BETWEEN`
+- **`bucket` transform**: Only `=` (equality)
+- **Other transforms** (`truncate`, identity): `>`, `<`, `>=`, `<=`, `=`, `IN`, `ANY`, `BETWEEN`
 
-Let’s create a table partitioned by year and insert two rows from different years:
+**Verifying partition pruning:**
+
+You can confirm pruning by checking the `Data Files Scanned:` line in `EXPLAIN (verbose)` output. Fewer files scanned means better pruning.
+
+Example: Create a table partitioned by year and insert rows from different years:
 
 ```sql
 CREATE TABLE t_year_partitioned (
@@ -280,7 +266,7 @@ INSERT INTO t_year_partitioned VALUES
   ('2024-08-10', 'hello from 2024');
 ```
 
-Now query with a filter that matches only one partition, see **`Data Files Scanned:`**:
+Query with a filter that matches only one partition:
 
 ```sql
 EXPLAIN (verbose)
@@ -293,7 +279,9 @@ WHERE event_time >= '2024-01-01';
    Data Files Scanned: 1
 ```
 
-Similarly, Iceberg only processes relevant data files when removing data for a given partition. In this case, look for **`Data Files Skipped:`** in the **`EXPLAIN (verbose)`** output — it shows how many files were avoided entirely. In the example below, the partition for **`year=2023`** is skipped because the filter only matches **`year=2024`**. This makes large-scale data retention operations fast and efficient.
+**Partition pruning for DELETE operations:**
+
+Iceberg only processes relevant data files when removing data for a given partition. Look for `Data Files Skipped:` in the `EXPLAIN (verbose)` output—it shows how many files were avoided entirely. This makes large-scale data retention operations fast and efficient.
 
 ```sql
 EXPLAIN (verbose) 
@@ -305,6 +293,40 @@ DELETE FROM t_year_partitioned WHERE event_time >= '2024-01-01';
    ...
    Data Files Skipped: 1
 ```
+
+In this example, the partition for `year=2023` is skipped because the filter only matches `year=2024`.
+
+### Best practices
+
+Partitioning can greatly improve query performance at scale, but it also introduces overhead during writes and maintenance. Use these guidelines to get the most out of Iceberg's hidden partitioning.
+
+**When to use partitioning:**
+- **Use partitioning** for datasets larger than ~10GB that are queried with predictable filters (e.g., `WHERE event_time >= ...`)
+- **Skip partitioning** for small tables or tables that are mostly scanned in full
+
+**Performance trade-offs:**
+- **Write performance**: Partitioned tables have slower writes because the engine must evaluate partition expressions, organize data into partition files, and manage more metadata
+- **Query performance**: Partitioning allows the query engine to skip most files during filtered queries, dramatically reducing scan time
+
+**Avoid high-cardinality partitions:**
+
+More partitions mean more small files, which hurt performance and increase operational overhead. If you partition by high-cardinality columns (e.g., `user_id`, `uuid`, or raw `event_time`), Iceberg may create thousands of tiny files, leading to:
+- Slower write performance
+- Increased metadata size
+- Higher planning and listing overhead
+- More frequent `VACUUM` needs to merge files
+
+**Use transforms to control cardinality:**
+- Instead of `user_id`, use `bucket(32, user_id)` to spread users across a fixed number of partitions
+- Instead of raw timestamps, use `year(event_time)` or `month(event_time)` depending on query patterns
+- For strings, use `truncate(N, col)` to limit cardinality
+
+**Match partitioning to query patterns:**
+
+Let your common filter patterns guide your partitioning strategy:
+- **Time-based data** → `year(event_time)`, `month(event_time)`
+- **User-specific queries** → `bucket(32, user_id)`
+- **Region or category filters** → `region` or `truncate(4, region)`
 
 ### Iceberg hidden partitioning limitations
 
