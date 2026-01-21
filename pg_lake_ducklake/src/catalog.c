@@ -900,22 +900,22 @@ DucklakeAddColumn(Oid tableOid, const char *columnName, const char *columnType,
 	/* Allocate new column_id from current snapshot */
 	columnId = currentSnapshot->nextCatalogId++;
 
-	/* Update current snapshot with new next_catalog_id */
-	SPI_connect();
+	/* Initialize StringInfo in caller's memory context before SPI operations */
 	StringInfoData query;
 	initStringInfo(&query);
+
+	/* Update current snapshot with new next_catalog_id */
+	SPI_connect();
 	appendStringInfo(&query,
 					 "UPDATE lake_ducklake.snapshot SET next_catalog_id = %ld WHERE snapshot_id = %ld",
 					 currentSnapshot->nextCatalogId, currentSnapshot->snapshotId);
 	SPI_exec(query.data, 0);
-	SPI_finish();
 
 	/* Now create a new snapshot for this schema change */
 	DucklakeSnapshot *newSnapshot = DucklakeCreateSnapshot("ADD COLUMN", NULL, NULL);
 
 	/* Increment schema_version and insert column - all within same SPI context */
-	SPI_connect();
-	initStringInfo(&query);
+	resetStringInfo(&query);
 	appendStringInfo(&query,
 					 "UPDATE lake_ducklake.snapshot SET schema_version = schema_version + 1 "
 					 "WHERE snapshot_id = %ld",
