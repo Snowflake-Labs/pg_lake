@@ -134,7 +134,9 @@ GetDucklakeDataFilesHash(Oid relationId, bool dataOnly, int64 snapshotId)
 	DucklakeTableMetadata *metadata = DucklakeGetTableMetadata(relationId);
 
 	if (!metadata)
+	{
 		return dataFilesHash;
+	}
 
 	/* Get data files from DuckLake catalog */
 	List	   *dataFiles = DucklakeGetDataFiles(metadata->tableId, snapshotId);
@@ -147,13 +149,44 @@ GetDucklakeDataFilesHash(Oid relationId, bool dataOnly, int64 snapshotId)
 
 		/* Create TableDataFile from DucklakeDataFile */
 		TableDataFile *tableFile = hash_search(dataFilesHash,
-											   &ducklakeFile->path,
+											   &ducklakeFile->dataFileId,
 											   HASH_ENTER,
 											   &found);
 
 		if (!found)
 		{
-			tableFile->path = pstrdup(ducklakeFile->path);
+			/* Switch to caller's memory context for allocations that need to persist */
+			MemoryContext oldContext = MemoryContextSwitchTo(callerContext);
+
+			/* Resolve relative paths against table base path */
+			char	   *resolvedPath;
+
+			if (ducklakeFile->pathIsRelative && metadata->path)
+			{
+				/*
+				 * DuckLake relative paths may start with '/' but should be
+				 * appended to the table base path
+				 */
+				const char *relativePath = ducklakeFile->path;
+
+				/* Skip leading '/' if present */
+				if (relativePath[0] == '/')
+					relativePath++;
+
+				/* Concatenate table base path with relative file path */
+				StringInfoData pathBuf;
+
+				initStringInfo(&pathBuf);
+				appendStringInfo(&pathBuf, "%s/%s", metadata->path, relativePath);
+				resolvedPath = pathBuf.data;
+			}
+			else
+			{
+				/* Use absolute path as-is */
+				resolvedPath = pstrdup(ducklakeFile->path);
+			}
+
+			tableFile->path = resolvedPath;
 			tableFile->fileId = ducklakeFile->dataFileId;
 			tableFile->content = CONTENT_DATA;	/* Assume data files for now */
 			tableFile->stats.rowCount = ducklakeFile->recordCount;
@@ -162,6 +195,9 @@ GetDucklakeDataFilesHash(Oid relationId, bool dataOnly, int64 snapshotId)
 			tableFile->stats.rowIdStart = ducklakeFile->rowIdStart;
 			tableFile->stats.columnStats = NIL;
 			tableFile->partition = NULL;
+
+			/* Restore previous memory context */
+			MemoryContextSwitchTo(oldContext);
 		}
 	}
 

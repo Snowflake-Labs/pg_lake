@@ -228,7 +228,33 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 		foreach_ptr(DucklakeDataFile, duckFile, ducklakeDataFiles)
 		{
 			TableDataFile *dataFile = palloc0(sizeof(TableDataFile));
-			dataFile->path = pstrdup(duckFile->path);
+
+			/* Resolve relative paths against table base path */
+			if (duckFile->pathIsRelative && tableMetadata->path)
+			{
+				/*
+				 * DuckLake relative paths may start with '/' but should be
+				 * appended to the table base path
+				 */
+				const char *relativePath = duckFile->path;
+
+				/* Skip leading '/' if present */
+				if (relativePath[0] == '/')
+					relativePath++;
+
+				/* Concatenate table base path with relative file path */
+				StringInfoData pathBuf;
+
+				initStringInfo(&pathBuf);
+				appendStringInfo(&pathBuf, "%s/%s", tableMetadata->path, relativePath);
+				dataFile->path = pathBuf.data;
+			}
+			else
+			{
+				/* Use absolute path as-is */
+				dataFile->path = pstrdup(duckFile->path);
+			}
+
 			dataFile->stats.rowCount = duckFile->recordCount;
 			dataFile->stats.fileSize = duckFile->fileSizeBytes;
 			dataFile->stats.deletedRowCount = 0;
@@ -240,7 +266,31 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 		foreach_ptr(DucklakeDeleteFile, duckDelFile, ducklakeDeleteFiles)
 		{
 			TableDataFile *deleteFile = palloc0(sizeof(TableDataFile));
-			deleteFile->path = pstrdup(duckDelFile->path);
+
+			/* Resolve relative paths against table base path */
+			if (duckDelFile->pathIsRelative && tableMetadata->path)
+			{
+				const char *relativePath = duckDelFile->path;
+
+				/* Skip leading '/' if present */
+				if (relativePath[0] == '/')
+					relativePath++;
+
+				/* Concatenate table base path with relative file path */
+				StringInfoData pathBuf;
+
+				initStringInfo(&pathBuf);
+				appendStringInfo(&pathBuf, "%s/%s", tableMetadata->path, relativePath);
+				deleteFile->path = pathBuf.data;
+
+				elog(NOTICE, "Resolved relative delete path: %s -> %s", duckDelFile->path, deleteFile->path);
+			}
+			else
+			{
+				/* Use absolute path as-is */
+				deleteFile->path = pstrdup(duckDelFile->path);
+			}
+
 			deleteFile->stats.rowCount = duckDelFile->deleteCount;
 			deleteFile->stats.fileSize = duckDelFile->fileSizeBytes;
 			deleteFiles = lappend(deleteFiles, deleteFile);
