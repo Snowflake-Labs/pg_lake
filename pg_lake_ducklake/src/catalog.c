@@ -323,6 +323,7 @@ DucklakeGetTableMetadata(Oid tableOid)
 	int ret;
 	char	   *schemaName;
 	char	   *tableName;
+	MemoryContext oldcontext;
 
 	/* Get the table and schema name from the PostgreSQL catalog */
 	schemaName = get_namespace_name(get_rel_namespace(tableOid));
@@ -330,6 +331,9 @@ DucklakeGetTableMetadata(Oid tableOid)
 
 	if (!schemaName || !tableName)
 		return NULL;
+
+	/* Save the caller's memory context before entering SPI */
+	oldcontext = CurrentMemoryContext;
 
 	/* Look up the table in DuckLake metadata by schema and table name */
 	initStringInfo(&query);
@@ -351,19 +355,28 @@ DucklakeGetTableMetadata(Oid tableOid)
 		return NULL;
 	}
 
-	/* Extract all values while SPI context is still active */
+	/*
+	 * Switch to caller's memory context before extracting values.
+	 * This ensures that strings duplicated with pstrdup() persist after SPI_finish().
+	 */
+	MemoryContextSwitchTo(oldcontext);
+
+	/* Extract all values and duplicate strings in caller's context */
 	bool isnull;
 	int64 tableId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
 												 SPI_tuptable->tupdesc, 1, &isnull));
 	int64 schemaId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
 												  SPI_tuptable->tupdesc, 3, &isnull));
-	char *tableNameStr = TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[0],
-															SPI_tuptable->tupdesc, 4, &isnull));
-	char *schemaNameStr = TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[0],
-															 SPI_tuptable->tupdesc, 5, &isnull));
+	char *tableNameStr = pstrdup(TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[0],
+																	SPI_tuptable->tupdesc, 4, &isnull)));
+	char *schemaNameStr = pstrdup(TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[0],
+																	 SPI_tuptable->tupdesc, 5, &isnull)));
+
 	Datum pathDatum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 6, &isnull);
 	bool pathIsNull = isnull;
-	char *pathStr = pathIsNull ? NULL : TextDatumGetCString(pathDatum);
+
+	char *pathStr = pathIsNull ? NULL : pstrdup(TextDatumGetCString(pathDatum));
+
 	bool pathIsRelative = DatumGetBool(SPI_getbinval(SPI_tuptable->vals[0],
 													  SPI_tuptable->tupdesc, 7, &isnull));
 	int64 beginSnapshot = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
@@ -375,9 +388,9 @@ DucklakeGetTableMetadata(Oid tableOid)
 	metadata = (DucklakeTableMetadata *) palloc(sizeof(DucklakeTableMetadata));
 	metadata->tableId = tableId;
 	metadata->schemaId = schemaId;
-	metadata->tableName = pstrdup(tableNameStr);
-	metadata->schemaName = pstrdup(schemaNameStr);
-	metadata->path = pathIsNull ? NULL : pstrdup(pathStr);
+	metadata->tableName = tableNameStr;
+	metadata->schemaName = schemaNameStr;
+	metadata->path = pathStr;
 	metadata->pathIsRelative = pathIsRelative;
 	metadata->beginSnapshot = beginSnapshot;
 
@@ -390,6 +403,10 @@ DucklakeGetTableMetadataById(int64 tableId)
 	StringInfoData query;
 	DucklakeTableMetadata *metadata;
 	int ret;
+	MemoryContext oldcontext;
+
+	/* Save the caller's memory context before entering SPI */
+	oldcontext = CurrentMemoryContext;
 
 	initStringInfo(&query);
 	appendStringInfo(&query,
@@ -409,19 +426,26 @@ DucklakeGetTableMetadataById(int64 tableId)
 		return NULL;
 	}
 
-	/* Extract all values while SPI context is still active */
+	/*
+	 * Switch to caller's memory context before extracting values.
+	 * This ensures that strings duplicated with pstrdup() persist after SPI_finish().
+	 */
+	MemoryContextSwitchTo(oldcontext);
+
+	/* Extract all values and duplicate strings in caller's context */
 	bool isnull;
 	int64 tableIdResult = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
 													   SPI_tuptable->tupdesc, 1, &isnull));
 	int64 schemaId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
 												  SPI_tuptable->tupdesc, 3, &isnull));
-	char *tableNameStr = TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[0],
-															SPI_tuptable->tupdesc, 4, &isnull));
-	char *schemaNameStr = TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[0],
-															 SPI_tuptable->tupdesc, 5, &isnull));
+	char *tableNameStr = pstrdup(TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[0],
+																	SPI_tuptable->tupdesc, 4, &isnull)));
+	char *schemaNameStr = pstrdup(TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[0],
+																	 SPI_tuptable->tupdesc, 5, &isnull)));
 	Datum pathDatum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 6, &isnull);
 	bool pathIsNull = isnull;
-	char *pathStr = pathIsNull ? NULL : TextDatumGetCString(pathDatum);
+
+	char *pathStr = pathIsNull ? NULL : pstrdup(TextDatumGetCString(pathDatum));
 	bool pathIsRelative = DatumGetBool(SPI_getbinval(SPI_tuptable->vals[0],
 													  SPI_tuptable->tupdesc, 7, &isnull));
 	int64 beginSnapshot = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
@@ -433,9 +457,9 @@ DucklakeGetTableMetadataById(int64 tableId)
 	metadata = (DucklakeTableMetadata *) palloc(sizeof(DucklakeTableMetadata));
 	metadata->tableId = tableIdResult;
 	metadata->schemaId = schemaId;
-	metadata->tableName = pstrdup(tableNameStr);
-	metadata->schemaName = pstrdup(schemaNameStr);
-	metadata->path = pathIsNull ? NULL : pstrdup(pathStr);
+	metadata->tableName = tableNameStr;
+	metadata->schemaName = schemaNameStr;
+	metadata->path = pathStr;
 	metadata->pathIsRelative = pathIsRelative;
 	metadata->beginSnapshot = beginSnapshot;
 

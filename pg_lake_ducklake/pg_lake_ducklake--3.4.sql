@@ -555,6 +555,9 @@ $$;
 INSERT INTO lake_ducklake.snapshot (snapshot_id, schema_version, next_catalog_id, next_file_id)
 VALUES (0, 0, 1, 1);
 
+INSERT INTO lake_ducklake.schema_versions (begin_snapshot, schema_version)
+VALUES (0, 0);
+
 INSERT INTO lake_ducklake.metadata (key, value, scope, scope_id)
 VALUES ('ducklake_version', '0.3', NULL, NULL);
 
@@ -611,8 +614,15 @@ CREATE VIEW public.ducklake_schema_versions AS
 SELECT * FROM lake_ducklake.schema_versions;
 
 -- ducklake_snapshot_changes view
+-- Create column aliases to match DuckDB expectations
 CREATE VIEW public.ducklake_snapshot_changes AS
-SELECT * FROM lake_ducklake.snapshot_changes;
+SELECT
+    snapshot_id,
+    changes_made AS operations,
+    author,
+    commit_message AS description,
+    commit_extra_info
+FROM lake_ducklake.snapshot_changes;
 
 -- ducklake_table_column_stats view
 CREATE VIEW public.ducklake_table_column_stats AS
@@ -1226,8 +1236,8 @@ FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_schema_versions_delete();
 CREATE OR REPLACE FUNCTION lake_ducklake.ducklake_snapshot_changes_insert()
 RETURNS TRIGGER AS $$
 BEGIN
-    INSERT INTO lake_ducklake.snapshot_changes (snapshot_id, operations, author, description)
-    VALUES (NEW.snapshot_id, NEW.operations, NEW.author, NEW.description);
+    INSERT INTO lake_ducklake.snapshot_changes (snapshot_id, changes_made, author, commit_message, commit_extra_info)
+    VALUES (NEW.snapshot_id, NEW.operations, NEW.author, NEW.description, NEW.commit_extra_info);
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -1662,9 +1672,9 @@ RETURNS TRIGGER AS $$
 BEGIN
     UPDATE lake_ducklake.snapshot_changes
     SET
-        changes_made = NEW.changes_made,
+        changes_made = NEW.operations,
         author = NEW.author,
-        commit_message = NEW.commit_message,
+        commit_message = NEW.description,
         commit_extra_info = NEW.commit_extra_info
     WHERE snapshot_id = OLD.snapshot_id;
     RETURN NEW;
