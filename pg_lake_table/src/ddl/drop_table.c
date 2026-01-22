@@ -298,7 +298,7 @@ DropTableAccessHook(ObjectAccessType access, Oid classId, Oid objectId,
 			IcebergCatalogType catalogType = GetIcebergCatalogType(objectId);
 
 			if (catalogType == REST_CATALOG_READ_WRITE)
-				RecordRestCatalogRequestInTx(objectId, REST_CATALOG_DROP_TABLE, NULL);
+				RecordRestCatalogRequestInTx(objectId, REST_CATALOG_DROP_TABLE, NULL, -1);
 		}
 	}
 	else if (get_rel_type_id(objectId) != InvalidOid && subId != 0)

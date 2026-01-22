@@ -86,7 +86,6 @@ static void AddNewRowIdMapping(Oid relationId, const char *path, List *rowIdRang
 static int64 GetFileIdForPath(Oid relatoinId, const char *path);
 static void UpdateDeletedRowCount(Oid relationId, const char *path, int64 deletedRowCount);
 static void RemoveDataFileFromTable(Oid relationId, const char *path);
-static void RemoveAllDataFilesFromCatalog(Oid relationId);
 static HTAB *CreateDataFilesHash(void);
 static HTAB *CreateDataFilesByPathHash(void);
 static List *TableDataFileHashToList(HTAB *dataFiles);
@@ -1051,7 +1050,7 @@ RemoveDataFileFromTable(Oid relationId, const char *path)
  * RemoveAllDataFileFromTable deletes all data file URL from
  * lake_table.files for a given relation.
  */
-static void
+void
 RemoveAllDataFilesFromCatalog(Oid relationId)
 {
 	/* switch to schema owner, we assume callers checked permissions */
