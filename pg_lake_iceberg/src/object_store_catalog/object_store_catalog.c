@@ -508,7 +508,7 @@ GetExternalObjectStoreCatalogFilePath(const char *catalogName)
 				 errdetail("Set the GUC to use catalog=" OBJECT_STORE_CATALOG_NAME)));
 	}
 
-	return psprintf("%s/%s/%s/catalog.json", defaultPrefix,
+	return psprintf("%s/%s/catalog/%s/catalog.json", defaultPrefix,
 					ExternalObjectStorePrefix, URLEncodePath(catalogName));
 }
 
@@ -533,7 +533,7 @@ GetInternalObjectStoreCatalogFilePath(const char *catalogName)
 				 errdetail("Set the GUC to use catalog=" OBJECT_STORE_CATALOG_NAME)));
 	}
 
-	return psprintf("%s/%s/%s/catalog.json", defaultPrefix,
+	return psprintf("%s/%s/catalog/%s/catalog.json", defaultPrefix,
 					InternalObjectStorePrefix, URLEncodePath(catalogName));
 }
 
