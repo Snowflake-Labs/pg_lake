@@ -19,6 +19,7 @@
 
 #include "postgres.h"
 
+#include "pg_lake/iceberg/metadata_spec.h"
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/pgduck/type.h"
 #include "access/attnum.h"
@@ -38,7 +39,8 @@ typedef enum IcebergPartitionTransformType
 	PARTITION_TRANSFORM_VOID
 }			IcebergPartitionTransformType;
 
-typedef struct IcebergPartitionTransform
+/* Represents a parsed partition transform from table's partition_by string option. */
+typedef struct ParsedIcebergPartitionTransform
 {
 	IcebergPartitionTransformType type;
 
@@ -51,20 +53,22 @@ typedef struct IcebergPartitionTransform
 		size_t		truncateLen;
 	};
 
-	/* partition field id */
-	int32_t		partitionFieldId;
+	const char *columnName;
+}			ParsedIcebergPartitionTransform;
 
-	/* <columnName>_<transformName>, e.g. a_bucket */
-	const char *partitionFieldName;
+/* Represents an analyzed partition transform with all necessary info. */
+typedef struct IcebergPartitionTransform
+{
+	/* parsed transform info */
+	ParsedIcebergPartitionTransform parsedTransform;
 
-	/* transform name, e.g. bucket[3] */
-	const char *transformName;
+	/* spec field info */
+	IcebergPartitionSpecField *specField;
 
 	/* source field of the column to which transform applies */
 	DataFileSchemaField *sourceField;
 
 	/* Postgres column info to which transform applies */
-	const char *columnName;
 	AttrNumber	attnum;
 	PGType		pgType;
 
