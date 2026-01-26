@@ -181,7 +181,7 @@ _PG_init(void)
 											".. USING iceberg\" statements."),
 							   NULL,
 							   &IcebergDefaultCatalog,
-							   "postgres",
+							   "object_store",
 							   PGC_USERSET,
 							   0,
 							   IcebergDefaultCatalogCheckHook, NULL, NULL);

@@ -61,7 +61,7 @@ def test_writable_rest_basic_flow(
     )
 
     run_command(
-        f"""CREATE TABLE test_writable_rest_basic_flow.unrelated_table(a int) USING iceberg""",
+        f"""CREATE TABLE test_writable_rest_basic_flow.unrelated_table(a int) USING iceberg WITH (catalog='postgres')""",
         pg_conn,
     )
 
@@ -624,7 +624,7 @@ def test_different_table_types(
     )
 
     run_command(
-        f"""CREATE TABLE test_different_table_types.postgres_catalog_iceberg_test USING iceberg AS SELECT 3 as a""",
+        f"""CREATE TABLE test_different_table_types.postgres_catalog_iceberg_test USING iceberg WITH (catalog='postgres') AS SELECT 3 as a""",
         pg_conn,
     )
 

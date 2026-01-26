@@ -32,7 +32,7 @@
 
 
 char	   *IcebergDefaultLocationPrefix = NULL;
-char	   *IcebergDefaultCatalog = POSTGRES_CATALOG_NAME;
+char	   *IcebergDefaultCatalog = OBJECT_STORE_CATALOG_NAME;
 
 static char *GetIcebergExternalMetadataLocation(Oid relationId);
 static char *GetIcebergCatalogMetadataLocationInternal(Oid relationId, bool isPrevMetadata, bool forUpdate);
