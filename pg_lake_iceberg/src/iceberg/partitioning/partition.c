@@ -225,7 +225,7 @@ FindPartitionTransformById(List *transforms, int32_t partitionFieldId, bool erro
 	{
 		IcebergPartitionTransform *transform = (IcebergPartitionTransform *) lfirst(cell);
 
-		if (transform->specField.field_id == partitionFieldId)
+		if (transform->specField->field_id == partitionFieldId)
 			return transform;
 	}
 

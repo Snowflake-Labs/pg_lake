@@ -676,7 +676,7 @@ GetColumnBoundConstraintsFromPartition(Oid relationId, ColumnToFieldIdMapping * 
 			continue;
 
 		/* skip if transform's sourceId does not match the entry's fieldId */
-		if (partitionTransform->sourceField.id != entry->fieldId)
+		if (partitionTransform->sourceField->id != entry->fieldId)
 			continue;
 
 		Expr	   *boundsConstraint =

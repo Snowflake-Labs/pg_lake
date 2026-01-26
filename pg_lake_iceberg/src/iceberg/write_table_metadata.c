@@ -764,6 +764,31 @@ AppendIcebergPartitionSpecFields(StringInfo command, IcebergPartitionSpecField *
 	appendStringInfoString(command, "]");
 }
 
+/*
+ * DeepCopyIcebergPartitionSpecField deep copies a IcebergPartitionSpecField.
+ */
+IcebergPartitionSpecField *
+DeepCopyIcebergPartitionSpecField(const IcebergPartitionSpecField * field)
+{
+	IcebergPartitionSpecField *copiedField = palloc0(sizeof(IcebergPartitionSpecField));
+
+	copiedField->field_id = field->field_id;
+	copiedField->name = pstrdup(field->name);
+	copiedField->name_length = field->name_length;
+	copiedField->transform = pstrdup(field->transform);
+	copiedField->transform_length = field->transform_length;
+
+	copiedField->source_id = field->source_id;
+	copiedField->source_ids_length = field->source_ids_length;
+	if (field->source_ids_length > 0)
+	{
+		copiedField->source_ids = palloc0(field->source_ids_length * sizeof(int32));
+		memcpy(copiedField->source_ids, field->source_ids, field->source_ids_length * sizeof(int32));
+	}
+
+	return copiedField;
+}
+
 static void
 AppendIcebergSortOrderFields(StringInfo command, IcebergSortOrderField * fields, size_t fields_length)
 {

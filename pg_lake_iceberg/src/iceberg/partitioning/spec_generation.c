@@ -60,7 +60,7 @@ BuildPartitionSpecFromPartitionTransforms(Oid relationId, List *partitionTransfo
 	{
 		IcebergPartitionTransform *transform = lfirst(transformCell);
 
-		spec->fields[fieldIndex] = transform->specField;
+		spec->fields[fieldIndex] = *(DeepCopyIcebergPartitionSpecField(transform->specField));
 		fieldIndex++;
 	}
 

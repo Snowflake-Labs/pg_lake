@@ -63,10 +63,10 @@ typedef struct IcebergPartitionTransform
 	ParsedIcebergPartitionTransform parsedTransform;
 
 	/* spec field info */
-	IcebergPartitionSpecField specField;
+	IcebergPartitionSpecField *specField;
 
 	/* source field of the column to which transform applies */
-	DataFileSchemaField sourceField;
+	DataFileSchemaField *sourceField;
 
 	/* Postgres column info to which transform applies */
 	AttrNumber	attnum;

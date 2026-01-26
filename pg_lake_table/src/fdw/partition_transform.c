@@ -152,7 +152,7 @@ PartitionTransformsEqual(IcebergPartitionSpec * spec, List *partitionTransforms)
 		 * ErrorIfColumnEverUsedInIcebergPartitionSpec(). Still, let's be
 		 * defensive and also check source field ids.
 		 */
-		if (specField->source_id != transform->sourceField.id)
+		if (specField->source_id != transform->sourceField->id)
 			return false;
 
 		/*
@@ -162,7 +162,7 @@ PartitionTransformsEqual(IcebergPartitionSpec * spec, List *partitionTransforms)
 		 * Iceberg does here:
 		 * https://github.com/apache/iceberg/blob/8b55ac834015ce664f879ecfe1e80a941a994420/api/src/main/java/org/apache/iceberg/PartitionSpec.java#L239-L259
 		 */
-		if (strcasecmp(specField->name, transform->specField.name) != 0)
+		if (strcasecmp(specField->name, transform->specField->name) != 0)
 		{
 			return false;
 		}
@@ -251,7 +251,7 @@ GetPartitionTransformFromSpecField(Oid relationId, IcebergPartitionSpecField * s
 {
 	IcebergPartitionTransform *transform = palloc0(sizeof(IcebergPartitionTransform));
 
-	transform->specField = *specField;
+	transform->specField = DeepCopyIcebergPartitionSpecField(specField);
 
 	transform->attnum =
 		GetAttributeForFieldId(relationId, specField->source_id);
@@ -260,9 +260,7 @@ GetPartitionTransformFromSpecField(Oid relationId, IcebergPartitionSpecField * s
 
 	if (IsInternalIcebergTable(relationId))
 	{
-		DataFileSchemaField *sourceField = GetRegisteredFieldForAttribute(relationId, transform->attnum);
-
-		transform->sourceField = *sourceField;
+		transform->sourceField = GetRegisteredFieldForAttribute(relationId, transform->attnum);
 	}
 	else
 	{
@@ -270,13 +268,11 @@ GetPartitionTransformFromSpecField(Oid relationId, IcebergPartitionSpecField * s
 
 		DataFileSchema *schema = GetDataFileSchemaForTable(relationId);
 
-		DataFileSchemaField *sourceField = GetDataFileSchemaFieldById(schema, specField->source_id);
-
-		transform->sourceField = *sourceField;
+		transform->sourceField = GetDataFileSchemaFieldById(schema, specField->source_id);
 	}
 
 	/* parse transform name */
-	ParseTransformName(transform->specField.transform,
+	ParseTransformName(transform->specField->transform,
 					   &transform->parsedTransform.type,
 					   &transform->parsedTransform.bucketCount,
 					   &transform->parsedTransform.truncateLen);
@@ -415,8 +411,8 @@ ApplyPartitionTransformToTuple(IcebergPartitionTransform * transform, TupleTable
 {
 	PartitionField *field = palloc0(sizeof(PartitionField));
 
-	field->field_name = pstrdup(transform->specField.name);
-	field->field_id = transform->specField.field_id;
+	field->field_name = pstrdup(transform->specField->name);
+	field->field_id = transform->specField->field_id;
 
 	bool		isNull = false;
 	Datum		columnValue = slot_getattr(slot, transform->attnum, &isNull);
@@ -455,7 +451,7 @@ ApplyPartitionTransformToTuple(IcebergPartitionTransform * transform, TupleTable
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("applying transform %s is not yet support ",
-							transform->specField.transform)));
+							transform->specField->transform)));
 	}
 
 	field->value_type = GetTransformResultAvroType(transform);
@@ -479,7 +475,7 @@ ApplyIdentityTransformToColumn(IcebergPartitionTransform * transform, Datum colu
 		return NULL;
 	}
 
-	return PGIcebergBinarySerializePartitionFieldValue(columnValue, transform->sourceField.type,
+	return PGIcebergBinarySerializePartitionFieldValue(columnValue, transform->sourceField->type,
 													   transform->pgType, valueSize);
 }
 
@@ -840,7 +836,7 @@ ApplyBucketTransformToColumn(IcebergPartitionTransform * transform, Datum column
 	else if (transform->pgType.postgresTypeOid == UUIDOID)
 	{
 		size_t		valueSize = 0;
-		unsigned char *value = PGIcebergBinarySerializePartitionFieldValue(columnValue, transform->sourceField.type,
+		unsigned char *value = PGIcebergBinarySerializePartitionFieldValue(columnValue, transform->sourceField->type,
 																		   transform->pgType, &valueSize);
 
 		*bucketValue = (MurmurHash3_32_Bytes(value, valueSize) & INT32_MAX) % transform->parsedTransform.bucketCount;
@@ -848,7 +844,7 @@ ApplyBucketTransformToColumn(IcebergPartitionTransform * transform, Datum column
 	else if (transform->pgType.postgresTypeOid == NUMERICOID)
 	{
 		size_t		valueSize = 0;
-		unsigned char *value = PGIcebergBinarySerializePartitionFieldValue(columnValue, transform->sourceField.type,
+		unsigned char *value = PGIcebergBinarySerializePartitionFieldValue(columnValue, transform->sourceField->type,
 																		   transform->pgType, &valueSize);
 
 		*bucketValue = (MurmurHash3_32_Bytes(value, valueSize) & INT32_MAX) % transform->parsedTransform.bucketCount;

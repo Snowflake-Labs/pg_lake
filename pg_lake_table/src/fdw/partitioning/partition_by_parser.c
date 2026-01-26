@@ -532,27 +532,28 @@ AnalyzeIcebergTablePartitionBy(Oid relationId, List *parsedTransforms)
 		/* 2) Check scalar column */
 		EnsureTransformSourceColumnScalar(parsedTransform, sourceField);
 
-		analyzedTransform->sourceField = *sourceField;
+		analyzedTransform->sourceField = sourceField;
 
 		/* set transform name */
-		analyzedTransform->specField.transform = GenerateTransformName(analyzedTransform);
-		analyzedTransform->specField.transform_length = strlen(analyzedTransform->specField.transform);
+		analyzedTransform->specField = palloc0(sizeof(IcebergPartitionSpecField));
+		analyzedTransform->specField->transform = GenerateTransformName(analyzedTransform);
+		analyzedTransform->specField->transform_length = strlen(analyzedTransform->specField->transform);
 
 		/* set partition field name */
-		analyzedTransform->specField.name = GeneratePartitionFieldName(analyzedTransform, relationId);
-		analyzedTransform->specField.name_length = strlen(analyzedTransform->specField.name);
+		analyzedTransform->specField->name = GeneratePartitionFieldName(analyzedTransform, relationId);
+		analyzedTransform->specField->name_length = strlen(analyzedTransform->specField->name);
 
 		/* set partition field id */
-		analyzedTransform->specField.field_id = ++largestPartitionFieldId;
+		analyzedTransform->specField->field_id = ++largestPartitionFieldId;
 		/* set source field id */
-		analyzedTransform->specField.source_id = sourceField->id;
-		analyzedTransform->specField.source_ids_length = 1;
-		analyzedTransform->specField.source_ids = palloc0(sizeof(int) * analyzedTransform->specField.source_ids_length);
-		analyzedTransform->specField.source_ids[0] = analyzedTransform->specField.source_id;
+		analyzedTransform->specField->source_id = sourceField->id;
+		analyzedTransform->specField->source_ids_length = 1;
+		analyzedTransform->specField->source_ids = palloc0(sizeof(int) * analyzedTransform->specField->source_ids_length);
+		analyzedTransform->specField->source_ids[0] = analyzedTransform->specField->source_id;
 
 		/* 3) Check column type compatibility. */
 		EnsureValidTypeForTransform(analyzedTransform->parsedTransform.type, analyzedTransform->pgType.postgresTypeOid);
-	
+
 		analyzedTransforms = lappend(analyzedTransforms, analyzedTransform);
 	}
 
@@ -832,11 +833,11 @@ EnsureNoDuplicateTransforms(List *transforms)
 			IcebergPartitionTransform *other = list_nth(transforms, j);
 
 			if (transform->parsedTransform.type == other->parsedTransform.type &&
-				transform->sourceField.id == other->sourceField.id)
+				transform->sourceField->id == other->sourceField->id)
 				ereport(ERROR,
 						(errcode(ERRCODE_DUPLICATE_OBJECT),
 						 errmsg("\"%s\" transform on column \"%s\" appears multiple times in partition spec",
-								transform->specField.transform, transform->parsedTransform.columnName)));
+								transform->specField->transform, transform->parsedTransform.columnName)));
 		}
 	}
 }
