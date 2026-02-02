@@ -26,3 +26,4 @@ extern PGDLLEXPORT List *StringArrayToList(ArrayType *array);
 extern PGDLLEXPORT List *Int64ArrayToList(ArrayType *array);
 extern PGDLLEXPORT ArrayType *StringListToArray(List *stringList);
 extern PGDLLEXPORT ArrayType *INT16ListToArray(List *stringList);
+extern PGDLLEXPORT ArrayType *OidListToArray(List *oidList);

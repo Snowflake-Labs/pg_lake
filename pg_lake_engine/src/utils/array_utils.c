@@ -57,12 +57,21 @@ StringListToArray(List *stringList)
 }
 
 /*
-* INT16ListToArray converts a list of strings to a text array.
+* INT16ListToArray converts a list of int16 values to an int2 array.
 */
 ArrayType *
 INT16ListToArray(List *stringList)
 {
 	return ListToArray(stringList, INT2OID);
+}
+
+/*
+* OidListToArray converts a list of OIDs to an oid array.
+*/
+ArrayType *
+OidListToArray(List *oidList)
+{
+	return ListToArray(oidList, OIDOID);
 }
 
 
@@ -95,6 +104,12 @@ ListToArray(List *list, Oid elementType)
 			char	   *val = (char *) lfirst(cell);
 
 			datums[datumIndex] = CStringGetTextDatum(val);
+		}
+		else if (elementType == OIDOID)
+		{
+			Oid			val = lfirst_oid(cell);
+
+			datums[datumIndex] = ObjectIdGetDatum(val);
 		}
 		else
 		{
