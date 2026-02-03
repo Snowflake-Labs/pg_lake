@@ -79,5 +79,6 @@ extern PGDLLEXPORT char *TupleDescToProjectionList(TupleDesc tupleDesc,
 												   bool addCast);
 
 extern PGDLLEXPORT char *CopyOptionsToReadCSVParams(List *copyOptions);
+extern PGDLLEXPORT char *PathListToString(List *paths);
 
 #endif
