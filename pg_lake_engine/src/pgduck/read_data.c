@@ -66,7 +66,6 @@ static char *BuildColumnProjection(char *expression,
 								   CopyDataFormat sourceFormat,
 								   List *formatOptions,
 								   bool addAlias);
-static char *PathListToString(List *paths);
 static char *GetLogFormatRegex(List *options);
 static char *GetLogTimestampFormat(List *options);
 
@@ -1235,7 +1234,7 @@ BuildColumnProjection(char *columnName,
  * PathListToString converts a list of paths to a single string that can
  * be used in a pgduck SQL query.
  */
-static char *
+char *
 PathListToString(List *paths)
 {
 	if (list_length(paths) == 1)

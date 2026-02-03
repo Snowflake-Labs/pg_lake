@@ -84,5 +84,6 @@ extern PGDLLEXPORT char *TupleDescToDuckDBColumnsMap(TupleDesc tupleDesc,
 													 bool skipFilename);
 
 extern PGDLLEXPORT char *CopyOptionsToReadCSVParams(List *copyOptions);
+extern PGDLLEXPORT char *PathListToString(List *paths);
 
 #endif
