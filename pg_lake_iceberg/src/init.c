@@ -306,6 +306,16 @@ _PG_init(void)
 							   GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							   NULL, NULL, NULL);
 
+	DefineCustomBoolVariable("pg_lake_iceberg.rest_catalog_enable_vended_credentials",
+							 gettext_noop("Enable requesting vended credentials from REST catalog."),
+							 gettext_noop("When disabled, the X-Iceberg-Access-Delegation header is not sent. "
+										  "Disable this for S3-compatible storage that does not support AWS STS."),
+							 &RestCatalogEnableVendedCredentials,
+							 true,
+							 PGC_SUSET,
+							 GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
 	AvroInit();
 }
 

@@ -32,6 +32,7 @@ extern char *RestCatalogClientId;
 extern char *RestCatalogClientSecret;
 extern char *RestCatalogScope;
 extern int	RestCatalogAuthType;
+extern bool RestCatalogEnableVendedCredentials;
 
 #define REST_CATALOG_AUTH_TOKEN_PATH "%s/api/catalog/v1/oauth/tokens"
 

@@ -51,7 +51,7 @@ char	   *RestCatalogClientId = NULL;
 char	   *RestCatalogClientSecret = NULL;
 char	   *RestCatalogScope = "PRINCIPAL_ROLE:ALL";
 int			RestCatalogAuthType = REST_CATALOG_AUTH_TYPE_DEFAULT;
-
+bool		RestCatalogEnableVendedCredentials = true;
 
 /*
 * Should always be accessed via GetRestCatalogAccessToken()
@@ -113,14 +113,12 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId)
 				 URLEncodePath(catalogName), URLEncodePath(namespaceName));
 	List	   *headers = PostHeadersWithAuth();
 
-	/*
-	 * TODO: Should we make this configurable? Some object stores may require
-	 * different headers or authentication methods. TODO: We currently do not
-	 * use vended credentials, but should we?
-	 */
-	char	   *vendedCreds = pstrdup("X-Iceberg-Access-Delegation: vended-credentials");
+	if (RestCatalogEnableVendedCredentials)
+	{
+		char	   *vendedCreds = pstrdup("X-Iceberg-Access-Delegation: vended-credentials");
 
-	headers = lappend(headers, vendedCreds);
+		headers = lappend(headers, vendedCreds);
+	}
 
 	HttpResult	httpResult = SendRequestToRestCatalog(HTTP_POST, postUrl, body->data, headers);
 
