@@ -17,6 +17,13 @@
 
 #pragma once
 
+/* we use a multiple of 3 since metadata files always come in triplets */
+#define DEFAULT_MAX_PARALLEL_FILE_UPLOADS 12
+
+/* pg_lake_engine.max_parallel_file_uploads */
+extern int32 MaxParallelFileUploads;
+
+extern PGDLLEXPORT void ScheduleFileCopyToS3WithCleanup(char *localFilePath, char *s3Uri, bool autoDeleteRecord);
 extern PGDLLEXPORT void CopyLocalFileToS3(char *localFilePath, char *s3Uri);
-extern PGDLLEXPORT void CopyLocalFileToS3WithCleanupOnAbort(char *localFilePath, char *s3Uri);
-extern PGDLLEXPORT void CopyLocalManifestFileToS3WithCleanupOnAbort(char *localFilePath, char *s3Uri);
+extern PGDLLEXPORT void FinishAllUploads(void);
+extern PGDLLEXPORT char *GetPendingUploadLocalPath(const char *remoteUrl);

@@ -38,7 +38,10 @@ UploadIcebergManifestListToURI(List *manifestList, char *manifestListURI)
 	char	   *localManifestListPath = GenerateTempFileName(PG_LAKE_ICEBERG, true);
 
 	WriteIcebergManifestList(localManifestListPath, manifestList);
-	CopyLocalFileToS3WithCleanupOnAbort(localManifestListPath, manifestListURI);
+
+	bool		autoDeleteRecord = true;
+
+	ScheduleFileCopyToS3WithCleanup(localManifestListPath, manifestListURI, autoDeleteRecord);
 
 	int64		manifestListSize = GetLocalFileSize(localManifestListPath);
 

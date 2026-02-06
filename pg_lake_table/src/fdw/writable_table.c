@@ -252,9 +252,10 @@ PrepareCSVInsertion(Oid relationId, char *insertCSV, int64 rowCount,
 	char	   *dataFilePrefix = GenerateDataFileNameForTable(relationId, !isPrefix);
 
 	/* we defer deletion of in-progress data files only for Iceberg tables */
-	bool		deferDeletion = IsPgLakeIcebergForeignTableById(relationId);
+	bool		isIcebergTable = IsPgLakeIcebergForeignTableById(relationId);
+	bool		autoDeleteRecord = !isIcebergTable;
 
-	InsertInProgressFileRecordExtended(dataFilePrefix, isPrefix, deferDeletion);
+	InsertInProgressFileRecordExtended(dataFilePrefix, isPrefix, autoDeleteRecord);
 
 	List	   *leafFields = GetLeafFieldsForTable(relationId);
 
@@ -286,7 +287,7 @@ PrepareCSVInsertion(Oid relationId, char *insertCSV, int64 rowCount,
 	 * prefix paths with full paths. At precommit hook, we delete persisted
 	 * files from in-progress
 	 */
-	if (isPrefix && deferDeletion)
+	if (isPrefix && isIcebergTable)
 		ReplaceInProgressPrefixPathWithFullPaths(dataFilePrefix, GetDataFilePathsFromStatsList(statsCollector->dataFileStats));
 
 	/* build a DataFileModification for each new data file */
@@ -513,9 +514,10 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 			 * tables
 			 */
 			bool		isPrefix = false;
-			bool		deferDeletion = IsPgLakeIcebergForeignTableById(relationId);
+			bool		isIcebergTable = IsPgLakeIcebergForeignTableById(relationId);
+			bool		autoDeleteRecord = !isIcebergTable;
 
-			InsertInProgressFileRecordExtended(newDataFilePath, isPrefix, deferDeletion);
+			InsertInProgressFileRecordExtended(newDataFilePath, isPrefix, autoDeleteRecord);
 
 			/* write the remainder of the file into a new path */
 			uint64		existingDeletedRowCount = sourceRowCount - liveRowCount;
@@ -577,9 +579,10 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 			 * tables
 			 */
 			bool		isPrefix = false;
-			bool		deferDeletion = IsPgLakeIcebergForeignTableById(relationId);
+			bool		isIcebergTable = IsPgLakeIcebergForeignTableById(relationId);
+			bool		autoDeleteRecord = !isIcebergTable;
 
-			InsertInProgressFileRecordExtended(deletionFilePath, isPrefix, deferDeletion);
+			InsertInProgressFileRecordExtended(deletionFilePath, isPrefix, autoDeleteRecord);
 
 			List	   *leafFields = GetLeafFieldsForTable(relationId);
 
@@ -985,9 +988,10 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 	DataFileSchema *schema = GetDataFileSchemaForTable(relationId);
 
 	/* we defer deletion of in-progress data files only for Iceberg tables */
-	bool		deferDeletion = IsPgLakeIcebergForeignTableById(relationId);
+	bool		isIcebergTable = IsPgLakeIcebergForeignTableById(relationId);
+	bool		autoDeleteRecord = !isIcebergTable;
 
-	InsertInProgressFileRecordExtended(newDataFilePath, isPrefix, deferDeletion);
+	InsertInProgressFileRecordExtended(newDataFilePath, isPrefix, autoDeleteRecord);
 
 	/* perform compaction */
 	List	   *leafFields = GetLeafFieldsForTable(relationId);
@@ -1027,7 +1031,7 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 	 * prefix paths with full paths. At precommit hook, we delete persisted
 	 * files from in-progress
 	 */
-	if (isPrefix && deferDeletion)
+	if (isPrefix && isIcebergTable)
 		ReplaceInProgressPrefixPathWithFullPaths(newDataFilePath, newFiles);
 
 	return newFileOps;

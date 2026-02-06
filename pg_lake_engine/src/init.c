@@ -43,6 +43,7 @@
 #include "pg_extension_base/pg_extension_base_ids.h"
 #include "pg_lake/pgduck/cache_worker.h"
 #include "pg_lake/pgduck/client.h"
+#include "pg_lake/util/s3_writer_utils.h"
 #include "utils/guc.h"
 
 PG_MODULE_MAGIC;
@@ -166,6 +167,18 @@ _PG_init(void)
 							INT32_MAX,
 							PGC_SUSET,
 							GUC_UNIT_S | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("pg_lake_engine.max_parallel_file_uploads",
+							gettext_noop("Maximum number of concurrent file uploads to "
+										 "object storage."),
+							NULL,
+							&MaxParallelFileUploads,
+							DEFAULT_MAX_PARALLEL_FILE_UPLOADS /* default */ ,
+							1,
+							256,
+							PGC_USERSET,
+							0,
 							NULL, NULL, NULL);
 
 	if (QueryEngineEnabled)

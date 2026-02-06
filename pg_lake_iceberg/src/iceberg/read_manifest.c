@@ -28,6 +28,7 @@
 #include "pg_lake/iceberg/manifest_spec.h"
 #include "pg_lake/avro/avro_reader.h"
 #include "pg_lake/util/s3_reader_utils.h"
+#include "pg_lake/util/s3_writer_utils.h"
 #include "pg_lake/util/plan_cache.h"
 #include "pg_extension_base/spi_helpers.h"
 

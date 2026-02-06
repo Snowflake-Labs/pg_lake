@@ -100,7 +100,16 @@ UploadIcebergManifestToURI(List *manifestEntries, char *manifestURI)
 	char	   *localManifestPath = GenerateTempFileName(PG_LAKE_ICEBERG, true);
 
 	WriteIcebergManifest(localManifestPath, manifestEntries);
-	CopyLocalManifestFileToS3WithCleanupOnAbort(localManifestPath, manifestURI);
+
+	/*
+	 * Manifest files will get auto-deleted on commit unless
+	 * DeleteInProgressManifests is called. The reason is that manifest files
+	 * generated at commit time might still get replaced via manifest merge
+	 * before commit.
+	 */
+	bool		autoDeleteRecord = false;
+
+	ScheduleFileCopyToS3WithCleanup(localManifestPath, manifestURI, autoDeleteRecord);
 
 	int64		manifestSize = GetLocalFileSize(localManifestPath);
 

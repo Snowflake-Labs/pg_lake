@@ -22,46 +22,57 @@
 
 #include "pg_lake/cleanup/in_progress_files.h"
 #include "pg_lake/pgduck/client.h"
+#include "pg_lake/pgduck/parallel_command.h"
+#include "pg_lake/util/s3_reader_utils.h"
 #include "pg_lake/util/s3_writer_utils.h"
 #include "pg_lake/util/rel_utils.h"
 #include "utils/builtins.h"
+#include "utils/hsearch.h"
+#include "utils/memutils.h"
+
+
+/*
+ * ScheduledUpload represents an upload to be performed by FinishAllUpload.
+ */
+typedef struct ScheduledUpload
+{
+	char		remoteUrl[MAX_S3_PATH_LENGTH];
+	char		localFile[MAXPGPATH];
+}			ScheduledUpload;
+
 
 static char *CopyLocalFileToS3Command(char *localFileUri, char *s3Uri);
+static void ScheduleFileUpload(char *localFile, char *remoteUrl);
+static void InitUploadScheduling(void);
+static void ResetPendingUploads(void);
+
+static MemoryContext UploadSchedulingContext = NULL;
+static HTAB *PendingUploads = NULL;
+
+/* pg_lake_engine.max_parallel_file_uploads setting */
+int			MaxParallelFileUploads = DEFAULT_MAX_PARALLEL_FILE_UPLOADS;
 
 
 /*
-* CopyLocalFileToS3WithCleanupOnAbort similar to CopyLocalFileToS3 but
-* it inserts the file path to the IN_PROGRESS_FILES_TABLE before copying
-* the file to S3.
-*/
+ * ScheduleFileCopyToS3WithCleanup schedules a file upload for later execution, and also ensures
+ * that the file is deleted in case of abort.
+ */
 void
-CopyLocalFileToS3WithCleanupOnAbort(char *localFilePath, char *s3Uri)
-{
-	InsertInProgressFileRecord(s3Uri);
-
-	CopyLocalFileToS3(localFilePath, s3Uri);
-}
-
-/*
-* CopyLocalManifestFileToS3WithCleanupOnAbort similar to CopyLocalFileToS3WithCleanupOnAbort
-* but we defer the deletion of the IN_PROGRESS_FILES_TABLE record for manifests until snapshot
-* creation time.
-*/
-void
-CopyLocalManifestFileToS3WithCleanupOnAbort(char *localFilePath, char *s3Uri)
+ScheduleFileCopyToS3WithCleanup(char *localFilePath, char *s3Uri, bool autoDeleteRecord)
 {
 	bool		isPrefix = false;
-	bool		deferDeletion = true;
 
-	InsertInProgressFileRecordExtended(s3Uri, isPrefix, deferDeletion);
+	InsertInProgressFileRecordExtended(s3Uri, isPrefix, autoDeleteRecord);
 
-	CopyLocalFileToS3(localFilePath, s3Uri);
+	ScheduleFileUpload(localFilePath, s3Uri);
 }
 
+
 /*
-* CopyLocalFileToS3 copies the content of a local
-* file to an S3 bucket.
-*/
+ * CopyLocalFileToS3 copies the content of a local file to an S3 bucket.
+ *
+ * Note: If the transaction rolls back this file will not be cleaned up.
+ */
 void
 CopyLocalFileToS3(char *localFilePath, char *s3Uri)
 {
@@ -84,4 +95,130 @@ CopyLocalFileToS3Command(char *localFileUri, char *s3Uri)
 					 quote_literal_cstr(localFileUri), quote_literal_cstr(s3Uri));
 
 	return command.data;
+}
+
+
+/*
+ * ScheduleFileUpload schedules a file for being uploaded into object storage
+ * when FinishAllUploads is called.
+ */
+static void
+ScheduleFileUpload(char *localFile, char *remoteUrl)
+{
+	InitUploadScheduling();
+
+	bool		found = false;
+	ScheduledUpload *upload = hash_search(PendingUploads, remoteUrl, HASH_ENTER, &found);
+
+	if (found)
+		elog(ERROR, "%s scheduled for upload twice", remoteUrl);
+
+	strlcpy(upload->localFile, localFile, MAXPGPATH);
+}
+
+
+/*
+ * InitUploadScheduling creates a memory context used to schedule
+ * uploads that happen at a later time in the transaction (read: commit)
+ * and a hash to track them.
+ */
+static void
+InitUploadScheduling(void)
+{
+	if (PendingUploads != NULL)
+		return;
+
+	/* create a memory context that lasts until the end of the transaction */
+	UploadSchedulingContext = AllocSetContextCreate(TopTransactionContext,
+													"Upload scheduler",
+													ALLOCSET_DEFAULT_SIZES);
+
+	/* reset PendingUploads on abort */
+	MemoryContextCallback *cb = MemoryContextAllocZero(UploadSchedulingContext,
+													   sizeof(MemoryContextCallback));
+
+	cb->func = (MemoryContextCallbackFunction) ResetPendingUploads;
+	cb->arg = NULL;
+	MemoryContextRegisterResetCallback(UploadSchedulingContext, cb);
+
+	/* create a URL -> local file hash */
+	HASHCTL		hashCtl;
+
+	memset(&hashCtl, 0, sizeof(hashCtl));
+	hashCtl.keysize = MAX_S3_PATH_LENGTH;
+	hashCtl.entrysize = sizeof(ScheduledUpload);
+	hashCtl.hcxt = UploadSchedulingContext;
+
+	PendingUploads = hash_create("scheduled uploads", 32, &hashCtl,
+								 HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
+}
+
+
+/*
+ * ResetPendingUploads prevents PendingUploads and UploadSchedulingContext containing
+ * dangling pointers when the memory context is reset.
+ */
+static void
+ResetPendingUploads(void)
+{
+	PendingUploads = NULL;
+	UploadSchedulingContext = NULL;
+}
+
+
+/*
+ * FinishAllUploads completes all of the pending uploads in parallel using
+ * a state machine approach.
+ *
+ * Each upload connection progresses through states independently, with up to
+ * pg_lake_engine.max_parallel_file_uploads (default 8) connections active
+ * concurrently.
+ */
+void
+FinishAllUploads(void)
+{
+	if (PendingUploads == NULL)
+		return;
+
+	/* build command list */
+	List	   *commandList = NIL;
+	ScheduledUpload *upload = NULL;
+
+	HASH_SEQ_STATUS status;
+
+	hash_seq_init(&status, PendingUploads);
+
+	while ((upload = hash_seq_search(&status)) != NULL)
+	{
+		char	   *command = CopyLocalFileToS3Command(upload->localFile,
+													   upload->remoteUrl);
+
+		commandList = lappend(commandList, command);
+	}
+
+	ExecuteCommandsInParallelInPGDuck(commandList, MaxParallelFileUploads);
+
+	MemoryContextDelete(UploadSchedulingContext);
+}
+
+
+/*
+ * GetPendingUploadLocalPath returns the local path of a remote URL, if any.
+ */
+char *
+GetPendingUploadLocalPath(const char *remoteUrl)
+{
+	if (PendingUploads == NULL)
+		return NULL;
+
+	char	   *localFile = NULL;
+	bool		found = false;
+
+	ScheduledUpload *upload =
+		hash_search(PendingUploads, remoteUrl, HASH_FIND, &found);
+
+	if (found)
+		localFile = upload->localFile;
+
+	return localFile;
 }

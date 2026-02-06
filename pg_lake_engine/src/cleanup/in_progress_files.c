@@ -418,7 +418,10 @@ ReplaceInProgressPrefixPathWithFullPaths(char *prefixPath, List *fullPaths)
 void
 InsertInProgressFileRecord(char *path)
 {
-	InsertInProgressFileRecordExtended(path, false, false);
+	bool		isPrefix = false;
+	bool		autoDeleteRecord = true;
+
+	InsertInProgressFileRecordExtended(path, isPrefix, autoDeleteRecord);
 }
 
 
@@ -427,11 +430,13 @@ InsertInProgressFileRecord(char *path)
  * for internal bookkeeping with more options.
  *
  * "isPrefix": indicates whether the path is a prefix (directory) or a full path (file).
- * "deferDeletion": indicates whether the deletion of the record should be deferred until
- *                  the end of the transaction for iceberg tables.
+ * "autoDeleteRecord": indicates whether we know for sure whether we want to keep the file
+ *                     on commit. Some files do not make it to the end of the transaction.
+ *                     If the caller passes autoDeleteRecord false, and they want to keep
+ *                     the file, they should call DeleteInProgressFileRecord.
  */
 void
-InsertInProgressFileRecordExtended(char *path, bool isPrefix, bool deferDeletion)
+InsertInProgressFileRecordExtended(char *path, bool isPrefix, bool autoDeleteRecord)
 {
 	if (XactReadOnly)
 	{
@@ -509,7 +514,7 @@ InsertInProgressFileRecordExtended(char *path, bool isPrefix, bool deferDeletion
 	 * this transaction commits, the record is removed. If the transaction
 	 * aborts, the record (and the file) is removed by the vacuum.
 	 */
-	if (!deferDeletion)
+	if (autoDeleteRecord)
 		DeleteInProgressFileRecord(path);
 }
 

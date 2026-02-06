@@ -417,7 +417,9 @@ UploadTableMetadataToURI(IcebergTableMetadata * tableMetadata, char *metadataURI
 
 	WriteMetadataJsonToTemporaryFile(tableMetadata, localFile);
 
-	CopyLocalFileToS3WithCleanupOnAbort(localFilePath, metadataURI);
+	bool		autoDeleteRecord = true;
+
+	ScheduleFileCopyToS3WithCleanup(localFilePath, metadataURI, autoDeleteRecord);
 
 	FreeFile(localFile);
 }

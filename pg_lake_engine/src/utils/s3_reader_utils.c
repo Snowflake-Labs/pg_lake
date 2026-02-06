@@ -22,6 +22,7 @@
 
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/util/s3_reader_utils.h"
+#include "pg_lake/util/s3_writer_utils.h"
 #include "utils/builtins.h"
 
 static char *ReadTextContent(const char *command);
@@ -35,7 +36,10 @@ static char *ReadBlobFileCommand(const char *blobFileUri);
 char *
 GetTextFromURI(const char *textFileUri)
 {
-	return ReadTextContent(ReadTextFileCommand(textFileUri));
+	const char *localPath = GetPendingUploadLocalPath(textFileUri);
+	const char *readPath = localPath != NULL ? localPath : textFileUri;
+
+	return ReadTextContent(ReadTextFileCommand(readPath));
 }
 
 /*
@@ -46,7 +50,10 @@ GetTextFromURI(const char *textFileUri)
 char *
 GetBlobFromURI(const char *blobFileUri, size_t *contentLength)
 {
-	return ReadBlobContent(ReadBlobFileCommand(blobFileUri), contentLength);
+	const char *localPath = GetPendingUploadLocalPath(blobFileUri);
+	const char *readPath = localPath != NULL ? localPath : blobFileUri;
+
+	return ReadBlobContent(ReadBlobFileCommand(readPath), contentLength);
 }
 
 /*

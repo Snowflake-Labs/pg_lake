@@ -17,14 +17,4 @@
 
 #pragma once
 
-#include "postgres.h"
-#include "nodes/pg_list.h"
-#include "datatype/timestamp.h"
-
-#define PER_LOOP_IN_PROGRESS_FILE_CLEANUP_LIMIT 50
-
-extern PGDLLEXPORT bool RemoveInProgressFiles(char *location, bool isFull, bool isVerbose, List **deletedPaths);
-extern PGDLLEXPORT void InsertInProgressFileRecord(char *path);
-extern PGDLLEXPORT void InsertInProgressFileRecordExtended(char *path, bool isPrefix, bool autoDeleteRecord);
-extern PGDLLEXPORT void DeleteInProgressFileRecord(char *path);
-extern PGDLLEXPORT void ReplaceInProgressPrefixPathWithFullPaths(char *prefixPath, List *fullPaths);
+extern PGDLLEXPORT void ExecuteCommandsInParallelInPGDuck(List *commandList, int32 maxActiveExecutions);

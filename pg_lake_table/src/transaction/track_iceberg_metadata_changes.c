@@ -37,6 +37,7 @@
 #include "pg_lake/transaction/transaction_hooks.h"
 #include "pg_lake/util/injection_points.h"
 #include "pg_lake/json/json_utils.h"
+#include "pg_lake/util/s3_writer_utils.h"
 #include "pg_lake/util/url_encode.h"
 
 #define ONE_MB (1 * 1024 * 1024)
@@ -771,6 +772,9 @@ ApplyTrackedIcebergMetadataChanges(void)
 
 		}
 	}
+
+	/* now write all the metadata files to object storage in parallel */
+	FinishAllUploads();
 
 	INJECTION_POINT_COMPAT("after-apply-iceberg-changes");
 
