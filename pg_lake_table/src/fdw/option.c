@@ -204,7 +204,7 @@ pg_lake_table_validator(PG_FUNCTION_ARGS)
 
 			if (!IsSupportedURL(path))
 				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								errmsg("pg_lake_table: only s3:// and gs:// "
+								errmsg("pg_lake_table: only s3://, gs://, az://, azure://, and abfss:// "
 									   "URLs are currently supported for the \"path\" "
 									   "option.")));
 
@@ -216,7 +216,7 @@ pg_lake_table_validator(PG_FUNCTION_ARGS)
 
 			if (!IsSupportedURL(value))
 				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								errmsg("pg_lake_table: only s3:// and gs:// "
+								errmsg("pg_lake_table: only s3://, gs://, az://, azure://, and abfss:// "
 									   "URLs are currently supported for the \"location\" "
 									   "option.")));
 
@@ -718,7 +718,7 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 
 			if (!IsSupportedURL(location))
 				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								errmsg("pg_lake_iceberg: only s3:// and gs:// "
+								errmsg("pg_lake_iceberg: only s3://, gs://, az://, azure://, and abfss:// "
 									   "URLs are currently supported for the \"location\" "
 									   "option.")));
 

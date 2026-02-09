@@ -59,7 +59,7 @@ pg_lake_file_size(PG_FUNCTION_ARGS)
 
 	/* sanity-check URL */
 	if (!IsSupportedURL(path))
-		ereport(ERROR, (errmsg("file_size: only %s urls are supported", S3_URL_PREFIX),
+		ereport(ERROR, (errmsg("file_size: only s3://, gs://, az://, azure://, and abfss:// urls are supported"),
 						errcode(ERRCODE_INVALID_PARAMETER_VALUE)));
 
 	CheckURLReadAccess();
@@ -88,8 +88,7 @@ pg_lake_list_files(PG_FUNCTION_ARGS)
 
 	/* sanity-check URL */
 	if (!IsSupportedURL(globURL) || !IsFileListSupportedUrl(globURL))
-		ereport(ERROR, (errmsg("list_files: only %s and %s urls are supported",
-							   S3_URL_PREFIX, GCS_URL_PREFIX),
+		ereport(ERROR, (errmsg("list_files: only s3://, gs://, az://, azure://, abfss://, and hf:// urls are supported"),
 						errcode(ERRCODE_INVALID_PARAMETER_VALUE)));
 
 	CheckURLReadAccess();
@@ -135,6 +134,7 @@ IsFileListSupportedUrl(char *path)
 
 	return strncmp(path, S3_URL_PREFIX, strlen(S3_URL_PREFIX)) == 0 ||
 		strncmp(path, GCS_URL_PREFIX, strlen(GCS_URL_PREFIX)) == 0 ||
+		strncmp(path, AZURE_URL_PREFIX, strlen(AZURE_URL_PREFIX)) == 0 ||
 		strncmp(path, AZURE_BLOB_URL_PREFIX, strlen(AZURE_BLOB_URL_PREFIX)) == 0 ||
 		strncmp(path, AZURE_DLS_URL_PREFIX, strlen(AZURE_DLS_URL_PREFIX)) == 0 ||
 		strncmp(path, HUGGING_FACE_URL_PREFIX, strlen(HUGGING_FACE_URL_PREFIX)) == 0;
@@ -151,8 +151,7 @@ pg_lake_file_exists(PG_FUNCTION_ARGS)
 
 	/* sanity-check URL */
 	if (!IsSupportedURL(path))
-		ereport(ERROR, (errmsg("file_exists: only %s and %s urls are supported",
-							   S3_URL_PREFIX, GCS_URL_PREFIX),
+		ereport(ERROR, (errmsg("file_exists: only s3://, gs://, az://, azure://, and abfss:// urls are supported"),
 						errcode(ERRCODE_INVALID_PARAMETER_VALUE)));
 
 	CheckURLReadAccess();
@@ -206,8 +205,7 @@ pg_lake_file_preview(PG_FUNCTION_ARGS)
 
 	/* sanity-check URL */
 	if (!IsSupportedURL(url))
-		ereport(ERROR, (errmsg("file_preview: only %s and %s urls are supported",
-							   S3_URL_PREFIX, GCS_URL_PREFIX),
+		ereport(ERROR, (errmsg("file_preview: only s3://, gs://, az://, azure://, and abfss:// urls are supported"),
 						errcode(ERRCODE_INVALID_PARAMETER_VALUE)));
 
 	CheckURLReadAccess();
@@ -255,7 +253,7 @@ pg_lake_delete_file(PG_FUNCTION_ARGS)
 
 	/* sanity-check URL */
 	if (!IsSupportedURL(path))
-		ereport(ERROR, (errmsg("delete_file: only %s urls are supported", S3_URL_PREFIX),
+		ereport(ERROR, (errmsg("delete_file: only s3://, gs://, az://, azure://, and abfss:// urls are supported"),
 						errcode(ERRCODE_INVALID_PARAMETER_VALUE)));
 
 	CheckURLWriteAccess();

@@ -70,7 +70,7 @@ pg_lake_tpch_gen(PG_FUNCTION_ARGS)
 
 	if (!IsSupportedURL(location))
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg("only s3:// and gs:// URLs are "
+						errmsg("only s3://, gs://, az://, azure://, and abfss:// URLs are "
 							   "currently supported")));
 
 	Oid			tableTypeId = (BenchmarkTableType) PG_GETARG_OID(1);
@@ -104,7 +104,7 @@ pg_lake_tpch_gen_partitioned(PG_FUNCTION_ARGS)
 
 	if (!IsSupportedURL(location))
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg("only s3:// and gs:// URLs are "
+						errmsg("only s3://, gs://, az://, azure://, and abfss:// URLs are "
 							   "currently supported")));
 
 	Oid			tableTypeId = (BenchmarkTableType) PG_GETARG_OID(1);

@@ -53,6 +53,47 @@ def test_create_table_definition_from(pg_conn, azure):
     pg_conn.rollback()
 
 
+def test_create_table_definition_from_azure_long_prefix(pg_conn, azure):
+    """Test that azure:// prefix (long form) works the same as az://"""
+    url = f"azure://{TEST_BUCKET}/test_create_table_definition_from_azure_long/data.parquet"
+    json = '{"hello":5}'
+
+    run_command(
+        f"""
+        COPY (SELECT s, '2020-01-01 04:00:00'::timestamptz t, 3.4 d, 55000000000 b, 'hello' h, '{json}'::jsonb j FROM generate_series(1,10) s) TO '{url}';
+    """,
+        pg_conn,
+    )
+
+    run_command(
+        f"""
+        CREATE TABLE test_definition_from_azure_long () WITH (definition_from='{url}')
+    """,
+        pg_conn,
+    )
+
+    result = run_query(
+        """
+        select attname column_name, atttypid::regtype type_name from pg_attribute where attrelid = 'test_definition_from_azure_long'::regclass and attnum > 0 order by attnum
+    """,
+        pg_conn,
+    )
+    assert len(result) == 6
+    assert result == [
+        ["s", "integer"],
+        ["t", "timestamp with time zone"],
+        ["d", "numeric"],
+        ["b", "bigint"],
+        ["h", "text"],
+        ["j", "jsonb"],
+    ]
+
+    result = run_query("SELECT count(*) FROM test_definition_from_azure_long", pg_conn)
+    assert result[0]["count"] == 0
+
+    pg_conn.rollback()
+
+
 def test_create_table_definition_from_options(pg_conn, s3):
     url = f"s3://{TEST_BUCKET}/test_create_table_definition_from_options/data.1"
 
@@ -261,7 +302,7 @@ def test_create_table_load_from_invalid_url(pg_conn, duckdb_conn, s3):
         raise_error=False,
     )
     assert error.startswith(
-        "ERROR:  pg_lake_copy: only s3:// and gs:// URLs are currently supported"
+        "ERROR:  pg_lake_copy: only s3://, gs://, az://, azure://, and abfss:// URLs are currently supported"
     )
 
     pg_conn.rollback()
@@ -274,7 +315,7 @@ def test_create_table_load_from_invalid_url(pg_conn, duckdb_conn, s3):
         raise_error=False,
     )
     assert error.startswith(
-        "ERROR:  pg_lake_copy: only s3:// and gs:// URLs are currently supported"
+        "ERROR:  pg_lake_copy: only s3://, gs://, az://, azure://, and abfss:// URLs are currently supported"
     )
 
     pg_conn.rollback()

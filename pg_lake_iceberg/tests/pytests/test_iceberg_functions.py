@@ -47,7 +47,10 @@ def test_pg_lake_iceberg_table_metadata(
         raise_error=False,
     )
 
-    assert "pg_lake_iceberg: only s3:// and gs:// are supported" in error
+    assert (
+        "pg_lake_iceberg: only s3://, gs://, az://, azure://, and abfss:// are supported"
+        in error
+    )
 
     pg_conn.rollback()
 
@@ -106,7 +109,10 @@ def test_unsupported_url(installcheck, superuser_conn, iceberg_extension, s3):
 
     error = run_query(query, superuser_conn, raise_error=False)
 
-    assert "pg_lake_iceberg: only s3:// and gs:// are supported" in error
+    assert (
+        "pg_lake_iceberg: only s3://, gs://, az://, azure://, and abfss:// are supported"
+        in error
+    )
 
 
 @pytest.fixture(scope="module")

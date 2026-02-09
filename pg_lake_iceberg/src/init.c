@@ -333,7 +333,7 @@ IcebergDefaultLocationCheckHook(char **newvalue, void **extra, GucSource source)
 
 	if (!IsSupportedURL(newLocationPrefix))
 	{
-		GUC_check_errdetail("pg_lake_iceberg: only s3:// and gs:// URLs are currently "
+		GUC_check_errdetail("pg_lake_iceberg: only s3://, gs://, az://, azure://, and abfss:// URLs are "
 							"supported as the default location prefix");
 		return false;
 	}

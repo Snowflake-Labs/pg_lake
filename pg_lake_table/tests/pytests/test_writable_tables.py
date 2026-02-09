@@ -309,6 +309,49 @@ def internal_test_insert(azure, pg_conn, duckdb_conn, extension, table_type):
     pg_conn.rollback()
 
 
+def test_insert_azure_long_prefix(azure, pg_conn, duckdb_conn, extension):
+    """Test that azure:// prefix (long form) works the same as az:// for writable tables"""
+    location = f"azure://{TEST_BUCKET}/test_insert_azure_long_prefix/"
+
+    run_command(
+        f"""
+        CREATE FOREIGN TABLE test_insert_azure_long (
+            id int not null,
+            value text
+        )
+        SERVER pg_lake
+        OPTIONS (format 'parquet', writable 'true', location '{location}');
+        """,
+        pg_conn,
+    )
+
+    run_command(
+        """
+        INSERT INTO test_insert_azure_long VALUES (1, 'hello'), (2, 'world');
+    """,
+        pg_conn,
+    )
+
+    # Check row count
+    result = run_query("SELECT count(*) FROM test_insert_azure_long", pg_conn)
+    assert result[0]["count"] == 2
+
+    # Check data
+    result = run_query("SELECT * FROM test_insert_azure_long ORDER BY id", pg_conn)
+    assert len(result) == 2
+    assert result[0]["value"] == "hello"
+    assert result[1]["value"] == "world"
+
+    # Verify files exist
+    result = run_query(
+        "SELECT count(*) FROM lake_table.files WHERE table_name = 'test_insert_azure_long'::regclass",
+        pg_conn,
+    )
+    assert result[0]["count"] > 0
+
+    pg_conn.rollback()
+
+
 def test_update(s3, pg_conn, duckdb_conn, extension):
     for table_type in ["pg_lake", "pg_lake_iceberg"]:
         internal_test_update(s3, pg_conn, duckdb_conn, extension, table_type)

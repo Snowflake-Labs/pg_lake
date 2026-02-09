@@ -24,6 +24,7 @@
 
 #define S3_URL_PREFIX "s3://"
 #define GCS_URL_PREFIX "gs://"
+#define AZURE_URL_PREFIX "azure://"
 #define AZURE_BLOB_URL_PREFIX "az://"
 #define AZURE_DLS_URL_PREFIX "abfss://"
 #define HTTP_URL_PREFIX "http://"

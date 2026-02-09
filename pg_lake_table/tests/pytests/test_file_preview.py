@@ -55,7 +55,9 @@ def test_file_preview_non_s3_url(pg_conn, extension):
         pg_conn,
         raise_error=False,
     )
-    assert "only s3:// and gs:// urls are supported" in error
+    assert (
+        "only s3://, gs://, az://, azure://, and abfss:// urls are supported" in error
+    )
     pg_conn.rollback()
 
 

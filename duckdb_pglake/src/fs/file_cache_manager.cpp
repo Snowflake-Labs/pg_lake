@@ -222,6 +222,7 @@ FileCacheManager::IsCacheableURL(string cacheDir, string url)
 
 	return StringUtil::StartsWith(url, "s3://") ||
 		   StringUtil::StartsWith(url, "gs://") ||
+		   StringUtil::StartsWith(url, "azure://") ||
 		   StringUtil::StartsWith(url, "az://") ||
 		   StringUtil::StartsWith(url, "abfss://") ||
 		   StringUtil::StartsWith(url, "https://") ||
