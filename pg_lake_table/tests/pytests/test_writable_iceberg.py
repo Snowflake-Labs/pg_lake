@@ -110,7 +110,7 @@ def test_writable_iceberg_create_wrong_option(pg_conn, extension):
         raise_error=False,
     )
     assert (
-        'pg_lake_iceberg: only s3:// and gs:// URLs are currently supported for the "location" option.'
+        'pg_lake_iceberg: only s3://, gs://, az://, azure://, and abfss:// URLs are currently supported for the "location" option.'
         in str(error)
     )
     pg_conn.rollback()

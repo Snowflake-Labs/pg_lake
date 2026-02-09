@@ -57,7 +57,7 @@ def test_unsupported_url(s3, pg_conn, extension):
         pg_conn,
         raise_error=False,
     )
-    assert "only s3:// and gs:// URLs" in error
+    assert "only s3://, gs://, az://, azure://, and abfss:// URLs" in error
 
     pg_conn.rollback()
 

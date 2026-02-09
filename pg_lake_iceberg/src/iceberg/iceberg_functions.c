@@ -49,7 +49,7 @@ iceberg_metadata(PG_FUNCTION_ARGS)
 	if (!IsSupportedURL(metadataUri))
 	{
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg("pg_lake_iceberg: only s3:// and gs:// are supported")));
+						errmsg("pg_lake_iceberg: only s3://, gs://, az://, azure://, and abfss:// are supported")));
 	}
 
 	CheckURLReadAccess();
@@ -71,7 +71,7 @@ iceberg_files(PG_FUNCTION_ARGS)
 	if (!IsSupportedURL(metadataUri))
 	{
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg("pg_lake_iceberg: only s3:// and gs:// are supported")));
+						errmsg("pg_lake_iceberg: only s3://, gs://, az://, azure://, and abfss:// are supported")));
 	}
 
 	CheckURLReadAccess();
@@ -144,7 +144,7 @@ iceberg_snapshots(PG_FUNCTION_ARGS)
 	if (!IsSupportedURL(metadataUri))
 	{
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg("pg_lake_iceberg: only s3:// and gs:// are supported")));
+						errmsg("pg_lake_iceberg: only s3://, gs://, az://, azure://, and abfss:// are supported")));
 	}
 
 	CheckURLReadAccess();
