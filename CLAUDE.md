@@ -16,7 +16,7 @@ Users connect only to PostgreSQL. The pg_lake extensions transparently delegate 
 ```bash
 # Install vcpkg dependencies (required once)
 export VCPKG_VERSION=2025.12.12
-git clone --recurse-submodules https://github.com/Microsoft/vcpkg.git
+git clone --recurse-submodules --branch $VCPKG_VERSION https://github.com/Microsoft/vcpkg.git
 ./vcpkg/bootstrap-vcpkg.sh
 ./vcpkg/vcpkg install azure-identity-cpp azure-storage-blobs-cpp azure-storage-files-datalake-cpp openssl
 export VCPKG_TOOLCHAIN_PATH="$(pwd)/vcpkg/scripts/buildsystems/vcpkg.cmake"

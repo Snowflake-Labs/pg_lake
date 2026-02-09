@@ -126,8 +126,8 @@ After installing os specific build dependencies, you can follow below steps. The
 
 ```bash
 # install vcpkg dependencies
-export VCPKG_VERSION=2025.01.13 && \
-git clone --recurse-submodules https://github.com/Microsoft/vcpkg.git && \
+export VCPKG_VERSION=2025.10.17 && \
+git clone --recurse-submodules --branch $VCPKG_VERSION https://github.com/Microsoft/vcpkg.git && \
 ./vcpkg/bootstrap-vcpkg.sh && \
 ./vcpkg/vcpkg install azure-identity-cpp azure-storage-blobs-cpp azure-storage-files-datalake-cpp openssl && \
 export VCPKG_TOOLCHAIN_PATH="$(pwd)/vcpkg/scripts/buildsystems/vcpkg.cmake"
