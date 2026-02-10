@@ -54,10 +54,6 @@ static char *GetSchemaType(Field * mapping);
 static char *ReadEmptyDataSource(TupleDesc tupleDesc, CopyDataFormat format,
 								 bool preferVarchar,
 								 ReadRowLocationMode emitRowLocation);
-static char *TupleDescToDuckDBColumnsMap(TupleDesc tupleDesc,
-										 CopyDataFormat sourceFormat,
-										 bool preferVarchar,
-										 bool skipFilename);
 static char *TupleDescToDuckDBColumnsArray(TupleDesc tupleDesc, bool skipFilename);
 static char *TupleDescToAliasList(TupleDesc tupleDesc);
 static DuckDBTypeInfo ChooseCompatibleDuckDBType(Oid postgresTypeId, int postgresTypeMod,
@@ -742,7 +738,7 @@ ReadEmptyDataSource(TupleDesc tupleDesc, CopyDataFormat sourceFormat, bool prefe
  * TupleDescToColumnMap converts a PostgreSQL tuple descriptor to
  * a DuckDB columns map in string form.
  */
-static char *
+char *
 TupleDescToDuckDBColumnsMap(TupleDesc tupleDesc, CopyDataFormat sourceFormat, bool preferVarchar,
 							bool skipFilename)
 {
