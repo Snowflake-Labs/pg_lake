@@ -22,6 +22,7 @@
 
 RangeVar   *RowIdSequenceGetRangeVar(Oid relationId);
 void		CreateRelationRowIdSequence(Oid relationId);
+void		DropRowIdSequenceForRelation(Oid relationId);
 Oid			FindRelationRowIdSequence(Oid relationId);
 RowIdRangeMapping *CreateRowIdRangeForNewFile(Oid relationId, int64 rowCount,
 											  int64 reservedRowIdStart);

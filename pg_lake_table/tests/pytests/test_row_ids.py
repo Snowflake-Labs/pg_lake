@@ -18,6 +18,121 @@ def test_row_ids(s3, pg_conn, extension, with_default_location):
     pg_conn.rollback()
 
 
+def test_row_id_sequence(s3, pg_conn, extension, with_default_location):
+    "Verify the rowid sequence is created and dropped with the table"
+    run_command(
+        f"""
+        create table test_row_ids (x int, y int) using iceberg with (row_ids = 'true');
+    """,
+        pg_conn,
+    )
+
+    seqname = run_query(
+        "select format('rowid_%s_seq', oid::text) from pg_class where relname = 'test_row_ids'",
+        pg_conn,
+    )[0][0]
+
+    assert [[1]] == run_query(
+        f"select count(*) from pg_class where relnamespace = '__pg_lake_table_writes' :: regnamespace and relname = '{seqname}'",
+        pg_conn,
+    )
+
+    # drop the table, ensure no sequence exists
+    run_command("drop table test_row_ids", pg_conn)
+
+    assert [[0]] == run_query(
+        f"select count(*) from pg_class where relnamespace = '__pg_lake_table_writes' :: regnamespace and relname = '{seqname}'",
+        pg_conn,
+    )
+
+    pg_conn.rollback()
+
+
+def test_row_id_sequence_upgrade_sql(
+    s3, pg_conn, superuser_conn, extension, with_default_location
+):
+    "Verify that the rowid sequence update sql works to remove the sequence dependencies"
+
+    # create a table, setup the dependencies for the sequence on the table
+    # instead of a column (like we did pre-2.4-1)
+
+    run_command(
+        f"""
+        create table test_row_ids (x int, y int) using iceberg with (row_ids = 'true');
+    """,
+        pg_conn,
+    )
+
+    seqname = run_query(
+        "select format('rowid_%s_seq', oid::text) from pg_class where relname = 'test_row_ids'",
+        pg_conn,
+    )[0][0]
+
+    seqid = run_query(
+        f"select '__pg_lake_table_writes.{seqname}'::regclass::oid", pg_conn
+    )[0][0]
+
+    assert seqid > 0
+
+    pg_conn.commit()
+
+    # note that raw sql will not let us assign an owner to the table; it
+    # validates that it is a sequence/column, so we must add the dependency
+    # manually to pg_depend as superuser.
+
+    run_command(
+        f"""
+        insert into pg_depend (classid, objid, objsubid, refclassid, refobjid, refobjsubid, deptype)
+        values ('pg_class'::regclass, {seqid}, 0, 'pg_class'::regclass, 'test_row_ids'::regclass, 0, 'a')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    # our dependency is visible now; verify the pg_depend row exists
+
+    assert [[1]] == run_query(
+        f"""
+    select count(*) from pg_depend
+    where objid = {seqid} and
+    refobjid = 'test_row_ids'::regclass
+    """,
+        superuser_conn,
+    )
+
+    # get and run our update sql
+    update_command = get_seq_update_sql(superuser_conn)
+    run_command(update_command, superuser_conn)
+
+    superuser_conn.commit()
+
+    # verify the dependency got removed
+    assert [[0]] == run_query(
+        f"""
+    select count(*) from pg_depend
+    where objid = {seqid} and
+    refobjid = 'test_row_ids'::regclass
+    """,
+        superuser_conn,
+    )
+
+    # verify the sequence exists
+    assert [[1]] == run_query(
+        f"select count(*) from pg_class where relnamespace = '__pg_lake_table_writes' :: regnamespace and relname = '{seqname}'",
+        pg_conn,
+    )
+
+    # drop the table, ensure no sequence exists
+    run_command("drop table test_row_ids", pg_conn)
+
+    assert [[0]] == run_query(
+        f"select count(*) from pg_class where relnamespace = '__pg_lake_table_writes' :: regnamespace and relname = '{seqname}'",
+        pg_conn,
+    )
+
+    pg_conn.commit()
+
+
 def test_row_ids_ddl(s3, pg_conn, extension, with_default_location):
     run_command(
         f"""
@@ -242,6 +357,44 @@ def test_zero_size_rowids(s3, pg_conn, with_default_location, extension):
     assert error is None
 
     pg_conn.rollback()
+
+
+def get_seq_update_sql(pg_conn):
+    """Return the SQL used to update/test the rowid sequence changes.
+
+    Since this is isolated and there is a lot in the extension script, just
+    reproduce here; keep in-line with the pg_lake_table--2.4--3.0.sql script.
+    """
+
+    return """
+    CREATE EXTENSION IF NOT EXISTS plpgsql;
+
+DO $$
+DECLARE
+    row RECORD;
+BEGIN
+    FOR row IN
+        SELECT
+            n.nspname AS schema_name,
+            s.relname AS sequence_name
+        FROM pg_class s
+        JOIN pg_namespace n ON n.oid = s.relnamespace
+        JOIN pg_depend d ON d.objid = s.oid
+        JOIN pg_class t ON d.refobjid = t.oid
+        WHERE s.relkind = 'S'
+        AND s.relname LIKE 'rowid_%_seq'
+        AND d.refobjsubid = 0
+        AND t.relkind = 'f'
+        AND d.deptype IN ('a', 'n')
+    LOOP
+        -- Safely execute the unlinking command
+        EXECUTE format('ALTER SEQUENCE %I.%I OWNED BY NONE', row.schema_name, row.sequence_name);
+
+        -- Optional: Log the action to the console
+        RAISE NOTICE 'Unlinked sequence: %.%', row.schema_name, row.sequence_name;
+    END LOOP;
+END $$ LANGUAGE plpgsql;
+    """
 
 
 def count_row_id_mappings(table_name, pg_conn):

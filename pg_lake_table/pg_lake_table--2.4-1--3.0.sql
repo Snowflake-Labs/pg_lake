@@ -167,33 +167,3 @@ RETURNS bool
 LANGUAGE C
 IMMUTABLE PARALLEL SAFE
 AS 'MODULE_PATHNAME', $$is_object_created_by_lake$$;
-
--- cleanup rowid sequences; if we are using this script, we did not run CDW 2.4 -> 2.4-1
-CREATE EXTENSION IF NOT EXISTS plpgsql;
-
-DO $$
-DECLARE
-    row RECORD;
-BEGIN
-    FOR row IN
-        SELECT
-            n.nspname AS schema_name,
-            s.relname AS sequence_name
-        FROM pg_class s
-        JOIN pg_namespace n ON n.oid = s.relnamespace
-        JOIN pg_depend d ON d.objid = s.oid
-        JOIN pg_class t ON d.refobjid = t.oid
-        WHERE s.relkind = 'S'
-        AND s.relname LIKE 'rowid_%_seq'
-        AND d.refobjsubid = 0
-        AND t.relkind = 'f'
-        AND d.deptype IN ('a', 'n')
-    LOOP
-        -- Safely execute the unlinking command
-        EXECUTE format('ALTER SEQUENCE %I.%I OWNED BY NONE', row.schema_name, row.sequence_name);
-
-        -- Optional: Log the action to the console
-        RAISE NOTICE 'Unlinked sequence: %.%', row.schema_name, row.sequence_name;
-    END LOOP;
-END $$ LANGUAGE plpgsql;
-

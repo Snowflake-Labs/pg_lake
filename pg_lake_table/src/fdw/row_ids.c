@@ -24,6 +24,7 @@
 #include "catalog/namespace.h"
 #include "catalog/pg_class.h"
 #include "commands/sequence.h"
+#include "commands/tablecmds.h"
 #include "pg_lake/csv/csv_options.h"
 #include "pg_lake/extensions/pg_lake_table.h"
 #include "pg_lake/fdw/catalog/row_id_mappings.h"
@@ -122,19 +123,8 @@ CreateRelationRowIdSequence(Oid relationId)
 
 	createSeqStmt->sequence = sequenceName;
 
-	/* run it, and get a dependency */
-	ObjectAddress rowidSequenceAddress = DefineSequence(NULL, createSeqStmt);
-
-	CommandCounterIncrement();
-
-	/* add as a dependency to the table */
-	ObjectAddress tableAddress = {
-		.classId = RelationRelationId,
-		.objectId = relationId,
-		.objectSubId = 0
-	};
-
-	recordDependencyOn(&rowidSequenceAddress, &tableAddress, DEPENDENCY_AUTO);
+	/* run it */
+	DefineSequence(NULL, createSeqStmt);
 
 	CommandCounterIncrement();
 
@@ -156,6 +146,37 @@ FindRelationRowIdSequence(Oid relationId)
 	Assert(get_rel_relkind(sequenceId) == RELKIND_SEQUENCE);
 
 	return sequenceId;
+}
+
+
+
+/*
+ * Execute a drop of the row id sequence for the associated relation if it
+ * exists; or do nothing if it does not.
+ */
+void
+DropRowIdSequenceForRelation(Oid relationId)
+{
+	RangeVar   *sequenceName = RowIdSequenceGetRangeVar(relationId);
+	DropStmt   *dropStmt = makeNode(DropStmt);
+
+	/* unpack the schema/relation */
+	dropStmt->objects = list_make1(list_make2(
+											  makeString(sequenceName->schemaname),
+											  makeString(sequenceName->relname)));
+	dropStmt->removeType = OBJECT_SEQUENCE;
+	dropStmt->missing_ok = true;
+
+	Oid			savedUserId = InvalidOid;
+	int			savedSecurityContext = 0;
+
+	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
+	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeTable), SECURITY_LOCAL_USERID_CHANGE);
+
+	/* a sequence is a type of relation */
+	RemoveRelations(dropStmt);
+
+	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 }
 
 
