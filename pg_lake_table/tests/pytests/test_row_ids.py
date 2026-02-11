@@ -274,44 +274,6 @@ def test_zero_size_rowids(s3, pg_conn, with_default_location, extension):
     pg_conn.rollback()
 
 
-def get_seq_update_sql(pg_conn):
-    """Return the SQL used to update/test the rowid sequence changes.
-
-    Since this is isolated and there is a lot in the extension script, just
-    reproduce here; keep in-line with the pg_lake_table--2.4--3.0.sql script.
-    """
-
-    return """
-    CREATE EXTENSION IF NOT EXISTS plpgsql;
-
-DO $$
-DECLARE
-    row RECORD;
-BEGIN
-    FOR row IN
-        SELECT
-            n.nspname AS schema_name,
-            s.relname AS sequence_name
-        FROM pg_class s
-        JOIN pg_namespace n ON n.oid = s.relnamespace
-        JOIN pg_depend d ON d.objid = s.oid
-        JOIN pg_class t ON d.refobjid = t.oid
-        WHERE s.relkind = 'S'
-        AND s.relname LIKE 'rowid_%_seq'
-        AND d.refobjsubid = 0
-        AND t.relkind = 'f'
-        AND d.deptype IN ('a', 'n')
-    LOOP
-        -- Safely execute the unlinking command
-        EXECUTE format('ALTER SEQUENCE %I.%I OWNED BY NONE', row.schema_name, row.sequence_name);
-
-        -- Optional: Log the action to the console
-        RAISE NOTICE 'Unlinked sequence: %.%', row.schema_name, row.sequence_name;
-    END LOOP;
-END $$ LANGUAGE plpgsql;
-    """
-
-
 def count_row_id_mappings(table_name, pg_conn):
     res = run_query(
         f"""
