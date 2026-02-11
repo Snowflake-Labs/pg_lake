@@ -43,7 +43,6 @@
 
 static char *TupleDescToProjectionListForWrite(TupleDesc tupleDesc,
 											   CopyDataFormat destinationFormat);
-static char *TupleDescToColumnMapForWrite(TupleDesc tupleDesc, CopyDataFormat destinationFormat);
 static DuckDBTypeInfo ChooseDuckDBEngineTypeForWrite(PGType postgresType,
 													 CopyDataFormat destinationFormat);
 static void AppendFieldIdValue(StringInfo map, Field * field, int fieldId);
@@ -455,7 +454,7 @@ TupleDescToProjectionListForWrite(TupleDesc tupleDesc, CopyDataFormat destinatio
  * TupleDescToColumnMapForWrite converts a PostgreSQL tuple descriptor to
  * a DuckDB columns map in string form.
  */
-static char *
+char *
 TupleDescToColumnMapForWrite(TupleDesc tupleDesc, CopyDataFormat destinationFormat)
 {
 	StringInfoData map;
