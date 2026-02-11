@@ -158,6 +158,20 @@ void
 DropRowIdSequenceForRelation(Oid relationId)
 {
 	RangeVar   *sequenceName = RowIdSequenceGetRangeVar(relationId);
+
+	/*
+	 * Early exit for NoLock existence check; technically a race condition if
+	 * we drop from multiple sessions at the same time, but since we do
+	 * missing_ok one of them will get a NOTICE.  We thus avoid unnecessary
+	 * NOTICES in the common case that we are just dropping a table without a
+	 * rowid sequence.
+	 */
+
+	Oid			existingOid = RangeVarGetRelid(sequenceName, NoLock, true /* missing_ok */ );
+
+	if (!OidIsValid(existingOid))
+		return;
+
 	DropStmt   *dropStmt = makeNode(DropStmt);
 
 	/* unpack the schema/relation */
