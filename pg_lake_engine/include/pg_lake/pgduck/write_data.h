@@ -55,3 +55,4 @@ extern PGDLLEXPORT StatsCollector * WriteQueryResultTo(char *query,
 													   TupleDesc queryTupleDesc,
 													   List *leafFields);
 extern PGDLLEXPORT void AppendFields(StringInfo map, DataFileSchema * schema);
+extern PGDLLEXPORT char *TupleDescToColumnMapForWrite(TupleDesc tupleDesc, CopyDataFormat destinationFormat);
