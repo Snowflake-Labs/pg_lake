@@ -251,7 +251,7 @@ RUN git clone https://github.com/CrunchyData/pg_incremental.git && \
     cd .. && rm -rf pg_incremental
 
 # Install vcpkg as postgres user
-ARG VCPKG_VERSION=2025.01.13
+ARG VCPKG_VERSION=2025.10.17
 
 RUN git clone https://github.com/Microsoft/vcpkg.git -b $VCPKG_VERSION /home/postgres/vcpkg && \
     ./vcpkg/bootstrap-vcpkg.sh && \
