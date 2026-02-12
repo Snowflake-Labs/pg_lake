@@ -29,6 +29,7 @@
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/pgduck/gdal.h"
 #include "pg_lake/pgduck/numeric.h"
+#include "pg_lake/pgduck/client.h"
 #include "pg_lake/pgduck/read_data.h"
 #include "pg_lake/pgduck/type.h"
 #include "pg_lake/util/numeric.h"
@@ -1343,6 +1344,58 @@ CopyOptionsToReadCSVParams(List *copyOptions)
 	}
 
 	return command.data;
+}
+
+
+/*
+ * AppendReadCSVClause - append a complete read_csv(...) clause to buf.
+ *
+ * Builds the DuckDB read_csv() expression used to read back a CSV file
+ * that was previously written with InternalCSVOptions.  This centralises
+ * the max_line_size / parallel-disable / columns-map / CSV-options logic.
+ *
+ * filePath    - unquoted path; will be quoted internally
+ * maxLineSize - observed max line size from writing; pass -1 to omit
+ * columnsMap  - pre-built DuckDB {col:type,...} string; NULL → auto_detect
+ * csvOptions  - COPY options list (e.g. from InternalCSVOptions)
+ */
+void
+AppendReadCSVClause(StringInfo buf, const char *filePath,
+					int maxLineSize, const char *columnsMap,
+					List *csvOptions)
+{
+	appendStringInfo(buf, "read_csv(%s", quote_literal_cstr(filePath));
+
+	if (maxLineSize > 0)
+	{
+		/* use maxLineSize + 1 to include end-of-line */
+		appendStringInfo(buf, ", max_line_size=%d", maxLineSize + 1);
+	}
+
+	/*
+	 * We might hit errors in DuckDB 0.9.2 for long lines and we see
+	 * excessive (infinite?) runtime for 0.10.0 when using parallel CSV
+	 * reads.  Use the default max_line_size in DuckDB as a safety
+	 * threshold.
+	 */
+	if (maxLineSize > DEFAULT_DUCKDB_MAX_LINE_SIZE)
+	{
+		appendStringInfoString(buf, ", parallel=false");
+	}
+
+	if (columnsMap != NULL)
+	{
+		appendStringInfo(buf, ", columns=%s", columnsMap);
+	}
+	else
+	{
+		/* infer columns and their types automatically */
+		appendStringInfoString(buf, ", auto_detect=true");
+	}
+
+	appendStringInfoString(buf, CopyOptionsToReadCSVParams(csvOptions));
+
+	appendStringInfoChar(buf, ')');
 }
 
 

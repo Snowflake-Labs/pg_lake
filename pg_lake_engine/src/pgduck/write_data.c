@@ -30,7 +30,6 @@
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/parquet/geoparquet.h"
 #include "pg_lake/parsetree/options.h"
-#include "pg_lake/pgduck/client.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/pgduck/read_data.h"
 #include "pg_lake/pgduck/type.h"
@@ -77,49 +76,19 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 	initStringInfo(&command);
 
 	/* project columns into target format */
-	appendStringInfo(&command, "SELECT %s",
+	appendStringInfo(&command, "SELECT %s FROM ",
 					 TupleDescToProjectionListForWrite(csvTupleDesc, destinationFormat));
 
-	/* read the CSV file */
-	appendStringInfo(&command, " FROM read_csv(%s",
-					 quote_literal_cstr(csvFilePath));
-
-	if (maxLineSize > 0)
-	{
-		/* use maxLineSize + 1 to include end-of-line */
-		appendStringInfo(&command, ", max_line_size=%d", maxLineSize + 1);
-	}
-
-	/*
-	 * We might hit errors in DuckDB 0.9.2 for long lines and we see excessive
-	 * (infinite?) runtime for 0.10.0 when using parallel CSV reads.
-	 *
-	 * Use the default max_line_size in DuckDB as a safety threshold.
-	 */
-	if (maxLineSize > DEFAULT_DUCKDB_MAX_LINE_SIZE)
-	{
-		appendStringInfoString(&command, ", parallel=false");
-	}
+	/* build the read_csv(...) clause */
+	char	   *columnsMap = NULL;
 
 	if (csvTupleDesc != NULL && csvTupleDesc->natts > 0)
-	{
-		char	   *columnsMap =
-			TupleDescToColumnMapForWrite(csvTupleDesc, destinationFormat);
+		columnsMap = TupleDescToColumnMapForWrite(csvTupleDesc, destinationFormat);
 
-		appendStringInfo(&command, ", columns=%s", columnsMap);
-	}
-	else
-	{
-		/* infer columns and their types automatically */
-		appendStringInfoString(&command, ", auto_detect=true");
-	}
+	bool		includeHeader = true;
 
-	/* should match InternalCSVOptions */
-	appendStringInfo(&command,
-					 ", header=true, delim=',', quote='\"', escape='\"', nullstr='\\N'");
-
-	/* end read_csv */
-	appendStringInfoString(&command, ")");
+	AppendReadCSVClause(&command, csvFilePath, maxLineSize, columnsMap,
+						InternalCSVOptions(includeHeader));
 
 	bool		queryHasRowIds = false;
 
