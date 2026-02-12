@@ -1,0 +1,84 @@
+unused step name: s2-commit
+Parsed test spec with 2 sessions
+
+starting permutation: s1-select-sum s2-select-sum s1-update-key-1 s2-update-key-2 s1-commit s2-rollback
+step s1-select-sum: 
+    SELECT SUM(value) FROM test_iceberg_ser;
+
+sum
+---
+200
+(1 row)
+
+step s2-select-sum: 
+    SELECT SUM(value) FROM test_iceberg_ser;
+
+sum
+---
+200
+(1 row)
+
+step s1-update-key-1: 
+    UPDATE test_iceberg_ser SET value = value - 50 WHERE key = 1;
+
+step s2-update-key-2: 
+    UPDATE test_iceberg_ser SET value = value - 50 WHERE key = 2;
+ <waiting ...>
+step s1-commit: 
+    COMMIT;
+
+step s2-update-key-2: <... completed>
+ERROR:  could not serialize access due to concurrent update
+step s2-rollback: 
+    ROLLBACK;
+
+
+starting permutation: s1-update-key-1 s2-update-key-1 s1-commit s2-rollback
+step s1-update-key-1: 
+    UPDATE test_iceberg_ser SET value = value - 50 WHERE key = 1;
+
+step s2-update-key-1: 
+    UPDATE test_iceberg_ser SET value = value + 10 WHERE key = 1;
+ <waiting ...>
+step s1-commit: 
+    COMMIT;
+
+step s2-update-key-1: <... completed>
+ERROR:  could not serialize access due to concurrent update
+step s2-rollback: 
+    ROLLBACK;
+
+
+starting permutation: s1-select-all s2-select-all s1-insert s2-insert s1-commit s2-rollback
+step s1-select-all: 
+    SELECT * FROM test_iceberg_ser ORDER BY key;
+
+key|value
+---+-----
+  1|  100
+  2|  100
+(2 rows)
+
+step s2-select-all: 
+    SELECT * FROM test_iceberg_ser ORDER BY key;
+
+key|value
+---+-----
+  1|  100
+  2|  100
+(2 rows)
+
+step s1-insert: 
+    INSERT INTO test_iceberg_ser VALUES (3, 30);
+
+step s2-insert: 
+    INSERT INTO test_iceberg_ser VALUES (4, 40);
+ <waiting ...>
+step s1-commit: 
+    COMMIT;
+
+step s2-insert: <... completed>
+ERROR:  could not serialize access due to concurrent update
+step s2-rollback: 
+    ROLLBACK;
+
