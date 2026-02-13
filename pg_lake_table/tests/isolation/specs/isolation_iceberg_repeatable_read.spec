@@ -59,6 +59,11 @@ step "s2-delete"
     DELETE FROM test_iceberg_rr WHERE key = 2;
 }
 
+step "s2-delete-key-1"
+{
+    DELETE FROM test_iceberg_rr WHERE key = 1;
+}
+
 step "s2-commit"
 {
     COMMIT;
@@ -81,3 +86,10 @@ permutation "s1-delete" "s2-delete" "s1-commit" "s2-rollback"
 
 # Concurrent inserts: one fails after other commits.
 permutation "s1-insert" "s2-insert" "s1-commit" "s2-rollback"
+
+# Concurrent insert vs delete/update: one fails.
+permutation "s1-insert" "s2-delete" "s1-commit" "s2-rollback"
+permutation "s1-insert" "s2-update" "s1-commit" "s2-rollback"
+
+# Concurrent update vs delete on same row: one fails.
+permutation "s1-update" "s2-delete-key-1" "s1-commit" "s2-rollback"
