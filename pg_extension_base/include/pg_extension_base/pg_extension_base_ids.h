@@ -22,6 +22,6 @@
 #define PG_EXTENSION_BASE_NAME "pg_extension_base"
 
 /* cached extension IDs for pg_extension_base */
-extern PGDLLEXPORT CachedExtensionIds *PgExtensionBase;
+extern PGDLLEXPORT CachedExtensionIds * PgExtensionBase;
 
 extern PGDLLEXPORT void InitializePgExtensionBaseCache(void);

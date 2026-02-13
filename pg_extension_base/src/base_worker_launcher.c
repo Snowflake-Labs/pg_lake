@@ -269,8 +269,7 @@ typedef enum StartDatabaseStarterResult
 	DATABASE_STARTER_STARTED,
 	DATABASE_STARTER_EXISTS,
 	DATABASE_STARTER_DONE,
-	DATABASE_STARTER_FAILED,
-	DATABASE_STARTER_BLOCKED
+	DATABASE_STARTER_FAILED
 }			StartDatabaseStarterResult;
 
 /*
@@ -889,8 +888,7 @@ StartDatabaseStarter(Oid databaseId, char *databaseName)
 
 	/*
 	 * In case of a concurrent DROP DATABASE/EXTENSION that affects this
-	 * database (which takes ExclusiveLock), we bail out and wait for the next
-	 * iteration.
+	 * database (which takes ExclusiveLock), we wait for it to finish.
 	 *
 	 * Otherwise, in case of DROP DATABASE, we might proceed to create a
 	 * database starter for a database that is gone by the time the worker is
@@ -902,28 +900,13 @@ StartDatabaseStarter(Oid databaseId, char *databaseName)
 	 *
 	 * In case of CREATE EXTENSION (which takes ShareLock), we do not back
 	 * off.
+	 *
+	 * We prefer to block here instead of wait for the next server starter
+	 * iteration to promptly react to DROP+CREATE EXTENSION operations.
 	 */
 	bool		waitForLock = false;
-	LockAcquireResult lockResult =
-		LockDatabaseStarter(databaseId, ShareLock, waitForLock);
 
-	if (lockResult == LOCKACQUIRE_NOT_AVAIL)
-	{
-		/*
-		 * A DROP DATABASE/EXTENSION is in progress, wait for it to finish.
-		 *
-		 * If the DROP DATABASE succeeds, we may never get back here since the
-		 * database will not be returned by GetDatabaseList on the next
-		 * iteration. If the DROP DATABASE fails, we will start a new database
-		 * starter on the next iteration.
-		 *
-		 * In case of a DROP EXTENSION, we will always get back here and exit
-		 * early in the database starter if needed. That's because we have no
-		 * way of knowing whether or not a DROP EXTENSION succeeded or failed
-		 * from the server starter.
-		 */
-		return DATABASE_STARTER_BLOCKED;
-	}
+	LockDatabaseStarter(databaseId, ShareLock, waitForLock);
 
 	LWLockAcquire(&BaseWorkerControl->lock, LW_EXCLUSIVE);
 
@@ -933,8 +916,6 @@ StartDatabaseStarter(Oid databaseId, char *databaseName)
 
 	if (isFound)
 	{
-		/* breaking down 2 cases for readability */
-
 		if (starterEntry->workerPid > 0 || starterEntry->state == WORKER_STARTING)
 		{
 			/* database starter is already running */
@@ -946,6 +927,14 @@ StartDatabaseStarter(Oid databaseId, char *databaseName)
 			/*
 			 * database starter is already finished and does not need a
 			 * restart
+			 */
+			LWLockRelease(&BaseWorkerControl->lock);
+			return DATABASE_STARTER_DONE;
+		}
+		else if (get_database_name(databaseId) == NULL)
+		{
+			/*
+			 * the database was dropped, no need to start a worker
 			 */
 			LWLockRelease(&BaseWorkerControl->lock);
 			return DATABASE_STARTER_DONE;
