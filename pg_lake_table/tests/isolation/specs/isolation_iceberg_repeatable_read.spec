@@ -15,11 +15,6 @@ session "s1"
 
 setup { BEGIN ISOLATION LEVEL REPEATABLE READ; }
 
-step "s1-select-all"
-{
-    SELECT * FROM test_iceberg_rr ORDER BY key;
-}
-
 step "s1-insert"
 {
     INSERT INTO test_iceberg_rr VALUES (4, 40);
@@ -69,15 +64,20 @@ step "s2-commit"
     COMMIT;
 }
 
+step "s2-rollback"
+{
+    ROLLBACK;
+}
+
 # REPEATABLE READ isolation tests for Iceberg tables.
 # Snapshot stability: s2 does not see s1's committed changes.
 permutation "s2-select-all" "s1-insert" "s1-commit" "s2-select-all" "s2-commit"
 permutation "s2-select-all" "s1-update" "s1-commit" "s2-select-all" "s2-commit"
 permutation "s2-select-all" "s1-delete" "s1-commit" "s2-select-all" "s2-commit"
 
-# Concurrent update/delete on same row fails after other session committed.
-permutation "s1-update" "s1-commit" "s2-update" "s2-commit"
-permutation "s1-delete" "s1-commit" "s2-delete" "s2-commit"
+# Concurrent update/delete on same row: one fails after other commits.
+permutation "s1-update" "s2-update" "s1-commit" "s2-rollback"
+permutation "s1-delete" "s2-delete" "s1-commit" "s2-rollback"
 
-# Non-conflicting inserts both commit.
-permutation "s1-insert" "s2-insert" "s1-commit" "s2-commit"
+# Concurrent inserts: one fails after other commits.
+permutation "s1-insert" "s2-insert" "s1-commit" "s2-rollback"
