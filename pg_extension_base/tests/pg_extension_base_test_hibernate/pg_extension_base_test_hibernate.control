@@ -1,0 +1,7 @@
+comment = 'Pg Extension Base Test Hibernate'
+default_version = '1.0'
+module_pathname = '$libdir/pg_extension_base_test_hibernate'
+requires = 'pg_extension_base'
+relocatable = false
+schema = pg_catalog
+#!shared_preload_libraries
