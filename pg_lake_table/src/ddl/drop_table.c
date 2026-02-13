@@ -42,6 +42,7 @@
 #include "pg_lake/fdw/data_files_catalog.h"
 #include "pg_lake/fdw/data_file_stats_catalog.h"
 #include "pg_lake/fdw/writable_table.h"
+#include "pg_lake/fdw/row_ids.h"
 #include "pg_lake/fdw/schema_operations/field_id_mapping_catalog.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/fdw/partition_transform.h"
@@ -240,6 +241,9 @@ DropTableAccessHook(ObjectAccessType access, Oid classId, Oid objectId,
 			 * extension)
 			 */
 			RemoveAllDataFilesFromTable(objectId);
+
+			/* Cleanup rowid sequence, if we have it */
+			DropRowIdSequenceForRelation(objectId);
 		}
 	}
 	else if (IsWritableIcebergTable(objectId))
@@ -287,6 +291,9 @@ DropTableAccessHook(ObjectAccessType access, Oid classId, Oid objectId,
 		}
 		else
 		{
+			/* Cleanup rowid sequence, if we have it */
+			DropRowIdSequenceForRelation(objectId);
+
 			IcebergDDLOperation *ddlOperation = palloc0(sizeof(IcebergDDLOperation));
 
 			ddlOperation->type = DDL_TABLE_DROP;

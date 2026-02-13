@@ -18,6 +18,36 @@ def test_row_ids(s3, pg_conn, extension, with_default_location):
     pg_conn.rollback()
 
 
+def test_row_id_sequence(s3, pg_conn, extension, with_default_location):
+    "Verify the rowid sequence is created and dropped with the table"
+    run_command(
+        f"""
+        create table test_row_ids (x int, y int) using iceberg with (row_ids = 'true');
+    """,
+        pg_conn,
+    )
+
+    seqname = run_query(
+        "select format('rowid_%s_seq', oid::text) from pg_class where relname = 'test_row_ids'",
+        pg_conn,
+    )[0][0]
+
+    assert [[1]] == run_query(
+        f"select count(*) from pg_class where relnamespace = '__pg_lake_table_writes' :: regnamespace and relname = '{seqname}'",
+        pg_conn,
+    )
+
+    # drop the table, ensure no sequence exists
+    run_command("drop table test_row_ids", pg_conn)
+
+    assert [[0]] == run_query(
+        f"select count(*) from pg_class where relnamespace = '__pg_lake_table_writes' :: regnamespace and relname = '{seqname}'",
+        pg_conn,
+    )
+
+    pg_conn.rollback()
+
+
 def test_row_ids_ddl(s3, pg_conn, extension, with_default_location):
     run_command(
         f"""
