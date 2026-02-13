@@ -2,6 +2,7 @@ import uuid
 import pytest
 import datetime
 from utils_pytest import *
+from spark_utils import *
 
 
 N_ROWS = 5  # how many rows we want to insert

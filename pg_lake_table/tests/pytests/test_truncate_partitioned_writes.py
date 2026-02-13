@@ -2,6 +2,7 @@ import uuid
 import random
 import pytest
 from utils_pytest import *
+from spark_utils import *
 
 N_ROWS = 30
 SCHEMA = "test_part_writes_truncate"

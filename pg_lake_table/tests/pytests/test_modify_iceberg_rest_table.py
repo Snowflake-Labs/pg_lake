@@ -1,6 +1,7 @@
 import pytest
 import psycopg2
 from utils_pytest import *
+from spark_utils import *
 import json
 import re
 
