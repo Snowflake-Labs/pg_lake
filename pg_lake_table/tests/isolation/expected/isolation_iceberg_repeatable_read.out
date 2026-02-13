@@ -1,0 +1,190 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s2-select-all s1-insert s1-commit s2-select-all s2-commit
+step s2-select-all: 
+    SELECT * FROM test_iceberg_rr ORDER BY key;
+
+key|value
+---+-----
+  1|   10
+  2|   20
+  3|   30
+(3 rows)
+
+step s1-insert: 
+    INSERT INTO test_iceberg_rr VALUES (4, 40);
+
+step s1-commit: 
+    COMMIT;
+
+step s2-select-all: 
+    SELECT * FROM test_iceberg_rr ORDER BY key;
+
+key|value
+---+-----
+  1|   10
+  2|   20
+  3|   30
+(3 rows)
+
+step s2-commit: 
+    COMMIT;
+
+
+starting permutation: s2-select-all s1-update s1-commit s2-select-all s2-commit
+step s2-select-all: 
+    SELECT * FROM test_iceberg_rr ORDER BY key;
+
+key|value
+---+-----
+  1|   10
+  2|   20
+  3|   30
+(3 rows)
+
+step s1-update: 
+    UPDATE test_iceberg_rr SET value = 99 WHERE key = 1;
+
+step s1-commit: 
+    COMMIT;
+
+step s2-select-all: 
+    SELECT * FROM test_iceberg_rr ORDER BY key;
+
+key|value
+---+-----
+  1|   10
+  2|   20
+  3|   30
+(3 rows)
+
+step s2-commit: 
+    COMMIT;
+
+
+starting permutation: s2-select-all s1-delete s1-commit s2-select-all s2-commit
+step s2-select-all: 
+    SELECT * FROM test_iceberg_rr ORDER BY key;
+
+key|value
+---+-----
+  1|   10
+  2|   20
+  3|   30
+(3 rows)
+
+step s1-delete: 
+    DELETE FROM test_iceberg_rr WHERE key = 2;
+
+step s1-commit: 
+    COMMIT;
+
+step s2-select-all: 
+    SELECT * FROM test_iceberg_rr ORDER BY key;
+
+key|value
+---+-----
+  1|   10
+  2|   20
+  3|   30
+(3 rows)
+
+step s2-commit: 
+    COMMIT;
+
+
+starting permutation: s1-update s2-update s1-commit s2-rollback
+step s1-update: 
+    UPDATE test_iceberg_rr SET value = 99 WHERE key = 1;
+
+step s2-update: 
+    UPDATE test_iceberg_rr SET value = 88 WHERE key = 1;
+ <waiting ...>
+step s1-commit: 
+    COMMIT;
+
+step s2-update: <... completed>
+ERROR:  could not serialize access due to concurrent update
+step s2-rollback: 
+    ROLLBACK;
+
+
+starting permutation: s1-delete s2-delete s1-commit s2-rollback
+step s1-delete: 
+    DELETE FROM test_iceberg_rr WHERE key = 2;
+
+step s2-delete: 
+    DELETE FROM test_iceberg_rr WHERE key = 2;
+ <waiting ...>
+step s1-commit: 
+    COMMIT;
+
+step s2-delete: <... completed>
+ERROR:  could not serialize access due to concurrent update
+step s2-rollback: 
+    ROLLBACK;
+
+
+starting permutation: s1-insert s2-insert s1-commit s2-rollback
+step s1-insert: 
+    INSERT INTO test_iceberg_rr VALUES (4, 40);
+
+step s2-insert: 
+    INSERT INTO test_iceberg_rr VALUES (5, 50);
+ <waiting ...>
+step s1-commit: 
+    COMMIT;
+
+step s2-insert: <... completed>
+ERROR:  could not serialize access due to concurrent update
+step s2-rollback: 
+    ROLLBACK;
+
+
+starting permutation: s1-insert s2-delete s1-commit s2-rollback
+step s1-insert: 
+    INSERT INTO test_iceberg_rr VALUES (4, 40);
+
+step s2-delete: 
+    DELETE FROM test_iceberg_rr WHERE key = 2;
+ <waiting ...>
+step s1-commit: 
+    COMMIT;
+
+step s2-delete: <... completed>
+ERROR:  could not serialize access due to concurrent update
+step s2-rollback: 
+    ROLLBACK;
+
+
+starting permutation: s1-insert s2-update s1-commit s2-rollback
+step s1-insert: 
+    INSERT INTO test_iceberg_rr VALUES (4, 40);
+
+step s2-update: 
+    UPDATE test_iceberg_rr SET value = 88 WHERE key = 1;
+ <waiting ...>
+step s1-commit: 
+    COMMIT;
+
+step s2-update: <... completed>
+ERROR:  could not serialize access due to concurrent update
+step s2-rollback: 
+    ROLLBACK;
+
+
+starting permutation: s1-update s2-delete-key-1 s1-commit s2-rollback
+step s1-update: 
+    UPDATE test_iceberg_rr SET value = 99 WHERE key = 1;
+
+step s2-delete-key-1: 
+    DELETE FROM test_iceberg_rr WHERE key = 1;
+ <waiting ...>
+step s1-commit: 
+    COMMIT;
+
+step s2-delete-key-1: <... completed>
+ERROR:  could not serialize access due to concurrent update
+step s2-rollback: 
+    ROLLBACK;
+

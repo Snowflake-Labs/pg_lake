@@ -2,3 +2,5 @@ test: isolation_concurrent_iceberg_dml
 test: isolation_concurrent_writable_table_dml
 test: isolation_concurrent_iceberg_ddl
 test: isolation_concurrent_iceberg_add_data_file
+test: isolation_iceberg_repeatable_read
+test: isolation_iceberg_serializable
