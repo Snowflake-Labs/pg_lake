@@ -4,6 +4,7 @@ import random
 import string
 import sys
 from utils_pytest import *
+from spark_utils import *
 
 SPARK_TABLE_NAME = "test_pg_lake_iceberg_file_stats"
 SPARK_TABLE_NAMESPACE = "public"

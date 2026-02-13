@@ -1,6 +1,7 @@
 import pytest
 from datetime import date
 from utils_pytest import *
+from spark_utils import *
 import re
 
 # Parameterized data: needs_quote, table_name, sample data and partition_by

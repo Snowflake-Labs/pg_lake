@@ -1,6 +1,7 @@
 import pytest
 import psycopg2
 from utils_pytest import *
+from spark_utils import *
 
 
 def test_iceberg_add_file(
