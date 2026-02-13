@@ -5,12 +5,6 @@ from utils_pytest import *
 import server_params
 
 
-@pytest.fixture(autouse=True)
-def skip_if_unsupported(superuser_conn):
-    if superuser_conn.server_version >= 180000:
-        pytest.xfail("postgres 18 does not support this feature")
-
-
 def test_server_start(superuser_conn):
     result = get_pg_extension_workers(superuser_conn)
     assert result[0]["datname"] == None
@@ -124,7 +118,7 @@ def test_create_drop_pg_extension_base(superuser_conn):
 
     assert count_pg_extension_base_workers(superuser_conn) == 1
 
-    # drop the pg_base_base extension
+    # drop the pg_extension_base extension
     run_command("DROP EXTENSION pg_extension_base CASCADE", superuser_conn)
     superuser_conn.commit()
 
@@ -311,6 +305,6 @@ def get_pg_extension_workers(conn):
 
 
 def count_pg_extension_base_workers(conn):
-    query = "SELECT count(*) FROM pg_stat_activity WHERE backend_type LIKE 'pg base extension %'"
+    query = "SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'pg base extension worker'"
     result = run_query(query, conn)
     return result[0]["count"]
