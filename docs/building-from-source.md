@@ -158,8 +158,13 @@ brew install $USER/local-cmake/cmake@3.31.1
 pg_lake is supported with PostgreSQL 16, 17 and 18.
 
 You might need to configure Postgres with necessary args and flags. Below is an example for Postgres 18 on MacOS, with debugging flags and needed libraries:
-```
+```bash
 ./configure --prefix=$HOME/pgsql/18 --enable-cassert --enable-debug --enable-injection-points CFLAGS="-ggdb -O0 -fno-omit-frame-pointer" CPPFLAGS="-g -O0" --with-lz4 --with-icu --with-zstd --with-libxslt --with-libxml --with-readline --with-openssl --with-includes=/opt/homebrew/include/ --with-libraries=/opt/homebrew/lib PG_SYSROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
+make -j 16 && make install
+
+# btree_gist needed for CREATE EXTENSION pg_lake CASCADE
+make -C contrib/btree_gist
+make -C contrib/btree_gist install
 ```
 
 To create a new PostgreSQL database directory, run initdb: 
@@ -245,9 +250,14 @@ You need to follow below instructions to successfully run all tests locally:
 Build PostgreSQL from source:
 
 ```bash
+# IPC::Run module needed for --enable-tap-tests, MacOS command
+brew install cpanminus
+cpanm IPC::Run
+
+# configure and build PG from source
 git clone git@github.com:postgres/postgres.git -b REL_18_STABLE
 cd postgres
-./configure --enable-injection-point --enable-tap-tests --with-llvm --enable-debug --enable-cassert --enable-depend CFLAGS="-ggdb -Og -g3 -fno-omit-frame-pointer" --with-openssl --with-libxml --with-libxslt --with-icu --with-uuid=ossp --with-lz4 --with-python --prefix=$HOME/pgsql/18/
+./configure --enable-injection-points --enable-tap-tests --enable-debug --enable-cassert --enable-depend CFLAGS="-ggdb -Og -g3 -fno-omit-frame-pointer" --with-openssl --with-libxml --with-libxslt --with-icu --with-lz4 --with-python --prefix=$HOME/pgsql/18/
 make -j 16 && make install
 
 # install relevant test packages
@@ -265,9 +275,9 @@ Build PostGIS (dependency of pg_lake_spatial (install postgis before `make insta
 git clone git@github.com:postgis/postgis.git
 cd postgis
 ./autogen.sh
-./configure
+./configure --prefix=$HOME/pgsql/18/
 make -j 16
-sudo make install
+make install
 ```
 
 Build pgaudit (used in test suite):
@@ -294,6 +304,9 @@ sudo apt-get -y install nodejs npm
 
 # On RHEL
 sudo yum install -y nodejs npm
+
+# On MacOS
+brew install node
 
 # Afterwards
 npm install -g azurite
