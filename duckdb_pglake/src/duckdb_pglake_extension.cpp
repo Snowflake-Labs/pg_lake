@@ -111,6 +111,51 @@ inline void AtanhPG(DataChunk &args, ExpressionState &state, Vector &result)
 
 
 /*
+ * InitcapPG implements the Postgres initcap(text) function:
+ * converts the first letter of each word to uppercase and the
+ * rest to lowercase.
+ */
+inline void InitcapPG(DataChunk &args, ExpressionState &state, Vector &result)
+{
+	auto &input_vector = args.data[0];
+
+	UnaryExecutor::Execute<string_t, string_t>(
+		input_vector, result, args.size(),
+		[&](string_t input) {
+			auto input_data = input.GetData();
+			auto input_size = input.GetSize();
+
+			auto result_str = StringVector::EmptyString(result, input_size);
+			auto result_data = result_str.GetDataWriteable();
+
+			bool word_start = true;
+			for (idx_t i = 0; i < input_size; i++) {
+				unsigned char c = input_data[i];
+
+				/* handle ASCII alphanumeric characters */
+				if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+					if (word_start) {
+						result_data[i] = toupper(c);
+						word_start = false;
+					} else {
+						result_data[i] = tolower(c);
+					}
+				} else if (c >= '0' && c <= '9') {
+					result_data[i] = c;
+					word_start = false;
+				} else {
+					result_data[i] = c;
+					word_start = true;
+				}
+			}
+
+			result_str.Finalize();
+			return result_str;
+		});
+}
+
+
+/*
 * Postgres and DuckDB have different behavior for the SUBSTRING function when
 * the length or offset is negative. This function implements the Postgres
 * behavior for the SUBSTRING function.
@@ -292,6 +337,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	auto atanh_function = ScalarFunction("atanh_pg", {LogicalType::DOUBLE}, LogicalType::DOUBLE, AtanhPG);
 	loader.RegisterFunction(atanh_function);
+
+	auto initcap_function = ScalarFunction("initcap_pg", {LogicalType::VARCHAR}, LogicalType::VARCHAR, InitcapPG);
+	loader.RegisterFunction(initcap_function);
 
 	auto nullify_any_type = ScalarFunction("nullify_any_type", {LogicalType::ANY}, LogicalType::SQLNULL, NullifyAnyType);
 	loader.RegisterFunction(nullify_any_type);

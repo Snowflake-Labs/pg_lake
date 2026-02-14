@@ -434,6 +434,7 @@ static const PGDuckShippableFunction ShippableBuiltinProcs[] =
 	{"substring", 'f', 2, {"text", "int4"}, NULL},
 	{"substring", 'f', 3, {"text", "int4", "int4"}, NULL},
 	{"upper", 'f', 1, {"text"}, NULL},
+	{"initcap", 'f', 1, {"text"}, NULL},
 
 	/* json functions */
 	{"json_array_length", 'f', 1, {"json"}, NULL},
