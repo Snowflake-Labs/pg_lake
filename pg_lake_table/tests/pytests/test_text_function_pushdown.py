@@ -176,6 +176,10 @@ test_cases = [
     ("split_part", "WHERE split_part(col_text, 'o', 1) = 'm'", "split_part", True),
     ("starts_with", "WHERE starts_with(col_text, 'mo')", "starts_with", True),
     ("strpos", "WHERE strpos(col_text, 'a') IS NULL", "strpos", True),
+    # initcap
+    ("initcap_text", "WHERE initcap(col_text) = 'Test'", "initcap_pg", True),
+    ("initcap_varchar", "WHERE initcap(col_varchar) = 'Test'", "initcap_pg", True),
+    ("initcap_moo", "WHERE initcap(col_text) = 'Moo'", "initcap_pg", True),
 ]
 
 
@@ -370,3 +374,125 @@ def test_substring_on_pg_vs_duck(pg_conn, pgduck_conn):
     res = run_query(duck_query, pgduck_conn, raise_error=False)
     assert "negative substring length not allowed" in res, False
     pgduck_conn.rollback()
+
+
+def test_initcap_on_pg_vs_duck(pg_conn, pgduck_conn):
+    """
+    Comprehensive edge case tests for initcap pushdown.
+    Verifies that Postgres initcap() and DuckDB initcap_pg() produce
+    identical results across a wide range of inputs.
+    """
+
+    test_queries = [
+        # --- Basic word capitalization ---
+        ("SELECT initcap('hello world')", "Hello World"),
+        ("SELECT initcap('HELLO WORLD')", "Hello World"),
+        ("SELECT initcap('hElLo WoRlD')", "Hello World"),
+        # --- Various separators / punctuation as word boundaries ---
+        ("SELECT initcap('hello-world')", "Hello-World"),
+        ("SELECT initcap('hello_world')", "Hello_World"),
+        ("SELECT initcap('hello.world')", "Hello.World"),
+        ("SELECT initcap('hello,world')", "Hello,World"),
+        ("SELECT initcap('hello;world')", "Hello;World"),
+        ("SELECT initcap('hello:world')", "Hello:World"),
+        ("SELECT initcap('hello/world')", "Hello/World"),
+        ("SELECT initcap('hello+world')", "Hello+World"),
+        ("SELECT initcap('hello=world')", "Hello=World"),
+        ("SELECT initcap('hello@world')", "Hello@World"),
+        ("SELECT initcap('hello#world')", "Hello#World"),
+        ("SELECT initcap('hello!world')", "Hello!World"),
+        ("SELECT initcap('hello?world')", "Hello?World"),
+        # --- Parentheses, brackets, braces ---
+        ("SELECT initcap('(hello) world')", "(Hello) World"),
+        ("SELECT initcap('[hello] world')", "[Hello] World"),
+        ("SELECT initcap('{hello} world')", "{Hello} World"),
+        # --- Apostrophe as word boundary ---
+        # Apostrophe is non-alphanumeric, so it breaks words
+        ("SELECT initcap('it''s a test')", "It'S A Test"),
+        ("SELECT initcap('don''t stop')", "Don'T Stop"),
+        ("SELECT initcap('o''brien')", "O'Brien"),
+        # --- Whitespace variations ---
+        ("SELECT initcap('hello  world')", "Hello  World"),
+        ("SELECT initcap('  hello world  ')", "  Hello World  "),
+        ("SELECT initcap('   ')", "   "),
+        ("SELECT initcap(E'hello\\tworld')", "Hello\tWorld"),
+        ("SELECT initcap(E'hello\\nworld')", "Hello\nWorld"),
+        ("SELECT initcap(E'hello\\r\\nworld')", "Hello\r\nWorld"),
+        # --- Digits and alphanumeric boundaries ---
+        # Digits ARE alphanumeric: they continue a word, not start a new one
+        ("SELECT initcap('123abc')", "123abc"),
+        ("SELECT initcap('abc123def')", "Abc123def"),
+        ("SELECT initcap('abc 123def')", "Abc 123def"),
+        ("SELECT initcap('abc 123 def')", "Abc 123 Def"),
+        ("SELECT initcap('12345')", "12345"),
+        ("SELECT initcap('1a2b3c')", "1a2b3c"),
+        ("SELECT initcap('a1b2c3')", "A1b2c3"),
+        # Digits after separators: digit starts the word (but digit itself
+        # is not a letter, so no case change; next letter is lowercased)
+        ("SELECT initcap('abc-123-def')", "Abc-123-Def"),
+        ("SELECT initcap('abc-1a-def')", "Abc-1a-Def"),
+        ("SELECT initcap('100-200-300')", "100-200-300"),
+        # --- Empty and NULL ---
+        ("SELECT initcap('')", ""),
+        ("SELECT initcap(NULL)", None),
+        # --- Single characters ---
+        ("SELECT initcap('a')", "A"),
+        ("SELECT initcap('A')", "A"),
+        ("SELECT initcap('z')", "Z"),
+        ("SELECT initcap('1')", "1"),
+        ("SELECT initcap(' ')", " "),
+        ("SELECT initcap('-')", "-"),
+        # --- All uppercase / all lowercase ---
+        ("SELECT initcap('ALL CAPS HERE')", "All Caps Here"),
+        ("SELECT initcap('all lowercase here')", "All Lowercase Here"),
+        ("SELECT initcap('aaaa')", "Aaaa"),
+        ("SELECT initcap('AAAA')", "Aaaa"),
+        # --- Leading and trailing punctuation ---
+        ("SELECT initcap('...hello...')", "...Hello..."),
+        ("SELECT initcap('---hello---')", "---Hello---"),
+        ("SELECT initcap('***hello***')", "***Hello***"),
+        ("SELECT initcap('!!hello!!')", "!!Hello!!"),
+        # --- Only special characters (no letters/digits) ---
+        ("SELECT initcap('!@#$%')", "!@#$%"),
+        ("SELECT initcap('---')", "---"),
+        ("SELECT initcap('...')", "..."),
+        # --- Multiple mixed separators ---
+        ("SELECT initcap('a-b_c.d')", "A-B_C.D"),
+        ("SELECT initcap('one.two.three')", "One.Two.Three"),
+        ("SELECT initcap('test_value')", "Test_Value"),
+        # --- Repeated separators ---
+        ("SELECT initcap('hello--world')", "Hello--World"),
+        ("SELECT initcap('hello__world')", "Hello__World"),
+        ("SELECT initcap('hello..world')", "Hello..World"),
+        # --- Quoted strings inside ---
+        ("SELECT initcap('she said \"hello\"')", 'She Said "Hello"'),
+        # --- Longer sentence ---
+        (
+            "SELECT initcap('the quick brown fox jumps over the lazy dog')",
+            "The Quick Brown Fox Jumps Over The Lazy Dog",
+        ),
+        (
+            "SELECT initcap('THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG')",
+            "The Quick Brown Fox Jumps Over The Lazy Dog",
+        ),
+    ]
+
+    for test_query in test_queries:
+        query = test_query[0]
+        expected_result = test_query[1]
+        pg_results = run_query(query, pg_conn)
+
+        duck_query = query.replace("initcap(", "initcap_pg(")
+        duck_results = run_query(duck_query, pgduck_conn)
+
+        pg_val = pg_results[0][0]
+        duck_val = duck_results[0][0]
+
+        # Primary assertion: Postgres and DuckDB must produce identical results
+        assert (
+            pg_val == duck_val
+        ), f"PG vs DuckDB mismatch for {query}: pg={pg_val!r}, duck={duck_val!r}"
+        # Secondary assertion: both match the expected result
+        assert (
+            expected_result == pg_val
+        ), f"Expected value mismatch for {query}: expected={expected_result!r}, pg={pg_val!r}"
