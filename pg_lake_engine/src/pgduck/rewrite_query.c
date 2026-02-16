@@ -23,6 +23,7 @@
 #include "catalog/pg_operator.h"
 #include "catalog/pg_operator_d.h"
 #include "catalog/pg_proc.h"
+#include "catalog/pg_type.h"
 #include "common/hashfn.h"
 #include "pg_lake/extensions/pg_lake_spatial.h"
 #include "pg_lake/extensions/postgis.h"
@@ -145,6 +146,9 @@ static ExpressionRewriter GetOperatorRewriter(Oid functionId);
 static char *GetOperatorRewriteFunctionName(Oid functionId);
 
 static Node *RewriteFuncExprBtrim(Node *node, void *context);
+#if PG_VERSION_NUM >= 170000
+static Node *RewriteFuncExprUuidExtractTimestamp(Node *node, void *context);
+#endif
 static Node *RewriteFunctionCallExpression(Oid functionId, Node *node, void *context);
 static Node *RewriteFuncExprCast(Node *node, void *context);
 static Node *RewriteFuncExprExtract(Node *node, void *context);
@@ -342,6 +346,13 @@ static FunctionCallRewriteRuleByName BuiltinFunctionCallRewriteRulesByName[] =
 	{
 		"pg_catalog", "decode", RewriteFuncExprDecode, 0
 	},
+
+#if PG_VERSION_NUM >= 170000
+	/* uuid functions */
+	{
+		"pg_catalog", "uuid_extract_timestamp", RewriteFuncExprUuidExtractTimestamp, 0
+	},
+#endif
 
 };
 
@@ -1636,6 +1647,45 @@ RewriteFuncExprDecode(Node *node, void *context)
 
 	return (Node *) funcExpr;
 }
+
+
+#if PG_VERSION_NUM >= 170000
+/*
+ * RewriteFuncExprUuidExtractTimestamp rewrites uuid_extract_timestamp(..) function calls
+ * to use the custom uuid_extract_timestamp_pg(..) function that mimics Postgres behavior.
+ *
+ * Postgres returns NULL for UUID versions that don't contain timestamps (v1 and v7 (>=pg18 ) only).
+ * DuckDB's uuid_extract_timestamp throws an error for non-v7 UUIDs.
+ */
+static Node *
+RewriteFuncExprUuidExtractTimestamp(Node *node, void *context)
+{
+	FuncExpr   *funcExpr = castNode(FuncExpr, node);
+	int			argCount = list_length(funcExpr->args);
+
+	/* uuid_extract_timestamp should have exactly 1 argument */
+	if (argCount != 1)
+		return node;
+
+	Node	   *firstArg = linitial(funcExpr->args);
+
+	if (exprType(firstArg) != UUIDOID)
+		return node;
+
+	/* add the second argument, the Postgres version number */
+	funcExpr->args = list_make2(firstArg, MakeIntConst(PG_VERSION_NUM));
+	argCount = 2;
+
+	/* Rewrite to uuid_extract_timestamp_pg(uuid) */
+	List	   *funcName = list_make2(makeString(PG_LAKE_INTERNAL_NSP),
+									  makeString("uuid_extract_timestamp_pg"));
+	Oid			argTypes[] = {UUIDOID, INT4OID};
+
+	funcExpr->funcid = LookupFuncName(funcName, argCount, argTypes, false);
+
+	return (Node *) funcExpr;
+}
+#endif
 
 
 /*

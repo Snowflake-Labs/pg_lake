@@ -111,6 +111,123 @@ inline void AtanhPG(DataChunk &args, ExpressionState &state, Vector &result)
 
 
 /*
+ * Extract timestamp from UUID, mimicking Postgres behavior.
+ * Postgres supports UUID v1 and v7 (above 18), returning NULL for other versions.
+ * DuckDB's uuid_extract_timestamp only supports v7 and throws an error for others.
+ */
+inline void UUIDExtractTimestampPG(DataChunk &args, ExpressionState &state, Vector &result)
+{
+	D_ASSERT(args.ColumnCount() == 2);
+	auto &input_vector = args.data[0];
+	auto &version_vector = args.data[1];
+	auto count = args.size();
+
+	// Prepare input in unified format
+	UnifiedVectorFormat vdata;
+	input_vector.ToUnifiedFormat(count, vdata);
+	
+	UnifiedVectorFormat vdata_version;
+	version_vector.ToUnifiedFormat(count, vdata_version);
+	
+	auto input_data = UnifiedVectorFormat::GetData<hugeint_t>(vdata);
+	auto pg_version_data = UnifiedVectorFormat::GetData<int32_t>(vdata_version);
+	auto result_data = FlatVector::GetData<timestamp_t>(result);
+	auto &result_validity = FlatVector::Validity(result);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto idx = vdata.sel->get_index(i);
+		auto version_idx = vdata_version.sel->get_index(i);
+
+		// Propagate input NULL
+		if (!vdata.validity.RowIsValid(idx)) {
+			result_validity.SetInvalid(i);
+			continue;
+		}
+		
+		auto uuid_val = input_data[idx];
+		auto pg_version = pg_version_data[version_idx];
+
+		// Check if RFC 4122 variant (bits 10xxxxxx in the variant field)
+		// The variant field is in byte 8 (counting from 0)
+		uint8_t variant_byte = static_cast<uint8_t>((uuid_val.lower >> 56) & 0xFF);
+		if ((variant_byte & 0xc0) != 0x80) {
+			// Not RFC 4122 variant, return NULL
+			result_validity.SetInvalid(i);
+			continue;
+		}
+
+		// Extract version (first 4 bits of byte 6)
+		// DuckDB stores UUID with XOR flip on the upper 64 bits, so we need to undo it
+		uint64_t unsigned_upper = static_cast<uint64_t>(uuid_val.upper) ^ (uint64_t(1) << 63);
+		uint8_t version = (static_cast<uint8_t>((unsigned_upper) >> 8) & 0xf0) >> 4;
+
+		if (version == 1) {
+			// UUID v1: Extract timestamp from time_low, time_mid, and time_hi_and_version fields
+			// Mimic PostgreSQL's uuid_extract_timestamp implementation
+			
+			// Extract individual bytes from the UUID (bytes 0-7 are in upper)
+			// We already have unsigned_upper computed above
+			uint8_t data[8];
+			for (int i = 0; i < 8; i++) {
+				data[i] = static_cast<uint8_t>((unsigned_upper >> (56 - i * 8)) & 0xFF);
+			}
+			
+			// Extract timestamp following PostgreSQL's exact logic
+			// See: src/backend/utils/adt/uuid.c:uuid_extract_timestamp()
+			uint64_t tms = ((uint64_t) data[0] << 24)
+				+ ((uint64_t) data[1] << 16)
+				+ ((uint64_t) data[2] << 8)
+				+ ((uint64_t) data[3])
+				+ ((uint64_t) data[4] << 40)
+				+ ((uint64_t) data[5] << 32)
+				+ (((uint64_t) data[6] & 0xf) << 56)
+				+ ((uint64_t) data[7] << 48);
+			
+			// Convert 100-ns intervals to microseconds
+			int64_t timestamp_us = static_cast<int64_t>(tms / 10);
+			
+			// Adjust from UUID epoch (1582-10-15) to Postgres epoch (2000-01-01)
+			// This matches PostgreSQL's calculation exactly
+			constexpr int64_t POSTGRES_EPOCH_JDATE = 2451545; // date2j(2000, 1, 1)
+			constexpr int64_t UUIDV1_EPOCH_JDATE = 2299161;   // date2j(1582, 10, 15)
+			constexpr int64_t SECS_PER_DAY = 86400;
+			constexpr int64_t USECS_PER_SEC = 1000000;
+			constexpr int64_t UUID_TO_PG_EPOCH_US = 
+				(POSTGRES_EPOCH_JDATE - UUIDV1_EPOCH_JDATE) * SECS_PER_DAY * USECS_PER_SEC;
+			
+			timestamp_us -= UUID_TO_PG_EPOCH_US;
+			
+			// Convert from Postgres epoch (2000-01-01) to Unix epoch (1970-01-01)
+			// Unix epoch is 946684800 seconds (30 years) before Postgres epoch
+			// So we ADD this offset to convert from Postgres timestamp to Unix timestamp
+			constexpr int64_t PG_TO_UNIX_EPOCH_US = 946684800LL * USECS_PER_SEC;
+			timestamp_us += PG_TO_UNIX_EPOCH_US;
+			
+			result_data[i] = timestamp_t{timestamp_us};
+		}
+		// UUID v7 is supported in Postgres 18 and above
+		else if (version == 7 && pg_version >= 180000) {
+			// UUID v7: Extract timestamp from first 48 bits (Unix timestamp in milliseconds)
+			int64_t upper = uuid_val.upper;
+			// Flip the top byte to handle signed representation
+			upper ^= NumericLimits<int64_t>::Minimum();
+			int64_t unix_ts_milli = upper >> 16;
+			
+			// Convert milliseconds to microseconds
+			constexpr int64_t kMilliToMicro = 1000;
+			int64_t unix_ts_us = kMilliToMicro * unix_ts_milli;
+			
+			result_data[i] = timestamp_t{unix_ts_us};
+		}
+		else {
+			// Not a timestamp-containing UUID version, return NULL
+			result_validity.SetInvalid(i);
+		}
+	}
+}
+
+
+/*
 * Postgres and DuckDB have different behavior for the SUBSTRING function when
 * the length or offset is negative. This function implements the Postgres
 * behavior for the SUBSTRING function.
@@ -306,6 +423,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	substr.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::BIGINT}, LogicalType::VARCHAR, SubstringPG));
 	substr.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT}, LogicalType::VARCHAR, SubstringPG));
 	loader.RegisterFunction(substr);
+
+	auto uuid_extract_timestamp_pg = ScalarFunction("uuid_extract_timestamp_pg", {LogicalType::UUID, LogicalType::INTEGER}, LogicalType::TIMESTAMP_TZ, UUIDExtractTimestampPG);
+	loader.RegisterFunction(uuid_extract_timestamp_pg);
 
 	PgLakeUtilityFunctions::RegisterFunctions(loader);
 	PgLakeFileSystemFunctions::RegisterFunctions(loader);
