@@ -37,10 +37,14 @@
 #include "pg_lake/transaction/transaction_hooks.h"
 #include "pg_lake/util/injection_points.h"
 #include "pg_lake/json/json_utils.h"
+#include "pg_lake/util/progress_callback.h"
 #include "pg_lake/util/s3_writer_utils.h"
 #include "pg_lake/util/url_encode.h"
 
 #define ONE_MB (1 * 1024 * 1024)
+
+/* How often to invoke PgLakeProgressCallback during bulk metadata operations */
+#define PROGRESS_CALLBACK_INTERVAL 25
 
 /*
 * Represents the rest catalog requests per table within a transaction.
@@ -694,6 +698,7 @@ ApplyTrackedIcebergMetadataChanges(void)
 
 	HASH_SEQ_STATUS status;
 	TableMetadataOperationTracker *opTracker;
+	int			tablesApplied = 0;
 
 	hash_seq_init(&status, trackedRelations);
 	while ((opTracker = hash_seq_search(&status)) != NULL)
@@ -771,6 +776,14 @@ ApplyTrackedIcebergMetadataChanges(void)
 			}
 
 		}
+
+		/*
+		 * Invoke progress callback so that extensions can perform periodic
+		 * housekeeping (e.g. keepalive on an external connection) during bulk
+		 * metadata operations at pre-commit time.
+		 */
+		if (++tablesApplied % PROGRESS_CALLBACK_INTERVAL == 0 && PgLakeTransactionProgressCallback != NULL)
+			PgLakeTransactionProgressCallback();
 	}
 
 	/* now write all the metadata files to object storage in parallel */
