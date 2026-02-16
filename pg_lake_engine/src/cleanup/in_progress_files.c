@@ -71,6 +71,21 @@ static int64 TransactionOperationId = 0;
 /* each backend should register the callbacks */
 static bool TransactionCallbackRegistered = false;
 
+/*
+ * Cached result of InProgressTableVisibleToExternalTx().
+ *
+ * We only cache the "visible" (true) result, which is the common case
+ * once the extension has been committed. The rare "not visible" case
+ * (during CREATE EXTENSION in the same transaction) is not cached so
+ * it is re-checked each call; that is acceptable because the caller
+ * returns early in that path anyway.
+ *
+ * Invalidated via InvalidateInProgressTableVisibilityCache(), which is
+ * called from the pg_lake_engine extension ID cache clear function on
+ * CREATE/DROP EXTENSION.
+ */
+static bool InProgressTableVisibilityCached = false;
+
 
 /*
  * InProgressFiles represents a deletion entry from the
@@ -450,8 +465,9 @@ InsertInProgressFileRecordExtended(char *path, bool isPrefix, bool autoDeleteRec
 		 * extension. The in-progress table is not visible to the external
 		 * transactions until the transaction commits.
 		 *
-		 * Caching this value is not trivial, you should also take
-		 * drop&recreate extension.
+		 * The result is cached once it becomes true (the common path). The
+		 * cache is invalidated on CREATE/DROP EXTENSION via the
+		 * pg_lake_engine extension ID cache mechanism.
 		 */
 		return;
 	}
@@ -520,61 +536,77 @@ InsertInProgressFileRecordExtended(char *path, bool isPrefix, bool autoDeleteRec
 
 
 /*
-* InProgressTableVisibleToExternalTx checks if the in-progress
-* table is visible to the external transactions.
-*
-* This is only useful when the in-progress table is created
-* in the same transaction that is inserting the records.
-*/
+ * InvalidateInProgressTableVisibilityCache resets the cached result
+ * of InProgressTableVisibleToExternalTx(). Called from the
+ * pg_lake_engine extension ID cache clear function on CREATE/DROP
+ * EXTENSION so that a subsequent DROP + CREATE in the same
+ * transaction is handled correctly.
+ */
+void
+InvalidateInProgressTableVisibilityCache(void)
+{
+	InProgressTableVisibilityCached = false;
+}
+
+
+/*
+ * InProgressTableVisibleToExternalTx checks if the in-progress
+ * table is visible to external transactions.
+ *
+ * We check rd_createSubid on the relation: if the table was created
+ * in the current transaction (rd_createSubid != InvalidSubTransactionId),
+ * it is not yet visible to external connections (e.g. via run_attached),
+ * and the caller should skip the insert.  This is the same technique
+ * PostgreSQL uses in RELATION_IS_LOCAL (see src/include/utils/rel.h)
+ * and in COPY FROM (see src/backend/commands/copyfrom.c) to detect
+ * relations created in the current transaction.
+ *
+ * This replaces an earlier approach that used SPI via run_attached to
+ * query information_schema.tables from an external connection.  That
+ * approach had two problems:
+ *  (1) it added an SPI round-trip per InsertInProgressFileRecordExtended
+ *      call, which is expensive for transactions touching many tables, and
+ *  (2) it could self-deadlock after DROP + CREATE EXTENSION in the same
+ *      transaction, because the external connection would see the old
+ *      (locked) table and block on its AccessExclusiveLock.
+ *
+ * The result is cached once it becomes true (the common case).
+ * See InProgressTableVisibilityCached for details.
+ */
 static bool
 InProgressTableVisibleToExternalTx(void)
 {
-	StringInfo	query = makeStringInfo();
+	if (InProgressTableVisibilityCached)
+		return true;
 
-	appendStringInfo(query,
-					 "SELECT * FROM extension_base.run_attached($$"
-					 "SELECT 1 FROM information_schema.tables "
-					 "WHERE table_schema OPERATOR(pg_catalog.=) '%s' "
-					 "AND table_name OPERATOR(pg_catalog.=) '%s'$$);",
-					 PG_LAKE_ENGINE_NSP, IN_PROGRESS_FILES_TABLE);
+	Oid			tableOid = InProgressTableId();
+	Relation	rel = table_open(tableOid, AccessShareLock);
+	bool		createdInCurrentXact =
+		(rel->rd_createSubid != InvalidSubTransactionId);
 
-	bool		visible = false;
+	table_close(rel, AccessShareLock);
 
-	/* switch to schema owner, we assume callers checked permissions */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeEngine),
-						   SECURITY_LOCAL_USERID_CHANGE);
-
-	SPI_START();
-
-	bool		readOnly = true;
-
-	SPI_execute(query->data, readOnly, 0);
-
-	if (SPI_processed == 1)
+	if (createdInCurrentXact)
 	{
-
-		bool		isNull;
-		char	   *commandTag = GET_SPI_VALUE(TEXTOID, 0, 2, &isNull);
-
 		/*
-		 * run_attached returns the command tag of the query. We asked for
-		 * whether the table exists, so the command tag should be "SELECT 1".
+		 * Table was created in the current transaction (e.g. during CREATE
+		 * EXTENSION).  It is not visible to external transactions yet, so
+		 * skip the insert.
+		 *
+		 * We do NOT cache this result.  Once the transaction commits and a
+		 * new transaction starts, rd_createSubid will be reset and the next
+		 * call will correctly return true and cache it.  This avoids the need
+		 * for a transaction-end invalidation callback.
 		 */
-		if (strcmp(commandTag, "SELECT 1") == 0)
-		{
-			visible = true;
-		}
+		return false;
 	}
 
-	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
-
-	return visible;
+	/*
+	 * Only cache the "true" result.  Once visible, the table stays visible
+	 * until DROP EXTENSION, which resets the cache via ClearIds().
+	 */
+	InProgressTableVisibilityCached = true;
+	return true;
 }
 
 /*
