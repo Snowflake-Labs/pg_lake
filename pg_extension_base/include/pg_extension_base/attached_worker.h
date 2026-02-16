@@ -20,6 +20,7 @@
 #include "postmaster/bgworker.h"
 #include "storage/dsm.h"
 #include "storage/shm_mq.h"
+#include "utils/tuplestore.h"
 
 /*
  * AttachedWorker contains references to a background worker that
@@ -31,6 +32,9 @@ typedef struct AttachedWorker
 	dsm_segment *sharedMemorySegment;
 	shm_mq_handle *outputQueue;
 
+	/* tuple queue for returning query results (NULL if not returning) */
+	shm_mq_handle *tupleQueue;
+
 	/* background worker handle */
 	pid_t		workerPid;
 	BackgroundWorkerHandle *workerHandle;
@@ -40,6 +44,13 @@ extern PGDLLEXPORT AttachedWorker * StartAttachedWorker(char *command);
 extern PGDLLEXPORT AttachedWorker * StartAttachedWorkerInDatabase(char *command,
 																  char *databaseName,
 																  char *userName);
+extern PGDLLEXPORT AttachedWorker * StartAttachedWorkerReturning(char *command);
+extern PGDLLEXPORT AttachedWorker * StartAttachedWorkerInDatabaseReturning(char *command,
+																		   char *databaseName,
+																		   char *userName);
 extern PGDLLEXPORT char *ReadFromAttachedWorker(AttachedWorker * worker, bool wait);
+extern PGDLLEXPORT void ReadResultsFromAttachedWorker(AttachedWorker * worker,
+													  Tuplestorestate *store,
+													  TupleDesc *resultDesc);
 extern PGDLLEXPORT bool IsAttachedWorkerRunning(AttachedWorker * worker);
 extern PGDLLEXPORT void EndAttachedWorker(AttachedWorker * worker);
