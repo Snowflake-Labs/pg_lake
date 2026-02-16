@@ -18,6 +18,7 @@
 #include "postgres.h"
 
 #include "catalog/pg_type.h"
+#include "pg_lake/cleanup/in_progress_files.h"
 #include "pg_lake/extensions/pg_lake_engine.h"
 #include "pg_extension_base/extension_ids.h"
 #include "parser/parse_func.h"
@@ -58,7 +59,7 @@ InitializePgLakeEngineIdCache(void)
 
 
 /*
- * ClearIds clears all the cached OIDs.
+ * ClearIds clears all the cached OIDs and related caches.
  */
 static void
 ClearIds(void *queryEngineIds)
@@ -66,6 +67,9 @@ ClearIds(void *queryEngineIds)
 	Assert(queryEngineIds != NULL);
 
 	memset(queryEngineIds, '\0', sizeof(PgLakeEngineIds));
+
+	/* also reset the in-progress table visibility cache */
+	InvalidateInProgressTableVisibilityCache();
 }
 
 
