@@ -1161,7 +1161,7 @@ CreateTxDataFileIdsTempTableIfNotExists(void)
 		"create temporary table if not exists " TX_DATA_FILES_QUALIFIED_TABLE_NAME " "
 		"(id bigint primary key) USING heap ON COMMIT DELETE ROWS;";
 
-	SPI_START();
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
 
 	bool		readOnly = false;
 
@@ -1189,7 +1189,7 @@ InsertDataFileIdIntoTransactionTable(int64 fileId)
 	DECLARE_SPI_ARGS(1);
 	SPI_ARG_VALUE(1, INT8OID, fileId, false);
 
-	SPI_START();
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
 
 	bool		readOnly = false;
 
