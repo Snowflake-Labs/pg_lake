@@ -95,7 +95,8 @@ ExecuteCopyToCommandOnPGDuckConnection(char *copyCommand,
 		result = ExecuteQueryOnPGDuckConnection(pgDuckConn, copyCommand);
 		CheckPGDuckResult(pgDuckConn, result);
 
-		if (destinationFormat == DATA_FORMAT_PARQUET)
+		if (destinationFormat == DATA_FORMAT_PARQUET ||
+			destinationFormat == DATA_FORMAT_ICEBERG)
 		{
 			/* DuckDB returns COPY 0 when return_stats is used. */
 			statsCollector = GetDataFileStatsListFromPGResult(result, leafFields, schema);
@@ -766,7 +767,7 @@ SerializeTextArrayTypeToPgDuck(ArrayType *array)
 	getTypeOutputInfo(TEXTARRAYOID, &outFuncId, &isvarlena);
 	fmgr_info(outFuncId, &outFunc);
 
-	return PGDuckSerialize(&outFunc, TEXTARRAYOID, arrayDatum);
+	return PGDuckSerialize(&outFunc, TEXTARRAYOID, arrayDatum, DATA_FORMAT_INVALID);
 }
 
 

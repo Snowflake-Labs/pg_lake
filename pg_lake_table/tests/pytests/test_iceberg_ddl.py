@@ -1530,6 +1530,305 @@ def test_interval(pg_conn, s3, with_default_location):
     pg_conn.commit()
 
 
+def test_interval_edge_cases(pg_conn, s3, with_default_location):
+    run_command(
+        """
+        CREATE SCHEMA test_interval_edge;
+        CREATE TABLE test_interval_edge.test (id int, i interval) USING iceberg;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        """
+        INSERT INTO test_interval_edge.test VALUES
+            (1, '-1 day'),
+            (2, '-2 hours -30 minutes'),
+            (3, '-1 year -6 months'),
+            (4, '1 month -5 days'),
+            (5, '-3 days 12 hours'),
+            (6, '2 years 3 months 10 days 4 hours 5 minutes 6.789012 seconds'),
+            (7, '0.000001 seconds'),
+            (8, '999 years'),
+            (9, '999999999 days'),
+            (10, NULL);
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        "SELECT id, i FROM test_interval_edge.test ORDER BY id",
+        pg_conn,
+    )
+    assert len(result) == 10
+
+    # negative day-only
+    assert result[0][1] == datetime.timedelta(days=-1)
+
+    # negative time-only
+    assert result[1][1] == datetime.timedelta(hours=-2, minutes=-30)
+
+    # negative months - psycopg2 cannot represent as timedelta, just check round-trip
+    assert result[2][1] is not None
+
+    # mixed sign: 1 month -5 days
+    assert result[3][1] is not None
+
+    # mixed sign: -3 days 12 hours
+    assert result[4][1] == datetime.timedelta(days=-3, hours=12)
+
+    # all components
+    assert result[5][1] is not None
+
+    # microsecond precision
+    assert result[6][1] == datetime.timedelta(microseconds=1)
+
+    # large year value
+    assert result[7][1] is not None
+
+    # large day value
+    assert result[8][1] == datetime.timedelta(days=999999999)
+
+    # NULL
+    assert result[9][1] is None
+
+    # verify round-trip by re-reading with explicit casts
+    result = run_query(
+        """
+        SELECT
+            extract(epoch from i)
+        FROM test_interval_edge.test
+        WHERE id = 6
+        """,
+        pg_conn,
+    )
+    # 2y3m = 27 months, 10d, 4h5m6.789012s => epoch depends on month interpretation
+    assert result[0][0] is not None
+
+    run_command("DROP SCHEMA test_interval_edge CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_interval_array_edge_cases(pg_conn, s3, with_default_location):
+    run_command(
+        """
+        CREATE SCHEMA test_interval_arr_edge;
+        CREATE TABLE test_interval_arr_edge.test (id int, intervals interval[]) USING iceberg;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        """
+        INSERT INTO test_interval_arr_edge.test VALUES
+            (1, ARRAY['1 day'::interval, '-2 hours'::interval, '1 year 6 months'::interval]),
+            (2, ARRAY[NULL::interval, '30 minutes'::interval]),
+            (3, ARRAY['0 seconds'::interval]),
+            (4, NULL),
+            (5, ARRAY[]::interval[]),
+            (6, ARRAY['-1 year -6 months'::interval, '2 days 3 hours 4.567 seconds'::interval]);
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        "SELECT id, intervals FROM test_interval_arr_edge.test ORDER BY id",
+        pg_conn,
+    )
+    assert len(result) == 6
+
+    # mixed positive/negative intervals in array
+    assert len(result[0][1]) == 3
+    assert result[0][1][0] == datetime.timedelta(days=1)
+    assert result[0][1][1] == datetime.timedelta(hours=-2)
+
+    # NULL element in array
+    assert len(result[1][1]) == 2
+    assert result[1][1][0] is None
+    assert result[1][1][1] == datetime.timedelta(minutes=30)
+
+    # single zero element
+    assert result[2][1] == [datetime.timedelta(0)]
+
+    # NULL array
+    assert result[3][1] is None
+
+    # empty array
+    assert result[4][1] == []
+
+    # negative month-based and mixed components
+    assert len(result[5][1]) == 2
+
+    run_command("DROP SCHEMA test_interval_arr_edge CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_interval_in_composite(pg_conn, s3, with_default_location):
+    run_command(
+        """
+        CREATE SCHEMA test_interval_comp;
+        CREATE TYPE test_interval_comp.event_duration AS (
+            name text,
+            duration interval
+        );
+        CREATE TABLE test_interval_comp.test (
+            id int,
+            event test_interval_comp.event_duration
+        ) USING iceberg;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        """
+        INSERT INTO test_interval_comp.test VALUES
+            (1, ROW('meeting', '1 hour 30 minutes')::test_interval_comp.event_duration),
+            (2, ROW('sprint', '14 days')::test_interval_comp.event_duration),
+            (3, ROW('break', '-15 minutes')::test_interval_comp.event_duration),
+            (4, ROW(NULL, '1 day')::test_interval_comp.event_duration),
+            (5, ROW('vacation', NULL)::test_interval_comp.event_duration),
+            (6, NULL);
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        "SELECT id, (event).name, (event).duration FROM test_interval_comp.test ORDER BY id",
+        pg_conn,
+    )
+    assert len(result) == 6
+    assert result[0][1] == "meeting"
+    assert result[0][2] == datetime.timedelta(hours=1, minutes=30)
+    assert result[1][1] == "sprint"
+    assert result[1][2] == datetime.timedelta(days=14)
+    assert result[2][1] == "break"
+    assert result[2][2] == datetime.timedelta(minutes=-15)
+    assert result[3][1] is None
+    assert result[3][2] == datetime.timedelta(days=1)
+    assert result[4][1] == "vacation"
+    assert result[4][2] is None
+    assert result[5][1] is None
+    assert result[5][2] is None
+
+    run_command("DROP SCHEMA test_interval_comp CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_interval_update_delete(pg_conn, s3, with_default_location):
+    run_command(
+        """
+        CREATE SCHEMA test_interval_ud;
+        CREATE TABLE test_interval_ud.test (id int, i interval) USING iceberg;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        """
+        INSERT INTO test_interval_ud.test VALUES
+            (1, '1 day'),
+            (2, '2 hours'),
+            (3, '3 months');
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # update an interval value
+    run_command(
+        "UPDATE test_interval_ud.test SET i = '-5 days' WHERE id = 1",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        "SELECT i FROM test_interval_ud.test WHERE id = 1",
+        pg_conn,
+    )
+    assert result[0][0] == datetime.timedelta(days=-5)
+
+    # update to NULL
+    run_command(
+        "UPDATE test_interval_ud.test SET i = NULL WHERE id = 2",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        "SELECT i FROM test_interval_ud.test WHERE id = 2",
+        pg_conn,
+    )
+    assert result[0][0] is None
+
+    # delete
+    run_command(
+        "DELETE FROM test_interval_ud.test WHERE id = 3",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        "SELECT count(*) FROM test_interval_ud.test",
+        pg_conn,
+    )
+    assert result[0][0] == 2
+
+    run_command("DROP SCHEMA test_interval_ud CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_interval_infinity(pg_conn, s3, with_default_location):
+    if get_pg_version_num(pg_conn) < 170000:
+        pytest.skip("infinity intervals require PostgreSQL 17+")
+
+    run_command(
+        """
+        CREATE SCHEMA test_interval_inf;
+        CREATE TABLE test_interval_inf.test (id int, i interval) USING iceberg;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # infinity intervals are rejected (same as infinity dates/timestamps)
+    with pytest.raises(psycopg2.errors.DatetimeFieldOverflow):
+        run_command(
+            "INSERT INTO test_interval_inf.test VALUES (1, 'infinity')",
+            pg_conn,
+        )
+    pg_conn.rollback()
+
+    with pytest.raises(psycopg2.errors.DatetimeFieldOverflow):
+        run_command(
+            "INSERT INTO test_interval_inf.test VALUES (2, '-infinity')",
+            pg_conn,
+        )
+    pg_conn.rollback()
+
+    # finite intervals still work
+    run_command(
+        "INSERT INTO test_interval_inf.test VALUES (3, '1 day')",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        "SELECT i FROM test_interval_inf.test WHERE id = 3",
+        pg_conn,
+    )
+    assert result[0][0] == datetime.timedelta(days=1)
+
+    run_command("DROP SCHEMA test_interval_inf CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 def test_use_same_schema_when_needed(pg_conn, s3, with_default_location):
 
     run_command("CREATE SCHEMA test_use_same_schema_when_needed", pg_conn)

@@ -1021,7 +1021,9 @@ ChooseCompatibleDuckDBType(Oid postgresTypeId, int postgresTypeMod,
 			duckTypeId = DUCKDB_TYPE_VARCHAR;
 		}
 	}
-	else if (duckTypeId == DUCKDB_TYPE_BLOB && sourceFormat != DATA_FORMAT_PARQUET)
+	else if (duckTypeId == DUCKDB_TYPE_BLOB &&
+			 sourceFormat != DATA_FORMAT_PARQUET &&
+			 sourceFormat != DATA_FORMAT_ICEBERG)
 	{
 		/*
 		 * We currently treat bytea as text in JSON/CSV, because DuckDB's
@@ -1140,12 +1142,13 @@ GuessStorageType(DuckDBTypeInfo engineType, CopyDataFormat sourceFormat)
 	}
 	else if (engineType.typeId == DUCKDB_TYPE_INTERVAL)
 	{
-		if (sourceFormat == DATA_FORMAT_PARQUET ||
-			sourceFormat == DATA_FORMAT_ICEBERG)
+		if (sourceFormat == DATA_FORMAT_ICEBERG)
 		{
 			/*
-			 * Interval is stored as struct(months, days, microseconds) in
-			 * Parquet. We read as STRUCT and convert via make_interval().
+			 * Iceberg stores intervals as struct(months, days, microseconds)
+			 * in Parquet data files. We read as STRUCT and convert back to
+			 * INTERVAL. Plain Parquet files use DuckDB's native INTERVAL
+			 * type.
 			 */
 			storageType.typeId = DUCKDB_TYPE_STRUCT;
 			storageType.typeName = engineType.isArrayType ?
@@ -1184,12 +1187,12 @@ BuildColumnProjection(char *columnName,
 
 	if (engineType.typeId == DUCKDB_TYPE_INTERVAL)
 	{
-		if (sourceFormat == DATA_FORMAT_PARQUET ||
-			sourceFormat == DATA_FORMAT_ICEBERG)
+		if (sourceFormat == DATA_FORMAT_ICEBERG)
 		{
 			/*
-			 * Interval is stored as struct(months, days, microseconds). We
-			 * reconstruct the interval using DuckDB interval constructors.
+			 * Iceberg stores intervals as struct(months, days, microseconds).
+			 * We reconstruct the interval using DuckDB interval constructors.
+			 * Plain Parquet files use DuckDB's native INTERVAL type.
 			 */
 			const char *col = quote_identifier(columnName);
 

@@ -2694,8 +2694,9 @@ def test_iceberg_interval_type(pg_conn, s3, extension, with_default_location):
     parsed_data = json.loads(data)
     fields = parsed_data["schemas"][0]["fields"]
     duration_field = [f for f in fields if f["name"] == "duration"][0]
-    assert duration_field["type"] == "struct"
-    struct_fields = duration_field["fields"]
+    duration_type = duration_field["type"]
+    assert duration_type["type"] == "struct"
+    struct_fields = duration_type["fields"]
     assert len(struct_fields) == 3
     assert struct_fields[0]["name"] == "months"
     assert struct_fields[0]["type"] == "long"

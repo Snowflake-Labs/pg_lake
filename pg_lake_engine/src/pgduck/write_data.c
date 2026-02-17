@@ -37,11 +37,14 @@
 #include "pg_lake/util/numeric.h"
 #include "nodes/pg_list.h"
 #include "utils/builtins.h"
+#include "pg_lake/pgduck/parse_struct.h"
 #include "utils/lsyscache.h"
 
+#define ICEBERG_INTERVAL_STRUCT "STRUCT(months BIGINT, days BIGINT, microseconds BIGINT)"
 
 static char *TupleDescToProjectionListForWrite(TupleDesc tupleDesc,
 											   CopyDataFormat destinationFormat);
+static const char *GetFullDuckDBTypeNameForIceberg(PGType postgresType);
 static DuckDBTypeInfo ChooseDuckDBEngineTypeForWrite(PGType postgresType,
 													 CopyDataFormat destinationFormat);
 static void AppendFieldIdValue(StringInfo map, Field * field, int fieldId);
@@ -131,13 +134,19 @@ WriteQueryResultTo(char *query,
 	/* start WITH options */
 	appendStringInfoString(&command, " WITH (");
 
-	const char *formatName = CopyDataFormatToName(destinationFormat);
+	/*
+	 * Iceberg data files are Parquet, so use "parquet" as the DuckDB
+	 * format name for both DATA_FORMAT_PARQUET and DATA_FORMAT_ICEBERG.
+	 */
+	const char *formatName = (destinationFormat == DATA_FORMAT_ICEBERG) ?
+		"parquet" : CopyDataFormatToName(destinationFormat);
 
 	appendStringInfo(&command, "format %s",
 					 quote_literal_cstr(formatName));
 
 	switch (destinationFormat)
 	{
+		case DATA_FORMAT_ICEBERG:
 		case DATA_FORMAT_PARQUET:
 			{
 				if (destinationCompression == DATA_COMPRESSION_NONE)
@@ -331,14 +340,6 @@ WriteQueryResultTo(char *query,
 						}
 					}
 				}
-
-				break;
-			}
-
-		case DATA_FORMAT_ICEBERG:
-			{
-				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								errmsg("writing in Iceberg format is not supported")));
 
 				break;
 			}
@@ -569,6 +570,40 @@ ParquetVersionToString(ParquetVersion version)
 
 
 /*
+ * GetFullDuckDBTypeNameForIceberg is a format-aware variant of
+ * GetFullDuckDBTypeNameForPGType that replaces INTERVAL with
+ * STRUCT(months BIGINT, days BIGINT, microseconds BIGINT) for Iceberg.
+ *
+ * This is needed because Iceberg stores intervals as structs, so interval
+ * fields inside composite types also need to be expanded to structs.
+ */
+static const char *
+GetFullDuckDBTypeNameForIceberg(PGType postgresType)
+{
+	DuckDBType	myType = GetDuckDBTypeForPGType(postgresType);
+
+	if (myType == DUCKDB_TYPE_INTERVAL)
+		return ICEBERG_INTERVAL_STRUCT;
+
+	if (myType == DUCKDB_TYPE_LIST)
+	{
+		Oid			elementType = get_element_type(postgresType.postgresTypeOid);
+
+		return psprintf("%s[]", GetFullDuckDBTypeNameForIceberg(MakePGTypeOid(elementType)));
+	}
+
+	if (myType == DUCKDB_TYPE_STRUCT)
+	{
+		CompositeType *type = GetCompositeTypeForPGType(postgresType.postgresTypeOid);
+
+		return GetDuckDBStructDefinitionForIceberg(type);
+	}
+
+	return GetFullDuckDBTypeNameForPGType(postgresType);
+}
+
+
+/*
  * ChooseDuckDBEngineTypeForWrite obtains a DuckDB type name for a given postgres
  * type, and codifies some of our limitations around arrays and decimals.
  *
@@ -654,12 +689,13 @@ ChooseDuckDBEngineTypeForWrite(PGType postgresType,
 		duckTypeId = DUCKDB_TYPE_VARCHAR;
 		isArrayType = false;
 	}
-	else if (duckTypeId == DUCKDB_TYPE_INTERVAL)
+	else if (duckTypeId == DUCKDB_TYPE_INTERVAL && destinationFormat == DATA_FORMAT_ICEBERG)
 	{
 		/*
 		 * Iceberg does not have a native interval type. We store intervals as
 		 * struct(months BIGINT, days BIGINT, microseconds BIGINT) in both the
-		 * Iceberg metadata and Parquet data files.
+		 * Iceberg metadata and Parquet data files. For plain Parquet files,
+		 * DuckDB uses its native INTERVAL type.
 		 */
 		char	   *intervalTypeName =
 			psprintf("STRUCT(months BIGINT, days BIGINT, microseconds BIGINT)%s",
@@ -686,10 +722,17 @@ ChooseDuckDBEngineTypeForWrite(PGType postgresType,
 	char	   *typeName;
 
 	if (duckTypeId == DUCKDB_TYPE_STRUCT || duckTypeId == DUCKDB_TYPE_MAP)
-		/* generate field names for struct/map */
-		typeName = psprintf("%s%s",
-							GetFullDuckDBTypeNameForPGType(postgresType),
-							isArrayType ? "[]" : "");
+	{
+		/*
+		 * Generate field names for struct/map. For Iceberg, use the
+		 * format-aware variant that expands INTERVAL fields to structs.
+		 */
+		const char *structDef = (destinationFormat == DATA_FORMAT_ICEBERG) ?
+			GetFullDuckDBTypeNameForIceberg(postgresType) :
+			GetFullDuckDBTypeNameForPGType(postgresType);
+
+		typeName = psprintf("%s%s", structDef, isArrayType ? "[]" : "");
+	}
 	else
 		typeName = psprintf("%s%s%s",
 							GetDuckDBTypeName(duckTypeId),
