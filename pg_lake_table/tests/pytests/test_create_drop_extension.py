@@ -132,6 +132,73 @@ def test_drop_create_extension_insert_same_tx(superuser_conn, s3, app_user):
     superuser_conn.commit()
 
 
+def test_extension_creates_iceberg_table(superuser_conn, s3, app_user):
+    """
+    Verify that an extension can explicitly create an Iceberg table
+    using USING iceberg in its SQL script.
+    """
+    run_command(
+        """
+        CREATE EXTENSION IF NOT EXISTS pg_lake_table CASCADE;
+    """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    # Get the PostgreSQL sharedir to install our test extension
+    sharedir = subprocess.run(
+        [PG_CONFIG, "--sharedir"], capture_output=True, text=True
+    ).stdout.rstrip()
+    ext_dir = os.path.join(sharedir, "extension")
+
+    control_path = os.path.join(ext_dir, "pg_lake_table_test_iceberg.control")
+    sql_path = os.path.join(ext_dir, "pg_lake_table_test_iceberg--1.0.sql")
+
+    try:
+        # Write the test extension files
+        with open(control_path, "w") as f:
+            f.write("comment = 'Test extension that creates iceberg tables'\n")
+            f.write("default_version = '1.0'\n")
+            f.write("relocatable = false\n")
+            f.write("requires = 'pg_lake_table'\n")
+
+        with open(sql_path, "w") as f:
+            f.write("CREATE TABLE ext_iceberg_tbl (x int) USING iceberg;\n")
+
+        # Set the default location prefix and create the test extension.
+        # The extension script runs with creating_extension=true; the fix
+        # allows explicit USING iceberg to proceed in that context.
+        run_command(
+            f"""
+            GRANT lake_read_write TO {app_user};
+            SET pg_lake_iceberg.default_location_prefix TO 's3://{TEST_BUCKET}';
+            CREATE EXTENSION pg_lake_table_test_iceberg;
+        """,
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        # Verify the iceberg table was created and is functional
+        run_command("INSERT INTO ext_iceberg_tbl VALUES (1), (2), (3)", superuser_conn)
+        superuser_conn.commit()
+
+        result = run_query("SELECT * FROM ext_iceberg_tbl ORDER BY x", superuser_conn)
+        assert [r["x"] for r in result] == [1, 2, 3]
+
+    finally:
+        superuser_conn.rollback()
+        run_command(
+            "DROP EXTENSION IF EXISTS pg_lake_table_test_iceberg CASCADE",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        if os.path.exists(control_path):
+            os.remove(control_path)
+        if os.path.exists(sql_path):
+            os.remove(sql_path)
+
+
 def create_table_with_data(superuser_conn):
     url = f"s3://{TEST_BUCKET}/test_create_drop_extension/"
 

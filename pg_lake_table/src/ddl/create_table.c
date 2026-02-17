@@ -1090,14 +1090,21 @@ ProcessCreateIcebergTableFromCreateStmt(ProcessUtilityParams * params)
 		 * pg_lake_iceberg access method. This includes our own extensions
 		 * such as pg_lake_iceberg as well as other extensions that use
 		 * metadata tables, such as pg_cron.
+		 *
+		 * However, if the extension explicitly specifies USING iceberg, we
+		 * allow the iceberg table creation.
 		 */
 		if (createStmt->accessMethod == NULL &&
 			IsPgLakeIcebergAccessMethod(default_table_access_method))
 		{
 			createStmt->accessMethod = DEFAULT_TABLE_ACCESS_METHOD;
+			return false;
 		}
-
-		return false;
+		else if (createStmt->accessMethod != NULL &&
+				 !IsPgLakeIcebergAccessMethod(createStmt->accessMethod))
+		{
+			return false;
+		}
 	}
 
 	PgLakeTableType tableType = GetPgLakeTableTypeViaAccessMethod(createStmt->accessMethod);

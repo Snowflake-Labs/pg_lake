@@ -141,10 +141,10 @@ ProcessCreateAsSelectPgLakeTable(ProcessUtilityParams * params, void *arg)
 	/*
 	 * If we are creating an extension, we want to ensure that we don't use
 	 * the user-provided default_table_access_method and just override
-	 * ourselves if we need to.  This does mean you can't use CTAS in an
-	 * extension script and create an iceberg table (at least using
-	 * default_table_access_method), but seems better than breaking extension
-	 * upgrades.
+	 * ourselves if we need to.
+	 *
+	 * However, if the extension explicitly specifies USING iceberg, we allow
+	 * the iceberg table creation.
 	 */
 	if (creating_extension)
 	{
@@ -152,9 +152,13 @@ ProcessCreateAsSelectPgLakeTable(ProcessUtilityParams * params, void *arg)
 			IsPgLakeIcebergAccessMethod(default_table_access_method))
 		{
 			createAsStmt->into->accessMethod = DEFAULT_TABLE_ACCESS_METHOD;
+			return false;
 		}
-
-		return false;
+		else if (createAsStmt->into->accessMethod != NULL &&
+				 !IsPgLakeIcebergAccessMethod(createAsStmt->into->accessMethod))
+		{
+			return false;
+		}
 	}
 
 	EnsureCreateAsSelectIcebergTableSupported(createAsStmt);
