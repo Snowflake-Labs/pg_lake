@@ -418,5 +418,6 @@ GetDuckSerializedIcebergFieldInitialDefault(const char *initialDefault,
 	getTypeOutputInfo(pgType.postgresTypeOid, &outFuncId, &isvarlena);
 	fmgr_info(outFuncId, &outFunc);
 
-	return PGDuckSerialize(&outFunc, pgType.postgresTypeOid, initialDefaultDatum);
+	return PGDuckSerialize(&outFunc, pgType.postgresTypeOid, initialDefaultDatum,
+						   DATA_FORMAT_INVALID);
 }

@@ -229,6 +229,36 @@ PostgresTypeToIcebergField(PGType pgType, bool forAddColumn, int *subFieldIndex)
 
 		ReleaseTupleDesc(tupleDesc);
 	}
+	else if (typeId == INTERVALOID)
+	{
+		/*
+		 * Iceberg does not have a native interval type. We represent it as a
+		 * struct with months, days, and microseconds fields, matching the
+		 * internal PostgreSQL interval representation. This is self-describing
+		 * and readable by any Iceberg-compatible engine.
+		 */
+		const char *names[] = {"months", "days", "microseconds"};
+
+		field->type = FIELD_TYPE_STRUCT;
+		field->field.structType.nfields = 3;
+		field->field.structType.fields = palloc0(sizeof(FieldStructElement) * 3);
+
+		for (int i = 0; i < 3; i++)
+		{
+			FieldStructElement *elem = &field->field.structType.fields[i];
+
+			elem->id = *subFieldIndex + 1;
+			*subFieldIndex = elem->id;
+			elem->name = pstrdup(names[i]);
+			elem->required = true;
+
+			Field	   *subField = palloc0(sizeof(Field));
+
+			subField->type = FIELD_TYPE_SCALAR;
+			subField->field.scalar.typeName = pstrdup("long");
+			elem->type = subField;
+		}
+	}
 	else if (IsMapTypeOid(typeId))
 	{
 		field->type = FIELD_TYPE_MAP;

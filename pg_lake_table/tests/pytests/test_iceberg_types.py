@@ -2637,6 +2637,78 @@ def test_iceberg_large_value(pg_conn, s3, extension, with_default_location):
     pg_conn.rollback()
 
 
+def test_iceberg_interval_type(pg_conn, s3, extension, with_default_location):
+    location = f"s3://{TEST_BUCKET}/test_iceberg_interval_type"
+
+    run_command(
+        f"""
+            CREATE SCHEMA test_iceberg_interval_type;
+            CREATE FOREIGN TABLE test_iceberg_interval_type.interval_test (
+                id INTEGER,
+                duration INTERVAL
+            ) SERVER pg_lake_iceberg OPTIONS (location '{location}');
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        """
+            INSERT INTO test_iceberg_interval_type.interval_test VALUES
+                (1, '1 day'),
+                (2, '2 hours 30 minutes'),
+                (3, '1 year 6 months'),
+                (4, '0 seconds'),
+                (5, NULL);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    results = run_query(
+        "SELECT id, duration FROM test_iceberg_interval_type.interval_test ORDER BY id",
+        pg_conn,
+    )
+    assert len(results) == 5
+
+    import datetime
+
+    assert results[0][1] == datetime.timedelta(days=1)
+    assert results[1][1] == datetime.timedelta(hours=2, minutes=30)
+    # 1 year 6 months is returned as months by psycopg2
+    assert results[2][1] is not None
+    assert results[3][1] == datetime.timedelta(0)
+    assert results[4][1] is None
+
+    # verify metadata has interval type
+    metadata_results = run_query(
+        """
+        SELECT metadata_location FROM lake_iceberg.tables
+        WHERE table_name = 'interval_test' AND table_namespace = 'test_iceberg_interval_type'
+        """,
+        pg_conn,
+    )
+    assert len(metadata_results) == 1
+    metadata_path = metadata_results[0][0]
+    data = read_s3_operations(s3, metadata_path)
+    parsed_data = json.loads(data)
+    fields = parsed_data["schemas"][0]["fields"]
+    duration_field = [f for f in fields if f["name"] == "duration"][0]
+    duration_type = duration_field["type"]
+    assert duration_type["type"] == "struct"
+    struct_fields = duration_type["fields"]
+    assert len(struct_fields) == 3
+    assert struct_fields[0]["name"] == "months"
+    assert struct_fields[0]["type"] == "long"
+    assert struct_fields[1]["name"] == "days"
+    assert struct_fields[1]["type"] == "long"
+    assert struct_fields[2]["name"] == "microseconds"
+    assert struct_fields[2]["type"] == "long"
+
+    run_command("DROP SCHEMA test_iceberg_interval_type CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 @pytest.fixture(scope="module")
 def create_helper_functions(superuser_conn, app_user):
 
