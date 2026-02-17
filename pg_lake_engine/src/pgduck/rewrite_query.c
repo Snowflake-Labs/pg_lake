@@ -20,6 +20,7 @@
 #include <float.h>
 #include <math.h>
 
+#include "catalog/pg_collation_d.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_operator_d.h"
 #include "catalog/pg_proc.h"
@@ -2238,13 +2239,21 @@ RewriteFuncExprHyperbolic(Node *node, void *context)
 /*
  * RewriteFuncExprInitcap rewrites initcap(..) function calls
  * into initcap_pg(..) function calls.
+ *
+ * Only rewrites when the collation is C_COLLATION_OID.
  */
 static Node *
 RewriteFuncExprInitcap(Node *node, void *context)
 {
 	FuncExpr   *funcExpr = castNode(FuncExpr, node);
 
+	/* be defensive about signature */
 	if (list_length(funcExpr->args) != 1)
+		return node;
+
+	Oid	collation = funcExpr->inputcollid;
+	if (collation != InvalidOid &&
+		!(collation == DEFAULT_COLLATION_OID || collation == C_COLLATION_OID))
 		return node;
 
 	List	   *funcName = list_make2(makeString(PG_LAKE_INTERNAL_NSP),

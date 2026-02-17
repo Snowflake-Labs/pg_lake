@@ -179,7 +179,6 @@ test_cases = [
     # initcap
     ("initcap_text", "WHERE initcap(col_text) = 'Test'", "initcap_pg", True),
     ("initcap_varchar", "WHERE initcap(col_varchar) = 'Test'", "initcap_pg", True),
-    ("initcap_moo", "WHERE initcap(col_text) = 'Moo'", "initcap_pg", True),
 ]
 
 

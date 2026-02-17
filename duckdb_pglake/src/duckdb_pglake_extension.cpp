@@ -111,9 +111,10 @@ inline void AtanhPG(DataChunk &args, ExpressionState &state, Vector &result)
 
 
 /*
- * InitcapPG implements the Postgres initcap(text) function:
- * converts the first letter of each word to uppercase and the
- * rest to lowercase.
+ * InitcapPG implements the Postgres initcap(text) function for the
+ * C collation.
+ *
+ * This mimics Postgres's asc_initcap(): pure ASCII, byte-at-a-time
  */
 inline void InitcapPG(DataChunk &args, ExpressionState &state, Vector &result)
 {
@@ -128,25 +129,19 @@ inline void InitcapPG(DataChunk &args, ExpressionState &state, Vector &result)
 			auto result_str = StringVector::EmptyString(result, input_size);
 			auto result_data = result_str.GetDataWriteable();
 
-			bool word_start = true;
+			bool wasalnum = false;
 			for (idx_t i = 0; i < input_size; i++) {
 				unsigned char c = input_data[i];
 
-				/* handle ASCII alphanumeric characters */
-				if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
-					if (word_start) {
-						result_data[i] = toupper(c);
-						word_start = false;
-					} else {
-						result_data[i] = tolower(c);
-					}
-				} else if (c >= '0' && c <= '9') {
-					result_data[i] = c;
-					word_start = false;
-				} else {
-					result_data[i] = c;
-					word_start = true;
-				}
+				if (wasalnum)
+					c = tolower(c);
+				else
+					c = toupper(c);
+
+				result_data[i] = c;
+				wasalnum = ((c >= 'A' && c <= 'Z') ||
+							(c >= 'a' && c <= 'z') ||
+							(c >= '0' && c <= '9'));
 			}
 
 			result_str.Finalize();
