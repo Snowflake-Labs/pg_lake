@@ -1782,20 +1782,6 @@ ErrorIfTypeUnsupportedForIcebergTablesInternal(Oid typeOid, int32 typmod, int le
 		ErrorIfTypeUnsupportedNumericForIcebergTables(typmod, columnName);
 	}
 
-	/*
-	 * Iceberg does not have a native interval type, but Parquet does. We
-	 * would like to store interval as the native Parquet type, but then we
-	 * need to then somehow tell BuildParquetSchema that we want a (possibly
-	 * nested) interval. For now, this is not yet implemented, and we want to
-	 * avoid storing the intervals as strings.
-	 */
-	if (typeOid == INTERVALOID)
-	{
-		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg("pg_lake_iceberg: interval types in columns are not yet supported"),
-						errdetail("column name triggering the error: \"%s\"", columnName)));
-	}
-
 	Oid			typrelid = get_typ_typrelid(typeOid);
 	char		typtype = get_typtype(typeOid);
 

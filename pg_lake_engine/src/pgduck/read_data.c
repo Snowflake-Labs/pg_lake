@@ -715,10 +715,11 @@ ReadEmptyDataSource(TupleDesc tupleDesc, CopyDataFormat sourceFormat, bool prefe
 																   columnTypeMod,
 																   sourceFormat,
 																   preferVarchar);
+		DuckDBTypeInfo storageType = GuessStorageType(duckdbTypeInfo, sourceFormat);
 
 		appendStringInfo(&query, "%s NULL::%s AS %s",
 						 addComma ? "," : "",
-						 duckdbTypeInfo.typeName,
+						 storageType.typeName,
 						 quote_identifier(columnName));
 
 		addComma = true;
@@ -1137,6 +1138,21 @@ GuessStorageType(DuckDBTypeInfo engineType, CopyDataFormat sourceFormat)
 			storageType.typeName = engineType.isArrayType ? "VARCHAR[]" : "VARCHAR";
 		}
 	}
+	else if (engineType.typeId == DUCKDB_TYPE_INTERVAL)
+	{
+		if (sourceFormat == DATA_FORMAT_PARQUET ||
+			sourceFormat == DATA_FORMAT_ICEBERG)
+		{
+			/*
+			 * Interval is stored as struct(months, days, microseconds) in
+			 * Parquet. We read as STRUCT and convert via make_interval().
+			 */
+			storageType.typeId = DUCKDB_TYPE_STRUCT;
+			storageType.typeName = engineType.isArrayType ?
+				"STRUCT(months BIGINT, days BIGINT, microseconds BIGINT)[]" :
+				"STRUCT(months BIGINT, days BIGINT, microseconds BIGINT)";
+		}
+	}
 
 	return storageType;
 }
@@ -1165,6 +1181,36 @@ BuildColumnProjection(char *columnName,
 					  bool addCast)
 {
 	char	   *columnAliasString = !addCast ? psprintf(" AS %s", quote_identifier(columnName)) : "";
+
+	if (engineType.typeId == DUCKDB_TYPE_INTERVAL)
+	{
+		if (sourceFormat == DATA_FORMAT_PARQUET ||
+			sourceFormat == DATA_FORMAT_ICEBERG)
+		{
+			/*
+			 * Interval is stored as struct(months, days, microseconds). We
+			 * reconstruct the interval using DuckDB interval constructors.
+			 */
+			const char *col = quote_identifier(columnName);
+
+#define INTERVAL_FROM_STRUCT(prefix) \
+	"(to_months(" prefix ".months) + " \
+	"to_days(" prefix ".days) + " \
+	"to_microseconds(" prefix ".microseconds))"
+
+			if (engineType.isArrayType)
+				return psprintf(
+								"list_transform(%s, _x -> "
+								INTERVAL_FROM_STRUCT("_x") ")%s",
+								col, columnAliasString);
+			else
+				return psprintf(
+								INTERVAL_FROM_STRUCT("%s") "%s",
+								col, col, col, columnAliasString);
+
+#undef INTERVAL_FROM_STRUCT
+		}
+	}
 
 	if (engineType.typeId == DUCKDB_TYPE_GEOMETRY && !engineType.isArrayType)
 	{
@@ -1373,10 +1419,9 @@ AppendReadCSVClause(StringInfo buf, const char *filePath,
 	}
 
 	/*
-	 * We might hit errors in DuckDB 0.9.2 for long lines and we see
-	 * excessive (infinite?) runtime for 0.10.0 when using parallel CSV
-	 * reads.  Use the default max_line_size in DuckDB as a safety
-	 * threshold.
+	 * We might hit errors in DuckDB 0.9.2 for long lines and we see excessive
+	 * (infinite?) runtime for 0.10.0 when using parallel CSV reads.  Use the
+	 * default max_line_size in DuckDB as a safety threshold.
 	 */
 	if (maxLineSize > DEFAULT_DUCKDB_MAX_LINE_SIZE)
 	{

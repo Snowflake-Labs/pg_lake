@@ -654,6 +654,24 @@ ChooseDuckDBEngineTypeForWrite(PGType postgresType,
 		duckTypeId = DUCKDB_TYPE_VARCHAR;
 		isArrayType = false;
 	}
+	else if (duckTypeId == DUCKDB_TYPE_INTERVAL)
+	{
+		/*
+		 * Iceberg does not have a native interval type. We store intervals as
+		 * struct(months BIGINT, days BIGINT, microseconds BIGINT) in both the
+		 * Iceberg metadata and Parquet data files.
+		 */
+		char	   *intervalTypeName =
+			psprintf("STRUCT(months BIGINT, days BIGINT, microseconds BIGINT)%s",
+					 isArrayType ? "[]" : "");
+		DuckDBTypeInfo typeInfo = {
+			.typeId = DUCKDB_TYPE_STRUCT,
+			.typeName = intervalTypeName,
+			.isArrayType = isArrayType,
+		};
+
+		return typeInfo;
+	}
 
 	/*
 	 * In case of both JSON and Parquet, composites/arrays/maps are serialized

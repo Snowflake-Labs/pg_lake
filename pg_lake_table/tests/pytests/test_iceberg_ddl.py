@@ -1,5 +1,6 @@
 import pytest
 import psycopg2
+import datetime
 from utils_pytest import *
 
 import os
@@ -1474,32 +1475,59 @@ def test_transaction_ddl(pg_conn, s3, with_default_location):
     run_command("ROLLBACK", pg_conn)
 
 
-# Intervals are not yet supported as Iceberg columns
 def test_interval(pg_conn, s3, with_default_location):
-    error = run_command(
+    run_command(
         """
         CREATE SCHEMA test_interval;
         CREATE TABLE test_interval.test (i interval) USING iceberg;
     """,
         pg_conn,
-        raise_error=False,
     )
-    assert "not yet supported" in error
+    pg_conn.commit()
 
-    pg_conn.rollback()
-
-    error = run_command(
+    run_command(
         """
-        CREATE SCHEMA test_interval;
-        CREATE TABLE test_interval.test (x int) USING iceberg;
-        ALTER TABLE test_interval.test ADD COLUMN y interval[];
+        INSERT INTO test_interval.test VALUES ('1 day'), ('2 hours'), ('1 year 3 months'), (NULL);
     """,
         pg_conn,
-        raise_error=False,
     )
-    assert "not yet supported" in error
+    pg_conn.commit()
 
-    pg_conn.rollback()
+    result = run_query(
+        "SELECT i FROM test_interval.test ORDER BY i",
+        pg_conn,
+    )
+    assert result[0][0] == datetime.timedelta(hours=2)
+    assert result[1][0] == datetime.timedelta(days=1)
+    assert result[2][0] is not None  # 1 year 3 months
+    assert result[3][0] is None
+
+    # also test interval[] via ALTER TABLE ADD COLUMN
+    run_command(
+        """
+        ALTER TABLE test_interval.test ADD COLUMN j interval[];
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        """
+        INSERT INTO test_interval.test VALUES ('5 days', ARRAY['1 hour'::interval, '30 minutes'::interval]);
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        "SELECT j FROM test_interval.test WHERE j IS NOT NULL",
+        pg_conn,
+    )
+    assert len(result) == 1
+    assert len(result[0][0]) == 2
+
+    run_command("DROP SCHEMA test_interval CASCADE", pg_conn)
+    pg_conn.commit()
 
 
 def test_use_same_schema_when_needed(pg_conn, s3, with_default_location):

@@ -510,6 +510,15 @@ ShouldSkipStatistics(LeafField * leafField)
 		 */
 		return true;
 	}
+	else if (pgTypeOid == INTERVALOID)
+	{
+		/*
+		 * Intervals do not have a well-defined total ordering (e.g., 1 month
+		 * vs 30 days depends on context), so min/max statistics are not
+		 * meaningful for data file pruning.
+		 */
+		return true;
+	}
 	else if (leafField->level != 1)
 	{
 		/*

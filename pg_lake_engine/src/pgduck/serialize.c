@@ -27,9 +27,11 @@
 #include "pg_lake/pgduck/struct_conversion.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
+#include "utils/timestamp.h"
 
 
 static char *ByteAOutForPGDuck(Datum value);
+static char *IntervalOutForPGDuck(Datum value);
 
 
 /*
@@ -59,6 +61,9 @@ PGDuckSerialize(FmgrInfo *flinfo, Oid columnType, Datum value)
 	if (columnType == BYTEAOID)
 		return ByteAOutForPGDuck(value);
 
+	if (columnType == INTERVALOID)
+		return IntervalOutForPGDuck(value);
+
 	if (IsGeometryOutFunctionId(flinfo->fn_oid))
 	{
 		/*
@@ -84,6 +89,9 @@ IsPGDuckSerializeRequired(PGType postgresType)
 	Oid			typeId = postgresType.postgresTypeOid;
 
 	if (typeId == BYTEAOID)
+		return true;
+
+	if (typeId == INTERVALOID)
 		return true;
 
 	/* also covers map */
@@ -126,6 +134,27 @@ ByteAOutForPGDuck(Datum value)
 
 	return outputBuffer;
 }
+
+/*
+ * IntervalOutForPGDuck serializes a PostgreSQL interval as a DuckDB struct:
+ * {'months': M, 'days': D, 'microseconds': U}
+ */
+static char *
+IntervalOutForPGDuck(Datum value)
+{
+	Interval   *interval = DatumGetIntervalP(value);
+	StringInfoData buf;
+
+	initStringInfo(&buf);
+	appendStringInfo(&buf,
+					 "{'months': %d, 'days': %d, 'microseconds': " INT64_FORMAT "}",
+					 interval->month,
+					 interval->day,
+					 interval->time);
+
+	return buf.data;
+}
+
 
 /* Helper to see if we are a "container" type oid */
 bool
