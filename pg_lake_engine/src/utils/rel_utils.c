@@ -331,8 +331,8 @@ GetForeignTableFormat(Oid foreignTableId)
 
 	if (tableType == PG_LAKE_ICEBERG_TABLE_TYPE)
 	{
-		/* iceberg tables are always parquet */
-		return DATA_FORMAT_PARQUET;
+		/* iceberg data files are parquet, but use a separate format for type handling */
+		return DATA_FORMAT_ICEBERG;
 	}
 
 	ForeignTable *fTable = GetForeignTable(foreignTableId);

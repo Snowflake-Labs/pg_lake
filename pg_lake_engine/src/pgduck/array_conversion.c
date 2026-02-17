@@ -112,7 +112,8 @@ ArrayOutForPGDuck(ArrayType *array)
 		}
 		else
 		{
-			values[i] = PGDuckSerialize(&my_extra->proc, element_type, itemvalue);
+			values[i] = PGDuckSerialize(&my_extra->proc, element_type, itemvalue,
+										DATA_FORMAT_INVALID);
 
 			/* count data plus backslashes; detect chars needing quotes */
 			needquote = !IsContainerType(element_type);

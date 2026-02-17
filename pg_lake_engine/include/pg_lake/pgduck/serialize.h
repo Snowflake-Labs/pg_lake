@@ -25,7 +25,10 @@
 
 #define BYTEA_OUT_OID 31
 
-extern PGDLLEXPORT char *PGDuckSerialize(FmgrInfo *flinfo, Oid typeOid, Datum value);
+extern PGDLLEXPORT char *PGDuckSerialize(FmgrInfo *flinfo, Oid typeOid, Datum value,
+										 CopyDataFormat format);
 extern PGDLLEXPORT char *PGDuckOnlySerialize(Oid typeOid, Datum value);
 extern PGDLLEXPORT bool IsPGDuckSerializeRequired(PGType postgresType);
+extern PGDLLEXPORT char *IntervalOutForPGDuck(Datum value);
+extern PGDLLEXPORT char *IntervalArrayOutForPGDuck(Datum value);
 extern bool IsContainerType(Oid postgresType);
