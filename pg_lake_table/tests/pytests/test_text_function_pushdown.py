@@ -375,123 +375,141 @@ def test_substring_on_pg_vs_duck(pg_conn, pgduck_conn):
     pgduck_conn.rollback()
 
 
-def test_initcap_on_pg_vs_duck(pg_conn, pgduck_conn):
+initcap_test_cases = [
+    # Basic word capitalization
+    "hello world",
+    "HELLO WORLD",
+    "hElLo WoRlD",
+    # Various separators / punctuation as word boundaries
+    "hello-world",
+    "hello_world",
+    "hello.world",
+    "hello,world",
+    "hello;world",
+    "hello:world",
+    "hello/world",
+    "hello+world",
+    "hello=world",
+    "hello@world",
+    "hello#world",
+    "hello!world",
+    "hello?world",
+    # Parentheses, brackets, braces
+    "(hello) world",
+    "[hello] world",
+    "{hello} world",
+    # Apostrophe as word boundary
+    "it's a test",
+    "don't stop",
+    "o'brien",
+    # Whitespace variations
+    "hello  world",
+    "  hello world  ",
+    "   ",
+    "hello\tworld",
+    "hello\nworld",
+    "hello\r\nworld",
+    # Digits and alphanumeric boundaries
+    "123abc",
+    "abc123def",
+    "abc 123def",
+    "abc 123 def",
+    "12345",
+    "1a2b3c",
+    "a1b2c3",
+    "abc-123-def",
+    "abc-1a-def",
+    "100-200-300",
+    # Single characters
+    "a",
+    "A",
+    "z",
+    "1",
+    " ",
+    "-",
+    # All uppercase / all lowercase
+    "ALL CAPS HERE",
+    "all lowercase here",
+    "aaaa",
+    "AAAA",
+    # Leading and trailing punctuation
+    "...hello...",
+    "---hello---",
+    "***hello***",
+    "!!hello!!",
+    # Only special characters
+    "!@#$%",
+    "---",
+    # Multiple mixed separators
+    "a-b_c.d",
+    "one.two.three",
+    "test_value",
+    # Repeated separators
+    "hello--world",
+    "hello__world",
+    "hello..world",
+    # Quoted strings / longer sentences
+    'she said "hello"',
+    "the quick brown fox jumps over the lazy dog",
+    "THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG",
+]
+
+
+@pytest.fixture(scope="module")
+def create_initcap_edge_case_tables(pg_conn, s3, extension):
+    url = f"s3://{TEST_BUCKET}/initcap_pushdown/data.parquet"
+
+    run_command(
+        """
+        CREATE SCHEMA initcap_pushdown;
+        CREATE TABLE initcap_pushdown.src (val text);
+        """,
+        pg_conn,
+    )
+
+    cur = pg_conn.cursor()
+    for input_val in initcap_test_cases:
+        cur.execute("INSERT INTO initcap_pushdown.src VALUES (%s)", (input_val,))
+    cur.close()
+    pg_conn.commit()
+
+    run_command(
+        f"COPY initcap_pushdown.src TO '{url}' WITH (FORMAT 'parquet')",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        CREATE FOREIGN TABLE initcap_pushdown.tbl (val text)
+            SERVER pg_lake OPTIONS (format 'parquet', path '{url}');
+        CREATE TABLE initcap_pushdown.heap_tbl (val text);
+        COPY initcap_pushdown.heap_tbl FROM '{url}';
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command("DROP TABLE initcap_pushdown.src", pg_conn)
+    pg_conn.commit()
+
+    yield
+    pg_conn.rollback()
+    run_command("DROP SCHEMA initcap_pushdown CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_initcap_on_pg_vs_duck(create_initcap_edge_case_tables, pg_conn):
     """
     Comprehensive edge case tests for initcap pushdown.
-    Verifies that Postgres initcap() and DuckDB initcap_pg() produce
-    identical results across a wide range of inputs.
+    Runs initcap() on a foreign table (DuckDB) and a heap table (Postgres)
+    and verifies they produce identical results for every edge case row.
     """
+    query = "SELECT val, initcap(val) FROM initcap_pushdown.tbl ORDER BY val"
 
-    test_queries = [
-        # --- Basic word capitalization ---
-        ("SELECT initcap('hello world')", "Hello World"),
-        ("SELECT initcap('HELLO WORLD')", "Hello World"),
-        ("SELECT initcap('hElLo WoRlD')", "Hello World"),
-        # --- Various separators / punctuation as word boundaries ---
-        ("SELECT initcap('hello-world')", "Hello-World"),
-        ("SELECT initcap('hello_world')", "Hello_World"),
-        ("SELECT initcap('hello.world')", "Hello.World"),
-        ("SELECT initcap('hello,world')", "Hello,World"),
-        ("SELECT initcap('hello;world')", "Hello;World"),
-        ("SELECT initcap('hello:world')", "Hello:World"),
-        ("SELECT initcap('hello/world')", "Hello/World"),
-        ("SELECT initcap('hello+world')", "Hello+World"),
-        ("SELECT initcap('hello=world')", "Hello=World"),
-        ("SELECT initcap('hello@world')", "Hello@World"),
-        ("SELECT initcap('hello#world')", "Hello#World"),
-        ("SELECT initcap('hello!world')", "Hello!World"),
-        ("SELECT initcap('hello?world')", "Hello?World"),
-        # --- Parentheses, brackets, braces ---
-        ("SELECT initcap('(hello) world')", "(Hello) World"),
-        ("SELECT initcap('[hello] world')", "[Hello] World"),
-        ("SELECT initcap('{hello} world')", "{Hello} World"),
-        # --- Apostrophe as word boundary ---
-        # Apostrophe is non-alphanumeric, so it breaks words
-        ("SELECT initcap('it''s a test')", "It'S A Test"),
-        ("SELECT initcap('don''t stop')", "Don'T Stop"),
-        ("SELECT initcap('o''brien')", "O'Brien"),
-        # --- Whitespace variations ---
-        ("SELECT initcap('hello  world')", "Hello  World"),
-        ("SELECT initcap('  hello world  ')", "  Hello World  "),
-        ("SELECT initcap('   ')", "   "),
-        ("SELECT initcap(E'hello\\tworld')", "Hello\tWorld"),
-        ("SELECT initcap(E'hello\\nworld')", "Hello\nWorld"),
-        ("SELECT initcap(E'hello\\r\\nworld')", "Hello\r\nWorld"),
-        # --- Digits and alphanumeric boundaries ---
-        # Digits ARE alphanumeric: they continue a word, not start a new one
-        ("SELECT initcap('123abc')", "123abc"),
-        ("SELECT initcap('abc123def')", "Abc123def"),
-        ("SELECT initcap('abc 123def')", "Abc 123def"),
-        ("SELECT initcap('abc 123 def')", "Abc 123 Def"),
-        ("SELECT initcap('12345')", "12345"),
-        ("SELECT initcap('1a2b3c')", "1a2b3c"),
-        ("SELECT initcap('a1b2c3')", "A1b2c3"),
-        # Digits after separators: digit starts the word (but digit itself
-        # is not a letter, so no case change; next letter is lowercased)
-        ("SELECT initcap('abc-123-def')", "Abc-123-Def"),
-        ("SELECT initcap('abc-1a-def')", "Abc-1a-Def"),
-        ("SELECT initcap('100-200-300')", "100-200-300"),
-        # --- Empty and NULL ---
-        ("SELECT initcap('')", ""),
-        ("SELECT initcap(NULL)", None),
-        # --- Single characters ---
-        ("SELECT initcap('a')", "A"),
-        ("SELECT initcap('A')", "A"),
-        ("SELECT initcap('z')", "Z"),
-        ("SELECT initcap('1')", "1"),
-        ("SELECT initcap(' ')", " "),
-        ("SELECT initcap('-')", "-"),
-        # --- All uppercase / all lowercase ---
-        ("SELECT initcap('ALL CAPS HERE')", "All Caps Here"),
-        ("SELECT initcap('all lowercase here')", "All Lowercase Here"),
-        ("SELECT initcap('aaaa')", "Aaaa"),
-        ("SELECT initcap('AAAA')", "Aaaa"),
-        # --- Leading and trailing punctuation ---
-        ("SELECT initcap('...hello...')", "...Hello..."),
-        ("SELECT initcap('---hello---')", "---Hello---"),
-        ("SELECT initcap('***hello***')", "***Hello***"),
-        ("SELECT initcap('!!hello!!')", "!!Hello!!"),
-        # --- Only special characters (no letters/digits) ---
-        ("SELECT initcap('!@#$%')", "!@#$%"),
-        ("SELECT initcap('---')", "---"),
-        ("SELECT initcap('...')", "..."),
-        # --- Multiple mixed separators ---
-        ("SELECT initcap('a-b_c.d')", "A-B_C.D"),
-        ("SELECT initcap('one.two.three')", "One.Two.Three"),
-        ("SELECT initcap('test_value')", "Test_Value"),
-        # --- Repeated separators ---
-        ("SELECT initcap('hello--world')", "Hello--World"),
-        ("SELECT initcap('hello__world')", "Hello__World"),
-        ("SELECT initcap('hello..world')", "Hello..World"),
-        # --- Quoted strings inside ---
-        ("SELECT initcap('she said \"hello\"')", 'She Said "Hello"'),
-        # --- Longer sentence ---
-        (
-            "SELECT initcap('the quick brown fox jumps over the lazy dog')",
-            "The Quick Brown Fox Jumps Over The Lazy Dog",
-        ),
-        (
-            "SELECT initcap('THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG')",
-            "The Quick Brown Fox Jumps Over The Lazy Dog",
-        ),
-    ]
-
-    for test_query in test_queries:
-        query = test_query[0]
-        expected_result = test_query[1]
-        pg_results = run_query(query, pg_conn)
-
-        duck_query = query.replace("initcap(", "initcap_pg(")
-        duck_results = run_query(duck_query, pgduck_conn)
-
-        pg_val = pg_results[0][0]
-        duck_val = duck_results[0][0]
-
-        # Primary assertion: Postgres and DuckDB must produce identical results
-        assert (
-            pg_val == duck_val
-        ), f"PG vs DuckDB mismatch for {query}: pg={pg_val!r}, duck={duck_val!r}"
-        # Secondary assertion: both match the expected result
-        assert (
-            expected_result == pg_val
-        ), f"Expected value mismatch for {query}: expected={expected_result!r}, pg={pg_val!r}"
+    assert_query_results_on_tables(
+        query,
+        pg_conn,
+        ["initcap_pushdown.tbl"],
+        ["initcap_pushdown.heap_tbl"],
+    )
