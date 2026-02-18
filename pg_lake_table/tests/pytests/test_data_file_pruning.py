@@ -1421,6 +1421,65 @@ def test_pruning_for_collations(
     pg_conn.commit()
 
 
+def test_pruning_correctness_with_non_c_collation(
+    s3, pg_conn, extension, with_default_location, create_helper_functions
+):
+    """
+    When the database default collation is non-C (e.g. en_US.UTF-8),
+    text column pruning must be disabled. Otherwise, data file statistics
+    (which use byte-order comparisons) can incorrectly prune files whose
+    values satisfy the query under the actual locale ordering.
+
+    For example, under en_US.UTF-8, 'A' BETWEEN 'a' AND 'z' is true
+    (case-insensitive ordering), but byte-order comparison says 'A' < 'a',
+    so a pruner using C-order stats would wrongly skip that file.
+    """
+    schema = "test_pruning_non_c_collation"
+
+    lc_collate = run_query("SHOW lc_collate", pg_conn)[0][0]
+    is_c_locale = lc_collate in ("C", "POSIX")
+
+    run_command(
+        f"""
+        CREATE SCHEMA {schema};
+        SET search_path TO {schema};
+
+        CREATE TABLE words (w text) USING iceberg
+            WITH (autovacuum_enabled='False');
+
+        INSERT INTO words (w) VALUES ('A');
+        INSERT INTO words (w) VALUES ('a');
+        INSERT INTO words (w) VALUES ('B');
+        INSERT INTO words (w) VALUES ('b');
+
+        CREATE TABLE words_heap AS SELECT * FROM words;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    queries = [
+        "SELECT w FROM words WHERE w BETWEEN 'a' AND 'z'",
+        "SELECT w FROM words WHERE w >= 'a' AND w <= 'z'",
+        "SELECT w FROM words WHERE w > 'a'",
+        "SELECT w FROM words WHERE w < 'b'",
+    ]
+
+    for query in queries:
+        assert_query_results_on_tables(query, pg_conn, ["words"], ["words_heap"])
+
+    if not is_c_locale:
+        explain_prefix = "EXPLAIN (verbose, format json) "
+        results = run_query(
+            f"{explain_prefix} SELECT w FROM words WHERE w BETWEEN 'a' AND 'z'",
+            pg_conn,
+        )
+        assert int(fetch_data_files_used(results)) == 4
+
+    run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 def test_pruning_for_domains(
     s3, pg_conn, extension, with_default_location, create_helper_functions
 ):

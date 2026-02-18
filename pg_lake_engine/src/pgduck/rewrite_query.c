@@ -32,6 +32,7 @@
 #include "pg_lake/parsetree/expression.h"
 #include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/rewrite_query.h"
+#include "pg_lake/util/collation_utils.h"
 #include "pg_lake/pgduck/serialize.h"
 #include "pg_lake/pgduck/to_char.h"
 #include "pg_lake/util/operator_utils.h"
@@ -2252,8 +2253,7 @@ RewriteFuncExprInitcap(Node *node, void *context)
 		return node;
 
 	Oid	collation = funcExpr->inputcollid;
-	if (collation != InvalidOid &&
-		!(collation == DEFAULT_COLLATION_OID || collation == C_COLLATION_OID))
+	if (!IsNonCollatableOrC(collation))
 		return node;
 
 	List	   *funcName = list_make2(makeString(PG_LAKE_INTERNAL_NSP),

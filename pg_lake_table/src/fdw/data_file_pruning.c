@@ -24,7 +24,6 @@
 
 #include "catalog/pg_am_d.h"
 #include "catalog/pg_index.h"
-#include "catalog/pg_collation_d.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_opfamily.h"
 #include "commands/defrem.h"
@@ -52,6 +51,7 @@
 #include "pg_lake/fdw/schema_operations/field_id_mapping_catalog.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/fdw/data_file_pruning.h"
+#include "pg_lake/util/collation_utils.h"
 #include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/iceberg/api/table_schema.h"
@@ -467,8 +467,7 @@ AddFieldIdsUsedInQuery(HTAB *fieldIdsUsedInQuery, Oid relationId, PgLakeTablePro
 		 * We currently do not support data file pruning for columns with
 		 * collations.
 		 */
-		if (collation == InvalidOid || collation == DEFAULT_COLLATION_OID ||
-			collation == C_COLLATION_OID)
+		if (IsNonCollatableOrC(collation))
 		{
 			entry->columnBoundInclusiveUpper =
 				BuildConstraintsWithNullConst(column, BTLessEqualStrategyNumber, BTGreaterEqualStrategyNumber);

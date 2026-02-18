@@ -36,6 +36,7 @@
 #include "pg_lake/planner/dbt.h"
 #include "pg_lake/planner/explain.h"
 #include "pg_lake/planner/pushdown_utils.h"
+#include "pg_lake/util/collation_utils.h"
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/planner/insert_select.h"
 #include "pg_lake/planner/query_pushdown.h"
@@ -955,21 +956,6 @@ ExpressionHasNonShippableObject(Node *node, bool srfAllowed, IsShippableContext 
 }
 
 
-/*
-* UseCollationIfNonDefault returns the collation if it is not the default
-* collation, otherwise it returns InvalidOid.
-*/
-static Oid
-UseCollationIfNonDefault(Oid nodeCollation)
-{
-	if (nodeCollation != InvalidOid &&
-		!(nodeCollation == DEFAULT_COLLATION_OID || nodeCollation == C_COLLATION_OID))
-	{
-		return nodeCollation;
-	}
-	return InvalidOid;
-}
-
 
 /*
  * TargetListHasOnlyResjunk determines whether there the target list
@@ -1065,10 +1051,9 @@ ExpressionHasCollation(Node *node, IsShippableContext * context)
 		case T_InferenceElem:
 		case T_PlaceHolderVar:
 			{
-				Oid			collation = UseCollationIfNonDefault(exprCollation(node));
+				Oid			collation = exprCollation(node);
 
-				if (collation != InvalidOid &&
-					!(collation == DEFAULT_COLLATION_OID || collation == C_COLLATION_OID))
+				if (!(IsNonCollatableOrC(collation) || collation == DEFAULT_COLLATION_OID))
 				{
 					TryRecordNotShippableObject(context, collation, CollationRelationId, NOT_SHIPPABLE_COLLATION);
 					return true;
