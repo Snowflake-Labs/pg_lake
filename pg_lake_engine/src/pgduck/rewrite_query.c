@@ -20,6 +20,7 @@
 #include <float.h>
 #include <math.h>
 
+#include "catalog/pg_collation_d.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_operator_d.h"
 #include "catalog/pg_proc.h"
@@ -164,6 +165,7 @@ static Node *RewriteFuncExprPostgisBytea(Node *node, void *context);
 static Node *RewriteFuncExprTrigonometry(Node *node, void *context);
 static Node *RewriteFuncExprInverseTrigonometry(Node *node, void *context);
 static Node *RewriteFuncExprHyperbolic(Node *node, void *context);
+static Node *RewriteFuncExprInitcap(Node *node, void *context);
 static Node *RewriteFuncExprJsonbArrayLength(Node *node, void *context);
 static Node *RewriteFuncExprEncode(Node *node, void *context);
 static Node *RewriteFuncExprDecode(Node *node, void *context);
@@ -290,6 +292,11 @@ static FunctionCallRewriteRuleByName BuiltinFunctionCallRewriteRulesByName[] =
 	},
 	{
 		"pg_catalog", "atanh", RewriteFuncExprHyperbolic, 0
+	},
+
+	/* text functions */
+	{
+		"pg_catalog", "initcap", RewriteFuncExprInitcap, 0
 	},
 
 	/* explicit calls to cast functions */
@@ -2221,6 +2228,37 @@ RewriteFuncExprHyperbolic(Node *node, void *context)
 	}
 
 	Oid			argTypes[] = {FLOAT8OID};
+	int			argCount = 1;
+
+	funcExpr->funcid = LookupFuncName(funcName, argCount, argTypes, false);
+
+	return (Node *) funcExpr;
+}
+
+
+/*
+ * RewriteFuncExprInitcap rewrites initcap(..) function calls
+ * into initcap_pg(..) function calls.
+ *
+ * Only rewrites when the collation is C_COLLATION_OID.
+ */
+static Node *
+RewriteFuncExprInitcap(Node *node, void *context)
+{
+	FuncExpr   *funcExpr = castNode(FuncExpr, node);
+
+	/* be defensive about signature */
+	if (list_length(funcExpr->args) != 1)
+		return node;
+
+	Oid	collation = funcExpr->inputcollid;
+	if (collation != InvalidOid &&
+		!(collation == DEFAULT_COLLATION_OID || collation == C_COLLATION_OID))
+		return node;
+
+	List	   *funcName = list_make2(makeString(PG_LAKE_INTERNAL_NSP),
+									  makeString("initcap_pg"));
+	Oid			argTypes[] = {TEXTOID};
 	int			argCount = 1;
 
 	funcExpr->funcid = LookupFuncName(funcName, argCount, argTypes, false);

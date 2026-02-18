@@ -176,6 +176,9 @@ test_cases = [
     ("split_part", "WHERE split_part(col_text, 'o', 1) = 'm'", "split_part", True),
     ("starts_with", "WHERE starts_with(col_text, 'mo')", "starts_with", True),
     ("strpos", "WHERE strpos(col_text, 'a') IS NULL", "strpos", True),
+    # initcap
+    ("initcap_text", "WHERE initcap(col_text) = 'Test'", "initcap_pg", True),
+    ("initcap_varchar", "WHERE initcap(col_varchar) = 'Test'", "initcap_pg", True),
 ]
 
 
@@ -370,3 +373,143 @@ def test_substring_on_pg_vs_duck(pg_conn, pgduck_conn):
     res = run_query(duck_query, pgduck_conn, raise_error=False)
     assert "negative substring length not allowed" in res, False
     pgduck_conn.rollback()
+
+
+initcap_test_cases = [
+    # Basic word capitalization
+    "hello world",
+    "HELLO WORLD",
+    "hElLo WoRlD",
+    # Various separators / punctuation as word boundaries
+    "hello-world",
+    "hello_world",
+    "hello.world",
+    "hello,world",
+    "hello;world",
+    "hello:world",
+    "hello/world",
+    "hello+world",
+    "hello=world",
+    "hello@world",
+    "hello#world",
+    "hello!world",
+    "hello?world",
+    # Parentheses, brackets, braces
+    "(hello) world",
+    "[hello] world",
+    "{hello} world",
+    # Apostrophe as word boundary
+    "it's a test",
+    "don't stop",
+    "o'brien",
+    # Whitespace variations
+    "hello  world",
+    "  hello world  ",
+    "   ",
+    "hello\tworld",
+    "hello\nworld",
+    "hello\r\nworld",
+    # Digits and alphanumeric boundaries
+    "123abc",
+    "abc123def",
+    "abc 123def",
+    "abc 123 def",
+    "12345",
+    "1a2b3c",
+    "a1b2c3",
+    "abc-123-def",
+    "abc-1a-def",
+    "100-200-300",
+    # Single characters
+    "a",
+    "A",
+    "z",
+    "1",
+    " ",
+    "-",
+    # All uppercase / all lowercase
+    "ALL CAPS HERE",
+    "all lowercase here",
+    "aaaa",
+    "AAAA",
+    # Leading and trailing punctuation
+    "...hello...",
+    "---hello---",
+    "***hello***",
+    "!!hello!!",
+    # Only special characters
+    "!@#$%",
+    "---",
+    # Multiple mixed separators
+    "a-b_c.d",
+    "one.two.three",
+    "test_value",
+    # Repeated separators
+    "hello--world",
+    "hello__world",
+    "hello..world",
+    # Quoted strings / longer sentences
+    'she said "hello"',
+    "the quick brown fox jumps over the lazy dog",
+    "THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG",
+]
+
+
+@pytest.fixture(scope="module")
+def create_initcap_edge_case_tables(pg_conn, s3, extension):
+    url = f"s3://{TEST_BUCKET}/initcap_pushdown/data.parquet"
+
+    run_command(
+        """
+        CREATE SCHEMA initcap_pushdown;
+        CREATE TABLE initcap_pushdown.src (val text);
+        """,
+        pg_conn,
+    )
+
+    cur = pg_conn.cursor()
+    for input_val in initcap_test_cases:
+        cur.execute("INSERT INTO initcap_pushdown.src VALUES (%s)", (input_val,))
+    cur.close()
+    pg_conn.commit()
+
+    run_command(
+        f"COPY initcap_pushdown.src TO '{url}' WITH (FORMAT 'parquet')",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        CREATE FOREIGN TABLE initcap_pushdown.tbl (val text)
+            SERVER pg_lake OPTIONS (format 'parquet', path '{url}');
+        CREATE TABLE initcap_pushdown.heap_tbl (val text);
+        COPY initcap_pushdown.heap_tbl FROM '{url}';
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command("DROP TABLE initcap_pushdown.src", pg_conn)
+    pg_conn.commit()
+
+    yield
+    pg_conn.rollback()
+    run_command("DROP SCHEMA initcap_pushdown CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_initcap_on_pg_vs_duck(create_initcap_edge_case_tables, pg_conn):
+    """
+    Comprehensive edge case tests for initcap pushdown.
+    Runs initcap() on a foreign table (DuckDB) and a heap table (Postgres)
+    and verifies they produce identical results for every edge case row.
+    """
+    query = "SELECT val, initcap(val) FROM initcap_pushdown.tbl ORDER BY val"
+
+    assert_query_results_on_tables(
+        query,
+        pg_conn,
+        ["initcap_pushdown.tbl"],
+        ["initcap_pushdown.heap_tbl"],
+    )
