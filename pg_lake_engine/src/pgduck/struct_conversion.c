@@ -52,7 +52,7 @@ typedef struct RecordIOData
  */
 
 char *
-StructOutForPGDuck(Datum myStruct)
+StructOutForPGDuck(Datum myStruct, CopyDataFormat format)
 {
 	HeapTupleHeader rec = DatumGetHeapTupleHeader(myStruct);
 	Oid			tupType;
@@ -152,7 +152,7 @@ StructOutForPGDuck(Datum myStruct)
 		}
 
 		attr = values[i];
-		value = PGDuckSerialize(&column_info->proc, column_type, attr);
+		value = PGDuckSerialize(&column_info->proc, column_type, attr, format);
 
 		/* Detect whether we need double quotes for this value */
 		bool		needQuotes = !IsContainerType(column_type);

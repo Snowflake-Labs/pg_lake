@@ -756,20 +756,34 @@ RegisterIcebergColumnMapping(Oid relationId, Field * field,
 
 		case FIELD_TYPE_STRUCT:
 			{
-				TupleDesc	tupDesc = lookup_rowtype_tupdesc(pgType.postgresTypeOid, pgType.postgresTypeMod);
+				size_t		nfields = field->field.structType.nfields;
 
-				for (int fieldIndex = 0; fieldIndex < tupDesc->natts; fieldIndex++)
+				/*
+				 * For real composite types, get subfield PG types from the
+				 * tuple descriptor. For synthetic structs (e.g., interval
+				 * stored as struct(months, days, microseconds)), derive the
+				 * PG type from the Iceberg field type instead.
+				 */
+				bool		isComposite = (get_typtype(pgType.postgresTypeOid) == TYPTYPE_COMPOSITE);
+				TupleDesc	tupDesc = isComposite ?
+					lookup_rowtype_tupdesc(pgType.postgresTypeOid, pgType.postgresTypeMod) : NULL;
+
+				for (size_t fieldIndex = 0; fieldIndex < nfields; fieldIndex++)
 				{
-					/*
-					 * we are sure that the struct element order matches the
-					 * tupledesc order. there cannot be dropped columns in
-					 * type. (we disallow altering type in iceberg table)
-					 */
-					Form_pg_attribute attr = TupleDescAttr(tupDesc, fieldIndex);
-
-					PGType		subFieldPGType = MakePGType(attr->atttypid, attr->atttypmod);
-
 					FieldStructElement *structElementField = &field->field.structType.fields[fieldIndex];
+
+					PGType		subFieldPGType;
+
+					if (isComposite)
+					{
+						Form_pg_attribute attr = TupleDescAttr(tupDesc, fieldIndex);
+
+						subFieldPGType = MakePGType(attr->atttypid, attr->atttypmod);
+					}
+					else
+					{
+						subFieldPGType = IcebergFieldToPostgresType(structElementField->type);
+					}
 
 					/* we register defaults only for top level fields */
 					const char *subFieldWriteDefault = NULL;
@@ -784,7 +798,8 @@ RegisterIcebergColumnMapping(Oid relationId, Field * field,
 												 subFieldWriteDefault, subFieldInitialDefault);
 				}
 
-				ReleaseTupleDesc(tupDesc);
+				if (isComposite)
+					ReleaseTupleDesc(tupDesc);
 
 				break;
 			}

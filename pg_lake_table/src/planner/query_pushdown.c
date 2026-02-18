@@ -1440,7 +1440,8 @@ QueryPushdownBeginScan(CustomScanState *node, EState *estate, int eflags)
 
 				fmgr_info(typeOutputFunctionId, &fmgrInfo);
 				scanState->parameterValues[parameterIndex] =
-					PGDuckSerialize(&fmgrInfo, parameterData->ptype, parameterData->value);
+					PGDuckSerialize(&fmgrInfo, parameterData->ptype, parameterData->value,
+									DATA_FORMAT_INVALID);
 			}
 		}
 	}

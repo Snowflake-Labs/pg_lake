@@ -95,7 +95,8 @@ ExecuteCopyToCommandOnPGDuckConnection(char *copyCommand,
 		result = ExecuteQueryOnPGDuckConnection(pgDuckConn, copyCommand);
 		CheckPGDuckResult(pgDuckConn, result);
 
-		if (destinationFormat == DATA_FORMAT_PARQUET)
+		if (destinationFormat == DATA_FORMAT_PARQUET ||
+			destinationFormat == DATA_FORMAT_ICEBERG)
 		{
 			/* DuckDB returns COPY 0 when return_stats is used. */
 			statsCollector = GetDataFileStatsListFromPGResult(result, leafFields, schema);
@@ -510,6 +511,15 @@ ShouldSkipStatistics(LeafField * leafField)
 		 */
 		return true;
 	}
+	else if (pgTypeOid == INTERVALOID)
+	{
+		/*
+		 * Intervals do not have a well-defined total ordering (e.g., 1 month
+		 * vs 30 days depends on context), so min/max statistics are not
+		 * meaningful for data file pruning.
+		 */
+		return true;
+	}
 	else if (leafField->level != 1)
 	{
 		/*
@@ -757,7 +767,7 @@ SerializeTextArrayTypeToPgDuck(ArrayType *array)
 	getTypeOutputInfo(TEXTARRAYOID, &outFuncId, &isvarlena);
 	fmgr_info(outFuncId, &outFunc);
 
-	return PGDuckSerialize(&outFunc, TEXTARRAYOID, arrayDatum);
+	return PGDuckSerialize(&outFunc, TEXTARRAYOID, arrayDatum, DATA_FORMAT_INVALID);
 }
 
 

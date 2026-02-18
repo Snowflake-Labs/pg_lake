@@ -530,6 +530,16 @@ GetFullDuckDBTypeNameForPGType(PGType postgresType)
 		return GetDuckDBStructDefinitionForPGType(postgresType.postgresTypeOid);
 	}
 
+	if (myType == DUCKDB_TYPE_INTERVAL)
+	{
+		/*
+		 * Intervals are stored as struct(months, days, microseconds) in
+		 * Parquet/Iceberg. We always emit the struct form so that composite
+		 * types containing intervals get the correct nested type definition.
+		 */
+		return "STRUCT(months BIGINT, days BIGINT, microseconds BIGINT)";
+	}
+
 	if (myType == DUCKDB_TYPE_INVALID)
 		myType = DUCKDB_TYPE_VARCHAR;
 
