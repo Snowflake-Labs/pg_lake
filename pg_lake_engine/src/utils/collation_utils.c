@@ -18,7 +18,16 @@
 #include "postgres.h"
 
 #include "pg_lake/util/collation_utils.h"
+#include "catalog/pg_collation.h"
 #include "utils/pg_locale.h"
+
+#if PG_VERSION_NUM >= 180000
+#include "access/htup_details.h"
+#include "catalog/pg_database.h"
+#include "miscadmin.h"
+#include "utils/builtins.h"
+#include "utils/syscache.h"
+#endif
 
 
 /*
@@ -32,10 +41,64 @@ IsNonCollatableOrC(Oid collation)
 	if (collation == InvalidOid)
 		return true;
 
+	if (collation == C_COLLATION_OID)
+		return true;
+
+	if (collation == DEFAULT_COLLATION_OID)
+	{
 #if PG_VERSION_NUM >= 180000
-	pg_locale_t locale = pg_newlocale_from_collation(collation);
-	return locale->ctype_is_c;
+		HeapTuple	tup;
+		Form_pg_database dbform;
+		bool		is_c = false;
+
+		tup = SearchSysCache1(DATABASEOID, ObjectIdGetDatum(MyDatabaseId));
+		if (!HeapTupleIsValid(tup))
+			elog(ERROR, "cache lookup failed for database %u", MyDatabaseId);
+		dbform = (Form_pg_database) GETSTRUCT(tup);
+
+		if (dbform->datlocprovider == COLLPROVIDER_LIBC)
+		{
+			Datum		d = SysCacheGetAttrNotNull(DATABASEOID, tup,
+												   Anum_pg_database_datcollate);
+
+			is_c = strcmp(TextDatumGetCString(d), "C") == 0;
+		}
+		else if (dbform->datlocprovider == COLLPROVIDER_BUILTIN)
+		{
+			Datum		d = SysCacheGetAttrNotNull(DATABASEOID, tup,
+												   Anum_pg_database_datlocale);
+
+			is_c = strcmp(TextDatumGetCString(d), "C") == 0;
+		}
+
+		ReleaseSysCache(tup);
+		return is_c;
 #else
-	return lc_ctype_is_c(collation);
+		char	   *localeptr;
+
+		if (default_locale.provider == COLLPROVIDER_ICU)
+		{
+			return false;
+		}
+		else if (default_locale.provider == COLLPROVIDER_LIBC)
+		{
+			localeptr = setlocale(LC_CTYPE, NULL);
+			if (!localeptr)
+				elog(ERROR, "invalid LC_CTYPE setting");
+		}
+#if PG_VERSION_NUM >= 170000
+		else if (default_locale.provider == COLLPROVIDER_BUILTIN)
+		{
+			localeptr = default_locale.info.builtin.locale;
+		}
 #endif
+		else
+			elog(ERROR, "unexpected collation provider '%c'",
+				 default_locale.provider);
+
+		return strcmp(localeptr, "C") == 0;
+#endif
+	}
+
+	return false;
 }
