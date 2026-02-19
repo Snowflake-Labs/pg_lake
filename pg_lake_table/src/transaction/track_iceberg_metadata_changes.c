@@ -69,6 +69,9 @@ typedef struct RestCatalogRequestPerTable
 	char	   *tableRestUrl;
 	char	   *tableIdentifier;
 
+	/* Per-table REST catalog connection info for multi-server support */
+	RestCatalogConnectionInfo *conn;
+
 	RestCatalogRequest *createTableRequest;
 	RestCatalogRequest *dropTableRequest;
 
@@ -274,7 +277,7 @@ PostAllRestCatalogRequests(void)
 			{
 				HttpResult	httpResult =
 					SendRequestToRestCatalog(HTTP_POST, requestPerTable->tableRestUrl,
-											 createTableRequest->body, PostHeadersWithAuth());
+											 createTableRequest->body, PostHeadersWithAuth(requestPerTable->conn));
 
 				if (httpResult.status != 200)
 				{
@@ -290,7 +293,7 @@ PostAllRestCatalogRequests(void)
 			{
 				HttpResult	httpResult =
 					SendRequestToRestCatalog(HTTP_DELETE, requestPerTable->tableRestUrl,
-											 NULL, DeleteHeadersWithAuth());
+											 NULL, DeleteHeadersWithAuth(requestPerTable->conn));
 
 				if (httpResult.status != 204)
 				{
@@ -312,9 +315,13 @@ PostAllRestCatalogRequests(void)
 	/*
 	 * Now that all create table requests have been posted, we can post all
 	 * the other modifications. All table modifications are sent in a single
-	 * HTTP request to ensure atomicity.
+	 * HTTP request per REST catalog host to ensure atomicity.
+	 *
+	 * With multiple REST catalog servers, we group batch requests by
+	 * connection host. Each host gets its own transaction commit request.
 	 */
 	char	   *catalogName = NULL;
+	RestCatalogConnectionInfo *batchConn = NULL;
 	bool		hasRestCatalogChanges = false;
 	StringInfo	batchRequestBody = makeStringInfo();
 
@@ -337,8 +344,8 @@ PostAllRestCatalogRequests(void)
 			continue;
 		}
 
-		/* TODO: can we ever have multiple catalogs? */
 		catalogName = requestPerTable->catalogName;
+		batchConn = requestPerTable->conn;
 
 		if (requestPerTable->createTableRequest != NULL &&
 			requestPerTable->dropTableRequest != NULL)
@@ -408,8 +415,8 @@ PostAllRestCatalogRequests(void)
 		appendStringInfoChar(batchRequestBody, ']');	/* close table-changes */
 		appendStringInfoChar(batchRequestBody, '}');	/* close json body */
 
-		char	   *url = psprintf(REST_CATALOG_TRANSACTION_COMMIT, RestCatalogHost, catalogName);
-		HttpResult	httpResult = SendRequestToRestCatalog(HTTP_POST, url, batchRequestBody->data, PostHeadersWithAuth());
+		char	   *url = psprintf(REST_CATALOG_TRANSACTION_COMMIT, batchConn->host, catalogName);
+		HttpResult	httpResult = SendRequestToRestCatalog(HTTP_POST, url, batchRequestBody->data, PostHeadersWithAuth(batchConn));
 
 		if (httpResult.status != 204)
 		{
@@ -599,6 +606,23 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 		memset(requestPerTable, 0, sizeof(RestCatalogRequestPerTable));
 		requestPerTable->relationId = relationId;
 
+		/* Resolve per-table REST catalog connection info */
+		RestCatalogConnectionInfo *conn = GetRestCatalogConnectionForRelation(relationId);
+		RestCatalogConnectionInfo *persistConn =
+			MemoryContextAlloc(TopTransactionContext, sizeof(RestCatalogConnectionInfo));
+
+		memcpy(persistConn, conn, sizeof(RestCatalogConnectionInfo));
+		persistConn->host = MemoryContextStrdup(TopTransactionContext, conn->host);
+		if (conn->oauthHostPath)
+			persistConn->oauthHostPath = MemoryContextStrdup(TopTransactionContext, conn->oauthHostPath);
+		if (conn->clientId)
+			persistConn->clientId = MemoryContextStrdup(TopTransactionContext, conn->clientId);
+		if (conn->clientSecret)
+			persistConn->clientSecret = MemoryContextStrdup(TopTransactionContext, conn->clientSecret);
+		if (conn->scope)
+			persistConn->scope = MemoryContextStrdup(TopTransactionContext, conn->scope);
+		requestPerTable->conn = persistConn;
+
 		requestPerTable->catalogName =
 			MemoryContextStrdup(TopTransactionContext, GetRestCatalogName(relationId));
 		requestPerTable->catalogNamespace =
@@ -615,7 +639,7 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 
 		requestPerTable->tableRestUrl =
 			MemoryContextStrdup(TopTransactionContext, psprintf(REST_CATALOG_TABLE,
-																RestCatalogHost,
+																persistConn->host,
 																requestPerTable->urlEncodedCatalogName,
 																requestPerTable->urlEncodedCatalogNamespace,
 																requestPerTable->urlEncodedCatalogTableName));
