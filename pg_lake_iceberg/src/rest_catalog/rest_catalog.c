@@ -44,6 +44,7 @@
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
+#include "pg_lake/util/catalog_type.h"
 #include "pg_lake/util/url_encode.h"
 #include "pg_lake/util/rel_utils.h"
 
@@ -159,6 +160,118 @@ iceberg_catalog_validator(PG_FUNCTION_ARGS)
 				 errmsg("\"host\" option is required for iceberg_catalog servers")));
 
 	PG_RETURN_VOID();
+}
+
+
+/*
+ * GetRestCatalogConnectionFromGUCs returns a RestCatalogConnectionInfo
+ * populated from the current GUC variables. Used for backward-compatible
+ * catalog='rest' tables.
+ */
+RestCatalogConnectionInfo *
+GetRestCatalogConnectionFromGUCs(void)
+{
+	RestCatalogConnectionInfo *conn = palloc0(sizeof(RestCatalogConnectionInfo));
+
+	conn->host = RestCatalogHost;
+	conn->oauthHostPath = RestCatalogOauthHostPath;
+	conn->clientId = RestCatalogClientId;
+	conn->clientSecret = RestCatalogClientSecret;
+	conn->scope = RestCatalogScope;
+	conn->authType = RestCatalogAuthType;
+	conn->enableVendedCredentials = RestCatalogEnableVendedCredentials;
+
+	return conn;
+}
+
+
+/*
+ * GetRestCatalogConnectionFromServer returns a RestCatalogConnectionInfo
+ * populated from the options of a ForeignServer created with the
+ * iceberg_catalog FDW.
+ */
+RestCatalogConnectionInfo *
+GetRestCatalogConnectionFromServer(const char *serverName)
+{
+	ForeignServer *server = GetForeignServerByName(serverName, false);
+	ForeignDataWrapper *fdw = GetForeignDataWrapper(server->fdwid);
+
+	if (strcmp(fdw->fdwname, ICEBERG_CATALOG_FDW_NAME) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("server \"%s\" does not use the iceberg_catalog foreign data wrapper",
+						serverName)));
+
+	RestCatalogConnectionInfo *conn = palloc0(sizeof(RestCatalogConnectionInfo));
+
+	/* Set defaults matching the GUC defaults */
+	conn->host = NULL;
+	conn->oauthHostPath = "";
+	conn->clientId = NULL;
+	conn->clientSecret = NULL;
+	conn->scope = "PRINCIPAL_ROLE:ALL";
+	conn->authType = REST_CATALOG_AUTH_TYPE_DEFAULT;
+	conn->enableVendedCredentials = true;
+
+	ListCell   *lc;
+
+	foreach(lc, server->options)
+	{
+		DefElem    *def = (DefElem *) lfirst(lc);
+
+		if (strcmp(def->defname, "host") == 0)
+			conn->host = defGetString(def);
+		else if (strcmp(def->defname, "client_id") == 0)
+			conn->clientId = defGetString(def);
+		else if (strcmp(def->defname, "client_secret") == 0)
+			conn->clientSecret = defGetString(def);
+		else if (strcmp(def->defname, "scope") == 0)
+			conn->scope = defGetString(def);
+		else if (strcmp(def->defname, "auth_type") == 0)
+		{
+			char	   *authType = defGetString(def);
+
+			conn->authType = (strcmp(authType, "horizon") == 0)
+				? REST_CATALOG_AUTH_TYPE_HORIZON
+				: REST_CATALOG_AUTH_TYPE_DEFAULT;
+		}
+		else if (strcmp(def->defname, "oauth_host_path") == 0)
+			conn->oauthHostPath = defGetString(def);
+		else if (strcmp(def->defname, "enable_vended_credentials") == 0)
+			conn->enableVendedCredentials = defGetBoolean(def);
+	}
+
+	if (conn->host == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
+				 errmsg("\"host\" option is required for iceberg_catalog server \"%s\"",
+						serverName)));
+
+	return conn;
+}
+
+
+/*
+ * GetRestCatalogConnectionForRelation returns the REST catalog connection
+ * info for the given relation. If the table uses catalog='rest', the
+ * connection is built from GUCs. Otherwise, the catalog option is treated
+ * as a server name and the connection is built from its options.
+ */
+RestCatalogConnectionInfo *
+GetRestCatalogConnectionForRelation(Oid relationId)
+{
+	ForeignTable *foreignTable = GetForeignTable(relationId);
+	char	   *catalog = GetStringOption(foreignTable->options, "catalog", false);
+
+	if (catalog == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("catalog option is not set for relation %u", relationId)));
+
+	if (pg_strncasecmp(catalog, REST_CATALOG_NAME, strlen(catalog)) == 0)
+		return GetRestCatalogConnectionFromGUCs();
+
+	return GetRestCatalogConnectionFromServer(catalog);
 }
 
 
