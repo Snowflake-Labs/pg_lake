@@ -738,10 +738,18 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 
 		if (hasRestCatalogOption && hasExternalCatalogReadOnlyOption)
 		{
-			ErrorIfRestNamespaceDoesNotExist(catalogName, catalogNamespace);
+			char	   *catalogOptionValue = GetStringOption(createStmt->options, "catalog", false);
+			RestCatalogConnectionInfo *conn;
+
+			if (pg_strncasecmp(catalogOptionValue, REST_CATALOG_NAME, strlen(catalogOptionValue)) == 0)
+				conn = GetRestCatalogConnectionFromGUCs();
+			else
+				conn = GetRestCatalogConnectionFromServer(catalogOptionValue);
+
+			ErrorIfRestNamespaceDoesNotExist(conn, catalogName, catalogNamespace);
 
 			metadataLocation =
-				GetMetadataLocationFromRestCatalog(catalogName, catalogNamespace, catalogTableName);
+				GetMetadataLocationFromRestCatalog(conn, catalogName, catalogNamespace, catalogTableName);
 		}
 		else if (hasObjectStoreCatalogOption && hasExternalCatalogReadOnlyOption)
 		{
@@ -948,7 +956,15 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		 * database name. We normally encode that in GetRestCatalogName()
 		 * etc., but here we need to do it early before the table is created.
 		 */
-		RegisterNamespaceToRestCatalog(get_database_name(MyDatabaseId),
+		char	   *catalogOptionValue = GetStringOption(createStmt->options, "catalog", false);
+		RestCatalogConnectionInfo *conn;
+
+		if (pg_strncasecmp(catalogOptionValue, REST_CATALOG_NAME, strlen(catalogOptionValue)) == 0)
+			conn = GetRestCatalogConnectionFromGUCs();
+		else
+			conn = GetRestCatalogConnectionFromServer(catalogOptionValue);
+
+		RegisterNamespaceToRestCatalog(conn, get_database_name(MyDatabaseId),
 									   get_namespace_name(namespaceId));
 	}
 
