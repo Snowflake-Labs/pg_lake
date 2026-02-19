@@ -20,17 +20,25 @@
  * PG Extension Base Test Hibernate
  *
  * This test extension demonstrates the hibernate/restart feature.
- * For now it runs in steady state like a normal worker.
+ * It supports two modes:
+ *
+ * - Delayed restart: worker runs for 5 seconds, then restarts after 5 seconds
+ * - No restart: worker runs for 2 seconds, then stops (can be woken up)
+ *
+ * The mode is controlled by the pg_extension_base_test_hibernate.no_restart GUC.
  *
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
 #include "fmgr.h"
 #include "miscadmin.h"
+#include "utils/guc.h"
 
 #include "pg_extension_base/base_workers.h"
 
 PG_MODULE_MAGIC;
+
+static bool NoRestart = false;
 
 /* function declarations */
 void		_PG_init(void);
@@ -45,7 +53,14 @@ PG_FUNCTION_INFO_V1(pg_extension_base_test_hibernate_main_worker);
 void
 _PG_init(void)
 {
-	/* No GUCs needed for now */
+	DefineCustomBoolVariable("pg_extension_base_test_hibernate.no_restart",
+							 "Whether to stop without automatic restart",
+							 NULL,
+							 &NoRestart,
+							 false,
+							 PGC_SIGHUP,
+							 0,
+							 NULL, NULL, NULL);
 }
 
 
@@ -58,12 +73,26 @@ pg_extension_base_test_hibernate_main_worker(PG_FUNCTION_ARGS)
 {
 	int32		workerId = PG_GETARG_INT32(0);
 
-	elog(LOG, "pg_extension_base_test_hibernate worker %d started", workerId);
-	elog(LOG, "pg_extension_base_test_hibernate worker %d sleeping for 5 seconds", workerId);
+	if (NoRestart)
+	{
+		elog(LOG, "pg_extension_base_test_hibernate worker %d started (no restart mode)", workerId);
+		elog(LOG, "pg_extension_base_test_hibernate worker %d sleeping for 2 seconds", workerId);
 
-	pg_usleep(5000000);
+		pg_usleep(2000000);
 
-	elog(LOG, "pg_extension_base_test_hibernate worker %d restarting in 5 seconds", workerId);
+		elog(LOG, "pg_extension_base_test_hibernate worker %d stopping", workerId);
 
-	PG_RETURN_INT64(5000);
+		PG_RETURN_INT64(BASE_WORKER_NO_RESTART);
+	}
+	else
+	{
+		elog(LOG, "pg_extension_base_test_hibernate worker %d started", workerId);
+		elog(LOG, "pg_extension_base_test_hibernate worker %d sleeping for 5 seconds", workerId);
+
+		pg_usleep(5000000);
+
+		elog(LOG, "pg_extension_base_test_hibernate worker %d restarting in 5 seconds", workerId);
+
+		PG_RETURN_INT64(5000);
+	}
 }

@@ -356,3 +356,140 @@ def test_hibernate_worker_restart_delay(superuser_conn):
     superuser_conn.commit()
 
     assert count_pg_extension_base_workers(superuser_conn) == 0
+
+
+def test_wakeup_worker(superuser_conn):
+    """
+    Test that a stopped worker can be woken up.
+
+    With no_restart mode enabled, the hibernate test worker:
+    - Runs for 2 seconds
+    - Stops (returns 0, no automatic restart)
+
+    We verify:
+    1. The worker starts and runs
+    2. The worker stops (no longer running)
+    3. After calling wakeup_worker, the worker restarts
+    """
+    # no_restart is PGC_SIGHUP, so we need ALTER SYSTEM + reload
+    # ALTER SYSTEM cannot run inside a transaction block
+    superuser_conn.rollback()
+    superuser_conn.autocommit = True
+    run_command(
+        "ALTER SYSTEM SET pg_extension_base_test_hibernate.no_restart TO on",
+        superuser_conn,
+    )
+    run_command("SELECT pg_reload_conf()", superuser_conn)
+    superuser_conn.autocommit = False
+
+    run_command(
+        "CREATE EXTENSION pg_extension_base_test_hibernate CASCADE", superuser_conn
+    )
+    superuser_conn.commit()
+
+    # Give the database starter time to start the worker
+    time.sleep(0.5)
+
+    # Worker should be running
+    assert count_pg_extension_base_workers(superuser_conn) == 1
+
+    # Wait for the worker to finish (runs for 2 seconds) and stop
+    time.sleep(3)
+
+    # Worker should be stopped (not running)
+    assert count_pg_extension_base_workers(superuser_conn) == 0
+
+    # Wake up the worker by name
+    run_command(
+        "SELECT extension_base.wakeup_worker('pg_extension_base_test_hibernate_main_worker')",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    # Give the database starter time to restart the worker
+    time.sleep(1)
+
+    # Worker should be running again
+    assert count_pg_extension_base_workers(superuser_conn) == 1
+
+    # Wait for the worker to finish and stop again
+    time.sleep(3)
+
+    # Worker should be stopped again
+    assert count_pg_extension_base_workers(superuser_conn) == 0
+
+    # Wake up using worker_id this time
+    worker_id = run_query(
+        "SELECT worker_id FROM extension_base.workers WHERE worker_name = 'pg_extension_base_test_hibernate_main_worker'",
+        superuser_conn,
+    )[0][0]
+    run_command(
+        f"SELECT extension_base.wakeup_worker({worker_id}::int)",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    time.sleep(1)
+
+    # Worker should be running again
+    assert count_pg_extension_base_workers(superuser_conn) == 1
+
+    # Clean up
+    run_command(
+        "DROP EXTENSION pg_extension_base_test_hibernate CASCADE", superuser_conn
+    )
+    superuser_conn.commit()
+
+    superuser_conn.autocommit = True
+    run_command(
+        "ALTER SYSTEM RESET pg_extension_base_test_hibernate.no_restart",
+        superuser_conn,
+    )
+    run_command("SELECT pg_reload_conf()", superuser_conn)
+    superuser_conn.autocommit = False
+
+    assert count_pg_extension_base_workers(superuser_conn) == 0
+
+
+def test_wakeup_delayed_worker(superuser_conn):
+    """
+    Test that wakeup_worker can wake up a worker that is in a delayed restart
+    (restart after N milliseconds), causing it to restart immediately.
+    """
+    run_command(
+        "CREATE EXTENSION pg_extension_base_test_hibernate CASCADE", superuser_conn
+    )
+    superuser_conn.commit()
+
+    # Give the database starter time to start the worker
+    time.sleep(0.5)
+
+    # Worker should be running
+    assert count_pg_extension_base_workers(superuser_conn) == 1
+
+    # Wait for the worker to finish (runs for 5 seconds) and enter delayed restart
+    time.sleep(6)
+
+    # Worker should be in delayed restart (5 second delay, not yet elapsed)
+    assert count_pg_extension_base_workers(superuser_conn) == 0
+
+    # Wake it up early
+    run_command(
+        "SELECT extension_base.wakeup_worker('pg_extension_base_test_hibernate_main_worker')",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    # Give the database starter time to restart the worker
+    time.sleep(1)
+
+    # Worker should be running again (woken up early)
+    assert count_pg_extension_base_workers(superuser_conn) == 1
+
+    # Clean up
+    run_command(
+        "DROP EXTENSION pg_extension_base_test_hibernate CASCADE", superuser_conn
+    )
+    superuser_conn.commit()
+
+    assert count_pg_extension_base_workers(superuser_conn) == 0

@@ -83,14 +83,15 @@
  * A base worker entry point function returns internal (Datum). The return
  * value controls whether and when the worker should be restarted:
  *
- *   BASE_WORKER_NO_RESTART (0): Clean exit, no restart
- *   BASE_WORKER_RESTART_IMMEDIATELY (-1): Restart immediately
- *   Any positive value: Restart after N milliseconds
+ *   BASE_WORKER_NO_RESTART (0): Clean exit, no automatic restart.
+ *     The worker can still be restarted later via WakeupBaseWorker()
+ *     or the wakeup_worker() SQL function.
+ *   Any positive value: Restart after N milliseconds. The worker can
+ *     also be woken up early via WakeupBaseWorker().
  *
- * Values less than -1 are treated as "no restart" (same as 0).
+ * Negative values are treated as "no restart" (same as 0).
  */
-#define BASE_WORKER_NO_RESTART          ((Datum) 0)
-#define BASE_WORKER_RESTART_IMMEDIATELY ((Datum) -1)
+#define BASE_WORKER_NO_RESTART ((Datum) 0)
 
 /* adjusted based on signals */
 extern PGDLLEXPORT volatile sig_atomic_t ReloadRequested;
@@ -109,5 +110,6 @@ extern PGDLLEXPORT int32 RegisterBaseWorker(char *workerName, Oid entryPointFunc
 											Oid extensionId);
 extern PGDLLEXPORT int32 DeregisterBaseWorker(char *workerName);
 extern PGDLLEXPORT int32 DeregisterBaseWorkerById(int32 workerId);
+extern PGDLLEXPORT void WakeupBaseWorker(int32 workerId);
 
 #endif

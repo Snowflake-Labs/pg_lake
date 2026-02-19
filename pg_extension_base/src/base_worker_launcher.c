@@ -332,6 +332,7 @@ static LockAcquireResult LockDatabaseStarter(Oid databaseId, LOCKMODE lockMode,
 static void PgExtensionBaseWorkerSharedMemoryExit(int code, Datum arg);
 
 /* functions called via UDFs */
+static int32 LookupBaseWorkerIdByName(char *workerName);
 static int32 InsertBaseWorkerRegistration(char *workerName, Oid extensionId,
 										  Oid entryPointFunctionId);
 static bool DatabaseIsTemplate(Oid databaseId);
@@ -367,6 +368,7 @@ static void BaseWorkerTransactionCallback(XactEvent event, void *arg);
 /* SQL-callable functions */
 PG_FUNCTION_INFO_V1(pg_extension_base_register_worker);
 PG_FUNCTION_INFO_V1(pg_extension_base_deregister_worker);
+PG_FUNCTION_INFO_V1(pg_extension_base_wakeup_worker);
 PG_FUNCTION_INFO_V1(pg_extension_base_list_base_workers);
 PG_FUNCTION_INFO_V1(pg_extension_base_list_database_starters);
 
@@ -1959,21 +1961,19 @@ PgExtensionBaseWorkerMain(Datum arg)
 	 * Our current design is not to loop here, but let the function decide
 	 * whether to loop.
 	 *
-	 * The return value indicates when the worker should be restarted: -1:
-	 * restart immediately 0: do not restart (clean exit) >0: restart after N
-	 * milliseconds
+	 * The return value indicates when the worker should be restarted:
+	 *    0: do not restart (clean exit), but can be restarted later via
+	 *       WakeupBaseWorker() or the wakeup_worker() SQL function.
+	 *   >0: restart after N milliseconds (can be woken up early)
 	 */
 	Datum		restartResult = FunctionCall1(&entryPoint, Int32GetDatum(workerId));
 	int64		restartDelayMs = DatumGetInt64(restartResult);
 
 	/*
-	 * If a restart was requested, store it in shared memory before the exit
-	 * handler runs. The exit handler will respect this setting.
-	 *
-	 * -1 means restart immediately, >0 means restart after N milliseconds. 0
-	 * or any other value means no restart.
+	 * If a delayed restart was requested, store it in shared memory before
+	 * the exit handler runs. The exit handler will respect this setting.
 	 */
-	if (restartDelayMs == -1 || restartDelayMs > 0)
+	if (restartDelayMs > 0)
 	{
 		LWLockAcquire(&BaseWorkerControl->lock, LW_EXCLUSIVE);
 
@@ -1984,11 +1984,7 @@ PgExtensionBaseWorkerMain(Datum arg)
 		{
 			workerEntry->needsRestart = true;
 			workerEntry->state = WORKER_RESTARTING;
-
-			if (restartDelayMs <= 0)
-				workerEntry->restartAfter = 0;	/* immediate */
-			else
-				workerEntry->restartAfter = GetDelayedTimestamp(restartDelayMs);
+			workerEntry->restartAfter = GetDelayedTimestamp(restartDelayMs);
 
 			SignalDatabaseStarterLocked(databaseId);
 		}
@@ -2301,6 +2297,109 @@ DeregisterBaseWorker_internal(int32 workerId)
 	}
 
 	LWLockRelease(&BaseWorkerControl->lock);
+
+	PG_RETURN_VOID();
+}
+
+
+/*
+ * WakeupBaseWorker restarts a base worker that is currently not running.
+ *
+ * This works regardless of whether the worker exited cleanly (returned 0)
+ * or is in a delayed restart (returned >0). In either case, the worker is
+ * marked for immediate restart and the database starter is signaled.
+ *
+ * If the worker is currently running, this is a no-op.
+ */
+void
+WakeupBaseWorker(int32 workerId)
+{
+	LWLockAcquire(&BaseWorkerControl->lock, LW_EXCLUSIVE);
+
+	bool		isFound = false;
+	BaseWorkerEntry *workerEntry = GetBaseWorkerEntry(MyDatabaseId, workerId, &isFound);
+
+	if (isFound &&
+		workerEntry->workerPid == 0 &&
+		workerEntry->state != WORKER_STARTING)
+	{
+		workerEntry->needsRestart = true;
+		workerEntry->restartAfter = 0;
+		SignalDatabaseStarterLocked(MyDatabaseId);
+	}
+
+	LWLockRelease(&BaseWorkerControl->lock);
+}
+
+
+/*
+ * LookupBaseWorkerIdByName looks up a base worker ID by name from the
+ * extension_base.workers table.
+ *
+ * Returns the worker ID or throws an error if not found.
+ */
+static int32
+LookupBaseWorkerIdByName(char *workerName)
+{
+	SPI_START_EXTENSION_OWNER(PgExtensionBase);
+
+	int			argCount = 1;
+	Oid			argTypes[] = {TEXTOID};
+	Datum		argValues[] = {CStringGetTextDatum(workerName)};
+	const char *argNulls = " ";
+	bool		readOnly = true;
+	long		limit = 0;
+
+	SPI_execute_with_args("select worker_id "
+						  "from " PG_EXTENSION_BASE_SCHEMA_NAME ".workers "
+						  "where worker_name = $1",
+						  argCount, argTypes, argValues, argNulls,
+						  readOnly, limit);
+
+	if (SPI_processed != 1)
+	{
+		ereport(ERROR, (errcode(ERRCODE_UNDEFINED_OBJECT),
+						errmsg("base worker \"%s\" does not exist", workerName)));
+	}
+
+	bool		isNull = false;
+	Datum		workerIdDatum = GET_SPI_DATUM(0, 1, &isNull);
+	int32		workerId = DatumGetInt32(workerIdDatum);
+
+	SPI_END();
+
+	return workerId;
+}
+
+
+/*
+ * pg_extension_base_wakeup_worker implements the extension_base.wakeup_worker
+ * function.
+ *
+ * It wakes up a sleeping base worker, causing it to restart immediately.
+ */
+Datum
+pg_extension_base_wakeup_worker(PG_FUNCTION_ARGS)
+{
+	Oid			argtype = get_fn_expr_argtype(fcinfo->flinfo, 0);
+	int32		workerId;
+
+	if (argtype == INT4OID)
+	{
+		workerId = PG_GETARG_INT32(0);
+	}
+	else if (argtype == TEXTOID)
+	{
+		char	   *workerName = text_to_cstring(PG_GETARG_TEXT_P(0));
+
+		workerId = LookupBaseWorkerIdByName(workerName);
+	}
+	else
+	{
+		ereport(ERROR, (errmsg("unrecognized argument type")));
+	}
+
+	WakeupBaseWorker(workerId);
 
 	PG_RETURN_VOID();
 }
