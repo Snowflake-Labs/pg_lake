@@ -68,15 +68,22 @@ GetIcebergCatalogType(Oid relationId)
 
 
 /*
- * HasRestCatalogTableOption returns true if the options contain
- * catalog='rest'.
+ * HasRestCatalogTableOption returns true if the catalog option indicates a
+ * REST catalog: either the literal value 'rest' or the name of an
+ * iceberg_catalog foreign server with TYPE 'rest'.
  */
 bool
 HasRestCatalogTableOption(List *options)
 {
 	char	   *catalog = GetStringOption(options, "catalog", false);
 
-	return catalog ? pg_strncasecmp(catalog, REST_CATALOG_NAME, strlen(catalog)) == 0 : false;
+	if (catalog == NULL)
+		return false;
+
+	if (pg_strncasecmp(catalog, REST_CATALOG_NAME, strlen(catalog)) == 0)
+		return true;
+
+	return IsServerBasedRestCatalog(options);
 }
 
 
@@ -103,4 +110,45 @@ HasReadOnlyOption(List *options)
 	char	   *readOnly = GetStringOption(options, "read_only", false);
 
 	return readOnly ? pg_strncasecmp(readOnly, "true", strlen("true")) == 0 : false;
+}
+
+
+/*
+ * IsServerBasedRestCatalog returns true if the catalog option refers to a
+ * ForeignServer created with the iceberg_catalog FDW whose TYPE is 'rest'.
+ * Returns false if the catalog value is a known literal ('rest',
+ * 'object_store', 'postgres') or if no matching server is found.
+ */
+bool
+IsServerBasedRestCatalog(List *options)
+{
+	char	   *catalog = GetStringOption(options, "catalog", false);
+
+	if (catalog == NULL)
+		return false;
+
+	/* Skip known literal catalog names */
+	if (pg_strncasecmp(catalog, REST_CATALOG_NAME, strlen(REST_CATALOG_NAME)) == 0 ||
+		pg_strncasecmp(catalog, OBJECT_STORE_CATALOG_NAME, strlen(OBJECT_STORE_CATALOG_NAME)) == 0 ||
+		pg_strncasecmp(catalog, POSTGRES_CATALOG_NAME, strlen(POSTGRES_CATALOG_NAME)) == 0)
+		return false;
+
+	/* Try to look up a server with this name */
+	bool		missingOK = true;
+	ForeignServer *server = GetForeignServerByName(catalog, missingOK);
+
+	if (server == NULL)
+		return false;
+
+	ForeignDataWrapper *fdw = GetForeignDataWrapper(server->fdwid);
+
+	if (strcmp(fdw->fdwname, "iceberg_catalog") != 0)
+		return false;
+
+	/* Check server TYPE if set */
+	if (server->servertype != NULL && *server->servertype != '\0')
+		return pg_strncasecmp(server->servertype, "rest", strlen("rest")) == 0;
+
+	/* No TYPE specified, assume rest (the only supported type for now) */
+	return true;
 }
