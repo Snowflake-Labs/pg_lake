@@ -20,9 +20,13 @@
 #include "postgres.h"
 #include "miscadmin.h"
 
+#include "access/reloptions.h"
+#include "catalog/pg_foreign_server.h"
 #include "common/base64.h"
 #include "commands/dbcommands.h"
+#include "commands/defrem.h"
 #include "foreign/foreign.h"
+#include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "utils/builtins.h"
 #include "utils/jsonb.h"
@@ -59,13 +63,104 @@ bool		RestCatalogEnableVendedCredentials = true;
 char	   *RestCatalogAccessToken = NULL;
 TimestampTz RestCatalogAccessTokenExpiry = 0;
 
-static char *GetRestCatalogAccessToken(bool forceRefreshToken);
-static void FetchRestCatalogAccessToken(char **accessToken, int *expiresIn);
-static void CreateNamespaceOnRestCatalog(const char *catalogName, const char *namespaceName);
+static char *GetRestCatalogAccessToken(RestCatalogConnectionInfo * conn, bool forceRefreshToken);
+static void FetchRestCatalogAccessToken(RestCatalogConnectionInfo * conn, char **accessToken, int *expiresIn);
+static void CreateNamespaceOnRestCatalog(RestCatalogConnectionInfo * conn, const char *catalogName, const char *namespaceName);
 static char *EncodeBasicAuth(const char *clientId, const char *clientSecret);
 static char *JsonbGetStringByPath(const char *jsonb_text, int nkeys,...);
-static List *GetHeadersWithAuth(void);
+static List *GetHeadersWithAuth(RestCatalogConnectionInfo * conn);
 static char *AppendIcebergPartitionSpecForRestCatalog(List *partitionSpecs);
+
+PG_FUNCTION_INFO_V1(iceberg_catalog_validator);
+
+/*
+ * Valid options for iceberg_catalog servers.
+ */
+static const char *iceberg_catalog_server_options[] = {
+	"host",
+	"client_id",
+	"client_secret",
+	"scope",
+	"auth_type",
+	"oauth_host_path",
+	"enable_vended_credentials",
+	NULL
+};
+
+
+static bool
+is_valid_iceberg_catalog_option(const char *keyword)
+{
+	for (int i = 0; iceberg_catalog_server_options[i] != NULL; i++)
+	{
+		if (strcmp(keyword, iceberg_catalog_server_options[i]) == 0)
+			return true;
+	}
+	return false;
+}
+
+
+/*
+ * iceberg_catalog_validator validates options for the iceberg_catalog FDW.
+ * Only server-level options are supported (host, credentials, etc.).
+ */
+Datum
+iceberg_catalog_validator(PG_FUNCTION_ARGS)
+{
+	List	   *options_list = untransformRelOptions(PG_GETARG_DATUM(0));
+	Oid			catalog = PG_GETARG_OID(1);
+	ListCell   *cell;
+	bool		hostProvided = false;
+
+	if (catalog != ForeignServerRelationId)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
+				 errmsg("iceberg_catalog options are only valid for SERVER objects")));
+	}
+
+	foreach(cell, options_list)
+	{
+		DefElem    *def = (DefElem *) lfirst(cell);
+
+		if (!is_valid_iceberg_catalog_option(def->defname))
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
+					 errmsg("invalid option \"%s\" for iceberg_catalog server", def->defname),
+					 errhint("Valid options are: host, client_id, client_secret, scope, "
+							 "auth_type, oauth_host_path, enable_vended_credentials.")));
+		}
+
+		if (strcmp(def->defname, "host") == 0)
+		{
+			hostProvided = true;
+		}
+		else if (strcmp(def->defname, "auth_type") == 0)
+		{
+			char	   *authType = defGetString(def);
+
+			if (strcmp(authType, "default") != 0 && strcmp(authType, "horizon") != 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("invalid auth_type option: \"%s\"", authType),
+						 errhint("Valid values are \"default\" and \"horizon\".")));
+		}
+		else if (strcmp(def->defname, "enable_vended_credentials") == 0)
+		{
+			/* validate boolean */
+			(void) defGetBoolean(def);
+		}
+	}
+
+	if (!hostProvided)
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
+				 errmsg("\"host\" option is required for iceberg_catalog servers")));
+
+	PG_RETURN_VOID();
+}
+
 
 /*
 * StartStageRestCatalogIcebergTableCreate stages the creation of an iceberg table
