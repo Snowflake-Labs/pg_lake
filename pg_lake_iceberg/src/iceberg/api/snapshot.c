@@ -114,7 +114,7 @@ GetCurrentSnapshot(IcebergTableMetadata * metadata, bool missingOk)
 * an error is thrown.
 */
 IcebergSnapshot *
-GetIcebergSnapshotViaId(IcebergTableMetadata * metadata, uint64_t snapshotId)
+GetIcebergSnapshotViaId(IcebergTableMetadata * metadata, uint64_t snapshotId, bool missingOk)
 {
 	int			snapshotIndex = 0;
 
@@ -127,6 +127,9 @@ GetIcebergSnapshotViaId(IcebergTableMetadata * metadata, uint64_t snapshotId)
 			return snapshot;
 		}
 	}
+
+	if (missingOk)
+		return NULL;
 
 	ereport(ERROR,
 			(errcode(ERRCODE_INTERNAL_ERROR),
