@@ -107,7 +107,6 @@ _PG_init(void)
 							 GUC_STANDARD,
 							 NULL, NULL, NULL);
 
-
 	if (EnableBaseWorkerLauncher)
 	{
 		InitializeBaseWorkerLauncher();

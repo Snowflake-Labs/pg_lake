@@ -1,0 +1,7 @@
+comment = 'Job scheduler using attached workers'
+default_version = '1.0'
+module_pathname = '$libdir/pg_job_scheduler'
+requires = 'pg_extension_base'
+relocatable = false
+schema = pg_catalog
+#!shared_preload_libraries

@@ -1,5 +1,5 @@
 # when adding a new extension, add to this list to get the standard targets supported
-EXTENSION_TARGETS = pg_extension_base pg_map pg_extension_updater pg_lake_engine pg_lake_copy pg_lake_table pg_lake_iceberg pg_lake_spatial pg_lake pg_lake_benchmark
+EXTENSION_TARGETS = pg_extension_base pg_job_scheduler pg_map pg_extension_updater pg_lake_engine pg_lake_copy pg_lake_table pg_lake_iceberg pg_lake_spatial pg_lake pg_lake_benchmark
 DUCK_TARGETS = pgduck_server duckdb_pglake
 ALL_TARGETS = $(DUCK_TARGETS) avro $(EXTENSION_TARGETS)
 
@@ -105,6 +105,12 @@ pg_extension_base:
 
 install-pg_extension_base: pg_extension_base
 	$(MAKE) -C pg_extension_base install
+
+pg_job_scheduler: pg_extension_base
+	$(MAKE) -C pg_job_scheduler
+
+install-pg_job_scheduler: install-pg_extension_base pg_job_scheduler
+	$(MAKE) -C pg_job_scheduler install
 
 pg_lake_engine: install-avro pg_extension_base pg_map pg_extension_updater
 	$(MAKE) -C pg_lake_engine
