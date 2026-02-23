@@ -441,9 +441,9 @@ install_postgres() {
     make -j "$JOBS"
     make install
 
-    # Install necessary contrib modules
+    # Install all contrib modules (required for tests)
     print_info "Installing contrib modules..."
-    make -C contrib/btree_gist install
+    make -C contrib install
 
     # Install test modules
     if [[ -d src/test/modules/injection_points ]]; then
