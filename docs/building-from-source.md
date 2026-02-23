@@ -624,7 +624,11 @@ npm install -g azurite
 
 ### Java and JDBC Driver
 
-Some tests verify pg_lake_iceberg table results using Apache Spark, which requires Java and the PostgreSQL JDBC driver:
+Some tests verify pg_lake_iceberg table results using Apache Spark, which requires Java 21+ and the PostgreSQL JDBC driver.
+
+**Note:** `./install.sh --with-test-deps` automatically installs Java 21+ and downloads the JDBC driver for you.
+
+To install manually:
 
 ```bash
 # Install Java 21 or higher
@@ -637,9 +641,13 @@ sudo dnf install -y java-21-openjdk
 # macOS
 brew install openjdk@21
 
-# Download PostgreSQL JDBC driver
-# Then set environment variable:
-export JDBC_DRIVER_PATH=/path/to/postgresql.jar
+# Download PostgreSQL JDBC driver (version 42.7.10)
+mkdir -p ~/pg_lake-deps/jdbc
+curl -L -o ~/pg_lake-deps/jdbc/postgresql-42.7.10.jar \
+  https://jdbc.postgresql.org/download/postgresql-42.7.10.jar
+
+# Set environment variable (add to ~/.bashrc or ~/.zshrc):
+export JDBC_DRIVER_PATH=~/pg_lake-deps/jdbc/postgresql-42.7.10.jar
 ```
 
 ## Running Tests

@@ -306,6 +306,6 @@ pg_lake_iceberg.default_location_prefix = 's3://bucket/prefix'
 
 ## CI and Testing Notes
 
-- JDBC driver path must be set for Spark verification tests: `JDBC_DRIVER_PATH=/usr/share/java/postgresql.jar`
-- Java 21+ required for Polaris REST catalog tests
-- Azure tests require `azurite` (install via npm: `npm install -g azurite`)
+- JDBC driver path must be set for Spark verification tests: `JDBC_DRIVER_PATH=~/pg_lake-deps/jdbc/postgresql-42.7.10.jar` (automatically installed by `./install.sh --with-test-deps`)
+- Java 21+ required for Polaris REST catalog tests (automatically installed by `./install.sh --with-test-deps`)
+- Azure tests require `azurite` (install via npm: `npm install -g azurite`, or use `./install.sh --with-test-deps`)

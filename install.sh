@@ -672,6 +672,66 @@ install_test_deps() {
         print_info "pipenv already installed"
     fi
 
+    # Java 21+ (needed for Spark verification tests and Polaris catalog tests)
+    if command -v java &>/dev/null; then
+        # Check Java version
+        JAVA_VERSION=$(java -version 2>&1 | head -1 | sed -n 's/.*version "\([0-9]*\).*/\1/p')
+        if [[ -n "$JAVA_VERSION" ]] && [[ "$JAVA_VERSION" -ge 21 ]]; then
+            print_info "Java $JAVA_VERSION already installed"
+        else
+            print_warning "Java version is $JAVA_VERSION but 21+ is required for tests"
+            print_info "Installing Java 21..."
+            case $OS in
+                debian)
+                    sudo apt-get install -y openjdk-21-jdk
+                    ;;
+                rhel)
+                    sudo dnf install -y java-21-openjdk
+                    ;;
+                macos)
+                    brew install openjdk@21
+                    # Add to PATH for this session
+                    export PATH="/opt/homebrew/opt/openjdk@21/bin:$PATH"
+                    ;;
+            esac
+        fi
+    else
+        print_info "Installing Java 21..."
+        case $OS in
+            debian)
+                sudo apt-get install -y openjdk-21-jdk
+                ;;
+            rhel)
+                sudo dnf install -y java-21-openjdk
+                ;;
+            macos)
+                brew install openjdk@21
+                export PATH="/opt/homebrew/opt/openjdk@21/bin:$PATH"
+                ;;
+        esac
+    fi
+
+    # PostgreSQL JDBC driver (needed for Spark verification tests)
+    JDBC_DIR="$SOURCE_DIR/jdbc"
+    JDBC_VERSION="42.7.10"
+    JDBC_JAR="$JDBC_DIR/postgresql-${JDBC_VERSION}.jar"
+
+    if [[ -f "$JDBC_JAR" ]]; then
+        print_info "PostgreSQL JDBC driver already downloaded"
+    else
+        print_info "Downloading PostgreSQL JDBC driver ${JDBC_VERSION}..."
+        mkdir -p "$JDBC_DIR"
+        if command -v curl &>/dev/null; then
+            curl -L -o "$JDBC_JAR" "https://jdbc.postgresql.org/download/postgresql-${JDBC_VERSION}.jar"
+        elif command -v wget &>/dev/null; then
+            wget -O "$JDBC_JAR" "https://jdbc.postgresql.org/download/postgresql-${JDBC_VERSION}.jar"
+        else
+            print_error "Neither curl nor wget found. Please install one to download JDBC driver."
+            print_error "Or download manually from: https://jdbc.postgresql.org/download/postgresql-${JDBC_VERSION}.jar"
+            print_error "And place it at: $JDBC_JAR"
+        fi
+    fi
+
     print_info "Test dependencies installed successfully"
 }
 
@@ -734,13 +794,21 @@ print_summary() {
     echo "   Query data lake files: docs/query-data-lake-files.md"
     echo
 
-    if [[ $BUILD_POSTGRES -eq 1 ]] || [[ -d "$SOURCE_DIR/vcpkg" ]] || [[ "$OS" == "macos" ]]; then
+    if [[ $BUILD_POSTGRES -eq 1 ]] || [[ -d "$SOURCE_DIR/vcpkg" ]] || [[ $WITH_TEST_DEPS -eq 1 ]] || [[ "$OS" == "macos" ]]; then
         echo -e "${YELLOW}Environment variables to add to your ~/.bashrc or ~/.zshrc:${NC}"
         if [[ $BUILD_POSTGRES -eq 1 ]]; then
             echo "   export PATH=$PG_BIN:\$PATH"
         fi
         if [[ -d "$SOURCE_DIR/vcpkg" ]]; then
             echo "   export VCPKG_TOOLCHAIN_PATH=$SOURCE_DIR/vcpkg/scripts/buildsystems/vcpkg.cmake"
+        fi
+        if [[ $WITH_TEST_DEPS -eq 1 ]]; then
+            JDBC_DIR="$SOURCE_DIR/jdbc"
+            JDBC_VERSION="42.7.10"
+            JDBC_JAR="$JDBC_DIR/postgresql-${JDBC_VERSION}.jar"
+            if [[ -f "$JDBC_JAR" ]]; then
+                echo "   export JDBC_DRIVER_PATH=$JDBC_JAR"
+            fi
         fi
         if [[ "$OS" == "macos" ]]; then
             echo "   export PATH=\"/opt/homebrew/opt/bison/bin:/opt/homebrew/opt/flex/bin:\$PATH\""
