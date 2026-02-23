@@ -49,8 +49,7 @@ def test_server_start(clean_socket_path):
     )
     assert is_server_listening(socket_path)
     assert has_duckdb_created_file(DUCKDB_DATABASE_FILE_PATH)
-    server.terminate()
-    server.wait()
+    terminate_process(server)
 
 
 @pytest.mark.skipif(
@@ -64,8 +63,7 @@ def test_server_start_abstract_socket():
     )
     assert is_server_listening(socket_path)
     assert has_duckdb_created_file(DUCKDB_DATABASE_FILE_PATH)
-    server.terminate()
-    server.wait()
+    terminate_process(server)
 
 
 def test_multiple_server_instances_on_same_socket(clean_socket_path):
@@ -89,10 +87,8 @@ def test_multiple_server_instances_on_same_socket(clean_socket_path):
     assert is_server_listening(socket_path)
 
     # Clean up
-    server1.terminate()
-    server1.wait()
-    server2.terminate()
-    server2.wait()
+    terminate_process(server1)
+    terminate_process(server2)
 
 
 @pytest.mark.skipif(
@@ -120,10 +116,8 @@ def test_multiple_server_instances_on_same_abstract_socket():
     assert is_server_listening(socket_path)
 
     # Clean up
-    server1.terminate()
-    server1.wait()
-    server2.terminate()
-    server2.wait()
+    terminate_process(server1)
+    terminate_process(server2)
 
 
 def test_multiple_server_instances_on_duckdb_file_path_socket(clean_socket_path):
@@ -220,10 +214,8 @@ def test_two_servers_different_ports(clean_socket_path):
     assert has_duckdb_created_file("/tmp/data1.db")
     assert has_duckdb_created_file("/tmp/data2.db")
 
-    server1.terminate()
-    server1.wait()
-    server2.terminate()
-    server2.wait()
+    terminate_process(server1)
+    terminate_process(server2)
 
 
 @pytest.mark.skipif(
@@ -261,10 +253,8 @@ def test_two_servers_different_abstract_ports():
     assert has_duckdb_created_file("/tmp/data1.db")
     assert has_duckdb_created_file("/tmp/data2.db")
 
-    server1.terminate()
-    server1.wait()
-    server2.terminate()
-    server2.wait()
+    terminate_process(server1)
+    terminate_process(server2)
 
 
 def test_two_servers_different_paths(clean_socket_path):
@@ -298,10 +288,8 @@ def test_two_servers_different_paths(clean_socket_path):
         assert is_server_listening(socket_path1)
         assert is_server_listening(socket_path2)
 
-        server1.terminate()
-        server1.wait()
-        server2.terminate()
-        server2.wait()
+        terminate_process(server1)
+        terminate_process(server2)
 
 
 # Failure scenario tests
@@ -312,8 +300,7 @@ def test_server_invalid_port(clean_socket_path):
     )
     server.poll()
     assert server.returncode != 0
-    server.terminate()
-    server.wait()
+    terminate_process(server)
 
 
 def test_server_excessively_high_port(clean_socket_path):
@@ -328,8 +315,7 @@ def test_server_excessively_high_port(clean_socket_path):
     )
     server.poll()
     assert server.returncode != 0
-    server.terminate()
-    server.wait()
+    terminate_process(server)
 
 
 def test_server_with_nonexistent_socket_directory(clean_socket_path):
@@ -339,8 +325,7 @@ def test_server_with_nonexistent_socket_directory(clean_socket_path):
     )
     server.poll()
     assert server.returncode != 0
-    server.terminate()
-    server.wait()
+    terminate_process(server)
 
 
 def test_server_exit_code_and_error_message_for_invalid_socket(clean_socket_path):
@@ -349,7 +334,7 @@ def test_server_exit_code_and_error_message_for_invalid_socket(clean_socket_path
         ["--unix_socket_directory", invalid_socket_path, "--port", str(PGDUCK_PORT)]
     )
     assert server.returncode != 0
-    server.terminate()
+    terminate_process(server)
 
 
 def test_long_unix_socket_path(clean_socket_path):
@@ -358,7 +343,7 @@ def test_long_unix_socket_path(clean_socket_path):
         ["--unix_socket_directory", long_socket_path, "--port", str(PGDUCK_PORT)]
     )
     assert server.returncode != 0
-    server.terminate()
+    terminate_process(server)
 
 
 @pytest.mark.parametrize("use_debug", [False, True])
@@ -401,8 +386,7 @@ def test_server_debug_messages(clean_socket_path, use_debug):
     cur.close()
     conn.close()
 
-    server.terminate()
-    server.wait()
+    terminate_process(server)
 
 
 def test_server_pidfile(clean_socket_path):
@@ -427,10 +411,23 @@ def test_server_pidfile(clean_socket_path):
     assert is_server_listening(socket_path)
     assert os.path.exists(pidfile_path)
 
-    # test sending external signal
+    # Give the server a moment to finish handling the is_server_listening connection
+    time.sleep(0.1)
 
+    # Verify the server removes its pidfile on clean SIGTERM shutdown.
+    # Don't use terminate_process() here: its SIGKILL fallback would
+    # bypass the server's signal handler and leave the pidfile behind.
+    # Use a generous timeout (60s) to allow for clean shutdown even under
+    # heavy load or when multiple test instances are running concurrently.
     server.terminate()
-    server.wait()
+    try:
+        server.wait(timeout=60)
+    except subprocess.TimeoutExpired:
+        server.kill()
+        server.wait(timeout=10)
+        pytest.fail(
+            "server did not exit on SIGTERM; pidfile cleanup could not be verified"
+        )
 
     time.sleep(1)
 

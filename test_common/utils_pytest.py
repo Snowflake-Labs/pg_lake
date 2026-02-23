@@ -12,6 +12,7 @@ import os
 import zoneinfo
 import math
 import signal
+import atexit
 import shutil
 import pytest
 import grp
@@ -21,8 +22,6 @@ import boto3
 import server_params
 import threading
 from pyiceberg.catalog.sql import SqlCatalog
-from pyiceberg.catalog.rest import RestCatalog
-from pyiceberg.exceptions import NamespaceAlreadyExistsError
 from urllib.parse import urlparse
 import json
 import platform
@@ -76,15 +75,13 @@ def get_pgduck_server_path():
     return Path(pgduck_server)
 
 
-def get_polaris_server_path():
-
-    base_dir = Path(__file__).resolve().parent
-    polaris_server_path = base_dir / "rest_catalog/rest_catalog_server.sh"
-
-    return polaris_server_path
-
-
 def setup_pgduck_server():
+
+    # Stop any leftover pgduck_server from a previous interrupted run.
+    # This must happen before the "already running" check because a stale
+    # server may still be listening but its S3/GCS secrets point to mock
+    # servers from a previous (now-dead) test session.
+    stop_pgduck_server()
 
     remove_duckdb_cache()
 
@@ -156,8 +153,14 @@ def setup_pgduck_server():
         str(init_file_path),
         "--cache_dir",
         str(server_params.PGDUCK_CACHE_DIR),
+        "--pidfile",
+        server_params.PGDUCK_PID_FILE,
         "--debug",
     ]
+
+    # Register cleanup before starting so the process is stopped even
+    # when the test process is interrupted and fixture teardown is skipped.
+    atexit.register(stop_pgduck_server)
 
     server, output_queue, stderr_thread = capture_output_queue(
         start_server_in_background(args, True)
@@ -167,6 +170,11 @@ def setup_pgduck_server():
         Path(server_params.PGDUCK_UNIX_DOMAIN_PATH)
         / f".s.PGSQL.{server_params.PGDUCK_PORT}"
     )
+
+    # Wait for the server to create the socket before attempting to stat it
+    if not is_server_listening(socket_path):
+        raise RuntimeError(f"Server failed to start - socket not listening: {socket_path}")
+
     socket_stat = os.stat(socket_path)
 
     # check socket permissions
@@ -186,50 +194,51 @@ def setup_pgduck_server():
     return server, output_queue, stderr_thread
 
 
-def start_polaris_server_in_background():
-    polaris_server_path = get_polaris_server_path()
-    if not polaris_server_path.exists():
-        raise FileNotFoundError(f"Executable not found: {polaris_server_path}")
+def stop_process_via_pidfile(pid_file, timeout=10):
+    """Stop a process identified by a PID file.
 
-    env = os.environ.copy()
-    env.update(
-        {
-            "PGHOST": server_params.PG_HOST,
-            "PGPORT": str(server_params.PG_PORT),
-            "PGUSER": server_params.PG_USER,
-            "PGDATABASE": server_params.PG_DATABASE,
-            "PGPASSWORD": server_params.PG_PASSWORD,
-            "CLIENT_ID": "client_id",
-            "CLIENT_SECRET": "client_secret",
-            "AWS_ROLE_ARN": AWS_ROLE_ARN,
-            # todo: this polaris server only works for the default database
-            # in the regression tests.
-            "STORAGE_LOCATION": f"s3://{TEST_BUCKET}/{server_params.PG_DATABASE}",
-            "POLARIS_HOSTNAME": server_params.POLARIS_HOSTNAME,
-            "POLARIS_PORT": str(server_params.POLARIS_PORT),
-            "POLARIS_PRINCIPAL_CREDS_FILE": server_params.POLARIS_PRINCIPAL_CREDS_FILE,
-            "POLARIS_PYICEBERG_SAMPLE": server_params.POLARIS_PYICEBERG_SAMPLE,
-            "POLARIS_PID_FILE": server_params.POLARIS_PID_FILE,
-        }
-    )
+    Reads the PID from *pid_file*, sends SIGTERM, waits up to *timeout*
+    seconds, and escalates to SIGKILL if the process is still alive.
+    The PID file is removed afterwards.  Safe to call when the process
+    is already stopped or the PID file does not exist.
+    """
+    pid_path = Path(pid_file)
+    if not pid_path.exists():
+        return
 
-    log_path = Path("/tmp/polaris_startup.log").resolve()
-    log_file = log_path.open("w+", buffering=1)
+    try:
+        pid = int(pid_path.read_text().strip())
+    except (ValueError, OSError):
+        return
 
-    proc = subprocess.Popen(
-        [str(polaris_server_path), "--purge", "--no-wait"],
-        stdout=log_file,
-        stderr=subprocess.STDOUT,
-        env=env,
-        start_new_session=True,
-    )
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        # Already gone
+        pid_path.unlink(missing_ok=True)
+        return
 
-    exit_code = proc.wait()
+    # Wait for the process to exit
+    for _ in range(timeout * 10):
+        try:
+            os.kill(pid, 0)  # check if alive
+        except ProcessLookupError:
+            pid_path.unlink(missing_ok=True)
+            return
+        time.sleep(0.1)
 
-    if exit_code != 0:
-        raise Exception(f"polaris server start failed with return code {exit_code}")
+    # Still alive after timeout – escalate to SIGKILL
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
-    return proc
+    pid_path.unlink(missing_ok=True)
+
+
+def stop_pgduck_server(timeout=10):
+    """Stop the pgduck_server process using its PID file."""
+    stop_process_via_pidfile(server_params.PGDUCK_PID_FILE, timeout)
 
 
 def capture_output_queue(server):
@@ -278,9 +287,23 @@ def capture_output(file, output_queue):
         with file as pipe:
             for line in iter(pipe.readline, ""):
                 output_queue.put(line)
-                print(line)
+                print(line, end="")
+    except UnicodeDecodeError:
+        # Server stderr may contain non-UTF-8 bytes; ignore and stop reading.
+        pass
     finally:
         output_queue.put(None)
+
+
+def terminate_server(server, stderr_thread, timeout=10):
+    """Terminate a pgduck_server process and its output capture thread.
+
+    Sends SIGTERM, waits up to `timeout` seconds, then sends SIGKILL if still
+    alive.  The stderr capture thread is joined with the same timeout so that
+    test teardown never hangs indefinitely.
+    """
+    terminate_process(server, timeout=timeout)
+    stderr_thread.join(timeout=timeout)
 
 
 def perform_query(query, conn):
@@ -301,6 +324,30 @@ def get_server_output(output_queue):
         pass
 
     return server_output
+
+
+def terminate_process(proc, timeout=10):
+    """Terminate a subprocess with timeout, falling back to SIGKILL.
+
+    Sends SIGTERM first, then escalates to SIGKILL if the process does
+    not exit within ``timeout`` seconds.  Safe to call on already-exited
+    processes.
+    """
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=timeout)
+
+
+# Tracks processes spawned by start_server_in_background() so that the
+# cleanup_test_servers autouse fixture can terminate any servers that a
+# test failed to clean up (e.g. when an assertion fails before the cleanup
+# code runs).
+spawned_test_servers = []
 
 
 def start_server_in_background(command, need_output=False):
@@ -335,6 +382,7 @@ def start_server_in_background(command, need_output=False):
         env=extra_env,
         start_new_session=True,
     )
+    spawned_test_servers.append(process)
     return process
 
 
@@ -352,7 +400,10 @@ def is_server_listening(socket_path, timeout=5, interval=0.01):
         if socket_path_str.startswith("\0") or Path(socket_path_str).exists():
             try:
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                    # Set a short timeout to avoid hanging connections
+                    s.settimeout(1.0)
                     s.connect(socket_path_str)
+                    # Socket will be automatically closed when exiting the with block
                 print("is_server_listening: socket connected")
                 return True
             except socket.error as e:
@@ -374,6 +425,9 @@ def has_duckdb_created_file(duckdb_database_file_path):
 
 
 def start_postgres(db_path, db_user, db_port):
+    # Stop any leftover PostgreSQL from a previous interrupted run.
+    stop_postgres(db_path)
+
     # Ensure the database directory is clean
     if os.path.exists(db_path):
         shutil.rmtree(db_path)
@@ -425,6 +479,12 @@ def start_postgres(db_path, db_user, db_port):
 
         # Run pg_upgrade
         run_pg_upgrade(old_db_path, db_path, upgrade_from_bindir)
+
+    # Register cleanup before starting so PostgreSQL is stopped even when
+    # the test process is interrupted (e.g. Ctrl+C) and fixture teardown
+    # is skipped.  stop_postgres() is safe to call when PostgreSQL is not
+    # running.
+    atexit.register(stop_postgres, db_path)
 
     subprocess.run(
         [
@@ -622,6 +682,9 @@ def open_pg_conn(user=server_params.PG_USER):
 
 
 def stop_postgres(db_path, bindir=PG_BINDIR):
+    pidfile = os.path.join(db_path, "postmaster.pid")
+    if not os.path.exists(pidfile):
+        return
     subprocess.run([f"{bindir}/pg_ctl", "-D", db_path, "stop"])
 
 
@@ -738,6 +801,7 @@ def run_command_outside_tx(query_list, raise_error=True):
         conn.close()
 
 
+
 # Example usage for thread_run_query() and thread_run_command():
 #   thread1 = thread_run_query("SELECT * FROM your_table", conn)
 #   thread2 = thread_run_command("UPDATE your_table SET field='value'", conn)
@@ -826,7 +890,9 @@ def start_azurite():
     if azurite_tmp_dir.exists():
         shutil.rmtree(azurite_tmp_dir, ignore_errors=True)
 
-    process = subprocess.Popen(["azurite", "--location", str(azurite_tmp_dir)])
+    process = subprocess.Popen(
+        ["azurite", "--location", str(azurite_tmp_dir), "--skipApiVersionCheck"]
+    )
 
     # Wait a bit for blob storage to start
     # If it doesn't, the SDK will still retry, but that might add more delay
@@ -1180,8 +1246,6 @@ def assert_query_result_on_duckdb_and_pg(duckdb_conn, pg_conn, duckdb_query, pg_
     return pg_result
 
 
-
-
 def install_duckdb_extension(duckdb_conn, extension):
     run_command(f"INSTALL {extension};", duckdb_conn)
     run_command(f"LOAD {extension};", duckdb_conn)
@@ -1395,41 +1459,6 @@ def create_iceberg_test_catalog(pg_conn):
         },
     )
     catalog.create_namespace("public")
-
-    return catalog
-
-
-def create_iceberg_rest_catalog(namespace):
-
-    creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
-    client_id = creds["credentials"]["clientId"]
-    client_secret = creds["credentials"]["clientSecret"]
-
-    # Polaris REST endpoints
-    base_uri = f"http://{server_params.POLARIS_HOSTNAME}:{server_params.POLARIS_PORT}/api/catalog"
-    oauth_token_url = f"http://{server_params.POLARIS_HOSTNAME}:{server_params.POLARIS_PORT}/api/catalog/v1/oauth/tokens"
-
-    catalog = RestCatalog(
-        "pyiceberg",  # local name for the catalog in your test
-        **{
-            # REST Catalog connection (Polaris)
-            "uri": base_uri,  # required
-            "warehouse": "postgres",  # Polaris catalog name
-            "oauth2-server-uri": oauth_token_url,  # token endpoint
-            "scope": "PRINCIPAL_ROLE:ALL",  # typical Polaris scope
-            "credential": f"{client_id}:{client_secret}",  # "id:secret"
-            # S3/Moto settings (same as your JDBC helper)
-            "s3.endpoint": f"http://localhost:{MOTO_PORT}",
-            "s3.access-key-id": TEST_AWS_ACCESS_KEY_ID,
-            "s3.secret-access-key": TEST_AWS_SECRET_ACCESS_KEY,
-            "s3.path-style-access": "true",
-        },
-    )
-
-    try:
-        catalog.create_namespace(f"{namespace}")
-    except NamespaceAlreadyExistsError:
-        pass  # ignore only this case
 
     return catalog
 
@@ -1740,6 +1769,146 @@ def extension(superuser_conn, pg_conn, app_user):
     superuser_conn.commit()
 
 
+def stop_moto_server(server, timeout=5):
+    """Stop a ThreadedMotoServer, handling edge cases.
+
+    - If the server thread failed to bind (``_server`` is None),
+      skip shutdown to avoid blocking forever.
+    - ``shutdown()`` is run in a helper thread with a *timeout* so we
+      never block indefinitely.
+    - ``server_close()`` is called afterwards to close the listening
+      socket immediately (avoids TCP TIME_WAIT that blocks the next
+      test session from binding the same port).
+    """
+    if server is None:
+        return
+
+    inner = getattr(server, "_server", None)
+    if inner is None:
+        # Server thread never created the WSGI server (e.g. bind failed)
+        return
+
+    # Run stop() in a thread so we can enforce a timeout
+    t = threading.Thread(target=server.stop, daemon=True)
+    t.start()
+    t.join(timeout=timeout)
+
+    # Close the listening socket to release the port immediately
+    try:
+        inner.server_close()
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Singleton caches for session-scoped fixtures.
+#
+# Every test file does ``from utils_pytest import *`` which imports
+# @pytest.fixture-decorated functions into the *test module* namespace.
+# Pytest discovers them there as module-local fixtures that shadow the
+# conftest versions.  When transitioning between test files, pytest may
+# create a *second* instance of the same session fixture.
+#
+# The caches below ensure the underlying resource (mock server, process,
+# …) is only created once, regardless of how many times pytest calls the
+# fixture function.
+# ---------------------------------------------------------------------------
+_mock_s3_cache = None
+_gcs_cache = None
+_azure_cache = None
+_pgduck_started = False
+_postgres_started = False
+
+
+@pytest.fixture(scope="session")
+def mock_s3():
+    """Creates a single Moto S3 instance shared across the session."""
+    global _mock_s3_cache
+    if _mock_s3_cache is not None:
+        yield _mock_s3_cache
+        return
+    client, server = create_mock_s3()
+    _mock_s3_cache = (client, server)
+    atexit.register(stop_moto_server, server)
+    yield client, server
+    stop_moto_server(server)
+
+
+@pytest.fixture(scope="session")
+def s3(mock_s3):
+    """Returns the S3 client from the shared mock S3 instance."""
+    client, _ = mock_s3
+    return client
+
+
+@pytest.fixture(scope="session")
+def s3_server(mock_s3):
+    """Returns the server from the shared mock S3 instance."""
+    _, server = mock_s3
+    return server
+
+
+@pytest.fixture(scope="session")
+def gcs():
+    global _gcs_cache
+    if _gcs_cache is not None:
+        yield _gcs_cache
+        return
+    client, server = create_mock_gcs()
+    _gcs_cache = client
+    atexit.register(stop_moto_server, server)
+    yield client
+    stop_moto_server(server)
+
+
+@pytest.fixture(scope="session")
+def azure():
+    global _azure_cache
+    if _azure_cache is not None:
+        yield _azure_cache
+        return
+    client, server = create_mock_azure_blob_storage()
+    _azure_cache = client
+    atexit.register(terminate_process, server)
+    yield client
+    terminate_process(server)
+
+
+@pytest.fixture(scope="session")
+def pgduck_server(installcheck, s3):
+    global _pgduck_started
+    if _pgduck_started:
+        yield
+        return
+    if installcheck:
+        remove_duckdb_cache()
+        _pgduck_started = True
+        yield None
+    else:
+        setup_pgduck_server()
+        _pgduck_started = True
+        yield
+        stop_pgduck_server()
+
+
+@pytest.fixture(scope="session")
+def postgres(installcheck, pgduck_server):
+    global _postgres_started
+    if _postgres_started:
+        yield
+        return
+    if not installcheck:
+        start_postgres(
+            server_params.PG_DIR, server_params.PG_USER, server_params.PG_PORT
+        )
+    _postgres_started = True
+
+    yield
+
+    if not installcheck:
+        stop_postgres(server_params.PG_DIR)
+
+
 @pytest.fixture(scope="module")
 def pg_conn(postgres, app_user):
     conn = open_pg_conn(app_user)
@@ -1932,7 +2101,15 @@ def file_sort_key(file_entry):
 # then compare results
 # this should be called after VACUUM which triggers removal of
 # unreferenced files
-def assert_iceberg_s3_file_consistency(pg_conn, s3, table_namespace, table_name, metadata_location=None, current_metadata_path=None, prev_metadata_path=None):
+def assert_iceberg_s3_file_consistency(
+    pg_conn,
+    s3,
+    table_namespace,
+    table_name,
+    metadata_location=None,
+    current_metadata_path=None,
+    prev_metadata_path=None,
+):
 
     files_via_s3_list = iceberg_s3_list_all_files_for_table(
         pg_conn, s3, table_namespace, table_name, metadata_location
@@ -1995,7 +2172,9 @@ def iceberg_get_referenced_files_metadata_path(pg_conn, metadata_location):
     return referenced_files
 
 
-def iceberg_s3_list_all_files_for_table(pg_conn, s3, table_namespace, table_name, table_location=None):
+def iceberg_s3_list_all_files_for_table(
+    pg_conn, s3, table_namespace, table_name, table_location=None
+):
 
     if table_location is None:
         metadata_location = run_query(
@@ -2130,10 +2309,41 @@ def installcheck(request):
     return myopt
 
 
+# when --installcheck is passed to pytests,
+# override the variables to point to the
+# official pgduck_server settings
+# this trick helps us to use the existing
+# pgduck_server
+@pytest.fixture(autouse=True, scope="session")
+def configure_server_params(request):
+    if request.config.getoption("--installcheck"):
+        server_params.PGDUCK_PORT = 5332
+        server_params.DUCKDB_DATABASE_FILE_PATH = "/tmp/duckdb.db"
+        server_params.PGDUCK_UNIX_DOMAIN_PATH = "/tmp"
+        server_params.PGDUCK_CACHE_DIR = "/tmp/cache"
+
+        # Access environment variables if exists
+        server_params.PG_DATABASE = os.getenv(
+            "PGDATABASE", "regression"
+        )  # 'postgres' or a default
+        server_params.PG_USER = os.getenv(
+            "PGUSER", "postgres"
+        )  # 'postgres' or a postgres
+        server_params.PG_PASSWORD = os.getenv(
+            "PGPASSWORD", "postgres"
+        )  # 'postgres' or a postgres
+        server_params.PG_PORT = os.getenv("PGPORT", "5432")  # '5432' or a default
+        server_params.PG_HOST = os.getenv(
+            "PGHOST", "localhost"
+        )  # 'localhost' or a default
+
+        # mostly relevant for CI
+        server_params.PG_DIR = "/tmp/pg_installcheck_tests"
+
+
 @pytest.fixture(scope="session")
 def isolationtester(request):
     return request.config.getoption("--isolationtester")
-
 
 
 def compare_results_with_duckdb(
@@ -2165,8 +2375,6 @@ def compare_results_with_duckdb(
         assert compare_rows_as_string_or_float(
             row_pg_lake, row_duckdb, 0.001
         ), f"Results do not match: {row_pg_lake} and {row_duckdb}"
-
-
 
 
 def date_days_since_epoch(d: datetime.date) -> int:
@@ -2207,8 +2415,6 @@ def compare_rows_as_string_or_float(row_pg_lake, row_other, tolerance):
                 print(f"Mismatch: {val_pg_lake} vs {val_other}")
                 return False
     return True
-
-
 
 
 def generate_random_numeric_typename(max_precision=38):
@@ -2574,46 +2780,6 @@ def change_timezone(superuser_conn, tz):
     return old_timezone
 
 
-def get_polaris_access_token(
-    credentials_file: str = server_params.POLARIS_PRINCIPAL_CREDS_FILE,
-    host: str = server_params.POLARIS_HOSTNAME,
-    port: int = server_params.POLARIS_PORT,
-    timeout: int = 2,
-) -> str:
-    creds = json.loads(Path(credentials_file).read_text())
-    client_id = creds["credentials"]["clientId"]
-    client_secret = creds["credentials"]["clientSecret"]
-
-    token_url = f"http://{host}:{port}/api/catalog/v1/oauth/tokens"
-
-    resp = requests.post(
-        token_url,
-        data={
-            "grant_type": "client_credentials",
-            "scope": "PRINCIPAL_ROLE:ALL",
-        },
-        auth=(client_id, client_secret),
-        timeout=timeout,
-    )
-    resp.raise_for_status()
-    return resp.json()["access_token"]
-
-
-# DONOT add postgres fixture as dep. that causes circular deps and consumes all shared memory
-@pytest.fixture(scope="module")
-def polaris_session(installcheck) -> requests.Session:
-    if installcheck:
-        return None
-    """
-    Ready‑to‑use requests.Session that attaches the bearer token
-    to every call.
-    """
-    polaris_token = get_polaris_access_token()
-    sess = requests.Session()
-    sess.headers.update({"Authorization": f"Bearer {polaris_token}"})
-    return sess
-
-
 @pytest.fixture(scope="function")
 def grant_access_to_data_file_partition(
     extension,
@@ -2663,6 +2829,7 @@ def table_partition_specs(pg_conn, table_name):
 
     metadata = run_query(pg_query, pg_conn)[0][0]
     return metadata["partition-specs"]
+
 
 @pytest.fixture(scope="function")
 def adjust_object_store_settings(superuser_conn):
@@ -2724,6 +2891,7 @@ def adjust_object_store_settings(superuser_conn):
 
     run_command("SELECT pg_reload_conf()", superuser_conn)
     superuser_conn.commit()
+
 
 def wait_until_object_store_writable_table_pushed(
     superuser_conn, table_namespace, table_name
@@ -2793,43 +2961,6 @@ def wait_until_object_store_writable_table_removed(
     )
     assert False, f"failed to refresh object catalog table {dbname}: {str(res)}"
 
-
-@pytest.fixture(scope="module")
-def set_polaris_gucs(
-    superuser_conn,
-    iceberg_extension,
-    installcheck,
-    credentials_file: str = server_params.POLARIS_PRINCIPAL_CREDS_FILE,
-):
-    if not installcheck:
-
-        creds = json.loads(Path(credentials_file).read_text())
-        client_id = creds["credentials"]["clientId"]
-        client_secret = creds["credentials"]["clientSecret"]
-
-        run_command_outside_tx(
-            [
-                f"""ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_host TO '{server_params.POLARIS_HOSTNAME}:{server_params.POLARIS_PORT}'""",
-                f"""ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_id TO '{client_id}'""",
-                f"""ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_secret TO '{client_secret}'""",
-                "SELECT pg_reload_conf()",
-            ],
-            superuser_conn,
-        )
-
-    yield
-
-    if not installcheck:
-
-        run_command_outside_tx(
-            [
-                f"""ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_host""",
-                f"""ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_id""",
-                f"""ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_secret""",
-                "SELECT pg_reload_conf()",
-            ],
-            superuser_conn,
-        )
 
 @pytest.fixture(scope="module")
 def create_http_helper_functions(superuser_conn, iceberg_extension):

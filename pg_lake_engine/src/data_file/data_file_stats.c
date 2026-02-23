@@ -105,27 +105,32 @@ ExecuteCopyToCommandOnPGDuckConnection(char *copyCommand,
 			char	   *commandTuples = PQcmdTuples(result);
 			int64		totalRowCount = atoll(commandTuples);
 
-#ifdef USE_ASSERT_CHECKING
-			if (EnableHeavyAsserts)
-			{
-				List	   *remoteFiles = ListRemoteFileNames(destinationPath);
-
-				if (list_length(remoteFiles) != 1)
-				{
-					ereport(ERROR, (errmsg("expected exactly one file at %s, found %d files",
-										   destinationPath, list_length(remoteFiles))));
-				}
-			}
-#endif
-
-			DataFileStats *fileStats = CreateDataFileStatsForDataFile(destinationPath,
-																	  totalRowCount,
-																	  0,
-																	  leafFields);
-
 			statsCollector = palloc0(sizeof(StatsCollector));
 			statsCollector->totalRowCount = totalRowCount;
-			statsCollector->dataFileStats = list_make1(fileStats);
+
+			/* no file is created when 0 rows are copied */
+			if (totalRowCount > 0)
+			{
+#ifdef USE_ASSERT_CHECKING
+				if (EnableHeavyAsserts)
+				{
+					List	   *remoteFiles = ListRemoteFileNames(destinationPath);
+
+					if (list_length(remoteFiles) != 1)
+					{
+						ereport(ERROR, (errmsg("expected exactly one file at %s, found %d files",
+											   destinationPath, list_length(remoteFiles))));
+					}
+				}
+#endif
+
+				DataFileStats *fileStats = CreateDataFileStatsForDataFile(destinationPath,
+																		  totalRowCount,
+																		  0,
+																		  leafFields);
+
+				statsCollector->dataFileStats = list_make1(fileStats);
+			}
 		}
 
 		PQclear(result);

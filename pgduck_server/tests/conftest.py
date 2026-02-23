@@ -16,16 +16,11 @@ import server_params
 
 @pytest.fixture(scope="session")
 def pgduck_server(request, installcheck, configure_server_params):
-
-    if not installcheck:
-        server, output_queue, stderr_thread = setup_pgduck_server()
-
-    yield
-
-    if not installcheck:
-        server.terminate()
-        server.wait()
-        stderr_thread.join()
+    if installcheck:
+        yield None
+    else:
+        setup_pgduck_server()
+        yield
 
 
 # when --installcheck is passed to pytests,
