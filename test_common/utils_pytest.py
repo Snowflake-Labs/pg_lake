@@ -12,6 +12,7 @@ import os
 import zoneinfo
 import math
 import signal
+import atexit
 import shutil
 import pytest
 import grp
@@ -183,6 +184,10 @@ def setup_pgduck_server():
     run_command("SET GLOBAL TimeZone = 'Etc/UTC'", conn)
     conn.close()
 
+    # Ensure pgduck_server is stopped on exit, same rationale as the
+    # atexit handler registered in start_postgres().
+    atexit.register(terminate_process, server)
+
     return server, output_queue, stderr_thread
 
 
@@ -278,9 +283,23 @@ def capture_output(file, output_queue):
         with file as pipe:
             for line in iter(pipe.readline, ""):
                 output_queue.put(line)
-                print(line)
+                print(line, end="")
+    except UnicodeDecodeError:
+        # Server stderr may contain non-UTF-8 bytes; ignore and stop reading.
+        pass
     finally:
         output_queue.put(None)
+
+
+def terminate_server(server, stderr_thread, timeout=10):
+    """Terminate a pgduck_server process and its output capture thread.
+
+    Sends SIGTERM, waits up to `timeout` seconds, then sends SIGKILL if still
+    alive.  The stderr capture thread is joined with the same timeout so that
+    test teardown never hangs indefinitely.
+    """
+    terminate_process(server, timeout=timeout)
+    stderr_thread.join(timeout=timeout)
 
 
 def perform_query(query, conn):
@@ -301,6 +320,30 @@ def get_server_output(output_queue):
         pass
 
     return server_output
+
+
+def terminate_process(proc, timeout=10):
+    """Terminate a subprocess with timeout, falling back to SIGKILL.
+
+    Sends SIGTERM first, then escalates to SIGKILL if the process does
+    not exit within ``timeout`` seconds.  Safe to call on already-exited
+    processes.
+    """
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=timeout)
+
+
+# Tracks processes spawned by start_server_in_background() so that the
+# cleanup_test_servers autouse fixture can terminate any servers that a
+# test failed to clean up (e.g. when an assertion fails before the cleanup
+# code runs).
+spawned_test_servers = []
 
 
 def start_server_in_background(command, need_output=False):
@@ -335,6 +378,7 @@ def start_server_in_background(command, need_output=False):
         env=extra_env,
         start_new_session=True,
     )
+    spawned_test_servers.append(process)
     return process
 
 
@@ -439,6 +483,12 @@ def start_postgres(db_path, db_user, db_port):
             "start",
         ]
     )
+
+    # Register a cleanup handler so PostgreSQL is stopped even when the
+    # test process is interrupted (e.g. Ctrl+C) and fixture teardown is
+    # skipped.  pg_ctl start runs PostgreSQL as a daemon that outlives the
+    # test process, so without this it would be left behind.
+    atexit.register(stop_postgres, db_path)
 
     file = open(log_file_path, "r")
     content = file.read()
@@ -1178,8 +1228,6 @@ def assert_query_result_on_duckdb_and_pg(duckdb_conn, pg_conn, duckdb_query, pg_
     assert duckdb_result == pg_result
 
     return pg_result
-
-
 
 
 def install_duckdb_extension(duckdb_conn, extension):
@@ -1932,7 +1980,15 @@ def file_sort_key(file_entry):
 # then compare results
 # this should be called after VACUUM which triggers removal of
 # unreferenced files
-def assert_iceberg_s3_file_consistency(pg_conn, s3, table_namespace, table_name, metadata_location=None, current_metadata_path=None, prev_metadata_path=None):
+def assert_iceberg_s3_file_consistency(
+    pg_conn,
+    s3,
+    table_namespace,
+    table_name,
+    metadata_location=None,
+    current_metadata_path=None,
+    prev_metadata_path=None,
+):
 
     files_via_s3_list = iceberg_s3_list_all_files_for_table(
         pg_conn, s3, table_namespace, table_name, metadata_location
@@ -1995,7 +2051,9 @@ def iceberg_get_referenced_files_metadata_path(pg_conn, metadata_location):
     return referenced_files
 
 
-def iceberg_s3_list_all_files_for_table(pg_conn, s3, table_namespace, table_name, table_location=None):
+def iceberg_s3_list_all_files_for_table(
+    pg_conn, s3, table_namespace, table_name, table_location=None
+):
 
     if table_location is None:
         metadata_location = run_query(
@@ -2135,7 +2193,6 @@ def isolationtester(request):
     return request.config.getoption("--isolationtester")
 
 
-
 def compare_results_with_duckdb(
     pg_conn, duckdb_conn, table_name, table_namespace, metadata_location, query
 ):
@@ -2165,8 +2222,6 @@ def compare_results_with_duckdb(
         assert compare_rows_as_string_or_float(
             row_pg_lake, row_duckdb, 0.001
         ), f"Results do not match: {row_pg_lake} and {row_duckdb}"
-
-
 
 
 def date_days_since_epoch(d: datetime.date) -> int:
@@ -2207,8 +2262,6 @@ def compare_rows_as_string_or_float(row_pg_lake, row_other, tolerance):
                 print(f"Mismatch: {val_pg_lake} vs {val_other}")
                 return False
     return True
-
-
 
 
 def generate_random_numeric_typename(max_precision=38):
@@ -2664,6 +2717,7 @@ def table_partition_specs(pg_conn, table_name):
     metadata = run_query(pg_query, pg_conn)[0][0]
     return metadata["partition-specs"]
 
+
 @pytest.fixture(scope="function")
 def adjust_object_store_settings(superuser_conn):
     superuser_conn.autocommit = True
@@ -2724,6 +2778,7 @@ def adjust_object_store_settings(superuser_conn):
 
     run_command("SELECT pg_reload_conf()", superuser_conn)
     superuser_conn.commit()
+
 
 def wait_until_object_store_writable_table_pushed(
     superuser_conn, table_namespace, table_name
@@ -2830,6 +2885,7 @@ def set_polaris_gucs(
             ],
             superuser_conn,
         )
+
 
 @pytest.fixture(scope="module")
 def create_http_helper_functions(superuser_conn, iceberg_extension):

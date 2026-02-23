@@ -23,9 +23,7 @@ def pgduck_server(request, installcheck, configure_server_params):
     yield
 
     if not installcheck:
-        server.terminate()
-        server.wait()
-        stderr_thread.join()
+        terminate_server(server, stderr_thread)
 
 
 # when --installcheck is passed to pytests,

@@ -32,9 +32,7 @@ def postgres(installcheck):
         if os.path.isdir(server_params.PG_DIR + "/base/pgsql_tmp"):
             assert len(os.listdir(server_params.PG_DIR + "/base/pgsql_tmp")) == 0
 
-        server.terminate()
-        server.wait()
-        output_thread.join()
+        terminate_server(server, output_thread)
 
 
 @pytest.fixture(scope="module")
@@ -94,9 +92,7 @@ def pgduck_server(installcheck):
         server, output_queue, output_thread = setup_pgduck_server()
         yield server, output_queue, output_thread
 
-        server.terminate()
-        server.wait()
-        output_thread.join()
+        terminate_server(server, output_thread)
 
 
 # when --installcheck is passed to pytests,

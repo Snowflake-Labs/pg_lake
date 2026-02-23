@@ -46,9 +46,7 @@ def postgres(installcheck):
         if os.path.isdir(server_params.PG_DIR + "/base/pgsql_tmp"):
             assert len(os.listdir(server_params.PG_DIR + "/base/pgsql_tmp")) == 0
 
-        server.terminate()
-        server.wait()
-        output_thread.join()
+        terminate_server(server, output_thread)
 
 
 @pytest.fixture(scope="module")
@@ -86,7 +84,7 @@ def gcs():
 def azure():
     client, server = create_mock_azure_blob_storage()
     yield client
-    server.terminate()
+    terminate_process(server)
 
 
 @pytest.fixture(scope="module")

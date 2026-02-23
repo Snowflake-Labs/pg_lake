@@ -37,12 +37,14 @@ def postgres(installcheck):
         if os.path.isdir(server_params.PG_DIR + "/base/pgsql_tmp"):
             assert len(os.listdir(server_params.PG_DIR + "/base/pgsql_tmp")) == 0
 
-        pgduck_server.terminate()
-        pgduck_server.wait()
-        pgduck_output_thread.join()
+        terminate_server(pgduck_server, pgduck_output_thread)
 
         polaris_server.terminate()
-        polaris_server.wait()
+        try:
+            polaris_server.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            polaris_server.kill()
+            polaris_server.wait(timeout=10)
         polaris_pid = Path(server_params.POLARIS_PID_FILE)
         if polaris_pid.exists():
             os.kill(int(polaris_pid.read_text().strip()), signal.SIGTERM)

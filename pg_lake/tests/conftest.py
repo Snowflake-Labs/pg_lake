@@ -75,9 +75,7 @@ def pgduck_server(installcheck):
         server, output_queue, output_thread = setup_pgduck_server()
         yield server, output_queue, output_thread
 
-        server.terminate()
-        server.wait()
-        output_thread.join()
+        terminate_server(server, output_thread)
 
 
 # when --installcheck is passed to pytests,

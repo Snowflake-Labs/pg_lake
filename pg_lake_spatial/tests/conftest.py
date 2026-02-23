@@ -33,9 +33,7 @@ def pgduck_server(installcheck, server_state):
 
             yield server, output_queue, stderr_thread
 
-            server.terminate()
-            server.wait()
-            stderr_thread.join()
+            terminate_server(server, stderr_thread)
 
             server_state["pgduck_server_started"] = False
         else:
@@ -68,9 +66,7 @@ def postgres(installcheck, server_state):
 
         # we had to start ourselves
         if not pgduck_started:
-            server.terminate()
-            server.wait()
-            stderr_thread.join()
+            terminate_server(server, stderr_thread)
             server_state["pgduck_server_started"] = False
 
 
@@ -192,7 +188,7 @@ def s3():
 def azure():
     client, server = create_mock_azure_blob_storage()
     yield client
-    server.terminate()
+    terminate_process(server)
 
 
 @pytest.fixture(scope="module")
