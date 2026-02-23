@@ -34,6 +34,8 @@
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/transaction/transaction_hooks.h"
+#include "pg_lake/iceberg/iceberg_type_binary_serde.h"
+#include "pg_lake/iceberg/iceberg_field.h"
 
 #ifdef USE_ASSERT_CHECKING
 static void EnsureIcebergPartitionMetadataInSync(Oid relationId, int largestSpecId,
@@ -43,6 +45,14 @@ static void AssertInternalAndExternalIcebergStatsMatchForAllDataFiles(Oid relati
 static void AssertInternalAndExternalIcebergDataFileColumnStatsMatch(List *internalColumnStatsList,
 																	 List *externalLowerBounds,
 																	 List *externalUpperBounds);
+static void NormalizeColumnBound(Field * field, unsigned char *externalValue,
+								 size_t externalLen, unsigned char **normalizedValue,
+								 size_t *normalizedLen);
+static void NormalizePartitionFieldValue(IcebergScalarAvroType internalType,
+										 unsigned char *externalValue,
+										 size_t externalLen,
+										 unsigned char **normalizedValue,
+										 size_t *normalizedLen);
 static List *RemoveDroppedFieldBounds(const List *existingLeafFields, ColumnBound * bounds, size_t boundsLen);
 static int	TableDataFileCompare(const ListCell *a, const ListCell *b);
 static int	DataFileCompare(const ListCell *a, const ListCell *b);
@@ -448,12 +458,21 @@ AssertInternalAndExternalIcebergStatsMatchForAllDataFiles(Oid relationId, bool d
 						 errmsg("internal and external iceberg data file partition field name mismatch")));
 			}
 
-			if (internalPartitionField->value_type.physical_type != externalPartitionField->value_type.physical_type)
-			{
-				ereport(ERROR,
-						(errcode(ERRCODE_INTERNAL_ERROR),
-						 errmsg("internal and external iceberg data file partition field physical type mismatch")));
-			}
+			/*
+			 * Normalize the external value.  For type promotions (e.g.
+			 * int→long, float→double) the external bytes are in the
+			 * pre-promotion encoding; NormalizePartitionFieldValue widens
+			 * them to the current type so we can compare byte-for-byte with
+			 * the internal value.  For non-promotion cases this is an
+			 * identity operation.
+			 */
+			unsigned char *normalizedValue = NULL;
+			size_t		normalizedLen = 0;
+
+			NormalizePartitionFieldValue(internalPartitionField->value_type,
+										 (unsigned char *) externalPartitionField->value,
+										 externalPartitionField->value_length,
+										 &normalizedValue, &normalizedLen);
 
 			/*
 			 * we serialize boolean 1 byte per spec but spark serializes it as
@@ -462,30 +481,135 @@ AssertInternalAndExternalIcebergStatsMatchForAllDataFiles(Oid relationId, bool d
 			bool		mismatchBoolLength = internalPartitionField->value_type.physical_type == ICEBERG_AVRO_PHYSICAL_TYPE_BOOL &&
 				internalPartitionField->value_length == 1 && externalPartitionField->value_length == 4;
 
-			if (internalPartitionField->value_length != externalPartitionField->value_length && !mismatchBoolLength)
+			if (!mismatchBoolLength)
 			{
-				ereport(ERROR,
-						(errcode(ERRCODE_INTERNAL_ERROR),
-						 errmsg("internal and external iceberg data file partition field value length mismatch %zu %zu for %s",
-								internalPartitionField->value_length,
-								externalPartitionField->value_length,
-								internalPartitionField->field_name)));
-			}
+				if (internalPartitionField->value_length != normalizedLen)
+				{
+					ereport(ERROR,
+							(errcode(ERRCODE_INTERNAL_ERROR),
+							 errmsg("internal and external iceberg data file partition field value length mismatch %zu %zu for %s",
+									internalPartitionField->value_length,
+									normalizedLen,
+									internalPartitionField->field_name)));
+				}
 
-			if (memcmp(internalPartitionField->value,
-					   externalPartitionField->value,
-					   internalPartitionField->value_length) != 0 && !mismatchBoolLength)
-			{
-				ereport(ERROR,
-						(errcode(ERRCODE_INTERNAL_ERROR),
-						 errmsg("internal and external iceberg data file partition field value mismatch %s:%s for %s",
-								(char *) internalPartitionField->value,
-								(char *) externalPartitionField->value,
-								internalPartitionField->field_name)));
+				if (memcmp(internalPartitionField->value,
+						   normalizedValue,
+						   internalPartitionField->value_length) != 0)
+				{
+					ereport(ERROR,
+							(errcode(ERRCODE_INTERNAL_ERROR),
+							 errmsg("internal and external iceberg data file partition field value mismatch for %s",
+									internalPartitionField->field_name)));
+				}
 			}
 		}
 	}
 }
+
+/*
+ * NormalizePartitionFieldValue deserializes an external partition field value
+ * (which may be encoded in a pre-promotion type, e.g. 4-byte int) through
+ * PGIcebergBinaryDeserialize (which handles widening), then re-serializes
+ * using the current field type via PGIcebergBinarySerializePartitionFieldValue.
+ * The result is in the current type's binary encoding so it can be compared
+ * byte-for-byte with the internally-serialized partition value.
+ *
+ * When there is no type promotion the external bytes already match the
+ * internal type, so this is an identity operation.
+ */
+static void
+NormalizePartitionFieldValue(IcebergScalarAvroType internalType,
+							 unsigned char *externalValue,
+							 size_t externalLen,
+							 unsigned char **normalizedValue,
+							 size_t *normalizedLen)
+{
+	PGType		pgType;
+
+	/* Map the Avro physical+logical type to the PGType of the current schema */
+	switch (internalType.physical_type)
+	{
+		case ICEBERG_AVRO_PHYSICAL_TYPE_INT32:
+			if (internalType.logical_type == ICEBERG_AVRO_LOGICAL_TYPE_DATE)
+				pgType = MakePGType(DATEOID, -1);
+			else
+				pgType = MakePGType(INT4OID, -1);
+			break;
+		case ICEBERG_AVRO_PHYSICAL_TYPE_INT64:
+			if (internalType.logical_type == ICEBERG_AVRO_LOGICAL_TYPE_TIMESTAMP)
+				pgType = MakePGType(TIMESTAMPTZOID, -1);
+			else if (internalType.logical_type == ICEBERG_AVRO_LOGICAL_TYPE_TIME)
+				pgType = MakePGType(TIMEOID, -1);
+			else
+				pgType = MakePGType(INT8OID, -1);
+			break;
+		case ICEBERG_AVRO_PHYSICAL_TYPE_FLOAT:
+			pgType = MakePGType(FLOAT4OID, -1);
+			break;
+		case ICEBERG_AVRO_PHYSICAL_TYPE_DOUBLE:
+			pgType = MakePGType(FLOAT8OID, -1);
+			break;
+		case ICEBERG_AVRO_PHYSICAL_TYPE_BOOL:
+			pgType = MakePGType(BOOLOID, -1);
+			break;
+		case ICEBERG_AVRO_PHYSICAL_TYPE_STRING:
+			pgType = MakePGType(TEXTOID, -1);
+			break;
+		case ICEBERG_AVRO_PHYSICAL_TYPE_BINARY:
+			if (internalType.logical_type == ICEBERG_AVRO_LOGICAL_TYPE_UUID)
+				pgType = MakePGType(UUIDOID, -1);
+			else
+				pgType = MakePGType(BYTEAOID, -1);
+			break;
+		default:
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("unexpected partition field physical type %d",
+							internalType.physical_type)));
+			return;				/* keep compiler happy */
+	}
+
+	bool		forAddColumn = false;
+	int			subFieldIndex = 0;
+	Field	   *field = PostgresTypeToIcebergField(pgType, forAddColumn,
+												   &subFieldIndex);
+
+	Datum		datum = PGIcebergBinaryDeserialize(externalValue, externalLen,
+												   field, pgType);
+
+	*normalizedValue = PGIcebergBinarySerializePartitionFieldValue(datum, field,
+																   pgType,
+																   normalizedLen);
+}
+
+
+/*
+ * NormalizeColumnBound deserializes an external column bound (which may be
+ * encoded in a pre-promotion type, e.g. 4-byte int) through
+ * PGIcebergBinaryDeserialize (which handles widening), then re-serializes
+ * using the current field type.  The result is in the current type's binary
+ * encoding so it can be compared byte-for-byte with the internally-serialized
+ * bound.
+ *
+ * Per the Iceberg spec, column metrics "must be computed using the type
+ * at the time the data file is written."  After a type promotion the reader
+ * must widen the value.
+ * See https://iceberg.apache.org/spec/#schema-evolution
+ */
+static void
+NormalizeColumnBound(Field * field, unsigned char *externalValue,
+					 size_t externalLen, unsigned char **normalizedValue,
+					 size_t *normalizedLen)
+{
+	PGType		pgType = IcebergFieldToPostgresType(field);
+	Datum		datum = PGIcebergBinaryDeserialize(externalValue, externalLen,
+												   field, pgType);
+
+	*normalizedValue = PGIcebergBinarySerializeBoundValue(datum, field, pgType,
+														  normalizedLen);
+}
+
 
 /*
  * AssertInternalAndExternalIcebergDataFileColumnStatsMatch checks if the internal and external
@@ -529,8 +653,22 @@ AssertInternalAndExternalIcebergDataFileColumnStatsMatch(List *internalColumnSta
 																			internalColumnStats->leafField.field,
 																			&internalLowerBoundLen);
 
-		if (internalLowerBoundLen != externalLowerBound->value_length ||
-			memcmp(internalLowerBound, externalLowerBound->value, internalLowerBoundLen) != 0)
+		/*
+		 * Normalize the external bound through PGIcebergBinaryDeserialize
+		 * (which handles widening for type promotions like int->long,
+		 * float->double) then re-serialize with the current type.  This
+		 * ensures both sides use the same binary encoding for comparison.
+		 */
+		size_t		normalizedLowerLen = 0;
+		unsigned char *normalizedLower = NULL;
+
+		NormalizeColumnBound(internalColumnStats->leafField.field,
+							 (unsigned char *) externalLowerBound->value,
+							 externalLowerBound->value_length,
+							 &normalizedLower, &normalizedLowerLen);
+
+		if (internalLowerBoundLen != normalizedLowerLen ||
+			memcmp(internalLowerBound, normalizedLower, internalLowerBoundLen) != 0)
 		{
 			ereport(ERROR,
 					(errcode(ERRCODE_INTERNAL_ERROR),
@@ -542,8 +680,16 @@ AssertInternalAndExternalIcebergDataFileColumnStatsMatch(List *internalColumnSta
 																			internalColumnStats->leafField.field,
 																			&internalUpperBoundLen);
 
-		if (internalUpperBoundLen != externalUpperBound->value_length ||
-			memcmp(internalUpperBound, externalUpperBound->value, internalUpperBoundLen) != 0)
+		size_t		normalizedUpperLen = 0;
+		unsigned char *normalizedUpper = NULL;
+
+		NormalizeColumnBound(internalColumnStats->leafField.field,
+							 (unsigned char *) externalUpperBound->value,
+							 externalUpperBound->value_length,
+							 &normalizedUpper, &normalizedUpperLen);
+
+		if (internalUpperBoundLen != normalizedUpperLen ||
+			memcmp(internalUpperBound, normalizedUpper, internalUpperBoundLen) != 0)
 		{
 			ereport(ERROR,
 					(errcode(ERRCODE_INTERNAL_ERROR),

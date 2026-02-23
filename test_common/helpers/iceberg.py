@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -798,3 +799,36 @@ def adjust_object_store_settings(superuser_conn):
 
     run_command("SELECT pg_reload_conf()", superuser_conn)
     superuser_conn.commit()
+
+
+def assert_iceberg_schemas_equal(left_json, right_json, label=""):
+    """Compare the full schemas array from two Iceberg metadata JSONs.
+
+    Both engines should produce the same number of schema versions with
+    matching field definitions.  Field IDs and schema-ids are ignored
+    because they may be assigned differently by each engine.
+    """
+    def _norm_fields(fields):
+        return [
+            (f["name"],
+             re.sub(r"\s+", "", f["type"]) if isinstance(f["type"], str) else f["type"],
+             f.get("required", False))
+            for f in fields
+        ]
+
+    left_schemas = left_json["schemas"]
+    right_schemas = right_json["schemas"]
+
+    assert len(left_schemas) == len(right_schemas), (
+        f"[{label}] schema count mismatch: "
+        f"left has {len(left_schemas)}, right has {len(right_schemas)}"
+    )
+
+    for idx, (ls, rs) in enumerate(zip(left_schemas, right_schemas)):
+        left_fields = _norm_fields(ls["fields"])
+        right_fields = _norm_fields(rs["fields"])
+        assert left_fields == right_fields, (
+            f"[{label}] schema #{idx} field mismatch:\n"
+            f"  left:  {left_fields}\n"
+            f"  right: {right_fields}"
+        )

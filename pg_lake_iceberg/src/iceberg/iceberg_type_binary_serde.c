@@ -371,10 +371,29 @@ PGIcebergBinaryDeserialize(unsigned char *binaryValue, size_t binaryLen, Field *
 	}
 	else if (pgType.postgresTypeOid == INT8OID)
 	{
-		binaryValue = FromLittleEndian64(binaryValue);
-		int64		longValue = *((int64 *) binaryValue);
+		/*
+		 * Per the Iceberg spec, column metrics are serialized using the type
+		 * at the time the data file was written. After an int -> long type
+		 * promotion, existing data files retain 4-byte int bounds while the
+		 * current schema expects 8-byte long. Widen on read.
+		 *
+		 * See:
+		 * https://iceberg.apache.org/spec/#binary-single-value-serialization
+		 */
+		if (binaryLen == sizeof(int32))
+		{
+			binaryValue = FromLittleEndian32(binaryValue);
+			int32		intValue = *((int32 *) binaryValue);
 
-		datum = Int64GetDatum(longValue);
+			datum = Int64GetDatum((int64) intValue);
+		}
+		else
+		{
+			binaryValue = FromLittleEndian64(binaryValue);
+			int64		longValue = *((int64 *) binaryValue);
+
+			datum = Int64GetDatum(longValue);
+		}
 	}
 	else if (pgType.postgresTypeOid == FLOAT4OID)
 	{
@@ -385,10 +404,25 @@ PGIcebergBinaryDeserialize(unsigned char *binaryValue, size_t binaryLen, Field *
 	}
 	else if (pgType.postgresTypeOid == FLOAT8OID)
 	{
-		binaryValue = FromLittleEndian64(binaryValue);
-		float8		doubleValue = *((float8 *) binaryValue);
+		/*
+		 * Same as int -> long above: after a float -> double type promotion,
+		 * existing data files retain 4-byte float bounds while the current
+		 * schema expects 8-byte double. Widen on read.
+		 */
+		if (binaryLen == sizeof(float4))
+		{
+			binaryValue = FromLittleEndian32(binaryValue);
+			float4		floatValue = *((float4 *) binaryValue);
 
-		datum = Float8GetDatum(doubleValue);
+			datum = Float8GetDatum((float8) floatValue);
+		}
+		else
+		{
+			binaryValue = FromLittleEndian64(binaryValue);
+			float8		doubleValue = *((float8 *) binaryValue);
+
+			datum = Float8GetDatum(doubleValue);
+		}
 	}
 	else if (pgType.postgresTypeOid == DATEOID)
 	{
