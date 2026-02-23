@@ -33,6 +33,7 @@ extern PGDLLEXPORT List *GetRegisteredFieldForAttributes(Oid relationId, List *a
 extern PGDLLEXPORT DataFileSchemaField * GetRegisteredFieldForAttribute(Oid relationId, AttrNumber attrNo);
 extern PGDLLEXPORT AttrNumber GetAttributeForFieldId(Oid relationId, int fieldId);
 extern PGDLLEXPORT void UpdateRegisteredFieldWriteDefaultForAttribute(Oid relationId, AttrNumber attNum, const char *writeDefault);
+extern PGDLLEXPORT void UpdateRegisteredFieldTypeForAttribute(Oid relationId, AttrNumber attNum, PGType newPgType);
 extern PGDLLEXPORT int GetLargestRegisteredFieldId(Oid relationId);
 extern PGDLLEXPORT void RegisterIcebergColumnMapping(Oid relationId, Field * field,
 													 AttrNumber attNo, int parentFieldId, PGType pgType,
