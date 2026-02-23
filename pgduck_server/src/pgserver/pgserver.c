@@ -323,7 +323,7 @@ set_unix_socket_permissions(char *unixSocketPath, char *groupName, int permissio
 }
 
 
-volatile sig_atomic_t running = 1;
+static volatile sig_atomic_t running = 1;
 
 /* basic sigint handler */
 static void

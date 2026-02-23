@@ -28,8 +28,8 @@
 #include "utils/pidfile.h"
 #define MAXPGPATH 1024
 
-int			my_pidfile;
-char		pidfile_path[MAXPGPATH];
+static int	my_pidfile;
+static char	pidfile_path[MAXPGPATH];
 
 /**
  * @brief Creates and locks a PID file.

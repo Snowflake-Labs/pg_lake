@@ -56,8 +56,8 @@ bool		RestCatalogEnableVendedCredentials = true;
 /*
 * Should always be accessed via GetRestCatalogAccessToken()
 */
-char	   *RestCatalogAccessToken = NULL;
-TimestampTz RestCatalogAccessTokenExpiry = 0;
+static char *RestCatalogAccessToken = NULL;
+static TimestampTz RestCatalogAccessTokenExpiry = 0;
 
 static char *GetRestCatalogAccessToken(bool forceRefreshToken);
 static void FetchRestCatalogAccessToken(char **accessToken, int *expiresIn);
