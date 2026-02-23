@@ -782,7 +782,16 @@ print_summary() {
     echo
 
     if [[ $WITH_TEST_DEPS -eq 1 ]]; then
+        JDBC_DIR="$SOURCE_DIR/jdbc"
+        JDBC_VERSION="42.7.10"
+        JDBC_JAR="$JDBC_DIR/postgresql-${JDBC_VERSION}.jar"
+
         echo "4. Run tests:"
+        if [[ -f "$JDBC_JAR" ]]; then
+            echo "   export JDBC_DRIVER_PATH=$JDBC_JAR"
+        else
+            echo "   # Note: JDBC driver download may have failed. Set JDBC_DRIVER_PATH manually if needed."
+        fi
         echo "   cd pg_lake"
         echo "   make check"
         echo
@@ -806,9 +815,7 @@ print_summary() {
             JDBC_DIR="$SOURCE_DIR/jdbc"
             JDBC_VERSION="42.7.10"
             JDBC_JAR="$JDBC_DIR/postgresql-${JDBC_VERSION}.jar"
-            if [[ -f "$JDBC_JAR" ]]; then
-                echo "   export JDBC_DRIVER_PATH=$JDBC_JAR"
-            fi
+            echo "   export JDBC_DRIVER_PATH=$JDBC_JAR  # Required for Spark verification tests"
         fi
         if [[ "$OS" == "macos" ]]; then
             echo "   export PATH=\"/opt/homebrew/opt/bison/bin:/opt/homebrew/opt/flex/bin:\$PATH\""
