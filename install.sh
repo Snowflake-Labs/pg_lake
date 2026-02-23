@@ -680,13 +680,13 @@ install_test_deps() {
             print_info "Java $JAVA_VERSION already installed"
         else
             print_warning "Java version is $JAVA_VERSION but 21+ is required for tests"
-            print_info "Installing Java 21..."
+            print_info "Installing Java 21 JDK..."
             case $OS in
                 debian)
                     sudo apt-get install -y openjdk-21-jdk
                     ;;
                 rhel)
-                    sudo dnf install -y java-21-openjdk
+                    sudo dnf install -y java-21-openjdk-devel
                     ;;
                 macos)
                     brew install openjdk@21
@@ -696,13 +696,13 @@ install_test_deps() {
             esac
         fi
     else
-        print_info "Installing Java 21..."
+        print_info "Installing Java 21 JDK..."
         case $OS in
             debian)
                 sudo apt-get install -y openjdk-21-jdk
                 ;;
             rhel)
-                sudo dnf install -y java-21-openjdk
+                sudo dnf install -y java-21-openjdk-devel
                 ;;
             macos)
                 brew install openjdk@21
@@ -730,6 +730,47 @@ install_test_deps() {
             print_error "Or download manually from: https://jdbc.postgresql.org/download/postgresql-${JDBC_VERSION}.jar"
             print_error "And place it at: $JDBC_JAR"
         fi
+    fi
+
+    # Polaris REST catalog server (requires Java 21+)
+    POLARIS_JAR="$PG_INSTALL_DIR/bin/polaris-server.jar"
+    if [[ -f "$POLARIS_JAR" ]]; then
+        print_info "Polaris REST catalog server already installed"
+    else
+        print_info "Building Polaris REST catalog server (requires Java 21+)..."
+        print_info "This may take several minutes on first build..."
+
+        # Set JAVA_HOME to Java 21 for Polaris build
+        case $OS in
+            debian|rhel)
+                # Find Java 21 installation
+                if [[ -d "/usr/lib/jvm/java-21-openjdk" ]]; then
+                    export JAVA_HOME="/usr/lib/jvm/java-21-openjdk"
+                elif ls -d /usr/lib/jvm/java-21-openjdk-* 2>/dev/null | head -1 | read JAVA_DIR; then
+                    export JAVA_HOME="$JAVA_DIR"
+                fi
+                ;;
+            macos)
+                if [[ -d "/opt/homebrew/opt/openjdk@21" ]]; then
+                    export JAVA_HOME="/opt/homebrew/opt/openjdk@21"
+                fi
+                ;;
+        esac
+        export PATH="$JAVA_HOME/bin:$PATH"
+
+        # Stop any existing Gradle daemons to avoid cached toolchain issues
+        cd "$PG_LAKE_REPO_DIR/test_common/rest_catalog/polaris"
+        ./gradlew --stop 2>/dev/null || true
+
+        cd "$PG_LAKE_REPO_DIR/test_common/rest_catalog"
+        if make all; then
+            make install
+            print_info "Polaris REST catalog server built and installed successfully"
+        else
+            print_warning "Polaris build failed. This is optional but required for REST catalog tests."
+            print_warning "Make sure Java 21+ is installed and JAVA_HOME is set correctly."
+        fi
+        cd "$PG_LAKE_REPO_DIR"
     fi
 
     print_info "Test dependencies installed successfully"

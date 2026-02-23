@@ -549,8 +549,9 @@ To run the full test suite, you need to install additional dependencies. These a
 - **PostGIS** (dependency of pg_lake_spatial)
 - **pgAudit** (used in test suite)
 - **pg_cron** (used in test suite)
-- **Java 21+** (for Spark verification tests and Polaris catalog tests)
+- **Java 21+** (for Spark verification tests and Polaris REST catalog tests)
 - **PostgreSQL JDBC driver** (for Spark tests)
+- **Polaris REST catalog server** (for Iceberg REST catalog tests)
 - **azurite** (for Azure storage tests)
 
 The automated installation script can install these for you:
@@ -649,6 +650,33 @@ curl -L -o ~/pg_lake-deps/jdbc/postgresql-42.7.10.jar \
 # Set environment variable (add to ~/.bashrc or ~/.zshrc):
 export JDBC_DRIVER_PATH=~/pg_lake-deps/jdbc/postgresql-42.7.10.jar
 ```
+
+### Polaris REST Catalog Server
+
+Polaris is an Apache Iceberg REST catalog server used for testing Iceberg REST catalog integration. It requires Java 21+.
+
+**Note:** `./install.sh --with-test-deps` automatically builds and installs Polaris for you.
+
+To build and install manually:
+
+```bash
+# Ensure Java 21+ is installed and in PATH
+java -version  # Should show version 21 or higher
+
+# Build Polaris (this takes several minutes on first build)
+cd test_common/rest_catalog
+make all
+
+# Install Polaris JARs to PostgreSQL bin directory
+make install
+```
+
+This will install:
+- `polaris-server.jar` - The REST catalog server
+- `polaris-admin.jar` - The admin CLI tool
+- `gradlew` - Gradle wrapper script
+
+For more details, see `test_common/rest_catalog/README.md`.
 
 ## Running Tests
 
