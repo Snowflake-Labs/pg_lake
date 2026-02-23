@@ -876,7 +876,9 @@ def start_azurite():
     if azurite_tmp_dir.exists():
         shutil.rmtree(azurite_tmp_dir, ignore_errors=True)
 
-    process = subprocess.Popen(["azurite", "--location", str(azurite_tmp_dir)])
+    process = subprocess.Popen(
+        ["azurite", "--location", str(azurite_tmp_dir), "--skipApiVersionCheck"]
+    )
 
     # Wait a bit for blob storage to start
     # If it doesn't, the SDK will still retry, but that might add more delay
