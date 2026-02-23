@@ -420,8 +420,8 @@ cd postgres
 # Build and install
 make -j 16 && make install
 
-# Install required contrib modules
-make -C contrib/btree_gist install
+# Install all contrib modules (includes auto_explain, pg_stat_statements, btree_gist, etc.)
+make -C contrib install
 
 # Install test modules (optional, for test suite)
 make -C src/test/modules/injection_points install
