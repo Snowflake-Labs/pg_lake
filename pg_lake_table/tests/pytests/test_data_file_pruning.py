@@ -1,5 +1,6 @@
 import pytest
 import server_params
+from utils_polaris import *
 from utils_pytest import *
 import re
 

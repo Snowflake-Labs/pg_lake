@@ -14,62 +14,6 @@ from utils_pytest import *
 reduce_werkzeug_log_level()
 
 
-@pytest.fixture(scope="session")
-def server_state():
-    data = {"pgduck_server_started": False}
-    return data
-
-
-@pytest.fixture(scope="session")
-def pgduck_server(installcheck, server_state):
-
-    if installcheck:
-        yield None
-    else:
-        if not server_state["pgduck_server_started"]:
-            server, output_queue, stderr_thread = setup_pgduck_server()
-
-            server_state["pgduck_server_started"] = True
-
-            yield server, output_queue, stderr_thread
-
-            terminate_server(server, stderr_thread)
-
-            server_state["pgduck_server_started"] = False
-        else:
-            yield None
-
-
-@pytest.fixture(scope="session")
-def postgres(installcheck, server_state):
-    if installcheck:
-        # re-running installcheck might cause different results otherwise
-        remove_duckdb_cache()
-    else:
-        pgduck_started = server_state["pgduck_server_started"]
-
-        if not pgduck_started:
-            server, output_queue, stderr_thread = setup_pgduck_server()
-            server_state["pgduck_server_started"] = True
-
-        start_postgres(
-            server_params.PG_DIR, server_params.PG_USER, server_params.PG_PORT
-        )
-
-    yield
-
-    if not installcheck:
-        stop_postgres(server_params.PG_DIR)
-
-        if os.path.isdir(server_params.PG_DIR + "/base/pgsql_tmp"):
-            assert len(os.listdir(server_params.PG_DIR + "/base/pgsql_tmp")) == 0
-
-        # we had to start ourselves
-        if not pgduck_started:
-            terminate_server(server, stderr_thread)
-            server_state["pgduck_server_started"] = False
-
-
 @pytest.fixture(scope="module")
 def test_user(pg_lake_table_extension):
     username = "test_application"
@@ -177,55 +121,9 @@ def postgis_extension(postgres):
     superuser_conn.close()
 
 
-@pytest.fixture(scope="session")
-def s3():
-    client, server = create_mock_s3()
-    yield client
-    server.stop()
-
-
-@pytest.fixture(scope="session")
-def azure():
-    client, server = create_mock_azure_blob_storage()
-    yield client
-    terminate_process(server)
-
-
 @pytest.fixture(scope="module")
 def test_s3_path(request, s3):
     return f"s3://{TEST_BUCKET}/{request.node.name}"
-
-
-# when --installcheck is passed to pytests,
-# override the variables to point to the
-# official pgduck_server settings
-# this trick helps us to use the existing
-# pgduck_server
-@pytest.fixture(autouse=True, scope="session")
-def configure_server_params(request):
-    if request.config.getoption("--installcheck"):
-        server_params.PGDUCK_PORT = 5332
-        server_params.DUCKDB_DATABASE_FILE_PATH = "/tmp/duckdb.db"
-        server_params.PGDUCK_UNIX_DOMAIN_PATH = "/tmp"
-        server_params.PGDUCK_CACHE_DIR = "/tmp/cache"
-
-        # Access environment variables if exists
-        server_params.PG_DATABASE = os.getenv(
-            "PGDATABASE", "regression"
-        )  # 'postgres' or a default
-        server_params.PG_USER = os.getenv(
-            "PGUSER", "postgres"
-        )  # 'postgres' or a postgres
-        server_params.PG_PASSWORD = os.getenv(
-            "PGPASSWORD", "postgres"
-        )  # 'postgres' or a postgres
-        server_params.PG_PORT = os.getenv("PGPORT", "5432")  # '5432' or a default
-        server_params.PG_HOST = os.getenv(
-            "PGHOST", "localhost"
-        )  # 'localhost' or a default
-
-        # mostly relevant for CI
-        server_params.PG_DIR = "/tmp/pg_installcheck_tests"
 
 
 @pytest.fixture(scope="module")

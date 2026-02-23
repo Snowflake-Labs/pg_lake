@@ -8,6 +8,7 @@ PGDUCK_UNIX_DOMAIN_PERMISSIONS = "0700"
 PGDUCK_PORT = 8257
 DUCKDB_DATABASE_FILE_PATH = "/tmp/pytest_duckdb.db"
 PGDUCK_CACHE_DIR = f"/tmp/cache.{PGDUCK_PORT}"
+PGDUCK_PID_FILE = "/tmp/regress-pgduck-server.pid"
 
 
 PG_DATABASE = "postgres"
