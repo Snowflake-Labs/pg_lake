@@ -1767,6 +1767,116 @@ def test_pruning_for_inlined_functions(
     pg_conn.commit()
 
 
+@pytest.mark.parametrize(
+    "schema, col_type, new_type, pre_vals, post_val, prune_filter_pre, prune_filter_post",
+    [
+        pytest.param(
+            "prune_promo_int",
+            "int",
+            "bigint",
+            # INT_MIN, 0, INT_MAX — boundary values for int4
+            [(-2147483648, 1), (0, 2), (2147483647, 3)],
+            # first value outside int4 range
+            ("2147483648", 4),
+            "a = -2147483648",
+            "a = 2147483648",
+            id="int_to_bigint",
+        ),
+        pytest.param(
+            "prune_promo_float",
+            "real",
+            "double precision",
+            # well-separated float4 values for distinct per-file min-max bounds
+            [(-100.5, 1), (0.0, 2), (100.5, 3)],
+            # post-promotion value clearly beyond the pre-promotion range
+            ("200.5", 4),
+            "a < -100",
+            "a > 200",
+            id="float_to_double",
+        ),
+        pytest.param(
+            "prune_promo_decimal",
+            "numeric(10,2)",
+            "numeric(20,2)",
+            # min, zero, max for numeric(10,2)
+            [(-99999999.99, 1), (0.00, 2), (99999999.99, 3)],
+            # value requiring wider precision (numeric(20,2))
+            ("99999999999999999.99", 4),
+            "a < -99999999",
+            "a > 9999999999",
+            id="decimal_widen_precision",
+        ),
+    ],
+)
+def test_data_file_pruning_after_type_promotion(
+    s3,
+    pg_conn,
+    extension,
+    with_default_location,
+    schema,
+    col_type,
+    new_type,
+    pre_vals,
+    post_val,
+    prune_filter_pre,
+    prune_filter_post,
+):
+    """Verify data file pruning still works after an Iceberg type promotion."""
+    explain_prefix = "EXPLAIN (analyze, verbose, format json) "
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(
+        f"""
+        CREATE TABLE {schema}.tbl (a {col_type}, b int)
+        USING iceberg WITH (autovacuum_enabled='False');
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # Insert rows into separate data files so each has distinct min-max bounds
+    for a_val, b_val in pre_vals:
+        run_command(f"INSERT INTO {schema}.tbl VALUES ({a_val}, {b_val});", pg_conn)
+        pg_conn.commit()
+
+    # Promote column type
+    run_command(f"ALTER TABLE {schema}.tbl ALTER COLUMN a TYPE {new_type};", pg_conn)
+    pg_conn.commit()
+
+    # Insert a row with promoted type precision
+    run_command(
+        f"INSERT INTO {schema}.tbl VALUES ({post_val[0]}, {post_val[1]});", pg_conn
+    )
+    pg_conn.commit()
+
+    total_files = len(pre_vals) + 1
+
+    # Verify all data readable
+    results = run_query(f"SELECT count(*) FROM {schema}.tbl", pg_conn)
+    assert results[0][0] == total_files
+
+    # Pruning on pre-promotion data: should hit exactly 1 file
+    results = run_query(
+        f"{explain_prefix} SELECT * FROM {schema}.tbl WHERE {prune_filter_pre}",
+        pg_conn,
+    )
+    assert int(fetch_data_files_used(results)) == 1
+
+    # Pruning on post-promotion data: should hit exactly 1 file
+    results = run_query(
+        f"{explain_prefix} SELECT * FROM {schema}.tbl WHERE {prune_filter_post}",
+        pg_conn,
+    )
+    assert int(fetch_data_files_used(results)) == 1
+
+    # Full scan should see all files
+    results = run_query(f"{explain_prefix} SELECT * FROM {schema}.tbl", pg_conn)
+    assert int(fetch_data_files_used(results)) == total_files
+
+    run_command(f"DROP SCHEMA {schema} CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
 @pytest.fixture(scope="module")
 def create_helper_functions(superuser_conn):
 
