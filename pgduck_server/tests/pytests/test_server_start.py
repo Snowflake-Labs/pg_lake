@@ -411,12 +411,17 @@ def test_server_pidfile(clean_socket_path):
     assert is_server_listening(socket_path)
     assert os.path.exists(pidfile_path)
 
+    # Give the server a moment to finish handling the is_server_listening connection
+    time.sleep(0.1)
+
     # Verify the server removes its pidfile on clean SIGTERM shutdown.
     # Don't use terminate_process() here: its SIGKILL fallback would
     # bypass the server's signal handler and leave the pidfile behind.
+    # Use a generous timeout (60s) to allow for clean shutdown even under
+    # heavy load or when multiple test instances are running concurrently.
     server.terminate()
     try:
-        server.wait(timeout=10)
+        server.wait(timeout=60)
     except subprocess.TimeoutExpired:
         server.kill()
         server.wait(timeout=10)

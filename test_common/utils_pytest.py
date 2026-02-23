@@ -401,7 +401,10 @@ def is_server_listening(socket_path, timeout=5, interval=0.01):
         if socket_path_str.startswith("\0") or Path(socket_path_str).exists():
             try:
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                    # Set a short timeout to avoid hanging connections
+                    s.settimeout(1.0)
                     s.connect(socket_path_str)
+                    # Socket will be automatically closed when exiting the with block
                 print("is_server_listening: socket connected")
                 return True
             except socket.error as e:
