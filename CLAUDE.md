@@ -369,6 +369,21 @@ pg_lake_iceberg.default_location_prefix = 's3://bucket/prefix'
 
 ## CI and Testing Notes
 
-- JDBC driver path must be set for Spark verification tests: `JDBC_DRIVER_PATH=~/pg_lake-deps/jdbc/postgresql-42.7.10.jar` (automatically installed by `./install.sh --with-test-deps`)
-- Java 21+ required for Polaris REST catalog tests (automatically installed by `./install.sh --with-test-deps`)
+### Required environment variables for tests
+- `JAVA_HOME` must point to a Java 21+ JDK installation. The Polaris REST catalog server and Spark verification tests require Java 21+. If your default `java` is an older version, you must set `JAVA_HOME` explicitly:
+  - RHEL/AlmaLinux: `export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-<arch>` (install with `sudo dnf install java-21-openjdk-devel`)
+  - Debian/Ubuntu: `export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64` (install with `sudo apt-get install openjdk-21-jdk`)
+  - macOS: `export JAVA_HOME=/opt/homebrew/opt/openjdk@21` (install with `brew install openjdk@21`)
+- `JDBC_DRIVER_PATH` must point to the PostgreSQL JDBC driver JAR: `export JDBC_DRIVER_PATH=~/pg_lake-deps/jdbc/postgresql-42.7.10.jar`
+
+All of the above are automatically installed and detected by `./install.sh --with-test-deps`.
+
+### Polaris REST catalog server
+- Tests in `pg_lake_table` and `pg_lake_iceberg` start a Polaris REST catalog server automatically
+- Polaris must be built and installed first: `cd test_common/rest_catalog && make all && make install` (requires Java 21+ JDK with `javac`)
+- This installs `polaris-server.jar` and `polaris-admin.jar` to the PostgreSQL bin directory
+- If the JARs are not installed, tests will skip Polaris startup and print a warning
+- Polaris uses PostgreSQL as its metadata store, connecting to the test PostgreSQL instance
+
+### Other notes
 - Azure tests require `azurite` (install via npm: `npm install -g azurite`, or use `./install.sh --with-test-deps`)

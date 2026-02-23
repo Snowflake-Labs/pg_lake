@@ -625,19 +625,19 @@ npm install -g azurite
 
 ### Java and JDBC Driver
 
-Some tests verify pg_lake_iceberg table results using Apache Spark, which requires Java 21+ and the PostgreSQL JDBC driver.
+Some tests verify pg_lake_iceberg table results using Apache Spark, and Polaris REST catalog tests also require Java 21+. You need the **JDK** (with compiler), not just the JRE.
 
 **Note:** `./install.sh --with-test-deps` automatically installs Java 21+ and downloads the JDBC driver for you.
 
 To install manually:
 
 ```bash
-# Install Java 21 or higher
+# Install Java 21 JDK (must include javac for Polaris build)
 # Ubuntu/Debian
 sudo apt-get install -y openjdk-21-jdk
 
-# RHEL/AlmaLinux
-sudo dnf install -y java-21-openjdk
+# RHEL/AlmaLinux (note: -devel, not just java-21-openjdk)
+sudo dnf install -y java-21-openjdk-devel
 
 # macOS
 brew install openjdk@21
@@ -646,8 +646,21 @@ brew install openjdk@21
 mkdir -p ~/pg_lake-deps/jdbc
 curl -L -o ~/pg_lake-deps/jdbc/postgresql-42.7.10.jar \
   https://jdbc.postgresql.org/download/postgresql-42.7.10.jar
+```
 
-# Set environment variable (add to ~/.bashrc or ~/.zshrc):
+**Important:** If your system has multiple Java versions, you must set `JAVA_HOME` to point to Java 21. Add these to your `~/.bashrc` or `~/.zshrc`:
+
+```bash
+# RHEL/AlmaLinux (find exact path with: ls -d /usr/lib/jvm/java-21-openjdk-*)
+export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-<arch>
+
+# Ubuntu/Debian
+export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64  # or -arm64
+
+# macOS
+export JAVA_HOME=/opt/homebrew/opt/openjdk@21
+
+# Also needed:
 export JDBC_DRIVER_PATH=~/pg_lake-deps/jdbc/postgresql-42.7.10.jar
 ```
 

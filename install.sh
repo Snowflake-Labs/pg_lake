@@ -690,8 +690,6 @@ install_test_deps() {
                     ;;
                 macos)
                     brew install openjdk@21
-                    # Add to PATH for this session
-                    export PATH="/opt/homebrew/opt/openjdk@21/bin:$PATH"
                     ;;
             esac
         fi
@@ -706,9 +704,36 @@ install_test_deps() {
                 ;;
             macos)
                 brew install openjdk@21
-                export PATH="/opt/homebrew/opt/openjdk@21/bin:$PATH"
                 ;;
         esac
+    fi
+
+    # Detect JAVA_HOME for Java 21
+    JAVA21_HOME=""
+    case $OS in
+        debian)
+            if [[ -d "/usr/lib/jvm/java-21-openjdk-amd64" ]]; then
+                JAVA21_HOME="/usr/lib/jvm/java-21-openjdk-amd64"
+            elif [[ -d "/usr/lib/jvm/java-21-openjdk-arm64" ]]; then
+                JAVA21_HOME="/usr/lib/jvm/java-21-openjdk-arm64"
+            fi
+            ;;
+        rhel)
+            JAVA21_HOME=$(ls -d /usr/lib/jvm/java-21-openjdk-* 2>/dev/null | head -1)
+            ;;
+        macos)
+            if [[ -d "/opt/homebrew/opt/openjdk@21" ]]; then
+                JAVA21_HOME="/opt/homebrew/opt/openjdk@21"
+            elif [[ -d "/usr/local/opt/openjdk@21" ]]; then
+                JAVA21_HOME="/usr/local/opt/openjdk@21"
+            fi
+            ;;
+    esac
+
+    if [[ -n "$JAVA21_HOME" ]]; then
+        print_info "Detected JAVA_HOME for Java 21: $JAVA21_HOME"
+    else
+        print_warning "Could not detect JAVA_HOME for Java 21. Set it manually if needed."
     fi
 
     # PostgreSQL JDBC driver (needed for Spark verification tests)
@@ -828,12 +853,14 @@ print_summary() {
         JDBC_JAR="$JDBC_DIR/postgresql-${JDBC_VERSION}.jar"
 
         echo "4. Run tests:"
+        if [[ -n "$JAVA21_HOME" ]]; then
+            echo "   export JAVA_HOME=$JAVA21_HOME"
+        fi
         if [[ -f "$JDBC_JAR" ]]; then
             echo "   export JDBC_DRIVER_PATH=$JDBC_JAR"
         else
             echo "   # Note: JDBC driver download may have failed. Set JDBC_DRIVER_PATH manually if needed."
         fi
-        echo "   cd pg_lake"
         echo "   make check"
         echo
     fi
@@ -857,6 +884,9 @@ print_summary() {
             JDBC_VERSION="42.7.10"
             JDBC_JAR="$JDBC_DIR/postgresql-${JDBC_VERSION}.jar"
             echo "   export JDBC_DRIVER_PATH=$JDBC_JAR  # Required for Spark verification tests"
+            if [[ -n "$JAVA21_HOME" ]]; then
+                echo "   export JAVA_HOME=$JAVA21_HOME  # Required for Polaris REST catalog tests"
+            fi
         fi
         if [[ "$OS" == "macos" ]]; then
             echo "   export PATH=\"/opt/homebrew/opt/bison/bin:/opt/homebrew/opt/flex/bin:\$PATH\""
