@@ -168,6 +168,11 @@ def setup_pgduck_server():
         Path(server_params.PGDUCK_UNIX_DOMAIN_PATH)
         / f".s.PGSQL.{server_params.PGDUCK_PORT}"
     )
+
+    # Wait for the server to create the socket before attempting to stat it
+    if not is_server_listening(socket_path):
+        raise RuntimeError(f"Server failed to start - socket not listening: {socket_path}")
+
     socket_stat = os.stat(socket_path)
 
     # check socket permissions
