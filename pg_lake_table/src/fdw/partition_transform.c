@@ -162,7 +162,7 @@ PartitionTransformsEqual(IcebergPartitionSpec * spec, List *partitionTransforms)
 		 * Iceberg does here:
 		 * https://github.com/apache/iceberg/blob/8b55ac834015ce664f879ecfe1e80a941a994420/api/src/main/java/org/apache/iceberg/PartitionSpec.java#L239-L259
 		 */
-		if (strcasecmp(specField->name, transform->partitionFieldName) != 0)
+		if (strcasecmp(specField->name, transform->specField->name) != 0)
 		{
 			return false;
 		}
@@ -251,13 +251,11 @@ GetPartitionTransformFromSpecField(Oid relationId, IcebergPartitionSpecField * s
 {
 	IcebergPartitionTransform *transform = palloc0(sizeof(IcebergPartitionTransform));
 
-	transform->partitionFieldId = specField->field_id;
-	transform->partitionFieldName = pstrdup(specField->name);
-	transform->transformName = pstrdup(specField->transform);
+	transform->specField = DeepCopyIcebergPartitionSpecField(specField);
 
 	transform->attnum =
 		GetAttributeForFieldId(relationId, specField->source_id);
-	transform->columnName = get_attname(relationId, transform->attnum, false);
+	transform->parsedTransform.columnName = get_attname(relationId, transform->attnum, false);
 	transform->pgType = GetAttributePGType(relationId, transform->attnum);
 
 	if (IsInternalIcebergTable(relationId))
@@ -274,10 +272,10 @@ GetPartitionTransformFromSpecField(Oid relationId, IcebergPartitionSpecField * s
 	}
 
 	/* parse transform name */
-	ParseTransformName(transform->transformName,
-					   &transform->type,
-					   &transform->bucketCount,
-					   &transform->truncateLen);
+	ParseTransformName(transform->specField->transform,
+					   &transform->parsedTransform.type,
+					   &transform->parsedTransform.bucketCount,
+					   &transform->parsedTransform.truncateLen);
 
 	/* set transform's postgres type */
 	transform->resultPgType = GetTransformResultPGType(transform);
@@ -413,13 +411,13 @@ ApplyPartitionTransformToTuple(IcebergPartitionTransform * transform, TupleTable
 {
 	PartitionField *field = palloc0(sizeof(PartitionField));
 
-	field->field_name = pstrdup(transform->partitionFieldName);
-	field->field_id = transform->partitionFieldId;
+	field->field_name = pstrdup(transform->specField->name);
+	field->field_id = transform->specField->field_id;
 
 	bool		isNull = false;
 	Datum		columnValue = slot_getattr(slot, transform->attnum, &isNull);
 
-	switch (transform->type)
+	switch (transform->parsedTransform.type)
 	{
 		case PARTITION_TRANSFORM_IDENTITY:
 			field->value = ApplyIdentityTransformToColumn(transform, columnValue, isNull,
@@ -453,7 +451,7 @@ ApplyPartitionTransformToTuple(IcebergPartitionTransform * transform, TupleTable
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("applying transform %s is not yet support ",
-							transform->transformName)));
+							transform->specField->transform)));
 	}
 
 	field->value_type = GetTransformResultAvroType(transform);
@@ -498,7 +496,7 @@ ApplyTruncateTransformToColumn(IcebergPartitionTransform * transform, Datum colu
 
 	PGType		sourceType = transform->pgType;
 	PGType		resultType = transform->resultPgType;
-	int64_t		truncateLen = (int64_t) transform->truncateLen;
+	int64_t		truncateLen = (int64_t) transform->parsedTransform.truncateLen;
 	Datum		truncatedColumnValue = 0;
 
 	if (sourceType.postgresTypeOid == INT2OID)
@@ -767,7 +765,7 @@ ApplyBucketTransformToColumn(IcebergPartitionTransform * transform, Datum column
 	{
 		int64_t		value = (int64_t) DatumGetInt16(columnValue);
 
-		*bucketValue = (MurmurHash3_32_Long(value) & INT32_MAX) % transform->bucketCount;
+		*bucketValue = (MurmurHash3_32_Long(value) & INT32_MAX) % transform->parsedTransform.bucketCount;
 	}
 	else if (transform->pgType.postgresTypeOid == INT4OID)
 	{
@@ -777,13 +775,13 @@ ApplyBucketTransformToColumn(IcebergPartitionTransform * transform, Datum column
 		 */
 		int64_t		value = (int64_t) DatumGetInt32(columnValue);
 
-		*bucketValue = (MurmurHash3_32_Long(value) & INT32_MAX) % transform->bucketCount;
+		*bucketValue = (MurmurHash3_32_Long(value) & INT32_MAX) % transform->parsedTransform.bucketCount;
 	}
 	else if (transform->pgType.postgresTypeOid == INT8OID)
 	{
 		int64_t		value = DatumGetInt64(columnValue);
 
-		*bucketValue = (MurmurHash3_32_Long(value) & INT32_MAX) % transform->bucketCount;
+		*bucketValue = (MurmurHash3_32_Long(value) & INT32_MAX) % transform->parsedTransform.bucketCount;
 	}
 	else if (transform->pgType.postgresTypeOid == TEXTOID ||
 			 transform->pgType.postgresTypeOid == VARCHAROID ||
@@ -791,13 +789,13 @@ ApplyBucketTransformToColumn(IcebergPartitionTransform * transform, Datum column
 	{
 		const char *value = TextDatumGetCString(columnValue);
 
-		*bucketValue = (MurmurHash3_32_Bytes(value, strlen(value)) & INT32_MAX) % transform->bucketCount;
+		*bucketValue = (MurmurHash3_32_Bytes(value, strlen(value)) & INT32_MAX) % transform->parsedTransform.bucketCount;
 	}
 	else if (transform->pgType.postgresTypeOid == BYTEAOID)
 	{
 		bytea	   *value = DatumGetByteaP(columnValue);
 
-		*bucketValue = (MurmurHash3_32_Bytes(VARDATA_ANY(value), VARSIZE_ANY_EXHDR(value)) & INT32_MAX) % transform->bucketCount;
+		*bucketValue = (MurmurHash3_32_Bytes(VARDATA_ANY(value), VARSIZE_ANY_EXHDR(value)) & INT32_MAX) % transform->parsedTransform.bucketCount;
 	}
 	else if (transform->pgType.postgresTypeOid == DATEOID)
 	{
@@ -809,7 +807,7 @@ ApplyBucketTransformToColumn(IcebergPartitionTransform * transform, Datum column
 		 * spec normally hashes int bytes for date type but spark hashes long
 		 * bytes of date. We follow spark here.
 		 */
-		*bucketValue = (MurmurHash3_32_Long(daysFromEpoch) & INT32_MAX) % transform->bucketCount;
+		*bucketValue = (MurmurHash3_32_Long(daysFromEpoch) & INT32_MAX) % transform->parsedTransform.bucketCount;
 	}
 	else if (transform->pgType.postgresTypeOid == TIMESTAMPOID)
 	{
@@ -817,7 +815,7 @@ ApplyBucketTransformToColumn(IcebergPartitionTransform * transform, Datum column
 
 		int64_t		microsecsFromEpoch = AdjustTimestampFromPostgresToUnix(value);
 
-		*bucketValue = (MurmurHash3_32_Long(microsecsFromEpoch) & INT32_MAX) % transform->bucketCount;
+		*bucketValue = (MurmurHash3_32_Long(microsecsFromEpoch) & INT32_MAX) % transform->parsedTransform.bucketCount;
 	}
 	else if (transform->pgType.postgresTypeOid == TIMESTAMPTZOID)
 	{
@@ -825,7 +823,7 @@ ApplyBucketTransformToColumn(IcebergPartitionTransform * transform, Datum column
 
 		int64_t		microsecsFromEpoch = AdjustTimestampFromPostgresToUnix(value);
 
-		*bucketValue = (MurmurHash3_32_Long(microsecsFromEpoch) & INT32_MAX) % transform->bucketCount;
+		*bucketValue = (MurmurHash3_32_Long(microsecsFromEpoch) & INT32_MAX) % transform->parsedTransform.bucketCount;
 	}
 	else if (transform->pgType.postgresTypeOid == TIMEOID)
 	{
@@ -833,7 +831,7 @@ ApplyBucketTransformToColumn(IcebergPartitionTransform * transform, Datum column
 
 		int64_t		microsecsFromMidnight = value;
 
-		*bucketValue = (MurmurHash3_32_Long(microsecsFromMidnight) & INT32_MAX) % transform->bucketCount;
+		*bucketValue = (MurmurHash3_32_Long(microsecsFromMidnight) & INT32_MAX) % transform->parsedTransform.bucketCount;
 	}
 	else if (transform->pgType.postgresTypeOid == UUIDOID)
 	{
@@ -841,7 +839,7 @@ ApplyBucketTransformToColumn(IcebergPartitionTransform * transform, Datum column
 		unsigned char *value = PGIcebergBinarySerializePartitionFieldValue(columnValue, transform->sourceField->type,
 																		   transform->pgType, &valueSize);
 
-		*bucketValue = (MurmurHash3_32_Bytes(value, valueSize) & INT32_MAX) % transform->bucketCount;
+		*bucketValue = (MurmurHash3_32_Bytes(value, valueSize) & INT32_MAX) % transform->parsedTransform.bucketCount;
 	}
 	else if (transform->pgType.postgresTypeOid == NUMERICOID)
 	{
@@ -849,7 +847,7 @@ ApplyBucketTransformToColumn(IcebergPartitionTransform * transform, Datum column
 		unsigned char *value = PGIcebergBinarySerializePartitionFieldValue(columnValue, transform->sourceField->type,
 																		   transform->pgType, &valueSize);
 
-		*bucketValue = (MurmurHash3_32_Bytes(value, valueSize) & INT32_MAX) % transform->bucketCount;
+		*bucketValue = (MurmurHash3_32_Bytes(value, valueSize) & INT32_MAX) % transform->parsedTransform.bucketCount;
 	}
 	else
 	{
@@ -977,7 +975,7 @@ SerializePartitionValueToPGText(void *value, size_t valueLength, IcebergPartitio
 	/* First, deserialize back */
 	bool		isNull = false;
 	Datum		partitionDatum =
-		PartitionValueToDatum(transform->type, value, valueLength,
+		PartitionValueToDatum(transform->parsedTransform.type, value, valueLength,
 							  transform->resultPgType, &isNull);
 
 	if (isNull)

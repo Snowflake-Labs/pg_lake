@@ -292,3 +292,4 @@ extern PGDLLEXPORT IcebergTableMetadata * ReadIcebergTableMetadata(const char *t
 extern PGDLLEXPORT char *WriteIcebergTableMetadataToJson(IcebergTableMetadata * metadata);
 extern PGDLLEXPORT void AppendIcebergTableSchemaForRestCatalog(StringInfo command, IcebergTableSchema * schemas, size_t schemas_length);
 extern PGDLLEXPORT void AppendIcebergPartitionSpecFields(StringInfo command, IcebergPartitionSpecField * fields, size_t fields_length);
+extern PGDLLEXPORT IcebergPartitionSpecField * DeepCopyIcebergPartitionSpecField(const IcebergPartitionSpecField * field);
