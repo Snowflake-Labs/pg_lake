@@ -7,7 +7,7 @@ def test_unsupported_types(
     pg_conn,
     s3,
     spatial_analytics_extension,
-    pg_lake_table_extension,
+    pg_lake_extension,
     extension,
     with_default_location,
 ):

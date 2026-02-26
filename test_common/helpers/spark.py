@@ -9,7 +9,7 @@ import os
 import importlib.metadata
 
 import pytest
-import server_params
+from . import server_params
 
 from utils_pytest import (
     run_query,

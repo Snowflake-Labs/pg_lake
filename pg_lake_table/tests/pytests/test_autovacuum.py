@@ -1,5 +1,4 @@
 import pytest
-import psycopg2
 from utils_pytest import *
 
 
@@ -144,9 +143,3 @@ def set_auto_vacuum_params(superuser_conn):
         ],
         superuser_conn,
     )
-
-
-def open_pg_conn_to_db(dbname):
-    conn_str = f"dbname={dbname} user={server_params.PG_USER} password={server_params.PG_PASSWORD} port={server_params.PG_PORT} host={server_params.PG_HOST}"
-
-    return psycopg2.connect(conn_str)

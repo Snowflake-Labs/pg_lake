@@ -1,6 +1,5 @@
 import pytest
 from utils_pytest import *
-from fixtures.delta import *
 from datetime import datetime, date, timezone
 
 

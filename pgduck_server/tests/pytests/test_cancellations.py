@@ -2,7 +2,6 @@ import psycopg2
 import pytest
 import threading
 import time
-import server_params
 from utils_pytest import *
 
 

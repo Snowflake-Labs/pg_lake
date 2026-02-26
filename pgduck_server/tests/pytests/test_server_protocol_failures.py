@@ -3,7 +3,6 @@ from utils_pytest import *
 from utils_protocol import *
 from pathlib import Path
 import socket
-import server_params
 
 # use > 1 to make sure multiple failures
 # do not cause problems

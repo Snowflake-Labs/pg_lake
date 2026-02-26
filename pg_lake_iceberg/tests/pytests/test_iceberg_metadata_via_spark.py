@@ -1,7 +1,7 @@
 import pytest
 import psycopg2
 from utils_pytest import *
-from spark_utils import *
+from helpers.spark import *
 
 
 SPARK_TABLE_NAME = "test_reserialize_via_spark"

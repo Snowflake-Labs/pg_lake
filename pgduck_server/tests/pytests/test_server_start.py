@@ -3,8 +3,6 @@ import subprocess
 import os
 import signal
 import time
-from pathlib import Path
-import socket
 import tempfile
 from utils_pytest import *
 import platform
@@ -16,150 +14,72 @@ DUCKDB_DATABASE_FILE_PATH = "/tmp/duckdb.db"
 PGDUCK_CACHE_DIR = f"/tmp/cache.{PGDUCK_PORT}"
 
 
-# runs before each test that uses domain sockets
-@pytest.fixture
-def clean_socket_path():
-    # Setup: remove any existing socket file
-    socket_path = Path(PGDUCK_UNIX_DOMAIN_PATH) / f".s.PGSQL.{PGDUCK_PORT}"
-    if socket_path.exists():
-        os.remove(socket_path)
-
-    duckdb_database_file_path_p = Path(DUCKDB_DATABASE_FILE_PATH)
-    if duckdb_database_file_path_p.exists():
-        os.remove(duckdb_database_file_path_p)
-
-    pidfile_path_p = Path(f"/tmp/pgduck_server_test_{os.getpid()}.pid")
-    if pidfile_path_p.exists():
-        os.remove(pidfile_path_p)
-
-    yield
-    # Teardown: remove socket file after test
-    if socket_path.exists():
-        os.remove(socket_path)
-    if duckdb_database_file_path_p.exists():
-        os.remove(duckdb_database_file_path_p)
-    if pidfile_path_p.exists():
-        os.remove(pidfile_path_p)
-
-
-def test_server_start(clean_socket_path):
-    socket_path = Path(PGDUCK_UNIX_DOMAIN_PATH) / f".s.PGSQL.{PGDUCK_PORT}"
-    server = start_server_in_background(
-        ["--unix_socket_directory", PGDUCK_UNIX_DOMAIN_PATH, "--port", str(PGDUCK_PORT)]
-    )
-    assert is_server_listening(socket_path)
+def test_server_start():
+    server = PgDuckServer(port=PGDUCK_PORT)
+    assert is_server_listening(server.socket_path)
     assert has_duckdb_created_file(DUCKDB_DATABASE_FILE_PATH)
-    terminate_process(server)
 
 
 @pytest.mark.skipif(
     platform.system() == "Darwin", reason="Abstract sockets no supported on Mac"
 )
 def test_server_start_abstract_socket():
-    abstract_path = Path("@" + PGDUCK_UNIX_DOMAIN_PATH)
-    socket_path = abstract_path / f".s.PGSQL.{PGDUCK_PORT}"
-    server = start_server_in_background(
-        ["--unix_socket_directory", str(abstract_path), "--port", str(PGDUCK_PORT)]
+    server = PgDuckServer(
+        unix_socket_directory="@" + PGDUCK_UNIX_DOMAIN_PATH, port=PGDUCK_PORT
     )
-    assert is_server_listening(socket_path)
+    assert is_server_listening(server.socket_path)
     assert has_duckdb_created_file(DUCKDB_DATABASE_FILE_PATH)
-    terminate_process(server)
 
 
-def test_multiple_server_instances_on_same_socket(clean_socket_path):
-    # Start the first server
-    socket_path = Path(PGDUCK_UNIX_DOMAIN_PATH) / f".s.PGSQL.{PGDUCK_PORT}"
-    server1 = start_server_in_background(
-        ["--unix_socket_directory", PGDUCK_UNIX_DOMAIN_PATH, "--port", str(PGDUCK_PORT)]
-    )
-    assert is_server_listening(socket_path)
+def test_multiple_server_instances_on_same_socket():
+    server1 = PgDuckServer(port=PGDUCK_PORT)
+    assert is_server_listening(server1.socket_path)
 
     # Attempt to start a second server on the same socket
-    server2 = start_server_in_background(
-        ["--unix_socket_directory", PGDUCK_UNIX_DOMAIN_PATH, "--port", str(PGDUCK_PORT)]
-    )
+    server2 = PgDuckServer(port=PGDUCK_PORT)
 
     # Check if server2 has terminated (indicating failure to start)
-    server2.poll()  # Update server2's status
-    assert server2.returncode != 0  # server2 should have exited by now
+    server2.process.poll()
+    assert server2.process.returncode != 0
 
     # we should be able to connect to the socket again
-    assert is_server_listening(socket_path)
-
-    # Clean up
-    terminate_process(server1)
-    terminate_process(server2)
+    assert is_server_listening(server1.socket_path)
 
 
 @pytest.mark.skipif(
     platform.system() == "Darwin", reason="Abstract sockets no supported on Mac"
 )
 def test_multiple_server_instances_on_same_abstract_socket():
-    # Start the first server
-    abstract_path = Path("@" + PGDUCK_UNIX_DOMAIN_PATH)
-    socket_path = abstract_path / f".s.PGSQL.{PGDUCK_PORT}"
-    server1 = start_server_in_background(
-        ["--unix_socket_directory", str(abstract_path), "--port", str(PGDUCK_PORT)]
-    )
-    assert is_server_listening(socket_path)
+    abstract_path = "@" + PGDUCK_UNIX_DOMAIN_PATH
+    server1 = PgDuckServer(unix_socket_directory=abstract_path, port=PGDUCK_PORT)
+    assert is_server_listening(server1.socket_path)
 
     # Attempt to start a second server on the same socket
-    server2 = start_server_in_background(
-        ["--unix_socket_directory", str(abstract_path), "--port", str(PGDUCK_PORT)]
-    )
+    server2 = PgDuckServer(unix_socket_directory=abstract_path, port=PGDUCK_PORT)
 
-    # Check if server2 has terminated (indicating failure to start)
-    server2.poll()  # Update server2's status
-    assert server2.returncode != 0  # server2 should have exited by now
+    server2.process.poll()
+    assert server2.process.returncode != 0
 
     # we should be able to connect to the socket again
-    assert is_server_listening(socket_path)
-
-    # Clean up
-    terminate_process(server1)
-    terminate_process(server2)
+    assert is_server_listening(server1.socket_path)
 
 
-def test_multiple_server_instances_on_duckdb_file_path_socket(clean_socket_path):
-    # Start the first server
-    socket_path = Path(PGDUCK_UNIX_DOMAIN_PATH) / f".s.PGSQL.{PGDUCK_PORT}"
-    server1 = start_server_in_background(
-        [
-            "--unix_socket_directory",
-            PGDUCK_UNIX_DOMAIN_PATH,
-            "--port",
-            str(PGDUCK_PORT),
-            "--duckdb_database_file_path",
-            "/tmp/data1.db",
-        ]
+def test_multiple_server_instances_on_duckdb_file_path_socket():
+    server1 = PgDuckServer(port=PGDUCK_PORT, duckdb_database_file_path="/tmp/data1.db")
+    assert is_server_listening(server1.socket_path)
+
+    # Attempt to start a second server on the same duckdb_database_file_path.
+    server2 = PgDuckServer(
+        port=PGDUCK_PORT + 1,
+        duckdb_database_file_path="/tmp/data1.db",
+        need_output=True,
     )
-    assert is_server_listening(socket_path)
-
-    # Attempt to start a second server on the duckdb_database_file_path
-    server2 = start_server_in_background(
-        [
-            "--unix_socket_directory",
-            PGDUCK_UNIX_DOMAIN_PATH,
-            "--port",
-            str(PGDUCK_PORT + 1),
-            "--duckdb_database_file_path",
-            "/tmp/data1.db",
-        ],
-        True,
-    )
-
-    output_queue_2 = queue.Queue()
-    output_thread_2 = threading.Thread(
-        target=capture_output, args=(server2.stderr, output_queue_2)
-    )
-    output_thread_2.start()
 
     start_time = time.time()
     found_error = False
     while (time.time() - start_time) < 20:  # loop at most 20 seconds
         try:
-            # Check if there is any output indicating the server is ready
-            line = output_queue_2.get_nowait()
+            line = server2.output_queue.get_nowait()
             if line and "error initialization DuckDB" in line:
                 found_error = True
                 break
@@ -167,203 +87,103 @@ def test_multiple_server_instances_on_duckdb_file_path_socket(clean_socket_path)
             time.sleep(0.1)  # No output yet, continue waiting
 
     # Check if server2 has terminated (indicating failure to start)
-    server2.poll()  # Update server2's status
-    assert server2.returncode != 0  # server2 should have exited by now
+    server2.process.poll()
+    assert server2.process.returncode != 0
     assert found_error == True
 
     # we should be able to connect to the socket again
-    assert is_server_listening(socket_path)
+    assert is_server_listening(server1.socket_path)
     assert has_duckdb_created_file("/tmp/data1.db")
 
-    # Clean up
-    try:
-        _, _ = server1.communicate(timeout=2)
-    except subprocess.TimeoutExpired:
-        server1.kill()
-        _, _ = server1.communicate()
 
-
-def test_two_servers_different_ports(clean_socket_path):
-    socket_path1 = Path(PGDUCK_UNIX_DOMAIN_PATH) / f".s.PGSQL.{PGDUCK_PORT}"
-    socket_path2 = Path(PGDUCK_UNIX_DOMAIN_PATH) / f".s.PGSQL.{PGDUCK_PORT + 1}"
-
-    server1 = start_server_in_background(
-        [
-            "--unix_socket_directory",
-            PGDUCK_UNIX_DOMAIN_PATH,
-            "--port",
-            str(PGDUCK_PORT),
-            "--duckdb_database_file_path",
-            "/tmp/data1.db",
-        ]
-    )
-    server2 = start_server_in_background(
-        [
-            "--unix_socket_directory",
-            PGDUCK_UNIX_DOMAIN_PATH,
-            "--port",
-            str(PGDUCK_PORT + 1),
-            "--duckdb_database_file_path",
-            "/tmp/data2.db",
-        ]
+def test_two_servers_different_ports():
+    server1 = PgDuckServer(port=PGDUCK_PORT, duckdb_database_file_path="/tmp/data1.db")
+    server2 = PgDuckServer(
+        port=PGDUCK_PORT + 1, duckdb_database_file_path="/tmp/data2.db"
     )
 
-    assert is_server_listening(socket_path1)
-    assert is_server_listening(socket_path2)
+    assert is_server_listening(server1.socket_path)
+    assert is_server_listening(server2.socket_path)
 
     assert has_duckdb_created_file("/tmp/data1.db")
     assert has_duckdb_created_file("/tmp/data2.db")
-
-    terminate_process(server1)
-    terminate_process(server2)
 
 
 @pytest.mark.skipif(
     platform.system() == "Darwin", reason="Abstract sockets no supported on Mac"
 )
 def test_two_servers_different_abstract_ports():
-    abstract_path = Path("@" + PGDUCK_UNIX_DOMAIN_PATH)
-    socket_path1 = abstract_path / f".s.PGSQL.{PGDUCK_PORT}"
-    socket_path2 = abstract_path / f".s.PGSQL.{PGDUCK_PORT + 1}"
-
-    server1 = start_server_in_background(
-        [
-            "--unix_socket_directory",
-            str(abstract_path),
-            "--port",
-            str(PGDUCK_PORT),
-            "--duckdb_database_file_path",
-            "/tmp/data1.db",
-        ]
+    abstract_path = "@" + PGDUCK_UNIX_DOMAIN_PATH
+    server1 = PgDuckServer(
+        unix_socket_directory=abstract_path,
+        port=PGDUCK_PORT,
+        duckdb_database_file_path="/tmp/data1.db",
     )
-    server2 = start_server_in_background(
-        [
-            "--unix_socket_directory",
-            str(abstract_path),
-            "--port",
-            str(PGDUCK_PORT + 1),
-            "--duckdb_database_file_path",
-            "/tmp/data2.db",
-        ]
+    server2 = PgDuckServer(
+        unix_socket_directory=abstract_path,
+        port=PGDUCK_PORT + 1,
+        duckdb_database_file_path="/tmp/data2.db",
     )
 
-    assert is_server_listening(socket_path1)
-    assert is_server_listening(socket_path2)
+    assert is_server_listening(server1.socket_path)
+    assert is_server_listening(server2.socket_path)
 
     assert has_duckdb_created_file("/tmp/data1.db")
     assert has_duckdb_created_file("/tmp/data2.db")
 
-    terminate_process(server1)
-    terminate_process(server2)
 
-
-def test_two_servers_different_paths(clean_socket_path):
-    socket_path1 = Path(PGDUCK_UNIX_DOMAIN_PATH) / f".s.PGSQL.{PGDUCK_PORT}"
-
+def test_two_servers_different_paths():
     # Create a temporary directory
     with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
-        socket_path2 = Path(temp_dir) / f".s.PGSQL.{PGDUCK_PORT}"
-
-        server1 = start_server_in_background(
-            [
-                "--unix_socket_directory",
-                PGDUCK_UNIX_DOMAIN_PATH,
-                "--port",
-                str(PGDUCK_PORT),
-                "--duckdb_database_file_path",
-                "/tmp/data1.db",
-            ]
+        server1 = PgDuckServer(
+            port=PGDUCK_PORT, duckdb_database_file_path="/tmp/data1.db"
         )
-        server2 = start_server_in_background(
-            [
-                "--unix_socket_directory",
-                temp_dir,
-                "--port",
-                str(PGDUCK_PORT),
-                "--duckdb_database_file_path",
-                "/tmp/data2.db",
-            ]
+        server2 = PgDuckServer(
+            unix_socket_directory=temp_dir,
+            port=PGDUCK_PORT,
+            duckdb_database_file_path="/tmp/data2.db",
         )
 
-        assert is_server_listening(socket_path1)
-        assert is_server_listening(socket_path2)
-
-        terminate_process(server1)
-        terminate_process(server2)
+        assert is_server_listening(server1.socket_path)
+        assert is_server_listening(server2.socket_path)
 
 
 # Failure scenario tests
-def test_server_invalid_port(clean_socket_path):
-    invalid_port = "invalid_port"
-    server = start_server_in_background(
-        ["--unix_socket_directory", PGDUCK_UNIX_DOMAIN_PATH, "--port", invalid_port]
+def test_server_invalid_port():
+    server = PgDuckServer(port="invalid_port")
+    server.process.poll()
+    assert server.process.returncode != 0
+
+
+def test_server_excessively_high_port():
+    server = PgDuckServer(port=65536)
+    server.process.poll()
+    assert server.process.returncode != 0
+
+
+def test_server_with_nonexistent_socket_directory():
+    server = PgDuckServer(
+        unix_socket_directory="/nonexistent/directory", port=PGDUCK_PORT
     )
-    server.poll()
-    assert server.returncode != 0
-    terminate_process(server)
+    server.process.poll()
+    assert server.process.returncode != 0
 
 
-def test_server_excessively_high_port(clean_socket_path):
-    excessively_high_port = "65536"  # Above the valid port range
-    server = start_server_in_background(
-        [
-            "--unix_socket_directory",
-            PGDUCK_UNIX_DOMAIN_PATH,
-            "--port",
-            excessively_high_port,
-        ]
-    )
-    server.poll()
-    assert server.returncode != 0
-    terminate_process(server)
+def test_server_exit_code_and_error_message_for_invalid_socket():
+    server = PgDuckServer(unix_socket_directory="/invalid/path", port=PGDUCK_PORT)
+    assert server.process.returncode != 0
 
 
-def test_server_with_nonexistent_socket_directory(clean_socket_path):
-    nonexistent_directory = "/nonexistent/directory"
-    server = start_server_in_background(
-        ["--unix_socket_directory", nonexistent_directory, "--port", str(PGDUCK_PORT)]
-    )
-    server.poll()
-    assert server.returncode != 0
-    terminate_process(server)
-
-
-def test_server_exit_code_and_error_message_for_invalid_socket(clean_socket_path):
-    invalid_socket_path = "/invalid/path"
-    server = start_server_in_background(
-        ["--unix_socket_directory", invalid_socket_path, "--port", str(PGDUCK_PORT)]
-    )
-    assert server.returncode != 0
-    terminate_process(server)
-
-
-def test_long_unix_socket_path(clean_socket_path):
-    long_socket_path = "/tmp/" + "a" * 100  # Create an overly long socket path
-    server = start_server_in_background(
-        ["--unix_socket_directory", long_socket_path, "--port", str(PGDUCK_PORT)]
-    )
-    assert server.returncode != 0
-    terminate_process(server)
+def test_long_unix_socket_path():
+    server = PgDuckServer(unix_socket_directory="/tmp/" + "a" * 100, port=PGDUCK_PORT)
+    assert server.process.returncode != 0
 
 
 @pytest.mark.parametrize("use_debug", [False, True])
-def test_server_debug_messages(clean_socket_path, use_debug):
-    socket_path = Path(PGDUCK_UNIX_DOMAIN_PATH) / f".s.PGSQL.{PGDUCK_PORT}"
-    params = [
-        "--unix_socket_directory",
-        PGDUCK_UNIX_DOMAIN_PATH,
-        "--port",
-        str(PGDUCK_PORT),
-    ]
+def test_server_debug_messages(use_debug):
+    server = PgDuckServer(port=PGDUCK_PORT, debug=use_debug, need_output=True)
 
-    if use_debug:
-        params.append("--debug")
-
-    server, output_queue, stderr_thread = capture_output_queue(
-        start_server_in_background(params, True)
-    )
-
-    assert is_server_listening(socket_path)
+    assert is_server_listening(server.socket_path)
     assert has_duckdb_created_file(DUCKDB_DATABASE_FILE_PATH)
 
     # connect to our server, issue our command
@@ -375,7 +195,7 @@ def test_server_debug_messages(clean_socket_path, use_debug):
 
     cur.execute(query)
 
-    server_output = get_server_output(output_queue)
+    server_output = get_server_output(server.output_queue)
     found = query in server_output
 
     if use_debug:
@@ -386,45 +206,35 @@ def test_server_debug_messages(clean_socket_path, use_debug):
     cur.close()
     conn.close()
 
-    terminate_process(server)
 
-
-def test_server_pidfile(clean_socket_path):
-    socket_path = Path(PGDUCK_UNIX_DOMAIN_PATH) / f".s.PGSQL.{PGDUCK_PORT}"
+def test_server_pidfile():
     pidfile_path = f"/tmp/pgduck_server_test_{os.getpid()}.pid"
 
     assert not os.path.exists(pidfile_path)
 
-    server = start_server_in_background(
-        [
-            "--unix_socket_directory",
-            PGDUCK_UNIX_DOMAIN_PATH,
-            "--port",
-            str(PGDUCK_PORT),
-            "--pidfile",
-            pidfile_path,
-            "--duckdb_database_file_path",
-            "/tmp/data1.db",
-        ]
+    server = PgDuckServer(
+        port=PGDUCK_PORT,
+        pidfile=pidfile_path,
+        duckdb_database_file_path="/tmp/data1.db",
     )
 
-    assert is_server_listening(socket_path)
+    assert is_server_listening(server.socket_path)
     assert os.path.exists(pidfile_path)
 
     # Give the server a moment to finish handling the is_server_listening connection
     time.sleep(0.1)
 
     # Verify the server removes its pidfile on clean SIGTERM shutdown.
-    # Don't use terminate_process() here: its SIGKILL fallback would
-    # bypass the server's signal handler and leave the pidfile behind.
+    # Don't use server.stop() here: the SIGKILL fallback would bypass the
+    # server's signal handler and leave the pidfile behind.
     # Use a generous timeout (60s) to allow for clean shutdown even under
     # heavy load or when multiple test instances are running concurrently.
-    server.terminate()
+    server.process.terminate()
     try:
-        server.wait(timeout=60)
+        server.process.wait(timeout=60)
     except subprocess.TimeoutExpired:
-        server.kill()
-        server.wait(timeout=10)
+        server.process.kill()
+        server.process.wait(timeout=10)
         pytest.fail(
             "server did not exit on SIGTERM; pidfile cleanup could not be verified"
         )
@@ -437,26 +247,18 @@ def test_server_pidfile(clean_socket_path):
 
 # ensure we handle pidfiles properly when sending normal stop signals or interrupt
 @pytest.mark.parametrize("send_signal", [signal.SIGINT, signal.SIGTERM])
-def test_server_pidfile_signal(clean_socket_path, send_signal):
-    socket_path = Path(PGDUCK_UNIX_DOMAIN_PATH) / f".s.PGSQL.{PGDUCK_PORT}"
+def test_server_pidfile_signal(send_signal):
     pidfile_path = f"/tmp/pgduck_server_test_{os.getpid()}.pid"
 
     assert not os.path.exists(pidfile_path)
 
-    server = start_server_in_background(
-        [
-            "--unix_socket_directory",
-            PGDUCK_UNIX_DOMAIN_PATH,
-            "--port",
-            str(PGDUCK_PORT),
-            "--pidfile",
-            pidfile_path,
-            "--duckdb_database_file_path",
-            "/tmp/data1.db",
-        ]
+    server = PgDuckServer(
+        port=PGDUCK_PORT,
+        pidfile=pidfile_path,
+        duckdb_database_file_path="/tmp/data1.db",
     )
 
-    assert is_server_listening(socket_path)
+    assert is_server_listening(server.socket_path)
     assert os.path.exists(pidfile_path)
 
     # test sending external signal

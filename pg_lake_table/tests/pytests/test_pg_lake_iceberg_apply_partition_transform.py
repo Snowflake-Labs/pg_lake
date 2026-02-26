@@ -3,7 +3,7 @@ import datetime
 from decimal import Decimal
 import random
 from utils_pytest import *
-from spark_utils import *
+from helpers.spark import *
 
 
 TOTAL_ROWS = 100

@@ -1,7 +1,6 @@
 import os
 import pytest
 import time
-import server_params
 import psycopg2
 import select
 from utils_pytest import *
