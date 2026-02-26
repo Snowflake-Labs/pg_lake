@@ -326,7 +326,7 @@ pg_lake_reserialize_data_file_stats(PG_FUNCTION_ARGS)
 
 		int64		addedSnapshotId = manifest->added_snapshot_id;
 
-		IcebergSnapshot *snapshot = GetIcebergSnapshotViaId(metadata, addedSnapshotId);
+		IcebergSnapshot *snapshot = GetIcebergSnapshotViaId(metadata, addedSnapshotId, false);
 
 		/*
 		 * we need to use the schema of the snapshot that added the datafiles

@@ -917,6 +917,7 @@ GetAddSnapshotCatalogRequest(IcebergSnapshot * newSnapshot, Oid relationId)
 	request->relationId = relationId;
 	request->operationType = REST_CATALOG_ADD_SNAPSHOT;
 	request->body = body->data;
+	request->newSnapshotId = newSnapshot->snapshot_id;
 
 	return request;
 }

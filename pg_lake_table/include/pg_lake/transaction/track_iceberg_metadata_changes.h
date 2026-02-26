@@ -19,6 +19,7 @@
 
 #include "postgres.h"
 #include "access/hash.h"
+#include "pg_lake/iceberg/metadata_spec.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 
 typedef struct TableMetadataOperationTracker
@@ -31,6 +32,19 @@ typedef struct TableMetadataOperationTracker
 	bool		relationDataFileChanged;
 	bool		relationManifestMergeRequested;
 	bool		relationSnapshotExpirationRequested;
+
+	/*
+	 * used to compute diff between internal catalog and the last snapshot
+	 * that is synced to rest catalog by us
+	 */
+	IcebergSnapshot *lastSyncedSnapshot;
+
+	/*
+	 * current metadata of the table, cache it at the start of diff
+	 * computation
+	 */
+	IcebergTableMetadata *currentMetadata;
+	char	   *currentMetadataLocation;
 }			TableMetadataOperationTracker;
 
 
@@ -38,7 +52,8 @@ extern PGDLLEXPORT void ConsumeTrackedIcebergMetadataChanges(void);
 extern PGDLLEXPORT void PostAllRestCatalogRequests(void);
 extern PGDLLEXPORT void TrackIcebergMetadataChangesInTx(Oid relationId, List *metadataOperationTypes);
 extern PGDLLEXPORT void RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationType,
-													 const char *body);
+													 const char *body,
+													 int64_t currentSnapshotId);
 extern PGDLLEXPORT void ResetTrackedIcebergMetadataOperation(void);
 extern PGDLLEXPORT void ResetRestCatalogRequests(void);
 extern PGDLLEXPORT HTAB *GetTrackedIcebergMetadataOperations(void);

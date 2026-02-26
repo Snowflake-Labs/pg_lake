@@ -71,6 +71,14 @@ typedef struct RestCatalogRequest
 	 * holds the full request body.
 	 */
 	char	   *body;
+
+	/*
+	 * For ADD_SNAPSHOT operations, this holds the new snapshot ID being
+	 * added. Set to -1 for other operation types. Used to track what snapshot
+	 * was successfully pushed to the REST catalog for external change
+	 * detection.
+	 */
+	int64		newSnapshotId;
 }			RestCatalogRequest;
 
 

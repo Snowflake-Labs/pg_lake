@@ -17,21 +17,27 @@
 
 #include "postgres.h"
 #include "access/xact.h"
+#include "miscadmin.h"
 #include "common/int.h"
+#include "utils/builtins.h"
+#include "utils/lsyscache.h"
 #include "utils/memutils.h"
 
 #include "pg_lake/cleanup/in_progress_files.h"
 #include "pg_lake/data_file/data_files.h"
+#include "pg_lake/extensions/pg_lake_iceberg.h"
 #include "pg_lake/fdw/data_files_catalog.h"
 #include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/iceberg/data_file_stats.h"
 #include "pg_lake/iceberg/metadata_operations.h"
 #include "pg_lake/iceberg/operations/find_referenced_files.h"
 #include "pg_lake/iceberg/operations/manifest_merge.h"
 #include "pg_lake/iceberg/partitioning/spec_generation.h"
 #include "pg_lake/partitioning/partition_spec_catalog.h"
+#include "pg_lake/pgduck/remote_storage.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/transaction/transaction_hooks.h"
@@ -39,6 +45,10 @@
 #include "pg_lake/json/json_utils.h"
 #include "pg_lake/util/s3_writer_utils.h"
 #include "pg_lake/util/url_encode.h"
+#include "pg_lake/util/catalog_type.h"
+#include "pg_lake/util/spi_helpers.h"
+#include "pg_lake/util/string_utils.h"
+#include "pg_lake/util/s3_reader_utils.h"
 
 #define ONE_MB (1 * 1024 * 1024)
 
@@ -72,20 +82,55 @@ typedef struct RestCatalogRequestPerTable
 	RestCatalogRequest *createTableRequest;
 	RestCatalogRequest *dropTableRequest;
 
+	/*
+	 * Last synced snapshot ID from REST catalog, used for optimistic
+	 * concurrency control via assert-ref-snapshot-id requirement. Set to -1
+	 * if table has no snapshots yet.
+	 */
+	int64_t		lastSyncedSnapshotId;
+
+	/*
+	 * New snapshot ID being pushed to REST catalog in this transaction. Set
+	 * to -1 if no new snapshot is being added (e.g., only schema changes).
+	 */
+	int64_t		newSnapshotId;
 
 	List	   *tableModifyRequests;
 }			RestCatalogRequestPerTable;
+
+
+/*
+ * SnapshotDataFileHashEntry is a hash table entry for a data file in a snapshot,
+ * that is not available in the internal catalog yet.
+ */
+typedef struct SnapshotDataFileHashEntry
+{
+	char		filePath[MAX_S3_PATH_LENGTH];
+	int32_t		partitionSpecId;
+	DataFileStats dataFileStats;
+	DataFile	dataFile;
+}			SnapshotDataFileHashEntry;
 
 static void ApplyTrackedIcebergMetadataChanges(void);
 static void RecordIcebergMetadataOperation(Oid relationId, TableMetadataOperationType operationType);
 static void InitTableMetadataTrackerHashIfNeeded(void);
 static void InitRestCatalogRequestsHashIfNeeded(void);
-static HTAB *CreateDataFilesHashForMetadata(IcebergTableMetadata * metadata);
-static void FindChangedFilesSinceMetadata(HTAB *currentFilesMap, IcebergTableMetadata * metadata,
-										  List **addedFiles, List **removedFilePaths);
+static HTAB *CreateDataFilesHashForSnapshot(IcebergSnapshot * snapshot, IcebergTableMetadata * metadata);
+static void FindInternallyChangedFilesSinceSnapshot(HTAB *currentFilesMap, IcebergSnapshot * snapshot,
+													IcebergTableMetadata * metadata,
+													List **addedFiles, List **removedFilePaths);
+static void FindExternallyChangedFilesAtSnapshot(HTAB *currentFilesMap, IcebergSnapshot * snapshot,
+												 IcebergTableMetadata * metadata,
+												 List **addedFiles, List **removedFilePaths);
+static void SyncInternalCatalogFromLatestSnapshotOutsideTx(Oid relationId, bool resetInternalCatalog);
+static void ApplyExternallyChangedFilesToDataCatalog(Oid relationId, IcebergSnapshot * snapshot, IcebergTableMetadata * metadata);
+static void EnsureNoExternalDDL(Oid relationId, char *metadataLocation);
+static void EnsureNoExternalDDLOutsideTx(Oid relationId, char *metadataLocation);
+static bool ArePartitionSpecFieldsEqual(IcebergPartitionSpecField * fieldA, IcebergPartitionSpecField * fieldB);
+static bool ArePartitionSpecsEqual(IcebergPartitionSpec * specA, IcebergPartitionSpec * specB);
 static HTAB *CreatePartitionSpecsHashForMetadata(IcebergTableMetadata * metadata);
 static List *FindNewPartitionSpecsSinceMetadata(HTAB *currentSpecs, IcebergTableMetadata * metadata);
-static IcebergTableMetadata * GetLastPushedIcebergMetadata(const TableMetadataOperationTracker * opTracker);
+static IcebergSnapshot * GetLastSyncedIcebergSnapshotIfExists(const TableMetadataOperationTracker * opTracker, IcebergCatalogType catalogType);
 static List *GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 										   List *allTransforms);
 static List *GetDDLMetadataOperations(const TableMetadataOperationTracker * opTracker);
@@ -95,7 +140,6 @@ static int32_t GetSchemaIdForIcebergTableIfExists(const TableMetadataOperationTr
 static int	ComparePartitionSpecsById(const ListCell *a, const ListCell *b);
 
 static char *IdentifierJson(const char *namespaceFlat, const char *tableName);
-
 
 
 /*
@@ -212,8 +256,8 @@ ResetRestCatalogRequests(void)
 
 /*
 * PostAllRestCatalogRequests posts all the tracked REST catalog requests
-* to the REST catalog at transaction commit time. This is called at post-commit
-* hook, meaning that ERRORS here will be FATAL, so not acceptable.
+* to the REST catalog at transaction pre-commit time. This is called at pre-commit
+* hook.
 */
 void
 PostAllRestCatalogRequests(void)
@@ -224,8 +268,8 @@ PostAllRestCatalogRequests(void)
 	}
 
 	/*
-	 * Switch to PgLakeXactCommitContext to avoid palloc() in XACT_COMMIT, as
-	 * PgLakeXactCommitContext is pre-allocated before.
+	 * PgLakeXactCommitContext is allocated to minimize palloc overhead when
+	 * sending REST catalog requests. We use it here in pre-commit as well.
 	 */
 	MemoryContext oldContext = MemoryContextSwitchTo(PgLakeXactCommitContext);
 
@@ -268,43 +312,36 @@ PostAllRestCatalogRequests(void)
 			 */
 			continue;
 		}
-		else if (createTableRequest != NULL || dropTableRequest != NULL)
+		else if (createTableRequest != NULL)
 		{
-			if (createTableRequest != NULL)
+			HttpResult	httpResult =
+				SendRequestToRestCatalog(HTTP_POST, requestPerTable->tableRestUrl,
+										 createTableRequest->body, PostHeadersWithAuth());
+
+			if (httpResult.status != 200)
 			{
-				HttpResult	httpResult =
-					SendRequestToRestCatalog(HTTP_POST, requestPerTable->tableRestUrl,
-											 createTableRequest->body, PostHeadersWithAuth());
+				ReportHTTPError(httpResult, ERROR);
 
-				if (httpResult.status != 200)
-				{
-					ReportHTTPError(httpResult, WARNING);
-
-					/*
-					 * Ouch, something failed. Should we stop sending the
-					 * requests?
-					 */
-				}
+				/*
+				 * Ouch, something failed. Should we stop sending the
+				 * requests?
+				 */
 			}
-			else if (dropTableRequest != NULL)
-			{
-				HttpResult	httpResult =
-					SendRequestToRestCatalog(HTTP_DELETE, requestPerTable->tableRestUrl,
-											 NULL, DeleteHeadersWithAuth());
+		}
+		else if (dropTableRequest != NULL)
+		{
+			HttpResult	httpResult =
+				SendRequestToRestCatalog(HTTP_DELETE, requestPerTable->tableRestUrl,
+										 NULL, DeleteHeadersWithAuth());
 
-				if (httpResult.status != 204)
-				{
-					ReportHTTPError(httpResult, WARNING);
-
-					/*
-					 * Ouch, something failed. Should we stop sending the
-					 * requests?
-					 */
-				}
-			}
-			else
+			if (httpResult.status != 204)
 			{
-				pg_unreachable();
+				ReportHTTPError(httpResult, ERROR);
+
+				/*
+				 * Ouch, something failed. Should we stop sending the
+				 * requests?
+				 */
 			}
 		}
 	}
@@ -368,7 +405,30 @@ PostAllRestCatalogRequests(void)
 		appendJsonKey(batchRequestBody, "identifier");
 		appendStringInfo(batchRequestBody, "%s", requestPerTable->tableIdentifier);
 		appendStringInfoChar(batchRequestBody, ',');
-		appendStringInfoString(batchRequestBody, "\"requirements\":[],");
+
+		/*
+		 * Add requirements array with assert-ref-snapshot-id for optimistic
+		 * concurrency control
+		 */
+		appendJsonKey(batchRequestBody, "requirements");
+		appendStringInfoChar(batchRequestBody, '[');
+
+		if (requestPerTable->lastSyncedSnapshotId > 0)
+		{
+			/* Add assert-ref-snapshot-id requirement */
+			appendStringInfoChar(batchRequestBody, '{');
+			appendJsonString(batchRequestBody, "type", "assert-ref-snapshot-id");
+			appendStringInfoChar(batchRequestBody, ',');
+			appendJsonString(batchRequestBody, "ref", "main");
+			appendStringInfoChar(batchRequestBody, ',');
+			appendStringInfo(batchRequestBody, "\"snapshot-id\":%" PRId64, requestPerTable->lastSyncedSnapshotId);
+			appendStringInfoChar(batchRequestBody, '}');
+		}
+
+		appendStringInfoChar(batchRequestBody, ']');	/* close requirements
+														 * array */
+		appendStringInfoChar(batchRequestBody, ',');
+
 		appendStringInfoString(batchRequestBody, " \"updates\":[");
 
 		ListCell   *requestCell = NULL;
@@ -411,9 +471,53 @@ PostAllRestCatalogRequests(void)
 		char	   *url = psprintf(REST_CATALOG_TRANSACTION_COMMIT, RestCatalogHost, catalogName);
 		HttpResult	httpResult = SendRequestToRestCatalog(HTTP_POST, url, batchRequestBody->data, PostHeadersWithAuth());
 
-		if (httpResult.status != 204)
+		if (httpResult.status == 409)
 		{
-			ReportHTTPError(httpResult, WARNING);
+			/*
+			 * 409 Conflict: Concurrent write detected. The snapshot ID we
+			 * asserted in our requirement doesn't match the current state in
+			 * the REST catalog. This means another writer committed between
+			 * when we fetched the current state and when we tried to commit.
+			 */
+
+			/*
+			 * sync the latest changes, from REST catalog to internal catalog
+			 * in separate transaction and also abort the transaction
+			 */
+			hash_seq_init(&status, RestCatalogRequestsHash);
+
+			while ((requestPerTable = hash_seq_search(&status)) != NULL)
+			{
+				if (requestPerTable->isValid)
+				{
+					/*
+					 * This transaction is about to be aborted due to the
+					 * conflict, we need to sync the latest changes from REST
+					 * catalog to internal catalog
+					 */
+					bool		resetInternalCatalog = false;
+
+					SyncInternalCatalogFromLatestSnapshotOutsideTx(requestPerTable->relationId, resetInternalCatalog);
+				}
+			}
+
+			ReportHTTPError(httpResult, ERROR);
+		}
+		else if (httpResult.status != 204)
+		{
+			ReportHTTPError(httpResult, ERROR);
+		}
+
+		/*
+		 * update the last synced snapshot id and metadata location for all
+		 * tables
+		 */
+		hash_seq_init(&status, RestCatalogRequestsHash);
+
+		while ((requestPerTable = hash_seq_search(&status)) != NULL)
+		{
+			if (requestPerTable->isValid && requestPerTable->newSnapshotId != -1)
+				UpdateLastSyncedSnapshotId(requestPerTable->relationId, requestPerTable->newSnapshotId);
 		}
 	}
 
@@ -469,7 +573,7 @@ RecordIcebergMetadataOperation(Oid relationId, TableMetadataOperationType operat
 	/*
 	 * flags are not reset in case a subtransaction rollbacks. But this is not
 	 * a problem because we calculate the difference between our catalogs and
-	 * the last pushed metadata and then apply the difference to the new
+	 * the last synced metadata and then apply the difference to the new
 	 * metadata. Only exception is TABLE_DDL operations, for which we always
 	 * create a snapshot even if the subtransaction rollbacks. In future, we
 	 * might want to apply the diff algorithm to see if the schema changes as
@@ -585,7 +689,7 @@ InitRestCatalogRequestsHashIfNeeded(void)
 */
 void
 RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationType,
-							 const char *body)
+							 const char *body, int64_t lastSyncedSnapshotId)
 {
 	InitRestCatalogRequestsHashIfNeeded();
 
@@ -624,6 +728,8 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 			MemoryContextStrdup(TopTransactionContext,
 								IdentifierJson(requestPerTable->catalogNamespace,
 											   requestPerTable->catalogTableName));
+
+		requestPerTable->lastSyncedSnapshotId = lastSyncedSnapshotId;
 
 		requestPerTable->isValid = true;
 	}
@@ -668,13 +774,26 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 
 /*
  * ConsumeTrackedIcebergMetadataChanges consumes the tracked metadata operations and
- * applies them to the Iceberg metadata.
+ * applies them to the Iceberg metadata. This is called in pre-commit hook, so it
+ * can send REST catalog requests and ERROR on failure to trigger transaction rollback.
  */
 void
 ConsumeTrackedIcebergMetadataChanges(void)
 {
 	ApplyTrackedIcebergMetadataChanges();
+
+	/*
+	 * After applying metadata changes to internal catalogs, send REST catalog
+	 * requests. This is done in pre-commit so failures can trigger rollback.
+	 */
+	PostAllRestCatalogRequests();
+
+	/*
+	 * Reset both tracked operations and REST requests after successfully
+	 * sending all requests.
+	 */
 	ResetTrackedIcebergMetadataOperation();
+	ResetRestCatalogRequests();
 }
 
 
@@ -704,6 +823,38 @@ ApplyTrackedIcebergMetadataChanges(void)
 		if (!RelationExistsInTheIcebergCatalog(relationId))
 			continue;
 
+		/* first cache the latest metadata for the relation */
+		if (opTracker->currentMetadata == NULL && !opTracker->relationCreated)
+		{
+			opTracker->currentMetadataLocation = GetIcebergMetadataLocation(relationId, false);
+
+			opTracker->currentMetadata = ReadIcebergTableMetadata(opTracker->currentMetadataLocation);
+		}
+
+		IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
+
+		if (!opTracker->relationCreated && catalogType == REST_CATALOG_READ_WRITE)
+		{
+			/*
+			 * we do not want to see our own ddl changes. This check needs to
+			 * be done outside of the current transaction.
+			 *
+			 * TODO: what happens if ddl request succeeded to the rest catalog
+			 * but the transaction failed in previous write. Then we
+			 * mistakenly detect external ddl. This can be resolved if we can
+			 * apply reverse diff algorithm for ddls.
+			 */
+			EnsureNoExternalDDLOutsideTx(opTracker->relationId, opTracker->currentMetadataLocation);
+		}
+
+		/* get the last synced snapshot for the relation */
+		IcebergSnapshot *lastSyncedSnapshot = GetLastSyncedIcebergSnapshotIfExists(opTracker, catalogType);
+
+		if (opTracker->lastSyncedSnapshot == NULL)
+			opTracker->lastSyncedSnapshot = lastSyncedSnapshot;
+
+		int64_t		lastSyncedSnapshotId = (opTracker->lastSyncedSnapshot) ? opTracker->lastSyncedSnapshot->snapshot_id : -1;
+
 		List	   *allTransforms = AllPartitionTransformList(relationId);
 
 		List	   *metadataOperations = NIL;
@@ -715,8 +866,7 @@ ApplyTrackedIcebergMetadataChanges(void)
 
 			metadataOperations = list_concat(metadataOperations, ddlOps);
 
-			if (opTracker->relationCreated &&
-				GetIcebergCatalogType(relationId) == REST_CATALOG_READ_WRITE)
+			if (opTracker->relationCreated && catalogType == REST_CATALOG_READ_WRITE)
 			{
 				TableMetadataOperation *createOp = linitial(metadataOperations);
 
@@ -725,7 +875,7 @@ ApplyTrackedIcebergMetadataChanges(void)
 																		createOp->newSchema,
 																		createOp->partitionSpecs);
 
-				RecordRestCatalogRequestInTx(relationId, REST_CATALOG_CREATE_TABLE, body);
+				RecordRestCatalogRequestInTx(relationId, REST_CATALOG_CREATE_TABLE, body, -1);
 			}
 		}
 
@@ -767,7 +917,26 @@ ApplyTrackedIcebergMetadataChanges(void)
 				RestCatalogRequest *request = lfirst(requestCell);
 
 				RecordRestCatalogRequestInTx(relationId, request->operationType,
-											 request->body);
+											 request->body, lastSyncedSnapshotId);
+
+				/*
+				 * Track the new snapshot ID if this is an ADD_SNAPSHOT
+				 * operation. We'll use this to record what we actually pushed
+				 * to REST catalog.
+				 */
+				if (request->operationType == REST_CATALOG_ADD_SNAPSHOT &&
+					request->newSnapshotId > 0)
+				{
+					bool		found = false;
+					RestCatalogRequestPerTable *requestPerTable =
+						hash_search(RestCatalogRequestsHash,
+									&relationId, HASH_FIND, &found);
+
+					if (found && requestPerTable->isValid)
+					{
+						requestPerTable->newSnapshotId = request->newSnapshotId;
+					}
+				}
 			}
 
 		}
@@ -783,72 +952,447 @@ ApplyTrackedIcebergMetadataChanges(void)
 
 
 /*
- * CreateDataFilesHashForMetadata creates and populates a hash table of data files
- * from the given Iceberg table metadata.
+ * CreateDataFilesHashForSnapshot creates and populates a hash table of data files
+ * from the given Iceberg snapshot.
  */
 static HTAB *
-CreateDataFilesHashForMetadata(IcebergTableMetadata * metadata)
+CreateDataFilesHashForSnapshot(IcebergSnapshot * snapshot, IcebergTableMetadata * metadata)
 {
-	HTAB	   *dataFilesMap = CreateFilesHash();
+	HASHCTL		hashCtl;
 
-	if (metadata == NULL)
-		return dataFilesMap;
+	memset(&hashCtl, 0, sizeof(hashCtl));
+	hashCtl.keysize = MAX_S3_PATH_LENGTH;
+	hashCtl.entrysize = sizeof(SnapshotDataFileHashEntry);
+	hashCtl.hcxt = CurrentMemoryContext;
+	HTAB	   *snapshotDataFilesMap = hash_create("snapshot data files hash", 1024, &hashCtl, HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
 
-	IcebergSnapshot *iceSnapshot = GetCurrentSnapshot(metadata, true);
-	List	   *dataFiles = FetchDataFilesFromSnapshot(iceSnapshot, NULL, IsManifestEntryStatusScannable, NULL);
+	if (snapshot == NULL)
+		return snapshotDataFilesMap;
 
-	ListCell   *fileCell = NULL;
+	List	   *leafFields = GetLeafFieldsFromIcebergMetadata(metadata);
 
-	foreach(fileCell, dataFiles)
+	/* fetch manifests from snapshot */
+	List	   *manifests = FetchManifestsFromSnapshot(snapshot, NULL);
+
+	ListCell   *manifestCell = NULL;
+
+	foreach(manifestCell, manifests)
 	{
-		TableDataFile *dataFile = lfirst(fileCell);
+		IcebergManifest *manifest = lfirst(manifestCell);
 
-		AppendFileToHash(dataFile->path, dataFilesMap);
+		List	   *dataFiles = FetchDataFilesFromManifest(manifest, NULL, IsManifestEntryStatusScannable, NULL);
+
+		ListCell   *dataFileCell = NULL;
+
+		foreach(dataFileCell, dataFiles)
+		{
+			DataFile   *dataFile = lfirst(dataFileCell);
+			bool		found = false;
+			SnapshotDataFileHashEntry *entry =
+				(SnapshotDataFileHashEntry *) hash_search(snapshotDataFilesMap, dataFile->file_path,
+														  HASH_ENTER, &found);
+
+			if (!found)
+			{
+				entry->dataFile = *dataFile;
+				entry->partitionSpecId = manifest->partition_spec_id;
+
+				char	   *filePath = pstrdup(dataFile->file_path);
+
+				int64		rowCount = GetRemoteParquetFileRowCount(filePath);
+				DataFileStats *dataFileStats = CreateDataFileStatsForDataFile(filePath, rowCount, 0, leafFields);
+
+				entry->dataFileStats = *dataFileStats;
+			}
+		}
 	}
 
-	return dataFilesMap;
+	return snapshotDataFilesMap;
 }
 
 
 /*
- * FindChangedFilesSinceMetadata identifies added and removed files by comparing
- * the current state of data files with the state recorded in the provided metadata.
+ * FindInternallyChangedFilesSinceSnapshot identifies added and removed files by comparing
+ * the current state of data files with the state recorded in the provided snapshot.
  * It populates the addedFiles and removedFilePaths lists with the respective files.
  *
- * addedFiles: file info, wrapped in `TableDataFile` struct, for the files that are added since the metadata
- * removedFilePaths: file paths, which are added before the current tx, that are removed since the metadata
+ * addedFiles: file info, wrapped in `TableDataFile` struct, for the files that are added since the snapshot
+ * removedFilePaths: file paths, which are added before the current tx, that are removed since the snapshot
  */
 static void
-FindChangedFilesSinceMetadata(HTAB *currentFilesMap, IcebergTableMetadata * metadata,
-							  List **addedFiles, List **removedFilePaths)
+FindInternallyChangedFilesSinceSnapshot(HTAB *currentFilesMap, IcebergSnapshot * snapshot,
+										IcebergTableMetadata * metadata,
+										List **addedFiles, List **removedFilePaths)
 {
-	/* create metadata's data files */
-	HTAB	   *metadataDataFilesMap = CreateDataFilesHashForMetadata(metadata);
+	HTAB	   *snapshotDataFilesMap = CreateDataFilesHashForSnapshot(snapshot, metadata);
 
-	/* find added files */
+	/* find internally added files */
 	HASH_SEQ_STATUS currentFilesStatus;
 
 	hash_seq_init(&currentFilesStatus, currentFilesMap);
 
-	TableDataFileHashEntry *currentDataFile = NULL;
+	TableDataFileHashEntry *currentFile = NULL;
 
-	while ((currentDataFile = hash_seq_search(&currentFilesStatus)) != NULL)
+	while ((currentFile = hash_seq_search(&currentFilesStatus)) != NULL)
 	{
-		if (!hash_search(metadataDataFilesMap, currentDataFile->filePath, HASH_FIND, NULL))
-			*addedFiles = lappend(*addedFiles, &currentDataFile->dataFile);
+		if (!hash_search(snapshotDataFilesMap, currentFile->filePath, HASH_FIND, NULL))
+			*addedFiles = lappend(*addedFiles, &currentFile->dataFile);
 	}
 
-	/* find removed files */
-	HASH_SEQ_STATUS metadataFilesStatus;
+	/* find internally removed files */
+	HASH_SEQ_STATUS snapshotDataFilesStatus;
 
-	hash_seq_init(&metadataFilesStatus, metadataDataFilesMap);
+	hash_seq_init(&snapshotDataFilesStatus, snapshotDataFilesMap);
 
-	char	   *metadataDataFilePath = NULL;
+	SnapshotDataFileHashEntry *snapshotDataFile = NULL;
 
-	while ((metadataDataFilePath = hash_seq_search(&metadataFilesStatus)) != NULL)
+	while ((snapshotDataFile = hash_seq_search(&snapshotDataFilesStatus)) != NULL)
 	{
-		if (!hash_search(currentFilesMap, metadataDataFilePath, HASH_FIND, NULL))
-			*removedFilePaths = lappend(*removedFilePaths, metadataDataFilePath);
+		if (!hash_search(currentFilesMap, snapshotDataFile->filePath, HASH_FIND, NULL))
+			*removedFilePaths = lappend(*removedFilePaths, snapshotDataFile->filePath);
+	}
+}
+
+
+/*
+ * FindExternallyChangedFilesAtSnapshot identifies files that are added or removed externally till the given snapshot.
+ *
+ * addedFiles: file info, wrapped in `TableDataFile` struct, for the files that are added externally till the snapshot
+ * removedFilePaths: file paths, which are removed externally till the snapshot
+ */
+static void
+FindExternallyChangedFilesAtSnapshot(HTAB *currentFilesMap, IcebergSnapshot * snapshot,
+									 IcebergTableMetadata * metadata,
+									 List **addedFiles, List **removedFilePaths)
+{
+	HTAB	   *snapshotDataFilesMap = CreateDataFilesHashForSnapshot(snapshot, metadata);
+
+	/* find externally added files */
+	HASH_SEQ_STATUS snapshotDataFilesStatus;
+
+	hash_seq_init(&snapshotDataFilesStatus, snapshotDataFilesMap);
+
+	SnapshotDataFileHashEntry *snapshotDataFile = NULL;
+
+	while ((snapshotDataFile = hash_seq_search(&snapshotDataFilesStatus)) != NULL)
+	{
+		if (!hash_search(currentFilesMap, snapshotDataFile->filePath, HASH_FIND, NULL))
+			*addedFiles = lappend(*addedFiles, snapshotDataFile);
+	}
+
+	/* find externally removed files */
+	HASH_SEQ_STATUS currentFilesStatus;
+
+	hash_seq_init(&currentFilesStatus, currentFilesMap);
+
+	TableDataFileHashEntry *currentFile = NULL;
+
+	while ((currentFile = hash_seq_search(&currentFilesStatus)) != NULL)
+	{
+		if (!hash_search(snapshotDataFilesMap, currentFile->filePath, HASH_FIND, NULL))
+			*removedFilePaths = lappend(*removedFilePaths, currentFile->filePath);
+	}
+}
+
+
+/* TODO: are locks problematic? any deadlock or race condition?*/
+PG_FUNCTION_INFO_V1(pg_lake_sync_internal_catalog_from_latest_snapshot);
+PG_FUNCTION_INFO_V1(pg_lake_ensure_no_external_ddl);
+
+Datum
+pg_lake_sync_internal_catalog_from_latest_snapshot(PG_FUNCTION_ARGS)
+{
+	Oid			relationId = PG_GETARG_OID(0);
+	bool		resetInternalCatalog = PG_GETARG_BOOL(1);
+
+	ereport(NOTICE, (errmsg("syncing internal catalog from latest metadata in rest catalog")));
+
+	if (resetInternalCatalog)
+		RemoveAllDataFilesFromCatalog(relationId);
+
+	char	   *latestMetadataLocation = GetIcebergMetadataLocation(relationId, false);
+
+	IcebergTableMetadata *latestMetadata = ReadIcebergTableMetadata(latestMetadataLocation);
+
+	if (latestMetadata == NULL)
+		ereport(ERROR, (errmsg("failed to read iceberg table metadata from %s", latestMetadataLocation)));
+
+	IcebergSnapshot *newSnapshotForSync = GetCurrentSnapshot(latestMetadata, true);
+
+	/* no current snapshot found, return */
+	if (newSnapshotForSync == NULL)
+		PG_RETURN_VOID();
+
+	int64_t		lastSyncedSnapshotId = GetLastSyncedSnapshotId(relationId);
+
+	/* already synced from this location */
+	if (lastSyncedSnapshotId == newSnapshotForSync->snapshot_id && !resetInternalCatalog)
+	{
+		ereport(NOTICE, (errmsg("already synced from this location. skipping sync.")));
+		PG_RETURN_VOID();
+	}
+
+	ApplyExternallyChangedFilesToDataCatalog(relationId, newSnapshotForSync, latestMetadata);
+
+	UpdateLastSyncedSnapshotId(relationId, newSnapshotForSync->snapshot_id);
+
+	PG_RETURN_VOID();
+}
+
+
+Datum
+pg_lake_ensure_no_external_ddl(PG_FUNCTION_ARGS)
+{
+	Oid			relationId = PG_GETARG_OID(0);
+	char	   *metadataLocation = text_to_cstring(PG_GETARG_TEXT_PP(1));
+
+	EnsureNoExternalDDL(relationId, metadataLocation);
+
+	PG_RETURN_VOID();
+}
+
+
+/*
+ * SyncInternalCatalogFromLatestSnapshotOutsideTx syncs the internal catalog from the latest snapshot
+ * available in the rest catalog outside of the current transaction. (to not see internal catalog changes in the current transaction)
+ */
+static void
+SyncInternalCatalogFromLatestSnapshotOutsideTx(Oid relationId, bool resetInternalCatalog)
+{
+	StringInfo	query = makeStringInfo();
+
+	appendStringInfo(query,
+					 "select pg_lake_sync_internal_catalog_from_latest_snapshot(%u, %s)",
+					 relationId,
+					 resetInternalCatalog ? "true" : "false");
+
+	StringInfo	runAttachedQuery = makeStringInfo();
+
+	appendStringInfo(runAttachedQuery,
+					 "select * from extension_base.run_attached($$%s$$)",
+					 query->data);
+
+	/* switch to schema owner, we assume callers checked permissions */
+	Oid			savedUserId = InvalidOid;
+	int			savedSecurityContext = 0;
+
+	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
+	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeIceberg),
+						   SECURITY_LOCAL_USERID_CHANGE);
+
+	SPI_START();
+
+	bool		readOnly = false;
+
+	int			spiResult = SPI_execute(runAttachedQuery->data, readOnly, 0);
+
+	if (spiResult != SPI_OK_SELECT)
+	{
+		ereport(ERROR, (errmsg("failed to sync internal catalog from metadata")));
+	}
+
+	SPI_END();
+
+	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
+}
+
+
+/*
+ * ApplyExternallyChangedFilesToDataCatalog applies the externally changed files to the data catalog.
+ */
+static void
+ApplyExternallyChangedFilesToDataCatalog(Oid relationId, IcebergSnapshot * snapshot, IcebergTableMetadata * metadata)
+{
+	HTAB	   *currentFilesMap = GetTableDataFilesByPathHashFromCatalog(relationId, false, false, false, NULL, GetTransactionSnapshot(), AllPartitionTransformList(relationId));
+
+	List	   *addedFiles = NIL;
+	List	   *removedFilePaths = NIL;
+
+	FindExternallyChangedFilesAtSnapshot(currentFilesMap, snapshot, metadata, &addedFiles, &removedFilePaths);
+
+	/* create metadata operations */
+	List	   *metadataOperations = NIL;
+
+	/* create operations for externally added files */
+	ListCell   *addedFileCell = NULL;
+
+	foreach(addedFileCell, addedFiles)
+	{
+		SnapshotDataFileHashEntry *snapshotAddedFile = lfirst(addedFileCell);
+		DataFile   *addedFile = &snapshotAddedFile->dataFile;
+		DataFileStats *dataFileStats = &snapshotAddedFile->dataFileStats;
+		DataFileContent content = (addedFile->content == ICEBERG_DATA_FILE_CONTENT_DATA) ? CONTENT_DATA : CONTENT_POSITION_DELETES;
+
+		TableMetadataOperation *addFileOp =
+			AddDataFileOperation(addedFile->file_path, content, dataFileStats,
+								 &addedFile->partition, snapshotAddedFile->partitionSpecId);
+
+		metadataOperations = lappend(metadataOperations, addFileOp);
+	}
+
+	/* create operations for externally removed files */
+	ListCell   *removedFilePathCell = NULL;
+
+	foreach(removedFilePathCell, removedFilePaths)
+	{
+		char	   *removedFilePath = lfirst(removedFilePathCell);
+
+		TableMetadataOperation *removeFileOp = RemoveDataFileOperation(removedFilePath);
+
+		metadataOperations = lappend(metadataOperations, removeFileOp);
+	}
+
+	/* apply the operations to the data catalog */
+	if (metadataOperations != NIL)
+		ApplyDataFileCatalogChanges(relationId, metadataOperations);
+}
+
+
+/*
+ * ArePartitionSpecFieldsEqual compares two partition spec fields for equality.
+ * Returns true if all fields match.
+ */
+static bool
+ArePartitionSpecFieldsEqual(IcebergPartitionSpecField * fieldA, IcebergPartitionSpecField * fieldB)
+{
+	if (fieldA->source_id != fieldB->source_id)
+		return false;
+
+	if (fieldA->field_id != fieldB->field_id)
+		return false;
+
+	if (!PgStrcasecmpNullable(fieldA->name, fieldB->name))
+		return false;
+
+	if (!PgStrcasecmpNullable(fieldA->transform, fieldB->transform))
+		return false;
+
+	return true;
+}
+
+
+/*
+ * ArePartitionSpecsEqual compares two partition specs for equality.
+ * Returns true if spec_id matches, field counts match, and all fields are equal.
+ */
+static bool
+ArePartitionSpecsEqual(IcebergPartitionSpec * specA, IcebergPartitionSpec * specB)
+{
+	if (specA->spec_id != specB->spec_id)
+		return false;
+
+	if (specA->fields_length != specB->fields_length)
+		return false;
+
+	for (size_t i = 0; i < specA->fields_length; i++)
+	{
+		IcebergPartitionSpecField *fieldA = &specA->fields[i];
+		IcebergPartitionSpecField *fieldB = &specB->fields[i];
+
+		if (!ArePartitionSpecFieldsEqual(fieldA, fieldB))
+			return false;
+	}
+
+	return true;
+}
+
+
+/*
+ * EnsureNoExternalDDLOutsideTx ensures that no external DDL is applied to the table
+ * outside of the current transaction. (to not see internal catalog changes in the current transaction)
+ */
+static void
+EnsureNoExternalDDLOutsideTx(Oid relationId, char *metadataLocation)
+{
+	StringInfo	query = makeStringInfo();
+
+	appendStringInfo(query,
+					 "select pg_lake_ensure_no_external_ddl(%u,%s)",
+					 relationId, quote_literal_cstr(metadataLocation));
+
+	StringInfo	runAttachedQuery = makeStringInfo();
+
+	appendStringInfo(runAttachedQuery,
+					 "select * from extension_base.run_attached($$%s$$)",
+					 query->data);
+
+	/* switch to schema owner, we assume callers checked permissions */
+	Oid			savedUserId = InvalidOid;
+	int			savedSecurityContext = 0;
+
+	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
+	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeIceberg),
+						   SECURITY_LOCAL_USERID_CHANGE);
+
+	SPI_START();
+
+	bool		readOnly = false;
+
+	int			spiResult = SPI_execute(runAttachedQuery->data, readOnly, 0);
+
+	if (spiResult != SPI_OK_SELECT)
+	{
+		ereport(ERROR, (errmsg("failed to sync internal catalog from metadata")));
+	}
+
+	SPI_END();
+
+	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
+}
+
+
+/*
+ * EnsureNoExternalDDL ensures that no external DDL is applied to the table.
+ */
+static void
+EnsureNoExternalDDL(Oid relationId, char *metadataLocation)
+{
+	DataFileSchema *expectedSchema = GetDataFileSchemaForTable(relationId);
+
+	IcebergTableMetadata *metadata = ReadIcebergTableMetadata(metadataLocation);
+	IcebergTableSchema *schema = GetCurrentIcebergTableSchema(metadata);
+
+	if (!AreSchemasEqual(schema, expectedSchema))
+	{
+		ereport(ERROR, (errmsg("external DDL is applied to the table"), errhint("recreate the table to fix the schema mismatch")));
+	}
+
+	/* Compare partition specs */
+	HTAB	   *catalogSpecs = GetAllPartitionSpecsFromCatalog(relationId);
+	HTAB	   *metadataSpecs = CreatePartitionSpecsHashForMetadata(metadata);
+
+	/* Check if the number of specs matches */
+	uint32		catalogSpecCount = hash_get_num_entries(catalogSpecs);
+	uint32		metadataSpecCount = hash_get_num_entries(metadataSpecs);
+
+	if (catalogSpecCount != metadataSpecCount)
+	{
+		ereport(ERROR, (errmsg("external DDL is applied to the table"), errhint("recreate the table to fix the partition spec mismatch")));
+	}
+
+	/* Verify each spec in catalog exists in metadata with matching fields */
+	HASH_SEQ_STATUS catalogStatus;
+	IcebergPartitionSpecHashEntry *catalogEntry = NULL;
+
+	hash_seq_init(&catalogStatus, catalogSpecs);
+
+	while ((catalogEntry = hash_seq_search(&catalogStatus)) != NULL)
+	{
+		bool		found = false;
+		IcebergPartitionSpecHashEntry *metadataEntry =
+			(IcebergPartitionSpecHashEntry *) hash_search(metadataSpecs,
+														  &catalogEntry->specId,
+														  HASH_FIND, &found);
+
+		if (!found)
+		{
+			ereport(ERROR, (errmsg("external DDL is applied to the table"), errhint("recreate the table to fix the partition spec mismatch")));
+		}
+
+		if (!ArePartitionSpecsEqual(catalogEntry->spec, metadataEntry->spec))
+		{
+			ereport(ERROR, (errmsg("external DDL is applied to the table"), errhint("recreate the table to fix the partition spec mismatch")));
+		}
 	}
 }
 
@@ -939,20 +1483,47 @@ FindNewPartitionSpecsSinceMetadata(HTAB *currentSpecs, IcebergTableMetadata * me
 
 
 /*
- * GetLastPushedIcebergMetadata retrieves the most recently pushed Iceberg metadata
- * for the specified relation. It returns NULL if no metadata is found.
+ * GetLastSyncedIcebergSnapshotIfExists retrieves the last synced snapshot id for the given relation.
  */
-static IcebergTableMetadata *
-GetLastPushedIcebergMetadata(const TableMetadataOperationTracker * opTracker)
+static IcebergSnapshot *
+GetLastSyncedIcebergSnapshotIfExists(const TableMetadataOperationTracker * opTracker, IcebergCatalogType catalogType)
 {
 	/* table is just created, no metadata is pushed yet */
 	if (opTracker->relationCreated)
 		return NULL;
 
-	/* read the most recently pushed iceberg metadata for the table */
-	char	   *metadataPath = GetIcebergMetadataLocation(opTracker->relationId, false);
+	Assert(opTracker->currentMetadata != NULL);
 
-	return ReadIcebergTableMetadata(metadataPath);
+	if (catalogType == REST_CATALOG_READ_WRITE)
+	{
+		int64		lastSyncedSnapshotId = GetLastSyncedSnapshotId(opTracker->relationId);
+
+		if (lastSyncedSnapshotId == -1)
+			return NULL;
+
+		bool		missingOk = true;
+		IcebergSnapshot *snapshot = GetIcebergSnapshotViaId(opTracker->currentMetadata, lastSyncedSnapshotId, missingOk);
+
+		/* cannot find last synced snapshot, sync the table from scratch */
+		if (snapshot == NULL)
+		{
+			bool		resetInternalCatalog = true;
+
+			SyncInternalCatalogFromLatestSnapshotOutsideTx(opTracker->relationId, resetInternalCatalog);
+
+			ereport(ERROR, (errmsg("failed to get last synced snapshot from metadata. syncing the table from scratch.")));
+		}
+
+		return snapshot;
+	}
+
+	IcebergSnapshot *currentSnapshot = GetCurrentSnapshot(opTracker->currentMetadata, true);
+
+	/* no current snapshot found, return NULL */
+	if (currentSnapshot == NULL)
+		return NULL;
+
+	return currentSnapshot;
 }
 
 
@@ -977,14 +1548,14 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 	HTAB	   *currentFilesMap = GetTableDataFilesByPathHashFromCatalog(opTracker->relationId, dataOnly, newFilesOnly,
 																		 forUpdate, orderBy, snapshot, allTransforms);
 
-	/* get last pushed metadata */
-	IcebergTableMetadata *lastMetadata = GetLastPushedIcebergMetadata(opTracker);
+	/* get last synced snapshot */
+	IcebergSnapshot *lastSyncedSnapshot = opTracker->lastSyncedSnapshot;
 
 	/* find added and removed files since metadata */
 	List	   *addedFiles = NIL;
 	List	   *removedFilePaths = NIL;
 
-	FindChangedFilesSinceMetadata(currentFilesMap, lastMetadata, &addedFiles, &removedFilePaths);
+	FindInternallyChangedFilesSinceSnapshot(currentFilesMap, lastSyncedSnapshot, opTracker->currentMetadata, &addedFiles, &removedFilePaths);
 
 	/*
 	 * We have found the new files that are added since the last metadata
@@ -1046,7 +1617,7 @@ GetDDLMetadataOperations(const TableMetadataOperationTracker * opTracker)
 
 	if (opTracker->relationCreated || opTracker->relationPartitionByChanged)
 	{
-		IcebergTableMetadata *lastMetadata = GetLastPushedIcebergMetadata(opTracker);
+		IcebergTableMetadata *lastMetadata = opTracker->currentMetadata;
 
 		HTAB	   *currentSpecs = GetAllPartitionSpecsFromCatalog(opTracker->relationId);
 
@@ -1137,7 +1708,7 @@ ComparePartitionSpecsById(const ListCell *a, const ListCell *b)
 static int32_t
 GetSchemaIdForIcebergTableIfExists(const TableMetadataOperationTracker * opTracker, DataFileSchema * schema)
 {
-	IcebergTableMetadata *metadata = GetLastPushedIcebergMetadata(opTracker);
+	IcebergTableMetadata *metadata = opTracker->currentMetadata;
 
 	if (metadata == NULL)
 		return -1;

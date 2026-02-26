@@ -50,9 +50,11 @@ extern PGDLLEXPORT char *IcebergDefaultCatalog;
 */
 #define ICEBERG_INTERNAL_CATALOG_TABLE_NAME "tables_internal"
 #define ICEBERG_EXTERNAL_CATALOG_TABLE_NAME "tables_external"
+#define REST_CATALOG_SYNC_TABLE_NAME "rest_catalog_sync"
 
 #define ICEBERG_INTERNAL_CATALOG_TABLE_QUALIFIED PG_LAKE_ICEBERG_SCHEMA "." ICEBERG_INTERNAL_CATALOG_TABLE_NAME
 #define ICEBERG_EXTERNAL_CATALOG_TABLE_QUALIFIED PG_LAKE_ICEBERG_SCHEMA "." ICEBERG_EXTERNAL_CATALOG_TABLE_NAME
+#define REST_CATALOG_SYNC_TABLE_QUALIFIED PG_LAKE_ICEBERG_SCHEMA "." REST_CATALOG_SYNC_TABLE_NAME
 
 extern PGDLLEXPORT void InsertInternalIcebergCatalogTable(Oid relationId, const char *metadataLocation, bool hasCustomLocation);
 extern PGDLLEXPORT void InsertExternalIcebergCatalogTable(const char *catalogName, const char *tableNamespace,
@@ -76,3 +78,7 @@ extern PGDLLEXPORT bool RelationExistsInTheIcebergCatalog(Oid relationId);
 extern PGDLLEXPORT bool HasCustomLocation(Oid relationId);
 extern PGDLLEXPORT bool IsWritableIcebergTable(Oid relationId);
 extern PGDLLEXPORT bool IsReadOnlyIcebergTable(Oid relationId);
+
+/* REST Catalog Sync Table Functions */
+extern PGDLLEXPORT void UpdateLastSyncedSnapshotId(Oid relationId, int64 snapshotId);
+extern PGDLLEXPORT int64_t GetLastSyncedSnapshotId(Oid relationId);
