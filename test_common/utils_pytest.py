@@ -1092,13 +1092,13 @@ def list_objects(client, bucket_name, prefix=""):
 def sampledata_filepath(datafile):
     from pathlib import Path
 
-    return str(Path(__file__).parent / "sample_data" / datafile)
+    return str(Path(__file__).parent / "sample" / "data" / datafile)
 
 
 def sample_avro_filepath(avrofile):
     from pathlib import Path
 
-    return str(Path(__file__).parent / "sample_avro" / avrofile)
+    return str(Path(__file__).parent / "sample" / "avro" / avrofile)
 
 
 def compare_values(val1, val2, tolerance):
@@ -1144,19 +1144,19 @@ def sort_with_none_at_end(lst):
 def iceberg_metadata_json_folder_path():
     from pathlib import Path
 
-    return str(Path(__file__).parent / "iceberg/metadata_json")
+    return str(Path(__file__).parent / "sample" / "iceberg" / "metadata_json")
 
 
 def iceberg_sample_table_folder_path():
     from pathlib import Path
 
-    return str(Path(__file__).parent / "iceberg/sample_tables")
+    return str(Path(__file__).parent / "sample" / "iceberg" / "sample_tables")
 
 
 def iceberg_metadata_manifest_folder_path():
     from pathlib import Path
 
-    return str(Path(__file__).parent / "iceberg/manifests")
+    return str(Path(__file__).parent / "sample" / "iceberg" / "manifests")
 
 
 def assert_query_results_on_tables(
