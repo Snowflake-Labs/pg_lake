@@ -30,6 +30,7 @@
 #include <netdb.h>
 #include <common/ip.h>
 #include <pthread.h>
+#include <signal.h>
 #include <sys/fcntl.h>
 #include <sys/file.h>
 #include <sys/stat.h>
@@ -375,6 +376,18 @@ pgserver_run(PGServer * pgServer)
 
 		if (client->clientSocket < 0)
 		{
+			/*
+			 * accept() returns -1/EINTR when interrupted by a signal.  Our
+			 * SIGINT/SIGTERM handler sets running = 0 so that the while-loop
+			 * exits on the next iteration.  Free the unused PGClient and
+			 * re-check the loop condition instead of calling exit().
+			 */
+			if (errno == EINTR)
+			{
+				pg_free(client);
+				continue;
+			}
+
 			PGDUCK_SERVER_ERROR("Could not accept the client: %s",
 								strerror(errno));
 
@@ -486,6 +499,20 @@ static void *
 pgclient_thread_main(void *arg)
 {
 	PgClientThreadInitState *initState = (PgClientThreadInitState *) arg;
+
+	/*
+	 * Block SIGINT and SIGTERM in client threads so that these signals are
+	 * always delivered to the main thread.  Without this, the OS may route a
+	 * termination signal to a client thread; that thread's handler sets
+	 * `running = 0`, but the main thread's accept() is never interrupted,
+	 * causing the server to hang instead of shutting down.
+	 */
+	sigset_t	sigs;
+
+	sigemptyset(&sigs);
+	sigaddset(&sigs, SIGINT);
+	sigaddset(&sigs, SIGTERM);
+	pthread_sigmask(SIG_BLOCK, &sigs, NULL);
 
 	/* cleanup handler */
 	pthread_cleanup_push(pgclient_thread_cleanup, arg);

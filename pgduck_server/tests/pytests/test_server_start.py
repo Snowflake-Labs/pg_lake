@@ -245,6 +245,65 @@ def test_server_pidfile():
     assert not os.path.exists(pidfile_path)
 
 
+# Verify the server exits promptly on SIGINT/SIGTERM even while a client
+# connection is open.  Before the signal-masking fix, the OS could deliver
+# the signal to a client thread instead of the main thread; the client
+# thread's handler would set ``running = 0`` but the main thread's
+# ``accept()`` would never be interrupted, causing a hang.
+@pytest.mark.parametrize("send_signal", [signal.SIGINT, signal.SIGTERM])
+def test_server_exits_on_signal_with_active_client(send_signal):
+    server = PgDuckServer(port=PGDUCK_PORT, need_output=True)
+    assert is_server_listening(server.socket_path)
+
+    # Open a client connection so the server has an active client thread.
+    conn = psycopg2.connect(host=PGDUCK_UNIX_DOMAIN_PATH, port=PGDUCK_PORT)
+
+    # Send the signal directly to the server process.
+    server.process.send_signal(send_signal)
+
+    # The server must exit within a reasonable timeout.  If the signal was
+    # delivered to the client thread (the old bug) the main thread's
+    # accept() would block indefinitely and this would time out.
+    try:
+        server.process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        server.process.kill()
+        server.process.wait(timeout=5)
+        conn.close()
+        pytest.fail(
+            f"Server did not exit within 10s after {send_signal.name}; "
+            "signal was likely delivered to a client thread"
+        )
+
+    conn.close()
+    assert server.process.returncode is not None
+
+    # The server should have reached its clean shutdown path and logged this.
+    server_output = get_server_output(server.output_queue)
+    assert "Done running" in server_output
+
+
+def test_server_survives_sigstop_sigcont():
+    """SIGSTOP/SIGCONT should pause and resume the server, not terminate it."""
+    server = PgDuckServer(port=PGDUCK_PORT)
+    assert is_server_listening(server.socket_path)
+
+    # Pause the server.
+    server.process.send_signal(signal.SIGSTOP)
+    time.sleep(1)
+
+    # Server process must still be alive (suspended, not exited).
+    assert server.process.poll() is None
+
+    # Resume the server.
+    server.process.send_signal(signal.SIGCONT)
+    time.sleep(1)
+
+    # Server should still be running and accepting connections.
+    assert server.process.poll() is None
+    assert is_server_listening(server.socket_path)
+
+
 # ensure we handle pidfiles properly when sending normal stop signals or interrupt
 @pytest.mark.parametrize("send_signal", [signal.SIGINT, signal.SIGTERM])
 def test_server_pidfile_signal(send_signal):
