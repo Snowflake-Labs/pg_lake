@@ -2,7 +2,6 @@ import pytest
 import psycopg2
 import duckdb
 import math
-import server_params
 from decimal import *
 from utils_pytest import *
 

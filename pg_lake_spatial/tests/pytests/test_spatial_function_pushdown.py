@@ -273,7 +273,7 @@ def test_agg_function_pushdown(create_test_spatial_function_pushdown_table, user
 
 @pytest.fixture(scope="module")
 def create_test_spatial_function_pushdown_table(
-    user_conn, s3, spatial_analytics_extension, pg_lake_table_extension
+    user_conn, s3, spatial_analytics_extension, pg_lake_extension
 ):
     url = f"s3://{TEST_BUCKET}/create_test_spatial_function_pushdown_table/data.parquet"
 

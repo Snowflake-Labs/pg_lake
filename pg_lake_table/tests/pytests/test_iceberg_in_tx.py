@@ -1,6 +1,6 @@
 import pytest
 from utils_pytest import *
-from spark_utils import *
+from helpers.spark import *
 
 from test_writable_iceberg_common import *
 

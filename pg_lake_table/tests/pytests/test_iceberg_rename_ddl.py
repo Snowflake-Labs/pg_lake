@@ -219,9 +219,3 @@ def test_alter_database_rename(superuser_conn, s3, extension, with_default_locat
     run_command("RESET pg_lake_iceberg.default_catalog", superuser_conn)
 
     superuser_conn.autocommit = False
-
-
-def open_pg_conn_to_db(dbname):
-    conn_str = f"dbname={dbname} user={server_params.PG_USER} password={server_params.PG_PASSWORD} port={server_params.PG_PORT} host={server_params.PG_HOST}"
-
-    return psycopg2.connect(conn_str)

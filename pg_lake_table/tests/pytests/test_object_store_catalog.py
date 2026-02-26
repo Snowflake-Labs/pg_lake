@@ -1,6 +1,5 @@
 from utils_pytest import *
 import itertools
-import server_params
 
 
 # don't accept 'catalog_name', 'catalog_namespace', 'catalog_table_name'
@@ -972,9 +971,3 @@ def set_catalog_prefixes(read_only_prefix="_catalog", read_write_prefix="_catalo
     )
 
     run_command("SELECT pg_reload_conf()", superuser_conn)
-
-
-def open_pg_conn_to_db(dbname):
-    conn_str = f"dbname={dbname} user={server_params.PG_USER} password={server_params.PG_PASSWORD} port={server_params.PG_PORT} host={server_params.PG_HOST}"
-
-    return psycopg2.connect(conn_str)
