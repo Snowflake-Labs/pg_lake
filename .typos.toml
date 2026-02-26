@@ -6,7 +6,7 @@ extend-exclude = [
     "Dockerfile",
     "Pipfile*",
     "CMakeLists.txt",
-    "**/sample_data",
+    "test_common/sample",
     "test_common/rest_catalog",
     "**/isolation_schedule",
     "*.control",

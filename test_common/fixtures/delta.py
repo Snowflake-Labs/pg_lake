@@ -5,7 +5,7 @@ from utils_pytest import TEST_BUCKET, s3_upload_dir
 def delta_sample_delta_table_folder_path():
     from pathlib import Path
 
-    return str(Path(__file__).parent.parent / "sample_data/delta")
+    return str(Path(__file__).parent.parent / "sample" / "data" / "delta")
 
 
 @pytest.fixture(scope="module")
