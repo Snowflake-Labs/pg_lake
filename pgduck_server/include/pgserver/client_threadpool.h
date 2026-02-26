@@ -41,5 +41,6 @@ extern int	pgclient_threadpool_cancel_thread(int cancellationProcId, uint8 *canc
 extern int	pgclient_threadpool_cancel_thread(int cancellationProcId, int32 cancellationToken);
 #endif
 extern void pgclient_threadpool_set_duckdb_conn(int threadIndex, duckdb_connection conn);
+extern int	pgclient_threadpool_cancel_all(void);
 
 #endif							/* PGDUCK_CLIENT_THREAD_H */

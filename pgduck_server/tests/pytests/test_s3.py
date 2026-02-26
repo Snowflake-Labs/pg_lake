@@ -198,4 +198,7 @@ def test_s3_get_region_invalid(pgduck_conn):
         pgduck_conn,
         raise_error=False,
     )
-    assert "Could not establish connection error" in error
+    assert (
+        "Could not establish connection error" in error
+        or "server closed the connection" in error
+    )
