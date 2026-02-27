@@ -1,5 +1,4 @@
 from utils_pytest import *
-import server_params
 
 
 def test_psql_simple_select(pgduck_server):

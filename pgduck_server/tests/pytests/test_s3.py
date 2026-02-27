@@ -3,7 +3,6 @@ import pytest
 from moto.server import ThreadedMotoServer
 import boto3
 from utils_pytest import *
-import server_params
 import psycopg2
 
 

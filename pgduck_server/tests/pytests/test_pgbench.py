@@ -1,7 +1,6 @@
 from utils_pytest import *
 import os
 import psycopg2
-import server_params
 
 from pathlib import Path
 

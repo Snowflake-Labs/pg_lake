@@ -1,17 +1,6 @@
-import duckdb
-import os
 import psycopg2
-import psycopg2.extras
 import pytest
-import shutil
-import queue
-import threading
-import time
 from utils_pytest import *
-import server_params
-
-
-reduce_werkzeug_log_level()
 
 
 @pytest.fixture(scope="module")
@@ -49,65 +38,6 @@ def pg_replica_conn(read_replica, installcheck):
         conn = psycopg2.connect(conn_str)
 
     yield conn
-
-
-@pytest.fixture(scope="module")
-def test_user(extension):
-    username = "test_application"
-
-    superuser_conn = open_pg_conn()
-    run_command(
-        f"""
-        CREATE USER {username};
-        GRANT ALL ON SCHEMA public TO {username};
-        GRANT CREATE ON DATABASE {server_params.PG_DATABASE} TO {username};
-        GRANT lake_read_write TO {username};
-    """,
-        superuser_conn,
-    )
-    superuser_conn.commit()
-    superuser_conn.close()
-
-    yield username
-
-    superuser_conn = open_pg_conn()
-    run_command(
-        f"""
-        DROP OWNED BY {username};
-        DROP USER {username};
-    """,
-        superuser_conn,
-    )
-    superuser_conn.commit()
-    superuser_conn.close()
-
-
-@pytest.fixture(scope="module")
-def superuser_conn(postgres):
-    conn = open_pg_conn()
-    yield conn
-    conn.close()
-
-
-@pytest.fixture(scope="module")
-def user_conn(test_user):
-    conn = open_pg_conn(user=test_user)
-    yield conn
-    conn.close()
-
-
-@pytest.fixture(scope="module")
-def pgduck_conn(postgres):
-    conn = psycopg2.connect(
-        host=server_params.PGDUCK_UNIX_DOMAIN_PATH, port=server_params.PGDUCK_PORT
-    )
-    yield conn
-    conn.close()
-
-
-@pytest.fixture(scope="module")
-def test_s3_path(request, s3):
-    return f"s3://{TEST_BUCKET}/{request.node.name}"
 
 
 @pytest.fixture(scope="module")
@@ -172,21 +102,3 @@ def create_pushdown_tables(s3, pg_conn, extension):
 
     run_command("DROP SCHEMA test_window_function_pushdown CASCADE;", pg_conn)
     pg_conn.commit()
-
-
-@pytest.fixture(scope="module")
-def duckdb_conn(s3):
-    conn = create_duckdb_conn()
-    yield conn
-    conn.close()
-
-
-@pytest.fixture(scope="module")
-def iceberg_catalog(superuser_conn, extension, s3):
-    catalog = create_iceberg_test_catalog(superuser_conn)
-    yield catalog
-    tables = catalog.list_tables("public")
-    for table in tables:
-        catalog.drop_table(table)
-    catalog.drop_namespace("public")
-    catalog.engine.dispose()

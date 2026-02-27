@@ -1,6 +1,6 @@
 import pytest
 from utils_pytest import *
-from spark_utils import *
+from helpers.spark import *
 
 TABLE_NAME = "test_pg_lake_iceberg_metadata"
 TABLE_NAMESPACE = "public"

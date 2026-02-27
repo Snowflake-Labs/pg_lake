@@ -3,7 +3,7 @@ import uuid as uuid_mod
 import random
 import pytest
 from utils_pytest import *
-from spark_utils import *
+from helpers.spark import *
 
 N_ROWS = 64
 SCHEMA = "test_part_writes_bucket"

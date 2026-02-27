@@ -4,7 +4,7 @@ import random
 import string
 import sys
 from utils_pytest import *
-from spark_utils import *
+from helpers.spark import *
 
 TABLE_NAME = "test_pg_lake_get_leaf_fields"
 TABLE_NAMESPACE = "public"

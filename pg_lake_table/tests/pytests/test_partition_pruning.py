@@ -1,8 +1,8 @@
 import pytest
 from datetime import date
-from utils_polaris import *
+from helpers.polaris import *
 from utils_pytest import *
-from spark_utils import *
+from helpers.spark import *
 import re
 
 # Parameterized data: needs_quote, table_name, sample data and partition_by

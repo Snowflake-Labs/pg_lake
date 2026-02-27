@@ -11,7 +11,7 @@ from pathlib import Path
 from pyiceberg.catalog.rest import RestCatalog
 from pyiceberg.exceptions import NamespaceAlreadyExistsError
 
-import server_params
+from . import server_params
 
 # Lazy imports from utils_pytest to avoid circular-import issues.
 # These names are resolved at *call* time, not import time.
@@ -33,7 +33,7 @@ from utils_pytest import (
 
 def get_polaris_server_path():
 
-    base_dir = Path(__file__).resolve().parent
+    base_dir = Path(__file__).resolve().parent.parent
     polaris_server_path = base_dir / "rest_catalog/rest_catalog_server.sh"
 
     return polaris_server_path

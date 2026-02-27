@@ -8,7 +8,7 @@ def test_no_extension(
     user_conn,
     superuser_conn,
     postgis_extension,
-    pg_lake_table_extension,
+    pg_lake_extension,
     basic_geometry_file,
 ):
     # Drop the existing extension
@@ -80,7 +80,7 @@ def test_no_extension(
 def test_copy_from(
     user_conn,
     spatial_analytics_extension,
-    pg_lake_table_extension,
+    pg_lake_extension,
     basic_geometry_file,
 ):
     # Create a regular table and load in data using COPY .. FROM
@@ -106,7 +106,7 @@ def test_copy_from(
 def test_wkb(
     user_conn,
     spatial_analytics_extension,
-    pg_lake_table_extension,
+    pg_lake_extension,
     basic_geometry_file,
 ):
 
@@ -134,7 +134,7 @@ def test_wkb(
 def test_geometry(
     user_conn,
     spatial_analytics_extension,
-    pg_lake_table_extension,
+    pg_lake_extension,
     basic_geometry_file,
 ):
 
@@ -159,9 +159,7 @@ def test_geometry(
     user_conn.rollback()
 
 
-def test_iceberg_geometry(
-    user_conn, spatial_analytics_extension, pg_lake_table_extension
-):
+def test_iceberg_geometry(user_conn, spatial_analytics_extension, pg_lake_extension):
     # we're going to commit, rollback any existing state
     user_conn.rollback()
 
@@ -203,9 +201,7 @@ def test_iceberg_geometry(
     user_conn.commit()
 
 
-def test_writable_parquet(
-    user_conn, spatial_analytics_extension, pg_lake_table_extension
-):
+def test_writable_parquet(user_conn, spatial_analytics_extension, pg_lake_extension):
     location = f"s3://{TEST_BUCKET}/test_spatial_basics/test_parquet/"
 
     # Define a table with a geometry column
@@ -244,7 +240,7 @@ def test_writable_parquet(
     user_conn.rollback()
 
 
-def test_writable_csv(user_conn, spatial_analytics_extension, pg_lake_table_extension):
+def test_writable_csv(user_conn, spatial_analytics_extension, pg_lake_extension):
     location = f"s3://{TEST_BUCKET}/test_spatial_basics/test_csv/"
 
     # Define a table with a geometry column
@@ -281,7 +277,7 @@ def test_writable_csv(user_conn, spatial_analytics_extension, pg_lake_table_exte
     user_conn.rollback()
 
 
-def test_writable_json(user_conn, spatial_analytics_extension, pg_lake_table_extension):
+def test_writable_json(user_conn, spatial_analytics_extension, pg_lake_extension):
     location = f"s3://{TEST_BUCKET}/test_spatial_basics/test_json/"
 
     # Define a table with a geometry column

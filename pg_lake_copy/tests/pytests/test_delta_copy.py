@@ -2,7 +2,6 @@ import pytest
 import psycopg2
 import time
 import duckdb
-from fixtures.delta import *
 from utils_pytest import *
 
 

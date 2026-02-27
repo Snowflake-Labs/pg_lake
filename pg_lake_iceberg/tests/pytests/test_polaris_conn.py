@@ -1,6 +1,5 @@
 from utils_pytest import *
-from utils_polaris import *
-import server_params
+from helpers.polaris import *
 
 
 # pg_conn is to start Polaris server

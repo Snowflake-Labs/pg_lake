@@ -1,8 +1,8 @@
 import pytest
 import psycopg2
 from utils_pytest import *
-from utils_polaris import *
-from spark_utils import *
+from helpers.polaris import *
+from helpers.spark import *
 import json
 import re
 

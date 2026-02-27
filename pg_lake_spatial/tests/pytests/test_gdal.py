@@ -23,7 +23,7 @@ def test_gdal_read(
     user_conn,
     s3,
     spatial_analytics_extension,
-    pg_lake_table_extension,
+    pg_lake_extension,
     tmp_path,
     driver,
     file_extension,
@@ -87,7 +87,7 @@ def test_gdal_read(
 
 
 def test_gdal_zip_shapefile(
-    user_conn, sample_shapefile, spatial_analytics_extension, pg_lake_table_extension
+    user_conn, sample_shapefile, spatial_analytics_extension, pg_lake_extension
 ):
     # Read the file using FDW
     run_command(
@@ -126,7 +126,7 @@ def test_gdal_zip_shapefile(
 
 
 def test_gdal_to_iceberg(
-    user_conn, sample_shapefile, spatial_analytics_extension, pg_lake_table_extension
+    user_conn, sample_shapefile, spatial_analytics_extension, pg_lake_extension
 ):
     location = f"s3://{TEST_BUCKET}/test_gdal_to_iceberg"
 
@@ -157,7 +157,7 @@ def test_gdal_to_iceberg(
 
 
 def test_gdal_zip_gml(
-    user_conn, sample_gml, spatial_analytics_extension, pg_lake_table_extension
+    user_conn, sample_gml, spatial_analytics_extension, pg_lake_extension
 ):
     # Read the file using a regular table, zip_path is required
     run_command(
@@ -226,9 +226,7 @@ def test_gdal_zip_gml(
     user_conn.rollback()
 
 
-def test_invalid_options(
-    s3, user_conn, spatial_analytics_extension, pg_lake_table_extension
-):
+def test_invalid_options(s3, user_conn, spatial_analytics_extension, pg_lake_extension):
     url = f"s3://{TEST_BUCKET}/test_invalid_options/data.zip"
 
     # Cannot use zip_path with non-GDAL
@@ -281,7 +279,7 @@ def test_no_extension_gdal(
     sample_shapefile,
     superuser_conn,
     spatial_analytics_extension,
-    pg_lake_table_extension,
+    pg_lake_extension,
 ):
     # Cannot use zip_path with non-GDAL
     error = run_command(

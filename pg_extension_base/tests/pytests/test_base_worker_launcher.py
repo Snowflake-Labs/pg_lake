@@ -2,7 +2,6 @@ import pytest
 import psycopg2
 import time
 from utils_pytest import *
-import server_params
 
 
 def test_server_start(superuser_conn):

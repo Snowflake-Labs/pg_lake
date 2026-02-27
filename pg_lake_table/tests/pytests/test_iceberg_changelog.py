@@ -1,7 +1,6 @@
 import pytest
 from utils_pytest import *
-from spark_utils import *
-import server_params
+from helpers.spark import *
 
 
 def test_copy_on_write_changelog(
