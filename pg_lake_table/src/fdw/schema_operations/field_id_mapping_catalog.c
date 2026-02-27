@@ -608,6 +608,56 @@ UpdateRegisteredFieldWriteDefaultForAttribute(Oid relationId, AttrNumber attNum,
 }
 
 /*
+ * UpdateRegisteredFieldTypeForAttribute updates the field_pg_type and
+ * field_pg_typemod for a given column in the field mapping catalog.
+ * This is used when a column type is promoted (e.g. int -> long).
+ */
+void
+UpdateRegisteredFieldTypeForAttribute(Oid relationId, AttrNumber attNum, PGType newPgType)
+{
+	/* switch to schema owner */
+	Oid			savedUserId = InvalidOid;
+	int			savedSecurityContext = 0;
+
+	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
+	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeIceberg), SECURITY_LOCAL_USERID_CHANGE);
+
+	StringInfo	query = makeStringInfo();
+
+	appendStringInfo(query, "UPDATE " MAPPING_TABLE_NAME
+					 " SET field_pg_type = $1, field_pg_typemod = $2 "
+					 "WHERE table_name OPERATOR(pg_catalog.=) $3 AND "
+					 "pg_attnum OPERATOR(pg_catalog.=) $4 AND "
+					 "parent_field_id IS NULL "
+					 "RETURNING field_id");
+
+	DECLARE_SPI_ARGS(4);
+
+	SPI_ARG_VALUE(1, OIDOID, newPgType.postgresTypeOid, false);
+	SPI_ARG_VALUE(2, INT4OID, newPgType.postgresTypeMod, false);
+	SPI_ARG_VALUE(3, OIDOID, relationId, false);
+	SPI_ARG_VALUE(4, INT2OID, attNum, false);
+
+	SPI_START();
+
+	bool		readOnly = false;
+
+	SPI_EXECUTE(query->data, readOnly);
+
+	if (SPI_processed != 1)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("Failed to update field type for column %d in relation %u", attNum, relationId)));
+	}
+
+	SPI_END();
+
+	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
+}
+
+
+/*
 * GetLargestRegisteredFieldId returns the largest field ID for a given relation.
 */
 int

@@ -3264,6 +3264,346 @@ def test_add_drop_columns(
     pg_conn.commit()
 
 
+def test_rest_alter_column_type_int_to_bigint(
+    pg_conn,
+    superuser_conn,
+    installcheck,
+    s3,
+    extension,
+    create_types_helper_functions,
+    with_default_location,
+    polaris_session,
+    set_polaris_gucs,
+    create_http_helper_functions,
+):
+    """Test allowed Iceberg type promotion int -> bigint on REST catalog table"""
+    if installcheck:
+        return
+
+    run_command("CREATE SCHEMA rest_type_promo;", pg_conn)
+    run_command(
+        """
+        CREATE TABLE rest_type_promo.tbl (a int, b int)
+        USING iceberg WITH (catalog='rest');
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        "INSERT INTO rest_type_promo.tbl VALUES (1, 2);",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # promote int -> bigint (allowed by Iceberg spec)
+    run_command(
+        "ALTER TABLE rest_type_promo.tbl ALTER COLUMN a TYPE bigint;",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # verify column type changed in PG catalog
+    result = run_query(
+        "SELECT atttypid::regtype FROM pg_attribute "
+        "WHERE attrelid = 'rest_type_promo.tbl'::regclass AND attname = 'a'",
+        pg_conn,
+    )
+    assert result == [["bigint"]]
+
+    # insert data that requires bigint range
+    run_command(
+        f"INSERT INTO rest_type_promo.tbl VALUES ({2**40}, 3);",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # verify all data is readable
+    results = run_query("SELECT a, b FROM rest_type_promo.tbl ORDER BY b ASC", pg_conn)
+    assert results == [[1, 2], [2**40, 3]]
+
+    # verify REST catalog metadata reflects the type change
+    metadata = get_rest_table_metadata("rest_type_promo", "tbl", superuser_conn)
+    schemas = metadata["metadata"].get("schemas", [])
+    last_schema = schemas[-1]
+    field_a = next(f for f in last_schema["fields"] if f["name"] == "a")
+    assert field_a["type"] == "long", f"Expected 'long' but got {field_a['type']}"
+
+    field_b = next(f for f in last_schema["fields"] if f["name"] == "b")
+    assert field_b["type"] == "int", f"Expected 'int' but got {field_b['type']}"
+
+    assert_metadata_on_pg_catalog_and_rest_matches(
+        "rest_type_promo", "tbl", superuser_conn
+    )
+
+    run_command("DROP SCHEMA rest_type_promo CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_rest_alter_column_type_float_to_double(
+    pg_conn,
+    superuser_conn,
+    installcheck,
+    s3,
+    extension,
+    create_types_helper_functions,
+    with_default_location,
+    polaris_session,
+    set_polaris_gucs,
+    create_http_helper_functions,
+):
+    """Test allowed Iceberg type promotion float -> double on REST catalog table"""
+    if installcheck:
+        return
+
+    run_command("CREATE SCHEMA rest_type_promo_f;", pg_conn)
+    run_command(
+        """
+        CREATE TABLE rest_type_promo_f.tbl (a real, b int)
+        USING iceberg WITH (catalog='rest');
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        "INSERT INTO rest_type_promo_f.tbl VALUES (1.5, 1);",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # promote float4 -> float8 (allowed by Iceberg spec)
+    run_command(
+        "ALTER TABLE rest_type_promo_f.tbl ALTER COLUMN a TYPE double precision;",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # verify column type changed
+    result = run_query(
+        "SELECT atttypid::regtype FROM pg_attribute "
+        "WHERE attrelid = 'rest_type_promo_f.tbl'::regclass AND attname = 'a'",
+        pg_conn,
+    )
+    assert result == [["double precision"]]
+
+    # insert data with higher precision
+    run_command(
+        "INSERT INTO rest_type_promo_f.tbl VALUES (1.23456789012345, 2);",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    results = run_query(
+        "SELECT a, b FROM rest_type_promo_f.tbl ORDER BY b ASC", pg_conn
+    )
+    assert results == [[1.5, 1], [1.23456789012345, 2]]
+
+    # verify REST catalog metadata
+    metadata = get_rest_table_metadata("rest_type_promo_f", "tbl", superuser_conn)
+    schemas = metadata["metadata"].get("schemas", [])
+    last_schema = schemas[-1]
+    field_a = next(f for f in last_schema["fields"] if f["name"] == "a")
+    assert field_a["type"] == "double", f"Expected 'double' but got {field_a['type']}"
+
+    assert_metadata_on_pg_catalog_and_rest_matches(
+        "rest_type_promo_f", "tbl", superuser_conn
+    )
+
+    run_command("DROP SCHEMA rest_type_promo_f CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_rest_alter_column_type_decimal_widen_precision(
+    pg_conn,
+    superuser_conn,
+    installcheck,
+    s3,
+    extension,
+    create_types_helper_functions,
+    with_default_location,
+    polaris_session,
+    set_polaris_gucs,
+    create_http_helper_functions,
+):
+    """Test allowed Iceberg type promotion decimal(P,S) -> decimal(P',S) on REST catalog table"""
+    if installcheck:
+        return
+
+    run_command("CREATE SCHEMA rest_type_promo_d;", pg_conn)
+    run_command(
+        """
+        CREATE TABLE rest_type_promo_d.tbl (a numeric(10,2), b int)
+        USING iceberg WITH (catalog='rest');
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        "INSERT INTO rest_type_promo_d.tbl VALUES (12345.67, 1);",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # widen precision: numeric(10,2) -> numeric(20,2)
+    run_command(
+        "ALTER TABLE rest_type_promo_d.tbl ALTER COLUMN a TYPE numeric(20,2);",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # insert data requiring wider precision
+    run_command(
+        "INSERT INTO rest_type_promo_d.tbl VALUES (123456789012345.67, 2);",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    results = run_query(
+        "SELECT a, b FROM rest_type_promo_d.tbl ORDER BY b ASC", pg_conn
+    )
+    assert len(results) == 2
+    assert str(results[0][0]) == "12345.67"
+    assert str(results[1][0]) == "123456789012345.67"
+
+    # verify REST catalog metadata
+    metadata = get_rest_table_metadata("rest_type_promo_d", "tbl", superuser_conn)
+    schemas = metadata["metadata"].get("schemas", [])
+    last_schema = schemas[-1]
+    field_a = next(f for f in last_schema["fields"] if f["name"] == "a")
+    assert (
+        "decimal" in field_a["type"]
+    ), f"Expected decimal type but got {field_a['type']}"
+
+    assert_metadata_on_pg_catalog_and_rest_matches(
+        "rest_type_promo_d", "tbl", superuser_conn
+    )
+
+    run_command("DROP SCHEMA rest_type_promo_d CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_rest_alter_column_type_disallowed_promotions(
+    pg_conn,
+    installcheck,
+    s3,
+    extension,
+    create_types_helper_functions,
+    with_default_location,
+    polaris_session,
+    set_polaris_gucs,
+    create_http_helper_functions,
+):
+    """Test that disallowed type promotions are rejected for REST catalog Iceberg tables"""
+    if installcheck:
+        return
+
+    run_command("CREATE SCHEMA rest_type_promo_dis;", pg_conn)
+    run_command(
+        """
+        CREATE TABLE rest_type_promo_dis.tbl (
+            a int,
+            b bigint,
+            c double precision,
+            d numeric(10,2)
+        ) USING iceberg WITH (catalog='rest');
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    disallowed_cases = [
+        ("a", "varchar(255)", "int to varchar"),
+        ("b", "int", "bigint to int"),
+        ("c", "real", "double to float"),
+        ("d", "numeric(10,3)", "decimal scale change"),
+        ("d", "numeric(8,2)", "decimal precision narrowing"),
+        ("a", "real", "int to real"),
+    ]
+
+    for col, new_type, description in disallowed_cases:
+        error = run_command(
+            f"ALTER TABLE rest_type_promo_dis.tbl ALTER COLUMN {col} TYPE {new_type};",
+            pg_conn,
+            raise_error=False,
+        )
+        assert error is not None, f"Expected error for {description}"
+        assert "not supported" in str(
+            error
+        ), f"Expected 'not supported' error for {description}, got: {error}"
+        assert "Allowed type promotions for Iceberg tables are" in str(
+            error
+        ), f"Expected detail message for {description}, got: {error}"
+        pg_conn.rollback()
+
+    run_command("DROP SCHEMA rest_type_promo_dis CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_rest_alter_column_type_with_insert_after(
+    pg_conn,
+    superuser_conn,
+    installcheck,
+    s3,
+    extension,
+    create_types_helper_functions,
+    with_default_location,
+    polaris_session,
+    set_polaris_gucs,
+    create_http_helper_functions,
+):
+    """Test type promotion followed by data insert and read on REST catalog table"""
+    if installcheck:
+        return
+
+    run_command("CREATE SCHEMA rest_type_promo_ins;", pg_conn)
+    run_command(
+        """
+        CREATE TABLE rest_type_promo_ins.tbl (a int, b real, c int)
+        USING iceberg WITH (catalog='rest');
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        "INSERT INTO rest_type_promo_ins.tbl VALUES (1, 1.5, 10);",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # promote multiple columns in the same transaction
+    run_command(
+        "ALTER TABLE rest_type_promo_ins.tbl ALTER COLUMN a TYPE bigint;",
+        pg_conn,
+    )
+    run_command(
+        "ALTER TABLE rest_type_promo_ins.tbl ALTER COLUMN b TYPE double precision;",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # insert data with promoted types
+    run_command(
+        f"INSERT INTO rest_type_promo_ins.tbl VALUES ({2**40}, 1.23456789012345, 20);",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    results = run_query(
+        "SELECT a, b, c FROM rest_type_promo_ins.tbl ORDER BY c ASC", pg_conn
+    )
+    assert results == [[1, 1.5, 10], [2**40, 1.23456789012345, 20]]
+
+    assert_metadata_on_pg_catalog_and_rest_matches(
+        "rest_type_promo_ins", "tbl", superuser_conn
+    )
+
+    run_command("DROP SCHEMA rest_type_promo_ins CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
 def test_add_column_with_check_constraint(
     pg_conn,
     superuser_conn,
@@ -4078,7 +4418,9 @@ def assert_schemas_equal(namespace, table_name, superuser_conn, metadata):
             "bool": "boolean",
             "boolean": "boolean",
             "float": "float",
+            "real": "float",
             "double": "double",
+            "double precision": "double",
             "str": "string",
             "string": "text",
             "timestamp_tz": "timestamp_tz",
@@ -4089,8 +4431,11 @@ def assert_schemas_equal(namespace, table_name, superuser_conn, metadata):
             "uuid": "uuid",
             "binary": "binary",
             "decimal": "decimal",
+            "numeric": "decimal",
         }
-        return aliases.get(t, t)
+        # strip precision/scale from parameterized types like "decimal(20, 2)"
+        base = t.split("(")[0].strip()
+        return aliases.get(base, t)
 
     # schema checks
     schemas = metadata["metadata"].get("schemas", [])

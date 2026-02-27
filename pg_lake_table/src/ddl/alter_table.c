@@ -58,6 +58,7 @@
 #include "pg_lake/partitioning/partition_spec_catalog.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
+#include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/util/rel_utils.h"
 
 
@@ -119,6 +120,7 @@ typedef struct PgLakeDDL
 static bool Allowed(Node *arg, Oid relationId);
 static bool Disallowed(Node *arg, Oid relationId);
 static bool DisallowedAddColumnWithUnsupportedConstraints(Node *arg, Oid relationId);
+static bool AllowedAlterColumnTypeForIceberg(Node *arg, Oid relationId);
 static bool DisallowedForWritableRestRenameTable(Node *arg, Oid relationId);
 static bool DisallowedForWritableRestSetSchema(Node *arg, Oid relationId);
 
@@ -155,7 +157,7 @@ static const PgLakeDDL PgLakeDDLs[] = {
 #if PG_VERSION_NUM >= 170000
 	ALTER_TABLE_DDL(AT_SetExpression, Disallowed, Disallowed),
 #endif
-	ALTER_TABLE_DDL(AT_AlterColumnType, Disallowed, Disallowed),
+	ALTER_TABLE_DDL(AT_AlterColumnType, AllowedAlterColumnTypeForIceberg, Disallowed),
 
 	/* allowed for writable tables, not allowed for iceberg tables */
 	ALTER_TABLE_DDL(AT_AddIdentity, Disallowed, Allowed),
@@ -406,6 +408,32 @@ CreateDDLOperationsForAlterTable(AlterTableStmt *alterStmt)
 			{
 				ddlOperation->type = DDL_COLUMN_DROP_DEFAULT;
 			}
+
+			ddlOperations = lappend(ddlOperations, ddlOperation);
+		}
+		else if (subcommand->subtype == AT_AlterColumnType)
+		{
+			char	   *columnName = subcommand->name;
+			AttrNumber	attrNo = get_attnum(relationId, columnName);
+
+			IcebergDDLOperation *ddlOperation = palloc0(sizeof(IcebergDDLOperation));
+
+			ddlOperation->type = DDL_COLUMN_ALTER_TYPE;
+			ddlOperation->attrNumber = attrNo;
+
+			/*
+			 * At this point, PgLakeCommonParentProcessUtility has already
+			 * been called so the column type in pg_attribute is updated. We
+			 * read the new type from the relation.
+			 */
+			Oid			newTypeOid = InvalidOid;
+			int32		newTypMod = -1;
+			Oid			newCollId = InvalidOid;
+
+			get_atttypetypmodcoll(relationId, attrNo,
+								  &newTypeOid, &newTypMod, &newCollId);
+
+			ddlOperation->newPgType = MakePGType(newTypeOid, newTypMod);
 
 			ddlOperations = lappend(ddlOperations, ddlOperation);
 		}
@@ -841,10 +869,40 @@ ErrorIfUnsupportedAlterWritablePgLakeTableStmt(AlterTableStmt *alterStmt,
 
 			const char *cmdTypeStr = PgLakeUnsupportedAlterTableToString(cmd);
 
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("ALTER TABLE %s command not supported for "
-							"%s tables", cmdTypeStr, tableTypeStr)));
+			if (cmd->subtype == AT_AlterColumnType &&
+				tableType == PG_LAKE_ICEBERG_TABLE_TYPE)
+			{
+				ColumnDef  *def = (ColumnDef *) cmd->def;
+
+				if (def->raw_default != NULL)
+				{
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("ALTER TABLE %s command not supported for "
+									"%s tables", cmdTypeStr, tableTypeStr),
+							 errdetail("USING requires rewriting data files, "
+									   "but Iceberg schema evolution is a "
+									   "metadata-only operation.")));
+				}
+				else
+				{
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("ALTER TABLE %s command not supported for "
+									"%s tables", cmdTypeStr, tableTypeStr),
+							 errdetail("Allowed type promotions for Iceberg tables "
+									   "are: int -> bigint, float -> double, and "
+									   "decimal(P,S) -> decimal(P',S) where P' > P "
+									   "(wider precision, same scale).")));
+				}
+			}
+			else
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("ALTER TABLE %s command not supported for "
+								"%s tables", cmdTypeStr, tableTypeStr)));
+			}
 		}
 	}
 
@@ -1039,6 +1097,113 @@ Allowed(Node *arg, Oid relationId)
 static bool
 Disallowed(Node *arg, Oid relationId)
 {
+	return false;
+}
+
+
+/*
+ * AllowedAlterColumnTypeForIceberg validates whether a column type change
+ * is allowed for an Iceberg table per the Iceberg spec v2 type promotion rules.
+ *
+ * The Iceberg spec allows the following type promotions:
+ *   - int -> long
+ *   - float -> double
+ *   - decimal(P, S) -> decimal(P', S) where P' > P (wider precision, same scale)
+ *
+ * See: https://iceberg.apache.org/spec/#schema-evolution
+ */
+static bool
+AllowedAlterColumnTypeForIceberg(Node *arg, Oid relationId)
+{
+	AlterTableCmd *cmd = (AlterTableCmd *) arg;
+
+	Assert(cmd->subtype == AT_AlterColumnType);
+
+	char	   *columnName = cmd->name;
+	ColumnDef  *def = (ColumnDef *) cmd->def;
+	TypeName   *newTypeName = def->typeName;
+
+	/*
+	 * Reject USING clause. USING requires rewriting data files, but Iceberg
+	 * schema evolution is metadata-only so data files are never rewritten.
+	 */
+	if (def->raw_default != NULL)
+		return false;
+
+	/* resolve the new type OID and typmod */
+	int32		newTypMod = 0;
+	Oid			newTypeOid = InvalidOid;
+
+	typenameTypeIdAndMod(NULL, newTypeName, &newTypeOid, &newTypMod);
+
+	/* get the current column type from the relation */
+	AttrNumber	attrNum = get_attnum(relationId, columnName);
+
+	if (attrNum == InvalidAttrNumber)
+		return false;
+
+	Oid			currentTypeOid = InvalidOid;
+	int32		currentTypMod = -1;
+	Oid			currentCollId = InvalidOid;
+
+	get_atttypetypmodcoll(relationId, attrNum,
+						  &currentTypeOid, &currentTypMod, &currentCollId);
+
+	/* same type is always allowed (no-op from Iceberg perspective) */
+	if (currentTypeOid == newTypeOid && currentTypMod == newTypMod)
+		return true;
+
+	/*
+	 * Iceberg type promotion: int -> long
+	 *
+	 * PostgreSQL int2 and int4 both map to Iceberg "int", and int8 maps to
+	 * Iceberg "long". So we allow int2/int4 -> int8.
+	 */
+	if ((currentTypeOid == INT4OID || currentTypeOid == INT2OID) &&
+		newTypeOid == INT8OID)
+		return true;
+
+	/*
+	 * Iceberg type promotion: float -> double
+	 *
+	 * PostgreSQL float4 maps to Iceberg "float" and float8 maps to Iceberg
+	 * "double". So we allow float4 -> float8.
+	 */
+	if (currentTypeOid == FLOAT4OID && newTypeOid == FLOAT8OID)
+		return true;
+
+	/*
+	 * Iceberg type promotion: decimal(P, S) -> decimal(P', S) where P' > P
+	 *
+	 * Both must be numeric, the new precision must be greater, and the scale
+	 * must remain the same.
+	 */
+	if (currentTypeOid == NUMERICOID && newTypeOid == NUMERICOID)
+	{
+		int			currentPrecision = -1;
+		int			currentScale = -1;
+		int			newPrecision = -1;
+		int			newScale = -1;
+
+		GetDuckdbAdjustedPrecisionAndScaleFromNumericTypeMod(currentTypMod,
+															 &currentPrecision,
+															 &currentScale);
+		GetDuckdbAdjustedPrecisionAndScaleFromNumericTypeMod(newTypMod,
+															 &newPrecision,
+															 &newScale);
+
+		/* new precision must be wider and scale must stay the same */
+		if (newPrecision > currentPrecision && newScale == currentScale)
+		{
+			/* also validate the new type is supported for Iceberg tables */
+			ErrorIfTypeUnsupportedNumericForIcebergTables(newTypMod, columnName);
+			return true;
+		}
+
+		return false;
+	}
+
+	/* all other type changes are disallowed */
 	return false;
 }
 
