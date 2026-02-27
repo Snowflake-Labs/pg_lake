@@ -117,6 +117,16 @@ pg_queries = [
     """select a < b and b < 3 from (values (1, 2)) t(a, b) group by rollup(a < b and b < 3) having a < b and b < 3;"""
     """select not a from (values(true)) t(a) group by rollup(not a) having not not a;"""
     """select not a from (values(true)) t(a) group by rollup(not a) having not not a;""",
+    # test GROUPING() with constant expressions referenced via positional GROUP BY
+    # regression: boolean constants were deparsed without type label in GROUPING()
+    # but with type label in GROUP BY, causing DuckDB binder mismatch
+    "SELECT true, GROUPING(true), COUNT(*) FROM gstest5 GROUP BY ROLLUP(1) ORDER BY 1, 2, 3;",
+    "SELECT true, GROUPING(true), SUM(id) FROM gstest5 GROUP BY ROLLUP(1) ORDER BY 1, 2, 3;",
+    "SELECT false, GROUPING(false), COUNT(*) FROM gstest5 GROUP BY ROLLUP(1) ORDER BY 1, 2, 3;",
+    # mix of constant and column args in GROUPING with ROLLUP
+    "SELECT true, id, GROUPING(true, id), COUNT(*) FROM gstest5 GROUP BY ROLLUP(1, 2) ORDER BY 1, 2, 3, 4;",
+    # non-boolean constant in GROUPING with ROLLUP
+    "SELECT 'x', GROUPING('x'), COUNT(*) FROM gstest5 GROUP BY ROLLUP(1) ORDER BY 1, 2, 3;",
 ]
 
 

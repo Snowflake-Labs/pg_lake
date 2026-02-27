@@ -598,6 +598,49 @@ RewriteQueryTreeForPGDuckMutator(Node *node, RewriteQueryTreeContext * context)
 
 		node = RewriteSQLValueFunction(sqlValueFunctionExpr, context);
 	}
+	else if (IsA(node, GroupingFunc))
+	{
+		/*
+		 * PostgreSQL's ruleutils.c deparses constant expressions in GROUP BY
+		 * clauses with an explicit type label (showtype=1 in
+		 * get_rule_sortgroupclause), e.g. true::boolean. However, it deparses
+		 * the same constants in GROUPING() args without a type label
+		 * (showtype=0), e.g. just true.
+		 *
+		 * DuckDB's binder compares the GROUPING() children against the GROUP
+		 * BY expressions using parsed expression equality. When the GROUP BY
+		 * has "true::boolean" but GROUPING has just "true", DuckDB sees them
+		 * as different expressions and raises:
+		 * "GROUPING child must be a grouping column".
+		 *
+		 * To fix this, we wrap any Const args in the GroupingFunc with an
+		 * explicit RelabelType cast so that ruleutils deparses them with the
+		 * type label, matching the GROUP BY output.
+		 */
+		GroupingFunc *grpFunc = (GroupingFunc *) node;
+		ListCell   *lc;
+
+		foreach(lc, grpFunc->args)
+		{
+			Node	   *arg = (Node *) lfirst(lc);
+
+			if (IsA(arg, Const))
+			{
+				Const	   *constArg = (Const *) arg;
+
+				RelabelType *castExpr = makeNode(RelabelType);
+
+				castExpr->arg = (Expr *) constArg;
+				castExpr->resulttype = constArg->consttype;
+				castExpr->resulttypmod = constArg->consttypmod;
+				castExpr->resultcollid = constArg->constcollid;
+				castExpr->relabelformat = COERCE_EXPLICIT_CAST;
+				castExpr->location = -1;
+
+				lfirst(lc) = castExpr;
+			}
+		}
+	}
 
 	return node;
 }
