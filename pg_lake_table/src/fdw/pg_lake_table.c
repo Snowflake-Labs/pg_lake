@@ -2562,7 +2562,7 @@ postgresIsForeignRelUpdatable(Relation rel)
 	 */
 	CopyDataFormat format = GetForeignTableFormat(relationId);
 
-	if (format == DATA_FORMAT_PARQUET)
+	if (format == DATA_FORMAT_PARQUET || format == DATA_FORMAT_ICEBERG)
 		writeFlags |= (1 << CMD_UPDATE) | (1 << CMD_DELETE);
 
 	return writeFlags;
@@ -3792,7 +3792,8 @@ process_query_params(ExprContext *econtext,
 			param_values[i] = NULL;
 		else
 
-			param_values[i] = PGDuckSerialize(&param_flinfo[i], exprType((Node *) expr_state->expr), expr_value);
+			param_values[i] = PGDuckSerialize(&param_flinfo[i], exprType((Node *) expr_state->expr), expr_value,
+														  DATA_FORMAT_INVALID);
 		i++;
 	}
 

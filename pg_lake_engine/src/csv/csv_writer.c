@@ -29,6 +29,7 @@
 #include "fmgr.h"
 #include "miscadmin.h"
 
+#include "catalog/pg_type_d.h"
 #include "commands/copy.h"
 #include "commands/defrem.h"
 #include "pg_lake/csv/csv_writer.h"
@@ -787,7 +788,8 @@ CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot)
 
 					string = PGDuckSerialize(&out_functions[attnum - 1],
 											 attr->atttypid,
-											 value);
+											 value,
+											 cstate->targetFormat);
 				}
 				else
 					string = OutputFunctionCall(&out_functions[attnum - 1],
@@ -1250,6 +1252,7 @@ ShouldUseDuckSerialization(CopyDataFormat targetFormat, PGType postgresType)
 			 * serialization format, since they can then be converted to the
 			 * corresponding Parquet data types.
 			 */
+		case DATA_FORMAT_ICEBERG:
 		case DATA_FORMAT_PARQUET:
 			return true;
 

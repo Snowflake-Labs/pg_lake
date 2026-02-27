@@ -1138,6 +1138,75 @@ GetDuckDBStructDefinitionForCompositeType(CompositeType * type)
 
 
 /*
+ * GetDuckDBStructDefinitionForIceberg is a variant of
+ * GetDuckDBStructDefinitionForCompositeType that expands INTERVAL
+ * fields to STRUCT(months BIGINT, days BIGINT, microseconds BIGINT).
+ */
+char *
+GetDuckDBStructDefinitionForIceberg(CompositeType *type)
+{
+	ListCell   *lc;
+	StringInfo	string = makeStringInfo();
+	bool		processedOne = false;
+
+	appendStringInfo(string, "STRUCT(");
+
+	foreach(lc, type->cols)
+	{
+		CompositeCol *col = (CompositeCol *) lfirst(lc);
+
+		if (processedOne)
+			appendStringInfoChar(string, ',');
+
+		appendStringInfoString(string, QuoteDuckDBFieldName(col->colName));
+		appendStringInfoChar(string, ' ');
+
+		if (col->subStruct != NULL)
+		{
+			appendStringInfoString(string,
+								   GetDuckDBStructDefinitionForIceberg(col->subStruct));
+		}
+		else
+		{
+			PGType		baseColumnType = MakePGTypeOid(GetRelatedTypeOid(col->colType, false));
+			DuckDBType	duckDBType = GetDuckDBTypeForPGType(baseColumnType);
+
+			if (duckDBType == DUCKDB_TYPE_INTERVAL)
+			{
+				appendStringInfoString(string,
+									   "STRUCT(months BIGINT, days BIGINT, microseconds BIGINT)");
+			}
+			else if (duckDBType)
+			{
+				const char *duckDBName = GetFullDuckDBTypeNameForPGType(baseColumnType);
+
+				if (duckDBName)
+					appendStringInfoString(string, duckDBName);
+				else
+					ereport(ERROR, (errmsg("unresolved duckdb type name for type: %d", duckDBType),
+									errcode(ERRCODE_INTERNAL_ERROR)));
+			}
+			else
+				ereport(ERROR, (errmsg("composite types with a \"%s\" field cannot be exported to data lake",
+									   format_type_be(col->colType)),
+								errcode(ERRCODE_INDETERMINATE_DATATYPE)));
+		}
+		if (col->isArray)
+			appendStringInfoString(string, "[]");
+
+		processedOne = true;
+	}
+
+	appendStringInfoChar(string, ')');
+
+	if (type->isArray)
+		appendStringInfo(string, "[]");
+
+	return string->data;
+}
+
+
+/*
  * This helper just quotes our input string to be used in a duckdb field name.
  */
 const char *
