@@ -323,3 +323,36 @@ pgclient_threadpool_set_duckdb_conn(int threadIndex, duckdb_connection conn)
 
 	pthread_rwlock_unlock(&rwlock);
 }
+
+
+/*
+ * pgclient_threadpool_cancel_all interrupts every active DuckDB query.
+ *
+ * Called during server shutdown so that client threads get a clean
+ * interruption error instead of an abrupt connection reset when the
+ * process exits.  Only sets the DuckDB interrupt flag (an atomic bool),
+ * so this is cheap and safe to call from the main thread.
+ *
+ * Returns the number of active threads that were interrupted.
+ */
+int
+pgclient_threadpool_cancel_all(void)
+{
+	int			interrupted = 0;
+
+	pthread_rwlock_rdlock(&rwlock);
+
+	for (int i = 0; i < MaxThreads; i++)
+	{
+		if (ClientThreadPool[i].isStarted &&
+			ClientThreadPool[i].duckdbConnection != NULL)
+		{
+			duckdb_interrupt(ClientThreadPool[i].duckdbConnection);
+			interrupted++;
+		}
+	}
+
+	pthread_rwlock_unlock(&rwlock);
+
+	return interrupted;
+}

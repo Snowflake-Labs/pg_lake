@@ -88,8 +88,7 @@ main(int argc, char *argv[])
 	if (pgserver_run(&pgServer) != STATUS_OK)
 		return STATUS_ERROR;
 
-	if (pgserver_destroy(&pgServer) != STATUS_OK)
-		return STATUS_ERROR;
+	pgserver_destroy(&pgServer);
 
 	return STATUS_OK;
 }

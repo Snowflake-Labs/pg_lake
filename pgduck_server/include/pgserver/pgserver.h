@@ -50,7 +50,7 @@ extern int	pgserver_init(PGServer * pgServer,
 						  int unixSocketPermissions,
 						  int port);
 extern int	pgserver_run(PGServer * pgServer);
-extern int	pgserver_destroy(PGServer * pgServer);
+extern void pgserver_destroy(PGServer * pgServer);
 
 
 #endif							/* PGDUCK_PG_SERVER_H */

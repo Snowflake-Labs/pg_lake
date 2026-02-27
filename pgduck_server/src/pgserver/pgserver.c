@@ -30,6 +30,7 @@
 #include <netdb.h>
 #include <common/ip.h>
 #include <pthread.h>
+#include <signal.h>
 #include <sys/fcntl.h>
 #include <sys/file.h>
 #include <sys/stat.h>
@@ -325,11 +326,86 @@ set_unix_socket_permissions(char *unixSocketPath, char *groupName, int permissio
 
 static volatile sig_atomic_t running = 1;
 
-/* basic sigint handler */
 static void
-handle_signal(int sig)
+handle_shutdown_signal(int sig)
 {
 	running = 0;
+}
+
+
+/*
+ * install_shutdown_signal_handlers -- install SIGINT/SIGTERM handlers.
+ *
+ * The handler simply sets `running = 0`.  SA_RESTART is deliberately
+ * *not* set so that accept() in the main loop returns -1/EINTR, giving
+ * the loop a chance to notice the flag and exit promptly.
+ */
+static int
+install_shutdown_signal_handlers(void)
+{
+	struct sigaction sa;
+
+	sa.sa_handler = handle_shutdown_signal;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = 0;			/* no SA_RESTART — accept() must return
+								 * EINTR */
+
+	if (sigaction(SIGINT, &sa, NULL) == -1 ||
+		sigaction(SIGTERM, &sa, NULL) == -1)
+	{
+		PGDUCK_SERVER_ERROR("sigaction failed: %s", strerror(errno));
+		return STATUS_ERROR;
+	}
+
+	return STATUS_OK;
+}
+
+
+/*
+ * disable_shutdown_signals -- block SIGINT/SIGTERM in the calling thread.
+ *
+ * Used before pthread_create() so the child thread inherits a blocked
+ * mask and never receives these signals.
+ */
+static int
+disable_shutdown_signals(void)
+{
+	sigset_t	sigs;
+
+	sigemptyset(&sigs);
+	sigaddset(&sigs, SIGINT);
+	sigaddset(&sigs, SIGTERM);
+
+	if (pthread_sigmask(SIG_BLOCK, &sigs, NULL) != 0)
+	{
+		PGDUCK_SERVER_ERROR("pthread_sigmask failed: %s", strerror(errno));
+		return STATUS_ERROR;
+	}
+
+	return STATUS_OK;
+}
+
+
+/*
+ * enable_shutdown_signals -- unblock SIGINT/SIGTERM and re-install the
+ * shutdown signal handlers so accept() can be interrupted again.
+ */
+static int
+enable_shutdown_signals(void)
+{
+	sigset_t	sigs;
+
+	sigemptyset(&sigs);
+	sigaddset(&sigs, SIGINT);
+	sigaddset(&sigs, SIGTERM);
+
+	if (pthread_sigmask(SIG_UNBLOCK, &sigs, NULL) != 0)
+	{
+		PGDUCK_SERVER_ERROR("pthread_sigmask failed: %s", strerror(errno));
+		return STATUS_ERROR;
+	}
+
+	return STATUS_OK;
 }
 
 
@@ -339,30 +415,8 @@ handle_signal(int sig)
 int
 pgserver_run(PGServer * pgServer)
 {
-	/* install signal handlers */
-	struct sigaction sa;
-
-	/* Use our custom handler */
-	sa.sa_handler = handle_signal;
-
-	/* Do not block any other signals during handling */
-	sigemptyset(&sa.sa_mask);
-
-	/* CRITICAL: Do NOT set the SA_RESTART flag. */
-	/* This ensures that system calls like accept() are interrupted. */
-	sa.sa_flags = 0;
-
-	/* Install the handler for SIGINT and SIGTERM */
-	if (sigaction(SIGINT, &sa, NULL) == -1)
-	{
-		perror("sigaction for SIGINT failed");
-		exit(STATUS_ERROR);
-	}
-	if (sigaction(SIGTERM, &sa, NULL) == -1)
-	{
-		perror("sigaction for SIGTERM failed");
-		exit(STATUS_ERROR);
-	}
+	if (install_shutdown_signal_handlers() != STATUS_OK)
+		return STATUS_ERROR;
 
 	while (running)
 	{
@@ -375,8 +429,21 @@ pgserver_run(PGServer * pgServer)
 
 		if (client->clientSocket < 0)
 		{
+			int			save_errno = errno;
+
+			pg_free(client);
+
+			/*
+			 * EINTR can come from our shutdown handler (running == 0) or from
+			 * unrelated sources like a debugger attaching (ptrace). In either
+			 * case, just retry the loop — the while-condition takes care of
+			 * the shutdown case.
+			 */
+			if (save_errno == EINTR)
+				continue;
+
 			PGDUCK_SERVER_ERROR("Could not accept the client: %s",
-								strerror(errno));
+								strerror(save_errno));
 
 			/*
 			 * TODO: We can probably recover from this error, but lets handle
@@ -422,6 +489,9 @@ pgserver_run(PGServer * pgServer)
 		initState->startFunction = pgServer->startFunction;
 		initState->pgClient = client;
 
+		if (disable_shutdown_signals() != STATUS_OK)
+			exit(STATUS_ERROR);
+
 		if (pgserver_create_client_thread(initState) != OK)
 		{
 			PGDUCK_SERVER_ERROR("Thread creation failed for client %d", client->clientSocket);
@@ -430,19 +500,61 @@ pgserver_run(PGServer * pgServer)
 			pg_free(client);
 			pg_free(initState);
 			pgclient_threadpool_free_slot(threadIndex);
-			continue;
 		}
-	}
 
-	PGDUCK_SERVER_LOG("Done running");
+		if (enable_shutdown_signals() != STATUS_OK)
+			exit(STATUS_ERROR);
+	}
 
 	return STATUS_OK;
 }
 
 
 /*
+ * pgserver_destroy performs a graceful shutdown of the server.
+ *
+ * 1. Close the listening socket so no new connections are accepted.
+ * 2. Interrupt every active DuckDB query so client threads can send a
+ *    proper error to their clients instead of an abrupt TCP reset.
+ * 3. Brief grace period to let interrupted threads finish their error
+ *    path and close their sockets cleanly.
+ *
+ * We don't join the client threads (they are detached), so the grace
+ * period is best-effort.  When main() returns, exit() will tear down
+ * any remaining threads.
+ */
+void
+pgserver_destroy(PGServer * pgServer)
+{
+	PGDUCK_SERVER_LOG("Shutting down: closing listening socket");
+	closesocket(pgServer->listeningSocket);
+	pgServer->listeningSocket = -1;
+
+	int			interrupted = pgclient_threadpool_cancel_all();
+
+	if (interrupted > 0)
+	{
+		PGDUCK_SERVER_LOG("Shutting down: interrupted %d active connection(s), "
+						  "waiting briefly for them to finish", interrupted);
+
+		/*
+		 * 2 seconds is generous for the threads to send an error to their
+		 * client and run through pgclient_thread_cleanup.
+		 */
+		pg_usleep(2 * 1000000L);
+	}
+
+	PGDUCK_SERVER_LOG("Done running");
+}
+
+
+/*
  * pgserver_create_client_thread creates a new thread for the client.
  * We use PTHREAD_CREATE_DETACHED so that we don't have to join the threads.
+ *
+ * The caller must block shutdown signals before calling this function
+ * so the new thread inherits a blocked mask and never receives
+ * SIGINT/SIGTERM.
  */
 static int
 pgserver_create_client_thread(const PgClientThreadInitState * initState)
@@ -487,6 +599,12 @@ pgclient_thread_main(void *arg)
 {
 	PgClientThreadInitState *initState = (PgClientThreadInitState *) arg;
 
+	/*
+	 * SIGINT/SIGTERM are already blocked — pgserver_create_client_thread()
+	 * blocks them before pthread_create(), so this thread inherits a blocked
+	 * mask.  No per-thread sigmask call needed.
+	 */
+
 	/* cleanup handler */
 	pthread_cleanup_push(pgclient_thread_cleanup, arg);
 
@@ -523,18 +641,6 @@ pgclient_thread_cleanup(void *arg)
 }
 
 
-/*
- * cleanup on successful exists.
- *
- * TODO: not called ever yet
- */
-int
-pgserver_destroy(PGServer * pgServer)
-{
-	closesocket(pgServer->listeningSocket);
-
-	return STATUS_OK;
-}
 
 
 /*
