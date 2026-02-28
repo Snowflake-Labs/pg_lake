@@ -307,3 +307,51 @@ def count_pg_extension_base_workers(conn):
     query = "SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'pg base extension worker'"
     result = run_query(query, conn)
     return result[0]["count"]
+
+
+def test_hibernate_worker_restart_delay(superuser_conn):
+    """
+    Test that workers can hibernate and restart after a delay.
+
+    The hibernate test worker:
+    - Runs for 5 seconds
+    - Exits and requests restart in 5 seconds
+    - Repeats
+
+    This test monitors worker count over time to verify the cycling behavior.
+    """
+    run_command(
+        "CREATE EXTENSION pg_extension_base_test_hibernate CASCADE", superuser_conn
+    )
+    superuser_conn.commit()
+
+    # Give the database starter time to start the worker
+    time.sleep(0.5)
+
+    # Monitor worker count over 12 seconds
+    # We expect to see transitions: 1 -> 0 -> 1
+    # Worker runs for 5s, hibernates for 5s, runs again
+    counts = []
+    for _ in range(24):  # 12 seconds total, check every 0.5s
+        counts.append(count_pg_extension_base_workers(superuser_conn))
+        time.sleep(0.5)
+
+    # Verify we saw the worker running at some point
+    assert 1 in counts, f"Worker should have been running at some point: {counts}"
+
+    # Verify we saw the worker NOT running at some point (hibernating)
+    assert 0 in counts, f"Worker should have been hibernating at some point: {counts}"
+
+    # Verify at least one transition from running to not running
+    transitions = sum(1 for i in range(len(counts) - 1) if counts[i] != counts[i + 1])
+    assert (
+        transitions >= 1
+    ), f"Expected at least one transition, got {transitions}: {counts}"
+
+    # Clean up
+    run_command(
+        "DROP EXTENSION pg_extension_base_test_hibernate CASCADE", superuser_conn
+    )
+    superuser_conn.commit()
+
+    assert count_pg_extension_base_workers(superuser_conn) == 0

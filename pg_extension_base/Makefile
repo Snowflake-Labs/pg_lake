@@ -23,6 +23,8 @@ pg_extension_base-test:
 	$(MAKE) -C tests/pg_extension_base_test_ext1/
 	$(MAKE) -C tests/pg_extension_base_test_ext2/
 	$(MAKE) -C tests/pg_extension_base_test_ext3/
+	$(MAKE) -C tests/pg_extension_base_test_scheduler/
+	$(MAKE) -C tests/pg_extension_base_test_hibernate/
 
 install-pg_extension_base-test: pg_extension_base-test
 	$(MAKE) -C tests/pg_extension_base_test_common/ install
@@ -30,6 +32,7 @@ install-pg_extension_base-test: pg_extension_base-test
 	$(MAKE) -C tests/pg_extension_base_test_ext2/ install
 	$(MAKE) -C tests/pg_extension_base_test_ext3/ install
 	$(MAKE) -C tests/pg_extension_base_test_scheduler/ install
+	$(MAKE) -C tests/pg_extension_base_test_hibernate/ install
 
 uninstall-pg_extension_base-test:
 	$(MAKE) -C tests/pg_extension_base_test_common/ uninstall
@@ -37,6 +40,7 @@ uninstall-pg_extension_base-test:
 	$(MAKE) -C tests/pg_extension_base_test_ext2/ uninstall
 	$(MAKE) -C tests/pg_extension_base_test_ext3/ uninstall
 	$(MAKE) -C tests/pg_extension_base_test_scheduler/ uninstall
+	$(MAKE) -C tests/pg_extension_base_test_hibernate/ uninstall
 
 clean-pg_extension_base-test:
 	$(MAKE) -C tests/pg_extension_base_test_common/ clean
@@ -44,6 +48,7 @@ clean-pg_extension_base-test:
 	$(MAKE) -C tests/pg_extension_base_test_ext2/ clean
 	$(MAKE) -C tests/pg_extension_base_test_ext3/ clean
 	$(MAKE) -C tests/pg_extension_base_test_scheduler/ clean
+	$(MAKE) -C tests/pg_extension_base_test_hibernate/ clean
 
 prepare-check: install install-pg_extension_base-test
 finish-check: uninstall-pg_extension_base-test

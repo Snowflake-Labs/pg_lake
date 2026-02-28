@@ -9,14 +9,15 @@ def test_list_preload_libraries(superuser_conn, pg_extension_base):
         "SELECT library_name FROM extension_base.list_preload_libraries() WHERE extension_name LIKE 'pg_extension_base_test%' ORDER BY 1",
         superuser_conn,
     )
-    assert len(result) == 5
+    assert len(result) == 6
     assert result[0]["library_name"] == "$libdir/pg_extension_base_test_ext1"
     assert result[1]["library_name"] == "$libdir/pg_extension_base_test_ext2"
     assert result[2]["library_name"] == "$libdir/pg_extension_base_test_ext3"
-    assert result[3]["library_name"] == "$libdir/pg_extension_base_test_scheduler"
+    assert result[3]["library_name"] == "$libdir/pg_extension_base_test_hibernate"
+    assert result[4]["library_name"] == "$libdir/pg_extension_base_test_scheduler"
 
     # We did not explicitly specify $libdir for pg_extension_base_test_common
-    assert result[4]["library_name"] == "pg_extension_base_test_common"
+    assert result[5]["library_name"] == "pg_extension_base_test_common"
 
     superuser_conn.rollback()
 

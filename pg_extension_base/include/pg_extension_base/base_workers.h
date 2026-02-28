@@ -77,6 +77,21 @@
 	MemoryContextSwitchTo(OuterContext); \
 }
 
+/*
+ * Return values for base worker entry points to control restart behavior.
+ *
+ * A base worker entry point function returns internal (Datum). The return
+ * value controls whether and when the worker should be restarted:
+ *
+ *   BASE_WORKER_NO_RESTART (0): Clean exit, no restart
+ *   BASE_WORKER_RESTART_IMMEDIATELY (-1): Restart immediately
+ *   Any positive value: Restart after N milliseconds
+ *
+ * Values less than -1 are treated as "no restart" (same as 0).
+ */
+#define BASE_WORKER_NO_RESTART          ((Datum) 0)
+#define BASE_WORKER_RESTART_IMMEDIATELY ((Datum) -1)
+
 /* adjusted based on signals */
 extern PGDLLEXPORT volatile sig_atomic_t ReloadRequested;
 extern PGDLLEXPORT volatile sig_atomic_t TerminationRequested;

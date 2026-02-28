@@ -181,6 +181,9 @@ typedef struct DatabaseStarterEntry
 
 	/* whether to start the database starter */
 	bool		needsRestart;
+
+	/* process number for signaling via ProcSendSignal */
+	int			procno;
 }			DatabaseStarterEntry;
 
 
@@ -317,6 +320,7 @@ static bool BaseWorkerExistsInRegistrationList(List *workerRegistrationList,
 
 /* functions called by database starter */
 static void PgExtensionBaseDatabaseStarterSharedMemoryExit(int code, Datum arg);
+static int64 ComputeNextWakeTimeMs(void);
 static bool StartAllBaseWorkers(List *workerRegistrationList);
 static List *GetBaseWorkerRegistrationList(void);
 static StartBaseWorkerResult StartBaseWorker(int workerId, Oid extensionId,
@@ -353,6 +357,7 @@ static void BaseWorkerObjectAccessHook(ObjectAccessType access, Oid classId,
 static Oid	PgExtensionBaseExtensionId(void);
 static bool ExtensionExists(char *extensionName);
 static TimestampTz GetDelayedTimestamp(int64 millis);
+static void SignalDatabaseStarterLocked(Oid databaseId);
 static void DatabaseStarterNeedsRestart(Oid databaseId);
 static void PrepareForDrop(Oid databaseId, Oid extensionId);
 
@@ -698,8 +703,7 @@ PgExtensionServerStarterMain(Datum arg)
 		/* clean up any allocated memory */
 		MemoryContextReset(loopContext);
 
-		/* try again in 30 seconds */
-		LightSleep(30000);
+		LightSleep(ComputeNextWakeTimeMs());
 	}
 
 	ereport(LOG, (errmsg("pg base extension server starter restarting")));
@@ -1064,6 +1068,7 @@ PgExtensionBaseDatabaseStarterMain(Datum databaseIdDatum)
 	/* show my presence */
 	starterEntry->workerPid = MyProcPid;
 	starterEntry->state = WORKER_RUNNING;
+	starterEntry->procno = MyProcNumber;
 
 	LWLockRelease(&BaseWorkerControl->lock);
 
@@ -1203,8 +1208,8 @@ PgExtensionBaseDatabaseStarterMain(Datum databaseIdDatum)
 
 		MemoryContextReset(loopContext);
 
-		/* try again later */
-		LightSleep(30000);
+		/* try again later, respecting pending restart delays */
+		LightSleep(ComputeNextWakeTimeMs());
 	}
 
 	ereport(LOG, (errmsg("pg_extension_base database starter for database %s restarting",
@@ -1241,6 +1246,7 @@ PgExtensionBaseDatabaseStarterSharedMemoryExit(int code, Datum arg)
 		/* signal to other backends that I'm no longer running */
 		starterEntry->workerPid = 0;
 		starterEntry->state = WORKER_STOPPED;
+		starterEntry->procno = 0;
 
 		if (code != 0)
 		{
@@ -1253,6 +1259,74 @@ PgExtensionBaseDatabaseStarterSharedMemoryExit(int code, Datum arg)
 	}
 
 	LWLockRelease(&BaseWorkerControl->lock);
+}
+
+
+/*
+ * ComputeNextWakeTimeMs computes the minimum sleep time based on pending
+ * worker restarts in the current database.
+ *
+ * Returns the number of milliseconds until the next worker restart is due,
+ * or 10 seconds if no restarts are pending.
+ */
+static int64
+ComputeNextWakeTimeMs(void)
+{
+	int64		minSleepMs = 10000; /* default */
+
+	if (BaseWorkerHash == NULL)
+	{
+		return minSleepMs;
+	}
+
+	TimestampTz now = GetCurrentTimestamp();
+
+	LWLockAcquire(&BaseWorkerControl->lock, LW_SHARED);
+
+	HASH_SEQ_STATUS status;
+
+	hash_seq_init(&status, BaseWorkerHash);
+
+	BaseWorkerEntry *workerEntry;
+
+	while ((workerEntry = (BaseWorkerEntry *) hash_seq_search(&status)) != NULL)
+	{
+		if (workerEntry->key.databaseId != MyDatabaseId)
+			continue;
+		if (!workerEntry->needsRestart)
+			continue;
+
+		if (workerEntry->restartAfter == 0)
+		{
+			/* immediate restart */
+			minSleepMs = 0;
+			hash_seq_term(&status);
+			break;
+		}
+
+		int64		secDiff;
+		int			microsecDiff;
+
+		TimestampDifference(now, workerEntry->restartAfter, &secDiff, &microsecDiff);
+
+		int64		msUntilRestart = secDiff * 1000 + microsecDiff / 1000;
+
+		if (msUntilRestart <= 0)
+		{
+			minSleepMs = 0;
+			hash_seq_term(&status);
+			break;
+		}
+		else if (msUntilRestart < minSleepMs)
+		{
+			minSleepMs = msUntilRestart;
+		}
+	}
+
+	LWLockRelease(&BaseWorkerControl->lock);
+
+	/* Add small buffer to avoid tight loops */
+	return Max(minSleepMs, 100);
 }
 
 
@@ -1884,8 +1958,43 @@ PgExtensionBaseWorkerMain(Datum arg)
 	 *
 	 * Our current design is not to loop here, but let the function decide
 	 * whether to loop.
+	 *
+	 * The return value indicates when the worker should be restarted: -1:
+	 * restart immediately 0: do not restart (clean exit) >0: restart after N
+	 * milliseconds
 	 */
-	FunctionCall1(&entryPoint, Int32GetDatum(workerId));
+	Datum		restartResult = FunctionCall1(&entryPoint, Int32GetDatum(workerId));
+	int64		restartDelayMs = DatumGetInt64(restartResult);
+
+	/*
+	 * If a restart was requested, store it in shared memory before the exit
+	 * handler runs. The exit handler will respect this setting.
+	 *
+	 * -1 means restart immediately, >0 means restart after N milliseconds. 0
+	 * or any other value means no restart.
+	 */
+	if (restartDelayMs == -1 || restartDelayMs > 0)
+	{
+		LWLockAcquire(&BaseWorkerControl->lock, LW_EXCLUSIVE);
+
+		bool		isFound = false;
+		BaseWorkerEntry *workerEntry = GetBaseWorkerEntry(databaseId, workerId, &isFound);
+
+		if (isFound)
+		{
+			workerEntry->needsRestart = true;
+			workerEntry->state = WORKER_RESTARTING;
+
+			if (restartDelayMs <= 0)
+				workerEntry->restartAfter = 0;	/* immediate */
+			else
+				workerEntry->restartAfter = GetDelayedTimestamp(restartDelayMs);
+
+			SignalDatabaseStarterLocked(databaseId);
+		}
+
+		LWLockRelease(&BaseWorkerControl->lock);
+	}
 
 	ereport(LOG, (errmsg("pg extension base worker %d in database %s finished",
 						 workerId, databaseName)));
@@ -1916,8 +2025,15 @@ PgExtensionBaseWorkerSharedMemoryExit(int code, Datum arg)
 
 		if (code == 0)
 		{
-			/* clean exit */
-			workerEntry->state = WORKER_STOPPED;
+			/*
+			 * Clean exit - if needsRestart is already set, the worker
+			 * requested restart via its return value. Otherwise, no restart.
+			 */
+			if (!workerEntry->needsRestart)
+			{
+				workerEntry->state = WORKER_STOPPED;
+			}
+			/* else: state already set to WORKER_RESTARTING in main function */
 		}
 		else if (workerEntry->needsRestart)
 		{
@@ -2689,6 +2805,37 @@ GetDelayedTimestamp(int64 millis)
 	TimestampTz now = GetCurrentTimestamp();
 
 	return now + 1000 * millis;
+}
+
+
+/*
+ * SignalDatabaseStarterLocked signals the database starter for the given
+ * database to wake up, or falls back to signaling the server starter.
+ *
+ * Must be called while holding the BaseWorkerControl->lock.
+ */
+static void
+SignalDatabaseStarterLocked(Oid databaseId)
+{
+	bool		isFound = false;
+	DatabaseStarterEntry *starterEntry = GetDatabaseStarterEntry(databaseId, &isFound);
+
+	if (isFound)
+	{
+		starterEntry->needsRestart = true;
+
+		if (starterEntry->procno != 0)
+		{
+			ProcSendSignal(starterEntry->procno);
+			return;
+		}
+	}
+
+	/* Fall back to server starter */
+	if (BaseWorkerControl->serverStarterProcno != 0)
+	{
+		ProcSendSignal(BaseWorkerControl->serverStarterProcno);
+	}
 }
 
 
