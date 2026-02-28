@@ -15,7 +15,7 @@ Users connect only to PostgreSQL. The pg_lake extensions transparently delegate 
 ### First-time build
 ```bash
 # Install vcpkg dependencies (required once)
-export VCPKG_VERSION=2025.12.12
+export VCPKG_VERSION=2025.10.17
 git clone --recurse-submodules --branch $VCPKG_VERSION https://github.com/Microsoft/vcpkg.git
 ./vcpkg/bootstrap-vcpkg.sh
 ./vcpkg/vcpkg install azure-identity-cpp azure-storage-blobs-cpp azure-storage-files-datalake-cpp openssl
@@ -188,6 +188,69 @@ pg_lake_benchmark (optional, for benchmarking)
 - `docs/query-data-lake-files.md`: Foreign table usage
 - `docs/data-lake-import-export.md`: COPY command usage
 
+## Maintaining Installation Documentation
+
+### Overview
+The repository provides both automated installation (`install.sh`) and comprehensive manual documentation (`docs/building-from-source.md`). These must be kept in sync when dependencies or build steps change.
+
+### install.sh
+- **Location**: `install.sh` at repository root
+- **Purpose**: Automated installation script for developers to quickly set up pg_lake environments
+- **Capabilities**:
+  - Installs to existing PostgreSQL (default) or builds PostgreSQL from source (--build-postgres)
+  - Installs vcpkg and Azure SDK dependencies
+  - Builds and installs pg_lake extensions
+  - Optionally installs test dependencies: PostGIS, pgAudit, pg_cron, azurite, pipenv, Java 21+, JDBC driver
+  - Initializes PostgreSQL database cluster
+- **Platform support**: RHEL/AlmaLinux, Debian/Ubuntu, macOS
+
+### docs/building-from-source.md
+- **Location**: `docs/building-from-source.md`
+- **Purpose**: Comprehensive manual installation guide with both automated and manual approaches
+- **Structure**:
+  1. Quick Start - points to install.sh for common cases
+  2. Manual installation to existing PostgreSQL - minimal steps for users with PostgreSQL already installed
+  3. Full development environment setup - detailed manual steps for building everything from source
+  4. Test dependencies - optional components for running test suite
+  5. Running tests - how to execute pytest suites
+
+### When to Update Both Files
+
+**System dependencies change:**
+- Update package lists in both `install.sh` (install_system_deps function) and `docs/building-from-source.md` (System Dependencies section)
+- Ensure all three platforms (Debian, RHEL, macOS) are updated consistently
+
+**PostgreSQL build process changes:**
+- Update `install.sh` (install_postgres function) and `docs/building-from-source.md` (Build PostgreSQL from Source section)
+- Keep configure flags, contrib modules, and test modules in sync
+
+**vcpkg or Azure SDK versions change:**
+- Update VCPKG_VERSION variable in `install.sh`, `docs/building-from-source.md`, and this CLAUDE.md file
+- Update vcpkg package names if they change
+
+**New test dependencies:**
+- Add to `install.sh` (install_test_deps function)
+- Add to `docs/building-from-source.md` (Test Dependencies section)
+- Update the installation checks to be idempotent (skip if already installed)
+
+**pg_lake build process changes:**
+- Usually handled by Makefile, but if manual steps needed, document in `docs/building-from-source.md`
+
+### Testing install.sh Changes
+Before committing changes to install.sh:
+1. Test on a clean environment if possible
+2. Test with both `--build-postgres` (full dev setup) and without (existing PostgreSQL)
+3. Test `--with-test-deps` flag to ensure all test dependencies install correctly
+4. Verify idempotency - running the script twice should not fail or duplicate work
+5. Check that the summary output shows correct environment variables and next steps
+
+### Documentation Best Practices
+- Keep install.sh focused on automation - don't add extensive comments explaining "why", put that in the docs
+- Keep docs/building-from-source.md comprehensive - explain the "why" behind each step
+- When adding new flags to install.sh, document them in the "Development Environment Options" section of the docs
+- System dependency lists should match exactly across install.sh and docs for each platform
+- Test the manual instructions in docs/building-from-source.md periodically to ensure they still work
+
 ## Code Conventions
 
 ### C code (PostgreSQL extensions and pgduck_server)
@@ -306,6 +369,21 @@ pg_lake_iceberg.default_location_prefix = 's3://bucket/prefix'
 
 ## CI and Testing Notes
 
-- JDBC driver path must be set for Spark verification tests: `JDBC_DRIVER_PATH=/usr/share/java/postgresql.jar`
-- Java 21+ required for Polaris REST catalog tests
-- Azure tests require `azurite` (install via npm: `npm install -g azurite`)
+### Required environment variables for tests
+- `JAVA_HOME` must point to a Java 21+ JDK installation. The Polaris REST catalog server and Spark verification tests require Java 21+. If your default `java` is an older version, you must set `JAVA_HOME` explicitly:
+  - RHEL/AlmaLinux: `export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-<arch>` (install with `sudo dnf install java-21-openjdk-devel`)
+  - Debian/Ubuntu: `export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64` (install with `sudo apt-get install openjdk-21-jdk`)
+  - macOS: `export JAVA_HOME=/opt/homebrew/opt/openjdk@21` (install with `brew install openjdk@21`)
+- `JDBC_DRIVER_PATH` must point to the PostgreSQL JDBC driver JAR: `export JDBC_DRIVER_PATH=~/pg_lake-deps/jdbc/postgresql-42.7.10.jar`
+
+All of the above are automatically installed and detected by `./install.sh --with-test-deps`.
+
+### Polaris REST catalog server
+- Tests in `pg_lake_table` and `pg_lake_iceberg` start a Polaris REST catalog server automatically
+- Polaris must be built and installed first: `cd test_common/rest_catalog && make all && make install` (requires Java 21+ JDK with `javac`)
+- This installs `polaris-server.jar` and `polaris-admin.jar` to the PostgreSQL bin directory
+- If the JARs are not installed, tests will skip Polaris startup and print a warning
+- Polaris uses PostgreSQL as its metadata store, connecting to the test PostgreSQL instance
+
+### Other notes
+- Azure tests require `azurite` (install via npm: `npm install -g azurite`, or use `./install.sh --with-test-deps`)
