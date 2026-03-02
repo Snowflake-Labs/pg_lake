@@ -69,6 +69,7 @@
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/ruleutils.h"
+#include "utils/timestamp.h"
 #include "utils/typcache.h"
 
 /*
@@ -764,6 +765,32 @@ ProcessNotShippableExpressionWalker(Node *node, IsShippableContext * context)
 		if (funcExpr->funcid == F_UNNEST_ANYARRAY)
 			context->hasUnnest = true;
 	}
+
+	/*
+	 * DuckDB does not support infinite intervals, so we cannot push down
+	 * queries that contain +-infinity interval constants. Infinite intervals
+	 * were introduced in PostgreSQL 17.
+	 */
+#if PG_VERSION_NUM >= 170000
+	if (IsA(node, Const))
+	{
+		Const	   *constExpr = (Const *) node;
+
+		if (!constExpr->constisnull && constExpr->consttype == INTERVALOID)
+		{
+			Interval   *interval = DatumGetIntervalP(constExpr->constvalue);
+
+			if (INTERVAL_NOT_FINITE(interval))
+			{
+				if (context->stopAtFirstNotShippable)
+					return true;
+
+				RecordNotShippableObject(context, InvalidOid, InvalidOid,
+										 NOT_SHIPPABLE_INFINITE_CONST_VALUE);
+			}
+		}
+	}
+#endif
 
 	if (ExpressionHasNonShippableObject(node, srfAllowed, context))
 	{
