@@ -61,3 +61,4 @@ extern PGDLLEXPORT IcebergCatalogType GetIcebergCatalogType(Oid relationId);
 extern PGDLLEXPORT bool HasRestCatalogTableOption(List *options);
 extern PGDLLEXPORT bool HasObjectStoreCatalogTableOption(List *options);
 extern PGDLLEXPORT bool HasReadOnlyOption(List *options);
+extern PGDLLEXPORT bool IsServerBasedRestCatalog(List *options);
