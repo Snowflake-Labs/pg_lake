@@ -52,14 +52,7 @@ PGDuckSerialize(FmgrInfo *flinfo, Oid columnType, Datum value,
 		if (IsMapTypeOid(columnType))
 			return MapOutForPGDuck(value, format);
 
-		/*
-		 * For Iceberg, interval arrays need struct serialization.
-		 */
-		if (get_element_type(columnType) == INTERVALOID &&
-			format == DATA_FORMAT_ICEBERG)
-			return IntervalArrayOutForPGDuck(value);
-
-		return ArrayOutForPGDuck(DatumGetArrayTypeP(value));
+		return ArrayOutForPGDuck(DatumGetArrayTypeP(value), format);
 	}
 
 	if (flinfo->fn_oid == RECORD_OUT_OID)
@@ -167,59 +160,6 @@ IntervalOutForPGDuck(Datum value)
 					 interval->month,
 					 interval->day,
 					 interval->time);
-
-	return buf.data;
-}
-
-
-/*
- * IntervalArrayOutForPGDuck serializes a PostgreSQL interval[] as a DuckDB
- * list of structs: [{'months': M, 'days': D, 'microseconds': U}, ...]
- *
- * This is used for Iceberg where intervals are stored as structs.
- */
-char *
-IntervalArrayOutForPGDuck(Datum value)
-{
-	ArrayType  *array = DatumGetArrayTypeP(value);
-	int			nitems = ArrayGetNItems(ARR_NDIM(array), ARR_DIMS(array));
-
-	StringInfoData buf;
-
-	initStringInfo(&buf);
-	appendStringInfoChar(&buf, '[');
-
-	if (nitems > 0)
-	{
-		ArrayMetaState *my_extra = palloc0(sizeof(ArrayMetaState));
-
-		get_type_io_data(INTERVALOID, IOFunc_output,
-						 &my_extra->typlen, &my_extra->typbyval,
-						 &my_extra->typalign, &my_extra->typdelim,
-						 &my_extra->typioparam, &my_extra->typiofunc);
-		my_extra->element_type = INTERVALOID;
-
-		ArrayIterator iter = array_create_iterator(array, 0, my_extra);
-		Datum		itemvalue;
-		bool		isnull;
-		bool		first = true;
-
-		while (array_iterate(iter, &itemvalue, &isnull))
-		{
-			if (!first)
-				appendStringInfoString(&buf, ", ");
-			first = false;
-
-			if (isnull)
-				appendStringInfoString(&buf, "NULL");
-			else
-				appendStringInfoString(&buf, IntervalOutForPGDuck(itemvalue));
-		}
-
-		array_free_iterator(iter);
-	}
-
-	appendStringInfoChar(&buf, ']');
 
 	return buf.data;
 }
