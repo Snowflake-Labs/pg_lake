@@ -33,6 +33,7 @@
 #include "catalog/pg_foreign_table.h"
 #include "commands/defrem.h"
 #include "commands/extension.h"
+#include "foreign/foreign.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/partitioning/partition_by_parser.h"
 #include "pg_lake/permissions/roles.h"
@@ -767,10 +768,20 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 			else if (pg_strncasecmp(icebergCatalogName, POSTGRES_CATALOG_NAME, strlen(icebergCatalogName)) == 0)
 				icebergCatalogType = POSTGRES_CATALOG;
 			else
-				ereport(ERROR,
-						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("invalid catalog option: %s", icebergCatalogName),
-						 errdetail("Only " REST_CATALOG_NAME " and " POSTGRES_CATALOG_NAME " are supported for now.")));
+			{
+				/*
+				 * Check if the catalog value refers to an iceberg_catalog
+				 * server. If so, treat it as a REST catalog.
+				 */
+				if (IsServerBasedRestCatalog(options_list))
+					icebergCatalogType = REST_CATALOG_READ_ONLY;
+				else
+					ereport(ERROR,
+							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+							 errmsg("invalid catalog option: %s", icebergCatalogName),
+							 errdetail("Use \"rest\", \"object_store\", \"postgres\", "
+									   "or the name of an iceberg_catalog server.")));
+			}
 		}
 		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "read_only") == 0)
 		{
