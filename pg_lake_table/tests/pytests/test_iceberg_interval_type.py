@@ -893,3 +893,52 @@ def test_interval_array_update(pg_conn, s3, with_default_location):
 
     run_command("DROP SCHEMA test_interval_arr_ud CASCADE", pg_conn)
     pg_conn.commit()
+
+
+def test_interval_prepared_statement(pg_conn, s3, with_default_location):
+    """
+    Verify that prepared statements with interval parameters work against
+    Iceberg tables. This exercises the PGDuckSerialize call in
+    QueryPushdownBeginScan where parameters are serialized for DuckDB.
+    """
+    run_command(
+        """
+        CREATE SCHEMA test_interval_prep;
+        CREATE TABLE test_interval_prep.test (id int, i interval) USING iceberg;
+        INSERT INTO test_interval_prep.test VALUES
+            (1, '1 day'),
+            (2, '2 hours'),
+            (3, '1 year 3 months'),
+            (4, NULL);
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # prepared statement with interval parameter in WHERE clause
+    run_command(
+        "PREPARE interval_lookup(interval) AS "
+        "SELECT id FROM test_interval_prep.test WHERE i = $1",
+        pg_conn,
+    )
+
+    # execute enough times to trigger generic plan (uses parameters)
+    for _ in range(7):
+        result = run_query("EXECUTE interval_lookup('1 day')", pg_conn)
+
+    assert len(result) == 1
+    assert result[0][0] == 1
+
+    # test with a different value
+    result = run_query("EXECUTE interval_lookup('2 hours')", pg_conn)
+    assert len(result) == 1
+    assert result[0][0] == 2
+
+    # test with NULL parameter
+    result = run_query("EXECUTE interval_lookup(NULL)", pg_conn)
+    assert len(result) == 0
+
+    run_command("DEALLOCATE interval_lookup", pg_conn)
+
+    run_command("DROP SCHEMA test_interval_prep CASCADE", pg_conn)
+    pg_conn.commit()
