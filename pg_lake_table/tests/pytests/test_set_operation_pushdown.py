@@ -73,7 +73,7 @@ queries = [
     ],
     [
         "INTERSECT",
-        "SELECT DISTINCT U.id, U.metric1 FROM Users_f U WHERE EXISTS (SELECT 1 FROM Events_f E WHERE U.id = E.id INTERSECT SELECT id FROM Users_f WHERE metric2 < 100);",
+        "SELECT DISTINCT U.id, U.metric1 FROM Users_f U WHERE EXISTS (SELECT E.id FROM Events_f E WHERE U.id = E.id INTERSECT SELECT id FROM Users_f WHERE metric2 < 100);",
     ],
     [
         "UNION",
@@ -107,4 +107,4 @@ def test_set_operation_pushdown(create_pushdown_tables, pg_conn):
 
         # then replace table names for ensuring SET OPERATION pushdown
         expected_exprs = query_data[0]
-        assert_remote_query_contains_expression(query, query[0], pg_conn)
+        assert_remote_query_contains_expression(query, expected_exprs, pg_conn)
