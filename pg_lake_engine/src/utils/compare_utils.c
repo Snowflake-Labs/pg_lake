@@ -57,6 +57,8 @@ IsDatumGreaterThan(Datum v1, Datum v2, PGType pgType)
 			return DatumGetBool(DirectFunctionCall2(timestamp_gt, v1, v2));
 		case TIMEOID:
 			return DatumGetBool(DirectFunctionCall2(time_gt, v1, v2));
+		case TIMETZOID:
+			return DatumGetBool(DirectFunctionCall2(timetz_gt, v1, v2));
 		case TEXTOID:
 		case VARCHAROID:
 			return DatumGetBool(DirectFunctionCall2Coll(text_gt, DEFAULT_COLLATION_OID, v1, v2));
@@ -108,6 +110,8 @@ IsDatumLessThan(Datum v1, Datum v2, PGType pgType)
 			return DatumGetBool(DirectFunctionCall2(timestamp_lt, v1, v2));
 		case TIMEOID:
 			return DatumGetBool(DirectFunctionCall2(time_lt, v1, v2));
+		case TIMETZOID:
+			return DatumGetBool(DirectFunctionCall2(timetz_lt, v1, v2));
 		case TEXTOID:
 		case VARCHAROID:
 			return DatumGetBool(DirectFunctionCall2Coll(text_lt, DEFAULT_COLLATION_OID, v1, v2));

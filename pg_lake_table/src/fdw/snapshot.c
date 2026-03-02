@@ -21,6 +21,7 @@
 #include <inttypes.h>
 
 #include "catalog/pg_inherits.h"
+#include "catalog/pg_type.h"
 #include "commands/dbcommands.h"
 #include "commands/defrem.h"
 #include "pg_lake/copy/copy_format.h"
@@ -434,6 +435,15 @@ TypesAreCompatible(PGType pgType, PGType icebergType)
 	/* if both are the same base type, they are compatible */
 	if (pgType.postgresTypeOid == icebergType.postgresTypeOid &&
 		pgType.postgresTypeMod == icebergType.postgresTypeMod)
+		return true;
+
+	/*
+	 * timetz is stored as Iceberg "time" which maps to PG TIMEOID. Allow this
+	 * mismatch since we normalize to UTC on write and parse back as timetz
+	 * +00 on read.
+	 */
+	if (pgType.postgresTypeOid == TIMETZOID &&
+		icebergType.postgresTypeOid == TIMEOID)
 		return true;
 
 	/* not composite type, we are done */

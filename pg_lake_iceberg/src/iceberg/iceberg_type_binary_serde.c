@@ -26,6 +26,7 @@
 #include "pg_lake/iceberg/iceberg_type_binary_serde.h"
 #include "pg_lake/iceberg/iceberg_type_numeric_binary_serde.h"
 #include "pg_lake/iceberg/utils.h"
+#include "pg_lake/util/timetz.h"
 
 #include "port/pg_bswap.h"
 #include "utils/builtins.h"
@@ -267,6 +268,22 @@ PGIcebergBinarySerialize(Datum datum, Field * field, PGType pgType, bool addNull
 
 		binaryValue = ToLittleEndian64(binaryValue);
 	}
+	else if (pgType.postgresTypeOid == TIMETZOID)
+	{
+		/*
+		 * Iceberg stores time as microseconds since midnight (no timezone).
+		 * Convert timetz to UTC microseconds.
+		 */
+		TimeTzADT  *timetz = DatumGetTimeTzADTP(datum);
+		TimeADT		utcMicros = TimeTzGetUTCMicros(timetz);
+
+		*binaryLen = sizeof(int64);
+
+		binaryValue = palloc0(*binaryLen);
+		memcpy(binaryValue, (unsigned char *) &utcMicros, *binaryLen);
+
+		binaryValue = ToLittleEndian64(binaryValue);
+	}
 	else if (pgType.postgresTypeOid == TEXTOID)
 	{
 		const char *textValue = TextDatumGetCString(datum);
@@ -427,6 +444,23 @@ PGIcebergBinaryDeserialize(unsigned char *binaryValue, size_t binaryLen, Field *
 		TimeADT		timeValue = *((TimeADT *) binaryValue);
 
 		datum = TimeADTGetDatum(timeValue);
+	}
+	else if (pgType.postgresTypeOid == TIMETZOID)
+	{
+		/*
+		 * Iceberg stores time as UTC microseconds since midnight. Deserialize
+		 * into a TimeTzADT at UTC (zone = 0).
+		 */
+		binaryValue = FromLittleEndian64(binaryValue);
+
+		int64		utcMicros = *((int64 *) binaryValue);
+
+		TimeTzADT  *timetz = palloc(sizeof(TimeTzADT));
+
+		timetz->time = utcMicros;
+		timetz->zone = 0;
+
+		datum = TimeTzADTPGetDatum(timetz);
 	}
 	else if (pgType.postgresTypeOid == TEXTOID)
 	{

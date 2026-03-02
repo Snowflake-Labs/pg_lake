@@ -289,6 +289,46 @@ def test_pg_lake_serde_temporal(
     superuser_conn.rollback()
 
 
+def test_pg_lake_serde_timetz(
+    superuser_conn,
+    iceberg_extension,
+    create_helper_functions,
+):
+    """TimeTZ is stored as Iceberg 'time' type, UTC-normalized."""
+    timetz_values = [
+        # (iceberg_type, pg_type, input, expected_str)
+        # already UTC
+        ("time", "timetz", "12:30:00+00", "12:30:00+00:00"),
+        # positive offset → subtract hours
+        ("time", "timetz", "12:30:00+04", "08:30:00+00:00"),
+        # negative offset → add hours, wraps past midnight
+        ("time", "timetz", "23:30:00-02", "01:30:00+00:00"),
+        # wraps before midnight
+        ("time", "timetz", "01:30:00+04", "21:30:00+00:00"),
+        # midnight
+        ("time", "timetz", "00:00:00+00", "00:00:00+00:00"),
+        # microseconds preserved
+        ("time", "timetz", "12:00:00.123456+00", "12:00:00.123456+00:00"),
+        # large positive offset
+        ("time", "timetz", "14:00:00+12", "02:00:00+00:00"),
+        # large negative offset
+        ("time", "timetz", "02:00:00-12", "14:00:00+00:00"),
+        # half-hour offset
+        ("time", "timetz", "12:00:00+05:30", "06:30:00+00:00"),
+    ]
+
+    for iceberg_type, pg_type, value, expected in timetz_values:
+        pg_query = (
+            f"SELECT lake_iceberg.serde_value('{value}'::{pg_type}, '{iceberg_type}');"
+        )
+        result = run_query(pg_query, superuser_conn)
+        assert (
+            str(result[0][0]) == expected
+        ), f"serde_value('{value}'::timetz, 'time') = {result[0][0]}, expected {expected}"
+
+    superuser_conn.rollback()
+
+
 @pytest.fixture(scope="module")
 def create_helper_functions(superuser_conn, s3, iceberg_extension):
 

@@ -400,7 +400,7 @@ AdjustFieldSummaryTextToSpark(const char *fieldSummaryText, PGType sourceType,
 
 		return DirectFunctionCall2(timestamp_to_char, TimestampGetDatum(ts), CStringGetTextDatum("YYYY-MM-DD"));
 	}
-	else if ((sourceType.postgresTypeOid == TIMEOID || sourceType.postgresTypeOid == TIMESTAMPOID || sourceType.postgresTypeOid == TIMESTAMPTZOID) && transformType == PARTITION_TRANSFORM_HOUR)
+	else if ((sourceType.postgresTypeOid == TIMEOID || sourceType.postgresTypeOid == TIMETZOID || sourceType.postgresTypeOid == TIMESTAMPOID || sourceType.postgresTypeOid == TIMESTAMPTZOID) && transformType == PARTITION_TRANSFORM_HOUR)
 	{
 		/* spark prints 30 hours as '1970-01-02-06' */
 		int			hours = DirectFunctionCall1(int4in, CStringGetDatum(fieldSummaryText));

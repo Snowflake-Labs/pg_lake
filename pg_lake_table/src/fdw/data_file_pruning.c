@@ -42,6 +42,7 @@
 #include "parser/parse_coerce.h"
 #include "parser/parse_type.h"
 #include "utils/builtins.h"
+#include "utils/date.h"
 #include "utils/datum.h"
 #include "utils/syscache.h"
 #include "utils/lsyscache.h"
@@ -599,6 +600,23 @@ GetColumnBoundConstraintsFromColumnStats(Oid relationId, List *columnStats,
 		char	   *lowerBoundText = columnStat->lowerBoundText;
 		char	   *upperBoundText = columnStat->upperBoundText;
 
+		/*
+		 * For TIMETZ columns, Iceberg stores time as UTC-normalized TIME (no
+		 * timezone).  The stats text is in TIME format (e.g. "12:30:00").
+		 * Append "+00" so timetz_in correctly interprets them as UTC,
+		 * regardless of the session timezone setting.
+		 */
+		if (pgType.postgresTypeOid == TIMETZOID)
+		{
+			if (strchr(lowerBoundText, '+') == NULL &&
+				strchr(lowerBoundText, '-') == NULL)
+				lowerBoundText = psprintf("%s+00", lowerBoundText);
+
+			if (strchr(upperBoundText, '+') == NULL &&
+				strchr(upperBoundText, '-') == NULL)
+				upperBoundText = psprintf("%s+00", upperBoundText);
+		}
+
 		Expr	   *columnConstraint = NULL;
 
 		/* check for min == max through string comparison */
@@ -1098,6 +1116,29 @@ HourPartitionFieldBoundConstraint(PartitionField * partitionField,
 		return CreateConstraintWithBounds(columnBoundExclusiveUpper, entry->constByVal, entry->typLen,
 										  lowerBoundDatum, upperBoundDatum);
 	}
+	else if (pgType.postgresTypeOid == TIMETZOID)
+	{
+		int32		hoursSinceMidnight = *(int32_t *) partitionField->value;
+
+		TimeADT		lowerTime = HoursFromUnixEpochToTime(hoursSinceMidnight);
+		TimeADT		upperTime = HoursFromUnixEpochToTime(hoursSinceMidnight + 1);
+
+		TimeTzADT  *lowerTimeTz = palloc(sizeof(TimeTzADT));
+
+		lowerTimeTz->time = lowerTime;
+		lowerTimeTz->zone = 0;
+
+		TimeTzADT  *upperTimeTz = palloc(sizeof(TimeTzADT));
+
+		upperTimeTz->time = upperTime;
+		upperTimeTz->zone = 0;
+
+		Datum		lowerBoundDatum = TimeTzADTPGetDatum(lowerTimeTz);
+		Datum		upperBoundDatum = TimeTzADTPGetDatum(upperTimeTz);
+
+		return CreateConstraintWithBounds(columnBoundExclusiveUpper, entry->constByVal, entry->typLen,
+										  lowerBoundDatum, upperBoundDatum);
+	}
 	else
 	{
 		elog(DEBUG1, "Hour partition transform pruning is not yet supported for type %s",
@@ -1297,6 +1338,8 @@ StripAllImplicitCoercionsMutator(Node *node, void *context)
 			}
 	}
 }
+
+
 
 
 /*

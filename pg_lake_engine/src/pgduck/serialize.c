@@ -25,12 +25,15 @@
 #include "pg_lake/pgduck/map_conversion.h"
 #include "pg_lake/pgduck/serialize.h"
 #include "pg_lake/pgduck/struct_conversion.h"
+#include "pg_lake/util/timetz.h"
 #include "utils/builtins.h"
+#include "utils/date.h"
 #include "utils/lsyscache.h"
 #include "utils/timestamp.h"
 
 
 static char *ByteAOutForPGDuck(Datum value);
+static char *TimeTzOutForPGDuck(Datum value);
 
 
 /*
@@ -59,13 +62,21 @@ PGDuckSerialize(FmgrInfo *flinfo, Oid columnType, Datum value,
 		return StructOutForPGDuck(value, format);
 
 	/*
-	 * For Iceberg, intervals are serialized as struct(months, days, microseconds).
+	 * For Iceberg, intervals are serialized as struct(months, days,
+	 * microseconds).
 	 */
 	if (columnType == INTERVALOID && format == DATA_FORMAT_ICEBERG)
 		return IntervalOutForPGDuck(value);
 
 	if (columnType == BYTEAOID)
 		return ByteAOutForPGDuck(value);
+
+	/*
+	 * TimeTZ is stored as TIME (UTC-normalized) in Iceberg. We convert to UTC
+	 * in PGDuckSerialize, so DuckDB should parse as TIME.
+	 */
+	if (columnType == TIMETZOID && format == DATA_FORMAT_ICEBERG)
+		return TimeTzOutForPGDuck(value);
 
 	if (IsGeometryOutFunctionId(flinfo->fn_oid))
 	{
@@ -92,6 +103,9 @@ IsPGDuckSerializeRequired(PGType postgresType)
 	Oid			typeId = postgresType.postgresTypeOid;
 
 	if (typeId == BYTEAOID)
+		return true;
+
+	if (typeId == TIMETZOID)
 		return true;
 
 	/* also covers map */
@@ -135,6 +149,7 @@ ByteAOutForPGDuck(Datum value)
 	return outputBuffer;
 }
 
+
 /*
  * IntervalOutForPGDuck serializes a PostgreSQL interval as a DuckDB struct:
  * {'months': M, 'days': D, 'microseconds': U}
@@ -162,6 +177,27 @@ IntervalOutForPGDuck(Datum value)
 					 interval->time);
 
 	return buf.data;
+}
+
+
+/*
+ * TimeTzOutForPGDuck converts a timetz datum to a UTC time string
+ * for DuckDB. Since Iceberg only supports time (no timezone), we
+ * normalize to UTC and format via PG's time_out.
+ */
+static char *
+TimeTzOutForPGDuck(Datum value)
+{
+	TimeTzADT  *timetz = DatumGetTimeTzADTP(value);
+	TimeADT		utcMicros = TimeTzGetUTCMicros(timetz);
+
+	/* format via PG's time output function (produces "HH:MM:SS[.ffffff]") */
+	Oid			timeOutputFunc;
+	bool		typIsVarlena;
+
+	getTypeOutputInfo(TIMEOID, &timeOutputFunc, &typIsVarlena);
+
+	return OidOutputFunctionCall(timeOutputFunc, TimeADTGetDatum(utcMicros));
 }
 
 

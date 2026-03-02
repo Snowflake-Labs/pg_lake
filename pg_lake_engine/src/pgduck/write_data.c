@@ -132,8 +132,8 @@ WriteQueryResultTo(char *query,
 	appendStringInfoString(&command, " WITH (");
 
 	/*
-	 * Iceberg data files are Parquet, so use "parquet" as the DuckDB
-	 * format name for both DATA_FORMAT_PARQUET and DATA_FORMAT_ICEBERG.
+	 * Iceberg data files are Parquet, so use "parquet" as the DuckDB format
+	 * name for both DATA_FORMAT_PARQUET and DATA_FORMAT_ICEBERG.
 	 */
 	const char *formatName = (destinationFormat == DATA_FORMAT_ICEBERG) ?
 		"parquet" : CopyDataFormatToName(destinationFormat);
@@ -383,6 +383,14 @@ TupleDescToProjectionListForWrite(TupleDesc tupleDesc, CopyDataFormat destinatio
 
 		if (hasColumns)
 			appendStringInfoString(&projection, ", ");
+
+		/*
+		 * TimeTZ is stored as TIME (UTC-normalized) in Iceberg. We convert to
+		 * UTC in PGDuckSerialize, so DuckDB should parse as TIME.
+		 */
+		if (columnTypeId == TIMETZOID && destinationFormat == DATA_FORMAT_ICEBERG)
+			appendStringInfo(&projection, "CAST(%s AS TIME) AS ",
+							 quote_identifier(columnName));
 
 		/*
 		 * In case of geometry, we write WKT in csv_writer.c and parse it as
@@ -637,6 +645,14 @@ ChooseDuckDBEngineTypeForWrite(PGType postgresType,
 			/* explicit precision which is too big for us */
 			duckTypeId = DUCKDB_TYPE_VARCHAR;
 		}
+	}
+	else if (duckTypeId == DUCKDB_TYPE_TIME_TZ && destinationFormat == DATA_FORMAT_ICEBERG)
+	{
+		/*
+		 * Iceberg only has a "time" type (no timezone). We convert timetz
+		 * values to UTC in PGDuckSerialize, so DuckDB should parse as TIME.
+		 */
+		duckTypeId = DUCKDB_TYPE_TIME;
 	}
 	else if (duckTypeId == DUCKDB_TYPE_BLOB && destinationFormat == DATA_FORMAT_JSON)
 	{

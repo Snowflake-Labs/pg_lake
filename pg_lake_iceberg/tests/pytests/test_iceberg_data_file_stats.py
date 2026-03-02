@@ -46,6 +46,7 @@ PG_LAKE_TABLE_COLUMNS = [
     ["p", "int[]"],
     ["r", "simple_composite"],
     ["s", "map_type.key_int_val_int"],
+    ["t", "timetz"],
 ]
 
 
@@ -80,6 +81,7 @@ def test_pg_lake_iceberg_table_read_data_file_stats_from_metadata(
                 # "17": 1,
                 # "19": 1,
                 # "20": 2,
+                "21": "01:30:00",
             },
             {
                 "1": "San Francisco",
@@ -99,6 +101,7 @@ def test_pg_lake_iceberg_table_read_data_file_stats_from_metadata(
                 # "17": 4,
                 # "19": 7,
                 # "20": 8,
+                "21": "21:30:00",
             },
         ]
     ]
@@ -138,6 +141,7 @@ def test_pg_lake_iceberg_table_reserialize_data_file_stats_from_metadata(
                 # "17": "\\x01000000",
                 # "19": "\\x01000000",
                 # "20": "\\x02000000",
+                "21": "\\x0076dd4101000000",
             },
             {
                 "1": "\\x53616e204672616e636973636f",
@@ -157,6 +161,7 @@ def test_pg_lake_iceberg_table_reserialize_data_file_stats_from_metadata(
                 # "17": "\\x04000000",
                 # "19": "\\x07000000",
                 # "20": "\\x08000000",
+                "21": "\\x0046660512000000",
             },
         ]
     ]
@@ -196,6 +201,7 @@ def test_pg_lake_iceberg_table_read_data_file_stats_from_catalog(
         # [3, 17, "1", "4"],
         # [3, 19, "1", "7"],
         # [3, 20, "2", "8"],
+        [3, 21, "01:30:00", "21:30:00"],
     ]
 
     table_name = f"{PG_LAKE_TABLE_NAMESPACE}.{PG_LAKE_TABLE_NAME}"
@@ -220,6 +226,7 @@ def test_pg_lake_iceberg_table_read_data_file_stats_from_catalog(
         [3, 13, "abc", "jkl"],
         # [3, 15, "1", "12"],
         # [3, 17, "1", "4"],
+        [3, 21, "01:30:00", "21:30:00"],
         [4, 2, "37.77397", "53.11254"],
     ]
 
@@ -251,6 +258,7 @@ def test_pg_lake_iceberg_table_read_data_file_stats_from_catalog(
         [5, 13, "abc", "jkl"],
         # [5, 15, "1", "12"],
         # [5, 17, "1", "4"],
+        [5, 21, "01:30:00", "21:30:00"],
     ]
 
     # remove data files. then stats should be empty due to foreign key constraint
@@ -1231,19 +1239,23 @@ def pg_lake_table_metadata_location(
         f"""INSERT INTO {table_name} VALUES ('Amsterdam', 52.371807, 4.896029, 1, 2, true,
                                          '2021-01-01', '2021-01-01 00:00:00-04:00',
                                          -6403.01, 12, '2021-01-01 00:00:00',
-                                         'a', 'abc', array[1, 2, 3], row(1), array[(1,2)]::map_type.key_int_val_int),
+                                         'a', 'abc', array[1, 2, 3], row(1), array[(1,2)]::map_type.key_int_val_int,
+                                         '12:30:00+04'),
                                         ('San Francisco', 37.773972, -122.431297, 3, 4, false,
                                          '2021-01-02', '2021-01-02 00:00:00-04:00',
                                          123.01, 13, '2021-01-02 00:00:00',
-                                         'b', 'def', array[4, 5, 6], row(2), array[(3,4)]::map_type.key_int_val_int),
+                                         'b', 'def', array[4, 5, 6], row(2), array[(3,4)]::map_type.key_int_val_int,
+                                         '23:30:00-02'),
                                         ('Drachten', 53.11254, 6.0989, 5, 6, true,
                                          '2021-01-03', '2021-01-03 00:00:00',
                                          1, 14, '2021-01-03 00:00:00',
-                                         'c', 'ghi', array[7, 8, 9], row(3), array[(5,6)]::map_type.key_int_val_int),
+                                         'c', 'ghi', array[7, 8, 9], row(3), array[(5,6)]::map_type.key_int_val_int,
+                                         '12:30:00+00'),
                                         ('Paris', 48.864716, 2.349014, 7, 8, false,
                                          '2021-01-04', '2021-01-04 00:00:00-04:00',
                                          7.0, 15, '2021-01-04 00:00:00',
-                                         'd', 'jkl', array[10, 11, 12], row(4), array[(7,8)]::map_type.key_int_val_int)""",
+                                         'd', 'jkl', array[10, 11, 12], row(4), array[(7,8)]::map_type.key_int_val_int,
+                                         '01:30:00+04')""",
         pg_conn,
     )
     pg_conn.commit()

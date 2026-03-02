@@ -38,6 +38,7 @@
 #include "pg_lake/iceberg/truncate_utils.h"
 #include "pg_lake/util/numeric.h"
 #include "pg_lake/util/rel_utils.h"
+#include "pg_lake/util/timetz.h"
 
 static PartitionField * ApplyPartitionTransformToTuple(IcebergPartitionTransform * transform,
 													   TupleTableSlot *slot);
@@ -727,6 +728,13 @@ ApplyHourTransformToColumn(IcebergPartitionTransform * transform, Datum columnVa
 
 		hour = TimeHourFromUnixEpoch(timeValue);
 	}
+	else if (transform->pgType.postgresTypeOid == TIMETZOID)
+	{
+		TimeTzADT  *timetz = DatumGetTimeTzADTP(columnValue);
+		TimeADT		utcMicros = TimeTzGetUTCMicros(timetz);
+
+		hour = TimeHourFromUnixEpoch(utcMicros);
+	}
 	else
 	{
 		ereport(ERROR,
@@ -835,6 +843,15 @@ ApplyBucketTransformToColumn(IcebergPartitionTransform * transform, Datum column
 
 		*bucketValue = (MurmurHash3_32_Long(microsecsFromMidnight) & INT32_MAX) % transform->bucketCount;
 	}
+	else if (transform->pgType.postgresTypeOid == TIMETZOID)
+	{
+		TimeTzADT  *timetz = DatumGetTimeTzADTP(columnValue);
+		TimeADT		utcMicros = TimeTzGetUTCMicros(timetz);
+
+		int64_t		microsecsFromMidnight = utcMicros;
+
+		*bucketValue = (MurmurHash3_32_Long(microsecsFromMidnight) & INT32_MAX) % transform->bucketCount;
+	}
 	else if (transform->pgType.postgresTypeOid == UUIDOID)
 	{
 		size_t		valueSize = 0;
@@ -931,6 +948,7 @@ GetTransformResultAvroType(IcebergPartitionTransform * transform)
 				break;
 			}
 		case TIMEOID:
+		case TIMETZOID:
 			{
 				type.physical_type = ICEBERG_AVRO_PHYSICAL_TYPE_INT64;
 				type.logical_type = ICEBERG_AVRO_LOGICAL_TYPE_TIME;

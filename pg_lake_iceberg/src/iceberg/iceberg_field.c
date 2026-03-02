@@ -604,13 +604,7 @@ PostgresBaseTypeIdToIcebergTypeName(PGType pgType)
 		case TIMEOID:
 			return "time";
 		case TIMETZOID:
-			{
-				ereport(ERROR,
-						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("TIMETZ is not supported by Iceberg")));
-				/* silence compiler */
-				return NULL;
-			}
+			return "time";
 		case TIMESTAMPOID:
 			return "timestamp";
 		case TIMESTAMPTZOID:

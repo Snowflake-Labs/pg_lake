@@ -99,6 +99,17 @@ pruning_data = [
     ),
     (
         True,
+        "timetz",
+        "prune_timetz",
+        [
+            ("08:30:00.123456+00", "12:45:00.654321+00"),
+            ("08:30:00.123456+00", "05:15:00.987654+00"),
+            ("21:30:00.789012+00", "12:45:00.654321+00"),
+            ("21:30:00.789012+00", "05:15:00.987654+00"),
+        ],
+    ),
+    (
+        True,
         "bytea",
         "prune_bytea",
         [
@@ -201,7 +212,7 @@ def test_simple_data_pruning_for_data_types(
             return
 
     if partition_type in ("hour"):
-        if column_type not in ("time", "timestamp", "timestamptz"):
+        if column_type not in ("time", "timetz", "timestamp", "timestamptz"):
             return
 
     if "bucket" in partition_type:
@@ -216,6 +227,7 @@ def test_simple_data_pruning_for_data_types(
             "varchar(1)",
             "bytea",
             "time",
+            "timetz",
             "date",
             "timestamp",
             "timestamptz",
@@ -283,7 +295,7 @@ def test_simple_data_pruning_for_data_types(
 
     # polaris is not setup at installcheck tests AND
     # time column is not supported for polaris rest catalog
-    if not installcheck and column_type != "time":
+    if not installcheck and column_type not in ("time", "timetz"):
         run_command(
             f"""CREATE TABLE test_data_file_pruning.{table_name}_rest (
                     col1 {column_type},

@@ -564,6 +564,7 @@ static bool
 IsTimeOrTimestampType(Oid typeOid)
 {
 	return (typeOid == TIMEOID ||
+			typeOid == TIMETZOID ||
 			typeOid == TIMESTAMPOID ||
 			typeOid == TIMESTAMPTZOID);
 }

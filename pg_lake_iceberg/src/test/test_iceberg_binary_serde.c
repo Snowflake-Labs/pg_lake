@@ -429,7 +429,16 @@ pg_lake_serde_value(PG_FUNCTION_ARGS)
 	/* check if iceberg type and pg type matches */
 	PGType		pgTypeFromIceberg = IcebergFieldToPostgresType(field);
 
+	/*
+	 * TimeTZ is stored as Iceberg "time" (UTC-normalized), so the Iceberg
+	 * type resolves to TIMEOID while the input is TIMETZOID.  Allow this
+	 * expected mismatch.
+	 */
+	bool		isTimeTzToTime = (pgType.postgresTypeOid == TIMETZOID &&
+								  pgTypeFromIceberg.postgresTypeOid == TIMEOID);
+
 	if (pgTypeFromIceberg.postgresTypeOid != pgType.postgresTypeOid &&
+		!isTimeTzToTime &&
 		!PGTypeRequiresConversionToIcebergString(field, pgType))
 	{
 		ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
