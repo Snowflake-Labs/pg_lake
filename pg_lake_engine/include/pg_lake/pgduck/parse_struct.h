@@ -54,7 +54,6 @@ typedef struct CompositeCol
 extern PGDLLEXPORT CompositeType * GetCompositeTypeForPGType(Oid postgresType);
 extern PGDLLEXPORT char *GetDuckDBStructDefinitionForCompositeType(CompositeType * type,
 																   CopyDataFormat format);
-extern PGDLLEXPORT char *GetDuckDBStructDefinitionForPGType(Oid postgresType);
 
 /* simple string to parse tree */
 extern PGDLLEXPORT CompositeType * ParseStructString(char *parse);

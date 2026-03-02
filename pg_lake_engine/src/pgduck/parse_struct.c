@@ -1054,18 +1054,6 @@ FinalizeCompositeTypeName(CompositeType * type)
 }
 
 /*
- * Wrapper for decomposing a postgres type and returning the corresponding
- * STRUCT string.
- */
-char *
-GetDuckDBStructDefinitionForPGType(Oid postgresType)
-{
-	CompositeType *type = GetCompositeTypeForPGType(postgresType);
-
-	return GetDuckDBStructDefinitionForCompositeType(type, DATA_FORMAT_INVALID);
-}
-
-/*
  * This function turns a CompositeType into a STRUCT type string.  It is
  * basically the inverse of the ParseStructType() routine.
  */
