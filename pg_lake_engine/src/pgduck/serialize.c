@@ -50,7 +50,7 @@ PGDuckSerialize(FmgrInfo *flinfo, Oid columnType, Datum value,
 	{
 		/* maps are a type of array */
 		if (IsMapTypeOid(columnType))
-			return MapOutForPGDuck(value);
+			return MapOutForPGDuck(value, format);
 
 		/*
 		 * For Iceberg, interval arrays need struct serialization.

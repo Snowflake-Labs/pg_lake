@@ -232,7 +232,7 @@ PrepareCSVInsertion(Oid relationId, char *insertCSV, int64 rowCount,
 	 */
 	bool		splitFilesBySize =
 		TargetFileSizeMB > 0 &&
-		(format == DATA_FORMAT_PARQUET || format == DATA_FORMAT_ICEBERG) &&
+		FormatUsesParquet(format) &&
 		reservedRowIdStart == 0;
 
 	/*
@@ -719,7 +719,7 @@ CompactDataFiles(Oid relationId, TimestampTz compactionStartTime,
 	FindDataFormatAndCompression(tableType, NULL, options, &format, &compression);
 
 	if (TargetFileSizeMB <= 0 ||
-		(format != DATA_FORMAT_PARQUET && format != DATA_FORMAT_ICEBERG))
+		!FormatUsesParquet(format))
 	{
 		/* files are not splittable */
 		table_close(rel, RowExclusiveLock);
@@ -971,7 +971,7 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 	 */
 	bool		splitFilesBySize =
 		allowSplit && TargetFileSizeMB > 0 &&
-		(properties.format == DATA_FORMAT_PARQUET || properties.format == DATA_FORMAT_ICEBERG);
+		FormatUsesParquet(properties.format);
 
 	/*
 	 * When target_file_size_mb is non-0 (512MB by default), we use the

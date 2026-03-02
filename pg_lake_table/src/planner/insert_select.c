@@ -398,7 +398,7 @@ RelationColumnsSuitableForPushdown(Relation relation, CopyDataFormat sourceForma
 		/*
 		 * We only support nested types when the source is Parquet or Iceberg.
 		 */
-		if (sourceFormat != DATA_FORMAT_PARQUET && sourceFormat != DATA_FORMAT_ICEBERG)
+		if (!FormatUsesParquet(sourceFormat))
 		{
 			/* type_is_array also covers pg_map */
 			if (type_is_array(typeId) || get_typtype(typeId) == TYPTYPE_COMPOSITE)

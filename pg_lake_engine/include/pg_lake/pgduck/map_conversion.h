@@ -17,4 +17,6 @@
 
 #pragma once
 
-extern PGDLLEXPORT char *MapOutForPGDuck(Datum myMap);
+#include "pg_lake/copy/copy_format.h"
+
+extern PGDLLEXPORT char *MapOutForPGDuck(Datum myMap, CopyDataFormat format);

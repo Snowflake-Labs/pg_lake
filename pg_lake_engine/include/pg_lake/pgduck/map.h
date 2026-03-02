@@ -20,7 +20,8 @@
 #include "pg_lake/pgduck/type.h"
 
 Oid			GetOrCreatePGMapType(const char *name);
-char	   *GetDuckDBMapDefinitionForPGType(Oid postgresTypeId);
+char	   *GetDuckDBMapDefinitionForPGType(Oid postgresTypeId,
+										CopyDataFormat format);
 
 extern PGDLLEXPORT bool IsMapTypeOid(Oid typeId);
 extern PGDLLEXPORT PGType GetMapKeyType(Oid mapOid);

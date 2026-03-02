@@ -32,6 +32,7 @@
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/pgduck/read_data.h"
 #include "pg_lake/pgduck/type.h"
+#include "pg_lake/pgduck/map.h"
 #include "pg_lake/util/numeric.h"
 #include "nodes/parsenodes.h"
 #include "nodes/makefuncs.h"
@@ -69,6 +70,7 @@ static char *BuildColumnProjection(char *expression,
 								   CopyDataFormat sourceFormat,
 								   List *formatOptions,
 								   bool addAlias);
+static char *BuildMapWithIntervalProjection(char *columnName, Oid mapTypeId);
 static char *GetLogFormatRegex(List *options);
 static char *GetLogTimestampFormat(List *options);
 
@@ -885,6 +887,35 @@ TupleDescToAliasList(TupleDesc tupleDesc)
 
 
 /*
+ * BuildMapWithIntervalProjection generates a DuckDB expression that
+ * reconstructs interval values inside a MAP type from their
+ * struct(months, days, microseconds) Iceberg representation.
+ *
+ * Returns NULL if the map value type is not INTERVAL.
+ */
+static char *
+BuildMapWithIntervalProjection(char *columnName, Oid mapTypeId)
+{
+	PGType		valType = GetMapValueType(mapTypeId);
+
+	if (valType.postgresTypeOid != INTERVALOID)
+		return NULL;
+
+	const char *col = quote_identifier(columnName);
+
+	return psprintf(
+					"map_from_entries("
+					"list_transform(map_entries(%s), _x -> "
+					"struct_pack(key := _x.key, value := "
+					"(to_months(_x.value.months) + "
+					"to_days(_x.value.days) + "
+					"to_microseconds(_x.value.microseconds))"
+					")))",
+					col);
+}
+
+
+/*
  * BuildStructWithIntervalProjection generates a DuckDB expression that
  * reconstructs interval fields inside a composite type from their
  * struct(months, days, microseconds) Parquet representation.
@@ -1053,6 +1084,32 @@ TupleDescToProjectionList(TupleDesc tupleDesc, CopyDataFormat sourceFormat,
 			}
 		}
 
+		/*
+		 * For MAP types with interval values, reconstruct intervals from
+		 * struct(months, days, microseconds) on the read path.
+		 */
+		if (duckdbType.typeId == DUCKDB_TYPE_MAP &&
+			sourceFormat == DATA_FORMAT_ICEBERG)
+		{
+			char	   *mapProjection =
+				BuildMapWithIntervalProjection(columnName, columnTypeId);
+
+			if (mapProjection != NULL)
+			{
+				char	   *columnAliasString =
+					!addCast ? psprintf(" AS %s", quote_identifier(columnName)) : "";
+
+				if (hasColumns)
+					appendStringInfoString(&projection, ", ");
+
+				appendStringInfo(&projection, "%s%s",
+								 mapProjection, columnAliasString);
+
+				hasColumns = true;
+				continue;
+			}
+		}
+
 		char	   *columnProjection = BuildColumnProjection(columnName,
 															 duckdbType,
 															 sourceFormat,
@@ -1214,7 +1271,8 @@ ChooseCompatibleDuckDBType(Oid postgresTypeId, int postgresTypeMod,
 
 	if (duckTypeId == DUCKDB_TYPE_STRUCT || duckTypeId == DUCKDB_TYPE_MAP)
 		typeName = psprintf("%s%s",
-							GetFullDuckDBTypeNameForPGType(MakePGType(postgresTypeId, postgresTypeMod)),
+							GetFullDuckDBTypeNameForPGType(MakePGType(postgresTypeId, postgresTypeMod),
+														   sourceFormat),
 							isArrayType ? "[]" : "");
 	else
 		typeName = psprintf("%s%s%s",
@@ -1326,22 +1384,19 @@ BuildColumnProjection(char *columnName,
 			 */
 			const char *col = quote_identifier(columnName);
 
-#define INTERVAL_FROM_STRUCT(prefix) \
-	"(to_months(" prefix ".months) + " \
-	"to_days(" prefix ".days) + " \
-	"to_microseconds(" prefix ".microseconds))"
-
 			if (engineType.isArrayType)
 				return psprintf(
 								"list_transform(%s, _x -> "
-								INTERVAL_FROM_STRUCT("_x") ")%s",
+								"(to_months(_x.months) + "
+								"to_days(_x.days) + "
+								"to_microseconds(_x.microseconds)))%s",
 								col, columnAliasString);
 			else
 				return psprintf(
-								INTERVAL_FROM_STRUCT("%s") "%s",
+								"(to_months(%s.months) + "
+								"to_days(%s.days) + "
+								"to_microseconds(%s.microseconds))%s",
 								col, col, col, columnAliasString);
-
-#undef INTERVAL_FROM_STRUCT
 		}
 	}
 
@@ -1350,7 +1405,7 @@ BuildColumnProjection(char *columnName,
 		/*
 		 * Geometry requires special casts using spatial functions
 		 */
-		if (sourceFormat == DATA_FORMAT_PARQUET || sourceFormat == DATA_FORMAT_ICEBERG)
+		if (FormatUsesParquet(sourceFormat))
 			/* assume geometry in Parquet is stored as WKB blob */
 			return psprintf("ST_GeomFromWKB(%s::blob)%s",
 							quote_identifier(columnName),

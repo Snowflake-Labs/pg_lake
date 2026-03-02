@@ -40,11 +40,8 @@
 #include "pg_lake/pgduck/parse_struct.h"
 #include "utils/lsyscache.h"
 
-#define ICEBERG_INTERVAL_STRUCT "STRUCT(months BIGINT, days BIGINT, microseconds BIGINT)"
-
 static char *TupleDescToProjectionListForWrite(TupleDesc tupleDesc,
 											   CopyDataFormat destinationFormat);
-static const char *GetFullDuckDBTypeNameForIceberg(PGType postgresType);
 static DuckDBTypeInfo ChooseDuckDBEngineTypeForWrite(PGType postgresType,
 													 CopyDataFormat destinationFormat);
 static void AppendFieldIdValue(StringInfo map, Field * field, int fieldId);
@@ -570,40 +567,6 @@ ParquetVersionToString(ParquetVersion version)
 
 
 /*
- * GetFullDuckDBTypeNameForIceberg is a format-aware variant of
- * GetFullDuckDBTypeNameForPGType that replaces INTERVAL with
- * STRUCT(months BIGINT, days BIGINT, microseconds BIGINT) for Iceberg.
- *
- * This is needed because Iceberg stores intervals as structs, so interval
- * fields inside composite types also need to be expanded to structs.
- */
-static const char *
-GetFullDuckDBTypeNameForIceberg(PGType postgresType)
-{
-	DuckDBType	myType = GetDuckDBTypeForPGType(postgresType);
-
-	if (myType == DUCKDB_TYPE_INTERVAL)
-		return ICEBERG_INTERVAL_STRUCT;
-
-	if (myType == DUCKDB_TYPE_LIST)
-	{
-		Oid			elementType = get_element_type(postgresType.postgresTypeOid);
-
-		return psprintf("%s[]", GetFullDuckDBTypeNameForIceberg(MakePGTypeOid(elementType)));
-	}
-
-	if (myType == DUCKDB_TYPE_STRUCT)
-	{
-		CompositeType *type = GetCompositeTypeForPGType(postgresType.postgresTypeOid);
-
-		return GetDuckDBStructDefinitionForIceberg(type);
-	}
-
-	return GetFullDuckDBTypeNameForPGType(postgresType);
-}
-
-
-/*
  * ChooseDuckDBEngineTypeForWrite obtains a DuckDB type name for a given postgres
  * type, and codifies some of our limitations around arrays and decimals.
  *
@@ -723,13 +686,9 @@ ChooseDuckDBEngineTypeForWrite(PGType postgresType,
 
 	if (duckTypeId == DUCKDB_TYPE_STRUCT || duckTypeId == DUCKDB_TYPE_MAP)
 	{
-		/*
-		 * Generate field names for struct/map. For Iceberg, use the
-		 * format-aware variant that expands INTERVAL fields to structs.
-		 */
-		const char *structDef = (destinationFormat == DATA_FORMAT_ICEBERG) ?
-			GetFullDuckDBTypeNameForIceberg(postgresType) :
-			GetFullDuckDBTypeNameForPGType(postgresType);
+		/* generate field names for struct/map */
+		const char *structDef =
+			GetFullDuckDBTypeNameForPGType(postgresType, destinationFormat);
 
 		typeName = psprintf("%s%s", structDef, isArrayType ? "[]" : "");
 	}

@@ -32,3 +32,16 @@ extern PGDLLEXPORT bool IsPGDuckSerializeRequired(PGType postgresType);
 extern PGDLLEXPORT char *IntervalOutForPGDuck(Datum value);
 extern PGDLLEXPORT char *IntervalArrayOutForPGDuck(Datum value);
 extern bool IsContainerType(Oid postgresType);
+
+/*
+ * IsSerializedAsContainer returns whether a type will be serialized as a
+ * container (struct/array/map) for the given format. Iceberg intervals are
+ * serialized as struct(months, days, microseconds), so they count as
+ * containers in that context.
+ */
+static inline bool
+IsSerializedAsContainer(Oid typeId, CopyDataFormat format)
+{
+	return IsContainerType(typeId) ||
+		(typeId == INTERVALOID && format == DATA_FORMAT_ICEBERG);
+}

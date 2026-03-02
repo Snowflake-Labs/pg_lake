@@ -113,7 +113,8 @@ typedef struct PGType
 #define MakePGType(oid,mod) ((PGType){.postgresTypeOid = oid, .postgresTypeMod = mod})
 
 extern PGDLLEXPORT const char *GetDuckDBTypeName(DuckDBType duckType);
-extern PGDLLEXPORT const char *GetFullDuckDBTypeNameForPGType(PGType postgresType);
+extern PGDLLEXPORT const char *GetFullDuckDBTypeNameForPGType(PGType postgresType,
+															  CopyDataFormat format);
 extern PGDLLEXPORT DuckDBType GetDuckDBTypeForPGType(PGType postgresType);
 extern PGDLLEXPORT DuckDBType GetDuckDBTypeByName(const char *name);
 extern PGDLLEXPORT Oid GetOrCreatePGTypeForDuckDBTypeName(const char *name, int *typeMod);

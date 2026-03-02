@@ -225,7 +225,7 @@ GetMapCreateFunctionOid()
  * GetDuckDBMapDefinitionForPGType returns a type definition string for a DuckDB map type.
  */
 char *
-GetDuckDBMapDefinitionForPGType(Oid postgresTypeId)
+GetDuckDBMapDefinitionForPGType(Oid postgresTypeId, CopyDataFormat format)
 {
 	Assert(IsMapTypeOid(postgresTypeId));
 
@@ -267,8 +267,10 @@ GetDuckDBMapDefinitionForPGType(Oid postgresTypeId)
 
 	/* We need to use the element type of the attribute for our lookups */
 	return psprintf("MAP(%s,%s)",
-					GetFullDuckDBTypeNameForPGType(MakePGType(keysAttribute->atttypid, keysAttribute->atttypmod)),
-					GetFullDuckDBTypeNameForPGType(MakePGType(valuesAttribute->atttypid, valuesAttribute->atttypmod))
+					GetFullDuckDBTypeNameForPGType(MakePGType(keysAttribute->atttypid, keysAttribute->atttypmod),
+												   format),
+					GetFullDuckDBTypeNameForPGType(MakePGType(valuesAttribute->atttypid, valuesAttribute->atttypmod),
+												   format)
 		);
 }
 

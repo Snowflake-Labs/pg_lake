@@ -19,6 +19,7 @@
 #define PGDUCK_PARSE_STRUCT_H
 
 #include "nodes/pg_list.h"
+#include "pg_lake/copy/copy_format.h"
 
 /* Recursively create a Postgres type based on a STRUCT string */
 Oid			GetOrCreatePGStructType(const char *name);
@@ -51,8 +52,8 @@ typedef struct CompositeCol
 /* Composite Type functions - convert to/from postgres composite types and
  * STRUCT strings */
 extern PGDLLEXPORT CompositeType * GetCompositeTypeForPGType(Oid postgresType);
-extern PGDLLEXPORT char *GetDuckDBStructDefinitionForCompositeType(CompositeType * type);
-extern PGDLLEXPORT char *GetDuckDBStructDefinitionForIceberg(CompositeType * type);
+extern PGDLLEXPORT char *GetDuckDBStructDefinitionForCompositeType(CompositeType * type,
+																   CopyDataFormat format);
 extern PGDLLEXPORT char *GetDuckDBStructDefinitionForPGType(Oid postgresType);
 
 /* simple string to parse tree */

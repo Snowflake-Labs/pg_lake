@@ -772,7 +772,7 @@ SerializeTextArrayTypeToPgDuck(ArrayType *array)
 	getTypeOutputInfo(TEXTARRAYOID, &outFuncId, &isvarlena);
 	fmgr_info(outFuncId, &outFunc);
 
-	return PGDuckSerialize(&outFunc, TEXTARRAYOID, arrayDatum, DATA_FORMAT_INVALID);
+	return PGDuckSerialize(&outFunc, TEXTARRAYOID, arrayDatum, DATA_FORMAT_ICEBERG);
 }
 
 

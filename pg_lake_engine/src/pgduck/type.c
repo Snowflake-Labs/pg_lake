@@ -506,15 +506,25 @@ GetDuckDBTypeForPGType(PGType postgresType)
  * types or array types; it assists in mapping from Postgres types to the
  * underlying duckdb type strings, for instance for defining the "columns={}"
  * struct in the CSV imports.
+ *
+ * When format is DATA_FORMAT_ICEBERG, interval types are expanded to
+ * STRUCT(months BIGINT, days BIGINT, microseconds BIGINT) to match the
+ * Iceberg interval representation.
  */
 const char *
-GetFullDuckDBTypeNameForPGType(PGType postgresType)
+GetFullDuckDBTypeNameForPGType(PGType postgresType, CopyDataFormat format)
 {
 	DuckDBType	myType = GetDuckDBTypeForPGType(postgresType);
 
+	/*
+	 * Iceberg stores intervals as struct(months, days, microseconds).
+	 */
+	if (myType == DUCKDB_TYPE_INTERVAL && format == DATA_FORMAT_ICEBERG)
+		return "STRUCT(months BIGINT, days BIGINT, microseconds BIGINT)";
+
 	if (myType == DUCKDB_TYPE_MAP)
 	{
-		return GetDuckDBMapDefinitionForPGType(postgresType.postgresTypeOid);
+		return GetDuckDBMapDefinitionForPGType(postgresType.postgresTypeOid, format);
 	}
 
 	if (myType == DUCKDB_TYPE_LIST)
@@ -522,12 +532,14 @@ GetFullDuckDBTypeNameForPGType(PGType postgresType)
 		/* get the element type and return [] after */
 		Oid			elementType = get_element_type(postgresType.postgresTypeOid);
 
-		return psprintf("%s[]", GetFullDuckDBTypeNameForPGType(MakePGTypeOid(elementType)));
+		return psprintf("%s[]", GetFullDuckDBTypeNameForPGType(MakePGTypeOid(elementType), format));
 	}
 
 	if (myType == DUCKDB_TYPE_STRUCT)
 	{
-		return GetDuckDBStructDefinitionForPGType(postgresType.postgresTypeOid);
+		CompositeType *type = GetCompositeTypeForPGType(postgresType.postgresTypeOid);
+
+		return GetDuckDBStructDefinitionForCompositeType(type, format);
 	}
 
 	if (myType == DUCKDB_TYPE_INVALID)

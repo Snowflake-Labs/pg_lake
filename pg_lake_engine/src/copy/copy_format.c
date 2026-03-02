@@ -389,7 +389,7 @@ const char *
 FormatToFileExtension(CopyDataFormat format, CopyDataCompression compression)
 {
 	/* Parquet files use a single extension (Iceberg data files are also Parquet) */
-	if (format == DATA_FORMAT_PARQUET || format == DATA_FORMAT_ICEBERG)
+	if (FormatUsesParquet(format))
 		return ".parquet";
 
 	/* CSV/JSON extension depends on compression */
@@ -509,7 +509,7 @@ FindDataFormatAndCompression(PgLakeTableType tableType,
 
 	if (*compression == DATA_COMPRESSION_INVALID)
 	{
-		if (*format == DATA_FORMAT_PARQUET || *format == DATA_FORMAT_ICEBERG)
+		if (FormatUsesParquet(*format))
 		{
 			/*
 			 * For Parquet we use snappy if not specified because it appears

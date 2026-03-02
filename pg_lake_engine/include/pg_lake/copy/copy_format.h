@@ -69,6 +69,16 @@ typedef struct PgLakeTableProperties
 }			PgLakeTableProperties;
 
 
+/*
+ * FormatUsesParquet returns whether data files for a given format
+ * are stored as Parquet (includes Iceberg, which uses Parquet data files).
+ */
+static inline bool
+FormatUsesParquet(CopyDataFormat format)
+{
+	return format == DATA_FORMAT_PARQUET || format == DATA_FORMAT_ICEBERG;
+}
+
 extern PGDLLEXPORT const char *CopyDataFormatToName(CopyDataFormat format);
 extern PGDLLEXPORT const char *CopyDataCompressionToName(CopyDataCompression compression);
 

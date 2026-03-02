@@ -331,7 +331,7 @@ IcebergFieldToPostgresType(Field * field)
 				PGType		elementPGType =
 					IcebergFieldToPostgresType(field->field.list.element);
 
-				const char *elementDuckDBTypeName = GetFullDuckDBTypeNameForPGType(elementPGType);
+				const char *elementDuckDBTypeName = GetFullDuckDBTypeNameForPGType(elementPGType, DATA_FORMAT_ICEBERG);
 
 				StringInfo	listTypeName = makeStringInfo();
 
@@ -354,12 +354,12 @@ IcebergFieldToPostgresType(Field * field)
 				PGType		keyPGType =
 					IcebergFieldToPostgresType(field->field.map.key);
 
-				const char *keyDuckDBTypeName = GetFullDuckDBTypeNameForPGType(keyPGType);
+				const char *keyDuckDBTypeName = GetFullDuckDBTypeNameForPGType(keyPGType, DATA_FORMAT_ICEBERG);
 
 				PGType		valuePGType =
 					IcebergFieldToPostgresType(field->field.map.value);
 
-				const char *valueDuckDBTypeName = GetFullDuckDBTypeNameForPGType(valuePGType);
+				const char *valueDuckDBTypeName = GetFullDuckDBTypeNameForPGType(valuePGType, DATA_FORMAT_ICEBERG);
 
 				StringInfo	mapTypeName = makeStringInfo();
 
@@ -398,7 +398,7 @@ IcebergFieldToPostgresType(Field * field)
 					PGType		fieldPGType =
 						IcebergFieldToPostgresType(structElementField->type);
 
-					const char *fieldDuckDBTypeName = GetFullDuckDBTypeNameForPGType(fieldPGType);
+					const char *fieldDuckDBTypeName = GetFullDuckDBTypeNameForPGType(fieldPGType, DATA_FORMAT_ICEBERG);
 
 					appendStringInfo(structTypeName, "%s %s",
 									 quotedFieldName,

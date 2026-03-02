@@ -36,7 +36,7 @@
  */
 
 char *
-MapOutForPGDuck(Datum myMap)
+MapOutForPGDuck(Datum myMap, CopyDataFormat format)
 {
 	/* myMap is a domain over an array of a 2-col composite type */
 
@@ -90,6 +90,9 @@ MapOutForPGDuck(Datum myMap)
 	bool		elemIsNull,
 				needComma = false;
 
+	bool		keyIsContainer = IsSerializedAsContainer(keysElementType, format);
+	bool		valIsContainer = IsSerializedAsContainer(valuesElementType, format);
+
 	StringInfoData outputBuffer;
 
 	initStringInfo(&outputBuffer);
@@ -124,8 +127,8 @@ MapOutForPGDuck(Datum myMap)
 			ereport(ERROR, (errmsg("cannot have NULL for map key entry")));;
 
 		serializedKey = PGDuckSerialize(&keysExtra->proc, keysElementType, pairValues[0],
-									DATA_FORMAT_INVALID);
-		if (!IsContainerType(keysElementType))
+								format);
+		if (!keyIsContainer)
 			serializedKey = (char *) quote_literal_cstr(serializedKey);
 
 		if (nulls[1])
@@ -133,8 +136,8 @@ MapOutForPGDuck(Datum myMap)
 		else
 		{
 			serializedValue = PGDuckSerialize(&valuesExtra->proc, valuesElementType, pairValues[1],
-											  DATA_FORMAT_INVALID);
-			if (!IsContainerType(valuesElementType))
+											  format);
+			if (!valIsContainer)
 				serializedValue = (char *) quote_literal_cstr(serializedValue);
 		}
 

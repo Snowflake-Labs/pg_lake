@@ -2562,7 +2562,7 @@ postgresIsForeignRelUpdatable(Relation rel)
 	 */
 	CopyDataFormat format = GetForeignTableFormat(relationId);
 
-	if (format == DATA_FORMAT_PARQUET || format == DATA_FORMAT_ICEBERG)
+	if (FormatUsesParquet(format))
 		writeFlags |= (1 << CMD_UPDATE) | (1 << CMD_DELETE);
 
 	return writeFlags;

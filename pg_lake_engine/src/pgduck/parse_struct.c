@@ -731,7 +731,7 @@ ParseSkipToNextField(StructParserState * parse)
 static Oid
 FindOrCreatePGCompositeType(CompositeType * type)
 {
-	elog(DEBUG1, "Looking up existing composite postgres type for: %s", GetDuckDBStructDefinitionForCompositeType(type));
+	elog(DEBUG1, "Looking up existing composite postgres type for: %s", GetDuckDBStructDefinitionForCompositeType(type, DATA_FORMAT_INVALID));
 
 	/*
 	 * Structured as a do block so we can bail to our followup routine at any
@@ -1062,7 +1062,7 @@ GetDuckDBStructDefinitionForPGType(Oid postgresType)
 {
 	CompositeType *type = GetCompositeTypeForPGType(postgresType);
 
-	return GetDuckDBStructDefinitionForCompositeType(type);
+	return GetDuckDBStructDefinitionForCompositeType(type, DATA_FORMAT_INVALID);
 }
 
 /*
@@ -1070,7 +1070,8 @@ GetDuckDBStructDefinitionForPGType(Oid postgresType)
  * basically the inverse of the ParseStructType() routine.
  */
 char *
-GetDuckDBStructDefinitionForCompositeType(CompositeType * type)
+GetDuckDBStructDefinitionForCompositeType(CompositeType * type,
+										  CopyDataFormat format)
 {
 	ListCell   *lc;
 	StringInfo	string = makeStringInfo();
@@ -1093,7 +1094,7 @@ GetDuckDBStructDefinitionForCompositeType(CompositeType * type)
 		{
 			/* add a child composite type */
 			appendStringInfoString(string,
-								   GetDuckDBStructDefinitionForCompositeType(col->subStruct));
+								   GetDuckDBStructDefinitionForCompositeType(col->subStruct, format));
 		}
 		else
 		{
@@ -1107,7 +1108,7 @@ GetDuckDBStructDefinitionForCompositeType(CompositeType * type)
 
 			if (duckDBType)
 			{
-				const char *duckDBName = GetFullDuckDBTypeNameForPGType(baseColumnType);
+				const char *duckDBName = GetFullDuckDBTypeNameForPGType(baseColumnType, format);
 
 				if (duckDBName)
 					appendStringInfoString(string, duckDBName);
@@ -1128,75 +1129,6 @@ GetDuckDBStructDefinitionForCompositeType(CompositeType * type)
 	}
 
 	/* close the opening struct */
-	appendStringInfoChar(string, ')');
-
-	if (type->isArray)
-		appendStringInfo(string, "[]");
-
-	return string->data;
-}
-
-
-/*
- * GetDuckDBStructDefinitionForIceberg is a variant of
- * GetDuckDBStructDefinitionForCompositeType that expands INTERVAL
- * fields to STRUCT(months BIGINT, days BIGINT, microseconds BIGINT).
- */
-char *
-GetDuckDBStructDefinitionForIceberg(CompositeType *type)
-{
-	ListCell   *lc;
-	StringInfo	string = makeStringInfo();
-	bool		processedOne = false;
-
-	appendStringInfo(string, "STRUCT(");
-
-	foreach(lc, type->cols)
-	{
-		CompositeCol *col = (CompositeCol *) lfirst(lc);
-
-		if (processedOne)
-			appendStringInfoChar(string, ',');
-
-		appendStringInfoString(string, QuoteDuckDBFieldName(col->colName));
-		appendStringInfoChar(string, ' ');
-
-		if (col->subStruct != NULL)
-		{
-			appendStringInfoString(string,
-								   GetDuckDBStructDefinitionForIceberg(col->subStruct));
-		}
-		else
-		{
-			PGType		baseColumnType = MakePGTypeOid(GetRelatedTypeOid(col->colType, false));
-			DuckDBType	duckDBType = GetDuckDBTypeForPGType(baseColumnType);
-
-			if (duckDBType == DUCKDB_TYPE_INTERVAL)
-			{
-				appendStringInfoString(string,
-									   "STRUCT(months BIGINT, days BIGINT, microseconds BIGINT)");
-			}
-			else if (duckDBType)
-			{
-				const char *duckDBName = GetFullDuckDBTypeNameForPGType(baseColumnType);
-
-				if (duckDBName)
-					appendStringInfoString(string, duckDBName);
-				else
-					ereport(ERROR, (errmsg("unresolved duckdb type name for type: %d", duckDBType),
-									errcode(ERRCODE_INTERNAL_ERROR)));
-			}
-			else
-				ereport(ERROR, (errmsg("composite types with a \"%s\" field cannot be exported to data lake",
-									   format_type_be(col->colType)),
-								errcode(ERRCODE_INDETERMINATE_DATATYPE)));
-		}
-		if (col->isArray)
-			appendStringInfoString(string, "[]");
-
-		processedOne = true;
-	}
-
 	appendStringInfoChar(string, ')');
 
 	if (type->isArray)
