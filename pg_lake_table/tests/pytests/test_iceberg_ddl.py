@@ -1829,6 +1829,207 @@ def test_interval_infinity(pg_conn, s3, with_default_location):
     pg_conn.commit()
 
 
+def test_interval_infinity_predicate(pg_conn, s3, with_default_location):
+    if get_pg_version_num(pg_conn) < 170000:
+        pytest.skip("infinity intervals require PostgreSQL 17+")
+
+    run_command(
+        """
+        CREATE SCHEMA test_interval_inf_pred;
+        CREATE TABLE test_interval_inf_pred.test (id int, i interval) USING iceberg;
+        INSERT INTO test_interval_inf_pred.test VALUES
+            (1, '1 day'),
+            (2, '2 hours'),
+            (3, NULL);
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # Queries using infinity interval constants must not be pushed down to
+    # DuckDB since DuckDB does not support infinity intervals. Without the
+    # fix, DuckDB raises "Could not convert string 'infinity' to INTERVAL".
+    result = run_query(
+        "SELECT id FROM test_interval_inf_pred.test WHERE i < INTERVAL 'infinity' ORDER BY id",
+        pg_conn,
+    )
+    assert len(result) == 2
+    assert result[0][0] == 1
+    assert result[1][0] == 2
+
+    result = run_query(
+        "SELECT id FROM test_interval_inf_pred.test WHERE i = INTERVAL 'infinity' ORDER BY id",
+        pg_conn,
+    )
+    assert len(result) == 0
+
+    result = run_query(
+        "SELECT id FROM test_interval_inf_pred.test WHERE i > INTERVAL '-infinity' ORDER BY id",
+        pg_conn,
+    )
+    assert len(result) == 2
+
+    run_command("DROP SCHEMA test_interval_inf_pred CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_interval_ctas(pg_conn, s3, with_default_location):
+    """
+    CREATE TABLE ... USING iceberg AS SELECT <interval> exercises the
+    INSERT..SELECT pushdown path. Intervals are stored as
+    STRUCT(months, days, microseconds) in Iceberg, which requires the
+    pushdown to be disabled and fall back to the row-by-row path.
+    """
+    run_command(
+        """
+        CREATE SCHEMA test_interval_ctas;
+        CREATE TABLE test_interval_ctas.source (id int, i interval) USING heap;
+        INSERT INTO test_interval_ctas.source VALUES
+            (1, '1 day'),
+            (2, '2 hours 30 minutes'),
+            (3, '1 year 3 months'),
+            (4, '-5 days 12 hours'),
+            (5, '0.000001 seconds'),
+            (6, NULL);
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # CTAS from a constant expression (the exact failing case from the bug report)
+    run_command(
+        """
+        CREATE TABLE test_interval_ctas.from_const USING iceberg
+        AS SELECT INTERVAL '01:00' AS "One hour";
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        'SELECT "One hour" FROM test_interval_ctas.from_const',
+        pg_conn,
+    )
+    assert len(result) == 1
+    assert result[0][0] == datetime.timedelta(hours=1)
+
+    # CTAS from an existing table
+    run_command(
+        """
+        CREATE TABLE test_interval_ctas.from_table USING iceberg
+        AS SELECT id, i FROM test_interval_ctas.source;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        "SELECT id, i FROM test_interval_ctas.from_table ORDER BY id",
+        pg_conn,
+    )
+    assert len(result) == 6
+    assert result[0][1] == datetime.timedelta(days=1)
+    assert result[1][1] == datetime.timedelta(hours=2, minutes=30)
+    assert result[2][1] is not None  # 1 year 3 months
+    assert result[3][1] == datetime.timedelta(days=-5, hours=12)
+    assert result[4][1] == datetime.timedelta(microseconds=1)
+    assert result[5][1] is None
+
+    # CTAS with interval array column
+    run_command(
+        """
+        CREATE TABLE test_interval_ctas.from_array USING iceberg
+        AS SELECT
+            1 AS id,
+            ARRAY['1 hour'::interval, '30 minutes'::interval] AS durations;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        "SELECT durations FROM test_interval_ctas.from_array",
+        pg_conn,
+    )
+    assert len(result) == 1
+    assert len(result[0][0]) == 2
+    assert result[0][0][0] == datetime.timedelta(hours=1)
+    assert result[0][0][1] == datetime.timedelta(minutes=30)
+
+    run_command("DROP SCHEMA test_interval_ctas CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_interval_insert_select(pg_conn, s3, with_default_location):
+    """
+    INSERT INTO iceberg_table SELECT ... exercises the same pushdown-disabled
+    path for interval columns. Verifies the row-by-row fallback correctly
+    serializes intervals as STRUCT(months, days, microseconds).
+    """
+    run_command(
+        """
+        CREATE SCHEMA test_interval_ins_sel;
+        CREATE TABLE test_interval_ins_sel.source (id int, i interval) USING heap;
+        INSERT INTO test_interval_ins_sel.source VALUES
+            (1, '3 days'),
+            (2, '-1 hour 45 minutes'),
+            (3, '2 years'),
+            (4, NULL);
+
+        CREATE TABLE test_interval_ins_sel.dest (id int, i interval) USING iceberg;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        """
+        INSERT INTO test_interval_ins_sel.dest
+        SELECT id, i FROM test_interval_ins_sel.source;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        "SELECT id, i FROM test_interval_ins_sel.dest ORDER BY id",
+        pg_conn,
+    )
+    assert len(result) == 4
+    assert result[0][1] == datetime.timedelta(days=3)
+    assert result[1][1] == datetime.timedelta(minutes=-15)
+    assert result[2][1] is not None  # 2 years
+    assert result[3][1] is None
+
+    # also test interval[] in INSERT..SELECT
+    run_command(
+        """
+        CREATE TABLE test_interval_ins_sel.arr_source (id int, intervals interval[]) USING heap;
+        INSERT INTO test_interval_ins_sel.arr_source VALUES
+            (1, ARRAY['1 day'::interval, '2 hours'::interval]),
+            (2, NULL);
+
+        CREATE TABLE test_interval_ins_sel.arr_dest (id int, intervals interval[]) USING iceberg;
+
+        INSERT INTO test_interval_ins_sel.arr_dest
+        SELECT id, intervals FROM test_interval_ins_sel.arr_source;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        "SELECT id, intervals FROM test_interval_ins_sel.arr_dest ORDER BY id",
+        pg_conn,
+    )
+    assert len(result) == 2
+    assert result[0][1] == [datetime.timedelta(days=1), datetime.timedelta(hours=2)]
+    assert result[1][1] is None
+
+    run_command("DROP SCHEMA test_interval_ins_sel CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 def test_use_same_schema_when_needed(pg_conn, s3, with_default_location):
 
     run_command("CREATE SCHEMA test_use_same_schema_when_needed", pg_conn)

@@ -74,6 +74,7 @@
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
+#include "utils/timestamp.h"
 #include "utils/typcache.h"
 #include "commands/tablecmds.h"
 
@@ -431,6 +432,20 @@ foreign_expr_walker(Node *node,
 						return false;
 				}
 
+				/*
+				 * DuckDB does not support infinite intervals, so we cannot
+				 * push down conditions that contain +-infinity interval
+				 * constants.
+				 */
+#if PG_VERSION_NUM >= 170000
+				if (!c->constisnull && c->consttype == INTERVALOID)
+				{
+					Interval   *interval = DatumGetIntervalP(c->constvalue);
+
+					if (INTERVAL_NOT_FINITE(interval))
+						return false;
+				}
+#endif
 
 				/*
 				 * If the constant has nondefault collation, either it's of a

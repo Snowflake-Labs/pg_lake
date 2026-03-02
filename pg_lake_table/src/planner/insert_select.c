@@ -423,6 +423,23 @@ RelationColumnsSuitableForPushdown(Relation relation, CopyDataFormat sourceForma
 			return false;
 		}
 
+		/*
+		 * For Iceberg, intervals are stored as STRUCT(months, days,
+		 * microseconds). The pushdown path sends INTERVAL directly to DuckDB,
+		 * which cannot apply nested field_ids to a non-struct column. Fall
+		 * back to the row-by-row path which serializes intervals as structs.
+		 */
+		Oid			elemTypeId = get_element_type(typeId);
+
+		if ((typeId == INTERVALOID || elemTypeId == INTERVALOID) &&
+			sourceFormat == DATA_FORMAT_ICEBERG)
+		{
+			ereport(DEBUG4,
+					(errmsg("Interval type is not pushdownable for Iceberg")));
+
+			return false;
+		}
+
 		if (typeId == NUMERICOID || typeId == NUMERICARRAYOID)
 		{
 			/* todo: handle numeric field in composite type */
