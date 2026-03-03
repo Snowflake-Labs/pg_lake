@@ -1,3 +1,4 @@
+import psycopg2
 import pytest
 
 from utils_pytest import *
@@ -352,6 +353,234 @@ def test_insert_select_pushdown_unsupported(
     )
     assert "Custom Scan (Query Pushdown)" in str(results)
 
+    pg_conn.rollback()
+
+
+_UNSUITABLE_LOC = f"s3://{TEST_BUCKET}/test_unsuitable"
+
+_INSERT_SELECT_UNSUITABLE_CASES = [
+    # --- domain nested inside an array ---
+    pytest.param(
+        f"""
+        CREATE DOMAIN pos_int AS INT CHECK (VALUE > 0);
+        CREATE FOREIGN TABLE src (id INT, vals pos_int[])
+            SERVER pg_lake OPTIONS (writable 'true',
+            location '{_UNSUITABLE_LOC}/domain_in_array/src/', format 'parquet');
+        CREATE FOREIGN TABLE tgt (id INT, vals pos_int[])
+            SERVER pg_lake OPTIONS (writable 'true',
+            location '{_UNSUITABLE_LOC}/domain_in_array/tgt/', format 'parquet');
+        """,
+        "INSERT INTO tgt SELECT * FROM src",
+        None,
+        id="domain-in-array",
+    ),
+    # --- bad numeric (scale>precision) nested inside an array ---
+    pytest.param(
+        f"""
+        CREATE FOREIGN TABLE src (id INT, vals numeric(25,26)[])
+            SERVER pg_lake OPTIONS (writable 'true',
+            location '{_UNSUITABLE_LOC}/bad_numeric_in_array/src/', format 'parquet');
+        CREATE FOREIGN TABLE tgt (id INT, vals numeric(25,26)[])
+            SERVER pg_lake OPTIONS (writable 'true',
+            location '{_UNSUITABLE_LOC}/bad_numeric_in_array/tgt/', format 'parquet');
+        """,
+        "INSERT INTO tgt SELECT * FROM src",
+        None,
+        id="bad-numeric-in-array",
+    ),
+    # --- bad numeric nested inside a composite ---
+    pytest.param(
+        f"""
+        CREATE TYPE has_bad_num AS (v numeric(25,26));
+        CREATE FOREIGN TABLE src (id INT, d has_bad_num)
+            SERVER pg_lake OPTIONS (writable 'true',
+            location '{_UNSUITABLE_LOC}/bad_numeric_in_struct/src/', format 'parquet');
+        CREATE FOREIGN TABLE tgt (id INT, d has_bad_num)
+            SERVER pg_lake OPTIONS (writable 'true',
+            location '{_UNSUITABLE_LOC}/bad_numeric_in_struct/tgt/', format 'parquet');
+        """,
+        "INSERT INTO tgt SELECT * FROM src",
+        None,
+        id="bad-numeric-in-struct",
+    ),
+    # --- bad numeric inside a composite inside an array (deep nesting) ---
+    pytest.param(
+        f"""
+        CREATE TYPE with_bad_num AS (a INT, b numeric(25,26));
+        CREATE FOREIGN TABLE src (id INT, vals with_bad_num[])
+            SERVER pg_lake OPTIONS (writable 'true',
+            location '{_UNSUITABLE_LOC}/bad_numeric_in_struct_in_array/src/', format 'parquet');
+        CREATE FOREIGN TABLE tgt (id INT, vals with_bad_num[])
+            SERVER pg_lake OPTIONS (writable 'true',
+            location '{_UNSUITABLE_LOC}/bad_numeric_in_struct_in_array/tgt/', format 'parquet');
+        """,
+        "INSERT INTO tgt SELECT * FROM src",
+        None,
+        id="bad-numeric-in-struct-in-array",
+    ),
+    # --- interval column (Iceberg stores as struct, needs special serde) ---
+    pytest.param(
+        """
+        CREATE TABLE src (id INT, d INTERVAL) USING iceberg;
+        CREATE TABLE tgt (id INT, d INTERVAL) USING iceberg;
+        """,
+        "INSERT INTO tgt SELECT * FROM src",
+        None,
+        id="interval-iceberg",
+    ),
+    # --- interval inside an array (Iceberg) ---
+    pytest.param(
+        """
+        CREATE TABLE src (id INT, vals INTERVAL[]) USING iceberg;
+        CREATE TABLE tgt (id INT, vals INTERVAL[]) USING iceberg;
+        """,
+        "INSERT INTO tgt SELECT * FROM src",
+        None,
+        id="interval-in-array-iceberg",
+    ),
+    # --- interval inside a composite (Iceberg) ---
+    pytest.param(
+        """
+        CREATE TYPE has_interval AS (a INT, b INTERVAL);
+        CREATE TABLE src (id INT, d has_interval) USING iceberg;
+        CREATE TABLE tgt (id INT, d has_interval) USING iceberg;
+        """,
+        "INSERT INTO tgt SELECT * FROM src",
+        None,
+        id="interval-in-struct-iceberg",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "setup_sql, insert_query, map_type", _INSERT_SELECT_UNSUITABLE_CASES
+)
+def test_insert_select_nested_unsuitable_types(
+    s3,
+    pg_conn,
+    extension,
+    with_default_location,
+    setup_sql,
+    insert_query,
+    map_type,
+):
+    """INSERT..SELECT must NOT be pushed down when a column contains a type
+    unsuitable for pushdown — whether at the top level, inside an array,
+    composite, or map.
+    """
+    if map_type:
+        create_map_type(*map_type)
+
+    run_command(setup_sql, pg_conn)
+    assert_query_not_pushdownable(insert_query, pg_conn)
+    pg_conn.rollback()
+
+
+def test_insert_select_domain_in_map_value(s3, pg_conn, superuser_conn, extension):
+    """Domain as map value type must block pushdown."""
+    run_command(
+        "DROP DOMAIN IF EXISTS bounded_text CASCADE;"
+        "CREATE DOMAIN bounded_text AS TEXT CHECK (LENGTH(VALUE) <= 10);",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    map_typename = create_map_type("int", "bounded_text")
+
+    loc = f"s3://{TEST_BUCKET}/test_unsuitable/domain_in_map_value"
+    run_command(
+        f"""
+        CREATE FOREIGN TABLE src (id INT, m {map_typename})
+            SERVER pg_lake OPTIONS (writable 'true',
+            location '{loc}/src/', format 'parquet');
+        CREATE FOREIGN TABLE tgt (id INT, m {map_typename})
+            SERVER pg_lake OPTIONS (writable 'true',
+            location '{loc}/tgt/', format 'parquet');
+        """,
+        pg_conn,
+    )
+    assert_query_not_pushdownable("INSERT INTO tgt SELECT * FROM src", pg_conn)
+    pg_conn.rollback()
+
+
+def test_insert_select_domain_in_map_key(s3, pg_conn, superuser_conn, extension):
+    """Domain as map key type must block pushdown."""
+    run_command(
+        "DROP DOMAIN IF EXISTS small_int CASCADE;"
+        "CREATE DOMAIN small_int AS INT CHECK (VALUE < 1000);",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    map_typename = create_map_type("small_int", "text")
+
+    loc = f"s3://{TEST_BUCKET}/test_unsuitable/domain_in_map_key"
+    run_command(
+        f"""
+        CREATE FOREIGN TABLE src (id INT, m {map_typename})
+            SERVER pg_lake OPTIONS (writable 'true',
+            location '{loc}/src/', format 'parquet');
+        CREATE FOREIGN TABLE tgt (id INT, m {map_typename})
+            SERVER pg_lake OPTIONS (writable 'true',
+            location '{loc}/tgt/', format 'parquet');
+        """,
+        pg_conn,
+    )
+    assert_query_not_pushdownable("INSERT INTO tgt SELECT * FROM src", pg_conn)
+    pg_conn.rollback()
+
+
+def test_insert_select_domain_in_struct(s3, pg_conn, extension):
+    """Domain inside a composite: even EXPLAIN fails because the FDW
+    planning path cannot resolve domain types in DuckDB struct
+    definitions.  The error itself proves the query cannot be pushed down.
+    """
+    loc = f"s3://{TEST_BUCKET}/test_unsuitable/domain_in_struct"
+    run_command(
+        f"""
+        CREATE DOMAIN positive_int AS INT CHECK (VALUE > 0);
+        CREATE TYPE has_domain AS (id INT, val positive_int);
+        CREATE FOREIGN TABLE domain_src (id INT, d has_domain)
+            SERVER pg_lake OPTIONS (writable 'true',
+            location '{loc}/src/', format 'parquet');
+        CREATE FOREIGN TABLE domain_tgt (id INT, d has_domain)
+            SERVER pg_lake OPTIONS (writable 'true',
+            location '{loc}/tgt/', format 'parquet');
+        """,
+        pg_conn,
+    )
+    with pytest.raises(psycopg2.errors.IndeterminateDatatype):
+        run_query(
+            "EXPLAIN INSERT INTO domain_tgt SELECT * FROM domain_src",
+            pg_conn,
+        )
+    pg_conn.rollback()
+
+
+def test_insert_select_domain_in_struct_in_array(s3, pg_conn, extension):
+    """Domain inside a composite inside an array: EXPLAIN fails because
+    the FDW planning path cannot resolve domain types in DuckDB struct
+    definitions.  The error itself proves the query cannot be pushed down.
+    """
+    loc = f"s3://{TEST_BUCKET}/test_unsuitable/domain_in_struct_in_array"
+    run_command(
+        f"""
+        CREATE DOMAIN nonneg AS INT CHECK (VALUE >= 0);
+        CREATE TYPE with_domain AS (a INT, b nonneg);
+        CREATE FOREIGN TABLE src (id INT, vals with_domain[])
+            SERVER pg_lake OPTIONS (writable 'true',
+            location '{loc}/src/', format 'parquet');
+        CREATE FOREIGN TABLE tgt (id INT, vals with_domain[])
+            SERVER pg_lake OPTIONS (writable 'true',
+            location '{loc}/tgt/', format 'parquet');
+        """,
+        pg_conn,
+    )
+    with pytest.raises(psycopg2.errors.IndeterminateDatatype):
+        run_query(
+            "EXPLAIN INSERT INTO tgt SELECT * FROM src",
+            pg_conn,
+        )
     pg_conn.rollback()
 
 

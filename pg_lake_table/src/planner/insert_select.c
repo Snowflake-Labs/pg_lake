@@ -24,6 +24,7 @@
 #include "pg_lake/planner/query_pushdown.h"
 #include "pg_lake/util/numeric.h"
 #include "pg_lake/partitioning/partition_by_parser.h"
+#include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/util/rel_utils.h"
 #include "nodes/makefuncs.h"
@@ -32,10 +33,12 @@
 #include "parser/parsetree.h"
 #include "utils/rel.h"
 #include "utils/lsyscache.h"
+#include "utils/typcache.h"
 
 
 static RangeTblEntry *GetSelectRteFromInsertSelect(Query *query);
 static RangeTblEntry *GetInsertRteFromInsertSelect(Query *query);
+static bool TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod, CopyDataFormat sourceFormat);
 
 /* pg_lake_table.enable_insert_select_pushdown setting */
 bool		EnableInsertSelectPushdown = true;
@@ -378,6 +381,119 @@ RelationSuitableForPushdown(Relation relation, bool allowDefaultConsts)
 
 
 /*
+ * TypeContainsUnsuitableForPushdown recursively checks whether the given type
+ * (or any type nested within it) is unsuitable for pushdown.
+ *
+ * Returns true if the type is unsuitable (i.e., pushdown should be blocked).
+ */
+static bool
+TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod, CopyDataFormat sourceFormat)
+{
+	/*
+	 * The current pushdown implementation does not convert geometry to the
+	 * appropriate storage format yet.
+	 */
+	if (IsGeometryTypeId(typeId))
+	{
+		ereport(DEBUG4,
+				(errmsg("Geometry type is not pushdownable")));
+		return true;
+	}
+
+	/*
+	 * Interval is stored as struct(months, days, microseconds) in Iceberg.
+	 * PGDuckSerialize handles the conversion, but during pushdown DuckDB
+	 * writes directly—bypassing that conversion—so we must block it.
+	 */
+	if (typeId == INTERVALOID && sourceFormat == DATA_FORMAT_ICEBERG)
+	{
+		ereport(DEBUG4,
+				(errmsg("Interval type is not pushdownable for Iceberg")));
+
+		return true;
+	}
+
+	/*
+	 * Map types are domains over arrays of key-value composites.  Check the
+	 * key and value types rather than rejecting the map outright as a domain.
+	 * This must come before the generic domain check below.
+	 */
+	if (IsMapTypeOid(typeId))
+	{
+		PGType		keyType = GetMapKeyType(typeId);
+		PGType		valType = GetMapValueType(typeId);
+
+		return TypeContainsUnsuitableForPushdown(keyType.postgresTypeOid,
+												 keyType.postgresTypeMod, sourceFormat) ||
+			TypeContainsUnsuitableForPushdown(valType.postgresTypeOid,
+											  valType.postgresTypeMod, sourceFormat);
+	}
+
+	/*
+	 * Domains may have constraints which are not checked on the DuckDB side.
+	 */
+	char		typeType = get_typtype(typeId);
+
+	if (typeType == TYPTYPE_DOMAIN)
+	{
+		ereport(DEBUG4,
+				(errmsg("Domain type is not pushdownable")));
+		return true;
+	}
+
+	if (typeId == NUMERICOID)
+	{
+		/* may fail if unbounded numeric exceeds duckdb limits (38,38) */
+		if (typmod == -1)
+			return false;
+
+		int			precision = numeric_typmod_precision(typmod);
+		int			scale = numeric_typmod_scale(typmod);
+
+		if (!CanPushdownNumericToDuckdb(precision, scale))
+		{
+			ereport(DEBUG4,
+					(errmsg("Numeric type with precision(%d) and scale(%d) "
+							"is not pushdownable", precision, scale)));
+			return true;
+		}
+	}
+
+	/* Recurse into array element type */
+	if (type_is_array(typeId))
+	{
+		Oid			elemType = get_element_type(typeId);
+
+		return TypeContainsUnsuitableForPushdown(elemType, typmod, sourceFormat);
+	}
+
+	/* Recurse into composite type fields */
+	if (typeType == TYPTYPE_COMPOSITE)
+	{
+		TupleDesc	tupdesc = lookup_rowtype_tupdesc(typeId, typmod);
+
+		for (int i = 0; i < tupdesc->natts; i++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+			if (attr->attisdropped)
+				continue;
+
+			if (TypeContainsUnsuitableForPushdown(attr->atttypid, attr->atttypmod, sourceFormat))
+			{
+				ReleaseTupleDesc(tupdesc);
+				return true;
+			}
+		}
+
+		ReleaseTupleDesc(tupdesc);
+	}
+
+	return false;
+}
+
+
+/*
 * RelationColumnsSuitableForPushdown checks whether the columns of a relation
 * are suitable for pushdown.
 */
@@ -411,69 +527,8 @@ RelationColumnsSuitableForPushdown(Relation relation, CopyDataFormat sourceForma
 			}
 		}
 
-		/*
-		 * The current pushdown implementation does not convert geometry to
-		 * the appropriate storage format yet.
-		 */
-		if (IsGeometryTypeId(typeId))
-		{
-			ereport(DEBUG4,
-					(errmsg("Geometry type is not pushdownable")));
-
+		if (TypeContainsUnsuitableForPushdown(typeId, column->atttypmod, sourceFormat))
 			return false;
-		}
-
-		/*
-		 * For Iceberg, intervals are stored as STRUCT(months, days,
-		 * microseconds). The pushdown path sends INTERVAL directly to DuckDB,
-		 * which cannot apply nested field_ids to a non-struct column. Fall
-		 * back to the row-by-row path which serializes intervals as structs.
-		 */
-		Oid			elemTypeId = get_element_type(typeId);
-
-		if ((typeId == INTERVALOID || elemTypeId == INTERVALOID) &&
-			sourceFormat == DATA_FORMAT_ICEBERG)
-		{
-			ereport(DEBUG4,
-					(errmsg("Interval type is not pushdownable for Iceberg")));
-
-			return false;
-		}
-
-		if (typeId == NUMERICOID || typeId == NUMERICARRAYOID)
-		{
-			/* todo: handle numeric field in composite type */
-			int			typmod = column->atttypmod;
-
-			/* may fail if unbounded numeric exceeds duckdb limits (38,38) */
-			if (typmod == -1)
-				continue;
-
-			int			precision = numeric_typmod_precision(typmod);
-			int			scale = numeric_typmod_scale(typmod);
-
-			if (!CanPushdownNumericToDuckdb(precision, scale))
-			{
-				ereport(DEBUG4,
-						(errmsg("Numeric type with precision(%d) and scale(%d) "
-								"is not pushdownable", precision, scale)));
-
-				return false;
-			}
-		}
-
-		/*
-		 * Domains may have constraints which are not checked on the DuckDB
-		 * side.
-		 */
-		char		typeType = get_typtype(typeId);
-
-		if (typeType == TYPTYPE_DOMAIN)
-		{
-			ereport(DEBUG4,
-					(errmsg("Domain type is not pushdownable")));
-			return false;
-		}
 	}
 
 	return true;

@@ -74,3 +74,24 @@ def assert_remote_query_not_contains_expression(query, expression, pg_conn):
     remote_sql = fetch_remote_sql(explain_result)
     print(remote_sql)
     assert expression not in remote_sql
+
+
+def assert_query_pushdownable(query, pg_conn, msg=None):
+    """Assert that the query plan uses Query Pushdown."""
+    results = run_query("EXPLAIN " + query, pg_conn)
+    assert "Custom Scan (Query Pushdown)" in str(results), msg or (
+        "Expected Query Pushdown for: " + query
+    )
+
+
+def assert_query_not_pushdownable(query, pg_conn, msg=None):
+    """Assert that the query plan does NOT use Query Pushdown.
+
+    Uses plain EXPLAIN (no execution) so that the check works even when
+    the query would fail at execution time (e.g. composite types
+    containing domains).
+    """
+    results = run_query("EXPLAIN " + query, pg_conn)
+    assert "Custom Scan (Query Pushdown)" not in str(results), msg or (
+        "Unexpected Query Pushdown for: " + query
+    )
