@@ -270,7 +270,7 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 		List	   *options = foreignTable->options;
 
 		/* error if path is missing */
-		char	   *path = GetStringOption(options, "path", true);
+		char	   *path = GetURLOption(options, "path", true);
 
 		/* for wildcard paths, check if we have a _filename filter */
 		if (EnableDataFilePruning &&
