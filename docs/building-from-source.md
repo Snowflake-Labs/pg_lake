@@ -221,7 +221,7 @@ Run `./install.sh --help` to see all available options:
 --build-postgres            Build PostgreSQL from source and initialize database
 --pg-version VERSION        PostgreSQL version to build (16, 17, or 18) [default: 18]
 --prefix DIR                PostgreSQL installation prefix [default: auto-detect or $HOME/pgsql]
---source-dir DIR            Directory for cloning source repos [default: $HOME/pg_lake-deps]
+--deps-dir DIR              Directory for dependencies [default: $HOME/pg_lake-deps]
 --jobs N                    Number of parallel build jobs [default: nproc]
 
 --with-system-deps          Install system build dependencies (auto-enabled with --build-postgres)
@@ -269,6 +269,7 @@ apt-get install -y \
     libtool \
     libjansson-dev \
     libcurl4-openssl-dev \
+    libpam0g-dev \
     curl \
     patch \
     g++ \
@@ -312,6 +313,7 @@ dnf -y install \
     jansson-devel \
     jq \
     libcurl-devel \
+    pam-devel \
     patch \
     which \
     gcc-c++ \
@@ -395,6 +397,7 @@ cd postgres
     --with-libxslt \
     --with-icu \
     --with-lz4 \
+    --with-pam \
     --with-python
 
 # Configure (macOS example)
@@ -635,8 +638,8 @@ To install manually:
 # Ubuntu/Debian
 sudo apt-get install -y openjdk-21-jdk
 
-# RHEL/AlmaLinux
-sudo dnf install -y java-21-openjdk
+# RHEL/AlmaLinux (install -devel package for full JDK including javac)
+sudo dnf install -y java-21-openjdk-devel
 
 # macOS
 brew install openjdk@21

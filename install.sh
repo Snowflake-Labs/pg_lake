@@ -16,7 +16,7 @@ fi
 # Default configuration
 PG_VERSION=18
 INSTALL_PREFIX="$HOME/pgsql"
-SOURCE_DIR="$HOME/pg_lake-deps"
+PGLAKE_DEPS_DIR="$HOME/pg_lake-deps"
 JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 VCPKG_VERSION=2025.10.17
 
@@ -65,7 +65,7 @@ OPTIONS:
     --build-postgres            Build PostgreSQL from source and initialize database
     --pg-version VERSION        PostgreSQL version to build (16, 17, or 18) [default: 18]
     --prefix DIR                PostgreSQL installation prefix [default: auto-detect or \$HOME/pgsql]
-    --source-dir DIR            Directory for cloning source repos [default: \$HOME/pg_lake-deps]
+    --deps-dir DIR              Directory for dependencies [default: \$HOME/pg_lake-deps]
     --jobs N                    Number of parallel build jobs [default: nproc]
 
     --with-system-deps          Install system build dependencies (auto-enabled with --build-postgres)
@@ -107,8 +107,8 @@ while [[ $# -gt 0 ]]; do
             INSTALL_PREFIX="$2"
             shift 2
             ;;
-        --source-dir)
-            SOURCE_DIR="$2"
+        --deps-dir)
+            PGLAKE_DEPS_DIR="$2"
             shift 2
             ;;
         --jobs)
@@ -134,6 +134,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --with-test-deps)
             WITH_TEST_DEPS=1
+            SKIP_SYSTEM_DEPS=0  # Auto-enable system deps when building test dependencies
             shift
             ;;
         -h|--help)
@@ -252,6 +253,7 @@ install_system_deps() {
                 perl \
                 libtool \
                 libjansson-dev \
+                libpam0g-dev \
                 libcurl4-openssl-dev \
                 curl \
                 patch \
@@ -292,6 +294,7 @@ install_system_deps() {
                 libtool \
                 jansson-devel \
                 jq \
+                pam-devel \
                 libcurl-devel \
                 patch \
                 which \
@@ -367,8 +370,8 @@ install_postgres() {
         return
     fi
 
-    mkdir -p "$SOURCE_DIR"
-    cd "$SOURCE_DIR"
+    mkdir -p "$PGLAKE_DEPS_DIR"
+    cd "$PGLAKE_DEPS_DIR"
 
     # Clone if needed
     if [[ ! -d "postgres-$PG_VERSION" ]]; then
@@ -434,6 +437,7 @@ install_postgres() {
             --with-libxslt \
             --with-icu \
             --with-lz4 \
+            --with-pam \
             --with-python
     fi
 
@@ -465,8 +469,8 @@ install_vcpkg() {
 
     print_header "Installing vcpkg and Azure SDK dependencies"
 
-    mkdir -p "$SOURCE_DIR"
-    cd "$SOURCE_DIR"
+    mkdir -p "$PGLAKE_DEPS_DIR"
+    cd "$PGLAKE_DEPS_DIR"
 
     # Clone vcpkg if needed
     if [[ ! -d "vcpkg" ]]; then
@@ -491,7 +495,7 @@ install_vcpkg() {
     ./vcpkg/vcpkg install azure-identity-cpp azure-storage-blobs-cpp azure-storage-files-datalake-cpp openssl
 
     # Set environment variable
-    export VCPKG_TOOLCHAIN_PATH="$SOURCE_DIR/vcpkg/scripts/buildsystems/vcpkg.cmake"
+    export VCPKG_TOOLCHAIN_PATH="$PGLAKE_DEPS_DIR/vcpkg/scripts/buildsystems/vcpkg.cmake"
 
     print_info "vcpkg installed successfully"
 }
@@ -515,8 +519,8 @@ install_pg_lake() {
     fi
 
     # Set vcpkg toolchain path
-    if [[ -z "$VCPKG_TOOLCHAIN_PATH" ]] && [[ -d "$SOURCE_DIR/vcpkg" ]]; then
-        export VCPKG_TOOLCHAIN_PATH="$SOURCE_DIR/vcpkg/scripts/buildsystems/vcpkg.cmake"
+    if [[ -z "$VCPKG_TOOLCHAIN_PATH" ]] && [[ -d "$PGLAKE_DEPS_DIR/vcpkg" ]]; then
+        export VCPKG_TOOLCHAIN_PATH="$PGLAKE_DEPS_DIR/vcpkg/scripts/buildsystems/vcpkg.cmake"
     fi
 
     # Verify we're in the pg_lake repository by checking for key files
@@ -571,8 +575,8 @@ install_test_deps() {
     print_header "Installing test dependencies"
 
     export PATH="$PG_BIN:$PATH"
-    mkdir -p "$SOURCE_DIR"
-    cd "$SOURCE_DIR"
+    mkdir -p "$PGLAKE_DEPS_DIR"
+    cd "$PGLAKE_DEPS_DIR"
 
     # PostGIS
     # Check if PostGIS is already installed by looking for the extension control file
@@ -636,22 +640,35 @@ install_test_deps() {
     fi
 
     # azurite (npm)
-    if ! command -v azurite &>/dev/null; then
-        print_info "Installing azurite via npm..."
-        case $OS in
-            debian)
-                sudo apt-get install -y nodejs npm
-                ;;
-            rhel)
-                sudo dnf install -y nodejs npm
-                ;;
-            macos)
-                brew install node
-                ;;
-        esac
-        npm install -g azurite
-    else
+    NPM_PREFIX="$PGLAKE_DEPS_DIR/npm-global"
+    if command -v azurite &>/dev/null; then
         print_info "azurite already installed"
+    elif [[ -x "$NPM_PREFIX/bin/azurite" ]]; then
+        print_info "azurite already installed at $NPM_PREFIX/bin/azurite"
+    else
+        print_info "Installing azurite via npm..."
+        if ! command -v npm &>/dev/null; then
+            case $OS in
+                debian)
+                    sudo apt-get install -y nodejs npm
+                    ;;
+                rhel)
+                    sudo dnf install -y nodejs npm
+                    ;;
+                macos)
+                    brew install node
+                    ;;
+            esac
+        fi
+        # Install to a user-local prefix to avoid permission issues with
+        # system/Nix-managed npm installations
+        mkdir -p "$NPM_PREFIX"
+        npm install -g --prefix "$NPM_PREFIX" azurite
+    fi
+
+    # Add azurite to PATH for this session
+    if [[ -x "$NPM_PREFIX/bin/azurite" ]]; then
+        export PATH="$NPM_PREFIX/bin:$PATH"
     fi
 
     # Python/pipenv
@@ -673,46 +690,58 @@ install_test_deps() {
     fi
 
     # Java 21+ (needed for Spark verification tests and Polaris catalog tests)
+    JAVA_VERSION=""
     if command -v java &>/dev/null; then
-        # Check Java version
         JAVA_VERSION=$(java -version 2>&1 | head -1 | sed -n 's/.*version "\([0-9]*\).*/\1/p')
-        if [[ -n "$JAVA_VERSION" ]] && [[ "$JAVA_VERSION" -ge 21 ]]; then
-            print_info "Java $JAVA_VERSION already installed"
-        else
-            print_warning "Java version is $JAVA_VERSION but 21+ is required for tests"
-            print_info "Installing Java 21..."
-            case $OS in
-                debian)
-                    sudo apt-get install -y openjdk-21-jdk
-                    ;;
-                rhel)
-                    sudo dnf install -y java-21-openjdk
-                    ;;
-                macos)
-                    brew install openjdk@21
-                    # Add to PATH for this session
-                    export PATH="/opt/homebrew/opt/openjdk@21/bin:$PATH"
-                    ;;
-            esac
-        fi
+    fi
+
+    if [[ -n "$JAVA_VERSION" ]] && [[ "$JAVA_VERSION" -ge 21 ]]; then
+        print_info "Java $JAVA_VERSION already installed and in PATH"
     else
-        print_info "Installing Java 21..."
+        if [[ -n "$JAVA_VERSION" ]]; then
+            print_warning "Java in PATH is version $JAVA_VERSION but 21+ is required for tests"
+        fi
+
+        # Install Java 21 if not present on the system
         case $OS in
             debian)
-                sudo apt-get install -y openjdk-21-jdk
+                if ! dpkg -l openjdk-21-jdk &>/dev/null; then
+                    print_info "Installing Java 21..."
+                    sudo apt-get install -y openjdk-21-jdk
+                fi
+                JAVA_HOME=$(dirname $(dirname $(update-alternatives --list java 2>/dev/null | grep 21 | head -1))) 2>/dev/null || true
+                if [[ -z "$JAVA_HOME" ]]; then
+                    JAVA_HOME=$(ls -d /usr/lib/jvm/java-21-openjdk-* 2>/dev/null | head -1)
+                fi
                 ;;
             rhel)
-                sudo dnf install -y java-21-openjdk
+                if ! rpm -q java-21-openjdk-devel &>/dev/null; then
+                    print_info "Installing Java 21 JDK..."
+                    sudo dnf install -y java-21-openjdk-devel
+                fi
+                JAVA_HOME=$(ls -d /usr/lib/jvm/java-21-openjdk-* 2>/dev/null | head -1)
                 ;;
             macos)
-                brew install openjdk@21
-                export PATH="/opt/homebrew/opt/openjdk@21/bin:$PATH"
+                if ! brew list openjdk@21 &>/dev/null; then
+                    print_info "Installing Java 21..."
+                    brew install openjdk@21
+                fi
+                JAVA_HOME="/opt/homebrew/opt/openjdk@21"
                 ;;
         esac
+
+        # Ensure Java 21 is first in PATH
+        if [[ -n "$JAVA_HOME" ]] && [[ -d "$JAVA_HOME/bin" ]]; then
+            export JAVA_HOME
+            export PATH="$JAVA_HOME/bin:$PATH"
+            print_info "Using Java 21 from $JAVA_HOME"
+        else
+            print_warning "Could not locate Java 21 installation. Tests requiring Java 21 may fail."
+        fi
     fi
 
     # PostgreSQL JDBC driver (needed for Spark verification tests)
-    JDBC_DIR="$SOURCE_DIR/jdbc"
+    JDBC_DIR="$PGLAKE_DEPS_DIR/jdbc"
     JDBC_VERSION="42.7.10"
     JDBC_JAR="$JDBC_DIR/postgresql-${JDBC_VERSION}.jar"
 
@@ -730,6 +759,16 @@ install_test_deps() {
             print_error "Or download manually from: https://jdbc.postgresql.org/download/postgresql-${JDBC_VERSION}.jar"
             print_error "And place it at: $JDBC_JAR"
         fi
+    fi
+
+    # Install Python test dependencies via pipenv
+    if command -v pipenv &>/dev/null; then
+        print_info "Installing Python test dependencies via pipenv..."
+        cd "$PG_LAKE_REPO_DIR"
+        pipenv install --dev
+    else
+        print_warning "pipenv not found in PATH. You may need to run 'pipenv install --dev' manually."
+        print_warning "Check that ~/.local/bin is in your PATH if pipenv was installed with --user."
     fi
 
     print_info "Test dependencies installed successfully"
@@ -782,7 +821,7 @@ print_summary() {
     echo
 
     if [[ $WITH_TEST_DEPS -eq 1 ]]; then
-        JDBC_DIR="$SOURCE_DIR/jdbc"
+        JDBC_DIR="$PGLAKE_DEPS_DIR/jdbc"
         JDBC_VERSION="42.7.10"
         JDBC_JAR="$JDBC_DIR/postgresql-${JDBC_VERSION}.jar"
 
@@ -803,19 +842,27 @@ print_summary() {
     echo "   Query data lake files: docs/query-data-lake-files.md"
     echo
 
-    if [[ $BUILD_POSTGRES -eq 1 ]] || [[ -d "$SOURCE_DIR/vcpkg" ]] || [[ $WITH_TEST_DEPS -eq 1 ]] || [[ "$OS" == "macos" ]]; then
+    if [[ $BUILD_POSTGRES -eq 1 ]] || [[ -d "$PGLAKE_DEPS_DIR/vcpkg" ]] || [[ $WITH_TEST_DEPS -eq 1 ]] || [[ "$OS" == "macos" ]]; then
         echo -e "${YELLOW}Environment variables to add to your ~/.bashrc or ~/.zshrc:${NC}"
         if [[ $BUILD_POSTGRES -eq 1 ]]; then
             echo "   export PATH=$PG_BIN:\$PATH"
         fi
-        if [[ -d "$SOURCE_DIR/vcpkg" ]]; then
-            echo "   export VCPKG_TOOLCHAIN_PATH=$SOURCE_DIR/vcpkg/scripts/buildsystems/vcpkg.cmake"
+        if [[ -d "$PGLAKE_DEPS_DIR/vcpkg" ]]; then
+            echo "   export VCPKG_TOOLCHAIN_PATH=$PGLAKE_DEPS_DIR/vcpkg/scripts/buildsystems/vcpkg.cmake"
         fi
         if [[ $WITH_TEST_DEPS -eq 1 ]]; then
-            JDBC_DIR="$SOURCE_DIR/jdbc"
+            NPM_PREFIX="$PGLAKE_DEPS_DIR/npm-global"
+            if [[ -d "$NPM_PREFIX/bin" ]]; then
+                echo "   export PATH=$NPM_PREFIX/bin:\$PATH  # azurite (required for Azure tests)"
+            fi
+            JDBC_DIR="$PGLAKE_DEPS_DIR/jdbc"
             JDBC_VERSION="42.7.10"
             JDBC_JAR="$JDBC_DIR/postgresql-${JDBC_VERSION}.jar"
             echo "   export JDBC_DRIVER_PATH=$JDBC_JAR  # Required for Spark verification tests"
+            if [[ -n "$JAVA_HOME" ]]; then
+                echo "   export JAVA_HOME=$JAVA_HOME"
+                echo "   export PATH=\$JAVA_HOME/bin:\$PATH  # Java 21+ (required for Polaris catalog tests)"
+            fi
         fi
         if [[ "$OS" == "macos" ]]; then
             echo "   export PATH=\"/opt/homebrew/opt/bison/bin:/opt/homebrew/opt/flex/bin:\$PATH\""
@@ -844,7 +891,7 @@ main() {
     else
         print_info "Mode: Building PostgreSQL from source"
     fi
-    print_info "Source directory: $SOURCE_DIR"
+    print_info "Dependencies directory: $PGLAKE_DEPS_DIR"
     print_info "Build jobs: $JOBS"
     echo
 
