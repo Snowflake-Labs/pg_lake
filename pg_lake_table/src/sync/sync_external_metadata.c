@@ -40,8 +40,10 @@
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 
+#include "pg_lake/cleanup/deletion_queue.h"
 #include "pg_lake/data_file/data_files.h"
 #include "pg_lake/data_file/data_file_stats.h"
+#include "pg_lake/ddl/alter_table.h"
 #include "pg_lake/extensions/pg_lake_iceberg.h"
 #include "pg_lake/extensions/pg_lake_table.h"
 #include "pg_lake/fdw/data_files_catalog.h"
@@ -55,6 +57,7 @@
 #include "pg_lake/iceberg/iceberg_type_binary_serde.h"
 #include "pg_lake/partitioning/partition_spec_catalog.h"
 #include "pg_extension_base/spi_helpers.h"
+#include "utils/hsearch.h"
 
 PG_FUNCTION_INFO_V1(sync_iceberg_metadata_from_external_write);
 
@@ -92,9 +95,24 @@ sync_iceberg_metadata_from_external_write(PG_FUNCTION_ARGS)
 
 	IcebergTableMetadata *metadata = ReadIcebergTableMetadata(metadataLocation);
 
-	SyncSchemaFromMetadata(relationId, metadata);
-	SyncPartitionSpecsFromMetadata(relationId, metadata);
-	SyncDataFilesFromMetadata(relationId, metadata);
+	/*
+	 * Suppress the ProcessAlterTable hook's Iceberg DDL processing while we
+	 * add/drop columns.  We manage field_id_mappings ourselves and do not want
+	 * the hook to register duplicate mappings or schedule a metadata write.
+	 */
+	SkipIcebergDDLProcessing = true;
+
+	PG_TRY();
+	{
+		SyncSchemaFromMetadata(relationId, metadata);
+		SyncPartitionSpecsFromMetadata(relationId, metadata);
+		SyncDataFilesFromMetadata(relationId, metadata);
+	}
+	PG_FINALLY();
+	{
+		SkipIcebergDDLProcessing = false;
+	}
+	PG_END_TRY();
 
 	PG_RETURN_VOID();
 }
@@ -366,10 +384,54 @@ SyncPartitionSpecsFromMetadata(Oid relationId, IcebergTableMetadata *metadata)
  * pg_lake catalog from the current snapshot in the Iceberg metadata.
  *
  * This clears all existing data files and repopulates them from the metadata.
+ * Files that are no longer referenced are added to the deletion queue.
  */
 static void
 SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata *metadata)
 {
+	TimestampTz orphanedAt = GetCurrentTransactionStartTimestamp();
+
+	/*
+	 * Get the list of old file paths before clearing, so we can queue
+	 * unreferenced files for deletion.
+	 */
+	bool		dataOnly = false;
+	bool		newFilesOnly = false;
+	bool		forUpdate = false;
+	Snapshot	snapshot = GetActiveSnapshot();
+
+	List	   *oldDataFiles = GetTableDataFilesFromCatalog(relationId, dataOnly,
+															newFilesOnly, forUpdate,
+															NULL, snapshot);
+
+	/* build a hash table of old file paths for quick lookup */
+	HTAB	   *oldFileHash = NULL;
+
+	if (oldDataFiles != NIL)
+	{
+		HASHCTL		hashCtl;
+
+		memset(&hashCtl, 0, sizeof(hashCtl));
+		hashCtl.keysize = MAX_S3_PATH_LENGTH;
+		hashCtl.entrysize = MAX_S3_PATH_LENGTH;
+		hashCtl.hcxt = CurrentMemoryContext;
+
+		oldFileHash = hash_create("old file paths",
+								  list_length(oldDataFiles),
+								  &hashCtl,
+								  HASH_ELEM | HASH_CONTEXT);
+
+		ListCell   *oldFileCell = NULL;
+
+		foreach(oldFileCell, oldDataFiles)
+		{
+			TableDataFile *oldFile = lfirst(oldFileCell);
+			bool		found = false;
+
+			hash_search(oldFileHash, oldFile->path, HASH_ENTER, &found);
+		}
+	}
+
 	/* clear all existing data files from the catalog */
 	RemoveAllDataFilesFromPgLakeCatalogFromTable(relationId);
 
@@ -379,7 +441,21 @@ SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata *metadata)
 
 	if (currentSnapshot == NULL)
 	{
-		/* empty table after external write, no data files to sync */
+		/*
+		 * Empty table after external write. All old files are now unreferenced,
+		 * queue them for deletion.
+		 */
+		if (oldFileHash != NULL)
+		{
+			HASH_SEQ_STATUS hashSeq;
+			char	   *filePath = NULL;
+
+			hash_seq_init(&hashSeq, oldFileHash);
+			while ((filePath = hash_seq_search(&hashSeq)) != NULL)
+			{
+				InsertDeletionQueueRecord(filePath, relationId, orphanedAt);
+			}
+		}
 		return;
 	}
 
@@ -387,6 +463,24 @@ SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata *metadata)
 
 	/* fetch all manifests from the current snapshot */
 	List	   *manifests = FetchManifestsFromSnapshot(currentSnapshot, NULL);
+
+	/* track new file paths to identify unreferenced files later */
+	HTAB	   *newFileHash = NULL;
+
+	if (oldFileHash != NULL)
+	{
+		HASHCTL		hashCtl;
+
+		memset(&hashCtl, 0, sizeof(hashCtl));
+		hashCtl.keysize = MAX_S3_PATH_LENGTH;
+		hashCtl.entrysize = MAX_S3_PATH_LENGTH;
+		hashCtl.hcxt = CurrentMemoryContext;
+
+		newFileHash = hash_create("new file paths",
+								  1024,		/* initial estimate */
+								  &hashCtl,
+								  HASH_ELEM | HASH_CONTEXT);
+	}
 
 	ListCell   *manifestCell = NULL;
 
@@ -405,6 +499,14 @@ SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata *metadata)
 			IcebergManifestEntry *entry = lfirst(entryCell);
 
 			DataFile   *dataFile = &entry->data_file;
+
+			/* track this new file path */
+			if (newFileHash != NULL)
+			{
+				bool		found = false;
+
+				hash_search(newFileHash, dataFile->file_path, HASH_ENTER, &found);
+			}
 
 			/* map Iceberg content type to pg_lake content type */
 			DataFileContent content;
@@ -454,6 +556,30 @@ SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata *metadata)
 												   manifest->partition_spec_id,
 												   fileId,
 												   &dataFile->partition);
+			}
+		}
+	}
+
+	/*
+	 * Queue old files that are no longer referenced for deletion.
+	 * Compare oldFileHash with newFileHash to find unreferenced files.
+	 */
+	if (oldFileHash != NULL && newFileHash != NULL)
+	{
+		HASH_SEQ_STATUS hashSeq;
+		char	   *oldFilePath = NULL;
+
+		hash_seq_init(&hashSeq, oldFileHash);
+		while ((oldFilePath = hash_seq_search(&hashSeq)) != NULL)
+		{
+			bool		found = false;
+
+			hash_search(newFileHash, oldFilePath, HASH_FIND, &found);
+
+			if (!found)
+			{
+				/* file is no longer referenced, queue for deletion */
+				InsertDeletionQueueRecord(oldFilePath, relationId, orphanedAt);
 			}
 		}
 	}
