@@ -9,3 +9,10 @@ ALTER TABLE lake_table.data_file_column_stats REPLICA IDENTITY FULL;
 ALTER TABLE lake_table.partition_specs REPLICA IDENTITY FULL;
 ALTER TABLE lake_table.partition_fields REPLICA IDENTITY FULL;
 ALTER TABLE lake_table.data_file_partition_values REPLICA IDENTITY FULL;
+
+-- Sync function for external writes to Iceberg tables.
+-- Called by the iceberg_tables INSTEAD OF trigger when an external client
+-- updates metadata_location for a table in the current database catalog.
+CREATE FUNCTION lake_table.sync_iceberg_metadata_from_external_write(regclass)
+    RETURNS void AS 'MODULE_PATHNAME', 'sync_iceberg_metadata_from_external_write'
+    LANGUAGE C STRICT;
