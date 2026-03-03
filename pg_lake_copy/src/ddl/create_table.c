@@ -168,6 +168,7 @@ ProcessCreateFromFile(CreateStmt *createStmt,
 		}
 
 		definitionFromURL = defGetString(definitionFromOption);
+		definitionFromURL = ResolveStageURL(definitionFromURL);
 
 		if (!IsSupportedURL(definitionFromURL))
 		{
@@ -188,6 +189,7 @@ ProcessCreateFromFile(CreateStmt *createStmt,
 	else if (loadFromOption != NULL)
 	{
 		loadFromURL = defGetString(loadFromOption);
+		loadFromURL = ResolveStageURL(loadFromURL);
 
 		if (!IsSupportedURL(loadFromURL))
 		{

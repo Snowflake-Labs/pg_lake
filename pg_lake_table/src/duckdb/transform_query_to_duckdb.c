@@ -160,12 +160,10 @@ BuildReadDataSourceQueryForTableScan(PgLakeTableScan * tableScan, bool skipFullM
 	Oid			relationId = tableScan->relationId;
 	ForeignTable *foreignTable = GetForeignTable(relationId);
 	List	   *options = foreignTable->options;
-	DefElem    *pathOption = GetOption(options, "path");
-
 	/*
 	 * First, fetch the properties of the file: path, format and compression
 	 */
-	char	   *path = pathOption != NULL ? defGetString(pathOption) : NULL;
+	char	   *path = GetURLOption(options, "path", false);
 	PgLakeTableType tableType = GetPgLakeTableType(relationId);
 	CopyDataFormat format = DATA_FORMAT_INVALID;
 	CopyDataCompression compression = DATA_COMPRESSION_INVALID;
