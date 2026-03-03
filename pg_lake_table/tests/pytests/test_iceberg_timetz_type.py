@@ -160,7 +160,45 @@ def test_iceberg_timetz_as_utc_time(
         "pushed_down"
     ], "COPY FROM with TIMETZ into Iceberg should be pushed down"
 
-    # 7. DROP TABLES
+    # 7. timetz[] array round-trip: elements must come back at UTC (+00)
+    array_table = f"{table_name}_array"
+    run_command(
+        f"""
+        CREATE TABLE {schema_name}.{array_table} (
+            id INTEGER,
+            ts TIMETZ[]
+        ) USING iceberg;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        INSERT INTO {schema_name}.{array_table} VALUES
+            (1, ARRAY['12:30:00+00'::timetz, '12:30:00+04'::timetz]),
+            (2, ARRAY['23:30:00-02'::timetz, '01:30:00+04'::timetz]),
+            (3, ARRAY['00:00:00+00'::timetz, '12:00:00.123456+00'::timetz]);
+        """,
+        pg_conn,
+    )
+
+    results = run_query(
+        f"SELECT id, ts FROM {schema_name}.{array_table} ORDER BY id",
+        pg_conn,
+    )
+
+    expected_arrays = [
+        [1, [time(12, 30, 0, tzinfo=utc), time(8, 30, 0, tzinfo=utc)]],
+        [2, [time(1, 30, 0, tzinfo=utc), time(21, 30, 0, tzinfo=utc)]],
+        [3, [time(0, 0, 0, tzinfo=utc), time(12, 0, 0, 123456, tzinfo=utc)]],
+    ]
+
+    assert (
+        results == expected_arrays
+    ), f"timetz[] round-trip failed: {results} != {expected_arrays}"
+
+    # 8. DROP TABLES
     run_command(f"DROP SCHEMA {schema_name} CASCADE", pg_conn)
     pg_conn.commit()
 

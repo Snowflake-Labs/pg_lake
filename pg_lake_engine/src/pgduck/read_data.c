@@ -1434,17 +1434,24 @@ BuildColumnProjection(char *columnName,
 							columnAliasString);
 	}
 
-	if (engineType.typeId == DUCKDB_TYPE_TIME_TZ && !engineType.isArrayType)
+	if (engineType.typeId == DUCKDB_TYPE_TIME_TZ)
 	{
 		if (sourceFormat == DATA_FORMAT_ICEBERG)
 		{
 			/*
 			 * TimeTZ is stored as TIME (UTC-normalized) in Iceberg. Cast to
-			 * TIMETZ so pushed-down WHERE clauses can compare correctly.
+			 * TIMETZ so the UTC offset (+00) is preserved rather than having
+			 * the session timezone applied during text parsing.
 			 */
-			return psprintf("%s::TIMETZ%s",
-							quote_identifier(columnName),
-							columnAliasString);
+			const char *col = quote_identifier(columnName);
+
+			if (engineType.isArrayType)
+				return psprintf(
+								"list_transform(%s, _x -> _x::TIMETZ)%s",
+								col, columnAliasString);
+			else
+				return psprintf("%s::TIMETZ%s",
+								col, columnAliasString);
 		}
 	}
 
