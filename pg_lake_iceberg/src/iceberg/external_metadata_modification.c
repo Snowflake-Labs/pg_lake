@@ -26,6 +26,8 @@
 #include "commands/extension.h"
 #include "commands/trigger.h"
 #include "executor/spi.h"
+#include "nodes/makefuncs.h"
+#include "parser/parse_func.h"
 #include "utils/builtins.h"
 #include "utils/elog.h"
 #include "utils/rel.h"
@@ -252,12 +254,20 @@ HandleInternalCatalogUpdate(char *namespaceName, char *tableName,
 							  SECURITY_LOCAL_USERID_CHANGE);
 
 		/*
-		 * Call the sync function directly (not via SPI) to avoid nested SPI
-		 * calls, since the sync function itself uses SPI internally.
+		 * Use OidFunctionCall1 to call the sync function. This is safe because
+		 * OidFunctionCall doesn't use SPI - it calls the function directly via
+		 * the function manager. The sync function itself uses SPI internally,
+		 * but that's fine since we're not in an SPI context here.
 		 */
-		extern Datum sync_iceberg_metadata_from_external_write(PG_FUNCTION_ARGS);
-		DirectFunctionCall1(sync_iceberg_metadata_from_external_write,
-							ObjectIdGetDatum(relationId));
+		Oid			syncFuncOid = LookupFuncName(
+											list_make2(makeString("lake_table"),
+													  makeString("sync_iceberg_metadata_from_external_write")),
+											1, (Oid[]){REGCLASSOID}, true);
+
+		if (OidIsValid(syncFuncOid))
+		{
+			OidFunctionCall1(syncFuncOid, ObjectIdGetDatum(relationId));
+		}
 
 		SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 	}
