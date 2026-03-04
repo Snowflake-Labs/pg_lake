@@ -560,6 +560,7 @@ InitPgLakeIcebergOptions(void)
 		{"location", ForeignTableRelationId},
 
 		{"autovacuum_enabled", ForeignTableRelationId},
+		{"max_snapshot_age", ForeignTableRelationId},
 		{"column_stats_mode", ForeignTableRelationId},
 		{"row_ids", ForeignTableRelationId},
 		{"partition_by", ForeignTableRelationId},
@@ -736,6 +737,15 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 		{
 			/* only accept boolean */
 			(void) defGetBoolean(def);
+		}
+		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "max_snapshot_age") == 0)
+		{
+			/* only accept non-negative integer (seconds) */
+			int32		val = pg_strtoint32(defGetString(def));
+
+			if (val < 0)
+				ereport(ERROR, (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+								errmsg("option \"max_snapshot_age\" must be non-negative")));
 		}
 		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "catalog") == 0)
 		{

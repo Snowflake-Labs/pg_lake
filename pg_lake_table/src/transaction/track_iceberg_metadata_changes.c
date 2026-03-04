@@ -39,6 +39,10 @@
 #include "pg_lake/json/json_utils.h"
 #include "pg_lake/util/s3_writer_utils.h"
 #include "pg_lake/util/url_encode.h"
+#include "pg_lake/parsetree/options.h"
+#include "commands/defrem.h"
+#include "foreign/foreign.h"
+#include "utils/builtins.h"
 
 #define ONE_MB (1 * 1024 * 1024)
 
@@ -95,6 +99,7 @@ static int32_t GetSchemaIdForIcebergTableIfExists(const TableMetadataOperationTr
 static int	ComparePartitionSpecsById(const ListCell *a, const ListCell *b);
 
 static char *IdentifierJson(const char *namespaceFlat, const char *tableName);
+static int	GetEffectiveMaxSnapshotAgeInSecs(Oid relationId);
 
 
 
@@ -679,6 +684,26 @@ ConsumeTrackedIcebergMetadataChanges(void)
 
 
 /*
+ * GetEffectiveMaxSnapshotAgeInSecs returns the effective max snapshot age
+ * in seconds for the given relation. If the table has a per-table
+ * max_snapshot_age option set, that value is used. Otherwise, the global
+ * GUC IcebergMaxSnapshotAge is used as the default.
+ */
+static int
+GetEffectiveMaxSnapshotAgeInSecs(Oid relationId)
+{
+	ForeignTable *foreignTable = GetForeignTable(relationId);
+	List	   *options = foreignTable->options;
+	DefElem    *maxSnapshotAgeOption = GetOption(options, "max_snapshot_age");
+
+	if (maxSnapshotAgeOption != NULL)
+		return pg_strtoint32(defGetString(maxSnapshotAgeOption));
+
+	return IcebergMaxSnapshotAge;
+}
+
+
+/*
  * ApplyTrackedIcebergMetadataChanges applies the tracked metadata operations to the
  * Iceberg metadata and pushes the changes to remote catalog.
  */
@@ -737,6 +762,19 @@ ApplyTrackedIcebergMetadataChanges(void)
 			metadataOperations = list_concat(metadataOperations, dataFileOps);
 		}
 
+		/*
+		 * Auto-expire old snapshots during writes when the effective
+		 * max_snapshot_age for the table is 0.
+		 */
+		if (opTracker->relationDataFileChanged &&
+			!opTracker->relationSnapshotExpirationRequested)
+		{
+			int			effectiveAgeInSecs = GetEffectiveMaxSnapshotAgeInSecs(relationId);
+
+			if (effectiveAgeInSecs == 0)
+				opTracker->relationSnapshotExpirationRequested = true;
+		}
+
 		/* explicit manifest merge operation */
 		if (opTracker->relationManifestMergeRequested)
 		{
@@ -759,7 +797,8 @@ ApplyTrackedIcebergMetadataChanges(void)
 
 		if (metadataOperations != NIL)
 		{
-			List	   *restRequests = ApplyIcebergMetadataChanges(relationId, metadataOperations, allTransforms, true);
+			int			maxSnapshotAgeInSecs = GetEffectiveMaxSnapshotAgeInSecs(relationId);
+			List	   *restRequests = ApplyIcebergMetadataChanges(relationId, metadataOperations, allTransforms, maxSnapshotAgeInSecs, true);
 			ListCell   *requestCell = NULL;
 
 			foreach(requestCell, restRequests)

@@ -12,10 +12,6 @@ def test_unreferenced_files_1(
     # make sure we do not interfere with any external changes to this
     run_command("SET pg_lake_iceberg.manifest_min_count_to_merge TO 1000", pg_conn)
 
-    # on every command, get rid of the previous snapshots so that
-    # we can show more meaningful differences
-    run_command("SET pg_lake_iceberg.max_snapshot_age TO 0", pg_conn)
-
     # we don't want every test to have data file compaction for test readability
     # purposes
     run_command("SET pg_lake_table.target_file_size_mb TO -1", pg_conn)
@@ -129,7 +125,6 @@ def test_unreferenced_files_1(
     assert ".parquet" in unreferenced_files[5][0]
 
     run_command("RESET pg_lake_iceberg.manifest_min_count_to_merge", pg_conn)
-    run_command("RESET pg_lake_iceberg.max_snapshot_age", pg_conn)
 
     pg_conn.rollback()
 
@@ -141,10 +136,6 @@ def test_unreferenced_files_2(
 
     # make sure we do not interfere with any external changes to this
     run_command("SET pg_lake_iceberg.manifest_min_count_to_merge TO 1000", pg_conn)
-
-    # on every command, get rid of the previous snapshots so that
-    # we can show more meaningful differences
-    run_command("SET pg_lake_iceberg.max_snapshot_age TO 0", pg_conn)
 
     # we don't want every test to have data file compaction for test readability
     # purposes
@@ -265,7 +256,6 @@ def test_unreferenced_files_2(
     assert ".parquet" in unreferenced_files[5][0]
 
     run_command("RESET pg_lake_iceberg.manifest_min_count_to_merge", pg_conn)
-    run_command("RESET pg_lake_iceberg.max_snapshot_age", pg_conn)
     run_command("RESET pg_lake_iceberg.target_file_size_mb", pg_conn)
     pg_conn.commit()
 
@@ -277,10 +267,6 @@ def test_unreferenced_files_3(
 
     # make sure we do not interfere with any external changes to this
     run_command("SET pg_lake_iceberg.manifest_min_count_to_merge TO 1000", pg_conn)
-
-    # on every command, get rid of the previous snapshots so that
-    # we can show more meaningful differences
-    run_command("SET pg_lake_iceberg.max_snapshot_age TO 0", pg_conn)
 
     # we don't want every test to have data file compaction for test readability
     # purposes
@@ -404,7 +390,6 @@ def test_unreferenced_files_3(
     assert ".parquet" in unreferenced_files[7][0]
 
     run_command("RESET pg_lake_iceberg.manifest_min_count_to_merge", pg_conn)
-    run_command("RESET pg_lake_iceberg.max_snapshot_age", pg_conn)
     run_command("RESET pg_lake_iceberg.target_file_size_mb", pg_conn)
     pg_conn.commit()
 
@@ -416,10 +401,6 @@ def test_unreferenced_files_4(
 
     # make sure we do not interfere with any external changes to this
     run_command("SET pg_lake_iceberg.manifest_min_count_to_merge TO 1000", pg_conn)
-
-    # on every command, get rid of the previous snapshots so that
-    # we can show more meaningful differences
-    run_command("SET pg_lake_iceberg.max_snapshot_age TO 0", pg_conn)
 
     # we don't want every test to have data file compaction for test readability
     # purposes
@@ -529,7 +510,6 @@ def test_unreferenced_files_4(
     assert ".parquet" in unreferenced_files[5][0]
 
     run_command("RESET pg_lake_iceberg.manifest_min_count_to_merge", pg_conn)
-    run_command("RESET pg_lake_iceberg.max_snapshot_age", pg_conn)
     run_command("RESET pg_lake_iceberg.target_file_size_mb", pg_conn)
     pg_conn.commit()
 
@@ -541,10 +521,6 @@ def test_unreferenced_files_5(
 
     # make sure we do not interfere with any external changes to this
     run_command("SET pg_lake_iceberg.manifest_min_count_to_merge TO 1000", pg_conn)
-
-    # on every command, get rid of the previous snapshots so that
-    # we can show more meaningful differences
-    run_command("SET pg_lake_iceberg.max_snapshot_age TO 0", pg_conn)
 
     prev_metadata_list = []
 
@@ -649,7 +625,6 @@ def test_unreferenced_files_5(
     )
 
     run_command("RESET pg_lake_iceberg.manifest_min_count_to_merge", pg_conn)
-    run_command("RESET pg_lake_iceberg.max_snapshot_age", pg_conn)
     run_command("RESET pg_lake_iceberg.target_file_size_mb", pg_conn)
 
     pg_conn.commit()

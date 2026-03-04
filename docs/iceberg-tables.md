@@ -67,9 +67,10 @@ with (definition_from = 'https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_
 
 Iceberg tables support the following options when creating the table:
 
-| Option   | Description                                                          |
-| -------- | -------------------------------------------------------------------- |
-| location | URL prefix for the Iceberg table (e.g. `s3://mybucket/measurements`) |
+| Option           | Description                                                          |
+| ---------------- | -------------------------------------------------------------------- |
+| location         | URL prefix for the Iceberg table (e.g. `s3://mybucket/measurements`) |
+| max_snapshot_age | Maximum age (in seconds) of snapshots to retain. When set to `0`, old snapshots are automatically expired during writes. Overrides the `pg_lake_iceberg.max_snapshot_age` GUC for this table. |
 
 Additionally, when creating the Iceberg table from a file, the following options are supported along with the format-specific options listed in the [data lake formats](../docs/file-formats-reference) section:
 
@@ -624,6 +625,27 @@ Each insert/update/delete operation on an Iceberg table results in additional da
 
 - Data compaction: When you INSERT rows into your Iceberg tables, the data is stored as Parquet files. Iceberg data compaction merges small data files into larger ones to improve read performance and reduce metadata overhead.
 - Managing expired metadata and data files: Modifying Iceberg tables generates new data and metadata files, leaving some older files unused and inaccessible. The VACUUM operation ensures these obsolete files are cleaned up, maintaining storage efficiency and preventing unnecessary accumulation of unused files.
+
+### Snapshot retention
+
+Each write to an Iceberg table creates a new snapshot. By default, old snapshots are retained and only expired during VACUUM based on the `pg_lake_iceberg.max_snapshot_age` GUC (default: 1800 seconds).
+
+You can override the snapshot retention policy per table using the `max_snapshot_age` option (in seconds). When set to `0`, old snapshots are expired automatically during writes, without requiring a separate VACUUM:
+
+```sql
+-- expire old snapshots immediately on every write
+CREATE TABLE events (id int, payload text)
+USING iceberg WITH (max_snapshot_age = 0);
+
+-- or, change an existing table
+ALTER FOREIGN TABLE events OPTIONS (ADD max_snapshot_age '0');
+```
+
+The table-level option takes precedence over the GUC. To revert to the GUC default:
+
+```sql
+ALTER FOREIGN TABLE events OPTIONS (DROP max_snapshot_age);
+```
 
 ### Autovacuum on Iceberg tables
 `pg_lake` automatically runs vacuum on Iceberg tables every 10 minutes.
