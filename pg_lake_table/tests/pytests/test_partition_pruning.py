@@ -1805,6 +1805,115 @@ def test_pruning_for_coercions_temporal(
     pg_conn.rollback()
 
 
+@pytest.mark.parametrize(
+    "schema, col_type, new_type, pre_a_vals, post_a_val",
+    [
+        pytest.param(
+            "part_promo_int",
+            "int",
+            "bigint",
+            # INT_MIN and INT_MAX — int4 boundary values
+            [-2147483648, 2147483647],
+            # first value outside int4 range
+            "2147483648",
+            id="int_to_bigint",
+        ),
+        pytest.param(
+            "part_promo_float",
+            "real",
+            "double precision",
+            # near -FLOAT_MAX and +FLOAT_MAX — float4 boundary values
+            [-1e38, 1e38],
+            # value beyond float4 range, only representable in float8
+            "1e+200",
+            id="float_to_double",
+        ),
+        pytest.param(
+            "part_promo_decimal",
+            "numeric(10,2)",
+            "numeric(20,2)",
+            # min and max for numeric(10,2)
+            [-99999999.99, 99999999.99],
+            # value requiring wider precision (numeric(20,2))
+            "99999999999999999.99",
+            id="decimal_widen_precision",
+        ),
+    ],
+)
+def test_partition_pruning_after_type_promotion(
+    s3,
+    disable_data_file_pruning,
+    pg_conn,
+    extension,
+    with_default_location,
+    schema,
+    col_type,
+    new_type,
+    pre_a_vals,
+    post_a_val,
+):
+    """Verify partition pruning still works after promoting a non-partition column."""
+    explain_prefix = "EXPLAIN (analyze, verbose, format json) "
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(
+        f"""
+        CREATE TABLE {schema}.tbl (a {col_type}, b int)
+        USING iceberg WITH (autovacuum_enabled='False', partition_by='b');
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # Insert rows into 2 partitions (b=10, b=20), one row each
+    run_command(f"INSERT INTO {schema}.tbl VALUES ({pre_a_vals[0]}, 10);", pg_conn)
+    run_command(f"INSERT INTO {schema}.tbl VALUES ({pre_a_vals[1]}, 20);", pg_conn)
+    pg_conn.commit()
+
+    # Baseline: partition pruning on b works before promotion
+    results = run_query(
+        f"{explain_prefix} SELECT * FROM {schema}.tbl WHERE b = 10", pg_conn
+    )
+    assert int(fetch_data_files_used(results)) == 1
+
+    # Promote non-partition column a
+    run_command(f"ALTER TABLE {schema}.tbl ALTER COLUMN a TYPE {new_type};", pg_conn)
+    pg_conn.commit()
+
+    # Insert a row into a new partition (b=30) after promotion
+    run_command(f"INSERT INTO {schema}.tbl VALUES ({post_a_val}, 30);", pg_conn)
+    pg_conn.commit()
+
+    # Verify all data readable
+    results = run_query(f"SELECT count(*) FROM {schema}.tbl", pg_conn)
+    assert results[0][0] == 3
+
+    # Partition pruning: b=10 → 1 file (old partition, pre-promotion data)
+    results = run_query(
+        f"{explain_prefix} SELECT * FROM {schema}.tbl WHERE b = 10", pg_conn
+    )
+    assert int(fetch_data_files_used(results)) == 1
+
+    # Partition pruning: b=20 → 1 file (old partition, pre-promotion data)
+    results = run_query(
+        f"{explain_prefix} SELECT * FROM {schema}.tbl WHERE b = 20", pg_conn
+    )
+    assert int(fetch_data_files_used(results)) == 1
+
+    # Partition pruning: b=30 → 1 file (new partition, post-promotion data)
+    results = run_query(
+        f"{explain_prefix} SELECT * FROM {schema}.tbl WHERE b = 30", pg_conn
+    )
+    assert int(fetch_data_files_used(results)) == 1
+
+    # Full scan: all 3 files
+    results = run_query(f"{explain_prefix} SELECT * FROM {schema}.tbl", pg_conn)
+    assert int(fetch_data_files_used(results)) == 3
+
+    run_command(f"DROP SCHEMA {schema} CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
 # this test file aims to ensure partition pruning works
 @pytest.fixture(scope="module")
 def disable_data_file_pruning(superuser_conn):

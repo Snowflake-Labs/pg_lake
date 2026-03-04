@@ -1,5 +1,6 @@
 from utils_pytest import *
 import itertools
+import pytest
 
 
 # don't accept 'catalog_name', 'catalog_namespace', 'catalog_table_name'
@@ -835,6 +836,222 @@ def test_complex_types_object_store(
         	""",
         pg_conn,
     )
+    pg_conn.commit()
+
+
+@pytest.mark.parametrize(
+    "schema, col_type, new_type, initial_val, initial_b, promoted_val, promoted_b, expected_pg_type",
+    [
+        pytest.param(
+            "os_type_promo",
+            "int",
+            "bigint",
+            "1",
+            2,
+            str(2**40),
+            3,
+            "bigint",
+            id="int_to_bigint",
+        ),
+        pytest.param(
+            "os_type_promo_f",
+            "real",
+            "double precision",
+            "1.5",
+            1,
+            "1.23456789012345",
+            2,
+            "double precision",
+            id="float_to_double",
+        ),
+        pytest.param(
+            "os_type_promo_d",
+            "numeric(10,2)",
+            "numeric(20,2)",
+            "12345.67",
+            1,
+            "123456789012345.67",
+            2,
+            "numeric",
+            id="decimal_widen_precision",
+        ),
+    ],
+)
+def test_object_store_alter_column_type(
+    pg_conn,
+    s3,
+    extension,
+    with_default_location,
+    adjust_object_store_settings,
+    schema,
+    col_type,
+    new_type,
+    initial_val,
+    initial_b,
+    promoted_val,
+    promoted_b,
+    expected_pg_type,
+):
+    """Test allowed Iceberg type promotions on object_store catalog tables"""
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(
+        f"""
+        CREATE TABLE {schema}.tbl (a {col_type}, b int)
+        USING iceberg WITH (catalog='object_store');
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"INSERT INTO {schema}.tbl VALUES ({initial_val}, {initial_b});", pg_conn
+    )
+    pg_conn.commit()
+    wait_until_object_store_writable_table_pushed(pg_conn, schema, "tbl")
+
+    # promote column type
+    run_command(f"ALTER TABLE {schema}.tbl ALTER COLUMN a TYPE {new_type};", pg_conn)
+    pg_conn.commit()
+    wait_until_object_store_writable_table_pushed(pg_conn, schema, "tbl")
+
+    # verify column type changed in PG catalog
+    result = run_query(
+        f"SELECT atttypid::regtype FROM pg_attribute "
+        f"WHERE attrelid = '{schema}.tbl'::regclass AND attname = 'a'",
+        pg_conn,
+    )
+    assert result == [[expected_pg_type]]
+
+    # insert data utilizing promoted type
+    run_command(
+        f"INSERT INTO {schema}.tbl VALUES ({promoted_val}, {promoted_b});", pg_conn
+    )
+    pg_conn.commit()
+    wait_until_object_store_writable_table_pushed(pg_conn, schema, "tbl")
+
+    # verify all data is readable
+    results = run_query(f"SELECT a, b FROM {schema}.tbl ORDER BY b ASC", pg_conn)
+    assert len(results) == 2
+    assert str(results[0][0]) == initial_val
+    assert results[0][1] == initial_b
+    assert str(results[1][0]) == promoted_val
+    assert results[1][1] == promoted_b
+
+    run_command(f"DROP SCHEMA {schema} CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_object_store_alter_column_type_disallowed(
+    pg_conn, s3, extension, with_default_location, adjust_object_store_settings
+):
+    """Test that disallowed type promotions are rejected for object_store catalog Iceberg tables"""
+    run_command("CREATE SCHEMA os_type_promo_dis;", pg_conn)
+    run_command(
+        """
+        CREATE TABLE os_type_promo_dis.tbl (a int, b bigint, c double precision, d numeric(10,2))
+        USING iceberg WITH (catalog='object_store');
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    disallowed_cases = [
+        ("a", "varchar(255)", "int to varchar"),
+        ("b", "int", "bigint to int"),
+        ("c", "real", "double to float"),
+        ("d", "numeric(10,3)", "decimal scale change"),
+        ("d", "numeric(8,2)", "decimal precision narrowing"),
+        ("a", "real", "int to real"),
+    ]
+
+    for col, new_type, description in disallowed_cases:
+        error = run_command(
+            f"ALTER TABLE os_type_promo_dis.tbl ALTER COLUMN {col} TYPE {new_type};",
+            pg_conn,
+            raise_error=False,
+        )
+        assert error is not None, f"Expected error for {description}"
+        assert "not supported" in str(
+            error
+        ), f"Expected 'not supported' error for {description}, got: {error}"
+        assert "Allowed type promotions for Iceberg tables are" in str(
+            error
+        ), f"Expected detail message for {description}, got: {error}"
+        pg_conn.rollback()
+
+    run_command("DROP SCHEMA os_type_promo_dis CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_object_store_alter_column_type_with_reader(
+    pg_conn, s3, extension, with_default_location, adjust_object_store_settings
+):
+    """Test type promotion followed by data insert, verifying object_store reader sees changes"""
+    run_command("CREATE SCHEMA os_type_promo_rdr;", pg_conn)
+    run_command(
+        """
+        CREATE TABLE os_type_promo_rdr.tbl (a int, b real, c int)
+        USING iceberg WITH (catalog='object_store');
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command("INSERT INTO os_type_promo_rdr.tbl VALUES (1, 1.5, 10);", pg_conn)
+    pg_conn.commit()
+    wait_until_object_store_writable_table_pushed(pg_conn, "os_type_promo_rdr", "tbl")
+
+    # promote multiple columns
+    run_command(
+        "ALTER TABLE os_type_promo_rdr.tbl ALTER COLUMN a TYPE bigint;", pg_conn
+    )
+    run_command(
+        "ALTER TABLE os_type_promo_rdr.tbl ALTER COLUMN b TYPE double precision;",
+        pg_conn,
+    )
+    pg_conn.commit()
+    wait_until_object_store_writable_table_pushed(pg_conn, "os_type_promo_rdr", "tbl")
+
+    # insert data with promoted types
+    run_command(
+        f"INSERT INTO os_type_promo_rdr.tbl VALUES ({2**40}, 1.23456789012345, 20);",
+        pg_conn,
+    )
+    pg_conn.commit()
+    wait_until_object_store_writable_table_pushed(pg_conn, "os_type_promo_rdr", "tbl")
+
+    results = run_query(
+        "SELECT a, b, c FROM os_type_promo_rdr.tbl ORDER BY c ASC", pg_conn
+    )
+    assert results == [[1, 1.5, 10], [2**40, 1.23456789012345, 20]]
+
+    # create read-only reader and verify schema + data match
+    run_command(
+        """
+        CREATE TABLE os_type_promo_rdr.reader ()
+        USING iceberg WITH (catalog='object_store', read_only=True, catalog_table_name='tbl');
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    reader_types = run_query(
+        "SELECT attname, atttypid::regtype FROM pg_attribute "
+        "WHERE attrelid = 'os_type_promo_rdr.reader'::regclass AND attnum > 0 "
+        "ORDER BY attnum",
+        pg_conn,
+    )
+    assert reader_types == [
+        ["a", "bigint"],
+        ["b", "double precision"],
+        ["c", "integer"],
+    ]
+
+    assert_tables_are_the_same(
+        pg_conn, "os_type_promo_rdr.tbl", "os_type_promo_rdr.reader"
+    )
+
+    run_command("DROP SCHEMA os_type_promo_rdr CASCADE;", pg_conn)
     pg_conn.commit()
 
 

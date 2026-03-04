@@ -1,25 +1,6 @@
 from utils_pytest import *
 from helpers.polaris import *
-from urllib.parse import quote
-from urllib.parse import urlencode
-from pyiceberg.schema import Schema
-from pyiceberg.types import (
-    TimestampType,
-    FloatType,
-    IntegerType,
-    DoubleType,
-    StringType,
-    BinaryType,
-    FixedType,
-    NestedField,
-    ListType,
-    StructType,
-)
-import pyarrow
-from datetime import datetime, date, timezone
-from urllib.parse import quote, quote_plus
-from pyiceberg.expressions import EqualTo
-from pyiceberg.partitioning import PartitionSpec, PartitionField
+import pytest
 import json
 
 
@@ -3264,6 +3245,248 @@ def test_add_drop_columns(
     pg_conn.commit()
 
 
+@pytest.mark.parametrize(
+    "schema, col_type, new_type, initial_val, initial_b, promoted_val, promoted_b, expected_pg_type, expected_rest_type",
+    [
+        pytest.param(
+            "rest_type_promo",
+            "int",
+            "bigint",
+            "1",
+            2,
+            str(2**40),
+            3,
+            "bigint",
+            "long",
+            id="int_to_bigint",
+        ),
+        pytest.param(
+            "rest_type_promo_f",
+            "real",
+            "double precision",
+            "1.5",
+            1,
+            "1.23456789012345",
+            2,
+            "double precision",
+            "double",
+            id="float_to_double",
+        ),
+        pytest.param(
+            "rest_type_promo_d",
+            "numeric(10,2)",
+            "numeric(20,2)",
+            "12345.67",
+            1,
+            "123456789012345.67",
+            2,
+            "numeric",
+            "decimal",
+            id="decimal_widen_precision",
+        ),
+    ],
+)
+def test_rest_alter_column_type(
+    pg_conn,
+    superuser_conn,
+    installcheck,
+    s3,
+    extension,
+    create_types_helper_functions,
+    with_default_location,
+    polaris_session,
+    set_polaris_gucs,
+    create_http_helper_functions,
+    schema,
+    col_type,
+    new_type,
+    initial_val,
+    initial_b,
+    promoted_val,
+    promoted_b,
+    expected_pg_type,
+    expected_rest_type,
+):
+    """Test allowed Iceberg type promotions on REST catalog tables"""
+    if installcheck:
+        return
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(
+        f"""
+        CREATE TABLE {schema}.tbl (a {col_type}, b int)
+        USING iceberg WITH (catalog='rest');
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"INSERT INTO {schema}.tbl VALUES ({initial_val}, {initial_b});", pg_conn
+    )
+    pg_conn.commit()
+
+    # promote column type
+    run_command(f"ALTER TABLE {schema}.tbl ALTER COLUMN a TYPE {new_type};", pg_conn)
+    pg_conn.commit()
+
+    # verify column type changed in PG catalog
+    result = run_query(
+        f"SELECT atttypid::regtype FROM pg_attribute "
+        f"WHERE attrelid = '{schema}.tbl'::regclass AND attname = 'a'",
+        pg_conn,
+    )
+    assert result == [[expected_pg_type]]
+
+    # insert data utilizing promoted type
+    run_command(
+        f"INSERT INTO {schema}.tbl VALUES ({promoted_val}, {promoted_b});", pg_conn
+    )
+    pg_conn.commit()
+
+    # verify all data is readable
+    results = run_query(f"SELECT a, b FROM {schema}.tbl ORDER BY b ASC", pg_conn)
+    assert len(results) == 2
+    assert str(results[0][0]) == initial_val
+    assert results[0][1] == initial_b
+    assert str(results[1][0]) == promoted_val
+    assert results[1][1] == promoted_b
+
+    # verify REST catalog metadata reflects the type change
+    metadata = get_rest_table_metadata(schema, "tbl", superuser_conn)
+    schemas = metadata["metadata"].get("schemas", [])
+    last_schema = schemas[-1]
+    field_a = next(f for f in last_schema["fields"] if f["name"] == "a")
+    assert (
+        expected_rest_type in field_a["type"]
+    ), f"Expected '{expected_rest_type}' in REST type but got {field_a['type']}"
+
+    assert_metadata_on_pg_catalog_and_rest_matches(schema, "tbl", superuser_conn)
+
+    run_command(f"DROP SCHEMA {schema} CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_rest_alter_column_type_disallowed_promotions(
+    pg_conn,
+    installcheck,
+    s3,
+    extension,
+    create_types_helper_functions,
+    with_default_location,
+    polaris_session,
+    set_polaris_gucs,
+    create_http_helper_functions,
+):
+    """Test that disallowed type promotions are rejected for REST catalog Iceberg tables"""
+    if installcheck:
+        return
+
+    run_command("CREATE SCHEMA rest_type_promo_dis;", pg_conn)
+    run_command(
+        """
+        CREATE TABLE rest_type_promo_dis.tbl (
+            a int,
+            b bigint,
+            c double precision,
+            d numeric(10,2)
+        ) USING iceberg WITH (catalog='rest');
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    disallowed_cases = [
+        ("a", "varchar(255)", "int to varchar"),
+        ("b", "int", "bigint to int"),
+        ("c", "real", "double to float"),
+        ("d", "numeric(10,3)", "decimal scale change"),
+        ("d", "numeric(8,2)", "decimal precision narrowing"),
+        ("a", "real", "int to real"),
+    ]
+
+    for col, new_type, description in disallowed_cases:
+        error = run_command(
+            f"ALTER TABLE rest_type_promo_dis.tbl ALTER COLUMN {col} TYPE {new_type};",
+            pg_conn,
+            raise_error=False,
+        )
+        assert error is not None, f"Expected error for {description}"
+        assert "not supported" in str(
+            error
+        ), f"Expected 'not supported' error for {description}, got: {error}"
+        assert "Allowed type promotions for Iceberg tables are" in str(
+            error
+        ), f"Expected detail message for {description}, got: {error}"
+        pg_conn.rollback()
+
+    run_command("DROP SCHEMA rest_type_promo_dis CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_rest_alter_column_type_with_insert_after(
+    pg_conn,
+    superuser_conn,
+    installcheck,
+    s3,
+    extension,
+    create_types_helper_functions,
+    with_default_location,
+    polaris_session,
+    set_polaris_gucs,
+    create_http_helper_functions,
+):
+    """Test type promotion followed by data insert and read on REST catalog table"""
+    if installcheck:
+        return
+
+    run_command("CREATE SCHEMA rest_type_promo_ins;", pg_conn)
+    run_command(
+        """
+        CREATE TABLE rest_type_promo_ins.tbl (a int, b real, c int)
+        USING iceberg WITH (catalog='rest');
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        "INSERT INTO rest_type_promo_ins.tbl VALUES (1, 1.5, 10);",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # promote multiple columns in the same transaction
+    run_command(
+        "ALTER TABLE rest_type_promo_ins.tbl ALTER COLUMN a TYPE bigint;",
+        pg_conn,
+    )
+    run_command(
+        "ALTER TABLE rest_type_promo_ins.tbl ALTER COLUMN b TYPE double precision;",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # insert data with promoted types
+    run_command(
+        f"INSERT INTO rest_type_promo_ins.tbl VALUES ({2**40}, 1.23456789012345, 20);",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    results = run_query(
+        "SELECT a, b, c FROM rest_type_promo_ins.tbl ORDER BY c ASC", pg_conn
+    )
+    assert results == [[1, 1.5, 10], [2**40, 1.23456789012345, 20]]
+
+    assert_metadata_on_pg_catalog_and_rest_matches(
+        "rest_type_promo_ins", "tbl", superuser_conn
+    )
+
+    run_command("DROP SCHEMA rest_type_promo_ins CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
 def test_add_column_with_check_constraint(
     pg_conn,
     superuser_conn,
@@ -4078,7 +4301,9 @@ def assert_schemas_equal(namespace, table_name, superuser_conn, metadata):
             "bool": "boolean",
             "boolean": "boolean",
             "float": "float",
+            "real": "float",
             "double": "double",
+            "double precision": "double",
             "str": "string",
             "string": "text",
             "timestamp_tz": "timestamp_tz",
@@ -4089,8 +4314,11 @@ def assert_schemas_equal(namespace, table_name, superuser_conn, metadata):
             "uuid": "uuid",
             "binary": "binary",
             "decimal": "decimal",
+            "numeric": "decimal",
         }
-        return aliases.get(t, t)
+        # strip precision/scale from parameterized types like "decimal(20, 2)"
+        base = t.split("(")[0].strip()
+        return aliases.get(base, t)
 
     # schema checks
     schemas = metadata["metadata"].get("schemas", [])
