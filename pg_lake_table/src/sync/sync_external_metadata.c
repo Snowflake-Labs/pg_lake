@@ -61,16 +61,16 @@
 
 PG_FUNCTION_INFO_V1(sync_iceberg_metadata_from_external_write);
 
-static void SyncSchemaFromMetadata(Oid relationId, IcebergTableMetadata *metadata);
+static void SyncSchemaFromMetadata(Oid relationId, IcebergTableMetadata * metadata);
 static void FetchExistingFieldMappings(Oid relationId, int **fieldIds,
 									   int16 **attnums, int *count);
 static void ExecuteAlterTableViaSPI(const char *cmd);
-static void SyncPartitionSpecsFromMetadata(Oid relationId, IcebergTableMetadata *metadata);
-static void SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata *metadata);
-static char *ColumnBoundBinaryToText(ColumnBound *bound, int fieldId,
-									 IcebergTableSchema *schema);
-static List *BuildColumnStatsForManifestEntry(IcebergManifestEntry *manifestEntry,
-											  IcebergTableSchema *schema);
+static void SyncPartitionSpecsFromMetadata(Oid relationId, IcebergTableMetadata * metadata);
+static void SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata * metadata);
+static char *ColumnBoundBinaryToText(ColumnBound * bound, int fieldId,
+									 IcebergTableSchema * schema);
+static List *BuildColumnStatsForManifestEntry(IcebergManifestEntry * manifestEntry,
+											  IcebergTableSchema * schema);
 
 
 /*
@@ -97,8 +97,9 @@ sync_iceberg_metadata_from_external_write(PG_FUNCTION_ARGS)
 
 	/*
 	 * Suppress the ProcessAlterTable hook's Iceberg DDL processing while we
-	 * add/drop columns.  We manage field_id_mappings ourselves and do not want
-	 * the hook to register duplicate mappings or schedule a metadata write.
+	 * add/drop columns.  We manage field_id_mappings ourselves and do not
+	 * want the hook to register duplicate mappings or schedule a metadata
+	 * write.
 	 */
 	SkipIcebergDDLProcessing = true;
 
@@ -189,7 +190,7 @@ ExecuteAlterTableViaSPI(const char *cmd)
  * Iceberg schema, we DROP COLUMN (but keep the mapping for reading old files).
  */
 static void
-SyncSchemaFromMetadata(Oid relationId, IcebergTableMetadata *metadata)
+SyncSchemaFromMetadata(Oid relationId, IcebergTableMetadata * metadata)
 {
 	IcebergTableSchema *icebergSchema = GetCurrentIcebergTableSchema(metadata);
 
@@ -308,8 +309,8 @@ SyncSchemaFromMetadata(Oid relationId, IcebergTableMetadata *metadata)
 			continue;
 
 		/*
-		 * Check if the column is already dropped in pg_attribute (could happen
-		 * if this sync runs multiple times).
+		 * Check if the column is already dropped in pg_attribute (could
+		 * happen if this sync runs multiple times).
 		 */
 		Relation	rel = RelationIdGetRelation(relationId);
 		TupleDesc	tupdesc = RelationGetDescr(rel);
@@ -359,7 +360,7 @@ SyncSchemaFromMetadata(Oid relationId, IcebergTableMetadata *metadata)
  * we register it. We also update the default_spec_id.
  */
 static void
-SyncPartitionSpecsFromMetadata(Oid relationId, IcebergTableMetadata *metadata)
+SyncPartitionSpecsFromMetadata(Oid relationId, IcebergTableMetadata * metadata)
 {
 	/* get the largest spec_id currently in catalog */
 	int			largestCatalogSpecId = GetLargestSpecId(relationId);
@@ -387,7 +388,7 @@ SyncPartitionSpecsFromMetadata(Oid relationId, IcebergTableMetadata *metadata)
  * Files that are no longer referenced are added to the deletion queue.
  */
 static void
-SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata *metadata)
+SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata * metadata)
 {
 	TimestampTz orphanedAt = GetCurrentTransactionStartTimestamp();
 
@@ -442,8 +443,8 @@ SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata *metadata)
 	if (currentSnapshot == NULL)
 	{
 		/*
-		 * Empty table after external write. All old files are now unreferenced,
-		 * queue them for deletion.
+		 * Empty table after external write. All old files are now
+		 * unreferenced, queue them for deletion.
 		 */
 		if (oldFileHash != NULL)
 		{
@@ -477,7 +478,7 @@ SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata *metadata)
 		hashCtl.hcxt = CurrentMemoryContext;
 
 		newFileHash = hash_create("new file paths",
-								  1024,		/* initial estimate */
+								  1024, /* initial estimate */
 								  &hashCtl,
 								  HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
 	}
@@ -529,11 +530,11 @@ SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata *metadata)
 
 			/* insert the data file into the catalog */
 			int64		fileId = AddDataFileToTable(relationId,
-												   dataFile->file_path,
-												   dataFile->record_count,
-												   dataFile->file_size_in_bytes,
-												   content,
-												   INVALID_ROW_ID);
+													dataFile->file_path,
+													dataFile->record_count,
+													dataFile->file_size_in_bytes,
+													content,
+													INVALID_ROW_ID);
 
 			/* insert column stats if available */
 			if (content == CONTENT_DATA)
@@ -561,8 +562,8 @@ SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata *metadata)
 	}
 
 	/*
-	 * Queue old files that are no longer referenced for deletion.
-	 * Compare oldFileHash with newFileHash to find unreferenced files.
+	 * Queue old files that are no longer referenced for deletion. Compare
+	 * oldFileHash with newFileHash to find unreferenced files.
 	 */
 	if (oldFileHash != NULL && newFileHash != NULL)
 	{
@@ -594,8 +595,8 @@ SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata *metadata)
  * to Postgres text representation for the catalog.
  */
 static List *
-BuildColumnStatsForManifestEntry(IcebergManifestEntry *manifestEntry,
-								 IcebergTableSchema *schema)
+BuildColumnStatsForManifestEntry(IcebergManifestEntry * manifestEntry,
+								 IcebergTableSchema * schema)
 {
 	DataFile   *dataFile = &manifestEntry->data_file;
 
@@ -677,8 +678,8 @@ BuildColumnStatsForManifestEntry(IcebergManifestEntry *manifestEntry,
  * deserialization fails.
  */
 static char *
-ColumnBoundBinaryToText(ColumnBound *bound, int fieldId,
-						IcebergTableSchema *schema)
+ColumnBoundBinaryToText(ColumnBound * bound, int fieldId,
+						IcebergTableSchema * schema)
 {
 	if (bound->value == NULL || bound->value_length == 0)
 		return NULL;
@@ -702,9 +703,9 @@ ColumnBoundBinaryToText(ColumnBound *bound, int fieldId,
 
 	/* deserialize from Iceberg binary to Postgres Datum */
 	Datum		boundDatum = PGIcebergBinaryDeserialize(bound->value,
-													   bound->value_length,
-													   icebergField->type,
-													   pgType);
+														bound->value_length,
+														icebergField->type,
+														pgType);
 
 	/* convert Datum to text representation */
 	Oid			typoutput;
