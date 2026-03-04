@@ -69,6 +69,9 @@ typedef struct RestCatalogRequestPerTable
 	char	   *tableRestUrl;
 	char	   *tableIdentifier;
 
+	/* Per-table REST catalog connection info for multi-server support */
+	RestCatalogConnectionInfo *conn;
+
 	RestCatalogRequest *createTableRequest;
 	RestCatalogRequest *dropTableRequest;
 
@@ -274,7 +277,7 @@ PostAllRestCatalogRequests(void)
 			{
 				HttpResult	httpResult =
 					SendRequestToRestCatalog(HTTP_POST, requestPerTable->tableRestUrl,
-											 createTableRequest->body, PostHeadersWithAuth());
+											 createTableRequest->body, PostHeadersWithAuth(requestPerTable->conn));
 
 				if (httpResult.status != 200)
 				{
@@ -290,7 +293,7 @@ PostAllRestCatalogRequests(void)
 			{
 				HttpResult	httpResult =
 					SendRequestToRestCatalog(HTTP_DELETE, requestPerTable->tableRestUrl,
-											 NULL, DeleteHeadersWithAuth());
+											 NULL, DeleteHeadersWithAuth(requestPerTable->conn));
 
 				if (httpResult.status != 204)
 				{
@@ -311,16 +314,14 @@ PostAllRestCatalogRequests(void)
 
 	/*
 	 * Now that all create table requests have been posted, we can post all
-	 * the other modifications. All table modifications are sent in a single
-	 * HTTP request to ensure atomicity.
+	 * the other modifications. We group modifications by REST catalog server
+	 * (identified by host) so that each server gets its own transaction
+	 * commit request for atomicity.
+	 *
+	 * We do two passes: first collect tables that have modifications, then
+	 * group by server host and send one batch per server.
 	 */
-	char	   *catalogName = NULL;
-	bool		hasRestCatalogChanges = false;
-	StringInfo	batchRequestBody = makeStringInfo();
-
-	appendStringInfo(batchRequestBody, "{");	/* start msg body  */
-	appendJsonKey(batchRequestBody, "table-changes");
-	appendStringInfo(batchRequestBody, "[");	/* start array of changes */
+	List	   *tablesWithModifications = NIL;
 
 	hash_seq_init(&status, RestCatalogRequestsHash);
 
@@ -328,93 +329,102 @@ PostAllRestCatalogRequests(void)
 	{
 		if (!requestPerTable->isValid)
 		{
-			/*
-			 * Might only happen if an OOM happened during adding this request
-			 * to the hash table.
-			 */
 			elog(WARNING, "Skipping invalid REST catalog request for relation %u",
 				 requestPerTable->relationId);
 			continue;
 		}
 
-		/* TODO: can we ever have multiple catalogs? */
-		catalogName = requestPerTable->catalogName;
-
 		if (requestPerTable->createTableRequest != NULL &&
 			requestPerTable->dropTableRequest != NULL)
-		{
-			/*
-			 * table is created and dropped in the same transaction, nothing
-			 * post to do for this table to the REST catalog.
-			 */
 			continue;
-		}
-		else if (requestPerTable->tableModifyRequests == NIL)
-		{
-			/*
-			 * no modifications to send for this table
-			 */
+
+		if (requestPerTable->tableModifyRequests == NIL)
 			continue;
-		}
 
-		if (hasRestCatalogChanges)
-		{
-			appendStringInfoChar(batchRequestBody, ',');	/* separate previous
-															 * table change */
-		}
-
-		appendStringInfoChar(batchRequestBody, '{');	/* start per-table json
-														 * object */
-		appendJsonKey(batchRequestBody, "identifier");
-		appendStringInfo(batchRequestBody, "%s", requestPerTable->tableIdentifier);
-		appendStringInfoChar(batchRequestBody, ',');
-		appendStringInfoString(batchRequestBody, "\"requirements\":[],");
-		appendStringInfoString(batchRequestBody, " \"updates\":[");
-
-		ListCell   *requestCell = NULL;
-
-		foreach(requestCell, requestPerTable->tableModifyRequests)
-		{
-			RestCatalogRequest *request = (RestCatalogRequest *) lfirst(requestCell);
-
-			appendStringInfoString(batchRequestBody, request->body);
-
-			bool		lastRequest = (requestCell == list_tail(requestPerTable->tableModifyRequests));
-
-			if (!lastRequest)
-			{
-				appendStringInfoChar(batchRequestBody, ',');
-			}
-
-			if (message_level_is_interesting(DEBUG2))
-			{
-				elog(DEBUG2, "REST Catalog Request Body size reached: %d bytes",
-					 batchRequestBody->len);
-			}
-		}
-
-		appendStringInfoChar(batchRequestBody, ']');	/* close updates array */
-		appendStringInfoChar(batchRequestBody, '}');	/* close per-table json
-														 * object */
-
-		/*
-		 * We have at least one change to send for this table
-		 */
-		hasRestCatalogChanges = true;
+		tablesWithModifications = lappend(tablesWithModifications, requestPerTable);
 	}
 
-	if (hasRestCatalogChanges)
+	/*
+	 * Group by server host and send one batch per server. For each table,
+	 * find if we already started a batch for its server host, otherwise
+	 * start a new one.
+	 */
+	while (list_length(tablesWithModifications) > 0)
 	{
-		appendStringInfoChar(batchRequestBody, ']');	/* close table-changes */
-		appendStringInfoChar(batchRequestBody, '}');	/* close json body */
+		RestCatalogRequestPerTable *firstTable =
+			(RestCatalogRequestPerTable *) linitial(tablesWithModifications);
 
-		char	   *url = psprintf(REST_CATALOG_TRANSACTION_COMMIT, RestCatalogHost, catalogName);
-		HttpResult	httpResult = SendRequestToRestCatalog(HTTP_POST, url, batchRequestBody->data, PostHeadersWithAuth());
+		char	   *batchHost = firstTable->conn->host;
+		char	   *catalogName = firstTable->catalogName;
+		RestCatalogConnectionInfo *batchConn = firstTable->conn;
+		bool		hasChanges = false;
+		StringInfo	batchRequestBody = makeStringInfo();
 
-		if (httpResult.status != 204)
+		appendStringInfoChar(batchRequestBody, '{');
+		appendJsonKey(batchRequestBody, "table-changes");
+		appendStringInfoChar(batchRequestBody, '[');
+
+		List	   *remaining = NIL;
+		ListCell   *lc;
+
+		foreach(lc, tablesWithModifications)
 		{
-			ReportHTTPError(httpResult, WARNING);
+			requestPerTable = (RestCatalogRequestPerTable *) lfirst(lc);
+
+			if (strcmp(requestPerTable->conn->host, batchHost) != 0)
+			{
+				remaining = lappend(remaining, requestPerTable);
+				continue;
+			}
+
+			if (hasChanges)
+				appendStringInfoChar(batchRequestBody, ',');
+
+			appendStringInfoChar(batchRequestBody, '{');
+			appendJsonKey(batchRequestBody, "identifier");
+			appendStringInfo(batchRequestBody, "%s", requestPerTable->tableIdentifier);
+			appendStringInfoChar(batchRequestBody, ',');
+			appendStringInfoString(batchRequestBody, "\"requirements\":[],");
+			appendStringInfoString(batchRequestBody, " \"updates\":[");
+
+			ListCell   *requestCell = NULL;
+
+			foreach(requestCell, requestPerTable->tableModifyRequests)
+			{
+				RestCatalogRequest *request = (RestCatalogRequest *) lfirst(requestCell);
+
+				appendStringInfoString(batchRequestBody, request->body);
+
+				if (requestCell != list_tail(requestPerTable->tableModifyRequests))
+					appendStringInfoChar(batchRequestBody, ',');
+
+				if (message_level_is_interesting(DEBUG2))
+				{
+					elog(DEBUG2, "REST Catalog Request Body size reached: %d bytes",
+						 batchRequestBody->len);
+				}
+			}
+
+			appendStringInfoChar(batchRequestBody, ']');
+			appendStringInfoChar(batchRequestBody, '}');
+			hasChanges = true;
 		}
+
+		if (hasChanges)
+		{
+			appendStringInfoChar(batchRequestBody, ']');
+			appendStringInfoChar(batchRequestBody, '}');
+
+			char	   *url = psprintf(REST_CATALOG_TRANSACTION_COMMIT, batchConn->host, catalogName);
+			HttpResult	httpResult = SendRequestToRestCatalog(HTTP_POST, url, batchRequestBody->data, PostHeadersWithAuth(batchConn));
+
+			if (httpResult.status != 204)
+			{
+				ReportHTTPError(httpResult, WARNING);
+			}
+		}
+
+		tablesWithModifications = remaining;
 	}
 
 	/*
@@ -599,6 +609,25 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 		memset(requestPerTable, 0, sizeof(RestCatalogRequestPerTable));
 		requestPerTable->relationId = relationId;
 
+		/* Resolve per-table REST catalog connection info */
+		RestCatalogConnectionInfo *conn = GetRestCatalogConnectionForRelation(relationId);
+		RestCatalogConnectionInfo *persistConn =
+			MemoryContextAlloc(TopTransactionContext, sizeof(RestCatalogConnectionInfo));
+
+		memcpy(persistConn, conn, sizeof(RestCatalogConnectionInfo));
+		if (conn->serverName)
+			persistConn->serverName = MemoryContextStrdup(TopTransactionContext, conn->serverName);
+		persistConn->host = MemoryContextStrdup(TopTransactionContext, conn->host);
+		if (conn->oauthHostPath)
+			persistConn->oauthHostPath = MemoryContextStrdup(TopTransactionContext, conn->oauthHostPath);
+		if (conn->clientId)
+			persistConn->clientId = MemoryContextStrdup(TopTransactionContext, conn->clientId);
+		if (conn->clientSecret)
+			persistConn->clientSecret = MemoryContextStrdup(TopTransactionContext, conn->clientSecret);
+		if (conn->scope)
+			persistConn->scope = MemoryContextStrdup(TopTransactionContext, conn->scope);
+		requestPerTable->conn = persistConn;
+
 		requestPerTable->catalogName =
 			MemoryContextStrdup(TopTransactionContext, GetRestCatalogName(relationId));
 		requestPerTable->catalogNamespace =
@@ -615,7 +644,7 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 
 		requestPerTable->tableRestUrl =
 			MemoryContextStrdup(TopTransactionContext, psprintf(REST_CATALOG_TABLE,
-																RestCatalogHost,
+																persistConn->host,
 																requestPerTable->urlEncodedCatalogName,
 																requestPerTable->urlEncodedCatalogNamespace,
 																requestPerTable->urlEncodedCatalogTableName));
