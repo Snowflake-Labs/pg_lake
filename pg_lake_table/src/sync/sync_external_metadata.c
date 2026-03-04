@@ -39,6 +39,7 @@
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/snapmgr.h"
 
 #include "pg_lake/cleanup/deletion_queue.h"
 #include "pg_lake/data_file/data_files.h"
