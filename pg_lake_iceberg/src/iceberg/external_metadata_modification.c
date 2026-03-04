@@ -259,10 +259,11 @@ HandleInternalCatalogUpdate(char *namespaceName, char *tableName,
 		 * the function manager. The sync function itself uses SPI internally,
 		 * but that's fine since we're not in an SPI context here.
 		 */
+		Oid			argTypes[1] = {REGCLASSOID};
 		Oid			syncFuncOid = LookupFuncName(
 											list_make2(makeString("lake_table"),
 													  makeString("sync_iceberg_metadata_from_external_write")),
-											1, (Oid[]){REGCLASSOID}, true);
+											1, argTypes, true);
 
 		if (OidIsValid(syncFuncOid))
 		{

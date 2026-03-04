@@ -432,7 +432,9 @@ def test_external_write_deletion_queue_on_overwrite(
         """,
         superuser_conn,
     )
-    assert all(row[0] for row in timestamps), "All queued files should have orphaned_at timestamp"
+    assert all(
+        row[0] for row in timestamps
+    ), "All queued files should have orphaned_at timestamp"
 
     pg_conn.rollback()
 
