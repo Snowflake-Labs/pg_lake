@@ -351,3 +351,282 @@ def test_external_write_empty_table(
     assert result[0][0] == 0
 
     pg_conn.rollback()
+
+
+def test_external_write_deletion_queue_on_overwrite(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+):
+    """
+    Verify that when PyIceberg overwrites a table, the old data files are
+    added to the deletion queue.
+    """
+    tbl = f"{TABLE_NAMESPACE}.{TABLE_NAME}_del_overwrite"
+
+    # create and insert initial data
+    run_command(f"CREATE TABLE {tbl} (a int, b text) USING iceberg", pg_conn)
+    run_command(
+        f"INSERT INTO {tbl} SELECT i, 'row' || i FROM generate_series(1,5) i",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # get the old data file paths before overwrite
+    old_files = run_query(
+        f"""
+        SELECT f.path
+        FROM lake_table.files f
+        JOIN pg_class c ON c.oid = f.table_name
+        WHERE c.relname = '{TABLE_NAME}_del_overwrite'
+        ORDER BY f.path
+        """,
+        superuser_conn,
+    )
+    assert len(old_files) > 0, "Should have at least one data file before overwrite"
+    old_file_paths = [row[0] for row in old_files]
+
+    # use PyIceberg to overwrite with new data
+    pyiceberg_table = iceberg_catalog.load_table(
+        f"{TABLE_NAMESPACE}.{TABLE_NAME}_del_overwrite"
+    )
+    new_data = pa.table(
+        {"a": [10, 20], "b": ["new1", "new2"]},
+        schema=pa.schema([pa.field("a", pa.int32()), pa.field("b", pa.string())]),
+    )
+    pyiceberg_table.overwrite(new_data)
+
+    # verify the new data is visible
+    result = run_query(f"SELECT count(*) FROM {tbl}", pg_conn)
+    assert result[0][0] == 2
+
+    # verify old files are in the deletion queue
+    queued_files = run_query(
+        f"""
+        SELECT dq.path
+        FROM lake_engine.deletion_queue dq
+        JOIN pg_class c ON c.oid = dq.table_name
+        WHERE c.relname = '{TABLE_NAME}_del_overwrite'
+        ORDER BY dq.path
+        """,
+        superuser_conn,
+    )
+    queued_file_paths = [row[0] for row in queued_files]
+
+    # all old files should be in the deletion queue
+    for old_path in old_file_paths:
+        assert (
+            old_path in queued_file_paths
+        ), f"Old file {old_path} should be in deletion queue"
+
+    # verify orphaned_at timestamp is set
+    timestamps = run_query(
+        f"""
+        SELECT dq.orphaned_at IS NOT NULL
+        FROM lake_engine.deletion_queue dq
+        JOIN pg_class c ON c.oid = dq.table_name
+        WHERE c.relname = '{TABLE_NAME}_del_overwrite'
+        """,
+        superuser_conn,
+    )
+    assert all(row[0] for row in timestamps), "All queued files should have orphaned_at timestamp"
+
+    pg_conn.rollback()
+
+
+def test_external_write_deletion_queue_on_empty(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+):
+    """
+    Verify that when PyIceberg overwrites a table with empty data,
+    ALL old data files are added to the deletion queue.
+    """
+    tbl = f"{TABLE_NAMESPACE}.{TABLE_NAME}_del_empty"
+
+    # create and insert initial data
+    run_command(f"CREATE TABLE {tbl} (a int) USING iceberg", pg_conn)
+    run_command(f"INSERT INTO {tbl} VALUES (1), (2), (3), (4), (5)", pg_conn)
+    pg_conn.commit()
+
+    # get the old data file paths
+    old_files = run_query(
+        f"""
+        SELECT f.path
+        FROM lake_table.files f
+        JOIN pg_class c ON c.oid = f.table_name
+        WHERE c.relname = '{TABLE_NAME}_del_empty'
+        ORDER BY f.path
+        """,
+        superuser_conn,
+    )
+    old_file_count = len(old_files)
+    assert old_file_count > 0, "Should have at least one data file"
+    old_file_paths = [row[0] for row in old_files]
+
+    # use PyIceberg to overwrite with empty data
+    pyiceberg_table = iceberg_catalog.load_table(
+        f"{TABLE_NAMESPACE}.{TABLE_NAME}_del_empty"
+    )
+    pyiceberg_table.overwrite(
+        pa.table({"a": pa.array([], type=pa.int32())}),
+    )
+
+    # verify table is empty
+    result = run_query(f"SELECT count(*) FROM {tbl}", pg_conn)
+    assert result[0][0] == 0
+
+    # verify ALL old files are in the deletion queue
+    queued_files = run_query(
+        f"""
+        SELECT dq.path
+        FROM lake_engine.deletion_queue dq
+        JOIN pg_class c ON c.oid = dq.table_name
+        WHERE c.relname = '{TABLE_NAME}_del_empty'
+        ORDER BY dq.path
+        """,
+        superuser_conn,
+    )
+    queued_file_paths = [row[0] for row in queued_files]
+
+    assert (
+        len(queued_file_paths) == old_file_count
+    ), f"Expected {old_file_count} files in deletion queue, got {len(queued_file_paths)}"
+
+    for old_path in old_file_paths:
+        assert (
+            old_path in queued_file_paths
+        ), f"Old file {old_path} should be in deletion queue"
+
+    pg_conn.rollback()
+
+
+def test_external_write_deletion_queue_only_old_files(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+):
+    """
+    Verify that only old files (not new files) are added to the deletion queue
+    after an external write that keeps some files.
+    """
+    tbl = f"{TABLE_NAMESPACE}.{TABLE_NAME}_del_selective"
+
+    # create and insert initial data
+    run_command(f"CREATE TABLE {tbl} (a int) USING iceberg", pg_conn)
+    run_command(f"INSERT INTO {tbl} VALUES (1), (2), (3)", pg_conn)
+    pg_conn.commit()
+
+    # get old data files
+    old_files = run_query(
+        f"""
+        SELECT f.path
+        FROM lake_table.files f
+        JOIN pg_class c ON c.oid = f.table_name
+        WHERE c.relname = '{TABLE_NAME}_del_selective'
+        ORDER BY f.path
+        """,
+        superuser_conn,
+    )
+    old_file_paths = [row[0] for row in old_files]
+
+    # append more data via PyIceberg
+    pyiceberg_table = iceberg_catalog.load_table(
+        f"{TABLE_NAMESPACE}.{TABLE_NAME}_del_selective"
+    )
+    new_data = pa.table(
+        {"a": [4, 5, 6]},
+        schema=pa.schema([pa.field("a", pa.int32())]),
+    )
+    pyiceberg_table.append(new_data)
+
+    # verify we have 6 rows
+    result = run_query(f"SELECT count(*) FROM {tbl}", pg_conn)
+    assert result[0][0] == 6
+
+    # get new data files (after append)
+    new_files = run_query(
+        f"""
+        SELECT f.path
+        FROM lake_table.files f
+        JOIN pg_class c ON c.oid = f.table_name
+        WHERE c.relname = '{TABLE_NAME}_del_selective'
+        ORDER BY f.path
+        """,
+        superuser_conn,
+    )
+    new_file_paths = [row[0] for row in new_files]
+
+    # after append, old files should still be there (no files queued for deletion)
+    queued_files_after_append = run_query(
+        f"""
+        SELECT dq.path
+        FROM lake_engine.deletion_queue dq
+        JOIN pg_class c ON c.oid = dq.table_name
+        WHERE c.relname = '{TABLE_NAME}_del_selective'
+        """,
+        superuser_conn,
+    )
+    assert (
+        len(queued_files_after_append) == 0
+    ), "After append, no files should be in deletion queue"
+
+    # now overwrite the table
+    overwrite_data = pa.table(
+        {"a": [100, 200]},
+        schema=pa.schema([pa.field("a", pa.int32())]),
+    )
+    pyiceberg_table.overwrite(overwrite_data)
+
+    # verify we have 2 rows
+    result = run_query(f"SELECT count(*) FROM {tbl}", pg_conn)
+    assert result[0][0] == 2
+
+    # verify ALL old files (both original and appended) are in deletion queue
+    queued_files = run_query(
+        f"""
+        SELECT dq.path
+        FROM lake_engine.deletion_queue dq
+        JOIN pg_class c ON c.oid = dq.table_name
+        WHERE c.relname = '{TABLE_NAME}_del_selective'
+        ORDER BY dq.path
+        """,
+        superuser_conn,
+    )
+    queued_file_paths = [row[0] for row in queued_files]
+
+    # all files from before the overwrite should be queued
+    for old_path in new_file_paths:
+        assert (
+            old_path in queued_file_paths
+        ), f"File {old_path} should be in deletion queue after overwrite"
+
+    # get current data files (after overwrite)
+    current_files = run_query(
+        f"""
+        SELECT f.path
+        FROM lake_table.files f
+        JOIN pg_class c ON c.oid = f.table_name
+        WHERE c.relname = '{TABLE_NAME}_del_selective'
+        """,
+        superuser_conn,
+    )
+    current_file_paths = [row[0] for row in current_files]
+
+    # current files should NOT be in the deletion queue
+    for current_path in current_file_paths:
+        assert (
+            current_path not in queued_file_paths
+        ), f"Current file {current_path} should NOT be in deletion queue"
+
+    pg_conn.rollback()
