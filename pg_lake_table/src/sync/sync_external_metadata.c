@@ -419,7 +419,7 @@ SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata *metadata)
 		oldFileHash = hash_create("old file paths",
 								  list_length(oldDataFiles),
 								  &hashCtl,
-								  HASH_ELEM | HASH_CONTEXT);
+								  HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
 
 		ListCell   *oldFileCell = NULL;
 
@@ -479,7 +479,7 @@ SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata *metadata)
 		newFileHash = hash_create("new file paths",
 								  1024,		/* initial estimate */
 								  &hashCtl,
-								  HASH_ELEM | HASH_CONTEXT);
+								  HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
 	}
 
 	ListCell   *manifestCell = NULL;
