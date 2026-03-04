@@ -114,8 +114,25 @@ external_catalog_modification(PG_FUNCTION_ARGS)
 		prevMetadataLocationIsNull ? NULL : TextDatumGetCString(prevMetadataLocationDatum);
 
 	char	   *databaseName = get_database_name(MyDatabaseId);
+	bool		isInternalCatalog = (strcmp(catalogName, databaseName) == 0);
 
-	if (strcmp(catalogName, databaseName) == 0)
+	/* For UPDATE, check if catalog_name is being changed */
+	if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
+	{
+		Datum		oldCatalogNameDatum = heap_getattr(trigdata->tg_trigtuple, 1,
+													   trigdata->tg_relation->rd_att, &isnull);
+		char	   *oldCatalogName = TextDatumGetCString(oldCatalogNameDatum);
+		bool		wasInternalCatalog = (strcmp(oldCatalogName, databaseName) == 0);
+
+		if (isInternalCatalog != wasInternalCatalog)
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("modifying the internal catalog is currently only supported via pg_lake_iceberg tables")));
+		}
+	}
+
+	if (isInternalCatalog)
 	{
 		/*
 		 * For the current database catalog, only UPDATE is supported.
@@ -132,15 +149,13 @@ external_catalog_modification(PG_FUNCTION_ARGS)
 		{
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("INSERT to the %s catalog is only supported via CREATE TABLE ... USING iceberg",
-							databaseName)));
+					 errmsg("modifying the internal catalog is currently only supported via pg_lake_iceberg tables")));
 		}
 		else if (TRIGGER_FIRED_BY_DELETE(trigdata->tg_event))
 		{
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("DELETE from the %s catalog is only supported via DROP TABLE",
-							databaseName)));
+					 errmsg("modifying the internal catalog is currently only supported via pg_lake_iceberg tables")));
 		}
 		else
 		{
