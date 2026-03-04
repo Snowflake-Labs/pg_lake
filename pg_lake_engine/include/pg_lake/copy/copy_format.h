@@ -30,6 +30,7 @@
 #define HTTP_URL_PREFIX "http://"
 #define HTTPS_URL_PREFIX "https://"
 #define HUGGING_FACE_URL_PREFIX "hf://"
+#define STAGE_URL_PREFIX "@STAGE/"
 
 
 /* possible values of the COPY .. WITH (format ..) option */
@@ -93,6 +94,9 @@ extern PGDLLEXPORT const char *FormatToFileExtension(CopyDataFormat format,
 													 CopyDataCompression compression);
 
 extern PGDLLEXPORT bool IsSupportedURL(const char *path);
+
+extern PGDLLEXPORT char *GetPgLakeStageLocation(void);
+extern PGDLLEXPORT char *ResolveStageURL(const char *path);
 
 extern PGDLLEXPORT void FindDataFormatAndCompression(PgLakeTableType tableType,
 													 char *path, List *copyOptions,

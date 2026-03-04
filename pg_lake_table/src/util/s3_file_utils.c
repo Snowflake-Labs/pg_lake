@@ -57,6 +57,9 @@ pg_lake_file_size(PG_FUNCTION_ARGS)
 {
 	char	   *path = text_to_cstring(PG_GETARG_TEXT_P(0));
 
+	/* Resolve @STAGE/ prefix if present */
+	path = ResolveStageURL(path);
+
 	/* sanity-check URL */
 	if (!IsSupportedURL(path))
 		ereport(ERROR, (errmsg("file_size: only s3://, gs://, az://, azure://, and abfss:// urls are supported"),
@@ -81,6 +84,9 @@ Datum
 pg_lake_list_files(PG_FUNCTION_ARGS)
 {
 	char	   *globURL = text_to_cstring(PG_GETARG_TEXT_P(0));
+
+	/* Resolve @STAGE/ prefix if present */
+	globURL = ResolveStageURL(globURL);
 
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 
@@ -149,6 +155,9 @@ pg_lake_file_exists(PG_FUNCTION_ARGS)
 {
 	char	   *path = text_to_cstring(PG_GETARG_TEXT_P(0));
 
+	/* Resolve @STAGE/ prefix if present */
+	path = ResolveStageURL(path);
+
 	/* sanity-check URL */
 	if (!IsSupportedURL(path))
 		ereport(ERROR, (errmsg("file_exists: only s3://, gs://, az://, azure://, and abfss:// urls are supported"),
@@ -177,6 +186,10 @@ pg_lake_file_preview(PG_FUNCTION_ARGS)
 				(errmsg("file_preview: url is required")));
 
 	char	   *url = text_to_cstring(PG_GETARG_TEXT_PP(0));
+
+	/* Resolve @STAGE/ prefix if present */
+	url = ResolveStageURL(url);
+
 	List	   *previewOptionsList = NIL;
 
 	/*
@@ -250,6 +263,9 @@ Datum
 pg_lake_delete_file(PG_FUNCTION_ARGS)
 {
 	char	   *path = text_to_cstring(PG_GETARG_TEXT_P(0));
+
+	/* Resolve @STAGE/ prefix if present */
+	path = ResolveStageURL(path);
 
 	/* sanity-check URL */
 	if (!IsSupportedURL(path))

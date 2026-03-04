@@ -219,11 +219,15 @@ IsPgLakeCopy(CopyStmt *copyStmt)
 		return false;
 	}
 
-	if (copyStmt->filename != NULL && !copyStmt->is_program &&
-		IsSupportedURL(copyStmt->filename))
+	if (copyStmt->filename != NULL && !copyStmt->is_program)
 	{
-		/* the filename is a URL */
-		return true;
+		/* Resolve @STAGE/ prefix before checking if it's a supported URL */
+		char *resolvedPath = ResolveStageURL(copyStmt->filename);
+		if (IsSupportedURL(resolvedPath))
+		{
+			/* the filename is a URL */
+			return true;
+		}
 	}
 
 	CopyDataFormat format = OptionsToCopyDataFormat(copyStmt->options);
@@ -385,6 +389,9 @@ ProcessPgLakeCopyFrom(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 	Oid			relationId = RelationGetRelid(relation);
 	char	   *sourcePath = copyStmt->filename;
 	bool		ensureCleanup = true;
+
+	/* Resolve @STAGE/ prefix if present */
+	sourcePath = ResolveStageURL(sourcePath);
 
 	if (PgLakeCopyValidityCheckHook)
 		PgLakeCopyValidityCheckHook(relationId);
@@ -779,6 +786,9 @@ static void
 ProcessPgLakeCopyTo(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 					RawStmt *rawQuery, const char *queryString, uint64 *rowsProcessed)
 {
+	/* Resolve @STAGE/ prefix if present */
+	copyStmt->filename = ResolveStageURL(copyStmt->filename);
+
 	if (IsSupportedURL(copyStmt->filename))
 	{
 		CheckURLWriteAccess();

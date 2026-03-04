@@ -170,13 +170,7 @@ CreatePgLakeTableCheckUnsupportedFeaturesPostProcess(ProcessUtilityParams * para
 static bool
 IsJsonOrCSVBackedTable(PgLakeTableType tableType, List *options)
 {
-	DefElem    *pathOption = GetOption(options, "path");
-	char	   *path = NULL;
-
-	if (pathOption != NULL)
-	{
-		path = defGetString(pathOption);
-	}
+	char	   *path = GetURLOption(options, "path", false);
 
 	CopyDataFormat format = DATA_FORMAT_INVALID;
 	CopyDataCompression compression = DATA_COMPRESSION_INVALID;
@@ -362,9 +356,13 @@ ErrorIfUnsupportedLakeTable(CreateForeignTableStmt *createStmt)
 {
 	List	   *options = createStmt->options;
 	DefElem    *pathOption = GetOption(options, "path");
-	char	   *path = pathOption != NULL ? defGetString(pathOption) : "";
-	DefElem    *locationOption = GetOption(options, "location");
-	char	   *location = locationOption != NULL ? defGetString(locationOption) : "";
+	char	   *path = GetURLOption(options, "path", false);
+	char	   *location = GetURLOption(options, "location", false);
+
+	if (path == NULL)
+		path = "";
+	if (location == NULL)
+		location = "";
 
 	bool		isWritable = GetBoolOption(createStmt->options, "writable", false);
 
@@ -1334,8 +1332,10 @@ AddLakeTableColumnDefinitions(CreateForeignTableStmt *createStmt)
 	CopyDataCompression compression = DATA_COMPRESSION_INVALID;
 	PgLakeTableType tableType = GetPgLakeTableTypeViaServerName(createStmt->servername);
 
-	DefElem    *pathOption = GetOption(options, "path");
-	char	   *path = pathOption != NULL ? defGetString(pathOption) : "";
+	char	   *path = GetURLOption(options, "path", false);
+
+	if (path == NULL)
+		path = "";
 
 	Assert(IsSupportedURL(path));
 
