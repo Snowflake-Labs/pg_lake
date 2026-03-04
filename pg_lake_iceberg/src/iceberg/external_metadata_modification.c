@@ -251,17 +251,13 @@ HandleInternalCatalogUpdate(char *namespaceName, char *tableName,
 		SetUserIdAndSecContext(ExtensionOwnerId(PgLakeIceberg),
 							  SECURITY_LOCAL_USERID_CHANGE);
 
-		DECLARE_SPI_ARGS(1);
-		SPI_ARG_VALUE(1, OIDOID, relationId, false);
-
-		SPI_START();
-
-		bool		readOnly = false;
-
-		SPI_EXECUTE("SELECT lake_table.sync_iceberg_metadata_from_external_write($1)",
-					readOnly);
-
-		SPI_END();
+		/*
+		 * Call the sync function directly (not via SPI) to avoid nested SPI
+		 * calls, since the sync function itself uses SPI internally.
+		 */
+		extern Datum sync_iceberg_metadata_from_external_write(PG_FUNCTION_ARGS);
+		DirectFunctionCall1(sync_iceberg_metadata_from_external_write,
+							ObjectIdGetDatum(relationId));
 
 		SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 	}
