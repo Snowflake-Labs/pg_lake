@@ -398,7 +398,7 @@ SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata *metadata)
 	bool		dataOnly = false;
 	bool		newFilesOnly = false;
 	bool		forUpdate = false;
-	Snapshot	snapshot = GetActiveSnapshot();
+	Snapshot	snapshot = GetTransactionSnapshot();
 
 	List	   *oldDataFiles = GetTableDataFilesFromCatalog(relationId, dataOnly,
 															newFilesOnly, forUpdate,
