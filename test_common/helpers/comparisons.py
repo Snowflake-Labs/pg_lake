@@ -14,6 +14,7 @@ from .db import (
 # Value / row comparison helpers
 # ---------------------------------------------------------------------------
 
+
 def compare_values(val1, val2, tolerance):
     if isinstance(val1, float) and isinstance(val2, float):
         return abs(val1 - val2) <= tolerance
@@ -129,6 +130,7 @@ def compare_results_with_duckdb(
 # Query-result assertion helpers
 # ---------------------------------------------------------------------------
 
+
 def assert_query_results_on_tables(
     query, pg_conn, first_table_names, second_table_names, tolerance=0.001
 ):
@@ -203,3 +205,25 @@ def assert_query_result_on_duckdb_and_pg(duckdb_conn, pg_conn, duckdb_query, pg_
 def check_table_size(pg_conn, table_name, count):
     result = run_query(f"SELECT count(*) FROM {table_name}", pg_conn)
     assert result[0]["count"] == count
+
+
+def normalize_bc(rows):
+    """Normalize DuckDB's '(BC) between date and time' to PG's 'BC at end'.
+
+    When a ``::text`` cast is pushed down to DuckDB, BC dates are formatted
+    with parentheses and the indicator sits between the date and time parts
+    (e.g. ``"4712-01-01 (BC) 00:00:00"``).  PostgreSQL places ``BC`` at the
+    end without parentheses (``"4712-01-01 00:00:00 BC"``).  This helper
+    normalises query results so assertions can use the PostgreSQL convention.
+    """
+
+    def _fix(v):
+        if not isinstance(v, str):
+            return v
+        v = v.replace(" (BC)", " BC")
+        # DuckDB: "YYYY-MM-DD BC HH:MM:SS" → PG: "YYYY-MM-DD HH:MM:SS BC"
+        if " BC " in v:
+            v = v.replace(" BC ", " ", 1) + " BC"
+        return v
+
+    return [[_fix(v) for v in row] for row in rows]

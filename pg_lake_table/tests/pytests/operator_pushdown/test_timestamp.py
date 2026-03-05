@@ -28,67 +28,67 @@ test_cases = [
     (
         "timestamp_eq",
         "WHERE col_timestamp = '2024-01-01 12:00:00'::timestamp",
-        "WHERE (col_timestamp = '2024-01-01 12:00:00'::timestamp without time zone)",
+        "WHERE (col_timestamp = ('2024-01-01 12:00:00'::text)::timestamp without time zone)",
     ),
     (
         "timestamp_ne",
         "WHERE col_timestamp <> '2023-01-01 13:00:00'::timestamp",
-        "WHERE (col_timestamp <> '2023-01-01 13:00:00'::timestamp without time zone)",
+        "WHERE (col_timestamp <> ('2023-01-01 13:00:00'::text)::timestamp without time zone)",
     ),
     (
         "timestamp_lt",
         "WHERE col_timestamp < '2024-01-01 12:00:00'::timestamp",
-        "WHERE (col_timestamp < '2024-01-01 12:00:00'::timestamp without time zone)",
+        "WHERE (col_timestamp < ('2024-01-01 12:00:00'::text)::timestamp without time zone)",
     ),
     (
         "timestamp_le",
         "WHERE col_timestamp <= '2022-12-31 23:59:59'::timestamp",
-        "WHERE (col_timestamp <= '2022-12-31 23:59:59'::timestamp without time zone)",
+        "WHERE (col_timestamp <= ('2022-12-31 23:59:59'::text)::timestamp without time zone)",
     ),
     (
         "timestamp_gt",
         "WHERE col_timestamp > '2023-01-01 13:00:00'::timestamp",
-        "WHERE (col_timestamp > '2023-01-01 13:00:00'::timestamp without time zone)",
+        "WHERE (col_timestamp > ('2023-01-01 13:00:00'::text)::timestamp without time zone)",
     ),
     (
         "timestamp_ge",
         "WHERE col_timestamp >= '2022-12-31 23:59:59'::timestamp",
-        "WHERE (col_timestamp >= '2022-12-31 23:59:59'::timestamp without time zone)",
+        "WHERE (col_timestamp >= ('2022-12-31 23:59:59'::text)::timestamp without time zone)",
     ),
     (
         "timestamp_mi",
         "WHERE col_timestamp - '2022-12-30'::timestamp >= INTERVAL '1 day'",
-        "WHERE ((col_timestamp - '",
+        "WHERE ((col_timestamp - ('",
     ),
     (
         "timestamp_eq_date",
         "WHERE col_timestamp = '2024-01-01'::date",
-        "WHERE (col_timestamp = '2024-01-01'::date)",
+        "WHERE (col_timestamp = ('2024-01-01'::text)::date)",
     ),
     (
         "timestamp_ge_date",
         "WHERE col_timestamp >= '2024-01-01'::date",
-        "WHERE (col_timestamp >= '2024-01-01'::date)",
+        "WHERE (col_timestamp >= ('2024-01-01'::text)::date)",
     ),
     (
         "timestamp_gt_date",
         "WHERE col_timestamp > '2024-01-01'::date",
-        "WHERE (col_timestamp > '2024-01-01'::date)",
+        "WHERE (col_timestamp > ('2024-01-01'::text)::date)",
     ),
     (
         "timestamp_le_date",
         "WHERE col_timestamp <= '2024-01-01'::date",
-        "WHERE (col_timestamp <= '2024-01-01'::date)",
+        "WHERE (col_timestamp <= ('2024-01-01'::text)::date)",
     ),
     (
         "timestamp_lt_date",
         "WHERE col_timestamp < '2024-01-01'::date",
-        "WHERE (col_timestamp < '2024-01-01'::date)",
+        "WHERE (col_timestamp < ('2024-01-01'::text)::date)",
     ),
     (
         "timestamp_ne_date",
         "WHERE col_timestamp <> '2024-01-01'::date",
-        "WHERE (col_timestamp <> '2024-01-01'::date)",
+        "WHERE (col_timestamp <> ('2024-01-01'::text)::date)",
     ),
     (
         "timestamp_eq_timestamptz",
@@ -123,7 +123,7 @@ test_cases = [
     (
         "timestamp_pl_interval",
         "WHERE col_timestamp + INTERVAL '1 day' = '2024-01-02 12:00:00'::timestamp",
-        "WHERE ((col_timestamp + '1 day'::interval) = '2024-01-02 12:00:00'::timestamp without time zone)",
+        "WHERE ((col_timestamp + '1 day'::interval) = ('2024-01-02 12:00:00'::text)::timestamp without time zone)",
     ),
     (
         "timestamp_mi_interval",

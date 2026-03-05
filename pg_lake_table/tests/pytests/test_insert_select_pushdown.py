@@ -723,3 +723,75 @@ def test_insert_select_dropped_cols(s3, pg_conn, extension, with_default_locatio
     assert res == [[22]]
 
     pg_conn.rollback()
+
+
+def test_bc_dates_insert_select_pushdown(
+    pg_conn,
+    extension,
+    s3,
+    with_default_location,
+):
+    """Verify BC dates roundtrip correctly through INSERT SELECT pushdown.
+
+    INSERT INTO iceberg_table SELECT * FROM iceberg_table goes through
+    WriteQueryResultTo (DuckDB-side COPY), bypassing PGDuckSerialize.
+    This test ensures the ISO-year conversion produces correct results
+    in the pushed-down path.
+    """
+    run_command(
+        """
+        CREATE SCHEMA test_bc_insert_pushdown;
+        SET search_path TO test_bc_insert_pushdown;
+
+        CREATE TABLE source (
+            col_date date,
+            col_ts timestamp,
+            col_tstz timestamptz
+        ) USING iceberg;
+
+        CREATE TABLE target (
+            col_date date,
+            col_ts timestamp,
+            col_tstz timestamptz
+        ) USING iceberg;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+    run_command(
+        """INSERT INTO source VALUES
+            ('4712-01-01 BC', '0001-01-01 00:00:00', '0001-01-01 00:00:00+00'),
+            ('0001-01-01 BC', '0001-06-15 12:30:00', '0001-06-15 12:30:00+00'),
+            ('2021-01-01', '2021-01-01 00:00:00', '2021-01-01 00:00:00+00');""",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # INSERT SELECT pushdown: data flows through DuckDB without PGDuckSerialize
+    results = run_query(
+        "EXPLAIN (VERBOSE) INSERT INTO target SELECT * FROM source",
+        pg_conn,
+    )
+    assert "Custom Scan (Query Pushdown)" in str(results)
+
+    run_command("INSERT INTO target SELECT * FROM source", pg_conn)
+    pg_conn.commit()
+
+    result = run_query(
+        "SELECT col_date::text AS d, col_ts::text AS ts, col_tstz::text AS tstz "
+        "FROM target ORDER BY col_date;",
+        pg_conn,
+    )
+
+    assert normalize_bc(result) == [
+        ["4712-01-01 BC", "0001-01-01 00:00:00", "0001-01-01 00:00:00+00"],
+        ["0001-01-01 BC", "0001-06-15 12:30:00", "0001-06-15 12:30:00+00"],
+        ["2021-01-01", "2021-01-01 00:00:00", "2021-01-01 00:00:00+00"],
+    ]
+
+    run_command("RESET TIME ZONE;", pg_conn)
+    run_command("RESET search_path;", pg_conn)
+    run_command("DROP SCHEMA test_bc_insert_pushdown CASCADE;", pg_conn)
+    pg_conn.commit()

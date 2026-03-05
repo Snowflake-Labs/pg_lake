@@ -28,32 +28,32 @@ test_cases = [
     (
         "date_eq",
         "WHERE col_date = '2024-01-01'",
-        "WHERE (col_date = '2024-01-01'::date)",
+        "WHERE (col_date = ('2024-01-01'::text)::date)",
     ),
     (
         "date_ne",
         "WHERE col_date <> '2023-01-01'",
-        "WHERE (col_date <> '2023-01-01'::date)",
+        "WHERE (col_date <> ('2023-01-01'::text)::date)",
     ),
     (
         "date_lt",
         "WHERE col_date < '2024-01-01'",
-        "WHERE (col_date < '2024-01-01'::date)",
+        "WHERE (col_date < ('2024-01-01'::text)::date)",
     ),
     (
         "date_le",
         "WHERE col_date <= '2022-12-31'",
-        "WHERE (col_date <= '2022-12-31'::date)",
+        "WHERE (col_date <= ('2022-12-31'::text)::date)",
     ),
     (
         "date_gt",
         "WHERE col_date > '2023-01-01'",
-        "WHERE (col_date > '2023-01-01'::date)",
+        "WHERE (col_date > ('2023-01-01'::text)::date)",
     ),
     (
         "date_ge",
         "WHERE col_date >= '2022-12-31'",
-        "WHERE (col_date >= '2022-12-31'::date)",
+        "WHERE (col_date >= ('2022-12-31'::text)::date)",
     ),
     (
         "date_eq_timestamp",
@@ -118,22 +118,22 @@ test_cases = [
     (
         "date_pli",
         "WHERE col_date + 1 = '2024-01-02'::date",
-        "WHERE ((col_date + 1) = '2024-01-02'::date)",
+        "WHERE ((col_date + 1) = ('2024-01-02'::text)::date)",
     ),
     (
         "date_mii",
         "WHERE col_date - 1 = '2023-12-31'::date",
-        "WHERE ((col_date - 1) = '2023-12-31'::date)",
+        "WHERE ((col_date - 1) = ('2023-12-31'::text)::date)",
     ),
     (
         "date_pl_interval",
         "WHERE col_date + interval '1 day' = '2024-01-02'::date",
-        "WHERE ((col_date + '1 day'::interval) = '2024-01-02'::date)",
+        "WHERE ((col_date + '1 day'::interval) = ('2024-01-02'::text)::date)",
     ),
     (
         "date_mi_interval",
         "WHERE col_date - interval '1 day' = '2023-12-31'::date",
-        "WHERE ((col_date - '1 day'::interval) = '2023-12-31'::date)",
+        "WHERE ((col_date - '1 day'::interval) = ('2023-12-31'::text)::date)",
     ),
     (
         "datetime_pl",
@@ -148,17 +148,17 @@ test_cases = [
     (
         "date_mi",
         "WHERE col_date - '2023-12-31' = 1",
-        "WHERE ((col_date - '2023-12-31'::date) = 1)",
+        "WHERE ((col_date - ('2023-12-31'::text)::date) = 1)",
     ),
     (
         "date cast",
         "WHERE col_timestamp::date = '2024-01-01'::date",
-        "WHERE ((col_timestamp)::date = '2024-01-01'::date)",
+        "WHERE ((col_timestamp)::date = ('2024-01-01'::text)::date)",
     ),
     (
         "date cast",
         "WHERE col_timestamptz::date = '2024-01-01'::date",
-        "WHERE ((col_timestamptz)::date = '2024-01-01'::date)",
+        "WHERE ((col_timestamptz)::date = ('2024-01-01'::text)::date)",
     ),
 ]
 
