@@ -21,5 +21,5 @@
 
 #include "pg_lake/pgduck/type.h"
 
-extern PGDLLEXPORT unsigned char *PGNumericIcebergBinarySerialize(Datum numericDatum, size_t *binaryLen);
+extern PGDLLEXPORT unsigned char *PGNumericIcebergBinarySerialize(Datum numericDatum, int icebergScale, size_t *binaryLen);
 extern PGDLLEXPORT Datum PGNumericIcebergBinaryDeserialize(unsigned char *numericBinary, size_t binaryLen, PGType pgType);
