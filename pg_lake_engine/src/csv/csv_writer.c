@@ -34,7 +34,6 @@
 #include "commands/defrem.h"
 #include "pg_lake/csv/csv_writer.h"
 #include "pg_lake/extensions/postgis.h"
-#include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/pgduck/serialize.h"
 #include "pg_lake/util/numeric.h"
 #include "executor/executor.h"
@@ -142,8 +141,6 @@ static void CopySendInt16(CopyToState cstate, int16 val);
 static List *TupleDescColumnNameList(TupleDesc tupleDescriptor);
 static List *CopyGetAttnumsFixed(TupleDesc tupDesc, List *attnamelist);
 static bool ShouldUseDuckSerialization(CopyDataFormat targetFormat, PGType postgresType);
-static void ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits(const char *numericStr);
-static void ErrorIfSpecialNumeric(const char *input_str);
 
 
 /*----------
@@ -646,82 +643,6 @@ CopyGetAttnumsFixed(TupleDesc tupDesc, List *attnamelist)
 	return attnums;
 }
 
-/*
- * ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits ensures the digits for
- * both precision and scale of the numeric, in string, does not exceed the max
- * allowed digits during COPY TO.
- */
-static void
-ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits(const char *numericStr)
-{
-	int			totalIntegralDigits = 0;
-	int			totalDecimalDigits = 0;
-	bool		foundDotSeparator = false;
-
-	for (int i = 0; numericStr[i] != '\0'; i++)
-	{
-		if (numericStr[i] == '.')
-		{
-			foundDotSeparator = true;
-			continue;
-		}
-
-		if (!isdigit(numericStr[i]))
-			continue;
-
-		if (foundDotSeparator)
-			totalDecimalDigits++;
-		else
-			totalIntegralDigits++;
-
-		if (totalIntegralDigits > (UnboundedNumericDefaultPrecision - UnboundedNumericDefaultScale))
-		{
-			ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
-							errmsg("unbounded numeric type exceeds max allowed digits %d "
-								   "before decimal point",
-								   UnboundedNumericDefaultPrecision - UnboundedNumericDefaultScale),
-							errhint("Consider specifying precision and scale for numeric types, "
-									"i.e. \"numeric(P,S)\" instead of \"numeric\".")));
-		}
-
-		if (totalDecimalDigits > UnboundedNumericDefaultScale)
-		{
-			ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
-							errmsg("unbounded numeric type exceeds max allowed digits %d "
-								   "after decimal point", UnboundedNumericDefaultScale),
-							errhint("Consider specifying precision and scale for numeric types, "
-									"i.e. \"numeric(P,S)\" instead of \"numeric\".")));
-		}
-	}
-}
-
-
-/*
-* ErrorIfSpecialNumeric ensures that the input string does not contain
-* special numeric values like NaN, Inf, -Inf.
-*/
-static void
-ErrorIfSpecialNumeric(const char *input_str)
-{
-
-	char	   *num = (char *) input_str;
-
-	/* skip leading whitespace */
-	while (*num != '\0' && isspace((unsigned char) *num))
-		num++;
-
-	if (pg_strncasecmp(num, "NaN", 3) == 0 ||
-		pg_strncasecmp(num, "Infinity", 8) == 0 ||
-		pg_strncasecmp(num, "+Infinity", 9) == 0 ||
-		pg_strncasecmp(num, "-Infinity", 9) == 0 ||
-		pg_strncasecmp(num, "inf", 3) == 0 ||
-		pg_strncasecmp(num, "+inf", 4) == 0 ||
-		pg_strncasecmp(num, "-inf", 4) == 0)
-	{
-		ereport(ERROR, errmsg("Special numeric values like NaN, Inf, -Inf are not allowed for numeric type"),
-				errhint("Use float type instead."));
-	}
-}
 
 
 /*
@@ -795,17 +716,7 @@ CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot)
 					string = OutputFunctionCall(&out_functions[attnum - 1],
 												value);
 
-				if (attr->atttypid == NUMERICOID)
-				{
-					if (IsUnboundedNumeric(NUMERICOID, attr->atttypmod))
-						ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits(string);
-
-					/* do not allow Nan, Inf etc. */
-					ErrorIfSpecialNumeric(string);
-				}
-
-
-				if (cstate->opts.csv_mode)
+					if (cstate->opts.csv_mode)
 					CopyAttributeOutCSV(cstate, string,
 										cstate->opts.force_quote_flags[attnum - 1],
 										list_length(cstate->attnumlist) == 1);

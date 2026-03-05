@@ -77,7 +77,8 @@ get_partition_tuple(PG_FUNCTION_ARGS)
 	/* compute partition tuple */
 	TupleTableSlot *slot = make_tuple_slot_from_record(relationId, row);
 
-	Partition  *partition = ComputePartitionTupleForTuple(transforms, slot);
+	Partition  *partition = ComputePartitionTupleForTuple(transforms, slot,
+														  OUT_OF_RANGE_ERROR);
 
 	/* init result tuplestore */
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;

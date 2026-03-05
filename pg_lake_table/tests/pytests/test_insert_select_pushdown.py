@@ -256,7 +256,7 @@ def test_insert_select_pushdown_unsupported(
 		CREATE DOMAIN simple_text AS TEXT CHECK (LENGTH(VALUE) <= 50);
 		CREATE TABLE table_with_domain (id INT, description simple_text) USING iceberg;
 
-        -- scale>precision is not safe to pushdown
+        -- scale>precision: neutralized to ::text in the query tree, validated by wrapper
 		CREATE TABLE numeric_table (value numeric(25,26)) USING iceberg;
 
         -- plain numeric is safe to pushdown
@@ -274,6 +274,7 @@ def test_insert_select_pushdown_unsupported(
         pg_conn,
     )
 
+    # generated column contains more than max allowed decimal places
     results = run_query(
         "EXPLAIN ANALYZE INSERT INTO table_with_generated_columns SELECT i FROM generate_series(0,10)i",
         pg_conn,
@@ -320,7 +321,7 @@ def test_insert_select_pushdown_unsupported(
         "EXPLAIN ANALYZE INSERT INTO numeric_table SELECT random()*0.01 FROM generate_series(0,10)i",
         pg_conn,
     )
-    assert "Custom Scan (Query Pushdown)" not in str(results)
+    assert "Custom Scan (Query Pushdown)" in str(results)
 
     results = run_query(
         "EXPLAIN ANALYZE INSERT INTO table_use_sequence(value) SELECT i FROM generate_series(0,10)i",
@@ -374,50 +375,11 @@ _INSERT_SELECT_UNSUITABLE_CASES = [
         None,
         id="domain-in-array",
     ),
-    # --- bad numeric (scale>precision) nested inside an array ---
-    pytest.param(
-        f"""
-        CREATE FOREIGN TABLE src (id INT, vals numeric(25,26)[])
-            SERVER pg_lake OPTIONS (writable 'true',
-            location '{_UNSUITABLE_LOC}/bad_numeric_in_array/src/', format 'parquet');
-        CREATE FOREIGN TABLE tgt (id INT, vals numeric(25,26)[])
-            SERVER pg_lake OPTIONS (writable 'true',
-            location '{_UNSUITABLE_LOC}/bad_numeric_in_array/tgt/', format 'parquet');
-        """,
-        "INSERT INTO tgt SELECT * FROM src",
-        None,
-        id="bad-numeric-in-array",
-    ),
-    # --- bad numeric nested inside a composite ---
-    pytest.param(
-        f"""
-        CREATE TYPE has_bad_num AS (v numeric(25,26));
-        CREATE FOREIGN TABLE src (id INT, d has_bad_num)
-            SERVER pg_lake OPTIONS (writable 'true',
-            location '{_UNSUITABLE_LOC}/bad_numeric_in_struct/src/', format 'parquet');
-        CREATE FOREIGN TABLE tgt (id INT, d has_bad_num)
-            SERVER pg_lake OPTIONS (writable 'true',
-            location '{_UNSUITABLE_LOC}/bad_numeric_in_struct/tgt/', format 'parquet');
-        """,
-        "INSERT INTO tgt SELECT * FROM src",
-        None,
-        id="bad-numeric-in-struct",
-    ),
-    # --- bad numeric inside a composite inside an array (deep nesting) ---
-    pytest.param(
-        f"""
-        CREATE TYPE with_bad_num AS (a INT, b numeric(25,26));
-        CREATE FOREIGN TABLE src (id INT, vals with_bad_num[])
-            SERVER pg_lake OPTIONS (writable 'true',
-            location '{_UNSUITABLE_LOC}/bad_numeric_in_struct_in_array/src/', format 'parquet');
-        CREATE FOREIGN TABLE tgt (id INT, vals with_bad_num[])
-            SERVER pg_lake OPTIONS (writable 'true',
-            location '{_UNSUITABLE_LOC}/bad_numeric_in_struct_in_array/tgt/', format 'parquet');
-        """,
-        "INSERT INTO tgt SELECT * FROM src",
-        None,
-        id="bad-numeric-in-struct-in-array",
-    ),
+    # NOTE: numeric(25,26) cases (bad-numeric-in-array, bad-numeric-in-struct,
+    # bad-numeric-in-struct-in-array) were removed from this list because
+    # numeric(25,26) adjusts to DECIMAL(26,26) which DuckDB handles correctly.
+    # The validation wrapper provides element-level DECIMAL casting for nested
+    # types, so pushdown is safe.
     # --- interval column (Iceberg stores as struct, needs special serde) ---
     pytest.param(
         """
@@ -795,3 +757,439 @@ def test_bc_dates_insert_select_pushdown(
     run_command("RESET search_path;", pg_conn)
     run_command("DROP SCHEMA test_bc_insert_pushdown CASCADE;", pg_conn)
     pg_conn.commit()
+
+
+@pytest.mark.parametrize(
+    "col_type,value,expected_err",
+    [
+        # date: year 10000 AD exceeds Iceberg's 9999 upper bound
+        ("date", "10000-01-01", "date out of range"),
+        # timestamp: BC timestamps are not allowed (min is 0001-01-01 AD)
+        (
+            "timestamp",
+            "0001-01-01 00:00:00 BC",
+            "timestamp out of range",
+        ),
+        # timestamptz: BC timestamps are not allowed
+        (
+            "timestamptz",
+            "0001-01-01 00:00:00+00 BC",
+            "timestamp out of range",
+        ),
+    ],
+)
+def test_temporal_out_of_range_insert_select_pushdown(
+    pg_conn,
+    extension,
+    s3,
+    with_default_location,
+    col_type,
+    value,
+    expected_err,
+):
+    """Verify out-of-range temporal values are rejected during INSERT SELECT pushdown.
+
+    The WrapQueryWithIcebergTemporalValidation wrapper in WriteQueryResultTo
+    adds DuckDB-side range checks that call error() for out-of-range values.
+    """
+    schema = f"test_oor_is_{col_type.replace(' ', '_')}"
+    parquet_url = (
+        f"s3://{TEST_BUCKET}/test_temporal_oor_pushdown_{col_type}/data.parquet"
+    )
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    try:
+        # Create the target Iceberg table with error policy
+        run_command(
+            f"CREATE TABLE oor_target (col {col_type}) USING iceberg"
+            f" WITH (out_of_range_values = 'error');",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        # INSERT SELECT pushdown should reject the out-of-range value
+        with pytest.raises(Exception, match=expected_err):
+            run_command(
+                f"INSERT INTO oor_target SELECT '{value}'::{col_type} AS col;",
+                pg_conn,
+            )
+        pg_conn.rollback()
+    finally:
+        run_command("RESET TIME ZONE;", pg_conn)
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+def test_nested_temporal_out_of_range_struct_insert_select_pushdown(
+    pg_conn,
+    extension,
+    s3,
+    with_default_location,
+):
+    """Verify out-of-range date inside a struct is rejected during INSERT SELECT pushdown."""
+    schema = "test_nested_oor_struct"
+    parquet_url = f"s3://{TEST_BUCKET}/test_nested_oor_struct/data.parquet"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+
+    try:
+        run_command("CREATE TYPE event AS (id int, happened_at date);", pg_conn)
+        pg_conn.commit()
+
+        run_command(
+            "CREATE TABLE oor_target (col event) USING iceberg"
+            " WITH (out_of_range_values = 'error');",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        # INSERT SELECT pushdown should reject the out-of-range date inside the struct
+        with pytest.raises(Exception, match="date out of range"):
+            run_command(
+                "INSERT INTO oor_target SELECT row(1, '10000-01-01'::date)::event AS col;",
+                pg_conn,
+            )
+        pg_conn.rollback()
+    finally:
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+def test_nested_temporal_out_of_range_map_insert_select_pushdown(
+    pg_conn,
+    extension,
+    s3,
+    with_default_location,
+):
+    """Verify out-of-range timestamp in map values is rejected during INSERT SELECT pushdown."""
+    schema = "test_nested_oor_map"
+    parquet_url = f"s3://{TEST_BUCKET}/test_nested_oor_map/data.parquet"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    try:
+        map_type = create_map_type("text", "timestamp")
+        pg_conn.commit()
+
+        run_command(
+            f"CREATE TABLE oor_target (col {map_type}) USING iceberg"
+            f" WITH (out_of_range_values = 'error');",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        # INSERT SELECT pushdown should reject the out-of-range timestamp in the map
+        with pytest.raises(Exception, match="timestamp out of range"):
+            run_command(
+                f"INSERT INTO oor_target SELECT ARRAY[('key1', '0001-01-01 00:00:00 BC'::timestamp)]::{map_type} AS col;",
+                pg_conn,
+            )
+        pg_conn.rollback()
+    finally:
+        run_command("RESET TIME ZONE;", pg_conn)
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+def test_nested_temporal_out_of_range_array_of_struct_insert_select_pushdown(
+    pg_conn,
+    extension,
+    s3,
+    with_default_location,
+):
+    """Verify out-of-range date inside an array of structs is rejected during INSERT SELECT pushdown."""
+    schema = "test_nested_oor_arr_struct"
+    parquet_url = f"s3://{TEST_BUCKET}/test_nested_oor_arr_struct/data.parquet"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+
+    try:
+        run_command("CREATE TYPE log_entry AS (msg text, logged_at date);", pg_conn)
+        pg_conn.commit()
+
+        run_command(
+            "CREATE TABLE oor_target (col log_entry[]) USING iceberg"
+            " WITH (out_of_range_values = 'error');",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        # INSERT SELECT pushdown should reject the out-of-range date in the struct array
+        with pytest.raises(Exception, match="date out of range"):
+            run_command(
+                "INSERT INTO oor_target SELECT ARRAY[row('ok', '2021-01-01'::date)::log_entry, row('bad', '10000-01-01'::date)::log_entry];",
+                pg_conn,
+            )
+        pg_conn.rollback()
+    finally:
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+def test_nested_temporal_valid_struct_insert_select_pushdown(
+    pg_conn,
+    extension,
+    s3,
+    with_default_location,
+):
+    """Verify valid dates inside structs pass through INSERT SELECT pushdown correctly."""
+    schema = "test_nested_valid_struct"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+
+    try:
+        run_command("CREATE TYPE event_v AS (id int, happened_at date);", pg_conn)
+        pg_conn.commit()
+
+        run_command("CREATE TABLE source (col event_v) USING iceberg;", pg_conn)
+        run_command("CREATE TABLE target (col event_v) USING iceberg;", pg_conn)
+        pg_conn.commit()
+
+        run_command(
+            "INSERT INTO source VALUES (row(1, '4712-01-01 BC')::event_v), "
+            "(row(2, '2021-06-15')::event_v), "
+            "(row(3, '9999-12-31')::event_v);",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        # INSERT SELECT pushdown — valid dates inside struct should work
+        run_command("INSERT INTO target SELECT * FROM source;", pg_conn)
+        pg_conn.commit()
+
+        result = run_query(
+            "SELECT (col).id, (col).happened_at::text FROM target ORDER BY (col).id;",
+            pg_conn,
+        )
+
+        assert normalize_bc(result) == [
+            [1, "4712-01-01 BC"],
+            [2, "2021-06-15"],
+            [3, "9999-12-31"],
+        ]
+    finally:
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+@pytest.mark.parametrize(
+    "col_type,value,expected_clamped",
+    [
+        # date: year 10000 AD exceeds upper bound → clamped to 9999-12-31
+        ("date", "10000-01-01", "9999-12-31"),
+        # timestamp: BC below lower bound → clamped to 0001-01-01 00:00:00
+        (
+            "timestamp",
+            "0001-01-01 00:00:00 BC",
+            "0001-01-01 00:00:00",
+        ),
+        # timestamptz: BC below lower bound → clamped to 0001-01-01 00:00:00+00
+        (
+            "timestamptz",
+            "0001-01-01 00:00:00+00 BC",
+            "0001-01-01 00:00:00+00",
+        ),
+    ],
+)
+def test_temporal_out_of_range_clamp_insert_select_pushdown(
+    pg_conn,
+    extension,
+    s3,
+    with_default_location,
+    col_type,
+    value,
+    expected_clamped,
+):
+    """Verify out-of-range temporal values are clamped during INSERT SELECT pushdown.
+
+    When out_of_range_values = 'clamp' (set as table option), the temporal
+    validation wrapper clamps values to the nearest Iceberg boundary instead
+    of raising an error.
+    """
+    schema = f"test_oor_clamp_is_{col_type.replace(' ', '_')}"
+    parquet_url = (
+        f"s3://{TEST_BUCKET}/test_temporal_oor_clamp_pushdown_{col_type}/data.parquet"
+    )
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    try:
+        # Write an out-of-range value to a Parquet file (clamped via COPY option)
+        run_command(
+            f"COPY (SELECT '{value}'::{col_type} AS col) TO '{parquet_url}';",
+            pg_conn,
+        )
+
+        # Create a pg_lake foreign table pointing to the Parquet file
+        run_command(
+            f"""CREATE FOREIGN TABLE oor_source (col {col_type})
+                SERVER pg_lake OPTIONS (path '{parquet_url}');""",
+            pg_conn,
+        )
+
+        # Create the target Iceberg table with clamp option
+        run_command(
+            f"CREATE TABLE oor_target (col {col_type}) USING iceberg;",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        # INSERT SELECT pushdown should succeed with clamping (table option)
+        run_command(
+            "INSERT INTO oor_target SELECT * FROM oor_source;",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        # Read back and verify the clamped value
+        result = run_query(
+            "SELECT col::text FROM oor_target;",
+            pg_conn,
+        )
+        assert result[0][0] == expected_clamped
+    finally:
+        run_command("RESET TIME ZONE;", pg_conn)
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+@pytest.mark.parametrize(
+    "col_type,value,expected_err",
+    [
+        ("date", "infinity", "date out of range"),
+        ("date", "-infinity", "date out of range"),
+        ("timestamp", "infinity", "timestamp out of range"),
+        ("timestamp", "-infinity", "timestamp out of range"),
+        ("timestamptz", "infinity", "timestamp out of range"),
+        ("timestamptz", "-infinity", "timestamp out of range"),
+    ],
+)
+def test_infinity_temporal_error_insert_select_pushdown(
+    pg_conn,
+    extension,
+    s3,
+    with_default_location,
+    col_type,
+    value,
+    expected_err,
+):
+    """Verify +-infinity temporal values are rejected during INSERT SELECT pushdown."""
+    schema = f"test_inf_err_is_{col_type.replace(' ', '_')}"
+    parquet_url = (
+        f"s3://{TEST_BUCKET}/test_inf_temporal_err_pushdown_{col_type}/data.parquet"
+    )
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    try:
+        # Create the target Iceberg table with error policy
+        run_command(
+            f"CREATE TABLE inf_target (col {col_type}) USING iceberg"
+            f" WITH (out_of_range_values = 'error');",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        # INSERT SELECT pushdown should reject the infinity value
+        with pytest.raises(Exception, match=expected_err):
+            run_command(
+                f"INSERT INTO inf_target SELECT '{value}'::{col_type} AS col;",
+                pg_conn,
+            )
+        pg_conn.rollback()
+    finally:
+        run_command("RESET TIME ZONE;", pg_conn)
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+@pytest.mark.parametrize(
+    "col_type,value,expected_clamped",
+    [
+        ("date", "infinity", "9999-12-31"),
+        ("date", "-infinity", "4713-01-01 BC"),
+        ("timestamp", "infinity", "9999-12-31 23:59:59.999999"),
+        ("timestamp", "-infinity", "0001-01-01 00:00:00"),
+        ("timestamptz", "infinity", "9999-12-31 23:59:59.999999+00"),
+        ("timestamptz", "-infinity", "0001-01-01 00:00:00+00"),
+    ],
+)
+def test_infinity_temporal_clamp_insert_select_pushdown(
+    pg_conn,
+    extension,
+    s3,
+    with_default_location,
+    col_type,
+    value,
+    expected_clamped,
+):
+    """Verify +-infinity temporal values are clamped during INSERT SELECT pushdown."""
+    schema = f"test_inf_clamp_is_{col_type.replace(' ', '_')}"
+    parquet_url = (
+        f"s3://{TEST_BUCKET}/test_inf_temporal_clamp_pushdown_{col_type}/data.parquet"
+    )
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    try:
+        # Write an infinity value to a Parquet file (clamped via COPY option)
+        run_command(
+            f"COPY (SELECT '{value}'::{col_type} AS col) TO '{parquet_url}';",
+            pg_conn,
+        )
+
+        # Create a pg_lake foreign table pointing to the Parquet file
+        run_command(
+            f"""CREATE FOREIGN TABLE inf_source (col {col_type})
+                SERVER pg_lake OPTIONS (path '{parquet_url}');""",
+            pg_conn,
+        )
+
+        # Create the target Iceberg table with clamp option
+        run_command(
+            f"CREATE TABLE inf_target (col {col_type}) USING iceberg;",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        # INSERT SELECT pushdown should succeed with clamping (table option)
+        run_command(
+            "INSERT INTO inf_target SELECT * FROM inf_source;",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        # Read back and verify the clamped value
+        # The ::text cast may execute inside DuckDB (query pushdown), which
+        # formats BC as "(BC)".  Normalize to PostgreSQL's " BC" for comparison.
+        result = run_query(
+            "SELECT col::text FROM inf_target;",
+            pg_conn,
+        )
+        assert normalize_bc(result)[0][0] == expected_clamped
+    finally:
+        run_command("RESET TIME ZONE;", pg_conn)
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()

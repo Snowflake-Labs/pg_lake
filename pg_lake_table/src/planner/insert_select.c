@@ -31,6 +31,7 @@
 #include "nodes/nodeFuncs.h"
 #include "nodes/parsenodes.h"
 #include "parser/parsetree.h"
+#include "utils/fmgroids.h"
 #include "utils/rel.h"
 #include "utils/lsyscache.h"
 #include "utils/typcache.h"
@@ -39,6 +40,7 @@
 static RangeTblEntry *GetSelectRteFromInsertSelect(Query *query);
 static RangeTblEntry *GetInsertRteFromInsertSelect(Query *query);
 static bool TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod, CopyDataFormat sourceFormat);
+static Expr *StripTopNumericCasts(Expr *expr);
 
 /* pg_lake_table.enable_insert_select_pushdown setting */
 bool		EnableInsertSelectPushdown = true;
@@ -441,24 +443,6 @@ TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod, CopyDataFormat sourc
 		return true;
 	}
 
-	if (typeId == NUMERICOID)
-	{
-		/* may fail if unbounded numeric exceeds duckdb limits (38,38) */
-		if (typmod == -1)
-			return false;
-
-		int			precision = numeric_typmod_precision(typmod);
-		int			scale = numeric_typmod_scale(typmod);
-
-		if (!CanPushdownNumericToDuckdb(precision, scale))
-		{
-			ereport(DEBUG4,
-					(errmsg("Numeric type with precision(%d) and scale(%d) "
-							"is not pushdownable", precision, scale)));
-			return true;
-		}
-	}
-
 	/* Recurse into array element type */
 	if (type_is_array(typeId))
 	{
@@ -532,4 +516,107 @@ RelationColumnsSuitableForPushdown(Relation relation, CopyDataFormat sourceForma
 	}
 
 	return true;
+}
+
+
+/*
+ * StripTopNumericCasts peels off the outermost numeric cast node(s) from
+ * an expression and returns the underlying expression.
+ *
+ * Handles:
+ *   - FuncExpr(F_NUMERIC_NUMERIC_INT4): numeric typemod coercion,
+ *     e.g. (expr)::numeric(3,0).  Returns the first argument.
+ *   - CoerceViaIO to NUMERICOID: IO coercion, e.g. (text_val)::numeric.
+ *     Returns the inner argument.
+ *
+ * Recurses so that stacked casts (e.g. text -> numeric -> numeric(3,0))
+ * are fully peeled off.
+ */
+static Expr *
+StripTopNumericCasts(Expr *expr)
+{
+	if (expr == NULL)
+		return NULL;
+
+	/*
+	 * FuncExpr with funcid F_NUMERIC_NUMERIC_INT4 (OID 1703) is the numeric
+	 * typemod coercion: numeric(numeric, int4, bool).  Its first argument is
+	 * the input expression.
+	 */
+	if (IsA(expr, FuncExpr))
+	{
+		FuncExpr   *funcExpr = (FuncExpr *) expr;
+
+		if (funcExpr->funcid == F_NUMERIC_NUMERIC_INT4)
+		{
+			Expr	   *inner = (Expr *) linitial(funcExpr->args);
+
+			return StripTopNumericCasts(inner);
+		}
+	}
+
+	/*
+	 * CoerceViaIO to NUMERICOID: cast from another type via text
+	 * representation, e.g. text_col::numeric.
+	 */
+	if (IsA(expr, CoerceViaIO))
+	{
+		CoerceViaIO *coerce = (CoerceViaIO *) expr;
+
+		if (coerce->resulttype == NUMERICOID)
+			return StripTopNumericCasts(coerce->arg);
+	}
+
+	return expr;
+}
+
+
+/*
+ * NeutralizeNumericCastsInTargetList walks the target list of a SELECT
+ * query (after INSERT..SELECT transformation) and strips top-level
+ * numeric type coercions.
+ *
+ * PostgreSQL's planner adds type coercions like ::numeric or ::numeric(3,0)
+ * to the target list to match the INSERT target column types.  When DuckDB
+ * executes these casts, it may fail for values that exceed the target
+ * precision (e.g. a large value being cast to DECIMAL(3,0)).
+ *
+ * By removing these casts at the query tree level, the deparsed SQL
+ * leaves column values in their natural type (int, float, text, etc.).
+ * The validation wrapper (WrapQueryWithWriteValidation) handles range
+ * checking, clamping, and final casting to the target DECIMAL type.
+ *
+ * We intentionally do NOT re-wrap the stripped expression with ::text
+ * because DuckDB formats DOUBLE values in scientific notation when cast
+ * to VARCHAR, and its DECIMAL parser cannot convert those strings back.
+ *
+ * Only top-level casts on target list entries are modified; intermediate
+ * numeric casts inside expressions (e.g. (i)::numeric * 0.01) are
+ * preserved so DuckDB can evaluate the arithmetic correctly.
+ */
+void
+NeutralizeNumericCastsInTargetList(Query *query)
+{
+	ListCell   *lc;
+
+	foreach(lc, query->targetList)
+	{
+		TargetEntry *tle = (TargetEntry *) lfirst(lc);
+
+		if (tle->resjunk)
+			continue;
+
+		/* Only process expressions that produce numeric type */
+		if (exprType((Node *) tle->expr) != NUMERICOID)
+			continue;
+
+		/* Strip outermost numeric cast nodes */
+		Expr	   *stripped = StripTopNumericCasts(tle->expr);
+
+		/* Nothing to do if there was no wrapping numeric cast */
+		if (stripped == tle->expr)
+			continue;
+
+		tle->expr = stripped;
+	}
 }

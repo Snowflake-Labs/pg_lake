@@ -844,6 +844,512 @@ def test_pg_lake_iceberg_table_bc_dates(
     pg_conn.commit()
 
 
+@pytest.mark.parametrize(
+    "col_type,value,expected_err",
+    [
+        # date: year 10000 AD exceeds Iceberg's 9999 upper bound
+        ("date", "10000-01-01", "date out of range"),
+        # timestamp: BC timestamps are not allowed (min is 0001-01-01 AD)
+        ("timestamp", "0001-01-01 00:00:00 BC", "timestamp out of range"),
+        # timestamptz: BC timestamps are not allowed
+        (
+            "timestamptz",
+            "0001-01-01 00:00:00+00 BC",
+            "timestamp out of range",
+        ),
+    ],
+)
+def test_pg_lake_iceberg_temporal_out_of_range(
+    pg_conn,
+    extension,
+    s3,
+    create_helper_functions,
+    with_default_location,
+    col_type,
+    value,
+    expected_err,
+):
+    """Verify that out-of-range date/timestamp values are rejected on insert."""
+    table_name = "test_temporal_oor"
+    run_command(
+        f"CREATE TABLE {table_name} (col {col_type}) USING iceberg"
+        f" WITH (out_of_range_values = 'error');",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    with pytest.raises(Exception, match=expected_err):
+        run_command(
+            f"INSERT INTO {table_name} VALUES ('{value}');",
+            pg_conn,
+        )
+    pg_conn.rollback()
+
+    run_command("RESET TIME ZONE;", pg_conn)
+    run_command(f"DROP TABLE {table_name}", pg_conn)
+    pg_conn.commit()
+
+
+def test_pg_lake_iceberg_nested_temporal_out_of_range_struct(
+    pg_conn,
+    extension,
+    s3,
+    create_helper_functions,
+    with_default_location,
+):
+    """Verify out-of-range date inside a struct is rejected on direct insert."""
+    run_command("CREATE TYPE event_ds AS (id int, happened_at date);", pg_conn)
+    pg_conn.commit()
+
+    run_command(
+        "CREATE TABLE test_nested_oor_struct (col event_ds) USING iceberg"
+        " WITH (out_of_range_values = 'error');",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # Valid struct should succeed
+    run_command(
+        "INSERT INTO test_nested_oor_struct VALUES (row(1, '2021-01-01')::event_ds);",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # Out-of-range date inside struct should fail
+    with pytest.raises(Exception, match="date out of range"):
+        run_command(
+            "INSERT INTO test_nested_oor_struct VALUES (row(2, '10000-01-01')::event_ds);",
+            pg_conn,
+        )
+    pg_conn.rollback()
+
+    run_command("DROP TABLE test_nested_oor_struct;", pg_conn)
+    pg_conn.commit()
+
+
+def test_pg_lake_iceberg_nested_temporal_out_of_range_map(
+    pg_conn,
+    extension,
+    s3,
+    create_helper_functions,
+    with_default_location,
+):
+    """Verify out-of-range timestamp in map values is rejected on direct insert."""
+    map_type = create_map_type("text", "timestamp")
+
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    run_command(
+        f"CREATE TABLE test_nested_oor_map (col {map_type}) USING iceberg"
+        f" WITH (out_of_range_values = 'error');",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # Valid map should succeed
+    run_command(
+        f"INSERT INTO test_nested_oor_map VALUES (ARRAY[('key1', '2021-01-01 00:00:00'::timestamp)]::{map_type});",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # Out-of-range timestamp in map values should fail
+    with pytest.raises(Exception, match="timestamp out of range"):
+        run_command(
+            f"INSERT INTO test_nested_oor_map VALUES (ARRAY[('key1', '0001-01-01 00:00:00 BC'::timestamp)]::{map_type});",
+            pg_conn,
+        )
+    pg_conn.rollback()
+
+    run_command("RESET TIME ZONE;", pg_conn)
+    run_command("DROP TABLE test_nested_oor_map;", pg_conn)
+    pg_conn.commit()
+
+
+def test_pg_lake_iceberg_nested_temporal_out_of_range_array_of_struct(
+    pg_conn,
+    extension,
+    s3,
+    create_helper_functions,
+    with_default_location,
+):
+    """Verify out-of-range date inside an array of structs is rejected on direct insert."""
+    run_command("CREATE TYPE log_entry_ds AS (msg text, logged_at date);", pg_conn)
+    pg_conn.commit()
+
+    run_command(
+        "CREATE TABLE test_nested_oor_arr (col log_entry_ds[]) USING iceberg"
+        " WITH (out_of_range_values = 'error');",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # Valid array of structs should succeed
+    run_command(
+        "INSERT INTO test_nested_oor_arr VALUES (ARRAY[row('ok', '2021-01-01')::log_entry_ds]);",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # Out-of-range date in array of structs should fail
+    with pytest.raises(Exception, match="date out of range"):
+        run_command(
+            "INSERT INTO test_nested_oor_arr VALUES "
+            "(ARRAY[row('ok', '2021-01-01')::log_entry_ds, row('bad', '10000-01-01')::log_entry_ds]);",
+            pg_conn,
+        )
+    pg_conn.rollback()
+
+    run_command("DROP TABLE test_nested_oor_arr;", pg_conn)
+    pg_conn.commit()
+
+
+@pytest.mark.parametrize(
+    "col_type,value,expected_clamped",
+    [
+        # date: year 10000 AD exceeds upper bound → clamped to 9999-12-31
+        ("date", "10000-01-01", "9999-12-31"),
+        # timestamp: BC below lower bound → clamped to 0001-01-01 00:00:00
+        ("timestamp", "0001-01-01 00:00:00 BC", "0001-01-01 00:00:00"),
+        # timestamptz: BC below lower bound → clamped to 0001-01-01 00:00:00+00
+        (
+            "timestamptz",
+            "0001-01-01 00:00:00+00 BC",
+            "0001-01-01 00:00:00+00",
+        ),
+    ],
+)
+def test_pg_lake_iceberg_temporal_out_of_range_clamp(
+    pg_conn,
+    extension,
+    s3,
+    create_helper_functions,
+    with_default_location,
+    col_type,
+    value,
+    expected_clamped,
+):
+    """Verify that out-of-range date/timestamp values are clamped when table option is set to 'clamp'."""
+    table_name = "test_temporal_oor_clamp"
+    run_command(
+        f"CREATE TABLE {table_name} (col {col_type}) USING iceberg;",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    # Insert should succeed (value is clamped, not rejected)
+    run_command(
+        f"INSERT INTO {table_name} VALUES ('{value}');",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # Read back and verify the clamped value
+    result = run_query(
+        f"SELECT col::text FROM {table_name};",
+        pg_conn,
+    )
+    assert result[0][0] == expected_clamped
+
+    run_command("RESET TIME ZONE;", pg_conn)
+    run_command(f"DROP TABLE {table_name}", pg_conn)
+    pg_conn.commit()
+
+
+def test_pg_lake_iceberg_nested_temporal_out_of_range_struct_clamp(
+    pg_conn,
+    extension,
+    s3,
+    create_helper_functions,
+    with_default_location,
+):
+    """Verify out-of-range date inside a struct is clamped when table option is set to 'clamp'."""
+    run_command("CREATE TYPE event_ds_clamp AS (id int, happened_at date);", pg_conn)
+    pg_conn.commit()
+
+    run_command(
+        "CREATE TABLE test_nested_oor_struct_clamp (col event_ds_clamp) USING iceberg;",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # Out-of-range date inside struct should be clamped, not rejected
+    run_command(
+        "INSERT INTO test_nested_oor_struct_clamp VALUES (row(1, '10000-01-01')::event_ds_clamp);",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        "SELECT (col).id, (col).happened_at::text FROM test_nested_oor_struct_clamp;",
+        pg_conn,
+    )
+    assert result[0][0] == 1
+    assert result[0][1] == "9999-12-31"
+
+    run_command("DROP TABLE test_nested_oor_struct_clamp;", pg_conn)
+    pg_conn.commit()
+
+
+@pytest.mark.parametrize(
+    "col_type,value,expected_err",
+    [
+        ("date", "infinity", "date out of range"),
+        ("date", "-infinity", "date out of range"),
+        ("timestamp", "infinity", "timestamp out of range"),
+        ("timestamp", "-infinity", "timestamp out of range"),
+        ("timestamptz", "infinity", "timestamp out of range"),
+        ("timestamptz", "-infinity", "timestamp out of range"),
+    ],
+)
+def test_pg_lake_iceberg_infinity_temporal_error(
+    pg_conn,
+    extension,
+    s3,
+    create_helper_functions,
+    with_default_location,
+    col_type,
+    value,
+    expected_err,
+):
+    """Verify that +-infinity date/timestamp values are rejected on insert."""
+    table_name = "test_inf_temporal_err"
+    run_command(
+        f"CREATE TABLE {table_name} (col {col_type}) USING iceberg"
+        f" WITH (out_of_range_values = 'error');",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    with pytest.raises(Exception, match=expected_err):
+        run_command(
+            f"INSERT INTO {table_name} VALUES ('{value}');",
+            pg_conn,
+        )
+    pg_conn.rollback()
+
+    run_command("RESET TIME ZONE;", pg_conn)
+    run_command(f"DROP TABLE {table_name}", pg_conn)
+    pg_conn.commit()
+
+
+@pytest.mark.parametrize(
+    "col_type,value,expected_clamped",
+    [
+        # +infinity date → clamped to 9999-12-31
+        ("date", "infinity", "9999-12-31"),
+        # -infinity date → clamped to 4713-01-01 BC (PG's lower date bound)
+        ("date", "-infinity", "4713-01-01 BC"),
+        # +infinity timestamp → clamped to 9999-12-31 23:59:59.999999
+        ("timestamp", "infinity", "9999-12-31 23:59:59.999999"),
+        # -infinity timestamp → clamped to 0001-01-01 00:00:00
+        ("timestamp", "-infinity", "0001-01-01 00:00:00"),
+        # +infinity timestamptz → clamped to 9999-12-31 23:59:59.999999+00
+        ("timestamptz", "infinity", "9999-12-31 23:59:59.999999+00"),
+        # -infinity timestamptz → clamped to 0001-01-01 00:00:00+00
+        ("timestamptz", "-infinity", "0001-01-01 00:00:00+00"),
+    ],
+)
+def test_pg_lake_iceberg_infinity_temporal_clamp(
+    pg_conn,
+    extension,
+    s3,
+    create_helper_functions,
+    with_default_location,
+    col_type,
+    value,
+    expected_clamped,
+):
+    """Verify that +-infinity temporal values are clamped when table option is 'clamp'."""
+    table_name = "test_inf_temporal_clamp"
+    run_command(
+        f"CREATE TABLE {table_name} (col {col_type}) USING iceberg;",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    run_command(
+        f"INSERT INTO {table_name} VALUES ('{value}');",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # The ::text cast may execute inside DuckDB (query pushdown), which
+    # formats BC as "(BC)".  Normalize to PostgreSQL's " BC" for comparison.
+    result = run_query(
+        f"SELECT col::text FROM {table_name};",
+        pg_conn,
+    )
+    assert normalize_bc(result)[0][0] == expected_clamped
+
+    run_command("RESET TIME ZONE;", pg_conn)
+    run_command(f"DROP TABLE {table_name}", pg_conn)
+    pg_conn.commit()
+
+
+@pytest.mark.parametrize(
+    "value,expected_err",
+    [
+        ("NaN", "NaN is not allowed for numeric type"),
+        ("Inf", "Infinity values are not allowed for numeric type"),
+        ("-Inf", "Infinity values are not allowed for numeric type"),
+    ],
+)
+def test_pg_lake_iceberg_numeric_special_error(
+    pg_conn,
+    extension,
+    s3,
+    create_helper_functions,
+    with_default_location,
+    value,
+    expected_err,
+):
+    """Verify NaN/Inf are rejected on insert for iceberg numeric columns."""
+    table_name = "test_numeric_special_err"
+    run_command(
+        f"CREATE TABLE {table_name} (col numeric) USING iceberg"
+        f" WITH (out_of_range_values = 'error');",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    with pytest.raises(Exception, match=expected_err):
+        run_command(
+            f"INSERT INTO {table_name} VALUES ('{value}');",
+            pg_conn,
+        )
+    pg_conn.rollback()
+
+    run_command(f"DROP TABLE {table_name}", pg_conn)
+    pg_conn.commit()
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        # NaN → NULL
+        ("NaN", None),
+        # +Inf → max DECIMAL(38,9)
+        ("Inf", "99999999999999999999999999999.999999999"),
+        # -Inf → min DECIMAL(38,9)
+        ("-Inf", "-99999999999999999999999999999.999999999"),
+    ],
+)
+def test_pg_lake_iceberg_numeric_special_clamp(
+    pg_conn,
+    extension,
+    s3,
+    create_helper_functions,
+    with_default_location,
+    value,
+    expected,
+):
+    """Verify NaN → NULL and Inf → max/min when table option is 'clamp'."""
+    table_name = "test_numeric_special_clamp"
+    run_command(
+        f"CREATE TABLE {table_name} (col numeric) USING iceberg;",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"INSERT INTO {table_name} VALUES ('{value}');",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        f"SELECT col::text FROM {table_name};",
+        pg_conn,
+    )
+    assert result[0][0] == expected
+
+    run_command(f"DROP TABLE {table_name}", pg_conn)
+    pg_conn.commit()
+
+
+@pytest.mark.parametrize(
+    "value,expected_err",
+    [
+        ("NaN", "NaN is not allowed for numeric type"),
+        ("Inf", "Infinity values are not allowed for numeric type"),
+        ("-Inf", "Infinity values are not allowed for numeric type"),
+    ],
+)
+def test_pg_lake_iceberg_numeric_array_special_error(
+    pg_conn,
+    extension,
+    s3,
+    create_helper_functions,
+    with_default_location,
+    value,
+    expected_err,
+):
+    """Verify NaN/Inf in numeric arrays are rejected on insert."""
+    table_name = "test_numeric_arr_err"
+    run_command(
+        f"CREATE TABLE {table_name} (col numeric[]) USING iceberg"
+        f" WITH (out_of_range_values = 'error');",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    with pytest.raises(Exception, match=expected_err):
+        run_command(
+            f"INSERT INTO {table_name} VALUES (ARRAY['{value}'::numeric]);",
+            pg_conn,
+        )
+    pg_conn.rollback()
+
+    run_command(f"DROP TABLE {table_name}", pg_conn)
+    pg_conn.commit()
+
+
+def test_pg_lake_iceberg_numeric_array_special_clamp(
+    pg_conn,
+    extension,
+    s3,
+    create_helper_functions,
+    with_default_location,
+):
+    """Verify NaN → NULL, Inf → max, -Inf → min in numeric arrays when table option is 'clamp'."""
+    table_name = "test_numeric_arr_clamp"
+    run_command(
+        f"CREATE TABLE {table_name} (col numeric[]) USING iceberg;",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"INSERT INTO {table_name} VALUES "
+        "(ARRAY['NaN'::numeric, 'Inf'::numeric, '-Inf'::numeric]);",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        f"SELECT col[1]::text, col[2]::text, col[3]::text FROM {table_name};",
+        pg_conn,
+    )
+    # NaN → NULL
+    assert result[0][0] is None
+    # Inf → max DECIMAL(38,9)
+    assert result[0][1] == "99999999999999999999999999999.999999999"
+    # -Inf → min DECIMAL(38,9)
+    assert result[0][2] == "-99999999999999999999999999999.999999999"
+
+    run_command(f"DROP TABLE {table_name}", pg_conn)
+    pg_conn.commit()
+
+
 def test_pg_lake_iceberg_table_random_values(
     pg_conn,
     extension,
