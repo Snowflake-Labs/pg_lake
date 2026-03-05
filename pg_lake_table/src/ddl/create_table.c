@@ -86,8 +86,6 @@ PgLakeIsReservedColumnNameHookType PgLakeIsReservedColumnNameHook = NULL;
 
 static bool IsCreateLakeTable(CreateForeignTableStmt *createStmt);
 static void AddLakeTableColumnDefinitions(CreateForeignTableStmt *createStmt);
-static bool IsForeignTableStmtWithUnboundedNumericColumns(CreateForeignTableStmt *createStmt);
-static void SetDefaultPrecisionAndScaleForUnboundedNumericColumns(List *columnDefList);
 static bool IsJsonOrCSVBackedTable(PgLakeTableType tableType, List *options);
 static void ErrorIfUnsupportedColumnTypeForJsonOrCSVTables(List *columnDefList);
 static void ErrorIfUsingGeometryWithoutSpatialAnalytics(List *columnDefList);
@@ -594,23 +592,6 @@ ProcessCreateLakeTable(ProcessUtilityParams * params)
 	}
 
 	/*
-	 * If there are unbounded numerics, we assign them a scale and precision.
-	 */
-	if (IsForeignTableStmtWithUnboundedNumericColumns(createStmt))
-	{
-		/* we will adjust numerics in the parse tree */
-		if (params->readOnlyTree)
-			createStmt = (CreateForeignTableStmt *) CopyUtilityStmt(params);
-
-		SetDefaultPrecisionAndScaleForUnboundedNumericColumns(createStmt->base.tableElts);
-
-		/*
-		 * Note: we do not explicitly rerun handlers from the start, since we
-		 * expect the statement to be ready for execution.
-		 */
-	}
-
-	/*
 	 * If there is a filename option, check whether the _filename column is in
 	 * the right place.
 	 */
@@ -812,14 +793,6 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		 * rely on the schema name in PostProcessCreateIcebergTable.
 		 */
 		createStmt->base.relation->schemaname = get_namespace_name(namespaceId);
-	}
-
-	/*
-	 * If there are unbounded numerics, we assign them a scale and precision.
-	 */
-	if (createStmt->base.partbound == NULL && IsForeignTableStmtWithUnboundedNumericColumns(createStmt))
-	{
-		SetDefaultPrecisionAndScaleForUnboundedNumericColumns(createStmt->base.tableElts);
 	}
 
 	DefElem    *locationOption = GetOption(createStmt->options, "location");
@@ -1502,104 +1475,6 @@ ExpandTableLikeClause(TableLikeClause *table_like_clause)
 	table_close(relation, NoLock);
 
 	return newColumns;
-}
-
-
-/*
- * IsForeignTableStmtWithUnboundedNumericColumns checks whether the given
- * CreateForeignTableStmt has unbounded numeric columns.
- */
-static bool
-IsForeignTableStmtWithUnboundedNumericColumns(CreateForeignTableStmt *createStmt)
-{
-	ListCell   *columnDefCell = NULL;
-
-	foreach(columnDefCell, createStmt->base.tableElts)
-	{
-		/* could be LIKE clause or constraint clause */
-		if (!IsA(lfirst(columnDefCell), ColumnDef))
-		{
-			continue;
-		}
-
-		ColumnDef  *columnDef = (ColumnDef *) lfirst(columnDefCell);
-
-		int32		typmod = 0;
-		bool		missingOK = true;
-		Type		typeTuple = LookupTypeName(NULL, columnDef->typeName, &typmod, missingOK);
-
-		if (typeTuple == NULL)
-		{
-			/*
-			 * type not found, could be serial. But we are sure it is not
-			 * numeric
-			 */
-			continue;
-		}
-
-		Oid			typeOid = typeTypeId(typeTuple);
-
-		ReleaseSysCache(typeTuple);
-
-		if (IsUnboundedNumeric(typeOid, typmod))
-		{
-			return true;
-		}
-	}
-
-	return false;
-}
-
-
-/*
- * SetDefaultPrecisionAndScaleForUnboundedNumericColumns sets the default
- * precision and scale for unbounded numeric columns.
- */
-static void
-SetDefaultPrecisionAndScaleForUnboundedNumericColumns(List *columnDefList)
-{
-	ListCell   *columnDefCell = NULL;
-
-	foreach(columnDefCell, columnDefList)
-	{
-		/* could be LIKE clause or constraint clause */
-		if (!IsA(lfirst(columnDefCell), ColumnDef))
-		{
-			continue;
-		}
-
-		ColumnDef  *columnDef = (ColumnDef *) lfirst(columnDefCell);
-
-		int32		typmod = 0;
-		bool		missingOK = true;
-		Type		typeTuple = LookupTypeName(NULL, columnDef->typeName, &typmod, missingOK);
-
-		if (typeTuple == NULL)
-		{
-			/*
-			 * type not found, could be serial. But we are sure it is not
-			 * numeric
-			 */
-			continue;
-		}
-
-		Oid			typeOid = typeTypeId(typeTuple);
-
-		if (IsUnboundedNumeric(typeOid, typmod))
-		{
-			int			newTypMod = make_numeric_typmod(UnboundedNumericDefaultPrecision,
-														UnboundedNumericDefaultScale);
-
-			columnDef->typeName = makeTypeNameFromOid(typeOid, newTypMod);
-
-			ereport(NOTICE, (errmsg("setting default precision and scale for unbounded numeric column \"%s\" to (%d, %d)",
-									columnDef->colname, UnboundedNumericDefaultPrecision,
-									UnboundedNumericDefaultScale),
-							 errdetail("Iceberg tables do not fully support unbounded numeric columns.")));
-		}
-
-		ReleaseSysCache(typeTuple);
-	}
 }
 
 

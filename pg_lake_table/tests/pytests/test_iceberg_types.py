@@ -2195,7 +2195,7 @@ def test_field_id_mappings(
     assert top_level_mappings == [
         ["verify_field_id_mapping.test_table", 1, "int_col", "integer", -1],
         ["verify_field_id_mapping.test_table", 2, "array_int_col", "integer[]", -1],
-        ["verify_field_id_mapping.test_table", 4, "numeric_col", "numeric", 2490381],
+        ["verify_field_id_mapping.test_table", 4, "numeric_col", "numeric", -1],
         [
             "verify_field_id_mapping.test_table",
             5,
