@@ -123,18 +123,14 @@ def test_unbounded_numeric_pushdown(s3, pg_conn, extension):
 def test_copy_to_unbounded_numeric_with_default(s3, pg_conn, extension):
     uri = f"s3://{TEST_BUCKET}/unbounded_numeric.parquet"
 
-    error = run_command(
+    # random()::numeric may have more than 9 decimal digits, but DuckDB's
+    # DECIMAL(38,9) rounds the excess fractional digits — this should succeed.
+    run_command(
         f"""
         copy (select random()::numeric)
         to '{uri}'
     """,
         pg_conn,
-        raise_error=False,
-    )
-
-    assert (
-        "unbounded numeric type exceeds max allowed digits 9 after decimal point"
-        in error
     )
 
     pg_conn.rollback()
@@ -162,18 +158,17 @@ def test_copy_to_exceeds_unbounded_numeric_max_integral_digits(s3, pg_conn, exte
 def test_copy_to_exceeds_unbounded_numeric_max_decimal_digits(s3, pg_conn, extension):
     uri = f"s3://{TEST_BUCKET}/numeric_exceeds_max_decimal.parquet"
 
-    invalid_numeric = "23.1234567890123"
+    # 13 decimal digits exceed scale 9, but DuckDB's DECIMAL(38,9) rounds
+    # the excess fractional digits — this should succeed.
+    numeric_val = "23.1234567890123"
 
-    error = run_command(
+    run_command(
         f"""
-        copy (select 12 as id, {invalid_numeric}::numeric as a)
+        copy (select 12 as id, {numeric_val}::numeric as a)
         to '{uri}'
     """,
         pg_conn,
-        raise_error=False,
     )
-
-    assert "numeric type exceeds max allowed digits 9 after decimal point" in error
 
     pg_conn.rollback()
 
@@ -266,7 +261,7 @@ def test_pg_lake_table_explicit(s3, pg_conn, extension, copy_numeric_to_file):
         "select data_type, numeric_precision, numeric_scale from information_schema.columns where table_name = 'pg_lake_table_explicit' order by column_name",
         pg_conn,
     )
-    assert result == [["numeric", 39, 10], ["numeric", 5, 3], ["numeric", 38, 9]]
+    assert result == [["numeric", 39, 10], ["numeric", 5, 3], ["numeric", None, None]]
 
     expected_expression = "WHERE (abs(numeric_unbounded) > (1)::numeric)"
     query = f"SELECT numeric_large, numeric_small, numeric_unbounded FROM pg_lake_table_explicit {expected_expression}"
@@ -296,7 +291,7 @@ def test_writable_pg_lake_table(s3, pg_conn, extension, copy_numeric_to_file):
         "select data_type, numeric_precision, numeric_scale from information_schema.columns where table_name = 'writable_pg_lake_table' order by column_name",
         pg_conn,
     )
-    assert result == [["numeric", 39, 10], ["numeric", 5, 3], ["numeric", 10, 5]]
+    assert result == [["numeric", 39, 10], ["numeric", 5, 3], ["numeric", None, None]]
 
     expected_expression = "WHERE (abs(numeric_unbounded) > (1)::numeric)"
     query = f"SELECT * FROM writable_pg_lake_table {expected_expression}"
@@ -367,7 +362,7 @@ def test_iceberg_table_explicit(s3, pg_conn, extension, with_default_location):
         "select data_type, numeric_precision, numeric_scale from information_schema.columns where table_name = 'iceberg_table' order by column_name",
         pg_conn,
     )
-    assert result == [["numeric", 5, 3], ["numeric", 10, 5]]
+    assert result == [["numeric", 5, 3], ["numeric", None, None]]
 
     expected_expression = "WHERE (abs(numeric_unbounded) > (1)::numeric)"
     query = f"SELECT * FROM iceberg_table {expected_expression}"
@@ -390,7 +385,7 @@ def test_iceberg_create_as_select(s3, pg_conn, extension, with_default_location)
         "select data_type, numeric_precision, numeric_scale from information_schema.columns where table_name = 'iceberg_table' order by column_name",
         pg_conn,
     )
-    assert result == [["numeric", 5, 3], ["numeric", 38, 9]]
+    assert result == [["numeric", 5, 3], ["numeric", None, None]]
 
     expected_expression = "WHERE (abs(numeric_unbounded) > (1)::numeric)"
     query = f"SELECT numeric_small, numeric_unbounded FROM iceberg_table {expected_expression}"

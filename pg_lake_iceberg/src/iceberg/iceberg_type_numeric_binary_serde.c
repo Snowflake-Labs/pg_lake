@@ -20,12 +20,13 @@
 #include "utils/numeric.h"
 
 #include "pg_lake/iceberg/iceberg_type_numeric_binary_serde.h"
+#include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/util/numeric.h"
 
 
 static unsigned char *NumericStrToBigEndianBinary(const char *numericStr);
 static char *BigEndianBinaryToNumericStr(unsigned char *numericBinary, int scale, bool isNegative);
-static char *NormalizeNumericStr(const char *numericStr);
+static char *NormalizeNumericStr(const char *numericStr, int targetScale);
 static void TwosComplement(unsigned char *numericBinary);
 static unsigned char *StripLeadingBytes(const unsigned char *binaryValue, size_t *binaryLen, bool isNegative);
 static unsigned char *SignExtendNumericBinary(const unsigned char *numericBinary, size_t binaryLen);
@@ -37,7 +38,8 @@ static unsigned char *SignExtendNumericBinary(const unsigned char *numericBinary
  * number of bytes)
  */
 unsigned char *
-PGNumericIcebergBinarySerialize(Datum numericDatum, size_t *binaryLen)
+PGNumericIcebergBinarySerialize(Datum numericDatum, int icebergScale,
+								size_t *binaryLen)
 {
 	Numeric numeric = DatumGetNumeric(numericDatum);
 
@@ -61,7 +63,8 @@ PGNumericIcebergBinarySerialize(Datum numericDatum, size_t *binaryLen)
 
 	bool		isNegative = (*numericStr == '-');
 
-	char	   *normalizedNumericStr = NormalizeNumericStr(numericStr);
+	char	   *normalizedNumericStr = NormalizeNumericStr(numericStr,
+														   icebergScale);
 
 	unsigned char *numericBinary = NumericStrToBigEndianBinary(normalizedNumericStr);
 
@@ -81,7 +84,11 @@ PGNumericIcebergBinarySerialize(Datum numericDatum, size_t *binaryLen)
 Datum
 PGNumericIcebergBinaryDeserialize(unsigned char *numericBinary, size_t binaryLen, PGType pgType)
 {
-	int			scale = numeric_typmod_scale(pgType.postgresTypeMod);
+	int			precision;
+	int			scale;
+
+	GetDuckdbAdjustedPrecisionAndScaleFromNumericTypeMod(pgType.postgresTypeMod,
+														 &precision, &scale);
 
 	bool		isNegative = (numericBinary[0] & 0x80) != 0;
 
@@ -245,10 +252,17 @@ BigEndianBinaryToNumericStr(unsigned char *numericBinary, int scale,
 
 /*
  * NormalizeNumericStr normalizes a Postgres numeric string by removing sign
- * and decimal point.
+ * and decimal point, producing the unscaled integer string for the given
+ * target Iceberg scale.
+ *
+ * The fractional part is padded with trailing zeros (or truncated) to
+ * exactly targetScale digits.  For example:
+ *   "7"         with targetScale=9 → "7000000000"
+ *   "7.5"       with targetScale=9 → "7500000000"
+ *   "7.123456789012" with targetScale=9 → "7123456789"
  */
 static char *
-NormalizeNumericStr(const char *numericStr)
+NormalizeNumericStr(const char *numericStr, int targetScale)
 {
 	const char *p = numericStr;
 
@@ -257,7 +271,7 @@ NormalizeNumericStr(const char *numericStr)
 		p++;
 	}
 
-	/* 2. Remove decimal point if any */
+	/* Find decimal point if any */
 	const char *dot = strchr(p, '.');
 	int			integralLen,
 				fractionLen;
@@ -273,23 +287,27 @@ NormalizeNumericStr(const char *numericStr)
 		fractionLen = 0;
 	}
 
-	/* Build a pure integer string without decimal point */
-	/* For example "123.45" with scale=2 becomes "12345". */
-	int			totalLen = integralLen + fractionLen;
+	/*
+	 * Build a pure integer string representing the unscaled value at the
+	 * target scale.  E.g. "123.45" with targetScale=9 becomes "123450000000".
+	 */
+	int			totalLen = integralLen + targetScale;
 	char	   *normalizedStr = palloc0(totalLen + 1);
 
-	if (dot)
-	{
-		/* copy integral part */
-		memcpy(normalizedStr, p, integralLen);
-		/* copy fractional part */
-		memcpy(normalizedStr + integralLen, dot + 1, fractionLen);
-	}
-	else
-	{
-		/* no decimal point */
-		memcpy(normalizedStr, p, totalLen);
-	}
+	/* Copy integral part */
+	memcpy(normalizedStr, p, integralLen);
+
+	/* Copy fractional digits (up to targetScale) */
+	int			copyFraction = (fractionLen < targetScale) ? fractionLen : targetScale;
+
+	if (dot && copyFraction > 0)
+		memcpy(normalizedStr + integralLen, dot + 1, copyFraction);
+
+	/* Pad remaining fractional positions with zeros */
+	for (int i = copyFraction; i < targetScale; i++)
+		normalizedStr[integralLen + i] = '0';
+
+	normalizedStr[totalLen] = '\0';
 
 	return normalizedStr;
 }

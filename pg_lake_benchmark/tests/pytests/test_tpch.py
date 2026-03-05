@@ -114,12 +114,19 @@ def test_tpch_answers(
             pgduck_conn,
         )
 
+        # Load CSV into a temp heap table, then create the answer as an iceberg
+        # table so both sides go through the same DECIMAL(38,9) truncation path.
         run_command(
             f"""
-                    CREATE TABLE answer_{query_nr} (LIKE result_{query_nr});
-                    COPY answer_{query_nr} FROM '{answer_location}' (format 'csv', delimiter '|',
+                    CREATE TEMP TABLE _load_answer_{query_nr} (LIKE result_{query_nr});
+                    COPY _load_answer_{query_nr} FROM '{answer_location}' (format 'csv', delimiter '|',
                                                                      header 'true', quote '');
                     """,
+            pg_conn,
+        )
+
+        run_command(
+            f"CREATE TABLE answer_{query_nr} USING iceberg AS SELECT * FROM _load_answer_{query_nr}",
             pg_conn,
         )
 
@@ -184,12 +191,19 @@ def test_tpch_partitioned_answers(
             pgduck_conn,
         )
 
+        # Load CSV into a temp heap table, then create the answer as an iceberg
+        # table so both sides go through the same DECIMAL(38,9) truncation path.
         run_command(
             f"""
-                    CREATE TABLE answer_{query_nr} (LIKE result_{query_nr});
-                    COPY answer_{query_nr} FROM '{answer_location}' (format 'csv', delimiter '|',
+                    CREATE TEMP TABLE _load_answer_{query_nr} (LIKE result_{query_nr});
+                    COPY _load_answer_{query_nr} FROM '{answer_location}' (format 'csv', delimiter '|',
                                                                      header 'true', quote '');
                     """,
+            pg_conn,
+        )
+
+        run_command(
+            f"CREATE TABLE answer_{query_nr} USING iceberg AS SELECT * FROM _load_answer_{query_nr}",
             pg_conn,
         )
 

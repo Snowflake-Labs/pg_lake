@@ -26,6 +26,7 @@
 #include "pg_lake/iceberg/iceberg_type_binary_serde.h"
 #include "pg_lake/iceberg/iceberg_type_numeric_binary_serde.h"
 #include "pg_lake/iceberg/utils.h"
+#include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/util/timetz.h"
 
 #include "port/pg_bswap.h"
@@ -310,8 +311,22 @@ PGIcebergBinarySerialize(Datum datum, Field * field, PGType pgType, bool addNull
 	}
 	else if (pgType.postgresTypeOid == NUMERICOID)
 	{
-		/* generate numeric binary in bigendian */
-		binaryValue = PGNumericIcebergBinarySerialize(datum, binaryLen);
+		/*
+		 * Generate numeric binary in big-endian.  The Iceberg spec requires
+		 * the unscaled integer at the schema's scale, so we must pass the
+		 * target scale.  For unbounded numeric (typmod == -1) this falls back
+		 * to the default Iceberg scale via
+		 * GetDuckdbAdjustedPrecisionAndScaleFromNumericTypeMod.
+		 */
+		int			precision;
+		int			scale;
+
+		GetDuckdbAdjustedPrecisionAndScaleFromNumericTypeMod(
+															 pgType.postgresTypeMod,
+															 &precision, &scale);
+
+		binaryValue = PGNumericIcebergBinarySerialize(datum, scale,
+													  binaryLen);
 	}
 	else if (pgType.postgresTypeOid == UUIDOID)
 	{

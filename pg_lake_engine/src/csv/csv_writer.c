@@ -647,15 +647,17 @@ CopyGetAttnumsFixed(TupleDesc tupDesc, List *attnamelist)
 }
 
 /*
- * ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits ensures the digits for
- * both precision and scale of the numeric, in string, does not exceed the max
- * allowed digits during COPY TO.
+ * ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits ensures the integral
+ * digits of the numeric string do not exceed the max allowed digits during
+ * COPY TO.
+ *
+ * Excess fractional (decimal) digits are intentionally allowed here because
+ * DuckDB's DECIMAL(P,S) will round them during the CSV-to-Parquet conversion.
  */
 static void
 ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits(const char *numericStr)
 {
 	int			totalIntegralDigits = 0;
-	int			totalDecimalDigits = 0;
 	bool		foundDotSeparator = false;
 
 	for (int i = 0; numericStr[i] != '\0'; i++)
@@ -669,9 +671,7 @@ ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits(const char *numericStr)
 		if (!isdigit(numericStr[i]))
 			continue;
 
-		if (foundDotSeparator)
-			totalDecimalDigits++;
-		else
+		if (!foundDotSeparator)
 			totalIntegralDigits++;
 
 		if (totalIntegralDigits > (UnboundedNumericDefaultPrecision - UnboundedNumericDefaultScale))
@@ -680,15 +680,6 @@ ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits(const char *numericStr)
 							errmsg("unbounded numeric type exceeds max allowed digits %d "
 								   "before decimal point",
 								   UnboundedNumericDefaultPrecision - UnboundedNumericDefaultScale),
-							errhint("Consider specifying precision and scale for numeric types, "
-									"i.e. \"numeric(P,S)\" instead of \"numeric\".")));
-		}
-
-		if (totalDecimalDigits > UnboundedNumericDefaultScale)
-		{
-			ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
-							errmsg("unbounded numeric type exceeds max allowed digits %d "
-								   "after decimal point", UnboundedNumericDefaultScale),
 							errhint("Consider specifying precision and scale for numeric types, "
 									"i.e. \"numeric(P,S)\" instead of \"numeric\".")));
 		}
