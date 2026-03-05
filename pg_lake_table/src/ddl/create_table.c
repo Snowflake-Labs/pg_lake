@@ -995,7 +995,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		 * record it here such if table is dropped before commit, we can track
 		 * the creation of the table properly.
 		 */
-		RecordRestCatalogRequestInTx(relationId, REST_CATALOG_CREATE_TABLE, "");
+		RecordRestCatalogRequestInTx(relationId, REST_CATALOG_CREATE_TABLE, "", -1);
 	}
 
 

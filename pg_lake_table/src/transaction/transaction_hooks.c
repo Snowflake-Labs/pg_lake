@@ -80,8 +80,10 @@ IcebergXactCallback(XactEvent event, void *arg)
 		case XACT_EVENT_COMMIT:
 		case XACT_EVENT_PARALLEL_COMMIT:
 			{
-				PostAllRestCatalogRequests();
-				ResetRestCatalogRequests();
+				/*
+				 * REST catalog requests are now sent in pre-commit hook via
+				 * ConsumeTrackedIcebergMetadataChanges(). Nothing to do here.
+				 */
 				break;
 			}
 	}
