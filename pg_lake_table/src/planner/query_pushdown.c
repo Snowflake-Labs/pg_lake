@@ -19,7 +19,9 @@
 #include "funcapi.h"
 #include "miscadmin.h"
 
+#include "access/table.h"
 #include "catalog/catalog.h"
+#include "utils/rel.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_collation.h"
@@ -37,6 +39,7 @@
 #include "pg_lake/planner/explain.h"
 #include "pg_lake/planner/pushdown_utils.h"
 #include "pg_lake/fdw/writable_table.h"
+#include "pg_lake/pgduck/iceberg_write_validation.h"
 #include "pg_lake/planner/insert_select.h"
 #include "pg_lake/planner/query_pushdown.h"
 #include "pg_lake/planner/restriction_collector.h"
@@ -1547,11 +1550,26 @@ QueryPushdownScanNextInternal(CustomScanState *node)
 	if (scanState->insertIntoRelid != InvalidOid)
 	{
 		/*
-		 * append the query result to the table and set the number of
-		 * processed rows
+		 * Set out-of-range policy from the target table's option for this
+		 * INSERT..SELECT pushdown write.
 		 */
+		IcebergOutOfRangePolicy outOfRangePolicy =
+			GetIcebergOutOfRangePolicyForTable(scanState->insertIntoRelid);
+
+		/*
+		 * The CustomScan output slot has 0 attributes because the scan node
+		 * doesn't return rows to PostgreSQL.  Fetch the target table's tuple
+		 * descriptor so IcebergWrapQueryWithErrorOrClampChecks can inspect
+		 * column types.
+		 */
+		Relation	rel = table_open(scanState->insertIntoRelid, AccessShareLock);
+		TupleDesc	targetTupleDesc = CreateTupleDescCopy(RelationGetDescr(rel));
+
+		table_close(rel, AccessShareLock);
+
 		scanState->estate->es_processed =
-			AddQueryResultToTable(scanState->insertIntoRelid, scanState->queryString, tupleDesc);
+			AddQueryResultToTable(scanState->insertIntoRelid, scanState->queryString,
+								  targetTupleDesc, outOfRangePolicy);
 
 		return NULL;
 	}

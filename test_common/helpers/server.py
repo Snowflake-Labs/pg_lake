@@ -143,12 +143,15 @@ def setup_pgduck_server():
         ],
     )
 
-    # Wait for the server to create the socket before attempting to stat it
-    if not is_server_listening(server.socket_path):
+    # Wait for the server to create the socket before attempting to stat it.
+    # The init file may include INSTALL commands that download DuckDB extensions
+    # over the network (e.g. INSTALL spatial), so use a generous timeout.
+    if not is_server_listening(server.socket_path, timeout=60):
         exit_code = server.process.poll()
         stderr_output = (
             get_server_output(server.output_queue) if server.output_queue else ""
         )
+        terminate_process(server.process)
         raise RuntimeError(
             f"Server failed to start - socket not listening: {server.socket_path}\n"
             f"Process alive: {exit_code is None}, exit code: {exit_code}\n"

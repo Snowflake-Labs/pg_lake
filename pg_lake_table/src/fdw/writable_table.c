@@ -52,6 +52,7 @@
 #include "pg_lake/pgduck/read_data.h"
 #include "pg_lake/pgduck/remote_storage.h"
 #include "pg_lake/pgduck/write_data.h"
+#include "pg_lake/pgduck/iceberg_write_validation.h"
 #include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_extension_base/spi_helpers.h"
@@ -121,7 +122,8 @@ static List *PrepareToAddQueryResultToTable(Oid relationId,
 											Partition * partition,
 											bool queryHasRowId,
 											bool allowSplit,
-											bool isVerbose);
+											bool isVerbose,
+											IcebergOutOfRangePolicy outOfRangePolicy);
 static List *GetPossiblePositionDeleteFiles(Oid relationId, List *sourcePathList,
 											Snapshot snapshot);
 static void ApplyMetadataChanges(Oid relationId, List *metadataOperations);
@@ -210,7 +212,8 @@ ApplyInsertFile(Relation rel, char *insertFile, int64 rowCount,
 List *
 PrepareCSVInsertion(Oid relationId, char *insertCSV, int64 rowCount,
 					int64 reservedRowIdStart, int maximumLineSize,
-					DataFileSchema * schema)
+					DataFileSchema * schema,
+					IcebergOutOfRangePolicy outOfRangePolicy)
 {
 	Relation	relation = table_open(relationId, RowExclusiveLock);
 	ForeignTable *foreignTable = GetForeignTable(relationId);
@@ -270,7 +273,8 @@ PrepareCSVInsertion(Oid relationId, char *insertCSV, int64 rowCount,
 						 compression,
 						 options,
 						 schema,
-						 leafFields);
+						 leafFields,
+						 outOfRangePolicy);
 
 	ApplyColumnStatsModeForAllFileStats(relationId, statsCollector->dataFileStats);
 
@@ -587,10 +591,11 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 
 			List	   *leafFields = GetLeafFieldsForTable(relationId);
 
-			/* write the deletion file */
+			/* write the deletion file (no temporal validation needed) */
 			StatsCollector *statsCollector =
 				ConvertCSVFileTo(deleteFile, deleteTupleDesc, -1, deletionFilePath,
-								 DATA_FORMAT_PARQUET, compression, copyOptions, schema, leafFields);
+								 DATA_FORMAT_PARQUET, compression, copyOptions, schema, leafFields,
+								 ICEBERG_OOR_ERROR);
 
 			ereport(WriteLogLevel, (errmsg("adding deletion file %s with " INT64_FORMAT " rows ",
 										   deletionFilePath, deletedRowCount)));
@@ -915,7 +920,8 @@ TryCompactDataFiles(Oid relationId, TupleDesc tupleDescriptor, List *candidates,
 	List	   *newFileOps =
 		PrepareToAddQueryResultToTable(relationId, readFileQuery, tupleDescriptor,
 									   partitionSpecId, partition,
-									   hasRowIds, allowSplit, isVerbose);
+									   hasRowIds, allowSplit, isVerbose,
+									   GetIcebergOutOfRangePolicyForTable(relationId));
 
 	metadataOperations = list_concat(metadataOperations, newFileOps);
 
@@ -958,7 +964,8 @@ TryCompactDataFiles(Oid relationId, TupleDesc tupleDescriptor, List *candidates,
 static List *
 PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc,
 							   int32 partitionSpecId, Partition * partition,
-							   bool queryHasRowId, bool allowSplit, bool isVerbose)
+							   bool queryHasRowId, bool allowSplit, bool isVerbose,
+							   IcebergOutOfRangePolicy outOfRangePolicy)
 {
 	PgLakeTableProperties properties = GetPgLakeTableProperties(relationId);
 	List	   *options = properties.options;
@@ -1007,7 +1014,8 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 						   queryHasRowId,
 						   schema,
 						   queryTupleDesc,
-						   leafFields);
+						   leafFields,
+						   outOfRangePolicy);
 
 	if (statsCollector->totalRowCount == 0)
 	{
@@ -1045,8 +1053,11 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
  * AddQueryResultToTable adds the result of a pgduck query to the table.
  */
 int64
-AddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc)
+AddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc,
+					  IcebergOutOfRangePolicy outOfRangePolicy)
 {
+	Assert(queryTupleDesc != NULL && queryTupleDesc->natts > 0);
+
 	int64		rowsProcessed = 0;
 	ForeignTable *foreignTable = GetForeignTable(relationId);
 	List	   *options = foreignTable->options;
@@ -1082,7 +1093,8 @@ AddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc)
 	List	   *newFileOps =
 		PrepareToAddQueryResultToTable(relationId, readQuery, queryTupleDesc,
 									   partitionSpecId, partition,
-									   queryHasRowId, allowSplit, isVerbose);
+									   queryHasRowId, allowSplit, isVerbose,
+									   outOfRangePolicy);
 
 	metadataOperations = list_concat(metadataOperations, newFileOps);
 

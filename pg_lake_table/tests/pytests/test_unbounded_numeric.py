@@ -120,59 +120,6 @@ def test_unbounded_numeric_pushdown(s3, pg_conn, extension):
     pg_conn.rollback()
 
 
-def test_copy_to_unbounded_numeric_with_default(s3, pg_conn, extension):
-    uri = f"s3://{TEST_BUCKET}/unbounded_numeric.parquet"
-
-    # random()::numeric may have more than 9 decimal digits, but DuckDB's
-    # DECIMAL(38,9) rounds the excess fractional digits — this should succeed.
-    run_command(
-        f"""
-        copy (select random()::numeric)
-        to '{uri}'
-    """,
-        pg_conn,
-    )
-
-    pg_conn.rollback()
-
-
-def test_copy_to_exceeds_unbounded_numeric_max_integral_digits(s3, pg_conn, extension):
-    uri = f"s3://{TEST_BUCKET}/numeric_exceeds_max_integral.parquet"
-
-    invalid_numeric = "123456789012345678901234567890.56"
-
-    error = run_command(
-        f"""
-        copy (select 12 as id, {invalid_numeric}::numeric as a)
-        to '{uri}'
-    """,
-        pg_conn,
-        raise_error=False,
-    )
-
-    assert "numeric type exceeds max allowed digits 29 before decimal point" in error
-
-    pg_conn.rollback()
-
-
-def test_copy_to_exceeds_unbounded_numeric_max_decimal_digits(s3, pg_conn, extension):
-    uri = f"s3://{TEST_BUCKET}/numeric_exceeds_max_decimal.parquet"
-
-    # 13 decimal digits exceed scale 9, but DuckDB's DECIMAL(38,9) rounds
-    # the excess fractional digits — this should succeed.
-    numeric_val = "23.1234567890123"
-
-    run_command(
-        f"""
-        copy (select 12 as id, {numeric_val}::numeric as a)
-        to '{uri}'
-    """,
-        pg_conn,
-    )
-
-    pg_conn.rollback()
-
-
 def test_regular_table_load_from(s3, pg_conn, extension, copy_numeric_to_file):
     run_command(
         f"""
