@@ -571,6 +571,12 @@ InitPgLakeIcebergOptions(void)
 		{"catalog_table_name", ForeignTableRelationId},
 		{"catalog_namespace", ForeignTableRelationId},
 
+		/*
+		 * out-of-range value handling during writes: 'error' (default) or
+		 * 'clamp'
+		 */
+		{"out_of_range_values", ForeignTableRelationId},
+
 		{NULL, InvalidOid}
 	};
 
@@ -857,6 +863,20 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 						 errmsg("invalid column_stats_mode option: %s", columnStatsMode)));
+			}
+		}
+		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "out_of_range_values") == 0)
+		{
+			const char *outOfRangeValues = defGetString(def);
+
+			if (strcmp(outOfRangeValues, "error") != 0 &&
+				strcmp(outOfRangeValues, "clamp") != 0)
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("invalid out_of_range_values option: \"%s\"",
+								outOfRangeValues),
+						 errhint("Valid values are \"error\" and \"clamp\".")));
 			}
 		}
 	}

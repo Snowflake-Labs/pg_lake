@@ -92,6 +92,9 @@ typedef struct PartitioningDestReceiverData
 
 	/* operation of the DestReceiver */
 	int			operation;
+
+	/* out-of-range policy for temporal partition transforms */
+	IcebergOutOfRangePolicy outOfRangePolicy;
 }			PartitioningDestReceiverData;
 
 
@@ -114,7 +117,8 @@ int			MaxOpenFilesForPartitionedWrite = 5000;
 DestReceiver *
 CreatePartitionedDestReceiver(Oid relationId,
 							  CopyDataFormat targetFormat,
-							  int32 partitionSpecId)
+							  int32 partitionSpecId,
+							  IcebergOutOfRangePolicy outOfRangePolicy)
 {
 	PartitioningDestReceiverData *self =
 		(PartitioningDestReceiverData *) palloc0(sizeof(PartitioningDestReceiverData));
@@ -135,6 +139,7 @@ CreatePartitionedDestReceiver(Oid relationId,
 	self->relationId = relationId;
 	self->targetFormat = targetFormat;
 	self->alreadyFlushedPartitionModifications = NIL;
+	self->outOfRangePolicy = outOfRangePolicy;
 
 	/*
 	 * We return modifications to the upper context, so better allocate
@@ -221,7 +226,8 @@ PartitionedDestReceiveSlot(TupleTableSlot *slot, DestReceiver *self)
 	MemoryContext callerContext = MemoryContextSwitchTo(myState->perRowContext);
 
 	Partition  *partition =
-		ComputePartitionTupleForTuple(myState->partitionTransformList, slot);
+		ComputePartitionTupleForTuple(myState->partitionTransformList, slot,
+									  myState->outOfRangePolicy);
 	uint64		partitionHash = ComputePartitionKey(partition);
 
 	/* Lookup or create subreceiver in the hashtable */
@@ -271,7 +277,8 @@ PartitionedDestReceiveSlot(TupleTableSlot *slot, DestReceiver *self)
 											myState->targetFormat,
 											MaxWriteTempFileSizeMB,
 											myState->currentPartitionSpecId,
-											0);
+											0,
+											myState->outOfRangePolicy);
 
 		entryPtr->multiDataFileDestReceiver = partitionReceiver;
 		partitionReceiver->rStartup((DestReceiver *) entryPtr->multiDataFileDestReceiver, myState->operation, myState->tupleDesc);

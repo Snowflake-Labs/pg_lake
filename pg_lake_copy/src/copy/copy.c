@@ -48,6 +48,7 @@
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/parsetree/columns.h"
+#include "pg_lake/parsetree/options.h"
 #include "pg_lake/permissions/roles.h"
 #include "pg_lake/planner/insert_select.h"
 #include "pg_lake/pgduck/cache_control.h"
@@ -56,6 +57,7 @@
 #include "pg_lake/pgduck/read_data.h"
 #include "pg_lake/pgduck/type.h"
 #include "pg_lake/pgduck/write_data.h"
+#include "pg_lake/pgduck/iceberg_write_validation.h"
 #include "pg_lake/query/execute.h"
 #include "pg_lake/storage/local_storage.h"
 #include "pg_lake/util/numeric.h"
@@ -428,6 +430,26 @@ ProcessPgLakeCopyFrom(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 	EnsureFormatSupported(sourceFormat, sourceCompression, false);
 
 	/*
+	 * Determine out-of-range policy from COPY option (if present) or fall
+	 * back to the target table's option.  Only iceberg tables support this
+	 * option; returns NONE for other tables.
+	 */
+	IcebergOutOfRangePolicy outOfRangePolicy;
+
+	if (HasOption(copyStmt->options, "out_of_range_values"))
+	{
+		if (!IsIcebergTable(relationId))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("\"out_of_range_values\" option is only supported for "
+							"iceberg tables")));
+
+		outOfRangePolicy = GetIcebergOutOfRangePolicyFromOptions(copyStmt->options);
+	}
+	else
+		outOfRangePolicy = GetIcebergOutOfRangePolicyForTable(relationId);
+
+	/*
 	 * Find which options should pass through COPY .. FROM and do early
 	 * validation.
 	 *
@@ -534,7 +556,8 @@ ProcessPgLakeCopyFrom(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 	 */
 	if (doCopyPushdown)
 	{
-		*rowsProcessed = AddQueryResultToTable(relationId, readQuery, tupleDesc);
+		*rowsProcessed = AddQueryResultToTable(relationId, readQuery, tupleDesc,
+											   outOfRangePolicy);
 		return;
 	}
 
@@ -718,7 +741,8 @@ FindCopyFromWriteOptions(CopyDataFormat format, List *options)
 		if (strcmp(option->defname, "format") == 0 ||
 			strcmp(option->defname, "compression") == 0 ||
 			strcmp(option->defname, "auto_detect") == 0 ||
-			strcmp(option->defname, "filename") == 0)
+			strcmp(option->defname, "filename") == 0 ||
+			strcmp(option->defname, "out_of_range_values") == 0)
 		{
 			continue;
 		}
@@ -887,7 +911,9 @@ ProcessPgLakeCopyTo(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 	char	   *tempCSVPath = GenerateTempFileName(TEMP_FILE_PATTERN, ensureCleanup);
 
 	/* execute query and write results to CSV */
-	DestReceiver *dest = CreateCSVDestReceiver(tempCSVPath, readOptions, destinationFormat);
+	DestReceiver *dest = CreateCSVDestReceiver(tempCSVPath, readOptions,
+											   destinationFormat,
+											   ICEBERG_OOR_NONE);
 
 	*rowsProcessed = ExecuteQueryToDestReceiver(query, queryString, NULL, dest);
 
@@ -927,7 +953,8 @@ ProcessPgLakeCopyTo(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 	 */
 	ConvertCSVFileTo(tempCSVPath, tupleDesc, maximumLineLength,
 					 destinationPath, destinationFormat, destinationCompression,
-					 copyStmt->options, schema, NIL);
+					 copyStmt->options, schema, NIL,
+					 ICEBERG_OOR_NONE);
 
 	if (IsCopyToStdout(copyStmt))
 	{
