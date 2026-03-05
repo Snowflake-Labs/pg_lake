@@ -58,7 +58,7 @@ test_cases = [
     (
         "timestamptz_mi",
         "WHERE col_timestamptz - '2022-12-30'::timestamptz >= INTERVAL '1 day'",
-        "WHERE ((col_timestamptz - '",
+        "WHERE ((col_timestamptz - ('",
     ),
     (
         "timestamptz_eq_date",

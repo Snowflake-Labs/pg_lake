@@ -379,6 +379,94 @@ def test_iceberg_add_column_default(pg_conn, s3, extension, with_default_locatio
     pg_conn.rollback()
 
 
+def test_iceberg_add_column_bc_date_default(
+    pg_conn, s3, extension, with_default_location
+):
+    """Verify BC date and early-AD timestamp defaults round-trip through Iceberg JSON serde.
+
+    Iceberg supports dates from ISO year -9999 to 9999 (BC dates allowed),
+    but timestamps/timestamptz only from 0001-01-01 through 9999-12-31 (AD only).
+
+    When a column is added with a BC date default, the value is serialized to
+    Iceberg metadata JSON via PGIcebergJsonSerialize (ConvertBCToISOYear).
+    Old rows that predate the column read the initial-default back via
+    PGIcebergJsonDeserialize (ConvertISOYearToBC).
+    """
+    run_command("CREATE SCHEMA bc_default_test;", pg_conn)
+    run_command(
+        "CREATE TABLE bc_default_test.tbl (a int) USING iceberg",
+        pg_conn,
+    )
+    # row inserted before the default columns exist
+    run_command("INSERT INTO bc_default_test.tbl VALUES (1)", pg_conn)
+
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    # add columns with defaults — BC for date, early-AD for timestamps
+    run_command(
+        "ALTER TABLE bc_default_test.tbl "
+        "ADD COLUMN d date DEFAULT '4712-01-01 BC', "
+        "ADD COLUMN ts timestamp DEFAULT '0001-01-01 00:00:00', "
+        "ADD COLUMN tstz timestamptz DEFAULT '0001-01-01 00:00:00+00'",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # ── verify Iceberg metadata JSON stores ISO 8601 year numbering ──
+    metadata_location = run_query(
+        "SELECT metadata_location FROM iceberg_tables "
+        "WHERE table_name = 'tbl' AND table_namespace = 'bc_default_test'",
+        pg_conn,
+    )[0][0]
+    returned_json = normalize_json(read_s3_operations(s3, metadata_location))
+    latest_schema = returned_json["schemas"][-1]
+    fields_by_name = {f["name"]: f for f in latest_schema["fields"]}
+
+    # date: "4712-01-01 BC" → ISO "-4711-01-01"
+    assert fields_by_name["d"]["write-default"] == "-4711-01-01"
+    assert fields_by_name["d"]["initial-default"] == "-4711-01-01"
+
+    # timestamp: "0001-01-01 00:00:00" → "0001-01-01T00:00:00" (AD, no BC conversion)
+    assert fields_by_name["ts"]["write-default"] == "0001-01-01T00:00:00"
+    assert fields_by_name["ts"]["initial-default"] == "0001-01-01T00:00:00"
+
+    # timestamptz: "0001-01-01 00:00:00+00" → "0001-01-01T00:00:00+00:00" (AD, no BC conversion)
+    assert fields_by_name["tstz"]["write-default"] == "0001-01-01T00:00:00+00:00"
+    assert fields_by_name["tstz"]["initial-default"] == "0001-01-01T00:00:00+00:00"
+
+    # row with explicit values — BC date, early-AD timestamps
+    run_command(
+        "INSERT INTO bc_default_test.tbl VALUES "
+        "(2, '0001-01-01 BC', '0001-06-15 12:30:00', '0001-06-15 12:30:00+00')",
+        pg_conn,
+    )
+
+    # row relying on defaults (write-default path)
+    run_command("INSERT INTO bc_default_test.tbl(a) VALUES (3)", pg_conn)
+
+    # cast to text to work around psycopg2 limitation with BC dates
+    # The ::text cast may execute inside DuckDB (query pushdown), which
+    # formats BC as "(BC)".  Normalize to PostgreSQL's " BC" for comparison.
+    results = run_query(
+        "SELECT a, d::text AS d, ts::text AS ts, tstz::text AS tstz "
+        "FROM bc_default_test.tbl ORDER BY a",
+        pg_conn,
+    )
+
+    assert normalize_bc(results) == [
+        # row 1: initial-default from Iceberg JSON deserialization
+        [1, "4712-01-01 BC", "0001-01-01 00:00:00", "0001-01-01 00:00:00+00"],
+        # row 2: explicit values
+        [2, "0001-01-01 BC", "0001-06-15 12:30:00", "0001-06-15 12:30:00+00"],
+        # row 3: write-default applied at insert time
+        [3, "4712-01-01 BC", "0001-01-01 00:00:00", "0001-01-01 00:00:00+00"],
+    ]
+
+    run_command("RESET TIME ZONE;", pg_conn)
+    run_command("DROP SCHEMA bc_default_test CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
 def test_iceberg_add_nested_column_default(
     pg_conn, s3, extension, with_default_location
 ):

@@ -31,6 +31,8 @@ extern PGDLLEXPORT char *PGDuckOnlySerialize(Oid typeOid, Datum value);
 extern PGDLLEXPORT bool IsPGDuckSerializeRequired(PGType postgresType);
 extern PGDLLEXPORT char *IntervalOutForPGDuck(Datum value);
 extern bool IsContainerType(Oid postgresType);
+extern PGDLLEXPORT const char *ConvertBCToISOYearIfNeeded(const char *str);
+extern PGDLLEXPORT const char *ConvertISOYearToBCIfNeeded(const char *str);
 
 /*
  * IsSerializedAsContainer returns whether a type will be serialized as a
