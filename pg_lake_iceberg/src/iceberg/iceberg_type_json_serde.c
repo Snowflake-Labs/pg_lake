@@ -27,6 +27,7 @@
 #include "pg_lake/iceberg/iceberg_type_json_serde.h"
 #include "pg_lake/json/json_utils.h"
 #include "pg_lake/pgduck/map.h"
+#include "pg_lake/pgduck/serialize.h"
 #include "pg_extension_base/spi_helpers.h"
 
 #include "access/tupdesc.h"
@@ -137,6 +138,37 @@ PGScalarIcebergJsonSerialize(Datum scalarDatum, Field * field, PGType pgType)
 		 */
 		Assert(strncmp(jsonString, "\"\\\\x", 4) == 0);
 		jsonString = psprintf("\"%s", jsonString + 4);
+	}
+
+	/*
+	 * Convert BC dates to ISO 8601.
+	 *
+	 * PostgreSQL's to_json appends " BC" for BC-era dates/timestamps (e.g.
+	 * "4712-01-01 BC"), but the Iceberg spec requires ISO 8601 format
+	 * ("YYYY-MM-DD") which has no era suffix.  Convert to ISO 8601 year
+	 * numbering (year 0000 = 1 BC, negative years for earlier dates).
+	 * ConvertISOYearToBCIfNeeded reverses this on deserialization.
+	 */
+	if (pgType.postgresTypeOid == DATEOID ||
+		pgType.postgresTypeOid == TIMESTAMPOID ||
+		pgType.postgresTypeOid == TIMESTAMPTZOID)
+	{
+		/*
+		 * to_json wraps the value in JSON quotes (e.g. "\"4712-01-01 BC\"").
+		 * Strip the quotes, apply ISO year conversion, then re-quote.
+		 */
+		int			jsonLen = strlen(jsonString);
+
+		Assert(jsonLen >= 2 && jsonString[0] == '"' && jsonString[jsonLen - 1] == '"');
+
+		char	   *content = pnstrdup(jsonString + 1, jsonLen - 2);
+		const char *converted = ConvertBCToISOYearIfNeeded(content);
+
+		if (converted != content)
+		{
+			jsonString = psprintf("\"%s\"", converted);
+			pfree(content);
+		}
 	}
 
 	return jsonString;
@@ -423,6 +455,18 @@ PGScalarIcebergJsonDeserialize(const char *scalarJson, Field * field, PGType pgT
 		appendStringInfo(hexString, "\\x%s", scalarJson);
 
 		scalarJson = hexString->data;
+	}
+
+	/*
+	 * ISO 8601 year 0000 represents 1 BC, and negative years represent
+	 * earlier BC dates.  Convert back to PostgreSQL's "YYYY BC" format before
+	 * calling the type input function.
+	 */
+	if (pgType.postgresTypeOid == DATEOID ||
+		pgType.postgresTypeOid == TIMESTAMPOID ||
+		pgType.postgresTypeOid == TIMESTAMPTZOID)
+	{
+		scalarJson = ConvertISOYearToBCIfNeeded(scalarJson);
 	}
 
 	Oid			typinput;

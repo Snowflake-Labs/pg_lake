@@ -776,6 +776,74 @@ def test_pg_lake_iceberg_table_serial_column(
     pg_conn.commit()
 
 
+def test_pg_lake_iceberg_table_bc_dates(
+    pg_conn,
+    extension,
+    s3,
+    create_helper_functions,
+    with_default_location,
+):
+    """Verify that BC dates and early-AD timestamps roundtrip correctly through Iceberg write+read.
+
+    Iceberg supports dates from ISO year -9999 to 9999 (BC dates allowed),
+    but timestamps/timestamptz only from 0001-01-01 through 9999-12-31 (AD only).
+    """
+    table_name = "test_pg_lake_iceberg_table_bc_dates"
+    run_command(
+        f"""CREATE TABLE {table_name}(
+            col_date date,
+            col_ts timestamp,
+            col_tstz timestamptz
+        ) USING iceberg;""",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+    run_command(
+        f"""INSERT INTO {table_name} VALUES
+            ('4712-01-01 BC', '0001-01-01 00:00:00', '0001-01-01 00:00:00+00'),
+            ('0001-01-01 BC', '0001-06-15 12:30:00', '0001-06-15 12:30:00+00'),
+            ('2021-01-01', '2021-01-01 00:00:00', '2021-01-01 00:00:00+00');""",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # verify the data roundtrips correctly
+    # cast to text to work around psycopg2 limitation with BC dates
+    # The ::text cast may execute inside DuckDB (query pushdown), which
+    # formats BC as "(BC)".  Normalize to PostgreSQL's " BC" for comparison.
+    result = run_query(
+        f"SELECT col_date::text AS d, col_ts::text AS ts, col_tstz::text AS tstz FROM {table_name} ORDER BY col_date;",
+        pg_conn,
+    )
+
+    assert normalize_bc(result) == [
+        ["4712-01-01 BC", "0001-01-01 00:00:00", "0001-01-01 00:00:00+00"],
+        ["0001-01-01 BC", "0001-06-15 12:30:00", "0001-06-15 12:30:00+00"],
+        ["2021-01-01", "2021-01-01 00:00:00", "2021-01-01 00:00:00+00"],
+    ]
+
+    # verify data file stats: BC dates should appear in lower_bounds,
+    # AD dates in upper_bounds
+    for field_id, col_name, col_type in [
+        (1, "col_date", "date"),
+        (2, "col_ts", "timestamp"),
+        (3, "col_tstz", "timestamptz"),
+    ]:
+        result = run_query(
+            f"""SELECT min((lower_bounds->>'{field_id}')::{col_type}) = (SELECT min({col_name}) FROM {table_name}),
+                    max((upper_bounds->>'{field_id}')::{col_type}) = (SELECT max({col_name}) FROM {table_name})
+                FROM lake_iceberg.data_file_stats((SELECT metadata_location FROM iceberg_tables WHERE table_name = '{table_name}'));""",
+            pg_conn,
+        )
+        assert result == [[True, True]], f"stats mismatch for {col_name}"
+
+    run_command("RESET TIME ZONE;", pg_conn)
+    run_command(f"DROP TABLE {table_name}", pg_conn)
+    pg_conn.commit()
+
+
 def test_pg_lake_iceberg_table_random_values(
     pg_conn,
     extension,

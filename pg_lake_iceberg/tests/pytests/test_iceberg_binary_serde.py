@@ -240,6 +240,19 @@ def test_pg_lake_serde_temporal(
         result = run_query(pg_query, superuser_conn)
         assert str(result[0][0]) == value
 
+    # BC dates — cast to text to work around psycopg2 limitation with BC dates.
+    # Iceberg only supports BC for date type (years -9999..9999 ISO);
+    # timestamps/timestamptz must be AD (years 0001–9999).
+    bc_date_values = [
+        ("date", "date", "4712-01-01 BC"),
+        ("date", "date", "0001-01-01 BC"),
+    ]
+
+    for iceberg_type, pg_type, value in bc_date_values:
+        pg_query = f"SELECT lake_iceberg.serde_value('{value}'::{pg_type}, '{iceberg_type}')::text;"
+        result = run_query(pg_query, superuser_conn)
+        assert result[0][0] == value
+
     timestamptz_values = [
         (
             "timestamptz",
@@ -285,6 +298,33 @@ def test_pg_lake_serde_temporal(
         )
         result = run_query(pg_query, superuser_conn)
         assert str(result[0][0]) == expected
+
+    # Early-AD timestamptz — verifies serde at the boundary of the allowed range
+    run_command("SET TIME ZONE 'UTC';", superuser_conn)
+
+    early_ad_timestamptz_values = [
+        (
+            "timestamptz",
+            "timestamptz",
+            "0001-01-01 00:00:00+00",
+            "0001-01-01 00:00:00+00:00",
+        ),
+        (
+            "timestamptz",
+            "timestamptz",
+            "0001-06-15 12:30:00+00",
+            "0001-06-15 12:30:00+00:00",
+        ),
+    ]
+
+    for iceberg_type, pg_type, value, expected in early_ad_timestamptz_values:
+        pg_query = (
+            f"SELECT lake_iceberg.serde_value('{value}'::{pg_type}, '{iceberg_type}');"
+        )
+        result = run_query(pg_query, superuser_conn)
+        assert str(result[0][0]) == expected
+
+    run_command("RESET TIME ZONE;", superuser_conn)
 
     superuser_conn.rollback()
 

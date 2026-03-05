@@ -27,13 +27,97 @@
 #include "pg_lake/pgduck/struct_conversion.h"
 #include "pg_lake/util/timetz.h"
 #include "utils/builtins.h"
-#include "utils/date.h"
 #include "utils/lsyscache.h"
-#include "utils/timestamp.h"
 
 
 static char *ByteAOutForPGDuck(Datum value);
 static char *TimeTzOutForPGDuck(Datum value);
+
+
+/*
+ * ConvertBCToISOYearIfNeeded converts PostgreSQL's BC-era date/timestamp
+ * string to ISO 8601 year numbering.
+ *
+ * If the input ends with " BC", the 1-based BC year is converted:
+ *   1 BC → 0000, 2 BC → -0001, 4712 BC → -4711
+ *
+ * The rest of the string (month-day, time, timezone) is preserved:
+ *   "4712-01-01 BC"            → "-4711-01-01"
+ *   "4712-01-01 00:00:00 BC"   → "-4711-01-01 00:00:00"
+ *   "0001-01-01 00:00:00+00 BC" → "0000-01-01 00:00:00+00"
+ *
+ * AD strings (no " BC" suffix) are returned unchanged.
+ */
+const char *
+ConvertBCToISOYearIfNeeded(const char *str)
+{
+	int			len = strlen(str);
+
+	/* Must end with " BC" */
+	if (len < 3 || strcmp(str + len - 3, " BC") != 0)
+		return str;
+
+	/* Parse PostgreSQL's 1-based BC year */
+	int			pgBcYear;
+
+	if (sscanf(str, "%d-", &pgBcYear) != 1 || pgBcYear <= 0)
+		return str;
+
+	/*
+	 * Convert: 1 BC (pgBcYear=1) → ISO year 0, 2 BC → -1, 4712 BC →
+	 * -4711
+	 */
+	int			isoYear = -(pgBcYear - 1);
+
+	/* Locate first '-' after the year digits to find "-MM-DD..." */
+	const char *afterYear = strchr(str, '-');
+
+	if (afterYear == NULL)
+		return str;
+
+	/* Extract the portion between year and trailing " BC" */
+	int			middleLen = (str + len - 3) - afterYear;
+	char	   *middle = pnstrdup(afterYear, middleLen);
+
+	const char *result;
+
+	if (isoYear == 0)
+		result = psprintf("%04d%s", isoYear, middle);
+	else
+		result = psprintf("-%04d%s", -isoYear, middle);
+
+	pfree(middle);
+	return result;
+}
+
+
+/*
+ * ConvertISOYearToBCIfNeeded converts an ISO 8601 zero/negative year
+ * date/timestamp string to PostgreSQL's "YYYY BC" format.
+ *
+ *   "-4711-01-01"            → "4712-01-01 BC"
+ *   "0000-01-01T00:00:00"    → "0001-01-01T00:00:00 BC"
+ *   "0000-01-01 00:00:00+00" → "0001-01-01 00:00:00+00 BC"
+ *
+ * Positive-year strings pass through unchanged.
+ */
+const char *
+ConvertISOYearToBCIfNeeded(const char *str)
+{
+	int			isoYear;
+	int			consumed = 0;
+
+	if (sscanf(str, "%d%n", &isoYear, &consumed) != 1 || isoYear > 0)
+		return str;
+
+	/* ISO year 0 = 1 BC, -1 = 2 BC, etc. */
+	int			bcYear = 1 - isoYear;
+
+	/* rest points to "-MM-DD..." after the year digits */
+	const char *rest = str + consumed;
+
+	return psprintf("%04d%s BC", bcYear, rest);
+}
 
 
 /*
@@ -89,6 +173,20 @@ PGDuckSerialize(FmgrInfo *flinfo, Oid columnType, Datum value,
 		return TextDatumGetCString(geomAsText);
 	}
 
+	/*
+	 * PostgreSQL outputs BC dates/timestamps with a " BC" suffix (e.g.
+	 * "4712-01-01 BC"), but DuckDB expects ISO 8601 negative-year format
+	 * (e.g. "-4711-01-01").  Without this conversion, DuckDB silently drops
+	 * the BC era indicator and treats the value as AD.
+	 */
+	if (columnType == DATEOID || columnType == TIMESTAMPOID ||
+		columnType == TIMESTAMPTZOID)
+	{
+		char	   *result = OutputFunctionCall(flinfo, value);
+
+		return (char *) ConvertBCToISOYearIfNeeded(result);
+	}
+
 	return OutputFunctionCall(flinfo, value);
 }
 
@@ -106,6 +204,14 @@ IsPGDuckSerializeRequired(PGType postgresType)
 		return true;
 
 	if (typeId == TIMETZOID)
+		return true;
+
+	/*
+	 * PostgreSQL outputs BC dates/timestamps with " BC" suffix, but DuckDB
+	 * expects ISO 8601 negative-year format.  We route these types through
+	 * PGDuckSerialize so that ConvertBCToISOYearIfNeeded can convert.
+	 */
+	if (typeId == DATEOID || typeId == TIMESTAMPOID || typeId == TIMESTAMPTZOID)
 		return true;
 
 	/* also covers map */
