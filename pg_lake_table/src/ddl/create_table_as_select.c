@@ -163,6 +163,16 @@ ProcessCreateAsSelectPgLakeTable(ProcessUtilityParams * params, void *arg)
 
 	EnsureCreateAsSelectIcebergTableSupported(createAsStmt);
 
+	/*
+	 * Fix for issue #215: When CTAS USING iceberg is executed through SPI
+	 * (e.g., from PL/pgSQL EXECUTE), PostgreSQL's SPI layer asserts that
+	 * either if_not_exists or skipData is set. Since we're going to transform
+	 * this statement to CREATE FOREIGN TABLE + INSERT, we can safely set
+	 * skipData = true to satisfy the SPI assertion, as we handle data insertion
+	 * separately via InsertIntoIcebergTable().
+	 */
+	createAsStmt->into->skipData = true;
+
 	char	   *tableName = createAsStmt->into->rel->relname;
 	char	   *schemaName = createAsStmt->into->rel->schemaname;
 
