@@ -31,6 +31,7 @@
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/pgduck/remote_storage.h"
 #include "pg_lake/pgduck/write_data.h"
+#include "pg_lake/pgduck/write_validation.h"
 #include "pg_lake/storage/local_storage.h"
 #include "foreign/foreign.h"
 #include "tcop/dest.h"
@@ -102,6 +103,9 @@ typedef struct MultiDataFileUploadDestReceiver
 	 * dest receiver).
 	 */
 	int			maxWriteTempFileSizeMB;
+
+	/* out-of-range policy for temporal/numeric validation */
+	OutOfRangePolicy outOfRangePolicy;
 }			MultiDataFileUploadDestReceiver;
 
 
@@ -145,7 +149,8 @@ CreateMultiDataFileDestReceiver(Oid relationId,
 								CopyDataFormat targetFormat,
 								int MaxWriteTempFileSizeMB,
 								int32 partitionSpecId,
-								int64 rowIdStart)
+								int64 rowIdStart,
+								OutOfRangePolicy outOfRangePolicy)
 {
 	MultiDataFileUploadDestReceiver *self =
 		(MultiDataFileUploadDestReceiver *) palloc0(sizeof(MultiDataFileUploadDestReceiver));
@@ -166,6 +171,7 @@ CreateMultiDataFileDestReceiver(Oid relationId,
 											   ALLOCSET_DEFAULT_INITSIZE,
 											   ALLOCSET_DEFAULT_MAXSIZE);
 	self->currentRowIdStart = rowIdStart;
+	self->outOfRangePolicy = outOfRangePolicy;
 
 	/* cache the schema field */
 	self->schema = GetDataFileSchemaForTable(relationId);
@@ -218,7 +224,8 @@ FlushChildDestReceiver(MultiDataFileUploadDestReceiver * self)
 							self->currentRowCount,
 							self->currentRowIdStart,
 							GetCSVDestReceiverMaxLineSize(self->currentDest),
-							self->schema);
+							self->schema,
+							self->outOfRangePolicy);
 
 	/* make sure we preserve the list of data file modifications */
 	MemoryContextSwitchTo(self->parentContext);

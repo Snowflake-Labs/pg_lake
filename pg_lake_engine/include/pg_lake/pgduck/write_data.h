@@ -21,6 +21,7 @@
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/data_file/data_file_stats.h"
 #include "pg_lake/parquet/field.h"
+#include "pg_lake/pgduck/write_validation.h"
 #include "nodes/pg_list.h"
 
 /* pg_lake_table.target_row_group_size_mb */
@@ -44,7 +45,8 @@ extern PGDLLEXPORT StatsCollector * ConvertCSVFileTo(char *csvFilePath,
 													 CopyDataCompression destinationCompression,
 													 List *formatOptions,
 													 DataFileSchema * schema,
-													 List *leafFields);
+													 List *leafFields,
+													 OutOfRangePolicy outOfRangePolicy);
 extern PGDLLEXPORT StatsCollector * WriteQueryResultTo(char *query,
 													   char *destinationPath,
 													   CopyDataFormat destinationFormat,
@@ -53,6 +55,7 @@ extern PGDLLEXPORT StatsCollector * WriteQueryResultTo(char *query,
 													   bool queryHasRowId,
 													   DataFileSchema * schema,
 													   TupleDesc queryTupleDesc,
-													   List *leafFields);
+													   List *leafFields,
+													   OutOfRangePolicy outOfRangePolicy);
 extern PGDLLEXPORT void AppendFields(StringInfo map, DataFileSchema * schema);
-extern PGDLLEXPORT char *TupleDescToColumnMapForWrite(TupleDesc tupleDesc, CopyDataFormat destinationFormat);
+extern PGDLLEXPORT char *TupleDescToColumnMapForWrite(TupleDesc tupleDesc, CopyDataFormat destinationFormat, OutOfRangePolicy outOfRangePolicy);

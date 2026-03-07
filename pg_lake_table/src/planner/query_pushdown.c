@@ -37,6 +37,7 @@
 #include "pg_lake/planner/explain.h"
 #include "pg_lake/planner/pushdown_utils.h"
 #include "pg_lake/fdw/writable_table.h"
+#include "pg_lake/pgduck/write_validation.h"
 #include "pg_lake/planner/insert_select.h"
 #include "pg_lake/planner/query_pushdown.h"
 #include "pg_lake/planner/restriction_collector.h"
@@ -1406,6 +1407,19 @@ QueryPushdownBeginScan(CustomScanState *node, EState *estate, int eflags)
 			(Query *) ReplaceExternalParamsWithPgDuckConsts((Node *) scanQuery, paramListInfo);
 
 		TransformPushdownableInsertSelect(scanQuery);
+
+		/*
+		 * Replace top-level ::numeric / ::numeric(p,s) casts in the target
+		 * list with ::text.  The validation wrapper handles range checking
+		 * and final DECIMAL casting; this prevents DuckDB from failing on
+		 * precision-constrained numeric casts.
+		 *
+		 * Skip when the policy is NONE (non-Iceberg tables) since there is no
+		 * validation wrapper to compensate.
+		 */
+		if (GetOutOfRangePolicyForTable(scanState->insertIntoRelid) !=
+			OUT_OF_RANGE_NONE)
+			NeutralizeNumericCastsInTargetList(scanQuery);
 	}
 
 	/*
@@ -1547,11 +1561,19 @@ QueryPushdownScanNextInternal(CustomScanState *node)
 	if (scanState->insertIntoRelid != InvalidOid)
 	{
 		/*
+		 * Set out-of-range policy from the target table's option for this
+		 * INSERT..SELECT pushdown write.
+		 */
+		OutOfRangePolicy outOfRangePolicy =
+			GetOutOfRangePolicyForTable(scanState->insertIntoRelid);
+
+		/*
 		 * append the query result to the table and set the number of
 		 * processed rows
 		 */
 		scanState->estate->es_processed =
-			AddQueryResultToTable(scanState->insertIntoRelid, scanState->queryString, tupleDesc);
+			AddQueryResultToTable(scanState->insertIntoRelid, scanState->queryString, tupleDesc,
+								  outOfRangePolicy);
 
 		return NULL;
 	}
@@ -1674,6 +1696,10 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 	if (scanState->insertIntoRelid != InvalidOid)
 	{
 		TransformPushdownableInsertSelect(scanQuery);
+
+		if (GetOutOfRangePolicyForTable(scanState->insertIntoRelid) !=
+			OUT_OF_RANGE_NONE)
+			NeutralizeNumericCastsInTargetList(scanQuery);
 	}
 
 	/*

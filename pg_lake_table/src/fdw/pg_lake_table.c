@@ -3390,10 +3390,13 @@ create_foreign_modify(Relation rel,
 		 */
 		int			specId = GetCurrentSpecId(relationId);
 
+		OutOfRangePolicy outOfRangePolicy = GetOutOfRangePolicyForTable(relationId);
+
 		if (partitionBy != NULL)
 		{
 			fmstate->insertDest =
-				CreatePartitionedDestReceiver(relationId, foreignTableFormat, specId);
+				CreatePartitionedDestReceiver(relationId, foreignTableFormat, specId,
+											  outOfRangePolicy);
 		}
 		else
 		{
@@ -3402,7 +3405,8 @@ create_foreign_modify(Relation rel,
 												foreignTableFormat,
 												MaxWriteTempFileSizeMB,
 												specId,
-												0);
+												0,
+												outOfRangePolicy);
 		}
 	}
 

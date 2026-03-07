@@ -29,7 +29,6 @@
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/parquet/geoparquet.h"
-#include "pg_lake/parsetree/options.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/pgduck/read_data.h"
 #include "pg_lake/pgduck/type.h"
@@ -43,7 +42,8 @@
 static char *TupleDescToProjectionListForWrite(TupleDesc tupleDesc,
 											   CopyDataFormat destinationFormat);
 static DuckDBTypeInfo ChooseDuckDBEngineTypeForWrite(PGType postgresType,
-													 CopyDataFormat destinationFormat);
+													 CopyDataFormat destinationFormat,
+													 OutOfRangePolicy outOfRangePolicy);
 static void AppendFieldIdValue(StringInfo map, Field * field, int fieldId);
 static const char *ParquetVersionToString(ParquetVersion version);
 
@@ -54,7 +54,6 @@ static DuckDBTypeInfo VARCHAR_TYPE =
 
 int			TargetRowGroupSizeMB = DEFAULT_TARGET_ROW_GROUP_SIZE_MB;
 int			DefaultParquetVersion = PARQUET_VERSION_V1;
-
 
 /*
  * ConvertCSVFileTo copies and converts a CSV file at source path to
@@ -69,7 +68,8 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 				 CopyDataCompression destinationCompression,
 				 List *formatOptions,
 				 DataFileSchema * schema,
-				 List *leafFields)
+				 List *leafFields,
+				 OutOfRangePolicy outOfRangePolicy)
 {
 	StringInfoData command;
 
@@ -83,7 +83,7 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 	char	   *columnsMap = NULL;
 
 	if (csvTupleDesc != NULL && csvTupleDesc->natts > 0)
-		columnsMap = TupleDescToColumnMapForWrite(csvTupleDesc, destinationFormat);
+		columnsMap = TupleDescToColumnMapForWrite(csvTupleDesc, destinationFormat, outOfRangePolicy);
 
 	bool		includeHeader = true;
 
@@ -100,7 +100,8 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 							  queryHasRowIds,
 							  schema,
 							  csvTupleDesc,
-							  leafFields);
+							  leafFields,
+							  outOfRangePolicy);
 }
 
 
@@ -118,8 +119,12 @@ WriteQueryResultTo(char *query,
 				   bool queryHasRowId,
 				   DataFileSchema * schema,
 				   TupleDesc queryTupleDesc,
-				   List *leafFields)
+				   List *leafFields,
+				   OutOfRangePolicy outOfRangePolicy)
 {
+	if (outOfRangePolicy != OUT_OF_RANGE_NONE)
+		query = WrapQueryWithWriteValidation(query, queryTupleDesc, outOfRangePolicy);
+
 	StringInfoData command;
 
 	initStringInfo(&command);
@@ -430,7 +435,7 @@ TupleDescToProjectionListForWrite(TupleDesc tupleDesc, CopyDataFormat destinatio
  * a DuckDB columns map in string form.
  */
 char *
-TupleDescToColumnMapForWrite(TupleDesc tupleDesc, CopyDataFormat destinationFormat)
+TupleDescToColumnMapForWrite(TupleDesc tupleDesc, CopyDataFormat destinationFormat, OutOfRangePolicy outOfRangePolicy)
 {
 	StringInfoData map;
 
@@ -452,7 +457,8 @@ TupleDescToColumnMapForWrite(TupleDesc tupleDesc, CopyDataFormat destinationForm
 		int			columnTypeMod = column->atttypmod;
 		DuckDBTypeInfo duckdbType = ChooseDuckDBEngineTypeForWrite(
 																   MakePGType(columnTypeId, columnTypeMod),
-																   destinationFormat);
+																   destinationFormat,
+																   outOfRangePolicy);
 
 		appendStringInfo(&map, "%s%s:%s",
 						 hasColumns ? "," : "",
@@ -585,7 +591,8 @@ ParquetVersionToString(ParquetVersion version)
  */
 static DuckDBTypeInfo
 ChooseDuckDBEngineTypeForWrite(PGType postgresType,
-							   CopyDataFormat destinationFormat)
+							   CopyDataFormat destinationFormat,
+							   OutOfRangePolicy outOfRangePolicy)
 {
 	/*
 	 * We prefer to treat all fields as text when writing CSV to preserve
@@ -628,21 +635,42 @@ ChooseDuckDBEngineTypeForWrite(PGType postgresType,
 		 * https://duckdb.org/docs/sql/data_types/overview
 		 * https://www.postgresql.org/docs/current/datatype-numeric.html#DATATYPE-NUMERIC-DECIMAL
 		 */
+
+		/*
+		 * Read numeric as VARCHAR. The numeric validation wrapper will
+		 * validate NaN/Inf and digit limits before casting to DECIMAL (for
+		 * both scalars and arrays). For other cases, the precision is too big
+		 * for DuckDB's DECIMAL type.
+		 */
 		int			precision = -1;
 		int			scale = -1;
 
 		GetDuckdbAdjustedPrecisionAndScaleFromNumericTypeMod(postgresTypeMod, &precision, &scale);
 
-		if (CanPushdownNumericToDuckdb(precision, scale))
+		if (outOfRangePolicy == OUT_OF_RANGE_NONE)
 		{
-			/*
-			 * happy case: we can map to DECIMAL(precision, scale)
-			 */
-			typeModifier = psprintf("(%d,%d)", precision, scale);
+			int			precision;
+			int			scale;
+
+			GetDuckdbAdjustedPrecisionAndScaleFromNumericTypeMod(postgresTypeMod, &precision, &scale);
+
+			if (CanPushdownNumericToDuckdb(precision, scale))
+			{
+				typeModifier = psprintf("(%d,%d)", precision, scale);
+				duckTypeId = DUCKDB_TYPE_DECIMAL;
+			}
+			else
+			{
+				duckTypeId = DUCKDB_TYPE_VARCHAR;
+			}
 		}
 		else
 		{
-			/* explicit precision which is too big for us */
+			/*
+			 * If out-of-range policy is not NONE, we need to validate the
+			 * numeric values. We do this by casting to VARCHAR and then
+			 * validating in the write validation layer.
+			 */
 			duckTypeId = DUCKDB_TYPE_VARCHAR;
 		}
 	}

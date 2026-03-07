@@ -866,3 +866,72 @@ def test_copy_virtual_column(pg_conn, tmp_path):
     ]
 
     pg_conn.rollback()
+
+
+def test_out_of_range_values_copy_to_parquet(pg_conn, s3):
+    """COPY TO parquet accepts the out_of_range_values option."""
+    url = f"s3://{TEST_BUCKET}/test_oor_copy_to_parquet/data.parquet"
+
+    run_command(
+        f"COPY (SELECT 1 AS id) TO '{url}' WITH (out_of_range_values 'error');",
+        pg_conn,
+    )
+    pg_conn.rollback()
+
+    run_command(
+        f"COPY (SELECT 1 AS id) TO '{url}' WITH (out_of_range_values 'clamp');",
+        pg_conn,
+    )
+    pg_conn.rollback()
+
+
+def test_out_of_range_values_copy_to_csv_rejected(pg_conn, s3):
+    """COPY TO csv rejects the out_of_range_values option."""
+    url = f"s3://{TEST_BUCKET}/test_oor_copy_to_csv/data.csv"
+
+    error = run_command(
+        f"COPY (SELECT 1 AS id) TO '{url}' WITH (format 'csv', out_of_range_values 'error');",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "out_of_range_values" in error
+    assert "parquet or iceberg" in error
+
+    pg_conn.rollback()
+
+
+def test_out_of_range_values_copy_to_json_rejected(pg_conn, s3):
+    """COPY TO json rejects the out_of_range_values option."""
+    url = f"s3://{TEST_BUCKET}/test_oor_copy_to_json/data.json"
+
+    error = run_command(
+        f"COPY (SELECT 1 AS id) TO '{url}' WITH (format 'json', out_of_range_values 'error');",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "out_of_range_values" in error
+    assert "parquet or iceberg" in error
+
+    pg_conn.rollback()
+
+
+def test_out_of_range_values_copy_from_heap_rejected(pg_conn, s3):
+    """COPY FROM into a heap table rejects the out_of_range_values option."""
+    url = f"s3://{TEST_BUCKET}/test_oor_copy_from_heap/data.parquet"
+
+    run_command(
+        f"COPY (SELECT 1 AS id) TO '{url}';",
+        pg_conn,
+    )
+
+    run_command("CREATE TABLE heap_oor (id int);", pg_conn)
+
+    error = run_command(
+        f"COPY heap_oor FROM '{url}' WITH (out_of_range_values 'clamp');",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "out_of_range_values" in error
+    assert "parquet or iceberg" in error
+
+    pg_conn.rollback()

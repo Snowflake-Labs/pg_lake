@@ -116,6 +116,8 @@ pg_lake_table_validator(PG_FUNCTION_ARGS)
 
 	char	   *logFormat = NULL;
 
+	bool		foundOutOfRangeValues = false;
+
 	CopyDataFormat copyDataFormat = DATA_FORMAT_INVALID;
 	CopyDataCompression copyDataCompression = DATA_COMPRESSION_INVALID;
 
@@ -345,6 +347,22 @@ pg_lake_table_validator(PG_FUNCTION_ARGS)
 
 			foundMaximumObjectSize = true;
 		}
+		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "out_of_range_values") == 0)
+		{
+			const char *outOfRangeValues = defGetString(def);
+
+			if (strcmp(outOfRangeValues, "error") != 0 &&
+				strcmp(outOfRangeValues, "clamp") != 0)
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("invalid out_of_range_values option: \"%s\"",
+								outOfRangeValues),
+						 errhint("Valid values are \"error\" and \"clamp\".")));
+			}
+
+			foundOutOfRangeValues = true;
+		}
 	}
 
 	if (catalog != ForeignTableRelationId)
@@ -474,6 +492,13 @@ pg_lake_table_validator(PG_FUNCTION_ARGS)
 							   "format")));
 	}
 
+	if (foundOutOfRangeValues && copyDataFormat != DATA_FORMAT_PARQUET)
+	{
+		ereport(ERROR, (errcode(ERRCODE_SYNTAX_ERROR),
+						errmsg("\"out_of_range_values\" option is only supported for "
+							   "parquet tables")));
+	}
+
 	PG_RETURN_VOID();
 }
 
@@ -522,6 +547,12 @@ InitPgLakeOptions(void)
 		/* log options */
 		{"log_format", ForeignTableRelationId},
 
+		/*
+		 * out-of-range value handling during writes: 'error' (default) or
+		 * 'clamp'.  Only valid for writable parquet tables.
+		 */
+		{"out_of_range_values", ForeignTableRelationId},
+
 		{NULL, InvalidOid}
 	};
 
@@ -569,6 +600,12 @@ InitPgLakeIcebergOptions(void)
 		{"catalog_name", ForeignTableRelationId},
 		{"catalog_table_name", ForeignTableRelationId},
 		{"catalog_namespace", ForeignTableRelationId},
+
+		/*
+		 * out-of-range value handling during writes: 'error' (default) or
+		 * 'clamp'
+		 */
+		{"out_of_range_values", ForeignTableRelationId},
 
 		{NULL, InvalidOid}
 	};
@@ -847,6 +884,20 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 						 errmsg("invalid column_stats_mode option: %s", columnStatsMode)));
+			}
+		}
+		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "out_of_range_values") == 0)
+		{
+			const char *outOfRangeValues = defGetString(def);
+
+			if (strcmp(outOfRangeValues, "error") != 0 &&
+				strcmp(outOfRangeValues, "clamp") != 0)
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("invalid out_of_range_values option: \"%s\"",
+								outOfRangeValues),
+						 errhint("Valid values are \"error\" and \"clamp\".")));
 			}
 		}
 	}

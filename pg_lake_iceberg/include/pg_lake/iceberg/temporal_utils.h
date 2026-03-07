@@ -19,6 +19,7 @@
 
 #include "postgres.h"
 
+#include "pg_lake/pgduck/write_validation.h"
 #include "utils/date.h"
 #include "utils/timestamp.h"
 
@@ -28,7 +29,7 @@ extern PGDLLEXPORT Timestamp AdjustTimestampFromUnixToPostgres(Timestamp timesta
 extern PGDLLEXPORT Timestamp AdjustTimestampFromPostgresToUnix(Timestamp timestamp);
 extern PGDLLEXPORT DateADT AdjustDateFromPostgresToUnix(DateADT date);
 extern PGDLLEXPORT DateADT AdjustDateFromUnixToPostgres(DateADT date);
-extern PGDLLEXPORT int32_t DateYearFromUnixEpoch(DateADT date);
+extern PGDLLEXPORT int32_t DateYearFromUnixEpoch(DateADT date, OutOfRangePolicy policy);
 extern PGDLLEXPORT DateADT YearsFromEpochToDate(int32 yearsSinceEpoch);
 extern PGDLLEXPORT Timestamp YearsFromEpochToTimestamp(int32 yearsSinceEpoch);
 extern PGDLLEXPORT Timestamp MonthsFromUnixEpochToTimestamp(int32 monthsSinceEpoch);
@@ -36,11 +37,11 @@ extern PGDLLEXPORT DateADT MonthsFromEpochToDate(int32 monthsSinceEpoch);
 extern PGDLLEXPORT DateADT DaysFromEpochToDate(int32 daysSinceEpoch);
 extern PGDLLEXPORT TimeADT HoursFromUnixEpochToTime(int32 hoursSinceEpoch);
 extern PGDLLEXPORT Timestamp DaysFromUnixEpochToTimestamp(int32 daysSinceEpoch);
-extern PGDLLEXPORT int32_t DateMonthFromUnixEpoch(DateADT date);
-extern PGDLLEXPORT int32_t DateDayFromUnixEpoch(DateADT date);
-extern PGDLLEXPORT int32_t TimestampYearFromUnixEpoch(Timestamp timestamp);
-extern PGDLLEXPORT int32_t TimestampMonthFromUnixEpoch(Timestamp timestamp);
-extern PGDLLEXPORT int32_t TimestampDayFromUnixEpoch(Timestamp timestamp);
-extern PGDLLEXPORT int32_t TimestampHourFromUnixEpoch(Timestamp timestamp);
+extern PGDLLEXPORT int32_t DateMonthFromUnixEpoch(DateADT date, OutOfRangePolicy policy);
+extern PGDLLEXPORT int32_t DateDayFromUnixEpoch(DateADT date, OutOfRangePolicy policy);
+extern PGDLLEXPORT int32_t TimestampYearFromUnixEpoch(Timestamp timestamp, OutOfRangePolicy policy);
+extern PGDLLEXPORT int32_t TimestampMonthFromUnixEpoch(Timestamp timestamp, OutOfRangePolicy policy);
+extern PGDLLEXPORT int32_t TimestampDayFromUnixEpoch(Timestamp timestamp, OutOfRangePolicy policy);
+extern PGDLLEXPORT int32_t TimestampHourFromUnixEpoch(Timestamp timestamp, OutOfRangePolicy policy);
 extern PGDLLEXPORT Timestamp HoursFromUnixEpochToTimestamp(int32 hoursSinceEpoch);
 extern PGDLLEXPORT int32_t TimeHourFromUnixEpoch(TimeADT time);

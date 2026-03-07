@@ -22,8 +22,10 @@
 
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/iceberg/api/partitioning.h"
+#include "pg_lake/pgduck/write_validation.h"
 
-extern Partition * ComputePartitionTupleForTuple(List *transforms, TupleTableSlot *slot);
+extern Partition * ComputePartitionTupleForTuple(List *transforms, TupleTableSlot *slot,
+												 OutOfRangePolicy outOfRangePolicy);
 extern void *ApplyBucketTransformToColumn(IcebergPartitionTransform * transform,
 										  Datum columnValue, bool isNull,
 										  size_t *bucketSize);

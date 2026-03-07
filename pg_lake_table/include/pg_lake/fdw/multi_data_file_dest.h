@@ -18,6 +18,7 @@
 #pragma once
 
 #include "pg_lake/copy/copy_format.h"
+#include "pg_lake/pgduck/write_validation.h"
 #include "nodes/pg_list.h"
 #include "tcop/dest.h"
 #include "utils/relcache.h"
@@ -32,5 +33,6 @@ extern PGDLLEXPORT DestReceiver *CreateMultiDataFileDestReceiver(Oid relationId,
 																 CopyDataFormat targetFormat,
 																 int MaxWriteTempFileSizeMB,
 																 int32 partitionSpecId,
-																 int64 rowIdStart);
+																 int64 rowIdStart,
+																 OutOfRangePolicy outOfRangePolicy);
 extern PGDLLEXPORT List *GetMultiDataFileDestReceiverModifications(DestReceiver *dest);
