@@ -670,13 +670,15 @@ def test_multi_table_different_rest_catalog_hosts_in_single_transaction(
     pg_conn.rollback()
     run_command(f"DROP SCHEMA {ns} CASCADE", pg_conn)
     pg_conn.commit()
+    run_command(f"DROP USER MAPPING FOR CURRENT_USER SERVER {server_a}", superuser_conn)
+    run_command(f"DROP USER MAPPING FOR CURRENT_USER SERVER {server_b}", superuser_conn)
     run_command(f"DROP SERVER {server_a}", superuser_conn)
     run_command(f"DROP SERVER {server_b}", superuser_conn)
     superuser_conn.commit()
 
 
 def _create_polaris_catalog_server(conn, server_name, hostname):
-    """Create an iceberg_catalog server pointing to the Polaris instance via the given hostname."""
+    """Create an iceberg_catalog server and user mapping pointing to the Polaris instance via the given hostname."""
     creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
     client_id = creds["credentials"]["clientId"]
     client_secret = creds["credentials"]["clientSecret"]
@@ -686,11 +688,14 @@ def _create_polaris_catalog_server(conn, server_name, hostname):
         f"""
         CREATE SERVER {server_name} TYPE 'rest'
             FOREIGN DATA WRAPPER iceberg_catalog
-            OPTIONS (
-                rest_endpoint '{endpoint}',
-                client_id '{client_id}',
-                client_secret '{client_secret}'
-            )
+            OPTIONS (rest_endpoint '{endpoint}')
+        """,
+        conn,
+    )
+    run_command(
+        f"""
+        CREATE USER MAPPING FOR CURRENT_USER SERVER {server_name}
+            OPTIONS (client_id '{client_id}', client_secret '{client_secret}')
         """,
         conn,
     )
