@@ -22,6 +22,7 @@
 
 #include "access/reloptions.h"
 #include "catalog/pg_foreign_server.h"
+#include "catalog/pg_user_mapping.h"
 #include "common/base64.h"
 #include "commands/dbcommands.h"
 #include "commands/defrem.h"
@@ -91,8 +92,9 @@ static char *AppendIcebergPartitionSpecForRestCatalog(List *partitionSpecs);
 PG_FUNCTION_INFO_V1(iceberg_catalog_validator);
 
 /*
- * Valid options for iceberg_catalog servers.
+ * Valid options for iceberg_catalog servers and their user mappings
  */
+
 static const char *iceberg_catalog_server_options[] = {
 	"rest_endpoint",
 	"scope",
@@ -101,18 +103,23 @@ static const char *iceberg_catalog_server_options[] = {
 	"enable_vended_credentials",
 	"location_prefix",
 	"catalog_name",
+	NULL
+};
+
+static const char *iceberg_catalog_user_mapping_options[] = {
 	"client_id",
 	"client_secret",
+	"scope",
 	NULL
 };
 
 
 static bool
-is_valid_iceberg_catalog_option(const char *keyword)
+is_valid_option_in_list(const char *keyword, const char *const *options)
 {
-	for (int i = 0; iceberg_catalog_server_options[i] != NULL; i++)
+	for (int i = 0; options[i] != NULL; i++)
 	{
-		if (strcmp(keyword, iceberg_catalog_server_options[i]) == 0)
+		if (strcmp(keyword, options[i]) == 0)
 			return true;
 	}
 	return false;
@@ -121,7 +128,12 @@ is_valid_iceberg_catalog_option(const char *keyword)
 
 /*
  * iceberg_catalog_validator validates options for the iceberg_catalog FDW.
- * Only server-level options are supported.
+ *
+ * Server options: rest_endpoint, scope, rest_auth_type, oauth_endpoint,
+ *   enable_vended_credentials, location_prefix, catalog_name.
+ * User mapping options: client_id, client_secret, scope.
+ *
+ * scope is accepted in both places; user mapping scope takes priority.
  */
 Datum
 iceberg_catalog_validator(PG_FUNCTION_ARGS)
@@ -130,19 +142,33 @@ iceberg_catalog_validator(PG_FUNCTION_ARGS)
 	Oid			catalog = PG_GETARG_OID(1);
 	ListCell   *cell;
 
+	if (catalog == UserMappingRelationId)
+	{
+		foreach(cell, options_list)
+		{
+			DefElem    *def = (DefElem *) lfirst(cell);
+
+			if (!is_valid_option_in_list(def->defname, iceberg_catalog_user_mapping_options))
+				ereport(ERROR,
+						(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
+						 errmsg("invalid option \"%s\" for iceberg_catalog user mapping",
+								def->defname),
+						 errhint("Valid options are: client_id, client_secret, scope.")));
+		}
+		PG_RETURN_VOID();
+	}
+
 	/*
-	 * PostgreSQL calls the validator for CREATE FOREIGN DATA WRAPPER itself
-	 * (with ForeignDataWrapperRelationId), not just for CREATE SERVER.  Allow
-	 * empty option lists for non-server contexts so extension creation
-	 * succeeds, but still reject if someone passes options where they don't
-	 * belong.
+	 * Reject options in any context other than SERVER or USER MAPPING.
+	 * PostgreSQL also calls the validator for the FDW itself and for
+	 * foreign tables; allow empty option lists so those succeed.
 	 */
 	if (catalog != ForeignServerRelationId)
 	{
 		if (list_length(options_list) > 0)
 			ereport(ERROR,
 					(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
-					 errmsg("iceberg_catalog options are only valid for SERVER objects")));
+					 errmsg("iceberg_catalog options are only valid for SERVER or USER MAPPING objects")));
 		PG_RETURN_VOID();
 	}
 
@@ -150,14 +176,14 @@ iceberg_catalog_validator(PG_FUNCTION_ARGS)
 	{
 		DefElem    *def = (DefElem *) lfirst(cell);
 
-		if (!is_valid_iceberg_catalog_option(def->defname))
+		if (!is_valid_option_in_list(def->defname, iceberg_catalog_server_options))
 		{
 			ereport(ERROR,
 					(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
 					 errmsg("invalid option \"%s\" for iceberg_catalog server", def->defname),
 					 errhint("Valid options are: rest_endpoint, rest_auth_type, "
 							 "oauth_endpoint, scope, enable_vended_credentials, "
-							 "location_prefix, catalog_name, client_id, client_secret.")));
+							 "location_prefix, catalog_name.")));
 		}
 
 		if (strcmp(def->defname, "rest_auth_type") == 0)
@@ -373,10 +399,6 @@ GetRestCatalogConnectionFromServer(const char *serverName)
 
 		if (strcmp(def->defname, "rest_endpoint") == 0)
 			conn->host = defGetString(def);
-		else if (strcmp(def->defname, "client_id") == 0)
-			conn->clientId = defGetString(def);
-		else if (strcmp(def->defname, "client_secret") == 0)
-			conn->clientSecret = defGetString(def);
 		else if (strcmp(def->defname, "scope") == 0)
 			conn->scope = defGetString(def);
 		else if (strcmp(def->defname, "rest_auth_type") == 0)
