@@ -30,10 +30,14 @@
 #include "foreign/foreign.h"
 #include "fmgr.h"
 #include "lib/stringinfo.h"
+#include "storage/fd.h"
 #include "utils/builtins.h"
+#include "utils/conffiles.h"
+#include "utils/guc.h"
 #include "utils/jsonb.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/syscache.h"
 #include "utils/timestamp.h"
 
 #include "pg_extension_base/base_workers.h"
@@ -167,8 +171,8 @@ iceberg_catalog_validator(PG_FUNCTION_ARGS)
 
 	/*
 	 * Reject options in any context other than SERVER or USER MAPPING.
-	 * PostgreSQL also calls the validator for the FDW itself and for
-	 * foreign tables; allow empty option lists so those succeed.
+	 * PostgreSQL also calls the validator for the FDW itself and for foreign
+	 * tables; allow empty option lists so those succeed.
 	 */
 	if (catalogRelId != ForeignServerRelationId)
 	{
@@ -286,11 +290,137 @@ ValidateIcebergCatalogServerDDL(ProcessUtilityParams * processUtilityParams,
 }
 
 
+#define CATALOGS_CONF_FILENAME "catalogs.conf"
+
+/*
+ * LookupUserMappingOptions returns the user mapping options for the current
+ * user on the given server, or NULL if no mapping exists. Checks for a
+ * user-specific mapping first, then falls back to PUBLIC.
+ */
+static List *
+LookupUserMappingOptions(Oid serverid)
+{
+	HeapTuple	tp;
+	Datum		datum;
+	bool		isnull;
+	List	   *options;
+
+	tp = SearchSysCache2(USERMAPPINGUSERSERVER,
+						 ObjectIdGetDatum(GetUserId()),
+						 ObjectIdGetDatum(serverid));
+
+	if (!HeapTupleIsValid(tp))
+	{
+		tp = SearchSysCache2(USERMAPPINGUSERSERVER,
+							 ObjectIdGetDatum(InvalidOid),
+							 ObjectIdGetDatum(serverid));
+	}
+
+	if (!HeapTupleIsValid(tp))
+		return NIL;
+
+	datum = SysCacheGetAttr(USERMAPPINGUSERSERVER, tp,
+							Anum_pg_user_mapping_umoptions, &isnull);
+	options = isnull ? NIL : untransformRelOptions(datum);
+	ReleaseSysCache(tp);
+
+	return options;
+}
+
+
+/*
+ * ReadCatalogsConfCredentials reads $PGDATA/catalogs.conf and extracts
+ * credentials for the given server name. The file uses PostgreSQL's
+ * standard key = value format with dotted keys:
+ *
+ *   horizon.client_id = 'platform_id'
+ *   horizon.client_secret = 'platform_secret'
+ *   horizon.scope = 'PRINCIPAL_ROLE:ALL'
+ *
+ * Re-reads the file every time for simplicity -- these requests are
+ * infrequent (one per REST catalog operation, not per row).
+ *
+ * Returns true if any credential was found for serverName.
+ */
+static bool
+ReadCatalogsConfCredentials(const char *serverName,
+							char **clientId, char **clientSecret,
+							char **scope)
+{
+	char		path[MAXPGPATH];
+	FILE	   *fp;
+	ConfigVariable *head = NULL;
+	ConfigVariable *tail = NULL;
+	ConfigVariable *item;
+	bool		found = false;
+	int			serverNameLen = strlen(serverName);
+
+	snprintf(path, MAXPGPATH, "%s/%s", DataDir, CATALOGS_CONF_FILENAME);
+
+	fp = AllocateFile(path, "r");
+	if (fp == NULL)
+	{
+		if (errno == ENOENT)
+			return false;
+		ereport(WARNING,
+				(errcode_for_file_access(),
+				 errmsg("could not open catalog config file \"%s\": %m", path)));
+		return false;
+	}
+
+	ParseConfigFp(fp, path, CONF_FILE_START_DEPTH, WARNING, &head, &tail);
+	FreeFile(fp);
+
+	for (item = head; item != NULL; item = item->next)
+	{
+		const char *key;
+
+		if (item->errmsg != NULL)
+			continue;
+
+		/*
+		 * Match entries of the form "servername.key = value". The dot
+		 * separates the server name from the property name.
+		 */
+		if (strncmp(item->name, serverName, serverNameLen) != 0 ||
+			item->name[serverNameLen] != '.')
+			continue;
+
+		key = item->name + serverNameLen + 1;
+
+		if (strcmp(key, "client_id") == 0)
+		{
+			*clientId = pstrdup(item->value);
+			found = true;
+		}
+		else if (strcmp(key, "client_secret") == 0)
+		{
+			*clientSecret = pstrdup(item->value);
+			found = true;
+		}
+		else if (strcmp(key, "scope") == 0)
+		{
+			*scope = pstrdup(item->value);
+			found = true;
+		}
+	}
+
+	FreeConfigVariables(head);
+	return found;
+}
+
+
 /*
  * GetRestCatalogOptionsFromCatalog returns a RestCatalogOptions struct.
  * For the built-in 'rest' catalog name the GUCs are used directly.
  * For user-created servers, the GUCs serve as defaults,
  * overridden by any option set on the server.
+ *
+ * Credential resolution order:
+ * 1. pg_user_mapping for the current user + user-created server
+ * 2. $PGDATA/catalogs.conf (re-read each time; infrequent requests)
+ * 3. GUC variables (backward compatibility)
+ * 4. Error if no credentials found
  */
 RestCatalogOptions *
 GetRestCatalogOptionsFromCatalog(const char *catalog)
@@ -336,10 +466,6 @@ GetRestCatalogOptionsFromCatalog(const char *catalog)
 
 			if (pg_strcasecmp(def->defname, "rest_endpoint") == 0)
 				opts->host = defGetString(def);
-			else if (pg_strcasecmp(def->defname, "client_id") == 0)
-				opts->clientId = defGetString(def);
-			else if (pg_strcasecmp(def->defname, "client_secret") == 0)
-				opts->clientSecret = defGetString(def);
 			else if (pg_strcasecmp(def->defname, "scope") == 0)
 				opts->scope = defGetString(def);
 			else if (pg_strcasecmp(def->defname, "rest_auth_type") == 0)
@@ -363,15 +489,61 @@ GetRestCatalogOptionsFromCatalog(const char *catalog)
 				opts->locationPrefix = StripTrailingSlash(defGetString(def), inPlace);
 			}
 		}
+
+		if (opts->host == NULL || opts->host[0] == '\0')
+			ereport(ERROR,
+					(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
+					 errmsg("\"rest_endpoint\" is not configured for REST catalog \"%s\"",
+							catalog),
+					 errhint("Set the pg_lake_iceberg.rest_catalog_host GUC or "
+							 "the \"rest_endpoint\" option on the server.")));
+
+		/*
+		 * Phase 2: Resolve credentials and scope.
+		 *
+		 * Priority: user mapping > catalogs.conf > GUC fallback (set above).
+		 */
+		List	   *umOptions = LookupUserMappingOptions(server->serverid);
+
+		foreach(lc, umOptions)
+		{
+			DefElem    *def = (DefElem *) lfirst(lc);
+
+			if (strcmp(def->defname, "client_id") == 0)
+				opts->clientId = pstrdup(defGetString(def));
+			else if (strcmp(def->defname, "client_secret") == 0)
+				opts->clientSecret = pstrdup(defGetString(def));
+			else if (strcmp(def->defname, "scope") == 0)
+				opts->scope = pstrdup(defGetString(def));
+		}
+
 	}
 
-	if (opts->host == NULL || opts->host[0] == '\0')
+
+
+
+	/* catalogs.conf overrides GUCs but not user mapping */
+	char	   *confClientId = NULL;
+	char	   *confClientSecret = NULL;
+	char	   *confScope = NULL;
+
+	if (ReadCatalogsConfCredentials(catalog,
+									&confClientId, &confClientSecret,
+									&confScope))
+	{
+		if (opts->clientId == NULL && confClientId != NULL)
+			opts->clientId = confClientId;
+		if (opts->clientSecret == NULL && confClientSecret != NULL)
+			opts->clientSecret = confClientSecret;
+		if (opts->scope == NULL && confScope != NULL)
+			opts->scope = confScope;
+	}
+
+	if (opts->clientId == NULL || opts->clientSecret == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
-				 errmsg("\"rest_endpoint\" is not configured for REST catalog \"%s\"",
-						catalog),
-				 errhint("Set the pg_lake_iceberg.rest_catalog_host GUC or "
-						 "the \"rest_endpoint\" option on the server.")));
+				 errmsg("no credentials found for iceberg_catalog \"%s\"",
+						catalog)));
 
 	return opts;
 }
