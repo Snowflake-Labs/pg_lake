@@ -1,3 +1,4 @@
+import os
 import pytest
 from utils_pytest import *
 
@@ -28,7 +29,7 @@ def test_iceberg_catalog_fdw_has_no_handler(pg_conn, extension):
 
 
 def test_create_rest_server_with_all_options(superuser_conn, extension):
-    """All documented options should be accepted for a REST-type server.
+    """All documented non-secret options should be accepted for a REST-type server.
     Uses a mix of quoted upper-case and plain lower-case option names to
     verify case-insensitive matching."""
     run_command(
@@ -42,9 +43,7 @@ def test_create_rest_server_with_all_options(superuser_conn, extension):
                 scope 'PRINCIPAL_ROLE:ALL',
                 enable_vended_credentials 'true',
                 "Location_Prefix" 's3://bucket/prefix',
-                catalog_name 'my_catalog',
-                "Client_Id" 'test-id',
-                "Client_Secret" 'test-secret'
+                catalog_name 'my_catalog'
             )
         """,
         superuser_conn,
@@ -73,8 +72,7 @@ def test_create_server_horizon_auth(superuser_conn, extension):
             FOREIGN DATA WRAPPER iceberg_catalog
             OPTIONS (
                 rest_endpoint 'https://horizon.example.com',
-                rest_auth_type 'horizon',
-                client_secret 'secret'
+                rest_auth_type 'horizon'
             )
         """,
         superuser_conn,
@@ -141,6 +139,110 @@ def test_reject_options_on_non_server(superuser_conn, extension):
         raise_error=False,
     )
     assert "only valid for SERVER" in str(err)
+    superuser_conn.rollback()
+
+
+def test_reject_secrets_in_server_options(superuser_conn, extension):
+    """client_id and client_secret are not valid server options (they belong to user mappings)."""
+    err = run_command(
+        """
+        CREATE SERVER test_secrets_srv TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181', client_id 'id')
+        """,
+        superuser_conn,
+        raise_error=False,
+    )
+    assert "invalid option" in str(err)
+    assert "client_id" in str(err)
+    superuser_conn.rollback()
+
+
+# ── CREATE USER MAPPING ───────────────────────────────────────────────────
+
+
+def test_create_user_mapping_valid(superuser_conn, extension):
+    """client_id, client_secret, and scope should be accepted as user mapping options."""
+    run_command(
+        """
+        CREATE SERVER test_um_srv TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        """
+        CREATE USER MAPPING FOR CURRENT_USER SERVER test_um_srv
+            OPTIONS (client_id 'my-id', client_secret 'my-secret', scope 'PRINCIPAL_ROLE:ADMIN')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.rollback()
+
+
+def test_create_user_mapping_public(superuser_conn, extension):
+    """A PUBLIC user mapping should be accepted."""
+    run_command(
+        """
+        CREATE SERVER test_um_pub_srv TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        """
+        CREATE USER MAPPING FOR PUBLIC SERVER test_um_pub_srv
+            OPTIONS (client_id 'pub-id', client_secret 'pub-secret')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.rollback()
+
+
+def test_reject_unknown_user_mapping_option(superuser_conn, extension):
+    """Unknown options in user mapping should be rejected."""
+    run_command(
+        """
+        CREATE SERVER test_um_bad_srv TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    err = run_command(
+        """
+        CREATE USER MAPPING FOR CURRENT_USER SERVER test_um_bad_srv
+            OPTIONS (client_id 'id', unknown_opt 'x')
+        """,
+        superuser_conn,
+        raise_error=False,
+    )
+    assert "invalid option" in str(err)
+    assert "unknown_opt" in str(err)
+    superuser_conn.rollback()
+
+
+def test_reject_server_options_in_user_mapping(superuser_conn, extension):
+    """Server-level options like rest_endpoint should not be accepted in user mapping."""
+    run_command(
+        """
+        CREATE SERVER test_um_wrong_srv TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    err = run_command(
+        """
+        CREATE USER MAPPING FOR CURRENT_USER SERVER test_um_wrong_srv
+            OPTIONS (rest_endpoint 'http://other:8181')
+        """,
+        superuser_conn,
+        raise_error=False,
+    )
+    assert "invalid option" in str(err)
     superuser_conn.rollback()
 
 
@@ -291,11 +393,14 @@ def test_create_table_with_server_catalog(
         """
         CREATE SERVER test_srv_catalog TYPE 'rest'
             FOREIGN DATA WRAPPER iceberg_catalog
-            OPTIONS (
-                rest_endpoint 'http://localhost:8181',
-                client_id 'id',
-                client_secret 'secret'
-            )
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        """
+        CREATE USER MAPPING FOR CURRENT_USER SERVER test_srv_catalog
+            OPTIONS (client_id 'id', client_secret 'secret')
         """,
         superuser_conn,
     )
@@ -317,6 +422,9 @@ def test_create_table_with_server_catalog(
     assert "invalid catalog option" not in str(err)
     pg_conn.rollback()
 
+    run_command(
+        "DROP USER MAPPING FOR CURRENT_USER SERVER test_srv_catalog", superuser_conn
+    )
     run_command("DROP SERVER test_srv_catalog CASCADE", superuser_conn)
     superuser_conn.commit()
 
@@ -352,6 +460,214 @@ def test_non_iceberg_catalog_server_rejected(
     )
     assert "invalid catalog option" in str(err)
     pg_conn.rollback()
+
+
+# ── Credential resolution: catalogs.conf ──────────────────────────────────
+
+
+@pytest.fixture
+def pg_data_dir(superuser_conn):
+    """Returns the PGDATA directory path."""
+    result = run_query("SHOW data_directory", superuser_conn)
+    return result[0]["data_directory"]
+
+
+@pytest.fixture
+def catalogs_conf(pg_data_dir):
+    """Write a temporary catalogs.conf in $PGDATA and clean up after."""
+    conf_path = os.path.join(pg_data_dir, "catalogs.conf")
+    created = not os.path.exists(conf_path)
+    original_content = None
+    if not created:
+        with open(conf_path, "r") as f:
+            original_content = f.read()
+
+    def _write(content):
+        with open(conf_path, "w") as f:
+            f.write(content)
+
+    yield _write
+
+    if created:
+        if os.path.exists(conf_path):
+            os.remove(conf_path)
+    else:
+        with open(conf_path, "w") as f:
+            f.write(original_content or "")
+
+
+def test_credentials_from_catalogs_conf(
+    pg_conn,
+    superuser_conn,
+    s3,
+    extension,
+    with_default_location,
+    catalogs_conf,
+):
+    """Credentials should be resolved from $PGDATA/catalogs.conf when no
+    user mapping exists."""
+    catalogs_conf(
+        "test_conf_srv.client_id = 'conf-id'\n"
+        "test_conf_srv.client_secret = 'conf-secret'\n"
+    )
+    run_command(
+        """
+        CREATE SERVER test_conf_srv TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    err = run_command(
+        """
+        CREATE TABLE test_conf_tbl ()
+            USING iceberg
+            WITH (catalog = 'test_conf_srv', read_only = 'true',
+                  catalog_namespace = 'ns', catalog_table_name = 'tbl')
+        """,
+        pg_conn,
+        raise_error=False,
+    )
+    # Should get a connection error (fake endpoint), not a credentials error
+    assert err is not None
+    assert "no credentials found" not in str(err)
+    assert "invalid catalog option" not in str(err)
+    pg_conn.rollback()
+
+    run_command("DROP SERVER test_conf_srv CASCADE", superuser_conn)
+    superuser_conn.commit()
+
+
+def test_user_mapping_overrides_catalogs_conf(
+    pg_conn,
+    superuser_conn,
+    s3,
+    extension,
+    with_default_location,
+    catalogs_conf,
+):
+    """User mapping credentials should take priority over catalogs.conf."""
+    catalogs_conf(
+        "test_override_srv.client_id = 'conf-id'\n"
+        "test_override_srv.client_secret = 'conf-secret'\n"
+    )
+    run_command(
+        """
+        CREATE SERVER test_override_srv TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        """
+        CREATE USER MAPPING FOR CURRENT_USER SERVER test_override_srv
+            OPTIONS (client_id 'um-id', client_secret 'um-secret')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    err = run_command(
+        """
+        CREATE TABLE test_override_tbl ()
+            USING iceberg
+            WITH (catalog = 'test_override_srv', read_only = 'true',
+                  catalog_namespace = 'ns', catalog_table_name = 'tbl')
+        """,
+        pg_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert "no credentials found" not in str(err)
+    assert "invalid catalog option" not in str(err)
+    pg_conn.rollback()
+
+    run_command(
+        "DROP USER MAPPING FOR CURRENT_USER SERVER test_override_srv", superuser_conn
+    )
+    run_command("DROP SERVER test_override_srv CASCADE", superuser_conn)
+    superuser_conn.commit()
+
+
+def test_no_credentials_errors(
+    pg_conn,
+    superuser_conn,
+    s3,
+    extension,
+    with_default_location,
+):
+    """Without user mapping, catalogs.conf, or GUCs, credential resolution should error."""
+    run_command(
+        """
+        CREATE SERVER test_no_creds TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    err = run_command(
+        """
+        CREATE TABLE test_no_creds_tbl ()
+            USING iceberg
+            WITH (catalog = 'test_no_creds', read_only = 'true',
+                  catalog_namespace = 'ns', catalog_table_name = 'tbl')
+        """,
+        pg_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert "no credentials found" in str(err)
+    pg_conn.rollback()
+
+    run_command("DROP SERVER test_no_creds CASCADE", superuser_conn)
+    superuser_conn.commit()
+
+
+def test_scope_from_catalogs_conf(
+    pg_conn,
+    superuser_conn,
+    s3,
+    extension,
+    with_default_location,
+    catalogs_conf,
+):
+    """catalogs.conf can also provide scope alongside credentials."""
+    catalogs_conf(
+        "test_scope_srv.client_id = 'conf-id'\n"
+        "test_scope_srv.client_secret = 'conf-secret'\n"
+        "test_scope_srv.scope = 'PRINCIPAL_ROLE:ADMIN'\n"
+    )
+    run_command(
+        """
+        CREATE SERVER test_scope_srv TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    err = run_command(
+        """
+        CREATE TABLE test_scope_tbl ()
+            USING iceberg
+            WITH (catalog = 'test_scope_srv', read_only = 'true',
+                  catalog_namespace = 'ns', catalog_table_name = 'tbl')
+        """,
+        pg_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert "no credentials found" not in str(err)
+    pg_conn.rollback()
+
+    run_command("DROP SERVER test_scope_srv CASCADE", superuser_conn)
+    superuser_conn.commit()
 
 
 # ── Backward compatibility ─────────────────────────────────────────────────
