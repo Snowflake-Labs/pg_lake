@@ -638,15 +638,16 @@ def test_server_option_overrides_guc(
 
     server_options = {
         "rest_endpoint": endpoint,
+        "location_prefix": VALID_PREFIX,
+    }
+
+    user_mapping_options = {
         "client_id": client_id,
         "client_secret": client_secret,
-        "location_prefix": VALID_PREFIX,
     }
 
     if option_name == "catalog_name":
         server_options["catalog_name"] = "nonexistent_catalog"
-
-    options_sql = ", ".join(f"{k} '{v}'" for k, v in server_options.items())
 
     if guc_name is not None:
         run_command(
@@ -655,11 +656,21 @@ def test_server_option_overrides_guc(
         )
         superuser_conn.commit()
 
+    options_sql = ", ".join(f"{k} '{v}'" for k, v in server_options.items())
+    um_options_sql = ", ".join(f"{k} '{v}'" for k, v in user_mapping_options.items())
+
     run_command(
         f"""
         CREATE SERVER {SERVER_NAME} TYPE 'rest'
             FOREIGN DATA WRAPPER iceberg_catalog
             OPTIONS ({options_sql})
+        """,
+        superuser_conn,
+    )
+    run_command(
+        f"""
+        CREATE USER MAPPING FOR PUBLIC SERVER {SERVER_NAME}
+            OPTIONS ({um_options_sql})
         """,
         superuser_conn,
     )
@@ -752,9 +763,14 @@ def test_reject_modify_different_rest_catalogs_in_single_transaction(
             f"""
             CREATE SERVER {name} TYPE 'rest'
                 FOREIGN DATA WRAPPER iceberg_catalog
-                OPTIONS (rest_endpoint '{endpoint}',
-                         client_id '{client_id}',
-                         client_secret '{client_secret}')
+                OPTIONS (rest_endpoint '{endpoint}')
+            """,
+            superuser_conn,
+        )
+        run_command(
+            f"""
+            CREATE USER MAPPING FOR CURRENT_USER SERVER {name}
+                OPTIONS (client_id '{client_id}', client_secret '{client_secret}')
             """,
             superuser_conn,
         )
@@ -818,10 +834,15 @@ def test_reject_writable_table_on_server_with_catalog_name(
         CREATE SERVER {SERVER_NAME} TYPE 'rest'
             FOREIGN DATA WRAPPER iceberg_catalog
             OPTIONS (rest_endpoint '{endpoint}',
-                     client_id '{client_id}',
-                     client_secret '{client_secret}',
                      catalog_name '{server_params.PG_DATABASE}',
                      location_prefix 's3://{TEST_BUCKET}')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        f"""
+        CREATE USER MAPPING FOR CURRENT_USER SERVER {SERVER_NAME}
+            OPTIONS (client_id '{client_id}', client_secret '{client_secret}')
         """,
         superuser_conn,
     )
@@ -844,7 +865,7 @@ def test_reject_writable_table_on_server_with_catalog_name(
     pg_conn.rollback()
 
     superuser_conn.rollback()
-    run_command(f"DROP SERVER {SERVER_NAME}", superuser_conn)
+    run_command(f"DROP SERVER {SERVER_NAME} CASCADE", superuser_conn)
     superuser_conn.commit()
 
 
@@ -901,9 +922,14 @@ def test_table_catalog_name_overrides_server(
         CREATE SERVER {SERVER_NAME} TYPE 'rest'
             FOREIGN DATA WRAPPER iceberg_catalog
             OPTIONS (rest_endpoint '{endpoint}',
-                     client_id '{client_id}',
-                     client_secret '{client_secret}',
                      catalog_name 'nonexistent_catalog')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        f"""
+        CREATE USER MAPPING FOR CURRENT_USER SERVER {SERVER_NAME}
+            OPTIONS (client_id '{client_id}', client_secret '{client_secret}')
         """,
         superuser_conn,
     )
@@ -927,5 +953,5 @@ def test_table_catalog_name_overrides_server(
     pg_conn.commit()
 
     superuser_conn.rollback()
-    run_command(f"DROP SERVER {SERVER_NAME}", superuser_conn)
+    run_command(f"DROP SERVER {SERVER_NAME} CASCADE", superuser_conn)
     superuser_conn.commit()
