@@ -30,10 +30,14 @@
 #include "foreign/foreign.h"
 #include "fmgr.h"
 #include "lib/stringinfo.h"
+#include "storage/fd.h"
 #include "utils/builtins.h"
+#include "utils/conffiles.h"
+#include "utils/guc.h"
 #include "utils/jsonb.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/syscache.h"
 #include "utils/timestamp.h"
 
 #include "pg_extension_base/base_workers.h"
@@ -359,12 +363,138 @@ BlockDDLOnExtensionCatalogs(ProcessUtilityParams *processUtilityParams,
 }
 
 
+#define CATALOGS_CONF_FILENAME "catalogs.conf"
+
+/*
+ * LookupUserMappingOptions returns the user mapping options for the current
+ * user on the given server, or NULL if no mapping exists. Checks for a
+ * user-specific mapping first, then falls back to PUBLIC.
+ */
+static List *
+LookupUserMappingOptions(Oid serverid)
+{
+	HeapTuple	tp;
+	Datum		datum;
+	bool		isnull;
+	List	   *options;
+
+	tp = SearchSysCache2(USERMAPPINGUSERSERVER,
+						 ObjectIdGetDatum(GetUserId()),
+						 ObjectIdGetDatum(serverid));
+
+	if (!HeapTupleIsValid(tp))
+	{
+		tp = SearchSysCache2(USERMAPPINGUSERSERVER,
+							 ObjectIdGetDatum(InvalidOid),
+							 ObjectIdGetDatum(serverid));
+	}
+
+	if (!HeapTupleIsValid(tp))
+		return NIL;
+
+	datum = SysCacheGetAttr(USERMAPPINGUSERSERVER, tp,
+							Anum_pg_user_mapping_umoptions, &isnull);
+	options = isnull ? NIL : untransformRelOptions(datum);
+	ReleaseSysCache(tp);
+
+	return options;
+}
+
+
+/*
+ * ReadCatalogsConfCredentials reads $PGDATA/catalogs.conf and extracts
+ * credentials for the given server name. The file uses PostgreSQL's
+ * standard key = value format with dotted keys:
+ *
+ *   horizon.client_id = 'platform_id'
+ *   horizon.client_secret = 'platform_secret'
+ *   horizon.scope = 'PRINCIPAL_ROLE:ALL'
+ *
+ * Re-reads the file every time for simplicity -- these requests are
+ * infrequent (one per REST catalog operation, not per row).
+ *
+ * Returns true if any credential was found for serverName.
+ */
+static bool
+ReadCatalogsConfCredentials(const char *serverName,
+							char **clientId, char **clientSecret,
+							char **scope)
+{
+	char		path[MAXPGPATH];
+	FILE	   *fp;
+	ConfigVariable *head = NULL;
+	ConfigVariable *tail = NULL;
+	ConfigVariable *item;
+	bool		found = false;
+	int			serverNameLen = strlen(serverName);
+
+	snprintf(path, MAXPGPATH, "%s/%s", DataDir, CATALOGS_CONF_FILENAME);
+
+	fp = AllocateFile(path, "r");
+	if (fp == NULL)
+	{
+		if (errno == ENOENT)
+			return false;
+		ereport(WARNING,
+				(errcode_for_file_access(),
+				 errmsg("could not open catalog config file \"%s\": %m", path)));
+		return false;
+	}
+
+	ParseConfigFp(fp, path, CONF_FILE_START_DEPTH, WARNING, &head, &tail);
+	FreeFile(fp);
+
+	for (item = head; item != NULL; item = item->next)
+	{
+		const char *key;
+
+		if (item->errmsg != NULL)
+			continue;
+
+		/*
+		 * Match entries of the form "servername.key = value".
+		 * The dot separates the server name from the property name.
+		 */
+		if (strncmp(item->name, serverName, serverNameLen) != 0 ||
+			item->name[serverNameLen] != '.')
+			continue;
+
+		key = item->name + serverNameLen + 1;
+
+		if (strcmp(key, "client_id") == 0)
+		{
+			*clientId = pstrdup(item->value);
+			found = true;
+		}
+		else if (strcmp(key, "client_secret") == 0)
+		{
+			*clientSecret = pstrdup(item->value);
+			found = true;
+		}
+		else if (strcmp(key, "scope") == 0)
+		{
+			*scope = pstrdup(item->value);
+			found = true;
+		}
+	}
+
+	FreeConfigVariables(head);
+	return found;
+}
+
+
 /*
  * GetRestCatalogConnectionFromServer returns a RestCatalogConnectionInfo
  * populated from the options of the named ForeignServer. GUC values are
  * used as defaults; any option explicitly set on the server overrides the
  * corresponding GUC.  This applies to both the extension-owned 'rest'
  * server and user-created iceberg_catalog servers.
+ *
+ * Credential resolution order:
+ * 1. pg_user_mapping for the current user + server (cached by PG's relcache)
+ * 2. $PGDATA/catalogs.conf (re-read each time; infrequent requests)
+ * 3. GUC variables (backward compatibility)
+ * 4. Error if no credentials found
  */
 RestCatalogConnectionInfo *
 GetRestCatalogConnectionFromServer(const char *serverName)
@@ -391,6 +521,7 @@ GetRestCatalogConnectionFromServer(const char *serverName)
 	conn->authType = RestCatalogAuthType;
 	conn->enableVendedCredentials = RestCatalogEnableVendedCredentials;
 
+	/* Phase 1: Populate non-secret properties from server options */
 	ListCell   *lc;
 
 	foreach(lc, server->options)
@@ -419,6 +550,48 @@ GetRestCatalogConnectionFromServer(const char *serverName)
 		ereport(ERROR,
 				(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
 				 errmsg("\"rest_endpoint\" option is required for iceberg_catalog server \"%s\"",
+						serverName)));
+
+	/*
+	 * Phase 2: Resolve credentials and scope.
+	 *
+	 * Priority: user mapping > catalogs.conf > GUC fallback (set above).
+	 */
+	List	   *umOptions = LookupUserMappingOptions(server->serverid);
+
+	foreach(lc, umOptions)
+	{
+		DefElem    *def = (DefElem *) lfirst(lc);
+
+		if (strcmp(def->defname, "client_id") == 0)
+			conn->clientId = pstrdup(defGetString(def));
+		else if (strcmp(def->defname, "client_secret") == 0)
+			conn->clientSecret = pstrdup(defGetString(def));
+		else if (strcmp(def->defname, "scope") == 0)
+			conn->scope = pstrdup(defGetString(def));
+	}
+
+	/* catalogs.conf overrides GUCs but not user mapping */
+	char	   *confClientId = NULL;
+	char	   *confClientSecret = NULL;
+	char	   *confScope = NULL;
+
+	if (ReadCatalogsConfCredentials(serverName,
+									&confClientId, &confClientSecret,
+									&confScope))
+	{
+		if (conn->clientId == NULL && confClientId != NULL)
+			conn->clientId = confClientId;
+		if (conn->clientSecret == NULL && confClientSecret != NULL)
+			conn->clientSecret = confClientSecret;
+		if (conn->scope == NULL && confScope != NULL)
+			conn->scope = confScope;
+	}
+
+	if (conn->clientId == NULL || conn->clientSecret == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
+				 errmsg("no credentials found for iceberg_catalog server \"%s\"",
 						serverName)));
 
 	return conn;
