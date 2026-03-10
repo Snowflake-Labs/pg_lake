@@ -904,7 +904,6 @@ def test_set_default_catalog_to_user_created_rest_server(superuser_conn, extensi
         """,
         superuser_conn,
     )
-
     run_command(
         "SET pg_lake_iceberg.default_catalog = 'my_rest_catalog'",
         superuser_conn,
@@ -953,7 +952,6 @@ def test_case_sensitive_server_names(superuser_conn, extension):
         """,
         superuser_conn,
     )
-
     lower_opts = run_query(
         "SELECT srvoptions FROM pg_foreign_server WHERE srvname = 'test_cs'",
         superuser_conn,
@@ -971,3 +969,205 @@ def test_case_sensitive_server_names(superuser_conn, extension):
     run_command("DROP SERVER test_cs", superuser_conn)
     run_command('DROP SERVER "TEST_CS"', superuser_conn)
     superuser_conn.rollback()
+
+
+# ── Query string scrubbing for user mapping DDL ───────────────────────────
+
+
+def test_scrub_create_user_mapping_in_pg_stat_statements(
+    installcheck, superuser_conn, extension
+):
+    """CREATE USER MAPPING secrets should be scrubbed in pg_stat_statements."""
+    if installcheck:
+        return
+
+    run_command("CREATE EXTENSION IF NOT EXISTS pg_stat_statements", superuser_conn)
+    run_command("SELECT pg_stat_statements_reset()", superuser_conn)
+    superuser_conn.commit()
+
+    run_command(
+        """
+        CREATE SERVER test_scrub_srv TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+
+    superuser_conn.commit()
+
+    run_command(
+        """
+        CREATE USER MAPPING FOR CURRENT_USER SERVER test_scrub_srv
+            OPTIONS (client_id 'secret_id_value', client_secret 'secret_key_value')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    result = run_query(
+        """
+        SELECT query FROM pg_stat_statements
+        WHERE query ILIKE '%CREATE USER MAPPING%test_scrub_srv%'
+        """,
+        superuser_conn,
+    )
+
+    assert len(result) >= 1
+    query_text = result[0]["query"]
+    assert "secret_id_value" not in query_text
+    assert "secret_key_value" not in query_text
+    assert "'***" in query_text
+
+    run_command(
+        "DROP USER MAPPING FOR CURRENT_USER SERVER test_scrub_srv", superuser_conn
+    )
+    run_command("DROP SERVER test_scrub_srv", superuser_conn)
+    superuser_conn.commit()
+
+
+def test_scrub_alter_user_mapping_in_pg_stat_statements(
+    installcheck, superuser_conn, extension
+):
+    """ALTER USER MAPPING secrets should also be scrubbed in pg_stat_statements."""
+    if installcheck:
+        return
+
+    run_command("CREATE EXTENSION IF NOT EXISTS pg_stat_statements", superuser_conn)
+    run_command("SELECT pg_stat_statements_reset()", superuser_conn)
+    superuser_conn.commit()
+
+    run_command(
+        """
+        CREATE SERVER test_scrub_alter_srv TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        """
+        CREATE USER MAPPING FOR CURRENT_USER SERVER test_scrub_alter_srv
+            OPTIONS (client_id 'old_id', client_secret 'old_secret')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    run_command("SELECT pg_stat_statements_reset()", superuser_conn)
+    superuser_conn.commit()
+
+    run_command(
+        """
+        ALTER USER MAPPING FOR CURRENT_USER SERVER test_scrub_alter_srv
+            OPTIONS (SET client_id 'new_secret_id', SET client_secret 'new_secret_key')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    result = run_query(
+        """
+        SELECT query FROM pg_stat_statements
+        WHERE query ILIKE '%ALTER USER MAPPING%test_scrub_alter_srv%'
+        """,
+        superuser_conn,
+    )
+
+    assert len(result) >= 1
+    query_text = result[0]["query"]
+    assert "new_secret_id" not in query_text
+    assert "new_secret_key" not in query_text
+    assert "'***" in query_text
+
+    run_command(
+        "DROP USER MAPPING FOR CURRENT_USER SERVER test_scrub_alter_srv",
+        superuser_conn,
+    )
+    run_command("DROP SERVER test_scrub_alter_srv", superuser_conn)
+    superuser_conn.commit()
+
+
+def test_scrub_preserves_actual_credentials(superuser_conn, extension):
+    """Scrubbing the query string should not affect the stored credentials."""
+    run_command(
+        """
+        CREATE SERVER test_scrub_creds_srv TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        """
+        CREATE USER MAPPING FOR CURRENT_USER SERVER test_scrub_creds_srv
+            OPTIONS (client_id 'real_id', client_secret 'real_secret')
+        """,
+        superuser_conn,
+    )
+
+    result = run_query(
+        """
+        SELECT umoptions FROM pg_user_mapping um
+            JOIN pg_foreign_server fs ON um.umserver = fs.oid
+        WHERE fs.srvname = 'test_scrub_creds_srv'
+        """,
+        superuser_conn,
+    )
+
+    assert len(result) == 1
+    opts = result[0]["umoptions"]
+    assert "client_id=real_id" in opts
+    assert "client_secret=real_secret" in opts
+
+    superuser_conn.rollback()
+
+
+def test_scrub_leaves_scope_visible(installcheck, superuser_conn, extension):
+    """scope is not a secret — it should remain visible after scrubbing."""
+    if installcheck:
+        return
+
+    run_command("CREATE EXTENSION IF NOT EXISTS pg_stat_statements", superuser_conn)
+    run_command("SELECT pg_stat_statements_reset()", superuser_conn)
+    superuser_conn.commit()
+
+    run_command(
+        """
+        CREATE SERVER test_scrub_scope_srv TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    run_command(
+        """
+        CREATE USER MAPPING FOR CURRENT_USER SERVER test_scrub_scope_srv
+            OPTIONS (client_id 'id123', client_secret 'secret456', scope 'PRINCIPAL_ROLE:ALL')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    result = run_query(
+        """
+        SELECT query FROM pg_stat_statements
+        WHERE query ILIKE '%CREATE USER MAPPING%test_scrub_scope_srv%'
+        """,
+        superuser_conn,
+    )
+
+    assert len(result) >= 1
+    query_text = result[0]["query"]
+    assert "id123" not in query_text
+    assert "secret456" not in query_text
+    assert "PRINCIPAL_ROLE:ALL" in query_text
+
+    run_command(
+        "DROP USER MAPPING FOR CURRENT_USER SERVER test_scrub_scope_srv",
+        superuser_conn,
+    )
+    run_command("DROP SERVER test_scrub_scope_srv", superuser_conn)
+    superuser_conn.commit()
