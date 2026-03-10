@@ -561,3 +561,68 @@ def copy_from_pushdown_setup(superuser_conn):
         superuser_conn,
     )
     superuser_conn.commit()
+
+
+def test_bc_dates_copy_from_pushdown(
+    pg_conn,
+    extension,
+    s3,
+    with_default_location,
+):
+    """Verify BC dates roundtrip correctly through COPY FROM pushdown.
+
+    COPY iceberg_table FROM 'file.parquet' goes through WriteQueryResultTo,
+    bypassing PGDuckSerialize.  This test ensures BC dates in a Parquet file
+    are correctly written to the Iceberg table via the pushed-down path.
+    """
+    parquet_url = f"s3://{TEST_BUCKET}/test_bc_copy_from_pushdown/data.parquet"
+
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    # Write BC dates to a Parquet file
+    run_command(
+        f"""COPY (
+            SELECT '4712-01-01 BC'::date      AS col_date,
+                   '0001-01-01 00:00:00'::timestamp AS col_ts,
+                   '0001-01-01 00:00:00+00'::timestamptz AS col_tstz
+            UNION ALL
+            SELECT '0001-01-01 BC'::date,
+                   '0001-06-15 12:30:00'::timestamp,
+                   '0001-06-15 12:30:00+00'::timestamptz
+            UNION ALL
+            SELECT '2021-01-01'::date,
+                   '2021-01-01 00:00:00'::timestamp,
+                   '2021-01-01 00:00:00+00'::timestamptz
+        ) TO '{parquet_url}';""",
+        pg_conn,
+    )
+
+    run_command(
+        """CREATE TABLE test_bc_copy_target (
+            col_date date,
+            col_ts timestamp,
+            col_tstz timestamptz
+        ) USING iceberg;""",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # COPY FROM pushdown
+    run_command(f"COPY test_bc_copy_target FROM '{parquet_url}';", pg_conn)
+    pg_conn.commit()
+
+    result = run_query(
+        "SELECT col_date::text AS d, col_ts::text AS ts, col_tstz::text AS tstz "
+        "FROM test_bc_copy_target ORDER BY col_date;",
+        pg_conn,
+    )
+
+    assert normalize_bc(result) == [
+        ["4712-01-01 BC", "0001-01-01 00:00:00", "0001-01-01 00:00:00+00"],
+        ["0001-01-01 BC", "0001-06-15 12:30:00", "0001-06-15 12:30:00+00"],
+        ["2021-01-01", "2021-01-01 00:00:00", "2021-01-01 00:00:00+00"],
+    ]
+
+    run_command("RESET TIME ZONE;", pg_conn)
+    run_command("DROP TABLE test_bc_copy_target;", pg_conn)
+    pg_conn.commit()

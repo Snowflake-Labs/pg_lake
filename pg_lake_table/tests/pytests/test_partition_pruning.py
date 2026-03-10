@@ -88,6 +88,40 @@ pruning_data = [
     ),
     (
         True,
+        "date",
+        "prune_date_bc",
+        [
+            ("4712-01-01 BC", "4712-01-01 BC"),
+            ("4712-01-01 BC", "0001-01-01 BC"),
+            ("0001-01-01 BC", "4712-01-01 BC"),
+            ("0001-01-01 BC", "0001-01-01 BC"),
+        ],
+    ),
+    # Iceberg timestamps only support AD years 0001–9999; use early-AD values
+    (
+        True,
+        "timestamp",
+        "prune_timestamp_early_ad",
+        [
+            ("0001-01-01 00:00:00", "0001-01-01 00:00:00"),
+            ("0001-01-01 00:00:00", "0002-06-15 12:30:00"),
+            ("0002-06-15 12:30:00", "0001-01-01 00:00:00"),
+            ("0002-06-15 12:30:00", "0002-06-15 12:30:00"),
+        ],
+    ),
+    (
+        True,
+        "timestamptz",
+        "prune_timestamptz_early_ad",
+        [
+            ("0001-01-01 00:00:00+00", "0001-01-01 00:00:00+00"),
+            ("0001-01-01 00:00:00+00", "0002-06-15 12:30:00+00"),
+            ("0002-06-15 12:30:00+00", "0001-01-01 00:00:00+00"),
+            ("0002-06-15 12:30:00+00", "0002-06-15 12:30:00+00"),
+        ],
+    ),
+    (
+        True,
         "time",
         "prune_time",
         [
@@ -572,6 +606,88 @@ def test_datetime_partition_pruning_simple(
             pg_conn,
         )
         assert len(rows) == expected_rows, f"rows: {sql}"
+    run_command("RESET TIME ZONE;", pg_conn)
+    pg_conn.rollback()
+
+
+# Iceberg timestamps only support AD years (0001–9999), so only date
+# columns use BC values for partition pruning tests.
+bc_col_types = ["date"]
+bc_partition_types = ["year", "month", "day"]
+
+
+@pytest.mark.parametrize("partition_by", bc_partition_types)
+@pytest.mark.parametrize("col_type", bc_col_types)
+def test_bc_date_partition_pruning(
+    s3,
+    disable_data_file_pruning,
+    pg_conn,
+    extension,
+    with_default_location,
+    col_type,
+    partition_by,
+):
+    """Verify partition pruning works correctly with BC dates."""
+
+    explain_prefix = "EXPLAIN (analyze, verbose, format json) "
+
+    run_command(
+        f"""
+        CREATE SCHEMA test_bc_partition;
+        CREATE TABLE  test_bc_partition.tbl (
+            col_date {col_type}
+        ) USING iceberg
+        WITH (
+            autovacuum_enabled = 'False',
+            partition_by       = '{partition_by}(col_date)'
+        );
+        SET TIME ZONE 'UTC';
+    """,
+        pg_conn,
+    )
+
+    # insert BC and AD dates into separate data files via separate inserts
+    dates = [
+        "4712-01-01 BC",
+        "1000-01-01 BC",
+        "0001-01-01 BC",
+        "0001-01-01",
+        "1970-01-01",
+        "2021-01-01",
+    ]
+    values_sql = ",".join(f"('{d}')" for d in dates)
+    run_command(
+        f"INSERT INTO test_bc_partition.tbl VALUES {values_sql};",
+        pg_conn,
+    )
+
+    # use count(*) to avoid psycopg2 issues with BC date objects
+    filter_tests = [
+        ("col_date = '4712-01-01 BC'", 1, 1),
+        ("col_date = '0001-01-01 BC'", 1, 1),
+        ("col_date = '2021-01-01'", 1, 1),
+        ("col_date <= '0001-01-01 BC'", 3, 3),
+        ("col_date >= '0001-01-01'", 3, 3),
+        ("col_date BETWEEN '4712-01-01 BC' AND '0001-01-01 BC'", 3, 3),
+        ("col_date BETWEEN '0001-01-01' AND '2021-01-01'", 3, 3),
+        ("col_date BETWEEN '4712-01-01 BC' AND '2021-01-01'", 6, 6),
+        ("col_date = '9999-01-01'", 0, 0),
+        ("col_date > '2021-01-01'", 0, 1),
+    ]
+
+    for sql, expected_rows, expected_files in filter_tests:
+        plan = run_query(
+            f"{explain_prefix} SELECT * FROM test_bc_partition.tbl WHERE {sql}",
+            pg_conn,
+        )
+        assert fetch_data_files_used(plan) == str(expected_files), f"files: {sql}"
+
+        count = run_query(
+            f"SELECT count(*) FROM test_bc_partition.tbl WHERE {sql};",
+            pg_conn,
+        )
+        assert count[0][0] == expected_rows, f"rows: {sql}"
+
     run_command("RESET TIME ZONE;", pg_conn)
     pg_conn.rollback()
 
