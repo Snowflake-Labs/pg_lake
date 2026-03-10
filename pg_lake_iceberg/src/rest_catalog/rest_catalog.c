@@ -40,7 +40,10 @@
 #include "utils/syscache.h"
 #include "utils/timestamp.h"
 
+#include "nodes/parsenodes.h"
+
 #include "pg_extension_base/base_workers.h"
+#include "pg_lake/ddl/utility_hook.h"
 #include "pg_lake/http/http_client.h"
 #include "pg_lake/iceberg/api/table_schema.h"
 #include "pg_lake/iceberg/catalog.h"
@@ -125,6 +128,7 @@ static const char *iceberg_catalog_user_mapping_options[] = {
 };
 
 
+
 static bool
 is_valid_option_in_list(const char *keyword, const char *const *options)
 {
@@ -153,7 +157,7 @@ iceberg_catalog_validator(PG_FUNCTION_ARGS)
 	Oid			catalogRelId = PG_GETARG_OID(1);
 	ListCell   *cell;
 
-	if (catalog == UserMappingRelationId)
+	if (catalogRelId == UserMappingRelationId)
 	{
 		foreach(cell, options_list)
 		{
@@ -216,6 +220,128 @@ iceberg_catalog_validator(PG_FUNCTION_ARGS)
 	}
 
 	PG_RETURN_VOID();
+}
+
+
+/*
+ * IsIcebergCatalogServer returns true if the named server exists and
+ * uses the iceberg_catalog FDW.
+ */
+static bool
+IsIcebergCatalogServer(const char *serverName)
+{
+	ForeignServer *server = GetForeignServerByName(serverName, true);
+
+	if (server == NULL)
+		return false;
+
+	ForeignDataWrapper *fdw = GetForeignDataWrapper(server->fdwid);
+
+	return strcmp(fdw->fdwname, ICEBERG_CATALOG_FDW_NAME) == 0;
+}
+
+
+/*
+ * ScrubUserMappingSecrets overwrites secret option values in the query
+ * string in-place with asterisks.
+ *
+ * In-place mutation is essential: pg_stat_statements captures the queryString
+ * pointer before calling prev_ProcessUtility, then stores it after the call
+ * returns. A copy with pstrdup would be invisible to pg_stat_statements
+ * because its local pointer still references the original memory. By
+ * overwriting the original buffer, every holder of that pointer — including
+ * pg_stat_statements — sees the scrubbed version.
+ *
+ * The actual DDL execution is unaffected because CREATE/ALTER USER MAPPING
+ * reads option values from the parse tree (DefElem nodes), not from
+ * queryString.
+ */
+static void
+ScrubUserMappingSecrets(const char *queryString, List *options)
+{
+	const char *secret_options[] = {"client_id", "client_secret", NULL};
+	ListCell   *lc;
+
+	foreach(lc, options)
+	{
+		DefElem    *def = (DefElem *) lfirst(lc);
+
+		if (!is_valid_option_in_list(def->defname, secret_options))
+			continue;
+
+		if (def->location < 0)
+			continue;
+
+		char	   *p = (char *) queryString + def->location;
+
+		/* skip past the key name */
+		while (*p && !isspace((unsigned char) *p) && *p != '\'')
+			p++;
+
+		/* skip whitespace between key and opening quote */
+		while (*p && *p != '\'')
+			p++;
+
+		if (*p != '\'')
+			continue;
+
+		p++;					/* skip opening quote */
+
+		/* overwrite value characters with '*', handling '' escapes */
+		while (*p && *p != '\'')
+			*p++ = '*';
+		while (*(p + 1) == '\'')
+		{
+			*p++ = '*';			/* first quote of '' pair */
+			*p++ = '*';			/* second quote of '' pair */
+			while (*p && *p != '\'')
+				*p++ = '*';
+		}
+	}
+}
+
+
+/*
+ * ScrubIcebergUserMappingHandler is a ProcessUtility handler registered via
+ * pg_lake_engine's RegisterUtilityStatementHandler.  When it detects a
+ * CREATE/ALTER USER MAPPING targeting an iceberg_catalog server, it scrubs
+ * secret values in the queryString in-place and returns false so normal
+ * processing continues.
+ */
+bool
+ScrubIcebergUserMappingHandler(ProcessUtilityParams *processUtilityParams,
+							   void *arg)
+{
+	Node	   *parsetree = processUtilityParams->plannedStmt->utilityStmt;
+	const char *serverName = NULL;
+	List	   *options = NIL;
+
+	if (IsA(parsetree, CreateUserMappingStmt))
+	{
+		CreateUserMappingStmt *stmt = (CreateUserMappingStmt *) parsetree;
+
+		serverName = stmt->servername;
+		options = stmt->options;
+	}
+	else if (IsA(parsetree, AlterUserMappingStmt))
+	{
+		AlterUserMappingStmt *stmt = (AlterUserMappingStmt *) parsetree;
+
+		serverName = stmt->servername;
+		options = stmt->options;
+	}
+	else
+		return false;
+
+	if (serverName == NULL || options == NIL)
+		return false;
+
+	if (!IsIcebergCatalogServer(serverName))
+		return false;
+
+	ScrubUserMappingSecrets(processUtilityParams->queryString, options);
+
+	return false;
 }
 
 
