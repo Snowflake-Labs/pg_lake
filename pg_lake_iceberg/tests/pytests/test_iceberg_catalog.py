@@ -20,18 +20,14 @@ from datetime import datetime, date, timezone
 
 
 def test_iceberg_catalog_permissions(catalog_conn, cities_table, iceberg_extension):
-    assert None is run_query(
-        "SELECT * FROM lake_iceberg.tables limit 0", catalog_conn, raise_error=False
-    )
-    assert None is run_query(
+    assert [] is run_query("SELECT * FROM lake_iceberg.tables limit 0", catalog_conn)
+    assert [] is run_query(
         "SELECT * FROM lake_iceberg.tables_internal limit 0",
         catalog_conn,
-        raise_error=False,
     )
-    assert None is run_query(
+    assert [] is run_query(
         "SELECT * FROM lake_iceberg.tables_external limit 0",
         catalog_conn,
-        raise_error=False,
     )
 
 
