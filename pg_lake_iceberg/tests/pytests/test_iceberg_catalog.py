@@ -19,7 +19,7 @@ from sqlalchemy.exc import NotSupportedError
 from datetime import datetime, date, timezone
 
 
-def test_iceberg_catalog_permissions(catalog_conn, cities_tables, iceberg_extension):
+def test_iceberg_catalog_permissions(catalog_conn, cities_table, iceberg_extension):
     assert None is run_query(
         "SELECT * FROM lake_iceberg.tables limit 0", raise_error=False
     )
