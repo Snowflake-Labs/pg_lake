@@ -27,7 +27,7 @@ def _insert_select(col_type: str) -> str:
     """
     dup = random.randint(2, 4)
 
-    if col_type in {"SMALLINT", "INTEGER", "BIGINT", "NUMERIC"}:
+    if col_type in {"SMALLINT", "INTEGER", "BIGINT"} or col_type.startswith("NUMERIC"):
         return f"SELECT (i/{dup})::{col_type} FROM generate_series(1,{N_ROWS}) AS i"
 
     if col_type == "TEXT":
@@ -59,7 +59,7 @@ CASES = [
     ("smallint", "SMALLINT", True, False),
     ("integer", "INTEGER", True, False),
     ("bigint", "BIGINT", True, False),
-    ("numeric", "NUMERIC", True, False),
+    ("numeric_10_2", "NUMERIC(10,2)", True, False),
     ("text", "TEXT", True, True),
     ("bytea", "BYTEA", False, True),
     ("date", "DATE", True, True),

@@ -30,10 +30,15 @@
 #include "commands/defrem.h"
 #include "utils/acl.h"
 
+#include "catalog/pg_type.h"
+#include "parser/parser.h"
+#include "parser/parse_type.h"
+
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/extensions/pg_lake_iceberg.h"
 #include "pg_lake/extensions/pg_lake_table.h"
 #include "pg_lake/parsetree/options.h"
+#include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/util/rel_utils.h"
 
 
@@ -331,7 +336,10 @@ GetForeignTableFormat(Oid foreignTableId)
 
 	if (tableType == PG_LAKE_ICEBERG_TABLE_TYPE)
 	{
-		/* iceberg data files are parquet, but use a separate format for type handling */
+		/*
+		 * iceberg data files are parquet, but use a separate format for type
+		 * handling
+		 */
 		return DATA_FORMAT_ICEBERG;
 	}
 
@@ -386,4 +394,78 @@ GetPgLakeTableProperties(Oid relationId)
 	};
 
 	return result;
+}
+
+
+static bool
+IsUnsupportedNumericForIceberg(int32 typmod)
+{
+	if (IsUnboundedNumeric(NUMERICOID, typmod))
+		return true;
+
+	int			precision = -1;
+	int			scale = -1;
+
+	GetDuckdbAdjustedPrecisionAndScaleFromNumericTypeMod(typmod, &precision, &scale);
+
+	return precision > DUCKDB_MAX_NUMERIC_PRECISION ||
+		scale > DUCKDB_MAX_NUMERIC_SCALE;
+}
+
+
+/*
+ * MaybeConvertUnsupportedNumericColumnsToDouble converts numeric columns that
+ * cannot be represented as Iceberg decimals (unbounded or precision > 38) to
+ * float8, when pg_lake_iceberg.unsupported_numeric_as_double is enabled.
+ * Does nothing when the GUC is off.
+ */
+void
+MaybeConvertUnsupportedNumericColumnsToDouble(List *columnDefList)
+{
+	ListCell   *cell;
+
+	if (!UnsupportedNumericAsDouble)
+		return;
+
+	foreach(cell, columnDefList)
+	{
+		if (!IsA(lfirst(cell), ColumnDef))
+			continue;
+
+		ColumnDef  *columnDef = (ColumnDef *) lfirst(cell);
+
+		if (columnDef->typeName == NULL)
+			continue;
+
+		int32		typmod = 0;
+		Oid			typeOid = InvalidOid;
+
+		/*
+		 * Use missing_ok lookup because pseudo-types like serial/bigserial
+		 * are not resolvable before transformColumnDefinition() runs.
+		 */
+		Type		tup = LookupTypeName(NULL, columnDef->typeName, &typmod, true);
+
+		if (!HeapTupleIsValid(tup))
+			continue;
+
+		typeOid = ((Form_pg_type) GETSTRUCT(tup))->oid;
+		ReleaseSysCache(tup);
+
+		if (typeOid != NUMERICOID)
+			continue;
+
+		if (!IsUnsupportedNumericForIceberg(typmod))
+			continue;
+
+		ereport(NOTICE,
+				(errmsg("column \"%s\" has numeric type that cannot be stored "
+						"as an Iceberg decimal, converting to double precision",
+						columnDef->colname),
+				 errhint("Use numeric(P,S) with precision <= %d to preserve "
+						 "exact decimal semantics.",
+						 DUCKDB_MAX_NUMERIC_PRECISION)));
+
+		columnDef->typeName = SystemTypeName("float8");
+	}
 }

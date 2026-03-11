@@ -216,6 +216,7 @@ static bool HasPartitionByDropped(AlterTableStmt *alterStmt);
 static bool HasOnlyCatalogAlterTableOptions(AlterTableStmt *alterStmt);
 static void ErrorIfUnsupportedTableOptionChange(AlterTableStmt *alterStmt, List *allowedOptions);
 static void ErrorIfAnyRestCatalogTablesInSchema(const char *schemaName);
+static void MaybeConvertUnsupportedNumericColumnsToDoubleInAlterStmt(AlterTableStmt *alterStmt);
 
 /*
  * ProcessAlterTable is used in cases where we want to preempt the error
@@ -284,6 +285,7 @@ ProcessAlterTable(ProcessUtilityParams * processUtilityParams, void *arg)
 
 	ErrorIfReadOnlyIcebergTable(relationId);
 
+	MaybeConvertUnsupportedNumericColumnsToDoubleInAlterStmt(alterStmt);
 	ErrorIfUnsupportedTypeAddedForIcebergTables(alterStmt);
 
 	/* check whether we are accepting writes for this table */
@@ -425,10 +427,28 @@ CreateDDLOperationsForAlterTable(AlterTableStmt *alterStmt)
 }
 
 
+static void
+MaybeConvertUnsupportedNumericColumnsToDoubleInAlterStmt(AlterTableStmt *alterStmt)
+{
+	List	   *addColumnDefs = NIL;
+	ListCell   *cell;
+
+	foreach(cell, alterStmt->cmds)
+	{
+		AlterTableCmd *cmd = (AlterTableCmd *) lfirst(cell);
+
+		if (cmd->subtype == AT_AddColumn)
+			addColumnDefs = lappend(addColumnDefs, cmd->def);
+	}
+
+	MaybeConvertUnsupportedNumericColumnsToDouble(addColumnDefs);
+}
+
+
 /*
-* ErrorIfUnsupportedTypeAddedForIcebergTables checks if the column type being added
-* to an iceberg table is supported.
-*/
+ * ErrorIfUnsupportedTypeAddedForIcebergTables checks if the column type being
+ * added to an iceberg table is supported.
+ */
 static void
 ErrorIfUnsupportedTypeAddedForIcebergTables(AlterTableStmt *alterStmt)
 {
@@ -439,14 +459,9 @@ ErrorIfUnsupportedTypeAddedForIcebergTables(AlterTableStmt *alterStmt)
 		AlterTableCmd *subcommand = (AlterTableCmd *) lfirst(subcommandCell);
 
 		if (subcommand->subtype != AT_AddColumn)
-		{
 			continue;
-		}
-		else if (AlterTableHasSerialPseudoType(subcommand))
-		{
+		if (AlterTableHasSerialPseudoType(subcommand))
 			continue;
-		}
-
 
 		ColumnDef  *columnDef = (ColumnDef *) subcommand->def;
 

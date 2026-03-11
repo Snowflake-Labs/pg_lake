@@ -14,7 +14,7 @@ pruning_data = [
     (False, "float8", "prune_float8", [(1, 1), (1, 2), (2, 1), (2, 2)]),
     (
         False,
-        "numeric",
+        "numeric(10,2)",
         "prune_numeric",
         [(1.1, 1.1), (1.1, 1.2), (1.2, 1.1), (1.2, 1.2)],
     ),
@@ -1780,7 +1780,7 @@ def test_pruning_for_generated_cols(
     pg_conn.rollback()
 
 
-column_types = ["int", "smallint", "numeric", "numeric(10,1)"]
+column_types = ["int", "smallint", "numeric(10,2)", "numeric(10,1)"]
 partition_by_1_coercions = [
     ("truncate", "truncate(10, col1)"),
     ("bucket", "bucket(20, col1)"),
@@ -1802,7 +1802,7 @@ def test_pruning_for_coercions_numeric(
 ):
 
     # truncate does not support numeric columns
-    if partition_type == "truncate" and col_type in ("numeric", "numeric(10,1)"):
+    if partition_type == "truncate" and col_type.startswith("numeric"):
         return
 
     explain_prefix = "EXPLAIN (analyze, verbose, format json) "

@@ -122,6 +122,7 @@ def test_unsupported_types(
     pg_conn.rollback()
 
     # unsupported numeric
+    run_command("SET pg_lake_iceberg.unsupported_numeric_as_double TO off", pg_conn)
     error = run_command(
         "CREATE TABLE test_unsupported_types.t (a numeric(40,50)) USING iceberg",
         pg_conn,
@@ -241,6 +242,7 @@ def test_unsupported_types(
     pg_conn.rollback()
 
     # unsupported type partition of with constraint
+    run_command("SET pg_lake_iceberg.unsupported_numeric_as_double TO off", pg_conn)
     error = run_command(
         f"""CREATE TABLE orders (
                                 order_id INT,

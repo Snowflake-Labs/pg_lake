@@ -41,6 +41,8 @@
 extern int	PGDLLEXPORT UnboundedNumericDefaultPrecision;
 extern int	PGDLLEXPORT UnboundedNumericDefaultScale;
 
+extern bool PGDLLEXPORT UnsupportedNumericAsDouble;
+
 extern PGDLLEXPORT bool IsUnboundedNumeric(int typOid, int typMod);
 extern PGDLLEXPORT void GetDuckdbAdjustedPrecisionAndScaleFromNumericTypeMod(int typeMod,
 																			 int *precision,

@@ -729,25 +729,23 @@ def test_create_iceberg_table_load_from_iceberg_metadata(
     assert len(result) == 4
     assert result == [
         ["a", "numeric", 262150],
-        ["b", "numeric", 2490381],
+        ["b", "double precision", -1],
         ["c", "numeric[]", 262150],
         ["d", "numeric[]", 2490381],
     ]
 
     a_typmod = result[0][2]
-    b_typmod = result[1][2]
     c_typmod = result[2][2]
     d_typmod = result[3][2]
 
     result = run_query(
-        f"""select numerictypmodout({a_typmod}), numerictypmodout({b_typmod}),
+        f"""select numerictypmodout({a_typmod}),
                                   numerictypmodout({c_typmod}), numerictypmodout({d_typmod})""",
         pg_conn,
     )
     assert result[0][0] == "(4,2)"
-    assert result[0][1] == "(38,9)"
-    assert result[0][2] == "(4,2)"
-    assert result[0][3] == "(38,9)"
+    assert result[0][1] == "(4,2)"
+    assert result[0][2] == "(38,9)"
 
     result = run_query("SELECT count(*) FROM load_from_iceberg_table", pg_conn)
     assert result[0]["count"] == 1

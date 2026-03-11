@@ -27,6 +27,9 @@ int			UnboundedNumericDefaultPrecision = UNBOUNDED_NUMERIC_DEFAULT_PRECISION;
 /* pg_lake_table.unbounded_numeric_default_scale setting */
 int			UnboundedNumericDefaultScale = UNBOUNDED_NUMERIC_DEFAULT_SCALE;
 
+/* pg_lake_iceberg.unsupported_numeric_as_double setting */
+bool		UnsupportedNumericAsDouble = true;
+
 
 /*
  * IsUnboundedNumeric checks if the given type is an unbounded numeric type.

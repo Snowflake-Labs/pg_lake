@@ -347,10 +347,6 @@ def test_iceberg_table_definition_from(
 
 
 def test_iceberg_table_explicit(s3, pg_conn, extension, with_default_location):
-    # lets try with different defaults
-    run_command("set pg_lake_table.unbounded_numeric_default_precision = 10", pg_conn)
-    run_command("set pg_lake_table.unbounded_numeric_default_scale = 5", pg_conn)
-
     run_command(
         f"""
         create table iceberg_table (numeric_small numeric(5,3), numeric_unbounded numeric) using pg_lake_iceberg;
@@ -362,11 +358,7 @@ def test_iceberg_table_explicit(s3, pg_conn, extension, with_default_location):
         "select data_type, numeric_precision, numeric_scale from information_schema.columns where table_name = 'iceberg_table' order by column_name",
         pg_conn,
     )
-    assert result == [["numeric", 5, 3], ["numeric", None, None]]
-
-    expected_expression = "WHERE (abs(numeric_unbounded) > (1)::numeric)"
-    query = f"SELECT * FROM iceberg_table {expected_expression}"
-    assert_remote_query_contains_expression(query, expected_expression, pg_conn)
+    assert result == [["numeric", 5, 3], ["double precision", 53, None]]
 
     pg_conn.rollback()
 
@@ -385,14 +377,12 @@ def test_iceberg_create_as_select(s3, pg_conn, extension, with_default_location)
         "select data_type, numeric_precision, numeric_scale from information_schema.columns where table_name = 'iceberg_table' order by column_name",
         pg_conn,
     )
-    assert result == [["numeric", 5, 3], ["numeric", None, None]]
+    assert result == [["numeric", 5, 3], ["double precision", 53, None]]
 
-    expected_expression = "WHERE (abs(numeric_unbounded) > (1)::numeric)"
-    query = f"SELECT numeric_small, numeric_unbounded FROM iceberg_table {expected_expression}"
-    assert_remote_query_contains_expression(query, expected_expression, pg_conn)
-
-    result = run_query(query, pg_conn)
-    assert result == [[Decimal("12.223"), Decimal("12.22300000")]]
+    result = run_query(
+        "SELECT numeric_small, numeric_unbounded FROM iceberg_table", pg_conn
+    )
+    assert result == [[Decimal("12.223"), 12.223]]
 
     pg_conn.rollback()
 

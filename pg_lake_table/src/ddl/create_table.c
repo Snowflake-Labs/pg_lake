@@ -759,6 +759,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 				DescribeColumnsFromIcebergMetadataURI(metadataLocation, false);
 
 			createStmt->base.tableElts = dataFileColumns;
+			MaybeConvertUnsupportedNumericColumnsToDouble(createStmt->base.tableElts);
 			EnsureSupportedIcebergTableColumnDefinitions(createStmt->base.tableElts);
 
 			/*
@@ -771,6 +772,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		}
 		else
 		{
+			MaybeConvertUnsupportedNumericColumnsToDouble(createStmt->base.tableElts);
 			EnsureSupportedIcebergTableColumnDefinitions(createStmt->base.tableElts);
 
 			PgLakeCommonParentProcessUtility(params);
@@ -779,6 +781,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		}
 	}
 
+	MaybeConvertUnsupportedNumericColumnsToDouble(createStmt->base.tableElts);
 	EnsureSupportedIcebergTableColumnDefinitions(createStmt->base.tableElts);
 
 	Oid			namespaceId =
@@ -859,7 +862,10 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 	 * that the column list is populated.
 	 */
 	if (createStmt->base.partbound != NULL)
+	{
+		MaybeConvertUnsupportedNumericColumnsToDouble(createStmt->base.tableElts);
 		ErrorIfTableContainsUnsupportedTypes(createStmt->base.tableElts);
+	}
 
 	/* the table is now created, get its OID */
 	Oid			relationId = RangeVarGetRelid(createStmt->base.relation, NoLock, false);
@@ -1563,10 +1569,11 @@ ErrorIfTableContainsVirtualColumns(List *columnDefList)
 }
 #endif
 
+
 /*
-* ErrorIfTableContainsUnsupportedTypes throws an error if the given column definitions
-* contain unsupported types for Iceberg tables.
-*/
+ * ErrorIfTableContainsUnsupportedTypes throws an error if the given column
+ * definitions contain unsupported types for Iceberg tables.
+ */
 static void
 ErrorIfTableContainsUnsupportedTypes(List *columnDefList)
 {
@@ -1584,11 +1591,12 @@ ErrorIfTableContainsUnsupportedTypes(List *columnDefList)
 
 		typenameTypeIdAndMod(NULL, columnDef->typeName, &typeOid, &typmod);
 
-		char	   *columnName = columnDef->colname;
-
-		ErrorIfTypeUnsupportedForIcebergTables(typeOid, typmod, columnName);
+		ErrorIfTypeUnsupportedForIcebergTables(typeOid, typmod,
+											   columnDef->colname);
 	}
 }
+
+
 
 
 /*
@@ -1747,14 +1755,29 @@ ErrorIfTypeUnsupportedForIcebergTablesInternal(Oid typeOid, int32 typmod, int le
 	}
 }
 
+
 /*
  * ErrorIfTypeUnsupportedNumericForIcebergTables throws an error if the given
  * numeric type is unsupported for Iceberg tables.
+ *
+ * This is only reached when the unsupported_numeric_as_double GUC is off or
+ * the numeric appears inside a nested type (array / composite / map) where
+ * automatic column-level conversion is not possible.
  */
 void
 ErrorIfTypeUnsupportedNumericForIcebergTables(int32 typmod, char *columnName)
 {
-	/* check precision */
+	if (!UnsupportedNumericAsDouble && IsUnboundedNumeric(NUMERICOID, typmod))
+	{
+		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg("unbounded numeric types are not supported on Iceberg tables"),
+						errdetail("column name triggering the error: \"%s\"", columnName ? columnName : "null"),
+						errhint("Use numeric(P,S) with precision <= %d, or enable "
+								"pg_lake_iceberg.unsupported_numeric_as_double to "
+								"convert to double precision.",
+								DUCKDB_MAX_NUMERIC_PRECISION)));
+	}
+
 	int			precision = -1;
 	int			scale = -1;
 
@@ -1762,10 +1785,6 @@ ErrorIfTypeUnsupportedNumericForIcebergTables(int32 typmod, char *columnName)
 
 	if (precision > DUCKDB_MAX_NUMERIC_PRECISION)
 	{
-		/*
-		 * we don't expect columnName to be null, but let's be defensive
-		 * anyway..
-		 */
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						errmsg("numeric types with precision > %d are not supported on Iceberg tables", DUCKDB_MAX_NUMERIC_PRECISION),
 						errdetail("column name triggering the error: \"%s\", precision: %d", columnName ? columnName : "null", precision)));

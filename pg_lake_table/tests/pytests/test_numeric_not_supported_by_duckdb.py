@@ -32,17 +32,20 @@ def test_numerics_with_negative_scale(pg_conn, extension, s3, with_default_locat
 def test_numerics_with_negative_scale_exceeds_max_precision(
     pg_conn, extension, s3, with_default_location
 ):
-    error = run_command(
+    run_command(
         f"""
     CREATE TABLE test_numeric (
-        a numeric(33, -6) -- (33 + 6 > 19)
+        a numeric(33, -6)
     ) USING iceberg;
     """,
         pg_conn,
-        raise_error=False,
     )
 
-    assert "precision > 38 are not supported" in error
+    result = run_query(
+        "select data_type from information_schema.columns where table_name = 'test_numeric' and column_name = 'a'",
+        pg_conn,
+    )
+    assert result == [["double precision"]]
 
     pg_conn.rollback()
 

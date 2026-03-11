@@ -134,7 +134,7 @@ def test_iceberg_base_types(pg_conn, s3, extension, create_helper_functions):
             "type": "string",
             "write-default": "testas",
         },
-        {"id": 14, "name": "decimal_col", "required": False, "type": "decimal(38,9)"},
+        {"id": 14, "name": "decimal_col", "required": False, "type": "double"},
         {
             "id": 15,
             "name": "uuid_col",
@@ -2195,7 +2195,13 @@ def test_field_id_mappings(
     assert top_level_mappings == [
         ["verify_field_id_mapping.test_table", 1, "int_col", "integer", -1],
         ["verify_field_id_mapping.test_table", 2, "array_int_col", "integer[]", -1],
-        ["verify_field_id_mapping.test_table", 4, "numeric_col", "numeric", -1],
+        [
+            "verify_field_id_mapping.test_table",
+            4,
+            "numeric_col",
+            "double precision",
+            -1,
+        ],
         [
             "verify_field_id_mapping.test_table",
             5,

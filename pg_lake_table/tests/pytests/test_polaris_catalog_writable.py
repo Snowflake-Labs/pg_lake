@@ -1657,7 +1657,7 @@ def test_rest_iceberg_base_types(
             "type": "string",
             "write-default": "testas",
         },
-        {"id": 14, "name": "decimal_col", "required": False, "type": "decimal(38, 9)"},
+        {"id": 14, "name": "decimal_col", "required": False, "type": "double"},
         {
             "id": 15,
             "name": "uuid_col",

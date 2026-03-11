@@ -28,6 +28,7 @@
 #include "pg_lake/avro/avro_writer.h"
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/iceberg/api.h"
+#include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/iceberg/operations/manifest_merge.h"
@@ -314,6 +315,17 @@ _PG_init(void)
 							 true,
 							 PGC_SUSET,
 							 GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
+	DefineCustomBoolVariable("pg_lake_iceberg.unsupported_numeric_as_double",
+							 gettext_noop("When enabled, numeric columns that cannot be represented "
+										  "as Iceberg decimals (unbounded or precision > 38) are "
+										  "stored as double precision instead of raising an error."),
+							 NULL,
+							 &UnsupportedNumericAsDouble,
+							 true,
+							 PGC_USERSET,
+							 0,
 							 NULL, NULL, NULL);
 
 	AvroInit();
