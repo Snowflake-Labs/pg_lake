@@ -34,7 +34,7 @@ typedef struct TableMetadataOperationTracker
 }			TableMetadataOperationTracker;
 
 
-extern PGDLLEXPORT void ConsumeTrackedIcebergMetadataChanges(void);
+extern PGDLLEXPORT void ConsumeTrackedIcebergMetadataChanges(bool isVerbose);
 extern PGDLLEXPORT void PostAllRestCatalogRequests(void);
 extern PGDLLEXPORT void TrackIcebergMetadataChangesInTx(Oid relationId, List *metadataOperationTypes);
 extern PGDLLEXPORT void RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationType,

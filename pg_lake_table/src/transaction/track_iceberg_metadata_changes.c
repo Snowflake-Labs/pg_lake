@@ -80,7 +80,7 @@ typedef struct RestCatalogRequestPerTable
 	List	   *tableModifyRequests;
 }			RestCatalogRequestPerTable;
 
-static void ApplyTrackedIcebergMetadataChanges(void);
+static void ApplyTrackedIcebergMetadataChanges(bool isVerbose);
 static void RecordIcebergMetadataOperation(Oid relationId, TableMetadataOperationType operationType);
 static void InitTableMetadataTrackerHashIfNeeded(void);
 static void InitRestCatalogRequestsHashIfNeeded(void);
@@ -673,12 +673,13 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 
 /*
  * ConsumeTrackedIcebergMetadataChanges consumes the tracked metadata operations and
- * applies them to the Iceberg metadata.
+ * applies them to the Iceberg metadata. The isVerbose flag controls whether
+ * verbose output is produced (e.g., during VACUUM VERBOSE).
  */
 void
-ConsumeTrackedIcebergMetadataChanges(void)
+ConsumeTrackedIcebergMetadataChanges(bool isVerbose)
 {
-	ApplyTrackedIcebergMetadataChanges();
+	ApplyTrackedIcebergMetadataChanges(isVerbose);
 	ResetTrackedIcebergMetadataOperation();
 }
 
@@ -708,7 +709,7 @@ GetEffectiveMaxSnapshotAgeInSecs(Oid relationId)
  * Iceberg metadata and pushes the changes to remote catalog.
  */
 static void
-ApplyTrackedIcebergMetadataChanges(void)
+ApplyTrackedIcebergMetadataChanges(bool isVerbose)
 {
 	HTAB	   *trackedRelations = GetTrackedIcebergMetadataOperations();
 
@@ -798,7 +799,7 @@ ApplyTrackedIcebergMetadataChanges(void)
 		if (metadataOperations != NIL)
 		{
 			int			maxSnapshotAgeInSecs = GetEffectiveMaxSnapshotAgeInSecs(relationId);
-			List	   *restRequests = ApplyIcebergMetadataChanges(relationId, metadataOperations, allTransforms, maxSnapshotAgeInSecs, true);
+			List	   *restRequests = ApplyIcebergMetadataChanges(relationId, metadataOperations, allTransforms, maxSnapshotAgeInSecs, isVerbose);
 			ListCell   *requestCell = NULL;
 
 			foreach(requestCell, restRequests)

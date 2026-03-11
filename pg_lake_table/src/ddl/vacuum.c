@@ -98,7 +98,7 @@ static void PgLakeIcebergVacuumForRelation(Oid relationId, bool firstLoop);
 static void VacuumTableInSeparateXacts(Oid relationId, bool isFull, bool isVerbose);
 static void VacuumDroppedPgLakeIcebergTables(VacuumStmt *vacuumStmt);
 static char *GetMetadataLocationPrefixForRelationId(Oid relationId);
-static void VacuumConsumeTrackedIcebergMetadataChanges(void);
+static void VacuumConsumeTrackedIcebergMetadataChanges(bool isVerbose);
 
 
 /*
@@ -674,7 +674,7 @@ VacuumCompactDataFiles(Oid relationId, bool isFull, bool isVerbose)
 			/* do compaction */
 			continueCompaction = CompactDataFiles(relationId, compactionStartTime, isFull, isVerbose);
 
-			VacuumConsumeTrackedIcebergMetadataChanges();
+			VacuumConsumeTrackedIcebergMetadataChanges(isVerbose);
 
 			INJECTION_POINT_COMPAT("compact-files-after-compact");
 
@@ -747,7 +747,7 @@ VacuumCompactMetadata(Oid relationId, bool isVerbose)
 
 		CompactMetadata(relationId, isVerbose);
 
-		VacuumConsumeTrackedIcebergMetadataChanges();
+		VacuumConsumeTrackedIcebergMetadataChanges(isVerbose);
 
 		ReleaseCurrentSubTransaction();
 	}
@@ -833,7 +833,7 @@ VacuumRemoveDeletionQueueRecords(Oid relationId, bool isFull, bool isVerbose)
 
 			hasRemainingFiles = RemoveDeletionQueueRecords(deletionQueueRecords, isVerbose);
 
-			VacuumConsumeTrackedIcebergMetadataChanges();
+			VacuumConsumeTrackedIcebergMetadataChanges(isVerbose);
 
 			ReleaseCurrentSubTransaction();
 		}
@@ -912,7 +912,7 @@ VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose)
 
 			hasRemainingFiles = RemoveInProgressFiles(locationPrefix, isFull, isVerbose, &removedFiles);
 
-			VacuumConsumeTrackedIcebergMetadataChanges();
+			VacuumConsumeTrackedIcebergMetadataChanges(isVerbose);
 
 			ReleaseCurrentSubTransaction();
 		}
@@ -1003,7 +1003,7 @@ VacuumRegisterMissingFields(Oid relationId)
 			RegisterPostgresColumnMappings(postgresColumnMappings);
 		}
 
-		VacuumConsumeTrackedIcebergMetadataChanges();
+		VacuumConsumeTrackedIcebergMetadataChanges(false);
 
 		ReleaseCurrentSubTransaction();
 	}
@@ -1090,7 +1090,7 @@ GetMetadataLocationPrefixForRelationId(Oid relationId)
  * this in mind before removing this logic.
 */
 static void
-VacuumConsumeTrackedIcebergMetadataChanges(void)
+VacuumConsumeTrackedIcebergMetadataChanges(bool isVerbose)
 {
-	ConsumeTrackedIcebergMetadataChanges();
+	ConsumeTrackedIcebergMetadataChanges(isVerbose);
 }
