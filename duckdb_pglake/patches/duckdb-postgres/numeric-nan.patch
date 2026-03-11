@@ -1,0 +1,112 @@
+diff --git a/src/include/postgres_binary_reader.hpp b/src/include/postgres_binary_reader.hpp
+index f4bc336..d9e92f1 100644
+--- a/src/include/postgres_binary_reader.hpp
++++ b/src/include/postgres_binary_reader.hpp
+@@ -136,9 +136,11 @@ protected:
+ 	PostgresDecimalConfig ReadDecimalConfig();
+ 
+ 	template <class T, class OP = DecimalConversionInteger>
+-	T ReadDecimal() {
+-		// this is wild
++	T ReadDecimal(bool *out_is_nan = nullptr) {
+ 		auto config = ReadDecimalConfig();
++		if (out_is_nan) {
++			*out_is_nan = config.is_nan;
++		}
+ 		auto scale_POWER = OP::GetPowerOfTen(config.scale);
+ 
+ 		if (config.ndigits == 0) {
+diff --git a/src/include/postgres_conversion.hpp b/src/include/postgres_conversion.hpp
+index 391429e..ba4162b 100644
+--- a/src/include/postgres_conversion.hpp
++++ b/src/include/postgres_conversion.hpp
+@@ -96,6 +96,7 @@ struct PostgresDecimalConfig {
+ 	uint16_t ndigits;
+ 	int16_t weight;
+ 	bool is_negative;
++	bool is_nan;
+ };
+ 
+ struct PostgresConversion {
+diff --git a/src/postgres_binary_reader.cpp b/src/postgres_binary_reader.cpp
+index 86ebe30..9a49f8c 100644
+--- a/src/postgres_binary_reader.cpp
++++ b/src/postgres_binary_reader.cpp
+@@ -137,6 +137,7 @@ PostgresDecimalConfig PostgresBinaryReader::ReadDecimalConfig() {
+ 		throw NotImplementedException("Postgres numeric NA/Inf");
+ 	}
+ 	config.is_negative = sign == NUMERIC_NEG;
++	config.is_nan = sign == NUMERIC_NAN;
+ 	config.scale = ReadInteger<uint16_t>();
+ 
+ 	return config;
+@@ -247,9 +248,12 @@ void PostgresBinaryReader::ReadValue(const LogicalType &type, const PostgresType
+ 		FlatVector::GetData<float>(out_vec)[output_offset] = ReadFloat();
+ 		break;
+ 	case LogicalTypeId::DOUBLE: {
+-		// this was an unbounded decimal, read params from value and cast to double
+ 		if (postgres_type.info == PostgresTypeAnnotation::NUMERIC_AS_DOUBLE) {
+-			FlatVector::GetData<double>(out_vec)[output_offset] = ReadDecimal<double, DecimalConversionDouble>();
++			bool is_nan = false;
++			FlatVector::GetData<double>(out_vec)[output_offset] = ReadDecimal<double, DecimalConversionDouble>(&is_nan);
++			if (is_nan) {
++				FlatVector::GetData<double>(out_vec)[output_offset] = NAN;
++			}
+ 			break;
+ 		}
+ 		D_ASSERT(value_len == sizeof(double));
+@@ -284,22 +288,26 @@ void PostgresBinaryReader::ReadValue(const LogicalType &type, const PostgresType
+ 		if (value_len < sizeof(uint16_t) * 4) {
+ 			throw InvalidInputException("Need at least 8 bytes to read a Postgres decimal. Got %d", value_len);
+ 		}
++		bool is_nan = false;
+ 		switch (type.InternalType()) {
+ 		case PhysicalType::INT16:
+-			FlatVector::GetData<int16_t>(out_vec)[output_offset] = ReadDecimal<int16_t>();
++			FlatVector::GetData<int16_t>(out_vec)[output_offset] = ReadDecimal<int16_t>(&is_nan);
+ 			break;
+ 		case PhysicalType::INT32:
+-			FlatVector::GetData<int32_t>(out_vec)[output_offset] = ReadDecimal<int32_t>();
++			FlatVector::GetData<int32_t>(out_vec)[output_offset] = ReadDecimal<int32_t>(&is_nan);
+ 			break;
+ 		case PhysicalType::INT64:
+-			FlatVector::GetData<int64_t>(out_vec)[output_offset] = ReadDecimal<int64_t>();
++			FlatVector::GetData<int64_t>(out_vec)[output_offset] = ReadDecimal<int64_t>(&is_nan);
+ 			break;
+ 		case PhysicalType::INT128:
+-			FlatVector::GetData<hugeint_t>(out_vec)[output_offset] = ReadDecimal<hugeint_t, DecimalConversionHugeint>();
++			FlatVector::GetData<hugeint_t>(out_vec)[output_offset] = ReadDecimal<hugeint_t, DecimalConversionHugeint>(&is_nan);
+ 			break;
+ 		default:
+ 			throw InvalidInputException("Unsupported decimal storage type");
+ 		}
++		if (is_nan) {
++			FlatVector::SetNull(out_vec, output_offset, true);
++		}
+ 		break;
+ 	}
+ 
+diff --git a/src/postgres_text_reader.cpp b/src/postgres_text_reader.cpp
+index 066e072..e3cfa67 100644
+--- a/src/postgres_text_reader.cpp
++++ b/src/postgres_text_reader.cpp
+@@ -321,6 +321,19 @@ void PostgresTextReader::ConvertVector(Vector &source, Vector &target, const Pos
+ 	case LogicalTypeId::BLOB:
+ 		ConvertBlob(source, target, count);
+ 		break;
++	case LogicalTypeId::DECIMAL: {
++		auto strings = FlatVector::GetData<string_t>(source);
++		for (idx_t i = 0; i < count; i++) {
++			if (!FlatVector::IsNull(source, i)) {
++				auto str = strings[i];
++				if (str.GetSize() == 3 && memcmp(str.GetData(), "NaN", 3) == 0) {
++					FlatVector::SetNull(source, i, true);
++				}
++			}
++		}
++		VectorOperations::Cast(context, source, target, count);
++		break;
++	}
+ 	default:
+ 		VectorOperations::Cast(context, source, target, count);
+ 	}
