@@ -720,12 +720,8 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		if (hasRestCatalogOption && hasExternalCatalogReadOnlyOption)
 		{
 			char	   *catalogOptionValue = GetStringOption(createStmt->options, "catalog", false);
-			RestCatalogConnectionInfo *conn;
-
-			if (IsRestCatalogOwnedByExtension(catalogOptionValue))
-				conn = GetRestCatalogConnectionFromGUCs();
-			else
-				conn = GetRestCatalogConnectionFromServer(catalogOptionValue);
+			RestCatalogConnectionInfo *conn =
+				GetRestCatalogConnectionFromServer(catalogOptionValue);
 
 			ErrorIfRestNamespaceDoesNotExist(conn, catalogName, catalogNamespace);
 
@@ -936,12 +932,8 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		 * etc., but here we need to do it early before the table is created.
 		 */
 		char	   *catalogOptionValue = GetStringOption(createStmt->options, "catalog", false);
-		RestCatalogConnectionInfo *conn;
-
-		if (IsRestCatalogOwnedByExtension(catalogOptionValue))
-			conn = GetRestCatalogConnectionFromGUCs();
-		else
-			conn = GetRestCatalogConnectionFromServer(catalogOptionValue);
+		RestCatalogConnectionInfo *conn =
+			GetRestCatalogConnectionFromServer(catalogOptionValue);
 
 		RegisterNamespaceToRestCatalog(conn, get_database_name(MyDatabaseId),
 									   get_namespace_name(namespaceId));

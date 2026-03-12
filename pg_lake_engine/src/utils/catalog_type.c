@@ -77,13 +77,7 @@ HasRestCatalogTableOption(List *options)
 {
 	char	   *catalog = GetStringOption(options, "catalog", false);
 
-	if (catalog == NULL)
-		return false;
-
-	if (IsRestCatalogOwnedByExtension(catalog))
-		return true;
-
-	return IsRestCatalogOwnedByUsers(options);
+	return IsRestCatalog(catalog);
 }
 
 
@@ -114,45 +108,31 @@ HasReadOnlyOption(List *options)
 
 
 /*
- * IsRestCatalogOwnedByExtension returns true if the catalog name matches
- * the extension-owned 'rest' catalog literal.
- */
-bool
-IsRestCatalogOwnedByExtension(const char *catalog)
-{
-	return pg_strncasecmp(catalog, REST_CATALOG_NAME, strlen(REST_CATALOG_NAME)) == 0;
-}
-
-
-/*
  * IsCatalogOwnedByExtension returns true if the catalog name is one of the
  * extension-owned literals: 'rest', 'object_store', or 'postgres'.
  */
 bool
 IsCatalogOwnedByExtension(const char *catalog)
 {
-	return IsRestCatalogOwnedByExtension(catalog) ||
+	return pg_strncasecmp(catalog, REST_CATALOG_NAME, strlen(REST_CATALOG_NAME)) == 0 ||
 		pg_strncasecmp(catalog, OBJECT_STORE_CATALOG_NAME, strlen(OBJECT_STORE_CATALOG_NAME)) == 0 ||
 		pg_strncasecmp(catalog, POSTGRES_CATALOG_NAME, strlen(POSTGRES_CATALOG_NAME)) == 0;
 }
 
 
 /*
- * IsRestCatalogOwnedByUsers returns true if the catalog option refers to a
- * ForeignServer created by the user with the iceberg_catalog FDW whose TYPE is 'rest'.
- * Returns false if the catalog is owned by the extension ('rest',
- * 'object_store', 'postgres') or if no matching server is found.
+ * IsRestCatalog returns true if the catalog name identifies a REST catalog.
+ * This includes the extension-owned 'rest' literal and any user-created
+ * iceberg_catalog server whose TYPE is 'rest' (or omitted, defaulting to 'rest').
  */
 bool
-IsRestCatalogOwnedByUsers(List *options)
+IsRestCatalog(const char *catalog)
 {
-	char	   *catalog = GetStringOption(options, "catalog", false);
-
 	if (catalog == NULL)
 		return false;
 
-	if (IsCatalogOwnedByExtension(catalog))
-		return false;
+	if (pg_strncasecmp(catalog, REST_CATALOG_NAME, strlen(REST_CATALOG_NAME)) == 0)
+		return true;
 
 	/* Try to look up a server with this name */
 	bool		missingOK = true;

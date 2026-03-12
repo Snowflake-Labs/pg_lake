@@ -292,36 +292,19 @@ ProtectExtensionCatalogServersHandler(ProcessUtilityParams *processUtilityParams
 
 
 /*
- * GetRestCatalogConnectionFromGUCs returns a RestCatalogConnectionInfo
- * populated from the current GUC variables. Used for backward-compatible
- * catalog='rest' tables.
- */
-RestCatalogConnectionInfo *
-GetRestCatalogConnectionFromGUCs(void)
-{
-	RestCatalogConnectionInfo *conn = palloc0(sizeof(RestCatalogConnectionInfo));
-
-	conn->serverName = REST_CATALOG_NAME;
-	conn->host = RestCatalogHost;
-	conn->oauthHostPath = RestCatalogOauthHostPath;
-	conn->clientId = RestCatalogClientId;
-	conn->clientSecret = RestCatalogClientSecret;
-	conn->scope = RestCatalogScope;
-	conn->authType = RestCatalogAuthType;
-	conn->enableVendedCredentials = RestCatalogEnableVendedCredentials;
-
-	return conn;
-}
-
-
-/*
  * GetRestCatalogConnectionFromServer returns a RestCatalogConnectionInfo
- * populated from the options of a ForeignServer (non-secret config) and
- * its USER MAPPING (credentials) for the current user.
+ * populated from the options of the named ForeignServer. GUC values are
+ * used as defaults; any option explicitly set on the server overrides the
+ * corresponding GUC.  This applies to both the extension-owned 'rest'
+ * server and user-created iceberg_catalog servers.
  */
 RestCatalogConnectionInfo *
 GetRestCatalogConnectionFromServer(const char *serverName)
 {
+	/* Normalize case-insensitive match to the canonical pre-created name */
+	if (pg_strcasecmp(serverName, REST_CATALOG_NAME) == 0)
+		serverName = REST_CATALOG_NAME;
+
 	ForeignServer *server = GetForeignServerByName(serverName, false);
 	ForeignDataWrapper *fdw = GetForeignDataWrapper(server->fdwid);
 
@@ -335,14 +318,14 @@ GetRestCatalogConnectionFromServer(const char *serverName)
 
 	conn->serverName = pstrdup(serverName);
 
-	/* Set defaults matching the GUC defaults */
-	conn->host = NULL;
-	conn->oauthHostPath = "";
-	conn->clientId = NULL;
-	conn->clientSecret = NULL;
-	conn->scope = "PRINCIPAL_ROLE:ALL";
-	conn->authType = REST_CATALOG_AUTH_TYPE_DEFAULT;
-	conn->enableVendedCredentials = true;
+	/* GUC values serve as defaults; server options override below */
+	conn->host = RestCatalogHost;
+	conn->oauthHostPath = RestCatalogOauthHostPath;
+	conn->clientId = RestCatalogClientId;
+	conn->clientSecret = RestCatalogClientSecret;
+	conn->scope = RestCatalogScope;
+	conn->authType = RestCatalogAuthType;
+	conn->enableVendedCredentials = RestCatalogEnableVendedCredentials;
 
 	ListCell   *lc;
 
@@ -372,7 +355,7 @@ GetRestCatalogConnectionFromServer(const char *serverName)
 			conn->enableVendedCredentials = defGetBoolean(def);
 	}
 
-	if (conn->host == NULL)
+	if (conn->host == NULL || conn->host[0] == '\0')
 		ereport(ERROR,
 				(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
 				 errmsg("\"rest_endpoint\" option is required for iceberg_catalog server \"%s\"",
@@ -384,9 +367,9 @@ GetRestCatalogConnectionFromServer(const char *serverName)
 
 /*
  * GetRestCatalogConnectionForRelation returns the REST catalog connection
- * info for the given relation. If the table uses catalog='rest', the
- * connection is built from GUCs. Otherwise, the catalog option is treated
- * as a server name and the connection is built from its options.
+ * info for the given relation. The catalog option value is used as the
+ * server name.  For the extension-owned 'rest' server and user-created
+ * servers alike, server options are read first with GUC fallback.
  */
 RestCatalogConnectionInfo *
 GetRestCatalogConnectionForRelation(Oid relationId)
@@ -398,9 +381,6 @@ GetRestCatalogConnectionForRelation(Oid relationId)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("catalog option is not set for relation %u", relationId)));
-
-	if (IsRestCatalogOwnedByExtension(catalog))
-		return GetRestCatalogConnectionFromGUCs();
 
 	return GetRestCatalogConnectionFromServer(catalog);
 }
