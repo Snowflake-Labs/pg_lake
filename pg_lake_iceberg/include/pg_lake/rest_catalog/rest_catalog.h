@@ -18,6 +18,7 @@
 #pragma once
 
 #include "postgres.h"
+#include "pg_lake/ddl/utility_hook.h"
 #include "pg_lake/http/http_client.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_lake/parquet/field.h"
@@ -125,3 +126,6 @@ extern PGDLLEXPORT RestCatalogRequest * GetSetCurrentSchemaCatalogRequest(Oid re
 extern PGDLLEXPORT RestCatalogRequest * GetAddPartitionCatalogRequest(Oid relationId, List *partitionSpec);
 extern PGDLLEXPORT RestCatalogRequest * GetSetPartitionDefaultIdCatalogRequest(Oid relationId, int specId);
 extern PGDLLEXPORT RestCatalogRequest * GetRemoveSnapshotCatalogRequest(List *removedSnapshotIds, Oid relationId);
+
+/* ProcessUtility handler: protects extension-owned catalog servers */
+extern PGDLLEXPORT bool ProtectExtensionCatalogServersHandler(ProcessUtilityParams *processUtilityParams, void *arg);
