@@ -25,6 +25,7 @@
 #include "common/base64.h"
 #include "commands/dbcommands.h"
 #include "commands/defrem.h"
+#include "commands/extension.h"
 #include "foreign/foreign.h"
 #include "fmgr.h"
 #include "lib/stringinfo.h"
@@ -182,6 +183,128 @@ iceberg_catalog_validator(PG_FUNCTION_ARGS)
 	}
 
 	PG_RETURN_VOID();
+}
+
+
+/*
+ * IsIcebergCatalogServer returns true if the named server exists and
+ * uses the iceberg_catalog FDW.
+ */
+static bool
+IsIcebergCatalogServer(const char *serverName)
+{
+	ForeignServer *server = GetForeignServerByName(serverName, true);
+
+	if (server == NULL)
+		return false;
+
+	ForeignDataWrapper *fdw = GetForeignDataWrapper(server->fdwid);
+
+	return strcmp(fdw->fdwname, ICEBERG_CATALOG_FDW_NAME) == 0;
+}
+
+
+/*
+ * ProtectExtensionCatalogServersHandler guards the extension-owned
+ * iceberg_catalog servers (postgres, object_store, rest) against
+ * unauthorized DDL.
+ *
+ * Rules (outside of CREATE/ALTER EXTENSION):
+ *  - CREATE SERVER with TYPE 'postgres' or 'object_store' is blocked.
+ *  - ALTER SERVER on 'postgres' or 'object_store' is blocked.
+ *  - ALTER SERVER on 'rest' is allowed (users may set options).
+ *  - DROP SERVER on 'postgres', 'object_store', or 'rest' is blocked.
+ *  - ALTER ... RENAME on 'postgres', 'object_store', or 'rest' is blocked.
+ */
+bool
+ProtectExtensionCatalogServersHandler(ProcessUtilityParams *processUtilityParams,
+									  void *arg)
+{
+	Node	   *parsetree = processUtilityParams->plannedStmt->utilityStmt;
+
+	if (creating_extension)
+		return false;
+
+	if (IsA(parsetree, CreateForeignServerStmt))
+	{
+		CreateForeignServerStmt *stmt = (CreateForeignServerStmt *) parsetree;
+
+		if (stmt->fdwname == NULL ||
+			strcmp(stmt->fdwname, ICEBERG_CATALOG_FDW_NAME) != 0)
+			return false;
+
+		if (stmt->servertype != NULL &&
+			(pg_strcasecmp(stmt->servertype, POSTGRES_CATALOG_NAME) == 0 ||
+			 pg_strcasecmp(stmt->servertype, OBJECT_STORE_CATALOG_NAME) == 0))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot create iceberg_catalog server with TYPE '%s'",
+							stmt->servertype),
+					 errhint("Use the pre-created \"%s\" or \"%s\" server, "
+							 "or create a server of type 'rest'.",
+							 POSTGRES_CATALOG_NAME, OBJECT_STORE_CATALOG_NAME)));
+	}
+	else if (IsA(parsetree, AlterForeignServerStmt))
+	{
+		AlterForeignServerStmt *stmt = (AlterForeignServerStmt *) parsetree;
+
+		if (!IsIcebergCatalogServer(stmt->servername))
+			return false;
+
+		if (pg_strcasecmp(stmt->servername, POSTGRES_CATALOG_NAME) == 0 ||
+			pg_strcasecmp(stmt->servername, OBJECT_STORE_CATALOG_NAME) == 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot alter the extension-owned \"%s\" catalog server",
+							stmt->servername)));
+	}
+	else if (IsA(parsetree, DropStmt))
+	{
+		DropStmt   *stmt = (DropStmt *) parsetree;
+
+		if (stmt->removeType != OBJECT_FOREIGN_SERVER)
+			return false;
+
+		ListCell   *lc;
+
+		foreach(lc, stmt->objects)
+		{
+			char	   *serverName = strVal(lfirst(lc));
+
+			if (!IsIcebergCatalogServer(serverName))
+				continue;
+
+			if (pg_strcasecmp(serverName, POSTGRES_CATALOG_NAME) == 0 ||
+				pg_strcasecmp(serverName, OBJECT_STORE_CATALOG_NAME) == 0 ||
+				pg_strcasecmp(serverName, REST_CATALOG_NAME) == 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("cannot drop the extension-owned \"%s\" catalog server",
+								serverName)));
+		}
+	}
+	else if (IsA(parsetree, RenameStmt))
+	{
+		RenameStmt *stmt = (RenameStmt *) parsetree;
+
+		if (stmt->renameType != OBJECT_FOREIGN_SERVER)
+			return false;
+
+		char	   *serverName = strVal(stmt->object);
+
+		if (!IsIcebergCatalogServer(serverName))
+			return false;
+
+		if (pg_strcasecmp(serverName, POSTGRES_CATALOG_NAME) == 0 ||
+			pg_strcasecmp(serverName, OBJECT_STORE_CATALOG_NAME) == 0 ||
+			pg_strcasecmp(serverName, REST_CATALOG_NAME) == 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot rename the extension-owned \"%s\" catalog server",
+							serverName)));
+	}
+
+	return false;
 }
 
 

@@ -487,3 +487,175 @@ def test_catalog_object_store_literal_still_works(
         pg_conn,
     )
     pg_conn.rollback()
+
+
+# ── Protection of extension-owned catalog servers ─────────────────────────
+
+
+def test_reject_create_server_type_postgres(superuser_conn, extension):
+    """Users cannot create a new server with TYPE 'postgres'."""
+    err = run_command(
+        """
+        CREATE SERVER my_postgres TYPE 'postgres'
+            FOREIGN DATA WRAPPER iceberg_catalog
+        """,
+        superuser_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert "cannot create iceberg_catalog server with TYPE 'postgres'" in str(err)
+    superuser_conn.rollback()
+
+
+def test_reject_create_server_type_object_store(superuser_conn, extension):
+    """Users cannot create a new server with TYPE 'object_store'."""
+    err = run_command(
+        """
+        CREATE SERVER my_obj_store TYPE 'object_store'
+            FOREIGN DATA WRAPPER iceberg_catalog
+        """,
+        superuser_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert "cannot create iceberg_catalog server with TYPE 'object_store'" in str(err)
+    superuser_conn.rollback()
+
+
+def test_reject_alter_postgres_server(superuser_conn, extension):
+    """ALTER SERVER on the extension-owned 'postgres' server is blocked."""
+    err = run_command(
+        "ALTER SERVER postgres OPTIONS (ADD location_prefix 's3://bucket')",
+        superuser_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert 'cannot alter the extension-owned "postgres" catalog server' in str(err)
+    superuser_conn.rollback()
+
+
+def test_reject_alter_object_store_server(superuser_conn, extension):
+    """ALTER SERVER on the extension-owned 'object_store' server is blocked."""
+    err = run_command(
+        "ALTER SERVER object_store OPTIONS (ADD location_prefix 's3://bucket')",
+        superuser_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert 'cannot alter the extension-owned "object_store" catalog server' in str(err)
+    superuser_conn.rollback()
+
+
+def test_allow_alter_rest_server(superuser_conn, extension):
+    """ALTER SERVER on the extension-owned 'rest' server is allowed."""
+    run_command(
+        "ALTER SERVER rest OPTIONS (ADD rest_endpoint 'http://localhost:8181')",
+        superuser_conn,
+    )
+    run_command(
+        "ALTER SERVER rest OPTIONS (DROP rest_endpoint)",
+        superuser_conn,
+    )
+    superuser_conn.rollback()
+
+
+def test_reject_drop_postgres_server(superuser_conn, extension):
+    """DROP SERVER on the extension-owned 'postgres' server is blocked."""
+    err = run_command(
+        "DROP SERVER postgres",
+        superuser_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert 'cannot drop the extension-owned "postgres" catalog server' in str(err)
+    superuser_conn.rollback()
+
+
+def test_reject_drop_object_store_server(superuser_conn, extension):
+    """DROP SERVER on the extension-owned 'object_store' server is blocked."""
+    err = run_command(
+        "DROP SERVER object_store",
+        superuser_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert 'cannot drop the extension-owned "object_store" catalog server' in str(err)
+    superuser_conn.rollback()
+
+
+def test_reject_drop_rest_server(superuser_conn, extension):
+    """DROP SERVER on the extension-owned 'rest' server is blocked."""
+    err = run_command(
+        "DROP SERVER rest",
+        superuser_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert 'cannot drop the extension-owned "rest" catalog server' in str(err)
+    superuser_conn.rollback()
+
+
+def test_reject_rename_postgres_server(superuser_conn, extension):
+    """RENAME on the extension-owned 'postgres' server is blocked."""
+    err = run_command(
+        "ALTER SERVER postgres RENAME TO my_postgres",
+        superuser_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert 'cannot rename the extension-owned "postgres" catalog server' in str(err)
+    superuser_conn.rollback()
+
+
+def test_reject_rename_object_store_server(superuser_conn, extension):
+    """RENAME on the extension-owned 'object_store' server is blocked."""
+    err = run_command(
+        "ALTER SERVER object_store RENAME TO my_obj_store",
+        superuser_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert 'cannot rename the extension-owned "object_store" catalog server' in str(err)
+    superuser_conn.rollback()
+
+
+def test_reject_rename_rest_server(superuser_conn, extension):
+    """RENAME on the extension-owned 'rest' server is blocked."""
+    err = run_command(
+        "ALTER SERVER rest RENAME TO my_rest",
+        superuser_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert 'cannot rename the extension-owned "rest" catalog server' in str(err)
+    superuser_conn.rollback()
+
+
+def test_allow_drop_user_created_server(superuser_conn, extension):
+    """DROP SERVER on a user-created server should work fine."""
+    run_command(
+        """
+        CREATE SERVER user_rest_srv TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    run_command("DROP SERVER user_rest_srv", superuser_conn)
+    superuser_conn.rollback()
+
+
+def test_allow_rename_user_created_server(superuser_conn, extension):
+    """RENAME on a user-created server should work fine."""
+    run_command(
+        """
+        CREATE SERVER user_rename_srv TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        "ALTER SERVER user_rename_srv RENAME TO user_renamed_srv", superuser_conn
+    )
+    superuser_conn.rollback()

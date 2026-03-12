@@ -47,3 +47,7 @@ CREATE SERVER postgres
 CREATE SERVER object_store
   TYPE 'object_store'
   FOREIGN DATA WRAPPER iceberg_catalog;
+
+CREATE SERVER rest
+  TYPE 'rest'
+  FOREIGN DATA WRAPPER iceberg_catalog;
