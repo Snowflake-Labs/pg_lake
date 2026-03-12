@@ -60,8 +60,7 @@ int			RestCatalogAuthType = REST_CATALOG_AUTH_TYPE_DEFAULT;
 bool		RestCatalogEnableVendedCredentials = true;
 
 /*
- * Per-server token cache. Keyed by server name (for server-based catalogs)
- * or "GUC" (for GUC-based backward-compatible catalog='rest').
+ * Per-server token cache. Keyed by server name.
  */
 #define TOKEN_CACHE_KEY_LEN NAMEDATALEN
 
@@ -262,9 +261,7 @@ ProtectExtensionCatalogServersHandler(ProcessUtilityParams *processUtilityParams
 			if (!IsIcebergCatalogServer(serverName))
 				continue;
 
-			if (pg_strcasecmp(serverName, POSTGRES_CATALOG_NAME) == 0 ||
-				pg_strcasecmp(serverName, OBJECT_STORE_CATALOG_NAME) == 0 ||
-				pg_strcasecmp(serverName, REST_CATALOG_NAME) == 0)
+			if (IsCatalogOwnedByExtension(serverName))
 				ereport(ERROR,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						 errmsg("cannot drop the extension-owned \"%s\" catalog server",
@@ -283,9 +280,7 @@ ProtectExtensionCatalogServersHandler(ProcessUtilityParams *processUtilityParams
 		if (!IsIcebergCatalogServer(serverName))
 			return false;
 
-		if (pg_strcasecmp(serverName, POSTGRES_CATALOG_NAME) == 0 ||
-			pg_strcasecmp(serverName, OBJECT_STORE_CATALOG_NAME) == 0 ||
-			pg_strcasecmp(serverName, REST_CATALOG_NAME) == 0)
+		if (IsCatalogOwnedByExtension(serverName))
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("cannot rename the extension-owned \"%s\" catalog server",
@@ -306,7 +301,7 @@ GetRestCatalogConnectionFromGUCs(void)
 {
 	RestCatalogConnectionInfo *conn = palloc0(sizeof(RestCatalogConnectionInfo));
 
-	conn->serverName = NULL;
+	conn->serverName = REST_CATALOG_NAME;
 	conn->host = RestCatalogHost;
 	conn->oauthHostPath = RestCatalogOauthHostPath;
 	conn->clientId = RestCatalogClientId;
@@ -404,7 +399,7 @@ GetRestCatalogConnectionForRelation(Oid relationId)
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("catalog option is not set for relation %u", relationId)));
 
-	if (pg_strncasecmp(catalog, REST_CATALOG_NAME, strlen(catalog)) == 0)
+	if (IsRestCatalogOwnedByExtension(catalog))
 		return GetRestCatalogConnectionFromGUCs();
 
 	return GetRestCatalogConnectionFromServer(catalog);
@@ -874,15 +869,13 @@ ReportHTTPError(HttpResult httpResult, int level)
 
 
 /*
- * Build a cache key for the per-server token cache. Uses server name for
- * server-based catalogs, or "GUC" for GUC-based backward-compatible mode.
+ * Build a cache key for the per-server token cache.
  */
 static void
 BuildTokenCacheKey(char *key, const RestCatalogConnectionInfo *conn)
 {
-	strlcpy(key,
-			conn->serverName ? conn->serverName : "GUC",
-			TOKEN_CACHE_KEY_LEN);
+	Assert(conn->serverName != NULL);
+	strlcpy(key, conn->serverName, TOKEN_CACHE_KEY_LEN);
 }
 
 

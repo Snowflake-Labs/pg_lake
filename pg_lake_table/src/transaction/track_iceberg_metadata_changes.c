@@ -329,6 +329,10 @@ PostAllRestCatalogRequests(void)
 	{
 		if (!requestPerTable->isValid)
 		{
+			/*
+			 * Might only happen if an OOM happened during adding this request
+			 * to the hash table.
+			 */
 			elog(WARNING, "Skipping invalid REST catalog request for relation %u",
 				 requestPerTable->relationId);
 			continue;
@@ -336,10 +340,20 @@ PostAllRestCatalogRequests(void)
 
 		if (requestPerTable->createTableRequest != NULL &&
 			requestPerTable->dropTableRequest != NULL)
+		{
+			/*
+			 * table is created and dropped in the same transaction, nothing
+			 * post to do for this table to the REST catalog.
+			 */
 			continue;
-
-		if (requestPerTable->tableModifyRequests == NIL)
+		}
+		else if (requestPerTable->tableModifyRequests == NIL)
+		{
+			/*
+			 * no modifications to send for this table
+			 */
 			continue;
+		}
 
 		tablesWithModifications = lappend(tablesWithModifications, requestPerTable);
 	}

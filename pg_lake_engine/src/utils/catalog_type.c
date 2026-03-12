@@ -80,10 +80,10 @@ HasRestCatalogTableOption(List *options)
 	if (catalog == NULL)
 		return false;
 
-	if (pg_strncasecmp(catalog, REST_CATALOG_NAME, strlen(catalog)) == 0)
+	if (IsRestCatalogOwnedByExtension(catalog))
 		return true;
 
-	return IsServerBasedRestCatalog(options);
+	return IsRestCatalogOwnedByUsers(options);
 }
 
 
@@ -114,23 +114,44 @@ HasReadOnlyOption(List *options)
 
 
 /*
- * IsServerBasedRestCatalog returns true if the catalog option refers to a
- * ForeignServer created with the iceberg_catalog FDW whose TYPE is 'rest'.
- * Returns false if the catalog value is a known literal ('rest',
+ * IsRestCatalogOwnedByExtension returns true if the catalog name matches
+ * the extension-owned 'rest' catalog literal.
+ */
+bool
+IsRestCatalogOwnedByExtension(const char *catalog)
+{
+	return pg_strncasecmp(catalog, REST_CATALOG_NAME, strlen(REST_CATALOG_NAME)) == 0;
+}
+
+
+/*
+ * IsCatalogOwnedByExtension returns true if the catalog name is one of the
+ * extension-owned literals: 'rest', 'object_store', or 'postgres'.
+ */
+bool
+IsCatalogOwnedByExtension(const char *catalog)
+{
+	return IsRestCatalogOwnedByExtension(catalog) ||
+		pg_strncasecmp(catalog, OBJECT_STORE_CATALOG_NAME, strlen(OBJECT_STORE_CATALOG_NAME)) == 0 ||
+		pg_strncasecmp(catalog, POSTGRES_CATALOG_NAME, strlen(POSTGRES_CATALOG_NAME)) == 0;
+}
+
+
+/*
+ * IsRestCatalogOwnedByUsers returns true if the catalog option refers to a
+ * ForeignServer created by the user with the iceberg_catalog FDW whose TYPE is 'rest'.
+ * Returns false if the catalog is owned by the extension ('rest',
  * 'object_store', 'postgres') or if no matching server is found.
  */
 bool
-IsServerBasedRestCatalog(List *options)
+IsRestCatalogOwnedByUsers(List *options)
 {
 	char	   *catalog = GetStringOption(options, "catalog", false);
 
 	if (catalog == NULL)
 		return false;
 
-	/* Skip known literal catalog names */
-	if (pg_strncasecmp(catalog, REST_CATALOG_NAME, strlen(REST_CATALOG_NAME)) == 0 ||
-		pg_strncasecmp(catalog, OBJECT_STORE_CATALOG_NAME, strlen(OBJECT_STORE_CATALOG_NAME)) == 0 ||
-		pg_strncasecmp(catalog, POSTGRES_CATALOG_NAME, strlen(POSTGRES_CATALOG_NAME)) == 0)
+	if (IsCatalogOwnedByExtension(catalog))
 		return false;
 
 	/* Try to look up a server with this name */
