@@ -758,11 +758,7 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 		{
 			char	   *icebergCatalogName = defGetString(def);
 
-			/*
-			 * We only accept "rest" and "postgres" for now. If not provided,
-			 * assume "postgres" by default. Don't allow anything.
-			 */
-			if (pg_strncasecmp(icebergCatalogName, REST_CATALOG_NAME, strlen(icebergCatalogName)) == 0)
+			if (IsRestCatalog(icebergCatalogName))
 			{
 				/*
 				 * at this point, we cannot tell whether it's read only or
@@ -773,7 +769,6 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 			}
 			else if (pg_strncasecmp(icebergCatalogName, OBJECT_STORE_CATALOG_NAME, strlen(icebergCatalogName)) == 0)
 			{
-
 				/*
 				 * at this point, we cannot tell whether it's read only or
 				 * read write. We'll determine that later based on the
@@ -784,20 +779,11 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 			else if (pg_strncasecmp(icebergCatalogName, POSTGRES_CATALOG_NAME, strlen(icebergCatalogName)) == 0)
 				icebergCatalogType = POSTGRES_CATALOG;
 			else
-			{
-				/*
-				 * Check if the catalog value refers to an iceberg_catalog
-				 * server. If so, treat it as a REST catalog.
-				 */
-				if (IsRestCatalogOwnedByUsers(options_list))
-					icebergCatalogType = REST_CATALOG_READ_ONLY;
-				else
-					ereport(ERROR,
-							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-							 errmsg("invalid catalog option: %s", icebergCatalogName),
-							 errdetail("Use \"rest\", \"object_store\", \"postgres\", "
-									   "or the name of an iceberg_catalog server.")));
-			}
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("invalid catalog option: %s", icebergCatalogName),
+						 errdetail("Use \"rest\", \"object_store\", \"postgres\", "
+								   "or the name of an iceberg_catalog server.")));
 		}
 		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "read_only") == 0)
 		{

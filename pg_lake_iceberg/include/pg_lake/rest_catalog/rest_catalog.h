@@ -36,14 +36,13 @@ extern int	RestCatalogAuthType;
 extern bool RestCatalogEnableVendedCredentials;
 
 /*
- * Holds per-server REST catalog connection settings. Can be populated from
- * GUCs (for backward-compatible catalog='rest') or from a ForeignServer
- * created via CREATE SERVER ... FOREIGN DATA WRAPPER iceberg_catalog.
+ * Holds per-server REST catalog connection settings. Populated from the
+ * server options of an iceberg_catalog ForeignServer, with GUC fallback
+ * for any option not explicitly set on the server.
  */
 typedef struct RestCatalogConnectionInfo
 {
-	char	   *serverName;		/* server name for cache keying, NULL for
-								 * GUC-based */
+	char	   *serverName;		/* server name, used for token cache keying */
 	char	   *host;
 	char	   *oauthHostPath;
 	char	   *clientId;
@@ -97,7 +96,6 @@ typedef struct RestCatalogRequest
 #define GET_REST_CATALOG_METADATA_LOCATION "%s/api/catalog/v1/%s/namespaces/%s/tables/%s"
 
 /* Connection info resolution */
-extern PGDLLEXPORT RestCatalogConnectionInfo * GetRestCatalogConnectionFromGUCs(void);
 extern PGDLLEXPORT RestCatalogConnectionInfo * GetRestCatalogConnectionFromServer(const char *serverName);
 extern PGDLLEXPORT RestCatalogConnectionInfo * GetRestCatalogConnectionForRelation(Oid relationId);
 
