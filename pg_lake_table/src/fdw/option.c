@@ -789,7 +789,7 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 				 * Check if the catalog value refers to an iceberg_catalog
 				 * server. If so, treat it as a REST catalog.
 				 */
-				if (IsServerBasedRestCatalog(options_list))
+				if (IsRestCatalogOwnedByUsers(options_list))
 					icebergCatalogType = REST_CATALOG_READ_ONLY;
 				else
 					ereport(ERROR,
