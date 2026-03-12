@@ -486,7 +486,6 @@ def test_vacuum_multiple_metadata_ops(s3, pg_conn, extension, with_default_locat
         f"""
             SET pg_lake_iceberg.enable_manifest_merge_on_write TO off;
             SET pg_lake_iceberg.manifest_min_count_to_merge TO 2;
-            SET pg_lake_iceberg.max_snapshot_age TO 0;
 
             CREATE TABLE test_vacuum_multiple_metadata_ops(key int) USING iceberg;
 
@@ -500,17 +499,10 @@ def test_vacuum_multiple_metadata_ops(s3, pg_conn, extension, with_default_locat
     # Clear any existing notices
     pg_conn.notices.clear()
 
-    run_command(
-        f"""
-        VACUUM (verbose) test_vacuum_multiple_metadata_ops;
-    """,
-        pg_conn,
-    )
+    run_command("SET pg_lake_iceberg.max_snapshot_age TO 0", pg_conn)
+    run_command("VACUUM (verbose) test_vacuum_multiple_metadata_ops", pg_conn)
 
     assert any("merging 2 manifests into" in line for line in pg_conn.notices)
-
-    # triggers a single snapshot, we only have 2 snapshot expiring
-    # for INSERTs
     assert sum("expiring" in line for line in pg_conn.notices) == 2
 
     run_command(

@@ -73,9 +73,10 @@ static void AddIcebergSnapshotToMetadata(IcebergTableMetadata * metadata, Iceber
 static void DeleteUnreferencedFiles(Oid relationId, IcebergTableMetadata * metadata, IcebergSnapshot * expiredSnapshots,
 									int expiredSnapshotCount, IcebergSnapshot * nonExpiredSnapshots, int nonExpiredSnapshotCount);
 static void SetSnapshotReference(IcebergTableMetadata * metadata, uint64_t snapshotId);
-static void GroupExpiredSnapshots(IcebergTableMetadata * metadata, IcebergSnapshot * expiredSnapshots, int *expiredSnapshotCount,
+static void GroupExpiredSnapshots(IcebergTableMetadata * metadata, int maxSnapshotAgeInSecs,
+								  IcebergSnapshot * expiredSnapshots, int *expiredSnapshotCount,
 								  IcebergSnapshot * nonExpiredSnapshots, int *nonExpiredSnapshotCount);
-static bool SnapshotAgeExceeded(IcebergSnapshot * snapshot, int64_t currentTimeMs, int maxAge);
+static bool SnapshotAgeExceeded(IcebergSnapshot * snapshot, int64_t currentTimeMs, int maxAgeInSecs);
 static int32_t MaxSchemaId(IcebergTableSchema * schemas, size_t schemasLength);
 
 /*
@@ -216,7 +217,8 @@ AddIcebergSnapshotToMetadata(IcebergTableMetadata * metadata, IcebergSnapshot * 
  * persisting the changes.
  */
 List *
-RemoveOldSnapshotsFromMetadata(Oid relationId, IcebergTableMetadata * metadata, bool isVerbose)
+RemoveOldSnapshotsFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
+							   int maxSnapshotAgeInSecs, bool isVerbose)
 {
 	if (metadata->snapshots_length == 0)
 	{
@@ -237,7 +239,7 @@ RemoveOldSnapshotsFromMetadata(Oid relationId, IcebergTableMetadata * metadata, 
 		palloc0(sizeof(IcebergSnapshot) * metadata->snapshots_length);
 	int			nonExpiredSnapshotCount = 0;
 
-	GroupExpiredSnapshots(metadata, expiredSnapshots, &expiredSnapshotCount,
+	GroupExpiredSnapshots(metadata, maxSnapshotAgeInSecs, expiredSnapshots, &expiredSnapshotCount,
 						  nonExpiredSnapshots, &nonExpiredSnapshotCount);
 
 	if (expiredSnapshotCount == 0)
@@ -487,7 +489,8 @@ AdjustAndRetainMetadataLogs(IcebergTableMetadata * metadata, char *prevMetadataP
 
 
 static void
-GroupExpiredSnapshots(IcebergTableMetadata * metadata, IcebergSnapshot * expiredSnapshots, int *expiredSnapshotCount,
+GroupExpiredSnapshots(IcebergTableMetadata * metadata, int maxSnapshotAgeInSecs,
+					  IcebergSnapshot * expiredSnapshots, int *expiredSnapshotCount,
 					  IcebergSnapshot * nonExpiredSnapshots, int *nonExpiredSnapshotCount)
 {
 	IcebergSnapshot *allSnapshots = metadata->snapshots;
@@ -500,7 +503,7 @@ GroupExpiredSnapshots(IcebergTableMetadata * metadata, IcebergSnapshot * expired
 
 	for (int snapshotIndex = 0; snapshotIndex < allSnapshotCount; snapshotIndex++)
 	{
-		if (SnapshotAgeExceeded(&allSnapshots[snapshotIndex], currentTimeMs, IcebergMaxSnapshotAge))
+		if (SnapshotAgeExceeded(&allSnapshots[snapshotIndex], currentTimeMs, maxSnapshotAgeInSecs))
 		{
 			expiredSnapshots[(*expiredSnapshotCount)++] = allSnapshots[snapshotIndex];
 		}
@@ -516,9 +519,9 @@ GroupExpiredSnapshots(IcebergTableMetadata * metadata, IcebergSnapshot * expired
 * current time and the maximum age.
 */
 static bool
-SnapshotAgeExceeded(IcebergSnapshot * snapshot, int64_t currentTimeMs, int maxAge)
+SnapshotAgeExceeded(IcebergSnapshot * snapshot, int64_t currentTimeMs, int maxAgeInSecs)
 {
-	uint64_t	maxAgeMs = (uint64_t) maxAge * 1000;
+	uint64_t	maxAgeMs = (uint64_t) maxAgeInSecs * 1000;
 
 	return (currentTimeMs - snapshot->timestamp_ms) > maxAgeMs;
 }

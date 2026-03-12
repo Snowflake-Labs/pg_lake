@@ -149,7 +149,8 @@ static void DeleteInProgressManifests(Oid relationId, List *manifests);
  * iceberg metadata for the given relation.
  */
 List *
-ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allTransforms, bool isVerbose)
+ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allTransforms,
+							int maxSnapshotAgeInSecs, bool isVerbose)
 {
 	List	   *restCatalogRequests = NIL;
 
@@ -317,7 +318,7 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 	if (builder->expireOldSnapshots)
 	{
 		List	   *expiredSnapshotIds =
-			RemoveOldSnapshotsFromMetadata(relationId, metadata, isVerbose);
+			RemoveOldSnapshotsFromMetadata(relationId, metadata, maxSnapshotAgeInSecs, isVerbose);
 
 		if (expiredSnapshotIds != NIL)
 		{

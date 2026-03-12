@@ -53,7 +53,7 @@ IcebergXactCallback(XactEvent event, void *arg)
 				Assert(!ActiveSnapshotSet());
 				PushActiveSnapshot(GetTransactionSnapshot());
 
-				ConsumeTrackedIcebergMetadataChanges();
+				ConsumeTrackedIcebergMetadataChanges(false);
 
 				PopActiveSnapshot();
 
