@@ -168,7 +168,13 @@ CreatePgLakeTableCheckUnsupportedFeaturesPostProcess(ProcessUtilityParams * para
 static bool
 IsJsonOrCSVBackedTable(PgLakeTableType tableType, List *options)
 {
-	char	   *path = GetURLOption(options, "path", false);
+	DefElem    *pathOption = GetOption(options, "path");
+	char	   *path = NULL;
+
+	if (pathOption != NULL)
+	{
+		path = defGetString(pathOption);
+	}
 
 	CopyDataFormat format = DATA_FORMAT_INVALID;
 	CopyDataCompression compression = DATA_COMPRESSION_INVALID;
@@ -354,13 +360,9 @@ ErrorIfUnsupportedLakeTable(CreateForeignTableStmt *createStmt)
 {
 	List	   *options = createStmt->options;
 	DefElem    *pathOption = GetOption(options, "path");
-	char	   *path = GetURLOption(options, "path", false);
-	char	   *location = GetURLOption(options, "location", false);
-
-	if (path == NULL)
-		path = "";
-	if (location == NULL)
-		location = "";
+	char	   *path = pathOption != NULL ? ResolveStageURL(defGetString(pathOption)) : "";
+	DefElem    *locationOption = GetOption(options, "location");
+	char	   *location = locationOption != NULL ? defGetString(locationOption) : "";
 
 	bool		isWritable = GetBoolOption(createStmt->options, "writable", false);
 
@@ -570,15 +572,30 @@ ProcessCreateLakeTable(ProcessUtilityParams * params)
 	if (createStmt->base.partbound != NULL)
 		return false;
 
+	/* get a writable copy of the parse tree */
+	if (params->readOnlyTree)
+		createStmt = (CreateForeignTableStmt *) CopyUtilityStmt(params);
+
+	/*
+	 * Resolve @STAGE/ prefix in the path option so the full URL is stored in
+	 * the foreign table metadata rather than the @STAGE/ shorthand.
+	 */
+	DefElem    *pathOption = GetOption(createStmt->options, "path");
+
+	if (pathOption != NULL)
+	{
+		char	   *path = defGetString(pathOption);
+		char	   *resolvedPath = ResolveStageURL(path);
+
+		if (resolvedPath != path)
+			pathOption->arg = (Node *) makeString(resolvedPath);
+	}
+
 	/*
 	 * If the column list is empty, we automatically fill it in.
 	 */
 	if (createStmt->base.tableElts == NIL)
 	{
-		/* we will adjust column list in the parse tree */
-		if (params->readOnlyTree)
-			createStmt = (CreateForeignTableStmt *) CopyUtilityStmt(params);
-
 		AddLakeTableColumnDefinitions(createStmt);
 
 		/*
@@ -1311,10 +1328,8 @@ AddLakeTableColumnDefinitions(CreateForeignTableStmt *createStmt)
 	CopyDataCompression compression = DATA_COMPRESSION_INVALID;
 	PgLakeTableType tableType = GetPgLakeTableTypeViaServerName(createStmt->servername);
 
-	char	   *path = GetURLOption(options, "path", false);
-
-	if (path == NULL)
-		path = "";
+	DefElem    *pathOption = GetOption(options, "path");
+	char	   *path = pathOption != NULL ? defGetString(pathOption) : "";
 
 	Assert(IsSupportedURL(path));
 

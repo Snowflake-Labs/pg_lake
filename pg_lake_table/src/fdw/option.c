@@ -201,8 +201,6 @@ pg_lake_table_validator(PG_FUNCTION_ARGS)
 		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "path") == 0)
 		{
 			path = defGetString(def);
-			/* Resolve @STAGE/ prefix before validation */
-			path = ResolveStageURL(path);
 
 			if (!IsSupportedURL(path))
 				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -215,8 +213,6 @@ pg_lake_table_validator(PG_FUNCTION_ARGS)
 		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "location") == 0)
 		{
 			char	   *value = defGetString(def);
-			/* Resolve @STAGE/ prefix before validation */
-			value = ResolveStageURL(value);
 
 			if (!IsSupportedURL(value))
 				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -719,9 +715,6 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 				locationProvided = true;
 				continue;
 			}
-
-			/* Resolve @STAGE/ prefix before validation */
-			location = ResolveStageURL(location);
 
 			if (!IsSupportedURL(location))
 				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),

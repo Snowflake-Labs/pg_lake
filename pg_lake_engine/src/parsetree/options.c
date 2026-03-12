@@ -19,7 +19,6 @@
 
 #include "commands/defrem.h"
 #include "utils/memutils.h"
-#include "pg_lake/copy/copy_format.h"
 #include "pg_lake/parsetree/options.h"
 
 
@@ -100,20 +99,6 @@ GetStringOption(List *options, char *optionName, bool errorOnMissing)
 		return NULL;
 
 	return defGetString(option);
-}
-
-
-/*
- * GetURLOption returns the value of the given option as a URL string,
- * resolving @STAGE/ prefix if present.
- */
-char *
-GetURLOption(List *options, char *optionName, bool errorOnMissing)
-{
-	char	   *url = GetStringOption(options, optionName, errorOnMissing);
-
-	/* Resolve @STAGE/ prefix if present */
-	return ResolveStageURL(url);
 }
 
 

@@ -224,6 +224,29 @@ def test_stage_create_foreign_table(superuser_conn, setup_stage_location, extens
     assert len(res) == 1
     assert res[0][0] == 1
     assert res[0][1] == "test"
+
+    # Verify the stored path in metadata is the fully resolved URL, not @STAGE/
+    res = run_query(
+        """
+        SELECT option_value
+        FROM pg_options_to_table((
+            SELECT ftoptions FROM pg_foreign_table
+            WHERE ftrelid = 'stage_ft_test'::regclass
+        ))
+        WHERE option_name = 'path'
+        """,
+        superuser_conn,
+    )
+    assert len(res) == 1
+    stored_path = res[0][0]
+    assert stored_path.startswith(
+        "s3://"
+    ), f"stored path should be resolved: {stored_path}"
+    assert (
+        "@STAGE" not in stored_path
+    ), f"stored path should not contain @STAGE: {stored_path}"
+    assert stored_path == f"s3://{TEST_BUCKET}/{BUCKET_SUBDIR}/ft_test.parquet"
+
     superuser_conn.rollback()
 
 
