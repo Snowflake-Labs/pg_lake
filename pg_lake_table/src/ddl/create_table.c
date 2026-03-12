@@ -737,7 +737,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 			char	   *catalogOptionValue = GetStringOption(createStmt->options, "catalog", false);
 			RestCatalogConnectionInfo *conn;
 
-			if (pg_strncasecmp(catalogOptionValue, REST_CATALOG_NAME, strlen(catalogOptionValue)) == 0)
+			if (IsRestCatalogOwnedByExtension(catalogOptionValue))
 				conn = GetRestCatalogConnectionFromGUCs();
 			else
 				conn = GetRestCatalogConnectionFromServer(catalogOptionValue);
@@ -953,7 +953,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		char	   *catalogOptionValue = GetStringOption(createStmt->options, "catalog", false);
 		RestCatalogConnectionInfo *conn;
 
-		if (pg_strncasecmp(catalogOptionValue, REST_CATALOG_NAME, strlen(catalogOptionValue)) == 0)
+		if (IsRestCatalogOwnedByExtension(catalogOptionValue))
 			conn = GetRestCatalogConnectionFromGUCs();
 		else
 			conn = GetRestCatalogConnectionFromServer(catalogOptionValue);

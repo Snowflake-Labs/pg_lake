@@ -565,3 +565,132 @@ def get_rest_table_metadata_location(encoded_namespace, encoded_table_name, pg_c
     status, json_str, headers = res[0]
     metadata = json.loads(json_str)
     return metadata["metadata"]["location"]
+
+
+def test_multi_table_different_rest_catalog_hosts_in_single_transaction(
+    installcheck,
+    superuser_conn,
+    pg_conn,
+    s3,
+    extension,
+    with_default_location,
+    polaris_session,
+    create_http_helper_functions,
+):
+    """
+    Tables from two REST catalog servers with different hosts are modified
+    in the same transaction. PostAllRestCatalogRequests groups modifications
+    by conn->host, so using 'localhost' vs '127.0.0.1' (same Polaris, different
+    host strings) produces two separate batch commit requests.
+    """
+    if installcheck:
+        return
+
+    server_a = "multi_host_catalog_a"
+    server_b = "multi_host_catalog_b"
+    table_a = "multi_host_tx_a"
+    table_b = "multi_host_tx_b"
+    ns = TABLE_NAMESPACE + "_multi_host"
+
+    _create_polaris_catalog_server(superuser_conn, server_a, "localhost")
+    _create_polaris_catalog_server(superuser_conn, server_b, "127.0.0.1")
+    superuser_conn.commit()
+
+    run_command(f"CREATE SCHEMA IF NOT EXISTS {ns}", pg_conn)
+    pg_conn.commit()
+
+    run_command(
+        f"CREATE TABLE {ns}.{table_a} (id bigint, value text) USING iceberg WITH (catalog='{server_a}')",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"CREATE TABLE {ns}.{table_b} (id bigint, value text) USING iceberg WITH (catalog='{server_b}')",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # Insert into both tables (different hosts) within a single transaction
+    run_command(
+        f"INSERT INTO {ns}.{table_a} SELECT i, 'a' FROM generate_series(1, 50) i",
+        pg_conn,
+    )
+    run_command(
+        f"INSERT INTO {ns}.{table_b} SELECT i, 'b' FROM generate_series(1, 30) i",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    results_a = run_query(f"SELECT count(*) FROM {ns}.{table_a}", pg_conn)
+    assert results_a[0][0] == 50
+
+    results_b = run_query(f"SELECT count(*) FROM {ns}.{table_b}", pg_conn)
+    assert results_b[0][0] == 30
+
+    # Mixed DML across different hosts in a single transaction
+    run_command(
+        f"INSERT INTO {ns}.{table_a} SELECT i, 'a2' FROM generate_series(51, 70) i",
+        pg_conn,
+    )
+    run_command(
+        f"DELETE FROM {ns}.{table_b} WHERE id <= 10",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    results_a = run_query(f"SELECT count(*) FROM {ns}.{table_a}", pg_conn)
+    assert results_a[0][0] == 70
+
+    results_b = run_query(f"SELECT count(*) FROM {ns}.{table_b}", pg_conn)
+    assert results_b[0][0] == 20
+
+    # UPDATE on both hosts in a single transaction
+    run_command(
+        f"UPDATE {ns}.{table_a} SET value = 'updated_a' WHERE id <= 5",
+        pg_conn,
+    )
+    run_command(
+        f"UPDATE {ns}.{table_b} SET value = 'updated_b' WHERE id > 20",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    results_a = run_query(
+        f"SELECT count(*) FROM {ns}.{table_a} WHERE value = 'updated_a'", pg_conn
+    )
+    assert results_a[0][0] == 5
+
+    results_b = run_query(
+        f"SELECT count(*) FROM {ns}.{table_b} WHERE value = 'updated_b'", pg_conn
+    )
+    assert results_b[0][0] == 10
+
+    # Cleanup
+    pg_conn.rollback()
+    run_command(f"DROP SCHEMA {ns} CASCADE", pg_conn)
+    pg_conn.commit()
+    run_command(f"DROP SERVER {server_a}", superuser_conn)
+    run_command(f"DROP SERVER {server_b}", superuser_conn)
+    superuser_conn.commit()
+
+
+def _create_polaris_catalog_server(conn, server_name, hostname):
+    """Create an iceberg_catalog server pointing to the Polaris instance via the given hostname."""
+    creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
+    client_id = creds["credentials"]["clientId"]
+    client_secret = creds["credentials"]["clientSecret"]
+    endpoint = f"http://{hostname}:{server_params.POLARIS_PORT}"
+
+    run_command(
+        f"""
+        CREATE SERVER {server_name} TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (
+                rest_endpoint '{endpoint}',
+                client_id '{client_id}',
+                client_secret '{client_secret}'
+            )
+        """,
+        conn,
+    )
