@@ -1,14 +1,14 @@
 # External extensions to link into libduckdb
 duckdb_extension_load(httpfs
     GIT_URL https://github.com/duckdb/duckdb-httpfs
-    GIT_TAG 9c7d34977b10346d0b4cbbde5df807d1dab0b2bf
+    GIT_TAG 13f8a814d41a978c3f19eb1dc76069489652ea6f
     INCLUDE_DIR src/include
     ADD_PATCHES
 )
 
 duckdb_extension_load(aws
     GIT_URL https://github.com/duckdb/duckdb-aws
-    GIT_TAG 55bf3621fb7db254b473c94ce6360643ca38fac0
+    GIT_TAG bc15d211f282d1d78fc0d9fda3d09957ba776423
 )
 
 duckdb_extension_load(azure
