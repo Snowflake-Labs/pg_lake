@@ -55,6 +55,7 @@ log_level = os.getenv("LOG_MIN_MESSAGES", "notice")
 # PgDuck server helpers
 # ---------------------------------------------------------------------------
 
+
 def get_pgduck_server_path():
     pgduck_server = subprocess.run(
         ["which", "pgduck_server"], capture_output=True, text=True
@@ -144,8 +145,14 @@ def setup_pgduck_server():
 
     # Wait for the server to create the socket before attempting to stat it
     if not is_server_listening(server.socket_path):
+        exit_code = server.process.poll()
+        stderr_output = (
+            get_server_output(server.output_queue) if server.output_queue else ""
+        )
         raise RuntimeError(
-            f"Server failed to start - socket not listening: {server.socket_path}"
+            f"Server failed to start - socket not listening: {server.socket_path}\n"
+            f"Process alive: {exit_code is None}, exit code: {exit_code}\n"
+            f"Server stderr:\n{stderr_output}"
         )
 
     socket_stat = os.stat(server.socket_path)
@@ -207,7 +214,6 @@ def stop_process_via_pidfile(pid_file, timeout=10):
         pass
 
     pid_path.unlink(missing_ok=True)
-
 
 
 def remove_duckdb_cache():
@@ -309,8 +315,10 @@ class PgDuckServer:
 
         # -- Build CLI args and start ----------------------------------------
         args = [
-            "--unix_socket_directory", unix_socket_directory,
-            "--port", str(port),
+            "--unix_socket_directory",
+            unix_socket_directory,
+            "--port",
+            str(port),
         ]
         if duckdb_database_file_path is not None:
             args += ["--duckdb_database_file_path", duckdb_database_file_path]
@@ -448,6 +456,7 @@ def run_cli_command(command):
 # ---------------------------------------------------------------------------
 # PostgreSQL server helpers
 # ---------------------------------------------------------------------------
+
 
 def start_postgres(db_path, db_user, db_port):
     # Stop any leftover PostgreSQL from a previous interrupted run.
