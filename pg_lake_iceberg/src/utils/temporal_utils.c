@@ -122,17 +122,9 @@ AdjustTimestampFromPostgresToUnix(Timestamp timestamp)
  * calculates the total years from Unix epoch to the given date.
  */
 int32_t
-DateYearFromUnixEpoch(DateADT date, IcebergOutOfRangePolicy policy)
+DateYearFromUnixEpoch(DateADT date)
 {
-	date = DatumGetDateADT(IcebergErrorOrClampTemporalDatum(DateADTGetDatum(date),
-															DATEOID, policy));
-
-	int			year;
-	int			month;
-	int			day;
-
-	j2date(date + POSTGRES_EPOCH_JDATE, &year, &month, &day);
-	int32		years = (year - UNIX_EPOCH_YEAR);
+	int32		years = (GetYearFromDate(date) - UNIX_EPOCH_YEAR);
 
 #ifdef USE_ASSERT_CHECKING
 
@@ -256,11 +248,8 @@ YearsFromEpochToTimestamp(int32 yearsSinceEpoch)
  * date.
  */
 int32_t
-DateMonthFromUnixEpoch(DateADT date, IcebergOutOfRangePolicy policy)
+DateMonthFromUnixEpoch(DateADT date)
 {
-	date = DatumGetDateADT(IcebergErrorOrClampTemporalDatum(DateADTGetDatum(date),
-															DATEOID, policy));
-
 	int			year;
 	int			month;
 	int			day;
@@ -285,11 +274,8 @@ DateMonthFromUnixEpoch(DateADT date, IcebergOutOfRangePolicy policy)
  * date.
  */
 int32_t
-DateDayFromUnixEpoch(DateADT date, IcebergOutOfRangePolicy policy)
+DateDayFromUnixEpoch(DateADT date)
 {
-	date = DatumGetDateADT(IcebergErrorOrClampTemporalDatum(DateADTGetDatum(date),
-															DATEOID, policy));
-
 	return (int32_t) AdjustDateFromPostgresToUnix(date);
 }
 
@@ -302,20 +288,9 @@ DateDayFromUnixEpoch(DateADT date, IcebergOutOfRangePolicy policy)
  * to the given timestamp.
  */
 int32_t
-TimestampYearFromUnixEpoch(Timestamp ts, IcebergOutOfRangePolicy policy)
+TimestampYearFromUnixEpoch(Timestamp ts)
 {
-	ts = DatumGetTimestamp(IcebergErrorOrClampTemporalDatum(TimestampGetDatum(ts),
-															TIMESTAMPOID, policy));
-
-	struct pg_tm tm;
-	fsec_t		fsec;
-
-	if (timestamp2tm(ts, NULL, &tm, &fsec, NULL, NULL) != 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
-				 errmsg("timestamp out of range")));
-
-	return tm.tm_year - UNIX_EPOCH_YEAR;
+	return GetYearFromTimestamp(ts) - UNIX_EPOCH_YEAR;
 }
 
 
@@ -327,11 +302,8 @@ TimestampYearFromUnixEpoch(Timestamp ts, IcebergOutOfRangePolicy policy)
  * timestamp.
  */
 int32_t
-TimestampMonthFromUnixEpoch(Timestamp ts, IcebergOutOfRangePolicy policy)
+TimestampMonthFromUnixEpoch(Timestamp ts)
 {
-	ts = DatumGetTimestamp(IcebergErrorOrClampTemporalDatum(TimestampGetDatum(ts),
-															TIMESTAMPOID, policy));
-
 	struct pg_tm tm;
 	fsec_t		fsec;
 
@@ -389,11 +361,8 @@ MonthsFromUnixEpochToTimestamp(int32 monthsSinceEpoch)
  * timestamp.
  */
 int32_t
-TimestampDayFromUnixEpoch(Timestamp ts, IcebergOutOfRangePolicy policy)
+TimestampDayFromUnixEpoch(Timestamp ts)
 {
-	ts = DatumGetTimestamp(IcebergErrorOrClampTemporalDatum(TimestampGetDatum(ts),
-															TIMESTAMPOID, policy));
-
 	Timestamp	unixTs = AdjustTimestampFromPostgresToUnix(ts);
 
 	/*
@@ -409,11 +378,8 @@ TimestampDayFromUnixEpoch(Timestamp ts, IcebergOutOfRangePolicy policy)
  * given timestamp.
  */
 int32_t
-TimestampHourFromUnixEpoch(Timestamp ts, IcebergOutOfRangePolicy policy)
+TimestampHourFromUnixEpoch(Timestamp ts)
 {
-	ts = DatumGetTimestamp(IcebergErrorOrClampTemporalDatum(TimestampGetDatum(ts),
-															TIMESTAMPOID, policy));
-
 	Timestamp	unixTs = AdjustTimestampFromPostgresToUnix(ts);
 
 	/*

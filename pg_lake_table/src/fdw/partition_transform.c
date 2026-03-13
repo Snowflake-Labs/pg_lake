@@ -37,6 +37,7 @@
 #include "pg_lake/iceberg/hash_utils.h"
 #include "pg_lake/iceberg/truncate_utils.h"
 #include "pg_lake/util/numeric.h"
+#include "pg_lake/pgduck/iceberg_write_validation.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_lake/util/timetz.h"
 
@@ -51,20 +52,16 @@ static void *ApplyTruncateTransformToColumn(IcebergPartitionTransform * transfor
 											size_t *valueSize);
 static void *ApplyYearTransformToColumn(IcebergPartitionTransform * transform,
 										Datum columnValue, bool isNull,
-										size_t *valueSize,
-										IcebergOutOfRangePolicy outOfRangePolicy);
+										size_t *valueSize);
 static void *ApplyMonthTransformToColumn(IcebergPartitionTransform * transform,
 										 Datum columnValue, bool isNull,
-										 size_t *valueSize,
-										 IcebergOutOfRangePolicy outOfRangePolicy);
+										 size_t *valueSize);
 static void *ApplyDayTransformToColumn(IcebergPartitionTransform * transform,
 									   Datum columnValue, bool isNull,
-									   size_t *valueSize,
-									   IcebergOutOfRangePolicy outOfRangePolicy);
+									   size_t *valueSize);
 static void *ApplyHourTransformToColumn(IcebergPartitionTransform * transform,
 										Datum columnValue, bool isNull,
-										size_t *valueSize,
-										IcebergOutOfRangePolicy outOfRangePolicy);
+										size_t *valueSize);
 static IcebergPartitionTransform * GetPartitionTransformFromSpecField(Oid relationId,
 																	  IcebergPartitionSpecField * specField);
 static void ParseTransformName(const char *name, IcebergPartitionTransformType * type,
@@ -428,6 +425,11 @@ ApplyPartitionTransformToTuple(IcebergPartitionTransform * transform, TupleTable
 	bool		isNull = false;
 	Datum		columnValue = slot_getattr(slot, transform->attnum, &isNull);
 
+	if (!isNull)
+		columnValue = IcebergErrorOrClampDatum(columnValue,
+											   transform->pgType.postgresTypeOid,
+											   outOfRangePolicy, &isNull);
+
 	switch (transform->type)
 	{
 		case PARTITION_TRANSFORM_IDENTITY:
@@ -440,23 +442,19 @@ ApplyPartitionTransformToTuple(IcebergPartitionTransform * transform, TupleTable
 			break;
 		case PARTITION_TRANSFORM_YEAR:
 			field->value = ApplyYearTransformToColumn(transform, columnValue, isNull,
-													  &field->value_length,
-													  outOfRangePolicy);
+													  &field->value_length);
 			break;
 		case PARTITION_TRANSFORM_MONTH:
 			field->value = ApplyMonthTransformToColumn(transform, columnValue, isNull,
-													   &field->value_length,
-													   outOfRangePolicy);
+													   &field->value_length);
 			break;
 		case PARTITION_TRANSFORM_DAY:
 			field->value = ApplyDayTransformToColumn(transform, columnValue, isNull,
-													 &field->value_length,
-													 outOfRangePolicy);
+													 &field->value_length);
 			break;
 		case PARTITION_TRANSFORM_HOUR:
 			field->value = ApplyHourTransformToColumn(transform, columnValue, isNull,
-													  &field->value_length,
-													  outOfRangePolicy);
+													  &field->value_length);
 			break;
 		case PARTITION_TRANSFORM_BUCKET:
 			field->value = ApplyBucketTransformToColumn(transform, columnValue, isNull,
@@ -562,7 +560,7 @@ ApplyTruncateTransformToColumn(IcebergPartitionTransform * transform, Datum colu
  */
 static void *
 ApplyYearTransformToColumn(IcebergPartitionTransform * transform, Datum columnValue, bool isNull,
-						   size_t *valueSize, IcebergOutOfRangePolicy outOfRangePolicy)
+						   size_t *valueSize)
 {
 	if (isNull)
 	{
@@ -576,19 +574,19 @@ ApplyYearTransformToColumn(IcebergPartitionTransform * transform, Datum columnVa
 	{
 		DateADT		dateValue = DatumGetDateADT(columnValue);
 
-		year = DateYearFromUnixEpoch(dateValue, outOfRangePolicy);
+		year = DateYearFromUnixEpoch(dateValue);
 	}
 	else if (transform->pgType.postgresTypeOid == TIMESTAMPOID)
 	{
 		Timestamp	timestampValue = DatumGetTimestamp(columnValue);
 
-		year = TimestampYearFromUnixEpoch(timestampValue, outOfRangePolicy);
+		year = TimestampYearFromUnixEpoch(timestampValue);
 	}
 	else if (transform->pgType.postgresTypeOid == TIMESTAMPTZOID)
 	{
 		TimestampTz timestamptzValue = DatumGetTimestampTz(columnValue);
 
-		year = TimestampYearFromUnixEpoch(timestamptzValue, outOfRangePolicy);
+		year = TimestampYearFromUnixEpoch(timestamptzValue);
 	}
 	else
 	{
@@ -612,7 +610,7 @@ ApplyYearTransformToColumn(IcebergPartitionTransform * transform, Datum columnVa
  */
 static void *
 ApplyMonthTransformToColumn(IcebergPartitionTransform * transform, Datum columnValue, bool isNull,
-							size_t *valueSize, IcebergOutOfRangePolicy outOfRangePolicy)
+							size_t *valueSize)
 {
 	if (isNull)
 	{
@@ -626,19 +624,19 @@ ApplyMonthTransformToColumn(IcebergPartitionTransform * transform, Datum columnV
 	{
 		DateADT		dateValue = DatumGetDateADT(columnValue);
 
-		month = DateMonthFromUnixEpoch(dateValue, outOfRangePolicy);
+		month = DateMonthFromUnixEpoch(dateValue);
 	}
 	else if (transform->pgType.postgresTypeOid == TIMESTAMPOID)
 	{
 		Timestamp	timestampValue = DatumGetTimestamp(columnValue);
 
-		month = TimestampMonthFromUnixEpoch(timestampValue, outOfRangePolicy);
+		month = TimestampMonthFromUnixEpoch(timestampValue);
 	}
 	else if (transform->pgType.postgresTypeOid == TIMESTAMPTZOID)
 	{
 		TimestampTz timestamptzValue = DatumGetTimestampTz(columnValue);
 
-		month = TimestampMonthFromUnixEpoch(timestamptzValue, outOfRangePolicy);
+		month = TimestampMonthFromUnixEpoch(timestamptzValue);
 	}
 	else
 	{
@@ -662,7 +660,7 @@ ApplyMonthTransformToColumn(IcebergPartitionTransform * transform, Datum columnV
  */
 static void *
 ApplyDayTransformToColumn(IcebergPartitionTransform * transform, Datum columnValue, bool isNull,
-						  size_t *valueSize, IcebergOutOfRangePolicy outOfRangePolicy)
+						  size_t *valueSize)
 {
 	if (isNull)
 	{
@@ -676,19 +674,19 @@ ApplyDayTransformToColumn(IcebergPartitionTransform * transform, Datum columnVal
 	{
 		DateADT		dateValue = DatumGetDateADT(columnValue);
 
-		day = DateDayFromUnixEpoch(dateValue, outOfRangePolicy);
+		day = DateDayFromUnixEpoch(dateValue);
 	}
 	else if (transform->pgType.postgresTypeOid == TIMESTAMPOID)
 	{
 		Timestamp	timestampValue = DatumGetTimestamp(columnValue);
 
-		day = TimestampDayFromUnixEpoch(timestampValue, outOfRangePolicy);
+		day = TimestampDayFromUnixEpoch(timestampValue);
 	}
 	else if (transform->pgType.postgresTypeOid == TIMESTAMPTZOID)
 	{
 		TimestampTz timestamptzValue = DatumGetTimestampTz(columnValue);
 
-		day = TimestampDayFromUnixEpoch(timestamptzValue, outOfRangePolicy);
+		day = TimestampDayFromUnixEpoch(timestamptzValue);
 	}
 	else
 	{
@@ -712,7 +710,7 @@ ApplyDayTransformToColumn(IcebergPartitionTransform * transform, Datum columnVal
  */
 static void *
 ApplyHourTransformToColumn(IcebergPartitionTransform * transform, Datum columnValue, bool isNull,
-						   size_t *valueSize, IcebergOutOfRangePolicy outOfRangePolicy)
+						   size_t *valueSize)
 {
 	if (isNull)
 	{
@@ -726,13 +724,13 @@ ApplyHourTransformToColumn(IcebergPartitionTransform * transform, Datum columnVa
 	{
 		Timestamp	timestampValue = DatumGetTimestamp(columnValue);
 
-		hour = TimestampHourFromUnixEpoch(timestampValue, outOfRangePolicy);
+		hour = TimestampHourFromUnixEpoch(timestampValue);
 	}
 	else if (transform->pgType.postgresTypeOid == TIMESTAMPTZOID)
 	{
 		TimestampTz timestamptzValue = DatumGetTimestampTz(columnValue);
 
-		hour = TimestampHourFromUnixEpoch(timestamptzValue, outOfRangePolicy);
+		hour = TimestampHourFromUnixEpoch(timestamptzValue);
 	}
 	else if (transform->pgType.postgresTypeOid == TIMEOID)
 	{

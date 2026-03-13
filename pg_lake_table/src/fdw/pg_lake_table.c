@@ -3390,13 +3390,10 @@ create_foreign_modify(Relation rel,
 		 */
 		int			specId = GetCurrentSpecId(relationId);
 
-		IcebergOutOfRangePolicy outOfRangePolicy = GetIcebergOutOfRangePolicyForTable(relationId);
-
 		if (partitionBy != NULL)
 		{
 			fmstate->insertDest =
-				CreatePartitionedDestReceiver(relationId, foreignTableFormat, specId,
-											  outOfRangePolicy);
+				CreatePartitionedDestReceiver(relationId, foreignTableFormat, specId);
 		}
 		else
 		{
@@ -3405,8 +3402,7 @@ create_foreign_modify(Relation rel,
 												foreignTableFormat,
 												MaxWriteTempFileSizeMB,
 												specId,
-												0,
-												outOfRangePolicy);
+												0);
 		}
 	}
 
@@ -3491,9 +3487,9 @@ create_foreign_modify(Relation rel,
 					char	   *tempFileName = GenerateTempFileName("lake_table_delete", true);
 
 					fileModifyState->deleteFile = tempFileName;
-				fileModifyState->deleteDest = CreateCSVDestReceiver(tempFileName, copyOptions,
-																	foreignTableFormat,
-																	ICEBERG_OOR_NONE);
+					fileModifyState->deleteDest = CreateCSVDestReceiver(tempFileName, copyOptions,
+																		foreignTableFormat,
+																		ICEBERG_OOR_NONE);
 				}
 
 				fileModifyStates = lappend(fileModifyStates, fileModifyState);
@@ -3799,7 +3795,7 @@ process_query_params(ExprContext *econtext,
 		else
 
 			param_values[i] = PGDuckSerialize(&param_flinfo[i], exprType((Node *) expr_state->expr), expr_value,
-														  DATA_FORMAT_INVALID);
+											  DATA_FORMAT_INVALID);
 		i++;
 	}
 

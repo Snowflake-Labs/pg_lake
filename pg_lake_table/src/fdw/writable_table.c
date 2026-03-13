@@ -122,8 +122,7 @@ static List *PrepareToAddQueryResultToTable(Oid relationId,
 											Partition * partition,
 											bool queryHasRowId,
 											bool allowSplit,
-											bool isVerbose,
-											IcebergOutOfRangePolicy outOfRangePolicy);
+											bool isVerbose);
 static List *GetPossiblePositionDeleteFiles(Oid relationId, List *sourcePathList,
 											Snapshot snapshot);
 static void ApplyMetadataChanges(Oid relationId, List *metadataOperations);
@@ -212,9 +211,10 @@ ApplyInsertFile(Relation rel, char *insertFile, int64 rowCount,
 List *
 PrepareCSVInsertion(Oid relationId, char *insertCSV, int64 rowCount,
 					int64 reservedRowIdStart, int maximumLineSize,
-					DataFileSchema * schema,
-					IcebergOutOfRangePolicy outOfRangePolicy)
+					DataFileSchema * schema)
 {
+	IcebergOutOfRangePolicy outOfRangePolicy =
+		GetIcebergOutOfRangePolicyForTable(relationId);
 	Relation	relation = table_open(relationId, RowExclusiveLock);
 	ForeignTable *foreignTable = GetForeignTable(relationId);
 	TupleDesc	tupleDescriptor = RelationGetDescr(relation);
@@ -595,7 +595,7 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 			StatsCollector *statsCollector =
 				ConvertCSVFileTo(deleteFile, deleteTupleDesc, -1, deletionFilePath,
 								 DATA_FORMAT_PARQUET, compression, copyOptions, schema, leafFields,
-								 ICEBERG_OOR_ERROR);
+								 ICEBERG_OOR_NONE);
 
 			ereport(WriteLogLevel, (errmsg("adding deletion file %s with " INT64_FORMAT " rows ",
 										   deletionFilePath, deletedRowCount)));
@@ -920,8 +920,7 @@ TryCompactDataFiles(Oid relationId, TupleDesc tupleDescriptor, List *candidates,
 	List	   *newFileOps =
 		PrepareToAddQueryResultToTable(relationId, readFileQuery, tupleDescriptor,
 									   partitionSpecId, partition,
-									   hasRowIds, allowSplit, isVerbose,
-									   GetIcebergOutOfRangePolicyForTable(relationId));
+									   hasRowIds, allowSplit, isVerbose);
 
 	metadataOperations = list_concat(metadataOperations, newFileOps);
 
@@ -964,9 +963,10 @@ TryCompactDataFiles(Oid relationId, TupleDesc tupleDescriptor, List *candidates,
 static List *
 PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc,
 							   int32 partitionSpecId, Partition * partition,
-							   bool queryHasRowId, bool allowSplit, bool isVerbose,
-							   IcebergOutOfRangePolicy outOfRangePolicy)
+							   bool queryHasRowId, bool allowSplit, bool isVerbose)
 {
+	IcebergOutOfRangePolicy outOfRangePolicy =
+		GetIcebergOutOfRangePolicyForTable(relationId);
 	PgLakeTableProperties properties = GetPgLakeTableProperties(relationId);
 	List	   *options = properties.options;
 
@@ -1053,8 +1053,7 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
  * AddQueryResultToTable adds the result of a pgduck query to the table.
  */
 int64
-AddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc,
-					  IcebergOutOfRangePolicy outOfRangePolicy)
+AddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc)
 {
 	Assert(queryTupleDesc != NULL && queryTupleDesc->natts > 0);
 
@@ -1093,8 +1092,7 @@ AddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc,
 	List	   *newFileOps =
 		PrepareToAddQueryResultToTable(relationId, readQuery, queryTupleDesc,
 									   partitionSpecId, partition,
-									   queryHasRowId, allowSplit, isVerbose,
-									   outOfRangePolicy);
+									   queryHasRowId, allowSplit, isVerbose);
 
 	metadataOperations = list_concat(metadataOperations, newFileOps);
 

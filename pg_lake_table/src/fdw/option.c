@@ -571,8 +571,8 @@ InitPgLakeIcebergOptions(void)
 		{"catalog_namespace", ForeignTableRelationId},
 
 		/*
-		 * out-of-range value handling during writes: 'error' (default) or
-		 * 'clamp'
+		 * out-of-range value handling during writes: 'error' or 'clamp'
+		 * (default)
 		 */
 		{"out_of_range_values", ForeignTableRelationId},
 

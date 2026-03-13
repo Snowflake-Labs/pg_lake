@@ -30,6 +30,7 @@
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/fdw/partition_transform.h"
+#include "pg_lake/pgduck/iceberg_write_validation.h"
 #include "pg_lake/iceberg/manifest_spec.h"
 #include "pg_lake/iceberg/partitioning/partition.h"
 #include "pg_lake/partitioning/partitioned_dest_receiver.h"
@@ -117,8 +118,7 @@ int			MaxOpenFilesForPartitionedWrite = 5000;
 DestReceiver *
 CreatePartitionedDestReceiver(Oid relationId,
 							  CopyDataFormat targetFormat,
-							  int32 partitionSpecId,
-							  IcebergOutOfRangePolicy outOfRangePolicy)
+							  int32 partitionSpecId)
 {
 	PartitioningDestReceiverData *self =
 		(PartitioningDestReceiverData *) palloc0(sizeof(PartitioningDestReceiverData));
@@ -139,7 +139,7 @@ CreatePartitionedDestReceiver(Oid relationId,
 	self->relationId = relationId;
 	self->targetFormat = targetFormat;
 	self->alreadyFlushedPartitionModifications = NIL;
-	self->outOfRangePolicy = outOfRangePolicy;
+	self->outOfRangePolicy = GetIcebergOutOfRangePolicyForTable(relationId);
 
 	/*
 	 * We return modifications to the upper context, so better allocate
@@ -277,8 +277,7 @@ PartitionedDestReceiveSlot(TupleTableSlot *slot, DestReceiver *self)
 											myState->targetFormat,
 											MaxWriteTempFileSizeMB,
 											myState->currentPartitionSpecId,
-											0,
-											myState->outOfRangePolicy);
+											0);
 
 		entryPtr->multiDataFileDestReceiver = partitionReceiver;
 		partitionReceiver->rStartup((DestReceiver *) entryPtr->multiDataFileDestReceiver, myState->operation, myState->tupleDesc);

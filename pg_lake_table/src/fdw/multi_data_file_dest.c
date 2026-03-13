@@ -104,8 +104,6 @@ typedef struct MultiDataFileUploadDestReceiver
 	 */
 	int			maxWriteTempFileSizeMB;
 
-	/* out-of-range policy for temporal/numeric validation */
-	IcebergOutOfRangePolicy outOfRangePolicy;
 }			MultiDataFileUploadDestReceiver;
 
 
@@ -149,8 +147,7 @@ CreateMultiDataFileDestReceiver(Oid relationId,
 								CopyDataFormat targetFormat,
 								int MaxWriteTempFileSizeMB,
 								int32 partitionSpecId,
-								int64 rowIdStart,
-								IcebergOutOfRangePolicy outOfRangePolicy)
+								int64 rowIdStart)
 {
 	MultiDataFileUploadDestReceiver *self =
 		(MultiDataFileUploadDestReceiver *) palloc0(sizeof(MultiDataFileUploadDestReceiver));
@@ -171,7 +168,6 @@ CreateMultiDataFileDestReceiver(Oid relationId,
 											   ALLOCSET_DEFAULT_INITSIZE,
 											   ALLOCSET_DEFAULT_MAXSIZE);
 	self->currentRowIdStart = rowIdStart;
-	self->outOfRangePolicy = outOfRangePolicy;
 
 	/* cache the schema field */
 	self->schema = GetDataFileSchemaForTable(relationId);
@@ -199,7 +195,7 @@ CreateChildDestReceiver(MultiDataFileUploadDestReceiver * self)
 	self->currentFilePath = tempFilePath;
 	self->currentDest = CreateCSVDestReceiver(tempFilePath, copyOptions,
 											  self->targetFormat,
-											  self->outOfRangePolicy);
+											  GetIcebergOutOfRangePolicyForTable(self->relationId));
 
 	self->currentDest->rStartup(self->currentDest, self->operation, self->tupleDesc);
 
@@ -225,8 +221,7 @@ FlushChildDestReceiver(MultiDataFileUploadDestReceiver * self)
 							self->currentRowCount,
 							self->currentRowIdStart,
 							GetCSVDestReceiverMaxLineSize(self->currentDest),
-							self->schema,
-							self->outOfRangePolicy);
+							self->schema);
 
 	/* make sure we preserve the list of data file modifications */
 	MemoryContextSwitchTo(self->parentContext);

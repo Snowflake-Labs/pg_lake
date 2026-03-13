@@ -18,7 +18,6 @@
 #pragma once
 
 #include "pg_lake/copy/copy_format.h"
-#include "pg_lake/pgduck/iceberg_write_validation.h"
 #include "nodes/pg_list.h"
 #include "tcop/dest.h"
 #include "utils/relcache.h"
@@ -27,6 +26,5 @@ extern PGDLLEXPORT int MaxOpenFilesForPartitionedWrite;
 
 extern PGDLLEXPORT DestReceiver *CreatePartitionedDestReceiver(Oid relationId,
 															   CopyDataFormat targetFormat,
-															   int32 partitionSpecId,
-															   IcebergOutOfRangePolicy outOfRangePolicy);
+															   int32 partitionSpecId);
 extern PGDLLEXPORT List *GetPartitionedDestReceiverModifications(DestReceiver *dest);

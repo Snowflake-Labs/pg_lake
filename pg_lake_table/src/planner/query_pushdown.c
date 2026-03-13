@@ -162,6 +162,7 @@ typedef struct QueryPushdownScanState
 
 	/* INSERT..SELECT into the following relation, or InvalidOid */
 	Oid			insertIntoRelid;
+	TupleDesc	insertTargetTupleDesc;
 
 	/* table properties */
 	TupleDesc	tupleDesc;
@@ -1438,6 +1439,14 @@ QueryPushdownBeginScan(CustomScanState *node, EState *estate, int eflags)
 
 	TupleDesc	tupleDesc = node->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
 
+	if (scanState->insertIntoRelid != InvalidOid)
+	{
+		Relation	rel = table_open(scanState->insertIntoRelid, AccessShareLock);
+
+		scanState->insertTargetTupleDesc = CreateTupleDescCopy(RelationGetDescr(rel));
+		table_close(rel, AccessShareLock);
+	}
+
 	scanState->queryString = queryString;
 	scanState->connection = GetPGDuckConnection();
 	scanState->tupleDesc = tupleDesc;
@@ -1549,27 +1558,9 @@ QueryPushdownScanNextInternal(CustomScanState *node)
 
 	if (scanState->insertIntoRelid != InvalidOid)
 	{
-		/*
-		 * Set out-of-range policy from the target table's option for this
-		 * INSERT..SELECT pushdown write.
-		 */
-		IcebergOutOfRangePolicy outOfRangePolicy =
-			GetIcebergOutOfRangePolicyForTable(scanState->insertIntoRelid);
-
-		/*
-		 * The CustomScan output slot has 0 attributes because the scan node
-		 * doesn't return rows to PostgreSQL.  Fetch the target table's tuple
-		 * descriptor so IcebergWrapQueryWithErrorOrClampChecks can inspect
-		 * column types.
-		 */
-		Relation	rel = table_open(scanState->insertIntoRelid, AccessShareLock);
-		TupleDesc	targetTupleDesc = CreateTupleDescCopy(RelationGetDescr(rel));
-
-		table_close(rel, AccessShareLock);
-
 		scanState->estate->es_processed =
 			AddQueryResultToTable(scanState->insertIntoRelid, scanState->queryString,
-								  targetTupleDesc, outOfRangePolicy);
+								  scanState->insertTargetTupleDesc);
 
 		return NULL;
 	}
@@ -1733,6 +1724,15 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 
 		ExplainPropertyText("Data Files Scanned", dataFileScansString, es);
 		ExplainPropertyText("Deletion Files Scanned", deleteFileScansString, es);
+
+		if (scanState->insertIntoRelid != InvalidOid)
+		{
+			queryString =
+				IcebergWrapQueryWithErrorOrClampChecks(queryString,
+													   scanState->insertTargetTupleDesc,
+													   GetIcebergOutOfRangePolicyForTable(scanState->insertIntoRelid),
+													   false);
+		}
 
 		ExplainPropertyText("Vectorized SQL", queryString, es);
 	}

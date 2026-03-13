@@ -1317,6 +1317,157 @@ def test_vacuum_max_compaction_count(
     pg_conn.commit()
 
 
+@pytest.mark.parametrize(
+    "col_type, col_name, partition_by, special_val, clamped_hi",
+    [
+        ("date", "d", "d", "infinity", "9999-12-31"),
+        ("date", "d", "year(d)", "infinity", "9999-12-31"),
+        ("date", "d", "bucket(10, d)", "infinity", "9999-12-31"),
+        (
+            "timestamp",
+            "ts",
+            "ts",
+            "infinity",
+            "9999-12-31 23:59:59.999999",
+        ),
+        (
+            "timestamp",
+            "ts",
+            "hour(ts)",
+            "infinity",
+            "9999-12-31 23:59:59.999999",
+        ),
+        (
+            "timestamptz",
+            "tstz",
+            "tstz",
+            "infinity",
+            "9999-12-31 23:59:59.999999+00",
+        ),
+        (
+            "timestamptz",
+            "tstz",
+            "hour(tstz)",
+            "infinity",
+            "9999-12-31 23:59:59.999999+00",
+        ),
+        ("numeric(20,10)", "val", "val", "NaN", None),
+        ("numeric(20,10)", "val", "bucket(10, val)", "NaN", None),
+    ],
+    ids=[
+        "date-identity",
+        "date-year",
+        "date-bucket",
+        "timestamp-identity",
+        "timestamp-hour",
+        "timestamptz-identity",
+        "timestamptz-hour",
+        "numeric-identity",
+        "numeric-bucket",
+    ],
+)
+def test_vacuum_clamped_values(
+    s3,
+    pg_conn,
+    extension,
+    grant_access_to_data_file_partition,
+    with_default_location,
+    col_type,
+    col_name,
+    partition_by,
+    special_val,
+    clamped_hi,
+):
+    """
+    Verify that clamped out-of-range values survive VACUUM compaction and
+    remain queryable.  The partition key and data must stay consistent
+    through the insert → compact → query lifecycle.
+    """
+
+    table_name = "test_vacuum_clamped"
+
+    run_command(
+        f"""
+        CREATE TABLE {table_name} (
+            {col_name} {col_type}
+        )
+        USING pg_lake_iceberg WITH (partition_by = '{partition_by}');
+        SET TIME ZONE 'UTC';
+        SET pg_lake_table.vacuum_compact_min_input_files TO 1;
+    """,
+        pg_conn,
+    )
+
+    if "numeric" in col_type:
+        normal_vals = ["1.5", "2.5"]
+    elif col_type == "date":
+        normal_vals = ["2024-06-15", "2024-07-20"]
+    elif col_type == "timestamp":
+        normal_vals = ["2024-06-15 10:00:00", "2024-07-20 12:30:00"]
+    else:
+        normal_vals = ["2024-06-15 10:00:00+00", "2024-07-20 12:30:00+00"]
+
+    for v in normal_vals:
+        run_command(
+            f"INSERT INTO {table_name} VALUES ('{v}');",
+            pg_conn,
+        )
+    run_command(
+        f"INSERT INTO {table_name} VALUES ('{special_val}');",
+        pg_conn,
+    )
+
+    total_rows = len(normal_vals) + 1
+
+    # -- pre-compaction checks --
+    cnt = run_query(f"SELECT count(*) FROM {table_name};", pg_conn)[0][0]
+    assert cnt == total_rows, f"pre-vacuum row count: {cnt}"
+
+    if clamped_hi is not None:
+        pre = run_query(
+            f"SELECT count(*) FROM {table_name} WHERE {col_name} = '{clamped_hi}';",
+            pg_conn,
+        )[0][0]
+        assert pre == 1, f"pre-vacuum: clamped value not found via {clamped_hi}"
+    else:
+        pre = run_query(
+            f"SELECT count(*) FROM {table_name} WHERE {col_name} IS NULL;",
+            pg_conn,
+        )[0][0]
+        assert pre == 1, "pre-vacuum: NaN not clamped to NULL"
+
+    # -- run compaction --
+    vacuum_table(pg_conn, table_name)
+
+    # -- post-compaction checks --
+    cnt = run_query(f"SELECT count(*) FROM {table_name};", pg_conn)[0][0]
+    assert cnt == total_rows, f"post-vacuum row count: {cnt}"
+
+    if clamped_hi is not None:
+        post = run_query(
+            f"SELECT count(*) FROM {table_name} WHERE {col_name} = '{clamped_hi}';",
+            pg_conn,
+        )[0][0]
+        assert post == 1, f"post-vacuum: clamped value not found via {clamped_hi}"
+    else:
+        post = run_query(
+            f"SELECT count(*) FROM {table_name} WHERE {col_name} IS NULL;",
+            pg_conn,
+        )[0][0]
+        assert post == 1, "post-vacuum: NaN NULL lost after compaction"
+
+    for v in normal_vals:
+        r = run_query(
+            f"SELECT count(*) FROM {table_name} WHERE {col_name} = '{v}';",
+            pg_conn,
+        )[0][0]
+        assert r == 1, f"post-vacuum: normal value {v} not found"
+
+    run_command("RESET TIME ZONE;", pg_conn)
+    run_command(f"DROP TABLE {table_name} CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 def test_target_row_group_size(pg_conn, duckdb_conn, extension, tmp_path):
     parquet_path = tmp_path / "test.parquet"
 
