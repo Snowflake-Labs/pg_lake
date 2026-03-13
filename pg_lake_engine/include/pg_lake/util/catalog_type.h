@@ -17,6 +17,9 @@
 
 #pragma once
 
+/* FDW name for iceberg_catalog servers */
+#define ICEBERG_CATALOG_FDW_NAME "iceberg_catalog"
+
 /*
 * The allowed values for IcebergDefaultCatalog, case insensitive.
 */
