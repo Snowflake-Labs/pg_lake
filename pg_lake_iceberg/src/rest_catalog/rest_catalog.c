@@ -72,6 +72,13 @@ typedef struct RestCatalogTokenCacheEntry
 }			RestCatalogTokenCacheEntry;
 
 static HTAB *RestCatalogTokenCache = NULL;
+static MemoryContext RestTokenCacheCtx = NULL;
+
+/*
+ * Tracks which server's request is in flight so the retry callback can
+ * invalidate only the right token cache entry.
+ */
+static const char *CurrentRetryServerName = NULL;
 
 static char *GetRestCatalogAccessToken(RestCatalogConnectionInfo * conn, bool forceRefreshToken);
 static void FetchRestCatalogAccessToken(RestCatalogConnectionInfo * conn, char **accessToken, int *expiresIn);
@@ -329,11 +336,7 @@ GetRestCatalogConnectionFromServer(const char *serverName)
 	ForeignServer *server = GetForeignServerByName(serverName, false);
 	ForeignDataWrapper *fdw = GetForeignDataWrapper(server->fdwid);
 
-	if (strcmp(fdw->fdwname, ICEBERG_CATALOG_FDW_NAME) != 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("server \"%s\" does not use the iceberg_catalog foreign data wrapper",
-						serverName)));
+	Assert(strcmp(fdw->fdwname, ICEBERG_CATALOG_FDW_NAME) == 0);
 
 	RestCatalogConnectionInfo *conn = palloc0(sizeof(RestCatalogConnectionInfo));
 
@@ -462,7 +465,8 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId)
 		headers = lappend(headers, vendedCreds);
 	}
 
-	HttpResult	httpResult = SendRequestToRestCatalog(HTTP_POST, postUrl, body->data, headers);
+	HttpResult	httpResult = SendRequestToRestCatalog(HTTP_POST, postUrl, body->data,
+												  headers, conn->serverName);
 
 	if (httpResult.status != 200)
 	{
@@ -596,7 +600,9 @@ RegisterNamespaceToRestCatalog(RestCatalogConnectionInfo * conn, const char *cat
 		psprintf(REST_CATALOG_NAMESPACE_NAME,
 				 conn->host, URLEncodePath(catalogName),
 				 URLEncodePath(namespaceName));
-	HttpResult	httpResult = SendRequestToRestCatalog(HTTP_GET, getUrl, NULL, GetHeadersWithAuth(conn));
+	HttpResult	httpResult = SendRequestToRestCatalog(HTTP_GET, getUrl, NULL,
+												  GetHeadersWithAuth(conn),
+												  conn->serverName);
 
 	switch (httpResult.status)
 	{
@@ -686,8 +692,9 @@ ErrorIfRestNamespaceDoesNotExist(RestCatalogConnectionInfo * conn, const char *c
 		psprintf(REST_CATALOG_NAMESPACE_NAME,
 				 conn->host, URLEncodePath(catalogName),
 				 URLEncodePath(namespaceName));
-	HttpResult	httpResult = SendRequestToRestCatalog(HTTP_GET, getUrl, NULL, GetHeadersWithAuth(conn));
-
+	HttpResult	httpResult = SendRequestToRestCatalog(HTTP_GET, getUrl, NULL,
+												  GetHeadersWithAuth(conn),
+												  conn->serverName);
 
 	/* namespace not found */
 	if (httpResult.status == 404)
@@ -736,7 +743,8 @@ GetMetadataLocationFromRestCatalog(RestCatalogConnectionInfo * conn, const char 
 				 conn->host, URLEncodePath(restCatalogName), URLEncodePath(namespaceName), URLEncodePath(relationName));
 
 	List	   *headers = GetHeadersWithAuth(conn);
-	HttpResult	hr = SendRequestToRestCatalog(HTTP_GET, getUrl, NULL, headers);
+	HttpResult	hr = SendRequestToRestCatalog(HTTP_GET, getUrl, NULL, headers,
+											 conn->serverName);
 
 	if (hr.status != 200)
 	{
@@ -784,7 +792,9 @@ CreateNamespaceOnRestCatalog(RestCatalogConnectionInfo * conn, const char *catal
 		psprintf(REST_CATALOG_NAMESPACE, conn->host,
 				 URLEncodePath(catalogName));
 
-	HttpResult	httpResult = SendRequestToRestCatalog(HTTP_POST, postUrl, body.data, PostHeadersWithAuth(conn));
+	HttpResult	httpResult = SendRequestToRestCatalog(HTTP_POST, postUrl, body.data,
+												  PostHeadersWithAuth(conn),
+												  conn->serverName);
 
 	if (httpResult.status != 200)
 	{
@@ -889,12 +899,16 @@ InitTokenCacheIfNeeded(void)
 	if (RestCatalogTokenCache != NULL)
 		return;
 
+	RestTokenCacheCtx = AllocSetContextCreate(TopMemoryContext,
+											  "RestTokenCacheCtx",
+											  ALLOCSET_DEFAULT_SIZES);
+
 	HASHCTL		ctl;
 
 	memset(&ctl, 0, sizeof(ctl));
 	ctl.keysize = TOKEN_CACHE_KEY_LEN;
 	ctl.entrysize = sizeof(RestCatalogTokenCacheEntry);
-	ctl.hcxt = TopMemoryContext;
+	ctl.hcxt = RestTokenCacheCtx;
 
 	RestCatalogTokenCache = hash_create("REST Catalog Token Cache",
 										8, &ctl,
@@ -943,7 +957,7 @@ GetRestCatalogAccessToken(RestCatalogConnectionInfo * conn, bool forceRefreshTok
 
 		FetchRestCatalogAccessToken(conn, &accessToken, &expiresIn);
 
-		entry->accessToken = MemoryContextStrdup(TopMemoryContext, accessToken);
+		entry->accessToken = MemoryContextStrdup(RestTokenCacheCtx, accessToken);
 		entry->accessTokenExpiry = now + (int64_t) expiresIn * 1000000;	/* expiresIn is in
 																		 * seconds */
 	}
@@ -961,9 +975,15 @@ static void
 FetchRestCatalogAccessToken(RestCatalogConnectionInfo * conn, char **accessToken, int *expiresIn)
 {
 	if (!conn->host || !*conn->host)
-		ereport(ERROR, (errmsg("REST catalog host is not configured")));
+		ereport(ERROR,
+				(errmsg("REST catalog host is not configured"),
+				 errhint("Set the \"rest_endpoint\" option on the server "
+						 "or the pg_lake_iceberg.rest_catalog_host GUC.")));
 	if (!conn->clientSecret || !*conn->clientSecret)
-		ereport(ERROR, (errmsg("REST catalog client_secret is not configured")));
+		ereport(ERROR,
+				(errmsg("REST catalog client_secret is not configured"),
+				 errhint("Set the \"client_secret\" option on the server "
+						 "or the pg_lake_iceberg.rest_catalog_client_secret GUC.")));
 
 	char	   *accessTokenUrl = conn->oauthHostPath;
 
@@ -991,7 +1011,10 @@ FetchRestCatalogAccessToken(RestCatalogConnectionInfo * conn, char **accessToken
 	else
 	{
 		if (!conn->clientId || !*conn->clientId)
-			ereport(ERROR, (errmsg("REST catalog client_id is not configured")));
+			ereport(ERROR,
+					(errmsg("REST catalog client_id is not configured"),
+					 errhint("Set the \"client_id\" option on the server "
+							 "or the pg_lake_iceberg.rest_catalog_client_id GUC.")));
 
 		/* Build Authorization: Basic <base64(clientId:clientSecret)> */
 		char	   *encodedAuth = EncodeBasicAuth(conn->clientId, conn->clientSecret);
@@ -1003,7 +1026,9 @@ FetchRestCatalogAccessToken(RestCatalogConnectionInfo * conn, char **accessToken
 	headers = lappend(headers, "Content-Type: application/x-www-form-urlencoded");
 
 	/* POST */
-	HttpResult	httpResponse = SendRequestToRestCatalog(HTTP_POST, accessTokenUrl, body.data, headers);
+	HttpResult	httpResponse = SendRequestToRestCatalog(HTTP_POST, accessTokenUrl,
+													   body.data, headers,
+													   conn->serverName);
 
 	if (httpResponse.status != 200)
 		ereport(ERROR,
@@ -1458,14 +1483,24 @@ GetRemoveSnapshotCatalogRequest(List *removedSnapshotIds, Oid relationId)
 /*
  * SendRequestToRestCatalog sends an HTTP request to the rest catalog
  * with retry logic for retriable errors, attempting up to MAX_HTTP_RETRY_FOR_REST_CATALOG
- * times.
+ * times.  The serverName is used by the retry callback to invalidate only the
+ * matching token cache entry on a 419 (token expired) response.
  */
 HttpResult
-SendRequestToRestCatalog(HttpMethod method, const char *url, const char *body, List *headers)
+SendRequestToRestCatalog(HttpMethod method, const char *url, const char *body,
+						 List *headers, const char *serverName)
 {
 	const int	MAX_HTTP_RETRY_FOR_REST_CATALOG = 3;
 
-	return SendHttpRequestWithRetry(method, url, body, headers, ShouldRetryRequestToRestCatalog, MAX_HTTP_RETRY_FOR_REST_CATALOG);
+	CurrentRetryServerName = serverName;
+
+	HttpResult	result = SendHttpRequestWithRetry(method, url, body, headers,
+												  ShouldRetryRequestToRestCatalog,
+												  MAX_HTTP_RETRY_FOR_REST_CATALOG);
+
+	CurrentRetryServerName = NULL;
+
+	return result;
 }
 
 
@@ -1508,26 +1543,15 @@ ShouldRetryRequestToRestCatalog(long status, int maxRetry, int retryNo)
 		return true;
 	}
 
-	/* token expired, retry after refreshing token */
+	/* token expired: invalidate only the affected server's cached token */
 	else if (status == TOKEN_EXPIRED_STATUS)
 	{
-		/*
-		 * Invalidate all cached tokens so that the next request will fetch a
-		 * fresh one. We clear the entire cache because the retry callback
-		 * does not have access to a specific connection's info. This is safe
-		 * because token expiry is rare and other connections will simply
-		 * re-authenticate on their next request.
-		 */
-		if (RestCatalogTokenCache != NULL)
+		if (RestCatalogTokenCache != NULL && CurrentRetryServerName != NULL)
 		{
-			HASH_SEQ_STATUS seq;
-			RestCatalogTokenCacheEntry *entry;
+			char		cacheKey[TOKEN_CACHE_KEY_LEN];
 
-			hash_seq_init(&seq, RestCatalogTokenCache);
-			while ((entry = hash_seq_search(&seq)) != NULL)
-			{
-				entry->accessTokenExpiry = 0;
-			}
+			strlcpy(cacheKey, CurrentRetryServerName, TOKEN_CACHE_KEY_LEN);
+			hash_search(RestCatalogTokenCache, cacheKey, HASH_REMOVE, NULL);
 		}
 		return true;
 	}
