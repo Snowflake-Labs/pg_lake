@@ -29,7 +29,6 @@
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/parquet/geoparquet.h"
-#include "pg_lake/parsetree/options.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/pgduck/read_data.h"
 #include "pg_lake/pgduck/type.h"
@@ -55,7 +54,6 @@ static DuckDBTypeInfo VARCHAR_TYPE =
 int			TargetRowGroupSizeMB = DEFAULT_TARGET_ROW_GROUP_SIZE_MB;
 int			DefaultParquetVersion = PARQUET_VERSION_V1;
 
-
 /*
  * ConvertCSVFileTo copies and converts a CSV file at source path to
  * the destinationPath.
@@ -69,7 +67,8 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 				 CopyDataCompression destinationCompression,
 				 List *formatOptions,
 				 DataFileSchema * schema,
-				 List *leafFields)
+				 List *leafFields,
+				 IcebergOutOfRangePolicy outOfRangePolicy)
 {
 	StringInfoData command;
 
@@ -100,7 +99,8 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 							  queryHasRowIds,
 							  schema,
 							  csvTupleDesc,
-							  leafFields);
+							  leafFields,
+							  outOfRangePolicy);
 }
 
 
@@ -118,8 +118,17 @@ WriteQueryResultTo(char *query,
 				   bool queryHasRowId,
 				   DataFileSchema * schema,
 				   TupleDesc queryTupleDesc,
-				   List *leafFields)
+				   List *leafFields,
+				   IcebergOutOfRangePolicy outOfRangePolicy)
 {
+	if (destinationFormat == DATA_FORMAT_ICEBERG &&
+		outOfRangePolicy != ICEBERG_OOR_NONE)
+	{
+		query = IcebergWrapQueryWithErrorOrClampChecks(query, queryTupleDesc,
+													   outOfRangePolicy,
+													   queryHasRowId);
+	}
+
 	StringInfoData command;
 
 	initStringInfo(&command);
@@ -628,21 +637,18 @@ ChooseDuckDBEngineTypeForWrite(PGType postgresType,
 		 * https://duckdb.org/docs/sql/data_types/overview
 		 * https://www.postgresql.org/docs/current/datatype-numeric.html#DATATYPE-NUMERIC-DECIMAL
 		 */
-		int			precision = -1;
-		int			scale = -1;
+		int			precision;
+		int			scale;
 
 		GetDuckdbAdjustedPrecisionAndScaleFromNumericTypeMod(postgresTypeMod, &precision, &scale);
 
 		if (CanPushdownNumericToDuckdb(precision, scale))
 		{
-			/*
-			 * happy case: we can map to DECIMAL(precision, scale)
-			 */
 			typeModifier = psprintf("(%d,%d)", precision, scale);
+			duckTypeId = DUCKDB_TYPE_DECIMAL;
 		}
 		else
 		{
-			/* explicit precision which is too big for us */
 			duckTypeId = DUCKDB_TYPE_VARCHAR;
 		}
 	}

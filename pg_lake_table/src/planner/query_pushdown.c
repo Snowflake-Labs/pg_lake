@@ -19,7 +19,9 @@
 #include "funcapi.h"
 #include "miscadmin.h"
 
+#include "access/table.h"
 #include "catalog/catalog.h"
+#include "utils/rel.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_collation.h"
@@ -37,6 +39,7 @@
 #include "pg_lake/planner/explain.h"
 #include "pg_lake/planner/pushdown_utils.h"
 #include "pg_lake/fdw/writable_table.h"
+#include "pg_lake/pgduck/iceberg_write_validation.h"
 #include "pg_lake/planner/insert_select.h"
 #include "pg_lake/planner/query_pushdown.h"
 #include "pg_lake/planner/restriction_collector.h"
@@ -159,6 +162,7 @@ typedef struct QueryPushdownScanState
 
 	/* INSERT..SELECT into the following relation, or InvalidOid */
 	Oid			insertIntoRelid;
+	TupleDesc	insertTargetTupleDesc;
 
 	/* table properties */
 	TupleDesc	tupleDesc;
@@ -1435,6 +1439,14 @@ QueryPushdownBeginScan(CustomScanState *node, EState *estate, int eflags)
 
 	TupleDesc	tupleDesc = node->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
 
+	if (scanState->insertIntoRelid != InvalidOid)
+	{
+		Relation	rel = table_open(scanState->insertIntoRelid, AccessShareLock);
+
+		scanState->insertTargetTupleDesc = CreateTupleDescCopy(RelationGetDescr(rel));
+		table_close(rel, AccessShareLock);
+	}
+
 	scanState->queryString = queryString;
 	scanState->connection = GetPGDuckConnection();
 	scanState->tupleDesc = tupleDesc;
@@ -1546,12 +1558,9 @@ QueryPushdownScanNextInternal(CustomScanState *node)
 
 	if (scanState->insertIntoRelid != InvalidOid)
 	{
-		/*
-		 * append the query result to the table and set the number of
-		 * processed rows
-		 */
 		scanState->estate->es_processed =
-			AddQueryResultToTable(scanState->insertIntoRelid, scanState->queryString, tupleDesc);
+			AddQueryResultToTable(scanState->insertIntoRelid, scanState->queryString,
+								  scanState->insertTargetTupleDesc);
 
 		return NULL;
 	}
@@ -1715,6 +1724,15 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 
 		ExplainPropertyText("Data Files Scanned", dataFileScansString, es);
 		ExplainPropertyText("Deletion Files Scanned", deleteFileScansString, es);
+
+		if (scanState->insertIntoRelid != InvalidOid)
+		{
+			queryString =
+				IcebergWrapQueryWithErrorOrClampChecks(queryString,
+													   scanState->insertTargetTupleDesc,
+													   GetIcebergOutOfRangePolicyForTable(scanState->insertIntoRelid),
+													   false);
+		}
 
 		ExplainPropertyText("Vectorized SQL", queryString, es);
 	}

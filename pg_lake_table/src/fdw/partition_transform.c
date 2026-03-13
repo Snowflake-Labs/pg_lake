@@ -37,11 +37,13 @@
 #include "pg_lake/iceberg/hash_utils.h"
 #include "pg_lake/iceberg/truncate_utils.h"
 #include "pg_lake/util/numeric.h"
+#include "pg_lake/pgduck/iceberg_write_validation.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_lake/util/timetz.h"
 
 static PartitionField * ApplyPartitionTransformToTuple(IcebergPartitionTransform * transform,
-													   TupleTableSlot *slot);
+													   TupleTableSlot *slot,
+													   IcebergOutOfRangePolicy outOfRangePolicy);
 static void *ApplyIdentityTransformToColumn(IcebergPartitionTransform * transform,
 											Datum columnValue, bool isNull,
 											size_t *valueSize);
@@ -74,7 +76,8 @@ static bool PartitionTransformsEqual(IcebergPartitionSpec * spec, List *partitio
  * to the given tuple and returns partition tuple for data file.
  */
 Partition *
-ComputePartitionTupleForTuple(List *transforms, TupleTableSlot *slot)
+ComputePartitionTupleForTuple(List *transforms, TupleTableSlot *slot,
+							  IcebergOutOfRangePolicy outOfRangePolicy)
 {
 	Assert(transforms != NIL);
 
@@ -87,7 +90,8 @@ ComputePartitionTupleForTuple(List *transforms, TupleTableSlot *slot)
 	{
 		IcebergPartitionTransform *transform = list_nth(transforms, i);
 
-		PartitionField *field = ApplyPartitionTransformToTuple(transform, slot);
+		PartitionField *field = ApplyPartitionTransformToTuple(transform, slot,
+															   outOfRangePolicy);
 
 		partition->fields[i] = *field;
 	}
@@ -410,7 +414,8 @@ ParseBracketUintSize(const char *name, const char *prefix, size_t *outVal)
  * and returns the partition field.
  */
 static PartitionField *
-ApplyPartitionTransformToTuple(IcebergPartitionTransform * transform, TupleTableSlot *slot)
+ApplyPartitionTransformToTuple(IcebergPartitionTransform * transform, TupleTableSlot *slot,
+							   IcebergOutOfRangePolicy outOfRangePolicy)
 {
 	PartitionField *field = palloc0(sizeof(PartitionField));
 
@@ -419,6 +424,11 @@ ApplyPartitionTransformToTuple(IcebergPartitionTransform * transform, TupleTable
 
 	bool		isNull = false;
 	Datum		columnValue = slot_getattr(slot, transform->attnum, &isNull);
+
+	if (!isNull)
+		columnValue = IcebergErrorOrClampDatum(columnValue,
+											   transform->pgType.postgresTypeOid,
+											   outOfRangePolicy, &isNull);
 
 	switch (transform->type)
 	{

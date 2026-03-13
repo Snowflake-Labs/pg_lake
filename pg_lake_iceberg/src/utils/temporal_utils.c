@@ -17,15 +17,15 @@
 
 #include "postgres.h"
 
+#include "catalog/pg_type.h"
 #include "pg_lake/iceberg/utils.h"
+#include "pg_lake/pgduck/iceberg_write_validation.h"
+#include "utils/date.h"
 #include "utils/datetime.h"
 #include "utils/timestamp.h"
 
 static const int32 PostgresToUnixEpochDiffInDays = POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE;
 static const int64 PostgresToUnixEpochDiffInMicrosecs = ((int64) PostgresToUnixEpochDiffInDays) * USECS_PER_DAY;
-
-static void EnsureNotInfinityDate(DateADT date);
-static void EnsureNotInfinityTimestamp(Timestamp ts);
 
 #define UNIX_EPOCH_YEAR 1970
 
@@ -124,14 +124,7 @@ AdjustTimestampFromPostgresToUnix(Timestamp timestamp)
 int32_t
 DateYearFromUnixEpoch(DateADT date)
 {
-	EnsureNotInfinityDate(date);
-
-	int			year;
-	int			month;
-	int			day;
-
-	j2date(date + POSTGRES_EPOCH_JDATE, &year, &month, &day);
-	int32		years = (year - UNIX_EPOCH_YEAR);
+	int32		years = (GetYearFromDate(date) - UNIX_EPOCH_YEAR);
 
 #ifdef USE_ASSERT_CHECKING
 
@@ -257,8 +250,6 @@ YearsFromEpochToTimestamp(int32 yearsSinceEpoch)
 int32_t
 DateMonthFromUnixEpoch(DateADT date)
 {
-	EnsureNotInfinityDate(date);
-
 	int			year;
 	int			month;
 	int			day;
@@ -285,8 +276,6 @@ DateMonthFromUnixEpoch(DateADT date)
 int32_t
 DateDayFromUnixEpoch(DateADT date)
 {
-	EnsureNotInfinityDate(date);
-
 	return (int32_t) AdjustDateFromPostgresToUnix(date);
 }
 
@@ -301,17 +290,7 @@ DateDayFromUnixEpoch(DateADT date)
 int32_t
 TimestampYearFromUnixEpoch(Timestamp ts)
 {
-	EnsureNotInfinityTimestamp(ts);
-
-	struct pg_tm tm;
-	fsec_t		fsec;
-
-	if (timestamp2tm(ts, NULL, &tm, &fsec, NULL, NULL) != 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
-				 errmsg("timestamp out of range")));
-
-	return tm.tm_year - UNIX_EPOCH_YEAR;
+	return GetYearFromTimestamp(ts) - UNIX_EPOCH_YEAR;
 }
 
 
@@ -325,8 +304,6 @@ TimestampYearFromUnixEpoch(Timestamp ts)
 int32_t
 TimestampMonthFromUnixEpoch(Timestamp ts)
 {
-	EnsureNotInfinityTimestamp(ts);
-
 	struct pg_tm tm;
 	fsec_t		fsec;
 
@@ -386,8 +363,6 @@ MonthsFromUnixEpochToTimestamp(int32 monthsSinceEpoch)
 int32_t
 TimestampDayFromUnixEpoch(Timestamp ts)
 {
-	EnsureNotInfinityTimestamp(ts);
-
 	Timestamp	unixTs = AdjustTimestampFromPostgresToUnix(ts);
 
 	/*
@@ -405,8 +380,6 @@ TimestampDayFromUnixEpoch(Timestamp ts)
 int32_t
 TimestampHourFromUnixEpoch(Timestamp ts)
 {
-	EnsureNotInfinityTimestamp(ts);
-
 	Timestamp	unixTs = AdjustTimestampFromPostgresToUnix(ts);
 
 	/*
@@ -454,35 +427,4 @@ TimeADT
 HoursFromUnixEpochToTime(int32 hoursSinceEpoch)
 {
 	return (TimeADT) ((int64) hoursSinceEpoch * USECS_PER_HOUR);
-}
-
-
-/*
- * EnsureNotInfinityDate checks if the given date is +-Infinity.
- * If it is, it raises an error. +-Infinity is not a meaningful value for
- * some query engines.
- */
-static void
-EnsureNotInfinityDate(DateADT date)
-{
-	if (DATE_NOT_FINITE(date))
-		ereport(ERROR,
-				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
-				 errmsg("+-Infinity dates are not allowed in iceberg tables"),
-				 errhint("Delete or replace +-Infinity values.")));
-}
-
-/*
- * EnsureNotInfinityTimestamp checks if the given timestamp is +-Infinity.
- * If it is, it raises an error. +-Infinity is not a meaningful value for
- * some query engines.
- */
-static void
-EnsureNotInfinityTimestamp(Timestamp ts)
-{
-	if (TIMESTAMP_NOT_FINITE(ts))
-		ereport(ERROR,
-				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
-				 errmsg("+-Infinity timestamps are not allowed in iceberg tables"),
-				 errhint("Delete or replace +-Infinity values.")));
 }

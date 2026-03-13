@@ -866,3 +866,38 @@ def test_copy_virtual_column(pg_conn, tmp_path):
     ]
 
     pg_conn.rollback()
+
+
+def test_out_of_range_values_copy_to_rejected(pg_conn, s3):
+    """COPY TO rejects the out_of_range_values option."""
+    url = f"s3://{TEST_BUCKET}/test_oor_copy_to_parquet/data.parquet"
+
+    error = run_command(
+        f"COPY (SELECT 1 AS id) TO '{url}' WITH (out_of_range_values 'error');",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "out_of_range_values" in error
+
+    pg_conn.rollback()
+
+
+def test_out_of_range_values_copy_from_rejected(pg_conn, s3):
+    """COPY FROM rejects the out_of_range_values option (always read from table)."""
+    url = f"s3://{TEST_BUCKET}/test_oor_copy_from_heap/data.parquet"
+
+    run_command(
+        f"COPY (SELECT 1 AS id) TO '{url}';",
+        pg_conn,
+    )
+
+    run_command("CREATE TABLE heap_oor (id int);", pg_conn)
+
+    error = run_command(
+        f"COPY heap_oor FROM '{url}' WITH (out_of_range_values 'clamp');",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "out_of_range_values" in error
+
+    pg_conn.rollback()

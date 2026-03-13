@@ -1921,6 +1921,308 @@ def test_pruning_for_coercions_temporal(
     pg_conn.rollback()
 
 
+clamped_inf_col_types = ["date", "timestamp", "timestamptz"]
+clamped_inf_partition_types = ["year", "month", "day"]
+
+
+@pytest.mark.parametrize("partition_by", clamped_inf_partition_types)
+@pytest.mark.parametrize("col_type", clamped_inf_col_types)
+def test_clamped_infinity_partition_pruning(
+    s3,
+    disable_data_file_pruning,
+    pg_conn,
+    extension,
+    with_default_location,
+    col_type,
+    partition_by,
+):
+    """Verify partition pruning works correctly with clamped +-infinity values."""
+
+    explain_prefix = "EXPLAIN (analyze, verbose, format json) "
+
+    run_command(
+        f"""
+        CREATE SCHEMA test_clamp_inf_part;
+        CREATE TABLE test_clamp_inf_part.tbl (
+            col_val {col_type}
+        ) USING iceberg
+        WITH (
+            autovacuum_enabled = 'False',
+            partition_by       = '{partition_by}(col_val)'
+        );
+        SET TIME ZONE 'UTC';
+    """,
+        pg_conn,
+    )
+
+    if col_type == "date":
+        normal_vals = ["2020-01-15", "2021-06-20"]
+    elif col_type == "timestamp":
+        normal_vals = ["2020-01-15 10:00:00", "2021-06-20 12:30:00"]
+    else:
+        normal_vals = ["2020-01-15 10:00:00+00", "2021-06-20 12:30:00+00"]
+
+    all_vals = normal_vals + ["infinity", "-infinity"]
+    values_sql = ",".join(f"('{v}')" for v in all_vals)
+    run_command(
+        f"INSERT INTO test_clamp_inf_part.tbl VALUES {values_sql};",
+        pg_conn,
+    )
+
+    # 4 rows in 4 different partitions → 4 data files
+
+    # Full scan → 4 files
+    plan = run_query(
+        f"{explain_prefix} SELECT count(*) FROM test_clamp_inf_part.tbl",
+        pg_conn,
+    )
+    assert fetch_data_files_used(plan) == "4"
+
+    count = run_query("SELECT count(*) FROM test_clamp_inf_part.tbl;", pg_conn)
+    assert count[0][0] == 4
+
+    # Exact match on a normal value → 1 file
+    if col_type == "date":
+        eq_filter = "col_val = '2020-01-15'"
+    elif col_type == "timestamp":
+        eq_filter = "col_val = '2020-01-15 10:00:00'"
+    else:
+        eq_filter = "col_val = '2020-01-15 10:00:00+00'"
+
+    plan = run_query(
+        f"{explain_prefix} SELECT * FROM test_clamp_inf_part.tbl WHERE {eq_filter}",
+        pg_conn,
+    )
+    assert fetch_data_files_used(plan) == "1", f"eq: {eq_filter}"
+
+    # Year >= 9999 → only the clamped +infinity partition
+    if col_type == "date":
+        hi_filter = "col_val >= '9999-01-01'"
+    elif col_type == "timestamp":
+        hi_filter = "col_val >= '9999-01-01 00:00:00'"
+    else:
+        hi_filter = "col_val >= '9999-01-01 00:00:00+00'"
+
+    plan = run_query(
+        f"{explain_prefix} SELECT * FROM test_clamp_inf_part.tbl WHERE {hi_filter}",
+        pg_conn,
+    )
+    assert fetch_data_files_used(plan) == "1", f"hi: {hi_filter}"
+
+    count = run_query(
+        f"SELECT count(*) FROM test_clamp_inf_part.tbl WHERE {hi_filter};",
+        pg_conn,
+    )
+    assert count[0][0] == 1
+
+    # Lower bound → only the clamped -infinity partition
+    if col_type == "date":
+        lo_filter = "col_val <= '4000-01-01 BC'"
+    elif col_type == "timestamp":
+        lo_filter = "col_val <= '0001-12-31 23:59:59'"
+    else:
+        lo_filter = "col_val <= '0001-12-31 23:59:59+00'"
+
+    plan = run_query(
+        f"{explain_prefix} SELECT * FROM test_clamp_inf_part.tbl WHERE {lo_filter}",
+        pg_conn,
+    )
+    assert fetch_data_files_used(plan) == "1", f"lo: {lo_filter}"
+
+    count = run_query(
+        f"SELECT count(*) FROM test_clamp_inf_part.tbl WHERE {lo_filter};",
+        pg_conn,
+    )
+    assert count[0][0] == 1
+
+    run_command("RESET TIME ZONE;", pg_conn)
+    pg_conn.rollback()
+
+
+clamped_inf_all_transforms = [
+    # (partition_type, partition_by_template, applicable_col_types)
+    # year/month/day already covered by test_clamped_infinity_partition_pruning above
+    ("identity", "{col}", ["date", "timestamp", "timestamptz"]),
+    ("hour", "hour({col})", ["timestamp", "timestamptz"]),
+    ("bucket", "bucket(10, {col})", ["date", "timestamp", "timestamptz"]),
+]
+
+
+def _clamped_inf_transform_params():
+    """Generate (col_type, partition_type, partition_by) combinations."""
+    params = []
+    for ptype, tpl, col_types in clamped_inf_all_transforms:
+        for ct in col_types:
+            params.append(pytest.param(ct, ptype, tpl, id=f"{ct}-{ptype}"))
+    return params
+
+
+@pytest.mark.parametrize(
+    "col_type, partition_type, partition_by_tpl",
+    _clamped_inf_transform_params(),
+)
+def test_clamped_infinity_all_transforms(
+    s3,
+    disable_data_file_pruning,
+    pg_conn,
+    extension,
+    with_default_location,
+    col_type,
+    partition_type,
+    partition_by_tpl,
+):
+    """
+    Verify that ALL partition transforms clamp +-infinity values in the
+    partition key consistently with the data path.
+
+    Before the fix, clamping only happened in the CSV writer (data path)
+    and in year/month/day/hour temporal utils.  Identity and bucket
+    transforms operated on the raw datum, so the partition metadata
+    recorded infinity while the actual data was clamped to
+    9999-12-31 / 0001-01-01.  This caused partition pruning to skip
+    files that should have been scanned.
+
+    Covers identity, hour, and bucket transforms.
+    (year/month/day are tested separately in
+     test_clamped_infinity_partition_pruning.)
+    """
+
+    explain_prefix = "EXPLAIN (analyze, verbose, format json) "
+    partition_by = partition_by_tpl.format(col="col_val")
+
+    run_command(
+        f"""
+        CREATE SCHEMA test_clamp_all;
+        CREATE TABLE test_clamp_all.tbl (
+            col_val {col_type}
+        ) USING iceberg
+        WITH (
+            autovacuum_enabled = 'False',
+            partition_by       = '{partition_by}'
+        );
+        SET TIME ZONE 'UTC';
+    """,
+        pg_conn,
+    )
+
+    if col_type == "date":
+        normal_val = "2024-06-15"
+        clamped_hi = "9999-12-31"
+    elif col_type == "timestamp":
+        normal_val = "2024-06-15 10:00:00"
+        clamped_hi = "9999-12-31 23:59:59.999999"
+    else:
+        normal_val = "2024-06-15 10:00:00+00"
+        clamped_hi = "9999-12-31 23:59:59.999999+00"
+
+    run_command(
+        f"INSERT INTO test_clamp_all.tbl VALUES ('{normal_val}');",
+        pg_conn,
+    )
+    run_command(
+        "INSERT INTO test_clamp_all.tbl VALUES ('infinity');",
+        pg_conn,
+    )
+
+    count = run_query("SELECT count(*) FROM test_clamp_all.tbl;", pg_conn)
+    assert count[0][0] == 2
+
+    # the clamped +infinity value must be findable by its clamped representation;
+    # before the fix, the partition key was infinity while the data was 9999-12-31,
+    # so this query returned 0 rows due to pruning mismatch
+    result = run_query(
+        f"SELECT count(*) FROM test_clamp_all.tbl WHERE col_val = '{clamped_hi}';",
+        pg_conn,
+    )
+    assert result[0][0] == 1, (
+        f"clamped +infinity not found via {clamped_hi} "
+        f"[{col_type}, {partition_type}]"
+    )
+
+    if partition_type != "bucket":
+        # identity/hour: each distinct value maps to a distinct partition,
+        # so pruning must narrow to exactly 1 data file
+        plan = run_query(
+            f"{explain_prefix} SELECT * FROM test_clamp_all.tbl "
+            f"WHERE col_val = '{clamped_hi}';",
+            pg_conn,
+        )
+        assert (
+            int(fetch_data_files_used(plan)) == 1
+        ), f"pruning failed for {clamped_hi} [{col_type}, {partition_type}]"
+
+        plan = run_query(
+            f"{explain_prefix} SELECT * FROM test_clamp_all.tbl "
+            f"WHERE col_val = '{normal_val}';",
+            pg_conn,
+        )
+        assert (
+            int(fetch_data_files_used(plan)) == 1
+        ), f"pruning failed for {normal_val} [{col_type}, {partition_type}]"
+
+    run_command("RESET TIME ZONE;", pg_conn)
+    pg_conn.rollback()
+
+
+@pytest.mark.parametrize(
+    "partition_type, partition_by",
+    [
+        ("identity", "val"),
+        ("bucket", "bucket(10, val)"),
+    ],
+)
+def test_clamped_numeric_nan_partition(
+    s3,
+    disable_data_file_pruning,
+    pg_conn,
+    extension,
+    with_default_location,
+    partition_type,
+    partition_by,
+):
+    """
+    Verify that numeric NaN is clamped to NULL in the partition key,
+    consistent with the data path, for every supported numeric partition
+    transform (identity, bucket).
+    """
+
+    run_command(
+        f"""
+        CREATE SCHEMA test_clamp_nan;
+        CREATE TABLE test_clamp_nan.tbl (
+            val numeric(20,10)
+        ) USING iceberg
+        WITH (autovacuum_enabled = 'False', partition_by = '{partition_by}');
+    """,
+        pg_conn,
+    )
+
+    run_command(
+        "INSERT INTO test_clamp_nan.tbl VALUES ('NaN'), (1.5), (2.5);",
+        pg_conn,
+    )
+
+    result = run_query(
+        "SELECT count(*) FROM test_clamp_nan.tbl WHERE val IS NULL;",
+        pg_conn,
+    )
+    assert result[0][0] == 1, f"NaN not clamped to NULL [{partition_type}]"
+
+    result = run_query(
+        "SELECT count(*) FROM test_clamp_nan.tbl WHERE val IS NOT NULL;",
+        pg_conn,
+    )
+    assert result[0][0] == 2, f"unexpected NULL count [{partition_type}]"
+
+    result = run_query(
+        "SELECT count(*) FROM test_clamp_nan.tbl;",
+        pg_conn,
+    )
+    assert result[0][0] == 3, f"row count mismatch [{partition_type}]"
+
+    pg_conn.rollback()
+
+
 # this test file aims to ensure partition pruning works
 @pytest.fixture(scope="module")
 def disable_data_file_pruning(superuser_conn):

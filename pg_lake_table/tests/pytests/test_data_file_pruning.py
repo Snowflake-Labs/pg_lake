@@ -54,6 +54,40 @@ pruning_data = [
             ("2023-01-02 00:00:00+00", "2023-01-02 00:00:00+00"),
         ],
     ),
+    (
+        True,
+        "date",
+        "prune_date_bc",
+        [
+            ("4712-01-01 BC", "4712-01-01 BC"),
+            ("4712-01-01 BC", "0001-01-01 BC"),
+            ("0001-01-01 BC", "4712-01-01 BC"),
+            ("0001-01-01 BC", "0001-01-01 BC"),
+        ],
+    ),
+    # Iceberg timestamps only support AD years 0001–9999; use early-AD values
+    (
+        True,
+        "timestamp",
+        "prune_timestamp_early_ad",
+        [
+            ("0001-01-01 00:00:00", "0001-01-01 00:00:00"),
+            ("0001-01-01 00:00:00", "0002-06-15 12:30:00"),
+            ("0002-06-15 12:30:00", "0001-01-01 00:00:00"),
+            ("0002-06-15 12:30:00", "0002-06-15 12:30:00"),
+        ],
+    ),
+    (
+        True,
+        "timestamptz",
+        "prune_timestamptz_early_ad",
+        [
+            ("0001-01-01 00:00:00+00", "0001-01-01 00:00:00+00"),
+            ("0001-01-01 00:00:00+00", "0002-06-15 12:30:00+00"),
+            ("0002-06-15 12:30:00+00", "0001-01-01 00:00:00+00"),
+            ("0002-06-15 12:30:00+00", "0002-06-15 12:30:00+00"),
+        ],
+    ),
     # we currently do not store statistics for UUID, once we do, uncomment
     # (True, "uuid", "prune_uuid", [('550e8400-e29b-41d4-a716-446655440000', '550e8400-e29b-41d4-a716-446655440000'), ('550e8400-e29b-41d4-a716-446655440000', '123e4567-e89b-12d3-a456-426614174000'), ('123e4567-e89b-12d3-a456-426614174000', '550e8400-e29b-41d4-a716-446655440000'), ('123e4567-e89b-12d3-a456-426614174000', '123e4567-e89b-12d3-a456-426614174000')]),
 ]
@@ -1764,6 +1798,128 @@ def test_pruning_for_inlined_functions(
         assert int(fetch_data_files_used(results)) == 1
 
     run_command("DROP SCHEMA test_pruning_for_inlined_functions CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+@pytest.mark.parametrize("col_type", ["date", "timestamp", "timestamptz"])
+def test_clamped_infinity_data_file_pruning(
+    s3,
+    pg_conn,
+    extension,
+    with_default_location,
+    col_type,
+):
+    """Verify data file pruning works correctly with clamped +-infinity values."""
+
+    explain_prefix = "EXPLAIN (analyze, verbose, format json) "
+
+    run_command(
+        f"""
+        CREATE SCHEMA test_clamp_inf_dfp;
+        CREATE TABLE test_clamp_inf_dfp.tbl (
+            col {col_type}
+        ) USING iceberg WITH (autovacuum_enabled='False');
+        SET TIME ZONE 'UTC';
+    """,
+        pg_conn,
+    )
+
+    # Insert values in separate transactions to create separate data files
+    if col_type == "date":
+        normal_val = "2020-06-15"
+    elif col_type == "timestamp":
+        normal_val = "2020-06-15 10:00:00"
+    else:
+        normal_val = "2020-06-15 10:00:00+00"
+
+    # File 1: normal value
+    run_command(
+        f"INSERT INTO test_clamp_inf_dfp.tbl VALUES ('{normal_val}');",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # File 2: +infinity (clamped to upper Iceberg bound)
+    run_command(
+        "INSERT INTO test_clamp_inf_dfp.tbl VALUES ('infinity');",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # File 3: -infinity (clamped to lower Iceberg bound)
+    run_command(
+        "INSERT INTO test_clamp_inf_dfp.tbl VALUES ('-infinity');",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # 3 data files total
+
+    # Full scan → 3 files
+    results = run_query(
+        f"{explain_prefix} SELECT count(*) FROM test_clamp_inf_dfp.tbl",
+        pg_conn,
+    )
+    assert int(fetch_data_files_used(results)) == 3
+
+    # Exact match on normal value → prune to 1 file
+    if col_type == "date":
+        eq_filter = "col = '2020-06-15'"
+    elif col_type == "timestamp":
+        eq_filter = "col = '2020-06-15 10:00:00'"
+    else:
+        eq_filter = "col = '2020-06-15 10:00:00+00'"
+
+    results = run_query(
+        f"{explain_prefix} SELECT * FROM test_clamp_inf_dfp.tbl WHERE {eq_filter}",
+        pg_conn,
+    )
+    assert int(fetch_data_files_used(results)) == 1
+
+    # Year >= 9999 → only the clamped +infinity file
+    if col_type == "date":
+        hi_filter = "col >= '9999-01-01'"
+    elif col_type == "timestamp":
+        hi_filter = "col >= '9999-01-01 00:00:00'"
+    else:
+        hi_filter = "col >= '9999-01-01 00:00:00+00'"
+
+    results = run_query(
+        f"{explain_prefix} SELECT * FROM test_clamp_inf_dfp.tbl WHERE {hi_filter}",
+        pg_conn,
+    )
+    assert int(fetch_data_files_used(results)) == 1
+
+    # Lower bound → only the clamped -infinity file
+    if col_type == "date":
+        lo_filter = "col <= '4000-01-01 BC'"
+    elif col_type == "timestamp":
+        lo_filter = "col <= '0001-12-31 23:59:59'"
+    else:
+        lo_filter = "col <= '0001-12-31 23:59:59+00'"
+
+    results = run_query(
+        f"{explain_prefix} SELECT * FROM test_clamp_inf_dfp.tbl WHERE {lo_filter}",
+        pg_conn,
+    )
+    assert int(fetch_data_files_used(results)) == 1
+
+    # No matching value → 0 files
+    if col_type == "date":
+        no_match = "col = '2025-01-01'"
+    elif col_type == "timestamp":
+        no_match = "col = '2025-01-01 00:00:00'"
+    else:
+        no_match = "col = '2025-01-01 00:00:00+00'"
+
+    results = run_query(
+        f"{explain_prefix} SELECT * FROM test_clamp_inf_dfp.tbl WHERE {no_match}",
+        pg_conn,
+    )
+    assert int(fetch_data_files_used(results)) == 0
+
+    run_command("RESET TIME ZONE;", pg_conn)
+    run_command("DROP SCHEMA test_clamp_inf_dfp CASCADE", pg_conn)
     pg_conn.commit()
 
 

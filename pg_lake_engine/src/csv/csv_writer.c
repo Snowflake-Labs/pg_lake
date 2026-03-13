@@ -34,6 +34,7 @@
 #include "commands/defrem.h"
 #include "pg_lake/csv/csv_writer.h"
 #include "pg_lake/extensions/postgis.h"
+#include "pg_lake/pgduck/iceberg_write_validation.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/pgduck/serialize.h"
 #include "pg_lake/util/numeric.h"
@@ -107,6 +108,7 @@ typedef struct CopyToStateData
 	int			maxLineSize;
 	bool		quoteEmptyLines;
 	CopyDataFormat targetFormat;
+	IcebergOutOfRangePolicy outOfRangePolicy;
 
 	/* whether the CSV writer should survive multiple transactions */
 	bool		sessionLifetime;
@@ -646,6 +648,7 @@ CopyGetAttnumsFixed(TupleDesc tupDesc, List *attnamelist)
 	return attnums;
 }
 
+
 /*
  * ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits ensures the integral
  * digits of the numeric string do not exceed the max allowed digits during
@@ -687,10 +690,10 @@ ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits(const char *numericStr)
 }
 
 
-/*
-* ErrorIfSpecialNumeric ensures that the input string does not contain
-* special numeric values like NaN, Inf, -Inf.
-*/
+ /*
+  * ErrorIfSpecialNumeric ensures that the input string does not contain
+  * special numeric values like NaN, Inf, -Inf.
+  */
 static void
 ErrorIfSpecialNumeric(const char *input_str)
 {
@@ -745,11 +748,21 @@ CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot)
 		Datum		value = slot->tts_values[attnum - 1];
 		bool		isnull = slot->tts_isnull[attnum - 1];
 
+		/*
+		 * Lookup the underlying tuple's attribute so we can pass in the typid
+		 */
+		Form_pg_attribute attr = TupleDescAttr(slot->tts_tupleDescriptor, attnum - 1);
+
 		if (!cstate->opts.binary)
 		{
 			if (need_delim)
 				CopySendChar(cstate, cstate->opts.delim[0]);
 			need_delim = true;
+
+			if (!isnull && cstate->outOfRangePolicy != ICEBERG_OOR_NONE)
+				value = IcebergErrorOrClampDatum(value, attr->atttypid,
+												 cstate->outOfRangePolicy,
+												 &isnull);
 		}
 
 		if (isnull)
@@ -763,12 +776,6 @@ CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot)
 		{
 			if (!cstate->opts.binary)
 			{
-				/*
-				 * Lookup the underlying tuple's attribute so we can pass in
-				 * the typid
-				 */
-				Form_pg_attribute attr = TupleDescAttr(slot->tts_tupleDescriptor, attnum - 1);
-
 				if (ShouldUseDuckSerialization(cstate->targetFormat, MakePGType(attr->atttypid, attr->atttypmod)))
 				{
 					/*
@@ -786,15 +793,15 @@ CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot)
 					string = OutputFunctionCall(&out_functions[attnum - 1],
 												value);
 
-				if (attr->atttypid == NUMERICOID)
+				/* validate numeric for non-iceberg tables */
+				if (attr->atttypid == NUMERICOID &&
+					cstate->outOfRangePolicy == ICEBERG_OOR_NONE)
 				{
 					if (IsUnboundedNumeric(NUMERICOID, attr->atttypmod))
 						ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits(string);
 
-					/* do not allow Nan, Inf etc. */
 					ErrorIfSpecialNumeric(string);
 				}
-
 
 				if (cstate->opts.csv_mode)
 					CopyAttributeOutCSV(cstate, string,
@@ -1130,7 +1137,8 @@ copy_dest_destroy(DestReceiver *self)
  */
 DestReceiver *
 CreateCSVDestReceiver(char *filename, List *copyOptions,
-					  CopyDataFormat targetFormat)
+					  CopyDataFormat targetFormat,
+					  IcebergOutOfRangePolicy outOfRangePolicy)
 {
 	DR_copy    *self = (DR_copy *) palloc0(sizeof(DR_copy));
 
@@ -1150,6 +1158,7 @@ CreateCSVDestReceiver(char *filename, List *copyOptions,
 	 */
 	self->cstate->quoteEmptyLines = true;
 	self->cstate->targetFormat = targetFormat;
+	self->cstate->outOfRangePolicy = outOfRangePolicy;
 
 	return (DestReceiver *) self;
 }
@@ -1162,10 +1171,12 @@ CreateCSVDestReceiver(char *filename, List *copyOptions,
 DestReceiver *
 CreateCSVDestReceiverExtended(char *filename, List *copyOptions,
 							  CopyDataFormat targetFormat,
+							  IcebergOutOfRangePolicy outOfRangePolicy,
 							  bool sessionLifetime)
 {
 	DR_copy    *self =
-		(DR_copy *) CreateCSVDestReceiver(filename, copyOptions, targetFormat);
+		(DR_copy *) CreateCSVDestReceiver(filename, copyOptions, targetFormat,
+										  outOfRangePolicy);
 
 	self->cstate->sessionLifetime = sessionLifetime;
 

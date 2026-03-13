@@ -52,6 +52,7 @@
 #include "pg_lake/pgduck/read_data.h"
 #include "pg_lake/pgduck/remote_storage.h"
 #include "pg_lake/pgduck/write_data.h"
+#include "pg_lake/pgduck/iceberg_write_validation.h"
 #include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_extension_base/spi_helpers.h"
@@ -212,6 +213,8 @@ PrepareCSVInsertion(Oid relationId, char *insertCSV, int64 rowCount,
 					int64 reservedRowIdStart, int maximumLineSize,
 					DataFileSchema * schema)
 {
+	IcebergOutOfRangePolicy outOfRangePolicy =
+		GetIcebergOutOfRangePolicyForTable(relationId);
 	Relation	relation = table_open(relationId, RowExclusiveLock);
 	ForeignTable *foreignTable = GetForeignTable(relationId);
 	TupleDesc	tupleDescriptor = RelationGetDescr(relation);
@@ -270,7 +273,8 @@ PrepareCSVInsertion(Oid relationId, char *insertCSV, int64 rowCount,
 						 compression,
 						 options,
 						 schema,
-						 leafFields);
+						 leafFields,
+						 outOfRangePolicy);
 
 	ApplyColumnStatsModeForAllFileStats(relationId, statsCollector->dataFileStats);
 
@@ -587,10 +591,11 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 
 			List	   *leafFields = GetLeafFieldsForTable(relationId);
 
-			/* write the deletion file */
+			/* write the deletion file (no temporal validation needed) */
 			StatsCollector *statsCollector =
 				ConvertCSVFileTo(deleteFile, deleteTupleDesc, -1, deletionFilePath,
-								 DATA_FORMAT_PARQUET, compression, copyOptions, schema, leafFields);
+								 DATA_FORMAT_PARQUET, compression, copyOptions, schema, leafFields,
+								 ICEBERG_OOR_NONE);
 
 			ereport(WriteLogLevel, (errmsg("adding deletion file %s with " INT64_FORMAT " rows ",
 										   deletionFilePath, deletedRowCount)));
@@ -960,6 +965,8 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 							   int32 partitionSpecId, Partition * partition,
 							   bool queryHasRowId, bool allowSplit, bool isVerbose)
 {
+	IcebergOutOfRangePolicy outOfRangePolicy =
+		GetIcebergOutOfRangePolicyForTable(relationId);
 	PgLakeTableProperties properties = GetPgLakeTableProperties(relationId);
 	List	   *options = properties.options;
 
@@ -1007,7 +1014,8 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 						   queryHasRowId,
 						   schema,
 						   queryTupleDesc,
-						   leafFields);
+						   leafFields,
+						   outOfRangePolicy);
 
 	if (statsCollector->totalRowCount == 0)
 	{
@@ -1047,6 +1055,8 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 int64
 AddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc)
 {
+	Assert(queryTupleDesc != NULL && queryTupleDesc->natts > 0);
+
 	int64		rowsProcessed = 0;
 	ForeignTable *foreignTable = GetForeignTable(relationId);
 	List	   *options = foreignTable->options;

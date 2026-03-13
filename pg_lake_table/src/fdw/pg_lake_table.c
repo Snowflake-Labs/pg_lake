@@ -3487,7 +3487,9 @@ create_foreign_modify(Relation rel,
 					char	   *tempFileName = GenerateTempFileName("lake_table_delete", true);
 
 					fileModifyState->deleteFile = tempFileName;
-					fileModifyState->deleteDest = CreateCSVDestReceiver(tempFileName, copyOptions, foreignTableFormat);
+					fileModifyState->deleteDest = CreateCSVDestReceiver(tempFileName, copyOptions,
+																		foreignTableFormat,
+																		ICEBERG_OOR_NONE);
 				}
 
 				fileModifyStates = lappend(fileModifyStates, fileModifyState);
@@ -3793,7 +3795,7 @@ process_query_params(ExprContext *econtext,
 		else
 
 			param_values[i] = PGDuckSerialize(&param_flinfo[i], exprType((Node *) expr_state->expr), expr_value,
-														  DATA_FORMAT_INVALID);
+											  DATA_FORMAT_INVALID);
 		i++;
 	}
 

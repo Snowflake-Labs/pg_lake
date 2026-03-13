@@ -32,7 +32,7 @@ def test_iceberg_base_types(pg_conn, s3, extension, create_helper_functions):
                     float4_col REAL DEFAULT 3.14,
                     float8_col DOUBLE PRECISION DEFAULT 2.718281828,
                     varchar_col VARCHAR DEFAULT 'test' || 'as',
-                    decimal_col NUMERIC DEFAULT random(),
+                    decimal_col NUMERIC DEFAULT round(random()::numeric, 9),
                     uuid_col UUID DEFAULT '123e4567-e89b-12d3-a456-426614174000',
                     hugeint_col NUMERIC(38, 0),
                     uhugeint_col NUMERIC(38, 0),
@@ -262,7 +262,7 @@ def test_iceberg_base_types(pg_conn, s3, extension, create_helper_functions):
                 DEFAULT,                -- float4_col uses the default (3.14)
                 DEFAULT,                -- float8_col uses the default (2.718281828)
                 DEFAULT,                -- varchar_col uses default ('testas')
-                DEFAULT,                -- decimal_col uses default (random())
+                DEFAULT,                -- decimal_col uses default (round(random()::numeric, 9))
                 DEFAULT,                -- uuid_col uses the default ('123e4567-e89b-12d3-a456-426614174000')
                 12345678901234567890123456789012345678, -- hugeint_col (NUMERIC(38, 0))
                 98765432109876543210987654321098765432, -- uhugeint_col (NUMERIC(38, 0))
@@ -694,7 +694,7 @@ def test_iceberg_types_array(pg_conn, create_helper_functions, s3, extension):
             ARRAY[3.14, 2.71],                                              -- float4_col (REAL)
             ARRAY[2.718281828, 3.1415926535],                               -- float8_col (DOUBLE PRECISION)
             ARRAY['hello', 'world'],                                        -- varchar_col (VARCHAR)
-            ARRAY[random(), random()],                                      -- decimal_col (NUMERIC)
+            ARRAY[round(random()::numeric, 9), round(random()::numeric, 9)],    -- decimal_col (NUMERIC)
             ARRAY['123e4567-e89b-12d3-a456-426614174000'::uuid, '321e6547-e89b-12d3-a456-426614174000'::uuid], -- uuid_col (UUID)
             ARRAY[12345678901234567890123456789012345678, 98765432109876543210987654321098765432], -- hugeint_col (NUMERIC(38, 0))
             ARRAY[11111111111111111111111111111111111111, 22222222222222222222222222222222222222], -- uhugeint_col (NUMERIC(38, 0))
