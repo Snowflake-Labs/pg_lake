@@ -790,3 +790,89 @@ IsReadOnlyIcebergTable(Oid relationId)
 {
 	return IsIcebergTable(relationId) && !IsWritableIcebergTable(relationId);
 }
+
+
+/*
+ * UpdateLastSyncedSnapshotId upserts the last synced snapshot ID for a given relation into the REST catalog sync table.
+ * This tracks what was last successfully pushed to the REST catalog.
+ */
+void
+UpdateLastSyncedSnapshotId(Oid relationId, int64 snapshotId)
+{
+	/* switch to schema owner */
+	Oid			savedUserId = InvalidOid;
+	int			savedSecurityContext = 0;
+
+	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
+	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeIceberg), SECURITY_LOCAL_USERID_CHANGE);
+
+	StringInfo	query = makeStringInfo();
+
+	appendStringInfo(query,
+					 "INSERT INTO %s (table_name, last_synced_snapshot_id) "
+					 "VALUES ($1, $2) "
+					 "ON CONFLICT (table_name) "
+					 "DO UPDATE SET last_synced_snapshot_id = EXCLUDED.last_synced_snapshot_id",
+					 REST_CATALOG_SYNC_TABLE_QUALIFIED);
+
+	DECLARE_SPI_ARGS(2);
+	SPI_ARG_VALUE(1, OIDOID, relationId, false);
+	SPI_ARG_VALUE(2, INT8OID, snapshotId, false);
+
+	SPI_START();
+
+	bool		readOnly = false;
+
+	SPI_EXECUTE(query->data, readOnly);
+
+	SPI_END();
+
+	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
+}
+
+
+/*
+ * GetLastSyncedSnapshotId returns the last synced snapshot id for a given
+ * relation from the REST catalog sync table. Returns NULL if not found.
+ */
+int64_t
+GetLastSyncedSnapshotId(Oid relationId)
+{
+	/* switch to schema owner */
+	Oid			savedUserId = InvalidOid;
+	int			savedSecurityContext = 0;
+
+	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
+	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeIceberg), SECURITY_LOCAL_USERID_CHANGE);
+
+	StringInfo	query = makeStringInfo();
+
+	appendStringInfo(query,
+					 "SELECT last_synced_snapshot_id FROM %s "
+					 "WHERE table_name OPERATOR(pg_catalog.=) $1",
+					 REST_CATALOG_SYNC_TABLE_QUALIFIED);
+
+	DECLARE_SPI_ARGS(1);
+	SPI_ARG_VALUE(1, OIDOID, relationId, false);
+
+	SPI_START();
+
+	bool		readOnly = true;
+
+	SPI_EXECUTE(query->data, readOnly);
+
+	int64_t		lastSyncedSnapshotId = -1;
+
+	if (SPI_processed > 0)
+	{
+		bool		isNull = false;
+
+		lastSyncedSnapshotId = GET_SPI_VALUE(INT8OID, 0, 1, &isNull);
+	}
+
+	SPI_END();
+
+	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
+
+	return lastSyncedSnapshotId;
+}
