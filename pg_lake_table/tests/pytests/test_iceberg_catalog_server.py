@@ -518,6 +518,27 @@ def test_reject_create_server_type_object_store(superuser_conn, extension):
     superuser_conn.rollback()
 
 
+def test_reject_create_server_reserved_name(superuser_conn, extension):
+    """CREATE SERVER with a reserved catalog name (case-insensitive) is blocked."""
+    reserved_names = [
+        "Postgres",
+        "OBJECT_STORE",
+        "ReSt",
+    ]
+    for name in reserved_names:
+        err = run_command(
+            f"""
+            CREATE SERVER "{name}" TYPE 'rest'
+                FOREIGN DATA WRAPPER iceberg_catalog
+            """,
+            superuser_conn,
+            raise_error=False,
+        )
+        assert err is not None, f"Expected error for reserved name '{name}'"
+        assert "reserved for the extension-owned catalog" in str(err)
+        superuser_conn.rollback()
+
+
 def test_reject_alter_postgres_server(superuser_conn, extension):
     """ALTER SERVER on the extension-owned 'postgres' server is blocked."""
     err = run_command(
@@ -624,6 +645,36 @@ def test_reject_rename_rest_server(superuser_conn, extension):
     )
     assert err is not None
     assert 'cannot rename the extension-owned "rest" catalog server' in str(err)
+    superuser_conn.rollback()
+
+
+def test_reject_rename_to_reserved_name(superuser_conn, extension):
+    """Renaming a user-created server TO a reserved name is blocked."""
+    run_command(
+        """
+        CREATE SERVER tmp_rename_srv TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    for reserved in ["POSTGRES", "Object_Store", "REST"]:
+        err = run_command(
+            f'ALTER SERVER tmp_rename_srv RENAME TO "{reserved}"',
+            superuser_conn,
+            raise_error=False,
+        )
+        assert err is not None, f"Expected error for renaming to '{reserved}'"
+        assert "reserved for the extension-owned catalog" in str(err)
+        superuser_conn.rollback()
+        run_command(
+            """
+            CREATE SERVER tmp_rename_srv TYPE 'rest'
+                FOREIGN DATA WRAPPER iceberg_catalog
+                OPTIONS (rest_endpoint 'http://localhost:8181')
+            """,
+            superuser_conn,
+        )
     superuser_conn.rollback()
 
 

@@ -242,6 +242,13 @@ BlockDDLOnExtensionCatalogs(ProcessUtilityParams *processUtilityParams,
 			strcmp(stmt->fdwname, ICEBERG_CATALOG_FDW_NAME) != 0)
 			return false;
 
+		if (IsCatalogOwnedByExtension(stmt->servername))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("server name \"%s\" is reserved for the extension-owned catalog",
+							stmt->servername),
+					 errhint("Choose a different server name.")));
+
 		if (stmt->servertype != NULL &&
 			(pg_strcasecmp(stmt->servertype, POSTGRES_CATALOG_NAME) == 0 ||
 			 pg_strcasecmp(stmt->servertype, OBJECT_STORE_CATALOG_NAME) == 0))
@@ -307,6 +314,13 @@ BlockDDLOnExtensionCatalogs(ProcessUtilityParams *processUtilityParams,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("cannot rename the extension-owned \"%s\" catalog server",
 							serverName)));
+
+		if (IsCatalogOwnedByExtension(stmt->newname))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("server name \"%s\" is reserved for the extension-owned catalog",
+							stmt->newname),
+					 errhint("Choose a different server name.")));
 	}
 	else if (IsA(parsetree, AlterOwnerStmt))
 	{

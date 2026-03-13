@@ -90,7 +90,7 @@ HasObjectStoreCatalogTableOption(List *options)
 {
 	char	   *catalog = GetStringOption(options, "catalog", false);
 
-	return catalog ? pg_strncasecmp(catalog, OBJECT_STORE_CATALOG_NAME, strlen(catalog)) == 0 : false;
+	return catalog ? pg_strcasecmp(catalog, OBJECT_STORE_CATALOG_NAME) == 0 : false;
 }
 
 
@@ -114,9 +114,9 @@ HasReadOnlyOption(List *options)
 bool
 IsCatalogOwnedByExtension(const char *catalog)
 {
-	return pg_strncasecmp(catalog, REST_CATALOG_NAME, strlen(REST_CATALOG_NAME)) == 0 ||
-		pg_strncasecmp(catalog, OBJECT_STORE_CATALOG_NAME, strlen(OBJECT_STORE_CATALOG_NAME)) == 0 ||
-		pg_strncasecmp(catalog, POSTGRES_CATALOG_NAME, strlen(POSTGRES_CATALOG_NAME)) == 0;
+	return pg_strcasecmp(catalog, REST_CATALOG_NAME) == 0 ||
+		pg_strcasecmp(catalog, OBJECT_STORE_CATALOG_NAME) == 0 ||
+		pg_strcasecmp(catalog, POSTGRES_CATALOG_NAME) == 0;
 }
 
 
@@ -131,7 +131,7 @@ IsRestCatalog(const char *catalog)
 	if (catalog == NULL)
 		return false;
 
-	if (pg_strncasecmp(catalog, REST_CATALOG_NAME, strlen(REST_CATALOG_NAME)) == 0)
+	if (pg_strcasecmp(catalog, REST_CATALOG_NAME) == 0)
 		return true;
 
 	/* Try to look up a server with this name */
@@ -148,7 +148,7 @@ IsRestCatalog(const char *catalog)
 
 	/* Check server TYPE if set */
 	if (server->servertype != NULL && *server->servertype != '\0')
-		return pg_strncasecmp(server->servertype, "rest", strlen("rest")) == 0;
+		return pg_strcasecmp(server->servertype, "rest") == 0;
 
 	/* No TYPE specified, assume rest */
 	return true;
