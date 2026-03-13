@@ -367,9 +367,9 @@ IcebergDefaultCatalogCheckHook(char **newvalue, void **extra, GucSource source)
 {
 	char	   *newCatalog = *newvalue;
 
-	if (pg_strncasecmp(newCatalog, POSTGRES_CATALOG_NAME, strlen(newCatalog)) == 0 ||
-		pg_strncasecmp(newCatalog, REST_CATALOG_NAME, strlen(newCatalog)) == 0 ||
-		pg_strncasecmp(newCatalog, OBJECT_STORE_CATALOG_NAME, strlen(newCatalog)) == 0)
+	if (pg_strcasecmp(newCatalog, POSTGRES_CATALOG_NAME) == 0 ||
+		pg_strcasecmp(newCatalog, REST_CATALOG_NAME) == 0 ||
+		pg_strcasecmp(newCatalog, OBJECT_STORE_CATALOG_NAME) == 0)
 		return true;
 
 	GUC_check_errdetail("pg_lake_iceberg: allowed iceberg catalog options are '" POSTGRES_CATALOG_NAME "', "
