@@ -56,7 +56,7 @@ char	   *RestCatalogOauthHostPath = "";
 char	   *RestCatalogClientId = NULL;
 char	   *RestCatalogClientSecret = NULL;
 char	   *RestCatalogScope = "PRINCIPAL_ROLE:ALL";
-int			RestCatalogAuthType = REST_CATALOG_AUTH_TYPE_DEFAULT;
+int			RestCatalogAuthType = REST_CATALOG_AUTH_TYPE_OAUTH2;
 bool		RestCatalogEnableVendedCredentials = true;
 
 /*
@@ -169,11 +169,13 @@ iceberg_catalog_validator(PG_FUNCTION_ARGS)
 		{
 			char	   *authType = defGetString(def);
 
-			if (strcmp(authType, "default") != 0 && strcmp(authType, "horizon") != 0)
+			if (strcmp(authType, "oauth2") != 0 &&
+				strcmp(authType, "default") != 0 &&
+				strcmp(authType, "horizon") != 0)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 						 errmsg("invalid rest_auth_type option: \"%s\"", authType),
-						 errhint("Valid values are \"default\" and \"horizon\".")));
+						 errhint("Valid values are \"oauth2\" and \"horizon\".")));
 		}
 		else if (strcmp(def->defname, "enable_vended_credentials") == 0)
 		{
@@ -204,7 +206,7 @@ IsIcebergCatalogServer(const char *serverName)
 
 
 /*
- * ProtectExtensionCatalogServersHandler guards the extension-owned
+ * BlockDDLOnExtensionCatalogs guards the extension-owned
  * iceberg_catalog servers (postgres, object_store, rest) against
  * unauthorized DDL.
  *
@@ -214,9 +216,10 @@ IsIcebergCatalogServer(const char *serverName)
  *  - ALTER SERVER on 'rest' is allowed (users may set options).
  *  - DROP SERVER on 'postgres', 'object_store', or 'rest' is blocked.
  *  - ALTER ... RENAME on 'postgres', 'object_store', or 'rest' is blocked.
+ *  - ALTER ... OWNER TO on 'postgres', 'object_store', or 'rest' is blocked.
  */
 bool
-ProtectExtensionCatalogServersHandler(ProcessUtilityParams *processUtilityParams,
+BlockDDLOnExtensionCatalogs(ProcessUtilityParams *processUtilityParams,
 									  void *arg)
 {
 	Node	   *parsetree = processUtilityParams->plannedStmt->utilityStmt;
@@ -298,6 +301,24 @@ ProtectExtensionCatalogServersHandler(ProcessUtilityParams *processUtilityParams
 					 errmsg("cannot rename the extension-owned \"%s\" catalog server",
 							serverName)));
 	}
+	else if (IsA(parsetree, AlterOwnerStmt))
+	{
+		AlterOwnerStmt *stmt = (AlterOwnerStmt *) parsetree;
+
+		if (stmt->objectType != OBJECT_FOREIGN_SERVER)
+			return false;
+
+		char	   *serverName = strVal(stmt->object);
+
+		if (!IsIcebergCatalogServer(serverName))
+			return false;
+
+		if (IsCatalogOwnedByExtension(serverName))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot change owner of the extension-owned \"%s\" catalog server",
+							serverName)));
+	}
 
 	return false;
 }
@@ -359,7 +380,7 @@ GetRestCatalogConnectionFromServer(const char *serverName)
 
 			conn->authType = (strcmp(authType, "horizon") == 0)
 				? REST_CATALOG_AUTH_TYPE_HORIZON
-				: REST_CATALOG_AUTH_TYPE_DEFAULT;
+				: REST_CATALOG_AUTH_TYPE_OAUTH2;
 		}
 		else if (strcmp(def->defname, "oauth_endpoint") == 0)
 			conn->oauthHostPath = defGetString(def);
