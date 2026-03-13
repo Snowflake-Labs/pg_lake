@@ -24,7 +24,7 @@
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/iceberg/api/snapshot.h"
 
-#define REST_CATALOG_AUTH_TYPE_DEFAULT (0)
+#define REST_CATALOG_AUTH_TYPE_OAUTH2 (0)
 #define REST_CATALOG_AUTH_TYPE_HORIZON (1)
 
 extern PGDLLEXPORT char *RestCatalogHost;
@@ -99,9 +99,6 @@ typedef struct RestCatalogRequest
 extern PGDLLEXPORT RestCatalogConnectionInfo * GetRestCatalogConnectionFromServer(const char *serverName);
 extern PGDLLEXPORT RestCatalogConnectionInfo * GetRestCatalogConnectionForRelation(Oid relationId);
 
-/* FDW name for iceberg_catalog servers */
-#define ICEBERG_CATALOG_FDW_NAME "iceberg_catalog"
-
 extern PGDLLEXPORT void RegisterNamespaceToRestCatalog(RestCatalogConnectionInfo * conn, const char *catalogName, const char *namespaceName);
 extern PGDLLEXPORT void StartStageRestCatalogIcebergTableCreate(Oid relationId);
 extern PGDLLEXPORT char *FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSchema * dataFileSchema, List *partitionSpecs);
@@ -125,4 +122,4 @@ extern PGDLLEXPORT RestCatalogRequest * GetSetPartitionDefaultIdCatalogRequest(O
 extern PGDLLEXPORT RestCatalogRequest * GetRemoveSnapshotCatalogRequest(List *removedSnapshotIds, Oid relationId);
 
 /* ProcessUtility handler: protects extension-owned catalog servers */
-extern PGDLLEXPORT bool ProtectExtensionCatalogServersHandler(ProcessUtilityParams *processUtilityParams, void *arg);
+extern PGDLLEXPORT bool BlockDDLOnExtensionCatalogs(ProcessUtilityParams *processUtilityParams, void *arg);
