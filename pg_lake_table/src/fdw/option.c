@@ -751,7 +751,7 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 				 */
 				icebergCatalogType = REST_CATALOG_READ_ONLY;
 			}
-			else if (pg_strncasecmp(icebergCatalogName, OBJECT_STORE_CATALOG_NAME, strlen(icebergCatalogName)) == 0)
+			else if (pg_strcasecmp(icebergCatalogName, OBJECT_STORE_CATALOG_NAME) == 0)
 			{
 				/*
 				 * at this point, we cannot tell whether it's read only or
@@ -760,7 +760,7 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 				 */
 				icebergCatalogType = OBJECT_STORE_READ_ONLY;
 			}
-			else if (pg_strncasecmp(icebergCatalogName, POSTGRES_CATALOG_NAME, strlen(icebergCatalogName)) == 0)
+			else if (pg_strcasecmp(icebergCatalogName, POSTGRES_CATALOG_NAME) == 0)
 				icebergCatalogType = POSTGRES_CATALOG;
 			else
 				ereport(ERROR,
