@@ -278,7 +278,9 @@ PostAllRestCatalogRequests(void)
 			{
 				HttpResult	httpResult =
 					SendRequestToRestCatalog(HTTP_POST, requestPerTable->tableRestUrl,
-											 createTableRequest->body, PostHeadersWithAuth(requestPerTable->conn));
+											 createTableRequest->body,
+											 PostHeadersWithAuth(requestPerTable->conn),
+											 requestPerTable->conn->serverName);
 
 				if (httpResult.status != 200)
 				{
@@ -294,7 +296,9 @@ PostAllRestCatalogRequests(void)
 			{
 				HttpResult	httpResult =
 					SendRequestToRestCatalog(HTTP_DELETE, requestPerTable->tableRestUrl,
-											 NULL, DeleteHeadersWithAuth(requestPerTable->conn));
+											 NULL,
+											 DeleteHeadersWithAuth(requestPerTable->conn),
+											 requestPerTable->conn->serverName);
 
 				if (httpResult.status != 204)
 				{
@@ -360,9 +364,10 @@ PostAllRestCatalogRequests(void)
 	}
 
 	/*
-	 * Group by server host and send one batch per server. For each table,
-	 * find if we already started a batch for its server host, otherwise
-	 * start a new one.
+	 * Group by (host, catalogName) and send one batch per group.  The
+	 * transaction commit URL includes the catalog prefix, so tables under
+	 * different catalog names need separate commits even when the host is
+	 * the same.
 	 */
 	while (list_length(tablesWithModifications) > 0)
 	{
@@ -386,7 +391,8 @@ PostAllRestCatalogRequests(void)
 		{
 			requestPerTable = (RestCatalogRequestPerTable *) lfirst(lc);
 
-			if (strcmp(requestPerTable->conn->host, batchHost) != 0)
+			if (strcmp(requestPerTable->conn->host, batchHost) != 0 ||
+				strcmp(requestPerTable->catalogName, catalogName) != 0)
 			{
 				remaining = lappend(remaining, requestPerTable);
 				continue;
@@ -431,7 +437,9 @@ PostAllRestCatalogRequests(void)
 			appendStringInfoChar(batchRequestBody, '}');
 
 			char	   *url = psprintf(REST_CATALOG_TRANSACTION_COMMIT, batchConn->host, catalogName);
-			HttpResult	httpResult = SendRequestToRestCatalog(HTTP_POST, url, batchRequestBody->data, PostHeadersWithAuth(batchConn));
+			HttpResult	httpResult = SendRequestToRestCatalog(HTTP_POST, url, batchRequestBody->data,
+															 PostHeadersWithAuth(batchConn),
+															 batchConn->serverName);
 
 			if (httpResult.status != 204)
 			{
