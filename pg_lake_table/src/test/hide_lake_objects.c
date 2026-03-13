@@ -356,7 +356,7 @@ CheckObjectCreatedByLakeInternal(HTAB *referencedObjectsMap, ObjectAddress refer
 				BTEqualStrategyNumber, F_OIDEQ,
 				ObjectIdGetDatum(referencingAddress.objectId));
 
-	scanDesc = systable_beginscan(pgDependRel, InvalidOid, false,
+	scanDesc = systable_beginscan(pgDependRel, DependDependerIndexId, true,
 								  NULL, 2, scanKey);
 
 	bool		createdByLake = false;
