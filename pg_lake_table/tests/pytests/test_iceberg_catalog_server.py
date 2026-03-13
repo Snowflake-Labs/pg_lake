@@ -57,7 +57,7 @@ def test_create_rest_server_with_all_options(superuser_conn, extension):
             FOREIGN DATA WRAPPER iceberg_catalog
             OPTIONS (
                 rest_endpoint 'http://localhost:8181',
-                rest_auth_type 'default',
+                rest_auth_type 'oauth2',
                 oauth_endpoint 'http://localhost:8181/oauth/tokens',
                 scope 'PRINCIPAL_ROLE:ALL',
                 enable_vended_credentials 'true',
@@ -135,12 +135,12 @@ def test_reject_unknown_server_option(superuser_conn, extension):
 
 
 def test_reject_invalid_auth_type(superuser_conn, extension):
-    """Only 'default' and 'horizon' are valid for rest_auth_type."""
+    """Only 'oauth2', 'default', and 'horizon' are valid for rest_auth_type."""
     err = run_command(
         """
         CREATE SERVER test_bad_auth TYPE 'rest'
             FOREIGN DATA WRAPPER iceberg_catalog
-            OPTIONS (rest_endpoint 'http://localhost:8181', rest_auth_type 'oauth2')
+            OPTIONS (rest_endpoint 'http://localhost:8181', rest_auth_type 'basic')
         """,
         superuser_conn,
         raise_error=False,
@@ -177,38 +177,23 @@ def test_reject_options_on_non_server(superuser_conn, extension):
     superuser_conn.rollback()
 
 
-# ── Creating foreign tables on iceberg_catalog should fail ─────────────────
+# ── CREATE FOREIGN TABLE on iceberg_catalog servers is blocked ──────────────
 
 
-def test_cannot_query_foreign_table_on_catalog_server(superuser_conn, extension):
-    """iceberg_catalog has no handler, so querying a foreign table should fail.
-
-    PostgreSQL allows CREATE FOREIGN TABLE on a handler-less FDW; the error
-    only surfaces at query time when GetFdwRoutineByServerId() is called.
-    """
-    run_command(
-        """
-        CREATE SERVER test_ft_server TYPE 'rest'
-            FOREIGN DATA WRAPPER iceberg_catalog
-            OPTIONS (rest_endpoint 'http://localhost:8181')
-        """,
-        superuser_conn,
-    )
-
-    run_command(
-        """
-        CREATE FOREIGN TABLE test_ft_table (id int)
-            SERVER test_ft_server
-        """,
-        superuser_conn,
-    )
-
+def test_reject_create_foreign_table_on_iceberg_catalog_server(
+    superuser_conn, extension
+):
+    """CREATE FOREIGN TABLE on an iceberg_catalog server is blocked."""
     err = run_command(
-        "SELECT * FROM test_ft_table",
+        """
+        CREATE FOREIGN TABLE test_ft_pg (id int)
+            SERVER postgres
+        """,
         superuser_conn,
         raise_error=False,
     )
-    assert "has no handler" in str(err)
+    assert err is not None
+    assert "cannot create foreign tables on iceberg_catalog server" in str(err)
     superuser_conn.rollback()
 
 
@@ -631,6 +616,50 @@ def test_reject_rename_rest_server(superuser_conn, extension):
     superuser_conn.rollback()
 
 
+def test_reject_owner_change_postgres_server(superuser_conn, extension):
+    """ALTER SERVER ... OWNER TO on the extension-owned 'postgres' server is blocked."""
+    err = run_command(
+        "ALTER SERVER postgres OWNER TO CURRENT_USER",
+        superuser_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert (
+        'cannot change owner of the extension-owned "postgres" catalog server'
+        in str(err)
+    )
+    superuser_conn.rollback()
+
+
+def test_reject_owner_change_object_store_server(superuser_conn, extension):
+    """ALTER SERVER ... OWNER TO on the extension-owned 'object_store' server is blocked."""
+    err = run_command(
+        "ALTER SERVER object_store OWNER TO CURRENT_USER",
+        superuser_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert (
+        'cannot change owner of the extension-owned "object_store" catalog server'
+        in str(err)
+    )
+    superuser_conn.rollback()
+
+
+def test_reject_owner_change_rest_server(superuser_conn, extension):
+    """ALTER SERVER ... OWNER TO on the extension-owned 'rest' server is blocked."""
+    err = run_command(
+        "ALTER SERVER rest OWNER TO CURRENT_USER",
+        superuser_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert 'cannot change owner of the extension-owned "rest" catalog server' in str(
+        err
+    )
+    superuser_conn.rollback()
+
+
 def test_allow_drop_user_created_server(superuser_conn, extension):
     """DROP SERVER on a user-created server should work fine."""
     run_command(
@@ -657,5 +686,22 @@ def test_allow_rename_user_created_server(superuser_conn, extension):
     )
     run_command(
         "ALTER SERVER user_rename_srv RENAME TO user_renamed_srv", superuser_conn
+    )
+    superuser_conn.rollback()
+
+
+def test_allow_owner_change_user_created_server(superuser_conn, extension):
+    """ALTER SERVER ... OWNER TO on a user-created server should work fine."""
+    run_command(
+        """
+        CREATE SERVER user_owner_srv TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        "ALTER SERVER user_owner_srv OWNER TO CURRENT_USER",
+        superuser_conn,
     )
     superuser_conn.rollback()
