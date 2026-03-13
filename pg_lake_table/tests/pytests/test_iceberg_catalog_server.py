@@ -46,6 +46,17 @@ def test_precreated_object_store_server(pg_conn, extension):
     assert result[0]["srvtype"] == "object_store"
 
 
+def test_precreated_rest_server(pg_conn, extension):
+    """A 'rest' server of TYPE 'rest' should be pre-created."""
+    result = run_query(
+        "SELECT srvname, srvtype FROM pg_foreign_server WHERE srvname = 'rest'",
+        pg_conn,
+    )
+    assert len(result) == 1
+    assert result[0]["srvname"] == "rest"
+    assert result[0]["srvtype"] == "rest"
+
+
 # ── CREATE SERVER with valid options ───────────────────────────────────────
 
 
