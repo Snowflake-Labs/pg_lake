@@ -20,7 +20,6 @@
 #include "nodes/pg_list.h"
 #include "utils/relcache.h"
 #include "pg_lake/data_file/data_files.h"
-#include "pg_lake/pgduck/iceberg_write_validation.h"
 
 /* by default, we switch to copy-on-write if 20% or more of a file is deleted */
 #define DEFAULT_COPY_ON_WRITE_THRESHOLD (20)
@@ -114,9 +113,7 @@ extern PGDLLEXPORT bool TryLockTableForUpdate(Oid relationId);
 
 extern PGDLLEXPORT List *PrepareCSVInsertion(Oid relationId, char *insertCSV, int64 rowCount,
 											 int64 reservedRowIdStart, int maximumLineSize,
-											 DataFileSchema * schema,
-											 IcebergOutOfRangePolicy outOfRangePolicy);
+											 DataFileSchema * schema);
 
 extern PGDLLEXPORT int64 AddQueryResultToTable(Oid relationId, char *readQuery,
-											   TupleDesc queryTupleDesc,
-											   IcebergOutOfRangePolicy outOfRangePolicy);
+											   TupleDesc queryTupleDesc);

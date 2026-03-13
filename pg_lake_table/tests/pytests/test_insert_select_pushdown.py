@@ -1089,3 +1089,59 @@ def test_infinity_temporal_clamp_insert_select_pushdown(
         run_command("RESET search_path;", pg_conn)
         run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
         pg_conn.commit()
+
+
+@pytest.mark.parametrize(
+    "col_type,policy,expected_pattern",
+    [
+        ("date", "clamp", r"WHEN.*<.*DATE.*THEN.*DATE"),
+        ("date", "error", r"WHEN.*NOT BETWEEN.*DATE.*error\("),
+        ("timestamp", "clamp", r"WHEN.*<.*TIMESTAMP.*THEN.*TIMESTAMP"),
+        ("timestamp", "error", r"WHEN.*NOT BETWEEN.*TIMESTAMP.*error\("),
+        ("timestamptz", "clamp", r"WHEN.*<.*TIMESTAMPTZ.*THEN.*TIMESTAMPTZ"),
+        ("timestamptz", "error", r"WHEN.*NOT BETWEEN.*TIMESTAMPTZ.*error\("),
+    ],
+)
+def test_explain_shows_temporal_validation_wrapper(
+    pg_conn,
+    extension,
+    s3,
+    with_default_location,
+    col_type,
+    policy,
+    expected_pattern,
+):
+    """EXPLAIN (VERBOSE) should show the CASE WHEN temporal validation wrapper."""
+    schema = "test_explain_oor_wrapper"
+
+    run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    try:
+        run_command(
+            f"CREATE TABLE oor_explain (col {col_type}) USING iceberg"
+            f" WITH (out_of_range_values = '{policy}');",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        result = run_query(
+            "EXPLAIN (VERBOSE) INSERT INTO oor_explain"
+            f" SELECT '2024-01-01'::{col_type} AS col;",
+            pg_conn,
+        )
+        explain_text = "\n".join(line[0] for line in result)
+
+        import re
+
+        assert re.search(expected_pattern, explain_text), (
+            f"Expected validation wrapper pattern '{expected_pattern}' "
+            f"not found in EXPLAIN output:\n{explain_text}"
+        )
+    finally:
+        run_command("RESET TIME ZONE;", pg_conn)
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()

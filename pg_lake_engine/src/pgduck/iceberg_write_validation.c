@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Snowflake Inc.
+ * Copyright 2026 Snowflake Inc.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,20 +18,26 @@
 /*
  * Iceberg write-time value validation.
  *
- * Provides two mechanisms for enforcing temporal value constraints on
- * data written to Iceberg tables:
+ * Enforces the out_of_range_values table option (clamp or error) for
+ * values that fall outside what Iceberg data files can represent:
  *
- * 1. C-level validation (IcebergErrorOrClampTemporalDatum) used by partition
- *    transform code on the PostgreSQL side.
+ *   - Temporal columns (date, timestamp, timestamptz): values beyond
+ *     the Iceberg-supported range, including ±infinity.
+ *   - Bounded numeric columns: NaN values (clamped to NULL or rejected).
  *
- * 2. Query wrapping (IcebergWrapQueryWithErrorOrClampChecks) that embeds
- *    CASE WHEN checks into the write query sent to pgduck_server.  Used
- *    by both pushdown and non-pushdown write paths for temporal boundary
- *    enforcement (date/timestamp/timestamptz).
+ * Two complementary mechanisms are used:
  *
- * NaN rejection for numeric columns is handled separately in the CSV
- * writer (ErrorIfSpecialNumeric in csv_writer.c) before data reaches
- * DuckDB.
+ * 1. C-level validation (IcebergErrorOrClampDatum) runs on the
+ *    PostgreSQL side.  It is called from partition transform code
+ *    (to keep partition keys consistent with the clamped data) and
+ *    from the CSV writer (for the data itself).  Handles both
+ *    temporal boundaries and numeric NaN.
+ *
+ * 2. Query wrapping (IcebergWrapQueryWithErrorOrClampChecks) embeds
+ *    CASE WHEN checks into the write query sent to pgduck_server.
+ *    Used by pushdown and non-pushdown write paths for temporal
+ *    boundary enforcement only; numeric NaN is already handled by
+ *    mechanism (1) before the query reaches DuckDB.
  *
  * Temporal boundaries:
  *   - Date: proleptic Gregorian range -4712-01-01 .. 9999-12-31.
@@ -66,16 +72,13 @@
 #define TEMPORAL_MAX_YEAR			9999
 
 /* SQL literal boundaries for the query wrapper */
-#define ICEBERG_DATE_MIN_LIT				"DATE '-4712-01-01'"
-#define ICEBERG_DATE_MAX_LIT				"DATE '9999-12-31'"
-#define ICEBERG_TIMESTAMP_MIN_LIT		"TIMESTAMP '0001-01-01 00:00:00'"
-#define ICEBERG_TIMESTAMP_MAX_LIT		"TIMESTAMP '9999-12-31 23:59:59.999999'"
-#define ICEBERG_TIMESTAMPTZ_MIN_LIT		"TIMESTAMPTZ '0001-01-01 00:00:00+00'"
-#define ICEBERG_TIMESTAMPTZ_MAX_LIT		"TIMESTAMPTZ '9999-12-31 23:59:59.999999+00'"
+#define ICEBERG_DATE_MIN_LITERAL			"DATE '-4712-01-01'"
+#define ICEBERG_DATE_MAX_LITERAL			"DATE '9999-12-31'"
+#define ICEBERG_TIMESTAMP_MIN_LITERAL		"TIMESTAMP '0001-01-01 00:00:00'"
+#define ICEBERG_TIMESTAMP_MAX_LITERAL		"TIMESTAMP '9999-12-31 23:59:59.999999'"
+#define ICEBERG_TIMESTAMPTZ_MIN_LITERAL		"TIMESTAMPTZ '0001-01-01 00:00:00+00'"
+#define ICEBERG_TIMESTAMPTZ_MAX_LITERAL		"TIMESTAMPTZ '9999-12-31 23:59:59.999999+00'"
 
-static bool IsTemporalType(Oid typeOid);
-static int	GetYearFromDate(DateADT d);
-static int	GetYearFromTimestamp(Timestamp ts);
 static Datum ClampOrErrorTemporal(Datum value, Oid typeOid, int year,
 								  IcebergOutOfRangePolicy policy);
 static DateADT MakeDateFromYMD(int y, int m, int d);
@@ -85,15 +88,19 @@ static void AppendClampExpression(StringInfo buf, const char *quotedName,
 								  Oid typeOid);
 static void AppendErrorExpression(StringInfo buf, const char *quotedName,
 								  Oid typeOid);
+static IcebergOutOfRangePolicy GetIcebergOutOfRangePolicyFromOptions(List *options);
+static Datum IcebergErrorOrClampTemporalDatum(Datum value, Oid typeOid,
+											  IcebergOutOfRangePolicy policy);
+
 
 /*
  * GetIcebergOutOfRangePolicyFromOptions reads the "out_of_range_values" option
- * from a list of DefElem options (table options or COPY options).
+ * from a list of DefElem options (table options).
  *
  * Returns ICEBERG_OOR_ERROR if the option is set to "error",
  * ICEBERG_OOR_CLAMP otherwise (including when not present).
  */
-IcebergOutOfRangePolicy
+static IcebergOutOfRangePolicy
 GetIcebergOutOfRangePolicyFromOptions(List *options)
 {
 	char	   *value = GetStringOption(options, "out_of_range_values", false);
@@ -124,7 +131,7 @@ GetIcebergOutOfRangePolicyForTable(Oid relationId)
 /*
  * IsTemporalType returns true for date, timestamp, or timestamptz.
  */
-static bool
+bool
 IsTemporalType(Oid typeOid)
 {
 	return typeOid == DATEOID ||
@@ -134,13 +141,16 @@ IsTemporalType(Oid typeOid)
 
 
 /* ================================================================
- * C-level temporal validation (used by partition transforms)
+ * C-level value validation
+ *
+ * Used by partition transforms (to keep partition keys consistent
+ * with the clamped data) and by the CSV writer (for the data itself).
  * ================================================================ */
 
 /*
  * GetYearFromDate extracts the year from a PostgreSQL DateADT.
  */
-static int
+int
 GetYearFromDate(DateADT d)
 {
 	int			y,
@@ -157,7 +167,7 @@ GetYearFromDate(DateADT d)
  * (works for both Timestamp and TimestampTz since they share the
  * same representation).
  */
-static int
+int
 GetYearFromTimestamp(Timestamp ts)
 {
 	struct pg_tm tt;
@@ -297,11 +307,14 @@ ClampOrErrorTemporal(Datum value, Oid typeOid, int year,
 
 
 /*
- * IcebergErrorOrClampTemporalDatum validates a date, timestamp, or timestamptz Datum.
- * This is needed for partition values to be computed correctly in case of clamping.
+ * IcebergErrorOrClampTemporalDatum validates a date, timestamp, or
+ * timestamptz Datum against Iceberg temporal boundaries.
+ *
+ * Called from IcebergErrorOrClampDatum; not exported.
  */
-Datum
-IcebergErrorOrClampTemporalDatum(Datum value, Oid typeOid, IcebergOutOfRangePolicy policy)
+static Datum
+IcebergErrorOrClampTemporalDatum(Datum value, Oid typeOid,
+								 IcebergOutOfRangePolicy policy)
 {
 	Assert(IsTemporalType(typeOid));
 
@@ -395,13 +408,13 @@ TupleDescHasTemporalColumn(TupleDesc tupleDesc)
 static void
 AppendClampExpression(StringInfo buf, const char *quotedName, Oid typeOid)
 {
-	const char *minLit;
-	const char *maxLit;
+	const char *minLiteral;
+	const char *maxLiteral;
 
 	if (typeOid == DATEOID)
 	{
-		minLit = ICEBERG_DATE_MIN_LIT;
-		maxLit = ICEBERG_DATE_MAX_LIT;
+		minLiteral = ICEBERG_DATE_MIN_LITERAL;
+		maxLiteral = ICEBERG_DATE_MAX_LITERAL;
 	}
 	else if (typeOid == TIMESTAMPTZOID)
 	{
@@ -416,8 +429,8 @@ AppendClampExpression(StringInfo buf, const char *quotedName, Oid typeOid)
 						 "WHEN year(timezone('%s', %s)) < %d "
 						 "THEN timezone('%s', TIMESTAMP '0001-01-01 00:00:00') "
 						 "ELSE %s END",
-						 quotedName, ICEBERG_TIMESTAMPTZ_MIN_LIT, ICEBERG_TIMESTAMPTZ_MIN_LIT,
-						 quotedName, ICEBERG_TIMESTAMPTZ_MAX_LIT, ICEBERG_TIMESTAMPTZ_MAX_LIT,
+						 quotedName, ICEBERG_TIMESTAMPTZ_MIN_LITERAL, ICEBERG_TIMESTAMPTZ_MIN_LITERAL,
+						 quotedName, ICEBERG_TIMESTAMPTZ_MAX_LITERAL, ICEBERG_TIMESTAMPTZ_MAX_LITERAL,
 						 tzName, quotedName, TEMPORAL_MAX_YEAR,
 						 tzName,
 						 tzName, quotedName, TEMPORAL_TIMESTAMP_MIN_YEAR,
@@ -427,8 +440,8 @@ AppendClampExpression(StringInfo buf, const char *quotedName, Oid typeOid)
 	}
 	else if (typeOid == TIMESTAMPOID)
 	{
-		minLit = ICEBERG_TIMESTAMP_MIN_LIT;
-		maxLit = ICEBERG_TIMESTAMP_MAX_LIT;
+		minLiteral = ICEBERG_TIMESTAMP_MIN_LITERAL;
+		maxLiteral = ICEBERG_TIMESTAMP_MAX_LITERAL;
 	}
 	else
 	{
@@ -439,33 +452,33 @@ AppendClampExpression(StringInfo buf, const char *quotedName, Oid typeOid)
 					 "CASE WHEN %s < %s THEN %s "
 					 "WHEN %s > %s THEN %s "
 					 "ELSE %s END",
-					 quotedName, minLit, minLit,
-					 quotedName, maxLit, maxLit,
+					 quotedName, minLiteral, minLiteral,
+					 quotedName, maxLiteral, maxLiteral,
 					 quotedName);
 }
 
 
 /*
- * AppendErrorExpression appends a CASE WHEN expression that triggers
- * an error (via an invalid CAST) when the column is out of range.
+ * AppendErrorExpression appends a CASE WHEN expression that raises
+ * an error (via DuckDB's error() function) when the column is out of range.
  */
 static void
 AppendErrorExpression(StringInfo buf, const char *quotedName, Oid typeOid)
 {
-	const char *minLit;
-	const char *maxLit;
+	const char *minLiteral;
+	const char *maxLiteral;
 	const char *typeName;
 
 	if (typeOid == DATEOID)
 	{
-		minLit = ICEBERG_DATE_MIN_LIT;
-		maxLit = ICEBERG_DATE_MAX_LIT;
+		minLiteral = ICEBERG_DATE_MIN_LITERAL;
+		maxLiteral = ICEBERG_DATE_MAX_LITERAL;
 		typeName = "DATE";
 	}
 	else if (typeOid == TIMESTAMPOID)
 	{
-		minLit = ICEBERG_TIMESTAMP_MIN_LIT;
-		maxLit = ICEBERG_TIMESTAMP_MAX_LIT;
+		minLiteral = ICEBERG_TIMESTAMP_MIN_LITERAL;
+		maxLiteral = ICEBERG_TIMESTAMP_MAX_LITERAL;
 		typeName = "TIMESTAMP";
 	}
 	else if (typeOid == TIMESTAMPTZOID)
@@ -474,11 +487,11 @@ AppendErrorExpression(StringInfo buf, const char *quotedName, Oid typeOid)
 
 		appendStringInfo(buf,
 						 "CASE WHEN %s NOT BETWEEN %s AND %s "
-						 "THEN CAST(printf('timestamp out of range: %%s', %s::VARCHAR) AS TIMESTAMPTZ) "
+						 "THEN CAST(error(printf('timestamp out of range: %%s', %s::VARCHAR)) AS TIMESTAMPTZ) "
 						 "WHEN year(timezone('%s', %s)) NOT BETWEEN %d AND %d "
-						 "THEN CAST(printf('timestamp out of range: %%s', %s::VARCHAR) AS TIMESTAMPTZ) "
+						 "THEN CAST(error(printf('timestamp out of range: %%s', %s::VARCHAR)) AS TIMESTAMPTZ) "
 						 "ELSE %s END",
-						 quotedName, ICEBERG_TIMESTAMPTZ_MIN_LIT, ICEBERG_TIMESTAMPTZ_MAX_LIT,
+						 quotedName, ICEBERG_TIMESTAMPTZ_MIN_LITERAL, ICEBERG_TIMESTAMPTZ_MAX_LITERAL,
 						 quotedName,
 						 tzName, quotedName, TEMPORAL_TIMESTAMP_MIN_YEAR, TEMPORAL_MAX_YEAR,
 						 quotedName,
@@ -494,54 +507,59 @@ AppendErrorExpression(StringInfo buf, const char *quotedName, Oid typeOid)
 
 	appendStringInfo(buf,
 					 "CASE WHEN %s NOT BETWEEN %s AND %s "
-					 "THEN CAST(printf('%s out of range: %%s', %s::VARCHAR) AS %s) "
+					 "THEN CAST(error(printf('%s out of range: %%s', %s::VARCHAR)) AS %s) "
 					 "ELSE %s END",
-					 quotedName, minLit, maxLit,
+					 quotedName, minLiteral, maxLiteral,
 					 errLabel, quotedName, typeName,
 					 quotedName);
 }
 
 
 /*
- * IcebergErrorOrClampNumericDatum checks a numeric Datum for NaN.
- * Returns true when NaN is detected and the policy is CLAMP (caller
- * should write NULL); raises an error for ERROR policy.  Returns
- * false when the value is not NaN.
+ * IcebergErrorOrClampDatum validates a Datum for Iceberg write constraints.
+ *
+ * Dispatches to temporal validation (date/timestamp/timestamptz) or
+ * numeric NaN rejection based on typeOid.  For types that need no
+ * validation the value is returned unchanged.
+ *
+ * *isNull is set to true only when a numeric NaN is clamped (the
+ * caller should write NULL instead of the original value).
  */
 Datum
-IcebergErrorOrClampNumericDatum(Datum value,
-								IcebergOutOfRangePolicy policy,
-								bool *isNull)
+IcebergErrorOrClampDatum(Datum value, Oid typeOid,
+						 IcebergOutOfRangePolicy policy, bool *isNull)
 {
-	Numeric		num = DatumGetNumeric(value);
+	*isNull = false;
 
-	if (!numeric_is_nan(num))
+	if (IsTemporalType(typeOid))
+		return IcebergErrorOrClampTemporalDatum(value, typeOid, policy);
+
+	if (typeOid == NUMERICOID && numeric_is_nan(DatumGetNumeric(value)))
 	{
-		*isNull = false;
-		return value;
+		if (policy == ICEBERG_OOR_CLAMP)
+		{
+			*isNull = true;
+			return (Datum) 0;
+		}
+
+		Assert(policy == ICEBERG_OOR_ERROR);
+		ereport(ERROR,
+				errmsg("NaN is not supported for Iceberg decimal"),
+				errhint("Use float type instead."));
 	}
 
-	if (policy == ICEBERG_OOR_CLAMP)
-	{
-		*isNull = true;
-		return (Datum) 0;
-	}
-
-	ereport(ERROR,
-			errmsg("NaN is not supported for Iceberg decimal"),
-			errhint("Use float type instead."));
-
-	pg_unreachable();
+	return value;
 }
 
 
 /*
  * IcebergWrapQueryWithErrorOrClampChecks wraps a query string with an
- * outer SELECT that applies CASE WHEN checks to temporal columns that
- * need Iceberg write-time validation (date/timestamp/timestamptz).
+ * outer SELECT that applies CASE WHEN checks to temporal columns
+ * (date/timestamp/timestamptz) for Iceberg boundary enforcement.
  *
- * NaN rejection for numeric columns is handled earlier in the CSV
- * writer (ErrorIfSpecialNumeric) before the data reaches DuckDB.
+ * Only temporal columns are handled here.  Numeric NaN validation is
+ * performed by IcebergErrorOrClampDatum on the PostgreSQL side before
+ * the data reaches DuckDB.
  *
  * Returns the original query unchanged if no temporal columns exist
  * or the policy is ICEBERG_OOR_NONE.
@@ -558,7 +576,7 @@ IcebergErrorOrClampNumericDatum(Datum value,
  *
  *   SELECT id,
  *          CASE WHEN created_at NOT BETWEEN DATE '0001-01-01' AND DATE '9999-12-31'
- *               THEN CAST(printf('date out of range: %s', created_at::VARCHAR) AS DATE)
+ *               THEN CAST(error(printf('date out of range: %s', created_at::VARCHAR)) AS DATE)
  *               ELSE created_at END AS created_at
  *   FROM (<original_query>) AS __iceberg_oor
  */
@@ -567,10 +585,7 @@ IcebergWrapQueryWithErrorOrClampChecks(char *query, TupleDesc tupleDesc,
 									   IcebergOutOfRangePolicy policy,
 									   bool queryHasRowId)
 {
-	if (policy == ICEBERG_OOR_NONE || tupleDesc == NULL)
-		return query;
-
-	if (!TupleDescHasTemporalColumn(tupleDesc))
+	if (policy == ICEBERG_OOR_NONE || tupleDesc == NULL || !TupleDescHasTemporalColumn(tupleDesc))
 		return query;
 
 	StringInfoData wrapped;

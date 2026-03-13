@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Snowflake Inc.
+ * Copyright 2026 Snowflake Inc.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,13 +18,18 @@
 #pragma once
 
 #include "access/tupdesc.h"
-#include "nodes/pg_list.h"
+#include "utils/date.h"
+#include "utils/timestamp.h"
 
 /*
- * Behavior for out-of-range temporal values during writes to Iceberg
- * data files.  Applies to date, timestamp, and timestamptz columns.
+ * Behavior for out-of-range values during writes to Iceberg data files.
  *
- * Controlled by the out_of_range_values table option or COPY option.
+ * Applies to:
+ *   - Temporal columns (date, timestamp, timestamptz): values beyond
+ *     the Iceberg-supported range are clamped or rejected.
+ *   - Bounded numeric columns: NaN values are clamped to NULL or rejected.
+ *
+ * Controlled by the out_of_range_values table option.
  *
  * NONE skips validation entirely (used for non-Iceberg tables).
  */
@@ -36,13 +41,6 @@ typedef enum IcebergOutOfRangePolicy
 }			IcebergOutOfRangePolicy;
 
 /*
- * GetIcebergOutOfRangePolicyFromOptions returns the IcebergOutOfRangePolicy
- * from the given option list.  Returns ICEBERG_OOR_CLAMP if
- * the option is not present.
- */
-extern PGDLLEXPORT IcebergOutOfRangePolicy GetIcebergOutOfRangePolicyFromOptions(List *options);
-
-/*
  * GetIcebergOutOfRangePolicyForTable returns the IcebergOutOfRangePolicy
  * from the given table's foreign table options.  Returns NONE for
  * non-iceberg tables.
@@ -50,25 +48,18 @@ extern PGDLLEXPORT IcebergOutOfRangePolicy GetIcebergOutOfRangePolicyFromOptions
 extern PGDLLEXPORT IcebergOutOfRangePolicy GetIcebergOutOfRangePolicyForTable(Oid relationId);
 
 /*
- * IcebergErrorOrClampTemporalDatum validates a date, timestamp, or timestamptz
- * Datum for out-of-range or infinity values.  Returns the original
- * value if it is in range, or a clamped/error value otherwise.
+ * IcebergErrorOrClampDatum validates a Datum for Iceberg write constraints.
  *
- * Used by partition-transform code to validate temporal values on the
- * PostgreSQL side (e.g. for partition key computation).
+ * Dispatches to temporal validation (date/timestamp/timestamptz) or
+ * numeric NaN validation based on typeOid.  For types that need no
+ * validation the value is returned unchanged.
+ *
+ * *isNull is set to true only when a numeric NaN is clamped (the
+ * caller should write NULL instead of the original value).
  */
-extern PGDLLEXPORT Datum IcebergErrorOrClampTemporalDatum(Datum value, Oid typeOid,
-														  IcebergOutOfRangePolicy policy);
-
-/*
- * IcebergErrorOrClampNumericDatum checks a numeric Datum for NaN.
- * Returns true when NaN is detected and the policy is CLAMP (caller
- * should write NULL); raises an error for ERROR policy.  Returns
- * false when the value is not NaN.
- */
-extern PGDLLEXPORT Datum IcebergErrorOrClampNumericDatum(Datum value,
-														 IcebergOutOfRangePolicy policy,
-														 bool *isNull);
+extern PGDLLEXPORT Datum IcebergErrorOrClampDatum(Datum value, Oid typeOid,
+												  IcebergOutOfRangePolicy policy,
+												  bool *isNull);
 
 /*
  * IcebergWrapQueryWithErrorOrClampChecks wraps a query with CASE WHEN
@@ -85,3 +76,7 @@ extern PGDLLEXPORT char *IcebergWrapQueryWithErrorOrClampChecks(char *query,
 																TupleDesc tupleDesc,
 																IcebergOutOfRangePolicy policy,
 																bool queryHasRowId);
+
+extern PGDLLEXPORT bool IsTemporalType(Oid typeOid);
+extern PGDLLEXPORT int GetYearFromDate(DateADT d);
+extern PGDLLEXPORT int GetYearFromTimestamp(Timestamp ts);

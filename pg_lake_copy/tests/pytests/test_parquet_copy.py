@@ -869,7 +869,7 @@ def test_copy_virtual_column(pg_conn, tmp_path):
 
 
 def test_out_of_range_values_copy_to_rejected(pg_conn, s3):
-    """COPY TO rejects the out_of_range_values option (only supported on iceberg tables)."""
+    """COPY TO rejects the out_of_range_values option."""
     url = f"s3://{TEST_BUCKET}/test_oor_copy_to_parquet/data.parquet"
 
     error = run_command(
@@ -882,8 +882,8 @@ def test_out_of_range_values_copy_to_rejected(pg_conn, s3):
     pg_conn.rollback()
 
 
-def test_out_of_range_values_copy_from_heap_rejected(pg_conn, s3):
-    """COPY FROM into a heap table rejects the out_of_range_values option."""
+def test_out_of_range_values_copy_from_rejected(pg_conn, s3):
+    """COPY FROM rejects the out_of_range_values option (always read from table)."""
     url = f"s3://{TEST_BUCKET}/test_oor_copy_from_heap/data.parquet"
 
     run_command(
@@ -899,6 +899,5 @@ def test_out_of_range_values_copy_from_heap_rejected(pg_conn, s3):
         raise_error=False,
     )
     assert "out_of_range_values" in error
-    assert "iceberg tables" in error
 
     pg_conn.rollback()

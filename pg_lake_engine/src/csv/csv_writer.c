@@ -760,22 +760,9 @@ CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot)
 			need_delim = true;
 
 			if (!isnull && cstate->outOfRangePolicy != ICEBERG_OOR_NONE)
-			{
-				if (attr->atttypid == DATEOID ||
-					attr->atttypid == TIMESTAMPOID ||
-					attr->atttypid == TIMESTAMPTZOID)
-				{
-					value = IcebergErrorOrClampTemporalDatum(value,
-															 attr->atttypid,
-															 cstate->outOfRangePolicy);
-				}
-				else if (attr->atttypid == NUMERICOID)
-				{
-					value = IcebergErrorOrClampNumericDatum(value,
-															cstate->outOfRangePolicy,
-															&isnull);
-				}
-			}
+				value = IcebergErrorOrClampDatum(value, attr->atttypid,
+												 cstate->outOfRangePolicy,
+												 &isnull);
 		}
 
 		if (isnull)
