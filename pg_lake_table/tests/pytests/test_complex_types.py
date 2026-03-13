@@ -194,7 +194,7 @@ def test_struct_from_user_composite_type(pg_conn, extension):
 
 
 # This test verifies #788 behavior and fix for a MAP type as part of a composite type
-def test_map_inside_composite_type(pg_conn):
+def test_map_inside_composite_type(pg_conn, extension):
     url = f"s3://{TEST_BUCKET}/test_map_inside_composite_type/data.parquet"
 
     map_type_name = create_map_type("int", "text")
