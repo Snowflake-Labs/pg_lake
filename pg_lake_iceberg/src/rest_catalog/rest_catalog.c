@@ -295,15 +295,14 @@ ScrubUserMappingSecrets(const char *queryString, List *options)
 
 
 /*
- * ScrubIcebergUserMappingHandler is a ProcessUtility handler registered via
- * pg_lake_engine's RegisterUtilityStatementHandler.  When it detects a
- * CREATE/ALTER USER MAPPING targeting an iceberg_catalog server, it scrubs
- * secret values in the queryString in-place and returns false so normal
+ * RedactRestCatalogUserMappingSecrets is a ProcessUtility handler that detects
+ * CREATE/ALTER USER MAPPING targeting an iceberg_catalog server and scrubs
+ * secret values in the queryString in-place. Returns false so normal
  * processing continues.
  */
 bool
-ScrubIcebergUserMappingHandler(ProcessUtilityParams *processUtilityParams,
-							   void *arg)
+RedactRestCatalogUserMappingSecrets(ProcessUtilityParams *processUtilityParams,
+									void *arg)
 {
 	Node	   *parsetree = processUtilityParams->plannedStmt->utilityStmt;
 	const char *serverName = NULL;
@@ -564,7 +563,8 @@ ReadCatalogsConfCredentials(const char *serverName,
 		 * The dot separates the server name from the property name.
 		 */
 		if (strncmp(item->name, serverName, serverNameLen) != 0 ||
-			item->name[serverNameLen] != '.')
+			item->name[serverNameLen] != '.' ||
+			item->name[serverNameLen + 1] == '\0')
 			continue;
 
 		key = item->name + serverNameLen + 1;
@@ -663,8 +663,25 @@ GetRestCatalogConnectionFromServer(const char *serverName)
 	/*
 	 * Phase 2: Resolve credentials and scope.
 	 *
-	 * Priority: user mapping > catalogs.conf > GUC fallback (set above).
+	 * Priority (ascending): GUC (set above) < catalogs.conf < user mapping.
 	 */
+	char	   *confClientId = NULL;
+	char	   *confClientSecret = NULL;
+	char	   *confScope = NULL;
+
+	if (ReadCatalogsConfCredentials(serverName,
+									&confClientId, &confClientSecret,
+									&confScope))
+	{
+		if (confClientId != NULL)
+			conn->clientId = confClientId;
+		if (confClientSecret != NULL)
+			conn->clientSecret = confClientSecret;
+		if (confScope != NULL)
+			conn->scope = confScope;
+	}
+
+	/* User mapping has highest priority — overrides everything above */
 	List	   *umOptions = LookupUserMappingOptions(server->serverid);
 
 	foreach(lc, umOptions)
@@ -677,23 +694,6 @@ GetRestCatalogConnectionFromServer(const char *serverName)
 			conn->clientSecret = pstrdup(defGetString(def));
 		else if (strcmp(def->defname, "scope") == 0)
 			conn->scope = pstrdup(defGetString(def));
-	}
-
-	/* catalogs.conf overrides GUCs but not user mapping */
-	char	   *confClientId = NULL;
-	char	   *confClientSecret = NULL;
-	char	   *confScope = NULL;
-
-	if (ReadCatalogsConfCredentials(serverName,
-									&confClientId, &confClientSecret,
-									&confScope))
-	{
-		if (conn->clientId == NULL && confClientId != NULL)
-			conn->clientId = confClientId;
-		if (conn->clientSecret == NULL && confClientSecret != NULL)
-			conn->clientSecret = confClientSecret;
-		if (conn->scope == NULL && confScope != NULL)
-			conn->scope = confScope;
 	}
 
 	if (conn->clientId == NULL || conn->clientSecret == NULL)
