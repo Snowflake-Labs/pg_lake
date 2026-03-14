@@ -18,12 +18,13 @@
 #pragma once
 
 #include "postgres.h"
+#include "pg_lake/ddl/utility_hook.h"
 #include "pg_lake/http/http_client.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/iceberg/api/snapshot.h"
 
-#define REST_CATALOG_AUTH_TYPE_DEFAULT (0)
+#define REST_CATALOG_AUTH_TYPE_OAUTH2 (0)
 #define REST_CATALOG_AUTH_TYPE_HORIZON (1)
 
 extern PGDLLEXPORT char *RestCatalogHost;
@@ -33,6 +34,23 @@ extern char *RestCatalogClientSecret;
 extern char *RestCatalogScope;
 extern int	RestCatalogAuthType;
 extern bool RestCatalogEnableVendedCredentials;
+
+/*
+ * Holds per-server REST catalog connection settings. Populated from the
+ * server options of an iceberg_catalog ForeignServer, with GUC fallback
+ * for any option not explicitly set on the server.
+ */
+typedef struct RestCatalogConnectionInfo
+{
+	char	   *serverName;		/* server name, used for token cache keying */
+	char	   *host;
+	char	   *oauthHostPath;
+	char	   *clientId;
+	char	   *clientSecret;
+	char	   *scope;
+	int			authType;
+	bool		enableVendedCredentials;
+}			RestCatalogConnectionInfo;
 
 #define REST_CATALOG_AUTH_TOKEN_PATH "%s/api/catalog/v1/oauth/tokens"
 
@@ -77,25 +95,32 @@ typedef struct RestCatalogRequest
 #define REST_CATALOG_AUTH_TOKEN_PATH "%s/api/catalog/v1/oauth/tokens"
 #define GET_REST_CATALOG_METADATA_LOCATION "%s/api/catalog/v1/%s/namespaces/%s/tables/%s"
 
-extern PGDLLEXPORT void RegisterNamespaceToRestCatalog(const char *catalogName, const char *namespaceName);
+/* Connection info resolution */
+extern PGDLLEXPORT RestCatalogConnectionInfo * GetRestCatalogConnectionFromServer(const char *serverName);
+extern PGDLLEXPORT RestCatalogConnectionInfo * GetRestCatalogConnectionForRelation(Oid relationId);
+
+extern PGDLLEXPORT void RegisterNamespaceToRestCatalog(RestCatalogConnectionInfo * conn, const char *catalogName, const char *namespaceName);
 extern PGDLLEXPORT void StartStageRestCatalogIcebergTableCreate(Oid relationId);
 extern PGDLLEXPORT char *FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSchema * dataFileSchema, List *partitionSpecs);
-extern PGDLLEXPORT void ErrorIfRestNamespaceDoesNotExist(const char *catalogName, const char *namespaceName);
+extern PGDLLEXPORT void ErrorIfRestNamespaceDoesNotExist(RestCatalogConnectionInfo * conn, const char *catalogName, const char *namespaceName);
 extern PGDLLEXPORT char *GetRestCatalogName(Oid relationId);
 extern PGDLLEXPORT char *GetRestCatalogNamespace(Oid relationId);
 extern PGDLLEXPORT char *GetRestCatalogTableName(Oid relationId);
 extern PGDLLEXPORT bool IsReadOnlyRestCatalogIcebergTable(Oid relationId);
-extern PGDLLEXPORT char *GetMetadataLocationFromRestCatalog(const char *restCatalogName, const char *namespaceName,
+extern PGDLLEXPORT char *GetMetadataLocationFromRestCatalog(RestCatalogConnectionInfo * conn, const char *restCatalogName, const char *namespaceName,
 															const char *relationName);
 extern PGDLLEXPORT char *GetMetadataLocationForRestCatalogForIcebergTable(Oid relationId);
 extern PGDLLEXPORT void ReportHTTPError(HttpResult httpResult, int level);
-extern PGDLLEXPORT List *PostHeadersWithAuth(void);
-extern PGDLLEXPORT List *DeleteHeadersWithAuth(void);
+extern PGDLLEXPORT List *PostHeadersWithAuth(RestCatalogConnectionInfo * conn);
+extern PGDLLEXPORT List *DeleteHeadersWithAuth(RestCatalogConnectionInfo * conn);
 extern PGDLLEXPORT bool ShouldRetryRequestToRestCatalog(long status, int maxRetry, int retryNo);
-extern PGDLLEXPORT HttpResult SendRequestToRestCatalog(HttpMethod method, const char *url, const char *body, List *headers);
+extern PGDLLEXPORT HttpResult SendRequestToRestCatalog(HttpMethod method, const char *url, const char *body, List *headers, const char *serverName);
 extern PGDLLEXPORT RestCatalogRequest * GetAddSnapshotCatalogRequest(IcebergSnapshot * newSnapshot, Oid relationId);
 extern PGDLLEXPORT RestCatalogRequest * GetAddSchemaCatalogRequest(Oid relationId, DataFileSchema * dataFileSchema);
 extern PGDLLEXPORT RestCatalogRequest * GetSetCurrentSchemaCatalogRequest(Oid relationId, int32_t schemaId);
 extern PGDLLEXPORT RestCatalogRequest * GetAddPartitionCatalogRequest(Oid relationId, List *partitionSpec);
 extern PGDLLEXPORT RestCatalogRequest * GetSetPartitionDefaultIdCatalogRequest(Oid relationId, int specId);
 extern PGDLLEXPORT RestCatalogRequest * GetRemoveSnapshotCatalogRequest(List *removedSnapshotIds, Oid relationId);
+
+/* ProcessUtility handler: protects extension-owned catalog servers */
+extern PGDLLEXPORT bool BlockDDLOnExtensionCatalogs(ProcessUtilityParams *processUtilityParams, void *arg);

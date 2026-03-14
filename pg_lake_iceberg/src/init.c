@@ -59,7 +59,8 @@ void		_PG_init(void);
 
 /* pg_lake_iceberg.rest_catalog_auth_type */
 static const struct config_enum_entry RestCatalogAuthTypeOptions[] = {
-	{"default", REST_CATALOG_AUTH_TYPE_DEFAULT, false},
+	{"oauth2", REST_CATALOG_AUTH_TYPE_OAUTH2, false},
+	{"default", REST_CATALOG_AUTH_TYPE_OAUTH2, false},
 	{"horizon", REST_CATALOG_AUTH_TYPE_HORIZON, false},
 	{NULL, 0, false},
 };
@@ -256,7 +257,7 @@ _PG_init(void)
 							 gettext_noop("Determines the format for the initial OAuth token requests."),
 							 NULL,
 							 &RestCatalogAuthType,
-							 REST_CATALOG_AUTH_TYPE_DEFAULT,
+							 REST_CATALOG_AUTH_TYPE_OAUTH2,
 							 RestCatalogAuthTypeOptions,
 							 PGC_SUSET,
 							 GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
@@ -366,9 +367,9 @@ IcebergDefaultCatalogCheckHook(char **newvalue, void **extra, GucSource source)
 {
 	char	   *newCatalog = *newvalue;
 
-	if (pg_strncasecmp(newCatalog, POSTGRES_CATALOG_NAME, strlen(newCatalog)) == 0 ||
-		pg_strncasecmp(newCatalog, REST_CATALOG_NAME, strlen(newCatalog)) == 0 ||
-		pg_strncasecmp(newCatalog, OBJECT_STORE_CATALOG_NAME, strlen(newCatalog)) == 0)
+	if (pg_strcasecmp(newCatalog, POSTGRES_CATALOG_NAME) == 0 ||
+		pg_strcasecmp(newCatalog, REST_CATALOG_NAME) == 0 ||
+		pg_strcasecmp(newCatalog, OBJECT_STORE_CATALOG_NAME) == 0)
 		return true;
 
 	GUC_check_errdetail("pg_lake_iceberg: allowed iceberg catalog options are '" POSTGRES_CATALOG_NAME "', "

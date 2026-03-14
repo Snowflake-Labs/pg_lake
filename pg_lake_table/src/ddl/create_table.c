@@ -90,6 +90,7 @@ static bool IsJsonOrCSVBackedTable(PgLakeTableType tableType, List *options);
 static void ErrorIfUnsupportedColumnTypeForJsonOrCSVTables(List *columnDefList);
 static void ErrorIfUsingGeometryWithoutSpatialAnalytics(List *columnDefList);
 static void ErrorIfUnsupportedLakeTable(CreateForeignTableStmt *createStmt);
+static void ErrorIfCreateForeignTableOnIcebergCatalog(CreateForeignTableStmt *createStmt);
 static void ErrorIfWritableTableWithReservedColumnName(List *columnDefList, PgLakeTableType tableType);
 static void ErrorIfInvalidFilenameColumn(List *columnDefList);
 static bool IsConflictingColumnNameForReadParquet(const char *columnName);
@@ -324,6 +325,9 @@ ErrorIfUsingGeometryWithoutSpatialAnalytics(List *columnDefList)
 *
 * We check for unsupported features in the table definition, such as unsupported URLs or unsupported
 * combinations such as writable tables without column definitions.
+*
+* Also blocks CREATE FOREIGN TABLE on iceberg_catalog servers, which have no
+* handler. Tables should be created via CREATE TABLE ... USING iceberg instead.
 */
 bool
 ErrorUnsupportedCreatePgLakeTableHandler(ProcessUtilityParams * params, void *arg)
@@ -339,6 +343,8 @@ ErrorUnsupportedCreatePgLakeTableHandler(ProcessUtilityParams * params, void *ar
 	CreateForeignTableStmt *createStmt =
 		(CreateForeignTableStmt *) plannedStmt->utilityStmt;
 
+	ErrorIfCreateForeignTableOnIcebergCatalog(createStmt);
+
 	if (!IsCreateLakeTable(createStmt))
 	{
 		/* not a lake table */
@@ -348,6 +354,31 @@ ErrorUnsupportedCreatePgLakeTableHandler(ProcessUtilityParams * params, void *ar
 	ErrorIfUnsupportedLakeTable(createStmt);
 
 	return false;
+}
+
+
+/*
+ * ErrorIfCreateForeignTableOnIcebergCatalog blocks CREATE FOREIGN TABLE
+ * when the target server uses the iceberg_catalog FDW, which has no handler.
+ */
+static void
+ErrorIfCreateForeignTableOnIcebergCatalog(CreateForeignTableStmt *createStmt)
+{
+	ForeignServer *server =
+		GetForeignServerByName(createStmt->servername, true);
+
+	if (server == NULL)
+		return;
+
+	ForeignDataWrapper *fdw = GetForeignDataWrapper(server->fdwid);
+
+	if (strcmp(fdw->fdwname, ICEBERG_CATALOG_FDW_NAME) == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot create foreign tables on iceberg_catalog server \"%s\"",
+						createStmt->servername),
+				 errhint("Use CREATE TABLE ... USING iceberg WITH (catalog = '%s') instead.",
+						 createStmt->servername)));
 }
 
 
@@ -719,10 +750,14 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 
 		if (hasRestCatalogOption && hasExternalCatalogReadOnlyOption)
 		{
-			ErrorIfRestNamespaceDoesNotExist(catalogName, catalogNamespace);
+			char	   *catalogOptionValue = GetStringOption(createStmt->options, "catalog", false);
+			RestCatalogConnectionInfo *conn =
+				GetRestCatalogConnectionFromServer(catalogOptionValue);
+
+			ErrorIfRestNamespaceDoesNotExist(conn, catalogName, catalogNamespace);
 
 			metadataLocation =
-				GetMetadataLocationFromRestCatalog(catalogName, catalogNamespace, catalogTableName);
+				GetMetadataLocationFromRestCatalog(conn, catalogName, catalogNamespace, catalogTableName);
 		}
 		else if (hasObjectStoreCatalogOption && hasExternalCatalogReadOnlyOption)
 		{
@@ -927,7 +962,11 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		 * database name. We normally encode that in GetRestCatalogName()
 		 * etc., but here we need to do it early before the table is created.
 		 */
-		RegisterNamespaceToRestCatalog(get_database_name(MyDatabaseId),
+		char	   *catalogOptionValue = GetStringOption(createStmt->options, "catalog", false);
+		RestCatalogConnectionInfo *conn =
+			GetRestCatalogConnectionFromServer(catalogOptionValue);
+
+		RegisterNamespaceToRestCatalog(conn, get_database_name(MyDatabaseId),
 									   get_namespace_name(namespaceId));
 	}
 

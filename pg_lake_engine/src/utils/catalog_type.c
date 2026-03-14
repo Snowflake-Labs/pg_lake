@@ -68,15 +68,16 @@ GetIcebergCatalogType(Oid relationId)
 
 
 /*
- * HasRestCatalogTableOption returns true if the options contain
- * catalog='rest'.
+ * HasRestCatalogTableOption returns true if the catalog option indicates a
+ * REST catalog: either the literal value 'rest' or the name of an
+ * iceberg_catalog foreign server with TYPE 'rest'.
  */
 bool
 HasRestCatalogTableOption(List *options)
 {
 	char	   *catalog = GetStringOption(options, "catalog", false);
 
-	return catalog ? pg_strncasecmp(catalog, REST_CATALOG_NAME, strlen(catalog)) == 0 : false;
+	return IsRestCatalog(catalog);
 }
 
 
@@ -89,7 +90,7 @@ HasObjectStoreCatalogTableOption(List *options)
 {
 	char	   *catalog = GetStringOption(options, "catalog", false);
 
-	return catalog ? pg_strncasecmp(catalog, OBJECT_STORE_CATALOG_NAME, strlen(catalog)) == 0 : false;
+	return catalog ? pg_strcasecmp(catalog, OBJECT_STORE_CATALOG_NAME) == 0 : false;
 }
 
 
@@ -103,4 +104,52 @@ HasReadOnlyOption(List *options)
 	char	   *readOnly = GetStringOption(options, "read_only", false);
 
 	return readOnly ? pg_strncasecmp(readOnly, "true", strlen("true")) == 0 : false;
+}
+
+
+/*
+ * IsCatalogOwnedByExtension returns true if the catalog name is one of the
+ * extension-owned literals: 'rest', 'object_store', or 'postgres'.
+ */
+bool
+IsCatalogOwnedByExtension(const char *catalog)
+{
+	return pg_strcasecmp(catalog, REST_CATALOG_NAME) == 0 ||
+		pg_strcasecmp(catalog, OBJECT_STORE_CATALOG_NAME) == 0 ||
+		pg_strcasecmp(catalog, POSTGRES_CATALOG_NAME) == 0;
+}
+
+
+/*
+ * IsRestCatalog returns true if the catalog name identifies a REST catalog.
+ * This includes the extension-owned 'rest' literal and any user-created
+ * iceberg_catalog server whose TYPE is 'rest' (or omitted, defaulting to 'rest').
+ */
+bool
+IsRestCatalog(const char *catalog)
+{
+	if (catalog == NULL)
+		return false;
+
+	if (pg_strcasecmp(catalog, REST_CATALOG_NAME) == 0)
+		return true;
+
+	/* Try to look up a server with this name */
+	bool		missingOK = true;
+	ForeignServer *server = GetForeignServerByName(catalog, missingOK);
+
+	if (server == NULL)
+		return false;
+
+	ForeignDataWrapper *fdw = GetForeignDataWrapper(server->fdwid);
+
+	if (strcmp(fdw->fdwname, "iceberg_catalog") != 0)
+		return false;
+
+	/* Check server TYPE if set */
+	if (server->servertype != NULL && *server->servertype != '\0')
+		return pg_strcasecmp(server->servertype, "rest") == 0;
+
+	/* No TYPE specified, assume rest */
+	return true;
 }
