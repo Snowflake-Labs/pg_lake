@@ -302,15 +302,14 @@ ScrubUserMappingSecrets(const char *queryString, List *options)
 
 
 /*
- * ScrubIcebergUserMappingHandler is a ProcessUtility handler registered via
- * pg_lake_engine's RegisterUtilityStatementHandler.  When it detects a
- * CREATE/ALTER USER MAPPING targeting an iceberg_catalog server, it scrubs
- * secret values in the queryString in-place and returns false so normal
+ * RedactRestCatalogUserMappingSecrets is a ProcessUtility handler that detects
+ * CREATE/ALTER USER MAPPING targeting an iceberg_catalog server and scrubs
+ * secret values in the queryString in-place. Returns false so normal
  * processing continues.
  */
 bool
-ScrubIcebergUserMappingHandler(ProcessUtilityParams *processUtilityParams,
-							   void *arg)
+RedactRestCatalogUserMappingSecrets(ProcessUtilityParams * processUtilityParams,
+									void *arg)
 {
 	Node	   *parsetree = processUtilityParams->plannedStmt->utilityStmt;
 	const char *serverName = NULL;
@@ -509,7 +508,8 @@ ReadCatalogsConfCredentials(const char *serverName,
 		 * separates the server name from the property name.
 		 */
 		if (strncmp(item->name, serverName, serverNameLen) != 0 ||
-			item->name[serverNameLen] != '.')
+			item->name[serverNameLen] != '.' ||
+			item->name[serverNameLen + 1] == '\0')
 			continue;
 
 		key = item->name + serverNameLen + 1;
@@ -573,13 +573,15 @@ GetRestCatalogOptionsFromCatalog(const char *catalog)
 	opts->enableVendedCredentials = RestCatalogEnableVendedCredentials;
 	opts->locationPrefix = GetIcebergDefaultLocationPrefix();
 
+	ForeignServer *server = NULL;
+
 	/*
 	 * The built-in 'rest' name uses GUCs exclusively. For user-created
 	 * servers, look up server options and override the GUC defaults.
 	 */
 	if (pg_strcasecmp(catalog, REST_CATALOG_NAME) != 0)
 	{
-		ForeignServer *server = GetForeignServerByName(catalog, false);
+		server = GetForeignServerByName(catalog, false);
 		ForeignDataWrapper *fdw = GetForeignDataWrapper(server->fdwid);
 
 		Assert(strcmp(fdw->fdwname, ICEBERG_CATALOG_FDW_NAME) == 0);
@@ -623,14 +625,37 @@ GetRestCatalogOptionsFromCatalog(const char *catalog)
 							catalog),
 					 errhint("Set the pg_lake_iceberg.rest_catalog_host GUC or "
 							 "the \"rest_endpoint\" option on the server.")));
+	}
 
-		/*
-		 * Phase 2: Resolve credentials and scope.
-		 *
-		 * Priority: user mapping > catalogs.conf > GUC fallback (set above).
-		 */
+	/*
+	 * Phase 2: Resolve credentials and scope.
+	 *
+	 * Priority (ascending): GUC (set above) < catalogs.conf < user mapping.
+	 */
+	char	   *confClientId = NULL;
+	char	   *confClientSecret = NULL;
+	char	   *confScope = NULL;
+
+	if (ReadCatalogsConfCredentials(catalog,
+									&confClientId, &confClientSecret,
+									&confScope))
+	{
+		if (confClientId != NULL)
+			opts->clientId = confClientId;
+		if (confClientSecret != NULL)
+			opts->clientSecret = confClientSecret;
+		if (confScope != NULL)
+			opts->scope = confScope;
+	}
+
+	/*
+	 * User mapping has highest priority — overrides everything above
+	 * Can only be set for user-created servers
+	 */
+	if (server != NULL)
+	{
 		List	   *umOptions = LookupUserMappingOptions(server->serverid);
-
+		ListCell   *lc;
 		foreach(lc, umOptions)
 		{
 			DefElem    *def = (DefElem *) lfirst(lc);
@@ -642,27 +667,6 @@ GetRestCatalogOptionsFromCatalog(const char *catalog)
 			else if (strcmp(def->defname, "scope") == 0)
 				opts->scope = pstrdup(defGetString(def));
 		}
-
-	}
-
-
-
-
-	/* catalogs.conf overrides GUCs but not user mapping */
-	char	   *confClientId = NULL;
-	char	   *confClientSecret = NULL;
-	char	   *confScope = NULL;
-
-	if (ReadCatalogsConfCredentials(catalog,
-									&confClientId, &confClientSecret,
-									&confScope))
-	{
-		if (opts->clientId == NULL && confClientId != NULL)
-			opts->clientId = confClientId;
-		if (opts->clientSecret == NULL && confClientSecret != NULL)
-			opts->clientSecret = confClientSecret;
-		if (opts->scope == NULL && confScope != NULL)
-			opts->scope = confScope;
 	}
 
 	if (opts->clientId == NULL || opts->clientSecret == NULL)

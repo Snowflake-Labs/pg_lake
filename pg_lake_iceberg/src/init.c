@@ -332,8 +332,6 @@ _PG_init(void)
 							 NULL, NULL, NULL);
 
 	AvroInit();
-
-	RegisterUtilityStatementHandler(ScrubIcebergUserMappingHandler, NULL);
 }
 
 
