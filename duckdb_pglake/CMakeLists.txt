@@ -26,10 +26,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 project(${TARGET_NAME})
 include_directories(src/include
                     duckdb-postgres/src/include
-                    duckdb-azure/src/include
                     duckdb/third_party/httplib
                     ${PG_INCLUDEDIR}
                     ${OPENSSL_INCLUDE_DIR}
+                    ${DUCKDB_EXTENSION_AZURE_INCLUDE_PATH}
                     ${DUCKDB_EXTENSION_HTTPFS_INCLUDE_PATH})
 
 file(GLOB PGCOMPAT_SOURCES 
@@ -42,16 +42,9 @@ file(GLOB POSTGRES_SOURCES
      "duckdb-postgres/src/storage/*.cpp"
 )
 
-file(GLOB AZURE_SOURCES
-     "duckdb-azure/src/*.cpp"
-     "duckdb-azure/src/storage/*.cpp"
-)
-
-
 set(EXTENSION_SOURCES
     ${PGCOMPAT_SOURCES}
     ${POSTGRES_SOURCES}
-    ${AZURE_SOURCES}
 )
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})

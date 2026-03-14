@@ -468,8 +468,8 @@ static void ListFilesExec(ClientContext &context, TableFunctionInput &data_p, Da
 		 * than to implement singleton infrastructure just for this purpose.
 		 */
 		RegionAwareS3FileSystem s3fs(bufferManager);
-		AzureBlobStorageFileSystem abfs(bufferManager);
-		AzureDfsStorageFileSystem adfs(bufferManager);
+		AzureBlobStorageFileSystem abfs;
+		AzureDfsStorageFileSystem adfs;
 
 		if (s3fs.CanHandleFile(globPattern))
 		{
