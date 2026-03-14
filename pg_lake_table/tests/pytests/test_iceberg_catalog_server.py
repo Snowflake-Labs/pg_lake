@@ -246,6 +246,59 @@ def test_reject_server_options_in_user_mapping(superuser_conn, extension):
     superuser_conn.rollback()
 
 
+def test_per_user_scope_in_user_mapping(superuser_conn, extension):
+    """Different users can have different scopes on the same server."""
+    run_command(
+        """
+        CREATE SERVER test_scope_srv TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    run_command("CREATE ROLE analyst LOGIN", superuser_conn)
+    run_command("CREATE ROLE admin_user LOGIN", superuser_conn)
+    run_command(
+        """
+        CREATE USER MAPPING FOR analyst SERVER test_scope_srv
+            OPTIONS (client_id 'a-id', client_secret 'a-secret',
+                     scope 'PRINCIPAL_ROLE:READER')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        """
+        CREATE USER MAPPING FOR admin_user SERVER test_scope_srv
+            OPTIONS (client_id 'b-id', client_secret 'b-secret',
+                     scope 'PRINCIPAL_ROLE:ALL')
+        """,
+        superuser_conn,
+    )
+
+    result = run_query(
+        """
+        SELECT u.rolname, array_to_string(um.umoptions, ', ') AS opts
+        FROM pg_user_mapping um
+        JOIN pg_roles u ON u.oid = um.umuser
+        WHERE um.umserver = (SELECT oid FROM pg_foreign_server WHERE srvname = 'test_scope_srv')
+        ORDER BY u.rolname
+        """,
+        superuser_conn,
+    )
+    assert len(result) == 2
+    assert "PRINCIPAL_ROLE:ALL" in result[0]["opts"]  # admin_user
+    assert "PRINCIPAL_ROLE:READER" in result[1]["opts"]  # analyst
+
+    run_command("DROP USER MAPPING FOR analyst SERVER test_scope_srv", superuser_conn)
+    run_command(
+        "DROP USER MAPPING FOR admin_user SERVER test_scope_srv", superuser_conn
+    )
+    run_command("DROP SERVER test_scope_srv", superuser_conn)
+    run_command("DROP ROLE analyst", superuser_conn)
+    run_command("DROP ROLE admin_user", superuser_conn)
+    superuser_conn.rollback()
+
+
 # ── CREATE FOREIGN TABLE on iceberg_catalog servers is blocked ──────────────
 
 
@@ -668,6 +721,57 @@ def test_scope_from_catalogs_conf(
 
     run_command("DROP SERVER test_scope_srv CASCADE", superuser_conn)
     superuser_conn.commit()
+
+
+def test_credentials_from_catalogs_conf_for_rest_server(
+    pg_conn,
+    superuser_conn,
+    s3,
+    extension,
+    with_default_location,
+    catalogs_conf,
+):
+    """catalogs.conf credentials for the extension-owned 'rest' server"""
+
+    # Clearing the GUCs shouldn't matter when catalogs.conf is set (it should
+    # take priority), but there is currently no way to verify that credentials
+    # are actually coming from catalogs.conf rather than GUC fallback.
+    run_command("SET pg_lake_iceberg.rest_catalog_client_id TO ''", superuser_conn)
+    run_command("SET pg_lake_iceberg.rest_catalog_client_secret TO ''", superuser_conn)
+
+    # Without catalogs.conf, credentials should be missing
+    err = run_command(
+        """
+        CREATE TABLE test_rest_conf_tbl ()
+            USING iceberg
+            WITH (catalog = 'rest', read_only = 'true',
+                  catalog_namespace = 'ns', catalog_table_name = 'tbl')
+        """,
+        pg_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert "no credentials found" in str(err)
+    pg_conn.rollback()
+
+    # Now write catalogs.conf — credentials should resolve
+    catalogs_conf(
+        "rest.client_id = 'platform-id'\n" "rest.client_secret = 'platform-secret'\n"
+    )
+
+    err = run_command(
+        """
+        CREATE TABLE test_rest_conf_tbl ()
+            USING iceberg
+            WITH (catalog = 'rest', read_only = 'true',
+                  catalog_namespace = 'ns', catalog_table_name = 'tbl')
+        """,
+        pg_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert "no credentials found" not in str(err)
+    pg_conn.rollback()
 
 
 # ── Backward compatibility ─────────────────────────────────────────────────

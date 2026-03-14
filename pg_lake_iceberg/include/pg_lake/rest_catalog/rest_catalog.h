@@ -134,4 +134,4 @@ extern PGDLLEXPORT RestCatalogRequest * GetRemoveSnapshotCatalogRequest(List *re
 extern PGDLLEXPORT bool BlockDDLOnExtensionCatalogs(ProcessUtilityParams *processUtilityParams, void *arg);
 extern PGDLLEXPORT bool RequireRestTypeForIcebergCatalogServer(ProcessUtilityParams * processUtilityParams, void *arg);
 /* scrubs user mapping secrets in-place */
-extern PGDLLEXPORT bool ScrubIcebergUserMappingHandler(ProcessUtilityParams *processUtilityParams, void *arg);
+extern PGDLLEXPORT bool RedactRestCatalogUserMappingSecrets(ProcessUtilityParams *processUtilityParams, void *arg);
