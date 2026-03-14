@@ -52,7 +52,7 @@
 static bool IsCreateAsSelectIcebergTable(CreateTableAsStmt *createAsStmt);
 static void EnsureCreateAsSelectIcebergTableSupported(CreateTableAsStmt *createAsStmt);
 static CreateForeignTableStmt *GetCreateIcebergForeignTableStmtFromCreateAsSelect(CreateTableAsStmt *createAsStmt);
-static void InsertIntoIcebergTable(Query *selectQuery, char *qualifiedTableName);
+static uint64 InsertIntoIcebergTable(Query *selectQuery, char *qualifiedTableName);
 
 
 /*
@@ -191,8 +191,10 @@ ProcessCreateAsSelectPgLakeTable(ProcessUtilityParams * params, void *arg)
 		Query	   *selectQuery = (Query *) createAsStmt->query;
 
 		char	   *qualifiedTableName = quote_qualified_identifier(schemaName, tableName);
+		uint64		rowCount = InsertIntoIcebergTable(selectQuery, qualifiedTableName);
 
-		InsertIntoIcebergTable(selectQuery, qualifiedTableName);
+		if (params->completionTag)
+			SetQueryCompletion(params->completionTag, CMDTAG_SELECT, rowCount);
 	}
 
 	/* signal that we already ran the ProcessUtility */
@@ -203,7 +205,7 @@ ProcessCreateAsSelectPgLakeTable(ProcessUtilityParams * params, void *arg)
  * InsertIntoIcebergTable inserts the result of a SELECT statement into given
  * iceberg table.
  */
-static void
+static uint64
 InsertIntoIcebergTable(Query *selectQuery, char *qualifiedTableName)
 {
 	char	   *selectQueryStr = pg_get_querydef(selectQuery, false);
@@ -218,7 +220,11 @@ InsertIntoIcebergTable(Query *selectQuery, char *qualifiedTableName)
 
 	SPI_exec(insertSelectSql->data, 0);
 
+	uint64		rowCount = SPI_processed;
+
 	SPI_END();
+
+	return rowCount;
 }
 
 
