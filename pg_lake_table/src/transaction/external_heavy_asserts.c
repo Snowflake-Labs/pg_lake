@@ -388,8 +388,37 @@ AssertInternalAndExternalIcebergStatsMatchForAllDataFiles(Oid relationId, bool d
 
 		Assert(list_length(externalLowerBounds) == list_length(externalUpperBounds));
 
-		/* copy internal column stats to compare them */
-		List	   *internalColumnStatsList = list_copy(internalDataFile->stats.columnStats);
+		/*
+		 * Filter out internal column stats whose bounds were not written
+		 * to the Iceberg metadata.  Columns with NULL bounds (all-NULL
+		 * data) or non-serializable bounds (NaN/Inf floats) are skipped
+		 * by CreateColumnBoundForLeafField during metadata writes, so
+		 * they won't appear in the external bounds.
+		 */
+		List	   *internalColumnStatsList = NIL;
+		ListCell   *statsCell;
+
+		foreach(statsCell, internalDataFile->stats.columnStats)
+		{
+			DataFileColumnStats *colStats = lfirst(statsCell);
+
+			if (colStats->lowerBoundText == NULL)
+			{
+				Assert(colStats->upperBoundText == NULL);
+				continue;
+			}
+
+			size_t		boundLen = 0;
+			unsigned char *serialized =
+				IcebergSerializeColumnBoundText(pstrdup(colStats->lowerBoundText),
+												colStats->leafField.field,
+												&boundLen);
+
+			if (serialized == NULL)
+				continue;
+
+			internalColumnStatsList = lappend(internalColumnStatsList, colStats);
+		}
 
 		if ((size_t) list_length(internalColumnStatsList) != list_length(externalLowerBounds))
 		{
