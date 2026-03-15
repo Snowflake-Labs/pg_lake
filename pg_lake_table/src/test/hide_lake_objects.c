@@ -278,8 +278,25 @@ HideObjectsCreatedByLakeFromCatalogTables(Node *node, void *context)
 					CreateObjectCreatedByLakeExpr(catalogTableOid, varno);
 
 				/*
-				 * we add the new expr to the existing quals
+				 * In PG17+, transform_MERGE_to_join() moves jointree->quals
+				 * into a FromExpr scoped to only mergeTargetRelation, and
+				 * uses mergeJoinCondition as the JoinExpr->quals that can
+				 * see both sides. So source RTE quals must go in
+				 * mergeJoinCondition to avoid referencing a varno outside
+				 * the target-only scope (see prepjointree.c).
 				 */
+#if PG_VERSION_NUM >= 170000
+				if (query->commandType == CMD_MERGE &&
+					varno != query->mergeTargetRelation)
+				{
+					query->mergeJoinCondition =
+						make_and_qual(query->mergeJoinCondition,
+									  createdByLakeExpr);
+					MemoryContextSwitchTo(originalContext);
+					continue;
+				}
+#endif
+
 				query->jointree->quals = make_and_qual(query->jointree->quals, createdByLakeExpr);
 
 				MemoryContextSwitchTo(originalContext);
