@@ -29,3 +29,13 @@ AS 'MODULE_PATHNAME', $function$force_push_object_store_catalog$function$;
 -- any role who can write into a table should be able to trigger this
 REVOKE ALL ON FUNCTION lake_iceberg.force_push_object_store_catalog() FROM public;
 GRANT EXECUTE ON FUNCTION lake_iceberg.force_push_object_store_catalog() TO lake_read_write;
+
+-- Create rest_catalog_sync table if it doesn't exist (for upgrades from 3.0)
+CREATE TABLE lake_iceberg.rest_catalog_sync (
+    table_name regclass NOT NULL,
+    last_synced_snapshot_id BIGINT,
+    PRIMARY KEY (table_name)
+);
+
+REVOKE ALL ON TABLE lake_iceberg.rest_catalog_sync FROM public;
+GRANT SELECT, INSERT, UPDATE ON TABLE lake_iceberg.rest_catalog_sync TO lake_read_write;

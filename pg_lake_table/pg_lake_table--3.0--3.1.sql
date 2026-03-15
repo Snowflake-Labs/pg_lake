@@ -29,3 +29,13 @@ BEGIN
   );
 END;
 $$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION pg_lake_sync_internal_catalog_from_latest_snapshot(oid, boolean)
+RETURNS void
+AS 'MODULE_PATHNAME'
+LANGUAGE C STRICT;
+
+CREATE OR REPLACE FUNCTION pg_lake_ensure_no_external_ddl(oid, text)
+RETURNS void
+AS 'MODULE_PATHNAME'
+LANGUAGE C STRICT;

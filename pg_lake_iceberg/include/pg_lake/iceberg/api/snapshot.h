@@ -50,7 +50,7 @@ extern PGDLLEXPORT bool IsCurrentSnapshot(IcebergTableMetadata * metadata, Icebe
 /* read api */
 extern PGDLLEXPORT List *FetchSnapshotsFromTableMetadata(IcebergTableMetadata * metadata, SnapshotPredicateFn snapshotPredicateFn);
 extern PGDLLEXPORT IcebergSnapshot * GetCurrentSnapshot(IcebergTableMetadata * metadata, bool missingOk);
-extern PGDLLEXPORT IcebergSnapshot * GetIcebergSnapshotViaId(IcebergTableMetadata * metadata, uint64_t snapshotId);
+extern PGDLLEXPORT IcebergSnapshot * GetIcebergSnapshotViaId(IcebergTableMetadata * metadata, uint64_t snapshotId, bool missingOk);
 
 
 /* write api */
