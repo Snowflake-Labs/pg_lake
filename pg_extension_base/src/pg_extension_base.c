@@ -31,8 +31,8 @@
 PG_MODULE_MAGIC;
 
 
-#if PG_VERSION_NUM < 150000
-#error This extension requires Postgres 15 or newer
+#if PG_VERSION_NUM < 160000
+#error This extension requires Postgres 16 or newer
 #endif
 
 

@@ -23,11 +23,7 @@
 
 #include "pg_extension_base/extension_control_file.h"
 #include "storage/fd.h"
-#if PG_VERSION_NUM >= 160000
 #include "utils/conffiles.h"
-#else
-#define CONF_FILE_START_DEPTH 0
-#endif
 #include "utils/guc.h"
 #include "utils/varlena.h"
 

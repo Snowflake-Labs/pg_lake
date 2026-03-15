@@ -56,103 +56,14 @@
 
 
 /* Check PgSQL version */
-#if PG_VERSION_NUM < 100000
-#error PostgreSQL 10 or newer is required
+#if PG_VERSION_NUM < 160000
+#error PostgreSQL 16 or newer is required
 #endif
 
 #define ARRNELEMS(x)  ArrayGetNItems(ARR_NDIM(x), ARR_DIMS(x))
 
 #define EXTENSION_NAME "pg_map"
 #define EXTENSION_SCHEMA "map_type"
-
-/* postgres 14/15 do not have this routine */
-#if PG_VERSION_NUM < 160000
-/*
- * Like construct_array(), where elmtype must be a built-in type, and
- * elmlen/elmbyval/elmalign is looked up from hardcoded data.  This is often
- * useful when manipulating arrays from/for system catalogs.
- */
-static ArrayType *
-construct_array_builtin(Datum *elems, int nelems, Oid elmtype)
-{
-	int			elmlen;
-	bool		elmbyval;
-	char		elmalign;
-
-	switch (elmtype)
-	{
-		case CHAROID:
-			elmlen = 1;
-			elmbyval = true;
-			elmalign = TYPALIGN_CHAR;
-			break;
-
-		case CSTRINGOID:
-			elmlen = -2;
-			elmbyval = false;
-			elmalign = TYPALIGN_CHAR;
-			break;
-
-		case FLOAT4OID:
-			elmlen = sizeof(float4);
-			elmbyval = true;
-			elmalign = TYPALIGN_INT;
-			break;
-
-		case INT2OID:
-			elmlen = sizeof(int16);
-			elmbyval = true;
-			elmalign = TYPALIGN_SHORT;
-			break;
-
-		case INT4OID:
-			elmlen = sizeof(int32);
-			elmbyval = true;
-			elmalign = TYPALIGN_INT;
-			break;
-
-		case INT8OID:
-			elmlen = sizeof(int64);
-			elmbyval = FLOAT8PASSBYVAL;
-			elmalign = TYPALIGN_DOUBLE;
-			break;
-
-		case NAMEOID:
-			elmlen = NAMEDATALEN;
-			elmbyval = false;
-			elmalign = TYPALIGN_CHAR;
-			break;
-
-		case OIDOID:
-		case REGTYPEOID:
-			elmlen = sizeof(Oid);
-			elmbyval = true;
-			elmalign = TYPALIGN_INT;
-			break;
-
-		case TEXTOID:
-			elmlen = -1;
-			elmbyval = false;
-			elmalign = TYPALIGN_INT;
-			break;
-
-		case TIDOID:
-			elmlen = sizeof(ItemPointerData);
-			elmbyval = false;
-			elmalign = TYPALIGN_SHORT;
-			break;
-
-		default:
-			elog(ERROR, "type %u not supported by construct_array_builtin()", elmtype);
-			/* keep compiler quiet */
-			elmlen = 0;
-			elmbyval = false;
-			elmalign = 0;
-	}
-
-	return construct_array(elems, nelems, elmtype, elmlen, elmbyval, elmalign);
-}
-#endif
 
 PG_MODULE_MAGIC;
 
@@ -1058,9 +969,6 @@ map_entries(PG_FUNCTION_ARGS)
 	bool		isNull;
 
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-#if PG_VERSION_NUM >= 150000
-	InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC);
-#else
 	{
 		TupleDesc	tupdesc;
 		Tuplestorestate *tupstore;
@@ -1092,7 +1000,6 @@ map_entries(PG_FUNCTION_ARGS)
 
 		MemoryContextSwitchTo(oldcontext);
 	}
-#endif
 
 	ereport(DEBUG3,
 			(errcode(ERRCODE_SUCCESSFUL_COMPLETION),

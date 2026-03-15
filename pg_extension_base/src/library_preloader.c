@@ -34,11 +34,7 @@
 #include "nodes/pg_list.h"
 #include "storage/fd.h"
 #include "utils/builtins.h"
-#if PG_VERSION_NUM >= 160000
 #include "utils/conffiles.h"
-#else
-#define CONF_FILE_START_DEPTH 0
-#endif
 #include "utils/guc.h"
 
 /* PreloadLibrary represents a library to preload */
