@@ -172,9 +172,9 @@ RUN wget https://ftp.postgresql.org/pub/source/v$PG16_VERSION/postgresql-$PG16_V
     tar -xzf postgis-$POSTGIS_VERSION.tar.gz && rm postgis-$POSTGIS_VERSION.tar.gz
 
 ARG PG_COMPILE_FLAGS_16="--enable-debug --enable-cassert --enable-depend --with-openssl --with-libxml --with-libxslt --with-icu --with-uuid=ossp --with-lz4"
-# PG 17-18 have asserts disabled
+# PG17 has asserts disabled
 ARG PG_COMPILE_FLAGS_17="--enable-debug --enable-depend --with-openssl --with-libxml --with-libxslt --with-icu --with-uuid=ossp --with-lz4 --enable-injection-points"
-ARG PG_COMPILE_FLAGS_18="--enable-debug --enable-depend --with-openssl --with-libxml --with-libxslt --with-icu --with-uuid=ossp --with-lz4 --enable-injection-points"
+ARG PG_COMPILE_FLAGS_18="--enable-debug --enable-cassert --enable-depend --with-openssl --with-libxml --with-libxslt --with-icu --with-uuid=ossp --with-lz4 --enable-injection-points"
 ENV PGBASEDIR=/home/postgres
 
 # Compile and install PostgreSQL 16 with pgindent
