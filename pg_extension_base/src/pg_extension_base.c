@@ -107,6 +107,21 @@ _PG_init(void)
 							 GUC_STANDARD,
 							 NULL, NULL, NULL);
 
+	DefineCustomIntVariable("pg_extension_base.worker_starter_sleep_time",
+							"Sets the time in seconds that the worker starter sleeps "
+							"in between checking for failed workers.",
+							NULL,
+							&WorkerStarterSleepTimeSec,
+							DEFAULT_WORKER_STARTER_SLEEP_TIME,
+							0,
+							INT32_MAX,
+							PGC_USERSET,
+							GUC_UNIT_S | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							NULL,
+							NULL,
+							NULL);
+
+
 
 	if (EnableBaseWorkerLauncher)
 	{
