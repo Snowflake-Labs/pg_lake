@@ -362,7 +362,7 @@ ErrorIfUnsupportedLakeTable(CreateForeignTableStmt *createStmt)
 {
 	List	   *options = createStmt->options;
 	DefElem    *pathOption = GetOption(options, "path");
-	char	   *path = pathOption != NULL ? defGetString(pathOption) : "";
+	char	   *path = pathOption != NULL ? ResolveStageURL(defGetString(pathOption)) : "";
 	DefElem    *locationOption = GetOption(options, "location");
 	char	   *location = locationOption != NULL ? defGetString(locationOption) : "";
 
@@ -574,15 +574,30 @@ ProcessCreateLakeTable(ProcessUtilityParams * params)
 	if (createStmt->base.partbound != NULL)
 		return false;
 
+	/* get a writable copy of the parse tree */
+	if (params->readOnlyTree)
+		createStmt = (CreateForeignTableStmt *) CopyUtilityStmt(params);
+
+	/*
+	 * Resolve @STAGE/ prefix in the path option so the full URL is stored in
+	 * the foreign table metadata rather than the @STAGE/ shorthand.
+	 */
+	DefElem    *pathOption = GetOption(createStmt->options, "path");
+
+	if (pathOption != NULL)
+	{
+		char	   *path = defGetString(pathOption);
+		char	   *resolvedPath = ResolveStageURL(path);
+
+		if (resolvedPath != path)
+			pathOption->arg = (Node *) makeString(resolvedPath);
+	}
+
 	/*
 	 * If the column list is empty, we automatically fill it in.
 	 */
 	if (createStmt->base.tableElts == NIL)
 	{
-		/* we will adjust column list in the parse tree */
-		if (params->readOnlyTree)
-			createStmt = (CreateForeignTableStmt *) CopyUtilityStmt(params);
-
 		AddLakeTableColumnDefinitions(createStmt);
 
 		/*
