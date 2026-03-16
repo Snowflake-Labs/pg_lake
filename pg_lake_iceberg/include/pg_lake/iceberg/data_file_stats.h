@@ -32,4 +32,5 @@ extern PGDLLEXPORT void SetIcebergDataFileStats(const DataFileStats * dataFileSt
 extern PGDLLEXPORT unsigned char *IcebergSerializeColumnBoundText(char *columnBoundText,
 																  Field * field,
 																  size_t *binaryLen);
+extern PGDLLEXPORT bool CanSerializeColumnBound(char *boundText, Field * field);
 extern PGDLLEXPORT Datum ColumnBoundDatum(char *columnBoundText, PGType pgType);

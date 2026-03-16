@@ -140,8 +140,11 @@ CreateColumnBoundForLeafField(LeafField * leafField, char *columnBoundText)
 		 * even if bound text is valid in Postgres, we return null for special
 		 * types e.g. NaN
 		 */
+		Assert(!CanSerializeColumnBound(columnBoundText, leafField->field));
 		return NULL;
 	}
+
+	Assert(CanSerializeColumnBound(columnBoundText, leafField->field));
 
 	ColumnBound *columnBound = palloc0(sizeof(ColumnBound));
 
@@ -169,6 +172,25 @@ IcebergSerializeColumnBoundText(char *columnBoundText, Field * field, size_t *bi
 		PGIcebergBinarySerializeBoundValue(boundDatum, field, pgType, binaryLen);
 
 	return binaryValue;
+}
+
+
+/*
+ * CanSerializeColumnBound returns true if the given bound text can be
+ * serialized to Iceberg binary format for the given field.  Returns
+ * false for NULL text or values that have no Iceberg binary
+ * representation (e.g. NaN/Inf floats).
+ */
+bool
+CanSerializeColumnBound(char *boundText, Field * field)
+{
+	if (boundText == NULL)
+		return false;
+
+	size_t		boundLen = 0;
+
+	return IcebergSerializeColumnBoundText(pstrdup(boundText),
+										   field, &boundLen) != NULL;
 }
 
 

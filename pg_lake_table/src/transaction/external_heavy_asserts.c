@@ -403,18 +403,10 @@ AssertInternalAndExternalIcebergStatsMatchForAllDataFiles(Oid relationId, bool d
 			DataFileColumnStats *colStats = lfirst(statsCell);
 
 			if (colStats->lowerBoundText == NULL)
-			{
 				Assert(colStats->upperBoundText == NULL);
-				continue;
-			}
 
-			size_t		boundLen = 0;
-			unsigned char *serialized =
-				IcebergSerializeColumnBoundText(pstrdup(colStats->lowerBoundText),
-												colStats->leafField.field,
-												&boundLen);
-
-			if (serialized == NULL)
+			if (!CanSerializeColumnBound(colStats->lowerBoundText,
+										 colStats->leafField.field))
 				continue;
 
 			internalColumnStatsList = lappend(internalColumnStatsList, colStats);
