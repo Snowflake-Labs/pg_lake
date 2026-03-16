@@ -83,13 +83,11 @@
  * A base worker entry point function returns internal (Datum). The return
  * value controls whether and when the worker should be restarted:
  *
- *   BASE_WORKER_NO_RESTART (0): Clean exit, no restart
  *   BASE_WORKER_RESTART_IMMEDIATELY (-1): Restart immediately
  *   Any positive value: Restart after N milliseconds
  *
  * Values less than -1 are treated as "no restart" (same as 0).
  */
-#define BASE_WORKER_NO_RESTART          ((Datum) 0)
 #define BASE_WORKER_RESTART_IMMEDIATELY ((Datum) -1)
 
 /* adjusted based on signals */
@@ -101,6 +99,10 @@ extern PGDLLEXPORT void LightSleep(long timeoutMs);
 
 /* whether the base worker launcher is enabled */
 extern bool EnableBaseWorkerLauncher;
+
+/* pg_extension_base.worker_starter_sleep_time setting */
+#define DEFAULT_WORKER_STARTER_SLEEP_TIME (10)
+extern int	WorkerStarterSleepTimeSec;
 
 void		BaseWorkerSharedMemoryInit(void);
 size_t		BaseWorkerSharedMemorySize(void);

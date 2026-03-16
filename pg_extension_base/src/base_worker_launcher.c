@@ -107,7 +107,7 @@
 /*
  * When a base worker fails with an error, we avoid a crash loop by waiting at
  * least 5 seconds. We do not currently wake up the server and database starters,
- * so the total wait can be up to 30 seconds.
+ * so the total wait can be up to 15 seconds.
  */
 #define NAP_TIME_AFTER_FAILURE (5000)
 
@@ -394,6 +394,9 @@ volatile sig_atomic_t TerminationRequested = false;
 
 /* flags set by DDL commands that want to wake up server starter */
 static bool SignalServerStarter = false;
+
+/* pg_extension_base.worker_starter_sleep_time */
+int			WorkerStarterSleepTimeSec = DEFAULT_WORKER_STARTER_SLEEP_TIME;
 
 
 /*
@@ -1272,7 +1275,7 @@ PgExtensionBaseDatabaseStarterSharedMemoryExit(int code, Datum arg)
 static int64
 ComputeNextWakeTimeMs(void)
 {
-	int64		minSleepMs = 10000; /* default */
+	int64		minSleepMs = WorkerStarterSleepTimeSec;
 
 	if (BaseWorkerHash == NULL)
 	{
