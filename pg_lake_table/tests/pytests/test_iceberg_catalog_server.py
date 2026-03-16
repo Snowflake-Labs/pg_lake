@@ -1,4 +1,6 @@
 import os
+import tempfile
+
 import pytest
 from utils_pytest import *
 
@@ -772,6 +774,62 @@ def test_credentials_from_catalogs_conf_for_rest_server(
     assert err is not None
     assert "no credentials found" not in str(err)
     pg_conn.rollback()
+
+
+def test_catalogs_conf_path_outside_pgdata(
+    pg_conn,
+    superuser_conn,
+    s3,
+    extension,
+    with_default_location,
+):
+    """catalogs_conf_path GUC accepts an absolute path for the credentials file."""
+    fd, tmp_path = tempfile.mkstemp(suffix=".conf", prefix="catalogs_")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(
+                "rest.client_id = 'external-id'\n"
+                "rest.client_secret = 'external-secret'\n"
+            )
+
+        run_command_outside_tx(
+            [
+                "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_id TO ''",
+                "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_secret TO ''",
+                f"ALTER SYSTEM SET pg_lake_iceberg.catalogs_conf_path TO '{tmp_path}'",
+                "SELECT pg_reload_conf()",
+            ],
+        )
+
+        # Use a fresh connection so its backend reads the updated
+        # postgresql.auto.conf on startup — avoids SIGHUP race.
+        fresh = open_pg_conn()
+        try:
+            err = run_command(
+                """
+                CREATE TABLE test_ext_conf_tbl ()
+                    USING iceberg
+                    WITH (catalog = 'rest', read_only = 'true',
+                          catalog_namespace = 'ns', catalog_table_name = 'tbl')
+                """,
+                fresh,
+                raise_error=False,
+            )
+            assert err is not None
+            assert "no credentials found" not in str(err)
+        finally:
+            fresh.close()
+    finally:
+        run_command_outside_tx(
+            [
+                "ALTER SYSTEM RESET pg_lake_iceberg.catalogs_conf_path",
+                "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_id",
+                "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_secret",
+                "SELECT pg_reload_conf()",
+            ],
+        )
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 
 # ── Backward compatibility ─────────────────────────────────────────────────

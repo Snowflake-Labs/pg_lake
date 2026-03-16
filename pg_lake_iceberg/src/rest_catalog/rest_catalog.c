@@ -60,6 +60,7 @@
 
 
 /* determined by GUC */
+char	   *CatalogsConfPath = NULL;
 char	   *RestCatalogHost = "http://localhost:8181";
 char	   *RestCatalogOauthHostPath = "";
 char	   *RestCatalogClientId = NULL;
@@ -398,8 +399,6 @@ BlockDDLOnExtensionCatalogs(ProcessUtilityParams * processUtilityParams,
 }
 
 
-#define CATALOGS_CONF_FILENAME "catalogs.conf"
-
 /*
  * LookupUserMappingOptions returns the user mapping options for the current
  * user on the given server, or NULL if no mapping exists. Checks for a
@@ -437,9 +436,13 @@ LookupUserMappingOptions(Oid serverid)
 
 
 /*
- * ReadCatalogsConfCredentials reads $PGDATA/catalogs.conf and extracts
- * credentials for the given server name. The file uses PostgreSQL's
- * standard key = value format with dotted keys:
+ * ReadCatalogsConfCredentials reads the catalog credentials file and
+ * extracts credentials for the given server name.
+ *
+ * The file path is pg_lake_iceberg.catalogs_conf_path. Relative paths
+ * are resolved against the data directory.
+ *
+ * The file uses PostgreSQL's standard key = value format with dotted keys:
  *
  *   horizon.client_id = 'platform_id'
  *   horizon.client_secret = 'platform_secret'
@@ -463,7 +466,10 @@ ReadCatalogsConfCredentials(const char *serverName,
 	bool		found = false;
 	int			serverNameLen = strlen(serverName);
 
-	snprintf(path, MAXPGPATH, "%s/%s", DataDir, CATALOGS_CONF_FILENAME);
+	if (is_absolute_path(CatalogsConfPath))
+		strlcpy(path, CatalogsConfPath, MAXPGPATH);
+	else
+		snprintf(path, MAXPGPATH, "%s/%s", DataDir, CatalogsConfPath);
 
 	fp = AllocateFile(path, "r");
 	if (fp == NULL)

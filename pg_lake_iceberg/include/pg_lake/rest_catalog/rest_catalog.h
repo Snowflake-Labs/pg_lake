@@ -28,6 +28,7 @@
 #define REST_CATALOG_AUTH_TYPE_OAUTH2 (0)
 #define REST_CATALOG_AUTH_TYPE_HORIZON (1)
 
+extern char *CatalogsConfPath;
 extern PGDLLEXPORT char *RestCatalogHost;
 extern char *RestCatalogOauthHostPath;
 extern char *RestCatalogClientId;
