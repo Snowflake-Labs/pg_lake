@@ -17,9 +17,7 @@
 
 #pragma once
 
-#include "access/tupdesc.h"
-#include "utils/date.h"
-#include "utils/timestamp.h"
+#include "postgres.h"
 
 /*
  * Behavior for out-of-range values during writes to Iceberg data files.
@@ -29,8 +27,11 @@
  *     the Iceberg-supported range are clamped or rejected.
  *   - Bounded numeric columns: NaN values are clamped to NULL or rejected.
  *
- * Controlled by the out_of_range_values table option.
+ * Controlled by the out_of_range_values table option (default: clamp).
  *
+ * CLAMP silently adjusts out-of-range values to the nearest representable
+ * boundary (e.g. year 10000 becomes 9999-12-31, NaN becomes NULL).
+ * ERROR raises an error instead.
  * NONE skips validation entirely (used for non-Iceberg tables).
  */
 typedef enum IcebergOutOfRangePolicy
@@ -47,36 +48,9 @@ typedef enum IcebergOutOfRangePolicy
  */
 extern PGDLLEXPORT IcebergOutOfRangePolicy GetIcebergOutOfRangePolicyForTable(Oid relationId);
 
-/*
- * IcebergErrorOrClampDatum validates a Datum for Iceberg write constraints.
- *
- * Dispatches to temporal validation (date/timestamp/timestamptz) or
- * numeric NaN validation based on typeOid.  For types that need no
- * validation the value is returned unchanged.
- *
- * *isNull is set to true only when a numeric NaN is clamped (the
- * caller should write NULL instead of the original value).
- */
-extern PGDLLEXPORT Datum IcebergErrorOrClampDatum(Datum value, Oid typeOid,
-												  IcebergOutOfRangePolicy policy,
-												  bool *isNull);
-
-/*
- * IcebergWrapQueryWithErrorOrClampChecks wraps a query with CASE WHEN
- * checks for temporal columns that need Iceberg write-time validation
- * (date/timestamp/timestamptz).
- *
- * For ICEBERG_OOR_CLAMP: out-of-range values are clamped to boundaries.
- * For ICEBERG_OOR_ERROR: out-of-range values trigger a cast error.
- *
- * Returns the original query unchanged if no temporal columns exist or
- * the policy is ICEBERG_OOR_NONE.
- */
-extern PGDLLEXPORT char *IcebergWrapQueryWithErrorOrClampChecks(char *query,
-																TupleDesc tupleDesc,
-																IcebergOutOfRangePolicy policy,
-																bool queryHasRowId);
-
 extern PGDLLEXPORT bool IsTemporalType(Oid typeOid);
-extern PGDLLEXPORT int GetYearFromDate(DateADT d);
-extern PGDLLEXPORT int GetYearFromTimestamp(Timestamp ts);
+
+/* Temporal boundary year constants shared by datum and query-level validation */
+#define TEMPORAL_DATE_MIN_YEAR		(-4712)
+#define TEMPORAL_TIMESTAMP_MIN_YEAR	1
+#define TEMPORAL_MAX_YEAR			9999

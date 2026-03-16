@@ -25,7 +25,7 @@
 #include "pg_lake/iceberg/iceberg_type_binary_serde.h"
 #include "pg_lake/iceberg/iceberg_type_numeric_binary_serde.h"
 #include "pg_lake/iceberg/partitioning/partition.h"
-#include "pg_lake/iceberg/temporal_utils.h"
+#include "pg_lake/util/temporal_utils.h"
 
 static int	PartitionFieldCompare(const void *a, const void *b);
 

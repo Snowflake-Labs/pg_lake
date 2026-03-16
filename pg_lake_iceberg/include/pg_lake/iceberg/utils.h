@@ -20,7 +20,7 @@
 #include "postgres.h"
 
 #include "pg_lake/iceberg/manifest_spec.h"
-#include "pg_lake/iceberg/temporal_utils.h"
+#include "pg_lake/util/temporal_utils.h"
 
 extern PGDLLEXPORT const char *IcebergManifestContentTypeToName(IcebergManifestContentType contentType);
 extern PGDLLEXPORT const char *IcebergManifestEntryStatusToName(IcebergManifestEntryStatus status);

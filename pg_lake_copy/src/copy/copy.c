@@ -889,8 +889,7 @@ ProcessPgLakeCopyTo(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 
 	/* execute query and write results to CSV */
 	DestReceiver *dest = CreateCSVDestReceiver(tempCSVPath, readOptions,
-											   destinationFormat,
-											   ICEBERG_OOR_NONE);
+											   destinationFormat);
 
 	*rowsProcessed = ExecuteQueryToDestReceiver(query, queryString, NULL, dest);
 
@@ -930,8 +929,7 @@ ProcessPgLakeCopyTo(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 	 */
 	ConvertCSVFileTo(tempCSVPath, tupleDesc, maximumLineLength,
 					 destinationPath, destinationFormat, destinationCompression,
-					 copyStmt->options, schema, NIL,
-					 ICEBERG_OOR_NONE);
+					 copyStmt->options, schema, NIL);
 
 	if (IsCopyToStdout(copyStmt))
 	{

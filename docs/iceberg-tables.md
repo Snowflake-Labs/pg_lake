@@ -67,10 +67,11 @@ with (definition_from = 'https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_
 
 Iceberg tables support the following options when creating the table:
 
-| Option           | Description                                                          |
-| ---------------- | -------------------------------------------------------------------- |
-| location         | URL prefix for the Iceberg table (e.g. `s3://mybucket/measurements`) |
-| max_snapshot_age | Maximum age (in seconds) of snapshots to retain. When set to `0`, old snapshots are automatically expired during writes. Overrides the `pg_lake_iceberg.max_snapshot_age` GUC for this table. |
+| Option               | Description                                                          |
+| -------------------- | -------------------------------------------------------------------- |
+| location             | URL prefix for the Iceberg table (e.g. `s3://mybucket/measurements`) |
+| max_snapshot_age     | Maximum age (in seconds) of snapshots to retain. When set to `0`, old snapshots are automatically expired during writes. Overrides the `pg_lake_iceberg.max_snapshot_age` GUC for this table. |
+| out_of_range_values  | How to handle values that fall outside the Iceberg-representable range. Valid values: `clamp` (default), `error`. See [Out-of-range value handling](#out-of-range-value-handling). |
 
 Additionally, when creating the Iceberg table from a file, the following options are supported along with the format-specific options listed in the [data lake formats](../docs/file-formats-reference) section:
 
@@ -108,6 +109,67 @@ There are a few limitations to be aware of:
     - Other tables used as column types.
     - Not all geometry types are supported in Iceberg tables (only point, linestring, polygon, multipoint, multilinestring, multipolygon, geometrycollection), and geometry types cannot be nested in an array or composite type.
 - Custom base types other than geometry are stored using their text representation, which may lead to suboptimal performance.
+
+
+## Out-of-range value handling
+
+The Iceberg specification defines strict boundaries for temporal types that are narrower than what PostgreSQL allows. When writing data to an Iceberg table, pg_lake validates temporal and numeric values against these boundaries. The `out_of_range_values` table option controls what happens when a value falls outside the representable range.
+
+### Affected types and boundaries
+
+| Type | Iceberg-supported range |
+| --- | --- |
+| `date` | `-4712-01-01` to `9999-12-31` |
+| `timestamp` | `0001-01-01 00:00:00` to `9999-12-31 23:59:59.999999` |
+| `timestamptz` | `0001-01-01 00:00:00+00` to `9999-12-31 23:59:59.999999+00` |
+| `numeric(p,s)` | NaN is not representable in Iceberg decimals |
+
+PostgreSQL supports dates and timestamps well beyond year 9999, as well as special values like `infinity`, `-infinity`, and `NaN` for numerics. These values cannot be stored in Iceberg data files (Parquet).
+
+### Behavior: `clamp` vs `error`
+
+The `out_of_range_values` option accepts two values:
+
+- **`clamp`** (default): Out-of-range temporal values are silently adjusted to the nearest Iceberg boundary. Numeric `NaN` values in bounded numeric columns are replaced with `NULL`. **No error is raised and no warning is emitted.** This means your stored data may differ from what was inserted.
+- **`error`**: An error is raised if any value falls outside the Iceberg-representable range. The write is aborted entirely.
+
+### Example
+
+```sql
+-- Default behavior (clamp): out-of-range values are silently adjusted
+CREATE TABLE events (
+  event_time timestamptz NOT NULL,
+  score numeric(10,2)
+)
+USING iceberg;
+
+-- This succeeds, but 'infinity' is stored as '9999-12-31 23:59:59.999999+00'
+INSERT INTO events VALUES ('infinity', 3.14);
+
+-- Strict mode: out-of-range values cause an error
+CREATE TABLE events_strict (
+  event_time timestamptz NOT NULL,
+  score numeric(10,2)
+)
+USING iceberg WITH (out_of_range_values = 'error');
+
+-- This fails with: "timestamp out of range"
+INSERT INTO events_strict VALUES ('infinity', 3.14);
+```
+
+The option can also be changed on an existing Iceberg table:
+
+```sql
+ALTER TABLE events OPTIONS (ADD out_of_range_values 'error');
+```
+
+### When to use `error`
+
+The default `clamp` mode is convenient for pipelines that may produce edge-case temporal values (e.g. sentinel dates like `9999-12-31` or `infinity` from PostgreSQL). However, if data integrity is critical and you want to catch unexpected values early, set `out_of_range_values` to `error`. This is especially recommended when:
+
+- Your application logic should never produce values outside the valid range
+- You are migrating data from PostgreSQL heap tables that might contain `infinity` or extreme dates
+- You want to detect data quality issues at write time rather than discovering silently clamped values later
 
 
 ## Loading data into an Iceberg table

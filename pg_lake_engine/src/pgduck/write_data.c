@@ -32,6 +32,7 @@
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/pgduck/read_data.h"
 #include "pg_lake/pgduck/type.h"
+#include "pg_lake/pgduck/iceberg_query_validation.h"
 #include "pg_lake/pgduck/write_data.h"
 #include "pg_lake/util/numeric.h"
 #include "nodes/pg_list.h"
@@ -67,8 +68,7 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 				 CopyDataCompression destinationCompression,
 				 List *formatOptions,
 				 DataFileSchema * schema,
-				 List *leafFields,
-				 IcebergOutOfRangePolicy outOfRangePolicy)
+				 List *leafFields)
 {
 	StringInfoData command;
 
@@ -91,6 +91,7 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 
 	bool		queryHasRowIds = false;
 
+	/* CSV data is already clamped by IcebergValidatingDestReceiver */
 	return WriteQueryResultTo(command.data,
 							  destinationPath,
 							  destinationFormat,
@@ -100,7 +101,7 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 							  schema,
 							  csvTupleDesc,
 							  leafFields,
-							  outOfRangePolicy);
+							  ICEBERG_OOR_NONE);
 }
 
 
@@ -121,8 +122,7 @@ WriteQueryResultTo(char *query,
 				   List *leafFields,
 				   IcebergOutOfRangePolicy outOfRangePolicy)
 {
-	if (destinationFormat == DATA_FORMAT_ICEBERG &&
-		outOfRangePolicy != ICEBERG_OOR_NONE)
+	if (outOfRangePolicy != ICEBERG_OOR_NONE)
 	{
 		query = IcebergWrapQueryWithErrorOrClampChecks(query, queryTupleDesc,
 													   outOfRangePolicy,

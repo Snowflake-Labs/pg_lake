@@ -22,6 +22,8 @@
 #include "utils/date.h"
 #include "utils/timestamp.h"
 
+extern PGDLLEXPORT int GetYearFromDate(DateADT d);
+extern PGDLLEXPORT int GetYearFromTimestamp(Timestamp ts);
 extern PGDLLEXPORT Timestamp IcebergTimestampMsToPostgresTimestamp(Timestamp icebergTimestampMs);
 extern PGDLLEXPORT Timestamp PostgresTimestampToIcebergTimestampMs(void);
 extern PGDLLEXPORT Timestamp AdjustTimestampFromUnixToPostgres(Timestamp timestamp);
@@ -44,3 +46,5 @@ extern PGDLLEXPORT int32_t TimestampDayFromUnixEpoch(Timestamp timestamp);
 extern PGDLLEXPORT int32_t TimestampHourFromUnixEpoch(Timestamp timestamp);
 extern PGDLLEXPORT Timestamp HoursFromUnixEpochToTimestamp(int32 hoursSinceEpoch);
 extern PGDLLEXPORT int32_t TimeHourFromUnixEpoch(TimeADT time);
+extern PGDLLEXPORT DateADT MakeDateFromYMD(int y, int m, int d);
+extern PGDLLEXPORT Timestamp MakeTimestampUsec(int y, int m, int d, int h, int min, int sec, int usec);

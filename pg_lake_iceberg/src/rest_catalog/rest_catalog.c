@@ -35,7 +35,7 @@
 #include "pg_lake/iceberg/api/table_schema.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/metadata_spec.h"
-#include "pg_lake/iceberg/temporal_utils.h"
+#include "pg_lake/util/temporal_utils.h"
 #include "pg_lake/json/json_utils.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "pg_lake/parsetree/options.h"

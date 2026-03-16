@@ -19,17 +19,14 @@
 #define CSV_WRITER_H
 
 #include "pg_lake/copy/copy_format.h"
-#include "pg_lake/pgduck/iceberg_write_validation.h"
 #include "tcop/dest.h"
 #include "nodes/pg_list.h"
 
 extern PGDLLEXPORT DestReceiver *CreateCSVDestReceiver(char *filename, List *copyOptions,
-													   CopyDataFormat targetFormat,
-													   IcebergOutOfRangePolicy outOfRangePolicy);
+													   CopyDataFormat targetFormat);
 extern PGDLLEXPORT DestReceiver *CreateCSVDestReceiverExtended(char *filename,
 															   List *copyOptions,
 															   CopyDataFormat targetFormat,
-															   IcebergOutOfRangePolicy outOfRangePolicy,
 															   bool sessionLifetime);
 extern PGDLLEXPORT int GetCSVDestReceiverMaxLineSize(DestReceiver *dest);
 extern PGDLLEXPORT uint64 GetCSVDestReceiverFileSize(DestReceiver *dest);

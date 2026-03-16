@@ -39,7 +39,7 @@
 #include "pg_lake/planner/explain.h"
 #include "pg_lake/planner/pushdown_utils.h"
 #include "pg_lake/fdw/writable_table.h"
-#include "pg_lake/pgduck/iceberg_write_validation.h"
+#include "pg_lake/pgduck/iceberg_query_validation.h"
 #include "pg_lake/planner/insert_select.h"
 #include "pg_lake/planner/query_pushdown.h"
 #include "pg_lake/planner/restriction_collector.h"

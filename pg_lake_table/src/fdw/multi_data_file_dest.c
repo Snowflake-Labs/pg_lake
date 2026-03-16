@@ -31,7 +31,7 @@
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/pgduck/remote_storage.h"
 #include "pg_lake/pgduck/write_data.h"
-#include "pg_lake/pgduck/iceberg_write_validation.h"
+#include "pg_lake/pgduck/iceberg_validation.h"
 #include "pg_lake/storage/local_storage.h"
 #include "foreign/foreign.h"
 #include "tcop/dest.h"
@@ -194,8 +194,7 @@ CreateChildDestReceiver(MultiDataFileUploadDestReceiver * self)
 	self->currentRowCount = 0;
 	self->currentFilePath = tempFilePath;
 	self->currentDest = CreateCSVDestReceiver(tempFilePath, copyOptions,
-											  self->targetFormat,
-											  GetIcebergOutOfRangePolicyForTable(self->relationId));
+											  self->targetFormat);
 
 	self->currentDest->rStartup(self->currentDest, self->operation, self->tupleDesc);
 

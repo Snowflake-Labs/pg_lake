@@ -191,8 +191,7 @@ GetPositionDeleteFileDest(PositionDeleteDestReceiver * self, int64 fileId)
 		fileDest->deletedRowCount = 0;
 		fileDest->csvFilePath = pstrdup(tempFilePath);
 		fileDest->csvDest = CreateCSVDestReceiver(tempFilePath, copyOptions,
-												  DATA_FORMAT_PARQUET,
-												  ICEBERG_OOR_NONE);
+												  DATA_FORMAT_PARQUET);
 
 		fileDest->csvDest->rStartup(fileDest->csvDest, CMD_DELETE,
 									self->deleteSlot->tts_tupleDescriptor);

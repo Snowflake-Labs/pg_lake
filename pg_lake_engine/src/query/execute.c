@@ -173,13 +173,11 @@ SimpleParseUtility(char *queryString)
  * returns the number of rows.
  */
 int64
-WriteQueryResultToCSV(char *query, char *destFile, int *maxLineSize,
-					  IcebergOutOfRangePolicy outOfRangePolicy)
+WriteQueryResultToCSV(char *query, char *destFile, int *maxLineSize)
 {
 	bool		includeHeader = true;
 	List	   *writeOptions = InternalCSVOptions(includeHeader);
-	DestReceiver *dest = CreateCSVDestReceiver(destFile, writeOptions, DATA_FORMAT_PARQUET,
-											   outOfRangePolicy);
+	DestReceiver *dest = CreateCSVDestReceiver(destFile, writeOptions, DATA_FORMAT_PARQUET);
 
 	int64		rowCount = ExecuteQueryStringToDestReceiver(query, dest);
 

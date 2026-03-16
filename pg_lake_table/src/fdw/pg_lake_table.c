@@ -81,6 +81,7 @@
 #include "pg_lake/fdw/snapshot.h"
 #include "pg_lake/fdw/update_tracking.h"
 #include "pg_lake/fdw/writable_table.h"
+#include "pg_lake/fdw/iceberg_validating_dest_receiver.h"
 #include "pg_lake/fdw/multi_data_file_dest.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/operations/manifest_merge.h"
@@ -236,6 +237,7 @@ typedef struct PgLakeModifyState
 	/* destination for inserts */
 	DestReceiver *insertDest;
 	uint64		insertedRowCount;
+	IcebergOutOfRangePolicy outOfRangePolicy;
 
 	/* slot used for position deletes */
 	TupleTableSlot *deleteSlot;
@@ -2798,12 +2800,21 @@ FinishForeignModify(PgLakeModifyState * fmstate)
 		 */
 		fmstate->insertDest->rShutdown(fmstate->insertDest);
 
+		/*
+		 * If the insertDest is wrapped with an IcebergValidatingDestReceiver,
+		 * unwrap it to reach the inner receiver for modification extraction.
+		 */
+		DestReceiver *innerDest = fmstate->insertDest;
+
+		if (fmstate->outOfRangePolicy != ICEBERG_OOR_NONE)
+			innerDest = GetIcebergValidatingDestReceiverChild(fmstate->insertDest);
+
 		bool		partitionedTable =
 			GetIcebergTablePartitionByOption(RelationGetRelid(fmstate->rel)) != NULL;
 
 		List	   *insertModifications =
-			partitionedTable ? GetPartitionedDestReceiverModifications(fmstate->insertDest) :
-			GetMultiDataFileDestReceiverModifications(fmstate->insertDest);
+			partitionedTable ? GetPartitionedDestReceiverModifications(innerDest) :
+			GetMultiDataFileDestReceiverModifications(innerDest);
 
 		modifications = list_concat(modifications, insertModifications);
 	}
@@ -3404,6 +3415,21 @@ create_foreign_modify(Relation rel,
 												specId,
 												0);
 		}
+
+		/*
+		 * For Iceberg tables, wrap the insert destination with a validating
+		 * receiver that clamps or rejects out-of-range values in-place before
+		 * they reach the partition transform or the CSV writer.
+		 */
+		fmstate->outOfRangePolicy =
+			GetIcebergOutOfRangePolicyForTable(relationId);
+
+		if (fmstate->outOfRangePolicy != ICEBERG_OOR_NONE)
+		{
+			fmstate->insertDest =
+				CreateIcebergValidatingDestReceiver(fmstate->insertDest,
+													fmstate->outOfRangePolicy);
+		}
 	}
 
 	if (operation == CMD_UPDATE || operation == CMD_DELETE)
@@ -3488,8 +3514,7 @@ create_foreign_modify(Relation rel,
 
 					fileModifyState->deleteFile = tempFileName;
 					fileModifyState->deleteDest = CreateCSVDestReceiver(tempFileName, copyOptions,
-																		foreignTableFormat,
-																		ICEBERG_OOR_NONE);
+																		foreignTableFormat);
 				}
 
 				fileModifyStates = lappend(fileModifyStates, fileModifyState);

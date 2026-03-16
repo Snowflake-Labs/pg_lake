@@ -18,7 +18,7 @@
 #pragma once
 
 #include "executor/executor.h"
-#include "pg_lake/pgduck/iceberg_write_validation.h"
+#include "pg_lake/pgduck/iceberg_validation.h"
 #include "tcop/dest.h"
 #include "tcop/tcopprot.h"
 
@@ -36,8 +36,7 @@ extern PGDLLEXPORT uint64 ExecutePlanToDestReceiver(PlannedStmt *plan,
 													DestReceiver *dest);
 extern PGDLLEXPORT void ExecuteInternalDDL(Node *parseTree, char *queryString);
 extern PGDLLEXPORT int64 WriteQueryResultToCSV(char *query, char *destFile,
-											   int *maxLineSize,
-											   IcebergOutOfRangePolicy outOfRangePolicy);
+											   int *maxLineSize);
 
 /* doesn't really belong here... */
 extern PGDLLEXPORT Node *SimpleParseUtility(char *queryString);

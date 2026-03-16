@@ -59,7 +59,7 @@
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/data_file_stats.h"
 #include "pg_lake/iceberg/partitioning/partition.h"
-#include "pg_lake/iceberg/temporal_utils.h"
+#include "pg_lake/util/temporal_utils.h"
 #include "pg_lake/partitioning/partition_spec_catalog.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/iceberg/hash_utils.h"

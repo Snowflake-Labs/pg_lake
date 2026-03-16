@@ -21,7 +21,7 @@
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/data_file/data_file_stats.h"
 #include "pg_lake/parquet/field.h"
-#include "pg_lake/pgduck/iceberg_write_validation.h"
+#include "pg_lake/pgduck/iceberg_validation.h"
 #include "nodes/pg_list.h"
 
 /* pg_lake_table.target_row_group_size_mb */
@@ -45,8 +45,7 @@ extern PGDLLEXPORT StatsCollector * ConvertCSVFileTo(char *csvFilePath,
 													 CopyDataCompression destinationCompression,
 													 List *formatOptions,
 													 DataFileSchema * schema,
-													 List *leafFields,
-													 IcebergOutOfRangePolicy outOfRangePolicy);
+													 List *leafFields);
 extern PGDLLEXPORT StatsCollector * WriteQueryResultTo(char *query,
 													   char *destinationPath,
 													   CopyDataFormat destinationFormat,

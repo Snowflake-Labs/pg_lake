@@ -30,7 +30,6 @@
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/fdw/partition_transform.h"
-#include "pg_lake/pgduck/iceberg_write_validation.h"
 #include "pg_lake/iceberg/manifest_spec.h"
 #include "pg_lake/iceberg/partitioning/partition.h"
 #include "pg_lake/partitioning/partitioned_dest_receiver.h"
@@ -93,9 +92,6 @@ typedef struct PartitioningDestReceiverData
 
 	/* operation of the DestReceiver */
 	int			operation;
-
-	/* out-of-range policy for temporal partition transforms */
-	IcebergOutOfRangePolicy outOfRangePolicy;
 }			PartitioningDestReceiverData;
 
 
@@ -139,7 +135,6 @@ CreatePartitionedDestReceiver(Oid relationId,
 	self->relationId = relationId;
 	self->targetFormat = targetFormat;
 	self->alreadyFlushedPartitionModifications = NIL;
-	self->outOfRangePolicy = GetIcebergOutOfRangePolicyForTable(relationId);
 
 	/*
 	 * We return modifications to the upper context, so better allocate
@@ -226,8 +221,7 @@ PartitionedDestReceiveSlot(TupleTableSlot *slot, DestReceiver *self)
 	MemoryContext callerContext = MemoryContextSwitchTo(myState->perRowContext);
 
 	Partition  *partition =
-		ComputePartitionTupleForTuple(myState->partitionTransformList, slot,
-									  myState->outOfRangePolicy);
+		ComputePartitionTupleForTuple(myState->partitionTransformList, slot);
 	uint64		partitionHash = ComputePartitionKey(partition);
 
 	/* Lookup or create subreceiver in the hashtable */

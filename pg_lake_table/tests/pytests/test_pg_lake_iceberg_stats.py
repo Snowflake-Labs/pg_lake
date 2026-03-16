@@ -623,6 +623,106 @@ def test_create_iceberg_table_alter_stats_mode(
     pg_conn.rollback()
 
 
+@pytest.mark.parametrize(
+    "col_type,value,expected_lower,expected_upper",
+    [
+        ("date", "infinity", "9999-12-31", "9999-12-31"),
+        ("date", "-infinity", "4713-01-01 (BC)", "4713-01-01 (BC)"),
+        ("date", "10000-01-01", "9999-12-31", "9999-12-31"),
+        (
+            "timestamp",
+            "infinity",
+            "9999-12-31 23:59:59.999999",
+            "9999-12-31 23:59:59.999999",
+        ),
+        ("timestamp", "-infinity", "0001-01-01 00:00:00", "0001-01-01 00:00:00"),
+        (
+            "timestamptz",
+            "infinity",
+            "9999-12-31 23:59:59.999999+00",
+            "9999-12-31 23:59:59.999999+00",
+        ),
+        (
+            "timestamptz",
+            "-infinity",
+            "0001-01-01 00:00:00+00",
+            "0001-01-01 00:00:00+00",
+        ),
+    ],
+)
+def test_clamped_temporal_column_stats(
+    pg_conn,
+    extension,
+    app_user,
+    s3,
+    with_default_location,
+    stats_catalog_permission,
+    col_type,
+    value,
+    expected_lower,
+    expected_upper,
+):
+    """Verify data_file_column_stats reflect the clamped boundary after writing
+    out-of-range or infinity temporal values."""
+    table_name = "test_clamped_temporal_stats"
+    run_command(
+        f"CREATE TABLE {table_name} (col {col_type}) USING iceberg;",
+        pg_conn,
+    )
+
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    run_command(
+        f"INSERT INTO {table_name} VALUES ('{value}');",
+        pg_conn,
+    )
+
+    result = run_query(
+        f"SELECT lower_bound, upper_bound FROM lake_table.data_file_column_stats "
+        f"WHERE table_name = '{table_name}'::regclass ORDER BY field_id",
+        pg_conn,
+    )
+
+    assert len(result) == 1
+    assert result[0][0] == expected_lower
+    assert result[0][1] == expected_upper
+
+    run_command("RESET TIME ZONE;", pg_conn)
+    pg_conn.rollback()
+
+
+def test_clamped_nan_numeric_column_stats(
+    pg_conn,
+    extension,
+    app_user,
+    s3,
+    with_default_location,
+    stats_catalog_permission,
+):
+    """Verify data_file_column_stats has no stats row when a NaN numeric
+    value is clamped to NULL (all-NULL columns produce no min/max stats)."""
+    table_name = "test_nan_numeric_stats"
+    run_command(
+        f"CREATE TABLE {table_name} (col numeric(10,2)) USING iceberg;",
+        pg_conn,
+    )
+
+    run_command(
+        f"INSERT INTO {table_name} VALUES ('NaN');",
+        pg_conn,
+    )
+
+    result = run_query(
+        f"SELECT lower_bound, upper_bound FROM lake_table.data_file_column_stats "
+        f"WHERE table_name = '{table_name}'::regclass ORDER BY field_id",
+        pg_conn,
+    )
+
+    assert len(result) == 0
+
+    pg_conn.rollback()
+
+
 @pytest.fixture(scope="module")
 def stats_catalog_permission(app_user, superuser_conn, extension, s3):
     run_command(
