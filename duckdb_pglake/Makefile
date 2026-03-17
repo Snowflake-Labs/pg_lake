@@ -11,7 +11,7 @@ EXT_FLAGS=-DBUILD_EXTENSIONS="tpch;json;icu"
 # GitHub actions uses a hash of the Makefile and source
 # files as a cache key. When we update the DuckDB version,
 # we should update the line below to trigger a new hash.
-DUCKDB_VERSION=1.4.4
+DUCKDB_VERSION=1.4.3
 
 # We install libduckdb.so into the postgres direcotry
 PG_CONFIG ?= pg_config
@@ -133,7 +133,7 @@ release: patch_duckdb
 #### Misc
 
 patch_duckdb: $(shell find patches -type f -name '*.patch')
-	for patchdir in duckdb duckdb-postgres ; do \
+	for patchdir in duckdb duckdb-postgres duckdb-azure; do \
 		(cd $$patchdir && \
 		git checkout -f . && \
 		find ../patches/$$patchdir -type f -name '*.patch' -print | sort | xargs -0 printf '%s ' | \
@@ -144,7 +144,7 @@ patch_duckdb: $(shell find patches -type f -name '*.patch')
 	done
 
 clean_patches:
-	for patchdir in duckdb duckdb-postgres ; do \
+	for patchdir in duckdb duckdb-postgres duckdb-azure; do \
 		(cd $$patchdir && \
 		git checkout -f . ); \
 	done

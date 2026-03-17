@@ -1,0 +1,15 @@
+diff --git a/src/include/azure_filesystem.hpp b/src/include/azure_filesystem.hpp
+index dc8e5bb..01b95b8 100644
+--- a/src/include/azure_filesystem.hpp
++++ b/src/include/azure_filesystem.hpp
+@@ -15,8 +15,8 @@
+ namespace duckdb {
+ 
+ struct AzureReadOptions {
+-	int32_t transfer_concurrency = 5;
+-	int64_t transfer_chunk_size = 1 * 1024 * 1024;
++	int32_t transfer_concurrency = 16;
++	int64_t transfer_chunk_size = 8 * 1024 * 1024;
+ 	idx_t buffer_size = 1 * 1024 * 1024;
+ };
+ 

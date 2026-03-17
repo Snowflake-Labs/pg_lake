@@ -1,0 +1,77 @@
+diff --git a/src/azure_blob_filesystem.cpp b/src/azure_blob_filesystem.cpp
+index 3462b94..d4cc101 100644
+--- a/src/azure_blob_filesystem.cpp
++++ b/src/azure_blob_filesystem.cpp
+@@ -117,6 +117,8 @@ vector<OpenFileInfo> AzureBlobStorageFileSystem::Glob(const string &path, FileOp
+ 		throw InternalException("Cannot do Azure storage Glob without FileOpener");
+ 	}
+ 
++	optional_ptr<ClientContext> context = opener->TryGetClientContext();
++
+ 	auto azure_url = ParseUrl(path);
+ 	auto storage_context = GetOrCreateStorageContext(opener, path, azure_url);
+ 
+@@ -140,6 +142,9 @@ vector<OpenFileInfo> AzureBlobStorageFileSystem::Glob(const string &path, FileOp
+ 	                                     '/' + azure_url.container)
+ 	                                  : (azure_url.prefix + azure_url.container));
+ 	while (true) {
++		if (context->interrupted)
++			throw InterruptException();
++
+ 		// Perform query
+ 		Azure::Storage::Blobs::ListBlobsPagedResponse res;
+ 		try {
+diff --git a/src/azure_dfs_filesystem.cpp b/src/azure_dfs_filesystem.cpp
+index f70fe53..8696f9e 100644
+--- a/src/azure_dfs_filesystem.cpp
++++ b/src/azure_dfs_filesystem.cpp
+@@ -29,7 +29,8 @@ inline static bool IsDfsScheme(const string &fpath) {
+ }
+ 
+ static void Walk(const Azure::Storage::Files::DataLake::DataLakeFileSystemClient &fs, const std::string &path,
+-                 const string &path_pattern, std::size_t end_match, std::vector<OpenFileInfo> *out_result) {
++                 const string &path_pattern, std::size_t end_match,
++				 optional_ptr<ClientContext> context, std::vector<OpenFileInfo> *out_result) {
+ 	auto directory_client = fs.GetDirectoryClient(path);
+ 
+ 	bool recursive = false;
+@@ -47,6 +48,9 @@ static void Walk(const Azure::Storage::Files::DataLake::DataLakeFileSystemClient
+ 	Azure::Storage::Files::DataLake::ListPathsOptions options;
+ 	try {
+ 		while (true) {
++			if (context->interrupted)
++				throw InterruptException();
++
+ 			auto res = directory_client.ListPaths(recursive, options);
+ 
+ 			for (const auto &elt : res.Paths) {
+@@ -59,7 +63,7 @@ static void Walk(const Azure::Storage::Files::DataLake::DataLakeFileSystemClient
+ 							}
+ 							Walk(fs, elt.Name, path_pattern,
+ 								 std::min(path_pattern.length(), path_pattern.find('/', end_match + 1)),
+-								 out_result);
++								 context, out_result);
+ 						}
+ 					}
+ 				} else {
+@@ -161,6 +165,8 @@ vector<OpenFileInfo> AzureDfsStorageFileSystem::Glob(const string &path, FileOpe
+ 		throw InternalException("Cannot do Azure storage Glob without FileOpener");
+ 	}
+ 
++	optional_ptr<ClientContext> context = opener->TryGetClientContext();
++
+ 	auto azure_url = ParseUrl(path);
+ 
+ 	// If path does not contains any wildcard, we assume that an absolute path therefor nothing to do
+@@ -185,7 +191,7 @@ vector<OpenFileInfo> AzureDfsStorageFileSystem::Glob(const string &path, FileOpe
+ 	     // pattern to match
+ 	     azure_url.path, std::min(azure_url.path.length(), azure_url.path.find('/', index_root_dir + 1)),
+ 	     // output result
+-	     &result);
++	     context, &result);
+ 
+ 	if (!result.empty()) {
+ 		const auto path_result_prefix =
+-- 
+2.49.0
+

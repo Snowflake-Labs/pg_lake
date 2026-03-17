@@ -4,6 +4,9 @@
 [submodule "duckdb_pglake/duckdb-postgres"]
 	path = duckdb_pglake/duckdb-postgres
 	url = https://github.com/duckdb/duckdb-postgres
+[submodule "duckdb_pglake/duckdb-azure"]
+	path = duckdb_pglake/duckdb-azure
+	url = https://github.com/duckdb/duckdb-azure
 [submodule "avro"]
 	path = avro
 	url = https://github.com/apache/avro.git

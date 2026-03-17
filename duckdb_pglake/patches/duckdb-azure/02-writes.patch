@@ -1,0 +1,904 @@
+diff --git a/src/azure_blob_filesystem.cpp b/src/azure_blob_filesystem.cpp
+index 774b9e2..3462b94 100644
+--- a/src/azure_blob_filesystem.cpp
++++ b/src/azure_blob_filesystem.cpp
+@@ -8,6 +8,7 @@
+ #include "azure_http_state.hpp"
+ #include "duckdb/common/file_opener.hpp"
+ #include "duckdb/common/string_util.hpp"
++#include "duckdb/common/types/blob.hpp"
+ #include "duckdb/main/secret/secret.hpp"
+ #include "duckdb/main/secret/secret_manager.hpp"
+ #include "duckdb/function/scalar/string_common.hpp"
+@@ -18,9 +19,12 @@
+ #include <azure/storage/blobs.hpp>
+ #include <chrono>
+ #include <cstdlib>
++#include <iostream>
++#include <iomanip>
+ #include <memory>
+ #include <string>
+ #include <utility>
++#include <thread>
+ 
+ namespace duckdb {
+ 
+@@ -70,7 +74,7 @@ AzureBlobContextState::GetBlobContainerClient(const std::string &blobContainerNa
+ //////// AzureBlobStorageFileHandle ////////
+ AzureBlobStorageFileHandle::AzureBlobStorageFileHandle(AzureBlobStorageFileSystem &fs, const OpenFileInfo &info,
+                                                        FileOpenFlags flags, const AzureReadOptions &read_options,
+-                                                       Azure::Storage::Blobs::BlobClient blob_client)
++                                                       Azure::Storage::Blobs::BlockBlobClient blob_client)
+     : AzureFileHandle(fs, info, flags, read_options), blob_client(std::move(blob_client)) {
+ }
+ 
+@@ -93,6 +97,14 @@ unique_ptr<AzureFileHandle> AzureBlobStorageFileSystem::CreateHandle(const OpenF
+ 	if (!handle->PostConstruct()) {
+ 		return nullptr;
+ 	}
++
++	if (flags.OpenForWriting()) {
++		auto azure_recommended_part_size = 8*1024*1024;
++
++		// Round part size up to multiple of Storage::DEFAULT_BLOCK_SIZE
++		handle->part_size = ((azure_recommended_part_size + Storage::DEFAULT_BLOCK_SIZE - 1) / Storage::DEFAULT_BLOCK_SIZE) *
++							Storage::DEFAULT_BLOCK_SIZE;
++	}
+ 	return std::move(handle);
+ }
+ 
+@@ -153,6 +165,7 @@ vector<OpenFileInfo> AzureBlobStorageFileSystem::Glob(const string &path, FileOp
+ 				options.emplace("file_size", Value::BIGINT(key.BlobSize));
+ 				options.emplace("last_modified", Value::TIMESTAMP(
+ 				                                     AzureStorageFileSystem::ToTimestamp(key.Details.LastModified)));
++				options.emplace("etag", Value(key.Details.ETag.ToString()));
+ 				result.push_back(info);
+ 			}
+ 		}
+@@ -168,6 +181,7 @@ vector<OpenFileInfo> AzureBlobStorageFileSystem::Glob(const string &path, FileOp
+ 	return result;
+ }
+ 
++
+ void AzureBlobStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
+ 	auto &hfh = handle.Cast<AzureBlobStorageFileHandle>();
+ 
+@@ -218,4 +232,111 @@ shared_ptr<AzureContextState> AzureBlobStorageFileSystem::CreateStorageContext(o
+ 	                                              azure_read_options);
+ }
+ 
++
++/*
++ * RemoveFile removes a blob from blob storage.
++ */
++void
++AzureBlobStorageFileSystem::RemoveFile(const string &path, optional_ptr<FileOpener> opener)
++{
++	auto parsed_url = ParseUrl(path);
++	auto storage_context = GetOrCreateStorageContext(opener, path, parsed_url);
++	auto container = storage_context->As<AzureBlobContextState>().GetBlobContainerClient(parsed_url.container);
++	auto blob_client = container.GetBlockBlobClient(parsed_url.path);
++
++	blob_client.DeleteIfExists();
++}
++
++/*
++ * Base64Encode base64 encodes the input string.
++ */
++static string
++Base64Encode(string input_string)
++{
++	idx_t base64_length = Blob::ToBase64Size(input_string);
++	unique_ptr<char[]> buffer(new char [base64_length + 1]);
++
++	string_t duckdb_string(input_string);
++	Blob::ToBase64(duckdb_string, buffer.get());
++	buffer[base64_length] = '\0';
++
++	return string(buffer.get());
++}
++
++
++void AzureBlobStorageFileSystem::UploadBuffer(AzureFileHandle &file_handle, shared_ptr<AzureWriteBuffer> write_buffer) {
++	auto &afh = file_handle.Cast<AzureBlobStorageFileHandle>();
++    auto block_data = Azure::Core::IO::MemoryBodyStream((const uint8_t*)write_buffer->Ptr(), write_buffer->idx);
++
++    std::ostringstream oss;
++    oss << std::setw(6) << std::setfill('0') << (write_buffer->part_no + 1);  // e.g., "000001"
++
++	string block_id_base64_string = Base64Encode(oss.str());
++
++	try {
++		afh.blob_client.StageBlock(block_id_base64_string, block_data);
++	} catch (std::exception &e) {
++		// Ensure only one thread sets the exception
++		bool f = false;
++		auto exchanged = afh.uploader_has_error.compare_exchange_strong(f, true);
++		if (exchanged) {
++			afh.upload_exception = std::current_exception();
++		}
++
++		NotifyUploadsInProgress(file_handle);
++		return;
++	}
++
++	{
++		unique_lock<mutex> lck(file_handle.block_ids_lock);
++		file_handle.block_ids.push_back(oss.str());
++	}
++
++	file_handle.parts_uploaded++;
++
++	// Free up space for another thread to acquire an AzureWriteBuffer
++	write_buffer.reset();
++
++	NotifyUploadsInProgress(file_handle);
++}
++
++
++void AzureBlobStorageFileSystem::FinalizeMultipartUpload(AzureFileHandle &file_handle) {
++	auto &afh = file_handle.Cast<AzureBlobStorageFileHandle>();
++
++	std::sort(afh.block_ids.begin(), afh.block_ids.end());
++
++	vector<string> base64_block_ids;
++
++	for (auto &block_id: afh.block_ids)
++		base64_block_ids.push_back(Base64Encode(block_id));
++
++    afh.blob_client.CommitBlockList(base64_block_ids);
++
++	file_handle.upload_finalized = true;
++}
++
++void AzureBlobStorageFileHandle::Close() {
++	auto &afs = (AzureBlobStorageFileSystem &)file_system;
++	if (flags.OpenForWriting() && !upload_finalized) {
++		afs.FlushAllBuffers(*this);
++		if (parts_uploaded) {
++			afs.FinalizeMultipartUpload(*this);
++		}
++	}
++}
++
++AzureBlobStorageFileHandle::~AzureBlobStorageFileHandle() {
++	if (Exception::UncaughtException()) {
++		// We are in an exception, don't do anything
++		return;
++	}
++
++	try {
++		// Try to finalize the file
++		Close();
++	} catch (...) { // NOLINT
++	}
++}
++
+ } // namespace duckdb
+diff --git a/src/azure_dfs_filesystem.cpp b/src/azure_dfs_filesystem.cpp
+index cd7a0db..f70fe53 100644
+--- a/src/azure_dfs_filesystem.cpp
++++ b/src/azure_dfs_filesystem.cpp
+@@ -45,40 +45,51 @@ static void Walk(const Azure::Storage::Files::DataLake::DataLakeFileSystemClient
+ 	}
+ 
+ 	Azure::Storage::Files::DataLake::ListPathsOptions options;
+-	while (true) {
+-		auto res = directory_client.ListPaths(recursive, options);
+-
+-		for (const auto &elt : res.Paths) {
+-			if (elt.IsDirectory) {
+-				if (!recursive) { // Only perform recursive call if we are not already processing recursive result
+-					if (Glob(elt.Name.data(), elt.Name.length(), path_pattern.data(), end_match)) {
+-						if (end_match >= path_pattern.length()) {
+-							// Skip, no way there will be matches anymore
+-							continue;
++	try {
++		while (true) {
++			auto res = directory_client.ListPaths(recursive, options);
++
++			for (const auto &elt : res.Paths) {
++				if (elt.IsDirectory) {
++					if (!recursive) { // Only perform recursive call if we are not already processing recursive result
++						if (Glob(elt.Name.data(), elt.Name.length(), path_pattern.data(), end_match)) {
++							if (end_match >= path_pattern.length()) {
++								// Skip, no way there will be matches anymore
++								continue;
++							}
++							Walk(fs, elt.Name, path_pattern,
++								 std::min(path_pattern.length(), path_pattern.find('/', end_match + 1)),
++								 out_result);
+ 						}
+-						Walk(fs, elt.Name, path_pattern,
+-						     std::min(path_pattern.length(), path_pattern.find('/', end_match + 1)), out_result);
++					}
++				} else {
++					// File
++					if (Glob(elt.Name.data(), elt.Name.length(), path_pattern.data(), path_pattern.length())) {
++						OpenFileInfo info(elt.Name);
++						info.extended_info = make_shared_ptr<ExtendedOpenFileInfo>();
++						auto &options = info.extended_info->options;
++						options.emplace("file_size", Value::BIGINT(elt.FileSize));
++						options.emplace("last_modified", Value::TIMESTAMP(
++															 AzureStorageFileSystem::ToTimestamp(elt.LastModified)));
++						options.emplace("etag", Value(elt.ETag));
++						out_result->push_back(info);
+ 					}
+ 				}
++			}
++
++			if (res.NextPageToken) {
++				options.ContinuationToken = res.NextPageToken;
+ 			} else {
+-				// File
+-				if (Glob(elt.Name.data(), elt.Name.length(), path_pattern.data(), path_pattern.length())) {
+-					OpenFileInfo info(elt.Name);
+-					info.extended_info = make_shared_ptr<ExtendedOpenFileInfo>();
+-					auto &options = info.extended_info->options;
+-					options.emplace("file_size", Value::BIGINT(elt.FileSize));
+-					options.emplace("last_modified", Value::TIMESTAMP(
+-					                                     AzureStorageFileSystem::ToTimestamp(elt.LastModified)));
+-					out_result->push_back(info);
+-				}
++				break;
+ 			}
+ 		}
++	}
++	catch (const Azure::Storage::StorageException& ex)
++    {
++		if (ex.StatusCode == Azure::Core::Http::HttpStatusCode::NotFound)
++			return;
+ 
+-		if (res.NextPageToken) {
+-			options.ContinuationToken = res.NextPageToken;
+-		} else {
+-			break;
+-		}
++		throw;
+ 	}
+ }
+ 
+@@ -97,7 +108,7 @@ AzureDfsContextState::GetDfsFileSystemClient(const std::string &file_system_name
+ AzureDfsStorageFileHandle::AzureDfsStorageFileHandle(AzureDfsStorageFileSystem &fs, const OpenFileInfo &info,
+                                                      FileOpenFlags flags, const AzureReadOptions &read_options,
+                                                      Azure::Storage::Files::DataLake::DataLakeFileClient client)
+-    : AzureFileHandle(fs, info, flags, read_options), file_client(std::move(client)) {
++    : AzureFileHandle(fs, info, flags, read_options), file_client(std::move(client)), bytes_uploaded(0) {
+ }
+ 
+ //////// AzureDfsStorageFileSystem ////////
+@@ -112,12 +123,23 @@ unique_ptr<AzureFileHandle> AzureDfsStorageFileSystem::CreateHandle(const OpenFi
+ 	auto parsed_url = ParseUrl(info.path);
+ 	auto storage_context = GetOrCreateStorageContext(opener, info.path, parsed_url);
+ 	auto file_system_client = storage_context->As<AzureDfsContextState>().GetDfsFileSystemClient(parsed_url.container);
++	auto file_client = file_system_client.GetFileClient(parsed_url.path);
+ 
+-	auto handle = make_uniq<AzureDfsStorageFileHandle>(*this, info, flags, storage_context->read_options,
+-	                                                   file_system_client.GetFileClient(parsed_url.path));
++	auto handle = make_uniq<AzureDfsStorageFileHandle>(*this, info, flags, storage_context->read_options, file_client);
+ 	if (!handle->PostConstruct()) {
+ 		return nullptr;
+ 	}
++
++	if (flags.OpenForWriting()) {
++		auto azure_recommended_part_size = 8*1024*1024;
++
++		// Round part size up to multiple of Storage::DEFAULT_BLOCK_SIZE
++		handle->part_size = ((azure_recommended_part_size + Storage::DEFAULT_BLOCK_SIZE - 1) / Storage::DEFAULT_BLOCK_SIZE) *
++							Storage::DEFAULT_BLOCK_SIZE;
++
++		file_client.Create();
++	}
++
+ 	return std::move(handle);
+ }
+ 
+@@ -145,6 +167,7 @@ vector<OpenFileInfo> AzureDfsStorageFileSystem::Glob(const string &path, FileOpe
+ 	auto first_wildcard_pos = azure_url.path.find_first_of("*[\\");
+ 	if (first_wildcard_pos == string::npos) {
+ 		return {path};
++
+ 	}
+ 
+ 	// The path contains wildcard try to list file with the minimum calls
+@@ -204,7 +227,7 @@ void AzureDfsStorageFileSystem::ReadRange(AzureFileHandle &handle, idx_t file_of
+ 		auto res = afh.file_client.DownloadTo((uint8_t *)buffer_out, buffer_out_len, options);
+ 
+ 	} catch (const Azure::Storage::StorageException &e) {
+-		throw IOException("AzureBlobStorageFileSystem Read to '%s' failed with %s Reason Phrase: %s", afh.path,
++		throw IOException("AzureDfsStorageFileSystem Read to '%s' failed with %s Reason Phrase: %s", afh.path,
+ 		                  e.ErrorCode, e.ReasonPhrase);
+ 	}
+ }
+@@ -218,4 +241,83 @@ shared_ptr<AzureContextState> AzureDfsStorageFileSystem::CreateStorageContext(op
+ 	                                             azure_read_options);
+ }
+ 
++
++/*
++ * RemoveFile removes a file from Azure Data Lake Storage.
++ */
++void
++AzureDfsStorageFileSystem::RemoveFile(const string &path, optional_ptr<FileOpener> opener)
++{
++	auto parsed_url = ParseUrl(path);
++	auto storage_context = GetOrCreateStorageContext(opener, path, parsed_url);
++	auto file_system_client = storage_context->As<AzureDfsContextState>().GetDfsFileSystemClient(parsed_url.container);
++	auto file_client = file_system_client.GetFileClient(parsed_url.path);
++
++	file_client.DeleteIfExists();
++}
++
++
++/*
++ * UploadBuffer uploads one buffer to the file in blob storage.
++ */
++void
++AzureDfsStorageFileSystem::UploadBuffer(AzureFileHandle &file_handle, shared_ptr<AzureWriteBuffer> write_buffer) {
++	auto &afh = file_handle.Cast<AzureDfsStorageFileHandle>();
++    auto block_data = Azure::Core::IO::MemoryBodyStream((const uint8_t*)write_buffer->Ptr(), write_buffer->idx);
++
++	try {
++		afh.file_client.Append(block_data, write_buffer->part_no * afh.part_size);
++	} catch (std::exception &e) {
++		// Ensure only one thread sets the exception
++		bool f = false;
++		auto exchanged = afh.uploader_has_error.compare_exchange_strong(f, true);
++		if (exchanged) {
++			afh.upload_exception = std::current_exception();
++		}
++
++		NotifyUploadsInProgress(afh);
++		return;
++	}
++
++	afh.parts_uploaded++;
++	afh.bytes_uploaded += write_buffer->idx;
++
++	// Free up space for another thread to acquire an AzureWriteBuffer
++	write_buffer.reset();
++
++	NotifyUploadsInProgress(afh);
++}
++
++void AzureDfsStorageFileSystem::FinalizeMultipartUpload(AzureFileHandle &file_handle) {
++	auto &afh = file_handle.Cast<AzureDfsStorageFileHandle>();
++
++	afh.file_client.Flush(afh.bytes_uploaded);
++
++	file_handle.upload_finalized = true;
++}
++
++void AzureDfsStorageFileHandle::Close() {
++	auto &afs = (AzureDfsStorageFileSystem &)file_system;
++	if (flags.OpenForWriting() && !upload_finalized) {
++		afs.FlushAllBuffers(*this);
++		if (parts_uploaded) {
++			afs.FinalizeMultipartUpload(*this);
++		}
++	}
++}
++
++AzureDfsStorageFileHandle::~AzureDfsStorageFileHandle() {
++	if (Exception::UncaughtException()) {
++		// We are in an exception, don't do anything
++		return;
++	}
++
++	try {
++		// Try to finalize the file
++		Close();
++	} catch (...) { // NOLINT
++	}
++}
++
++
+ } // namespace duckdb
+diff --git a/src/azure_extension.cpp b/src/azure_extension.cpp
+index d0758e2..2b0f2d1 100644
+--- a/src/azure_extension.cpp
++++ b/src/azure_extension.cpp
+@@ -9,8 +9,8 @@ static void LoadInternal(ExtensionLoader &loader) {
+ 	// Load filesystem
+ 	auto &instance = loader.GetDatabaseInstance();
+ 	auto &fs = instance.GetFileSystem();
+-	fs.RegisterSubSystem(make_uniq<AzureBlobStorageFileSystem>());
+-	fs.RegisterSubSystem(make_uniq<AzureDfsStorageFileSystem>());
++	fs.RegisterSubSystem(make_uniq<AzureBlobStorageFileSystem>(BufferManager::GetBufferManager(instance)));
++	fs.RegisterSubSystem(make_uniq<AzureDfsStorageFileSystem>(BufferManager::GetBufferManager(instance)));
+ 
+ 	// Load Secret functions
+ 	CreateAzureSecretFunctions::Register(loader);
+diff --git a/src/azure_filesystem.cpp b/src/azure_filesystem.cpp
+index e1689c7..41fbc70 100644
+--- a/src/azure_filesystem.cpp
++++ b/src/azure_filesystem.cpp
+@@ -1,14 +1,19 @@
+ #include "azure_filesystem.hpp"
+ 
++#include "duckdb/common/enums/memory_tag.hpp"
+ #include "duckdb/common/exception.hpp"
+ #include "duckdb/common/shared_ptr.hpp"
++#include "duckdb/common/thread.hpp"
+ #include "duckdb/common/types/value.hpp"
+ #include "duckdb/main/client_context.hpp"
+ 
+ #include <azure/storage/common/storage_exception.hpp>
++#include <thread>
+ 
+ namespace duckdb {
+ 
++static constexpr uint64_t DEFAULT_MAX_UPLOAD_THREADS = 50;
++
+ AzureContextState::AzureContextState(const AzureReadOptions &read_options)
+     : read_options(read_options), is_valid(true) {
+ }
+@@ -28,6 +33,11 @@ AzureFileHandle::AzureFileHandle(AzureStorageFileSystem &fs, const OpenFileInfo
+       length(0), last_modified(0),
+       // Read info
+       buffer_available(0), buffer_idx(0), file_offset(0), buffer_start(0), buffer_end(0),
++
++      // Write info
++      uploads_in_progress(0), parts_uploaded(0), upload_finalized(false),
++      uploader_has_error(false), upload_exception(nullptr),
++
+       // Options
+       read_options(read_options) {
+ 	if (!flags.RequireParallelAccess() && !flags.DirectIO()) {
+@@ -77,10 +87,6 @@ unique_ptr<FileHandle> AzureStorageFileSystem::OpenFileExtended(const OpenFileIn
+                                                                 optional_ptr<FileOpener> opener) {
+ 	D_ASSERT(flags.Compression() == FileCompressionType::UNCOMPRESSED);
+ 
+-	if (flags.OpenForWriting()) {
+-		throw NotImplementedException("Writing to Azure containers is currently not supported");
+-	}
+-
+ 	auto handle = CreateHandle(info, flags, opener);
+ 	return std::move(handle);
+ }
+@@ -110,10 +116,6 @@ idx_t AzureStorageFileSystem::SeekPosition(FileHandle &handle) {
+ 	return afh.file_offset;
+ }
+ 
+-void AzureStorageFileSystem::FileSync(FileHandle &handle) {
+-	throw NotImplementedException("FileSync for Azure Storage files not implemented");
+-}
+-
+ // TODO: this code is identical to HTTPFS, look into unifying it
+ void AzureStorageFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) {
+ 	auto &hfh = handle.Cast<AzureFileHandle>();
+@@ -186,6 +188,29 @@ int64_t AzureStorageFileSystem::Read(FileHandle &handle, void *buffer, int64_t n
+ 	return nr_bytes;
+ }
+ 
++
++/*
++ * ListFiles performs a callback on each of the files returned by a glob operation.
++ */
++bool AzureStorageFileSystem::ListFiles(const string &directory,
++									   const std::function<void(const string &, bool)> &callback,
++									   FileOpener *opener) {
++	string trimmed_dir = directory;
++	StringUtil::RTrim(trimmed_dir, PathSeparator(trimmed_dir));
++	auto glob_res = Glob(JoinPath(trimmed_dir, "**"), opener);
++
++	if (glob_res.empty()) {
++		return false;
++	}
++
++	for (const auto &file : glob_res) {
++		callback(file.path, false);
++	}
++
++	return true;
++}
++
++
+ shared_ptr<AzureContextState> AzureStorageFileSystem::GetOrCreateStorageContext(optional_ptr<FileOpener> opener,
+                                                                                 const string &path,
+                                                                                 const AzureParsedUrl &parsed_url) {
+@@ -241,4 +266,165 @@ timestamp_t AzureStorageFileSystem::ToTimestamp(const Azure::DateTime &dt) {
+ 	return timestamp_t(micros);
+ }
+ 
++void AzureStorageFileSystem::FileSync(FileHandle &handle) {
++	auto &hfh = handle.Cast<AzureFileHandle>();
++	if (!hfh.upload_finalized) {
++		FlushAllBuffers(hfh);
++		FinalizeMultipartUpload(hfh);
++	}
++}
++
++int64_t AzureStorageFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes) {
++	auto &afh = handle.Cast<AzureFileHandle>();
++	Write(handle, buffer, nr_bytes, afh.file_offset);
++	return nr_bytes;
++}
++
++
++void AzureStorageFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) {
++	auto &hfh = handle.Cast<AzureFileHandle>();
++	if (!hfh.flags.OpenForWriting()) {
++		throw InternalException("Write called on file not opened in write mode");
++	}
++	int64_t bytes_written = 0;
++
++	while (bytes_written < nr_bytes) {
++		auto curr_location = location + bytes_written;
++
++		if (curr_location != hfh.file_offset) {
++			throw InternalException("Non-sequential write not supported!");
++		}
++
++		// Find buffer for writing
++		auto write_buffer_idx = curr_location / hfh.part_size;
++
++		// Get write buffer, may block until buffer is available
++		auto write_buffer = hfh.GetBuffer(write_buffer_idx);
++
++		// Writing to buffer
++		auto idx_to_write = curr_location - write_buffer->buffer_start;
++		auto bytes_to_write = MinValue<idx_t>(nr_bytes - bytes_written, hfh.part_size - idx_to_write);
++		memcpy((char *)write_buffer->Ptr() + idx_to_write, (char *)buffer + bytes_written, bytes_to_write);
++		write_buffer->idx += bytes_to_write;
++
++		// Flush to HTTP if full
++		if (write_buffer->idx >= hfh.part_size) {
++			FlushBuffer(hfh, write_buffer);
++		}
++		hfh.file_offset += bytes_to_write;
++		bytes_written += bytes_to_write;
++	}
++}
++
++// Wrapper around the BufferManager::Allocate to that allows limiting the number of buffers that will be handed out
++BufferHandle AzureStorageFileSystem::Allocate(idx_t part_size, uint16_t max_threads) {
++	return buffer_manager.Allocate(MemoryTag::EXTENSION, part_size);
++}
++
++shared_ptr<AzureWriteBuffer> AzureFileHandle::GetBuffer(uint16_t write_buffer_idx) {
++	auto &azurefs = (AzureStorageFileSystem &)file_system;
++
++	// Check if write buffer already exists
++	{
++		unique_lock<mutex> lck(write_buffers_lock);
++		auto lookup_result = write_buffers.find(write_buffer_idx);
++		if (lookup_result != write_buffers.end()) {
++			shared_ptr<AzureWriteBuffer> buffer = lookup_result->second;
++			return buffer;
++		}
++	}
++
++	auto buffer_handle = azurefs.Allocate(part_size, DEFAULT_MAX_UPLOAD_THREADS);
++	auto new_write_buffer =
++	    make_shared_ptr<AzureWriteBuffer>(write_buffer_idx * part_size, part_size, std::move(buffer_handle));
++	{
++		unique_lock<mutex> lck(write_buffers_lock);
++		auto lookup_result = write_buffers.find(write_buffer_idx);
++
++		// Check if other thread has created the same buffer, if so we return theirs and drop ours.
++		if (lookup_result != write_buffers.end()) {
++			// write_buffer_idx << std::endl;
++			shared_ptr<AzureWriteBuffer> write_buffer = lookup_result->second;
++			return write_buffer;
++		}
++		write_buffers.insert(pair<uint16_t, shared_ptr<AzureWriteBuffer>>(write_buffer_idx, new_write_buffer));
++	}
++
++	return new_write_buffer;
++}
++
++void AzureStorageFileSystem::NotifyUploadsInProgress(AzureFileHandle &file_handle) {
++	{
++		unique_lock<mutex> lck(file_handle.uploads_in_progress_lock);
++		file_handle.uploads_in_progress--;
++	}
++	// Note that there are 2 cv's because otherwise we might deadlock when the final flushing thread is notified while
++	// another thread is still waiting for an upload thread
++	file_handle.uploads_in_progress_cv.notify_one();
++	file_handle.final_flush_cv.notify_one();
++}
++
++void AzureStorageFileSystem::FlushBuffer(AzureFileHandle &file_handle, shared_ptr<AzureWriteBuffer> write_buffer) {
++	if (write_buffer->idx == 0) {
++		return;
++	}
++
++	auto uploading = write_buffer->uploading.load();
++	if (uploading) {
++		return;
++	}
++	bool can_upload = write_buffer->uploading.compare_exchange_strong(uploading, true);
++	if (!can_upload) {
++		return;
++	}
++
++	file_handle.RethrowIOError();
++
++	{
++		unique_lock<mutex> lck(file_handle.write_buffers_lock);
++		file_handle.write_buffers.erase(write_buffer->part_no);
++	}
++
++	{
++		unique_lock<mutex> lck(file_handle.uploads_in_progress_lock);
++		// check if there are upload threads available
++		if (file_handle.uploads_in_progress >= DEFAULT_MAX_UPLOAD_THREADS) {
++			// there are not - wait for one to become available
++			file_handle.uploads_in_progress_cv.wait(lck, [&file_handle] {
++				return file_handle.uploads_in_progress < DEFAULT_MAX_UPLOAD_THREADS;
++			});
++		}
++		file_handle.uploads_in_progress++;
++	}
++
++	thread upload_thread(&AzureStorageFileSystem::UploadBuffer, this, std::ref(file_handle), write_buffer);
++	upload_thread.detach();
++}
++
++// Note that FlushAll currently does not allow to continue writing afterwards. Therefore, FinalizeMultipartUpload should
++// be called right after it!
++// TODO: we can fix this by keeping the last partially written buffer in memory and allow reuploading it with new data.
++void AzureStorageFileSystem::FlushAllBuffers(AzureFileHandle &file_handle) {
++	//  Collect references to all buffers to check
++	vector<shared_ptr<AzureWriteBuffer>> to_flush;
++	file_handle.write_buffers_lock.lock();
++	for (auto &item : file_handle.write_buffers) {
++		to_flush.push_back(item.second);
++	}
++	file_handle.write_buffers_lock.unlock();
++
++	// Flush all buffers that aren't already uploading
++	for (auto &write_buffer : to_flush) {
++		if (!write_buffer->uploading) {
++			FlushBuffer(file_handle, write_buffer);
++		}
++	}
++	unique_lock<mutex> lck(file_handle.uploads_in_progress_lock);
++	file_handle.final_flush_cv.wait(lck, [&file_handle] { return file_handle.uploads_in_progress == 0; });
++
++	file_handle.RethrowIOError();
++}
++
++
++
+ } // namespace duckdb
+diff --git a/src/include/azure_blob_filesystem.hpp b/src/include/azure_blob_filesystem.hpp
+index f009e13..ed0b9de 100644
+--- a/src/include/azure_blob_filesystem.hpp
++++ b/src/include/azure_blob_filesystem.hpp
+@@ -7,6 +7,7 @@
+ #include "azure_filesystem.hpp"
+ #include <azure/storage/blobs/blob_client.hpp>
+ #include <azure/storage/blobs/blob_service_client.hpp>
++#include <azure/storage/blobs/block_blob_client.hpp>
+ #include <string>
+ 
+ namespace duckdb {
+@@ -26,20 +27,31 @@ class AzureBlobStorageFileSystem;
+ class AzureBlobStorageFileHandle : public AzureFileHandle {
+ public:
+ 	AzureBlobStorageFileHandle(AzureBlobStorageFileSystem &fs, const OpenFileInfo &info, FileOpenFlags flags,
+-	                           const AzureReadOptions &read_options, Azure::Storage::Blobs::BlobClient blob_client);
+-	~AzureBlobStorageFileHandle() override = default;
++	                           const AzureReadOptions &read_options, Azure::Storage::Blobs::BlockBlobClient blob_client);
++	~AzureBlobStorageFileHandle() override;
++
++	void Close() override;
+ 
+ public:
+-	Azure::Storage::Blobs::BlobClient blob_client;
++	Azure::Storage::Blobs::BlockBlobClient blob_client;
+ };
+ 
+ class AzureBlobStorageFileSystem : public AzureStorageFileSystem {
+ public:
+ 	vector<OpenFileInfo> Glob(const string &path, FileOpener *opener = nullptr) override;
++	explicit AzureBlobStorageFileSystem(BufferManager &buffer_manager) : AzureStorageFileSystem(buffer_manager) {
++	}
+ 
+ 	// FS methods
+ 	bool FileExists(const string &filename, optional_ptr<FileOpener> opener = nullptr) override;
+ 	bool CanHandleFile(const string &fpath) override;
++	void RemoveFile(const string &filename, optional_ptr<FileOpener> opener = nullptr) override;
++
++	// directories effectively always exist in blob storage
++	bool DirectoryExists(const string &directory, optional_ptr<FileOpener> opener = nullptr) override {
++		return true;
++	}
++
+ 	string GetName() const override {
+ 		return "AzureBlobStorageFileSystem";
+ 	}
+@@ -54,6 +66,8 @@ public:
+ 	static const string PATH_PREFIX;
+ 	static const string SHORT_PATH_PREFIX;
+ 
++	void UploadBuffer(AzureFileHandle &file_handle, shared_ptr<AzureWriteBuffer> write_buffer) override;
++	void FinalizeMultipartUpload(AzureFileHandle &file_handle) override;
+ protected:
+ 	// From AzureFilesystem
+ 	const string &GetContextPrefix() const override {
+diff --git a/src/include/azure_dfs_filesystem.hpp b/src/include/azure_dfs_filesystem.hpp
+index 3552bb5..5d8452c 100644
+--- a/src/include/azure_dfs_filesystem.hpp
++++ b/src/include/azure_dfs_filesystem.hpp
+@@ -31,15 +31,27 @@ public:
+ 	AzureDfsStorageFileHandle(AzureDfsStorageFileSystem &fs, const OpenFileInfo &info, FileOpenFlags flags,
+ 	                          const AzureReadOptions &read_options,
+ 	                          Azure::Storage::Files::DataLake::DataLakeFileClient client);
+-	~AzureDfsStorageFileHandle() override = default;
++	~AzureDfsStorageFileHandle() override;
+ 
++	void Close() override;
+ public:
+ 	Azure::Storage::Files::DataLake::DataLakeFileClient file_client;
++
++	atomic<uint64_t> bytes_uploaded;
+ };
+ 
+ class AzureDfsStorageFileSystem : public AzureStorageFileSystem {
+ public:
++	explicit AzureDfsStorageFileSystem(BufferManager &buffer_manager) : AzureStorageFileSystem(buffer_manager) {
++	}
++
+ 	vector<OpenFileInfo> Glob(const string &path, FileOpener *opener = nullptr) override;
++	void RemoveFile(const string &filename, optional_ptr<FileOpener> opener = nullptr) override;
++
++	// should perhaps check the actual directory status, but there is no convenient functio for that
++	bool DirectoryExists(const string &directory, optional_ptr<FileOpener> opener = nullptr) override {
++		return true;
++	}
+ 
+ 	bool CanHandleFile(const string &fpath) override;
+ 	string GetName() const override {
+@@ -51,6 +63,9 @@ public:
+ 	// From AzureFilesystem
+ 	void LoadRemoteFileInfo(AzureFileHandle &handle) override;
+ 
++	void UploadBuffer(AzureFileHandle &file_handle, shared_ptr<AzureWriteBuffer> write_buffer) override;
++	void FinalizeMultipartUpload(AzureFileHandle &file_handle) override;
++
+ public:
+ 	static const string SCHEME;
+ 	static const string PATH_PREFIX;
+diff --git a/src/include/azure_filesystem.hpp b/src/include/azure_filesystem.hpp
+index 3089663..96bf32a 100644
+--- a/src/include/azure_filesystem.hpp
++++ b/src/include/azure_filesystem.hpp
+@@ -6,9 +6,11 @@
+ #include "duckdb/common/shared_ptr.hpp"
+ #include "duckdb/common/file_system.hpp"
+ #include "duckdb/main/client_context_state.hpp"
++#include "duckdb/storage/buffer_manager.hpp"
+ #include <azure/core/datetime.hpp>
+ #include <ctime>
+ #include <cstdint>
++#include <iostream>
+ 
+ namespace duckdb {
+ 
+@@ -46,11 +48,35 @@ protected:
+ 
+ class AzureStorageFileSystem;
+ 
++// Holds the buffered data for 1 part of an S3 Multipart upload
++class AzureWriteBuffer {
++public:
++	explicit AzureWriteBuffer(idx_t buffer_start, size_t buffer_size, BufferHandle buffer_p)
++	    : idx(0), buffer_start(buffer_start), buffer(std::move(buffer_p)) {
++		buffer_end = buffer_start + buffer_size;
++		part_no = buffer_start / buffer_size;
++		uploading = false;
++	}
++
++	void *Ptr() {
++		return buffer.Ptr();
++	}
++
++	idx_t part_no;
++
++	idx_t idx;
++	idx_t buffer_start;
++	idx_t buffer_end;
++	BufferHandle buffer;
++	atomic<bool> uploading;
++};
++
++
+ class AzureFileHandle : public FileHandle {
+ public:
+ 	virtual bool PostConstruct();
+-	void Close() override {
+-	}
++
++	~AzureFileHandle() override = default;
+ 
+ protected:
+ 	AzureFileHandle(AzureStorageFileSystem &fs, const OpenFileInfo &info, FileOpenFlags flags,
+@@ -72,11 +98,48 @@ public:
+ 	idx_t buffer_start;
+ 	idx_t buffer_end;
+ 
++	size_t part_size;
++
++	//! Write buffers for this file
++	mutex write_buffers_lock;
++	unordered_map<uint16_t, shared_ptr<AzureWriteBuffer>> write_buffers;
++
++	//! Synchronization for upload threads
++	mutex uploads_in_progress_lock;
++	std::condition_variable uploads_in_progress_cv;
++	std::condition_variable final_flush_cv;
++	uint16_t uploads_in_progress;
++
++	//! Etags are stored for each part
++	mutex block_ids_lock;
++	vector<string> block_ids;
++
++	//! Info for upload
++	atomic<uint16_t> parts_uploaded;
++	bool upload_finalized = true;
++
++	//! Error handling in upload threads
++	atomic<bool> uploader_has_error {false};
++	std::exception_ptr upload_exception;
++
++	shared_ptr<AzureWriteBuffer> GetBuffer(uint16_t write_buffer_idx);
++
++	//! Rethrow IO Exception originating from an upload thread
++	void RethrowIOError() {
++		if (uploader_has_error) {
++			std::rethrow_exception(upload_exception);
++		}
++	}
++
+ 	const AzureReadOptions read_options;
+ };
+ 
+ class AzureStorageFileSystem : public FileSystem {
+ public:
++	explicit AzureStorageFileSystem(BufferManager &buffer_manager) : buffer_manager(buffer_manager) {
++	}
++	BufferManager &buffer_manager;
++
+ 	// FS methods
+ 	duckdb::unique_ptr<FileHandle> OpenFile(const string &path, FileOpenFlags flags,
+ 	                                        optional_ptr<FileOpener> opener = nullptr) override;
+@@ -97,6 +160,10 @@ public:
+ 	void Seek(FileHandle &handle, idx_t location) override;
+ 	idx_t SeekPosition(FileHandle &handle) override;
+ 	void FileSync(FileHandle &handle) override;
++	bool ListFiles(const string &directory, const std::function<void(const string &, bool)> &callback,
++                   FileOpener *opener = nullptr) override;
++	void Write(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) override;
++	int64_t Write(FileHandle &handle, void *buffer, int64_t nr_bytes) override;
+ 
+ 	bool LoadFileInfo(AzureFileHandle &handle);
+ 
+@@ -104,6 +171,12 @@ public:
+ 		return "/";
+ 	}
+ 
++	BufferHandle Allocate(idx_t part_size, uint16_t max_threads);
++	void FlushAllBuffers(AzureFileHandle &handle);
++
++	virtual void FinalizeMultipartUpload(AzureFileHandle &file_handle) = 0;
++	virtual void UploadBuffer(AzureFileHandle &file_handle, shared_ptr<AzureWriteBuffer> write_buffer) = 0;
++
+ protected:
+ 	unique_ptr<FileHandle> OpenFileExtended(const OpenFileInfo &info, FileOpenFlags flags,
+ 	                                        optional_ptr<FileOpener> opener) override;
+@@ -127,6 +200,9 @@ protected:
+ 
+ public:
+ 	static timestamp_t ToTimestamp(const Azure::DateTime &dt);
++
++	static void NotifyUploadsInProgress(AzureFileHandle &file_handle);
++	void FlushBuffer(AzureFileHandle &handle, shared_ptr<AzureWriteBuffer> write_buffer);
+ };
+ 
+ } // namespace duckdb
+-- 
+2.49.0
+

@@ -59,6 +59,7 @@
 bool PgLakePgcompatIsOutputVerbose = false;
 
 // new explicit entrypoints
+extern "C" void azure_duckdb_cpp_init(duckdb::ExtensionLoader &loader);
 extern "C" void postgres_scanner_duckdb_cpp_init(duckdb::ExtensionLoader &loader);
 
 
@@ -319,6 +320,7 @@ PgLakeGeometryToHexWKB(shared_ptr<DatabaseInstance> db, string_t input)
 static void LoadInternal(ExtensionLoader &loader) {
 
 	/* dependent extensions to override -- XXX helper with autoload, maybe? */
+	azure_duckdb_cpp_init(loader);
 	postgres_scanner_duckdb_cpp_init(loader);
 
     /* Register functions */
@@ -365,14 +367,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 	fs.UnregisterSubSystem("AzureBlobStorageFileSystem");
 	fs.RegisterSubSystem(
 		make_uniq<PGLakeCachingFileSystem>(
-			make_uniq<AzureBlobStorageFileSystem>()
+			make_uniq<AzureBlobStorageFileSystem>(BufferManager::GetBufferManager(instance))
 		)
 	);
 
 	fs.UnregisterSubSystem("AzureDfsStorageFileSystem");
 	fs.RegisterSubSystem(
 		make_uniq<PGLakeCachingFileSystem>(
-			make_uniq<AzureDfsStorageFileSystem>()
+			make_uniq<AzureDfsStorageFileSystem>(BufferManager::GetBufferManager(instance))
 		)
 	);
 
