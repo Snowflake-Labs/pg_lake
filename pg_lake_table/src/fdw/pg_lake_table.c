@@ -230,6 +230,7 @@ typedef struct PgLakeModifyState
 {
 	/* relcache entry for the foreign table */
 	Relation	rel;
+	TupleDesc	tupleDesc;
 
 	/* type of modification operation */
 	CmdType		operation;
@@ -237,8 +238,10 @@ typedef struct PgLakeModifyState
 	/* destination for inserts */
 	DestReceiver *insertDest;
 	uint64		insertedRowCount;
+
+	/* out-of-range policy for the table */
 	IcebergOutOfRangePolicy outOfRangePolicy;
-	TupleDesc	tupleDesc;
+	bool		needsOutOfRangeValidation;
 
 	/* slot used for position deletes */
 	TupleTableSlot *deleteSlot;
@@ -2573,6 +2576,28 @@ postgresIsForeignRelUpdatable(Relation rel)
 
 
 /*
+ * TupleDescNeedsIcebergValidation returns true if any non-dropped column
+ * is temporal or numeric (i.e. requires IcebergErrorOrClampDatum processing).
+ */
+static bool
+TupleDescNeedsIcebergValidation(TupleDesc tupleDesc)
+{
+	for (int i = 0; i < tupleDesc->natts; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupleDesc, i);
+
+		if (attr->attisdropped)
+			continue;
+
+		if (IsTemporalType(attr->atttypid) || attr->atttypid == NUMERICOID)
+			return true;
+	}
+
+	return false;
+}
+
+
+/*
  * IcebergErrorOrClampSlotInPlace clamps or rejects out-of-range temporal and numeric
  * values in the slot, modifying it in-place.
  */
@@ -2615,7 +2640,8 @@ WriteInsertRecord(PgLakeModifyState * modifyState, TupleTableSlot *slot)
 {
 	DestReceiver *insertDest = modifyState->insertDest;
 
-	if (modifyState->outOfRangePolicy != ICEBERG_OOR_NONE)
+	if (modifyState->outOfRangePolicy != ICEBERG_OOR_NONE &&
+		modifyState->needsOutOfRangeValidation)
 		IcebergErrorOrClampSlotInPlace(slot, modifyState->tupleDesc,
 									   modifyState->outOfRangePolicy);
 
@@ -3449,6 +3475,7 @@ create_foreign_modify(Relation rel,
 		fmstate->tupleDesc = RelationGetDescr(rel);
 		fmstate->outOfRangePolicy =
 			GetIcebergOutOfRangePolicyForTable(relationId);
+		fmstate->needsOutOfRangeValidation = TupleDescNeedsIcebergValidation(fmstate->tupleDesc);
 	}
 
 	if (operation == CMD_UPDATE || operation == CMD_DELETE)

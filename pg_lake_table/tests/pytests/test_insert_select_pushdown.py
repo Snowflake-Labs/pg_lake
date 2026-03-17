@@ -1092,6 +1092,180 @@ def test_infinity_temporal_clamp_insert_select_pushdown(
 
 
 @pytest.mark.parametrize(
+    "col_type,expression,expected_clamped",
+    [
+        ("date", "DATE '9999-12-31' + 1", "9999-12-31"),
+        (
+            "timestamp",
+            "DATE '9999-12-31' + INTERVAL '1 day'",
+            "9999-12-31 23:59:59.999999",
+        ),
+        (
+            "timestamptz",
+            "TIMESTAMPTZ '9999-12-31 23:59:59.999999+00' + INTERVAL '1 second'",
+            "9999-12-31 23:59:59.999999+00",
+        ),
+    ],
+)
+def test_temporal_arithmetic_overflow_clamp(
+    pg_conn,
+    extension,
+    s3,
+    with_default_location,
+    col_type,
+    expression,
+    expected_clamped,
+):
+    """Arithmetic producing out-of-range temporal values is clamped."""
+    schema = f"test_arith_clamp_{col_type}"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    try:
+        run_command(
+            f"CREATE TABLE arith_clamp (col {col_type}) USING iceberg;",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        run_command(
+            f"INSERT INTO arith_clamp SELECT {expression} AS col;",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        result = run_query("SELECT col::text FROM arith_clamp;", pg_conn)
+        assert result[0][0] == expected_clamped
+    finally:
+        run_command("RESET TIME ZONE;", pg_conn)
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+@pytest.mark.parametrize(
+    "col_type,expression,expected_err",
+    [
+        ("date", "DATE '9999-12-31' + 1", "date out of range"),
+        (
+            "timestamp",
+            "DATE '9999-12-31' + INTERVAL '1 day'",
+            "timestamp out of range",
+        ),
+        (
+            "timestamptz",
+            "TIMESTAMPTZ '9999-12-31 23:59:59.999999+00' + INTERVAL '1 second'",
+            "timestamp out of range",
+        ),
+    ],
+)
+def test_temporal_arithmetic_overflow_error(
+    pg_conn,
+    extension,
+    s3,
+    with_default_location,
+    col_type,
+    expression,
+    expected_err,
+):
+    """Arithmetic producing out-of-range temporal values raises an error."""
+    schema = f"test_arith_err_{col_type}"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    try:
+        run_command(
+            f"CREATE TABLE arith_err (col {col_type}) USING iceberg"
+            f" WITH (out_of_range_values = 'error');",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        with pytest.raises(Exception, match=expected_err):
+            run_command(
+                f"INSERT INTO arith_err SELECT {expression} AS col;",
+                pg_conn,
+            )
+        pg_conn.rollback()
+    finally:
+        run_command("RESET TIME ZONE;", pg_conn)
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+def test_nan_arithmetic_clamp(
+    pg_conn,
+    extension,
+    s3,
+    with_default_location,
+):
+    """NaN produced by arithmetic on bounded numeric is clamped to NULL."""
+    schema = "test_nan_arith_clamp"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+
+    try:
+        run_command(
+            "CREATE TABLE nan_clamp (col numeric(10,2)) USING iceberg;",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        run_command(
+            "INSERT INTO nan_clamp VALUES ('NaN'::numeric(10,2) + 1);",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        result = run_query("SELECT col FROM nan_clamp;", pg_conn)
+        assert len(result) == 1
+        assert result[0][0] is None
+    finally:
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+def test_nan_arithmetic_error(
+    pg_conn,
+    extension,
+    s3,
+    with_default_location,
+):
+    """NaN produced by arithmetic on bounded numeric raises an error."""
+    schema = "test_nan_arith_err"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+
+    try:
+        run_command(
+            "CREATE TABLE nan_err (col numeric(10,2)) USING iceberg"
+            " WITH (out_of_range_values = 'error');",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        err = run_command(
+            "INSERT INTO nan_err VALUES ('NaN'::numeric(10,2) + 1);",
+            pg_conn,
+            raise_error=False,
+        )
+        assert "NaN is not supported for Iceberg decimal" in str(err)
+        pg_conn.rollback()
+    finally:
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+@pytest.mark.parametrize(
     "col_type,policy,expected_pattern",
     [
         ("date", "clamp", r"WHEN.*<.*DATE.*THEN.*DATE"),

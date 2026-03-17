@@ -43,11 +43,9 @@ typedef enum IcebergOutOfRangePolicy
 
 /*
  * GetIcebergOutOfRangePolicyForTable returns the IcebergOutOfRangePolicy
- * for the given relation.  Returns NONE when the table is not Iceberg
- * or no column needs validation.
+ * for the given relation.  Returns NONE when the table is not Iceberg.
  */
 extern PGDLLEXPORT IcebergOutOfRangePolicy GetIcebergOutOfRangePolicyForTable(Oid relationId);
-
 extern PGDLLEXPORT bool IsTemporalType(Oid typeOid);
 
 /* Temporal boundary year constants shared by datum and query-level validation */
