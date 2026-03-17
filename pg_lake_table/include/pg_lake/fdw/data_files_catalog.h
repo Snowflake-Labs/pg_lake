@@ -51,6 +51,7 @@ HTAB	   *GetTableDataFilesByPathHashFromCatalog(Oid relationId, bool dataOnly, b
 extern PGDLLEXPORT List *GetPossiblePositionDeleteFilesFromCatalog(Oid relationId, List *sourcePathList,
 																   Snapshot snapshot);
 extern PGDLLEXPORT int64 GetTableSizeFromCatalog(Oid relationId);
+extern PGDLLEXPORT int64 GetTotalDeletedRowCountFromCatalog(Oid relationId);
 bool		DataFilesCatalogExists(void);
 bool		DataFilesPartitionValuesCatalogExists(void);
 bool		PartitionSpecsCatalogExists(void);

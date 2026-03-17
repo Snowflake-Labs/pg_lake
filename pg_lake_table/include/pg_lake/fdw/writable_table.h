@@ -24,6 +24,9 @@
 /* by default, we switch to copy-on-write if 20% or more of a file is deleted */
 #define DEFAULT_COPY_ON_WRITE_THRESHOLD (20)
 
+/* by default, switch all remaining files to copy-on-write once 10M rows have been position-deleted */
+#define DEFAULT_COPY_ON_WRITE_MAX_DELETE_ROWS (10000000)
+
 /* by default, we generate 512 MB files (same as Spark Iceberg) */
 #define DEFAULT_TARGET_FILE_SIZE_MB (512)
 
@@ -82,6 +85,9 @@ typedef struct DataFileModification
 
 /* pg_lake_table.copy_on_write_threshold */
 extern int	CopyOnWriteThreshold;
+
+/* pg_lake_table.copy_on_write_max_delete_rows */
+extern int	CopyOnWriteMaxDeleteRows;
 
 /* pg_lake_table.target_file_size_mb */
 extern int	TargetFileSizeMB;

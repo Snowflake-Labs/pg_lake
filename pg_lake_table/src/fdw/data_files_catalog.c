@@ -732,6 +732,55 @@ GetTableSizeFromCatalog(Oid relationId)
 
 
 /*
+ * GetTotalDeletedRowCountFromCatalog sums the deleted_row_count of all data
+ * files in the table.  This is the total number of rows that are currently
+ * covered by position delete files.
+ *
+ * Returns 0 when the table is empty or no file has recorded deletions yet.
+ */
+int64
+GetTotalDeletedRowCountFromCatalog(Oid relationId)
+{
+	int64		totalDeletedRows = 0;
+
+	/* cast sum result to bigint to avoid returning numeric */
+	char	   *metadataQuery =
+		psprintf("select "
+				  /* 1 */ "sum(deleted_row_count)::bigint "
+				 "from " DATA_FILES_TABLE_QUALIFIED " "
+				 "where table_name OPERATOR(pg_catalog.=) $1 "
+				 "and content OPERATOR(pg_catalog.=) %d",
+				 (int) CONTENT_DATA);
+
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
+
+	DECLARE_SPI_ARGS(1);
+	SPI_ARG_VALUE(1, OIDOID, relationId, false);
+
+	bool		readOnly = true;
+
+	SPI_EXECUTE(metadataQuery, readOnly);
+
+	if (SPI_processed == 1)
+	{
+		bool		rowIndex = 0;
+		bool		isNull = false;
+
+		Datum		totalDeletedRowsDatum = GET_SPI_DATUM(rowIndex, 1, &isNull);
+
+		if (!isNull)
+		{
+			totalDeletedRows = DatumGetInt64(totalDeletedRowsDatum);
+		}
+	}
+
+	SPI_END();
+
+	return totalDeletedRows;
+}
+
+
+/*
  * AddDataFileToTable inserts a new file URL into lake_table.files
  *
  * content indicates whether this is a data file or deletion file.

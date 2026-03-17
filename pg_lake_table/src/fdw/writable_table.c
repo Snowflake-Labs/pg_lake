@@ -98,17 +98,19 @@ static List *ApplyInsertFile(Relation rel, char *insertFile, int64 rowCount,
 							 int64 reservedRowIdStart, int32 partitionSpecId,
 							 Partition * partition, DataFileStats * fileStats);
 static List *ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount,
-							 int64 liveRowCount, char *deleteFile, int64 deletedRowCount);
+							 int64 liveRowCount, char *deleteFile, int64 deletedRowCount,
+							 int64 *totalPositionDeletedRows);
 static List *GetDataFilePathsFromStatsList(List *dataFileStats);
 static List *GetNewFileOpsFromFileStats(Oid relationId, List *dataFileStats,
 										int32 partitionSpecId, Partition * partition, int64 rowCount,
 										bool isVerbose, List **newFiles);
 static bool ShouldRewriteAfterDeletions(int64 sourceRowCount, uint64 totalDeletedRowCount);
 static CompactionDataFileHashEntry * GetPartitionWithMostEligibleFiles(Oid relationId, TimestampTz compactionStartTime,
-																	   bool forceMerge);
+																	   bool forceMerge, bool forceCompactDeletions);
 static HTAB *CreateCompactionDataFileHash(void);
 static HTAB *GroupDataFilesByPartition(List *dataFiles, TimestampTz compactionStartTime, bool forceMerge);
-static List *FilterCompactionCandidates(List *dataFiles, TimestampTz compactionStartTime, bool forceMerge);
+static List *FilterCompactionCandidates(List *dataFiles, TimestampTz compactionStartTime, bool forceMerge,
+										bool forceCompactDeletions);
 static List *TryCompactDataFiles(Oid relationId, TupleDesc tupleDescriptor, List *candidates,
 								 PgLakeTableType tableType, List *options, bool forceMerge, bool isVerbose);
 #ifdef USE_ASSERT_CHECKING
@@ -129,6 +131,9 @@ static void ApplyMetadataChanges(Oid relationId, List *metadataOperations);
 
 /* pg_lake_table.copy_on_write_threshold */
 int			CopyOnWriteThreshold = DEFAULT_COPY_ON_WRITE_THRESHOLD;
+
+/* pg_lake_table.copy_on_write_max_delete_rows */
+int			CopyOnWriteMaxDeleteRows = DEFAULT_COPY_ON_WRITE_MAX_DELETE_ROWS;
 
 /* pg_lake_table.target_file_size_mb */
 int			TargetFileSizeMB = DEFAULT_TARGET_FILE_SIZE_MB;
@@ -430,7 +435,7 @@ GenerateDataFileNameForTable(Oid relationId, bool withExtension)
  */
 static List *
 ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 liveRowCount,
-				char *deleteFile, int64 deletedRowCount)
+				char *deleteFile, int64 deletedRowCount, int64 *totalPositionDeletedRows)
 {
 	if (deletedRowCount == 0)
 		return NIL;
@@ -476,13 +481,19 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 		Assert(deleteFile != NULL);
 
 		/*
-		 * we only do copy-on-write if more than copy_on_write_threshold
-		 * percent of the original file was deleted.
+		 * We use copy-on-write if either: - more than copy_on_write_threshold
+		 * percent of the original file was deleted, OR - we have already
+		 * accumulated more than copy_on_write_max_delete_rows
+		 * position-deleted rows across all files in this operation.
 		 *
 		 * Copy-on-write with row IDs is not yet supported. We'd want to
 		 * preserve the row IDs similar to compaction.
 		 */
-		if (ShouldRewriteAfterDeletions(sourceRowCount, totalDeletedRowCount) &&
+		bool		exceedsRowLimit = (CopyOnWriteMaxDeleteRows >= 0 &&
+									   *totalPositionDeletedRows >= (int64) CopyOnWriteMaxDeleteRows);
+
+		if ((ShouldRewriteAfterDeletions(sourceRowCount, totalDeletedRowCount) ||
+			 exceedsRowLimit) &&
 			!hasRowIds)
 		{
 			/*
@@ -629,6 +640,12 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 				UpdateDeletedRowCountOperation(sourcePath, totalDeletedRowCount);
 
 			metadataOperations = lappend(metadataOperations, updateOperation);
+
+			/*
+			 * track rows deleted via position deletes across all files in
+			 * this operation
+			 */
+			*totalPositionDeletedRows += deletedRowCount;
 		}
 	}
 	else
@@ -727,7 +744,22 @@ CompactDataFiles(Oid relationId, TimestampTz compactionStartTime,
 		return false;
 	}
 
-	CompactionDataFileHashEntry *entry = GetPartitionWithMostEligibleFiles(relationId, compactionStartTime, forceMerge);
+	/*
+	 * If the table-wide position-deleted row count has crossed 50% of the
+	 * limit, treat any file with deletions as a compaction candidate so that
+	 * VACUUM drains the backlog before the hard limit is reached.
+	 */
+	bool		forceCompactDeletions = false;
+
+	if (CopyOnWriteMaxDeleteRows >= 0)
+	{
+		int64		tableDeletedRows = GetTotalDeletedRowCountFromCatalog(relationId);
+
+		forceCompactDeletions = tableDeletedRows > CopyOnWriteMaxDeleteRows / 2;
+	}
+
+	CompactionDataFileHashEntry *entry = GetPartitionWithMostEligibleFiles(relationId, compactionStartTime,
+																		   forceMerge, forceCompactDeletions);
 
 	if (entry == NULL)
 	{
@@ -1130,7 +1162,8 @@ AddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc)
  * partition that always generate big file forever.
  */
 static CompactionDataFileHashEntry *
-GetPartitionWithMostEligibleFiles(Oid relationId, TimestampTz compactionStartTime, bool forceMerge)
+GetPartitionWithMostEligibleFiles(Oid relationId, TimestampTz compactionStartTime, bool forceMerge,
+								  bool forceCompactDeletions)
 {
 	/* we're going to rewrite files, so lock them */
 	bool		forUpdate = true;
@@ -1163,7 +1196,8 @@ GetPartitionWithMostEligibleFiles(Oid relationId, TimestampTz compactionStartTim
 		/* filter out files that are not eligible for compaction */
 		entry->dataFiles = FilterCompactionCandidates(entry->dataFiles,
 													  compactionStartTime,
-													  forceMerge);
+													  forceMerge,
+													  forceCompactDeletions);
 
 		if (entry->dataFiles == NIL)
 		{
@@ -1221,6 +1255,17 @@ ApplyDataFileModifications(Relation rel, List *modifications)
 	List	   *metadataOperations = NIL;
 
 	/*
+	 * Seed the counter with rows already deleted across the whole table so
+	 * that copy_on_write_max_delete_rows limits the table-wide total, not
+	 * just the rows deleted in this single operation.  Skip the catalog query
+	 * when the limit is disabled (< 0) to avoid unnecessary overhead.
+	 */
+	int64		totalPositionDeletedRows =
+		(CopyOnWriteMaxDeleteRows >= 0)
+		? GetTotalDeletedRowCountFromCatalog(relationId)
+		: 0;
+
+	/*
 	 * We may have deferred modifications from previous commands to this one.
 	 * We primarily do this in logical replication flush.
 	 */
@@ -1247,7 +1292,8 @@ ApplyDataFileModifications(Relation rel, List *modifications)
 								modification->sourceRowCount,
 								modification->liveRowCount,
 								modification->deleteFile,
-								modification->deletedRowCount);
+								modification->deletedRowCount,
+								&totalPositionDeletedRows);
 		}
 
 		else if (modification->type == ADD_DATA_FILE)
@@ -1378,7 +1424,7 @@ GroupDataFilesByPartition(List *dataFiles, TimestampTz compactionStartTime, bool
  */
 static List *
 FilterCompactionCandidates(List *dataFiles, TimestampTz compactionStartTime,
-						   bool forceMerge)
+						   bool forceMerge, bool forceCompactDeletions)
 {
 #ifdef USE_ASSERT_CHECKING
 	AssertAllFilesHaveSamePartition(dataFiles);
@@ -1389,7 +1435,7 @@ FilterCompactionCandidates(List *dataFiles, TimestampTz compactionStartTime,
 
 	ListCell   *dataFileCell = NULL;
 
-	bool		meetCompactionCriteria = forceMerge;
+	bool		meetCompactionCriteria = forceMerge || forceCompactDeletions;
 
 	foreach(dataFileCell, dataFiles)
 	{
@@ -1415,7 +1461,7 @@ FilterCompactionCandidates(List *dataFiles, TimestampTz compactionStartTime,
 		if (dataFile->stats.fileSize < MIN_TARGET_FILE_SIZE ||
 			dataFile->stats.fileSize > MAX_TARGET_FILE_SIZE ||
 			ShouldRewriteAfterDeletions(dataFile->stats.rowCount, dataFile->stats.deletedRowCount) ||
-			(forceMerge && dataFile->stats.deletedRowCount > 0))
+			((forceMerge || forceCompactDeletions) && dataFile->stats.deletedRowCount > 0))
 		{
 			candidates = lappend(candidates, dataFile);
 

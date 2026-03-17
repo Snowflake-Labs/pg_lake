@@ -171,6 +171,23 @@ _PG_init(void)
 							NULL,
 							NULL);
 
+	DefineCustomIntVariable("pg_lake_table.copy_on_write_max_delete_rows",
+							"Once this many rows have been deleted via position deletes "
+							"across all files in a single operation, all remaining files "
+							"switch to copy-on-write regardless of the per-file threshold. "
+							"The default is 10000000 (10M rows). "
+							"Set to -1 to disable this limit.",
+							NULL,
+							&CopyOnWriteMaxDeleteRows,
+							DEFAULT_COPY_ON_WRITE_MAX_DELETE_ROWS,
+							-1,
+							INT_MAX,
+							PGC_USERSET,
+							GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							NULL,
+							NULL,
+							NULL);
+
 	DefineCustomIntVariable("pg_lake_table.target_file_size_mb",
 							"Determines the target size of files in writable tables. "
 							"Files larger than this size will be split during insertion "
