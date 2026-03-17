@@ -101,10 +101,11 @@ Consult the [**PostgreSQL documentation**](https://www.postgresql.org/docs/curre
 There are a few limitations to be aware of:
 
 - Collations, declarative partitioning, and inheritance work as expected, but may result in suboptimal query plans.
-- Numeric types that do not specify a precision and scale are treated as numeric(38,9).
-- Numeric values cannot be NaN or infinite.
+- Numeric types are mapped based on precision:
+    - **Bounded `numeric(p,s)` with precision ≤ 38**: stored as an Iceberg decimal. NaN is not representable (see [Out-of-range value handling](#out-of-range-value-handling)).
+    - **Unbounded `numeric`** or **precision > 38**: automatically converted to `double precision` at table creation time. NaN and infinity are valid in double precision columns and are not affected by `out_of_range_values`.
+    - This conversion can be disabled with `SET pg_lake_iceberg.unsupported_numeric_as_double = off`, in which case unbounded or large-precision numeric columns are rejected at table creation.
 - Some types are not yet supported as column types in Iceberg tables:
-    - Numeric with precision > 38
     - Intervals
     - Other tables used as column types.
     - Not all geometry types are supported in Iceberg tables (only point, linestring, polygon, multipoint, multilinestring, multipolygon, geometrycollection), and geometry types cannot be nested in an array or composite type.
@@ -122,15 +123,17 @@ The Iceberg specification defines strict boundaries for temporal types that are 
 | `date` | `-4712-01-01` to `9999-12-31` |
 | `timestamp` | `0001-01-01 00:00:00` to `9999-12-31 23:59:59.999999` |
 | `timestamptz` | `0001-01-01 00:00:00+00` to `9999-12-31 23:59:59.999999+00` |
-| `numeric(p,s)` | NaN is not representable in Iceberg decimals |
+| `numeric(p,s)` (precision ≤ 38) | NaN is not representable in Iceberg decimals |
 
-PostgreSQL supports dates and timestamps well beyond year 9999, as well as special values like `infinity`, `-infinity`, and `NaN` for numerics. These values cannot be stored in Iceberg data files (Parquet).
+PostgreSQL supports dates and timestamps well beyond year 9999, as well as special values like `infinity`, `-infinity`, and `NaN` for numerics. These values cannot be stored in Iceberg decimal columns (Parquet).
+
+> **Note:** Unbounded `numeric` and `numeric` with precision > 38 are stored as `double precision`, not as Iceberg decimals. NaN and infinity are valid in double precision columns and are **not** subject to `out_of_range_values` handling.
 
 ### Behavior: `clamp` vs `error`
 
 The `out_of_range_values` option accepts two values:
 
-- **`clamp`** (default): Out-of-range temporal values are silently adjusted to the nearest Iceberg boundary. Numeric `NaN` values in bounded numeric columns are replaced with `NULL`. **No error is raised and no warning is emitted.** This means your stored data may differ from what was inserted.
+- **`clamp`** (default): Out-of-range temporal values are silently adjusted to the nearest Iceberg boundary. `NaN` values in bounded `numeric(p,s)` columns (precision ≤ 38) are replaced with `NULL`. **No error is raised and no warning is emitted.** This means your stored data may differ from what was inserted.
 - **`error`**: An error is raised if any value falls outside the Iceberg-representable range. The write is aborted entirely.
 
 ### Example
@@ -144,7 +147,15 @@ CREATE TABLE events (
 USING iceberg;
 
 -- This succeeds, but 'infinity' is stored as '9999-12-31 23:59:59.999999+00'
-INSERT INTO events VALUES ('infinity', 3.14);
+INSERT INTO events VALUES ('infinity', 3.14) RETURNING *;
+┌───────────────────────────────┬───────┐
+│          event_time           │ score │
+├───────────────────────────────┼───────┤
+│ 9999-12-31 23:59:59.999999+03 │  3.14 │
+└───────────────────────────────┴───────┘
+(1 row)
+
+INSERT 0 1
 
 -- Strict mode: out-of-range values cause an error
 CREATE TABLE events_strict (
@@ -807,5 +818,3 @@ begin
 end;
 $$;
 ```
-
-

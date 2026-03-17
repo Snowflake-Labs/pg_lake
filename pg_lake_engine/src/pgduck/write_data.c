@@ -55,6 +55,7 @@ static DuckDBTypeInfo VARCHAR_TYPE =
 int			TargetRowGroupSizeMB = DEFAULT_TARGET_ROW_GROUP_SIZE_MB;
 int			DefaultParquetVersion = PARQUET_VERSION_V1;
 
+
 /*
  * ConvertCSVFileTo copies and converts a CSV file at source path to
  * the destinationPath.
@@ -91,7 +92,7 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 
 	bool		queryHasRowIds = false;
 
-	/* CSV data is already clamped by IcebergValidatingDestReceiver */
+	/* CSV data is already clamped by WriteInsertRecord */
 	return WriteQueryResultTo(command.data,
 							  destinationPath,
 							  destinationFormat,
@@ -637,18 +638,22 @@ ChooseDuckDBEngineTypeForWrite(PGType postgresType,
 		 * https://duckdb.org/docs/sql/data_types/overview
 		 * https://www.postgresql.org/docs/current/datatype-numeric.html#DATATYPE-NUMERIC-DECIMAL
 		 */
-		int			precision;
-		int			scale;
+		int			precision = -1;
+		int			scale = -1;
 
 		GetDuckdbAdjustedPrecisionAndScaleFromNumericTypeMod(postgresTypeMod, &precision, &scale);
 
 		if (CanPushdownNumericToDuckdb(precision, scale))
 		{
+			/*
+			 * happy case: we can map to DECIMAL(precision, scale)
+			 */
 			typeModifier = psprintf("(%d,%d)", precision, scale);
 			duckTypeId = DUCKDB_TYPE_DECIMAL;
 		}
 		else
 		{
+			/* explicit precision which is too big for us */
 			duckTypeId = DUCKDB_TYPE_VARCHAR;
 		}
 	}

@@ -1727,11 +1727,15 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 
 		if (scanState->insertIntoRelid != InvalidOid)
 		{
-			queryString =
-				IcebergWrapQueryWithErrorOrClampChecks(queryString,
-													   scanState->insertTargetTupleDesc,
-													   GetIcebergOutOfRangePolicyForTable(scanState->insertIntoRelid),
-													   false);
+			IcebergOutOfRangePolicy outOfRangePolicy =
+				GetIcebergOutOfRangePolicyForTable(scanState->insertIntoRelid);
+
+			if (outOfRangePolicy != ICEBERG_OOR_NONE)
+				queryString =
+					IcebergWrapQueryWithErrorOrClampChecks(queryString,
+														   scanState->insertTargetTupleDesc,
+														   outOfRangePolicy,
+														   false);
 		}
 
 		ExplainPropertyText("Vectorized SQL", queryString, es);

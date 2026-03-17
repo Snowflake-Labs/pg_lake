@@ -26,6 +26,9 @@
 static const int32 PostgresToUnixEpochDiffInDays = POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE;
 static const int64 PostgresToUnixEpochDiffInMicrosecs = ((int64) PostgresToUnixEpochDiffInDays) * USECS_PER_DAY;
 
+static void EnsureFiniteDate(DateADT date);
+static void EnsureFiniteTimestamp(Timestamp ts);
+
 #define UNIX_EPOCH_YEAR 1970
 
 /*
@@ -36,9 +39,6 @@ static const int64 PostgresToUnixEpochDiffInMicrosecs = ((int64) PostgresToUnixE
 #define DIV_FLOOR_INT64(x, y)  \
     ( ((x) >= 0) ? ((x) / (y)) \
                  : (-((-(x) + (y) - 1) / (y))) )
-
-static void EnsureFiniteDate(DateADT date);
-static void EnsureFiniteTimestamp(Timestamp ts);
 
 
 /*

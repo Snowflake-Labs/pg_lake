@@ -18,7 +18,6 @@
 #pragma once
 
 #include "executor/executor.h"
-#include "pg_lake/pgduck/iceberg_validation.h"
 #include "tcop/dest.h"
 #include "tcop/tcopprot.h"
 

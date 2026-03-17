@@ -19,9 +19,9 @@
  * C-level Iceberg write-time datum validation.
  *
  * Validates individual Datum values against Iceberg representable ranges
- * on the PostgreSQL side (non-pushdown path).  Called from partition
- * transform code (to keep partition keys consistent with clamped data)
- * and from the CSV writer (for the data itself).
+ * on the PostgreSQL side (non-pushdown path).  Called from
+ * IcebergErrorOrClampSlotInPlace during FDW inserts and from partition transform
+ * code (to keep partition keys consistent with clamped data).
  *
  * Handles both temporal boundaries (date/timestamp/timestamptz) and
  * numeric NaN (clamped to NULL or rejected).
@@ -36,14 +36,12 @@
 #include "datatype/timestamp.h"
 #include "pg_lake/pgduck/iceberg_datum_validation.h"
 #include "pg_lake/util/temporal_utils.h"
-#include "pgtime.h"
 #include "utils/date.h"
-#include "utils/datetime.h"
 #include "utils/numeric.h"
 #include "utils/timestamp.h"
 
 
-static Datum ClampOrErrorTemporal(Datum value, Oid typeOid, int year,
+static Datum ErrorOrClampTemporal(Datum value, Oid typeOid, int year,
 								  IcebergOutOfRangePolicy policy);
 static Datum IcebergErrorOrClampTemporalDatum(Datum value, Oid typeOid,
 											  IcebergOutOfRangePolicy policy);
@@ -53,15 +51,17 @@ static Datum IcebergErrorOrClampNumericDatum(Datum value,
 
 
 /*
- * ClampOrErrorTemporal handles an out-of-range temporal value.
+ * ErrorOrClampTemporal handles an out-of-range temporal value.
  *
  * In error mode: raises an error.
  * In clamp mode: returns the nearest boundary value.
  */
 static Datum
-ClampOrErrorTemporal(Datum value, Oid typeOid, int year,
+ErrorOrClampTemporal(Datum value, Oid typeOid, int year,
 					 IcebergOutOfRangePolicy policy)
 {
+	Assert(IsTemporalType(typeOid));
+
 	if (policy == ICEBERG_OOR_ERROR)
 	{
 		const char *errMsg = (typeOid == DATEOID) ?
@@ -115,7 +115,13 @@ ClampOrErrorTemporal(Datum value, Oid typeOid, int year,
 	}
 	else
 	{
-		/* TIMESTAMPTZOID: clamp to boundaries in the session timezone */
+		Assert(typeOid == TIMESTAMPTZOID);
+
+		/*
+		 * TIMESTAMPTZOID: clamp to UTC boundaries.  Iceberg stores
+		 * timestamptz as UTC microseconds, so the boundaries are defined in
+		 * UTC regardless of the session timezone.
+		 */
 		TimestampTz ts = DatumGetTimestampTz(value);
 
 		if (TIMESTAMP_NOT_FINITE(ts))
@@ -123,28 +129,12 @@ ClampOrErrorTemporal(Datum value, Oid typeOid, int year,
 		else
 			clampToMin = (year < TEMPORAL_TIMESTAMP_MIN_YEAR);
 
-		int			clampYear = clampToMin ? TEMPORAL_TIMESTAMP_MIN_YEAR : TEMPORAL_MAX_YEAR;
-		int			clampMon = clampToMin ? 1 : 12;
-		int			clampDay = clampToMin ? 1 : 31;
-		int			clampHour = clampToMin ? 0 : 23;
-		int			clampMin = clampToMin ? 0 : 59;
-		int			clampSec = clampToMin ? 0 : 59;
-		int			clampUsec = clampToMin ? 0 : 999999;
-
-		struct pg_tm clampTm = {0};
-
-		clampTm.tm_year = clampYear;
-		clampTm.tm_mon = clampMon;
-		clampTm.tm_mday = clampDay;
-		clampTm.tm_hour = clampHour;
-		clampTm.tm_min = clampMin;
-		clampTm.tm_sec = clampSec;
-
-		int			tzOffset = DetermineTimeZoneOffset(&clampTm, session_timezone);
-		Timestamp	localTs = MakeTimestampUsec(clampYear, clampMon, clampDay,
-												clampHour, clampMin, clampSec, clampUsec);
-
-		return TimestampTzGetDatum(localTs + (int64) tzOffset * USECS_PER_SEC);
+		if (clampToMin)
+			return TimestampTzGetDatum(
+									   MakeTimestampUsec(TEMPORAL_TIMESTAMP_MIN_YEAR, 1, 1, 0, 0, 0, 0));
+		else
+			return TimestampTzGetDatum(
+									   MakeTimestampUsec(TEMPORAL_MAX_YEAR, 12, 31, 23, 59, 59, 999999));
 	}
 }
 
@@ -152,6 +142,10 @@ ClampOrErrorTemporal(Datum value, Oid typeOid, int year,
 /*
  * IcebergErrorOrClampTemporalDatum validates a date, timestamp, or
  * timestamptz Datum against Iceberg temporal boundaries.
+ *
+ * For timestamptz, GetYearFromTimestamp extracts the UTC year (since
+ * TimestampTz is stored as UTC microseconds internally), so the range
+ * check and clamping are timezone-independent.
  */
 static Datum
 IcebergErrorOrClampTemporalDatum(Datum value, Oid typeOid,
@@ -164,48 +158,28 @@ IcebergErrorOrClampTemporalDatum(Datum value, Oid typeOid,
 		DateADT		d = DatumGetDateADT(value);
 
 		if (DATE_NOT_FINITE(d))
-			return ClampOrErrorTemporal(value, typeOid, 0, policy);
+			return ErrorOrClampTemporal(value, typeOid, 0, policy);
 
 		int			year = GetYearFromDate(d);
 
 		if (year < TEMPORAL_DATE_MIN_YEAR || year > TEMPORAL_MAX_YEAR)
-			return ClampOrErrorTemporal(value, typeOid, year, policy);
+			return ErrorOrClampTemporal(value, typeOid, year, policy);
 	}
 	else
 	{
+		Assert(typeOid == TIMESTAMPTZOID || typeOid == TIMESTAMPOID);
+
 		Timestamp	ts = (typeOid == TIMESTAMPTZOID) ?
 			DatumGetTimestampTz(value) :
 			DatumGetTimestamp(value);
 
 		if (TIMESTAMP_NOT_FINITE(ts))
-			return ClampOrErrorTemporal(value, typeOid, 0, policy);
+			return ErrorOrClampTemporal(value, typeOid, 0, policy);
 
 		int			year = GetYearFromTimestamp(ts);
 
 		if (year < TEMPORAL_TIMESTAMP_MIN_YEAR || year > TEMPORAL_MAX_YEAR)
-			return ClampOrErrorTemporal(value, typeOid, year, policy);
-
-		/*
-		 * For timestamptz, also check the year in the session timezone. A
-		 * value like '10000-01-01 00:00:00+03' has UTC year 9999 but local
-		 * year 10000.
-		 */
-		if (typeOid == TIMESTAMPTZOID)
-		{
-			struct pg_tm tt;
-			fsec_t		fsec;
-			int			tz;
-
-			if (timestamp2tm(ts, &tz, &tt, &fsec, NULL, NULL) == 0)
-			{
-				int			localYear = tt.tm_year;
-
-				if (localYear < TEMPORAL_TIMESTAMP_MIN_YEAR ||
-					localYear > TEMPORAL_MAX_YEAR)
-					return ClampOrErrorTemporal(value, typeOid,
-												localYear, policy);
-			}
-		}
+			return ErrorOrClampTemporal(value, typeOid, year, policy);
 	}
 
 	return value;

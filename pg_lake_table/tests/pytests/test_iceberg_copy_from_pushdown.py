@@ -872,3 +872,125 @@ def test_infinity_temporal_clamp_copy_from_pushdown(
         run_command("RESET search_path;", pg_conn)
         run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
         pg_conn.commit()
+
+
+@pytest.mark.parametrize(
+    "col_type,value,expected_err",
+    [
+        ("date", "infinity", "date out of range"),
+        ("date", "-infinity", "date out of range"),
+        ("timestamp", "infinity", "timestamp out of range"),
+        ("timestamp", "-infinity", "timestamp out of range"),
+        ("timestamptz", "infinity", "timestamp out of range"),
+        ("timestamptz", "-infinity", "timestamp out of range"),
+    ],
+)
+def test_infinity_temporal_error_copy_from_non_pushdown(
+    pg_conn,
+    extension,
+    s3,
+    with_default_location,
+    col_type,
+    value,
+    expected_err,
+):
+    """Verify +-infinity temporal values are rejected during non-pushdown
+    COPY FROM (the row-by-row path through WriteInsertRecord).
+
+    A NOT NULL constraint forces the non-pushdown path.
+    """
+    schema = f"test_inf_err_cf_np_{col_type.replace(' ', '_')}"
+    csv_url = f"s3://{TEST_BUCKET}/test_inf_temporal_err_copy_np_{col_type}/data.csv"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    try:
+        run_command(
+            f"COPY (SELECT '{value}' AS col) TO '{csv_url}' (FORMAT csv, HEADER true);",
+            pg_conn,
+        )
+
+        run_command(
+            f"CREATE TABLE inf_copy_target (col {col_type} NOT NULL) USING iceberg"
+            f" WITH (out_of_range_values = 'error');",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        with pytest.raises(Exception, match=expected_err):
+            run_command(
+                f"COPY inf_copy_target FROM '{csv_url}' (FORMAT csv, HEADER true);",
+                pg_conn,
+            )
+        pg_conn.rollback()
+    finally:
+        pg_conn.rollback()
+        run_command("RESET TIME ZONE;", pg_conn)
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+@pytest.mark.parametrize(
+    "col_type,value,expected_clamped",
+    [
+        ("date", "infinity", "9999-12-31"),
+        ("date", "-infinity", "4713-01-01 BC"),
+        ("timestamp", "infinity", "9999-12-31 23:59:59.999999"),
+        ("timestamp", "-infinity", "0001-01-01 00:00:00"),
+        ("timestamptz", "infinity", "9999-12-31 23:59:59.999999+00"),
+        ("timestamptz", "-infinity", "0001-01-01 00:00:00+00"),
+    ],
+)
+def test_infinity_temporal_clamp_copy_from_non_pushdown(
+    pg_conn,
+    extension,
+    s3,
+    with_default_location,
+    col_type,
+    value,
+    expected_clamped,
+):
+    """Verify +-infinity temporal values are clamped during non-pushdown
+    COPY FROM (the row-by-row path through WriteInsertRecord).
+
+    A NOT NULL constraint forces the non-pushdown path.
+    """
+    schema = f"test_inf_clamp_cf_np_{col_type.replace(' ', '_')}"
+    csv_url = f"s3://{TEST_BUCKET}/test_inf_temporal_clamp_copy_np_{col_type}/data.csv"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    try:
+        run_command(
+            f"COPY (SELECT '{value}' AS col) TO '{csv_url}' (FORMAT csv, HEADER true);",
+            pg_conn,
+        )
+
+        run_command(
+            f"CREATE TABLE inf_copy_target (col {col_type} NOT NULL) USING iceberg;",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        run_command(
+            f"COPY inf_copy_target FROM '{csv_url}' (FORMAT csv, HEADER true);",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        result = run_query(
+            "SELECT col::text FROM inf_copy_target;",
+            pg_conn,
+        )
+        assert normalize_bc(result)[0][0] == expected_clamped
+    finally:
+        pg_conn.rollback()
+        run_command("RESET TIME ZONE;", pg_conn)
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()

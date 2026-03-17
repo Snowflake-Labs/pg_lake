@@ -1904,6 +1904,13 @@ def test_clamped_infinity_data_file_pruning(
     )
     assert int(fetch_data_files_used(results)) == 1
 
+    # col < 'infinity' → all 3 files (clamped +infinity is finite, so still < infinity)
+    results = run_query(
+        f"{explain_prefix} SELECT * FROM test_clamp_inf_dfp.tbl WHERE col < 'infinity'",
+        pg_conn,
+    )
+    assert int(fetch_data_files_used(results)) == 3
+
     # No matching value → 0 files
     if col_type == "date":
         no_match = "col = '2025-01-01'"

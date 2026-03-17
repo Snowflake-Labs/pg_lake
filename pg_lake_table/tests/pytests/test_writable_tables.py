@@ -1747,14 +1747,15 @@ def test_stringify_map():
     assert result == '{"(a,b)","(c,\\"{1,2,3}\\")"}'
 
 
-def test_out_of_range_values_writable_parquet_rejected(s3, pg_conn, extension):
-    """Writable parquet tables reject the out_of_range_values option."""
-    location = f"s3://{TEST_BUCKET}/test_oor_writable_parquet/"
+@pytest.mark.parametrize("fmt", ["parquet", "csv", "json"])
+def test_out_of_range_values_writable_rejected(s3, pg_conn, extension, fmt):
+    """Writable non-iceberg tables reject the out_of_range_values option."""
+    location = f"s3://{TEST_BUCKET}/test_oor_writable_{fmt}/"
 
     error = run_command(
         f"""
-        CREATE FOREIGN TABLE oor_writable_parquet (id int)
-        SERVER pg_lake OPTIONS (writable 'true', format 'parquet', location '{location}',
+        CREATE FOREIGN TABLE oor_writable_{fmt} (id int)
+        SERVER pg_lake OPTIONS (writable 'true', format '{fmt}', location '{location}',
                                 out_of_range_values 'clamp');
     """,
         pg_conn,
@@ -1786,54 +1787,15 @@ def test_out_of_range_values_readable_parquet_rejected(s3, pg_conn, extension):
     pg_conn.rollback()
 
 
-def test_out_of_range_values_iceberg(s3, pg_conn, extension, with_default_location):
+@pytest.mark.parametrize("value", ["clamp", "error"])
+def test_out_of_range_values_iceberg(
+    s3, pg_conn, extension, with_default_location, value
+):
     """Iceberg tables accept the out_of_range_values option."""
     run_command(
-        "CREATE TABLE oor_iceberg (id int) USING iceberg WITH (out_of_range_values = 'clamp');",
+        f"CREATE TABLE oor_iceberg (id int) USING iceberg WITH (out_of_range_values = '{value}');",
         pg_conn,
     )
-    pg_conn.rollback()
-
-    run_command(
-        "CREATE TABLE oor_iceberg (id int) USING iceberg WITH (out_of_range_values = 'error');",
-        pg_conn,
-    )
-    pg_conn.rollback()
-
-
-def test_out_of_range_values_csv_rejected(s3, pg_conn, extension):
-    """CSV tables reject the out_of_range_values option."""
-    location = f"s3://{TEST_BUCKET}/test_oor_csv/"
-
-    error = run_command(
-        f"""
-        CREATE FOREIGN TABLE oor_csv (id int)
-        SERVER pg_lake OPTIONS (writable 'true', format 'csv', location '{location}',
-                                out_of_range_values 'clamp');
-    """,
-        pg_conn,
-        raise_error=False,
-    )
-    assert "out_of_range_values" in error
-
-    pg_conn.rollback()
-
-
-def test_out_of_range_values_json_rejected(s3, pg_conn, extension):
-    """JSON tables reject the out_of_range_values option."""
-    location = f"s3://{TEST_BUCKET}/test_oor_json/"
-
-    error = run_command(
-        f"""
-        CREATE FOREIGN TABLE oor_json (id int)
-        SERVER pg_lake OPTIONS (writable 'true', format 'json', location '{location}',
-                                out_of_range_values 'clamp');
-    """,
-        pg_conn,
-        raise_error=False,
-    )
-    assert "out_of_range_values" in error
-
     pg_conn.rollback()
 
 

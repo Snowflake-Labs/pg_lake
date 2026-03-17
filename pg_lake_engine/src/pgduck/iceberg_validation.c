@@ -22,6 +22,9 @@
  */
 #include "postgres.h"
 
+#include "access/relation.h"
+#include "access/tupdesc.h"
+#include "utils/rel.h"
 #include "catalog/pg_type.h"
 #include "foreign/foreign.h"
 #include "pg_lake/parsetree/options.h"
@@ -30,6 +33,7 @@
 
 
 static IcebergOutOfRangePolicy GetIcebergOutOfRangePolicyFromOptions(List *options);
+static bool TupleDescNeedsIcebergValidation(TupleDesc tupleDesc);
 
 
 /*
@@ -52,13 +56,24 @@ GetIcebergOutOfRangePolicyFromOptions(List *options)
 
 
 /*
- * GetIcebergOutOfRangePolicyForTable reads the "out_of_range_values" table
- * option for the given relation.  Returns NONE for non-iceberg tables.
+ * GetIcebergOutOfRangePolicyForTable returns the IcebergOutOfRangePolicy
+ * for the given relation.  Returns NONE when:
+ *   - the table is not an Iceberg table, or
+ *   - no column is temporal or numeric (nothing to validate).
  */
 IcebergOutOfRangePolicy
 GetIcebergOutOfRangePolicyForTable(Oid relationId)
 {
 	if (!IsIcebergTable(relationId))
+		return ICEBERG_OOR_NONE;
+
+	Relation	rel = RelationIdGetRelation(relationId);
+	TupleDesc	tupleDesc = RelationGetDescr(rel);
+	bool		needsValidation = TupleDescNeedsIcebergValidation(tupleDesc);
+
+	RelationClose(rel);
+
+	if (!needsValidation)
 		return ICEBERG_OOR_NONE;
 
 	ForeignTable *foreignTable = GetForeignTable(relationId);
@@ -76,4 +91,27 @@ IsTemporalType(Oid typeOid)
 	return typeOid == DATEOID ||
 		typeOid == TIMESTAMPOID ||
 		typeOid == TIMESTAMPTZOID;
+}
+
+
+/*
+ * TupleDescNeedsIcebergValidation returns true if any non-dropped column
+ * in the tuple descriptor is temporal or numeric (i.e. requires
+ * IcebergErrorOrClampDatum processing).
+ */
+static bool
+TupleDescNeedsIcebergValidation(TupleDesc tupleDesc)
+{
+	for (int i = 0; i < tupleDesc->natts; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupleDesc, i);
+
+		if (attr->attisdropped)
+			continue;
+
+		if (IsTemporalType(attr->atttypid) || attr->atttypid == NUMERICOID)
+			return true;
+	}
+
+	return false;
 }

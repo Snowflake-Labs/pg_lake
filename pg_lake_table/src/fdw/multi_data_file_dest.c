@@ -31,7 +31,6 @@
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/pgduck/remote_storage.h"
 #include "pg_lake/pgduck/write_data.h"
-#include "pg_lake/pgduck/iceberg_validation.h"
 #include "pg_lake/storage/local_storage.h"
 #include "foreign/foreign.h"
 #include "tcop/dest.h"
@@ -103,7 +102,6 @@ typedef struct MultiDataFileUploadDestReceiver
 	 * dest receiver).
 	 */
 	int			maxWriteTempFileSizeMB;
-
 }			MultiDataFileUploadDestReceiver;
 
 

@@ -43,8 +43,8 @@ typedef enum IcebergOutOfRangePolicy
 
 /*
  * GetIcebergOutOfRangePolicyForTable returns the IcebergOutOfRangePolicy
- * from the given table's foreign table options.  Returns NONE for
- * non-iceberg tables.
+ * for the given relation.  Returns NONE when the table is not Iceberg
+ * or no column needs validation.
  */
 extern PGDLLEXPORT IcebergOutOfRangePolicy GetIcebergOutOfRangePolicyForTable(Oid relationId);
 

@@ -81,7 +81,6 @@
 #include "pg_lake/fdw/snapshot.h"
 #include "pg_lake/fdw/update_tracking.h"
 #include "pg_lake/fdw/writable_table.h"
-#include "pg_lake/fdw/iceberg_validating_dest_receiver.h"
 #include "pg_lake/fdw/multi_data_file_dest.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/operations/manifest_merge.h"
@@ -92,6 +91,7 @@
 #include "pg_lake/permissions/roles.h"
 #include "pg_extension_base/pg_compat.h"
 #include "pg_lake/pgduck/array_conversion.h"
+#include "pg_lake/pgduck/iceberg_datum_validation.h"
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/pgduck/explain.h"
 #include "pg_lake/pgduck/rewrite_query.h"
@@ -238,6 +238,7 @@ typedef struct PgLakeModifyState
 	DestReceiver *insertDest;
 	uint64		insertedRowCount;
 	IcebergOutOfRangePolicy outOfRangePolicy;
+	TupleDesc	tupleDesc;
 
 	/* slot used for position deletes */
 	TupleTableSlot *deleteSlot;
@@ -2572,20 +2573,58 @@ postgresIsForeignRelUpdatable(Relation rel)
 
 
 /*
- * WriteInsertRecord writes the tuple held by the given slot to the insert
- * destination.
+ * IcebergErrorOrClampSlotInPlace clamps or rejects out-of-range temporal and numeric
+ * values in the slot, modifying it in-place.
+ */
+static void
+IcebergErrorOrClampSlotInPlace(TupleTableSlot *slot, TupleDesc tupleDesc,
+							   IcebergOutOfRangePolicy policy)
+{
+	int			natts = tupleDesc->natts;
+
+	slot_getallattrs(slot);
+
+	for (int i = 0; i < natts; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupleDesc, i);
+
+		if (attr->attisdropped || slot->tts_isnull[i])
+			continue;
+
+		if (!IsTemporalType(attr->atttypid) && attr->atttypid != NUMERICOID)
+			continue;
+
+		bool		isNull = false;
+		Datum		clamped = IcebergErrorOrClampDatum(slot->tts_values[i],
+													   attr->atttypid,
+													   policy,
+													   &isNull);
+
+		slot->tts_values[i] = clamped;
+		slot->tts_isnull[i] = isNull;
+	}
+}
+
+
+/*
+ * WriteInsertRecord validates the tuple against Iceberg write constraints
+ * (when applicable) and forwards it to the insert destination.
  */
 static void
 WriteInsertRecord(PgLakeModifyState * modifyState, TupleTableSlot *slot)
 {
 	DestReceiver *insertDest = modifyState->insertDest;
 
+	if (modifyState->outOfRangePolicy != ICEBERG_OOR_NONE)
+		IcebergErrorOrClampSlotInPlace(slot, modifyState->tupleDesc,
+									   modifyState->outOfRangePolicy);
+
 	if (modifyState->insertedRowCount == 0)
 	{
 		/* incoming inserts have the tuple descriptor of the table */
 		insertDest->rStartup(insertDest,
 							 CMD_INSERT,
-							 RelationGetDescr(modifyState->rel));
+							 modifyState->tupleDesc);
 	}
 
 	insertDest->receiveSlot(slot, insertDest);
@@ -2800,21 +2839,12 @@ FinishForeignModify(PgLakeModifyState * fmstate)
 		 */
 		fmstate->insertDest->rShutdown(fmstate->insertDest);
 
-		/*
-		 * If the insertDest is wrapped with an IcebergValidatingDestReceiver,
-		 * unwrap it to reach the inner receiver for modification extraction.
-		 */
-		DestReceiver *innerDest = fmstate->insertDest;
-
-		if (fmstate->outOfRangePolicy != ICEBERG_OOR_NONE)
-			innerDest = GetIcebergValidatingDestReceiverChild(fmstate->insertDest);
-
 		bool		partitionedTable =
 			GetIcebergTablePartitionByOption(RelationGetRelid(fmstate->rel)) != NULL;
 
 		List	   *insertModifications =
-			partitionedTable ? GetPartitionedDestReceiverModifications(innerDest) :
-			GetMultiDataFileDestReceiverModifications(innerDest);
+			partitionedTable ? GetPartitionedDestReceiverModifications(fmstate->insertDest) :
+			GetMultiDataFileDestReceiverModifications(fmstate->insertDest);
 
 		modifications = list_concat(modifications, insertModifications);
 	}
@@ -3416,20 +3446,9 @@ create_foreign_modify(Relation rel,
 												0);
 		}
 
-		/*
-		 * For Iceberg tables, wrap the insert destination with a validating
-		 * receiver that clamps or rejects out-of-range values in-place before
-		 * they reach the partition transform or the CSV writer.
-		 */
+		fmstate->tupleDesc = RelationGetDescr(rel);
 		fmstate->outOfRangePolicy =
 			GetIcebergOutOfRangePolicyForTable(relationId);
-
-		if (fmstate->outOfRangePolicy != ICEBERG_OOR_NONE)
-		{
-			fmstate->insertDest =
-				CreateIcebergValidatingDestReceiver(fmstate->insertDest,
-													fmstate->outOfRangePolicy);
-		}
 	}
 
 	if (operation == CMD_UPDATE || operation == CMD_DELETE)

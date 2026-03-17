@@ -37,7 +37,6 @@
 #include "access/tupdesc.h"
 #include "catalog/pg_type.h"
 #include "pg_lake/pgduck/iceberg_query_validation.h"
-#include "pgtime.h"
 #include "utils/builtins.h"
 
 
@@ -50,6 +49,9 @@
 #define ICEBERG_TIMESTAMPTZ_MAX_LITERAL		"TIMESTAMPTZ '9999-12-31 23:59:59.999999+00'"
 
 static bool TupleDescHasTemporalColumn(TupleDesc tupleDesc);
+static void GetTemporalLiterals(Oid typeOid,
+								const char **minLiteral, const char **maxLiteral,
+								const char **typeName, const char **errLabel);
 static void AppendClampExpression(StringInfo buf, const char *quotedName,
 								  Oid typeOid);
 static void AppendErrorExpression(StringInfo buf, const char *quotedName,
@@ -83,46 +85,55 @@ TupleDescHasTemporalColumn(TupleDesc tupleDesc)
 
 
 /*
+ * GetTemporalLiterals sets *minLiteral, *maxLiteral, *typeName, and
+ * *errLabel for the given temporal type.  For timestamptz the boundaries
+ * are in UTC (explicit +00) since Iceberg stores timestamptz as UTC
+ * microseconds.
+ */
+static void
+GetTemporalLiterals(Oid typeOid,
+					const char **minLiteral, const char **maxLiteral,
+					const char **typeName, const char **errLabel)
+{
+	switch (typeOid)
+	{
+		case DATEOID:
+			*minLiteral = ICEBERG_DATE_MIN_LITERAL;
+			*maxLiteral = ICEBERG_DATE_MAX_LITERAL;
+			*typeName = "DATE";
+			*errLabel = "date";
+			break;
+		case TIMESTAMPOID:
+			*minLiteral = ICEBERG_TIMESTAMP_MIN_LITERAL;
+			*maxLiteral = ICEBERG_TIMESTAMP_MAX_LITERAL;
+			*typeName = "TIMESTAMP";
+			*errLabel = "timestamp";
+			break;
+		case TIMESTAMPTZOID:
+			*minLiteral = ICEBERG_TIMESTAMPTZ_MIN_LITERAL;
+			*maxLiteral = ICEBERG_TIMESTAMPTZ_MAX_LITERAL;
+			*typeName = "TIMESTAMPTZ";
+			*errLabel = "timestamp";
+			break;
+		default:
+			elog(ERROR, "unexpected temporal type OID: %u", typeOid);
+	}
+}
+
+
+/*
  * AppendClampExpression appends a CASE WHEN expression that clamps
  * the named column to its temporal boundary.
- *
- * For timestamptz we also check the year in the PG session timezone,
- * because a value like '10000-01-01 00:00:00+03' converts to a UTC
- * value in year 9999 and would slip past a pure-UTC boundary check.
  */
 static void
 AppendClampExpression(StringInfo buf, const char *quotedName, Oid typeOid)
 {
-	if (typeOid == TIMESTAMPTZOID)
-	{
-		const char *quotedTzName =
-			quote_literal_cstr(pg_get_timezone_name(session_timezone));
+	const char *minLiteral;
+	const char *maxLiteral;
+	const char *typeName;
+	const char *errLabel;
 
-		appendStringInfo(buf,
-						 "CASE "
-						 "WHEN %s < %s THEN %s "
-						 "WHEN %s > %s THEN %s "
-						 "WHEN year(timezone(%s, %s)) > %d "
-						 "THEN timezone(%s, TIMESTAMP '9999-12-31 23:59:59.999999') "
-						 "WHEN year(timezone(%s, %s)) < %d "
-						 "THEN timezone(%s, TIMESTAMP '0001-01-01 00:00:00') "
-						 "ELSE %s END",
-						 quotedName, ICEBERG_TIMESTAMPTZ_MIN_LITERAL, ICEBERG_TIMESTAMPTZ_MIN_LITERAL,
-						 quotedName, ICEBERG_TIMESTAMPTZ_MAX_LITERAL, ICEBERG_TIMESTAMPTZ_MAX_LITERAL,
-						 quotedTzName, quotedName, TEMPORAL_MAX_YEAR,
-						 quotedTzName,
-						 quotedTzName, quotedName, TEMPORAL_TIMESTAMP_MIN_YEAR,
-						 quotedTzName,
-						 quotedName);
-		return;
-	}
-
-	Assert(typeOid == DATEOID || typeOid == TIMESTAMPOID);
-
-	const char *minLiteral = (typeOid == DATEOID) ?
-		ICEBERG_DATE_MIN_LITERAL : ICEBERG_TIMESTAMP_MIN_LITERAL;
-	const char *maxLiteral = (typeOid == DATEOID) ?
-		ICEBERG_DATE_MAX_LITERAL : ICEBERG_TIMESTAMP_MAX_LITERAL;
+	GetTemporalLiterals(typeOid, &minLiteral, &maxLiteral, &typeName, &errLabel);
 
 	appendStringInfo(buf,
 					 "CASE WHEN %s < %s THEN %s "
@@ -141,33 +152,12 @@ AppendClampExpression(StringInfo buf, const char *quotedName, Oid typeOid)
 static void
 AppendErrorExpression(StringInfo buf, const char *quotedName, Oid typeOid)
 {
-	if (typeOid == TIMESTAMPTZOID)
-	{
-		const char *quotedTzName =
-			quote_literal_cstr(pg_get_timezone_name(session_timezone));
+	const char *minLiteral;
+	const char *maxLiteral;
+	const char *typeName;
+	const char *errLabel;
 
-		appendStringInfo(buf,
-						 "CASE WHEN %s NOT BETWEEN %s AND %s "
-						 "THEN CAST(error(printf('timestamp out of range: %%s', %s::VARCHAR)) AS TIMESTAMPTZ) "
-						 "WHEN year(timezone(%s, %s)) NOT BETWEEN %d AND %d "
-						 "THEN CAST(error(printf('timestamp out of range: %%s', %s::VARCHAR)) AS TIMESTAMPTZ) "
-						 "ELSE %s END",
-						 quotedName, ICEBERG_TIMESTAMPTZ_MIN_LITERAL, ICEBERG_TIMESTAMPTZ_MAX_LITERAL,
-						 quotedName,
-						 quotedTzName, quotedName, TEMPORAL_TIMESTAMP_MIN_YEAR, TEMPORAL_MAX_YEAR,
-						 quotedName,
-						 quotedName);
-		return;
-	}
-
-	Assert(typeOid == DATEOID || typeOid == TIMESTAMPOID);
-
-	const char *minLiteral = (typeOid == DATEOID) ?
-		ICEBERG_DATE_MIN_LITERAL : ICEBERG_TIMESTAMP_MIN_LITERAL;
-	const char *maxLiteral = (typeOid == DATEOID) ?
-		ICEBERG_DATE_MAX_LITERAL : ICEBERG_TIMESTAMP_MAX_LITERAL;
-	const char *typeName = (typeOid == DATEOID) ? "DATE" : "TIMESTAMP";
-	const char *errLabel = (typeOid == DATEOID) ? "date" : "timestamp";
+	GetTemporalLiterals(typeOid, &minLiteral, &maxLiteral, &typeName, &errLabel);
 
 	appendStringInfo(buf,
 					 "CASE WHEN %s NOT BETWEEN %s AND %s "
@@ -194,7 +184,7 @@ AppendErrorExpression(StringInfo buf, const char *quotedName, Oid typeOid)
  * Example with clamp policy (table: id int, created_at date):
  *
  *   SELECT id,
- *          CASE WHEN created_at < DATE '0001-01-01' THEN DATE '0001-01-01'
+ *          CASE WHEN created_at < DATE '-4712-01-01' THEN DATE '-4712-01-01'
  *               WHEN created_at > DATE '9999-12-31' THEN DATE '9999-12-31'
  *               ELSE created_at END AS created_at
  *   FROM (<original_query>) AS __iceberg_oor
@@ -202,7 +192,7 @@ AppendErrorExpression(StringInfo buf, const char *quotedName, Oid typeOid)
  * Example with error policy (same table):
  *
  *   SELECT id,
- *          CASE WHEN created_at NOT BETWEEN DATE '0001-01-01' AND DATE '9999-12-31'
+ *          CASE WHEN created_at NOT BETWEEN DATE '-4712-01-01' AND DATE '9999-12-31'
  *               THEN CAST(error(printf('date out of range: %s', created_at::VARCHAR)) AS DATE)
  *               ELSE created_at END AS created_at
  *   FROM (<original_query>) AS __iceberg_oor

@@ -412,14 +412,37 @@ TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod, CopyDataFormat sourc
 	}
 
 	/*
-	 * Bounded numeric maps to DuckDB DECIMAL which cannot represent NaN.
-	 * PostgreSQL allows NaN in numeric columns, so we must fall back to the
-	 * CSV path where ErrorIfSpecialNumeric in the CSV writer rejects NaN and
-	 * unbounded numerics that exceed the max allowed digits before the data
-	 * reaches DuckDB.
+	 * Numeric type handling varies by precision:
+	 *
+	 * - Bounded (precision <= 38): maps to DuckDB DECIMAL, which cannot
+	 * represent NaN. PostgreSQL allows NaN in any numeric column, so we must
+	 * block pushdown and let the non-pushdown path clamp or reject NaN via
+	 * IcebergErrorOrClampSlotInPlace / IcebergErrorOrClampDatum.
+	 *
+	 * - Unbounded or precision > 38: on Iceberg tables these are converted to
+	 * float8 at CREATE TABLE time by
+	 * MaybeConvertUnsupportedNumericColumnsToDouble (or rejected if that GUC
+	 * is off), so they never appear as NUMERICOID at pushdown time. On
+	 * non-Iceberg tables, they remain NUMERICOID and are blocked here for the
+	 * same NaN reason.
 	 */
 	if (typeId == NUMERICOID)
 	{
+#ifdef USE_ASSERT_CHECKING
+		if (sourceFormat == DATA_FORMAT_ICEBERG)
+		{
+			Assert(!IsUnboundedNumeric(typeId, typmod));
+
+			int			precision = -1;
+			int			scale = -1;
+
+			GetDuckdbAdjustedPrecisionAndScaleFromNumericTypeMod(typmod,
+																 &precision,
+																 &scale);
+			Assert(precision <= DUCKDB_MAX_NUMERIC_PRECISION);
+		}
+#endif
+
 		ereport(DEBUG4,
 				(errmsg("Numeric type is not pushdownable")));
 

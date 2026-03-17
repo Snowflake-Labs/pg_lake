@@ -20,7 +20,6 @@
 #include "nodes/pg_list.h"
 #include "utils/relcache.h"
 #include "pg_lake/data_file/data_files.h"
-#include "pg_lake/pgduck/iceberg_validation.h"
 
 /* by default, we switch to copy-on-write if 20% or more of a file is deleted */
 #define DEFAULT_COPY_ON_WRITE_THRESHOLD (20)

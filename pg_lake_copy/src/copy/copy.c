@@ -48,7 +48,6 @@
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/parsetree/columns.h"
-#include "pg_lake/parsetree/options.h"
 #include "pg_lake/permissions/roles.h"
 #include "pg_lake/planner/insert_select.h"
 #include "pg_lake/pgduck/cache_control.h"
@@ -888,8 +887,7 @@ ProcessPgLakeCopyTo(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 	char	   *tempCSVPath = GenerateTempFileName(TEMP_FILE_PATTERN, ensureCleanup);
 
 	/* execute query and write results to CSV */
-	DestReceiver *dest = CreateCSVDestReceiver(tempCSVPath, readOptions,
-											   destinationFormat);
+	DestReceiver *dest = CreateCSVDestReceiver(tempCSVPath, readOptions, destinationFormat);
 
 	*rowsProcessed = ExecuteQueryToDestReceiver(query, queryString, NULL, dest);
 

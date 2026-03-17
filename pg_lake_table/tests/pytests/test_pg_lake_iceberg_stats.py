@@ -723,6 +723,45 @@ def test_clamped_nan_numeric_column_stats(
     pg_conn.rollback()
 
 
+@pytest.mark.parametrize(
+    "col_type",
+    ["numeric", "numeric(50,2)"],
+    ids=["unbounded", "precision_gt_38"],
+)
+def test_nan_double_converted_numeric_column_stats(
+    pg_conn,
+    extension,
+    app_user,
+    s3,
+    with_default_location,
+    stats_catalog_permission,
+    col_type,
+):
+    """Unbounded numeric and numeric with precision > 38 are stored as double.
+    NaN is not clamped, but Parquet excludes NaN from min/max stats, so
+    an all-NaN column produces no stats row."""
+    table_name = "test_nan_double_numeric_stats"
+    run_command(
+        f"CREATE TABLE {table_name} (col {col_type}) USING iceberg;",
+        pg_conn,
+    )
+
+    run_command(
+        f"INSERT INTO {table_name} VALUES ('NaN');",
+        pg_conn,
+    )
+
+    result = run_query(
+        f"SELECT lower_bound, upper_bound FROM lake_table.data_file_column_stats "
+        f"WHERE table_name = '{table_name}'::regclass ORDER BY field_id",
+        pg_conn,
+    )
+
+    assert len(result) == 0
+
+    pg_conn.rollback()
+
+
 @pytest.fixture(scope="module")
 def stats_catalog_permission(app_user, superuser_conn, extension, s3):
     run_command(
