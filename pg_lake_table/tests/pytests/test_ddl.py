@@ -62,6 +62,10 @@ def alter_stmts(pg_conn):
             "ALTER TABLE test_ddl.fdw ADD COLUMN new_col INT DEFAULT 10;",
             pg_lake_disallow=disallowed_only_for_writable,
         ),
+        AlterStmt(
+            "ALTER TABLE test_ddl.fdw ALTER COLUMN e TYPE bigint;",
+            pg_lake_disallow=disallowed_only_for_writable,
+        ),
         # pg_lake disallows for iceberg and writable tables
         AlterStmt(
             "ALTER TABLE test_ddl.fdw ALTER COLUMN a TYPE varchar(255);",

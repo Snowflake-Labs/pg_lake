@@ -1,5 +1,6 @@
 import pytest
 from utils_pytest import *
+from helpers.spark import *
 
 import os
 import glob
@@ -1672,6 +1673,958 @@ def test_use_same_schema_when_needed(pg_conn, s3, with_default_location):
     assert schema_id_8 == 0
 
     run_command("DROP SCHEMA test_use_same_schema_when_needed CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+@pytest.mark.parametrize(
+    "test_id, col_def, promoted_type, expected_pg_type, initial_values, post_values, "
+    "select_cols, order_col, expected_results, expected_iceberg_type, str_compare_a",
+    [
+        pytest.param(
+            "int2_to_int4",
+            "a int2",
+            "int4",
+            "integer",
+            "(1)",
+            "(2)",
+            "a",
+            "a",
+            [[1], [2]],
+            None,
+            False,
+            id="int2-to-int4",
+        ),
+        pytest.param(
+            "int_to_bigint",
+            "a int, b int",
+            "bigint",
+            "bigint",
+            "(1, 2)",
+            f"({2**40}, 3)",
+            "a, b",
+            "b",
+            [[1, 2], [2**40, 3]],
+            "long",
+            False,
+            id="int-to-bigint",
+        ),
+        pytest.param(
+            "sm_to_bigint",
+            "a smallint, b int",
+            "bigint",
+            "bigint",
+            "(1, 2)",
+            f"({2**40}, 3)",
+            "a, b",
+            "b",
+            [[1, 2], [2**40, 3]],
+            None,
+            False,
+            id="smallint-to-bigint",
+        ),
+        pytest.param(
+            "float_to_double",
+            "a real, b int",
+            "double precision",
+            "double precision",
+            "(1.5, 1)",
+            "(1.23456789012345, 2)",
+            "a, b",
+            "b",
+            [[1.5, 1], [1.23456789012345, 2]],
+            "double",
+            False,
+            id="float-to-double",
+        ),
+        pytest.param(
+            "decimal_widen",
+            "a numeric(10,2), b int",
+            "numeric(20,2)",
+            None,
+            "(12345.67, 1)",
+            "(123456789012345.67, 2)",
+            "a, b",
+            "b",
+            [["12345.67", 1], ["123456789012345.67", 2]],
+            "decimal(20,2)",
+            True,
+            id="decimal-widen-precision",
+        ),
+    ],
+)
+def test_alter_column_type_promotion(
+    pg_conn,
+    s3,
+    with_default_location,
+    test_id,
+    col_def,
+    promoted_type,
+    expected_pg_type,
+    initial_values,
+    post_values,
+    select_cols,
+    order_col,
+    expected_results,
+    expected_iceberg_type,
+    str_compare_a,
+):
+    """Test allowed Iceberg type promotions per the Iceberg spec."""
+    schema = f"test_alter_type_{test_id}"
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"CREATE TABLE {schema}.tbl ({col_def}) USING iceberg;", pg_conn)
+    run_command(f"INSERT INTO {schema}.tbl VALUES {initial_values};", pg_conn)
+    pg_conn.commit()
+
+    run_command(
+        f"ALTER TABLE {schema}.tbl ALTER COLUMN a TYPE {promoted_type};",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    if expected_pg_type is not None:
+        result = run_query(
+            f"SELECT atttypid::regtype FROM pg_attribute "
+            f"WHERE attrelid = '{schema}.tbl'::regclass AND attname = 'a'",
+            pg_conn,
+        )
+        assert result == [[expected_pg_type]]
+
+    run_command(f"INSERT INTO {schema}.tbl VALUES {post_values};", pg_conn)
+    pg_conn.commit()
+
+    results = run_query(
+        f"SELECT {select_cols} FROM {schema}.tbl ORDER BY {order_col} ASC",
+        pg_conn,
+    )
+    if str_compare_a:
+        for row in results:
+            row[0] = str(row[0])
+    assert results == expected_results
+
+    if expected_iceberg_type is not None:
+        metadata_location = run_query(
+            f"SELECT metadata_location FROM iceberg_tables "
+            f"WHERE table_name = 'tbl' AND table_namespace = '{schema}'",
+            pg_conn,
+        )[0][0]
+        returned_json = normalize_json(read_s3_operations(s3, metadata_location))
+        last_schema = returned_json["schemas"][-1]
+        a_field = [f for f in last_schema["fields"] if f["name"] == "a"][0]
+        assert a_field["type"] == expected_iceberg_type
+
+    run_command(f"DROP SCHEMA {schema} CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_alter_column_type_disallowed_promotions(pg_conn, s3, with_default_location):
+    """Test that disallowed type promotions are rejected for Iceberg tables"""
+    run_command("CREATE SCHEMA test_alter_type_dis;", pg_conn)
+    run_command(
+        """CREATE TABLE test_alter_type_dis.tbl (
+            a int,
+            b bigint,
+            c double precision,
+            d numeric(10,2),
+            e text,
+            f real
+        ) USING iceberg;""",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    disallowed_cases = [
+        # int -> varchar (not an allowed promotion)
+        ("a", "varchar(255)", "int to varchar"),
+        # bigint -> int (narrowing not allowed)
+        ("b", "int", "bigint to int"),
+        # double -> float (narrowing not allowed)
+        ("c", "real", "double to float"),
+        # decimal: changing scale not allowed
+        ("d", "numeric(10,3)", "decimal scale change"),
+        # decimal: narrowing precision not allowed
+        ("d", "numeric(8,2)", "decimal precision narrowing"),
+        # text -> int (not an allowed promotion)
+        ("e", "int", "text to int"),
+        # int -> real (not an allowed promotion in Iceberg spec)
+        ("a", "real", "int to real"),
+        # float -> int (not an allowed promotion)
+        ("f", "int", "float to int"),
+    ]
+
+    for col, new_type, description in disallowed_cases:
+        error = run_command(
+            f"ALTER TABLE test_alter_type_dis.tbl ALTER COLUMN {col} TYPE {new_type};",
+            pg_conn,
+            raise_error=False,
+        )
+        assert "command not supported for pg_lake_iceberg tables" in str(
+            error
+        ), f"Expected error for {description}, got: {error}"
+        assert "Allowed type promotions for Iceberg tables are" in str(
+            error
+        ), f"Expected detail about allowed promotions for {description}, got: {error}"
+        pg_conn.rollback()
+
+    run_command("DROP SCHEMA test_alter_type_dis CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_alter_column_type_using_clause_rejected(pg_conn, s3, with_default_location):
+    """Test that USING clause is rejected for Iceberg type promotions.
+
+    Iceberg schema evolution is metadata-only; data files are never rewritten,
+    so arbitrary USING expressions are not supported.
+    """
+    run_command("CREATE SCHEMA test_alter_using;", pg_conn)
+    run_command(
+        "CREATE TABLE test_alter_using.tbl (a int, b real) USING iceberg;",
+        pg_conn,
+    )
+    run_command("INSERT INTO test_alter_using.tbl VALUES (1, 1.5);", pg_conn)
+    pg_conn.commit()
+
+    # USING with an otherwise-allowed promotion (int -> bigint)
+    error = run_command(
+        "ALTER TABLE test_alter_using.tbl ALTER COLUMN a TYPE bigint USING a::bigint;",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "command not supported for pg_lake_iceberg tables" in str(error)
+    assert "USING requires rewriting data files" in str(error)
+    pg_conn.rollback()
+
+    # USING with an expression on an allowed promotion (float -> double)
+    error = run_command(
+        "ALTER TABLE test_alter_using.tbl ALTER COLUMN b TYPE double precision USING b * 2;",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "command not supported for pg_lake_iceberg tables" in str(error)
+    assert "USING requires rewriting data files" in str(error)
+    pg_conn.rollback()
+
+    # Verify the table is intact (nothing changed)
+    result = run_query("SELECT a, b FROM test_alter_using.tbl;", pg_conn)
+    assert result == [[1, 1.5]]
+
+    run_command("DROP SCHEMA test_alter_using CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_alter_column_type_same_type_noop(pg_conn, s3, with_default_location):
+    """Test that changing to the same type is allowed (no-op)"""
+    run_command("CREATE SCHEMA test_alter_type_noop;", pg_conn)
+    run_command(
+        "CREATE TABLE test_alter_type_noop.tbl (a int, b numeric(10,2)) USING iceberg;",
+        pg_conn,
+    )
+    run_command("INSERT INTO test_alter_type_noop.tbl VALUES (1, 2.50);", pg_conn)
+    pg_conn.commit()
+
+    # same type should be allowed
+    run_command(
+        "ALTER TABLE test_alter_type_noop.tbl ALTER COLUMN a TYPE int;", pg_conn
+    )
+    run_command(
+        "ALTER TABLE test_alter_type_noop.tbl ALTER COLUMN b TYPE numeric(10,2);",
+        pg_conn,
+    )
+
+    results = run_query("SELECT a, b FROM test_alter_type_noop.tbl", pg_conn)
+    assert results == [[1, Decimal("2.50")]]
+
+    run_command("DROP SCHEMA test_alter_type_noop CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_alter_column_type_on_empty_table(pg_conn, s3, with_default_location):
+    """Test type promotion on a table with no data"""
+    run_command("CREATE SCHEMA test_alter_type_empty;", pg_conn)
+    run_command(
+        "CREATE TABLE test_alter_type_empty.tbl (a int, b real) USING iceberg;",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        "ALTER TABLE test_alter_type_empty.tbl ALTER COLUMN a TYPE bigint;", pg_conn
+    )
+    run_command(
+        "ALTER TABLE test_alter_type_empty.tbl ALTER COLUMN b TYPE double precision;",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # insert data with promoted types
+    run_command(
+        f"INSERT INTO test_alter_type_empty.tbl VALUES ({2**40}, 1.23456789012345);",
+        pg_conn,
+    )
+
+    results = run_query("SELECT a FROM test_alter_type_empty.tbl", pg_conn)
+    assert results == [[2**40]]
+
+    run_command("DROP SCHEMA test_alter_type_empty CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_alter_column_type_combined_with_other_ddl(pg_conn, s3, with_default_location):
+    """Test type promotion combined with other DDL operations in the same ALTER TABLE"""
+    run_command("CREATE SCHEMA test_alter_type_combo;", pg_conn)
+    run_command(
+        "CREATE TABLE test_alter_type_combo.tbl (a int, b int, c int) USING iceberg;",
+        pg_conn,
+    )
+    run_command("INSERT INTO test_alter_type_combo.tbl VALUES (1, 2, 3);", pg_conn)
+    pg_conn.commit()
+
+    # combine type change with add and drop column
+    run_command(
+        "ALTER TABLE test_alter_type_combo.tbl ALTER COLUMN a TYPE bigint, ADD COLUMN d int, DROP COLUMN c;",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        "SELECT atttypid::regtype FROM pg_attribute WHERE attrelid = 'test_alter_type_combo.tbl'::regclass AND attname = 'a'",
+        pg_conn,
+    )
+    assert result == [["bigint"]]
+
+    run_command(
+        f"INSERT INTO test_alter_type_combo.tbl VALUES ({2**40}, 20, 30);", pg_conn
+    )
+
+    results = run_query(
+        "SELECT a, b, d FROM test_alter_type_combo.tbl ORDER BY b ASC", pg_conn
+    )
+    assert results == [[1, 2, None], [2**40, 20, 30]]
+
+    run_command("DROP SCHEMA test_alter_type_combo CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_alter_column_type_metadata_schema_evolution(
+    pg_conn, s3, with_default_location
+):
+    """Test that type promotion creates a new schema in Iceberg metadata"""
+    run_command("CREATE SCHEMA test_alter_type_meta;", pg_conn)
+    run_command(
+        "CREATE TABLE test_alter_type_meta.tbl (a int, b int) USING iceberg;", pg_conn
+    )
+    pg_conn.commit()
+
+    metadata_location = run_query(
+        "SELECT metadata_location FROM iceberg_tables WHERE table_name = 'tbl' AND table_namespace = 'test_alter_type_meta'",
+        pg_conn,
+    )[0][0]
+    returned_json = normalize_json(read_s3_operations(s3, metadata_location))
+    assert returned_json["current-schema-id"] == 0
+    initial_schema = returned_json["schemas"][0]
+    assert initial_schema == {
+        "type": "struct",
+        "schema-id": 0,
+        "fields": [
+            {"id": 1, "name": "a", "type": "int", "required": False},
+            {"id": 2, "name": "b", "type": "int", "required": False},
+        ],
+    }
+
+    # promote a: int -> long
+    run_command(
+        "ALTER TABLE test_alter_type_meta.tbl ALTER COLUMN a TYPE bigint;", pg_conn
+    )
+    pg_conn.commit()
+
+    metadata_location = run_query(
+        "SELECT metadata_location FROM iceberg_tables WHERE table_name = 'tbl' AND table_namespace = 'test_alter_type_meta'",
+        pg_conn,
+    )[0][0]
+    returned_json = normalize_json(read_s3_operations(s3, metadata_location))
+    assert returned_json["current-schema-id"] == 1
+    new_schema = returned_json["schemas"][-1]
+    assert new_schema == {
+        "type": "struct",
+        "schema-id": 1,
+        "fields": [
+            {"id": 1, "name": "a", "type": "long", "required": False},
+            {"id": 2, "name": "b", "type": "int", "required": False},
+        ],
+    }
+
+    # promote b: int -> long
+    run_command(
+        "ALTER TABLE test_alter_type_meta.tbl ALTER COLUMN b TYPE bigint;", pg_conn
+    )
+    pg_conn.commit()
+
+    metadata_location = run_query(
+        "SELECT metadata_location FROM iceberg_tables WHERE table_name = 'tbl' AND table_namespace = 'test_alter_type_meta'",
+        pg_conn,
+    )[0][0]
+    returned_json = normalize_json(read_s3_operations(s3, metadata_location))
+    assert returned_json["current-schema-id"] == 2
+    new_schema = returned_json["schemas"][-1]
+    assert new_schema == {
+        "type": "struct",
+        "schema-id": 2,
+        "fields": [
+            {"id": 1, "name": "a", "type": "long", "required": False},
+            {"id": 2, "name": "b", "type": "long", "required": False},
+        ],
+    }
+
+    run_command("DROP SCHEMA test_alter_type_meta CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_alter_column_type_int2_to_int4_no_metadata_change(
+    pg_conn, s3, with_default_location
+):
+    """int2 -> int4 both map to Iceberg 'int', so no new metadata.json should
+    be generated. The PG catalog type should change, data should remain readable,
+    and the Iceberg schema should stay identical."""
+    schema = "test_int2_int4_noop"
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"CREATE TABLE {schema}.tbl (a int2, b int) USING iceberg;", pg_conn)
+    run_command(f"INSERT INTO {schema}.tbl VALUES (1, 10);", pg_conn)
+    pg_conn.commit()
+
+    # capture metadata location and schema before ALTER
+    metadata_before = run_query(
+        f"SELECT metadata_location FROM iceberg_tables "
+        f"WHERE table_name = 'tbl' AND table_namespace = '{schema}'",
+        pg_conn,
+    )[0][0]
+    json_before = normalize_json(read_s3_operations(s3, metadata_before))
+    schema_id_before = json_before["current-schema-id"]
+
+    # promote int2 -> int4 (no-op for Iceberg)
+    run_command(f"ALTER TABLE {schema}.tbl ALTER COLUMN a TYPE int4;", pg_conn)
+    pg_conn.commit()
+
+    # PG catalog should reflect the new PG type
+    result = run_query(
+        f"SELECT atttypid::regtype FROM pg_attribute "
+        f"WHERE attrelid = '{schema}.tbl'::regclass AND attname = 'a'",
+        pg_conn,
+    )
+    assert result == [["integer"]]
+
+    # metadata_location must not have changed — no new metadata.json written
+    metadata_after = run_query(
+        f"SELECT metadata_location FROM iceberg_tables "
+        f"WHERE table_name = 'tbl' AND table_namespace = '{schema}'",
+        pg_conn,
+    )[0][0]
+    assert metadata_after == metadata_before, (
+        f"metadata.json should not be regenerated for int2->int4, "
+        f"but location changed from {metadata_before} to {metadata_after}"
+    )
+
+    # Iceberg schema-id must be unchanged
+    json_after = normalize_json(read_s3_operations(s3, metadata_after))
+    assert json_after["current-schema-id"] == schema_id_before
+
+    # the Iceberg schema still says "int" for column a
+    last_schema = json_after["schemas"][-1]
+    a_field = [f for f in last_schema["fields"] if f["name"] == "a"][0]
+    assert a_field["type"] == "int"
+
+    # data is still readable after the promotion
+    run_command(f"INSERT INTO {schema}.tbl VALUES (2, 20);", pg_conn)
+    pg_conn.commit()
+
+    results = run_query(f"SELECT a, b FROM {schema}.tbl ORDER BY b ASC", pg_conn)
+    assert results == [[1, 10], [2, 20]]
+
+    run_command(f"DROP SCHEMA {schema} CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_alter_column_type_partitioned_table(pg_conn, s3, with_default_location):
+    """Test type promotion on a partitioned iceberg table does not break
+    partitioning, partition pruning, or data file pruning."""
+    schema = "test_alter_type_part"
+    explain_prefix = "EXPLAIN (analyze, verbose, format json) "
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+
+    # Create a partitioned table: partition by identity on column b
+    # Use separate inserts so each value of (a, b) lands in its own data file.
+    run_command(
+        f"""
+        CREATE TABLE {schema}.tbl (a int, b int)
+        USING iceberg WITH (partition_by = 'b');
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # Insert 4 rows into separate data files across 2 partitions (b=10, b=20)
+    run_command(f"INSERT INTO {schema}.tbl VALUES (1, 10);", pg_conn)
+    run_command(f"INSERT INTO {schema}.tbl VALUES (2, 10);", pg_conn)
+    run_command(f"INSERT INTO {schema}.tbl VALUES (3, 20);", pg_conn)
+    run_command(f"INSERT INTO {schema}.tbl VALUES (4, 20);", pg_conn)
+    pg_conn.commit()
+
+    # ── Baseline: verify pruning works BEFORE type promotion ──
+
+    # Partition pruning: b=10 should scan 2 data files (skip the b=20 partition)
+    results = run_query(
+        f"{explain_prefix} SELECT * FROM {schema}.tbl WHERE b = 10", pg_conn
+    )
+    assert fetch_data_files_used(results) == "2"
+
+    # Data file pruning on non-partition column: a=1 should scan 1 file
+    results = run_query(
+        f"{explain_prefix} SELECT * FROM {schema}.tbl WHERE a = 1", pg_conn
+    )
+    assert fetch_data_files_used(results) == "1"
+
+    # Combined: b=10 AND a=1 → 1 file
+    results = run_query(
+        f"{explain_prefix} SELECT * FROM {schema}.tbl WHERE b = 10 AND a = 1",
+        pg_conn,
+    )
+    assert fetch_data_files_used(results) == "1"
+
+    # ── Promote non-partition column a: int → bigint ──
+    run_command(f"ALTER TABLE {schema}.tbl ALTER COLUMN a TYPE bigint;", pg_conn)
+    pg_conn.commit()
+
+    # Verify column type changed
+    result = run_query(
+        f"SELECT atttypid::regtype FROM pg_attribute "
+        f"WHERE attrelid = '{schema}.tbl'::regclass AND attname = 'a'",
+        pg_conn,
+    )
+    assert result == [["bigint"]]
+
+    # Insert bigint-range data into each partition
+    run_command(f"INSERT INTO {schema}.tbl VALUES ({2**40}, 10);", pg_conn)
+    run_command(f"INSERT INTO {schema}.tbl VALUES ({2**41}, 20);", pg_conn)
+    pg_conn.commit()
+
+    # Verify all data readable
+    results = run_query(f"SELECT a, b FROM {schema}.tbl ORDER BY a ASC", pg_conn)
+    assert results == [
+        [1, 10],
+        [2, 10],
+        [3, 20],
+        [4, 20],
+        [2**40, 10],
+        [2**41, 20],
+    ]
+
+    # ── Verify pruning still works AFTER promoting non-partition column ──
+
+    # Partition pruning: b=10 → 3 files (2 old + 1 new in b=10 partition)
+    results = run_query(
+        f"{explain_prefix} SELECT * FROM {schema}.tbl WHERE b = 10", pg_conn
+    )
+    assert fetch_data_files_used(results) == "3"
+
+    # Data file pruning: a=1 → still 1 file (old pre-promotion data file)
+    results = run_query(
+        f"{explain_prefix} SELECT * FROM {schema}.tbl WHERE a = 1", pg_conn
+    )
+    assert fetch_data_files_used(results) == "1"
+
+    # Data file pruning: a={2**40} → 1 file (the new bigint data file)
+    results = run_query(
+        f"{explain_prefix} SELECT * FROM {schema}.tbl WHERE a = {2**40}",
+        pg_conn,
+    )
+    assert fetch_data_files_used(results) == "1"
+
+    # ── Verify Iceberg metadata reflects the type change ──
+    metadata_location = run_query(
+        f"SELECT metadata_location FROM iceberg_tables "
+        f"WHERE table_name = 'tbl' AND table_namespace = '{schema}'",
+        pg_conn,
+    )[0][0]
+    returned_json = normalize_json(read_s3_operations(s3, metadata_location))
+    last_schema = returned_json["schemas"][-1]
+    a_field = [f for f in last_schema["fields"] if f["name"] == "a"][0]
+    assert a_field["type"] == "long"
+
+    # Partition spec still intact
+    partition_specs = returned_json["partition-specs"]
+    last_spec = partition_specs[-1]
+    assert len(last_spec["fields"]) == 1  # identity(b)
+
+    # ── Promote the partition column b: int → bigint ──
+    run_command(f"ALTER TABLE {schema}.tbl ALTER COLUMN b TYPE bigint;", pg_conn)
+    pg_conn.commit()
+
+    # Verify column type changed
+    result = run_query(
+        f"SELECT atttypid::regtype FROM pg_attribute "
+        f"WHERE attrelid = '{schema}.tbl'::regclass AND attname = 'b'",
+        pg_conn,
+    )
+    assert result == [["bigint"]]
+
+    # Insert data into a new partition value after promoting partition column
+    run_command(f"INSERT INTO {schema}.tbl VALUES (100, 30);", pg_conn)
+    pg_conn.commit()
+
+    # Verify all data readable
+    results = run_query(f"SELECT a, b FROM {schema}.tbl ORDER BY a ASC", pg_conn)
+    assert results == [
+        [1, 10],
+        [2, 10],
+        [3, 20],
+        [4, 20],
+        [100, 30],
+        [2**40, 10],
+        [2**41, 20],
+    ]
+
+    # ── Verify pruning still works AFTER promoting partition column ──
+
+    # Partition pruning: b=10 → 3 files (old b=10 partition)
+    results = run_query(
+        f"{explain_prefix} SELECT * FROM {schema}.tbl WHERE b = 10", pg_conn
+    )
+    assert fetch_data_files_used(results) == "3"
+
+    # Partition pruning: b=30 → 1 file (new partition after promotion)
+    results = run_query(
+        f"{explain_prefix} SELECT * FROM {schema}.tbl WHERE b = 30", pg_conn
+    )
+    assert fetch_data_files_used(results) == "1"
+
+    # Data file pruning: a=3 → 1 file
+    results = run_query(
+        f"{explain_prefix} SELECT * FROM {schema}.tbl WHERE a = 3", pg_conn
+    )
+    assert fetch_data_files_used(results) == "1"
+
+    # Verify schema shows both promotions
+    metadata_location = run_query(
+        f"SELECT metadata_location FROM iceberg_tables "
+        f"WHERE table_name = 'tbl' AND table_namespace = '{schema}'",
+        pg_conn,
+    )[0][0]
+    returned_json = normalize_json(read_s3_operations(s3, metadata_location))
+    last_schema = returned_json["schemas"][-1]
+    a_field = [f for f in last_schema["fields"] if f["name"] == "a"][0]
+    b_field = [f for f in last_schema["fields"] if f["name"] == "b"][0]
+    assert a_field["type"] == "long"
+    assert b_field["type"] == "long"
+
+    run_command(f"DROP SCHEMA {schema} CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_alter_column_type_spark_comparison(
+    installcheck, spark_session, pg_conn, s3, with_default_location
+):
+    """Create the same table in Spark and pg_lake, perform identical type promotions,
+    verify both produce the same results, compare metadata schemas, and confirm
+    Spark can read pg_lake's metadata.json after type promotion."""
+    if installcheck:
+        return
+
+    pg_schema = "test_type_promo_pg"
+    spark_ns = "public"
+
+    run_command(f"CREATE SCHEMA {pg_schema};", pg_conn)
+
+    # ── 1. int → bigint ──
+
+    # Spark side
+    spark_session.sql(
+        f"CREATE TABLE {spark_ns}.spark_int_promo (a int, b int) USING iceberg"
+    )
+    spark_session.sql(f"INSERT INTO {spark_ns}.spark_int_promo VALUES (1, 10), (2, 20)")
+    spark_session.sql(
+        f"ALTER TABLE {spark_ns}.spark_int_promo ALTER COLUMN a TYPE bigint"
+    )
+    spark_session.sql(f"INSERT INTO {spark_ns}.spark_int_promo VALUES ({2**40}, 30)")
+
+    # pg_lake side — same operations
+    run_command(
+        f"CREATE TABLE {pg_schema}.int_tbl (a int, b int) USING iceberg;", pg_conn
+    )
+    run_command(f"INSERT INTO {pg_schema}.int_tbl VALUES (1, 10), (2, 20);", pg_conn)
+    pg_conn.commit()
+    run_command(f"ALTER TABLE {pg_schema}.int_tbl ALTER COLUMN a TYPE bigint;", pg_conn)
+    pg_conn.commit()
+    run_command(f"INSERT INTO {pg_schema}.int_tbl VALUES ({2**40}, 30);", pg_conn)
+    pg_conn.commit()
+
+    # Compare: query both natively
+    spark_query = f"SELECT a, b FROM {spark_ns}.spark_int_promo ORDER BY b ASC"
+    pg_query = f"SELECT a, b FROM {pg_schema}.int_tbl ORDER BY b ASC"
+
+    pg_lake_result = assert_query_result_on_spark_and_pg(
+        installcheck, spark_session, pg_conn, spark_query, pg_query
+    )
+
+    assert len(pg_lake_result) == 3
+    assert pg_lake_result == [[1, 10], [2, 20], [2**40, 30]]
+
+    # Compare full schemas JSON
+    spark_metadata_loc = (
+        spark_session.sql(
+            f"SELECT file FROM {spark_ns}.spark_int_promo.metadata_log_entries ORDER BY timestamp DESC"
+        )
+        .collect()[0]
+        .file
+    )
+    spark_json = normalize_json(read_s3_operations(s3, spark_metadata_loc))
+
+    pg_metadata_loc = run_query(
+        f"SELECT metadata_location FROM iceberg_tables "
+        f"WHERE table_name = 'int_tbl' AND table_namespace = '{pg_schema}'",
+        pg_conn,
+    )[0][0]
+    pg_json = normalize_json(read_s3_operations(s3, pg_metadata_loc))
+
+    assert_iceberg_schemas_equal(spark_json, pg_json, "int→bigint")
+
+    # Verify Spark can read pg_lake's metadata.json
+    # Disable vectorized reading: Spark 3.5 / Iceberg 1.4.3 vectorized reader
+    # crashes with ClassCastException when an old data file's Parquet physical
+    # type (int32) doesn't match the current schema type (int64) after promotion.
+    spark_session.conf.set("spark.sql.iceberg.vectorization.enabled", "false")
+    spark_register_table(
+        installcheck, spark_session, "int_tbl", pg_schema, pg_metadata_loc
+    )
+    spark_cross_query = f"SELECT a, b FROM {pg_schema}.int_tbl ORDER BY b ASC"
+    spark_cross = spark_session.sql(spark_cross_query).collect()
+    assert len(spark_cross) == 3
+    assert [spark_cross[0].a, spark_cross[0].b] == [1, 10]
+    assert [spark_cross[1].a, spark_cross[1].b] == [2, 20]
+    assert [spark_cross[2].a, spark_cross[2].b] == [2**40, 30]
+    spark_unregister_table(installcheck, spark_session, "int_tbl", pg_schema)
+    spark_session.conf.set("spark.sql.iceberg.vectorization.enabled", "true")
+
+    spark_session.sql(f"DROP TABLE {spark_ns}.spark_int_promo")
+
+    # ── 2. float → double ──
+
+    # Spark side
+    spark_session.sql(
+        f"CREATE TABLE {spark_ns}.spark_float_promo (a float, b int) USING iceberg"
+    )
+    spark_session.sql(f"INSERT INTO {spark_ns}.spark_float_promo VALUES (1.5, 1)")
+    spark_session.sql(
+        f"ALTER TABLE {spark_ns}.spark_float_promo ALTER COLUMN a TYPE double"
+    )
+    spark_session.sql(
+        f"INSERT INTO {spark_ns}.spark_float_promo VALUES (1.23456789012345, 2)"
+    )
+
+    # pg_lake side
+    run_command(
+        f"CREATE TABLE {pg_schema}.float_tbl (a real, b int) USING iceberg;", pg_conn
+    )
+    run_command(f"INSERT INTO {pg_schema}.float_tbl VALUES (1.5, 1);", pg_conn)
+    pg_conn.commit()
+    run_command(
+        f"ALTER TABLE {pg_schema}.float_tbl ALTER COLUMN a TYPE double precision;",
+        pg_conn,
+    )
+    pg_conn.commit()
+    run_command(
+        f"INSERT INTO {pg_schema}.float_tbl VALUES (1.23456789012345, 2);", pg_conn
+    )
+    pg_conn.commit()
+
+    spark_query = f"SELECT a, b FROM {spark_ns}.spark_float_promo ORDER BY b ASC"
+    pg_query = f"SELECT a, b FROM {pg_schema}.float_tbl ORDER BY b ASC"
+
+    pg_lake_result = assert_query_result_on_spark_and_pg(
+        installcheck, spark_session, pg_conn, spark_query, pg_query
+    )
+
+    assert len(pg_lake_result) == 2
+
+    # Compare full schemas JSON
+    spark_metadata_loc = (
+        spark_session.sql(
+            f"SELECT file FROM {spark_ns}.spark_float_promo.metadata_log_entries ORDER BY timestamp DESC"
+        )
+        .collect()[0]
+        .file
+    )
+    spark_json = normalize_json(read_s3_operations(s3, spark_metadata_loc))
+
+    pg_metadata_loc = run_query(
+        f"SELECT metadata_location FROM iceberg_tables "
+        f"WHERE table_name = 'float_tbl' AND table_namespace = '{pg_schema}'",
+        pg_conn,
+    )[0][0]
+    pg_json = normalize_json(read_s3_operations(s3, pg_metadata_loc))
+
+    assert_iceberg_schemas_equal(spark_json, pg_json, "float→double")
+
+    # Verify Spark can read pg_lake's metadata.json (vectorized off, same reason)
+    spark_session.conf.set("spark.sql.iceberg.vectorization.enabled", "false")
+    spark_register_table(
+        installcheck, spark_session, "float_tbl", pg_schema, pg_metadata_loc
+    )
+    spark_cross_query = f"SELECT a, b FROM {pg_schema}.float_tbl ORDER BY b ASC"
+    spark_cross = spark_session.sql(spark_cross_query).collect()
+    assert len(spark_cross) == 2
+    assert spark_cross[0].a == pytest.approx(1.5, abs=1e-6)
+    assert spark_cross[1].a == pytest.approx(1.23456789012345, abs=1e-10)
+    spark_unregister_table(installcheck, spark_session, "float_tbl", pg_schema)
+    spark_session.conf.set("spark.sql.iceberg.vectorization.enabled", "true")
+
+    spark_session.sql(f"DROP TABLE {spark_ns}.spark_float_promo")
+
+    # ── 3. decimal(P,S) → decimal(P',S) where P' > P ──
+
+    # Spark side
+    spark_session.sql(
+        f"CREATE TABLE {spark_ns}.spark_dec_promo (a decimal(10,2), b int) USING iceberg"
+    )
+    spark_session.sql(f"INSERT INTO {spark_ns}.spark_dec_promo VALUES (12345.67, 1)")
+    spark_session.sql(
+        f"ALTER TABLE {spark_ns}.spark_dec_promo ALTER COLUMN a TYPE decimal(20,2)"
+    )
+    spark_session.sql(
+        f"INSERT INTO {spark_ns}.spark_dec_promo VALUES (123456789012345.67, 2)"
+    )
+
+    # pg_lake side
+    run_command(
+        f"CREATE TABLE {pg_schema}.dec_tbl (a numeric(10,2), b int) USING iceberg;",
+        pg_conn,
+    )
+    run_command(f"INSERT INTO {pg_schema}.dec_tbl VALUES (12345.67, 1);", pg_conn)
+    pg_conn.commit()
+    run_command(
+        f"ALTER TABLE {pg_schema}.dec_tbl ALTER COLUMN a TYPE numeric(20,2);", pg_conn
+    )
+    pg_conn.commit()
+    run_command(
+        f"INSERT INTO {pg_schema}.dec_tbl VALUES (123456789012345.67, 2);", pg_conn
+    )
+    pg_conn.commit()
+
+    spark_query = f"SELECT a, b FROM {spark_ns}.spark_dec_promo ORDER BY b ASC"
+    pg_query = f"SELECT a, b FROM {pg_schema}.dec_tbl ORDER BY b ASC"
+
+    pg_lake_result = assert_query_result_on_spark_and_pg(
+        installcheck, spark_session, pg_conn, spark_query, pg_query
+    )
+
+    assert len(pg_lake_result) == 2
+
+    # Compare full schemas JSON
+    spark_metadata_loc = (
+        spark_session.sql(
+            f"SELECT file FROM {spark_ns}.spark_dec_promo.metadata_log_entries ORDER BY timestamp DESC"
+        )
+        .collect()[0]
+        .file
+    )
+    spark_json = normalize_json(read_s3_operations(s3, spark_metadata_loc))
+
+    pg_metadata_loc = run_query(
+        f"SELECT metadata_location FROM iceberg_tables "
+        f"WHERE table_name = 'dec_tbl' AND table_namespace = '{pg_schema}'",
+        pg_conn,
+    )[0][0]
+    pg_json = normalize_json(read_s3_operations(s3, pg_metadata_loc))
+
+    assert_iceberg_schemas_equal(spark_json, pg_json, "decimal widening")
+
+    # Verify Spark can read pg_lake's metadata.json
+    spark_register_table(
+        installcheck, spark_session, "dec_tbl", pg_schema, pg_metadata_loc
+    )
+    spark_cross_query = f"SELECT a, b FROM {pg_schema}.dec_tbl ORDER BY b ASC"
+    spark_cross = spark_session.sql(spark_cross_query).collect()
+    assert len(spark_cross) == 2
+    assert str(spark_cross[0].a) == "12345.67"
+    assert str(spark_cross[1].a) == "123456789012345.67"
+    spark_unregister_table(installcheck, spark_session, "dec_tbl", pg_schema)
+
+    spark_session.sql(f"DROP TABLE {spark_ns}.spark_dec_promo")
+
+    # ── 4. partitioned table: int → bigint on partition column ──
+
+    # Spark side
+    spark_session.sql(
+        f"CREATE TABLE {spark_ns}.spark_part_promo (a int, b int) "
+        f"USING iceberg PARTITIONED BY (b)"
+    )
+    spark_session.sql(
+        f"INSERT INTO {spark_ns}.spark_part_promo VALUES (1, 10), (2, 20)"
+    )
+    spark_session.sql(
+        f"ALTER TABLE {spark_ns}.spark_part_promo ALTER COLUMN b TYPE bigint"
+    )
+    spark_session.sql(f"INSERT INTO {spark_ns}.spark_part_promo VALUES (3, 30)")
+
+    # pg_lake side
+    run_command(
+        f"CREATE TABLE {pg_schema}.part_tbl (a int, b int) "
+        f"USING iceberg WITH (partition_by = 'b');",
+        pg_conn,
+    )
+    run_command(f"INSERT INTO {pg_schema}.part_tbl VALUES (1, 10), (2, 20);", pg_conn)
+    pg_conn.commit()
+    run_command(
+        f"ALTER TABLE {pg_schema}.part_tbl ALTER COLUMN b TYPE bigint;", pg_conn
+    )
+    pg_conn.commit()
+    run_command(f"INSERT INTO {pg_schema}.part_tbl VALUES (3, 30);", pg_conn)
+    pg_conn.commit()
+
+    spark_query = f"SELECT a, b FROM {spark_ns}.spark_part_promo ORDER BY a ASC"
+    pg_query = f"SELECT a, b FROM {pg_schema}.part_tbl ORDER BY a ASC"
+
+    pg_lake_result = assert_query_result_on_spark_and_pg(
+        installcheck, spark_session, pg_conn, spark_query, pg_query
+    )
+
+    assert len(pg_lake_result) == 3
+    assert pg_lake_result == [[1, 10], [2, 20], [3, 30]]
+
+    # Compare full schemas JSON
+    spark_metadata_loc = (
+        spark_session.sql(
+            f"SELECT file FROM {spark_ns}.spark_part_promo.metadata_log_entries ORDER BY timestamp DESC"
+        )
+        .collect()[0]
+        .file
+    )
+    spark_json = normalize_json(read_s3_operations(s3, spark_metadata_loc))
+
+    pg_metadata_loc = run_query(
+        f"SELECT metadata_location FROM iceberg_tables "
+        f"WHERE table_name = 'part_tbl' AND table_namespace = '{pg_schema}'",
+        pg_conn,
+    )[0][0]
+    pg_json = normalize_json(read_s3_operations(s3, pg_metadata_loc))
+
+    assert_iceberg_schemas_equal(spark_json, pg_json, "partitioned int→bigint")
+
+    # Verify Spark can read pg_lake's metadata.json (vectorized off, same reason)
+    spark_session.conf.set("spark.sql.iceberg.vectorization.enabled", "false")
+    spark_register_table(
+        installcheck, spark_session, "part_tbl", pg_schema, pg_metadata_loc
+    )
+    spark_cross_query = f"SELECT a, b FROM {pg_schema}.part_tbl ORDER BY a ASC"
+    spark_cross = spark_session.sql(spark_cross_query).collect()
+    assert len(spark_cross) == 3
+    assert [spark_cross[0].a, spark_cross[0].b] == [1, 10]
+    assert [spark_cross[1].a, spark_cross[1].b] == [2, 20]
+    assert [spark_cross[2].a, spark_cross[2].b] == [3, 30]
+    spark_unregister_table(installcheck, spark_session, "part_tbl", pg_schema)
+    spark_session.conf.set("spark.sql.iceberg.vectorization.enabled", "true")
+
+    spark_session.sql(f"DROP TABLE {spark_ns}.spark_part_promo")
+
+    # cleanup
+    run_command(f"DROP SCHEMA {pg_schema} CASCADE;", pg_conn)
     pg_conn.commit()
 
 
