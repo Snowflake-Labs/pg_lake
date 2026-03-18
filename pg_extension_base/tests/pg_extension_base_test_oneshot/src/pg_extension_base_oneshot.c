@@ -32,6 +32,7 @@
 #include "commands/async.h"
 #include "pg_extension_base/base_workers.h"
 #include "pg_extension_base/spi_helpers.h"
+#include "utils/snapmgr.h"
 
 PG_MODULE_MAGIC;
 
