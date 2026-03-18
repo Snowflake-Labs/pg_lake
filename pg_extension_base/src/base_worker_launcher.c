@@ -397,7 +397,7 @@ static bool SignalServerStarter = false;
 
 /* pg_extension_base.worker_starter_sleep_time */
 int			WorkerStarterSleepTimeSec = DEFAULT_WORKER_STARTER_SLEEP_TIME;
-
+int32		MyBaseWorkerId = InvalidOid;
 
 /*
  * InitializeBaseWorkerLauncher sets up hooks used by the base worker launcher.
@@ -1818,6 +1818,9 @@ PgExtensionBaseWorkerMain(Datum arg)
 	Oid			databaseId = workerKey >> 32;
 	int32		workerId = workerKey & 0xFFFF;
 
+	/* record our worker id in a global */
+	MyBaseWorkerId = workerId;
+
 	/* Establish signal handlers before unblocking signals. */
 	pqsignal(SIGHUP, HandleSighup);
 
@@ -2247,6 +2250,38 @@ DeregisterBaseWorkerById(int32 workerId)
 	DeleteBaseWorkerRegistrationById(workerId);
 
 	return DeregisterBaseWorker_internal(workerId);
+}
+
+
+/*
+ * DeregisterBaseWorkerSelf removes a one-shot base worker from the registry
+ * without terminating the process.  Call this from within the worker's own
+ * transaction after the work is done.  If the transaction commits the catalog
+ * row is gone and the worker will never be restarted.  If the transaction
+ * aborts, or the server crashes before commit, the row is preserved and the
+ * worker will be restarted as normal, giving it a chance to retry.
+ *
+ * The caller is responsible for then returning cleanly from the entry-point
+ * function so that proc_exit(0) fires.  The database starter will notice the
+ * missing catalog row via RemoveBaseWorkerEntriesNotInRegistrationList and
+ * remove the shared-memory entry; no shmem manipulation is needed here.
+ */
+void
+DeregisterBaseWorkerSelf(void)
+{
+	Assert(MyBaseWorkerId != 0);
+
+	/*
+	 * Remove the catalog row.  This is the transactional part: if we abort,
+	 * the row comes back and the worker will be restarted.
+	 */
+	DeleteBaseWorkerRegistrationById(MyBaseWorkerId);
+
+	/*
+	 * Intentionally do NOT touch shmem needsRestart or send SIGTERM.  The
+	 * worker process keeps running and should return from its entry-point
+	 * function normally.
+	 */
 }
 
 

@@ -1,5 +1,6 @@
 import pytest
 import psycopg2
+import select
 import time
 from utils_pytest import *
 
@@ -291,6 +292,81 @@ def test_failed_drop_database(superuser_conn):
 
     # now actually drop it
     run_command("DROP DATABASE other", superuser_conn)
+
+    assert count_pg_extension_base_workers(superuser_conn) == 0
+
+    superuser_conn.autocommit = False
+
+
+def test_oneshot_worker_completes(superuser_conn):
+    run_command("LISTEN oneshot", superuser_conn)
+    superuser_conn.commit()
+
+    run_command(
+        "CREATE EXTENSION pg_extension_base_test_oneshot CASCADE", superuser_conn
+    )
+    superuser_conn.commit()
+    time.sleep(0.3)
+
+    # if the extension ran, we got the the notify before we deregistered
+    if select.select([superuser_conn], [], [], 5) == ([], [], []):
+        pytest.fail("Timeout: Did not receive notification from extension")
+    else:
+        superuser_conn.poll()  # Pull the data from the socket into Python objects
+        seen = False
+        while superuser_conn.notifies:
+            notify = superuser_conn.notifies.pop(0)
+            assert notify.channel == "oneshot"
+            assert notify.payload != "0"
+            seen = True
+
+        assert seen, "got our notification proving the worker ran"
+
+    # Worker starts, calls DeregisterBaseWorkerSelf(), and exits -- count drops to 0
+    assert count_pg_extension_base_workers(superuser_conn) == 0
+
+    # Wait longer and verify the worker is not restarted
+    time.sleep(0.3)
+    assert count_pg_extension_base_workers(superuser_conn) == 0
+
+    superuser_conn.rollback()
+    run_command("DROP EXTENSION pg_extension_base_test_oneshot CASCADE", superuser_conn)
+    superuser_conn.commit()
+
+
+def test_oneshot_worker_catalog_row_removed(superuser_conn):
+    run_command(
+        "CREATE EXTENSION pg_extension_base_test_oneshot CASCADE", superuser_conn
+    )
+    superuser_conn.commit()
+    time.sleep(0.1)
+
+    # After completion the catalog row is gone -- no workers registered
+    worker_count = run_query(
+        "SELECT count(*) FROM extension_base.workers WHERE worker_name = 'pg_extension_base_test_oneshot_main_worker'",
+        superuser_conn,
+    )[0][0]
+    assert worker_count == 0
+
+    run_command("DROP EXTENSION pg_extension_base_test_oneshot CASCADE", superuser_conn)
+    superuser_conn.commit()
+
+
+def test_oneshot_worker_drop_database(superuser_conn):
+    superuser_conn.autocommit = True
+
+    run_command("CREATE DATABASE other_oneshot", superuser_conn)
+
+    other_conn_str = f"dbname=other_oneshot user={server_params.PG_USER} password={server_params.PG_PASSWORD} port={server_params.PG_PORT} host={server_params.PG_HOST}"
+    other_conn = psycopg2.connect(other_conn_str)
+
+    run_command("CREATE EXTENSION pg_extension_base_test_oneshot CASCADE", other_conn)
+    other_conn.commit()
+    time.sleep(0.1)
+
+    other_conn.close()
+
+    run_command("DROP DATABASE other_oneshot", superuser_conn)
 
     assert count_pg_extension_base_workers(superuser_conn) == 0
 

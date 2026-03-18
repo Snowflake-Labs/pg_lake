@@ -1,0 +1,7 @@
+comment = 'Pg Extension Base Test One-shot Worker'
+default_version = '1.0'
+module_pathname = '$libdir/pg_extension_base_test_oneshot'
+requires = 'pg_extension_base'
+relocatable = false
+schema = pg_catalog
+#!shared_preload_libraries

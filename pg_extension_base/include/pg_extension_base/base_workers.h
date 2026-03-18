@@ -111,5 +111,8 @@ extern PGDLLEXPORT int32 RegisterBaseWorker(char *workerName, Oid entryPointFunc
 											Oid extensionId);
 extern PGDLLEXPORT int32 DeregisterBaseWorker(char *workerName);
 extern PGDLLEXPORT int32 DeregisterBaseWorkerById(int32 workerId);
+extern PGDLLEXPORT void DeregisterBaseWorkerSelf(void);
+
+extern PGDLLEXPORT int32 MyBaseWorkerId;
 
 #endif
