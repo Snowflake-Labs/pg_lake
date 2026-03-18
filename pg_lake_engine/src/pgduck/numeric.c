@@ -79,6 +79,31 @@ GetDuckdbAdjustedPrecisionAndScaleFromNumericTypeMod(int typeMod, int *precision
 	}
 }
 
+
+/*
+ * IsUnsupportedNumericForIceberg returns true when typeOid is NUMERICOID and
+ * the typmod represents a numeric that cannot be stored as an Iceberg decimal
+ * (unbounded, precision > 38, or scale > 38).  Returns false for non-numeric
+ * types so the caller does not need a separate type check.
+ */
+bool
+IsUnsupportedNumericForIceberg(Oid typeOid, int typmod)
+{
+	if (typeOid != NUMERICOID)
+		return false;
+
+	if (IsUnboundedNumeric(typeOid, typmod))
+		return true;
+
+	int			precision = -1;
+	int			scale = -1;
+
+	GetDuckdbAdjustedPrecisionAndScaleFromNumericTypeMod(typmod, &precision, &scale);
+
+	return precision > DUCKDB_MAX_NUMERIC_PRECISION ||
+		scale > DUCKDB_MAX_NUMERIC_SCALE;
+}
+
 /*
  * CanPushdownNumericToDuckdb checks if the precision and scale of a numeric type
  * is within the limits of duckdb.

@@ -511,7 +511,7 @@ def test_iceberg_types_array(pg_conn, create_helper_functions, s3, extension):
             "type": {
                 "type": "list",
                 "element-id": 28,
-                "element": "decimal(38,9)",
+                "element": "double",
                 "element-required": False,
             },
         },
@@ -1893,9 +1893,9 @@ def test_initial_and_write_defaults_arrays(
     )
 
     assert field_id_mappings == [
-        [1, 1, None, "[1.0, 2.1, 3.2]"],
-        [3, 5, "[10.0, 20.1, 30.2]", "[10.0, 20.1, 30.2]"],
-        [5, 9, None, "[100.0, 200.1, 300.2]"],
+        [1, 1, None, "[1, 2.1, 3.2]"],
+        [3, 5, "[10, 20.1, 30.2]", "[10, 20.1, 30.2]"],
+        [5, 9, None, "[100, 200.1, 300.2]"],
     ]
 
     # also, verify from the
@@ -1917,9 +1917,9 @@ def test_initial_and_write_defaults_arrays(
     )
 
     assert res == [
-        ["[1.0, 2.1, 3.2]"],
-        ["[10.0, 20.1, 30.2]"],
-        ["[100.0, 200.1, 300.2]"],
+        ["[1, 2.1, 3.2]"],
+        ["[10, 20.1, 30.2]"],
+        ["[100, 200.1, 300.2]"],
     ]
 
     res = run_query(
@@ -1930,7 +1930,7 @@ def test_initial_and_write_defaults_arrays(
         pg_conn,
     )
 
-    assert res == [["[10.0, 20.1, 30.2]"]]
+    assert res == [["[10, 20.1, 30.2]"]]
 
     run_command(
         "ALTER TABLE example_table ALTER COLUMN modify_column_for_defaults DROP DEFAULT;",
@@ -1947,8 +1947,8 @@ def test_initial_and_write_defaults_arrays(
     )
 
     assert field_id_mappings == [
-        [1, 1, None, "[1.0, 2.1, 3.2]"],
-        [3, 5, "[10.0, 20.1, 30.2]", "[10.0, 20.1, 30.2]"],
+        [1, 1, None, "[1, 2.1, 3.2]"],
+        [3, 5, "[10, 20.1, 30.2]", "[10, 20.1, 30.2]"],
     ]
 
     # sanity check
@@ -1972,7 +1972,7 @@ def test_initial_and_write_defaults_arrays(
 
     assert field_id_mappings == [
         [1, 1, None, "[500, 501]"],
-        [3, 5, "[10.0, 20.1, 30.2]", "[10.0, 20.1, 30.2]"],
+        [3, 5, "[10, 20.1, 30.2]", "[10, 20.1, 30.2]"],
     ]
 
     # sanity check

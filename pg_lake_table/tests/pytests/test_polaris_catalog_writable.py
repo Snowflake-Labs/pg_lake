@@ -2035,7 +2035,7 @@ def test_rest_iceberg_types_array(
             "type": {
                 "type": "list",
                 "element-id": 28,
-                "element": "decimal(38, 9)",
+                "element": "double",
                 "element-required": False,
             },
         },

@@ -48,3 +48,4 @@ extern PGDLLEXPORT void GetDuckdbAdjustedPrecisionAndScaleFromNumericTypeMod(int
 																			 int *precision,
 																			 int *scale);
 extern PGDLLEXPORT bool CanPushdownNumericToDuckdb(int precision, int scale);
+extern PGDLLEXPORT bool IsUnsupportedNumericForIceberg(Oid typeOid, int typmod);

@@ -1775,14 +1775,17 @@ ErrorIfTypeUnsupportedForIcebergTablesInternal(Oid typeOid, int32 typmod, int le
  * ErrorIfTypeUnsupportedNumericForIcebergTables throws an error if the given
  * numeric type is unsupported for Iceberg tables.
  *
- * This is only reached when the unsupported_numeric_as_double GUC is off or
- * the numeric appears inside a nested type (array / composite / map) where
- * automatic column-level conversion is not possible.
+ * When unsupported_numeric_as_double GUC is on, all unsupported numerics
+ * (including nested ones) are converted to float8 at CREATE TABLE time by
+ * MaybeConvertUnsupportedNumericColumnsToDouble, so no error is needed.
  */
 void
 ErrorIfTypeUnsupportedNumericForIcebergTables(int32 typmod, char *columnName)
 {
-	if (!UnsupportedNumericAsDouble && IsUnboundedNumeric(NUMERICOID, typmod))
+	if (UnsupportedNumericAsDouble)
+		return;
+
+	if (IsUnboundedNumeric(NUMERICOID, typmod))
 	{
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						errmsg("unbounded numeric types are not supported on Iceberg tables"),

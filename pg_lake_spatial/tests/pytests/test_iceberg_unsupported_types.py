@@ -132,6 +132,7 @@ def test_unsupported_types(
     pg_conn.rollback()
 
     # unsupported numeric in array
+    run_command("SET pg_lake_iceberg.unsupported_numeric_as_double TO off", pg_conn)
     error = run_command(
         "CREATE TABLE test_unsupported_types.t (a numeric(40,50)[]) USING iceberg",
         pg_conn,
@@ -141,6 +142,7 @@ def test_unsupported_types(
     pg_conn.rollback()
 
     # unsupported numeric in composite
+    run_command("SET pg_lake_iceberg.unsupported_numeric_as_double TO off", pg_conn)
     error = run_command(
         "CREATE TABLE test_unsupported_types.t (a test_unsupported_types.numeric_in_composite) USING iceberg",
         pg_conn,
@@ -150,6 +152,7 @@ def test_unsupported_types(
     pg_conn.rollback()
 
     # unsupported numeric in composite array
+    run_command("SET pg_lake_iceberg.unsupported_numeric_as_double TO off", pg_conn)
     error = run_command(
         "CREATE TABLE test_unsupported_types.t (a test_unsupported_types.numeric_in_composite[][]) USING iceberg",
         pg_conn,

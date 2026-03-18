@@ -21,6 +21,7 @@
 #include "nodes/primnodes.h"
 
 #include "pg_lake/copy/copy_format.h"
+#include "pg_lake/pgduck/type.h"
 #include "pg_lake/util/catalog_type.h"
 #include "pg_lake/util/table_type.h"
 
@@ -44,6 +45,7 @@ extern PGDLLEXPORT char *GetForeignTablePath(Oid foreignTableId);
 extern PGDLLEXPORT void ErrorIfTypeUnsupportedForIcebergTables(Oid typeOid, int32 typmod, char *columnName);
 extern PGDLLEXPORT void ErrorIfTypeUnsupportedNumericForIcebergTables(int32 typmod, char *columnName);
 extern PGDLLEXPORT void MaybeConvertUnsupportedNumericColumnsToDouble(List *columnDefList);
+extern PGDLLEXPORT PGType MaybeConvertType(PGType type, char *columnName);
 extern PGDLLEXPORT PgLakeTableProperties GetPgLakeTableProperties(Oid relationId);
 
 /* range var help */

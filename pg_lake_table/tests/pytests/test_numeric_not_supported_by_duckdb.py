@@ -73,6 +73,23 @@ def test_numerics_with_larger_scale_than_precision(
 def test_numerics_with_larger_scale_than_precision_exceeds_max_precision(
     pg_conn, extension, s3, with_default_location
 ):
+    run_command(
+        f"""
+    CREATE TABLE test_numeric (
+        a numeric(3, 50)[]
+    ) USING iceberg;
+    """,
+        pg_conn,
+    )
+
+    pg_conn.rollback()
+
+
+def test_numerics_with_larger_scale_than_precision_exceeds_max_precision_guc_off(
+    pg_conn, extension, s3, with_default_location
+):
+    run_command("SET pg_lake_iceberg.unsupported_numeric_as_double TO off", pg_conn)
+
     error = run_command(
         f"""
     CREATE TABLE test_numeric (
