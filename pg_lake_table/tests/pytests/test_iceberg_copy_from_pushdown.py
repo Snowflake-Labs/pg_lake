@@ -595,7 +595,7 @@ def test_bc_dates_copy_from_pushdown(
         (
             "timestamptz",
             "0001-01-01 00:00:00+00 BC",
-            "timestamp out of range|Error|Could not convert",
+            "timestamptz out of range|Error|Could not convert",
         ),
     ],
 )
@@ -741,8 +741,8 @@ def test_temporal_out_of_range_clamp_copy_from_pushdown(
         ("date", "-infinity", "date out of range"),
         ("timestamp", "infinity", "timestamp out of range"),
         ("timestamp", "-infinity", "timestamp out of range"),
-        ("timestamptz", "infinity", "timestamp out of range"),
-        ("timestamptz", "-infinity", "timestamp out of range"),
+        ("timestamptz", "infinity", "timestamptz out of range"),
+        ("timestamptz", "-infinity", "timestamptz out of range"),
     ],
 )
 def test_infinity_temporal_error_copy_from_pushdown(
@@ -881,8 +881,8 @@ def test_infinity_temporal_clamp_copy_from_pushdown(
         ("date", "-infinity", "date out of range"),
         ("timestamp", "infinity", "timestamp out of range"),
         ("timestamp", "-infinity", "timestamp out of range"),
-        ("timestamptz", "infinity", "timestamp out of range"),
-        ("timestamptz", "-infinity", "timestamp out of range"),
+        ("timestamptz", "infinity", "timestamptz out of range"),
+        ("timestamptz", "-infinity", "timestamptz out of range"),
     ],
 )
 def test_infinity_temporal_error_copy_from_non_pushdown(

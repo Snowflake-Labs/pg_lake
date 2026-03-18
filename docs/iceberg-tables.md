@@ -164,7 +164,7 @@ CREATE TABLE events_strict (
 )
 USING iceberg WITH (out_of_range_values = 'error');
 
--- This fails with: "timestamp out of range"
+-- This fails with: "timestamptz out of range"
 INSERT INTO events_strict VALUES ('infinity', 3.14);
 ```
 

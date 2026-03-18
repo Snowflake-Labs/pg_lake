@@ -113,7 +113,7 @@ GetTemporalLiterals(Oid typeOid,
 			*minLiteral = ICEBERG_TIMESTAMPTZ_MIN_LITERAL;
 			*maxLiteral = ICEBERG_TIMESTAMPTZ_MAX_LITERAL;
 			*typeName = "TIMESTAMPTZ";
-			*errLabel = "timestamp";
+			*errLabel = "timestamptz";
 			break;
 		default:
 			elog(ERROR, "unexpected temporal type OID: %u", typeOid);

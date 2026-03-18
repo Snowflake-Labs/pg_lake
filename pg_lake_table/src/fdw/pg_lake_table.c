@@ -2625,6 +2625,14 @@ IcebergErrorOrClampSlotInPlace(TupleTableSlot *slot, TupleDesc tupleDesc,
 													   policy,
 													   &isNull);
 
+		/*
+		 * Safe to assign directly: - temporal types
+		 * (date/timestamp/timestamptz) are pass-by-value, so clamped values
+		 * need no detoasting or copying. - numeric is pass-by-reference, but
+		 * the clamp function either returns the original datum unchanged or
+		 * sets isNull = true (NaN case), so no new allocation needs to be
+		 * managed.
+		 */
 		slot->tts_values[i] = clamped;
 		slot->tts_isnull[i] = isNull;
 	}

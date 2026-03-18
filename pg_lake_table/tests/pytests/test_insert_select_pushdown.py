@@ -783,7 +783,7 @@ def test_bc_dates_insert_select_pushdown(
         (
             "timestamptz",
             "0001-01-01 00:00:00+00 BC",
-            "timestamp out of range",
+            "timestamptz out of range",
         ),
     ],
 )
@@ -972,8 +972,8 @@ def test_temporal_out_of_range_clamp_insert_select_pushdown(
         ("date", "-infinity", "date out of range"),
         ("timestamp", "infinity", "timestamp out of range"),
         ("timestamp", "-infinity", "timestamp out of range"),
-        ("timestamptz", "infinity", "timestamp out of range"),
-        ("timestamptz", "-infinity", "timestamp out of range"),
+        ("timestamptz", "infinity", "timestamptz out of range"),
+        ("timestamptz", "-infinity", "timestamptz out of range"),
     ],
 )
 def test_infinity_temporal_error_insert_select_pushdown(
@@ -1157,7 +1157,7 @@ def test_temporal_arithmetic_overflow_clamp(
         (
             "timestamptz",
             "TIMESTAMPTZ '9999-12-31 23:59:59.999999+00' + INTERVAL '1 second'",
-            "timestamp out of range",
+            "timestamptz out of range",
         ),
     ],
 )

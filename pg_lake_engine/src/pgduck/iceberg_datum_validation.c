@@ -64,9 +64,22 @@ ErrorOrClampTemporal(Datum value, Oid typeOid, int year,
 
 	if (policy == ICEBERG_OOR_ERROR)
 	{
-		const char *errMsg = (typeOid == DATEOID) ?
-			"date out of range" :
-			"timestamp out of range";
+		const char *errMsg;
+
+		switch (typeOid)
+		{
+			case DATEOID:
+				errMsg = "date out of range";
+				break;
+			case TIMESTAMPOID:
+				errMsg = "timestamp out of range";
+				break;
+			case TIMESTAMPTZOID:
+				errMsg = "timestamptz out of range";
+				break;
+			default:
+				elog(ERROR, "unexpected temporal type OID: %u", typeOid);
+		}
 
 		ereport(ERROR,
 				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),

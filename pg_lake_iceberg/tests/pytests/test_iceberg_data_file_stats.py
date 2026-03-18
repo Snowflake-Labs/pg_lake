@@ -855,7 +855,7 @@ def test_pg_lake_iceberg_table_bc_dates(
         (
             "timestamptz",
             "0001-01-01 00:00:00+00 BC",
-            "timestamp out of range",
+            "timestamptz out of range",
         ),
     ],
 )
@@ -953,8 +953,8 @@ def test_pg_lake_iceberg_temporal_out_of_range_clamp(
         ("date", "-infinity", "date out of range"),
         ("timestamp", "infinity", "timestamp out of range"),
         ("timestamp", "-infinity", "timestamp out of range"),
-        ("timestamptz", "infinity", "timestamp out of range"),
-        ("timestamptz", "-infinity", "timestamp out of range"),
+        ("timestamptz", "infinity", "timestamptz out of range"),
+        ("timestamptz", "-infinity", "timestamptz out of range"),
     ],
 )
 def test_pg_lake_iceberg_infinity_temporal_error(
