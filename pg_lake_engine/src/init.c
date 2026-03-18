@@ -25,6 +25,7 @@
 #include "miscadmin.h"
 
 #include "pg_lake/cleanup/deletion_queue.h"
+#include "pg_lake/copy/copy_format.h"
 #include "pg_lake/ddl/utility_hook.h"
 #include "pg_lake/extensions/btree_gist.h"
 #include "pg_lake/extensions/pg_lake_benchmark.h"
@@ -48,12 +49,16 @@ PG_MODULE_MAGIC;
 
 /* function declarations */
 void		_PG_init(void);
+static bool PgLakeStageLocationCheckHook(char **newvalue, void **extra, GucSource source);
 
 /* pg_lake_engine.enabled setting */
 static bool QueryEngineEnabled = true;
 
 /* pg_lake_engine.enable_heavy_asserts setting */
 bool		EnableHeavyAsserts = false;
+
+/* pg_lake.stage_location setting */
+char	   *PgLakeStageLocation = NULL;
 
 
 /*
@@ -167,6 +172,17 @@ _PG_init(void)
 							GUC_UNIT_S | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
 
+	DefineCustomStringVariable(
+							   "pg_lake.stage_location",
+							   gettext_noop("Base URL for @STAGE/ resolution in paths"),
+							   NULL,
+							   &PgLakeStageLocation,
+							   NULL,
+							   PGC_SUSET,
+							   0,
+							   PgLakeStageLocationCheckHook,
+							   NULL, NULL);
+
 	if (QueryEngineEnabled)
 	{
 		InitializePgLakeEngineIdCache();
@@ -185,4 +201,44 @@ _PG_init(void)
 		InitializeUtilityHook();
 		StartPGDuckCacheWorker();
 	}
+}
+
+
+/*
+ * PgLakeStageLocationCheckHook validates the pg_lake.stage_location GUC value.
+ */
+static bool
+PgLakeStageLocationCheckHook(char **newvalue, void **extra, GucSource source)
+{
+	char	   *newStageLocation = *newvalue;
+
+	if (newStageLocation == NULL)
+	{
+		/* stage location not set */
+		return true;
+	}
+
+	if (!IsSupportedURL(newStageLocation))
+	{
+		GUC_check_errdetail("pg_lake.stage_location must be a valid cloud storage URL "
+							"(s3://, gs://, az://, azure://, or abfss://)");
+		return false;
+	}
+
+	/* Reject HTTP/HTTPS URLs for stage location (only cloud storage allowed) */
+	if (strncmp(newStageLocation, HTTP_URL_PREFIX, strlen(HTTP_URL_PREFIX)) == 0 ||
+		strncmp(newStageLocation, HTTPS_URL_PREFIX, strlen(HTTPS_URL_PREFIX)) == 0)
+	{
+		GUC_check_errdetail("pg_lake.stage_location must be a valid cloud storage URL "
+							"(s3://, gs://, az://, azure://, or abfss://)");
+		return false;
+	}
+
+	if (strchr(newStageLocation, '?') != NULL)
+	{
+		GUC_check_errdetail("pg_lake.stage_location cannot contain query parameters (?)");
+		return false;
+	}
+
+	return true;
 }

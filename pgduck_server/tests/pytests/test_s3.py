@@ -94,6 +94,38 @@ def test_copy_to_parquet_azure(azure, pgduck_conn):
     pgduck_conn.rollback()
 
 
+def test_copy_to_parquet_azure_long_prefix(azure, pgduck_conn):
+    """Test that azure:// prefix (long form) works the same as az://"""
+    perform_query(
+        f"""
+        COPY (SELECT * FROM generate_series(1,100))
+        TO 'azure://{TEST_BUCKET}/test_copy_to_parquet_azure_long/data.parquet';
+    """,
+        pgduck_conn,
+    )
+
+    blob_list = list(
+        azure.list_blobs(name_starts_with="test_copy_to_parquet_azure_long/")
+    )
+    assert len(blob_list) == 1
+    assert blob_list[0].name == "test_copy_to_parquet_azure_long/data.parquet"
+
+    perform_query(
+        f"""
+        CREATE TABLE mytable (x int);
+        COPY mytable
+        FROM 'azure://{TEST_BUCKET}/test_copy_to_parquet_azure_long/data.parquet';
+    """,
+        pgduck_conn,
+    )
+
+    results = perform_query_on_cursor("SELECT count(*) FROM mytable", pgduck_conn)
+    assert len(results) == 1
+    assert results[0][0] == "100"
+
+    pgduck_conn.rollback()
+
+
 def test_copy_from_non_existent(s3, pgduck_conn):
     perform_query("CREATE TABLE mytable (x int)", pgduck_conn)
 

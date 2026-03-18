@@ -22,7 +22,9 @@
 
 #include "commands/defrem.h"
 #include "common/string.h"
+#include "lib/stringinfo.h"
 #include "pg_lake/copy/copy_format.h"
+#include "pg_lake/extensions/pg_lake_engine.h"
 #include "nodes/parsenodes.h"
 #include "nodes/pg_list.h"
 
@@ -426,11 +428,86 @@ IsSupportedURL(const char *path)
 
 	return strncmp(path, S3_URL_PREFIX, strlen(S3_URL_PREFIX)) == 0 ||
 		strncmp(path, GCS_URL_PREFIX, strlen(GCS_URL_PREFIX)) == 0 ||
+		strncmp(path, AZURE_URL_PREFIX, strlen(AZURE_URL_PREFIX)) == 0 ||
 		strncmp(path, AZURE_BLOB_URL_PREFIX, strlen(AZURE_BLOB_URL_PREFIX)) == 0 ||
 		strncmp(path, AZURE_DLS_URL_PREFIX, strlen(AZURE_DLS_URL_PREFIX)) == 0 ||
 		strncmp(path, HTTP_URL_PREFIX, strlen(HTTP_URL_PREFIX)) == 0 ||
 		strncmp(path, HTTPS_URL_PREFIX, strlen(HTTPS_URL_PREFIX)) == 0 ||
 		strncmp(path, HUGGING_FACE_URL_PREFIX, strlen(HUGGING_FACE_URL_PREFIX)) == 0;
+}
+
+
+/*
+ * GetPgLakeStageLocation returns the base URL configured for @STAGE/ resolution,
+ * with trailing slash removed if present.
+ */
+char *
+GetPgLakeStageLocation(void)
+{
+	if (PgLakeStageLocation == NULL)
+	{
+		return NULL;
+	}
+
+	size_t		len = strlen(PgLakeStageLocation);
+
+	if (len > 0 && PgLakeStageLocation[len - 1] == '/')
+	{
+		/* remove trailing "/" */
+		char	   *stageLocationRemovedTrailingSlash = pstrdup(PgLakeStageLocation);
+
+		stageLocationRemovedTrailingSlash[len - 1] = '\0';
+
+		return stageLocationRemovedTrailingSlash;
+	}
+
+	return PgLakeStageLocation;
+}
+
+
+/*
+ * ResolveStageURL resolves @STAGE/ prefix in paths to the configured
+ * stage location. Returns the original path if it doesn't start with @STAGE/,
+ * or returns a resolved URL if it does.
+ */
+char *
+ResolveStageURL(const char *path)
+{
+	if (path == NULL)
+	{
+		return NULL;
+	}
+
+	/* Check for @STAGE/ prefix (case-insensitive) */
+	size_t		prefixLen = strlen(STAGE_URL_PREFIX);
+
+	if (pg_strncasecmp(path, STAGE_URL_PREFIX, prefixLen) != 0)
+	{
+		/* Not a stage URL, return as-is */
+		return (char *) path;
+	}
+
+	/* Get the configured stage location */
+	char	   *baseUrl = GetPgLakeStageLocation();
+
+	if (baseUrl == NULL)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("@STAGE/ URL prefix used but pg_lake.stage_location is not configured"),
+				 errhint("Set pg_lake.stage_location to your bucket URL (e.g., SET pg_lake.stage_location TO 's3://my-bucket/prefix')")));
+	}
+
+	/* Extract the path after @STAGE/ */
+	const char *relativePath = path + prefixLen;
+
+	/* Concatenate base URL + "/" + relative path */
+	StringInfoData resolvedUrl;
+
+	initStringInfo(&resolvedUrl);
+	appendStringInfo(&resolvedUrl, "%s/%s", baseUrl, relativePath);
+
+	return resolvedUrl.data;
 }
 
 
