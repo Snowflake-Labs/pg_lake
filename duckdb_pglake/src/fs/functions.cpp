@@ -506,18 +506,19 @@ static void ListFilesExec(ClientContext &context, TableFunctionInput &data_p, Da
 
 		if (functionData.hasDetails && file.extended_info)
 		{
-			auto entry1 = file.extended_info->options.find("file_size");
-			if (entry1 != file.extended_info->options.end()) {
-				output.SetValue(1, rowInChunk, entry1->second);
-			}
-			auto entry2 = file.extended_info->options.find("last_modified");
-			if (entry2 != file.extended_info->options.end()) {
-				output.SetValue(2, rowInChunk, entry2->second);
-			}
-			auto entry3 = file.extended_info->options.find("etag");
-			if (entry3 != file.extended_info->options.end()) {
-				output.SetValue(3, rowInChunk, entry3->second);
-			}
+			auto &options = file.extended_info->options;
+
+			auto entry1 = options.find("file_size");
+			output.SetValue(1, rowInChunk,
+							entry1 != options.end() ? entry1->second : Value(nullptr));
+
+			auto entry2 = options.find("last_modified");
+			output.SetValue(2, rowInChunk,
+							entry2 != options.end() ? entry2->second : Value(nullptr));
+
+			auto entry3 = options.find("etag");
+			output.SetValue(3, rowInChunk,
+							entry3 != options.end() ? entry3->second : Value(nullptr));
 		}
 		else
 		{
