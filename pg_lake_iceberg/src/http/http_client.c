@@ -277,7 +277,8 @@ CurlReturnError(CURL * curl, struct curl_slist *headerList,
  */
 HttpResult
 SendHttpRequestWithRetry(HttpMethod method, const char *url, const char *body,
-						 List *headers, HttpRetryFn retryFn, int maxRetry)
+						 List *headers, HttpRetryFn retryFn, int maxRetry,
+						 void *retryContext)
 {
 	Assert(maxRetry > 0);
 
@@ -287,7 +288,7 @@ SendHttpRequestWithRetry(HttpMethod method, const char *url, const char *body,
 	{
 		result = SendHttpRequest(method, url, body, headers);
 
-		if (retryFn != NULL && retryFn(result.status, maxRetry, retryNo))
+		if (retryFn != NULL && retryFn(result.status, maxRetry, retryNo, retryContext, headers))
 			continue;
 		else
 			break;
