@@ -73,9 +73,6 @@ typedef struct RestCatalogRequestPerTable
 	char	   *tableRestUrl;
 	char	   *tableIdentifier;
 
-	/* Per-table REST catalog connection info for multi-server support */
-	RestCatalogConnectionInfo *conn;
-
 	RestCatalogRequest *createTableRequest;
 	RestCatalogRequest *dropTableRequest;
 
@@ -116,9 +113,18 @@ static HTAB *TrackedIcebergMetadataOperationsHash = NULL;
 */
 static HTAB *RestCatalogRequestsHash = NULL;
 
-
 /* some pre-allocated memory so we don't palloc() ever in XACT_COMMIT  */
 static MemoryContext PgLakeXactCommitContext = NULL;
+
+/*
+ * Resolved REST catalog options for the current transaction, deep-copied into
+ * TopTransactionContext in RecordRestCatalogRequestInTx (when syscache is still
+ * accessible) because PostAllRestCatalogRequests runs at XACT_EVENT_COMMIT,
+ * where syscache lookups are forbidden. Only one REST catalog server is allowed
+ * per transaction.
+ */
+static RestCatalogOptions *PgLakeXactRestCatalogOpts = NULL;
+
 
 /*
  * TrackIcebergMetadataChangesInTx tracks metadata changes for a given relation
@@ -211,6 +217,7 @@ ResetRestCatalogRequests(void)
 {
 	RestCatalogRequestsHash = NULL;
 	PgLakeXactCommitContext = NULL;
+	PgLakeXactRestCatalogOpts = NULL;
 }
 
 
@@ -232,6 +239,8 @@ PostAllRestCatalogRequests(void)
 	 * PgLakeXactCommitContext is pre-allocated before.
 	 */
 	MemoryContext oldContext = MemoryContextSwitchTo(PgLakeXactCommitContext);
+
+	Assert(PgLakeXactRestCatalogOpts != NULL);
 
 	/*
 	 * We need to iterate over the RestCatalogRequestsHash twice: 1. First, we
@@ -279,8 +288,8 @@ PostAllRestCatalogRequests(void)
 				HttpResult	httpResult =
 					SendRequestToRestCatalog(HTTP_POST, requestPerTable->tableRestUrl,
 											 createTableRequest->body,
-											 PostHeadersWithAuth(requestPerTable->conn),
-											 requestPerTable->conn->serverName);
+											 PostHeadersWithAuth(PgLakeXactRestCatalogOpts),
+											 PgLakeXactRestCatalogOpts);
 
 				if (httpResult.status != 200)
 				{
@@ -297,8 +306,8 @@ PostAllRestCatalogRequests(void)
 				HttpResult	httpResult =
 					SendRequestToRestCatalog(HTTP_DELETE, requestPerTable->tableRestUrl,
 											 NULL,
-											 DeleteHeadersWithAuth(requestPerTable->conn),
-											 requestPerTable->conn->serverName);
+											 DeleteHeadersWithAuth(PgLakeXactRestCatalogOpts),
+											 PgLakeXactRestCatalogOpts);
 
 				if (httpResult.status != 204)
 				{
@@ -319,14 +328,16 @@ PostAllRestCatalogRequests(void)
 
 	/*
 	 * Now that all create table requests have been posted, we can post all
-	 * the other modifications. We group modifications by REST catalog server
-	 * (identified by host) so that each server gets its own transaction
-	 * commit request for atomicity.
-	 *
-	 * We do two passes: first collect tables that have modifications, then
-	 * group by server host and send one batch per server.
+	 * the other modifications. All table modifications are sent in a single
+	 * HTTP request to ensure atomicity.
 	 */
-	List	   *tablesWithModifications = NIL;
+	char	   *catalogName = NULL;
+	bool		hasRestCatalogChanges = false;
+	StringInfo	batchRequestBody = makeStringInfo();
+
+	appendStringInfo(batchRequestBody, "{");	/* start msg body  */
+	appendJsonKey(batchRequestBody, "table-changes");
+	appendStringInfo(batchRequestBody, "[");	/* start array of changes */
 
 	hash_seq_init(&status, RestCatalogRequestsHash);
 
@@ -342,6 +353,9 @@ PostAllRestCatalogRequests(void)
 				 requestPerTable->relationId);
 			continue;
 		}
+
+		/* TODO: can we ever have multiple catalogs? */
+		catalogName = requestPerTable->catalogName;
 
 		if (requestPerTable->createTableRequest != NULL &&
 			requestPerTable->dropTableRequest != NULL)
@@ -360,94 +374,67 @@ PostAllRestCatalogRequests(void)
 			continue;
 		}
 
-		tablesWithModifications = lappend(tablesWithModifications, requestPerTable);
+		if (hasRestCatalogChanges)
+		{
+			appendStringInfoChar(batchRequestBody, ',');	/* separate previous
+															 * table change */
+		}
+
+		appendStringInfoChar(batchRequestBody, '{');	/* start per-table json
+														 * object */
+		appendJsonKey(batchRequestBody, "identifier");
+		appendStringInfo(batchRequestBody, "%s", requestPerTable->tableIdentifier);
+		appendStringInfoChar(batchRequestBody, ',');
+		appendStringInfoString(batchRequestBody, "\"requirements\":[],");
+		appendStringInfoString(batchRequestBody, " \"updates\":[");
+
+		ListCell   *requestCell = NULL;
+
+		foreach(requestCell, requestPerTable->tableModifyRequests)
+		{
+			RestCatalogRequest *request = (RestCatalogRequest *) lfirst(requestCell);
+
+			appendStringInfoString(batchRequestBody, request->body);
+
+			bool		lastRequest = (requestCell == list_tail(requestPerTable->tableModifyRequests));
+
+			if (!lastRequest)
+			{
+				appendStringInfoChar(batchRequestBody, ',');
+			}
+
+			if (message_level_is_interesting(DEBUG2))
+			{
+				elog(DEBUG2, "REST Catalog Request Body size reached: %d bytes",
+					 batchRequestBody->len);
+			}
+		}
+
+		appendStringInfoChar(batchRequestBody, ']');	/* close updates array */
+		appendStringInfoChar(batchRequestBody, '}');	/* close per-table json
+														 * object */
+
+		/*
+		 * We have at least one change to send for this table
+		 */
+		hasRestCatalogChanges = true;
 	}
 
-	/*
-	 * Group by (host, catalogName) and send one batch per group.  The
-	 * transaction commit URL includes the catalog prefix, so tables under
-	 * different catalog names need separate commits even when the host is
-	 * the same.
-	 */
-	while (list_length(tablesWithModifications) > 0)
+	if (hasRestCatalogChanges)
 	{
-		RestCatalogRequestPerTable *firstTable =
-			(RestCatalogRequestPerTable *) linitial(tablesWithModifications);
+		appendStringInfoChar(batchRequestBody, ']');	/* close table-changes */
+		appendStringInfoChar(batchRequestBody, '}');	/* close json body */
 
-		char	   *batchHost = firstTable->conn->host;
-		char	   *catalogName = firstTable->catalogName;
-		RestCatalogConnectionInfo *batchConn = firstTable->conn;
-		bool		hasChanges = false;
-		StringInfo	batchRequestBody = makeStringInfo();
+		char	   *url = psprintf(REST_CATALOG_TRANSACTION_COMMIT,
+								   PgLakeXactRestCatalogOpts->host, catalogName);
+		HttpResult	httpResult = SendRequestToRestCatalog(HTTP_POST, url, batchRequestBody->data,
+														  PostHeadersWithAuth(PgLakeXactRestCatalogOpts),
+														  PgLakeXactRestCatalogOpts);
 
-		appendStringInfoChar(batchRequestBody, '{');
-		appendJsonKey(batchRequestBody, "table-changes");
-		appendStringInfoChar(batchRequestBody, '[');
-
-		List	   *remaining = NIL;
-		ListCell   *lc;
-
-		foreach(lc, tablesWithModifications)
+		if (httpResult.status != 204)
 		{
-			requestPerTable = (RestCatalogRequestPerTable *) lfirst(lc);
-
-			if (strcmp(requestPerTable->conn->host, batchHost) != 0 ||
-				strcmp(requestPerTable->catalogName, catalogName) != 0)
-			{
-				remaining = lappend(remaining, requestPerTable);
-				continue;
-			}
-
-			if (hasChanges)
-				appendStringInfoChar(batchRequestBody, ',');
-
-			appendStringInfoChar(batchRequestBody, '{');
-			appendJsonKey(batchRequestBody, "identifier");
-			appendStringInfo(batchRequestBody, "%s", requestPerTable->tableIdentifier);
-			appendStringInfoChar(batchRequestBody, ',');
-			appendStringInfoString(batchRequestBody, "\"requirements\":[],");
-			appendStringInfoString(batchRequestBody, " \"updates\":[");
-
-			ListCell   *requestCell = NULL;
-
-			foreach(requestCell, requestPerTable->tableModifyRequests)
-			{
-				RestCatalogRequest *request = (RestCatalogRequest *) lfirst(requestCell);
-
-				appendStringInfoString(batchRequestBody, request->body);
-
-				if (requestCell != list_tail(requestPerTable->tableModifyRequests))
-					appendStringInfoChar(batchRequestBody, ',');
-
-				if (message_level_is_interesting(DEBUG2))
-				{
-					elog(DEBUG2, "REST Catalog Request Body size reached: %d bytes",
-						 batchRequestBody->len);
-				}
-			}
-
-			appendStringInfoChar(batchRequestBody, ']');
-			appendStringInfoChar(batchRequestBody, '}');
-			hasChanges = true;
+			ReportHTTPError(httpResult, WARNING);
 		}
-
-		if (hasChanges)
-		{
-			appendStringInfoChar(batchRequestBody, ']');
-			appendStringInfoChar(batchRequestBody, '}');
-
-			char	   *url = psprintf(REST_CATALOG_TRANSACTION_COMMIT, batchConn->host, catalogName);
-			HttpResult	httpResult = SendRequestToRestCatalog(HTTP_POST, url, batchRequestBody->data,
-															 PostHeadersWithAuth(batchConn),
-															 batchConn->serverName);
-
-			if (httpResult.status != 204)
-			{
-				ReportHTTPError(httpResult, WARNING);
-			}
-		}
-
-		tablesWithModifications = remaining;
 	}
 
 	/*
@@ -632,24 +619,39 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 		memset(requestPerTable, 0, sizeof(RestCatalogRequestPerTable));
 		requestPerTable->relationId = relationId;
 
-		/* Resolve per-table REST catalog connection info */
-		RestCatalogConnectionInfo *conn = GetRestCatalogConnectionForRelation(relationId);
-		RestCatalogConnectionInfo *persistConn =
-			MemoryContextAlloc(TopTransactionContext, sizeof(RestCatalogConnectionInfo));
+		/* Resolve the options for this relation's REST catalog */
+		RestCatalogOptions *resolvedOpts = GetRestCatalogOptionsForRelation(relationId);
 
-		memcpy(persistConn, conn, sizeof(RestCatalogConnectionInfo));
-		if (conn->serverName)
-			persistConn->serverName = MemoryContextStrdup(TopTransactionContext, conn->serverName);
-		persistConn->host = MemoryContextStrdup(TopTransactionContext, conn->host);
-		if (conn->oauthHostPath)
-			persistConn->oauthHostPath = MemoryContextStrdup(TopTransactionContext, conn->oauthHostPath);
-		if (conn->clientId)
-			persistConn->clientId = MemoryContextStrdup(TopTransactionContext, conn->clientId);
-		if (conn->clientSecret)
-			persistConn->clientSecret = MemoryContextStrdup(TopTransactionContext, conn->clientSecret);
-		if (conn->scope)
-			persistConn->scope = MemoryContextStrdup(TopTransactionContext, conn->scope);
-		requestPerTable->conn = persistConn;
+		if (PgLakeXactRestCatalogOpts == NULL)
+		{
+			/*
+			 * Deep-copy opts into TopTransactionContext so the struct and its
+			 * string fields survive until XACT_EVENT_COMMIT.
+			 */
+			MemoryContext oldctx = MemoryContextSwitchTo(TopTransactionContext);
+
+			PgLakeXactRestCatalogOpts = palloc0(sizeof(RestCatalogOptions));
+			PgLakeXactRestCatalogOpts->serverName = pstrdup(resolvedOpts->serverName);
+			PgLakeXactRestCatalogOpts->host = pstrdup(resolvedOpts->host);
+			PgLakeXactRestCatalogOpts->oauthHostPath = resolvedOpts->oauthHostPath ? pstrdup(resolvedOpts->oauthHostPath) : NULL;
+			PgLakeXactRestCatalogOpts->clientId = resolvedOpts->clientId ? pstrdup(resolvedOpts->clientId) : NULL;
+			PgLakeXactRestCatalogOpts->clientSecret = resolvedOpts->clientSecret ? pstrdup(resolvedOpts->clientSecret) : NULL;
+			PgLakeXactRestCatalogOpts->scope = resolvedOpts->scope ? pstrdup(resolvedOpts->scope) : NULL;
+			PgLakeXactRestCatalogOpts->locationPrefix = resolvedOpts->locationPrefix ? pstrdup(resolvedOpts->locationPrefix) : NULL;
+			PgLakeXactRestCatalogOpts->authType = resolvedOpts->authType;
+			PgLakeXactRestCatalogOpts->enableVendedCredentials = resolvedOpts->enableVendedCredentials;
+
+			MemoryContextSwitchTo(oldctx);
+		}
+		else if (strcmp(PgLakeXactRestCatalogOpts->serverName, resolvedOpts->serverName) != 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot modify tables from different REST catalogs "
+							"in the same transaction"),
+					 errdetail("This transaction already targets catalog server "
+							   "\"%s\", but table %u belongs to \"%s\".",
+							   PgLakeXactRestCatalogOpts->serverName, relationId,
+							   resolvedOpts->serverName)));
 
 		requestPerTable->catalogName =
 			MemoryContextStrdup(TopTransactionContext, GetRestCatalogName(relationId));
@@ -667,7 +669,7 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 
 		requestPerTable->tableRestUrl =
 			MemoryContextStrdup(TopTransactionContext, psprintf(REST_CATALOG_TABLE,
-																persistConn->host,
+																resolvedOpts->host,
 																requestPerTable->urlEncodedCatalogName,
 																requestPerTable->urlEncodedCatalogNamespace,
 																requestPerTable->urlEncodedCatalogTableName));

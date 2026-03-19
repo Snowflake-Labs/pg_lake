@@ -50,7 +50,7 @@ extern bool HttpClientTraceTraffic;
 #define HTTP_STATUS_SERVICE_UNAVAILABLE	503
 
 /* Callback function to determine if a request should be retried */
-typedef bool (*HttpRetryFn) (long status, int maxRetry, int retryNo);
+typedef bool (*HttpRetryFn) (long status, int maxRetry, int retryNo, void *context, List *headers);
 
 /* plain C API (no PostgreSQL types) */
 extern PGDLLEXPORT HttpResult HttpGet(const char *url, List *headers);
@@ -60,5 +60,6 @@ extern PGDLLEXPORT HttpResult HttpDelete(const char *url, List *headers);
 extern PGDLLEXPORT HttpResult HttpPut(const char *url, const char *body, List *headers);
 extern PGDLLEXPORT HttpResult SendHttpRequest(HttpMethod method, const char *url, const char *body, List *headers);
 extern PGDLLEXPORT HttpResult SendHttpRequestWithRetry(HttpMethod method, const char *url, const char *body,
-													   List *headers, HttpRetryFn retryFn, int maxRetry);
+													   List *headers, HttpRetryFn retryFn, int maxRetry,
+													   void *retryContext);
 extern PGDLLEXPORT int LinearBackoffSleepMs(int baseMs, int retryNo);

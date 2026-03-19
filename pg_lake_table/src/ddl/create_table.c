@@ -766,13 +766,13 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		if (hasRestCatalogOption && hasExternalCatalogReadOnlyOption)
 		{
 			char	   *catalogOptionValue = GetStringOption(createStmt->options, "catalog", false);
-			RestCatalogConnectionInfo *conn =
-				GetRestCatalogConnectionFromServer(catalogOptionValue);
+			RestCatalogOptions *opts =
+				GetRestCatalogOptionsFromServer(catalogOptionValue);
 
-			ErrorIfRestNamespaceDoesNotExist(conn, catalogName, catalogNamespace);
+			ErrorIfRestNamespaceDoesNotExist(opts, catalogName, catalogNamespace);
 
 			metadataLocation =
-				GetMetadataLocationFromRestCatalog(conn, catalogName, catalogNamespace, catalogTableName);
+				GetMetadataLocationFromRestCatalog(opts, catalogName, catalogNamespace, catalogTableName);
 		}
 		else if (hasObjectStoreCatalogOption && hasExternalCatalogReadOnlyOption)
 		{
@@ -884,6 +884,18 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 										 "tables");
 	}
 
+	if (hasRestCatalogOption && locationOption == NULL &&
+		!HasReadOnlyOption(createStmt->options))
+	{
+		char	   *catalogOptionValue =
+			GetStringOption(createStmt->options, "catalog", false);
+		RestCatalogOptions *opts =
+			GetRestCatalogOptionsFromServer(catalogOptionValue);
+
+		if (opts->locationPrefix != NULL)
+			defaultLocationPrefix = opts->locationPrefix;
+	}
+
 	/*
 	 * We will set the location by using the default location prefix when user
 	 * does not specify the location but already set default locatipn prefix.
@@ -978,10 +990,10 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		 * etc., but here we need to do it early before the table is created.
 		 */
 		char	   *catalogOptionValue = GetStringOption(createStmt->options, "catalog", false);
-		RestCatalogConnectionInfo *conn =
-			GetRestCatalogConnectionFromServer(catalogOptionValue);
+		RestCatalogOptions *opts =
+			GetRestCatalogOptionsFromServer(catalogOptionValue);
 
-		RegisterNamespaceToRestCatalog(conn, get_database_name(MyDatabaseId),
+		RegisterNamespaceToRestCatalog(opts, get_database_name(MyDatabaseId),
 									   get_namespace_name(namespaceId));
 	}
 

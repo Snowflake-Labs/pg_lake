@@ -61,21 +61,23 @@ def test_precreated_rest_server(pg_conn, extension):
 
 
 def test_create_rest_server_with_all_options(superuser_conn, extension):
-    """All documented options should be accepted for a REST-type server."""
+    """All documented options should be accepted for a REST-type server.
+    Uses a mix of quoted upper-case and plain lower-case option names to
+    verify case-insensitive matching."""
     run_command(
         """
         CREATE SERVER test_rest_all_opts TYPE 'rest'
             FOREIGN DATA WRAPPER iceberg_catalog
             OPTIONS (
-                rest_endpoint 'http://localhost:8181',
-                rest_auth_type 'oauth2',
-                oauth_endpoint 'http://localhost:8181/oauth/tokens',
+                "Rest_Endpoint" 'http://localhost:8181',
+                "REST_AUTH_TYPE" 'OAuth2',
+                "OAuth_Endpoint" 'http://localhost:8181/oauth/tokens',
                 scope 'PRINCIPAL_ROLE:ALL',
                 enable_vended_credentials 'true',
-                location_prefix 's3://bucket/prefix',
+                "Location_Prefix" 's3://bucket/prefix',
                 catalog_name 'my_catalog',
-                client_id 'test-id',
-                client_secret 'test-secret'
+                "Client_Id" 'test-id',
+                "Client_Secret" 'test-secret'
             )
         """,
         superuser_conn,
@@ -88,19 +90,6 @@ def test_create_rest_server_minimal(superuser_conn, extension):
     run_command(
         """
         CREATE SERVER test_rest_minimal TYPE 'rest'
-            FOREIGN DATA WRAPPER iceberg_catalog
-            OPTIONS (rest_endpoint 'http://localhost:8181')
-        """,
-        superuser_conn,
-    )
-    superuser_conn.rollback()
-
-
-def test_create_server_without_type(superuser_conn, extension):
-    """A server without TYPE should be accepted (defaults to rest)."""
-    run_command(
-        """
-        CREATE SERVER test_no_type
             FOREIGN DATA WRAPPER iceberg_catalog
             OPTIONS (rest_endpoint 'http://localhost:8181')
         """,
@@ -390,42 +379,6 @@ def test_non_iceberg_catalog_server_rejected(
     pg_conn.rollback()
 
 
-def test_server_without_type_treated_as_rest(
-    pg_conn, superuser_conn, s3, extension, with_default_location
-):
-    """A server without explicit TYPE should default to rest catalog behavior."""
-    run_command(
-        """
-        CREATE SERVER test_no_type_srv
-            FOREIGN DATA WRAPPER iceberg_catalog
-            OPTIONS (
-                rest_endpoint 'http://localhost:8181',
-                client_id 'id',
-                client_secret 'secret'
-            )
-        """,
-        superuser_conn,
-    )
-    superuser_conn.commit()
-
-    err = run_command(
-        """
-        CREATE TABLE test_no_type_tbl ()
-            USING iceberg
-            WITH (catalog = 'test_no_type_srv', read_only = 'true',
-                  catalog_namespace = 'ns', catalog_table_name = 'tbl')
-        """,
-        pg_conn,
-        raise_error=False,
-    )
-    # Should be treated as REST, not rejected as invalid catalog
-    assert "invalid catalog option" not in str(err)
-    pg_conn.rollback()
-
-    run_command("DROP SERVER test_no_type_srv CASCADE", superuser_conn)
-    superuser_conn.commit()
-
-
 # ── Backward compatibility ─────────────────────────────────────────────────
 
 
@@ -515,6 +468,36 @@ def test_reject_create_server_type_object_store(superuser_conn, extension):
     )
     assert err is not None
     assert "cannot create iceberg_catalog server with TYPE 'object_store'" in str(err)
+    superuser_conn.rollback()
+
+
+def test_reject_create_server_non_rest_type(superuser_conn, extension):
+    """Any TYPE other than 'rest' is rejected for user-created iceberg_catalog servers."""
+    err = run_command(
+        """
+        CREATE SERVER my_server TYPE 'something_else'
+            FOREIGN DATA WRAPPER iceberg_catalog
+        """,
+        superuser_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert "iceberg_catalog server requires TYPE 'rest'" in str(err)
+    superuser_conn.rollback()
+
+
+def test_reject_create_server_without_type(superuser_conn, extension):
+    """CREATE SERVER without TYPE is rejected for iceberg_catalog servers."""
+    err = run_command(
+        """
+        CREATE SERVER my_server
+            FOREIGN DATA WRAPPER iceberg_catalog
+        """,
+        superuser_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert "iceberg_catalog server requires TYPE 'rest'" in str(err)
     superuser_conn.rollback()
 
 
@@ -766,4 +749,87 @@ def test_allow_owner_change_user_created_server(superuser_conn, extension):
         "ALTER SERVER user_owner_srv OWNER TO CURRENT_USER",
         superuser_conn,
     )
+    superuser_conn.rollback()
+
+
+# ── default_catalog GUC with user-created servers ──────────────────────────
+
+
+def test_set_default_catalog_to_user_created_rest_server(superuser_conn, extension):
+    """SET pg_lake_iceberg.default_catalog should accept a user-created
+    iceberg_catalog server with TYPE 'rest'."""
+    run_command(
+        """
+        CREATE SERVER my_rest_catalog TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+
+    run_command(
+        "SET pg_lake_iceberg.default_catalog = 'my_rest_catalog'",
+        superuser_conn,
+    )
+
+    result = run_query(
+        "SHOW pg_lake_iceberg.default_catalog",
+        superuser_conn,
+    )
+    assert result[0]["pg_lake_iceberg.default_catalog"] == "my_rest_catalog"
+    superuser_conn.rollback()
+
+
+def test_set_default_catalog_rejects_nonexistent_server(pg_conn, extension):
+    """SET pg_lake_iceberg.default_catalog should reject a name that is
+    neither a built-in literal nor an existing server."""
+    err = run_command(
+        "SET pg_lake_iceberg.default_catalog = 'no_such_server'",
+        pg_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert "user-created iceberg_catalog server" in str(err)
+    pg_conn.rollback()
+
+
+# ── Case-sensitive server names ────────────────────────────────────────────
+
+
+def test_case_sensitive_server_names(superuser_conn, extension):
+    """Server names are case-sensitive: "test_cs" and "TEST_CS" are distinct
+    servers that can coexist with different options."""
+    run_command(
+        """
+        CREATE SERVER test_cs TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://host-lower:8181')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        """
+        CREATE SERVER "TEST_CS" TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://host-upper:8181')
+        """,
+        superuser_conn,
+    )
+
+    lower_opts = run_query(
+        "SELECT srvoptions FROM pg_foreign_server WHERE srvname = 'test_cs'",
+        superuser_conn,
+    )
+    upper_opts = run_query(
+        "SELECT srvoptions FROM pg_foreign_server WHERE srvname = 'TEST_CS'",
+        superuser_conn,
+    )
+
+    assert len(lower_opts) == 1
+    assert len(upper_opts) == 1
+    assert "host-lower" in str(lower_opts[0]["srvoptions"])
+    assert "host-upper" in str(upper_opts[0]["srvoptions"])
+
+    run_command("DROP SERVER test_cs", superuser_conn)
+    run_command('DROP SERVER "TEST_CS"', superuser_conn)
     superuser_conn.rollback()

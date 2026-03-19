@@ -37,8 +37,8 @@ register_namespace_to_rest_catalog(PG_FUNCTION_ARGS)
 	char	   *catalogName = text_to_cstring(PG_GETARG_TEXT_P(0));
 	char	   *namespaceName = text_to_cstring(PG_GETARG_TEXT_P(1));
 
-	RestCatalogConnectionInfo *conn = GetRestCatalogConnectionFromServer(REST_CATALOG_NAME);
+	RestCatalogOptions *opts = GetRestCatalogOptionsFromServer(REST_CATALOG_NAME);
 
-	RegisterNamespaceToRestCatalog(conn, catalogName, namespaceName);
+	RegisterNamespaceToRestCatalog(opts, catalogName, namespaceName);
 	PG_RETURN_VOID();
 }
