@@ -2577,7 +2577,8 @@ postgresIsForeignRelUpdatable(Relation rel)
 
 /*
  * TupleDescNeedsIcebergValidation returns true if any non-dropped column
- * is temporal or numeric (i.e. requires IcebergErrorOrClampDatum processing).
+ * contains a type that requires Iceberg write validation, recursing into
+ * arrays, composites, maps, and domains.
  */
 static bool
 TupleDescNeedsIcebergValidation(TupleDesc tupleDesc)
@@ -2589,7 +2590,7 @@ TupleDescNeedsIcebergValidation(TupleDesc tupleDesc)
 		if (attr->attisdropped)
 			continue;
 
-		if (IsTemporalType(attr->atttypid) || attr->atttypid == NUMERICOID)
+		if (TypeContainsValidatable(attr->atttypid))
 			return true;
 	}
 
@@ -2599,7 +2600,8 @@ TupleDescNeedsIcebergValidation(TupleDesc tupleDesc)
 
 /*
  * IcebergErrorOrClampSlotInPlace clamps or rejects out-of-range temporal and numeric
- * values in the slot, modifying it in-place.
+ * values in the slot, modifying it in-place.  Handles nested types (arrays,
+ * composites, maps, domains) via IcebergErrorOrClampDatum's recursive validation.
  */
 static void
 IcebergErrorOrClampSlotInPlace(TupleTableSlot *slot, TupleDesc tupleDesc,
@@ -2616,7 +2618,7 @@ IcebergErrorOrClampSlotInPlace(TupleTableSlot *slot, TupleDesc tupleDesc,
 		if (attr->attisdropped || slot->tts_isnull[i])
 			continue;
 
-		if (!IsTemporalType(attr->atttypid) && attr->atttypid != NUMERICOID)
+		if (!TypeContainsValidatable(attr->atttypid))
 			continue;
 
 		bool		isNull = false;
@@ -2625,14 +2627,6 @@ IcebergErrorOrClampSlotInPlace(TupleTableSlot *slot, TupleDesc tupleDesc,
 													   policy,
 													   &isNull);
 
-		/*
-		 * Safe to assign directly: - temporal types
-		 * (date/timestamp/timestamptz) are pass-by-value, so clamped values
-		 * need no detoasting or copying. - numeric is pass-by-reference, but
-		 * the clamp function either returns the original datum unchanged or
-		 * sets isNull = true (NaN case), so no new allocation needs to be
-		 * managed.
-		 */
 		slot->tts_values[i] = clamped;
 		slot->tts_isnull[i] = isNull;
 	}

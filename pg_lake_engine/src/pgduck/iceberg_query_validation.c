@@ -37,7 +37,10 @@
 #include "access/tupdesc.h"
 #include "catalog/pg_type.h"
 #include "pg_lake/pgduck/iceberg_query_validation.h"
+#include "pg_lake/pgduck/map.h"
 #include "utils/builtins.h"
+#include "utils/lsyscache.h"
+#include "utils/typcache.h"
 
 
 /* SQL literal boundaries for the query wrapper */
@@ -48,14 +51,19 @@
 #define ICEBERG_TIMESTAMPTZ_MIN_LITERAL		"TIMESTAMPTZ '0001-01-01 00:00:00+00'"
 #define ICEBERG_TIMESTAMPTZ_MAX_LITERAL		"TIMESTAMPTZ '9999-12-31 23:59:59.999999+00'"
 
+static bool TypeContainsTemporal(Oid typeOid);
 static bool TupleDescHasTemporalColumn(TupleDesc tupleDesc);
 static void GetTemporalLiterals(Oid typeOid,
 								const char **minLiteral, const char **maxLiteral,
 								const char **typeName, const char **errLabel);
-static void AppendClampExpression(StringInfo buf, const char *quotedName,
+static void AppendClampExpression(StringInfo buf, const char *expr,
 								  Oid typeOid);
-static void AppendErrorExpression(StringInfo buf, const char *quotedName,
+static void AppendErrorExpression(StringInfo buf, const char *expr,
 								  Oid typeOid);
+static bool AppendTemporalValidationExpression(StringInfo buf, const char *expr,
+											   Oid typeOid, int32 typmod,
+											   IcebergOutOfRangePolicy policy,
+											   int depth);
 
 
 /* ================================================================
@@ -63,8 +71,67 @@ static void AppendErrorExpression(StringInfo buf, const char *quotedName,
  * ================================================================ */
 
 /*
+ * TypeContainsTemporal recursively checks whether a type contains
+ * any temporal component (date/timestamp/timestamptz), including
+ * inside arrays, composites, maps, and domains.
+ */
+static bool
+TypeContainsTemporal(Oid typeOid)
+{
+	if (IsTemporalType(typeOid))
+		return true;
+
+	Oid			elemType = get_element_type(typeOid);
+
+	if (OidIsValid(elemType))
+		return TypeContainsTemporal(elemType);
+
+	/* map check must precede the generic domain unwrap (maps are domains) */
+	if (IsMapTypeOid(typeOid))
+	{
+		PGType		keyType = GetMapKeyType(typeOid);
+		PGType		valType = GetMapValueType(typeOid);
+
+		return TypeContainsTemporal(keyType.postgresTypeOid) ||
+			TypeContainsTemporal(valType.postgresTypeOid);
+	}
+
+	char		typtype = get_typtype(typeOid);
+
+	if (typtype == TYPTYPE_DOMAIN)
+		return TypeContainsTemporal(getBaseType(typeOid));
+
+	if (typtype == TYPTYPE_COMPOSITE)
+	{
+		TupleDesc	tupdesc = lookup_rowtype_tupdesc(typeOid, -1);
+		bool		found = false;
+
+		for (int i = 0; i < tupdesc->natts; i++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+			if (attr->attisdropped)
+				continue;
+
+			if (TypeContainsTemporal(attr->atttypid))
+			{
+				found = true;
+				break;
+			}
+		}
+
+		ReleaseTupleDesc(tupdesc);
+		return found;
+	}
+
+	return false;
+}
+
+
+/*
  * TupleDescHasTemporalColumn returns true if any non-dropped column
- * in the tuple descriptor is a temporal type.
+ * in the tuple descriptor contains a temporal type, recursing into
+ * nested types (arrays, composites, maps, domains).
  */
 static bool
 TupleDescHasTemporalColumn(TupleDesc tupleDesc)
@@ -76,7 +143,7 @@ TupleDescHasTemporalColumn(TupleDesc tupleDesc)
 		if (attr->attisdropped)
 			continue;
 
-		if (IsTemporalType(attr->atttypid))
+		if (TypeContainsTemporal(attr->atttypid))
 			return true;
 	}
 
@@ -170,6 +237,170 @@ AppendErrorExpression(StringInfo buf, const char *quotedName, Oid typeOid)
 
 
 /*
+ * AppendTemporalValidationExpression recursively generates DuckDB SQL
+ * that applies temporal boundary validation to an expression of the
+ * given type.  Handles scalars, arrays (list_transform), composites
+ * (struct_pack), maps (map_from_entries + list_transform), and domains.
+ *
+ * Returns true if a transformed expression was written to buf, false
+ * if the type contains no temporal component (caller should use the
+ * original expression).
+ *
+ * The depth parameter controls lambda variable naming (_x0, _x1, ...)
+ * to avoid shadowing in nested list_transform calls.
+ */
+static bool
+AppendTemporalValidationExpression(StringInfo buf, const char *expr,
+								   Oid typeOid, int32 typmod,
+								   IcebergOutOfRangePolicy policy,
+								   int depth)
+{
+	/* scalar temporal types: emit CASE WHEN expression directly */
+	if (IsTemporalType(typeOid))
+	{
+		if (policy == ICEBERG_OOR_CLAMP)
+			AppendClampExpression(buf, expr, typeOid);
+		else
+			AppendErrorExpression(buf, expr, typeOid);
+		return true;
+	}
+
+	/* array types: wrap elements via list_transform */
+	Oid			elemType = get_element_type(typeOid);
+
+	if (OidIsValid(elemType))
+	{
+		if (!TypeContainsTemporal(elemType))
+			return false;
+
+		char	   *lambdaVar = psprintf("_x%d", depth);
+
+		appendStringInfo(buf, "list_transform(%s, %s -> ", expr, lambdaVar);
+		AppendTemporalValidationExpression(buf, lambdaVar, elemType, -1,
+										   policy, depth + 1);
+		appendStringInfoChar(buf, ')');
+		return true;
+	}
+
+	/* map check must precede the generic domain unwrap (maps are domains) */
+	if (IsMapTypeOid(typeOid))
+	{
+		PGType		keyType = GetMapKeyType(typeOid);
+		PGType		valType = GetMapValueType(typeOid);
+		bool		keyHasTemporal = TypeContainsTemporal(keyType.postgresTypeOid);
+		bool		valHasTemporal = TypeContainsTemporal(valType.postgresTypeOid);
+
+		if (!keyHasTemporal && !valHasTemporal)
+			return false;
+
+		char	   *lambdaVar = psprintf("_x%d", depth);
+
+		appendStringInfo(buf,
+						 "map_from_entries(list_transform(map_entries(%s), %s -> struct_pack(key := ",
+						 expr, lambdaVar);
+
+		char	   *keyExpr = psprintf("%s.key", lambdaVar);
+
+		if (keyHasTemporal)
+			AppendTemporalValidationExpression(buf, keyExpr,
+											   keyType.postgresTypeOid,
+											   keyType.postgresTypeMod,
+											   policy, depth + 1);
+		else
+			appendStringInfoString(buf, keyExpr);
+
+		appendStringInfoString(buf, ", value := ");
+
+		char	   *valExpr = psprintf("%s.value", lambdaVar);
+
+		if (valHasTemporal)
+			AppendTemporalValidationExpression(buf, valExpr,
+											   valType.postgresTypeOid,
+											   valType.postgresTypeMod,
+											   policy, depth + 1);
+		else
+			appendStringInfoString(buf, valExpr);
+
+		appendStringInfoString(buf, ")))");
+		return true;
+	}
+
+	/* domain (non-map): unwrap to base type and recurse */
+	char		typtype = get_typtype(typeOid);
+
+	if (typtype == TYPTYPE_DOMAIN)
+	{
+		Oid			baseType = getBaseTypeAndTypmod(typeOid, &typmod);
+
+		return AppendTemporalValidationExpression(buf, expr, baseType, typmod,
+												  policy, depth);
+	}
+
+	/* composite types: transform fields via struct_pack */
+	if (typtype == TYPTYPE_COMPOSITE)
+	{
+		TupleDesc	tupdesc = lookup_rowtype_tupdesc(typeOid, -1);
+		bool		anyFieldNeedsTransform = false;
+
+		for (int i = 0; i < tupdesc->natts; i++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+			if (attr->attisdropped)
+				continue;
+
+			if (TypeContainsTemporal(attr->atttypid))
+			{
+				anyFieldNeedsTransform = true;
+				break;
+			}
+		}
+
+		if (!anyFieldNeedsTransform)
+		{
+			ReleaseTupleDesc(tupdesc);
+			return false;
+		}
+
+		appendStringInfoString(buf, "struct_pack(");
+
+		bool		firstField = true;
+
+		for (int i = 0; i < tupdesc->natts; i++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+			if (attr->attisdropped)
+				continue;
+
+			if (!firstField)
+				appendStringInfoString(buf, ", ");
+
+			const char *fieldName = NameStr(attr->attname);
+			const char *quotedField = quote_identifier(fieldName);
+			char	   *fieldExpr = psprintf("%s.%s", expr, quotedField);
+
+			appendStringInfo(buf, "%s := ", quotedField);
+
+			if (!AppendTemporalValidationExpression(buf, fieldExpr,
+													attr->atttypid,
+													attr->atttypmod,
+													policy, depth))
+				appendStringInfoString(buf, fieldExpr);
+
+			firstField = false;
+		}
+
+		appendStringInfoChar(buf, ')');
+		ReleaseTupleDesc(tupdesc);
+		return true;
+	}
+
+	return false;
+}
+
+
+/*
  * IcebergWrapQueryWithErrorOrClampChecks wraps a query string with an
  * outer SELECT that applies CASE WHEN checks to temporal columns
  * (date/timestamp/timestamptz) for Iceberg boundary enforcement.
@@ -225,19 +456,23 @@ IcebergWrapQueryWithErrorOrClampChecks(char *query, TupleDesc tupleDesc,
 
 		const char *quotedName = quote_identifier(NameStr(attr->attname));
 
-		if (IsTemporalType(attr->atttypid))
-		{
-			if (policy == ICEBERG_OOR_CLAMP)
-				AppendClampExpression(&wrapped, quotedName, attr->atttypid);
-			else
-				AppendErrorExpression(&wrapped, quotedName, attr->atttypid);
+		StringInfoData exprBuf;
 
-			appendStringInfo(&wrapped, " AS %s", quotedName);
+		initStringInfo(&exprBuf);
+
+		if (AppendTemporalValidationExpression(&exprBuf, quotedName,
+											   attr->atttypid,
+											   attr->atttypmod,
+											   policy, 0))
+		{
+			appendStringInfo(&wrapped, "%s AS %s", exprBuf.data, quotedName);
 		}
 		else
 		{
 			appendStringInfoString(&wrapped, quotedName);
 		}
+
+		pfree(exprBuf.data);
 
 		firstColumn = false;
 	}
