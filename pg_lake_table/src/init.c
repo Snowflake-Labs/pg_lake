@@ -368,6 +368,7 @@ _PG_init(void)
 
 	MarkGUCPrefixReserved(PG_LAKE_TABLE);
 
+	RegisterUtilityStatementHandler(RequireRestTypeForIcebergCatalogServer, NULL);
 	RegisterUtilityStatementHandler(BlockDDLOnExtensionCatalogs, NULL);
 	RegisterUtilityStatementHandler(ProcessVacuumPgLakeTable, NULL);
 	RegisterUtilityStatementHandler(ProcessCreatePgLakeTable, NULL);

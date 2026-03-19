@@ -35,6 +35,8 @@
 #include "pg_lake/iceberg/operations/vacuum.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
+#include "pg_lake/util/catalog_type.h"
+#include "access/xact.h"
 
 #define GUC_STANDARD 0
 
@@ -372,8 +374,16 @@ IcebergDefaultCatalogCheckHook(char **newvalue, void **extra, GucSource source)
 		pg_strcasecmp(newCatalog, OBJECT_STORE_CATALOG_NAME) == 0)
 		return true;
 
+	/*
+	 * When catalog access is available, also accept user-created
+	 * iceberg_catalog foreign servers with TYPE 'rest'.
+	 */
+	if (IsTransactionState() && IsRestCatalog(newCatalog))
+		return true;
+
 	GUC_check_errdetail("pg_lake_iceberg: allowed iceberg catalog options are '" POSTGRES_CATALOG_NAME "', "
-						" '" REST_CATALOG_NAME "' and '" OBJECT_STORE_CATALOG_NAME "'");
+						"'" REST_CATALOG_NAME "', '" OBJECT_STORE_CATALOG_NAME
+						"', or the name of a user-created iceberg_catalog server with TYPE 'rest'");
 
 	return false;
 }
