@@ -51,7 +51,6 @@
 #define ICEBERG_TIMESTAMPTZ_MIN_LITERAL		"TIMESTAMPTZ '0001-01-01 00:00:00+00'"
 #define ICEBERG_TIMESTAMPTZ_MAX_LITERAL		"TIMESTAMPTZ '9999-12-31 23:59:59.999999+00'"
 
-static bool TypeContainsTemporal(Oid typeOid);
 static bool TupleDescHasTemporalColumn(TupleDesc tupleDesc);
 static void GetTemporalLiterals(Oid typeOid,
 								const char **minLiteral, const char **maxLiteral,
@@ -71,64 +70,6 @@ static bool AppendTemporalValidationExpression(StringInfo buf, const char *expr,
  * ================================================================ */
 
 /*
- * TypeContainsTemporal recursively checks whether a type contains
- * any temporal component (date/timestamp/timestamptz), including
- * inside arrays, composites, maps, and domains.
- */
-static bool
-TypeContainsTemporal(Oid typeOid)
-{
-	if (IsTemporalType(typeOid))
-		return true;
-
-	Oid			elemType = get_element_type(typeOid);
-
-	if (OidIsValid(elemType))
-		return TypeContainsTemporal(elemType);
-
-	/* map check must precede the generic domain unwrap (maps are domains) */
-	if (IsMapTypeOid(typeOid))
-	{
-		PGType		keyType = GetMapKeyType(typeOid);
-		PGType		valType = GetMapValueType(typeOid);
-
-		return TypeContainsTemporal(keyType.postgresTypeOid) ||
-			TypeContainsTemporal(valType.postgresTypeOid);
-	}
-
-	char		typtype = get_typtype(typeOid);
-
-	if (typtype == TYPTYPE_DOMAIN)
-		return TypeContainsTemporal(getBaseType(typeOid));
-
-	if (typtype == TYPTYPE_COMPOSITE)
-	{
-		TupleDesc	tupdesc = lookup_rowtype_tupdesc(typeOid, -1);
-		bool		found = false;
-
-		for (int i = 0; i < tupdesc->natts; i++)
-		{
-			Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
-
-			if (attr->attisdropped)
-				continue;
-
-			if (TypeContainsTemporal(attr->atttypid))
-			{
-				found = true;
-				break;
-			}
-		}
-
-		ReleaseTupleDesc(tupdesc);
-		return found;
-	}
-
-	return false;
-}
-
-
-/*
  * TupleDescHasTemporalColumn returns true if any non-dropped column
  * in the tuple descriptor contains a temporal type, recursing into
  * nested types (arrays, composites, maps, domains).
@@ -143,7 +84,7 @@ TupleDescHasTemporalColumn(TupleDesc tupleDesc)
 		if (attr->attisdropped)
 			continue;
 
-		if (TypeContainsTemporal(attr->atttypid))
+		if (TypeNeedsIcebergValidation(attr->atttypid, true))
 			return true;
 	}
 
@@ -270,7 +211,7 @@ AppendTemporalValidationExpression(StringInfo buf, const char *expr,
 
 	if (OidIsValid(elemType))
 	{
-		if (!TypeContainsTemporal(elemType))
+		if (!TypeNeedsIcebergValidation(elemType, true))
 			return false;
 
 		char	   *lambdaVar = psprintf("_x%d", depth);
@@ -287,8 +228,8 @@ AppendTemporalValidationExpression(StringInfo buf, const char *expr,
 	{
 		PGType		keyType = GetMapKeyType(typeOid);
 		PGType		valType = GetMapValueType(typeOid);
-		bool		keyHasTemporal = TypeContainsTemporal(keyType.postgresTypeOid);
-		bool		valHasTemporal = TypeContainsTemporal(valType.postgresTypeOid);
+		bool		keyHasTemporal = TypeNeedsIcebergValidation(keyType.postgresTypeOid, true);
+		bool		valHasTemporal = TypeNeedsIcebergValidation(valType.postgresTypeOid, true);
 
 		if (!keyHasTemporal && !valHasTemporal)
 			return false;
@@ -349,7 +290,7 @@ AppendTemporalValidationExpression(StringInfo buf, const char *expr,
 			if (attr->attisdropped)
 				continue;
 
-			if (TypeContainsTemporal(attr->atttypid))
+			if (TypeNeedsIcebergValidation(attr->atttypid, true))
 			{
 				anyFieldNeedsTransform = true;
 				break;
@@ -362,7 +303,7 @@ AppendTemporalValidationExpression(StringInfo buf, const char *expr,
 			return false;
 		}
 
-		appendStringInfoString(buf, "struct_pack(");
+		appendStringInfo(buf, "CASE WHEN %s IS NOT NULL THEN struct_pack(", expr);
 
 		bool		firstField = true;
 
@@ -391,7 +332,7 @@ AppendTemporalValidationExpression(StringInfo buf, const char *expr,
 			firstField = false;
 		}
 
-		appendStringInfoChar(buf, ')');
+		appendStringInfoString(buf, ") ELSE NULL END");
 		ReleaseTupleDesc(tupdesc);
 		return true;
 	}

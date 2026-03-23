@@ -20,13 +20,6 @@
 #include "pg_lake/pgduck/iceberg_validation.h"
 
 /*
- * TypeContainsValidatable recursively checks whether a type contains
- * any component that needs Iceberg write validation (temporal types or
- * numeric), including inside arrays, composites, maps, and domains.
- */
-extern PGDLLEXPORT bool TypeContainsValidatable(Oid typeOid);
-
-/*
  * IcebergErrorOrClampDatum validates a Datum for Iceberg write constraints.
  *
  * Recursively handles scalar types (date/timestamp/timestamptz/numeric)

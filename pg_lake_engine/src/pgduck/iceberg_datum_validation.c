@@ -237,64 +237,6 @@ IcebergErrorOrClampNumericDatum(Datum value, IcebergOutOfRangePolicy policy,
 
 
 /*
- * TypeContainsValidatable recursively checks whether a type contains
- * any component that needs Iceberg write validation (temporal types or
- * numeric), including inside arrays, composites, maps, and domains.
- */
-bool
-TypeContainsValidatable(Oid typeOid)
-{
-	if (IsTemporalType(typeOid) || typeOid == NUMERICOID)
-		return true;
-
-	Oid			elemType = get_element_type(typeOid);
-
-	if (OidIsValid(elemType))
-		return TypeContainsValidatable(elemType);
-
-	/* map check must precede the generic domain unwrap (maps are domains) */
-	if (IsMapTypeOid(typeOid))
-	{
-		PGType		keyType = GetMapKeyType(typeOid);
-		PGType		valType = GetMapValueType(typeOid);
-
-		return TypeContainsValidatable(keyType.postgresTypeOid) ||
-			TypeContainsValidatable(valType.postgresTypeOid);
-	}
-
-	char		typtype = get_typtype(typeOid);
-
-	if (typtype == TYPTYPE_DOMAIN)
-		return TypeContainsValidatable(getBaseType(typeOid));
-
-	if (typtype == TYPTYPE_COMPOSITE)
-	{
-		TupleDesc	tupdesc = lookup_rowtype_tupdesc(typeOid, -1);
-		bool		found = false;
-
-		for (int i = 0; i < tupdesc->natts; i++)
-		{
-			Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
-
-			if (attr->attisdropped)
-				continue;
-
-			if (TypeContainsValidatable(attr->atttypid))
-			{
-				found = true;
-				break;
-			}
-		}
-
-		ReleaseTupleDesc(tupdesc);
-		return found;
-	}
-
-	return false;
-}
-
-
-/*
  * IcebergErrorOrClampNestedDatum recursively validates a Datum for
  * Iceberg write constraints, deconstructing and reconstructing arrays,
  * composites, maps (domain over array of composites), and domains.
@@ -336,7 +278,7 @@ IcebergErrorOrClampNestedDatum(Datum value, Oid typeOid, int32 typmod,
 
 	if (OidIsValid(elemType))
 	{
-		if (!TypeContainsValidatable(elemType))
+		if (!TypeNeedsIcebergValidation(elemType, false))
 			return value;
 
 		ArrayType  *array = DatumGetArrayTypeP(value);
@@ -436,7 +378,7 @@ IcebergErrorOrClampNestedDatum(Datum value, Oid typeOid, int32 typmod,
 			if (attr->attisdropped || attrNulls[i])
 				continue;
 
-			if (!TypeContainsValidatable(attr->atttypid))
+			if (!TypeNeedsIcebergValidation(attr->atttypid, false))
 				continue;
 
 			bool		attrIsNull = false;

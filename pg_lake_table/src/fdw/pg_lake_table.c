@@ -2590,7 +2590,7 @@ TupleDescNeedsIcebergValidation(TupleDesc tupleDesc)
 		if (attr->attisdropped)
 			continue;
 
-		if (TypeContainsValidatable(attr->atttypid))
+		if (TypeNeedsIcebergValidation(attr->atttypid, false))
 			return true;
 	}
 
@@ -2618,7 +2618,7 @@ IcebergErrorOrClampSlotInPlace(TupleTableSlot *slot, TupleDesc tupleDesc,
 		if (attr->attisdropped || slot->tts_isnull[i])
 			continue;
 
-		if (!TypeContainsValidatable(attr->atttypid))
+		if (!TypeNeedsIcebergValidation(attr->atttypid, false))
 			continue;
 
 		bool		isNull = false;
@@ -2627,6 +2627,14 @@ IcebergErrorOrClampSlotInPlace(TupleTableSlot *slot, TupleDesc tupleDesc,
 													   policy,
 													   &isNull);
 
+		/*
+		 * Safe to assign directly: - temporal types
+		 * (date/timestamp/timestamptz) are pass-by-value, so clamped values
+		 * need no detoasting or copying. - numeric is pass-by-reference, but
+		 * the clamp function either returns the original datum unchanged or
+		 * sets isNull = true (NaN case), so no new allocation needs to be
+		 * managed.
+		 */
 		slot->tts_values[i] = clamped;
 		slot->tts_isnull[i] = isNull;
 	}

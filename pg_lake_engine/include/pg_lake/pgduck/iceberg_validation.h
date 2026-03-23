@@ -48,6 +48,18 @@ typedef enum IcebergOutOfRangePolicy
 extern PGDLLEXPORT IcebergOutOfRangePolicy GetIcebergOutOfRangePolicyForTable(Oid relationId);
 extern PGDLLEXPORT bool IsTemporalType(Oid typeOid);
 
+/*
+ * TypeNeedsIcebergValidation recursively checks whether a type contains
+ * any component that needs Iceberg write validation, including inside
+ * arrays, composites, maps, and domains.
+ *
+ * When isPushdown is true only temporal types (date/timestamp/timestamptz)
+ * are considered (bounded numeric blocks pushdown entirely, so NaN is
+ * never reachable on that path).  When false the check also includes
+ * bounded numeric (NUMERICOID).
+ */
+extern PGDLLEXPORT bool TypeNeedsIcebergValidation(Oid typeOid, bool isPushdown);
+
 /* Temporal boundary year constants shared by datum and query-level validation */
 #define TEMPORAL_DATE_MIN_YEAR		(-4712)
 #define TEMPORAL_TIMESTAMP_MIN_YEAR	1

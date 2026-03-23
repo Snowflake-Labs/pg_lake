@@ -22,11 +22,15 @@
  */
 #include "postgres.h"
 
+#include "access/tupdesc.h"
 #include "catalog/pg_type.h"
 #include "foreign/foreign.h"
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/pgduck/iceberg_validation.h"
+#include "pg_lake/pgduck/map.h"
 #include "pg_lake/util/table_type.h"
+#include "utils/lsyscache.h"
+#include "utils/typcache.h"
 
 
 static IcebergOutOfRangePolicy GetIcebergOutOfRangePolicyFromOptions(List *options);
@@ -76,4 +80,69 @@ IsTemporalType(Oid typeOid)
 	return typeOid == DATEOID ||
 		typeOid == TIMESTAMPOID ||
 		typeOid == TIMESTAMPTZOID;
+}
+
+
+/*
+ * TypeNeedsIcebergValidation recursively checks whether a type contains
+ * any component that needs Iceberg write validation, including inside
+ * arrays, composites, maps, and domains.
+ *
+ * When isPushdown is true only temporal types are considered (bounded
+ * numeric blocks pushdown entirely).  When false the check also
+ * includes bounded numeric (NUMERICOID).
+ */
+bool
+TypeNeedsIcebergValidation(Oid typeOid, bool isPushdown)
+{
+	if (IsTemporalType(typeOid))
+		return true;
+
+	if (!isPushdown && typeOid == NUMERICOID)
+		return true;
+
+	Oid			elemType = get_element_type(typeOid);
+
+	if (OidIsValid(elemType))
+		return TypeNeedsIcebergValidation(elemType, isPushdown);
+
+	/* map check must precede the generic domain unwrap (maps are domains) */
+	if (IsMapTypeOid(typeOid))
+	{
+		PGType		keyType = GetMapKeyType(typeOid);
+		PGType		valType = GetMapValueType(typeOid);
+
+		return TypeNeedsIcebergValidation(keyType.postgresTypeOid, isPushdown) ||
+			TypeNeedsIcebergValidation(valType.postgresTypeOid, isPushdown);
+	}
+
+	char		typtype = get_typtype(typeOid);
+
+	if (typtype == TYPTYPE_DOMAIN)
+		return TypeNeedsIcebergValidation(getBaseType(typeOid), isPushdown);
+
+	if (typtype == TYPTYPE_COMPOSITE)
+	{
+		TupleDesc	tupdesc = lookup_rowtype_tupdesc(typeOid, -1);
+		bool		found = false;
+
+		for (int i = 0; i < tupdesc->natts; i++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+			if (attr->attisdropped)
+				continue;
+
+			if (TypeNeedsIcebergValidation(attr->atttypid, isPushdown))
+			{
+				found = true;
+				break;
+			}
+		}
+
+		ReleaseTupleDesc(tupdesc);
+		return found;
+	}
+
+	return false;
 }
