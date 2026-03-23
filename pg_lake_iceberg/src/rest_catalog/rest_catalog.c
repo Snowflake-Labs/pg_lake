@@ -1084,7 +1084,7 @@ SendRequestToRestCatalog(HttpMethod method, const char *url, const char *body, L
  * and returns true. Otherwise, it returns false.
  */
 bool
-ShouldRetryRequestToRestCatalog(long status, int maxRetry, int retryNo)
+ShouldRetryRequestToRestCatalog(long status, int maxRetry, int retryNo, List **headers)
 {
 	if (retryNo > maxRetry)
 		return false;
@@ -1117,7 +1117,7 @@ ShouldRetryRequestToRestCatalog(long status, int maxRetry, int retryNo)
 		return true;
 	}
 
-	/* token expired, retry after refreshing token */
+	/* token expired, retry after refreshing token and updating headers */
 	else if (status == TOKEN_EXPIRED_STATUS)
 	{
 		/*
@@ -1125,10 +1125,14 @@ ShouldRetryRequestToRestCatalog(long status, int maxRetry, int retryNo)
 		 * (forceRefreshToken = false), just 1 minute before the expiration
 		 * for each request. Retry logic makes it safer by ensuring we get a
 		 * fresh token for unforeseen circumstances.
+		 *
+		 * We must also update the Authorization header in the request so
+		 * that the retried request carries the new token.
 		 */
 		bool		forceRefreshToken = true;
+		char	   *freshToken = GetRestCatalogAccessToken(forceRefreshToken);
 
-		GetRestCatalogAccessToken(forceRefreshToken);
+		lfirst(list_head(*headers)) = psprintf("Authorization: Bearer %s", freshToken);
 		return true;
 	}
 

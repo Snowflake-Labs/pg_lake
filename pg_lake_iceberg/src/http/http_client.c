@@ -287,7 +287,7 @@ SendHttpRequestWithRetry(HttpMethod method, const char *url, const char *body,
 	{
 		result = SendHttpRequest(method, url, body, headers);
 
-		if (retryFn != NULL && retryFn(result.status, maxRetry, retryNo))
+		if (retryFn != NULL && retryFn(result.status, maxRetry, retryNo, &headers))
 			continue;
 		else
 			break;
