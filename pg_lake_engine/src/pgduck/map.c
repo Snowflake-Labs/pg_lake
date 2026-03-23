@@ -200,43 +200,6 @@ GetOrCreatePGMapType(const char *inputName)
 }
 
 
-/*
- * CreatePGMapTypeFromOids creates a map type from key/value type OIDs
- * by calling map_type.create(keyOid, valOid).  Idempotent: returns the
- * existing map type if one already matches.
- */
-Oid
-CreatePGMapTypeFromOids(Oid keyOid, Oid valOid)
-{
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(PgMapSchemaOwner(), SECURITY_LOCAL_USERID_CHANGE);
-
-	Oid			mapCreateFunctionOid = GetMapCreateFunctionOid();
-	FmgrInfo	flinfo;
-
-	fmgr_info(mapCreateFunctionOid, &flinfo);
-	LOCAL_FCINFO(fcinfo, 3);
-
-	InitFunctionCallInfoData(*fcinfo, &flinfo, 3, InvalidOid, NULL, NULL);
-
-	fcinfo->args[0].value = ObjectIdGetDatum(keyOid);
-	fcinfo->args[0].isnull = false;
-	fcinfo->args[1].value = ObjectIdGetDatum(valOid);
-	fcinfo->args[1].isnull = false;
-	fcinfo->args[2].value = (Datum) 0;
-	fcinfo->args[2].isnull = true;
-
-	Datum		createMapTypeResult = FunctionCallInvoke(fcinfo);
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
-
-	return DatumGetObjectId(createMapTypeResult);
-}
-
-
 /* This helper will identify the creation function for maps */
 static Oid
 GetMapCreateFunctionOid()

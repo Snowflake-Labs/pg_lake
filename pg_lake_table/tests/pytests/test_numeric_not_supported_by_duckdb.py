@@ -100,6 +100,6 @@ def test_numerics_with_larger_scale_than_precision_exceeds_max_precision_guc_off
         raise_error=False,
     )
 
-    assert "scale > 38 are not supported" in error
+    assert "numeric type is not supported on Iceberg tables" in error
 
     pg_conn.rollback()

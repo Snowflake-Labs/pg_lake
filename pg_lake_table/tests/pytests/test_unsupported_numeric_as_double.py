@@ -59,7 +59,7 @@ def test_guc_off_unbounded_numeric_errors(
         raise_error=False,
     )
 
-    assert "unbounded numeric types are not supported" in error
+    assert "numeric type is not supported on Iceberg tables" in error
 
     pg_conn.rollback()
 
@@ -78,7 +78,7 @@ def test_guc_off_precision_above_38_errors(
         raise_error=False,
     )
 
-    assert "precision > 38 are not supported" in error
+    assert "numeric type is not supported on Iceberg tables" in error
 
     pg_conn.rollback()
 
@@ -633,6 +633,54 @@ def test_composite_with_numeric_array_converted(
         pg_conn,
     )
     assert attrs == [["a", "integer"], ["b", "double precision[]"]]
+
+    pg_conn.rollback()
+
+
+@pytest.mark.parametrize(
+    "numeric_type",
+    ["numeric", "numeric(50,10)"],
+    ids=["unbounded", "large_precision"],
+)
+def test_array_of_composite_with_numeric_converted(
+    s3, pg_conn, extension, with_default_location, numeric_type
+):
+    """Array of composite where composite contains unsupported numeric is converted."""
+    run_command(
+        f"""
+        CREATE TYPE comp_in_arr AS (a int, b {numeric_type});
+        CREATE TABLE test_arr_comp (id int, vals comp_in_arr[]) USING iceberg;
+    """,
+        pg_conn,
+    )
+
+    col_type = run_query(
+        "SELECT format_type(atttypid, atttypmod) FROM pg_attribute "
+        "WHERE attrelid = 'test_arr_comp'::regclass AND attname = 'vals'",
+        pg_conn,
+    )[0][0]
+
+    assert col_type.endswith("[]")
+
+    elem_type_oid = run_query(
+        "SELECT typelem FROM pg_type WHERE oid = ("
+        "  SELECT atttypid FROM pg_attribute"
+        "  WHERE attrelid = 'test_arr_comp'::regclass AND attname = 'vals'"
+        ")",
+        pg_conn,
+    )[0][0]
+
+    attrs = run_query(
+        f"""
+        SELECT a.attname, format_type(a.atttypid, a.atttypmod)
+        FROM pg_attribute a
+        JOIN pg_type t ON t.typrelid = a.attrelid
+        WHERE t.oid = {elem_type_oid} AND a.attnum > 0
+        ORDER BY a.attnum
+    """,
+        pg_conn,
+    )
+    assert attrs == [["a", "integer"], ["b", "double precision"]]
 
     pg_conn.rollback()
 

@@ -42,10 +42,9 @@
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/numeric.h"
+#include "pg_lake/pgduck/parse_struct.h"
 #include "pg_lake/pgduck/type.h"
 #include "pg_lake/util/rel_utils.h"
-
-
 
 
 PgLakeTableType
@@ -404,25 +403,41 @@ GetPgLakeTableProperties(Oid relationId)
 
 
 /*
- * LookupTypeInSchema returns the OID of a type by name and schema, or
- * InvalidOid if it does not exist.
+ * FindOrCreateCompositeTypeFromColumnDefs builds a DuckDB STRUCT type string
+ * from a list of ColumnDef nodes and delegates to GetOrCreatePGStructType,
+ * which finds a matching existing type or creates a new one.
  */
 static Oid
-LookupTypeInSchema(const char *schemaName, const char *typeName)
+FindOrCreateCompositeTypeFromColumnDefs(List *coldeflist)
 {
-	List	   *names = list_make2(makeString(pstrdup(schemaName)),
-								   makeString(pstrdup(typeName)));
-	TypeName   *tn = makeTypeNameFromNameList(names);
-	int32		typmod_out;
-	Type		tup = LookupTypeName(NULL, tn, &typmod_out, true);
+	StringInfoData buf;
+	ListCell   *lc;
+	bool		first = true;
 
-	if (!HeapTupleIsValid(tup))
-		return InvalidOid;
+	initStringInfo(&buf);
+	appendStringInfoString(&buf, "STRUCT(");
 
-	Oid			result = ((Form_pg_type) GETSTRUCT(tup))->oid;
+	foreach(lc, coldeflist)
+	{
+		ColumnDef  *colDef = lfirst(lc);
+		Oid			colTypeOid;
+		int32		colTypmod;
 
-	ReleaseSysCache(tup);
-	return result;
+		typenameTypeIdAndMod(NULL, colDef->typeName, &colTypeOid, &colTypmod);
+
+		if (!first)
+			appendStringInfoString(&buf, ", ");
+		first = false;
+
+		appendStringInfo(&buf, "%s %s",
+						 colDef->colname,
+						 GetFullDuckDBTypeNameForPGType(MakePGType(colTypeOid, colTypmod),
+														DATA_FORMAT_ICEBERG));
+	}
+
+	appendStringInfoChar(&buf, ')');
+
+	return GetOrCreatePGStructType(buf.data);
 }
 
 
@@ -433,9 +448,9 @@ LookupTypeInSchema(const char *schemaName, const char *typeName)
  *
  *   numeric (unsupported)       -> FLOAT8OID
  *   array of X                  -> array of MaybeConvertType(X)
- *   map (domain over array)     -> new map via CreatePGMapTypeFromOids
+ *   map (domain over array)     -> new map via GetOrCreatePGMapType
  *   domain (non-map)            -> unwrap and recurse into base type
- *   composite containing any    -> new composite via DefineCompositeType
+ *   composite containing any    -> new composite via GetOrCreatePGStructType
  */
 PGType
 MaybeConvertType(PGType type, char *columnName)
@@ -472,9 +487,15 @@ MaybeConvertType(PGType type, char *columnName)
 			!OidIsValid(newVal.postgresTypeOid))
 			return MakePGTypeOid(InvalidOid);
 
-		return MakePGTypeOid(CreatePGMapTypeFromOids(
-													 OidIsValid(newKey.postgresTypeOid) ? newKey.postgresTypeOid : keyType.postgresTypeOid,
-													 OidIsValid(newVal.postgresTypeOid) ? newVal.postgresTypeOid : valType.postgresTypeOid));
+		Oid			finalKeyOid = OidIsValid(newKey.postgresTypeOid) ? newKey.postgresTypeOid : keyType.postgresTypeOid;
+		Oid			finalValOid = OidIsValid(newVal.postgresTypeOid) ? newVal.postgresTypeOid : valType.postgresTypeOid;
+		const char *mapTypeName = psprintf("MAP(%s,%s)",
+										   GetFullDuckDBTypeNameForPGType(MakePGTypeOid(finalKeyOid), DATA_FORMAT_ICEBERG),
+										   GetFullDuckDBTypeNameForPGType(MakePGTypeOid(finalValOid), DATA_FORMAT_ICEBERG));
+
+		Oid			mapOid = GetOrCreatePGMapType(mapTypeName);
+
+		return MakePGTypeOid(mapOid);
 	}
 
 	char		typeType = get_typtype(typeOid);
@@ -526,26 +547,9 @@ MaybeConvertType(PGType type, char *columnName)
 		if (!needsConversion)
 			return MakePGTypeOid(InvalidOid);
 
-		char	   *newTypeName = psprintf("converted_%u_f8", typeOid);
-		Oid			existingOid = LookupTypeInSchema(STRUCT_TYPES_SCHEMA,
-													 newTypeName);
+		Oid			compositeOid = FindOrCreateCompositeTypeFromColumnDefs(coldeflist);
 
-		if (OidIsValid(existingOid))
-			return MakePGTypeOid(existingOid);
-
-		ereport(NOTICE,
-				(errmsg("creating type \"%s\".\"%s\" with unsupported numeric "
-						"attributes replaced by double precision for Iceberg "
-						"column \"%s\"",
-						STRUCT_TYPES_SCHEMA, newTypeName, columnName)));
-
-		RangeVar   *typevar = makeRangeVar(STRUCT_TYPES_SCHEMA, newTypeName,
-										   -1);
-		ObjectAddress newType = DefineCompositeType(typevar, coldeflist);
-
-		CommandCounterIncrement();
-
-		return MakePGTypeOid(newType.objectId);
+		return MakePGTypeOid(compositeOid);
 	}
 
 	return MakePGTypeOid(InvalidOid);

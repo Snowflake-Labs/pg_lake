@@ -1785,34 +1785,16 @@ ErrorIfTypeUnsupportedNumericForIcebergTables(int32 typmod, char *columnName)
 	if (UnsupportedNumericAsDouble)
 		return;
 
-	if (IsUnboundedNumeric(NUMERICOID, typmod))
+	if (IsUnsupportedNumericForIceberg(NUMERICOID, typmod))
 	{
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg("unbounded numeric types are not supported on Iceberg tables"),
+						errmsg("numeric type is not supported on Iceberg tables"),
 						errdetail("column name triggering the error: \"%s\"", columnName ? columnName : "null"),
-						errhint("Use numeric(P,S) with precision <= %d, or enable "
-								"pg_lake_iceberg.unsupported_numeric_as_double to "
-								"convert to double precision.",
-								DUCKDB_MAX_NUMERIC_PRECISION)));
-	}
-
-	int			precision = -1;
-	int			scale = -1;
-
-	GetDuckdbAdjustedPrecisionAndScaleFromNumericTypeMod(typmod, &precision, &scale);
-
-	if (precision > DUCKDB_MAX_NUMERIC_PRECISION)
-	{
-		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg("numeric types with precision > %d are not supported on Iceberg tables", DUCKDB_MAX_NUMERIC_PRECISION),
-						errdetail("column name triggering the error: \"%s\", precision: %d", columnName ? columnName : "null", precision)));
-	}
-
-	if (scale > DUCKDB_MAX_NUMERIC_SCALE)
-	{
-		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg("numeric types with scale > %d are not supported on Iceberg tables", DUCKDB_MAX_NUMERIC_SCALE),
-						errdetail("column name triggering the error: \"%s\", scale: %d", columnName ? columnName : "null", scale)));
+						errhint("Use numeric(P,S) with precision <= %d and scale <= %d, "
+								"or enable pg_lake_iceberg.unsupported_numeric_as_double "
+								"to convert to double precision.",
+								DUCKDB_MAX_NUMERIC_PRECISION,
+								DUCKDB_MAX_NUMERIC_SCALE)));
 	}
 }
 
