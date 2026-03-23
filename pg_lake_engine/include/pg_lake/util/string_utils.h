@@ -34,6 +34,7 @@ extern PGDLLEXPORT char *ReverseStringSearch(const char *haystack, const char *n
 extern PGDLLEXPORT int32_t AdjustAnyCharTypmod(int32_t typmod, int32_t newLength);
 extern PGDLLEXPORT int32_t GetAnyCharLengthFrom(int32_t typmod);
 extern PGDLLEXPORT bool PgStrcasecmpNullable(const char *a, const char *b);
+extern PGDLLEXPORT char *StripTrailingSlash(char *input, bool inPlace);
 
 #define RangeVarQuoteIdentifier(rv) \
 	(((rv)->schemaname != NULL) ?							  \

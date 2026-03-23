@@ -40,6 +40,7 @@
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/util/rel_utils.h"
+#include "pg_lake/util/string_utils.h"
 
 
 PgLakeTableType
@@ -260,13 +261,9 @@ GetWritableTableLocation(Oid relationId, char **queryArguments)
 			*queryArguments = psprintf("?%s", queryParamSeparator + 1);
 	}
 
-	int			locationLength = strlen(location);
+	bool		inPlace = true;
 
-	/* normalize prefix to not have a trailing slash */
-	if (location[locationLength - 1] == '/')
-		location[locationLength - 1] = '\0';
-
-	return location;
+	return StripTrailingSlash(location, inPlace);
 }
 
 /*

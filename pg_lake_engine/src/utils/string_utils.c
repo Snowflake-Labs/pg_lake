@@ -261,3 +261,32 @@ PgStrcasecmpNullable(const char *a, const char *b)
 
 	return pg_strcasecmp(a, b) == 0;
 }
+
+
+/*
+ * StripTrailingSlash removes a trailing '/' from the input string.
+ *
+ * When inPlace is true, the input buffer is modified directly.
+ * When inPlace is false, a pstrdup'd copy is made before modifying.
+ *
+ * Returns NULL if input is NULL. If there is no trailing slash the
+ * input pointer is returned unchanged regardless of inPlace.
+ */
+char *
+StripTrailingSlash(char *input, bool inPlace)
+{
+	if (input == NULL)
+		return NULL;
+
+	size_t		len = strlen(input);
+
+	if (len > 0 && input[len - 1] == '/')
+	{
+		char	   *result = inPlace ? input : pstrdup(input);
+
+		result[len - 1] = '\0';
+		return result;
+	}
+
+	return input;
+}
