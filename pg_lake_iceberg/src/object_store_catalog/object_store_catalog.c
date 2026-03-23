@@ -20,6 +20,7 @@
 #include "pg_lake/util/s3_writer_utils.h"
 #include "pg_lake/extensions/pg_lake_iceberg.h"
 #include "pg_lake/storage/local_storage.h"
+#include "pg_lake/util/string_utils.h"
 
 char	   *ObjectStoreCatalogLocationPrefix = NULL;
 char	   *ExternalObjectStorePrefix = "fromsf";
@@ -564,22 +565,7 @@ TriggerCatalogExportIfObjectStoreTable(Oid relationId)
 const char *
 GetObjectStoreDefaultLocationPrefix(void)
 {
-	if (ObjectStoreCatalogLocationPrefix == NULL)
-	{
-		return NULL;
-	}
+	bool		inPlace = false;
 
-	size_t		len = strlen(ObjectStoreCatalogLocationPrefix);
-
-	if (len > 0 && ObjectStoreCatalogLocationPrefix[len - 1] == '/')
-	{
-		/* remove trailing "/" */
-		char	   *locationPrefixRemovedTrailingSlash = pstrdup(ObjectStoreCatalogLocationPrefix);
-
-		locationPrefixRemovedTrailingSlash[len - 1] = '\0';
-
-		return locationPrefixRemovedTrailingSlash;
-	}
-
-	return ObjectStoreCatalogLocationPrefix;
+	return StripTrailingSlash(ObjectStoreCatalogLocationPrefix, inPlace);
 }

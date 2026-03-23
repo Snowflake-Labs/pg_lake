@@ -23,6 +23,7 @@
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/util/rel_utils.h"
+#include "pg_lake/util/string_utils.h"
 #include "pg_extension_base/spi_helpers.h"
 #include "catalog/namespace.h"
 #include "commands/dbcommands.h"
@@ -715,24 +716,9 @@ UpdateAllInternalIcebergTablesToReadOnly(void)
 char *
 GetIcebergDefaultLocationPrefix(void)
 {
-	if (IcebergDefaultLocationPrefix == NULL)
-	{
-		return NULL;
-	}
+	bool		inPlace = false;
 
-	size_t		len = strlen(IcebergDefaultLocationPrefix);
-
-	if (len > 0 && IcebergDefaultLocationPrefix[len - 1] == '/')
-	{
-		/* remove trailing "/" */
-		char	   *locationPrefixRemovedTrailingSlash = pstrdup(IcebergDefaultLocationPrefix);
-
-		locationPrefixRemovedTrailingSlash[len - 1] = '\0';
-
-		return locationPrefixRemovedTrailingSlash;
-	}
-
-	return IcebergDefaultLocationPrefix;
+	return StripTrailingSlash(IcebergDefaultLocationPrefix, inPlace);
 }
 
 

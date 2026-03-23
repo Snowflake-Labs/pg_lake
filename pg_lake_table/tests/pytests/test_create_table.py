@@ -341,6 +341,32 @@ def test_create_table_with_default_location_override(
     pg_conn.rollback()
 
 
+@pytest.mark.location_prefix(f"s3://{TEST_BUCKET}/test_trailing_slash_prefix/")
+def test_create_table_default_location_trailing_slash(
+    s3, pg_conn, extension, with_default_location
+):
+    """Trailing slash in default_location_prefix should be stripped."""
+    run_command(
+        "CREATE TABLE test_trailing_slash_tbl (a int) USING iceberg",
+        pg_conn,
+    )
+
+    metadata_location = run_query(
+        """SELECT metadata_location FROM iceberg_tables
+           WHERE table_name = 'test_trailing_slash_tbl'""",
+        pg_conn,
+    )[0][0]
+
+    after_scheme = metadata_location[len("s3://") :]
+    assert (
+        "//" not in after_scheme
+    ), f"metadata_location contains double slash: {metadata_location}"
+    assert after_scheme.startswith(f"{TEST_BUCKET}/test_trailing_slash_prefix/")
+
+    run_command("DROP TABLE test_trailing_slash_tbl", pg_conn)
+    pg_conn.rollback()
+
+
 def test_create_table_with_wrong_default_location(s3, pg_conn, extension):
     location = f"invalid_loc/"
 

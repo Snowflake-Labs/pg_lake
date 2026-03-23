@@ -25,6 +25,7 @@
 #include "lib/stringinfo.h"
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/extensions/pg_lake_engine.h"
+#include "pg_lake/util/string_utils.h"
 #include "nodes/parsenodes.h"
 #include "nodes/pg_list.h"
 
@@ -444,24 +445,9 @@ IsSupportedURL(const char *path)
 char *
 GetPgLakeStageLocation(void)
 {
-	if (PgLakeStageLocation == NULL)
-	{
-		return NULL;
-	}
+	bool		inPlace = false;
 
-	size_t		len = strlen(PgLakeStageLocation);
-
-	if (len > 0 && PgLakeStageLocation[len - 1] == '/')
-	{
-		/* remove trailing "/" */
-		char	   *stageLocationRemovedTrailingSlash = pstrdup(PgLakeStageLocation);
-
-		stageLocationRemovedTrailingSlash[len - 1] = '\0';
-
-		return stageLocationRemovedTrailingSlash;
-	}
-
-	return PgLakeStageLocation;
+	return StripTrailingSlash(PgLakeStageLocation, inPlace);
 }
 
 
