@@ -1975,3 +1975,454 @@ def test_explain_array_of_composites_shows_nested_wrapping(
         run_command("RESET search_path;", pg_conn)
         run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
         pg_conn.commit()
+
+
+# =====================================================================
+# Quoted identifier coverage: column names, type names, field names
+#
+# The pushdown SQL wrapper uses quote_identifier() for column names
+# and composite field names in the generated DuckDB SQL.  These tests
+# exercise identifiers that require quoting: SQL reserved words
+# (e.g. "select", "from") and mixed-case names (e.g. "EventDate").
+# =====================================================================
+
+
+@pytest.mark.parametrize(
+    "col_name_quoted,name_tag",
+    [
+        ('"select"', "rw"),
+        ('"EventDate"', "mc"),
+    ],
+    ids=["reserved_word", "mixed_case"],
+)
+@pytest.mark.parametrize("use_pushdown", [False, True], ids=["values", "pushdown"])
+def test_temporal_clamp_quoted_column_name(
+    pg_conn,
+    extension,
+    s3,
+    with_default_location,
+    use_pushdown,
+    col_name_quoted,
+    name_tag,
+):
+    """Temporal column whose name requires quoting is clamped correctly."""
+    suffix = "_pd" if use_pushdown else ""
+    schema = f"test_tc_qcol_{name_tag}{suffix}"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    try:
+        run_command(
+            f"CREATE TABLE target (id int, {col_name_quoted} date) USING iceberg;",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        if use_pushdown:
+            parquet_url = f"s3://{TEST_BUCKET}/{schema}/data.parquet"
+            run_command(
+                f"COPY (SELECT 1 AS id, 'infinity'::date AS {col_name_quoted}) "
+                f"TO '{parquet_url}';",
+                pg_conn,
+            )
+            run_command(
+                f"CREATE FOREIGN TABLE source (id int, {col_name_quoted} date) "
+                f"SERVER pg_lake OPTIONS (path '{parquet_url}');",
+                pg_conn,
+            )
+            assert_query_pushdownable(
+                "INSERT INTO target SELECT * FROM source;", pg_conn
+            )
+            run_command("INSERT INTO target SELECT * FROM source;", pg_conn)
+        else:
+            run_command(
+                "INSERT INTO target VALUES "
+                "(1, 'infinity'::date), (2, '2024-06-15'::date);",
+                pg_conn,
+            )
+        pg_conn.commit()
+
+        result = run_query(
+            f"SELECT id, {col_name_quoted}::text FROM target ORDER BY id;",
+            pg_conn,
+        )
+        if use_pushdown:
+            assert result == [[1, "9999-12-31"]]
+        else:
+            assert result == [[1, "9999-12-31"], [2, "2024-06-15"]]
+    finally:
+        pg_conn.rollback()
+        run_command("RESET TIME ZONE;", pg_conn)
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+@pytest.mark.parametrize("use_pushdown", [False, True], ids=["values", "pushdown"])
+def test_temporal_clamp_quoted_column_with_array(
+    pg_conn, extension, s3, with_default_location, use_pushdown
+):
+    """Temporal array in column named with reserved word is clamped."""
+    suffix = "_pd" if use_pushdown else ""
+    schema = f"test_tc_qcolarr{suffix}"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    try:
+        run_command(
+            'CREATE TABLE target ("from" date[]) USING iceberg;',
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        if use_pushdown:
+            parquet_url = f"s3://{TEST_BUCKET}/{schema}/data.parquet"
+            run_command(
+                f"""COPY (SELECT ARRAY['infinity'::date, '2024-01-01'::date] AS "from") TO '{parquet_url}';""",
+                pg_conn,
+            )
+            run_command(
+                f"""CREATE FOREIGN TABLE source ("from" date[]) """
+                f"SERVER pg_lake OPTIONS (path '{parquet_url}');",
+                pg_conn,
+            )
+            assert_query_pushdownable(
+                "INSERT INTO target SELECT * FROM source;", pg_conn
+            )
+            run_command("INSERT INTO target SELECT * FROM source;", pg_conn)
+        else:
+            run_command(
+                "INSERT INTO target VALUES "
+                "(ARRAY['infinity'::date, '2024-01-01'::date]);",
+                pg_conn,
+            )
+        pg_conn.commit()
+
+        result = run_query(
+            'SELECT "from"[1]::text, "from"[2]::text FROM target;',
+            pg_conn,
+        )
+        assert result == [["9999-12-31", "2024-01-01"]]
+    finally:
+        pg_conn.rollback()
+        run_command("RESET TIME ZONE;", pg_conn)
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+@pytest.mark.parametrize("use_pushdown", [False, True], ids=["values", "pushdown"])
+def test_temporal_clamp_composite_mixed_case_fields(
+    pg_conn, extension, s3, with_default_location, use_pushdown
+):
+    """Composite with mixed-case field names is clamped via struct_pack."""
+    suffix = "_pd" if use_pushdown else ""
+    schema = f"test_tc_mcfld{suffix}"
+    type_name = f"event_mc{suffix}"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    try:
+        run_command(
+            f'CREATE TYPE {type_name} AS ("RecordId" int, "EventDate" date);',
+            pg_conn,
+        )
+
+        if use_pushdown:
+            parquet_url = f"s3://{TEST_BUCKET}/{schema}/data.parquet"
+            run_command(
+                f"COPY (SELECT ROW(1, 'infinity'::date)::{type_name} AS col) "
+                f"TO '{parquet_url}';",
+                pg_conn,
+            )
+            run_command(
+                f"CREATE FOREIGN TABLE source (col {type_name}) "
+                f"SERVER pg_lake OPTIONS (path '{parquet_url}');",
+                pg_conn,
+            )
+
+        run_command(
+            f"CREATE TABLE target (col {type_name}) USING iceberg;",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        if use_pushdown:
+            assert_query_pushdownable(
+                "INSERT INTO target SELECT * FROM source;", pg_conn
+            )
+            run_command("INSERT INTO target SELECT * FROM source;", pg_conn)
+        else:
+            run_command(
+                f"INSERT INTO target VALUES "
+                f"(ROW(1, 'infinity'::date)::{type_name}), "
+                f"(ROW(2, '2024-03-01'::date)::{type_name});",
+                pg_conn,
+            )
+        pg_conn.commit()
+
+        result = run_query(
+            'SELECT (col)."RecordId", (col)."EventDate"::text '
+            'FROM target ORDER BY (col)."RecordId";',
+            pg_conn,
+        )
+        if use_pushdown:
+            assert result == [[1, "9999-12-31"]]
+        else:
+            assert result == [[1, "9999-12-31"], [2, "2024-03-01"]]
+    finally:
+        pg_conn.rollback()
+        run_command("RESET TIME ZONE;", pg_conn)
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+@pytest.mark.parametrize("use_pushdown", [False, True], ids=["values", "pushdown"])
+def test_temporal_clamp_multiple_quoted_columns(
+    pg_conn, extension, s3, with_default_location, use_pushdown
+):
+    """Multiple temporal columns with quoted names are all clamped."""
+    suffix = "_pd" if use_pushdown else ""
+    schema = f"test_tc_mqcol{suffix}"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    try:
+        run_command(
+            "CREATE TABLE target ("
+            'id int, "from" date, "Table" timestamptz'
+            ") USING iceberg;",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        if use_pushdown:
+            parquet_url = f"s3://{TEST_BUCKET}/{schema}/data.parquet"
+            run_command(
+                f"""COPY (SELECT 1 AS id, 'infinity'::date AS "from", """
+                f"""'infinity'::timestamptz AS "Table") TO '{parquet_url}';""",
+                pg_conn,
+            )
+            run_command(
+                f"""CREATE FOREIGN TABLE source (id int, "from" date, "Table" timestamptz) """
+                f"SERVER pg_lake OPTIONS (path '{parquet_url}');",
+                pg_conn,
+            )
+            assert_query_pushdownable(
+                "INSERT INTO target SELECT * FROM source;", pg_conn
+            )
+            run_command("INSERT INTO target SELECT * FROM source;", pg_conn)
+        else:
+            run_command(
+                "INSERT INTO target VALUES "
+                "(1, 'infinity'::date, 'infinity'::timestamptz);",
+                pg_conn,
+            )
+        pg_conn.commit()
+
+        result = run_query(
+            'SELECT id, "from"::text, "Table"::text FROM target;',
+            pg_conn,
+        )
+        assert result == [[1, "9999-12-31", "9999-12-31 23:59:59.999999+00"]]
+    finally:
+        pg_conn.rollback()
+        run_command("RESET TIME ZONE;", pg_conn)
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+@pytest.mark.parametrize("use_pushdown", [False, True], ids=["values", "pushdown"])
+def test_temporal_clamp_quoted_column_with_quoted_composite_fields(
+    pg_conn, extension, s3, with_default_location, use_pushdown
+):
+    """Column and composite field names both requiring quoting are handled."""
+    suffix = "_pd" if use_pushdown else ""
+    schema = f"test_tc_qcolqf{suffix}"
+    type_name = f"comp_qq{suffix}"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    try:
+        run_command(
+            f'CREATE TYPE {type_name} AS ("group" int, "order" date);',
+            pg_conn,
+        )
+
+        if use_pushdown:
+            parquet_url = f"s3://{TEST_BUCKET}/{schema}/data.parquet"
+            run_command(
+                f"""COPY (SELECT ROW(1, 'infinity'::date)::{type_name} AS "Data") TO '{parquet_url}';""",
+                pg_conn,
+            )
+            run_command(
+                f"""CREATE FOREIGN TABLE source ("Data" {type_name}) """
+                f"SERVER pg_lake OPTIONS (path '{parquet_url}');",
+                pg_conn,
+            )
+
+        run_command(
+            f'CREATE TABLE target ("Data" {type_name}) USING iceberg;',
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        if use_pushdown:
+            assert_query_pushdownable(
+                "INSERT INTO target SELECT * FROM source;", pg_conn
+            )
+            run_command("INSERT INTO target SELECT * FROM source;", pg_conn)
+        else:
+            run_command(
+                f"INSERT INTO target VALUES "
+                f"(ROW(1, 'infinity'::date)::{type_name});",
+                pg_conn,
+            )
+        pg_conn.commit()
+
+        result = run_query(
+            'SELECT ("Data")."group", ("Data")."order"::text FROM target;',
+            pg_conn,
+        )
+        assert result == [[1, "9999-12-31"]]
+    finally:
+        pg_conn.rollback()
+        run_command("RESET TIME ZONE;", pg_conn)
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+@pytest.mark.parametrize("use_pushdown", [False, True], ids=["values", "pushdown"])
+def test_temporal_clamp_array_of_composites_quoted_fields(
+    pg_conn, extension, s3, with_default_location, use_pushdown
+):
+    """Array of composites with mixed-case field names is clamped."""
+    suffix = "_pd" if use_pushdown else ""
+    schema = f"test_tc_acqf{suffix}"
+    type_name = f"event_acq{suffix}"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    try:
+        run_command(
+            f'CREATE TYPE {type_name} AS ("Id" int, "OccurredAt" date);',
+            pg_conn,
+        )
+
+        if use_pushdown:
+            parquet_url = f"s3://{TEST_BUCKET}/{schema}/data.parquet"
+            run_command(
+                f"COPY (SELECT ARRAY["
+                f"ROW(1, 'infinity'::date)::{type_name}, "
+                f"ROW(2, '2024-06-15'::date)::{type_name}] AS col) "
+                f"TO '{parquet_url}';",
+                pg_conn,
+            )
+            run_command(
+                f"CREATE FOREIGN TABLE source (col {type_name}[]) "
+                f"SERVER pg_lake OPTIONS (path '{parquet_url}');",
+                pg_conn,
+            )
+
+        run_command(
+            f"CREATE TABLE target (col {type_name}[]) USING iceberg;",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        if use_pushdown:
+            assert_query_pushdownable(
+                "INSERT INTO target SELECT * FROM source;", pg_conn
+            )
+            run_command("INSERT INTO target SELECT * FROM source;", pg_conn)
+        else:
+            run_command(
+                f"INSERT INTO target VALUES "
+                f"(ARRAY[ROW(1, 'infinity'::date)::{type_name}, "
+                f"ROW(2, '2024-06-15'::date)::{type_name}]);",
+                pg_conn,
+            )
+        pg_conn.commit()
+
+        result = run_query(
+            'SELECT (col[1])."Id", (col[1])."OccurredAt"::text, '
+            '(col[2])."Id", (col[2])."OccurredAt"::text FROM target;',
+            pg_conn,
+        )
+        assert result == [[1, "9999-12-31", 2, "2024-06-15"]]
+    finally:
+        pg_conn.rollback()
+        run_command("RESET TIME ZONE;", pg_conn)
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+@pytest.mark.parametrize("use_pushdown", [False, True], ids=["values", "pushdown"])
+def test_temporal_error_quoted_column_name(
+    pg_conn, extension, s3, with_default_location, use_pushdown
+):
+    """Error mode with quoted column name raises error correctly."""
+    suffix = "_pd" if use_pushdown else ""
+    schema = f"test_te_qcol{suffix}"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    try:
+        run_command(
+            'CREATE TABLE target (id int, "from" date) USING iceberg'
+            " WITH (out_of_range_values = 'error');",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        if use_pushdown:
+            parquet_url = f"s3://{TEST_BUCKET}/{schema}/data.parquet"
+            run_command(
+                f"""COPY (SELECT 1 AS id, 'infinity'::date AS "from") TO '{parquet_url}';""",
+                pg_conn,
+            )
+            run_command(
+                f"""CREATE FOREIGN TABLE source (id int, "from" date) """
+                f"SERVER pg_lake OPTIONS (path '{parquet_url}');",
+                pg_conn,
+            )
+            pg_conn.commit()
+
+            assert_query_pushdownable(
+                "INSERT INTO target SELECT * FROM source;", pg_conn
+            )
+            with pytest.raises(Exception, match="date out of range"):
+                run_command("INSERT INTO target SELECT * FROM source;", pg_conn)
+            pg_conn.rollback()
+        else:
+            err = run_command(
+                "INSERT INTO target VALUES (1, 'infinity'::date);",
+                pg_conn,
+                raise_error=False,
+            )
+            assert "date out of range" in str(err)
+            pg_conn.rollback()
+    finally:
+        pg_conn.rollback()
+        run_command("RESET TIME ZONE;", pg_conn)
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
