@@ -344,6 +344,8 @@ GetRestCatalogOptionsFromCatalog(const char *catalog)
 				opts->oauthHostPath = defGetString(def);
 			else if (pg_strcasecmp(def->defname, "enable_vended_credentials") == 0)
 				opts->enableVendedCredentials = defGetBoolean(def);
+			else if (pg_strcasecmp(def->defname, "catalog_name") == 0)
+				opts->catalogName = defGetString(def);
 			else if (pg_strcasecmp(def->defname, "location_prefix") == 0)
 			{
 				bool        inPlace = false;
@@ -1213,10 +1215,13 @@ GetRestCatalogNamespace(Oid relationId)
 
 
 /*
-* Readable rest catalog tables always use the catalog_name option
-* as the catalog name in the external catalog. Writable rest catalog tables
-* use the current database name as the catalog name.
-*/
+ * Returns the catalog name to use for REST API calls.
+ *
+ * Precedence: table option catalog_name > server option catalog_name
+ *             > current database name.
+ *
+ * Read-only tables must have catalog_name set (on the table or server).
+ */
 char *
 GetRestCatalogName(Oid relationId)
 {
@@ -1225,25 +1230,22 @@ GetRestCatalogName(Oid relationId)
 	Assert(catalogType == REST_CATALOG_READ_ONLY ||
 		   catalogType == REST_CATALOG_READ_WRITE);
 
-	if (catalogType == REST_CATALOG_READ_ONLY)
-	{
+	ForeignTable *foreignTable = GetForeignTable(relationId);
+	char	   *catalogName = GetStringOption(foreignTable->options, "catalog_name", false);
 
-		Assert(GetIcebergCatalogType(relationId) == REST_CATALOG_READ_ONLY ||
-			   GetIcebergCatalogType(relationId) == REST_CATALOG_READ_WRITE);
-
-		ForeignTable *foreignTable = GetForeignTable(relationId);
-		List	   *options = foreignTable->options;
-
-		char	   *catalogName = GetStringOption(options, "catalog_name", false);
-
-		/* user provided the custom catalog name */
-		if (!catalogName)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("catalog_name option is required for rest catalog iceberg tables")));
-
+	if (catalogName != NULL)
 		return catalogName;
-	}
+
+	RestCatalogOptions *opts = GetRestCatalogOptionsForRelation(relationId);
+
+	if (opts->catalogName != NULL)
+		return opts->catalogName;
+
+	if (catalogType == REST_CATALOG_READ_ONLY)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("catalog_name is required for read-only REST catalog tables"),
+				 errhint("Set catalog_name on the table or the server.")));
 
 	return get_database_name(MyDatabaseId);
 }

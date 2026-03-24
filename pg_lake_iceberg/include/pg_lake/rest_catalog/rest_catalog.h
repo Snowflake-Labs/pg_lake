@@ -53,6 +53,7 @@ typedef struct RestCatalogOptions
 	char	   *clientSecret;
 	char	   *scope;
 	char	   *locationPrefix;
+	char	   *catalogName;	/* REST API catalog prefix; defaults to dbname */
 	int			authType;
 	bool		enableVendedCredentials;
 }			RestCatalogOptions;
