@@ -639,6 +639,7 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 			PgLakeXactRestCatalogOpts->clientSecret = resolvedOpts->clientSecret ? pstrdup(resolvedOpts->clientSecret) : NULL;
 			PgLakeXactRestCatalogOpts->scope = resolvedOpts->scope ? pstrdup(resolvedOpts->scope) : NULL;
 			PgLakeXactRestCatalogOpts->locationPrefix = resolvedOpts->locationPrefix ? pstrdup(resolvedOpts->locationPrefix) : NULL;
+			PgLakeXactRestCatalogOpts->catalogName = resolvedOpts->catalogName ? pstrdup(resolvedOpts->catalogName) : NULL;
 			PgLakeXactRestCatalogOpts->authType = resolvedOpts->authType;
 			PgLakeXactRestCatalogOpts->enableVendedCredentials = resolvedOpts->enableVendedCredentials;
 
