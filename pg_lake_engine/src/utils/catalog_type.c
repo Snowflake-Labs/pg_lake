@@ -108,8 +108,8 @@ HasReadOnlyOption(List *options)
 
 
 /*
- * IsCatalogOwnedByExtension returns true if the catalog name matches one of
- * the extension-owned names: 'rest', 'object_store', or 'postgres'.
+ * IsCatalogOwnedByExtension returns true if the catalog name is one of
+ * the reserved built-in names: 'rest', 'object_store', or 'postgres'.
  * Comparison is case-insensitive so that "Postgres", "REST", etc. are
  * also recognized as reserved.
  */
@@ -124,7 +124,7 @@ IsCatalogOwnedByExtension(const char *catalog)
 
 /*
  * IsRestCatalog returns true if the catalog name identifies a REST catalog.
- * This includes the extension-owned 'rest' literal and any user-created
+ * This includes the built-in 'rest' literal and any user-created
  * iceberg_catalog server whose TYPE is 'rest'.
  */
 bool
@@ -148,6 +148,6 @@ IsRestCatalog(const char *catalog)
 	if (strcmp(fdw->fdwname, ICEBERG_CATALOG_FDW_NAME) != 0)
 		return false;
 
-	Assert(server->servertype != NULL && *server->servertype != '\0');
-	return pg_strcasecmp(server->servertype, REST_CATALOG_NAME) == 0;
+	Assert(pg_strcasecmp(server->servertype, REST_CATALOG_NAME) == 0);
+	return true;
 }

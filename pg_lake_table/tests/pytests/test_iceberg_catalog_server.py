@@ -2,7 +2,7 @@ import pytest
 from utils_pytest import *
 
 
-# ── FDW and pre-created servers ────────────────────────────────────────────
+# ── FDW --------------------------─────────────────────────────────────────-
 
 
 def test_iceberg_catalog_fdw_exists(pg_conn, extension):
@@ -22,39 +22,6 @@ def test_iceberg_catalog_fdw_has_no_handler(pg_conn, extension):
         pg_conn,
     )
     assert result[0]["fdwhandler"] == 0
-
-
-def test_precreated_postgres_server(pg_conn, extension):
-    """A 'postgres' server of TYPE 'postgres' should be pre-created."""
-    result = run_query(
-        "SELECT srvname, srvtype FROM pg_foreign_server WHERE srvname = 'postgres'",
-        pg_conn,
-    )
-    assert len(result) == 1
-    assert result[0]["srvname"] == "postgres"
-    assert result[0]["srvtype"] == "postgres"
-
-
-def test_precreated_object_store_server(pg_conn, extension):
-    """An 'object_store' server of TYPE 'object_store' should be pre-created."""
-    result = run_query(
-        "SELECT srvname, srvtype FROM pg_foreign_server WHERE srvname = 'object_store'",
-        pg_conn,
-    )
-    assert len(result) == 1
-    assert result[0]["srvname"] == "object_store"
-    assert result[0]["srvtype"] == "object_store"
-
-
-def test_precreated_rest_server(pg_conn, extension):
-    """A 'rest' server of TYPE 'rest' should be pre-created."""
-    result = run_query(
-        "SELECT srvname, srvtype FROM pg_foreign_server WHERE srvname = 'rest'",
-        pg_conn,
-    )
-    assert len(result) == 1
-    assert result[0]["srvname"] == "rest"
-    assert result[0]["srvtype"] == "rest"
 
 
 # ── CREATE SERVER with valid options ───────────────────────────────────────
@@ -184,10 +151,18 @@ def test_reject_create_foreign_table_on_iceberg_catalog_server(
     superuser_conn, extension
 ):
     """CREATE FOREIGN TABLE on an iceberg_catalog server is blocked."""
+    run_command(
+        """
+        CREATE SERVER test_ft_srv TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
     err = run_command(
         """
-        CREATE FOREIGN TABLE test_ft_pg (id int)
-            SERVER postgres
+        CREATE FOREIGN TABLE test_ft_tbl (id int)
+            SERVER test_ft_srv
         """,
         superuser_conn,
         raise_error=False,
@@ -438,7 +413,7 @@ def test_catalog_object_store_literal_still_works(
     pg_conn.rollback()
 
 
-# ── Protection of extension-owned catalog servers ─────────────────────────
+# ── Protection of reserved catalog names ───────────────────────────────────
 
 
 def test_reject_create_server_type_postgres(superuser_conn, extension):
@@ -518,117 +493,8 @@ def test_reject_create_server_reserved_name(superuser_conn, extension):
             raise_error=False,
         )
         assert err is not None, f"Expected error for reserved name '{name}'"
-        assert "reserved for the extension-owned catalog" in str(err)
+        assert "is reserved" in str(err)
         superuser_conn.rollback()
-
-
-def test_reject_alter_postgres_server(superuser_conn, extension):
-    """ALTER SERVER on the extension-owned 'postgres' server is blocked."""
-    err = run_command(
-        "ALTER SERVER postgres OPTIONS (ADD location_prefix 's3://bucket')",
-        superuser_conn,
-        raise_error=False,
-    )
-    assert err is not None
-    assert 'cannot alter the extension-owned "postgres" catalog server' in str(err)
-    superuser_conn.rollback()
-
-
-def test_reject_alter_object_store_server(superuser_conn, extension):
-    """ALTER SERVER on the extension-owned 'object_store' server is blocked."""
-    err = run_command(
-        "ALTER SERVER object_store OPTIONS (ADD location_prefix 's3://bucket')",
-        superuser_conn,
-        raise_error=False,
-    )
-    assert err is not None
-    assert 'cannot alter the extension-owned "object_store" catalog server' in str(err)
-    superuser_conn.rollback()
-
-
-def test_allow_alter_rest_server(superuser_conn, extension):
-    """ALTER SERVER on the extension-owned 'rest' server is allowed."""
-    run_command(
-        "ALTER SERVER rest OPTIONS (ADD rest_endpoint 'http://localhost:8181')",
-        superuser_conn,
-    )
-    run_command(
-        "ALTER SERVER rest OPTIONS (DROP rest_endpoint)",
-        superuser_conn,
-    )
-    superuser_conn.rollback()
-
-
-def test_reject_drop_postgres_server(superuser_conn, extension):
-    """DROP SERVER on the extension-owned 'postgres' server is blocked."""
-    err = run_command(
-        "DROP SERVER postgres",
-        superuser_conn,
-        raise_error=False,
-    )
-    assert err is not None
-    assert 'cannot drop the extension-owned "postgres" catalog server' in str(err)
-    superuser_conn.rollback()
-
-
-def test_reject_drop_object_store_server(superuser_conn, extension):
-    """DROP SERVER on the extension-owned 'object_store' server is blocked."""
-    err = run_command(
-        "DROP SERVER object_store",
-        superuser_conn,
-        raise_error=False,
-    )
-    assert err is not None
-    assert 'cannot drop the extension-owned "object_store" catalog server' in str(err)
-    superuser_conn.rollback()
-
-
-def test_reject_drop_rest_server(superuser_conn, extension):
-    """DROP SERVER on the extension-owned 'rest' server is blocked."""
-    err = run_command(
-        "DROP SERVER rest",
-        superuser_conn,
-        raise_error=False,
-    )
-    assert err is not None
-    assert 'cannot drop the extension-owned "rest" catalog server' in str(err)
-    superuser_conn.rollback()
-
-
-def test_reject_rename_postgres_server(superuser_conn, extension):
-    """RENAME on the extension-owned 'postgres' server is blocked."""
-    err = run_command(
-        "ALTER SERVER postgres RENAME TO my_postgres",
-        superuser_conn,
-        raise_error=False,
-    )
-    assert err is not None
-    assert 'cannot rename the extension-owned "postgres" catalog server' in str(err)
-    superuser_conn.rollback()
-
-
-def test_reject_rename_object_store_server(superuser_conn, extension):
-    """RENAME on the extension-owned 'object_store' server is blocked."""
-    err = run_command(
-        "ALTER SERVER object_store RENAME TO my_obj_store",
-        superuser_conn,
-        raise_error=False,
-    )
-    assert err is not None
-    assert 'cannot rename the extension-owned "object_store" catalog server' in str(err)
-    superuser_conn.rollback()
-
-
-def test_reject_rename_rest_server(superuser_conn, extension):
-    """RENAME on the extension-owned 'rest' server is blocked."""
-    err = run_command(
-        "ALTER SERVER rest RENAME TO my_rest",
-        superuser_conn,
-        raise_error=False,
-    )
-    assert err is not None
-    assert 'cannot rename the extension-owned "rest" catalog server' in str(err)
-    superuser_conn.rollback()
 
 
 def test_reject_rename_to_reserved_name(superuser_conn, extension):
@@ -658,50 +524,6 @@ def test_reject_rename_to_reserved_name(superuser_conn, extension):
             """,
             superuser_conn,
         )
-    superuser_conn.rollback()
-
-
-def test_reject_owner_change_postgres_server(superuser_conn, extension):
-    """ALTER SERVER ... OWNER TO on the extension-owned 'postgres' server is blocked."""
-    err = run_command(
-        "ALTER SERVER postgres OWNER TO CURRENT_USER",
-        superuser_conn,
-        raise_error=False,
-    )
-    assert err is not None
-    assert (
-        'cannot change owner of the extension-owned "postgres" catalog server'
-        in str(err)
-    )
-    superuser_conn.rollback()
-
-
-def test_reject_owner_change_object_store_server(superuser_conn, extension):
-    """ALTER SERVER ... OWNER TO on the extension-owned 'object_store' server is blocked."""
-    err = run_command(
-        "ALTER SERVER object_store OWNER TO CURRENT_USER",
-        superuser_conn,
-        raise_error=False,
-    )
-    assert err is not None
-    assert (
-        'cannot change owner of the extension-owned "object_store" catalog server'
-        in str(err)
-    )
-    superuser_conn.rollback()
-
-
-def test_reject_owner_change_rest_server(superuser_conn, extension):
-    """ALTER SERVER ... OWNER TO on the extension-owned 'rest' server is blocked."""
-    err = run_command(
-        "ALTER SERVER rest OWNER TO CURRENT_USER",
-        superuser_conn,
-        raise_error=False,
-    )
-    assert err is not None
-    assert 'cannot change owner of the extension-owned "rest" catalog server' in str(
-        err
-    )
     superuser_conn.rollback()
 
 

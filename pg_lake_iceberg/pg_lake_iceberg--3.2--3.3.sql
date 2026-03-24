@@ -38,16 +38,3 @@ LANGUAGE C STRICT;
 CREATE FOREIGN DATA WRAPPER iceberg_catalog
   NO HANDLER
   VALIDATOR lake_iceberg.iceberg_catalog_validator;
-
-/* Pre-created catalog servers for backward compatibility */
-CREATE SERVER postgres
-  TYPE 'postgres'
-  FOREIGN DATA WRAPPER iceberg_catalog;
-
-CREATE SERVER object_store
-  TYPE 'object_store'
-  FOREIGN DATA WRAPPER iceberg_catalog;
-
-CREATE SERVER rest
-  TYPE 'rest'
-  FOREIGN DATA WRAPPER iceberg_catalog;
