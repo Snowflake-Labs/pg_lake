@@ -767,7 +767,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		{
 			char	   *catalogOptionValue = GetStringOption(createStmt->options, "catalog", false);
 			RestCatalogOptions *opts =
-				GetRestCatalogOptionsFromServer(catalogOptionValue);
+				GetRestCatalogOptionsFromCatalog(catalogOptionValue);
 
 			ErrorIfRestNamespaceDoesNotExist(opts, catalogName, catalogNamespace);
 
@@ -890,7 +890,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		char	   *catalogOptionValue =
 			GetStringOption(createStmt->options, "catalog", false);
 		RestCatalogOptions *opts =
-			GetRestCatalogOptionsFromServer(catalogOptionValue);
+			GetRestCatalogOptionsFromCatalog(catalogOptionValue);
 
 		if (opts->locationPrefix != NULL)
 			defaultLocationPrefix = opts->locationPrefix;
@@ -991,7 +991,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		 */
 		char	   *catalogOptionValue = GetStringOption(createStmt->options, "catalog", false);
 		RestCatalogOptions *opts =
-			GetRestCatalogOptionsFromServer(catalogOptionValue);
+			GetRestCatalogOptionsFromCatalog(catalogOptionValue);
 
 		RegisterNamespaceToRestCatalog(opts, get_database_name(MyDatabaseId),
 									   get_namespace_name(namespaceId));
