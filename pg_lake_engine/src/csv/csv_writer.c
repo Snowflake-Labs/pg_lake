@@ -786,7 +786,12 @@ CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot)
 					string = OutputFunctionCall(&out_functions[attnum - 1],
 												value);
 
-				if (attr->atttypid == NUMERICOID)
+				/*
+				 * iceberg validation is handled separately for numeric types
+				 * (see IcebergErrorOrClampDatum)
+				 */
+				if (attr->atttypid == NUMERICOID &&
+					cstate->targetFormat != DATA_FORMAT_ICEBERG)
 				{
 					if (IsUnboundedNumeric(NUMERICOID, attr->atttypmod))
 						ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits(string);
