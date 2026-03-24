@@ -36,13 +36,17 @@ extern int	RestCatalogAuthType;
 extern bool RestCatalogEnableVendedCredentials;
 
 /*
- * Holds per-server REST catalog options. Populated from the server options
- * of an iceberg_catalog ForeignServer, with GUC fallback for any option
- * not explicitly set on the server.
+ * Resolved REST catalog connection options.  For the built-in 'rest'
+ * catalog the fields come entirely from GUC settings.  For user-created
+ * catalogs (CREATE SERVER ... FOREIGN DATA WRAPPER iceberg_catalog) the
+ * server options override the GUC defaults.
  */
 typedef struct RestCatalogOptions
 {
-	char	   *serverName;		/* server name, used for token cache keying */
+	char	   *catalog;		/* catalog name, used for token cache keying;
+							 	 * can be 'rest' or a user-created server name
+							 	 * of TYPE 'rest'
+								 */
 	char	   *host;
 	char	   *oauthHostPath;
 	char	   *clientId;
@@ -96,8 +100,8 @@ typedef struct RestCatalogRequest
 #define REST_CATALOG_AUTH_TOKEN_PATH "%s/api/catalog/v1/oauth/tokens"
 #define GET_REST_CATALOG_METADATA_LOCATION "%s/api/catalog/v1/%s/namespaces/%s/tables/%s"
 
-/* Connection info resolution */
-extern PGDLLEXPORT RestCatalogOptions * GetRestCatalogOptionsFromServer(const char *serverName);
+/* Catalog options resolution */
+extern PGDLLEXPORT RestCatalogOptions * GetRestCatalogOptionsFromCatalog(const char *catalog);
 extern PGDLLEXPORT RestCatalogOptions * GetRestCatalogOptionsForRelation(Oid relationId);
 
 extern PGDLLEXPORT void RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName);

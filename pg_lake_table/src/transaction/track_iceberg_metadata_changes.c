@@ -113,6 +113,7 @@ static HTAB *TrackedIcebergMetadataOperationsHash = NULL;
 */
 static HTAB *RestCatalogRequestsHash = NULL;
 
+
 /* some pre-allocated memory so we don't palloc() ever in XACT_COMMIT  */
 static MemoryContext PgLakeXactCommitContext = NULL;
 
@@ -631,7 +632,7 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 			MemoryContext oldctx = MemoryContextSwitchTo(TopTransactionContext);
 
 			PgLakeXactRestCatalogOpts = palloc0(sizeof(RestCatalogOptions));
-			PgLakeXactRestCatalogOpts->serverName = pstrdup(resolvedOpts->serverName);
+			PgLakeXactRestCatalogOpts->catalog = pstrdup(resolvedOpts->catalog);
 			PgLakeXactRestCatalogOpts->host = pstrdup(resolvedOpts->host);
 			PgLakeXactRestCatalogOpts->oauthHostPath = resolvedOpts->oauthHostPath ? pstrdup(resolvedOpts->oauthHostPath) : NULL;
 			PgLakeXactRestCatalogOpts->clientId = resolvedOpts->clientId ? pstrdup(resolvedOpts->clientId) : NULL;
@@ -643,15 +644,15 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 
 			MemoryContextSwitchTo(oldctx);
 		}
-		else if (strcmp(PgLakeXactRestCatalogOpts->serverName, resolvedOpts->serverName) != 0)
+		else if (strcmp(PgLakeXactRestCatalogOpts->catalog, resolvedOpts->catalog) != 0)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("cannot modify tables from different REST catalogs "
 							"in the same transaction"),
 					 errdetail("This transaction already targets catalog server "
 							   "\"%s\", but table %u belongs to \"%s\".",
-							   PgLakeXactRestCatalogOpts->serverName, relationId,
-							   resolvedOpts->serverName)));
+							   PgLakeXactRestCatalogOpts->catalog, relationId,
+							   resolvedOpts->catalog)));
 
 		requestPerTable->catalogName =
 			MemoryContextStrdup(TopTransactionContext, GetRestCatalogName(relationId));
