@@ -787,12 +787,11 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		if (!hasExternalCatalogReadOnlyOption)
 		{
 			/*
-			 * For writable object store catalog tables, we need to continue
-			 * with the regular iceberg table creation process. We only fill
-			 * in the catalog options here. Other than that, we simply check
-			 * if user provided any catalog options. That's not allowed,
-			 * writable tables only inherit from the database name, schema
-			 * name, and table name.
+			 * Writable tables always derive catalog_name, catalog_namespace,
+			 * and catalog_table_name from the database name, schema name, and
+			 * table name.  Explicit catalog options on the table are rejected,
+			 * and the server must not have catalog_name set either, since that
+			 * would conflict with the derived values.
 			 */
 			if (catalogNamespaceProvided != NULL ||
 				catalogTableNameProvided != NULL ||
@@ -801,6 +800,19 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 				ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 								errmsg("writable %s catalog iceberg tables do not "
 									   "allow explicit catalog options", hasObjectStoreCatalogOption ? OBJECT_STORE_CATALOG_NAME : REST_CATALOG_NAME)));
+			}
+
+			if (hasRestCatalogOption)
+			{
+				char	   *catalogOptionValue = GetStringOption(createStmt->options, "catalog", false);
+				RestCatalogOptions *opts =
+					GetRestCatalogOptionsFromCatalog(catalogOptionValue);
+
+				if (opts->catalogName != NULL)
+					ereport(ERROR,
+							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+							 errmsg("writable REST catalog tables cannot use a server "
+									"with catalog_name set")));
 			}
 		}
 		else if (createStmt->base.tableElts == NIL && hasExternalCatalogReadOnlyOption)
