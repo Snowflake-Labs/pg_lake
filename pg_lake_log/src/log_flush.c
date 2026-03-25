@@ -41,6 +41,7 @@
 #include "lib/stringinfo.h"
 #include "utils/builtins.h"
 #include "utils/rel.h"
+#include "utils/varlena.h"
 #include "utils/timestamp.h"
 
 #include "pg_lake/fdw/writable_table.h"
