@@ -262,7 +262,11 @@ install_system_deps() {
                 jq \
                 git \
                 pkg-config \
-                python3-dev
+                python3-dev \
+                pipenv \
+                zip \
+                unzip \
+                tar
             ;;
         rhel)
             sudo dnf -y update
@@ -771,6 +775,14 @@ install_test_deps() {
         print_warning "Check that ~/.local/bin is in your PATH if pipenv was installed with --user."
     fi
 
+    if [[ -f "$PG_INSTALL_DIR/bin/polaris-server.jar" ]]; then
+        print_info "Polaris already installed"
+    else
+        print_info "Installing Polaris"
+        cd "$PG_LAKE_REPO_DIR"
+        make -C test_common/rest_catalog install
+    fi
+
     print_info "Test dependencies installed successfully"
 }
 
@@ -826,12 +838,6 @@ print_summary() {
         JDBC_JAR="$JDBC_DIR/postgresql-${JDBC_VERSION}.jar"
 
         echo "4. Run tests:"
-        if [[ -f "$JDBC_JAR" ]]; then
-            echo "   export JDBC_DRIVER_PATH=$JDBC_JAR"
-        else
-            echo "   # Note: JDBC driver download may have failed. Set JDBC_DRIVER_PATH manually if needed."
-        fi
-        echo "   cd pg_lake"
         echo "   make check"
         echo
     fi

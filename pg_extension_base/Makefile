@@ -59,6 +59,7 @@ finish-check: uninstall-pg_extension_base-test
 # Custom target for running Python tests
 # Run prepare-check before check (might require superuser)
 check:
+	$(MAKE) prepare-check
 	if [ ! -f "$(SHAREDIR)/extension/pg_extension_base_test_ext1.control" ] ; \
 	then \
 		echo pg_extension_base_test_ext1 is not installed, run make prepare-check first ; \
@@ -66,6 +67,7 @@ check:
 	fi
 	@echo "Running Python tests..."
 	PYTHONPATH=../test_common pipenv run pytest -v tests/pytests
+	$(MAKE) finish-check
 
 clean: clean-pg_extension_base-test
 uninstall: uninstall-pg_extension_base-test

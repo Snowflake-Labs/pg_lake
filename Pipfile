@@ -27,6 +27,3 @@ pytest = "~=8.4"
 pytest-split = "~=0.10"
 setuptools = "~=80.9"
 wheel = "~=0.45"
-
-[requires]
-python_version = "3.11"
