@@ -71,7 +71,7 @@ InsertBatchToIceberg(LogEntry *entries, int count, const char *table_name)
 		return;
 
 	/* Resolve the target table OID. */
-	List	   *names = stringToQualifiedNameList(table_name, NULL);
+	List	   *names = textToQualifiedNameList(cstring_to_text(table_name));
 	RangeVar   *rv = makeRangeVarFromNameList(names);
 	Oid			relationId = RangeVarGetRelid(rv, RowExclusiveLock, false);
 
