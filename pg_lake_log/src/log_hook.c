@@ -35,6 +35,9 @@
 #include "pg_lake_log/log_buffer.h"
 #include "pg_lake_log/log_worker.h"
 
+/* Forward declaration */
+void		PgLakeLogHook(ErrorData *edata);
+
 /* Saved previous hook so we can chain. */
 emit_log_hook_type PrevEmitLogHook = NULL;
 
