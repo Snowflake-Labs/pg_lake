@@ -18,6 +18,7 @@
 #include "postgres.h"
 
 #include "access/table.h"
+#include "access/xact.h"
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/planner/insert_select.h"
@@ -41,6 +42,12 @@ static bool TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod, CopyData
 
 /* pg_lake_table.enable_insert_select_pushdown setting */
 bool		EnableInsertSelectPushdown = true;
+
+/*
+ * Set by IsPushdownableInsertSelectQuery when postgres_scan is needed.
+ * This is consumed by GeneratePushdownScan to propagate to execution.
+ */
+bool		InsertSelectUsesPostgresScan = false;
 
 /*
  * IsPushdownableInsertSelectQuery checks whether the given query is an INSERT..SELECT
@@ -133,7 +140,28 @@ IsPushdownableInsertSelectQuery(Query *query)
 	/* check whether SELECT is pushdownable */
 	RangeTblEntry *selectRte = GetSelectRteFromInsertSelect(query);
 
-	if (!FullQueryIsPushdownable(selectRte->subquery))
+	bool		selectPushdownable = FullQueryIsPushdownable(selectRte->subquery);
+	bool		usesPostgresScan = false;
+
+	/*
+	 * If the query contains heap tables that are not normally pushdownable,
+	 * we can try scanning them via DuckDB's postgres_scan function, provided
+	 * the current transaction has not performed any writes yet.
+	 */
+	bool		postgresScanAllowed =
+		EnablePostgresScanInPushdown &&
+		!TransactionIdIsValid(GetTopTransactionIdIfAny());
+
+	if (!selectPushdownable && postgresScanAllowed)
+	{
+		if (FullQueryIsPushdownableWithPostgresScan(selectRte->subquery))
+		{
+			selectPushdownable = true;
+			usesPostgresScan = true;
+		}
+	}
+
+	if (!selectPushdownable)
 	{
 		ereport(DEBUG4, (errmsg("SELECT part of INSERT..SELECT is not pushdownable")));
 		return false;
@@ -152,13 +180,25 @@ IsPushdownableInsertSelectQuery(Query *query)
 	foreach(cteCell, query->cteList)
 	{
 		CommonTableExpr *cte = (CommonTableExpr *) lfirst(cteCell);
+		bool		ctePushdownable = FullQueryIsPushdownable((Query *) cte->ctequery);
 
-		if (!FullQueryIsPushdownable((Query *) cte->ctequery))
+		if (!ctePushdownable && postgresScanAllowed)
+		{
+			if (FullQueryIsPushdownableWithPostgresScan((Query *) cte->ctequery))
+			{
+				ctePushdownable = true;
+				usesPostgresScan = true;
+			}
+		}
+
+		if (!ctePushdownable)
 		{
 			ereport(DEBUG4, (errmsg("CTE in INSERT..SELECT is not pushdownable")));
 			return false;
 		}
 	}
+
+	InsertSelectUsesPostgresScan = usesPostgresScan;
 
 	return true;
 }

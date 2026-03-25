@@ -25,7 +25,10 @@
 
 #include "fmgr.h"
 #include "funcapi.h"
+#include "miscadmin.h"
 #include "access/relation.h"
+#include "commands/dbcommands.h"
+#include "parser/parsetree.h"
 #include "access/xact.h"
 #include "utils/builtins.h"
 #include "catalog/pg_class_d.h"
@@ -40,6 +43,7 @@
 #include "nodes/nodeFuncs.h"
 #include "parser/parse_func.h"
 #include "utils/builtins.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/regproc.h"
 #include "utils/rel.h"
@@ -55,6 +59,7 @@
 #include "pg_lake/pgduck/read_data.h"
 #include "pg_lake/pgduck/rewrite_query.h"
 #include "pg_lake/parsetree/options.h"
+#include "pg_lake/planner/restriction_collector.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_lake/util/string_utils.h"
 
@@ -143,6 +148,96 @@ ReplaceReadTableFunctionCalls(char *query,
 												quote_literal_cstr(timestampString));
 
 	query = PgLakeReplaceText(query, PG_LAKE_NOW_TEMPLATE "()", nowReplacementString);
+
+	return query;
+}
+
+
+/*
+ * GetPostgresScanDSN builds a libpq-style connection string for DuckDB's
+ * postgres_scan to connect back to the current PostgreSQL database.
+ */
+static char *
+GetPostgresScanDSN(void)
+{
+	const char *socketDir = GetConfigOption("unix_socket_directories",
+										   false, false);
+	const char *portStr = GetConfigOption("port", false, false);
+	const char *dbname = get_database_name(MyDatabaseId);
+	const char *userName = GetUserNameFromId(GetUserId(), false);
+
+	StringInfo	dsn = makeStringInfo();
+
+	appendStringInfo(dsn, "dbname=%s port=%s user=%s", dbname, portStr, userName);
+	if (socketDir != NULL && socketDir[0] != '\0')
+	{
+		/*
+		 * unix_socket_directories may contain multiple entries. Use only the
+		 * first one.
+		 */
+		char	   *firstDir = pstrdup(socketDir);
+		char	   *comma = strchr(firstDir, ',');
+
+		if (comma)
+			*comma = '\0';
+
+		appendStringInfo(dsn, " host=%s", firstDir);
+	}
+
+	return dsn->data;
+}
+
+
+/*
+ * ReplaceHeapTableReadCalls replaces the read_table() placeholder calls for
+ * heap tables with postgres_scan() function calls.
+ *
+ * Each read_table('schema.table', id) is replaced with
+ * postgres_scan('dsn', 'schema', 'table').
+ *
+ * postgres_scan handles snapshot management internally.
+ */
+char *
+ReplaceHeapTableReadCalls(char *query, List *heapRteList, bool explainRequested)
+{
+	if (heapRteList == NIL)
+		return query;
+
+	char	   *dsn = GetPostgresScanDSN();
+
+	ListCell   *rteCell = NULL;
+
+	foreach(rteCell, heapRteList)
+	{
+		RangeTblEntry *rte = (RangeTblEntry *) lfirst(rteCell);
+		Oid			relid = rte->relid;
+		int			uniqueRelationIdentifier = GetUniqueRelationIdentifier(rte);
+		char	   *qualifiedRelationName = GetQualifiedRelationName(relid);
+
+		/* extract schema and table name separately */
+		Oid			namespaceId = get_rel_namespace(relid);
+		char	   *schemaName = get_namespace_name(namespaceId);
+		char	   *tableName = get_rel_name(relid);
+
+		/* build the read_table() call to search for */
+		StringInfo	functionCallToReplace = makeStringInfo();
+
+		appendStringInfo(functionCallToReplace, "%s(%s::text, %d)",
+						 PG_LAKE_READ_TABLE,
+						 quote_literal_cstr(qualifiedRelationName),
+						 uniqueRelationIdentifier);
+
+		/* build the postgres_scan() replacement */
+		StringInfo	replacement = makeStringInfo();
+
+		appendStringInfo(replacement, "postgres_scan(%s, %s, %s)",
+						 quote_literal_cstr(dsn),
+						 quote_literal_cstr(schemaName),
+						 quote_literal_cstr(tableName));
+
+		query = PgLakeReplaceText(query, functionCallToReplace->data,
+								  replacement->data);
+	}
 
 	return query;
 }

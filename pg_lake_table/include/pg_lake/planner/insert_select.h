@@ -23,6 +23,9 @@
 /* pg_lake_table.enable_insert_select_pushdown setting */
 extern bool EnableInsertSelectPushdown;
 
+/* set by IsPushdownableInsertSelectQuery when postgres_scan is needed */
+extern bool InsertSelectUsesPostgresScan;
+
 bool		IsPushdownableInsertSelectQuery(Query *query);
 bool		IsInsertSelectQuery(Query *query);
 Oid			GetInsertRelidFromInsertSelect(Query *query);

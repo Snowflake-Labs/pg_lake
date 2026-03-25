@@ -22,7 +22,11 @@
 /* pg_lake_table.enable_full_query_pushdown setting */
 extern bool EnableFullQueryPushdown;
 
+/* pg_lake_table.enable_postgres_scan_in_pushdown setting */
+extern bool EnablePostgresScanInPushdown;
+
 void		InitializeFullQueryPushdown(void);
 bool		FullQueryIsPushdownable(Query *query);
+bool		FullQueryIsPushdownableWithPostgresScan(Query *parse);
 bool		HasNotShippableExpression(Node *node);
 extern PGDLLEXPORT bool HasLakeRTE(Node *node, void *context);

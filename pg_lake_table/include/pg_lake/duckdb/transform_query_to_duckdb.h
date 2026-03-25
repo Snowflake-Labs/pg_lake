@@ -32,3 +32,5 @@
 extern char *ReplaceReadTableFunctionCalls(char *query,
 										   PgLakeScanSnapshot * snapshot,
 										   int scanFlags);
+extern char *ReplaceHeapTableReadCalls(char *query, List *heapRteList,
+									   bool explainRequested);

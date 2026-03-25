@@ -338,6 +338,8 @@ def test_insert_select_pushdown_unsupported(
     )
     assert "Custom Scan (Query Pushdown)" not in str(results)
 
+    # heap table would be pushdownable via postgres_scan in a clean transaction,
+    # but this transaction has writes so it falls back to non-pushdown
     results = run_query(
         "EXPLAIN ANALYZE INSERT INTO numeric_table_2 SELECT * FROM heap_numeric",
         pg_conn,
@@ -595,7 +597,7 @@ def test_insert_select_ctes(s3, pg_conn, extension, with_default_location):
     res = run_query("SELECT count(*) FROM target_table", pg_conn)
     assert res == [[10]]
 
-    # Non-modifying CTEs with not-pushdownable heap table
+    # Non-modifying CTEs with heap table are not pushdownable in a dirty transaction
     results = run_query(
         "EXPLAIN ANALYZE WITH sel AS (SELECT * FROM heap_source_table) INSERT INTO target_table SELECT * FROM sel",
         pg_conn,
@@ -1319,3 +1321,169 @@ def test_explain_shows_temporal_validation_wrapper(
         run_command("RESET search_path;", pg_conn)
         run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
         pg_conn.commit()
+
+
+def test_insert_select_postgres_scan(s3, pg_conn, extension, with_default_location):
+    """Test INSERT..SELECT pushdown from regular heap tables via postgres_scan."""
+
+    run_command(
+        """
+        CREATE SCHEMA test_insert_select_pg_scan;
+        SET search_path TO test_insert_select_pg_scan;
+
+        CREATE TABLE heap_source (id bigint, value_text text, value_int int, value_float float);
+        CREATE TABLE iceberg_target (id bigint, value_text text, value_int int, value_float float) USING iceberg;
+        CREATE TABLE iceberg_target_local (LIKE iceberg_target INCLUDING ALL);
+
+        INSERT INTO heap_source VALUES (1, 'hello', 42, 3.14), (2, 'world', 99, 2.72), (3, NULL, NULL, NULL);
+    """,
+        pg_conn,
+    )
+
+    # commit so the next transaction has no writes (required for postgres_scan)
+    pg_conn.commit()
+
+    # simple pushdown from heap table to iceberg table
+    results = run_query(
+        "EXPLAIN (VERBOSE) INSERT INTO iceberg_target SELECT * FROM heap_source",
+        pg_conn,
+    )
+    assert "Custom Scan (Query Pushdown)" in str(results)
+    assert "postgres_scan" in str(results)
+
+    # actually execute it and verify results
+    run_command(
+        "INSERT INTO iceberg_target SELECT * FROM heap_source",
+        pg_conn,
+    )
+    pg_conn.commit()
+    run_command(
+        "INSERT INTO iceberg_target_local SELECT * FROM heap_source",
+        pg_conn,
+    )
+    pg_conn.commit()
+    assert_tables_equal(pg_conn, "iceberg_target", "iceberg_target_local")
+
+    # subset of columns (commit so no writes in this transaction)
+    pg_conn.commit()
+    run_command(
+        "INSERT INTO iceberg_target (id, value_text) SELECT id, value_text FROM heap_source",
+        pg_conn,
+    )
+    pg_conn.commit()
+    run_command(
+        "INSERT INTO iceberg_target_local (id, value_text) SELECT id, value_text FROM heap_source",
+        pg_conn,
+    )
+    pg_conn.commit()
+    assert_tables_equal(pg_conn, "iceberg_target", "iceberg_target_local")
+
+    # aggregations
+    run_command(
+        """
+        CREATE TABLE iceberg_agg_target (total_int bigint, avg_float float) USING iceberg;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+    results = run_query(
+        "EXPLAIN (VERBOSE) INSERT INTO iceberg_agg_target SELECT sum(value_int), avg(value_float) FROM heap_source",
+        pg_conn,
+    )
+    assert "Custom Scan (Query Pushdown)" in str(results)
+
+    run_command(
+        "INSERT INTO iceberg_agg_target SELECT sum(value_int), avg(value_float) FROM heap_source",
+        pg_conn,
+    )
+    pg_conn.commit()
+    res = run_query("SELECT * FROM iceberg_agg_target", pg_conn)
+    assert len(res) == 1
+
+    # mixed: heap table joined with iceberg table
+    run_command(
+        """
+        CREATE TABLE iceberg_source (id bigint, extra text) USING iceberg;
+        INSERT INTO iceberg_source VALUES (1, 'extra1'), (2, 'extra2');
+        CREATE TABLE iceberg_join_target (id bigint, value_text text, extra text) USING iceberg;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+    results = run_query(
+        "EXPLAIN (VERBOSE) INSERT INTO iceberg_join_target SELECT h.id, h.value_text, i.extra FROM heap_source h JOIN iceberg_source i ON h.id = i.id",
+        pg_conn,
+    )
+    assert "Custom Scan (Query Pushdown)" in str(results)
+
+    run_command(
+        "INSERT INTO iceberg_join_target SELECT h.id, h.value_text, i.extra FROM heap_source h JOIN iceberg_source i ON h.id = i.id",
+        pg_conn,
+    )
+    pg_conn.commit()
+    res = run_query(
+        "SELECT count(*) FROM iceberg_join_target",
+        pg_conn,
+    )
+    assert res == [[2]]
+
+    # CTE with heap table
+    results = run_query(
+        "EXPLAIN (VERBOSE) WITH sel AS (SELECT * FROM heap_source) INSERT INTO iceberg_target SELECT * FROM sel",
+        pg_conn,
+    )
+    assert "Custom Scan (Query Pushdown)" in str(results)
+
+    run_command("DROP SCHEMA test_insert_select_pg_scan CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_insert_select_postgres_scan_not_pushdownable(
+    s3, pg_conn, extension, with_default_location
+):
+    """Test that INSERT..SELECT from heap tables is NOT pushed down when conditions are not met."""
+
+    run_command(
+        """
+        CREATE SCHEMA test_pg_scan_not_pushdown;
+        SET search_path TO test_pg_scan_not_pushdown;
+
+        CREATE TYPE composite_type AS (a int, b text);
+        CREATE TABLE heap_composite (id int, data composite_type);
+        CREATE TABLE iceberg_target (id int) USING iceberg;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # composite type prevents postgres_scan pushdown
+    results = run_query(
+        "EXPLAIN ANALYZE INSERT INTO iceberg_target SELECT id FROM heap_composite",
+        pg_conn,
+    )
+    assert "Custom Scan (Query Pushdown)" not in str(results)
+
+    # disable the feature via GUC
+    run_command(
+        """
+        CREATE TABLE heap_simple (x int);
+        INSERT INTO heap_simple VALUES (1);
+        CREATE TABLE iceberg_simple (x int) USING iceberg;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        "SET pg_lake_table.enable_postgres_scan_in_pushdown TO off;",
+        pg_conn,
+    )
+
+    results = run_query(
+        "EXPLAIN ANALYZE INSERT INTO iceberg_simple SELECT * FROM heap_simple",
+        pg_conn,
+    )
+    assert "Custom Scan (Query Pushdown)" not in str(results)
+
+    run_command("DROP SCHEMA test_pg_scan_not_pushdown CASCADE", pg_conn)
+    pg_conn.commit()

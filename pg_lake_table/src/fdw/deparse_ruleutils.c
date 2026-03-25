@@ -73,6 +73,8 @@ typedef struct FixCtidVarContext
 static char *DeparseQualifiedQuery(Query *query);
 static bool ReplacePgLakeTableWalker(Node *node,
 									 ReplacePgLakeTableContext * context);
+static bool ReplaceHeapTableWalker(Node *node,
+								   ReplacePgLakeTableContext * context);
 static bool FixCtidVarWalker(Node *node,
 							 FixCtidVarContext * context);
 
@@ -229,6 +231,112 @@ ReplacePgLakeTableWalker(Node *node, ReplacePgLakeTableContext * context)
 
 		return false;
 	}
+
+	return false;
+}
+
+
+/*
+ * ReplaceHeapTableWithReadTableFunc replaces all occurrences of regular
+ * heap tables with read_table(..) function calls. This is used for
+ * INSERT..SELECT pushdown where the SELECT part references heap tables
+ * that will be scanned via postgres_scan.
+ *
+ * Returns a list of the original RangeTblEntry copies (before replacement).
+ */
+List *
+ReplaceHeapTableWithReadTableFunc(Node *node)
+{
+	Oid			readTableFunctionId = ReadTableFunctionId();
+
+	ReplacePgLakeTableContext context = {
+		.readTableFunctionId = readTableFunctionId,
+		.relationRteList = NIL,
+		.hasCtidVar = false
+	};
+
+	ReplaceHeapTableWalker(node, &context);
+
+	return context.relationRteList;
+}
+
+
+/*
+ * ReplaceHeapTableWalker replaces regular heap table RTEs with
+ * read_table(..) function calls.
+ */
+static bool
+ReplaceHeapTableWalker(Node *node, ReplacePgLakeTableContext * context)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, Query))
+	{
+		return query_tree_walker((Query *) node, ReplaceHeapTableWalker,
+								 context, QTW_EXAMINE_RTES_BEFORE);
+	}
+
+	if (!IsA(node, RangeTblEntry))
+	{
+		return expression_tree_walker(node, ReplaceHeapTableWalker,
+									  context);
+	}
+
+	RangeTblEntry *rte = (RangeTblEntry *) node;
+
+	/* only replace heap tables (non-lake, non-function RTEs) */
+	if (rte->rtekind != RTE_RELATION || IsAnyLakeForeignTable(rte))
+		return false;
+
+	char	   *qualifiedRelationName = GetQualifiedRelationName(rte->relid);
+
+#ifdef USE_ASSERT_CHECKING
+	elog(DEBUG2, "replacing heap table %s with read_table('%s') for postgres_scan",
+		 qualifiedRelationName, qualifiedRelationName);
+#endif
+
+	/* store the copy of the rte for later use */
+	context->relationRteList = lappend(context->relationRteList, copyObject(rte));
+
+	Const	   *tableNameParam = makeNode(Const);
+
+	tableNameParam->constvalue = CStringGetTextDatum(qualifiedRelationName);
+	tableNameParam->consttype = TEXTOID;
+	tableNameParam->consttypmod = -1;
+	tableNameParam->constbyval = false;
+	tableNameParam->constlen = get_typlen(TEXTOID);
+	tableNameParam->location = -1;
+
+	Const	   *uniqueRelationId = makeNode(Const);
+	int			uniqueRelationIdentifier = GetUniqueRelationIdentifier(rte);
+
+	uniqueRelationId->constvalue = Int32GetDatum(uniqueRelationIdentifier);
+	uniqueRelationId->consttype = INT4OID;
+	uniqueRelationId->consttypmod = -1;
+	uniqueRelationId->constbyval = true;
+	uniqueRelationId->constlen = 4;
+	uniqueRelationId->location = -1;
+
+	FuncExpr   *readTableFuncExpr = makeNode(FuncExpr);
+
+	readTableFuncExpr->funcid = context->readTableFunctionId;
+	readTableFuncExpr->funcresulttype = RECORDOID;
+	readTableFuncExpr->funcretset = true;
+	readTableFuncExpr->location = -1;
+	readTableFuncExpr->args = list_make2(tableNameParam, uniqueRelationId);
+
+	RangeTblFunction *readTableFunction = makeNode(RangeTblFunction);
+
+	readTableFunction->funcexpr = (Node *) readTableFuncExpr;
+
+	Relation	rel = RelationIdGetRelation(rte->relid);
+
+	readTableFunction->funccolcount = RelationGetNumberOfAttributes(rel);
+	RelationClose(rel);
+
+	rte->functions = list_make1(readTableFunction);
+	rte->rtekind = RTE_FUNCTION;
 
 	return false;
 }

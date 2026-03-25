@@ -128,10 +128,14 @@ static void TryRecordNotShippableObject(IsShippableContext * context, Oid object
 static void RecordNotShippableObject(IsShippableContext * context, Oid objectId,
 									 Oid classId, NotShippableReason reason);
 static HTAB *CreateNotShippableObjectsHash(void);
+static bool HeapTableSuitableForPostgresScan(Oid relid);
 
 
 /* pg_lake_table.enable_full_query_pushdown setting */
 bool		EnableFullQueryPushdown = true;
+
+/* pg_lake_table.enable_postgres_scan_in_pushdown setting */
+bool		EnablePostgresScanInPushdown = true;
 
 static planner_hook_type PreviousPlannerHook = NULL;
 
@@ -163,6 +167,9 @@ typedef struct QueryPushdownScanState
 	/* INSERT..SELECT into the following relation, or InvalidOid */
 	Oid			insertIntoRelid;
 	TupleDesc	insertTargetTupleDesc;
+
+	/* whether to use postgres_scan for heap tables in the SELECT */
+	bool		usesPostgresScan;
 
 	/* table properties */
 	TupleDesc	tupleDesc;
@@ -541,6 +548,135 @@ CollectNotShippableObjects(Node *node)
 	ProcessNotShippableExpressionWalker(node, &context);
 
 	return context.notShippableObjects;
+}
+
+
+/*
+ * FullQueryIsPushdownableWithPostgresScan is similar to FullQueryIsPushdownable
+ * but allows regular heap tables in the query if they are suitable for scanning
+ * via postgres_scan in DuckDB.
+ *
+ * Returns true if the query is pushdownable when heap tables are read via
+ * postgres_scan. The only allowed "not shippable" objects are heap tables
+ * whose columns are compatible with postgres_scan.
+ */
+bool
+FullQueryIsPushdownableWithPostgresScan(Query *parse)
+{
+	if (parse->commandType != CMD_SELECT || parse->hasModifyingCTE ||
+		parse->hasForUpdate)
+		return false;
+
+	HTAB	   *notShippable = CollectNotShippableObjects((Node *) parse);
+	HASH_SEQ_STATUS status;
+	NotShippableObject *entry;
+
+	hash_seq_init(&status, notShippable);
+
+	while ((entry = (NotShippableObject *) hash_seq_search(&status)) != NULL)
+	{
+		if (entry->reason != NOT_SHIPPABLE_TABLE)
+		{
+			hash_seq_term(&status);
+			return false;
+		}
+
+		/* verify the heap table is suitable for postgres_scan */
+		if (!HeapTableSuitableForPostgresScan(entry->objectId))
+		{
+			hash_seq_term(&status);
+			return false;
+		}
+	}
+
+	return true;
+}
+
+
+/*
+ * HeapTableSuitableForPostgresScan checks whether a regular PostgreSQL heap
+ * table can be scanned via DuckDB's postgres_scan function.
+ *
+ * postgres_scan does not support composite types (structs must be
+ * registered via CREATE TYPE in DuckDB, which we don't do for ad-hoc scans).
+ * Domain types, MAP types and other non-standard types are also blocked.
+ */
+static bool
+HeapTableSuitableForPostgresScan(Oid relid)
+{
+	Relation	rel = RelationIdGetRelation(relid);
+
+	if (!RelationIsValid(rel))
+		return false;
+
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+	bool		suitable = true;
+
+	for (int i = 0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+		if (attr->attisdropped)
+			continue;
+
+		Oid			typeId = attr->atttypid;
+		char		typeType = get_typtype(typeId);
+
+		/* composite types are not reliably supported by postgres_scan */
+		if (typeType == TYPTYPE_COMPOSITE)
+		{
+			ereport(DEBUG4,
+					(errmsg("composite type column \"%s\" prevents postgres_scan",
+							NameStr(attr->attname))));
+			suitable = false;
+			break;
+		}
+
+		/* domain types have constraints not enforced by postgres_scan */
+		if (typeType == TYPTYPE_DOMAIN && !IsMapTypeOid(typeId))
+		{
+			ereport(DEBUG4,
+					(errmsg("domain type column \"%s\" prevents postgres_scan",
+							NameStr(attr->attname))));
+			suitable = false;
+			break;
+		}
+
+		/* range types are not supported */
+		if (typeType == TYPTYPE_RANGE || typeType == TYPTYPE_MULTIRANGE)
+		{
+			ereport(DEBUG4,
+					(errmsg("range type column \"%s\" prevents postgres_scan",
+							NameStr(attr->attname))));
+			suitable = false;
+			break;
+		}
+
+		/*
+		 * Recurse into array element types: arrays of composites/domains
+		 * are not supported.
+		 */
+		if (type_is_array(typeId))
+		{
+			Oid			elemType = get_element_type(typeId);
+			char		elemTypeType = get_typtype(elemType);
+
+			if (elemTypeType == TYPTYPE_COMPOSITE ||
+				(elemTypeType == TYPTYPE_DOMAIN && !IsMapTypeOid(elemType)))
+			{
+				ereport(DEBUG4,
+						(errmsg("array of composite/domain type column \"%s\" "
+								"prevents postgres_scan",
+								NameStr(attr->attname))));
+				suitable = false;
+				break;
+			}
+		}
+	}
+
+	RelationClose(rel);
+
+	return suitable;
 }
 
 
@@ -1318,12 +1454,23 @@ GeneratePushdownScan(Query *originalQuery)
 	customScan->flags = CUSTOMPATH_SUPPORT_BACKWARD_SCAN | CUSTOMPATH_SUPPORT_PROJECTION;
 	customScan->methods = &QueryPushdownScanMethods;
 
-	Oid			insertIntoRelid =
-		IsPushdownableInsertSelectQuery(originalQuery) ?
-		GetInsertRelidFromInsertSelect(originalQuery) : InvalidOid;
+	Oid			insertIntoRelid = InvalidOid;
+	bool		usesPostgresScan = false;
+
+	if (IsPushdownableInsertSelectQuery(originalQuery))
+	{
+		insertIntoRelid = GetInsertRelidFromInsertSelect(originalQuery);
+		usesPostgresScan = InsertSelectUsesPostgresScan;
+
+		/* reset for next use */
+		InsertSelectUsesPostgresScan = false;
+	}
+
+	List	   *insertInfo = list_make2_oid(insertIntoRelid,
+											(Oid) usesPostgresScan);
 
 	customScan->custom_private =
-		list_make3(rewrittenQuery, restrictionList, list_make1_oid(insertIntoRelid));
+		list_make3(rewrittenQuery, restrictionList, insertInfo);
 
 	return customScan;
 }
@@ -1360,9 +1507,10 @@ QueryPushdownCreateScanState(CustomScan *scan)
 	scanState->query = (Query *) linitial(scan->custom_private);
 	scanState->restrictionsList = (List *) lsecond(scan->custom_private);
 
-	List	   *insertIntoRelidList = lthird(scan->custom_private);
+	List	   *insertInfo = lthird(scan->custom_private);
 
-	scanState->insertIntoRelid = linitial_oid(insertIntoRelidList);
+	scanState->insertIntoRelid = linitial_oid(insertInfo);
+	scanState->usesPostgresScan = (bool) lsecond_oid(insertInfo);
 
 	return (Node *) scanState;
 }
@@ -1419,6 +1567,16 @@ QueryPushdownBeginScan(CustomScanState *node, EState *estate, int eflags)
 	List	   *rteList =
 		ReplacePgLakeTableWithReadTableFunc((Node *) scanQuery);
 
+	/*
+	 * If using postgres_scan, also replace remaining heap table RTEs with
+	 * read_table() calls. We'll replace those with postgres_scan() calls
+	 * after deparsing.
+	 */
+	List	   *heapRteList = NIL;
+
+	if (scanState->usesPostgresScan)
+		heapRteList = ReplaceHeapTableWithReadTableFunc((Node *) scanQuery);
+
 	/* if there are child tables, include them in the snapshot */
 	bool		includeChildren = true;
 
@@ -1436,6 +1594,13 @@ QueryPushdownBeginScan(CustomScanState *node, EState *estate, int eflags)
 	char	   *queryString = ReplaceReadTableFunctionCalls(pgDuckSQLTemplate,
 															snapshot,
 															explainRequested);
+
+	/*
+	 * Replace the heap table read_table() calls with postgres_scan() calls.
+	 */
+	if (heapRteList != NIL)
+		queryString = ReplaceHeapTableReadCalls(queryString, heapRteList,
+												explainRequested);
 
 	TupleDesc	tupleDesc = node->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
 
@@ -1692,6 +1857,11 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 	List	   *rteList =
 		ReplacePgLakeTableWithReadTableFunc((Node *) scanQuery);
 
+	List	   *heapRteList = NIL;
+
+	if (scanState->usesPostgresScan)
+		heapRteList = ReplaceHeapTableWithReadTableFunc((Node *) scanQuery);
+
 	/* if there are child tables, include them in the snapshot */
 	bool		includeChildren = true;
 
@@ -1709,6 +1879,10 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 	char	   *queryString = ReplaceReadTableFunctionCalls(pgDuckSQLTemplate,
 															snapshot,
 															explainRequested);
+
+	if (heapRteList != NIL)
+		queryString = ReplaceHeapTableReadCalls(queryString, heapRteList,
+												explainRequested);
 
 	ExplainPropertyText("Engine", "DuckDB", es);
 
@@ -1742,6 +1916,9 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 	}
 	char	   *realQuery = ReplaceReadTableFunctionCalls(pgDuckSQLTemplate,
 														  snapshot, false);
+
+	if (heapRteList != NIL)
+		realQuery = ReplaceHeapTableReadCalls(realQuery, heapRteList, false);
 
 	if (scanState->insertIntoRelid != InvalidOid)
 	{
