@@ -769,7 +769,7 @@ install_test_deps() {
     if command -v pipenv &>/dev/null; then
         print_info "Installing Python test dependencies via pipenv..."
         cd "$PG_LAKE_REPO_DIR"
-        pipenv install --dev
+        pipenv install --dev --python "$(python3 -c 'import sys; print(sys.executable)')"
     else
         print_warning "pipenv not found in PATH. You may need to run 'pipenv install --dev' manually."
         print_warning "Check that ~/.local/bin is in your PATH if pipenv was installed with --user."
