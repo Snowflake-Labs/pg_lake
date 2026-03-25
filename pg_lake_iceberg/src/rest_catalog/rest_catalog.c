@@ -261,30 +261,30 @@ ScrubUserMappingSecrets(const char *queryString, List *options)
 		if (def->location < 0)
 			continue;
 
-		char	   *p = (char *) queryString + def->location;
+		char	   *currentChar = (char *) queryString + def->location;
 
 		/* skip past the key name */
-		while (*p && !isspace((unsigned char) *p) && *p != '\'')
-			p++;
+		while (*currentChar && !isspace((unsigned char) *currentChar) && *currentChar != '\'')
+			currentChar++;
 
 		/* skip whitespace between key and opening quote */
-		while (*p && *p != '\'')
-			p++;
+		while (*currentChar && *currentChar != '\'')
+			currentChar++;
 
-		if (*p != '\'')
+		if (*currentChar != '\'')
 			continue;
 
-		p++;					/* skip opening quote */
+		currentChar++;			/* skip opening quote */
 
 		/* overwrite value characters with '*', handling '' escapes */
-		while (*p && *p != '\'')
-			*p++ = '*';
-		while (*(p + 1) == '\'')
+		while (*currentChar && *currentChar != '\'')
+			*currentChar++ = '*';
+		while (*(currentChar + 1) == '\'')
 		{
-			*p++ = '*';			/* first quote of '' pair */
-			*p++ = '*';			/* second quote of '' pair */
-			while (*p && *p != '\'')
-				*p++ = '*';
+			*currentChar++ = '*';	/* first quote of '' pair */
+			*currentChar++ = '*';	/* second quote of '' pair */
+			while (*currentChar && *currentChar != '\'')
+				*currentChar++ = '*';
 		}
 	}
 }
