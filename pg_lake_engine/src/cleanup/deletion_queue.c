@@ -380,3 +380,19 @@ InsertDeletionQueueRecordExtended(char *path, Oid relationId, TimestampTz orphan
 
 	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 }
+
+
+/*
+ * DeleteDeletionQueueRecordsByPath removes the given paths from the
+ * deletion queue table without deleting the actual remote files.
+ * Used to undo premature deletion queue entries when a REST catalog
+ * commit fails.
+ */
+void
+DeleteDeletionQueueRecordsByPath(List *paths)
+{
+	if (paths == NIL)
+		return;
+
+	RemoveDeletionQueuePathsFromCatalog(paths);
+}

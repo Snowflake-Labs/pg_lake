@@ -26,6 +26,9 @@
 #define INJECTION_POINT_COMPAT(name) \
     INJECTION_POINT(name, NULL)
 
+#define IS_INJECTION_POINT_ATTACHED_COMPAT(name) \
+    IS_INJECTION_POINT_ATTACHED(name)
+
 #elif PG_VERSION_NUM >= 170000
 
 #include "utils/injection_point.h"
@@ -33,9 +36,15 @@
 #define INJECTION_POINT_COMPAT(name) \
     INJECTION_POINT(name)
 
+#define IS_INJECTION_POINT_ATTACHED_COMPAT(name) \
+    (false)
+
 #else
 
 #define INJECTION_POINT_COMPAT(name) \
     ((void) name)
+
+#define IS_INJECTION_POINT_ATTACHED_COMPAT(name) \
+    (false)
 
 #endif

@@ -20,6 +20,7 @@
 #include "common/int.h"
 #include "utils/memutils.h"
 
+#include "pg_lake/cleanup/deletion_queue.h"
 #include "pg_lake/cleanup/in_progress_files.h"
 #include "pg_lake/data_file/data_files.h"
 #include "pg_lake/fdw/data_files_catalog.h"
@@ -78,9 +79,18 @@ typedef struct RestCatalogRequestPerTable
 
 
 	List	   *tableModifyRequests;
+
+	/*
+	 * For writable REST catalog tables, the metadata path that was
+	 * optimistically inserted into the deletion queue during pre-commit.
+	 * If the REST commit fails, this path needs to be removed from the
+	 * deletion queue to undo the premature insertion.
+	 */
+	char	   *deletionQueueMetadataPath;
 }			RestCatalogRequestPerTable;
 
 static void ApplyTrackedIcebergMetadataChanges(bool isVerbose);
+static void UndoFailedRestCatalogDeletionQueueEntries(void);
 static void RecordIcebergMetadataOperation(Oid relationId, TableMetadataOperationType operationType);
 static void InitTableMetadataTrackerHashIfNeeded(void);
 static void InitRestCatalogRequestsHashIfNeeded(void);
@@ -116,6 +126,15 @@ static HTAB *RestCatalogRequestsHash = NULL;
 
 /* some pre-allocated memory so we don't palloc() ever in XACT_COMMIT  */
 static MemoryContext PgLakeXactCommitContext = NULL;
+
+/*
+ * Paths that were optimistically inserted into the deletion queue during
+ * pre-commit, but whose REST catalog commit subsequently failed. These
+ * are saved in TopMemoryContext so they survive across transactions, and
+ * removed from the deletion_queue at the next pre-commit to undo the
+ * premature insertion.
+ */
+static List *FailedRestCatalogDeletionPaths = NIL;
 
 /*
  * TrackIcebergMetadataChangesInTx tracks metadata changes for a given relation
@@ -212,6 +231,33 @@ ResetRestCatalogRequests(void)
 {
 	RestCatalogRequestsHash = NULL;
 	PgLakeXactCommitContext = NULL;
+}
+
+
+/*
+ * UndoFailedRestCatalogDeletionQueueEntries removes deletion queue entries
+ * that were optimistically inserted during pre-commit of a previous
+ * transaction, but whose REST catalog commit subsequently failed. Must be
+ * called in a context where SPI is available (e.g., during pre-commit with
+ * an active snapshot).
+ */
+static void
+UndoFailedRestCatalogDeletionQueueEntries(void)
+{
+	if (FailedRestCatalogDeletionPaths == NIL)
+		return;
+
+	DeleteDeletionQueueRecordsByPath(FailedRestCatalogDeletionPaths);
+
+	ListCell   *lc = NULL;
+
+	foreach(lc, FailedRestCatalogDeletionPaths)
+	{
+		pfree(lfirst(lc));
+	}
+
+	list_free(FailedRestCatalogDeletionPaths);
+	FailedRestCatalogDeletionPaths = NIL;
 }
 
 
@@ -414,11 +460,47 @@ PostAllRestCatalogRequests(void)
 		appendStringInfoChar(batchRequestBody, '}');	/* close json body */
 
 		char	   *url = psprintf(REST_CATALOG_TRANSACTION_COMMIT, RestCatalogHost, catalogName);
-		HttpResult	httpResult = SendRequestToRestCatalog(HTTP_POST, url, batchRequestBody->data, PostHeadersWithAuth());
+		HttpResult	httpResult;
+
+		if (IS_INJECTION_POINT_ATTACHED_COMPAT("rest-catalog-batch-commit"))
+		{
+			memset(&httpResult, 0, sizeof(HttpResult));
+			httpResult.status = 503;
+			httpResult.errorMsg = "injected failure for testing";
+		}
+		else
+		{
+			httpResult = SendRequestToRestCatalog(HTTP_POST, url, batchRequestBody->data, PostHeadersWithAuth());
+		}
 
 		if (httpResult.status != 204)
 		{
 			ReportHTTPError(httpResult, WARNING);
+
+			/*
+			 * REST catalog commit failed. Any metadata paths that were
+			 * optimistically inserted into the deletion queue during
+			 * pre-commit need to be undone, since the old metadata is
+			 * still the active version. We save them in TopMemoryContext
+			 * so they survive the current transaction, and delete them
+			 * from the deletion_queue at the next pre-commit.
+			 */
+			MemoryContext undoContext = MemoryContextSwitchTo(TopMemoryContext);
+
+			hash_seq_init(&status, RestCatalogRequestsHash);
+
+			while ((requestPerTable = hash_seq_search(&status)) != NULL)
+			{
+				if (requestPerTable->isValid &&
+					requestPerTable->deletionQueueMetadataPath != NULL)
+				{
+					FailedRestCatalogDeletionPaths =
+						lappend(FailedRestCatalogDeletionPaths,
+								pstrdup(requestPerTable->deletionQueueMetadataPath));
+				}
+			}
+
+			MemoryContextSwitchTo(undoContext);
 		}
 	}
 
@@ -679,6 +761,14 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 void
 ConsumeTrackedIcebergMetadataChanges(bool isVerbose)
 {
+	/*
+	 * Undo any deletion queue entries from previous failed REST catalog
+	 * commits. Those entries were optimistically inserted during pre-commit
+	 * but the REST commit failed, so the metadata files are still active
+	 * and must not be deleted.
+	 */
+	UndoFailedRestCatalogDeletionQueueEntries();
+
 	ApplyTrackedIcebergMetadataChanges(isVerbose);
 	ResetTrackedIcebergMetadataOperation();
 }
@@ -799,7 +889,9 @@ ApplyTrackedIcebergMetadataChanges(bool isVerbose)
 		if (metadataOperations != NIL)
 		{
 			int			maxSnapshotAgeInSecs = GetEffectiveMaxSnapshotAgeInSecs(relationId);
-			List	   *restRequests = ApplyIcebergMetadataChanges(relationId, metadataOperations, allTransforms, maxSnapshotAgeInSecs, isVerbose);
+			char	   *deletionQueuePath = NULL;
+			List	   *restRequests = ApplyIcebergMetadataChanges(relationId, metadataOperations, allTransforms, maxSnapshotAgeInSecs, isVerbose,
+																   &deletionQueuePath);
 			ListCell   *requestCell = NULL;
 
 			foreach(requestCell, restRequests)
@@ -810,6 +902,23 @@ ApplyTrackedIcebergMetadataChanges(bool isVerbose)
 											 request->body);
 			}
 
+			/*
+			 * If a metadata path was inserted into the deletion queue,
+			 * record it so PostAllRestCatalogRequests can undo it if the
+			 * REST commit fails.
+			 */
+			if (deletionQueuePath != NULL)
+			{
+				bool		isFound = false;
+				RestCatalogRequestPerTable *requestPerTable =
+					hash_search(RestCatalogRequestsHash,
+								&relationId, HASH_FIND, &isFound);
+
+				if (isFound && requestPerTable->isValid)
+					requestPerTable->deletionQueueMetadataPath =
+						MemoryContextStrdup(TopTransactionContext,
+											deletionQueuePath);
+			}
 		}
 	}
 

@@ -150,9 +150,13 @@ static void DeleteInProgressManifests(Oid relationId, List *manifests);
  */
 List *
 ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allTransforms,
-							int maxSnapshotAgeInSecs, bool isVerbose)
+							int maxSnapshotAgeInSecs, bool isVerbose,
+							char **deletionQueueMetadataPath)
 {
 	List	   *restCatalogRequests = NIL;
+
+	if (deletionQueueMetadataPath)
+		*deletionQueueMetadataPath = NULL;
 
 	Assert(metadataOperations != NIL);
 
@@ -344,7 +348,16 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 	if (writableRestCatalogTable)
 	{
 		if (metadataPath)
+		{
 			InsertDeletionQueueRecord(metadataPath, relationId, GetCurrentTransactionStartTimestamp());
+
+			/*
+			 * Report the path we inserted so the caller can undo it if
+			 * the REST catalog commit fails later.
+			 */
+			if (deletionQueueMetadataPath)
+				*deletionQueueMetadataPath = metadataPath;
+		}
 
 		/*
 		 * We are done, writable rest catalog iceberg tables have their

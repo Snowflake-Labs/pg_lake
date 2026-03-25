@@ -33,3 +33,4 @@ extern PGDLLEXPORT void InsertDeletionQueueRecord(char *path, Oid relationId, Ti
 extern PGDLLEXPORT void InsertPrefixDeletionRecord(char *path, TimestampTz orphanedAt);
 extern PGDLLEXPORT void InsertDeletionQueueRecordExtended(char *path, Oid relationId, TimestampTz orphanedAt,
 														  bool isPrefix);
+extern PGDLLEXPORT void DeleteDeletionQueueRecordsByPath(List *paths);
