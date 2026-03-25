@@ -29,6 +29,9 @@
 #include "fmgr.h"
 #include "miscadmin.h"
 
+#include <limits.h>
+
+#include "storage/ipc.h"
 #include "storage/shmem.h"
 #include "utils/elog.h"
 #include "utils/guc.h"
