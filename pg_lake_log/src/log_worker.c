@@ -88,6 +88,8 @@ LogFlushWorkerMain(Datum arg)
 
 	ereport(LOG, (errmsg(WORKER_NAME ": started")));
 
+	BackgroundWorkerInitializeConnection(PgLakeLogDatabase, NULL, 0);
+
 	LogEntry   *batch = (LogEntry *)
 		MemoryContextAlloc(TopMemoryContext,
 						   sizeof(LogEntry) * PgLakeLogBatchSize);
@@ -109,14 +111,11 @@ LogFlushWorkerMain(Datum arg)
 								   sizeof(LogEntry) * PgLakeLogBatchSize);
 		}
 
-		if (!PgLakeLogEnabled ||
-			PgLakeLogDatabase == NULL || PgLakeLogDatabase[0] == '\0')
+		if (!PgLakeLogEnabled)
 		{
 			LightSleep(PgLakeLogFlushIntervalMs);
 			continue;
 		}
-
-		BackgroundWorkerInitializeConnection(PgLakeLogDatabase, NULL, 0);
 
 		drained = LogBufferDrain(batch, PgLakeLogBatchSize);
 
