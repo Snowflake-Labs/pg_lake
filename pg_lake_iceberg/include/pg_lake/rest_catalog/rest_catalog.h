@@ -22,11 +22,13 @@
 #include "pg_lake/http/http_client.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_lake/parquet/field.h"
+#include "pg_lake/ddl/utility_hook.h"
 #include "pg_lake/iceberg/api/snapshot.h"
 
 #define REST_CATALOG_AUTH_TYPE_OAUTH2 (0)
 #define REST_CATALOG_AUTH_TYPE_HORIZON (1)
 
+extern char *CatalogsConfPath;
 extern PGDLLEXPORT char *RestCatalogHost;
 extern char *RestCatalogOauthHostPath;
 extern char *RestCatalogClientId;
@@ -128,6 +130,9 @@ extern PGDLLEXPORT RestCatalogRequest * GetAddPartitionCatalogRequest(Oid relati
 extern PGDLLEXPORT RestCatalogRequest * GetSetPartitionDefaultIdCatalogRequest(Oid relationId, int specId);
 extern PGDLLEXPORT RestCatalogRequest * GetRemoveSnapshotCatalogRequest(List *removedSnapshotIds, Oid relationId);
 
-/* ProcessUtility handlers for iceberg_catalog servers */
-extern PGDLLEXPORT bool BlockDDLOnExtensionCatalogs(ProcessUtilityParams * processUtilityParams, void *arg);
+/* ProcessUtility handlers */
+/* protect catalogs */
+extern PGDLLEXPORT bool BlockDDLOnExtensionCatalogs(ProcessUtilityParams *processUtilityParams, void *arg);
 extern PGDLLEXPORT bool RequireRestTypeForIcebergCatalogServer(ProcessUtilityParams * processUtilityParams, void *arg);
+/* scrubs user mapping secrets in-place */
+extern PGDLLEXPORT bool RedactRestCatalogUserMappingSecrets(ProcessUtilityParams *processUtilityParams, void *arg);

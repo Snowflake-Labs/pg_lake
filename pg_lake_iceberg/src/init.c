@@ -255,6 +255,16 @@ _PG_init(void)
 							GUC_UNIT_KB,
 							NULL, NULL, NULL);
 
+	DefineCustomStringVariable("pg_lake_iceberg.catalogs_conf_path",
+							   gettext_noop("Path to the catalog credentials file. "
+											"Defaults to $PGDATA/catalogs.conf."),
+							   NULL,
+							   &CatalogsConfPath,
+							   "catalogs.conf",
+							   PGC_SIGHUP,
+							   GUC_SUPERUSER_ONLY,
+							   NULL, NULL, NULL);
+
 	DefineCustomEnumVariable("pg_lake_iceberg.rest_catalog_auth_type",
 							 gettext_noop("Determines the format for the initial OAuth token requests."),
 							 NULL,

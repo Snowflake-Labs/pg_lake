@@ -368,8 +368,11 @@ _PG_init(void)
 
 	MarkGUCPrefixReserved(PG_LAKE_TABLE);
 
+	/* iceberg catalogs / user mapping guards */
 	RegisterUtilityStatementHandler(RequireRestTypeForIcebergCatalogServer, NULL);
 	RegisterUtilityStatementHandler(BlockDDLOnExtensionCatalogs, NULL);
+	RegisterUtilityStatementHandler(RedactRestCatalogUserMappingSecrets, NULL);
+
 	RegisterUtilityStatementHandler(ProcessVacuumPgLakeTable, NULL);
 	RegisterUtilityStatementHandler(ProcessCreatePgLakeTable, NULL);
 	RegisterUtilityStatementHandler(ProcessCreateAsSelectPgLakeTable, NULL);
