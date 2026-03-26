@@ -69,6 +69,9 @@ InsertBatchToIceberg(LogEntry *entries, int count, Oid relationId)
 	if (count == 0)
 		return;
 
+	/* Acquire lock before any operations on the relation. */
+	Relation	rel = table_open(relationId, RowExclusiveLock);
+
 	/* ---- Step 1: write a local CSV file directly from C ---- */
 
 	char	   *csvPath = GenerateTempFileName(LOG_TEMP_FILE_PATTERN, true);
@@ -82,8 +85,6 @@ InsertBatchToIceberg(LogEntry *entries, int count, Oid relationId)
 												   maxLineSize, schema);
 
 	/* ---- Step 3: commit the new Parquet file to Iceberg metadata ---- */
-
-	Relation	rel = table_open(relationId, NoLock);
 
 	ApplyDataFileModifications(rel, modifications);
 
