@@ -2,6 +2,6 @@ comment = 'Transfer PostgreSQL log entries to an Iceberg table in small batches'
 default_version = '1.0'
 module_pathname = '$libdir/pg_lake_log'
 relocatable = false
-schema = pg_lake_log
+schema = pg_catalog
 requires = 'pg_lake_iceberg,pg_lake_table'
 #!shared_preload_libraries = '$libdir/pg_lake_log'
