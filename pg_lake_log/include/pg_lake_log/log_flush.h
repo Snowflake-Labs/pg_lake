@@ -21,16 +21,21 @@
 #include "pg_lake_log/log_buffer.h"
 
 /*
- * InsertBatchToIceberg writes entries[0..count-1] to the named Iceberg table.
+ * InsertBatchToIceberg writes entries[0..count-1] to the given Iceberg table.
  *
  * Internally it uses the same pipeline as "COPY tbl FROM 'file.csv'":
- *   1. Build a PostgreSQL VALUES query and run it through WriteQueryResultToCSV
- *      to produce a local temp CSV (PostgreSQL handles all type formatting).
+ *   1. Write a local temp CSV directly from C (no SQL parsing).
  *   2. Pass the CSV to PrepareCSVInsertion, which sends it to pgduck_server;
  *      DuckDB converts it to a single Parquet file in object storage.
  *   3. Call ApplyDataFileModifications to commit the Iceberg snapshot.
  *
  * The caller must be inside an open transaction with an active snapshot.
  */
-void		InsertBatchToIceberg(LogEntry *entries, int count,
-								 const char *table_name);
+void		InsertBatchToIceberg(LogEntry *entries, int count, Oid relationId);
+
+/*
+ * GetLogTableOids reads lake_log.log_tables via SPI and returns a List of
+ * target table OIDs.  The caller must be inside an open transaction.
+ * SPI is connected and disconnected internally.
+ */
+List	   *GetLogTableOids(void);

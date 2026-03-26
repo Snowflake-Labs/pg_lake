@@ -87,11 +87,8 @@ pg_lake_log_buffer_status(PG_FUNCTION_ARGS)
 
 /*
  * pg_lake_log_flush drains the ring buffer and writes all pending entries to
- * the configured Iceberg table in the current session.  Returns the number
- * of entries written.
- *
- * Each drain-cycle is flushed via InsertBatchToIceberg, which batches all
- * rows into a single multi-row INSERT so they land in one Parquet file.
+ * all registered Iceberg log tables.  Returns the total number of entries
+ * written (count × number of tables).
  */
 Datum
 pg_lake_log_flush(PG_FUNCTION_ARGS)
@@ -101,24 +98,29 @@ pg_lake_log_flush(PG_FUNCTION_ARGS)
 	if (!PgLakeLogEnabled)
 		PG_RETURN_INT64(0);
 
-	if (PgLakeLogTargetTable == NULL || PgLakeLogTargetTable[0] == '\0')
-		ereport(ERROR,
-				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				 errmsg("pg_lake_log.target_table is not configured")));
-
 	if (PgLakeLogBuffer == NULL)
 		PG_RETURN_INT64(0);
+
+	List	   *tableOids = GetLogTableOids();
+
+	if (tableOids == NIL)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("no log tables registered in lake_log.log_tables")));
 
 	LogEntry   *batch = (LogEntry *) palloc(sizeof(LogEntry) * PgLakeLogBatchSize);
 
 	for (;;)
 	{
 		int			drained = LogBufferDrain(batch, PgLakeLogBatchSize);
+		ListCell   *lc;
 
 		if (drained == 0)
 			break;
 
-		InsertBatchToIceberg(batch, drained, PgLakeLogTargetTable);
+		foreach(lc, tableOids)
+			InsertBatchToIceberg(batch, drained, lfirst_oid(lc));
+
 		total_written += drained;
 	}
 

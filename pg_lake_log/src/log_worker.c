@@ -110,7 +110,6 @@ LogFlushWorkerMain(Datum arg)
 		}
 
 		if (!PgLakeLogEnabled ||
-			PgLakeLogTargetTable == NULL || PgLakeLogTargetTable[0] == '\0' ||
 			PgLakeLogDatabase == NULL || PgLakeLogDatabase[0] == '\0')
 		{
 			LightSleep(PgLakeLogFlushIntervalMs);
@@ -160,6 +159,9 @@ LogFlushWorkerMain(Datum arg)
 
 /*
  * FlushBatch wraps InsertBatchToIceberg in a transaction.
+ *
+ * Reads the set of target tables from lake_log.log_tables and writes the
+ * batch to each one.
  */
 static void
 FlushBatch(LogEntry *entries, int count)
@@ -171,7 +173,11 @@ FlushBatch(LogEntry *entries, int count)
 	{
 		PushActiveSnapshot(GetTransactionSnapshot());
 
-		InsertBatchToIceberg(entries, count, PgLakeLogTargetTable);
+		List	   *tableOids = GetLogTableOids();
+		ListCell   *lc;
+
+		foreach(lc, tableOids)
+			InsertBatchToIceberg(entries, count, lfirst_oid(lc));
 
 		if (ActiveSnapshotSet())
 			PopActiveSnapshot();

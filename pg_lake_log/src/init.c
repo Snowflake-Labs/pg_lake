@@ -45,9 +45,6 @@ PG_MODULE_MAGIC;
  * GUC variables (declared extern in log_worker.h / log_hook.c)
  * ---------------------------------------------------------------- */
 
-/* Target Iceberg table (schema-qualified or unqualified). */
-char	   *PgLakeLogTargetTable = NULL;
-
 /* Database the worker connects to. */
 char	   *PgLakeLogDatabase = NULL;
 
@@ -122,19 +119,6 @@ _PG_init(void)
 							 PGC_SIGHUP,
 							 0,
 							 NULL, NULL, NULL);
-
-	DefineCustomStringVariable(
-							   "pg_lake_log.target_table",
-							   gettext_noop("Schema-qualified name of the Iceberg table "
-											"that receives captured log entries."),
-							   gettext_noop("The table must have columns: "
-											"log_time timestamptz, pid int, severity text, "
-											"message text, detail text, context text."),
-							   &PgLakeLogTargetTable,
-							   NULL,
-							   PGC_SIGHUP,
-							   0,
-							   NULL, NULL, NULL);
 
 	DefineCustomStringVariable(
 							   "pg_lake_log.database",

@@ -21,7 +21,6 @@
 #include "fmgr.h"
 
 /* GUCs owned by init.c but consumed by the worker and log hook. */
-extern char *PgLakeLogTargetTable;
 extern char *PgLakeLogDatabase;
 extern int	PgLakeLogBatchSize;
 extern int	PgLakeLogFlushIntervalMs;

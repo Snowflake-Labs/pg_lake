@@ -37,11 +37,10 @@
 #include "postgres.h"
 
 #include "access/table.h"
-#include "catalog/namespace.h"
+#include "executor/spi.h"
 #include "lib/stringinfo.h"
 #include "utils/builtins.h"
 #include "utils/rel.h"
-#include "utils/varlena.h"
 #include "utils/timestamp.h"
 
 #include "pg_lake/fdw/writable_table.h"
@@ -60,20 +59,15 @@ static void AppendCSVQuoted(StringInfo buf, const char *str);
 
 
 /*
- * InsertBatchToIceberg writes entries[0..count-1] to the named Iceberg table.
+ * InsertBatchToIceberg writes entries[0..count-1] to the given Iceberg table.
  *
  * Caller must be inside an open transaction with an active snapshot.
  */
 void
-InsertBatchToIceberg(LogEntry *entries, int count, const char *table_name)
+InsertBatchToIceberg(LogEntry *entries, int count, Oid relationId)
 {
 	if (count == 0)
 		return;
-
-	/* Resolve the target table OID. */
-	List	   *names = textToQualifiedNameList(cstring_to_text(table_name));
-	RangeVar   *rv = makeRangeVarFromNameList(names);
-	Oid			relationId = RangeVarGetRelid(rv, RowExclusiveLock, false);
 
 	/* ---- Step 1: write a local CSV file directly from C ---- */
 
@@ -94,6 +88,42 @@ InsertBatchToIceberg(LogEntry *entries, int count, const char *table_name)
 	ApplyDataFileModifications(rel, modifications);
 
 	table_close(rel, NoLock);
+}
+
+
+/*
+ * GetLogTableOids reads lake_log.log_tables and returns a List of OIDs of
+ * all registered target tables.
+ *
+ * The caller must be inside an open transaction.  SPI is connected and
+ * disconnected internally.
+ */
+List *
+GetLogTableOids(void)
+{
+	List	   *result = NIL;
+	int			ret;
+
+	SPI_connect();
+
+	ret = SPI_execute("SELECT table_name FROM lake_log.log_tables", true, 0);
+	if (ret != SPI_OK_SELECT)
+		ereport(ERROR,
+				(errmsg("pg_lake_log: failed to read lake_log.log_tables")));
+
+	for (uint64 i = 0; i < SPI_processed; i++)
+	{
+		bool		isnull;
+		Datum		d = SPI_getbinval(SPI_tuptable->vals[i],
+									  SPI_tuptable->tupdesc, 1, &isnull);
+
+		if (!isnull)
+			result = lappend_oid(result, DatumGetObjectId(d));
+	}
+
+	SPI_finish();
+
+	return result;
 }
 
 
