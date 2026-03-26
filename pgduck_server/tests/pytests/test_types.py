@@ -27,6 +27,7 @@ import psycopg2
 import os
 import shutil
 import csv
+import struct
 import sys
 from utils_pytest import *
 from datetime import datetime, timezone
@@ -598,11 +599,14 @@ def test_float4(setup_table, duckdb_conn, pgduck_conn, tmp_path):
     # we can safely support up-to 6 precision
     precision = 6
 
-    # Function to round or pass through special values
+    # Normalize through float32 so that different text representations of the
+    # same float32 value (e.g. DuckDB's "1e-40" vs pgduck_server's "9.999946e-41")
+    # compare as equal.
     def round_or_special(value):
         try:
-            return f"{float(value):.{precision}e}"
-        except ValueError:
+            f32 = struct.unpack("f", struct.pack("f", float(value)))[0]
+            return f"{f32:.{precision}e}"
+        except (ValueError, struct.error):
             return value
 
     # Apply the rounding or pass through for special values

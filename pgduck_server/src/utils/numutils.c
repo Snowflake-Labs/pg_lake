@@ -356,6 +356,7 @@ pg_float4_to_text(float4 num, char *buf)
 	if (extra_float_digits > 0)
 	{
 		float_to_shortest_decimal_buf(num, buf);
+		return;
 	}
 
 	(void) pg_strfromd(buf, 32, ndig, num);
@@ -376,6 +377,7 @@ pg_float8_to_text(float8 num, char *buf)
 	if (extra_float_digits > 0)
 	{
 		double_to_shortest_decimal_buf(num, buf);
+		return;
 	}
 
 	(void) pg_strfromd(buf, 32, ndig, num);
