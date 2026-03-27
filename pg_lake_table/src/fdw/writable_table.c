@@ -405,7 +405,8 @@ GenerateDataFileNameForTable(Oid relationId, bool withExtension)
 							errmsg("unsupported format or compression")));
 	}
 
-	char	   *dataFileRelativePath = psprintf("%s%s", GenerateUUID(), fileExtension);
+	char	   *uuid = GenerateUUID();
+	char	   *dataFileRelativePath = psprintf("%s%s", uuid, fileExtension);
 
 	/* if the location has query arguments, we need to append them to the path */
 	char	   *queryArguments = "";
@@ -413,20 +414,11 @@ GenerateDataFileNameForTable(Oid relationId, bool withExtension)
 	char	   *location = GetWritableTableLocation(relationId, &queryArguments);
 	char	   *dataFilePath = NULL;
 
-	if (tableType == PG_LAKE_ICEBERG_TABLE_TYPE)
-	{
-		dataFilePath = psprintf("%s/data/%s%s",
-								location,
-								dataFileRelativePath,
-								queryArguments);
-	}
-	else
-	{
-		dataFilePath = psprintf("%s/%s%s",
-								location,
-								dataFileRelativePath,
-								queryArguments);
-	}
+	dataFilePath = psprintf("%s/data/%.2s/%s%s",
+							location,
+							uuid,
+							dataFileRelativePath,
+							queryArguments);
 
 	return dataFilePath;
 }
