@@ -20,13 +20,25 @@
 #include "postgres.h"
 #include "fmgr.h"
 
+#include "access/tupdesc.h"
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/pgduck/type.h"
+#include "utils/hsearch.h"
 
 #define BYTEA_OUT_OID 31
 
+/*
+ * Entry in the Oid -> TupleDesc hash table used to cache composite-type
+ * descriptors across rows.  typid is the hash key and must be first.
+ */
+typedef struct TupleDescCacheEntry
+{
+	Oid			typid;
+	TupleDesc	tupdesc;
+}			TupleDescCacheEntry;
+
 extern PGDLLEXPORT char *PGDuckSerialize(FmgrInfo *flinfo, Oid typeOid, Datum value,
-										 CopyDataFormat format);
+										 CopyDataFormat format, HTAB *tupdescCache);
 extern PGDLLEXPORT char *PGDuckOnlySerialize(Oid typeOid, Datum value);
 extern PGDLLEXPORT bool IsPGDuckSerializeRequired(PGType postgresType);
 extern PGDLLEXPORT char *IntervalOutForPGDuck(Datum value);
