@@ -125,7 +125,7 @@ ConvertISOYearToBCIfNeeded(const char *dateTimestampString)
  */
 char *
 PGDuckSerialize(FmgrInfo *flinfo, Oid columnType, Datum value,
-				CopyDataFormat format)
+				CopyDataFormat format, HTAB *tupdesc_cache)
 {
 	if (flinfo->fn_oid == ARRAY_OUT_OID)
 	{
@@ -133,11 +133,11 @@ PGDuckSerialize(FmgrInfo *flinfo, Oid columnType, Datum value,
 		if (IsMapTypeOid(columnType))
 			return MapOutForPGDuck(value, format);
 
-		return ArrayOutForPGDuck(DatumGetArrayTypeP(value), format);
+		return ArrayOutForPGDuck(DatumGetArrayTypeP(value), format, tupdesc_cache);
 	}
 
 	if (flinfo->fn_oid == RECORD_OUT_OID)
-		return StructOutForPGDuck(value, format);
+		return StructOutForPGDuck(value, format, tupdesc_cache);
 
 	/*
 	 * For Iceberg, intervals are serialized as struct(months, days,
