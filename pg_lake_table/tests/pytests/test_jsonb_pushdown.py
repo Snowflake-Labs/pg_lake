@@ -296,12 +296,12 @@ def test_jsonb_pushdown(s3, pg_conn, extension, with_default_location):
     assert err is not None
     pg_conn.rollback()
 
-    # jsonb[] pushdown is supported
+    # col::jsonb[] is a cast from text[] to jsonb[] which is not pushdownable
     res = run_query(
         'explain (verbose) SELECT * FROM text_array_table WHERE col::jsonb[] =ARRAY[\'{"name": "Alice", "age": 30}\'::jsonb]::jsonb[];',
         pg_conn,
     )
-    assert "Custom Scan (Query Pushdown)" in str(res)
+    assert "Custom Scan (Query Pushdown)" not in str(res)
 
     run_command("DROP SCHEMA test_jsonb_pushdown CASCADE", pg_conn)
     pg_conn.commit()

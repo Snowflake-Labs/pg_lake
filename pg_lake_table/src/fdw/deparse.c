@@ -1221,6 +1221,17 @@ is_foreign_pathkey(PlannerInfo *root,
 static char *
 deparse_type_name(Oid type_oid, int32 typemod)
 {
+	/*
+	 * DuckDB does not have jsonb/jsonb[] types. Map them to json/json[]
+	 * which DuckDB understands. We do this at deparse time rather than
+	 * rewriting OIDs in the expression tree, because changing OIDs would
+	 * break operator and function lookup.
+	 */
+	if (type_oid == JSONBOID)
+		type_oid = JSONOID;
+	else if (type_oid == JSONBARRAYOID)
+		type_oid = JSONARRAYOID;
+
 	bits16		flags = FORMAT_TYPE_TYPEMOD_GIVEN;
 
 	if (!is_builtin(type_oid))

@@ -561,25 +561,6 @@ RewriteQueryTreeForPGDuckMutator(Node *node, RewriteQueryTreeContext * context)
 		node = ReplaceJsonbWithPgLakeInternalJsonbFunction(node, context);
 	}
 
-	/*
-	 * DuckDB does not have a jsonb[] type, but it does have json[]. Rewrite
-	 * any JSONBARRAYOID references to JSONARRAYOID so the deparsed query
-	 * emits "json[]" instead of "jsonb[]".
-	 */
-	if (IsA(node, Const) && ((Const *) node)->consttype == JSONBARRAYOID)
-		((Const *) node)->consttype = JSONARRAYOID;
-	else if (IsA(node, CoerceViaIO) && ((CoerceViaIO *) node)->resulttype == JSONBARRAYOID)
-		((CoerceViaIO *) node)->resulttype = JSONARRAYOID;
-	else if (IsA(node, RelabelType) && ((RelabelType *) node)->resulttype == JSONBARRAYOID)
-		((RelabelType *) node)->resulttype = JSONARRAYOID;
-	else if (IsA(node, Param) && ((Param *) node)->paramtype == JSONBARRAYOID)
-		((Param *) node)->paramtype = JSONARRAYOID;
-	else if (IsA(node, ArrayExpr) && ((ArrayExpr *) node)->array_typeid == JSONBARRAYOID)
-	{
-		((ArrayExpr *) node)->array_typeid = JSONARRAYOID;
-		((ArrayExpr *) node)->element_typeid = JSONOID;
-	}
-
 	if (IsA(node, Const))
 	{
 		Const	   *constExpr = (Const *) node;
