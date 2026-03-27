@@ -1222,14 +1222,16 @@ static char *
 deparse_type_name(Oid type_oid, int32 typemod)
 {
 	/*
-	 * DuckDB does not have jsonb/jsonb[] types. Map them to json/json[]
-	 * which DuckDB understands. We do this at deparse time rather than
-	 * rewriting OIDs in the expression tree, because changing OIDs would
-	 * break operator and function lookup.
+	 * DuckDB does not have a jsonb[] type. Map it to json[] which DuckDB
+	 * understands. We do this at deparse time rather than rewriting OIDs
+	 * in the expression tree, because changing OIDs would break operator
+	 * and function lookup.
+	 *
+	 * Scalar jsonb is handled differently: rewrite_query.c wraps jsonb
+	 * expressions in __lake__internal__nsp__.jsonb() function calls, so
+	 * we do not need to remap JSONBOID here.
 	 */
-	if (type_oid == JSONBOID)
-		type_oid = JSONOID;
-	else if (type_oid == JSONBARRAYOID)
+	if (type_oid == JSONBARRAYOID)
 		type_oid = JSONARRAYOID;
 
 	bits16		flags = FORMAT_TYPE_TYPEMOD_GIVEN;
