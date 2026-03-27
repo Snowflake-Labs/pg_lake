@@ -358,9 +358,7 @@ def test_jsonb_array_pushdown(s3, pg_conn, extension, with_default_location):
         assert str(r_ice) == str(r_heap), f"Mismatch: {r_ice} vs {r_heap}"
 
     # verify pushdown happens for SELECT
-    res = run_query(
-        "EXPLAIN (VERBOSE) SELECT * FROM jsonb_array_table", pg_conn
-    )
+    res = run_query("EXPLAIN (VERBOSE) SELECT * FROM jsonb_array_table", pg_conn)
     assert "Custom Scan (Query Pushdown)" in str(res)
 
     # verify WHERE with jsonb[] equality
