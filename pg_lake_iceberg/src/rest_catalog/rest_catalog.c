@@ -68,6 +68,17 @@ static List *GetHeadersWithAuth(void);
 static char *AppendIcebergPartitionSpecForRestCatalog(List *partitionSpecs);
 
 /*
+ * Retry actions returned by ClassifyRestCatalogRequestRetry.
+ */
+typedef enum RestCatalogRequestRetryAction
+{
+	REST_CATALOG_RETRY_STOP,
+	REST_CATALOG_RETRY_BACKOFF_SHORT,	/* 429 Too Many Requests */
+	REST_CATALOG_RETRY_BACKOFF_LONG,	/* 503 Service Unavailable */
+	REST_CATALOG_RETRY_REFRESH_AUTH		/* 419 Token Expired */
+}			RestCatalogRequestRetryAction;
+
+/*
 * StartStageRestCatalogIcebergTableCreate stages the creation of an iceberg table
 * in the rest catalog. On any failure, an error is raised. If the table exists,
 * an error is raised as well.
@@ -1065,29 +1076,14 @@ GetRemoveSnapshotCatalogRequest(List *removedSnapshotIds, Oid relationId)
 
 
 /*
- * SendRequestToRestCatalog sends an HTTP request to the rest catalog
- * with retry logic for retriable errors, attempting up to MAX_HTTP_RETRY_FOR_REST_CATALOG
- * times.
+ * ClassifyRestCatalogRequestRetry decides whether to retry and, if so, what
+ * kind of action the caller should take.
  */
-HttpResult
-SendRequestToRestCatalog(HttpMethod method, const char *url, const char *body, List *headers)
-{
-	const int	MAX_HTTP_RETRY_FOR_REST_CATALOG = 3;
-
-	return SendHttpRequestWithRetry(method, url, body, headers, ShouldRetryRequestToRestCatalog, MAX_HTTP_RETRY_FOR_REST_CATALOG);
-}
-
-
-/*
- * ShouldRetryRequestToRestCatalog checks if the given HTTP result status is retriable.
- * If it is retriable, it performs necessary actions (like sleeping or refreshing token)
- * and returns true. Otherwise, it returns false.
- */
-bool
-ShouldRetryRequestToRestCatalog(long status, int maxRetry, int retryNo, List **headers)
+static RestCatalogRequestRetryAction
+ClassifyRestCatalogRequestRetry(long status, int maxRetry, int retryNo)
 {
 	if (retryNo > maxRetry)
-		return false;
+		return REST_CATALOG_RETRY_STOP;
 
 	const int	TOO_MANY_REQUEST_STATUS = 429;
 	const int	SERVER_UNAVAILABLE_STATUS = 503;
@@ -1095,47 +1091,69 @@ ShouldRetryRequestToRestCatalog(long status, int maxRetry, int retryNo, List **h
 
 	/* too many request, wait some time */
 	if (status == TOO_MANY_REQUEST_STATUS)
-	{
-		int			baseMs = 500;
-
-		/*
-		 * LightSleep reacts to signals, and can easily throw an error (e.g.,
-		 * cancel backend). This function can be called at post-commit hook,
-		 * so normally we wouldn't want any errors to happen, but then
-		 * Postgres already prevents post-commit backends to receive signals.
-		 */
-		LightSleep(LinearBackoffSleepMs(baseMs, retryNo));
-		return true;
-	}
+		return REST_CATALOG_RETRY_BACKOFF_SHORT;
 
 	/* server unavailable, lets wait a bit more */
-	else if (status == SERVER_UNAVAILABLE_STATUS)
-	{
-		int			baseMs = 5000;
+	if (status == SERVER_UNAVAILABLE_STATUS)
+		return REST_CATALOG_RETRY_BACKOFF_LONG;
 
-		LightSleep(LinearBackoffSleepMs(baseMs, retryNo));
-		return true;
+	/* token expired, retry after refreshing token */
+	if (status == TOKEN_EXPIRED_STATUS)
+		return REST_CATALOG_RETRY_REFRESH_AUTH;
+
+	return REST_CATALOG_RETRY_STOP;
+}
+
+
+/*
+ * SendRequestToRestCatalog sends an HTTP request to the rest catalog
+ * with retry logic for retriable errors, attempting up to
+ * MAX_HTTP_RETRY_FOR_REST_CATALOG times.
+ *
+ * LightSleep reacts to signals, and can easily throw an error (e.g.,
+ * cancel backend). This function can be called at post-commit hook,
+ * so normally we wouldn't want any errors to happen, but then
+ * Postgres already prevents post-commit backends to receive signals.
+ */
+HttpResult
+SendRequestToRestCatalog(HttpMethod method, const char *url, const char *body, List *headers)
+{
+	const int	MAX_HTTP_RETRY_FOR_REST_CATALOG = 3;
+
+	HttpResult	result;
+
+	for (int retryNo = 1; retryNo <= MAX_HTTP_RETRY_FOR_REST_CATALOG; retryNo++)
+	{
+		result = SendHttpRequest(method, url, body, headers);
+
+		switch (ClassifyRestCatalogRequestRetry(result.status, MAX_HTTP_RETRY_FOR_REST_CATALOG, retryNo))
+		{
+			case REST_CATALOG_RETRY_BACKOFF_SHORT:
+				LightSleep(LinearBackoffSleepMs(500, retryNo));
+				continue;
+
+			case REST_CATALOG_RETRY_BACKOFF_LONG:
+				LightSleep(LinearBackoffSleepMs(5000, retryNo));
+				continue;
+
+			case REST_CATALOG_RETRY_REFRESH_AUTH:
+				{
+					/*
+					 * Force-refresh the cached token and update the
+					 * Authorization header (always the first list element) so
+					 * the retried request carries the new token.
+					 */
+					bool		forceRefreshToken = true;
+					char	   *freshToken = GetRestCatalogAccessToken(forceRefreshToken);
+
+					lfirst(list_head(headers)) = psprintf("Authorization: Bearer %s", freshToken);
+					continue;
+				}
+
+			case REST_CATALOG_RETRY_STOP:
+				return result;
+		}
 	}
 
-	/* token expired, retry after refreshing token and updating headers */
-	else if (status == TOKEN_EXPIRED_STATUS)
-	{
-		/*
-		 * We normally refresh the token only when it is about to expire
-		 * (forceRefreshToken = false), just 1 minute before the expiration
-		 * for each request. Retry logic makes it safer by ensuring we get a
-		 * fresh token for unforeseen circumstances.
-		 *
-		 * We must also update the Authorization header in the request so
-		 * that the retried request carries the new token.
-		 */
-		bool		forceRefreshToken = true;
-		char	   *freshToken = GetRestCatalogAccessToken(forceRefreshToken);
-
-		lfirst(list_head(*headers)) = psprintf("Authorization: Bearer %s", freshToken);
-		return true;
-	}
-
-	/* successful or other error, no retry */
-	return false;
+	return result;
 }

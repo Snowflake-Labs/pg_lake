@@ -34,7 +34,7 @@ PG_FUNCTION_INFO_V1(test_http_with_retry);
 
 static Datum build_http_result(FunctionCallInfo fcinfo, const HttpResult * r);
 static List *extract_headers(FunctionCallInfo fcinfo, int argno);
-static bool TestShouldRetryRequestToRestCatalog(long status, int maxRetry, int retryNo, List **headers);
+static bool TestShouldRetryRequestToRestCatalog(long status, int maxRetry, int retryNo);
 
 
 Datum
@@ -192,7 +192,7 @@ build_http_result(FunctionCallInfo fcinfo, const HttpResult * r)
  * retries until maxRetry is reached.
  */
 static bool
-TestShouldRetryRequestToRestCatalog(long status, int maxRetry, int retryNo, List **headers)
+TestShouldRetryRequestToRestCatalog(long status, int maxRetry, int retryNo)
 {
 	if (retryNo > maxRetry)
 		return false;
