@@ -307,9 +307,12 @@ TransformPushdownableInsertSelect(Query *query)
 			 * we need to do it here as well because the transformation to a
 			 * SELECT query after before the rewrite phase.
 			 */
-			Oid			nullAttributeOid =
-				column->atttypid == JSONBOID ?
-				JSONOID : column->atttypid;
+			Oid			nullAttributeOid = column->atttypid;
+
+			if (nullAttributeOid == JSONBOID)
+				nullAttributeOid = JSONOID;
+			else if (nullAttributeOid == JSONBARRAYOID)
+				nullAttributeOid = JSONARRAYOID;
 
 			/* create a NULL value of the column type */
 			Const	   *nullConst = makeNullConst(nullAttributeOid,
