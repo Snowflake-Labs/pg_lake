@@ -20,17 +20,21 @@
 #include "postgres.h"
 
 /*
- * Behavior for out-of-range values during writes to Iceberg data files.
+ * Behavior for out-of-range or unsupported values during writes to Iceberg
+ * data files.
  *
  * Applies to:
  *   - Temporal columns (date, timestamp, timestamptz): values beyond
  *     the Iceberg-supported range are clamped or rejected.
  *   - Bounded numeric columns: NaN values are clamped to NULL or rejected.
+ *   - Array columns: multidimensional arrays are clamped to NULL or
+ *     rejected (error), since PostgreSQL's single array type (e.g. int[])
+ *     maps to a flat LIST(T) in DuckDB/Iceberg.
  *
  * Controlled by the out_of_range_values table option (default: clamp).
  *
- * CLAMP silently adjusts out-of-range values to the nearest representable
- * boundary (e.g. year 10000 becomes 9999-12-31, NaN becomes NULL).
+ * CLAMP silently adjusts values (e.g. year 10000 becomes 9999-12-31,
+ * NaN becomes NULL, multidimensional arrays become NULL).
  * ERROR raises an error instead.
  * NONE skips validation entirely (used for non-Iceberg tables).
  */
@@ -53,10 +57,9 @@ extern PGDLLEXPORT bool IsTemporalType(Oid typeOid);
  * any component that needs Iceberg write validation, including inside
  * arrays, composites, maps, and domains.
  *
- * When isPushdown is true only temporal types (date/timestamp/timestamptz)
- * are considered (bounded numeric blocks pushdown entirely, so NaN is
- * never reachable on that path).  When false the check also includes
- * bounded numeric (NUMERICOID).
+ * Validation covers: temporal boundaries (date/timestamp/timestamptz),
+ * multidimensional array rejection (any array type), and bounded
+ * numeric NaN (non-pushdown only, since numeric blocks pushdown).
  */
 extern PGDLLEXPORT bool TypeNeedsIcebergValidation(Oid typeOid, bool isPushdown);
 

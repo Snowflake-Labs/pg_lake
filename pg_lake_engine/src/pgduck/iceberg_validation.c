@@ -16,9 +16,11 @@
  */
 
 /*
- * Common Iceberg validation helpers shared by query-level and datum-level
- * validation: out-of-range policy resolution, temporal type classification,
- * and temporal boundary constants.
+ * Common Iceberg write-validation helpers shared by query-level and
+ * datum-level validation: out-of-range policy resolution, temporal type
+ * classification, and TypeNeedsIcebergValidation which determines
+ * whether a type requires any validation (temporal boundaries,
+ * multidimensional array rejection, or bounded numeric NaN).
  */
 #include "postgres.h"
 
@@ -88,9 +90,9 @@ IsTemporalType(Oid typeOid)
  * any component that needs Iceberg write validation, including inside
  * arrays, composites, maps, and domains.
  *
- * When isPushdown is true only temporal types are considered (bounded
- * numeric blocks pushdown entirely).  When false the check also
- * includes bounded numeric (NUMERICOID).
+ * Validation covers: temporal boundaries (date/timestamp/timestamptz),
+ * multidimensional array rejection (any array type), and bounded
+ * numeric NaN (non-pushdown only, since numeric blocks pushdown).
  */
 bool
 TypeNeedsIcebergValidation(Oid typeOid, bool isPushdown)
@@ -104,7 +106,17 @@ TypeNeedsIcebergValidation(Oid typeOid, bool isPushdown)
 	Oid			elemType = get_element_type(typeOid);
 
 	if (OidIsValid(elemType))
-		return TypeNeedsIcebergValidation(elemType, isPushdown);
+	{
+		/*
+		 * Any array column needs validation because PostgreSQL allows
+		 * multidimensional values in a plain array type (e.g. int[]) and
+		 * those must be nullified (clamped to NULL) or raise an error.  On
+		 * the non-pushdown path this is handled by IcebergErrorOrClampDatum;
+		 * on the pushdown path by pg_nullify_nested_list() or
+		 * pg_error_nested_list() in the query wrapper.
+		 */
+		return true;
+	}
 
 	/* map check must precede the generic domain unwrap (maps are domains) */
 	if (IsMapTypeOid(typeOid))

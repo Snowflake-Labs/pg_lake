@@ -315,6 +315,80 @@ PgLakeGeometryToHexWKB(shared_ptr<DatabaseInstance> db, string_t input)
 }
 
 
+/*
+ * NestedListBind resolves the return type for pg_nullify_nested_list
+ * and pg_error_nested_list.  The return type is always the input type
+ * (pass-through or NULL/error).
+ */
+static unique_ptr<FunctionData>
+NestedListBind(ClientContext &context, ScalarFunction &bound_function,
+			   vector<unique_ptr<Expression>> &arguments)
+{
+	bound_function.return_type = arguments[0]->return_type;
+	return nullptr;
+}
+
+
+static int
+ListDepth(const LogicalType &type)
+{
+	int depth = 0;
+	LogicalType inner = type;
+
+	while (inner.id() == LogicalTypeId::LIST)
+	{
+		inner = ListType::GetChildType(inner);
+		depth++;
+	}
+
+	return depth;
+}
+
+
+/*
+ * PgNullifyNestedListFun returns NULL for nested lists (depth > 1),
+ * and passes through non-nested lists unchanged.  Used when the
+ * out-of-range policy is CLAMP.
+ */
+static void
+PgNullifyNestedListFun(DataChunk &args, ExpressionState &state, Vector &result)
+{
+	auto &input = args.data[0];
+
+	if (ListDepth(input.GetType()) <= 1)
+	{
+		result.Reference(input);
+		return;
+	}
+
+	result.SetVectorType(VectorType::CONSTANT_VECTOR);
+	ConstantVector::SetNull(result, true);
+}
+
+
+/*
+ * PgErrorNestedListFun raises an error for nested lists (depth > 1),
+ * and passes through non-nested lists unchanged.  Used when the
+ * out-of-range policy is ERROR.
+ */
+static void
+PgErrorNestedListFun(DataChunk &args, ExpressionState &state, Vector &result)
+{
+	auto &input = args.data[0];
+
+	if (ListDepth(input.GetType()) <= 1)
+	{
+		result.Reference(input);
+		return;
+	}
+
+	throw InvalidInputException(
+		"multidimensional arrays are not supported in Iceberg tables. "
+		"Use out_of_range_values = 'clamp' to automatically replace "
+		"multidimensional arrays with NULL.");
+}
+
+
 
 static void LoadInternal(ExtensionLoader &loader) {
 
@@ -347,6 +421,22 @@ static void LoadInternal(ExtensionLoader &loader) {
 	substr.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::BIGINT}, LogicalType::VARCHAR, SubstringPG));
 	substr.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT}, LogicalType::VARCHAR, SubstringPG));
 	loader.RegisterFunction(substr);
+
+	{
+		ScalarFunction pg_nullify_nested("pg_nullify_nested_list",
+										{LogicalType::ANY},
+										LogicalType::ANY,
+										PgNullifyNestedListFun,
+										NestedListBind);
+		loader.RegisterFunction(pg_nullify_nested);
+
+		ScalarFunction pg_error_nested("pg_error_nested_list",
+									   {LogicalType::ANY},
+									   LogicalType::ANY,
+									   PgErrorNestedListFun,
+									   NestedListBind);
+		loader.RegisterFunction(pg_error_nested);
+	}
 
 	PgLakeUtilityFunctions::RegisterFunctions(loader);
 	PgLakeFileSystemFunctions::RegisterFunctions(loader);

@@ -16,11 +16,19 @@
  */
 
 /*
- * Query-level Iceberg type transformations.
+ * Query-level Iceberg value clamp/error and type transformations.
  *
- * IcebergWrapQueryWithErrorOrClampChecks embeds CASE WHEN checks into
- * the write query sent to pgduck_server for temporal boundary
- * enforcement (date/timestamp/timestamptz).
+ * IcebergWrapQueryWithErrorOrClampChecks embeds validation expressions
+ * into the write query sent to pgduck_server.  Currently handles:
+ *
+ *   - Temporal boundary enforcement (date/timestamp/timestamptz):
+ *     clamp or reject values outside the Iceberg-supported range.
+ *   - Multidimensional array enforcement: pg_nullify_nested_list()
+ *     (clamp) or pg_error_nested_list() (error) for nested lists,
+ *     since Iceberg/Parquet only supports flat lists.
+ *
+ * These checks are applied recursively through arrays, composites,
+ * maps, and domains.
  *
  * IcebergWrapQueryWithIntervalConversion decomposes DuckDB INTERVAL
  * columns into STRUCT(months, days, microseconds) to match the Iceberg
@@ -55,7 +63,7 @@
 #define ICEBERG_TIMESTAMPTZ_MIN_LITERAL		"TIMESTAMPTZ '0001-01-01 00:00:00+00'"
 #define ICEBERG_TIMESTAMPTZ_MAX_LITERAL		"TIMESTAMPTZ '9999-12-31 23:59:59.999999+00'"
 
-static bool TupleDescHasTemporalColumn(TupleDesc tupleDesc);
+static bool TupleDescNeedsValidation(TupleDesc tupleDesc);
 static void GetTemporalLiterals(Oid typeOid,
 								const char **minLiteral, const char **maxLiteral,
 								const char **typeName, const char **errLabel);
@@ -63,10 +71,10 @@ static void AppendClampExpression(StringInfo buf, const char *expr,
 								  Oid typeOid);
 static void AppendErrorExpression(StringInfo buf, const char *expr,
 								  Oid typeOid);
-static bool AppendTemporalValidationExpression(StringInfo buf, const char *expr,
-											   Oid typeOid, int32 typmod,
-											   IcebergOutOfRangePolicy policy,
-											   int depth);
+static bool AppendIcebergValidationExpression(StringInfo buf, const char *expr,
+											  Oid typeOid, int32 typmod,
+											  IcebergOutOfRangePolicy policy,
+											  int depth);
 
 static bool TypeContainsInterval(Oid typeOid);
 static bool TupleDescHasIntervalColumn(TupleDesc tupleDesc);
@@ -77,16 +85,16 @@ static bool AppendIntervalConversionExpression(StringInfo buf, const char *expr,
 
 
 /* ================================================================
- * Query wrapping for temporal boundary checks
+ * Query wrapping for Iceberg write validation
  * ================================================================ */
 
 /*
- * TupleDescHasTemporalColumn returns true if any non-dropped column
- * in the tuple descriptor contains a temporal type, recursing into
- * nested types (arrays, composites, maps, domains).
+ * TupleDescNeedsValidation returns true if any non-dropped column
+ * needs query-level validation: temporal boundary checks (recursing
+ * into nested types) or multidimensional array enforcement.
  */
 static bool
-TupleDescHasTemporalColumn(TupleDesc tupleDesc)
+TupleDescNeedsValidation(TupleDesc tupleDesc)
 {
 	for (int i = 0; i < tupleDesc->natts; i++)
 	{
@@ -189,23 +197,26 @@ AppendErrorExpression(StringInfo buf, const char *quotedName, Oid typeOid)
 
 
 /*
- * AppendTemporalValidationExpression recursively generates DuckDB SQL
- * that applies temporal boundary validation to an expression of the
- * given type.  Handles scalars, arrays (list_transform), composites
- * (struct_pack), maps (map_from_entries + list_transform), and domains.
+ * AppendIcebergValidationExpression recursively generates DuckDB SQL
+ * that applies Iceberg write validation to an expression of the given
+ * type.  Handles temporal boundary clamping/rejection, multidimensional
+ * array clamping/rejection via pg_nullify_nested_list() or
+ * pg_error_nested_list(), and recurses through arrays (list_transform),
+ * composites (struct_pack), maps (map_from_entries + list_transform),
+ * and domains.
  *
  * Returns true if a transformed expression was written to buf, false
- * if the type contains no temporal component (caller should use the
- * original expression).
+ * if the type needs no validation (caller should use the original
+ * expression).
  *
  * The depth parameter controls lambda variable naming (_x0, _x1, ...)
  * to avoid shadowing in nested list_transform calls.
  */
 static bool
-AppendTemporalValidationExpression(StringInfo buf, const char *expr,
-								   Oid typeOid, int32 typmod,
-								   IcebergOutOfRangePolicy policy,
-								   int depth)
+AppendIcebergValidationExpression(StringInfo buf, const char *expr,
+								  Oid typeOid, int32 typmod,
+								  IcebergOutOfRangePolicy policy,
+								  int depth)
 {
 	/* scalar temporal types: emit CASE WHEN expression directly */
 	if (IsTemporalType(typeOid))
@@ -217,20 +228,34 @@ AppendTemporalValidationExpression(StringInfo buf, const char *expr,
 		return true;
 	}
 
-	/* array types: wrap elements via list_transform */
+	/*
+	 * Array types: clamp (nullify) or reject multidimensional arrays
+	 * depending on the policy, then optionally validate elements via
+	 * list_transform when the element type needs temporal validation.
+	 */
 	Oid			elemType = get_element_type(typeOid);
 
 	if (OidIsValid(elemType))
 	{
-		if (!TypeNeedsIcebergValidation(elemType, true))
-			return false;
+		const char *nestedListFn = (policy == ICEBERG_OOR_CLAMP)
+			? "pg_nullify_nested_list"
+			: "pg_error_nested_list";
 
-		char	   *lambdaVar = psprintf("_x%d", depth);
+		if (TypeNeedsIcebergValidation(elemType, true))
+		{
+			char	   *lambdaVar = psprintf("_x%d", depth);
 
-		appendStringInfo(buf, "list_transform(%s, %s -> ", expr, lambdaVar);
-		AppendTemporalValidationExpression(buf, lambdaVar, elemType, -1,
-										   policy, depth + 1);
-		appendStringInfoChar(buf, ')');
+			appendStringInfo(buf, "list_transform(%s(%s), %s -> ",
+							 nestedListFn, expr, lambdaVar);
+			AppendIcebergValidationExpression(buf, lambdaVar, elemType, -1,
+											  policy, depth + 1);
+			appendStringInfoChar(buf, ')');
+		}
+		else
+		{
+			appendStringInfo(buf, "%s(%s)", nestedListFn, expr);
+		}
+
 		return true;
 	}
 
@@ -239,10 +264,10 @@ AppendTemporalValidationExpression(StringInfo buf, const char *expr,
 	{
 		PGType		keyType = GetMapKeyType(typeOid);
 		PGType		valType = GetMapValueType(typeOid);
-		bool		keyHasTemporal = TypeNeedsIcebergValidation(keyType.postgresTypeOid, true);
-		bool		valHasTemporal = TypeNeedsIcebergValidation(valType.postgresTypeOid, true);
+		bool		keyNeedsValidation = TypeNeedsIcebergValidation(keyType.postgresTypeOid, true);
+		bool		valNeedsValidation = TypeNeedsIcebergValidation(valType.postgresTypeOid, true);
 
-		if (!keyHasTemporal && !valHasTemporal)
+		if (!keyNeedsValidation && !valNeedsValidation)
 			return false;
 
 		char	   *lambdaVar = psprintf("_x%d", depth);
@@ -253,11 +278,11 @@ AppendTemporalValidationExpression(StringInfo buf, const char *expr,
 
 		char	   *keyExpr = psprintf("%s.key", lambdaVar);
 
-		if (keyHasTemporal)
-			AppendTemporalValidationExpression(buf, keyExpr,
-											   keyType.postgresTypeOid,
-											   keyType.postgresTypeMod,
-											   policy, depth + 1);
+		if (keyNeedsValidation)
+			AppendIcebergValidationExpression(buf, keyExpr,
+											  keyType.postgresTypeOid,
+											  keyType.postgresTypeMod,
+											  policy, depth + 1);
 		else
 			appendStringInfoString(buf, keyExpr);
 
@@ -265,11 +290,11 @@ AppendTemporalValidationExpression(StringInfo buf, const char *expr,
 
 		char	   *valExpr = psprintf("%s.value", lambdaVar);
 
-		if (valHasTemporal)
-			AppendTemporalValidationExpression(buf, valExpr,
-											   valType.postgresTypeOid,
-											   valType.postgresTypeMod,
-											   policy, depth + 1);
+		if (valNeedsValidation)
+			AppendIcebergValidationExpression(buf, valExpr,
+											  valType.postgresTypeOid,
+											  valType.postgresTypeMod,
+											  policy, depth + 1);
 		else
 			appendStringInfoString(buf, valExpr);
 
@@ -284,8 +309,8 @@ AppendTemporalValidationExpression(StringInfo buf, const char *expr,
 	{
 		Oid			baseType = getBaseTypeAndTypmod(typeOid, &typmod);
 
-		return AppendTemporalValidationExpression(buf, expr, baseType, typmod,
-												  policy, depth);
+		return AppendIcebergValidationExpression(buf, expr, baseType, typmod,
+												 policy, depth);
 	}
 
 	/* composite types: transform fields via struct_pack */
@@ -334,10 +359,10 @@ AppendTemporalValidationExpression(StringInfo buf, const char *expr,
 
 			appendStringInfo(buf, "%s := ", quotedField);
 
-			if (!AppendTemporalValidationExpression(buf, fieldExpr,
-													attr->atttypid,
-													attr->atttypmod,
-													policy, depth))
+			if (!AppendIcebergValidationExpression(buf, fieldExpr,
+												   attr->atttypid,
+												   attr->atttypmod,
+												   policy, depth))
 				appendStringInfoString(buf, fieldExpr);
 
 			firstField = false;
@@ -354,14 +379,16 @@ AppendTemporalValidationExpression(StringInfo buf, const char *expr,
 
 /*
  * IcebergWrapQueryWithErrorOrClampChecks wraps a query string with an
- * outer SELECT that applies CASE WHEN checks to temporal columns
- * (date/timestamp/timestamptz) for Iceberg boundary enforcement.
+ * outer SELECT that applies Iceberg write validation to columns that
+ * need it: temporal boundary enforcement (date/timestamp/timestamptz)
+ * and multidimensional array enforcement (pg_nullify_nested_list or
+ * pg_error_nested_list, depending on the policy).
  *
- * Only temporal columns are handled here.  Numeric NaN validation is
+ * Numeric NaN validation is
  * performed by IcebergErrorOrClampDatum (in iceberg_datum_validation.c)
  * on the PostgreSQL side before the data reaches DuckDB.
  *
- * Returns the original query unchanged if no temporal columns exist
+ * Returns the original query unchanged if no columns need validation
  * or the policy is ICEBERG_OOR_NONE.
  *
  * Example with clamp policy (table: id int, created_at date):
@@ -385,7 +412,8 @@ IcebergWrapQueryWithErrorOrClampChecks(char *query, TupleDesc tupleDesc,
 									   IcebergOutOfRangePolicy policy,
 									   bool queryHasRowId)
 {
-	if (policy == ICEBERG_OOR_NONE || tupleDesc == NULL || !TupleDescHasTemporalColumn(tupleDesc))
+	if (policy == ICEBERG_OOR_NONE || tupleDesc == NULL ||
+		!TupleDescNeedsValidation(tupleDesc))
 		return query;
 
 	StringInfoData wrapped;
@@ -412,10 +440,10 @@ IcebergWrapQueryWithErrorOrClampChecks(char *query, TupleDesc tupleDesc,
 
 		initStringInfo(&exprBuf);
 
-		if (AppendTemporalValidationExpression(&exprBuf, quotedName,
-											   attr->atttypid,
-											   attr->atttypmod,
-											   policy, 0))
+		if (AppendIcebergValidationExpression(&exprBuf, quotedName,
+											  attr->atttypid,
+											  attr->atttypmod,
+											  policy, 0))
 		{
 			appendStringInfo(&wrapped, "%s AS %s", exprBuf.data, quotedName);
 		}

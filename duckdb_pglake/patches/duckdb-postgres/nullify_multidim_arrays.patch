@@ -1,0 +1,53 @@
+diff --git a/src/postgres_binary_reader.cpp b/src/postgres_binary_reader.cpp
+--- a/src/postgres_binary_reader.cpp
++++ b/src/postgres_binary_reader.cpp
+@@ -397,6 +397,19 @@ void PostgresBinaryReader::ReadValue(const LogicalType &type, const PostgresType
+ 			expected_dimensions++;
+ 		}
+ 		if (expected_dimensions != array_dim) {
++			if (expected_dimensions == 1) {
++				// PostgreSQL uses a single array type (e.g. int[]) for
++				// both 1-D and multidimensional values, which maps to a
++				// flat LIST(T) — produce NULL for multidim arrays.
++				// Skip the remaining bytes of this array value.
++				// We already consumed 3 uint32s (ndim, has_null,
++				// element OID) above, so advance past the rest.
++				buffer_ptr += (value_len - 3 * sizeof(uint32_t));
++				FlatVector::SetNull(out_vec, output_offset, true);
++				list_entry.offset = child_offset;
++				list_entry.length = 0;
++				break;
++			}
+ 			throw InvalidInputException(
+ 			    "Expected an array with %llu dimensions, but this array has %llu dimensions. The array stored in "
+ 			    "Postgres does not match the schema. Postgres does not enforce that arrays match the provided "
+diff --git a/src/postgres_text_reader.cpp b/src/postgres_text_reader.cpp
+--- a/src/postgres_text_reader.cpp
++++ b/src/postgres_text_reader.cpp
+@@ -205,6 +205,9 @@ void PostgresTextReader::ConvertList(Vector &source, Vector &target, const Postg
+ 	auto strings = UnifiedVectorFormat::GetData<string_t>(vdata);
+ 	auto list_data = FlatVector::GetData<list_entry_t>(target);
+ 
++	auto &child_type = ListType::GetChildType(target.GetType());
++	bool is_flat_list = child_type.id() != LogicalTypeId::LIST;
++
+ 	PostgresListParser list_parser;
+ 	for (idx_t i = 0; i < count; i++) {
+ 		if (!vdata.validity.RowIsValid(i)) {
+@@ -213,7 +216,15 @@ void PostgresTextReader::ConvertList(Vector &source, Vector &target, const Postg
+ 			continue;
+ 		}
+ 		list_data[i].offset = list_parser.size;
+-		ParsePostgresList(list_parser, strings[i]);
++		if (is_flat_list && strings[i].GetSize() >= 4 &&
++		    strings[i].GetData()[0] == '{' && strings[i].GetData()[1] == '{') {
++			// Multidimensional array text (e.g. {{1,2},{3,4}}) for a
++			// flat list type — produce NULL.
++			FlatVector::SetNull(target, i, true);
++			list_data[i].length = 0;
++			continue;
++		}
++		ParsePostgresList(list_parser, strings[i]);
+ 		list_data[i].length = list_parser.size - list_data[i].offset;
+ 	}
+ 	if (list_parser.size > 0) {

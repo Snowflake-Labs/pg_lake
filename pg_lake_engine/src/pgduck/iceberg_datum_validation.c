@@ -18,13 +18,20 @@
 /*
  * C-level Iceberg write-time datum validation.
  *
- * Validates individual Datum values against Iceberg representable ranges
- * on the PostgreSQL side (non-pushdown path).  Called from
- * IcebergErrorOrClampSlotInPlace during FDW inserts and from partition transform
- * code (to keep partition keys consistent with clamped data).
+ * Validates individual Datum values against Iceberg constraints on
+ * the PostgreSQL side (non-pushdown path).  Called from
+ * IcebergErrorOrClampSlotInPlace during FDW inserts and from partition
+ * transform code (to keep partition keys consistent with clamped data).
  *
- * Handles both temporal boundaries (date/timestamp/timestamptz) and
- * numeric NaN (clamped to NULL or rejected).
+ * Handles:
+ *   - Temporal boundaries (date/timestamp/timestamptz): values outside
+ *     the Iceberg range are clamped or rejected.
+ *   - Bounded numeric NaN: clamped to NULL or rejected.
+ *   - Multidimensional arrays: clamped to NULL or rejected, since
+ *     PostgreSQL's single array type (e.g. int[]) maps to a flat
+ *     LIST(T) in DuckDB/Iceberg.
+ *
+ * Validation recurses through arrays, composites, maps, and domains.
  *
  * Temporal boundaries:
  *   - Date: proleptic Gregorian range -4712-01-01 .. 9999-12-31.
@@ -54,6 +61,9 @@ static Datum IcebergErrorOrClampTemporalDatum(Datum value, Oid typeOid,
 static Datum IcebergErrorOrClampNumericDatum(Datum value,
 											 IcebergOutOfRangePolicy policy,
 											 bool *isNull);
+static Datum IcebergErrorOrClampMultiDimArrayDatum(ArrayType *array,
+												   IcebergOutOfRangePolicy policy,
+												   bool *isNull);
 static Datum IcebergErrorOrClampNestedDatum(Datum value, Oid typeOid,
 											int32 typmod,
 											IcebergOutOfRangePolicy policy,
@@ -237,6 +247,41 @@ IcebergErrorOrClampNumericDatum(Datum value, IcebergOutOfRangePolicy policy,
 
 
 /*
+ * IcebergErrorOrClampMultiDimArrayDatum handles a multidimensional
+ * PostgreSQL array: raises an error, or nullifies it via *isNull.
+ *
+ * PostgreSQL does not distinguish int[] from int[][] at the type level,
+ * so a column declared as int[] (Iceberg list(integer)) can hold arrays
+ * with ndim > 1 at runtime.  Since the PG array type maps to a flat
+ * LIST(T) in DuckDB/Iceberg, multidimensional values cannot be stored
+ * faithfully.  Rather than
+ * silently restructuring the data by flattening, we treat them like
+ * other unsupported values (NaN) and clamp to NULL.
+ */
+static Datum
+IcebergErrorOrClampMultiDimArrayDatum(ArrayType *array,
+									  IcebergOutOfRangePolicy policy,
+									  bool *isNull)
+{
+	Assert(ARR_NDIM(array) > 1);
+
+	if (policy == ICEBERG_OOR_ERROR)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("multidimensional arrays are not supported "
+						"in Iceberg tables"),
+				 errhint("Use out_of_range_values = 'clamp' to "
+						 "automatically replace multidimensional "
+						 "arrays with NULL.")));
+	}
+
+	*isNull = true;
+	return (Datum) 0;
+}
+
+
+/*
  * IcebergErrorOrClampNestedDatum recursively validates a Datum for
  * Iceberg write constraints, deconstructing and reconstructing arrays,
  * composites, maps (domain over array of composites), and domains.
@@ -273,15 +318,32 @@ IcebergErrorOrClampNestedDatum(Datum value, Oid typeOid, int32 typmod,
 		return result;
 	}
 
-	/* array types: deconstruct, validate elements, reconstruct */
+	/*
+	 * array types: nullify multidim (→ NULL), validate elements,
+	 * reconstruct
+	 */
 	Oid			elemType = get_element_type(typeOid);
 
 	if (OidIsValid(elemType))
 	{
-		if (!TypeNeedsIcebergValidation(elemType, false))
+		ArrayType  *array = DatumGetArrayTypeP(value);
+		bool		needsMultidimClamp = ARR_NDIM(array) > 1;
+		bool		needsElementValidation =
+			TypeNeedsIcebergValidation(elemType, false);
+
+		if (!needsMultidimClamp && !needsElementValidation)
 			return value;
 
-		ArrayType  *array = DatumGetArrayTypeP(value);
+		if (needsMultidimClamp)
+		{
+			*modified = true;
+			return IcebergErrorOrClampMultiDimArrayDatum(array, policy,
+														 isNull);
+		}
+
+		if (!needsElementValidation)
+			return value;
+
 		int16		elmlen;
 		bool		elmbyval;
 		char		elmalign;
@@ -305,7 +367,8 @@ IcebergErrorOrClampNestedDatum(Datum value, Oid typeOid, int32 typmod,
 			bool		elemIsNull = false;
 			bool		elemModified = false;
 			Datum		clamped = IcebergErrorOrClampNestedDatum(elems[i],
-																 elemType, -1,
+																 elemType,
+																 -1,
 																 policy,
 																 &elemIsNull,
 																 &elemModified);
@@ -426,10 +489,10 @@ IcebergErrorOrClampNestedDatum(Datum value, Oid typeOid, int32 typmod,
  * as well as nested containers (arrays, composites, maps, domains).
  * For types that need no validation the value is returned unchanged.
  *
- * *isNull is set to true only when a top-level numeric NaN is clamped
- * (the caller should write NULL instead of the original value).
- * NaN values nested inside containers are absorbed as NULL within
- * the reconstructed container.
+ * *isNull is set to true when a top-level unsupported value is clamped:
+ * numeric NaN or a multidimensional array.  The caller should write NULL
+ * instead of the original value.  Unsupported values nested inside
+ * containers are absorbed as NULL within the reconstructed container.
  */
 Datum
 IcebergErrorOrClampDatum(Datum value, Oid typeOid,

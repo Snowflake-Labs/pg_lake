@@ -21,15 +21,16 @@
 #include "pg_lake/pgduck/iceberg_validation.h"
 
 /*
- * IcebergWrapQueryWithErrorOrClampChecks wraps a query with CASE WHEN
- * checks for temporal columns that need Iceberg write-time validation
- * (date/timestamp/timestamptz).
+ * IcebergWrapQueryWithErrorOrClampChecks wraps a query with validation
+ * expressions for columns that need Iceberg write-time checks: temporal
+ * boundary enforcement (date/timestamp/timestamptz) and multidimensional
+ * array enforcement (pg_nullify_nested_list or pg_error_nested_list).
  *
  * For ICEBERG_OOR_CLAMP: out-of-range values are clamped to boundaries.
  * For ICEBERG_OOR_ERROR: out-of-range values trigger a cast error.
  *
- * Returns the original query unchanged if no temporal columns exist or
- * the policy is ICEBERG_OOR_NONE.
+ * Returns the original query unchanged if no columns need validation
+ * or the policy is ICEBERG_OOR_NONE.
  */
 extern PGDLLEXPORT char *IcebergWrapQueryWithErrorOrClampChecks(char *query,
 																TupleDesc tupleDesc,

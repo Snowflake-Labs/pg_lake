@@ -1486,7 +1486,7 @@ def test_temporal_clamp_in_map_with_composite_value(
 # =====================================================================
 # Map with temporal key
 #
-# Exercises the keyHasTemporal branch in AppendTemporalValidationExpression
+# Exercises the key validation branch in AppendIcebergValidationExpression
 # and the key-side recursion in IcebergErrorOrClampNestedDatum.
 # =====================================================================
 
@@ -2420,6 +2420,354 @@ def test_temporal_error_quoted_column_name(
             )
             assert "date out of range" in str(err)
             pg_conn.rollback()
+    finally:
+        pg_conn.rollback()
+        run_command("RESET TIME ZONE;", pg_conn)
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+# =====================================================================
+# Multidimensional array validation
+#
+# Multidimensional arrays are clamped to NULL (clamp mode) or rejected
+# (error mode).  Parametrized across array shapes and both the
+# non-pushdown (INSERT VALUES) and pushdown (INSERT SELECT from foreign
+# table) paths.
+# =====================================================================
+
+ARRAY_CLAMP_PARAMS = [
+    pytest.param("int[]", "ARRAY[1,2,3]", None, [1, 2, 3], id="1d_int"),
+    pytest.param("int[]", "ARRAY[1, NULL, 3]", None, [1, None, 3], id="1d_int_null"),
+    pytest.param("int[]", "ARRAY[]::int[]", None, [], id="empty"),
+    pytest.param(
+        "int[]",
+        "ARRAY[ARRAY[1,2,3], ARRAY[4,5,6]]",
+        "[[1,2,3],[4,5,6]]",
+        None,
+        id="2d_int",
+    ),
+    pytest.param(
+        "text[]",
+        "ARRAY[ARRAY['a','b'], ARRAY['c','d']]",
+        "[['a','b'],['c','d']]",
+        None,
+        id="2d_text",
+    ),
+    pytest.param(
+        "int[]",
+        (
+            "ARRAY[ARRAY[ARRAY[1,2,3], ARRAY[4,5,6]], "
+            "ARRAY[ARRAY[7,8,9], ARRAY[10,11,12]]]"
+        ),
+        "[[[1,2,3],[4,5,6]],[[7,8,9],[10,11,12]]]",
+        None,
+        id="3d_int",
+    ),
+    pytest.param(
+        "int[]",
+        "ARRAY[ARRAY[1, NULL, 3], ARRAY[NULL, 5, 6]]",
+        "[[1, NULL, 3],[NULL, 5, 6]]",
+        None,
+        id="2d_int_nulls",
+    ),
+    pytest.param(
+        "int[]",
+        None,
+        "[[]::INTEGER[], []::INTEGER[]]",
+        None,
+        id="empty_nested",
+    ),
+]
+
+
+@pytest.mark.parametrize("use_pushdown", [False, True], ids=["values", "pushdown"])
+@pytest.mark.parametrize(
+    "col_type,pg_insert_expr,duckdb_copy_expr,expected",
+    ARRAY_CLAMP_PARAMS,
+)
+def test_array_multidim_clamp(
+    pg_conn,
+    pgduck_conn,
+    extension,
+    s3,
+    with_default_location,
+    use_pushdown,
+    col_type,
+    pg_insert_expr,
+    duckdb_copy_expr,
+    expected,
+):
+    """Multidimensional arrays become NULL in clamp mode; 1D arrays pass through."""
+    if not use_pushdown and pg_insert_expr is None:
+        pytest.skip("no non-pushdown INSERT expression for this case")
+
+    suffix = "_pd" if use_pushdown else ""
+    schema = f"test_arr_clamp{suffix}"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+
+    try:
+        if use_pushdown:
+            parquet_url = f"s3://{TEST_BUCKET}/{schema}/data.parquet"
+            if duckdb_copy_expr is not None:
+                run_command(
+                    f"COPY (SELECT {duckdb_copy_expr} AS col) "
+                    f"TO '{parquet_url}' (FORMAT PARQUET)",
+                    pgduck_conn,
+                )
+                pgduck_conn.commit()
+            else:
+                run_command(
+                    f"COPY (SELECT {pg_insert_expr} AS col) " f"TO '{parquet_url}';",
+                    pg_conn,
+                )
+
+            run_command(
+                f"CREATE FOREIGN TABLE source (col {col_type}) "
+                f"SERVER pg_lake OPTIONS (path '{parquet_url}');",
+                pg_conn,
+            )
+
+        run_command(
+            f"CREATE TABLE target (col {col_type}) USING iceberg;",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        if use_pushdown:
+            assert_query_pushdownable(
+                "INSERT INTO target SELECT * FROM source;", pg_conn
+            )
+            run_command("INSERT INTO target SELECT * FROM source;", pg_conn)
+        else:
+            run_command(f"INSERT INTO target VALUES ({pg_insert_expr});", pg_conn)
+        pg_conn.commit()
+
+        result = run_query("SELECT col FROM target;", pg_conn)
+        assert result[0]["col"] == expected
+    finally:
+        pg_conn.rollback()
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+def test_multidim_array_error(pg_conn, extension, s3, with_default_location):
+    """Multidimensional arrays are rejected in error mode."""
+    schema = "test_md_arr_err"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+
+    try:
+        run_command(
+            "CREATE TABLE target (col int[]) USING iceberg"
+            " WITH (out_of_range_values = 'error');",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        err = run_command(
+            "INSERT INTO target VALUES (ARRAY[ARRAY[1,2,3]]);",
+            pg_conn,
+            raise_error=False,
+        )
+        assert "multidimensional arrays are not supported" in str(err)
+        pg_conn.rollback()
+    finally:
+        pg_conn.rollback()
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+def test_multidim_array_in_composite_clamp(
+    pg_conn, extension, s3, with_default_location
+):
+    """Multidimensional array inside a composite field becomes NULL."""
+    schema = "test_md_comp_clamp"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+
+    try:
+        run_command(
+            "CREATE TYPE md_arr_comp AS (id int, vals int[]);",
+            pg_conn,
+        )
+        run_command(
+            "CREATE TABLE target (col md_arr_comp) USING iceberg;",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        run_command(
+            "INSERT INTO target VALUES "
+            "(ROW(1, ARRAY[ARRAY[10,20], ARRAY[30,40]])::md_arr_comp);",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        run_command("SET pg_lake_table.enable_full_query_pushdown TO false;", pg_conn)
+        result = run_query(
+            "SELECT (col).id, (col).vals FROM target;",
+            pg_conn,
+        )
+        assert result[0][0] == 1
+        assert result[0][1] is None
+    finally:
+        pg_conn.rollback()
+        run_command("RESET pg_lake_table.enable_full_query_pushdown;", pg_conn)
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+def test_multidim_array_in_composite_error(
+    pg_conn, extension, s3, with_default_location
+):
+    """Multidimensional array inside a composite raises error in error mode."""
+    schema = "test_md_comp_err"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+
+    try:
+        run_command(
+            "CREATE TYPE md_arr_comp_e AS (id int, vals int[]);",
+            pg_conn,
+        )
+        run_command(
+            "CREATE TABLE target (col md_arr_comp_e) USING iceberg"
+            " WITH (out_of_range_values = 'error');",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        err = run_command(
+            "INSERT INTO target VALUES "
+            "(ROW(1, ARRAY[ARRAY[10,20]])::md_arr_comp_e);",
+            pg_conn,
+            raise_error=False,
+        )
+        assert "multidimensional arrays are not supported" in str(err)
+        pg_conn.rollback()
+    finally:
+        pg_conn.rollback()
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+def test_multidim_temporal_array_clamp(pg_conn, extension, s3, with_default_location):
+    """Multidimensional date array becomes NULL (not flattened+clamped)."""
+    schema = "test_md_temp_arr"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    try:
+        run_command("CREATE TABLE target (col date[]) USING iceberg;", pg_conn)
+        pg_conn.commit()
+
+        run_command(
+            "INSERT INTO target VALUES "
+            "(ARRAY[ARRAY['2024-01-01'::date, 'infinity'::date], "
+            "ARRAY['-infinity'::date, '2024-06-15'::date]]);",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        result = run_query("SELECT col FROM target;", pg_conn)
+        assert result[0]["col"] is None
+    finally:
+        pg_conn.rollback()
+        run_command("RESET TIME ZONE;", pg_conn)
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+# =====================================================================
+# EXPLAIN verification: pg_nullify_nested_list in query wrapper
+# =====================================================================
+
+
+def test_explain_shows_pg_nullify_nested_list_for_plain_array(
+    pg_conn, extension, s3, with_default_location
+):
+    """EXPLAIN output for int[] column shows pg_nullify_nested_list wrapping."""
+    schema = "test_explain_prnl"
+
+    run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+
+    try:
+        run_command(
+            "CREATE TABLE explain_source (col int[]) USING iceberg;",
+            pg_conn,
+        )
+        run_command(
+            "CREATE TABLE explain_target (col int[]) USING iceberg;",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        result = run_query(
+            "EXPLAIN (VERBOSE) INSERT INTO explain_target"
+            " SELECT * FROM explain_source;",
+            pg_conn,
+        )
+        explain_text = "\n".join(line[0] for line in result)
+
+        assert re.search(
+            r"pg_nullify_nested_list", explain_text
+        ), f"Expected pg_nullify_nested_list not found in EXPLAIN:\n{explain_text}"
+    finally:
+        pg_conn.rollback()
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+def test_explain_shows_pg_nullify_nested_list_in_list_transform(
+    pg_conn, extension, s3, with_default_location
+):
+    """EXPLAIN for date[] shows pg_nullify_nested_list inside list_transform."""
+    schema = "test_explain_prnl_lt"
+
+    run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    try:
+        run_command(
+            "CREATE TABLE explain_source (col date[]) USING iceberg;",
+            pg_conn,
+        )
+        run_command(
+            "CREATE TABLE explain_target (col date[]) USING iceberg;",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        result = run_query(
+            "EXPLAIN (VERBOSE) INSERT INTO explain_target"
+            " SELECT * FROM explain_source;",
+            pg_conn,
+        )
+        explain_text = "\n".join(line[0] for line in result)
+
+        assert re.search(r"list_transform\(pg_nullify_nested_list", explain_text), (
+            f"Expected list_transform(pg_nullify_nested_list pattern "
+            f"not found in EXPLAIN:\n{explain_text}"
+        )
     finally:
         pg_conn.rollback()
         run_command("RESET TIME ZONE;", pg_conn)
