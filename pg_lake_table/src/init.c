@@ -42,6 +42,7 @@
 #include "pg_lake/planner/insert_select.h"
 #include "pg_lake/planner/query_pushdown.h"
 #include "pg_lake/util/s3_file_utils.h"
+#include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/test/hide_lake_objects.h"
 #include "pg_lake/transaction/transaction_hooks.h"
 #include "utils/guc.h"
@@ -367,6 +368,8 @@ _PG_init(void)
 
 	MarkGUCPrefixReserved(PG_LAKE_TABLE);
 
+	RegisterUtilityStatementHandler(RequireRestTypeForIcebergCatalogServer, NULL);
+	RegisterUtilityStatementHandler(BlockDDLOnExtensionCatalogs, NULL);
 	RegisterUtilityStatementHandler(ProcessVacuumPgLakeTable, NULL);
 	RegisterUtilityStatementHandler(ProcessCreatePgLakeTable, NULL);
 	RegisterUtilityStatementHandler(ProcessCreateAsSelectPgLakeTable, NULL);

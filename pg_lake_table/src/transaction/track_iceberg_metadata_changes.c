@@ -118,6 +118,16 @@ static HTAB *RestCatalogRequestsHash = NULL;
 static MemoryContext PgLakeXactCommitContext = NULL;
 
 /*
+ * Resolved REST catalog options for the current transaction, deep-copied into
+ * TopTransactionContext in RecordRestCatalogRequestInTx (when syscache is still
+ * accessible) because PostAllRestCatalogRequests runs at XACT_EVENT_COMMIT,
+ * where syscache lookups are forbidden. Only one REST catalog server is allowed
+ * per transaction.
+ */
+static RestCatalogOptions *PgLakeXactRestCatalogOpts = NULL;
+
+
+/*
  * TrackIcebergMetadataChangesInTx tracks metadata changes for a given relation
  * within a transaction. It acquires the necessary locks before applying the changes
  * here. (might defer locking as well but let's not worry about edge cases now)
@@ -208,6 +218,7 @@ ResetRestCatalogRequests(void)
 {
 	RestCatalogRequestsHash = NULL;
 	PgLakeXactCommitContext = NULL;
+	PgLakeXactRestCatalogOpts = NULL;
 }
 
 
@@ -229,6 +240,8 @@ PostAllRestCatalogRequests(void)
 	 * PgLakeXactCommitContext is pre-allocated before.
 	 */
 	MemoryContext oldContext = MemoryContextSwitchTo(PgLakeXactCommitContext);
+
+	Assert(PgLakeXactRestCatalogOpts != NULL);
 
 	/*
 	 * We need to iterate over the RestCatalogRequestsHash twice: 1. First, we
@@ -275,7 +288,9 @@ PostAllRestCatalogRequests(void)
 			{
 				HttpResult	httpResult =
 					SendRequestToRestCatalog(HTTP_POST, requestPerTable->tableRestUrl,
-											 createTableRequest->body, PostHeadersWithAuth());
+											 createTableRequest->body,
+											 PostHeadersWithAuth(PgLakeXactRestCatalogOpts),
+											 PgLakeXactRestCatalogOpts);
 
 				if (httpResult.status != 200)
 				{
@@ -291,7 +306,9 @@ PostAllRestCatalogRequests(void)
 			{
 				HttpResult	httpResult =
 					SendRequestToRestCatalog(HTTP_DELETE, requestPerTable->tableRestUrl,
-											 NULL, DeleteHeadersWithAuth());
+											 NULL,
+											 DeleteHeadersWithAuth(PgLakeXactRestCatalogOpts),
+											 PgLakeXactRestCatalogOpts);
 
 				if (httpResult.status != 204)
 				{
@@ -409,8 +426,11 @@ PostAllRestCatalogRequests(void)
 		appendStringInfoChar(batchRequestBody, ']');	/* close table-changes */
 		appendStringInfoChar(batchRequestBody, '}');	/* close json body */
 
-		char	   *url = psprintf(REST_CATALOG_TRANSACTION_COMMIT, RestCatalogHost, catalogName);
-		HttpResult	httpResult = SendRequestToRestCatalog(HTTP_POST, url, batchRequestBody->data, PostHeadersWithAuth());
+		char	   *url = psprintf(REST_CATALOG_TRANSACTION_COMMIT,
+								   PgLakeXactRestCatalogOpts->host, catalogName);
+		HttpResult	httpResult = SendRequestToRestCatalog(HTTP_POST, url, batchRequestBody->data,
+														  PostHeadersWithAuth(PgLakeXactRestCatalogOpts),
+														  PgLakeXactRestCatalogOpts);
 
 		if (httpResult.status != 204)
 		{
@@ -600,6 +620,41 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 		memset(requestPerTable, 0, sizeof(RestCatalogRequestPerTable));
 		requestPerTable->relationId = relationId;
 
+		/* Resolve the options for this relation's REST catalog */
+		RestCatalogOptions *resolvedOpts = GetRestCatalogOptionsForRelation(relationId);
+
+		if (PgLakeXactRestCatalogOpts == NULL)
+		{
+			/*
+			 * Deep-copy opts into TopTransactionContext so the struct and its
+			 * string fields survive until XACT_EVENT_COMMIT.
+			 */
+			MemoryContext oldctx = MemoryContextSwitchTo(TopTransactionContext);
+
+			PgLakeXactRestCatalogOpts = palloc0(sizeof(RestCatalogOptions));
+			PgLakeXactRestCatalogOpts->catalog = pstrdup(resolvedOpts->catalog);
+			PgLakeXactRestCatalogOpts->host = pstrdup(resolvedOpts->host);
+			PgLakeXactRestCatalogOpts->oauthHostPath = resolvedOpts->oauthHostPath ? pstrdup(resolvedOpts->oauthHostPath) : NULL;
+			PgLakeXactRestCatalogOpts->clientId = resolvedOpts->clientId ? pstrdup(resolvedOpts->clientId) : NULL;
+			PgLakeXactRestCatalogOpts->clientSecret = resolvedOpts->clientSecret ? pstrdup(resolvedOpts->clientSecret) : NULL;
+			PgLakeXactRestCatalogOpts->scope = resolvedOpts->scope ? pstrdup(resolvedOpts->scope) : NULL;
+			PgLakeXactRestCatalogOpts->locationPrefix = resolvedOpts->locationPrefix ? pstrdup(resolvedOpts->locationPrefix) : NULL;
+			PgLakeXactRestCatalogOpts->catalogName = resolvedOpts->catalogName ? pstrdup(resolvedOpts->catalogName) : NULL;
+			PgLakeXactRestCatalogOpts->authType = resolvedOpts->authType;
+			PgLakeXactRestCatalogOpts->enableVendedCredentials = resolvedOpts->enableVendedCredentials;
+
+			MemoryContextSwitchTo(oldctx);
+		}
+		else if (strcmp(PgLakeXactRestCatalogOpts->catalog, resolvedOpts->catalog) != 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot modify tables from different REST catalogs "
+							"in the same transaction"),
+					 errdetail("This transaction already targets catalog server "
+							   "\"%s\", but table %u belongs to \"%s\".",
+							   PgLakeXactRestCatalogOpts->catalog, relationId,
+							   resolvedOpts->catalog)));
+
 		requestPerTable->catalogName =
 			MemoryContextStrdup(TopTransactionContext, GetRestCatalogName(relationId));
 		requestPerTable->catalogNamespace =
@@ -616,7 +671,7 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 
 		requestPerTable->tableRestUrl =
 			MemoryContextStrdup(TopTransactionContext, psprintf(REST_CATALOG_TABLE,
-																RestCatalogHost,
+																resolvedOpts->host,
 																requestPerTable->urlEncodedCatalogName,
 																requestPerTable->urlEncodedCatalogNamespace,
 																requestPerTable->urlEncodedCatalogTableName));
