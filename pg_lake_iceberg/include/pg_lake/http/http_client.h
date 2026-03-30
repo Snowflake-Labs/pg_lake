@@ -45,6 +45,10 @@ typedef struct
 
 extern bool HttpClientTraceTraffic;
 
+#define HTTP_STATUS_TOKEN_EXPIRED		419
+#define HTTP_STATUS_TOO_MANY_REQUESTS	429
+#define HTTP_STATUS_SERVICE_UNAVAILABLE	503
+
 /* Callback function to determine if a request should be retried */
 typedef bool (*HttpRetryFn) (long status, int maxRetry, int retryNo);
 

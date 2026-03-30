@@ -1085,20 +1085,16 @@ ClassifyRestCatalogRequestRetry(long status, int maxRetry, int retryNo)
 	if (retryNo > maxRetry)
 		return REST_CATALOG_RETRY_STOP;
 
-	const int	TOO_MANY_REQUEST_STATUS = 429;
-	const int	SERVER_UNAVAILABLE_STATUS = 503;
-	const int	TOKEN_EXPIRED_STATUS = 419;
-
-	/* too many request, wait some time */
-	if (status == TOO_MANY_REQUEST_STATUS)
+	/* too many requests, wait some time */
+	if (status == HTTP_STATUS_TOO_MANY_REQUESTS)
 		return REST_CATALOG_RETRY_BACKOFF_SHORT;
 
-	/* server unavailable, lets wait a bit more */
-	if (status == SERVER_UNAVAILABLE_STATUS)
+	/* server unavailable, let's wait a bit more */
+	if (status == HTTP_STATUS_SERVICE_UNAVAILABLE)
 		return REST_CATALOG_RETRY_BACKOFF_LONG;
 
 	/* token expired, retry after refreshing token */
-	if (status == TOKEN_EXPIRED_STATUS)
+	if (status == HTTP_STATUS_TOKEN_EXPIRED)
 		return REST_CATALOG_RETRY_REFRESH_AUTH;
 
 	return REST_CATALOG_RETRY_STOP;
