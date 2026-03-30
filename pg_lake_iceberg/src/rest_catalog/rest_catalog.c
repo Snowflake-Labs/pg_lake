@@ -66,6 +66,7 @@ static char *EncodeBasicAuth(const char *clientId, const char *clientSecret);
 static char *JsonbGetStringByPath(const char *jsonb_text, int nkeys,...);
 static List *GetHeadersWithAuth(void);
 static char *AppendIcebergPartitionSpecForRestCatalog(List *partitionSpecs);
+static void UpdateAuthorizationHeader(List *headers, const char *token);
 
 /*
  * Retry actions returned by ClassifyRestCatalogRequestRetry.
@@ -1076,6 +1077,30 @@ GetRemoveSnapshotCatalogRequest(List *removedSnapshotIds, Oid relationId)
 
 
 /*
+ * UpdateAuthorizationHeader finds the "Authorization: Bearer ..." entry in the
+ * header list and replaces it with a new one carrying the given token.  If no
+ * matching header is found the function is a no-op (defensive).
+ */
+static void
+UpdateAuthorizationHeader(List *headers, const char *token)
+{
+	const char *prefix = "Authorization: Bearer ";
+	ListCell   *lc;
+
+	foreach(lc, headers)
+	{
+		char	   *header = (char *) lfirst(lc);
+
+		if (strncmp(header, prefix, strlen(prefix)) == 0)
+		{
+			lfirst(lc) = psprintf("Authorization: Bearer %s", token);
+			return;
+		}
+	}
+}
+
+
+/*
  * ClassifyRestCatalogRequestRetry decides whether to retry and, if so, what
  * kind of action the caller should take.
  */
@@ -1135,14 +1160,13 @@ SendRequestToRestCatalog(HttpMethod method, const char *url, const char *body, L
 			case REST_CATALOG_RETRY_REFRESH_AUTH:
 				{
 					/*
-					 * Force-refresh the cached token and update the
-					 * Authorization header (always the first list element) so
-					 * the retried request carries the new token.
+					 * Force-refresh the cached token and update the Authorization
+					 * header so the retried request carries the new token.
 					 */
 					bool		forceRefreshToken = true;
 					char	   *freshToken = GetRestCatalogAccessToken(forceRefreshToken);
 
-					lfirst(list_head(headers)) = psprintf("Authorization: Bearer %s", freshToken);
+					UpdateAuthorizationHeader(headers, freshToken);
 					continue;
 				}
 
