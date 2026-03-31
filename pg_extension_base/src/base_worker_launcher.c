@@ -336,8 +336,8 @@ static int32 InsertBaseWorkerRegistration(char *workerName, Oid extensionId,
 										  Oid entryPointFunctionId);
 static bool DatabaseIsTemplate(Oid databaseId);
 static int32 DeregisterBaseWorker_internal(int32 workerId);
-static int32 DeleteBaseWorkerRegistrationByName(char *extensionName);
-static void DeleteBaseWorkerRegistrationById(int32 workerId);
+static int32 DeleteBaseWorkerRegistrationByName(char *extensionName, bool missingOk);
+static void DeleteBaseWorkerRegistrationById(int32 workerId, bool missingOk);
 static void DeleteBaseWorkerRegistrationsByExtensionId(Oid extensionId);
 static Oid	PgExtensionBaseWorkersRelationId(void);
 static Oid	PgExtensionSchemaId(void);
@@ -2203,16 +2203,17 @@ Datum
 pg_extension_base_deregister_worker(PG_FUNCTION_ARGS)
 {
 	Oid			argtype = get_fn_expr_argtype(fcinfo->flinfo, 0);
+	bool		missingOk = PG_GETARG_BOOL(1);
 
 	if (argtype == INT4OID)
 	{
-		DeregisterBaseWorkerById(PG_GETARG_INT32(0));
+		DeregisterBaseWorkerById(PG_GETARG_INT32(0), missingOk);
 	}
 	else if (argtype == TEXTOID)
 	{
 		char	   *workerName = text_to_cstring(PG_GETARG_TEXT_P(0));
 
-		DeregisterBaseWorker(workerName);
+		DeregisterBaseWorker(workerName, missingOk);
 	}
 	else
 	{
@@ -2227,12 +2228,12 @@ pg_extension_base_deregister_worker(PG_FUNCTION_ARGS)
  * DeregisterBaseWorker stops and removes a base worker by name.
  */
 int32
-DeregisterBaseWorker(char *workerName)
+DeregisterBaseWorker(char *workerName, bool missingOk)
 {
 	/*
 	 * Delete base worker from the database.
 	 */
-	int			workerId = DeleteBaseWorkerRegistrationByName(workerName);
+	int			workerId = DeleteBaseWorkerRegistrationByName(workerName, missingOk);
 
 	return DeregisterBaseWorker_internal(workerId);
 }
@@ -2242,12 +2243,12 @@ DeregisterBaseWorker(char *workerName)
  * DeregisterBaseWorkerById stops and removes a base worker by id.
  */
 int32
-DeregisterBaseWorkerById(int32 workerId)
+DeregisterBaseWorkerById(int32 workerId, bool missingOk)
 {
 	/*
 	 * Delete base worker from the database.
 	 */
-	DeleteBaseWorkerRegistrationById(workerId);
+	DeleteBaseWorkerRegistrationById(workerId, missingOk);
 
 	return DeregisterBaseWorker_internal(workerId);
 }
@@ -2275,7 +2276,7 @@ DeregisterBaseWorkerSelf(void)
 	 * Remove the catalog row.  This is the transactional part: if we abort,
 	 * the row comes back and the worker will be restarted.
 	 */
-	DeleteBaseWorkerRegistrationById(MyBaseWorkerId);
+	DeleteBaseWorkerRegistrationById(MyBaseWorkerId, false);
 
 	/*
 	 * Intentionally do NOT touch shmem needsRestart or send SIGTERM.  The
@@ -2429,7 +2430,7 @@ DatabaseIsTemplate(Oid databaseId)
  * EXECUTE on deregister_worker to delete from the workers table.
  */
 static int32
-DeleteBaseWorkerRegistrationByName(char *workerName)
+DeleteBaseWorkerRegistrationByName(char *workerName, bool missingOk)
 {
 	SPI_START_EXTENSION_OWNER(PgExtensionBase);
 
@@ -2449,7 +2450,7 @@ DeleteBaseWorkerRegistrationByName(char *workerName)
 						  readOnly, limit);
 
 	if (SPI_processed != 1)
-		ereport(ERROR, (errmsg("could not find worker %s", workerName)));
+		ereport(missingOk ? NOTICE : ERROR, (errmsg("could not find worker %s", workerName)));
 
 	bool		isNull = false;
 	Datum		workerIdDatum = GET_SPI_DATUM(0, 1, &isNull);
@@ -2472,7 +2473,7 @@ DeleteBaseWorkerRegistrationByName(char *workerName)
  * EXECUTE on deregister_worker to delete from the workers table.
  */
 static void
-DeleteBaseWorkerRegistrationById(int32 workerId)
+DeleteBaseWorkerRegistrationById(int32 workerId, bool missingOk)
 {
 	SPI_START_EXTENSION_OWNER(PgExtensionBase);
 
@@ -2490,7 +2491,7 @@ DeleteBaseWorkerRegistrationById(int32 workerId)
 						  readOnly, limit);
 
 	if (SPI_processed != 1)
-		ereport(ERROR, (errmsg("could not find worker id %d", workerId)));
+		ereport(missingOk ? NOTICE : ERROR, (errmsg("could not find worker id %d", workerId)));
 
 	SPI_END();
 }
