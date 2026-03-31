@@ -16,11 +16,15 @@
  */
 
 /*
- * Query-level Iceberg out-of-range validation.
+ * Query-level Iceberg type transformations.
  *
  * IcebergWrapQueryWithErrorOrClampChecks embeds CASE WHEN checks into
  * the write query sent to pgduck_server for temporal boundary
  * enforcement (date/timestamp/timestamptz).
+ *
+ * IcebergWrapQueryWithIntervalConversion decomposes DuckDB INTERVAL
+ * columns into STRUCT(months, days, microseconds) to match the Iceberg
+ * interval representation.
  *
  * Common validation helpers (policy resolution, IsTemporalType, temporal
  * boundary constants) live in iceberg_validation.c.
@@ -62,6 +66,13 @@ static void AppendErrorExpression(StringInfo buf, const char *expr,
 static bool AppendTemporalValidationExpression(StringInfo buf, const char *expr,
 											   Oid typeOid, int32 typmod,
 											   IcebergOutOfRangePolicy policy,
+											   int depth);
+
+static bool TypeContainsInterval(Oid typeOid);
+static bool TupleDescHasIntervalColumn(TupleDesc tupleDesc);
+static void AppendIntervalStructPack(StringInfo buf, const char *expr);
+static bool AppendIntervalConversionExpression(StringInfo buf, const char *expr,
+											   Oid typeOid, int32 typmod,
 											   int depth);
 
 
@@ -426,6 +437,329 @@ IcebergWrapQueryWithErrorOrClampChecks(char *query, TupleDesc tupleDesc,
 	}
 
 	appendStringInfo(&wrapped, " FROM (%s) AS __iceberg_oor", query);
+
+	return wrapped.data;
+}
+
+
+/* ================================================================
+ * Query wrapping for interval -> struct conversion
+ * ================================================================ */
+
+/*
+ * TypeContainsInterval recursively checks whether a type is or contains
+ * an interval, including inside arrays, composites, maps, and domains.
+ */
+static bool
+TypeContainsInterval(Oid typeOid)
+{
+	if (typeOid == INTERVALOID)
+		return true;
+
+	Oid			elemType = get_element_type(typeOid);
+
+	if (OidIsValid(elemType))
+		return TypeContainsInterval(elemType);
+
+	if (IsMapTypeOid(typeOid))
+	{
+		PGType		keyType = GetMapKeyType(typeOid);
+		PGType		valType = GetMapValueType(typeOid);
+
+		return TypeContainsInterval(keyType.postgresTypeOid) ||
+			TypeContainsInterval(valType.postgresTypeOid);
+	}
+
+	char		typtype = get_typtype(typeOid);
+
+	if (typtype == TYPTYPE_DOMAIN)
+		return TypeContainsInterval(getBaseType(typeOid));
+
+	if (typtype == TYPTYPE_COMPOSITE)
+	{
+		TupleDesc	tupdesc = lookup_rowtype_tupdesc(typeOid, -1);
+		bool		found = false;
+
+		for (int i = 0; i < tupdesc->natts; i++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+			if (attr->attisdropped)
+				continue;
+
+			if (TypeContainsInterval(attr->atttypid))
+			{
+				found = true;
+				break;
+			}
+		}
+
+		ReleaseTupleDesc(tupdesc);
+		return found;
+	}
+
+	return false;
+}
+
+
+static bool
+TupleDescHasIntervalColumn(TupleDesc tupleDesc)
+{
+	for (int i = 0; i < tupleDesc->natts; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupleDesc, i);
+
+		if (attr->attisdropped)
+			continue;
+
+		if (TypeContainsInterval(attr->atttypid))
+			return true;
+	}
+
+	return false;
+}
+
+
+/*
+ * AppendIntervalStructPack appends a DuckDB struct_pack expression that
+ * decomposes a DuckDB INTERVAL into {months, days, microseconds}.
+ *
+ * Wraps in CASE WHEN ... IS NOT NULL to preserve NULL semantics (a NULL
+ * interval should produce a NULL struct, not a struct of NULL fields).
+ */
+static void
+AppendIntervalStructPack(StringInfo buf, const char *expr)
+{
+	appendStringInfo(buf,
+					 "CASE WHEN %s IS NOT NULL THEN struct_pack("
+					 "months := CAST(datepart('year', %s) AS BIGINT) * 12 "
+					 "+ CAST(datepart('month', %s) AS BIGINT), "
+					 "days := CAST(datepart('day', %s) AS BIGINT), "
+					 "microseconds := CAST(datepart('hour', %s) AS BIGINT) * 3600000000 "
+					 "+ CAST(datepart('minute', %s) AS BIGINT) * 60000000 "
+					 "+ CAST(datepart('microsecond', %s) AS BIGINT)"
+					 ") ELSE NULL END",
+					 expr, expr, expr, expr, expr, expr, expr);
+}
+
+
+/*
+ * AppendIntervalConversionExpression recursively generates DuckDB SQL
+ * that converts INTERVAL values to STRUCT(months, days, microseconds).
+ * Handles scalars, arrays (list_transform), composites (struct_pack),
+ * maps (map_from_entries + list_transform), and domains.
+ *
+ * Returns true if a transformed expression was written to buf.
+ */
+static bool
+AppendIntervalConversionExpression(StringInfo buf, const char *expr,
+								   Oid typeOid, int32 typmod,
+								   int depth)
+{
+	if (typeOid == INTERVALOID)
+	{
+		AppendIntervalStructPack(buf, expr);
+		return true;
+	}
+
+	/* array types: wrap elements via list_transform */
+	Oid			elemType = get_element_type(typeOid);
+
+	if (OidIsValid(elemType))
+	{
+		if (!TypeContainsInterval(elemType))
+			return false;
+
+		char	   *lambdaVar = psprintf("_x%d", depth);
+
+		appendStringInfo(buf, "list_transform(%s, %s -> ", expr, lambdaVar);
+		AppendIntervalConversionExpression(buf, lambdaVar, elemType, -1,
+										   depth + 1);
+		appendStringInfoChar(buf, ')');
+		return true;
+	}
+
+	/* map check must precede the generic domain unwrap (maps are domains) */
+	if (IsMapTypeOid(typeOid))
+	{
+		PGType		keyType = GetMapKeyType(typeOid);
+		PGType		valType = GetMapValueType(typeOid);
+		bool		keyHasInterval = TypeContainsInterval(keyType.postgresTypeOid);
+		bool		valHasInterval = TypeContainsInterval(valType.postgresTypeOid);
+
+		if (!keyHasInterval && !valHasInterval)
+			return false;
+
+		char	   *lambdaVar = psprintf("_x%d", depth);
+
+		appendStringInfo(buf,
+						 "map_from_entries(list_transform(map_entries(%s), %s -> struct_pack(key := ",
+						 expr, lambdaVar);
+
+		char	   *keyExpr = psprintf("%s.key", lambdaVar);
+
+		if (keyHasInterval)
+			AppendIntervalConversionExpression(buf, keyExpr,
+											   keyType.postgresTypeOid,
+											   keyType.postgresTypeMod,
+											   depth + 1);
+		else
+			appendStringInfoString(buf, keyExpr);
+
+		appendStringInfoString(buf, ", value := ");
+
+		char	   *valExpr = psprintf("%s.value", lambdaVar);
+
+		if (valHasInterval)
+			AppendIntervalConversionExpression(buf, valExpr,
+											   valType.postgresTypeOid,
+											   valType.postgresTypeMod,
+											   depth + 1);
+		else
+			appendStringInfoString(buf, valExpr);
+
+		appendStringInfoString(buf, ")))");
+		return true;
+	}
+
+	/* domain (non-map): unwrap to base type and recurse */
+	char		typtype = get_typtype(typeOid);
+
+	if (typtype == TYPTYPE_DOMAIN)
+	{
+		Oid			baseType = getBaseTypeAndTypmod(typeOid, &typmod);
+
+		return AppendIntervalConversionExpression(buf, expr, baseType, typmod,
+												  depth);
+	}
+
+	/* composite types: transform fields via struct_pack */
+	if (typtype == TYPTYPE_COMPOSITE)
+	{
+		TupleDesc	tupdesc = lookup_rowtype_tupdesc(typeOid, -1);
+		bool		anyFieldNeedsTransform = false;
+
+		for (int i = 0; i < tupdesc->natts; i++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+			if (attr->attisdropped)
+				continue;
+
+			if (TypeContainsInterval(attr->atttypid))
+			{
+				anyFieldNeedsTransform = true;
+				break;
+			}
+		}
+
+		if (!anyFieldNeedsTransform)
+		{
+			ReleaseTupleDesc(tupdesc);
+			return false;
+		}
+
+		appendStringInfo(buf, "CASE WHEN %s IS NOT NULL THEN struct_pack(", expr);
+
+		bool		firstField = true;
+
+		for (int i = 0; i < tupdesc->natts; i++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+			if (attr->attisdropped)
+				continue;
+
+			if (!firstField)
+				appendStringInfoString(buf, ", ");
+
+			const char *fieldName = NameStr(attr->attname);
+			const char *quotedField = quote_identifier(fieldName);
+			char	   *fieldExpr = psprintf("%s.%s", expr, quotedField);
+
+			appendStringInfo(buf, "%s := ", quotedField);
+
+			if (!AppendIntervalConversionExpression(buf, fieldExpr,
+													attr->atttypid,
+													attr->atttypmod,
+													depth))
+				appendStringInfoString(buf, fieldExpr);
+
+			firstField = false;
+		}
+
+		appendStringInfoString(buf, ") ELSE NULL END");
+		ReleaseTupleDesc(tupdesc);
+		return true;
+	}
+
+	return false;
+}
+
+
+/*
+ * IcebergWrapQueryWithIntervalConversion wraps a query string with an
+ * outer SELECT that decomposes INTERVAL columns into
+ * STRUCT(months BIGINT, days BIGINT, microseconds BIGINT) to match
+ * Iceberg's interval representation.
+ *
+ * Returns the original query unchanged if no interval columns exist.
+ */
+char *
+IcebergWrapQueryWithIntervalConversion(char *query, TupleDesc tupleDesc,
+									   bool queryHasRowId)
+{
+	if (tupleDesc == NULL || !TupleDescHasIntervalColumn(tupleDesc))
+		return query;
+
+	StringInfoData wrapped;
+
+	initStringInfo(&wrapped);
+
+	appendStringInfoString(&wrapped, "SELECT ");
+
+	bool		firstColumn = true;
+
+	for (int i = 0; i < tupleDesc->natts; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupleDesc, i);
+
+		if (attr->attisdropped)
+			continue;
+
+		if (!firstColumn)
+			appendStringInfoString(&wrapped, ", ");
+
+		const char *quotedName = quote_identifier(NameStr(attr->attname));
+
+		StringInfoData exprBuf;
+
+		initStringInfo(&exprBuf);
+
+		if (AppendIntervalConversionExpression(&exprBuf, quotedName,
+											   attr->atttypid,
+											   attr->atttypmod, 0))
+		{
+			appendStringInfo(&wrapped, "%s AS %s", exprBuf.data, quotedName);
+		}
+		else
+		{
+			appendStringInfoString(&wrapped, quotedName);
+		}
+
+		pfree(exprBuf.data);
+
+		firstColumn = false;
+	}
+
+	if (queryHasRowId)
+	{
+		if (!firstColumn)
+			appendStringInfoString(&wrapped, ", ");
+		appendStringInfoString(&wrapped, "_row_id");
+	}
+
+	appendStringInfo(&wrapped, " FROM (%s) AS __iceberg_interval", query);
 
 	return wrapped.data;
 }

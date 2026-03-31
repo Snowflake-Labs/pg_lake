@@ -125,7 +125,8 @@ static List *PrepareToAddQueryResultToTable(Oid relationId,
 											bool queryHasRowId,
 											bool allowSplit,
 											bool isVerbose,
-											IcebergOutOfRangePolicy outOfRangePolicy);
+											IcebergOutOfRangePolicy outOfRangePolicy,
+											bool wrapNativeIntervals);
 static List *GetPossiblePositionDeleteFiles(Oid relationId, List *sourcePathList,
 											Snapshot snapshot);
 static void ApplyMetadataChanges(Oid relationId, List *metadataOperations);
@@ -938,12 +939,16 @@ TryCompactDataFiles(Oid relationId, TupleDesc tupleDescriptor, List *candidates,
 	int32		partitionSpecId = firstCandidate->partitionSpecId;
 	Partition  *partition = firstCandidate->partition;
 
-	/* compaction re-writes existing data files; values are already clamped */
+	/*
+	 * compaction re-writes existing data files; values are already clamped
+	 * and intervals are already converted to struct for Iceberg
+	 */
 	List	   *newFileOps =
 		PrepareToAddQueryResultToTable(relationId, readFileQuery, tupleDescriptor,
 									   partitionSpecId, partition,
 									   hasRowIds, allowSplit, isVerbose,
-									   ICEBERG_OOR_NONE);
+									   ICEBERG_OOR_NONE,
+									   false /* wrapNativeIntervals */ );
 
 	metadataOperations = list_concat(metadataOperations, newFileOps);
 
@@ -987,7 +992,8 @@ static List *
 PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc,
 							   int32 partitionSpecId, Partition * partition,
 							   bool queryHasRowId, bool allowSplit, bool isVerbose,
-							   IcebergOutOfRangePolicy outOfRangePolicy)
+							   IcebergOutOfRangePolicy outOfRangePolicy,
+							   bool wrapNativeIntervals)
 {
 	PgLakeTableProperties properties = GetPgLakeTableProperties(relationId);
 	List	   *options = properties.options;
@@ -1037,7 +1043,8 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 						   schema,
 						   queryTupleDesc,
 						   leafFields,
-						   outOfRangePolicy);
+						   outOfRangePolicy,
+						   wrapNativeIntervals);
 
 	if (statsCollector->totalRowCount == 0)
 	{
@@ -1073,9 +1080,18 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 
 /*
  * AddQueryResultToTable adds the result of a pgduck query to the table.
+ *
+ * When wrapNativeIntervals is true, DuckDB's native INTERVAL columns are
+ * decomposed into STRUCT(months, days, microseconds) to match the Iceberg
+ * interval representation before writing. This is needed for INSERT ..
+ * SELECT and COPY FROM pushdown paths where the source data contains
+ * native intervals. It should be false when the data is already in
+ * Iceberg struct form (e.g. compaction, which re-writes existing Iceberg
+ * data files).
  */
 int64
-AddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc)
+AddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc,
+					  bool wrapNativeIntervals)
 {
 	Assert(queryTupleDesc != NULL && queryTupleDesc->natts > 0);
 
@@ -1118,7 +1134,7 @@ AddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc)
 		PrepareToAddQueryResultToTable(relationId, readQuery, queryTupleDesc,
 									   partitionSpecId, partition,
 									   queryHasRowId, allowSplit, isVerbose,
-									   outOfRangePolicy);
+									   outOfRangePolicy, wrapNativeIntervals);
 
 	metadataOperations = list_concat(metadataOperations, newFileOps);
 

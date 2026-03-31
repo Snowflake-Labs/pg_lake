@@ -1560,7 +1560,7 @@ QueryPushdownScanNextInternal(CustomScanState *node)
 	{
 		scanState->estate->es_processed =
 			AddQueryResultToTable(scanState->insertIntoRelid, scanState->queryString,
-								  scanState->insertTargetTupleDesc);
+								  scanState->insertTargetTupleDesc, true);
 
 		return NULL;
 	}
@@ -1735,6 +1735,12 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 					IcebergWrapQueryWithErrorOrClampChecks(queryString,
 														   scanState->insertTargetTupleDesc,
 														   outOfRangePolicy,
+														   false);
+
+			if (IsWritableIcebergTable(scanState->insertIntoRelid))
+				queryString =
+					IcebergWrapQueryWithIntervalConversion(queryString,
+														   scanState->insertTargetTupleDesc,
 														   false);
 		}
 

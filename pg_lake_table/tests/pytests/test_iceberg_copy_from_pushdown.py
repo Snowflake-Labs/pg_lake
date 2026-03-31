@@ -933,6 +933,200 @@ def test_infinity_temporal_error_copy_from_non_pushdown(
         pg_conn.commit()
 
 
+_INTERVAL_COPY_LOC = f"s3://{TEST_BUCKET}/test_iceberg_copy_from_with_pushdown/interval"
+
+
+def test_copy_from_interval_pushdown(
+    pg_conn,
+    extension,
+    s3,
+    copy_from_pushdown_setup,
+    with_default_location,
+):
+    """COPY FROM with plain interval column IS pushed down and the interval
+    is converted to struct(months, days, microseconds) via
+    IcebergWrapQueryWithIntervalConversion.
+    """
+    import datetime
+
+    parquet_url = f"{_INTERVAL_COPY_LOC}/plain.parquet"
+
+    run_command(
+        f"""
+        COPY (
+            SELECT 1 AS id, INTERVAL '1 day' AS d
+            UNION ALL SELECT 2, INTERVAL '2 hours 30 minutes'
+            UNION ALL SELECT 3, NULL::interval
+        ) TO '{parquet_url}';
+
+        CREATE TABLE interval_plain (id int, d interval) USING iceberg;
+        COPY interval_plain FROM '{parquet_url}';
+    """,
+        pg_conn,
+    )
+
+    result = run_query(
+        "SELECT count(*), pg_lake_last_copy_pushed_down_test() pushed_down "
+        "FROM interval_plain",
+        pg_conn,
+    )
+    assert result[0]["count"] == 3
+    assert result[0]["pushed_down"]
+
+    result = run_query("SELECT id, d FROM interval_plain ORDER BY id", pg_conn)
+    assert result[0][1] == datetime.timedelta(days=1)
+    assert result[1][1] == datetime.timedelta(hours=2, minutes=30)
+    assert result[2][1] is None
+
+    pg_conn.rollback()
+
+
+def test_copy_from_interval_array_pushdown(
+    pg_conn,
+    extension,
+    s3,
+    copy_from_pushdown_setup,
+    with_default_location,
+):
+    """COPY FROM with interval[] column IS pushed down."""
+    import datetime
+
+    parquet_url = f"{_INTERVAL_COPY_LOC}/array.parquet"
+
+    run_command(
+        f"""
+        COPY (
+            SELECT 1 AS id,
+                   ARRAY['1 hour'::interval, '30 minutes'::interval] AS vals
+            UNION ALL
+            SELECT 2, NULL::interval[]
+        ) TO '{parquet_url}';
+
+        CREATE TABLE interval_arr (id int, vals interval[]) USING iceberg;
+        COPY interval_arr FROM '{parquet_url}';
+    """,
+        pg_conn,
+    )
+
+    result = run_query(
+        "SELECT count(*), pg_lake_last_copy_pushed_down_test() pushed_down "
+        "FROM interval_arr",
+        pg_conn,
+    )
+    assert result[0]["count"] == 2
+    assert result[0]["pushed_down"]
+
+    result = run_query("SELECT id, vals FROM interval_arr ORDER BY id", pg_conn)
+    assert result[0][1] == [datetime.timedelta(hours=1), datetime.timedelta(minutes=30)]
+    assert result[1][1] is None
+
+    pg_conn.rollback()
+
+
+def test_copy_from_interval_in_composite_pushdown(
+    pg_conn,
+    extension,
+    s3,
+    copy_from_pushdown_setup,
+    with_default_location,
+):
+    """COPY FROM with interval inside a composite IS pushed down."""
+    import datetime
+
+    parquet_url = f"{_INTERVAL_COPY_LOC}/composite.parquet"
+
+    run_command(
+        f"""
+        CREATE TYPE iv_comp AS (a int, b interval);
+
+        COPY (
+            SELECT 1 AS id, ROW(10, '3 days'::interval)::iv_comp AS d
+            UNION ALL SELECT 2, ROW(20, NULL::interval)::iv_comp
+            UNION ALL SELECT 3, NULL::iv_comp
+        ) TO '{parquet_url}';
+
+        CREATE TABLE interval_comp (id int, d iv_comp) USING iceberg;
+        COPY interval_comp FROM '{parquet_url}';
+    """,
+        pg_conn,
+    )
+
+    result = run_query(
+        "SELECT count(*), pg_lake_last_copy_pushed_down_test() pushed_down "
+        "FROM interval_comp",
+        pg_conn,
+    )
+    assert result[0]["count"] == 3
+    assert result[0]["pushed_down"]
+
+    result = run_query(
+        "SELECT id, (d).a, (d).b FROM interval_comp ORDER BY id", pg_conn
+    )
+    assert result[0][1] == 10
+    assert result[0][2] == datetime.timedelta(days=3)
+    assert result[1][1] == 20
+    assert result[1][2] is None
+    assert result[2][1] is None
+    assert result[2][2] is None
+
+    pg_conn.rollback()
+
+
+def test_copy_from_interval_in_map_pushdown(
+    pg_conn,
+    extension,
+    s3,
+    copy_from_pushdown_setup,
+    with_default_location,
+):
+    """COPY FROM with interval as map value IS pushed down."""
+    import datetime
+
+    map_typename = create_map_type("text", "interval")
+    parquet_url = f"{_INTERVAL_COPY_LOC}/map.parquet"
+
+    run_command(
+        f"""
+        COPY (
+            SELECT 1 AS id,
+                   ARRAY[ROW('a', '1 hour'::interval),
+                         ROW('b', '2 days'::interval)]::{map_typename} AS m
+            UNION ALL
+            SELECT 2, NULL::{map_typename}
+        ) TO '{parquet_url}';
+
+        CREATE TABLE interval_map (id int, m {map_typename}) USING iceberg;
+        COPY interval_map FROM '{parquet_url}';
+    """,
+        pg_conn,
+    )
+
+    result = run_query(
+        "SELECT count(*), pg_lake_last_copy_pushed_down_test() pushed_down "
+        "FROM interval_map",
+        pg_conn,
+    )
+    assert result[0]["count"] == 2
+    assert result[0]["pushed_down"]
+
+    result = run_query(
+        "SELECT map_type.extract(m, 'a') FROM interval_map WHERE id = 1",
+        pg_conn,
+    )
+    assert result[0][0] == datetime.timedelta(hours=1)
+
+    result = run_query(
+        "SELECT map_type.extract(m, 'b') FROM interval_map WHERE id = 1",
+        pg_conn,
+    )
+    assert result[0][0] == datetime.timedelta(days=2)
+
+    result = run_query("SELECT m FROM interval_map WHERE id = 2", pg_conn)
+    assert result[0][0] is None
+
+    pg_conn.rollback()
+
+
 @pytest.mark.parametrize(
     "col_type,value,expected_clamped",
     [

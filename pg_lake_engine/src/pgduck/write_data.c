@@ -92,7 +92,10 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 
 	bool		queryHasRowIds = false;
 
-	/* CSV data is already clamped by WriteInsertRecord */
+	/*
+	 * CSV data is already clamped by WriteInsertRecord and converted to
+	 * struct for Iceberg
+	 */
 	return WriteQueryResultTo(command.data,
 							  destinationPath,
 							  destinationFormat,
@@ -102,7 +105,8 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 							  schema,
 							  csvTupleDesc,
 							  leafFields,
-							  ICEBERG_OOR_NONE);
+							  ICEBERG_OOR_NONE,
+							  false /* wrapNativeIntervals */ );
 }
 
 
@@ -121,12 +125,19 @@ WriteQueryResultTo(char *query,
 				   DataFileSchema * schema,
 				   TupleDesc queryTupleDesc,
 				   List *leafFields,
-				   IcebergOutOfRangePolicy outOfRangePolicy)
+				   IcebergOutOfRangePolicy outOfRangePolicy,
+				   bool wrapNativeIntervals)
 {
 	if (outOfRangePolicy != ICEBERG_OOR_NONE)
 	{
 		query = IcebergWrapQueryWithErrorOrClampChecks(query, queryTupleDesc,
 													   outOfRangePolicy,
+													   queryHasRowId);
+	}
+
+	if (wrapNativeIntervals && destinationFormat == DATA_FORMAT_ICEBERG)
+	{
+		query = IcebergWrapQueryWithIntervalConversion(query, queryTupleDesc,
 													   queryHasRowId);
 	}
 

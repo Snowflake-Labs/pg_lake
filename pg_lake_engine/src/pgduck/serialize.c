@@ -141,7 +141,8 @@ PGDuckSerialize(FmgrInfo *flinfo, Oid columnType, Datum value,
 
 	/*
 	 * For Iceberg, intervals are serialized as struct(months, days,
-	 * microseconds).
+	 * microseconds). We need to to this during writing to csv because duckdb
+	 * interval formatting is different from postgres interval formatting.
 	 */
 	if (columnType == INTERVALOID && format == DATA_FORMAT_ICEBERG)
 		return IntervalOutForPGDuck(value);

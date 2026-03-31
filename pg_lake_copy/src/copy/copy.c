@@ -222,7 +222,8 @@ IsPgLakeCopy(CopyStmt *copyStmt)
 	if (copyStmt->filename != NULL && !copyStmt->is_program)
 	{
 		/* Resolve @STAGE/ prefix before checking if it's a supported URL */
-		char *resolvedPath = ResolveStageURL(copyStmt->filename);
+		char	   *resolvedPath = ResolveStageURL(copyStmt->filename);
+
 		if (IsSupportedURL(resolvedPath))
 		{
 			/* the filename is a URL */
@@ -534,7 +535,7 @@ ProcessPgLakeCopyFrom(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 	 */
 	if (doCopyPushdown)
 	{
-		*rowsProcessed = AddQueryResultToTable(relationId, readQuery, tupleDesc);
+		*rowsProcessed = AddQueryResultToTable(relationId, readQuery, tupleDesc, true);
 		return;
 	}
 

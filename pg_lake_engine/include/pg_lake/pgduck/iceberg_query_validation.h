@@ -35,3 +35,13 @@ extern PGDLLEXPORT char *IcebergWrapQueryWithErrorOrClampChecks(char *query,
 																TupleDesc tupleDesc,
 																IcebergOutOfRangePolicy policy,
 																bool queryHasRowId);
+
+/*
+ * IcebergWrapQueryWithIntervalConversion wraps a query to decompose
+ * INTERVAL columns into STRUCT(months, days, microseconds) for Iceberg.
+ *
+ * Returns the original query unchanged if no interval columns exist.
+ */
+extern PGDLLEXPORT char *IcebergWrapQueryWithIntervalConversion(char *query,
+																TupleDesc tupleDesc,
+																bool queryHasRowId);

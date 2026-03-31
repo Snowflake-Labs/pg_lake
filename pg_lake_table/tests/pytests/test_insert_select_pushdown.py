@@ -396,37 +396,12 @@ _INSERT_SELECT_UNSUITABLE_CASES = [
     # numeric(25,26) adjusts to DECIMAL(26,26) which DuckDB handles correctly.
     # The validation wrapper provides element-level DECIMAL casting for nested
     # types, so pushdown is safe.
-    # --- interval column (Iceberg stores as struct, needs special serde) ---
-    pytest.param(
-        """
-        CREATE TABLE src (id INT, d INTERVAL) USING iceberg;
-        CREATE TABLE tgt (id INT, d INTERVAL) USING iceberg;
-        """,
-        "INSERT INTO tgt SELECT * FROM src",
-        None,
-        id="interval-iceberg",
-    ),
-    # --- interval inside an array (Iceberg) ---
-    pytest.param(
-        """
-        CREATE TABLE src (id INT, vals INTERVAL[]) USING iceberg;
-        CREATE TABLE tgt (id INT, vals INTERVAL[]) USING iceberg;
-        """,
-        "INSERT INTO tgt SELECT * FROM src",
-        None,
-        id="interval-in-array-iceberg",
-    ),
-    # --- interval inside a composite (Iceberg) ---
-    pytest.param(
-        """
-        CREATE TYPE has_interval AS (a INT, b INTERVAL);
-        CREATE TABLE src (id INT, d has_interval) USING iceberg;
-        CREATE TABLE tgt (id INT, d has_interval) USING iceberg;
-        """,
-        "INSERT INTO tgt SELECT * FROM src",
-        None,
-        id="interval-in-struct-iceberg",
-    ),
+    #
+    # NOTE: interval cases (interval-iceberg, interval-in-array-iceberg,
+    # interval-in-struct-iceberg) were removed from this list because
+    # IcebergWrapQueryWithIntervalConversion now decomposes intervals into
+    # STRUCT(months, days, microseconds) in the pushdown query, so pushdown
+    # is safe for interval columns.
 ]
 
 
@@ -560,6 +535,162 @@ def test_insert_select_domain_in_struct_in_array(s3, pg_conn, extension):
             pg_conn,
         )
     pg_conn.rollback()
+
+
+def _get_explain_text(query, pg_conn):
+    """Return the full EXPLAIN (VERBOSE) output as a single string."""
+    result = run_query("EXPLAIN (VERBOSE) " + query, pg_conn)
+    return "\n".join(line[0] for line in result)
+
+
+def _assert_interval_struct_in_explain(query, pg_conn):
+    """Assert the query is pushed down AND the Vectorized SQL in EXPLAIN
+    contains the interval-to-struct conversion (struct_pack with
+    months/days/microseconds).
+    """
+    explain = _get_explain_text(query, pg_conn)
+    assert "Custom Scan (Query Pushdown)" in explain, (
+        "Expected Query Pushdown for: " + query
+    )
+    assert "struct_pack(months :=" in explain, (
+        "Expected interval struct_pack conversion in EXPLAIN output:\n" + explain
+    )
+
+
+def test_insert_select_interval_pushdown(s3, pg_conn, extension, with_default_location):
+    """INSERT..SELECT with interval columns IS pushed down and the
+    EXPLAIN (VERBOSE) Vectorized SQL shows the interval-to-struct
+    conversion (struct_pack with months/days/microseconds).
+
+    Covers: plain interval, interval[], interval inside a composite.
+    """
+    import datetime
+
+    run_command(
+        """
+        CREATE SCHEMA test_interval_pushdown;
+        SET search_path TO test_interval_pushdown;
+
+        -- plain interval
+        CREATE TABLE src_plain (id int, d interval) USING iceberg;
+        CREATE TABLE tgt_plain (id int, d interval) USING iceberg;
+        INSERT INTO src_plain VALUES
+            (1, '1 day'), (2, '2 hours 30 minutes'), (3, NULL);
+
+        -- interval[]
+        CREATE TABLE src_arr (id int, vals interval[]) USING iceberg;
+        CREATE TABLE tgt_arr (id int, vals interval[]) USING iceberg;
+        INSERT INTO src_arr VALUES
+            (1, ARRAY['1 hour'::interval, '30 minutes'::interval]),
+            (2, NULL);
+
+        -- interval inside a composite
+        CREATE TYPE has_interval AS (a int, b interval);
+        CREATE TABLE src_comp (id int, d has_interval) USING iceberg;
+        CREATE TABLE tgt_comp (id int, d has_interval) USING iceberg;
+        INSERT INTO src_comp VALUES
+            (1, ROW(10, '3 days')::has_interval),
+            (2, ROW(20, NULL)::has_interval),
+            (3, NULL);
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # --- plain interval: EXPLAIN shows struct_pack conversion ---
+    _assert_interval_struct_in_explain(
+        "INSERT INTO tgt_plain SELECT * FROM src_plain", pg_conn
+    )
+    run_command("INSERT INTO tgt_plain SELECT * FROM src_plain", pg_conn)
+    pg_conn.commit()
+
+    result = run_query("SELECT id, d FROM tgt_plain ORDER BY id", pg_conn)
+    assert len(result) == 3
+    assert result[0][1] == datetime.timedelta(days=1)
+    assert result[1][1] == datetime.timedelta(hours=2, minutes=30)
+    assert result[2][1] is None
+
+    # --- interval[]: EXPLAIN shows list_transform + struct_pack ---
+    explain = _get_explain_text("INSERT INTO tgt_arr SELECT * FROM src_arr", pg_conn)
+    assert "Custom Scan (Query Pushdown)" in explain
+    assert "list_transform" in explain
+    assert "struct_pack(months :=" in explain
+
+    run_command("INSERT INTO tgt_arr SELECT * FROM src_arr", pg_conn)
+    pg_conn.commit()
+
+    result = run_query("SELECT id, vals FROM tgt_arr ORDER BY id", pg_conn)
+    assert len(result) == 2
+    assert result[0][1] == [datetime.timedelta(hours=1), datetime.timedelta(minutes=30)]
+    assert result[1][1] is None
+
+    # --- interval in composite: EXPLAIN shows struct_pack wrapping ---
+    _assert_interval_struct_in_explain(
+        "INSERT INTO tgt_comp SELECT * FROM src_comp", pg_conn
+    )
+    run_command("INSERT INTO tgt_comp SELECT * FROM src_comp", pg_conn)
+    pg_conn.commit()
+
+    result = run_query("SELECT id, (d).a, (d).b FROM tgt_comp ORDER BY id", pg_conn)
+    assert len(result) == 3
+    assert result[0][1] == 10
+    assert result[0][2] == datetime.timedelta(days=3)
+    assert result[1][1] == 20
+    assert result[1][2] is None
+    assert result[2][1] is None
+    assert result[2][2] is None
+
+    run_command("DROP SCHEMA test_interval_pushdown CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_insert_select_interval_in_map_pushdown(
+    s3, pg_conn, extension, with_default_location
+):
+    """INSERT..SELECT with interval as map value IS pushed down and
+    the EXPLAIN (VERBOSE) Vectorized SQL shows the map interval
+    conversion (map_from_entries + struct_pack).
+    """
+    import datetime
+
+    map_typename = create_map_type("text", "interval")
+
+    run_command(
+        f"""
+        CREATE SCHEMA test_interval_map_pd;
+        SET search_path TO test_interval_map_pd;
+
+        CREATE TABLE src (id int, m {map_typename}) USING iceberg;
+        CREATE TABLE tgt (id int, m {map_typename}) USING iceberg;
+
+        INSERT INTO src VALUES
+            (1, ARRAY[ROW('a', '1 hour'::interval),
+                       ROW('b', '2 days'::interval)]::{map_typename}),
+            (2, NULL);
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    explain = _get_explain_text("INSERT INTO tgt SELECT * FROM src", pg_conn)
+    assert "Custom Scan (Query Pushdown)" in explain
+    assert "map_from_entries" in explain
+    assert "struct_pack(months :=" in explain
+
+    run_command("INSERT INTO tgt SELECT * FROM src", pg_conn)
+    pg_conn.commit()
+
+    result = run_query("SELECT map_type.extract(m, 'a') FROM tgt WHERE id = 1", pg_conn)
+    assert result[0][0] == datetime.timedelta(hours=1)
+
+    result = run_query("SELECT map_type.extract(m, 'b') FROM tgt WHERE id = 1", pg_conn)
+    assert result[0][0] == datetime.timedelta(days=2)
+
+    result = run_query("SELECT m FROM tgt WHERE id = 2", pg_conn)
+    assert result[0][0] is None
+
+    run_command("DROP SCHEMA test_interval_map_pd CASCADE", pg_conn)
+    pg_conn.commit()
 
 
 # we can only pushdown INSERT .. SELECT as the top level command, not inside a CTE

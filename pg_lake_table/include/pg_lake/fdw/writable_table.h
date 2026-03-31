@@ -122,4 +122,5 @@ extern PGDLLEXPORT List *PrepareCSVInsertion(Oid relationId, char *insertCSV, in
 											 DataFileSchema * schema);
 
 extern PGDLLEXPORT int64 AddQueryResultToTable(Oid relationId, char *readQuery,
-											   TupleDesc queryTupleDesc);
+											   TupleDesc queryTupleDesc,
+											   bool wrapNativeIntervals);

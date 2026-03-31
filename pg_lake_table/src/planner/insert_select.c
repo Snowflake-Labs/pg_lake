@@ -399,19 +399,6 @@ TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod, CopyDataFormat sourc
 	}
 
 	/*
-	 * Interval is stored as struct(months, days, microseconds) in Iceberg.
-	 * PGDuckSerialize handles the conversion, but during pushdown DuckDB
-	 * writes directly—bypassing that conversion—so we must block it.
-	 */
-	if (typeId == INTERVALOID && sourceFormat == DATA_FORMAT_ICEBERG)
-	{
-		ereport(DEBUG4,
-				(errmsg("Interval type is not pushdownable for Iceberg")));
-
-		return true;
-	}
-
-	/*
 	 * Numeric type handling varies by precision:
 	 *
 	 * - Bounded (precision <= 38): maps to DuckDB DECIMAL, which cannot
