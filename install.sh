@@ -318,7 +318,6 @@ install_system_deps() {
 
             brew update
             brew install \
-                cmake \
                 ninja \
                 readline \
                 zlib \
@@ -779,8 +778,7 @@ install_test_deps() {
         print_info "Polaris already installed"
     else
         print_info "Installing Polaris"
-        cd "$PG_LAKE_REPO_DIR"
-        make -C test_common/rest_catalog install
+        (cd "$PG_LAKE_REPO_DIR" && make -C test_common/rest_catalog install)
     fi
 
     print_info "Test dependencies installed successfully"
