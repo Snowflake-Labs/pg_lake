@@ -1,0 +1,171 @@
+diff --git a/src/include/postgres_utils.hpp b/src/include/postgres_utils.hpp
+index ea04300..38672a9 100644
+--- a/src/include/postgres_utils.hpp
++++ b/src/include/postgres_utils.hpp
+@@ -13,6 +13,7 @@
+ #include "postgres_version.hpp"
+ 
+ namespace duckdb {
++class PostgresConnection;
+ class PostgresSchemaEntry;
+ class PostgresTransaction;
+ 
+@@ -64,7 +65,8 @@ public:
+ 	static LogicalType ToPostgresType(const LogicalType &input);
+ 	static LogicalType TypeToLogicalType(optional_ptr<PostgresTransaction> transaction,
+ 	                                     optional_ptr<PostgresSchemaEntry> schema, const PostgresTypeData &input,
+-	                                     PostgresType &postgres_type);
++	                                     PostgresType &postgres_type,
++	                                     PostgresConnection *connection = nullptr);
+ 	static string TypeToString(const LogicalType &input);
+ 	static string PostgresOidToName(uint32_t oid);
+ 	static uint32_t ToPostgresOid(const LogicalType &input);
+diff --git a/src/include/storage/postgres_table_set.hpp b/src/include/storage/postgres_table_set.hpp
+index 422c2a1..997cf71 100644
+--- a/src/include/storage/postgres_table_set.hpp
++++ b/src/include/storage/postgres_table_set.hpp
+@@ -46,11 +46,13 @@ protected:
+ 	void AlterTable(PostgresTransaction &transaction, RemoveColumnInfo &info);
+ 
+ 	static void AddColumn(optional_ptr<PostgresTransaction> transaction, optional_ptr<PostgresSchemaEntry> schema,
+-	                      PostgresResult &result, idx_t row, PostgresTableInfo &table_info);
++	                      PostgresResult &result, idx_t row, PostgresTableInfo &table_info,
++	                      PostgresConnection *connection = nullptr);
+ 	static void AddConstraint(PostgresResult &result, idx_t row, PostgresTableInfo &table_info);
+ 	static void AddColumnOrConstraint(optional_ptr<PostgresTransaction> transaction,
+ 	                                  optional_ptr<PostgresSchemaEntry> schema, PostgresResult &result, idx_t row,
+-	                                  PostgresTableInfo &table_info);
++	                                  PostgresTableInfo &table_info,
++	                                  PostgresConnection *connection = nullptr);
+ 
+ 	void CreateEntries(PostgresTransaction &transaction, PostgresResult &result, idx_t start, idx_t end);
+ 
+diff --git a/src/postgres_utils.cpp b/src/postgres_utils.cpp
+index 2d9f5d9..6f2a3f2 100644
+--- a/src/postgres_utils.cpp
++++ b/src/postgres_utils.cpp
+@@ -1,4 +1,5 @@
+ #include "postgres_utils.hpp"
++#include "postgres_connection.hpp"
+ #include "storage/postgres_schema_entry.hpp"
+ #include "storage/postgres_transaction.hpp"
+ #include "postgres_type_oids.hpp"
+@@ -85,7 +86,8 @@ LogicalType PostgresUtils::RemoveAlias(const LogicalType &type) {
+ 
+ LogicalType PostgresUtils::TypeToLogicalType(optional_ptr<PostgresTransaction> transaction,
+                                              optional_ptr<PostgresSchemaEntry> schema,
+-                                             const PostgresTypeData &type_info, PostgresType &postgres_type) {
++                                             const PostgresTypeData &type_info, PostgresType &postgres_type,
++                                             PostgresConnection *connection) {
+ 	auto &pgtypename = type_info.type_name;
+ 
+ 	// postgres array types start with an _
+@@ -113,7 +115,7 @@ LogicalType PostgresUtils::TypeToLogicalType(optional_ptr<PostgresTransaction> t
+ 		child_type_info.type_name = pgtypename.substr(1);
+ 		child_type_info.type_modifier = type_info.type_modifier;
+ 		PostgresType child_pg_type;
+-		auto child_type = PostgresUtils::TypeToLogicalType(transaction, schema, child_type_info, child_pg_type);
++		auto child_type = PostgresUtils::TypeToLogicalType(transaction, schema, child_type_info, child_pg_type, connection);
+ 		// construct the child type based on the number of dimensions
+ 		for (idx_t i = 1; i < dimensions; i++) {
+ 			PostgresType new_pg_type;
+@@ -201,7 +203,51 @@ LogicalType PostgresUtils::TypeToLogicalType(optional_ptr<PostgresTransaction> t
+ 		return LogicalType::LIST(LogicalType::DOUBLE);
+ 	} else {
+ 		if (!transaction) {
+-			// unsupported so fallback to varchar
++			if (connection) {
++				// try composite type
++				auto query = StringUtil::Format(
++				    "SELECT a.attname, t.typname, a.atttypmod "
++				    "FROM pg_type ct "
++				    "JOIN pg_class c ON c.oid = ct.typrelid "
++				    "JOIN pg_attribute a ON a.attrelid = ct.typrelid "
++				    "JOIN pg_type t ON t.oid = a.atttypid "
++				    "WHERE ct.typname = %s AND ct.typtype = 'c' "
++				    "AND a.attnum > 0 AND NOT a.attisdropped "
++				    "ORDER BY a.attnum",
++				    KeywordHelper::WriteQuoted(pgtypename).c_str());
++				auto result = connection->Query(query);
++				auto rows = result->Count();
++				if (rows > 0) {
++					child_list_t<LogicalType> child_types;
++					for (idx_t row = 0; row < rows; row++) {
++						auto field_name = result->GetString(row, 0);
++						PostgresTypeData field_type_info;
++						field_type_info.type_name = result->GetString(row, 1);
++						field_type_info.type_modifier = result->GetInt64(row, 2);
++						PostgresType child_pg_type;
++						auto field_type = TypeToLogicalType(nullptr, nullptr, field_type_info,
++						                                    child_pg_type, connection);
++						child_types.push_back(make_pair(field_name, field_type));
++						postgres_type.children.push_back(std::move(child_pg_type));
++					}
++					return LogicalType::STRUCT(std::move(child_types));
++				}
++				// try domain type — resolve to base type
++				auto domain_query = StringUtil::Format(
++				    "SELECT bt.typname, t.typtypmod "
++				    "FROM pg_type t "
++				    "JOIN pg_type bt ON bt.oid = t.typbasetype "
++				    "WHERE t.typname = %s AND t.typtype = 'd'",
++				    KeywordHelper::WriteQuoted(pgtypename).c_str());
++				auto domain_result = connection->Query(domain_query);
++				if (domain_result->Count() > 0) {
++					PostgresTypeData base_type_info;
++					base_type_info.type_name = domain_result->GetString(0, 0);
++					base_type_info.type_modifier = domain_result->GetInt64(0, 1);
++					return TypeToLogicalType(nullptr, nullptr, base_type_info,
++					                         postgres_type, connection);
++				}
++			}
+ 			postgres_type.info = PostgresTypeAnnotation::CAST_TO_VARCHAR;
+ 			return LogicalType::VARCHAR;
+ 		}
+diff --git a/src/storage/postgres_table_set.cpp b/src/storage/postgres_table_set.cpp
+index efe37a1..07d3ee6 100644
+--- a/src/storage/postgres_table_set.cpp
++++ b/src/storage/postgres_table_set.cpp
+@@ -53,7 +53,7 @@ ORDER BY namespace_id, relname, attnum, constraint_id;
+ 
+ void PostgresTableSet::AddColumn(optional_ptr<PostgresTransaction> transaction,
+                                  optional_ptr<PostgresSchemaEntry> schema, PostgresResult &result, idx_t row,
+-                                 PostgresTableInfo &table_info) {
++                                 PostgresTableInfo &table_info, PostgresConnection *connection) {
+ 	PostgresTypeData type_info;
+ 	idx_t column_index = 3;
+ 	auto column_name = result.GetString(row, column_index);
+@@ -64,7 +64,7 @@ void PostgresTableSet::AddColumn(optional_ptr<PostgresTransaction> transaction,
+ 	string default_value;
+ 
+ 	PostgresType postgres_type;
+-	auto column_type = PostgresUtils::TypeToLogicalType(transaction, schema, type_info, postgres_type);
++	auto column_type = PostgresUtils::TypeToLogicalType(transaction, schema, type_info, postgres_type, connection);
+ 	table_info.postgres_types.push_back(std::move(postgres_type));
+ 	table_info.postgres_names.push_back(column_name);
+ 	ColumnDefinition column(std::move(column_name), std::move(column_type));
+@@ -109,12 +109,13 @@ void PostgresTableSet::AddConstraint(PostgresResult &result, idx_t row, Postgres
+ 
+ void PostgresTableSet::AddColumnOrConstraint(optional_ptr<PostgresTransaction> transaction,
+                                              optional_ptr<PostgresSchemaEntry> schema, PostgresResult &result,
+-                                             idx_t row, PostgresTableInfo &table_info) {
++                                             idx_t row, PostgresTableInfo &table_info,
++                                             PostgresConnection *connection) {
+ 	if (result.IsNull(row, 3)) {
+ 		// constraint
+ 		AddConstraint(result, row, table_info);
+ 	} else {
+-		AddColumn(transaction, schema, result, row, table_info);
++		AddColumn(transaction, schema, result, row, table_info, connection);
+ 	}
+ }
+ 
+@@ -183,7 +184,7 @@ unique_ptr<PostgresTableInfo> PostgresTableSet::GetTableInfo(PostgresConnection
+ 	}
+ 	auto table_info = make_uniq<PostgresTableInfo>(schema_name, table_name);
+ 	for (idx_t row = 0; row < rows; row++) {
+-		AddColumnOrConstraint(nullptr, nullptr, *result, row, *table_info);
++		AddColumnOrConstraint(nullptr, nullptr, *result, row, *table_info, &connection);
+ 	}
+ 	table_info->approx_num_pages = result->GetInt64(0, 2);
+ 	return table_info;
