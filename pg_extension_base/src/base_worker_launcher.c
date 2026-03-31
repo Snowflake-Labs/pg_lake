@@ -2449,19 +2449,23 @@ DeleteBaseWorkerRegistrationByName(char *workerName, bool missingOk)
 						  argCount, argTypes, argValues, argNulls,
 						  readOnly, limit);
 
+	int32		workerId = 0;
+
 	if (SPI_processed != 1)
 	{
-		ereport(missingOk ? NOTICE : ERROR, (errmsg("could not find worker %s", workerName)));
-		return 0;
+		if (!missingOk)
+			ereport(ERROR, (errmsg("could not find worker %s", workerName)));
 	}
+	else
+	{
+		bool		isNull = false;
+		Datum		workerIdDatum = GET_SPI_DATUM(0, 1, &isNull);
 
-	bool		isNull = false;
-	Datum		workerIdDatum = GET_SPI_DATUM(0, 1, &isNull);
+		if (isNull)
+			ereport(ERROR, (errmsg("unexpected NULL worker id")));
 
-	if (isNull)
-		ereport(ERROR, (errmsg("unexpected NULL worker id")));
-
-	int32		workerId = DatumGetInt32(workerIdDatum);
+		workerId = DatumGetInt32(workerIdDatum);
+	}
 
 	SPI_END();
 
@@ -2495,8 +2499,11 @@ DeleteBaseWorkerRegistrationById(int32 workerId, bool missingOk)
 
 	if (SPI_processed != 1)
 	{
-		ereport(missingOk ? NOTICE : ERROR, (errmsg("could not find worker id %d", workerId)));
-		return 0;
+		if (!missingOk)
+			ereport(ERROR, (errmsg("could not find worker id %d", workerId)));
+
+		/* missingOk */
+		workerId = 0;
 	}
 
 	SPI_END();
