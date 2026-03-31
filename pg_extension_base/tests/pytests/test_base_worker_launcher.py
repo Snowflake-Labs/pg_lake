@@ -109,6 +109,64 @@ def test_create_deregister_worker_id(superuser_conn):
     time.sleep(0.1)
 
 
+def test_deregister_worker_missing_ok_by_name(superuser_conn):
+    # deregistering a nonexistent worker by name with missing_ok=true should not raise
+    run_command(
+        "SELECT extension_base.deregister_worker('nonexistent_worker_name', true)",
+        superuser_conn,
+    )
+    superuser_conn.rollback()
+
+
+def test_deregister_worker_missing_ok_by_id(superuser_conn):
+    # deregistering a nonexistent worker by id with missing_ok=true should not raise
+    run_command(
+        "SELECT extension_base.deregister_worker(99999, true)",
+        superuser_conn,
+    )
+    superuser_conn.rollback()
+
+
+def test_deregister_worker_not_found_by_name_raises(superuser_conn):
+    # deregistering a nonexistent worker by name without missing_ok should raise an error
+    with pytest.raises(psycopg2.DatabaseError, match="could not find worker"):
+        run_command(
+            "SELECT extension_base.deregister_worker('nonexistent_worker_name')",
+            superuser_conn,
+        )
+    superuser_conn.rollback()
+
+
+def test_deregister_worker_not_found_by_id_raises(superuser_conn):
+    # deregistering a nonexistent worker by id without missing_ok should raise an error
+    with pytest.raises(psycopg2.DatabaseError, match="could not find worker"):
+        run_command(
+            "SELECT extension_base.deregister_worker(99999)",
+            superuser_conn,
+        )
+    superuser_conn.rollback()
+
+
+def test_deregister_worker_missing_ok_false_by_name_raises(superuser_conn):
+    # deregistering a nonexistent worker with explicit missing_ok=false should raise
+    with pytest.raises(psycopg2.DatabaseError, match="could not find worker"):
+        run_command(
+            "SELECT extension_base.deregister_worker('nonexistent_worker_name', false)",
+            superuser_conn,
+        )
+    superuser_conn.rollback()
+
+
+def test_deregister_worker_missing_ok_false_by_id_raises(superuser_conn):
+    # deregistering a nonexistent worker by id with explicit missing_ok=false should raise
+    with pytest.raises(psycopg2.DatabaseError, match="could not find worker"):
+        run_command(
+            "SELECT extension_base.deregister_worker(99999, false)",
+            superuser_conn,
+        )
+    superuser_conn.rollback()
+
+
 def test_create_drop_pg_extension_base(superuser_conn):
     run_command(
         "CREATE EXTENSION pg_extension_base_test_scheduler CASCADE", superuser_conn
