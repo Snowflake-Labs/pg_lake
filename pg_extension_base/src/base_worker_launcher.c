@@ -337,7 +337,7 @@ static int32 InsertBaseWorkerRegistration(char *workerName, Oid extensionId,
 static bool DatabaseIsTemplate(Oid databaseId);
 static int32 DeregisterBaseWorker_internal(int32 workerId);
 static int32 DeleteBaseWorkerRegistrationByName(char *extensionName, bool missingOk);
-static void DeleteBaseWorkerRegistrationById(int32 workerId, bool missingOk);
+static int32 DeleteBaseWorkerRegistrationById(int32 workerId, bool missingOk);
 static void DeleteBaseWorkerRegistrationsByExtensionId(Oid extensionId);
 static Oid	PgExtensionBaseWorkersRelationId(void);
 static Oid	PgExtensionSchemaId(void);
@@ -2450,7 +2450,10 @@ DeleteBaseWorkerRegistrationByName(char *workerName, bool missingOk)
 						  readOnly, limit);
 
 	if (SPI_processed != 1)
+	{
 		ereport(missingOk ? NOTICE : ERROR, (errmsg("could not find worker %s", workerName)));
+		return 0;
+	}
 
 	bool		isNull = false;
 	Datum		workerIdDatum = GET_SPI_DATUM(0, 1, &isNull);
@@ -2472,7 +2475,7 @@ DeleteBaseWorkerRegistrationByName(char *workerName, bool missingOk)
  * We run as the extension owner to allow non-superusers who have been granted
  * EXECUTE on deregister_worker to delete from the workers table.
  */
-static void
+static int32
 DeleteBaseWorkerRegistrationById(int32 workerId, bool missingOk)
 {
 	SPI_START_EXTENSION_OWNER(PgExtensionBase);
@@ -2491,9 +2494,14 @@ DeleteBaseWorkerRegistrationById(int32 workerId, bool missingOk)
 						  readOnly, limit);
 
 	if (SPI_processed != 1)
+	{
 		ereport(missingOk ? NOTICE : ERROR, (errmsg("could not find worker id %d", workerId)));
+		return 0;
+	}
 
 	SPI_END();
+
+	return workerId;
 }
 
 /*
