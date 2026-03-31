@@ -11,7 +11,7 @@ COMMENT ON FUNCTION extension_base.run_attached_returning(text,text)
 
 
 DROP FUNCTION extension_base.deregister_worker(int);
-CREATE FUNCTION extension_base.deregister_worker(worker_id int, bool missing_ok default false)
+CREATE FUNCTION extension_base.deregister_worker(worker_id int, missing_ok bool default false)
  RETURNS void
  LANGUAGE c
 AS 'MODULE_PATHNAME', $function$pg_extension_base_deregister_worker$function$;
@@ -23,7 +23,7 @@ REVOKE ALL ON FUNCTION extension_base.deregister_worker(int, bool) FROM public;
 
 
 DROP FUNCTION extension_base.deregister_worker(text);
-CREATE FUNCTION extension_base.deregister_worker(worker_name text, bool missing_ok default false)
+CREATE FUNCTION extension_base.deregister_worker(worker_name text, missing_ok bool default false)
  RETURNS void
  LANGUAGE c
 AS 'MODULE_PATHNAME', $function$pg_extension_base_deregister_worker$function$;
