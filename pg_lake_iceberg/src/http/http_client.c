@@ -43,7 +43,6 @@
 #define TOTAL_TIMEOUT_MS   180000
 
 
-static HttpResult SendHttpRequest(HttpMethod method, const char *url, const char *body, List *headers);
 static HttpResult HttpCommonNoThrows(HttpMethod method, const char *url, const char *postData,
 									 const List *headers);
 static bool CheckMinCurlVersion(const curl_version_info_data * versionInfo);
@@ -297,7 +296,7 @@ SendHttpRequestWithRetry(HttpMethod method, const char *url, const char *body,
 }
 
 
-static HttpResult
+HttpResult
 SendHttpRequest(HttpMethod method, const char *url, const char *body, List *headers)
 {
 	HttpResult	result;
