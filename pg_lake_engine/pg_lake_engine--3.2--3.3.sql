@@ -10,3 +10,9 @@ CREATE FUNCTION __lake__internal__nsp__.initcap_pg(text)
  LANGUAGE C
  IMMUTABLE PARALLEL SAFE STRICT
 AS 'MODULE_PATHNAME', $function$pg_lake_internal_dummy_function$function$;
+
+CREATE FUNCTION __lake__internal__nsp__.uuid_extract_timestamp_pg(uuid, integer)
+ RETURNS timestamp with time zone
+ LANGUAGE C
+ IMMUTABLE PARALLEL SAFE STRICT
+AS 'MODULE_PATHNAME', $function$pg_lake_internal_dummy_function$function$;
