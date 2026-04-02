@@ -29,6 +29,7 @@
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/parquet/geoparquet.h"
+#include "pg_lake/pgduck/keywords.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/pgduck/read_data.h"
 #include "pg_lake/pgduck/type.h"
@@ -349,7 +350,7 @@ WriteQueryResultTo(char *query,
 								/* add comma after first column */
 								appendStringInfo(&command, "%s%s",
 												 columnIndex > 0 ? ", " : "",
-												 quote_identifier(columnName));
+												 duckdb_quote_identifier(columnName));
 
 								columnIndex++;
 							}
@@ -411,7 +412,7 @@ TupleDescToProjectionListForWrite(TupleDesc tupleDesc, CopyDataFormat destinatio
 		 */
 		if (columnTypeId == TIMETZOID && destinationFormat == DATA_FORMAT_ICEBERG)
 			appendStringInfo(&projection, "CAST(%s AS TIME) AS ",
-							 quote_identifier(columnName));
+							 duckdb_quote_identifier(columnName));
 
 		/*
 		 * In case of geometry, we write WKT in csv_writer.c and parse it as
@@ -426,14 +427,14 @@ TupleDescToProjectionListForWrite(TupleDesc tupleDesc, CopyDataFormat destinatio
 			if (destinationFormat == DATA_FORMAT_PARQUET ||
 				destinationFormat == DATA_FORMAT_ICEBERG)
 				appendStringInfo(&projection, "ST_AsWKB(%s) AS ",
-								 quote_identifier(columnName));
+								 duckdb_quote_identifier(columnName));
 
 			else if (destinationFormat == DATA_FORMAT_JSON)
 				appendStringInfo(&projection, "ST_AsGeoJSON(%s) AS ",
-								 quote_identifier(columnName));
+								 duckdb_quote_identifier(columnName));
 		}
 		appendStringInfo(&projection, "%s",
-						 quote_identifier(columnName));
+						 duckdb_quote_identifier(columnName));
 
 		hasColumns = true;
 	}

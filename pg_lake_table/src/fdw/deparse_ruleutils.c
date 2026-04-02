@@ -40,6 +40,7 @@
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/fdw/deparse_ruleutils.h"
 #include "pg_lake/parsetree/rte.h"
+#include "pg_lake/pgduck/keywords.h"
 #include "pg_lake/pgduck/rewrite_query.h"
 #include "pg_lake/planner/restriction_collector.h"
 #include "pg_lake/extensions/postgis.h"
@@ -393,6 +394,13 @@ DeparseQualifiedQuery(Query *query)
 
 	bool		pretty = false;
 	char	   *newQuery = pg_get_querydef(query, pretty);
+
+	/*
+	 * pg_get_querydef uses PostgreSQL's quote_identifier() which does not
+	 * know about DuckDB-reserved keywords (PIVOT, QUALIFY, LAMBDA, etc.).
+	 * Requote any such identifiers so the SQL is valid for pgduck_server.
+	 */
+	newQuery = RequoteDuckDBReservedInSQL(newQuery);
 
 	/*
 	 * Restore the GUC variable search_path we set above.
