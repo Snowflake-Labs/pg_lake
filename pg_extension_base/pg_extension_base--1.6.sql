@@ -65,18 +65,6 @@ AS 'MODULE_PATHNAME', $function$pg_extension_base_list_database_starters$functio
 COMMENT ON FUNCTION extension_base.list_database_starters()
  IS 'list all database starter states';
 
-/* return the PID of a running base worker given its worker ID, or 0 if not found */
-CREATE FUNCTION extension_base.get_worker_pid(worker_id int)
- RETURNS int
- LANGUAGE c STRICT
-AS 'MODULE_PATHNAME', $function$pg_extension_base_get_worker_pid$function$;
-
-COMMENT ON FUNCTION extension_base.get_worker_pid(int)
- IS 'return the PID of a running base worker, or 0 if not found';
-
-REVOKE ALL ON FUNCTION extension_base.get_worker_pid(int) FROM public;
-
-
 /* remove a worker from another extension */
 CREATE FUNCTION extension_base.deregister_worker(worker_name text)
  RETURNS void
