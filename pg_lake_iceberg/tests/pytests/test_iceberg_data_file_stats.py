@@ -872,8 +872,7 @@ def test_pg_lake_iceberg_temporal_out_of_range(
     """Verify that out-of-range date/timestamp values are rejected on insert."""
     table_name = "test_temporal_oor"
     run_command(
-        f"CREATE TABLE {table_name} (col {col_type}) USING iceberg"
-        f" WITH (out_of_range_values = 'error');",
+        f"CREATE TABLE {table_name} (col {col_type}) USING iceberg;",
         pg_conn,
     )
     pg_conn.commit()
@@ -920,7 +919,7 @@ def test_pg_lake_iceberg_temporal_out_of_range_clamp(
     """Verify that out-of-range date/timestamp values are clamped when table option is set to 'clamp'."""
     table_name = "test_temporal_oor_clamp"
     run_command(
-        f"CREATE TABLE {table_name} (col {col_type}) USING iceberg;",
+        f"CREATE TABLE {table_name} (col {col_type}) USING iceberg WITH (out_of_range_values = 'clamp');",
         pg_conn,
     )
     pg_conn.commit()
@@ -1020,7 +1019,7 @@ def test_pg_lake_iceberg_infinity_temporal_clamp(
     """Verify that +-infinity temporal values are clamped when table option is 'clamp'."""
     table_name = "test_inf_temporal_clamp"
     run_command(
-        f"CREATE TABLE {table_name} (col {col_type}) USING iceberg;",
+        f"CREATE TABLE {table_name} (col {col_type}) USING iceberg WITH (out_of_range_values = 'clamp');",
         pg_conn,
     )
     pg_conn.commit()
@@ -1083,7 +1082,7 @@ def test_pg_lake_iceberg_bounded_numeric_nan_clamp(
     """Verify NaN is clamped to NULL for iceberg bounded numeric columns."""
     table_name = "test_numeric_nan_clamp"
     run_command(
-        f"CREATE TABLE {table_name} (col numeric(10,2)) USING iceberg;",
+        f"CREATE TABLE {table_name} (col numeric(10,2)) USING iceberg WITH (out_of_range_values = 'clamp');",
         pg_conn,
     )
     pg_conn.commit()

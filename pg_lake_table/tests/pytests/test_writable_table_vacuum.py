@@ -1383,7 +1383,10 @@ def test_vacuum_clamped_values(
         CREATE TABLE {table_name} (
             {col_name} {col_type}
         )
-        USING pg_lake_iceberg WITH (partition_by = '{partition_by}');
+        USING pg_lake_iceberg WITH (
+            partition_by = '{partition_by}',
+            out_of_range_values = 'clamp'
+        );
         SET TIME ZONE 'UTC';
         SET pg_lake_table.vacuum_compact_min_input_files TO 1;
     """,

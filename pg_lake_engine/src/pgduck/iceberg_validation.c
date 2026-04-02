@@ -42,18 +42,18 @@ static IcebergOutOfRangePolicy GetIcebergOutOfRangePolicyFromOptions(List *optio
  * GetIcebergOutOfRangePolicyFromOptions reads the "out_of_range_values" option
  * from a list of DefElem options (table options).
  *
- * Returns ICEBERG_OOR_ERROR if the option is set to "error",
- * ICEBERG_OOR_CLAMP otherwise (including when not present).
+ * Returns ICEBERG_OOR_CLAMP if the option is set to "clamp",
+ * ICEBERG_OOR_ERROR otherwise (including when not present).
  */
 static IcebergOutOfRangePolicy
 GetIcebergOutOfRangePolicyFromOptions(List *options)
 {
 	char	   *value = GetStringOption(options, "out_of_range_values", false);
 
-	if (value != NULL && strcmp(value, "error") == 0)
-		return ICEBERG_OOR_ERROR;
+	if (value != NULL && strcmp(value, "clamp") == 0)
+		return ICEBERG_OOR_CLAMP;
 
-	return ICEBERG_OOR_CLAMP;
+	return ICEBERG_OOR_ERROR;
 }
 
 

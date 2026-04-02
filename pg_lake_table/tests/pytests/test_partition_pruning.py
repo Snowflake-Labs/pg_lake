@@ -1947,8 +1947,9 @@ def test_clamped_infinity_partition_pruning(
             col_val {col_type}
         ) USING iceberg
         WITH (
-            autovacuum_enabled = 'False',
-            partition_by       = '{partition_by}(col_val)'
+            autovacuum_enabled      = 'False',
+            partition_by            = '{partition_by}(col_val)',
+            out_of_range_values     = 'clamp'
         );
         SET TIME ZONE 'UTC';
     """,
@@ -2097,8 +2098,9 @@ def test_clamped_infinity_all_transforms(
             col_val {col_type}
         ) USING iceberg
         WITH (
-            autovacuum_enabled = 'False',
-            partition_by       = '{partition_by}'
+            autovacuum_enabled      = 'False',
+            partition_by            = '{partition_by}',
+            out_of_range_values     = 'clamp'
         );
         SET TIME ZONE 'UTC';
     """,
@@ -2192,7 +2194,11 @@ def test_clamped_numeric_nan_partition(
         CREATE TABLE test_clamp_nan.tbl (
             val numeric(20,10)
         ) USING iceberg
-        WITH (autovacuum_enabled = 'False', partition_by = '{partition_by}');
+        WITH (
+            autovacuum_enabled = 'False',
+            partition_by = '{partition_by}',
+            out_of_range_values = 'clamp'
+        );
     """,
         pg_conn,
     )

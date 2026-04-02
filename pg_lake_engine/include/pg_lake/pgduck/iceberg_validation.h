@@ -31,7 +31,7 @@
  *     rejected (error), since PostgreSQL's single array type (e.g. int[])
  *     maps to a flat LIST(T) in DuckDB/Iceberg.
  *
- * Controlled by the out_of_range_values table option (default: clamp).
+ * Controlled by the out_of_range_values table option (default: error).
  *
  * CLAMP silently adjusts values (e.g. year 10000 becomes 9999-12-31,
  * NaN becomes NULL, multidimensional arrays become NULL).

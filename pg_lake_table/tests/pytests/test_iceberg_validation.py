@@ -58,7 +58,8 @@ def test_scalar_temporal_clamp(
 
     try:
         run_command(
-            f"CREATE TABLE target (col {col_type}) USING iceberg;",
+            f"CREATE TABLE target (col {col_type}) USING iceberg"
+            f" WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         pg_conn.commit()
@@ -137,7 +138,8 @@ def test_scalar_numeric_nan_clamp(pg_conn, extension, s3, with_default_location)
 
     try:
         run_command(
-            "CREATE TABLE target (col numeric(10,2)) USING iceberg;",
+            "CREATE TABLE target (col numeric(10,2)) USING iceberg"
+            " WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         pg_conn.commit()
@@ -228,7 +230,8 @@ def test_scalar_temporal_clamp_pushdown(
         )
 
         run_command(
-            f"CREATE TABLE target (col {col_type}) USING iceberg;",
+            f"CREATE TABLE target (col {col_type}) USING iceberg"
+            f" WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         pg_conn.commit()
@@ -331,7 +334,11 @@ def test_temporal_clamp_in_array(
     run_command("SET TIME ZONE 'UTC';", pg_conn)
 
     try:
-        run_command(f"CREATE TABLE target (col {col_type}[]) USING iceberg;", pg_conn)
+        run_command(
+            f"CREATE TABLE target (col {col_type}[]) USING iceberg"
+            f" WITH (out_of_range_values = 'clamp');",
+            pg_conn,
+        )
         pg_conn.commit()
 
         run_command(
@@ -425,7 +432,11 @@ def test_temporal_clamp_in_composite(
             f"CREATE TYPE {type_name} AS (id int, happened_at {col_type});",
             pg_conn,
         )
-        run_command(f"CREATE TABLE target (col {type_name}) USING iceberg;", pg_conn)
+        run_command(
+            f"CREATE TABLE target (col {type_name}) USING iceberg"
+            f" WITH (out_of_range_values = 'clamp');",
+            pg_conn,
+        )
         pg_conn.commit()
 
         run_command(
@@ -511,7 +522,8 @@ def test_temporal_clamp_in_map(pg_conn, extension, s3, with_default_location):
     try:
         map_type_name = create_map_type("text", "date")
         run_command(
-            f"CREATE TABLE target (col {map_type_name}) USING iceberg;",
+            f"CREATE TABLE target (col {map_type_name}) USING iceberg"
+            f" WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         pg_conn.commit()
@@ -589,7 +601,8 @@ def test_numeric_nan_clamp_in_array(pg_conn, extension, s3, with_default_locatio
 
     try:
         run_command(
-            "CREATE TABLE target (col numeric(10,2)[]) USING iceberg;",
+            "CREATE TABLE target (col numeric(10,2)[]) USING iceberg"
+            " WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         pg_conn.commit()
@@ -658,7 +671,8 @@ def test_numeric_nan_clamp_in_composite(pg_conn, extension, s3, with_default_loc
             pg_conn,
         )
         run_command(
-            "CREATE TABLE target (col measurement_nc) USING iceberg;",
+            "CREATE TABLE target (col measurement_nc) USING iceberg"
+            " WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         pg_conn.commit()
@@ -740,7 +754,8 @@ def test_numeric_nan_clamp_in_map(pg_conn, extension, s3, with_default_location)
 
         map_type_name = create_map_type("int", f"{schema}.num_val")
         run_command(
-            f"CREATE TABLE target (col {map_type_name}) USING iceberg;",
+            f"CREATE TABLE target (col {map_type_name}) USING iceberg"
+            f" WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         pg_conn.commit()
@@ -829,7 +844,8 @@ def test_deeply_nested_numeric_nan_clamp(pg_conn, extension, s3, with_default_lo
             pg_conn,
         )
         run_command(
-            "CREATE TABLE target (col measurements) USING iceberg;",
+            "CREATE TABLE target (col measurements) USING iceberg"
+            " WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         pg_conn.commit()
@@ -951,7 +967,8 @@ def test_temporal_clamp_in_array_pushdown(
         )
 
         run_command(
-            f"CREATE TABLE target (col {col_type}[]) USING iceberg;",
+            f"CREATE TABLE target (col {col_type}[]) USING iceberg"
+            f" WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         pg_conn.commit()
@@ -1055,7 +1072,8 @@ def test_temporal_clamp_in_composite_pushdown(
         )
 
         run_command(
-            f"CREATE TABLE target (col {type_name}) USING iceberg;",
+            f"CREATE TABLE target (col {type_name}) USING iceberg"
+            f" WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         pg_conn.commit()
@@ -1159,7 +1177,8 @@ def test_temporal_clamp_in_map_pushdown(pg_conn, extension, s3, with_default_loc
         )
 
         run_command(
-            f"CREATE TABLE target (col {map_type_name}) USING iceberg;",
+            f"CREATE TABLE target (col {map_type_name}) USING iceberg"
+            f" WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         pg_conn.commit()
@@ -1250,7 +1269,11 @@ def test_temporal_in_array_of_composites(
 
     try:
         run_command(f"CREATE TYPE {type_name} AS (id int, happened_at date);", pg_conn)
-        options = " WITH (out_of_range_values = 'error')" if policy == "error" else ""
+        options = (
+            " WITH (out_of_range_values = 'error')"
+            if policy == "error"
+            else " WITH (out_of_range_values = 'clamp')"
+        )
         run_command(
             f"CREATE TABLE target (col {type_name}[])" f" USING iceberg{options};",
             pg_conn,
@@ -1316,7 +1339,11 @@ def test_temporal_clamp_in_array_of_composites_pushdown(
             pg_conn,
         )
 
-        run_command("CREATE TABLE target (col event_ac_pd[]) USING iceberg;", pg_conn)
+        run_command(
+            "CREATE TABLE target (col event_ac_pd[]) USING iceberg"
+            " WITH (out_of_range_values = 'clamp');",
+            pg_conn,
+        )
         pg_conn.commit()
 
         assert_query_pushdownable("INSERT INTO target SELECT * FROM source;", pg_conn)
@@ -1376,7 +1403,11 @@ def test_temporal_clamp_in_composite_with_map(
                 pg_conn,
             )
 
-        run_command(f"CREATE TABLE target (col {type_name}) USING iceberg;", pg_conn)
+        run_command(
+            f"CREATE TABLE target (col {type_name}) USING iceberg"
+            f" WITH (out_of_range_values = 'clamp');",
+            pg_conn,
+        )
         pg_conn.commit()
 
         if use_pushdown:
@@ -1448,7 +1479,9 @@ def test_temporal_clamp_in_map_with_composite_value(
             )
 
         run_command(
-            f"CREATE TABLE target (col {map_type_name}) USING iceberg;", pg_conn
+            f"CREATE TABLE target (col {map_type_name}) USING iceberg"
+            f" WITH (out_of_range_values = 'clamp');",
+            pg_conn,
         )
         pg_conn.commit()
 
@@ -1521,7 +1554,9 @@ def test_temporal_clamp_in_map_temporal_key(
             )
 
         run_command(
-            f"CREATE TABLE target (col {map_type_name}) USING iceberg;", pg_conn
+            f"CREATE TABLE target (col {map_type_name}) USING iceberg"
+            f" WITH (out_of_range_values = 'clamp');",
+            pg_conn,
         )
         pg_conn.commit()
 
@@ -1575,7 +1610,11 @@ def test_temporal_clamp_domain_over_date(pg_conn, extension, s3, with_default_lo
 
     try:
         run_command("CREATE DOMAIN date_alias AS date;", pg_conn)
-        run_command("CREATE TABLE target (col date_alias) USING iceberg;", pg_conn)
+        run_command(
+            "CREATE TABLE target (col date_alias) USING iceberg"
+            " WITH (out_of_range_values = 'clamp');",
+            pg_conn,
+        )
         pg_conn.commit()
 
         run_command(
@@ -1613,8 +1652,16 @@ def test_composite_type_reuse_validation(pg_conn, extension, s3, with_default_lo
 
     try:
         run_command("CREATE TYPE shared_event AS (id int, happened_at date);", pg_conn)
-        run_command("CREATE TABLE target_a (col shared_event) USING iceberg;", pg_conn)
-        run_command("CREATE TABLE target_b (col shared_event) USING iceberg;", pg_conn)
+        run_command(
+            "CREATE TABLE target_a (col shared_event) USING iceberg"
+            " WITH (out_of_range_values = 'clamp');",
+            pg_conn,
+        )
+        run_command(
+            "CREATE TABLE target_b (col shared_event) USING iceberg"
+            " WITH (out_of_range_values = 'clamp');",
+            pg_conn,
+        )
         pg_conn.commit()
 
         run_command(
@@ -1680,7 +1727,11 @@ def test_temporal_clamp_composite_reserved_field_name(
                 pg_conn,
             )
 
-        run_command(f"CREATE TABLE target (col {type_name}) USING iceberg;", pg_conn)
+        run_command(
+            f"CREATE TABLE target (col {type_name}) USING iceberg"
+            f" WITH (out_of_range_values = 'clamp');",
+            pg_conn,
+        )
         pg_conn.commit()
 
         if use_pushdown:
@@ -1727,7 +1778,11 @@ def test_empty_temporal_array_clamp(pg_conn, extension, s3, with_default_locatio
     run_command("SET TIME ZONE 'UTC';", pg_conn)
 
     try:
-        run_command("CREATE TABLE target (col date[]) USING iceberg;", pg_conn)
+        run_command(
+            "CREATE TABLE target (col date[]) USING iceberg"
+            " WITH (out_of_range_values = 'clamp');",
+            pg_conn,
+        )
         pg_conn.commit()
 
         run_command(
@@ -1763,7 +1818,7 @@ def test_null_container_columns_passthrough(
             "arr_col date[], "
             "comp_col event_null, "
             "scalar_col date"
-            ") USING iceberg;",
+            ") USING iceberg WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         pg_conn.commit()
@@ -2015,7 +2070,8 @@ def test_temporal_clamp_quoted_column_name(
 
     try:
         run_command(
-            f"CREATE TABLE target (id int, {col_name_quoted} date) USING iceberg;",
+            f"CREATE TABLE target (id int, {col_name_quoted} date) USING iceberg"
+            f" WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         pg_conn.commit()
@@ -2074,7 +2130,8 @@ def test_temporal_clamp_quoted_column_with_array(
 
     try:
         run_command(
-            'CREATE TABLE target ("from" date[]) USING iceberg;',
+            'CREATE TABLE target ("from" date[]) USING iceberg'
+            " WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         pg_conn.commit()
@@ -2148,7 +2205,8 @@ def test_temporal_clamp_composite_mixed_case_fields(
             )
 
         run_command(
-            f"CREATE TABLE target (col {type_name}) USING iceberg;",
+            f"CREATE TABLE target (col {type_name}) USING iceberg"
+            f" WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         pg_conn.commit()
@@ -2200,7 +2258,7 @@ def test_temporal_clamp_multiple_quoted_columns(
         run_command(
             "CREATE TABLE target ("
             'id int, "from" date, "Table" timestamptz'
-            ") USING iceberg;",
+            ") USING iceberg WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         pg_conn.commit()
@@ -2274,7 +2332,8 @@ def test_temporal_clamp_quoted_column_with_quoted_composite_fields(
             )
 
         run_command(
-            f'CREATE TABLE target ("Data" {type_name}) USING iceberg;',
+            f'CREATE TABLE target ("Data" {type_name}) USING iceberg'
+            f" WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         pg_conn.commit()
@@ -2340,7 +2399,8 @@ def test_temporal_clamp_array_of_composites_quoted_fields(
             )
 
         run_command(
-            f"CREATE TABLE target (col {type_name}[]) USING iceberg;",
+            f"CREATE TABLE target (col {type_name}[]) USING iceberg"
+            f" WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         pg_conn.commit()
@@ -2532,7 +2592,8 @@ def test_array_multidim_clamp(
             )
 
         run_command(
-            f"CREATE TABLE target (col {col_type}) USING iceberg;",
+            f"CREATE TABLE target (col {col_type}) USING iceberg"
+            f" WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         pg_conn.commit()
@@ -2599,7 +2660,8 @@ def test_multidim_array_in_composite_clamp(
             pg_conn,
         )
         run_command(
-            "CREATE TABLE target (col md_arr_comp) USING iceberg;",
+            "CREATE TABLE target (col md_arr_comp) USING iceberg"
+            " WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         pg_conn.commit()
@@ -2671,7 +2733,11 @@ def test_multidim_temporal_array_clamp(pg_conn, extension, s3, with_default_loca
     run_command("SET TIME ZONE 'UTC';", pg_conn)
 
     try:
-        run_command("CREATE TABLE target (col date[]) USING iceberg;", pg_conn)
+        run_command(
+            "CREATE TABLE target (col date[]) USING iceberg"
+            " WITH (out_of_range_values = 'clamp');",
+            pg_conn,
+        )
         pg_conn.commit()
 
         run_command(
@@ -2709,11 +2775,13 @@ def test_explain_shows_pg_nullify_nested_list_for_plain_array(
 
     try:
         run_command(
-            "CREATE TABLE explain_source (col int[]) USING iceberg;",
+            "CREATE TABLE explain_source (col int[]) USING iceberg"
+            " WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         run_command(
-            "CREATE TABLE explain_target (col int[]) USING iceberg;",
+            "CREATE TABLE explain_target (col int[]) USING iceberg"
+            " WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         pg_conn.commit()
@@ -2748,11 +2816,13 @@ def test_explain_shows_pg_nullify_nested_list_in_list_transform(
 
     try:
         run_command(
-            "CREATE TABLE explain_source (col date[]) USING iceberg;",
+            "CREATE TABLE explain_source (col date[]) USING iceberg"
+            " WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         run_command(
-            "CREATE TABLE explain_target (col date[]) USING iceberg;",
+            "CREATE TABLE explain_target (col date[]) USING iceberg"
+            " WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         pg_conn.commit()

@@ -1071,7 +1071,7 @@ def test_temporal_out_of_range_clamp_insert_select_pushdown(
 
         # Create the target Iceberg table with clamp option
         run_command(
-            f"CREATE TABLE oor_target (col {col_type}) USING iceberg;",
+            f"CREATE TABLE oor_target (col {col_type}) USING iceberg WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         pg_conn.commit()
@@ -1195,7 +1195,7 @@ def test_infinity_temporal_clamp_insert_select_pushdown(
 
         # Create the target Iceberg table with clamp option
         run_command(
-            f"CREATE TABLE inf_target (col {col_type}) USING iceberg;",
+            f"CREATE TABLE inf_target (col {col_type}) USING iceberg WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         pg_conn.commit()
@@ -1256,7 +1256,7 @@ def test_temporal_arithmetic_overflow_clamp(
 
     try:
         run_command(
-            f"CREATE TABLE arith_clamp (col {col_type}) USING iceberg;",
+            f"CREATE TABLE arith_clamp (col {col_type}) USING iceberg WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         pg_conn.commit()
@@ -1343,7 +1343,7 @@ def test_nan_arithmetic_clamp(
 
     try:
         run_command(
-            "CREATE TABLE nan_clamp (col numeric(10,2)) USING iceberg;",
+            "CREATE TABLE nan_clamp (col numeric(10,2)) USING iceberg WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         pg_conn.commit()

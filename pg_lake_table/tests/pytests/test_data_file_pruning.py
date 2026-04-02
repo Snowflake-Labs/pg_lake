@@ -1818,7 +1818,10 @@ def test_clamped_infinity_data_file_pruning(
         CREATE SCHEMA test_clamp_inf_dfp;
         CREATE TABLE test_clamp_inf_dfp.tbl (
             col {col_type}
-        ) USING iceberg WITH (autovacuum_enabled='False');
+        ) USING iceberg WITH (
+            autovacuum_enabled = 'False',
+            out_of_range_values = 'clamp'
+        );
         SET TIME ZONE 'UTC';
     """,
         pg_conn,

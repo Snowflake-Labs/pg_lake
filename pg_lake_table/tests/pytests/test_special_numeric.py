@@ -12,7 +12,7 @@ def test_special_numeric_bounded(s3, pg_conn, extension, with_default_location):
                 CREATE SCHEMA {schema};
                 CREATE TABLE {schema}.bounded_err(b numeric(20,10)) USING iceberg
                     WITH (out_of_range_values = 'error');
-                CREATE TABLE {schema}.bounded_clamp(b numeric(20,10)) USING iceberg;
+                CREATE TABLE {schema}.bounded_clamp(b numeric(20,10)) USING iceberg WITH (out_of_range_values = 'clamp');
         """,
         pg_conn,
     )
