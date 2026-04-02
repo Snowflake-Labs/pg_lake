@@ -431,6 +431,39 @@ def test_oneshot_worker_drop_database(superuser_conn):
     superuser_conn.autocommit = False
 
 
+def test_get_worker_pid_running(superuser_conn):
+    run_command(
+        "CREATE EXTENSION pg_extension_base_test_scheduler CASCADE", superuser_conn
+    )
+    superuser_conn.commit()
+    time.sleep(0.1)
+
+    worker_id = run_query(
+        "SELECT worker_id FROM extension_base.workers WHERE worker_name = 'pg_extension_base_test_scheduler_main_worker'",
+        superuser_conn,
+    )[0][0]
+
+    pid = run_query(
+        f"SELECT extension_base.get_worker_pid({worker_id})",
+        superuser_conn,
+    )[0][0]
+    assert pid > 0
+
+    run_command(
+        "DROP EXTENSION pg_extension_base_test_scheduler CASCADE", superuser_conn
+    )
+    superuser_conn.commit()
+
+
+def test_get_worker_pid_not_found(superuser_conn):
+    pid = run_query(
+        "SELECT extension_base.get_worker_pid(99999)",
+        superuser_conn,
+    )[0][0]
+    assert pid == 0
+    superuser_conn.rollback()
+
+
 def get_pg_extension_workers(conn):
     query = "SELECT datname, application_name FROM pg_stat_activity WHERE backend_type LIKE 'pg_base_extension server %' OR backend_type LIKE 'pg base extension%' ORDER BY application_name"
     result = run_query(query, conn)

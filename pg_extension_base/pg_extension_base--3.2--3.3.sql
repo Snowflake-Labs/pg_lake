@@ -32,3 +32,15 @@ COMMENT ON FUNCTION extension_base.deregister_worker(text, bool)
  IS 'deregister a base worker';
 
 REVOKE ALL ON FUNCTION extension_base.deregister_worker(text, bool) FROM public;
+
+
+/* return the PID of a running base worker given its worker ID, or 0 if not found */
+CREATE FUNCTION extension_base.get_worker_pid(worker_id int)
+ RETURNS int
+ LANGUAGE c STRICT
+AS 'MODULE_PATHNAME', $function$pg_extension_base_get_worker_pid$function$;
+
+COMMENT ON FUNCTION extension_base.get_worker_pid(int)
+ IS 'return the PID of a running base worker, or 0 if not found';
+
+REVOKE ALL ON FUNCTION extension_base.get_worker_pid(int) FROM public;

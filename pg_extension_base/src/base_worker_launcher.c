@@ -367,6 +367,7 @@ static void BaseWorkerTransactionCallback(XactEvent event, void *arg);
 /* SQL-callable functions */
 PG_FUNCTION_INFO_V1(pg_extension_base_register_worker);
 PG_FUNCTION_INFO_V1(pg_extension_base_deregister_worker);
+PG_FUNCTION_INFO_V1(pg_extension_base_get_worker_pid);
 PG_FUNCTION_INFO_V1(pg_extension_base_list_base_workers);
 PG_FUNCTION_INFO_V1(pg_extension_base_list_database_starters);
 
@@ -2922,6 +2923,42 @@ BaseWorkerTransactionCallback(XactEvent event, void *arg)
 		default:
 			break;
 	}
+}
+
+
+/*
+ * GetBaseWorkerPid returns the PID of a running base worker given its worker
+ * ID, or 0 if the worker is not found in the current database.
+ */
+pid_t
+GetBaseWorkerPid(int32 workerId)
+{
+	pid_t		workerPid = 0;
+
+	LWLockAcquire(&BaseWorkerControl->lock, LW_SHARED);
+
+	bool		isFound = false;
+	BaseWorkerEntry *workerEntry = GetBaseWorkerEntry(MyDatabaseId, workerId, &isFound);
+
+	if (isFound)
+		workerPid = workerEntry->workerPid;
+
+	LWLockRelease(&BaseWorkerControl->lock);
+
+	return workerPid;
+}
+
+
+/*
+ * pg_extension_base_get_worker_pid implements the extension_base.get_worker_pid
+ * SQL function.
+ */
+Datum
+pg_extension_base_get_worker_pid(PG_FUNCTION_ARGS)
+{
+	int32		workerId = PG_GETARG_INT32(0);
+
+	PG_RETURN_INT32(GetBaseWorkerPid(workerId));
 }
 
 

@@ -115,4 +115,6 @@ extern PGDLLEXPORT void DeregisterBaseWorkerSelf(void);
 
 extern PGDLLEXPORT int32 MyBaseWorkerId;
 
+extern PGDLLEXPORT pid_t GetBaseWorkerPid(int32 workerId);
+
 #endif
