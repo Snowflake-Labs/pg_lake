@@ -459,7 +459,9 @@ def test_get_worker_pid_not_found(superuser_conn):
     pid = run_query(
         "SELECT extension_base.get_worker_pid(99999)",
         superuser_conn,
-    )[0][0]
+    )[
+        0
+    ][0]
     assert pid == 0
     superuser_conn.rollback()
 
