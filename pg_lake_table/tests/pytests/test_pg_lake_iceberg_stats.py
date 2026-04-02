@@ -666,7 +666,8 @@ def test_clamped_temporal_column_stats(
     out-of-range or infinity temporal values."""
     table_name = "test_clamped_temporal_stats"
     run_command(
-        f"CREATE TABLE {table_name} (col {col_type}) USING iceberg;",
+        f"CREATE TABLE {table_name} (col {col_type}) "
+        f"USING iceberg WITH (out_of_range_values = 'clamp');",
         pg_conn,
     )
 
@@ -703,7 +704,8 @@ def test_clamped_nan_numeric_column_stats(
     value is clamped to NULL (all-NULL columns produce no min/max stats)."""
     table_name = "test_nan_numeric_stats"
     run_command(
-        f"CREATE TABLE {table_name} (col numeric(10,2)) USING iceberg;",
+        f"CREATE TABLE {table_name} (col numeric(10,2)) "
+        f"USING iceberg WITH (out_of_range_values = 'clamp');",
         pg_conn,
     )
 

@@ -708,7 +708,7 @@ def test_temporal_out_of_range_clamp_copy_from_pushdown(
 
         # Create the target Iceberg table with clamp option
         run_command(
-            f"CREATE TABLE oor_copy_target (col {col_type}) USING iceberg;",
+            f"CREATE TABLE oor_copy_target (col {col_type}) USING iceberg WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         pg_conn.commit()
@@ -846,7 +846,7 @@ def test_infinity_temporal_clamp_copy_from_pushdown(
 
         # Create the target Iceberg table with clamp option
         run_command(
-            f"CREATE TABLE inf_copy_target (col {col_type}) USING iceberg;",
+            f"CREATE TABLE inf_copy_target (col {col_type}) USING iceberg WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         pg_conn.commit()
@@ -1166,7 +1166,7 @@ def test_infinity_temporal_clamp_copy_from_non_pushdown(
         )
 
         run_command(
-            f"CREATE TABLE inf_copy_target (col {col_type} NOT NULL) USING iceberg;",
+            f"CREATE TABLE inf_copy_target (col {col_type} NOT NULL) USING iceberg WITH (out_of_range_values = 'clamp');",
             pg_conn,
         )
         pg_conn.commit()
