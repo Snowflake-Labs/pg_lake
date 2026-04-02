@@ -10,7 +10,14 @@ index ea04300..38672a9 100644
  class PostgresSchemaEntry;
  class PostgresTransaction;
  
-@@ -64,7 +65,8 @@ public:
+@@ -21,5 +22,6 @@ struct PostgresTypeData {
+ 	int64_t type_modifier = 0;
+ 	string type_name;
++	int64_t type_oid = 0;
+ 	idx_t array_dimensions = 0;
+ };
+ 
+@@ -64,7 +66,8 @@ public:
  	static LogicalType ToPostgresType(const LogicalType &input);
  	static LogicalType TypeToLogicalType(optional_ptr<PostgresTransaction> transaction,
  	                                     optional_ptr<PostgresSchemaEntry> schema, const PostgresTypeData &input,
@@ -60,32 +67,39 @@ index 2d9f5d9..6f2a3f2 100644
  	auto &pgtypename = type_info.type_name;
  
  	// postgres array types start with an _
-@@ -113,7 +115,7 @@ LogicalType PostgresUtils::TypeToLogicalType(optional_ptr<PostgresTransaction> t
+@@ -113,7 +115,14 @@ LogicalType PostgresUtils::TypeToLogicalType(optional_ptr<PostgresTransaction> t
  		child_type_info.type_name = pgtypename.substr(1);
  		child_type_info.type_modifier = type_info.type_modifier;
++		if (connection) {
++			D_ASSERT(type_info.type_oid != 0);
++			auto elem_result = connection->Query(StringUtil::Format(
++			    "SELECT typelem FROM pg_type WHERE oid = %d", type_info.type_oid));
++			D_ASSERT(elem_result->Count() > 0);
++			child_type_info.type_oid = elem_result->GetInt64(0, 0);
++		}
  		PostgresType child_pg_type;
 -		auto child_type = PostgresUtils::TypeToLogicalType(transaction, schema, child_type_info, child_pg_type);
 +		auto child_type = PostgresUtils::TypeToLogicalType(transaction, schema, child_type_info, child_pg_type, connection);
  		// construct the child type based on the number of dimensions
  		for (idx_t i = 1; i < dimensions; i++) {
  			PostgresType new_pg_type;
-@@ -201,7 +203,51 @@ LogicalType PostgresUtils::TypeToLogicalType(optional_ptr<PostgresTransaction> t
+@@ -201,7 +203,52 @@ LogicalType PostgresUtils::TypeToLogicalType(optional_ptr<PostgresTransaction> t
  		return LogicalType::LIST(LogicalType::DOUBLE);
  	} else {
  		if (!transaction) {
 -			// unsupported so fallback to varchar
 +			if (connection) {
-+				// try composite type
++				D_ASSERT(type_info.type_oid != 0);
 +				auto query = StringUtil::Format(
-+				    "SELECT a.attname, t.typname, a.atttypmod "
++				    "SELECT a.attname, t.typname, a.atttypmod, a.atttypid "
 +				    "FROM pg_type ct "
 +				    "JOIN pg_class c ON c.oid = ct.typrelid "
 +				    "JOIN pg_attribute a ON a.attrelid = ct.typrelid "
 +				    "JOIN pg_type t ON t.oid = a.atttypid "
-+				    "WHERE ct.typname = %s AND ct.typtype = 'c' "
++				    "WHERE ct.oid = %d AND ct.typtype = 'c' "
 +				    "AND a.attnum > 0 AND NOT a.attisdropped "
 +				    "ORDER BY a.attnum",
-+				    KeywordHelper::WriteQuoted(pgtypename).c_str());
++				    type_info.type_oid);
 +				auto result = connection->Query(query);
 +				auto rows = result->Count();
 +				if (rows > 0) {
@@ -95,6 +109,7 @@ index 2d9f5d9..6f2a3f2 100644
 +						PostgresTypeData field_type_info;
 +						field_type_info.type_name = result->GetString(row, 1);
 +						field_type_info.type_modifier = result->GetInt64(row, 2);
++						field_type_info.type_oid = result->GetInt64(row, 3);
 +						PostgresType child_pg_type;
 +						auto field_type = TypeToLogicalType(nullptr, nullptr, field_type_info,
 +						                                    child_pg_type, connection);
@@ -103,18 +118,18 @@ index 2d9f5d9..6f2a3f2 100644
 +					}
 +					return LogicalType::STRUCT(std::move(child_types));
 +				}
-+				// try domain type — resolve to base type
 +				auto domain_query = StringUtil::Format(
-+				    "SELECT bt.typname, t.typtypmod "
++				    "SELECT bt.typname, t.typtypmod, bt.oid "
 +				    "FROM pg_type t "
 +				    "JOIN pg_type bt ON bt.oid = t.typbasetype "
-+				    "WHERE t.typname = %s AND t.typtype = 'd'",
-+				    KeywordHelper::WriteQuoted(pgtypename).c_str());
++				    "WHERE t.oid = %d AND t.typtype = 'd'",
++				    type_info.type_oid);
 +				auto domain_result = connection->Query(domain_query);
 +				if (domain_result->Count() > 0) {
 +					PostgresTypeData base_type_info;
 +					base_type_info.type_name = domain_result->GetString(0, 0);
 +					base_type_info.type_modifier = domain_result->GetInt64(0, 1);
++					base_type_info.type_oid = domain_result->GetInt64(0, 2);
 +					return TypeToLogicalType(nullptr, nullptr, base_type_info,
 +					                         postgres_type, connection);
 +				}
@@ -126,7 +141,27 @@ diff --git a/src/storage/postgres_table_set.cpp b/src/storage/postgres_table_set
 index efe37a1..07d3ee6 100644
 --- a/src/storage/postgres_table_set.cpp
 +++ b/src/storage/postgres_table_set.cpp
-@@ -53,7 +53,7 @@ ORDER BY namespace_id, relname, attnum, constraint_id;
+@@ -24,16 +24,16 @@ SELECT pg_namespace.oid AS namespace_id, relname, relpages, attname,
+-    pg_type.typname type_name, atttypmod type_modifier, pg_attribute.attndims ndim,
+-    attnum, pg_attribute.attnotnull AS notnull, NULL constraint_id,
++    pg_type.typname type_name, atttypmod type_modifier, pg_attribute.attndims ndim,
++    atttypid type_oid, attnum, pg_attribute.attnotnull AS notnull, NULL constraint_id,
+     NULL constraint_type, NULL constraint_key
+ FROM pg_class
+ JOIN pg_namespace ON relnamespace = pg_namespace.oid
+ JOIN pg_attribute ON pg_class.oid=pg_attribute.attrelid
+ JOIN pg_type ON atttypid=pg_type.oid
+ WHERE attnum > 0 AND relkind IN ('r', 'v', 'm', 'f', 'p') ${CONDITION}
+ UNION ALL
+ SELECT pg_namespace.oid AS namespace_id, relname, NULL relpages, NULL attname, NULL type_name,
+-    NULL type_modifier, NULL ndim, NULL attnum, NULL AS notnull,
++    NULL type_modifier, NULL ndim, NULL type_oid, NULL attnum, NULL AS notnull,
+     pg_constraint.oid AS constraint_id, contype AS constraint_type,
+     conkey AS constraint_key
+ FROM pg_class
+ JOIN pg_namespace ON relnamespace = pg_namespace.oid
+ JOIN pg_constraint ON (pg_class.oid=pg_constraint.conrelid)
+@@ -53,18 +53,19 @@ ORDER BY namespace_id, relname, attnum, constraint_id;
  
  void PostgresTableSet::AddColumn(optional_ptr<PostgresTransaction> transaction,
                                   optional_ptr<PostgresSchemaEntry> schema, PostgresResult &result, idx_t row,
@@ -135,7 +170,12 @@ index efe37a1..07d3ee6 100644
  	PostgresTypeData type_info;
  	idx_t column_index = 3;
  	auto column_name = result.GetString(row, column_index);
-@@ -64,7 +64,7 @@ void PostgresTableSet::AddColumn(optional_ptr<PostgresTransaction> transaction,
+ 	type_info.type_name = result.GetString(row, column_index + 1);
+ 	type_info.type_modifier = result.GetInt64(row, column_index + 2);
+ 	type_info.array_dimensions = result.GetInt64(row, column_index + 3);
++	type_info.type_oid = result.GetInt64(row, column_index + 4);
+-	bool is_not_null = result.GetBool(row, column_index + 5);
++	bool is_not_null = result.GetBool(row, column_index + 6);
  	string default_value;
  
  	PostgresType postgres_type;
@@ -144,6 +184,11 @@ index efe37a1..07d3ee6 100644
  	table_info.postgres_types.push_back(std::move(postgres_type));
  	table_info.postgres_names.push_back(column_name);
  	ColumnDefinition column(std::move(column_name), std::move(column_type));
+@@ -87,3 +87,3 @@ void PostgresTableSet::AddConstraint(PostgresResult &result, idx_t row, Postgres
+ void PostgresTableSet::AddConstraint(PostgresResult &result, idx_t row, PostgresTableInfo &table_info) {
+-	idx_t column_index = 9;
++	idx_t column_index = 10;
+ 	auto constraint_type = result.GetString(row, column_index + 1);
 @@ -109,12 +109,13 @@ void PostgresTableSet::AddConstraint(PostgresResult &result, idx_t row, Postgres
  
  void PostgresTableSet::AddColumnOrConstraint(optional_ptr<PostgresTransaction> transaction,
