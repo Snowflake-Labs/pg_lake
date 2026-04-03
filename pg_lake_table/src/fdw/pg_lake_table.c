@@ -3876,7 +3876,7 @@ process_query_params(ExprContext *econtext,
 		else
 
 			param_values[i] = PGDuckSerialize(&param_flinfo[i], exprType((Node *) expr_state->expr), expr_value,
-											  DATA_FORMAT_INVALID);
+											  DATA_FORMAT_INVALID, NULL);
 		i++;
 	}
 
