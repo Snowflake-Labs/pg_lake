@@ -250,7 +250,8 @@ PostgresTypeToIcebergField(PGType pgType, bool forAddColumn, int *subFieldIndex)
 			elem->id = *subFieldIndex + 1;
 			*subFieldIndex = elem->id;
 			elem->name = pstrdup(names[i]);
-			elem->required = true;
+			/* Snowflake requires struct fields to be optional (nullable) */
+			elem->required = false;
 
 			Field	   *subField = palloc0(sizeof(Field));
 
