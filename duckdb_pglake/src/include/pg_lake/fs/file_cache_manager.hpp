@@ -244,6 +244,10 @@ public:
 		return ObjectType();
 	}
 
+	optional_idx GetEstimatedCacheMemory() const override {
+		return optional_idx();
+	}
+
 private:
 	/* 
 	 * FileCacheActivity is a wrapper for both a mutex and state of a 

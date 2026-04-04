@@ -416,6 +416,111 @@ pg_varchar_to_text(duckdb_string_t val, TextOutputBuffer * toTextBuffer)
 
 
 /*
+ * inject_srid_into_hex_wkb transforms ISO WKB hex into EWKB hex by setting
+ * the SRID flag in the type word and inserting 4 SRID bytes.
+ *
+ * Returns a newly allocated string (caller must free), or NULL on error.
+ * If srid <= 0 or the input is too short, returns NULL without modifying.
+ */
+static char *
+inject_srid_into_hex_wkb(const char *hexWkb, int srid)
+{
+	size_t		len = strlen(hexWkb);
+
+	/* minimum: 1 byte order + 4 type bytes = 10 hex chars */
+	if (len < 10 || srid <= 0)
+		return NULL;
+
+	bool		isLE = (hexWkb[0] == '0' && hexWkb[1] == '1');
+
+	/* parse existing type word (4 bytes = 8 hex chars at offset 2) */
+	uint32_t	typeWord = 0;
+
+	for (int i = 0; i < 8; i++)
+	{
+		char		c = hexWkb[2 + i];
+		uint32_t	nibble;
+
+		if (c >= '0' && c <= '9')
+			nibble = c - '0';
+		else if (c >= 'a' && c <= 'f')
+			nibble = c - 'a' + 10;
+		else if (c >= 'A' && c <= 'F')
+			nibble = c - 'A' + 10;
+		else
+			return NULL;
+
+		if (isLE)
+			typeWord |= nibble << ((i / 2) * 8 + (i % 2 ? 0 : 4));
+		else
+			typeWord = (typeWord << 4) | nibble;
+	}
+
+	/* set SRID flag */
+	typeWord |= 0x20000000;
+
+	/* EWKB = byte_order(2) + type_word(8) + srid(8) + rest */
+	size_t		ewkbLen = len + 8 + 1;
+	char	   *ewkb = (char *) malloc(ewkbLen);
+
+	if (!ewkb)
+		return NULL;
+
+	/* copy byte order */
+	ewkb[0] = hexWkb[0];
+	ewkb[1] = hexWkb[1];
+
+	/* write modified type word */
+	if (isLE)
+	{
+		for (int i = 0; i < 4; i++)
+		{
+			uint8_t		byte = (typeWord >> (i * 8)) & 0xFF;
+
+			snprintf(ewkb + 2 + i * 2, 3, "%02X", byte);
+		}
+	}
+	else
+	{
+		for (int i = 0; i < 4; i++)
+		{
+			uint8_t		byte = (typeWord >> ((3 - i) * 8)) & 0xFF;
+
+			snprintf(ewkb + 2 + i * 2, 3, "%02X", byte);
+		}
+	}
+
+	/* write SRID */
+	if (isLE)
+	{
+		for (int i = 0; i < 4; i++)
+		{
+			uint8_t		byte = (srid >> (i * 8)) & 0xFF;
+
+			snprintf(ewkb + 10 + i * 2, 3, "%02X", byte);
+		}
+	}
+	else
+	{
+		for (int i = 0; i < 4; i++)
+		{
+			uint8_t		byte = (srid >> ((3 - i) * 8)) & 0xFF;
+
+			snprintf(ewkb + 10 + i * 2, 3, "%02X", byte);
+		}
+	}
+
+	/*
+	 * copy remainder of original WKB (everything after byte_order +
+	 * type_word)
+	 */
+	memcpy(ewkb + 18, hexWkb + 10, len - 10 + 1);
+
+	return ewkb;
+}
+
+
+/*
  * pg_blob_to_text: converts a blob to its string representation
  *
  * Note that blob uses duckdb_string_t internally.
@@ -429,22 +534,53 @@ blob_to_text(duckdb_vector vector, duckdb_logical_type blobType, int row, TextOu
 	char	   *typeAlias = duckdb_logical_type_get_alias(blobType);
 	bool		emitEscapeSequence = true;
 
-	if (typeAlias != NULL)
+	/*
+	 * Check for geometry: either via type alias (legacy DuckDB where GEOMETRY
+	 * was BLOB + alias) or via the first-class GEOMETRY LogicalTypeId
+	 * introduced in DuckDB 1.5.1.
+	 */
+	if ((typeAlias != NULL && strcmp(typeAlias, "GEOMETRY") == 0) ||
+		duckdb_pglake_is_geometry_type(blobType))
 	{
-		if (strcmp(typeAlias, "GEOMETRY") == 0)
-		{
-			/* output geometry via st_ashexwkb */
-			toTextBuffer->buffer = (char *) duckdb_pglake_geometry_to_string(DuckDB, val);
-			toTextBuffer->needsFree = true;
+		char	   *hexWkb = (char *) duckdb_pglake_geometry_to_string(DuckDB, val);
 
-			return CHECK_OOM(toTextBuffer->buffer);
-		}
-		else if (strcmp(typeAlias, "WKB_BLOB") == 0)
+		if (hexWkb == NULL)
 		{
-			/* output WKB_BLOB as pure hex to be parseable as geometry */
-			emitEscapeSequence = false;
+			duckdb_free(typeAlias);
+			toTextBuffer->buffer = NULL;
+			return DUCKDB_OUT_OF_MEMORY_ERROR;
 		}
+
+		/*
+		 * If the column carries a CRS (e.g. EPSG:4326), inject the SRID into
+		 * the hex WKB to produce EWKB so PostGIS can recover it.
+		 */
+		int			srid = duckdb_pglake_geometry_get_srid(blobType);
+
+		if (srid > 0)
+		{
+			char	   *ewkb = inject_srid_into_hex_wkb(hexWkb, srid);
+
+			if (ewkb != NULL)
+			{
+				free(hexWkb);
+				hexWkb = ewkb;
+			}
+		}
+
+		toTextBuffer->buffer = hexWkb;
+		toTextBuffer->needsFree = true;
+
+		duckdb_free(typeAlias);
+		return DUCKDB_SUCCESS;
 	}
+	else if (typeAlias != NULL && strcmp(typeAlias, "WKB_BLOB") == 0)
+	{
+		/* output WKB_BLOB as pure hex to be parseable as geometry */
+		emitEscapeSequence = false;
+	}
+
+	duckdb_free(typeAlias);
 
 	uint32_t	blobLength;
 	char	   *blobBuffer;

@@ -53,6 +53,32 @@ const string MANAGED_STORAGE_KEY_ID_SETTING = "pg_lake_managed_storage_key_id";
 
 
 
+void
+PgLakeS3FileSystem::RegisterContext(const shared_ptr<HTTPInput> &input, optional_ptr<ClientContext> context)
+{
+	lock_guard<mutex> guard(context_mutex_);
+
+	/* Lazily clean up entries for destroyed handles */
+	for (auto it = context_map_.begin(); it != context_map_.end();) {
+		if (it->second.input_ref.expired())
+			it = context_map_.erase(it);
+		else
+			++it;
+	}
+
+	context_map_[input.get()] = {input, context};
+}
+
+optional_ptr<ClientContext>
+PgLakeS3FileSystem::LookupContext(HTTPInput *input)
+{
+	lock_guard<mutex> guard(context_mutex_);
+	auto it = context_map_.find(input);
+	if (it != context_map_.end() && !it->second.input_ref.expired())
+		return it->second.context;
+	return nullptr;
+}
+
 /*
  * CreateHandle is copy-pasted from s3fs.cpp, but using PgLakeS3FileHandle which includes
  * a pointer to the ClientContext.
@@ -76,13 +102,17 @@ unique_ptr<HTTPFileHandle> PgLakeS3FileSystem::CreateHandle(const OpenFileInfo &
 	if (StringUtil::EndsWith(auth_params.endpoint, ".amazonaws.com"))
 		auth_params.endpoint = StringUtil::Format("s3.%s.amazonaws.com", auth_params.region);
 
-	auto http_util = HTTPFSUtil::GetHTTPUtil(opener);
-	auto params = http_util->InitializeParameters(opener, info);
+	auto &http_util = HTTPFSUtil::GetHTTPUtil(opener);
+	auto params = http_util.InitializeParameters(opener, info);
 
-	return duckdb::make_uniq<PgLakeS3FileHandle>(*this, fileInfo.path, flags, context,
-												  params,
-												  auth_params,
-			                                      S3ConfigParams::ReadFrom(opener));
+	auto handle = duckdb::make_uniq<PgLakeS3FileHandle>(*this, fileInfo.path, flags, context,
+	                                                     params,
+	                                                     auth_params,
+	                                                     S3ConfigParams::ReadFrom(opener));
+
+	RegisterContext(handle->http_input, context);
+
+	return unique_ptr_cast<PgLakeS3FileHandle, HTTPFileHandle>(std::move(handle));
 }
 
 
@@ -183,7 +213,7 @@ PgLakeS3FileSystem::RemoveFileFromS3(string path, optional_ptr<FileOpener> opene
 
 	/* Perform the "batch" deletion */
 	unique_ptr<HTTPResponse> postResponse =
-		PostRequest(*s3Handle, s3Handle->path, {}, responseBuffer,
+		PostRequest(*s3Handle->http_input, s3Handle->path, {}, responseBuffer,
 		            (char *) body.c_str(), body.length(), "delete=");
 
 	/* Construct body of the POST response */
@@ -396,13 +426,16 @@ IsPgLakeManagedStorageBucket(optional_ptr<ClientContext> context, string prefix,
  * managed storage bucket if a key ID is configured.
  */
 static void
-SetEncryptionFields(PgLakeS3FileHandle &s3Handle, ParsedS3Url &parsed_s3_url,
+SetEncryptionFields(optional_ptr<ClientContext> context, ParsedS3Url &parsed_s3_url,
 					string &encryption, string &customer_key_id)
 {
+	if (context == nullptr)
+		return;
+
 	Value setting;
 
-	if (s3Handle.context->TryGetCurrentSetting(MANAGED_STORAGE_KEY_ID_SETTING, setting) &&
-		IsPgLakeManagedStorageBucket(s3Handle.context, parsed_s3_url.prefix, parsed_s3_url.bucket))
+	if (context->TryGetCurrentSetting(MANAGED_STORAGE_KEY_ID_SETTING, setting) &&
+		IsPgLakeManagedStorageBucket(context, parsed_s3_url.prefix, parsed_s3_url.bucket))
 	{
 		/* use customer managed key */
 		customer_key_id = setting.ToString();
@@ -425,12 +458,12 @@ SetEncryptionFields(PgLakeS3FileHandle &s3Handle, ParsedS3Url &parsed_s3_url,
  * but with the addition of Content-MD5, which is required for DeleteObjects.
  */
 unique_ptr<HTTPResponse>
-PgLakeS3FileSystem::PostRequest(FileHandle &handle, string url, HTTPHeaders header_map,
+PgLakeS3FileSystem::PostRequest(HTTPInput &input, string url, HTTPHeaders header_map,
                                  string &buffer_out,
                                  char *buffer_in, idx_t buffer_in_len, string http_params)
 {
-	PgLakeS3FileHandle &s3Handle = handle.Cast<PgLakeS3FileHandle>();
-	auto auth_params = s3Handle.auth_params;
+	auto &s3_input = input.Cast<S3HTTPInput>();
+	auto auth_params = s3_input.auth_params;
 	auto parsed_s3_url = S3UrlParse(url, auth_params);
 	string http_url = parsed_s3_url.GetHTTPUrl(auth_params, http_params);
 	auto payload_hash = GetPayloadHash(buffer_in, buffer_in_len);
@@ -443,7 +476,7 @@ PgLakeS3FileSystem::PostRequest(FileHandle &handle, string url, HTTPHeaders head
 	 * For CreateMultipartUpload operations (?uploads=...), use the customer-managed key, if any.
 	 */
 	if (http_params.find("uploads=") != std::string::npos)
-		SetEncryptionFields(s3Handle, parsed_s3_url, encryption, customer_key_id);
+		SetEncryptionFields(LookupContext(&input), parsed_s3_url, encryption, customer_key_id);
 
 	/*
 	 * For DeleteObjects operations we need to specify the Content-MD5 header.
@@ -454,15 +487,15 @@ PgLakeS3FileSystem::PostRequest(FileHandle &handle, string url, HTTPHeaders head
 	auto headers = create_s3_header(parsed_s3_url.path, http_params, parsed_s3_url.host, "s3", "POST", auth_params, "",
 	                                "", payload_hash, "application/octet-stream", content_md5, encryption, customer_key_id);
 
-	return HTTPFileSystem::PostRequest(handle, http_url, headers, buffer_out, buffer_in, buffer_in_len);
+	return HTTPFileSystem::PostRequest(input, http_url, headers, buffer_out, buffer_in, buffer_in_len);
 }
 
 unique_ptr<HTTPResponse>
-PgLakeS3FileSystem::PutRequest(FileHandle &handle, string url, HTTPHeaders header_map,
+PgLakeS3FileSystem::PutRequest(HTTPInput &input, string url, HTTPHeaders header_map,
 								char *buffer_in, idx_t buffer_in_len, string http_params)
 {
-	PgLakeS3FileHandle &s3Handle = handle.Cast<PgLakeS3FileHandle>();
-	auto auth_params = s3Handle.auth_params;
+	auto &s3_input = input.Cast<S3HTTPInput>();
+	auto auth_params = s3_input.auth_params;
 	auto parsed_s3_url = S3UrlParse(url, auth_params);
 	string http_url = parsed_s3_url.GetHTTPUrl(auth_params, http_params);
 	auto content_type = "application/octet-stream";
@@ -475,11 +508,11 @@ PgLakeS3FileSystem::PutRequest(FileHandle &handle, string url, HTTPHeaders heade
 	 * For PutObject operations (no params), use the customer-managed key, if any.
 	 */
 	if (http_params.empty())
-		SetEncryptionFields(s3Handle, parsed_s3_url, encryption, customer_key_id);
+		SetEncryptionFields(LookupContext(&input), parsed_s3_url, encryption, customer_key_id);
 
 	auto headers = create_s3_header(parsed_s3_url.path, http_params, parsed_s3_url.host, "s3", "PUT", auth_params, "",
 	                                "", payload_hash, content_type, "", encryption, customer_key_id);
-	return HTTPFileSystem::PutRequest(handle, http_url, headers, buffer_in, buffer_in_len);
+	return HTTPFileSystem::PutRequest(input, http_url, headers, buffer_in, buffer_in_len);
 }
 
 /*
@@ -698,7 +731,8 @@ PgLakeS3FileSystem::List(const string &glob_pattern, bool is_glob, FileOpener *o
 		// Repeat requests until the keys of all common prefixes are parsed.
 		auto common_prefixes = AWSListObjectV2::ParseCommonPrefix(response_str);
 		while (!common_prefixes.empty()) {
-			auto prefix_path = parsed_s3_url.prefix + parsed_s3_url.bucket + '/' + common_prefixes.back();
+			auto prefix_path = S3FileSystem::UrlDecode(
+			    parsed_s3_url.prefix + parsed_s3_url.bucket + '/' + common_prefixes.back());
 			common_prefixes.pop_back();
 
 			// TODO we could optimize here by doing a match on the prefix, if it doesn't match we can skip this prefix

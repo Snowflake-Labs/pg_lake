@@ -54,7 +54,7 @@ def test_invalid_url(conn):
         conn,
         raise_error=False,
     )
-    assert "NOT FOUND" in error
+    assert "NOT FOUND" in error.upper()
 
     conn.rollback()
 
