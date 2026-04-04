@@ -1,8 +1,8 @@
 diff --git a/src/include/postgres_scanner.hpp b/src/include/postgres_scanner.hpp
-index 0f9cda7..9f93468 100644
+index 3e0162c..7c8fa19 100644
 --- a/src/include/postgres_scanner.hpp
 +++ b/src/include/postgres_scanner.hpp
-@@ -48,6 +48,8 @@ public:
+@@ -50,6 +50,8 @@ public:
  	bool use_text_protocol = false;
  	idx_t max_threads = 1;
  
@@ -12,10 +12,10 @@ index 0f9cda7..9f93468 100644
  	void SetTablePages(idx_t approx_num_pages);
  
 diff --git a/src/postgres_query.cpp b/src/postgres_query.cpp
-index 700db2f..c7c5101 100644
+index f999617..771427c 100644
 --- a/src/postgres_query.cpp
 +++ b/src/postgres_query.cpp
-@@ -43,6 +43,9 @@ static unique_ptr<FunctionData> PGQueryBind(ClientContext &context, TableFunctio
+@@ -44,6 +44,9 @@ static unique_ptr<FunctionData> PGQueryBind(ClientContext &context, TableFunctio
  		if (kv.first == "use_transaction") {
  			use_transaction = BooleanValue::Get(kv.second);
  		}
@@ -23,23 +23,22 @@ index 700db2f..c7c5101 100644
 +			result->snapshot = kv.second.GetValue<string>();
 +		}
  	}
- 	result->use_transaction = use_transaction;
  
-@@ -97,6 +100,8 @@ static unique_ptr<FunctionData> PGQueryBind(ClientContext &context, TableFunctio
- PostgresQueryFunction::PostgresQueryFunction()
+ 	vector<Value> param_values;
+@@ -123,6 +126,7 @@ PostgresQueryFunction::PostgresQueryFunction()
      : TableFunction("postgres_query", {LogicalType::VARCHAR, LogicalType::VARCHAR}, nullptr, PGQueryBind) {
  	named_parameters["use_transaction"] = LogicalType::BOOLEAN;
+ 	named_parameters["params"] = LogicalType::ANY;
 +	named_parameters["snapshot"] = LogicalType::VARCHAR;
-+
  	PostgresScanFunction scan_function;
  	init_global = scan_function.init_global;
  	init_local = scan_function.init_local;
 diff --git a/src/postgres_scanner.cpp b/src/postgres_scanner.cpp
-index bb4136f..2530172 100644
+index eb4360a..3de7dbe 100644
 --- a/src/postgres_scanner.cpp
 +++ b/src/postgres_scanner.cpp
 @@ -67,9 +67,10 @@ private:
- static void PostgresGetSnapshot(PostgresVersion version, const PostgresBindData &bind_data,
+ static void PostgresGetSnapshot(ClientContext &context, PostgresVersion version, const PostgresBindData &bind_data,
                                  PostgresGlobalState &gstate) {
  	unique_ptr<PostgresResult> result;
 -	// by default disable snapshotting
@@ -52,8 +51,8 @@ index bb4136f..2530172 100644
  		return;
  	}
  	if (version.type_v == PostgresInstanceType::AURORA) {
-@@ -93,7 +94,6 @@ static void PostgresGetSnapshot(PostgresVersion version, const PostgresBindData
- 	    con.TryQuery("SELECT pg_is_in_recovery(), pg_export_snapshot(), (select count(*) from pg_stat_wal_receiver)");
+@@ -93,7 +94,6 @@ static void PostgresGetSnapshot(ClientContext &context, PostgresVersion version,
+ 	    context, "SELECT pg_is_in_recovery(), pg_export_snapshot(), (select count(*) from pg_stat_wal_receiver)");
  	if (result) {
  		auto in_recovery = result->GetBool(0, 0) || result->GetInt64(0, 2) > 0;
 -		gstate.snapshot = "";
@@ -74,7 +73,7 @@ index bb4136f..2530172 100644
 +	}
 +
  	auto con = PostgresConnection::Open(bind_data->dsn, bind_data->attach_path);
- 	auto version = con.GetPostgresVersion();
+ 	auto version = con.GetPostgresVersion(context);
  	// query the table schema so we can interpret the bits in the pages
 @@ -315,6 +324,9 @@ static unique_ptr<GlobalTableFunctionState> PostgresInitGlobalState(ClientContex
  	auto &bind_data = input.bind_data->Cast<PostgresBindData>();
@@ -90,8 +89,8 @@ index bb4136f..2530172 100644
  	} else {
  		auto con = PostgresConnection::Open(bind_data.dsn, bind_data.attach_path);
  		if (bind_data.use_transaction) {
--			PostgresScanConnect(con, string());
-+			PostgresScanConnect(con, result->snapshot);
+-			PostgresScanConnect(context, con, string());
++			PostgresScanConnect(context, con, result->snapshot);
  		}
  		result->SetConnection(std::move(con));
  	}

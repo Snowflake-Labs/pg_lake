@@ -566,7 +566,7 @@ RegionAwareS3FileSystem::ClearCachedRegion(const string &bucketUrl, optional_ptr
 string
 RegionAwareS3FileSystem::GetBucketRegionFromS3(const string &url, optional_ptr<FileOpener> opener)
 {
-	shared_ptr<HTTPUtil> httpUtil = HTTPFSUtil::GetHTTPUtil(opener);
+	auto &httpUtil = HTTPFSUtil::GetHTTPUtil(opener);
 
 	/* Get the configuration */
 	FileOpenerInfo s3UrlInfo = {url};
@@ -587,12 +587,12 @@ RegionAwareS3FileSystem::GetBucketRegionFromS3(const string &url, optional_ptr<F
 
 	/* Get a client for the base URL */
 	FileOpenerInfo httpUrlInfo = {httpUrl};
-	unique_ptr<HTTPParams> httpParams = httpUtil->InitializeParameters(opener, httpUrlInfo);
-	unique_ptr<HTTPClient> client = httpUtil->InitializeClient(*httpParams, baseUrl);
+	unique_ptr<HTTPParams> httpParams = httpUtil.InitializeParameters(opener, httpUrlInfo);
+	unique_ptr<HTTPClient> client = httpUtil.InitializeClient(*httpParams, baseUrl);
 
 	HTTPHeaders requestHeaders;
 	HeadRequestInfo headRequest(baseUrl + "/", requestHeaders, *httpParams);
-	unique_ptr<HTTPResponse> response = httpUtil->Request(headRequest, client);
+	unique_ptr<HTTPResponse> response = httpUtil.Request(headRequest, client);
 
 	if (!response->headers.HasHeader("x-amz-bucket-region"))
 		return string();

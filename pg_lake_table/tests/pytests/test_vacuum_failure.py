@@ -136,7 +136,7 @@ def test_vacuum_without_s3_access(
         pg_conn,
         raise_error=False,
     )
-    assert "Could not establish connection error" in result
+    assert "Could not connect to server error" in result
     pg_conn.rollback()
 
     # first, show that there are already items in the deletion queue

@@ -1,0 +1,27 @@
+diff --git a/extension/parquet/parquet_reader.cpp b/extension/parquet/parquet_reader.cpp
+--- a/extension/parquet/parquet_reader.cpp
++++ b/extension/parquet/parquet_reader.cpp
+@@ -1286,7 +1286,10 @@
+ 	unique_ptr<BaseStatistics> GetColumnStatistics(const StorageIndex &storage_index) override {
+ 		const idx_t primary_index = storage_index.GetPrimaryIndex();
+ 		D_ASSERT(metadata.row_groups.size() > row_group_idx);
+-		D_ASSERT(root_schema->children.size() > primary_index);
++
++		if (primary_index >= root_schema->children.size()) {
++			return nullptr;
++		}
+ 
+ 		const auto &row_group = metadata.row_groups[row_group_idx];
+ 		const auto &column_schema = root_schema->children[primary_index];
+@@ -1296,7 +1299,10 @@
+ 	bool MinMaxIsExact(const BaseStatistics &, const StorageIndex &storage_index) override {
+ 		const idx_t primary_index = storage_index.GetPrimaryIndex();
+ 		D_ASSERT(metadata.row_groups.size() > row_group_idx);
+-		D_ASSERT(root_schema->children.size() > primary_index);
++
++		if (primary_index >= root_schema->children.size()) {
++			return false;
++		}
+ 
+ 		const auto &row_group = metadata.row_groups[row_group_idx];
+ 		const auto &column_chunk = row_group.columns[primary_index];

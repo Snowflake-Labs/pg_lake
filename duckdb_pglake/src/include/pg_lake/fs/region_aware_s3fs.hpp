@@ -195,6 +195,10 @@ public:
 	string GetObjectType() override {
 		return ObjectType();
 	}
+
+	optional_idx GetEstimatedCacheMemory() const override {
+		return optional_idx();
+	}
 };
 
 
