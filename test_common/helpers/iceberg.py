@@ -701,7 +701,7 @@ def iceberg_extension(postgres):
 
 
 @pytest.fixture(scope="module")
-def iceberg_catalog(superuser_conn, s3):
+def iceberg_catalog(superuser_conn, s3, extension):
     catalog = create_iceberg_test_catalog(superuser_conn)
     yield catalog
     tables = catalog.list_tables("public")

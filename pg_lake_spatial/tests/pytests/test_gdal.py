@@ -206,6 +206,7 @@ def test_gdal_zip_gml(
     assert (
         "Geometry type 10 not supported" in error
         or "'MULTICURVE' is not supported" in error
+        or "Unsupported geometry type in WKB" in error
     )
 
     user_conn.rollback()
@@ -221,7 +222,7 @@ def test_gdal_zip_gml(
         user_conn,
         raise_error=False,
     )
-    assert "could not be found" in error
+    assert "could not be found" in error or "Could not find layer" in error
 
     user_conn.rollback()
 

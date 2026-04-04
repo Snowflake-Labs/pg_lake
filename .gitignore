@@ -42,3 +42,4 @@ pg_lake_iceberg/logs/*
 pg_lake_table/logs/
 .volume/
 Dockerfile.alpine
+duckdb_pglake/.cache/

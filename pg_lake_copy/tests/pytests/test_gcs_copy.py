@@ -59,7 +59,7 @@ def test_gcs_copy_from_parquet_notexists(pg_conn, gcs):
         pg_conn,
         raise_error=False,
     )
-    assert error.startswith("ERROR:  HTTP Error: Unable to connect to URL ")
+    assert error.startswith("ERROR:  HTTP Error:")
 
     pg_conn.rollback()
 

@@ -272,19 +272,40 @@ PGLakeCachingFileSystem::CleanUpCacheOnWriteFile(CachingFSFileHandle &pg_lakeHan
 vector<OpenFileInfo>
 PGLakeCachingFileSystem::Glob(const string &urlPattern, FileOpener *opener)
 {
-	if (StringUtil::StartsWith(urlPattern, NO_CACHE_PREFIX))
+	string url = urlPattern;
+	bool noCache = false;
+
+	if (StringUtil::StartsWith(url, NO_CACHE_PREFIX))
 	{
-		/* do the Glob without the prefix */
-		vector<OpenFileInfo> result = remoteFs->Glob(urlPattern.substr(NO_CACHE_PREFIX.length()), opener);
+		url = url.substr(NO_CACHE_PREFIX.length());
+		noCache = true;
+	}
 
-		/* add the prefix back to the results to pass nocache through */
-		for (OpenFileInfo& url : result)
-			url.path = NO_CACHE_PREFIX + url.path;
-
+	/*
+	 * Iceberg partition paths can contain glob characters like * as literal
+	 * characters in directory names (e.g., "specialChars!@#$%^&*()_+").
+	 * DuckDB's glob machinery interprets these as wildcards, causing S3
+	 * ListObjects to search with a truncated prefix and find nothing.
+	 *
+	 * When the path has glob characters, check whether it refers to an
+	 * actual file first. If it does, return it directly without globbing.
+	 */
+	if (HasGlob(url) && remoteFs->FileExists(url, opener))
+	{
+		vector<OpenFileInfo> result;
+		result.push_back(OpenFileInfo(noCache ? NO_CACHE_PREFIX + url : url));
 		return result;
 	}
-	else
-		return remoteFs->Glob(urlPattern, opener);
+
+	vector<OpenFileInfo> result = remoteFs->Glob(url, opener);
+
+	if (noCache)
+	{
+		for (OpenFileInfo& fileInfo : result)
+			fileInfo.path = NO_CACHE_PREFIX + fileInfo.path;
+	}
+
+	return result;
 }
 
 
