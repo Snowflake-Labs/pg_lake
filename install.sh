@@ -678,9 +678,9 @@ install_test_deps() {
     if ! command -v pipenv &>/dev/null; then
         print_info "Installing pipenv..."
         if command -v pip3 &>/dev/null; then
-            pip3 install --user pipenv
+            pip3 install --user pipenv || pip3 install --user --break-system-packages pipenv
         elif command -v python3 &>/dev/null; then
-            python3 -m pip install --user pipenv
+            python3 -m pip install --user pipenv || python3 -m pip install --user --break-system-packages pipenv
         else
             print_warning "pip3 or python3 not found. Please install pipenv manually:"
             print_warning "  Debian/Ubuntu: sudo apt-get install pipenv"
