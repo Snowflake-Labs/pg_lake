@@ -196,7 +196,7 @@ ifeq ("$(wildcard avro/lang/c/build)","")
 	mkdir -p avro/lang/c/build
 	# builds and installs into local avrolib directory 
 	cd avro/lang/c/build && \
-	cmake .. $(CMAKE_AVRO_ARGS) && $(MAKE) -j8 && $(MAKE) install
+	cmake .. $(CMAKE_AVRO_ARGS) && cmake --build . && cmake --build . --target install
 endif
 
 install-avro: avro
