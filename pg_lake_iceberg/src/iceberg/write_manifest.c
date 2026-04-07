@@ -219,7 +219,7 @@ WriteIcebergManifestEntryToAvro(IcebergManifestEntry * entry, avro_value_t * rec
 	AvroSetInt32Field(record, "status", entry->status);
 	AvroSetNullableInt64Field(record, "snapshot_id", entry->snapshot_id, entry->has_snapshot_id);
 	AvroSetNullableInt64Field(record, "sequence_number", entry->sequence_number, entry->has_sequence_number);
-	AvroSetNullableInt64Field(record, "file_sequence_number", entry->sequence_number, entry->has_file_sequence_number);
+	AvroSetNullableInt64Field(record, "file_sequence_number", entry->file_sequence_number, entry->has_file_sequence_number);
 	AvroSetRecordField(record, "data_file", (AvroSerializeFunction) WriteDataFileToAvro, &entry->data_file);
 }
 
