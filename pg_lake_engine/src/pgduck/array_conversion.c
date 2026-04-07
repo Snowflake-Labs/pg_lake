@@ -34,8 +34,7 @@
  * - we do not use fcinfo (not in a UDF) or AnyArrayType
  */
 char *
-ArrayOutForPGDuck(ArrayType *array, CopyDataFormat format,
-				  HTAB *tupdescCache)
+ArrayOutForPGDuck(ArrayType *array, CopyDataFormat format)
 {
 	Oid			element_type = ARR_ELEMTYPE(array);
 	char	   *p,
@@ -114,7 +113,7 @@ ArrayOutForPGDuck(ArrayType *array, CopyDataFormat format,
 		else
 		{
 			values[i] = PGDuckSerialize(&my_extra->proc, element_type, itemvalue,
-										format, tupdescCache);
+										format);
 
 			/* count data plus backslashes; detect chars needing quotes */
 			needquote = !IsSerializedAsContainer(element_type, format);

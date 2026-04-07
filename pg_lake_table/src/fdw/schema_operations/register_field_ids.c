@@ -419,5 +419,5 @@ GetDuckSerializedIcebergFieldInitialDefault(const char *initialDefault,
 	fmgr_info(outFuncId, &outFunc);
 
 	return PGDuckSerialize(&outFunc, pgType.postgresTypeOid, initialDefaultDatum,
-						   DATA_FORMAT_INVALID, NULL);
+						   DATA_FORMAT_INVALID);
 }

@@ -20,11 +20,10 @@
 
 #include "access/htup_details.h"
 #include "utils/builtins.h"
-#include "utils/hsearch.h"
-#include "utils/lsyscache.h"
-#include "utils/typcache.h"
 #include "pg_lake/pgduck/serialize.h"
 #include "pg_lake/pgduck/struct_conversion.h"
+#include "utils/lsyscache.h"
+#include "utils/typcache.h"
 
 /*
  * structure to cache metadata needed for record I/O
@@ -53,13 +52,12 @@ typedef struct RecordIOData
  */
 
 char *
-StructOutForPGDuck(Datum myStruct, CopyDataFormat format, HTAB *tupdescCache)
+StructOutForPGDuck(Datum myStruct, CopyDataFormat format)
 {
 	HeapTupleHeader rec = DatumGetHeapTupleHeader(myStruct);
 	Oid			tupType;
 	int32		tupTypmod;
 	TupleDesc	tupdesc;
-	bool		tupdescFromCache = false;
 	HeapTupleData tuple;
 	RecordIOData *my_extra;
 	bool		needComma = false;
@@ -74,40 +72,7 @@ StructOutForPGDuck(Datum myStruct, CopyDataFormat format, HTAB *tupdescCache)
 	/* Extract type info from the tuple itself */
 	tupType = HeapTupleHeaderGetTypeId(rec);
 	tupTypmod = HeapTupleHeaderGetTypMod(rec);
-
-	if (tupdescCache != NULL && tupType != RECORDOID)
-	{
-		bool		found;
-		TupleDescCacheEntry *entry = (TupleDescCacheEntry *)
-			hash_search(tupdescCache, &tupType, HASH_FIND, &found);
-
-		if (found)
-		{
-			tupdesc = entry->tupdesc;
-			tupdescFromCache = true;
-		}
-		else
-		{
-			/*
-			 * New nested composite type; fetch, pin, and add to cache.
-			 *
-			 * lookup_rowtype_tupdesc returns a pointer into the type cache
-			 * (CacheMemoryContext) and pins it via IncrTupleDescRefCount --
-			 * no allocation in CurrentMemoryContext.  hash_search(HASH_ENTER)
-			 * allocates in the hash table's own context (copycontext, set via
-			 * HASH_CONTEXT at creation time).  If either of these assumptions
-			 * changes and something is palloc'd here, the caller's rowcontext
-			 * would be wrong -- switch to copycontext first.
-			 */
-			tupdesc = lookup_rowtype_tupdesc(tupType, tupTypmod);
-			entry = (TupleDescCacheEntry *)
-				hash_search(tupdescCache, &tupType, HASH_ENTER, &found);
-			entry->tupdesc = tupdesc;
-			tupdescFromCache = true;
-		}
-	}
-	else
-		tupdesc = lookup_rowtype_tupdesc(tupType, tupTypmod);
+	tupdesc = lookup_rowtype_tupdesc(tupType, tupTypmod);
 	ncolumns = tupdesc->natts;
 
 	/* Build a temporary HeapTuple control structure */
@@ -187,7 +152,7 @@ StructOutForPGDuck(Datum myStruct, CopyDataFormat format, HTAB *tupdescCache)
 		}
 
 		attr = values[i];
-		value = PGDuckSerialize(&column_info->proc, column_type, attr, format, tupdescCache);
+		value = PGDuckSerialize(&column_info->proc, column_type, attr, format);
 
 		/* Detect whether we need double quotes for this value */
 		bool		needQuotes = !IsContainerType(column_type);
@@ -211,10 +176,7 @@ StructOutForPGDuck(Datum myStruct, CopyDataFormat format, HTAB *tupdescCache)
 
 	pfree(values);
 	pfree(nulls);
-
-	/* Only release if we looked it up outside the cache */
-	if (!tupdescFromCache)
-		ReleaseTupleDesc(tupdesc);
+	ReleaseTupleDesc(tupdesc);
 
 	return buf.data;
 }

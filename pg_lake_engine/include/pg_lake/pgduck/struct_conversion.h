@@ -18,9 +18,7 @@
 #pragma once
 
 #include "pg_lake/copy/copy_format.h"
-#include "utils/hsearch.h"
 
 #define RECORD_OUT_OID 2291
 
-extern PGDLLEXPORT char *StructOutForPGDuck(Datum myStruct, CopyDataFormat format,
-											HTAB *tupdescCache);
+extern PGDLLEXPORT char *StructOutForPGDuck(Datum myStruct, CopyDataFormat format);

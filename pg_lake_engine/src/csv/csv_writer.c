@@ -29,8 +29,6 @@
 #include "fmgr.h"
 #include "miscadmin.h"
 
-#include "access/htup_details.h"
-#include "catalog/pg_type.h"
 #include "catalog/pg_type_d.h"
 #include "commands/copy.h"
 #include "commands/defrem.h"
@@ -38,7 +36,6 @@
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/pgduck/serialize.h"
-#include "pg_lake/pgduck/struct_conversion.h"
 #include "pg_lake/util/numeric.h"
 #include "executor/executor.h"
 #include "mb/pg_wchar.h"
@@ -48,7 +45,6 @@
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
-#include "utils/typcache.h"
 #include "utils/numeric.h"
 #include "utils/rel.h"
 
@@ -105,14 +101,6 @@ typedef struct CopyToStateData
 	MemoryContext copycontext;	/* per-copy execution context */
 
 	FmgrInfo   *out_functions;	/* lookup info for output functions */
-
-	/*
-	 * Oid -> TupleDesc hash table for composite-type columns.  Pre-populated
-	 * during StartCopyTo with the top-level composite column types; lazily
-	 * extended with nested composite types encountered during serialization.
-	 * Each entry holds a pinned TupleDesc released in EndCopy.
-	 */
-	HTAB	   *tupdescCache;
 	MemoryContext rowcontext;	/* per-row evaluation context */
 	uint64		bytes_processed;	/* number of bytes processed so far */
 
@@ -299,17 +287,6 @@ EndCopy(CopyToState cstate)
 		}
 	}
 
-	/* Release all pinned TupleDescs from the cache */
-	{
-		HASH_SEQ_STATUS seq;
-		TupleDescCacheEntry *entry;
-
-		hash_seq_init(&seq, cstate->tupdescCache);
-		while ((entry = (TupleDescCacheEntry *) hash_seq_search(&seq)) != NULL)
-			ReleaseTupleDesc(entry->tupdesc);
-		hash_destroy(cstate->tupdescCache);
-	}
-
 	MemoryContextDelete(cstate->rowcontext);
 	MemoryContextDelete(cstate->copycontext);
 }
@@ -476,19 +453,6 @@ StartCopyTo(CopyToState cstate, TupleDesc tupDesc)
 
 	/* Get info about the columns we need to process. */
 	cstate->out_functions = (FmgrInfo *) palloc(num_phys_attrs * sizeof(FmgrInfo));
-
-	/* Create the Oid -> TupleDesc cache for composite-type columns. */
-	{
-		HASHCTL		hctl;
-
-		memset(&hctl, 0, sizeof(hctl));
-		hctl.keysize = sizeof(Oid);
-		hctl.entrysize = sizeof(TupleDescCacheEntry);
-		hctl.hcxt = cstate->copycontext;
-		cstate->tupdescCache = hash_create("TupleDesc cache", 16, &hctl,
-										   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
-	}
-
 	foreach(cur, cstate->attnumlist)
 	{
 		int			attnum = lfirst_int(cur);
@@ -505,29 +469,6 @@ StartCopyTo(CopyToState cstate, TupleDesc tupDesc)
 							  &out_func_oid,
 							  &isvarlena);
 		fmgr_info(out_func_oid, &cstate->out_functions[attnum - 1]);
-
-		/*
-		 * Pre-populate the TupleDesc cache for composite columns and arrays
-		 * of composite elements.  Anonymous RECORD types are skipped because
-		 * their structure is not known until row data is inspected.
-		 */
-		{
-			Oid			elemTypeOid = get_element_type(attr->atttypid);
-			Oid			baseTypeOid = OidIsValid(elemTypeOid) ? elemTypeOid : attr->atttypid;
-			int32		baseTypmod = OidIsValid(elemTypeOid) ? -1 : attr->atttypmod;
-
-			if (get_typtype(baseTypeOid) == TYPTYPE_COMPOSITE &&
-				baseTypeOid != RECORDOID)
-			{
-				bool		found;
-				TupleDescCacheEntry *entry = (TupleDescCacheEntry *)
-					hash_search(cstate->tupdescCache, &baseTypeOid,
-								HASH_ENTER, &found);
-
-				if (!found)
-					entry->tupdesc = lookup_rowtype_tupdesc(baseTypeOid, baseTypmod);
-			}
-		}
 	}
 
 	/*
@@ -830,11 +771,16 @@ CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot)
 
 				if (ShouldUseDuckSerialization(cstate->targetFormat, MakePGType(attr->atttypid, attr->atttypmod)))
 				{
+					/*
+					 * Since we are at the top-level when emitting an
+					 * attribute in CopyOneRowTo(), we are not inside a
+					 * composite type.
+					 */
+
 					string = PGDuckSerialize(&out_functions[attnum - 1],
 											 attr->atttypid,
 											 value,
-											 cstate->targetFormat,
-											 cstate->tupdescCache);
+											 cstate->targetFormat);
 				}
 				else
 					string = OutputFunctionCall(&out_functions[attnum - 1],

@@ -299,9 +299,7 @@ def test_select_from_table(
     run_command("DROP TABLE test_select_from_table", pg_conn)
 
 
-def test_select_from_pg_lake_table(
-    s3, pg_conn, extension, with_default_location, create_types
-):
+def test_select_from_pg_lake_table(s3, pg_conn, extension, with_default_location):
     run_command(
         f"""
         CREATE TABLE test_table USING iceberg

@@ -18,10 +18,8 @@
 #pragma once
 
 #include "utils/array.h"
-#include "utils/hsearch.h"
 #include "pg_lake/copy/copy_format.h"
 
 #define ARRAY_OUT_OID (751)
 
-extern PGDLLEXPORT char *ArrayOutForPGDuck(ArrayType *array, CopyDataFormat format,
-										   HTAB *tupdescCache);
+extern PGDLLEXPORT char *ArrayOutForPGDuck(ArrayType *array, CopyDataFormat format);

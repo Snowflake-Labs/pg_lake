@@ -789,7 +789,7 @@ RewriteConst(Const *constExpr)
 
 	/* serialize Const in the DuckDB format */
 	char	   *pgduckText = PGDuckSerialize(&outFunc, constTypeId, constExpr->constvalue,
-											  DATA_FORMAT_INVALID, NULL);
+											  DATA_FORMAT_INVALID);
 
 	/* construct a text constant with the rewritten text */
 	Const	   *textConst = makeNode(Const);
