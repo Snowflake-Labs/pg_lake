@@ -20,4 +20,5 @@
 #include "pg_lake/copy/copy_format.h"
 #include "nodes/pg_list.h"
 
-extern PGDLLEXPORT char *GDALReadFunctionCall(char *path, CopyDataCompression compression, List *options);
+extern PGDLLEXPORT char *GDALReadFunctionCall(char *path, CopyDataCompression compression, List *options,
+											  bool forceKeepWKB);

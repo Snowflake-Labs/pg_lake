@@ -471,8 +471,14 @@ ReadDataSourceFunction(List *sourcePaths,
 				}
 
 				char	   *path = (char *) linitial(sourcePaths);
+
+				/*
+				 * Force keep_wkb so geometry stays as raw WKB BLOB. This
+				 * avoids DuckDB's strict Arrow-to-GEOMETRY conversion that
+				 * throws on types like MULTICURVE.
+				 */
 				char	   *stReadCall =
-					GDALReadFunctionCall(path, sourceCompression, formatOptions);
+					GDALReadFunctionCall(path, sourceCompression, formatOptions, true);
 
 				appendStringInfoString(&command, stReadCall);
 				break;
@@ -1482,9 +1488,10 @@ BuildColumnProjection(char *columnName,
 
 
 		/*
-		 * GDAL format can store geometry as BLOB or GEOMETRY depending on the
-		 * driver. We need to cast to BLOB and then to hex to get the WKB
-		 * representation.
+		 * GDAL data scans always use keep_wkb=true so geometry arrives as raw
+		 * WKB BLOB. The hex(TRY_CAST(... AS BLOB)) path converts it directly.
+		 * The ST_AsHexWKB fallback exists for safety but should not be
+		 * reached.
 		 */
 		if (sourceFormat == DATA_FORMAT_GDAL)
 			return psprintf("COALESCE(hex(TRY_CAST(%s AS BLOB)), ST_AsHexWKB(TRY_CAST(%s AS GEOMETRY)))%s",
