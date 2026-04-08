@@ -124,6 +124,8 @@ static bool DisallowedForWritableRestSetSchema(Node *arg, Oid relationId);
 
 PgLakeAlterTableHookType PgLakeAlterTableHook = NULL;
 PgLakeAlterTableRenameColumnHookType PgLakeAlterTableRenameColumnHook = NULL;
+PgLakeAlterTableSetSchemaHookType PgLakeAlterTableSetSchemaHook = NULL;
+PgLakeIsReplicationTargetHookType PgLakeIsReplicationTargetHook = NULL;
 
 /*
  * Below is the support matrix for ALTER TABLE commands, which pg_lake
@@ -742,13 +744,18 @@ PostProcessAlterWritablePgLakeTableSchema(ProcessUtilityParams * params, void *a
 		return;
 	}
 
-	ErrorIfReadOnlyIcebergTable(relationId);
+	bool isReplicationTarget = PgLakeIsReplicationTargetHook && PgLakeIsReplicationTargetHook(relationId);
+	if (!isReplicationTarget)
+		ErrorIfReadOnlyIcebergTable(relationId);
 
 	PgLakeTableType tableType = GetPgLakeTableType(relationId);
 
 	ErrorIfUnsupportedAlterWritablePgLakeTableSchemaStmt(alterSchemaStmt, tableType);
 
 	TriggerCatalogExportIfObjectStoreTable(relationId);
+
+	if (PgLakeAlterTableSetSchemaHook)
+		PgLakeAlterTableSetSchemaHook(relationId, alterSchemaStmt);
 
 	return;
 }
