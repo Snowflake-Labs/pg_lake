@@ -402,6 +402,6 @@ _PG_init(void)
 static bool
 CheckTargetFileSizeMB(int *newval, void **extra, GucSource source)
 {
-	return *newval <= 0 || *newval > MIN_TARGET_FILE_SIZE_MB ||
+	return *newval <= 0 || *newval >= MIN_TARGET_FILE_SIZE_MB ||
 		(IsTransactionState() && superuser());
 }

@@ -1308,12 +1308,12 @@ ComputeNextWakeTimeMs(void)
 			break;
 		}
 
-		int64		secDiff;
+		long		secDiff;
 		int			microsecDiff;
 
 		TimestampDifference(now, workerEntry->restartAfter, &secDiff, &microsecDiff);
 
-		int64		msUntilRestart = secDiff * 1000 + microsecDiff / 1000;
+		long		msUntilRestart = secDiff * 1000 + microsecDiff / 1000;
 
 		if (msUntilRestart <= 0)
 		{
