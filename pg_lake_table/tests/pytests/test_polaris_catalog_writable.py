@@ -3954,6 +3954,115 @@ def test_rest_rename_col_same_name(
     pg_conn.commit()
 
 
+def test_rest_commit_failure_undo_deletion_queue(
+    pg_conn,
+    superuser_conn,
+    s3,
+    polaris_session,
+    set_polaris_gucs,
+    with_default_location,
+    installcheck,
+    create_http_helper_functions,
+):
+    """
+    When a REST catalog commit fails (e.g. HTTP 429), the old metadata path
+    was optimistically inserted into the deletion_queue during pre-commit.
+    Without the undo mechanism, the next INSERT would crash with:
+        ERROR: duplicate key value violates unique constraint "deletion_queue_pkey"
+
+    This test verifies that the stale deletion_queue entry is cleaned up at
+    the next pre-commit, allowing the subsequent INSERT to succeed.
+
+    Uses the "rest-catalog-batch-commit" injection point (PG 18+) to
+    simulate a batch commit failure without breaking the metadata fetch.
+    """
+    if installcheck:
+        return
+
+    if get_pg_version_num(pg_conn) < 180000:
+        return
+
+    SCHEMA = "test_rest_commit_failure_undo"
+    TABLE_FQN = f"{SCHEMA}.t_rest"
+    INJECTION_POINT = "rest-catalog-batch-commit"
+
+    conn = open_pg_conn()
+
+    try:
+        run_command(
+            f"SET pg_lake_iceberg.default_location_prefix TO 's3://{TEST_BUCKET}'",
+            conn,
+        )
+        run_command("CREATE EXTENSION IF NOT EXISTS injection_points", conn)
+        conn.commit()
+
+        run_command(f"CREATE SCHEMA {SCHEMA}", conn)
+        run_command(
+            f"CREATE TABLE {TABLE_FQN} (a int) USING iceberg "
+            f"WITH (catalog='rest', autovacuum_enabled=False)",
+            conn,
+        )
+        run_command(f"INSERT INTO {TABLE_FQN} VALUES (1)", conn)
+        conn.commit()
+
+        rows = run_query(f"SELECT a FROM {TABLE_FQN} ORDER BY a", conn)
+        assert len(rows) == 1 and rows[0][0] == 1
+
+        # Attach injection point so PostAllRestCatalogRequests skips the
+        # real HTTP call and simulates a non-204 response.
+        run_command(
+            f"SELECT injection_points_attach('{INJECTION_POINT}', 'notice')",
+            conn,
+        )
+        conn.commit()
+
+        # INSERT succeeds at PG level; REST batch commit is skipped (WARNING).
+        # The old metadata path is now a stale entry in deletion_queue.
+        run_command(f"INSERT INTO {TABLE_FQN} VALUES (2)", conn)
+        conn.commit()
+
+        # Detach injection point so the next commit goes through to Polaris.
+        run_command(
+            f"SELECT injection_points_detach('{INJECTION_POINT}')",
+            conn,
+        )
+        conn.commit()
+
+        # This INSERT must NOT crash with "duplicate key violates unique
+        # constraint deletion_queue_pkey". The undo mechanism removes the
+        # stale deletion_queue entry at the start of pre-commit.
+        run_command(f"INSERT INTO {TABLE_FQN} VALUES (3)", conn)
+        conn.commit()
+
+        rows = run_query(f"SELECT a FROM {TABLE_FQN} ORDER BY a", conn)
+        assert len(rows) == 3
+        assert [r[0] for r in rows] == [1, 2, 3]
+
+    finally:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        run_command(
+            f"SELECT injection_points_detach('{INJECTION_POINT}')",
+            conn,
+            raise_error=False,
+        )
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        try:
+            run_command(f"DROP SCHEMA {SCHEMA} CASCADE", conn)
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        conn.close()
+
+
 def assert_metadata_on_pg_catalog_and_rest_matches(
     namespace, table_name, superuser_conn
 ):
