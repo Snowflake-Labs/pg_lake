@@ -642,6 +642,31 @@ RewriteQueryTreeForPGDuckMutator(Node *node, RewriteQueryTreeContext * context)
 		}
 	}
 
+	/*
+	 * DuckDB does not have a jsonb[] type (only json[]). Remap any remaining
+	 * JSONBARRAYOID references to JSONARRAYOID so that both the FDW deparse
+	 * path (deparse.c) and the ruleutils deparse path (pg_get_querydef) emit
+	 * "json[]" instead of "jsonb[]".
+	 *
+	 * We only touch value/output nodes here (Const, RelabelType, Param,
+	 * ArrayExpr), NOT operator or function nodes, to avoid breaking operator
+	 * resolution which depends on matching type OIDs.
+	 *
+	 * This must run after RewriteConst/RewriteParam so that the RelabelType
+	 * nodes they create are also caught.
+	 */
+	if (IsA(node, Const) && ((Const *) node)->consttype == JSONBARRAYOID)
+		((Const *) node)->consttype = JSONARRAYOID;
+	else if (IsA(node, RelabelType) && ((RelabelType *) node)->resulttype == JSONBARRAYOID)
+		((RelabelType *) node)->resulttype = JSONARRAYOID;
+	else if (IsA(node, Param) && ((Param *) node)->paramtype == JSONBARRAYOID)
+		((Param *) node)->paramtype = JSONARRAYOID;
+	else if (IsA(node, ArrayExpr) && ((ArrayExpr *) node)->array_typeid == JSONBARRAYOID)
+	{
+		((ArrayExpr *) node)->array_typeid = JSONARRAYOID;
+		((ArrayExpr *) node)->element_typeid = JSONOID;
+	}
+
 	return node;
 }
 
