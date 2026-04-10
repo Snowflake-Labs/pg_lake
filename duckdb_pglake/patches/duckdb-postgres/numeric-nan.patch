@@ -1,46 +1,58 @@
 diff --git a/src/include/postgres_binary_reader.hpp b/src/include/postgres_binary_reader.hpp
-index f4bc336..d9e92f1 100644
+index f4bc336..79ab24e 100644
 --- a/src/include/postgres_binary_reader.hpp
 +++ b/src/include/postgres_binary_reader.hpp
-@@ -136,9 +136,11 @@ protected:
+@@ -136,9 +136,17 @@ protected:
  	PostgresDecimalConfig ReadDecimalConfig();
  
  	template <class T, class OP = DecimalConversionInteger>
 -	T ReadDecimal() {
 -		// this is wild
-+	T ReadDecimal(bool *out_is_nan = nullptr) {
++	T ReadDecimal(bool *out_is_nan = nullptr, bool *out_is_pinf = nullptr, bool *out_is_ninf = nullptr) {
  		auto config = ReadDecimalConfig();
 +		if (out_is_nan) {
 +			*out_is_nan = config.is_nan;
++		}
++		if (out_is_pinf) {
++			*out_is_pinf = config.is_pinf;
++		}
++		if (out_is_ninf) {
++			*out_is_ninf = config.is_ninf;
 +		}
  		auto scale_POWER = OP::GetPowerOfTen(config.scale);
  
  		if (config.ndigits == 0) {
 diff --git a/src/include/postgres_conversion.hpp b/src/include/postgres_conversion.hpp
-index 391429e..ba4162b 100644
+index 391429e..f9049eb 100644
 --- a/src/include/postgres_conversion.hpp
 +++ b/src/include/postgres_conversion.hpp
-@@ -96,6 +96,7 @@ struct PostgresDecimalConfig {
+@@ -96,6 +96,9 @@ struct PostgresDecimalConfig {
  	uint16_t ndigits;
  	int16_t weight;
  	bool is_negative;
 +	bool is_nan;
++	bool is_pinf;
++	bool is_ninf;
  };
  
  struct PostgresConversion {
 diff --git a/src/postgres_binary_reader.cpp b/src/postgres_binary_reader.cpp
-index 86ebe30..9a49f8c 100644
+index 86ebe30..4dbccc2 100644
 --- a/src/postgres_binary_reader.cpp
 +++ b/src/postgres_binary_reader.cpp
-@@ -137,6 +137,7 @@ PostgresDecimalConfig PostgresBinaryReader::ReadDecimalConfig() {
+@@ -136,7 +136,10 @@ PostgresDecimalConfig PostgresBinaryReader::ReadDecimalConfig() {
+ 	      sign == NUMERIC_NEG)) {
  		throw NotImplementedException("Postgres numeric NA/Inf");
  	}
- 	config.is_negative = sign == NUMERIC_NEG;
+-	config.is_negative = sign == NUMERIC_NEG;
++	config.is_negative = sign == NUMERIC_NEG || sign == NUMERIC_NINF;
 +	config.is_nan = sign == NUMERIC_NAN;
++	config.is_pinf = sign == NUMERIC_PINF;
++	config.is_ninf = sign == NUMERIC_NINF;
  	config.scale = ReadInteger<uint16_t>();
  
  	return config;
-@@ -247,9 +248,12 @@ void PostgresBinaryReader::ReadValue(const LogicalType &type, const PostgresType
+@@ -247,9 +250,19 @@ void PostgresBinaryReader::ReadValue(const LogicalType &type, const PostgresType
  		FlatVector::GetData<float>(out_vec)[output_offset] = ReadFloat();
  		break;
  	case LogicalTypeId::DOUBLE: {
@@ -48,39 +60,48 @@ index 86ebe30..9a49f8c 100644
  		if (postgres_type.info == PostgresTypeAnnotation::NUMERIC_AS_DOUBLE) {
 -			FlatVector::GetData<double>(out_vec)[output_offset] = ReadDecimal<double, DecimalConversionDouble>();
 +			bool is_nan = false;
-+			FlatVector::GetData<double>(out_vec)[output_offset] = ReadDecimal<double, DecimalConversionDouble>(&is_nan);
++			bool is_pinf = false;
++			bool is_ninf = false;
++			FlatVector::GetData<double>(out_vec)[output_offset] =
++			    ReadDecimal<double, DecimalConversionDouble>(&is_nan, &is_pinf, &is_ninf);
 +			if (is_nan) {
 +				FlatVector::GetData<double>(out_vec)[output_offset] = NAN;
++			} else if (is_pinf) {
++				FlatVector::GetData<double>(out_vec)[output_offset] = INFINITY;
++			} else if (is_ninf) {
++				FlatVector::GetData<double>(out_vec)[output_offset] = -INFINITY;
 +			}
  			break;
  		}
  		D_ASSERT(value_len == sizeof(double));
-@@ -284,22 +288,26 @@ void PostgresBinaryReader::ReadValue(const LogicalType &type, const PostgresType
+@@ -284,22 +297,28 @@ void PostgresBinaryReader::ReadValue(const LogicalType &type, const PostgresType
  		if (value_len < sizeof(uint16_t) * 4) {
  			throw InvalidInputException("Need at least 8 bytes to read a Postgres decimal. Got %d", value_len);
  		}
 +		bool is_nan = false;
++		bool is_pinf = false;
++		bool is_ninf = false;
  		switch (type.InternalType()) {
  		case PhysicalType::INT16:
 -			FlatVector::GetData<int16_t>(out_vec)[output_offset] = ReadDecimal<int16_t>();
-+			FlatVector::GetData<int16_t>(out_vec)[output_offset] = ReadDecimal<int16_t>(&is_nan);
++			FlatVector::GetData<int16_t>(out_vec)[output_offset] = ReadDecimal<int16_t>(&is_nan, &is_pinf, &is_ninf);
  			break;
  		case PhysicalType::INT32:
 -			FlatVector::GetData<int32_t>(out_vec)[output_offset] = ReadDecimal<int32_t>();
-+			FlatVector::GetData<int32_t>(out_vec)[output_offset] = ReadDecimal<int32_t>(&is_nan);
++			FlatVector::GetData<int32_t>(out_vec)[output_offset] = ReadDecimal<int32_t>(&is_nan, &is_pinf, &is_ninf);
  			break;
  		case PhysicalType::INT64:
 -			FlatVector::GetData<int64_t>(out_vec)[output_offset] = ReadDecimal<int64_t>();
-+			FlatVector::GetData<int64_t>(out_vec)[output_offset] = ReadDecimal<int64_t>(&is_nan);
++			FlatVector::GetData<int64_t>(out_vec)[output_offset] = ReadDecimal<int64_t>(&is_nan, &is_pinf, &is_ninf);
  			break;
  		case PhysicalType::INT128:
 -			FlatVector::GetData<hugeint_t>(out_vec)[output_offset] = ReadDecimal<hugeint_t, DecimalConversionHugeint>();
-+			FlatVector::GetData<hugeint_t>(out_vec)[output_offset] = ReadDecimal<hugeint_t, DecimalConversionHugeint>(&is_nan);
++			FlatVector::GetData<hugeint_t>(out_vec)[output_offset] = ReadDecimal<hugeint_t, DecimalConversionHugeint>(&is_nan, &is_pinf, &is_ninf);
  			break;
  		default:
  			throw InvalidInputException("Unsupported decimal storage type");
  		}
-+		if (is_nan) {
++		if (is_nan || is_pinf || is_ninf) {
 +			FlatVector::SetNull(out_vec, output_offset, true);
 +		}
  		break;
@@ -90,7 +111,7 @@ diff --git a/src/postgres_text_reader.cpp b/src/postgres_text_reader.cpp
 index 066e072..e3cfa67 100644
 --- a/src/postgres_text_reader.cpp
 +++ b/src/postgres_text_reader.cpp
-@@ -321,6 +321,19 @@ void PostgresTextReader::ConvertVector(Vector &source, Vector &target, const Pos
+@@ -321,6 +321,23 @@ void PostgresTextReader::ConvertVector(Vector &source, Vector &target, const Pos
  	case LogicalTypeId::BLOB:
  		ConvertBlob(source, target, count);
  		break;
@@ -99,7 +120,11 @@ index 066e072..e3cfa67 100644
 +		for (idx_t i = 0; i < count; i++) {
 +			if (!FlatVector::IsNull(source, i)) {
 +				auto str = strings[i];
-+				if (str.GetSize() == 3 && memcmp(str.GetData(), "NaN", 3) == 0) {
++				auto sz = str.GetSize();
++				auto ptr = str.GetData();
++				if ((sz == 3 && memcmp(ptr, "NaN", 3) == 0) ||
++				    (sz == 8 && memcmp(ptr, "Infinity", 8) == 0) ||
++				    (sz == 9 && memcmp(ptr, "-Infinity", 9) == 0)) {
 +					FlatVector::SetNull(source, i, true);
 +				}
 +			}

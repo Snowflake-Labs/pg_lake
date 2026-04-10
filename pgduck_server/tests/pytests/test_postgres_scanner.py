@@ -4,8 +4,10 @@ via postgres_scan().
 
 Scenarios covered:
 - Composite types read as structs with correct field values
-- Bounded numeric(p,s) NaN clamped to NULL
-- Unbounded / large-precision numerics converted to double (NaN preserved)
+- Bounded numeric(p,s) NaN clamped to NULL (binary & text protocol)
+- Unbounded / large-precision numerics converted to double (NaN and ±Inf preserved)
+- Special values (±Inf, NaN, NULL) across float4, float8, and numeric flavors
+  (binary & text protocol)
 - Multidimensional array values in int[] column clamped to NULL
 """
 
@@ -147,7 +149,30 @@ def pg_tables(postgres):
         "(123.456, 999.99), "
         "('NaN'::numeric, 'NaN'::numeric), "
         "(NULL, NULL), "
-        "(1e30, 1e30)"
+        "(1e30, 1e30), "
+        "('Infinity'::numeric, NULL), "
+        "('-Infinity'::numeric, NULL)"
+    )
+
+    # -- special values across float and numeric types -------------------
+    cur.execute("DROP TABLE IF EXISTS scanner_special_values_tbl")
+    cur.execute(
+        "CREATE TABLE scanner_special_values_tbl ("
+        "  id int PRIMARY KEY,"
+        "  f4 float4,"
+        "  f8 float8,"
+        "  num_unbounded numeric,"
+        "  num_large numeric(50, 2),"
+        "  num_bounded numeric(10, 2)"
+        ")"
+    )
+    cur.execute(
+        "INSERT INTO scanner_special_values_tbl VALUES "
+        "(1, 'NaN'::float4, 'NaN'::float8, 'NaN'::numeric, 'NaN'::numeric, 'NaN'::numeric),"
+        "(2, 'Infinity'::float4, 'Infinity'::float8, 'Infinity'::numeric, NULL, NULL),"
+        "(3, '-Infinity'::float4, '-Infinity'::float8, '-Infinity'::numeric, NULL, NULL),"
+        "(4, NULL, NULL, NULL, NULL, NULL),"
+        "(5, 1.5::float4, 1.5::float8, 1.5::numeric, 1.50::numeric(50,2), 1.50::numeric(10,2))"
     )
 
     # -- multidimensional arrays ----------------------------------------
@@ -187,6 +212,7 @@ def pg_tables(postgres):
     cur.execute("DROP TYPE IF EXISTS scanner_color CASCADE")
     cur.execute("DROP TABLE IF EXISTS scanner_bounded_numeric_tbl")
     cur.execute("DROP TABLE IF EXISTS scanner_unbounded_numeric_tbl")
+    cur.execute("DROP TABLE IF EXISTS scanner_special_values_tbl")
     cur.execute("DROP TABLE IF EXISTS scanner_multidim_array_tbl")
     cur.close()
     conn.close()
@@ -285,16 +311,23 @@ def test_enum_type(pg_tables, pgduck_conn):
 # -------------------------------------------------------------------
 
 
-def test_bounded_numeric_nan_to_null(pg_tables, pgduck_conn):
+@pytest.mark.parametrize("use_text_protocol", [False, True], ids=["binary", "text"])
+def test_bounded_numeric_nan_to_null(pg_tables, pgduck_conn, use_text_protocol):
     """NaN in numeric(10,2) is scanned as NULL (DuckDB DECIMAL can't hold NaN)."""
-    scan = _scan("scanner_bounded_numeric_tbl")
-    rows = perform_query_on_cursor(
-        f"SELECT v FROM {scan} ORDER BY v NULLS LAST",
-        pgduck_conn,
-    )
-    # Source: 123.45, NaN, NULL, 0.00
-    # After:  0.00, 123.45, NULL (NaN→NULL), NULL (original)
-    assert rows == [("0.00",), ("123.45",), (None,), (None,)]
+    if use_text_protocol:
+        perform_query_on_cursor("SET pg_use_text_protocol = true", pgduck_conn)
+    try:
+        scan = _scan("scanner_bounded_numeric_tbl")
+        rows = perform_query_on_cursor(
+            f"SELECT v FROM {scan} ORDER BY v NULLS LAST",
+            pgduck_conn,
+        )
+        # Source: 123.45, NaN, NULL, 0.00
+        # After:  0.00, 123.45, NULL (NaN→NULL), NULL (original)
+        assert rows == [("0.00",), ("123.45",), (None,), (None,)]
+    finally:
+        if use_text_protocol:
+            perform_query_on_cursor("SET pg_use_text_protocol = false", pgduck_conn)
 
 
 # -------------------------------------------------------------------
@@ -303,41 +336,122 @@ def test_bounded_numeric_nan_to_null(pg_tables, pgduck_conn):
 
 
 def test_unbounded_numeric_as_double(pg_tables, pgduck_conn):
-    """Unbounded numeric maps to DOUBLE; NaN preserved, NULL preserved."""
+    """Unbounded numeric maps to DOUBLE; NaN and ±Infinity preserved, NULL preserved."""
     scan = _scan("scanner_unbounded_numeric_tbl")
     rows = perform_query_on_cursor(
         f"SELECT typeof(unbounded), "
         f"  CASE WHEN unbounded IS NULL THEN 'null' "
         f"       WHEN isnan(unbounded) THEN 'nan' "
+        f"       WHEN isinf(unbounded) AND unbounded > 0 THEN '+inf' "
+        f"       WHEN isinf(unbounded) AND unbounded < 0 THEN '-inf' "
         f"       ELSE 'value' END "
         f"FROM {scan} ORDER BY unbounded NULLS LAST",
         pgduck_conn,
     )
     assert rows == [
+        ("DOUBLE", "-inf"),  # -Infinity preserved
         ("DOUBLE", "value"),  # 123.456
         ("DOUBLE", "value"),  # 1e30
+        ("DOUBLE", "+inf"),  # +Infinity preserved
         ("DOUBLE", "nan"),  # NaN preserved as double NaN
         ("DOUBLE", "null"),  # original NULL
     ]
 
 
 def test_large_precision_numeric_as_double(pg_tables, pgduck_conn):
-    """numeric(40,2) (precision > 38) maps to DOUBLE; NaN preserved, NULL preserved."""
+    """numeric(40,2) (precision > 38) maps to DOUBLE; NaN preserved, NULL preserved.
+
+    PostgreSQL rejects ±Infinity for bounded numeric types (including
+    large-precision), so the Infinity rows in the source table have NULL
+    for this column.
+    """
     scan = _scan("scanner_unbounded_numeric_tbl")
     rows = perform_query_on_cursor(
         f"SELECT typeof(large_precision), "
         f"  CASE WHEN large_precision IS NULL THEN 'null' "
         f"       WHEN isnan(large_precision) THEN 'nan' "
         f"       ELSE 'value' END "
-        f"FROM {scan} ORDER BY large_precision NULLS LAST",
+        f"FROM {scan} "
+        f"WHERE large_precision IS NOT NULL "
+        f"ORDER BY large_precision NULLS LAST",
         pgduck_conn,
     )
     assert rows == [
         ("DOUBLE", "value"),  # 999.99
         ("DOUBLE", "value"),  # 1e30
         ("DOUBLE", "nan"),  # NaN preserved as double NaN
-        ("DOUBLE", "null"),  # original NULL
     ]
+
+
+# -------------------------------------------------------------------
+# Special values (±Inf, NaN, NULL) across float & numeric types
+# -------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("use_text_protocol", [False, True], ids=["binary", "text"])
+def test_special_values_across_types(pg_tables, pgduck_conn, use_text_protocol):
+    """±Inf, NaN, and NULL across float4, float8, and three numeric flavors.
+
+    Column types and their DuckDB mapping via postgres_scan:
+
+      f4            float4         → FLOAT
+      f8            float8         → DOUBLE
+      num_unbounded numeric        → DOUBLE (NUMERIC_AS_DOUBLE)
+      num_large     numeric(50,2)  → DOUBLE (precision > 38)
+      num_bounded   numeric(10,2)  → DECIMAL(10,2)
+
+    PostgreSQL rejects ±Infinity for bounded numeric types, so Infinity
+    rows use NULL for num_large and num_bounded.  NaN is accepted by all
+    PostgreSQL numeric types, but DuckDB DECIMAL cannot represent NaN, so
+    bounded numeric NaN is scanned as NULL.
+    """
+    if use_text_protocol:
+        perform_query_on_cursor("SET pg_use_text_protocol = true", pgduck_conn)
+    try:
+        scan = _scan("scanner_special_values_tbl")
+
+        def classify(col):
+            return (
+                f"CASE WHEN {col} IS NULL THEN 'null' "
+                f"WHEN isnan({col}) THEN 'nan' "
+                f"WHEN isinf({col}) AND {col} > 0 THEN '+inf' "
+                f"WHEN isinf({col}) AND {col} < 0 THEN '-inf' "
+                f"ELSE 'value' END"
+            )
+
+        rows = perform_query_on_cursor(
+            f"SELECT id, "
+            f"  {classify('f4')}, {classify('f8')}, "
+            f"  {classify('num_unbounded')}, {classify('num_large')}, "
+            f"  CASE WHEN num_bounded IS NULL THEN 'null' ELSE 'value' END "
+            f"FROM {scan} ORDER BY id",
+            pgduck_conn,
+        )
+
+        assert rows == [
+            ("1", "nan", "nan", "nan", "nan", "null"),  # NaN (bounded → NULL)
+            (
+                "2",
+                "+inf",
+                "+inf",
+                "+inf",
+                "null",
+                "null",
+            ),  # +Inf (large/bounded NULL in PG)
+            (
+                "3",
+                "-inf",
+                "-inf",
+                "-inf",
+                "null",
+                "null",
+            ),  # -Inf (large/bounded NULL in PG)
+            ("4", "null", "null", "null", "null", "null"),  # NULL
+            ("5", "value", "value", "value", "value", "value"),  # 1.5
+        ]
+    finally:
+        if use_text_protocol:
+            perform_query_on_cursor("SET pg_use_text_protocol = false", pgduck_conn)
 
 
 # -------------------------------------------------------------------

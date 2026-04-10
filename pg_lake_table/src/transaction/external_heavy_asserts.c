@@ -390,10 +390,10 @@ AssertInternalAndExternalIcebergStatsMatchForAllDataFiles(Oid relationId, bool d
 
 		/*
 		 * Filter out internal column stats whose bounds were not written to
-		 * the Iceberg metadata.  Columns with NULL bounds (all-NULL data) or
-		 * non-serializable bounds (NaN/Inf floats) are skipped by
-		 * CreateColumnBoundForLeafField during metadata writes, so they won't
-		 * appear in the external bounds.
+		 * the Iceberg metadata.  The write path
+		 * (SetColumnBoundsFromDataFileStats) only emits a column's bounds
+		 * when BOTH lower and upper serialize successfully, so we must apply
+		 * the same predicate here.
 		 */
 		List	   *internalColumnStatsList = NIL;
 		ListCell   *statsCell;
@@ -406,6 +406,10 @@ AssertInternalAndExternalIcebergStatsMatchForAllDataFiles(Oid relationId, bool d
 				Assert(colStats->upperBoundText == NULL);
 
 			if (!CanSerializeColumnBound(colStats->lowerBoundText,
+										 colStats->leafField.field))
+				continue;
+
+			if (!CanSerializeColumnBound(colStats->upperBoundText,
 										 colStats->leafField.field))
 				continue;
 

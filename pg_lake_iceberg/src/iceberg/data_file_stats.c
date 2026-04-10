@@ -84,16 +84,11 @@ SetColumnBoundsFromDataFileStats(const DataFileStats * dataFileStats,
 
 		char	   *upperBoundText = columnStat->upperBoundText;
 
-		if (lowerBoundText != NULL)
-		{
-			ColumnBound *lowerBound = CreateColumnBoundForLeafField(leafField, lowerBoundText);
+		ColumnBound *lowerBound = NULL;
+		ColumnBound *upperBound = NULL;
 
-			if (lowerBound)
-			{
-				lBounds[totalLowerBounds] = *lowerBound;
-				totalLowerBounds++;
-			}
-		}
+		if (lowerBoundText != NULL)
+			lowerBound = CreateColumnBoundForLeafField(leafField, lowerBoundText);
 
 		if (upperBoundText != NULL)
 		{
@@ -104,13 +99,23 @@ SetColumnBoundsFromDataFileStats(const DataFileStats * dataFileStats,
 			 */
 			Assert(lowerBoundText != NULL);
 
-			ColumnBound *upperBound = CreateColumnBoundForLeafField(leafField, upperBoundText);
+			upperBound = CreateColumnBoundForLeafField(leafField, upperBoundText);
+		}
 
-			if (upperBound)
-			{
-				uBounds[totalUpperBounds] = *upperBound;
-				totalUpperBounds++;
-			}
+		/*
+		 * Add bounds only when both serialize successfully.  Special values
+		 * like NaN/Infinity can cause one bound to serialize while the other
+		 * cannot (e.g. min=0.0 serializes but max=NaN does not).  Truncation
+		 * overflow can also set upperBoundText to NULL.  In both cases we
+		 * skip the column to keep lower_bounds and upper_bounds in sync.
+		 */
+		if (lowerBound != NULL && upperBound != NULL)
+		{
+			lBounds[totalLowerBounds] = *lowerBound;
+			totalLowerBounds++;
+
+			uBounds[totalUpperBounds] = *upperBound;
+			totalUpperBounds++;
 		}
 	}
 
