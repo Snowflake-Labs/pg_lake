@@ -355,16 +355,6 @@ duckdb_global_init(char *databaseFilePath,
 	}
 
 	{
-		if (snprintf(setCommand, 1024, "SET GLOBAL enable_geoparquet_conversion TO 'false'") < 0)
-		{
-			return DUCKDB_INITIALIZATION_ERROR;
-		}
-
-		if (run_command_on_duckdb(setCommand) == DuckDBError)
-			return DUCKDB_INITIALIZATION_ERROR;
-	}
-
-	{
 		if (snprintf(setCommand, 1024, "SET GLOBAL enable_object_cache TO true") < 0)
 		{
 			return DUCKDB_INITIALIZATION_ERROR;
@@ -675,6 +665,14 @@ duckdb_vector_to_pg_wire(duckdb_vector vector, duckdb_type duckType,
 						 ResponseFormat * responseFormat,
 						 StringInfo output)
 {
+	/*
+	 * GEOMETRY has no duckdb_type enum value; fall back to BLOB which handles
+	 * it via blob_to_text + the geometry-specific check.
+	 */
+	if (duckType == DUCKDB_TYPE_INVALID &&
+		duckdb_pglake_is_geometry_type(logicalType))
+		duckType = DUCKDB_TYPE_BLOB;
+
 	DuckDBTypeInfo *typeMap = find_duck_type_info(duckType);
 
 	if (typeMap == NULL || typeMap->to_text == NULL)
@@ -1130,6 +1128,24 @@ duckdb_query_result_send_column_metadata(DuckDBQueryResult * duckdb_query_result
 		const char *columnName = duckdb_column_name(duckResult, columnIndex);
 		duckdb_type duckType = duckdb_column_type(duckResult, columnIndex);
 		DuckDBResultColumn *resultColumn = &resultColumns[columnIndex];
+
+		/*
+		 * DuckDB 1.5.1 promoted GEOMETRY to a first-class LogicalTypeId with
+		 * no corresponding duckdb_type enum value, so duckdb_column_type()
+		 * returns DUCKDB_TYPE_INVALID. Map it to BLOB so our existing
+		 * blob_to_text handler can convert it to hex WKB.
+		 */
+		if (duckType == DUCKDB_TYPE_INVALID)
+		{
+			duckdb_logical_type colLogicalType =
+				duckdb_column_logical_type(duckResult, columnIndex);
+
+			if (colLogicalType != NULL &&
+				duckdb_pglake_is_geometry_type(colLogicalType))
+				duckType = DUCKDB_TYPE_BLOB;
+
+			duckdb_destroy_logical_type(&colLogicalType);
+		}
 
 		Oid			originalTableId = 0;
 		AttrNumber	originalColumnNumber = 0;

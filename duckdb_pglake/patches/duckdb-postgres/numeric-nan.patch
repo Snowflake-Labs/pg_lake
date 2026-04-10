@@ -1,5 +1,5 @@
 diff --git a/src/include/postgres_binary_reader.hpp b/src/include/postgres_binary_reader.hpp
-index f4bc336..d9e92f1 100644
+index 5b5cca9..cbbc708 100644
 --- a/src/include/postgres_binary_reader.hpp
 +++ b/src/include/postgres_binary_reader.hpp
 @@ -136,9 +136,11 @@ protected:
@@ -29,7 +29,7 @@ index 391429e..ba4162b 100644
  
  struct PostgresConversion {
 diff --git a/src/postgres_binary_reader.cpp b/src/postgres_binary_reader.cpp
-index 86ebe30..9a49f8c 100644
+index c7fd72e..dd96b11 100644
 --- a/src/postgres_binary_reader.cpp
 +++ b/src/postgres_binary_reader.cpp
 @@ -137,6 +137,7 @@ PostgresDecimalConfig PostgresBinaryReader::ReadDecimalConfig() {
@@ -55,7 +55,7 @@ index 86ebe30..9a49f8c 100644
  			break;
  		}
  		D_ASSERT(value_len == sizeof(double));
-@@ -284,22 +288,26 @@ void PostgresBinaryReader::ReadValue(const LogicalType &type, const PostgresType
+@@ -294,22 +298,26 @@ void PostgresBinaryReader::ReadValue(const LogicalType &type, const PostgresType
  		if (value_len < sizeof(uint16_t) * 4) {
  			throw InvalidInputException("Need at least 8 bytes to read a Postgres decimal. Got %d", value_len);
  		}
@@ -87,12 +87,12 @@ index 86ebe30..9a49f8c 100644
  	}
  
 diff --git a/src/postgres_text_reader.cpp b/src/postgres_text_reader.cpp
-index 066e072..e3cfa67 100644
+index 3f41a8f..c1e3632 100644
 --- a/src/postgres_text_reader.cpp
 +++ b/src/postgres_text_reader.cpp
-@@ -321,6 +321,19 @@ void PostgresTextReader::ConvertVector(Vector &source, Vector &target, const Pos
- 	case LogicalTypeId::BLOB:
- 		ConvertBlob(source, target, count);
+@@ -370,6 +370,19 @@ void PostgresTextReader::ConvertVector(Vector &source, Vector &target, const Pos
+ 	case LogicalTypeId::GEOMETRY:
+ 		ConvertGeometry(source, target, count);
  		break;
 +	case LogicalTypeId::DECIMAL: {
 +		auto strings = FlatVector::GetData<string_t>(source);

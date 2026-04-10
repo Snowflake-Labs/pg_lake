@@ -25,6 +25,7 @@
 #include "commands/defrem.h"
 #include "common/string.h"
 #include "pg_lake/csv/csv_options.h"
+#include "pg_lake/extensions/postgis.h"
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/pgduck/gdal.h"
@@ -53,7 +54,7 @@ static char *ReadDataSourceFunction(List *sourcePaths,
 									bool preferVarchar,
 									ReadRowLocationMode emitRowLocation,
 									bool emitRowId);
-static char *BuildParquetSchema(DataFileSchema * schema, bool emitRowId);
+static char *BuildParquetSchema(DataFileSchema * schema, TupleDesc expectedDesc, bool emitRowId);
 static char *GetSchemaType(Field * mapping);
 static char *ReadEmptyDataSource(TupleDesc tupleDesc, CopyDataFormat format,
 								 bool preferVarchar,
@@ -256,7 +257,7 @@ ReadDataSourceFunction(List *sourcePaths,
 
 				if (schema && schema->nfields > 0)
 				{
-					char	   *schemaOptions = BuildParquetSchema(schema, emitRowId);
+					char	   *schemaOptions = BuildParquetSchema(schema, expectedDesc, emitRowId);
 
 					if (schemaOptions != NULL)
 					{
@@ -470,8 +471,14 @@ ReadDataSourceFunction(List *sourcePaths,
 				}
 
 				char	   *path = (char *) linitial(sourcePaths);
+
+				/*
+				 * Force keep_wkb so geometry stays as raw WKB BLOB. This
+				 * avoids DuckDB's strict Arrow-to-GEOMETRY conversion that
+				 * throws on types like MULTICURVE.
+				 */
 				char	   *stReadCall =
-					GDALReadFunctionCall(path, sourceCompression, formatOptions);
+					GDALReadFunctionCall(path, sourceCompression, formatOptions, true);
 
 				appendStringInfoString(&command, stReadCall);
 				break;
@@ -566,7 +573,7 @@ ReadDataSourceFunction(List *sourcePaths,
 * read them all. The
 */
 static char *
-BuildParquetSchema(DataFileSchema * schema, bool emitRowId)
+BuildParquetSchema(DataFileSchema * schema, TupleDesc expectedDesc, bool emitRowId)
 {
 	StringInfoData schemaString;
 
@@ -591,13 +598,42 @@ BuildParquetSchema(DataFileSchema * schema, bool emitRowId)
 		}
 
 		/*
+		 * GeoParquet stores geometry as native GEOMETRY with CRS in Parquet,
+		 * but the Iceberg spec maps geometry to "binary" (BLOB).  Override to
+		 * plain GEOMETRY so read_parquet() reads the column natively rather
+		 * than trying to cast GEOMETRY to BLOB.  CRS is stripped in
+		 * BuildColumnProjection.
+		 */
+		const char *schemaType = GetSchemaType(field->type);
+
+		if (expectedDesc != NULL &&
+			field->type->type == FIELD_TYPE_SCALAR &&
+			strcmp(schemaType, "binary") == 0)
+		{
+			for (int attnum = 0; attnum < expectedDesc->natts; attnum++)
+			{
+				Form_pg_attribute attr = TupleDescAttr(expectedDesc, attnum);
+
+				if (attr->attisdropped)
+					continue;
+
+				if (strcmp(field->name, NameStr(attr->attname)) == 0 &&
+					IsGeometryTypeId(attr->atttypid))
+				{
+					schemaType = "GEOMETRY";
+					break;
+				}
+			}
+		}
+
+		/*
 		 * add this to the schema 0: {name: 'renamed_i', type: 'BIGINT',
 		 * default_value: '<default>'}
 		 */
 		appendStringInfo(&schemaString, "%d: {name: %s, type: %s, default_value: %s}",
 						 field->id,
 						 quote_literal_cstr(field->name),
-						 quote_literal_cstr(GetSchemaType(field->type)),
+						 quote_literal_cstr(schemaType),
 						 defaultValue);
 
 		addComma = true;
@@ -627,8 +663,10 @@ GetSchemaType(Field * field)
 	switch (field->type)
 	{
 		case FIELD_TYPE_SCALAR:
-			/* For scalar types, simply append the type name */
-			appendStringInfoString(&str, field->field.scalar.typeName);
+			if (strncasecmp(field->field.scalar.typeName, "fixed[", 6) == 0)
+				appendStringInfoString(&str, "binary");
+			else
+				appendStringInfoString(&str, field->field.scalar.typeName);
 			break;
 
 		case FIELD_TYPE_LIST:
@@ -1304,18 +1342,17 @@ GuessStorageType(DuckDBTypeInfo engineType, CopyDataFormat sourceFormat)
 
 	if (engineType.typeId == DUCKDB_TYPE_GEOMETRY)
 	{
-		if (sourceFormat == DATA_FORMAT_PARQUET ||
-			sourceFormat == DATA_FORMAT_ICEBERG)
-		{
-			/*
-			 * Geometry is stored as a WKB blob in Parquet, we ask for it as
-			 * BLOB such that we can call ST_GeomFromWKB
-			 */
-			storageType.typeId = DUCKDB_TYPE_BLOB;
-			storageType.typeName = engineType.isArrayType ? "BLOB[]" : "BLOB";
-		}
-		else if (sourceFormat == DATA_FORMAT_JSON ||
-				 sourceFormat == DATA_FORMAT_CSV)
+		/*
+		 * For Parquet/Iceberg, keep GEOMETRY as-is so DuckDB reads it
+		 * natively via GeoParquet. For old files without GeoParquet metadata,
+		 * DuckDB casts BLOB to GEOMETRY automatically.
+		 *
+		 * JSON and CSV store geometry as text (GeoJSON / WKT), so we override
+		 * to VARCHAR here and convert via spatial functions in
+		 * BuildColumnProjection.
+		 */
+		if (sourceFormat == DATA_FORMAT_JSON ||
+			sourceFormat == DATA_FORMAT_CSV)
 		{
 			/*
 			 * Geometry is stored as a GeoJSON in JSON, we ask for it as
@@ -1371,7 +1408,7 @@ GuessStorageType(DuckDBTypeInfo engineType, CopyDataFormat sourceFormat)
  * do its own casting or alias then we end up with invalid/weird expressions
  * here, such as:
  *
- * ST_AsWKB(geom :: BLOB) AS geom :: geometry AS geom
+ * ST_SetCRS(geom, '') AS geom :: geometry AS geom
  *
  * Since only the caller knows whether it will be doing that, it will tell us
  * if we need to add our own column aliasing in this case.
@@ -1415,22 +1452,51 @@ BuildColumnProjection(char *columnName,
 	if (engineType.typeId == DUCKDB_TYPE_GEOMETRY && !engineType.isArrayType)
 	{
 		/*
-		 * Geometry requires special casts using spatial functions
+		 * Geometry requires special casts using spatial functions.
+		 *
+		 * For Parquet/Iceberg the column is read as native GEOMETRY with CRS
+		 * stripped so that pushed-down WHERE clauses using functions like
+		 * ST_Distance_Spheroid work correctly (DuckDB 1.5+ requires plain
+		 * GEOMETRY for implicit POINT_2D casts). SRID is preserved by PostGIS
+		 * via the column's typmod.
 		 */
 		if (FormatUsesParquet(sourceFormat))
-			/* assume geometry in Parquet is stored as WKB blob */
-			return psprintf("ST_GeomFromWKB(%s::blob)%s",
+		{
+			/*
+			 * GeoParquet defaults to OGC:CRS84 (SRID 4326) when no explicit
+			 * CRS is stored, and setting CRS via ST_SetCRS prevents implicit
+			 * GEOMETRY → POINT_2D casts required by DuckDB 1.5+ spheroid
+			 * functions.  Strip all CRS so that pushed-down WHERE clauses
+			 * work correctly.
+			 *
+			 * SRID preservation for the output relies on PostGIS applying the
+			 * column typmod (e.g. geometry(point,4326)) when the FDW converts
+			 * the result to PostgreSQL format.
+			 */
+			return psprintf("ST_SetCRS(%s, '')%s",
 							quote_identifier(columnName),
 							columnAliasString);
+		}
 
 		if (sourceFormat == DATA_FORMAT_CSV)
-			/* assume geometry in JSON is stored as WKT */
 			return psprintf("ST_GeomFromText(%s)%s", quote_identifier(columnName),
 							columnAliasString);
 
 		if (sourceFormat == DATA_FORMAT_JSON)
-			/* assume geometry in JSON is stored as GeoJSON */
 			return psprintf("ST_GeomFromGeoJSON(%s)%s", quote_identifier(columnName),
+							columnAliasString);
+
+
+		/*
+		 * GDAL data scans always use keep_wkb=true so geometry arrives as raw
+		 * WKB BLOB. The hex(TRY_CAST(... AS BLOB)) path converts it directly.
+		 * The ST_AsHexWKB fallback exists for safety but should not be
+		 * reached.
+		 */
+		if (sourceFormat == DATA_FORMAT_GDAL)
+			return psprintf("COALESCE(hex(TRY_CAST(%s AS BLOB)), ST_AsHexWKB(TRY_CAST(%s AS GEOMETRY)))%s",
+							quote_identifier(columnName),
+							quote_identifier(columnName),
 							columnAliasString);
 	}
 

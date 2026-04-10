@@ -253,7 +253,7 @@ def test_explain_explicit_cardinality(pg_conn, s3, with_default_location):
     assert custom_scan["Node Type"] == "Custom Scan"
 
     duckdb_plan = custom_scan["Plans"][0]
-    assert duckdb_plan["Node Type"] == "READ_PARQUET "
+    assert duckdb_plan["Node Type"].strip() == "READ_PARQUET"
     assert duckdb_plan["Estimated Cardinality"] == "101"
 
     # first, delete one row, then check the plan with position deletes
@@ -286,7 +286,7 @@ def test_explain_explicit_cardinality(pg_conn, s3, with_default_location):
     assert hash_join_plan["Estimated Cardinality"] == "101"
 
     source_read_parquet_plan = hash_join_plan["Plans"][0]
-    assert source_read_parquet_plan["Node Type"] == "READ_PARQUET "
+    assert source_read_parquet_plan["Node Type"].strip() == "READ_PARQUET"
     assert source_read_parquet_plan["Estimated Cardinality"] == "101"
 
     position_delete_projection_plan = hash_join_plan["Plans"][1]
@@ -295,7 +295,7 @@ def test_explain_explicit_cardinality(pg_conn, s3, with_default_location):
     assert position_delete_projection_plan["Estimated Cardinality"] == "1"
 
     position_delete_read_parquet_plan = position_delete_projection_plan["Plans"][0]
-    assert position_delete_read_parquet_plan["Node Type"] == "READ_PARQUET "
+    assert position_delete_read_parquet_plan["Node Type"].strip() == "READ_PARQUET"
     assert position_delete_read_parquet_plan["Estimated Cardinality"] == "1"
 
 

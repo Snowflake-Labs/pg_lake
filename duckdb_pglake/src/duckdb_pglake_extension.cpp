@@ -37,6 +37,7 @@
 #include "duckdb/function/scalar/string_common.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/main/extension_helper.hpp"
+#include "duckdb/common/types/geometry_crs.hpp"
 
 #include "httpfs.hpp"
 #include "s3fs.hpp"
@@ -585,6 +586,46 @@ DUCKDB_EXTENSION_API const char * duckdb_pglake_geometry_to_string(duckdb_databa
 	duckdb::Value hexWKB = PgLakeGeometryToHexWKB(db, data);
 
 	return strdup(hexWKB.ToString().c_str());
+}
+
+DUCKDB_EXTENSION_API bool duckdb_pglake_is_geometry_type(duckdb_logical_type type) {
+	if (!type) {
+		return false;
+	}
+	auto *logical_type = reinterpret_cast<duckdb::LogicalType *>(type);
+	return logical_type->id() == duckdb::LogicalTypeId::GEOMETRY;
+}
+
+DUCKDB_EXTENSION_API int duckdb_pglake_geometry_get_srid(duckdb_logical_type type) {
+	if (!type) {
+		return 0;
+	}
+	auto *logical_type = reinterpret_cast<duckdb::LogicalType *>(type);
+	if (logical_type->id() != duckdb::LogicalTypeId::GEOMETRY) {
+		return 0;
+	}
+	if (!duckdb::GeoType::HasCRS(*logical_type)) {
+		return 0;
+	}
+	auto &crs = duckdb::GeoType::GetCRS(*logical_type);
+	auto &identifier = crs.GetIdentifier();
+
+	// Handle AUTHORITY:NUMERIC_CODE format (e.g. "EPSG:4326")
+	auto colon = identifier.find(':');
+	if (colon != std::string::npos) {
+		try {
+			return std::stoi(identifier.substr(colon + 1));
+		} catch (...) {
+			// Not a numeric code, fall through to well-known identifier check
+		}
+	}
+
+	// Handle well-known non-numeric CRS identifiers
+	if (identifier == "OGC:CRS84") {
+		return 4326;
+	}
+
+	return 0;
 }
 
 DUCKDB_EXTENSION_API void duckdb_pglake_set_output_verbose(bool verbose) {

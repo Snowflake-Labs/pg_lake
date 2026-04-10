@@ -200,13 +200,8 @@ def test_gdal_zip_gml(
         user_conn,
     )
 
-    # Querying is currently not supported because WKB is converted by DuckDB
-    # Error messages reflect different DuckDB spatial versions
-    error = run_query("SELECT shape FROM test_gdal.fdw", user_conn, raise_error=False)
-    assert (
-        "Geometry type 10 not supported" in error
-        or "'MULTICURVE' is not supported" in error
-    )
+    result = run_query("SELECT shape FROM test_gdal.fdw", user_conn)
+    assert len(result) == 5
 
     user_conn.rollback()
 
@@ -221,7 +216,7 @@ def test_gdal_zip_gml(
         user_conn,
         raise_error=False,
     )
-    assert "could not be found" in error
+    assert "could not be found" in error or "Could not find layer" in error
 
     user_conn.rollback()
 

@@ -248,7 +248,7 @@ def test_invalid_url(s3, pg_conn, extension):
     error = run_command(
         f"SELECT lake_file_cache.add('{url_notexists}');", pg_conn, raise_error=False
     )
-    assert "NOT FOUND" in error
+    assert "NOT FOUND" in error.upper()
 
     pg_conn.rollback()
 

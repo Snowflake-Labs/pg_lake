@@ -1145,8 +1145,8 @@ CreateIcebergManifestEntryFromMetadataOperation(TableMetadataOperation * operati
 	manifestEntry->has_sequence_number = true;
 	manifestEntry->sequence_number = sequenceNumber;
 
-	manifestEntry->file_sequence_number = 0;
-	manifestEntry->has_file_sequence_number = false;
+	manifestEntry->file_sequence_number = sequenceNumber;
+	manifestEntry->has_file_sequence_number = true;
 
 	SetIcebergDataFileStats(&operation->dataFileStats,
 							&manifestEntry->data_file.record_count,

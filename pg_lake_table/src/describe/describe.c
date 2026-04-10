@@ -375,8 +375,12 @@ DescribeColumnsQueryForURL(char *url,
 	}
 	else if (format == DATA_FORMAT_GDAL)
 	{
+		/*
+		 * DESCRIBE needs the native GEOMETRY type so foreign table columns
+		 * are created as PostGIS geometry, not bytea.
+		 */
 		appendStringInfo(&command, "FROM %s",
-						 GDALReadFunctionCall(url, compression, copyOptions));
+						 GDALReadFunctionCall(url, compression, copyOptions, false));
 	}
 	else
 	{

@@ -414,8 +414,12 @@ TupleDescToProjectionListForWrite(TupleDesc tupleDesc, CopyDataFormat destinatio
 		/*
 		 * In case of geometry, we write WKT in csv_writer.c and parse it as
 		 * GEOMETRY via read_csv. Just before writing to the destination, we
-		 * convert to a form that makes sense for the destination format,
-		 * namely WKB blob in Parquet and GeoJSON in JSON.
+		 * convert to a form that makes sense for the destination format.
+		 *
+		 * For Parquet/Iceberg we keep the column as native GEOMETRY so that
+		 * DuckDB's GeoParquet writer can emit CRS metadata preserving the
+		 * SRID. When the PostgreSQL column carries an SRID we set the CRS via
+		 * ST_SetCRS.
 		 *
 		 * In case of CSV we preserve the WKT as written by csv_writer.c
 		 */
@@ -423,9 +427,13 @@ TupleDescToProjectionListForWrite(TupleDesc tupleDesc, CopyDataFormat destinatio
 		{
 			if (destinationFormat == DATA_FORMAT_PARQUET ||
 				destinationFormat == DATA_FORMAT_ICEBERG)
-				appendStringInfo(&projection, "ST_AsWKB(%s) AS ",
-								 quote_identifier(columnName));
+			{
+				int			srid = GEOMETRY_GET_SRID(column->atttypmod);
 
+				if (srid > 0)
+					appendStringInfo(&projection, "ST_SetCRS(%s, 'EPSG:%d') AS ",
+									 quote_identifier(columnName), srid);
+			}
 			else if (destinationFormat == DATA_FORMAT_JSON)
 				appendStringInfo(&projection, "ST_AsGeoJSON(%s) AS ",
 								 quote_identifier(columnName));

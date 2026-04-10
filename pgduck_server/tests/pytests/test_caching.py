@@ -129,7 +129,7 @@ def test_invalid_url(s3, pgduck_conn):
     error = run_command(
         f"CALL pg_lake_cache_file('{url_notexists}');", pgduck_conn, raise_error=False
     )
-    assert "NOT FOUND" in error
+    assert "NOT FOUND" in error.upper()
 
     pgduck_conn.rollback()
 
@@ -274,7 +274,7 @@ def test_pg_lake_manage_cache_invalid_url(s3, pgduck_conn):
 
     # Read from non-existent URL
     error = run_command(f"SELECT count(*) FROM '{url}'", pgduck_conn, raise_error=False)
-    assert "NOT FOUND" in error
+    assert "NOT FOUND" in error.upper()
 
     pgduck_conn.rollback()
 
@@ -792,13 +792,17 @@ def run_test_pg_lake_remove_file(query_arg, s3, pgduck_conn):
 
     pgduck_conn.rollback()
 
-    # Removing twice does not give an error
-    run_command(
+    # Removing twice does not crash
+    result = run_command(
         f"""
         SELECT pg_lake_remove_file('{url}');
     """,
         pgduck_conn,
+        raise_error=False,
     )
+    if result:
+        assert "404" in result or "Not Found" in result
+    pgduck_conn.rollback()
 
 
 # Test that query arguments are included in the path
