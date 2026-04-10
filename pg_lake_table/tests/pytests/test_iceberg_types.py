@@ -2715,6 +2715,157 @@ def test_iceberg_interval_type(pg_conn, s3, extension, with_default_location):
     pg_conn.commit()
 
 
+def test_iceberg_domain_in_nested_types(pg_conn, s3, extension, with_default_location):
+    """Domains inside composites, arrays, maps, and domain-over-domain must
+    round-trip through every write path: INSERT VALUES, COPY TO parquet,
+    COPY FROM parquet, and INSERT ... SELECT pushdown.
+    """
+    schema = "test_domain_nested"
+    parquet_url = f"s3://{TEST_BUCKET}/{schema}/export.parquet"
+
+    run_command(
+        f"""
+        CREATE SCHEMA {schema};
+        SET search_path TO {schema};
+
+        CREATE DOMAIN d_int AS int;
+        CREATE DOMAIN d_text AS text;
+        CREATE DOMAIN dd_text AS d_text;
+
+        CREATE TYPE comp AS (a d_int, b dd_text);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    map_type_name = create_map_type("int", f"{schema}.dd_text")
+
+    run_command(
+        f"""
+        SET search_path TO {schema};
+
+        CREATE TABLE src (
+            id int,
+            c comp,
+            ca comp[],
+            plain_d dd_text,
+            m {map_type_name}
+        ) USING iceberg;
+
+        INSERT INTO src VALUES
+            (1,
+             ROW(42, 'hello')::comp,
+             ARRAY[ROW(1, 'a'), ROW(2, 'b')]::comp[],
+             'world',
+             ARRAY[(10, 'x'), (20, 'y')]::{map_type_name}),
+            (2,
+             ROW(99, NULL)::comp,
+             ARRAY[ROW(3, 'c')]::comp[],
+             NULL,
+             NULL),
+            (3,
+             NULL,
+             NULL,
+             'zz',
+             ARRAY[(30, NULL)]::{map_type_name});
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # -- verify INSERT VALUES round-trip --
+    result = run_query(
+        f"SELECT id, c, ca, plain_d, m FROM {schema}.src ORDER BY id", pg_conn
+    )
+    assert len(result) == 3
+    assert result[0][0] == 1
+    assert result[0][1] == "(42,hello)"
+    assert result[0][2] == '{"(1,a)","(2,b)"}'
+    assert result[0][3] == "world"
+    assert result[1][0] == 2
+    assert result[1][1] == "(99,)"
+    assert result[1][2] == '{"(3,c)"}'
+    assert result[1][3] is None
+    assert result[1][4] is None
+    assert result[2][0] == 3
+    assert result[2][1] is None
+    assert result[2][2] is None
+    assert result[2][3] == "zz"
+
+    # -- COPY TO parquet --
+    run_command(
+        f"COPY (SELECT * FROM {schema}.src ORDER BY id) TO '{parquet_url}'", pg_conn
+    )
+
+    # -- COPY FROM parquet --
+    run_command(
+        f"""
+        SET search_path TO {schema};
+
+        CREATE TABLE tgt_copy (
+            id int,
+            c comp,
+            ca comp[],
+            plain_d dd_text,
+            m {map_type_name}
+        ) USING iceberg;
+
+        COPY tgt_copy FROM '{parquet_url}';
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        f"SELECT id, c, ca, plain_d FROM {schema}.tgt_copy ORDER BY id", pg_conn
+    )
+    assert len(result) == 3
+    assert result[0] == [1, "(42,hello)", '{"(1,a)","(2,b)"}', "world"]
+    assert result[1] == [2, "(99,)", '{"(3,c)"}', None]
+    assert result[2] == [3, None, None, "zz"]
+
+    # -- INSERT ... SELECT --
+    run_command(
+        f"""
+        SET search_path TO {schema};
+
+        CREATE TABLE tgt_pushdown (
+            id int,
+            c comp,
+            ca comp[],
+            plain_d dd_text,
+            m {map_type_name}
+        ) USING iceberg;
+
+        INSERT INTO tgt_pushdown SELECT * FROM src;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        f"SELECT id, c, ca, plain_d FROM {schema}.tgt_pushdown ORDER BY id", pg_conn
+    )
+    assert len(result) == 3
+    assert result[0] == [1, "(42,hello)", '{"(1,a)","(2,b)"}', "world"]
+    assert result[1] == [2, "(99,)", '{"(3,c)"}', None]
+    assert result[2] == [3, None, None, "zz"]
+
+    # cleanup: drop iceberg tables first to avoid cross-schema cascade issues
+    # with map internal types
+    run_command(
+        f"""
+        DROP TABLE {schema}.tgt_pushdown;
+        DROP TABLE {schema}.tgt_copy;
+        DROP TABLE {schema}.src;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+    run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 @pytest.fixture(scope="module")
 def create_helper_functions(superuser_conn, app_user):
 
