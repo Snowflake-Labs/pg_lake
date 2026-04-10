@@ -40,8 +40,6 @@
 #include "pg_lake/pgduck/parse_struct.h"
 #include "utils/lsyscache.h"
 
-static char *TupleDescToProjectionListForWrite(TupleDesc tupleDesc,
-											   CopyDataFormat destinationFormat);
 static DuckDBTypeInfo ChooseDuckDBEngineTypeForWrite(PGType postgresType,
 													 CopyDataFormat destinationFormat);
 static void AppendFieldIdValue(StringInfo map, Field * field, int fieldId);
@@ -381,7 +379,7 @@ WriteQueryResultTo(char *query,
  * TupleDescToProjectionList converts a PostgreSQL tuple descriptor to
  * projection list in string form that can be used for writes.
  */
-static char *
+char *
 TupleDescToProjectionListForWrite(TupleDesc tupleDesc, CopyDataFormat destinationFormat)
 {
 	Assert(tupleDesc != NULL);
