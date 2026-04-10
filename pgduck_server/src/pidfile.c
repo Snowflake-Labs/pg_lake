@@ -29,7 +29,7 @@
 #define MAXPGPATH 1024
 
 static int	my_pidfile;
-static char	pidfile_path[MAXPGPATH];
+static char pidfile_path[MAXPGPATH];
 
 /**
  * @brief Creates and locks a PID file.

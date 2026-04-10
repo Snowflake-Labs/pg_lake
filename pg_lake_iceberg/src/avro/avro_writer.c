@@ -618,7 +618,7 @@ AvroSetInt32ArrayField(avro_value_t * record, char *fieldName, int32_t *values, 
 
 
 void
-AvroSetInt64ArrayField(avro_value_t * record, char *fieldName, int64_t * values, size_t valueCount)
+AvroSetInt64ArrayField(avro_value_t * record, char *fieldName, int64_t *values, size_t valueCount)
 {
 	avro_value_t arrayValue;
 	bool		isSet = valueCount > 0;

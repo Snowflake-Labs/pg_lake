@@ -203,7 +203,7 @@ AvroGetNullableInt32Field(avro_value_t * record, char *fieldName, int32_t *intPo
 
 
 void
-AvroGetInt64Field(avro_value_t * record, char *fieldName, AvroFieldRequired required, int64_t * longPointer)
+AvroGetInt64Field(avro_value_t * record, char *fieldName, AvroFieldRequired required, int64_t *longPointer)
 {
 	avro_value_t fieldValue;
 
@@ -221,7 +221,7 @@ AvroGetInt64Field(avro_value_t * record, char *fieldName, AvroFieldRequired requ
 
 
 void
-AvroGetNullableInt64Field(avro_value_t * record, char *fieldName, int64_t * longPointer, bool *isSet)
+AvroGetNullableInt64Field(avro_value_t * record, char *fieldName, int64_t *longPointer, bool *isSet)
 {
 	avro_value_t fieldValue;
 
@@ -399,7 +399,7 @@ AvroGetInt32ArrayField(avro_value_t * record, char *fieldName, AvroFieldRequired
 
 void
 AvroGetInt64ArrayField(avro_value_t * record, char *fieldName, AvroFieldRequired required,
-					   int64_t * *arrayPointer, size_t *lengthPointer)
+					   int64_t **arrayPointer, size_t *lengthPointer)
 {
 	avro_value_t fieldValue;
 	size_t		itemCount;
@@ -557,7 +557,7 @@ AvroExtractNullableFieldFromRecordByIndex(avro_value_t * record, int index,
 	{
 		*value = palloc0(sizeof(int64_t));
 		*valueLength = sizeof(int64_t);
-		rc = avro_value_get_long(&fieldValue, (int64_t *) * value);
+		rc = avro_value_get_long(&fieldValue, (int64_t *) *value);
 	}
 	else if (fieldType == AVRO_STRING)
 	{

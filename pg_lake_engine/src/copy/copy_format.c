@@ -391,7 +391,10 @@ OptionsToCopyDataCompression(List *copyOptions)
 const char *
 FormatToFileExtension(CopyDataFormat format, CopyDataCompression compression)
 {
-	/* Parquet files use a single extension (Iceberg data files are also Parquet) */
+	/*
+	 * Parquet files use a single extension (Iceberg data files are also
+	 * Parquet)
+	 */
 	if (FormatUsesParquet(format))
 		return ".parquet";
 

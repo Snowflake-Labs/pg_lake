@@ -48,7 +48,9 @@ UNAME_S := $(shell uname -s)
 
 # List of targets for indent checks
 INDENT_TARGETS = pgduck_server $(EXTENSION_TARGETS)
-TYPEDEFS = /tmp/typedefs-$(PG_MAJOR_VERSION).list
+PG_INDENT_VERSION = 18
+PG_INDENT ?= pgindent
+TYPEDEFS = /tmp/typedefs-$(PG_INDENT_VERSION).list
 
 CMAKE_AVRO_ARGS = -DCMAKE_INSTALL_PREFIX=avrolib -DCMAKE_BUILD_TYPE=RelWithDebInfo
 
@@ -63,7 +65,7 @@ endif
 
 # style/indent-related changes
 
-# This target ensures that we download the latest major version's typedefs.list
+# This target ensures that we download the PG_INDENT_VERSION's typedefs.list
 # from buildfarm if we don't have a local copy.  Since we currently do not
 # override the typedefs.list, this should be equivalent to what we were
 # previously doing by pulling from the postgres source tree.
@@ -71,16 +73,14 @@ endif
 typedefs: $(TYPEDEFS)
 
 $(TYPEDEFS):
-	curl -o $(TYPEDEFS) https://buildfarm.postgresql.org/cgi-bin/typedefs.pl?branch=REL_$(PG_MAJOR_VERSION)_STABLE
+	curl -o $(TYPEDEFS) https://buildfarm.postgresql.org/cgi-bin/typedefs.pl?branch=REL_$(PG_INDENT_VERSION)_STABLE
 
 check-indent: typedefs
-	for dir in $(INDENT_TARGETS); do \
-		pgindent --typedefs=$(TYPEDEFS) $(INDENT_TARGETS); \
-	done
+	$(PG_INDENT) --typedefs=$(TYPEDEFS) --check --diff $(INDENT_TARGETS)
 	pipenv run black --check --diff $(INDENT_TARGETS)
 
 reindent: typedefs
-	pgindent --typedefs=$(TYPEDEFS) $(INDENT_TARGETS)
+	$(PG_INDENT) --typedefs=$(TYPEDEFS) $(INDENT_TARGETS)
 	pipenv run black $(INDENT_TARGETS)
 
 submodules:

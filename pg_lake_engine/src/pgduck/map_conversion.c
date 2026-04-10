@@ -127,7 +127,7 @@ MapOutForPGDuck(Datum myMap, CopyDataFormat format)
 			ereport(ERROR, (errmsg("cannot have NULL for map key entry")));;
 
 		serializedKey = PGDuckSerialize(&keysExtra->proc, keysElementType, pairValues[0],
-								format);
+										format);
 		if (!keyIsContainer)
 			serializedKey = (char *) quote_literal_cstr(serializedKey);
 

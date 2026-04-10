@@ -70,4 +70,4 @@ void		AvroSetBinaryField(avro_value_t * record, char *fieldName, const void *byt
 void		AvroSetNullableBinaryField(avro_value_t * record, char *fieldName, const void *bytes, size_t length, bool isSet);
 void		AvroSetRecordArrayField(avro_value_t * record, char *fieldName, AvroSerializeFunction serializeFn, size_t entrySize, void *entryArray, size_t entryCount);
 void		AvroSetInt32ArrayField(avro_value_t * record, char *fieldName, int32_t *values, size_t valueCount);
-void		AvroSetInt64ArrayField(avro_value_t * record, char *fieldName, int64_t * values, size_t valueCount);
+void		AvroSetInt64ArrayField(avro_value_t * record, char *fieldName, int64_t *values, size_t valueCount);
