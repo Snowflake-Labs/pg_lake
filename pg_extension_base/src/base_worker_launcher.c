@@ -1308,7 +1308,7 @@ ComputeNextWakeTimeMs(void)
 			break;
 		}
 
-		int64		secDiff;
+		long		secDiff;
 		int			microsecDiff;
 
 		TimestampDifference(now, workerEntry->restartAfter, &secDiff, &microsecDiff);
