@@ -610,8 +610,8 @@ RewriteQueryTreeForPGDuckMutator(Node *node, RewriteQueryTreeContext * context)
 		 * DuckDB's binder compares the GROUPING() children against the GROUP
 		 * BY expressions using parsed expression equality. When the GROUP BY
 		 * has "true::boolean" but GROUPING has just "true", DuckDB sees them
-		 * as different expressions and raises:
-		 * "GROUPING child must be a grouping column".
+		 * as different expressions and raises: "GROUPING child must be a
+		 * grouping column".
 		 *
 		 * To fix this, we wrap any Const args in the GroupingFunc with an
 		 * explicit RelabelType cast so that ruleutils deparses them with the
@@ -789,7 +789,7 @@ RewriteConst(Const *constExpr)
 
 	/* serialize Const in the DuckDB format */
 	char	   *pgduckText = PGDuckSerialize(&outFunc, constTypeId, constExpr->constvalue,
-											  DATA_FORMAT_INVALID);
+											 DATA_FORMAT_INVALID);
 
 	/* construct a text constant with the rewritten text */
 	Const	   *textConst = makeNode(Const);
@@ -2295,7 +2295,8 @@ RewriteFuncExprInitcap(Node *node, void *context)
 	if (list_length(funcExpr->args) != 1)
 		return node;
 
-	Oid	collation = funcExpr->inputcollid;
+	Oid			collation = funcExpr->inputcollid;
+
 	if (collation != InvalidOid &&
 		!(collation == DEFAULT_COLLATION_OID || collation == C_COLLATION_OID))
 		return node;

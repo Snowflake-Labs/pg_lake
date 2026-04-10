@@ -45,7 +45,7 @@
 
 static HttpResult HttpCommonNoThrows(HttpMethod method, const char *url, const char *postData,
 									 const List *headers);
-static bool CheckMinCurlVersion(const curl_version_info_data * versionInfo);
+static bool CheckMinCurlVersion(const curl_version_info_data *versionInfo);
 static size_t CurlResponseBodyWriteCallback(void *ptr, size_t size, size_t nmemb, void *userdata);
 static size_t CurlResponseHeaderWriteCallback(void *ptr, size_t size, size_t nmemb, void *userdata);
 static void GrowResponseData(char **data, size_t *dataLength, void *newData, size_t newDataBytes);
@@ -55,13 +55,13 @@ static int	CurlProgressCallback(void *clientp, curl_off_t dltotal, curl_off_t dl
 #endif
 static void CurlLogError(CURLcode curlCode, const char *error_buffer);
 static CURLcode CurlGloballyInitIfNotInitialized(void);
-static CURLcode CurlSetErrorBuffer(CURL * curl, char **errorBuffer);
-static CURLcode CurlSetOptions(CURL * curl, const char *url, HttpMethod method,
+static CURLcode CurlSetErrorBuffer(CURL *curl, char **errorBuffer);
+static CURLcode CurlSetOptions(CURL *curl, const char *url, HttpMethod method,
 							   const char *postData, HttpResult * httpResult);
-static CURLcode CurlSetHeaders(CURL * curl, const List *headers, struct curl_slist **headerList);
+static CURLcode CurlSetHeaders(CURL *curl, const List *headers, struct curl_slist **headerList);
 static void CurlGlobalCleanup(int code, Datum arg);
-static void CurlCleanup(CURL * curl, struct curl_slist *headerList);
-static HttpResult CurlReturnError(CURL * curl, struct curl_slist *headerList,
+static void CurlCleanup(CURL *curl, struct curl_slist *headerList);
+static HttpResult CurlReturnError(CURL *curl, struct curl_slist *headerList,
 								  CURLcode curlCode, const char *errorMsg);
 static const char *HttpRequestMethodToString(HttpMethod method);
 static char *RedactSensitiveJson(char *s);
@@ -110,7 +110,7 @@ CurlGloballyInitIfNotInitialized(void)
  * CurlSetErrorBuffer sets up the error buffer for a given CURL handle.
  */
 static CURLcode
-CurlSetErrorBuffer(CURL * curl, char **errorBuffer)
+CurlSetErrorBuffer(CURL *curl, char **errorBuffer)
 {
 	ereport(DEBUG4, (errmsg("setting libcurl error buffer")));
 
@@ -132,7 +132,7 @@ CurlSetErrorBuffer(CURL * curl, char **errorBuffer)
  * CurlSetOptions sets the options for a given CURL handle.
  */
 static CURLcode
-CurlSetOptions(CURL * curl, const char *url, HttpMethod method,
+CurlSetOptions(CURL *curl, const char *url, HttpMethod method,
 			   const char *postData, HttpResult * res)
 {
 	ereport(DEBUG4, (errmsg("setting libcurl options")));
@@ -198,7 +198,7 @@ CurlSetOptions(CURL * curl, const char *url, HttpMethod method,
  * CurlSetHeaders sets the headers for a given CURL handle.
  */
 static CURLcode
-CurlSetHeaders(CURL * curl, const List *headers, struct curl_slist **headerList)
+CurlSetHeaders(CURL *curl, const List *headers, struct curl_slist **headerList)
 {
 	ereport(DEBUG4, (errmsg("setting libcurl headers")));
 
@@ -238,7 +238,7 @@ CurlGlobalCleanup(int code, Datum arg)
  * CurlCleanup cleans up given curl handle and headers.
  */
 static void
-CurlCleanup(CURL * curl, struct curl_slist *headerList)
+CurlCleanup(CURL *curl, struct curl_slist *headerList)
 {
 	ereport(DEBUG4, (errmsg("cleaning up libcurl")));
 
@@ -255,7 +255,7 @@ CurlCleanup(CURL * curl, struct curl_slist *headerList)
  * with the error message.
  */
 static HttpResult
-CurlReturnError(CURL * curl, struct curl_slist *headerList,
+CurlReturnError(CURL *curl, struct curl_slist *headerList,
 				CURLcode curlCode, const char *errorMsg)
 {
 	CurlLogError(curlCode, errorMsg);
@@ -496,7 +496,7 @@ CurlLogError(CURLcode curlCode, const char *error_buffer)
  * CheckMinCurlVersion checks if curl version >= the minimum required version.
  */
 static bool
-CheckMinCurlVersion(const curl_version_info_data * versionInfo)
+CheckMinCurlVersion(const curl_version_info_data *versionInfo)
 {
 	elog(DEBUG4, "curl version %s", versionInfo->version);
 	elog(DEBUG4, "curl version number 0x%x", versionInfo->version_num);

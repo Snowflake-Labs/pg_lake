@@ -21,7 +21,7 @@
 
 Oid			GetOrCreatePGMapType(const char *name);
 char	   *GetDuckDBMapDefinitionForPGType(Oid postgresTypeId,
-										CopyDataFormat format);
+											CopyDataFormat format);
 
 extern PGDLLEXPORT bool IsMapTypeOid(Oid typeId);
 extern PGDLLEXPORT PGType GetMapKeyType(Oid mapOid);

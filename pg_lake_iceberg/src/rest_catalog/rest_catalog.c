@@ -76,7 +76,7 @@ typedef enum RestCatalogRequestRetryAction
 	REST_CATALOG_RETRY_STOP,
 	REST_CATALOG_RETRY_BACKOFF_SHORT,	/* 429 Too Many Requests */
 	REST_CATALOG_RETRY_BACKOFF_LONG,	/* 503 Service Unavailable */
-	REST_CATALOG_RETRY_REFRESH_AUTH		/* 419 Token Expired */
+	REST_CATALOG_RETRY_REFRESH_AUTH /* 419 Token Expired */
 }			RestCatalogRequestRetryAction;
 
 /*
@@ -1160,8 +1160,9 @@ SendRequestToRestCatalog(HttpMethod method, const char *url, const char *body, L
 			case REST_CATALOG_RETRY_REFRESH_AUTH:
 				{
 					/*
-					 * Force-refresh the cached token and update the Authorization
-					 * header so the retried request carries the new token.
+					 * Force-refresh the cached token and update the
+					 * Authorization header so the retried request carries the
+					 * new token.
 					 */
 					bool		forceRefreshToken = true;
 					char	   *freshToken = GetRestCatalogAccessToken(forceRefreshToken);

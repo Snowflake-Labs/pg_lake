@@ -58,8 +58,8 @@ bool		AvroFieldExists(avro_value_t * record, char *fieldName);
 void		AvroGetBoolField(avro_value_t * record, char *fieldName, AvroFieldRequired required, bool *boolPointer);
 void		AvroGetInt32Field(avro_value_t * record, char *fieldName, AvroFieldRequired required, int32_t *valPointer);
 void		AvroGetNullableInt32Field(avro_value_t * record, char *fieldName, int32_t *intPointer, bool *isSet);
-void		AvroGetInt64Field(avro_value_t * record, char *fieldName, AvroFieldRequired required, int64_t * valPointer);
-void		AvroGetNullableInt64Field(avro_value_t * record, char *fieldName, int64_t * longPointer, bool *isSet);
+void		AvroGetInt64Field(avro_value_t * record, char *fieldName, AvroFieldRequired required, int64_t *valPointer);
+void		AvroGetNullableInt64Field(avro_value_t * record, char *fieldName, int64_t *longPointer, bool *isSet);
 void		AvroGetStringField(avro_value_t * record, char *fieldName, AvroFieldRequired required,
 							   const char **stringPointer, size_t *lengthPointer);
 void		AvroGetNullableStringField(avro_value_t * record, char *fieldName, const char **stringPointer, size_t *lengthPointer, bool *isSet);
@@ -74,7 +74,7 @@ void		AvroGetObjectArrayField(avro_value_t * record, char *fieldName, AvroFieldR
 void		AvroGetInt32ArrayField(avro_value_t * record, char *fieldName, AvroFieldRequired required,
 								   int32_t **arrayPointer, size_t *lengthPointer);
 void		AvroGetInt64ArrayField(avro_value_t * record, char *fieldName, AvroFieldRequired required,
-								   int64_t * *arrayPointer, size_t *lengthPointer);
+								   int64_t **arrayPointer, size_t *lengthPointer);
 void		AvroGetMapField(avro_value_t * record, char *fieldName, AvroFieldRequired required,
 							AvroParseMapEntryFunction parseFn, size_t entrySize,
 							void **arrayPointer, size_t *lengthPointer, void *context);

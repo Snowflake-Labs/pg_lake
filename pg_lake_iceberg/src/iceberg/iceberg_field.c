@@ -234,8 +234,8 @@ PostgresTypeToIcebergField(PGType pgType, bool forAddColumn, int *subFieldIndex)
 		/*
 		 * Iceberg does not have a native interval type. We represent it as a
 		 * struct with months, days, and microseconds fields, matching the
-		 * internal PostgreSQL interval representation. This is self-describing
-		 * and readable by any Iceberg-compatible engine.
+		 * internal PostgreSQL interval representation. This is
+		 * self-describing and readable by any Iceberg-compatible engine.
 		 */
 		const char *names[] = {"months", "days", "microseconds"};
 

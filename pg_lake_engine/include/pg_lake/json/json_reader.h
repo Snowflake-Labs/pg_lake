@@ -31,7 +31,7 @@ typedef enum FieldRequired
 }			FieldRequired;
 
 extern PGDLLEXPORT bool JsonExtractInt32Field(JsonbContainer *json, char *fieldName, FieldRequired required, int32_t *intPointer);
-extern PGDLLEXPORT bool JsonExtractInt64Field(JsonbContainer *json, char *fieldName, FieldRequired required, int64_t * longPointer);
+extern PGDLLEXPORT bool JsonExtractInt64Field(JsonbContainer *json, char *fieldName, FieldRequired required, int64_t *longPointer);
 extern PGDLLEXPORT bool JsonExtractBoolField(JsonbContainer *json, char *fieldName, FieldRequired required, bool *boolPointer);
 extern PGDLLEXPORT bool JsonExtractStringField(JsonbContainer *json, char *fieldName, FieldRequired required,
 											   const char **stringPointer, size_t *lengthPointer);

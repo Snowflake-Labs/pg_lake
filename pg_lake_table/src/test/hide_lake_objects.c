@@ -280,10 +280,10 @@ HideObjectsCreatedByLakeFromCatalogTables(Node *node, void *context)
 				/*
 				 * In PG17+, transform_MERGE_to_join() moves jointree->quals
 				 * into a FromExpr scoped to only mergeTargetRelation, and
-				 * uses mergeJoinCondition as the JoinExpr->quals that can
-				 * see both sides. So source RTE quals must go in
-				 * mergeJoinCondition to avoid referencing a varno outside
-				 * the target-only scope (see prepjointree.c).
+				 * uses mergeJoinCondition as the JoinExpr->quals that can see
+				 * both sides. So source RTE quals must go in
+				 * mergeJoinCondition to avoid referencing a varno outside the
+				 * target-only scope (see prepjointree.c).
 				 */
 #if PG_VERSION_NUM >= 170000
 				if (query->commandType == CMD_MERGE &&

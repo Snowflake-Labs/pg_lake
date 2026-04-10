@@ -58,7 +58,7 @@ JsonExtractInt32Field(JsonbContainer *json, char *fieldName, FieldRequired requi
 
 
 bool
-JsonExtractInt64Field(JsonbContainer *json, char *fieldName, FieldRequired required, int64_t * longPointer)
+JsonExtractInt64Field(JsonbContainer *json, char *fieldName, FieldRequired required, int64_t *longPointer)
 {
 	JsonbValue *fieldValueJson;
 
