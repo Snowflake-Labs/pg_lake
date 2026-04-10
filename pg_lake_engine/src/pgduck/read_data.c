@@ -28,6 +28,7 @@
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/pgduck/gdal.h"
+#include "pg_lake/pgduck/keywords.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/pgduck/read_data.h"
@@ -670,7 +671,7 @@ GetSchemaType(Field * field)
 					/* Recursively get the field type */
 					char	   *fieldType = GetSchemaType(structElementField->type);
 
-					appendStringInfo(&str, "%s %s", quote_identifier(structElementField->name), fieldType);
+					appendStringInfo(&str, "%s %s", duckdb_quote_identifier(structElementField->name), fieldType);
 				}
 				appendStringInfoChar(&str, ')');
 				break;
@@ -724,7 +725,7 @@ ReadEmptyDataSource(TupleDesc tupleDesc, CopyDataFormat sourceFormat, bool prefe
 		appendStringInfo(&query, "%s NULL::%s AS %s",
 						 addComma ? "," : "",
 						 storageType.typeName,
-						 quote_identifier(columnName));
+						 duckdb_quote_identifier(columnName));
 
 		addComma = true;
 	}
@@ -874,7 +875,7 @@ TupleDescToAliasList(TupleDesc tupleDesc)
 
 		appendStringInfo(&alias, "%s%s",
 						 hasColumns ? "," : "(",
-						 quote_identifier(columnName));
+						 duckdb_quote_identifier(columnName));
 
 		hasColumns = true;
 	}
@@ -901,7 +902,7 @@ BuildMapWithIntervalProjection(char *columnName, Oid mapTypeId)
 	if (valType.postgresTypeOid != INTERVALOID)
 		return NULL;
 
-	const char *col = quote_identifier(columnName);
+	const char *col = duckdb_quote_identifier(columnName);
 
 	return psprintf(
 					"map_from_entries("
@@ -962,7 +963,7 @@ BuildStructWithIntervalProjection(char *columnName, Oid compositeTypeId)
 	}
 
 	StringInfoData buf;
-	const char *col = quote_identifier(columnName);
+	const char *col = duckdb_quote_identifier(columnName);
 
 	initStringInfo(&buf);
 	appendStringInfoChar(&buf, '{');
@@ -993,9 +994,9 @@ BuildStructWithIntervalProjection(char *columnName, Oid compositeTypeId)
 			appendStringInfo(&buf,
 							 "(to_months(%s.%s.months) + to_days(%s.%s.days) + "
 							 "to_microseconds(%s.%s.microseconds))",
-							 col, quote_identifier(fieldName),
-							 col, quote_identifier(fieldName),
-							 col, quote_identifier(fieldName));
+							 col, duckdb_quote_identifier(fieldName),
+							 col, duckdb_quote_identifier(fieldName),
+							 col, duckdb_quote_identifier(fieldName));
 		}
 		else if (isIntervalArray)
 		{
@@ -1003,12 +1004,12 @@ BuildStructWithIntervalProjection(char *columnName, Oid compositeTypeId)
 							 "list_transform(%s.%s, _x -> "
 							 "(to_months(_x.months) + to_days(_x.days) + "
 							 "to_microseconds(_x.microseconds)))",
-							 col, quote_identifier(fieldName));
+							 col, duckdb_quote_identifier(fieldName));
 		}
 		else
 		{
 			appendStringInfo(&buf, "%s.%s",
-							 col, quote_identifier(fieldName));
+							 col, duckdb_quote_identifier(fieldName));
 		}
 	}
 
@@ -1071,7 +1072,7 @@ TupleDescToProjectionList(TupleDesc tupleDesc, CopyDataFormat sourceFormat,
 			if (structProjection != NULL)
 			{
 				char	   *columnAliasString =
-					!addCast ? psprintf(" AS %s", quote_identifier(columnName)) : "";
+					!addCast ? psprintf(" AS %s", duckdb_quote_identifier(columnName)) : "";
 
 				if (hasColumns)
 					appendStringInfoString(&projection, ", ");
@@ -1097,7 +1098,7 @@ TupleDescToProjectionList(TupleDesc tupleDesc, CopyDataFormat sourceFormat,
 			if (mapProjection != NULL)
 			{
 				char	   *columnAliasString =
-					!addCast ? psprintf(" AS %s", quote_identifier(columnName)) : "";
+					!addCast ? psprintf(" AS %s", duckdb_quote_identifier(columnName)) : "";
 
 				if (hasColumns)
 					appendStringInfoString(&projection, ", ");
@@ -1383,7 +1384,7 @@ BuildColumnProjection(char *columnName,
 					  List *formatOptions,
 					  bool addCast)
 {
-	char	   *columnAliasString = !addCast ? psprintf(" AS %s", quote_identifier(columnName)) : "";
+	char	   *columnAliasString = !addCast ? psprintf(" AS %s", duckdb_quote_identifier(columnName)) : "";
 
 	if (engineType.typeId == DUCKDB_TYPE_INTERVAL)
 	{
@@ -1394,7 +1395,7 @@ BuildColumnProjection(char *columnName,
 			 * We reconstruct the interval using DuckDB interval constructors.
 			 * Plain Parquet files use DuckDB's native INTERVAL type.
 			 */
-			const char *col = quote_identifier(columnName);
+			const char *col = duckdb_quote_identifier(columnName);
 
 			if (engineType.isArrayType)
 				return psprintf(
@@ -1420,17 +1421,17 @@ BuildColumnProjection(char *columnName,
 		if (FormatUsesParquet(sourceFormat))
 			/* assume geometry in Parquet is stored as WKB blob */
 			return psprintf("ST_GeomFromWKB(%s::blob)%s",
-							quote_identifier(columnName),
+							duckdb_quote_identifier(columnName),
 							columnAliasString);
 
 		if (sourceFormat == DATA_FORMAT_CSV)
 			/* assume geometry in JSON is stored as WKT */
-			return psprintf("ST_GeomFromText(%s)%s", quote_identifier(columnName),
+			return psprintf("ST_GeomFromText(%s)%s", duckdb_quote_identifier(columnName),
 							columnAliasString);
 
 		if (sourceFormat == DATA_FORMAT_JSON)
 			/* assume geometry in JSON is stored as GeoJSON */
-			return psprintf("ST_GeomFromGeoJSON(%s)%s", quote_identifier(columnName),
+			return psprintf("ST_GeomFromGeoJSON(%s)%s", duckdb_quote_identifier(columnName),
 							columnAliasString);
 	}
 
@@ -1443,7 +1444,7 @@ BuildColumnProjection(char *columnName,
 			 * TIMETZ so the UTC offset (+00) is preserved rather than having
 			 * the session timezone applied during text parsing.
 			 */
-			const char *col = quote_identifier(columnName);
+			const char *col = duckdb_quote_identifier(columnName);
 
 			if (engineType.isArrayType)
 				return psprintf(
@@ -1464,14 +1465,14 @@ BuildColumnProjection(char *columnName,
 
 			if (timestampFormat != NULL)
 				return psprintf("strptime(%s, %s)%s",
-								quote_identifier(columnName),
+								duckdb_quote_identifier(columnName),
 								quote_literal_cstr(timestampFormat),
 								columnAliasString);
 		}
 
 		if (engineType.typeId != DUCKDB_TYPE_VARCHAR)
 			return psprintf("try_cast(%s AS %s)%s",
-							quote_identifier(columnName),
+							duckdb_quote_identifier(columnName),
 							engineType.typeName,
 							columnAliasString);
 	}
@@ -1485,15 +1486,15 @@ BuildColumnProjection(char *columnName,
 		 * the source file does not 100% match.
 		 */
 		return psprintf("%s::%s AS %s",
-						quote_identifier(columnName),
+						duckdb_quote_identifier(columnName),
 						engineType.typeName,
-						quote_identifier(columnName));
+						duckdb_quote_identifier(columnName));
 
 	}
 	else
 	{
 		/* no cast needed */
-		return psprintf("%s", quote_identifier(columnName));
+		return psprintf("%s", duckdb_quote_identifier(columnName));
 	}
 }
 
