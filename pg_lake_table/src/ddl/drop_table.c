@@ -480,7 +480,6 @@ static bool
 MarkAllReferencedFilesForDeletion(Oid relationId)
 {
 	TimestampTz orphanedAt = GetCurrentTransactionStartTimestamp();
-	char	   *metadataLocation = GetIcebergMetadataLocation(relationId, true);
 	MemoryContext savedContext = CurrentMemoryContext;
 
 	List	   *allFiles = NIL;
@@ -488,6 +487,8 @@ MarkAllReferencedFilesForDeletion(Oid relationId)
 
 	PG_TRY();
 	{
+		char	   *metadataLocation = GetIcebergMetadataLocation(relationId, true);
+
 		allFiles = IcebergFindAllReferencedFiles(metadataLocation);
 	}
 	PG_CATCH();
