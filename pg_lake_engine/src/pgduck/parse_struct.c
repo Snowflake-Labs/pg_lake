@@ -41,6 +41,7 @@
 #include "executor/spi.h"
 #include "nodes/makefuncs.h"
 #include "utils/builtins.h"
+#include "utils/lsyscache.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
 
@@ -1280,10 +1281,15 @@ GetCompositeTypeForPGType(Oid postgresType)
 
 		/*
 		 * Our internal representation wants to track the base type of any
-		 * array type and to carry a flag instead atttypid directly.
+		 * array type and to carry a flag instead of atttypid directly. Unwrap
+		 * domains so downstream code sees the base type, but preserve map
+		 * types which are domains with special semantics.
 		 */
 
 		Oid			rawTypid = attr->atttypid;
+
+		if (!IsMapTypeOid(rawTypid))
+			rawTypid = getBaseType(rawTypid);
 
 		col->colType = GetRelatedTypeOid(rawTypid, false);
 		col->isArray = rawTypid != col->colType;

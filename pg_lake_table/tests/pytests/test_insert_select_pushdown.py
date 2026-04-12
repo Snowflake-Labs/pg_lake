@@ -1,4 +1,3 @@
-import psycopg2
 import pytest
 
 from utils_pytest import *
@@ -484,9 +483,8 @@ def test_insert_select_domain_in_map_key(s3, pg_conn, superuser_conn, extension)
 
 
 def test_insert_select_domain_in_struct(s3, pg_conn, extension):
-    """Domain inside a composite: even EXPLAIN fails because the FDW
-    planning path cannot resolve domain types in DuckDB struct
-    definitions.  The error itself proves the query cannot be pushed down.
+    """Domain inside a composite is not pushed down but is supported via
+    the non-pushdown path.
     """
     loc = f"s3://{TEST_BUCKET}/test_unsuitable/domain_in_struct"
     run_command(
@@ -502,18 +500,15 @@ def test_insert_select_domain_in_struct(s3, pg_conn, extension):
         """,
         pg_conn,
     )
-    with pytest.raises(psycopg2.errors.IndeterminateDatatype):
-        run_query(
-            "EXPLAIN INSERT INTO domain_tgt SELECT * FROM domain_src",
-            pg_conn,
-        )
+    assert_query_not_pushdownable(
+        "INSERT INTO domain_tgt SELECT * FROM domain_src", pg_conn
+    )
     pg_conn.rollback()
 
 
 def test_insert_select_domain_in_struct_in_array(s3, pg_conn, extension):
-    """Domain inside a composite inside an array: EXPLAIN fails because
-    the FDW planning path cannot resolve domain types in DuckDB struct
-    definitions.  The error itself proves the query cannot be pushed down.
+    """Domain inside a composite inside an array is not pushed down but
+    is supported via the non-pushdown path.
     """
     loc = f"s3://{TEST_BUCKET}/test_unsuitable/domain_in_struct_in_array"
     run_command(
@@ -529,11 +524,7 @@ def test_insert_select_domain_in_struct_in_array(s3, pg_conn, extension):
         """,
         pg_conn,
     )
-    with pytest.raises(psycopg2.errors.IndeterminateDatatype):
-        run_query(
-            "EXPLAIN INSERT INTO tgt SELECT * FROM src",
-            pg_conn,
-        )
+    assert_query_not_pushdownable("INSERT INTO tgt SELECT * FROM src", pg_conn)
     pg_conn.rollback()
 
 

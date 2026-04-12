@@ -568,6 +568,52 @@ def test_default_table_access_method_iceberg(
     pg_conn.commit()
 
 
+@pytest.mark.parametrize("access_method", ["iceberg", "heap"])
+def test_ctas_domain_in_nested_types(
+    s3, pg_conn, extension, with_default_location, access_method
+):
+    """CREATE TABLE AS must handle domains inside composites, arrays of
+    composites, and domain-over-domain through the DESCRIBE path for
+    both iceberg and heap access methods.
+    """
+    schema = "test_ctas_domain_nested"
+    run_command(
+        f"""
+        CREATE SCHEMA {schema};
+        SET search_path TO {schema};
+
+        CREATE DOMAIN d_int AS int;
+        CREATE DOMAIN d_text AS text;
+        CREATE DOMAIN dd_text AS d_text;
+
+        CREATE TYPE comp AS (a d_int, b dd_text);
+        """,
+        pg_conn,
+    )
+
+    using_clause = "USING iceberg" if access_method == "iceberg" else ""
+    run_command(
+        f"""
+        SET search_path TO {schema};
+        CREATE TABLE tgt {using_clause} AS
+            SELECT 1 AS id,
+                   ROW(42, 'hello')::comp AS c,
+                   ARRAY[ROW(1, 'a'), ROW(2, 'b')]::comp[] AS ca,
+                   'world'::dd_text AS plain_d;
+        """,
+        pg_conn,
+    )
+
+    result = run_query(f"SELECT id, c, ca, plain_d FROM {schema}.tgt", pg_conn)
+    assert len(result) == 1
+    assert result[0][0] == 1
+    assert result[0][1] == "(42,hello)"
+    assert result[0][2] == '{"(1,a)","(2,b)"}'
+    assert result[0][3] == "world"
+
+    pg_conn.rollback()
+
+
 # create the table on both Postgres
 @pytest.fixture(scope="module")
 def create_heap_table(pg_conn, s3, request, create_types):
