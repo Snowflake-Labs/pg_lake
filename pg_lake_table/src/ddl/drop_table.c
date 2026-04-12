@@ -341,8 +341,9 @@ PreventCitusTableVisibility(void)
 * CheckIfTypeIsUsedInIcebergTable checks if the given type is used in any
 * iceberg table.
 *
-* It also recursively checks if any type that depends on
-* the given type is used in any iceberg table.
+* It recursively walks the type dependency graph upward: composites that
+* contain the type as an attribute, array types whose element is the type,
+* and domain types (including maps) whose base type is the type.
 */
 bool
 CheckIfTypeIsUsedInIcebergTable(Oid typeId)
@@ -355,13 +356,17 @@ CheckIfTypeIsUsedInIcebergTable(Oid typeId)
 
 	appendStringInfo(query,
 					 "WITH RECURSIVE dependent_types(type_oid) AS ( "
-					 "   SELECT $1::oid AS type_oid "
+					 "  SELECT $1::oid AS type_oid "
 					 "UNION "
-					 " SELECT t.oid AS type_oid "
-					 "    FROM pg_type t "
-					 "   JOIN pg_attribute a ON a.attrelid = t.typrelid "
-					 "  JOIN dependent_types dt ON a.atttypid = dt.type_oid "
-					 " WHERE NOT a.attisdropped "
+					 "  SELECT t.oid AS type_oid "
+					 "    FROM pg_type t, dependent_types dt "
+					 "   WHERE (t.typrelid != 0 "
+					 "          AND EXISTS (SELECT 1 FROM pg_attribute a "
+					 "                       WHERE a.attrelid = t.typrelid "
+					 "                         AND a.atttypid = dt.type_oid "
+					 "                         AND NOT a.attisdropped)) "
+					 "      OR (t.typelem = dt.type_oid AND t.typcategory = 'A') "
+					 "      OR (t.typbasetype = dt.type_oid AND t.typtype = 'd') "
 					 ") "
 					 "SELECT EXISTS ( "
 					 "    SELECT 1 "
@@ -384,7 +389,14 @@ CheckIfTypeIsUsedInIcebergTable(Oid typeId)
 	/* SPI_END will rollback this setting to previous value */
 	PreventCitusTableVisibility();
 
-	bool		readOnly = true;
+	/*
+	 * Use readOnly = false so SPI_execute_with_args calls
+	 * CommandCounterIncrement and takes a fresh transaction snapshot. During
+	 * DROP SCHEMA CASCADE, the iceberg table referencing this type may
+	 * already have been deleted earlier in the cascade; a stale read-only
+	 * snapshot would not see that deletion.
+	 */
+	bool		readOnly = false;
 
 	DECLARE_SPI_ARGS(1);
 

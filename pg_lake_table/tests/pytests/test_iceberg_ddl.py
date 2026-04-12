@@ -1502,6 +1502,257 @@ def test_prevent_type_attribute_changes(pg_conn, extension, s3, with_default_loc
     pg_conn.commit()
 
 
+def test_prevent_alter_type_in_array_column(
+    pg_conn, extension, s3, with_default_location
+):
+    run_command(
+        """
+        CREATE SCHEMA test_alter_type_array;
+
+        CREATE TYPE test_alter_type_array.comp AS (a int, b int);
+        CREATE TYPE test_alter_type_array.inner_comp AS (x int, y int);
+        CREATE TYPE test_alter_type_array.outer_comp AS (a int, b test_alter_type_array.inner_comp);
+        CREATE TYPE test_alter_type_array.unrelated AS (a int, b int);
+
+        CREATE TABLE test_alter_type_array.iceberg_tbl (
+            id int,
+            arr test_alter_type_array.comp[],
+            nested test_alter_type_array.outer_comp[]
+        ) USING iceberg;
+
+        CREATE TABLE test_alter_type_array.heap_tbl (
+            id int, arr test_alter_type_array.unrelated[]
+        ) USING heap;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # heap tables are not affected
+    run_command(
+        "ALTER TYPE test_alter_type_array.unrelated ADD ATTRIBUTE c INT", pg_conn
+    )
+    pg_conn.rollback()
+
+    # type directly used as array element
+    error = run_command(
+        "ALTER TYPE test_alter_type_array.comp ADD ATTRIBUTE c INT",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "because it is used in an iceberg table" in str(error)
+    pg_conn.rollback()
+
+    error = run_command(
+        "ALTER TYPE test_alter_type_array.comp DROP ATTRIBUTE b",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "because it is used in an iceberg table" in str(error)
+    pg_conn.rollback()
+
+    error = run_command(
+        "ALTER TYPE test_alter_type_array.comp RENAME ATTRIBUTE a TO a_new",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "because it is used in an iceberg table" in str(error)
+    pg_conn.rollback()
+
+    # type nested inside a composite that is used as an array element
+    error = run_command(
+        "ALTER TYPE test_alter_type_array.inner_comp ADD ATTRIBUTE c INT",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "because it is used in an iceberg table" in str(error)
+    pg_conn.rollback()
+
+    run_command("DROP SCHEMA test_alter_type_array CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_prevent_alter_type_in_domain_column(
+    pg_conn, extension, s3, with_default_location
+):
+    run_command(
+        """
+        CREATE SCHEMA test_alter_type_domain;
+
+        CREATE TYPE test_alter_type_domain.comp AS (a int, b int);
+        CREATE DOMAIN test_alter_type_domain.comp_domain
+            AS test_alter_type_domain.comp;
+
+        CREATE TYPE test_alter_type_domain.unrelated AS (a int, b int);
+        CREATE DOMAIN test_alter_type_domain.unrelated_domain
+            AS test_alter_type_domain.unrelated;
+
+        CREATE TABLE test_alter_type_domain.iceberg_tbl (
+            id int,
+            val test_alter_type_domain.comp_domain
+        ) USING iceberg;
+
+        CREATE TABLE test_alter_type_domain.heap_tbl (
+            id int, val test_alter_type_domain.unrelated_domain
+        ) USING heap;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # heap tables are not affected
+    run_command(
+        "ALTER TYPE test_alter_type_domain.unrelated ADD ATTRIBUTE c INT", pg_conn
+    )
+    pg_conn.rollback()
+
+    # type used as the base of a domain column
+    error = run_command(
+        "ALTER TYPE test_alter_type_domain.comp ADD ATTRIBUTE c INT",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "because it is used in an iceberg table" in str(error)
+    pg_conn.rollback()
+
+    error = run_command(
+        "ALTER TYPE test_alter_type_domain.comp RENAME ATTRIBUTE a TO a_new",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "because it is used in an iceberg table" in str(error)
+    pg_conn.rollback()
+
+    run_command("DROP SCHEMA test_alter_type_domain CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_prevent_alter_type_domain_inside_composite(
+    pg_conn, extension, s3, with_default_location
+):
+    run_command(
+        """
+        CREATE SCHEMA test_alter_domain_in_comp;
+
+        CREATE TYPE test_alter_domain_in_comp.inner_comp AS (a int, b int);
+        CREATE DOMAIN test_alter_domain_in_comp.inner_domain
+            AS test_alter_domain_in_comp.inner_comp;
+        CREATE TYPE test_alter_domain_in_comp.outer_comp AS (
+            x int,
+            y test_alter_domain_in_comp.inner_domain
+        );
+
+        CREATE TABLE test_alter_domain_in_comp.iceberg_tbl (
+            id int,
+            val test_alter_domain_in_comp.outer_comp
+        ) USING iceberg;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    error = run_command(
+        "ALTER TYPE test_alter_domain_in_comp.inner_comp ADD ATTRIBUTE c INT",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "because it is used in an iceberg table" in str(error)
+    pg_conn.rollback()
+
+    error = run_command(
+        "ALTER TYPE test_alter_domain_in_comp.inner_comp RENAME ATTRIBUTE a TO a_new",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "because it is used in an iceberg table" in str(error)
+    pg_conn.rollback()
+
+    run_command("DROP SCHEMA test_alter_domain_in_comp CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_prevent_alter_enum_in_array_column(
+    pg_conn, extension, s3, with_default_location
+):
+    run_command(
+        """
+        CREATE SCHEMA test_alter_enum_array;
+
+        CREATE TYPE test_alter_enum_array.mood AS ENUM ('happy', 'sad');
+
+        CREATE TABLE test_alter_enum_array.iceberg_tbl (
+            id int,
+            moods test_alter_enum_array.mood[]
+        ) USING iceberg;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    error = run_command(
+        "ALTER TYPE test_alter_enum_array.mood ADD VALUE 'excited'",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "because it is used in an iceberg table" in str(error)
+    pg_conn.rollback()
+
+    error = run_command(
+        "ALTER TYPE test_alter_enum_array.mood RENAME VALUE 'happy' TO 'glad'",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "because it is used in an iceberg table" in str(error)
+    pg_conn.rollback()
+
+    run_command("DROP SCHEMA test_alter_enum_array CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_prevent_alter_type_in_map_column(
+    pg_conn, extension, s3, with_default_location
+):
+    map_type_name = create_map_type("int", "text")
+
+    run_command(
+        f"""
+        CREATE SCHEMA test_alter_type_map;
+
+        CREATE TYPE test_alter_type_map.comp AS (a int, b int);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    comp_map = create_map_type("int", "test_alter_type_map.comp")
+
+    run_command(
+        f"""
+        CREATE TABLE test_alter_type_map.iceberg_tbl (
+            id int,
+            m {map_type_name},
+            cm {comp_map}
+        ) USING iceberg;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # type used as a map value type (map is domain -> array -> composite)
+    error = run_command(
+        "ALTER TYPE test_alter_type_map.comp ADD ATTRIBUTE c INT",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "because it is used in an iceberg table" in str(error)
+    pg_conn.rollback()
+
+    run_command("DROP TABLE test_alter_type_map.iceberg_tbl;", pg_conn)
+    pg_conn.commit()
+    run_command("DROP SCHEMA test_alter_type_map CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
 def test_set_not_null(pg_conn, s3, with_default_location):
     # Create schema and table
     run_command("CREATE SCHEMA test_set_not_null;", pg_conn)
