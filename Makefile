@@ -14,7 +14,7 @@ CUSTOM_TARGETS = check-pg_lake_engine installcheck-pg_lake_engine check-pg_exten
 DUCKDB_BUILD_USE_CACHE ?= 0
 
 # other phony targets go here
-.PHONY: all fast install install-fast installcheck clean check submodules uninstall check-indent reindent installcheck-postgres installcheck-postgres-with_extensions_created
+.PHONY: all fast install install-fast installcheck clean check submodules uninstall check-indent reindent installcheck-postgres installcheck-postgres-with_extensions_created generate-duckdb-kwlist check-duckdb-kwlist
 .PHONY: $(ALL_TARGETS)
 .PHONY: $(PHONY_TARGETS)
 
@@ -219,6 +219,17 @@ endif
 uninstall-avro:
 	rm -f $(PG_LIBDIR)/libavro.*
 	rm -rf $(PG_INCLUDEDIR)/avro*
+
+## DuckDB keyword list maintenance
+# Regenerate the checked-in keyword table from the vendored DuckDB kwlist.hpp.
+# Re-run whenever duckdb_pglake/duckdb is updated to a new DuckDB release.
+generate-duckdb-kwlist:
+	python3 tools/generate_duckdb_kwlist.py
+
+# Verify that the checked-in keyword table matches the current kwlist.hpp.
+# Run in CI to catch stale keyword tables after a DuckDB version bump.
+check-duckdb-kwlist:
+	python3 tools/generate_duckdb_kwlist.py --check
 
 ## Other targets
 check-isolation_pg_lake_table:
