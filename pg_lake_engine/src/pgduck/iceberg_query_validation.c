@@ -103,7 +103,7 @@ TupleDescNeedsValidation(TupleDesc tupleDesc)
 		if (attr->attisdropped)
 			continue;
 
-		if (TypeNeedsIcebergValidation(attr->atttypid, true))
+		if (TypeNeedsIcebergValidation(attr->atttypid, attr->atttypmod, true))
 			return true;
 	}
 
@@ -241,7 +241,7 @@ AppendIcebergValidationExpression(StringInfo buf, const char *expr,
 			? "pg_nullify_nested_list"
 			: "pg_error_nested_list";
 
-		if (TypeNeedsIcebergValidation(elemType, true))
+		if (TypeNeedsIcebergValidation(elemType, typmod, true))
 		{
 			char	   *lambdaVar = psprintf("_x%d", depth);
 
@@ -264,8 +264,10 @@ AppendIcebergValidationExpression(StringInfo buf, const char *expr,
 	{
 		PGType		keyType = GetMapKeyType(typeOid);
 		PGType		valType = GetMapValueType(typeOid);
-		bool		keyNeedsValidation = TypeNeedsIcebergValidation(keyType.postgresTypeOid, true);
-		bool		valNeedsValidation = TypeNeedsIcebergValidation(valType.postgresTypeOid, true);
+		bool		keyNeedsValidation = TypeNeedsIcebergValidation(keyType.postgresTypeOid,
+																	keyType.postgresTypeMod, true);
+		bool		valNeedsValidation = TypeNeedsIcebergValidation(valType.postgresTypeOid,
+																	valType.postgresTypeMod, true);
 
 		if (!keyNeedsValidation && !valNeedsValidation)
 			return false;
@@ -326,7 +328,8 @@ AppendIcebergValidationExpression(StringInfo buf, const char *expr,
 			if (attr->attisdropped)
 				continue;
 
-			if (TypeNeedsIcebergValidation(attr->atttypid, true))
+			if (TypeNeedsIcebergValidation(attr->atttypid, attr->atttypmod,
+										   true))
 			{
 				anyFieldNeedsTransform = true;
 				break;

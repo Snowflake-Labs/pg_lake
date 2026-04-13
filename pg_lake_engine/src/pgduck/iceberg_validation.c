@@ -30,6 +30,7 @@
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/pgduck/iceberg_validation.h"
 #include "pg_lake/pgduck/map.h"
+#include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/util/table_type.h"
 #include "utils/lsyscache.h"
 #include "utils/typcache.h"
@@ -93,14 +94,17 @@ IsTemporalType(Oid typeOid)
  * Validation covers: temporal boundaries (date/timestamp/timestamptz),
  * multidimensional array rejection (any array type), and bounded
  * numeric NaN (non-pushdown only, since numeric blocks pushdown).
+ * Unbounded and large-precision numerics are mapped to float8 on
+ * Iceberg tables, so NaN is valid for those and no validation is needed.
  */
 bool
-TypeNeedsIcebergValidation(Oid typeOid, bool isPushdown)
+TypeNeedsIcebergValidation(Oid typeOid, int32 typmod, bool isPushdown)
 {
 	if (IsTemporalType(typeOid))
 		return true;
 
-	if (!isPushdown && typeOid == NUMERICOID)
+	if (!isPushdown && typeOid == NUMERICOID &&
+		!IsUnsupportedNumericForIceberg(typeOid, typmod))
 		return true;
 
 	Oid			elemType = get_element_type(typeOid);
@@ -124,14 +128,21 @@ TypeNeedsIcebergValidation(Oid typeOid, bool isPushdown)
 		PGType		keyType = GetMapKeyType(typeOid);
 		PGType		valType = GetMapValueType(typeOid);
 
-		return TypeNeedsIcebergValidation(keyType.postgresTypeOid, isPushdown) ||
-			TypeNeedsIcebergValidation(valType.postgresTypeOid, isPushdown);
+		return TypeNeedsIcebergValidation(keyType.postgresTypeOid,
+										  keyType.postgresTypeMod, isPushdown) ||
+			TypeNeedsIcebergValidation(valType.postgresTypeOid,
+									   valType.postgresTypeMod, isPushdown);
 	}
 
 	char		typtype = get_typtype(typeOid);
 
 	if (typtype == TYPTYPE_DOMAIN)
-		return TypeNeedsIcebergValidation(getBaseType(typeOid), isPushdown);
+	{
+		int32		baseTypmod = typmod;
+		Oid			baseType = getBaseTypeAndTypmod(typeOid, &baseTypmod);
+
+		return TypeNeedsIcebergValidation(baseType, baseTypmod, isPushdown);
+	}
 
 	if (typtype == TYPTYPE_COMPOSITE)
 	{
@@ -145,7 +156,8 @@ TypeNeedsIcebergValidation(Oid typeOid, bool isPushdown)
 			if (attr->attisdropped)
 				continue;
 
-			if (TypeNeedsIcebergValidation(attr->atttypid, isPushdown))
+			if (TypeNeedsIcebergValidation(attr->atttypid, attr->atttypmod,
+										   isPushdown))
 			{
 				found = true;
 				break;
