@@ -27,6 +27,10 @@
  * (composites, maps, domains).  For types that need no validation the
  * value is returned unchanged.
  *
+ * typmod is used to distinguish bounded numerics (Iceberg decimal) from
+ * unbounded ones (mapped to float8).  Only bounded numerics have NaN
+ * clamped; unbounded numerics pass through unchanged.
+ *
  * *isNull is set to true when a top-level unsupported value is clamped:
  * numeric NaN or a multidimensional array.  The caller should write NULL
  * instead of the original value.  NaN values and multidimensional arrays
@@ -34,5 +38,6 @@
  * container.
  */
 extern PGDLLEXPORT Datum IcebergErrorOrClampDatum(Datum value, Oid typeOid,
+												  int32 typmod,
 												  IcebergOutOfRangePolicy policy,
 												  bool *isNull);

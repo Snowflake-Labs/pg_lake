@@ -57,11 +57,16 @@ extern PGDLLEXPORT bool IsTemporalType(Oid typeOid);
  * any component that needs Iceberg write validation, including inside
  * arrays, composites, maps, and domains.
  *
+ * typmod is used to distinguish bounded numerics (Iceberg decimal) from
+ * unbounded ones (mapped to float8).  Only bounded numerics need NaN
+ * validation.
+ *
  * Validation covers: temporal boundaries (date/timestamp/timestamptz),
  * multidimensional array rejection (any array type), and bounded
  * numeric NaN (non-pushdown only, since numeric blocks pushdown).
  */
-extern PGDLLEXPORT bool TypeNeedsIcebergValidation(Oid typeOid, bool isPushdown);
+extern PGDLLEXPORT bool TypeNeedsIcebergValidation(Oid typeOid, int32 typmod,
+												   bool isPushdown);
 
 /* Temporal boundary year constants shared by datum and query-level validation */
 #define TEMPORAL_DATE_MIN_YEAR		(-4712)

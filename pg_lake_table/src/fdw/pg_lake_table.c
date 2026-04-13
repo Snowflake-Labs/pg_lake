@@ -2590,7 +2590,7 @@ TupleDescNeedsIcebergValidation(TupleDesc tupleDesc)
 		if (attr->attisdropped)
 			continue;
 
-		if (TypeNeedsIcebergValidation(attr->atttypid, false))
+		if (TypeNeedsIcebergValidation(attr->atttypid, attr->atttypmod, false))
 			return true;
 	}
 
@@ -2618,12 +2618,13 @@ IcebergErrorOrClampSlotInPlace(TupleTableSlot *slot, TupleDesc tupleDesc,
 		if (attr->attisdropped || slot->tts_isnull[i])
 			continue;
 
-		if (!TypeNeedsIcebergValidation(attr->atttypid, false))
+		if (!TypeNeedsIcebergValidation(attr->atttypid, attr->atttypmod, false))
 			continue;
 
 		bool		isNull = false;
 		Datum		clamped = IcebergErrorOrClampDatum(slot->tts_values[i],
 													   attr->atttypid,
+													   attr->atttypmod,
 													   policy,
 													   &isNull);
 
