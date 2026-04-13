@@ -45,6 +45,7 @@
 #include "datatype/timestamp.h"
 #include "pg_lake/pgduck/iceberg_datum_validation.h"
 #include "pg_lake/pgduck/map.h"
+#include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/util/temporal_utils.h"
 #include "utils/array.h"
 #include "utils/date.h"
@@ -58,7 +59,7 @@ static Datum ErrorOrClampTemporal(Datum value, Oid typeOid, int year,
 								  IcebergOutOfRangePolicy policy);
 static Datum IcebergErrorOrClampTemporalDatum(Datum value, Oid typeOid,
 											  IcebergOutOfRangePolicy policy);
-static Datum IcebergErrorOrClampNumericDatum(Datum value,
+static Datum IcebergErrorOrClampNumericDatum(Datum value, int32 typmod,
 											 IcebergOutOfRangePolicy policy,
 											 bool *isNull);
 static Datum IcebergErrorOrClampMultiDimArrayDatum(ArrayType *array,
@@ -220,16 +221,24 @@ IcebergErrorOrClampTemporalDatum(Datum value, Oid typeOid,
 
 
 /*
- * IcebergErrorOrClampNumericDatum validates a numeric Datum for NaN.
+ * IcebergErrorOrClampNumericDatum validates a bounded numeric Datum for NaN.
+ *
+ * Unbounded numerics (and those with precision/scale beyond Iceberg limits)
+ * are mapped to float8, which supports NaN natively, so they are returned
+ * unchanged.  Only bounded numerics that map to Iceberg decimal are checked.
  *
  * In clamp mode: sets *isNull to true and returns 0 (caller writes NULL).
  * In error mode: raises an error.
  * For non-NaN values the datum is returned unchanged.
  */
 static Datum
-IcebergErrorOrClampNumericDatum(Datum value, IcebergOutOfRangePolicy policy,
+IcebergErrorOrClampNumericDatum(Datum value, int32 typmod,
+								IcebergOutOfRangePolicy policy,
 								bool *isNull)
 {
+	if (IsUnsupportedNumericForIceberg(NUMERICOID, typmod))
+		return value;
+
 	if (!numeric_is_nan(DatumGetNumeric(value)))
 		return value;
 
@@ -311,8 +320,8 @@ IcebergErrorOrClampNestedDatum(Datum value, Oid typeOid, int32 typmod,
 
 	if (typeOid == NUMERICOID)
 	{
-		Datum		result = IcebergErrorOrClampNumericDatum(value, policy,
-															 isNull);
+		Datum		result = IcebergErrorOrClampNumericDatum(value, typmod,
+															 policy, isNull);
 
 		*modified = *isNull;
 		return result;
@@ -368,7 +377,7 @@ IcebergErrorOrClampNestedDatum(Datum value, Oid typeOid, int32 typmod,
 			bool		elemModified = false;
 			Datum		clamped = IcebergErrorOrClampNestedDatum(elems[i],
 																 elemType,
-																 -1,
+																 typmod,
 																 policy,
 																 &elemIsNull,
 																 &elemModified);
@@ -489,19 +498,23 @@ IcebergErrorOrClampNestedDatum(Datum value, Oid typeOid, int32 typmod,
  * as well as nested containers (arrays, composites, maps, domains).
  * For types that need no validation the value is returned unchanged.
  *
+ * typmod is used to distinguish bounded numerics (Iceberg decimal) from
+ * unbounded ones (mapped to float8).  Only bounded numerics have NaN
+ * clamped; unbounded numerics pass through unchanged.
+ *
  * *isNull is set to true when a top-level unsupported value is clamped:
  * numeric NaN or a multidimensional array.  The caller should write NULL
  * instead of the original value.  Unsupported values nested inside
  * containers are absorbed as NULL within the reconstructed container.
  */
 Datum
-IcebergErrorOrClampDatum(Datum value, Oid typeOid,
+IcebergErrorOrClampDatum(Datum value, Oid typeOid, int32 typmod,
 						 IcebergOutOfRangePolicy policy, bool *isNull)
 {
 	*isNull = false;
 
 	bool		modified = false;
 
-	return IcebergErrorOrClampNestedDatum(value, typeOid, -1, policy,
+	return IcebergErrorOrClampNestedDatum(value, typeOid, typmod, policy,
 										  isNull, &modified);
 }

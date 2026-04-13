@@ -2624,6 +2624,7 @@ IcebergErrorOrClampSlotInPlace(TupleTableSlot *slot, TupleDesc tupleDesc,
 		bool		isNull = false;
 		Datum		clamped = IcebergErrorOrClampDatum(slot->tts_values[i],
 													   attr->atttypid,
+													   attr->atttypmod,
 													   policy,
 													   &isNull);
 
