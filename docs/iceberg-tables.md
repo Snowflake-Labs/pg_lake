@@ -694,6 +694,17 @@ There are a few additional limitations regarding `ALTER TABLE` compared to regul
 
 Some advanced table management features such as declarative partitioning and inheritance are supported. Do be careful with those features, since the PostgreSQL planner does not always know how to efficiently perform aggregations across Iceberg (read: foreign) partitions.
 
+### Altering external Iceberg tables
+
+External read-only Iceberg foreign tables (created via `SERVER pg_lake OPTIONS (path '...metadata.json')`) support one `ALTER` operation: updating the `path` option to redirect the table to a different snapshot. All other `ALTER` operations are unsupported on external tables.
+
+```sql
+-- Redirect an external Iceberg table to a newer snapshot
+ALTER FOREIGN TABLE external_iceberg OPTIONS (SET path 's3://mybucket/table/v15.metadata.json');
+```
+
+This avoids having to `DROP` and re-`CREATE` the table when a new snapshot is available, preserving any dependent views, permissions, or references.
+
 ## Vacuuming an Iceberg table
 
 Each insert/update/delete operation on an Iceberg table results in additional data files being written. Quite often, this can result in the table being made up of many small files. The solution to that is to vacuum the table, similar to (auto)vacuum for regular heap tables. VACUUM on Iceberg tables does the following tasks:
