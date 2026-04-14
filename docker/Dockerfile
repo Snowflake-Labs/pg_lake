@@ -55,6 +55,7 @@ RUN if [ "$BASE_IMAGE_OS" = "almalinux" ]; then \
             jq \
             diffutils \
             libcurl-devel \
+            pam-devel \
             patch \
             which \
             gcc-c++ \
@@ -97,6 +98,7 @@ RUN if [ "$BASE_IMAGE_OS" = "debian" ]; then \
             perl \
             libtool \
             libjansson-dev \
+            libpam0g-dev \
             libcurl4-openssl-dev \
             curl \
             patch \
@@ -171,10 +173,10 @@ RUN wget https://ftp.postgresql.org/pub/source/v$PG16_VERSION/postgresql-$PG16_V
     tar -xzf $PGAUDIT18_VERSION.tar.gz && rm $PGAUDIT18_VERSION.tar.gz && \
     tar -xzf postgis-$POSTGIS_VERSION.tar.gz && rm postgis-$POSTGIS_VERSION.tar.gz
 
-ARG PG_COMPILE_FLAGS_16="--enable-debug --enable-cassert --enable-depend --with-openssl --with-libxml --with-libxslt --with-icu --with-uuid=ossp --with-lz4"
+ARG PG_COMPILE_FLAGS_16="--enable-debug --enable-cassert --enable-depend --with-openssl --with-libxml --with-libxslt --with-icu --with-uuid=ossp --with-lz4 --with-pam"
 # PG17 has asserts disabled
-ARG PG_COMPILE_FLAGS_17="--enable-debug --enable-depend --with-openssl --with-libxml --with-libxslt --with-icu --with-uuid=ossp --with-lz4 --enable-injection-points"
-ARG PG_COMPILE_FLAGS_18="--enable-debug --enable-cassert --enable-depend --with-openssl --with-libxml --with-libxslt --with-icu --with-uuid=ossp --with-lz4 --enable-injection-points"
+ARG PG_COMPILE_FLAGS_17="--enable-debug --enable-depend --with-openssl --with-libxml --with-libxslt --with-icu --with-uuid=ossp --with-lz4 --enable-injection-points --with-pam"
+ARG PG_COMPILE_FLAGS_18="--enable-debug --enable-cassert --enable-depend --with-openssl --with-libxml --with-libxslt --with-icu --with-uuid=ossp --with-lz4 --enable-injection-points --with-pam"
 ENV PGBASEDIR=/home/postgres
 
 # Compile and install PostgreSQL 16 with pgindent
@@ -331,6 +333,7 @@ RUN if [ "$BASE_IMAGE_OS" = "almalinux" ]; then \
     xz \
     snappy \
     perl \
+    pam \
     jansson \
     libcurl && \
     dnf clean all; \
@@ -356,6 +359,7 @@ RUN if [ "$BASE_IMAGE_OS" = "debian" ]; then \
     liblzma5 \
     libsnappy1v5 \
     perl \
+    libpam0g \
     libjansson4 \
     libcurl4 \
     curl \
