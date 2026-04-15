@@ -502,6 +502,8 @@ static void merge_fdw_options(PgLakeRelationInfo * fpinfo,
 							  const PgLakeRelationInfo * fpinfo_o,
 							  const PgLakeRelationInfo * fpinfo_i);
 
+static void IcebergErrorOrClampSlotInPlace(TupleTableSlot *slot, TupleDesc tupleDesc,
+										   IcebergOutOfRangePolicy policy);
 static void WriteInsertRecord(PgLakeModifyState * modifyState, TupleTableSlot *slot);
 static void PrepareDeletionSlot(PgLakeFileModifyState * fileModifyState,
 								uint64 fileRowNumber,
@@ -2221,6 +2223,16 @@ postgresExecForeignInsert(EState *estate,
 	PgLakeModifyState *fmstate = (PgLakeModifyState *) resultRelInfo->ri_FdwState;
 
 	/*
+	 * Clamp out-of-range values (e.g. NaN → NULL) before constraint checks
+	 * so that ExecConstraints sees the post-clamp slot and can enforce NOT
+	 * NULL on values that were clamped to NULL.
+	 */
+	if (fmstate->outOfRangePolicy != ICEBERG_OOR_NONE &&
+		fmstate->needsOutOfRangeValidation)
+		IcebergErrorOrClampSlotInPlace(slot, fmstate->tupleDesc,
+									   fmstate->outOfRangePolicy);
+
+	/*
 	 * Constraint checks are skipped by PostgreSQL itself, since it assumes
 	 * them to be unenforceable as data can change underneath.
 	 */
@@ -2267,6 +2279,16 @@ postgresExecForeignUpdate(EState *estate,
 	{
 		return NULL;
 	}
+
+	/*
+	 * Clamp out-of-range values (e.g. NaN → NULL) before constraint checks
+	 * so that ExecConstraints sees the post-clamp slot and can enforce NOT
+	 * NULL on values that were clamped to NULL.
+	 */
+	if (fmstate->outOfRangePolicy != ICEBERG_OOR_NONE &&
+		fmstate->needsOutOfRangeValidation)
+		IcebergErrorOrClampSlotInPlace(slot, fmstate->tupleDesc,
+									   fmstate->outOfRangePolicy);
 
 	/*
 	 * Constraint checks are skipped by PostgreSQL itself, since it assumes
@@ -2643,18 +2665,15 @@ IcebergErrorOrClampSlotInPlace(TupleTableSlot *slot, TupleDesc tupleDesc,
 
 
 /*
- * WriteInsertRecord validates the tuple against Iceberg write constraints
- * (when applicable) and forwards it to the insert destination.
+ * WriteInsertRecord forwards the tuple to the insert destination.
+ *
+ * Callers are responsible for running IcebergErrorOrClampSlotInPlace
+ * before ExecConstraints so that NOT NULL checks see post-clamp values.
  */
 static void
 WriteInsertRecord(PgLakeModifyState * modifyState, TupleTableSlot *slot)
 {
 	DestReceiver *insertDest = modifyState->insertDest;
-
-	if (modifyState->outOfRangePolicy != ICEBERG_OOR_NONE &&
-		modifyState->needsOutOfRangeValidation)
-		IcebergErrorOrClampSlotInPlace(slot, modifyState->tupleDesc,
-									   modifyState->outOfRangePolicy);
 
 	if (modifyState->insertedRowCount == 0)
 	{
