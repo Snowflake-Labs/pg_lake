@@ -134,7 +134,7 @@ Datum
 iceberg_catalog_validator(PG_FUNCTION_ARGS)
 {
 	List	   *options_list = untransformRelOptions(PG_GETARG_DATUM(0));
-	Oid			catalog = PG_GETARG_OID(1);
+	Oid			catalogRelId = PG_GETARG_OID(1);
 	ListCell   *cell;
 
 	/*
@@ -144,7 +144,7 @@ iceberg_catalog_validator(PG_FUNCTION_ARGS)
 	 * succeeds, but still reject if someone passes options where they don't
 	 * belong.
 	 */
-	if (catalog != ForeignServerRelationId)
+	if (catalogRelId != ForeignServerRelationId)
 	{
 		if (list_length(options_list) > 0)
 			ereport(ERROR,
@@ -190,20 +190,19 @@ iceberg_catalog_validator(PG_FUNCTION_ARGS)
 
 
 /*
- * BlockDDLOnExtensionCatalogs prevents misuse of the reserved catalog
- * names 'postgres', 'object_store', and 'rest'.  These are built-in
- * identifiers (not actual foreign servers), so we block:
+ * ValidateIcebergCatalogServerDDL validates DDL on iceberg_catalog servers:
  *
- *  - CREATE SERVER with a reserved name.
- *  - CREATE SERVER with TYPE 'postgres' or 'object_store'.
- *  - RENAME TO a reserved name.
+ *  - CREATE SERVER: rejects reserved names ('postgres', 'object_store',
+ *    'rest'), rejects TYPE 'postgres'/'object_store', and requires
+ *    TYPE 'rest'.
+ *  - ALTER SERVER RENAME TO: rejects renaming to a reserved name.
  *
- * ALTER/DROP/OWNER on these names will fail naturally because no
+ * ALTER/DROP/OWNER on reserved names will fail naturally because no
  * server object exists.
  */
 bool
-BlockDDLOnExtensionCatalogs(ProcessUtilityParams * processUtilityParams,
-							void *arg)
+ValidateIcebergCatalogServerDDL(ProcessUtilityParams * processUtilityParams,
+								void *arg)
 {
 	Node	   *parsetree = processUtilityParams->plannedStmt->utilityStmt;
 
@@ -235,6 +234,12 @@ BlockDDLOnExtensionCatalogs(ProcessUtilityParams * processUtilityParams,
 					 errhint("Use the built-in \"%s\" or \"%s\" catalogs, "
 							 "or create a server of type 'rest'.",
 							 POSTGRES_CATALOG_NAME, OBJECT_STORE_CATALOG_NAME)));
+
+		if (stmt->servertype == NULL ||
+			pg_strcasecmp(stmt->servertype, REST_CATALOG_NAME) != 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("iceberg_catalog server requires TYPE 'rest'")));
 	}
 	else if (IsA(parsetree, RenameStmt))
 	{
@@ -250,38 +255,6 @@ BlockDDLOnExtensionCatalogs(ProcessUtilityParams * processUtilityParams,
 							stmt->newname),
 					 errhint("Choose a different server name.")));
 	}
-
-	return false;
-}
-
-
-/*
- * RequireRestTypeForIcebergCatalogServer ensures that CREATE SERVER
- * commands using the iceberg_catalog FDW specify TYPE 'rest'.
- */
-bool
-RequireRestTypeForIcebergCatalogServer(ProcessUtilityParams * processUtilityParams,
-									   void *arg)
-{
-	Node	   *parsetree = processUtilityParams->plannedStmt->utilityStmt;
-
-	if (creating_extension)
-		return false;
-
-	if (!IsA(parsetree, CreateForeignServerStmt))
-		return false;
-
-	CreateForeignServerStmt *stmt = (CreateForeignServerStmt *) parsetree;
-
-	if (stmt->fdwname == NULL ||
-		strcmp(stmt->fdwname, ICEBERG_CATALOG_FDW_NAME) != 0)
-		return false;
-
-	if (stmt->servertype == NULL ||
-		pg_strcasecmp(stmt->servertype, REST_CATALOG_NAME) != 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("iceberg_catalog server requires TYPE 'rest'")));
 
 	return false;
 }
@@ -965,11 +938,7 @@ GetRestCatalogAccessToken(RestCatalogOptions * opts, bool forceRefreshToken)
 static void
 FetchRestCatalogAccessToken(RestCatalogOptions * opts, char **accessToken, int *expiresIn)
 {
-	if (!opts->host || !*opts->host)
-		ereport(ERROR,
-				(errmsg("REST catalog host is not configured"),
-				 errhint("Set the \"rest_endpoint\" option on the server "
-						 "or the pg_lake_iceberg.rest_catalog_host GUC.")));
+	Assert(opts->host != NULL && opts->host[0] != '\0');
 	if (!opts->clientSecret || !*opts->clientSecret)
 		ereport(ERROR,
 				(errmsg("REST catalog client_secret is not configured"),
