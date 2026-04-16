@@ -33,11 +33,6 @@ runs:
       run: |
         python3.11 -m pipenv install --dev
 
-    - name: Check formatting
-      shell: bash
-      run: |
-        make check-indent PG_INDENT=/home/postgres/pgsql-${PG_INDENT_VERSION}/bin/pgindent
-
     - name: Check for typos # ;)
       uses: ./.github/actions/check-typos
 

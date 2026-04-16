@@ -1,0 +1,55 @@
+name: Check formatting for pg_lake repos
+
+on:
+  workflow_call:
+    inputs:
+      pg_version:
+        required: true
+        type: string
+      image_tag:
+        required: true
+        type: string
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+
+    container:
+      image: ghcr.io/snowflake-labs/pg-lake-ci-pg-almalinux:${{ inputs.image_tag }}
+      options: --user 1001 --shm-size=128MB
+      volumes:
+        - /usr/local:/host/usr/local
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+        name: Check out repository code
+        with:
+          fetch-depth: 0
+
+      - name: Export PGDIR, PATH and PG_REGRESS_DIR
+        run: |
+          echo "PGDIR=/home/postgres/pgsql-${{ inputs.pg_version }}" >> $GITHUB_ENV
+          echo "PATH=/home/postgres/pgsql-${{ inputs.pg_version }}/bin:$PATH" >> $GITHUB_ENV
+          echo "PG_REGRESS_DIR=/home/postgres/pgsql-${{ inputs.pg_version }}/regress" >> $GITHUB_ENV
+
+      - uses: actions/cache@v4
+        id: cache_pipenv
+        name: Cache pipenv
+        with:
+          path: ~/.local/share/virtualenvs
+          key: ${{ runner.os }}-python-3.11-pipenv-${{ hashFiles('Pipfile.lock') }}
+
+      - name: Install pipenv dependencies
+        if: steps.cache_pipenv.outputs.cache-hit != 'true'
+        run: |
+          python3.11 -m pipenv install --dev
+
+      - name: Check formatting
+        run: |
+          make check-indent
