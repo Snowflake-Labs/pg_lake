@@ -243,7 +243,7 @@ IsIcebergCatalogServer(const char *serverName)
 
 
 /*
- * ScrubUserMappingSecrets overwrites secret option values in the query
+ * RedactUserMappingSecrets overwrites secret option values in the query
  * string in-place with asterisks.
  *
  * In-place mutation is essential: pg_stat_statements captures the queryString
@@ -251,14 +251,14 @@ IsIcebergCatalogServer(const char *serverName)
  * returns. A copy with pstrdup would be invisible to pg_stat_statements
  * because its local pointer still references the original memory. By
  * overwriting the original buffer, every holder of that pointer — including
- * pg_stat_statements — sees the scrubbed version.
+ * pg_stat_statements — sees the redacted version.
  *
  * The actual DDL execution is unaffected because CREATE/ALTER USER MAPPING
  * reads option values from the parse tree (DefElem nodes), not from
  * queryString.
  */
 static void
-ScrubUserMappingSecrets(const char *queryString, List *options)
+RedactUserMappingSecrets(const char *queryString, List *options)
 {
 	const char *secret_options[] = {"client_id", "client_secret", NULL};
 	ListCell   *lc;
@@ -339,7 +339,7 @@ RedactRestCatalogUserMappingSecrets(ProcessUtilityParams * processUtilityParams,
 	if (!IsIcebergCatalogServer(serverName))
 		return false;
 
-	ScrubUserMappingSecrets(processUtilityParams->queryString, options);
+	RedactUserMappingSecrets(processUtilityParams->queryString, options);
 
 	return false;
 }
@@ -655,13 +655,14 @@ GetRestCatalogOptionsFromCatalog(const char *catalog)
 	}
 
 	/*
-	 * User mapping has highest priority — overrides everything above
-	 * Can only be set for user-created servers
+	 * User mapping has highest priority — overrides everything above Can
+	 * only be set for user-created servers
 	 */
 	if (server != NULL)
 	{
 		List	   *umOptions = LookupUserMappingOptions(server->serverid);
 		ListCell   *lc;
+
 		foreach(lc, umOptions)
 		{
 			DefElem    *def = (DefElem *) lfirst(lc);

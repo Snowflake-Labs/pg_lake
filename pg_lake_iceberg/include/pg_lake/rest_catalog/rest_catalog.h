@@ -131,5 +131,6 @@ extern PGDLLEXPORT RestCatalogRequest * GetRemoveSnapshotCatalogRequest(List *re
 /* ProcessUtility handlers */
 /* iceberg_catalog server DDL validation */
 extern PGDLLEXPORT bool ValidateIcebergCatalogServerDDL(ProcessUtilityParams * processUtilityParams, void *arg);
+
 /* scrubs user mapping secrets in-place */
-extern PGDLLEXPORT bool RedactRestCatalogUserMappingSecrets(ProcessUtilityParams *processUtilityParams, void *arg);
+extern PGDLLEXPORT bool RedactRestCatalogUserMappingSecrets(ProcessUtilityParams * processUtilityParams, void *arg);
