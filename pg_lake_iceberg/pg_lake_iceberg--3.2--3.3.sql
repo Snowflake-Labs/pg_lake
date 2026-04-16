@@ -20,15 +20,36 @@ CREATE OR REPLACE VIEW pg_catalog.iceberg_tables AS
  * configurations via CREATE SERVER so that users are not limited to a
  * single global REST catalog configured through GUC settings.
  *
- * Example:
+ * Server options (non-secret): rest_endpoint, rest_auth_type,
+ *   oauth_endpoint, scope, enable_vended_credentials, location_prefix,
+ *   catalog_name.
+ * User mapping options (credentials): client_id, client_secret, scope.
+ *
+ * scope is accepted in both server and user mapping; user mapping wins.
+ *
+ * Credential resolution order:
+ *   1. CREATE USER MAPPING for the current user
+ *   2. $PGDATA/catalogs.conf (platform-provided)
+ *   3. GUC variables (backward compatibility)
+ *
+ * User-defined catalog example:
  *   CREATE SERVER my_polaris TYPE 'rest'
  *     FOREIGN DATA WRAPPER iceberg_catalog
- *     OPTIONS (rest_endpoint 'http://polaris:8181',
- *              rest_auth_type 'default',
- *              client_id '...',
- *              client_secret '...');
+ *     OPTIONS (rest_endpoint 'https://polaris.example.com');
+ *
+ *   CREATE USER MAPPING FOR user1 SERVER my_polaris
+ *     OPTIONS (client_id '...', client_secret '...');
  *
  *   CREATE TABLE t (a int) USING iceberg WITH (catalog = 'my_polaris');
+ *
+ * Platform-provided catalog example:
+ *   CREATE SERVER horizon TYPE 'rest'
+ *     FOREIGN DATA WRAPPER iceberg_catalog
+ *     OPTIONS (rest_endpoint 'https://horizon.example.com');
+ *
+ *   -- Credentials in $PGDATA/catalogs.conf:
+ *   --   horizon.client_id = 'platform_id'
+ *   --   horizon.client_secret = 'platform_secret'
  */
 CREATE FUNCTION lake_iceberg.iceberg_catalog_validator(text[], oid)
 RETURNS void
