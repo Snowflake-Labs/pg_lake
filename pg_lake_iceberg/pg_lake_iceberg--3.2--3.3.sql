@@ -38,3 +38,5 @@ LANGUAGE C STRICT;
 CREATE FOREIGN DATA WRAPPER iceberg_catalog
   NO HANDLER
   VALIDATOR lake_iceberg.iceberg_catalog_validator;
+
+GRANT USAGE ON FOREIGN DATA WRAPPER iceberg_catalog TO lake_write;

@@ -126,6 +126,5 @@ extern PGDLLEXPORT RestCatalogRequest * GetAddPartitionCatalogRequest(Oid relati
 extern PGDLLEXPORT RestCatalogRequest * GetSetPartitionDefaultIdCatalogRequest(Oid relationId, int specId);
 extern PGDLLEXPORT RestCatalogRequest * GetRemoveSnapshotCatalogRequest(List *removedSnapshotIds, Oid relationId);
 
-/* ProcessUtility handlers for iceberg_catalog servers */
-extern PGDLLEXPORT bool BlockDDLOnExtensionCatalogs(ProcessUtilityParams * processUtilityParams, void *arg);
-extern PGDLLEXPORT bool RequireRestTypeForIcebergCatalogServer(ProcessUtilityParams * processUtilityParams, void *arg);
+/* ProcessUtility handler for iceberg_catalog server DDL validation */
+extern PGDLLEXPORT bool ValidateIcebergCatalogServerDDL(ProcessUtilityParams * processUtilityParams, void *arg);

@@ -52,6 +52,31 @@ def test_create_rest_server_with_all_options(superuser_conn, extension):
     superuser_conn.rollback()
 
 
+def test_create_rest_server_no_options(superuser_conn, extension):
+    """A server with no options is valid; all settings fall back to GUCs."""
+    run_command(
+        """
+        CREATE SERVER test_rest_no_opts TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+        """,
+        superuser_conn,
+    )
+    superuser_conn.rollback()
+
+
+def test_lake_write_user_can_create_server(pg_conn, extension):
+    """A non-superuser with lake_write should be able to create a server."""
+    run_command(
+        """
+        CREATE SERVER test_lake_write_srv TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        pg_conn,
+    )
+    pg_conn.rollback()
+
+
 def test_create_rest_server_minimal(superuser_conn, extension):
     """A server with just rest_endpoint should be accepted."""
     run_command(
