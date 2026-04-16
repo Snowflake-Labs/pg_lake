@@ -2992,3 +2992,93 @@ def test_temporal_clamp_rescues_check_constraint(
         run_command("RESET search_path;", pg_conn)
         run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
         pg_conn.commit()
+
+
+def test_temporal_clamp_still_fails_strict_check_constraint(
+    pg_conn, extension, s3, with_default_location
+):
+    """Temporal clamping cannot rescue a CHECK that the clamped value still violates.
+
+    infinity is clamped to 9999-12-31, but CHECK (d < '9999-12-31') uses
+    strict less-than, so the clamped value still fails.
+    """
+    schema = "test_clamp_check_strict"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    try:
+        run_command(
+            "CREATE TABLE target (d date CHECK (d < '9999-12-31'::date))"
+            " USING iceberg WITH (out_of_range_values = 'clamp');",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        err = run_command(
+            "INSERT INTO target VALUES ('infinity'::date);",
+            pg_conn,
+            raise_error=False,
+        )
+        assert "check constraint" in str(err).lower()
+        pg_conn.rollback()
+    finally:
+        pg_conn.rollback()
+        run_command("RESET TIME ZONE;", pg_conn)
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+def test_numeric_nan_clamp_succeeds_on_nullable_column(
+    pg_conn, extension, s3, with_default_location
+):
+    """Bounded numeric NaN is clamped to NULL and stored when the column is nullable.
+
+    This is the happy-path counterpart of the NOT NULL tests: clamping
+    converts NaN to NULL, which is valid for a nullable column.  Covers
+    both INSERT and UPDATE.
+    """
+    schema = "test_clamp_nan_nullable"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+
+    try:
+        run_command(
+            "CREATE TABLE target ("
+            "  id int,"
+            "  n numeric(18,6)"
+            ") USING iceberg WITH (out_of_range_values = 'clamp');",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        # INSERT: NaN is clamped to NULL and succeeds
+        run_command(
+            "INSERT INTO target VALUES (1, 'NaN'::numeric(18,6));",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        result = run_query("SELECT n FROM target WHERE id = 1;", pg_conn)
+        assert result[0][0] is None
+
+        # UPDATE: NaN is clamped to NULL and succeeds
+        run_command("INSERT INTO target VALUES (2, 99.0);", pg_conn)
+        pg_conn.commit()
+
+        run_command(
+            "UPDATE target SET n = 'NaN'::numeric(18,6) WHERE id = 2;",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        result = run_query("SELECT n FROM target WHERE id = 2;", pg_conn)
+        assert result[0][0] is None
+    finally:
+        pg_conn.rollback()
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
