@@ -124,7 +124,7 @@ static MemoryContext PgLakeXactCommitContext = NULL;
  * where syscache lookups are forbidden. Only one REST catalog server is allowed
  * per transaction.
  */
-static RestCatalogOptions *PgLakeXactRestCatalogOpts = NULL;
+static RestCatalogOptions * PgLakeXactRestCatalogOpts = NULL;
 
 
 /*

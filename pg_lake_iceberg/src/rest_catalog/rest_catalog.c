@@ -299,8 +299,8 @@ GetRestCatalogOptionsFromCatalog(const char *catalog)
 	RestCatalogOptions *opts = palloc0(sizeof(RestCatalogOptions));
 
 	/*
-	 * Normalize built-in catalog name to the canonical constant so that
-	 * case variations (e.g. 'REST', 'rEst') compare equal with strcmp.
+	 * Normalize built-in catalog name to the canonical constant so that case
+	 * variations (e.g. 'REST', 'rEst') compare equal with strcmp.
 	 * User-created server names are case-sensitive and stored as-is.
 	 */
 	if (pg_strcasecmp(catalog, REST_CATALOG_NAME) == 0)
@@ -319,9 +319,8 @@ GetRestCatalogOptionsFromCatalog(const char *catalog)
 	opts->locationPrefix = GetIcebergDefaultLocationPrefix();
 
 	/*
-	 * The built-in 'rest' name uses GUCs exclusively.
-	 * For user-created servers, look up server options and
-	 * override the GUC defaults.
+	 * The built-in 'rest' name uses GUCs exclusively. For user-created
+	 * servers, look up server options and override the GUC defaults.
 	 */
 	if (pg_strcasecmp(catalog, REST_CATALOG_NAME) != 0)
 	{
@@ -360,8 +359,9 @@ GetRestCatalogOptionsFromCatalog(const char *catalog)
 				opts->catalogName = defGetString(def);
 			else if (pg_strcasecmp(def->defname, "location_prefix") == 0)
 			{
-				bool        inPlace = false;
-            opts->locationPrefix = StripTrailingSlash(defGetString(def), inPlace);
+				bool		inPlace = false;
+
+				opts->locationPrefix = StripTrailingSlash(defGetString(def), inPlace);
 			}
 		}
 	}
