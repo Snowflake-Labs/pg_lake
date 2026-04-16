@@ -789,9 +789,9 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 			/*
 			 * Writable tables always derive catalog_name, catalog_namespace,
 			 * and catalog_table_name from the database name, schema name, and
-			 * table name.  Explicit catalog options on the table are rejected,
-			 * and the server must not have catalog_name set either, since that
-			 * would conflict with the derived values.
+			 * table name.  Explicit catalog options on the table are
+			 * rejected, and the server must not have catalog_name set either,
+			 * since that would conflict with the derived values.
 			 */
 			if (catalogNamespaceProvided != NULL ||
 				catalogTableNameProvided != NULL ||
