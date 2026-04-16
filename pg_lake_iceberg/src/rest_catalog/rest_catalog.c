@@ -1544,7 +1544,6 @@ SendRequestToRestCatalog(HttpMethod method, const char *url, const char *body,
 {
 	const int	MAX_HTTP_RETRY_FOR_REST_CATALOG = 3;
 
-<<<<<<< HEAD
 	HttpResult	result;
 
 	for (int retryNo = 1; retryNo <= MAX_HTTP_RETRY_FOR_REST_CATALOG; retryNo++)
@@ -1569,7 +1568,7 @@ SendRequestToRestCatalog(HttpMethod method, const char *url, const char *body,
 					 * new token.
 					 */
 					bool		forceRefreshToken = true;
-					char	   *freshToken = GetRestCatalogAccessToken(forceRefreshToken);
+					char	   *freshToken = GetRestCatalogAccessToken(opts, forceRefreshToken);
 
 					UpdateAuthorizationHeader(headers, freshToken);
 					continue;
@@ -1582,76 +1581,3 @@ SendRequestToRestCatalog(HttpMethod method, const char *url, const char *body,
 
 	return result;
 }
-=======
-	return SendHttpRequestWithRetry(method, url, body, headers,
-									ShouldRetryRequestToRestCatalog,
-									MAX_HTTP_RETRY_FOR_REST_CATALOG,
-									opts);
-}
-
-
-/*
- * ShouldRetryRequestToRestCatalog checks if the given HTTP result status is retriable.
- * If it is retriable, it performs necessary actions (like sleeping or refreshing token)
- * and returns true. Otherwise, it returns false.
- */
-bool
-ShouldRetryRequestToRestCatalog(long status, int maxRetry, int retryNo,
-								void *context, List *headers)
-{
-	if (retryNo > maxRetry)
-		return false;
-
-	const int	TOO_MANY_REQUEST_STATUS = 429;
-	const int	SERVER_UNAVAILABLE_STATUS = 503;
-	const int	TOKEN_EXPIRED_STATUS = 419;
-
-	/* too many request, wait some time */
-	if (status == TOO_MANY_REQUEST_STATUS)
-	{
-		int			baseMs = 500;
-
-		/*
-		 * LightSleep reacts to signals, and can easily throw an error (e.g.,
-		 * cancel backend). This function can be called at post-commit hook,
-		 * so normally we wouldn't want any errors to happen, but then
-		 * Postgres already prevents post-commit backends to receive signals.
-		 */
-		LightSleep(LinearBackoffSleepMs(baseMs, retryNo));
-		return true;
-	}
-
-	/* server unavailable, lets wait a bit more */
-	else if (status == SERVER_UNAVAILABLE_STATUS)
-	{
-		int			baseMs = 5000;
-
-		LightSleep(LinearBackoffSleepMs(baseMs, retryNo));
-		return true;
-	}
-
-	/* token expired, retry after refreshing token */
-	else if (status == TOKEN_EXPIRED_STATUS)
-	{
-		RestCatalogOptions *opts = (RestCatalogOptions *) context;
-
-		if (opts == NULL)
-			return false;
-
-		/*
-		 * We normally refresh the token only when it is about to expire
-		 * (forceRefreshToken = false), just 1 minute before the expiration
-		 * for each request. Retry logic makes it safer by ensuring we get a
-		 * fresh token for unforeseen circumstances.
-		 */
-		bool		forceRefreshToken = true;
-		char	   *newToken = GetRestCatalogAccessToken(opts, forceRefreshToken);
-
-		linitial(headers) = psprintf("Authorization: Bearer %s", newToken);
-		return true;
-	}
-
-	/* successful or other error, no retry */
-	return false;
-}
->>>>>>> 5f24f40 (Address Onder's review)
