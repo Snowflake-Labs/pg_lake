@@ -44,9 +44,8 @@ extern bool RestCatalogEnableVendedCredentials;
 typedef struct RestCatalogOptions
 {
 	char	   *catalog;		/* catalog name, used for token cache keying;
-							 	 * can be 'rest' or a user-created server name
-							 	 * of TYPE 'rest'
-								 */
+								 * can be 'rest' or a user-created server name
+								 * of TYPE 'rest' */
 	char	   *host;
 	char	   *oauthHostPath;
 	char	   *clientId;
