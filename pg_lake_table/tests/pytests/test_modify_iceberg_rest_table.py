@@ -565,3 +565,367 @@ def get_rest_table_metadata_location(encoded_namespace, encoded_table_name, pg_c
     status, json_str, headers = res[0]
     metadata = json.loads(json_str)
     return metadata["metadata"]["location"]
+
+
+server_option_override_params = [
+    pytest.param(
+        "rest_endpoint",
+        "pg_lake_iceberg.rest_catalog_host",
+        "http://localhost:1",
+        id="rest_endpoint",
+    ),
+    pytest.param(
+        "client_id",
+        "pg_lake_iceberg.rest_catalog_client_id",
+        "wrong_id",
+        id="client_id",
+    ),
+    pytest.param(
+        "client_secret",
+        "pg_lake_iceberg.rest_catalog_client_secret",
+        "wrong_secret",
+        id="client_secret",
+    ),
+    pytest.param(
+        "location_prefix",
+        "pg_lake_iceberg.default_location_prefix",
+        "s3://nonexistent-broken-bucket-xyz",
+        id="location_prefix",
+    ),
+    pytest.param(
+        "catalog_name",
+        None,
+        None,
+        id="catalog_name",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "option_name, guc_name, broken_guc_value", server_option_override_params
+)
+def test_server_option_overrides_guc(
+    installcheck,
+    superuser_conn,
+    pg_conn,
+    s3,
+    extension,
+    polaris_session,
+    create_http_helper_functions,
+    option_name,
+    guc_name,
+    broken_guc_value,
+):
+    """
+    Verify that each overridable server option takes precedence over
+    its corresponding GUC.  For most options the GUC is set to a broken
+    value while the server option is set to the correct value, then we
+    prove the table works.  For catalog_name the server option is set to
+    a wrong value and we prove it is used (instead of the default).
+    """
+    if installcheck:
+        return
+
+    creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
+    client_id = creds["credentials"]["clientId"]
+    client_secret = creds["credentials"]["clientSecret"]
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}"
+    VALID_PREFIX = f"s3://{TEST_BUCKET}/"
+
+    SERVER_NAME = f"rest_opt_override_{option_name}"
+    SCHEMA_NAME = TABLE_NAMESPACE
+    TABLE_NAME = f"opt_override_{option_name}"
+
+    server_options = {
+        "rest_endpoint": endpoint,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "location_prefix": VALID_PREFIX,
+    }
+
+    if option_name == "catalog_name":
+        server_options["catalog_name"] = "nonexistent_catalog"
+
+    options_sql = ", ".join(f"{k} '{v}'" for k, v in server_options.items())
+
+    if guc_name is not None:
+        run_command(
+            f"SET {guc_name} TO '{broken_guc_value}'",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+    run_command(
+        f"""
+        CREATE SERVER {SERVER_NAME} TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS ({options_sql})
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    run_command(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA_NAME}", pg_conn)
+    pg_conn.commit()
+
+    if option_name == "catalog_name":
+        err = run_command(
+            f"CREATE TABLE {SCHEMA_NAME}.{TABLE_NAME} () "
+            f"USING iceberg WITH (catalog='{SERVER_NAME}', read_only='true')",
+            pg_conn,
+            raise_error=False,
+        )
+        assert err is not None, (
+            "Expected failure because server's catalog_name 'nonexistent_catalog' "
+            "should be used instead of the default database name"
+        )
+        pg_conn.rollback()
+    else:
+        run_command(
+            f"CREATE TABLE {SCHEMA_NAME}.{TABLE_NAME} (id bigint, value text) "
+            f"USING iceberg WITH (catalog='{SERVER_NAME}')",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        run_command(
+            f"INSERT INTO {SCHEMA_NAME}.{TABLE_NAME} "
+            f"SELECT i, i::text FROM generate_series(1, 10) i",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        results = run_query(f"SELECT count(*) FROM {SCHEMA_NAME}.{TABLE_NAME}", pg_conn)
+        assert results[0][0] == 10
+
+        if option_name == "location_prefix":
+            table_location = get_rest_table_metadata_location(
+                SCHEMA_NAME, TABLE_NAME, pg_conn
+            )
+            stripped_prefix = VALID_PREFIX.rstrip("/")
+            assert table_location.startswith(stripped_prefix), (
+                f"Expected location to start with server prefix "
+                f"'{stripped_prefix}', got '{table_location}'"
+            )
+            assert broken_guc_value not in table_location
+            assert (
+                "//" not in table_location.split("://", 1)[1]
+            ), f"Double slash found in location path: '{table_location}'"
+
+        pg_conn.rollback()
+        run_command(f"DROP SCHEMA {SCHEMA_NAME} CASCADE", pg_conn)
+        pg_conn.commit()
+
+    superuser_conn.rollback()
+    run_command(f"DROP SERVER {SERVER_NAME} CASCADE", superuser_conn)
+    superuser_conn.commit()
+
+    if guc_name is not None:
+        run_command(f"RESET {guc_name}", superuser_conn)
+        superuser_conn.commit()
+
+
+def test_reject_modify_different_rest_catalogs_in_single_transaction(
+    installcheck,
+    superuser_conn,
+    pg_conn,
+    s3,
+    extension,
+    with_default_location,
+    polaris_session,
+    create_http_helper_functions,
+):
+    """
+    Modifying tables from two different REST catalog servers in the same
+    transaction must be rejected.
+    """
+    if installcheck:
+        return
+
+    creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
+    client_id = creds["credentials"]["clientId"]
+    client_secret = creds["credentials"]["clientSecret"]
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}"
+
+    for name in ["rest_catalog_a", "rest_catalog_b"]:
+        run_command(
+            f"""
+            CREATE SERVER {name} TYPE 'rest'
+                FOREIGN DATA WRAPPER iceberg_catalog
+                OPTIONS (rest_endpoint '{endpoint}',
+                         client_id '{client_id}',
+                         client_secret '{client_secret}')
+            """,
+            superuser_conn,
+        )
+    superuser_conn.commit()
+
+    run_command(f"CREATE SCHEMA IF NOT EXISTS {TABLE_NAMESPACE}", pg_conn)
+    pg_conn.commit()
+
+    for name, catalog in [("table_a", "rest_catalog_a"), ("table_b", "rest_catalog_b")]:
+        run_command(
+            f"CREATE TABLE {TABLE_NAMESPACE}.{name} (id bigint) USING iceberg WITH (catalog='{catalog}')",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+    run_command(
+        f"INSERT INTO {TABLE_NAMESPACE}.table_a SELECT i FROM generate_series(1, 10) i",
+        pg_conn,
+    )
+    run_command(
+        f"INSERT INTO {TABLE_NAMESPACE}.table_b SELECT i FROM generate_series(1, 10) i",
+        pg_conn,
+    )
+
+    with pytest.raises(
+        psycopg2.errors.FeatureNotSupported, match="different REST catalogs"
+    ):
+        pg_conn.commit()
+
+    pg_conn.rollback()
+
+
+def test_reject_writable_table_on_server_with_catalog_name(
+    installcheck,
+    superuser_conn,
+    pg_conn,
+    s3,
+    extension,
+    with_default_location,
+    polaris_session,
+    create_http_helper_functions,
+):
+    """
+    Creating a writable table on a server that has catalog_name set must
+    be rejected, because writable tables always derive the catalog name
+    from the database name.
+    """
+    if installcheck:
+        return
+
+    SERVER_NAME = "rest_catalog_has_catname"
+    SCHEMA_NAME = TABLE_NAMESPACE
+
+    creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
+    client_id = creds["credentials"]["clientId"]
+    client_secret = creds["credentials"]["clientSecret"]
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}"
+
+    run_command(
+        f"""
+        CREATE SERVER {SERVER_NAME} TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint '{endpoint}',
+                     client_id '{client_id}',
+                     client_secret '{client_secret}',
+                     catalog_name '{server_params.PG_DATABASE}',
+                     location_prefix 's3://{TEST_BUCKET}')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    run_command(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA_NAME}", pg_conn)
+    pg_conn.commit()
+
+    err = run_command(
+        f"CREATE TABLE {SCHEMA_NAME}.reject_catname (id bigint) "
+        f"USING iceberg WITH (catalog='{SERVER_NAME}')",
+        pg_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert (
+        "writable REST catalog tables cannot use a server with catalog_name set"
+        in str(err)
+    )
+    pg_conn.rollback()
+
+    superuser_conn.rollback()
+    run_command(f"DROP SERVER {SERVER_NAME}", superuser_conn)
+    superuser_conn.commit()
+
+
+def test_table_catalog_name_overrides_server(
+    installcheck,
+    superuser_conn,
+    pg_conn,
+    s3,
+    extension,
+    with_default_location,
+    polaris_session,
+    set_polaris_gucs,
+    create_http_helper_functions,
+):
+    """
+    The table-level catalog_name takes precedence over the server's.
+    We create a writable table via the built-in 'rest' catalog, then
+    create a read-only table via a server whose catalog_name is wrong,
+    overriding it on the table with the correct one.  If the table
+    option did not take precedence, the metadata lookup would fail.
+    """
+    if installcheck:
+        return
+
+    SERVER_NAME = "rest_catname_bad"
+    SCHEMA_NAME = "test_catname_override"
+    SRC_TABLE = "catname_src"
+    RO_TABLE = "catname_ro"
+
+    creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
+    client_id = creds["credentials"]["clientId"]
+    client_secret = creds["credentials"]["clientSecret"]
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}"
+
+    run_command(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA_NAME}", pg_conn)
+    pg_conn.commit()
+
+    run_command(
+        f"CREATE TABLE {SCHEMA_NAME}.{SRC_TABLE} (id bigint) "
+        f"USING iceberg WITH (catalog='rest')",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"INSERT INTO {SCHEMA_NAME}.{SRC_TABLE} "
+        f"SELECT i FROM generate_series(1, 5) i",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        CREATE SERVER {SERVER_NAME} TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint '{endpoint}',
+                     client_id '{client_id}',
+                     client_secret '{client_secret}',
+                     catalog_name 'nonexistent_catalog')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    run_command(
+        f"CREATE TABLE {SCHEMA_NAME}.{RO_TABLE} () "
+        f"USING iceberg WITH (catalog='{SERVER_NAME}', read_only='true', "
+        f"catalog_name='{server_params.PG_DATABASE}', "
+        f"catalog_namespace='{SCHEMA_NAME}', "
+        f"catalog_table_name='{SRC_TABLE}')",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    results = run_query(f"SELECT count(*) FROM {SCHEMA_NAME}.{RO_TABLE}", pg_conn)
+    assert results[0][0] == 5
+
+    pg_conn.rollback()
+    run_command(f"DROP SCHEMA {SCHEMA_NAME} CASCADE", pg_conn)
+    pg_conn.commit()
+
+    superuser_conn.rollback()
+    run_command(f"DROP SERVER {SERVER_NAME}", superuser_conn)
+    superuser_conn.commit()

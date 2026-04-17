@@ -17,6 +17,9 @@
 
 #pragma once
 
+/* FDW name for iceberg_catalog servers */
+#define ICEBERG_CATALOG_FDW_NAME "iceberg_catalog"
+
 /*
 * The allowed values for IcebergDefaultCatalog, case insensitive.
 */
@@ -61,3 +64,5 @@ extern PGDLLEXPORT IcebergCatalogType GetIcebergCatalogType(Oid relationId);
 extern PGDLLEXPORT bool HasRestCatalogTableOption(List *options);
 extern PGDLLEXPORT bool HasObjectStoreCatalogTableOption(List *options);
 extern PGDLLEXPORT bool HasReadOnlyOption(List *options);
+extern PGDLLEXPORT bool IsCatalogOwnedByExtension(const char *catalog);
+extern PGDLLEXPORT bool IsRestCatalog(const char *catalog);
