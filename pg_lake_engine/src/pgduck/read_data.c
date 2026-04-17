@@ -49,12 +49,12 @@ static char *ReadDataSourceFunction(List *sourcePaths,
 									CopyDataCompression sourceCompression,
 									TupleDesc expectedDesc,
 									List *formatOptions,
-									DataFileSchema * schema,
+									DataFileSchema *schema,
 									bool preferVarchar,
 									ReadRowLocationMode emitRowLocation,
 									bool emitRowId);
-static char *BuildParquetSchema(DataFileSchema * schema, bool emitRowId);
-static char *GetSchemaType(Field * mapping);
+static char *BuildParquetSchema(DataFileSchema *schema, bool emitRowId);
+static char *GetSchemaType(Field *mapping);
 static char *ReadEmptyDataSource(TupleDesc tupleDesc, CopyDataFormat format,
 								 bool preferVarchar,
 								 ReadRowLocationMode emitRowLocation);
@@ -92,8 +92,8 @@ ReadDataSourceQuery(List *sourcePaths,
 					CopyDataCompression sourceCompression,
 					TupleDesc expectedDesc,
 					List *formatOptions,
-					DataFileSchema * schema,
-					ReadDataStats * stats,
+					DataFileSchema *schema,
+					ReadDataStats *stats,
 					int flags)
 {
 	/* whether to prepare output for TRANSMIT */
@@ -229,7 +229,7 @@ ReadDataSourceFunction(List *sourcePaths,
 					   CopyDataCompression sourceCompression,
 					   TupleDesc expectedDesc,
 					   List *formatOptions,
-					   DataFileSchema * schema,
+					   DataFileSchema *schema,
 					   bool preferVarchar,
 					   ReadRowLocationMode readRowLocationMode,
 					   bool emitRowId)
@@ -566,7 +566,7 @@ ReadDataSourceFunction(List *sourcePaths,
 * read them all. The
 */
 static char *
-BuildParquetSchema(DataFileSchema * schema, bool emitRowId)
+BuildParquetSchema(DataFileSchema *schema, bool emitRowId)
 {
 	StringInfoData schemaString;
 
@@ -618,7 +618,7 @@ BuildParquetSchema(DataFileSchema * schema, bool emitRowId)
 * GetSchemaType returns the schema type for a given field.
 */
 static char *
-GetSchemaType(Field * field)
+GetSchemaType(Field *field)
 {
 	StringInfoData str;
 

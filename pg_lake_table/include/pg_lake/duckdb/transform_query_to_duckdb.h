@@ -30,5 +30,5 @@
 #define SKIP_FULL_MATCH_FILES (1 << 1)
 
 extern char *ReplaceReadTableFunctionCalls(char *query,
-										   PgLakeScanSnapshot * snapshot,
+										   PgLakeScanSnapshot *snapshot,
 										   int scanFlags);

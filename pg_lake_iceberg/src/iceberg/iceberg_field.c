@@ -79,7 +79,7 @@ typedef enum IcebergType
 	ICEBERG_TYPE_LIST,
 	ICEBERG_TYPE_MAP,
 	ICEBERG_TYPE_STRUCT,
-}			IcebergType;
+} IcebergType;
 
 typedef struct IcebergTypeInfo
 {
@@ -88,14 +88,14 @@ typedef struct IcebergTypeInfo
 	/* additional context for decimal */
 	int			precision;
 	int			scale;
-}			IcebergTypeInfo;
+} IcebergTypeInfo;
 
 typedef struct IcebergToDuckDBType
 {
 	const char *icebergTypeName;
 	IcebergType icebergType;
 	DuckDBType	duckdbType;
-}			IcebergToDuckDBType;
+} IcebergToDuckDBType;
 
 
 static IcebergToDuckDBType IcebergToDuckDBTypes[] =
@@ -155,8 +155,8 @@ static IcebergToDuckDBType IcebergToDuckDBTypes[] =
 
 static DuckDBType GetDuckDBTypeFromIcebergType(IcebergType icebergType);
 static char *PostgresBaseTypeIdToIcebergTypeName(PGType pgType);
-static IcebergTypeInfo * GetIcebergTypeInfoFromTypeName(const char *typeName);
-static const char *GetIcebergJsonSerializedConstDefaultIfExists(const char *attrName, Field * field, Node *defaultExpr);
+static IcebergTypeInfo *GetIcebergTypeInfoFromTypeName(const char *typeName);
+static const char *GetIcebergJsonSerializedConstDefaultIfExists(const char *attrName, Field *field, Node *defaultExpr);
 
 
 /*
@@ -305,7 +305,7 @@ PostgresTypeToIcebergField(PGType pgType, bool forAddColumn, int *subFieldIndex)
  * 1. Get Postgres type from Field to serialize the Postgres type in duck format.
  */
 PGType
-IcebergFieldToPostgresType(Field * field)
+IcebergFieldToPostgresType(Field *field)
 {
 	EnsureIcebergField(field);
 
@@ -750,7 +750,7 @@ TupleDescGetDefault(TupleDesc tupdesc, AttrNumber attnum)
 */
 const char *
 GetIcebergJsonSerializedDefaultExpr(TupleDesc tupdesc, AttrNumber attnum,
-									FieldStructElement * structElementField)
+									FieldStructElement *structElementField)
 {
 	const char *attrName = structElementField->name;
 	Field	   *field = structElementField->type;
@@ -761,7 +761,7 @@ GetIcebergJsonSerializedDefaultExpr(TupleDesc tupdesc, AttrNumber attnum,
 
 
 static const char *
-GetIcebergJsonSerializedConstDefaultIfExists(const char *attrName, Field * field, Node *defaultExpr)
+GetIcebergJsonSerializedConstDefaultIfExists(const char *attrName, Field *field, Node *defaultExpr)
 {
 	EnsureIcebergField(field);
 
@@ -809,7 +809,7 @@ GetIcebergJsonSerializedConstDefaultIfExists(const char *attrName, Field * field
  * EnsureIcebergField ensures that the given field is valid Iceberg field.
  */
 void
-EnsureIcebergField(Field * field)
+EnsureIcebergField(Field *field)
 {
 #ifdef USE_ASSERT_CHECKING
 

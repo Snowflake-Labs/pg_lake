@@ -78,24 +78,24 @@ typedef struct RestCatalogRequestPerTable
 
 
 	List	   *tableModifyRequests;
-}			RestCatalogRequestPerTable;
+} RestCatalogRequestPerTable;
 
 static void ApplyTrackedIcebergMetadataChanges(bool isVerbose);
 static void RecordIcebergMetadataOperation(Oid relationId, TableMetadataOperationType operationType);
 static void InitTableMetadataTrackerHashIfNeeded(void);
 static void InitRestCatalogRequestsHashIfNeeded(void);
-static HTAB *CreateDataFilesHashForMetadata(IcebergTableMetadata * metadata);
-static void FindChangedFilesSinceMetadata(HTAB *currentFilesMap, IcebergTableMetadata * metadata,
+static HTAB *CreateDataFilesHashForMetadata(IcebergTableMetadata *metadata);
+static void FindChangedFilesSinceMetadata(HTAB *currentFilesMap, IcebergTableMetadata *metadata,
 										  List **addedFiles, List **removedFilePaths);
-static HTAB *CreatePartitionSpecsHashForMetadata(IcebergTableMetadata * metadata);
-static List *FindNewPartitionSpecsSinceMetadata(HTAB *currentSpecs, IcebergTableMetadata * metadata);
-static IcebergTableMetadata * GetLastPushedIcebergMetadata(const TableMetadataOperationTracker * opTracker);
-static List *GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
+static HTAB *CreatePartitionSpecsHashForMetadata(IcebergTableMetadata *metadata);
+static List *FindNewPartitionSpecsSinceMetadata(HTAB *currentSpecs, IcebergTableMetadata *metadata);
+static IcebergTableMetadata *GetLastPushedIcebergMetadata(const TableMetadataOperationTracker *opTracker);
+static List *GetDataFileMetadataOperations(const TableMetadataOperationTracker *opTracker,
 										   List *allTransforms);
-static List *GetDDLMetadataOperations(const TableMetadataOperationTracker * opTracker);
+static List *GetDDLMetadataOperations(const TableMetadataOperationTracker *opTracker);
 static void DeleteInProgressAddedFiles(Oid relationId, List *addedFiles);
-static bool AreSchemasEqual(IcebergTableSchema * existingSchema, DataFileSchema * newSchema);
-static int32_t GetSchemaIdForIcebergTableIfExists(const TableMetadataOperationTracker * opTracker, DataFileSchema * schema);
+static bool AreSchemasEqual(IcebergTableSchema *existingSchema, DataFileSchema *newSchema);
+static int32_t GetSchemaIdForIcebergTableIfExists(const TableMetadataOperationTracker *opTracker, DataFileSchema *schema);
 static int	ComparePartitionSpecsById(const ListCell *a, const ListCell *b);
 
 static char *IdentifierJson(const char *namespaceFlat, const char *tableName);
@@ -823,7 +823,7 @@ ApplyTrackedIcebergMetadataChanges(bool isVerbose)
  * from the given Iceberg table metadata.
  */
 static HTAB *
-CreateDataFilesHashForMetadata(IcebergTableMetadata * metadata)
+CreateDataFilesHashForMetadata(IcebergTableMetadata *metadata)
 {
 	HTAB	   *dataFilesMap = CreateFilesHash();
 
@@ -855,7 +855,7 @@ CreateDataFilesHashForMetadata(IcebergTableMetadata * metadata)
  * removedFilePaths: file paths, which are added before the current tx, that are removed since the metadata
  */
 static void
-FindChangedFilesSinceMetadata(HTAB *currentFilesMap, IcebergTableMetadata * metadata,
+FindChangedFilesSinceMetadata(HTAB *currentFilesMap, IcebergTableMetadata *metadata,
 							  List **addedFiles, List **removedFilePaths)
 {
 	/* create metadata's data files */
@@ -912,7 +912,7 @@ DeleteInProgressAddedFiles(Oid relationId, List *addedFiles)
  * from the given Iceberg table metadata.
  */
 static HTAB *
-CreatePartitionSpecsHashForMetadata(IcebergTableMetadata * metadata)
+CreatePartitionSpecsHashForMetadata(IcebergTableMetadata *metadata)
 {
 	HTAB	   *partitionSpecsMap = CreatePartitionSpecHash();
 
@@ -950,7 +950,7 @@ CreatePartitionSpecsHashForMetadata(IcebergTableMetadata * metadata)
  * with those in the metadata and returns a list of new partition specs.
  */
 static List *
-FindNewPartitionSpecsSinceMetadata(HTAB *currentSpecs, IcebergTableMetadata * metadata)
+FindNewPartitionSpecsSinceMetadata(HTAB *currentSpecs, IcebergTableMetadata *metadata)
 {
 	HTAB	   *metadataSpecs = CreatePartitionSpecsHashForMetadata(metadata);
 
@@ -979,7 +979,7 @@ FindNewPartitionSpecsSinceMetadata(HTAB *currentSpecs, IcebergTableMetadata * me
  * for the specified relation. It returns NULL if no metadata is found.
  */
 static IcebergTableMetadata *
-GetLastPushedIcebergMetadata(const TableMetadataOperationTracker * opTracker)
+GetLastPushedIcebergMetadata(const TableMetadataOperationTracker *opTracker)
 {
 	/* table is just created, no metadata is pushed yet */
 	if (opTracker->relationCreated)
@@ -997,7 +997,7 @@ GetLastPushedIcebergMetadata(const TableMetadataOperationTracker * opTracker)
  * in the specified relation.
  */
 static List *
-GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
+GetDataFileMetadataOperations(const TableMetadataOperationTracker *opTracker,
 							  List *allTransforms)
 {
 	/*
@@ -1069,7 +1069,7 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
  * the given relation.
  */
 static List *
-GetDDLMetadataOperations(const TableMetadataOperationTracker * opTracker)
+GetDDLMetadataOperations(const TableMetadataOperationTracker *opTracker)
 {
 	Assert(opTracker->relationCreated || opTracker->relationAltered || opTracker->relationPartitionByChanged);
 
@@ -1171,7 +1171,7 @@ ComparePartitionSpecsById(const ListCell *a, const ListCell *b)
  * in the iceberg table metadata. If it exists, it returns the schema ID, otherwise -1.
 */
 static int32_t
-GetSchemaIdForIcebergTableIfExists(const TableMetadataOperationTracker * opTracker, DataFileSchema * schema)
+GetSchemaIdForIcebergTableIfExists(const TableMetadataOperationTracker *opTracker, DataFileSchema *schema)
 {
 	IcebergTableMetadata *metadata = GetLastPushedIcebergMetadata(opTracker);
 
@@ -1197,7 +1197,7 @@ GetSchemaIdForIcebergTableIfExists(const TableMetadataOperationTracker * opTrack
 * AreSchemasEqual compares two schemas for equality.
 */
 static bool
-AreSchemasEqual(IcebergTableSchema * existingSchema, DataFileSchema * newSchema)
+AreSchemasEqual(IcebergTableSchema *existingSchema, DataFileSchema *newSchema)
 {
 	if (existingSchema->fields_length != newSchema->nfields)
 		return false;

@@ -86,7 +86,7 @@ static void PgLakeIcebergVacuumForTables(MemoryContext outOfTransactionMemoryCon
 static bool IsVacuumLakeTable(VacuumStmt *vacuumStmt);
 static List *GetAutoVacuumEnabledTables(List *relationIdList);
 static bool IsAutoVacuumEnabled(Oid relationId);
-static void VacuumLakeTables(ProcessUtilityParams * utilityParams);
+static void VacuumLakeTables(ProcessUtilityParams *utilityParams);
 static List *GetPgLakePartitionIds(Oid relationId);
 static bool ProcessVacuumPgLakeIcebergFlag(VacuumStmt *vacuumStmt);
 static void VacuumCompactDataFiles(Oid relationId, bool isFull, bool isVerbose);
@@ -349,7 +349,7 @@ IsAutoVacuumEnabled(Oid relationId)
  * VACUUM statements on pg_lake tables
  */
 bool
-ProcessVacuumPgLakeTable(ProcessUtilityParams * params, void *arg)
+ProcessVacuumPgLakeTable(ProcessUtilityParams *params, void *arg)
 {
 	PlannedStmt *plannedStmt = params->plannedStmt;
 
@@ -465,7 +465,7 @@ IsVacuumLakeTable(VacuumStmt *vacuumStmt)
  * tables and then proceeds with regular VACUUM for the remaining tables.
  */
 static void
-VacuumLakeTables(ProcessUtilityParams * utilityParams)
+VacuumLakeTables(ProcessUtilityParams *utilityParams)
 {
 	Assert(IsA(utilityParams->plannedStmt->utilityStmt, VacuumStmt));
 	VacuumStmt *vacuumStmt = (VacuumStmt *) utilityParams->plannedStmt->utilityStmt;

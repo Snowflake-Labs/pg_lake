@@ -41,7 +41,7 @@ typedef struct
 	int			proargcount;
 	char	   *proargtypes[10];
 	IsShippableFunction isShippable;
-}			PGDuckShippableFunction;
+} PGDuckShippableFunction;
 
 
 extern PGDLLEXPORT const PGDuckShippableFunction *GetShippableBuiltinFunctions(int *sizePointer);

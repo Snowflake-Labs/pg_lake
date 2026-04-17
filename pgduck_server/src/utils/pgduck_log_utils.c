@@ -32,7 +32,7 @@ typedef struct ErrorCode
 {
 	int			code;
 	const char *description;
-}			ErrorCode;
+} ErrorCode;
 
 
 /* Define the lookup table for error codes, derived from elog.h */

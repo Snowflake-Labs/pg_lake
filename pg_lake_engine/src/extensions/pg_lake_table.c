@@ -49,7 +49,7 @@ typedef struct PgLakeTableIds
 	 * __pg_lake_table_writes schema ID
 	 */
 	Oid			pgLakeWritesSchemaId;
-}			PgLakeTableIds;
+} PgLakeTableIds;
 
 static void ClearIds(void *lakeTableIds);
 

@@ -34,7 +34,7 @@ static int64_t GenerateIcebergSnapshotId(void);
  * IsCurrentSnapshot checks if the given snapshot is the current snapshot.
  */
 bool
-IsCurrentSnapshot(IcebergTableMetadata * metadata, IcebergSnapshot * snapshot)
+IsCurrentSnapshot(IcebergTableMetadata *metadata, IcebergSnapshot *snapshot)
 {
 	return snapshot->snapshot_id == metadata->current_snapshot_id;
 }
@@ -44,7 +44,7 @@ IsCurrentSnapshot(IcebergTableMetadata * metadata, IcebergSnapshot * snapshot)
  * from given table metadata.
  */
 List *
-FetchSnapshotsFromTableMetadata(IcebergTableMetadata * metadata, SnapshotPredicateFn snapshotPredicateFn)
+FetchSnapshotsFromTableMetadata(IcebergTableMetadata *metadata, SnapshotPredicateFn snapshotPredicateFn)
 {
 	if (metadata == NULL)
 	{
@@ -74,7 +74,7 @@ FetchSnapshotsFromTableMetadata(IcebergTableMetadata * metadata, SnapshotPredica
  * GetCurrentSnapshot gets the current snapshot from given table metadata.
  */
 IcebergSnapshot *
-GetCurrentSnapshot(IcebergTableMetadata * metadata, bool missingOk)
+GetCurrentSnapshot(IcebergTableMetadata *metadata, bool missingOk)
 {
 	if (metadata == NULL)
 	{
@@ -114,7 +114,7 @@ GetCurrentSnapshot(IcebergTableMetadata * metadata, bool missingOk)
 * an error is thrown.
 */
 IcebergSnapshot *
-GetIcebergSnapshotViaId(IcebergTableMetadata * metadata, uint64_t snapshotId)
+GetIcebergSnapshotViaId(IcebergTableMetadata *metadata, uint64_t snapshotId)
 {
 	int			snapshotIndex = 0;
 
@@ -139,7 +139,7 @@ GetIcebergSnapshotViaId(IcebergTableMetadata * metadata, uint64_t snapshotId)
  * CreateNewIcebergSnapshot creates a new snapshot for the given table metadata.
  */
 IcebergSnapshot *
-CreateNewIcebergSnapshot(IcebergTableMetadata * metadata)
+CreateNewIcebergSnapshot(IcebergTableMetadata *metadata)
 {
 	IcebergSnapshot *newSnapshot = palloc0(sizeof(IcebergSnapshot));
 

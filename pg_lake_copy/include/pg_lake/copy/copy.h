@@ -28,7 +28,7 @@
 extern bool EnablePgLakeCopy;
 extern bool EnablePgLakeCopyJson;
 
-bool		PgLakeCopyHandler(ProcessUtilityParams * params, void *arg);
+bool		PgLakeCopyHandler(ProcessUtilityParams *params, void *arg);
 void		ProcessPgLakeCopy(ParseState *pstate, PlannedStmt *plannedStmt,
 							  const char *queryString, uint64 *rowsProcessed);
 

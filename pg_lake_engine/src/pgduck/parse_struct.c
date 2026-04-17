@@ -59,24 +59,24 @@ typedef struct StructParserState
 	const char *sourceString;
 	char	   *position;
 	List	   *uncreatedTypes;
-}			StructParserState;
+} StructParserState;
 
 
 /* pulling from type.c without general include */
 extern Oid	GetPGTypeForDuckDBTypeNameBuiltin(const char *name, int *typeMod, bool arrayOid);
 
 /* prototypes */
-static Oid	FindOrCreatePGCompositeType(CompositeType * type);
-static Oid	CreatePGCompositeType(CompositeType * type);
+static Oid	FindOrCreatePGCompositeType(CompositeType *type);
+static Oid	CreatePGCompositeType(CompositeType *type);
 static void CreateUncreatedTypes(List *uncreatedTypes);
 static Oid	GetRelatedTypeOid(Oid inputType, bool getArray);
-static void EnsureColumnTypesArePopulated(CompositeType * myType);
+static void EnsureColumnTypesArePopulated(CompositeType *myType);
 
 /* parser-related returns */
 /* not exposed, but importable via extern */
-CompositeType *ParseStructType(StructParserState * parse);
-static CompositeCol * ParseStructColumn(StructParserState * parse);
-static bool ParseSkipToNextField(StructParserState * parse);
+CompositeType *ParseStructType(StructParserState *parse);
+static CompositeCol *ParseStructColumn(StructParserState *parse);
+static bool ParseSkipToNextField(StructParserState *parse);
 static char *ParseSkipCasePrefix(const char *string, const char *prefix);
 
 /* exposed for map parsing as well */
@@ -84,8 +84,8 @@ char	   *ParseDuckDBFieldType(char **sourceStringPtr, bool *isArray);
 
 /* helper functions for parsing */
 static char *ParseDuckDBFieldName(char **sourceStringPtr);
-static void AssignBaseStructTypeName(CompositeType * type);
-static void FinalizeCompositeTypeName(CompositeType * type);
+static void AssignBaseStructTypeName(CompositeType *type);
+static void FinalizeCompositeTypeName(CompositeType *type);
 
 /* simple wrapper for easily parsing a single type */
 CompositeType *
@@ -169,7 +169,7 @@ GetOrCreatePGStructType(const char *name)
  * order in one pass.
  */
 CompositeType *
-ParseStructType(StructParserState * parse)
+ParseStructType(StructParserState *parse)
 {
 	/* we should only be running this if we are a struct type */
 	Assert(IsStructType(parse->sourceString));
@@ -260,7 +260,7 @@ ParseSkipCasePrefix(const char *string, const char *prefix)
  * itself could be a struct, which will also recursively be parsed).
  */
 static CompositeCol *
-ParseStructColumn(StructParserState * parse)
+ParseStructColumn(StructParserState *parse)
 {
 	CompositeCol *myCol = palloc0(sizeof(CompositeCol));
 
@@ -678,7 +678,7 @@ ParseDuckDBFieldType(char **sourceString, bool *isArray)
  * false if there was an error.
  */
 static bool
-ParseSkipToNextField(StructParserState * parse)
+ParseSkipToNextField(StructParserState *parse)
 {
 	/* skip leading whitespace */
 	while (isspace(*parse->position))
@@ -730,7 +730,7 @@ ParseSkipToNextField(StructParserState * parse)
  * type instead of the elem composite type.
  */
 static Oid
-FindOrCreatePGCompositeType(CompositeType * type)
+FindOrCreatePGCompositeType(CompositeType *type)
 {
 	elog(DEBUG1, "Looking up existing composite postgres type for: %s", GetDuckDBStructDefinitionForCompositeType(type, DATA_FORMAT_INVALID));
 
@@ -845,7 +845,7 @@ FindOrCreatePGCompositeType(CompositeType * type)
  * of the columns match.
  */
 static Oid
-CreatePGCompositeType(CompositeType * type)
+CreatePGCompositeType(CompositeType *type)
 {
 	RangeVar   *typevar;
 	List	   *coldeflist = NIL;
@@ -917,7 +917,7 @@ CreatePGCompositeType(CompositeType * type)
  * finalizes the name.
  */
 static void
-AssignBaseStructTypeName(CompositeType * type)
+AssignBaseStructTypeName(CompositeType *type)
 {
 	/* get column names */
 
@@ -949,7 +949,7 @@ AssignBaseStructTypeName(CompositeType * type)
  * generated name.  It also changes spaces to underscores in the output.
  */
 static void
-FinalizeCompositeTypeName(CompositeType * type)
+FinalizeCompositeTypeName(CompositeType *type)
 {
 	if (type->isFinalized)
 		return;
@@ -1059,7 +1059,7 @@ FinalizeCompositeTypeName(CompositeType * type)
  * basically the inverse of the ParseStructType() routine.
  */
 char *
-GetDuckDBStructDefinitionForCompositeType(CompositeType * type,
+GetDuckDBStructDefinitionForCompositeType(CompositeType *type,
 										  CopyDataFormat format)
 {
 	ListCell   *lc;
@@ -1368,7 +1368,7 @@ GetRelatedTypeOid(Oid inputType, bool getArray)
  * This routine populates any unpopulated column type fields from the subStruct.
  */
 static void
-EnsureColumnTypesArePopulated(CompositeType * myType)
+EnsureColumnTypesArePopulated(CompositeType *myType)
 {
 	ListCell   *lc;
 

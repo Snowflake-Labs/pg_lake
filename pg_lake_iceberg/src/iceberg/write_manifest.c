@@ -28,15 +28,15 @@
 #include "pg_lake/iceberg/manifest_schema_v2.h"
 #include "pg_lake/util/string_utils.h"
 
-static void WriteColumnStatToAvro(ColumnStat * stat, avro_value_t * record);
-static void WriteColumnBoundToAvro(ColumnBound * bound, avro_value_t * record);
-static void WriteFieldSummaryToAvro(FieldSummary * summary, avro_value_t * record);
-static void WriteDataFileToAvro(DataFile * dataFile, avro_value_t * record);
-static void WritePartitionToAvro(Partition * partition, avro_value_t * record);
-static void WriteIcebergManifestToAvro(IcebergManifest * manifest, avro_value_t * record);
-static void WriteIcebergManifestEntryToAvro(IcebergManifestEntry * entry, avro_value_t * record);
+static void WriteColumnStatToAvro(ColumnStat *stat, avro_value_t * record);
+static void WriteColumnBoundToAvro(ColumnBound *bound, avro_value_t * record);
+static void WriteFieldSummaryToAvro(FieldSummary *summary, avro_value_t * record);
+static void WriteDataFileToAvro(DataFile *dataFile, avro_value_t * record);
+static void WritePartitionToAvro(Partition *partition, avro_value_t * record);
+static void WriteIcebergManifestToAvro(IcebergManifest *manifest, avro_value_t * record);
+static void WriteIcebergManifestEntryToAvro(IcebergManifestEntry *entry, avro_value_t * record);
 static const char *GetIcebergManifestJsonSchema(List *manifestEntries);
-static const char *AdjustPartitionsInManifestJsonSchema(char *manifestSchema, Partition * partition);
+static const char *AdjustPartitionsInManifestJsonSchema(char *manifestSchema, Partition *partition);
 
 
 /*
@@ -107,7 +107,7 @@ GetIcebergManifestJsonSchema(List *manifestEntries)
  * partition fields.
  */
 static const char *
-AdjustPartitionsInManifestJsonSchema(char *manifestSchema, Partition * partition)
+AdjustPartitionsInManifestJsonSchema(char *manifestSchema, Partition *partition)
 {
 	StringInfo	partitionFields = makeStringInfo();
 
@@ -184,7 +184,7 @@ WriteIcebergManifestList(const char *manifestListPath, List *manifests)
 }
 
 static void
-WriteIcebergManifestToAvro(IcebergManifest * manifest, avro_value_t * record)
+WriteIcebergManifestToAvro(IcebergManifest *manifest, avro_value_t * record)
 {
 	AvroSetStringField(record, "manifest_path", manifest->manifest_path);
 	AvroSetInt64Field(record, "manifest_length", manifest->manifest_length);
@@ -214,7 +214,7 @@ WriteIcebergManifestToAvro(IcebergManifest * manifest, avro_value_t * record)
 
 
 static void
-WriteIcebergManifestEntryToAvro(IcebergManifestEntry * entry, avro_value_t * record)
+WriteIcebergManifestEntryToAvro(IcebergManifestEntry *entry, avro_value_t * record)
 {
 	AvroSetInt32Field(record, "status", entry->status);
 	AvroSetNullableInt64Field(record, "snapshot_id", entry->snapshot_id, entry->has_snapshot_id);
@@ -225,7 +225,7 @@ WriteIcebergManifestEntryToAvro(IcebergManifestEntry * entry, avro_value_t * rec
 
 
 static void
-WriteDataFileToAvro(DataFile * dataFile, avro_value_t * record)
+WriteDataFileToAvro(DataFile *dataFile, avro_value_t * record)
 {
 	AvroSetInt32Field(record, "content", dataFile->content);
 	AvroSetStringField(record, "file_path", dataFile->file_path);
@@ -271,7 +271,7 @@ WriteDataFileToAvro(DataFile * dataFile, avro_value_t * record)
 }
 
 static void
-WritePartitionToAvro(Partition * partition, avro_value_t * record)
+WritePartitionToAvro(Partition *partition, avro_value_t * record)
 {
 	for (int i = 0; i < partition->fields_length; i++)
 	{
@@ -327,7 +327,7 @@ WritePartitionToAvro(Partition * partition, avro_value_t * record)
 }
 
 static void
-WriteColumnStatToAvro(ColumnStat * stat, avro_value_t * record)
+WriteColumnStatToAvro(ColumnStat *stat, avro_value_t * record)
 {
 	AvroSetInt32Field(record, "key", stat->column_id);
 	AvroSetInt64Field(record, "value", stat->value);
@@ -336,14 +336,14 @@ WriteColumnStatToAvro(ColumnStat * stat, avro_value_t * record)
 
 
 static void
-WriteColumnBoundToAvro(ColumnBound * bound, avro_value_t * record)
+WriteColumnBoundToAvro(ColumnBound *bound, avro_value_t * record)
 {
 	AvroSetInt32Field(record, "key", bound->column_id);
 	AvroSetBinaryField(record, "value", (void *) bound->value, bound->value_length);
 }
 
 static void
-WriteFieldSummaryToAvro(FieldSummary * summary, avro_value_t * record)
+WriteFieldSummaryToAvro(FieldSummary *summary, avro_value_t * record)
 {
 	/* fix: properly set summary->contains_null */
 	AvroSetBoolField(record, "contains_null", summary->contains_null);

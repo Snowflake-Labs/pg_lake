@@ -108,7 +108,7 @@ static duckdb_state run_command_on_duckdb_with_callback(const char *command,
 														void *callbackArg);
 static DuckDBStatus return_query_result_to_pgsession(DuckDBSession * duckSession,
 													 duckdb_result duckResult,
-													 ResponseFormat * responseFormat,
+													 ResponseFormat *responseFormat,
 													 char **errorMessage);
 static duckdb_state process_single_result_as_text(duckdb_result * result,
 												  void *callbackArg);
@@ -117,18 +117,18 @@ static DuckDBStatus return_command_completion_pgsession(DuckDBSession * duckSess
 static void duckdb_query_result_init(DuckDBQueryResult * duckdb_query_result,
 									 duckdb_result * duckResult);
 static DuckDBStatus duckdb_query_result_send_column_metadata(DuckDBQueryResult * duckdb_query_result,
-															 PGSession * clientSession,
-															 ResponseFormat * responseFormat);
+															 PGSession *clientSession,
+															 ResponseFormat *responseFormat);
 static DuckDBStatus process_and_send_data_chunks(DuckDBQueryResult * duckdb_query_result,
-												 PGSession * clientSession,
-												 ResponseFormat * responseFormat,
+												 PGSession *clientSession,
+												 ResponseFormat *responseFormat,
 												 idx_t * rowsReturned,
 												 char **errorMessage);
 static DuckDBStatus process_data_chunk(duckdb_data_chunk chunk, StringInfoData *buf,
-									   PGSession * clientSession,
+									   PGSession *clientSession,
 									   DuckDBResultColumn * resultColumns,
 									   idx_t columnCount,
-									   ResponseFormat * responseFormat);
+									   ResponseFormat *responseFormat);
 static void create_result_column_state(DuckDBResultColumn * resultColumn,
 									   duckdb_data_chunk chunk,
 									   idx_t columnCount);
@@ -137,7 +137,7 @@ static void duckdb_query_result_destroy(DuckDBQueryResult * duckdb_query_result)
 static DuckDBStatus duckdb_vector_to_pg_wire(duckdb_vector vector, duckdb_type duckType,
 											 duckdb_logical_type logicalType,
 											 int row,
-											 ResponseFormat * responseFormat,
+											 ResponseFormat *responseFormat,
 											 StringInfo output);
 static bool is_set_command(const char *command);
 static void append_escaped_csv(StringInfo buffer, char *value);
@@ -627,7 +627,7 @@ process_single_result_as_text(duckdb_result * duckResult, void *callbackArg)
  * PostgreSQL client session.
  */
 DuckDBStatus
-duckdb_session_init(DuckDBSession * duckSession, PGSession * clientSession)
+duckdb_session_init(DuckDBSession * duckSession, PGSession *clientSession)
 {
 	if (!IsDuckDBInitialized)
 	{
@@ -672,7 +672,7 @@ static DuckDBStatus
 duckdb_vector_to_pg_wire(duckdb_vector vector, duckdb_type duckType,
 						 duckdb_logical_type logicalType,
 						 int row,
-						 ResponseFormat * responseFormat,
+						 ResponseFormat *responseFormat,
 						 StringInfo output)
 {
 	DuckDBTypeInfo *typeMap = find_duck_type_info(duckType);
@@ -719,7 +719,7 @@ duckdb_vector_to_pg_wire(duckdb_vector vector, duckdb_type duckType,
  */
 DuckDBStatus
 duckdb_session_run_command(DuckDBSession * duckSession, const char *queryString,
-						   ResponseFormat * responseFormat, char **errorMessage)
+						   ResponseFormat *responseFormat, char **errorMessage)
 {
 	duckdb_result duckResult;
 	duckdb_state duckState = duckdb_query(duckSession->connection, queryString, &duckResult);
@@ -904,7 +904,7 @@ duckdb_session_bind_varchar(DuckDBSession * duckSession,
 */
 DuckDBStatus
 duckdb_session_execute_prepared(DuckDBSession * duckSession,
-								ResponseFormat * responseFormat,
+								ResponseFormat *responseFormat,
 								char **errorMessage)
 {
 	duckdb_result duckResult;
@@ -958,7 +958,7 @@ duckdb_session_execute_prepared(DuckDBSession * duckSession,
  */
 static DuckDBStatus
 return_query_result_to_pgsession(DuckDBSession * duckSession, duckdb_result duckResult,
-								 ResponseFormat * responseFormat, char **errorMessage)
+								 ResponseFormat *responseFormat, char **errorMessage)
 {
 	DuckDBQueryResult duckdb_query_result;
 
@@ -1103,8 +1103,8 @@ duckdb_query_result_init(DuckDBQueryResult * duckdb_query_result, duckdb_result 
  */
 static DuckDBStatus
 duckdb_query_result_send_column_metadata(DuckDBQueryResult * duckdb_query_result,
-										 PGSession * clientSession,
-										 ResponseFormat * responseFormat)
+										 PGSession *clientSession,
+										 ResponseFormat *responseFormat)
 {
 	StringInfoData *buf = &duckdb_query_result->buf;
 	duckdb_result *duckResult = duckdb_query_result->duckResult;
@@ -1178,8 +1178,8 @@ duckdb_query_result_send_column_metadata(DuckDBQueryResult * duckdb_query_result
  */
 static DuckDBStatus
 process_and_send_data_chunks(DuckDBQueryResult * duckdb_query_result,
-							 PGSession * clientSession,
-							 ResponseFormat * responseFormat,
+							 PGSession *clientSession,
+							 ResponseFormat *responseFormat,
 							 idx_t * rowsReturned,
 							 char **errorMessage)
 {
@@ -1256,9 +1256,9 @@ process_and_send_data_chunks(DuckDBQueryResult * duckdb_query_result,
  * of query results in CSV format through CopyData messages.
  */
 static DuckDBStatus
-process_data_chunk(duckdb_data_chunk chunk, StringInfoData *buf, PGSession * clientSession,
+process_data_chunk(duckdb_data_chunk chunk, StringInfoData *buf, PGSession *clientSession,
 				   DuckDBResultColumn * resultColumns, idx_t columnCount,
-				   ResponseFormat * responseFormat)
+				   ResponseFormat *responseFormat)
 {
 	idx_t		chunkSize = duckdb_data_chunk_get_size(chunk);
 	bool		isTransmit = responseFormat->isTransmit;

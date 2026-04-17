@@ -43,7 +43,7 @@ typedef enum IcebergOutOfRangePolicy
 	ICEBERG_OOR_NONE = 0,
 	ICEBERG_OOR_ERROR = 1,
 	ICEBERG_OOR_CLAMP = 2,
-}			IcebergOutOfRangePolicy;
+} IcebergOutOfRangePolicy;
 
 /*
  * GetIcebergOutOfRangePolicyForTable returns the IcebergOutOfRangePolicy

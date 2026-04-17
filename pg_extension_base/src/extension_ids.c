@@ -45,7 +45,7 @@ typedef enum ExtensionStatus
 	EXTENSION_STATUS_UNKNOWN,
 	EXTENSION_STATUS_EXISTS,
 	EXTENSION_STATUS_NOT_EXISTS
-}			ExtensionStatus;
+} ExtensionStatus;
 
 
 /*

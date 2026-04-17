@@ -34,7 +34,7 @@ typedef struct RemoteFileDesc
 	TimestampTz lastModifiedTime;
 
 	char	   *etag;
-}			RemoteFileDesc;
+} RemoteFileDesc;
 
 extern PGDLLEXPORT int64 GetRemoteFileSize(char *path);
 extern PGDLLEXPORT int64 GetRemoteParquetFileRowCount(char *path);

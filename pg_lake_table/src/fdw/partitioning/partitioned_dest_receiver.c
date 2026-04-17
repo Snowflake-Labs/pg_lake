@@ -55,7 +55,7 @@ typedef struct PartitionPartitionDestReceiverHashEntry
 	DestReceiver *multiDataFileDestReceiver;
 	int			rowCount;
 	Partition  *partition;
-}			PartitionPartitionDestReceiverHashEntry;
+} PartitionPartitionDestReceiverHashEntry;
 
 /*
  * Our custom PartitioningDestReceiver structure.
@@ -92,7 +92,7 @@ typedef struct PartitioningDestReceiverData
 
 	/* operation of the DestReceiver */
 	int			operation;
-}			PartitioningDestReceiverData;
+} PartitioningDestReceiverData;
 
 
 static void StartPartitionedDestReceiver(DestReceiver *self, int operation, TupleDesc typeinfo);
@@ -101,8 +101,8 @@ static void ShutdownPartitionedDestReceiver(DestReceiver *self);
 static void DestroyPartitionedDestReceiver(DestReceiver *self);
 
 static HTAB *InitializePartitionsHash(MemoryContext parentContext);
-static void AssignPartitionForModificationList(List *modifications, int32 partitionSpecId, Partition * partition);
-static List *FlushLargestPartitionedDestReceiver(PartitioningDestReceiverData * myState);
+static void AssignPartitionForModificationList(List *modifications, int32 partitionSpecId, Partition *partition);
+static List *FlushLargestPartitionedDestReceiver(PartitioningDestReceiverData *myState);
 
 /* controlled by a GUC */
 int			MaxOpenFilesForPartitionedWrite = 5000;
@@ -180,7 +180,7 @@ GetPartitionedDestReceiverModifications(DestReceiver *dest)
 
 
 static void
-AssignPartitionForModificationList(List *modifications, int32 partitionSpecId, Partition * partition)
+AssignPartitionForModificationList(List *modifications, int32 partitionSpecId, Partition *partition)
 {
 	ListCell   *cell;
 
@@ -298,7 +298,7 @@ PartitionedDestReceiveSlot(TupleTableSlot *slot, DestReceiver *self)
 * to MaxOpenFilesForPartitionedWrite.
 */
 static List *
-FlushLargestPartitionedDestReceiver(PartitioningDestReceiverData * myState)
+FlushLargestPartitionedDestReceiver(PartitioningDestReceiverData *myState)
 {
 	HTAB	   *partitionsHash = myState->partitionsHash;
 	HASH_SEQ_STATUS seqStatus;

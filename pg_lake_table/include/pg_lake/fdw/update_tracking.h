@@ -41,8 +41,8 @@ typedef struct RelationUpdateTrackingState
 
 	/* the slot for inserting row IDs */
 	TupleTableSlot *rowLocationSlot;
-}			RelationUpdateTrackingState;
+} RelationUpdateTrackingState;
 
-bool		BeginRelationUpdateTracking(RelationUpdateTrackingState * state, Oid relationId);
-bool		IsFirstUpdateOfTuple(RelationUpdateTrackingState * state, ItemPointer rowLocation);
-void		FinishRelationUpdateTracking(RelationUpdateTrackingState * state);
+bool		BeginRelationUpdateTracking(RelationUpdateTrackingState *state, Oid relationId);
+bool		IsFirstUpdateOfTuple(RelationUpdateTrackingState *state, ItemPointer rowLocation);
+void		FinishRelationUpdateTracking(RelationUpdateTrackingState *state);

@@ -36,7 +36,7 @@ typedef struct CompositeType
 	bool		isArray;		/* the top-level type can be an array */
 	bool		isFinalized;	/* if true, then we know all component parts
 								 * exist */
-}			CompositeType;
+} CompositeType;
 
 typedef struct CompositeCol
 {
@@ -46,16 +46,16 @@ typedef struct CompositeCol
 	CompositeType *subStruct;	/* for a non-composite type, NULL; for
 								 * composite, pointer to that type's struct */
 	bool		isArray;		/* whether we are an array type or not */
-}			CompositeCol;
+} CompositeCol;
 
 
 /* Composite Type functions - convert to/from postgres composite types and
  * STRUCT strings */
-extern PGDLLEXPORT CompositeType * GetCompositeTypeForPGType(Oid postgresType);
-extern PGDLLEXPORT char *GetDuckDBStructDefinitionForCompositeType(CompositeType * type,
+extern PGDLLEXPORT CompositeType *GetCompositeTypeForPGType(Oid postgresType);
+extern PGDLLEXPORT char *GetDuckDBStructDefinitionForCompositeType(CompositeType *type,
 																   CopyDataFormat format);
 
 /* simple string to parse tree */
-extern PGDLLEXPORT CompositeType * ParseStructString(char *parse);
+extern PGDLLEXPORT CompositeType *ParseStructString(char *parse);
 
 #endif

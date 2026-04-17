@@ -216,7 +216,7 @@ static const PGDuckShippableFunction ShippableSpatialProcs[] =
 /*
  * GetShippableSpatialFunctionCount returns the number of shippable spatial functions.
  */
-const		PGDuckShippableFunction *
+const PGDuckShippableFunction *
 GetShippableSpatialFunctions(int *sizePointer)
 {
 	*sizePointer = ARRAY_SIZE(ShippableSpatialProcs);

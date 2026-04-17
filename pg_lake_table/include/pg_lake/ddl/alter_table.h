@@ -19,12 +19,12 @@
 
 #include "pg_lake/ddl/utility_hook.h"
 
-bool		ProcessAlterTable(ProcessUtilityParams * params, void *arg);
-bool		ProcessAlterType(ProcessUtilityParams * params, void *arg);
-bool		ProcessEnumStatement(ProcessUtilityParams * params, void *arg);
-bool		ProcessAlterTypeAttributeRename(ProcessUtilityParams * processUtilityParams, void *arg);
-void		PostProcessRenameWritablePgLakeTable(ProcessUtilityParams * params, void *arg);
-void		PostProcessAlterWritablePgLakeTableSchema(ProcessUtilityParams * params, void *arg);
+bool		ProcessAlterTable(ProcessUtilityParams *params, void *arg);
+bool		ProcessAlterType(ProcessUtilityParams *params, void *arg);
+bool		ProcessEnumStatement(ProcessUtilityParams *params, void *arg);
+bool		ProcessAlterTypeAttributeRename(ProcessUtilityParams *processUtilityParams, void *arg);
+void		PostProcessRenameWritablePgLakeTable(ProcessUtilityParams *params, void *arg);
+void		PostProcessAlterWritablePgLakeTableSchema(ProcessUtilityParams *params, void *arg);
 
 /* allow other hooks */
 typedef void (*PgLakeAlterTableHookType) (Oid relationOid, AlterTableStmt *stmt);

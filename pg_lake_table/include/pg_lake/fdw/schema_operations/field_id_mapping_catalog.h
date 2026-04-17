@@ -27,13 +27,13 @@
 
 #define INVALID_FIELD_ID 0
 
-extern PGDLLEXPORT DataFileSchema * GetDataFileSchemaForInternalIcebergTable(Oid relationId);
+extern PGDLLEXPORT DataFileSchema *GetDataFileSchemaForInternalIcebergTable(Oid relationId);
 extern PGDLLEXPORT List *GetLeafFieldsForInternalIcebergTable(Oid relationId);
 extern PGDLLEXPORT List *GetRegisteredFieldForAttributes(Oid relationId, List *attrNos);
-extern PGDLLEXPORT DataFileSchemaField * GetRegisteredFieldForAttribute(Oid relationId, AttrNumber attrNo);
+extern PGDLLEXPORT DataFileSchemaField *GetRegisteredFieldForAttribute(Oid relationId, AttrNumber attrNo);
 extern PGDLLEXPORT AttrNumber GetAttributeForFieldId(Oid relationId, int fieldId);
 extern PGDLLEXPORT void UpdateRegisteredFieldWriteDefaultForAttribute(Oid relationId, AttrNumber attNum, const char *writeDefault);
 extern PGDLLEXPORT int GetLargestRegisteredFieldId(Oid relationId);
-extern PGDLLEXPORT void RegisterIcebergColumnMapping(Oid relationId, Field * field,
+extern PGDLLEXPORT void RegisterIcebergColumnMapping(Oid relationId, Field *field,
 													 AttrNumber attNo, int parentFieldId, PGType pgType,
 													 int fieldId, const char *writeDefault, const char *initialDefault);

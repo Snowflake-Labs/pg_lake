@@ -33,10 +33,10 @@
 
 #include "utils/lsyscache.h"
 
-static void SetManifestFileAndRowCounts(IcebergManifest * manifest, List *manifestEntries);
-static void SetManifestPartitionSummary(IcebergManifest * manifest, List *manifestEntries, List *transforms);
-static FieldSummary * GetPartitionFieldSummaryFromDataFiles(List *dataFiles, int32_t partitionFieldIndex,
-															Field * resultField, PGType resultPgType);
+static void SetManifestFileAndRowCounts(IcebergManifest *manifest, List *manifestEntries);
+static void SetManifestPartitionSummary(IcebergManifest *manifest, List *manifestEntries, List *transforms);
+static FieldSummary *GetPartitionFieldSummaryFromDataFiles(List *dataFiles, int32_t partitionFieldIndex,
+														   Field *resultField, PGType resultPgType);
 
 
 /*
@@ -44,7 +44,7 @@ static FieldSummary * GetPartitionFieldSummaryFromDataFiles(List *dataFiles, int
  * ICEBERG_MANIFEST_FILE_CONTENT_DATA.
  */
 bool
-IsManifestOfFileContentAdd(IcebergManifest * manifest)
+IsManifestOfFileContentAdd(IcebergManifest *manifest)
 {
 	return manifest->content == ICEBERG_MANIFEST_FILE_CONTENT_DATA;
 }
@@ -54,7 +54,7 @@ IsManifestOfFileContentAdd(IcebergManifest * manifest)
  * ICEBERG_MANIFEST_FILE_CONTENT_DELETES.
  */
 bool
-IsManifestOfFileContentDeletes(IcebergManifest * manifest)
+IsManifestOfFileContentDeletes(IcebergManifest *manifest)
 {
 	return manifest->content == ICEBERG_MANIFEST_FILE_CONTENT_DELETES;
 }
@@ -64,7 +64,7 @@ IsManifestOfFileContentDeletes(IcebergManifest * manifest)
  * from given snapshot.
  */
 List *
-FetchManifestsFromSnapshot(IcebergSnapshot * snapshot, ManifestPredicateFn manifestPredicateFn)
+FetchManifestsFromSnapshot(IcebergSnapshot *snapshot, ManifestPredicateFn manifestPredicateFn)
 {
 	if (snapshot == NULL)
 	{
@@ -134,7 +134,7 @@ GenerateRemoteManifestPath(const char *location, const char *snapshotUUID, int m
 * CreateNewIcebergManifest creates a new Iceberg manifest with the given parameters.
 */
 IcebergManifest *
-CreateNewIcebergManifest(IcebergSnapshot * snapshot,
+CreateNewIcebergManifest(IcebergSnapshot *snapshot,
 						 int32_t partitionSpecId,
 						 List *allTransforms,
 						 int64 manifestFileSize,
@@ -167,7 +167,7 @@ CreateNewIcebergManifest(IcebergSnapshot * snapshot,
  * files and rows in the manifest entry list and fills manifest's related fields.
  */
 static void
-SetManifestFileAndRowCounts(IcebergManifest * manifest, List *manifestEntries)
+SetManifestFileAndRowCounts(IcebergManifest *manifest, List *manifestEntries)
 {
 	ListCell   *manifestEntryCell = NULL;
 
@@ -204,7 +204,7 @@ SetManifestFileAndRowCounts(IcebergManifest * manifest, List *manifestEntries)
  * and max values for each partition field in all data files of the manifest.
  */
 static void
-SetManifestPartitionSummary(IcebergManifest * manifest, List *manifestEntries, List *transforms)
+SetManifestPartitionSummary(IcebergManifest *manifest, List *manifestEntries, List *transforms)
 {
 	List	   *dataFiles = NIL;
 
@@ -285,7 +285,7 @@ SetManifestPartitionSummary(IcebergManifest * manifest, List *manifestEntries, L
  */
 static FieldSummary *
 GetPartitionFieldSummaryFromDataFiles(List *dataFiles, int32_t partitionFieldIndex,
-									  Field * resultField, PGType resultPgType)
+									  Field *resultField, PGType resultPgType)
 {
 	FieldSummary *partitionSummary = palloc0(sizeof(FieldSummary));
 

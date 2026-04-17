@@ -48,7 +48,9 @@ UNAME_S := $(shell uname -s)
 
 # List of targets for indent checks
 INDENT_TARGETS = pgduck_server $(EXTENSION_TARGETS)
-TYPEDEFS = /tmp/typedefs-$(PG_MAJOR_VERSION).list
+PG_TYPEDEFS = /tmp/typedefs-pg-$(PG_MAJOR_VERSION).list
+PGLAKE_TYPEDEFS = /tmp/typedefs-pglake.list
+TYPEDEFS = /tmp/typedefs-combined-$(PG_MAJOR_VERSION).list
 
 CMAKE_AVRO_ARGS = -DCMAKE_INSTALL_PREFIX=avrolib -DCMAKE_BUILD_TYPE=RelWithDebInfo
 
@@ -67,11 +69,14 @@ endif
 # from buildfarm if we don't have a local copy.  Since we currently do not
 # override the typedefs.list, this should be equivalent to what we were
 # previously doing by pulling from the postgres source tree.
+$(PG_TYPEDEFS):
+	curl -o $(PG_TYPEDEFS) https://buildfarm.postgresql.org/cgi-bin/typedefs.pl?branch=REL_$(PG_MAJOR_VERSION)_STABLE
 
-typedefs: $(TYPEDEFS)
+$(PGLAKE_TYPEDEFS): $(shell find $(INDENT_TARGETS) -name '*.c' -o -name '*.h' 2>/dev/null)
+	tools/extract_typedefs.sh $(INDENT_TARGETS) > $(PGLAKE_TYPEDEFS)
 
-$(TYPEDEFS):
-	curl -o $(TYPEDEFS) https://buildfarm.postgresql.org/cgi-bin/typedefs.pl?branch=REL_$(PG_MAJOR_VERSION)_STABLE
+typedefs: $(PG_TYPEDEFS) $(PGLAKE_TYPEDEFS)
+	cat $(PG_TYPEDEFS) $(PGLAKE_TYPEDEFS) | sort -u > $(TYPEDEFS)
 
 check-indent: typedefs
 	pgindent --typedefs=$(TYPEDEFS) --check --diff $(INDENT_TARGETS)

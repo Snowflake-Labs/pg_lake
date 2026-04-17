@@ -46,7 +46,7 @@ typedef struct PartitionSpecManifestsEntry
 {
 	int32_t		partitionSpecId;
 	List	   *manifests;
-}			PartitionSpecManifestsEntry;
+} PartitionSpecManifestsEntry;
 
 
 /*
@@ -58,23 +58,23 @@ typedef struct ManifestGroup
 	List	   *manifests;
 	int32_t		partitionSpecId;
 	int64_t		totalSize;
-}			ManifestGroup;
+} ManifestGroup;
 
 
 static HTAB *GroupManifestsByPartitionSpecId(List *manifests);
-static ManifestGroup * FindBestFitManifestGroupForManifest(List *manifestGroups, IcebergManifest * manifest, int64_t targetSize);
+static ManifestGroup *FindBestFitManifestGroupForManifest(List *manifestGroups, IcebergManifest *manifest, int64_t targetSize);
 static List *CreateManifestGroupsWithTargetSize(List *manifests, int64_t targetSize);
-static bool RemoveDeletedManifestEntriesInternal(IcebergManifest * *manifest, IcebergSnapshot * currentSnapshot,
+static bool RemoveDeletedManifestEntriesInternal(IcebergManifest **manifest, IcebergSnapshot *currentSnapshot,
 												 List *allTransforms, IcebergManifestContentType contentType,
 												 const char *metadataLocation, const char *snapshotUUID, int *manifestIndex);
-static bool IsMergeableManifestGroup(ManifestGroup * manifestGroup, IcebergManifest * latestManifest);
-static IcebergManifest * MergeManifestGroup(ManifestGroup * mergeableManifestGroup, IcebergSnapshot * currentSnapshot,
-											List *allTransforms, int mergedManifestIndex, const char *metadataLocation,
-											const char *snapshotUUID);
+static bool IsMergeableManifestGroup(ManifestGroup *manifestGroup, IcebergManifest *latestManifest);
+static IcebergManifest *MergeManifestGroup(ManifestGroup *mergeableManifestGroup, IcebergSnapshot *currentSnapshot,
+										   List *allTransforms, int mergedManifestIndex, const char *metadataLocation,
+										   const char *snapshotUUID);
 
 #ifdef USE_ASSERT_CHECKING
 static int	IcebergManifestSequenceNumberComparator(const ListCell *manifestCell1, const ListCell *manifestCell2);
-static void EnsureLatestManifest(IcebergManifest * latestManifest, List *manifests);
+static void EnsureLatestManifest(IcebergManifest *latestManifest, List *manifests);
 #endif
 
 /* pg_lake_iceberg.enable_manifest_merge */
@@ -114,7 +114,7 @@ int			ManifestMinCountToMerge = DEFAULT_MANIFEST_MIN_COUNT_TO_MERGE;
  * 		  manifest files.
  */
 List *
-MergeDataManifests(IcebergSnapshot * currentSnapshot,
+MergeDataManifests(IcebergSnapshot *currentSnapshot,
 				   List *allTransforms,
 				   List *dataManifests,
 				   const char *metadataLocation,
@@ -198,7 +198,7 @@ MergeDataManifests(IcebergSnapshot * currentSnapshot,
  * true if any manifest is modified, false otherwise.
  */
 bool
-RemoveDeletedManifestEntries(IcebergSnapshot * currentSnapshot,
+RemoveDeletedManifestEntries(IcebergSnapshot *currentSnapshot,
 							 List *allTransforms,
 							 List **manifests,
 							 IcebergManifestContentType contentType,
@@ -376,7 +376,7 @@ CreateManifestGroupsWithTargetSize(List *manifests, int64_t targetSize)
  * Returns NULL if no best fit group is found.
  */
 static ManifestGroup *
-FindBestFitManifestGroupForManifest(List *manifestGroups, IcebergManifest * manifest, int64_t targetSize)
+FindBestFitManifestGroupForManifest(List *manifestGroups, IcebergManifest *manifest, int64_t targetSize)
 {
 	int			bestFitGroupIndex = -1;
 	int64_t		leastRemainingSize = INT64_MAX;
@@ -411,7 +411,7 @@ FindBestFitManifestGroupForManifest(List *manifestGroups, IcebergManifest * mani
  * IsMergeableManifestGroup checks if the manifest group can be merged.
  */
 static bool
-IsMergeableManifestGroup(ManifestGroup * manifestGroup, IcebergManifest * latestManifest)
+IsMergeableManifestGroup(ManifestGroup *manifestGroup, IcebergManifest *latestManifest)
 {
 	if (list_length(manifestGroup->manifests) == 1)
 	{
@@ -441,7 +441,7 @@ IsMergeableManifestGroup(ManifestGroup * manifestGroup, IcebergManifest * latest
  * the merged manifest to the remote location and returns it.
  */
 static IcebergManifest *
-MergeManifestGroup(ManifestGroup * mergeableManifestGroup, IcebergSnapshot * currentSnapshot,
+MergeManifestGroup(ManifestGroup *mergeableManifestGroup, IcebergSnapshot *currentSnapshot,
 				   List *allTransforms, int mergedManifestIndex, const char *metadataLocation,
 				   const char *snapshotUUID)
 {
@@ -491,7 +491,7 @@ MergeManifestGroup(ManifestGroup * mergeableManifestGroup, IcebergSnapshot * cur
  * true if the manifest was modified, false otherwise.
  */
 static bool
-RemoveDeletedManifestEntriesInternal(IcebergManifest * *manifest, IcebergSnapshot * currentSnapshot,
+RemoveDeletedManifestEntriesInternal(IcebergManifest **manifest, IcebergSnapshot *currentSnapshot,
 									 List *allTransforms, IcebergManifestContentType contentType,
 									 const char *metadataLocation, const char *snapshotUUID, int *manifestIndex)
 {
@@ -548,7 +548,7 @@ RemoveDeletedManifestEntriesInternal(IcebergManifest * *manifest, IcebergSnapsho
 
 #ifdef USE_ASSERT_CHECKING
 static void
-EnsureLatestManifest(IcebergManifest * latestManifest, List *manifests)
+EnsureLatestManifest(IcebergManifest *latestManifest, List *manifests)
 {
 	/* copy the list to not have flaky tests */
 	List	   *copyManifests = list_copy(manifests);

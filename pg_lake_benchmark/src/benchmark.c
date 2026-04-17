@@ -119,7 +119,7 @@ PgDuckCopyBenchTablesToRemoteParquet(const char *tableNames[], int length, char 
  * PgDuckGetQueries returns the benchmark queries via pgduck server.
  */
 void
-PgDuckGetQueries(BenchmarkType benchType, BenchQuery * queries, int queryCount)
+PgDuckGetQueries(BenchmarkType benchType, BenchQuery *queries, int queryCount)
 {
 	char	   *query;
 

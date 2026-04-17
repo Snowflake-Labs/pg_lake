@@ -38,19 +38,19 @@ typedef struct AttachedWorker
 	/* background worker handle */
 	pid_t		workerPid;
 	BackgroundWorkerHandle *workerHandle;
-}			AttachedWorker;
+} AttachedWorker;
 
-extern PGDLLEXPORT AttachedWorker * StartAttachedWorker(char *command);
-extern PGDLLEXPORT AttachedWorker * StartAttachedWorkerInDatabase(char *command,
-																  char *databaseName,
-																  char *userName);
-extern PGDLLEXPORT AttachedWorker * StartAttachedWorkerReturning(char *command);
-extern PGDLLEXPORT AttachedWorker * StartAttachedWorkerInDatabaseReturning(char *command,
-																		   char *databaseName,
-																		   char *userName);
-extern PGDLLEXPORT char *ReadFromAttachedWorker(AttachedWorker * worker, bool wait);
-extern PGDLLEXPORT void ReadResultsFromAttachedWorker(AttachedWorker * worker,
+extern PGDLLEXPORT AttachedWorker *StartAttachedWorker(char *command);
+extern PGDLLEXPORT AttachedWorker *StartAttachedWorkerInDatabase(char *command,
+																 char *databaseName,
+																 char *userName);
+extern PGDLLEXPORT AttachedWorker *StartAttachedWorkerReturning(char *command);
+extern PGDLLEXPORT AttachedWorker *StartAttachedWorkerInDatabaseReturning(char *command,
+																		  char *databaseName,
+																		  char *userName);
+extern PGDLLEXPORT char *ReadFromAttachedWorker(AttachedWorker *worker, bool wait);
+extern PGDLLEXPORT void ReadResultsFromAttachedWorker(AttachedWorker *worker,
 													  Tuplestorestate *store,
 													  TupleDesc *resultDesc);
-extern PGDLLEXPORT bool IsAttachedWorkerRunning(AttachedWorker * worker);
-extern PGDLLEXPORT void EndAttachedWorker(AttachedWorker * worker);
+extern PGDLLEXPORT bool IsAttachedWorkerRunning(AttachedWorker *worker);
+extern PGDLLEXPORT void EndAttachedWorker(AttachedWorker *worker);

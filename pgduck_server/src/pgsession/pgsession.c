@@ -93,28 +93,28 @@
 	 (oom_is_fatal && (status) == DUCKDB_OUT_OF_MEMORY_ERROR))
 
 /* The main functions that implement PG protocol */
-static int	pgsession_send_auth_ok(PGSession * pgSession);
+static int	pgsession_send_auth_ok(PGSession *pgSession);
 #if PG_VERSION_NUM >= 180000
-static int	pgsession_send_cancellation_key(PGSession * pgSession, int cancellationProcId, uint8 *cancellationToken,
+static int	pgsession_send_cancellation_key(PGSession *pgSession, int cancellationProcId, uint8 *cancellationToken,
 											size_t cancellationTokenSize);
 #else
-static int	pgsession_send_cancellation_key(PGSession * pgSession, int cancellationProcId, int32 cancellationToken);
+static int	pgsession_send_cancellation_key(PGSession *pgSession, int cancellationProcId, int32 cancellationToken);
 #endif
-static int	pgsession_send_server_version(PGSession * pgSession, const char *serverVersion);
-static int	pgsession_send_client_encoding(PGSession * pgSession, const char *clientEncoding);
-static int	pgsession_send_extra_float_digits(PGSession * pgSession, const char *extra_float_digits);
-static int	pgsession_send_ready_for_query(PGSession * pgSession);
-static int	pgsession_init(PGSession * pgSession, PGClient * pgClient);
-static int	pgsession_destroy(PGSession * pgSession);
-static void pgsession_prepared_statement_deallocate(PGSession * pgSession);
-static void pgsession_log_client_info(PGClient * pgClient);
-static int	handle_pgsession_error_message(DuckDBStatus status, PGSession * pgSession,
+static int	pgsession_send_server_version(PGSession *pgSession, const char *serverVersion);
+static int	pgsession_send_client_encoding(PGSession *pgSession, const char *clientEncoding);
+static int	pgsession_send_extra_float_digits(PGSession *pgSession, const char *extra_float_digits);
+static int	pgsession_send_ready_for_query(PGSession *pgSession);
+static int	pgsession_init(PGSession *pgSession, PGClient *pgClient);
+static int	pgsession_destroy(PGSession *pgSession);
+static void pgsession_prepared_statement_deallocate(PGSession *pgSession);
+static void pgsession_log_client_info(PGClient *pgClient);
+static int	handle_pgsession_error_message(DuckDBStatus status, PGSession *pgSession,
 										   char *errorMessage);
 
-static int	process_query_message(PGSession * pgSession, StringInfo inputMessage);
-static int	process_parse_message(PGSession * pgSession, StringInfo inputMessage);
-static int	process_bind_message(PGSession * pgSession, StringInfo inputMessage);
-static int	process_execute_message(PGSession * pgSession, StringInfo inputMessage);
+static int	process_query_message(PGSession *pgSession, StringInfo inputMessage);
+static int	process_parse_message(PGSession *pgSession, StringInfo inputMessage);
+static int	process_bind_message(PGSession *pgSession, StringInfo inputMessage);
+static int	process_execute_message(PGSession *pgSession, StringInfo inputMessage);
 
 static bool is_transmit_query(const char *queryString);
 
@@ -367,7 +367,7 @@ finally:
  * Otherwise, it returns OK.
  */
 static int
-process_query_message(PGSession * pgSession, StringInfo inputMessage)
+process_query_message(PGSession *pgSession, StringInfo inputMessage)
 {
 	const char *queryString = pq_getmsgstring(inputMessage);
 
@@ -444,7 +444,7 @@ process_query_message(PGSession * pgSession, StringInfo inputMessage)
  * Otherwise, it returns OK.
 */
 static int
-process_parse_message(PGSession * pgSession, StringInfo inputMessage)
+process_parse_message(PGSession *pgSession, StringInfo inputMessage)
 {
 	/*
 	 * A single session only supports a single unnamed prepared statement. We
@@ -600,7 +600,7 @@ process_parse_message(PGSession * pgSession, StringInfo inputMessage)
  * Otherwise, it returns OK.
 */
 static int
-process_bind_message(PGSession * pgSession, StringInfo inputMessage)
+process_bind_message(PGSession *pgSession, StringInfo inputMessage)
 {
 	if (pgSession->pgSessionPreparedStmt.state != PREPARED_STATEMENT_PARSED &&
 		pgSession->pgSessionPreparedStmt.state != PREPARED_STATEMENT_BOUND)
@@ -771,7 +771,7 @@ process_bind_message(PGSession * pgSession, StringInfo inputMessage)
  * Otherwise, it returns OK.
  */
 static int
-process_execute_message(PGSession * pgSession, StringInfo inputMessage)
+process_execute_message(PGSession *pgSession, StringInfo inputMessage)
 {
 	if (pgSession->pgSessionPreparedStmt.state != PREPARED_STATEMENT_BOUND)
 	{
@@ -849,7 +849,7 @@ process_execute_message(PGSession * pgSession, StringInfo inputMessage)
  * Helper function to handle different DuckDB statuses.
  */
 static int
-handle_pgsession_error_message(DuckDBStatus status, PGSession * pgSession, char *errorMessage)
+handle_pgsession_error_message(DuckDBStatus status, PGSession *pgSession, char *errorMessage)
 {
 	int			errorRes;
 
@@ -884,7 +884,7 @@ handle_pgsession_error_message(DuckDBStatus status, PGSession * pgSession, char 
  * the server is ready for a query.
  */
 static int
-pgsession_send_ready_for_query(PGSession * pgSession)
+pgsession_send_ready_for_query(PGSession *pgSession)
 {
 	StringInfoData buf;
 
@@ -906,7 +906,7 @@ pgsession_send_ready_for_query(PGSession * pgSession)
  * authentication is done.
  */
 static int
-pgsession_send_auth_ok(PGSession * pgSession)
+pgsession_send_auth_ok(PGSession *pgSession)
 {
 	StringInfoData buf;
 
@@ -926,7 +926,7 @@ pgsession_send_auth_ok(PGSession * pgSession)
  */
 #if PG_VERSION_NUM >= 180000
 static int
-pgsession_send_cancellation_key(PGSession * pgSession, int cancellationProcId, uint8 *cancelKey, size_t cancelKeyLength)
+pgsession_send_cancellation_key(PGSession *pgSession, int cancellationProcId, uint8 *cancelKey, size_t cancelKeyLength)
 {
 	StringInfoData buf;
 
@@ -943,7 +943,7 @@ pgsession_send_cancellation_key(PGSession * pgSession, int cancellationProcId, u
 }
 #else
 static int
-pgsession_send_cancellation_key(PGSession * pgSession, int cancellationProcId, int32 cancellationToken)
+pgsession_send_cancellation_key(PGSession *pgSession, int cancellationProcId, int32 cancellationToken)
 {
 	StringInfoData buf;
 
@@ -965,7 +965,7 @@ pgsession_send_cancellation_key(PGSession * pgSession, int cancellationProcId, i
  * SendServerVersion sends the server version to the client
  */
 static int
-pgsession_send_server_version(PGSession * pgSession, const char *serverVersion)
+pgsession_send_server_version(PGSession *pgSession, const char *serverVersion)
 {
 	StringInfoData buf;
 
@@ -985,7 +985,7 @@ pgsession_send_server_version(PGSession * pgSession, const char *serverVersion)
  * SendServerVersion sends the server version to the client
  */
 static int
-pgsession_send_client_encoding(PGSession * pgSession, const char *clientEncoding)
+pgsession_send_client_encoding(PGSession *pgSession, const char *clientEncoding)
 {
 	StringInfoData buf;
 
@@ -1006,7 +1006,7 @@ pgsession_send_client_encoding(PGSession * pgSession, const char *clientEncoding
  * pgsession_send_extra_float_digits sends the extra_float_digits to the client
  */
 static int
-pgsession_send_extra_float_digits(PGSession * pgSession, const char *extra_float_digits)
+pgsession_send_extra_float_digits(PGSession *pgSession, const char *extra_float_digits)
 {
 	StringInfoData buf;
 
@@ -1029,7 +1029,7 @@ pgsession_send_extra_float_digits(PGSession * pgSession, const char *extra_float
  * Extracted from BackendInitialize() from postmaster.c
  */
 static void
-pgsession_log_client_info(PGClient * pgClient)
+pgsession_log_client_info(PGClient *pgClient)
 {
 	int			retVal = 0;
 	char		clientHost[NI_MAXHOST];
@@ -1068,7 +1068,7 @@ pgsession_log_client_info(PGClient * pgClient)
  * pgsession_init initializes the pgSession state.
  */
 static int
-pgsession_init(PGSession * pgSession, PGClient * pgClient)
+pgsession_init(PGSession *pgSession, PGClient *pgClient)
 {
 	memset(pgSession, '\0', sizeof(PGSession));
 	pgSession->pgClient = pgClient;
@@ -1094,7 +1094,7 @@ pgsession_init(PGSession * pgSession, PGClient * pgClient)
  * pgsession_destroy frees any memory associated with the pgSession.
  */
 static int
-pgsession_destroy(PGSession * pgSession)
+pgsession_destroy(PGSession *pgSession)
 {
 	pg_free(pgSession->pqSendBuffer);
 	duckdb_session_destroy(&pgSession->duckSession);
@@ -1108,7 +1108,7 @@ pgsession_destroy(PGSession * pgSession)
 * deallocating the previous prepared statement, if any.
 */
 static void
-pgsession_prepared_statement_deallocate(PGSession * pgSession)
+pgsession_prepared_statement_deallocate(PGSession *pgSession)
 {
 	if (pgSession->pgSessionPreparedStmt.state != PREPARED_STATEMENT_INVALID)
 	{

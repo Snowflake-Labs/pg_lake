@@ -60,7 +60,7 @@ typedef struct PositionDeleteFileDest
 
 	/* number of deleted rows */
 	int64		deletedRowCount;
-}			PositionDeleteFileDest;
+} PositionDeleteFileDest;
 
 /*
  * PositionDeleteDestReceiver is a DestReceiver that writes position delete tuples
@@ -88,12 +88,12 @@ typedef struct PositionDeleteDestReceiver
 	/* operation of the DestReceiver */
 	int			operation;
 
-}			PositionDeleteDestReceiver;
+} PositionDeleteDestReceiver;
 
 
 static HTAB *CreateFileDestsHash(void);
-static PositionDeleteFileDest * GetPositionDeleteFileDest(PositionDeleteDestReceiver * self,
-														  int64 fileId);
+static PositionDeleteFileDest *GetPositionDeleteFileDest(PositionDeleteDestReceiver *self,
+														 int64 fileId);
 static void StartDestReceiver(DestReceiver *self, int operation, TupleDesc typeinfo);
 static bool ReceiveSlot(TupleTableSlot *slot, DestReceiver *self);
 static void PrepareDeletionSlot(Datum pathDatum, Datum rowNumberDatum,
@@ -165,7 +165,7 @@ CreateFileDestsHash(void)
  * to build the position delete file for a given data file ID.
  */
 static PositionDeleteFileDest *
-GetPositionDeleteFileDest(PositionDeleteDestReceiver * self, int64 fileId)
+GetPositionDeleteFileDest(PositionDeleteDestReceiver *self, int64 fileId)
 {
 	bool		fileDestFound = false;
 	PositionDeleteFileDest *fileDest =

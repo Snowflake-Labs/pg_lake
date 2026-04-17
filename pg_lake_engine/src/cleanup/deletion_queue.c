@@ -50,7 +50,7 @@ typedef struct DeletionQueueEntry
 	TimestampTz orphanedAt;
 	int			retryCount;
 	bool		isPrefix;
-}			DeletionQueueEntry;
+} DeletionQueueEntry;
 
 static void RemoveDeletionQueuePathsFromCatalog(List *filePaths);
 static void IncrementDeletionQueueRetryCount(List *failedRemovalPaths);

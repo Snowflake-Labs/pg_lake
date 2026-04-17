@@ -27,7 +27,7 @@
  * DeepCopyLeafField deep copies a LeafField.
  */
 LeafField
-DeepCopyLeafField(const LeafField * leafField)
+DeepCopyLeafField(const LeafField *leafField)
 {
 	LeafField  *copiedLeafField = palloc0(sizeof(LeafField));
 

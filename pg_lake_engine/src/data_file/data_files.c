@@ -25,7 +25,7 @@
  * file.
  */
 TableMetadataOperation *
-AddDataFileOperation(const char *path, DataFileContent content, DataFileStats * dataFileStats,
+AddDataFileOperation(const char *path, DataFileContent content, DataFileStats *dataFileStats,
 					 struct Partition *partition, int32 partitionSpecId)
 {
 	TableMetadataOperation *operation = palloc0(sizeof(TableMetadataOperation));
@@ -116,7 +116,7 @@ AddRowIdMappingOperation(const char *dataFilePath, List *rowIdRanges)
  * DeepCopyDataFileStats deep copies a DataFileSchema.
  */
 DataFileStats *
-DeepCopyDataFileStats(const DataFileStats * stats)
+DeepCopyDataFileStats(const DataFileStats *stats)
 {
 	DataFileStats *copiedStats = palloc0(sizeof(DataFileStats));
 

@@ -31,7 +31,7 @@ typedef enum PruneType
 {
 	PARTIAL_MATCH,
 	FULL_MATCH
-}			PruneType;
+} PruneType;
 
 extern bool EnableDataFilePruning;
 extern bool EnablePartitionPruning;

@@ -90,7 +90,7 @@ static List *GetObjectCreatedByLakeFuncArgs(Oid catalogTableId, int catalogTable
 typedef struct ReferencedObject
 {
 	ObjectAddress referenced;
-}			ReferencedObject;
+} ReferencedObject;
 
 /*
  * GUC hides any objects, which is created by pg_lake_table extension, from catalog queries,

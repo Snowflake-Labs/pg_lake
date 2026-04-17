@@ -55,8 +55,8 @@ typedef struct DuckDBTypeInfo
 	 * for DuckDB types.
 	 */
 				DuckDBStatus(*to_text) (duckdb_vector vector, duckdb_logical_type logicalType, int row, TextOutputBuffer * buffer);
-}			DuckDBTypeInfo;
+} DuckDBTypeInfo;
 
-extern DuckDBTypeInfo * find_duck_type_info(duckdb_type duckType);
+extern DuckDBTypeInfo *find_duck_type_info(duckdb_type duckType);
 
 #endif

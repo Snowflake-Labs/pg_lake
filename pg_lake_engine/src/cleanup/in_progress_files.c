@@ -96,7 +96,7 @@ typedef struct InProgressFiles
 	char	   *path;
 	int64_t		operationId;
 	bool		isPrefix;
-}			InProgressFiles;
+} InProgressFiles;
 
 static bool GetInProgressFileRecords(char *location, bool isFull, List **fileRecords);
 static int64 GetTransactionOperationId(void);

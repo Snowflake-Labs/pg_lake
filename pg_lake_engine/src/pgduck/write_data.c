@@ -42,7 +42,7 @@
 
 static DuckDBTypeInfo ChooseDuckDBEngineTypeForWrite(PGType postgresType,
 													 CopyDataFormat destinationFormat);
-static void AppendFieldIdValue(StringInfo map, Field * field, int fieldId);
+static void AppendFieldIdValue(StringInfo map, Field *field, int fieldId);
 static const char *ParquetVersionToString(ParquetVersion version);
 
 static DuckDBTypeInfo VARCHAR_TYPE =
@@ -66,7 +66,7 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 				 CopyDataFormat destinationFormat,
 				 CopyDataCompression destinationCompression,
 				 List *formatOptions,
-				 DataFileSchema * schema,
+				 DataFileSchema *schema,
 				 List *leafFields)
 {
 	StringInfoData command;
@@ -120,7 +120,7 @@ WriteQueryResultTo(char *query,
 				   CopyDataCompression destinationCompression,
 				   List *formatOptions,
 				   bool queryHasRowId,
-				   DataFileSchema * schema,
+				   DataFileSchema *schema,
 				   TupleDesc queryTupleDesc,
 				   List *leafFields,
 				   IcebergOutOfRangePolicy outOfRangePolicy,
@@ -492,7 +492,7 @@ TupleDescToColumnMapForWrite(TupleDesc tupleDesc, CopyDataFormat destinationForm
  * a field name to a field ID to a DuckDB map in string form.
  */
 void
-AppendFields(StringInfo map, DataFileSchema * schema)
+AppendFields(StringInfo map, DataFileSchema *schema)
 {
 	bool		addComma = false;
 
@@ -520,7 +520,7 @@ AppendFields(StringInfo map, DataFileSchema * schema)
  * https://duckdb.org/docs/sql/statements/copy
  */
 static void
-AppendFieldIdValue(StringInfo fieldIdsStr, Field * field, int fieldId)
+AppendFieldIdValue(StringInfo fieldIdsStr, Field *field, int fieldId)
 {
 #define CURRENT_FIELD_ID "__duckdb_field_id"
 

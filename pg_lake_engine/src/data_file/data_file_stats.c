@@ -38,13 +38,13 @@ static void ParseDuckdbColumnMinMaxFromText(char *input, List **names, List **mi
 static void ExtractMinMaxForAllColumns(Datum returnStatsMap, List **names, List **mins, List **maxs);
 static void ExtractMinMaxForColumn(Datum map, char *colName, List **names, List **mins, List **maxs);
 static char *UnescapeDoubleQuotes(char *s);
-static List *GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields, DataFileSchema * schema);
+static List *GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields, DataFileSchema *schema);
 static int	FindIndexInStringList(List *names, const char *targetName);
-static List *FetchRowGroupStats(PGDuckConnection * pgDuckConn, List *fieldIdList, char *path);
+static List *FetchRowGroupStats(PGDuckConnection *pgDuckConn, List *fieldIdList, char *path);
 static char *PrepareRowGroupStatsMinMaxQuery(List *rowGroupStatList);
 static char *SerializeTextArrayTypeToPgDuck(ArrayType *array);
 static ArrayType *ReadArrayFromText(char *arrayText);
-static List *GetFieldMinMaxStats(PGDuckConnection * pgDuckConn, List *rowGroupStatsList);
+static List *GetFieldMinMaxStats(PGDuckConnection *pgDuckConn, List *rowGroupStatsList);
 static ColumnStatsConfig GetColumnStatsConfig(Oid relationId);
 static void ApplyColumnStatsModeForType(ColumnStatsConfig columnStatsConfig,
 										PGType pgType, char **lowerBoundText,
@@ -72,7 +72,7 @@ typedef struct RowGroupStats
 {
 	LeafField  *leafField;
 	ArrayType  *minMaxArray;
-}			RowGroupStats;
+} RowGroupStats;
 
 
 /*
@@ -82,7 +82,7 @@ typedef struct RowGroupStats
 StatsCollector *
 ExecuteCopyToCommandOnPGDuckConnection(char *copyCommand,
 									   List *leafFields,
-									   DataFileSchema * schema,
+									   DataFileSchema *schema,
 									   char *destinationPath,
 									   CopyDataFormat destinationFormat)
 {
@@ -153,7 +153,7 @@ ExecuteCopyToCommandOnPGDuckConnection(char *copyCommand,
  * It returns the collector object that contains the total row count and data file statistics.
  */
 StatsCollector *
-GetDataFileStatsListFromPGResult(PGresult *result, List *leafFields, DataFileSchema * schema)
+GetDataFileStatsListFromPGResult(PGresult *result, List *leafFields, DataFileSchema *schema)
 {
 	List	   *statsList = NIL;
 
@@ -408,7 +408,7 @@ ParseDuckdbColumnMinMaxFromText(char *input, List **names, List **mins, List **m
  * names, mins, maxs lists and schema.
  */
 static List *
-GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields, DataFileSchema * schema)
+GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields, DataFileSchema *schema)
 {
 	List	   *columnStatsList = NIL;
 
@@ -479,7 +479,7 @@ FindIndexInStringList(List *names, const char *targetName)
 * given leaf field.
 */
 bool
-ShouldSkipStatistics(LeafField * leafField)
+ShouldSkipStatistics(LeafField *leafField)
 {
 	Field	   *field = leafField->field;
 	PGType		pgType = leafField->pgType;
@@ -598,7 +598,7 @@ GetRemoteParquetColumnStats(char *path, List *leafFields)
 * The output is sorted by the input fieldIdList.
 */
 static List *
-FetchRowGroupStats(PGDuckConnection * pgDuckConn, List *fieldIdList, char *path)
+FetchRowGroupStats(PGDuckConnection *pgDuckConn, List *fieldIdList, char *path)
 {
 	List	   *rowGroupStatsList = NIL;
 
@@ -825,7 +825,7 @@ ReadArrayFromText(char *arrayText)
 * and then aggregate the min and max values for each field.
 */
 static List *
-GetFieldMinMaxStats(PGDuckConnection * pgDuckConn, List *rowGroupStatList)
+GetFieldMinMaxStats(PGDuckConnection *pgDuckConn, List *rowGroupStatList)
 {
 	char	   *query = PrepareRowGroupStatsMinMaxQuery(rowGroupStatList);
 

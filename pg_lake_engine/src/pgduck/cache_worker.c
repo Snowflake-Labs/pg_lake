@@ -44,7 +44,7 @@ typedef enum ManageCacheResult
 	MANAGE_CACHE_SUCCESS,
 	MANAGE_CACHE_ERROR,
 	MANAGE_CACHE_DISABLED
-}			ManageCacheResult;
+} ManageCacheResult;
 
 
 /* background worker entry point */
@@ -200,7 +200,7 @@ ManageCache(void)
 					 "CALL pg_lake_manage_cache(" INT64_FORMAT ")",
 					 maxCacheSizeBytes);
 
-	volatile	ManageCacheResult manageCacheResult;
+	volatile ManageCacheResult manageCacheResult;
 
 	/*
 	 * We start a transaction primarily to go through the transaction

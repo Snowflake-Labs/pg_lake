@@ -197,7 +197,7 @@ typedef struct PgLakeScanState
 	uint64		skippableRows;
 	uint64		skippableDataFiles;
 
-}			PgLakeScanState;
+} PgLakeScanState;
 
 /*
  * PgLakeFileModifyState holds the state for modifications to an existing
@@ -221,7 +221,7 @@ typedef struct PgLakeFileModifyState
 	/* number of rows modified by UPDATE/DELETE */
 	int64		modifiedRowCount;
 
-}			PgLakeFileModifyState;
+} PgLakeFileModifyState;
 
 /*
  * Execution state of a foreign insert/update/delete operation.
@@ -265,7 +265,7 @@ typedef struct PgLakeModifyState
 	/* for update row movement if subplan result rel */
 	struct PgLakeModifyState *aux_fmstate;	/* foreign-insert state, if
 											 * created */
-}			PgLakeModifyState;
+} PgLakeModifyState;
 
 /*
  * This enum describes what's kept in the fdw_private list for a ForeignPath.
@@ -291,7 +291,7 @@ typedef struct
 	double		limit_tuples;
 	int64		count_est;
 	int64		offset_est;
-}			PgLakePathExtraData;
+} PgLakePathExtraData;
 
 /*
  * Identify the attribute where data conversion fails.
@@ -317,7 +317,7 @@ typedef struct ResultFileIndex
 {
 	char		path[MAXPGPATH];
 	int			index;
-}			ResultFileIndex;
+} ResultFileIndex;
 
 /*
  * FindResultRelationScanStateContext is passed down via plan_tree_walker
@@ -330,7 +330,7 @@ typedef struct FindResultRelationScanStateContext
 
 	/* the lake scan we found */
 	PgLakeScanState *lakeScan;
-}			FindResultRelationScanStateContext;
+} FindResultRelationScanStateContext;
 
 
 PgLakeModifyValidityCheckHookType PgLakeModifyValidityCheckHook = NULL;
@@ -402,7 +402,7 @@ static TupleTableSlot *postgresExecForeignDelete(EState *estate,
 												 ResultRelInfo *resultRelInfo,
 												 TupleTableSlot *slot,
 												 TupleTableSlot *planSlot);
-static void DeleteSingleRow(PgLakeModifyState * fmstate,
+static void DeleteSingleRow(PgLakeModifyState *fmstate,
 							ItemPointer ctid);
 static void StoreDeleteReturningSlot(TupleTableSlot *planSlot,
 									 TupleTableSlot *returningSlot,
@@ -440,7 +440,7 @@ static void estimate_path_cost_size(PlannerInfo *root,
 									RelOptInfo *foreignrel,
 									List *param_join_conds,
 									List *pathkeys,
-									PgLakePathExtraData * fpextra,
+									PgLakePathExtraData *fpextra,
 									double *p_rows, int *p_width,
 									int *p_disabled_nodes,
 									Cost *p_startup_cost, Cost *p_total_cost);
@@ -449,13 +449,13 @@ static bool ec_member_matches_foreign(PlannerInfo *root, RelOptInfo *rel,
 									  void *arg);
 static void send_prepared_statement(ForeignScanState *node);
 static void fetch_more_data(ForeignScanState *node);
-static PgLakeModifyState * create_foreign_modify(Relation rel,
-												 Index resultRangeTableIndex,
-												 ModifyTableState *mtstate);
-static PgLakeScanState * FindResultRelationScanState(PlanState *planState,
-													 Oid relationId);
+static PgLakeModifyState *create_foreign_modify(Relation rel,
+												Index resultRangeTableIndex,
+												ModifyTableState *mtstate);
+static PgLakeScanState *FindResultRelationScanState(PlanState *planState,
+													Oid relationId);
 static bool FindResultRelationScanStateWalker(PlanState *planState,
-											  FindResultRelationScanStateContext * context);
+											  FindResultRelationScanStateContext *context);
 static void prepare_query_params(PlanState *node,
 								 List *fdw_exprs,
 								 int numParams,
@@ -496,26 +496,26 @@ static void add_foreign_final_paths(PlannerInfo *root,
 									RelOptInfo *input_rel,
 									RelOptInfo *final_rel,
 									FinalPathExtraData *extra);
-static void apply_server_options(PgLakeRelationInfo * fpinfo);
-static void apply_table_options(PgLakeRelationInfo * fpinfo);
-static void merge_fdw_options(PgLakeRelationInfo * fpinfo,
-							  const PgLakeRelationInfo * fpinfo_o,
-							  const PgLakeRelationInfo * fpinfo_i);
+static void apply_server_options(PgLakeRelationInfo *fpinfo);
+static void apply_table_options(PgLakeRelationInfo *fpinfo);
+static void merge_fdw_options(PgLakeRelationInfo *fpinfo,
+							  const PgLakeRelationInfo *fpinfo_o,
+							  const PgLakeRelationInfo *fpinfo_i);
 
-static void WriteInsertRecord(PgLakeModifyState * modifyState, TupleTableSlot *slot);
-static void PrepareDeletionSlot(PgLakeFileModifyState * fileModifyState,
+static void WriteInsertRecord(PgLakeModifyState *modifyState, TupleTableSlot *slot);
+static void PrepareDeletionSlot(PgLakeFileModifyState *fileModifyState,
 								uint64 fileRowNumber,
 								TupleTableSlot *deleteSlot);
-static void WriteDeleteRecord(PgLakeFileModifyState * fileModifyState,
+static void WriteDeleteRecord(PgLakeFileModifyState *fileModifyState,
 							  TupleTableSlot *deleteSlot);
 static TupleDesc CreateRowIdTupleDesc(void);
 static ItemPointer RowIdRecordStringToItemPointer(char *recordString,
-												  PgLakeScanState * scanState);
+												  PgLakeScanState *scanState);
 static uint64 ExtractFileIndexFromItemPointer(ItemPointer ctid,
 											  int fileRowNumberBits);
 static uint64 ExtractFileRowNumberFromItemPointer(ItemPointer ctid,
 												  int fileRowNumberBits);
-static void FinishForeignModify(PgLakeModifyState * modifyState);
+static void FinishForeignModify(PgLakeModifyState *modifyState);
 
 static void ErrorIfSystemColumnUsed(Oid relationId, AttrNumber attnum);
 static bool AdjustUniqueRelationIdentifiersViaAlias(Node *node, void *context);
@@ -2340,7 +2340,7 @@ postgresExecForeignDelete(EState *estate,
  * DeleteSingleRow deletes a single row specified by the ctid column in planSlot.
  */
 static void
-DeleteSingleRow(PgLakeModifyState * fmstate, ItemPointer ctid)
+DeleteSingleRow(PgLakeModifyState *fmstate, ItemPointer ctid)
 {
 	/* deleteSlot can be NULL for WHERE false, but we should not get here */
 	Assert(fmstate->deleteSlot != NULL);
@@ -2647,7 +2647,7 @@ IcebergErrorOrClampSlotInPlace(TupleTableSlot *slot, TupleDesc tupleDesc,
  * (when applicable) and forwards it to the insert destination.
  */
 static void
-WriteInsertRecord(PgLakeModifyState * modifyState, TupleTableSlot *slot)
+WriteInsertRecord(PgLakeModifyState *modifyState, TupleTableSlot *slot)
 {
 	DestReceiver *insertDest = modifyState->insertDest;
 
@@ -2674,7 +2674,7 @@ WriteInsertRecord(PgLakeModifyState * modifyState, TupleTableSlot *slot)
  * deleteSlot.
  */
 static void
-PrepareDeletionSlot(PgLakeFileModifyState * fileModifyState,
+PrepareDeletionSlot(PgLakeFileModifyState *fileModifyState,
 					uint64 fileRowNumber,
 					TupleTableSlot *deleteSlot)
 {
@@ -2709,7 +2709,7 @@ PrepareDeletionSlot(PgLakeFileModifyState * fileModifyState,
  * modified.
  */
 static void
-WriteDeleteRecord(PgLakeFileModifyState * fileModifyState,
+WriteDeleteRecord(PgLakeFileModifyState *fileModifyState,
 				  TupleTableSlot *deleteSlot)
 {
 	DestReceiver *deleteDest = fileModifyState->deleteDest;
@@ -2764,7 +2764,7 @@ CreateRowIdTupleDesc(void)
  */
 static ItemPointer
 RowIdRecordStringToItemPointer(char *recordString,
-							   PgLakeScanState * scanState)
+							   PgLakeScanState *scanState)
 {
 	int			recordTypeMod = scanState->rowLocationTypeMod;
 	HTAB	   *resultFileIndexes = scanState->resultFileIndexes;
@@ -2839,7 +2839,7 @@ ExtractFileRowNumberFromItemPointer(ItemPointer ctid, int fileRowNumberBits)
  * FinishForeignModify finalizes a write to pg_lake table.
  */
 static void
-FinishForeignModify(PgLakeModifyState * fmstate)
+FinishForeignModify(PgLakeModifyState *fmstate)
 {
 	ListCell   *fileModifyCell = NULL;
 	List	   *modifications = NIL;
@@ -3093,7 +3093,7 @@ estimate_path_cost_size(PlannerInfo *root,
 						RelOptInfo *foreignrel,
 						List *param_join_conds,
 						List *pathkeys,
-						PgLakePathExtraData * fpextra,
+						PgLakePathExtraData *fpextra,
 						double *p_rows, int *p_width,
 						int *p_disabled_nodes,
 						Cost *p_startup_cost, Cost *p_total_cost)
@@ -3704,7 +3704,7 @@ FindResultRelationScanState(PlanState *planState, Oid resultRelationId)
  */
 static bool
 FindResultRelationScanStateWalker(PlanState *planState,
-								  FindResultRelationScanStateContext * context)
+								  FindResultRelationScanStateContext *context)
 {
 	if (planState == NULL)
 		return false;
@@ -4400,7 +4400,7 @@ add_paths_with_pathkeys_for_rel(PlannerInfo *root, RelOptInfo *rel,
  * New options might also require tweaking merge_fdw_options().
  */
 static void
-apply_server_options(PgLakeRelationInfo * fpinfo)
+apply_server_options(PgLakeRelationInfo *fpinfo)
 {
 	/* we always assume the estimates are fetched from remote server */
 	fpinfo->use_remote_estimate = true;
@@ -4426,7 +4426,7 @@ apply_server_options(PgLakeRelationInfo * fpinfo)
  * New options might also require tweaking merge_fdw_options().
  */
 static void
-apply_table_options(PgLakeRelationInfo * fpinfo)
+apply_table_options(PgLakeRelationInfo *fpinfo)
 {
 	/* we always assume the estimates are fetched from remote server */
 	fpinfo->use_remote_estimate = true;
@@ -4442,9 +4442,9 @@ apply_table_options(PgLakeRelationInfo * fpinfo)
  * expected to NULL.
  */
 static void
-merge_fdw_options(PgLakeRelationInfo * fpinfo,
-				  const PgLakeRelationInfo * fpinfo_o,
-				  const PgLakeRelationInfo * fpinfo_i)
+merge_fdw_options(PgLakeRelationInfo *fpinfo,
+				  const PgLakeRelationInfo *fpinfo_o,
+				  const PgLakeRelationInfo *fpinfo_i)
 {
 	/* We must always have fpinfo_o. */
 	Assert(fpinfo_o);

@@ -69,7 +69,7 @@ typedef struct PgDuckServerConnectionHashEntry
 	SubTransactionId subTransactionId;
 	PGDuckConnection pgDuckConnection;
 
-}			PgDuckServerConnectionHashEntry;
+} PgDuckServerConnectionHashEntry;
 
 /*
  * InitializePGDuckClient is called the first time we get a PGDuck connection
@@ -171,7 +171,7 @@ GetPGDuckConnection(void)
  * pgduck_server, if any.
  */
 void
-ReleasePGDuckConnection(PGDuckConnection * pgDuckConnection)
+ReleasePGDuckConnection(PGDuckConnection *pgDuckConnection)
 {
 	uint32		connectionId = pgDuckConnection->connectionId;
 	bool		found = false;
@@ -199,7 +199,7 @@ ReleasePGDuckConnection(PGDuckConnection * pgDuckConnection)
  * SendQueryToPGDuck sends the given query over the connection.
  */
 void
-SendQueryToPGDuck(PGDuckConnection * pgDuckConnection, char *query)
+SendQueryToPGDuck(PGDuckConnection *pgDuckConnection, char *query)
 {
 	PGconn	   *conn = pgDuckConnection->conn;
 
@@ -349,7 +349,7 @@ ExecuteOptionalCommandInPGDuck(char *command)
  * connection.
  */
 PGresult *
-ExecuteQueryOnPGDuckConnection(PGDuckConnection * pgDuckConnection,
+ExecuteQueryOnPGDuckConnection(PGDuckConnection *pgDuckConnection,
 							   const char *query)
 {
 	PGconn	   *conn = pgDuckConnection->conn;
@@ -384,7 +384,7 @@ ExecuteQueryOnPGDuckConnection(PGDuckConnection * pgDuckConnection,
  * while also checking for signals and postmaster death.
  */
 PGresult *
-WaitForResult(PGDuckConnection * pgDuckConnection)
+WaitForResult(PGDuckConnection *pgDuckConnection)
 {
 	PGconn	   *conn = pgDuckConnection->conn;
 
@@ -430,7 +430,7 @@ WaitForResult(PGDuckConnection * pgDuckConnection)
  * Derived from pgfdw_get_result
  */
 PGresult *
-WaitForLastResult(PGDuckConnection * pgDuckConnection)
+WaitForLastResult(PGDuckConnection *pgDuckConnection)
 {
 	PGresult   *volatile last_res = NULL;
 
@@ -465,7 +465,7 @@ WaitForLastResult(PGDuckConnection * pgDuckConnection)
  * PQclear is called on the result in case of error.
  */
 void
-CheckPGDuckResult(PGDuckConnection * pgDuckConnection, PGresult *result)
+CheckPGDuckResult(PGDuckConnection *pgDuckConnection, PGresult *result)
 {
 	PG_TRY();
 	{
@@ -485,7 +485,7 @@ CheckPGDuckResult(PGDuckConnection * pgDuckConnection, PGresult *result)
  * ThrowIfPGDuckResultHasError throws the error received over a connection, if any.
  */
 void
-ThrowIfPGDuckResultHasError(PGDuckConnection * pgDuckConnection, PGresult *result)
+ThrowIfPGDuckResultHasError(PGDuckConnection *pgDuckConnection, PGresult *result)
 {
 	ExecStatusType resultStatus = PQresultStatus(result);
 
@@ -922,7 +922,7 @@ GetSingleValueFromPGDuck(char *query)
 * It is a wrapper around PQsendQueryParams() followed by PQsetSingleRowMode().
 */
 void
-SendQueryWithParams(PGDuckConnection * pgduckConn, char *queryString,
+SendQueryWithParams(PGDuckConnection *pgduckConn, char *queryString,
 					int numParams, const char **parameterValues)
 {
 	PGconn	   *conn = pgduckConn->conn;

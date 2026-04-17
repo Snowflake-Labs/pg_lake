@@ -51,7 +51,7 @@ typedef enum FieldType
 	FIELD_TYPE_LIST,
 	FIELD_TYPE_MAP,
 	FIELD_TYPE_STRUCT
-}			FieldType;
+} FieldType;
 
 /* forward declaration */
 struct Field;
@@ -64,7 +64,7 @@ struct Field;
 typedef struct FieldScalar
 {
 	const char *typeName;
-}			FieldScalar;
+} FieldScalar;
 
 /*
  * FieldList represents a list is a collection of values with some element type.
@@ -77,7 +77,7 @@ typedef struct FieldList
 	int			elementId;
 	bool		elementRequired;
 	struct Field *element;
-}			FieldList;
+} FieldList;
 
 /*
  * FieldStructElement represents an element of a struct field.
@@ -96,7 +96,7 @@ typedef struct FieldStructElement
 	const char *initialDefault;
 	const char *duckSerializedInitialDefault;
 	struct Field *type;
-}			FieldStructElement;
+} FieldStructElement;
 
 /*
  * FieldStruct is a tuple of typed values. Each field in the tuple is named
@@ -111,7 +111,7 @@ typedef struct FieldStruct
 {
 	FieldStructElement *fields;
 	size_t		nfields;
-}			FieldStruct;
+} FieldStruct;
 
 /*
  * FieldMap represents is a collection of key-value pairs with a key type and a value type.
@@ -128,7 +128,7 @@ typedef struct FieldMap
 	int			valueId;
 	bool		valueRequired;
 	struct Field *value;
-}			FieldMap;
+} FieldMap;
 
 /*
  * Field represents a field.
@@ -145,7 +145,7 @@ typedef struct Field
 		FieldMap	map;
 		FieldStruct structType;
 	}			field;
-}			Field;
+} Field;
 
 /*
  * A data file schema is represented by FieldStruct. To make the context
@@ -154,6 +154,6 @@ typedef struct Field
 typedef FieldStruct DataFileSchema;
 typedef FieldStructElement DataFileSchemaField;
 
-extern PGDLLEXPORT DataFileSchema * DeepCopyDataFileSchema(const DataFileSchema * schema);
-extern PGDLLEXPORT Field * DeepCopyField(const Field * field);
-extern PGDLLEXPORT bool PGTypeRequiresConversionToIcebergString(Field * field, PGType pgType);
+extern PGDLLEXPORT DataFileSchema *DeepCopyDataFileSchema(const DataFileSchema *schema);
+extern PGDLLEXPORT Field *DeepCopyField(const Field *field);
+extern PGDLLEXPORT bool PGTypeRequiresConversionToIcebergString(Field *field, PGType pgType);

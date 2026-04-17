@@ -52,7 +52,7 @@
 #endif
 
 
-static unsigned char *PGIcebergBinarySerialize(Datum datum, Field * field, PGType pgType, bool addNullTerminator, size_t *binaryLen);
+static unsigned char *PGIcebergBinarySerialize(Datum datum, Field *field, PGType pgType, bool addNullTerminator, size_t *binaryLen);
 
 
 /*
@@ -62,7 +62,7 @@ static unsigned char *PGIcebergBinarySerialize(Datum datum, Field * field, PGTyp
  * They both are of avro "bytes" type. For those, addNullTerminator should be set to false.
  */
 unsigned char *
-PGIcebergBinarySerializeBoundValue(Datum datum, Field * field, PGType pgType, size_t *binaryLen)
+PGIcebergBinarySerializeBoundValue(Datum datum, Field *field, PGType pgType, size_t *binaryLen)
 {
 	bool		addNullTerminator = false;
 
@@ -77,7 +77,7 @@ PGIcebergBinarySerializeBoundValue(Datum datum, Field * field, PGType pgType, si
  * addNullTerminator should be set to true.
  */
 unsigned char *
-PGIcebergBinarySerializePartitionFieldValue(Datum datum, Field * field, PGType pgType, size_t *binaryLen)
+PGIcebergBinarySerializePartitionFieldValue(Datum datum, Field *field, PGType pgType, size_t *binaryLen)
 {
 	bool		addNullTerminator = true;
 
@@ -91,7 +91,7 @@ PGIcebergBinarySerializePartitionFieldValue(Datum datum, Field * field, PGType p
  * Only scalar types are supported for single value binary serde.
  */
 static unsigned char *
-PGIcebergBinarySerialize(Datum datum, Field * field, PGType pgType, bool addNullTerminator, size_t *binaryLen)
+PGIcebergBinarySerialize(Datum datum, Field *field, PGType pgType, bool addNullTerminator, size_t *binaryLen)
 {
 	Assert(field->type == FIELD_TYPE_SCALAR);
 
@@ -353,7 +353,7 @@ PGIcebergBinarySerialize(Datum datum, Field * field, PGType pgType, bool addNull
  * Only scalar types are supported for single value binary serde.
  */
 Datum
-PGIcebergBinaryDeserialize(unsigned char *binaryValue, size_t binaryLen, Field * field, PGType pgType)
+PGIcebergBinaryDeserialize(unsigned char *binaryValue, size_t binaryLen, Field *field, PGType pgType)
 {
 	Assert(field && field->type == FIELD_TYPE_SCALAR);
 	Assert(binaryValue);

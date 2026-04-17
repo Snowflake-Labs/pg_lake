@@ -38,15 +38,15 @@ typedef struct PostgresColumnMapping
 
 	/* field that is mapped to postgres column */
 	DataFileSchemaField *field;
-}			PostgresColumnMapping;
+} PostgresColumnMapping;
 
 extern PGDLLEXPORT void RegisterPostgresColumnMappings(List *pgColumnMappingList);
 extern PGDLLEXPORT List *CreatePostgresColumnMappingsForColumnDefs(Oid relationId, List *columnDefList, bool forAddColumn);
 extern PGDLLEXPORT List *CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(Oid relationId);
-extern PGDLLEXPORT DataFileSchema * GetDataFileSchemaForTable(Oid relationId);
-extern PGDLLEXPORT DataFileSchema * GetDataFileSchemaForTableWithExclusion(Oid relationId, List *excludedColumns);
-extern PGDLLEXPORT DataFileSchema * GetDataFileSchemaForExternalIcebergTable(char *metadataPath);
+extern PGDLLEXPORT DataFileSchema *GetDataFileSchemaForTable(Oid relationId);
+extern PGDLLEXPORT DataFileSchema *GetDataFileSchemaForTableWithExclusion(Oid relationId, List *excludedColumns);
+extern PGDLLEXPORT DataFileSchema *GetDataFileSchemaForExternalIcebergTable(char *metadataPath);
 extern PGDLLEXPORT List *GetLeafFieldsForExternalIcebergTable(char *metadataPath);
 extern PGDLLEXPORT List *GetLeafFieldsForTable(Oid relationId);
 extern PGDLLEXPORT const char *GetDuckSerializedIcebergFieldInitialDefault(const char *initialDefault,
-																		   Field * field);
+																		   Field *field);

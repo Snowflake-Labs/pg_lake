@@ -35,26 +35,26 @@ static const char *SnapshotReferenceTypeName[] = {
 };
 
 
-static void ReadIcebergTableMetadataFromJson(JsonbContainer *json, IcebergTableMetadata * metadata);
-static void ReadIcebergTableSchema(JsonbContainer *json, IcebergTableSchema * schema);
-static void ReadIcebergTableSchemaField(JsonbContainer *json, DataFileSchemaField * field);
-static void ReadIcebergPartitionSpec(JsonbContainer *json, IcebergPartitionSpec * spec);
-static void ReadIcebergPartitionSpecField(JsonbContainer *json, IcebergPartitionSpecField * field);
-static void ReadIcebergSnapshot(JsonbContainer *json, IcebergSnapshot * snapshot);
-static void ReadIcebergSnapshotLogEntry(JsonbContainer *json, IcebergSnapshotLogEntry * entry);
-static void ReadIcebergPartitionStatistics(JsonbContainer *json, IcebergPartitionStatistics * entry);
-static void ReadIcebergMetadataLogEntry(JsonbContainer *json, IcebergMetadataLogEntry * entry);
-static void ReadIcebergSortOrder(JsonbContainer *json, IcebergSortOrder * order);
-static void ReadIcebergSortOrderField(JsonbContainer *json, IcebergSortOrderField * field);
-static void ReadSnapshotReference(const char *key, JsonbValue *jsonValue, SnapshotReference * ref);
-static void ReadSnapshotReferenceType(JsonbContainer *refJson, SnapshotReferenceType * type);
-static void ReadIcebergStatistics(JsonbContainer *json, IcebergStatistics * statistics);
-static void ReadBlobMetadata(JsonbContainer *json, BlobMetadata * metadata);
+static void ReadIcebergTableMetadataFromJson(JsonbContainer *json, IcebergTableMetadata *metadata);
+static void ReadIcebergTableSchema(JsonbContainer *json, IcebergTableSchema *schema);
+static void ReadIcebergTableSchemaField(JsonbContainer *json, DataFileSchemaField *field);
+static void ReadIcebergPartitionSpec(JsonbContainer *json, IcebergPartitionSpec *spec);
+static void ReadIcebergPartitionSpecField(JsonbContainer *json, IcebergPartitionSpecField *field);
+static void ReadIcebergSnapshot(JsonbContainer *json, IcebergSnapshot *snapshot);
+static void ReadIcebergSnapshotLogEntry(JsonbContainer *json, IcebergSnapshotLogEntry *entry);
+static void ReadIcebergPartitionStatistics(JsonbContainer *json, IcebergPartitionStatistics *entry);
+static void ReadIcebergMetadataLogEntry(JsonbContainer *json, IcebergMetadataLogEntry *entry);
+static void ReadIcebergSortOrder(JsonbContainer *json, IcebergSortOrder *order);
+static void ReadIcebergSortOrderField(JsonbContainer *json, IcebergSortOrderField *field);
+static void ReadSnapshotReference(const char *key, JsonbValue *jsonValue, SnapshotReference *ref);
+static void ReadSnapshotReferenceType(JsonbContainer *refJson, SnapshotReferenceType *type);
+static void ReadIcebergStatistics(JsonbContainer *json, IcebergStatistics *statistics);
+static void ReadBlobMetadata(JsonbContainer *json, BlobMetadata *metadata);
 static void ReadInt32(int input, int *value);
-static void ReadProperty(const char *key, JsonbValue *jsonValue, Property * property);
+static void ReadProperty(const char *key, JsonbValue *jsonValue, Property *property);
 static bool JsonExtractField(JsonbContainer *topLevelJsonContainer,
 							 char *fieldName, FieldRequired required,
-							 Field * *field);
+							 Field **field);
 
 
 /*
@@ -81,7 +81,7 @@ ReadIcebergTableMetadata(const char *tableMetadataPath)
 * table metadata.
 */
 static void
-ReadIcebergTableMetadataFromJson(JsonbContainer *json, IcebergTableMetadata * metadata)
+ReadIcebergTableMetadataFromJson(JsonbContainer *json, IcebergTableMetadata *metadata)
 {
 	memset(metadata, '\0', sizeof(IcebergTableMetadata));
 
@@ -161,7 +161,7 @@ ReadIcebergTableMetadataFromJson(JsonbContainer *json, IcebergTableMetadata * me
 
 
 static void
-ReadIcebergTableSchema(JsonbContainer *json, IcebergTableSchema * schema)
+ReadIcebergTableSchema(JsonbContainer *json, IcebergTableSchema *schema)
 {
 	memset(schema, '\0', sizeof(IcebergTableSchema));
 	JsonExtractInt32Field(json, "schema-id", FIELD_REQUIRED, &schema->schema_id);
@@ -180,7 +180,7 @@ ReadIcebergTableSchema(JsonbContainer *json, IcebergTableSchema * schema)
 
 
 static void
-ReadIcebergTableSchemaField(JsonbContainer *json, DataFileSchemaField * field)
+ReadIcebergTableSchemaField(JsonbContainer *json, DataFileSchemaField *field)
 {
 	memset(field, '\0', sizeof(DataFileSchemaField));
 
@@ -212,7 +212,7 @@ ReadIcebergTableSchemaField(JsonbContainer *json, DataFileSchemaField * field)
 
 
 static void
-ReadIcebergPartitionSpec(JsonbContainer *json, IcebergPartitionSpec * spec)
+ReadIcebergPartitionSpec(JsonbContainer *json, IcebergPartitionSpec *spec)
 {
 	memset(spec, '\0', sizeof(IcebergPartitionSpec));
 	JsonExtractInt32Field(json, "spec-id", FIELD_REQUIRED, &spec->spec_id);
@@ -224,7 +224,7 @@ ReadIcebergPartitionSpec(JsonbContainer *json, IcebergPartitionSpec * spec)
 
 
 static void
-ReadIcebergPartitionSpecField(JsonbContainer *json, IcebergPartitionSpecField * field)
+ReadIcebergPartitionSpecField(JsonbContainer *json, IcebergPartitionSpecField *field)
 {
 	memset(field, '\0', sizeof(IcebergPartitionSpecField));
 	JsonExtractInt32Field(json, "source-id", FIELD_REQUIRED, &field->source_id);
@@ -238,7 +238,7 @@ ReadIcebergPartitionSpecField(JsonbContainer *json, IcebergPartitionSpecField * 
 }
 
 static void
-ReadSnapshotReference(const char *key, JsonbValue *jsonValue, SnapshotReference * ref)
+ReadSnapshotReference(const char *key, JsonbValue *jsonValue, SnapshotReference *ref)
 {
 	memset(ref, '\0', sizeof(SnapshotReference));
 
@@ -269,7 +269,7 @@ ReadSnapshotReference(const char *key, JsonbValue *jsonValue, SnapshotReference 
 }
 
 static void
-ReadSnapshotReferenceType(JsonbContainer *refJson, SnapshotReferenceType * type)
+ReadSnapshotReferenceType(JsonbContainer *refJson, SnapshotReferenceType *type)
 {
 	const char *typeName = NULL;
 	size_t		typeNameLength = 0;
@@ -290,7 +290,7 @@ ReadSnapshotReferenceType(JsonbContainer *refJson, SnapshotReferenceType * type)
 }
 
 static void
-ReadProperty(const char *key, JsonbValue *jsonValue, Property * property)
+ReadProperty(const char *key, JsonbValue *jsonValue, Property *property)
 {
 	memset(property, '\0', sizeof(Property));
 
@@ -314,7 +314,7 @@ ReadInt32(int input, int *value)
 
 
 static void
-ReadIcebergSnapshot(JsonbContainer *json, IcebergSnapshot * snapshot)
+ReadIcebergSnapshot(JsonbContainer *json, IcebergSnapshot *snapshot)
 {
 	memset(snapshot, '\0', sizeof(IcebergSnapshot));
 	JsonExtractInt64Field(json, "snapshot-id", FIELD_REQUIRED, &snapshot->snapshot_id);
@@ -331,7 +331,7 @@ ReadIcebergSnapshot(JsonbContainer *json, IcebergSnapshot * snapshot)
 }
 
 static void
-ReadIcebergSnapshotLogEntry(JsonbContainer *json, IcebergSnapshotLogEntry * entry)
+ReadIcebergSnapshotLogEntry(JsonbContainer *json, IcebergSnapshotLogEntry *entry)
 {
 	memset(entry, '\0', sizeof(IcebergSnapshotLogEntry));
 	JsonExtractInt64Field(json, "timestamp-ms", FIELD_REQUIRED, &entry->timestamp_ms);
@@ -339,7 +339,7 @@ ReadIcebergSnapshotLogEntry(JsonbContainer *json, IcebergSnapshotLogEntry * entr
 }
 
 static void
-ReadIcebergPartitionStatistics(JsonbContainer *json, IcebergPartitionStatistics * entry)
+ReadIcebergPartitionStatistics(JsonbContainer *json, IcebergPartitionStatistics *entry)
 {
 	memset(entry, '\0', sizeof(IcebergPartitionStatistics));
 	JsonExtractInt64Field(json, "snapshot-id", FIELD_REQUIRED, &entry->snapshot_id);
@@ -348,7 +348,7 @@ ReadIcebergPartitionStatistics(JsonbContainer *json, IcebergPartitionStatistics 
 }
 
 static void
-ReadIcebergMetadataLogEntry(JsonbContainer *json, IcebergMetadataLogEntry * entry)
+ReadIcebergMetadataLogEntry(JsonbContainer *json, IcebergMetadataLogEntry *entry)
 {
 	memset(entry, '\0', sizeof(IcebergMetadataLogEntry));
 	JsonExtractInt64Field(json, "timestamp-ms", FIELD_REQUIRED, &entry->timestamp_ms);
@@ -357,7 +357,7 @@ ReadIcebergMetadataLogEntry(JsonbContainer *json, IcebergMetadataLogEntry * entr
 
 
 static void
-ReadIcebergSortOrder(JsonbContainer *json, IcebergSortOrder * order)
+ReadIcebergSortOrder(JsonbContainer *json, IcebergSortOrder *order)
 {
 	memset(order, '\0', sizeof(IcebergSortOrder));
 	JsonExtractInt32Field(json, "order-id", FIELD_REQUIRED, &order->order_id);
@@ -369,7 +369,7 @@ ReadIcebergSortOrder(JsonbContainer *json, IcebergSortOrder * order)
 
 
 static void
-ReadIcebergSortOrderField(JsonbContainer *json, IcebergSortOrderField * field)
+ReadIcebergSortOrderField(JsonbContainer *json, IcebergSortOrderField *field)
 {
 	memset(field, '\0', sizeof(IcebergSortOrderField));
 	JsonExtractStringField(json, "transform", FIELD_REQUIRED, &field->transform, &field->transform_length);
@@ -380,7 +380,7 @@ ReadIcebergSortOrderField(JsonbContainer *json, IcebergSortOrderField * field)
 
 
 static void
-ReadBlobMetadata(JsonbContainer *json, BlobMetadata * metadata)
+ReadBlobMetadata(JsonbContainer *json, BlobMetadata *metadata)
 {
 	memset(metadata, '\0', sizeof(BlobMetadata));
 	JsonExtractStringField(json, "type", FIELD_REQUIRED, &metadata->type, &metadata->type_length);
@@ -397,7 +397,7 @@ ReadBlobMetadata(JsonbContainer *json, BlobMetadata * metadata)
 }
 
 static void
-ReadIcebergStatistics(JsonbContainer *json, IcebergStatistics * statistics)
+ReadIcebergStatistics(JsonbContainer *json, IcebergStatistics *statistics)
 {
 	memset(statistics, '\0', sizeof(IcebergStatistics));
 	JsonExtractInt64Field(json, "snapshot-id", FIELD_REQUIRED, &statistics->snapshot_id);
@@ -413,7 +413,7 @@ ReadIcebergStatistics(JsonbContainer *json, IcebergStatistics * statistics)
 
 
 static void
-ReadIcebergTypeFieldElement(JsonbContainer *json, DataFileSchemaField * fieldElement)
+ReadIcebergTypeFieldElement(JsonbContainer *json, DataFileSchemaField *fieldElement)
 {
 	memset(fieldElement, '\0', sizeof(DataFileSchemaField));
 	JsonExtractInt32Field(json, "id", FIELD_REQUIRED, &fieldElement->id);
@@ -432,7 +432,7 @@ ReadIcebergTypeFieldElement(JsonbContainer *json, DataFileSchemaField * fieldEle
 
 
 static bool
-JsonExtractField(JsonbContainer *topLevelJsonContainer, char *fieldName, FieldRequired required, Field * *field)
+JsonExtractField(JsonbContainer *topLevelJsonContainer, char *fieldName, FieldRequired required, Field **field)
 {
 	JsonbValue *topLevelTypeFieldJson =
 		getKeyJsonValueFromContainer(topLevelJsonContainer, fieldName, strlen(fieldName), NULL);

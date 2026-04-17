@@ -22,5 +22,5 @@
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/pgduck/type.h"
 
-extern PGDLLEXPORT const char *PGIcebergJsonSerialize(Datum datum, Field * field, PGType pgType, bool *isNull);
-extern PGDLLEXPORT Datum PGIcebergJsonDeserialize(const char *jsonString, Field * field, PGType pgType, bool *isNull);
+extern PGDLLEXPORT const char *PGIcebergJsonSerialize(Datum datum, Field *field, PGType pgType, bool *isNull);
+extern PGDLLEXPORT Datum PGIcebergJsonDeserialize(const char *jsonString, Field *field, PGType pgType, bool *isNull);

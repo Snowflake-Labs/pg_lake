@@ -32,7 +32,7 @@ PG_FUNCTION_INFO_V1(test_http_put);
 PG_FUNCTION_INFO_V1(test_http_with_retry);
 
 
-static Datum build_http_result(FunctionCallInfo fcinfo, const HttpResult * r);
+static Datum build_http_result(FunctionCallInfo fcinfo, const HttpResult *r);
 static List *extract_headers(FunctionCallInfo fcinfo, int argno);
 static bool TestShouldRetryRequestToRestCatalog(long status, int maxRetry, int retryNo);
 
@@ -155,7 +155,7 @@ extract_headers(FunctionCallInfo fcinfo, int argno)
 
 /* Helper: build (status, body, resp_headers) composite                    */
 static Datum
-build_http_result(FunctionCallInfo fcinfo, const HttpResult * r)
+build_http_result(FunctionCallInfo fcinfo, const HttpResult *r)
 {
 	TupleDesc	tupdesc;
 

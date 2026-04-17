@@ -27,7 +27,7 @@ typedef struct FileInCache
 	char	   *url;
 	size_t		fileSize;
 	Timestamp	lastAccessTime;
-}			FileInCache;
+} FileInCache;
 
 
 extern PGDLLEXPORT int64 AddFileToCache(char *url, bool refresh);

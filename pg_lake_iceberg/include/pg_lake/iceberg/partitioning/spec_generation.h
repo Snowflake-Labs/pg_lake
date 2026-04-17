@@ -22,6 +22,6 @@
 
 #define DEFAULT_SPEC_ID 0
 
-extern PGDLLEXPORT IcebergPartitionSpec * BuildPartitionSpecFromPartitionTransforms(Oid relationId,
-																					List *CurrentPartitionTransformList,
-																					int largestSpecId);
+extern PGDLLEXPORT IcebergPartitionSpec *BuildPartitionSpecFromPartitionTransforms(Oid relationId,
+																				   List *CurrentPartitionTransformList,
+																				   int largestSpecId);
