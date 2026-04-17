@@ -934,23 +934,21 @@ def test_reject_create_server_type_postgres(superuser_conn, extension):
     superuser_conn.rollback()
 
 
-def test_reject_create_server_type_object_store(superuser_conn, extension):
-    """Users cannot create a new server with TYPE 'object_store'."""
-    err = run_command(
+def test_create_object_store_server(superuser_conn, extension):
+    """Users can create a server with TYPE 'object_store'."""
+    run_command(
         """
-        CREATE SERVER my_obj_store TYPE 'object_store'
+        CREATE SERVER test_os_server TYPE 'object_store'
             FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (location_prefix 's3://bucket/prefix')
         """,
         superuser_conn,
-        raise_error=False,
     )
-    assert err is not None
-    assert "cannot create iceberg_catalog server with TYPE 'object_store'" in str(err)
     superuser_conn.rollback()
 
 
-def test_reject_create_server_non_rest_type(superuser_conn, extension):
-    """Any TYPE other than 'rest' is rejected for user-created iceberg_catalog servers."""
+def test_reject_create_server_non_rest_or_object_store_type(superuser_conn, extension):
+    """Any TYPE other than 'rest' or 'object_store' is rejected."""
     err = run_command(
         """
         CREATE SERVER my_server TYPE 'something_else'
@@ -960,7 +958,7 @@ def test_reject_create_server_non_rest_type(superuser_conn, extension):
         raise_error=False,
     )
     assert err is not None
-    assert "iceberg_catalog server requires TYPE 'rest'" in str(err)
+    assert "iceberg_catalog server requires TYPE 'rest' or 'object_store'" in str(err)
     superuser_conn.rollback()
 
 
@@ -975,7 +973,7 @@ def test_reject_create_server_without_type(superuser_conn, extension):
         raise_error=False,
     )
     assert err is not None
-    assert "iceberg_catalog server requires TYPE 'rest'" in str(err)
+    assert "iceberg_catalog server requires TYPE 'rest' or 'object_store'" in str(err)
     superuser_conn.rollback()
 
 
@@ -1358,3 +1356,94 @@ def test_scrub_leaves_scope_visible(installcheck, superuser_conn, extension):
     )
     run_command("DROP SERVER test_scrub_scope_srv", superuser_conn)
     superuser_conn.commit()
+
+
+# ── TYPE 'object_store' server tests ──────────────────────────────────────
+
+
+def test_create_object_store_server_with_location_prefix(superuser_conn, extension):
+    """Object store server accepts location_prefix option."""
+    run_command(
+        """
+        CREATE SERVER os_with_prefix TYPE 'object_store'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (location_prefix 's3://my-bucket/warehouse')
+        """,
+        superuser_conn,
+    )
+
+    result = run_query(
+        """
+        SELECT s.srvtype, (SELECT option_value
+                           FROM pg_options_to_table(s.srvoptions)
+                           WHERE option_name = 'location_prefix') AS prefix
+        FROM pg_foreign_server s WHERE s.srvname = 'os_with_prefix'
+        """,
+        superuser_conn,
+    )
+    assert result[0]["srvtype"] == "object_store"
+    assert result[0]["prefix"] == "s3://my-bucket/warehouse"
+    superuser_conn.rollback()
+
+
+def test_create_object_store_server_with_read_only(superuser_conn, extension):
+    """Object store server accepts read_only boolean option."""
+    run_command(
+        """
+        CREATE SERVER os_readonly TYPE 'object_store'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (location_prefix 's3://bucket/prefix', read_only 'true')
+        """,
+        superuser_conn,
+    )
+
+    result = run_query(
+        """
+        SELECT option_value FROM pg_options_to_table(
+            (SELECT srvoptions FROM pg_foreign_server WHERE srvname = 'os_readonly')
+        ) WHERE option_name = 'read_only'
+        """,
+        superuser_conn,
+    )
+    assert result[0]["option_value"] == "true"
+    superuser_conn.rollback()
+
+
+def test_create_rest_server_with_read_only(superuser_conn, extension):
+    """REST server also accepts the read_only option."""
+    run_command(
+        """
+        CREATE SERVER rest_readonly TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181', read_only 'true')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.rollback()
+
+
+def test_reject_invalid_read_only_value(superuser_conn, extension):
+    """read_only server option must be a valid boolean."""
+    err = run_command(
+        """
+        CREATE SERVER bad_ro TYPE 'object_store'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (read_only 'maybe')
+        """,
+        superuser_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    superuser_conn.rollback()
+
+
+def test_object_store_server_no_options(superuser_conn, extension):
+    """An object_store server with no options is valid; all settings fall back to GUCs."""
+    run_command(
+        """
+        CREATE SERVER os_no_opts TYPE 'object_store'
+            FOREIGN DATA WRAPPER iceberg_catalog
+        """,
+        superuser_conn,
+    )
+    superuser_conn.rollback()

@@ -386,14 +386,15 @@ IcebergDefaultCatalogCheckHook(char **newvalue, void **extra, GucSource source)
 
 	/*
 	 * When catalog access is available, also accept user-created
-	 * iceberg_catalog foreign servers with TYPE 'rest'.
+	 * iceberg_catalog foreign servers with TYPE 'rest' or 'object_store'.
 	 */
-	if (IsTransactionState() && IsRestCatalog(newCatalog))
+	if (IsTransactionState() &&
+		(IsRestCatalog(newCatalog) || IsObjectStoreCatalog(newCatalog)))
 		return true;
 
 	GUC_check_errdetail("pg_lake_iceberg: allowed iceberg catalog options are '" POSTGRES_CATALOG_NAME "', "
 						"'" REST_CATALOG_NAME "', '" OBJECT_STORE_CATALOG_NAME
-						"', or the name of a user-created iceberg_catalog server with TYPE 'rest'");
+						"', or the name of a user-created iceberg_catalog server");
 
 	return false;
 }

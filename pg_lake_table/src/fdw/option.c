@@ -39,6 +39,7 @@
 #include "pg_lake/permissions/roles.h"
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/util/string_utils.h"
+#include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "libpq/libpq-be.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
@@ -663,6 +664,8 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 	/* if not provided, assume postgres catalog */
 	IcebergCatalogType icebergCatalogType = POSTGRES_CATALOG;
 	bool		readOnlyExternalCatalogTable = false;
+	bool		readOnlyExplicitlySet = false;
+	char	   *icebergCatalogOptionValue = NULL;
 	char	   *catalogName = NULL;
 	char	   *catalogTableName = NULL;
 	char	   *catalogNamespace = NULL;
@@ -758,6 +761,8 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 		{
 			char	   *icebergCatalogName = defGetString(def);
 
+			icebergCatalogOptionValue = icebergCatalogName;
+
 			if (IsRestCatalog(icebergCatalogName))
 			{
 				/*
@@ -767,7 +772,7 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 				 */
 				icebergCatalogType = REST_CATALOG_READ_ONLY;
 			}
-			else if (pg_strcasecmp(icebergCatalogName, OBJECT_STORE_CATALOG_NAME) == 0)
+			else if (IsObjectStoreCatalog(icebergCatalogName))
 			{
 				/*
 				 * at this point, we cannot tell whether it's read only or
@@ -789,6 +794,7 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 		{
 			/* only accept boolean */
 			readOnlyExternalCatalogTable = defGetBoolean(def);
+			readOnlyExplicitlySet = true;
 		}
 		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "catalog_table_name") == 0)
 		{
@@ -878,7 +884,48 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 		}
 	}
 
-	/* first, adjust readable vs writable for external catalog tables */
+	/*
+	 * Inherit server-level read_only when the table does not explicitly set
+	 * it.  If the server says read_only and the table explicitly says
+	 * read_only='false', that is an error.
+	 */
+	if (catalog == ForeignTableRelationId && icebergCatalogOptionValue != NULL &&
+		!IsCatalogOwnedByExtension(icebergCatalogOptionValue))
+	{
+		ForeignServer *server = GetForeignServerByName(icebergCatalogOptionValue, true);
+
+		if (server != NULL)
+		{
+			ListCell   *lc;
+			bool		serverReadOnly = false;
+
+			foreach(lc, server->options)
+			{
+				DefElem    *def = (DefElem *) lfirst(lc);
+
+				if (pg_strcasecmp(def->defname, "read_only") == 0)
+				{
+					serverReadOnly = defGetBoolean(def);
+					break;
+				}
+			}
+
+			if (serverReadOnly)
+			{
+				if (readOnlyExplicitlySet && !readOnlyExternalCatalogTable)
+					ereport(ERROR,
+							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+							 errmsg("cannot set read_only='false' on a table "
+									"whose catalog server has read_only='true'"),
+							 errhint("Remove the read_only option from the table "
+									 "or change the server setting.")));
+
+				readOnlyExternalCatalogTable = true;
+			}
+		}
+	}
+
+	/* adjust readable vs writable for external catalog tables */
 	if (catalog == ForeignTableRelationId && icebergCatalogType == REST_CATALOG_READ_ONLY &&
 		!readOnlyExternalCatalogTable)
 		icebergCatalogType = REST_CATALOG_READ_WRITE;
@@ -898,7 +945,7 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 		!(icebergCatalogType == REST_CATALOG_READ_ONLY || icebergCatalogType == OBJECT_STORE_READ_ONLY))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("\"read_only\" option is only valid for catalog=\"rest\"")));
+				 errmsg("\"read_only\" option is only valid for REST or object_store catalogs")));
 
 	if (catalog == ForeignTableRelationId)
 	{

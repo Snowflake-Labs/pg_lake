@@ -3,6 +3,7 @@
 #include "miscadmin.h"
 
 #include "commands/dbcommands.h"
+#include "commands/defrem.h"
 #include "foreign/foreign.h"
 #include "utils/inval.h"
 #include "utils/snapmgr.h"
@@ -21,6 +22,7 @@
 #include "pg_lake/extensions/pg_lake_iceberg.h"
 #include "pg_lake/storage/local_storage.h"
 #include "pg_lake/util/string_utils.h"
+#include "pg_lake/util/catalog_type.h"
 
 char	   *ObjectStoreCatalogLocationPrefix = NULL;
 char	   *ExternalObjectStorePrefix = "fromsf";
@@ -321,6 +323,10 @@ PushMetadataLocationToObjectStoreCatalog(void)
 
 	StringInfo	fetchObjectStoreMetadata = makeStringInfo();
 
+	/*
+	 * Match tables whose catalog option is either the built-in 'object_store'
+	 * or any user-created iceberg_catalog server with TYPE 'object_store'.
+	 */
 	appendStringInfo(fetchObjectStoreMetadata,
 					 "  SELECT "
 					 "  c.metadata_location,"
@@ -331,7 +337,17 @@ PushMetadataLocationToObjectStoreCatalog(void)
 					 "  WHERE EXISTS ("
 					 "		SELECT 1"
 					 "		FROM unnest(f.ftoptions) opt"
-					 "		WHERE LOWER(opt) = LOWER('catalog=" OBJECT_STORE_CATALOG_NAME "')"
+					 "		WHERE opt ~* '^catalog='"
+					 "		  AND ("
+					 "			LOWER(opt) = LOWER('catalog=" OBJECT_STORE_CATALOG_NAME "')"
+					 "			OR LOWER(SUBSTRING(opt FROM 9)) IN ("
+					 "				SELECT LOWER(srvname)"
+					 "				FROM pg_foreign_server s"
+					 "				JOIN pg_foreign_data_wrapper w ON s.srvfdw = w.oid"
+					 "				WHERE w.fdwname = '" ICEBERG_CATALOG_FDW_NAME "'"
+					 "				  AND LOWER(s.srvtype) = LOWER('" OBJECT_STORE_CATALOG_NAME "')"
+					 "			)"
+					 "		  )"
 					 "		)");
 
 	/*
@@ -568,4 +584,48 @@ GetObjectStoreDefaultLocationPrefix(void)
 	bool		inPlace = false;
 
 	return StripTrailingSlash(ObjectStoreCatalogLocationPrefix, inPlace);
+}
+
+
+/*
+ * GetObjectStoreCatalogOptionsFromCatalog returns resolved object store
+ * catalog options.  For the built-in 'object_store' literal the GUCs are
+ * used directly.  For user-created servers the server options override
+ * the GUC defaults.
+ */
+ObjectStoreCatalogOptions *
+GetObjectStoreCatalogOptionsFromCatalog(const char *catalog)
+{
+	ObjectStoreCatalogOptions *opts = palloc0(sizeof(ObjectStoreCatalogOptions));
+
+	if (pg_strcasecmp(catalog, OBJECT_STORE_CATALOG_NAME) == 0)
+		opts->catalog = pstrdup(OBJECT_STORE_CATALOG_NAME);
+	else
+		opts->catalog = pstrdup(catalog);
+
+	/* GUC defaults */
+	opts->locationPrefix = (char *) GetObjectStoreDefaultLocationPrefix();
+	opts->readOnly = false;
+
+	if (pg_strcasecmp(catalog, OBJECT_STORE_CATALOG_NAME) != 0)
+	{
+		ForeignServer *server = GetForeignServerByName(catalog, false);
+		ListCell   *lc;
+
+		foreach(lc, server->options)
+		{
+			DefElem    *def = (DefElem *) lfirst(lc);
+
+			if (pg_strcasecmp(def->defname, "location_prefix") == 0)
+			{
+				bool		inPlace = false;
+
+				opts->locationPrefix = StripTrailingSlash(defGetString(def), inPlace);
+			}
+			else if (pg_strcasecmp(def->defname, "read_only") == 0)
+				opts->readOnly = defGetBoolean(def);
+		}
+	}
+
+	return opts;
 }

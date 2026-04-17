@@ -118,6 +118,7 @@ static const char *iceberg_catalog_server_options[] = {
 	"enable_vended_credentials",
 	"location_prefix",
 	"catalog_name",
+	"read_only",
 	NULL
 };
 
@@ -146,7 +147,7 @@ is_valid_option_in_list(const char *keyword, const char *const *options)
  * iceberg_catalog_validator validates options for the iceberg_catalog FDW.
  *
  * Server options: rest_endpoint, scope, rest_auth_type, oauth_endpoint,
- *   enable_vended_credentials, location_prefix, catalog_name.
+ *   enable_vended_credentials, location_prefix, catalog_name, read_only.
  * User mapping options: client_id, client_secret, scope.
  *
  * scope is accepted in both places; user mapping scope takes priority.
@@ -199,7 +200,7 @@ iceberg_catalog_validator(PG_FUNCTION_ARGS)
 					 errmsg("invalid option \"%s\" for iceberg_catalog server", def->defname),
 					 errhint("Valid options are: rest_endpoint, rest_auth_type, "
 							 "oauth_endpoint, scope, enable_vended_credentials, "
-							 "location_prefix, catalog_name.")));
+							 "location_prefix, catalog_name, read_only.")));
 		}
 
 		if (pg_strcasecmp(def->defname, "rest_auth_type") == 0)
@@ -214,7 +215,8 @@ iceberg_catalog_validator(PG_FUNCTION_ARGS)
 						 errmsg("invalid rest_auth_type option: \"%s\"", authType),
 						 errhint("Valid values are \"oauth2\" and \"horizon\".")));
 		}
-		else if (pg_strcasecmp(def->defname, "enable_vended_credentials") == 0)
+		else if (pg_strcasecmp(def->defname, "enable_vended_credentials") == 0 ||
+				 pg_strcasecmp(def->defname, "read_only") == 0)
 		{
 			(void) defGetBoolean(def);
 		}
@@ -349,8 +351,8 @@ RedactRestCatalogUserMappingSecrets(ProcessUtilityParams * processUtilityParams,
  * ValidateIcebergCatalogServerDDL validates DDL on iceberg_catalog servers:
  *
  *  - CREATE SERVER: rejects reserved names ('postgres', 'object_store',
- *    'rest'), rejects TYPE 'postgres'/'object_store', and requires
- *    TYPE 'rest'.
+ *    'rest'), rejects TYPE 'postgres', and requires TYPE 'rest' or
+ *    'object_store'.
  *  - ALTER SERVER RENAME TO: rejects renaming to a reserved name.
  *
  * ALTER/DROP/OWNER on reserved names will fail naturally because no
@@ -381,21 +383,20 @@ ValidateIcebergCatalogServerDDL(ProcessUtilityParams * processUtilityParams,
 					 errhint("Choose a different server name.")));
 
 		if (stmt->servertype != NULL &&
-			(pg_strcasecmp(stmt->servertype, POSTGRES_CATALOG_NAME) == 0 ||
-			 pg_strcasecmp(stmt->servertype, OBJECT_STORE_CATALOG_NAME) == 0))
+			pg_strcasecmp(stmt->servertype, POSTGRES_CATALOG_NAME) == 0)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("cannot create iceberg_catalog server with TYPE '%s'",
 							stmt->servertype),
-					 errhint("Use the built-in \"%s\" or \"%s\" catalogs, "
-							 "or create a server of type 'rest'.",
-							 POSTGRES_CATALOG_NAME, OBJECT_STORE_CATALOG_NAME)));
+					 errhint("Use the built-in \"%s\" catalog.",
+							 POSTGRES_CATALOG_NAME)));
 
 		if (stmt->servertype == NULL ||
-			pg_strcasecmp(stmt->servertype, REST_CATALOG_NAME) != 0)
+			(pg_strcasecmp(stmt->servertype, REST_CATALOG_NAME) != 0 &&
+			 pg_strcasecmp(stmt->servertype, OBJECT_STORE_CATALOG_NAME) != 0))
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("iceberg_catalog server requires TYPE 'rest'")));
+					 errmsg("iceberg_catalog server requires TYPE 'rest' or 'object_store'")));
 	}
 	else if (IsA(parsetree, RenameStmt))
 	{
