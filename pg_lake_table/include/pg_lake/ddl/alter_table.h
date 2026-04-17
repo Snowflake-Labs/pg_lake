@@ -29,6 +29,10 @@ void		PostProcessAlterWritablePgLakeTableSchema(ProcessUtilityParams * params, v
 /* allow other hooks */
 typedef void (*PgLakeAlterTableHookType) (Oid relationOid, AlterTableStmt *stmt);
 typedef void (*PgLakeAlterTableRenameColumnHookType) (Oid relationOid, RenameStmt *stmt);
+typedef void (*PgLakeAlterTableSetSchemaHookType) (Oid relationOid, AlterObjectSchemaStmt *stmt);
+typedef bool (*PgLakeIsReplicationTargetHookType) (Oid relationOid);
 
 extern PGDLLEXPORT PgLakeAlterTableHookType PgLakeAlterTableHook;
 extern PGDLLEXPORT PgLakeAlterTableRenameColumnHookType PgLakeAlterTableRenameColumnHook;
+extern PGDLLEXPORT PgLakeAlterTableSetSchemaHookType PgLakeAlterTableSetSchemaHook;
+extern PGDLLEXPORT PgLakeIsReplicationTargetHookType PgLakeIsReplicationTargetHook;
