@@ -1,0 +1,1 @@
+-- Upgrade script for pg_lake_benchmark from 3.3 to 3.4
