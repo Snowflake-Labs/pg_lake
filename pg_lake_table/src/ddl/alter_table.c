@@ -744,7 +744,8 @@ PostProcessAlterWritablePgLakeTableSchema(ProcessUtilityParams * params, void *a
 		return;
 	}
 
-	bool isReplicationTarget = PgLakeIsReplicationTargetHook && PgLakeIsReplicationTargetHook(relationId);
+	bool		isReplicationTarget = PgLakeIsReplicationTargetHook && PgLakeIsReplicationTargetHook(relationId);
+
 	if (!isReplicationTarget)
 		ErrorIfReadOnlyIcebergTable(relationId);
 
