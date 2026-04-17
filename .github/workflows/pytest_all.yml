@@ -14,7 +14,6 @@ env:
   CDWREGIONTEST_SECRET_ACCESS_KEY: ${{ secrets.cdwregiontest_secret_access_key }}
   ORG: snowflake-labs
   PG_LAKE_DELTA_SUPPORT: 1
-  PG_INDENT_VERSION: 18
 
 jobs:
   build-image-almalinux:
@@ -130,6 +129,14 @@ jobs:
         with:
           container_os: 'debian'
           pg_version: ${{ matrix.pg_version }}
+
+  # Formatting checks only on one postgres version
+  lint-check-18:
+    needs: [build-image-almalinux]
+    uses: ./.github/workflows/lint.yml
+    with:
+      pg_version: "18"
+      image_tag: ${{ needs.build-image-almalinux.outputs.tag }}
 
   test-check:
     needs: [build-image-almalinux, build-and-install-almalinux]
