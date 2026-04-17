@@ -52,7 +52,9 @@ INDENT_TARGETS = pgduck_server $(EXTENSION_TARGETS)
 # Pinned PG version for formatting (pgindent/typedefs). Must match CI
 # (lint-check-18 in pytest_all.yml).
 PGINDENT_PG_VERSION := 18
-TYPEDEFS = /tmp/typedefs-$(PGINDENT_PG_VERSION).list
+PG_TYPEDEFS = /tmp/typedefs-pg-$(PGINDENT_PG_VERSION).list
+PGLAKE_TYPEDEFS = /tmp/typedefs-pglake.list
+TYPEDEFS = /tmp/typedefs-combined-$(PGINDENT_PG_VERSION).list
 
 CMAKE_AVRO_ARGS = -DCMAKE_INSTALL_PREFIX=avrolib -DCMAKE_BUILD_TYPE=RelWithDebInfo
 
@@ -67,15 +69,18 @@ endif
 
 # style/indent-related changes
 
-# This target ensures that we download the target major version's typedefs.list
+# This target ensures that we download the PGINDENT_PG_VERSION's typedefs.list
 # from buildfarm if we don't have a local copy.  Since we currently do not
 # override the typedefs.list, this should be equivalent to what we were
 # previously doing by pulling from the postgres source tree.
+$(PG_TYPEDEFS):
+	curl -o $(PG_TYPEDEFS) https://buildfarm.postgresql.org/cgi-bin/typedefs.pl?branch=REL_$(PGINDENT_PG_VERSION)_STABLE
 
-typedefs: $(TYPEDEFS)
+$(PGLAKE_TYPEDEFS): $(shell find $(INDENT_TARGETS) -name '*.c' -o -name '*.h' 2>/dev/null)
+	tools/extract_typedefs.sh $(INDENT_TARGETS) > $(PGLAKE_TYPEDEFS)
 
-$(TYPEDEFS):
-	curl -o $(TYPEDEFS) https://buildfarm.postgresql.org/cgi-bin/typedefs.pl?branch=REL_$(PGINDENT_PG_VERSION)_STABLE
+typedefs: $(PG_TYPEDEFS) $(PGLAKE_TYPEDEFS)
+	cat $(PG_TYPEDEFS) $(PGLAKE_TYPEDEFS) | sort -u > $(TYPEDEFS)
 
 check-indent: typedefs
 	pgindent --typedefs=$(TYPEDEFS) --check --diff $(INDENT_TARGETS)
