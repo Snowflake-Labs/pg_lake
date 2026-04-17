@@ -871,8 +871,8 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 			GetObjectStoreCatalogOptionsFromCatalog(catalogOptionValue);
 
 		/*
-		 * Named servers may carry their own location_prefix; fall back to
-		 * the GUC-based prefix for the built-in 'object_store' catalog.
+		 * Named servers may carry their own location_prefix; fall back to the
+		 * GUC-based prefix for the built-in 'object_store' catalog.
 		 */
 		if (osOpts->locationPrefix != NULL)
 			defaultLocationPrefix = (char *) osOpts->locationPrefix;

@@ -324,9 +324,8 @@ PushMetadataLocationToObjectStoreCatalog(void)
 	StringInfo	fetchObjectStoreMetadata = makeStringInfo();
 
 	/*
-	 * Match tables whose catalog option is either the built-in
-	 * 'object_store' or any user-created iceberg_catalog server with
-	 * TYPE 'object_store'.
+	 * Match tables whose catalog option is either the built-in 'object_store'
+	 * or any user-created iceberg_catalog server with TYPE 'object_store'.
 	 */
 	appendStringInfo(fetchObjectStoreMetadata,
 					 "  SELECT "

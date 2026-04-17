@@ -885,8 +885,8 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 	}
 
 	/*
-	 * Inherit server-level read_only when the table does not explicitly
-	 * set it.  If the server says read_only and the table explicitly says
+	 * Inherit server-level read_only when the table does not explicitly set
+	 * it.  If the server says read_only and the table explicitly says
 	 * read_only='false', that is an error.
 	 */
 	if (catalog == ForeignTableRelationId && icebergCatalogOptionValue != NULL &&
