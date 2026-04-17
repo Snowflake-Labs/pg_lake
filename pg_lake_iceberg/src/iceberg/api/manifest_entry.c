@@ -35,7 +35,7 @@
  * IsManifestEntryStatusScannable checks if the given manifest entry is scannable.
  */
 bool
-IsManifestEntryStatusScannable(IcebergManifestEntry * manifestEntry)
+IsManifestEntryStatusScannable(IcebergManifestEntry *manifestEntry)
 {
 	/*
 	 * Scans are planned by reading the manifest files for the current
@@ -50,7 +50,7 @@ IsManifestEntryStatusScannable(IcebergManifestEntry * manifestEntry)
  * from given manifest.
  */
 List *
-FetchManifestEntriesFromManifest(IcebergManifest * manifest, ManifestEntryPredicateFn manifestEntryPredicateFn)
+FetchManifestEntriesFromManifest(IcebergManifest *manifest, ManifestEntryPredicateFn manifestEntryPredicateFn)
 {
 	if (manifest == NULL)
 	{
@@ -84,7 +84,7 @@ FetchManifestEntriesFromManifest(IcebergManifest * manifest, ManifestEntryPredic
 * It also adjusts the row/file counts in the manifest.
 */
 void
-UpdateManifestEntryStateToDeleted(IcebergManifest * manifest, IcebergManifestEntry * dataManifestEntry, int64_t snapshotId)
+UpdateManifestEntryStateToDeleted(IcebergManifest *manifest, IcebergManifestEntry *dataManifestEntry, int64_t snapshotId)
 {
 	manifest->deleted_rows_count += dataManifestEntry->data_file.record_count;
 	manifest->deleted_files_count++;
@@ -134,7 +134,7 @@ SetExistingStatusForOldSnapshotAddedEntries(List *manifestEntries, int64_t curre
 * prepared to be created as a new manifest file with the deleted entries.
 */
 List *
-FindAndAdjustDeletedManifestEntries(IcebergManifest * manifest, List *manifestEntryList,
+FindAndAdjustDeletedManifestEntries(IcebergManifest *manifest, List *manifestEntryList,
 									List *removeManifestEntryList, int64_t snapshotId,
 									bool allEntries)
 {

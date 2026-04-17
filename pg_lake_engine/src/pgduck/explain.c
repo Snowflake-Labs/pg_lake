@@ -37,7 +37,7 @@ typedef struct ExtraInfo
 {
 	const char *key;
 	const char *value;
-}			ExtraInfo;
+} ExtraInfo;
 
 /*
  * Physical operator object in DuckDB explain output.
@@ -52,13 +52,13 @@ typedef struct PhysicalOperator
 
 	ExtraInfo  *extraInfo;
 	size_t		extraInfoLength;
-}			PhysicalOperator;
+} PhysicalOperator;
 
 
 static char *GetExplainJson(char *query, int numParams, const char **parameterValues);
-static void ExplainPhysicalOperator(PhysicalOperator * operator, ExplainState *es);
-static void ReadPhysicalOperator(JsonbContainer *json, PhysicalOperator * operator);
-static void ReadExtraInfo(const char *key, JsonbValue *jsonValue, ExtraInfo * property);
+static void ExplainPhysicalOperator(PhysicalOperator *operator, ExplainState *es);
+static void ReadPhysicalOperator(JsonbContainer *json, PhysicalOperator *operator);
+static void ReadExtraInfo(const char *key, JsonbValue *jsonValue, ExtraInfo *property);
 
 
 /*
@@ -102,7 +102,7 @@ ExplainPGDuckQuery(char *query, int numParams, const char **parameterValues,
  * functions.
  */
 static void
-ExplainPhysicalOperator(PhysicalOperator * operator, ExplainState *es)
+ExplainPhysicalOperator(PhysicalOperator *operator, ExplainState *es)
 {
 	/* { in JSON, <Physical-Operator> in XML */
 	ExplainOpenGroup("Physical Operator", NULL, true, es);
@@ -163,7 +163,7 @@ ExplainPhysicalOperator(PhysicalOperator * operator, ExplainState *es)
  * ReadPhysicalOperator parses a DuckDB physical operator from explain output.
  */
 static void
-ReadPhysicalOperator(JsonbContainer *json, PhysicalOperator * operator)
+ReadPhysicalOperator(JsonbContainer *json, PhysicalOperator *operator)
 {
 	memset(operator, '\0', sizeof(PhysicalOperator));
 
@@ -184,7 +184,7 @@ ReadPhysicalOperator(JsonbContainer *json, PhysicalOperator * operator)
  * ReadExtraInfo reads the extra_info properties.
  */
 static void
-ReadExtraInfo(const char *key, JsonbValue *jsonValue, ExtraInfo * property)
+ReadExtraInfo(const char *key, JsonbValue *jsonValue, ExtraInfo *property)
 {
 	memset(property, '\0', sizeof(ExtraInfo));
 

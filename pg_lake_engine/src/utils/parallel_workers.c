@@ -39,7 +39,7 @@
 
 /* this should probably live in extension_base */
 
-static bool JobIsComplete(AttachedWorker * worker);
+static bool JobIsComplete(AttachedWorker *worker);
 
 /*
  * RunCommandsInParallel runs a list of commands in parallel, using at
@@ -187,7 +187,7 @@ RunCommandsInParallel(List *commands,
  * JobIsComplete() - check for completion
  */
 static bool
-JobIsComplete(AttachedWorker * worker)
+JobIsComplete(AttachedWorker *worker)
 {
 	bool		wait = false;
 

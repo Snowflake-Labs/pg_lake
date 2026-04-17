@@ -30,12 +30,12 @@
 #include "utils/json.h"
 
 
-static ColumnBound * FindColumnBoundByColumnId(ColumnBound * bounds, int numBounds, int columnId);
-static LeafField * GetLeafFieldByColumnId(List *leafFields, int columnId);
-static List *DeserializeDataFileColumnBounds(List *leafFields, ColumnBound * columnBounds,
+static ColumnBound *FindColumnBoundByColumnId(ColumnBound *bounds, int numBounds, int columnId);
+static LeafField *GetLeafFieldByColumnId(List *leafFields, int columnId);
+static List *DeserializeDataFileColumnBounds(List *leafFields, ColumnBound *columnBounds,
 											 int boundsLength, List **columnTypes, List **columnIdDatums);
 static List *SerializeDataFileColumnBounds(List *leafFields, List *columnIdDatums, List *boundDatums, List **columnTypes);
-static Datum DeserializeColumnBound(ColumnBound * bound, LeafField * leafField);
+static Datum DeserializeColumnBound(ColumnBound *bound, LeafField *leafField);
 static Datum DataFileColumnBoundsToJsonDatum(List *boundDatums, List *columnIdDatums, List *columnTypes);
 
 PG_FUNCTION_INFO_V1(pg_lake_read_data_file_stats);
@@ -46,7 +46,7 @@ PG_FUNCTION_INFO_V1(pg_lake_serde_value);
  * FindColumnBoundByColumnId finds ColumnBound by column id.
  */
 static ColumnBound *
-FindColumnBoundByColumnId(ColumnBound * bounds, int numBounds, int columnId)
+FindColumnBoundByColumnId(ColumnBound *bounds, int numBounds, int columnId)
 {
 	for (int i = 0; i < numBounds; i++)
 	{
@@ -87,7 +87,7 @@ GetLeafFieldByColumnId(List *leafFields, int columnId)
  * DeserializeColumnBound converts ColumnBound to datum.
  */
 static Datum
-DeserializeColumnBound(ColumnBound * bound, LeafField * leafField)
+DeserializeColumnBound(ColumnBound *bound, LeafField *leafField)
 {
 	Field	   *field = leafField->field;
 
@@ -101,7 +101,7 @@ DeserializeColumnBound(ColumnBound * bound, LeafField * leafField)
  * DeserializeDataFileColumnBounds deserializes ColumnBounds to datums.
  */
 static List *
-DeserializeDataFileColumnBounds(List *leafFields, ColumnBound * columnBounds,
+DeserializeDataFileColumnBounds(List *leafFields, ColumnBound *columnBounds,
 								int boundsLength, List **columnTypes, List **columnIdDatums)
 {
 	List	   *boundDatums = NIL;

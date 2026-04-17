@@ -90,7 +90,7 @@ typedef enum DuckDBType
 	DUCKDB_TYPE_JSON,
 	/* spatial extension */
 	DUCKDB_TYPE_GEOMETRY
-}			DuckDBType;
+} DuckDBType;
 
 /*
  * DuckDBTypeInfo holds a DuckDB type with its full name in string form.
@@ -100,14 +100,14 @@ typedef struct DuckDBTypeInfo
 	DuckDBType	typeId;
 	bool		isArrayType;
 	char	   *typeName;
-}			DuckDBTypeInfo;
+} DuckDBTypeInfo;
 
 /* Store information about a given postgres type */
 typedef struct PGType
 {
 	Oid			postgresTypeOid;
 	int32		postgresTypeMod;
-}			PGType;
+} PGType;
 
 #define MakePGTypeOid(oid) ((PGType){.postgresTypeOid = oid, .postgresTypeMod = -1})
 #define MakePGType(oid,mod) ((PGType){.postgresTypeOid = oid, .postgresTypeMod = mod})

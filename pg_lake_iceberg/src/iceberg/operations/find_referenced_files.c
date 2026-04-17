@@ -42,7 +42,7 @@
 typedef struct FileHashEntry
 {
 	char		path[MAX_S3_PATH_LENGTH];
-}			FileHashEntry;
+} FileHashEntry;
 
 PG_FUNCTION_INFO_V1(find_all_referenced_files);
 PG_FUNCTION_INFO_V1(find_unreferenced_files);
@@ -52,9 +52,9 @@ PG_FUNCTION_INFO_V1(find_unreferenced_files_via_snapshot_ids);
 
 
 static void IcebergMetadataAddAllReferencedFiles(char *metadataPath, HTAB *fileHash);
-static void IcebergSnapshotAddAllReferencedFiles(IcebergSnapshot * snapshot, HTAB *fileHash);
+static void IcebergSnapshotAddAllReferencedFiles(IcebergSnapshot *snapshot, HTAB *fileHash);
 static List *FindUnreferencedFiles(List *prevMetadataList, char *currentMetadataPath);
-static IcebergSnapshot * GetIcebergSnapshotsViaSnapshotIdList(IcebergTableMetadata * metadata, List *snapshotIdList);
+static IcebergSnapshot *GetIcebergSnapshotsViaSnapshotIdList(IcebergTableMetadata *metadata, List *snapshotIdList);
 
 /*
 * find_all_referenced_files reads the metadata file and returns a list of
@@ -237,7 +237,7 @@ find_unreferenced_files_via_snapshot_ids(PG_FUNCTION_ARGS)
 }
 
 static IcebergSnapshot *
-GetIcebergSnapshotsViaSnapshotIdList(IcebergTableMetadata * metadata, List *snapshotIdList)
+GetIcebergSnapshotsViaSnapshotIdList(IcebergTableMetadata *metadata, List *snapshotIdList)
 {
 	int			snapshotCount = list_length(snapshotIdList);
 	IcebergSnapshot *snapshots = palloc0(sizeof(IcebergSnapshot) * snapshotCount);
@@ -299,8 +299,8 @@ FindUnreferencedFiles(List *prevMetadataList, char *currentMetadataPath)
 * snapshot ids instead of metadata paths.
 */
 List *
-FindUnreferencedFilesForSnapshots(IcebergSnapshot * prevSnapshots, int prevSnapshotCount,
-								  IcebergSnapshot * currentSnapshots, int currentSnapshotCount)
+FindUnreferencedFilesForSnapshots(IcebergSnapshot *prevSnapshots, int prevSnapshotCount,
+								  IcebergSnapshot *currentSnapshots, int currentSnapshotCount)
 {
 	HTAB	   *prevReferencedFileHash = CreateFilesHash();
 
@@ -419,7 +419,7 @@ IcebergMetadataAddAllReferencedFiles(char *metadataPath, HTAB *fileHash)
 * in the snapshot to the hash table.
 */
 static void
-IcebergSnapshotAddAllReferencedFiles(IcebergSnapshot * snapshot, HTAB *fileHash)
+IcebergSnapshotAddAllReferencedFiles(IcebergSnapshot *snapshot, HTAB *fileHash)
 {
 	bool		fileAlreadyExists = AppendFileToHash(snapshot->manifest_list, fileHash);
 

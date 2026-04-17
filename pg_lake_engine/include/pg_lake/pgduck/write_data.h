@@ -37,27 +37,27 @@ typedef enum ParquetVersion
 /* pg_lake_table.default_parquet_version */
 extern PGDLLEXPORT int DefaultParquetVersion;
 
-extern PGDLLEXPORT StatsCollector * ConvertCSVFileTo(char *csvFilePath,
-													 TupleDesc tupleDesc,
-													 int maxLineSize,
-													 char *destinationPath,
-													 CopyDataFormat destinationFormat,
-													 CopyDataCompression destinationCompression,
-													 List *formatOptions,
-													 DataFileSchema * schema,
-													 List *leafFields);
-extern PGDLLEXPORT StatsCollector * WriteQueryResultTo(char *query,
-													   char *destinationPath,
-													   CopyDataFormat destinationFormat,
-													   CopyDataCompression destinationCompression,
-													   List *formatOptions,
-													   bool queryHasRowId,
-													   DataFileSchema * schema,
-													   TupleDesc queryTupleDesc,
-													   List *leafFields,
-													   IcebergOutOfRangePolicy outOfRangePolicy,
-													   bool wrapNativeIntervals);
-extern PGDLLEXPORT void AppendFields(StringInfo map, DataFileSchema * schema);
+extern PGDLLEXPORT StatsCollector *ConvertCSVFileTo(char *csvFilePath,
+													TupleDesc tupleDesc,
+													int maxLineSize,
+													char *destinationPath,
+													CopyDataFormat destinationFormat,
+													CopyDataCompression destinationCompression,
+													List *formatOptions,
+													DataFileSchema *schema,
+													List *leafFields);
+extern PGDLLEXPORT StatsCollector *WriteQueryResultTo(char *query,
+													  char *destinationPath,
+													  CopyDataFormat destinationFormat,
+													  CopyDataCompression destinationCompression,
+													  List *formatOptions,
+													  bool queryHasRowId,
+													  DataFileSchema *schema,
+													  TupleDesc queryTupleDesc,
+													  List *leafFields,
+													  IcebergOutOfRangePolicy outOfRangePolicy,
+													  bool wrapNativeIntervals);
+extern PGDLLEXPORT void AppendFields(StringInfo map, DataFileSchema *schema);
 extern PGDLLEXPORT char *TupleDescToColumnMapForWrite(TupleDesc tupleDesc, CopyDataFormat destinationFormat);
 extern PGDLLEXPORT char *TupleDescToProjectionListForWrite(TupleDesc tupleDesc,
 														   CopyDataFormat destinationFormat);

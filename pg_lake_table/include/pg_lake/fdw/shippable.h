@@ -42,7 +42,7 @@ typedef enum NotShippableReason
 	NOT_SHIPPABLE_SQL_JOIN_MERGED_COLUMNS_ALIAS,
 	NOT_SHIPPABLE_SQL_UNNEST_GROUP_BY_OR_WINDOW,
 	NOT_SHIPPABLE_INFINITE_CONST_VALUE
-}			NotShippableReason;
+} NotShippableReason;
 
 
 typedef struct NotShippableObject
@@ -50,7 +50,7 @@ typedef struct NotShippableObject
 	Oid			classId;		/* Class OID identifying the type of object */
 	Oid			objectId;		/* Specific object OID (if applicable) */
 	NotShippableReason reason;	/* Categorizes why the object isn't shippable */
-}			NotShippableObject;
+} NotShippableObject;
 
 extern bool is_builtin(Oid objectId);
 extern bool is_shippable(Oid objectId, Oid classId, Node *expr);

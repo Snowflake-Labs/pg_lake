@@ -31,7 +31,7 @@ typedef struct TableMetadataOperationTracker
 	bool		relationDataFileChanged;
 	bool		relationManifestMergeRequested;
 	bool		relationSnapshotExpirationRequested;
-}			TableMetadataOperationTracker;
+} TableMetadataOperationTracker;
 
 
 extern PGDLLEXPORT void ConsumeTrackedIcebergMetadataChanges(bool isVerbose);

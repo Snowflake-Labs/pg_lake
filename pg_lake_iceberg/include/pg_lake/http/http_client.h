@@ -31,7 +31,7 @@ typedef enum
 	HTTP_POST,
 	HTTP_PUT,
 	HTTP_DELETE
-}			HttpMethod;
+} HttpMethod;
 
 typedef struct
 {
@@ -41,7 +41,7 @@ typedef struct
 	char	   *headers;		/* raw response headers  */
 	size_t		headersLength;	/* length of response headers */
 	const char *errorMsg;		/* error message */
-}			HttpResult;
+} HttpResult;
 
 extern bool HttpClientTraceTraffic;
 

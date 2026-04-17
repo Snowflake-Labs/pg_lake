@@ -37,7 +37,7 @@ typedef enum DDLOperationType
 	DDL_COLUMN_DROP_NOT_NULL = 8,
 	DDL_TABLE_SET_PARTITION_BY = 9,
 	DDL_TABLE_DROP_PARTITION_BY = 10,
-}			DDLOperationType;
+} DDLOperationType;
 
 /*
  * IcebergDDLOperation represents a ddl operation on table metadata.
@@ -60,6 +60,6 @@ typedef struct IcebergDDLOperation
 
 	/* applicable for changing partition_by */
 	List	   *parsedTransforms;
-}			IcebergDDLOperation;
+} IcebergDDLOperation;
 
 extern void ApplyDDLChanges(Oid relationId, List *ddlOperations);

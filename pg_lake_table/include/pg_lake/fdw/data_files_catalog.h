@@ -31,7 +31,7 @@ typedef struct TableDataFileHashEntry
 {
 	char		filePath[MAX_S3_PATH_LENGTH];
 	TableDataFile dataFile;
-}			TableDataFileHashEntry;
+} TableDataFileHashEntry;
 
 
 /* external control of whether to add to in-transaction temp table */

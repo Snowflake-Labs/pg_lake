@@ -33,7 +33,7 @@ typedef struct PlannerRelationRestriction
 
 	RangeTblEntry *rte;
 	List	   *baseRestrictionList;
-}			PlannerRelationRestriction;
+} PlannerRelationRestriction;
 
 /*
 * Map entry for the restriction map.
@@ -43,7 +43,7 @@ typedef struct RestrictionMapEntry
 	int			uniqueRelationIdentifier;
 
 	PlannerRelationRestriction *relationRestriction;
-}			RestrictionMapEntry;
+} RestrictionMapEntry;
 
 /*
 * Map of PlannerRelationRestrictions.
@@ -52,7 +52,7 @@ typedef struct PlannerRelationRestrictionContext
 {
 	/* mapping uniqueRelationIdentifier to PlannerRelationRestriction */
 	HTAB	   *relationRestrictionMap;
-}			PlannerRelationRestrictionContext;
+} PlannerRelationRestrictionContext;
 
 extern set_rel_pathlist_hook_type PrevRelPathlistHook;
 

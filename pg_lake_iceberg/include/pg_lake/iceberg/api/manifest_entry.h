@@ -31,23 +31,23 @@
  *
  * The predicate function can be NULL, in which case all manifest entries are included in the result.
  */
-typedef bool (*ManifestEntryPredicateFn) (IcebergManifestEntry * manifestEntry);
+typedef bool (*ManifestEntryPredicateFn) (IcebergManifestEntry *manifestEntry);
 
 /* predicates */
-extern PGDLLEXPORT bool IsManifestEntryStatusScannable(IcebergManifestEntry * manifestEntry);
+extern PGDLLEXPORT bool IsManifestEntryStatusScannable(IcebergManifestEntry *manifestEntry);
 
 /* read api */
-extern PGDLLEXPORT List *FetchManifestEntriesFromManifest(IcebergManifest * manifest, ManifestEntryPredicateFn manifestEntryPredicateFn);
+extern PGDLLEXPORT List *FetchManifestEntriesFromManifest(IcebergManifest *manifest, ManifestEntryPredicateFn manifestEntryPredicateFn);
 
 /* write api */
 extern PGDLLEXPORT void AppendNewManifestEntriesToSnapshot(const char *metadataLocation, bool mergeAddManifests,
-														   IcebergSnapshot * currentSnapshot, IcebergSnapshot * newSnapshot,
+														   IcebergSnapshot *currentSnapshot, IcebergSnapshot *newSnapshot,
 														   List *newDataManifestEntries, List *newPositionalDeleteManifestEntries,
 														   List *removedEntries, bool removeAllEntries);
 
 void		SetExistingStatusForOldSnapshotAddedEntries(List *manifestEntries, int64_t currentSnapshotId);
-void		UpdateManifestEntryStateToDeleted(IcebergManifest * manifest, IcebergManifestEntry * dataManifestEntry, int64_t snapshotId);
-List	   *FindAndAdjustDeletedManifestEntries(IcebergManifest * manifest, List *manifestEntryList,
+void		UpdateManifestEntryStateToDeleted(IcebergManifest *manifest, IcebergManifestEntry *dataManifestEntry, int64_t snapshotId);
+List	   *FindAndAdjustDeletedManifestEntries(IcebergManifest *manifest, List *manifestEntryList,
 												List *removeManifestEntryList, int64_t snapshotId,
 												bool allEntries);
 const char *IcebergAvroPhysicalTypeName(IcebergScalarAvroType type);

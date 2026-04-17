@@ -32,7 +32,7 @@
 static const char *FetchCurrentSnapshotManifestListPathFromTableMetadataUri(const char *tableMetadataPath);
 static List *FetchDataFilePathsFromTableMetadataUri(const char *tableMetadataPath, bool isDelete);
 static List *FetchManifestPathsFromManifestListUri(const char *manifestListPath);
-static const char *ExternalPartitionValueToString(PartitionField * field);
+static const char *ExternalPartitionValueToString(PartitionField *field);
 
 PG_FUNCTION_INFO_V1(reserialize_iceberg_manifest_list);
 PG_FUNCTION_INFO_V1(reserialize_iceberg_manifest);
@@ -346,7 +346,7 @@ current_partition_fields(PG_FUNCTION_ARGS)
  * should be used for internal partitioning.
  */
 static const char *
-ExternalPartitionValueToString(PartitionField * field)
+ExternalPartitionValueToString(PartitionField *field)
 {
 	if (field->value == NULL)
 	{

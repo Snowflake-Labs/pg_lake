@@ -39,7 +39,7 @@ typedef struct PgLakeFileScan
 
 	/* true if we already determined that all rows match our filters */
 	bool		allRowsMatch;
-}			PgLakeFileScan;
+} PgLakeFileScan;
 
 /*
  * PgLakeTableScan represents a single table to scan.
@@ -59,7 +59,7 @@ typedef struct PgLakeTableScan
 	List	   *childScans;
 
 	bool		isUpdateDelete;
-}			PgLakeTableScan;
+} PgLakeTableScan;
 
 /*
  * PgLakeScanSnapshot represents the snapshot of all the tables
@@ -68,7 +68,7 @@ typedef struct PgLakeTableScan
 typedef struct PgLakeScanSnapshot
 {
 	List	   *tableScans;
-}			PgLakeScanSnapshot;
+} PgLakeScanSnapshot;
 
 
 PgLakeScanSnapshot *CreatePgLakeScanSnapshot(List *rteList,
@@ -76,11 +76,11 @@ PgLakeScanSnapshot *CreatePgLakeScanSnapshot(List *rteList,
 											 ParamListInfo externalParams,
 											 bool includeChildren,
 											 Oid resultRelationId);
-PgLakeTableScan *GetTableScanByRelationId(PgLakeScanSnapshot * snapshot, Oid relationId);
+PgLakeTableScan *GetTableScanByRelationId(PgLakeScanSnapshot *snapshot, Oid relationId);
 extern PGDLLEXPORT List *GetFileScanPathList(List *fileScans, uint64 *rowCount, bool skipFullScans);
-void		SnapshotFilesScanned(PgLakeScanSnapshot * scanSnapshot, int *dataFileScans, int *deleteFileScans);
+void		SnapshotFilesScanned(PgLakeScanSnapshot *scanSnapshot, int *dataFileScans, int *deleteFileScans);
 extern PGDLLEXPORT void CreateTableScanForIcebergMetadata(Oid relationId,
-														  IcebergTableMetadata * metadata,
+														  IcebergTableMetadata *metadata,
 														  List *baseRestrictInfoList,
 														  List **fileScans,
 														  List **positionDeleteScans);

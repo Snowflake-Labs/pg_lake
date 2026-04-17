@@ -99,9 +99,9 @@ static void EnsureCreateIcebergTableSupported(CreateStmt *createStmt);
 static List *ExpandTableElements(List *tableElements);
 static List *ExpandTableLikeClause(TableLikeClause *table_like_clause);
 
-static bool ProcessCreateLakeTable(ProcessUtilityParams * params);
-static bool ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params);
-static bool ProcessCreateIcebergTableFromCreateStmt(ProcessUtilityParams * params);
+static bool ProcessCreateLakeTable(ProcessUtilityParams *params);
+static bool ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams *params);
+static bool ProcessCreateIcebergTableFromCreateStmt(ProcessUtilityParams *params);
 static void ErrorIfNotInManagedStorageRegion(char *location);
 static void ErrorIfTypeUnsupportedForIcebergTablesInternal(Oid typeOid, int32 typmod, int level, char *columnName);
 static void ErrorIfLocationIsNotEmpty(const char *location);
@@ -126,7 +126,7 @@ static char *SetIcebergTableLocationOptionFromDefaultPrefix(Oid relationId,
 * converted to int8, etc.)
 */
 void
-CreatePgLakeTableCheckUnsupportedFeaturesPostProcess(ProcessUtilityParams * params, void *arg)
+CreatePgLakeTableCheckUnsupportedFeaturesPostProcess(ProcessUtilityParams *params, void *arg)
 {
 	PlannedStmt *plannedStmt = params->plannedStmt;
 
@@ -326,7 +326,7 @@ ErrorIfUsingGeometryWithoutSpatialAnalytics(List *columnDefList)
 * combinations such as writable tables without column definitions.
 */
 bool
-ErrorUnsupportedCreatePgLakeTableHandler(ProcessUtilityParams * params, void *arg)
+ErrorUnsupportedCreatePgLakeTableHandler(ProcessUtilityParams *params, void *arg)
 {
 	PlannedStmt *plannedStmt = params->plannedStmt;
 
@@ -523,7 +523,7 @@ IsConflictingColumnNameForReadParquet(const char *columnName)
  *   - CREATE TABLE name (<col_defs>) USING pg_lake_iceberg WITH (location = <>)
  */
 bool
-ProcessCreatePgLakeTable(ProcessUtilityParams * params, void *arg)
+ProcessCreatePgLakeTable(ProcessUtilityParams *params, void *arg)
 {
 	PlannedStmt *plannedStmt = params->plannedStmt;
 
@@ -555,7 +555,7 @@ ProcessCreatePgLakeTable(ProcessUtilityParams * params, void *arg)
  * that creates pg_lake tables.
  */
 static bool
-ProcessCreateLakeTable(ProcessUtilityParams * params)
+ProcessCreateLakeTable(ProcessUtilityParams *params)
 {
 	Assert(IsA(params->plannedStmt->utilityStmt, CreateForeignTableStmt));
 
@@ -634,7 +634,7 @@ ProcessCreateLakeTable(ProcessUtilityParams * params)
  * statements that are pg_lake_iceberg tables.
  */
 static bool
-ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
+ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams *params)
 {
 	Assert(IsA(params->plannedStmt->utilityStmt, CreateForeignTableStmt));
 
@@ -1069,7 +1069,7 @@ ErrorIfLocationIsNotEmpty(const char *location)
  * to foreign tables.
  */
 static bool
-ProcessCreateIcebergTableFromCreateStmt(ProcessUtilityParams * params)
+ProcessCreateIcebergTableFromCreateStmt(ProcessUtilityParams *params)
 {
 	Assert(IsA(params->plannedStmt->utilityStmt, CreateStmt));
 

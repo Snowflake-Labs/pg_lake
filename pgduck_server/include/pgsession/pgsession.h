@@ -74,7 +74,7 @@ typedef struct PGClient
 	int32		cancellationToken;
 #endif
 	int			threadIndex;
-}			PGClient;
+} PGClient;
 
 typedef uint32 ProtocolVersion;
 
@@ -94,7 +94,7 @@ typedef enum PreparedStatementState
 
 	/* prepared statement successfully bound */
 	PREPARED_STATEMENT_BOUND
-}			PreparedStatementState;
+} PreparedStatementState;
 
 /*
  * ResponseFormat describes the expected format of the response.
@@ -109,7 +109,7 @@ typedef struct ResponseFormat
 	 * data to clients.
 	 */
 	bool		isTransmit;
-}			ResponseFormat;
+} ResponseFormat;
 
 
 /*
@@ -133,7 +133,7 @@ typedef struct PgSessionPreparedStatement
 	/* current state of the prepared statement */
 	PreparedStatementState state;
 
-}			PgSessionPreparedStatement;
+} PgSessionPreparedStatement;
 
 
 
@@ -175,7 +175,7 @@ typedef struct PGSession
 
 	int			lastReportedSendErrno;	/* needed to make pgsession_flush
 										 * thread-safe */
-}			PGSession;
+} PGSession;
 
 /* per-client entrance point for the pgsession logic */
 extern void *pgsession_handle_connection(void *input);

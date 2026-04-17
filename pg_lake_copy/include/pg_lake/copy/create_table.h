@@ -20,6 +20,6 @@
 
 #include "pg_lake/ddl/utility_hook.h"
 
-bool		CreateTableFromFileHandler(ProcessUtilityParams * params, void *arg);
+bool		CreateTableFromFileHandler(ProcessUtilityParams *params, void *arg);
 
 #endif

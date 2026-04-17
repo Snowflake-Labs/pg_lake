@@ -41,7 +41,7 @@ typedef struct UtilityStatementHandlerItem
 
 	/* optional argument to the handler */
 	void	   *arg;
-}			UtilityStatementHandlerItem;
+} UtilityStatementHandlerItem;
 
 /*
  * Linked list of post utility statement handlers, based on XactCallback.
@@ -56,7 +56,7 @@ typedef struct UtilityStatementPostHandlerItem
 
 	/* optional argument to the handler */
 	void	   *arg;
-}			UtilityStatementPostHandlerItem;
+} UtilityStatementPostHandlerItem;
 
 static void PgLakeCommonProcessUtilityHook(PlannedStmt *plannedStmt,
 										   const char *queryString,
@@ -71,8 +71,8 @@ static void PgLakeCommonProcessUtilityHook(PlannedStmt *plannedStmt,
 static ProcessUtility_hook_type PrevProcessUtility = NULL;
 
 /* registered handlers */
-static UtilityStatementHandlerItem * UtilityStatementHandlers = NULL;
-static UtilityStatementPostHandlerItem * UtilityStatementPostHandlers = NULL;
+static UtilityStatementHandlerItem *UtilityStatementHandlers = NULL;
+static UtilityStatementPostHandlerItem *UtilityStatementPostHandlers = NULL;
 
 
 /*
@@ -122,7 +122,7 @@ PgLakeCommonProcessUtilityHook(PlannedStmt *plannedStmt,
  * logic otherwise.
  */
 void
-PgLakeCommonProcessUtility(ProcessUtilityParams * processUtilityParams)
+PgLakeCommonProcessUtility(ProcessUtilityParams *processUtilityParams)
 {
 	Node	   *parsetree = processUtilityParams->plannedStmt->utilityStmt;
 
@@ -182,7 +182,7 @@ PgLakeCommonProcessUtility(ProcessUtilityParams * processUtilityParams)
  * (or standard_ProcessUtility), skipping any registered handlers.
  */
 void
-PgLakeCommonParentProcessUtility(ProcessUtilityParams * processUtilityParams)
+PgLakeCommonParentProcessUtility(ProcessUtilityParams *processUtilityParams)
 {
 	PlannedStmt *plannedStmt = processUtilityParams->plannedStmt;
 	const char *queryString = processUtilityParams->queryString;
@@ -239,7 +239,7 @@ RegisterPostUtilityStatementHandler(UtilityStatementPostHandler handler, void *a
  * and returns the utility statement it contains.
  */
 Node *
-CopyUtilityStmt(ProcessUtilityParams * processUtilityParams)
+CopyUtilityStmt(ProcessUtilityParams *processUtilityParams)
 {
 	processUtilityParams->plannedStmt = copyObject(processUtilityParams->plannedStmt);
 	processUtilityParams->readOnlyTree = false;

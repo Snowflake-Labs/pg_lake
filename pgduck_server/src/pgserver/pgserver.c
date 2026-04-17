@@ -56,7 +56,7 @@ typedef struct PgClientThreadInitState
 	void	   *(*startFunction) (void *);
 	PGClient   *pgClient;
 
-}			PgClientThreadInitState;
+} PgClientThreadInitState;
 
 
 /* copied from UNIXSOCK_PATH from PG source */
@@ -64,24 +64,24 @@ typedef struct PgClientThreadInitState
 		snprintf(path, sizeof(path), "%s/.s.PGSQL.%d", \
 				 (sockdir), (port))
 
-static int	create_and_bind_unix_socket(PGServer * server, char *unixSocketPath,
+static int	create_and_bind_unix_socket(PGServer *server, char *unixSocketPath,
 										char *unixSocketOwningGroup,
 										int unixSocketPermissions,
 										int port);
-static int	acquire_domain_socket_lock_file(PGServer * server, int port);
+static int	acquire_domain_socket_lock_file(PGServer *server, int port);
 static int	set_unix_socket_permissions(char *unixSocketPath, char *groupName,
 										int permissionsMask);
-static int	pgserver_create_client_thread(const PgClientThreadInitState * initState);
+static int	pgserver_create_client_thread(const PgClientThreadInitState *initState);
 static void *pgclient_thread_main(void *arg);
 static void pgclient_thread_cleanup(void *arg);
-static void touch_internal_files(PGServer * pgServer, time_t now);
+static void touch_internal_files(PGServer *pgServer, time_t now);
 
 /*
  * pgserver_create initializes a PostgreSQL wire compatible server
  * and starts listening on the given port.
  */
 int
-pgserver_init(PGServer * pgServer,
+pgserver_init(PGServer *pgServer,
 			  char *unixSocketPath,
 			  char *unixSocketOwningGroup,
 			  int unixSocketPermissions,
@@ -113,7 +113,7 @@ pgserver_init(PGServer * pgServer,
  * requirements as Postgres has. Hence, our code is simpler than Postgres'.
  */
 static int
-create_and_bind_unix_socket(PGServer * server,
+create_and_bind_unix_socket(PGServer *server,
 							char *unixSocketPath,
 							char *unixSocketOwningGroup,
 							int unixSocketPermissions,
@@ -235,7 +235,7 @@ create_and_bind_unix_socket(PGServer * server,
  * Acquire a lockfile for the specified Unix socket file.
  */
 static int
-acquire_domain_socket_lock_file(PGServer * server, int port)
+acquire_domain_socket_lock_file(PGServer *server, int port)
 {
 	/* no lock file for abstract sockets */
 	if (server->unixSocketPath[0] == '@')
@@ -413,7 +413,7 @@ enable_shutdown_signals(void)
  * pgserver_run is the main loop for the PostgreSQL wire compatible server.
  */
 int
-pgserver_run(PGServer * pgServer)
+pgserver_run(PGServer *pgServer)
 {
 	if (install_shutdown_signal_handlers() != STATUS_OK)
 		return STATUS_ERROR;
@@ -524,7 +524,7 @@ pgserver_run(PGServer * pgServer)
  * any remaining threads.
  */
 void
-pgserver_destroy(PGServer * pgServer)
+pgserver_destroy(PGServer *pgServer)
 {
 	PGDUCK_SERVER_LOG("Shutting down: closing listening socket");
 	closesocket(pgServer->listeningSocket);
@@ -557,7 +557,7 @@ pgserver_destroy(PGServer * pgServer)
  * SIGINT/SIGTERM.
  */
 static int
-pgserver_create_client_thread(const PgClientThreadInitState * initState)
+pgserver_create_client_thread(const PgClientThreadInitState *initState)
 {
 	pthread_t	threadId;
 	pthread_attr_t threadAttr;
@@ -655,7 +655,7 @@ pgclient_thread_cleanup(void *arg)
  * never have put the socket file in /tmp...)
  */
 static void
-touch_internal_files(PGServer * pgServer, time_t now)
+touch_internal_files(PGServer *pgServer, time_t now)
 {
 	/* no files for abstract sockets */
 	if (pgServer->unixSocketPath[0] != '@')

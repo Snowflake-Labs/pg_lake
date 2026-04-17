@@ -32,7 +32,7 @@ PG_FUNCTION_INFO_V1(duckdb_type_by_name);
 PG_FUNCTION_INFO_V1(duckdb_name_by_type);
 PG_FUNCTION_INFO_V1(duckdb_parse_struct);
 
-static void output_composite_type_rows(ReturnSetInfo *rsinfo, CompositeType * parsedType, int level);
+static void output_composite_type_rows(ReturnSetInfo *rsinfo, CompositeType *parsedType, int level);
 
 /*
  * lookup pgduck type by pgduck name
@@ -92,7 +92,7 @@ duckdb_parse_struct(PG_FUNCTION_ARGS)
 
 /* recursive helper for above */
 static void
-output_composite_type_rows(ReturnSetInfo *rsinfo, CompositeType * parsedType, int level)
+output_composite_type_rows(ReturnSetInfo *rsinfo, CompositeType *parsedType, int level)
 {
 	if (parsedType->cols)
 	{

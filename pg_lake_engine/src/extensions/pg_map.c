@@ -31,7 +31,7 @@
 typedef struct PgMapIds
 {
 	Oid			schemaId;
-}			PgMapIds;
+} PgMapIds;
 
 static void ClearIds(void *queryEngineIds);
 

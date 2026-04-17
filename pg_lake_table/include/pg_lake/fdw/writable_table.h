@@ -48,7 +48,7 @@ typedef enum DataFileModificationType
 
 	/* new data file (Parquet) */
 	ADD_DATA_FILE,
-}			DataFileModificationType;
+} DataFileModificationType;
 
 /*
  * DataFileModification represents a batch of modifications to a source file.
@@ -80,7 +80,7 @@ typedef struct DataFileModification
 	/* if the caller already reserved a row ID range, where does it start? */
 	int64		reservedRowIdStart;
 	DataFileStats *fileStats;
-}			DataFileModification;
+} DataFileModification;
 
 
 /* pg_lake_table.copy_on_write_threshold */
@@ -119,7 +119,7 @@ extern PGDLLEXPORT bool TryLockTableForUpdate(Oid relationId);
 
 extern PGDLLEXPORT List *PrepareCSVInsertion(Oid relationId, char *insertCSV, int64 rowCount,
 											 int64 reservedRowIdStart, int maximumLineSize,
-											 DataFileSchema * schema);
+											 DataFileSchema *schema);
 
 extern PGDLLEXPORT int64 AddQueryResultToTable(Oid relationId, char *readQuery,
 											   TupleDesc queryTupleDesc,

@@ -34,7 +34,7 @@ typedef struct CopyDataFormatName
 {
 	char	   *name;
 	CopyDataFormat format;
-}			CopyDataFormatName;
+} CopyDataFormatName;
 
 static CopyDataFormatName DataFormatNames[] =
 {
@@ -71,7 +71,7 @@ typedef struct CopyDataCompressionName
 {
 	char	   *name;
 	CopyDataCompression compression;
-}			CopyDataCompressionName;
+} CopyDataCompressionName;
 
 static CopyDataCompressionName DataCompressionNames[] =
 {
@@ -102,7 +102,7 @@ typedef struct CopyDataFormatExtension
 
 	CopyDataFormat format;
 	CopyDataCompression compression;
-}			CopyDataFormatExtension;
+} CopyDataFormatExtension;
 
 static CopyDataFormatExtension DataFormatExtensions[] =
 {
@@ -508,8 +508,8 @@ ResolveStageURL(const char *path)
 void
 FindDataFormatAndCompression(PgLakeTableType tableType,
 							 char *path, List *copyOptions,
-							 CopyDataFormat * format,
-							 CopyDataCompression * compression)
+							 CopyDataFormat *format,
+							 CopyDataCompression *compression)
 {
 	*format = DATA_FORMAT_INVALID;
 	*compression = DATA_COMPRESSION_INVALID;

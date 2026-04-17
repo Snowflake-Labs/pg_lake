@@ -42,7 +42,7 @@
 
 static void ApplyDDLCatalogChanges(Oid relationId, List *ddlOperations,
 								   List **droppedColumns, char **metadataLocation,
-								   IcebergPartitionSpec * *partitionSpec,
+								   IcebergPartitionSpec **partitionSpec,
 								   bool *isIcebergTableCreated);
 static bool DDLsRequireIcebergSchemaChange(List *ddlOperations);
 
@@ -90,7 +90,7 @@ ApplyDDLChanges(Oid relationId, List *ddlOperations)
 static void
 ApplyDDLCatalogChanges(Oid relationId, List *ddlOperations,
 					   List **droppedColumns, char **metadataLocation,
-					   IcebergPartitionSpec * *partitionSpec,
+					   IcebergPartitionSpec **partitionSpec,
 					   bool *isIcebergTableCreated)
 {
 	*isIcebergTableCreated = false;

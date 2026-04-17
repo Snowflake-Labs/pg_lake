@@ -52,12 +52,12 @@
 #include "utils/lsyscache.h"
 #include "utils/typcache.h"
 
-static PgLakeTableScan * CreateTableScanForRelation(Oid relationId,
-													Snapshot snapshot,
-													int uniqueRelationIdentifier,
-													List *baseRestrictInfoList,
-													bool includeChildren,
-													bool isResultRelation);
+static PgLakeTableScan *CreateTableScanForRelation(Oid relationId,
+												   Snapshot snapshot,
+												   int uniqueRelationIdentifier,
+												   List *baseRestrictInfoList,
+												   bool includeChildren,
+												   bool isResultRelation);
 static List *GetPositionDeleteTableDataFileForDataFiles(Oid relationId, List *dataFileList,
 														Snapshot snapshot);
 static List *GetBaseRestrictInfoForRelation(List *relationRestrictionsList,
@@ -65,7 +65,7 @@ static List *GetBaseRestrictInfoForRelation(List *relationRestrictionsList,
 static void ConvertIcebergDataFilesToFileScan(List *dataFiles, List *deleteFiles,
 											  List **fileScans,
 											  List **positionDeleteFileScans);
-static void ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata);
+static void ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata *metadata);
 static int	NullSafeStrcmp(const char *a, const char *b);
 static bool TypesAreCompatible(PGType pgType, PGType icebergType);
 
@@ -371,7 +371,7 @@ NullSafeStrcmp(const char *a, const char *b)
 * table schema matches the Postgres table schema.
 */
 static void
-ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata)
+ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata *metadata)
 {
 	IcebergTableSchema *icebergTableSchema = GetCurrentIcebergTableSchema(metadata);
 	List	   *postgresColumnMappings =
@@ -547,7 +547,7 @@ GetPositionDeleteTableDataFileForDataFiles(Oid relationId, List *dataFileList,
 * Iceberg table metadata with the currentSnapshot.
 */
 void
-CreateTableScanForIcebergMetadata(Oid relationId, IcebergTableMetadata * metadata, List *baseRestrictInfoList,
+CreateTableScanForIcebergMetadata(Oid relationId, IcebergTableMetadata *metadata, List *baseRestrictInfoList,
 								  List **fileScans, List **positionDeleteScans)
 {
 	List	   *dataFiles = NIL;
@@ -605,7 +605,7 @@ ConvertIcebergDataFilesToFileScan(List *dataFiles, List *deleteFiles,
  * GetTableScanByRelationId returns the table scan for a given relation ID.
  */
 PgLakeTableScan *
-GetTableScanByRelationId(PgLakeScanSnapshot * snapshot, Oid relationId)
+GetTableScanByRelationId(PgLakeScanSnapshot *snapshot, Oid relationId)
 {
 	ListCell   *tableCell = NULL;
 
@@ -657,7 +657,7 @@ GetFileScanPathList(List *fileScans, uint64 *rowCount, bool skipFullScans)
 * and delete file scans in the snapshot.
 */
 void
-SnapshotFilesScanned(PgLakeScanSnapshot * scanSnapshot, int *dataFileScans,
+SnapshotFilesScanned(PgLakeScanSnapshot *scanSnapshot, int *dataFileScans,
 					 int *deleteFileScans)
 {
 	*dataFileScans = 0;

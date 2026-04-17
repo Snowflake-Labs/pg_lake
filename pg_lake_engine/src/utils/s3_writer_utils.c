@@ -38,7 +38,7 @@ typedef struct ScheduledUpload
 {
 	char		remoteUrl[MAX_S3_PATH_LENGTH];
 	char		localFile[MAXPGPATH];
-}			ScheduledUpload;
+} ScheduledUpload;
 
 
 static char *CopyLocalFileToS3Command(char *localFileUri, char *s3Uri);

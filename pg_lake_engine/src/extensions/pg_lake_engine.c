@@ -37,7 +37,7 @@ typedef struct PgLakeEngineIds
 	Oid			inProgressTableId;
 
 	Oid			inProgressTablePkeyId;
-}			PgLakeEngineIds;
+} PgLakeEngineIds;
 
 static void ClearIds(void *queryEngineIds);
 
