@@ -865,12 +865,23 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 
 	if (hasObjectStoreCatalogOption)
 	{
-		const char *objectStoreCatalogLocationPrefix = GetObjectStoreDefaultLocationPrefix();
+		char	   *catalogOptionValue =
+			GetStringOption(createStmt->options, "catalog", false);
+		ObjectStoreCatalogOptions *osOpts =
+			GetObjectStoreCatalogOptionsFromCatalog(catalogOptionValue);
 
-		if (objectStoreCatalogLocationPrefix == NULL)
+		/*
+		 * Named servers may carry their own location_prefix; fall back to
+		 * the GUC-based prefix for the built-in 'object_store' catalog.
+		 */
+		if (osOpts->locationPrefix != NULL)
+			defaultLocationPrefix = (char *) osOpts->locationPrefix;
+
+		if (defaultLocationPrefix == NULL)
 		{
 			ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-							errmsg(OBJECT_STORE_CATALOG_NAME " catalog iceberg tables require "
+							errmsg("object_store catalog iceberg tables require "
+								   "a location_prefix server option or "
 								   "pg_lake_iceberg.object_store_catalog_location_prefix "
 								   "to be set")));
 		}

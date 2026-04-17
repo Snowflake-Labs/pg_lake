@@ -18,21 +18,29 @@ CREATE OR REPLACE VIEW pg_catalog.iceberg_tables AS
 /*
  * iceberg_catalog foreign data wrapper: allows defining named catalog
  * configurations via CREATE SERVER so that users are not limited to a
- * single global REST catalog configured through GUC settings.
+ * single global catalog configured through GUC settings.
  *
- * Server options (non-secret): rest_endpoint, rest_auth_type,
- *   oauth_endpoint, scope, enable_vended_credentials, location_prefix,
- *   catalog_name.
- * User mapping options (credentials): client_id, client_secret, scope.
+ * Supported server types:
+ *   TYPE 'rest'          -- REST catalog (e.g. Polaris, Gravitino)
+ *   TYPE 'object_store'  -- Object store catalog (catalog.json in S3)
+ *
+ * Server options (all optional):
+ *   rest_endpoint, rest_auth_type, oauth_endpoint, scope,
+ *   enable_vended_credentials, location_prefix, catalog_name,
+ *   read_only (boolean).
+ *
+ * User mapping options (credentials, TYPE 'rest' only):
+ *   client_id, client_secret, scope.
  *
  * scope is accepted in both server and user mapping; user mapping wins.
+ * read_only on a server propagates to all tables unless overridden.
  *
- * Credential resolution order:
+ * Credential resolution order (TYPE 'rest'):
  *   1. CREATE USER MAPPING for the current user
  *   2. $PGDATA/catalogs.conf (platform-provided)
  *   3. GUC variables (backward compatibility)
  *
- * User-defined catalog example:
+ * REST catalog example:
  *   CREATE SERVER my_polaris TYPE 'rest'
  *     FOREIGN DATA WRAPPER iceberg_catalog
  *     OPTIONS (rest_endpoint 'https://polaris.example.com');
@@ -42,14 +50,19 @@ CREATE OR REPLACE VIEW pg_catalog.iceberg_tables AS
  *
  *   CREATE TABLE t (a int) USING iceberg WITH (catalog = 'my_polaris');
  *
- * Platform-provided catalog example:
- *   CREATE SERVER horizon TYPE 'rest'
+ * Object store catalog example (shared writer/reader):
+ *   -- Writer instance:
+ *   CREATE SERVER shared_catalog TYPE 'object_store'
  *     FOREIGN DATA WRAPPER iceberg_catalog
- *     OPTIONS (rest_endpoint 'https://horizon.example.com');
+ *     OPTIONS (location_prefix 's3://bucket/shared');
  *
- *   -- Credentials in $PGDATA/catalogs.conf:
- *   --   horizon.client_id = 'platform_id'
- *   --   horizon.client_secret = 'platform_secret'
+ *   CREATE TABLE t (a int) USING iceberg
+ *     WITH (catalog = 'shared_catalog');
+ *
+ *   -- Reader instance (same S3 path, read-only):
+ *   CREATE SERVER shared_catalog TYPE 'object_store'
+ *     FOREIGN DATA WRAPPER iceberg_catalog
+ *     OPTIONS (location_prefix 's3://bucket/shared', read_only 'true');
  */
 CREATE FUNCTION lake_iceberg.iceberg_catalog_validator(text[], oid)
 RETURNS void

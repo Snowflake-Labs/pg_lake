@@ -82,15 +82,16 @@ HasRestCatalogTableOption(List *options)
 
 
 /*
- * HasObjectStoreCatalogTableOption returns true if the options contain
- * catalog='object_store'.
+ * HasObjectStoreCatalogTableOption returns true if the catalog option
+ * indicates an object store catalog: either the literal 'object_store'
+ * or a named iceberg_catalog server with TYPE 'object_store'.
  */
 bool
 HasObjectStoreCatalogTableOption(List *options)
 {
 	char	   *catalog = GetStringOption(options, "catalog", false);
 
-	return catalog ? pg_strcasecmp(catalog, OBJECT_STORE_CATALOG_NAME) == 0 : false;
+	return IsObjectStoreCatalog(catalog);
 }
 
 
@@ -148,6 +149,35 @@ IsRestCatalog(const char *catalog)
 	if (strcmp(fdw->fdwname, ICEBERG_CATALOG_FDW_NAME) != 0)
 		return false;
 
-	Assert(pg_strcasecmp(server->servertype, REST_CATALOG_NAME) == 0);
-	return true;
+	return pg_strcasecmp(server->servertype, REST_CATALOG_NAME) == 0;
+}
+
+
+/*
+ * IsObjectStoreCatalog returns true if the catalog name identifies an
+ * object store catalog.  This includes the built-in 'object_store'
+ * literal and any user-created iceberg_catalog server whose TYPE is
+ * 'object_store'.
+ */
+bool
+IsObjectStoreCatalog(const char *catalog)
+{
+	if (catalog == NULL)
+		return false;
+
+	if (pg_strcasecmp(catalog, OBJECT_STORE_CATALOG_NAME) == 0)
+		return true;
+
+	bool		missingOK = true;
+	ForeignServer *server = GetForeignServerByName(catalog, missingOK);
+
+	if (server == NULL)
+		return false;
+
+	ForeignDataWrapper *fdw = GetForeignDataWrapper(server->fdwid);
+
+	if (strcmp(fdw->fdwname, ICEBERG_CATALOG_FDW_NAME) != 0)
+		return false;
+
+	return pg_strcasecmp(server->servertype, OBJECT_STORE_CATALOG_NAME) == 0;
 }
