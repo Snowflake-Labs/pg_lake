@@ -2844,3 +2844,241 @@ def test_explain_shows_pg_nullify_nested_list_in_list_transform(
         run_command("RESET search_path;", pg_conn)
         run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
         pg_conn.commit()
+
+
+# =====================================================================
+# NOT NULL constraint enforcement after clamping
+#
+# When out_of_range_values = 'clamp', values like bounded numeric NaN
+# and multidimensional arrays are clamped to NULL.  The NOT NULL
+# constraint must still be enforced on the post-clamp value.
+# =====================================================================
+
+
+def test_clamp_to_null_enforces_not_null(pg_conn, extension, s3, with_default_location):
+    """NOT NULL constraint is enforced on values clamped to NULL.
+
+    Covers both value types that clamp to NULL (bounded numeric NaN and
+    multidimensional arrays) and both DML paths (INSERT and UPDATE).
+
+    +-------+---------------------+--------+----------------------------+
+    | case  | value               | op     | expected                   |
+    +-------+---------------------+--------+----------------------------+
+    | NaN   | 'NaN'::numeric      | INSERT | not-null constraint error  |
+    | NaN   | 'NaN'::numeric      | UPDATE | not-null constraint error  |
+    | mdim  | ARRAY[ARRAY[1,2,3]] | INSERT | not-null constraint error  |
+    | mdim  | ARRAY[ARRAY[1,2,3]] | UPDATE | not-null constraint error  |
+    +-------+---------------------+--------+----------------------------+
+    """
+    schema = "test_clamp_null_nn"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+
+    try:
+        run_command(
+            "CREATE TABLE num_target ("
+            "  id int,"
+            "  n numeric(18,6) NOT NULL"
+            ") USING iceberg WITH (out_of_range_values = 'clamp');",
+            pg_conn,
+        )
+        run_command(
+            "CREATE TABLE arr_target ("
+            "  id int,"
+            "  vals int[] NOT NULL"
+            ") USING iceberg WITH (out_of_range_values = 'clamp');",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        # -- NaN INSERT into NOT NULL numeric --
+        err = run_command(
+            "INSERT INTO num_target VALUES (1, 'NaN'::numeric(18,6));",
+            pg_conn,
+            raise_error=False,
+        )
+        assert "not-null constraint" in str(err)
+        pg_conn.rollback()
+
+        # -- NaN UPDATE on NOT NULL numeric --
+        run_command("INSERT INTO num_target VALUES (1, 42.0);", pg_conn)
+        pg_conn.commit()
+
+        err = run_command(
+            "UPDATE num_target SET n = 'NaN'::numeric(18,6) WHERE id = 1;",
+            pg_conn,
+            raise_error=False,
+        )
+        assert "not-null constraint" in str(err)
+        pg_conn.rollback()
+
+        result = run_query("SELECT n FROM num_target WHERE id = 1;", pg_conn)
+        assert result[0][0] is not None
+
+        # -- Multidimensional array INSERT into NOT NULL column --
+        err = run_command(
+            "INSERT INTO arr_target VALUES (1, ARRAY[ARRAY[1,2,3]]);",
+            pg_conn,
+            raise_error=False,
+        )
+        assert "not-null constraint" in str(err)
+        pg_conn.rollback()
+
+        # -- Multidimensional array UPDATE on NOT NULL column --
+        run_command("INSERT INTO arr_target VALUES (1, ARRAY[10,20,30]);", pg_conn)
+        pg_conn.commit()
+
+        err = run_command(
+            "UPDATE arr_target SET vals = ARRAY[ARRAY[1,2],ARRAY[3,4]] WHERE id = 1;",
+            pg_conn,
+            raise_error=False,
+        )
+        assert "not-null constraint" in str(err)
+        pg_conn.rollback()
+
+        result = run_query("SELECT vals FROM arr_target WHERE id = 1;", pg_conn)
+        assert result[0][0] == [10, 20, 30]
+    finally:
+        pg_conn.rollback()
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+# =====================================================================
+# CHECK constraint interaction with clamping
+#
+# When clamping runs before constraint checks, CHECK constraints
+# evaluate the post-clamp value.  This means clamping can "rescue"
+# values that would otherwise violate a CHECK.  These tests document
+# the expected behavior: the CHECK validates what is actually stored.
+# =====================================================================
+
+
+def test_temporal_clamp_rescues_check_constraint(
+    pg_conn, extension, s3, with_default_location
+):
+    """Temporal clamping can satisfy a CHECK that the original value would violate.
+
+    Year 10000 violates CHECK (d <= '9999-12-31'), but clamping brings it
+    to exactly 9999-12-31, which satisfies the CHECK.
+    """
+    schema = "test_clamp_check_temporal"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    try:
+        run_command(
+            "CREATE TABLE target (d date CHECK (d <= '9999-12-31'::date))"
+            " USING iceberg WITH (out_of_range_values = 'clamp');",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        run_command(
+            "INSERT INTO target VALUES ('infinity'::date);",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        result = run_query("SELECT d::text FROM target;", pg_conn)
+        assert result[0][0] == "9999-12-31"
+    finally:
+        pg_conn.rollback()
+        run_command("RESET TIME ZONE;", pg_conn)
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+def test_temporal_clamp_still_fails_strict_check_constraint(
+    pg_conn, extension, s3, with_default_location
+):
+    """Temporal clamping cannot rescue a CHECK that the clamped value still violates.
+
+    infinity is clamped to 9999-12-31, but CHECK (d < '9999-12-31') uses
+    strict less-than, so the clamped value still fails.
+    """
+    schema = "test_clamp_check_strict"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    try:
+        run_command(
+            "CREATE TABLE target (d date CHECK (d < '9999-12-31'::date))"
+            " USING iceberg WITH (out_of_range_values = 'clamp');",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        err = run_command(
+            "INSERT INTO target VALUES ('infinity'::date);",
+            pg_conn,
+            raise_error=False,
+        )
+        assert "check constraint" in str(err).lower()
+        pg_conn.rollback()
+    finally:
+        pg_conn.rollback()
+        run_command("RESET TIME ZONE;", pg_conn)
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+def test_numeric_nan_clamp_succeeds_on_nullable_column(
+    pg_conn, extension, s3, with_default_location
+):
+    """Bounded numeric NaN is clamped to NULL and stored when the column is nullable.
+
+    This is the happy-path counterpart of the NOT NULL tests: clamping
+    converts NaN to NULL, which is valid for a nullable column.  Covers
+    both INSERT and UPDATE.
+    """
+    schema = "test_clamp_nan_nullable"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+
+    try:
+        run_command(
+            "CREATE TABLE target ("
+            "  id int,"
+            "  n numeric(18,6)"
+            ") USING iceberg WITH (out_of_range_values = 'clamp');",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        # INSERT: NaN is clamped to NULL and succeeds
+        run_command(
+            "INSERT INTO target VALUES (1, 'NaN'::numeric(18,6));",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        result = run_query("SELECT n FROM target WHERE id = 1;", pg_conn)
+        assert result[0][0] is None
+
+        # UPDATE: NaN is clamped to NULL and succeeds
+        run_command("INSERT INTO target VALUES (2, 99.0);", pg_conn)
+        pg_conn.commit()
+
+        run_command(
+            "UPDATE target SET n = 'NaN'::numeric(18,6) WHERE id = 2;",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        result = run_query("SELECT n FROM target WHERE id = 2;", pg_conn)
+        assert result[0][0] is None
+    finally:
+        pg_conn.rollback()
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
