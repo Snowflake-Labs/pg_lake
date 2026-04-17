@@ -57,7 +57,7 @@ static void CurlLogError(CURLcode curlCode, const char *error_buffer);
 static CURLcode CurlGloballyInitIfNotInitialized(void);
 static CURLcode CurlSetErrorBuffer(CURL *curl, char **errorBuffer);
 static CURLcode CurlSetOptions(CURL *curl, const char *url, HttpMethod method,
-							   const char *postData, HttpResult * httpResult);
+							   const char *postData, HttpResult *httpResult);
 static CURLcode CurlSetHeaders(CURL *curl, const List *headers, struct curl_slist **headerList);
 static void CurlGlobalCleanup(int code, Datum arg);
 static void CurlCleanup(CURL *curl, struct curl_slist *headerList);
@@ -133,7 +133,7 @@ CurlSetErrorBuffer(CURL *curl, char **errorBuffer)
  */
 static CURLcode
 CurlSetOptions(CURL *curl, const char *url, HttpMethod method,
-			   const char *postData, HttpResult * res)
+			   const char *postData, HttpResult *res)
 {
 	ereport(DEBUG4, (errmsg("setting libcurl options")));
 

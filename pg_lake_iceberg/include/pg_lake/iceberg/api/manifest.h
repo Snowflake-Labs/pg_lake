@@ -31,22 +31,22 @@
  *
  * The predicate function can be NULL, in which case all manifests are included in the result.
  */
-typedef bool (*ManifestPredicateFn) (IcebergManifest * manifest);
+typedef bool (*ManifestPredicateFn) (IcebergManifest *manifest);
 
 /* predicates */
-extern PGDLLEXPORT bool IsManifestOfFileContentAdd(IcebergManifest * manifest);
-extern PGDLLEXPORT bool IsManifestOfFileContentDeletes(IcebergManifest * manifest);
+extern PGDLLEXPORT bool IsManifestOfFileContentAdd(IcebergManifest *manifest);
+extern PGDLLEXPORT bool IsManifestOfFileContentDeletes(IcebergManifest *manifest);
 
 /* read api */
-extern PGDLLEXPORT List *FetchManifestsFromSnapshot(IcebergSnapshot * snapshot, ManifestPredicateFn manifestPredicateFn);
+extern PGDLLEXPORT List *FetchManifestsFromSnapshot(IcebergSnapshot *snapshot, ManifestPredicateFn manifestPredicateFn);
 
 /* write api */
 extern PGDLLEXPORT char *GenerateRemoteManifestPath(const char *location, const char *snapshotUUID, int manifestIndex, char *queryArguments);
 extern PGDLLEXPORT int64_t UploadIcebergManifestToURI(List *manifestEntries, char *manifestURI);
-extern PGDLLEXPORT IcebergManifest * CreateNewIcebergManifest(IcebergSnapshot * snapshot,
-															  int32_t partitionSpecId,
-															  List *allTransforms,
-															  int64 manifestFileSize,
-															  IcebergManifestContentType contentType,
-															  char *manifestPath,
-															  List *manifestEntries);
+extern PGDLLEXPORT IcebergManifest *CreateNewIcebergManifest(IcebergSnapshot *snapshot,
+															 int32_t partitionSpecId,
+															 List *allTransforms,
+															 int64 manifestFileSize,
+															 IcebergManifestContentType contentType,
+															 char *manifestPath,
+															 List *manifestEntries);

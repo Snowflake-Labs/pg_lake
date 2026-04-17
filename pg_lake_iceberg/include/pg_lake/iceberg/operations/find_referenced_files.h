@@ -21,8 +21,8 @@
 
 #include "pg_lake/iceberg/api/table_metadata.h"
 
-extern PGDLLEXPORT List *FindUnreferencedFilesForSnapshots(IcebergSnapshot * prevSnapshots, int prevSnapshotCount,
-														   IcebergSnapshot * currentSnapshots, int currentSnapshotCount);
+extern PGDLLEXPORT List *FindUnreferencedFilesForSnapshots(IcebergSnapshot *prevSnapshots, int prevSnapshotCount,
+														   IcebergSnapshot *currentSnapshots, int currentSnapshotCount);
 extern PGDLLEXPORT List *IcebergFindAllReferencedFiles(char *metadataPath);
 extern PGDLLEXPORT bool AppendFileToHash(const char *path, HTAB *referencedFilesHash);
 extern PGDLLEXPORT HTAB *CreateFilesHash(void);

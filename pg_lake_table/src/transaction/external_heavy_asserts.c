@@ -43,12 +43,12 @@ static void AssertInternalAndExternalIcebergStatsMatchForAllDataFiles(Oid relati
 static void AssertInternalAndExternalIcebergDataFileColumnStatsMatch(List *internalColumnStatsList,
 																	 List *externalLowerBounds,
 																	 List *externalUpperBounds);
-static List *RemoveDroppedFieldBounds(const List *existingLeafFields, ColumnBound * bounds, size_t boundsLen);
+static List *RemoveDroppedFieldBounds(const List *existingLeafFields, ColumnBound *bounds, size_t boundsLen);
 static int	TableDataFileCompare(const ListCell *a, const ListCell *b);
 static int	DataFileCompare(const ListCell *a, const ListCell *b);
 static int	DataFileColumnStatsCompare(const ListCell *a, const ListCell *b);
 static int	PartitionFieldCompare(const ListCell *a, const ListCell *b);
-static List *PartitionArrayToList(PartitionField * fields, size_t fieldsLength);
+static List *PartitionArrayToList(PartitionField *fields, size_t fieldsLength);
 static int	ColumnBoundCompare(const ListCell *a, const ListCell *b);
 static void DataFileToTableScanList(List *dataFileList, List **fileScans,
 									List **positionDeletes);
@@ -56,7 +56,7 @@ static void ErrorIfIcebergMetadataIsOutOfSync(Oid relationId, List *fileScans,
 											  List *positionDeleteScans);
 static int	ComparePgLakeFileScan(const ListCell *p1, const ListCell *p2);
 static void ErrorIfScanListsAreNotEqual(List *scanList1, List *scanList2, const char *scanType);
-static void AssertInternalAndExternalTableSchemaMatch(Oid relationId, DataFileSchema * internalSchema);
+static void AssertInternalAndExternalTableSchemaMatch(Oid relationId, DataFileSchema *internalSchema);
 static int	FieldCompare(const ListCell *a, const ListCell *b);
 static void AssertInternalAndExternalLeafFieldsMatch(Oid relationId, List *internalLeafFields);
 
@@ -589,7 +589,7 @@ AssertInternalAndExternalIcebergDataFileColumnStatsMatch(List *internalColumnSta
  * RemoveDroppedFieldBounds removes the bounds of dropped fields.
  */
 static List *
-RemoveDroppedFieldBounds(const List *existingLeafFields, ColumnBound * bounds, size_t boundsLen)
+RemoveDroppedFieldBounds(const List *existingLeafFields, ColumnBound *bounds, size_t boundsLen)
 {
 	List	   *nonDroppedBounds = NIL;
 
@@ -662,7 +662,7 @@ PartitionFieldCompare(const ListCell *a, const ListCell *b)
 }
 
 static List *
-PartitionArrayToList(PartitionField * fields, size_t fieldsLength)
+PartitionArrayToList(PartitionField *fields, size_t fieldsLength)
 {
 	List	   *partitionFields = NIL;
 
@@ -827,7 +827,7 @@ ErrorIfScanListsAreNotEqual(List *scanList1, List *scanList2, const char *scanTy
 * iceberg metadata.
 */
 static void
-AssertInternalAndExternalTableSchemaMatch(Oid relationId, DataFileSchema * internalSchema)
+AssertInternalAndExternalTableSchemaMatch(Oid relationId, DataFileSchema *internalSchema)
 {
 
 	char	   *metadataPath = GetIcebergMetadataLocation(relationId, false);

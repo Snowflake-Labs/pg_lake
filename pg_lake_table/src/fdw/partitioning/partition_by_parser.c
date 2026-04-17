@@ -43,12 +43,12 @@ static void SkipWhitespace(const char **ptr);
 static int	ParseInteger(const char **ptr);
 static char *ParseIdentifier(const char **ptr);
 static IcebergPartitionTransformType LookupTransformType(const char *str);
-static IcebergPartitionTransform * ParseOneTransform(const char **ptr);
+static IcebergPartitionTransform *ParseOneTransform(const char **ptr);
 static const char *NormalizeTransformColumnName(const char *colName);
 
 /* analyzer helpers */
-static void EnsureTransformSourceColumnExists(IcebergPartitionTransform * transform, Oid relationId);
-static void EnsureTransformSourceColumnScalar(IcebergPartitionTransform * transform, DataFileSchemaField * sourceField);
+static void EnsureTransformSourceColumnExists(IcebergPartitionTransform *transform, Oid relationId);
+static void EnsureTransformSourceColumnScalar(IcebergPartitionTransform *transform, DataFileSchemaField *sourceField);
 static void EnsureNoDuplicateTransforms(List *transforms);
 static void EnsureValidTypeForTransform(IcebergPartitionTransformType transformType, Oid typeOid);
 static void EnsureValidTypeForIdentityTransform(Oid typeOid);
@@ -60,9 +60,9 @@ static void EnsureValidTypeForTruncateTransform(Oid typeOid);
 static void EnsureValidTypeForBucketTransform(Oid typeOid);
 static bool IsDateOrTimestampType(Oid typeOid);
 static bool IsTimeOrTimestampType(Oid typeOid);
-static const char *GenerateTransformName(IcebergPartitionTransform * transform);
-static const char *GeneratePartitionFieldName(IcebergPartitionTransform * transform, Oid relationId);
-static int32_t AdjustTypmodForTruncateTransformIfNeeded(IcebergPartitionTransform * transform);
+static const char *GenerateTransformName(IcebergPartitionTransform *transform);
+static const char *GeneratePartitionFieldName(IcebergPartitionTransform *transform, Oid relationId);
+static int32_t AdjustTypmodForTruncateTransformIfNeeded(IcebergPartitionTransform *transform);
 
 
 /*
@@ -588,7 +588,7 @@ GetIcebergTablePartitionByOption(Oid relationId)
  * GenerateTransformName generates the transform name for the given transform.
  */
 static const char *
-GenerateTransformName(IcebergPartitionTransform * transform)
+GenerateTransformName(IcebergPartitionTransform *transform)
 {
 	switch (transform->type)
 	{
@@ -620,7 +620,7 @@ GenerateTransformName(IcebergPartitionTransform * transform)
  * GeneratePartitionFieldName generates the partition field name for given transform.
  */
 static const char *
-GeneratePartitionFieldName(IcebergPartitionTransform * transform, Oid relationId)
+GeneratePartitionFieldName(IcebergPartitionTransform *transform, Oid relationId)
 {
 	switch (transform->type)
 	{
@@ -653,7 +653,7 @@ GeneratePartitionFieldName(IcebergPartitionTransform * transform, Oid relationId
  * given transform exists in the relation. If it doesn't, it raises an error.
  */
 static void
-EnsureTransformSourceColumnExists(IcebergPartitionTransform * transform, Oid relationId)
+EnsureTransformSourceColumnExists(IcebergPartitionTransform *transform, Oid relationId)
 {
 	Relation	rel;
 	TupleDesc	desc;
@@ -700,7 +700,7 @@ EnsureTransformSourceColumnExists(IcebergPartitionTransform * transform, Oid rel
   * GetTransformResultPGType returns the result type of the transform.
   */
 PGType
-GetTransformResultPGType(IcebergPartitionTransform * transform)
+GetTransformResultPGType(IcebergPartitionTransform *transform)
 {
 	Oid			resultType = InvalidOid;
 	int32_t		resultTypMod = -1;
@@ -758,7 +758,7 @@ GetTransformResultPGType(IcebergPartitionTransform * transform)
  * It currently only applies to VARCHAR(n) and BPCHAR(n) types.
  */
 static int32_t
-AdjustTypmodForTruncateTransformIfNeeded(IcebergPartitionTransform * transform)
+AdjustTypmodForTruncateTransformIfNeeded(IcebergPartitionTransform *transform)
 {
 	PGType		pgType = transform->pgType;
 
@@ -793,7 +793,7 @@ AdjustTypmodForTruncateTransformIfNeeded(IcebergPartitionTransform * transform)
  * given transform is a scalar type. If it isn't, it raises an error.
  */
 static void
-EnsureTransformSourceColumnScalar(IcebergPartitionTransform * transform, DataFileSchemaField * sourceField)
+EnsureTransformSourceColumnScalar(IcebergPartitionTransform *transform, DataFileSchemaField *sourceField)
 {
 	if (sourceField->type->type != FIELD_TYPE_SCALAR)
 		ereport(ERROR,

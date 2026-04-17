@@ -24,13 +24,13 @@
 #include "pg_lake/parquet/leaf_field.h"
 #include "pg_lake/util/string_utils.h"
 
-static FieldStructElement * DeepCopyFieldStructElement(FieldStructElement * structElementField);
+static FieldStructElement *DeepCopyFieldStructElement(FieldStructElement *structElementField);
 
 /*
  * DeepCopyField deep copies a Field.
  */
 Field *
-DeepCopyField(const Field * field)
+DeepCopyField(const Field *field)
 {
 	Field	   *fieldCopy = palloc0(sizeof(Field));
 
@@ -90,7 +90,7 @@ DeepCopyField(const Field * field)
  * DeepCopyFieldStructElement deep copies a FieldStructElement.
  */
 static FieldStructElement *
-DeepCopyFieldStructElement(FieldStructElement * structElementField)
+DeepCopyFieldStructElement(FieldStructElement *structElementField)
 {
 	FieldStructElement *copiedStructElementField = palloc0(sizeof(FieldStructElement));
 
@@ -111,7 +111,7 @@ DeepCopyFieldStructElement(FieldStructElement * structElementField)
  * DeepCopyDataFileSchema deep copies a DataFileSchema.
  */
 DataFileSchema *
-DeepCopyDataFileSchema(const DataFileSchema * schema)
+DeepCopyDataFileSchema(const DataFileSchema *schema)
 {
 	DataFileSchema *copiedSchema = palloc0(sizeof(DataFileSchema));
 
@@ -156,7 +156,7 @@ pg_cmp_s32(int32 a, int32 b)
 * the type of any field in the schema, including nested types.
 */
 bool
-SchemaFieldsEquivalent(DataFileSchemaField * fieldA, DataFileSchemaField * fieldB)
+SchemaFieldsEquivalent(DataFileSchemaField *fieldA, DataFileSchemaField *fieldB)
 {
 	if (fieldA->id != fieldB->id)
 		return false;
@@ -192,7 +192,7 @@ SchemaFieldsEquivalent(DataFileSchemaField * fieldA, DataFileSchemaField * field
  * e.g. custom types like hstore
  */
 bool
-PGTypeRequiresConversionToIcebergString(Field * field, PGType pgType)
+PGTypeRequiresConversionToIcebergString(Field *field, PGType pgType)
 {
 	/*
 	 * We treat geometry as binary within the Iceberg schema, which is encoded

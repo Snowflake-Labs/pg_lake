@@ -28,5 +28,5 @@
 
 extern void AddDataFileColumnStatsToCatalog(Oid relationId, const char *path, List *columnStatsList);
 extern void AddDataFilePartitionValueToCatalog(Oid relationId, int32 partitionSpecId, int64 fileId,
-											   Partition * partition);
+											   Partition *partition);
 extern bool DataFileColumnStatsCatalogExists(void);

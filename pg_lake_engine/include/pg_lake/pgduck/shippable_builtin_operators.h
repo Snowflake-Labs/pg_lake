@@ -39,14 +39,14 @@ typedef struct
 	int			oprcodeargcount;
 	char	   *oprcodeargtypes[2];
 	IsShippableFunction isShippable;
-}			PGDuckShippableOperator;
+} PGDuckShippableOperator;
 
 typedef struct
 {
 	char	   *typename;
 	int			oprsLen;
-	const		PGDuckShippableOperator *oprs;
-}			PGDuckShippableOperatorsByType;
+	const PGDuckShippableOperator *oprs;
+} PGDuckShippableOperatorsByType;
 
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
 

@@ -78,7 +78,7 @@ static Oid	CreateUpdateTrackingTable(RangeVar *updateTableName);
  * is active and we return false.
  */
 bool
-BeginRelationUpdateTracking(RelationUpdateTrackingState * state, Oid relationId)
+BeginRelationUpdateTracking(RelationUpdateTrackingState *state, Oid relationId)
 {
 	RangeVar   *updateTableName = GetUpdateTableRangeVar(relationId);
 
@@ -225,7 +225,7 @@ CreateUpdateTrackingTable(RangeVar *updateTableName)
  * spills to disk.
  */
 bool
-IsFirstUpdateOfTuple(RelationUpdateTrackingState * state, ItemPointer rowLocation)
+IsFirstUpdateOfTuple(RelationUpdateTrackingState *state, ItemPointer rowLocation)
 {
 	MemoryContext oldContext = MemoryContextSwitchTo(state->perTupleContext);
 
@@ -275,7 +275,7 @@ IsFirstUpdateOfTuple(RelationUpdateTrackingState * state, ItemPointer rowLocatio
  * to track which rows have been updated by the current command.
  */
 void
-FinishRelationUpdateTracking(RelationUpdateTrackingState * state)
+FinishRelationUpdateTracking(RelationUpdateTrackingState *state)
 {
 	char	   *tableName = get_rel_name(RelationGetRelid(state->updateRel));
 

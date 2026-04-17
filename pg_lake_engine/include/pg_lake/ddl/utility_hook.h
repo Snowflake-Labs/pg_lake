@@ -33,25 +33,25 @@ typedef struct ProcessUtilityParams
 	struct QueryEnvironment *queryEnv;
 	DestReceiver *dest;
 	QueryCompletion *completionTag;
-}			ProcessUtilityParams;
+} ProcessUtilityParams;
 
 /*
  * UtilityStatementHandler implementations can handle a utility statement end-to-end,
  * and may internally call PgLakeCommonProcessUtility (with handlers) or
  * PgLakeCommonParentProcessUtility (skip handlers).
  */
-typedef bool (*UtilityStatementHandler) (ProcessUtilityParams * processUtilityParams, void *arg);
+typedef bool (*UtilityStatementHandler) (ProcessUtilityParams *processUtilityParams, void *arg);
 
 /*
  * UtilityStatementPostHandler implementations can handle a utility statement after
  * it is handled by UtilityStatementHandlers.
  */
-typedef void (*UtilityStatementPostHandler) (ProcessUtilityParams * processUtilityParams, void *arg);
+typedef void (*UtilityStatementPostHandler) (ProcessUtilityParams *processUtilityParams, void *arg);
 
 void		InitializeUtilityHook(void);
 
-extern PGDLLEXPORT void PgLakeCommonProcessUtility(ProcessUtilityParams * processUtilityParams);
-extern PGDLLEXPORT void PgLakeCommonParentProcessUtility(ProcessUtilityParams * processUtilityParams);
+extern PGDLLEXPORT void PgLakeCommonProcessUtility(ProcessUtilityParams *processUtilityParams);
+extern PGDLLEXPORT void PgLakeCommonParentProcessUtility(ProcessUtilityParams *processUtilityParams);
 extern PGDLLEXPORT void RegisterUtilityStatementHandler(UtilityStatementHandler callback, void *arg);
 extern PGDLLEXPORT void RegisterPostUtilityStatementHandler(UtilityStatementPostHandler callback, void *arg);
-extern PGDLLEXPORT Node *CopyUtilityStmt(ProcessUtilityParams * processUtilityParams);
+extern PGDLLEXPORT Node *CopyUtilityStmt(ProcessUtilityParams *processUtilityParams);

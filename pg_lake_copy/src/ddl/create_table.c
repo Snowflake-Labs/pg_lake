@@ -43,7 +43,7 @@
 
 static bool IsCreateFromFile(CreateStmt *createStmt);
 static void ProcessCreateFromFile(CreateStmt *createStmt,
-								  ProcessUtilityParams * params);
+								  ProcessUtilityParams *params);
 static void ErrorIfTableExists(CreateStmt *createStmt);
 static List *ExtractDataImportOptions(CopyDataFormat format, List *options);
 
@@ -55,7 +55,7 @@ static List *ExtractDataImportOptions(CopyDataFormat format, List *options);
  * - CREATE TABLE name () WITH (definition_from = 's3://...')
  */
 bool
-CreateTableFromFileHandler(ProcessUtilityParams * params, void *arg)
+CreateTableFromFileHandler(ProcessUtilityParams *params, void *arg)
 {
 	PlannedStmt *plannedStmt = params->plannedStmt;
 
@@ -116,7 +116,7 @@ IsCreateFromFile(CreateStmt *createStmt)
  */
 static void
 ProcessCreateFromFile(CreateStmt *createStmt,
-					  ProcessUtilityParams * utilityParams)
+					  ProcessUtilityParams *utilityParams)
 {
 	char	   *definitionFromURL = NULL;
 	char	   *loadFromURL = NULL;

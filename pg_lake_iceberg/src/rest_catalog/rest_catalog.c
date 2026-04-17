@@ -77,7 +77,7 @@ typedef enum RestCatalogRequestRetryAction
 	REST_CATALOG_RETRY_BACKOFF_SHORT,	/* 429 Too Many Requests */
 	REST_CATALOG_RETRY_BACKOFF_LONG,	/* 503 Service Unavailable */
 	REST_CATALOG_RETRY_REFRESH_AUTH /* 419 Token Expired */
-}			RestCatalogRequestRetryAction;
+} RestCatalogRequestRetryAction;
 
 /*
 * StartStageRestCatalogIcebergTableCreate stages the creation of an iceberg table
@@ -147,7 +147,7 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId)
 * catalog.
 */
 char *
-FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSchema * dataFileSchema, List *partitionSpecs)
+FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSchema *dataFileSchema, List *partitionSpecs)
 {
 	StringInfo	body = makeStringInfo();
 
@@ -904,7 +904,7 @@ AppendIcebergPartitionSpecForRestCatalog(List *partitionSpecs)
 * to the rest catalog for the given new snapshot.
 */
 RestCatalogRequest *
-GetAddSnapshotCatalogRequest(IcebergSnapshot * newSnapshot, Oid relationId)
+GetAddSnapshotCatalogRequest(IcebergSnapshot *newSnapshot, Oid relationId)
 {
 	StringInfo	body = makeStringInfo();
 
@@ -940,7 +940,7 @@ GetAddSnapshotCatalogRequest(IcebergSnapshot * newSnapshot, Oid relationId)
  * "the last added schema" per the REST spec).
  */
 RestCatalogRequest *
-GetAddSchemaCatalogRequest(Oid relationId, DataFileSchema * dataFileSchema)
+GetAddSchemaCatalogRequest(Oid relationId, DataFileSchema *dataFileSchema)
 {
 	StringInfo	body = makeStringInfo();
 

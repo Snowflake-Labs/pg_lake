@@ -101,7 +101,7 @@ typedef struct ColumnToFieldIdMapping
 
 	bool		constByVal;
 	int16		typLen;
-}			ColumnToFieldIdMapping;
+} ColumnToFieldIdMapping;
 
 static HTAB *CreateFieldIdMappingHash(void);
 static void AddFieldIdsUsedInQuery(HTAB *fieldIdsToUseInBounds, Oid relationId,
@@ -110,11 +110,11 @@ static void AddFieldIdsUsedInQuery(HTAB *fieldIdsToUseInBounds, Oid relationId,
 static List *GetPartitionSpecFieldsUsedInQuery(Oid relationId, HTAB *fieldIdsToUseInBounds);
 static List *GetExternalIcebergFieldsForAttributes(Oid relationId, List *attrNos);
 static List *GetColumnBoundConstraints(Oid relationId, HTAB *fieldIdCache, List *columnStats,
-									   List *partitionTransformsUsedInQuery, Partition * partition);
+									   List *partitionTransformsUsedInQuery, Partition *partition);
 static List *GetColumnBoundConstraintsFromColumnStats(Oid relationId, List *columnStats,
-													  ColumnToFieldIdMapping * entry);
-static List *GetColumnBoundConstraintsFromPartition(Oid relationId, ColumnToFieldIdMapping * entry,
-													List *partitionTransformsUsedInQuery, Partition * partition);
+													  ColumnToFieldIdMapping *entry);
+static List *GetColumnBoundConstraintsFromPartition(Oid relationId, ColumnToFieldIdMapping *entry,
+													List *partitionTransformsUsedInQuery, Partition *partition);
 static void StripAllImplicitCoercionsInList(List *baseRestrictInfoList);
 static Node *StripAllImplicitCoercions(Node *expr);
 static Node *StripAllImplicitCoercionsMutator(Node *node, void *context);
@@ -129,44 +129,44 @@ static Oid	GetOperatorByType(Oid typeId, Oid accessMethodId, int16 strategyNumbe
 static HTAB *TryCreateBatchFilterHash(List *baseRestrictInfoList, Var *filenameCol);
 
 /* partition pruning functions */
-static Expr *PartitionFieldBoundConstraint(PartitionField * partitionField,
-										   IcebergPartitionTransform * partitionTransform,
-										   ColumnToFieldIdMapping * entry);
-static BoolExpr *TruncatePartitionFieldBoundConstraint(PartitionField * partitionField,
-													   IcebergPartitionTransform * partitionTransform,
-													   ColumnToFieldIdMapping * entry);
+static Expr *PartitionFieldBoundConstraint(PartitionField *partitionField,
+										   IcebergPartitionTransform *partitionTransform,
+										   ColumnToFieldIdMapping *entry);
+static BoolExpr *TruncatePartitionFieldBoundConstraint(PartitionField *partitionField,
+													   IcebergPartitionTransform *partitionTransform,
+													   ColumnToFieldIdMapping *entry);
 
-static Expr *IdentityPartitionFieldBoundConstraint(PartitionField * partitionField,
-												   IcebergPartitionTransform * partitionTransform,
-												   ColumnToFieldIdMapping * entry);
-static BoolExpr *YearPartitionFieldBoundConstraint(PartitionField * partitionField,
-												   IcebergPartitionTransform * partitionTransform,
-												   ColumnToFieldIdMapping * entry);
-static BoolExpr *MonthPartitionFieldBoundConstraint(PartitionField * partitionField,
-													IcebergPartitionTransform * partitionTransform,
-													ColumnToFieldIdMapping * entry);
-static BoolExpr *DayPartitionFieldBoundConstraint(PartitionField * partitionField,
-												  IcebergPartitionTransform * partitionTransform,
-												  ColumnToFieldIdMapping * entry);
-static BoolExpr *HourPartitionFieldBoundConstraint(PartitionField * partitionField,
-												   IcebergPartitionTransform * partitionTransform,
-												   ColumnToFieldIdMapping * entry);
-static OpExpr *BucketPartitionFieldBoundConstraint(PartitionField * partitionField,
-												   IcebergPartitionTransform * partitionTransform,
-												   ColumnToFieldIdMapping * entry);
+static Expr *IdentityPartitionFieldBoundConstraint(PartitionField *partitionField,
+												   IcebergPartitionTransform *partitionTransform,
+												   ColumnToFieldIdMapping *entry);
+static BoolExpr *YearPartitionFieldBoundConstraint(PartitionField *partitionField,
+												   IcebergPartitionTransform *partitionTransform,
+												   ColumnToFieldIdMapping *entry);
+static BoolExpr *MonthPartitionFieldBoundConstraint(PartitionField *partitionField,
+													IcebergPartitionTransform *partitionTransform,
+													ColumnToFieldIdMapping *entry);
+static BoolExpr *DayPartitionFieldBoundConstraint(PartitionField *partitionField,
+												  IcebergPartitionTransform *partitionTransform,
+												  ColumnToFieldIdMapping *entry);
+static BoolExpr *HourPartitionFieldBoundConstraint(PartitionField *partitionField,
+												   IcebergPartitionTransform *partitionTransform,
+												   ColumnToFieldIdMapping *entry);
+static OpExpr *BucketPartitionFieldBoundConstraint(PartitionField *partitionField,
+												   IcebergPartitionTransform *partitionTransform,
+												   ColumnToFieldIdMapping *entry);
 
 static OpExpr *CreateConstraintWithEquality(OpExpr *eqOp, bool constByVal, int16 typLen,
 											Datum equalityDatum);
 static char *TruncateUpperBoundForText(char *upperBound, size_t truncateLen);
 static bytea *TruncateUpperBoundForBytea(bytea *data, int truncateLen);
-static List *ExtendClausesForBucketPartitioning(Partition * partition,
+static List *ExtendClausesForBucketPartitioning(Partition *partition,
 												List *partitionTransformsUsedInQuery,
 												HTAB *fieldIdMapping,
 												List *baseRestrictInfoList);
 static List *ExtendBaseRestrictInfoForBucketPartition(List *baseRestrictInfoList,
-													  IcebergPartitionTransform * partitionTransform,
+													  IcebergPartitionTransform *partitionTransform,
 													  OpExpr *syntheticColEqualityOperator);
-static OpExpr *GetSyntheticBucketForPartitionField(PartitionField * partitionField,
+static OpExpr *GetSyntheticBucketForPartitionField(PartitionField *partitionField,
 												   OpExpr *syntheticColEqualityOperator);
 static Const *ConstantEqualityOperatorExpressionOnColumn(Expr *clause, AttrNumber attrNo);
 static bool EqualityOperator(Oid opno);
@@ -516,7 +516,7 @@ AddFieldIdsUsedInQuery(HTAB *fieldIdsUsedInQuery, Oid relationId, PgLakeTablePro
 */
 static List *
 GetColumnBoundConstraints(Oid relationId, HTAB *fieldIdMapping, List *columnStats,
-						  List *partitionTransformsUsedInQuery, Partition * partition)
+						  List *partitionTransformsUsedInQuery, Partition *partition)
 {
 	List	   *constraintList = NIL;
 
@@ -568,7 +568,7 @@ GetColumnBoundConstraints(Oid relationId, HTAB *fieldIdMapping, List *columnStat
 */
 static List *
 GetColumnBoundConstraintsFromColumnStats(Oid relationId, List *columnStats,
-										 ColumnToFieldIdMapping * entry)
+										 ColumnToFieldIdMapping *entry)
 {
 	List	   *constraintList = NIL;
 	ListCell   *columnStatCell = NULL;
@@ -674,8 +674,8 @@ GetColumnBoundConstraintsFromColumnStats(Oid relationId, List *columnStats,
 * statistics stored in iceberg metadata.
 */
 static List *
-GetColumnBoundConstraintsFromPartition(Oid relationId, ColumnToFieldIdMapping * entry,
-									   List *partitionTransformsUsedInQuery, Partition * partition)
+GetColumnBoundConstraintsFromPartition(Oid relationId, ColumnToFieldIdMapping *entry,
+									   List *partitionTransformsUsedInQuery, Partition *partition)
 {
 	List	   *constraintList = NIL;
 	int			partitionFieldCount = partition ? partition->fields_length : 0;
@@ -714,8 +714,8 @@ GetColumnBoundConstraintsFromPartition(Oid relationId, ColumnToFieldIdMapping * 
 * partition transform.
 */
 static Expr *
-PartitionFieldBoundConstraint(PartitionField * partitionField, IcebergPartitionTransform * partitionTransform,
-							  ColumnToFieldIdMapping * entry)
+PartitionFieldBoundConstraint(PartitionField *partitionField, IcebergPartitionTransform *partitionTransform,
+							  ColumnToFieldIdMapping *entry)
 {
 	IcebergPartitionTransformType type = partitionTransform->type;
 
@@ -760,9 +760,9 @@ PartitionFieldBoundConstraint(PartitionField * partitionField, IcebergPartitionT
 *   column = partitionField->value
 */
 static Expr *
-IdentityPartitionFieldBoundConstraint(PartitionField * partitionField,
-									  IcebergPartitionTransform * partitionTransform,
-									  ColumnToFieldIdMapping * entry)
+IdentityPartitionFieldBoundConstraint(PartitionField *partitionField,
+									  IcebergPartitionTransform *partitionTransform,
+									  ColumnToFieldIdMapping *entry)
 {
 	/* non-null values */
 	if (partitionField->value != NULL)
@@ -788,9 +788,9 @@ IdentityPartitionFieldBoundConstraint(PartitionField * partitionField,
 * TruncatePartitionFieldBoundConstraint
 */
 static BoolExpr *
-TruncatePartitionFieldBoundConstraint(PartitionField * partitionField,
-									  IcebergPartitionTransform * partitionTransform,
-									  ColumnToFieldIdMapping * entry)
+TruncatePartitionFieldBoundConstraint(PartitionField *partitionField,
+									  IcebergPartitionTransform *partitionTransform,
+									  ColumnToFieldIdMapping *entry)
 {
 	BoolExpr   *columnBoundExclusiveUpper = copyObject(entry->columnBoundExclusiveUpper);
 	PGType		pgType = partitionTransform->pgType;
@@ -896,9 +896,9 @@ TruncatePartitionFieldBoundConstraint(PartitionField * partitionField,
 * YearPartitionFieldBoundConstraint
 */
 static BoolExpr *
-YearPartitionFieldBoundConstraint(PartitionField * partitionField,
-								  IcebergPartitionTransform * partitionTransform,
-								  ColumnToFieldIdMapping * entry)
+YearPartitionFieldBoundConstraint(PartitionField *partitionField,
+								  IcebergPartitionTransform *partitionTransform,
+								  ColumnToFieldIdMapping *entry)
 {
 	BoolExpr   *columnBoundExclusiveUpper = copyObject(entry->columnBoundExclusiveUpper);
 	PGType		pgType = partitionTransform->pgType;
@@ -955,9 +955,9 @@ YearPartitionFieldBoundConstraint(PartitionField * partitionField,
 * MonthPartitionFieldBoundConstraint
 */
 static BoolExpr *
-MonthPartitionFieldBoundConstraint(PartitionField * partitionField,
-								   IcebergPartitionTransform * partitionTransform,
-								   ColumnToFieldIdMapping * entry)
+MonthPartitionFieldBoundConstraint(PartitionField *partitionField,
+								   IcebergPartitionTransform *partitionTransform,
+								   ColumnToFieldIdMapping *entry)
 {
 	BoolExpr   *columnBoundExclusiveUpper = copyObject(entry->columnBoundExclusiveUpper);
 	PGType		pgType = partitionTransform->pgType;
@@ -1013,9 +1013,9 @@ MonthPartitionFieldBoundConstraint(PartitionField * partitionField,
 * DayPartitionFieldBoundConstraint
 */
 static BoolExpr *
-DayPartitionFieldBoundConstraint(PartitionField * partitionField,
-								 IcebergPartitionTransform * partitionTransform,
-								 ColumnToFieldIdMapping * entry)
+DayPartitionFieldBoundConstraint(PartitionField *partitionField,
+								 IcebergPartitionTransform *partitionTransform,
+								 ColumnToFieldIdMapping *entry)
 {
 	BoolExpr   *columnBoundExclusiveUpper = copyObject(entry->columnBoundExclusiveUpper);
 	PGType		pgType = partitionTransform->pgType;
@@ -1070,9 +1070,9 @@ DayPartitionFieldBoundConstraint(PartitionField * partitionField,
 * HourPartitionFieldBoundConstraint
 */
 static BoolExpr *
-HourPartitionFieldBoundConstraint(PartitionField * partitionField,
-								  IcebergPartitionTransform * partitionTransform,
-								  ColumnToFieldIdMapping * entry)
+HourPartitionFieldBoundConstraint(PartitionField *partitionField,
+								  IcebergPartitionTransform *partitionTransform,
+								  ColumnToFieldIdMapping *entry)
 {
 	BoolExpr   *columnBoundExclusiveUpper = copyObject(entry->columnBoundExclusiveUpper);
 	PGType		pgType = partitionTransform->pgType;
@@ -1153,9 +1153,9 @@ HourPartitionFieldBoundConstraint(PartitionField * partitionField,
 * BucketPartitionFieldBoundConstraint
 */
 static OpExpr *
-BucketPartitionFieldBoundConstraint(PartitionField * partitionField,
-									IcebergPartitionTransform * partitionTransform,
-									ColumnToFieldIdMapping * entry)
+BucketPartitionFieldBoundConstraint(PartitionField *partitionField,
+									IcebergPartitionTransform *partitionTransform,
+									ColumnToFieldIdMapping *entry)
 {
 	if (entry->syntheticColEqualityOperator == NULL)
 	{
@@ -1808,7 +1808,7 @@ GetExternalIcebergFieldsForAttributes(Oid relationId, List *columnsUsedInFilters
 * bucket partition transform always returns int32.
 */
 static OpExpr *
-GetSyntheticBucketForPartitionField(PartitionField * partitionField,
+GetSyntheticBucketForPartitionField(PartitionField *partitionField,
 									OpExpr *syntheticColEqualityOperator)
 {
 	/*
@@ -1836,7 +1836,7 @@ GetSyntheticBucketForPartitionField(PartitionField * partitionField,
 * where partition_col is the column that is used for bucket partition transforms.
 */
 static List *
-ExtendClausesForBucketPartitioning(Partition * partition, List *partitionTransformsUsedInQuery,
+ExtendClausesForBucketPartitioning(Partition *partition, List *partitionTransformsUsedInQuery,
 								   HTAB *fieldIdMapping, List *clauses)
 {
 	List	   *syntheticClauseList = NIL;
@@ -1889,7 +1889,7 @@ ExtendClausesForBucketPartitioning(Partition * partition, List *partitionTransfo
 */
 static List *
 ExtendBaseRestrictInfoForBucketPartition(List *clauses,
-										 IcebergPartitionTransform * partitionTransform,
+										 IcebergPartitionTransform *partitionTransform,
 										 OpExpr *syntheticColEqualityOperator)
 {
 	AttrNumber	columnAttrNo = partitionTransform->attnum;

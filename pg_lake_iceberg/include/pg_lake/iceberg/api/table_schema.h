@@ -23,13 +23,13 @@
 
 
 /* read api */
-extern PGDLLEXPORT IcebergTableSchema * GetIcebergTableSchemaByIdFromTableMetadata(IcebergTableMetadata * metadata, int schemaId);
-extern PGDLLEXPORT IcebergTableSchema * GetCurrentIcebergTableSchema(IcebergTableMetadata * metadata);
-extern PGDLLEXPORT List *GetLeafFieldsFromIcebergMetadata(IcebergTableMetadata * metadata);
-extern PGDLLEXPORT List *GetLeafFieldsForIcebergSchema(IcebergTableSchema * schema);
-extern PGDLLEXPORT DataFileSchemaField * GetDataFileSchemaFieldById(DataFileSchema * schema, int fieldId);
+extern PGDLLEXPORT IcebergTableSchema *GetIcebergTableSchemaByIdFromTableMetadata(IcebergTableMetadata *metadata, int schemaId);
+extern PGDLLEXPORT IcebergTableSchema *GetCurrentIcebergTableSchema(IcebergTableMetadata *metadata);
+extern PGDLLEXPORT List *GetLeafFieldsFromIcebergMetadata(IcebergTableMetadata *metadata);
+extern PGDLLEXPORT List *GetLeafFieldsForIcebergSchema(IcebergTableSchema *schema);
+extern PGDLLEXPORT DataFileSchemaField *GetDataFileSchemaFieldById(DataFileSchema *schema, int fieldId);
 
 /* write api */
-extern PGDLLEXPORT IcebergTableSchema * RebuildIcebergSchemaFromDataFileSchema(Oid foreignTableOid,
-																			   DataFileSchema * schema,
-																			   int *last_column_id);
+extern PGDLLEXPORT IcebergTableSchema *RebuildIcebergSchemaFromDataFileSchema(Oid foreignTableOid,
+																			  DataFileSchema *schema,
+																			  int *last_column_id);

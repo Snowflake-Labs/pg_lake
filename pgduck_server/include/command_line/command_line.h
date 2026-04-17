@@ -46,7 +46,7 @@ typedef struct
 	bool		debug;
 	char	   *init_file_path;
 	char	   *pidfile_path;
-}			CommandLineOptions;
+} CommandLineOptions;
 
 CommandLineOptions parse_arguments(int argc, char *argv[]);
 

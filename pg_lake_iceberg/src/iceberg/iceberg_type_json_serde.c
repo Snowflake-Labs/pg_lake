@@ -36,14 +36,14 @@
 #include "utils/lsyscache.h"
 #include "utils/typcache.h"
 
-static const char *PGScalarIcebergJsonSerialize(Datum scalarDatum, Field * field, PGType pgType);
-static const char *PGArrayIcebergJsonSerialize(Datum arrayDatum, Field * field, PGType pgType);
-static const char *PGStructIcebergJsonSerialize(Datum structDatum, Field * field, PGType pgType);
-static const char *PGMapIcebergJsonSerialize(Datum mapDatum, Field * field, PGType pgType);
-static Datum PGScalarIcebergJsonDeserialize(const char *scalarJson, Field * field, PGType pgType);
-static Datum PGArrayIcebergJsonDeserialize(const char *arrayJson, Field * field, PGType pgType);
-static Datum PGStructIcebergJsonDeserialize(const char *structJson, Field * field, PGType pgType);
-static Datum PGMapIcebergJsonDeserialize(const char *mapJson, Field * field, PGType pgType);
+static const char *PGScalarIcebergJsonSerialize(Datum scalarDatum, Field *field, PGType pgType);
+static const char *PGArrayIcebergJsonSerialize(Datum arrayDatum, Field *field, PGType pgType);
+static const char *PGStructIcebergJsonSerialize(Datum structDatum, Field *field, PGType pgType);
+static const char *PGMapIcebergJsonSerialize(Datum mapDatum, Field *field, PGType pgType);
+static Datum PGScalarIcebergJsonDeserialize(const char *scalarJson, Field *field, PGType pgType);
+static Datum PGArrayIcebergJsonDeserialize(const char *arrayJson, Field *field, PGType pgType);
+static Datum PGStructIcebergJsonDeserialize(const char *structJson, Field *field, PGType pgType);
+static Datum PGMapIcebergJsonDeserialize(const char *mapJson, Field *field, PGType pgType);
 
 /*
  * PGIcebergJsonSerialize converts PG datum to json serialized string according to
@@ -51,7 +51,7 @@ static Datum PGMapIcebergJsonDeserialize(const char *mapJson, Field * field, PGT
  * https://iceberg.apache.org/spec/#json-single-value-serialization
  */
 const char *
-PGIcebergJsonSerialize(Datum datum, Field * field, PGType pgType, bool *isNull)
+PGIcebergJsonSerialize(Datum datum, Field *field, PGType pgType, bool *isNull)
 {
 	if (*isNull)
 	{
@@ -98,7 +98,7 @@ PGIcebergJsonSerialize(Datum datum, Field * field, PGType pgType, bool *isNull)
  * serializes scalar values in the same way as Iceberg spec.
  */
 static const char *
-PGScalarIcebergJsonSerialize(Datum scalarDatum, Field * field, PGType pgType)
+PGScalarIcebergJsonSerialize(Datum scalarDatum, Field *field, PGType pgType)
 {
 	int16		typLen;
 	bool		typByVal;
@@ -179,7 +179,7 @@ PGScalarIcebergJsonSerialize(Datum scalarDatum, Field * field, PGType pgType)
  * Iceberg spec.
  */
 static const char *
-PGArrayIcebergJsonSerialize(Datum arrayDatum, Field * field, PGType pgType)
+PGArrayIcebergJsonSerialize(Datum arrayDatum, Field *field, PGType pgType)
 {
 	ArrayType  *array = DatumGetArrayTypeP(arrayDatum);
 
@@ -235,7 +235,7 @@ PGArrayIcebergJsonSerialize(Datum arrayDatum, Field * field, PGType pgType)
  * e.g. {"1": <val1>, "2": <val2>, ...}
  */
 static const char *
-PGStructIcebergJsonSerialize(Datum structDatum, Field * field, PGType pgType)
+PGStructIcebergJsonSerialize(Datum structDatum, Field *field, PGType pgType)
 {
 	TupleDesc	tupleDesc = lookup_rowtype_tupdesc(pgType.postgresTypeOid, pgType.postgresTypeMod);
 
@@ -282,7 +282,7 @@ PGStructIcebergJsonSerialize(Datum structDatum, Field * field, PGType pgType)
  * e.g. {"keys": [<key1>, <key2>, ...], "values": [<val1>, <val2>, ...]}
  */
 static const char *
-PGMapIcebergJsonSerialize(Datum mapDatum, Field * field, PGType pgType)
+PGMapIcebergJsonSerialize(Datum mapDatum, Field *field, PGType pgType)
 {
 	/* mapDatum is a domain over an array of a 2-col composite type */
 
@@ -402,7 +402,7 @@ PGMapIcebergJsonSerialize(Datum mapDatum, Field * field, PGType pgType)
  * PGIcebergJsonDeserialize converts json serialized Iceberg type to datum.
  */
 Datum
-PGIcebergJsonDeserialize(const char *jsonString, Field * field, PGType pgType, bool *isNull)
+PGIcebergJsonDeserialize(const char *jsonString, Field *field, PGType pgType, bool *isNull)
 {
 	if (strcasecmp(jsonString, "null") == 0)
 	{
@@ -442,7 +442,7 @@ PGIcebergJsonDeserialize(const char *jsonString, Field * field, PGType pgType, b
  * Input functions of scalar types are used to convert json string to scalar datum.
  */
 static Datum
-PGScalarIcebergJsonDeserialize(const char *scalarJson, Field * field, PGType pgType)
+PGScalarIcebergJsonDeserialize(const char *scalarJson, Field *field, PGType pgType)
 {
 	if (pgType.postgresTypeOid == BYTEAOID)
 	{
@@ -482,7 +482,7 @@ PGScalarIcebergJsonDeserialize(const char *scalarJson, Field * field, PGType pgT
  * PGArrayIcebergJsonDeserialize converts json serialized Iceberg array to datum.
  */
 static Datum
-PGArrayIcebergJsonDeserialize(const char *arrayJson, Field * field, PGType pgType)
+PGArrayIcebergJsonDeserialize(const char *arrayJson, Field *field, PGType pgType)
 {
 	MemoryContext callerContext = CurrentMemoryContext;
 
@@ -555,7 +555,7 @@ PGArrayIcebergJsonDeserialize(const char *arrayJson, Field * field, PGType pgTyp
  * e.g. {"1": <val1>, "2": <val2>, ...}
  */
 static Datum
-PGStructIcebergJsonDeserialize(const char *structJson, Field * field, PGType pgType)
+PGStructIcebergJsonDeserialize(const char *structJson, Field *field, PGType pgType)
 {
 	MemoryContext callerContext = CurrentMemoryContext;
 
@@ -624,7 +624,7 @@ PGStructIcebergJsonDeserialize(const char *structJson, Field * field, PGType pgT
  * e.g. {"keys": [<key1>, <key2>, ...], "values": [<val1>, <val2>, ...]}
  */
 static Datum
-PGMapIcebergJsonDeserialize(const char *mapJson, Field * field, PGType pgType)
+PGMapIcebergJsonDeserialize(const char *mapJson, Field *field, PGType pgType)
 {
 	MemoryContext callerContext = CurrentMemoryContext;
 

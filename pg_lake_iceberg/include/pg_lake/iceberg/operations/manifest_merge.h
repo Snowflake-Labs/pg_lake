@@ -39,14 +39,14 @@ extern int	TargetManifestSizeKB;
 /* pg_lake_iceberg.manifest_min_count_to_merge */
 extern int	ManifestMinCountToMerge;
 
-extern PGDLLEXPORT List *MergeDataManifests(IcebergSnapshot * currentSnapshot,
+extern PGDLLEXPORT List *MergeDataManifests(IcebergSnapshot *currentSnapshot,
 											List *allTransforms,
 											List *dataManifests,
 											const char *metadataLocation,
 											const char *snapshotUUID,
 											bool isVerbose,
 											int *manifestIndex);
-extern PGDLLEXPORT bool RemoveDeletedManifestEntries(IcebergSnapshot * currentSnapshot,
+extern PGDLLEXPORT bool RemoveDeletedManifestEntries(IcebergSnapshot *currentSnapshot,
 													 List *allTransforms,
 													 List **manifests,
 													 IcebergManifestContentType contentType,

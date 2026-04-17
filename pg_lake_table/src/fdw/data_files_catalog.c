@@ -75,8 +75,8 @@
 PgLakeAddDataFileHookType PgLakeAddDataFileHook = NULL;
 
 
-static void FillDataFileColumnStats(TableDataFile * dataFile, int64 fieldId, int rowIndex);
-static void FillPartitionFieldFromCatalog(TableDataFile * dataFile, List *partitionTransforms,
+static void FillDataFileColumnStats(TableDataFile *dataFile, int64 fieldId, int rowIndex);
+static void FillPartitionFieldFromCatalog(TableDataFile *dataFile, List *partitionTransforms,
 										  int64 partitionFieldId, int rowIndex);
 static int64 AddDataFileToTable(Oid relationId, const char *path, int64 rowCount,
 								int64 fileSize, DataFileContent content, int64 rowIdStart);
@@ -91,12 +91,12 @@ static HTAB *CreateDataFilesHash(void);
 static HTAB *CreateDataFilesByPathHash(void);
 static List *TableDataFileHashToList(HTAB *dataFiles);
 static bool ColumnStatAlreadyAdded(List *columnStats, int64 fieldId);
-static bool PartitionFieldAlreadyAdded(Partition * partition, int64 fieldId);
+static bool PartitionFieldAlreadyAdded(Partition *partition, int64 fieldId);
 static void CreateTxDataFileIdsTempTableIfNotExists(void);
 static void InsertDataFileIdIntoTransactionTable(int64 fileId);
-static DataFileColumnStats * CreateDataFileColumnStats(int fieldId, PGType pgType,
-													   char *lowerBoundText,
-													   char *upperBoundText);
+static DataFileColumnStats *CreateDataFileColumnStats(int fieldId, PGType pgType,
+													  char *lowerBoundText,
+													  char *upperBoundText);
 
 /*
  * GetTableDataFilesFromCatalog returns a list of TableDataFile for each data and deletion file
@@ -392,7 +392,7 @@ GetTableDataFilesByPathHashFromCatalog(Oid relationId, bool dataOnly, bool newFi
 * from the catalog. It is a helper function for GetTableDataFilesFromCatalog.
 */
 static void
-FillDataFileColumnStats(TableDataFile * dataFile, int64 fieldId, int rowIndex)
+FillDataFileColumnStats(TableDataFile *dataFile, int64 fieldId, int rowIndex)
 {
 	bool		isPgTypeNull = false;
 	bool		isPgTypeModNull = false;
@@ -433,7 +433,7 @@ FillDataFileColumnStats(TableDataFile * dataFile, int64 fieldId, int rowIndex)
 * the catalog. It is a helper function for GetTableDataFilesFromCatalog.
 */
 static void
-FillPartitionFieldFromCatalog(TableDataFile * dataFile, List *partitionTransforms, int64 partitionFieldId,
+FillPartitionFieldFromCatalog(TableDataFile *dataFile, List *partitionTransforms, int64 partitionFieldId,
 							  int rowIndex)
 {
 	/* not null enforced by the catalog */
@@ -482,7 +482,7 @@ FillPartitionFieldFromCatalog(TableDataFile * dataFile, List *partitionTransform
 * present in the partition.
 */
 static bool
-PartitionFieldAlreadyAdded(Partition * partition, int64 fieldId)
+PartitionFieldAlreadyAdded(Partition *partition, int64 fieldId)
 {
 	for (int i = 0; i < partition->fields_length; i++)
 	{
@@ -1360,7 +1360,7 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
  */
 void
 AddDataFilePartitionValueToCatalog(Oid relationId, int32 partitionSpecId, int64 fileId,
-								   Partition * partition)
+								   Partition *partition)
 {
 	Assert(partition != NULL);
 	Assert(partition->fields_length > 0);

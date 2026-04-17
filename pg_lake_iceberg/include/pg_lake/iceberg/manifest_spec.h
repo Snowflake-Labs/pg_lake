@@ -63,14 +63,14 @@ typedef struct ColumnStat
 {
 	int32_t		column_id;
 	int64_t		value;
-}			ColumnStat;
+} ColumnStat;
 
 typedef struct ColumnBound
 {
 	int32_t		column_id;
 	unsigned char *value;
 	size_t		value_length;
-}			ColumnBound;
+} ColumnBound;
 
 typedef struct FieldSummary
 {
@@ -82,7 +82,7 @@ typedef struct FieldSummary
 
 	unsigned char *upper_bound;
 	size_t		upper_bound_length;
-}			FieldSummary;
+} FieldSummary;
 
 /*
 * Important: Never change the order of the enum values.
@@ -115,7 +115,7 @@ typedef struct IcebergScalarAvroType
 	/* logical type: decimal */
 	int32_t		precision;
 	int32_t		scale;
-}			IcebergScalarAvroType;
+} IcebergScalarAvroType;
 
 typedef struct PartitionField
 {
@@ -124,13 +124,13 @@ typedef struct PartitionField
 	IcebergScalarAvroType value_type;
 	void	   *value;
 	size_t		value_length;
-}			PartitionField;
+} PartitionField;
 
 typedef struct Partition
 {
 	PartitionField *fields;
 	size_t		fields_length;
-}			Partition;
+} Partition;
 
 /*
  * IcebergManifest struct represents the Iceberg manifest file.
@@ -160,7 +160,7 @@ typedef struct IcebergManifest
 
 	char	   *key_metadata;
 	size_t		key_metadata_length;
-}			IcebergManifest;
+} IcebergManifest;
 
 /*
  * DataFile struct represents the data file in the Iceberg manifest.
@@ -210,7 +210,7 @@ typedef struct DataFile
 
 	bool		has_sort_order_id;
 	int32_t		sort_order_id;
-}			DataFile;
+} DataFile;
 
 /*
  * IcebergManifestEntry struct represents the Iceberg manifest entry.
@@ -230,7 +230,7 @@ typedef struct IcebergManifestEntry
 	int64_t		file_sequence_number;
 
 	DataFile	data_file;
-}			IcebergManifestEntry;
+} IcebergManifestEntry;
 
 extern List *ReadIcebergManifests(const char *manifestListPath);
 extern PGDLLEXPORT List *ReadManifestEntries(const char *manifestPath);

@@ -24,7 +24,7 @@ typedef enum PgLakeTableType
 	PG_LAKE_INVALID_TABLE_TYPE,
 	PG_LAKE_TABLE_TYPE,
 	PG_LAKE_ICEBERG_TABLE_TYPE
-}			PgLakeTableType;
+} PgLakeTableType;
 
 
 extern PGDLLEXPORT const char *PgLakeTableTypeToName(PgLakeTableType tableType);

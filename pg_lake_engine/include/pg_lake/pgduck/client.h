@@ -34,22 +34,22 @@ typedef struct PGDuckConnection
 	uint32		connectionId;
 	PGconn	   *conn;
 
-}			PGDuckConnection;
+} PGDuckConnection;
 
-extern PGDLLEXPORT PGDuckConnection * GetPGDuckConnection(void);
-extern PGDLLEXPORT void ReleasePGDuckConnection(PGDuckConnection * pgDuckConnection);
+extern PGDLLEXPORT PGDuckConnection *GetPGDuckConnection(void);
+extern PGDLLEXPORT void ReleasePGDuckConnection(PGDuckConnection *pgDuckConnection);
 extern PGDLLEXPORT int64 ExecuteCommandInPGDuck(char *query);
 extern PGDLLEXPORT List *ExecuteCommandsInPGDuck(List *commands);
 extern PGDLLEXPORT bool ExecuteOptionalCommandInPGDuck(char *command);
-extern PGDLLEXPORT PGresult *ExecuteQueryOnPGDuckConnection(PGDuckConnection * pgDuckConnection,
+extern PGDLLEXPORT PGresult *ExecuteQueryOnPGDuckConnection(PGDuckConnection *pgDuckConnection,
 															const char *query);
-extern PGDLLEXPORT PGresult *WaitForResult(PGDuckConnection * conn);
-extern PGDLLEXPORT PGresult *WaitForLastResult(PGDuckConnection * conn);
-extern PGDLLEXPORT void SendQueryToPGDuck(PGDuckConnection * conn, char *query);
-extern PGDLLEXPORT void CheckPGDuckResult(PGDuckConnection * conn, PGresult *result);
-extern PGDLLEXPORT void ThrowIfPGDuckResultHasError(PGDuckConnection * conn, PGresult *result);
+extern PGDLLEXPORT PGresult *WaitForResult(PGDuckConnection *conn);
+extern PGDLLEXPORT PGresult *WaitForLastResult(PGDuckConnection *conn);
+extern PGDLLEXPORT void SendQueryToPGDuck(PGDuckConnection *conn, char *query);
+extern PGDLLEXPORT void CheckPGDuckResult(PGDuckConnection *conn, PGresult *result);
+extern PGDLLEXPORT void ThrowIfPGDuckResultHasError(PGDuckConnection *conn, PGresult *result);
 extern PGDLLEXPORT char *GetSingleValueFromPGDuck(char *query);
-extern PGDLLEXPORT void SendQueryWithParams(PGDuckConnection * pgduckConn, char *queryString,
+extern PGDLLEXPORT void SendQueryWithParams(PGDuckConnection *pgduckConn, char *queryString,
 											int numParams, const char **parameterValues);
 
 #endif

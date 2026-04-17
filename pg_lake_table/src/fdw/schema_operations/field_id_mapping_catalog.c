@@ -51,7 +51,7 @@
 #include "pg_lake/util/rel_utils.h"
 #include "pg_extension_base/spi_helpers.h"
 
-static DataFileSchemaField * CreateRegisteredFieldForAttribute(Oid relationId, int spiIndex);
+static DataFileSchemaField *CreateRegisteredFieldForAttribute(Oid relationId, int spiIndex);
 static void InsertFieldMapping(Oid relationId, int attrIcebergFieldId,
 							   AttrNumber pg_attnum, PGType pgType,
 							   const char *writeDefault, const char *initialDefault,
@@ -670,7 +670,7 @@ GetLargestRegisteredFieldId(Oid relationId)
 * RegisterIcebergColumnMapping inserts field mapping for a relation column.
 */
 void
-RegisterIcebergColumnMapping(Oid relationId, Field * field,
+RegisterIcebergColumnMapping(Oid relationId, Field *field,
 							 AttrNumber attNo, int parentFieldId, PGType pgType,
 							 int fieldId, const char *writeDefault, const char *initialDefault)
 {

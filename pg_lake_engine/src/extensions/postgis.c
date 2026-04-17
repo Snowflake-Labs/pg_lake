@@ -71,7 +71,7 @@ typedef struct PostgisExtensionIds
 	/* ST_Union_Agg aggregate function */
 	Oid			stUnionAggAggregateId;
 
-}			PostgisExtensionIds;
+} PostgisExtensionIds;
 
 
 static void ClearIds(void *postgisIds);

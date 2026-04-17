@@ -36,7 +36,7 @@ typedef enum IcebergPartitionTransformType
 	PARTITION_TRANSFORM_BUCKET,
 	PARTITION_TRANSFORM_TRUNCATE,
 	PARTITION_TRANSFORM_VOID
-}			IcebergPartitionTransformType;
+} IcebergPartitionTransformType;
 
 typedef struct IcebergPartitionTransform
 {
@@ -70,4 +70,4 @@ typedef struct IcebergPartitionTransform
 
 	/* transform result's postgres type */
 	PGType		resultPgType;
-}			IcebergPartitionTransform;
+} IcebergPartitionTransform;

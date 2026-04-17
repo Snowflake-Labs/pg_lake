@@ -39,8 +39,8 @@
 static char *DeleteFromParquetQuery(char *sourceDataFilePath,
 									List *positionDeleteFiles,
 									char *deletionFilePath,
-									DataFileSchema * schema,
-									ReadDataStats * stats);
+									DataFileSchema *schema,
+									ReadDataStats *stats);
 
 
 /*
@@ -53,8 +53,8 @@ PerformDeleteFromParquet(char *sourcePath,
 						 char *deletionFilePath,
 						 char *destinationPath,
 						 CopyDataCompression destinationCompression,
-						 DataFileSchema * schema,
-						 ReadDataStats * stats,
+						 DataFileSchema *schema,
+						 ReadDataStats *stats,
 						 List *leafFields)
 {
 	const char *remainderQuery =
@@ -111,8 +111,8 @@ PerformDeleteFromParquet(char *sourcePath,
  */
 static char *
 DeleteFromParquetQuery(char *sourceDataFilePath, List *positionDeleteFiles,
-					   char *deletionFilePath, DataFileSchema * schema,
-					   ReadDataStats * stats)
+					   char *deletionFilePath, DataFileSchema *schema,
+					   ReadDataStats *stats)
 {
 	StringInfoData command;
 

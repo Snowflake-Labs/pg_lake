@@ -452,7 +452,7 @@ static const PGDuckShippableFunction ShippableBuiltinProcs[] =
  * GetShippableBuiltinFunctionCount
  *		Returns the number of shippable functions
  */
-const		PGDuckShippableFunction *
+const PGDuckShippableFunction *
 GetShippableBuiltinFunctions(int *sizePointer)
 {
 	*sizePointer = ARRAY_SIZE(ShippableBuiltinProcs);

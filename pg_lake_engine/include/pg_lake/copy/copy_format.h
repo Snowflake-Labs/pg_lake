@@ -44,7 +44,7 @@ typedef enum CopyDataFormat
 	DATA_FORMAT_DELTA,
 	DATA_FORMAT_GDAL,
 	DATA_FORMAT_LOG
-}			CopyDataFormat;
+} CopyDataFormat;
 
 /* possible values of the COPY .. WITH (compression ..) option */
 typedef enum CopyDataCompression
@@ -55,7 +55,7 @@ typedef enum CopyDataCompression
 	DATA_COMPRESSION_ZSTD,
 	DATA_COMPRESSION_SNAPPY,
 	DATA_COMPRESSION_ZIP
-}			CopyDataCompression;
+} CopyDataCompression;
 
 /*
  * PgLakeTableProperties describes the main properties of an Iceberg and
@@ -67,7 +67,7 @@ typedef struct PgLakeTableProperties
 	CopyDataFormat format;
 	CopyDataCompression compression;
 	List	   *options;
-}			PgLakeTableProperties;
+} PgLakeTableProperties;
 
 
 /*
@@ -100,7 +100,7 @@ extern PGDLLEXPORT char *ResolveStageURL(const char *path);
 
 extern PGDLLEXPORT void FindDataFormatAndCompression(PgLakeTableType tableType,
 													 char *path, List *copyOptions,
-													 CopyDataFormat * format,
-													 CopyDataCompression * compression);
+													 CopyDataFormat *format,
+													 CopyDataCompression *compression);
 
 #endif

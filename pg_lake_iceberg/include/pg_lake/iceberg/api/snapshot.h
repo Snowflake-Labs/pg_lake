@@ -29,7 +29,7 @@
  *
  * The predicate function can be NULL, in which case all snapshots are included in the result.
  */
-typedef bool (*SnapshotPredicateFn) (IcebergTableMetadata * metadata, IcebergSnapshot * snapshot);
+typedef bool (*SnapshotPredicateFn) (IcebergTableMetadata *metadata, IcebergSnapshot *snapshot);
 
 /*
 * Represents IcebergSnapshot->summary->operation value.
@@ -41,17 +41,17 @@ typedef enum
 	SNAPSHOT_OPERATION_REPLACE,
 	SNAPSHOT_OPERATION_OVERWRITE,
 	SNAPSHOT_OPERATION_DELETE
-}			SnapshotOperation;
+} SnapshotOperation;
 
 
 /* predicates */
-extern PGDLLEXPORT bool IsCurrentSnapshot(IcebergTableMetadata * metadata, IcebergSnapshot * snapshot);
+extern PGDLLEXPORT bool IsCurrentSnapshot(IcebergTableMetadata *metadata, IcebergSnapshot *snapshot);
 
 /* read api */
-extern PGDLLEXPORT List *FetchSnapshotsFromTableMetadata(IcebergTableMetadata * metadata, SnapshotPredicateFn snapshotPredicateFn);
-extern PGDLLEXPORT IcebergSnapshot * GetCurrentSnapshot(IcebergTableMetadata * metadata, bool missingOk);
-extern PGDLLEXPORT IcebergSnapshot * GetIcebergSnapshotViaId(IcebergTableMetadata * metadata, uint64_t snapshotId);
+extern PGDLLEXPORT List *FetchSnapshotsFromTableMetadata(IcebergTableMetadata *metadata, SnapshotPredicateFn snapshotPredicateFn);
+extern PGDLLEXPORT IcebergSnapshot *GetCurrentSnapshot(IcebergTableMetadata *metadata, bool missingOk);
+extern PGDLLEXPORT IcebergSnapshot *GetIcebergSnapshotViaId(IcebergTableMetadata *metadata, uint64_t snapshotId);
 
 
 /* write api */
-extern PGDLLEXPORT IcebergSnapshot * CreateNewIcebergSnapshot(IcebergTableMetadata * metadata);
+extern PGDLLEXPORT IcebergSnapshot *CreateNewIcebergSnapshot(IcebergTableMetadata *metadata);

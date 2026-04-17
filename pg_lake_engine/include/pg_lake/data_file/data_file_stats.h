@@ -35,7 +35,7 @@ typedef enum ColumnStatsMode
 {
 	COLUMN_STATS_MODE_TRUNCATE = 0,
 	COLUMN_STATS_MODE_NONE = 1,
-}			ColumnStatsMode;
+} ColumnStatsMode;
 
 /*
  * ColumnStatsConfig describes the configuration for column stats.
@@ -48,7 +48,7 @@ typedef struct ColumnStatsConfig
 
 	/* used for truncate mode */
 	size_t		truncateLen;
-}			ColumnStatsConfig;
+} ColumnStatsConfig;
 
 
 
@@ -66,7 +66,7 @@ typedef struct DataFileColumnStats
 
 	/* upper bound of the column in text representation of the field's type */
 	char	   *upperBoundText;
-}			DataFileColumnStats;
+} DataFileColumnStats;
 
  /*
   * DataFileStats stores all statistics for a data file.
@@ -92,26 +92,26 @@ typedef struct DataFileStats
 
 	/* for a new data file with row IDs, the start of the range */
 	int64		rowIdStart;
-}			DataFileStats;
+} DataFileStats;
 
 typedef struct StatsCollector
 {
 	int64		totalRowCount;
 	List	   *dataFileStats;
-}			StatsCollector;
+} StatsCollector;
 
-extern PGDLLEXPORT DataFileStats * DeepCopyDataFileStats(const DataFileStats * stats);
-extern PGDLLEXPORT StatsCollector * GetDataFileStatsListFromPGResult(PGresult *result,
-																	 List *leafFields,
-																	 DataFileSchema * schema);
-extern PGDLLEXPORT StatsCollector * ExecuteCopyToCommandOnPGDuckConnection(char *copyCommand,
-																		   List *leafFields,
-																		   DataFileSchema * schema,
-																		   char *destinationPath,
-																		   CopyDataFormat destinationFormat);
-extern PGDLLEXPORT bool ShouldSkipStatistics(LeafField * leafField);
-extern PGDLLEXPORT DataFileStats * CreateDataFileStatsForDataFile(char *dataFilePath,
-																  int64 rowCount, int64 deletedRowCount,
-																  List *leafFields);
+extern PGDLLEXPORT DataFileStats *DeepCopyDataFileStats(const DataFileStats *stats);
+extern PGDLLEXPORT StatsCollector *GetDataFileStatsListFromPGResult(PGresult *result,
+																	List *leafFields,
+																	DataFileSchema *schema);
+extern PGDLLEXPORT StatsCollector *ExecuteCopyToCommandOnPGDuckConnection(char *copyCommand,
+																		  List *leafFields,
+																		  DataFileSchema *schema,
+																		  char *destinationPath,
+																		  CopyDataFormat destinationFormat);
+extern PGDLLEXPORT bool ShouldSkipStatistics(LeafField *leafField);
+extern PGDLLEXPORT DataFileStats *CreateDataFileStatsForDataFile(char *dataFilePath,
+																 int64 rowCount, int64 deletedRowCount,
+																 List *leafFields);
 extern PGDLLEXPORT void ApplyColumnStatsModeForAllFileStats(Oid relationId, List *dataFileStats);
 extern PGDLLEXPORT List *GetRemoteParquetColumnStats(char *path, List *leafFields);

@@ -31,7 +31,7 @@
  * from given manifest entry.
  */
 List *
-FetchDataFilesFromManifestEntry(IcebergManifestEntry * manifestEntry, DataFilePredicateFn dataFilePredicateFn)
+FetchDataFilesFromManifestEntry(IcebergManifestEntry *manifestEntry, DataFilePredicateFn dataFilePredicateFn)
 {
 	if (manifestEntry == NULL)
 	{
@@ -55,7 +55,7 @@ FetchDataFilesFromManifestEntry(IcebergManifestEntry * manifestEntry, DataFilePr
  * from given snapshot.
  */
 List *
-FetchDataFilesFromSnapshot(IcebergSnapshot * snapshot, ManifestPredicateFn manifestPredicateFn, ManifestEntryPredicateFn manifestEntryPredicateFn, DataFilePredicateFn dataFilePredicateFn)
+FetchDataFilesFromSnapshot(IcebergSnapshot *snapshot, ManifestPredicateFn manifestPredicateFn, ManifestEntryPredicateFn manifestEntryPredicateFn, DataFilePredicateFn dataFilePredicateFn)
 {
 	List	   *manifests = FetchManifestsFromSnapshot(snapshot, manifestPredicateFn);
 
@@ -80,7 +80,7 @@ FetchDataFilesFromSnapshot(IcebergSnapshot * snapshot, ManifestPredicateFn manif
  * from given snapshot.
  */
 List *
-FetchDataFilePathsFromSnapshot(IcebergSnapshot * snapshot, ManifestPredicateFn manifestPredicateFn, ManifestEntryPredicateFn manifestEntryPredicateFn, DataFilePredicateFn dataFilePredicateFn)
+FetchDataFilePathsFromSnapshot(IcebergSnapshot *snapshot, ManifestPredicateFn manifestPredicateFn, ManifestEntryPredicateFn manifestEntryPredicateFn, DataFilePredicateFn dataFilePredicateFn)
 {
 	List	   *manifests = FetchManifestsFromSnapshot(snapshot, manifestPredicateFn);
 
@@ -105,7 +105,7 @@ FetchDataFilePathsFromSnapshot(IcebergSnapshot * snapshot, ManifestPredicateFn m
  * from the current snapshot of given table metadata.
  */
 void
-FetchAllDataAndDeleteFilesFromCurrentSnapshot(IcebergTableMetadata * metadata, List **dataFiles, List **deleteFiles)
+FetchAllDataAndDeleteFilesFromCurrentSnapshot(IcebergTableMetadata *metadata, List **dataFiles, List **deleteFiles)
 {
 	if (metadata == NULL)
 	{
@@ -125,7 +125,7 @@ FetchAllDataAndDeleteFilesFromCurrentSnapshot(IcebergTableMetadata * metadata, L
  * file paths from the current snapshot of given table metadata.
  */
 void
-FetchAllDataAndDeleteFilePathsFromCurrentSnapshot(IcebergTableMetadata * metadata, List **dataFilePaths, List **deleteFilePaths)
+FetchAllDataAndDeleteFilePathsFromCurrentSnapshot(IcebergTableMetadata *metadata, List **dataFilePaths, List **deleteFilePaths)
 {
 	List	   *dataFiles = NIL;
 	List	   *deleteFiles = NIL;
@@ -156,7 +156,7 @@ FetchAllDataAndDeleteFilePathsFromCurrentSnapshot(IcebergTableMetadata * metadat
  * from given manifest.
  */
 List *
-FetchDataFilesFromManifest(IcebergManifest * manifest, bool pathOnly, ManifestEntryPredicateFn manifestEntryPredicateFn, DataFilePredicateFn dataFilePredicateFn)
+FetchDataFilesFromManifest(IcebergManifest *manifest, bool pathOnly, ManifestEntryPredicateFn manifestEntryPredicateFn, DataFilePredicateFn dataFilePredicateFn)
 {
 	if (manifest == NULL)
 	{

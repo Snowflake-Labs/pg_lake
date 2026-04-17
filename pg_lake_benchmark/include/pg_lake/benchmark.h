@@ -36,13 +36,13 @@ typedef struct BenchQuery
 {
 	const char *query;
 	int			query_nr;
-}			BenchQuery;
+} BenchQuery;
 
 extern void PgDuckInstallBenchExtension(BenchmarkType benchType);
 extern void PgDuckDropBenchTables(const char *tableNames[], int length);
 extern void PgDuckGenerateBenchTables(BenchmarkType benchType, float4 scaleFactor, int iterationCount);
 extern void PgDuckCopyBenchTablesToRemoteParquet(const char *tableNames[], int length, char *location);
-extern void PgDuckGetQueries(BenchmarkType benchType, BenchQuery * queries, int queryCount);
+extern void PgDuckGetQueries(BenchmarkType benchType, BenchQuery *queries, int queryCount);
 extern void PgLakeDropBenchTables(const char *tableNames[], int length, char *location);
 extern void PgLakeCreateBenchTables(const char *tableNames[], char **partitionBys, int length, BenchmarkTableType tableType, char *location);
 extern BenchmarkTableType GetBenchTableType(Oid tableTypeId);

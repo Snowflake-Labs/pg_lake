@@ -54,15 +54,15 @@ typedef struct PgLakeOption
 {
 	const char *keyword;
 	Oid			optcontext;		/* OID of catalog in which option may appear */
-}			PgLakeOption;
+} PgLakeOption;
 
 
 /*
  * Valid options for lake_table.
  * Allocated and filled in InitPgLakeOptions.
  */
-static PgLakeOption * pg_lake_options;
-static PgLakeOption * pg_lake_iceberg_options;
+static PgLakeOption *pg_lake_options;
+static PgLakeOption *pg_lake_iceberg_options;
 
 /*
  * Helper functions

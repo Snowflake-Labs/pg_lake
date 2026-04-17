@@ -46,10 +46,10 @@ typedef struct CopyFromStdinState
 
 	/* whether we reached the end-of-file */
 	bool		raw_reached_eof;
-}			CopyFromStdinState;
+} CopyFromStdinState;
 
 static void SendCopyInResponseToClient(int16 columnCount, bool isBinary);
-static int	ReceiveDataFromClient(CopyFromStdinState * cstate, char *databuf);
+static int	ReceiveDataFromClient(CopyFromStdinState *cstate, char *databuf);
 static void SendCopyBegin(int columnCount, bool isBinary);
 static void SendCopyEnd(void);
 static void SendCopyData(char *sendBuffer, int sendBufferLength);
@@ -161,7 +161,7 @@ SendCopyInResponseToClient(int16 columnCount, bool isBinary)
  * This code is copied ad verbatim from CopyGetData in PostgreSQL.
  */
 static int
-ReceiveDataFromClient(CopyFromStdinState * cstate, char *databuf)
+ReceiveDataFromClient(CopyFromStdinState *cstate, char *databuf)
 {
 	int			minread = 1;
 	int			maxread = MAX_READ_SIZE;

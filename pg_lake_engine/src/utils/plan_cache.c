@@ -60,7 +60,7 @@ typedef struct QueryPlanCacheEntry
 	SPIPlanPtr	plan;
 	uint32		planUseCount;
 	bool		isValid;
-}			QueryPlanCacheEntry;
+} QueryPlanCacheEntry;
 
 /* internal function declarations */
 static void InitializeQueryPlanCache(void);

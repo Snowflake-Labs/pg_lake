@@ -152,7 +152,7 @@ typedef struct BaseWorkerControlData
 	/* current PID of the server starter */
 	pid_t		serverStarterPid;
 	int			serverStarterProcno;
-}			BaseWorkerControlData;
+} BaseWorkerControlData;
 
 
 typedef enum WorkerState
@@ -162,7 +162,7 @@ typedef enum WorkerState
 	WORKER_RUNNING,
 	WORKER_STOPPED,
 	WORKER_RESTARTING
-}			WorkerState;
+} WorkerState;
 
 
 /*
@@ -184,7 +184,7 @@ typedef struct DatabaseStarterEntry
 
 	/* process number for signaling via ProcSendSignal */
 	int			procno;
-}			DatabaseStarterEntry;
+} DatabaseStarterEntry;
 
 
 /*
@@ -197,7 +197,7 @@ typedef struct BaseWorkerKey
 
 	/* worker ID */
 	int32		workerId;
-}			BaseWorkerKey;
+} BaseWorkerKey;
 
 
 /*
@@ -225,7 +225,7 @@ typedef struct BaseWorkerEntry
 
 	/* when to restart the base worker (delayed after failure) */
 	TimestampTz restartAfter;
-}			BaseWorkerEntry;
+} BaseWorkerEntry;
 
 
 /*
@@ -241,7 +241,7 @@ typedef struct DatabaseEntry
 
 	/* whether this is a template database */
 	bool		isTemplate;
-}			DatabaseEntry;
+} DatabaseEntry;
 
 
 /*
@@ -261,7 +261,7 @@ typedef struct BaseWorkerRegistration
 
 	/* entry point function */
 	Oid			entryPointFunctionId;
-}			BaseWorkerRegistration;
+} BaseWorkerRegistration;
 
 /*
  * StartDatabaseStarterResult indicates whether a database starter was
@@ -273,7 +273,7 @@ typedef enum StartDatabaseStarterResult
 	DATABASE_STARTER_EXISTS,
 	DATABASE_STARTER_DONE,
 	DATABASE_STARTER_FAILED
-}			StartDatabaseStarterResult;
+} StartDatabaseStarterResult;
 
 /*
  * StartBaseWorkerResult indicates whether a base worker was
@@ -286,7 +286,7 @@ typedef enum StartBaseWorkerResult
 	BASE_WORKER_DONE,
 	BASE_WORKER_START_FAILED,
 	BASE_WORKER_START_BLOCKED
-}			StartBaseWorkerResult;
+} StartBaseWorkerResult;
 
 
 
@@ -308,10 +308,10 @@ static StartDatabaseStarterResult StartDatabaseStarter(Oid databaseId,
 													   char *databaseName);
 
 /* shared memory bookkeeping */
-static DatabaseStarterEntry * GetDatabaseStarterEntry(Oid databaseId, bool *isFound);
-static DatabaseStarterEntry * GetOrCreateDatabaseStarterEntry(Oid databaseId, bool *isFound);
-static BaseWorkerEntry * GetBaseWorkerEntry(Oid databaseId, int32 workerId, bool *isFound);
-static BaseWorkerEntry * GetOrCreateBaseWorkerEntry(int32 workerId, bool *isFound);
+static DatabaseStarterEntry *GetDatabaseStarterEntry(Oid databaseId, bool *isFound);
+static DatabaseStarterEntry *GetOrCreateDatabaseStarterEntry(Oid databaseId, bool *isFound);
+static BaseWorkerEntry *GetBaseWorkerEntry(Oid databaseId, int32 workerId, bool *isFound);
+static BaseWorkerEntry *GetOrCreateBaseWorkerEntry(int32 workerId, bool *isFound);
 static void RemoveBaseWorkerEntry(Oid databaseId, int32 workerId);
 static void RemoveBaseWorkerEntriesForDatabase(Oid databaseId);
 static void RemoveBaseWorkerEntriesNotInRegistrationList(List *workerRegistrationList);
@@ -377,7 +377,7 @@ PGDLLEXPORT void PgExtensionBaseDatabaseStarterMain(Datum arg);
 PGDLLEXPORT void PgExtensionBaseWorkerMain(Datum arg);
 
 /* shared memory state */
-static BaseWorkerControlData * BaseWorkerControl = NULL;
+static BaseWorkerControlData *BaseWorkerControl = NULL;
 static HTAB *DatabaseStarterHash = NULL;
 static HTAB *BaseWorkerHash = NULL;
 

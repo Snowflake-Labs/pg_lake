@@ -29,10 +29,10 @@
 #include "pg_extension_base/spi_helpers.h"
 
 static void InsertIcebergPartitionSpec(Oid relationId,
-									   IcebergPartitionSpec * spec);
+									   IcebergPartitionSpec *spec);
 static void InsertIcebergPartitionField(Oid relationId,
 										int specId,
-										IcebergPartitionSpecField * field);
+										IcebergPartitionSpecField *field);
 static List *GetAllPartitionSpecFieldsForExternalIcebergTable(char *metadataPath);
 static List *GetAllPartitionSpecFieldsForInternalIcebergTable(Oid relationId);
 
@@ -372,7 +372,7 @@ UpdateDefaultPartitionSpecId(Oid relationId, int specId)
 * lake_table.partition_fields tables.
 */
 void
-InsertPartitionSpecAndPartitionFields(Oid relationId, IcebergPartitionSpec * spec)
+InsertPartitionSpecAndPartitionFields(Oid relationId, IcebergPartitionSpec *spec)
 {
 	/* insert the partition spec */
 	InsertIcebergPartitionSpec(relationId, spec);
@@ -391,7 +391,7 @@ InsertPartitionSpecAndPartitionFields(Oid relationId, IcebergPartitionSpec * spe
 * lake_table.partition_specs table.
 */
 static void
-InsertIcebergPartitionSpec(Oid relationId, IcebergPartitionSpec * spec)
+InsertIcebergPartitionSpec(Oid relationId, IcebergPartitionSpec *spec)
 {
 	DECLARE_SPI_ARGS(2);
 
@@ -415,7 +415,7 @@ InsertIcebergPartitionSpec(Oid relationId, IcebergPartitionSpec * spec)
 * lake_table.partition_fields table.
 */
 static void
-InsertIcebergPartitionField(Oid relationId, int specId, IcebergPartitionSpecField * field)
+InsertIcebergPartitionField(Oid relationId, int specId, IcebergPartitionSpecField *field)
 {
 	DECLARE_SPI_ARGS(6);
 

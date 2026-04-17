@@ -49,7 +49,7 @@ typedef struct PgLakeSpatialExtensionIds
 
 	/* internal ST_GeometryType(geometry) function */
 	Oid			internalGeometryTypeFunctionId;
-}			PgLakeSpatialExtensionIds;
+} PgLakeSpatialExtensionIds;
 
 /*
  * Generic extension state.

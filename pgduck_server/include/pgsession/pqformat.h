@@ -187,8 +187,8 @@ pq_writestring(StringInfoData *pg_restrict buf, const char *pg_restrict str)
 
 extern void pq_beginmessage(StringInfo buf, char msgtype);
 extern void pq_beginmessage_reuse(StringInfo buf, char msgtype);
-extern int	pq_endmessage(PGSession * session, StringInfo buf);
-extern int	pq_endmessage_reuse(PGSession * session, StringInfo buf);
+extern int	pq_endmessage(PGSession *session, StringInfo buf);
+extern int	pq_endmessage_reuse(PGSession *session, StringInfo buf);
 extern const char *pq_getmsgstring(StringInfo msg);
 extern unsigned int pq_getmsgint(StringInfo msg, int b, bool *readFailed);
 extern void pq_copymsgbytes(StringInfo msg, char *buf, int datalen, bool *readFailed);

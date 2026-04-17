@@ -144,7 +144,7 @@ pq_beginmessage_reuse(StringInfo buf, char msgtype)
  * --------------------------------
  */
 int
-pq_endmessage(PGSession * session, StringInfo buf)
+pq_endmessage(PGSession *session, StringInfo buf)
 {
 	/* msgtype was saved in cursor field */
 	int			ret = pgsession_put_message(session, buf->cursor, buf->data, buf->len);
@@ -165,7 +165,7 @@ pq_endmessage(PGSession * session, StringInfo buf)
  */
 
 int
-pq_endmessage_reuse(PGSession * session, StringInfo buf)
+pq_endmessage_reuse(PGSession *session, StringInfo buf)
 {
 	/* msgtype was saved in cursor field */
 	return pgsession_put_message(session, buf->cursor, buf->data, buf->len);

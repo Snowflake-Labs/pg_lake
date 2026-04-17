@@ -92,22 +92,22 @@ typedef struct CompactionDataFileHashEntry
 	uint64		partitionHash;	/* combined hash of partition spec + partition
 								 * tuple */
 	List	   *dataFiles;
-}			CompactionDataFileHashEntry;
+} CompactionDataFileHashEntry;
 
 
 static List *ApplyInsertFile(Relation rel, char *insertFile, int64 rowCount,
 							 int64 reservedRowIdStart, int32 partitionSpecId,
-							 Partition * partition, DataFileStats * fileStats);
+							 Partition *partition, DataFileStats *fileStats);
 static List *ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount,
 							 int64 liveRowCount, char *deleteFile, int64 deletedRowCount,
 							 int64 *totalPositionDeletedRows);
 static List *GetDataFilePathsFromStatsList(List *dataFileStats);
 static List *GetNewFileOpsFromFileStats(Oid relationId, List *dataFileStats,
-										int32 partitionSpecId, Partition * partition, int64 rowCount,
+										int32 partitionSpecId, Partition *partition, int64 rowCount,
 										bool isVerbose, List **newFiles);
 static bool ShouldRewriteAfterDeletions(int64 sourceRowCount, uint64 totalDeletedRowCount);
-static CompactionDataFileHashEntry * GetPartitionWithMostEligibleFiles(Oid relationId, TimestampTz compactionStartTime,
-																	   bool forceMerge, bool forceCompactDeletions);
+static CompactionDataFileHashEntry *GetPartitionWithMostEligibleFiles(Oid relationId, TimestampTz compactionStartTime,
+																	  bool forceMerge, bool forceCompactDeletions);
 static HTAB *CreateCompactionDataFileHash(void);
 static HTAB *GroupDataFilesByPartition(List *dataFiles, TimestampTz compactionStartTime, bool forceMerge);
 static List *FilterCompactionCandidates(List *dataFiles, TimestampTz compactionStartTime, bool forceMerge,
@@ -121,7 +121,7 @@ static List *PrepareToAddQueryResultToTable(Oid relationId,
 											char *readQuery,
 											TupleDesc queryTupleDesc,
 											int32 partitionSpecId,
-											Partition * partition,
+											Partition *partition,
 											bool queryHasRowId,
 											bool allowSplit,
 											bool isVerbose,
@@ -170,7 +170,7 @@ List	   *DeferredModifications = NIL;
 static List *
 ApplyInsertFile(Relation rel, char *insertFile, int64 rowCount,
 				int64 reservedRowIdStart, int32 partitionSpecId,
-				Partition * partition, DataFileStats * dataFileStats)
+				Partition *partition, DataFileStats *dataFileStats)
 {
 	ereport(WriteLogLevel, (errmsg("adding %s with " INT64_FORMAT " rows ",
 								   insertFile, rowCount)));
@@ -218,7 +218,7 @@ ApplyInsertFile(Relation rel, char *insertFile, int64 rowCount,
 List *
 PrepareCSVInsertion(Oid relationId, char *insertCSV, int64 rowCount,
 					int64 reservedRowIdStart, int maximumLineSize,
-					DataFileSchema * schema)
+					DataFileSchema *schema)
 {
 	Relation	relation = table_open(relationId, RowExclusiveLock);
 	ForeignTable *foreignTable = GetForeignTable(relationId);
@@ -351,7 +351,7 @@ GetDataFilePathsFromStatsList(List *dataFileStats)
  * and adds them to the metadata operations list to be returned.
  */
 static List *
-GetNewFileOpsFromFileStats(Oid relationId, List *dataFileStats, int32 partitionSpecId, Partition * partition,
+GetNewFileOpsFromFileStats(Oid relationId, List *dataFileStats, int32 partitionSpecId, Partition *partition,
 						   int64 rowCount, bool isVerbose, List **newFiles)
 {
 	*newFiles = NIL;
@@ -990,7 +990,7 @@ TryCompactDataFiles(Oid relationId, TupleDesc tupleDescriptor, List *candidates,
  */
 static List *
 PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc,
-							   int32 partitionSpecId, Partition * partition,
+							   int32 partitionSpecId, Partition *partition,
 							   bool queryHasRowId, bool allowSplit, bool isVerbose,
 							   IcebergOutOfRangePolicy outOfRangePolicy,
 							   bool wrapNativeIntervals)

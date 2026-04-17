@@ -37,19 +37,19 @@ typedef struct IcebergPartitionSpecHashEntry
 {
 	int32		specId;			/* hash key: spec id */
 	IcebergPartitionSpec *spec; /* the partition spec */
-}			IcebergPartitionSpecHashEntry;
+} IcebergPartitionSpecHashEntry;
 
 
 extern void UpdateDefaultPartitionSpecId(Oid relationId, int specId);
-extern void InsertPartitionSpecAndPartitionFields(Oid relationId, IcebergPartitionSpec * spec);
+extern void InsertPartitionSpecAndPartitionFields(Oid relationId, IcebergPartitionSpec *spec);
 extern int	GetLargestSpecId(Oid relationId);
 extern List *GetAllIcebergPartitionSpecIds(Oid relationId);
 extern PGDLLEXPORT int GetCurrentSpecId(Oid relationId);
 extern int	GetLargestPartitionFieldId(Oid relationId);
-extern IcebergPartitionSpecField * GetIcebergPartitionFieldFromCatalog(Oid relationId, int fieldId);
+extern IcebergPartitionSpecField *GetIcebergPartitionFieldFromCatalog(Oid relationId, int fieldId);
 extern List *GetIcebergSpecPartitionFieldsFromCatalog(Oid relationId, int specId);
 extern List *GetAllPartitionSpecFields(Oid relationId);
-extern Partition * GetDataFilePartition(Oid relationId, List *partitionTransforms,
-										const char *path, int32 *partitionSpecId);
+extern Partition *GetDataFilePartition(Oid relationId, List *partitionTransforms,
+									   const char *path, int32 *partitionSpecId);
 extern HTAB *GetAllPartitionSpecsFromCatalog(Oid relationId);
 extern HTAB *CreatePartitionSpecHash(void);

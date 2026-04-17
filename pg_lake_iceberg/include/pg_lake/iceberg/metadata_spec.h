@@ -45,7 +45,7 @@ typedef struct Property
 	size_t		key_length;
 	const char *value;
 	size_t		value_length;
-}			Property;
+} Property;
 
 
 /*
@@ -63,7 +63,7 @@ typedef struct IcebergTableSchema
 
 	int		   *identifier_field_ids;
 	size_t		identifier_field_ids_length;
-}			IcebergTableSchema;
+} IcebergTableSchema;
 
 
 /*
@@ -81,7 +81,7 @@ typedef struct IcebergPartitionSpecField
 	size_t		name_length;
 	const char *transform;
 	size_t		transform_length;
-}			IcebergPartitionSpecField;
+} IcebergPartitionSpecField;
 
 /*
 * Represents the partition specification of the Iceberg table.
@@ -91,7 +91,7 @@ typedef struct IcebergPartitionSpec
 	int32_t		spec_id;
 	IcebergPartitionSpecField *fields;
 	size_t		fields_length;
-}			IcebergPartitionSpec;
+} IcebergPartitionSpec;
 
 
 /*
@@ -109,7 +109,7 @@ typedef struct IcebergSnapshot
 	size_t		summary_length;
 	int32_t		schema_id;
 	bool		schema_id_set;
-}			IcebergSnapshot;
+} IcebergSnapshot;
 
 /*
 * Represents the log entry of the Iceberg snapshot.
@@ -118,7 +118,7 @@ typedef struct IcebergSnapshotLogEntry
 {
 	int64_t		timestamp_ms;
 	int64_t		snapshot_id;
-}			IcebergSnapshotLogEntry;
+} IcebergSnapshotLogEntry;
 
 /*
 * Represents the statistics of the Iceberg partition.
@@ -130,7 +130,7 @@ typedef struct IcebergPartitionStatistics
 	size_t		statistics_path_length;
 	int64_t		file_size_in_bytes;
 
-}			IcebergPartitionStatistics;
+} IcebergPartitionStatistics;
 
 /*
 * Represents the log entry of the Iceberg metadata.
@@ -140,7 +140,7 @@ typedef struct IcebergMetadataLogEntry
 	int64_t		timestamp_ms;
 	const char *metadata_file;
 	size_t		metadata_file_length;
-}			IcebergMetadataLogEntry;
+} IcebergMetadataLogEntry;
 
 /*
 * Represents the sort order field of the Iceberg table.
@@ -154,7 +154,7 @@ typedef struct IcebergSortOrderField
 	size_t		direction_length;
 	const char *null_order;
 	size_t		null_order_length;
-}			IcebergSortOrderField;
+} IcebergSortOrderField;
 
 /*
 * Represents the sort order of the Iceberg table.
@@ -164,14 +164,14 @@ typedef struct IcebergSortOrder
 	int32_t		order_id;
 	IcebergSortOrderField *fields;
 	size_t		fields_length;
-}			IcebergSortOrder;
+} IcebergSortOrder;
 
 typedef enum SnapshotReferenceType
 {
 	SNAPSHOT_REFERENCE_TYPE_TAG,
 	SNAPSHOT_REFERENCE_TYPE_BRANCH,
 	SNAPSHOT_REFERENCE_TYPE_INVALID
-}			SnapshotReferenceType;
+} SnapshotReferenceType;
 
 /*
 * Represents the reference of the Iceberg snapshot.
@@ -188,7 +188,7 @@ typedef struct SnapshotReference
 	int64_t		max_snapshot_age_ms;
 	bool		has_max_ref_age_ms;
 	int64_t		max_ref_age_ms;
-}			SnapshotReference;
+} SnapshotReference;
 
 /*
 * Represents the metadata of the blob-metadata field under
@@ -209,7 +209,7 @@ typedef struct BlobMetadata
 	Property   *properties;
 	size_t		properties_length;
 
-}			BlobMetadata;
+} BlobMetadata;
 
 /*
 * Represents the statistics of the Iceberg table.
@@ -229,7 +229,7 @@ typedef struct IcebergStatistics
 
 	BlobMetadata *blobs;
 	size_t		blobs_length;
-}			IcebergStatistics;
+} IcebergStatistics;
 
 
 /*
@@ -286,9 +286,9 @@ typedef struct IcebergTableMetadata
 
 	IcebergStatistics *statistics;
 	size_t		statistics_length;
-}			IcebergTableMetadata;
+} IcebergTableMetadata;
 
-extern PGDLLEXPORT IcebergTableMetadata * ReadIcebergTableMetadata(const char *tableMetadataPath);
-extern PGDLLEXPORT char *WriteIcebergTableMetadataToJson(IcebergTableMetadata * metadata);
-extern PGDLLEXPORT void AppendIcebergTableSchemaForRestCatalog(StringInfo command, IcebergTableSchema * schemas, size_t schemas_length);
-extern PGDLLEXPORT void AppendIcebergPartitionSpecFields(StringInfo command, IcebergPartitionSpecField * fields, size_t fields_length);
+extern PGDLLEXPORT IcebergTableMetadata *ReadIcebergTableMetadata(const char *tableMetadataPath);
+extern PGDLLEXPORT char *WriteIcebergTableMetadataToJson(IcebergTableMetadata *metadata);
+extern PGDLLEXPORT void AppendIcebergTableSchemaForRestCatalog(StringInfo command, IcebergTableSchema *schemas, size_t schemas_length);
+extern PGDLLEXPORT void AppendIcebergPartitionSpecFields(StringInfo command, IcebergPartitionSpecField *fields, size_t fields_length);

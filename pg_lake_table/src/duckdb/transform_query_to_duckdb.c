@@ -58,7 +58,7 @@
 #include "pg_lake/util/rel_utils.h"
 #include "pg_lake/util/string_utils.h"
 
-static char *BuildReadDataSourceQueryForTableScan(PgLakeTableScan * tableScan,
+static char *BuildReadDataSourceQueryForTableScan(PgLakeTableScan *tableScan,
 												  bool skipFullMatchFiles,
 												  TupleDesc projection);
 static void EnsureServerType(Oid relationId);
@@ -75,7 +75,7 @@ static void EnsureServerType(Oid relationId);
  */
 char *
 ReplaceReadTableFunctionCalls(char *query,
-							  PgLakeScanSnapshot * snapshot,
+							  PgLakeScanSnapshot *snapshot,
 							  int scanFlags)
 {
 	bool		explainRequested = (scanFlags & EXPLAIN_REQUESTED) != 0;
@@ -155,7 +155,7 @@ ReplaceReadTableFunctionCalls(char *query,
  * If parentDesc is specified, use it
  */
 static char *
-BuildReadDataSourceQueryForTableScan(PgLakeTableScan * tableScan, bool skipFullMatchFiles, TupleDesc projection)
+BuildReadDataSourceQueryForTableScan(PgLakeTableScan *tableScan, bool skipFullMatchFiles, TupleDesc projection)
 {
 	Oid			relationId = tableScan->relationId;
 	ForeignTable *foreignTable = GetForeignTable(relationId);

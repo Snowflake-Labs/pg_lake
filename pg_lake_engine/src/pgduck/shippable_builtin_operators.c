@@ -519,7 +519,7 @@ static const PGDuckShippableOperatorsByType PGDuckShippableOperatorsByTypes[] = 
  * GetPGDuckShippableOperatorsByType returns all shippable built-in operators,
  * group by type.
  */
-const		PGDuckShippableOperatorsByType *
+const PGDuckShippableOperatorsByType *
 GetPGDuckShippableOperatorsByType(int *sizePointer)
 {
 	*sizePointer = ARRAY_SIZE(PGDuckShippableOperatorsByTypes);

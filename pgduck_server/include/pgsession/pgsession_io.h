@@ -25,18 +25,18 @@
 
 #include "include/pgsession/pgsession.h"
 
-extern int	pgsession_put_message(PGSession * session, char messageType, char *buf, size_t bufferLength);
-extern int	pgsession_putemptymessage(PGSession * session, char msgtype);
-extern int	pgsession_get_message(PGSession * session, StringInfo message, int maxLength);
-extern int	pgsession_read_startup_packet(PGSession * session);
-extern int	pgsession_read_command(PGSession * session, StringInfo inputMessage);
-extern int	pgsession_get_bytes(PGSession * session, char *buf, size_t len);
-extern int	pgsession_get_byte(PGSession * session);
-extern int	pgsession_receive(PGSession * session);
-extern int	pgsession_put_bytes(PGSession * session, char *buf, size_t bufferLength);
-extern int	pgsession_flush(PGSession * session);
+extern int	pgsession_put_message(PGSession *session, char messageType, char *buf, size_t bufferLength);
+extern int	pgsession_putemptymessage(PGSession *session, char msgtype);
+extern int	pgsession_get_message(PGSession *session, StringInfo message, int maxLength);
+extern int	pgsession_read_startup_packet(PGSession *session);
+extern int	pgsession_read_command(PGSession *session, StringInfo inputMessage);
+extern int	pgsession_get_bytes(PGSession *session, char *buf, size_t len);
+extern int	pgsession_get_byte(PGSession *session);
+extern int	pgsession_receive(PGSession *session);
+extern int	pgsession_put_bytes(PGSession *session, char *buf, size_t bufferLength);
+extern int	pgsession_flush(PGSession *session);
 extern char *pgduck_client_to_server(const char *s, int len);
 extern void pq_sendstring(StringInfo buf, const char *str);
-extern int	pgsession_send_postgres_error(PGSession * pgSession, int errSev, char *errorMessage);
+extern int	pgsession_send_postgres_error(PGSession *pgSession, int errSev, char *errorMessage);
 
 #endif							/* // PGDUCK_PG_SESSION_IO_H */

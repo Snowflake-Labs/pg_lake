@@ -29,7 +29,7 @@ typedef struct DbtApplicationQueryContext
 {
 	/* tables that are in the FROM clause of the query */
 	List	   *rtable;
-}			DbtApplicationQueryContext;
+} DbtApplicationQueryContext;
 
 
 extern bool AddForeignTablesToRelkindInArrayFilter(Node *node, void *context);
