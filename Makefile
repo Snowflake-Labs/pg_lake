@@ -63,7 +63,7 @@ endif
 
 # style/indent-related changes
 
-# This target ensures that we download the latest major version's typedefs.list
+# This target ensures that we download the target major version's typedefs.list
 # from buildfarm if we don't have a local copy.  Since we currently do not
 # override the typedefs.list, this should be equivalent to what we were
 # previously doing by pulling from the postgres source tree.
