@@ -40,7 +40,7 @@ typedef struct AttachedWorker
 	BackgroundWorkerHandle *workerHandle;
 } AttachedWorker;
 
-extern PGDLLEXPORT AttachedWorker *StartAttachedWorker(char *command);
+extern PGDLLEXPORT AttachedWorker * StartAttachedWorker(char *command);
 extern PGDLLEXPORT AttachedWorker *StartAttachedWorkerInDatabase(char *command,
 																 char *databaseName,
 																 char *userName);
