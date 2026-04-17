@@ -55,5 +55,5 @@ typedef struct NotShippableObject
 extern bool is_builtin(Oid objectId);
 extern bool is_shippable(Oid objectId, Oid classId, Node *expr);
 extern bool is_non_shippable_udt_context(Node *node);
-extern const char *GetNotShippableDescription(NotShippableReason reason, Oid classId, Oid objectId);
-extern HTAB *CollectNotShippableObjects(Node *node);
+extern PGDLLEXPORT const char *GetNotShippableDescription(NotShippableReason reason, Oid classId, Oid objectId);
+extern PGDLLEXPORT HTAB *CollectNotShippableObjects(Node *node);
