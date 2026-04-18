@@ -157,7 +157,11 @@ server pg_lake
 options (path 's3://mybucket/table/v14.metadata.json');
 ```
 
-Note that changes to the external Iceberg table will **not** be reflected in the foreign table unless you update the path to point to the new metadata file.
+Note that changes to the external Iceberg table will **not** be reflected in the foreign table unless you update the path to point to the new metadata file. You can do this without dropping and recreating the table:
+
+```sql
+ALTER FOREIGN TABLE external_iceberg OPTIONS (SET path 's3://mybucket/table/v15.metadata.json');
+```
 
 ## Hugging Face
 
