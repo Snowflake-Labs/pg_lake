@@ -78,8 +78,6 @@ PgLakeAddDataFileHookType PgLakeAddDataFileHook = NULL;
 static void FillDataFileColumnStats(TableDataFile * dataFile, int64 fieldId, int rowIndex);
 static void FillPartitionFieldFromCatalog(TableDataFile * dataFile, List *partitionTransforms,
 										  int64 partitionFieldId, int rowIndex);
-static int64 AddDataFileToTable(Oid relationId, const char *path, int64 rowCount,
-								int64 fileSize, DataFileContent content, int64 rowIdStart);
 static void AddDeletionFileMapping(Oid relationId, const char *path,
 								   const char *sourcePath);
 static void AddNewRowIdMapping(Oid relationId, const char *path, List *rowIdRanges);
@@ -788,7 +786,7 @@ GetTotalDeletedRowCountFromCatalog(Oid relationId)
  * For deletion files, deletedFrom indicates which file we are deleting from (can
  * be NULL if deleting from multiple files/unknown).
  */
-static int64
+int64
 AddDataFileToTable(Oid relationId, const char *path, int64 rowCount, int64 fileSize,
 				   DataFileContent content, int64 rowIdStart)
 {
