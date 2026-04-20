@@ -100,8 +100,12 @@ def test_bucket_partition_write(
         pg_conn,
     )
 
+    # bucket transforms should not use pushdown
+    insert_sql = f"INSERT INTO {tbl} {_insert_select(col_type)}"
+    assert_query_not_pushdownable(insert_sql, pg_conn)
+
     # 1 · insert rows
-    run_command(f"INSERT INTO {tbl} {_insert_select(col_type)};", pg_conn)
+    run_command(f"{insert_sql};", pg_conn)
 
     pg_conn.commit()
 

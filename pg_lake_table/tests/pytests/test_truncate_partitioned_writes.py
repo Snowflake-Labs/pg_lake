@@ -117,8 +117,12 @@ def test_truncate_partition_write(
         pg_conn,
     )
 
+    # truncate transforms should not use pushdown
+    insert_sql = f"INSERT INTO {tbl} {insert_tmpl.format(n=N_ROWS)}"
+    assert_query_not_pushdownable(insert_sql, pg_conn)
+
     # insert rows
-    run_command(f"INSERT INTO {tbl} {insert_tmpl.format(n=N_ROWS)};", pg_conn)
+    run_command(f"{insert_sql};", pg_conn)
     pg_conn.commit()
 
     res = run_query(f"SELECT * FROM {tbl}", pg_conn)

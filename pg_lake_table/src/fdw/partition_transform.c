@@ -38,6 +38,7 @@
 #include "pg_lake/iceberg/truncate_utils.h"
 #include "pg_lake/util/numeric.h"
 #include "pg_lake/util/rel_utils.h"
+#include "pg_lake/util/temporal_utils.h"
 #include "pg_lake/util/timetz.h"
 
 static PartitionField * ApplyPartitionTransformToTuple(IcebergPartitionTransform * transform,
@@ -1053,6 +1054,8 @@ DeserializePartitionValueFromPGText(IcebergPartitionTransform * transform,
 
 	return value;
 }
+
+
 
 /*
 * PartitionValueToDatum converts the partition value to a datum by deserializing

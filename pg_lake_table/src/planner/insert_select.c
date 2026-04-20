@@ -22,6 +22,8 @@
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/planner/insert_select.h"
 #include "pg_lake/planner/query_pushdown.h"
+#include "pg_lake/fdw/partition_pushdown.h"
+#include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/partitioning/partition_by_parser.h"
 #include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/numeric.h"
@@ -41,6 +43,9 @@ static bool TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod, CopyData
 
 /* pg_lake_table.enable_insert_select_pushdown setting */
 bool		EnableInsertSelectPushdown = true;
+
+/* pg_lake_table.enable_partitioned_write_pushdown setting */
+bool		EnablePartitionedWritePushdown = true;
 
 /*
  * IsPushdownableInsertSelectQuery checks whether the given query is an INSERT..SELECT
@@ -118,12 +123,27 @@ IsPushdownableInsertSelectQuery(Query *query)
 		return false;
 	}
 
+	/*
+	 * Partitioned tables can be pushed down if all transforms are supported
+	 * by DuckDB PARTITION_BY (identity, year, month, day, hour).
+	 */
 	const char *partitionBy = GetIcebergTablePartitionByOption(insertIntoRelid);
 
-	if (partitionBy != NULL)
+	if (partitionBy != NULL && !EnablePartitionedWritePushdown)
 	{
 		ereport(DEBUG4,
-				(errmsg("INSERT..SELECT into partitioned table is not pushdownable")));
+				(errmsg("INSERT..SELECT into partitioned table is not "
+						"pushdownable (enable_partitioned_write_pushdown is off)")));
+		RelationClose(insertRelation);
+		return false;
+	}
+
+	if (partitionBy != NULL &&
+		GetPartitionByExpressionsForRelation(insertIntoRelid) == NIL)
+	{
+		ereport(DEBUG4,
+				(errmsg("INSERT..SELECT into partitioned table with "
+						"unsupported transforms is not pushdownable")));
 		RelationClose(insertRelation);
 		return false;
 	}
