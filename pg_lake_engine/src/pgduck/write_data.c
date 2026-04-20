@@ -104,7 +104,8 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 							  csvTupleDesc,
 							  leafFields,
 							  ICEBERG_OOR_NONE,
-							  false /* wrapNativeIntervals */ );
+							  false /* wrapNativeIntervals */ ,
+							  NIL /* partitionByExprs */ );
 }
 
 
@@ -124,7 +125,8 @@ WriteQueryResultTo(char *query,
 				   TupleDesc queryTupleDesc,
 				   List *leafFields,
 				   IcebergOutOfRangePolicy outOfRangePolicy,
-				   bool wrapNativeIntervals)
+				   bool wrapNativeIntervals,
+				   List *partitionByExprs)
 {
 	if (outOfRangePolicy != ICEBERG_OOR_NONE)
 	{
@@ -137,6 +139,34 @@ WriteQueryResultTo(char *query,
 	{
 		query = IcebergWrapQueryWithIntervalConversion(query, queryTupleDesc,
 													   queryHasRowId);
+	}
+
+	/*
+	 * If partition expressions are given, wrap the (already validated) query
+	 * with synthetic partition columns. This must happen AFTER the validation
+	 * and interval wrappers, because those reconstruct the SELECT list from
+	 * queryTupleDesc and would drop any extra columns added earlier.
+	 */
+	if (partitionByExprs != NIL)
+	{
+		StringInfoData wrapped;
+
+		initStringInfo(&wrapped);
+		appendStringInfoString(&wrapped, "SELECT *");
+
+		int			partIndex = 0;
+		ListCell   *exprCell = NULL;
+
+		foreach(exprCell, partitionByExprs)
+		{
+			char	   *expr = strVal(lfirst(exprCell));
+
+			appendStringInfo(&wrapped, ", %s AS " PARTITION_COLUMN_PREFIX "%d", expr, partIndex);
+			partIndex++;
+		}
+
+		appendStringInfo(&wrapped, " FROM (%s) __partitioned_source", query);
+		query = wrapped.data;
 	}
 
 	StringInfoData command;
@@ -362,6 +392,33 @@ WriteQueryResultTo(char *query,
 
 		default:
 			elog(ERROR, "unexpected format: %s", formatName);
+	}
+
+	/* add PARTITION_BY if partitioning expressions were specified */
+	if (partitionByExprs != NIL)
+	{
+		appendStringInfoString(&command, ", PARTITION_BY (");
+
+		int			numExprs = list_length(partitionByExprs);
+
+		for (int i = 0; i < numExprs; i++)
+		{
+			if (i > 0)
+				appendStringInfoString(&command, ", ");
+
+			appendStringInfo(&command, PARTITION_COLUMN_PREFIX "%d", i);
+		}
+
+		appendStringInfoString(&command, ")");
+
+		/*
+		 * Disable Hive-style directory naming (col=val/) since we extract
+		 * partition values from the partition_keys MAP, not from file paths.
+		 * This avoids issues with long text values causing HTTP 400 errors
+		 * and percent-encoding in directory names.
+		 */
+		appendStringInfoString(&command, ", WRITE_PARTITION_COLUMNS false"
+							   ", HIVE_FILE_PATTERN false");
 	}
 
 	/* end WITH options */

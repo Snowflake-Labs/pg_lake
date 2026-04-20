@@ -169,6 +169,7 @@ CASES = [
 ]
 
 
+@pytest.mark.parametrize("run_pushdown", [True, False], ids=["pushdown", "row_by_row"])
 @pytest.mark.parametrize(
     "case_id, col_type, insert_tmpl, distinct_expected, test_filter, compare_with_spark",
     CASES,
@@ -177,6 +178,7 @@ def test_identity_partition_write(
     extension,
     s3,
     with_default_location,
+    run_pushdown,
     case_id,
     col_type,
     insert_tmpl,
@@ -199,12 +201,13 @@ def test_identity_partition_write(
     tbl_name = f"{_rand_table(case_id)}"
     tbl = f"{SCHEMA}.{tbl_name}"
 
+    if not run_pushdown:
+        run_command(
+            "SET pg_lake_table.enable_insert_select_pushdown TO false;", pg_conn
+        )
+
     run_command(
         f"""
-        
-        -- we currently do not support partitioned writes for pushdown
-        SET pg_lake_table.enable_insert_select_pushdown TO false;
-
         CREATE TABLE {tbl}({PARTITION_COL} {col_type})
         USING iceberg
         WITH (partition_by = '{PARTITION_COL}', autovacuum_enabled = false);
@@ -315,7 +318,8 @@ def test_identity_partition_write(
     assert res[0][0] == N_ROWS
     assert res[0][1] == distinct_expected
 
-    run_command("RESET pg_lake_table.enable_insert_select_pushdown;", pg_conn)
+    if not run_pushdown:
+        run_command("RESET pg_lake_table.enable_insert_select_pushdown;", pg_conn)
     pg_conn.rollback()
 
 

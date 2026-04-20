@@ -251,7 +251,8 @@ GetIcebergSpecPartitionFieldsFromCatalog(Oid relationId, int specId)
 
 	SPI_EXECUTE("SELECT source_field_id, partition_field_id, partition_field_name, transform_name "
 				"FROM " PARTITION_FIELDS_TABLE_QUALIFIED " "
-				"WHERE table_name OPERATOR(pg_catalog.=) $1 AND spec_id OPERATOR(pg_catalog.=) $2", readOnly);
+				"WHERE table_name OPERATOR(pg_catalog.=) $1 AND spec_id OPERATOR(pg_catalog.=) $2 "
+				"ORDER BY partition_field_id", readOnly);
 
 	for (int rowIndex = 0; rowIndex < SPI_processed; rowIndex++)
 	{
@@ -307,7 +308,8 @@ GetAllPartitionSpecFieldsForInternalIcebergTable(Oid relationId)
 
 	SPI_EXECUTE("SELECT source_field_id, partition_field_id, partition_field_name, transform_name "
 				"FROM " PARTITION_FIELDS_TABLE_QUALIFIED " "
-				"WHERE table_name OPERATOR(pg_catalog.=) $1", readOnly);
+				"WHERE table_name OPERATOR(pg_catalog.=) $1 "
+				"ORDER BY partition_field_id", readOnly);
 
 
 

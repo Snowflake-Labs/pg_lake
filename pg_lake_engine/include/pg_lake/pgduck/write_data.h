@@ -24,6 +24,13 @@
 #include "pg_lake/pgduck/iceberg_validation.h"
 #include "nodes/pg_list.h"
 
+/*
+ * Prefix for synthetic partition columns in DuckDB COPY TO queries.
+ * The PARTITION_BY expressions are aliased as __pglake_part_0, __pglake_part_1, ...
+ * and the partition_keys MAP returned by DuckDB uses these as keys.
+ */
+#define PARTITION_COLUMN_PREFIX "__pglake_part_"
+
 /* pg_lake_table.target_row_group_size_mb */
 #define DEFAULT_TARGET_ROW_GROUP_SIZE_MB 512
 extern PGDLLEXPORT int TargetRowGroupSizeMB;
@@ -56,7 +63,8 @@ extern PGDLLEXPORT StatsCollector * WriteQueryResultTo(char *query,
 													   TupleDesc queryTupleDesc,
 													   List *leafFields,
 													   IcebergOutOfRangePolicy outOfRangePolicy,
-													   bool wrapNativeIntervals);
+													   bool wrapNativeIntervals,
+													   List *partitionByExprs);
 extern PGDLLEXPORT void AppendFields(StringInfo map, DataFileSchema * schema);
 extern PGDLLEXPORT char *TupleDescToColumnMapForWrite(TupleDesc tupleDesc, CopyDataFormat destinationFormat);
 extern PGDLLEXPORT char *TupleDescToProjectionListForWrite(TupleDesc tupleDesc,

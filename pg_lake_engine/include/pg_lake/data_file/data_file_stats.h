@@ -92,6 +92,12 @@ typedef struct DataFileStats
 
 	/* for a new data file with row IDs, the start of the range */
 	int64		rowIdStart;
+
+	/*
+	 * partition key values from COPY TO return_stats (NULL if not
+	 * partitioned)
+	 */
+	char	   *partitionKeysText;
 }			DataFileStats;
 
 typedef struct StatsCollector

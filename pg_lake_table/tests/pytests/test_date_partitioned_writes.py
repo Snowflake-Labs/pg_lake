@@ -90,6 +90,7 @@ TYPES = [
 TRANSFORMS = ["year", "month", "day", "hour"]
 
 
+@pytest.mark.parametrize("run_pushdown", [True, False], ids=["pushdown", "row_by_row"])
 @pytest.mark.parametrize("case_id, col_type", TYPES)
 @pytest.mark.parametrize("transform", TRANSFORMS)
 def test_calendar_partition_write(
@@ -97,6 +98,7 @@ def test_calendar_partition_write(
     installcheck,
     s3,
     with_default_location,
+    run_pushdown,
     case_id,
     col_type,
     transform,
@@ -109,6 +111,11 @@ def test_calendar_partition_write(
     if col_type == "DATE" and transform == "hour":
         # hour() transform not valid for DATE columns
         return
+
+    if not run_pushdown:
+        run_command(
+            "SET pg_lake_table.enable_insert_select_pushdown TO false;", pg_conn
+        )
 
     _setup_schema(pg_conn)
     tbl_name = f"{_rand_table(f'{case_id}_{transform}')}"
@@ -207,6 +214,9 @@ def test_calendar_partition_write(
         assert spark_result[0][0] == test_cnt
 
         spark_unregister_table(installcheck, spark_session, f"{tbl_name}", f"{SCHEMA}")
+
+    if not run_pushdown:
+        run_command("RESET pg_lake_table.enable_insert_select_pushdown;", pg_conn)
 
     run_command(f"DROP SCHEMA {SCHEMA} CASCADE", pg_conn)
     pg_conn.commit()

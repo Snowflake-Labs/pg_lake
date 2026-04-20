@@ -129,6 +129,20 @@ _PG_init(void)
 							 NULL,
 							 NULL);
 
+	DefineCustomBoolVariable("pg_lake_table.enable_partitioned_write_pushdown",
+							 "Enables pushdown of partitioned writes to DuckDB "
+							 "using PARTITION_BY. When off, partitioned writes "
+							 "use row-by-row processing which supports "
+							 "file_size_bytes splitting.",
+							 NULL,
+							 &EnablePartitionedWritePushdown,
+							 true,
+							 PGC_USERSET,
+							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							 NULL,
+							 NULL,
+							 NULL);
+
 	DefineCustomBoolVariable("pg_lake_table.enable_data_file_pruning",
 							 "Enables data file pruning based on the metadata statistics "
 							 "for iceberg tables.",

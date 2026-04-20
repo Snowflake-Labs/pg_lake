@@ -41,6 +41,8 @@
 #include "pg_lake/extensions/pg_lake_copy.h"
 #include "pg_lake/extensions/pg_parquet.h"
 #include "pg_lake/extensions/postgis.h"
+#include "pg_lake/fdw/partition_pushdown.h"
+#include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/partitioning/partition_by_parser.h"
@@ -651,9 +653,17 @@ IsCopyFromPushdownable(Relation relation, List *columnNameList,
 	if (!RelationColumnsSuitableForPushdown(relation, sourceFormat))
 		return false;
 
+	/*
+	 * Partitioned tables can be pushed down if all transforms are supported
+	 * by DuckDB PARTITION_BY (identity, year, month, day, hour).
+	 */
 	const char *partitionBy = GetIcebergTablePartitionByOption(relationId);
 
-	if (partitionBy != NULL)
+	if (partitionBy != NULL && !EnablePartitionedWritePushdown)
+		return false;
+
+	if (partitionBy != NULL &&
+		GetPartitionByExpressionsForRelation(relationId) == NIL)
 		return false;
 
 	return true;
