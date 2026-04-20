@@ -65,6 +65,8 @@ static HttpResult CurlReturnError(CURL *curl, struct curl_slist *headerList,
 								  CURLcode curlCode, const char *errorMsg);
 static const char *HttpRequestMethodToString(HttpMethod method);
 static char *RedactSensitiveJson(char *s);
+static void RedactSensitiveFormEncoded(char *s);
+static bool IsOAuthTokenUrl(const char *url);
 
 #define CURL_SETOPT(curl, opt, value) do { \
 	curlCode = curl_easy_setopt((curl), (opt), (value)); \
@@ -532,7 +534,13 @@ HttpCommonNoThrows(HttpMethod method, const char *url, const char *postData, con
 	{
 		StringInfo	postDataInfo = NULL;
 
-		if (postData)
+		/*
+		 * Defense in depth: never log the request body when the URL targets
+		 * the OAuth token endpoint, even if the redactor would have handled
+		 * it. The single highest-value secret-carrying body we send lives
+		 * on this URL; we don't want to rely on any one layer.
+		 */
+		if (postData && !IsOAuthTokenUrl(url))
 		{
 			postDataInfo = makeStringInfo();
 			appendStringInfo(postDataInfo, ", body: {%s}", postData);
@@ -606,8 +614,21 @@ HttpCommonNoThrows(HttpMethod method, const char *url, const char *postData, con
 
 	if (HttpClientTraceTraffic && message_level_is_interesting(INFO))
 	{
-		ereport(INFO, (errmsg("received response with status code %ld, body: %s",
-							  res.status, res.body ? RedactSensitiveJson(res.body) : "<empty>")));
+		/*
+		 * Symmetric with the request-side suppression above: don't print
+		 * the token-endpoint response body at all — it carries the access
+		 * token and is our highest-value secret.
+		 */
+		if (IsOAuthTokenUrl(url))
+		{
+			ereport(INFO, (errmsg("received response with status code %ld",
+								  res.status)));
+		}
+		else
+		{
+			ereport(INFO, (errmsg("received response with status code %ld, body: %s",
+								  res.status, res.body ? RedactSensitiveJson(res.body) : "<empty>")));
+		}
 	}
 
 	return res;
@@ -637,7 +658,13 @@ HttpRequestMethodToString(HttpMethod method)
 
 /*
  * RedactSensitiveJson
- *   In-place redaction of token-looking values in JSON-ish text.
+ *   In-place redaction of token-looking values in HTTP bodies. Despite the
+ *   name (kept stable for backport compatibility), this now covers both
+ *   JSON-shaped bodies ({"client_secret": "..."}) and
+ *   application/x-www-form-urlencoded bodies
+ *   (grant_type=...&client_secret=...) — the latter is what the Horizon
+ *   auth flow emits, and without the form-encoded pass the secret would
+ *   hit the server log verbatim whenever http_client_trace_traffic is on.
  */
 static char *
 RedactSensitiveJson(char *input)
@@ -730,5 +757,94 @@ RedactSensitiveJson(char *input)
 		}
 	}
 
+	/*
+	 * Also run a form-urlencoded pass so that request bodies like
+	 * "grant_type=client_credentials&client_secret=abc" get their secret
+	 * fields asterisked. The JSON pass above does nothing on such bodies
+	 * because they contain no quoted keys.
+	 */
+	RedactSensitiveFormEncoded(copyOfinput);
+
 	return copyOfinput;
+}
+
+
+/*
+ * RedactSensitiveFormEncoded
+ *   In-place redaction of secret-looking values in an
+ *   application/x-www-form-urlencoded body. A field is recognized as
+ *   "<key>=..." where the key either starts at the beginning of the buffer
+ *   or is preceded by '&'. The value is overwritten with '*' up to the next
+ *   '&' or end-of-string.
+ */
+static void
+RedactSensitiveFormEncoded(char *s)
+{
+	static const char *formKeys[] = {
+		"client_secret",
+		"password",
+		"access_token",
+		"refresh_token",
+		"id_token",
+		"session_token",
+		"token"
+	};
+	const size_t keyCount = sizeof(formKeys) / sizeof(formKeys[0]);
+
+	if (s == NULL)
+		return;
+
+	for (size_t i = 0; i < keyCount; i++)
+	{
+		char		pattern[64];
+		int			patternBytes = snprintf(pattern, sizeof(pattern), "%s=",
+											formKeys[i]);
+
+		if (patternBytes <= 0 || (size_t) patternBytes >= sizeof(pattern))
+			continue;			/* should not happen for whitelisted keys */
+
+		size_t		plen = (size_t) patternBytes;
+		char	   *p = s;
+
+		while ((p = strstr(p, pattern)) != NULL)
+		{
+			/*
+			 * The match must be at a field boundary: either the very start
+			 * of the buffer or immediately after '&'. Otherwise it could be
+			 * a suffix of some unrelated token (e.g. "my_client_secret=").
+			 */
+			if (p == s || *(p - 1) == '&')
+			{
+				char	   *v = p + plen;
+
+				while (*v && *v != '&')
+				{
+					*v = '*';
+					v++;
+				}
+				p = v;
+			}
+			else
+			{
+				p += plen;
+			}
+		}
+	}
+}
+
+
+/*
+ * IsOAuthTokenUrl
+ *   Heuristic: does this URL target the REST catalog OAuth token endpoint?
+ *   Used as defense-in-depth so that bodies sent to /oauth/tokens are not
+ *   logged at all when http_client_trace_traffic is on, independent of the
+ *   body-redaction pass.
+ */
+static bool
+IsOAuthTokenUrl(const char *url)
+{
+	if (url == NULL)
+		return false;
+
+	return strstr(url, "/api/catalog/v1/oauth/tokens") != NULL;
 }
