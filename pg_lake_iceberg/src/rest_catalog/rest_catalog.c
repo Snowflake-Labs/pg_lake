@@ -20,7 +20,11 @@
 #include "postgres.h"
 #include "miscadmin.h"
 
+#include "access/genam.h"
 #include "access/reloptions.h"
+#include "access/table.h"
+#include "catalog/pg_class.h"
+#include "catalog/pg_depend.h"
 #include "catalog/pg_foreign_server.h"
 #include "common/base64.h"
 #include "commands/dbcommands.h"
@@ -30,9 +34,12 @@
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
+#include "utils/inval.h"
 #include "utils/jsonb.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/syscache.h"
 #include "utils/timestamp.h"
 
 #include "pg_extension_base/base_workers.h"
@@ -97,32 +104,183 @@ typedef enum RestCatalogRequestRetryAction
 
 PG_FUNCTION_INFO_V1(iceberg_catalog_validator);
 
+
 /*
- * Valid options for iceberg_catalog servers.
+ * Descriptor for a single iceberg_catalog server option.  This is the
+ * single source of truth: validation, the user-facing hint, and the
+ * option-to-struct applier all derive from this table.
  */
-static const char *iceberg_catalog_server_options[] = {
-	"rest_endpoint",
-	"scope",
-	"rest_auth_type",
-	"oauth_endpoint",
-	"enable_vended_credentials",
-	"location_prefix",
-	"catalog_name",
-	"client_id",
-	"client_secret",
-	NULL
+typedef enum IcebergCatalogOptionType
+{
+	CATALOG_OPT_STRING,
+	CATALOG_OPT_BOOL,
+	CATALOG_OPT_AUTH_TYPE,
+	CATALOG_OPT_LOCATION_PREFIX
+}			IcebergCatalogOptionType;
+
+/* Validation flags checked at CREATE/ALTER SERVER time. */
+#define CATALOG_OPT_NONEMPTY    0x01	/* reject empty string */
+#define CATALOG_OPT_HAS_SCHEME  0x02	/* must contain "://" */
+
+typedef struct IcebergCatalogOptionDesc
+{
+	const char *name;
+	IcebergCatalogOptionType type;
+	size_t		offset;			/* offsetof into RestCatalogOptions */
+	int			flags;			/* CATALOG_OPT_NONEMPTY |
+								 * CATALOG_OPT_HAS_SCHEME */
+}			IcebergCatalogOptionDesc;
+
+static const IcebergCatalogOptionDesc iceberg_catalog_option_descs[] = {
+	{"rest_endpoint", CATALOG_OPT_STRING, offsetof(RestCatalogOptions, host),
+	CATALOG_OPT_NONEMPTY | CATALOG_OPT_HAS_SCHEME},
+	{"rest_auth_type", CATALOG_OPT_AUTH_TYPE, offsetof(RestCatalogOptions, authType), 0},
+	{"oauth_endpoint", CATALOG_OPT_STRING, offsetof(RestCatalogOptions, oauthHostPath),
+	CATALOG_OPT_NONEMPTY | CATALOG_OPT_HAS_SCHEME},
+	{"scope", CATALOG_OPT_STRING, offsetof(RestCatalogOptions, scope),
+	CATALOG_OPT_NONEMPTY},
+	{"enable_vended_credentials", CATALOG_OPT_BOOL, offsetof(RestCatalogOptions, enableVendedCredentials), 0},
+	{"location_prefix", CATALOG_OPT_LOCATION_PREFIX, offsetof(RestCatalogOptions, locationPrefix),
+	CATALOG_OPT_NONEMPTY | CATALOG_OPT_HAS_SCHEME},
+	{"catalog_name", CATALOG_OPT_STRING, offsetof(RestCatalogOptions, catalogName),
+	CATALOG_OPT_NONEMPTY},
+	{"client_id", CATALOG_OPT_STRING, offsetof(RestCatalogOptions, clientId),
+	CATALOG_OPT_NONEMPTY},
+	{"client_secret", CATALOG_OPT_STRING, offsetof(RestCatalogOptions, clientSecret),
+	CATALOG_OPT_NONEMPTY},
 };
 
+#define NUM_CATALOG_OPTIONS lengthof(iceberg_catalog_option_descs)
 
-static bool
-is_valid_iceberg_catalog_option(const char *keyword)
+
+/*
+ * Look up a descriptor by option name, or return NULL if not found.
+ */
+static const IcebergCatalogOptionDesc *
+FindCatalogOptionDesc(const char *name)
 {
-	for (int i = 0; iceberg_catalog_server_options[i] != NULL; i++)
+	for (int i = 0; i < NUM_CATALOG_OPTIONS; i++)
 	{
-		if (pg_strcasecmp(keyword, iceberg_catalog_server_options[i]) == 0)
-			return true;
+		if (pg_strcasecmp(name, iceberg_catalog_option_descs[i].name) == 0)
+			return &iceberg_catalog_option_descs[i];
 	}
-	return false;
+	return NULL;
+}
+
+
+/*
+ * Build the "Valid options are: ?" hint string.  Cached after first call.
+ */
+static const char *
+GetValidCatalogOptionsHint(void)
+{
+	static char *hint = NULL;
+
+	if (hint == NULL)
+	{
+		StringInfoData buf;
+
+		initStringInfo(&buf);
+		appendStringInfoString(&buf, "Valid options are: ");
+		for (int i = 0; i < NUM_CATALOG_OPTIONS; i++)
+		{
+			if (i > 0)
+				appendStringInfoString(&buf, ", ");
+			appendStringInfoString(&buf, iceberg_catalog_option_descs[i].name);
+		}
+		appendStringInfoChar(&buf, '.');
+		hint = buf.data;
+	}
+
+	return hint;
+}
+
+
+/*
+ * Validate a single option value.  Called from iceberg_catalog_validator
+ * after the name has already been accepted.  Type-specific checks run
+ * first, then flag-based checks (non-empty, scheme present).
+ */
+static void
+ValidateCatalogOptionValue(const IcebergCatalogOptionDesc * desc, DefElem *def)
+{
+	switch (desc->type)
+	{
+		case CATALOG_OPT_AUTH_TYPE:
+			{
+				char	   *authType = defGetString(def);
+
+				if (pg_strcasecmp(authType, "oauth2") != 0 &&
+					pg_strcasecmp(authType, "default") != 0 &&
+					pg_strcasecmp(authType, "horizon") != 0)
+					ereport(ERROR,
+							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+							 errmsg("invalid rest_auth_type option: \"%s\"", authType),
+							 errhint("Valid values are \"oauth2\" and \"horizon\".")));
+				return;
+			}
+		case CATALOG_OPT_BOOL:
+			(void) defGetBoolean(def);
+			return;
+		default:
+			break;
+	}
+
+	if (desc->flags == 0)
+		return;
+
+	char	   *value = defGetString(def);
+
+	if ((desc->flags & CATALOG_OPT_NONEMPTY) && value[0] == '\0')
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid value for \"%s\": must not be empty",
+						desc->name)));
+
+	if ((desc->flags & CATALOG_OPT_HAS_SCHEME) && strstr(value, "://") == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid value for \"%s\": \"%s\"",
+						desc->name, value),
+				 errhint("Include a URI scheme (e.g. \"https://...\").")));
+}
+
+
+/*
+ * Apply a single server option onto the RestCatalogOptions struct.
+ * Called from ApplyServerOptionOverrides for each DefElem on the server.
+ */
+static void
+ApplyCatalogOptionValue(RestCatalogOptions * opts,
+						const IcebergCatalogOptionDesc * desc, DefElem *def)
+{
+	switch (desc->type)
+	{
+		case CATALOG_OPT_STRING:
+			*(char **) ((char *) opts + desc->offset) = pstrdup(defGetString(def));
+			break;
+		case CATALOG_OPT_BOOL:
+			*(bool *) ((char *) opts + desc->offset) = defGetBoolean(def);
+			break;
+		case CATALOG_OPT_AUTH_TYPE:
+			{
+				char	   *authType = defGetString(def);
+
+				*(int *) ((char *) opts + desc->offset) =
+					(pg_strcasecmp(authType, "horizon") == 0)
+					? REST_CATALOG_AUTH_TYPE_HORIZON
+					: REST_CATALOG_AUTH_TYPE_OAUTH2;
+				break;
+			}
+		case CATALOG_OPT_LOCATION_PREFIX:
+			{
+				bool		inPlace = false;
+
+				*(char **) ((char *) opts + desc->offset) =
+					pstrdup(StripTrailingSlash(defGetString(def), inPlace));
+				break;
+			}
+	}
 }
 
 
@@ -156,36 +314,69 @@ iceberg_catalog_validator(PG_FUNCTION_ARGS)
 	foreach(cell, options_list)
 	{
 		DefElem    *def = (DefElem *) lfirst(cell);
+		const		IcebergCatalogOptionDesc *desc = FindCatalogOptionDesc(def->defname);
 
-		if (!is_valid_iceberg_catalog_option(def->defname))
-		{
+		if (desc == NULL)
 			ereport(ERROR,
 					(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
-					 errmsg("invalid option \"%s\" for iceberg_catalog server", def->defname),
-					 errhint("Valid options are: rest_endpoint, rest_auth_type, "
-							 "oauth_endpoint, scope, enable_vended_credentials, "
-							 "location_prefix, catalog_name, client_id, client_secret.")));
-		}
+					 errmsg("invalid option \"%s\" for iceberg_catalog server",
+							def->defname),
+					 errhint("%s", GetValidCatalogOptionsHint())));
 
-		if (pg_strcasecmp(def->defname, "rest_auth_type") == 0)
-		{
-			char	   *authType = defGetString(def);
-
-			if (pg_strcasecmp(authType, "oauth2") != 0 &&
-				pg_strcasecmp(authType, "default") != 0 &&
-				pg_strcasecmp(authType, "horizon") != 0)
-				ereport(ERROR,
-						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("invalid rest_auth_type option: \"%s\"", authType),
-						 errhint("Valid values are \"oauth2\" and \"horizon\".")));
-		}
-		else if (pg_strcasecmp(def->defname, "enable_vended_credentials") == 0)
-		{
-			(void) defGetBoolean(def);
-		}
+		ValidateCatalogOptionValue(desc, def);
 	}
 
 	PG_RETURN_VOID();
+}
+
+
+/*
+ * ServerHasDependentWritableTable returns true if the given server
+ * has at least one dependent writable iceberg table recorded in
+ * pg_depend.  Used to block ALTER SERVER changes that would silently
+ * break existing tables.
+ */
+static bool
+ServerHasDependentWritableTable(Oid serverOid)
+{
+	Relation	depRel;
+	ScanKeyData key[2];
+	SysScanDesc scan;
+	HeapTuple	tup;
+	bool		found = false;
+
+	depRel = table_open(DependRelationId, AccessShareLock);
+
+	ScanKeyInit(&key[0],
+				Anum_pg_depend_refclassid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(ForeignServerRelationId));
+	ScanKeyInit(&key[1],
+				Anum_pg_depend_refobjid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(serverOid));
+
+	scan = systable_beginscan(depRel, DependReferenceIndexId, true,
+							  NULL, 2, key);
+
+	while (HeapTupleIsValid(tup = systable_getnext(scan)))
+	{
+		Form_pg_depend depForm = (Form_pg_depend) GETSTRUCT(tup);
+
+		if (depForm->classid != RelationRelationId)
+			continue;
+
+		if (GetIcebergCatalogType(depForm->objid) == REST_CATALOG_READ_WRITE)
+		{
+			found = true;
+			break;
+		}
+	}
+
+	systable_endscan(scan);
+	table_close(depRel, AccessShareLock);
+
+	return found;
 }
 
 
@@ -196,6 +387,9 @@ iceberg_catalog_validator(PG_FUNCTION_ARGS)
  *    'rest'), rejects TYPE 'postgres'/'object_store', and requires
  *    TYPE 'rest'.
  *  - ALTER SERVER RENAME TO: rejects renaming to a reserved name.
+ *  - ALTER SERVER OPTIONS: blocks SET/ADD rest_endpoint when dependent
+ *    writable tables exist (the table was registered at the original
+ *    endpoint and moving it would break the metadata chain).
  *
  * ALTER/DROP/OWNER on reserved names will fail naturally because no
  * server object exists.
@@ -254,91 +448,117 @@ ValidateIcebergCatalogServerDDL(ProcessUtilityParams * processUtilityParams,
 					 errmsg("server name \"%s\" is reserved for the extension-owned catalog",
 							stmt->newname),
 					 errhint("Choose a different server name.")));
+
+		/*
+		 * Renaming an iceberg_catalog server is blocked because dependent
+		 * iceberg tables store the server name as a string option
+		 * (catalog='<name>') in pg_foreign_table.ftoptions.  A rename would
+		 * silently break those references.
+		 */
+		ForeignServer *server = GetForeignServerByName(strVal(stmt->object),
+													   true);
+
+		if (server != NULL)
+		{
+			ForeignDataWrapper *fdw = GetForeignDataWrapper(server->fdwid);
+
+			if (strcmp(fdw->fdwname, ICEBERG_CATALOG_FDW_NAME) == 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("cannot rename iceberg_catalog server \"%s\"",
+								strVal(stmt->object)),
+						 errhint("Drop and recreate the server with the new name.")));
+		}
+	}
+	else if (IsA(parsetree, AlterForeignServerStmt))
+	{
+		AlterForeignServerStmt *stmt = (AlterForeignServerStmt *) parsetree;
+
+		ForeignServer *server = GetForeignServerByName(stmt->servername, true);
+
+		if (server == NULL)
+			return false;
+
+		ForeignDataWrapper *fdw = GetForeignDataWrapper(server->fdwid);
+
+		if (strcmp(fdw->fdwname, ICEBERG_CATALOG_FDW_NAME) != 0)
+			return false;
+
+		/*
+		 * Changing rest_endpoint on a server with dependent writable tables
+		 * would silently point them at a different REST catalog, breaking the
+		 * metadata chain.
+		 */
+		ListCell   *lc;
+
+		foreach(lc, stmt->options)
+		{
+			DefElem    *def = (DefElem *) lfirst(lc);
+
+			if (pg_strcasecmp(def->defname, "rest_endpoint") == 0 &&
+				ServerHasDependentWritableTable(server->serverid))
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("cannot change \"rest_endpoint\" on server \"%s\" "
+								"because it has dependent writable iceberg tables",
+								stmt->servername),
+						 errhint("Drop the dependent tables first, or create a "
+								 "new server with the desired endpoint.")));
+			}
+		}
 	}
 
 	return false;
 }
 
 
+
 /*
- * GetRestCatalogOptionsFromCatalog returns a RestCatalogOptions struct.
- * For the built-in 'rest' catalog name the GUCs are used directly.
- * For user-created servers, the GUCs serve as defaults,
- * overridden by any option set on the server.
+ * ApplyGUCDefaults populates opts with the current GUC values.
+ * All string fields are pstrdup'd so the struct is self-contained.
  */
-RestCatalogOptions *
-GetRestCatalogOptionsFromCatalog(const char *catalog)
+static void
+ApplyGUCDefaults(RestCatalogOptions * opts)
 {
-	RestCatalogOptions *opts = palloc0(sizeof(RestCatalogOptions));
-
-	/*
-	 * Normalize built-in catalog name to the canonical constant so that case
-	 * variations (e.g. 'REST', 'rEst') compare equal with strcmp.
-	 * User-created server names are case-sensitive and stored as-is.
-	 */
-	if (pg_strcasecmp(catalog, REST_CATALOG_NAME) == 0)
-		opts->catalog = pstrdup(REST_CATALOG_NAME);
-	else
-		opts->catalog = pstrdup(catalog);
-
-	/* GUC values serve as defaults */
-	opts->host = RestCatalogHost;
-	opts->oauthHostPath = RestCatalogOauthHostPath;
-	opts->clientId = RestCatalogClientId;
-	opts->clientSecret = RestCatalogClientSecret;
-	opts->scope = RestCatalogScope;
+	opts->host = RestCatalogHost ? pstrdup(RestCatalogHost) : NULL;
+	opts->oauthHostPath = RestCatalogOauthHostPath ? pstrdup(RestCatalogOauthHostPath) : NULL;
+	opts->clientId = RestCatalogClientId ? pstrdup(RestCatalogClientId) : NULL;
+	opts->clientSecret = RestCatalogClientSecret ? pstrdup(RestCatalogClientSecret) : NULL;
+	opts->scope = RestCatalogScope ? pstrdup(RestCatalogScope) : NULL;
 	opts->authType = RestCatalogAuthType;
 	opts->enableVendedCredentials = RestCatalogEnableVendedCredentials;
 	opts->locationPrefix = GetIcebergDefaultLocationPrefix();
+}
 
-	/*
-	 * The built-in 'rest' name uses GUCs exclusively. For user-created
-	 * servers, look up server options and override the GUC defaults.
-	 */
-	if (pg_strcasecmp(catalog, REST_CATALOG_NAME) != 0)
+
+/*
+ * ApplyServerOptionOverrides overrides the GUC-derived defaults in opts
+ * with any options explicitly set on the foreign server.
+ */
+static void
+ApplyServerOptionOverrides(RestCatalogOptions * opts, ForeignServer *server)
+{
+	ListCell   *lc;
+
+	foreach(lc, server->options)
 	{
-		ForeignServer *server = GetForeignServerByName(catalog, false);
-		ForeignDataWrapper *fdw = GetForeignDataWrapper(server->fdwid);
+		DefElem    *def = (DefElem *) lfirst(lc);
+		const		IcebergCatalogOptionDesc *desc = FindCatalogOptionDesc(def->defname);
 
-		Assert(strcmp(fdw->fdwname, ICEBERG_CATALOG_FDW_NAME) == 0);
-
-		ListCell   *lc;
-
-		foreach(lc, server->options)
-		{
-			DefElem    *def = (DefElem *) lfirst(lc);
-
-			if (pg_strcasecmp(def->defname, "rest_endpoint") == 0)
-				opts->host = defGetString(def);
-			else if (pg_strcasecmp(def->defname, "client_id") == 0)
-				opts->clientId = defGetString(def);
-			else if (pg_strcasecmp(def->defname, "client_secret") == 0)
-				opts->clientSecret = defGetString(def);
-			else if (pg_strcasecmp(def->defname, "scope") == 0)
-				opts->scope = defGetString(def);
-			else if (pg_strcasecmp(def->defname, "rest_auth_type") == 0)
-			{
-				char	   *authType = defGetString(def);
-
-				opts->authType = (pg_strcasecmp(authType, "horizon") == 0)
-					? REST_CATALOG_AUTH_TYPE_HORIZON
-					: REST_CATALOG_AUTH_TYPE_OAUTH2;
-			}
-			else if (pg_strcasecmp(def->defname, "oauth_endpoint") == 0)
-				opts->oauthHostPath = defGetString(def);
-			else if (pg_strcasecmp(def->defname, "enable_vended_credentials") == 0)
-				opts->enableVendedCredentials = defGetBoolean(def);
-			else if (pg_strcasecmp(def->defname, "catalog_name") == 0)
-				opts->catalogName = defGetString(def);
-			else if (pg_strcasecmp(def->defname, "location_prefix") == 0)
-			{
-				bool		inPlace = false;
-
-				opts->locationPrefix = StripTrailingSlash(defGetString(def), inPlace);
-			}
-		}
+		if (desc != NULL)
+			ApplyCatalogOptionValue(opts, desc, def);
 	}
+}
 
+
+/*
+ * ValidateRestCatalogOptions checks that the resolved options have
+ * the minimum required fields (e.g. rest_endpoint).
+ */
+static void
+ValidateRestCatalogOptions(const RestCatalogOptions * opts, const char *catalog)
+{
 	if (opts->host == NULL || opts->host[0] == '\0')
 		ereport(ERROR,
 				(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
@@ -346,8 +566,58 @@ GetRestCatalogOptionsFromCatalog(const char *catalog)
 						catalog),
 				 errhint("Set the pg_lake_iceberg.rest_catalog_host GUC or "
 						 "the \"rest_endpoint\" option on the server.")));
+}
 
+
+/*
+ * Built-in 'rest' catalog: GUCs only, no server lookup.
+ */
+static RestCatalogOptions *
+BuildRestCatalogOptionsFromGUCs(void)
+{
+	RestCatalogOptions *opts = palloc0(sizeof(RestCatalogOptions));
+
+	opts->catalog = pstrdup(REST_CATALOG_NAME);
+	ApplyGUCDefaults(opts);
+	ValidateRestCatalogOptions(opts, REST_CATALOG_NAME);
 	return opts;
+}
+
+
+/*
+ * User-created iceberg_catalog server: GUC defaults + server option
+ * overrides.
+ */
+static RestCatalogOptions *
+BuildRestCatalogOptionsFromServer(const char *serverName)
+{
+	ForeignServer *server = GetForeignServerByName(serverName, false);
+	ForeignDataWrapper *fdw = GetForeignDataWrapper(server->fdwid);
+
+	Assert(strcmp(fdw->fdwname, ICEBERG_CATALOG_FDW_NAME) == 0);
+
+	RestCatalogOptions *opts = palloc0(sizeof(RestCatalogOptions));
+
+	opts->catalog = pstrdup(serverName);
+	ApplyGUCDefaults(opts);
+	ApplyServerOptionOverrides(opts, server);
+	ValidateRestCatalogOptions(opts, serverName);
+	return opts;
+}
+
+
+/*
+ * ResolveRestCatalogOptions picks the right source based on the catalog
+ * identifier: GUCs for the built-in 'rest' name, server object for
+ * user-created iceberg_catalog servers.
+ */
+RestCatalogOptions *
+ResolveRestCatalogOptions(const char *catalog)
+{
+	if (pg_strcasecmp(catalog, REST_CATALOG_NAME) == 0)
+		return BuildRestCatalogOptionsFromGUCs();
+
+	return BuildRestCatalogOptionsFromServer(catalog);
 }
 
 
@@ -367,7 +637,34 @@ GetRestCatalogOptionsForRelation(Oid relationId)
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("catalog option is not set for relation %u", relationId)));
 
-	return GetRestCatalogOptionsFromCatalog(catalog);
+	return ResolveRestCatalogOptions(catalog);
+}
+
+
+/*
+ * CopyRestCatalogOptions deep-copies a RestCatalogOptions into the given
+ * memory context.  All string fields are duplicated so the result is
+ * self-contained and independent of the source's lifetime.
+ */
+RestCatalogOptions *
+CopyRestCatalogOptions(MemoryContext dst, const RestCatalogOptions * src)
+{
+	MemoryContext oldctx = MemoryContextSwitchTo(dst);
+	RestCatalogOptions *copy = palloc0(sizeof(RestCatalogOptions));
+
+	copy->catalog = pstrdup(src->catalog);
+	copy->host = pstrdup(src->host);
+	copy->oauthHostPath = src->oauthHostPath ? pstrdup(src->oauthHostPath) : NULL;
+	copy->clientId = src->clientId ? pstrdup(src->clientId) : NULL;
+	copy->clientSecret = src->clientSecret ? pstrdup(src->clientSecret) : NULL;
+	copy->scope = src->scope ? pstrdup(src->scope) : NULL;
+	copy->locationPrefix = src->locationPrefix ? pstrdup(src->locationPrefix) : NULL;
+	copy->catalogName = src->catalogName ? pstrdup(src->catalogName) : NULL;
+	copy->authType = src->authType;
+	copy->enableVendedCredentials = src->enableVendedCredentials;
+
+	MemoryContextSwitchTo(oldctx);
+	return copy;
 }
 
 
@@ -848,22 +1145,51 @@ static void
 BuildTokenCacheKey(char *key, const RestCatalogOptions * opts)
 {
 	Assert(opts->catalog != NULL);
+	MemSet(key, 0, TOKEN_CACHE_KEY_LEN);
 	strlcpy(key, opts->catalog, TOKEN_CACHE_KEY_LEN);
+}
+
+
+/*
+ * Syscache invalidation callback for pg_foreign_server changes.
+ * Any ALTER/DROP SERVER blows away the entire token cache so stale
+ * credentials are never reused.  The cache is rebuilt lazily on the
+ * next token lookup.
+ */
+static void
+InvalidateRestTokenCache(Datum arg, int cacheid, uint32 hashvalue)
+{
+	if (RestCatalogTokenCache == NULL)
+		return;
+
+	MemoryContextReset(RestTokenCacheCtx);
+	RestCatalogTokenCache = NULL;
 }
 
 
 /*
  * Initialize the per-catalog token cache hash table if needed.
  */
+static bool TokenCacheCallbackRegistered = false;
+
 static void
 InitTokenCacheIfNeeded(void)
 {
+	if (!TokenCacheCallbackRegistered)
+	{
+		CacheRegisterSyscacheCallback(FOREIGNSERVEROID,
+									  InvalidateRestTokenCache,
+									  (Datum) 0);
+		TokenCacheCallbackRegistered = true;
+	}
+
 	if (RestCatalogTokenCache != NULL)
 		return;
 
-	RestTokenCacheCtx = AllocSetContextCreate(TopMemoryContext,
-											  "RestTokenCacheCtx",
-											  ALLOCSET_DEFAULT_SIZES);
+	if (RestTokenCacheCtx == NULL)
+		RestTokenCacheCtx = AllocSetContextCreate(CacheMemoryContext,
+												  "RestTokenCacheCtx",
+												  ALLOCSET_DEFAULT_SIZES);
 
 	HASHCTL		ctl;
 
@@ -885,6 +1211,11 @@ InitTokenCacheIfNeeded(void)
 static char *
 GetRestCatalogAccessToken(RestCatalogOptions * opts, bool forceRefreshToken)
 {
+	if (opts == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("REST catalog options must not be NULL when fetching access token")));
+
 	InitTokenCacheIfNeeded();
 
 	char		cacheKey[TOKEN_CACHE_KEY_LEN];
@@ -1198,10 +1529,12 @@ GetRestCatalogNamespace(Oid relationId)
 /*
  * Returns the catalog name to use for REST API calls.
  *
- * Precedence: table option catalog_name > server option catalog_name
- *             > current database name.
+ * Writable tables always use the current database name so that a
+ * subsequent ALTER SERVER ? ADD/SET catalog_name cannot silently
+ * re-route an existing table to a different REST namespace.
  *
- * Read-only tables must have catalog_name set (on the table or server).
+ * Read-only tables resolve from table option > server option, and
+ * must have catalog_name set on one of them.
  */
 char *
 GetRestCatalogName(Oid relationId)
@@ -1210,6 +1543,9 @@ GetRestCatalogName(Oid relationId)
 
 	Assert(catalogType == REST_CATALOG_READ_ONLY ||
 		   catalogType == REST_CATALOG_READ_WRITE);
+
+	if (catalogType == REST_CATALOG_READ_WRITE)
+		return get_database_name(MyDatabaseId);
 
 	ForeignTable *foreignTable = GetForeignTable(relationId);
 	char	   *catalogName = GetStringOption(foreignTable->options, "catalog_name", false);
@@ -1222,13 +1558,10 @@ GetRestCatalogName(Oid relationId)
 	if (opts->catalogName != NULL)
 		return opts->catalogName;
 
-	if (catalogType == REST_CATALOG_READ_ONLY)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("catalog_name is required for read-only REST catalog tables"),
-				 errhint("Set catalog_name on the table or the server.")));
-
-	return get_database_name(MyDatabaseId);
+	ereport(ERROR,
+			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			 errmsg("catalog_name is required for read-only REST catalog tables"),
+			 errhint("Set catalog_name on the table or the server.")));
 }
 
 

@@ -101,8 +101,9 @@ typedef struct RestCatalogRequest
 #define GET_REST_CATALOG_METADATA_LOCATION "%s/api/catalog/v1/%s/namespaces/%s/tables/%s"
 
 /* Catalog options resolution */
-extern PGDLLEXPORT RestCatalogOptions * GetRestCatalogOptionsFromCatalog(const char *catalog);
+extern PGDLLEXPORT RestCatalogOptions * ResolveRestCatalogOptions(const char *catalog);
 extern PGDLLEXPORT RestCatalogOptions * GetRestCatalogOptionsForRelation(Oid relationId);
+extern PGDLLEXPORT RestCatalogOptions * CopyRestCatalogOptions(MemoryContext dst, const RestCatalogOptions * src);
 
 extern PGDLLEXPORT void RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName);
 extern PGDLLEXPORT void StartStageRestCatalogIcebergTableCreate(Oid relationId);

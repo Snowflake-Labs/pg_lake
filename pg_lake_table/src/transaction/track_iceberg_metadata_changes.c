@@ -599,8 +599,46 @@ InitRestCatalogRequestsHashIfNeeded(void)
 
 
 /*
-* RecordRestCatalogRequestInTx records a REST catalog request to be sent at post-commit.
-*/
+ * ValidateXactRestCatalog is a fail-fast guard that prevents cross-catalog
+ * DML within a single transaction.  It resolves the relation's catalog
+ * identifier and, if a different catalog was already locked in for this
+ * transaction, errors out immediately — before any Parquet data is written
+ * to S3.
+ *
+ * No-ops for relations that are not REST-backed writable iceberg tables,
+ * or when no catalog has been locked in yet (first DML in the xact).
+ */
+void
+ValidateXactRestCatalog(Oid relationId)
+{
+	if (!IsPgLakeIcebergForeignTableById(relationId) ||
+		GetIcebergCatalogType(relationId) != REST_CATALOG_READ_WRITE)
+		return;
+
+	if (PgLakeXactRestCatalog == NULL ||
+		PgLakeXactRestCatalog->catalogOpts == NULL)
+		return;
+
+	char	   *catalog = GetStringOption(GetForeignTable(relationId)->options,
+										  "catalog", false);
+
+	if (catalog == NULL)
+		return;
+
+	if (pg_strcasecmp(PgLakeXactRestCatalog->catalogOpts->catalog, catalog) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot modify tables from different REST catalogs "
+						"in the same transaction"),
+				 errdetail("This transaction already targets catalog \"%s\", "
+						   "but the current statement targets \"%s\".",
+						   PgLakeXactRestCatalog->catalogOpts->catalog, catalog)));
+}
+
+
+/*
+ * RecordRestCatalogRequestInTx records a REST catalog request to be sent at post-commit.
+ */
 void
 RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationType,
 							 const char *body)
@@ -622,27 +660,17 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 
 		if (PgLakeXactRestCatalog->catalogOpts == NULL)
 		{
-			/*
-			 * Deep-copy opts into TopTransactionContext so the struct and its
-			 * string fields survive until XACT_EVENT_COMMIT.
-			 */
-			MemoryContext oldctx = MemoryContextSwitchTo(TopTransactionContext);
-
-			PgLakeXactRestCatalog->catalogOpts = palloc0(sizeof(RestCatalogOptions));
-			PgLakeXactRestCatalog->catalogOpts->catalog = pstrdup(resolvedOpts->catalog);
-			PgLakeXactRestCatalog->catalogOpts->host = pstrdup(resolvedOpts->host);
-			PgLakeXactRestCatalog->catalogOpts->oauthHostPath = resolvedOpts->oauthHostPath ? pstrdup(resolvedOpts->oauthHostPath) : NULL;
-			PgLakeXactRestCatalog->catalogOpts->clientId = resolvedOpts->clientId ? pstrdup(resolvedOpts->clientId) : NULL;
-			PgLakeXactRestCatalog->catalogOpts->clientSecret = resolvedOpts->clientSecret ? pstrdup(resolvedOpts->clientSecret) : NULL;
-			PgLakeXactRestCatalog->catalogOpts->scope = resolvedOpts->scope ? pstrdup(resolvedOpts->scope) : NULL;
-			PgLakeXactRestCatalog->catalogOpts->locationPrefix = resolvedOpts->locationPrefix ? pstrdup(resolvedOpts->locationPrefix) : NULL;
-			PgLakeXactRestCatalog->catalogOpts->catalogName = resolvedOpts->catalogName ? pstrdup(resolvedOpts->catalogName) : NULL;
-			PgLakeXactRestCatalog->catalogOpts->authType = resolvedOpts->authType;
-			PgLakeXactRestCatalog->catalogOpts->enableVendedCredentials = resolvedOpts->enableVendedCredentials;
-
-			MemoryContextSwitchTo(oldctx);
+			PgLakeXactRestCatalog->catalogOpts =
+				CopyRestCatalogOptions(TopTransactionContext, resolvedOpts);
 		}
-		else if (strcmp(PgLakeXactRestCatalog->catalogOpts->catalog, resolvedOpts->catalog) != 0)
+
+		/*
+		 * Belt-and-suspenders check.  All DML and DDL entry points already
+		 * call ValidateXactRestCatalog() at statement time, so in practice we
+		 * should never reach here with a mismatched catalog.  Kept as a last
+		 * line of defense for any future code path that forgets to do so.
+		 */
+		else if (pg_strcasecmp(PgLakeXactRestCatalog->catalogOpts->catalog, resolvedOpts->catalog) != 0)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("cannot modify tables from different REST catalogs "

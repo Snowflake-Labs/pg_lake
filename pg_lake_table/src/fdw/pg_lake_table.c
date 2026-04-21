@@ -99,6 +99,7 @@
 #include "pg_lake/pgduck/write_data.h"
 #include "pg_lake/planner/restriction_collector.h"
 #include "pg_lake/storage/local_storage.h"
+#include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/util/item_pointer_utils.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_lake/util/string_utils.h"
@@ -2204,6 +2205,8 @@ postgresBeginForeignModify(ModifyTableState *mtstate,
 	 */
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
 		return;
+
+	ValidateXactRestCatalog(RelationGetRelid(resultRelInfo->ri_RelationDesc));
 
 	/* Construct an execution state. */
 	fmstate = create_foreign_modify(resultRelInfo->ri_RelationDesc,
