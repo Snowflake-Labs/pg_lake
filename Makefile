@@ -48,7 +48,11 @@ UNAME_S := $(shell uname -s)
 
 # List of targets for indent checks
 INDENT_TARGETS = pgduck_server $(EXTENSION_TARGETS)
-TYPEDEFS = /tmp/typedefs-$(PG_MAJOR_VERSION).list
+
+# Pinned PG version for formatting (pgindent/typedefs). Must match CI
+# (lint-check-18 in pytest_all.yml).
+PGINDENT_PG_VERSION := 18
+TYPEDEFS = /tmp/typedefs-$(PGINDENT_PG_VERSION).list
 
 CMAKE_AVRO_ARGS = -DCMAKE_INSTALL_PREFIX=avrolib -DCMAKE_BUILD_TYPE=RelWithDebInfo
 
@@ -71,7 +75,7 @@ endif
 typedefs: $(TYPEDEFS)
 
 $(TYPEDEFS):
-	curl -o $(TYPEDEFS) https://buildfarm.postgresql.org/cgi-bin/typedefs.pl?branch=REL_$(PG_MAJOR_VERSION)_STABLE
+	curl -o $(TYPEDEFS) https://buildfarm.postgresql.org/cgi-bin/typedefs.pl?branch=REL_$(PGINDENT_PG_VERSION)_STABLE
 
 check-indent: typedefs
 	pgindent --typedefs=$(TYPEDEFS) --check --diff $(INDENT_TARGETS)
