@@ -22,6 +22,6 @@
 #define PG_LAKE_BENCHMARK "pg_lake_benchmark"
 
 /* cached extension IDs for pg_lake_benchmark */
-extern PGDLLEXPORT CachedExtensionIds * PgLakeBenchmark;
+extern PGDLLEXPORT CachedExtensionIds *PgLakeBenchmark;
 
 void		InitializePgLakeBenchmarkIdCache(void);

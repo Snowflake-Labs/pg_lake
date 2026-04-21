@@ -22,7 +22,7 @@
 #define MAP_TYPES_SCHEMA "map_type"
 
 /* cached extension IDs for pg_map */
-extern PGDLLEXPORT CachedExtensionIds * PgMap;
+extern PGDLLEXPORT CachedExtensionIds *PgMap;
 
 void		InitializePgMapIdCache(void);
 Oid			PgMapSchemaId(void);

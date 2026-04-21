@@ -56,11 +56,11 @@ typedef void (*ClearFunction) (void *clearContext);
 struct CachedExtensionIdsData;
 typedef struct CachedExtensionIdsData CachedExtensionIds;
 
-extern PGDLLEXPORT CachedExtensionIds * CreateExtensionIdsCache(char *extensionName,
-																ClearFunction clearFn,
-																void *clearContext);
-extern PGDLLEXPORT bool IsExtensionCreated(CachedExtensionIds * extension);
-extern PGDLLEXPORT Oid ExtensionId(CachedExtensionIds * extension);
-extern PGDLLEXPORT Oid ExtensionSchemaId(CachedExtensionIds * extension);
-extern PGDLLEXPORT Oid ExtensionOwnerId(CachedExtensionIds * extension);
-extern PGDLLEXPORT void EnsureExtensionExists(CachedExtensionIds * extension);
+extern PGDLLEXPORT CachedExtensionIds *CreateExtensionIdsCache(char *extensionName,
+															   ClearFunction clearFn,
+															   void *clearContext);
+extern PGDLLEXPORT bool IsExtensionCreated(CachedExtensionIds *extension);
+extern PGDLLEXPORT Oid ExtensionId(CachedExtensionIds *extension);
+extern PGDLLEXPORT Oid ExtensionSchemaId(CachedExtensionIds *extension);
+extern PGDLLEXPORT Oid ExtensionOwnerId(CachedExtensionIds *extension);
+extern PGDLLEXPORT void EnsureExtensionExists(CachedExtensionIds *extension);

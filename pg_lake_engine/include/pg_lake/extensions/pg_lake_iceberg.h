@@ -24,7 +24,7 @@
 #define ICEBERG_INTERNAL_CATALOG_TABLE_NAME "tables_internal"
 
 /* cached extension IDs for pg_lake_iceberg */
-extern PGDLLEXPORT CachedExtensionIds * PgLakeIceberg;
+extern PGDLLEXPORT CachedExtensionIds *PgLakeIceberg;
 
 extern PGDLLEXPORT void InitializePgLakeIcebergIdCache(void);
 extern PGDLLEXPORT Oid IcebergTablesInternalTableId(void);

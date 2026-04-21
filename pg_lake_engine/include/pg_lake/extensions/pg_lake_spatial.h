@@ -19,7 +19,7 @@
 
 #include "pg_extension_base/extension_ids.h"
 
-extern PGDLLEXPORT CachedExtensionIds * PgLakeSpatial;
+extern PGDLLEXPORT CachedExtensionIds *PgLakeSpatial;
 
 void		InitializePgLakeSpatialIdCache(void);
 

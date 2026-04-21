@@ -28,7 +28,7 @@
 #define PG_LAKE_TABLE_DATA_FILE_PARTITION_VALUES_TABLE_NAME "data_file_partition_values"
 #define REPLICATION_WRITES_SCHEMA "__pg_lake_table_writes"
 
-extern PGDLLEXPORT CachedExtensionIds * PgLakeTable;
+extern PGDLLEXPORT CachedExtensionIds *PgLakeTable;
 
 extern PGDLLEXPORT void InitializePgLakeTableIdCache(void);
 

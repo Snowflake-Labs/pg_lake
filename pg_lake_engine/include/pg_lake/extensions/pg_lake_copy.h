@@ -22,6 +22,6 @@
 #define PG_LAKE_COPY "pg_lake_copy"
 
 /* cached extension IDs for pg_lake_copy */
-extern PGDLLEXPORT CachedExtensionIds * PgLakeCopy;
+extern PGDLLEXPORT CachedExtensionIds *PgLakeCopy;
 
 void		InitializePgLakeCopyIdCache(void);

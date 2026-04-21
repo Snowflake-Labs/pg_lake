@@ -22,6 +22,6 @@
 #define PG_PARQUET "pg_parquet"
 
 /* cached extension IDs for pg_parquet */
-extern PGDLLEXPORT CachedExtensionIds * PgParquet;
+extern PGDLLEXPORT CachedExtensionIds *PgParquet;
 
 void		InitializePgParquetIdCache(void);
