@@ -27,6 +27,22 @@
 #include "utils/timestamp.h"
 #include "utils/wait_event.h"
 
+/*
+ * Thin compat shim for injection points.  pg_lake_engine sits below
+ * pg_lake_table in the dependency graph, so we cannot include
+ * pg_lake/util/injection_points.h from there.  Inline the same three-line
+ * pattern here instead.
+ */
+#if PG_VERSION_NUM >= 180000
+#include "utils/injection_point.h"
+#define PG_LAKE_ENGINE_INJECTION_POINT(name) INJECTION_POINT(name, NULL)
+#elif PG_VERSION_NUM >= 170000
+#include "utils/injection_point.h"
+#define PG_LAKE_ENGINE_INJECTION_POINT(name) INJECTION_POINT(name)
+#else
+#define PG_LAKE_ENGINE_INJECTION_POINT(name) ((void) (name))
+#endif
+
 
 /*
  * Milliseconds to wait to cancel an in-progress query or execute a cleanup
@@ -392,6 +408,13 @@ WaitForResult(PGDuckConnection * pgDuckConnection)
 	{
 		int			wc;
 
+		/*
+		 * Injection point used by tests to pause the worker here so the test
+		 * can kill pgduck_server before PQconsumeInput is called, exercising
+		 * the broken-connection cleanup path.
+		 */
+		PG_LAKE_ENGINE_INJECTION_POINT("pgduck-wait-for-result");
+
 		/* Sleep until there's something to do */
 		wc = WaitLatchOrSocket(MyLatch,
 							   WL_LATCH_SET | WL_SOCKET_READABLE |
@@ -407,7 +430,14 @@ WaitForResult(PGDuckConnection * pgDuckConnection)
 		{
 			if (!PQconsumeInput(conn))
 			{
-				ReleasePGDuckConnection(pgDuckConnection);
+				/*
+				 * Do not release the connection here; the caller owns its
+				 * lifetime and will release it via PG_FINALLY or an explicit
+				 * ReleasePGDuckConnection call.  Releasing here causes a
+				 * double-free: the PG_FINALLY in the caller fires after this
+				 * error propagates out and calls ReleasePGDuckConnection a
+				 * second time on the same (now-freed or reused) hash entry.
+				 */
 				ereport(ERROR, (errmsg("lost connection to query engine")));
 			}
 		}
