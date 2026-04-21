@@ -137,6 +137,7 @@ runs:
 
     - name: Upload postgres test logs
       uses: actions/upload-artifact@v4
+      if: success() || failure()
       with:
         name: postgres-logs-${{ inputs.pg_version }}-${{ inputs.test_make_target }}
         path: |
