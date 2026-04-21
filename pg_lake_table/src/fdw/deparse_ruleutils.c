@@ -41,8 +41,8 @@
 #include "pg_lake/fdw/deparse_ruleutils.h"
 #include "pg_lake/parsetree/rte.h"
 #include "pg_lake/pgduck/rewrite_query.h"
+#include "pg_lake/planner/insert_select.h"
 #include "pg_lake/planner/restriction_collector.h"
-#include "pg_lake/extensions/postgis.h"
 #include "pg_lake/util/rel_utils.h"
 
 /*
@@ -305,6 +305,171 @@ FixCtidVarWalker(Node *node, FixCtidVarContext * context)
 
 	return expression_tree_walker(node, FixCtidVarWalker,
 								  context);
+}
+
+
+/*
+ * ReplacePostgresScanContext is used to pass parameters and return values
+ * to ReplacePostgresScanWalker.
+ */
+typedef struct ReplacePostgresScanContext
+{
+	/* OID of the __lake_postgres_scan(..) function */
+	Oid			postgresScanFunctionId;
+
+	/* OIDs of regular tables to replace with postgres_scan */
+	List	   *postgresScanTableOids;
+
+	/* DSN for connecting back to PostgreSQL */
+	char	   *dsn;
+
+	/* RTEs that were replaced with postgres_scan */
+	List	   *postgresScanRteList;
+}			ReplacePostgresScanContext;
+
+static bool ReplacePostgresScanWalker(Node *node,
+									  ReplacePostgresScanContext * context);
+
+
+/*
+ * ReplacePgTableWithPostgresScanFunc replaces all occurrences of
+ * regular PostgreSQL tables in the given node with __lake_postgres_scan(..)
+ * function calls.
+ */
+List *
+ReplacePgTableWithPostgresScanFunc(Node *node, List *postgresScanTableOids)
+{
+	if (postgresScanTableOids == NIL)
+		return NIL;
+
+	Oid			postgresScanFunctionId = PostgresScanFunctionId();
+	char	   *dsn = BuildLocalPostgresDSN();
+
+	ReplacePostgresScanContext context = {
+		.postgresScanFunctionId = postgresScanFunctionId,
+		.postgresScanTableOids = postgresScanTableOids,
+		.dsn = dsn,
+		.postgresScanRteList = NIL
+	};
+
+	ReplacePostgresScanWalker(node, &context);
+
+	return context.postgresScanRteList;
+}
+
+
+/*
+ * ReplacePostgresScanWalker replaces regular PostgreSQL table RTEs with
+ * __lake_postgres_scan function calls.
+ */
+static bool
+ReplacePostgresScanWalker(Node *node, ReplacePostgresScanContext * context)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, Query))
+	{
+		return query_tree_walker((Query *) node, ReplacePostgresScanWalker,
+								 context, QTW_EXAMINE_RTES_BEFORE);
+	}
+
+	if (!IsA(node, RangeTblEntry))
+	{
+		return expression_tree_walker(node, ReplacePostgresScanWalker,
+									  context);
+	}
+
+	RangeTblEntry *rte = (RangeTblEntry *) node;
+
+	if (rte->rtekind != RTE_RELATION)
+		return false;
+
+	if (!list_member_oid(context->postgresScanTableOids, rte->relid))
+		return false;
+
+	char	   *schemaName = get_namespace_name(get_rel_namespace(rte->relid));
+	char	   *tableName = get_rel_name(rte->relid);
+
+	/* store a copy of the rte for later use */
+	context->postgresScanRteList = lappend(context->postgresScanRteList,
+										   copyObject(rte));
+
+	/*
+	 * Assign a unique relation identifier if not already assigned.
+	 */
+	if (list_length(rte->functions) == 0)
+		AssignUniqueRelationIdentifier(rte);
+
+	int			uniqueRelationIdentifier = GetUniqueRelationIdentifier(rte);
+
+	/* reset functions list for our new function */
+	rte->functions = NIL;
+
+	/* DSN parameter */
+	Const	   *dsnParam = makeNode(Const);
+
+	dsnParam->constvalue = CStringGetTextDatum(context->dsn);
+	dsnParam->consttype = TEXTOID;
+	dsnParam->consttypmod = -1;
+	dsnParam->constbyval = false;
+	dsnParam->constlen = get_typlen(TEXTOID);
+	dsnParam->location = -1;
+
+	/* schema parameter */
+	Const	   *schemaParam = makeNode(Const);
+
+	schemaParam->constvalue = CStringGetTextDatum(schemaName);
+	schemaParam->consttype = TEXTOID;
+	schemaParam->consttypmod = -1;
+	schemaParam->constbyval = false;
+	schemaParam->constlen = get_typlen(TEXTOID);
+	schemaParam->location = -1;
+
+	/* table name parameter */
+	Const	   *tableParam = makeNode(Const);
+
+	tableParam->constvalue = CStringGetTextDatum(tableName);
+	tableParam->consttype = TEXTOID;
+	tableParam->consttypmod = -1;
+	tableParam->constbyval = false;
+	tableParam->constlen = get_typlen(TEXTOID);
+	tableParam->location = -1;
+
+	/* unique relation id parameter */
+	Const	   *uniqueIdParam = makeNode(Const);
+
+	uniqueIdParam->constvalue = Int32GetDatum(uniqueRelationIdentifier);
+	uniqueIdParam->consttype = INT4OID;
+	uniqueIdParam->consttypmod = -1;
+	uniqueIdParam->constbyval = true;
+	uniqueIdParam->constlen = 4;
+	uniqueIdParam->location = -1;
+
+	/* create function expression */
+	FuncExpr   *postgresScanFuncExpr = makeNode(FuncExpr);
+
+	postgresScanFuncExpr->funcid = context->postgresScanFunctionId;
+	postgresScanFuncExpr->funcresulttype = RECORDOID;
+	postgresScanFuncExpr->funcretset = true;
+	postgresScanFuncExpr->location = -1;
+	postgresScanFuncExpr->args = list_make4(dsnParam, schemaParam,
+											tableParam, uniqueIdParam);
+
+	RangeTblFunction *postgresScanFunction = makeNode(RangeTblFunction);
+
+	postgresScanFunction->funcexpr = (Node *) postgresScanFuncExpr;
+
+	/* set column count to pass ruleutils checks */
+	Relation	rel = RelationIdGetRelation(rte->relid);
+
+	postgresScanFunction->funccolcount = RelationGetNumberOfAttributes(rel);
+	RelationClose(rel);
+
+	rte->functions = list_make1(postgresScanFunction);
+	rte->rtekind = RTE_FUNCTION;
+
+	return false;
 }
 
 

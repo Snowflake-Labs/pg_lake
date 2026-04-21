@@ -32,3 +32,6 @@
 extern char *ReplaceReadTableFunctionCalls(char *query,
 										   PgLakeScanSnapshot * snapshot,
 										   int scanFlags);
+extern char *ReplacePostgresScanFunctionCalls(char *query,
+											  List *postgresScanRteList,
+											  bool explainRequested);

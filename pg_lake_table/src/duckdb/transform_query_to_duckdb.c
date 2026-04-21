@@ -47,6 +47,7 @@
 #include "tcop/tcopprot.h"
 
 #include "pg_lake/duckdb/transform_query_to_duckdb.h"
+#include "pg_lake/extensions/pg_lake_engine.h"
 #include "pg_lake/fdw/deparse_ruleutils.h"
 #include "pg_lake/fdw/snapshot.h"
 #include "pg_lake/fdw/writable_table.h"
@@ -54,6 +55,8 @@
 #include "pg_extension_base/pg_compat.h"
 #include "pg_lake/pgduck/read_data.h"
 #include "pg_lake/pgduck/rewrite_query.h"
+#include "pg_lake/planner/insert_select.h"
+#include "pg_lake/planner/restriction_collector.h"
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_lake/util/string_utils.h"
@@ -271,6 +274,117 @@ BuildReadDataSourceQueryForTableScan(PgLakeTableScan * tableScan, bool skipFullM
 	appendStringInfoString(&command, ")");
 
 	return command.data;
+}
+
+
+/*
+ * ReplacePostgresScanFunctionCalls replaces the __lake_postgres_scan function
+ * calls with postgres_scan_pushdown function calls for all regular PostgreSQL
+ * tables that are being scanned via DuckDB.
+ *
+ * If explainRequested is true, replaces with the qualified relation name
+ * for readable EXPLAIN output.
+ */
+char *
+ReplacePostgresScanFunctionCalls(char *query, List *postgresScanRteList,
+								 bool explainRequested)
+{
+	ListCell   *cell = NULL;
+
+	foreach(cell, postgresScanRteList)
+	{
+		RangeTblEntry *rte = (RangeTblEntry *) lfirst(cell);
+		Oid			relationId = rte->relid;
+		char	   *schemaName = get_namespace_name(get_rel_namespace(relationId));
+		char	   *tableName = get_rel_name(relationId);
+		char	   *qualifiedRelationName = psprintf("%s.%s",
+													 quote_identifier(schemaName),
+													 quote_identifier(tableName));
+
+		/*
+		 * Build the placeholder pattern that was emitted by
+		 * deparse_ruleutils. The deparser emits:
+		 * __lake_postgres_scan('dsn'::text, 'schema'::text, 'table'::text, N)
+		 *
+		 * We need to find this and replace it. Since the DSN and other values
+		 * were baked into the function call by
+		 * ReplacePgTableWithPostgresScanFunc, we search for the function name
+		 * with the schema and table name.
+		 */
+		StringInfo	searchPattern = makeStringInfo();
+
+		/*
+		 * We search for the pattern containing the table name to uniquely
+		 * identify this replacement. The deparsed SQL contains:
+		 * __lake__internal__nsp__.__lake_postgres_scan('dsn'::text,
+		 * 'schema'::text, 'table'::text, N)
+		 *
+		 * Instead of trying to match the full pattern, we search for the
+		 * __lake_postgres_scan call containing this specific table.
+		 */
+		appendStringInfo(searchPattern, "%s(%s::text, %s::text, %s::text, ",
+						 PG_LAKE_POSTGRES_SCAN,
+						 quote_literal_cstr("placeholder_dsn"),
+						 quote_literal_cstr(schemaName),
+						 quote_literal_cstr(tableName));
+
+		/*
+		 * Actually, the deparsed output will include the full DSN value.
+		 * Let's find the pattern more robustly by searching for just the
+		 * function name + schema + table combination and replacing the entire
+		 * function call.
+		 *
+		 * The function call in the deparsed SQL looks like:
+		 * __lake__internal__nsp__.__lake_postgres_scan('dsn_val'::text,
+		 * 'schema_val'::text, 'table_val'::text, N)
+		 *
+		 * We construct both the search pattern and the replacement.
+		 */
+		resetStringInfo(searchPattern);
+
+		/*
+		 * Build pattern to find: we know the schema and table are fixed, but
+		 * the DSN contains dynamic info. Since we need to match exactly, we
+		 * rebuild the full function call text using the same DSN.
+		 *
+		 * Note: the rte was saved with the original relid but was transformed
+		 * to RTE_FUNCTION. We need to get the DSN that was embedded. Since
+		 * BuildLocalPostgresDSN is deterministic per-backend, calling it
+		 * again gives the same result.
+		 */
+		char	   *dsn = BuildLocalPostgresDSN();
+		int			uniqueRelId = GetUniqueRelationIdentifier(rte);
+
+		appendStringInfo(searchPattern,
+						 "%s(%s::text, %s::text, %s::text, %d)",
+						 PG_LAKE_POSTGRES_SCAN,
+						 quote_literal_cstr(dsn),
+						 quote_literal_cstr(schemaName),
+						 quote_literal_cstr(tableName),
+						 uniqueRelId);
+
+		char	   *replacement = NULL;
+
+		if (explainRequested)
+		{
+			replacement = qualifiedRelationName;
+		}
+		else
+		{
+			StringInfo	replacementStr = makeStringInfo();
+
+			appendStringInfo(replacementStr,
+							 "postgres_scan_pushdown(%s, %s, %s)",
+							 quote_literal_cstr(dsn),
+							 quote_literal_cstr(schemaName),
+							 quote_literal_cstr(tableName));
+			replacement = replacementStr->data;
+		}
+
+		query = PgLakeReplaceText(query, searchPattern->data, replacement);
+	}
+
+	return query;
 }
 
 

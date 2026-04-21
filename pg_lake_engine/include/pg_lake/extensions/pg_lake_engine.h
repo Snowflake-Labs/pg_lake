@@ -23,6 +23,7 @@
 #define PG_LAKE_ENGINE_NSP "lake_engine"
 
 #define PG_LAKE_READ_TABLE "__lake_read_table"
+#define PG_LAKE_POSTGRES_SCAN "__lake_postgres_scan"
 #define IN_PROGRESS_FILES_TABLE "in_progress_files"
 
 
@@ -35,5 +36,6 @@ extern PGDLLEXPORT CachedExtensionIds * PgLakeEngine;
 void		InitializePgLakeEngineIdCache(void);
 
 extern PGDLLEXPORT Oid ReadTableFunctionId(void);
+extern PGDLLEXPORT Oid PostgresScanFunctionId(void);
 extern PGDLLEXPORT Oid InProgressTableId(void);
 extern PGDLLEXPORT Oid InProgressTablePkeyId(void);

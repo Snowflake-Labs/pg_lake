@@ -34,6 +34,9 @@ typedef struct PgLakeEngineIds
 	/* read table placeholder function */
 	Oid			readTableFunctionId;
 
+	/* postgres_scan placeholder function */
+	Oid			postgresScanFunctionId;
+
 	Oid			inProgressTableId;
 
 	Oid			inProgressTablePkeyId;
@@ -132,4 +135,28 @@ ReadTableFunctionId(void)
 	}
 
 	return CachedIds.readTableFunctionId;
+}
+
+
+/*
+ * PostgresScanFunctionId returns the OID of the placeholder function for
+ * scanning regular PostgreSQL tables via postgres_scan.
+ */
+Oid
+PostgresScanFunctionId(void)
+{
+	if (CachedIds.postgresScanFunctionId == InvalidOid)
+	{
+		EnsureExtensionExists(PgLakeEngine);
+
+		Oid			funcParamOid[4] = {TEXTOID, TEXTOID, TEXTOID, INT4OID};
+
+		List	   *functionName = list_make2(makeString(PG_LAKE_INTERNAL_NSP),
+											  makeString(PG_LAKE_POSTGRES_SCAN));
+
+		CachedIds.postgresScanFunctionId =
+			LookupFuncName(functionName, 4, funcParamOid, false);
+	}
+
+	return CachedIds.postgresScanFunctionId;
 }

@@ -129,6 +129,19 @@ _PG_init(void)
 							 NULL,
 							 NULL);
 
+	DefineCustomBoolVariable("pg_lake_table.enable_postgres_scan_pushdown",
+							 "Enables pg_lake_table extension to "
+							 "push down INSERT..SELECT queries that select from "
+							 "regular PostgreSQL tables using postgres_scan.",
+							 NULL,
+							 &EnablePostgresScanPushdown,
+							 true,
+							 PGC_USERSET,
+							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							 NULL,
+							 NULL,
+							 NULL);
+
 	DefineCustomBoolVariable("pg_lake_table.enable_data_file_pruning",
 							 "Enables data file pruning based on the metadata statistics "
 							 "for iceberg tables.",

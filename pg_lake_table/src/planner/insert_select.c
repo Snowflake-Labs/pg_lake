@@ -18,7 +18,25 @@
 #include "postgres.h"
 
 #include "access/table.h"
+#include "access/xact.h"
+#include "catalog/pg_class.h"
+#include "catalog/pg_inherits.h"
+#include "commands/dbcommands.h"
+#include "miscadmin.h"
+#include "postmaster/postmaster.h"
+#include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
+#include "nodes/parsenodes.h"
+#include "nodes/plannodes.h"
+#include "parser/parsetree.h"
+#include "utils/builtins.h"
+#include "utils/guc.h"
+#include "utils/rel.h"
+#include "utils/lsyscache.h"
+#include "utils/typcache.h"
+
 #include "pg_lake/extensions/postgis.h"
+#include "pg_lake/fdw/shippable.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/planner/insert_select.h"
 #include "pg_lake/planner/query_pushdown.h"
@@ -26,21 +44,19 @@
 #include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/util/rel_utils.h"
-#include "nodes/makefuncs.h"
-#include "nodes/nodeFuncs.h"
-#include "nodes/parsenodes.h"
-#include "parser/parsetree.h"
-#include "utils/rel.h"
-#include "utils/lsyscache.h"
-#include "utils/typcache.h"
 
 
 static RangeTblEntry *GetSelectRteFromInsertSelect(Query *query);
 static RangeTblEntry *GetInsertRteFromInsertSelect(Query *query);
 static bool TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod, CopyDataFormat sourceFormat);
+static bool SourceTableUsesSeqScan(Plan *plan, List *rtable, Oid sourceRelId);
+static bool RegularTableColumnsSuitableForPushdown(Oid relationId);
 
 /* pg_lake_table.enable_insert_select_pushdown setting */
 bool		EnableInsertSelectPushdown = true;
+
+/* pg_lake_table.enable_postgres_scan_pushdown setting */
+bool		EnablePostgresScanPushdown = true;
 
 /*
  * IsPushdownableInsertSelectQuery checks whether the given query is an INSERT..SELECT
@@ -537,4 +553,351 @@ RelationColumnsSuitableForPushdown(Relation relation, CopyDataFormat sourceForma
 	}
 
 	return true;
+}
+
+
+/*
+ * SourceTableUsesSeqScan walks the plan tree to check whether the scan on
+ * the given source table is a SeqScan. Returns true if it is a SeqScan,
+ * false if it uses an index scan or other scan type.
+ */
+static bool
+SourceTableUsesSeqScan(Plan *plan, List *rtable, Oid sourceRelId)
+{
+	if (plan == NULL)
+		return false;
+
+	switch (nodeTag(plan))
+	{
+		case T_SeqScan:
+			{
+				Scan	   *scan = (Scan *) plan;
+
+				if (scan->scanrelid > 0 && scan->scanrelid <= list_length(rtable))
+				{
+					RangeTblEntry *rte = rt_fetch(scan->scanrelid, rtable);
+
+					if (rte->rtekind == RTE_RELATION && rte->relid == sourceRelId)
+						return true;
+				}
+				break;
+			}
+
+		case T_IndexScan:
+		case T_IndexOnlyScan:
+		case T_BitmapIndexScan:
+		case T_BitmapHeapScan:
+			{
+				Scan	   *scan = (Scan *) plan;
+
+				if (scan->scanrelid > 0 && scan->scanrelid <= list_length(rtable))
+				{
+					RangeTblEntry *rte = rt_fetch(scan->scanrelid, rtable);
+
+					if (rte->rtekind == RTE_RELATION && rte->relid == sourceRelId)
+						return false;
+				}
+				break;
+			}
+
+		default:
+			break;
+	}
+
+	/* recurse into subplans */
+	if (SourceTableUsesSeqScan(plan->lefttree, rtable, sourceRelId))
+		return true;
+
+	if (SourceTableUsesSeqScan(plan->righttree, rtable, sourceRelId))
+		return true;
+
+	/* check subquery scan */
+	if (IsA(plan, SubqueryScan))
+	{
+		SubqueryScan *subqueryScan = (SubqueryScan *) plan;
+
+		if (SourceTableUsesSeqScan(subqueryScan->subplan, rtable, sourceRelId))
+			return true;
+	}
+
+	/* check Append/MergeAppend children */
+	if (IsA(plan, Append))
+	{
+		Append	   *appendPlan = (Append *) plan;
+		ListCell   *lc;
+
+		foreach(lc, appendPlan->appendplans)
+		{
+			if (SourceTableUsesSeqScan((Plan *) lfirst(lc), rtable, sourceRelId))
+				return true;
+		}
+	}
+
+	return false;
+}
+
+
+/*
+ * RegularTableColumnsSuitableForPushdown checks whether the columns of a
+ * regular PostgreSQL table are suitable for scanning via postgres_scan in
+ * DuckDB. This is a simplified version of RelationColumnsSuitableForPushdown
+ * that works for non-lake tables.
+ */
+static bool
+RegularTableColumnsSuitableForPushdown(Oid relationId)
+{
+	Relation	relation = RelationIdGetRelation(relationId);
+	TupleDesc	tableDescriptor = RelationGetDescr(relation);
+
+	for (int columnIndex = 0; columnIndex < tableDescriptor->natts; columnIndex++)
+	{
+		Form_pg_attribute column = TupleDescAttr(tableDescriptor, columnIndex);
+
+		if (column->attisdropped)
+			continue;
+
+		Oid			typeId = column->atttypid;
+
+		/*
+		 * postgres_scan handles most PostgreSQL types natively, but we still
+		 * block geometry and domain types which DuckDB cannot handle.
+		 */
+		if (IsGeometryTypeId(typeId))
+		{
+			RelationClose(relation);
+			return false;
+		}
+
+		char		typeType = get_typtype(typeId);
+
+		if (typeType == TYPTYPE_DOMAIN)
+		{
+			RelationClose(relation);
+			return false;
+		}
+	}
+
+	RelationClose(relation);
+	return true;
+}
+
+
+/*
+ * BuildLocalPostgresDSN constructs a libpq connection string for connecting
+ * back to the current PostgreSQL instance from pgduck_server. Uses unix
+ * socket for fast local connections with peer authentication.
+ */
+char *
+BuildLocalPostgresDSN(void)
+{
+	const char *socketDirs = GetConfigOption("unix_socket_directories",
+											 false, false);
+	const char *dbname = get_database_name(MyDatabaseId);
+	const char *username = GetUserNameFromId(GetUserId(), false);
+
+	/*
+	 * unix_socket_directories can be a comma-separated list. Use only the
+	 * first directory, trimming any leading/trailing whitespace.
+	 */
+	char	   *firstDir = pstrdup(socketDirs ? socketDirs : "/tmp");
+	char	   *comma = strchr(firstDir, ',');
+
+	if (comma)
+		*comma = '\0';
+
+	/* trim leading spaces */
+	while (*firstDir == ' ')
+		firstDir++;
+
+	/* trim trailing spaces */
+	int			len = strlen(firstDir);
+
+	while (len > 0 && firstDir[len - 1] == ' ')
+		firstDir[--len] = '\0';
+
+	StringInfoData dsn;
+
+	initStringInfo(&dsn);
+	appendStringInfo(&dsn, "host=%s port=%d dbname=%s user=%s",
+					 firstDir, PostPortNumber, dbname, username);
+	return dsn.data;
+}
+
+
+/*
+ * IsPostgresScanPushdownableInsertSelect checks whether the given
+ * INSERT..SELECT query can be pushed down using postgres_scan for
+ * regular PostgreSQL tables in the SELECT part.
+ *
+ * Returns a list of source table OIDs that should use postgres_scan,
+ * or NIL if the query is not pushdownable.
+ */
+List *
+IsPostgresScanPushdownableInsertSelect(Query *query, PlannedStmt *plan)
+{
+	if (!IsInsertSelectQuery(query))
+		return NIL;
+
+	if (!EnableInsertSelectPushdown || !EnablePostgresScanPushdown)
+		return NIL;
+
+	if (query->hasModifyingCTE)
+		return NIL;
+
+	if (query->returningList != NIL)
+		return NIL;
+
+	if (query->onConflict != NULL)
+		return NIL;
+
+	/* check that the INSERT target is a writable lake/iceberg table */
+	Oid			insertIntoRelid = GetInsertRelidFromInsertSelect(query);
+
+	if (!IsWritablePgLakeTable(insertIntoRelid) &&
+		!IsWritableIcebergTable(insertIntoRelid))
+		return NIL;
+
+	Relation	insertRelation = RelationIdGetRelation(insertIntoRelid);
+	bool		allowDefaultConsts = true;
+
+	if (!RelationSuitableForPushdown(insertRelation, allowDefaultConsts))
+	{
+		RelationClose(insertRelation);
+		return NIL;
+	}
+
+	PgLakeTableProperties properties =
+		GetPgLakeTableProperties(insertIntoRelid);
+
+	if (!RelationColumnsSuitableForPushdown(insertRelation, properties.format))
+	{
+		RelationClose(insertRelation);
+		return NIL;
+	}
+
+	const char *partitionBy = GetIcebergTablePartitionByOption(insertIntoRelid);
+
+	if (partitionBy != NULL)
+	{
+		RelationClose(insertRelation);
+		return NIL;
+	}
+
+	RelationClose(insertRelation);
+
+	/* check target list for non-shippable expressions */
+	if (HasNotShippableExpression((Node *) query->targetList))
+		return NIL;
+
+	/* check CTEs */
+	ListCell   *cteCell = NULL;
+
+	foreach(cteCell, query->cteList)
+	{
+		CommonTableExpr *cte = (CommonTableExpr *) lfirst(cteCell);
+
+		if (!FullQueryIsPushdownable((Query *) cte->ctequery))
+			return NIL;
+	}
+
+	/*
+	 * Collect non-shippable objects from the SELECT subquery. If the only
+	 * non-shippable items are regular PostgreSQL tables, those tables can
+	 * potentially be scanned via postgres_scan.
+	 */
+	RangeTblEntry *selectRte = GetSelectRteFromInsertSelect(query);
+	HTAB	   *notShippable = CollectNotShippableObjects((Node *) selectRte->subquery);
+
+	List	   *postgresScanTableOids = NIL;
+
+	HASH_SEQ_STATUS hashSeq;
+	NotShippableObject *entry;
+
+	hash_seq_init(&hashSeq, notShippable);
+
+	while ((entry = (NotShippableObject *) hash_seq_search(&hashSeq)) != NULL)
+	{
+		if (entry->reason != NOT_SHIPPABLE_TABLE)
+		{
+			/* non-table blocker found, cannot push down */
+			hash_seq_term(&hashSeq);
+			return NIL;
+		}
+
+		Oid			relid = entry->objectId;
+
+		/* skip temp tables - postgres_scan cannot see them */
+		if (get_rel_persistence(relid) == RELPERSISTENCE_TEMP)
+		{
+			hash_seq_term(&hashSeq);
+			return NIL;
+		}
+
+		/* skip tables with inheritance */
+		if (has_subclass(relid))
+		{
+			hash_seq_term(&hashSeq);
+			return NIL;
+		}
+
+		/*
+		 * Skip tables created or rewritten in the current transaction.
+		 * postgres_scan opens a separate connection that cannot see
+		 * uncommitted changes from this transaction.
+		 */
+		{
+			Relation	sourceRel = RelationIdGetRelation(relid);
+			bool		createdInXact =
+				sourceRel->rd_createSubid != InvalidSubTransactionId;
+			bool		rewrittenInXact =
+				sourceRel->rd_newRelfilelocatorSubid != InvalidSubTransactionId;
+
+			RelationClose(sourceRel);
+
+			if (createdInXact || rewrittenInXact)
+			{
+				ereport(DEBUG4,
+						(errmsg("postgres_scan pushdown blocked: source table "
+								"was created or rewritten in current transaction")));
+				hash_seq_term(&hashSeq);
+				return NIL;
+			}
+		}
+
+		/* check column type compatibility */
+		if (!RegularTableColumnsSuitableForPushdown(relid))
+		{
+			hash_seq_term(&hashSeq);
+			return NIL;
+		}
+
+		/* check that the standard plan uses SeqScan on this table */
+		if (!SourceTableUsesSeqScan(plan->planTree, plan->rtable, relid))
+		{
+			ereport(DEBUG4,
+					(errmsg("postgres_scan pushdown blocked: source table "
+							"uses index scan")));
+			hash_seq_term(&hashSeq);
+			return NIL;
+		}
+
+		postgresScanTableOids = lappend_oid(postgresScanTableOids, relid);
+	}
+
+	if (postgresScanTableOids == NIL)
+	{
+		/*
+		 * No non-shippable objects found at all. This means the query is
+		 * fully pushdownable without postgres_scan, which should have been
+		 * caught by IsPushdownableInsertSelectQuery. Return NIL to let the
+		 * caller handle it.
+		 */
+		return NIL;
+	}
+
+	ereport(DEBUG4,
+			(errmsg("INSERT..SELECT is pushdownable with postgres_scan "
+					"for %d source table(s)", list_length(postgresScanTableOids))));
+
+	return postgresScanTableOids;
 }

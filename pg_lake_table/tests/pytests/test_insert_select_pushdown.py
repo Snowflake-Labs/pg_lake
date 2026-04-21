@@ -1441,3 +1441,199 @@ def test_explain_shows_temporal_validation_wrapper(
         run_command("RESET search_path;", pg_conn)
         run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
         pg_conn.commit()
+
+
+def test_postgres_scan_pushdown(s3, pg_conn, extension, with_default_location):
+    """INSERT..SELECT from a regular PostgreSQL table into an Iceberg table
+    should use postgres_scan_pushdown when the source table is scanned via
+    SeqScan and was not created in the current transaction.
+    """
+
+    run_command(
+        """
+        CREATE SCHEMA test_pg_scan;
+        SET search_path TO test_pg_scan;
+
+        CREATE TABLE pg_source (id bigint, val int, label text);
+        INSERT INTO pg_source
+            SELECT i, (i * 7) % 100, 'row_' || i FROM generate_series(1, 50) i;
+
+        CREATE TABLE pg_source_2 (id bigint, amount float);
+        INSERT INTO pg_source_2
+            SELECT i, i * 1.5 FROM generate_series(1, 50) i;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        """
+        SET search_path TO test_pg_scan;
+
+        CREATE TABLE iceberg_target (id bigint, val int, label text) USING iceberg;
+        CREATE TABLE iceberg_target_2 (id bigint, total_val bigint) USING iceberg;
+        CREATE TABLE iceberg_target_3 (id bigint, val int, amount float) USING iceberg;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # ---- 1. Basic INSERT..SELECT with EXPLAIN ----
+    explain = _get_explain_text(
+        "INSERT INTO iceberg_target SELECT * FROM pg_source", pg_conn
+    )
+    assert (
+        "Custom Scan (Query Pushdown)" in explain
+    ), "Expected pushdown for INSERT from PG table"
+    assert "POSTGRES_SCAN_PUSHDOWN" in explain, (
+        "Expected POSTGRES_SCAN_PUSHDOWN in EXPLAIN output:\n" + explain
+    )
+
+    # run and verify correctness
+    run_command("INSERT INTO iceberg_target SELECT * FROM pg_source", pg_conn)
+    pg_conn.commit()
+
+    result = run_query("SELECT count(*) FROM iceberg_target", pg_conn)
+    assert result == [[50]]
+
+    result = run_query(
+        "SELECT id, val, label FROM iceberg_target ORDER BY id LIMIT 3", pg_conn
+    )
+    assert result[0] == [1, 7, "row_1"]
+    assert result[1] == [2, 14, "row_2"]
+    assert result[2] == [3, 21, "row_3"]
+
+    # ---- 2. INSERT..SELECT with WHERE clause ----
+    explain = _get_explain_text(
+        "INSERT INTO iceberg_target SELECT * FROM pg_source WHERE val > 50", pg_conn
+    )
+    assert "Custom Scan (Query Pushdown)" in explain
+    assert "POSTGRES_SCAN_PUSHDOWN" in explain
+
+    run_command(
+        "INSERT INTO iceberg_target SELECT * FROM pg_source WHERE val > 50", pg_conn
+    )
+    pg_conn.commit()
+
+    # ---- 3. INSERT..SELECT with aggregation ----
+    explain = _get_explain_text(
+        "INSERT INTO iceberg_target_2 SELECT val, sum(id) FROM pg_source GROUP BY val",
+        pg_conn,
+    )
+    assert "Custom Scan (Query Pushdown)" in explain
+    assert "POSTGRES_SCAN_PUSHDOWN" in explain
+
+    run_command(
+        "INSERT INTO iceberg_target_2 SELECT val, sum(id) FROM pg_source GROUP BY val",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # ---- 4. INSERT..SELECT with JOIN between two PG tables ----
+    explain = _get_explain_text(
+        "INSERT INTO iceberg_target_3 "
+        "SELECT s.id, s.val, s2.amount "
+        "FROM pg_source s JOIN pg_source_2 s2 ON s.id = s2.id",
+        pg_conn,
+    )
+    assert "Custom Scan (Query Pushdown)" in explain
+    assert "POSTGRES_SCAN_PUSHDOWN" in explain
+
+    run_command(
+        "INSERT INTO iceberg_target_3 "
+        "SELECT s.id, s.val, s2.amount "
+        "FROM pg_source s JOIN pg_source_2 s2 ON s.id = s2.id",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query("SELECT count(*) FROM iceberg_target_3", pg_conn)
+    assert result == [[50]]
+
+    result = run_query("SELECT id, amount FROM iceberg_target_3 WHERE id = 10", pg_conn)
+    assert result == [[10, 15.0]]
+
+    # ---- 5. EXPLAIN (non-VERBOSE) should not error ----
+    result = run_query(
+        "EXPLAIN INSERT INTO iceberg_target SELECT * FROM pg_source", pg_conn
+    )
+    assert "Custom Scan (Query Pushdown)" in str(result)
+
+    # ---- 6. EXPLAIN ANALYZE should not error ----
+    result = run_query(
+        "EXPLAIN ANALYZE INSERT INTO iceberg_target SELECT * FROM pg_source",
+        pg_conn,
+    )
+    assert "Custom Scan (Query Pushdown)" in str(result)
+
+    # ---- 7. Pushdown blocked for table created in same transaction ----
+    run_command(
+        """
+        SET search_path TO test_pg_scan;
+        CREATE TABLE pg_new_in_tx (id bigint, val int, label text);
+        INSERT INTO pg_new_in_tx SELECT * FROM pg_source;
+    """,
+        pg_conn,
+    )
+    # don't commit - table was created in current transaction
+    result = run_query(
+        "EXPLAIN (VERBOSE) INSERT INTO iceberg_target SELECT * FROM pg_new_in_tx",
+        pg_conn,
+    )
+    assert "Custom Scan (Query Pushdown)" not in str(result)
+    pg_conn.rollback()
+
+    # ---- 8. Pushdown blocked when GUC disabled ----
+    run_command("SET pg_lake_table.enable_postgres_scan_pushdown TO off", pg_conn)
+
+    result = run_query(
+        "EXPLAIN (VERBOSE) INSERT INTO iceberg_target SELECT * FROM pg_source",
+        pg_conn,
+    )
+    assert "Custom Scan (Query Pushdown)" not in str(result)
+
+    run_command("RESET pg_lake_table.enable_postgres_scan_pushdown", pg_conn)
+
+    # ---- cleanup ----
+    run_command("DROP SCHEMA test_pg_scan CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_postgres_scan_ctas(s3, pg_conn, extension, with_default_location):
+    """CREATE TABLE .. USING iceberg AS SELECT * FROM pg_table should use
+    postgres_scan_pushdown for the underlying INSERT..SELECT.
+    """
+
+    run_command(
+        """
+        CREATE SCHEMA test_pg_scan_ctas;
+        SET search_path TO test_pg_scan_ctas;
+
+        CREATE TABLE pg_source (id bigint, val int, label text);
+        INSERT INTO pg_source
+            SELECT i, (i * 7) % 100, 'row_' || i FROM generate_series(1, 30) i;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        """
+        SET search_path TO test_pg_scan_ctas;
+        CREATE TABLE iceberg_ctas USING iceberg AS SELECT * FROM pg_source;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query("SELECT count(*) FROM test_pg_scan_ctas.iceberg_ctas", pg_conn)
+    assert result == [[30]]
+
+    result = run_query(
+        "SELECT id, val, label FROM test_pg_scan_ctas.iceberg_ctas ORDER BY id LIMIT 1",
+        pg_conn,
+    )
+    assert result == [[1, 7, "row_1"]]
+
+    run_command("DROP SCHEMA test_pg_scan_ctas CASCADE", pg_conn)
+    pg_conn.commit()

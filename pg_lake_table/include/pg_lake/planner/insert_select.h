@@ -23,10 +23,26 @@
 /* pg_lake_table.enable_insert_select_pushdown setting */
 extern bool EnableInsertSelectPushdown;
 
+/* pg_lake_table.enable_postgres_scan_pushdown setting */
+extern bool EnablePostgresScanPushdown;
+
 bool		IsPushdownableInsertSelectQuery(Query *query);
 bool		IsInsertSelectQuery(Query *query);
 Oid			GetInsertRelidFromInsertSelect(Query *query);
 void		TransformPushdownableInsertSelect(Query *query);
+
+/*
+ * IsPostgresScanPushdownableInsertSelect checks whether the given INSERT..SELECT
+ * query can be pushed down using postgres_scan for regular PostgreSQL tables.
+ *
+ * Returns a list of source table OIDs that should use postgres_scan, or NIL
+ * if the query is not pushdownable.
+ */
+List	   *IsPostgresScanPushdownableInsertSelect(Query *query,
+												   PlannedStmt *plan);
+
+/* Build libpq DSN for connecting back to this PostgreSQL instance */
+char	   *BuildLocalPostgresDSN(void);
 
 /* logic shared with COPY pushdown */
 extern PGDLLEXPORT bool RelationColumnsSuitableForPushdown(Relation relation, CopyDataFormat sourceFormat);

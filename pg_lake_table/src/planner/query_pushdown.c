@@ -105,9 +105,11 @@ static bool ExpressionHasCollation(Node *node, IsShippableContext * context);
 static bool ExpressionHasNonShippableObject(Node *node, bool srfAllowed, IsShippableContext * context);
 static bool ExpressionReturnsNonShippableType(Node *node, IsShippableContext * context);
 static PlannedStmt *GenerateInsertSelectPushdownPlan(PlannedStmt *localPlan,
-													 Query *query);
+													 Query *query,
+													 List *postgresScanTableOids);
 static PlannedStmt *GeneratePushdownPlan(PlannedStmt *localPlan, Query *originalQuery);
-static CustomScan *GeneratePushdownScan(Query *originalQuery);
+static CustomScan *GeneratePushdownScan(Query *originalQuery,
+										List *postgresScanTableOids);
 static RangeTblEntry *CreateResultRTE(List *columnNameList);
 static Node *QueryPushdownCreateScanState(CustomScan *scan);
 static void QueryPushdownBeginScan(CustomScanState *node, EState *estate, int eflags);
@@ -163,6 +165,9 @@ typedef struct QueryPushdownScanState
 	/* INSERT..SELECT into the following relation, or InvalidOid */
 	Oid			insertIntoRelid;
 	TupleDesc	insertTargetTupleDesc;
+
+	/* regular PostgreSQL tables to scan via postgres_scan, or NIL */
+	List	   *postgresScanTableOids;
 
 	/* table properties */
 	TupleDesc	tupleDesc;
@@ -300,11 +305,22 @@ LakeTablePlanner(Query *parse, const char *queryString,
 		{
 			bool		isPushdownableSelect = FullQueryIsPushdownable(originalQuery);
 			bool		isPushdownableInsertSelect = false;
+			List	   *postgresScanTableOids = NIL;
 
 			if (!isPushdownableSelect)
 				isPushdownableInsertSelect = IsPushdownableInsertSelectQuery(originalQuery);
 
-			if (isPushdownableSelect || isPushdownableInsertSelect)
+			/*
+			 * If the INSERT..SELECT is not pushdownable (e.g. because the
+			 * SELECT references regular PostgreSQL tables), check whether we
+			 * can use postgres_scan to scan those tables from DuckDB.
+			 */
+			if (!isPushdownableSelect && !isPushdownableInsertSelect)
+				postgresScanTableOids =
+					IsPostgresScanPushdownableInsertSelect(originalQuery, plan);
+
+			if (isPushdownableSelect || isPushdownableInsertSelect ||
+				postgresScanTableOids != NIL)
 			{
 				AddMissingRTEAliasaes((Node *) originalQuery, NULL);
 
@@ -315,7 +331,8 @@ LakeTablePlanner(Query *parse, const char *queryString,
 					plan = AppendPermInfos(pushdownPlan, plan);
 				}
 				else
-					plan = GenerateInsertSelectPushdownPlan(plan, originalQuery);
+					plan = GenerateInsertSelectPushdownPlan(plan, originalQuery,
+															postgresScanTableOids);
 
 			}
 		}
@@ -1245,9 +1262,10 @@ ExpressionReturnsNonShippableType(Node *node, IsShippableContext * context)
  * insert..select query.
  */
 static PlannedStmt *
-GenerateInsertSelectPushdownPlan(PlannedStmt *localPlan, Query *query)
+GenerateInsertSelectPushdownPlan(PlannedStmt *localPlan, Query *query,
+								 List *postgresScanTableOids)
 {
-	CustomScan *customScan = GeneratePushdownScan(query);
+	CustomScan *customScan = GeneratePushdownScan(query, postgresScanTableOids);
 
 	customScan->custom_scan_tlist =
 		CreateInternalCustomScanTargetList(localPlan->planTree->targetlist);
@@ -1266,7 +1284,7 @@ GenerateInsertSelectPushdownPlan(PlannedStmt *localPlan, Query *query)
 static PlannedStmt *
 GeneratePushdownPlan(PlannedStmt *localPlan, Query *originalQuery)
 {
-	CustomScan *customScan = GeneratePushdownScan(originalQuery);
+	CustomScan *customScan = GeneratePushdownScan(originalQuery, NIL);
 
 	customScan->custom_scan_tlist =
 		CreateInternalCustomScanTargetList(localPlan->planTree->targetlist);
@@ -1305,7 +1323,7 @@ GeneratePushdownPlan(PlannedStmt *localPlan, Query *originalQuery)
  * query tree
  */
 static CustomScan *
-GeneratePushdownScan(Query *originalQuery)
+GeneratePushdownScan(Query *originalQuery, List *postgresScanTableOids)
 {
 	/*
 	 * Rewrite any unsupported expression to one that DuckDB understands.
@@ -1318,12 +1336,16 @@ GeneratePushdownScan(Query *originalQuery)
 	customScan->flags = CUSTOMPATH_SUPPORT_BACKWARD_SCAN | CUSTOMPATH_SUPPORT_PROJECTION;
 	customScan->methods = &QueryPushdownScanMethods;
 
-	Oid			insertIntoRelid =
-		IsPushdownableInsertSelectQuery(originalQuery) ?
-		GetInsertRelidFromInsertSelect(originalQuery) : InvalidOid;
+	Oid			insertIntoRelid = InvalidOid;
+
+	if (IsPushdownableInsertSelectQuery(originalQuery) ||
+		postgresScanTableOids != NIL)
+		insertIntoRelid = GetInsertRelidFromInsertSelect(originalQuery);
 
 	customScan->custom_private =
-		list_make3(rewrittenQuery, restrictionList, list_make1_oid(insertIntoRelid));
+		list_make4(rewrittenQuery, restrictionList,
+				   list_make1_oid(insertIntoRelid),
+				   postgresScanTableOids);
 
 	return customScan;
 }
@@ -1363,6 +1385,7 @@ QueryPushdownCreateScanState(CustomScan *scan)
 	List	   *insertIntoRelidList = lthird(scan->custom_private);
 
 	scanState->insertIntoRelid = linitial_oid(insertIntoRelidList);
+	scanState->postgresScanTableOids = (List *) lfourth(scan->custom_private);
 
 	return (Node *) scanState;
 }
@@ -1419,6 +1442,14 @@ QueryPushdownBeginScan(CustomScanState *node, EState *estate, int eflags)
 	List	   *rteList =
 		ReplacePgLakeTableWithReadTableFunc((Node *) scanQuery);
 
+	/*
+	 * Replace regular PostgreSQL tables with __lake_postgres_scan() function
+	 * calls (if any were identified during planning).
+	 */
+	List	   *postgresScanRteList =
+		ReplacePgTableWithPostgresScanFunc((Node *) scanQuery,
+										   scanState->postgresScanTableOids);
+
 	/* if there are child tables, include them in the snapshot */
 	bool		includeChildren = true;
 
@@ -1436,6 +1467,14 @@ QueryPushdownBeginScan(CustomScanState *node, EState *estate, int eflags)
 	char	   *queryString = ReplaceReadTableFunctionCalls(pgDuckSQLTemplate,
 															snapshot,
 															explainRequested);
+
+	/*
+	 * Replace __lake_postgres_scan() placeholders with actual
+	 * postgres_scan_pushdown() calls.
+	 */
+	queryString = ReplacePostgresScanFunctionCalls(queryString,
+												   postgresScanRteList,
+												   explainRequested);
 
 	TupleDesc	tupleDesc = node->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
 
@@ -1692,6 +1731,14 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 	List	   *rteList =
 		ReplacePgLakeTableWithReadTableFunc((Node *) scanQuery);
 
+	/*
+	 * Replace regular PostgreSQL tables with __lake_postgres_scan() function
+	 * calls (if any were identified during planning).
+	 */
+	List	   *postgresScanRteList =
+		ReplacePgTableWithPostgresScanFunc((Node *) scanQuery,
+										   scanState->postgresScanTableOids);
+
 	/* if there are child tables, include them in the snapshot */
 	bool		includeChildren = true;
 
@@ -1709,6 +1756,10 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 	char	   *queryString = ReplaceReadTableFunctionCalls(pgDuckSQLTemplate,
 															snapshot,
 															explainRequested);
+
+	queryString = ReplacePostgresScanFunctionCalls(queryString,
+												   postgresScanRteList,
+												   explainRequested);
 
 	ExplainPropertyText("Engine", "DuckDB", es);
 
@@ -1748,6 +1799,10 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 	}
 	char	   *realQuery = ReplaceReadTableFunctionCalls(pgDuckSQLTemplate,
 														  snapshot, false);
+
+	realQuery = ReplacePostgresScanFunctionCalls(realQuery,
+												 postgresScanRteList,
+												 false);
 
 	if (scanState->insertIntoRelid != InvalidOid)
 	{

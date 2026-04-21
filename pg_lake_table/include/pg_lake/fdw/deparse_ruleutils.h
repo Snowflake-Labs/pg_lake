@@ -31,6 +31,8 @@
 #include "nodes/parsenodes.h"
 
 extern List *ReplacePgLakeTableWithReadTableFunc(Node *node);
+extern List *ReplacePgTableWithPostgresScanFunc(Node *node,
+												List *postgresScanTableOids);
 extern List *RteListToOidList(List *rteList);
 extern Query *ParseQuery(char *command, List *paramList);
 extern char *PreparePGDuckSQLTemplate(Query *query);
