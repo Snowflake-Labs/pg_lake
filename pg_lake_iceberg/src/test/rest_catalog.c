@@ -37,7 +37,7 @@ register_namespace_to_rest_catalog(PG_FUNCTION_ARGS)
 	char	   *catalogName = text_to_cstring(PG_GETARG_TEXT_P(0));
 	char	   *namespaceName = text_to_cstring(PG_GETARG_TEXT_P(1));
 
-	RestCatalogOptions *opts = GetRestCatalogOptionsFromCatalog(REST_CATALOG_NAME);
+	RestCatalogOptions *opts = ResolveRestCatalogOptions(REST_CATALOG_NAME);
 
 	RegisterNamespaceToRestCatalog(opts, catalogName, namespaceName);
 	PG_RETURN_VOID();

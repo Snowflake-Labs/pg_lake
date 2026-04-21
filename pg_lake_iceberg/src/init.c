@@ -375,10 +375,16 @@ IcebergDefaultCatalogCheckHook(char **newvalue, void **extra, GucSource source)
 		return true;
 
 	/*
-	 * When catalog access is available, also accept user-created
-	 * iceberg_catalog foreign servers with TYPE 'rest'.
+	 * Outside a transaction we cannot do catalog lookups to verify that the
+	 * name refers to a valid iceberg_catalog server.  Accept the value on
+	 * faith; an invalid name will error at first use.  This mirrors how
+	 * PostgreSQL handles check_default_tablespace (see
+	 * src/backend/commands/tablespace.c).
 	 */
-	if (IsTransactionState() && IsRestCatalog(newCatalog))
+	if (!IsTransactionState())
+		return true;
+
+	if (IsRestCatalog(newCatalog))
 		return true;
 
 	GUC_check_errdetail("pg_lake_iceberg: allowed iceberg catalog options are '" POSTGRES_CATALOG_NAME "', "

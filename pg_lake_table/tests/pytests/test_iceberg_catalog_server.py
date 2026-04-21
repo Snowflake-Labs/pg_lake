@@ -169,6 +169,41 @@ def test_reject_options_on_non_server(superuser_conn, extension):
     superuser_conn.rollback()
 
 
+# ── Option value validation ─────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "option, bad_value, expected_error",
+    [
+        ("rest_endpoint", "", "must not be empty"),
+        ("rest_endpoint", "localhost:8181", "URI scheme"),
+        ("oauth_endpoint", "", "must not be empty"),
+        ("oauth_endpoint", "localhost/oauth/tokens", "URI scheme"),
+        ("location_prefix", "", "must not be empty"),
+        ("location_prefix", "my-bucket/prefix", "URI scheme"),
+        ("catalog_name", "", "must not be empty"),
+        ("client_id", "", "must not be empty"),
+        ("client_secret", "", "must not be empty"),
+        ("scope", "", "must not be empty"),
+    ],
+)
+def test_reject_bad_option_values(
+    superuser_conn, extension, option, bad_value, expected_error
+):
+    err = run_command(
+        f"""
+        CREATE SERVER test_bad_val TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS ({option} '{bad_value}')
+        """,
+        superuser_conn,
+        raise_error=False,
+    )
+    assert err is not None, f"Expected error for {option}='{bad_value}'"
+    assert expected_error in str(err), f"Expected '{expected_error}' in: {err}"
+    superuser_conn.rollback()
+
+
 # ── CREATE FOREIGN TABLE on iceberg_catalog servers is blocked ──────────────
 
 
@@ -324,6 +359,10 @@ def test_create_table_with_server_catalog(
         """,
         superuser_conn,
     )
+    run_command(
+        "GRANT USAGE ON FOREIGN SERVER test_srv_catalog TO PUBLIC",
+        superuser_conn,
+    )
     superuser_conn.commit()
 
     err = run_command(
@@ -340,9 +379,42 @@ def test_create_table_with_server_catalog(
     # "invalid catalog option" error. This proves the server was resolved.
     assert err is not None
     assert "invalid catalog option" not in str(err)
+    assert "permission denied" not in str(err)
     pg_conn.rollback()
 
     run_command("DROP SERVER test_srv_catalog CASCADE", superuser_conn)
+    superuser_conn.commit()
+
+
+def test_create_table_requires_usage_on_catalog_server(
+    pg_conn, superuser_conn, s3, extension, with_default_location
+):
+    """A non-superuser without USAGE on the catalog server must be
+    denied when creating a table that references it."""
+    run_command(
+        """
+        CREATE SERVER test_no_usage_srv TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    err = run_command(
+        """
+        CREATE TABLE test_no_usage_tbl (id bigint)
+            USING iceberg
+            WITH (catalog = 'test_no_usage_srv')
+        """,
+        pg_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert "permission denied for foreign server" in str(err).lower()
+    pg_conn.rollback()
+
+    run_command("DROP SERVER test_no_usage_srv", superuser_conn)
     superuser_conn.commit()
 
 
@@ -566,8 +638,9 @@ def test_allow_drop_user_created_server(superuser_conn, extension):
     superuser_conn.rollback()
 
 
-def test_allow_rename_user_created_server(superuser_conn, extension):
-    """RENAME on a user-created server should work fine."""
+def test_reject_rename_iceberg_catalog_server(superuser_conn, extension):
+    """Renaming an iceberg_catalog server is blocked because dependent tables
+    store the server name as a string option in ftoptions."""
     run_command(
         """
         CREATE SERVER user_rename_srv TYPE 'rest'
@@ -576,9 +649,13 @@ def test_allow_rename_user_created_server(superuser_conn, extension):
         """,
         superuser_conn,
     )
-    run_command(
-        "ALTER SERVER user_rename_srv RENAME TO user_renamed_srv", superuser_conn
+    err = run_command(
+        "ALTER SERVER user_rename_srv RENAME TO user_renamed_srv",
+        superuser_conn,
+        raise_error=False,
     )
+    assert err is not None
+    assert "cannot rename iceberg_catalog server" in str(err)
     superuser_conn.rollback()
 
 
@@ -638,6 +715,70 @@ def test_set_default_catalog_rejects_nonexistent_server(pg_conn, extension):
     assert err is not None
     assert "user-created iceberg_catalog server" in str(err)
     pg_conn.rollback()
+
+
+def test_alter_system_default_catalog_defers_validation(
+    superuser_conn, pg_conn, extension
+):
+    """The GUC check hook for pg_lake_iceberg.default_catalog cannot do catalog
+    lookups during SIGHUP reload (!IsTransactionState()), so it accepts the
+    value on faith — mirroring PostgreSQL's check_default_tablespace.
+
+    Sequence: create a server, ALTER SYSTEM SET to it (passes in-transaction
+    validation), drop the server, then pg_reload_conf() re-applies the
+    now-stale name.  The check hook must let it through.  A subsequent
+    CREATE TABLE must fail at runtime."""
+    run_command(
+        """
+        CREATE SERVER alter_sys_cat TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    superuser_conn.autocommit = True
+    run_command(
+        "ALTER SYSTEM SET pg_lake_iceberg.default_catalog = 'alter_sys_cat'",
+        superuser_conn,
+    )
+    run_command("SELECT pg_reload_conf()", superuser_conn)
+    run_command("SELECT pg_sleep(0.2)", superuser_conn)
+
+    result = run_query(
+        "SHOW pg_lake_iceberg.default_catalog",
+        superuser_conn,
+    )
+    assert result[0][0] == "alter_sys_cat"
+
+    run_command("DROP SERVER alter_sys_cat", superuser_conn)
+    run_command("SELECT pg_reload_conf()", superuser_conn)
+    run_command("SELECT pg_sleep(0.2)", superuser_conn)
+
+    result = run_query(
+        "SHOW pg_lake_iceberg.default_catalog",
+        superuser_conn,
+    )
+    assert result[0][0] == "alter_sys_cat"
+    superuser_conn.autocommit = False
+
+    err = run_command(
+        "CREATE TABLE alter_sys_test (id bigint) USING iceberg",
+        pg_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert "invalid catalog option" in str(err).lower()
+    pg_conn.rollback()
+
+    superuser_conn.autocommit = True
+    run_command(
+        "ALTER SYSTEM RESET pg_lake_iceberg.default_catalog",
+        superuser_conn,
+    )
+    run_command("SELECT pg_reload_conf()", superuser_conn)
+    superuser_conn.autocommit = False
 
 
 # ── Case-sensitive server names ────────────────────────────────────────────
