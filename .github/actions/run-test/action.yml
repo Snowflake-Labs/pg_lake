@@ -134,3 +134,15 @@ runs:
         else
           make ${{ inputs.test_make_target }}
         fi
+
+    - name: Upload postgres test logs
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: postgres-logs-${{ inputs.pg_version }}-${{ inputs.test_make_target }}
+        path: |
+          /tmp/pg_lake_tests/logfile
+          /tmp/pg_installcheck_tests/logfile
+          /tmp/pytest-of-*/**/postgres*.log
+        retention-days: 3
+
