@@ -578,6 +578,8 @@ def initdb(initdb_bindir, db_path, db_user):
             "max_prepared_transactions=100",
             "--set",
             "max_worker_processes=100",
+            "--set",
+            "max_replication_slots=100",
             # get rid of unused files, as well as stress test file removal
             "--set",
             "pg_lake_engine.orphaned_file_retention_period=0",
