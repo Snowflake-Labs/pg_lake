@@ -27,6 +27,8 @@
 #include "utils/timestamp.h"
 #include "utils/wait_event.h"
 
+#include "pg_lake/util/injection_points.h"
+
 
 /*
  * Milliseconds to wait to cancel an in-progress query or execute a cleanup
@@ -392,6 +394,13 @@ WaitForResult(PGDuckConnection * pgDuckConnection)
 	{
 		int			wc;
 
+		/*
+		 * Injection point used by tests to pause the worker here so the test
+		 * can kill pgduck_server before PQconsumeInput is called, exercising
+		 * the broken-connection cleanup path.
+		 */
+		INJECTION_POINT_COMPAT("pgduck-wait-for-result");
+
 		/* Sleep until there's something to do */
 		wc = WaitLatchOrSocket(MyLatch,
 							   WL_LATCH_SET | WL_SOCKET_READABLE |
@@ -407,7 +416,22 @@ WaitForResult(PGDuckConnection * pgDuckConnection)
 		{
 			if (!PQconsumeInput(conn))
 			{
-				ReleasePGDuckConnection(pgDuckConnection);
+				/*
+				 * Do not release the connection here — WaitForResult does
+				 * not own it.  Connection lifetime is the caller's
+				 * responsibility: either an enclosing PG_TRY/PG_FINALLY
+				 * releases it, or the transaction/subtransaction abort
+				 * callback (PGDuckClientTransactionCallback /
+				 * ...SubtransactionCallback) sweeps it on XACT_EVENT_ABORT.
+				 *
+				 * Releasing here is actively harmful:
+				 * ExecuteQueryOnPGDuckConnection's retry path may have
+				 * already swapped the hash slot out from under the caller's
+				 * pointer, so the caller's subsequent release either
+				 * double-frees the *new* connection (if dynahash reused the
+				 * slab) or PQfinish()'s an already-freed PGconn (if it
+				 * didn't).
+				 */
 				ereport(ERROR, (errmsg("lost connection to query engine")));
 			}
 		}
