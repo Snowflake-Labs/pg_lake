@@ -431,12 +431,21 @@ WaitForResult(PGDuckConnection * pgDuckConnection)
 			if (!PQconsumeInput(conn))
 			{
 				/*
-				 * Do not release the connection here; the caller owns its
-				 * lifetime and will release it via PG_FINALLY or an explicit
-				 * ReleasePGDuckConnection call.  Releasing here causes a
-				 * double-free: the PG_FINALLY in the caller fires after this
-				 * error propagates out and calls ReleasePGDuckConnection a
-				 * second time on the same (now-freed or reused) hash entry.
+				 * Do not release the connection here — WaitForResult does
+				 * not own it.  Connection lifetime is the caller's
+				 * responsibility: either an enclosing PG_TRY/PG_FINALLY
+				 * releases it, or the transaction/subtransaction abort
+				 * callback (PGDuckClientTransactionCallback /
+				 * ...SubtransactionCallback) sweeps it on
+				 * XACT_EVENT_ABORT.
+				 *
+				 * Releasing here is actively harmful:
+				 * ExecuteQueryOnPGDuckConnection's retry path may have
+				 * already swapped the hash slot out from under the
+				 * caller's pointer, so the caller's subsequent release
+				 * either double-frees the *new* connection (if dynahash
+				 * reused the slab) or PQfinish()'s an already-freed
+				 * PGconn (if it didn't).
 				 */
 				ereport(ERROR, (errmsg("lost connection to query engine")));
 			}
