@@ -422,16 +422,15 @@ WaitForResult(PGDuckConnection * pgDuckConnection)
 				 * responsibility: either an enclosing PG_TRY/PG_FINALLY
 				 * releases it, or the transaction/subtransaction abort
 				 * callback (PGDuckClientTransactionCallback /
-				 * ...SubtransactionCallback) sweeps it on
-				 * XACT_EVENT_ABORT.
+				 * ...SubtransactionCallback) sweeps it on XACT_EVENT_ABORT.
 				 *
 				 * Releasing here is actively harmful:
 				 * ExecuteQueryOnPGDuckConnection's retry path may have
-				 * already swapped the hash slot out from under the
-				 * caller's pointer, so the caller's subsequent release
-				 * either double-frees the *new* connection (if dynahash
-				 * reused the slab) or PQfinish()'s an already-freed
-				 * PGconn (if it didn't).
+				 * already swapped the hash slot out from under the caller's
+				 * pointer, so the caller's subsequent release either
+				 * double-frees the *new* connection (if dynahash reused the
+				 * slab) or PQfinish()'s an already-freed PGconn (if it
+				 * didn't).
 				 */
 				ereport(ERROR, (errmsg("lost connection to query engine")));
 			}
