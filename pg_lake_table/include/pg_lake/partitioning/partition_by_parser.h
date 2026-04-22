@@ -25,5 +25,5 @@ extern PGDLLEXPORT const char *GetIcebergTablePartitionByOption(Oid relationId);
 extern List *ParseIcebergTablePartitionBy(Oid relationId);
 extern bool IsIcebergTableWithDefaultPartitionSpec(Oid relationId);
 extern List *AnalyzeIcebergTablePartitionBy(Oid relationId, List *parsedTransforms);
-extern PGType GetTransformResultPGType(IcebergPartitionTransform * transform);
+extern PGType GetTransformResultPGType(IcebergPartitionTransform *transform);
 extern PGDLLEXPORT const char *GetIcebergTablePartitionByOption(Oid relationId);

@@ -93,7 +93,7 @@ typedef struct FormatSpecifierMapping
 	 */
 	int			padLength;
 	char	   *padString;
-}			FormatSpecifierMapping;
+} FormatSpecifierMapping;
 
 static Node *MakeStrftimeExpr(Node *timeArg, char *strftimeFormat);
 static Node *MakeSSSSExpr(Node *timeArg, char *tocharSpecifier);
@@ -121,150 +121,150 @@ static FormatSpecifierMapping SpecifierMappings[] =
 	{
 		/* seconds since midnight */
 		.toCharSpecifier = "SSSSS",
-			.createCustomExpr = MakeSSSSExpr
+		.createCustomExpr = MakeSSSSExpr
 	},
 	{
 		/* seconds since midnight */
 		.toCharSpecifier = "SSSS",
-			.createCustomExpr = MakeSSSSExpr
+		.createCustomExpr = MakeSSSSExpr
 	},
 
 	{
 		/* Hours 24-hour format (0-padded) */
 		.toCharSpecifier = "HH24",
-			.strftimeSpecifier = "%-H",
-			.strftimeSpecifierPadded = "%H"
+		.strftimeSpecifier = "%-H",
+		.strftimeSpecifierPadded = "%H"
 	},
 	{
 		/* Hours 12-hour format (0-padded) */
 		.toCharSpecifier = "HH12",
-			.strftimeSpecifier = "%-I",
-			.strftimeSpecifierPadded = "%I"
+		.strftimeSpecifier = "%-I",
+		.strftimeSpecifierPadded = "%I"
 	},
 	{
 		/* Hours 12-hour format (0-padded) */
 		.toCharSpecifier = "HH",
-			.strftimeSpecifier = "%I"
+		.strftimeSpecifier = "%I"
 	},
 	{
 		/* Minutes (0-padded) */
 		.toCharSpecifier = "MI",
-			.strftimeSpecifier = "%-M",
-			.strftimeSpecifierPadded = "%M"
+		.strftimeSpecifier = "%-M",
+		.strftimeSpecifierPadded = "%M"
 	},
 	{
 		/* Seconds (0-padded) */
 		.toCharSpecifier = "SS",
-			.strftimeSpecifier = "%-S",
-			.strftimeSpecifierPadded = "%S"
+		.strftimeSpecifier = "%-S",
+		.strftimeSpecifierPadded = "%S"
 	},
 	{
 		/* Milliseconds */
 		.toCharSpecifier = "MS",
-			.strftimeSpecifier = "%g"
+		.strftimeSpecifier = "%g"
 	},
 	{
 		/* Microseconds */
 		.toCharSpecifier = "US",
-			.strftimeSpecifier = "%f"
+		.strftimeSpecifier = "%f"
 	},
 	{
 		/* Tenth of seconds */
 		.toCharSpecifier = "FF1",
-			.createCustomExpr = MakeFFExpr
+		.createCustomExpr = MakeFFExpr
 	},
 	{
 		/* Hundredth of seconds */
 		.toCharSpecifier = "FF2",
-			.createCustomExpr = MakeFFExpr,
-			.padLength = -2,
-			.padString = "0"
+		.createCustomExpr = MakeFFExpr,
+		.padLength = -2,
+		.padString = "0"
 	},
 	{
 		/* Tenth of a millisecond */
 		.toCharSpecifier = "FF3",
-			.createCustomExpr = MakeFFExpr,
-			.padLength = -3,
-			.padString = "0"
+		.createCustomExpr = MakeFFExpr,
+		.padLength = -3,
+		.padString = "0"
 	},
 	{
 		/* Hundredth of a millisecond */
 		.toCharSpecifier = "FF4",
-			.createCustomExpr = MakeFFExpr,
-			.padLength = -4,
-			.padString = "0"
+		.createCustomExpr = MakeFFExpr,
+		.padLength = -4,
+		.padString = "0"
 	},
 	{
 		/* Tenth of a microsecond */
 		.toCharSpecifier = "FF5",
-			.createCustomExpr = MakeFFExpr,
-			.padLength = -5,
-			.padString = "0"
+		.createCustomExpr = MakeFFExpr,
+		.padLength = -5,
+		.padString = "0"
 	},
 	{
 		/* Hundredth of a microsecond */
 		.toCharSpecifier = "FF6",
-			.createCustomExpr = MakeFFExpr,
-			.padLength = -6,
-			.padString = "0"
+		.createCustomExpr = MakeFFExpr,
+		.padLength = -6,
+		.padString = "0"
 	},
 	{
 		/* AM / PM */
 		.toCharSpecifier = "AM",
-			.strftimeSpecifier = "%p",
-			.isCaseSensitive = true,
-			.isTextual = true
+		.strftimeSpecifier = "%p",
+		.isCaseSensitive = true,
+		.isTextual = true
 	},
 	{
 		/* am / pm */
 		.toCharSpecifier = "am",
-			.createCustomExpr = MakeAmPmExpr,
-			.isCaseSensitive = true,
-			.isTextual = true
+		.createCustomExpr = MakeAmPmExpr,
+		.isCaseSensitive = true,
+		.isTextual = true
 
 	},
 	{
 		/* AM / PM */
 		.toCharSpecifier = "PM",
-			.strftimeSpecifier = "%p",
-			.isCaseSensitive = true,
-			.isTextual = true
+		.strftimeSpecifier = "%p",
+		.isCaseSensitive = true,
+		.isTextual = true
 	},
 	{
 		/* am / pm */
 		.toCharSpecifier = "pm",
-			.createCustomExpr = MakeAmPmExpr,
-			.isCaseSensitive = true,
-			.isTextual = true
+		.createCustomExpr = MakeAmPmExpr,
+		.isCaseSensitive = true,
+		.isTextual = true
 	},
 	{
 		/* A.M. / P.M. */
 		.toCharSpecifier = "A.M.",
-			.createCustomExpr = MakeAmPmExpr,
-			.isCaseSensitive = true,
-			.isTextual = true
+		.createCustomExpr = MakeAmPmExpr,
+		.isCaseSensitive = true,
+		.isTextual = true
 	},
 	{
 		/* a.m. / p.m. */
 		.toCharSpecifier = "a.m.",
-			.createCustomExpr = MakeAmPmExpr,
-			.isCaseSensitive = true,
-			.isTextual = true
+		.createCustomExpr = MakeAmPmExpr,
+		.isCaseSensitive = true,
+		.isTextual = true
 
 	},
 	{
 		/* A.M. / P.M. */
 		.toCharSpecifier = "P.M.",
-			.createCustomExpr = MakeAmPmExpr,
-			.isCaseSensitive = true,
-			.isTextual = true
+		.createCustomExpr = MakeAmPmExpr,
+		.isCaseSensitive = true,
+		.isTextual = true
 	},
 	{
 		/* a.m. / p.m. */
 		.toCharSpecifier = "p.m.",
-			.createCustomExpr = MakeAmPmExpr,
-			.isCaseSensitive = true,
-			.isTextual = true
+		.createCustomExpr = MakeAmPmExpr,
+		.isCaseSensitive = true,
+		.isTextual = true
 	},
 	{
 		/* Year (always 0-padded to 4 digits) */
@@ -273,7 +273,7 @@ static FormatSpecifierMapping SpecifierMappings[] =
 		 * common case
 		 */
 		.toCharSpecifier = "YYYY",
-			.strftimeSpecifier = "%Y"
+		.strftimeSpecifier = "%Y"
 	},
 	{
 		/* Year formatted as 2,025  */
@@ -283,25 +283,25 @@ static FormatSpecifierMapping SpecifierMappings[] =
 		 * would be quite complicated.
 		 */
 		.toCharSpecifier = "Y,YYY",
-			.createCustomExpr = MakeYCommaYYYExpr,
+		.createCustomExpr = MakeYCommaYYYExpr,
 	},
 	{
 		/* Last 3 digits of the year */
 		.toCharSpecifier = "YYY",
-			.createCustomExpr = MakeYExpr,
-			.padLength = -3,
-			.padString = "0"
+		.createCustomExpr = MakeYExpr,
+		.padLength = -3,
+		.padString = "0"
 	},
 	{
 		/* Last 2 digits of year */
 		.toCharSpecifier = "YY",
-			.strftimeSpecifier = "%-y",
-			.strftimeSpecifierPadded = "%y"
+		.strftimeSpecifier = "%-y",
+		.strftimeSpecifierPadded = "%y"
 	},
 	{
 		/* Last digit of the year */
 		.toCharSpecifier = "Y",
-			.createCustomExpr = MakeYExpr
+		.createCustomExpr = MakeYExpr
 	},
 	{
 		/* ISO 8601 week aligned year (always 0-padded to 4 digits) */
@@ -310,180 +310,180 @@ static FormatSpecifierMapping SpecifierMappings[] =
 		 * common case
 		 */
 		.toCharSpecifier = "IYYY",
-			.strftimeSpecifier = "%G"
+		.strftimeSpecifier = "%G"
 	},
 	{
 		/* last 3 digits of ISO 8601 week aligned year */
 		.toCharSpecifier = "IYY",
-			.createCustomExpr = MakeIYExpr,
-			.padLength = -3,
-			.padString = "0"
+		.createCustomExpr = MakeIYExpr,
+		.padLength = -3,
+		.padString = "0"
 	},
 	{
 		/* last 2 digits of ISO 8601 week aligned year */
 		.toCharSpecifier = "IY",
-			.createCustomExpr = MakeIYExpr,
-			.padLength = -2,
-			.padString = "0"
+		.createCustomExpr = MakeIYExpr,
+		.padLength = -2,
+		.padString = "0"
 	},
 	{
 		/* AD / BC */
 		.toCharSpecifier = "BC",
-			.createCustomExpr = MakeEraExpr,
-			.isCaseSensitive = true,
-			.isTextual = true
+		.createCustomExpr = MakeEraExpr,
+		.isCaseSensitive = true,
+		.isTextual = true
 	},
 	{
 		/* ad / bc */
 		.toCharSpecifier = "bc",
-			.createCustomExpr = MakeEraExpr,
-			.isCaseSensitive = true,
-			.isTextual = true
+		.createCustomExpr = MakeEraExpr,
+		.isCaseSensitive = true,
+		.isTextual = true
 	},
 	{
 		/* AD / BC */
 		.toCharSpecifier = "AD",
-			.createCustomExpr = MakeEraExpr,
-			.isCaseSensitive = true,
-			.isTextual = true
+		.createCustomExpr = MakeEraExpr,
+		.isCaseSensitive = true,
+		.isTextual = true
 	},
 	{
 		/* ad / bc */
 		.toCharSpecifier = "ad",
-			.createCustomExpr = MakeEraExpr,
-			.isCaseSensitive = true,
-			.isTextual = true
+		.createCustomExpr = MakeEraExpr,
+		.isCaseSensitive = true,
+		.isTextual = true
 	},
 	{
 		/* A.D. / B.C. */
 		.toCharSpecifier = "B.C.",
-			.createCustomExpr = MakeEraExpr,
-			.isCaseSensitive = true,
-			.isTextual = true
+		.createCustomExpr = MakeEraExpr,
+		.isCaseSensitive = true,
+		.isTextual = true
 	},
 	{
 		/* a.d. / b.c. */
 		.toCharSpecifier = "b.c.",
-			.createCustomExpr = MakeEraExpr,
-			.isCaseSensitive = true,
-			.isTextual = true
+		.createCustomExpr = MakeEraExpr,
+		.isCaseSensitive = true,
+		.isTextual = true
 	},
 	{
 		/* A.D. / B.C. */
 		.toCharSpecifier = "A.D.",
-			.createCustomExpr = MakeEraExpr,
-			.isCaseSensitive = true,
-			.isTextual = true
+		.createCustomExpr = MakeEraExpr,
+		.isCaseSensitive = true,
+		.isTextual = true
 	},
 	{
 		/* a.d. / b.c. */
 		.toCharSpecifier = "a.d.",
-			.createCustomExpr = MakeEraExpr,
-			.isCaseSensitive = true,
-			.isTextual = true
+		.createCustomExpr = MakeEraExpr,
+		.isCaseSensitive = true,
+		.isTextual = true
 	},
 	{
 		/* month name uppercase */
 		.toCharSpecifier = "MONTH",
-			.createCustomExpr = MakeMonthNameExpr,
-			.padLength = MAX_MONTH_LENGTH,
-			.isCaseSensitive = true,
-			.isTextual = true
+		.createCustomExpr = MakeMonthNameExpr,
+		.padLength = MAX_MONTH_LENGTH,
+		.isCaseSensitive = true,
+		.isTextual = true
 	},
 	{
 		/* month name */
 		.toCharSpecifier = "Month",
-			.strftimeSpecifier = "%B",
-			.padLength = MAX_MONTH_LENGTH,
-			.isCaseSensitive = true,
-			.isTextual = true
+		.strftimeSpecifier = "%B",
+		.padLength = MAX_MONTH_LENGTH,
+		.isCaseSensitive = true,
+		.isTextual = true
 	},
 	{
 		/* month name lowercase */
 		.toCharSpecifier = "month",
-			.createCustomExpr = MakeMonthNameExpr,
-			.padLength = MAX_MONTH_LENGTH,
-			.isCaseSensitive = true,
-			.isTextual = true
+		.createCustomExpr = MakeMonthNameExpr,
+		.padLength = MAX_MONTH_LENGTH,
+		.isCaseSensitive = true,
+		.isTextual = true
 	},
 	{
 		/* abbreviated month name uppercase */
 		.toCharSpecifier = "MON",
-			.createCustomExpr = MakeMonthNameExpr,
-			.isCaseSensitive = true,
-			.isTextual = true
+		.createCustomExpr = MakeMonthNameExpr,
+		.isCaseSensitive = true,
+		.isTextual = true
 	},
 	{
 		/* abbreviated month name */
 		.toCharSpecifier = "Mon",
-			.strftimeSpecifier = "%b",
-			.isCaseSensitive = true,
-			.isTextual = true
+		.strftimeSpecifier = "%b",
+		.isCaseSensitive = true,
+		.isTextual = true
 	},
 	{
 		/* abbreviated month name lowercase */
 		.toCharSpecifier = "mon",
-			.createCustomExpr = MakeMonthNameExpr,
-			.isCaseSensitive = true,
-			.isTextual = true
+		.createCustomExpr = MakeMonthNameExpr,
+		.isCaseSensitive = true,
+		.isTextual = true
 	},
 	{
 		/* month number (0-padded) */
 		.toCharSpecifier = "MM",
-			.strftimeSpecifier = "%-m",
-			.strftimeSpecifierPadded = "%m",
-			.isTextual = true
+		.strftimeSpecifier = "%-m",
+		.strftimeSpecifierPadded = "%m",
+		.isTextual = true
 	},
 	{
 		/* day name uppercase */
 		.toCharSpecifier = "DAY",
-			.createCustomExpr = MakeDayNameExpr,
-			.padLength = MAX_DAY_LENGTH,
-			.isCaseSensitive = true,
-			.isTextual = true
+		.createCustomExpr = MakeDayNameExpr,
+		.padLength = MAX_DAY_LENGTH,
+		.isCaseSensitive = true,
+		.isTextual = true
 	},
 	{
 		/* day name */
 		.toCharSpecifier = "Day",
-			.strftimeSpecifier = "%A",
-			.isCaseSensitive = true,
-			.padLength = MAX_DAY_LENGTH,
-			.isTextual = true
+		.strftimeSpecifier = "%A",
+		.isCaseSensitive = true,
+		.padLength = MAX_DAY_LENGTH,
+		.isTextual = true
 	},
 	{
 		/* day name lowercase */
 		.toCharSpecifier = "day",
-			.createCustomExpr = MakeDayNameExpr,
-			.padLength = MAX_DAY_LENGTH,
-			.isCaseSensitive = true,
-			.isTextual = true
+		.createCustomExpr = MakeDayNameExpr,
+		.padLength = MAX_DAY_LENGTH,
+		.isCaseSensitive = true,
+		.isTextual = true
 	},
 	{
 		/* abbreviated day name uppercase */
 		.toCharSpecifier = "DY",
-			.createCustomExpr = MakeDayNameExpr,
-			.isCaseSensitive = true,
-			.isTextual = true
+		.createCustomExpr = MakeDayNameExpr,
+		.isCaseSensitive = true,
+		.isTextual = true
 	},
 	{
 		/* abbreviated day name */
 		.toCharSpecifier = "Dy",
-			.strftimeSpecifier = "%a",
-			.isCaseSensitive = true,
-			.isTextual = true
+		.strftimeSpecifier = "%a",
+		.isCaseSensitive = true,
+		.isTextual = true
 	},
 	{
 		/* abbreviated day name lowercase */
 		.toCharSpecifier = "dy",
-			.createCustomExpr = MakeDayNameExpr,
-			.isCaseSensitive = true,
-			.isTextual = true
+		.createCustomExpr = MakeDayNameExpr,
+		.isCaseSensitive = true,
+		.isTextual = true
 	},
 	{
 		/* day of the year */
 		.toCharSpecifier = "DDD",
-			.strftimeSpecifier = "%-j",
-			.strftimeSpecifierPadded = "%j"
+		.strftimeSpecifier = "%-j",
+		.strftimeSpecifierPadded = "%j"
 	},
 	{
 		/* day of the year of ISO 8601 week aligned year */
@@ -493,50 +493,50 @@ static FormatSpecifierMapping SpecifierMappings[] =
 	{
 		/* day of the month */
 		.toCharSpecifier = "DD",
-			.strftimeSpecifier = "%-d",
-			.strftimeSpecifierPadded = "%d"
+		.strftimeSpecifier = "%-d",
+		.strftimeSpecifierPadded = "%d"
 	},
 	{
 		/* day of the week with Sunday = 1 */
 		.toCharSpecifier = "D",
-			.createCustomExpr = MakeDayOfWeekExpr,
+		.createCustomExpr = MakeDayOfWeekExpr,
 	},
 	{
 		/* day of the week with Monday = 1 */
 		.toCharSpecifier = "ID",
-			.strftimeSpecifier = "%u"
+		.strftimeSpecifier = "%u"
 	},
 	{
 		/* week of year starting on first day */
 		.toCharSpecifier = "WW",
-			.createCustomExpr = MakeWeekCountInYearExpr,
-			.padLength = -2,
-			.padString = "0"
+		.createCustomExpr = MakeWeekCountInYearExpr,
+		.padLength = -2,
+		.padString = "0"
 	},
 	{
 		/* week of month starting on first day */
 		.toCharSpecifier = "W",
-			.createCustomExpr = MakeWeekCountInMonthExpr
+		.createCustomExpr = MakeWeekCountInMonthExpr
 	},
 	{
 		/* week number ISO 8601 week aligned year */
 		.toCharSpecifier = "IW",
-			.strftimeSpecifierPadded = "%V",
-			.createCustomExpr = MakeIsoWeekNumberExpr,
-			.padLength = -2,
-			.padString = "0"
+		.strftimeSpecifierPadded = "%V",
+		.createCustomExpr = MakeIsoWeekNumberExpr,
+		.padLength = -2,
+		.padString = "0"
 	},
 	{
 		/* last digit of ISO 8601 week aligned year */
 		.toCharSpecifier = "I",
-			.createCustomExpr = MakeIYExpr
+		.createCustomExpr = MakeIYExpr
 	},
 	{
 		/* century */
 		.toCharSpecifier = "CC",
-			.createCustomExpr = MakeCenturyExpr,
-			.padLength = -2,
-			.padString = "0"
+		.createCustomExpr = MakeCenturyExpr,
+		.padLength = -2,
+		.padString = "0"
 	},
 	{
 		/* julian date */
@@ -546,7 +546,7 @@ static FormatSpecifierMapping SpecifierMappings[] =
 	{
 		/* quarter */
 		.toCharSpecifier = "Q",
-			.createCustomExpr = MakeQuarterExpr,
+		.createCustomExpr = MakeQuarterExpr,
 	},
 	{
 		/* month in uppercase roman numerals */
@@ -561,14 +561,14 @@ static FormatSpecifierMapping SpecifierMappings[] =
 	{
 		/* time zone hours */
 		.toCharSpecifier = "TZH",
-			.createCustomExpr = MakeTimeZoneHoursExpr,
-			.isTextual = true
+		.createCustomExpr = MakeTimeZoneHoursExpr,
+		.isTextual = true
 	},
 	{
 		/* time zone minutes */
 		.toCharSpecifier = "TZM",
-			.createCustomExpr = MakeTimeZoneMinutesExpr,
-			.isTextual = true
+		.createCustomExpr = MakeTimeZoneMinutesExpr,
+		.isTextual = true
 	},
 	{
 		/* uppercase time zone abbreviation */
@@ -583,8 +583,8 @@ static FormatSpecifierMapping SpecifierMappings[] =
 	{
 		/* timezone offset */
 		.toCharSpecifier = "OF",
-			.strftimeSpecifier = "%z",
-			.isTextual = true
+		.strftimeSpecifier = "%z",
+		.isTextual = true
 	},
 	{
 		/* fill mode, included for completeness, but handled separately */
@@ -593,22 +593,22 @@ static FormatSpecifierMapping SpecifierMappings[] =
 	{
 		/* fixed format mode, mainly for parsing */
 		.toCharSpecifier = "FX",
-			.ignore = true
+		.ignore = true
 	},
 	{
 		/* translation mode, mainly for parsing */
 		.toCharSpecifier = "TM",
-			.ignore = true
+		.ignore = true
 	},
 	{
 		/* spell mode (not implemented in postgres) */
 		.toCharSpecifier = "SP",
-			.ignore = true
+		.ignore = true
 	},
 	{
 		/* ensure % is escaped as %% */
 		.toCharSpecifier = "%",
-			.strftimeSpecifier = "%%"
+		.strftimeSpecifier = "%%"
 	},
 };
 

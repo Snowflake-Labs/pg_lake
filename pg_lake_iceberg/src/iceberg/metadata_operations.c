@@ -103,7 +103,7 @@ typedef struct IcebergSnapshotBuilder
 
 	/* snapshot operation */
 	SnapshotOperation operation;
-}			IcebergSnapshotBuilder;
+} IcebergSnapshotBuilder;
 
 
 /*
@@ -114,32 +114,32 @@ typedef struct PartitionSpecManifestsEntries
 {
 	int32_t		partitionSpecId;
 	List	   *manifestEntries;
-}			PartitionSpecManifestsEntries;
+} PartitionSpecManifestsEntries;
 
-static IcebergSnapshotBuilder * CreateIcebergSnapshotBuilder(IcebergTableMetadata * metadata, List *metadataOperations);
-static void SetSnapshotOperation(IcebergSnapshot * snapshot, SnapshotOperation operation);
+static IcebergSnapshotBuilder *CreateIcebergSnapshotBuilder(IcebergTableMetadata *metadata, List *metadataOperations);
+static void SetSnapshotOperation(IcebergSnapshot *snapshot, SnapshotOperation operation);
 static SnapshotOperation SnapshotOperationSummary(List *metadataOperations);
 static void ProcessIcebergMetadataOperations(Oid relationId, List *metadataOperations,
-											 IcebergSnapshotBuilder * builder);
-static IcebergManifestEntry * CreateIcebergManifestEntryFromMetadataOperation(TableMetadataOperation * operation,
-																			  int64_t newSnapshotId,
-																			  int64_t sequenceNumber);
-static IcebergSnapshot * FinalizeNewSnapshot(IcebergSnapshotBuilder * builder,
-											 Oid relationId,
-											 const char *metadataLocation,
-											 int32_t currentSchemaId,
-											 List *allTransforms,
-											 bool isVerbose);
+											 IcebergSnapshotBuilder *builder);
+static IcebergManifestEntry *CreateIcebergManifestEntryFromMetadataOperation(TableMetadataOperation *operation,
+																			 int64_t newSnapshotId,
+																			 int64_t sequenceNumber);
+static IcebergSnapshot *FinalizeNewSnapshot(IcebergSnapshotBuilder *builder,
+											Oid relationId,
+											const char *metadataLocation,
+											int32_t currentSchemaId,
+											List *allTransforms,
+											bool isVerbose);
 static List *CreateNewManifestsForDeletedEntries(List *allManifestEntries, List *deletedManifestEntries,
-												 IcebergSnapshot * newSnapshot, const char *metadataLocation,
+												 IcebergSnapshot *newSnapshot, const char *metadataLocation,
 												 const char *snapshotUUID, int *manifestIndex,
 												 int partitionSpecId, List *partitionTransforms,
 												 IcebergManifestContentType contentType);
-static IcebergSnapshot * CopyIcebergSnapshot(IcebergSnapshot * src);
-static Property * CopyPropertiesArray(Property * src, int length);
+static IcebergSnapshot *CopyIcebergSnapshot(IcebergSnapshot *src);
+static Property *CopyPropertiesArray(Property *src, int length);
 static HTAB *MakePartitionManifestEntryHash(void);
 static void AddManifestEntryToHash(HTAB *hash, int32 partitionSpecId,
-								   IcebergManifestEntry * entry);
+								   IcebergManifestEntry *entry);
 static bool HasCreateTableOperation(List *metadataOperations);
 static void DeleteInProgressManifests(Oid relationId, List *manifests);
 
@@ -409,7 +409,7 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
  * of all the changes to the current snapshot.
  */
 static IcebergSnapshotBuilder *
-CreateIcebergSnapshotBuilder(IcebergTableMetadata * metadata, List *metadataOperations)
+CreateIcebergSnapshotBuilder(IcebergTableMetadata *metadata, List *metadataOperations)
 {
 	IcebergSnapshotBuilder *builder = palloc0(sizeof(IcebergSnapshotBuilder));
 
@@ -455,7 +455,7 @@ MakePartitionManifestEntryHash(void)
 * AddManifestEntryToHash adds a manifest entry to the hash table.
 */
 static void
-AddManifestEntryToHash(HTAB *hash, int32 partitionSpecId, IcebergManifestEntry * entry)
+AddManifestEntryToHash(HTAB *hash, int32 partitionSpecId, IcebergManifestEntry *entry)
 {
 	bool		found = false;
 	PartitionSpecManifestsEntries *manifestEntries = hash_search(hash, &partitionSpecId, HASH_ENTER, &found);
@@ -474,7 +474,7 @@ AddManifestEntryToHash(HTAB *hash, int32 partitionSpecId, IcebergManifestEntry *
 * SetSnapshotOperation sets the operation of the snapshot.
 */
 static void
-SetSnapshotOperation(IcebergSnapshot * snapshot, SnapshotOperation operation)
+SetSnapshotOperation(IcebergSnapshot *snapshot, SnapshotOperation operation)
 {
 	Property   *summary = palloc0(sizeof(Property));
 
@@ -622,7 +622,7 @@ SnapshotOperationSummary(List *metadataOperations)
 */
 static void
 ProcessIcebergMetadataOperations(Oid relationId, List *metadataOperations,
-								 IcebergSnapshotBuilder * builder)
+								 IcebergSnapshotBuilder *builder)
 {
 	ListCell   *operationCell = NULL;
 
@@ -831,7 +831,7 @@ ProcessIcebergMetadataOperations(Oid relationId, List *metadataOperations,
 * snapshot. If needed, we also apply manifest compaction.
 */
 static IcebergSnapshot *
-FinalizeNewSnapshot(IcebergSnapshotBuilder * builder, Oid relationId, const char *metadataLocation,
+FinalizeNewSnapshot(IcebergSnapshotBuilder *builder, Oid relationId, const char *metadataLocation,
 					int32_t currentSchemaId, List *allTransforms, bool isVerbose)
 {
 	IcebergSnapshot *currentSnapshot = builder->baseSnapshot;
@@ -1070,7 +1070,7 @@ FinalizeNewSnapshot(IcebergSnapshotBuilder * builder, Oid relationId, const char
 * final manifest list.
 */
 static List *
-CreateNewManifestsForDeletedEntries(List *allManifestEntries, List *deletedManifestEntries, IcebergSnapshot * newSnapshot,
+CreateNewManifestsForDeletedEntries(List *allManifestEntries, List *deletedManifestEntries, IcebergSnapshot *newSnapshot,
 									const char *metadataLocation, const char *snapshotUUID, int *manifestIndex,
 									int partitionSpecId, List *partitionTransforms, IcebergManifestContentType contentType)
 {
@@ -1118,7 +1118,7 @@ CreateNewManifestsForDeletedEntries(List *allManifestEntries, List *deletedManif
 * CreateIcebergManifestEntryFromMetadataOperation creates a new Iceberg manifest entry for the given metadata operation.
 */
 static IcebergManifestEntry *
-CreateIcebergManifestEntryFromMetadataOperation(TableMetadataOperation * operation, int64_t newSnapshotId, int64_t sequenceNumber)
+CreateIcebergManifestEntryFromMetadataOperation(TableMetadataOperation *operation, int64_t newSnapshotId, int64_t sequenceNumber)
 {
 	IcebergManifestEntry *manifestEntry = palloc0(sizeof(IcebergManifestEntry));
 
@@ -1220,7 +1220,7 @@ GetMetadataOperationTypes(List *metadataOperations)
 * CopyPropertiesArray creates a copy of the given Property array.
 */
 static Property *
-CopyPropertiesArray(Property * src, int length)
+CopyPropertiesArray(Property *src, int length)
 {
 	if (!src)
 		return NULL;
@@ -1242,7 +1242,7 @@ CopyPropertiesArray(Property * src, int length)
 * CopyIcebergSnapshot creates a copy of the given IcebergSnapshot.
 */
 static IcebergSnapshot *
-CopyIcebergSnapshot(IcebergSnapshot * src)
+CopyIcebergSnapshot(IcebergSnapshot *src)
 {
 	if (!src)
 		return NULL;

@@ -82,8 +82,8 @@ PG_FUNCTION_INFO_V1(pg_extension_base_run_attached_worker_returning);
 extern PGDLLEXPORT void AttachedWorkerMain(Datum mainArg);
 
 /* internal functions */
-static AttachedWorker * StartAttachedWorkerInternal(char *command, char *databaseName,
-													char *userName, uint32 flags);
+static AttachedWorker *StartAttachedWorkerInternal(char *command, char *databaseName,
+												   char *userName, uint32 flags);
 static void RunAttachedWorker(char *command, char *databaseName, char *userName, ReturnSetInfo *rsinfo);
 static void RunAttachedWorkerReturning(char *command, char *databaseName,
 									   char *userName, ReturnSetInfo *rsinfo);
@@ -543,7 +543,7 @@ ProcessProtocolMessages(shm_mq_handle *queue, bool nowait,
  * worker until reaching query completion or error.
  */
 char *
-ReadFromAttachedWorker(AttachedWorker * worker, bool wait)
+ReadFromAttachedWorker(AttachedWorker *worker, bool wait)
 {
 	return ProcessProtocolMessages(worker->outputQueue, !wait, NULL);
 }
@@ -594,7 +594,7 @@ ValidateWorkerTupleDesc(TupleDesc workerDesc, TupleDesc expectedDesc)
  * On return, *resultDesc is set to the TupleDesc that was used.
  */
 void
-ReadResultsFromAttachedWorker(AttachedWorker * worker, Tuplestorestate *store,
+ReadResultsFromAttachedWorker(AttachedWorker *worker, Tuplestorestate *store,
 							  TupleDesc *resultDesc)
 {
 	TupleDesc	tupleDesc = *resultDesc;
@@ -661,7 +661,7 @@ ReadResultsFromAttachedWorker(AttachedWorker * worker, Tuplestorestate *store,
  * still running.
  */
 bool
-IsAttachedWorkerRunning(AttachedWorker * worker)
+IsAttachedWorkerRunning(AttachedWorker *worker)
 {
 	pid_t		pid;
 
@@ -674,7 +674,7 @@ IsAttachedWorkerRunning(AttachedWorker * worker)
  * worker to clean up the resources.
  */
 void
-EndAttachedWorker(AttachedWorker * worker)
+EndAttachedWorker(AttachedWorker *worker)
 {
 	if (worker->sharedMemorySegment == NULL)
 		return;

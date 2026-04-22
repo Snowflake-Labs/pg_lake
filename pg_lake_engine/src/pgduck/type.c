@@ -43,7 +43,7 @@ typedef struct DuckDBTypeMap
 	Oid			postgresTypeId;
 	Oid			postgresArrayTypeId;
 	const char *duckDBTypeAliases;
-}			DuckDBTypeMap;
+} DuckDBTypeMap;
 
 
 /* prototypes */
@@ -66,7 +66,7 @@ Oid			GetPGTypeForDuckDBTypeNameBuiltin(const char *name, int *typeMod, bool isA
  * canonical name or an alias. */
 
 static bool
-IsMatchingTypeNameOrAlias(const char *inputType, DuckDBTypeMap * typeMap)
+IsMatchingTypeNameOrAlias(const char *inputType, DuckDBTypeMap *typeMap)
 {
 	Assert(inputType != NULL && typeMap != NULL);
 

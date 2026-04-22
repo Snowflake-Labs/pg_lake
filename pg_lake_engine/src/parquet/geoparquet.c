@@ -35,7 +35,7 @@ typedef struct GeometryColumn
 	/* geometry type (point, linestring, ...), see postgis.h */
 	int			geometryType;
 
-}			GeometryColumn;
+} GeometryColumn;
 
 
 static List *GetGeometryColumns(TupleDesc tupleDesc);

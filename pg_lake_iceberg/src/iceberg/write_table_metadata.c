@@ -30,20 +30,20 @@
 #include "utils/jsonb.h"
 #include "utils/builtins.h"
 
-static void AppendProperties(StringInfo command, Property * properties, size_t properties_length);
-static void AppendField(StringInfo command, Field * field);
-static void AppendIcebergStructFields(StringInfo command, FieldStructElement * fields, size_t fields_length);
-static void AppendIcebergTableSchemas(StringInfo command, IcebergTableSchema * schemas, size_t schemas_length);
-static void AppendIcebergPartitionSpecs(StringInfo command, IcebergPartitionSpec * specs, size_t specs_length);
-static void AppendIcebergSnapshots(StringInfo command, IcebergSnapshot * snapshots, size_t snapshots_length);
-static void AppendIcebergSnapshotLogEntries(StringInfo command, IcebergSnapshotLogEntry * entries, size_t entries_length);
-static void AppendcebergPartitionStatistics(StringInfo command, IcebergPartitionStatistics * entries, size_t entries_length);
-static void AppendIcebergMetadataLogEntries(StringInfo command, IcebergMetadataLogEntry * entries, size_t entries_length);
-static void AppendIcebergSortOrderFields(StringInfo command, IcebergSortOrderField * fields, size_t fields_length);
-static void AppendIcebergSortOrders(StringInfo command, IcebergSortOrder * orders, size_t orders_length);
-static void AppendSnapshotReferences(StringInfo command, SnapshotReference * refs, size_t refs_length);
-static void AppendIcebergStatistics(StringInfo command, IcebergStatistics * statistics, size_t statistics_length);
-static void AppendBlobMetadata(StringInfo command, BlobMetadata * metadata, size_t metadata_length);
+static void AppendProperties(StringInfo command, Property *properties, size_t properties_length);
+static void AppendField(StringInfo command, Field *field);
+static void AppendIcebergStructFields(StringInfo command, FieldStructElement *fields, size_t fields_length);
+static void AppendIcebergTableSchemas(StringInfo command, IcebergTableSchema *schemas, size_t schemas_length);
+static void AppendIcebergPartitionSpecs(StringInfo command, IcebergPartitionSpec *specs, size_t specs_length);
+static void AppendIcebergSnapshots(StringInfo command, IcebergSnapshot *snapshots, size_t snapshots_length);
+static void AppendIcebergSnapshotLogEntries(StringInfo command, IcebergSnapshotLogEntry *entries, size_t entries_length);
+static void AppendcebergPartitionStatistics(StringInfo command, IcebergPartitionStatistics *entries, size_t entries_length);
+static void AppendIcebergMetadataLogEntries(StringInfo command, IcebergMetadataLogEntry *entries, size_t entries_length);
+static void AppendIcebergSortOrderFields(StringInfo command, IcebergSortOrderField *fields, size_t fields_length);
+static void AppendIcebergSortOrders(StringInfo command, IcebergSortOrder *orders, size_t orders_length);
+static void AppendSnapshotReferences(StringInfo command, SnapshotReference *refs, size_t refs_length);
+static void AppendIcebergStatistics(StringInfo command, IcebergStatistics *statistics, size_t statistics_length);
+static void AppendBlobMetadata(StringInfo command, BlobMetadata *metadata, size_t metadata_length);
 static void AppendIntArray(StringInfo command, int *array, size_t array_length);
 
 /*
@@ -52,7 +52,7 @@ static void AppendIntArray(StringInfo command, int *array, size_t array_length);
 * IcebergTableMetadata
 */
 char *
-WriteIcebergTableMetadataToJson(IcebergTableMetadata * metadata)
+WriteIcebergTableMetadataToJson(IcebergTableMetadata *metadata)
 {
 	StringInfo	command = makeStringInfo();
 
@@ -165,7 +165,7 @@ WriteIcebergTableMetadataToJson(IcebergTableMetadata * metadata)
 }
 
 static void
-AppendProperties(StringInfo command, Property * properties, size_t properties_length)
+AppendProperties(StringInfo command, Property *properties, size_t properties_length)
 {
 	appendStringInfoString(command, "{");
 
@@ -203,7 +203,7 @@ AppendIntArray(StringInfo command, int *array, size_t array_length)
 }
 
 static void
-AppendIcebergTableSchemas(StringInfo command, IcebergTableSchema * schemas, size_t schemas_length)
+AppendIcebergTableSchemas(StringInfo command, IcebergTableSchema *schemas, size_t schemas_length)
 {
 	appendStringInfoString(command, "[");
 
@@ -249,7 +249,7 @@ AppendIcebergTableSchemas(StringInfo command, IcebergTableSchema * schemas, size
 * API calls.
 */
 void
-AppendIcebergTableSchemaForRestCatalog(StringInfo command, IcebergTableSchema * schemas, size_t schemas_length)
+AppendIcebergTableSchemaForRestCatalog(StringInfo command, IcebergTableSchema *schemas, size_t schemas_length)
 {
 	appendStringInfoString(command, "\"schema\":");
 
@@ -285,7 +285,7 @@ AppendIcebergTableSchemaForRestCatalog(StringInfo command, IcebergTableSchema * 
 
 
 static void
-AppendIcebergPartitionSpecs(StringInfo command, IcebergPartitionSpec * specs, size_t specs_length)
+AppendIcebergPartitionSpecs(StringInfo command, IcebergPartitionSpec *specs, size_t specs_length)
 {
 	appendStringInfoString(command, "[");
 
@@ -313,7 +313,7 @@ AppendIcebergPartitionSpecs(StringInfo command, IcebergPartitionSpec * specs, si
 }
 
 static void
-AppendIcebergSnapshots(StringInfo command, IcebergSnapshot * snapshots, size_t snapshots_length)
+AppendIcebergSnapshots(StringInfo command, IcebergSnapshot *snapshots, size_t snapshots_length)
 {
 	appendStringInfoString(command, "[");
 
@@ -364,7 +364,7 @@ AppendIcebergSnapshots(StringInfo command, IcebergSnapshot * snapshots, size_t s
 }
 
 static void
-AppendIcebergSnapshotLogEntries(StringInfo command, IcebergSnapshotLogEntry * entries, size_t entries_length)
+AppendIcebergSnapshotLogEntries(StringInfo command, IcebergSnapshotLogEntry *entries, size_t entries_length)
 {
 	appendStringInfoString(command, "[");
 
@@ -392,7 +392,7 @@ AppendIcebergSnapshotLogEntries(StringInfo command, IcebergSnapshotLogEntry * en
 
 
 static void
-AppendcebergPartitionStatistics(StringInfo command, IcebergPartitionStatistics * entries, size_t entries_length)
+AppendcebergPartitionStatistics(StringInfo command, IcebergPartitionStatistics *entries, size_t entries_length)
 {
 	appendStringInfoString(command, "[");
 
@@ -421,7 +421,7 @@ AppendcebergPartitionStatistics(StringInfo command, IcebergPartitionStatistics *
 }
 
 static void
-AppendIcebergMetadataLogEntries(StringInfo command, IcebergMetadataLogEntry * entries, size_t entries_length)
+AppendIcebergMetadataLogEntries(StringInfo command, IcebergMetadataLogEntry *entries, size_t entries_length)
 {
 	appendStringInfoString(command, "[");
 
@@ -448,7 +448,7 @@ AppendIcebergMetadataLogEntries(StringInfo command, IcebergMetadataLogEntry * en
 }
 
 static void
-AppendIcebergSortOrders(StringInfo command, IcebergSortOrder * orders, size_t orders_length)
+AppendIcebergSortOrders(StringInfo command, IcebergSortOrder *orders, size_t orders_length)
 {
 	appendStringInfoString(command, "[");
 
@@ -491,7 +491,7 @@ GetSnapshotReferenceType(SnapshotReferenceType type)
 }
 
 static void
-AppendSnapshotReferences(StringInfo command, SnapshotReference * refs, size_t refs_length)
+AppendSnapshotReferences(StringInfo command, SnapshotReference *refs, size_t refs_length)
 {
 	appendStringInfoString(command, "{");
 
@@ -544,7 +544,7 @@ AppendSnapshotReferences(StringInfo command, SnapshotReference * refs, size_t re
 }
 
 static void
-AppendIcebergStatistics(StringInfo command, IcebergStatistics * statistics, size_t statistics_length)
+AppendIcebergStatistics(StringInfo command, IcebergStatistics *statistics, size_t statistics_length)
 {
 	appendStringInfoString(command, "[");
 
@@ -593,7 +593,7 @@ AppendIcebergStatistics(StringInfo command, IcebergStatistics * statistics, size
 
 
 static void
-AppendField(StringInfo command, Field * field)
+AppendField(StringInfo command, Field *field)
 {
 	switch (field->type)
 	{
@@ -644,7 +644,7 @@ AppendField(StringInfo command, Field * field)
 }
 
 static void
-AppendIcebergStructFields(StringInfo command, FieldStructElement * fields, size_t fields_length)
+AppendIcebergStructFields(StringInfo command, FieldStructElement *fields, size_t fields_length)
 {
 	appendStringInfoString(command, "[");
 
@@ -722,7 +722,7 @@ AppendIcebergStructFields(StringInfo command, FieldStructElement * fields, size_
 
 
 void
-AppendIcebergPartitionSpecFields(StringInfo command, IcebergPartitionSpecField * fields, size_t fields_length)
+AppendIcebergPartitionSpecFields(StringInfo command, IcebergPartitionSpecField *fields, size_t fields_length)
 {
 	appendStringInfoString(command, "[");
 
@@ -765,7 +765,7 @@ AppendIcebergPartitionSpecFields(StringInfo command, IcebergPartitionSpecField *
 }
 
 static void
-AppendIcebergSortOrderFields(StringInfo command, IcebergSortOrderField * fields, size_t fields_length)
+AppendIcebergSortOrderFields(StringInfo command, IcebergSortOrderField *fields, size_t fields_length)
 {
 	appendStringInfoString(command, "[");
 
@@ -800,7 +800,7 @@ AppendIcebergSortOrderFields(StringInfo command, IcebergSortOrderField * fields,
 }
 
 static void
-AppendBlobMetadata(StringInfo command, BlobMetadata * metadata, size_t metadata_length)
+AppendBlobMetadata(StringInfo command, BlobMetadata *metadata, size_t metadata_length)
 {
 	appendStringInfoString(command, "[");
 

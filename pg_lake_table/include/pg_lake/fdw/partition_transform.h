@@ -23,18 +23,18 @@
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/iceberg/api/partitioning.h"
 
-extern Partition * ComputePartitionTupleForTuple(List *transforms, TupleTableSlot *slot);
-extern void *ApplyBucketTransformToColumn(IcebergPartitionTransform * transform,
+extern Partition *ComputePartitionTupleForTuple(List *transforms, TupleTableSlot *slot);
+extern void *ApplyBucketTransformToColumn(IcebergPartitionTransform *transform,
 										  Datum columnValue, bool isNull,
 										  size_t *bucketSize);
 extern List *CurrentPartitionTransformList(Oid relationId);
-extern IcebergPartitionSpec * GetPartitionSpecIfAlreadyExist(Oid relationId, List *partitionTransforms);
+extern IcebergPartitionSpec *GetPartitionSpecIfAlreadyExist(Oid relationId, List *partitionTransforms);
 extern List *AllPartitionTransformList(Oid relationId);
 extern List *GetPartitionTransformsFromSpecFields(Oid relationId, List *specFields);
-extern void *DeserializePartitionValueFromPGText(IcebergPartitionTransform * transform,
+extern void *DeserializePartitionValueFromPGText(IcebergPartitionTransform *transform,
 												 const char *valueText, size_t *valueLength);
-extern const char *SerializePartitionValueToPGText(void *value, size_t valueLength, IcebergPartitionTransform * transform);
+extern const char *SerializePartitionValueToPGText(void *value, size_t valueLength, IcebergPartitionTransform *transform);
 extern Datum PartitionValueToDatum(IcebergPartitionTransformType transformType, void *value, size_t valueLength,
 								   PGType pgType, bool *isNull);
 extern void ErrorIfColumnEverUsedInIcebergPartitionSpec(Oid relationId, AttrNumber attrNumber, char *operation);
-extern IcebergScalarAvroType GetTransformResultAvroType(IcebergPartitionTransform * transform);
+extern IcebergScalarAvroType GetTransformResultAvroType(IcebergPartitionTransform *transform);

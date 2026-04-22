@@ -55,7 +55,7 @@ static int	process_cancel_request(char *startupPacketBuf, int startupPacketLen);
  * Derived from SocketBackend() at postgres.c
  */
 int
-pgsession_read_command(PGSession * pgSession, StringInfo inputMessage)
+pgsession_read_command(PGSession *pgSession, StringInfo inputMessage)
 {
 	int			maxMessageLength;
 
@@ -144,7 +144,7 @@ pgsession_read_command(PGSession * pgSession, StringInfo inputMessage)
  *		returns 0 if OK, EOF if trouble
  */
 int
-pgsession_get_message(PGSession * pgSession, StringInfo message, int maxLength)
+pgsession_get_message(PGSession *pgSession, StringInfo message, int maxLength)
 {
 	int32		messageLength;
 
@@ -196,7 +196,7 @@ pgsession_get_message(PGSession * pgSession, StringInfo message, int maxLength)
  * The logic is extracted from ProcessStartupPacket() in postgres.
  */
 int
-pgsession_read_startup_packet(PGSession * pgSession)
+pgsession_read_startup_packet(PGSession *pgSession)
 {
 	int			startupPacketLen = 0;
 	char	   *startupPacketBuf = NULL;
@@ -393,7 +393,7 @@ pq_sendstring(StringInfo buf, const char *str)
  * Derived from pq_getbytes in postgres
  */
 int
-pgsession_get_bytes(PGSession * pgSession, char *buf, size_t len)
+pgsession_get_bytes(PGSession *pgSession, char *buf, size_t len)
 {
 	size_t		amount;
 
@@ -427,7 +427,7 @@ pgsession_get_bytes(PGSession * pgSession, char *buf, size_t len)
  * Derived from pq_recvbuf in postgres.
  */
 int
-pgsession_receive(PGSession * pgSession)
+pgsession_receive(PGSession *pgSession)
 {
 	if (pgSession->pqRecvPointer > 0)
 	{
@@ -497,7 +497,7 @@ pgsession_receive(PGSession * pgSession)
  *      returns 0 if OK, EOF if trouble
  */
 int
-pgsession_put_message(PGSession * pgSession, char messageType, char *buf, size_t bufferLength)
+pgsession_put_message(PGSession *pgSession, char messageType, char *buf, size_t bufferLength)
 {
 	uint32		n32;
 
@@ -526,7 +526,7 @@ pgsession_put_message(PGSession * pgSession, char messageType, char *buf, size_t
 * buffer of the pgSession.
 */
 int
-pgsession_putemptymessage(PGSession * pgSession, char msgtype)
+pgsession_putemptymessage(PGSession *pgSession, char msgtype)
 {
 	return pgsession_put_message(pgSession, msgtype, NULL, 0);
 }
@@ -536,7 +536,7 @@ pgsession_putemptymessage(PGSession * pgSession, char msgtype)
  * and flushes the buffer if it is full.
  */
 int
-pgsession_put_bytes(PGSession * pgSession, char *buf, size_t bufferLength)
+pgsession_put_bytes(PGSession *pgSession, char *buf, size_t bufferLength)
 {
 	size_t		amount;
 
@@ -574,7 +574,7 @@ pgsession_put_bytes(PGSession * pgSession, char *buf, size_t bufferLength)
  * and the socket is in non-blocking mode), or EOF if trouble.
  */
 int
-pgsession_flush(PGSession * pgSession)
+pgsession_flush(PGSession *pgSession)
 {
 	char	   *bufPtr = pgSession->pqSendBuffer + pgSession->pqSendStart;
 	char	   *bufEnd = pgSession->pqSendBuffer + pgSession->pqSendPointer;
@@ -643,7 +643,7 @@ pgsession_flush(PGSession * pgSession)
  *		pq_getbyte	- get a single byte from connection, or return EOF
  */
 int
-pgsession_get_byte(PGSession * pgSession)
+pgsession_get_byte(PGSession *pgSession)
 {
 	while (pgSession->pqRecvPointer >= pgSession->pqRecvLength)
 	{
@@ -664,7 +664,7 @@ pgsession_get_byte(PGSession * pgSession)
  * Derived from send_message_to_frontend
  */
 int
-pgsession_send_postgres_error(PGSession * pgSession, int errSev, char *errorMessage)
+pgsession_send_postgres_error(PGSession *pgSession, int errSev, char *errorMessage)
 {
 	StringInfoData msgBuffer;
 

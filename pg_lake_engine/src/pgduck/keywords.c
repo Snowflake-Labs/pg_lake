@@ -41,7 +41,7 @@ typedef struct DuckDBKeyword
 {
 	char	   *keywordName;
 	int			keywordCategory;
-}			DuckDBKeyword;
+} DuckDBKeyword;
 
 /* we only care about the name and the category here */
 #define PG_KEYWORD(name,value,cat,is_bare_label) {(name), (cat)},

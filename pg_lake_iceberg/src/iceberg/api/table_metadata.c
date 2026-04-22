@@ -68,16 +68,16 @@
 /* controlled via a GUC */
 int			IcebergMaxSnapshotAge = 0;	/* seconds */
 
-static void WriteMetadataJsonToTemporaryFile(IcebergTableMetadata * metadata, FILE *localFile);
-static void AddIcebergSnapshotToMetadata(IcebergTableMetadata * metadata, IcebergSnapshot * newSnapshot);
-static void DeleteUnreferencedFiles(Oid relationId, IcebergTableMetadata * metadata, IcebergSnapshot * expiredSnapshots,
-									int expiredSnapshotCount, IcebergSnapshot * nonExpiredSnapshots, int nonExpiredSnapshotCount);
-static void SetSnapshotReference(IcebergTableMetadata * metadata, uint64_t snapshotId);
-static void GroupExpiredSnapshots(IcebergTableMetadata * metadata, int maxSnapshotAgeInSecs,
-								  IcebergSnapshot * expiredSnapshots, int *expiredSnapshotCount,
-								  IcebergSnapshot * nonExpiredSnapshots, int *nonExpiredSnapshotCount);
-static bool SnapshotAgeExceeded(IcebergSnapshot * snapshot, int64_t currentTimeMs, int maxAgeInSecs);
-static int32_t MaxSchemaId(IcebergTableSchema * schemas, size_t schemasLength);
+static void WriteMetadataJsonToTemporaryFile(IcebergTableMetadata *metadata, FILE *localFile);
+static void AddIcebergSnapshotToMetadata(IcebergTableMetadata *metadata, IcebergSnapshot *newSnapshot);
+static void DeleteUnreferencedFiles(Oid relationId, IcebergTableMetadata *metadata, IcebergSnapshot *expiredSnapshots,
+									int expiredSnapshotCount, IcebergSnapshot *nonExpiredSnapshots, int nonExpiredSnapshotCount);
+static void SetSnapshotReference(IcebergTableMetadata *metadata, uint64_t snapshotId);
+static void GroupExpiredSnapshots(IcebergTableMetadata *metadata, int maxSnapshotAgeInSecs,
+								  IcebergSnapshot *expiredSnapshots, int *expiredSnapshotCount,
+								  IcebergSnapshot *nonExpiredSnapshots, int *nonExpiredSnapshotCount);
+static bool SnapshotAgeExceeded(IcebergSnapshot *snapshot, int64_t currentTimeMs, int maxAgeInSecs);
+static int32_t MaxSchemaId(IcebergTableSchema *schemas, size_t schemasLength);
 
 /*
 * GenerateEmptyTableMetadata generates an empty iceberg table metadata
@@ -132,7 +132,7 @@ GenerateEmptyTableMetadata(char *location)
 * snapshots in the metadata.
 */
 void
-GenerateSnapshotLogEntries(IcebergTableMetadata * metadata)
+GenerateSnapshotLogEntries(IcebergTableMetadata *metadata)
 {
 	int			snapshotLogLength = metadata->snapshots_length;
 
@@ -163,7 +163,7 @@ GenerateSnapshotLogEntries(IcebergTableMetadata * metadata)
 * override the existing snapshot reference.
 */
 static void
-SetSnapshotReference(IcebergTableMetadata * metadata, uint64_t snapshotId)
+SetSnapshotReference(IcebergTableMetadata *metadata, uint64_t snapshotId)
 {
 	if (metadata->refs == NULL)
 	{
@@ -186,7 +186,7 @@ SetSnapshotReference(IcebergTableMetadata * metadata, uint64_t snapshotId)
 * AddIcebergSnapshotToMetadata adds given snapshot in the metadata.
 */
 static void
-AddIcebergSnapshotToMetadata(IcebergTableMetadata * metadata, IcebergSnapshot * newSnapshot)
+AddIcebergSnapshotToMetadata(IcebergTableMetadata *metadata, IcebergSnapshot *newSnapshot)
 {
 	int			oldSize = metadata->snapshots_length;
 	int			newSize = oldSize + 1;
@@ -217,7 +217,7 @@ AddIcebergSnapshotToMetadata(IcebergTableMetadata * metadata, IcebergSnapshot * 
  * persisting the changes.
  */
 List *
-RemoveOldSnapshotsFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
+RemoveOldSnapshotsFromMetadata(Oid relationId, IcebergTableMetadata *metadata,
 							   int maxSnapshotAgeInSecs, bool isVerbose)
 {
 	if (metadata->snapshots_length == 0)
@@ -298,8 +298,8 @@ RemoveOldSnapshotsFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
 * and then deletes them from the remote storage.
 */
 static void
-DeleteUnreferencedFiles(Oid relationId, IcebergTableMetadata * metadata, IcebergSnapshot * expiredSnapshots, int expiredSnapshotCount,
-						IcebergSnapshot * nonExpiredSnapshots, int nonExpiredSnapshotCount)
+DeleteUnreferencedFiles(Oid relationId, IcebergTableMetadata *metadata, IcebergSnapshot *expiredSnapshots, int expiredSnapshotCount,
+						IcebergSnapshot *nonExpiredSnapshots, int nonExpiredSnapshotCount)
 {
 	TimestampTz orphanedAt = GetCurrentTransactionStartTimestamp();
 
@@ -322,7 +322,7 @@ DeleteUnreferencedFiles(Oid relationId, IcebergTableMetadata * metadata, Iceberg
 * new snapshot and also sets the last_updated_ms.
 */
 void
-UpdateLatestSnapshot(IcebergTableMetadata * tableMetadata, IcebergSnapshot * newSnapshot)
+UpdateLatestSnapshot(IcebergTableMetadata *tableMetadata, IcebergSnapshot *newSnapshot)
 {
 	/* add the new snapshot to the metadata */
 	AddIcebergSnapshotToMetadata(tableMetadata, newSnapshot);
@@ -383,7 +383,7 @@ GenerateRemoteMetadataFilePath(int version, const char *location, char *queryArg
 * iceberg table metadata to a temporary file.
 */
 static void
-WriteMetadataJsonToTemporaryFile(IcebergTableMetadata * metadata, FILE *file)
+WriteMetadataJsonToTemporaryFile(IcebergTableMetadata *metadata, FILE *file)
 {
 	char	   *metadataJson = WriteIcebergTableMetadataToJson(metadata);
 	int			contentLength = strlen(metadataJson);
@@ -403,7 +403,7 @@ WriteMetadataJsonToTemporaryFile(IcebergTableMetadata * metadata, FILE *file)
 * and uploads it to given uri.
 */
 void
-UploadTableMetadataToURI(IcebergTableMetadata * tableMetadata, char *metadataURI)
+UploadTableMetadataToURI(IcebergTableMetadata *tableMetadata, char *metadataURI)
 {
 	char	   *localFilePath = GenerateTempFileName(PG_LAKE_ICEBERG, true);
 
@@ -436,7 +436,7 @@ UploadTableMetadataToURI(IcebergTableMetadata * tableMetadata, char *metadataURI
 * removed if the new entry exceeds the limit.
 */
 void
-AdjustAndRetainMetadataLogs(IcebergTableMetadata * metadata, char *prevMetadataPath,
+AdjustAndRetainMetadataLogs(IcebergTableMetadata *metadata, char *prevMetadataPath,
 							size_t snapshotLogLength, int64_t prev_last_updated_ms)
 {
 	/* no snapshots, nothing to do */
@@ -489,9 +489,9 @@ AdjustAndRetainMetadataLogs(IcebergTableMetadata * metadata, char *prevMetadataP
 
 
 static void
-GroupExpiredSnapshots(IcebergTableMetadata * metadata, int maxSnapshotAgeInSecs,
-					  IcebergSnapshot * expiredSnapshots, int *expiredSnapshotCount,
-					  IcebergSnapshot * nonExpiredSnapshots, int *nonExpiredSnapshotCount)
+GroupExpiredSnapshots(IcebergTableMetadata *metadata, int maxSnapshotAgeInSecs,
+					  IcebergSnapshot *expiredSnapshots, int *expiredSnapshotCount,
+					  IcebergSnapshot *nonExpiredSnapshots, int *nonExpiredSnapshotCount)
 {
 	IcebergSnapshot *allSnapshots = metadata->snapshots;
 	int			allSnapshotCount = metadata->snapshots_length;
@@ -519,7 +519,7 @@ GroupExpiredSnapshots(IcebergTableMetadata * metadata, int maxSnapshotAgeInSecs,
 * current time and the maximum age.
 */
 static bool
-SnapshotAgeExceeded(IcebergSnapshot * snapshot, int64_t currentTimeMs, int maxAgeInSecs)
+SnapshotAgeExceeded(IcebergSnapshot *snapshot, int64_t currentTimeMs, int maxAgeInSecs)
 {
 	uint64_t	maxAgeMs = (uint64_t) maxAgeInSecs * 1000;
 
@@ -533,7 +533,7 @@ SnapshotAgeExceeded(IcebergSnapshot * snapshot, int64_t currentTimeMs, int maxAg
 * IcebergPartitionSpec, so we just need to find the largest one.
 */
 int
-FindLargestPartitionFieldId(IcebergPartitionSpec * newSpec)
+FindLargestPartitionFieldId(IcebergPartitionSpec *newSpec)
 {
 	int			largestFieldId = 0;
 
@@ -560,8 +560,8 @@ FindLargestPartitionFieldId(IcebergPartitionSpec * newSpec)
 * and appends it to the metadata.
 */
 void
-AppendCurrentPostgresSchema(Oid relationId, IcebergTableMetadata * metadata,
-							DataFileSchema * schema)
+AppendCurrentPostgresSchema(Oid relationId, IcebergTableMetadata *metadata,
+							DataFileSchema *schema)
 {
 	int			currentSchemaLength = metadata->schemas_length;
 
@@ -589,7 +589,7 @@ AppendCurrentPostgresSchema(Oid relationId, IcebergTableMetadata * metadata,
 * MaxSchemaId finds the maximum schema ID from the given schemas.
 */
 static int32_t
-MaxSchemaId(IcebergTableSchema * schemas, size_t schemasLength)
+MaxSchemaId(IcebergTableSchema *schemas, size_t schemasLength)
 {
 	int32_t		maxSchemaId = -1;
 
@@ -609,7 +609,7 @@ MaxSchemaId(IcebergTableSchema * schemas, size_t schemasLength)
 * AppendPartitionSpec appends given partition spec to the metadata.
 */
 void
-AppendPartitionSpec(IcebergTableMetadata * metadata, IcebergPartitionSpec * newSpec)
+AppendPartitionSpec(IcebergTableMetadata *metadata, IcebergPartitionSpec *newSpec)
 {
 	int			currentPartitionSpecLength = metadata->partition_specs_length;
 
@@ -638,7 +638,7 @@ AppendPartitionSpec(IcebergTableMetadata * metadata, IcebergPartitionSpec * newS
  * from the given metadata as a List.
  */
 List *
-GetAllIcebergPartitionSpecsFromTableMetadata(IcebergTableMetadata * metadata)
+GetAllIcebergPartitionSpecsFromTableMetadata(IcebergTableMetadata *metadata)
 {
 	List	   *partitionSpecs = NIL;
 

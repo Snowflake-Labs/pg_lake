@@ -91,7 +91,7 @@ InitializeDropTableHandler(void)
  * drop pg_lake tables.
  */
 bool
-ProcessDropPgLakeTable(ProcessUtilityParams * params, void *arg)
+ProcessDropPgLakeTable(ProcessUtilityParams *params, void *arg)
 {
 	PlannedStmt *plannedStmt = params->plannedStmt;
 

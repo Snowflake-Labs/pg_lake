@@ -38,7 +38,7 @@ typedef struct PgLakeIcebergIds
 	 * pg_lake_iceberg.tables_internal relation OID
 	 */
 	Oid			tablesInternalTableId;
-}			PgLakeIcebergIds;
+} PgLakeIcebergIds;
 
 static void ClearIds(void *pgLakeIcebergIds);
 

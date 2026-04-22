@@ -32,7 +32,7 @@ typedef struct PgLakeTableTypeName
 {
 	char	   *name;
 	PgLakeTableType tableType;
-}			PgLakeTableTypeName;
+} PgLakeTableTypeName;
 
 static PgLakeTableTypeName PgLakeTableTypeNames[] =
 {

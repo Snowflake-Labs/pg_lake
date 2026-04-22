@@ -33,14 +33,14 @@
 typedef enum PgLakeNodeTag
 {
 	T_PlannerRelationRestriction = PGL_NODE_TAG_START,
-}			PgLakeNodeTag;
+} PgLakeNodeTag;
 
 
 typedef struct PgLakeNode
 {
 	ExtensibleNode extensible;
 	PgLakeNodeTag pgl_tag;
-}			PgLakeNode;
+} PgLakeNode;
 
 
 /* filled in extensible_nodes.c */

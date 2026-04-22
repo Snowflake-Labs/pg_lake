@@ -22,15 +22,15 @@
 #include "pg_lake/data_file/data_files.h"
 #include "pg_lake/iceberg/api.h"
 
-extern PGDLLEXPORT void SetIcebergDataFileStats(const DataFileStats * dataFileStats,
+extern PGDLLEXPORT void SetIcebergDataFileStats(const DataFileStats *dataFileStats,
 												int64_t *recordCount,
 												int64_t *fileSizeInBytes,
-												ColumnBound * *lowerBounds,
+												ColumnBound **lowerBounds,
 												size_t *nLowerBounds,
-												ColumnBound * *upperBounds,
+												ColumnBound **upperBounds,
 												size_t *nUpperBounds);
 extern PGDLLEXPORT unsigned char *IcebergSerializeColumnBoundText(char *columnBoundText,
-																  Field * field,
+																  Field *field,
 																  size_t *binaryLen);
-extern PGDLLEXPORT bool CanSerializeColumnBound(char *boundText, Field * field);
+extern PGDLLEXPORT bool CanSerializeColumnBound(char *boundText, Field *field);
 extern PGDLLEXPORT Datum ColumnBoundDatum(char *columnBoundText, PGType pgType);

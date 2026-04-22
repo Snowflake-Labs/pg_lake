@@ -39,7 +39,7 @@ static const PGDuckShippableOperator ShippableSpatialOperators[] = {
  * GetShippableSpatialOperatorCount
  *		Returns the number of shippable functions
  */
-const		PGDuckShippableOperator *
+const PGDuckShippableOperator *
 GetShippableSpatialOperators(int *sizePointer)
 {
 	*sizePointer = ARRAY_SIZE(ShippableSpatialOperators);

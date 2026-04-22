@@ -33,7 +33,7 @@ static int	PartitionFieldCompare(const void *a, const void *b);
 * CopyPartition creates a copy of the given partition.
 */
 Partition *
-CopyPartition(Partition * partition)
+CopyPartition(Partition *partition)
 {
 	Partition  *copy = palloc0(sizeof(Partition));
 
@@ -69,7 +69,7 @@ CopyPartition(Partition * partition)
 * AppendPartitionField appends a partition field to the given partition.
 */
 void
-AppendPartitionField(Partition * partition, PartitionField * partitionField)
+AppendPartitionField(Partition *partition, PartitionField *partitionField)
 {
 	/*
 	 * if first element, do palloc, otherwise repalloc
@@ -123,8 +123,8 @@ AppendPartitionField(Partition * partition, PartitionField * partitionField)
 static int
 PartitionFieldCompare(const void *a, const void *b)
 {
-	const		PartitionField *fieldA = (const PartitionField *) a;
-	const		PartitionField *fieldB = (const PartitionField *) b;
+	const PartitionField *fieldA = (const PartitionField *) a;
+	const PartitionField *fieldB = (const PartitionField *) b;
 
 	if (fieldA->field_id < fieldB->field_id)
 		return -1;
@@ -142,14 +142,14 @@ PartitionFieldCompare(const void *a, const void *b)
  * due to 64 bits.
  */
 uint64
-ComputePartitionKey(const Partition * partition)
+ComputePartitionKey(const Partition *partition)
 {
 	/* seed – 0 is fine; we could pick any value */
 	uint64		hashValue = 0;
 
 	for (size_t partitionIndex = 0; partitionIndex < partition->fields_length; partitionIndex++)
 	{
-		const		PartitionField *partitionField = &partition->fields[partitionIndex];
+		const PartitionField *partitionField = &partition->fields[partitionIndex];
 
 		/*
 		 * 1. Mix in field_id Each partition can hold many fields.  Two
@@ -203,7 +203,7 @@ ComputePartitionKey(const Partition * partition)
  * due to 64 bits.
  */
 uint64
-ComputeSpecPartitionKey(int32_t partitionSpecId, const Partition * partition)
+ComputeSpecPartitionKey(int32_t partitionSpecId, const Partition *partition)
 {
 	uint64		specHash = hash_uint32((uint32) (partitionSpecId));
 

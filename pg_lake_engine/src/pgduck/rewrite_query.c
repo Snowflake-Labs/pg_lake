@@ -58,7 +58,7 @@ typedef struct RewriteQueryTreeContext
 	int			level;
 	/* our extra arg from rewrite rule */
 	int			funcIntArg;
-}			RewriteQueryTreeContext;
+} RewriteQueryTreeContext;
 
 
 /*
@@ -94,7 +94,7 @@ typedef struct FunctionCallRewriteRuleByName
 	const char *functionName;
 	ExpressionRewriter rewriteFunction;
 	int			limitArgs;
-}			FunctionCallRewriteRuleByName;
+} FunctionCallRewriteRuleByName;
 
 
 /*
@@ -107,7 +107,7 @@ typedef struct AggregateRewriteRuleByName
 	const char *schemaName;
 	const char *aggregateName;
 	ExpressionRewriter rewriteAggregate;
-}			AggregateRewriteRuleByName;
+} AggregateRewriteRuleByName;
 
 
 /*
@@ -120,11 +120,11 @@ typedef struct OperatorRewriteRuleByName
 	const char *operatorName;
 	char	   *replacementFunctionName;
 	ExpressionRewriter rewriteOperator;
-}			OperatorRewriteRuleByName;
+} OperatorRewriteRuleByName;
 
 
 static void InitRewriteRules(void);
-static Node *RewriteQueryTreeForPGDuckMutator(Node *node, RewriteQueryTreeContext * context);
+static Node *RewriteQueryTreeForPGDuckMutator(Node *node, RewriteQueryTreeContext *context);
 static Node *ReplaceJsonbWithPgLakeInternalJsonbFunction(Node *inputNode, void *context);
 static bool IsJsonbCast(Node *node);
 static Node *WrapPgLakeInternalJsonbFunction(Node *data);
@@ -521,7 +521,7 @@ RewriteQueryTreeForPGDuck(Query *query)
  * for use in pgduck.
  */
 static Node *
-RewriteQueryTreeForPGDuckMutator(Node *node, RewriteQueryTreeContext * context)
+RewriteQueryTreeForPGDuckMutator(Node *node, RewriteQueryTreeContext *context)
 {
 	if (node == NULL)
 	{

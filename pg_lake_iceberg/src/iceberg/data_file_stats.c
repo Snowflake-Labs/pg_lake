@@ -25,24 +25,24 @@
 
 #include "utils/lsyscache.h"
 
-static void SetColumnBoundsFromDataFileStats(const DataFileStats * dataFileStats,
-											 ColumnBound * *lowerBounds,
+static void SetColumnBoundsFromDataFileStats(const DataFileStats *dataFileStats,
+											 ColumnBound **lowerBounds,
 											 size_t *nLowerBounds,
-											 ColumnBound * *upperBounds,
+											 ColumnBound **upperBounds,
 											 size_t *nUpperBounds);
-static ColumnBound * CreateColumnBoundForLeafField(LeafField * leafField, char *columnBoundText);
+static ColumnBound *CreateColumnBoundForLeafField(LeafField *leafField, char *columnBoundText);
 
 /*
  * SetIcebergDataFileStats sets the record count, file size, lower and upper bounds
  * for the given data file stats.
  */
 void
-SetIcebergDataFileStats(const DataFileStats * dataFileStats,
+SetIcebergDataFileStats(const DataFileStats *dataFileStats,
 						int64_t *recordCount,
 						int64_t *fileSizeInBytes,
-						ColumnBound * *lowerBounds,
+						ColumnBound **lowerBounds,
 						size_t *nLowerBounds,
-						ColumnBound * *upperBounds,
+						ColumnBound **upperBounds,
 						size_t *nUpperBounds)
 {
 	*recordCount = dataFileStats->rowCount;
@@ -57,10 +57,10 @@ SetIcebergDataFileStats(const DataFileStats * dataFileStats,
  * in the given data file stats.
  */
 static void
-SetColumnBoundsFromDataFileStats(const DataFileStats * dataFileStats,
-								 ColumnBound * *lowerBounds,
+SetColumnBoundsFromDataFileStats(const DataFileStats *dataFileStats,
+								 ColumnBound **lowerBounds,
 								 size_t *nLowerBounds,
-								 ColumnBound * *upperBounds,
+								 ColumnBound **upperBounds,
 								 size_t *nUpperBounds)
 {
 	List	   *columnStats = dataFileStats->columnStats;
@@ -132,7 +132,7 @@ SetColumnBoundsFromDataFileStats(const DataFileStats * dataFileStats,
  * with Iceberg binary serialized value for the given leaf field.
  */
 static ColumnBound *
-CreateColumnBoundForLeafField(LeafField * leafField, char *columnBoundText)
+CreateColumnBoundForLeafField(LeafField *leafField, char *columnBoundText)
 {
 	size_t		valueLen = 0;
 	unsigned char *icebergSerializedValue = IcebergSerializeColumnBoundText(columnBoundText,
@@ -166,7 +166,7 @@ CreateColumnBoundForLeafField(LeafField * leafField, char *columnBoundText)
  * to Iceberg binary format.
  */
 unsigned char *
-IcebergSerializeColumnBoundText(char *columnBoundText, Field * field, size_t *binaryLen)
+IcebergSerializeColumnBoundText(char *columnBoundText, Field *field, size_t *binaryLen)
 {
 	PGType		pgType = IcebergFieldToPostgresType(field);
 
@@ -187,7 +187,7 @@ IcebergSerializeColumnBoundText(char *columnBoundText, Field * field, size_t *bi
  * representation (e.g. NaN/Inf floats).
  */
 bool
-CanSerializeColumnBound(char *boundText, Field * field)
+CanSerializeColumnBound(char *boundText, Field *field)
 {
 	if (boundText == NULL)
 		return false;

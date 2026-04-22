@@ -45,12 +45,12 @@ typedef struct PreloadLibrary
 
 	/* name of the library */
 	char	   *libraryName;
-}			PreloadLibrary;
+} PreloadLibrary;
 
 /* internal functions */
 static List *FindAllPreloadLibraries(void);
 static List *FindExtensionPreloadLibraryNames(char *extensionName);
-static List *AddPreloadLibrary(List *libraries, PreloadLibrary * preloadLibrary);
+static List *AddPreloadLibrary(List *libraries, PreloadLibrary *preloadLibrary);
 
 /* SQL-callable functions */
 PG_FUNCTION_INFO_V1(pg_extension_base_list_preload_libraries);
@@ -309,7 +309,7 @@ FindExtensionPreloadLibraryNames(char *extensionName)
  * unless the library already appears.
  */
 static List *
-AddPreloadLibrary(List *libraries, PreloadLibrary * preloadLibrary)
+AddPreloadLibrary(List *libraries, PreloadLibrary *preloadLibrary)
 {
 	ListCell   *libraryCell = NULL;
 

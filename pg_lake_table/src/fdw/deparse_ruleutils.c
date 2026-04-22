@@ -59,7 +59,7 @@ typedef struct ReplacePgLakeTableContext
 
 	/* whether a ctid Var is present */
 	bool		hasCtidVar;
-}			ReplacePgLakeTableContext;
+} ReplacePgLakeTableContext;
 
 typedef struct FixCtidVarContext
 {
@@ -68,13 +68,13 @@ typedef struct FixCtidVarContext
 
 	/* range table of the current query */
 	List	   *rtable;
-}			FixCtidVarContext;
+} FixCtidVarContext;
 
 static char *DeparseQualifiedQuery(Query *query);
 static bool ReplacePgLakeTableWalker(Node *node,
-									 ReplacePgLakeTableContext * context);
+									 ReplacePgLakeTableContext *context);
 static bool FixCtidVarWalker(Node *node,
-							 FixCtidVarContext * context);
+							 FixCtidVarContext *context);
 
 /*
  * ReplacePgLakeTableWithReadTableFunc replaces all occurrences of
@@ -139,7 +139,7 @@ RteListToOidList(List *rteList)
 * the context.
 */
 static bool
-ReplacePgLakeTableWalker(Node *node, ReplacePgLakeTableContext * context)
+ReplacePgLakeTableWalker(Node *node, ReplacePgLakeTableContext *context)
 {
 	if (node == NULL)
 	{
@@ -239,7 +239,7 @@ ReplacePgLakeTableWalker(Node *node, ReplacePgLakeTableContext * context)
 * since they cannot have attribute number -1.
 */
 static bool
-FixCtidVarWalker(Node *node, FixCtidVarContext * context)
+FixCtidVarWalker(Node *node, FixCtidVarContext *context)
 {
 	if (node == NULL)
 	{

@@ -28,17 +28,17 @@
 extern PGDLLEXPORT int IcebergMaxSnapshotAge;
 
 /* write api */
-extern PGDLLEXPORT IcebergTableMetadata * GenerateEmptyTableMetadata(char *location);
+extern PGDLLEXPORT IcebergTableMetadata *GenerateEmptyTableMetadata(char *location);
 extern PGDLLEXPORT char *GenerateInitialIcebergTableMetadataPath(Oid relationId);
-extern PGDLLEXPORT IcebergTableMetadata * GenerateInitialIcebergTableMetadata(Oid relationId);
+extern PGDLLEXPORT IcebergTableMetadata *GenerateInitialIcebergTableMetadata(Oid relationId);
 extern PGDLLEXPORT char *GenerateRemoteMetadataFilePath(int version, const char *location, char *queryArguments);
-extern PGDLLEXPORT void UploadTableMetadataToURI(IcebergTableMetadata * tableMetadata, char *metadataURI);
-extern PGDLLEXPORT void AdjustAndRetainMetadataLogs(IcebergTableMetadata * metadata, char *prevMetadataPath, size_t snapshotLogLength, int64_t prev_last_updated_ms);
-extern PGDLLEXPORT void UpdateLatestSnapshot(IcebergTableMetadata * tableMetadata, IcebergSnapshot * newSnapshot);
-extern PGDLLEXPORT List *RemoveOldSnapshotsFromMetadata(Oid relationId, IcebergTableMetadata * metadata, int maxSnapshotAgeInSecs, bool isVerbose);
-extern PGDLLEXPORT void GenerateSnapshotLogEntries(IcebergTableMetadata * metadata);
-extern PGDLLEXPORT int FindLargestPartitionFieldId(IcebergPartitionSpec * newSpec);
-extern PGDLLEXPORT void AppendCurrentPostgresSchema(Oid relationId, IcebergTableMetadata * metadata,
-													DataFileSchema * schema);
-extern PGDLLEXPORT void AppendPartitionSpec(IcebergTableMetadata * metadata, IcebergPartitionSpec * partitionSpec);
-extern PGDLLEXPORT List *GetAllIcebergPartitionSpecsFromTableMetadata(IcebergTableMetadata * metadata);
+extern PGDLLEXPORT void UploadTableMetadataToURI(IcebergTableMetadata *tableMetadata, char *metadataURI);
+extern PGDLLEXPORT void AdjustAndRetainMetadataLogs(IcebergTableMetadata *metadata, char *prevMetadataPath, size_t snapshotLogLength, int64_t prev_last_updated_ms);
+extern PGDLLEXPORT void UpdateLatestSnapshot(IcebergTableMetadata *tableMetadata, IcebergSnapshot *newSnapshot);
+extern PGDLLEXPORT List *RemoveOldSnapshotsFromMetadata(Oid relationId, IcebergTableMetadata *metadata, int maxSnapshotAgeInSecs, bool isVerbose);
+extern PGDLLEXPORT void GenerateSnapshotLogEntries(IcebergTableMetadata *metadata);
+extern PGDLLEXPORT int FindLargestPartitionFieldId(IcebergPartitionSpec *newSpec);
+extern PGDLLEXPORT void AppendCurrentPostgresSchema(Oid relationId, IcebergTableMetadata *metadata,
+													DataFileSchema *schema);
+extern PGDLLEXPORT void AppendPartitionSpec(IcebergTableMetadata *metadata, IcebergPartitionSpec *partitionSpec);
+extern PGDLLEXPORT List *GetAllIcebergPartitionSpecsFromTableMetadata(IcebergTableMetadata *metadata);

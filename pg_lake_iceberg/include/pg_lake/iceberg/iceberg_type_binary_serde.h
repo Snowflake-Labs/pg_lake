@@ -21,6 +21,6 @@
 
 #include "pg_lake/parquet/field.h"
 
-extern PGDLLEXPORT unsigned char *PGIcebergBinarySerializeBoundValue(Datum datum, Field * field, PGType pgType, size_t *binaryLen);
-extern PGDLLEXPORT unsigned char *PGIcebergBinarySerializePartitionFieldValue(Datum datum, Field * field, PGType pgType, size_t *binaryLen);
-extern PGDLLEXPORT Datum PGIcebergBinaryDeserialize(unsigned char *binaryVal, size_t binaryLen, Field * field, PGType pgType);
+extern PGDLLEXPORT unsigned char *PGIcebergBinarySerializeBoundValue(Datum datum, Field *field, PGType pgType, size_t *binaryLen);
+extern PGDLLEXPORT unsigned char *PGIcebergBinarySerializePartitionFieldValue(Datum datum, Field *field, PGType pgType, size_t *binaryLen);
+extern PGDLLEXPORT Datum PGIcebergBinaryDeserialize(unsigned char *binaryVal, size_t binaryLen, Field *field, PGType pgType);

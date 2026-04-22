@@ -56,7 +56,7 @@ typedef enum RestCatalogOperationType
 	REST_CATALOG_REMOVE_SNAPSHOT = 5,
 	REST_CATALOG_DROP_TABLE = 6,
 	REST_CATALOG_SET_DEFAULT_PARTITION_ID = 7,
-}			RestCatalogOperationType;
+} RestCatalogOperationType;
 
 
 typedef struct RestCatalogRequest
@@ -71,7 +71,7 @@ typedef struct RestCatalogRequest
 	 * holds the full request body.
 	 */
 	char	   *body;
-}			RestCatalogRequest;
+} RestCatalogRequest;
 
 
 #define REST_CATALOG_AUTH_TOKEN_PATH "%s/api/catalog/v1/oauth/tokens"
@@ -79,7 +79,7 @@ typedef struct RestCatalogRequest
 
 extern PGDLLEXPORT void RegisterNamespaceToRestCatalog(const char *catalogName, const char *namespaceName);
 extern PGDLLEXPORT void StartStageRestCatalogIcebergTableCreate(Oid relationId);
-extern PGDLLEXPORT char *FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSchema * dataFileSchema, List *partitionSpecs);
+extern PGDLLEXPORT char *FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSchema *dataFileSchema, List *partitionSpecs);
 extern PGDLLEXPORT void ErrorIfRestNamespaceDoesNotExist(const char *catalogName, const char *namespaceName);
 extern PGDLLEXPORT char *GetRestCatalogName(Oid relationId);
 extern PGDLLEXPORT char *GetRestCatalogNamespace(Oid relationId);
@@ -92,9 +92,9 @@ extern PGDLLEXPORT void ReportHTTPError(HttpResult httpResult, int level);
 extern PGDLLEXPORT List *PostHeadersWithAuth(void);
 extern PGDLLEXPORT List *DeleteHeadersWithAuth(void);
 extern PGDLLEXPORT HttpResult SendRequestToRestCatalog(HttpMethod method, const char *url, const char *body, List *headers);
-extern PGDLLEXPORT RestCatalogRequest * GetAddSnapshotCatalogRequest(IcebergSnapshot * newSnapshot, Oid relationId);
-extern PGDLLEXPORT RestCatalogRequest * GetAddSchemaCatalogRequest(Oid relationId, DataFileSchema * dataFileSchema);
-extern PGDLLEXPORT RestCatalogRequest * GetSetCurrentSchemaCatalogRequest(Oid relationId, int32_t schemaId);
-extern PGDLLEXPORT RestCatalogRequest * GetAddPartitionCatalogRequest(Oid relationId, List *partitionSpec);
-extern PGDLLEXPORT RestCatalogRequest * GetSetPartitionDefaultIdCatalogRequest(Oid relationId, int specId);
-extern PGDLLEXPORT RestCatalogRequest * GetRemoveSnapshotCatalogRequest(List *removedSnapshotIds, Oid relationId);
+extern PGDLLEXPORT RestCatalogRequest *GetAddSnapshotCatalogRequest(IcebergSnapshot *newSnapshot, Oid relationId);
+extern PGDLLEXPORT RestCatalogRequest *GetAddSchemaCatalogRequest(Oid relationId, DataFileSchema *dataFileSchema);
+extern PGDLLEXPORT RestCatalogRequest *GetSetCurrentSchemaCatalogRequest(Oid relationId, int32_t schemaId);
+extern PGDLLEXPORT RestCatalogRequest *GetAddPartitionCatalogRequest(Oid relationId, List *partitionSpec);
+extern PGDLLEXPORT RestCatalogRequest *GetSetPartitionDefaultIdCatalogRequest(Oid relationId, int specId);
+extern PGDLLEXPORT RestCatalogRequest *GetRemoveSnapshotCatalogRequest(List *removedSnapshotIds, Oid relationId);

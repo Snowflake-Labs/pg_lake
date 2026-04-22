@@ -51,7 +51,7 @@
 #include "pg_lake/pgduck/serialize.h"
 
 
-static DataFileSchema * GetDataFileSchemaForTableInternal(Oid relationId);
+static DataFileSchema *GetDataFileSchemaForTableInternal(Oid relationId);
 
 /*
 * RegisterPostgresColumnMappings adds entries to the
@@ -390,7 +390,7 @@ GetLeafFieldsForTable(Oid relationId)
  */
 const char *
 GetDuckSerializedIcebergFieldInitialDefault(const char *initialDefault,
-											Field * field)
+											Field *field)
 {
 	EnsureIcebergField(field);
 

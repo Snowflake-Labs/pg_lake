@@ -58,15 +58,15 @@ typedef struct ReplaceExternalParamsContext
 	bool		withPgDuckConsts;
 	ParamListInfo boundParams;
 
-}			ReplaceExternalParamsContext;
+} ReplaceExternalParamsContext;
 
 set_rel_pathlist_hook_type PrevRelPathlistHook = NULL;
 
-static PlannerRelationRestrictionContext * CurrentRestrictionContext(void);
+static PlannerRelationRestrictionContext *CurrentRestrictionContext(void);
 static int	GenerateNewUniqueRelationIdentifier(void);
 static bool RestrictionExists(List *baseRestrictionList, RestrictInfo *restrictInfo);
 static Node *ReplaceExternalParamsWithPgConsts(Node *inputNode, ParamListInfo boundParams);
-static Node *ReplaceExternalParamsWithConsts(Node *inputNode, ReplaceExternalParamsContext * context);
+static Node *ReplaceExternalParamsWithConsts(Node *inputNode, ReplaceExternalParamsContext *context);
 
 
 /*
@@ -398,7 +398,7 @@ ReplaceExternalParamsWithPgConsts(Node *inputNode, ParamListInfo boundParams)
  * optimizer/optimizer.c.
  */
 static Node *
-ReplaceExternalParamsWithConsts(Node *inputNode, ReplaceExternalParamsContext * context)
+ReplaceExternalParamsWithConsts(Node *inputNode, ReplaceExternalParamsContext *context)
 {
 	if (inputNode == NULL)
 	{

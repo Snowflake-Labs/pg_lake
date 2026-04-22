@@ -45,7 +45,7 @@ typedef struct UpdatableExtension
 
 	/* default version (usually the latest installed version) */
 	char	   *defaultVersion;
-}			UpdatableExtension;
+} UpdatableExtension;
 
 
 /* function declarations */

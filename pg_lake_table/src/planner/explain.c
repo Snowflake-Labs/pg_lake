@@ -29,7 +29,7 @@
 
 
 static void ExplainNotShippableObjects(HTAB *notShippableObjects, ExplainState *es);
-static const char *NotShippableObjectToString(const NotShippableObject * notShippableObject);
+static const char *NotShippableObjectToString(const NotShippableObject *notShippableObject);
 
 ExplainOneQuery_hook_type PrevExplainOneQueryHook = NULL;
 
@@ -127,7 +127,7 @@ ExplainNotShippableObjects(HTAB *notShippableObjects, ExplainState *es)
  * NotShippableObjectToString returns a string of why a particular object was deemed not shippable.
  */
 static const char *
-NotShippableObjectToString(const NotShippableObject * notShippableObject)
+NotShippableObjectToString(const NotShippableObject *notShippableObject)
 {
 	StringInfo	message = makeStringInfo();
 

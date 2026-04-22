@@ -53,7 +53,7 @@ typedef enum CommandExecutionStateMachineState
 	COMMAND_EXECUTION_STATE_FAILING,	/* cleaning up after failure */
 	COMMAND_EXECUTION_STATE_COMPLETED,	/* query completed successfully */
 	COMMAND_EXECUTION_STATE_FAILED	/* query failed (terminal state) */
-}			CommandExecutionStateMachineState;
+} CommandExecutionStateMachineState;
 
 /*
  * CommandExecutionState tracks the state of an in-progress upload.
@@ -64,7 +64,7 @@ typedef struct CommandExecutionState
 	PGDuckConnection *pgDuckConnection;
 	CommandExecutionStateMachineState state;
 	char	   *errorMessage;
-}			CommandExecutionState;
+} CommandExecutionState;
 
 /*
  * MultiCommandExecutionState tracks the state of a set of uploads.
@@ -74,18 +74,18 @@ typedef struct MultiCommandExecutionState
 	CommandExecutionState *states;
 	int32		executionCount;
 	int32		busyConnectionsCount;
-}			MultiCommandExecutionState;
+} MultiCommandExecutionState;
 
 
-static void RunNonBlockingCommandExecutions(MultiCommandExecutionState * multiState,
+static void RunNonBlockingCommandExecutions(MultiCommandExecutionState *multiState,
 											int32 maxRunningExecutions);
-static void WaitForSocketEvents(MultiCommandExecutionState * multiState);
-static void RunCommandExecutionStateMachine(MultiCommandExecutionState * multiState,
-											CommandExecutionState * state);
-static bool AdvanceCommandExecutionStateMachine(MultiCommandExecutionState * multiState,
-												CommandExecutionState * state);
-static int	CountActiveExecutions(MultiCommandExecutionState * multiState);
-static int	CountWaitingExecutions(MultiCommandExecutionState * multiState);
+static void WaitForSocketEvents(MultiCommandExecutionState *multiState);
+static void RunCommandExecutionStateMachine(MultiCommandExecutionState *multiState,
+											CommandExecutionState *state);
+static bool AdvanceCommandExecutionStateMachine(MultiCommandExecutionState *multiState,
+												CommandExecutionState *state);
+static int	CountActiveExecutions(MultiCommandExecutionState *multiState);
+static int	CountWaitingExecutions(MultiCommandExecutionState *multiState);
 
 
 
@@ -151,7 +151,7 @@ ExecuteCommandsInParallelInPGDuck(List *commandList, int32 maxActiveExecutions)
  * progress without waiting for I/O.
  */
 static void
-RunNonBlockingCommandExecutions(MultiCommandExecutionState * multiState,
+RunNonBlockingCommandExecutions(MultiCommandExecutionState *multiState,
 								int32 maxActiveExecutions)
 {
 	CommandExecutionState *execStates = multiState->states;
@@ -190,7 +190,7 @@ RunNonBlockingCommandExecutions(MultiCommandExecutionState * multiState,
  * For WAITING state: waits for read-ready
  */
 static void
-WaitForSocketEvents(MultiCommandExecutionState * multiState)
+WaitForSocketEvents(MultiCommandExecutionState *multiState)
 {
 	int			waitingExecutionsCount = CountWaitingExecutions(multiState);
 
@@ -298,8 +298,8 @@ WaitForSocketEvents(MultiCommandExecutionState * multiState)
  * until it reaches a state that requires waiting for IO or a terminal state.
  */
 static void
-RunCommandExecutionStateMachine(MultiCommandExecutionState * multiState,
-								CommandExecutionState * state)
+RunCommandExecutionStateMachine(MultiCommandExecutionState *multiState,
+								CommandExecutionState *state)
 {
 	/* iterate until a blocking or terminal state is reached */
 	while (AdvanceCommandExecutionStateMachine(multiState, state))
@@ -317,8 +317,8 @@ RunCommandExecutionStateMachine(MultiCommandExecutionState * multiState,
  * wait for IO.
  */
 static bool
-AdvanceCommandExecutionStateMachine(MultiCommandExecutionState * multiState,
-									CommandExecutionState * state)
+AdvanceCommandExecutionStateMachine(MultiCommandExecutionState *multiState,
+									CommandExecutionState *state)
 {
 	switch (state->state)
 	{
@@ -473,7 +473,7 @@ AdvanceCommandExecutionStateMachine(MultiCommandExecutionState * multiState,
  * CountActiveExecutions returns the number of executions that are not yet completed or failed.
  */
 static int
-CountActiveExecutions(MultiCommandExecutionState * multiState)
+CountActiveExecutions(MultiCommandExecutionState *multiState)
 {
 	int			activeCount = 0;
 
@@ -497,7 +497,7 @@ CountActiveExecutions(MultiCommandExecutionState * multiState)
  * for IO.
  */
 static int32
-CountWaitingExecutions(MultiCommandExecutionState * multiState)
+CountWaitingExecutions(MultiCommandExecutionState *multiState)
 {
 	int			waitingExecutionsCount = 0;
 

@@ -45,7 +45,7 @@ typedef enum ExtensionStatus
 	EXTENSION_STATUS_UNKNOWN,
 	EXTENSION_STATUS_EXISTS,
 	EXTENSION_STATUS_NOT_EXISTS
-}			ExtensionStatus;
+} ExtensionStatus;
 
 
 /*
@@ -208,7 +208,7 @@ InvalidateExtensionIdCache(Datum argument, Oid relationId)
  * IsExtensionCreated returns whether exists.
  */
 bool
-IsExtensionCreated(CachedExtensionIds * extension)
+IsExtensionCreated(CachedExtensionIds *extension)
 {
 	if (extension->existsStatus == EXTENSION_STATUS_EXISTS)
 		return true;
@@ -235,7 +235,7 @@ IsExtensionCreated(CachedExtensionIds * extension)
  * ExtensionId returns the OID of the extension.
  */
 Oid
-ExtensionId(CachedExtensionIds * extension)
+ExtensionId(CachedExtensionIds *extension)
 {
 	if (extension->extensionId == InvalidOid)
 	{
@@ -250,7 +250,7 @@ ExtensionId(CachedExtensionIds * extension)
  * ExtensionSchemaId returns the OID of the extension schema.
  */
 Oid
-ExtensionSchemaId(CachedExtensionIds * extension)
+ExtensionSchemaId(CachedExtensionIds *extension)
 {
 	if (extension->schemaId == InvalidOid)
 		extension->schemaId = get_extension_schema(ExtensionId(extension));
@@ -263,7 +263,7 @@ ExtensionSchemaId(CachedExtensionIds * extension)
  * ExtensionOwnerId returns the OID of the extension owner.
  */
 Oid
-ExtensionOwnerId(CachedExtensionIds * extension)
+ExtensionOwnerId(CachedExtensionIds *extension)
 {
 	if (extension->ownerId == InvalidOid)
 	{
@@ -300,7 +300,7 @@ ExtensionOwnerId(CachedExtensionIds * extension)
  * in the current database.
  */
 void
-EnsureExtensionExists(CachedExtensionIds * extension)
+EnsureExtensionExists(CachedExtensionIds *extension)
 {
 	if (IsExtensionCreated(extension))
 		return;

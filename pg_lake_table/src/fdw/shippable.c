@@ -105,10 +105,10 @@ static Oid *ParameterOidArray(char **parameterTypes, int parameterCount);
 static ShippableCacheEntry *EnterShippableCacheEntry(Oid objectId, Oid classId, bool shippable);
 static void LoadShippableBuiltinFunctions(void);
 static void LoadShippableSpatialFunctions(void);
-static void LoadShippablePgduckFunctions(const PGDuckShippableFunction * functions, int functionCount);
+static void LoadShippablePgduckFunctions(const PGDuckShippableFunction *functions, int functionCount);
 static void LoadShippableBuiltinOperators(void);
 static void LoadShippableSpatialOperators(void);
-static void LoadShippablePgduckOperators(const PGDuckShippableOperator * operators, int operatorCount);
+static void LoadShippablePgduckOperators(const PGDuckShippableOperator *operators, int operatorCount);
 static bool IsShippableStructType(Oid objectId);
 static char *GetObjectDescription(Oid classId, Oid objectId);
 
@@ -328,12 +328,12 @@ static void
 LoadShippableBuiltinOperators(void)
 {
 	int			numTypes = 0;
-	const		PGDuckShippableOperatorsByType *operatorTypes =
+	const PGDuckShippableOperatorsByType *operatorTypes =
 		GetPGDuckShippableOperatorsByType(&numTypes);
 
 	for (int typeIndex = 0; typeIndex < numTypes; typeIndex++)
 	{
-		const		PGDuckShippableOperatorsByType shippableOperatorsByType =
+		const PGDuckShippableOperatorsByType shippableOperatorsByType =
 			operatorTypes[typeIndex];
 
 		LoadShippablePgduckOperators(shippableOperatorsByType.oprs,
@@ -349,7 +349,7 @@ static void
 LoadShippableSpatialOperators(void)
 {
 	int			operatorCount = 0;
-	const		PGDuckShippableOperator *operators = GetShippableSpatialOperators(&operatorCount);
+	const PGDuckShippableOperator *operators = GetShippableSpatialOperators(&operatorCount);
 
 	LoadShippablePgduckOperators(operators, operatorCount);
 }
@@ -360,7 +360,7 @@ LoadShippableSpatialOperators(void)
  * array into the shippable cache.
  */
 static void
-LoadShippablePgduckOperators(const PGDuckShippableOperator * operators, int operatorCount)
+LoadShippablePgduckOperators(const PGDuckShippableOperator *operators, int operatorCount)
 {
 	for (int oprIndex = 0; oprIndex < operatorCount; oprIndex++)
 	{
@@ -410,7 +410,7 @@ static void
 LoadShippableBuiltinFunctions(void)
 {
 	int			functionCount = 0;
-	const		PGDuckShippableFunction *functions = GetShippableBuiltinFunctions(&functionCount);
+	const PGDuckShippableFunction *functions = GetShippableBuiltinFunctions(&functionCount);
 
 	LoadShippablePgduckFunctions(functions, functionCount);
 }
@@ -423,7 +423,7 @@ static void
 LoadShippableSpatialFunctions(void)
 {
 	int			functionCount = 0;
-	const		PGDuckShippableFunction *functions = GetShippableSpatialFunctions(&functionCount);
+	const PGDuckShippableFunction *functions = GetShippableSpatialFunctions(&functionCount);
 
 	LoadShippablePgduckFunctions(functions, functionCount);
 }
@@ -434,7 +434,7 @@ LoadShippableSpatialFunctions(void)
  * shippable cache.
  */
 static void
-LoadShippablePgduckFunctions(const PGDuckShippableFunction * functions, int functionCount)
+LoadShippablePgduckFunctions(const PGDuckShippableFunction *functions, int functionCount)
 {
 	for (size_t procIndex = 0; procIndex < functionCount; procIndex++)
 	{

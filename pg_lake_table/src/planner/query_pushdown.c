@@ -91,19 +91,19 @@ typedef struct IsShippableContext
 
 	/* map of not shippable objects */
 	HTAB	   *notShippableObjects;
-}			IsShippableContext;
+} IsShippableContext;
 
 
 static PlannedStmt *LakeTablePlanner(Query *parse, const char *queryString,
 									 int cursorOptions, ParamListInfo boundParams);
 static bool AdjustParseTreeForPgLake(Node *node, void *context);
-static bool ProcessNotShippableExpressionWalker(Node *node, IsShippableContext * context);
+static bool ProcessNotShippableExpressionWalker(Node *node, IsShippableContext *context);
 static bool AddMissingRTEAliasaes(Node *node, void *context);
 static bool TargetListHasOnlyResjunk(List *targetList);
 static bool AllInheritorsAreLakeTable(Oid relationId);
-static bool ExpressionHasCollation(Node *node, IsShippableContext * context);
-static bool ExpressionHasNonShippableObject(Node *node, bool srfAllowed, IsShippableContext * context);
-static bool ExpressionReturnsNonShippableType(Node *node, IsShippableContext * context);
+static bool ExpressionHasCollation(Node *node, IsShippableContext *context);
+static bool ExpressionHasNonShippableObject(Node *node, bool srfAllowed, IsShippableContext *context);
+static bool ExpressionReturnsNonShippableType(Node *node, IsShippableContext *context);
 static PlannedStmt *GenerateInsertSelectPushdownPlan(PlannedStmt *localPlan,
 													 Query *query);
 static PlannedStmt *GeneratePushdownPlan(PlannedStmt *localPlan, Query *originalQuery);
@@ -123,9 +123,9 @@ static void RemoveUnusedParametersFromList(Query *query, ParamListInfo paramList
 static bool FindAllParams(Node *node, List **allParams);
 static List *CreateInternalCustomScanTargetList(List *existingTargetlist);
 static List *CreateCustomScanOutputTargetList(List *customScanTargetList);
-static void TryRecordNotShippableObject(IsShippableContext * context, Oid objectId,
+static void TryRecordNotShippableObject(IsShippableContext *context, Oid objectId,
 										Oid classId, NotShippableReason reason);
-static void RecordNotShippableObject(IsShippableContext * context, Oid objectId,
+static void RecordNotShippableObject(IsShippableContext *context, Oid objectId,
 									 Oid classId, NotShippableReason reason);
 static HTAB *CreateNotShippableObjectsHash(void);
 
@@ -179,7 +179,7 @@ typedef struct QueryPushdownScanState
 	ParamListInfo paramListInfo;
 	int			numParams;
 	const char **parameterValues;
-}			QueryPushdownScanState;
+} QueryPushdownScanState;
 
 
 /*
@@ -549,7 +549,7 @@ CollectNotShippableObjects(Node *node)
  * given context if the context is configured to record such objects.
  */
 static void
-TryRecordNotShippableObject(IsShippableContext * context, Oid objectId,
+TryRecordNotShippableObject(IsShippableContext *context, Oid objectId,
 							Oid classId, NotShippableReason reason)
 {
 	if (context->stopAtFirstNotShippable)
@@ -564,7 +564,7 @@ TryRecordNotShippableObject(IsShippableContext * context, Oid objectId,
  * given context.
  */
 static void
-RecordNotShippableObject(IsShippableContext * context, Oid objectId,
+RecordNotShippableObject(IsShippableContext *context, Oid objectId,
 						 Oid classId, NotShippableReason reason)
 {
 	Assert(context->notShippableObjects != NULL);
@@ -608,7 +608,7 @@ CreateNotShippableObjectsHash(void)
  * Otherwise, it stops at the first not shippable object and returns true.
  */
 static bool
-ProcessNotShippableExpressionWalker(Node *node, IsShippableContext * context)
+ProcessNotShippableExpressionWalker(Node *node, IsShippableContext *context)
 {
 	if (node == NULL)
 	{
@@ -826,7 +826,7 @@ ProcessNotShippableExpressionWalker(Node *node, IsShippableContext * context)
 * Note that this function does not recurse into sub-expressions.
 */
 static bool
-ExpressionHasNonShippableObject(Node *node, bool srfAllowed, IsShippableContext * context)
+ExpressionHasNonShippableObject(Node *node, bool srfAllowed, IsShippableContext *context)
 {
 	if (IsA(node, FuncExpr))
 	{
@@ -1047,7 +1047,7 @@ AllInheritorsAreLakeTable(Oid relationId)
 * has a collation. This check is inline with the foreign_expr_walker().
 */
 static bool
-ExpressionHasCollation(Node *node, IsShippableContext * context)
+ExpressionHasCollation(Node *node, IsShippableContext *context)
 {
 	switch (nodeTag(node))
 	{
@@ -1121,7 +1121,7 @@ ExpressionHasCollation(Node *node, IsShippableContext * context)
  * returns a shippable type, or false if the node is not an expression.
  */
 static bool
-ExpressionReturnsNonShippableType(Node *node, IsShippableContext * context)
+ExpressionReturnsNonShippableType(Node *node, IsShippableContext *context)
 {
 	switch (nodeTag(node))
 	{

@@ -148,7 +148,7 @@ typedef struct PgLakeRelationInfo
 	 * representing the relation.
 	 */
 	int			relation_index;
-}			PgLakeRelationInfo;
+} PgLakeRelationInfo;
 
 /*
  * Method used by ANALYZE to sample remote rows.
@@ -160,7 +160,7 @@ typedef enum PgLakeSamplingMethod
 	ANALYZE_SAMPLE_RANDOM,		/* remote random() */
 	ANALYZE_SAMPLE_SYSTEM,		/* TABLESAMPLE system */
 	ANALYZE_SAMPLE_BERNOULLI	/* TABLESAMPLE bernoulli */
-}			PgLakeSamplingMethod;
+} PgLakeSamplingMethod;
 
 
 /* hook */

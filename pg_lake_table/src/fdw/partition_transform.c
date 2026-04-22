@@ -40,34 +40,34 @@
 #include "pg_lake/util/rel_utils.h"
 #include "pg_lake/util/timetz.h"
 
-static PartitionField * ApplyPartitionTransformToTuple(IcebergPartitionTransform * transform,
-													   TupleTableSlot *slot);
-static void *ApplyIdentityTransformToColumn(IcebergPartitionTransform * transform,
+static PartitionField *ApplyPartitionTransformToTuple(IcebergPartitionTransform *transform,
+													  TupleTableSlot *slot);
+static void *ApplyIdentityTransformToColumn(IcebergPartitionTransform *transform,
 											Datum columnValue, bool isNull,
 											size_t *valueSize);
-static void *ApplyTruncateTransformToColumn(IcebergPartitionTransform * transform,
+static void *ApplyTruncateTransformToColumn(IcebergPartitionTransform *transform,
 											Datum columnValue, bool isNull,
 											size_t *valueSize);
-static void *ApplyYearTransformToColumn(IcebergPartitionTransform * transform,
+static void *ApplyYearTransformToColumn(IcebergPartitionTransform *transform,
 										Datum columnValue, bool isNull,
 										size_t *valueSize);
-static void *ApplyMonthTransformToColumn(IcebergPartitionTransform * transform,
+static void *ApplyMonthTransformToColumn(IcebergPartitionTransform *transform,
 										 Datum columnValue, bool isNull,
 										 size_t *valueSize);
-static void *ApplyDayTransformToColumn(IcebergPartitionTransform * transform,
+static void *ApplyDayTransformToColumn(IcebergPartitionTransform *transform,
 									   Datum columnValue, bool isNull,
 									   size_t *valueSize);
-static void *ApplyHourTransformToColumn(IcebergPartitionTransform * transform,
+static void *ApplyHourTransformToColumn(IcebergPartitionTransform *transform,
 										Datum columnValue, bool isNull,
 										size_t *valueSize);
-static IcebergPartitionTransform * GetPartitionTransformFromSpecField(Oid relationId,
-																	  IcebergPartitionSpecField * specField);
-static void ParseTransformName(const char *name, IcebergPartitionTransformType * type,
+static IcebergPartitionTransform *GetPartitionTransformFromSpecField(Oid relationId,
+																	 IcebergPartitionSpecField *specField);
+static void ParseTransformName(const char *name, IcebergPartitionTransformType *type,
 							   size_t *bucketCount, size_t *truncateLen);
 static bool ParseBracketUintSize(const char *name, const char *prefix, size_t *outVal);
-static void *DatumToPartitionValue(IcebergPartitionTransform * transform, Datum columnValue, bool isNull,
+static void *DatumToPartitionValue(IcebergPartitionTransform *transform, Datum columnValue, bool isNull,
 								   size_t *valuelength);
-static bool PartitionTransformsEqual(IcebergPartitionSpec * spec, List *partitionTransforms);
+static bool PartitionTransformsEqual(IcebergPartitionSpec *spec, List *partitionTransforms);
 
 /*
  * ComputePartitionTupleForTuple applies relative partition transforms
@@ -137,7 +137,7 @@ GetPartitionSpecIfAlreadyExist(Oid relationId, List *partitionTransforms)
 * if they are equal, false otherwise.
 */
 static bool
-PartitionTransformsEqual(IcebergPartitionSpec * spec, List *partitionTransforms)
+PartitionTransformsEqual(IcebergPartitionSpec *spec, List *partitionTransforms)
 {
 	if (spec->fields_length != list_length(partitionTransforms))
 		return false;
@@ -248,7 +248,7 @@ GetPartitionTransformsFromSpecFields(Oid relationId, List *specFields)
 * bucket count, and truncate length for ease of use.
 */
 static IcebergPartitionTransform *
-GetPartitionTransformFromSpecField(Oid relationId, IcebergPartitionSpecField * specField)
+GetPartitionTransformFromSpecField(Oid relationId, IcebergPartitionSpecField *specField)
 {
 	IcebergPartitionTransform *transform = palloc0(sizeof(IcebergPartitionTransform));
 
@@ -298,7 +298,7 @@ GetPartitionTransformFromSpecField(Oid relationId, IcebergPartitionSpecField * s
  */
 static void
 ParseTransformName(const char *name,
-				   IcebergPartitionTransformType * type,
+				   IcebergPartitionTransformType *type,
 				   size_t *bucketCount,
 				   size_t *truncateLen)
 {
@@ -410,7 +410,7 @@ ParseBracketUintSize(const char *name, const char *prefix, size_t *outVal)
  * and returns the partition field.
  */
 static PartitionField *
-ApplyPartitionTransformToTuple(IcebergPartitionTransform * transform, TupleTableSlot *slot)
+ApplyPartitionTransformToTuple(IcebergPartitionTransform *transform, TupleTableSlot *slot)
 {
 	PartitionField *field = palloc0(sizeof(PartitionField));
 
@@ -469,7 +469,7 @@ ApplyPartitionTransformToTuple(IcebergPartitionTransform * transform, TupleTable
  * and returns the computed partition value.
  */
 static void *
-ApplyIdentityTransformToColumn(IcebergPartitionTransform * transform, Datum columnValue,
+ApplyIdentityTransformToColumn(IcebergPartitionTransform *transform, Datum columnValue,
 							   bool isNull, size_t *valueSize)
 {
 	if (isNull)
@@ -488,7 +488,7 @@ ApplyIdentityTransformToColumn(IcebergPartitionTransform * transform, Datum colu
  * and returns the computed partition value.
  */
 static void *
-ApplyTruncateTransformToColumn(IcebergPartitionTransform * transform, Datum columnValue,
+ApplyTruncateTransformToColumn(IcebergPartitionTransform *transform, Datum columnValue,
 							   bool isNull, size_t *valueSize)
 {
 	if (isNull)
@@ -549,7 +549,7 @@ ApplyTruncateTransformToColumn(IcebergPartitionTransform * transform, Datum colu
  * and returns the computed partition value.
  */
 static void *
-ApplyYearTransformToColumn(IcebergPartitionTransform * transform, Datum columnValue, bool isNull,
+ApplyYearTransformToColumn(IcebergPartitionTransform *transform, Datum columnValue, bool isNull,
 						   size_t *valueSize)
 {
 	if (isNull)
@@ -599,7 +599,7 @@ ApplyYearTransformToColumn(IcebergPartitionTransform * transform, Datum columnVa
  * and returns the computed partition value.
  */
 static void *
-ApplyMonthTransformToColumn(IcebergPartitionTransform * transform, Datum columnValue, bool isNull,
+ApplyMonthTransformToColumn(IcebergPartitionTransform *transform, Datum columnValue, bool isNull,
 							size_t *valueSize)
 {
 	if (isNull)
@@ -649,7 +649,7 @@ ApplyMonthTransformToColumn(IcebergPartitionTransform * transform, Datum columnV
  * and returns the computed partition value.
  */
 static void *
-ApplyDayTransformToColumn(IcebergPartitionTransform * transform, Datum columnValue, bool isNull,
+ApplyDayTransformToColumn(IcebergPartitionTransform *transform, Datum columnValue, bool isNull,
 						  size_t *valueSize)
 {
 	if (isNull)
@@ -699,7 +699,7 @@ ApplyDayTransformToColumn(IcebergPartitionTransform * transform, Datum columnVal
  * and returns the computed partition value.
  */
 static void *
-ApplyHourTransformToColumn(IcebergPartitionTransform * transform, Datum columnValue, bool isNull,
+ApplyHourTransformToColumn(IcebergPartitionTransform *transform, Datum columnValue, bool isNull,
 						   size_t *valueSize)
 {
 	if (isNull)
@@ -756,7 +756,7 @@ ApplyHourTransformToColumn(IcebergPartitionTransform * transform, Datum columnVa
  * and returns the computed partition value.
  */
 void *
-ApplyBucketTransformToColumn(IcebergPartitionTransform * transform, Datum columnValue, bool isNull,
+ApplyBucketTransformToColumn(IcebergPartitionTransform *transform, Datum columnValue, bool isNull,
 							 size_t *bucketSize)
 {
 	if (isNull)
@@ -883,7 +883,7 @@ ApplyBucketTransformToColumn(IcebergPartitionTransform * transform, Datum column
  * GetTransformResultAvroType returns the result type of the transform.
  */
 IcebergScalarAvroType
-GetTransformResultAvroType(IcebergPartitionTransform * transform)
+GetTransformResultAvroType(IcebergPartitionTransform *transform)
 {
 	IcebergScalarAvroType type = {0};
 
@@ -985,7 +985,7 @@ GetTransformResultAvroType(IcebergPartitionTransform * transform)
  * SerializePartitionValueToPGText returns Postgres text representation of the partition field value.
  */
 const char *
-SerializePartitionValueToPGText(void *value, size_t valueLength, IcebergPartitionTransform * transform)
+SerializePartitionValueToPGText(void *value, size_t valueLength, IcebergPartitionTransform *transform)
 {
 	if (value == NULL)
 	{
@@ -1016,7 +1016,7 @@ SerializePartitionValueToPGText(void *value, size_t valueLength, IcebergPartitio
  * from the given Postgres text representation.
  */
 void *
-DeserializePartitionValueFromPGText(IcebergPartitionTransform * transform,
+DeserializePartitionValueFromPGText(IcebergPartitionTransform *transform,
 									const char *valueText, size_t *valueLength)
 {
 	if (valueText == NULL)
@@ -1102,7 +1102,7 @@ PartitionValueToDatum(IcebergPartitionTransformType transformType, void *value, 
  * DatumToPartitionValue converts the column value to a partition value.
  */
 static void *
-DatumToPartitionValue(IcebergPartitionTransform * transform, Datum columnValue, bool isNull,
+DatumToPartitionValue(IcebergPartitionTransform *transform, Datum columnValue, bool isNull,
 					  size_t *valueLength)
 {
 	if (isNull)

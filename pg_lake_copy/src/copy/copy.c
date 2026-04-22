@@ -106,7 +106,7 @@ static char *GenerateReadDataSourceQuery(char *sourcePath,
 										 CopyDataCompression sourceCompression,
 										 TupleDesc tupleDesc,
 										 List *options,
-										 DataFileSchema * schema,
+										 DataFileSchema *schema,
 										 int readFlags);
 static List *FindCopyFromWriteOptions(CopyDataFormat format, List *options);
 static void ProcessPgLakeCopyTo(CopyStmt *copyStmt, ParseState *pstate,
@@ -129,7 +129,7 @@ static TupleDesc BuildTupleDescriptorForRelation(Relation relation, List *attrib
 static TupleDesc RemoveDroppedColumnsFromTupleDesc(TupleDesc tupleDesc);
 static void VerifyNoDuplicateNames(TupleDesc tupleDesc);
 static int	CopyReceivedTransmitDataToBuffer(void *outbuf, int minread, int maxread);
-static bool ReceiveCopyData(PGDuckConnection * pgDuckConn, StringInfo buffer);
+static bool ReceiveCopyData(PGDuckConnection *pgDuckConn, StringInfo buffer);
 
 PG_FUNCTION_INFO_V1(pg_lake_last_copy_pushed_down_test);
 
@@ -145,7 +145,7 @@ bool		EnablePgLakeCopyJson = true;
  * The connection is closed automatically via PGDuckClientTransactionCallback.
  * The old pointers may remain in place and should always be reset before use.
  */
-static PGDuckConnection * CurrentCopyFromConnection = NULL;
+static PGDuckConnection *CurrentCopyFromConnection = NULL;
 static StringInfoData CopyFromBuffer;
 
 
@@ -164,7 +164,7 @@ static bool LastCopyPushedDownTest = false;
  * - COPY (SELECT ... ) TO 's3://...';
  */
 bool
-PgLakeCopyHandler(ProcessUtilityParams * params, void *arg)
+PgLakeCopyHandler(ProcessUtilityParams *params, void *arg)
 {
 	PlannedStmt *plannedStmt = params->plannedStmt;
 
@@ -668,7 +668,7 @@ static char *
 GenerateReadDataSourceQuery(char *sourcePath, CopyDataFormat sourceFormat,
 							CopyDataCompression sourceCompression,
 							TupleDesc tupleDesc, List *options,
-							DataFileSchema * schema, int readFlags)
+							DataFileSchema *schema, int readFlags)
 {
 
 	List	   *dataFileList = NIL;
@@ -1497,7 +1497,7 @@ CopyReceivedTransmitDataToBuffer(void *outbuf, int minread, int maxread)
  * them to the buffer.
  */
 static bool
-ReceiveCopyData(PGDuckConnection * pgDuckConnection, StringInfo buffer)
+ReceiveCopyData(PGDuckConnection *pgDuckConnection, StringInfo buffer)
 {
 	PGconn	   *conn = pgDuckConnection->conn;
 	int			async = 0;

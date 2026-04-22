@@ -22,6 +22,6 @@
 #define BTREE_GIST "btree_gist"
 
 /* cached extension IDs for btree_gist */
-extern PGDLLEXPORT CachedExtensionIds * BtreeGist;
+extern PGDLLEXPORT CachedExtensionIds *BtreeGist;
 
 void		InitializeBtreeGistIdCache(void);

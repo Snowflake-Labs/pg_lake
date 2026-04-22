@@ -21,4 +21,4 @@
 extern int	MaxFileRemovalsPerVacuum;
 extern int	MaxCompactionsPerVacuum;
 
-bool		ProcessVacuumPgLakeTable(ProcessUtilityParams * params, void *arg);
+bool		ProcessVacuumPgLakeTable(ProcessUtilityParams *params, void *arg);

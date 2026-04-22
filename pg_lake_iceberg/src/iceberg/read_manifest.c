@@ -51,7 +51,7 @@ typedef struct PartitionFieldIdMapEntry
 	char		fieldName[PARTITION_FIELD_NAME_MAX_LENGTH];
 	int32_t		fieldId;
 	IcebergScalarAvroType fieldType;
-}			PartitionFieldIdMapEntry;
+} PartitionFieldIdMapEntry;
 
 
 /*
@@ -62,17 +62,17 @@ typedef struct ManifestReaderContext
 {
 	/* partition field name => field id mapping */
 	HTAB	   *partitionFieldMap;
-}			ManifestReaderContext;
+} ManifestReaderContext;
 
 
-static void ReadFieldSummaryFromAvro(avro_value_t * record, FieldSummary * summary, void *context);
-static void ReadColumnStatFromAvro(avro_value_t * record, ColumnStat * stat, void *context);
-static void ReadColumnBoundFromAvro(avro_value_t * record, ColumnBound * bound, void *context);
-static void ReadDataFileFromAvro(avro_value_t * record, DataFile * dataFile, ManifestReaderContext * context);
-static void ReadPartitionFromAvro(avro_value_t * record, Partition * partition, ManifestReaderContext * context);
-static void ReadIcebergManifestFromAvro(avro_value_t * record, IcebergManifest * manifest, void *context);
-static void ReadIcebergManifestEntryFromAvro(avro_value_t * record, IcebergManifestEntry * entry,
-											 ManifestReaderContext * context);
+static void ReadFieldSummaryFromAvro(avro_value_t * record, FieldSummary *summary, void *context);
+static void ReadColumnStatFromAvro(avro_value_t * record, ColumnStat *stat, void *context);
+static void ReadColumnBoundFromAvro(avro_value_t * record, ColumnBound *bound, void *context);
+static void ReadDataFileFromAvro(avro_value_t * record, DataFile *dataFile, ManifestReaderContext *context);
+static void ReadPartitionFromAvro(avro_value_t * record, Partition *partition, ManifestReaderContext *context);
+static void ReadIcebergManifestFromAvro(avro_value_t * record, IcebergManifest *manifest, void *context);
+static void ReadIcebergManifestEntryFromAvro(avro_value_t * record, IcebergManifestEntry *entry,
+											 ManifestReaderContext *context);
 static HTAB *CreateManifestPartitionFieldMap(AvroReader * manifestReader);
 static IcebergScalarAvroType IcebergAvroTypeFromString(const char *physicalTypeName, const char *logicalTypeName);
 
@@ -171,7 +171,7 @@ ReadManifestEntries(const char *manifestPath)
 }
 
 static void
-ReadIcebergManifestFromAvro(avro_value_t * record, IcebergManifest * manifest, void *context)
+ReadIcebergManifestFromAvro(avro_value_t * record, IcebergManifest *manifest, void *context)
 {
 	memset(manifest, '\0', sizeof(IcebergManifest));
 	AvroGetStringField(record, "manifest_path", AVRO_FIELD_REQUIRED, &manifest->manifest_path, &manifest->manifest_path_length);
@@ -227,7 +227,7 @@ ReadIcebergManifestFromAvro(avro_value_t * record, IcebergManifest * manifest, v
 
 
 static void
-ReadIcebergManifestEntryFromAvro(avro_value_t * record, IcebergManifestEntry * entry, ManifestReaderContext * context)
+ReadIcebergManifestEntryFromAvro(avro_value_t * record, IcebergManifestEntry *entry, ManifestReaderContext *context)
 {
 	memset(entry, '\0', sizeof(IcebergManifestEntry));
 	AvroGetInt32Field(record, "status", AVRO_FIELD_REQUIRED, (int32_t *) &entry->status);
@@ -239,7 +239,7 @@ ReadIcebergManifestEntryFromAvro(avro_value_t * record, IcebergManifestEntry * e
 
 
 static void
-ReadDataFileFromAvro(avro_value_t * record, DataFile * dataFile, ManifestReaderContext * context)
+ReadDataFileFromAvro(avro_value_t * record, DataFile *dataFile, ManifestReaderContext *context)
 {
 	memset(dataFile, '\0', sizeof(DataFile));
 	AvroGetInt32Field(record, "content", AVRO_FIELD_REQUIRED, (int32_t *) &dataFile->content);
@@ -293,7 +293,7 @@ ReadDataFileFromAvro(avro_value_t * record, DataFile * dataFile, ManifestReaderC
  * ReadPartitionFromAvro reads the partition from the avro record.
  */
 static void
-ReadPartitionFromAvro(avro_value_t * partitionRecord, Partition * partition, ManifestReaderContext * context)
+ReadPartitionFromAvro(avro_value_t * partitionRecord, Partition *partition, ManifestReaderContext *context)
 {
 	memset(partition, '\0', sizeof(Partition));
 
@@ -620,7 +620,7 @@ CreateManifestPartitionFieldMap(AvroReader * manifestReader)
 
 
 static void
-ReadFieldSummaryFromAvro(avro_value_t * record, FieldSummary * summary, void *context)
+ReadFieldSummaryFromAvro(avro_value_t * record, FieldSummary *summary, void *context)
 {
 	memset(summary, '\0', sizeof(FieldSummary));
 	AvroGetBoolField(record, "contains_null", AVRO_FIELD_REQUIRED, &summary->contains_null);
@@ -630,7 +630,7 @@ ReadFieldSummaryFromAvro(avro_value_t * record, FieldSummary * summary, void *co
 }
 
 static void
-ReadColumnStatFromAvro(avro_value_t * record, ColumnStat * stat, void *context)
+ReadColumnStatFromAvro(avro_value_t * record, ColumnStat *stat, void *context)
 {
 	memset(stat, '\0', sizeof(ColumnStat));
 	AvroGetInt32Field(record, "key", AVRO_FIELD_REQUIRED, &stat->column_id);
@@ -639,7 +639,7 @@ ReadColumnStatFromAvro(avro_value_t * record, ColumnStat * stat, void *context)
 
 
 static void
-ReadColumnBoundFromAvro(avro_value_t * record, ColumnBound * bound, void *context)
+ReadColumnBoundFromAvro(avro_value_t * record, ColumnBound *bound, void *context)
 {
 	memset(bound, '\0', sizeof(ColumnBound));
 	AvroGetInt32Field(record, "key", AVRO_FIELD_REQUIRED, &bound->column_id);

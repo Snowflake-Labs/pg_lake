@@ -22,6 +22,6 @@
 #define PG_LAKE "pg_lake"
 
 /* cached extension IDs for pg_lake */
-extern PGDLLEXPORT CachedExtensionIds * PgLake;
+extern PGDLLEXPORT CachedExtensionIds *PgLake;
 
 void		InitializePgLakeIdCache(void);

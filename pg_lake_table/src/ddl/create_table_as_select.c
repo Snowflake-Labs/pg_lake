@@ -69,7 +69,7 @@ static uint64 InsertIntoIcebergTable(Query *selectQuery, char *qualifiedTableNam
  * - CREATE TABLE name USING pg_lake_iceberg WITH (location = <>) AS VALUES ( ... )
  */
 bool
-ProcessCreateAsSelectPgLakeTable(ProcessUtilityParams * params, void *arg)
+ProcessCreateAsSelectPgLakeTable(ProcessUtilityParams *params, void *arg)
 {
 	PlannedStmt *plannedStmt = params->plannedStmt;
 

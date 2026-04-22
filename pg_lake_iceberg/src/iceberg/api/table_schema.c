@@ -31,14 +31,14 @@
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 
-static IcebergTableSchema * GetIcebergTableSchemaById(IcebergTableMetadata * metadata, int schemaId);
-static List *GetLeafFieldsForField(Field * field, int fieldId, int *level);
+static IcebergTableSchema *GetIcebergTableSchemaById(IcebergTableMetadata *metadata, int schemaId);
+static List *GetLeafFieldsForField(Field *field, int fieldId, int *level);
 
 /*
  * GetIcebergTableSchemaByIdFromTableMetadata gets the schema by id from given table metadata.
  */
 IcebergTableSchema *
-GetIcebergTableSchemaByIdFromTableMetadata(IcebergTableMetadata * metadata, int schemaId)
+GetIcebergTableSchemaByIdFromTableMetadata(IcebergTableMetadata *metadata, int schemaId)
 {
 	if (metadata == NULL)
 	{
@@ -77,7 +77,7 @@ GetIcebergTableSchemaByIdFromTableMetadata(IcebergTableMetadata * metadata, int 
  * GetCurrentIcebergTableSchema gets the current Iceberg schema from the table metadata.
  */
 IcebergTableSchema *
-GetCurrentIcebergTableSchema(IcebergTableMetadata * metadata)
+GetCurrentIcebergTableSchema(IcebergTableMetadata *metadata)
 {
 	int32_t		schemaId = metadata->current_schema_id;
 
@@ -95,7 +95,7 @@ GetCurrentIcebergTableSchema(IcebergTableMetadata * metadata)
  * GetIcebergTableSchemaById gets the schema by id from given table metadata.
  */
 static IcebergTableSchema *
-GetIcebergTableSchemaById(IcebergTableMetadata * metadata, int schemaId)
+GetIcebergTableSchemaById(IcebergTableMetadata *metadata, int schemaId)
 {
 	if (metadata == NULL)
 	{
@@ -135,7 +135,7 @@ GetIcebergTableSchemaById(IcebergTableMetadata * metadata, int schemaId)
  * from the iceberg metadata.
  */
 List *
-GetLeafFieldsFromIcebergMetadata(IcebergTableMetadata * metadata)
+GetLeafFieldsFromIcebergMetadata(IcebergTableMetadata *metadata)
 {
 	IcebergTableSchema *schema = GetCurrentIcebergTableSchema(metadata);
 
@@ -147,7 +147,7 @@ GetLeafFieldsFromIcebergMetadata(IcebergTableMetadata * metadata)
  * GetLeafFieldsForIcebergSchema returns all leaf fields for the given iceberg schema.
  */
 List *
-GetLeafFieldsForIcebergSchema(IcebergTableSchema * schema)
+GetLeafFieldsForIcebergSchema(IcebergTableSchema *schema)
 {
 	List	   *leafFields = NIL;
 
@@ -174,7 +174,7 @@ GetLeafFieldsForIcebergSchema(IcebergTableSchema * schema)
  * iceberg field id.
  */
 DataFileSchemaField *
-GetDataFileSchemaFieldById(DataFileSchema * schema, int fieldId)
+GetDataFileSchemaFieldById(DataFileSchema *schema, int fieldId)
 {
 	DataFileSchemaField *schemaField = NULL;
 
@@ -208,7 +208,7 @@ GetDataFileSchemaFieldById(DataFileSchema * schema, int fieldId)
  * The level starts from 1 for the top-level field.
  */
 static List *
-GetLeafFieldsForField(Field * field, int fieldId, int *level)
+GetLeafFieldsForField(Field *field, int fieldId, int *level)
 {
 	List	   *leafFields = NIL;
 
@@ -292,7 +292,7 @@ GetLeafFieldsForField(Field * field, int fieldId, int *level)
 * given data file schema.
 */
 IcebergTableSchema *
-RebuildIcebergSchemaFromDataFileSchema(Oid foreignTableOid, DataFileSchema * schema,
+RebuildIcebergSchemaFromDataFileSchema(Oid foreignTableOid, DataFileSchema *schema,
 									   int *last_column_id)
 {
 	size_t		totalFields = schema->nfields;

@@ -102,11 +102,11 @@ typedef struct MultiDataFileUploadDestReceiver
 	 * dest receiver).
 	 */
 	int			maxWriteTempFileSizeMB;
-}			MultiDataFileUploadDestReceiver;
+} MultiDataFileUploadDestReceiver;
 
 
-static void CreateChildDestReceiver(MultiDataFileUploadDestReceiver * self);
-static void FlushChildDestReceiver(MultiDataFileUploadDestReceiver * self);
+static void CreateChildDestReceiver(MultiDataFileUploadDestReceiver *self);
+static void FlushChildDestReceiver(MultiDataFileUploadDestReceiver *self);
 static void StartDestReceiver(DestReceiver *self, int operation, TupleDesc typeinfo);
 static bool ReceiveSlot(TupleTableSlot *slot, DestReceiver *self);
 static void ShutdownDestReceiver(DestReceiver *self);
@@ -179,7 +179,7 @@ CreateMultiDataFileDestReceiver(Oid relationId,
  * CreateChildDestReceiver creates the DestReceiver for the current file.
  */
 static void
-CreateChildDestReceiver(MultiDataFileUploadDestReceiver * self)
+CreateChildDestReceiver(MultiDataFileUploadDestReceiver *self)
 {
 	/* use the same memory context that was used to create the DestReceiver */
 	MemoryContext oldContext = MemoryContextSwitchTo(self->childContext);
@@ -205,7 +205,7 @@ CreateChildDestReceiver(MultiDataFileUploadDestReceiver * self)
  * one or more data files.
  */
 static void
-FlushChildDestReceiver(MultiDataFileUploadDestReceiver * self)
+FlushChildDestReceiver(MultiDataFileUploadDestReceiver *self)
 {
 	self->currentDest->rShutdown(self->currentDest);
 

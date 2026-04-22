@@ -44,7 +44,7 @@ typedef struct ReadDataStats
 {
 	uint64		sourceRowCount;
 	uint64		positionDeleteRowCount;
-}			ReadDataStats;
+} ReadDataStats;
 
 /*
  * ReadRowLocationMode reflects how we want to read filename and file_row_number.
@@ -59,7 +59,7 @@ typedef enum ReadRowLocationMode
 	NO_ROW_LOCATION,
 	READ_ROW_LOCATION,
 	EMIT_ROW_LOCATION
-}			ReadRowLocationMode;
+} ReadRowLocationMode;
 
 
 extern PGDLLEXPORT char *ReadDataSourceQuery(List *dataFilePaths,
@@ -68,8 +68,8 @@ extern PGDLLEXPORT char *ReadDataSourceQuery(List *dataFilePaths,
 											 CopyDataCompression sourceCompression,
 											 TupleDesc expectedDesc,
 											 List *formatOptions,
-											 DataFileSchema * schema,
-											 ReadDataStats * stats,
+											 DataFileSchema *schema,
+											 ReadDataStats *stats,
 											 int flags);
 extern PGDLLEXPORT char *TupleDescToProjectionList(TupleDesc tupleDesc,
 												   CopyDataFormat sourceFormat,

@@ -66,7 +66,7 @@ typedef enum PgLakeDDLType
 	PG_LAKE_DDL_ALTER_TABLE,
 	PG_LAKE_DDL_RENAME_TABLE,
 	PG_LAKE_DDL_SET_SCHEMA,
-}			PgLakeDDLType;
+} PgLakeDDLType;
 
 typedef struct PgLakeDDLTypeInfo
 {
@@ -82,14 +82,14 @@ typedef struct PgLakeDDLTypeInfo
 		ObjectType	renameObjectType;
 		ObjectType	alterSchemaObjectType;
 	}			ddlInfo;
-}			PgLakeDDLTypeInfo;
+} PgLakeDDLTypeInfo;
 
 typedef struct PgLakeDDL
 {
 	PgLakeDDLTypeInfo ddlTypeInfo;
 	bool		(*allowedForIceberg) (Node *, Oid relationId);
 	bool		(*allowedForWritableLake) (Node *, Oid relationId);
-}			PgLakeDDL;
+} PgLakeDDL;
 
 #define ALTER_TABLE_DDL(cmdType, icebergFunc, writableLakeFunc) \
 	{ \
@@ -223,7 +223,7 @@ static void MaybeConvertUnsupportedNumericColumnsToDoubleInAlterStmt(AlterTableS
  * message thrown by regular ProcessUtility.
  */
 bool
-ProcessAlterTable(ProcessUtilityParams * processUtilityParams, void *arg)
+ProcessAlterTable(ProcessUtilityParams *processUtilityParams, void *arg)
 {
 	PlannedStmt *plannedStmt = processUtilityParams->plannedStmt;
 
@@ -476,7 +476,7 @@ ErrorIfUnsupportedTypeAddedForIcebergTables(AlterTableStmt *alterStmt)
 
 
 bool
-ProcessAlterType(ProcessUtilityParams * processUtilityParams, void *arg)
+ProcessAlterType(ProcessUtilityParams *processUtilityParams, void *arg)
 {
 	PlannedStmt *plannedStmt = processUtilityParams->plannedStmt;
 
@@ -523,7 +523,7 @@ ProcessAlterType(ProcessUtilityParams * processUtilityParams, void *arg)
 * in an iceberg table.
 */
 bool
-ProcessEnumStatement(ProcessUtilityParams * processUtilityParams, void *arg)
+ProcessEnumStatement(ProcessUtilityParams *processUtilityParams, void *arg)
 {
 	PlannedStmt *plannedStmt = processUtilityParams->plannedStmt;
 
@@ -551,7 +551,7 @@ ProcessEnumStatement(ProcessUtilityParams * processUtilityParams, void *arg)
 * that is used in an iceberg table.
 */
 bool
-ProcessAlterTypeAttributeRename(ProcessUtilityParams * processUtilityParams, void *arg)
+ProcessAlterTypeAttributeRename(ProcessUtilityParams *processUtilityParams, void *arg)
 {
 	PlannedStmt *plannedStmt = processUtilityParams->plannedStmt;
 
@@ -624,7 +624,7 @@ RequiresNewIcebergSchema(AlterTableStmt *alterStmt)
  * throws an error if it is not.
  */
 void
-PostProcessRenameWritablePgLakeTable(ProcessUtilityParams * params, void *arg)
+PostProcessRenameWritablePgLakeTable(ProcessUtilityParams *params, void *arg)
 {
 	PlannedStmt *plannedStmt = params->plannedStmt;
 
@@ -709,7 +709,7 @@ PostProcessRenameWritablePgLakeTable(ProcessUtilityParams * params, void *arg)
  * tables and throws an error if it is not.
  */
 void
-PostProcessAlterWritablePgLakeTableSchema(ProcessUtilityParams * params, void *arg)
+PostProcessAlterWritablePgLakeTableSchema(ProcessUtilityParams *params, void *arg)
 {
 	PlannedStmt *plannedStmt = params->plannedStmt;
 
@@ -760,13 +760,13 @@ PostProcessAlterWritablePgLakeTableSchema(ProcessUtilityParams * params, void *a
 static const PgLakeDDL *
 FindPgLakeDDL(PgLakeDDLTypeInfo ddlTypeInfo)
 {
-	const		PgLakeDDL *pgLakeDDL = NULL;
+	const PgLakeDDL *pgLakeDDL = NULL;
 
 	int			pgLakeDDLIndex = 0;
 
 	for (pgLakeDDLIndex = 0; pgLakeDDLIndex < N_PG_LAKE_DDLS; pgLakeDDLIndex++)
 	{
-		const		PgLakeDDL *currentPgLakeDDL = &PgLakeDDLs[pgLakeDDLIndex];
+		const PgLakeDDL *currentPgLakeDDL = &PgLakeDDLs[pgLakeDDLIndex];
 
 		if (ddlTypeInfo.ddlType != currentPgLakeDDL->ddlTypeInfo.ddlType)
 		{
@@ -806,7 +806,7 @@ ShouldPgLakeThrowErrorForDDL(PgLakeTableType tableType,
 							 PgLakeDDLTypeInfo ddlTypeInfo,
 							 Node *arg)
 {
-	const		PgLakeDDL *pgLakeDDL = FindPgLakeDDL(ddlTypeInfo);
+	const PgLakeDDL *pgLakeDDL = FindPgLakeDDL(ddlTypeInfo);
 
 	if (pgLakeDDL == NULL)
 	{

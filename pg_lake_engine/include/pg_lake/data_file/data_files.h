@@ -38,7 +38,7 @@ typedef struct RowIdRangeMapping
 	int64		rowStartId;		/* starting row id for this range */
 	int64		rowStartNum;	/* starting row number for this range */
 	int64		numRows;		/* how many rows in this chunk */
-}			RowIdRangeMapping;
+} RowIdRangeMapping;
 
 
 /*
@@ -54,7 +54,7 @@ typedef enum DataFileContent
 	 * to match the Iceberg spec.
 	 */
 	CONTENT_EQUALITY_DELETES = 2,
-}			DataFileContent;
+} DataFileContent;
 
 /*
  * TableDataFile represents a single data file in a writable table.
@@ -76,7 +76,7 @@ typedef struct TableDataFile
 	/* partition info for the data file */
 	int32_t		partitionSpecId;
 	struct Partition *partition;
-}			TableDataFile;
+} TableDataFile;
 
 
 /*
@@ -97,7 +97,7 @@ typedef enum TableMetadataOperationType
 	DATA_FILE_ADD_ROW_ID_MAPPING = 9,
 	TABLE_PARTITION_BY = 10,
 	TABLE_CREATE = 11,
-}			TableMetadataOperationType;
+} TableMetadataOperationType;
 
 struct IcebergPartitionSpec;
 struct Partition;
@@ -118,7 +118,7 @@ typedef enum DDLSchemaEffect
 	DDL_EFFECT_NONE = 0,
 	DDL_EFFECT_ADD_SCHEMA = 1,
 	DDL_EFFECT_SET_EXISTING_SCHEMA = 2,
-}			DDLSchemaEffect;
+} DDLSchemaEffect;
 
 /*
  * TableMetadataOperation represents an operation on table metadata.
@@ -160,17 +160,17 @@ typedef struct TableMetadataOperation
 	/* for partition specs */
 	List	   *partitionSpecs;
 	int			defaultSpecId;
-}			TableMetadataOperation;
+} TableMetadataOperation;
 
 
-extern PGDLLEXPORT TableMetadataOperation * AddDataFileOperation(const char *path,
-																 DataFileContent content,
-																 DataFileStats * dataFileStats,
-																 struct Partition *partition,
-																 int32 partitionSpecId);
-extern PGDLLEXPORT TableMetadataOperation * RemoveDataFileOperation(const char *path);
-extern PGDLLEXPORT TableMetadataOperation * UpdateDeletedRowCountOperation(const char *path, int64 deletedRowCount);
-extern PGDLLEXPORT TableMetadataOperation * AddDeleteMappingOperation(const char *deleteFilePath,
-																	  const char *dataFilePath);
-extern PGDLLEXPORT TableMetadataOperation * AddRowIdMappingOperation(const char *dataFilePath,
-																	 List *rowIdRanges);
+extern PGDLLEXPORT TableMetadataOperation *AddDataFileOperation(const char *path,
+																DataFileContent content,
+																DataFileStats *dataFileStats,
+																struct Partition *partition,
+																int32 partitionSpecId);
+extern PGDLLEXPORT TableMetadataOperation *RemoveDataFileOperation(const char *path);
+extern PGDLLEXPORT TableMetadataOperation *UpdateDeletedRowCountOperation(const char *path, int64 deletedRowCount);
+extern PGDLLEXPORT TableMetadataOperation *AddDeleteMappingOperation(const char *deleteFilePath,
+																	 const char *dataFilePath);
+extern PGDLLEXPORT TableMetadataOperation *AddRowIdMappingOperation(const char *dataFilePath,
+																	List *rowIdRanges);

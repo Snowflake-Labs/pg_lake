@@ -42,15 +42,15 @@ typedef struct PGServer
 	 * simple protocol and extended protocol etc.
 	 */
 	void	   *(*startFunction) (void *);
-}			PGServer;
+} PGServer;
 
-extern int	pgserver_init(PGServer * pgServer,
+extern int	pgserver_init(PGServer *pgServer,
 						  char *unixSocketPath,
 						  char *unixSocketOwningGroup,
 						  int unixSocketPermissions,
 						  int port);
-extern int	pgserver_run(PGServer * pgServer);
-extern void pgserver_destroy(PGServer * pgServer);
+extern int	pgserver_run(PGServer *pgServer);
+extern void pgserver_destroy(PGServer *pgServer);
 
 
 #endif							/* PGDUCK_PG_SERVER_H */

@@ -22,6 +22,6 @@
 #define PG_LAKE_REPLICATION "pg_lake_replication"
 
 /* cached extension IDs for pg_lake_replication */
-extern PGDLLEXPORT CachedExtensionIds * PgLakeReplication;
+extern PGDLLEXPORT CachedExtensionIds *PgLakeReplication;
 
 void		InitializePgLakeReplicationIdCache(void);

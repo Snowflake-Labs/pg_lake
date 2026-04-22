@@ -34,7 +34,7 @@
 #define GEOMETRY_GET_TYPE(typmod) ((typmod & 0x000000FC)>>2)
 #define GEOMETRY_GET_SRID(typmod) ((((typmod) & 0x0FFFFF00) - ((typmod) & 0x10000000)) >> 8)
 
-extern PGDLLEXPORT CachedExtensionIds * Postgis;
+extern PGDLLEXPORT CachedExtensionIds *Postgis;
 
 void		InitializePostgisIdCache(void);
 

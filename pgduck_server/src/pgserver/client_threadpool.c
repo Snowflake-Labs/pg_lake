@@ -58,13 +58,13 @@ typedef struct PgClientThreadState
 	/* DuckDB connection to interrupt */
 	duckdb_connection duckdbConnection;
 
-}			PgClientThreadState;
+} PgClientThreadState;
 
 int			MaxAllowedClients;
 int			MaxThreads;
 
 /* all accesses to ClientThreadPool should happen while holding a lock */
-static PgClientThreadState * ClientThreadPool;
+static PgClientThreadState *ClientThreadPool;
 static int	ActiveClientThreadCount = 0;
 
 
@@ -127,7 +127,7 @@ pgclient_threadpool_init(int maxAllowedClients)
  * if no slot was available.
  */
 int
-pgclient_threadpool_reserve_slot(PGClient * client)
+pgclient_threadpool_reserve_slot(PGClient *client)
 {
 	int			usedThreadIndex = InvalidThreadIndex;
 	int			cancellationProcId = 0;

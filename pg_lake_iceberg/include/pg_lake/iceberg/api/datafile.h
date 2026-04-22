@@ -32,12 +32,12 @@
  *
  * The predicate function can be NULL, in which case all data files are included in the result.
  */
-typedef bool (*DataFilePredicateFn) (DataFile * dataFile);
+typedef bool (*DataFilePredicateFn) (DataFile *dataFile);
 
 /* read api */
-extern PGDLLEXPORT List *FetchDataFilesFromManifestEntry(IcebergManifestEntry * manifestEntry, DataFilePredicateFn dataFilePredicateFn);
-extern PGDLLEXPORT List *FetchDataFilesFromSnapshot(IcebergSnapshot * snapshot, ManifestPredicateFn manifestPredicateFn, ManifestEntryPredicateFn manifestEntryPredicateFn, DataFilePredicateFn dataFilePredicateFn);
-extern PGDLLEXPORT List *FetchDataFilePathsFromSnapshot(IcebergSnapshot * snapshot, ManifestPredicateFn manifestPredicateFn, ManifestEntryPredicateFn manifestEntryPredicateFn, DataFilePredicateFn dataFilePredicateFn);
-extern PGDLLEXPORT void FetchAllDataAndDeleteFilesFromCurrentSnapshot(IcebergTableMetadata * metadata, List **dataFiles, List **deleteFiles);
-extern PGDLLEXPORT void FetchAllDataAndDeleteFilePathsFromCurrentSnapshot(IcebergTableMetadata * metadata, List **dataFilePaths, List **deleteFilePaths);
-extern PGDLLEXPORT List *FetchDataFilesFromManifest(IcebergManifest * manifest, bool pathOnly, ManifestEntryPredicateFn manifestEntryPredicateFn, DataFilePredicateFn dataFilePredicateFn);
+extern PGDLLEXPORT List *FetchDataFilesFromManifestEntry(IcebergManifestEntry *manifestEntry, DataFilePredicateFn dataFilePredicateFn);
+extern PGDLLEXPORT List *FetchDataFilesFromSnapshot(IcebergSnapshot *snapshot, ManifestPredicateFn manifestPredicateFn, ManifestEntryPredicateFn manifestEntryPredicateFn, DataFilePredicateFn dataFilePredicateFn);
+extern PGDLLEXPORT List *FetchDataFilePathsFromSnapshot(IcebergSnapshot *snapshot, ManifestPredicateFn manifestPredicateFn, ManifestEntryPredicateFn manifestEntryPredicateFn, DataFilePredicateFn dataFilePredicateFn);
+extern PGDLLEXPORT void FetchAllDataAndDeleteFilesFromCurrentSnapshot(IcebergTableMetadata *metadata, List **dataFiles, List **deleteFiles);
+extern PGDLLEXPORT void FetchAllDataAndDeleteFilePathsFromCurrentSnapshot(IcebergTableMetadata *metadata, List **dataFilePaths, List **deleteFilePaths);
+extern PGDLLEXPORT List *FetchDataFilesFromManifest(IcebergManifest *manifest, bool pathOnly, ManifestEntryPredicateFn manifestEntryPredicateFn, DataFilePredicateFn dataFilePredicateFn);

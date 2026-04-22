@@ -19,10 +19,10 @@
 
 #include "pg_lake/ddl/utility_hook.h"
 
-bool		ProcessCreatePgLakeTable(ProcessUtilityParams * params, void *arg);
-bool		ProcessCreateAsSelectPgLakeTable(ProcessUtilityParams * params, void *arg);
-bool		ErrorUnsupportedCreatePgLakeTableHandler(ProcessUtilityParams * params, void *arg);
-void		CreatePgLakeTableCheckUnsupportedFeaturesPostProcess(ProcessUtilityParams * params, void *arg);
+bool		ProcessCreatePgLakeTable(ProcessUtilityParams *params, void *arg);
+bool		ProcessCreateAsSelectPgLakeTable(ProcessUtilityParams *params, void *arg);
+bool		ErrorUnsupportedCreatePgLakeTableHandler(ProcessUtilityParams *params, void *arg);
+void		CreatePgLakeTableCheckUnsupportedFeaturesPostProcess(ProcessUtilityParams *params, void *arg);
 bool		ColumnDefIsPseudoSerial(ColumnDef *column);
 List	   *GetRestrictedColumnDefList(List *columnDefList);
 
