@@ -346,6 +346,7 @@ class PgDuckServer:
             self.stderr_thread = threading.Thread(
                 target=capture_output,
                 args=(self.process.stderr, self.output_queue),
+                daemon=True,
             )
             self.stderr_thread.start()
 
