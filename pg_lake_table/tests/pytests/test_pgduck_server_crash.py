@@ -25,6 +25,7 @@ import time
 from pathlib import Path
 
 import pytest
+from helpers.server import _pgduck_servers
 from utils_pytest import *
 
 INJECTION_POINT = "pgduck-wait-for-result"
@@ -59,6 +60,24 @@ def _kill_pgduck_server():
             f"/.s.PGSQL.{server_params.PGDUCK_PORT}{suffix}"
         )
         p.unlink(missing_ok=True)
+
+
+def _restart_pgduck_server():
+    """Restart pgduck_server without handing ownership to the per-test cleanup.
+
+    setup_pgduck_server() appends the new PgDuckServer instance to
+    _pgduck_servers.  The function-scoped cleanup_test_servers autouse fixture
+    kills every instance added during the current test — which would leave the
+    server dead for all subsequent tests in the session.  Removing the instance
+    from the list after creation transfers ownership back to the session, so the
+    server stays alive until the session ends.
+    """
+    server = setup_pgduck_server()
+    try:
+        _pgduck_servers.remove(server)
+    except ValueError:
+        pass
+    return server
 
 
 def test_pgduck_crash_mid_query_no_sigsegv(
@@ -106,7 +125,7 @@ def test_pgduck_crash_mid_query_no_sigsegv(
     superuser_conn.commit()
 
     query_exception = []
-    new_server = None
+    restarted = False
 
     def run_scan():
         # Open a dedicated connection; the module-scoped pg_conn must not be
@@ -156,9 +175,9 @@ def test_pgduck_crash_mid_query_no_sigsegv(
         query_thread.join(timeout=15)
 
         # The FDW query must have failed cleanly, not silently succeeded.
-        assert query_exception, (
-            "Expected the FDW scan to fail after pgduck_server was killed"
-        )
+        assert (
+            query_exception
+        ), "Expected the FDW scan to fail after pgduck_server was killed"
 
         # PostgreSQL must still be alive.  A SIGSEGV in the FDW backend
         # would have crashed the cluster and this query would fail.
@@ -166,7 +185,8 @@ def test_pgduck_crash_mid_query_no_sigsegv(
         assert result[0]["ok"] == 1, "PostgreSQL cluster crashed after pgduck kill"
 
         # Restart pgduck_server so the rest of the test suite can continue.
-        new_server = setup_pgduck_server()
+        _restart_pgduck_server()
+        restarted = True
 
         # Verify the FDW works again now that pgduck_server is back.
         rows = run_query(f"SELECT count(*) AS n FROM {SCHEMA}.t", pg_conn)
@@ -186,9 +206,9 @@ def test_pgduck_crash_mid_query_no_sigsegv(
 
         # If pgduck_server was killed but not yet restarted, restart it so
         # the rest of the test session is not affected.
-        if new_server is None:
+        if not restarted:
             try:
-                setup_pgduck_server()
+                _restart_pgduck_server()
             except Exception:
                 pass
 
