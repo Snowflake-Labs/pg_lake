@@ -71,7 +71,7 @@ def test_create_extension_table_access_method(superuser_conn):
         SET default_table_access_method TO 'iceberg';
 
         -- Recreating might fail if we try to create metadata tables as Iceberg
-        DROP EXTENSION pg_lake_table;
+        DROP EXTENSION pg_lake_table CASCADE;
         CREATE EXTENSION pg_lake_table CASCADE;
     """,
         superuser_conn,
