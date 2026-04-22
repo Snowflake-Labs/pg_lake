@@ -27,21 +27,7 @@
 #include "utils/timestamp.h"
 #include "utils/wait_event.h"
 
-/*
- * Thin compat shim for injection points.  pg_lake_engine sits below
- * pg_lake_table in the dependency graph, so we cannot include
- * pg_lake/util/injection_points.h from there.  Inline the same three-line
- * pattern here instead.
- */
-#if PG_VERSION_NUM >= 180000
-#include "utils/injection_point.h"
-#define PG_LAKE_ENGINE_INJECTION_POINT(name) INJECTION_POINT(name, NULL)
-#elif PG_VERSION_NUM >= 170000
-#include "utils/injection_point.h"
-#define PG_LAKE_ENGINE_INJECTION_POINT(name) INJECTION_POINT(name)
-#else
-#define PG_LAKE_ENGINE_INJECTION_POINT(name) ((void) (name))
-#endif
+#include "pg_lake/util/injection_points.h"
 
 
 /*
@@ -413,7 +399,7 @@ WaitForResult(PGDuckConnection * pgDuckConnection)
 		 * can kill pgduck_server before PQconsumeInput is called, exercising
 		 * the broken-connection cleanup path.
 		 */
-		PG_LAKE_ENGINE_INJECTION_POINT("pgduck-wait-for-result");
+		INJECTION_POINT_COMPAT("pgduck-wait-for-result");
 
 		/* Sleep until there's something to do */
 		wc = WaitLatchOrSocket(MyLatch,
