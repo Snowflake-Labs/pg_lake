@@ -106,6 +106,7 @@ runs:
           
           echo "listen_addresses = 'localhost'" >> /tmp/pg_installcheck_tests/postgresql.conf
           echo "max_worker_processes = 100" >> /tmp/pg_installcheck_tests/postgresql.conf
+          echo "max_replication_slots = 100" >> /tmp/pg_installcheck_tests/postgresql.conf
           echo "pg_lake_engine.orphaned_file_retention_period=0" >> /tmp/pg_installcheck_tests/postgresql.conf
           echo "pg_lake_iceberg.autovacuum_naptime=5" >> /tmp/pg_installcheck_tests/postgresql.conf
           echo "unix_socket_directories = '/tmp/pg_installcheck_tests'" >> /tmp/pg_installcheck_tests/postgresql.conf
