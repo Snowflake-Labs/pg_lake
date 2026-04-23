@@ -49,6 +49,7 @@
 #include "access/tupdesc.h"
 #include "catalog/pg_type.h"
 #include "pg_lake/pgduck/iceberg_query_validation.h"
+#include "pg_lake/pgduck/keywords.h"
 #include "pg_lake/pgduck/map.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
@@ -357,7 +358,7 @@ AppendIcebergValidationExpression(StringInfo buf, const char *expr,
 				appendStringInfoString(buf, ", ");
 
 			const char *fieldName = NameStr(attr->attname);
-			const char *quotedField = quote_identifier(fieldName);
+			const char *quotedField = duckdb_quote_identifier(fieldName);
 			char	   *fieldExpr = psprintf("%s.%s", expr, quotedField);
 
 			appendStringInfo(buf, "%s := ", quotedField);
@@ -437,7 +438,7 @@ IcebergWrapQueryWithErrorOrClampChecks(char *query, TupleDesc tupleDesc,
 		if (!firstColumn)
 			appendStringInfoString(&wrapped, ", ");
 
-		const char *quotedName = quote_identifier(NameStr(attr->attname));
+		const char *quotedName = duckdb_quote_identifier(NameStr(attr->attname));
 
 		StringInfoData exprBuf;
 
@@ -705,7 +706,7 @@ AppendIntervalConversionExpression(StringInfo buf, const char *expr,
 				appendStringInfoString(buf, ", ");
 
 			const char *fieldName = NameStr(attr->attname);
-			const char *quotedField = quote_identifier(fieldName);
+			const char *quotedField = duckdb_quote_identifier(fieldName);
 			char	   *fieldExpr = psprintf("%s.%s", expr, quotedField);
 
 			appendStringInfo(buf, "%s := ", quotedField);
@@ -761,7 +762,7 @@ IcebergWrapQueryWithIntervalConversion(char *query, TupleDesc tupleDesc,
 		if (!firstColumn)
 			appendStringInfoString(&wrapped, ", ");
 
-		const char *quotedName = quote_identifier(NameStr(attr->attname));
+		const char *quotedName = duckdb_quote_identifier(NameStr(attr->attname));
 
 		StringInfoData exprBuf;
 
