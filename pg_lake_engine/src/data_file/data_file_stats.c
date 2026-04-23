@@ -192,6 +192,11 @@ GetDataFileStatsListFromPGResult(PGresult *result, List *leafFields, DataFileSch
 			{
 				fileStats->dataFilePath = pstrdup(resultValue);
 			}
+			else if (strcmp(resultColName, "partition_keys") == 0)
+			{
+				if (!PQgetisnull(result, resultRowIndex, resultColIndex))
+					fileStats->partitionKeysText = pstrdup(resultValue);
+			}
 		}
 
 		statsList = lappend(statsList, fileStats);

@@ -36,6 +36,7 @@
 #include "pg_lake/fdw/data_files_catalog.h"
 #include "pg_lake/fdw/row_ids.h"
 #include "pg_lake/fdw/writable_table.h"
+#include "pg_lake/fdw/partition_pushdown.h"
 #include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/iceberg/api.h"
@@ -126,7 +127,8 @@ static List *PrepareToAddQueryResultToTable(Oid relationId,
 											bool allowSplit,
 											bool isVerbose,
 											IcebergOutOfRangePolicy outOfRangePolicy,
-											bool wrapNativeIntervals);
+											bool wrapNativeIntervals,
+											List *partitionByExprs);
 static List *GetPossiblePositionDeleteFiles(Oid relationId, List *sourcePathList,
 											Snapshot snapshot);
 static void ApplyMetadataChanges(Oid relationId, List *metadataOperations);
@@ -948,7 +950,8 @@ TryCompactDataFiles(Oid relationId, TupleDesc tupleDescriptor, List *candidates,
 									   partitionSpecId, partition,
 									   hasRowIds, allowSplit, isVerbose,
 									   ICEBERG_OOR_NONE,
-									   false /* wrapNativeIntervals */ );
+									   false /* wrapNativeIntervals */ ,
+									   NIL /* partitionByExprs */ );
 
 	metadataOperations = list_concat(metadataOperations, newFileOps);
 
@@ -993,7 +996,8 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 							   int32 partitionSpecId, Partition * partition,
 							   bool queryHasRowId, bool allowSplit, bool isVerbose,
 							   IcebergOutOfRangePolicy outOfRangePolicy,
-							   bool wrapNativeIntervals)
+							   bool wrapNativeIntervals,
+							   List *partitionByExprs)
 {
 	PgLakeTableProperties properties = GetPgLakeTableProperties(relationId);
 	List	   *options = properties.options;
@@ -1004,9 +1008,15 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 	 * We currently only support splitting Parquet files, to not complicate
 	 * the row counting.
 	 */
+
+	/*
+	 * DuckDB does not support FILE_SIZE_BYTES combined with PARTITION_BY, so
+	 * disable file splitting when partitioning is used.
+	 */
 	bool		splitFilesBySize =
 		allowSplit && TargetFileSizeMB > 0 &&
-		FormatUsesParquet(properties.format);
+		FormatUsesParquet(properties.format) &&
+		partitionByExprs == NIL;
 
 	/*
 	 * When target_file_size_mb is non-0 (512MB by default), we use the
@@ -1020,6 +1030,13 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 		options = lappend(options, CreateFileSizeBytesOption(TargetFileSizeMB));
 		isPrefix = true;
 	}
+
+	/*
+	 * When PARTITION_BY is used, DuckDB treats the destination as a directory
+	 * prefix and creates subdirectories for each partition value.
+	 */
+	if (partitionByExprs != NIL)
+		isPrefix = true;
 
 	/* prepare a directory name */
 	char	   *newDataFilePath = GenerateDataFileNameForTable(relationId, !isPrefix);
@@ -1044,7 +1061,8 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 						   queryTupleDesc,
 						   leafFields,
 						   outOfRangePolicy,
-						   wrapNativeIntervals);
+						   wrapNativeIntervals,
+						   partitionByExprs);
 
 	if (statsCollector->totalRowCount == 0)
 	{
@@ -1111,30 +1129,49 @@ AddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc,
 
 	List	   *metadataOperations = NIL;
 
-	/*
-	 * COPY/INSERT .. SELECT pushdown code-path is never exercised for
-	 * partitioned tables, so partition is NULL.
-	 */
-	Assert(GetIcebergTablePartitionByOption(relationId) == NULL);
-	Partition  *partition = NULL;
-
-	/*
-	 * Our convention is to use partitionSpecId = 0 for non-partitioned
-	 * tables, and for now we don't support partitioning in COPY/INSERT ..
-	 * SELECT pushdown.
-	 */
 	int			partitionSpecId = GetCurrentSpecId(relationId);
 
-	Assert(partitionSpecId == DEFAULT_SPEC_ID);
+	/*
+	 * Check whether we can push down partitioned writes to DuckDB via
+	 * PARTITION_BY. If the table has a partition spec with all pushdownable
+	 * transforms, we pass the partition expressions to WriteQueryResultTo
+	 * which wraps the query with synthetic partition columns after
+	 * validation.
+	 */
+	List	   *partitionTransforms = CurrentPartitionTransformList(relationId);
+	List	   *partitionByExprs = GetPartitionByExpressionsForRelation(relationId);
 
 	IcebergOutOfRangePolicy outOfRangePolicy =
 		GetIcebergOutOfRangePolicyForTable(relationId);
 
 	List	   *newFileOps =
-		PrepareToAddQueryResultToTable(relationId, readQuery, queryTupleDesc,
-									   partitionSpecId, partition,
+		PrepareToAddQueryResultToTable(relationId, readQuery,
+									   queryTupleDesc,
+									   partitionSpecId,
+									   NULL /* partition */ ,
 									   queryHasRowId, allowSplit, isVerbose,
-									   outOfRangePolicy, wrapNativeIntervals);
+									   outOfRangePolicy, wrapNativeIntervals,
+									   partitionByExprs);
+
+	/*
+	 * For partitioned pushdown, each file may belong to a different
+	 * partition. Parse partition values from the file paths and update the
+	 * metadata operations.
+	 */
+	if (partitionByExprs != NIL)
+	{
+		ListCell   *newFileCell = NULL;
+
+		foreach(newFileCell, newFileOps)
+		{
+			TableMetadataOperation *addOp = lfirst(newFileCell);
+
+			addOp->partition = ParsePartitionValuesFromPartitionKeys(
+																	 addOp->dataFileStats.partitionKeysText,
+																	 partitionTransforms);
+			addOp->partitionSpecId = partitionSpecId;
+		}
+	}
 
 	metadataOperations = list_concat(metadataOperations, newFileOps);
 

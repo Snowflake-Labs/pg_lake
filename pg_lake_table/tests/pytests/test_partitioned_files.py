@@ -15,6 +15,9 @@ def test_max_open_files(superuser_conn, s3, extension, with_default_location):
 		-- only allow 1 file per partitioned writes
 		SET pg_lake_table.max_open_files_for_partitioned_write TO 1;
 
+		-- disable pushdown so the row-by-row PartitionedDestReceiver is used
+		SET pg_lake_table.enable_insert_select_pushdown TO false;
+
 		-- now, this creates 25 different files
 		INSERT INTO test_s3_copy_to_json.tbl SELECT i%2 FROM generate_series(0,24)i;
 		""",

@@ -17,12 +17,11 @@
 
 #pragma once
 
-#include "pg_lake/pgduck/type.h"
+#include "postgres.h"
 
-extern PGDLLEXPORT Oid GetOrCreatePGMapType(const char *name);
-char	   *GetDuckDBMapDefinitionForPGType(Oid postgresTypeId,
-											CopyDataFormat format);
+#include "pg_lake/iceberg/api/partitioning.h"
+#include "pg_lake/iceberg/manifest_spec.h"
 
-extern PGDLLEXPORT bool IsMapTypeOid(Oid typeId);
-extern PGDLLEXPORT PGType GetMapKeyType(Oid mapOid);
-extern PGDLLEXPORT PGType GetMapValueType(Oid mapOid);
+extern PGDLLEXPORT List *GetPartitionByExpressionsForRelation(Oid relationId);
+extern Partition * ParsePartitionValuesFromPartitionKeys(char *partitionKeysText,
+														 List *transforms);
