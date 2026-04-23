@@ -59,6 +59,7 @@
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "pg_lake/util/rel_utils.h"
+#include "pg_lake/util/table_type.h"
 
 
 typedef enum PgLakeDDLType
@@ -275,6 +276,20 @@ ProcessAlterTable(ProcessUtilityParams * processUtilityParams, void *arg)
 			 * read-only rest catalog iceberg tables.
 			 */
 			List	   *allowedOptions = list_make3("catalog_table_name", "catalog_namespace", "catalog_name");
+
+			ErrorIfUnsupportedTableOptionChange(alterStmt, allowedOptions);
+
+			return false;
+		}
+		else if (icebergCatalogType == NONE_CATALOG && IsExternalIcebergTable(relationId))
+		{
+			/*
+			 * For external read-only Iceberg foreign tables created via
+			 * SERVER pg_lake OPTIONS (path '...metadata.json'), allow
+			 * updating the path option so callers can redirect the table to a
+			 * newer snapshot without DROP + CREATE.
+			 */
+			List	   *allowedOptions = list_make1("path");
 
 			ErrorIfUnsupportedTableOptionChange(alterStmt, allowedOptions);
 
