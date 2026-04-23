@@ -4,6 +4,7 @@ from utils_pytest import *
 import json
 import re
 import random
+from pathlib import Path
 
 TABLE_NAMESPACE = "test_writable_iceberg"
 
@@ -270,3 +271,90 @@ def create_iceberg_rest_table(
     pg_conn.rollback()
     run_command(f"DROP SCHEMA {TABLE_NAMESPACE} CASCADE", pg_conn)
     pg_conn.commit()
+
+
+USER_SERVER_NAME = "crud_test_server"
+
+
+@pytest.fixture
+def create_iceberg_user_server_rest_table(
+    superuser_conn,
+    pg_conn,
+    with_default_location,
+    generate_table_name,
+    polaris_session,
+    installcheck,
+):
+    """Same as create_iceberg_rest_table but routes through a user-created
+    iceberg_catalog server instead of the built-in 'rest' GUC path."""
+    if installcheck:
+        yield
+        return
+
+    creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
+    client_id = creds["credentials"]["clientId"]
+    client_secret = creds["credentials"]["clientSecret"]
+    endpoint = f"http://{server_params.POLARIS_HOSTNAME}:{server_params.POLARIS_PORT}"
+
+    run_command(
+        f"""
+        CREATE SERVER {USER_SERVER_NAME} TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint '{endpoint}',
+                     client_id '{client_id}',
+                     client_secret '{client_secret}',
+                     location_prefix 's3://{TEST_BUCKET}')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        f"GRANT USAGE ON FOREIGN SERVER {USER_SERVER_NAME} TO PUBLIC",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    table_name = generate_table_name
+
+    run_command(f"CREATE SCHEMA {TABLE_NAMESPACE}", pg_conn)
+    run_command(
+        f"CREATE TABLE {TABLE_NAMESPACE}.{table_name} "
+        f"(drop_col_1 INT, id_old bigint, drop_col_2 INT) "
+        f"USING iceberg WITH (catalog='{USER_SERVER_NAME}')",
+        pg_conn,
+    )
+
+    run_command(
+        f"ALTER TABLE {TABLE_NAMESPACE}.{table_name} "
+        f"DROP COLUMN drop_col_2, ADD COLUMN value text, DROP COLUMN drop_col_1",
+        pg_conn,
+    )
+    run_command(
+        f"ALTER TABLE {TABLE_NAMESPACE}.{table_name} RENAME COLUMN id_old TO id",
+        pg_conn,
+    )
+    run_command(
+        f"ALTER FOREIGN TABLE {TABLE_NAMESPACE}.{table_name} "
+        f"OPTIONS (ADD autovacuum_enabled 'false')",
+        pg_conn,
+    )
+
+    pg_conn.commit()
+
+    yield table_name
+
+    pg_conn.rollback()
+    run_command(f"DROP SCHEMA {TABLE_NAMESPACE} CASCADE", pg_conn)
+    pg_conn.commit()
+    run_command(f"DROP SERVER IF EXISTS {USER_SERVER_NAME}", superuser_conn)
+    superuser_conn.commit()
+
+
+@pytest.fixture
+def create_iceberg_rest_table_parametrized(request):
+    """Dispatches to either the built-in 'rest' or user-server fixture
+    based on the indirect parameter."""
+    fixture_name = {
+        "rest": "create_iceberg_rest_table",
+        "user_server": "create_iceberg_user_server_rest_table",
+    }[request.param]
+    return request.getfixturevalue(fixture_name)

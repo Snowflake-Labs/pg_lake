@@ -21,9 +21,11 @@
 #include "access/table.h"
 #include "access/tableam.h"
 #include "access/relation.h"
+#include "catalog/dependency.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_attribute.h"
 #include "catalog/pg_class.h"
+#include "catalog/pg_foreign_server.h"
 #include "commands/dbcommands.h"
 #include "commands/defrem.h"
 #include "commands/extension.h"
@@ -90,6 +92,8 @@ static bool IsJsonOrCSVBackedTable(PgLakeTableType tableType, List *options);
 static void ErrorIfUnsupportedColumnTypeForJsonOrCSVTables(List *columnDefList);
 static void ErrorIfUsingGeometryWithoutSpatialAnalytics(List *columnDefList);
 static void ErrorIfUnsupportedLakeTable(CreateForeignTableStmt *createStmt);
+static void ErrorIfCreateForeignTableOnIcebergCatalog(CreateForeignTableStmt *createStmt);
+static void RecordIcebergCatalogServerDependency(Oid relationId, List *options);
 static void ErrorIfWritableTableWithReservedColumnName(List *columnDefList, PgLakeTableType tableType);
 static void ErrorIfInvalidFilenameColumn(List *columnDefList);
 static bool IsConflictingColumnNameForReadParquet(const char *columnName);
@@ -324,6 +328,9 @@ ErrorIfUsingGeometryWithoutSpatialAnalytics(List *columnDefList)
 *
 * We check for unsupported features in the table definition, such as unsupported URLs or unsupported
 * combinations such as writable tables without column definitions.
+*
+* Also blocks CREATE FOREIGN TABLE on iceberg_catalog servers, which have no
+* handler. Tables should be created via CREATE TABLE ... USING iceberg instead.
 */
 bool
 ErrorUnsupportedCreatePgLakeTableHandler(ProcessUtilityParams * params, void *arg)
@@ -339,6 +346,8 @@ ErrorUnsupportedCreatePgLakeTableHandler(ProcessUtilityParams * params, void *ar
 	CreateForeignTableStmt *createStmt =
 		(CreateForeignTableStmt *) plannedStmt->utilityStmt;
 
+	ErrorIfCreateForeignTableOnIcebergCatalog(createStmt);
+
 	if (!IsCreateLakeTable(createStmt))
 	{
 		/* not a lake table */
@@ -348,6 +357,69 @@ ErrorUnsupportedCreatePgLakeTableHandler(ProcessUtilityParams * params, void *ar
 	ErrorIfUnsupportedLakeTable(createStmt);
 
 	return false;
+}
+
+
+/*
+ * ErrorIfCreateForeignTableOnIcebergCatalog blocks CREATE FOREIGN TABLE
+ * when the target server uses the iceberg_catalog FDW, which has no handler.
+ */
+static void
+ErrorIfCreateForeignTableOnIcebergCatalog(CreateForeignTableStmt *createStmt)
+{
+	ForeignServer *server =
+		GetForeignServerByName(createStmt->servername, true);
+
+	if (server == NULL)
+		return;
+
+	ForeignDataWrapper *fdw = GetForeignDataWrapper(server->fdwid);
+
+	if (strcmp(fdw->fdwname, ICEBERG_CATALOG_FDW_NAME) == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot create foreign tables on iceberg_catalog server \"%s\"",
+						createStmt->servername),
+				 errhint("Use CREATE TABLE ... USING iceberg WITH (catalog = '%s') instead.",
+						 createStmt->servername)));
+}
+
+
+/*
+ * RecordIcebergCatalogServerDependency records a DEPENDENCY_NORMAL from
+ * the iceberg table to its catalog server in pg_depend, so that
+ * DROP SERVER is blocked while dependent tables exist (and
+ * DROP SERVER CASCADE drops them).
+ *
+ * Only user-created iceberg_catalog servers get a dependency entry;
+ * built-in catalog names ('rest', 'postgres', 'object_store') are not
+ * backed by a pg_foreign_server row managed by the user.
+ */
+static void
+RecordIcebergCatalogServerDependency(Oid relationId, List *options)
+{
+	char	   *catalog = GetStringOption(options, "catalog", false);
+
+	if (catalog == NULL || IsCatalogOwnedByExtension(catalog))
+		return;
+
+	ForeignServer *server = GetForeignServerByName(catalog, true);
+
+	if (server == NULL)
+		return;
+
+	ObjectAddress myself;
+	ObjectAddress referenced;
+
+	myself.classId = RelationRelationId;
+	myself.objectId = relationId;
+	myself.objectSubId = 0;
+
+	referenced.classId = ForeignServerRelationId;
+	referenced.objectId = server->serverid;
+	referenced.objectSubId = 0;
+
+	recordDependencyOn(&myself, &referenced, DEPENDENCY_NORMAL);
 }
 
 
@@ -663,6 +735,29 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 	bool		hasRestCatalogOption = HasRestCatalogTableOption(createStmt->options);
 	bool		hasObjectStoreCatalogOption = HasObjectStoreCatalogTableOption(createStmt->options);
 
+	/*
+	 * For user-created iceberg_catalog servers, verify that the current user
+	 * has USAGE privilege on the server.  Built-in catalog names ('rest',
+	 * 'postgres', 'object_store') have no backing server object and skip this
+	 * check — access is controlled by the lake_write role instead.
+	 */
+	if (hasRestCatalogOption)
+	{
+		char	   *catalog = GetStringOption(createStmt->options, "catalog", false);
+
+		if (!IsCatalogOwnedByExtension(catalog))
+		{
+			ForeignServer *server = GetForeignServerByName(catalog, false);
+			AclResult	aclresult = object_aclcheck(ForeignServerRelationId,
+													server->serverid,
+													GetUserId(),
+													ACL_USAGE);
+
+			if (aclresult != ACLCHECK_OK)
+				aclcheck_error(aclresult, OBJECT_FOREIGN_SERVER, catalog);
+		}
+	}
+
 	if (hasObjectStoreCatalogOption || hasRestCatalogOption)
 	{
 		Oid			namespaceId = RangeVarGetAndCheckCreationNamespace(createStmt->base.relation, NoLock, NULL);
@@ -734,10 +829,14 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 
 		if (hasRestCatalogOption && hasExternalCatalogReadOnlyOption)
 		{
-			ErrorIfRestNamespaceDoesNotExist(catalogName, catalogNamespace);
+			char	   *catalogOptionValue = GetStringOption(createStmt->options, "catalog", false);
+			RestCatalogOptions *opts =
+				ResolveRestCatalogOptions(catalogOptionValue);
+
+			ErrorIfRestNamespaceDoesNotExist(opts, catalogName, catalogNamespace);
 
 			metadataLocation =
-				GetMetadataLocationFromRestCatalog(catalogName, catalogNamespace, catalogTableName);
+				GetMetadataLocationFromRestCatalog(opts, catalogName, catalogNamespace, catalogTableName);
 		}
 		else if (hasObjectStoreCatalogOption && hasExternalCatalogReadOnlyOption)
 		{
@@ -752,12 +851,11 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		if (!hasExternalCatalogReadOnlyOption)
 		{
 			/*
-			 * For writable object store catalog tables, we need to continue
-			 * with the regular iceberg table creation process. We only fill
-			 * in the catalog options here. Other than that, we simply check
-			 * if user provided any catalog options. That's not allowed,
-			 * writable tables only inherit from the database name, schema
-			 * name, and table name.
+			 * Writable tables always derive catalog_name, catalog_namespace,
+			 * and catalog_table_name from the database name, schema name, and
+			 * table name.  Explicit catalog options on the table are
+			 * rejected, and the server must not have catalog_name set either,
+			 * since that would conflict with the derived values.
 			 */
 			if (catalogNamespaceProvided != NULL ||
 				catalogTableNameProvided != NULL ||
@@ -766,6 +864,19 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 				ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 								errmsg("writable %s catalog iceberg tables do not "
 									   "allow explicit catalog options", hasObjectStoreCatalogOption ? OBJECT_STORE_CATALOG_NAME : REST_CATALOG_NAME)));
+			}
+
+			if (hasRestCatalogOption)
+			{
+				char	   *catalogOptionValue = GetStringOption(createStmt->options, "catalog", false);
+				RestCatalogOptions *opts =
+					ResolveRestCatalogOptions(catalogOptionValue);
+
+				if (opts->catalogName != NULL)
+					ereport(ERROR,
+							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+							 errmsg("writable REST catalog tables cannot use a server "
+									"with catalog_name set")));
 			}
 		}
 		else if (createStmt->base.tableElts == NIL && hasExternalCatalogReadOnlyOption)
@@ -791,6 +902,10 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 			EnsureSupportedIcebergTableColumnDefinitions(createStmt->base.tableElts);
 
 			PgLakeCommonParentProcessUtility(params);
+
+			Oid			readOnlyRelId = RangeVarGetRelid(createStmt->base.relation, NoLock, false);
+
+			RecordIcebergCatalogServerDependency(readOnlyRelId, createStmt->options);
 
 			return true;
 		}
@@ -849,6 +964,18 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 										 "tables");
 	}
 
+	if (hasRestCatalogOption && locationOption == NULL &&
+		!HasReadOnlyOption(createStmt->options))
+	{
+		char	   *catalogOptionValue =
+			GetStringOption(createStmt->options, "catalog", false);
+		RestCatalogOptions *opts =
+			ResolveRestCatalogOptions(catalogOptionValue);
+
+		if (opts->locationPrefix != NULL)
+			defaultLocationPrefix = opts->locationPrefix;
+	}
+
 	/*
 	 * We will set the location by using the default location prefix when user
 	 * does not specify the location but already set default locatipn prefix.
@@ -884,6 +1011,8 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 
 	/* the table is now created, get its OID */
 	Oid			relationId = RangeVarGetRelid(createStmt->base.relation, NoLock, false);
+
+	RecordIcebergCatalogServerDependency(relationId, createStmt->options);
 
 	char	   *location;
 
@@ -942,7 +1071,11 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		 * database name. We normally encode that in GetRestCatalogName()
 		 * etc., but here we need to do it early before the table is created.
 		 */
-		RegisterNamespaceToRestCatalog(get_database_name(MyDatabaseId),
+		char	   *catalogOptionValue = GetStringOption(createStmt->options, "catalog", false);
+		RestCatalogOptions *opts =
+			ResolveRestCatalogOptions(catalogOptionValue);
+
+		RegisterNamespaceToRestCatalog(opts, get_database_name(MyDatabaseId),
 									   get_namespace_name(namespaceId));
 	}
 

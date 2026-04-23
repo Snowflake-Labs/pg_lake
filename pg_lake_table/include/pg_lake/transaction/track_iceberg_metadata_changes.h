@@ -44,3 +44,4 @@ extern PGDLLEXPORT void ResetRestCatalogRequests(void);
 extern PGDLLEXPORT HTAB *GetTrackedIcebergMetadataOperations(void);
 extern PGDLLEXPORT bool HasAnyTrackedIcebergMetadataChanges(void);
 extern PGDLLEXPORT bool IsIcebergTableCreatedInCurrentTransaction(Oid relation);
+extern PGDLLEXPORT void ValidateXactRestCatalog(Oid relationId);

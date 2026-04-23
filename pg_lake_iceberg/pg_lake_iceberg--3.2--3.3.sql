@@ -14,4 +14,3 @@ CREATE OR REPLACE VIEW pg_catalog.iceberg_tables AS
 	SELECT catalog_name, table_namespace, table_name, metadata_location, previous_metadata_location
 	FROM lake_iceberg.tables
     WHERE metadata_location IS NOT NULL;
-
