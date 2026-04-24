@@ -945,7 +945,7 @@ def test_copy_from_interval_pushdown(
 ):
     """COPY FROM with plain interval column IS pushed down and the interval
     is converted to struct(months, days, microseconds) via
-    IcebergWrapQueryWithIntervalConversion.
+    IcebergWrapQueryWithNativeTypeConversion.
     """
     import datetime
 
