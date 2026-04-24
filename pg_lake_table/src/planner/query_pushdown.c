@@ -1739,9 +1739,9 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 
 			if (IsWritableIcebergTable(scanState->insertIntoRelid))
 				queryString =
-					IcebergWrapQueryWithIntervalConversion(queryString,
-														   scanState->insertTargetTupleDesc,
-														   false);
+					IcebergWrapQueryWithNativeTypeConversion(queryString,
+															 scanState->insertTargetTupleDesc,
+															 false);
 		}
 
 		ExplainPropertyText("Vectorized SQL", queryString, es);

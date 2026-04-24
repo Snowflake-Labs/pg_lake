@@ -126,7 +126,7 @@ static List *PrepareToAddQueryResultToTable(Oid relationId,
 											bool allowSplit,
 											bool isVerbose,
 											IcebergOutOfRangePolicy outOfRangePolicy,
-											bool wrapNativeIntervals);
+											bool wrapNativeTypes);
 static List *GetPossiblePositionDeleteFiles(Oid relationId, List *sourcePathList,
 											Snapshot snapshot);
 static void ApplyMetadataChanges(Oid relationId, List *metadataOperations);
@@ -941,14 +941,15 @@ TryCompactDataFiles(Oid relationId, TupleDesc tupleDescriptor, List *candidates,
 
 	/*
 	 * compaction re-writes existing data files; values are already clamped
-	 * and intervals are already converted to struct for Iceberg
+	 * and native-only types (intervals, timetz) are already materialized in
+	 * their Iceberg shape
 	 */
 	List	   *newFileOps =
 		PrepareToAddQueryResultToTable(relationId, readFileQuery, tupleDescriptor,
 									   partitionSpecId, partition,
 									   hasRowIds, allowSplit, isVerbose,
 									   ICEBERG_OOR_NONE,
-									   false /* wrapNativeIntervals */ );
+									   false /* wrapNativeTypes */ );
 
 	metadataOperations = list_concat(metadataOperations, newFileOps);
 
@@ -993,7 +994,7 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 							   int32 partitionSpecId, Partition * partition,
 							   bool queryHasRowId, bool allowSplit, bool isVerbose,
 							   IcebergOutOfRangePolicy outOfRangePolicy,
-							   bool wrapNativeIntervals)
+							   bool wrapNativeTypes)
 {
 	PgLakeTableProperties properties = GetPgLakeTableProperties(relationId);
 	List	   *options = properties.options;
@@ -1044,7 +1045,7 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 						   queryTupleDesc,
 						   leafFields,
 						   outOfRangePolicy,
-						   wrapNativeIntervals);
+						   wrapNativeTypes);
 
 	if (statsCollector->totalRowCount == 0)
 	{
@@ -1081,17 +1082,26 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 /*
  * AddQueryResultToTable adds the result of a pgduck query to the table.
  *
- * When wrapNativeIntervals is true, DuckDB's native INTERVAL columns are
- * decomposed into STRUCT(months, days, microseconds) to match the Iceberg
- * interval representation before writing. This is needed for INSERT ..
- * SELECT and COPY FROM pushdown paths where the source data contains
- * native intervals. It should be false when the data is already in
- * Iceberg struct form (e.g. compaction, which re-writes existing Iceberg
- * data files).
+ * When wrapNativeTypes is true, DuckDB columns whose native shape does not
+ * match Iceberg's are rewritten before writing:
+ *
+ *   - INTERVAL columns are decomposed into
+ *     STRUCT(months, days, microseconds).
+ *   - TIMETZ columns are UTC-normalized and cast to TIME, because Iceberg
+ *     has no time-with-timezone type and DuckDB's implicit CAST(TIMETZ AS
+ *     TIME) drops the offset without shifting the time digits, silently
+ *     corrupting non-UTC values.
+ *
+ * This is needed for INSERT .. SELECT, COPY FROM, and snapshot/initial-copy
+ * paths where the source data is a raw DuckDB query result (e.g. heap
+ * scans or postgres_scan). It should be false when the data is already
+ * in Iceberg-native shape (e.g. compaction, which re-writes existing
+ * Iceberg data files, or CSV ingest that was already normalized during
+ * Postgres-side serialization).
  */
 int64
 AddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc,
-					  bool wrapNativeIntervals)
+					  bool wrapNativeTypes)
 {
 	Assert(queryTupleDesc != NULL && queryTupleDesc->natts > 0);
 
@@ -1134,7 +1144,7 @@ AddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc,
 		PrepareToAddQueryResultToTable(relationId, readQuery, queryTupleDesc,
 									   partitionSpecId, partition,
 									   queryHasRowId, allowSplit, isVerbose,
-									   outOfRangePolicy, wrapNativeIntervals);
+									   outOfRangePolicy, wrapNativeTypes);
 
 	metadataOperations = list_concat(metadataOperations, newFileOps);
 
