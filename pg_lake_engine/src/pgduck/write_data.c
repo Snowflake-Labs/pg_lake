@@ -104,7 +104,7 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 							  csvTupleDesc,
 							  leafFields,
 							  ICEBERG_OOR_NONE,
-							  false /* wrapNativeIntervals */ );
+							  false /* wrapNativeTypes */ );
 }
 
 
@@ -124,7 +124,7 @@ WriteQueryResultTo(char *query,
 				   TupleDesc queryTupleDesc,
 				   List *leafFields,
 				   IcebergOutOfRangePolicy outOfRangePolicy,
-				   bool wrapNativeIntervals)
+				   bool wrapNativeTypes)
 {
 	if (outOfRangePolicy != ICEBERG_OOR_NONE)
 	{
@@ -133,10 +133,10 @@ WriteQueryResultTo(char *query,
 													   queryHasRowId);
 	}
 
-	if (wrapNativeIntervals && destinationFormat == DATA_FORMAT_ICEBERG)
+	if (wrapNativeTypes && destinationFormat == DATA_FORMAT_ICEBERG)
 	{
-		query = IcebergWrapQueryWithIntervalConversion(query, queryTupleDesc,
-													   queryHasRowId);
+		query = IcebergWrapQueryWithNativeTypeConversion(query, queryTupleDesc,
+														 queryHasRowId);
 	}
 
 	StringInfoData command;

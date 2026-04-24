@@ -38,11 +38,10 @@ extern PGDLLEXPORT char *IcebergWrapQueryWithErrorOrClampChecks(char *query,
 																bool queryHasRowId);
 
 /*
- * IcebergWrapQueryWithIntervalConversion wraps a query to decompose
- * INTERVAL columns into STRUCT(months, days, microseconds) for Iceberg.
- *
- * Returns the original query unchanged if no interval columns exist.
+ * IcebergWrapQueryWithNativeTypeConversion wraps a query to rewrite
+ * columns whose native DuckDB shape does not match Iceberg's.  See the
+ * implementation for the set of rewrites and why each is required.
  */
-extern PGDLLEXPORT char *IcebergWrapQueryWithIntervalConversion(char *query,
-																TupleDesc tupleDesc,
-																bool queryHasRowId);
+extern PGDLLEXPORT char *IcebergWrapQueryWithNativeTypeConversion(char *query,
+																  TupleDesc tupleDesc,
+																  bool queryHasRowId);

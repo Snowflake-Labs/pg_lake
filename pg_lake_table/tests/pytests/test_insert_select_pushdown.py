@@ -398,7 +398,7 @@ _INSERT_SELECT_UNSUITABLE_CASES = [
     #
     # NOTE: interval cases (interval-iceberg, interval-in-array-iceberg,
     # interval-in-struct-iceberg) were removed from this list because
-    # IcebergWrapQueryWithIntervalConversion now decomposes intervals into
+    # IcebergWrapQueryWithNativeTypeConversion now decomposes intervals into
     # STRUCT(months, days, microseconds) in the pushdown query, so pushdown
     # is safe for interval columns.
 ]

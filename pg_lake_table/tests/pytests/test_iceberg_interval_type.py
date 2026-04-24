@@ -510,7 +510,7 @@ def test_interval_ctas(pg_conn, s3, with_default_location):
     CREATE TABLE ... USING iceberg AS SELECT <interval> exercises the
     INSERT..SELECT pushdown path. Intervals are stored as
     STRUCT(months, days, microseconds) in Iceberg; the pushdown query
-    wraps interval columns via IcebergWrapQueryWithIntervalConversion.
+    wraps interval columns via IcebergWrapQueryWithNativeTypeConversion.
     """
     run_command(
         """
@@ -596,7 +596,7 @@ def test_interval_insert_select(pg_conn, s3, with_default_location):
     """
     INSERT INTO iceberg_table SELECT ... exercises the pushdown path for
     interval columns. The pushdown query wraps interval columns via
-    IcebergWrapQueryWithIntervalConversion, decomposing them into
+    IcebergWrapQueryWithNativeTypeConversion, decomposing them into
     STRUCT(months, days, microseconds).
     """
     run_command(

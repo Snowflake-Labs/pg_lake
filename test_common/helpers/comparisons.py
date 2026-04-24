@@ -207,6 +207,62 @@ def check_table_size(pg_conn, table_name, count):
     assert result[0]["count"] == count
 
 
+def assert_table_contents_match(pg_conn, table_a, table_b):
+    """Assert ``table_a`` and ``table_b`` contain exactly the same multiset
+    of rows, using PostgreSQL set semantics as the source of truth.
+
+    Concretely runs:
+
+        SELECT count(*) FROM (
+            (SELECT * FROM table_a EXCEPT ALL SELECT * FROM table_b)
+            UNION ALL
+            (SELECT * FROM table_b EXCEPT ALL SELECT * FROM table_a)
+        ) diff;
+
+    and asserts the result is 0.
+
+    Why this exists: PostgreSQL knows the equality semantics of every type
+    (composites compare element-wise, arrays position-wise, etc.), which
+    makes this a stronger end-to-end check than a Python-side comparison
+    of psycopg-decoded rows.
+
+    Either ``table_a`` or ``table_b`` may be a parenthesised subquery
+    expression with an alias (e.g. ``"(SELECT id, x FROM t) s"``), so
+    callers can project / normalise columns where the bare table-vs-table
+    comparison would not say what they want.
+
+    Caveats -- ``EXCEPT ALL`` uses the btree/hash opclass of each column
+    type, NOT the bare ``=`` operator, so a few PostgreSQL types compare
+    here in ways that may surprise callers:
+
+      * ``timetz``: the ``=`` operator is by UTC instant
+        (``'12:30:00+04' = '08:30:00+00'`` is true), but the btree opclass
+        sorts on (UTC instant, then offset) and the hash opclass hashes
+        (time, zone) separately.  Two rows with the same UTC instant but
+        different offsets are treated as DIFFERENT by ``EXCEPT ALL``.  If
+        you need by-UTC-instant equality, project both sides through
+        ``(t AT TIME ZONE 'UTC')::time``.
+      * pg_lake map columns inherit array equality, which is order-
+        sensitive across map entries; if either side may have map columns
+        whose entries can be reordered (e.g. by a round-trip through
+        Iceberg storage), exclude them from the projection.
+    """
+    diff_query = (
+        "SELECT count(*) FROM ("
+        f"  (SELECT * FROM {table_a} EXCEPT ALL SELECT * FROM {table_b})"
+        "  UNION ALL"
+        f"  (SELECT * FROM {table_b} EXCEPT ALL SELECT * FROM {table_a})"
+        ") diff"
+    )
+    result = run_query(diff_query, pg_conn)
+    diff_count = result[0][0]
+    assert diff_count == 0, (
+        f"Tables {table_a} and {table_b} differ: "
+        f"{diff_count} rows in the symmetric difference.\n"
+        f"Diff query: {diff_query}"
+    )
+
+
 def normalize_bc(rows):
     """Normalize DuckDB's '(BC) between date and time' to PG's 'BC at end'.
 
