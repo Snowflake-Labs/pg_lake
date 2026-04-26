@@ -1151,7 +1151,7 @@ duckdb_query_result_send_column_metadata(DuckDBQueryResult * duckdb_query_result
 			 * We always send columnTypeId=InvalidOid, columnLength=-1,
 			 * columnTypeMod=-1 see TypeInfo struct comment for the reasoning.
 			 */
-			pq_writeint32(buf, InvalidOid);
+			pq_writeint32(buf, duckdb_type_to_pg_oid(duckType));
 			pq_writeint16(buf, -1);
 			pq_writeint32(buf, -1);
 		}

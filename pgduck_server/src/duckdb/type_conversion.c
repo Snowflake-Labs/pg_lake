@@ -343,6 +343,112 @@ find_duck_type_info(duckdb_type duckType)
 }
 
 /*
+ * duckdb_type_to_pg_oid: maps a DuckDB type to its closest PostgreSQL OID.
+ *
+ * For types with no direct PG equivalent (e.g. UBIGINT, HUGEINT, UHUGEINT,
+ * complex logical types), we fall back to TEXTOID so the client can still
+ * consume the text-serialised value we always send.
+ * 
+ * Note: consider falling back to InvalidOid (0).
+ *
+ * For DECIMAL we always return NUMERICOID regardless of width/scale;
+ * callers that need the typmod should handle that separately.
+ */
+Oid duckdb_type_to_pg_oid(duckdb_type duckType)
+{
+	switch (duckType)
+	{
+	/* ---- booleans ---- */
+	case DUCKDB_TYPE_BOOLEAN:
+		return BOOLOID;
+
+	/* ---- integers ---- */
+	case DUCKDB_TYPE_TINYINT:
+		return INT2OID; /* no INT1 in PG */
+	case DUCKDB_TYPE_SMALLINT:
+		return INT2OID;
+	case DUCKDB_TYPE_INTEGER:
+		return INT4OID;
+	case DUCKDB_TYPE_BIGINT:
+		return INT8OID;
+
+	/* unsigned — promote to next signed size that fits */
+	case DUCKDB_TYPE_UTINYINT:
+		return INT2OID;
+	case DUCKDB_TYPE_USMALLINT:
+		return INT4OID;
+	case DUCKDB_TYPE_UINTEGER:
+		return INT8OID;
+	case DUCKDB_TYPE_UBIGINT:
+		return NUMERICOID; /* no u64 in PG */
+	case DUCKDB_TYPE_HUGEINT:
+		return NUMERICOID;
+	case DUCKDB_TYPE_UHUGEINT:
+		return NUMERICOID;
+
+	/* ---- floats ---- */
+	case DUCKDB_TYPE_FLOAT:
+		return FLOAT4OID;
+	case DUCKDB_TYPE_DOUBLE:
+		return FLOAT8OID;
+
+	/* ---- arbitrary precision ---- */
+	case DUCKDB_TYPE_DECIMAL:
+		return NUMERICOID;
+
+	/* ---- text / bytes ---- */
+	case DUCKDB_TYPE_VARCHAR:
+		return TEXTOID;
+	case DUCKDB_TYPE_BLOB:
+		return BYTEAOID;
+	case DUCKDB_TYPE_BIT:
+		return BITOID;
+	case DUCKDB_TYPE_ENUM:
+		return TEXTOID; /* sent as label text */
+
+	/* ---- date / time ---- */
+	case DUCKDB_TYPE_DATE:
+		return DATEOID;
+	case DUCKDB_TYPE_TIME:
+		return TIMEOID;
+	case DUCKDB_TYPE_TIME_TZ:
+		return TIMETZOID;
+	case DUCKDB_TYPE_TIMESTAMP:
+		return TIMESTAMPOID;
+	case DUCKDB_TYPE_TIMESTAMP_S:
+		return TIMESTAMPOID;
+	case DUCKDB_TYPE_TIMESTAMP_MS:
+		return TIMESTAMPOID;
+	case DUCKDB_TYPE_TIMESTAMP_NS:
+		return TIMESTAMPOID;
+	case DUCKDB_TYPE_TIMESTAMP_TZ:
+		return TIMESTAMPTZOID;
+	case DUCKDB_TYPE_INTERVAL:
+		return INTERVALOID;
+
+	/* ---- uuid ---- */
+	case DUCKDB_TYPE_UUID:
+		return UUIDOID;
+
+	/* ---- complex / nested — serialised as text ---- */
+	/* TODO: Handle this case */
+	case DUCKDB_TYPE_LIST:
+		return TEXTOID;
+	case DUCKDB_TYPE_ARRAY:
+		return TEXTOID;
+	case DUCKDB_TYPE_STRUCT:
+		return TEXTOID;
+	case DUCKDB_TYPE_MAP:
+		return TEXTOID;
+	case DUCKDB_TYPE_UNION:
+		return TEXTOID;
+
+	default:
+		return TEXTOID;
+	}
+}
+
+/*
  * This function performs necessary cleanup of a TextOutputBuffer for handling
  * error conditions.
  */
