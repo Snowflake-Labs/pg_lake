@@ -38,11 +38,20 @@ extern PGDLLEXPORT char *IcebergWrapQueryWithErrorOrClampChecks(char *query,
 																bool queryHasRowId);
 
 /*
- * IcebergWrapQueryWithIntervalConversion wraps a query to decompose
- * INTERVAL columns into STRUCT(months, days, microseconds) for Iceberg.
+ * IcebergWrapQueryWithNativeTypeConversion wraps a query to rewrite
+ * columns whose native DuckDB shape does not match Iceberg's:
  *
- * Returns the original query unchanged if no interval columns exist.
+ *   - INTERVAL columns are decomposed into
+ *     STRUCT(months, days, microseconds).
+ *   - TIMETZ columns are UTC-normalized and cast to TIME, because
+ *     Iceberg has no time-with-timezone type and DuckDB's implicit
+ *     CAST(TIMETZ AS TIME) drops the offset without shifting the
+ *     time digits.
+ *
+ * Rewrites recurse through arrays, composites, maps, and domains.
+ *
+ * Returns the original query unchanged if no column needs conversion.
  */
-extern PGDLLEXPORT char *IcebergWrapQueryWithIntervalConversion(char *query,
-																TupleDesc tupleDesc,
-																bool queryHasRowId);
+extern PGDLLEXPORT char *IcebergWrapQueryWithNativeTypeConversion(char *query,
+																  TupleDesc tupleDesc,
+																  bool queryHasRowId);

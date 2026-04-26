@@ -56,7 +56,7 @@ extern PGDLLEXPORT StatsCollector * WriteQueryResultTo(char *query,
 													   TupleDesc queryTupleDesc,
 													   List *leafFields,
 													   IcebergOutOfRangePolicy outOfRangePolicy,
-													   bool wrapNativeIntervals);
+													   bool wrapNativeTypes);
 extern PGDLLEXPORT void AppendFields(StringInfo map, DataFileSchema * schema);
 extern PGDLLEXPORT char *TupleDescToColumnMapForWrite(TupleDesc tupleDesc, CopyDataFormat destinationFormat);
 extern PGDLLEXPORT char *TupleDescToProjectionListForWrite(TupleDesc tupleDesc,

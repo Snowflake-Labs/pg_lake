@@ -30,9 +30,17 @@
  * These checks are applied recursively through arrays, composites,
  * maps, and domains.
  *
- * IcebergWrapQueryWithIntervalConversion decomposes DuckDB INTERVAL
- * columns into STRUCT(months, days, microseconds) to match the Iceberg
- * interval representation.
+ * IcebergWrapQueryWithNativeTypeConversion rewrites DuckDB columns
+ * whose native representation differs from the Iceberg target:
+ *
+ *   - INTERVAL  -> STRUCT(months, days, microseconds) for Iceberg's
+ *                  interval representation.
+ *   - TIMETZ    -> CAST(x AT TIME ZONE 'UTC' AS TIME), because Iceberg
+ *                  has no time-with-timezone type and DuckDB's direct
+ *                  CAST(TIMETZ AS TIME) drops the offset without
+ *                  shifting the time digits to UTC.
+ *
+ * Recurses through arrays, composites, maps, and domains.
  *
  * Common validation helpers (policy resolution, IsTemporalType, temporal
  * boundary constants) live in iceberg_validation.c.
@@ -76,12 +84,13 @@ static bool AppendIcebergValidationExpression(StringInfo buf, const char *expr,
 											  IcebergOutOfRangePolicy policy,
 											  int depth);
 
-static bool TypeContainsInterval(Oid typeOid);
-static bool TupleDescHasIntervalColumn(TupleDesc tupleDesc);
+static bool TypeNeedsNativeConversion(Oid typeOid);
+static bool TupleDescHasNativeConversionColumn(TupleDesc tupleDesc);
 static void AppendIntervalStructPack(StringInfo buf, const char *expr);
-static bool AppendIntervalConversionExpression(StringInfo buf, const char *expr,
-											   Oid typeOid, int32 typmod,
-											   int depth);
+static void AppendTimeTzUtcCast(StringInfo buf, const char *expr);
+static bool AppendNativeConversionExpression(StringInfo buf, const char *expr,
+											 Oid typeOid, int32 typmod,
+											 int depth);
 
 
 /* ================================================================
@@ -474,37 +483,46 @@ IcebergWrapQueryWithErrorOrClampChecks(char *query, TupleDesc tupleDesc,
 
 
 /* ================================================================
- * Query wrapping for interval -> struct conversion
+ * Query wrapping for native-type -> Iceberg conversion
+ *
+ * Covers DuckDB types whose on-wire shape differs from Iceberg's:
+ *   - INTERVAL: split into STRUCT(months, days, microseconds).
+ *   - TIMETZ:   UTC-normalize and cast to TIME, because Iceberg has no
+ *               time-with-timezone type and DuckDB's implicit
+ *               CAST(TIMETZ AS TIME) drops the offset without shifting
+ *               the time digits.
  * ================================================================ */
 
 /*
- * TypeContainsInterval recursively checks whether a type is or contains
- * an interval, including inside arrays, composites, maps, and domains.
+ * TypeNeedsNativeConversion recursively checks whether a type is, or
+ * contains, one of the native DuckDB types that needs rewriting before
+ * being written to Iceberg (currently INTERVAL and TIMETZ).  Recurses
+ * through arrays, composites, maps, and domains.
  */
 static bool
-TypeContainsInterval(Oid typeOid)
+TypeNeedsNativeConversion(Oid typeOid)
 {
-	if (typeOid == INTERVALOID)
+	if (typeOid == INTERVALOID || typeOid == TIMETZOID)
 		return true;
 
 	Oid			elemType = get_element_type(typeOid);
 
 	if (OidIsValid(elemType))
-		return TypeContainsInterval(elemType);
+		return TypeNeedsNativeConversion(elemType);
 
 	if (IsMapTypeOid(typeOid))
 	{
 		PGType		keyType = GetMapKeyType(typeOid);
 		PGType		valType = GetMapValueType(typeOid);
 
-		return TypeContainsInterval(keyType.postgresTypeOid) ||
-			TypeContainsInterval(valType.postgresTypeOid);
+		return TypeNeedsNativeConversion(keyType.postgresTypeOid) ||
+			TypeNeedsNativeConversion(valType.postgresTypeOid);
 	}
 
 	char		typtype = get_typtype(typeOid);
 
 	if (typtype == TYPTYPE_DOMAIN)
-		return TypeContainsInterval(getBaseType(typeOid));
+		return TypeNeedsNativeConversion(getBaseType(typeOid));
 
 	if (typtype == TYPTYPE_COMPOSITE)
 	{
@@ -518,7 +536,7 @@ TypeContainsInterval(Oid typeOid)
 			if (attr->attisdropped)
 				continue;
 
-			if (TypeContainsInterval(attr->atttypid))
+			if (TypeNeedsNativeConversion(attr->atttypid))
 			{
 				found = true;
 				break;
@@ -534,7 +552,7 @@ TypeContainsInterval(Oid typeOid)
 
 
 static bool
-TupleDescHasIntervalColumn(TupleDesc tupleDesc)
+TupleDescHasNativeConversionColumn(TupleDesc tupleDesc)
 {
 	for (int i = 0; i < tupleDesc->natts; i++)
 	{
@@ -543,7 +561,7 @@ TupleDescHasIntervalColumn(TupleDesc tupleDesc)
 		if (attr->attisdropped)
 			continue;
 
-		if (TypeContainsInterval(attr->atttypid))
+		if (TypeNeedsNativeConversion(attr->atttypid))
 			return true;
 	}
 
@@ -575,21 +593,64 @@ AppendIntervalStructPack(StringInfo buf, const char *expr)
 
 
 /*
- * AppendIntervalConversionExpression recursively generates DuckDB SQL
- * that converts INTERVAL values to STRUCT(months, days, microseconds).
+ * AppendTimeTzUtcCast appends a DuckDB expression that UTC-normalizes a
+ * TIMETZ value and casts it to TIME.  This is required because DuckDB's
+ * implicit CAST(TIMETZ AS TIME) drops the offset without shifting the
+ * time digits, silently corrupting non-UTC values written to Iceberg
+ * (which has no time-with-timezone type).
+ *
+ * The expression we emit deliberately casts the input to TIMETZ first so
+ * that it is safe for every source DuckDB can present for a Postgres
+ * TIMETZ column:
+ *
+ *   - Top-level TIMETZ columns from read_iceberg / postgres_scan arrive
+ *     as TIME WITH TIME ZONE, where the inner cast is a no-op and AT
+ *     TIME ZONE 'UTC' shifts the digits to UTC as required.
+ *   - TIMETZ fields living *inside* an Iceberg composite arrive as plain
+ *     TIME (Parquet has no time-with-tz type and DuckDB does not recast
+ *     struct fields back to TIMETZ on read).  For these, DuckDB has no
+ *     timezone(VARCHAR, TIME) overload, so a bare "AT TIME ZONE 'UTC'"
+ *     would produce a binder error.  Casting to TIMETZ first lifts the
+ *     value to +00 (semantically a no-op, since pg_lake already stored
+ *     those digits as UTC), after which the outer AT TIME ZONE 'UTC' /
+ *     CAST AS TIME sequence is well-typed.
+ *
+ * The net effect is the same correct UTC-normalized TIME in both cases.
+ */
+static void
+AppendTimeTzUtcCast(StringInfo buf, const char *expr)
+{
+	appendStringInfo(buf,
+					 "CAST(CAST((%s) AS TIMETZ) AT TIME ZONE 'UTC' AS TIME)",
+					 expr);
+}
+
+
+/*
+ * AppendNativeConversionExpression recursively generates DuckDB SQL
+ * that converts native-only types to their Iceberg-compatible shape:
+ *   - INTERVAL -> STRUCT(months, days, microseconds)
+ *   - TIMETZ   -> CAST(CAST(<expr> AS TIMETZ) AT TIME ZONE 'UTC' AS TIME)
+ *
  * Handles scalars, arrays (list_transform), composites (struct_pack),
  * maps (map_from_entries + list_transform), and domains.
  *
  * Returns true if a transformed expression was written to buf.
  */
 static bool
-AppendIntervalConversionExpression(StringInfo buf, const char *expr,
-								   Oid typeOid, int32 typmod,
-								   int depth)
+AppendNativeConversionExpression(StringInfo buf, const char *expr,
+								 Oid typeOid, int32 typmod,
+								 int depth)
 {
 	if (typeOid == INTERVALOID)
 	{
 		AppendIntervalStructPack(buf, expr);
+		return true;
+	}
+
+	if (typeOid == TIMETZOID)
+	{
+		AppendTimeTzUtcCast(buf, expr);
 		return true;
 	}
 
@@ -598,14 +659,14 @@ AppendIntervalConversionExpression(StringInfo buf, const char *expr,
 
 	if (OidIsValid(elemType))
 	{
-		if (!TypeContainsInterval(elemType))
+		if (!TypeNeedsNativeConversion(elemType))
 			return false;
 
 		char	   *lambdaVar = psprintf("_x%d", depth);
 
 		appendStringInfo(buf, "list_transform(%s, %s -> ", expr, lambdaVar);
-		AppendIntervalConversionExpression(buf, lambdaVar, elemType, -1,
-										   depth + 1);
+		AppendNativeConversionExpression(buf, lambdaVar, elemType, -1,
+										 depth + 1);
 		appendStringInfoChar(buf, ')');
 		return true;
 	}
@@ -615,10 +676,10 @@ AppendIntervalConversionExpression(StringInfo buf, const char *expr,
 	{
 		PGType		keyType = GetMapKeyType(typeOid);
 		PGType		valType = GetMapValueType(typeOid);
-		bool		keyHasInterval = TypeContainsInterval(keyType.postgresTypeOid);
-		bool		valHasInterval = TypeContainsInterval(valType.postgresTypeOid);
+		bool		keyNeedsConversion = TypeNeedsNativeConversion(keyType.postgresTypeOid);
+		bool		valNeedsConversion = TypeNeedsNativeConversion(valType.postgresTypeOid);
 
-		if (!keyHasInterval && !valHasInterval)
+		if (!keyNeedsConversion && !valNeedsConversion)
 			return false;
 
 		char	   *lambdaVar = psprintf("_x%d", depth);
@@ -629,11 +690,11 @@ AppendIntervalConversionExpression(StringInfo buf, const char *expr,
 
 		char	   *keyExpr = psprintf("%s.key", lambdaVar);
 
-		if (keyHasInterval)
-			AppendIntervalConversionExpression(buf, keyExpr,
-											   keyType.postgresTypeOid,
-											   keyType.postgresTypeMod,
-											   depth + 1);
+		if (keyNeedsConversion)
+			AppendNativeConversionExpression(buf, keyExpr,
+											 keyType.postgresTypeOid,
+											 keyType.postgresTypeMod,
+											 depth + 1);
 		else
 			appendStringInfoString(buf, keyExpr);
 
@@ -641,11 +702,11 @@ AppendIntervalConversionExpression(StringInfo buf, const char *expr,
 
 		char	   *valExpr = psprintf("%s.value", lambdaVar);
 
-		if (valHasInterval)
-			AppendIntervalConversionExpression(buf, valExpr,
-											   valType.postgresTypeOid,
-											   valType.postgresTypeMod,
-											   depth + 1);
+		if (valNeedsConversion)
+			AppendNativeConversionExpression(buf, valExpr,
+											 valType.postgresTypeOid,
+											 valType.postgresTypeMod,
+											 depth + 1);
 		else
 			appendStringInfoString(buf, valExpr);
 
@@ -660,8 +721,8 @@ AppendIntervalConversionExpression(StringInfo buf, const char *expr,
 	{
 		Oid			baseType = getBaseTypeAndTypmod(typeOid, &typmod);
 
-		return AppendIntervalConversionExpression(buf, expr, baseType, typmod,
-												  depth);
+		return AppendNativeConversionExpression(buf, expr, baseType, typmod,
+												depth);
 	}
 
 	/* composite types: transform fields via struct_pack */
@@ -677,7 +738,7 @@ AppendIntervalConversionExpression(StringInfo buf, const char *expr,
 			if (attr->attisdropped)
 				continue;
 
-			if (TypeContainsInterval(attr->atttypid))
+			if (TypeNeedsNativeConversion(attr->atttypid))
 			{
 				anyFieldNeedsTransform = true;
 				break;
@@ -710,10 +771,10 @@ AppendIntervalConversionExpression(StringInfo buf, const char *expr,
 
 			appendStringInfo(buf, "%s := ", quotedField);
 
-			if (!AppendIntervalConversionExpression(buf, fieldExpr,
-													attr->atttypid,
-													attr->atttypmod,
-													depth))
+			if (!AppendNativeConversionExpression(buf, fieldExpr,
+												  attr->atttypid,
+												  attr->atttypmod,
+												  depth))
 				appendStringInfoString(buf, fieldExpr);
 
 			firstField = false;
@@ -729,18 +790,30 @@ AppendIntervalConversionExpression(StringInfo buf, const char *expr,
 
 
 /*
- * IcebergWrapQueryWithIntervalConversion wraps a query string with an
- * outer SELECT that decomposes INTERVAL columns into
- * STRUCT(months BIGINT, days BIGINT, microseconds BIGINT) to match
- * Iceberg's interval representation.
+ * IcebergWrapQueryWithNativeTypeConversion wraps a query string with an
+ * outer SELECT that rewrites columns whose native DuckDB shape does not
+ * match Iceberg's:
  *
- * Returns the original query unchanged if no interval columns exist.
+ *   - INTERVAL columns are decomposed into
+ *     STRUCT(months BIGINT, days BIGINT, microseconds BIGINT).
+ *   - TIMETZ columns are UTC-normalized and cast to TIME
+ *     (CAST(CAST(<expr> AS TIMETZ) AT TIME ZONE 'UTC' AS TIME)),
+ *     because Iceberg has no time-with-timezone type and DuckDB's
+ *     direct CAST(TIMETZ AS TIME) drops the offset without shifting
+ *     the time digits.  The inner cast to TIMETZ keeps the outer
+ *     AT TIME ZONE 'UTC' well-typed when the source is already plain
+ *     TIME (e.g. a TIMETZ field read back from an Iceberg composite
+ *     column, where the Parquet-level type is TIME).
+ *
+ * Rewrites recurse through arrays, composites, maps, and domains.
+ *
+ * Returns the original query unchanged if no column needs conversion.
  */
 char *
-IcebergWrapQueryWithIntervalConversion(char *query, TupleDesc tupleDesc,
-									   bool queryHasRowId)
+IcebergWrapQueryWithNativeTypeConversion(char *query, TupleDesc tupleDesc,
+										 bool queryHasRowId)
 {
-	if (tupleDesc == NULL || !TupleDescHasIntervalColumn(tupleDesc))
+	if (tupleDesc == NULL || !TupleDescHasNativeConversionColumn(tupleDesc))
 		return query;
 
 	StringInfoData wrapped;
@@ -767,9 +840,9 @@ IcebergWrapQueryWithIntervalConversion(char *query, TupleDesc tupleDesc,
 
 		initStringInfo(&exprBuf);
 
-		if (AppendIntervalConversionExpression(&exprBuf, quotedName,
-											   attr->atttypid,
-											   attr->atttypmod, 0))
+		if (AppendNativeConversionExpression(&exprBuf, quotedName,
+											 attr->atttypid,
+											 attr->atttypmod, 0))
 		{
 			appendStringInfo(&wrapped, "%s AS %s", exprBuf.data, quotedName);
 		}
@@ -790,7 +863,7 @@ IcebergWrapQueryWithIntervalConversion(char *query, TupleDesc tupleDesc,
 		appendStringInfoString(&wrapped, "_row_id");
 	}
 
-	appendStringInfo(&wrapped, " FROM (%s) AS __iceberg_interval", query);
+	appendStringInfo(&wrapped, " FROM (%s) AS __iceberg_native_conv", query);
 
 	return wrapped.data;
 }
