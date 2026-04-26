@@ -197,6 +197,18 @@ DescribeColumnsFromIcebergMetadataURI(char *uri, bool emitFilename)
 
 		ColumnDef  *column = makeColumnDef(columnName, typeOid, typemod, collationId);
 
+		/*
+		 * Propagate the iceberg "required" flag to postgres NOT NULL so the
+		 * empty-column-list auto-detect form
+		 *   CREATE TABLE foo () USING iceberg WITH (catalog='rest', read_only=true, ...)
+		 * doesn't trip ErrorIfSchemasDoNotMatch's
+		 *   columnMapping->attNotNull != icebergField->required
+		 * check at projection time. Without this, every auto-detected column
+		 * is nullable while the iceberg schema may have required fields,
+		 * forcing users to enumerate columns explicitly with NOT NULL.
+		 */
+		column->is_not_null = field->required;
+
 		columns = lappend(columns, column);
 	}
 
