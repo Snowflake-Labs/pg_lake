@@ -380,7 +380,7 @@ Oid duckdb_type_to_pg_oid(duckdb_type duckType)
 	case DUCKDB_TYPE_UINTEGER:
 		return INT8OID;
 	case DUCKDB_TYPE_UBIGINT:
-		return NUMERICOID; /* no u64 in PG */
+		return INT8OID; /* no u64 in PG, but this is the closest consistent choice */
 	case DUCKDB_TYPE_HUGEINT:
 		return NUMERICOID;
 	case DUCKDB_TYPE_UHUGEINT:
@@ -444,7 +444,7 @@ Oid duckdb_type_to_pg_oid(duckdb_type duckType)
 		return TEXTOID;
 
 	default:
-		return TEXTOID;
+		return InvalidOid;
 	}
 }
 
