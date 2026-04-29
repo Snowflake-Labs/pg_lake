@@ -26,7 +26,7 @@
  *     out-of-range temporal values and nested-list flattening.
  *   - IcebergWrapQueryWithNativeTypeConversion: rewrites DuckDB columns
  *     whose native representation differs from the Iceberg target
- *     (INTERVAL, TIMETZ).
+ *     (INTERVAL, TIMETZ, geometry).
  *
  * Both recurse through arrays, composites, maps, and domains.
  *
@@ -42,6 +42,7 @@
 
 #include "access/tupdesc.h"
 #include "catalog/pg_type.h"
+#include "pg_lake/extensions/postgis.h"
 #include "pg_lake/pgduck/iceberg_query_validation.h"
 #include "pg_lake/pgduck/map.h"
 #include "utils/builtins.h"
@@ -476,13 +477,16 @@ IcebergWrapQueryWithErrorOrClampChecks(char *query, TupleDesc tupleDesc,
 /*
  * TypeNeedsNativeConversion recursively checks whether a type is, or
  * contains, one of the native DuckDB types that needs rewriting before
- * being written to Iceberg (currently INTERVAL and TIMETZ).  Recurses
- * through arrays, composites, maps, and domains.
+ * being written to Iceberg (currently INTERVAL, TIMETZ, and geometry).
+ * Recurses through arrays, composites, maps, and domains.
  */
 static bool
 TypeNeedsNativeConversion(Oid typeOid)
 {
 	if (typeOid == INTERVALOID || typeOid == TIMETZOID)
+		return true;
+
+	if (IsGeometryTypeId(typeOid))
 		return true;
 
 	Oid			elemType = get_element_type(typeOid);
@@ -603,8 +607,9 @@ AppendTimeTzUtcCast(StringInfo buf, const char *expr)
 /*
  * AppendNativeConversionExpression recursively generates DuckDB SQL
  * that converts native-only types to their Iceberg-compatible shape:
- *   - INTERVAL -> STRUCT(months, days, microseconds)
- *   - TIMETZ   -> CAST(CAST(<expr> AS TIMETZ) AT TIME ZONE 'UTC' AS TIME)
+ *   - INTERVAL  -> STRUCT(months, days, microseconds)
+ *   - TIMETZ    -> CAST(CAST(<expr> AS TIMETZ) AT TIME ZONE 'UTC' AS TIME)
+ *   - geometry  -> ST_AsWKB(<expr>)
  *
  * Handles scalars, arrays (list_transform), composites (struct_pack),
  * maps (map_from_entries + list_transform), and domains.
@@ -625,6 +630,20 @@ AppendNativeConversionExpression(StringInfo buf, const char *expr,
 	if (typeOid == TIMETZOID)
 	{
 		AppendTimeTzUtcCast(buf, expr);
+		return true;
+	}
+
+	/*
+	 * Geometry from postgres_scan arrives as WKB_BLOB (DuckDB's internal
+	 * geometry representation).  Writing it directly to Parquet stores
+	 * DuckDB's internal format, which ST_GeomFromWKB cannot parse on read.
+	 * Explicitly converting via ST_AsWKB produces standard WKB that the read
+	 * path expects.  Geometry inside arrays or composites is unsupported (see
+	 * type_validation.c), so only top-level columns reach here.
+	 */
+	if (IsGeometryTypeId(typeOid))
+	{
+		appendStringInfo(buf, "ST_AsWKB(%s)", expr);
 		return true;
 	}
 
@@ -778,6 +797,9 @@ AppendNativeConversionExpression(StringInfo buf, const char *expr,
  *     AT TIME ZONE 'UTC' well-typed when the source is already plain
  *     TIME (e.g. a TIMETZ field read back from an Iceberg composite
  *     column, where the Parquet-level type is TIME).
+ *   - Geometry columns are converted to standard WKB via ST_AsWKB().
+ *     Without this, DuckDB writes its internal geometry representation
+ *     to Parquet, which ST_GeomFromWKB cannot parse on read.
  *
  * Rewrites recurse through arrays, composites, maps, and domains.
  *
