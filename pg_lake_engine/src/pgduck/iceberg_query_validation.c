@@ -634,16 +634,18 @@ AppendNativeConversionExpression(StringInfo buf, const char *expr,
 	}
 
 	/*
-	 * Geometry from postgres_scan arrives as WKB_BLOB (DuckDB's internal
-	 * geometry representation).  Writing it directly to Parquet stores
-	 * DuckDB's internal format, which ST_GeomFromWKB cannot parse on read.
-	 * Explicitly converting via ST_AsWKB produces standard WKB that the read
-	 * path expects.  Geometry inside arrays or composites is unsupported (see
-	 * type_validation.c), so only top-level columns reach here.
+	 * Geometry from postgres_scan arrives as WKB_BLOB (a BLOB with the
+	 * "WKB_BLOB" alias), not DuckDB's native GEOMETRY type.  ST_AsWKB
+	 * requires GEOMETRY, so we cast first.  The full expression
+	 * ST_AsWKB(col::GEOMETRY) parses the WKB_BLOB into a proper GEOMETRY,
+	 * then serializes it as standard WKB for Parquet.  Without this, the blob
+	 * is written as-is and ST_GeomFromWKB cannot parse it on read. Geometry
+	 * inside arrays or composites is unsupported (see type_validation.c), so
+	 * only top-level columns reach here.
 	 */
 	if (IsGeometryTypeId(typeOid))
 	{
-		appendStringInfo(buf, "ST_AsWKB(%s)", expr);
+		appendStringInfo(buf, "ST_AsWKB(%s::GEOMETRY)", expr);
 		return true;
 	}
 
