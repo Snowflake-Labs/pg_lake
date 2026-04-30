@@ -135,6 +135,13 @@ static List *CreateNewManifestsForDeletedEntries(List *allManifestEntries, List 
 												 const char *snapshotUUID, int *manifestIndex,
 												 int partitionSpecId, List *partitionTransforms,
 												 IcebergManifestContentType contentType);
+static bool RewriteManifestForRemoval(IcebergManifest * manifest,
+									  List *removedEntries, bool removeAllEntries,
+									  int64_t snapshotId, IcebergSnapshot * newSnapshot,
+									  const char *metadataLocation, const char *snapshotUUID,
+									  int *manifestIndex, List *allTransforms,
+									  List **finalDataManifestList,
+									  List **finalDeleteManifestList);
 static IcebergSnapshot * CopyIcebergSnapshot(IcebergSnapshot * src);
 static Property * CopyPropertiesArray(Property * src, int length);
 static HTAB *MakePartitionManifestEntryHash(void);
@@ -971,36 +978,14 @@ FinalizeNewSnapshot(IcebergSnapshotBuilder * builder, Oid relationId, const char
 		foreach(manifestCell, manifestList)
 		{
 			IcebergManifest *manifest = lfirst(manifestCell);
-			IcebergManifestContentType content = manifest->content;
-			List	   *manifestEntries =
-				ReadManifestEntries(manifest->manifest_path);
 
-			List	   *deletedManifestEntries =
-				FindAndAdjustDeletedManifestEntries(manifest, manifestEntries, removedEntries,
-													snapshotId, removeAllEntries);
-
-			if (deletedManifestEntries != NIL)
+			if (RewriteManifestForRemoval(manifest, removedEntries, removeAllEntries,
+										  snapshotId, newSnapshot,
+										  metadataLocation, snapshotUUID,
+										  &manifestIndex, allTransforms,
+										  &finalDataManifestList,
+										  &finalDeleteManifestList))
 			{
-				List	   *newManifests =
-					CreateNewManifestsForDeletedEntries(manifestEntries, deletedManifestEntries,
-														newSnapshot, metadataLocation, snapshotUUID,
-														&manifestIndex, manifest->partition_spec_id,
-														allTransforms, content);
-
-				/* remove the old manifest and add the new ones */
-				if (content == ICEBERG_MANIFEST_FILE_CONTENT_DATA)
-				{
-					finalDataManifestList = list_difference_ptr(finalDataManifestList, list_make1(manifest));
-					finalDataManifestList = list_concat(finalDataManifestList, newManifests);
-				}
-				else if (content == ICEBERG_MANIFEST_FILE_CONTENT_DELETES)
-				{
-					finalDeleteManifestList = list_difference_ptr(finalDeleteManifestList, list_make1(manifest));
-					finalDeleteManifestList = list_concat(finalDeleteManifestList, newManifests);
-				}
-				else
-					pg_unreachable();
-
 				createNewSnapshot = true;
 			}
 		}
@@ -1111,6 +1096,104 @@ CreateNewManifestsForDeletedEntries(List *allManifestEntries, List *deletedManif
 								 remainingManifestPath, remainingManifestEntries);
 
 	return list_make2(deleteManifest, remainingManifest);
+}
+
+
+/*
+ * RewriteManifestForRemoval marks the rows belonging to removedEntries (or
+ * every row if removeAllEntries is true) as deleted in the given manifest
+ * and, if any rows were affected, splices the resulting new manifests into
+ * finalDataManifestList / finalDeleteManifestList in place of the old one.
+ *
+ * Returns true iff the manifest was rewritten.
+ *
+ *
+ * Memory management:
+ *
+ * Reading one manifest's entries plus its Partition Field Map can take tens
+ * of MB.  When the caller iterates over thousands of manifests in a single
+ * DELETE, leaving that memory in the caller's context accumulates into
+ * multi-GB peaks.  This function isolates the per-manifest memory in a
+ * private context that is created and destroyed inside the function:
+ *
+ *   - The READ phase (entries + partition field map) is allocated in
+ *     perManifestCtx, which is destroyed before returning.
+ *
+ *   - The WRITE phase (UploadIcebergManifestToURI, the new IcebergManifest
+ *     headers) is run in callerCtx.  This is required, not just convenient:
+ *     UploadIcebergManifestToURI -> GenerateTempFileName registers a
+ *     callback on the current memory context that unlinks the local temp
+ *     file when that context is reset.  The actual S3 upload is deferred
+ *     until commit, so the callback must outlive this function.  Running
+ *     the WRITE phase in callerCtx also means the resulting IcebergManifest
+ *     headers are already in callerCtx and can be appended to the final
+ *     lists directly.
+ *
+ * Callers must not be in perManifestCtx when calling this function -- it
+ * unconditionally restores CurrentMemoryContext to whatever it was on
+ * entry before returning.
+ */
+static bool
+RewriteManifestForRemoval(IcebergManifest * manifest,
+						  List *removedEntries, bool removeAllEntries,
+						  int64_t snapshotId, IcebergSnapshot * newSnapshot,
+						  const char *metadataLocation, const char *snapshotUUID,
+						  int *manifestIndex, List *allTransforms,
+						  List **finalDataManifestList,
+						  List **finalDeleteManifestList)
+{
+	bool		rewritten = false;
+
+	MemoryContext perManifestCtx =
+		AllocSetContextCreate(CurrentMemoryContext,
+							  "Iceberg per-manifest memory",
+							  ALLOCSET_DEFAULT_SIZES);
+
+	/* read the manifest's entries into per-manifest memory */
+	MemoryContext callerCtx = MemoryContextSwitchTo(perManifestCtx);
+
+	List	   *manifestEntries = ReadManifestEntries(manifest->manifest_path);
+
+	List	   *deletedManifestEntries =
+		FindAndAdjustDeletedManifestEntries(manifest, manifestEntries, removedEntries,
+											snapshotId, removeAllEntries);
+
+	if (deletedManifestEntries != NIL)
+	{
+		/* write the new manifests in caller memory (see comment above) */
+		MemoryContextSwitchTo(callerCtx);
+
+		IcebergManifestContentType content = manifest->content;
+
+		List	   *newManifests =
+			CreateNewManifestsForDeletedEntries(manifestEntries, deletedManifestEntries,
+												newSnapshot, metadataLocation, snapshotUUID,
+												manifestIndex, manifest->partition_spec_id,
+												allTransforms, content);
+
+		if (content == ICEBERG_MANIFEST_FILE_CONTENT_DATA)
+		{
+			*finalDataManifestList =
+				list_difference_ptr(*finalDataManifestList, list_make1(manifest));
+			*finalDataManifestList =
+				list_concat(*finalDataManifestList, newManifests);
+		}
+		else if (content == ICEBERG_MANIFEST_FILE_CONTENT_DELETES)
+		{
+			*finalDeleteManifestList =
+				list_difference_ptr(*finalDeleteManifestList, list_make1(manifest));
+			*finalDeleteManifestList =
+				list_concat(*finalDeleteManifestList, newManifests);
+		}
+		else
+			pg_unreachable();
+
+		rewritten = true;
+	}
+
+	MemoryContextSwitchTo(callerCtx);
+	MemoryContextDelete(perManifestCtx);
+	return rewritten;
 }
 
 
