@@ -86,6 +86,7 @@ static void PgLakeIcebergVacuumForTables(MemoryContext outOfTransactionMemoryCon
 static bool IsVacuumLakeTable(VacuumStmt *vacuumStmt);
 static List *GetAutoVacuumEnabledTables(List *relationIdList);
 static bool IsAutoVacuumEnabled(Oid relationId);
+static bool IsAutoVacuumCompactDataFilesEnabled(Oid relationId);
 static void VacuumLakeTables(ProcessUtilityParams * utilityParams);
 static List *GetPgLakePartitionIds(Oid relationId);
 static bool ProcessVacuumPgLakeIcebergFlag(VacuumStmt *vacuumStmt);
@@ -95,7 +96,8 @@ static void VacuumRemoveDeletionQueueRecords(Oid relationId, bool isFull, bool i
 static void VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose);
 static void VacuumRegisterMissingFields(Oid relationId);
 static void PgLakeIcebergVacuumForRelation(Oid relationId, bool firstLoop);
-static void VacuumTableInSeparateXacts(Oid relationId, bool isFull, bool isVerbose);
+static void VacuumTableInSeparateXacts(Oid relationId, bool isFull, bool isVerbose,
+									   bool isAutoVacuum);
 static void VacuumDroppedPgLakeIcebergTables(VacuumStmt *vacuumStmt);
 static char *GetMetadataLocationPrefixForRelationId(Oid relationId);
 static void VacuumConsumeTrackedIcebergMetadataChanges(bool isVerbose);
@@ -289,7 +291,8 @@ PgLakeIcebergVacuumForRelation(Oid relationId, bool firstLoop)
 	bool		isVerbose = false;
 
 	/* main VACUUM logic for the iceberg table */
-	VacuumTableInSeparateXacts(relationId, isFull, isVerbose);
+	VacuumTableInSeparateXacts(relationId, isFull, isVerbose,
+							    /* isAutoVacuum */ true);
 
 	TimestampTz endTime = GetCurrentTimestamp();
 
@@ -342,6 +345,27 @@ IsAutoVacuumEnabled(Oid relationId)
 	DefElem    *autoVacuumOption = GetOption(options, "autovacuum_enabled");
 
 	return autoVacuumOption != NULL ? defGetBoolean(autoVacuumOption) : true;
+}
+
+/*
+ * IsAutoVacuumCompactDataFilesEnabled returns whether the autovacuum worker
+ * should compact data files for the given iceberg table.  When false, the
+ * autovacuum worker still runs every other vacuum stage (manifest merge,
+ * deletion-queue drain, orphan-file cleanup, field-id backfill); only the
+ * data-file rewrite is skipped.
+ *
+ * This option is consulted only on the autovacuum path.  Manual
+ * VACUUM (ICEBERG) tbl always compacts, mirroring the behavior of the
+ * heap-level autovacuum_enabled storage parameter.
+ */
+static bool
+IsAutoVacuumCompactDataFilesEnabled(Oid relationId)
+{
+	ForeignTable *foreignTable = GetForeignTable(relationId);
+	List	   *options = foreignTable->options;
+	DefElem    *opt = GetOption(options, "autovacuum_compact_data_files");
+
+	return opt != NULL ? defGetBoolean(opt) : true;
 }
 
 /*
@@ -572,7 +596,8 @@ VacuumLakeTables(ProcessUtilityParams * utilityParams)
 			continue;
 		}
 
-		VacuumTableInSeparateXacts(relationId, isFull, isVerbose);
+		VacuumTableInSeparateXacts(relationId, isFull, isVerbose,
+								    /* isAutoVacuum */ false);
 	}
 }
 
@@ -608,15 +633,28 @@ GetPgLakePartitionIds(Oid relationId)
  * progress.
  *
  * It currently performs the following operations:
- * 1. Compact data files
+ * 1. Compact data files (only when isAutoVacuum is false, or when the
+ *    autovacuum_compact_data_files table option is true; default true)
  * 2. Expire old snapshots & merge manifests
  * 3. Remove unreferenced files
  * 4. For pre-2.1 tables, register fields in field_id_mappings
+ *
+ * isAutoVacuum identifies whether the caller is the pg_lake autovacuum
+ * worker.  Only the autovacuum path consults the
+ * autovacuum_compact_data_files table option; manual VACUUM (ICEBERG) tbl
+ * always compacts data files (matching the semantics of PostgreSQL's
+ * autovacuum_enabled storage parameter for heap tables).
  */
 static void
-VacuumTableInSeparateXacts(Oid relationId, bool isFull, bool isVerbose)
+VacuumTableInSeparateXacts(Oid relationId, bool isFull, bool isVerbose,
+						   bool isAutoVacuum)
 {
-	VacuumCompactDataFiles(relationId, isFull, isVerbose);
+	bool		compactDataFiles =
+		!isAutoVacuum || IsAutoVacuumCompactDataFilesEnabled(relationId);
+
+	if (compactDataFiles)
+		VacuumCompactDataFiles(relationId, isFull, isVerbose);
+
 	VacuumCompactMetadata(relationId, isVerbose);
 	VacuumRemoveDeletionQueueRecords(relationId, isFull, isVerbose);
 	VacuumRemoveInProgressFiles(relationId, isFull, isVerbose);
