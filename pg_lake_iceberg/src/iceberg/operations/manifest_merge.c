@@ -36,6 +36,7 @@
 #include "common/hashfn.h"
 #include "nodes/pg_list.h"
 #include "utils/hsearch.h"
+#include "utils/memutils.h"
 
 
 
@@ -495,6 +496,36 @@ RemoveDeletedManifestEntriesInternal(IcebergManifest * *manifest, IcebergSnapsho
 									 List *allTransforms, IcebergManifestContentType contentType,
 									 const char *metadataLocation, const char *snapshotUUID, int *manifestIndex)
 {
+	/*
+	 * Reading one manifest's entries plus its Partition Field Map can take
+	 * tens of MB on large changelog tables.  When the caller calls us in a
+	 * loop over every manifest in a snapshot, leaving that memory in the
+	 * caller's context would accumulate into multi-GB peaks.
+	 *
+	 * Use two memory contexts:
+	 *
+	 * - callerCtx      : holds the new IcebergManifest header we hand back,
+	 * and the local temp file registered for upload at commit time.
+	 *
+	 * - perManifestCtx : holds the manifest entries we read and the filtered
+	 * list we build from them.  We free this before returning.
+	 *
+	 * The WRITE phase (GenerateRemoteManifestPath,
+	 * UploadIcebergManifestToURI, CreateNewIcebergManifest) must run in
+	 * callerCtx, because UploadIcebergManifestToURI -> GenerateTempFileName
+	 * registers a callback on the current memory context that unlinks the
+	 * local temp file when that context is reset.  The matching upload is
+	 * deferred until commit, so the callback has to outlive this function.
+	 */
+	bool		modified = false;
+
+	MemoryContext perManifestCtx =
+		AllocSetContextCreate(CurrentMemoryContext,
+							  "Iceberg per-manifest memory",
+							  ALLOCSET_DEFAULT_SIZES);
+
+	MemoryContext callerCtx = MemoryContextSwitchTo(perManifestCtx);
+
 	List	   *manifestEntries = FetchManifestEntriesFromManifest(*manifest, NULL);
 
 	List	   *newManifestEntries = NIL;
@@ -517,32 +548,31 @@ RemoveDeletedManifestEntriesInternal(IcebergManifest * *manifest, IcebergSnapsho
 	{
 		/* all entries are removed, skip this manifest */
 		*manifest = NULL;
-		return true;
+		modified = true;
 	}
-
-	bool		removedAnyEntry = list_length(newManifestEntries) != list_length(manifestEntries);
-
-	if (!removedAnyEntry)
+	else if (list_length(newManifestEntries) != list_length(manifestEntries))
 	{
-		/* no entries were removed, no modifications made */
-		return false;
+		/* some entries were removed -- write a new manifest in caller memory */
+		MemoryContextSwitchTo(callerCtx);
+
+		char	   *remoteManifestPath =
+			GenerateRemoteManifestPath(metadataLocation,
+									   snapshotUUID,
+									   (*manifestIndex)++, "");
+
+		int64_t		manifestSize = UploadIcebergManifestToURI(newManifestEntries, remoteManifestPath);
+
+		IcebergManifest *newManifest =
+			CreateNewIcebergManifest(currentSnapshot, (*manifest)->partition_spec_id, allTransforms,
+									 manifestSize, contentType, remoteManifestPath, newManifestEntries);
+
+		*manifest = newManifest;
+		modified = true;
 	}
 
-	char	   *remoteManifestPath =
-		GenerateRemoteManifestPath(metadataLocation,
-								   snapshotUUID,
-								   (*manifestIndex)++, "");
-
-	int64_t		manifestSize = UploadIcebergManifestToURI(newManifestEntries, remoteManifestPath);
-
-	IcebergManifest *newManifest =
-		CreateNewIcebergManifest(currentSnapshot, (*manifest)->partition_spec_id, allTransforms,
-								 manifestSize, contentType, remoteManifestPath, newManifestEntries);
-
-	*manifest = newManifest;
-
-	/* some entries were removed, manifest was modified */
-	return true;
+	MemoryContextSwitchTo(callerCtx);
+	MemoryContextDelete(perManifestCtx);
+	return modified;
 }
 
 
