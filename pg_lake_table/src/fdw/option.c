@@ -560,6 +560,7 @@ InitPgLakeIcebergOptions(void)
 		{"location", ForeignTableRelationId},
 
 		{"autovacuum_enabled", ForeignTableRelationId},
+		{"autovacuum_compact_data_files", ForeignTableRelationId},
 		{"max_snapshot_age", ForeignTableRelationId},
 		{"column_stats_mode", ForeignTableRelationId},
 		{"row_ids", ForeignTableRelationId},
@@ -740,6 +741,12 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 			locationProvided = true;
 		}
 		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "autovacuum_enabled") == 0)
+		{
+			/* only accept boolean */
+			(void) defGetBoolean(def);
+		}
+		else if (catalog == ForeignTableRelationId &&
+				 strcmp(def->defname, "autovacuum_compact_data_files") == 0)
 		{
 			/* only accept boolean */
 			(void) defGetBoolean(def);
