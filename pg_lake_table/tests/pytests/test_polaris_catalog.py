@@ -991,3 +991,143 @@ def test_rest_catalog_uppercase_columns(
     # Clean up
     rest_catalog.drop_table(f"{namespace}.{table_name}")
     rest_catalog.drop_namespace(namespace)
+
+
+def test_rest_catalog_required_columns_autodetect(
+    pg_conn,
+    s3,
+    polaris_session,
+    set_polaris_gucs,
+    with_default_location,
+    installcheck,
+):
+    """Regression: when CREATE TABLE () auto-detects columns from an
+    iceberg schema, fields with required=true must be reflected as
+    NOT NULL in postgres.
+
+    Otherwise ErrorIfSchemasDoNotMatch trips its strict-equality check
+        columnMapping->attNotNull != icebergField->required
+    on the first projection and the user gets
+        Schema mismatch between Iceberg and Postgres for field ids 1 vs 1
+    forcing them to enumerate every column by hand with explicit NOT NULL.
+    """
+
+    if installcheck:
+        return
+
+    namespace = "test_required_columns"
+    rest_catalog = create_iceberg_rest_catalog(namespace)
+
+    # mix required and optional fields so we exercise both branches of
+    # the attNotNull/required comparison
+    schema = Schema(
+        NestedField(1, "id", LongType(), required=True),
+        NestedField(2, "action", StringType(), required=True),
+        NestedField(3, "payload", StringType(), required=False),
+    )
+
+    table_name = "required_table"
+    iceberg_table = rest_catalog.create_table(
+        identifier=f"{namespace}.{table_name}",
+        schema=schema,
+    )
+
+    # pyiceberg's append() compares the iceberg schema's required flags
+    # against the pyarrow schema's nullable flags, so we must mark the
+    # required fields as non-nullable on the pyarrow side too.
+    pa_schema = pyarrow.schema(
+        [
+            pyarrow.field("id", pyarrow.int64(), nullable=False),
+            pyarrow.field("action", pyarrow.string(), nullable=False),
+            pyarrow.field("payload", pyarrow.string(), nullable=True),
+        ]
+    )
+    data = pyarrow.Table.from_pylist(
+        [
+            {"id": 1, "action": "INSERT", "payload": "row-1"},
+            {"id": 2, "action": "UPDATE", "payload": None},
+        ],
+        schema=pa_schema,
+    )
+    iceberg_table.append(data)
+
+    run_command(f"""CREATE SCHEMA "{namespace}" """, pg_conn)
+    pg_conn.commit()
+
+    # Empty column list -> pg_lake auto-detects columns from iceberg.
+    run_command(
+        f"""
+        CREATE TABLE "{namespace}".test_required ()
+        USING iceberg
+        WITH (
+            catalog='rest',
+            read_only=True,
+            catalog_table_name='{table_name}'
+        )
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # required iceberg fields must be reflected as NOT NULL in postgres,
+    # optional iceberg fields must remain nullable. This is exactly what
+    # ErrorIfSchemasDoNotMatch later compares for strict equality.
+    cols = run_query(
+        f"""
+        SELECT attname, attnotnull
+        FROM pg_attribute
+        WHERE attrelid = '"{namespace}".test_required'::regclass
+          AND attnum > 0
+        ORDER BY attnum
+        """,
+        pg_conn,
+    )
+    assert cols == [
+        ["id", True],
+        ["action", True],
+        ["payload", False],
+    ]
+
+    # The actual regression: projection used to trip
+    # ErrorIfSchemasDoNotMatch on attNotNull != required.
+    res = run_query(
+        f"""SELECT id, action, payload FROM "{namespace}".test_required ORDER BY id""",
+        pg_conn,
+    )
+    assert len(res) == 2
+    assert res[0] == [1, "INSERT", "row-1"]
+    assert res[1] == [2, "UPDATE", None]
+
+    # Sanity: explicit form with mismatched NOT NULL on a required field
+    # must still error -- this confirms ErrorIfSchemasDoNotMatch is the
+    # check we're satisfying with the auto-detect path above, not just
+    # bypassing.
+    run_command(f"""DROP TABLE "{namespace}".test_required""", pg_conn)
+    pg_conn.commit()
+    run_command(
+        f"""
+        CREATE TABLE "{namespace}".test_required (
+            id bigint,
+            action text,
+            payload text
+        )
+        USING iceberg
+        WITH (
+            catalog='rest',
+            read_only=True,
+            catalog_table_name='{table_name}'
+        )
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+    err = run_query(
+        f"""SELECT * FROM "{namespace}".test_required""",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "Schema mismatch between Iceberg and Postgres" in str(err)
+    pg_conn.rollback()
+
+    rest_catalog.drop_table(f"{namespace}.{table_name}")
+    rest_catalog.drop_namespace(namespace)
