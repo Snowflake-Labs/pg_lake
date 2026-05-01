@@ -1148,8 +1148,9 @@ duckdb_query_result_send_column_metadata(DuckDBQueryResult * duckdb_query_result
 			pq_writeint16(buf, originalColumnNumber);
 
 			/*
-			 * We always send columnTypeId=InvalidOid, columnLength=-1,
-			 * columnTypeMod=-1 see TypeInfo struct comment for the reasoning.
+			 * We convert each DuckDB type to the closest PostgreSQL OID equivalent.
+			 * columnLength and columnTypeMod are left as -1, see TypeInfo struct
+			 * comment for the reasoning.
 			 */
 			pq_writeint32(buf, duckdb_type_to_pg_oid(duckType));
 			pq_writeint16(buf, -1);
