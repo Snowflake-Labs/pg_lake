@@ -764,6 +764,70 @@ def test_nan_double_converted_numeric_column_stats(
     pg_conn.rollback()
 
 
+def test_column_stats_roundtrip_into_iceberg_manifest(
+    pg_conn, extension, app_user, s3, with_default_location, stats_catalog_permission
+):
+    """
+    Regression test for the PRE_COMMIT split-read in
+    GetDataFileMetadataOperations: the bulk catalog scan skips column stats
+    and a targeted LoadColumnStatsForFiles() reloads them for just the files
+    that are newly added in this transaction. A bug in that split — wrong
+    path matching, dedup logic, or NULL handling — would silently drop
+    bounds from the Iceberg manifest even though lake_table.data_file_column_stats
+    still has the row. We exercise that by reading the manifest directly
+    across multiple commits (each commit is a separate PRE_COMMIT pass that
+    must hit its own path through LoadColumnStatsForFiles) and confirming
+    bounds for every file and every column.
+    """
+    run_command(
+        """
+        CREATE TABLE stats_roundtrip (a int, b text, c bigint)
+        USING iceberg WITH (column_stats_mode = 'full');
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # First commit: a file with multiple rows -> non-trivial min/max.
+    run_command(
+        "INSERT INTO stats_roundtrip VALUES (1, 'aaa', 100), (5, 'zzz', 500);",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # Second commit: another file on a path the commit hook has never seen.
+    run_command(
+        "INSERT INTO stats_roundtrip VALUES (10, 'mmm', 1000);",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    stats = run_query(
+        "SELECT sequence_number, lower_bounds, upper_bounds "
+        "FROM lake_iceberg.data_file_stats("
+        "  (SELECT metadata_location FROM iceberg_tables "
+        "   WHERE table_name = 'stats_roundtrip')"
+        ") ORDER BY sequence_number;",
+        pg_conn,
+    )
+
+    # One manifest entry per commit, in order. int columns come back as ints,
+    # text columns as strings (see test_pg_lake_iceberg_table_skip_min_max for
+    # precedent).
+    assert stats == [
+        [1, {"1": 1, "2": "aaa", "3": 100}, {"1": 5, "2": "zzz", "3": 500}],
+        [2, {"1": 10, "2": "mmm", "3": 1000}, {"1": 10, "2": "mmm", "3": 1000}],
+    ], (
+        f"Manifest bounds do not match what was inserted. Got {stats}. "
+        "If some field_ids are missing from the lower_bounds/upper_bounds "
+        "dicts, the targeted stats load is dropping (path, field_id) rows "
+        "for some combination."
+    )
+
+    run_command("DROP TABLE stats_roundtrip", pg_conn)
+    pg_conn.commit()
+
+
 @pytest.fixture(scope="module")
 def stats_catalog_permission(app_user, superuser_conn, extension, s3):
     run_command(
