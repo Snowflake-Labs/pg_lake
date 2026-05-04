@@ -22,6 +22,7 @@
 
 #include "pg_lake/cleanup/in_progress_files.h"
 #include "pg_lake/data_file/data_files.h"
+#include "pg_lake/fdw/data_file_stats_catalog.h"
 #include "pg_lake/fdw/data_files_catalog.h"
 #include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
@@ -1001,15 +1002,12 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 							  List *allTransforms)
 {
 	/*
-	 * get current state of data files, which are not applied to metadata yet,
-	 * from catalog
-	 *
-	 * We skip per-column min/max stats on this read. The diff against the
-	 * last-pushed metadata below (FindChangedFilesSinceMetadata) only looks
-	 * at paths, and stats are only needed for the small subset of newly added
-	 * files — loaded in a targeted follow-up call below. On large
-	 * changelogs this avoids materializing one SPI row per (file × stats
-	 * column) just to diff paths.
+	 * Get current state of data files (not yet applied to metadata) from the
+	 * catalog. The bulk reader is stats-free by construction; we only need
+	 * paths here to diff against the last-pushed metadata, and the stats join
+	 * would otherwise blow up the SPI result set as
+	 * O(committed files * stats columns). Stats for the much smaller set of
+	 * newly added files are then loaded in a single follow-up SPI below.
 	 */
 	bool		dataOnly = false;
 	bool		newFilesOnly = false;
@@ -1018,8 +1016,7 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 	Snapshot	snapshot = GetTransactionSnapshot();
 
 	HTAB	   *currentFilesMap = GetTableDataFilesByPathHashFromCatalog(opTracker->relationId, dataOnly, newFilesOnly,
-																		 forUpdate, orderBy, snapshot, allTransforms,
-																		 true /* skipColumnStats */ );
+																		 forUpdate, orderBy, snapshot, allTransforms);
 
 	/* get last pushed metadata */
 	IcebergTableMetadata *lastMetadata = GetLastPushedIcebergMetadata(opTracker);
@@ -1036,7 +1033,7 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 	 * manifest DELETE entry carries only the path — so this is bounded by
 	 * the actual write size rather than by total files in the changelog.
 	 */
-	LoadColumnStatsForFiles(opTracker->relationId, addedFiles);
+	LoadColumnStats(opTracker->relationId, addedFiles);
 
 	/*
 	 * We have found the new files that are added since the last metadata

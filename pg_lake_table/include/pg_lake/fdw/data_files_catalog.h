@@ -44,11 +44,10 @@ extern PGDLLEXPORT List *GetTableDataFilesFromCatalog(Oid relationId, bool dataO
 													  bool forUpdate, char *orderBy, Snapshot snapshot);
 HTAB	   *GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
 											 bool forUpdate, char *orderBy, Snapshot snapshot,
-											 List *partitionTransforms, bool skipColumnStats);
+											 List *partitionTransforms);
 HTAB	   *GetTableDataFilesByPathHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
 												   bool forUpdate, char *orderBy, Snapshot snapshot,
-												   List *partitionTransforms, bool skipColumnStats);
-extern PGDLLEXPORT void LoadColumnStatsForFiles(Oid relationId, List *dataFiles);
+												   List *partitionTransforms);
 extern PGDLLEXPORT List *GetPossiblePositionDeleteFilesFromCatalog(Oid relationId, List *sourcePathList,
 																   Snapshot snapshot);
 extern PGDLLEXPORT int64 GetTableSizeFromCatalog(Oid relationId);

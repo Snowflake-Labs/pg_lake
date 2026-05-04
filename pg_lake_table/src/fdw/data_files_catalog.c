@@ -75,7 +75,6 @@
 PgLakeAddDataFileHookType PgLakeAddDataFileHook = NULL;
 
 
-static void FillDataFileColumnStats(TableDataFile * dataFile, int64 fieldId, int rowIndex);
 static void FillPartitionFieldFromCatalog(TableDataFile * dataFile, List *partitionTransforms,
 										  int64 partitionFieldId, int rowIndex);
 static int64 AddDataFileToTable(Oid relationId, const char *path, int64 rowCount,
@@ -90,19 +89,18 @@ static void RemoveAllDataFilesFromCatalog(Oid relationId);
 static HTAB *CreateDataFilesHash(void);
 static HTAB *CreateDataFilesByPathHash(void);
 static List *TableDataFileHashToList(HTAB *dataFiles);
-static bool ColumnStatAlreadyAdded(List *columnStats, int64 fieldId);
 static bool PartitionFieldAlreadyAdded(Partition * partition, int64 fieldId);
 static void CreateTxDataFileIdsTempTableIfNotExists(void);
 static void InsertDataFileIdIntoTransactionTable(int64 fileId);
-static DataFileColumnStats * CreateDataFileColumnStats(int fieldId, PGType pgType,
-													   char *lowerBoundText,
-													   char *upperBoundText);
 
 /*
- * GetTableDataFilesFromCatalog returns a list of TableDataFile for each data and deletion file
- * in the table. If dataOnly is true, only data files are returned. The optional snapshot
- * can be used to get a consistent view of the catalog.
- * It returns the data files that were updated before the given timestamp.
+ * GetTableDataFilesFromCatalog returns a list of TableDataFile for each data and
+ * deletion file in the table, including per-column min/max stats.
+ *
+ * Internally this is a two-phase read: a stats-free scan over the files catalog,
+ * followed by a single SPI scan over data_file_column_stats. The split avoids the
+ * multi-million-row blow-up that a wide LEFT JOIN against data_file_column_stats
+ * produces (files * partitions * stats columns).
  */
 List *
 GetTableDataFilesFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
@@ -113,17 +111,18 @@ GetTableDataFilesFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
 	HTAB	   *dataFilesHash = GetTableDataFilesHashFromCatalog(relationId, dataOnly,
 																 newFilesOnly, forUpdate,
 																 orderBy, snapshot,
-																 partitionTransforms,
-																 false /* skipColumnStats */ );
+																 partitionTransforms);
 
 	List	   *dataFiles = TableDataFileHashToList(dataFilesHash);
+
+	LoadColumnStats(relationId, dataFiles);
 
 	return dataFiles;
 }
 
 
 /*
- * GetTableDataFilesHashFromCatalog returns a hash of path => TableDataFile for
+ * GetTableDataFilesHashFromCatalog returns a hash of file_id => TableDataFile for
  * the given table.
  *
  * If dataOnly is true, position deletes are excluded.
@@ -131,15 +130,16 @@ GetTableDataFilesFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
  * If newFilesOnly is true, only data files that are added in the current transaction are returned.
  * If orderBy is not null, it is used to sort results.
  * If snapshot is set, it is used for the query.
- * If skipColumnStats is true, the per-column min/max stats are not loaded.
- * Callers that only need file-level info (path, id, row count, partition) can
- * pass true to avoid the expensive join against data_file_column_stats; stats
- * can be loaded on demand for a subset of files via LoadColumnStatsForFiles().
+ *
+ * Per-column min/max stats are NEVER loaded here. Callers that need stats
+ * must follow up with LoadColumnStats(). The wide LEFT JOIN against
+ * data_file_column_stats is intentionally absent: it would otherwise blow up
+ * the SPI result set as files * partition_values * stats_columns.
  */
 HTAB *
 GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
 								 bool forUpdate, char *orderBy, Snapshot snapshot,
-								 List *partitionTransforms, bool skipColumnStats)
+								 List *partitionTransforms)
 {
 	MemoryContext callerContext = CurrentMemoryContext;
 
@@ -151,32 +151,18 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
 
 	appendStringInfoString(&metadataQuery,
 						   "select "
-						    /* 1 */ "f.id, "
-						    /* 2 */ "f.path, "
-						    /* 3 */ "f.content, "
-						    /* 4 */ "f.row_count, "
-						    /* 5 */ "f.file_size, "
-						    /* 6 */ "f.deleted_row_count, "
-						    /* 7 */ "f.updated_time, "
-						    /* 8 */ "f.first_row_id, ");
-
-	if (!skipColumnStats)
-		appendStringInfoString(&metadataQuery,
-							    /* 9 */ "sma.field_id, "
-							    /* 10 */ "sma.field_pg_type, "
-							    /* 11 */ "sma.field_pg_typemod, "
-							    /* 12 */ "sma.lower_bound, "
-							    /* 13 */ "sma.upper_bound, ");
-	else
-		appendStringInfoString(&metadataQuery,
-							   "NULL::bigint, NULL::oid, NULL::int4, "
-							   "NULL::text, NULL::text, ");
-
-	appendStringInfoString(&metadataQuery,
-						    /* 14 */ "p.partition_field_id, "
-						    /* 15 */ "p.partition_field_name, "
-						    /* 16 */ "p.value, "
-						    /* 17 */ "p.spec_id "
+							/* 1 */ "f.id, "
+							/* 2 */ "f.path, "
+							/* 3 */ "f.content, "
+							/* 4 */ "f.row_count, "
+							/* 5 */ "f.file_size, "
+							/* 6 */ "f.deleted_row_count, "
+							/* 7 */ "f.updated_time, "
+							/* 8 */ "f.first_row_id, "
+							/* 9 */ "p.partition_field_id, "
+							/* 10 */ "p.partition_field_name, "
+							/* 11 */ "p.value, "
+							/* 12 */ "p.spec_id "
 						   "from (");
 
 	appendStringInfoString(&metadataQuery,
@@ -192,29 +178,12 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
 	if (forUpdate)
 		appendStringInfoString(&metadataQuery, " for update");
 
-	/*
-	 * not all tables (or all columns) have the stats. For example, iceberg
-	 * tables created before we added this catalog or data types that do not
-	 * have min/max or pg_lake tables.
-	 */
 	appendStringInfoString(&metadataQuery,
 						   ") f "
 						   "LEFT JOIN (" DATA_FILE_PARTITION_VALUES_TABLE_QUALIFIED
 						   " JOIN " PARTITION_FIELDS_TABLE_QUALIFIED
 						   " USING (table_name, partition_field_id) "
 						   ") p USING (table_name, id) ");
-
-	if (!skipColumnStats)
-		appendStringInfoString(&metadataQuery,
-							   "LEFT JOIN ("
-							   DATA_FILE_COLUMN_STATS_TABLE_QUALIFIED " s "
-							   "JOIN " MAPPING_TABLE_NAME
-							   " m USING (table_name, field_id) "
-							   "JOIN pg_attribute a ON (a.attrelid OPERATOR(pg_catalog.=) m.table_name "
-							   "                       AND a.attnum   OPERATOR(pg_catalog.=) m.pg_attnum "
-							   "                       AND NOT a.attisdropped)"
-							   ") sma USING (table_name, path)");
-
 
 	if (orderBy != NULL)
 		appendStringInfo(&metadataQuery, " order by %s",
@@ -274,9 +243,8 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
 		TableDataFile *dataFile = hash_search(dataFilesHash, &fileId, HASH_ENTER, &fileFound);
 
 		/*
-		 * single file can have stats for many columns, or can have multiple
-		 * partition values. Track the file in the map, and add stats or
-		 * partition values when needed.
+		 * A single file can have multiple partition values. Track the file
+		 * in the map, and add partition values when needed.
 		 */
 		if (!fileFound)
 		{
@@ -325,29 +293,12 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
 			dataFile->partitionSpecId = DEFAULT_SPEC_ID;
 		}
 
-		bool		isFieldIdNull = false;
-		Datum		fieldIdDatum = GET_SPI_DATUM(rowIndex, 9, &isFieldIdNull);
-
-		/*
-		 * when field id is not empty, this means we have column stats in the
-		 * row.
-		 */
-		if (!isFieldIdNull)
-		{
-			int64		fieldId = DatumGetInt64(fieldIdDatum);
-
-			if (!ColumnStatAlreadyAdded(dataFile->stats.columnStats, fieldId))
-			{
-				FillDataFileColumnStats(dataFile, fieldId, rowIndex);
-			}
-		}
-
 		/*
 		 * When there is a partition field id, we have a partition value in
 		 * the row, so add to the partition.
 		 */
 		bool		isPartitionFieldIdNull = false;
-		Datum		partitionFieldIdDatum = GET_SPI_DATUM(rowIndex, 14, &isPartitionFieldIdNull);
+		Datum		partitionFieldIdDatum = GET_SPI_DATUM(rowIndex, 9, &isPartitionFieldIdNull);
 
 		if (!isPartitionFieldIdNull)
 		{
@@ -372,16 +323,17 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
  * GetTableDataFilesByPathHashFromCatalog retrieves the data files for a given table
  * and returns a hash table indexed by file path.
  *
- * See GetTableDataFilesHashFromCatalog for the meaning of skipColumnStats.
+ * Per-column min/max stats are NOT loaded here; see
+ * GetTableDataFilesHashFromCatalog for the rationale.
  */
 HTAB *
 GetTableDataFilesByPathHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
 									   bool forUpdate, char *orderBy, Snapshot snapshot,
-									   List *partitionTransforms, bool skipColumnStats)
+									   List *partitionTransforms)
 {
 	HTAB	   *filesById = GetTableDataFilesHashFromCatalog(relationId, dataOnly, newFilesOnly,
 															 forUpdate, orderBy, snapshot,
-															 partitionTransforms, skipColumnStats);
+															 partitionTransforms);
 
 	HTAB	   *filesByPath = CreateDataFilesByPathHash();
 
@@ -407,193 +359,22 @@ GetTableDataFilesByPathHashFromCatalog(Oid relationId, bool dataOnly, bool newFi
 
 
 /*
- * LoadColumnStatsForFiles fills in per-column min/max stats for the given
- * data files, targeting only their paths. This lets callers pair a stats-free
- * bulk read (GetTableDataFilesHashFromCatalog with skipColumnStats=true) with
- * a narrow stats load for just the files that actually need them (e.g. the
- * handful of newly added files in a transaction).
- *
- * The dataFiles list must contain TableDataFile pointers whose columnStats
- * are currently NIL; this function appends to dataFile->stats.columnStats.
+ * FillPartitionFieldFromCatalog fills the partition field for a given data file from
+ * the catalog. It is a helper function for GetTableDataFilesHashFromCatalog.
  */
-void
-LoadColumnStatsForFiles(Oid relationId, List *dataFiles)
-{
-	if (dataFiles == NIL)
-		return;
-
-	MemoryContext callerContext = CurrentMemoryContext;
-
-	List	   *pathList = NIL;
-	ListCell   *fileCell = NULL;
-
-	foreach(fileCell, dataFiles)
-	{
-		TableDataFile *dataFile = lfirst(fileCell);
-
-		pathList = lappend(pathList, dataFile->path);
-	}
-
-	char	   *query =
-		"select "
-		 /* 1 */ "s.path, "
-		 /* 2 */ "s.field_id, "
-		 /* 3 */ "m.field_pg_type, "
-		 /* 4 */ "m.field_pg_typemod, "
-		 /* 5 */ "s.lower_bound, "
-		 /* 6 */ "s.upper_bound "
-		"from " DATA_FILE_COLUMN_STATS_TABLE_QUALIFIED " s "
-		"JOIN " MAPPING_TABLE_NAME " m USING (table_name, field_id) "
-		"JOIN pg_attribute a ON (a.attrelid OPERATOR(pg_catalog.=) m.table_name "
-		"                        AND a.attnum   OPERATOR(pg_catalog.=) m.pg_attnum "
-		"                        AND NOT a.attisdropped) "
-		"where s.table_name OPERATOR(pg_catalog.=) $1 "
-		"  AND s.path       OPERATOR(pg_catalog.=) ANY($2)";
-
-	SPI_START_EXTENSION_OWNER(PgLakeTable);
-
-	DECLARE_SPI_ARGS(2);
-	SPI_ARG_VALUE(1, OIDOID, relationId, false);
-	SPI_ARG_VALUE(2, TEXTARRAYOID, StringListToArray(pathList), false);
-
-	bool		readOnly = false;
-
-	SPI_EXECUTE(query, readOnly);
-
-	for (int rowIndex = 0; rowIndex < SPI_processed; rowIndex++)
-	{
-		MemoryContext spiContext = MemoryContextSwitchTo(callerContext);
-
-		bool		isPathNull = false;
-		char	   *path = GET_SPI_VALUE(TEXTOID, rowIndex, 1, &isPathNull);
-
-		if (isPathNull)
-		{
-			MemoryContextSwitchTo(spiContext);
-			continue;
-		}
-
-		bool		isFieldIdNull = false;
-		int64		fieldId = GET_SPI_VALUE(INT8OID, rowIndex, 2, &isFieldIdNull);
-
-		if (isFieldIdNull)
-		{
-			MemoryContextSwitchTo(spiContext);
-			continue;
-		}
-
-		bool		isPgTypeNull = false;
-		bool		isPgTypeModNull = false;
-
-		PGType		pgType = {
-			.postgresTypeOid = GET_SPI_VALUE(OIDOID, rowIndex, 3, &isPgTypeNull),
-			.postgresTypeMod = GET_SPI_VALUE(INT4OID, rowIndex, 4, &isPgTypeModNull)
-		};
-
-		char	   *lowerBoundText = NULL;
-		char	   *upperBoundText = NULL;
-
-		bool		isLowerBoundNull = false;
-		Datum		lowerBoundDatum = GET_SPI_DATUM(rowIndex, 5, &isLowerBoundNull);
-
-		if (!isLowerBoundNull)
-			lowerBoundText = TextDatumGetCString(lowerBoundDatum);
-
-		bool		isUpperBoundNull = false;
-		Datum		upperBoundDatum = GET_SPI_DATUM(rowIndex, 6, &isUpperBoundNull);
-
-		if (!isUpperBoundNull)
-			upperBoundText = TextDatumGetCString(upperBoundDatum);
-
-		/*
-		 * Walk the caller's list to find the matching struct. dataFiles is
-		 * expected to be small (typically 1-2 entries per transaction), so a
-		 * linear search is fine and avoids an extra pointer-valued hash.
-		 */
-		ListCell   *lc = NULL;
-
-		foreach(lc, dataFiles)
-		{
-			TableDataFile *dataFile = lfirst(lc);
-
-			if (strcmp(dataFile->path, path) != 0)
-				continue;
-
-			if (ColumnStatAlreadyAdded(dataFile->stats.columnStats, fieldId))
-				break;
-
-			DataFileColumnStats *columnStats =
-				CreateDataFileColumnStats(fieldId, pgType, lowerBoundText, upperBoundText);
-
-			dataFile->stats.columnStats = lappend(dataFile->stats.columnStats, columnStats);
-			break;
-		}
-
-		MemoryContextSwitchTo(spiContext);
-	}
-
-	SPI_END();
-}
-
-
-/*
-* FillDataFileColumnStats fills the column stats for a given data file
-* from the catalog. It is a helper function for GetTableDataFilesFromCatalog.
-*/
-static void
-FillDataFileColumnStats(TableDataFile * dataFile, int64 fieldId, int rowIndex)
-{
-	bool		isPgTypeNull = false;
-	bool		isPgTypeModNull = false;
-
-	PGType		pgType = {
-		.postgresTypeOid = GET_SPI_VALUE(OIDOID, rowIndex, 10, &isPgTypeNull),
-		.postgresTypeMod = GET_SPI_VALUE(INT4OID, rowIndex, 11, &isPgTypeModNull)
-	};
-
-	char	   *lowerBoundText = NULL;
-	char	   *upperBoundText = NULL;
-
-	bool		isLowerBoundNull = false;
-	Datum		lowerBoundDatum = GET_SPI_DATUM(rowIndex, 12, &isLowerBoundNull);
-
-	if (!isLowerBoundNull)
-	{
-		lowerBoundText = TextDatumGetCString(lowerBoundDatum);
-	}
-
-	bool		isUpperBoundNull = false;
-	Datum		upperBoundDatum = GET_SPI_DATUM(rowIndex, 13, &isUpperBoundNull);
-
-	if (!isUpperBoundNull)
-	{
-		upperBoundText = TextDatumGetCString(upperBoundDatum);
-	}
-
-	/* create column stats from catalog values */
-	DataFileColumnStats *columnStats = CreateDataFileColumnStats(fieldId, pgType, lowerBoundText, upperBoundText);
-
-	dataFile->stats.columnStats = lappend(dataFile->stats.columnStats, columnStats);
-}
-
-
-/*
-* FillPartitionFieldFromCatalog fills the partition field for a given data file from
-* the catalog. It is a helper function for GetTableDataFilesFromCatalog.
-*/
 static void
 FillPartitionFieldFromCatalog(TableDataFile * dataFile, List *partitionTransforms, int64 partitionFieldId,
 							  int rowIndex)
 {
 	/* not null enforced by the catalog */
 	bool		isPartitionFieldNameNull = false;
-	char	   *partitionFieldName = GET_SPI_VALUE(TEXTOID, rowIndex, 15, &isPartitionFieldNameNull);
+	char	   *partitionFieldName = GET_SPI_VALUE(TEXTOID, rowIndex, 10, &isPartitionFieldNameNull);
 
 	/* value can be NULL */
 	bool		isValueNull = false;
 	char	   *valueText = NULL;
 
-	Datum		valueDatum = GET_SPI_DATUM(rowIndex, 16, &isValueNull);
+	Datum		valueDatum = GET_SPI_DATUM(rowIndex, 11, &isValueNull);
 
 	if (!isValueNull)
 	{
@@ -620,7 +401,7 @@ FillPartitionFieldFromCatalog(TableDataFile * dataFile, List *partitionTransform
 
 	/* set the partition field id of data file */
 	bool		isSpecIdNull = false;
-	int			partitionSpecId = GET_SPI_VALUE(INT4OID, rowIndex, 17, &isSpecIdNull);
+	int			partitionSpecId = GET_SPI_VALUE(INT4OID, rowIndex, 12, &isSpecIdNull);
 
 	dataFile->partitionSpecId = partitionSpecId;
 }
@@ -638,26 +419,6 @@ PartitionFieldAlreadyAdded(Partition * partition, int64 fieldId)
 		PartitionField *partitionField = &partition->fields[i];
 
 		if (partitionField->field_id == fieldId)
-			return true;
-	}
-
-	return false;
-}
-
-/*
-* ColumnStatAlreadyAdded checks if the given field id is already
-* present in the column stats.
-*/
-static bool
-ColumnStatAlreadyAdded(List *columnStats, int64 fieldId)
-{
-	ListCell   *cell = NULL;
-
-	foreach(cell, columnStats)
-	{
-		DataFileColumnStats *columnStat = (DataFileColumnStats *) lfirst(cell);
-
-		if (columnStat->leafField.fieldId == fieldId)
 			return true;
 	}
 
@@ -728,7 +489,6 @@ TableDataFileHashToList(HTAB *dataFiles)
 
 	return result;
 }
-
 
 /*
  * GetPossiblePositionDeleteFilesFromCatalog returns a list of position delete files that
@@ -1562,35 +1322,4 @@ AddDataFilePartitionValueToCatalog(Oid relationId, int32 partitionSpecId, int64 
 	SPI_END();
 
 	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
-}
-
-
-/*
- * CreateDataFileColumnStats creates a new DataFileColumnStats from the given
- * parameters.
- */
-static DataFileColumnStats *
-CreateDataFileColumnStats(int fieldId, PGType pgType, char *lowerBoundText, char *upperBoundText)
-{
-	DataFileColumnStats *columnStats = palloc0(sizeof(DataFileColumnStats));
-
-	columnStats->leafField.fieldId = fieldId;
-	columnStats->lowerBoundText = lowerBoundText;
-	columnStats->upperBoundText = upperBoundText;
-	columnStats->leafField.pgType = pgType;
-
-	bool		forAddColumn = false;
-	int			subFieldIndex = fieldId;
-
-	Field	   *field = PostgresTypeToIcebergField(pgType, forAddColumn, &subFieldIndex);
-
-	Assert(field->type == FIELD_TYPE_SCALAR);
-
-	columnStats->leafField.field = field;
-
-	const char *duckTypeName = IcebergTypeNameToDuckdbTypeName(field->field.scalar.typeName);
-
-	columnStats->leafField.duckTypeName = duckTypeName;
-
-	return columnStats;
 }

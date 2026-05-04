@@ -125,8 +125,7 @@ CreatePositionDeleteDestReceiver(Oid relationId)
 	List	   *allTransforms = AllPartitionTransformList(relationId);
 
 	self->dataFilesHash =
-		GetTableDataFilesHashFromCatalog(relationId, true, false, false, NULL, NULL, allTransforms,
-										 false /* skipColumnStats */ );
+		GetTableDataFilesHashFromCatalog(relationId, true, false, false, NULL, NULL, allTransforms);
 
 	/* construct a tuple table slot for position deletes */
 	TupleDesc	deleteTupleDesc = CreatePositionDeleteTupleDesc();

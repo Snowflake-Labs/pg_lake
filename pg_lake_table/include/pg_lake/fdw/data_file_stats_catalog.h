@@ -30,3 +30,18 @@ extern void AddDataFileColumnStatsToCatalog(Oid relationId, const char *path, Li
 extern void AddDataFilePartitionValueToCatalog(Oid relationId, int32 partitionSpecId, int64 fileId,
 											   Partition * partition);
 extern bool DataFileColumnStatsCatalogExists(void);
+
+/*
+ * LoadColumnStats fills in per-column min/max stats for the given dataFiles
+ * by running a single SPI scan over data_file_column_stats filtered to the
+ * file paths in the list. The dataFiles list must contain TableDataFile
+ * pointers whose columnStats are NIL on entry; this function appends to
+ * each dataFile->stats.columnStats.
+ *
+ * Pair this with a stats-free bulk read (GetTableDataFilesHashFromCatalog
+ * or GetTableDataFilesByPathHashFromCatalog) to keep the bulk-read SPI
+ * result set small and let this loader focus the catalog read to exactly
+ * the files that need stats. Internally builds a small path->TableDataFile*
+ * hash so the per-row apply is O(1) regardless of list size.
+ */
+extern PGDLLEXPORT void LoadColumnStats(Oid relationId, List *dataFiles);
