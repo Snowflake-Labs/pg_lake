@@ -42,6 +42,18 @@ extern PGDLLEXPORT PgLakeAddDataFileHookType PgLakeAddDataFileHook;
 /* functions to read from files catalog */
 extern PGDLLEXPORT List *GetTableDataFilesFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
 													  bool forUpdate, char *orderBy, Snapshot snapshot);
+
+/*
+ * GetTableDataFilesFromCatalogNoStats is the same as
+ * GetTableDataFilesFromCatalog but skips the per-column min/max stats
+ * SPI scan entirely. Use it from callers that only consume file paths,
+ * row counts or partition values (e.g. compaction, row_id assignment,
+ * logical replication readers). Returned TableDataFile entries have
+ * stats.columnStats == NIL.
+ */
+extern PGDLLEXPORT List *GetTableDataFilesFromCatalogNoStats(Oid relationId, bool dataOnly,
+															 bool newFilesOnly, bool forUpdate,
+															 char *orderBy, Snapshot snapshot);
 HTAB	   *GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
 											 bool forUpdate, char *orderBy, Snapshot snapshot,
 											 List *partitionTransforms);

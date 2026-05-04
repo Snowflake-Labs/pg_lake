@@ -55,8 +55,10 @@ EnableRowIdsOnTable(Oid relationId)
 
 	bool		dataOnly = true;
 	bool		newFilesOnly = false;
-	List	   *dataFiles = GetTableDataFilesFromCatalog(relationId, dataOnly,
-														 newFilesOnly, false, NULL, NULL);
+
+	/* we only consume rowCount/fileId here, no need for column stats */
+	List	   *dataFiles = GetTableDataFilesFromCatalogNoStats(relationId, dataOnly,
+																newFilesOnly, false, NULL, NULL);
 
 	ListCell   *dataFileCell = NULL;
 

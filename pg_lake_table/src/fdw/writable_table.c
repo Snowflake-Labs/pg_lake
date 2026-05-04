@@ -1195,9 +1195,14 @@ GetPartitionWithMostEligibleFiles(Oid relationId, TimestampTz compactionStartTim
 	bool		dataOnly = false;
 	bool		newFilesOnly = false;
 
-	/* fetch all data files from catalog */
-	List	   *dataFiles = GetTableDataFilesFromCatalog(relationId, dataOnly, newFilesOnly,
-														 forUpdate, orderBy, snapshot);
+	/*
+	 * Fetch all data files from the catalog. Compaction only needs paths,
+	 * row counts and partition keys, so skip the column-stats SPI scan.
+	 * This matters in particular under autovacuum, which would otherwise
+	 * read every column-stats row of the table on every wakeup.
+	 */
+	List	   *dataFiles = GetTableDataFilesFromCatalogNoStats(relationId, dataOnly, newFilesOnly,
+																forUpdate, orderBy, snapshot);
 
 	/* group data files by partition spec and partition tuple */
 	HTAB	   *dataFilesPerPartition = GroupDataFilesByPartition(dataFiles, compactionStartTime, forceMerge);

@@ -122,6 +122,32 @@ GetTableDataFilesFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
 
 
 /*
+ * GetTableDataFilesFromCatalogNoStats returns the same TableDataFile list as
+ * GetTableDataFilesFromCatalog but does not load per-column min/max stats.
+ *
+ * Compaction (writable_table.c), row_id assignment (row_ids.c) and the
+ * logical replication readers (pg_lake_replication) only consume file paths,
+ * row counts or partition values. Skipping the stats SPI scan avoids a wide
+ * catalog read on tables with many files and many stats columns -- which is
+ * particularly painful inside autovacuum where compaction would otherwise
+ * read every column-stats row of the table on every wakeup.
+ */
+List *
+GetTableDataFilesFromCatalogNoStats(Oid relationId, bool dataOnly, bool newFilesOnly,
+									bool forUpdate, char *orderBy, Snapshot snapshot)
+{
+	List	   *partitionTransforms = AllPartitionTransformList(relationId);
+
+	HTAB	   *dataFilesHash = GetTableDataFilesHashFromCatalog(relationId, dataOnly,
+																	 newFilesOnly, forUpdate,
+																	 orderBy, snapshot,
+																	 partitionTransforms);
+
+	return TableDataFileHashToList(dataFilesHash);
+}
+
+
+/*
  * GetTableDataFilesHashFromCatalog returns a hash of file_id => TableDataFile for
  * the given table.
  *
