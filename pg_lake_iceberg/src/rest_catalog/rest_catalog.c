@@ -1549,8 +1549,9 @@ GetRestCatalogNamespace(Oid relationId)
  * subsequent ALTER SERVER ? ADD/SET catalog_name cannot silently
  * re-route an existing table to a different REST namespace.
  *
- * Read-only tables resolve from table option > server option, and
- * must have catalog_name set on one of them.
+ * Read-only tables always have catalog_name baked into their table
+ * options at CREATE TABLE time (inherited from the server option or
+ * defaulted to the database name).
  */
 char *
 GetRestCatalogName(Oid relationId)
@@ -1569,15 +1570,7 @@ GetRestCatalogName(Oid relationId)
 	if (catalogName != NULL)
 		return catalogName;
 
-	RestCatalogOptions *opts = GetRestCatalogOptionsForRelation(relationId);
-
-	if (opts->catalogName != NULL)
-		return opts->catalogName;
-
-	ereport(ERROR,
-			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-			 errmsg("catalog_name is required for read-only REST catalog tables"),
-			 errhint("Set catalog_name on the table or the server.")));
+	elog(ERROR, "catalog_name missing on read-only REST catalog table %u", relationId);
 }
 
 

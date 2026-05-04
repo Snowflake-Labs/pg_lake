@@ -817,7 +817,19 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 
 		if (catalogNameProvided == NULL && hasExternalCatalogReadOnlyOption)
 		{
-			catalogName = get_database_name(MyDatabaseId);
+			if (hasRestCatalogOption)
+			{
+				char	   *catalogOptionValue =
+					GetStringOption(createStmt->options, "catalog", false);
+				RestCatalogOptions *opts =
+					ResolveRestCatalogOptions(catalogOptionValue);
+
+				catalogName = opts->catalogName ? pstrdup(opts->catalogName)
+					: get_database_name(MyDatabaseId);
+			}
+			else
+				catalogName = get_database_name(MyDatabaseId);
+
 			createStmt->options =
 				lappend(createStmt->options,
 						makeDefElem("catalog_name", (Node *) makeString(catalogName), -1));
