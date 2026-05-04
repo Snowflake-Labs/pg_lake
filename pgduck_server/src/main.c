@@ -82,6 +82,7 @@ main(int argc, char *argv[])
 					  options.unix_socket_directory,
 					  options.unix_socket_group,
 					  options.unix_socket_permissions,
+					  options.listen_addresses,
 					  options.port) != STATUS_OK)
 		return STATUS_ERROR;
 

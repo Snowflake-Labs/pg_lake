@@ -33,6 +33,16 @@ typedef struct
 	char	   *unix_socket_directory;
 	char	   *unix_socket_group;
 	int			unix_socket_permissions;
+	/*
+	 * Comma-separated list of TCP addresses to bind on (PostgreSQL-style
+	 * semantics). Empty string or NULL means TCP is disabled (default) and
+	 * pgduck_server only listens on the Unix domain socket. Examples:
+	 *   "0.0.0.0"     listen on all IPv4 interfaces
+	 *   "0.0.0.0,::"  listen on all IPv4 + all IPv6 interfaces
+	 *   "127.0.0.1"   loopback only
+	 * The TCP port is the same `port` field used for the Unix socket suffix.
+	 */
+	char	   *listen_addresses;
 	unsigned int port;
 	unsigned int max_clients;
 	char	   *memory_limit;

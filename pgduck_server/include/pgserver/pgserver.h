@@ -24,13 +24,30 @@
 #define PGDUCK_PG_SERVER_H
 
 /*
+ * Maximum number of TCP listening sockets we'll bind. Each address in
+ * --listen_addresses can resolve to multiple addrinfos (rare; usually
+ * one per family), so we size for headroom over typical configs like
+ * "0.0.0.0,::".
+ */
+#define MAX_TCP_LISTEN_SOCKETS 16
+
+/*
  * PGServer represents an instance of a PostgreSQL wire compatible
  * server.
  */
 typedef struct PGServer
 {
 	int			listeningPort;
-	int			listeningSocket;
+	int			listeningSocket;	/* Unix domain socket */
+
+	/*
+	 * TCP listening sockets (one per resolved address from
+	 * --listen_addresses). numTcpSockets == 0 when TCP is disabled
+	 * (the default), in which case the server only accepts Unix-socket
+	 * connections — preserving backwards-compatible behavior.
+	 */
+	int			tcpSockets[MAX_TCP_LISTEN_SOCKETS];
+	int			numTcpSockets;
 
 	char		unixSocketDir[MAXPGPATH];
 	char		unixSocketPath[MAXPGPATH];
@@ -48,6 +65,7 @@ extern int	pgserver_init(PGServer * pgServer,
 						  char *unixSocketPath,
 						  char *unixSocketOwningGroup,
 						  int unixSocketPermissions,
+						  char *tcpListenAddresses,
 						  int port);
 extern int	pgserver_run(PGServer * pgServer);
 extern void pgserver_destroy(PGServer * pgServer);
