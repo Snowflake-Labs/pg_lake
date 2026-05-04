@@ -110,8 +110,7 @@ HasReadOnlyOption(List *options)
 /*
  * IsCatalogOwnedByExtension returns true if the catalog name is one of
  * the reserved built-in names: 'rest', 'object_store', or 'postgres'.
- * Comparison is case-insensitive so that "Postgres", "REST", etc. are
- * also recognized as reserved.
+ * Comparison is case-insensitive.
  */
 bool
 IsCatalogOwnedByExtension(const char *catalog)

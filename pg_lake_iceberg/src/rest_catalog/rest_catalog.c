@@ -68,7 +68,8 @@ int			RestCatalogAuthType = REST_CATALOG_AUTH_TYPE_OAUTH2;
 bool		RestCatalogEnableVendedCredentials = true;
 
 /*
- * Per-catalog token cache. Keyed by catalog.
+ * Per-rest-catalog token cache. Keyed by catalog.
+ * Should always be accessed via GetRestCatalogAccessToken()
  */
 #define TOKEN_CACHE_KEY_LEN NAMEDATALEN
 
@@ -81,6 +82,8 @@ typedef struct RestCatalogTokenCacheEntry
 
 static HTAB *RestCatalogTokenCache = NULL;
 static MemoryContext RestTokenCacheCtx = NULL;
+
+/* end of per-catalog token cache variables */
 
 static char *GetRestCatalogAccessToken(RestCatalogOptions * opts, bool forceRefreshToken);
 static void FetchRestCatalogAccessToken(RestCatalogOptions * opts, char **accessToken, int *expiresIn);
@@ -723,8 +726,8 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId)
 		headers = lappend(headers, vendedCreds);
 	}
 
-	HttpResult	httpResult = SendRequestToRestCatalog(HTTP_POST, postUrl, body->data,
-													  headers, opts);
+	HttpResult	httpResult = SendRequestToRestCatalog(opts, HTTP_POST, postUrl, body->data,
+													  headers);
 
 	if (httpResult.status != 200)
 	{
@@ -859,9 +862,8 @@ RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogNam
 		psprintf(REST_CATALOG_NAMESPACE_NAME,
 				 opts->host, URLEncodePath(catalogName),
 				 URLEncodePath(namespaceName));
-	HttpResult	httpResult = SendRequestToRestCatalog(HTTP_GET, getUrl, NULL,
-													  GetHeadersWithAuth(opts),
-													  opts);
+	HttpResult	httpResult = SendRequestToRestCatalog(opts, HTTP_GET, getUrl, NULL,
+													  GetHeadersWithAuth(opts));
 
 	switch (httpResult.status)
 	{
@@ -951,9 +953,8 @@ ErrorIfRestNamespaceDoesNotExist(RestCatalogOptions * opts, const char *catalogN
 		psprintf(REST_CATALOG_NAMESPACE_NAME,
 				 opts->host, URLEncodePath(catalogName),
 				 URLEncodePath(namespaceName));
-	HttpResult	httpResult = SendRequestToRestCatalog(HTTP_GET, getUrl, NULL,
-													  GetHeadersWithAuth(opts),
-													  opts);
+	HttpResult	httpResult = SendRequestToRestCatalog(opts, HTTP_GET, getUrl, NULL,
+													  GetHeadersWithAuth(opts));
 
 	/* namespace not found */
 	if (httpResult.status == 404)
@@ -1002,8 +1003,7 @@ GetMetadataLocationFromRestCatalog(RestCatalogOptions * opts, const char *restCa
 				 opts->host, URLEncodePath(restCatalogName), URLEncodePath(namespaceName), URLEncodePath(relationName));
 
 	List	   *headers = GetHeadersWithAuth(opts);
-	HttpResult	hr = SendRequestToRestCatalog(HTTP_GET, getUrl, NULL, headers,
-											  opts);
+	HttpResult	hr = SendRequestToRestCatalog(opts, HTTP_GET, getUrl, NULL, headers);
 
 	if (hr.status != 200)
 	{
@@ -1051,9 +1051,8 @@ CreateNamespaceOnRestCatalog(RestCatalogOptions * opts, const char *catalogName,
 		psprintf(REST_CATALOG_NAMESPACE, opts->host,
 				 URLEncodePath(catalogName));
 
-	HttpResult	httpResult = SendRequestToRestCatalog(HTTP_POST, postUrl, body.data,
-													  PostHeadersWithAuth(opts),
-													  opts);
+	HttpResult	httpResult = SendRequestToRestCatalog(opts, HTTP_POST, postUrl, body.data,
+													  PostHeadersWithAuth(opts));
 
 	if (httpResult.status != 200)
 	{
@@ -1155,6 +1154,12 @@ BuildTokenCacheKey(char *key, const RestCatalogOptions * opts)
  * Any ALTER/DROP SERVER blows away the entire token cache so stale
  * credentials are never reused.  The cache is rebuilt lazily on the
  * next token lookup.
+ *
+ * We ignore hashvalue and reset the whole cache rather than selectively
+ * invalidating a single server's entry (as postgres_fdw does).  With a
+ * handful of servers and infrequent ALTER SERVER, the cost of a few
+ * extra OAuth round-trips is negligible compared to the complexity of
+ * keying the cache by OID for selective invalidation.
  */
 static void
 InvalidateRestTokenCache(Datum arg, int cacheid, uint32 hashvalue)
@@ -1169,6 +1174,11 @@ InvalidateRestTokenCache(Datum arg, int cacheid, uint32 hashvalue)
 
 /*
  * Initialize the per-catalog token cache hash table if needed.
+ *
+ * TokenCacheCallbackRegistered is separate from RestCatalogTokenCache because
+ * the callback must be registered exactly once per backend lifetime
+ * (CacheRegisterSyscacheCallback appends to a fixed-size array), while
+ * RestCatalogTokenCache is reset to NULL on every invalidation.
  */
 static bool TokenCacheCallbackRegistered = false;
 
@@ -1318,10 +1328,14 @@ FetchRestCatalogAccessToken(RestCatalogOptions * opts, char **accessToken, int *
 
 	headers = lappend(headers, "Content-Type: application/x-www-form-urlencoded");
 
-	/* POST — pass NULL opts to skip 419 token refresh (avoids recursion) */
-	HttpResult	httpResponse = SendRequestToRestCatalog(HTTP_POST, accessTokenUrl,
-														body.data, headers,
-														NULL);
+	/*
+	 * Pass NULL opts so SendRequestToRestCatalog skips the 419 token-refresh
+	 * retry branch.  Otherwise a 419 here would call
+	 * GetRestCatalogAccessToken -> FetchRestCatalogAccessToken ->
+	 * SendRequestToRestCatalog in an infinite loop.
+	 */
+	HttpResult	httpResponse = SendRequestToRestCatalog(NULL, HTTP_POST, accessTokenUrl,
+														body.data, headers);
 
 	if (httpResponse.status != 200)
 		ereport(ERROR,

@@ -923,7 +923,7 @@ def test_token_cache_reuses_token_across_catalog_ops(
 
     Uses pg_lake_iceberg.http_client_trace_traffic to observe actual
     HTTP traffic: each token fetch shows up as a POST to .../oauth/tokens
-    in the connection notices.
+    in the connection notices. Does 3 back-to-back inserts.
     """
     if installcheck:
         return
@@ -935,18 +935,17 @@ def test_token_cache_reuses_token_across_catalog_ops(
     pg_conn.commit()
 
     run_command(
+        "SET pg_lake_iceberg.http_client_trace_traffic TO on",
+        pg_conn,
+    )
+    pg_conn.notices.clear()
+
+    run_command(
         f"CREATE TABLE {SCHEMA_NAME}.{TABLE_NAME} (id bigint, value text) "
         f"USING iceberg WITH (catalog='rest')",
         pg_conn,
     )
     pg_conn.commit()
-
-    run_command(
-        "SET pg_lake_iceberg.http_client_trace_traffic TO on",
-        pg_conn,
-    )
-
-    pg_conn.notices.clear()
 
     for i in range(3):
         run_command(
@@ -958,8 +957,8 @@ def test_token_cache_reuses_token_across_catalog_ops(
     token_fetches = sum(
         1 for n in pg_conn.notices if "oauth/tokens" in n and "POST" in n
     )
-    assert token_fetches <= 1, (
-        f"Expected at most 1 OAuth token fetch (cached), got {token_fetches}. "
+    assert token_fetches == 1, (
+        f"Expected exactly 1 OAuth token fetch (cached), got {token_fetches}. "
         f"Notices:\n" + "\n".join(pg_conn.notices)
     )
 
@@ -987,6 +986,8 @@ def test_alter_server_credentials_invalidates_token_cache(
     next catalog operation re-fetches it.  We verify this by enabling
     HTTP traffic tracing and checking that a POST to .../oauth/tokens
     appears after the ALTER SERVER (proving the cache was invalidated).
+    Test that cache is invalidated on bogus credentials (1 fetch, commit fails),
+    then cache is invalidated again on restored credentials (1 fetch, commit succeeds).
     """
     if installcheck:
         return
@@ -1078,8 +1079,8 @@ def test_alter_server_credentials_invalidates_token_cache(
         "Expected COMMIT to fail after ALTER SERVER set bogus client_id "
         "(cache should have been invalidated, forcing re-auth with bad creds)"
     )
-    assert post_alter_fetches >= 1, (
-        f"Expected token re-fetch after ALTER SERVER (cache invalidated), "
+    assert post_alter_fetches == 1, (
+        f"Expected exactly 1 token re-fetch after ALTER SERVER (cache invalidated), "
         f"got {post_alter_fetches}. Notices ({len(post_alter_notices)}):\n"
         + "\n".join(post_alter_notices)
     )
@@ -1090,11 +1091,21 @@ def test_alter_server_credentials_invalidates_token_cache(
     )
     superuser_conn.commit()
 
+    superuser_conn.notices.clear()
+
     run_command(
         f"INSERT INTO {SCHEMA_NAME}.{TABLE_NAME} VALUES (4)",
         superuser_conn,
     )
     superuser_conn.commit()
+
+    restore_fetches = sum(
+        1 for n in superuser_conn.notices if "oauth/tokens" in n and "POST" in n
+    )
+    assert restore_fetches == 1, (
+        f"Expected exactly 1 token re-fetch after restoring credentials, "
+        f"got {restore_fetches}. Notices:\n" + "\n".join(superuser_conn.notices)
+    )
 
     results = run_query(
         f"SELECT count(*) FROM {SCHEMA_NAME}.{TABLE_NAME}", superuser_conn

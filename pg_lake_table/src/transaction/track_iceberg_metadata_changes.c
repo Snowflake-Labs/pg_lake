@@ -292,10 +292,9 @@ PostAllRestCatalogRequests(void)
 			if (createTableRequest != NULL)
 			{
 				HttpResult	httpResult =
-					SendRequestToRestCatalog(HTTP_POST, requestPerTable->tableRestUrl,
-											 createTableRequest->body,
-											 PostHeadersWithAuth(PgLakeXactRestCatalog->catalogOpts),
-											 PgLakeXactRestCatalog->catalogOpts);
+					SendRequestToRestCatalog(PgLakeXactRestCatalog->catalogOpts, HTTP_POST,
+											 requestPerTable->tableRestUrl, createTableRequest->body,
+											 PostHeadersWithAuth(PgLakeXactRestCatalog->catalogOpts));
 
 				if (httpResult.status != 200)
 				{
@@ -310,10 +309,9 @@ PostAllRestCatalogRequests(void)
 			else if (dropTableRequest != NULL)
 			{
 				HttpResult	httpResult =
-					SendRequestToRestCatalog(HTTP_DELETE, requestPerTable->tableRestUrl,
-											 NULL,
-											 DeleteHeadersWithAuth(PgLakeXactRestCatalog->catalogOpts),
-											 PgLakeXactRestCatalog->catalogOpts);
+					SendRequestToRestCatalog(PgLakeXactRestCatalog->catalogOpts, HTTP_DELETE,
+											 requestPerTable->tableRestUrl, NULL,
+											 DeleteHeadersWithAuth(PgLakeXactRestCatalog->catalogOpts));
 
 				if (httpResult.status != 204)
 				{
@@ -433,9 +431,9 @@ PostAllRestCatalogRequests(void)
 
 		char	   *url = psprintf(REST_CATALOG_TRANSACTION_COMMIT,
 								   PgLakeXactRestCatalog->catalogOpts->host, catalogName);
-		HttpResult	httpResult = SendRequestToRestCatalog(HTTP_POST, url, batchRequestBody->data,
-														  PostHeadersWithAuth(PgLakeXactRestCatalog->catalogOpts),
-														  PgLakeXactRestCatalog->catalogOpts);
+		HttpResult	httpResult = SendRequestToRestCatalog(PgLakeXactRestCatalog->catalogOpts, HTTP_POST,
+														  url, batchRequestBody->data,
+														  PostHeadersWithAuth(PgLakeXactRestCatalog->catalogOpts));
 
 		if (httpResult.status != 204)
 		{
