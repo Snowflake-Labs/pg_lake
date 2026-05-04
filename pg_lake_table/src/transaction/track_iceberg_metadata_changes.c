@@ -1003,6 +1003,13 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 	/*
 	 * get current state of data files, which are not applied to metadata yet,
 	 * from catalog
+	 *
+	 * We skip per-column min/max stats on this read. The diff against the
+	 * last-pushed metadata below (FindChangedFilesSinceMetadata) only looks
+	 * at paths, and stats are only needed for the small subset of newly added
+	 * files — loaded in a targeted follow-up call below. On large
+	 * changelogs this avoids materializing one SPI row per (file × stats
+	 * column) just to diff paths.
 	 */
 	bool		dataOnly = false;
 	bool		newFilesOnly = false;
@@ -1011,7 +1018,8 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 	Snapshot	snapshot = GetTransactionSnapshot();
 
 	HTAB	   *currentFilesMap = GetTableDataFilesByPathHashFromCatalog(opTracker->relationId, dataOnly, newFilesOnly,
-																		 forUpdate, orderBy, snapshot, allTransforms);
+																		 forUpdate, orderBy, snapshot, allTransforms,
+																		 true /* skipColumnStats */ );
 
 	/* get last pushed metadata */
 	IcebergTableMetadata *lastMetadata = GetLastPushedIcebergMetadata(opTracker);
@@ -1021,6 +1029,14 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 	List	   *removedFilePaths = NIL;
 
 	FindChangedFilesSinceMetadata(currentFilesMap, lastMetadata, &addedFiles, &removedFilePaths);
+
+	/*
+	 * Now that we know which files are newly added, load per-column stats
+	 * targeted to just those paths. Removed files don't need stats — the
+	 * manifest DELETE entry carries only the path — so this is bounded by
+	 * the actual write size rather than by total files in the changelog.
+	 */
+	LoadColumnStatsForFiles(opTracker->relationId, addedFiles);
 
 	/*
 	 * We have found the new files that are added since the last metadata

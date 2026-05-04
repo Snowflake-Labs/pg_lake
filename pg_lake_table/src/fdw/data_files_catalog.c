@@ -113,7 +113,8 @@ GetTableDataFilesFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
 	HTAB	   *dataFilesHash = GetTableDataFilesHashFromCatalog(relationId, dataOnly,
 																 newFilesOnly, forUpdate,
 																 orderBy, snapshot,
-																 partitionTransforms);
+																 partitionTransforms,
+																 false /* skipColumnStats */ );
 
 	List	   *dataFiles = TableDataFileHashToList(dataFilesHash);
 
@@ -130,11 +131,15 @@ GetTableDataFilesFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
  * If newFilesOnly is true, only data files that are added in the current transaction are returned.
  * If orderBy is not null, it is used to sort results.
  * If snapshot is set, it is used for the query.
+ * If skipColumnStats is true, the per-column min/max stats are not loaded.
+ * Callers that only need file-level info (path, id, row count, partition) can
+ * pass true to avoid the expensive join against data_file_column_stats; stats
+ * can be loaded on demand for a subset of files via LoadColumnStatsForFiles().
  */
 HTAB *
 GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
 								 bool forUpdate, char *orderBy, Snapshot snapshot,
-								 List *partitionTransforms)
+								 List *partitionTransforms, bool skipColumnStats)
 {
 	MemoryContext callerContext = CurrentMemoryContext;
 
@@ -153,12 +158,21 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
 						    /* 5 */ "f.file_size, "
 						    /* 6 */ "f.deleted_row_count, "
 						    /* 7 */ "f.updated_time, "
-						    /* 8 */ "f.first_row_id, "
-						    /* 9 */ "sma.field_id, "
-						    /* 10 */ "sma.field_pg_type, "
-						    /* 11 */ "sma.field_pg_typemod, "
-						    /* 12 */ "sma.lower_bound, "
-						    /* 13 */ "sma.upper_bound, "
+						    /* 8 */ "f.first_row_id, ");
+
+	if (!skipColumnStats)
+		appendStringInfoString(&metadataQuery,
+							    /* 9 */ "sma.field_id, "
+							    /* 10 */ "sma.field_pg_type, "
+							    /* 11 */ "sma.field_pg_typemod, "
+							    /* 12 */ "sma.lower_bound, "
+							    /* 13 */ "sma.upper_bound, ");
+	else
+		appendStringInfoString(&metadataQuery,
+							   "NULL::bigint, NULL::oid, NULL::int4, "
+							   "NULL::text, NULL::text, ");
+
+	appendStringInfoString(&metadataQuery,
 						    /* 14 */ "p.partition_field_id, "
 						    /* 15 */ "p.partition_field_name, "
 						    /* 16 */ "p.value, "
@@ -188,15 +202,18 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
 						   "LEFT JOIN (" DATA_FILE_PARTITION_VALUES_TABLE_QUALIFIED
 						   " JOIN " PARTITION_FIELDS_TABLE_QUALIFIED
 						   " USING (table_name, partition_field_id) "
-						   ") p USING (table_name, id) "
-						   "LEFT JOIN ("
-						   DATA_FILE_COLUMN_STATS_TABLE_QUALIFIED " s "
-						   "JOIN " MAPPING_TABLE_NAME
-						   " m USING (table_name, field_id) "
-						   "JOIN pg_attribute a ON (a.attrelid OPERATOR(pg_catalog.=) m.table_name "
-						   "                       AND a.attnum   OPERATOR(pg_catalog.=) m.pg_attnum "
-						   "                       AND NOT a.attisdropped)"
-						   ") sma USING (table_name, path)");
+						   ") p USING (table_name, id) ");
+
+	if (!skipColumnStats)
+		appendStringInfoString(&metadataQuery,
+							   "LEFT JOIN ("
+							   DATA_FILE_COLUMN_STATS_TABLE_QUALIFIED " s "
+							   "JOIN " MAPPING_TABLE_NAME
+							   " m USING (table_name, field_id) "
+							   "JOIN pg_attribute a ON (a.attrelid OPERATOR(pg_catalog.=) m.table_name "
+							   "                       AND a.attnum   OPERATOR(pg_catalog.=) m.pg_attnum "
+							   "                       AND NOT a.attisdropped)"
+							   ") sma USING (table_name, path)");
 
 
 	if (orderBy != NULL)
@@ -354,15 +371,17 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
 /*
  * GetTableDataFilesByPathHashFromCatalog retrieves the data files for a given table
  * and returns a hash table indexed by file path.
+ *
+ * See GetTableDataFilesHashFromCatalog for the meaning of skipColumnStats.
  */
 HTAB *
 GetTableDataFilesByPathHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
 									   bool forUpdate, char *orderBy, Snapshot snapshot,
-									   List *partitionTransforms)
+									   List *partitionTransforms, bool skipColumnStats)
 {
 	HTAB	   *filesById = GetTableDataFilesHashFromCatalog(relationId, dataOnly, newFilesOnly,
 															 forUpdate, orderBy, snapshot,
-															 partitionTransforms);
+															 partitionTransforms, skipColumnStats);
 
 	HTAB	   *filesByPath = CreateDataFilesByPathHash();
 
@@ -384,6 +403,136 @@ GetTableDataFilesByPathHashFromCatalog(Oid relationId, bool dataOnly, bool newFi
 	}
 
 	return filesByPath;
+}
+
+
+/*
+ * LoadColumnStatsForFiles fills in per-column min/max stats for the given
+ * data files, targeting only their paths. This lets callers pair a stats-free
+ * bulk read (GetTableDataFilesHashFromCatalog with skipColumnStats=true) with
+ * a narrow stats load for just the files that actually need them (e.g. the
+ * handful of newly added files in a transaction).
+ *
+ * The dataFiles list must contain TableDataFile pointers whose columnStats
+ * are currently NIL; this function appends to dataFile->stats.columnStats.
+ */
+void
+LoadColumnStatsForFiles(Oid relationId, List *dataFiles)
+{
+	if (dataFiles == NIL)
+		return;
+
+	MemoryContext callerContext = CurrentMemoryContext;
+
+	List	   *pathList = NIL;
+	ListCell   *fileCell = NULL;
+
+	foreach(fileCell, dataFiles)
+	{
+		TableDataFile *dataFile = lfirst(fileCell);
+
+		pathList = lappend(pathList, dataFile->path);
+	}
+
+	char	   *query =
+		"select "
+		 /* 1 */ "s.path, "
+		 /* 2 */ "s.field_id, "
+		 /* 3 */ "m.field_pg_type, "
+		 /* 4 */ "m.field_pg_typemod, "
+		 /* 5 */ "s.lower_bound, "
+		 /* 6 */ "s.upper_bound "
+		"from " DATA_FILE_COLUMN_STATS_TABLE_QUALIFIED " s "
+		"JOIN " MAPPING_TABLE_NAME " m USING (table_name, field_id) "
+		"JOIN pg_attribute a ON (a.attrelid OPERATOR(pg_catalog.=) m.table_name "
+		"                        AND a.attnum   OPERATOR(pg_catalog.=) m.pg_attnum "
+		"                        AND NOT a.attisdropped) "
+		"where s.table_name OPERATOR(pg_catalog.=) $1 "
+		"  AND s.path       OPERATOR(pg_catalog.=) ANY($2)";
+
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
+
+	DECLARE_SPI_ARGS(2);
+	SPI_ARG_VALUE(1, OIDOID, relationId, false);
+	SPI_ARG_VALUE(2, TEXTARRAYOID, StringListToArray(pathList), false);
+
+	bool		readOnly = false;
+
+	SPI_EXECUTE(query, readOnly);
+
+	for (int rowIndex = 0; rowIndex < SPI_processed; rowIndex++)
+	{
+		MemoryContext spiContext = MemoryContextSwitchTo(callerContext);
+
+		bool		isPathNull = false;
+		char	   *path = GET_SPI_VALUE(TEXTOID, rowIndex, 1, &isPathNull);
+
+		if (isPathNull)
+		{
+			MemoryContextSwitchTo(spiContext);
+			continue;
+		}
+
+		bool		isFieldIdNull = false;
+		int64		fieldId = GET_SPI_VALUE(INT8OID, rowIndex, 2, &isFieldIdNull);
+
+		if (isFieldIdNull)
+		{
+			MemoryContextSwitchTo(spiContext);
+			continue;
+		}
+
+		bool		isPgTypeNull = false;
+		bool		isPgTypeModNull = false;
+
+		PGType		pgType = {
+			.postgresTypeOid = GET_SPI_VALUE(OIDOID, rowIndex, 3, &isPgTypeNull),
+			.postgresTypeMod = GET_SPI_VALUE(INT4OID, rowIndex, 4, &isPgTypeModNull)
+		};
+
+		char	   *lowerBoundText = NULL;
+		char	   *upperBoundText = NULL;
+
+		bool		isLowerBoundNull = false;
+		Datum		lowerBoundDatum = GET_SPI_DATUM(rowIndex, 5, &isLowerBoundNull);
+
+		if (!isLowerBoundNull)
+			lowerBoundText = TextDatumGetCString(lowerBoundDatum);
+
+		bool		isUpperBoundNull = false;
+		Datum		upperBoundDatum = GET_SPI_DATUM(rowIndex, 6, &isUpperBoundNull);
+
+		if (!isUpperBoundNull)
+			upperBoundText = TextDatumGetCString(upperBoundDatum);
+
+		/*
+		 * Walk the caller's list to find the matching struct. dataFiles is
+		 * expected to be small (typically 1-2 entries per transaction), so a
+		 * linear search is fine and avoids an extra pointer-valued hash.
+		 */
+		ListCell   *lc = NULL;
+
+		foreach(lc, dataFiles)
+		{
+			TableDataFile *dataFile = lfirst(lc);
+
+			if (strcmp(dataFile->path, path) != 0)
+				continue;
+
+			if (ColumnStatAlreadyAdded(dataFile->stats.columnStats, fieldId))
+				break;
+
+			DataFileColumnStats *columnStats =
+				CreateDataFileColumnStats(fieldId, pgType, lowerBoundText, upperBoundText);
+
+			dataFile->stats.columnStats = lappend(dataFile->stats.columnStats, columnStats);
+			break;
+		}
+
+		MemoryContextSwitchTo(spiContext);
+	}
+
+	SPI_END();
 }
 
 
