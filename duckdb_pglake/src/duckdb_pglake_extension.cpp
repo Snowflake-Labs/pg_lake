@@ -598,6 +598,21 @@ DUCKDB_EXTENSION_API void duckdb_pglake_init_connection(duckdb_connection connec
 		conn->context->registered_state->GetOrCreate<duckdb::PgLakeQueryListener>("pg_lake_query_listener");
 
 	queryListener->connectionId = connectionId;
+
+	/*
+	 * pg_lake's read path serializes all remote I/O through pgduck_server,
+	 * so there is no concurrent reader that would benefit from DuckDB's
+	 * per-URL etag-consistency check. The check only hurts us: catalog.json
+	 * is rewritten in place by publishers, and any session that reads it
+	 * twice (e.g. list_object_store_tables poll loops) trips a
+	 * "ETag was initially X and now returned Y" error whenever a writer
+	 * races between the two reads. Disable the check per-connection.
+	 */
+	auto result = conn->Query("SET unsafe_disable_etag_checks = true");
+	if (result->HasError()) {
+		PGDUCK_SERVER_DEBUG("failed to disable etag checks on new connection: %s",
+							result->GetError().c_str());
+	}
 }
 
 }

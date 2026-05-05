@@ -75,7 +75,15 @@ list_object_store_tables(PG_FUNCTION_ARGS)
 		GetInternalObjectStoreCatalogFilePath(catalogName) :
 		GetExternalObjectStoreCatalogFilePath(catalogName);
 
-	char	   *catalogContent = GetTextFromURI(catalogPath);
+	/*
+	 * catalog.json is rewritten in place by the publisher and must reflect
+	 * the latest contents on every read.  Prefix with nocache so the caching
+	 * file system skips both the on-disk pgduck cache and any in-process etag
+	 * tracking, which would otherwise serve stale contents (or error out on
+	 * an etag mismatch when a concurrent publisher has just written a new
+	 * version).
+	 */
+	char	   *catalogContent = GetTextFromURI(psprintf("nocache%s", catalogPath));
 
 	StringInfo	getObjectStoreTables = makeStringInfo();
 
@@ -397,7 +405,16 @@ GetTableMetadataLocationFromExternalObjectStoreCatalog(const char *catalogName, 
 {
 	const char *catalogPath =
 		GetExternalObjectStoreCatalogFilePath(catalogName);
-	char	   *catalogContent = GetTextFromURI(catalogPath);
+
+	/*
+	 * catalog.json is rewritten in place by the publisher and must reflect
+	 * the latest contents on every read.  Prefix with nocache so the caching
+	 * file system skips both the on-disk pgduck cache and any in-process etag
+	 * tracking, which would otherwise resolve to a stale metadata-location
+	 * (or error out on an etag mismatch when a concurrent publisher has just
+	 * written a new version).
+	 */
+	char	   *catalogContent = GetTextFromURI(psprintf("nocache%s", catalogPath));
 
 	StringInfo	metadataLocationStrInfo = makeStringInfo();
 	StringInfo	getMetadataLocation = makeStringInfo();
