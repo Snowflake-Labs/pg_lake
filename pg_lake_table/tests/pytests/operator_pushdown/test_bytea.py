@@ -8,7 +8,6 @@ import json
 from decimal import *
 from utils_pytest import *
 
-
 # including an ID as part of each parameter set
 # where id is oprcode for the given operator
 # this id shows up in the pytest output
@@ -16,32 +15,32 @@ test_cases = [
     (
         "byteaeq",
         "WHERE col_bytea = '\\xdeadbeef'",
-        "WHERE (col_bytea = ('\\xde\\xad\\xbe\\xef'::text)::bytea)",
+        'WHERE ("col_bytea" = (\'\\xde\\xad\\xbe\\xef\'::"text")::"bytea")',
     ),
     (
         "byteane",
         "WHERE col_bytea <> '\\xdeadbeef'",
-        "WHERE (col_bytea <> ('\\xde\\xad\\xbe\\xef'::text)::bytea)",
+        'WHERE ("col_bytea" <> (\'\\xde\\xad\\xbe\\xef\'::"text")::"bytea")',
     ),
     (
         "bytea_lt",
         "WHERE col_bytea < '\\xaaaa'",
-        "WHERE (col_bytea < ('\\xaa\\xaa'::text)::bytea)",
+        'WHERE ("col_bytea" < (\'\\xaa\\xaa\'::"text")::"bytea")',
     ),
     (
         "bytea_le",
         "WHERE col_bytea <= '\\x0000'",
-        "WHERE (col_bytea <= ('\\x00\\x00'::text)::bytea)",
+        'WHERE ("col_bytea" <= (\'\\x00\\x00\'::"text")::"bytea")',
     ),
     (
         "bytea_gt",
         "WHERE col_bytea > '\\x0000'",
-        "WHERE (col_bytea > ('\\x00\\x00'::text)::bytea)",
+        'WHERE ("col_bytea" > (\'\\x00\\x00\'::"text")::"bytea")',
     ),
     (
         "bytea_ge",
         "WHERE col_bytea >= '\\xaaaa'",
-        "WHERE (col_bytea >= ('\\xaa\\xaa'::text)::bytea)",
+        'WHERE ("col_bytea" >= (\'\\xaa\\xaa\'::"text")::"bytea")',
     ),
     ("byteacat", "WHERE col_bytea || '\\x0000' = '\\xdeadbeef0000'", "||"),
 ]

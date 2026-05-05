@@ -44,11 +44,11 @@ def test_encode_decode_pushdown(
 
     if pushdown:
         assert_remote_query_contains_expression(
-            query, f"from_{format}(to_{format}(col_bytea))", pg_conn
+            query, f'"from_{format}"("to_{format}"("col_bytea"))', pg_conn
         )
     else:
         assert_remote_query_not_contains_expression(
-            query, f"from_{format}(to_{format}(col_bytea))", pg_conn
+            query, f'"from_{format}"("to_{format}"("col_bytea"))', pg_conn
         )
 
     heap_result = run_query(query, pg_conn)

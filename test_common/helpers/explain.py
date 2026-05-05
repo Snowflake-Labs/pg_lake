@@ -64,7 +64,6 @@ def assert_remote_query_contains_expression(query, expression, pg_conn):
     explain = "EXPLAIN (ANALYZE, VERBOSE, format " "JSON" ") " + query
     explain_result = perform_query_on_cursor(explain, pg_conn)[0]
     remote_sql = fetch_remote_sql(explain_result)
-    print(remote_sql)
     assert expression in remote_sql
 
 

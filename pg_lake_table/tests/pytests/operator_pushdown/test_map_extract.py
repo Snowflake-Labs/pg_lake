@@ -13,7 +13,7 @@ from utils_pytest import *
 def test_map_extract_operator_pushdown_where(pg_conn, map_extract_setup):
 
     operator_expression = "WHERE map_col->'foo' = 1"
-    expected_expression = "WHERE ((map_extract(map_col, 'foo'::text))[1] = 1)"
+    expected_expression = 'WHERE (("map_extract"("map_col", \'foo\'::"text"))[1] = 1)'
     query = "SELECT * FROM map_extract_pushdown.tbl " + operator_expression
 
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)
@@ -26,7 +26,7 @@ def test_map_extract_operator_pushdown_where(pg_conn, map_extract_setup):
 
 def test_map_extract_operator_pushdown_target(pg_conn, map_extract_setup):
 
-    expected_expression = "SELECT (map_extract(map_col, 'foo'::text))[1]"
+    expected_expression = 'SELECT ("map_extract"("map_col", \'foo\'::"text"))[1]'
     query = "SELECT map_col->'foo' FROM map_extract_pushdown.tbl"
 
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)
@@ -40,7 +40,7 @@ def test_map_extract_operator_pushdown_target(pg_conn, map_extract_setup):
 def test_map_extract_function_pushdown_where(pg_conn, map_extract_setup):
 
     operator_expression = "WHERE map_type.extract(map_col, 'foo') = 1"
-    expected_expression = "WHERE ((map_extract(map_col, 'foo'::text))[1] = 1)"
+    expected_expression = 'WHERE (("map_extract"("map_col", \'foo\'::"text"))[1] = 1)'
     query = "SELECT * FROM map_extract_pushdown.tbl " + operator_expression
 
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)
@@ -53,7 +53,7 @@ def test_map_extract_function_pushdown_where(pg_conn, map_extract_setup):
 
 def test_map_extract_function_pushdown_target(pg_conn, map_extract_setup):
 
-    expected_expression = "SELECT (map_extract(map_col, 'foo'::text))[1]"
+    expected_expression = 'SELECT ("map_extract"("map_col", \'foo\'::"text"))[1]'
     query = "SELECT map_type.extract(map_col, 'foo') FROM map_extract_pushdown.tbl"
 
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)

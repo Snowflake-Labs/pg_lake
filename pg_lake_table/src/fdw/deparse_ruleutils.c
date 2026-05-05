@@ -391,8 +391,18 @@ DeparseQualifiedQuery(Query *query)
 							 PGC_USERSET, PGC_S_SESSION,
 							 GUC_ACTION_SAVE, true, 0, false);
 
+	/*
+	 * Force all identifiers to be double-quoted so that DuckDB-reserved
+	 * keywords (PIVOT, QUALIFY, LAMBDA, etc.) that PostgreSQL leaves unquoted
+	 * are properly escaped for pgduck_server.
+	 */
 	bool		pretty = false;
+	bool		save_quote_all = quote_all_identifiers;
+
+	quote_all_identifiers = true;
 	char	   *newQuery = pg_get_querydef(query, pretty);
+
+	quote_all_identifiers = save_quote_all;
 
 	/*
 	 * Restore the GUC variable search_path we set above.

@@ -29,14 +29,14 @@ import pytest
 # ```
 
 test_agg_cases = [
-    ("avg(col_int2)", "avg(col_int2)", "avg(col_int2)"),
-    ("avg(col_int4)", "avg(col_int4)", "avg(col_int4)"),
-    ("avg(col_int8)", "avg(col_int8)", "avg(col_int8)"),
-    ("avg(col_float)", "avg(col_float)", "avg(col_float)"),
-    ("avg(double precision)", "avg(col_double)", "avg(col_double)"),
-    ("avg(numeric)", "avg(col_numeric)", "avg(col_numeric)"),
-    ("avg(numeric_3_1)", "avg(col_numeric_1)", "avg(col_numeric_1)"),
-    ("avg(real)", "avg(col_real)", "avg(col_real)"),
+    ("avg(col_int2)", "avg(col_int2)", '"avg"("col_int2")'),
+    ("avg(col_int4)", "avg(col_int4)", '"avg"("col_int4")'),
+    ("avg(col_int8)", "avg(col_int8)", '"avg"("col_int8")'),
+    ("avg(col_float)", "avg(col_float)", '"avg"("col_float")'),
+    ("avg(double precision)", "avg(col_double)", '"avg"("col_double")'),
+    ("avg(numeric)", "avg(col_numeric)", '"avg"("col_numeric")'),
+    ("avg(numeric_3_1)", "avg(col_numeric_1)", '"avg"("col_numeric_1")'),
+    ("avg(real)", "avg(col_real)", '"avg"("col_real")'),
 ]
 
 

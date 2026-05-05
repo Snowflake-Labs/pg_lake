@@ -13,7 +13,7 @@ from utils_pytest import *
 test_cases = [
     # (Test name, pushdownable WHERE clause, expected pattern in query)
     ("geometrytype", "WHERE geometrytype(col_poly) = 'POLYGON'", "st_geometrytype"),
-    ("ST_Area", "WHERE ST_Area(col_poly) > 0", "st_area("),
+    ("ST_Area", "WHERE ST_Area(col_poly) > 0", '"st_area"'),
     ("ST_Area", "WHERE ST_Area(col_poly,true) > 0", "st_area_spheroid"),
     ("ST_Area", "WHERE ST_Area(col_poly,false) > 0", "st_area_spheroid"),
     (
@@ -143,7 +143,7 @@ test_cases = [
     ("ST_IsRing", "WHERE ST_IsRing(col_line)", "st_isring"),
     ("ST_IsSimple", "WHERE ST_IsSimple(col_poly)", "st_issimple"),
     ("ST_IsValid", "WHERE ST_IsValid(col_poly)", "st_isvalid"),
-    ("ST_Length", "WHERE ST_Length(col_line) > 0", "st_length("),
+    ("ST_Length", "WHERE ST_Length(col_line) > 0", '"st_length"('),
     ("ST_Length", "WHERE ST_Length(col_line,true) > 0.1", "st_length_spheroid"),
     ("ST_Length", "WHERE ST_Length(col_line,false) > 0.1", "st_length_spheroid"),
     # ("ST_LineMerge(geometry)", "WHERE NOT ST_IsEmpty(ST_LineMerge(col_poly))", "st_linemerge"),
@@ -171,7 +171,7 @@ test_cases = [
         "st_numinteriorrings",
     ),
     ("ST_Overlaps", "WHERE NOT ST_Overlaps(col_poly, col_poly)", "st_overlaps"),
-    ("ST_Perimeter", "WHERE ST_Perimeter(col_poly) > 0", "st_perimeter("),
+    ("ST_Perimeter", "WHERE ST_Perimeter(col_poly) > 0", '"st_perimeter"('),
     (
         "ST_Perimeter",
         "WHERE ST_Perimeter(col_poly,true) > 0.1",

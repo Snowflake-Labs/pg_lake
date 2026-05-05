@@ -2,7 +2,6 @@ import pytest
 import re
 from utils_pytest import *
 
-
 queries = [
     "SELECT DISTINCT COUNT(DISTINCT metric1) AS unique_metric1 FROM Users_f GROUP BY metric2 ORDER BY unique_metric1 DESC LIMIT 5;",
     "SELECT DISTINCT id, MIN(float_value) * 2 AS min_doubled, MAX(float_value) / 2 AS max_halved, SUM(metric1), COUNT(metric2), AVG(metric1) FROM Users_f GROUP BY id;",
@@ -89,7 +88,7 @@ def test_whole_var_queries(s3, extension, pg_conn):
             # this is very specifically tied to our implementation where
             # we deparse queries like whole_var_queries in a way that
             # each column is checked whether each column is NULL or NOT
-            if not re.search(r"\(r\d+\.id IS NOT NULL\)", str(results)):
+            if not re.search(r'\("r\d+"\."id" IS NOT NULL\)', str(results)):
                 assert False, "whole-var query failed:" + query
 
     run_command("RESET pg_lake_table.enable_full_query_pushdown;", pg_conn)

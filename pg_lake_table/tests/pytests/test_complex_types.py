@@ -132,7 +132,7 @@ def test_struct_from_user_composite_type(pg_conn, extension):
         """
     SELECT (comp_col).a FROM test_struct_from_user_composite_type WHERE (comp_col).b = '2.5'
     """,
-        "SELECT (comp_col).a",
+        'SELECT ("comp_col")."a"',
         pg_conn,
     )
 
@@ -141,7 +141,7 @@ def test_struct_from_user_composite_type(pg_conn, extension):
         """
     SELECT (comp_col).a FROM test_struct_from_user_composite_type WHERE (comp_col).b = '2.5'
     """,
-        "WHERE ((comp_col).b",
+        'WHERE (("comp_col")."b"',
         pg_conn,
     )
 
