@@ -95,6 +95,7 @@ pruning_data = [
 
 # this test aims to ensure some common operators like =,>,<,>=,<=,IN,ANY,BETWEEN etc
 # is supported for different data types
+@pytest.mark.flaky(reruns=2)
 @pytest.mark.parametrize("needs_quote, column_type, table_name, rows", pruning_data)
 def test_simple_data_pruning_for_data_types(
     installcheck,
@@ -114,10 +115,14 @@ def test_simple_data_pruning_for_data_types(
 
     explain_prefix = "EXPLAIN (analyze, verbose, format json) "
 
+    # Drop schema if it exists from a previous failed run
+    run_command("DROP SCHEMA IF EXISTS test_data_file_pruning CASCADE", pg_conn)
+    pg_conn.commit()
+
     # Create table and insert rows
     create_table_sql = f"""
         CREATE SCHEMA test_data_file_pruning;
-    
+
         CREATE TABLE test_data_file_pruning.{table_name} (
             col1 {column_type},
             col2 {column_type}

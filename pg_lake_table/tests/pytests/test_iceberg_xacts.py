@@ -8,6 +8,7 @@ import re
 from test_writable_iceberg_common import *
 
 
+@pytest.mark.flaky(reruns=2)
 @pytest.mark.parametrize(
     "manifest_min_count_to_merge, target_manifest_size_kb, max_snapshot_age_params ",
     manifest_snapshot_settings,

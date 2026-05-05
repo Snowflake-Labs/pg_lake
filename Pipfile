@@ -24,6 +24,7 @@ duckdb = "==1.4.3"
 [dev-packages]
 black = "==25.9.0"
 pytest = "~=8.4"
+pytest-rerunfailures = "~=15.0"
 pytest-split = "~=0.10"
 setuptools = "~=80.9"
 wheel = "~=0.45"

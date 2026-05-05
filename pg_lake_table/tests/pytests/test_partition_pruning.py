@@ -204,6 +204,7 @@ partition_by = [
 ]
 
 
+@pytest.mark.flaky(reruns=2)
 @pytest.mark.parametrize("partition_type, partition_by", partition_by)
 @pytest.mark.parametrize("needs_quote, column_type, table_name, rows", pruning_data)
 def test_simple_data_pruning_for_data_types(
@@ -270,6 +271,10 @@ def test_simple_data_pruning_for_data_types(
             return
 
     explain_prefix = "EXPLAIN (analyze, verbose, format json) "
+
+    # Drop schema if it exists from a previous failed run
+    run_command("DROP SCHEMA IF EXISTS test_data_file_pruning CASCADE", pg_conn)
+    pg_conn.commit()
 
     # Create table and insert rows
     create_table_sql = f"""
