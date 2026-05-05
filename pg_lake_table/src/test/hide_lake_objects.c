@@ -29,6 +29,7 @@
 #include "catalog/pg_attrdef.h"
 #include "catalog/pg_constraint.h"
 #include "catalog/pg_class.h"
+#include "catalog/pg_default_acl.h"
 #include "catalog/pg_depend.h"
 #include "catalog/pg_enum.h"
 #include "catalog/pg_event_trigger.h"
@@ -98,6 +99,15 @@ typedef struct ReferencedObject
  */
 bool		HideObjectsCreatedByLake = false;
 
+/*
+ * List of externally-registered CachedExtensionIds * whose objects should also
+ * be hidden from catalog queries when HideObjectsCreatedByLake is on.  The
+ * builtin pg_lake suite is handled directly in IsExtensionObjectCreatedByLake;
+ * this list lets other extensions opt in at _PG_init time without having to
+ * edit hide_lake_objects.c.
+ */
+static List *ExternalHideableExtensions = NIL;
+
 
 PG_FUNCTION_INFO_V1(is_object_created_by_lake);
 
@@ -128,6 +138,7 @@ is_object_created_by_lake(PG_FUNCTION_ARGS)
 		case AccessMethodRelationId:
 		case AttrDefaultRelationId:
 		case ConstraintRelationId:
+		case DefaultAclRelationId:
 		case EventTriggerRelationId:
 		case ForeignServerRelationId:
 		case ForeignDataWrapperRelationId:
@@ -233,6 +244,7 @@ HideObjectsCreatedByLakeFromCatalogTables(Node *node, void *context)
 				case AttrDefaultRelationId:
 				case AttributeRelationId:
 				case ConstraintRelationId:
+				case DefaultAclRelationId:
 				case EnumRelationId:
 				case EventTriggerRelationId:
 				case ForeignDataWrapperRelationId:
@@ -576,5 +588,43 @@ IsExtensionObjectCreatedByLake(ObjectAddress extensionAddress)
 		return true;
 	}
 
+	ListCell   *lc;
+
+	foreach(lc, ExternalHideableExtensions)
+	{
+		CachedExtensionIds *ext = (CachedExtensionIds *) lfirst(lc);
+
+		if (IsExtensionCreated(ext) && extensionAddress.objectId == ExtensionId(ext))
+			return true;
+	}
+
 	return false;
+}
+
+
+/*
+ * RegisterHideableExtension adds an extension to the list of externally-
+ * registered extensions whose objects should be hidden from catalog queries
+ * when HideObjectsCreatedByLake is on.  Intended to be called from an
+ * extension's _PG_init once it has created its CachedExtensionIds.
+ *
+ * The registration is stored in TopMemoryContext so it survives across
+ * statements, and is idempotent: registering the same extension twice is a
+ * no-op.
+ */
+void
+RegisterHideableExtension(CachedExtensionIds * extension)
+{
+	if (extension == NULL)
+		return;
+
+	if (!HideObjectsCreatedByLake)
+		return;
+
+	MemoryContext oldContext = MemoryContextSwitchTo(TopMemoryContext);
+
+	if (!list_member_ptr(ExternalHideableExtensions, extension))
+		ExternalHideableExtensions = lappend(ExternalHideableExtensions, extension);
+
+	MemoryContextSwitchTo(oldContext);
 }

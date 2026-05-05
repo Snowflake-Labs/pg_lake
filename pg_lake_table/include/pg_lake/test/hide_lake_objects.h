@@ -19,7 +19,10 @@
 
 #include "postgres.h"
 
+#include "pg_extension_base/extension_ids.h"
+
 extern bool HideObjectsCreatedByLake;
 
 extern bool HideObjectsCreatedByLakeFromCatalogTables(Node *node, void *context);
 extern void DisableLocallyHideObjectsCreatedByLakeWhenAlreadyEnabled(void);
+extern PGDLLEXPORT void RegisterHideableExtension(CachedExtensionIds * extension);
