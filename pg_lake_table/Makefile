@@ -38,6 +38,21 @@ $(EXTENSION)--1.0.sql: $(EXTENSION).sql
 	cat $^ > $@
 
 
+pg_lake_table-test:
+	$(MAKE) -C tests/sample_extensions/pg_lake_table_test_hideable/
+
+install-pg_lake_table-test: pg_lake_table-test
+	$(MAKE) -C tests/sample_extensions/pg_lake_table_test_hideable/ install
+
+uninstall-pg_lake_table-test:
+	$(MAKE) -C tests/sample_extensions/pg_lake_table_test_hideable/ uninstall
+
+clean-pg_lake_table-test:
+	$(MAKE) -C tests/sample_extensions/pg_lake_table_test_hideable/ clean
+
+prepare-check: install install-pg_lake_table-test
+finish-check: uninstall-pg_lake_table-test
+
 # Custom target for running Python tests
 .PHONY: check
 check:

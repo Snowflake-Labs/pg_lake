@@ -78,7 +78,9 @@ runs:
 
     - name: Install the test extensions
       shell: bash
-      run: make -C pg_extension_base prepare-check
+      run: |
+        make -C pg_extension_base prepare-check
+        make -C pg_lake_table prepare-check
 
     - name: Upload postgres-${{ inputs.pg_version }} artifacts for ${{ inputs.container_os }}
       uses: actions/upload-artifact@v4

@@ -1,0 +1,7 @@
+comment = 'Test extension for RegisterHideableExtension'
+default_version = '1.0'
+module_pathname = '$libdir/pg_lake_table_test_hideable'
+relocatable = false
+requires = 'pg_extension_base,pg_lake_table'
+schema = pg_catalog
+#!shared_preload_libraries
