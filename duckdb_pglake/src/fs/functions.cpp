@@ -24,6 +24,7 @@
 
 #include "azure_blob_filesystem.hpp"
 #include "azure_dfs_filesystem.hpp"
+#include "http_metadata_cache.hpp"
 
 namespace duckdb {
 
@@ -225,6 +226,21 @@ UncacheFileExec(ClientContext &context, TableFunctionInput &data_p, DataChunk &o
 	shared_ptr<FileCacheManager> cacheManager = FileCacheManager::Get(context);
 	FileCacheManager::CacheRemoveStatus status =
 		cacheManager->RemoveCacheFile(context, functionData.url, waitForLock);
+
+	/*
+	 * Also evict the URL from httpfs's HTTPMetadataCache. That cache stores
+	 * the file length / last-modified / etag captured on the first open and
+	 * is used both to skip subsequent HEAD requests and to validate the etag
+	 * on range reads. When a caller explicitly uncaches a file, they are
+	 * signalling that the contents may have changed out of band; if we leave
+	 * the metadata-cache entry in place, later reads in the same session
+	 * either serve stale metadata or trip the etag-mismatch check.
+	 */
+	auto metadataCache =
+		context.registered_state->GetOrCreate<HTTPMetadataCache>("http_cache", true, true).get();
+	if (metadataCache) {
+		metadataCache->Erase(functionData.url);
+	}
 
 	/* Set return values */
 	output.SetValue(0,0, Value(status == FileCacheManager::CacheRemoveStatus::FILE_EXISTS));

@@ -939,6 +939,134 @@ def test_re_create_tables(
     pg_conn.commit()
 
 
+# Verifies that a reader picks up external rewrites of catalog.json.
+#
+# catalog.json is rewritten in place when the mapping from (namespace, table-name)
+# to metadata-location changes.  pgduck's read_text cache has no TTL or etag
+# check, so unless pg_lake invalidates the cache entry before reading, a reader
+# session that has already read catalog.json once will continue to resolve to
+# the stale metadata-location even after an external publisher updates it.
+#
+# The test forges that external mutation by overwriting catalog.json via boto3,
+# swapping the read table's metadata-location to point at a different writable
+# table's data, and checks that the reader session sees the swap.  Running this
+# test without the cache eviction in GetTableMetadataLocationFromExternalObject
+# StoreCatalog causes it to hang until the polling timeout or SELECT the old data.
+def test_object_store_catalog_external_rewrite(
+    pg_conn, s3, extension, with_default_location, adjust_object_store_settings
+):
+    import json
+
+    run_command("SET pg_lake_iceberg.default_catalog TO 'object_store'", pg_conn)
+    run_command(
+        f"""CREATE SCHEMA test_catalog_external_rewrite""",
+        pg_conn,
+    )
+
+    # Two writable tables with distinct contents.  Each push writes its own
+    # (namespace, table-name) -> metadata-location mapping into catalog.json.
+    run_command(
+        f"""CREATE TABLE test_catalog_external_rewrite.src_a(a INT) USING iceberg""",
+        pg_conn,
+    )
+    run_command(
+        f"""CREATE TABLE test_catalog_external_rewrite.src_b(a INT) USING iceberg""",
+        pg_conn,
+    )
+    run_command(
+        "INSERT INTO test_catalog_external_rewrite.src_a VALUES (1), (2), (3)",
+        pg_conn,
+    )
+    run_command(
+        "INSERT INTO test_catalog_external_rewrite.src_b VALUES (100), (200), (300)",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    wait_until_object_store_writable_table_pushed(
+        pg_conn, "test_catalog_external_rewrite", "src_a"
+    )
+    wait_until_object_store_writable_table_pushed(
+        pg_conn, "test_catalog_external_rewrite", "src_b"
+    )
+
+    # Reader table aliased to src_a.  First SELECT primes pgduck's read_text
+    # cache with the current catalog.json contents.
+    run_command(
+        f"""
+        CREATE TABLE test_catalog_external_rewrite.reader(a INT)
+        USING iceberg
+        WITH (read_only=True, catalog_table_name='src_a')
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    rows_before = run_query(
+        "SELECT a FROM test_catalog_external_rewrite.reader ORDER BY a",
+        pg_conn,
+    )
+    assert [r[0] for r in rows_before] == [1, 2, 3]
+
+    # Simulate an external publisher rewriting catalog.json: look up src_b's
+    # metadata-location and reassign it to the src_a entry, then PUT the
+    # result back to S3 directly (bypassing pg_lake, so the rewrite is
+    # invisible to any pg_lake-side invalidation machinery).
+    catalog_rows = run_query(
+        "SELECT catalog_table_name, metadata_location "
+        "FROM lake_iceberg.list_object_store_tables(current_database()) "
+        "WHERE catalog_namespace = 'test_catalog_external_rewrite' "
+        "ORDER BY catalog_table_name",
+        pg_conn,
+    )
+    locations = {name: loc for name, loc in catalog_rows}
+    assert "src_a" in locations and "src_b" in locations
+
+    # Build the new catalog.json: src_a now points at src_b's metadata.
+    new_catalog = {
+        "tables": [
+            {
+                "table-name": "src_a",
+                "namespace": "test_catalog_external_rewrite",
+                "metadata-location": locations["src_b"],
+            },
+            {
+                "table-name": "src_b",
+                "namespace": "test_catalog_external_rewrite",
+                "metadata-location": locations["src_b"],
+            },
+        ]
+    }
+
+    # The compiled-in external prefix is overridden by the test fixture to 'tmp'.
+    # Path format: {location_prefix}/{external_prefix}/catalog/{catalog_name}/catalog.json
+    dbname_rows = run_query("SELECT current_database()", pg_conn)
+    dbname = dbname_rows[0][0]
+    catalog_key = f"tmp/catalog/{dbname}/catalog.json"
+
+    s3.put_object(
+        Bucket=TEST_BUCKET,
+        Key=catalog_key,
+        Body=json.dumps(new_catalog),
+    )
+
+    # Reader in the same session must now see src_b's rows.  If the cache
+    # is not evicted before reading catalog.json, this SELECT returns the
+    # pre-rewrite (1,2,3) rows.
+    rows_after = run_query(
+        "SELECT a FROM test_catalog_external_rewrite.reader ORDER BY a",
+        pg_conn,
+    )
+    assert [r[0] for r in rows_after] == [100, 200, 300]
+
+    run_command(
+        f"""DROP SCHEMA test_catalog_external_rewrite CASCADE""",
+        pg_conn,
+    )
+    pg_conn.commit()
+    run_command("RESET pg_lake_iceberg.default_catalog", pg_conn)
+
+
 def assert_tables_are_the_same(pg_conn, tbl_1, tbl_2):
     res = run_query(
         f"""

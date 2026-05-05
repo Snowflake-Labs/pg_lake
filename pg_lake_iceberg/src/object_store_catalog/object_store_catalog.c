@@ -14,6 +14,7 @@
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/util/url_encode.h"
+#include "pg_lake/pgduck/cache_control.h"
 #include "pg_lake/pgduck/remote_storage.h"
 #include "pg_extension_base/spi_helpers.h"
 #include "pg_lake/util/s3_reader_utils.h"
@@ -74,6 +75,16 @@ list_object_store_tables(PG_FUNCTION_ARGS)
 		internalTables ?
 		GetInternalObjectStoreCatalogFilePath(catalogName) :
 		GetExternalObjectStoreCatalogFilePath(catalogName);
+
+	/*
+	 * catalog.json is rewritten in place by the publisher, so any cached
+	 * copy or cached metadata (length / etag) is immediately stale. Evict
+	 * both pgduck's on-disk cache and httpfs's HTTPMetadataCache entry for
+	 * this URL before reading, or we either serve stale contents or trip
+	 * an etag-mismatch error on the next read when the publisher has just
+	 * written a new version.
+	 */
+	RemoveFileFromCache((char *) catalogPath);
 
 	char	   *catalogContent = GetTextFromURI(catalogPath);
 
@@ -397,6 +408,17 @@ GetTableMetadataLocationFromExternalObjectStoreCatalog(const char *catalogName, 
 {
 	const char *catalogPath =
 		GetExternalObjectStoreCatalogFilePath(catalogName);
+
+	/*
+	 * catalog.json is rewritten in place by the publisher, so any cached
+	 * copy or cached metadata (length / etag) is immediately stale. Evict
+	 * both pgduck's on-disk cache and httpfs's HTTPMetadataCache entry for
+	 * this URL before reading, or we either resolve to a stale
+	 * metadata-location or trip an etag-mismatch error when the publisher
+	 * has just written a new version.
+	 */
+	RemoveFileFromCache((char *) catalogPath);
+
 	char	   *catalogContent = GetTextFromURI(catalogPath);
 
 	StringInfo	metadataLocationStrInfo = makeStringInfo();
