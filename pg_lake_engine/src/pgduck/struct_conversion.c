@@ -46,6 +46,31 @@ typedef struct RecordIOData
 } RecordIOData;
 
 /*
+ * QuoteDuckDBStructKey — wrap a field name in single quotes using DuckDB's
+ * escaping conventions for struct literal keys.  DuckDB uses backslash
+ * escaping inside single-quoted strings: single-quotes become \' and
+ * backslashes become \\.
+ */
+static const char *
+QuoteDuckDBStructKey(const char *fieldName)
+{
+	char	   *result = palloc(2 * strlen(fieldName) + 3);
+	char	   *p = result;
+	const char *s;
+
+	*p++ = '\'';
+	for (s = fieldName; *s; s++)
+	{
+		if (*s == '\'' || *s == '\\')
+			*p++ = '\\';
+		*p++ = *s;
+	}
+	*p++ = '\'';
+	*p = '\0';
+	return result;
+}
+
+/*
  * StructOutForPGDuck is a modified version of C<record_out> that emits the
  * DuckDB STRUCT format.  Compared to C<record_out>, we use the names of the
  * attribute keys as text literals, and surround the output with curly braces.
@@ -129,7 +154,7 @@ StructOutForPGDuck(Datum myStruct, CopyDataFormat format)
 		needComma = true;
 
 		/* emit column name and delimiter */
-		appendStringInfoString(&buf, quote_literal_cstr(NameStr(att->attname)));
+		appendStringInfoString(&buf, QuoteDuckDBStructKey(NameStr(att->attname)));
 		appendStringInfoCharMacro(&buf, ':');
 		appendStringInfoCharMacro(&buf, ' ');
 
