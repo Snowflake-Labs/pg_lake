@@ -77,11 +77,11 @@ list_object_store_tables(PG_FUNCTION_ARGS)
 		GetExternalObjectStoreCatalogFilePath(catalogName);
 
 	/*
-	 * catalog.json is rewritten in place by the publisher, so any cached
-	 * copy or cached metadata (length / etag) is immediately stale. Evict
-	 * both pgduck's on-disk cache and httpfs's HTTPMetadataCache entry for
-	 * this URL before reading, or we either serve stale contents or trip
-	 * an etag-mismatch error on the next read when the publisher has just
+	 * catalog.json is rewritten in place by the publisher, so any cached copy
+	 * or cached metadata (length / etag) is immediately stale. Evict both
+	 * pgduck's on-disk cache and httpfs's HTTPMetadataCache entry for this
+	 * URL before reading, or we either serve stale contents or trip an
+	 * etag-mismatch error on the next read when the publisher has just
 	 * written a new version.
 	 */
 	RemoveFileFromCache((char *) catalogPath);
@@ -410,12 +410,12 @@ GetTableMetadataLocationFromExternalObjectStoreCatalog(const char *catalogName, 
 		GetExternalObjectStoreCatalogFilePath(catalogName);
 
 	/*
-	 * catalog.json is rewritten in place by the publisher, so any cached
-	 * copy or cached metadata (length / etag) is immediately stale. Evict
-	 * both pgduck's on-disk cache and httpfs's HTTPMetadataCache entry for
-	 * this URL before reading, or we either resolve to a stale
-	 * metadata-location or trip an etag-mismatch error when the publisher
-	 * has just written a new version.
+	 * catalog.json is rewritten in place by the publisher, so any cached copy
+	 * or cached metadata (length / etag) is immediately stale. Evict both
+	 * pgduck's on-disk cache and httpfs's HTTPMetadataCache entry for this
+	 * URL before reading, or we either resolve to a stale metadata-location
+	 * or trip an etag-mismatch error when the publisher has just written a
+	 * new version.
 	 */
 	RemoveFileFromCache((char *) catalogPath);
 
