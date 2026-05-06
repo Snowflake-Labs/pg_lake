@@ -555,7 +555,10 @@ GetRestCatalogAccessToken(bool forceRefreshToken)
 		!TimestampDifferenceExceeds(now, RestCatalogAccessTokenExpiry, MINUTE_IN_MSECS))
 	{
 		if (RestCatalogAccessToken)
+		{
 			pfree(RestCatalogAccessToken);
+			RestCatalogAccessToken = NULL;
+		}
 
 		char	   *accessToken = NULL;
 		int			expiresIn = 0;
