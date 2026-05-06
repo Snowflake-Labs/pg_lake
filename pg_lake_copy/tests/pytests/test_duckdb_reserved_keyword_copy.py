@@ -135,6 +135,118 @@ def test_copy_to_json_with_reserved_keyword_columns(pg_conn, s3):
 
 
 # ---------------------------------------------------------------------------
+# Composite type field names with embedded double-quotes
+# ---------------------------------------------------------------------------
+
+
+def test_copy_roundtrip_composite_with_embedded_quote(pg_conn, s3):
+    """
+    COPY TO/FROM must handle composite types whose field names contain
+    double-quote characters.  The STRUCT type definition sent to DuckDB must
+    properly escape the embedded quotes.
+
+    Reproduces: https://github.com/snowflake-eng/sfpg-extension-pg_lake_replication/issues/361
+    """
+    url = f"s3://{TEST_BUCKET}/test_kw_copy_composite_quote/data.parquet"
+
+    try:
+        run_command(
+            """
+            CREATE TYPE test_kw_composite_quote AS (
+                U&"has\\0022quote" text,
+                normal int
+            )
+            """,
+            pg_conn,
+        )
+
+        run_command(
+            """
+            CREATE TABLE test_kw_cq_src (id int, s test_kw_composite_quote);
+            INSERT INTO test_kw_cq_src VALUES (1, ROW('hello', 42));
+            """,
+            pg_conn,
+        )
+
+        run_command(
+            f"COPY test_kw_cq_src TO '{url}' WITH (format 'parquet')",
+            pg_conn,
+        )
+
+        run_command(
+            f"""
+            CREATE TABLE test_kw_cq_dst (id int, s test_kw_composite_quote);
+            COPY test_kw_cq_dst FROM '{url}' WITH (format 'parquet');
+            """,
+            pg_conn,
+        )
+
+        result = run_query(
+            "SELECT id, (s).normal FROM test_kw_cq_dst",
+            pg_conn,
+        )
+        assert result == [[1, 42]]
+
+        result = run_query(
+            'SELECT (s).U&"has\\0022quote" FROM test_kw_cq_dst',
+            pg_conn,
+        )
+        assert result == [["hello"]]
+    finally:
+        pg_conn.rollback()
+
+
+def test_copy_roundtrip_csv_composite_with_embedded_quote(pg_conn, s3):
+    """
+    COPY TO/FROM CSV with composite types containing double-quote field names.
+    This exercises the read_csv columns= type string path.
+
+    Reproduces: https://github.com/snowflake-eng/sfpg-extension-pg_lake_replication/issues/361
+    """
+    url = f"s3://{TEST_BUCKET}/test_kw_copy_csv_composite_quote/data.csv"
+
+    try:
+        run_command(
+            """
+            CREATE TYPE test_kw_csv_cq AS (
+                U&"has\\0022quote" text,
+                normal int
+            )
+            """,
+            pg_conn,
+        )
+
+        run_command(
+            """
+            CREATE TABLE test_kw_csv_cq_src (id int, s test_kw_csv_cq);
+            INSERT INTO test_kw_csv_cq_src VALUES (1, ROW('world', 99));
+            """,
+            pg_conn,
+        )
+
+        run_command(
+            f"COPY test_kw_csv_cq_src TO '{url}' WITH (format 'csv', header on)",
+            pg_conn,
+        )
+
+        run_command(
+            f"""
+            CREATE TABLE test_kw_csv_cq_dst (id int, s test_kw_csv_cq);
+            COPY test_kw_csv_cq_dst FROM '{url}' WITH (format 'csv', header on);
+            """,
+            pg_conn,
+        )
+
+        result = run_query(
+            "SELECT id, (s).normal FROM test_kw_csv_cq_dst",
+            pg_conn,
+        )
+        assert result == [[1, 99]]
+    finally:
+        pg_conn.rollback()
+
+
+# ---------------------------------------------------------------------------
 # Parameterised round-trip tests — each keyword, each format
 # ---------------------------------------------------------------------------
 

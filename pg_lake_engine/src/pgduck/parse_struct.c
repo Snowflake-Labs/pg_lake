@@ -1127,90 +1127,10 @@ GetDuckDBStructDefinitionForCompositeType(CompositeType * type,
 }
 
 
-/*
- * This helper just quotes our input string to be used in a duckdb field name.
- */
 const char *
 QuoteDuckDBFieldName(char *fieldName)
 {
-	char	   *position = fieldName;
-
-	/*
-	 * If we are a reserved word or the field name starts with a digit, then
-	 * we *must* quote, so advance position to end of the string.
-	 */
-	if (IsDuckDBReservedWord(fieldName) || isdigit(*position))
-	{
-		position = strchr(position, '\0');
-	}
-	else
-	{
-		/*
-		 * Check if we even need quoting -- this does not include keyword
-		 * consideration, so maybe we should unconditionally quote.
-		 */
-		while (*position && (isalnum(*position) || *position == '_'))
-			position++;
-
-		/*
-		 * If we reached the end of string, we can just return the original
-		 * input.
-		 */
-		if (!*position)
-			return fieldName;
-	}
-
-	/*
-	 * The current quoting can only add at most one additional character per
-	 * input character, so we get a safe-sized buffer by doubling the input
-	 * fieldName length and adding space for two quotes and a terminator.
-	 */
-	char	   *quotedBuf = palloc0(2 * strlen(fieldName) + 3);
-
-	/* reset our position */
-	position = quotedBuf;
-
-	/* start quote */
-	*position++ = '"';
-
-	/* reuse fieldName to walk the source string */
-	while (*fieldName)
-	{
-		char		writeChar = *fieldName;
-
-		switch (writeChar)
-		{
-			case '"':
-				*position++ = '\\';
-				*position++ = '"';
-				break;
-			case '\\':
-				*position++ = '\\';
-				*position++ = '\\';
-				break;
-			case '\r':
-				*position++ = '\\';
-				*position++ = 'r';
-				break;
-			case '\n':
-				*position++ = '\\';
-				*position++ = 'n';
-				break;
-			case '\t':
-				*position++ = '\\';
-				*position++ = 't';
-				break;
-			default:
-				*position++ = writeChar;
-		}
-		fieldName++;
-	}
-
-	/* end quote */
-	*position++ = '"';
-
-	/* quotedBuf is now our quoted string */
-	return quotedBuf;
+	return duckdb_quote_identifier(fieldName);
 }
 
 

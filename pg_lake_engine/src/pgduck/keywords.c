@@ -71,7 +71,7 @@ compareKeywords(const void *userKey, const void *keywordCandidate)
  * IsDuckDBReservedWord — returns true for any keyword that is not
  * UNRESERVED (i.e., RESERVED, COL_NAME, or TYPE_FUNC_NAME).
  *
- * Used by QuoteDuckDBFieldName() in parse_struct.c for struct field access.
+ * Used by QuoteDuckDBFieldName() and duckdb_quote_identifier().
  */
 bool
 IsDuckDBReservedWord(char *candidateWord)

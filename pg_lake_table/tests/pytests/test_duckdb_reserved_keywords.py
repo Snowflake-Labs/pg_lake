@@ -424,6 +424,137 @@ def test_each_reserved_keyword_csv(pg_conn, s3, extension, keyword):
         pg_conn.rollback()
 
 
+# ---------------------------------------------------------------------------
+# Composite type field names with special characters
+# ---------------------------------------------------------------------------
+
+
+def test_iceberg_composite_field_with_embedded_double_quote(pg_conn, s3, extension):
+    """
+    Composite type field names containing double-quote characters must be
+    properly escaped in the STRUCT type definitions sent to DuckDB.
+
+    DuckDB's type parser requires identifier quoting in STRUCT(...) type
+    strings.  A field name like  has"quote  must be emitted as "has""quote"
+    (standard SQL identifier escaping) rather than being passed through raw.
+
+    Reproduces: https://github.com/snowflake-eng/sfpg-extension-pg_lake_replication/issues/361
+    """
+    schema = "test_duckdb_kw_struct_quote"
+    location = f"s3://{TEST_BUCKET}/{schema}/"
+
+    run_command(f"CREATE SCHEMA {schema}", pg_conn)
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        CREATE TYPE {schema}.composite_with_quote AS (
+            U&"has\\0022quote" text,
+            normal_field int
+        )
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        CREATE TABLE {schema}.t (
+            id int,
+            s {schema}.composite_with_quote
+        )
+        USING iceberg
+        WITH (location = '{location}')
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        INSERT INTO {schema}.t VALUES (1, ROW('hello', 42))
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        f"SELECT id, (s).normal_field FROM {schema}.t",
+        pg_conn,
+    )
+    assert result == [[1, 42]]
+
+    result = run_query(
+        f'SELECT (s).U&"has\\0022quote" FROM {schema}.t',
+        pg_conn,
+    )
+    assert result == [["hello"]]
+
+    run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_iceberg_composite_field_with_special_characters(pg_conn, s3, extension):
+    """
+    Composite type field names containing characters that require quoting
+    (spaces, embedded double-quotes, single-quotes) must work correctly in
+    Iceberg tables when passed through duckdb_quote_identifier for STRUCT
+    type generation.
+
+    Exercises the STRUCT(...) type string path in read_data.c:GetSchemaType()
+    and GetDuckDBStructDefinitionForCompositeType() in parse_struct.c.
+
+    Reproduces: https://github.com/snowflake-eng/sfpg-extension-pg_lake_replication/issues/361
+    """
+    schema = "test_duckdb_kw_struct_special"
+    location = f"s3://{TEST_BUCKET}/{schema}/"
+
+    run_command(f"CREATE SCHEMA {schema}", pg_conn)
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        CREATE TYPE {schema}.composite_special AS (
+            "has space" text,
+            U&"has\\0022dquote" int,
+            "has'single" int
+        )
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        CREATE TABLE {schema}.t (
+            id int,
+            s {schema}.composite_special
+        )
+        USING iceberg
+        WITH (location = '{location}')
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        INSERT INTO {schema}.t VALUES (1, ROW('val', 10, 20))
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        f'SELECT (s)."has space", (s).U&"has\\0022dquote", (s)."has\'single" FROM {schema}.t',
+        pg_conn,
+    )
+    assert result == [["val", 10, 20]]
+
+    run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 @pytest.mark.parametrize("keyword", DUCKDB_ONLY_RESERVED)
 def test_each_reserved_keyword_json(pg_conn, s3, extension, keyword):
     """
