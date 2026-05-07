@@ -154,7 +154,9 @@ def test_copy_roundtrip_composite_with_embedded_quote(pg_conn, s3):
             """
             CREATE TYPE test_kw_composite_quote AS (
                 U&"has\\0022quote" text,
-                normal int
+                normal int,
+                "has'single" int,
+                U&"has\\005Cback" int
             )
             """,
             pg_conn,
@@ -163,7 +165,7 @@ def test_copy_roundtrip_composite_with_embedded_quote(pg_conn, s3):
         run_command(
             """
             CREATE TABLE test_kw_cq_src (id int, s test_kw_composite_quote);
-            INSERT INTO test_kw_cq_src VALUES (1, ROW('hello', 42));
+            INSERT INTO test_kw_cq_src VALUES (1, ROW('hello', 42, 7, 8));
             """,
             pg_conn,
         )
@@ -192,6 +194,12 @@ def test_copy_roundtrip_composite_with_embedded_quote(pg_conn, s3):
             pg_conn,
         )
         assert result == [["hello"]]
+
+        result = run_query(
+            """SELECT (s)."has'single", (s).U&"has\\005Cback" FROM test_kw_cq_dst""",
+            pg_conn,
+        )
+        assert result == [[7, 8]]
     finally:
         pg_conn.rollback()
 
@@ -210,7 +218,9 @@ def test_copy_roundtrip_csv_composite_with_embedded_quote(pg_conn, s3):
             """
             CREATE TYPE test_kw_csv_cq AS (
                 U&"has\\0022quote" text,
-                normal int
+                normal int,
+                "has'single" int,
+                U&"has\\005Cback" int
             )
             """,
             pg_conn,
@@ -219,7 +229,7 @@ def test_copy_roundtrip_csv_composite_with_embedded_quote(pg_conn, s3):
         run_command(
             """
             CREATE TABLE test_kw_csv_cq_src (id int, s test_kw_csv_cq);
-            INSERT INTO test_kw_csv_cq_src VALUES (1, ROW('world', 99));
+            INSERT INTO test_kw_csv_cq_src VALUES (1, ROW('world', 99, 11, 12));
             """,
             pg_conn,
         )
@@ -242,6 +252,12 @@ def test_copy_roundtrip_csv_composite_with_embedded_quote(pg_conn, s3):
             pg_conn,
         )
         assert result == [[1, 99]]
+
+        result = run_query(
+            """SELECT (s)."has'single", (s).U&"has\\005Cback" FROM test_kw_csv_cq_dst""",
+            pg_conn,
+        )
+        assert result == [[11, 12]]
     finally:
         pg_conn.rollback()
 

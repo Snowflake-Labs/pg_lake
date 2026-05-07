@@ -517,7 +517,8 @@ def test_iceberg_composite_field_with_special_characters(pg_conn, s3, extension)
         CREATE TYPE {schema}.composite_special AS (
             "has space" text,
             U&"has\\0022dquote" int,
-            "has'single" int
+            "has'single" int,
+            U&"has\\005Cback" int
         )
         """,
         pg_conn,
@@ -539,17 +540,17 @@ def test_iceberg_composite_field_with_special_characters(pg_conn, s3, extension)
 
     run_command(
         f"""
-        INSERT INTO {schema}.t VALUES (1, ROW('val', 10, 20))
+        INSERT INTO {schema}.t VALUES (1, ROW('val', 10, 20, 30))
         """,
         pg_conn,
     )
     pg_conn.commit()
 
     result = run_query(
-        f'SELECT (s)."has space", (s).U&"has\\0022dquote", (s)."has\'single" FROM {schema}.t',
+        f'SELECT (s)."has space", (s).U&"has\\0022dquote", (s)."has\'single", (s).U&"has\\005Cback" FROM {schema}.t',
         pg_conn,
     )
-    assert result == [["val", 10, 20]]
+    assert result == [["val", 10, 20, 30]]
 
     run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
     pg_conn.commit()
