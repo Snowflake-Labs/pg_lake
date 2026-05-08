@@ -8,6 +8,11 @@ import re
 from test_writable_iceberg_common import *
 
 
+# This test performs intense modifications to iceberg tables and verifies the
+# results via multiple processes (DuckDB/pg_lake and Spark).  Mock S3 (Moto)
+# occasionally fails to serve metadata that was just written, causing transient
+# 404s — a test-harness consistency issue, not a product bug.
+@pytest.mark.flaky(reruns=2)
 @pytest.mark.parametrize(
     "manifest_min_count_to_merge, target_manifest_size_kb, max_snapshot_age_params ",
     manifest_snapshot_settings,

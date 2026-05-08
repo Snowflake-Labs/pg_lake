@@ -353,9 +353,9 @@ def wait_until_object_store_writable_table_pushed(
     while True:
         run_command("SELECT pg_sleep(0.1)", superuser_conn)
         cnt += 1
-        # up to 4 seconds
+        # up to 10 seconds
         # the default is 1 second
-        if cnt == 40:
+        if cnt == 100:
             break
 
         res1 = run_query(cmd_1, superuser_conn)
@@ -392,9 +392,9 @@ def wait_until_object_store_writable_table_removed(
     while True:
         run_command("SELECT pg_sleep(0.1)", superuser_conn)
         cnt += 1
-        # up to 4 seconds
+        # up to 10 seconds
         # the default is 1 second
-        if cnt == 40:
+        if cnt == 100:
             break
 
         res = run_query(cmd, superuser_conn)
