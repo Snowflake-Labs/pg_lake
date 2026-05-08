@@ -248,9 +248,11 @@ ProcessAlterTable(ProcessUtilityParams * processUtilityParams, void *arg)
 	}
 
 	/*
-	 * For read-only rest catalog iceberg tables, we only allow changing
-	 * catalog_table_name option. All other operations or any other DDLs are
-	 * disallowed.
+	 * For read-only external catalog iceberg tables, we only allow changing a
+	 * subset of catalog options. All other operations are disallowed. After
+	 * the whitelist check passes, we return false so PostgreSQL processes the
+	 * ALTER normally (which invokes the FDW validator on the merged option
+	 * set).
 	 */
 	if (HasOnlyCatalogAlterTableOptions(alterStmt))
 	{
@@ -259,8 +261,9 @@ ProcessAlterTable(ProcessUtilityParams * processUtilityParams, void *arg)
 		if (icebergCatalogType == REST_CATALOG_READ_ONLY)
 		{
 			/*
-			 * We currently only allow changing catalog_table_name option for
-			 * read-only rest catalog iceberg tables.
+			 * For read-only rest catalog iceberg tables, only
+			 * catalog_table_name can be changed. catalog_name and
+			 * catalog_namespace are pinned at creation time.
 			 */
 			List	   *allowedOptions = list_make1("catalog_table_name");
 
@@ -271,8 +274,10 @@ ProcessAlterTable(ProcessUtilityParams * processUtilityParams, void *arg)
 		else if (icebergCatalogType == OBJECT_STORE_READ_ONLY)
 		{
 			/*
-			 * We currently only allow changing catalog_table_name option for
-			 * read-only rest catalog iceberg tables.
+			 * For read-only object_store catalog iceberg tables, the full
+			 * catalog identifier (catalog_name + catalog_namespace +
+			 * catalog_table_name) can be changed to re-point the table at a
+			 * different source.
 			 */
 			List	   *allowedOptions = list_make3("catalog_table_name", "catalog_namespace", "catalog_name");
 

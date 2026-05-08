@@ -127,6 +127,53 @@ def test_read_only_object_store_with_non_existing_options(
     pg_conn.commit()
 
 
+def test_object_store_read_only_alter_drop_required_options(
+    pg_conn, s3, extension, with_default_location, adjust_object_store_settings
+):
+    schema = "test_alter_drop_required"
+    run_command(f"CREATE SCHEMA {schema}", pg_conn)
+
+    run_command(
+        f"CREATE TABLE {schema}.wrt_tbl(a INT) USING iceberg WITH (catalog='object_store')",
+        pg_conn,
+    )
+    pg_conn.commit()
+    wait_until_object_store_writable_table_pushed(pg_conn, schema, "wrt_tbl")
+
+    run_command(
+        f"CREATE TABLE {schema}.ro_tbl() USING iceberg WITH (catalog='object_store', read_only=True, catalog_table_name='wrt_tbl')",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # dropping catalog_name should fail — it is required
+    error = run_command(
+        f"ALTER FOREIGN TABLE {schema}.ro_tbl OPTIONS (DROP catalog_name)",
+        pg_conn,
+        raise_error=False,
+    )
+    assert (
+        '"catalog_name" option is required for read-only external catalog tables'
+        in str(error)
+    )
+    pg_conn.rollback()
+
+    # dropping catalog_table_name should fail — it is required
+    error = run_command(
+        f"ALTER FOREIGN TABLE {schema}.ro_tbl OPTIONS (DROP catalog_table_name)",
+        pg_conn,
+        raise_error=False,
+    )
+    assert (
+        '"catalog_table_name" option is required for read-only external catalog tables'
+        in str(error)
+    )
+    pg_conn.rollback()
+
+    run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 # basic flow for object store catalog tables
 # changes on the source is reflected on the target
 def test_read_only_object_store_read_write(

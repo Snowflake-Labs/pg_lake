@@ -120,6 +120,78 @@ def test_writable_iceberg_create_wrong_option(pg_conn, extension):
     pg_conn.commit()
 
 
+def test_iceberg_catalog_option_validation_errors(pg_conn, extension):
+    schema = "test_catalog_option_validation"
+    run_command(f"CREATE SCHEMA {schema}", pg_conn)
+    pg_conn.commit()
+
+    # only rest, object_store and postgres are accepted as catalog values
+    error = run_command(
+        f"""CREATE FOREIGN TABLE {schema}.ft (id int) SERVER pg_lake_iceberg
+            OPTIONS (location 's3://bucket/path', catalog 'bogus')""",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "invalid catalog option: bogus" in str(error)
+    assert "Only rest, object_store and postgres are supported" in str(error)
+    pg_conn.rollback()
+
+    # read_only is only valid for catalog="rest" or catalog="object_store"
+    error = run_command(
+        f"""CREATE FOREIGN TABLE {schema}.ft (id int) SERVER pg_lake_iceberg
+            OPTIONS (location 's3://bucket/path', read_only 'true')""",
+        pg_conn,
+        raise_error=False,
+    )
+    assert (
+        '"read_only" option is only valid for catalog="rest" or catalog="object_store"'
+        in str(error)
+    )
+    pg_conn.rollback()
+
+    # catalog_name is only valid for read-only external catalog tables
+    error = run_command(
+        f"""CREATE FOREIGN TABLE {schema}.ft (id int) SERVER pg_lake_iceberg
+            OPTIONS (location 's3://bucket/path', catalog_name 'cat')""",
+        pg_conn,
+        raise_error=False,
+    )
+    assert (
+        '"catalog_name" option is only valid for read-only external catalog tables'
+        in str(error)
+    )
+    pg_conn.rollback()
+
+    # catalog_namespace is only valid for read-only external catalog tables
+    error = run_command(
+        f"""CREATE FOREIGN TABLE {schema}.ft (id int) SERVER pg_lake_iceberg
+            OPTIONS (location 's3://bucket/path', catalog_namespace 'ns')""",
+        pg_conn,
+        raise_error=False,
+    )
+    assert (
+        '"catalog_namespace" option is only valid for read-only external catalog tables'
+        in str(error)
+    )
+    pg_conn.rollback()
+
+    # catalog_table_name is only valid for read-only external catalog tables
+    error = run_command(
+        f"""CREATE FOREIGN TABLE {schema}.ft (id int) SERVER pg_lake_iceberg
+            OPTIONS (location 's3://bucket/path', catalog_table_name 'tbl')""",
+        pg_conn,
+        raise_error=False,
+    )
+    assert (
+        '"catalog_table_name" option is only valid for read-only external catalog tables'
+        in str(error)
+    )
+    pg_conn.rollback()
+
+    run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 def test_writable_iceberg_table_failure(
     installcheck,
     install_iceberg_to_duckdb,
