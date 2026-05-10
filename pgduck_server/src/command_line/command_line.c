@@ -57,7 +57,8 @@ print_usage()
 	printf(" --unix_socket_directory <path>		Specify the unix socket directory, default is %s\n", DEFAULT_UNIX_DOMAIN_PATH);
 	printf(" --unix_socket_group <group name>	Specify the unix socket group owner, default is \"%s\"\n", DEFAULT_UNIX_DOMAIN_GROUP);
 	printf(" --unix_socket_permissions <mask>	Specify the unix socket (chmod) permissions, default is %o\n", DEFAULT_UNIX_DOMAIN_PERMISSIONS);
-	printf(" --port <port>                 		Specify the port number, default is %d\n", DEFAULT_PORT);
+	printf(" --listen_addresses <addrs>		Comma-separated TCP addresses to listen on (e.g. \"0.0.0.0,::\"). Default: empty (Unix socket only)\n");
+	printf(" --port <port>                 		Specify the port number (used for both Unix socket suffix and TCP listener), default is %d\n", DEFAULT_PORT);
 	printf(" --max_clients <max_clients>		Specify the maximum allowed clients, default is %d\n", DEFAULT_MAX_CLIENTS);
 	printf(" --memory_limit=<memory_limit>		Optionally specify the maximum memory of pgduck_server similar to DuckDB's memory_limit, the default is 80 percent of the system memory\n");
 	printf(" --continue_on_oom                  If out of memory error occurs, continue operating\n");
@@ -66,6 +67,7 @@ print_usage()
 	printf(" --check_cli_params_only       		Only check the cli arguments, do not run the server\n");
 	printf(" --init_file_path <path>			Execute all statements in this file on start-up\n");
 	printf(" --cache_dir                    	Specify the directory to use to cache remote files (from S3)\n");
+	printf(" --recv_dir <path>                  Base dir for RECEIVE-query landing files; default <cache_dir>/recv or /tmp/pgduck_recv\n");
 	printf(" --extensions_dir <path>			Install and load extensions in the specified directory\n");
 	printf(" --pidfile <path>					Write the pid of this program to the given path\n");
 	printf(" --no_extension_install             Disable extension installation\n");
@@ -85,6 +87,7 @@ parse_arguments(int argc, char *argv[])
 		.unix_socket_directory = DEFAULT_UNIX_DOMAIN_PATH,
 		.unix_socket_group = DEFAULT_UNIX_DOMAIN_GROUP,
 		.unix_socket_permissions = DEFAULT_UNIX_DOMAIN_PERMISSIONS,
+		.listen_addresses = NULL,
 		.port = DEFAULT_PORT,
 		.max_clients = DEFAULT_MAX_CLIENTS,
 		.memory_limit = NULL,
@@ -97,6 +100,7 @@ parse_arguments(int argc, char *argv[])
 		.extensions_dir = NULL,
 		.no_extension_install = false,
 		.debug = false,
+		.recv_dir = NULL,
 	};
 	int			opt;
 	int			option_index = 0;
@@ -108,6 +112,7 @@ parse_arguments(int argc, char *argv[])
 		{"unix_socket_directory", required_argument, NULL, 'U'},
 		{"unix_socket_group", required_argument, NULL, 'G'},
 		{"unix_socket_permissions", required_argument, NULL, 'm'},
+		{"listen_addresses", required_argument, NULL, 'A'},
 		{"port", required_argument, NULL, 'P'},
 		{"max_clients", required_argument, NULL, 'M'},
 		{"memory_limit", required_argument, NULL, 'l'},
@@ -120,10 +125,11 @@ parse_arguments(int argc, char *argv[])
 		{"init_file_path", required_argument, NULL, 'i'},
 		{"pidfile", required_argument, NULL, 'p'},
 		{"debug", no_argument, NULL, 'd'},
+		{"recv_dir", required_argument, NULL, 'R'},
 		{0, 0, 0, 0}
 	};
 
-	while ((opt = getopt_long(argc, argv, "cvhU:P:M:D:l:L:p:d", long_options, &option_index)) != -1)
+	while ((opt = getopt_long(argc, argv, "cvhU:A:P:M:D:l:L:p:dR:", long_options, &option_index)) != -1)
 	{
 		switch (opt)
 		{
@@ -142,6 +148,14 @@ parse_arguments(int argc, char *argv[])
 				break;
 			case 'G':
 				options.unix_socket_group = strdup(optarg);
+				break;
+			case 'A':
+				/*
+				 * Empty string is allowed and disables TCP listening (same
+				 * as not passing the flag at all). Any non-empty value is
+				 * treated as a comma-separated list of addresses to bind on.
+				 */
+				options.listen_addresses = strdup(optarg);
 				break;
 			case 'l':
 				if (optarg)
@@ -251,6 +265,9 @@ parse_arguments(int argc, char *argv[])
 				break;
 			case 'p':
 				options.pidfile_path = strdup(optarg);
+				break;
+			case 'R':
+				options.recv_dir = strdup(optarg);
 				break;
 			case '?':
 				print_usage();

@@ -53,6 +53,7 @@
 #include "pgsession/pgsession.h"
 #include "pgsession/pgsession_io.h"
 #include "pgsession/pqformat.h"
+#include "pgsession/recv_sink.h"
 #include "utils/pgduck_log_utils.h"
 #include "utils/pg_log_utils.h"
 
@@ -68,6 +69,25 @@
  */
 #define TRANSMIT_PREFIX "transmit "
 #define TRANSMIT_PREFIX_LENGTH (strlen(TRANSMIT_PREFIX))
+
+/*
+ * RECEIVE-prefix detection (mirror of TRANSMIT, but for the input side).
+ *
+ * RECEIVE queries stage CopyData bytes streamed from the client into a
+ * server-local sink. Once the client sends CopyDone, the actual query
+ * (with SINK_PLACEHOLDER replaced by the sink path) runs against DuckDB.
+ *
+ * Form expected from clients:
+ *   "RECEIVE INSERT INTO foo SELECT * FROM read_csv('@@PG_LAKE_RECV@@', ...)"
+ *
+ * The placeholder is replaced exactly once; the substituted string is
+ * what gets passed to duckdb_query().
+ */
+#define RECEIVE_PREFIX "receive "
+#define RECEIVE_PREFIX_LENGTH (strlen(RECEIVE_PREFIX))
+
+#define SINK_PLACEHOLDER "'@@PG_LAKE_RECV@@'"
+#define SINK_PLACEHOLDER_LENGTH (strlen(SINK_PLACEHOLDER))
 
 /*
  * Convenience macro for pgsession_handle_connection to terminate
@@ -116,7 +136,17 @@ static int	process_parse_message(PGSession * pgSession, StringInfo inputMessage)
 static int	process_bind_message(PGSession * pgSession, StringInfo inputMessage);
 static int	process_execute_message(PGSession * pgSession, StringInfo inputMessage);
 
+static int	process_copy_data(PGSession * pgSession, StringInfo inputMessage);
+static int	process_copy_done(PGSession * pgSession, StringInfo inputMessage);
+static int	process_copy_fail(PGSession * pgSession, StringInfo inputMessage);
+static int	pgsession_send_copy_in_response(PGSession * pgSession);
+static char *substitute_sink_placeholder(const char *queryString,
+										 const char *sinkPath,
+										 char **errorMessageOut);
+static void recv_session_reset(PGSession * pgSession);
+
 static bool is_transmit_query(const char *queryString);
+static bool is_receive_query(const char *queryString);
 
 /* global flag on whether to exit on OOM */
 int			oom_is_fatal = true;
@@ -219,7 +249,13 @@ pgsession_handle_connection(void *input)
 					/* simple query */
 					check(process_query_message(&pgSession, &inputMessage), pgSession, "failed to process query message");
 
-					sendReadyForQuery = true;
+					/*
+					 * If process_query_message entered COPY-IN-active state
+					 * (RECEIVE prefix), defer ReadyForQuery until CopyDone /
+					 * CopyFail completes the deferred query.
+					 */
+					if (pgSession.activeRecvSink == NULL)
+						sendReadyForQuery = true;
 					break;
 				}
 
@@ -313,16 +349,48 @@ pgsession_handle_connection(void *input)
 				}
 
 			case 'd':
+				{
+					/* CopyData: only valid while a RECEIVE is in flight */
+					if (pgSession.activeRecvSink == NULL)
+					{
+						char	   *errorMessage = "unexpected CopyData message; no RECEIVE in progress";
+
+						check(pgsession_send_postgres_error(&pgSession, ERROR, errorMessage), pgSession, errorMessage);
+						break;
+					}
+					check(process_copy_data(&pgSession, &inputMessage), pgSession, "failed to process CopyData message");
+					break;
+				}
+
 			case 'c':
+				{
+					/* CopyDone: finalize the sink and run the deferred query */
+					if (pgSession.activeRecvSink == NULL)
+					{
+						char	   *errorMessage = "unexpected CopyDone message; no RECEIVE in progress";
+
+						check(pgsession_send_postgres_error(&pgSession, ERROR, errorMessage), pgSession, errorMessage);
+						sendReadyForQuery = true;
+						break;
+					}
+					check(process_copy_done(&pgSession, &inputMessage), pgSession, "failed to process CopyDone message");
+					sendReadyForQuery = true;
+					break;
+				}
+
 			case 'f':
 				{
-					/* d: copy data */
-					/* c: copy done */
-					/* f: copy fail */
-					char	   *errorMessage = "COPY command not yet supported in the protocol";
+					/* CopyFail: client aborted the upload */
+					if (pgSession.activeRecvSink == NULL)
+					{
+						char	   *errorMessage = "unexpected CopyFail message; no RECEIVE in progress";
 
-					check(pgsession_send_postgres_error(&pgSession, ERROR, errorMessage), pgSession, errorMessage);
-
+						check(pgsession_send_postgres_error(&pgSession, ERROR, errorMessage), pgSession, errorMessage);
+						sendReadyForQuery = true;
+						break;
+					}
+					check(process_copy_fail(&pgSession, &inputMessage), pgSession, "failed to process CopyFail message");
+					sendReadyForQuery = true;
 					break;
 				}
 
@@ -382,9 +450,80 @@ process_query_message(PGSession * pgSession, StringInfo inputMessage)
 						pgSession->pgClient->clientSocket, queryString);
 
 	ResponseFormat responseFormat = {
-		.isTransmit = is_transmit_query(queryString)
+		.isTransmit = false
 	};
 
+	if (is_receive_query(queryString))
+	{
+		ReceiveSink *sink;
+		char	   *substituted;
+		char	   *substituteError = NULL;
+
+		/* Strip RECEIVE prefix. */
+		queryString += RECEIVE_PREFIX_LENGTH;
+
+		/* RECEIVE may be combined with TRANSMIT (e.g. INSERT ... RETURNING)
+		 * — honor both prefixes. */
+		if (is_transmit_query(queryString))
+		{
+			responseFormat.isTransmit = true;
+			queryString += TRANSMIT_PREFIX_LENGTH;
+		}
+
+		sink = recv_sink_create();
+		if (sink == NULL)
+		{
+			char	   *err = "failed to create RECEIVE sink";
+
+			return pgsession_send_postgres_error(pgSession, ERROR, err);
+		}
+
+		substituted = substitute_sink_placeholder(queryString, recv_sink_path(sink), &substituteError);
+		if (substituted == NULL)
+		{
+			recv_sink_destroy(sink);
+			return pgsession_send_postgres_error(pgSession, ERROR, substituteError);
+		}
+
+		pgSession->activeRecvSink = sink;
+		pgSession->deferredQueryString = substituted;
+		pgSession->deferredResponseFormat = responseFormat;
+
+		if (!IsOK(pgsession_send_copy_in_response(pgSession)))
+		{
+			recv_session_reset(pgSession);
+			return COMM_ERROR;
+		}
+
+		/*
+		 * pgsession_send_copy_in_response only queues 5 bytes into the
+		 * send buffer; pq_endmessage / pgsession_put_bytes don't flush
+		 * unless the buffer fills. The outer pgsession_handle_connection
+		 * loop only flushes inside the `if (sendReadyForQuery)` branch,
+		 * which is skipped for RECEIVE (we leave activeRecvSink set so
+		 * the loop stays in COPY-IN-active state). Without this explicit
+		 * flush the CopyInResponse never reaches the client and the
+		 * client's PQgetResult blocks forever waiting for it — exactly
+		 * what hung the streaming-writes smoke at run #2v through #2y.
+		 */
+		if (!IsOK(pgsession_flush(pgSession)))
+		{
+			recv_session_reset(pgSession);
+			return COMM_ERROR;
+		}
+
+		/* Validate we read all the bytes from the original Q message. */
+		if (!IsOK(pq_getmsgend(inputMessage)))
+		{
+			recv_session_reset(pgSession);
+			return COMM_ERROR;
+		}
+
+		/* Stay in COPY-IN-active state; CopyDone runs the deferred query. */
+		return OK;
+	}
+
+	responseFormat.isTransmit = is_transmit_query(queryString);
 	if (responseFormat.isTransmit)
 	{
 		/* Skip the prefix by directly adding its length to the pointer */
@@ -1096,6 +1235,9 @@ pgsession_init(PGSession * pgSession, PGClient * pgClient)
 static int
 pgsession_destroy(PGSession * pgSession)
 {
+	/* clean up any in-flight RECEIVE state */
+	recv_session_reset(pgSession);
+
 	pg_free(pgSession->pqSendBuffer);
 	duckdb_session_destroy(&pgSession->duckSession);
 	return OK;
@@ -1130,4 +1272,238 @@ static bool
 is_transmit_query(const char *queryString)
 {
 	return strncasecmp(queryString, TRANSMIT_PREFIX, TRANSMIT_PREFIX_LENGTH) == 0;
+}
+
+
+/*
+ * is_receive_query returns whether the given query string starts with
+ * "receive ".
+ *
+ * RECEIVE queries land CopyData bytes streamed from the client into a
+ * server-local sink, and run the substituted query (with the sink path
+ * baked in) once the client sends CopyDone.
+ */
+static bool
+is_receive_query(const char *queryString)
+{
+	return strncasecmp(queryString, RECEIVE_PREFIX, RECEIVE_PREFIX_LENGTH) == 0;
+}
+
+
+/*
+ * Substitute exactly one occurrence of SINK_PLACEHOLDER in queryString
+ * with a single-quoted SQL literal containing sinkPath. Returns a
+ * malloc'd string (caller frees via pg_free) or NULL on error.
+ *
+ * sinkPath is generated by recv_sink and never contains a single quote;
+ * we still defensively reject the case in case future code changes that.
+ */
+static char *
+substitute_sink_placeholder(const char *queryString, const char *sinkPath, char **errorMessageOut)
+{
+	const char *first;
+	const char *second;
+	size_t		pathLen;
+	size_t		prefixLen;
+	size_t		suffixLen;
+	size_t		resultLen;
+	char	   *result;
+	char	   *p;
+
+	*errorMessageOut = NULL;
+
+	if (strchr(sinkPath, '\'') != NULL)
+	{
+		*errorMessageOut = "RECEIVE sink path must not contain single quote";
+		return NULL;
+	}
+
+	first = strstr(queryString, SINK_PLACEHOLDER);
+	if (first == NULL)
+	{
+		*errorMessageOut = "RECEIVE query must contain placeholder '@@PG_LAKE_RECV@@' exactly once";
+		return NULL;
+	}
+	second = strstr(first + SINK_PLACEHOLDER_LENGTH, SINK_PLACEHOLDER);
+	if (second != NULL)
+	{
+		*errorMessageOut = "RECEIVE query must contain placeholder '@@PG_LAKE_RECV@@' exactly once";
+		return NULL;
+	}
+
+	prefixLen = (size_t) (first - queryString);
+	suffixLen = strlen(first + SINK_PLACEHOLDER_LENGTH);
+	pathLen = strlen(sinkPath);
+	/* prefix + ' + path + ' + suffix + NUL */
+	resultLen = prefixLen + 1 + pathLen + 1 + suffixLen + 1;
+	result = pg_malloc(resultLen);
+	p = result;
+
+	memcpy(p, queryString, prefixLen);
+	p += prefixLen;
+	*p++ = '\'';
+	memcpy(p, sinkPath, pathLen);
+	p += pathLen;
+	*p++ = '\'';
+	memcpy(p, first + SINK_PLACEHOLDER_LENGTH, suffixLen);
+	p += suffixLen;
+	*p = '\0';
+
+	return result;
+}
+
+
+/*
+ * Send a CopyInResponse ('G') message: text format, zero columns. DuckDB
+ * consumes opaque bytes via read_csv() once we land them in the sink.
+ */
+static int
+pgsession_send_copy_in_response(PGSession * pgSession)
+{
+	StringInfoData buf;
+
+	pq_beginmessage(&buf, 'G');
+	pq_sendbyte(&buf, 0);		/* PG_WIRE_TEXT_FORMAT */
+	pq_sendint16(&buf, 0);		/* zero columns */
+	return pq_endmessage(pgSession, &buf);
+}
+
+
+/*
+ * Tear down per-RECEIVE state. Idempotent.
+ */
+static void
+recv_session_reset(PGSession * pgSession)
+{
+	if (pgSession->activeRecvSink != NULL)
+	{
+		recv_sink_destroy(pgSession->activeRecvSink);
+		pgSession->activeRecvSink = NULL;
+	}
+	if (pgSession->deferredQueryString != NULL)
+	{
+		pg_free(pgSession->deferredQueryString);
+		pgSession->deferredQueryString = NULL;
+	}
+}
+
+
+/*
+ * Append the CopyData payload to the active sink.
+ */
+static int
+process_copy_data(PGSession * pgSession, StringInfo inputMessage)
+{
+	int			payloadLen;
+	const char *payload;
+
+	payloadLen = inputMessage->len - inputMessage->cursor;
+	if (payloadLen < 0)
+		return COMM_ERROR;
+
+	payload = pq_getmsgbytes(inputMessage, payloadLen);
+	if (payload == NULL)
+		return COMM_ERROR;
+
+	if (recv_sink_write(pgSession->activeRecvSink, payload, (size_t) payloadLen) != 0)
+	{
+		char	   *errorMessage = "failed to write RECEIVE bytes to local sink";
+
+		recv_session_reset(pgSession);
+		return pgsession_send_postgres_error(pgSession, ERROR, errorMessage);
+	}
+
+	return OK;
+}
+
+
+/*
+ * Finalize the sink and run the deferred query against DuckDB.
+ *
+ * Mirrors the success/error handling at the bottom of process_query_message
+ * so that fatal DuckDB errors still terminate the server process and
+ * reportable errors flow back to the client as 'E' messages.
+ */
+static int
+process_copy_done(PGSession * pgSession, StringInfo inputMessage)
+{
+	int			status;
+	DuckDBStatus duckStatus;
+	char	   *errorMessage = NULL;
+	ResponseFormat responseFormat;
+	char	   *queryString;
+
+	if (!IsOK(pq_getmsgend(inputMessage)))
+	{
+		recv_session_reset(pgSession);
+		return COMM_ERROR;
+	}
+
+	if (recv_sink_finalize(pgSession->activeRecvSink) != 0)
+	{
+		char	   *err = "failed to finalize RECEIVE sink";
+
+		recv_session_reset(pgSession);
+		return pgsession_send_postgres_error(pgSession, ERROR, err);
+	}
+
+	queryString = pgSession->deferredQueryString;
+	responseFormat = pgSession->deferredResponseFormat;
+
+	PGDUCK_SERVER_DEBUG("connection %d running deferred RECEIVE query: %s",
+						pgSession->pgClient->clientSocket, queryString);
+
+	duckStatus = duckdb_session_run_command(&pgSession->duckSession, queryString,
+											&responseFormat, &errorMessage);
+
+	/* Tear down RECEIVE state regardless of outcome. */
+	recv_session_reset(pgSession);
+
+	if (duckStatus == DUCKDB_SUCCESS)
+		return OK;
+
+	if (IS_REPORTABLE_DUCKDB_ERROR(duckStatus))
+	{
+		status = handle_pgsession_error_message(duckStatus, pgSession, errorMessage);
+		pfree(errorMessage);
+		if (IS_FATAL_DUCKDB_STATUS(duckStatus))
+			exit(EXIT_FAILURE);
+		return status;
+	}
+
+	/* error has been logged already; disconnect */
+	return COMM_ERROR;
+}
+
+
+/*
+ * Discard the sink and surface the client's failure reason as an error.
+ */
+static int
+process_copy_fail(PGSession * pgSession, StringInfo inputMessage)
+{
+	const char *clientReason;
+	char	   *errMsg;
+	size_t		len;
+	int			status;
+
+	clientReason = pq_getmsgstring(inputMessage);
+	if (clientReason == NULL)
+		clientReason = "(no reason given)";
+
+	if (!IsOK(pq_getmsgend(inputMessage)))
+	{
+		recv_session_reset(pgSession);
+		return COMM_ERROR;
+	}
+
+	len = strlen("RECEIVE aborted by client: ") + strlen(clientReason) + 1;
+	errMsg = pg_malloc(len);
+	snprintf(errMsg, len, "RECEIVE aborted by client: %s", clientReason);
+
+	recv_session_reset(pgSession);
+
+	status = pgsession_send_postgres_error(pgSession, ERROR, errMsg);
+	pg_free(errMsg);
+	return status;
 }

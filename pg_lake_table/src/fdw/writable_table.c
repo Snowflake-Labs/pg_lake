@@ -101,6 +101,11 @@ static List *ApplyInsertFile(Relation rel, char *insertFile, int64 rowCount,
 static List *ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount,
 							 int64 liveRowCount, char *deleteFile, int64 deletedRowCount,
 							 int64 *totalPositionDeletedRows);
+static List *ApplyPrecomputedDeleteFile(Relation rel, char *sourcePath,
+										int64 sourceRowCount, int64 liveRowCount,
+										char *deleteFile, int64 deletedRowCount,
+										DataFileStats * deletionFileStats,
+										int64 *totalPositionDeletedRows);
 static List *GetDataFilePathsFromStatsList(List *dataFileStats);
 static List *GetNewFileOpsFromFileStats(Oid relationId, List *dataFileStats,
 										int32 partitionSpecId, Partition * partition, int64 rowCount,
@@ -210,6 +215,203 @@ ApplyInsertFile(Relation rel, char *insertFile, int64 rowCount,
 
 
 /*
+ * CSVInsertionContext bundles the per-target metadata that PrepareCSVInsertion
+ * computes once (relation lock, format/compression, options, dataFilePrefix,
+ * etc.) so both the file-based and streaming-write paths can share the
+ * "build modifications from a StatsCollector" tail.
+ */
+struct CSVInsertionContext
+{
+	Relation	relation;
+	TupleDesc	tupleDescriptor;
+	CopyDataFormat format;
+	CopyDataCompression compression;
+	List	   *options;		/* possibly with file_size_bytes appended */
+	DataFileSchema *schema;
+	List	   *leafFields;
+	char	   *dataFilePrefix;
+	bool		isPrefix;
+	bool		isIcebergTable;
+	bool		splitFilesBySize;
+	int64		reservedRowIdStart;
+};
+
+
+/*
+ * BeginCSVInsertion takes RowExclusiveLock on the relation, computes the
+ * destination prefix / format / options the same way PrepareCSVInsertion
+ * always has, and registers an in-progress-file record so a transaction
+ * abort can clean up partial writes. The caller (PrepareCSVInsertion or a
+ * streaming-write driver) then either runs ConvertCSVFileTo against
+ * dataFilePrefix or opens a CSVStreamWriter to it.
+ *
+ * EndCSVInsertion (must be called) drops the relation lock.
+ */
+CSVInsertionContext *
+BeginCSVInsertion(Oid relationId, int64 reservedRowIdStart, DataFileSchema * schema)
+{
+	CSVInsertionContext *ctx = palloc0(sizeof(CSVInsertionContext));
+
+	ctx->relation = table_open(relationId, RowExclusiveLock);
+	ctx->tupleDescriptor = RelationGetDescr(ctx->relation);
+	ctx->reservedRowIdStart = reservedRowIdStart;
+	ctx->schema = schema;
+
+	ForeignTable *foreignTable = GetForeignTable(relationId);
+
+	ctx->options = foreignTable->options;
+
+	PgLakeTableType tableType = GetPgLakeTableType(relationId);
+
+	FindDataFormatAndCompression(tableType, NULL, ctx->options, &ctx->format,
+								 &ctx->compression);
+
+	/*
+	 * We currently only support splitting Parquet files, to not complicate
+	 * the row counting.
+	 */
+	ctx->splitFilesBySize = TargetFileSizeMB > 0 &&
+		FormatUsesParquet(ctx->format) &&
+		reservedRowIdStart == 0;
+
+	/*
+	 * When target_file_size_mb is non-0 (512MB by default), we use the
+	 * file_size_bytes option in DuckDB COPY to split the file. The files
+	 * may not be exactly the desired size; some guess work is involved.
+	 */
+	if (ctx->splitFilesBySize)
+	{
+		ctx->options = lappend(ctx->options,
+							   CreateFileSizeBytesOption(TargetFileSizeMB));
+
+		/* extension will be added automatically when using file_size_bytes */
+		ctx->isPrefix = true;
+	}
+
+	ctx->dataFilePrefix = GenerateDataFileNameForTable(relationId, !ctx->isPrefix);
+	ctx->isIcebergTable = IsPgLakeIcebergForeignTableById(relationId);
+
+	bool		autoDeleteRecord = !ctx->isIcebergTable;
+
+	InsertInProgressFileRecordExtended(ctx->dataFilePrefix, ctx->isPrefix,
+									   autoDeleteRecord);
+
+	ctx->leafFields = GetLeafFieldsForTable(relationId);
+
+	return ctx;
+}
+
+
+/*
+ * BuildCSVInsertionModifications turns a StatsCollector (from either
+ * ConvertCSVFileTo or FinishCSVStreamWriter) into the
+ * ADD_DATA_FILE-typed DataFileModification list that
+ * ApplyDataFileModifications consumes. Same as PrepareCSVInsertion's tail
+ * before the table_close; pulled out so both write paths share it.
+ */
+List *
+BuildCSVInsertionModifications(CSVInsertionContext * ctx,
+							   StatsCollector * statsCollector,
+							   int64 rowCount)
+{
+	Oid			relationId = RelationGetRelid(ctx->relation);
+
+	ApplyColumnStatsModeForAllFileStats(relationId, statsCollector->dataFileStats);
+
+	if (!ctx->splitFilesBySize && statsCollector->dataFileStats == NIL)
+	{
+		DataFileStats *stats = palloc0(sizeof(DataFileStats));
+
+		stats->dataFilePath = ctx->dataFilePrefix;
+		stats->rowCount = rowCount;
+		statsCollector->dataFileStats = list_make1(stats);
+	}
+
+	/*
+	 * when we defer deletion of in-progress files, we need to replace the
+	 * prefix paths with full paths. At precommit hook, we delete persisted
+	 * files from in-progress
+	 */
+	if (ctx->isPrefix && ctx->isIcebergTable)
+		ReplaceInProgressPrefixPathWithFullPaths(ctx->dataFilePrefix,
+												 GetDataFilePathsFromStatsList(statsCollector->dataFileStats));
+
+	/* build a DataFileModification for each new data file */
+	List	   *modifications = NIL;
+	ListCell   *dataFileStatsCell = NULL;
+
+	foreach(dataFileStatsCell, statsCollector->dataFileStats)
+	{
+		DataFileStats *stats = lfirst(dataFileStatsCell);
+		DataFileModification *modification = palloc0(sizeof(DataFileModification));
+
+		modification->type = ADD_DATA_FILE;
+		modification->insertFile = stats->dataFilePath;
+		modification->insertedRowCount = stats->rowCount;
+		modification->reservedRowIdStart = ctx->reservedRowIdStart;
+		modification->fileStats = stats;
+
+		modifications = lappend(modifications, modification);
+	}
+
+	return modifications;
+}
+
+
+/*
+ * EndCSVInsertion drops the RowExclusiveLock taken in BeginCSVInsertion.
+ */
+void
+EndCSVInsertion(CSVInsertionContext * ctx)
+{
+	table_close(ctx->relation, NoLock);
+}
+
+
+TupleDesc
+CSVInsertionContextTupleDescriptor(CSVInsertionContext * ctx)
+{
+	return ctx->tupleDescriptor;
+}
+
+char *
+CSVInsertionContextDestinationPath(CSVInsertionContext * ctx)
+{
+	return ctx->dataFilePrefix;
+}
+
+CopyDataFormat
+CSVInsertionContextFormat(CSVInsertionContext * ctx)
+{
+	return ctx->format;
+}
+
+CopyDataCompression
+CSVInsertionContextCompression(CSVInsertionContext * ctx)
+{
+	return ctx->compression;
+}
+
+List *
+CSVInsertionContextOptions(CSVInsertionContext * ctx)
+{
+	return ctx->options;
+}
+
+DataFileSchema *
+CSVInsertionContextSchema(CSVInsertionContext * ctx)
+{
+	return ctx->schema;
+}
+
+List *
+CSVInsertionContextLeafFields(CSVInsertionContext * ctx)
+{
+	return ctx->leafFields;
+}
+
+
+/*
  * PrepareCSVInsertion converts a given CSV file to the table's format (e.g. Parquet)
  * the table's location (e.g. s3://mybucket/mytable/).
  *
@@ -220,105 +422,17 @@ PrepareCSVInsertion(Oid relationId, char *insertCSV, int64 rowCount,
 					int64 reservedRowIdStart, int maximumLineSize,
 					DataFileSchema * schema)
 {
-	Relation	relation = table_open(relationId, RowExclusiveLock);
-	ForeignTable *foreignTable = GetForeignTable(relationId);
-	TupleDesc	tupleDescriptor = RelationGetDescr(relation);
+	CSVInsertionContext *ctx = BeginCSVInsertion(relationId, reservedRowIdStart, schema);
 
-	List	   *options = foreignTable->options;
-
-	CopyDataFormat format;
-	CopyDataCompression compression;
-	PgLakeTableType tableType = GetPgLakeTableType(relationId);
-
-	FindDataFormatAndCompression(tableType, NULL, options, &format, &compression);
-
-	bool		isPrefix = false;
-
-	/*
-	 * We currently only support splitting Parquet files, to not complicate
-	 * the row counting.
-	 */
-	bool		splitFilesBySize =
-		TargetFileSizeMB > 0 &&
-		FormatUsesParquet(format) &&
-		reservedRowIdStart == 0;
-
-	/*
-	 * When target_file_size_mb is non-0 (512MB by default), we use the
-	 * file_size_bytes option in DuckDB COPY to split the file.
-	 *
-	 * The files may not be exactly the desired size; some guess work is
-	 * involved.
-	 */
-	if (splitFilesBySize)
-	{
-		options = lappend(options, CreateFileSizeBytesOption(TargetFileSizeMB));
-
-		/* extension will be added automatically when using file_size_bytes */
-		isPrefix = true;
-	}
-
-	char	   *dataFilePrefix = GenerateDataFileNameForTable(relationId, !isPrefix);
-
-	/* we defer deletion of in-progress data files only for Iceberg tables */
-	bool		isIcebergTable = IsPgLakeIcebergForeignTableById(relationId);
-	bool		autoDeleteRecord = !isIcebergTable;
-
-	InsertInProgressFileRecordExtended(dataFilePrefix, isPrefix, autoDeleteRecord);
-
-	List	   *leafFields = GetLeafFieldsForTable(relationId);
-
-	/* convert insert file to a new file in table format */
 	StatsCollector *statsCollector =
-		ConvertCSVFileTo(insertCSV,
-						 tupleDescriptor,
-						 maximumLineSize,
-						 dataFilePrefix,
-						 format,
-						 compression,
-						 options,
-						 schema,
-						 leafFields);
+		ConvertCSVFileTo(insertCSV, ctx->tupleDescriptor, maximumLineSize,
+						 ctx->dataFilePrefix, ctx->format, ctx->compression,
+						 ctx->options, ctx->schema, ctx->leafFields);
 
-	ApplyColumnStatsModeForAllFileStats(relationId, statsCollector->dataFileStats);
+	List	   *modifications = BuildCSVInsertionModifications(ctx, statsCollector,
+															   rowCount);
 
-	if (!splitFilesBySize && statsCollector->dataFileStats == NIL)
-	{
-		DataFileStats *stats = palloc0(sizeof(DataFileStats));
-
-		stats->dataFilePath = dataFilePrefix;
-		stats->rowCount = rowCount;
-		statsCollector->dataFileStats = list_make1(stats);
-	}
-
-	/*
-	 * when we defer deletion of in-progress files, we need to replace the
-	 * prefix paths with full paths. At precommit hook, we delete persisted
-	 * files from in-progress
-	 */
-	if (isPrefix && isIcebergTable)
-		ReplaceInProgressPrefixPathWithFullPaths(dataFilePrefix, GetDataFilePathsFromStatsList(statsCollector->dataFileStats));
-
-	/* build a DataFileModification for each new data file */
-	List	   *modifications = NIL;
-	ListCell   *dataFileStatsCell = NULL;
-
-	foreach(dataFileStatsCell, statsCollector->dataFileStats)
-	{
-		DataFileStats *stats = lfirst(dataFileStatsCell);
-
-		DataFileModification *modification = palloc0(sizeof(DataFileModification));
-
-		modification->type = ADD_DATA_FILE;
-		modification->insertFile = stats->dataFilePath;
-		modification->insertedRowCount = stats->rowCount;
-		modification->reservedRowIdStart = reservedRowIdStart;
-		modification->fileStats = stats;
-
-		modifications = lappend(modifications, modification);
-	}
-
-	table_close(relation, NoLock);
+	EndCSVInsertion(ctx);
 
 	return modifications;
 }
@@ -648,6 +762,84 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 		elog(ERROR, "deleted row count " INT64_FORMAT " exceeds live row count " INT64_FORMAT,
 			 deletedRowCount, liveRowCount);
 	}
+
+	return metadataOperations;
+}
+
+
+/*
+ * ApplyPrecomputedDeleteFile is the streaming-write counterpart of
+ * ApplyDeleteFile's merge-on-read branch.
+ *
+ * The caller (a streaming-write call site like pg_lake_table.c's DELETE
+ * path with pg_lake_engine.streaming_writes=on) has already streamed the
+ * (file_path, row_position) records into a Parquet position-delete file
+ * on object storage and captured its DuckDB return_stats. Here we just
+ * stitch that precomputed file into the table metadata.
+ *
+ * Compared with the file-based ApplyDeleteFile, this function:
+ *
+ * - Skips the copy_on_write_threshold check. COW reads the source file +
+ *   the delete CSV via DuckDB and JOINs them to write a new data file
+ *   (PerformDeleteFromParquet). The streaming path doesn't have a CSV to
+ *   feed PerformDeleteFromParquet — only a Parquet position-delete file.
+ *   We could teach PerformDeleteFromParquet to accept Parquet input, but
+ *   that's a separate change; for now streaming always uses MOR. This is
+ *   a pure perf trade-off (compaction will rewrite eventually).
+ * - Skips the all-rows-deleted shortcut (RemoveDataFileOperation). Same
+ *   reason: by the time we get here the streaming caller has already
+ *   committed to writing a delete file. If every row is deleted, MOR
+ *   still works — it just produces a position-delete file that wipes
+ *   the source. Compaction handles cleanup.
+ */
+static List *
+ApplyPrecomputedDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount,
+						   int64 liveRowCount, char *deleteFile, int64 deletedRowCount,
+						   DataFileStats * deletionFileStats,
+						   int64 *totalPositionDeletedRows)
+{
+	if (deletedRowCount == 0)
+		return NIL;
+
+	/* same invariants as ApplyDeleteFile */
+	Assert(liveRowCount <= sourceRowCount);
+	Assert(deletedRowCount <= liveRowCount);
+	Assert(sourceRowCount > 0);
+
+	Oid			relationId = RelationGetRelid(rel);
+	uint64		totalDeletedRowCount =
+		deletedRowCount + sourceRowCount - liveRowCount;
+
+	ApplyColumnStatsModeForAllFileStats(relationId,
+										list_make1(deletionFileStats));
+
+	ereport(WriteLogLevel, (errmsg("adding deletion file %s with " INT64_FORMAT " rows",
+								   deleteFile, deletedRowCount)));
+
+	int32		partitionSpecId = DEFAULT_SPEC_ID;
+	List	   *transforms = AllPartitionTransformList(relationId);
+	Partition  *partition =
+		GetDataFilePartition(relationId, transforms, sourcePath, &partitionSpecId);
+
+	List	   *metadataOperations = NIL;
+
+	TableMetadataOperation *addDeletionFileOperation =
+		AddDataFileOperation(deleteFile, CONTENT_POSITION_DELETES,
+							 deletionFileStats, partition, partitionSpecId);
+
+	metadataOperations = lappend(metadataOperations, addDeletionFileOperation);
+
+	TableMetadataOperation *delMapOperation =
+		AddDeleteMappingOperation(deleteFile, sourcePath);
+
+	metadataOperations = lappend(metadataOperations, delMapOperation);
+
+	TableMetadataOperation *updateOperation =
+		UpdateDeletedRowCountOperation(sourcePath, totalDeletedRowCount);
+
+	metadataOperations = lappend(metadataOperations, updateOperation);
+
+	*totalPositionDeletedRows += deletedRowCount;
 
 	return metadataOperations;
 }
@@ -1080,6 +1272,241 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 
 
 /*
+ * AddQueryResultStreamHandle holds the state needed to span the lifetime
+ * of a streaming AddQueryResultToTable call: the libpq connection
+ * (already opened with the deferred RECEIVE COPY query) and the
+ * preallocated table metadata (destination prefix, format/compression,
+ * schema, in-progress tracking) so we can build the same modifications
+ * the file-based AddQueryResultToTable produces once the stream finishes.
+ */
+struct AddQueryResultStreamHandle
+{
+	PGDuckConnection *conn;
+
+	/* table-level state */
+	Oid			relationId;
+	bool		hasRowIds;
+	int32		partitionSpecId;
+	Partition  *partition;
+
+	/* destination state (mirrors PrepareToAddQueryResultToTable) */
+	CopyDataFormat format;
+	CopyDataCompression compression;
+	List	   *leafFields;
+	DataFileSchema *schema;
+	char	   *newDataFilePath;
+	bool		isPrefix;
+	bool		isIcebergTable;
+};
+
+
+/*
+ * StartAddQueryResultToTableStream is the streaming-write counterpart of
+ * AddQueryResultToTable. See the doc comment in writable_table.h for the
+ * caller contract.
+ */
+AddQueryResultStreamHandle *
+StartAddQueryResultToTableStream(Oid relationId, char *readQuery,
+								 TupleDesc queryTupleDesc, bool wrapNativeTypes)
+{
+	Assert(queryTupleDesc != NULL && queryTupleDesc->natts > 0);
+
+	/*
+	 * COPY/INSERT .. SELECT pushdown is never exercised for partitioned
+	 * tables (same Assert as AddQueryResultToTable).
+	 */
+	Assert(GetIcebergTablePartitionByOption(relationId) == NULL);
+
+	AddQueryResultStreamHandle *handle =
+		palloc0(sizeof(AddQueryResultStreamHandle));
+
+	handle->relationId = relationId;
+	handle->partition = NULL;
+	handle->partitionSpecId = GetCurrentSpecId(relationId);
+	Assert(handle->partitionSpecId == DEFAULT_SPEC_ID);
+
+	ForeignTable *foreignTable = GetForeignTable(relationId);
+
+	handle->hasRowIds = GetBoolOption(foreignTable->options, "row_ids", false);
+
+	/* Mirror PrepareToAddQueryResultToTable for destination state. */
+	PgLakeTableProperties properties = GetPgLakeTableProperties(relationId);
+	List	   *options = properties.options;
+
+	handle->format = properties.format;
+	handle->compression = properties.compression;
+
+	/*
+	 * Splitting is allowed for the streaming path too; pgduck's COPY
+	 * file_size_bytes will produce one Parquet per split server-side.
+	 */
+	bool		allowSplit = true;
+	bool		splitFilesBySize = allowSplit && TargetFileSizeMB > 0 &&
+		FormatUsesParquet(handle->format);
+
+	handle->isPrefix = splitFilesBySize;
+
+	if (splitFilesBySize)
+		options = lappend(options, CreateFileSizeBytesOption(TargetFileSizeMB));
+
+	handle->newDataFilePath =
+		GenerateDataFileNameForTable(relationId, !handle->isPrefix);
+	handle->schema = GetDataFileSchemaForTable(relationId);
+	handle->isIcebergTable = IsPgLakeIcebergForeignTableById(relationId);
+	handle->leafFields = GetLeafFieldsForTable(relationId);
+
+	bool		autoDeleteRecord = !handle->isIcebergTable;
+
+	InsertInProgressFileRecordExtended(handle->newDataFilePath, handle->isPrefix,
+									   autoDeleteRecord);
+
+	IcebergOutOfRangePolicy outOfRangePolicy =
+		GetIcebergOutOfRangePolicyForTable(relationId);
+	bool		queryHasRowId = false;
+
+	/*
+	 * Build the same COPY (...) TO ... WITH (...) command WriteQueryResultTo
+	 * would build, then prefix RECEIVE so pgduck knows to wait for COPY-IN
+	 * bytes before running it.
+	 */
+	char	   *copyCommand = BuildCopyToCommandString(readQuery,
+													   handle->newDataFilePath,
+													   handle->format,
+													   handle->compression,
+													   options, queryHasRowId,
+													   handle->schema, queryTupleDesc,
+													   outOfRangePolicy,
+													   wrapNativeTypes);
+	char	   *receiveQuery = psprintf("RECEIVE %s", copyCommand);
+
+	handle->conn = GetPGDuckConnection();
+
+	PG_TRY();
+	{
+		OpenCopyInStreamToPGDuck(handle->conn, receiveQuery);
+	}
+	PG_CATCH();
+	{
+		ReleasePGDuckConnection(handle->conn);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	return handle;
+}
+
+
+PGconn *
+AddQueryResultStreamConnection(AddQueryResultStreamHandle * handle)
+{
+	return handle->conn->conn;
+}
+
+
+int64
+FinishAddQueryResultToTableStream(AddQueryResultStreamHandle * handle)
+{
+	int64		rowsProcessed = 0;
+	StatsCollector *statsCollector = NULL;
+	PGresult   *result = NULL;
+
+	PG_TRY();
+	{
+		result = FinishCopyInStreamToPGDuck(handle->conn);
+
+		if (handle->format == DATA_FORMAT_PARQUET ||
+			handle->format == DATA_FORMAT_ICEBERG)
+		{
+			statsCollector = GetDataFileStatsListFromPGResult(result,
+															  handle->leafFields,
+															  handle->schema);
+		}
+		else
+		{
+			char	   *commandTuples = PQcmdTuples(result);
+			int64		totalRowCount = atoll(commandTuples);
+
+			statsCollector = palloc0(sizeof(StatsCollector));
+			statsCollector->totalRowCount = totalRowCount;
+
+			if (totalRowCount > 0)
+			{
+				DataFileStats *fileStats =
+					CreateDataFileStatsForDataFile(handle->newDataFilePath,
+												   totalRowCount, 0,
+												   handle->leafFields);
+
+				statsCollector->dataFileStats = list_make1(fileStats);
+			}
+		}
+	}
+	PG_FINALLY();
+	{
+		if (result != NULL)
+			PQclear(result);
+		ReleasePGDuckConnection(handle->conn);
+	}
+	PG_END_TRY();
+
+	if (statsCollector->totalRowCount == 0)
+	{
+		/* mirror PrepareToAddQueryResultToTable's empty-result handling */
+		TimestampTz orphanedAt = GetCurrentTransactionStartTimestamp();
+
+		InsertDeletionQueueRecordExtended(handle->newDataFilePath,
+										  handle->isPrefix ? InvalidOid : handle->relationId,
+										  orphanedAt, handle->isPrefix);
+		return 0;
+	}
+
+	ApplyColumnStatsModeForAllFileStats(handle->relationId,
+										statsCollector->dataFileStats);
+
+	bool		isVerbose = false;
+	List	   *newFiles = NIL;
+	List	   *newFileOps =
+		GetNewFileOpsFromFileStats(handle->relationId,
+								   statsCollector->dataFileStats,
+								   handle->partitionSpecId, handle->partition,
+								   statsCollector->totalRowCount,
+								   isVerbose, &newFiles);
+
+	if (handle->isPrefix && handle->isIcebergTable)
+		ReplaceInProgressPrefixPathWithFullPaths(handle->newDataFilePath, newFiles);
+
+	List	   *metadataOperations = NIL;
+
+	metadataOperations = list_concat(metadataOperations, newFileOps);
+
+	ListCell   *newFileCell = NULL;
+
+	foreach(newFileCell, newFileOps)
+	{
+		TableMetadataOperation *addOp = lfirst(newFileCell);
+		int64		rowCount = addOp->dataFileStats.rowCount;
+
+		if (handle->hasRowIds && rowCount > 0)
+		{
+			RowIdRangeMapping *rowIdRange =
+				CreateRowIdRangeForNewFile(handle->relationId, rowCount, 0);
+
+			TableMetadataOperation *rowIdMappingOp =
+				AddRowIdMappingOperation(addOp->path, list_make1(rowIdRange));
+
+			metadataOperations = lappend(metadataOperations, rowIdMappingOp);
+			addOp->dataFileStats.rowIdStart = rowIdRange->rowStartId;
+		}
+
+		rowsProcessed += rowCount;
+	}
+
+	ApplyMetadataChanges(handle->relationId, metadataOperations);
+
+	return rowsProcessed;
+}
+
+
+/*
  * AddQueryResultToTable adds the result of a pgduck query to the table.
  *
  * Pass wrapNativeTypes=true when the source data is a raw DuckDB query
@@ -1314,6 +1741,23 @@ ApplyDataFileModifications(Relation rel, List *modifications)
 								modification->deleteFile,
 								modification->deletedRowCount,
 								&totalPositionDeletedRows);
+		}
+
+		else if (modification->type == ADD_DELETION_FILE_PRECOMPUTED)
+		{
+			Assert(modification->sourcePath != NULL);
+			Assert(modification->deleteFile != NULL);
+			Assert(modification->fileStats != NULL);
+
+			modificationOperations =
+				ApplyPrecomputedDeleteFile(rel,
+										   modification->sourcePath,
+										   modification->sourceRowCount,
+										   modification->liveRowCount,
+										   modification->deleteFile,
+										   modification->deletedRowCount,
+										   modification->fileStats,
+										   &totalPositionDeletedRows);
 		}
 
 		else if (modification->type == ADD_DATA_FILE)

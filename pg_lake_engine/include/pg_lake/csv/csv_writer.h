@@ -18,6 +18,8 @@
 #ifndef CSV_WRITER_H
 #define CSV_WRITER_H
 
+#include "libpq-fe.h"
+
 #include "pg_lake/copy/copy_format.h"
 #include "tcop/dest.h"
 #include "nodes/pg_list.h"
@@ -28,6 +30,22 @@ extern PGDLLEXPORT DestReceiver *CreateCSVDestReceiverExtended(char *filename,
 															   List *copyOptions,
 															   CopyDataFormat targetFormat,
 															   bool sessionLifetime);
+
+/*
+ * Streaming variant: bytes go to a libpq COPY-IN already opened on
+ * `streamConn` (use OpenCopyInStreamToPGDuck() to get there). The caller
+ * is responsible for finalizing the stream via FinishCopyInStreamToPGDuck()
+ * AFTER calling rShutdown on the returned DestReceiver — rShutdown only
+ * flushes the per-row buffer and emits any binary trailer; it deliberately
+ * does NOT call PQputCopyEnd, so callers can still emit additional
+ * CopyData (e.g. for multi-segment writes) before closing. The deferred
+ * query's PGresult is returned by FinishCopyInStreamToPGDuck so callers
+ * can extract row counts / column statistics.
+ */
+extern PGDLLEXPORT DestReceiver *CreateCSVStreamDestReceiver(PGconn *streamConn,
+															 List *copyOptions,
+															 CopyDataFormat targetFormat);
+
 extern PGDLLEXPORT int GetCSVDestReceiverMaxLineSize(DestReceiver *dest);
 extern PGDLLEXPORT uint64 GetCSVDestReceiverFileSize(DestReceiver *dest);
 

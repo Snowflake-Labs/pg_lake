@@ -18,8 +18,11 @@
 #ifndef PG_LAKE_COPY_IO_H
 #define PG_LAKE_COPY_IO_H
 
+#include "libpq-fe.h"
+
 
 void		CopyInputToFile(char *filePath, int columnCount, bool isBinary);
+void		CopyInputToStream(PGconn *streamConn, int columnCount, bool isBinary);
 void		CopyFileToOutput(char *filePath, int columnCount, bool isBinary);
 
 
