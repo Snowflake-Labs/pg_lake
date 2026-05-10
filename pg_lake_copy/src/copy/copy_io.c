@@ -30,6 +30,7 @@
 #include "storage/fd.h"
 #include "utils/memutils.h"
 
+#include "libpq-fe.h"
 #include "libpq/libpq.h"
 
 #define MAX_READ_SIZE (65536)
@@ -53,6 +54,55 @@ static int	ReceiveDataFromClient(CopyFromStdinState * cstate, char *databuf);
 static void SendCopyBegin(int columnCount, bool isBinary);
 static void SendCopyEnd(void);
 static void SendCopyData(char *sendBuffer, int sendBufferLength);
+
+
+/*
+ * CopyInputToStream is the streaming counterpart of CopyInputToFile.
+ *
+ * Instead of writing the postgres client's COPY-IN bytes to a local file,
+ * forwards them via PQputCopyData on `streamConn`. The caller must have
+ * already opened a libpq COPY-IN stream against pgduck_server (via
+ * OpenCopyInStreamToPGDuck) so streamConn is in COPY-IN-active state.
+ * Uses the same SendCopyInResponseToClient(columnCount, isBinary) the
+ * file-based path uses to tell the client we're ready.
+ *
+ * Caller is responsible for finalizing the libpq stream via
+ * FinishCopyInStreamToPGDuck (or moral equivalent) afterwards.
+ */
+void
+CopyInputToStream(PGconn *streamConn, int columnCount, bool isBinary)
+{
+	CopyFromStdinState cstate = {
+		.fe_msgbuf = makeStringInfo(),
+		.raw_reached_eof = false
+	};
+
+	/* tell the client we are ready for data */
+	SendCopyInResponseToClient(columnCount, isBinary);
+
+	char	   *receiveBuffer = palloc(MAX_READ_SIZE);
+
+	while (!cstate.raw_reached_eof)
+	{
+		unsigned long bytesRead = ReceiveDataFromClient(&cstate, receiveBuffer);
+
+		if (bytesRead > 0)
+		{
+			if (PQputCopyData(streamConn, receiveBuffer, (int) bytesRead) != 1)
+			{
+				ereport(ERROR, (errcode(ERRCODE_CONNECTION_FAILURE),
+								errmsg("failed to forward COPY data to pgduck_server: %s",
+									   PQerrorMessage(streamConn))));
+			}
+		}
+		else if (bytesRead == 0)
+		{
+			break;
+		}
+	}
+
+	pfree(receiveBuffer);
+}
 
 
 /*

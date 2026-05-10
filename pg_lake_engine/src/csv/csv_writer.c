@@ -56,7 +56,7 @@
 typedef enum CopyDest
 {
 	COPY_FILE,					/* to file */
-	/* other options removed, since we only supported COPY_FILE */
+	COPY_STREAM,				/* to libpq COPY IN on streamConn */
 } CopyDest;
 
 /*
@@ -79,6 +79,7 @@ typedef struct CopyToStateData
 	/* low-level state data */
 	CopyDest	copy_dest;		/* type of copy source/destination */
 	FILE	   *copy_file;		/* used if copy_dest == COPY_FILE */
+	PGconn	   *streamConn;		/* used if copy_dest == COPY_STREAM */
 	StringInfo	fe_msgbuf;		/* used for all dests during COPY TO */
 
 	int			file_encoding;	/* file or remote side's character encoding */
@@ -216,8 +217,26 @@ CopySendEndOfRow(CopyToState cstate)
 						 errmsg("could not write to COPY file: %m")));
 			}
 			break;
+		case COPY_STREAM:
+			if (!cstate->opts.binary)
+				CopySendChar(cstate, '\n');
+
+			/*
+			 * PQputCopyData blocks on socket back-pressure when the kernel
+			 * buffer fills, which gives the streaming path natural flow
+			 * control. Returns 1 on success, 0 on async-flow blocked (we
+			 * use sync mode so this shouldn't happen), -1 on error.
+			 */
+			if (PQputCopyData(cstate->streamConn, fe_msgbuf->data,
+							  fe_msgbuf->len) != 1)
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_CONNECTION_FAILURE),
+						 errmsg("failed to stream CopyData to pgduck_server: %s",
+								PQerrorMessage(cstate->streamConn))));
+			}
+			break;
 		default:
-			/* we only use COPY to emit files */
 			Assert(false);
 			break;
 	}
@@ -271,7 +290,7 @@ EndCopy(CopyToState cstate)
 		CopySendEndOfRow(cstate);
 	}
 
-	if (cstate->filename != NULL)
+	if (cstate->copy_dest == COPY_FILE && cstate->filename != NULL)
 	{
 		if (cstate->sessionLifetime)
 		{
@@ -286,6 +305,12 @@ EndCopy(CopyToState cstate)
 								cstate->filename)));
 		}
 	}
+	/*
+	 * COPY_STREAM: caller owns the libpq stream and is responsible for
+	 * calling FinishCopyInStreamToPGDuck() (PQputCopyEnd + drain). We
+	 * deliberately do NOT close the stream here so callers can interleave
+	 * multiple writes if needed.
+	 */
 
 	MemoryContextDelete(cstate->rowcontext);
 	MemoryContextDelete(cstate->copycontext);
@@ -301,9 +326,10 @@ CreateCopyToState(char *filename, List *copyOptions)
 {
 	/*
 	 * Prevent write to relative path ... too easy to shoot oneself in the
-	 * foot by overwriting a database file ...
+	 * foot by overwriting a database file ... (filename is NULL for stream
+	 * destinations, which skip this check.)
 	 */
-	if (!is_absolute_path(filename))
+	if (filename != NULL && !is_absolute_path(filename))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_NAME),
 				 errmsg("relative path not allowed for COPY to file")));
@@ -350,7 +376,7 @@ CreateCopyToState(char *filename, List *copyOptions)
 	cstate->fe_msgbuf = makeStringInfo();
 
 	cstate->copy_dest = COPY_FILE;	/* default */
-	cstate->filename = pstrdup(filename);
+	cstate->filename = filename ? pstrdup(filename) : NULL;
 
 	cstate->maxLineSize = 0;
 	cstate->bytes_processed = 0;
@@ -361,7 +387,7 @@ CreateCopyToState(char *filename, List *copyOptions)
 }
 
 /*
- * Setup CopyToState to write to the given file.
+ * Setup CopyToState to write to the given destination (file or stream).
  */
 static void
 StartCopyTo(CopyToState cstate, TupleDesc tupDesc)
@@ -370,49 +396,52 @@ StartCopyTo(CopyToState cstate, TupleDesc tupDesc)
 
 	MemoryContext oldcontext = MemoryContextSwitchTo(cstate->copycontext);
 
-	/* create the file */
-	mode_t		oumask = umask(S_IWGRP | S_IWOTH);
-
-	PG_TRY();
+	if (cstate->copy_dest == COPY_FILE)
 	{
-		if (cstate->sessionLifetime)
-			cstate->copy_file = fopen(cstate->filename, "w");
-		else
-			cstate->copy_file = AllocateFile(cstate->filename, PG_BINARY_W);
+		/* create the file */
+		mode_t		oumask = umask(S_IWGRP | S_IWOTH);
+
+		PG_TRY();
+		{
+			if (cstate->sessionLifetime)
+				cstate->copy_file = fopen(cstate->filename, "w");
+			else
+				cstate->copy_file = AllocateFile(cstate->filename, PG_BINARY_W);
+		}
+		PG_FINALLY();
+		{
+			umask(oumask);
+		}
+		PG_END_TRY();
+
+		if (cstate->copy_file == NULL)
+		{
+			/* copy errno because ereport subfunctions might change it */
+			int			save_errno = errno;
+
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not open file \"%s\" for writing: %m",
+							cstate->filename),
+					 (save_errno == ENOENT || save_errno == EACCES) ?
+					 errhint("COPY TO instructs the PostgreSQL server process to write a file. "
+							 "You may want a client-side facility such as psql's \\copy.") : 0));
+		}
+
+		struct stat st;
+
+		if (fstat(fileno(cstate->copy_file), &st))
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not stat file \"%s\": %m",
+							cstate->filename)));
+
+		if (S_ISDIR(st.st_mode))
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("\"%s\" is a directory", cstate->filename)));
 	}
-	PG_FINALLY();
-	{
-		umask(oumask);
-	}
-	PG_END_TRY();
-
-	if (cstate->copy_file == NULL)
-	{
-		/* copy errno because ereport subfunctions might change it */
-		int			save_errno = errno;
-
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not open file \"%s\" for writing: %m",
-						cstate->filename),
-				 (save_errno == ENOENT || save_errno == EACCES) ?
-				 errhint("COPY TO instructs the PostgreSQL server process to write a file. "
-						 "You may want a client-side facility such as psql's \\copy.") : 0));
-	}
-
-	struct stat st;
-
-	if (fstat(fileno(cstate->copy_file), &st))
-		ereport(ERROR,
-				(errcode_for_file_access(),
-				 errmsg("could not stat file \"%s\": %m",
-						cstate->filename)));
-
-	if (S_ISDIR(st.st_mode))
-		ereport(ERROR,
-				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				 errmsg("\"%s\" is a directory", cstate->filename)));
-
+	/* COPY_STREAM: caller already opened libpq COPY IN; nothing to do here. */
 
 	/* get the attribute names from the tuple descriptor */
 	List	   *attnamelist = TupleDescColumnNameList(tupDesc);
@@ -1173,6 +1202,35 @@ CreateCSVDestReceiverExtended(char *filename, List *copyOptions,
 		(DR_copy *) CreateCSVDestReceiver(filename, copyOptions, targetFormat);
 
 	self->cstate->sessionLifetime = sessionLifetime;
+
+	return (DestReceiver *) self;
+}
+
+
+/*
+ * CreateCSVStreamDestReceiver creates a DestReceiver that streams CSV
+ * bytes via libpq COPY IN on an already-open connection.
+ *
+ * Usage pattern:
+ *   1. Caller opens the COPY-IN stream via OpenCopyInStreamToPGDuck(conn,
+ *      "RECEIVE INSERT INTO ... read_csv('@@PG_LAKE_RECV@@', ...)").
+ *   2. Caller passes conn->conn into this factory; the returned
+ *      DestReceiver writes CSV bytes via PQputCopyData on each row flush.
+ *   3. Caller drives the producer query (e.g. ExecuteQuery) into the
+ *      DestReceiver. rShutdown emits the binary trailer if any but does
+ *      NOT call PQputCopyEnd.
+ *   4. Caller calls FinishCopyInStreamToPGDuck(conn) to send PQputCopyEnd
+ *      and wait for the deferred query's CommandComplete.
+ */
+DestReceiver *
+CreateCSVStreamDestReceiver(PGconn *streamConn, List *copyOptions,
+							CopyDataFormat targetFormat)
+{
+	DR_copy    *self =
+		(DR_copy *) CreateCSVDestReceiver(NULL, copyOptions, targetFormat);
+
+	self->cstate->copy_dest = COPY_STREAM;
+	self->cstate->streamConn = streamConn;
 
 	return (DestReceiver *) self;
 }
