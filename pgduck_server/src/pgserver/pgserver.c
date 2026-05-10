@@ -26,13 +26,19 @@
 #include "postgres_fe.h"
 
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 #include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <poll.h>
 #include <common/ip.h>
 #include <pthread.h>
 #include <signal.h>
 #include <sys/fcntl.h>
 #include <sys/file.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <utime.h>
 #include <grp.h>
@@ -68,6 +74,10 @@ static int	create_and_bind_unix_socket(PGServer * server, char *unixSocketPath,
 										char *unixSocketOwningGroup,
 										int unixSocketPermissions,
 										int port);
+static int	create_and_bind_tcp_sockets(PGServer * server,
+										char *tcpListenAddresses,
+										int port);
+static int	bind_one_tcp_addr(PGServer * server, const char *address, int port);
 static int	acquire_domain_socket_lock_file(PGServer * server, int port);
 static int	set_unix_socket_permissions(char *unixSocketPath, char *groupName,
 										int permissionsMask);
@@ -75,18 +85,24 @@ static int	pgserver_create_client_thread(const PgClientThreadInitState * initSta
 static void *pgclient_thread_main(void *arg);
 static void pgclient_thread_cleanup(void *arg);
 static void touch_internal_files(PGServer * pgServer, time_t now);
+static int	dispatch_accepted_client(PGServer * pgServer, int listeningSocket);
 
 /*
  * pgserver_create initializes a PostgreSQL wire compatible server
- * and starts listening on the given port.
+ * and starts listening on the given port. Always creates the Unix
+ * domain socket; additionally binds TCP sockets when
+ * `tcpListenAddresses` is non-NULL and non-empty.
  */
 int
 pgserver_init(PGServer * pgServer,
 			  char *unixSocketPath,
 			  char *unixSocketOwningGroup,
 			  int unixSocketPermissions,
+			  char *tcpListenAddresses,
 			  int port)
 {
+	pgServer->numTcpSockets = 0;
+
 	if (create_and_bind_unix_socket(pgServer,
 									unixSocketPath,
 									unixSocketOwningGroup,
@@ -94,12 +110,181 @@ pgserver_init(PGServer * pgServer,
 									port) != 0)
 		return STATUS_ERROR;
 
+	if (tcpListenAddresses != NULL && tcpListenAddresses[0] != '\0')
+	{
+		if (create_and_bind_tcp_sockets(pgServer, tcpListenAddresses, port) != STATUS_OK)
+			return STATUS_ERROR;
+	}
+
 	pgServer->listeningPort = port;
 	pgServer->startFunction = pgsession_handle_connection;
 	pgServer->last_touch_time = time(NULL);
 
-	PGDUCK_SERVER_LOG("pgduck_server is running with pid: %d", getpid());
+	PGDUCK_SERVER_LOG("pgduck_server is running with pid: %d (unix=%s, tcp_listeners=%d)",
+					  getpid(), pgServer->unixSocketPath, pgServer->numTcpSockets);
 
+	return STATUS_OK;
+}
+
+/*
+ * Bind a TCP listening socket per resolved address. `tcpListenAddresses`
+ * is a comma-separated list of addresses (e.g., "0.0.0.0,::") with
+ * PostgreSQL-style semantics. Each address is resolved via
+ * pg_getaddrinfo_all and bound on the same `port` as the Unix socket.
+ *
+ * On any failure, errors logged and STATUS_ERROR returned. Caller is
+ * responsible for cleanup; pgserver_destroy closes whatever sockets
+ * were successfully created.
+ */
+static int
+create_and_bind_tcp_sockets(PGServer * server, char *tcpListenAddresses, int port)
+{
+	char	   *list_copy = strdup(tcpListenAddresses);
+
+	if (list_copy == NULL)
+	{
+		PGDUCK_SERVER_ERROR("could not strdup listen_addresses: %m");
+		return STATUS_ERROR;
+	}
+
+	char	   *saveptr = NULL;
+	char	   *token = strtok_r(list_copy, ",", &saveptr);
+
+	while (token != NULL)
+	{
+		/* trim leading whitespace */
+		while (*token == ' ' || *token == '\t')
+			token++;
+
+		/* trim trailing whitespace */
+		size_t		len = strlen(token);
+
+		while (len > 0 && (token[len - 1] == ' ' || token[len - 1] == '\t'))
+			token[--len] = '\0';
+
+		if (*token != '\0')
+		{
+			if (bind_one_tcp_addr(server, token, port) != STATUS_OK)
+			{
+				free(list_copy);
+				return STATUS_ERROR;
+			}
+		}
+
+		token = strtok_r(NULL, ",", &saveptr);
+	}
+
+	free(list_copy);
+
+	if (server->numTcpSockets == 0)
+	{
+		PGDUCK_SERVER_ERROR("listen_addresses set but no TCP sockets bound �63� empty value?");
+		return STATUS_ERROR;
+	}
+
+	return STATUS_OK;
+}
+
+/*
+ * Resolve a single address (e.g., "0.0.0.0", "::", "127.0.0.1") and bind
+ * a TCP listening socket on it. May produce more than one socket if the
+ * resolver returns multiple addrinfos; each is added to server->tcpSockets.
+ */
+static int
+bind_one_tcp_addr(PGServer * server, const char *address, int port)
+{
+	struct addrinfo hint;
+
+	MemSet(&hint, 0, sizeof(hint));
+	hint.ai_family = AF_UNSPEC;
+	hint.ai_flags = AI_PASSIVE | AI_NUMERICHOST;
+	hint.ai_socktype = SOCK_STREAM;
+
+	char		portStr[16];
+
+	snprintf(portStr, sizeof(portStr), "%d", port);
+
+	struct addrinfo *addrs = NULL;
+	int			ret = pg_getaddrinfo_all(address, portStr, &hint, &addrs);
+
+	if (ret != STATUS_OK || addrs == NULL)
+	{
+		PGDUCK_SERVER_ERROR("could not translate address \"%s\" port %d: %s",
+							address, port,
+							ret != STATUS_OK ? gai_strerror(ret) : "no addresses returned");
+		if (addrs)
+			pg_freeaddrinfo_all(hint.ai_family, addrs);
+		return STATUS_ERROR;
+	}
+
+	for (struct addrinfo *a = addrs; a != NULL; a = a->ai_next)
+	{
+		if (server->numTcpSockets >= MAX_TCP_LISTEN_SOCKETS)
+		{
+			PGDUCK_SERVER_ERROR("too many TCP listen addresses (max %d)",
+								MAX_TCP_LISTEN_SOCKETS);
+			pg_freeaddrinfo_all(hint.ai_family, addrs);
+			return STATUS_ERROR;
+		}
+
+		int			sock = socket(a->ai_family, SOCK_STREAM, 0);
+
+		if (sock == PGINVALID_SOCKET)
+		{
+			PGDUCK_SERVER_ERROR("could not create TCP socket for \"%s\": %m", address);
+			pg_freeaddrinfo_all(hint.ai_family, addrs);
+			return STATUS_ERROR;
+		}
+
+		int			one = 1;
+
+		/* SO_REUSEADDR avoids "address already in use" after a restart */
+		if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) < 0)
+		{
+			PGDUCK_SERVER_ERROR("setsockopt(SO_REUSEADDR) on \"%s\": %m", address);
+			close(sock);
+			pg_freeaddrinfo_all(hint.ai_family, addrs);
+			return STATUS_ERROR;
+		}
+
+		/*
+		 * For dual-stack hosts, bind IPv6 sockets to v6-only so we can
+		 * separately bind 0.0.0.0 without conflict (matches PG's behavior).
+		 */
+		if (a->ai_family == AF_INET6 &&
+			setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, &one, sizeof(one)) < 0)
+		{
+			PGDUCK_SERVER_ERROR("setsockopt(IPV6_V6ONLY) on \"%s\": %m", address);
+			close(sock);
+			pg_freeaddrinfo_all(hint.ai_family, addrs);
+			return STATUS_ERROR;
+		}
+
+		if (bind(sock, a->ai_addr, a->ai_addrlen) < 0)
+		{
+			PGDUCK_SERVER_ERROR("could not bind TCP socket on \"%s\" port %d: %m",
+								address, port);
+			close(sock);
+			pg_freeaddrinfo_all(hint.ai_family, addrs);
+			return STATUS_ERROR;
+		}
+
+		const int	listenQueueSize = MaxThreads;
+
+		if (listen(sock, listenQueueSize) < 0)
+		{
+			PGDUCK_SERVER_ERROR("listen() on TCP socket for \"%s\": %m", address);
+			close(sock);
+			pg_freeaddrinfo_all(hint.ai_family, addrs);
+			return STATUS_ERROR;
+		}
+
+		server->tcpSockets[server->numTcpSockets++] = sock;
+		PGDUCK_SERVER_LOG("pgduck_server listening on TCP %s:%d (fd=%d)",
+						  address, port, sock);
+	}
+
+	pg_freeaddrinfo_all(hint.ai_family, addrs);
 	return STATUS_OK;
 }
 
@@ -410,7 +595,94 @@ enable_shutdown_signals(void)
 
 
 /*
+ * dispatch_accepted_client -- accept() one client on a ready listening
+ * socket and hand it off to a worker thread. Returns STATUS_OK if the
+ * client was accepted (success or backpressured-rejected) and the loop
+ * should continue, or STATUS_ERROR for a fatal error that should cause
+ * the server to exit. EINTR during accept() is treated as benign and
+ * returns STATUS_OK.
+ */
+static int
+dispatch_accepted_client(PGServer * pgServer, int listeningSocket)
+{
+	PGClient   *client = (PGClient *) pg_malloc0(sizeof(PGClient));
+	socklen_t	clientAddrLen = sizeof(client->clientAddress);
+
+	client->clientSocket =
+		accept(listeningSocket,
+			   (struct sockaddr *) &client->clientAddress, &clientAddrLen);
+
+	if (client->clientSocket < 0)
+	{
+		int			save_errno = errno;
+
+		pg_free(client);
+
+		/*
+		 * EINTR can come from our shutdown handler (running == 0) or from
+		 * unrelated sources like a debugger attaching (ptrace). Either way,
+		 * just continue — the while-condition handles shutdown.
+		 *
+		 * EAGAIN/EWOULDBLOCK shouldn't normally happen on a listening socket
+		 * we just learned was readable via poll(), but be defensive.
+		 */
+		if (save_errno == EINTR || save_errno == EAGAIN ||
+			save_errno == EWOULDBLOCK)
+			return STATUS_OK;
+
+		PGDUCK_SERVER_ERROR("Could not accept the client on fd %d: %s",
+							listeningSocket, strerror(save_errno));
+		return STATUS_ERROR;
+	}
+
+	/* first check if we have available threads */
+	int			threadIndex = pgclient_threadpool_reserve_slot(client);
+
+	if (threadIndex == InvalidThreadIndex)
+	{
+		PGDUCK_SERVER_LOG("A new client rejected as it exceeds %d clients", MaxAllowedClients);
+
+		/* TODO: send error message to the client */
+		close(client->clientSocket);
+		pg_free(client);
+		return STATUS_OK;
+	}
+
+	/* state to pass into pgclient_thread_main and pgclient_thread_cleanup */
+	PgClientThreadInitState *initState =
+		(PgClientThreadInitState *) pg_malloc0(sizeof(PgClientThreadInitState));
+
+	initState->threadIndex = threadIndex;
+	initState->startFunction = pgServer->startFunction;
+	initState->pgClient = client;
+
+	if (disable_shutdown_signals() != STATUS_OK)
+		exit(STATUS_ERROR);
+
+	if (pgserver_create_client_thread(initState) != OK)
+	{
+		PGDUCK_SERVER_ERROR("Thread creation failed for client %d", client->clientSocket);
+
+		close(client->clientSocket);
+		pg_free(client);
+		pg_free(initState);
+		pgclient_threadpool_free_slot(threadIndex);
+	}
+
+	if (enable_shutdown_signals() != STATUS_OK)
+		exit(STATUS_ERROR);
+
+	return STATUS_OK;
+}
+
+/*
  * pgserver_run is the main loop for the PostgreSQL wire compatible server.
+ *
+ * Polls across all listening sockets (Unix domain socket plus any TCP
+ * listeners configured via --listen_addresses). When any becomes
+ * readable, accepts the client there and dispatches via the thread
+ * pool. Touches lock/socket files periodically so /tmp cleaners don't
+ * eat them.
  */
 int
 pgserver_run(PGServer * pgServer)
@@ -418,92 +690,71 @@ pgserver_run(PGServer * pgServer)
 	if (install_shutdown_signal_handlers() != STATUS_OK)
 		return STATUS_ERROR;
 
+	struct pollfd fds[1 + MAX_TCP_LISTEN_SOCKETS];
+	int			nfds = 0;
+
+	fds[nfds].fd = pgServer->listeningSocket;
+	fds[nfds].events = POLLIN;
+	nfds++;
+
+	for (int i = 0; i < pgServer->numTcpSockets; i++)
+	{
+		fds[nfds].fd = pgServer->tcpSockets[i];
+		fds[nfds].events = POLLIN;
+		nfds++;
+	}
+
 	while (running)
 	{
-		PGClient   *client = (PGClient *) pg_malloc0(sizeof(PGClient));
-		socklen_t	clientAddrLen = sizeof(client->clientAddress);
+		/* Reset revents before each poll(). */
+		for (int i = 0; i < nfds; i++)
+			fds[i].revents = 0;
 
-		client->clientSocket =
-			accept(pgServer->listeningSocket,
-				   (struct sockaddr *) &client->clientAddress, &clientAddrLen);
+		/*
+		 * Use a 10-second timeout so the touch-internal-files maintenance
+		 * runs even when no clients connect for a long time. Previously the
+		 * code relied on pg_lake_manage_cache() generating a connection every
+		 * ~10s; we don't want to depend on that for the multi-socket path.
+		 */
+		int			r = poll(fds, nfds, 10 * 1000);
 
-		if (client->clientSocket < 0)
+		if (r < 0)
 		{
-			int			save_errno = errno;
+			if (errno == EINTR)
+				continue;		/* shutdown signal or unrelated; let the
+								 * while-condition decide */
 
-			pg_free(client);
-
-			/*
-			 * EINTR can come from our shutdown handler (running == 0) or from
-			 * unrelated sources like a debugger attaching (ptrace). In either
-			 * case, just retry the loop — the while-condition takes care of
-			 * the shutdown case.
-			 */
-			if (save_errno == EINTR)
-				continue;
-
-			PGDUCK_SERVER_ERROR("Could not accept the client: %s",
-								strerror(save_errno));
-
-			/*
-			 * TODO: We can probably recover from this error, but lets handle
-			 * errors gracefully in the future.
-			 */
-			exit(STATUS_ERROR);
+			PGDUCK_SERVER_ERROR("poll() failed: %s", strerror(errno));
+			return STATUS_ERROR;
 		}
 
 		/*
-		 * Touch Unix socket and lock files every 58 minutes, to ensure that
-		 * they are not removed by overzealous /tmp-cleaning tasks.  We assume
-		 * no one runs cleaners with cutoff times of less than an hour ...
-		 *
-		 * Note that normally you'd expect this code to run even if there are
-		 * no clients, but we are not doing that. When there are no clients,
-		 * we are blocked on the accept() system call. We currently rely on
-		 * the fact that every 10 seconds, pg_lake_manage_cache() is called,
-		 * guarantees that there is at least one new client.
+		 * Touch every 58 minutes regardless of activity. (Same logic as
+		 * before, but invoked from the poll loop instead of the inline accept
+		 * path.)
 		 */
 		time_t		now = time(NULL);
 
 		if (now - pgServer->last_touch_time >= 58 * SECS_PER_MINUTE)
 			touch_internal_files(pgServer, now);
 
-		/* first check if we have available threads */
-		int			threadIndex = pgclient_threadpool_reserve_slot(client);
+		if (r == 0)
+			continue;			/* timeout — go back to poll */
 
-		if (threadIndex == InvalidThreadIndex)
+		for (int i = 0; i < nfds; i++)
 		{
-			PGDUCK_SERVER_LOG("A new client rejected as it exceeds %d clients", MaxAllowedClients);
+			if (!(fds[i].revents & POLLIN))
+				continue;
 
-			/* TODO: send error message to the client */
-			close(client->clientSocket);
-			pg_free(client);
-			continue;
+			if (dispatch_accepted_client(pgServer, fds[i].fd) != STATUS_OK)
+			{
+				/*
+				 * TODO: be more graceful — for now keep the original
+				 * exit-on-fatal-accept-error behavior.
+				 */
+				exit(STATUS_ERROR);
+			}
 		}
-
-		/* state to pass into pgclient_thread_main and pgclient_thread_cleanup */
-		PgClientThreadInitState *initState =
-			(PgClientThreadInitState *) pg_malloc0(sizeof(PgClientThreadInitState));
-
-		initState->threadIndex = threadIndex;
-		initState->startFunction = pgServer->startFunction;
-		initState->pgClient = client;
-
-		if (disable_shutdown_signals() != STATUS_OK)
-			exit(STATUS_ERROR);
-
-		if (pgserver_create_client_thread(initState) != OK)
-		{
-			PGDUCK_SERVER_ERROR("Thread creation failed for client %d", client->clientSocket);
-
-			close(client->clientSocket);
-			pg_free(client);
-			pg_free(initState);
-			pgclient_threadpool_free_slot(threadIndex);
-		}
-
-		if (enable_shutdown_signals() != STATUS_OK)
-			exit(STATUS_ERROR);
 	}
 
 	return STATUS_OK;
@@ -526,9 +777,21 @@ pgserver_run(PGServer * pgServer)
 void
 pgserver_destroy(PGServer * pgServer)
 {
-	PGDUCK_SERVER_LOG("Shutting down: closing listening socket");
-	closesocket(pgServer->listeningSocket);
-	pgServer->listeningSocket = -1;
+	PGDUCK_SERVER_LOG("Shutting down: closing listening sockets");
+	if (pgServer->listeningSocket >= 0)
+	{
+		closesocket(pgServer->listeningSocket);
+		pgServer->listeningSocket = -1;
+	}
+	for (int i = 0; i < pgServer->numTcpSockets; i++)
+	{
+		if (pgServer->tcpSockets[i] >= 0)
+		{
+			closesocket(pgServer->tcpSockets[i]);
+			pgServer->tcpSockets[i] = -1;
+		}
+	}
+	pgServer->numTcpSockets = 0;
 
 	int			interrupted = pgclient_threadpool_cancel_all();
 
