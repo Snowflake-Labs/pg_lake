@@ -270,16 +270,42 @@ pgsession_read_startup_packet(PGSession * pgSession)
 	else if (proto == NEGOTIATE_SSL_CODE || proto == NEGOTIATE_GSS_CODE)
 	{
 		/*
-		 * We currently only support unix-domain sockets, and SSL is not
-		 * supported over unix domain sockets.
+		 * Standard PostgreSQL protocol: when a client sends an SSLRequest
+		 * or GSSENCRequest packet and the server doesn't support that
+		 * encryption mode, the server replies with a single 'N' byte and
+		 * the client either falls back to plaintext (sslmode=prefer /
+		 * gssencmode=prefer, the libpq defaults) or aborts (require).
+		 * Just closing the connection — which we used to do here — looks
+		 * like a transient failure to libpq, not a "no SSL" signal, so
+		 * the prefer-fallback retry never fires and the connection just
+		 * dies.
+		 *
+		 * We don't support either encryption method (the original code
+		 * was Unix-socket-only, where no libpq ever sends these packets;
+		 * with the TCP listener added by the 0001 patch these can now
+		 * arrive). Reply 'N' and recurse to read the real startup packet.
 		 *
 		 * For pg-hackers discussion on this topic:
 		 * https://www.postgresql.org/message-id/flat/49CA2524.5010809%40gmx.net
 		 */
-		PGDUCK_SERVER_ERROR("server does not support SSL or GSSAPI: %u", proto);
+		char		negResponse = 'N';
 
 		pg_free(startupPacketBuf);
-		return EOF;
+
+		if (!IsOK(pgsession_put_bytes(pgSession, &negResponse, 1)) ||
+			!IsOK(pgsession_flush(pgSession)))
+		{
+			PGDUCK_SERVER_ERROR("failed to send no-SSL/GSSAPI byte");
+			return EOF;
+		}
+
+		/*
+		 * Now wait for the real StartupPacket. Tail-recurse so error
+		 * handling stays DRY; the recursion is bounded by the startup
+		 * protocol (at most one of SSL+GSSAPI request before the actual
+		 * startup, and clients don't repeat).
+		 */
+		return pgsession_read_startup_packet(pgSession);
 	}
 	else if (proto != PG_PROTOCOL(3, 0))
 	{

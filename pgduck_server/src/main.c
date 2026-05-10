@@ -22,6 +22,8 @@
  */
 #include <stdio.h>
 #include <signal.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "c.h"
 #include "postgres_fe.h"
@@ -32,6 +34,7 @@
 #include "pgserver/pgserver.h"
 #include "pgserver/client_threadpool.h"
 #include "pgsession/pgsession.h"
+#include "pgsession/recv_sink.h"
 #include "duckdb/duckdb.h"
 #include "utils/pidfile.h"
 
@@ -74,6 +77,47 @@ main(int argc, char *argv[])
 
 	pgclient_threadpool_init(options.max_clients);
 
+	/*
+	 * Resolve and initialize the RECEIVE-query landing directory.
+	 *
+	 * Default precedence: --recv_dir > <cache_dir>/recv > /tmp/pgduck_recv.
+	 * The directory is created (mode 0700) and any stale files from a
+	 * prior run are unlinked.
+	 */
+	{
+		char	   *recv_dir = options.recv_dir;
+		char	   *resolved = NULL;
+
+		if (recv_dir == NULL)
+		{
+			if (options.cache_dir != NULL)
+			{
+				size_t		len = strlen(options.cache_dir) + sizeof("/recv");
+
+				resolved = malloc(len);
+				if (resolved == NULL)
+				{
+					PGDUCK_SERVER_ERROR("out of memory deriving recv_dir");
+					return STATUS_ERROR;
+				}
+				snprintf(resolved, len, "%s/recv", options.cache_dir);
+				recv_dir = resolved;
+			}
+			else
+			{
+				recv_dir = "/tmp/pgduck_recv";
+			}
+		}
+
+		if (recv_sink_global_init(recv_dir) != 0)
+		{
+			free(resolved);
+			return STATUS_ERROR;
+		}
+		PGDUCK_SERVER_LOG("RECEIVE-query landing dir: %s", recv_dir);
+		free(resolved);
+	}
+
 	PGServer	pgServer;
 
 	srand(time(NULL));
@@ -82,6 +126,7 @@ main(int argc, char *argv[])
 					  options.unix_socket_directory,
 					  options.unix_socket_group,
 					  options.unix_socket_permissions,
+					  options.listen_addresses,
 					  options.port) != STATUS_OK)
 		return STATUS_ERROR;
 

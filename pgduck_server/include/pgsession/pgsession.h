@@ -28,6 +28,9 @@
 
 #include "duckdb/duckdb.h"
 
+/* forward declaration; full definition lives in pgsession/recv_sink.h */
+typedef struct ReceiveSink ReceiveSink;
+
 #define DUCKPG_SERVER_VERSION "16.4.DuckPG"
 
 /*
@@ -175,6 +178,19 @@ typedef struct PGSession
 
 	int			lastReportedSendErrno;	/* needed to make pgsession_flush
 										 * thread-safe */
+
+	/*
+	 * RECEIVE-query state.
+	 *
+	 * When a query begins with the "RECEIVE " prefix, we send the client a
+	 * CopyInResponse, accept CopyData messages into activeRecvSink, and
+	 * defer running the actual DuckDB query until CopyDone arrives. While
+	 * deferredQueryString is non-NULL the session is in COPY-IN-active
+	 * state and only 'd' / 'c' / 'f' messages are valid.
+	 */
+	ReceiveSink *activeRecvSink;
+	char	   *deferredQueryString;
+	ResponseFormat deferredResponseFormat;
 }			PGSession;
 
 /* per-client entrance point for the pgsession logic */
