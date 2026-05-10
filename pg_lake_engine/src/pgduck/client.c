@@ -973,3 +973,135 @@ SendQueryWithParams(PGDuckConnection * pgduckConn, char *queryString,
 		elog(ERROR, "could not set single row mode for connection");
 	}
 }
+
+
+/*
+ * OpenCopyInStreamToPGDuck opens a libpq COPY-IN stream against
+ * pgduck_server. queryString must begin with the "RECEIVE " prefix and
+ * contain the '@@PG_LAKE_RECV@@' placeholder; pgduck_server creates a
+ * server-local sink, replaces the placeholder with the sink path, and
+ * sends a CopyInResponse. After this returns the caller may emit CSV
+ * bytes via PQputCopyData on pgDuckConnection->conn.
+ *
+ * On any error (PQsendQuery failure, non-CopyIn response, server-side
+ * sink-creation error) we ereport(ERROR), which will trigger the xact
+ * cleanup that cancels the in-flight query and releases the connection.
+ */
+void
+OpenCopyInStreamToPGDuck(PGDuckConnection * pgDuckConnection, const char *queryString)
+{
+	PGconn	   *conn = pgDuckConnection->conn;
+	PGresult   *result;
+
+	/*
+	 * Use the simple query protocol (PQsendQuery, not PQsendQueryParams)
+	 * because pgduck_server's RECEIVE handler routes through
+	 * process_query_message via the 'Q' message type. PQsendQueryParams uses
+	 * the extended protocol which goes through Parse/Bind/Execute and doesn't
+	 * currently support our RECEIVE prefix.
+	 */
+	if (PQsendQuery(conn, queryString) == 0)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("failed to send RECEIVE query to pgduck_server: %s",
+						PQerrorMessage(conn))));
+	}
+
+	/*
+	 * Use the WaitLatchOrSocket-driven cooperative wait via WaitForResult
+	 * rather than raw PQgetResult here. Raw PQgetResult blocks inside libpq's
+	 * pqWait, which never reaches CHECK_FOR_INTERRUPTS — so neither
+	 * statement_timeout nor postmaster-death detection can fire while we are
+	 * waiting on pgduck. Run #2v hung 4 minutes in this exact state because
+	 * of that. WaitForResult uses the standard pgduck-client wait pattern
+	 * (WL_LATCH_SET | WL_SOCKET_READABLE | WL_EXIT_ON_PM_DEATH +
+	 * PQconsumeInput + CHECK_FOR_INTERRUPTS) so a hang here surfaces as a
+	 * normal psql error within the configured timeout.
+	 */
+	result = WaitForResult(pgDuckConnection);
+	if (result == NULL)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("connection to pgduck_server closed before CopyInResponse")));
+	}
+
+	if (PQresultStatus(result) != PGRES_COPY_IN)
+	{
+		char	   *errMsg = pstrdup(PQresultErrorMessage(result));
+		ExecStatusType status = PQresultStatus(result);
+
+		PQclear(result);
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("expected CopyInResponse from pgduck_server, got %s: %s",
+						PQresStatus(status),
+						errMsg ? errMsg : "")));
+	}
+
+	PQclear(result);
+}
+
+
+/*
+ * FinishCopyInStreamToPGDuck closes the COPY-IN stream and waits for
+ * pgduck_server to run the deferred query (the one with the now-finalized
+ * sink path baked in) to completion. Errors raised by the deferred query
+ * surface here. The deferred query's PGresult is returned to the caller,
+ * who owns it and must PQclear it.
+ */
+PGresult *
+FinishCopyInStreamToPGDuck(PGDuckConnection * pgDuckConnection)
+{
+	PGconn	   *conn = pgDuckConnection->conn;
+	PGresult   *result;
+	PGresult   *trailing;
+
+	if (PQputCopyEnd(conn, NULL) != 1)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("failed to send CopyDone to pgduck_server: %s",
+						PQerrorMessage(conn))));
+	}
+
+	/*
+	 * Cooperative wait — see the matching note in OpenCopyInStreamToPGDuck.
+	 * Raw PQgetResult here would mask statement_timeout / SIGINT / postmaster
+	 * death the same way it did before CopyDone.
+	 *
+	 * The first PGresult after CopyDone is the deferred query's response
+	 * (CommandComplete, a result set with rows for COPY ... return_stats, or
+	 * an error). Subsequent PGresults are NULL (end-of-stream); drain them so
+	 * the connection is idle on return.
+	 */
+	result = WaitForResult(pgDuckConnection);
+	if (result == NULL)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("connection to pgduck_server closed before deferred query result")));
+	}
+
+	PG_TRY();
+	{
+		ThrowIfPGDuckResultHasError(pgDuckConnection, result);
+	}
+	PG_CATCH();
+	{
+		PQclear(result);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	/*
+	 * Drain trailing NULL terminator. WaitForResult re-checks PQisBusy each
+	 * iteration so a single call here is sufficient — but loop defensively
+	 * in case pgduck sends additional results (e.g. CommandComplete + Z).
+	 */
+	while ((trailing = WaitForResult(pgDuckConnection)) != NULL)
+		PQclear(trailing);
+
+	return result;
+}

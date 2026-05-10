@@ -82,7 +82,10 @@
 #include "pg_lake/fdw/update_tracking.h"
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/fdw/multi_data_file_dest.h"
+#include "pg_lake/cleanup/in_progress_files.h"
+#include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/iceberg/operations/manifest_merge.h"
 #include "pg_lake/partitioning/partition_by_parser.h"
 #include "pg_lake/partitioning/partitioned_dest_receiver.h"
@@ -214,9 +217,32 @@ typedef struct PgLakeFileModifyState
 	/* number of not-deleted rows in the source file */
 	int64		liveRowCount;
 
-	/* DestReceiver for deletions in case of UPDATE/DELETE */
+	/*
+	 * DestReceiver for deletions in case of UPDATE/DELETE.
+	 *
+	 * File-based path (StreamingWritesEnabled=false): deleteDest is a CSV
+	 * DestReceiver writing to deleteFile (a local temp under pgsql_tmp). The
+	 * file is later read by ApplyDeleteFile via ConvertCSVFileTo or
+	 * PerformDeleteFromParquet.
+	 *
+	 * Streaming-write path (StreamingWritesEnabled=true): deleteDest is
+	 * lazily set on the first row received for this source file. Until then
+	 * it stays NULL (along with deleteStreamWriter); `deleteFile` holds the
+	 * precomputed Parquet position-delete path and the deleteStream* fields
+	 * hold the metadata needed to open the stream. Lazy because we don't want
+	 * to open a libpq stream / write an empty Parquet for every source file
+	 * when only some have matching rows.
+	 *
+	 * deleteStreamWriter owns the libpq connection and is finalized in
+	 * end_foreign_modify (or on error). It's NULL on the file-based path.
+	 */
 	DestReceiver *deleteDest;
 	char	   *deleteFile;
+	CSVStreamWriter *deleteStreamWriter;
+	TupleDesc	deleteStreamTupleDesc;
+	DataFileSchema *deleteStreamSchema;
+	CopyDataCompression deleteStreamCompression;
+	List	   *deleteStreamLeafFields;
 
 	/* number of rows modified by UPDATE/DELETE */
 	int64		modifiedRowCount;
@@ -245,6 +271,29 @@ typedef struct PgLakeModifyState
 
 	/* slot used for position deletes */
 	TupleTableSlot *deleteSlot;
+
+	/*
+	 * Long-lived memory context for the per-file deleteStreamWriter
+	 * allocations made by the lazy-open in DeleteSingleRow.
+	 *
+	 * Without this, OpenCSVStreamWriter palloc's the writer + dest in
+	 * whatever CurrentMemoryContext the executor set up at
+	 * postgresExecForeignDelete/Update entry — typically a per-tuple
+	 * context whose chunks get reset or sibling-reused before
+	 * FinishForeignModify runs. The chunk gets re-allocated as a postgres
+	 * List by a later lappend in GetDataFileStatsListFromPGResult, and
+	 * writer->dest->rDestroy jumps into garbage → SIGSEGV.
+	 *
+	 * Mirrors the pattern in multi_data_file_dest.c::CreateChildDestReceiver,
+	 * which switches to its own childContext before the OpenCSVStreamWriter
+	 * call.
+	 *
+	 * Created lazily (only when DELETE/UPDATE) by create_foreign_modify as a
+	 * sub-context of CurrentMemoryContext at that time, which is the FDW
+	 * state's per-statement context — outlives all rows and survives until
+	 * FinishForeignModify completes.
+	 */
+	MemoryContext deleteStreamMemoryContext;
 
 	/* files that are scanned during UPDATE/DELETE */
 	List	   *fileModifyStates;
@@ -2354,9 +2403,49 @@ DeleteSingleRow(PgLakeModifyState * fmstate, ItemPointer ctid)
 	PgLakeFileModifyState *fileModifyState =
 		list_nth(fmstate->fileModifyStates, fileIndex);
 
-	if (fileModifyState->deleteDest == NULL)
-		/* not tracking deletions for this file, which is fully deleted */
+	if (fileModifyState->deleteFile == NULL)
+	{
+		/* not tracking deletions for this file (allRowsMatch shortcut) */
+		Assert(fileModifyState->deleteDest == NULL);
 		return;
+	}
+
+	/*
+	 * Lazy-open the streaming dest receiver on the first row for this source
+	 * file. We don't open up front because many source files in a scan may
+	 * end up with no matching rows, and an empty stream would still write an
+	 * empty Parquet on flush. See create_foreign_modify for where the stash
+	 * fields are populated.
+	 */
+	if (fileModifyState->deleteDest == NULL && StreamingWritesEnabled)
+	{
+		Assert(fileModifyState->deleteStreamWriter == NULL);
+
+		/*
+		 * Allocate the writer + dest + cstate in
+		 * fmstate->deleteStreamMemoryContext, not whatever per-tuple context
+		 * the executor handed us. Without this switch the chunks get reset /
+		 * sibling-reused before FinishForeignModify runs and
+		 * writer->dest->rDestroy jumps into garbage. See the field comment in
+		 * struct PgLakeModifyState.
+		 */
+		MemoryContext oldContext =
+			MemoryContextSwitchTo(fmstate->deleteStreamMemoryContext);
+
+		fileModifyState->deleteStreamWriter =
+			OpenCSVStreamWriter(fileModifyState->deleteStreamTupleDesc,
+								 /* maxLineSize */ -1,
+								fileModifyState->deleteFile,
+								DATA_FORMAT_PARQUET,
+								fileModifyState->deleteStreamCompression,
+								 /* formatOptions */ NIL,
+								fileModifyState->deleteStreamSchema,
+								fileModifyState->deleteStreamLeafFields);
+		fileModifyState->deleteDest =
+			CSVStreamWriterDestReceiver(fileModifyState->deleteStreamWriter);
+
+		MemoryContextSwitchTo(oldContext);
+	}
 
 	/* construct a (filename,position,...) delete record */
 	PrepareDeletionSlot(fileModifyState, fileRowNumber, fmstate->deleteSlot);
@@ -2735,13 +2824,29 @@ WriteDeleteRecord(PgLakeFileModifyState * fileModifyState,
 	deleteDest->receiveSlot(deleteSlot, deleteDest);
 	fileModifyState->modifiedRowCount++;
 
-	if (fileModifyState->modifiedRowCount == fileModifyState->liveRowCount)
+	if (fileModifyState->modifiedRowCount == fileModifyState->liveRowCount &&
+		fileModifyState->deleteStreamWriter == NULL)
 	{
 		/*
-		 * All rows are deleted, we do not actually need a delete file. Delete
-		 * it now to free up disk space.
+		 * File-based path only: all rows in this source file are being
+		 * deleted, so we don't need a deletion file. Drop the local CSV temp
+		 * file to free up disk space and let FinishForeignModify emit an
+		 * ADD_DELETION_FILE_FROM_CSV with deleteFile=NULL — downstream
+		 * ApplyDeleteFile handles that as "remove the source file"
+		 * (liveRowCount==0).
 		 *
-		 * We'll just pass on the modified row count.
+		 * The streaming path (deleteStreamWriter != NULL) MUST NOT take this
+		 * branch: rDestroy mid-stream pfree\'s the DR_copy chunk and the
+		 * still-non-NULL deleteStreamWriter then points at freed memory;
+		 * FinishForeignModify\'s FinishCSVStreamWriter would hit a
+		 * use-after-free + ApplyPrecomputedDeleteFile would receive a NULL
+		 * deleteFile.
+		 *
+		 * For the streaming path, just let WriteDeleteRecord keep
+		 * accumulating rows; the resulting parquet position-delete file will
+		 * cover all rows in the source, which is semantically equivalent
+		 * (iceberg readers see a fully-deleted source via the position-delete
+		 * merge).
 		 */
 		fileModifyState->deleteDest->rShutdown(fileModifyState->deleteDest);
 		fileModifyState->deleteDest->rDestroy(fileModifyState->deleteDest);
@@ -2873,12 +2978,43 @@ FinishForeignModify(PgLakeModifyState * fmstate)
 
 		DataFileModification *modification = palloc0(sizeof(DataFileModification));
 
-		modification->type = ADD_DELETION_FILE_FROM_CSV;
-		modification->sourcePath = TextDatumGetCString(fileModifyState->pathDatum);
-		modification->sourceRowCount = fileModifyState->sourceRowCount;
-		modification->liveRowCount = fileModifyState->liveRowCount;
-		modification->deleteFile = fileModifyState->deleteFile;
-		modification->deletedRowCount = fileModifyState->modifiedRowCount;
+		if (fileModifyState->deleteStreamWriter != NULL)
+		{
+			/*
+			 * Streaming-write path: close the COPY-IN stream, wait for
+			 * pgduck's deferred COPY ... TO 'parquet_path' to complete, and
+			 * grab the resulting per-file stats. The Parquet position- delete
+			 * file already exists on object storage at this point.
+			 *
+			 * ApplyPrecomputedDeleteFile will stitch it into the metadata
+			 * (always merge-on-read for streaming; see writable_table.c).
+			 */
+			StatsCollector *statsCollector =
+				FinishCSVStreamWriter(fileModifyState->deleteStreamWriter);
+
+			fileModifyState->deleteStreamWriter = NULL;
+			fileModifyState->deleteDest = NULL;
+
+			Assert(list_length(statsCollector->dataFileStats) == 1);
+			DataFileStats *stats = linitial(statsCollector->dataFileStats);
+
+			modification->type = ADD_DELETION_FILE_PRECOMPUTED;
+			modification->sourcePath = TextDatumGetCString(fileModifyState->pathDatum);
+			modification->sourceRowCount = fileModifyState->sourceRowCount;
+			modification->liveRowCount = fileModifyState->liveRowCount;
+			modification->deleteFile = fileModifyState->deleteFile;
+			modification->deletedRowCount = fileModifyState->modifiedRowCount;
+			modification->fileStats = stats;
+		}
+		else
+		{
+			modification->type = ADD_DELETION_FILE_FROM_CSV;
+			modification->sourcePath = TextDatumGetCString(fileModifyState->pathDatum);
+			modification->sourceRowCount = fileModifyState->sourceRowCount;
+			modification->liveRowCount = fileModifyState->liveRowCount;
+			modification->deleteFile = fileModifyState->deleteFile;
+			modification->deletedRowCount = fileModifyState->modifiedRowCount;
+		}
 
 		modifications = lappend(modifications, modification);
 	}
@@ -3505,6 +3641,17 @@ create_foreign_modify(Relation rel,
 
 	if (operation == CMD_UPDATE || operation == CMD_DELETE)
 	{
+		/*
+		 * Long-lived memory context for the deleteStreamWriter per-file
+		 * allocations. See the field comment in struct PgLakeModifyState for
+		 * the full reasoning. Created as a sub of CurrentMemoryContext (the
+		 * FDW state context) so it outlives all per-tuple resets.
+		 */
+		fmstate->deleteStreamMemoryContext =
+			AllocSetContextCreate(CurrentMemoryContext,
+								  "PgLakeDeleteStreamWriter",
+								  ALLOCSET_DEFAULT_SIZES);
+
 		/* Find the ctid resjunk column in the subplan's result */
 		Plan	   *subPlan = outerPlanState(mtstate)->plan;
 
@@ -3573,6 +3720,66 @@ create_foreign_modify(Relation rel,
 					 * remaining rows in the data file.
 					 */
 					fileModifyState->modifiedRowCount = fileModifyState->liveRowCount;
+				}
+				else if (StreamingWritesEnabled)
+				{
+					/*
+					 * Streaming-write path: precompute the Parquet
+					 * position-delete file path now and stash the args needed
+					 * to open a CSVStreamWriter targeting it. The actual
+					 * stream open is deferred to the first ExecForeignDelete
+					 * touching this source file (see the lazy-open block
+					 * above WriteDeleteRecord).
+					 *
+					 * Why deferred: ExecForeignDelete is dispatched per row
+					 * based on the row's ctid -> source file mapping. Many
+					 * source files in a scan may end up with zero matching
+					 * rows, and we don't want to open a libpq stream (and
+					 * write an empty Parquet) for those.
+					 *
+					 * We always go merge-on-read here; copy-on-write is
+					 * file-based-only for now (see
+					 * ApplyPrecomputedDeleteFile).
+					 */
+					ForeignTable *foreignTable = GetForeignTable(relationId);
+					CopyDataFormat tableFormat;
+					CopyDataCompression tableCompression;
+					PgLakeTableType tableType = GetPgLakeTableType(relationId);
+
+					FindDataFormatAndCompression(tableType, NULL,
+												 foreignTable->options,
+												 &tableFormat, &tableCompression);
+
+					char	   *deletionFilePath =
+						GenerateDataFileNameForTable(relationId, true);
+
+					/*
+					 * Mirror the in-progress-file tracking that
+					 * ApplyDeleteFile's merge-on-read branch does for the
+					 * file-based path so a transaction abort still cleans up
+					 * partial Parquet writes.
+					 */
+					bool		isPrefix = false;
+					bool		isIcebergTable =
+						IsPgLakeIcebergForeignTableById(relationId);
+					bool		autoDeleteRecord = !isIcebergTable;
+
+					InsertInProgressFileRecordExtended(deletionFilePath, isPrefix,
+													   autoDeleteRecord);
+
+					fileModifyState->deleteFile = deletionFilePath;
+					fileModifyState->deleteStreamTupleDesc =
+						fmstate->deleteSlot->tts_tupleDescriptor;
+					fileModifyState->deleteStreamSchema =
+						CreatePositionDeleteDataFileSchema();
+					fileModifyState->deleteStreamCompression = tableCompression;
+					fileModifyState->deleteStreamLeafFields =
+						GetLeafFieldsForTable(relationId);
+
+					/*
+					 * deleteDest stays NULL until the lazy-open block fires.
+					 * WriteDeleteRecord guards on this.
+					 */
 				}
 				else
 				{

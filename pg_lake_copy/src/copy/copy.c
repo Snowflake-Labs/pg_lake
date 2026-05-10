@@ -96,6 +96,8 @@ PgLakeCopyValidityCheckHookType PgLakeCopyValidityCheckHook = NULL;
 static bool IsPgLakeCopy(CopyStmt *copyStmt);
 static bool IsCopyFromStdin(CopyStmt *copyStmt);
 static bool IsCopyToStdout(CopyStmt *copyStmt);
+static int64 StreamingCopyFromStdinPushdown(Oid relationId, char *readQuery,
+											TupleDesc tupleDesc);
 static void ProcessPgLakeCopyFrom(CopyStmt *copyStmt, ParseState *pstate,
 								  Relation relation, Node *whereClause,
 								  uint64 *rowsProcessed);
@@ -449,23 +451,52 @@ ProcessPgLakeCopyFrom(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 	 */
 	TupleDesc	tupleDesc = BuildTupleDescriptorForRelation(relation, copyStmt->attlist);
 
+	/*
+	 * Compute doCopyPushdown up front so the STDIN block can choose between
+	 * the streaming-write path (when GUC is on AND we'll push the COPY down
+	 * to pgduck) and the file-based path (everything else). For non-pushdown
+	 * COPYs the COPY query is wrapped in TRANSMIT and rows round-trip back
+	 * through PG; that's a different shape than the deferred-INSERT we use
+	 * for streaming, so streaming + non-pushdown still uses the file-based
+	 * path. Document the gap.
+	 */
+	bool		doCopyPushdown = IsCopyFromPushdownable(relation, copyStmt->attlist,
+														whereClause, sourceFormat);
+	bool		useStreamingStdin = StreamingWritesEnabled && IsCopyFromStdin(copyStmt) &&
+		doCopyPushdown;
+
 	if (IsCopyFromStdin(copyStmt))
 	{
-		sourcePath = GenerateTempFileName(TEMP_FILE_PATTERN, ensureCleanup);
+		if (useStreamingStdin)
+		{
+			/*
+			 * Streaming-write path: don't park bytes locally. Use the
+			 * pgduck_server RECEIVE sink-path placeholder; the deferred COPY
+			 * query that AddQueryResultToTableStream builds will pick this up
+			 * and substitute it with the server-local sink path before
+			 * running read_csv() on it.
+			 */
+			sourcePath = pstrdup(PG_LAKE_RECV_PATH_PLACEHOLDER);
+		}
+		else
+		{
+			sourcePath = GenerateTempFileName(TEMP_FILE_PATTERN, ensureCleanup);
 
-		/*
-		 * we send the expected column count to make pedantic clients happy
-		 */
-		int			columnCount = tupleDesc->natts;
+			/*
+			 * we send the expected column count to make pedantic clients
+			 * happy
+			 */
+			int			columnCount = tupleDesc->natts;
 
-		bool		isBinary = true;
+			bool		isBinary = true;
 
-		/*
-		 * We copy the incoming bytes to a file first and then try to convert
-		 * that file. We could perhaps optimize this in the future by copying
-		 * via a named pipe.
-		 */
-		CopyInputToFile(sourcePath, columnCount, isBinary);
+			/*
+			 * We copy the incoming bytes to a file first and then try to
+			 * convert that file. We could perhaps optimize this in the future
+			 * by copying via a named pipe.
+			 */
+			CopyInputToFile(sourcePath, columnCount, isBinary);
+		}
 	}
 
 	/*
@@ -483,9 +514,6 @@ ProcessPgLakeCopyFrom(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 	 * case. However, we do want explicit casts to avoid writing incorrect
 	 * types.
 	 */
-	bool		doCopyPushdown = IsCopyFromPushdownable(relation, copyStmt->attlist,
-														whereClause, sourceFormat);
-
 	if (!doCopyPushdown)
 		readFlags |= READ_DATA_TRANSMIT;
 	else
@@ -535,6 +563,13 @@ ProcessPgLakeCopyFrom(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 	 */
 	if (doCopyPushdown)
 	{
+		if (useStreamingStdin)
+		{
+			*rowsProcessed = StreamingCopyFromStdinPushdown(relationId, readQuery,
+															tupleDesc);
+			return;
+		}
+
 		*rowsProcessed = AddQueryResultToTable(relationId, readQuery, tupleDesc, true);
 		return;
 	}
@@ -657,6 +692,38 @@ IsCopyFromPushdownable(Relation relation, List *columnNameList,
 		return false;
 
 	return true;
+}
+
+
+/*
+ * StreamingCopyFromStdinPushdown drives the COPY tablename FROM STDIN
+ * pushdown path when pg_lake_engine.streaming_writes=on.
+ *
+ * Pulled out of ProcessPgLakeCopyFrom so the caller stays small enough
+ * for gcc's clobbered-variable analysis (-Wclobbered) to keep its
+ * pre-streaming behavior on the unrelated TupleDesc helpers below;
+ * inlining a multi-step PG-call sequence into ProcessPgLakeCopyFrom
+ * triggered false-positive clobber warnings on attributeDescriptor /
+ * cleanTupleDesc that don't fire when this branch is its own function.
+ *
+ * No PG_TRY/CATCH: errors here trigger transaction abort; pgduck's
+ * PGDuckClientTransactionCallback recycles the libpq connection and
+ * the in-progress-file record registered inside Start... is cleaned
+ * up by the pre-commit hook on abort.
+ */
+static int64
+StreamingCopyFromStdinPushdown(Oid relationId, char *readQuery, TupleDesc tupleDesc)
+{
+	AddQueryResultStreamHandle *handle =
+		StartAddQueryResultToTableStream(relationId, readQuery, tupleDesc,
+										  /* wrapNativeTypes */ true);
+
+	int			columnCount = tupleDesc->natts;
+	bool		isBinary = true;
+
+	CopyInputToStream(AddQueryResultStreamConnection(handle), columnCount, isBinary);
+
+	return FinishAddQueryResultToTableStream(handle);
 }
 
 

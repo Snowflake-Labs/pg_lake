@@ -24,11 +24,13 @@
 #include "commands/defrem.h"
 #include "common/string.h"
 #include "pg_lake/csv/csv_options.h"
+#include "pg_lake/csv/csv_writer.h"
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/data_file/data_file_stats.h"
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/parquet/geoparquet.h"
+#include "pg_lake/pgduck/client.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/pgduck/read_data.h"
 #include "pg_lake/pgduck/type.h"
@@ -44,6 +46,10 @@ static DuckDBTypeInfo ChooseDuckDBEngineTypeForWrite(PGType postgresType,
 													 CopyDataFormat destinationFormat);
 static void AppendFieldIdValue(StringInfo map, Field * field, int fieldId);
 static const char *ParquetVersionToString(ParquetVersion version);
+static char *BuildSelectFromCSVQuery(const char *csvFilePath, TupleDesc csvTupleDesc,
+									 int maxLineSize, CopyDataFormat destinationFormat);
+
+/* BuildCopyToCommandString is exposed via write_data.h for the streaming path. */
 
 static DuckDBTypeInfo VARCHAR_TYPE =
 {
@@ -52,6 +58,41 @@ static DuckDBTypeInfo VARCHAR_TYPE =
 
 int			TargetRowGroupSizeMB = DEFAULT_TARGET_ROW_GROUP_SIZE_MB;
 int			DefaultParquetVersion = PARQUET_VERSION_V1;
+
+/*
+ * pg_lake_engine.streaming_writes — opt-in libpq COPY-IN streaming for
+ * bulk-write paths (INSERT/COPY/DELETE). Defined here so the variable
+ * lives next to the other write-side state. The DefineCustomBoolVariable
+ * call is in init.c.
+ *
+ * When false, the existing file-based path is used: rows are written to a
+ * local CSV under $PGDATA/pgsql_tmp and pgduck reads it via read_csv().
+ *
+ * When true, rows are streamed directly to pgduck_server's RECEIVE sink
+ * over libpq, decoupling pgduck_server's filesystem from PGDATA. This is
+ * required when pgduck_server runs on a different host than the postgres
+ * backend (e.g. as a separate Kubernetes pod).
+ */
+bool		StreamingWritesEnabled = false;
+
+/* PG_LAKE_RECV_PATH_PLACEHOLDER is exposed via write_data.h. */
+
+/*
+ * CSVStreamWriter is the streaming counterpart of a CSV temp file +
+ * deferred ConvertCSVFileTo: it owns a libpq COPY-IN stream and a CSV
+ * DestReceiver feeding bytes into it. The destination path / format /
+ * options used to build the deferred RECEIVE query are kept here so we
+ * can reconstruct the StatsCollector once the stream finishes.
+ */
+struct CSVStreamWriter
+{
+	PGDuckConnection *conn;
+	DestReceiver *dest;
+	char	   *destinationPath;
+	CopyDataFormat destinationFormat;
+	DataFileSchema *schema;
+	List	   *leafFields;
+};
 
 
 /*
@@ -68,6 +109,40 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 				 List *formatOptions,
 				 DataFileSchema * schema,
 				 List *leafFields)
+{
+	char	   *innerSelect = BuildSelectFromCSVQuery(csvFilePath, csvTupleDesc,
+													  maxLineSize, destinationFormat);
+	bool		queryHasRowIds = false;
+
+	/*
+	 * CSV data is already clamped by WriteInsertRecord and converted to
+	 * struct for Iceberg
+	 */
+	return WriteQueryResultTo(innerSelect,
+							  destinationPath,
+							  destinationFormat,
+							  destinationCompression,
+							  formatOptions,
+							  queryHasRowIds,
+							  schema,
+							  csvTupleDesc,
+							  leafFields,
+							  ICEBERG_OOR_NONE,
+							  false /* wrapNativeTypes */ );
+}
+
+
+/*
+ * BuildSelectFromCSVQuery builds the inner `SELECT ... FROM read_csv(<path>, ...)`
+ * query that ConvertCSVFileTo wraps with COPY (...) TO ... WITH (...).
+ *
+ * Pulled out so the streaming path (OpenCSVStreamWriter) can build the
+ * same query with the RECEIVE sink-path placeholder substituted for
+ * csvFilePath.
+ */
+static char *
+BuildSelectFromCSVQuery(const char *csvFilePath, TupleDesc csvTupleDesc,
+						int maxLineSize, CopyDataFormat destinationFormat)
 {
 	StringInfoData command;
 
@@ -88,23 +163,7 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 	AppendReadCSVClause(&command, csvFilePath, maxLineSize, columnsMap,
 						InternalCSVOptions(includeHeader));
 
-	bool		queryHasRowIds = false;
-
-	/*
-	 * CSV data is already clamped by WriteInsertRecord and converted to
-	 * struct for Iceberg
-	 */
-	return WriteQueryResultTo(command.data,
-							  destinationPath,
-							  destinationFormat,
-							  destinationCompression,
-							  formatOptions,
-							  queryHasRowIds,
-							  schema,
-							  csvTupleDesc,
-							  leafFields,
-							  ICEBERG_OOR_NONE,
-							  false /* wrapNativeTypes */ );
+	return command.data;
 }
 
 
@@ -125,6 +184,41 @@ WriteQueryResultTo(char *query,
 				   List *leafFields,
 				   IcebergOutOfRangePolicy outOfRangePolicy,
 				   bool wrapNativeTypes)
+{
+	char	   *command = BuildCopyToCommandString(query, destinationPath,
+												   destinationFormat,
+												   destinationCompression,
+												   formatOptions, queryHasRowId,
+												   schema, queryTupleDesc,
+												   outOfRangePolicy, wrapNativeTypes);
+
+	return ExecuteCopyToCommandOnPGDuckConnection(command,
+												  leafFields,
+												  schema,
+												  destinationPath,
+												  destinationFormat);
+}
+
+
+/*
+ * BuildCopyToCommandString wraps `query` in `COPY (...) TO 'destinationPath'
+ * WITH (...)` and returns the command string. Pulled out of
+ * WriteQueryResultTo so the streaming paths (OpenCSVStreamWriter and
+ * StartAddQueryResultToTableStream) can build the same command but with
+ * '@@PG_LAKE_RECV@@' substituted for the read_csv path arg, and then
+ * prefix it with "RECEIVE " before sending.
+ */
+char *
+BuildCopyToCommandString(char *query,
+						 char *destinationPath,
+						 CopyDataFormat destinationFormat,
+						 CopyDataCompression destinationCompression,
+						 List *formatOptions,
+						 bool queryHasRowId,
+						 DataFileSchema * schema,
+						 TupleDesc queryTupleDesc,
+						 IcebergOutOfRangePolicy outOfRangePolicy,
+						 bool wrapNativeTypes)
 {
 	if (outOfRangePolicy != ICEBERG_OOR_NONE)
 	{
@@ -367,11 +461,175 @@ WriteQueryResultTo(char *query,
 	/* end WITH options */
 	appendStringInfoString(&command, ")");
 
-	return ExecuteCopyToCommandOnPGDuckConnection(command.data,
-												  leafFields,
-												  schema,
-												  destinationPath,
-												  destinationFormat);
+	return command.data;
+}
+
+
+/*
+ * OpenCSVStreamWriter is the streaming counterpart of ConvertCSVFileTo:
+ * instead of reading bytes back through a local CSV file, it opens a
+ * libpq COPY-IN stream to pgduck_server's RECEIVE handler with the same
+ * COPY ... TO destination query baked in (with '@@PG_LAKE_RECV@@' as the
+ * read_csv path placeholder), and returns a writer whose ->dest is a CSV
+ * DestReceiver feeding bytes into that stream.
+ *
+ * Caller pattern:
+ *
+ *   writer = OpenCSVStreamWriter(...);
+ *   dest = CSVStreamWriterDestReceiver(writer);
+ *   <drive `dest` from a producer query>
+ *   dest->rShutdown(dest);
+ *   stats = FinishCSVStreamWriter(writer);
+ *
+ * The writer takes ownership of a PGDuckConnection for its lifetime and
+ * releases it in FinishCSVStreamWriter (success or failure).
+ */
+CSVStreamWriter *
+OpenCSVStreamWriter(TupleDesc csvTupleDesc, int maxLineSize,
+					char *destinationPath,
+					CopyDataFormat destinationFormat,
+					CopyDataCompression destinationCompression,
+					List *formatOptions,
+					DataFileSchema * schema,
+					List *leafFields)
+{
+	/* Build the same query as ConvertCSVFileTo, with the RECEIVE placeholder. */
+	char	   *innerSelect = BuildSelectFromCSVQuery(PG_LAKE_RECV_PATH_PLACEHOLDER,
+													  csvTupleDesc,
+													  maxLineSize,
+													  destinationFormat);
+
+	/*
+	 * Wrap with COPY (...) TO 'destinationPath' WITH (...). We use
+	 * outOfRangePolicy = ICEBERG_OOR_NONE / wrapNativeTypes = false to mirror
+	 * ConvertCSVFileTo: the CSV bytes coming from the DestReceiver are
+	 * already clamped / native-converted upstream.
+	 */
+	bool		queryHasRowIds = false;
+	char	   *copyCommand = BuildCopyToCommandString(innerSelect, destinationPath,
+													   destinationFormat,
+													   destinationCompression,
+													   formatOptions,
+													   queryHasRowIds,
+													   schema, csvTupleDesc,
+													   ICEBERG_OOR_NONE,
+													   false /* wrapNativeTypes */ );
+
+	char	   *receiveQuery = psprintf("RECEIVE %s", copyCommand);
+
+	CSVStreamWriter *writer = palloc0(sizeof(CSVStreamWriter));
+
+	writer->destinationPath = destinationPath;
+	writer->destinationFormat = destinationFormat;
+	writer->schema = schema;
+	writer->leafFields = leafFields;
+	writer->conn = GetPGDuckConnection();
+
+	PG_TRY();
+	{
+		OpenCopyInStreamToPGDuck(writer->conn, receiveQuery);
+
+		/*
+		 * The dest receiver uses the same CSV options as ConvertCSVFileTo's
+		 * caller: header included so AppendReadCSVClause's auto-detect /
+		 * columns map matches the bytes we emit.
+		 */
+		bool		includeHeader = true;
+		List	   *copyOptions = InternalCSVOptions(includeHeader);
+
+		writer->dest = CreateCSVStreamDestReceiver(writer->conn->conn,
+												   copyOptions,
+												   destinationFormat);
+	}
+	PG_CATCH();
+	{
+		ReleasePGDuckConnection(writer->conn);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	return writer;
+}
+
+
+/*
+ * CSVStreamWriterDestReceiver returns the DestReceiver that the caller
+ * should drive with rows. The receiver is owned by the writer; do not
+ * call rDestroy on it (FinishCSVStreamWriter handles that).
+ */
+DestReceiver *
+CSVStreamWriterDestReceiver(CSVStreamWriter * writer)
+{
+	return writer->dest;
+}
+
+
+/*
+ * FinishCSVStreamWriter closes the COPY-IN stream, waits for pgduck to
+ * complete the deferred COPY ... TO query, and returns the resulting
+ * StatsCollector built from its result rows (Parquet/Iceberg) or
+ * CommandComplete tag (CSV/JSON), exactly like
+ * ExecuteCopyToCommandOnPGDuckConnection does for the file-based path.
+ *
+ * The caller MUST have called writer->dest->rShutdown(writer->dest)
+ * before invoking this so the per-row buffer is flushed and any binary
+ * trailer is emitted.
+ *
+ * The DestReceiver and the underlying PGDuckConnection are released here
+ * (in both success and failure paths).
+ */
+StatsCollector *
+FinishCSVStreamWriter(CSVStreamWriter * writer)
+{
+	StatsCollector *statsCollector = NULL;
+	PGresult   *result = NULL;
+
+	PG_TRY();
+	{
+		result = FinishCopyInStreamToPGDuck(writer->conn);
+
+		if (writer->destinationFormat == DATA_FORMAT_PARQUET ||
+			writer->destinationFormat == DATA_FORMAT_ICEBERG)
+		{
+			/* DuckDB's COPY ... return_stats returns one row per file. */
+			statsCollector = GetDataFileStatsListFromPGResult(result,
+															  writer->leafFields,
+															  writer->schema);
+		}
+		else
+		{
+			char	   *commandTuples = PQcmdTuples(result);
+			int64		totalRowCount = atoll(commandTuples);
+
+			statsCollector = palloc0(sizeof(StatsCollector));
+			statsCollector->totalRowCount = totalRowCount;
+
+			/* no file is created when 0 rows are copied */
+			if (totalRowCount > 0)
+			{
+				DataFileStats *fileStats =
+					CreateDataFileStatsForDataFile(writer->destinationPath,
+												   totalRowCount, 0,
+												   writer->leafFields);
+
+				statsCollector->dataFileStats = list_make1(fileStats);
+			}
+		}
+	}
+	PG_FINALLY();
+	{
+		if (result != NULL)
+			PQclear(result);
+		if (writer->dest != NULL)
+		{
+			writer->dest->rDestroy(writer->dest);
+			writer->dest = NULL;
+		}
+		ReleasePGDuckConnection(writer->conn);
+	}
+	PG_END_TRY();
+
+	return statsCollector;
 }
 
 

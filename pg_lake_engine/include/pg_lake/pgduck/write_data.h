@@ -23,10 +23,24 @@
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/pgduck/iceberg_validation.h"
 #include "nodes/pg_list.h"
+#include "tcop/dest.h"
 
 /* pg_lake_table.target_row_group_size_mb */
 #define DEFAULT_TARGET_ROW_GROUP_SIZE_MB 512
 extern PGDLLEXPORT int TargetRowGroupSizeMB;
+
+/* pg_lake_engine.streaming_writes */
+extern PGDLLEXPORT bool StreamingWritesEnabled;
+
+/*
+ * Sink-path placeholder substituted server-side by pgduck_server's
+ * RECEIVE handler. Must match SINK_PLACEHOLDER in pgduck_server's
+ * pgsession.c. Streaming-write callers pass this where the file-based
+ * path would pass the local CSV file path; the placeholder is then
+ * embedded inside read_csv('<placeholder>', ...) and pgduck swaps in
+ * the server-local sink path before running the deferred query.
+ */
+#define PG_LAKE_RECV_PATH_PLACEHOLDER "@@PG_LAKE_RECV@@"
 
 typedef enum ParquetVersion
 {
@@ -57,7 +71,42 @@ extern PGDLLEXPORT StatsCollector * WriteQueryResultTo(char *query,
 													   List *leafFields,
 													   IcebergOutOfRangePolicy outOfRangePolicy,
 													   bool wrapNativeTypes);
+/*
+ * BuildCopyToCommandString assembles `COPY (query) TO 'destinationPath'
+ * WITH (format ..., compression ..., return_stats, ...)` for the given
+ * destination format / compression / format options. The same string
+ * builder is used by WriteQueryResultTo (file path), OpenCSVStreamWriter
+ * (streaming), and the streaming AddQueryResultToTable variant in
+ * writable_table.c.
+ */
+extern PGDLLEXPORT char *BuildCopyToCommandString(char *query, char *destinationPath,
+												  CopyDataFormat destinationFormat,
+												  CopyDataCompression destinationCompression,
+												  List *formatOptions,
+												  bool queryHasRowId,
+												  DataFileSchema * schema,
+												  TupleDesc queryTupleDesc,
+												  IcebergOutOfRangePolicy outOfRangePolicy,
+												  bool wrapNativeTypes);
+
 extern PGDLLEXPORT void AppendFields(StringInfo map, DataFileSchema * schema);
 extern PGDLLEXPORT char *TupleDescToColumnMapForWrite(TupleDesc tupleDesc, CopyDataFormat destinationFormat);
 extern PGDLLEXPORT char *TupleDescToProjectionListForWrite(TupleDesc tupleDesc,
 														   CopyDataFormat destinationFormat);
+
+/*
+ * Streaming counterpart of ConvertCSVFileTo. See OpenCSVStreamWriter in
+ * write_data.c for the contract. The struct is opaque to callers.
+ */
+typedef struct CSVStreamWriter CSVStreamWriter;
+
+extern PGDLLEXPORT CSVStreamWriter * OpenCSVStreamWriter(TupleDesc csvTupleDesc,
+														 int maxLineSize,
+														 char *destinationPath,
+														 CopyDataFormat destinationFormat,
+														 CopyDataCompression destinationCompression,
+														 List *formatOptions,
+														 DataFileSchema * schema,
+														 List *leafFields);
+extern PGDLLEXPORT DestReceiver *CSVStreamWriterDestReceiver(CSVStreamWriter * writer);
+extern PGDLLEXPORT StatsCollector * FinishCSVStreamWriter(CSVStreamWriter * writer);

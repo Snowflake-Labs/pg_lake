@@ -17,8 +17,11 @@
 
 #pragma once
 
+#include "access/tupdesc.h"
 #include "nodes/pg_list.h"
 #include "utils/relcache.h"
+#include "pg_lake/copy/copy_format.h"
+#include "pg_lake/data_file/data_file_stats.h"
 #include "pg_lake/data_file/data_files.h"
 
 /* by default, we switch to copy-on-write if 20% or more of a file is deleted */
@@ -48,6 +51,18 @@ typedef enum DataFileModificationType
 
 	/* new data file (Parquet) */
 	ADD_DATA_FILE,
+
+	/*
+	 * Streaming-write variant: deletions from a single data file where the
+	 * intermediate CSV was streamed directly into the destination Parquet
+	 * position-delete file (no local CSV ever existed). `deleteFile` points
+	 * at the precomputed Parquet path on object storage and `fileStats`
+	 * carries its DuckDB return_stats. ApplyPrecomputedDeleteFile consumes
+	 * this; the file-based ApplyDeleteFile path is bypassed (and so is its
+	 * copy-on-write threshold check — see ApplyPrecomputedDeleteFile for
+	 * the rationale).
+	 */
+	ADD_DELETION_FILE_PRECOMPUTED,
 }			DataFileModificationType;
 
 /*
@@ -121,6 +136,68 @@ extern PGDLLEXPORT List *PrepareCSVInsertion(Oid relationId, char *insertCSV, in
 											 int64 reservedRowIdStart, int maximumLineSize,
 											 DataFileSchema * schema);
 
+/*
+ * Two-phase variant of PrepareCSVInsertion exposed for the streaming-write
+ * path: callers compute the destination prefix / format / options up front
+ * (BeginCSVInsertion), drive the CSV bytes themselves (e.g. via
+ * OpenCSVStreamWriter), then build modifications from a precomputed
+ * StatsCollector (BuildCSVInsertionModifications). EndCSVInsertion releases
+ * the relation lock.
+ *
+ * The struct is opaque to callers; access the destination prefix / format /
+ * options via the accessor functions below.
+ */
+typedef struct CSVInsertionContext CSVInsertionContext;
+
+extern PGDLLEXPORT CSVInsertionContext * BeginCSVInsertion(Oid relationId,
+														   int64 reservedRowIdStart,
+														   DataFileSchema * schema);
+extern PGDLLEXPORT List *BuildCSVInsertionModifications(CSVInsertionContext * ctx,
+														StatsCollector * statsCollector,
+														int64 rowCount);
+extern PGDLLEXPORT void EndCSVInsertion(CSVInsertionContext * ctx);
+
+/* accessors for the streaming-write call sites */
+extern PGDLLEXPORT TupleDesc CSVInsertionContextTupleDescriptor(CSVInsertionContext * ctx);
+extern PGDLLEXPORT char *CSVInsertionContextDestinationPath(CSVInsertionContext * ctx);
+extern PGDLLEXPORT CopyDataFormat CSVInsertionContextFormat(CSVInsertionContext * ctx);
+extern PGDLLEXPORT CopyDataCompression CSVInsertionContextCompression(CSVInsertionContext * ctx);
+extern PGDLLEXPORT List *CSVInsertionContextOptions(CSVInsertionContext * ctx);
+extern PGDLLEXPORT DataFileSchema * CSVInsertionContextSchema(CSVInsertionContext * ctx);
+extern PGDLLEXPORT List *CSVInsertionContextLeafFields(CSVInsertionContext * ctx);
+
 extern PGDLLEXPORT int64 AddQueryResultToTable(Oid relationId, char *readQuery,
 											   TupleDesc queryTupleDesc,
 											   bool wrapNativeTypes);
+
+/*
+ * Streaming-write variant of AddQueryResultToTable.
+ *
+ * StartAddQueryResultToTableStream prepares destination metadata, builds
+ *   COPY (readQuery) TO '<parquet>' WITH (...), prefixes "RECEIVE " (with
+ *   '@@PG_LAKE_RECV@@' substituted for the read_csv path arg in
+ *   readQuery), and opens a libpq COPY-IN stream against pgduck_server.
+ *   Returns an opaque handle.
+ *
+ * AddQueryResultStreamConnection returns the libpq connection the
+ *   caller should forward CSV bytes over (e.g. via CopyInputToStream).
+ *
+ * FinishAddQueryResultToTableStream calls PQputCopyEnd, waits for the
+ *   deferred COPY query to complete, applies the resulting metadata
+ *   changes to the table, and returns the number of inserted rows.
+ *   Releases the underlying pgduck connection (success or failure).
+ *
+ * Callers of these helpers MUST use '@@PG_LAKE_RECV@@' as the read_csv
+ * path arg in readQuery; see write_data.c for why and pgduck_server's
+ * pgsession.c for the substitution.
+ */
+typedef struct AddQueryResultStreamHandle AddQueryResultStreamHandle;
+
+extern PGDLLEXPORT AddQueryResultStreamHandle *
+StartAddQueryResultToTableStream(Oid relationId, char *readQuery,
+								 TupleDesc queryTupleDesc, bool wrapNativeTypes);
+
+extern PGDLLEXPORT struct pg_conn *AddQueryResultStreamConnection(AddQueryResultStreamHandle * handle);
+
+extern PGDLLEXPORT int64
+			FinishAddQueryResultToTableStream(AddQueryResultStreamHandle * handle);

@@ -44,6 +44,7 @@
 #include "pg_extension_base/pg_extension_base_ids.h"
 #include "pg_lake/pgduck/cache_worker.h"
 #include "pg_lake/pgduck/client.h"
+#include "pg_lake/pgduck/write_data.h"
 #include "pg_lake/util/s3_writer_utils.h"
 #include "utils/guc.h"
 
@@ -196,6 +197,22 @@ _PG_init(void)
 							   0,
 							   PgLakeStageLocationCheckHook,
 							   NULL, NULL);
+
+	DefineCustomBoolVariable(
+							 "pg_lake_engine.streaming_writes",
+							 gettext_noop("Stream bulk-write CSV bytes to pgduck_server "
+										  "over libpq instead of writing them to a local "
+										  "temp file under PGDATA/pgsql_tmp."),
+							 gettext_noop("Required when pgduck_server runs on a different "
+										  "host than the postgres backend (e.g. as a "
+										  "separate Kubernetes pod) and therefore cannot "
+										  "read PGDATA-relative paths. Off by default to "
+										  "preserve the existing single-host behavior."),
+							 &StreamingWritesEnabled,
+							 false,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
 
 	if (QueryEngineEnabled)
 	{

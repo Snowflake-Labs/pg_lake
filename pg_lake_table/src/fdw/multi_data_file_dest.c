@@ -26,6 +26,7 @@
 #include "pg_lake/csv/csv_writer.h"
 #include "pg_lake/data_file/data_file_stats.h"
 #include "pg_lake/fdw/data_files_catalog.h"
+#include "pg_lake/iceberg/partitioning/partition.h"
 #include "pg_lake/fdw/multi_data_file_dest.h"
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
@@ -60,8 +61,20 @@ typedef struct MultiDataFileUploadDestReceiver
 	/* function pointers for the active CSV DestReceiver */
 	DestReceiver *currentDest;
 
-	/* current CSV file */
+	/*
+	 * File-based path: temp CSV that the active DestReceiver writes into,
+	 * later consumed by ConvertCSVFileTo. NULL when streaming.
+	 */
 	char	   *currentFilePath;
+
+	/*
+	 * Streaming path (StreamingWritesEnabled): holds the per-file insertion
+	 * context (relation lock, dataFilePrefix, format, options, schema, ...)
+	 * and the CSV stream writer that owns the libpq COPY-IN connection. Both
+	 * NULL on the file-based path.
+	 */
+	CSVInsertionContext *currentInsertCtx;
+	CSVStreamWriter *currentStreamWriter;
 
 	/* current number of rows in the CSV file */
 	int64		currentRowCount;
@@ -177,6 +190,12 @@ CreateMultiDataFileDestReceiver(Oid relationId,
 
 /*
  * CreateChildDestReceiver creates the DestReceiver for the current file.
+ *
+ * When pg_lake_engine.streaming_writes is on, we open a libpq COPY-IN
+ * stream to pgduck_server (via OpenCSVStreamWriter) instead of writing
+ * to a local temp CSV file. The active DestReceiver in that case is the
+ * stream's CSV writer; its rotated lifetime is FinishCSVStreamWriter +
+ * EndCSVInsertion in FlushChildDestReceiver.
  */
 static void
 CreateChildDestReceiver(MultiDataFileUploadDestReceiver * self)
@@ -184,15 +203,44 @@ CreateChildDestReceiver(MultiDataFileUploadDestReceiver * self)
 	/* use the same memory context that was used to create the DestReceiver */
 	MemoryContext oldContext = MemoryContextSwitchTo(self->childContext);
 
-	/* we currently use CSV as a universal intermediate format */
-	bool		includeHeader = true;
-	List	   *copyOptions = InternalCSVOptions(includeHeader);
-	char	   *tempFilePath = GenerateTempFileName("lake_table_insert", true);
-
 	self->currentRowCount = 0;
-	self->currentFilePath = tempFilePath;
-	self->currentDest = CreateCSVDestReceiver(tempFilePath, copyOptions,
-											  self->targetFormat);
+
+	if (StreamingWritesEnabled)
+	{
+		/*
+		 * Open the per-file context up front (relation lock, dataFilePrefix,
+		 * format, options, schema, ...) and pass those into
+		 * OpenCSVStreamWriter so the deferred RECEIVE query targets the same
+		 * destination ConvertCSVFileTo would have.
+		 */
+		self->currentInsertCtx = BeginCSVInsertion(self->relationId,
+												   self->currentRowIdStart,
+												   self->schema);
+
+		self->currentStreamWriter =
+			OpenCSVStreamWriter(CSVInsertionContextTupleDescriptor(self->currentInsertCtx),
+								 /* maxLineSize */ -1,
+								CSVInsertionContextDestinationPath(self->currentInsertCtx),
+								CSVInsertionContextFormat(self->currentInsertCtx),
+								CSVInsertionContextCompression(self->currentInsertCtx),
+								CSVInsertionContextOptions(self->currentInsertCtx),
+								CSVInsertionContextSchema(self->currentInsertCtx),
+								CSVInsertionContextLeafFields(self->currentInsertCtx));
+
+		self->currentDest = CSVStreamWriterDestReceiver(self->currentStreamWriter);
+		self->currentFilePath = NULL;
+	}
+	else
+	{
+		/* we currently use CSV as a universal intermediate format */
+		bool		includeHeader = true;
+		List	   *copyOptions = InternalCSVOptions(includeHeader);
+		char	   *tempFilePath = GenerateTempFileName("lake_table_insert", true);
+
+		self->currentFilePath = tempFilePath;
+		self->currentDest = CreateCSVDestReceiver(tempFilePath, copyOptions,
+												  self->targetFormat);
+	}
 
 	self->currentDest->rStartup(self->currentDest, self->operation, self->tupleDesc);
 
@@ -212,13 +260,37 @@ FlushChildDestReceiver(MultiDataFileUploadDestReceiver * self)
 	/* do conversion in a memory context that is about to be destroyed */
 	MemoryContext oldContext = MemoryContextSwitchTo(self->childContext);
 
-	List	   *insertModifications =
-		PrepareCSVInsertion(self->relationId,
-							self->currentFilePath,
-							self->currentRowCount,
-							self->currentRowIdStart,
-							GetCSVDestReceiverMaxLineSize(self->currentDest),
-							self->schema);
+	List	   *insertModifications;
+
+	if (self->currentStreamWriter != NULL)
+	{
+		/*
+		 * Streaming path: the deferred COPY ... TO query has already written
+		 * the destination file(s). FinishCSVStreamWriter waits for it to
+		 * complete and returns the resulting StatsCollector, which
+		 * BuildCSVInsertionModifications turns into the same
+		 * DataFileModification list PrepareCSVInsertion would.
+		 */
+		StatsCollector *statsCollector =
+			FinishCSVStreamWriter(self->currentStreamWriter);
+
+		insertModifications = BuildCSVInsertionModifications(self->currentInsertCtx,
+															 statsCollector,
+															 self->currentRowCount);
+		EndCSVInsertion(self->currentInsertCtx);
+		self->currentStreamWriter = NULL;
+		self->currentInsertCtx = NULL;
+	}
+	else
+	{
+		insertModifications =
+			PrepareCSVInsertion(self->relationId,
+								self->currentFilePath,
+								self->currentRowCount,
+								self->currentRowIdStart,
+								GetCSVDestReceiverMaxLineSize(self->currentDest),
+								self->schema);
+	}
 
 	/* make sure we preserve the list of data file modifications */
 	MemoryContextSwitchTo(self->parentContext);
@@ -234,7 +306,23 @@ FlushChildDestReceiver(MultiDataFileUploadDestReceiver * self)
 		copyModification->insertedRowCount = modification->insertedRowCount;
 
 		copyModification->partitionSpecId = self->currentPartitionSpecId;
-		copyModification->partition = modification->partition;
+
+		/*
+		 * partition is a pointer into childContext, which we are about to
+		 * MemoryContextReset() at the bottom of this function. Any downstream
+		 * consumer of self->modifications (notably ApplyDataFileModifications
+		 * during PRE_COMMIT, in another transaction's worth of execution)
+		 * will dereference it. Deep-copy under parentContext so the pointer
+		 * remains valid.
+		 *
+		 * NULL guard: CopyPartition unconditionally dereferences
+		 * partition->fields_length and segfaults on NULL. Unpartitioned
+		 * tables produce NULL modification->partition; preserve that as NULL
+		 * in the copy.
+		 */
+		copyModification->partition = (modification->partition != NULL)
+			? CopyPartition(modification->partition)
+			: NULL;
 		copyModification->fileStats = DeepCopyDataFileStats(modification->fileStats);
 
 		/*
@@ -259,8 +347,17 @@ FlushChildDestReceiver(MultiDataFileUploadDestReceiver * self)
 
 	MemoryContextSwitchTo(oldContext);
 
-	self->currentDest->rDestroy(self->currentDest);
-	self->currentDest = NULL;
+	if (self->currentDest != NULL)
+	{
+		/*
+		 * Streaming path's dest is owned by the (now-freed) stream writer;
+		 * for the file-based path we destroy it explicitly.
+		 */
+		if (self->currentFilePath != NULL)
+			self->currentDest->rDestroy(self->currentDest);
+		self->currentDest = NULL;
+	}
+	self->currentFilePath = NULL;
 
 	/* release all memory allocated for child DestReceiver, and the temp file */
 	MemoryContextReset(self->childContext);
@@ -285,6 +382,12 @@ StartDestReceiver(DestReceiver *dest, int operation, TupleDesc tupleDesc)
 /*
  * ReceiveSlot is called when a slot is received. We pass it on to the child
  * DestReceiver, and rotate to a new file if the file size exceeds the threshold.
+ *
+ * The temp-file size threshold only matters for the file-based path; for
+ * the streaming path the bytes are flowing over libpq into pgduck_server,
+ * which handles its own file-size splitting via the file_size_bytes COPY
+ * option. Rotating mid-stream would close the deferred query and force a
+ * separate RECEIVE round-trip per chunk for no benefit.
  */
 static bool
 ReceiveSlot(TupleTableSlot *slot, DestReceiver *dest)
@@ -298,7 +401,8 @@ ReceiveSlot(TupleTableSlot *slot, DestReceiver *dest)
 
 	self->currentRowCount++;
 
-	if (GetCSVDestReceiverFileSize(self->currentDest) > self->maxWriteTempFileSizeMB * MB_BYTES)
+	if (self->currentStreamWriter == NULL &&
+		GetCSVDestReceiverFileSize(self->currentDest) > self->maxWriteTempFileSizeMB * MB_BYTES)
 		FlushChildDestReceiver(self);
 
 	return result;

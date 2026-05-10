@@ -52,4 +52,27 @@ extern PGDLLEXPORT char *GetSingleValueFromPGDuck(char *query);
 extern PGDLLEXPORT void SendQueryWithParams(PGDuckConnection * pgduckConn, char *queryString,
 											int numParams, const char **parameterValues);
 
+/*
+ * Streaming-write helpers for the RECEIVE protocol prefix on pgduck_server.
+ *
+ * OpenCopyInStreamToPGDuck sends `queryString` (which must begin with
+ * "RECEIVE " and contain '@@PG_LAKE_RECV@@' as the read_csv path
+ * placeholder) and waits for pgduck_server's CopyInResponse. After this
+ * returns, the caller may emit CSV bytes via PQputCopyData on
+ * pgDuckConnection->conn (typically by passing it to
+ * CreateCSVStreamDestReceiver and driving a producer query through it).
+ *
+ * FinishCopyInStreamToPGDuck calls PQputCopyEnd(NULL), waits for the
+ * deferred query's first PGresult, drains the trailing NULL terminator,
+ * and returns the PGresult to the caller. The caller owns it and must
+ * PQclear it. Errors raised by the deferred query (e.g. INSERT failures)
+ * surface here as ereport(ERROR) before returning.
+ *
+ * Both throw on protocol or query errors; the connection is left in an
+ * idle state on success, in an error state on failure.
+ */
+extern PGDLLEXPORT void OpenCopyInStreamToPGDuck(PGDuckConnection * pgDuckConnection,
+												 const char *queryString);
+extern PGDLLEXPORT PGresult *FinishCopyInStreamToPGDuck(PGDuckConnection * pgDuckConnection);
+
 #endif
