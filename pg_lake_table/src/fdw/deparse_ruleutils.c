@@ -394,15 +394,16 @@ DeparseQualifiedQuery(Query *query)
 	/*
 	 * Force all identifiers to be double-quoted so that DuckDB-reserved
 	 * keywords (PIVOT, QUALIFY, LAMBDA, etc.) that PostgreSQL leaves unquoted
-	 * are properly escaped for pgduck_server.
+	 * are properly escaped for pgduck_server. Use set_config_option with
+	 * GUC_ACTION_SAVE so AtEOXact_GUC restores the prior value even if
+	 * pg_get_querydef throws.
 	 */
+	(void) set_config_option("quote_all_identifiers", "on",
+							 PGC_USERSET, PGC_S_SESSION,
+							 GUC_ACTION_SAVE, true, 0, false);
+
 	bool		pretty = false;
-	bool		save_quote_all = quote_all_identifiers;
-
-	quote_all_identifiers = true;
 	char	   *newQuery = pg_get_querydef(query, pretty);
-
-	quote_all_identifiers = save_quote_all;
 
 	/*
 	 * Restore the GUC variable search_path we set above.

@@ -296,6 +296,74 @@ def test_iceberg_table_with_reserved_keyword_columns(pg_conn, s3, extension):
     pg_conn.commit()
 
 
+def test_readable_iceberg_foreign_table_with_reserved_keyword_columns(
+    pg_conn, s3, extension
+):
+    """
+    Read-only iceberg foreign table: after writing an iceberg table with
+    DuckDB-reserved keyword columns, create a FOREIGN TABLE pointing at its
+    metadata_location and verify SELECT and filter pushdown still quote the
+    columns correctly for DuckDB.
+    """
+    schema = "test_duckdb_kw_iceberg_readable"
+    location = f"s3://{TEST_BUCKET}/{schema}/"
+
+    run_command(f"CREATE SCHEMA {schema}", pg_conn)
+    pg_conn.commit()
+
+    col_defs = ", ".join(f"{kw} int" for kw in TEST_KEYWORDS)
+    run_command(
+        f"""
+        CREATE TABLE {schema}.t ({col_defs})
+        USING iceberg
+        WITH (location = '{location}')
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        INSERT INTO {schema}.t (pivot, qualify, lambda, show)
+        VALUES (1, 2, 3, 4), (10, 20, 30, 40)
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    metadata_location = run_query(
+        f"SELECT metadata_location FROM iceberg_tables "
+        f"WHERE table_name = 't' AND table_namespace = '{schema}'",
+        pg_conn,
+    )[0][0]
+
+    run_command(
+        f"""
+        CREATE FOREIGN TABLE {schema}.t_readable ()
+        SERVER pg_lake
+        OPTIONS (path '{metadata_location}', format 'iceberg')
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        f"SELECT pivot, qualify, lambda, show FROM {schema}.t_readable ORDER BY pivot",
+        pg_conn,
+    )
+    assert result == [[1, 2, 3, 4], [10, 20, 30, 40]]
+
+    filter_query = (
+        f"SELECT pivot FROM {schema}.t_readable WHERE qualify > 5 ORDER BY pivot"
+    )
+    result = run_query(filter_query, pg_conn)
+    assert result == [[10]]
+    assert_remote_query_contains_expression(filter_query, '"qualify"', pg_conn)
+
+    run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 def test_iceberg_table_insert_select_all_reserved_keywords(pg_conn, s3, extension):
     """
     All DuckDB-only reserved keywords should work as iceberg column names.

@@ -68,27 +68,6 @@ compareKeywords(const void *userKey, const void *keywordCandidate)
 }
 
 /*
- * IsDuckDBReservedWord — returns true for any keyword that is not
- * UNRESERVED (i.e., RESERVED, COL_NAME, or TYPE_FUNC_NAME).
- *
- * Used by QuoteDuckDBFieldName() and duckdb_quote_identifier().
- */
-bool
-IsDuckDBReservedWord(char *candidateWord)
-{
-	const		DuckDBKeyword *found = bsearch(candidateWord,
-											   duckDBKeywordList,
-											   NUM_KEYWORDS,
-											   sizeof(DuckDBKeyword),
-											   compareKeywords);
-
-	if (!found)
-		return false;
-
-	return found->keywordCategory != UNRESERVED_KEYWORD;
-}
-
-/*
  * ForceQuoteIdentifier — unconditionally wraps ident in double-quotes,
  * doubling any embedded double-quotes per the SQL standard.
  */
@@ -136,8 +115,11 @@ duckdb_quote_identifier(const char *ident)
 		return pgQuoted;
 
 	/*
-	 * PostgreSQL doesn't think quoting is needed, but DuckDB may have
-	 * stricter reserved words.  Check for a strict RESERVED_KEYWORD match.
+	 * PostgreSQL doesn't think quoting is needed, but DuckDB has stricter
+	 * reserved-word categories.  Quote any keyword that is not UNRESERVED —
+	 * COL_NAME and TYPE_FUNC_NAME keywords (e.g. ASOF, ANTI, GLOB) fail to
+	 * parse in DuckDB when used as bare column identifiers.  This matches
+	 * the predicate used by IsDuckDBReservedWord().
 	 */
 	{
 		const		DuckDBKeyword *found = bsearch(ident,
@@ -146,7 +128,7 @@ duckdb_quote_identifier(const char *ident)
 												   sizeof(DuckDBKeyword),
 												   compareKeywords);
 
-		if (found && found->keywordCategory == RESERVED_KEYWORD)
+		if (found && found->keywordCategory != UNRESERVED_KEYWORD)
 			return ForceQuoteIdentifier(ident);
 	}
 

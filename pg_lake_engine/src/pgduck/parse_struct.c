@@ -430,11 +430,10 @@ ParseDuckDBFieldName(char **sourceString)
 	}
 
 	/*
-	 * The rest is quoted name handling. We need to consider quoting and
-	 * escaping.  First we allocate an output buffer that is as long as a
-	 * possible string, including terminator.  Fortunately, since we know we
-	 * are removing 2 chars (at least), we can just use the location of the
-	 * first unescaped quote char, we can use this as the output buffer size.
+	 * The rest is quoted name handling.  DuckDB (and our
+	 * ForceQuoteIdentifier) uses standard SQL double-quote doubling: an
+	 * embedded '"' is represented as '""'.  Find the closing quote by
+	 * scanning for a '"' that is not followed by another '"'.
 	 */
 
 	char	   *lastQuote = parseInput;
@@ -449,74 +448,42 @@ ParseDuckDBFieldName(char **sourceString)
 			return NULL;
 
 		/*
-		 * Count the number of preceding backslashes; no body, just iteration
-		 * in this loop
+		 * If the next char is also '"', this is a doubled quote representing
+		 * a literal '"' inside the name; skip the pair and keep scanning.
 		 */
-		int			i;
+		if (*(lastQuote + 1) == '"')
+		{
+			lastQuote++;
+			continue;
+		}
 
-		for (i = 0; *(lastQuote - (i + 1)) == '\\'; i++)
-			;
-
-		/*
-		 * If we had an even number of consecutive backslashes, then we're
-		 * done, this quote isn't escaped.
-		 */
-		if (!(i % 2))
-			break;
-
-		/* otherwise we slog on to the next one */
+		/* Otherwise this is the real closing quote. */
+		break;
 	}
 
 	/*
-	 * We want a buffer that will hold our unquoted string plus a terminating
-	 * NUL.  Since we know we have 2 quote characters that will be removed, we
-	 * can just use (lastQuote - parseInput) and since escaping only _removes_
-	 * characters from the total unescaped length, this will be as large as we
-	 * need.  (We don't care about the 1+ wasted bytes here, this is
-	 * ephemeral.
+	 * Buffer at most (lastQuote - parseInput) bytes: we drop the opening
+	 * quote and collapse each '""' pair into a single '"', so the unescaped
+	 * length is strictly smaller than the span between the opening and
+	 * closing quotes.
 	 */
 
 	char	   *quotedBuf = palloc0(lastQuote - parseInput);
-
-	/* start writing at the beginning of this buffer */
 	char	   *quotedBufWritePos = quotedBuf;
 
 	/* parseInput is currently the opening quote, so let's skip past that */
 	for (parseInput++; parseInput < lastQuote; parseInput++)
 	{
-		char		bufWriteChar = *parseInput;
-
 		/*
-		 * We just need to check if our character is an escape character; if
-		 * so, we perform a few transforms.  If we _must_, we can expand this
-		 * into other escapes (octal, unicode, etc); just do the common ones
-		 * here.
+		 * Collapse doubled quotes '""' into a single '"'.  Any other
+		 * character is copied verbatim — backslashes are not escape
+		 * characters inside a SQL-quoted identifier.
 		 */
-
-		if (bufWriteChar == '\\')
-		{
+		if (*parseInput == '"' && parseInput + 1 < lastQuote
+			&& *(parseInput + 1) == '"')
 			parseInput++;
-			switch (*parseInput)
-			{
-				case 't':
-					bufWriteChar = '\t';
-					break;
-				case 'n':
-					bufWriteChar = '\n';
-					break;
-				case 'r':
-					bufWriteChar = '\r';
-					break;
-				default:
-					/* just copy the next char in the default case */
-					/* this handles escaped quotes and escaped escapes */
-					bufWriteChar = *parseInput;
-			}
-		}
 
-		/* now that we have the char to write in our buffer, let's write it. */
-		*quotedBufWritePos = bufWriteChar;
-		quotedBufWritePos++;
+		*quotedBufWritePos++ = *parseInput;
 	}
 
 	/* advance our parser pointer past the last quote */
@@ -562,7 +529,7 @@ char *
 ParseDuckDBFieldType(char **sourceString, bool *isArray)
 {
 	char	   *parseInput = *sourceString;
-	int			quoteCount = 1; /* if used, we have opening quote already */
+	int			parenDepth = 1; /* if used, we have opening paren already */
 
 	if (IsStructType(parseInput) || IsMapType(parseInput))
 	{
@@ -573,12 +540,39 @@ ParseDuckDBFieldType(char **sourceString, bool *isArray)
 		if (!parseInput)
 			return NULL;
 
-		while (*parseInput && quoteCount)
+		while (*parseInput && parenDepth)
 		{
+			/*
+			 * Skip over quoted field names so embedded parentheses in the
+			 * name are not mistaken for struct delimiters.  Inside a
+			 * double-quoted identifier, '""' is the SQL-standard escape for
+			 * a literal '"'.
+			 */
+			if (*parseInput == '"')
+			{
+				parseInput++;
+				while (*parseInput)
+				{
+					if (*parseInput == '"')
+					{
+						if (*(parseInput + 1) == '"')
+							parseInput += 2;
+						else
+						{
+							parseInput++;
+							break;
+						}
+					}
+					else
+						parseInput++;
+				}
+				continue;
+			}
+
 			if (*parseInput == '(')
-				quoteCount++;
+				parenDepth++;
 			if (*parseInput == ')')
-				quoteCount--;
+				parenDepth--;
 			parseInput++;
 		}
 	}
