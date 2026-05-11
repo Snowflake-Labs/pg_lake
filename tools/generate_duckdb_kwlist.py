@@ -22,22 +22,46 @@ whenever duckdb_pglake/duckdb is updated to a new DuckDB release.
 import argparse
 import hashlib
 import re
+import subprocess
 import sys
 import textwrap
+import urllib.request
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-SOURCE_HPP = (
-    REPO_ROOT
-    / "duckdb_pglake"
-    / "duckdb"
-    / "third_party"
-    / "libpg_query"
-    / "include"
-    / "parser"
-    / "kwlist.hpp"
-)
+DUCKDB_SUBMODULE_PATH = "duckdb_pglake/duckdb"
+KWLIST_RELPATH = "third_party/libpg_query/include/parser/kwlist.hpp"
+
+SOURCE_HPP = REPO_ROOT / DUCKDB_SUBMODULE_PATH / KWLIST_RELPATH
+
+
+def fetch_kwlist_from_github() -> bytes:
+    """Fetch kwlist.hpp from github at the SHA the submodule is pinned to.
+
+    Used in CI environments where the submodule isn't checked out — avoids
+    cloning all of DuckDB just to read one header.
+    """
+    result = subprocess.run(
+        ["git", "ls-tree", "HEAD", DUCKDB_SUBMODULE_PATH],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    # Output: "160000 commit <sha>\tduckdb_pglake/duckdb"
+    parts = result.stdout.split()
+    if len(parts) < 3 or parts[1] != "commit":
+        raise RuntimeError(
+            f"unexpected git ls-tree output for {DUCKDB_SUBMODULE_PATH}: "
+            f"{result.stdout!r}"
+        )
+    sha = parts[2]
+    url = f"https://raw.githubusercontent.com/duckdb/duckdb/{sha}/{KWLIST_RELPATH}"
+    print(f"Fetching {url}", file=sys.stderr)
+    with urllib.request.urlopen(url) as resp:
+        return resp.read()
+
 
 OUTPUT_H = REPO_ROOT / "pg_lake_engine" / "src" / "pgduck" / "duckdb_kwlist.h"
 
@@ -69,8 +93,8 @@ def parse_keywords(hpp_text: str) -> list[tuple[str, str]]:
     return entries
 
 
-def sha256_of_file(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+def sha256_of_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
 
 def render(entries: list[tuple[str, str]], source_sha256: str) -> str:
@@ -113,13 +137,21 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if not SOURCE_HPP.exists():
-        print(f"ERROR: source file not found: {SOURCE_HPP}", file=sys.stderr)
-        print("Has the duckdb submodule been initialised?", file=sys.stderr)
-        return 1
+    if SOURCE_HPP.exists():
+        hpp_bytes = SOURCE_HPP.read_bytes()
+    else:
+        try:
+            hpp_bytes = fetch_kwlist_from_github()
+        except Exception as e:
+            print(
+                f"ERROR: submodule {DUCKDB_SUBMODULE_PATH} not checked out "
+                f"and remote fetch failed: {e}",
+                file=sys.stderr,
+            )
+            return 1
 
-    hpp_text = SOURCE_HPP.read_text(encoding="utf-8")
-    source_sha = sha256_of_file(SOURCE_HPP)
+    hpp_text = hpp_bytes.decode("utf-8")
+    source_sha = sha256_of_bytes(hpp_bytes)
     entries = parse_keywords(hpp_text)
 
     if not entries:
