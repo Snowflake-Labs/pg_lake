@@ -545,8 +545,8 @@ ParseDuckDBFieldType(char **sourceString, bool *isArray)
 			/*
 			 * Skip over quoted field names so embedded parentheses in the
 			 * name are not mistaken for struct delimiters.  Inside a
-			 * double-quoted identifier, '""' is the SQL-standard escape for
-			 * a literal '"'.
+			 * double-quoted identifier, '""' is the SQL-standard escape for a
+			 * literal '"'.
 			 */
 			if (*parseInput == '"')
 			{

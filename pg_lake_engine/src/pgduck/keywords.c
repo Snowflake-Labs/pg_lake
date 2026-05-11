@@ -118,8 +118,8 @@ duckdb_quote_identifier(const char *ident)
 	 * PostgreSQL doesn't think quoting is needed, but DuckDB has stricter
 	 * reserved-word categories.  Quote any keyword that is not UNRESERVED —
 	 * COL_NAME and TYPE_FUNC_NAME keywords (e.g. ASOF, ANTI, GLOB) fail to
-	 * parse in DuckDB when used as bare column identifiers.  This matches
-	 * the predicate used by IsDuckDBReservedWord().
+	 * parse in DuckDB when used as bare column identifiers.  This matches the
+	 * predicate used by IsDuckDBReservedWord().
 	 */
 	{
 		const		DuckDBKeyword *found = bsearch(ident,
