@@ -8,19 +8,18 @@ import json
 from decimal import *
 from utils_pytest import *
 
-
 # including an ID as part of each parameter set
 # where id is oprcode for the given operator
 # this id shows up in the pytest output
 test_cases = [
-    ("bool", "WHERE col_int4::boolean", "WHERE (col_int4)::boolean"),
-    ("bool", "WHERE bool(col_int4)", "WHERE (col_int4)::boolean"),
-    ("booleq", "WHERE col_bool = true", "WHERE (col_bool = true)"),
-    ("boolge", "WHERE col_bool >= true", "WHERE (col_bool >= "),
-    ("boolgt", "WHERE col_bool > col_bool2", "WHERE (col_bool > "),
-    ("boolle", "WHERE col_bool <= true", "WHERE (col_bool <= "),
-    ("boollt", "WHERE col_bool < col_bool2", "WHERE (col_bool < "),
-    ("boolne", "WHERE col_bool != true", "WHERE (col_bool <> true)"),
+    ("bool", "WHERE col_int4::boolean", 'WHERE ("col_int4")::boolean'),
+    ("bool", "WHERE bool(col_int4)", 'WHERE ("col_int4")::boolean'),
+    ("booleq", "WHERE col_bool = true", 'WHERE ("col_bool" = true)'),
+    ("boolge", "WHERE col_bool >= true", 'WHERE ("col_bool" >= '),
+    ("boolgt", "WHERE col_bool > col_bool2", 'WHERE ("col_bool" > '),
+    ("boolle", "WHERE col_bool <= true", 'WHERE ("col_bool" <= '),
+    ("boollt", "WHERE col_bool < col_bool2", 'WHERE ("col_bool" < '),
+    ("boolne", "WHERE col_bool != true", 'WHERE ("col_bool" <> true)'),
 ]
 
 
@@ -50,8 +49,8 @@ def test_int_comparison_operator_pushdown(
 
 
 agg_test_cases = [
-    ("bool_and", "bool_and(col_bool)", "bool_and(col_bool)"),
-    ("bool_or", "bool_or(col_bool)", "bool_or(col_bool)"),
+    ("bool_and", "bool_and(col_bool)", '"bool_and"("col_bool")'),
+    ("bool_or", "bool_or(col_bool)", '"bool_or"("col_bool")'),
 ]
 
 

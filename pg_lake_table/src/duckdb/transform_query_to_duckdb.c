@@ -103,7 +103,7 @@ ReplaceReadTableFunctionCalls(char *query,
 
 		StringInfo	functionCallToReplace = makeStringInfo();
 
-		appendStringInfo(functionCallToReplace, "%s(%s::text, %d)",
+		appendStringInfo(functionCallToReplace, "\"%s\"(%s::\"text\", %d)",
 						 PG_LAKE_READ_TABLE,
 						 quote_literal_cstr(qualifiedRelationName),
 						 uniqueRelationIdentifier);
@@ -142,7 +142,7 @@ ReplaceReadTableFunctionCalls(char *query,
 	char	   *nowReplacementString = psprintf("%s::timestamptz ",
 												quote_literal_cstr(timestampString));
 
-	query = PgLakeReplaceText(query, PG_LAKE_NOW_TEMPLATE "()", nowReplacementString);
+	query = PgLakeReplaceText(query, "\"" PG_LAKE_NOW_TEMPLATE "\"()", nowReplacementString);
 
 	return query;
 }

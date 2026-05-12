@@ -8,29 +8,28 @@ import json
 from decimal import *
 from utils_pytest import *
 
-
 # including an ID as part of each parameter set
 # where id is oprcode for the given operator
 # this id shows up in the pytest output
 test_cases = [
-    ("text", "WHERE col_text = text(true)", "WHERE (col_text = (true)::text)"),
+    ("text", "WHERE col_text = text(true)", 'WHERE ("col_text" = (true)::"text")'),
     (
         "text",
         "WHERE starts_with(col_text, text('t'::\"char\"))",
-        "WHERE starts_with(col_text, ('t'::\"char\")::text)",
+        'WHERE "starts_with"("col_text", (\'t\'::"char")::"text")',
     ),
     (
         "text",
         "WHERE col_text = text(col_varchar)",
-        "WHERE (col_text = (col_varchar)::text)",
+        'WHERE ("col_text" = ("col_varchar")::"text")',
     ),
     # Text operators
-    ("text_lt", "WHERE col_text < 'abc'", "WHERE (col_text < 'abc'::text)"),
-    ("text_le", "WHERE col_text <= 'def'", "WHERE (col_text <= 'def'::text)"),
-    ("text_gt", "WHERE col_text > 'ghi'", "WHERE (col_text > 'ghi'::text)"),
-    ("text_ge", "WHERE col_text >= 'jkl'", "WHERE (col_text >= 'jkl'::text)"),
-    ("texteq", "WHERE col_text = 'moo'", "WHERE (col_text = 'moo'::text)"),
-    ("textne", "WHERE col_text <> 'pqr'", "WHERE (col_text <> 'pqr'::text)"),
+    ("text_lt", "WHERE col_text < 'abc'", 'WHERE ("col_text" < \'abc\'::"text")'),
+    ("text_le", "WHERE col_text <= 'def'", 'WHERE ("col_text" <= \'def\'::"text")'),
+    ("text_gt", "WHERE col_text > 'ghi'", 'WHERE ("col_text" > \'ghi\'::"text")'),
+    ("text_ge", "WHERE col_text >= 'jkl'", 'WHERE ("col_text" >= \'jkl\'::"text")'),
+    ("texteq", "WHERE col_text = 'moo'", 'WHERE ("col_text" = \'moo\'::"text")'),
+    ("textne", "WHERE col_text <> 'pqr'", 'WHERE ("col_text" <> \'pqr\'::"text")'),
     ("textlike", "WHERE col_text LIKE col_text", "~~"),
     ("textlike", "WHERE col_text LIKE '%m%'", "~~"),
     ("textnlike", "WHERE col_text NOT LIKE '%q%'", "!~~"),
@@ -39,27 +38,27 @@ test_cases = [
     (
         "textrematch",
         "WHERE col_text ~ '.'",
-        "WHERE lake_regexp_matches(col_text, '.'::text, false)",
+        'WHERE "lake_regexp_matches"("col_text", \'.\'::"text", false)',
     ),
     (
         "textrenmatch",
         "WHERE col_text !~ '.'",
-        "WHERE (NOT lake_regexp_matches(col_text, '.'::text, false))",
+        'WHERE (NOT "lake_regexp_matches"("col_text", \'.\'::"text", false))',
     ),
     (
         "textreicmatch",
         "WHERE col_text ~* '.'",
-        "WHERE lake_regexp_matches(col_text, '.'::text, true)",
+        'WHERE "lake_regexp_matches"("col_text", \'.\'::"text", true)',
     ),
     (
         "textreicnmatch",
         "WHERE col_text !~* '.'",
-        "WHERE (NOT lake_regexp_matches(col_text, '.'::text, true))",
+        'WHERE (NOT "lake_regexp_matches"("col_text", \'.\'::"text", true))',
     ),
     ("textcat", "WHERE col_text || 'se' = 'moose'", "||"),
     ("starts_with", "WHERE col_text ^@ 'mo'", "^@"),
     # Text functions
-    ("length", "WHERE length(col_text) = 4", "WHERE (length(col_text) = 4)"),
+    ("length", "WHERE length(col_text) = 4", 'WHERE ("length"("col_text") = 4)'),
     (
         "regexp_replace",
         "WHERE regexp_replace(col_text, 'o', '$') = 'm$o'",
@@ -90,32 +89,32 @@ test_cases = [
     (
         "varchar_lt",
         "WHERE col_varchar < 'abc'::varchar",
-        "WHERE ((col_varchar)::text < ('abc'::character varying)::text)",
+        'WHERE (("col_varchar")::"text" < (\'abc\'::character varying)::"text")',
     ),
     (
         "varchar_le",
         "WHERE col_varchar <= 'def'::varchar",
-        "WHERE ((col_varchar)::text <= ('def'::character varying)::text)",
+        'WHERE (("col_varchar")::"text" <= (\'def\'::character varying)::"text")',
     ),
     (
         "varchar_gt",
         "WHERE col_varchar > 'ghi'::varchar",
-        "WHERE ((col_varchar)::text > ('ghi'::character varying)::text)",
+        'WHERE (("col_varchar")::"text" > (\'ghi\'::character varying)::"text")',
     ),
     (
         "varchar_ge",
         "WHERE col_varchar >= 'jkl'::varchar",
-        "WHERE ((col_varchar)::text >= ('jkl'::character varying)::text)",
+        'WHERE (("col_varchar")::"text" >= (\'jkl\'::character varying)::"text")',
     ),
     (
         "varchareq",
         "WHERE col_varchar = 'moo'::varchar",
-        "WHERE ((col_varchar)::text = ('moo'::character varying)::text)",
+        'WHERE (("col_varchar")::"text" = (\'moo\'::character varying)::"text")',
     ),
     (
         "varcharne",
         "WHERE col_varchar <> 'pqr'::varchar",
-        "WHERE ((col_varchar)::text <> ('pqr'::character varying)::text)",
+        'WHERE (("col_varchar")::"text" <> (\'pqr\'::character varying)::"text")',
     ),
     ("varcharlike", "WHERE col_varchar LIKE '%m%'", "~~"),
     ("varcharnlike", "WHERE col_varchar NOT LIKE '%q%'", "!~~"),

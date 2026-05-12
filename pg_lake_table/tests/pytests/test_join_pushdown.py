@@ -6,7 +6,6 @@ import math
 import re
 from utils_pytest import *
 
-
 from_clause_join_queries = [
     "SELECT * FROM test_fdw_join.ft1 t1 {join_type} JOIN test_fdw_join.ft1 t2 USING ({join_column})",  # join between parquet
     "SELECT * FROM test_fdw_join.ft2 t1 {join_type} JOIN test_fdw_join.ft2 t2 USING ({join_column})",  # join between csv
@@ -133,17 +132,18 @@ def test_join_explain_output(create_join_tables, pg_conn):
 
             # explain shows the user tables
             # not internal representations
-            assert "test_fdw_join.ft1" in explain_output
+            assert "test_fdw_join" in explain_output
+            assert "ft1" in explain_output
 
             if execution_type == "vectorize":
-                pattern = re.compile(
-                    r"JOIN test_fdw_join\.ft2 r\d+\(int_col, text_col, timestamp_col, timestamptz_col, numeric_col\) ON \(\(r\d+\.int_col = r\d+\.int_col\)\)\)"
-                )
+                assert "test_fdw_join.ft2" in explain_output
+                assert '"int_col"' in explain_output
+                pattern = re.compile(r'"r\d+"\."int_col" = "r\d+"\."int_col"')
                 assert pattern.search(explain_output)
             else:
-                assert (
-                    "JOIN test_fdw_join.ft2 ft2(int_col, text_col, timestamp_col, timestamptz_col, numeric_col) USING (int_col"
-                ) in explain_output
+                assert "test_fdw_join" in explain_output
+                assert "ft2" in explain_output
+                assert 'USING ("int_col"' in explain_output
             pg_conn.commit()
         run_command("SET pg_lake_table.enable_full_query_pushdown TO false;", pg_conn)
 

@@ -22,7 +22,7 @@ def test_create_table_with_specified_location(
     )
 
     query = "SELECT * FROM test_basic_create_table WHERE a <= 10 ORDER BY a"
-    expected_expression = "WHERE (a <= 10)"
+    expected_expression = 'WHERE ("a" <= 10)'
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)
 
     result = run_query(query, pg_conn)
@@ -136,19 +136,19 @@ def test_create_table_via_create_schema(
     )
 
     query = "SELECT * FROM new_schema.new_table WHERE id <= 5 ORDER BY id"
-    expected_expression = "WHERE (id <= 5)"
+    expected_expression = 'WHERE ("id" <= 5)'
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)
     result = run_query(query, pg_conn)
     assert result == [[1, "1"], [2, "2"], [3, "3"], [4, "4"], [5, "5"]]
 
     query = "SELECT * FROM new_schema.another_table WHERE id <= 5 ORDER BY id"
-    expected_expression = "WHERE (id <= 5)"
+    expected_expression = 'WHERE ("id" <= 5)'
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)
     result = run_query(query, pg_conn)
     assert result == [[1, "1"], [2, "2"], [3, "3"], [4, "4"], [5, "5"]]
 
     query = "SELECT * FROM new_schema.third_table WHERE id <= 5 ORDER BY id"
-    expected_expression = "WHERE (id <= 5)"
+    expected_expression = 'WHERE ("id" <= 5)'
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)
     result = run_query(query, pg_conn)
     assert result == [[1, "1"], [2, "2"], [3, "3"], [4, "4"], [5, "5"]]
@@ -183,7 +183,7 @@ def test_create_table_with_default_location(
     query = (
         "SELECT * FROM test_create_table_with_default_location WHERE a <= 10 ORDER BY a"
     )
-    expected_expression = "WHERE (a <= 10)"
+    expected_expression = 'WHERE ("a" <= 10)'
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)
 
     result = run_query(query, pg_conn)
@@ -241,7 +241,7 @@ def test_create_table_with_default_location(
     query = (
         "SELECT * FROM test_create_table_with_default_location WHERE a <= 10 ORDER BY a"
     )
-    expected_expression = "WHERE (a <= 10)"
+    expected_expression = 'WHERE ("a" <= 10)'
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)
 
     result = run_query(query, pg_conn)
@@ -306,7 +306,7 @@ def test_create_table_with_default_location_override(
     query = (
         "SELECT * FROM test_create_table_with_default_location WHERE a <= 10 ORDER BY a"
     )
-    expected_expression = "WHERE (a <= 10)"
+    expected_expression = 'WHERE ("a" <= 10)'
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)
 
     result = run_query(query, pg_conn)
@@ -556,7 +556,7 @@ def test_create_partition_of_table(s3, pg_conn, extension, with_default_location
     )
 
     query = "SELECT * FROM test_create_table_partition_of ORDER BY a"
-    expected_expression = "ORDER BY a"
+    expected_expression = 'ORDER BY "a"'
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)
 
     result = run_query(query, pg_conn)
@@ -594,7 +594,7 @@ def test_create_child_table(s3, pg_conn, extension, with_default_location):
     )
 
     query = "SELECT * FROM test_create_child_table WHERE a <= 10 ORDER BY a"
-    expected_expression = "WHERE (a <= 10)"
+    expected_expression = 'WHERE ("a" <= 10)'
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)
 
     result = run_query(query, pg_conn)
@@ -864,7 +864,7 @@ def test_create_table_with_supported_column_constraints(
         query = (
             "SELECT b FROM test_create_table_with_constraints WHERE b <= 10 ORDER BY b"
         )
-        expected_expression = "WHERE (b <= 10)"
+        expected_expression = 'WHERE ("b" <= 10)'
         assert_remote_query_contains_expression(query, expected_expression, pg_conn)
 
         result = run_query(query, pg_conn)
@@ -920,7 +920,7 @@ def test_create_table_with_supported_table_constraints(
         query = (
             "SELECT b FROM test_create_table_with_constraints WHERE b <= 10 ORDER BY b"
         )
-        expected_expression = "WHERE (b <= 10)"
+        expected_expression = 'WHERE ("b" <= 10)'
         assert_remote_query_contains_expression(query, expected_expression, pg_conn)
 
         result = run_query(query, pg_conn)

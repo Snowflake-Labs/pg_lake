@@ -119,7 +119,7 @@ def test_partition_wise_agg(create_partitioned_tables, pg_conn):
 
     for partition_wise_line in partition_wise_explain_result:
         if "Vectorized SQL" in partition_wise_line[0]:
-            assert "SELECT count(*)" in partition_wise_line[0]
+            assert 'SELECT "count"(*)' in partition_wise_line[0]
 
     run_command("COMMIT", pg_conn)
 
@@ -133,7 +133,7 @@ def test_partition_wise_agg(create_partitioned_tables, pg_conn):
 
     for non_partition_wise_line in non_partition_wise_explain_result:
         if "Vectorized SQL" in non_partition_wise_line[0]:
-            assert "SELECT id" in non_partition_wise_line[0]
+            assert 'SELECT "id"' in non_partition_wise_line[0]
 
     run_command("COMMIT", pg_conn)
 
@@ -172,7 +172,7 @@ def test_partition_wise_partial_agg(create_partitioned_tables, pg_conn):
     for non_partition_wise_line in non_partition_wise_explain_result:
         print(non_partition_wise_line)
         if "Vectorized SQL" in non_partition_wise_line[0]:
-            assert "SELECT letter" in non_partition_wise_line[0]
+            assert 'SELECT "letter"' in non_partition_wise_line[0]
 
     run_command("COMMIT", pg_conn)
 

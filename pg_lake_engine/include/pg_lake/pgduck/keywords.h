@@ -17,4 +17,14 @@
 
 #pragma once
 
-PGDLLEXPORT bool IsDuckDBReservedWord(char *candidateWord);
+/*
+ * duckdb_quote_identifier — like quote_identifier() but also quotes
+ * identifiers that are reserved (in any non-UNRESERVED category) in DuckDB
+ * but not in PostgreSQL — e.g. LAMBDA, PIVOT, QUALIFY, SUMMARIZE, DESCRIBE,
+ * SHOW, UNPIVOT (RESERVED_KEYWORD) as well as ASOF, ANTI, GLOB
+ * (COL_NAME_KEYWORD / TYPE_FUNC_NAME_KEYWORD).
+ *
+ * Use this for all identifiers (column names, field names, relation names)
+ * that will appear in SQL sent to pgduck_server.
+ */
+PGDLLEXPORT const char *duckdb_quote_identifier(const char *ident);

@@ -53,3 +53,7 @@ jobs:
       - name: Check formatting
         run: |
           make check-indent
+
+      - name: Check DuckDB keyword table is in sync
+        run: |
+          make check-duckdb-kwlist

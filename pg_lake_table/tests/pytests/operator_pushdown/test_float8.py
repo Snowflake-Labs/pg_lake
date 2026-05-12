@@ -8,7 +8,6 @@ import json
 from decimal import *
 from utils_pytest import *
 
-
 # including an ID as part of each parameter set
 # where id is oprcode for the given operator
 # this id shows up in the pytest output
@@ -16,133 +15,157 @@ test_cases = [
     (
         "float8",
         "WHERE float8(col_float4) <= col_float8",
-        "WHERE ((col_float4)::double precision <= col_float8)",
+        'WHERE (("col_float4")::double precision <= "col_float8")',
     ),
     (
         "float8",
         "WHERE col_float8 <= float8(1::int2)",
-        "WHERE (col_float8 <= ((1)::smallint)::double precision)",
+        'WHERE ("col_float8" <= ((1)::smallint)::double precision)',
     ),
     (
         "float8",
         "WHERE col_float8 <= float8(1::int4)",
-        "WHERE (col_float8 <= (1)::double precision)",
+        'WHERE ("col_float8" <= (1)::double precision)',
     ),
     (
         "float8",
         "WHERE col_float8 <= float8(1::int8)",
-        "WHERE (col_float8 <= ((1)::bigint)::double precision",
+        'WHERE ("col_float8" <= ((1)::bigint)::double precision',
     ),
     (
         "float8",
         "WHERE col_float8 <= float8(1::numeric)",
-        "WHERE (col_float8 <= ((1)::numeric)::double precision)",
+        'WHERE ("col_float8" <= ((1)::numeric)::double precision)',
     ),
     (
         "float8abs",
         "WHERE @ col_float8 > 0",
-        "WHERE ((@ col_float8) > (0)::double precision)",
+        'WHERE ((@ "col_float8") > (0)::double precision)',
     ),
     (
         "float8um",
         "WHERE - col_float8 < 0",
-        "WHERE ((- col_float8) < (0)::double precision)",
+        'WHERE ((- "col_float8") < (0)::double precision)',
     ),
     (
         "float8up",
         "WHERE + col_float8 > 0",
-        "WHERE ((+ col_float8) > (0)::double precision)",
+        'WHERE ((+ "col_float8") > (0)::double precision)',
     ),
     (
         "float8sqrt",
         "WHERE col_float8 > 0 and |/ col_float8 > 1",
-        "sqrt(col_float8) > (1)::double precision",
+        '"sqrt"("col_float8") > (1)::double precision',
     ),
     (
         "float8cbrt",
         "WHERE col_float8 > 0 and ||/ col_float8 > 1",
-        "cbrt(col_float8) > (1)::double precision",
+        '"cbrt"("col_float8") > (1)::double precision',
     ),
     (
         "float8eq",
         "WHERE col_float8 = 111.1111::float8",
-        "WHERE (col_float8 = (111.1111)::double precision)",
+        'WHERE ("col_float8" = (111.1111)::double precision)',
     ),
     (
         "float8ne",
         "WHERE col_float8 <> 2.0::float8",
-        "WHERE (col_float8 <> (2.0)::double precision)",
+        'WHERE ("col_float8" <> (2.0)::double precision)',
     ),
     (
         "float8lt",
         "WHERE col_float8 < 3.0::float8",
-        "WHERE (col_float8 < (3.0)::double precision)",
+        'WHERE ("col_float8" < (3.0)::double precision)',
     ),
     (
         "float8gt",
         "WHERE col_float8 > 4.0::float8",
-        "WHERE (col_float8 > (4.0)::double precision)",
+        'WHERE ("col_float8" > (4.0)::double precision)',
     ),
     (
         "float8le",
         "WHERE col_float8 <= 5.0::float8",
-        "WHERE (col_float8 <= (5.0)::double precision)",
+        'WHERE ("col_float8" <= (5.0)::double precision)',
     ),
     (
         "float8ge",
         "WHERE col_float8 >= 6.0::float8",
-        "WHERE (col_float8 >= (6.0)::double precision)",
+        'WHERE ("col_float8" >= (6.0)::double precision)',
     ),
     (
         "float8pl",
         "WHERE (col_float8 + 1.0::float8) = 112.1111::float8",
-        "WHERE ((col_float8 + (1.0)::double precision) = (112.1111)::double precision)",
+        'WHERE (("col_float8" + (1.0)::double precision) = (112.1111)::double precision)',
     ),
     (
         "float8mi",
         "WHERE (col_float8 - 1.0::float8) = 110.1111::float8",
-        "WHERE ((col_float8 - (1.0)::double precision) = (110.1111)::double precision)",
+        'WHERE (("col_float8" - (1.0)::double precision) = (110.1111)::double precision)',
     ),
     (
         "float8mul",
         "WHERE (col_float8 * 2.0::float8) = 222.2222::float8",
-        "WHERE ((col_float8 * (2.0)::double precision) = (222.2222)::double precision)",
+        'WHERE (("col_float8" * (2.0)::double precision) = (222.2222)::double precision)',
     ),
     (
         "float8div",
         "WHERE (col_float8 / 2.0::float4) > 0::float8",
-        "WHERE ((col_float8 / (2.0)::real) > (0)::double precision)",
+        'WHERE (("col_float8" / (2.0)::real) > (0)::double precision)',
     ),
     (
         "float8pow",
         "WHERE (col_float8 ^ 2) > 2.0::float8",
-        "WHERE ((col_float8 ^ (2)::double precision) > (2.0)::double precision)",
+        'WHERE (("col_float8" ^ (2)::double precision) > (2.0)::double precision)',
     ),
-    ("float84eq", "WHERE col_float8 = col_float4", "WHERE (col_float8 = col_float4)"),
-    ("float84ne", "WHERE col_float8 <> col_float4", "WHERE (col_float8 <> col_float4)"),
-    ("float84lt", "WHERE col_float8 < col_float4", "WHERE (col_float8 < col_float4)"),
-    ("float84gt", "WHERE col_float8 > col_float4", "WHERE (col_float8 > col_float4)"),
-    ("float84le", "WHERE col_float8 <= col_float4", "WHERE (col_float8 <= col_float4)"),
-    ("float84ge", "WHERE col_float8 >= col_float4", "WHERE (col_float8 >= col_float4)"),
+    (
+        "float84eq",
+        "WHERE col_float8 = col_float4",
+        'WHERE ("col_float8" = "col_float4")',
+    ),
+    (
+        "float84ne",
+        "WHERE col_float8 <> col_float4",
+        'WHERE ("col_float8" <> "col_float4")',
+    ),
+    (
+        "float84lt",
+        "WHERE col_float8 < col_float4",
+        'WHERE ("col_float8" < "col_float4")',
+    ),
+    (
+        "float84gt",
+        "WHERE col_float8 > col_float4",
+        'WHERE ("col_float8" > "col_float4")',
+    ),
+    (
+        "float84le",
+        "WHERE col_float8 <= col_float4",
+        'WHERE ("col_float8" <= "col_float4")',
+    ),
+    (
+        "float84ge",
+        "WHERE col_float8 >= col_float4",
+        'WHERE ("col_float8" >= "col_float4")',
+    ),
     (
         "float84pl",
         "WHERE (col_float8 + col_float4) > 0",
-        "WHERE ((col_float8 + col_float4) > (0)::double precision)",
+        'WHERE (("col_float8" + "col_float4") > (0)::double precision)',
     ),
     (
         "float84mi",
         "WHERE (col_float8 - col_float4) = 0::float8",
-        "WHERE ((col_float8 - col_float4) = (0)::double precision)",
+        'WHERE (("col_float8" - "col_float4") = (0)::double precision)',
     ),
     (
         "float84mul",
         "WHERE (col_float8 * col_float4) IS NULL",
-        "WHERE ((col_float8 * col_float4) IS NULL)",
+        'WHERE (("col_float8" * "col_float4") IS NULL)',
     ),
     (
         "float84div",
         "WHERE (col_float8 / 2.0::float4) > 1::float4",
-        "WHERE ((col_float8 / (2.0)::real) > (1)::real)",
+        'WHERE (("col_float8" / (2.0)::real) > (1)::real)',
     ),
 ]
 

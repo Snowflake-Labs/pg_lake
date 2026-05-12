@@ -18,19 +18,23 @@ test_cases = [
     (
         "timetz",
         "WHERE col_timetz = timetz(col_timestamptz)",
-        "WHERE (col_timetz = (col_timestamptz)::time with time zone)",
+        'WHERE ("col_timetz" = ("col_timestamptz")::time with time zone)',
     ),
     (
         "timetz",
         "WHERE col_timetz = timetz(col_time)",
-        "WHERE (col_timetz = (col_time)::time with time zone)",
+        'WHERE ("col_timetz" = ("col_time")::time with time zone)',
     ),
-    ("timetz_eq", "WHERE col_timetz = '12:00:00+00'::timetz", "WHERE (col_timetz = "),
-    ("timetz_ne", "WHERE col_timetz <> '13:00:00+00'::timetz", "WHERE (col_timetz <> "),
-    ("timetz_lt", "WHERE col_timetz < '14:00:00'::timetz", "WHERE (col_timetz < "),
-    ("timetz_le", "WHERE col_timetz <= '15:00:00'::timetz", "WHERE (col_timetz <= "),
-    ("timetz_gt", "WHERE col_timetz > '16:00:00'::timetz", "WHERE (col_timetz > "),
-    ("timetz_ge", "WHERE col_timetz >= '17:00:00'::timetz", "WHERE (col_timetz >= "),
+    ("timetz_eq", "WHERE col_timetz = '12:00:00+00'::timetz", 'WHERE ("col_timetz" = '),
+    (
+        "timetz_ne",
+        "WHERE col_timetz <> '13:00:00+00'::timetz",
+        'WHERE ("col_timetz" <> ',
+    ),
+    ("timetz_lt", "WHERE col_timetz < '14:00:00'::timetz", 'WHERE ("col_timetz" < '),
+    ("timetz_le", "WHERE col_timetz <= '15:00:00'::timetz", 'WHERE ("col_timetz" <= '),
+    ("timetz_gt", "WHERE col_timetz > '16:00:00'::timetz", 'WHERE ("col_timetz" > '),
+    ("timetz_ge", "WHERE col_timetz >= '17:00:00'::timetz", 'WHERE ("col_timetz" >= '),
 ]
 
 

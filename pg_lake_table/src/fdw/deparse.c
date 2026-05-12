@@ -81,6 +81,7 @@
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/fdw/pg_lake_table.h"
 #include "pg_lake/fdw/shippable.h"
+#include "pg_lake/pgduck/keywords.h"
 #include "pg_lake/pgduck/type.h"
 #include "pg_lake/pgduck/rewrite_query.h"
 #include "pg_lake/planner/restriction_collector.h"
@@ -2220,7 +2221,7 @@ deparseAnalyzeSql(StringInfo buf, Relation rel,
 			}
 		}
 
-		appendStringInfoString(buf, quote_identifier(colname));
+		appendStringInfoString(buf, duckdb_quote_identifier(colname));
 
 		*retrieved_attrs = lappend_int(*retrieved_attrs, i + 1);
 	}
@@ -2458,7 +2459,7 @@ deparseColumnRef(StringInfo buf, int varno, int varattno, RangeTblEntry *rte,
 		if (qualify_col)
 			ADD_REL_QUALIFIER(buf, GetUniqueRelationIdentifier(rte));
 
-		appendStringInfoString(buf, quote_identifier(colname));
+		appendStringInfoString(buf, duckdb_quote_identifier(colname));
 	}
 }
 
@@ -2501,7 +2502,8 @@ deparseRelation(StringInfo buf, Relation rel)
 		relname = RelationGetRelationName(rel);
 
 	appendStringInfo(buf, "%s.%s",
-					 quote_identifier(nspname), quote_identifier(relname));
+					 duckdb_quote_identifier(nspname),
+					 duckdb_quote_identifier(relname));
 }
 
 /*
@@ -3095,7 +3097,7 @@ deparseOperatorName(StringInfo buf, Form_pg_operator opform)
 		opnspname = get_namespace_name(opform->oprnamespace);
 		/* Print fully qualified operator name. */
 		appendStringInfo(buf, "OPERATOR(%s.%s)",
-						 quote_identifier(opnspname), opname);
+						 duckdb_quote_identifier(opnspname), opname);
 	}
 	else
 	{
@@ -3521,7 +3523,7 @@ deparseFieldSelect(FieldSelect *fieldSelect, deparse_expr_cxt *context)
 					attr_index,
 					false);
 
-	appendStringInfoString(context->buf, quote_identifier(field_name));
+	appendStringInfoString(context->buf, duckdb_quote_identifier(field_name));
 }
 
 /*
@@ -3756,12 +3758,12 @@ appendFunctionName(Oid funcid, deparse_expr_cxt *context)
 		const char *schemaname;
 
 		schemaname = get_namespace_name(procform->pronamespace);
-		appendStringInfo(buf, "%s.", quote_identifier(schemaname));
+		appendStringInfo(buf, "%s.", duckdb_quote_identifier(schemaname));
 	}
 
 	/* Always print the function name */
 	proname = NameStr(procform->proname);
-	appendStringInfoString(buf, quote_identifier(proname));
+	appendStringInfoString(buf, duckdb_quote_identifier(proname));
 
 	ReleaseSysCache(proctup);
 }
