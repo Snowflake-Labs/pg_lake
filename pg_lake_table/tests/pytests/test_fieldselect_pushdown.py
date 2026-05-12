@@ -11,24 +11,28 @@ import pytest
 
 test_cases = [
     # Field access pushdown
-    ("access_col_first", "WHERE (point).x = 1", "WHERE ((point).x = 1)"),
-    ("access_col_second", "WHERE (point).y = 2", "WHERE ((point).y = 2)"),
+    ("access_col_first", "WHERE (point).x = 1", 'WHERE (("point")."x" = 1)'),
+    ("access_col_second", "WHERE (point).y = 2", 'WHERE (("point")."y" = 2)'),
     (
         "multi_col",
         "WHERE (point).x = 1 AND (point).y = 2",
-        "WHERE (((point).x = 1) AND ((point).y = 2))",
+        'WHERE ((("point")."x" = 1) AND (("point")."y" = 2))',
     ),
     # Note that commutators are used when accessing a FieldSelect; this is
     # semantically the same, as well as serving as validation of #445.
-    ("ineq_col_first", "WHERE (point).x > 0", "WHERE (0 < (point).x)"),
-    ("ineq_col_second", "WHERE (point).y <= 10", "WHERE (10 >= (point).y)"),
-    ("ineq_col_fs_order", "WHERE 5 < (point).y", "WHERE (5 < (point).y)"),
+    ("ineq_col_first", "WHERE (point).x > 0", 'WHERE (0 < ("point")."x")'),
+    ("ineq_col_second", "WHERE (point).y <= 10", 'WHERE (10 >= ("point")."y")'),
+    ("ineq_col_fs_order", "WHERE 5 < (point).y", 'WHERE (5 < ("point")."y")'),
     # Nested access
-    ("nested_int", "WHERE ((intfoo).bar).baz = 1", "WHERE ((intfoo).bar.baz = 1)"),
+    (
+        "nested_int",
+        "WHERE ((intfoo).bar).baz = 1",
+        'WHERE (("intfoo")."bar"."baz" = 1)',
+    ),
     (
         "nested_text",
         "WHERE ((foo).bar).baz = 'bat'",
-        "WHERE ((foo).bar.baz = 'bat'::text)",
+        'WHERE (("foo")."bar"."baz" = \'bat\'::"text")',
     ),
 ]
 

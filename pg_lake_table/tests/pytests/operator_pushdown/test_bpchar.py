@@ -8,17 +8,40 @@ import json
 from decimal import *
 from utils_pytest import *
 
-
 # including an ID as part of each parameter set
 # where id is oprcode for the given operator
 # this id shows up in the pytest output
 test_cases = [
-    ("bpchar_lt", "WHERE col_char < 'a'::bpchar", "WHERE (col_char < 'a'::bpchar)"),
-    ("bpchar_le", "WHERE col_char <= 'b'::bpchar", "WHERE (col_char <= 'b'::bpchar)"),
-    ("bpchar_gt", "WHERE col_char > 'c'::bpchar", "WHERE (col_char > 'c'::bpchar)"),
-    ("bpchar_ge", "WHERE col_char >= 'd'::bpchar", "WHERE (col_char >= 'd'::bpchar)"),
-    ("bpchareq", "WHERE col_char = 'e'::bpchar", "WHERE (col_char = 'e'::bpchar)"),
-    ("bpcharne", "WHERE col_char <> 'f'::bpchar", "WHERE (col_char <> 'f'::bpchar)"),
+    (
+        "bpchar_lt",
+        "WHERE col_char < 'a'::bpchar",
+        'WHERE ("col_char" < \'a\'::"bpchar")',
+    ),
+    (
+        "bpchar_le",
+        "WHERE col_char <= 'b'::bpchar",
+        'WHERE ("col_char" <= \'b\'::"bpchar")',
+    ),
+    (
+        "bpchar_gt",
+        "WHERE col_char > 'c'::bpchar",
+        'WHERE ("col_char" > \'c\'::"bpchar")',
+    ),
+    (
+        "bpchar_ge",
+        "WHERE col_char >= 'd'::bpchar",
+        'WHERE ("col_char" >= \'d\'::"bpchar")',
+    ),
+    (
+        "bpchareq",
+        "WHERE col_char = 'e'::bpchar",
+        'WHERE ("col_char" = \'e\'::"bpchar")',
+    ),
+    (
+        "bpcharne",
+        "WHERE col_char <> 'f'::bpchar",
+        'WHERE ("col_char" <> \'f\'::"bpchar")',
+    ),
     ("bpcharlike", "WHERE col_char LIKE '%e%'", "~~"),
     ("bpcharnlike", "WHERE col_char NOT LIKE '%q%'", "!~~"),
     ("bpchariclike", "WHERE col_char ILIKE '%E%'", "~~*"),

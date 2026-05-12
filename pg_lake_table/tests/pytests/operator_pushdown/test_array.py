@@ -7,99 +7,98 @@ import json
 from decimal import *
 from utils_pytest import *
 
-
 test_cases = [
     # Int array operators
     (
         "int_array_eq",
         "WHERE col_int_array = array[13,1]",
-        "WHERE (col_int_array = ARRAY[13, 1])",
+        'WHERE ("col_int_array" = ARRAY[13, 1])',
     ),
     (
         "int_array_in",
         "WHERE col_int_array IN (array[4,5], array[13,1])",
-        "WHERE ((col_int_array = ARRAY[4, 5]) OR (col_int_array = ARRAY[13, 1]))",
+        'WHERE (("col_int_array" = ARRAY[4, 5]) OR ("col_int_array" = ARRAY[13, 1]))',
     ),
     (
         "int_array_lt",
         "WHERE col_int_array < array[4,5]",
-        "WHERE (col_int_array < ARRAY[4, 5])",
+        'WHERE ("col_int_array" < ARRAY[4, 5])',
     ),
     (
         "int_array_le",
         "WHERE col_int_array <= array[4,5]",
-        "WHERE (col_int_array <= ARRAY[4, 5])",
+        'WHERE ("col_int_array" <= ARRAY[4, 5])',
     ),
     (
         "int_array_gt",
         "WHERE col_int_array > array[4,5]",
-        "WHERE (col_int_array > ARRAY[4, 5])",
+        'WHERE ("col_int_array" > ARRAY[4, 5])',
     ),
     (
         "int_array_ge",
         "WHERE col_int_array >= array[]::int[]",
-        "WHERE (col_int_array >= ARRAY[]::integer[])",
+        'WHERE ("col_int_array" >= ARRAY[]::integer[])',
     ),
     (
         "int_array_overlaps",
         "WHERE col_int_array && array[4,5]",
-        "WHERE (col_int_array && ARRAY[4, 5])",
+        'WHERE ("col_int_array" && ARRAY[4, 5])',
     ),
     (
         "int_array_concat",
         "WHERE col_int_array || array[4] = array[13,1,4]",
-        "WHERE ((col_int_array || ARRAY[4]) = ARRAY[13, 1, 4])",
+        'WHERE (("col_int_array" || ARRAY[4]) = ARRAY[13, 1, 4])',
     ),
     (
         "int_array_append",
         "WHERE col_int_array || 4 = array[4]",
-        "WHERE (array_append(col_int_array, 4) = ARRAY[4])",
+        'WHERE ("array_append"("col_int_array", 4) = ARRAY[4])',
     ),
     # Text array operators
     (
         "text_array_eq",
         "WHERE col_text_array = array['hello', 'world']",
-        "WHERE (col_text_array = ARRAY['hello'::text, 'world'::text])",
+        'WHERE ("col_text_array" = ARRAY[\'hello\'::"text", \'world\'::"text"])',
     ),
     (
         "text_array_in",
         "WHERE col_text_array IN (array[]::text[], array['hello', 'world'])",
-        "WHERE ((col_text_array = ARRAY[]::text[]) OR (col_text_array = ARRAY['hello'::text, 'world'::text]))",
+        'WHERE (("col_text_array" = ARRAY[]::"text"[]) OR ("col_text_array" = ARRAY[\'hello\'::"text", \'world\'::"text"]))',
     ),
     (
         "text_array_lt",
         "WHERE col_text_array < array['bye']",
-        "WHERE (col_text_array < ARRAY['bye'::text])",
+        'WHERE ("col_text_array" < ARRAY[\'bye\'::"text"])',
     ),
     (
         "text_array_le",
         "WHERE col_text_array <= array['bye']",
-        "WHERE (col_text_array <= ARRAY['bye'::text])",
+        'WHERE ("col_text_array" <= ARRAY[\'bye\'::"text"])',
     ),
     (
         "text_array_gt",
         "WHERE col_text_array > array['hello']",
-        "WHERE (col_text_array > ARRAY['hello'::text])",
+        'WHERE ("col_text_array" > ARRAY[\'hello\'::"text"])',
     ),
     (
         "text_array_ge",
         "WHERE col_text_array >= array[]::text[]",
-        "WHERE (col_text_array >= ARRAY[]::text[])",
+        'WHERE ("col_text_array" >= ARRAY[]::"text"[])',
     ),
     (
         "text_array_overlaps",
         "WHERE col_text_array && array['earth','hello']",
-        "WHERE (col_text_array && ARRAY['earth'::text, 'hello'::text])",
+        'WHERE ("col_text_array" && ARRAY[\'earth\'::"text", \'hello\'::"text"])',
     ),
     (
         "text_array_concat",
         "WHERE col_text_array || array['earth'] = array['hello', 'world', 'earth']",
-        "WHERE ((col_text_array || ARRAY['earth'::text]) = ARRAY['hello'::text, 'world'::text, 'earth'::text])",
+        'WHERE (("col_text_array" || ARRAY[\'earth\'::"text"]) = ARRAY[\'hello\'::"text", \'world\'::"text", \'earth\'::"text"])',
     ),
     (
         "text_array_append",
         "WHERE col_text_array || ''::text = array['hello', 'world', '']",
-        "WHERE (array_append(col_text_array, ''::text) = ARRAY['hello'::text, 'world'::text, ''::text])",
+        'WHERE ("array_append"("col_text_array", \'\'::"text") = ARRAY[\'hello\'::"text", \'world\'::"text", \'\'::"text"])',
     ),
 ]
 

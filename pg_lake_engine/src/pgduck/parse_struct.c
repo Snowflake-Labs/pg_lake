@@ -40,6 +40,7 @@
 #include "commands/typecmds.h"
 #include "executor/spi.h"
 #include "nodes/makefuncs.h"
+#include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
@@ -430,11 +431,10 @@ ParseDuckDBFieldName(char **sourceString)
 	}
 
 	/*
-	 * The rest is quoted name handling. We need to consider quoting and
-	 * escaping.  First we allocate an output buffer that is as long as a
-	 * possible string, including terminator.  Fortunately, since we know we
-	 * are removing 2 chars (at least), we can just use the location of the
-	 * first unescaped quote char, we can use this as the output buffer size.
+	 * The rest is quoted name handling.  DuckDB (and our
+	 * ForceQuoteIdentifier) uses standard SQL double-quote doubling: an
+	 * embedded '"' is represented as '""'.  Find the closing quote by
+	 * scanning for a '"' that is not followed by another '"'.
 	 */
 
 	char	   *lastQuote = parseInput;
@@ -449,74 +449,42 @@ ParseDuckDBFieldName(char **sourceString)
 			return NULL;
 
 		/*
-		 * Count the number of preceding backslashes; no body, just iteration
-		 * in this loop
+		 * If the next char is also '"', this is a doubled quote representing
+		 * a literal '"' inside the name; skip the pair and keep scanning.
 		 */
-		int			i;
+		if (*(lastQuote + 1) == '"')
+		{
+			lastQuote++;
+			continue;
+		}
 
-		for (i = 0; *(lastQuote - (i + 1)) == '\\'; i++)
-			;
-
-		/*
-		 * If we had an even number of consecutive backslashes, then we're
-		 * done, this quote isn't escaped.
-		 */
-		if (!(i % 2))
-			break;
-
-		/* otherwise we slog on to the next one */
+		/* Otherwise this is the real closing quote. */
+		break;
 	}
 
 	/*
-	 * We want a buffer that will hold our unquoted string plus a terminating
-	 * NUL.  Since we know we have 2 quote characters that will be removed, we
-	 * can just use (lastQuote - parseInput) and since escaping only _removes_
-	 * characters from the total unescaped length, this will be as large as we
-	 * need.  (We don't care about the 1+ wasted bytes here, this is
-	 * ephemeral.
+	 * Buffer at most (lastQuote - parseInput) bytes: we drop the opening
+	 * quote and collapse each '""' pair into a single '"', so the unescaped
+	 * length is strictly smaller than the span between the opening and
+	 * closing quotes.
 	 */
 
 	char	   *quotedBuf = palloc0(lastQuote - parseInput);
-
-	/* start writing at the beginning of this buffer */
 	char	   *quotedBufWritePos = quotedBuf;
 
 	/* parseInput is currently the opening quote, so let's skip past that */
 	for (parseInput++; parseInput < lastQuote; parseInput++)
 	{
-		char		bufWriteChar = *parseInput;
-
 		/*
-		 * We just need to check if our character is an escape character; if
-		 * so, we perform a few transforms.  If we _must_, we can expand this
-		 * into other escapes (octal, unicode, etc); just do the common ones
-		 * here.
+		 * Collapse doubled quotes '""' into a single '"'.  Any other
+		 * character is copied verbatim — backslashes are not escape
+		 * characters inside a SQL-quoted identifier.
 		 */
-
-		if (bufWriteChar == '\\')
-		{
+		if (*parseInput == '"' && parseInput + 1 < lastQuote
+			&& *(parseInput + 1) == '"')
 			parseInput++;
-			switch (*parseInput)
-			{
-				case 't':
-					bufWriteChar = '\t';
-					break;
-				case 'n':
-					bufWriteChar = '\n';
-					break;
-				case 'r':
-					bufWriteChar = '\r';
-					break;
-				default:
-					/* just copy the next char in the default case */
-					/* this handles escaped quotes and escaped escapes */
-					bufWriteChar = *parseInput;
-			}
-		}
 
-		/* now that we have the char to write in our buffer, let's write it. */
-		*quotedBufWritePos = bufWriteChar;
-		quotedBufWritePos++;
+		*quotedBufWritePos++ = *parseInput;
 	}
 
 	/* advance our parser pointer past the last quote */
@@ -562,7 +530,7 @@ char *
 ParseDuckDBFieldType(char **sourceString, bool *isArray)
 {
 	char	   *parseInput = *sourceString;
-	int			quoteCount = 1; /* if used, we have opening quote already */
+	int			parenDepth = 1; /* if used, we have opening paren already */
 
 	if (IsStructType(parseInput) || IsMapType(parseInput))
 	{
@@ -573,12 +541,39 @@ ParseDuckDBFieldType(char **sourceString, bool *isArray)
 		if (!parseInput)
 			return NULL;
 
-		while (*parseInput && quoteCount)
+		while (*parseInput && parenDepth)
 		{
+			/*
+			 * Skip over quoted field names so embedded parentheses in the
+			 * name are not mistaken for struct delimiters.  Inside a
+			 * double-quoted identifier, '""' is the SQL-standard escape for a
+			 * literal '"'.
+			 */
+			if (*parseInput == '"')
+			{
+				parseInput++;
+				while (*parseInput)
+				{
+					if (*parseInput == '"')
+					{
+						if (*(parseInput + 1) == '"')
+							parseInput += 2;
+						else
+						{
+							parseInput++;
+							break;
+						}
+					}
+					else
+						parseInput++;
+				}
+				continue;
+			}
+
 			if (*parseInput == '(')
-				quoteCount++;
+				parenDepth++;
 			if (*parseInput == ')')
-				quoteCount--;
+				parenDepth--;
 			parseInput++;
 		}
 	}
@@ -740,9 +735,11 @@ FindOrCreatePGCompositeType(CompositeType * type)
 	 */
 	do
 	{
-		StringInfo	oidArray = makeStringInfo();
-		StringInfo	nameArray = makeStringInfo();
+		int			ncols = list_length(type->cols);
+		Datum	   *nameDatums = palloc(sizeof(Datum) * ncols);
+		Datum	   *oidDatums = palloc(sizeof(Datum) * ncols);
 		ListCell   *lc;
+		int			i = 0;
 
 		foreach(lc, type->cols)
 		{
@@ -750,33 +747,37 @@ FindOrCreatePGCompositeType(CompositeType * type)
 
 			Assert(col->colType);
 
-			/* if we are the first time through, skip this */
-			if (oidArray->len)
-			{
-				appendStringInfoChar(oidArray, ',');
-				appendStringInfoChar(nameArray, ',');
-			}
-
-			appendStringInfo(oidArray, "%d", col->colType);
-			appendStringInfo(nameArray, "%s", col->colName);
+			/*
+			 * Build the arrays as proper Datums rather than string-formatting
+			 * into a name[] literal: field names may contain commas, quotes,
+			 * backslashes, or whitespace that would break array literal
+			 * parsing.
+			 */
+			nameDatums[i] = DirectFunctionCall1(namein,
+												CStringGetDatum(col->colName));
+			oidDatums[i] = ObjectIdGetDatum(col->colType);
+			i++;
 		}
 
-		char	   *findTypeQuery = psprintf(
-											 "SELECT oid, typname, typarray FROM pg_type JOIN "
-											 "(SELECT attrelid,"
-											 "    array_agg(atttypid ORDER BY attnum) AS types,"
-											 "    array_agg(attname ORDER BY attnum) AS names "
-											 "    FROM pg_attribute "
-											 "    WHERE attnum > 0 AND NOT attisdropped "
-											 "    GROUP BY attrelid) atts "
-											 "ON pg_type.typrelid = atts.attrelid AND "
-											 "    atts.names = '{%s}'::name[] and atts.types='{%s}'::oid[] "
-											 "WHERE typnamespace :: regnamespace in ('pg_catalog','"
-											 STRUCT_TYPES_SCHEMA "') LIMIT 1",
-											 nameArray->data,
-											 oidArray->data);
+		ArrayType  *nameArr = construct_array_builtin(nameDatums, ncols, NAMEOID);
+		ArrayType  *oidArr = construct_array_builtin(oidDatums, ncols, OIDOID);
 
-		elog(DEBUG1, "checking for matching type oid via query: %s", findTypeQuery);
+		const char *findTypeQuery =
+			"SELECT oid, typname, typarray FROM pg_type JOIN "
+			"(SELECT attrelid,"
+			"    array_agg(atttypid ORDER BY attnum) AS types,"
+			"    array_agg(attname ORDER BY attnum) AS names "
+			"    FROM pg_attribute "
+			"    WHERE attnum > 0 AND NOT attisdropped "
+			"    GROUP BY attrelid) atts "
+			"ON pg_type.typrelid = atts.attrelid AND "
+			"    atts.names = $1 AND atts.types = $2 "
+			"WHERE typnamespace :: regnamespace in "
+			"    ('pg_catalog','" STRUCT_TYPES_SCHEMA "') LIMIT 1";
+
+		Oid			argTypes[2] = {NAMEARRAYOID, OIDARRAYOID};
+		Datum		argValues[2] = {PointerGetDatum(nameArr),
+		PointerGetDatum(oidArr)};
 
 		Oid			foundOid = InvalidOid;
 		Oid			foundArrayOid = InvalidOid;
@@ -784,7 +785,8 @@ FindOrCreatePGCompositeType(CompositeType * type)
 
 		SPI_START();
 
-		int			ret = SPI_execute(findTypeQuery, false, 1);
+		int			ret = SPI_execute_with_args(findTypeQuery, 2, argTypes,
+												argValues, NULL, false, 1);
 
 		if (ret == SPI_OK_SELECT && SPI_processed >= 1)
 		{
@@ -1127,90 +1129,10 @@ GetDuckDBStructDefinitionForCompositeType(CompositeType * type,
 }
 
 
-/*
- * This helper just quotes our input string to be used in a duckdb field name.
- */
 const char *
 QuoteDuckDBFieldName(char *fieldName)
 {
-	char	   *position = fieldName;
-
-	/*
-	 * If we are a reserved word or the field name starts with a digit, then
-	 * we *must* quote, so advance position to end of the string.
-	 */
-	if (IsDuckDBReservedWord(fieldName) || isdigit(*position))
-	{
-		position = strchr(position, '\0');
-	}
-	else
-	{
-		/*
-		 * Check if we even need quoting -- this does not include keyword
-		 * consideration, so maybe we should unconditionally quote.
-		 */
-		while (*position && (isalnum(*position) || *position == '_'))
-			position++;
-
-		/*
-		 * If we reached the end of string, we can just return the original
-		 * input.
-		 */
-		if (!*position)
-			return fieldName;
-	}
-
-	/*
-	 * The current quoting can only add at most one additional character per
-	 * input character, so we get a safe-sized buffer by doubling the input
-	 * fieldName length and adding space for two quotes and a terminator.
-	 */
-	char	   *quotedBuf = palloc0(2 * strlen(fieldName) + 3);
-
-	/* reset our position */
-	position = quotedBuf;
-
-	/* start quote */
-	*position++ = '"';
-
-	/* reuse fieldName to walk the source string */
-	while (*fieldName)
-	{
-		char		writeChar = *fieldName;
-
-		switch (writeChar)
-		{
-			case '"':
-				*position++ = '\\';
-				*position++ = '"';
-				break;
-			case '\\':
-				*position++ = '\\';
-				*position++ = '\\';
-				break;
-			case '\r':
-				*position++ = '\\';
-				*position++ = 'r';
-				break;
-			case '\n':
-				*position++ = '\\';
-				*position++ = 'n';
-				break;
-			case '\t':
-				*position++ = '\\';
-				*position++ = 't';
-				break;
-			default:
-				*position++ = writeChar;
-		}
-		fieldName++;
-	}
-
-	/* end quote */
-	*position++ = '"';
-
-	/* quotedBuf is now our quoted string */
-	return quotedBuf;
+	return duckdb_quote_identifier(fieldName);
 }
 
 

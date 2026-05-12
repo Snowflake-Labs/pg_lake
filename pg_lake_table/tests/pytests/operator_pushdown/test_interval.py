@@ -18,42 +18,42 @@ test_cases = [
     (
         "interval_eq",
         "WHERE col_interval = INTERVAL '1 day'",
-        "WHERE (col_interval = '1 day'::interval)",
+        "WHERE (\"col_interval\" = '1 day'::interval)",
     ),
     (
         "interval_ne",
         "WHERE col_interval <> INTERVAL '2 days'",
-        "WHERE (col_interval <> '2 days'::interval)",
+        "WHERE (\"col_interval\" <> '2 days'::interval)",
     ),
     (
         "interval_lt",
         "WHERE col_interval < INTERVAL '3 days'",
-        "WHERE (col_interval < '3 days'::interval)",
+        "WHERE (\"col_interval\" < '3 days'::interval)",
     ),
     (
         "interval_le",
         "WHERE col_interval <= INTERVAL '4 days'",
-        "WHERE (col_interval <= '4 days'::interval)",
+        "WHERE (\"col_interval\" <= '4 days'::interval)",
     ),
     (
         "interval_gt",
         "WHERE col_interval > INTERVAL '1 hour'",
-        "WHERE (col_interval > '01:00:00'::interval)",
+        "WHERE (\"col_interval\" > '01:00:00'::interval)",
     ),
     (
         "interval_ge",
         "WHERE col_interval >= INTERVAL '2 hours'",
-        "WHERE (col_interval >= '02:00:00'::interval)",
+        "WHERE (\"col_interval\" >= '02:00:00'::interval)",
     ),
     (
         "interval_pl",
         "WHERE col_interval + INTERVAL '1 day' = INTERVAL '2 days'",
-        "WHERE ((col_interval + '1 day'::interval) = '2 days'::interval)",
+        "WHERE ((\"col_interval\" + '1 day'::interval) = '2 days'::interval)",
     ),
     (
         "interval_mi",
         "WHERE col_interval - INTERVAL '1 day' = INTERVAL '1 day'",
-        "WHERE ((col_interval - '1 day'::interval) = '1 day'::interval)",
+        "WHERE ((\"col_interval\" - '1 day'::interval) = '1 day'::interval)",
     ),
 ]
 

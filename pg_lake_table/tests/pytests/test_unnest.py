@@ -211,9 +211,9 @@ test_cases = [
 )
 def test_unnest_pushdown(create_unnest_table, pg_conn, name, query, pushdown):
     if pushdown:
-        assert_remote_query_contains_expression(query, "unnest(", pg_conn)
+        assert_remote_query_contains_expression(query, '"unnest"(', pg_conn)
     else:
-        assert_remote_query_not_contains_expression(query, "unnest(", pg_conn)
+        assert_remote_query_not_contains_expression(query, '"unnest"(', pg_conn)
 
     assert_query_results_on_tables(query, pg_conn, ["untest"], ["untest_heap"])
 
