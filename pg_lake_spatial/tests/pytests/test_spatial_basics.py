@@ -373,3 +373,60 @@ def basic_geometry_file(s3, user_conn, postgis_extension, spatial_analytics_exte
     """,
         user_conn,
     )
+
+
+@pytest.mark.parametrize(
+    "fmt,options",
+    [
+        ("parquet", ""),
+        ("csv", ", format 'csv', writable 'true'"),
+        ("json", ", format 'json', writable 'true'"),
+    ],
+)
+def test_reserved_keyword_geometry_roundtrip(
+    user_conn, spatial_analytics_extension, pg_lake_extension, fmt, options
+):
+    """
+    Parameterized round-trip: DuckDB-reserved keyword as a geometry column
+    name, written to and read back from each supported format.  Exercises
+    the ST_AsWKB / ST_AsGeoJSON / ST_GeomFromWKB / ST_GeomFromText /
+    ST_GeomFromGeoJSON wrapper branches in write_data.c / read_data.c with
+    duckdb_quote_identifier applied to the column name.
+    """
+    user_conn.rollback()
+
+    location = f"s3://{TEST_BUCKET}/test_spatial_basics/kw_geom_roundtrip_{fmt}/"
+
+    if fmt == "parquet":
+        options_clause = (
+            f"OPTIONS (location '{location}', format 'parquet', writable 'true')"
+        )
+    else:
+        options_clause = f"OPTIONS (location '{location}'{options})"
+
+    run_command(
+        f"""
+        CREATE FOREIGN TABLE test_kw_geom_rt_{fmt} (id int, pivot geometry)
+        SERVER pg_lake {options_clause}
+        """,
+        user_conn,
+    )
+    user_conn.commit()
+
+    run_command(
+        f"INSERT INTO test_kw_geom_rt_{fmt} VALUES "
+        f"(1, ST_Point(1, 2)), (2, ST_Point(3, 4))",
+        user_conn,
+    )
+    user_conn.commit()
+
+    result = run_query(
+        f"SELECT id, ST_AsText(pivot) AS g FROM test_kw_geom_rt_{fmt} ORDER BY id",
+        user_conn,
+    )
+    assert [r["id"] for r in result] == [1, 2]
+    assert result[0]["g"] == "POINT (1 2)"
+    assert result[1]["g"] == "POINT (3 4)"
+
+    run_command(f"DROP FOREIGN TABLE test_kw_geom_rt_{fmt}", user_conn)
+    user_conn.commit()

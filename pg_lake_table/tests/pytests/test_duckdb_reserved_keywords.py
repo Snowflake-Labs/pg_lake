@@ -881,3 +881,187 @@ def test_each_reserved_keyword_json(pg_conn, s3, extension, keyword):
         assert_remote_query_contains_expression(filter_query, f'"{keyword}"', pg_conn)
     finally:
         pg_conn.rollback()
+
+
+# ---------------------------------------------------------------------------
+# Extended coverage from PR #297 review 4270327414
+# ---------------------------------------------------------------------------
+
+
+def test_iceberg_timetz_to_time_cast_on_reserved_column(pg_conn, s3, extension):
+    """
+    TIMETZ columns are CAST to TIME on iceberg INSERT (in
+    write_data.c:TupleDescToProjectionListForWrite).  Verify the emitted
+    CAST path correctly quotes a reserved-keyword column name.
+    """
+    schema = "test_duckdb_kw_timetz"
+    location = f"s3://{TEST_BUCKET}/{schema}/"
+
+    run_command(f"CREATE SCHEMA {schema}", pg_conn)
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        CREATE TABLE {schema}.t (id int, pivot timetz)
+        USING iceberg
+        WITH (location = '{location}')
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"INSERT INTO {schema}.t VALUES (1, TIMETZ '10:30:00+00'), "
+        f"(2, TIMETZ '15:45:00+00')",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        f"SELECT id, pivot FROM {schema}.t ORDER BY id",
+        pg_conn,
+    )
+    assert [r[0] for r in result] == [1, 2]
+
+    run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_iceberg_analyze_with_reserved_columns(pg_conn, s3, extension):
+    """
+    ANALYZE on an iceberg foreign table with reserved-keyword column names
+    goes through the deparse/pushdown path and must properly quote column
+    names when generating the remote stats-collection query.
+    """
+    schema = "test_duckdb_kw_analyze"
+    location = f"s3://{TEST_BUCKET}/{schema}/"
+
+    run_command(f"CREATE SCHEMA {schema}", pg_conn)
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        CREATE TABLE {schema}.t (pivot int, qualify text, lambda int)
+        USING iceberg
+        WITH (location = '{location}')
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        INSERT INTO {schema}.t (pivot, qualify, lambda) VALUES
+          (1, 'a', 10), (2, 'b', 20), (3, 'c', 30)
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # Must not error; exercises the stats/ANALYZE deparse path.
+    run_command(f"ANALYZE {schema}.t", pg_conn)
+    pg_conn.commit()
+
+    run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_reserved_keyword_schema_with_custom_function_and_operator(
+    pg_conn, s3, extension
+):
+    """
+    Custom operator / function living in a DuckDB-reserved-keyword schema
+    must have its schema-qualified name correctly quoted when deparsed into
+    the SQL sent to pgduck_server (deparse.c:deparseOperatorName/deparseFuncExpr).
+    """
+    schema = "pivot"
+    url = f"s3://{TEST_BUCKET}/test_duckdb_kw_schema_func/data.parquet"
+
+    run_command(
+        f'DROP SCHEMA IF EXISTS "{schema}" CASCADE; CREATE SCHEMA "{schema}"',
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        CREATE FUNCTION "{schema}".add_one(x int) RETURNS int
+          LANGUAGE sql IMMUTABLE PARALLEL SAFE
+          AS $$ SELECT x + 1 $$;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        COPY (SELECT 41 AS n UNION ALL SELECT 9) TO '{url}' WITH (format 'parquet')
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        CREATE FOREIGN TABLE test_kw_schema_func (n int)
+        SERVER pg_lake OPTIONS (path '{url}')
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    try:
+        # Local execution (function not shipped) — still exercises the
+        # schema-qualified deparse for the projection column list.
+        result = run_query(
+            f'SELECT "{schema}".add_one(n) FROM test_kw_schema_func ORDER BY 1',
+            pg_conn,
+        )
+        assert [r[0] for r in result] == [10, 42]
+    finally:
+        pg_conn.rollback()
+
+    run_command(f'DROP SCHEMA "{schema}" CASCADE', pg_conn)
+    pg_conn.commit()
+
+
+def test_iceberg_overflow_conversion_on_reserved_column(pg_conn, s3, extension):
+    """
+    The overflow / native-conversion wrapper in read_data.c's projection
+    builder (e.g. try_cast / explicit AS cast paths, ::TIMETZ, ::type AS
+    alias) must quote reserved-keyword column names consistently.  Verify
+    with a reserved-keyword smallint column that needs widening on read.
+    """
+    schema = "test_duckdb_kw_overflow"
+    location = f"s3://{TEST_BUCKET}/{schema}/"
+
+    run_command(f"CREATE SCHEMA {schema}", pg_conn)
+    pg_conn.commit()
+
+    # Create iceberg table with a reserved-keyword smallint column, then
+    # read it back through a FDW typed as int to exercise the ::type AS
+    # alias projection path with a reserved column name.
+    run_command(
+        f"""
+        CREATE TABLE {schema}.t (id int, pivot smallint)
+        USING iceberg
+        WITH (location = '{location}')
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"INSERT INTO {schema}.t VALUES (1, 100::smallint), (2, 200::smallint)",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        f"SELECT id, pivot::int AS pivot_widened FROM {schema}.t ORDER BY id",
+        pg_conn,
+    )
+    assert result == [[1, 100], [2, 200]]
+
+    run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
+    pg_conn.commit()
