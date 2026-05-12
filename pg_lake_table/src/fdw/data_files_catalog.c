@@ -407,14 +407,80 @@ GetTableDataFilesByPathHashFromCatalog(Oid relationId, bool dataOnly, bool newFi
 
 
 /*
+ * PathToDataFilePtrHashEntry is the entry type for the local
+ * path -> TableDataFile* hash used by LoadColumnStatsForFiles to dispatch
+ * each (path, field_id) stats row to its caller-owned data file struct
+ * in O(1).
+ *
+ * We can't reuse TableDataFileHashEntry from data_files_catalog.h because
+ * that entry embeds the TableDataFile by value and is filled from a SELECT,
+ * whereas here we need to mutate the *caller's* TableDataFile (its
+ * stats.columnStats list) in place. Hence: a separate entry that just holds
+ * a pointer.
+ */
+typedef struct PathToDataFilePtrHashEntry
+{
+	char		filePath[MAX_S3_PATH_LENGTH];
+	TableDataFile *dataFile;
+}			PathToDataFilePtrHashEntry;
+
+
+/*
+ * BuildPathToDataFilePtrHash returns a path-keyed hash that maps each
+ * TableDataFile in dataFiles to its pointer in the caller's list. Used by
+ * LoadColumnStatsForFiles to look up the target data file in O(1) instead of
+ * walking the entire dataFiles list per SPI result row.
+ *
+ * The hash is sized for the input list; callers are expected to hash_destroy()
+ * it when done.
+ */
+static HTAB *
+BuildPathToDataFilePtrHash(List *dataFiles)
+{
+	HASHCTL		ctl = {0};
+
+	ctl.keysize = MAX_S3_PATH_LENGTH;
+	ctl.entrysize = sizeof(PathToDataFilePtrHashEntry);
+	ctl.hcxt = CurrentMemoryContext;
+
+	HTAB	   *hash = hash_create("LoadColumnStatsForFiles path lookup",
+								   Max(list_length(dataFiles), 16),
+								   &ctl,
+								   HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
+
+	ListCell   *fileCell = NULL;
+
+	foreach(fileCell, dataFiles)
+	{
+		TableDataFile *dataFile = lfirst(fileCell);
+
+		PathToDataFilePtrHashEntry *entry =
+			(PathToDataFilePtrHashEntry *) hash_search(hash, dataFile->path,
+													   HASH_ENTER, NULL);
+
+		entry->dataFile = dataFile;
+	}
+
+	return hash;
+}
+
+
+/*
  * LoadColumnStatsForFiles fills in per-column min/max stats for the given
  * data files, targeting only their paths. This lets callers pair a stats-free
  * bulk read (GetTableDataFilesHashFromCatalog with skipColumnStats=true) with
  * a narrow stats load for just the files that actually need them (e.g. the
- * handful of newly added files in a transaction).
+ * newly added files in a transaction).
  *
  * The dataFiles list must contain TableDataFile pointers whose columnStats
  * are currently NIL; this function appends to dataFile->stats.columnStats.
+ *
+ * The SPI query returns one row per (path, field_id); to dispatch each row
+ * to the right caller-owned struct we build a path -> TableDataFile* hash
+ * up front. The dominant cost on a large pre-commit (tens of thousands of
+ * files, half a dozen stats columns each) is this dispatch, so O(1) hash
+ * lookups here turn an O(N^2) fill loop into O(N * C) with N files and C
+ * columns.
  */
 void
 LoadColumnStatsForFiles(Oid relationId, List *dataFiles)
@@ -423,6 +489,8 @@ LoadColumnStatsForFiles(Oid relationId, List *dataFiles)
 		return;
 
 	MemoryContext callerContext = CurrentMemoryContext;
+
+	HTAB	   *filesByPath = BuildPathToDataFilePtrHash(dataFiles);
 
 	List	   *pathList = NIL;
 	ListCell   *fileCell = NULL;
@@ -482,6 +550,29 @@ LoadColumnStatsForFiles(Oid relationId, List *dataFiles)
 			continue;
 		}
 
+		PathToDataFilePtrHashEntry *entry =
+			(PathToDataFilePtrHashEntry *) hash_search(filesByPath, path,
+													   HASH_FIND, NULL);
+
+		if (entry == NULL)
+		{
+			/*
+			 * Stats row points at a path that isn't in the caller's list.
+			 * Shouldn't happen given the WHERE path = ANY($2) filter, but
+			 * tolerate it to avoid crashing on a corrupt catalog.
+			 */
+			MemoryContextSwitchTo(spiContext);
+			continue;
+		}
+
+		TableDataFile *dataFile = entry->dataFile;
+
+		if (ColumnStatAlreadyAdded(dataFile->stats.columnStats, fieldId))
+		{
+			MemoryContextSwitchTo(spiContext);
+			continue;
+		}
+
 		bool		isPgTypeNull = false;
 		bool		isPgTypeModNull = false;
 
@@ -505,34 +596,17 @@ LoadColumnStatsForFiles(Oid relationId, List *dataFiles)
 		if (!isUpperBoundNull)
 			upperBoundText = TextDatumGetCString(upperBoundDatum);
 
-		/*
-		 * Walk the caller's list to find the matching struct. dataFiles is
-		 * expected to be small (typically 1-2 entries per transaction), so a
-		 * linear search is fine and avoids an extra pointer-valued hash.
-		 */
-		ListCell   *lc = NULL;
+		DataFileColumnStats *columnStats =
+			CreateDataFileColumnStats(fieldId, pgType, lowerBoundText, upperBoundText);
 
-		foreach(lc, dataFiles)
-		{
-			TableDataFile *dataFile = lfirst(lc);
-
-			if (strcmp(dataFile->path, path) != 0)
-				continue;
-
-			if (ColumnStatAlreadyAdded(dataFile->stats.columnStats, fieldId))
-				break;
-
-			DataFileColumnStats *columnStats =
-				CreateDataFileColumnStats(fieldId, pgType, lowerBoundText, upperBoundText);
-
-			dataFile->stats.columnStats = lappend(dataFile->stats.columnStats, columnStats);
-			break;
-		}
+		dataFile->stats.columnStats = lappend(dataFile->stats.columnStats, columnStats);
 
 		MemoryContextSwitchTo(spiContext);
 	}
 
 	SPI_END();
+
+	hash_destroy(filesByPath);
 }
 
 
