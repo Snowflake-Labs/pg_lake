@@ -51,7 +51,7 @@ typedef struct RecordIOData
  * escaping inside single-quoted strings: single-quotes become \' and
  * backslashes become \\.
  */
-static const char *
+const char *
 QuoteDuckDBStructKey(const char *fieldName)
 {
 	char	   *result = palloc(2 * strlen(fieldName) + 3);

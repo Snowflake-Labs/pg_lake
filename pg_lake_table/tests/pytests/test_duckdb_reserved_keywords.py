@@ -497,6 +497,71 @@ def test_each_reserved_keyword_csv(pg_conn, s3, extension, keyword):
 # ---------------------------------------------------------------------------
 
 
+def test_struct_of_interval_field_name_with_single_quote(pg_conn, s3, extension):
+    """
+    Iceberg table with a STRUCT field containing an INTERVAL sub-field whose
+    name contains a single quote.  Exercises the INTERVAL-specific struct
+    projection branch in pg_lake_engine/src/pgduck/read_data.c: the key emit
+    site previously used bare "'%s':" formatting, which truncated at the
+    embedded "'" and produced a DuckDB parser error.
+
+    Regression test for review feedback on PR #297 (read_data.c:986) — the
+    key emit must go through QuoteDuckDBStructKey() like the sibling site in
+    struct_conversion.c:157 does.
+    """
+    schema = "test_duckdb_kw_interval_quote"
+    location = f"s3://{TEST_BUCKET}/{schema}/"
+
+    run_command(f"CREATE SCHEMA {schema}", pg_conn)
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        CREATE TYPE {schema}.bad_interval_t AS (
+            "has'quote" interval,
+            "normal" interval,
+            "plain" int
+        )
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        CREATE TABLE {schema}.t (id int, s {schema}.bad_interval_t)
+        USING iceberg
+        WITH (location = '{location}')
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        INSERT INTO {schema}.t
+        VALUES (1, ROW(INTERVAL '1 day', INTERVAL '5 minutes', 42))
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        f"""
+        SELECT id,
+               (s)."has'quote" = INTERVAL '1 day',
+               (s)."normal"    = INTERVAL '5 minutes',
+               (s)."plain"
+          FROM {schema}.t
+        """,
+        pg_conn,
+    )
+    assert result == [[1, True, True, 42]]
+
+    run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 def test_autodetect_struct_field_names_with_hostile_characters(pg_conn, s3, extension):
     """
     Auto-detect (CREATE FOREIGN TABLE () ... OPTIONS (path ...)) against a
@@ -577,6 +642,77 @@ def test_autodetect_struct_field_names_with_hostile_characters(pg_conn, s3, exte
         pg_conn,
     )
     assert result == [[1, 1, 2, 3, 4, 5, 6, 7]]
+
+    run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+@pytest.mark.parametrize(
+    "keyword,pg_type,pg_value,sql_literal",
+    [
+        (
+            "lambda",
+            "interval",
+            "INTERVAL '2 hours 30 minutes'",
+            "INTERVAL '2 hours 30 minutes'",
+        ),
+        (
+            "pivot",
+            "timestamp",
+            "TIMESTAMP '2024-01-15 10:30:00'",
+            "TIMESTAMP '2024-01-15 10:30:00'",
+        ),
+        (
+            "qualify",
+            "interval[]",
+            "ARRAY[INTERVAL '1 day', INTERVAL '2 hours']::interval[]",
+            "ARRAY[INTERVAL '1 day', INTERVAL '2 hours']::interval[]",
+        ),
+    ],
+)
+def test_reserved_keyword_struct_field_typed(
+    pg_conn, s3, extension, keyword, pg_type, pg_value, sql_literal
+):
+    """
+    Reserved-keyword field names inside a composite column must also work for
+    the INTERVAL / TIMESTAMP / INTERVAL[] branches of the struct projection
+    builder in read_data.c (which has specialised emission for those types).
+    Locks in regression protection for review feedback on PR #297 — the main
+    parameterized tests use plain int, which doesn't touch those branches.
+    """
+    schema = f"test_duckdb_kw_struct_{keyword}_{pg_type.replace('[]', 'arr')}"
+    location = f"s3://{TEST_BUCKET}/{schema}/"
+
+    run_command(f"CREATE SCHEMA {schema}", pg_conn)
+    pg_conn.commit()
+
+    run_command(
+        f'CREATE TYPE {schema}.composite_t AS ("{keyword}" {pg_type}, plain int)',
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        CREATE TABLE {schema}.t (id int, s {schema}.composite_t)
+        USING iceberg
+        WITH (location = '{location}')
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"INSERT INTO {schema}.t VALUES (1, ROW({pg_value}, 42))",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        f'SELECT id, (s)."{keyword}" = {sql_literal}, (s).plain FROM {schema}.t',
+        pg_conn,
+    )
+    assert result == [[1, True, 42]]
 
     run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
     pg_conn.commit()

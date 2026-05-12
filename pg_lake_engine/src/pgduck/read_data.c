@@ -32,6 +32,7 @@
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/pgduck/read_data.h"
+#include "pg_lake/pgduck/struct_conversion.h"
 #include "pg_lake/pgduck/type.h"
 #include "pg_lake/pgduck/map.h"
 #include "pg_lake/util/numeric.h"
@@ -983,7 +984,7 @@ BuildStructWithIntervalProjection(char *columnName, Oid compositeTypeId)
 
 		char	   *fieldName = NameStr(att->attname);
 
-		appendStringInfo(&buf, "'%s': ", fieldName);
+		appendStringInfo(&buf, "%s: ", QuoteDuckDBStructKey(fieldName));
 
 		Oid			fieldElementType = get_element_type(att->atttypid);
 		bool		isIntervalArray = OidIsValid(fieldElementType) &&

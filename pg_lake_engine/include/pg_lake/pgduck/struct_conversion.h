@@ -22,3 +22,4 @@
 #define RECORD_OUT_OID 2291
 
 extern PGDLLEXPORT char *StructOutForPGDuck(Datum myStruct, CopyDataFormat format);
+extern PGDLLEXPORT const char *QuoteDuckDBStructKey(const char *fieldName);
