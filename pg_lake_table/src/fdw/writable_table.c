@@ -1361,6 +1361,14 @@ ApplyMetadataChanges(Oid relationId, List *metadataOperations)
 				List	   *operationTypes = GetMetadataOperationTypes(metadataOperations);
 
 				TrackIcebergMetadataChangesInTx(relationId, operationTypes);
+
+				/*
+				 * Feed the commit-time fast path: a deep copy of the
+				 * DATA_FILE_ADD ops we just persisted lets the pre-commit
+				 * hook skip the catalog-vs-metadata diff for append-only
+				 * workloads (see TrackAppliedDataFileOperations).
+				 */
+				TrackAppliedDataFileOperations(relationId, metadataOperations);
 				break;
 			}
 

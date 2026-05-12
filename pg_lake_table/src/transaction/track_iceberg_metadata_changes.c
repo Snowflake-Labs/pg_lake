@@ -109,6 +109,19 @@ static int	ComparePartitionSpecsById(const ListCell *a, const ListCell *b);
 static char *IdentifierJson(const char *namespaceFlat, const char *tableName);
 static int	GetEffectiveMaxSnapshotAgeInSecs(Oid relationId);
 
+/* Commit-time fast path forward decls */
+static TableMetadataOperation * CopyDataFileAddOpForTracker(TableMetadataOperation * op);
+static Partition * CopyPartitionForTracker(Partition * partition);
+static List *CopyColumnStatsListForTracker(List *columnStats);
+static List *DataFileAddPaths(List *addedOps);
+static List *TrackedAddOpsAsMetadataOperations(List *trackedOps);
+static bool TryFastPathDataFileOperations(const TableMetadataOperationTracker * opTracker,
+										  List **outMetadataOperations);
+static void DisableFastPathForAllTrackedRelations(void);
+static void IcebergCommitFastPathSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
+												 SubTransactionId parentSubid, void *arg);
+static void RegisterIcebergCommitFastPathSubXactCallbackIfNeeded(void);
+
 
 
 /*
@@ -124,6 +137,18 @@ static HTAB *RestCatalogRequestsHash = NULL;
 
 /* some pre-allocated memory so we don't palloc() ever in XACT_COMMIT  */
 static MemoryContext PgLakeXactCommitContext = NULL;
+
+/*
+ * Session-level counters for the commit-time fast path. Tests use these via
+ * GetCommitFastPathStats / the test_commit_fast_path_stats SQL function to
+ * assert that the fast path is taken on append-only workloads and that the
+ * diff fallback runs on workloads that should disable it.
+ */
+static int64 IcebergCommitFastPathHits = 0;
+static int64 IcebergCommitFastPathFallbacks = 0;
+
+/* Whether we've registered the subtransaction callback with xact.c yet. */
+static bool IcebergCommitFastPathSubXactCallbackRegistered = false;
 
 /*
  * TrackIcebergMetadataChangesInTx tracks metadata changes for a given relation
@@ -175,6 +200,330 @@ HasAnyTrackedIcebergMetadataChanges(void)
 {
 	return TrackedIcebergMetadataOperationsHash != NULL &&
 		hash_get_num_entries(TrackedIcebergMetadataOperationsHash) > 0;
+}
+
+
+/*
+ * TrackAppliedDataFileOperations is the per-statement bookkeeping hook for
+ * the commit-time fast path. Right after ApplyDataFileCatalogChanges() has
+ * persisted a list of metadata operations into the catalogs, we record:
+ *
+ *   - a deep copy (in TopTransactionContext) of every DATA_FILE_ADD op, so
+ *     ConsumeTrackedIcebergMetadataChanges can avoid the catalog-diff +
+ *     LoadColumnStatsForFiles round trips at commit; and
+ *   - the fact that any non-ADD op was applied, which forces commit to fall
+ *     back to the diff path because the in-memory list doesn't capture
+ *     REMOVE / UPDATE_DELETED_ROW_COUNT / position-delete mapping rows.
+ *
+ * Mirroring writable_table.c's ApplyMetadataChanges (which also calls
+ * TrackIcebergMetadataChangesInTx after the catalog writes succeed), we
+ * only track ops we know the catalog inserts committed.
+ */
+void
+TrackAppliedDataFileOperations(Oid relationId, List *operations)
+{
+	if (operations == NIL)
+		return;
+
+	RegisterIcebergCommitFastPathSubXactCallbackIfNeeded();
+
+	InitTableMetadataTrackerHashIfNeeded();
+
+	bool		isFound = false;
+	TableMetadataOperationTracker *opTracker =
+		hash_search(TrackedIcebergMetadataOperationsHash,
+					&relationId, HASH_ENTER, &isFound);
+
+	if (!isFound)
+	{
+		memset(opTracker, 0, sizeof(TableMetadataOperationTracker));
+		opTracker->relationId = relationId;
+	}
+
+	ListCell   *operationCell = NULL;
+
+	foreach(operationCell, operations)
+	{
+		TableMetadataOperation *operation = lfirst(operationCell);
+
+		if (operation->type != DATA_FILE_ADD)
+		{
+			/*
+			 * RecordIcebergMetadataOperation also flips this; belt and
+			 * braces.
+			 */
+			opTracker->fastPathDisabled = true;
+			continue;
+		}
+
+		if (opTracker->fastPathDisabled)
+		{
+			/* No point in deep-copying once we know we won't use it. */
+			continue;
+		}
+
+		MemoryContext oldContext = MemoryContextSwitchTo(TopTransactionContext);
+		TableMetadataOperation *copy = CopyDataFileAddOpForTracker(operation);
+
+		opTracker->trackedAddedFileOps = lappend(opTracker->trackedAddedFileOps, copy);
+		MemoryContextSwitchTo(oldContext);
+	}
+}
+
+
+/*
+ * CopyDataFileAddOpForTracker produces a TopTransactionContext-allocated copy
+ * of a DATA_FILE_ADD TableMetadataOperation suitable for handing back to
+ * ApplyIcebergMetadataChanges at commit time. Must be called inside
+ * TopTransactionContext (the caller switches).
+ */
+static TableMetadataOperation *
+CopyDataFileAddOpForTracker(TableMetadataOperation * op)
+{
+	Assert(op->type == DATA_FILE_ADD);
+
+	TableMetadataOperation *copy = palloc0(sizeof(TableMetadataOperation));
+
+	copy->type = DATA_FILE_ADD;
+	copy->path = pstrdup(op->path);
+	copy->content = op->content;
+	copy->dataFileStats = op->dataFileStats;
+	copy->dataFileStats.columnStats =
+		CopyColumnStatsListForTracker(op->dataFileStats.columnStats);
+	copy->partitionSpecId = op->partitionSpecId;
+	copy->partition = CopyPartitionForTracker(op->partition);
+
+	return copy;
+}
+
+
+/*
+ * CopyColumnStatsListForTracker rebuilds each DataFileColumnStats entry via
+ * CreateDataFileColumnStats so the embedded LeafField (and its Field*) live
+ * in the current memory context instead of pointing at per-statement memory
+ * that goes away at end-of-statement.
+ */
+static List *
+CopyColumnStatsListForTracker(List *columnStats)
+{
+	if (columnStats == NIL)
+		return NIL;
+
+	List	   *copy = NIL;
+	ListCell   *cell = NULL;
+
+	foreach(cell, columnStats)
+	{
+		DataFileColumnStats *original = lfirst(cell);
+
+		char	   *lower = original->lowerBoundText != NULL
+			? pstrdup(original->lowerBoundText)
+			: NULL;
+		char	   *upper = original->upperBoundText != NULL
+			? pstrdup(original->upperBoundText)
+			: NULL;
+
+		DataFileColumnStats *rebuilt =
+			CreateDataFileColumnStats(original->leafField.fieldId,
+									  original->leafField.pgType,
+									  lower, upper);
+
+		copy = lappend(copy, rebuilt);
+	}
+
+	return copy;
+}
+
+
+/*
+ * CopyPartitionForTracker deep-copies a Partition (incl. fields[] and per-field
+ * binary values) into the current memory context. partition may be NULL for
+ * non-partitioned tables.
+ */
+static Partition *
+CopyPartitionForTracker(Partition * partition)
+{
+	if (partition == NULL)
+		return NULL;
+
+	Partition  *copy = palloc0(sizeof(Partition));
+
+	copy->fields_length = partition->fields_length;
+
+	if (partition->fields_length == 0 || partition->fields == NULL)
+	{
+		copy->fields = NULL;
+		return copy;
+	}
+
+	copy->fields = palloc0(sizeof(PartitionField) * partition->fields_length);
+	for (size_t i = 0; i < partition->fields_length; i++)
+	{
+		PartitionField *srcField = &partition->fields[i];
+		PartitionField *dstField = &copy->fields[i];
+
+		dstField->field_name = srcField->field_name != NULL ? pstrdup(srcField->field_name) : NULL;
+		dstField->field_id = srcField->field_id;
+		dstField->value_type = srcField->value_type;
+		dstField->value_length = srcField->value_length;
+		if (srcField->value != NULL && srcField->value_length > 0)
+		{
+			dstField->value = palloc(srcField->value_length);
+			memcpy(dstField->value, srcField->value, srcField->value_length);
+		}
+		else
+		{
+			dstField->value = NULL;
+		}
+	}
+
+	return copy;
+}
+
+
+/*
+ * DataFileAddPaths returns a fresh list of (char *) paths from a list of
+ * tracked DATA_FILE_ADD operations. Used to drive
+ * DeleteInProgressFileRecords() in the fast path.
+ */
+static List *
+DataFileAddPaths(List *addedOps)
+{
+	List	   *paths = NIL;
+	ListCell   *cell = NULL;
+
+	foreach(cell, addedOps)
+	{
+		TableMetadataOperation *op = lfirst(cell);
+
+		paths = lappend(paths, (char *) op->path);
+	}
+
+	return paths;
+}
+
+
+/*
+ * TrackedAddOpsAsMetadataOperations returns a new top-level List wrapping the
+ * (TopTransactionContext-resident) operation pointers from the tracker. We
+ * pass these directly to ApplyIcebergMetadataChanges, which treats them
+ * read-only.
+ */
+static List *
+TrackedAddOpsAsMetadataOperations(List *trackedOps)
+{
+	List	   *out = NIL;
+	ListCell   *cell = NULL;
+
+	foreach(cell, trackedOps)
+	{
+		out = lappend(out, lfirst(cell));
+	}
+
+	return out;
+}
+
+
+/*
+ * TryFastPathDataFileOperations is the fast-path implementation of
+ * GetDataFileMetadataOperations. Returns true and fills out
+ * *outMetadataOperations when the tracker can answer the commit-time question
+ * "what data file operations should we apply to iceberg metadata" without
+ * going back to the catalog.
+ *
+ * Conditions for fast path:
+ *   - the tracker hasn't been marked fastPathDisabled (no REMOVE / DDL /
+ *     position-delete / etc. for this relation in this tx);
+ *   - at least one DATA_FILE_ADD has been tracked (we wouldn't be in
+ *     ApplyTrackedIcebergMetadataChanges otherwise).
+ *
+ * When taken, we still issue the batched DeleteInProgressFileRecords for the
+ * added paths -- those rows were written by the LOAD path and have to be
+ * cleaned up exactly as the diff path would.
+ */
+static bool
+TryFastPathDataFileOperations(const TableMetadataOperationTracker * opTracker,
+							  List **outMetadataOperations)
+{
+	if (opTracker->fastPathDisabled)
+		return false;
+
+	if (opTracker->trackedAddedFileOps == NIL)
+		return false;
+
+	List	   *addedPaths = DataFileAddPaths(opTracker->trackedAddedFileOps);
+
+	DeleteInProgressFileRecords(addedPaths);
+	list_free(addedPaths);
+
+	*outMetadataOperations = TrackedAddOpsAsMetadataOperations(opTracker->trackedAddedFileOps);
+
+	IcebergCommitFastPathHits++;
+	ereport(DEBUG1,
+			(errmsg("pg_lake commit fast path taken (relation %u): %d added file ops",
+					opTracker->relationId,
+					list_length(opTracker->trackedAddedFileOps))));
+	return true;
+}
+
+
+/*
+ * DisableFastPathForAllTrackedRelations turns the in-memory tracker off for
+ * every relation currently in the tx, forcing commit to use the diff path.
+ * Used as the safe fallback when a subtransaction abort makes some of the
+ * tracked entries questionable -- rather than try to surgically un-track only
+ * the entries written in the aborted subtxn, we just give up the fast path
+ * for the rest of the transaction.
+ *
+ * The diff path is always correct because the iceberg metadata is the source
+ * of truth at commit time; the tracker is purely an optimization.
+ */
+static void
+DisableFastPathForAllTrackedRelations(void)
+{
+	if (TrackedIcebergMetadataOperationsHash == NULL)
+		return;
+
+	HASH_SEQ_STATUS status;
+	TableMetadataOperationTracker *opTracker = NULL;
+
+	hash_seq_init(&status, TrackedIcebergMetadataOperationsHash);
+	while ((opTracker = hash_seq_search(&status)) != NULL)
+	{
+		opTracker->fastPathDisabled = true;
+	}
+}
+
+
+/*
+ * IcebergCommitFastPathSubXactCallback flips every tracker into fastPathDisabled
+ * when any subtransaction aborts. Conservative but cheap.
+ */
+static void
+IcebergCommitFastPathSubXactCallback(SubXactEvent event,
+									 SubTransactionId mySubid,
+									 SubTransactionId parentSubid,
+									 void *arg)
+{
+	if (event == SUBXACT_EVENT_ABORT_SUB)
+		DisableFastPathForAllTrackedRelations();
+}
+
+
+/*
+ * RegisterIcebergCommitFastPathSubXactCallbackIfNeeded installs the callback
+ * with xact.c once per backend. We do this lazily on the first
+ * TrackAppliedDataFileOperations call (rather than from extension load) so
+ * non-pg_lake backends don't pay for it.
+ */
+static void
+RegisterIcebergCommitFastPathSubXactCallbackIfNeeded(void)
+{
+	if (IcebergCommitFastPathSubXactCallbackRegistered)
+		return;
+
+	RegisterSubXactCallback(IcebergCommitFastPathSubXactCallback, NULL);
+	IcebergCommitFastPathSubXactCallbackRegistered = true;
 }
 
 
@@ -491,27 +840,44 @@ RecordIcebergMetadataOperation(Oid relationId, TableMetadataOperationType operat
 			break;
 		case TABLE_DDL:
 			opTracker->relationAltered = true;
+			/* schema/partition-spec rewrites require the diff path */
+			opTracker->fastPathDisabled = true;
 			break;
 		case TABLE_PARTITION_BY:
 			opTracker->relationPartitionByChanged = true;
+			opTracker->fastPathDisabled = true;
 			break;
 		case DATA_FILE_ADD:
+			opTracker->relationDataFileChanged = true;
+			break;
 		case DATA_FILE_REMOVE:
 			opTracker->relationDataFileChanged = true;
 			opTracker->dataFileChangeCount++;
 			break;
 		case DATA_FILE_REMOVE_ALL:
+		case DATA_FILE_DROP_TABLE:
+		case DATA_FILE_UPDATE_DELETED_ROW_COUNT:
+		case DATA_FILE_ADD_DELETE_MAPPING:
+		case DATA_FILE_ADD_ROW_ID_MAPPING:
 			opTracker->relationDataFileChanged = true;
 			opTracker->forceCommitTimeAnalyze = true;
+			opTracker->fastPathDisabled = true;
 			break;
 		case DATA_FILE_MERGE_MANIFESTS:
 			opTracker->relationManifestMergeRequested = true;
+			opTracker->fastPathDisabled = true;
 			break;
 		case EXPIRE_OLD_SNAPSHOTS:
 			opTracker->relationSnapshotExpirationRequested = true;
+			opTracker->fastPathDisabled = true;
 			break;
 		default:
-			/* other operations do not affect the flags */
+
+			/*
+			 * Conservatively disable the fast path for any op type we don't
+			 * explicitly know is append-only.
+			 */
+			opTracker->fastPathDisabled = true;
 			break;
 	}
 }
@@ -1127,11 +1493,29 @@ GetLastPushedIcebergMetadata(const TableMetadataOperationTracker * opTracker)
 /*
  * GetDataFileMetadataOperations retrieves the metadata operations for data files
  * in the specified relation.
+ *
+ * The append-only fast path (TryFastPathDataFileOperations) hands back the
+ * deep-copied DATA_FILE_ADD ops the tracker collected during the LOAD phase,
+ * skipping the catalog-vs-iceberg-metadata diff query and the targeted
+ * LoadColumnStatsForFiles SPI call below. When any non-ADD op or subtxn abort
+ * touched this relation, the tracker has set fastPathDisabled and we fall
+ * through to the diff path -- which is always correct because the iceberg
+ * metadata is the source of truth and the catalog has every write since.
  */
 static List *
 GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 							  List *allTransforms)
 {
+	List	   *fastPathOps = NIL;
+
+	if (TryFastPathDataFileOperations(opTracker, &fastPathOps))
+		return fastPathOps;
+
+	IcebergCommitFastPathFallbacks++;
+	ereport(DEBUG1,
+			(errmsg("pg_lake commit fast path fell back to diff for relation %u",
+					opTracker->relationId)));
+
 	/*
 	 * get current state of data files, which are not applied to metadata yet,
 	 * from catalog

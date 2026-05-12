@@ -83,6 +83,7 @@ add_files_to_table(PG_FUNCTION_ARGS)
 	List	   *operationTypes = GetMetadataOperationTypes(metadataOperations);
 
 	TrackIcebergMetadataChangesInTx(relationId, operationTypes);
+	TrackAppliedDataFileOperations(relationId, metadataOperations);
 
 	PG_RETURN_VOID();
 }

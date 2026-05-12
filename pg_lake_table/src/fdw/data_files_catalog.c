@@ -37,7 +37,6 @@
 #include "pg_lake/fdw/schema_operations/field_id_mapping_catalog.h"
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/fdw/partition_transform.h"
-#include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/data_file_stats.h"
@@ -46,7 +45,6 @@
 #include "pg_lake/iceberg/partitioning/partition.h"
 #include "pg_lake/iceberg/partitioning/spec_generation.h"
 #include "pg_lake/iceberg/utils.h"
-#include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/partitioning/partition_spec_catalog.h"
 #include "pg_lake/pgduck/delete_data.h"
@@ -88,9 +86,11 @@ static HTAB *CreateDataFilesByPathHash(void);
 static List *TableDataFileHashToList(HTAB *dataFiles);
 static bool ColumnStatAlreadyAdded(List *columnStats, int64 fieldId);
 static bool PartitionFieldAlreadyAdded(Partition * partition, int64 fieldId);
-static DataFileColumnStats * CreateDataFileColumnStats(int fieldId, PGType pgType,
-													   char *lowerBoundText,
-													   char *upperBoundText);
+
+/* CreateDataFileColumnStats is exported for the commit-time tracker fast path */
+DataFileColumnStats * CreateDataFileColumnStats(int fieldId, PGType pgType,
+												char *lowerBoundText,
+												char *upperBoundText);
 static void ApplySingleOp(Oid relationId, TableMetadataOperation * operation);
 
 /*
@@ -1390,8 +1390,15 @@ ApplySingleOp(Oid relationId, TableMetadataOperation * operation)
 /*
  * CreateDataFileColumnStats creates a new DataFileColumnStats from the given
  * parameters.
+ *
+ * Allocates everything in CurrentMemoryContext, including the rebuilt Field
+ * inside leafField (via PostgresTypeToIcebergField). Used both by the diff
+ * path in LoadColumnStatsForFiles and by the commit-time tracker fast path
+ * (track_iceberg_metadata_changes.c) to reconstitute LeafFields from cached
+ * pgType / fieldId pairs without retaining pointers into the per-statement
+ * memory of the original write.
  */
-static DataFileColumnStats *
+DataFileColumnStats *
 CreateDataFileColumnStats(int fieldId, PGType pgType, char *lowerBoundText, char *upperBoundText)
 {
 	DataFileColumnStats *columnStats = palloc0(sizeof(DataFileColumnStats));
