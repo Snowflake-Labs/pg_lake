@@ -777,7 +777,7 @@ FindOrCreatePGCompositeType(CompositeType * type)
 
 		Oid			argTypes[2] = {NAMEARRAYOID, OIDARRAYOID};
 		Datum		argValues[2] = {PointerGetDatum(nameArr),
-			PointerGetDatum(oidArr)};
+		PointerGetDatum(oidArr)};
 
 		Oid			foundOid = InvalidOid;
 		Oid			foundArrayOid = InvalidOid;
