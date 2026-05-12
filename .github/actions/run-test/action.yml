@@ -140,7 +140,7 @@ runs:
       uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: postgres-logs-${{ inputs.pg_version }}-${{ inputs.test_make_target }}
+        name: postgres-logs-${{ inputs.pg_version }}-${{ inputs.test_make_target }}${{ inputs.from_pg_version != '' && format('-from{0}', inputs.from_pg_version) || '' }}${{ inputs.worker_id != '' && format('-shard{0}', inputs.worker_id) || '' }}
         path: |
           /tmp/pg_lake_tests/logfile
           /tmp/pg_installcheck_tests/logfile
