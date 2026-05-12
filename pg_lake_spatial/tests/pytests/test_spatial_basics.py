@@ -314,6 +314,94 @@ def test_writable_json(user_conn, spatial_analytics_extension, pg_lake_extension
     user_conn.rollback()
 
 
+def test_iceberg_geometry_in_array(
+    user_conn, spatial_analytics_extension, pg_lake_extension
+):
+    """
+    Exploratory: geometry inside an array on an iceberg table.  Previously
+    rejected at DDL time.
+    """
+    user_conn.rollback()
+
+    run_command(
+        f"""
+        CREATE FOREIGN TABLE test_iceberg_geom_arr (id int, geoms geometry[])
+        SERVER pg_lake_iceberg
+        OPTIONS (location 's3://{TEST_BUCKET}/test_spatial_basics/iceberg_geom_arr/');
+        """,
+        user_conn,
+    )
+    user_conn.commit()
+
+    run_command(
+        "INSERT INTO test_iceberg_geom_arr VALUES "
+        "(1, ARRAY[ST_Point(1,2), ST_Point(3,4)]::geometry[])",
+        user_conn,
+    )
+    user_conn.commit()
+
+    res = run_query(
+        "SELECT id, array_length(geoms, 1) AS n, "
+        "ST_AsText(geoms[1]) AS g1, ST_AsText(geoms[2]) AS g2 "
+        "FROM test_iceberg_geom_arr",
+        user_conn,
+    )
+    assert len(res) == 1
+    assert res[0]["id"] == 1
+    assert res[0]["n"] == 2
+
+    run_command("DROP FOREIGN TABLE test_iceberg_geom_arr", user_conn)
+    user_conn.commit()
+
+
+def test_iceberg_geometry_in_composite(
+    user_conn, spatial_analytics_extension, pg_lake_extension
+):
+    """
+    Exploratory: geometry inside a composite on an iceberg table.
+    Previously rejected at DDL time.
+    """
+    user_conn.rollback()
+
+    run_command(
+        """
+        CREATE TYPE geom_pair_t AS (g1 geometry, g2 geometry, label text);
+        """,
+        user_conn,
+    )
+    user_conn.commit()
+
+    run_command(
+        f"""
+        CREATE FOREIGN TABLE test_iceberg_geom_comp (id int, pair geom_pair_t)
+        SERVER pg_lake_iceberg
+        OPTIONS (location 's3://{TEST_BUCKET}/test_spatial_basics/iceberg_geom_comp/');
+        """,
+        user_conn,
+    )
+    user_conn.commit()
+
+    run_command(
+        "INSERT INTO test_iceberg_geom_comp VALUES "
+        "(1, ROW(ST_Point(1,2), ST_Point(3,4), 'a')::geom_pair_t)",
+        user_conn,
+    )
+    user_conn.commit()
+
+    res = run_query(
+        "SELECT id, ST_AsText((pair).g1) AS g1, "
+        "ST_AsText((pair).g2) AS g2, (pair).label FROM test_iceberg_geom_comp",
+        user_conn,
+    )
+    assert len(res) == 1
+    assert res[0]["id"] == 1
+    assert res[0]["label"] == "a"
+
+    run_command("DROP FOREIGN TABLE test_iceberg_geom_comp", user_conn)
+    run_command("DROP TYPE geom_pair_t", user_conn)
+    user_conn.commit()
+
+
 @pytest.fixture(scope="module")
 def basic_geometry_file(s3, user_conn, postgis_extension, spatial_analytics_extension):
     run_command(

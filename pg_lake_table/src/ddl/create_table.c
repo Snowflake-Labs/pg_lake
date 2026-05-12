@@ -1693,13 +1693,15 @@ ErrorIfTypeUnsupportedForIcebergTablesInternal(Oid typeOid, int32 typmod, int le
 							errdetail("column name triggering the error: \"%s\"", columnName ? columnName : "null")));
 	}
 
-	if (level >= 1 && IsGeometryTypeId(typeOid))
-	{
-		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg("pg_lake_iceberg: geometry types are not supported inside arrays, composite types or maps"),
-						errdetail("column name triggering the error: \"%s\"", columnName ? columnName : "null")));
-	}
-	else if (level >= 1 && (typtype == TYPTYPE_MULTIRANGE || typtype == TYPTYPE_RANGE))
+	/*
+	 * Exploratory: previously we rejected geometry inside arrays, composite
+	 * types, or maps at DDL time.  Lift that guard here and see what the
+	 * read/write paths actually produce — the restriction was added
+	 * defensively and may no longer match what the engine and DuckDB can
+	 * round-trip.  The range/multirange guard below is kept: those types
+	 * have no DuckDB equivalent at all.
+	 */
+	if (level >= 1 && (typtype == TYPTYPE_MULTIRANGE || typtype == TYPTYPE_RANGE))
 	{
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						errmsg("pg_lake_iceberg: range types are not supported inside arrays, composite types or maps"),
