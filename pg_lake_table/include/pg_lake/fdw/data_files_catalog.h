@@ -18,7 +18,9 @@
 #pragma once
 
 #include "pg_lake/data_file/data_files.h"
+#include "pg_lake/data_file/data_file_stats.h"
 #include "pg_lake/iceberg/manifest_spec.h"
+#include "pg_lake/pgduck/type.h"
 #include "pg_lake/util/s3_reader_utils.h"
 
 #include "nodes/pg_list.h"
@@ -61,6 +63,17 @@ bool		PartitionFieldsCatalogExists(void);
 /* functions to write to files catalog */
 extern PGDLLEXPORT void ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations);
 int64		GenerateDataFileId(void);
+
+/*
+ * CreateDataFileColumnStats builds a DataFileColumnStats (incl. a fresh
+ * LeafField) in the current memory context from primitive parameters; the
+ * commit-time tracker fast path uses this to rebuild stats without retaining
+ * pointers into per-statement memory.
+ */
+extern PGDLLEXPORT DataFileColumnStats * CreateDataFileColumnStats(int fieldId,
+																   PGType pgType,
+																   char *lowerBoundText,
+																   char *upperBoundText);
 
 /* when enabling row_ids, we need to explicit update first_row_id */
 void		UpdateDataFileFirstRowId(Oid relationId, int64 fileId, int64 firstRowId);

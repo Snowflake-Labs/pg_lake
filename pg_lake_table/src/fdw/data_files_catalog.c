@@ -91,9 +91,8 @@ static List *TableDataFileHashToList(HTAB *dataFiles);
 static bool ColumnStatAlreadyAdded(List *columnStats, int64 fieldId);
 static bool PartitionFieldAlreadyAdded(Partition * partition, int64 fieldId);
 static void CreateTxDataFileIdsTempTableIfNotExists(void);
-static DataFileColumnStats * CreateDataFileColumnStats(int fieldId, PGType pgType,
-													   char *lowerBoundText,
-													   char *upperBoundText);
+
+/* CreateDataFileColumnStats is exported for the commit-time tracker fast path */
 
 /* Bulk-add path forward decls */
 static int64 *BuildBatchFileIds(int count);
@@ -2046,8 +2045,15 @@ AddDataFilePartitionValueToCatalog(Oid relationId, int32 partitionSpecId, int64 
 /*
  * CreateDataFileColumnStats creates a new DataFileColumnStats from the given
  * parameters.
+ *
+ * Allocates everything in CurrentMemoryContext, including the rebuilt Field
+ * inside leafField (via PostgresTypeToIcebergField). Used both by the diff
+ * path in LoadColumnStatsForFiles and by the commit-time tracker fast path
+ * (track_iceberg_metadata_changes.c) to reconstitute LeafFields from cached
+ * pgType / fieldId pairs without retaining pointers into the per-statement
+ * memory of the original write.
  */
-static DataFileColumnStats *
+DataFileColumnStats *
 CreateDataFileColumnStats(int fieldId, PGType pgType, char *lowerBoundText, char *upperBoundText)
 {
 	DataFileColumnStats *columnStats = palloc0(sizeof(DataFileColumnStats));

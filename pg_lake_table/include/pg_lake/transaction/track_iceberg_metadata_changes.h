@@ -31,12 +31,30 @@ typedef struct TableMetadataOperationTracker
 	bool		relationDataFileChanged;
 	bool		relationManifestMergeRequested;
 	bool		relationSnapshotExpirationRequested;
+
+	/*
+	 * Commit-time fast path state. trackedAddedFileOps accumulates a deep
+	 * copy of each DATA_FILE_ADD operation we've already inserted into the
+	 * catalog during this transaction, allocated in TopTransactionContext and
+	 * pre-loaded with column stats. At commit time
+	 * GetDataFileMetadataOperations can return these directly instead of
+	 * doing the catalog-vs-iceberg-metadata diff query +
+	 * LoadColumnStatsForFiles.
+	 *
+	 * fastPathDisabled flips to true on any operation we can't represent
+	 * cheaply in memory (REMOVE, REMOVE_ALL, UPDATE_DELETED_ROW_COUNT, etc.)
+	 * or when a subtransaction aborts after touching this relation. In that
+	 * case the diff path is used.
+	 */
+	List	   *trackedAddedFileOps;
+	bool		fastPathDisabled;
 }			TableMetadataOperationTracker;
 
 
 extern PGDLLEXPORT void ConsumeTrackedIcebergMetadataChanges(bool isVerbose);
 extern PGDLLEXPORT void PostAllRestCatalogRequests(void);
 extern PGDLLEXPORT void TrackIcebergMetadataChangesInTx(Oid relationId, List *metadataOperationTypes);
+extern PGDLLEXPORT void TrackAppliedDataFileOperations(Oid relationId, List *operations);
 extern PGDLLEXPORT void RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationType,
 													 const char *body);
 extern PGDLLEXPORT void ResetTrackedIcebergMetadataOperation(void);
