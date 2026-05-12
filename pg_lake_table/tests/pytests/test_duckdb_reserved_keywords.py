@@ -1067,7 +1067,9 @@ def test_iceberg_overflow_conversion_on_reserved_column(pg_conn, s3, extension):
     pg_conn.commit()
 
 
-def test_iceberg_map_of_interval_with_reserved_column(pg_conn, s3, extension):
+def test_iceberg_map_of_interval_with_reserved_column(
+    pg_conn, s3, extension, with_default_location
+):
     """
     MAP-of-INTERVAL column with a DuckDB-reserved keyword name on an
     iceberg table.  Exercises the read_data.c map projection / interval
@@ -1118,6 +1120,8 @@ def test_s3log_strptime_with_reserved_column_name(pg_conn, s3, extension):
     verify the strptime wrapper is emitted with proper quoting by
     checking EXPLAIN for the remote query.
     """
+    pg_conn.rollback()
+
     s3log_prefix = "test_duckdb_kw_s3log_strptime"
     s3log_url = f"s3://{TEST_BUCKET}/{s3log_prefix}"
     s3log_path = sampledata_filepath("s3log")
