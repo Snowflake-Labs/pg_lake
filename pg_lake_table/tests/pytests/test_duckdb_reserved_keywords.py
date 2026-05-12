@@ -1065,3 +1065,93 @@ def test_iceberg_overflow_conversion_on_reserved_column(pg_conn, s3, extension):
 
     run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
     pg_conn.commit()
+
+
+def test_iceberg_map_of_interval_with_reserved_column(pg_conn, s3, extension):
+    """
+    MAP-of-INTERVAL column with a DuckDB-reserved keyword name on an
+    iceberg table.  Exercises the read_data.c map projection / interval
+    encoding paths with duckdb_quote_identifier applied to the column.
+    """
+    import datetime
+
+    map_type_name = create_map_type("text", "interval")
+
+    schema = "test_duckdb_kw_map_interval"
+    run_command(
+        f"""
+        CREATE SCHEMA {schema};
+        CREATE TABLE {schema}.t (id int, pivot {map_type_name}) USING iceberg;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        INSERT INTO {schema}.t VALUES
+          (1, ARRAY[ROW('meeting', '1 hour'::interval)]::{map_type_name});
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        f"SELECT map_type.extract(pivot, 'meeting') FROM {schema}.t WHERE id = 1",
+        pg_conn,
+    )
+    assert result[0][0] == datetime.timedelta(hours=1)
+
+    run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_s3log_strptime_with_reserved_column_name(pg_conn, s3, extension):
+    """
+    format='log' with log_format='s3' on pgduck_server triggers the
+    strptime() projection wrapper in read_data.c:1468 for TIMESTAMP /
+    TIMESTAMPTZ columns.  With a reserved-keyword column name this
+    exercises the duckdb_quote_identifier() path that wraps the strptime
+    argument.
+
+    The upstream s3log schema pins a column named 'request_time'; we
+    verify the strptime wrapper is emitted with proper quoting by
+    checking EXPLAIN for the remote query.
+    """
+    s3log_prefix = "test_duckdb_kw_s3log_strptime"
+    s3log_url = f"s3://{TEST_BUCKET}/{s3log_prefix}"
+    s3log_path = sampledata_filepath("s3log")
+
+    for root, dirs, files in os.walk(s3log_path):
+        for filename in files:
+            s3.upload_file(
+                os.path.join(root, filename),
+                TEST_BUCKET,
+                f"{s3log_prefix}/{filename}",
+            )
+
+    run_command(
+        f"""
+        CREATE FOREIGN TABLE test_kw_s3log ()
+        SERVER pg_lake
+        OPTIONS (format 'log', log_format 's3', path '{s3log_url}/**');
+        """,
+        pg_conn,
+    )
+
+    try:
+        # Any query against a TIMESTAMP column drives strptime() emission.
+        result = run_query(
+            "SELECT count(*) FROM test_kw_s3log WHERE request_time < now()",
+            pg_conn,
+        )
+        assert result[0][0] > 0
+
+        # Confirm strptime appears (quoted) in the remote SQL.
+        assert_remote_query_contains_expression(
+            "SELECT request_time FROM test_kw_s3log LIMIT 1",
+            "strptime",
+            pg_conn,
+        )
+    finally:
+        pg_conn.rollback()
