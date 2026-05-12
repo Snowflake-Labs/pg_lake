@@ -407,17 +407,17 @@ GetTableDataFilesByPathHashFromCatalog(Oid relationId, bool dataOnly, bool newFi
 
 
 /*
- * LoadColumnStatsForFiles fills in per-column min/max stats for the given
- * data files, targeting only their paths. This lets callers pair a stats-free
- * bulk read (GetTableDataFilesHashFromCatalog with skipColumnStats=true) with
- * a narrow stats load for just the files that actually need them (e.g. the
- * handful of newly added files in a transaction).
+ * LoadColumnStatsForFiles fetches per-column min/max stats for the data files
+ * in dataFiles and appends them to each dataFile->stats.columnStats list.
  *
- * The dataFiles list must contain TableDataFile pointers whose columnStats
- * are currently NIL; this function appends to dataFile->stats.columnStats.
+ * filesByPath is the caller's path -> TableDataFileHashEntry hash (as built
+ * by GetTableDataFilesByPathHashFromCatalog / CreateDataFilesByPathHash);
+ * every TableDataFile in dataFiles must be the &entry->dataFile of an entry
+ * in filesByPath so we can dispatch each SPI result row back to its target
+ * in O(1) instead of walking dataFiles per row.
  */
 void
-LoadColumnStatsForFiles(Oid relationId, List *dataFiles)
+LoadColumnStatsForFiles(Oid relationId, HTAB *filesByPath, List *dataFiles)
 {
 	if (dataFiles == NIL)
 		return;
@@ -482,6 +482,29 @@ LoadColumnStatsForFiles(Oid relationId, List *dataFiles)
 			continue;
 		}
 
+		TableDataFileHashEntry *entry =
+			(TableDataFileHashEntry *) hash_search(filesByPath, path,
+												   HASH_FIND, NULL);
+
+		if (entry == NULL)
+		{
+			/*
+			 * Stats row points at a path that isn't in the caller's hash.
+			 * Shouldn't happen given the WHERE path = ANY($2) filter, but
+			 * tolerate it to avoid crashing on a corrupt catalog.
+			 */
+			MemoryContextSwitchTo(spiContext);
+			continue;
+		}
+
+		TableDataFile *dataFile = &entry->dataFile;
+
+		if (ColumnStatAlreadyAdded(dataFile->stats.columnStats, fieldId))
+		{
+			MemoryContextSwitchTo(spiContext);
+			continue;
+		}
+
 		bool		isPgTypeNull = false;
 		bool		isPgTypeModNull = false;
 
@@ -505,29 +528,10 @@ LoadColumnStatsForFiles(Oid relationId, List *dataFiles)
 		if (!isUpperBoundNull)
 			upperBoundText = TextDatumGetCString(upperBoundDatum);
 
-		/*
-		 * Walk the caller's list to find the matching struct. dataFiles is
-		 * expected to be small (typically 1-2 entries per transaction), so a
-		 * linear search is fine and avoids an extra pointer-valued hash.
-		 */
-		ListCell   *lc = NULL;
+		DataFileColumnStats *columnStats =
+			CreateDataFileColumnStats(fieldId, pgType, lowerBoundText, upperBoundText);
 
-		foreach(lc, dataFiles)
-		{
-			TableDataFile *dataFile = lfirst(lc);
-
-			if (strcmp(dataFile->path, path) != 0)
-				continue;
-
-			if (ColumnStatAlreadyAdded(dataFile->stats.columnStats, fieldId))
-				break;
-
-			DataFileColumnStats *columnStats =
-				CreateDataFileColumnStats(fieldId, pgType, lowerBoundText, upperBoundText);
-
-			dataFile->stats.columnStats = lappend(dataFile->stats.columnStats, columnStats);
-			break;
-		}
+		dataFile->stats.columnStats = lappend(dataFile->stats.columnStats, columnStats);
 
 		MemoryContextSwitchTo(spiContext);
 	}

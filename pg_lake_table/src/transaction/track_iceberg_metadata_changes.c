@@ -1153,7 +1153,7 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 	 * manifest DELETE entry carries only the path — so this is bounded by
 	 * the actual write size rather than by total files in the changelog.
 	 */
-	LoadColumnStatsForFiles(opTracker->relationId, addedFiles);
+	LoadColumnStatsForFiles(opTracker->relationId, currentFilesMap, addedFiles);
 
 	/*
 	 * We have found the new files that are added since the last metadata
