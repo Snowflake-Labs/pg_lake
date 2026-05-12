@@ -48,7 +48,8 @@ HTAB	   *GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool ne
 HTAB	   *GetTableDataFilesByPathHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
 												   bool forUpdate, char *orderBy, Snapshot snapshot,
 												   List *partitionTransforms, bool skipColumnStats);
-extern PGDLLEXPORT void LoadColumnStatsForFiles(Oid relationId, List *dataFiles);
+extern PGDLLEXPORT void LoadColumnStatsForFiles(Oid relationId, HTAB *filesByPath,
+												List *dataFiles);
 extern PGDLLEXPORT List *GetPossiblePositionDeleteFilesFromCatalog(Oid relationId, List *sourcePathList,
 																   Snapshot snapshot);
 extern PGDLLEXPORT int64 GetTableSizeFromCatalog(Oid relationId);
