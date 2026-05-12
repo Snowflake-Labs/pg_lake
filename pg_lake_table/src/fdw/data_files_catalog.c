@@ -78,8 +78,6 @@ PgLakeAddDataFileHookType PgLakeAddDataFileHook = NULL;
 static void FillDataFileColumnStats(TableDataFile * dataFile, int64 fieldId, int rowIndex);
 static void FillPartitionFieldFromCatalog(TableDataFile * dataFile, List *partitionTransforms,
 										  int64 partitionFieldId, int rowIndex);
-static int64 AddDataFileToTable(Oid relationId, const char *path, int64 rowCount,
-								int64 fileSize, DataFileContent content, int64 rowIdStart);
 static void AddDeletionFileMapping(Oid relationId, const char *path,
 								   const char *sourcePath);
 static void AddNewRowIdMapping(Oid relationId, const char *path, List *rowIdRanges);
@@ -93,10 +91,19 @@ static List *TableDataFileHashToList(HTAB *dataFiles);
 static bool ColumnStatAlreadyAdded(List *columnStats, int64 fieldId);
 static bool PartitionFieldAlreadyAdded(Partition * partition, int64 fieldId);
 static void CreateTxDataFileIdsTempTableIfNotExists(void);
-static void InsertDataFileIdIntoTransactionTable(int64 fileId);
 static DataFileColumnStats * CreateDataFileColumnStats(int fieldId, PGType pgType,
 													   char *lowerBoundText,
 													   char *upperBoundText);
+
+/* Bulk-add path forward decls */
+static int64 *BuildBatchFileIds(int count);
+static ArrayType *MakeArrayFromDatums(Datum *datums, bool *nulls, int count, Oid elementType);
+static void BulkInsertDataFiles(Oid relationId, List *addOps, int64 *fileIds);
+static void BulkInsertDataFileColumnStats(Oid relationId, List *addOps);
+static bool AddOpHasPartitionValues(TableMetadataOperation * operation);
+static void BulkInsertDataFilePartitionValues(Oid relationId, List *addOps, int64 *fileIds);
+static void BulkInsertTrackedFileIds(List *addOps, int64 *fileIds);
+static void FlushDataFileAddBatch(Oid relationId, List *addOps);
 
 /*
  * GetTableDataFilesFromCatalog returns a list of TableDataFile for each data and deletion file
@@ -1004,57 +1011,12 @@ GetTotalDeletedRowCountFromCatalog(Oid relationId)
 
 
 /*
- * AddDataFileToTable inserts a new file URL into lake_table.files
- *
- * content indicates whether this is a data file or deletion file.
- *
- * For deletion files, deletedFrom indicates which file we are deleting from (can
- * be NULL if deleting from multiple files/unknown).
- */
-static int64
-AddDataFileToTable(Oid relationId, const char *path, int64 rowCount, int64 fileSize,
-				   DataFileContent content, int64 rowIdStart)
-{
-	/* switch to schema owner, we assume callers checked permissions */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeTable), SECURITY_LOCAL_USERID_CHANGE);
-
-	char	   *query =
-		"insert into " DATA_FILES_TABLE_QUALIFIED " "
-		"(id, table_name, path, row_count, file_size, content, first_row_id) "
-		"values ($1,$2,$3,$4,$5,$6,$7)";
-
-	int64		fileId = GenerateDataFileId();
-
-	DECLARE_SPI_ARGS(7);
-	SPI_ARG_VALUE(1, INT8OID, fileId, false);
-	SPI_ARG_VALUE(2, OIDOID, relationId, false);
-	SPI_ARG_VALUE(3, TEXTOID, path, false);
-	SPI_ARG_VALUE(4, INT8OID, rowCount, false);
-	SPI_ARG_VALUE(5, INT8OID, fileSize, false);
-	SPI_ARG_VALUE(6, INT4OID, (int) content, false);
-	SPI_ARG_VALUE(7, INT8OID, rowIdStart, rowIdStart == INVALID_ROW_ID);
-
-	SPI_START();
-
-	bool		readOnly = false;
-
-	SPI_EXECUTE(query, readOnly);
-
-	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
-
-	return fileId;
-}
-
-
-/*
  * GenerateDataFileId returns a unique file number that can be used for insertion
  * into files.
+ *
+ * The bulk-add path in ApplyDataFileCatalogChanges fetches IDs in batches via
+ * BuildBatchFileIds; this single-id variant remains for callers outside the
+ * bulk path (e.g. row-id mapping recovery).
  */
 int64
 GenerateDataFileId(void)
@@ -1444,22 +1406,150 @@ CreateTxDataFileIdsTempTableIfNotExists(void)
 
 
 /*
- * InsertDataFileIdIntoTransactionTable records the data file IDs, that are being
- * added in the current transaction, into tx's temporary table.
- * It creates the table if it does not exist yet.
+ * BuildBatchFileIds reserves count file IDs from the files_id_seq sequence in
+ * a single SPI round trip. Returns a freshly palloc'd int64[count].
+ *
+ * Used by the bulk-add path so we don't pay one nextval call per file in a
+ * large transactional write (tens of thousands of files per partitioned
+ * iceberg insert).
  */
-static void
-InsertDataFileIdIntoTransactionTable(int64 fileId)
+static int64 *
+BuildBatchFileIds(int count)
 {
-	CreateTxDataFileIdsTempTableIfNotExists();
+	Assert(count > 0);
+
+	int64	   *fileIds = palloc(sizeof(int64) * count);
 
 	char	   *query =
-		"insert into " TX_DATA_FILES_QUALIFIED_TABLE_NAME " "
-		"(id) "
-		"values ($1)";
+		"select nextval('" PG_LAKE_TABLE_SCHEMA "." DATA_FILES_ID_SEQUENCE_NAME "') "
+		"from generate_series(1, $1)";
 
 	DECLARE_SPI_ARGS(1);
-	SPI_ARG_VALUE(1, INT8OID, fileId, false);
+	SPI_ARG_VALUE(1, INT4OID, count, false);
+
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
+
+	bool		readOnly = false;
+
+	SPI_EXECUTE(query, readOnly);
+
+	if (SPI_processed != (uint64) count)
+		elog(ERROR, "nextval batch returned %lu rows, expected %d",
+			 (unsigned long) SPI_processed, count);
+
+	MemoryContext spiContext = MemoryContextSwitchTo(TopTransactionContext);
+
+	for (int i = 0; i < count; i++)
+	{
+		bool		isNull = false;
+
+		fileIds[i] = GET_SPI_VALUE(INT8OID, i, 1, &isNull);
+		if (isNull)
+			elog(ERROR, "nextval batch returned NULL at row %d", i);
+	}
+
+	MemoryContextSwitchTo(spiContext);
+
+	SPI_END();
+
+	int64	   *out = palloc(sizeof(int64) * count);
+
+	memcpy(out, fileIds, sizeof(int64) * count);
+	pfree(fileIds);
+	return out;
+}
+
+
+/*
+ * MakeArrayFromDatums wraps construct_md_array for a 1-D nullable Postgres
+ * array of the given element type. Caller owns datums/nulls; this returns a
+ * freshly palloc'd ArrayType.
+ */
+static ArrayType *
+MakeArrayFromDatums(Datum *datums, bool *nulls, int count, Oid elementType)
+{
+	int16		typlen;
+	bool		typbyval;
+	char		typalign;
+	int			dims[1] = {count};
+	int			lbs[1] = {1};
+
+	get_typlenbyvalalign(elementType, &typlen, &typbyval, &typalign);
+
+	return construct_md_array(datums, nulls, 1, dims, lbs,
+							  elementType, typlen, typbyval, typalign);
+}
+
+
+/*
+ * BulkInsertDataFiles writes count rows into lake_table.files in a single
+ * INSERT ... SELECT ... FROM unnest(...) statement. The fileIds array carries
+ * the pre-allocated IDs (see BuildBatchFileIds) so partition_values can refer
+ * to them without a follow-up SELECT.
+ *
+ * Replaces what would otherwise be count calls to AddDataFileToTable.
+ */
+static void
+BulkInsertDataFiles(Oid relationId, List *addOps, int64 *fileIds)
+{
+	int			count = list_length(addOps);
+
+	if (count == 0)
+		return;
+
+	Datum	   *idDatums = palloc(sizeof(Datum) * count);
+	Datum	   *pathDatums = palloc(sizeof(Datum) * count);
+	Datum	   *rowCountDatums = palloc(sizeof(Datum) * count);
+	Datum	   *fileSizeDatums = palloc(sizeof(Datum) * count);
+	Datum	   *contentDatums = palloc(sizeof(Datum) * count);
+	Datum	   *firstRowIdDatums = palloc(sizeof(Datum) * count);
+	bool	   *firstRowIdNulls = palloc(sizeof(bool) * count);
+
+	int			rowIndex = 0;
+	ListCell   *operationCell = NULL;
+
+	foreach(operationCell, addOps)
+	{
+		TableMetadataOperation *operation = lfirst(operationCell);
+
+		idDatums[rowIndex] = Int64GetDatum(fileIds[rowIndex]);
+		pathDatums[rowIndex] = CStringGetTextDatum(operation->path);
+		rowCountDatums[rowIndex] = Int64GetDatum(operation->dataFileStats.rowCount);
+		fileSizeDatums[rowIndex] = Int64GetDatum(operation->dataFileStats.fileSize);
+		contentDatums[rowIndex] = Int32GetDatum((int) operation->content);
+
+		int64		firstRowId = operation->dataFileStats.rowIdStart;
+
+		firstRowIdNulls[rowIndex] = (firstRowId == INVALID_ROW_ID);
+		firstRowIdDatums[rowIndex] = Int64GetDatum(firstRowId);
+
+		rowIndex++;
+	}
+
+	ArrayType  *idArray = MakeArrayFromDatums(idDatums, NULL, count, INT8OID);
+	ArrayType  *pathArray = MakeArrayFromDatums(pathDatums, NULL, count, TEXTOID);
+	ArrayType  *rowCountArray = MakeArrayFromDatums(rowCountDatums, NULL, count, INT8OID);
+	ArrayType  *fileSizeArray = MakeArrayFromDatums(fileSizeDatums, NULL, count, INT8OID);
+	ArrayType  *contentArray = MakeArrayFromDatums(contentDatums, NULL, count, INT4OID);
+	ArrayType  *firstRowIdArray = MakeArrayFromDatums(firstRowIdDatums, firstRowIdNulls,
+													  count, INT8OID);
+
+	char	   *query =
+		"INSERT INTO " DATA_FILES_TABLE_QUALIFIED " "
+		"(id, table_name, path, row_count, file_size, content, first_row_id) "
+		"SELECT id, $1, path, row_count, file_size, content, first_row_id "
+		"FROM unnest($2::int8[], $3::text[], $4::int8[], $5::int8[], "
+		"$6::int4[], $7::int8[]) "
+		"AS t(id, path, row_count, file_size, content, first_row_id)";
+
+	DECLARE_SPI_ARGS(7);
+	SPI_ARG_VALUE(1, OIDOID, relationId, false);
+	SPI_ARG_VALUE(2, INT8ARRAYOID, idArray, false);
+	SPI_ARG_VALUE(3, TEXTARRAYOID, pathArray, false);
+	SPI_ARG_VALUE(4, INT8ARRAYOID, rowCountArray, false);
+	SPI_ARG_VALUE(5, INT8ARRAYOID, fileSizeArray, false);
+	SPI_ARG_VALUE(6, INT4ARRAYOID, contentArray, false);
+	SPI_ARG_VALUE(7, INT8ARRAYOID, firstRowIdArray, false);
 
 	SPI_START_EXTENSION_OWNER(PgLakeTable);
 
@@ -1472,69 +1562,372 @@ InsertDataFileIdIntoTransactionTable(int64 fileId)
 
 
 /*
+ * BulkInsertDataFileColumnStats writes per-column min/max stats for all
+ * DATA_FILE_ADD ops with content == CONTENT_DATA in a single INSERT.
+ * Skips ops with NULL bounds, matching the per-row helper semantics.
+ *
+ * Replaces what would otherwise be sum(ops_i.column_stats_length) calls to
+ * AddDataFileColumnStatsToCatalog. On a partitioned iceberg insert with
+ * ~6 stats columns per file this is the largest single source of catalog
+ * SPI calls during LOAD.
+ */
+static void
+BulkInsertDataFileColumnStats(Oid relationId, List *addOps)
+{
+	int			capacity = 0;
+	ListCell   *operationCell = NULL;
+
+	foreach(operationCell, addOps)
+	{
+		TableMetadataOperation *operation = lfirst(operationCell);
+
+		if (operation->content != CONTENT_DATA)
+			continue;
+
+		capacity += list_length(operation->dataFileStats.columnStats);
+	}
+
+	if (capacity == 0)
+		return;
+
+	Datum	   *pathDatums = palloc(sizeof(Datum) * capacity);
+	Datum	   *fieldIdDatums = palloc(sizeof(Datum) * capacity);
+	Datum	   *lowerDatums = palloc(sizeof(Datum) * capacity);
+	bool	   *lowerNulls = palloc(sizeof(bool) * capacity);
+	Datum	   *upperDatums = palloc(sizeof(Datum) * capacity);
+	bool	   *upperNulls = palloc(sizeof(bool) * capacity);
+
+	int			rowCount = 0;
+
+	foreach(operationCell, addOps)
+	{
+		TableMetadataOperation *operation = lfirst(operationCell);
+
+		if (operation->content != CONTENT_DATA)
+			continue;
+
+		ListCell   *statsCell = NULL;
+
+		foreach(statsCell, operation->dataFileStats.columnStats)
+		{
+			DataFileColumnStats *columnStats = lfirst(statsCell);
+
+			/*
+			 * Match the per-row code: skip rows with NULL bounds entirely
+			 * rather than emitting (NULL, NULL).
+			 */
+			if (columnStats->lowerBoundText == NULL)
+			{
+				Assert(columnStats->upperBoundText == NULL);
+				continue;
+			}
+
+			pathDatums[rowCount] = CStringGetTextDatum(operation->path);
+			fieldIdDatums[rowCount] = Int64GetDatum(columnStats->leafField.fieldId);
+			lowerDatums[rowCount] = CStringGetTextDatum(columnStats->lowerBoundText);
+			lowerNulls[rowCount] = false;
+			upperDatums[rowCount] = (columnStats->upperBoundText != NULL)
+				? CStringGetTextDatum(columnStats->upperBoundText)
+				: (Datum) 0;
+			upperNulls[rowCount] = (columnStats->upperBoundText == NULL);
+
+			rowCount++;
+		}
+	}
+
+	if (rowCount == 0)
+		return;
+
+	ArrayType  *pathArray = MakeArrayFromDatums(pathDatums, NULL, rowCount, TEXTOID);
+	ArrayType  *fieldIdArray = MakeArrayFromDatums(fieldIdDatums, NULL, rowCount, INT8OID);
+	ArrayType  *lowerArray = MakeArrayFromDatums(lowerDatums, lowerNulls, rowCount, TEXTOID);
+	ArrayType  *upperArray = MakeArrayFromDatums(upperDatums, upperNulls, rowCount, TEXTOID);
+
+	char	   *query =
+		"INSERT INTO " DATA_FILE_COLUMN_STATS_TABLE_QUALIFIED " "
+		"(table_name, path, field_id, lower_bound, upper_bound) "
+		"SELECT $1, path, field_id, lower_bound, upper_bound "
+		"FROM unnest($2::text[], $3::int8[], $4::text[], $5::text[]) "
+		"AS t(path, field_id, lower_bound, upper_bound)";
+
+	DECLARE_SPI_ARGS(5);
+	SPI_ARG_VALUE(1, OIDOID, relationId, false);
+	SPI_ARG_VALUE(2, TEXTARRAYOID, pathArray, false);
+	SPI_ARG_VALUE(3, INT8ARRAYOID, fieldIdArray, false);
+	SPI_ARG_VALUE(4, TEXTARRAYOID, lowerArray, false);
+	SPI_ARG_VALUE(5, TEXTARRAYOID, upperArray, false);
+
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
+
+	bool		readOnly = false;
+
+	SPI_EXECUTE(query, readOnly);
+
+	SPI_END();
+}
+
+
+/*
+ * AddOpHasPartitionValues mirrors the per-row predicate from the previous
+ * implementation: only DATA and POSITION_DELETES content can carry partition
+ * values, and the op must actually have a non-empty partition tuple.
+ */
+static bool
+AddOpHasPartitionValues(TableMetadataOperation * operation)
+{
+	if (operation->partition == NULL)
+		return false;
+	if (operation->partition->fields_length == 0)
+		return false;
+	if (operation->content != CONTENT_DATA &&
+		operation->content != CONTENT_POSITION_DELETES)
+		return false;
+	return true;
+}
+
+
+/*
+ * BulkInsertDataFilePartitionValues writes one row per (file, partition
+ * field) for all DATA_FILE_ADD ops that carry partition values, in a single
+ * INSERT.
+ *
+ * Replaces what would otherwise be sum(ops_i.partition_fields_length) calls to
+ * AddDataFilePartitionValueToCatalog. The per-call helper additionally did its
+ * own AllPartitionTransformList(relationId) catalog lookup; we hoist that
+ * lookup once per batch.
+ */
+static void
+BulkInsertDataFilePartitionValues(Oid relationId, List *addOps, int64 *fileIds)
+{
+	int			capacity = 0;
+	ListCell   *operationCell = NULL;
+
+	foreach(operationCell, addOps)
+	{
+		TableMetadataOperation *operation = lfirst(operationCell);
+
+		if (AddOpHasPartitionValues(operation))
+			capacity += operation->partition->fields_length;
+	}
+
+	if (capacity == 0)
+		return;
+
+	List	   *transforms = AllPartitionTransformList(relationId);
+
+	Datum	   *idDatums = palloc(sizeof(Datum) * capacity);
+	Datum	   *partitionFieldIdDatums = palloc(sizeof(Datum) * capacity);
+	Datum	   *valueDatums = palloc(sizeof(Datum) * capacity);
+	bool	   *valueNulls = palloc(sizeof(bool) * capacity);
+
+	int			outRow = 0;
+	int			opIndex = 0;
+
+	foreach(operationCell, addOps)
+	{
+		TableMetadataOperation *operation = lfirst(operationCell);
+
+		if (!AddOpHasPartitionValues(operation))
+		{
+			opIndex++;
+			continue;
+		}
+
+		Assert(operation->partitionSpecId != DEFAULT_SPEC_ID);
+
+		int64		fileId = fileIds[opIndex];
+
+		for (size_t fieldIndex = 0; fieldIndex < operation->partition->fields_length; fieldIndex++)
+		{
+			PartitionField *partitionField = &operation->partition->fields[fieldIndex];
+
+			bool		errorIfMissing = true;
+
+			IcebergPartitionTransform *transform =
+				FindPartitionTransformById(transforms, partitionField->field_id,
+										   errorIfMissing);
+
+			const char *partitionValue =
+				SerializePartitionValueToPGText(partitionField->value,
+												partitionField->value_length,
+												transform);
+
+			idDatums[outRow] = Int64GetDatum(fileId);
+			partitionFieldIdDatums[outRow] = Int32GetDatum(partitionField->field_id);
+			if (partitionValue == NULL)
+			{
+				valueDatums[outRow] = (Datum) 0;
+				valueNulls[outRow] = true;
+			}
+			else
+			{
+				valueDatums[outRow] = CStringGetTextDatum(partitionValue);
+				valueNulls[outRow] = false;
+			}
+
+			outRow++;
+		}
+
+		opIndex++;
+	}
+
+	ArrayType  *idArray = MakeArrayFromDatums(idDatums, NULL, outRow, INT8OID);
+	ArrayType  *partitionFieldIdArray = MakeArrayFromDatums(partitionFieldIdDatums, NULL,
+															outRow, INT4OID);
+	ArrayType  *valueArray = MakeArrayFromDatums(valueDatums, valueNulls, outRow, TEXTOID);
+
+	char	   *query =
+		"INSERT INTO " DATA_FILE_PARTITION_VALUES_TABLE_QUALIFIED " "
+		"(table_name, id, partition_field_id, value) "
+		"SELECT $1, id, partition_field_id, value "
+		"FROM unnest($2::int8[], $3::int4[], $4::text[]) "
+		"AS t(id, partition_field_id, value)";
+
+	DECLARE_SPI_ARGS(4);
+	SPI_ARG_VALUE(1, OIDOID, relationId, false);
+	SPI_ARG_VALUE(2, INT8ARRAYOID, idArray, false);
+	SPI_ARG_VALUE(3, INT4ARRAYOID, partitionFieldIdArray, false);
+	SPI_ARG_VALUE(4, TEXTARRAYOID, valueArray, false);
+
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
+
+	bool		readOnly = false;
+
+	SPI_EXECUTE(query, readOnly);
+
+	SPI_END();
+}
+
+
+/*
+ * BulkInsertTrackedFileIds inserts the file IDs of CONTENT_DATA ops whose
+ * PgLakeAddDataFileHook returns true into the per-transaction temp table.
+ *
+ * The hook gives a sibling extension (snowflake_cdc, currently) the ability
+ * to mark which files it wants to track for the rest of the transaction.
+ * It must be called once per file (even in batch mode) so the hook can
+ * inspect per-file state; we still collect the IDs and issue a single bulk
+ * INSERT at the end.
+ */
+static void
+BulkInsertTrackedFileIds(List *addOps, int64 *fileIds)
+{
+	if (PgLakeAddDataFileHook == NULL)
+		return;
+
+	int			count = list_length(addOps);
+	int64	   *trackedIds = palloc(sizeof(int64) * count);
+	int			trackedCount = 0;
+	int			opIndex = 0;
+
+	ListCell   *operationCell = NULL;
+
+	foreach(operationCell, addOps)
+	{
+		TableMetadataOperation *operation = lfirst(operationCell);
+
+		if (operation->content == CONTENT_DATA && PgLakeAddDataFileHook())
+			trackedIds[trackedCount++] = fileIds[opIndex];
+
+		opIndex++;
+	}
+
+	if (trackedCount == 0)
+	{
+		pfree(trackedIds);
+		return;
+	}
+
+	CreateTxDataFileIdsTempTableIfNotExists();
+
+	Datum	   *idDatums = palloc(sizeof(Datum) * trackedCount);
+
+	for (int i = 0; i < trackedCount; i++)
+		idDatums[i] = Int64GetDatum(trackedIds[i]);
+
+	ArrayType  *idArray = MakeArrayFromDatums(idDatums, NULL, trackedCount, INT8OID);
+
+	char	   *query =
+		"INSERT INTO " TX_DATA_FILES_QUALIFIED_TABLE_NAME " (id) "
+		"SELECT id FROM unnest($1::int8[]) AS t(id)";
+
+	DECLARE_SPI_ARGS(1);
+	SPI_ARG_VALUE(1, INT8ARRAYOID, idArray, false);
+
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
+
+	bool		readOnly = false;
+
+	SPI_EXECUTE(query, readOnly);
+
+	SPI_END();
+
+	pfree(trackedIds);
+}
+
+
+/*
+ * FlushDataFileAddBatch applies a contiguous batch of DATA_FILE_ADD operations
+ * to the three lake_table catalogs (files, data_file_column_stats,
+ * data_file_partition_values) using bulk INSERTs, plus the optional
+ * tx_data_file_ids temp table when PgLakeAddDataFileHook opts in.
+ *
+ * Equivalent in effect to looping the per-row helpers for each op, but pays
+ * O(catalogs) SPI round trips instead of O(files * (1 + columns + partition_fields)).
+ */
+static void
+FlushDataFileAddBatch(Oid relationId, List *addOps)
+{
+	if (addOps == NIL)
+		return;
+
+	int			count = list_length(addOps);
+	int64	   *fileIds = BuildBatchFileIds(count);
+
+	BulkInsertDataFiles(relationId, addOps, fileIds);
+	BulkInsertDataFileColumnStats(relationId, addOps);
+	BulkInsertDataFilePartitionValues(relationId, addOps, fileIds);
+	BulkInsertTrackedFileIds(addOps, fileIds);
+
+	pfree(fileIds);
+}
+
+
+/*
  * ApplyDataFileCatalogChanges is the main work horse for metadata operations
  * on the files catalog.
+ *
+ * DATA_FILE_ADD operations are bulked into a single round of INSERTs per
+ * catalog (see FlushDataFileAddBatch); all other operation types remain on
+ * the per-row helpers since they are rare compared to ADDs. We flush a
+ * pending ADD batch whenever a non-ADD op is encountered so that observable
+ * ordering between ADDs and (e.g.) REMOVEs is preserved.
  */
 void
 ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 {
+	List	   *pendingAdds = NIL;
 	ListCell   *operationCell = NULL;
 
 	foreach(operationCell, metadataOperations)
 	{
 		TableMetadataOperation *operation = lfirst(operationCell);
 
+		if (operation->type == DATA_FILE_ADD)
+		{
+			pendingAdds = lappend(pendingAdds, operation);
+			continue;
+		}
+
+		if (pendingAdds != NIL)
+		{
+			FlushDataFileAddBatch(relationId, pendingAdds);
+			list_free(pendingAdds);
+			pendingAdds = NIL;
+		}
+
 		switch (operation->type)
 		{
-			case DATA_FILE_ADD:
-				{
-					int64		fileId = AddDataFileToTable(relationId,
-															operation->path,
-															operation->dataFileStats.rowCount,
-															operation->dataFileStats.fileSize,
-															operation->content,
-															operation->dataFileStats.rowIdStart);
-
-					/* add column stats only for data files */
-					List	   *columnStats = operation->dataFileStats.columnStats;
-
-					if (operation->content == CONTENT_DATA && columnStats != NIL)
-						AddDataFileColumnStatsToCatalog(relationId,
-														operation->path,
-														columnStats);
-
-					/*
-					 * Add partition values only for data files. Even if the
-					 * table is not partitioned, we record the partition spec
-					 * id as the table might be partitioned in the future.
-					 *
-					 * For non-partitioned tables, if the table has never been
-					 * partitioned, we record the partition spec id as 0,
-					 * which is the default spec id for non-partitioned
-					 * tables. If the table has been partitioned before, and
-					 * now it is not, we record the partition spec id as the
-					 * current/largest spec id.
-					 */
-					if (operation->partition != NULL &&
-						operation->partition->fields_length > 0 &&
-						(operation->content == CONTENT_DATA ||
-						 operation->content == CONTENT_POSITION_DELETES))
-					{
-						AddDataFilePartitionValueToCatalog(relationId,
-														   operation->partitionSpecId,
-														   fileId,
-														   operation->partition);
-					}
-
-					if (PgLakeAddDataFileHook)
-					{
-						if (operation->content == CONTENT_DATA && PgLakeAddDataFileHook())
-							/* add the file ID to the transaction's temp table */
-							InsertDataFileIdIntoTransactionTable(fileId);
-					}
-					break;
-				}
-
 			case DATA_FILE_ADD_DELETE_MAPPING:
 				AddDeletionFileMapping(relationId,
 									   operation->path,
@@ -1569,10 +1962,21 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 				/* we don't do anything for EXPIRE_OLD_SNAPSHOTS */
 				break;
 
+			case DATA_FILE_ADD:
+				/* unreachable: handled above */
+				Assert(false);
+				break;
+
 			default:
 				elog(ERROR, "unsupported operation (%d) on data file catalog",
 					 operation->type);
 		}
+	}
+
+	if (pendingAdds != NIL)
+	{
+		FlushDataFileAddBatch(relationId, pendingAdds);
+		list_free(pendingAdds);
 	}
 }
 
