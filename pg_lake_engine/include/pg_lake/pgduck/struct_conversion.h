@@ -23,3 +23,4 @@
 
 extern PGDLLEXPORT char *StructOutForPGDuck(Datum myStruct, CopyDataFormat format);
 extern PGDLLEXPORT const char *QuoteDuckDBStructKey(const char *fieldName);
+extern PGDLLEXPORT const char *QuoteDuckDBStructKeySQL(const char *fieldName);

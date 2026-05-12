@@ -984,7 +984,7 @@ BuildStructWithIntervalProjection(char *columnName, Oid compositeTypeId)
 
 		char	   *fieldName = NameStr(att->attname);
 
-		appendStringInfo(&buf, "%s: ", QuoteDuckDBStructKey(fieldName));
+		appendStringInfo(&buf, "%s: ", QuoteDuckDBStructKeySQL(fieldName));
 
 		Oid			fieldElementType = get_element_type(att->atttypid);
 		bool		isIntervalArray = OidIsValid(fieldElementType) &&

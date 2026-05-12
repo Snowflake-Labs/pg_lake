@@ -46,10 +46,14 @@ typedef struct RecordIOData
 } RecordIOData;
 
 /*
- * QuoteDuckDBStructKey — wrap a field name in single quotes using DuckDB's
- * escaping conventions for struct literal keys.  DuckDB uses backslash
- * escaping inside single-quoted strings: single-quotes become \' and
- * backslashes become \\.
+ * QuoteDuckDBStructKey — wrap a field name in single quotes for emission
+ * inside a STRUCT literal that will travel through CSV.  DuckDB reads the
+ * literal after CSV un-quoting, so we use backslash escaping (single-quotes
+ * become \' and backslashes become \\) to round-trip through both layers.
+ *
+ * For struct literals that are concatenated directly into a SQL query text
+ * (not travelling through CSV), use QuoteDuckDBStructKeySQL instead — the
+ * DuckDB parser expects SQL-standard '' doubling in that context.
  */
 const char *
 QuoteDuckDBStructKey(const char *fieldName)
@@ -63,6 +67,32 @@ QuoteDuckDBStructKey(const char *fieldName)
 	{
 		if (*s == '\'' || *s == '\\')
 			*p++ = '\\';
+		*p++ = *s;
+	}
+	*p++ = '\'';
+	*p = '\0';
+	return result;
+}
+
+/*
+ * QuoteDuckDBStructKeySQL — same role as QuoteDuckDBStructKey but for
+ * struct literals emitted directly into SQL query text (e.g. the struct
+ * projection builder in read_data.c).  Uses SQL-standard single-quote
+ * doubling: '  ->  ''.  Backslashes are copied verbatim because
+ * standard_conforming_strings keeps them literal in single-quoted text.
+ */
+const char *
+QuoteDuckDBStructKeySQL(const char *fieldName)
+{
+	char	   *result = palloc(2 * strlen(fieldName) + 3);
+	char	   *p = result;
+	const char *s;
+
+	*p++ = '\'';
+	for (s = fieldName; *s; s++)
+	{
+		if (*s == '\'')
+			*p++ = '\'';
 		*p++ = *s;
 	}
 	*p++ = '\'';

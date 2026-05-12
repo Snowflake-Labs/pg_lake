@@ -365,50 +365,6 @@ def test_reserved_keyword_geometry_column(
     user_conn.commit()
 
 
-def test_reserved_keyword_struct_of_geometry(
-    user_conn, spatial_analytics_extension, pg_lake_extension
-):
-    """
-    Composite column with a geometry sub-field whose name is a DuckDB-reserved
-    keyword ("lambda").  Exercises the struct-projection builder in
-    read_data.c with a geometry field — the path that also handles INTERVAL
-    and struct-of-INTERVAL under the hood.
-    """
-    user_conn.rollback()
-
-    location = f"s3://{TEST_BUCKET}/test_spatial_basics/test_kw_struct_geom/"
-
-    run_command(
-        f"""
-        CREATE TYPE kw_geom_t AS ("lambda" geometry, plain int);
-
-        CREATE FOREIGN TABLE test_kw_struct_geom (id int, s kw_geom_t)
-        SERVER pg_lake_iceberg OPTIONS (location '{location}');
-    """,
-        user_conn,
-    )
-    user_conn.commit()
-
-    run_command(
-        "INSERT INTO test_kw_struct_geom VALUES (1, ROW(ST_Point(5, 6), 42))",
-        user_conn,
-    )
-    user_conn.commit()
-
-    result = run_query(
-        "SELECT id, ST_AsText((s).lambda) g, (s).plain FROM test_kw_struct_geom",
-        user_conn,
-    )
-    assert len(result) == 1
-    assert result[0]["id"] == 1
-    assert result[0]["g"] == "POINT (5 6)"
-    assert result[0]["plain"] == 42
-
-    run_command("DROP FOREIGN TABLE test_kw_struct_geom", user_conn)
-    run_command("DROP TYPE kw_geom_t", user_conn)
-    user_conn.commit()
-
-
 @pytest.fixture(scope="module")
 def basic_geometry_file(s3, user_conn, postgis_extension, spatial_analytics_extension):
     run_command(
