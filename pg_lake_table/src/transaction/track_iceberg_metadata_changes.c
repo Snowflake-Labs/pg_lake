@@ -22,6 +22,7 @@
 
 #include "pg_lake/cleanup/in_progress_files.h"
 #include "pg_lake/data_file/data_files.h"
+#include "pg_lake/fdw/data_file_stats_catalog.h"
 #include "pg_lake/fdw/data_files_catalog.h"
 #include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
@@ -40,6 +41,8 @@
 #include "pg_lake/util/s3_writer_utils.h"
 #include "pg_lake/util/url_encode.h"
 #include "pg_lake/parsetree/options.h"
+#include "pg_extension_base/spi_helpers.h"
+#include "executor/spi.h"
 #include "commands/defrem.h"
 #include "foreign/foreign.h"
 #include "utils/builtins.h"
@@ -84,6 +87,8 @@ static void ApplyTrackedIcebergMetadataChanges(bool isVerbose);
 static void RecordIcebergMetadataOperation(Oid relationId, TableMetadataOperationType operationType);
 static void InitTableMetadataTrackerHashIfNeeded(void);
 static void InitRestCatalogRequestsHashIfNeeded(void);
+static bool AnyTrackedRelationChangedDataFiles(HTAB *trackedRelations);
+static void EnsureFreshStatsForCommitTimeDiff(void);
 static HTAB *CreateDataFilesHashForMetadata(IcebergTableMetadata * metadata);
 static void FindChangedFilesSinceMetadata(HTAB *currentFilesMap, IcebergTableMetadata * metadata,
 										  List **addedFiles, List **removedFilePaths);
@@ -714,6 +719,24 @@ ApplyTrackedIcebergMetadataChanges(bool isVerbose)
 		return;
 	}
 
+	/*
+	 * Refresh catalog stats before we run the per-table data-file diff query.
+	 * The diff joins lake_table.files against the partition-value and
+	 * column-stats catalogs; autovacuum does not fire inside an open
+	 * transaction, so on workloads that insert tens of thousands of files in
+	 * one tx the planner's pg_class.reltuples is wildly stale by the time
+	 * GetDataFileMetadataOperations runs. With stale stats the planner can
+	 * pick an N^2 nested loop for a query whose result is comfortably
+	 * hash-join-able, blowing commit time up by orders of magnitude.
+	 *
+	 * Only worth doing if at least one tracked relation actually has data
+	 * file changes — DDL-only or noop trackers skip the diff entirely.
+	 */
+	if (AnyTrackedRelationChangedDataFiles(trackedRelations))
+	{
+		EnsureFreshStatsForCommitTimeDiff();
+	}
+
 	HASH_SEQ_STATUS status;
 	TableMetadataOperationTracker *opTracker;
 
@@ -815,6 +838,83 @@ ApplyTrackedIcebergMetadataChanges(bool isVerbose)
 	INJECTION_POINT_COMPAT("after-apply-iceberg-changes");
 
 	ExternalHeavyAssertsOnIcebergMetadataChange();
+}
+
+
+/*
+ * AnyTrackedRelationChangedDataFiles returns true if at least one tracked
+ * relation has data-file changes that will trigger the commit-time diff
+ * query. We use this to gate the upfront ANALYZE: DDL-only or noop trackers
+ * shouldn't pay even the few-ms ANALYZE cost.
+ */
+static bool
+AnyTrackedRelationChangedDataFiles(HTAB *trackedRelations)
+{
+	HASH_SEQ_STATUS status;
+	TableMetadataOperationTracker *opTracker;
+
+	hash_seq_init(&status, trackedRelations);
+	while ((opTracker = hash_seq_search(&status)) != NULL)
+	{
+		if (opTracker->relationDataFileChanged)
+		{
+			hash_seq_term(&status);
+			return true;
+		}
+	}
+
+	return false;
+}
+
+
+/*
+ * EnsureFreshStatsForCommitTimeDiff runs ANALYZE on the high-cardinality
+ * pg_lake_table catalogs that the commit-time data-file diff joins:
+ *
+ *   - lake_table.files
+ *   - lake_table.data_file_partition_values
+ *   - lake_table.data_file_column_stats
+ *
+ * Autovacuum cannot run inside the current transaction, so on a tx that
+ * has just inserted many thousand rows into these catalogs the planner's
+ * estimate of their size is whatever it was at the start of the tx
+ * (often zero, for a freshly created iceberg table, or stale for one
+ * with frequent DROP/CREATE churn). The diff query
+ * GetTableDataFilesHashFromCatalog joins files LEFT JOIN
+ * data_file_partition_values, and LoadColumnStatsForFiles joins
+ * data_file_column_stats against pg_attribute via field_id_mappings.
+ * With wrong row estimates the planner happily picks nested loops, which
+ * become quadratic as the catalogs grow within the transaction.
+ *
+ * The lower-cardinality catalogs (partition_fields, field_id_mappings)
+ * are intentionally skipped: they're small enough that even bad
+ * estimates don't change plan shape, and analyzing them per-commit adds
+ * latency without observable benefit.
+ *
+ * Cost: ANALYZE samples up to default_statistics_target * 300 rows; on
+ * these catalogs that's well under 50ms total even when there's nothing
+ * to do, which is why the caller gates this on AnyTrackedRelationChangedDataFiles().
+ */
+static void
+EnsureFreshStatsForCommitTimeDiff(void)
+{
+	const char *cmd =
+		"ANALYZE "
+		DATA_FILES_TABLE_QUALIFIED ", "
+		DATA_FILE_PARTITION_VALUES_TABLE_QUALIFIED ", "
+		DATA_FILE_COLUMN_STATS_TABLE_QUALIFIED;
+
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
+
+	int			spiStatus = SPI_execute(cmd, false /* readOnly */ , 0);
+
+	if (spiStatus < 0)
+		ereport(ERROR,
+				(errmsg("pg_lake: ANALYZE on commit-time catalogs failed"),
+				 errdetail("SPI_execute(\"%s\") returned %s",
+						   cmd, SPI_result_code_string(spiStatus))));
+
+	SPI_END();
 }
 
 
