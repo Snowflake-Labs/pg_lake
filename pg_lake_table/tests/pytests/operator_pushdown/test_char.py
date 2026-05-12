@@ -8,17 +8,40 @@ import json
 from decimal import *
 from utils_pytest import *
 
-
 # including an ID as part of each parameter set
 # where id is oprcode for the given operator
 # this id shows up in the pytest output
 test_cases = [
-    ("char_lt", "WHERE col_char < 'a'::char", "WHERE (col_char < 'a'::character(1)"),
-    ("char_le", "WHERE col_char <= 'b'::char", "WHERE (col_char <= 'b'::character(1))"),
-    ("char_gt", "WHERE col_char > 'c'::char", "WHERE (col_char > 'c'::character(1))"),
-    ("char_ge", "WHERE col_char >= 'd'::char", "WHERE (col_char >= 'd'::character(1))"),
-    ("chareq", "WHERE col_char = 'e'::char", "WHERE (col_char = 'e'::character(1))"),
-    ("charne", "WHERE col_char <> 'f'::char", "WHERE (col_char <> 'f'::character(1))"),
+    (
+        "char_lt",
+        "WHERE col_char < 'a'::char",
+        "WHERE (\"col_char\" < 'a'::character(1)",
+    ),
+    (
+        "char_le",
+        "WHERE col_char <= 'b'::char",
+        "WHERE (\"col_char\" <= 'b'::character(1))",
+    ),
+    (
+        "char_gt",
+        "WHERE col_char > 'c'::char",
+        "WHERE (\"col_char\" > 'c'::character(1))",
+    ),
+    (
+        "char_ge",
+        "WHERE col_char >= 'd'::char",
+        "WHERE (\"col_char\" >= 'd'::character(1))",
+    ),
+    (
+        "chareq",
+        "WHERE col_char = 'e'::char",
+        "WHERE (\"col_char\" = 'e'::character(1))",
+    ),
+    (
+        "charne",
+        "WHERE col_char <> 'f'::char",
+        "WHERE (\"col_char\" <> 'f'::character(1))",
+    ),
     ("charlike", "WHERE col_char LIKE '%e%'", "~~"),
     ("charnlike", "WHERE col_char NOT LIKE '%q%'", "!~~"),
     ("chariclike", "WHERE col_char ILIKE '%E%'", "~~*"),

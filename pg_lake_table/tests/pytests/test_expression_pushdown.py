@@ -1,17 +1,16 @@
 import pytest
 from utils_pytest import *
 
-
 queries = [
     # OPERATOR is deparsed as =
     ["WHERE", "SELECT DISTINCT * FROM Users_f WHERE (id OPERATOR(pg_catalog.=) 6);"],
-    # cast to text is deparsed as ::text
+    # cast to text is deparsed as ::"text"
     [
-        "::text",
+        '::"text"',
         "SELECT DISTINCT * FROM (select cast(id as text) from Users_f GROUP BY id)",
     ],
     # cannot pushdown as the type Users_f is not pushable, still useful to have coverage
-    ["SELECT id", "SELECT Users_f FROM Users_f"],
+    ['SELECT "id"', "SELECT Users_f FROM Users_f"],
     # cannot pushdown row / record functions
     # ["JOIN", "SELECT count(distinct bar.col1) FROM (SELECT row(id) FROM Users_f) as foo(col1) JOIN (SELECT row(id) FROM Events_f) bar(col1) ON (true)"],
     # Anti-Join
@@ -30,11 +29,11 @@ queries = [
         "SELECT DISTINCT e.* FROM Users_f u, LATERAL (SELECT DISTINCT metric2 FROM Events_f e WHERE e.id = u.id) e;",
     ],
     [
-        "count(DISTINCT array_metric[1])",
+        '"count"(DISTINCT "array_metric"[1])',
         "SELECT COUNT(DISTINCT array_metric[1]) FILTER (WHERE e.id = 1000000) FROM Events_f e",
     ],
     [
-        "DISTINCT ARRAY[max(id), min(metric1)",
+        'DISTINCT ARRAY["max"("id"), "min"("metric1")',
         "SELECT DISTINCT ARRAY[max(id), min(metric1)] from Users_f",
     ],
 ]

@@ -32,14 +32,14 @@ import pytest
 # ```
 
 test_agg_cases = [
-    ("sum(col_int2)", "sum(col_int2)", "sum(col_int2)"),
-    ("sum(col_int4)", "sum(col_int4)", "sum(col_int4)"),
-    ("sum(col_int8)", "sum(col_int8)", "sum(col_int8)"),
-    ("sum(col_float)", "sum(col_float)", "sum(col_float)"),
-    ("sum(double precision)", "sum(col_double)", "sum(col_double)"),
-    ("sum(numeric)", "sum(col_numeric)", "sum(col_numeric)"),
-    ("sum(numeric_3_1)", "sum(col_numeric_1)", "sum(col_numeric_1)"),
-    ("sum(real)", "sum(col_real)", "sum(col_real)"),
+    ("sum(col_int2)", "sum(col_int2)", '"sum"("col_int2")'),
+    ("sum(col_int4)", "sum(col_int4)", '"sum"("col_int4")'),
+    ("sum(col_int8)", "sum(col_int8)", '"sum"("col_int8")'),
+    ("sum(col_float)", "sum(col_float)", '"sum"("col_float")'),
+    ("sum(double precision)", "sum(col_double)", '"sum"("col_double")'),
+    ("sum(numeric)", "sum(col_numeric)", '"sum"("col_numeric")'),
+    ("sum(numeric_3_1)", "sum(col_numeric_1)", '"sum"("col_numeric_1")'),
+    ("sum(real)", "sum(col_real)", '"sum"("col_real")'),
 ]
 
 

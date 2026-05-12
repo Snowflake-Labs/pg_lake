@@ -8,12 +8,11 @@ import json
 from decimal import *
 from utils_pytest import *
 
-
 test_cases = [
     (
         "geometry_eq",
         "WHERE col_point = ST_GeomFromText('POINT(4 4)')",
-        "WHERE (col_point = st_geomfromtext('POINT(4 4)'::text))",
+        'WHERE ("col_point" = "st_geomfromtext"(\'POINT(4 4)\'::"text"))',
     ),
     ("<->", "WHERE col_point <-> ST_GeomFromText('POINT(4 4)') > 1", "st_distance"),
     ("&&", "WHERE col_point && 'POINT(4 4)'::geometry", "st_intersects_extent"),

@@ -23,17 +23,17 @@ def test_small_numeric_pushdown(s3, pg_conn, extension):
         pg_conn,
     )
 
-    expected_expression = "sum(a)"
+    expected_expression = '"sum"("a")'
     query = "select sum(a) from small_numeric"
     run_query(query, pg_conn)
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)
 
-    expected_expression = "abs(a)"
+    expected_expression = '"abs"("a")'
     query = "select abs(a) from small_numeric"
     run_query(query, pg_conn)
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)
 
-    expected_expression = "a + a"
+    expected_expression = '"a" + "a"'
     query = "select a + a from small_numeric"
     run_query(query, pg_conn)
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)
@@ -102,17 +102,17 @@ def test_unbounded_numeric_pushdown(s3, pg_conn, extension):
         pg_conn,
     )
 
-    expected_expression = "sum(a)"
+    expected_expression = '"sum"("a")'
     query = "select sum(a) from unbounded_numeric"
     run_query(query, pg_conn)
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)
 
-    expected_expression = "abs(a)"
+    expected_expression = '"abs"("a")'
     query = "select abs(a) from unbounded_numeric"
     run_query(query, pg_conn)
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)
 
-    expected_expression = "a + a"
+    expected_expression = '"a" + "a"'
     query = "select a + a from unbounded_numeric"
     run_query(query, pg_conn)
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)
@@ -185,7 +185,7 @@ def test_pg_lake_table_with_no_cols(s3, pg_conn, extension, copy_numeric_to_file
     )
     assert result == [["text", None, None], ["numeric", 5, 3], ["numeric", 38, 9]]
 
-    expected_expression = "WHERE (abs(numeric_unbounded) > (1)::numeric)"
+    expected_expression = 'WHERE ("abs"("numeric_unbounded") > (1)::numeric)'
     query = f"SELECT numeric_large, numeric_small, numeric_unbounded FROM pg_lake_table_with_no_cols {expected_expression}"
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)
 
@@ -210,7 +210,7 @@ def test_pg_lake_table_explicit(s3, pg_conn, extension, copy_numeric_to_file):
     )
     assert result == [["numeric", 39, 10], ["numeric", 5, 3], ["numeric", None, None]]
 
-    expected_expression = "WHERE (abs(numeric_unbounded) > (1)::numeric)"
+    expected_expression = 'WHERE ("abs"("numeric_unbounded") > (1)::numeric)'
     query = f"SELECT numeric_large, numeric_small, numeric_unbounded FROM pg_lake_table_explicit {expected_expression}"
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)
 
@@ -240,7 +240,7 @@ def test_writable_pg_lake_table(s3, pg_conn, extension, copy_numeric_to_file):
     )
     assert result == [["numeric", 39, 10], ["numeric", 5, 3], ["numeric", None, None]]
 
-    expected_expression = "WHERE (abs(numeric_unbounded) > (1)::numeric)"
+    expected_expression = 'WHERE ("abs"("numeric_unbounded") > (1)::numeric)'
     query = f"SELECT * FROM writable_pg_lake_table {expected_expression}"
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)
 
@@ -263,7 +263,7 @@ def test_iceberg_table_load_from(s3, pg_conn, extension, copy_numeric_to_file):
     )
     assert result == [["text", None, None], ["numeric", 5, 3], ["numeric", 38, 9]]
 
-    expected_expression = "WHERE (abs(numeric_unbounded) > (1)::numeric)"
+    expected_expression = 'WHERE ("abs"("numeric_unbounded") > (1)::numeric)'
     query = f"SELECT * FROM iceberg_table {expected_expression}"
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)
 
@@ -286,7 +286,7 @@ def test_iceberg_table_definition_from(
     )
     assert result == [["text", None, None], ["numeric", 5, 3], ["numeric", 38, 9]]
 
-    expected_expression = "WHERE (abs(numeric_unbounded) > (1)::numeric)"
+    expected_expression = 'WHERE ("abs"("numeric_unbounded") > (1)::numeric)'
     query = f"SELECT * FROM iceberg_table {expected_expression}"
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)
 

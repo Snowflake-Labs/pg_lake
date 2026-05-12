@@ -15,28 +15,48 @@ import pytest
 
 test_agg_cases = [
     # count works on "any" column type, so test with as many types as possible
-    ("count(*)", "count(*)", "count(*)"),
-    ("count(int2)", "count(col_int2)", "count(col_int2)"),
-    ("count(int4)", "count(col_int4)", "count(col_int4)"),
-    ("count(int8)", "count(col_int8)", "count(col_int8)"),
-    ("count(float)", "count(col_float)", "count(col_float)"),
-    ("count(double precision)", "count(col_double)", "count(col_double)"),
-    ("count(text)", "count(col_text)", "count(col_text)"),
-    ("count(varchar)", "count(col_varchar)", "count(col_varchar)"),
-    ("count(DISTINCT int2)", "count(DISTINCT col_int2)", "count(DISTINCT col_int2)"),
-    ("count(DISTINCT int4)", "count(DISTINCT col_int4)", "count(DISTINCT col_int4)"),
-    ("count(DISTINCT int8)", "count(DISTINCT col_int8)", "count(DISTINCT col_int8)"),
-    ("count(DISTINCT float)", "count(DISTINCT col_float)", "count(DISTINCT col_float)"),
+    ("count(*)", "count(*)", '"count"(*)'),
+    ("count(int2)", "count(col_int2)", '"count"("col_int2")'),
+    ("count(int4)", "count(col_int4)", '"count"("col_int4")'),
+    ("count(int8)", "count(col_int8)", '"count"("col_int8")'),
+    ("count(float)", "count(col_float)", '"count"("col_float")'),
+    ("count(double precision)", "count(col_double)", '"count"("col_double")'),
+    ("count(text)", "count(col_text)", '"count"("col_text")'),
+    ("count(varchar)", "count(col_varchar)", '"count"("col_varchar")'),
+    (
+        "count(DISTINCT int2)",
+        "count(DISTINCT col_int2)",
+        '"count"(DISTINCT "col_int2")',
+    ),
+    (
+        "count(DISTINCT int4)",
+        "count(DISTINCT col_int4)",
+        '"count"(DISTINCT "col_int4")',
+    ),
+    (
+        "count(DISTINCT int8)",
+        "count(DISTINCT col_int8)",
+        '"count"(DISTINCT "col_int8")',
+    ),
+    (
+        "count(DISTINCT float)",
+        "count(DISTINCT col_float)",
+        '"count"(DISTINCT "col_float")',
+    ),
     (
         "count(DISTINCT double precision)",
         "count(DISTINCT col_double)",
-        "count(DISTINCT col_double)",
+        '"count"(DISTINCT "col_double")',
     ),
-    ("count(DISTINCT text)", "count(DISTINCT col_text)", "count(DISTINCT col_text)"),
+    (
+        "count(DISTINCT text)",
+        "count(DISTINCT col_text)",
+        '"count"(DISTINCT "col_text")',
+    ),
     (
         "count(DISTINCT col)",
         "count(DISTINCT col_varchar)",
-        "count(DISTINCT col_varchar)",
+        '"count"(DISTINCT "col_varchar")',
     ),
 ]
 
