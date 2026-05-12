@@ -497,6 +497,91 @@ def test_each_reserved_keyword_csv(pg_conn, s3, extension, keyword):
 # ---------------------------------------------------------------------------
 
 
+def test_autodetect_struct_field_names_with_hostile_characters(pg_conn, s3, extension):
+    """
+    Auto-detect (CREATE FOREIGN TABLE () ... OPTIONS (path ...)) against a
+    parquet file whose struct field names contain characters that would break
+    a raw-formatted name[] array literal: quotes, commas, colons, spaces,
+    parens, backslashes.
+
+    Regression test for review feedback on PR #297 — after fixing
+    ParseDuckDBFieldName to handle SQL-standard "" doubling, the next layer
+    (GetOrCreatePGStructType's catalog-lookup SPI query) was still formatting
+    field names directly into a '{...}'::name[] literal, producing
+    "malformed array literal" for any hostile shape.
+    """
+    schema = "test_duckdb_kw_autodetect_hostile"
+    url = f"s3://{TEST_BUCKET}/{schema}/data.parquet"
+
+    run_command(f"CREATE SCHEMA {schema}", pg_conn)
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        CREATE TYPE {schema}.edge_t AS (
+            plain          int,
+            "with space"   int,
+            U&"has\\0022one"   int,
+            "comma,here"   int,
+            "colon:here"   int,
+            "with(parens)" int,
+            U&"back\\005Cslash" int
+        )
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        CREATE TABLE {schema}.src (id int, e {schema}.edge_t)
+        USING iceberg
+        WITH (location = 's3://{TEST_BUCKET}/{schema}_src/')
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"INSERT INTO {schema}.src VALUES (1, ROW(1, 2, 3, 4, 5, 6, 7))",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"COPY (SELECT * FROM {schema}.src) TO '{url}' WITH (format 'parquet')",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # Drop the catalog-side composite type so the next CREATE FOREIGN TABLE is
+    # forced down the auto-detect path through GetOrCreatePGStructType.
+    run_command(f"DROP TABLE {schema}.src", pg_conn)
+    run_command(f"DROP TYPE {schema}.edge_t", pg_conn)
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        CREATE FOREIGN TABLE {schema}.edge_pq ()
+        SERVER pg_lake
+        OPTIONS (path '{url}')
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        f'SELECT id, (e).plain, (e)."with space", (e).U&"has\\0022one", '
+        f'(e)."comma,here", (e)."colon:here", (e)."with(parens)", '
+        f'(e).U&"back\\005Cslash" FROM {schema}.edge_pq',
+        pg_conn,
+    )
+    assert result == [[1, 1, 2, 3, 4, 5, 6, 7]]
+
+    run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 def test_iceberg_composite_field_with_embedded_double_quote(pg_conn, s3, extension):
     """
     Composite type field names containing double-quote characters must be

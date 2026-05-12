@@ -40,6 +40,7 @@
 #include "commands/typecmds.h"
 #include "executor/spi.h"
 #include "nodes/makefuncs.h"
+#include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
@@ -734,9 +735,11 @@ FindOrCreatePGCompositeType(CompositeType * type)
 	 */
 	do
 	{
-		StringInfo	oidArray = makeStringInfo();
-		StringInfo	nameArray = makeStringInfo();
+		int			ncols = list_length(type->cols);
+		Datum	   *nameDatums = palloc(sizeof(Datum) * ncols);
+		Datum	   *oidDatums = palloc(sizeof(Datum) * ncols);
 		ListCell   *lc;
+		int			i = 0;
 
 		foreach(lc, type->cols)
 		{
@@ -744,33 +747,37 @@ FindOrCreatePGCompositeType(CompositeType * type)
 
 			Assert(col->colType);
 
-			/* if we are the first time through, skip this */
-			if (oidArray->len)
-			{
-				appendStringInfoChar(oidArray, ',');
-				appendStringInfoChar(nameArray, ',');
-			}
-
-			appendStringInfo(oidArray, "%d", col->colType);
-			appendStringInfo(nameArray, "%s", col->colName);
+			/*
+			 * Build the arrays as proper Datums rather than string-formatting
+			 * into a name[] literal: field names may contain commas, quotes,
+			 * backslashes, or whitespace that would break array literal
+			 * parsing.
+			 */
+			nameDatums[i] = DirectFunctionCall1(namein,
+												CStringGetDatum(col->colName));
+			oidDatums[i] = ObjectIdGetDatum(col->colType);
+			i++;
 		}
 
-		char	   *findTypeQuery = psprintf(
-											 "SELECT oid, typname, typarray FROM pg_type JOIN "
-											 "(SELECT attrelid,"
-											 "    array_agg(atttypid ORDER BY attnum) AS types,"
-											 "    array_agg(attname ORDER BY attnum) AS names "
-											 "    FROM pg_attribute "
-											 "    WHERE attnum > 0 AND NOT attisdropped "
-											 "    GROUP BY attrelid) atts "
-											 "ON pg_type.typrelid = atts.attrelid AND "
-											 "    atts.names = '{%s}'::name[] and atts.types='{%s}'::oid[] "
-											 "WHERE typnamespace :: regnamespace in ('pg_catalog','"
-											 STRUCT_TYPES_SCHEMA "') LIMIT 1",
-											 nameArray->data,
-											 oidArray->data);
+		ArrayType  *nameArr = construct_array_builtin(nameDatums, ncols, NAMEOID);
+		ArrayType  *oidArr = construct_array_builtin(oidDatums, ncols, OIDOID);
 
-		elog(DEBUG1, "checking for matching type oid via query: %s", findTypeQuery);
+		const char *findTypeQuery =
+			"SELECT oid, typname, typarray FROM pg_type JOIN "
+			"(SELECT attrelid,"
+			"    array_agg(atttypid ORDER BY attnum) AS types,"
+			"    array_agg(attname ORDER BY attnum) AS names "
+			"    FROM pg_attribute "
+			"    WHERE attnum > 0 AND NOT attisdropped "
+			"    GROUP BY attrelid) atts "
+			"ON pg_type.typrelid = atts.attrelid AND "
+			"    atts.names = $1 AND atts.types = $2 "
+			"WHERE typnamespace :: regnamespace in "
+			"    ('pg_catalog','" STRUCT_TYPES_SCHEMA "') LIMIT 1";
+
+		Oid			argTypes[2] = {NAMEARRAYOID, OIDARRAYOID};
+		Datum		argValues[2] = {PointerGetDatum(nameArr),
+			PointerGetDatum(oidArr)};
 
 		Oid			foundOid = InvalidOid;
 		Oid			foundArrayOid = InvalidOid;
@@ -778,7 +785,8 @@ FindOrCreatePGCompositeType(CompositeType * type)
 
 		SPI_START();
 
-		int			ret = SPI_execute(findTypeQuery, false, 1);
+		int			ret = SPI_execute_with_args(findTypeQuery, 2, argTypes,
+												argValues, NULL, false, 1);
 
 		if (ret == SPI_OK_SELECT && SPI_processed >= 1)
 		{
