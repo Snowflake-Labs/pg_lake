@@ -57,9 +57,24 @@ public:
 						   optional_ptr<FileOpener> opener);
 	void PutCachedRegion(const string &bucketUrl, const string &regionName,
 						 optional_ptr<FileOpener> opener);
+	void ClearCachedRegion(const string &bucketUrl,
+						   optional_ptr<FileOpener> opener);
 	string GetBucketRegionFromS3(const string &url, optional_ptr<FileOpener> opener);
 	string GetBucketRegion(const string &url, optional_ptr<FileOpener> opener);
 	vector<OpenFileInfo> List(const string &globPattern, bool isGlob, FileOpener *opener);
+
+	/*
+	 * Resolve the region for url (cache or S3 headers), then call s3Operation
+	 * with the region-adjusted URL. If s3Operation throws a 400/301 that
+	 * looks like a region mismatch, look up the actual region and retry
+	 * once. Used by FileExists / DirectoryExists / RemoveFile so they
+	 * self-heal on cross-region buckets the same way OpenFile / Glob do.
+	 *
+	 * s3Operation receives the URL with ?s3_region=... appended (or the
+	 * original URL if no cached/discovered region is available).
+	 */
+	void WithResolvedRegion(const string &url, optional_ptr<FileOpener> opener,
+							std::function<void(const string &)> s3Operation);
 
 	/*
 	 * Download performs similar logic to GetRequest, except writing the output
@@ -100,7 +115,23 @@ public:
 	}
 
 	bool FileExists(const string &filename, optional_ptr<FileOpener> opener = nullptr) override {
-		return s3fs.FileExists(filename, opener);
+		/*
+		 * HTTPFileSystem::FileExists calls OpenFile + catches all exceptions.
+		 * If we delegated to it on a cross-region bucket, the 400/301 would
+		 * be swallowed inside s3fs and WithResolvedRegion would never see
+		 * the failure to retry. Call our own region-aware OpenFile instead
+		 * so the retry fires, and map not-found back to false here.
+		 */
+		try
+		{
+			auto handle = OpenFile(filename, FileFlags::FILE_FLAGS_READ, opener);
+			auto &sfh = handle->Cast<HTTPFileHandle>();
+			return sfh.length != 0;
+		}
+		catch (...)
+		{
+			return false;
+		}
 	}
 
 	int64_t GetFileSize(FileHandle &handle) override {
@@ -128,11 +159,15 @@ public:
 	}
 
 	bool DirectoryExists(const string &directory, optional_ptr<FileOpener> opener = nullptr) override {
-		return s3fs.DirectoryExists(directory, opener);
+		bool result = false;
+		WithResolvedRegion(directory, opener,
+			[&](const string &regionUrl) { result = s3fs.DirectoryExists(regionUrl, opener); });
+		return result;
 	}
 
 	void RemoveFile(const string &filename, optional_ptr<FileOpener> opener = nullptr) override {
-		return s3fs.RemoveFile(filename, opener);
+		WithResolvedRegion(filename, opener,
+			[&](const string &regionUrl) { s3fs.RemoveFile(regionUrl, opener); });
 	}
 
 	bool IsPipe(const string &filename, optional_ptr<FileOpener> opener = nullptr) override {

@@ -216,17 +216,49 @@ RegionAwareS3FileSystem::OpenFile(const string &url,
 							  FileOpenFlags openFlags,
 							  optional_ptr<FileOpener> opener)
 {
+	unique_ptr<FileHandle> handle;
+	WithResolvedRegion(url, opener,
+		[&](const string &resolvedUrl) { handle = s3fs.OpenFile(resolvedUrl, openFlags, opener); });
+	return handle;
+}
+
+
+/*
+ * WithResolvedRegion runs s3Operation against an S3 URL, picking the region
+ * from cache when available and falling back to GetBucketRegionFromS3 on a
+ * 400/301.
+ *
+ * Same shape as the old OpenFile: try once (with cached region or bare URL),
+ * and if the error looks like a region mismatch, look up the actual region
+ * and retry. All region-aware entry points (OpenFile, FileExists,
+ * DirectoryExists, RemoveFile) go through here so the retry + cache logic
+ * lives in one place.
+ */
+void
+RegionAwareS3FileSystem::WithResolvedRegion(const string &url,
+											optional_ptr<FileOpener> opener,
+											std::function<void(const string &)> s3Operation)
+{
 	if (!opener || !opener->TryGetClientContext())
-		/* this probably cannot happen, but let's be defensive and let regular S3FS handle it */
-		return s3fs.OpenFile(url, openFlags, opener);
+	{
+		/* no client context, no cache; just pass through */
+		s3Operation(url);
+		return;
+	}
 
 	/* as far as we know, looking up bucket region only works for S3 */
 	if (!StringUtil::StartsWith(url, "s3://"))
-		return s3fs.OpenFile(url, openFlags, opener);
+	{
+		s3Operation(url);
+		return;
+	}
 
 	/* user explicitly asked for a region, don't try to be smart */
 	if (UrlHasQueryArgument(url, "s3_region"))
-		return s3fs.OpenFile(url, openFlags, opener);
+	{
+		s3Operation(url);
+		return;
+	}
 
 	/* extract the bucket URL */
 	string bucketUrl = GetBucketUrl(url, opener);
@@ -237,7 +269,10 @@ RegionAwareS3FileSystem::OpenFile(const string &url,
 	{
 		string expressUrl;
 		if (AddS3ExpressRegionEndpoint(url, expressUrl))
-			return s3fs.OpenFile(expressUrl, openFlags, opener);
+		{
+			s3Operation(expressUrl);
+			return;
+		}
 	}
 
 	/* if we previously looked up the region, use it */
@@ -247,10 +282,11 @@ RegionAwareS3FileSystem::OpenFile(const string &url,
 	{
 		if (!cachedRegion.empty())
 			/* use the cached region, we may still fail and refresh the region */
-			return s3fs.OpenFile(AddQueryArgumentToUrl(url, "s3_region", cachedRegion), openFlags, opener);
+			s3Operation(AddQueryArgumentToUrl(url, "s3_region", cachedRegion));
 		else
-			/* optimistically list the files, even if we don't know region */
-			return s3fs.OpenFile(url, openFlags, opener);
+			/* optimistically run the call, even if we don't know the region */
+			s3Operation(url);
+		return;
 	}
 	catch (Exception &ex)
 	{
@@ -269,7 +305,7 @@ RegionAwareS3FileSystem::OpenFile(const string &url,
 			error.Message().find("301") == std::string::npos)
 			throw;
 
-		PGDUCK_SERVER_DEBUG("OpenFile failed: %s", error.Message().c_str());
+		PGDUCK_SERVER_DEBUG("S3 operation failed (retrying with refreshed region): %s", error.Message().c_str());
 
 		/* get the actual region from S3 headers */
 		string actualRegion = GetBucketRegionFromS3(url, opener);
@@ -281,8 +317,8 @@ RegionAwareS3FileSystem::OpenFile(const string &url,
 		/* cache the result (could replace existing one if region changed) */
 		PutCachedRegion(bucketUrl, actualRegion, opener);
 
-		/* open with the actual region (and hope for the best) */
-		return s3fs.OpenFile(AddQueryArgumentToUrl(url, "s3_region", actualRegion), openFlags, opener);
+		/* retry with the actual region (and hope for the best) */
+		s3Operation(AddQueryArgumentToUrl(url, "s3_region", actualRegion));
 	}
 }
 
@@ -505,6 +541,21 @@ RegionAwareS3FileSystem::PutCachedRegion(const string &bucketUrl, const string &
 
 	PGDUCK_SERVER_LOG("requests for %s will use region %s",
 					  bucketUrl.c_str(), regionName.c_str());
+}
+
+
+/*
+ * ClearCachedRegion evicts the cached region entry for a given bucket URL,
+ * if one exists. Used by pg_lake_clear_region_cache() so operators (and
+ * tests) can force the next request to re-discover the bucket region.
+ */
+void
+RegionAwareS3FileSystem::ClearCachedRegion(const string &bucketUrl, optional_ptr<FileOpener> opener)
+{
+	optional_ptr<ClientContext> context = opener->TryGetClientContext();
+	ObjectCache &cache = ObjectCache::GetObjectCache(*context);
+
+	cache.Delete("pg_lake_region::" + bucketUrl);
 }
 
 

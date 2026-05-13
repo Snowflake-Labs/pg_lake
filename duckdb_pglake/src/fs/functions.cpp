@@ -644,6 +644,38 @@ GetBucketRegionScalarFun(DataChunk &args, ExpressionState &state, Vector &result
 
 
 /*
+ * Implementation of the pg_lake_clear_region_cache scalar function.
+ *
+ * Evicts the cached region for the bucket that owns the given URL.
+ * Returns true if the URL was an S3 URL (in which case the cache entry
+ * is cleared, whether or not one existed), false otherwise.
+ */
+static void
+ClearRegionCacheScalarFun(DataChunk &args, ExpressionState &state, Vector &result)
+{
+	auto &urlVector = args.data[0];
+
+	UnaryExecutor::Execute<string_t, bool>(
+		urlVector, result, args.size(),
+		[&](string_t urlStr) {
+			ClientContext &context = state.GetContext();
+			FileOpener *opener = context.client_data->file_opener.get();
+			DatabaseInstance &db = DatabaseInstance::GetDatabase(context);
+			RegionAwareS3FileSystem s3fs(BufferManager::GetBufferManager(db));
+			string url = urlStr.GetString();
+
+			if (!s3fs.CanHandleFile(url))
+				return false;
+
+			string bucketUrl = s3fs.GetBucketUrl(url, opener);
+			s3fs.ClearCachedRegion(bucketUrl, opener);
+			return true;
+		}
+	);
+}
+
+
+/*
  * Implementation of the pg_lake_get_managed_storage_region scalar function.
  */
 static void
@@ -814,6 +846,17 @@ PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
 						   GetBucketRegionScalarFun);
 
 		loader.RegisterFunction(pg_lake_get_bucket_region);
+	}
+
+	/* pg_lake_clear_region_cache function definition */
+	{
+		ScalarFunction pg_lake_clear_region_cache =
+			ScalarFunction("pg_lake_clear_region_cache",
+						   {LogicalType::VARCHAR},
+						   LogicalType::BOOLEAN,
+						   ClearRegionCacheScalarFun);
+
+		loader.RegisterFunction(pg_lake_clear_region_cache);
 	}
 
 	/* pg_lake_get_managed_storage_region function definition */
