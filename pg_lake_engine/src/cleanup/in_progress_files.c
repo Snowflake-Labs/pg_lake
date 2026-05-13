@@ -201,10 +201,21 @@ RemoveInProgressFiles(char *location, bool isFull, bool isVerbose, List **delete
 			DeleteRemoteFile(entry->path);
 		}
 
-		DeleteInProgressFileRecord(entry->path);
-
 		*deletedPaths = lappend(*deletedPaths, entry->path);
 	}
+
+	/*
+	 * Drop the catalog rows for the paths we just unlinked from remote
+	 * storage in a single DELETE. Per-row DeleteInProgressFileRecord would
+	 * take a fresh plan-cache + snapshot per file, which on large backlogs (a
+	 * stuck VACUUM walk of a long in-progress queue) was a notable share of
+	 * the loop. Remote DeleteObject above is still the dominant cost, so this
+	 * is a tidy-up rather than a hot-path win; the per-iteration semantics
+	 * are preserved because the catalog DELETE is idempotent against missing
+	 * paths and DeleteRemoteFile is idempotent against missing remote
+	 * objects, so a mid-loop error still recovers via the next VACUUM cycle.
+	 */
+	DeleteInProgressFileRecords(*deletedPaths);
 
 	return hasRemainingFiles;
 }
@@ -288,25 +299,48 @@ GetInProgressFileRecords(char *location, bool isFull, List **fileRecords)
 void
 DeleteInProgressFileRecord(char *path)
 {
-	StringInfo	queryBuf = makeStringInfo();
+	List	   *paths = list_make1(path);
 
-	appendStringInfo(queryBuf,
-					 "DELETE FROM " PG_LAKE_ENGINE_NSP "." IN_PROGRESS_FILES_TABLE " "
-					 "WHERE path = $1");
+	DeleteInProgressFileRecords(paths);
+
+	list_free(paths);
+}
+
+
+/*
+ * DeleteInProgressFileRecords deletes the records for the given list of paths
+ * from the IN_PROGRESS_FILES_TABLE in a single DELETE ... WHERE path = ANY($1).
+ *
+ * A no-op if paths is empty. Used by the iceberg commit-time pre-commit hook
+ * (DeleteInProgressAddedFiles, track_iceberg_metadata_changes.c) where the
+ * number of paths to clear is the number of files newly written in the
+ * transaction -- thousands per large partitioned write. Doing one round trip
+ * + one CommandCounterIncrement for the whole set is dramatically cheaper
+ * than calling DeleteInProgressFileRecord in a loop.
+ */
+void
+DeleteInProgressFileRecords(List *paths)
+{
+	if (paths == NIL)
+		return;
+
+	char	   *query =
+		"DELETE FROM " PG_LAKE_ENGINE_NSP "." IN_PROGRESS_FILES_TABLE " "
+		"WHERE path OPERATOR(pg_catalog.=) ANY($1)";
 
 	DECLARE_SPI_ARGS(1);
-	SPI_ARG_VALUE(1, TEXTOID, path, false);
+	SPI_ARG_VALUE(1, TEXTARRAYOID, StringListToArray(paths), false);
 
 	/* switch to schema owner, we assume callers checked permissions */
 	SPI_START_EXTENSION_OWNER(PgLakeEngine);
-	SPIPlanPtr	queryPlan = GetCachedQueryPlan(queryBuf->data, spiArgCount, spiArgTypes);
+	SPIPlanPtr	queryPlan = GetCachedQueryPlan(query, spiArgCount, spiArgTypes);
 
 	bool		readOnly = false;
 
 	/* IN_PROGRESS_FILES_TABLE doesn't have any triggers */
 	bool		fireTriggers = false;
 
-	/* always read from the  latest snapshot */
+	/* always read from the latest snapshot */
 	Snapshot	snapshot = GetLatestSnapshot();
 	int			spiResult = SPI_execute_snapshot(queryPlan,
 												 spiArgValues, spiArgNulls,
@@ -314,7 +348,6 @@ DeleteInProgressFileRecord(char *path)
 												 InvalidSnapshot,
 												 readOnly, fireTriggers, 0);
 
-	/* Check result */
 	if (spiResult != SPI_OK_DELETE)
 	{
 		elog(ERROR, "SPI_execute_snapshot returned %s", SPI_result_code_string(spiResult));
