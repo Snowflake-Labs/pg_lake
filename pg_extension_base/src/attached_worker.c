@@ -335,17 +335,17 @@ StartAttachedWorkerInternal(char *command, char *databaseName, char *userName,
 
 	char	   *databaseInShm = shm_toc_allocate(toc, strlen(databaseName) + 1);
 
-	strcpy(databaseInShm, databaseName);
+	memcpy(databaseInShm, databaseName, strlen(databaseName) + 1);
 	shm_toc_insert(toc, ATTACHED_WORKER_KEY_DATABASE, databaseInShm);
 
 	char	   *userInShm = shm_toc_allocate(toc, strlen(userName) + 1);
 
-	strcpy(userInShm, userName);
+	memcpy(userInShm, userName, strlen(userName) + 1);
 	shm_toc_insert(toc, ATTACHED_WORKER_KEY_USERNAME, userInShm);
 
 	char	   *commandInShm = shm_toc_allocate(toc, strlen(command) + 1);
 
-	strcpy(commandInShm, command);
+	memcpy(commandInShm, command, strlen(command) + 1);
 	shm_toc_insert(toc, ATTACHED_WORKER_KEY_COMMAND, commandInShm);
 
 	/* set up the shared memory queue for responses */
@@ -381,8 +381,8 @@ StartAttachedWorkerInternal(char *command, char *databaseName, char *userName,
 	worker.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
 	worker.bgw_start_time = BgWorkerStart_ConsistentState;
 	worker.bgw_restart_time = BGW_NEVER_RESTART;
-	sprintf(worker.bgw_library_name, "pg_extension_base");
-	sprintf(worker.bgw_function_name, "AttachedWorkerMain");
+	snprintf(worker.bgw_library_name, BGW_MAXLEN, "pg_extension_base");
+	snprintf(worker.bgw_function_name, BGW_MAXLEN, "AttachedWorkerMain");
 	snprintf(worker.bgw_type, BGW_MAXLEN, "pg_extension_base attached worker");
 	snprintf(worker.bgw_name, BGW_MAXLEN, "pg_extension_base attached worker");
 	worker.bgw_main_arg = UInt32GetDatum(dsm_segment_handle(seg));
@@ -457,6 +457,8 @@ ProcessProtocolMessages(shm_mq_handle *queue, bool nowait,
 			break;
 
 		resetStringInfo(&msg);
+		if (messageLength > (Size) MaxAllocSize)
+			elog(ERROR, "worker message too large");
 		enlargeStringInfo(&msg, messageLength);
 		msg.len = messageLength;
 		memcpy(msg.data, data, messageLength);
