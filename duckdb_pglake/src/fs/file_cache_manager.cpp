@@ -467,7 +467,7 @@ FileCacheManager::RemoveCacheFileInternal(FileSystem &file_system, string finalC
 		fileExists = file_system.FileExists(filePath);
 		if (fileExists)
 		{
-			PGDUCK_SERVER_LOG("removing %s from cache", filePath.c_str());
+			PGDUCK_SERVER_DEBUG("removing %s from cache", filePath.c_str());
 			file_system.RemoveFile(filePath);
 		}
 	}
@@ -624,8 +624,8 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize)
 
 		if (!cacheFile.isCandidate)
 		{
-			PGDUCK_SERVER_LOG("removing %s from cache (%" PRIu64 \
-							  " bytes)", cacheFile.cacheFilePath.c_str(), cacheFile.fileSize);
+			PGDUCK_SERVER_DEBUG("removing %s from cache (%" PRIu64 \
+							    " bytes)", cacheFile.cacheFilePath.c_str(), cacheFile.fileSize);
 
 			/* for background tasks, we skip if lock cannot be acquired */
 			bool waitForLock = false;

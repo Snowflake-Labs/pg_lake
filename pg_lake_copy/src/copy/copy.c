@@ -37,6 +37,7 @@
 #include "pg_lake/copy/copy.h"
 #include "pg_lake/csv/csv_options.h"
 #include "pg_lake/csv/csv_writer.h"
+#include "pg_lake/data_file/data_file_stats.h"
 #include "pg_lake/describe/describe.h"
 #include "pg_lake/extensions/pg_lake_copy.h"
 #include "pg_lake/extensions/pg_parquet.h"
@@ -936,14 +937,31 @@ ProcessPgLakeCopyTo(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 	/*
 	 * Copy the CSV file to the destination path in the desired format.
 	 */
-	ConvertCSVFileTo(tempCSVPath, tupleDesc, maximumLineLength,
-					 destinationPath, destinationFormat, destinationCompression,
-					 copyStmt->options, schema, NIL);
+	StatsCollector *writeStats =
+		ConvertCSVFileTo(tempCSVPath, tupleDesc, maximumLineLength,
+						 destinationPath, destinationFormat, destinationCompression,
+						 copyStmt->options, schema, NIL);
 
 	if (IsCopyToStdout(copyStmt))
 	{
 		/* send the temporary file in the target format to the client */
 		CopyFileToOutput(destinationPath, tupleDesc->natts, true);
+	}
+	else if (IsSupportedURL(copyStmt->filename) && writeStats != NULL)
+	{
+		int64		totalBytes = 0;
+		ListCell   *cell = NULL;
+
+		foreach(cell, writeStats->dataFileStats)
+		{
+			DataFileStats *fileStats = lfirst(cell);
+
+			totalBytes += fileStats->fileSize;
+		}
+
+		ereport(LOG,
+				(errmsg("pg_lake: wrote " INT64_FORMAT " rows (" INT64_FORMAT " bytes) to %s",
+						writeStats->totalRowCount, totalBytes, copyStmt->filename)));
 	}
 }
 

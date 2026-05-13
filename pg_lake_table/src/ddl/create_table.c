@@ -1196,6 +1196,10 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 
 	ApplyDDLChanges(relationId, ddlOps);
 
+	ereport(LOG,
+			(errmsg("pg_lake: created iceberg table %s at %s",
+					GetQualifiedRelationName(relationId), location)));
+
 	/* signal that we already executed parent process utility */
 	return true;
 }
