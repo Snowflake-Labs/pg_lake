@@ -705,6 +705,43 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize)
 		}
 	}
 
+	int64_t added = 0, addedBytes = 0;
+	int64_t removed = 0, removedBytes = 0;
+	int64_t skippedTooLarge = 0, skippedTooOld = 0;
+	int64_t skippedConcurrent = 0, addFailed = 0;
+
+	for (const CacheAction &a : actions)
+	{
+		switch (a.action)
+		{
+			case ADDED:             added++; addedBytes += a.fileSize; break;
+			case REMOVED:           removed++; removedBytes += a.fileSize; break;
+			case SKIPPED_TOO_LARGE: skippedTooLarge++; break;
+			case SKIPPED_TOO_OLD:   skippedTooOld++; break;
+			case SKIPPED_CONCURRENT_MODIFY: skippedConcurrent++; break;
+			case ADD_FAILED:        addFailed++; break;
+			default:                break;
+		}
+	}
+
+	if (added > 0 || removed > 0 || skippedTooOld > 0 ||
+		skippedTooLarge > 0 || addFailed > 0)
+	{
+		PGDUCK_SERVER_LOG("cache pressure: added %" PRIu64 " files (%" PRIu64
+						  " bytes), evicted %" PRIu64 " files (%" PRIu64 " bytes), "
+						  "skipped %" PRIu64 " (too old), %" PRIu64 " (too large), "
+						  "%" PRIu64 " (concurrent), %" PRIu64 " (add failed); "
+						  "cache now %" PRIu64 "/%" PRIu64 " bytes",
+						  (uint64_t) added, (uint64_t) addedBytes,
+						  (uint64_t) removed, (uint64_t) removedBytes,
+						  (uint64_t) skippedTooOld,
+						  (uint64_t) skippedTooLarge,
+						  (uint64_t) skippedConcurrent,
+						  (uint64_t) addFailed,
+						  (uint64_t) totalCacheSize,
+						  (uint64_t) maxCacheSize);
+	}
+
 	return actions;
 }
 

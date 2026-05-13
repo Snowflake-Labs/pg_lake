@@ -562,9 +562,10 @@ process_parse_message(PGSession * pgSession, StringInfo inputMessage)
 		/* we have to raise errors to the client */
 		int			sentErrorMsg = handle_pgsession_error_message(status, pgSession, errorMessage);
 
-		PGDUCK_SERVER_WARN("query from client %d failed during parse: %s",
+		PGDUCK_SERVER_WARN("query from client %d failed during parse: %s; query: %.500s",
 						   pgSession->pgClient->clientSocket,
-						   errorMessage);
+						   errorMessage,
+						   queryStringCopy);
 
 		/* free error message allocated by duckdb_session_prepare */
 		pfree(errorMessage);
@@ -713,9 +714,10 @@ process_bind_message(PGSession * pgSession, StringInfo inputMessage)
 		{
 			int			sentResult = handle_pgsession_error_message(bindResult, pgSession, errorMessage);
 
-			PGDUCK_SERVER_WARN("query from client %d failed during bind: %s",
+			PGDUCK_SERVER_WARN("query from client %d failed during bind: %s; query: %.500s",
 							   pgSession->pgClient->clientSocket,
-							   errorMessage);
+							   errorMessage,
+							   pgSession->pgSessionPreparedStmt.queryString);
 
 			/* free error message allocated by duckdb_session_bind_varchar */
 			pfree(errorMessage);
