@@ -31,8 +31,25 @@ typedef struct TableMetadataOperationTracker
 	bool		relationDataFileChanged;
 	bool		relationManifestMergeRequested;
 	bool		relationSnapshotExpirationRequested;
+
+	/*
+	 * Number of single-file data-file operations recorded for this relation
+	 * in the current transaction (DATA_FILE_ADD + DATA_FILE_REMOVE). Each
+	 * such op rewrites the pg_lake catalogs that the commit-time diff joins,
+	 * so the count tracks the work the diff will do regardless of direction.
+	 * Used by pg_lake_table.commit_time_analyze_threshold.
+	 */
+	int64		dataFileChangeCount;
+
+	/*
+	 * Set when DATA_FILE_REMOVE_ALL was recorded for this relation. That
+	 * single op typically maps to thousands of catalog deletes, so we force
+	 * commit-time ANALYZE regardless of dataFileChangeCount.
+	 */
+	bool		forceCommitTimeAnalyze;
 }			TableMetadataOperationTracker;
 
+extern PGDLLEXPORT int CommitTimeCatalogAnalyzeThreshold;
 
 extern PGDLLEXPORT void ConsumeTrackedIcebergMetadataChanges(bool isVerbose);
 extern PGDLLEXPORT void PostAllRestCatalogRequests(void);

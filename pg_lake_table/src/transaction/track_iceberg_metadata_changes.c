@@ -83,11 +83,14 @@ typedef struct RestCatalogRequestPerTable
 	List	   *tableModifyRequests;
 }			RestCatalogRequestPerTable;
 
+/* GUC: see pg_lake_table.commit_time_analyze_threshold in init.c. */
+int			CommitTimeCatalogAnalyzeThreshold = 1000;
+
 static void ApplyTrackedIcebergMetadataChanges(bool isVerbose);
 static void RecordIcebergMetadataOperation(Oid relationId, TableMetadataOperationType operationType);
 static void InitTableMetadataTrackerHashIfNeeded(void);
 static void InitRestCatalogRequestsHashIfNeeded(void);
-static bool AnyTrackedRelationChangedDataFiles(HTAB *trackedRelations);
+static bool ShouldRunCommitTimeAnalyze(HTAB *trackedRelations);
 static void EnsureFreshStatsForCommitTimeDiff(void);
 static HTAB *CreateDataFilesHashForMetadata(IcebergTableMetadata * metadata);
 static void FindChangedFilesSinceMetadata(HTAB *currentFilesMap, IcebergTableMetadata * metadata,
@@ -494,8 +497,12 @@ RecordIcebergMetadataOperation(Oid relationId, TableMetadataOperationType operat
 			break;
 		case DATA_FILE_ADD:
 		case DATA_FILE_REMOVE:
+			opTracker->relationDataFileChanged = true;
+			opTracker->dataFileChangeCount++;
+			break;
 		case DATA_FILE_REMOVE_ALL:
 			opTracker->relationDataFileChanged = true;
+			opTracker->forceCommitTimeAnalyze = true;
 			break;
 		case DATA_FILE_MERGE_MANIFESTS:
 			opTracker->relationManifestMergeRequested = true;
@@ -729,10 +736,11 @@ ApplyTrackedIcebergMetadataChanges(bool isVerbose)
 	 * pick an N^2 nested loop for a query whose result is comfortably
 	 * hash-join-able, blowing commit time up by orders of magnitude.
 	 *
-	 * Only worth doing if at least one tracked relation actually has data
-	 * file changes — DDL-only or noop trackers skip the diff entirely.
+	 * Gated by pg_lake_table.commit_time_analyze_threshold: DDL-only or noop
+	 * trackers skip the diff entirely, and small inserts skip ANALYZE because
+	 * the cliff only matters once the catalogs hold many rows.
 	 */
-	if (AnyTrackedRelationChangedDataFiles(trackedRelations))
+	if (ShouldRunCommitTimeAnalyze(trackedRelations))
 	{
 		EnsureFreshStatsForCommitTimeDiff();
 	}
@@ -842,28 +850,37 @@ ApplyTrackedIcebergMetadataChanges(bool isVerbose)
 
 
 /*
- * AnyTrackedRelationChangedDataFiles returns true if at least one tracked
- * relation has data-file changes that will trigger the commit-time diff
- * query. We use this to gate the upfront ANALYZE: DDL-only or noop trackers
- * shouldn't pay even the few-ms ANALYZE cost.
+ * ShouldRunCommitTimeAnalyze decides whether ANALYZE is worth running
+ * before the per-table data-file diff query. It says yes when:
+ *
+ *   - any tracked relation saw DATA_FILE_REMOVE_ALL (one op, but maps
+ *     to thousands of catalog deletes — always blow away stale stats), or
+ *   - the total number of single-file ADD/REMOVE ops across all tracked
+ *     relations reaches pg_lake_table.commit_time_analyze_threshold.
+ *
+ * Small commits (a handful of files) skip ANALYZE entirely so they don't
+ * pay its non-incremental resampling cost on every transaction.
  */
 static bool
-AnyTrackedRelationChangedDataFiles(HTAB *trackedRelations)
+ShouldRunCommitTimeAnalyze(HTAB *trackedRelations)
 {
 	HASH_SEQ_STATUS status;
 	TableMetadataOperationTracker *opTracker;
+	int64		totalChanges = 0;
 
 	hash_seq_init(&status, trackedRelations);
 	while ((opTracker = hash_seq_search(&status)) != NULL)
 	{
-		if (opTracker->relationDataFileChanged)
+		if (opTracker->forceCommitTimeAnalyze)
 		{
 			hash_seq_term(&status);
 			return true;
 		}
+
+		totalChanges += opTracker->dataFileChangeCount;
 	}
 
-	return false;
+	return totalChanges >= CommitTimeCatalogAnalyzeThreshold;
 }
 
 

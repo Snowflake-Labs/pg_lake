@@ -44,6 +44,7 @@
 #include "pg_lake/util/s3_file_utils.h"
 #include "pg_lake/test/hide_lake_objects.h"
 #include "pg_lake/transaction/transaction_hooks.h"
+#include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "utils/guc.h"
 
 #define GUC_STANDARD 0
@@ -153,6 +154,20 @@ _PG_init(void)
 							 NULL,
 							 NULL);
 
+	DefineCustomIntVariable("pg_lake_table.commit_time_analyze_threshold",
+							"Number of data-file ADD/REMOVE ops in one transaction "
+							"that triggers commit-time ANALYZE on the pg_lake catalogs. "
+							"REMOVE_ALL always triggers ANALYZE.",
+							NULL,
+							&CommitTimeCatalogAnalyzeThreshold,
+							1000,
+							1,
+							INT_MAX,
+							PGC_USERSET,
+							GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							NULL,
+							NULL,
+							NULL);
 
 	DefineCustomIntVariable("pg_lake_table.copy_on_write_threshold",
 							"Determines the percentage of deleted rows in a file "
