@@ -201,10 +201,21 @@ RemoveInProgressFiles(char *location, bool isFull, bool isVerbose, List **delete
 			DeleteRemoteFile(entry->path);
 		}
 
-		DeleteInProgressFileRecord(entry->path);
-
 		*deletedPaths = lappend(*deletedPaths, entry->path);
 	}
+
+	/*
+	 * Drop the catalog rows for the paths we just unlinked from remote
+	 * storage in a single DELETE. Per-row DeleteInProgressFileRecord would
+	 * take a fresh plan-cache + snapshot per file, which on large backlogs (a
+	 * stuck VACUUM walk of a long in-progress queue) was a notable share of
+	 * the loop. Remote DeleteObject above is still the dominant cost, so this
+	 * is a tidy-up rather than a hot-path win; the per-iteration semantics
+	 * are preserved because the catalog DELETE is idempotent against missing
+	 * paths and DeleteRemoteFile is idempotent against missing remote
+	 * objects, so a mid-loop error still recovers via the next VACUUM cycle.
+	 */
+	DeleteInProgressFileRecords(*deletedPaths);
 
 	return hasRemainingFiles;
 }
