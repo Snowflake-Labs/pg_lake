@@ -1008,19 +1008,34 @@ FindChangedFilesSinceMetadata(HTAB *currentFilesMap, IcebergTableMetadata * meta
 
 /*
  * DeleteInProgressAddedFiles deletes the in-progress data file records
- * for the given list of data files.
+ * for the given list of data files in a single batch DELETE.
+ *
+ * Pre-commit emits one row per file added in the transaction (tens of
+ * thousands per large partitioned iceberg write); doing one DELETE per file
+ * was the simplest version but cost a snapshot, a SPI execute, and a
+ * CommandCounterIncrement each. We collect the paths and let
+ * DeleteInProgressFileRecords (pg_lake_engine) issue a single
+ * WHERE path = ANY(...) DELETE instead.
  */
 static void
 DeleteInProgressAddedFiles(Oid relationId, List *addedFiles)
 {
+	if (addedFiles == NIL)
+		return;
+
+	List	   *addedFilePaths = NIL;
 	ListCell   *fileCell = NULL;
 
 	foreach(fileCell, addedFiles)
 	{
 		TableDataFile *addedFile = lfirst(fileCell);
 
-		DeleteInProgressFileRecord(addedFile->path);
+		addedFilePaths = lappend(addedFilePaths, addedFile->path);
 	}
+
+	DeleteInProgressFileRecords(addedFilePaths);
+
+	list_free(addedFilePaths);
 }
 
 

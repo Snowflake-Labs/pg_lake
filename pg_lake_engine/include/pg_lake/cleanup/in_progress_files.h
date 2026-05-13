@@ -27,5 +27,6 @@ extern PGDLLEXPORT bool RemoveInProgressFiles(char *location, bool isFull, bool 
 extern PGDLLEXPORT void InsertInProgressFileRecord(char *path);
 extern PGDLLEXPORT void InsertInProgressFileRecordExtended(char *path, bool isPrefix, bool autoDeleteRecord);
 extern PGDLLEXPORT void DeleteInProgressFileRecord(char *path);
+extern PGDLLEXPORT void DeleteInProgressFileRecords(List *paths);
 extern PGDLLEXPORT void ReplaceInProgressPrefixPathWithFullPaths(char *prefixPath, List *fullPaths);
 extern PGDLLEXPORT void InvalidateInProgressTableVisibilityCache(void);
