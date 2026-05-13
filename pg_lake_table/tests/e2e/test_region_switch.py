@@ -6,7 +6,7 @@ from utils_pytest import *
 def test_region_switch(s3, pg_conn, pgduck_conn, extension):
     # The following URLs point to real files in a real bucket which reside
     # in us-east-2
-    url1 = f"s3://aws-public-blockchain/v1.0/btc/blocks/date=2022-01-01/part-00000-477cb938-98c9-4865-9908-4e4a20ddf021-c000.snappy.parquet"
+    url1 = f"s3://aws-public-blockchain/v1.0/btc/blocks/date=2022-01-01/part-00000-2effe04c-6bb4-4793-8265-5139b41cd751-c000.snappy.parquet"
     url2 = f"s3://aws-public-blockchain/v1.0/btc/blocks/date=2022-01-02/*.parquet"
     url3 = f"s3://aws-public-blockchain/v1.0/btc/blocks/date=2022-01-03/*.parquet"
 
@@ -109,9 +109,81 @@ def test_region_switch(s3, pg_conn, pgduck_conn, extension):
         pg_conn,
         raise_error=False,
     )
-    assert "HTTP 400" in error
+    # Depending on whether the AWS list request returns 400 or an empty body,
+    # the surfaced error differs — both indicate a region mismatch.
+    assert "HTTP 400" in error or "no list response" in error
 
     pg_conn.rollback()
+
+
+def test_file_exists_cross_region(s3, pg_conn, pgduck_conn, extension):
+    # Exercises the region-aware FileExists path. Without the fix,
+    # pg_lake_file_exists() returned false on cross-region buckets because it
+    # bypassed the region-resolution logic that OpenFile/Glob used.
+    url = f"s3://aws-public-blockchain/v1.0/btc/blocks/date=2022-01-01/part-00000-2effe04c-6bb4-4793-8265-5139b41cd751-c000.snappy.parquet"
+    missing_url = f"s3://aws-public-blockchain/v1.0/btc/blocks/date=2099-01-01/does-not-exist.parquet"
+
+    access_key_id = os.getenv("CDWREGIONTEST_ACCESS_KEY_ID")
+    secret_access_key = os.getenv("CDWREGIONTEST_SECRET_ACCESS_KEY")
+
+    # Set up credentials with the wrong region (bucket is us-east-2)
+    if access_key_id:
+        run_command(
+            f"""
+            CREATE OR REPLACE SECRET s3pglregiontest_exists (
+                TYPE S3,
+                KEY_ID '{access_key_id}',
+                SECRET '{secret_access_key}',
+                SCOPE 's3://aws-public-blockchain',
+                REGION 'us-east-1',
+                ENDPOINT 's3.amazonaws.com'
+            );
+        """,
+            pgduck_conn,
+        )
+    else:
+        run_command(
+            f"""
+            CREATE OR REPLACE SECRET s3pglregiontest_exists (
+                TYPE S3,
+                SCOPE 's3://aws-public-blockchain',
+                PROVIDER CREDENTIAL_CHAIN,
+                REGION 'us-east-1',
+                ENDPOINT 's3.amazonaws.com',
+                CHAIN 'config'
+            );
+        """,
+            pgduck_conn,
+        )
+
+    pgduck_conn.commit()
+
+    # pgduck_conn is module-scoped, so a prior test (test_region_switch) may
+    # already have populated the region cache for aws-public-blockchain.
+    # Clear it so this test actually exercises the 400/301 retry path.
+    run_command(
+        f"SELECT pg_lake_clear_region_cache('{url}')",
+        pgduck_conn,
+    )
+
+    # File that exists in the us-east-2 bucket. Must return true even though
+    # the configured region is us-east-1 — the fix makes FileExists refresh
+    # the cached region on a 400/301 instead of silently returning false.
+    result = run_query(
+        f"SELECT pg_lake_file_exists('{url}') AS exists",
+        pgduck_conn,
+    )
+    # pgduck_server speaks the PG wire protocol and returns booleans as
+    # the text 't'/'f', so compare against those.
+    assert result[0]["exists"] == "t"
+
+    # File that does not exist in the same bucket. The region should be
+    # cached from the previous call, so this is a straight 404.
+    result = run_query(
+        f"SELECT pg_lake_file_exists('{missing_url}') AS exists",
+        pgduck_conn,
+    )
+    assert result[0]["exists"] == "f"
 
 
 def test_managed_storage_region(s3, pg_conn, pgduck_conn, extension):
