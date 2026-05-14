@@ -66,8 +66,8 @@ INT16ListToArray(List *stringList)
 }
 
 /*
-* OidListToArray converts a list of OIDs to an oid array.
-*/
+ * OidListToArray converts a list of OIDs to an oid array.
+ */
 ArrayType *
 OidListToArray(List *oidList)
 {
@@ -76,7 +76,36 @@ OidListToArray(List *oidList)
 
 
 /*
-* Generic function to convert a list to an array.
+ * MakeArrayFromDatums builds a 1-D PostgreSQL array of `count` elements of
+ * `elementType` from a caller-provided Datum[]. Pass `nulls == NULL` for a
+ * "no nulls in this array" call - construct_md_array treats a NULL bitmap as
+ * all-not-null. Pass a real bool[] of length `count` when any element may be
+ * SQL NULL. Use this whenever ListToArray's "single fixed type, never null"
+ * shape is too narrow.
+ *
+ * Inspired by construct_md_array in src/backend/utils/adt/arrayfuncs.c; this
+ * is a 1-D shortcut that does the get_typlenbyvalalign for the caller. There
+ * is no exported one-liner in core that does exactly this, so the
+ * port-from-postgres-source skill's "reimplement + cite" applies.
+ */
+ArrayType *
+MakeArrayFromDatums(Datum *datums, bool *nulls, int count, Oid elementType)
+{
+	int16		typlen;
+	bool		typbyval;
+	char		typalign;
+	int			dims[1] = {count};
+	int			lbs[1] = {1};
+
+	get_typlenbyvalalign(elementType, &typlen, &typbyval, &typalign);
+
+	return construct_md_array(datums, nulls, 1, dims, lbs,
+							  elementType, typlen, typbyval, typalign);
+}
+
+
+/*
+ * Generic function to convert a list to an array.
 * The 'elementType' should be the type of the elements in the
 * list. Make sure the type is supported by the function.
 */

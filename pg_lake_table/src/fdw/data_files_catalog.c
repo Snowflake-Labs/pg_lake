@@ -24,7 +24,6 @@
 #include "catalog/pg_class.h"
 #include "catalog/pg_namespace.h"
 #include "commands/defrem.h"
-#include "commands/sequence.h"
 #include "pg_lake/csv/csv_options.h"
 #include "pg_lake/data_file/data_files.h"
 #include "pg_lake/data_file/data_file_stats.h"
@@ -33,6 +32,7 @@
 #include "pg_lake/extensions/pg_lake_engine.h"
 #include "pg_lake/fdw/catalog/row_id_mappings.h"
 #include "pg_lake/fdw/data_files_catalog.h"
+#include "pg_lake/fdw/data_files_catalog_internal.h"
 #include "pg_lake/fdw/data_file_stats_catalog.h"
 #include "pg_lake/fdw/schema_operations/field_id_mapping_catalog.h"
 #include "pg_lake/fdw/writable_table.h"
@@ -67,8 +67,6 @@
 #include "utils/syscache.h"
 
 #define DELETION_FILE_MAP_TABLE PG_LAKE_TABLE_SCHEMA ".deletion_file_map"
-#define DATA_FILES_ID_SEQUENCE_NAME "files_id_seq"
-#define TX_DATA_FILES_QUALIFIED_TABLE_NAME PG_LAKE_TABLE_SCHEMA "tx_data_file_ids"
 
 
 /* global hook override */
@@ -78,8 +76,6 @@ PgLakeAddDataFileHookType PgLakeAddDataFileHook = NULL;
 static void FillDataFileColumnStats(TableDataFile * dataFile, int64 fieldId, int rowIndex);
 static void FillPartitionFieldFromCatalog(TableDataFile * dataFile, List *partitionTransforms,
 										  int64 partitionFieldId, int rowIndex);
-static int64 AddDataFileToTable(Oid relationId, const char *path, int64 rowCount,
-								int64 fileSize, DataFileContent content, int64 rowIdStart);
 static void AddDeletionFileMapping(Oid relationId, const char *path,
 								   const char *sourcePath);
 static void AddNewRowIdMapping(Oid relationId, const char *path, List *rowIdRanges);
@@ -92,11 +88,10 @@ static HTAB *CreateDataFilesByPathHash(void);
 static List *TableDataFileHashToList(HTAB *dataFiles);
 static bool ColumnStatAlreadyAdded(List *columnStats, int64 fieldId);
 static bool PartitionFieldAlreadyAdded(Partition * partition, int64 fieldId);
-static void CreateTxDataFileIdsTempTableIfNotExists(void);
-static void InsertDataFileIdIntoTransactionTable(int64 fileId);
 static DataFileColumnStats * CreateDataFileColumnStats(int fieldId, PGType pgType,
 													   char *lowerBoundText,
 													   char *upperBoundText);
+static void ApplySingleOp(Oid relationId, TableMetadataOperation * operation);
 
 /*
  * GetTableDataFilesFromCatalog returns a list of TableDataFile for each data and deletion file
@@ -934,70 +929,6 @@ GetTotalDeletedRowCountFromCatalog(Oid relationId)
 
 
 /*
- * AddDataFileToTable inserts a new file URL into lake_table.files
- *
- * content indicates whether this is a data file or deletion file.
- *
- * For deletion files, deletedFrom indicates which file we are deleting from (can
- * be NULL if deleting from multiple files/unknown).
- */
-static int64
-AddDataFileToTable(Oid relationId, const char *path, int64 rowCount, int64 fileSize,
-				   DataFileContent content, int64 rowIdStart)
-{
-	/* switch to schema owner, we assume callers checked permissions */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeTable), SECURITY_LOCAL_USERID_CHANGE);
-
-	char	   *query =
-		"insert into " DATA_FILES_TABLE_QUALIFIED " "
-		"(id, table_name, path, row_count, file_size, content, first_row_id) "
-		"values ($1,$2,$3,$4,$5,$6,$7)";
-
-	int64		fileId = GenerateDataFileId();
-
-	DECLARE_SPI_ARGS(7);
-	SPI_ARG_VALUE(1, INT8OID, fileId, false);
-	SPI_ARG_VALUE(2, OIDOID, relationId, false);
-	SPI_ARG_VALUE(3, TEXTOID, path, false);
-	SPI_ARG_VALUE(4, INT8OID, rowCount, false);
-	SPI_ARG_VALUE(5, INT8OID, fileSize, false);
-	SPI_ARG_VALUE(6, INT4OID, (int) content, false);
-	SPI_ARG_VALUE(7, INT8OID, rowIdStart, rowIdStart == INVALID_ROW_ID);
-
-	SPI_START();
-
-	bool		readOnly = false;
-
-	SPI_EXECUTE(query, readOnly);
-
-	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
-
-	return fileId;
-}
-
-
-/*
- * GenerateDataFileId returns a unique file number that can be used for insertion
- * into files.
- */
-int64
-GenerateDataFileId(void)
-{
-	bool		missingOk = false;
-	Oid			namespaceId = get_namespace_oid(PG_LAKE_TABLE_SCHEMA, missingOk);
-	Oid			sequenceId = get_relname_relid(DATA_FILES_ID_SEQUENCE_NAME, namespaceId);
-
-	return nextval_internal(sequenceId, false);
-}
-
-
-/*
  * AddDeletionFileMapping inserts a new deletion file -> source file mapping
  * that indicates the deletion file has at least 1 deletion from the source
  * file.
@@ -1353,219 +1284,106 @@ DataFilesPartitionValuesCatalogExists(void)
 
 
 /*
- * CreateTxDataFileIdsTempTableIfNotExists creates a temporary table
- * to track data file IDs that are being added in the current transaction.
- */
-static void
-CreateTxDataFileIdsTempTableIfNotExists(void)
-{
-	const char *query =
-		"create temporary table if not exists " TX_DATA_FILES_QUALIFIED_TABLE_NAME " "
-		"(id bigint primary key) USING heap ON COMMIT DELETE ROWS;";
-
-	SPI_START_EXTENSION_OWNER(PgLakeTable);
-
-	bool		readOnly = false;
-
-	SPI_execute(query, readOnly, 0);
-
-	SPI_END();
-}
-
-
-/*
- * InsertDataFileIdIntoTransactionTable records the data file IDs, that are being
- * added in the current transaction, into tx's temporary table.
- * It creates the table if it does not exist yet.
- */
-static void
-InsertDataFileIdIntoTransactionTable(int64 fileId)
-{
-	CreateTxDataFileIdsTempTableIfNotExists();
-
-	char	   *query =
-		"insert into " TX_DATA_FILES_QUALIFIED_TABLE_NAME " "
-		"(id) "
-		"values ($1)";
-
-	DECLARE_SPI_ARGS(1);
-	SPI_ARG_VALUE(1, INT8OID, fileId, false);
-
-	SPI_START_EXTENSION_OWNER(PgLakeTable);
-
-	bool		readOnly = false;
-
-	SPI_EXECUTE(query, readOnly);
-
-	SPI_END();
-}
-
-
-/*
- * ApplyDataFileCatalogChanges is the main work horse for metadata operations
- * on the files catalog.
+ * Drive the files-catalog write phase for one transaction's metadata ops.
+ * Coalesces adjacent runs of one batchable type into one bulk SQL; everything
+ * else goes one op at a time through ApplySingleOp.
  */
 void
 ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 {
-	ListCell   *operationCell = NULL;
+	/*
+	 * Walk ops in their original order. We must never coalesce across a
+	 * non-ADD op: an ADD followed by a REMOVE/UPDATE/ADD_DELETE_MAPPING on
+	 * the same path needs the ADD already visible in lake_table.files, and
+	 * pulling non-adjacent ADDs into one INSERT would silently reorder ops
+	 * across non-ADDs. Hence the alternating-phase loop here.
+	 */
+	ListCell   *opCell = list_head(metadataOperations);
 
-	foreach(operationCell, metadataOperations)
+	while (opCell != NULL)
 	{
-		TableMetadataOperation *operation = lfirst(operationCell);
+		TableMetadataOperation *currentOp = lfirst(opCell);
+		TableMetadataOperationType runType = currentOp->type;
 
-		switch (operation->type)
+		if (BatchableType(runType))
 		{
-			case DATA_FILE_ADD:
-				{
-					int64		fileId = AddDataFileToTable(relationId,
-															operation->path,
-															operation->dataFileStats.rowCount,
-															operation->dataFileStats.fileSize,
-															operation->content,
-															operation->dataFileStats.rowIdStart);
+			/*
+			 * Hot path: a partitioned bulk INSERT emits a long run of
+			 * DATA_FILE_ADDs that collapses to one INSERT per catalog inside
+			 * FlushBatch.
+			 */
+			List	   *runOps = NIL;
 
-					/* add column stats only for data files */
-					List	   *columnStats = operation->dataFileStats.columnStats;
-
-					if (operation->content == CONTENT_DATA && columnStats != NIL)
-						AddDataFileColumnStatsToCatalog(relationId,
-														operation->path,
-														columnStats);
-
-					/*
-					 * Add partition values only for data files. Even if the
-					 * table is not partitioned, we record the partition spec
-					 * id as the table might be partitioned in the future.
-					 *
-					 * For non-partitioned tables, if the table has never been
-					 * partitioned, we record the partition spec id as 0,
-					 * which is the default spec id for non-partitioned
-					 * tables. If the table has been partitioned before, and
-					 * now it is not, we record the partition spec id as the
-					 * current/largest spec id.
-					 */
-					if (operation->partition != NULL &&
-						operation->partition->fields_length > 0 &&
-						(operation->content == CONTENT_DATA ||
-						 operation->content == CONTENT_POSITION_DELETES))
-					{
-						AddDataFilePartitionValueToCatalog(relationId,
-														   operation->partitionSpecId,
-														   fileId,
-														   operation->partition);
-					}
-
-					if (PgLakeAddDataFileHook)
-					{
-						if (operation->content == CONTENT_DATA && PgLakeAddDataFileHook())
-							/* add the file ID to the transaction's temp table */
-							InsertDataFileIdIntoTransactionTable(fileId);
-					}
-					break;
-				}
-
-			case DATA_FILE_ADD_DELETE_MAPPING:
-				AddDeletionFileMapping(relationId,
-									   operation->path,
-									   operation->deletedFrom);
-				break;
-
-			case DATA_FILE_ADD_ROW_ID_MAPPING:
-				AddNewRowIdMapping(relationId,
-								   operation->path,
-								   operation->rowIdRanges);
-				break;
-
-			case DATA_FILE_REMOVE:
-				RemoveDataFileFromTable(relationId, operation->path);
-				break;
-			case DATA_FILE_REMOVE_ALL:
-			case DATA_FILE_DROP_TABLE:
-				RemoveAllDataFilesFromCatalog(relationId);
-				break;
-			case DATA_FILE_UPDATE_DELETED_ROW_COUNT:
-				UpdateDeletedRowCount(relationId,
-									  operation->path,
-									  operation->dataFileStats.deletedRowCount);
-				break;
-
-			case DATA_FILE_MERGE_MANIFESTS:
-			case EXPIRE_OLD_SNAPSHOTS:
-			case TABLE_CREATE:
-			case TABLE_DDL:
-			case TABLE_PARTITION_BY:
-				/* no-op for non-iceberg tables */
-				/* we don't do anything for EXPIRE_OLD_SNAPSHOTS */
-				break;
-
-			default:
-				elog(ERROR, "unsupported operation (%d) on data file catalog",
-					 operation->type);
+			while (opCell != NULL &&
+				   ((TableMetadataOperation *) lfirst(opCell))->type == runType)
+			{
+				runOps = lappend(runOps, lfirst(opCell));
+				opCell = lnext(metadataOperations, opCell);
+			}
+			FlushBatch(relationId, runType, runOps);
+			list_free(runOps);
+		}
+		else
+		{
+			ApplySingleOp(relationId, currentOp);
+			opCell = lnext(metadataOperations, opCell);
 		}
 	}
 }
 
 
-/*
-* AddDataFileColumnStatsToCatalog inserts the column stats for a data file
- * into the catalog.
- */
-void
-AddDataFilePartitionValueToCatalog(Oid relationId, int32 partitionSpecId, int64 fileId,
-								   Partition * partition)
+/* Apply one non-batchable metadata op to the files catalog. */
+static void
+ApplySingleOp(Oid relationId, TableMetadataOperation * operation)
 {
-	Assert(partition != NULL);
-	Assert(partition->fields_length > 0);
-	Assert(partition->fields != NULL);
-	Assert(partitionSpecId != DEFAULT_SPEC_ID);
-
-	/* we might be adding a file to an old partition spec */
-	List	   *transforms = AllPartitionTransformList(relationId);
-
-	/* switch to schema owner, we assume callers checked permissions */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeTable), SECURITY_LOCAL_USERID_CHANGE);
-
-	SPI_START();
-
-	for (size_t fieldIndex = 0; fieldIndex < partition->fields_length; fieldIndex++)
+	switch (operation->type)
 	{
-		PartitionField *partitionField = &partition->fields[fieldIndex];
+		case DATA_FILE_ADD_DELETE_MAPPING:
+			AddDeletionFileMapping(relationId,
+								   operation->path,
+								   operation->deletedFrom);
+			break;
 
-		bool		errorIfMissing = true;
+		case DATA_FILE_ADD_ROW_ID_MAPPING:
+			AddNewRowIdMapping(relationId,
+							   operation->path,
+							   operation->rowIdRanges);
+			break;
 
-		IcebergPartitionTransform *transform =
-			FindPartitionTransformById(transforms, partitionField->field_id, errorIfMissing);
+		case DATA_FILE_REMOVE:
+			RemoveDataFileFromTable(relationId, operation->path);
+			break;
+		case DATA_FILE_REMOVE_ALL:
+		case DATA_FILE_DROP_TABLE:
+			RemoveAllDataFilesFromCatalog(relationId);
+			break;
+		case DATA_FILE_UPDATE_DELETED_ROW_COUNT:
+			UpdateDeletedRowCount(relationId,
+								  operation->path,
+								  operation->dataFileStats.deletedRowCount);
+			break;
 
-		const char *partitionValue =
-			SerializePartitionValueToPGText(partitionField->value,
-											partitionField->value_length,
-											transform);
+		case DATA_FILE_MERGE_MANIFESTS:
+		case EXPIRE_OLD_SNAPSHOTS:
+		case TABLE_CREATE:
+		case TABLE_DDL:
+		case TABLE_PARTITION_BY:
 
-		char	   *query =
-			"INSERT INTO " DATA_FILE_PARTITION_VALUES_TABLE_QUALIFIED " "
-			"(table_name, id, partition_field_id, value) "
-			"VALUES ($1,$2,$3,$4)";
+			/*
+			 * no-op on the files catalog (EXPIRE_OLD_SNAPSHOTS and the DDL
+			 * types don't touch lake_table.files)
+			 */
+			break;
 
-		DECLARE_SPI_ARGS(4);
+		case DATA_FILE_ADD:
+			/* Routed via FlushBatch by the outer loop. */
+			Assert(false);
+			break;
 
-		SPI_ARG_VALUE(1, OIDOID, relationId, false);
-		SPI_ARG_VALUE(2, INT8OID, fileId, false);
-		SPI_ARG_VALUE(3, INT4OID, partitionField->field_id, false);
-		SPI_ARG_VALUE(4, TEXTOID, partitionValue, partitionValue == NULL);
-
-		bool		readOnly = false;
-
-		SPI_EXECUTE(query, readOnly);
+		default:
+			elog(ERROR, "unsupported operation (%d) on data file catalog",
+				 operation->type);
 	}
-
-	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 }
 
 
