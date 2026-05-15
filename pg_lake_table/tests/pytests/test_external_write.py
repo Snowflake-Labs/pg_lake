@@ -74,6 +74,28 @@ def grant_iceberg_tables_access(extension, app_user, superuser_conn):
     superuser_conn.commit()
 
 
+@pytest.fixture(scope="function")
+def grant_iceberg_tables_full_access(extension, app_user, superuser_conn):
+    """Grant the app_user INSERT/UPDATE/DELETE on iceberg_tables for trigger tests."""
+    run_command(
+        f"""
+        GRANT SELECT ON lake_iceberg.tables_internal TO {app_user};
+        GRANT INSERT, UPDATE, DELETE ON pg_catalog.iceberg_tables TO {app_user};
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+    yield
+    run_command(
+        f"""
+        REVOKE SELECT ON lake_iceberg.tables_internal FROM {app_user};
+        REVOKE INSERT, UPDATE, DELETE ON pg_catalog.iceberg_tables FROM {app_user};
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+
 def test_external_write_basic(
     s3,
     pg_conn,
@@ -770,5 +792,362 @@ def test_external_write_rename_column(
     # data is intact — the rename is non-destructive
     result = run_query(f"SELECT a, b_renamed FROM {tbl} ORDER BY a", pg_conn)
     assert result == [[1, "row1"], [2, "row2"], [3, "row3"]]
+
+    pg_conn.rollback()
+
+
+def test_external_write_schema_and_data_in_two_commits(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+):
+    """
+    Two PyIceberg commits land between consecutive pg_lake reads:
+    first a schema add_column, then a write that uses the new column.
+    The sync triggered by the second commit must see both the new column
+    in the foreign table and the new file in the catalog. PyIceberg's
+    Python API serialises schema and data into separate commits, so this
+    is the closest "transactional" coverage we can express here.
+    """
+    tbl = f"{TABLE_NAMESPACE}.{TABLE_NAME}_combined"
+
+    run_command(f"CREATE TABLE {tbl} (a int) USING iceberg", pg_conn)
+    run_command(f"INSERT INTO {tbl} VALUES (1), (2)", pg_conn)
+    pg_conn.commit()
+
+    pyiceberg_table = iceberg_catalog.load_table(
+        f"{TABLE_NAMESPACE}.{TABLE_NAME}_combined"
+    )
+
+    # commit 1: add column
+    with pyiceberg_table.update_schema() as update:
+        update.add_column("b", LongType())
+
+    # commit 2: write data using the new column
+    pyiceberg_table = iceberg_catalog.load_table(
+        f"{TABLE_NAMESPACE}.{TABLE_NAME}_combined"
+    )
+    pyiceberg_table.append(
+        pa.table(
+            {"a": [3, 4], "b": [30, 40]},
+            schema=pa.schema([pa.field("a", pa.int32()), pa.field("b", pa.int64())]),
+        )
+    )
+
+    # both reads must reflect the post-second-commit state
+    result = run_query(f"SELECT a, b FROM {tbl} ORDER BY a", pg_conn)
+    assert result == [
+        [1, None],
+        [2, None],
+        [3, 30],
+        [4, 40],
+    ]
+
+    pg_conn.rollback()
+
+
+def test_external_write_nested_list_append(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+):
+    """
+    Append rows to a table that has a list column. The schema doesn't
+    change, but the sync still walks the field mapping for the list
+    element. If the data-file resync chokes on nested types, the file
+    won't be cataloged and reads will under-report.
+    """
+    tbl = f"{TABLE_NAMESPACE}.{TABLE_NAME}_list"
+
+    run_command(f"CREATE TABLE {tbl} (a int, tags int[]) USING iceberg", pg_conn)
+    run_command(
+        f"INSERT INTO {tbl} VALUES (1, ARRAY[10, 20]), (2, ARRAY[30])",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    pyiceberg_table = iceberg_catalog.load_table(f"{TABLE_NAMESPACE}.{TABLE_NAME}_list")
+    pyiceberg_table.append(
+        pa.table(
+            {"a": [3], "tags": [[40, 50, 60]]},
+            schema=pa.schema(
+                [
+                    pa.field("a", pa.int32()),
+                    pa.field("tags", pa.list_(pa.field("element", pa.int32()))),
+                ]
+            ),
+        )
+    )
+
+    result = run_query(f"SELECT a, tags FROM {tbl} ORDER BY a", pg_conn)
+    assert result == [
+        [1, [10, 20]],
+        [2, [30]],
+        [3, [40, 50, 60]],
+    ]
+
+    pg_conn.rollback()
+
+
+def test_external_write_delete_rows(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+):
+    """
+    External client deletes a subset of rows via PyIceberg's delete().
+    Whether pyiceberg uses copy-on-write or merge-on-read (position
+    deletes), the sync must end up serving the correct row set; this
+    exercises the CONTENT_POSITION_DELETES branch in SyncDataFiles when
+    pyiceberg writes delete files, and the COW path when it rewrites.
+    """
+    tbl = f"{TABLE_NAMESPACE}.{TABLE_NAME}_delete"
+
+    run_command(f"CREATE TABLE {tbl} (a int, b text) USING iceberg", pg_conn)
+    run_command(
+        f"INSERT INTO {tbl} SELECT i, 'row' || i FROM generate_series(1,10) i",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    pyiceberg_table = iceberg_catalog.load_table(
+        f"{TABLE_NAMESPACE}.{TABLE_NAME}_delete"
+    )
+
+    # delete rows where a > 5 — should leave 5 rows
+    pyiceberg_table.delete(delete_filter="a > 5")
+
+    result = run_query(f"SELECT count(*) FROM {tbl}", pg_conn)
+    assert result[0][0] == 5
+
+    result = run_query(f"SELECT a, b FROM {tbl} ORDER BY a", pg_conn)
+    assert result == [
+        [1, "row1"],
+        [2, "row2"],
+        [3, "row3"],
+        [4, "row4"],
+        [5, "row5"],
+    ]
+
+    pg_conn.rollback()
+
+
+def test_external_write_stats_populated(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+):
+    """
+    After PyIceberg writes a data file, the sync must populate
+    lake_table.data_file_column_stats with the lower/upper bounds parsed
+    from the Iceberg manifest. Without this, file-level pruning regresses
+    silently for externally-written files.
+    """
+    tbl = f"{TABLE_NAMESPACE}.{TABLE_NAME}_stats"
+
+    run_command(f"CREATE TABLE {tbl} (a int, b text) USING iceberg", pg_conn)
+    pg_conn.commit()
+
+    # write a single file via PyIceberg with a known a-range [10, 30]
+    pyiceberg_table = iceberg_catalog.load_table(
+        f"{TABLE_NAMESPACE}.{TABLE_NAME}_stats"
+    )
+    pyiceberg_table.append(
+        pa.table(
+            {"a": [10, 20, 30], "b": ["x", "y", "z"]},
+            schema=pa.schema([pa.field("a", pa.int32()), pa.field("b", pa.string())]),
+        )
+    )
+
+    # the sync should have populated column stats for both fields. Field IDs
+    # 1 and 2 correspond to a and b in the order they were declared.
+    stats = run_query(
+        f"""
+        SELECT field_id, lower_bound, upper_bound
+        FROM lake_table.data_file_column_stats
+        WHERE table_name = '{tbl}'::regclass
+        ORDER BY field_id
+        """,
+        superuser_conn,
+    )
+    assert stats == [
+        [1, "10", "30"],
+        [2, "x", "z"],
+    ], f"expected bounds for a in [10,30] and b in [x,z]; got {stats}"
+
+    pg_conn.rollback()
+
+
+def test_external_write_internal_catalog_insert_rejected(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    grant_iceberg_tables_full_access,
+):
+    """
+    INSERT into iceberg_tables for the current database catalog must be
+    rejected — internal catalog is only mutable via pg_lake DDL.
+    """
+    db_name = run_query("SELECT current_database()", pg_conn)[0][0]
+
+    error_raised = False
+    try:
+        run_command(
+            f"""
+            INSERT INTO iceberg_tables
+                (catalog_name, table_namespace, table_name, metadata_location)
+            VALUES
+                ('{db_name}', '{TABLE_NAMESPACE}', 'fake_internal',
+                 's3://fake/v1.metadata.json')
+            """,
+            pg_conn,
+        )
+    except Exception as e:
+        error_raised = True
+        assert (
+            "internal catalog is currently only supported via pg_lake_iceberg" in str(e)
+        )
+        pg_conn.rollback()
+
+    assert error_raised
+
+
+def test_external_write_internal_catalog_delete_rejected(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    grant_iceberg_tables_full_access,
+):
+    """
+    DELETE from iceberg_tables for the current database catalog must be
+    rejected — dropping internal tables goes through pg_lake DDL.
+    """
+    tbl = f"{TABLE_NAMESPACE}.{TABLE_NAME}_del_internal"
+
+    run_command(f"CREATE TABLE {tbl} (a int) USING iceberg", pg_conn)
+    pg_conn.commit()
+
+    error_raised = False
+    try:
+        run_command(
+            f"""
+            DELETE FROM iceberg_tables
+            WHERE table_namespace = '{TABLE_NAMESPACE}'
+              AND table_name = '{TABLE_NAME}_del_internal'
+            """,
+            pg_conn,
+        )
+    except Exception as e:
+        error_raised = True
+        assert (
+            "internal catalog is currently only supported via pg_lake_iceberg" in str(e)
+        )
+        pg_conn.rollback()
+
+    assert error_raised
+
+    pg_conn.rollback()
+
+
+def test_external_write_catalog_name_change_rejected(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    grant_iceberg_tables_access,
+):
+    """
+    UPDATE that changes catalog_name across the internal/external boundary
+    must be rejected — the row's identity is tied to which catalog owns it.
+    """
+    tbl = f"{TABLE_NAMESPACE}.{TABLE_NAME}_catalog_change"
+
+    run_command(f"CREATE TABLE {tbl} (a int) USING iceberg", pg_conn)
+    run_command(f"INSERT INTO {tbl} VALUES (1)", pg_conn)
+    pg_conn.commit()
+
+    # current row is internal; flip catalog_name to a foreign value
+    error_raised = False
+    try:
+        run_command(
+            f"""
+            UPDATE iceberg_tables
+            SET catalog_name = 'some_other_catalog',
+                metadata_location = metadata_location,
+                previous_metadata_location = metadata_location
+            WHERE table_namespace = '{TABLE_NAMESPACE}'
+              AND table_name = '{TABLE_NAME}_catalog_change'
+            """,
+            pg_conn,
+        )
+    except Exception as e:
+        error_raised = True
+        assert (
+            "internal catalog is currently only supported via pg_lake_iceberg" in str(e)
+        )
+        pg_conn.rollback()
+
+    assert error_raised
+
+    pg_conn.rollback()
+
+
+def test_external_write_unknown_table_rejected(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    grant_iceberg_tables_full_access,
+):
+    """
+    UPDATE on iceberg_tables for the internal catalog with a namespace/table
+    that doesn't resolve to a real relation must raise an undefined-table
+    error rather than silently no-op'ing.
+    """
+    db_name = run_query("SELECT current_database()", pg_conn)[0][0]
+
+    tbl = f"{TABLE_NAMESPACE}.{TABLE_NAME}_unknown"
+    run_command(f"CREATE TABLE {tbl} (a int) USING iceberg", pg_conn)
+    run_command(f"INSERT INTO {tbl} VALUES (1)", pg_conn)
+    pg_conn.commit()
+
+    error_raised = False
+    try:
+        run_command(
+            f"""
+            UPDATE iceberg_tables
+            SET table_name = 'definitely_not_a_real_table',
+                metadata_location = metadata_location,
+                previous_metadata_location = metadata_location
+            WHERE catalog_name = '{db_name}'
+              AND table_namespace = '{TABLE_NAMESPACE}'
+              AND table_name = '{TABLE_NAME}_unknown'
+            """,
+            pg_conn,
+        )
+    except Exception as e:
+        error_raised = True
+        assert "does not exist" in str(e)
+        pg_conn.rollback()
+
+    assert error_raised
 
     pg_conn.rollback()
