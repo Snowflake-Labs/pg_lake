@@ -291,11 +291,6 @@ DropTableAccessHook(ObjectAccessType access, Oid classId, Oid objectId,
 		}
 		else
 		{
-			char	   *qualifiedName = GetQualifiedRelationName(objectId);
-			char	   *queryArguments = "";
-			char	   *tableLocation = GetWritableTableLocation(objectId, &queryArguments);
-			int64		tableSize = GetTableSizeFromCatalog(objectId);
-
 			/* Cleanup rowid sequence, if we have it */
 			DropRowIdSequenceForRelation(objectId);
 
@@ -311,11 +306,6 @@ DropTableAccessHook(ObjectAccessType access, Oid classId, Oid objectId,
 
 			if (catalogType == REST_CATALOG_READ_WRITE)
 				RecordRestCatalogRequestInTx(objectId, REST_CATALOG_DROP_TABLE, NULL);
-
-			ereport(LOG,
-					(errmsg("pg_lake: dropped iceberg table %s at %s "
-							"(" INT64_FORMAT " bytes)",
-							qualifiedName, tableLocation, tableSize)));
 		}
 	}
 	else if (get_rel_type_id(objectId) != InvalidOid && subId != 0)

@@ -325,7 +325,7 @@ FileCacheManager::CacheFileInternal(ClientContext &context, string url, bool for
 		return 0;
 	}
 
-	PGDUCK_SERVER_LOG("adding %s to cache", finalCacheFilePath.c_str());
+	PGDUCK_SERVER_DEBUG("adding %s to cache", finalCacheFilePath.c_str());
 
 	/* create the directory if it does not exist */
 	string cacheFileDir = FileUtils::ExtractDirName(finalCacheFilePath);

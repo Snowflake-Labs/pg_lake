@@ -133,6 +133,9 @@ static List *PrepareToAddQueryResultToTable(Oid relationId,
 static List *GetPossiblePositionDeleteFiles(Oid relationId, List *sourcePathList,
 											Snapshot snapshot);
 static void ApplyMetadataChanges(Oid relationId, List *metadataOperations);
+static void RecordRemovedFile(CompactionStats * runStats, int64 fileSize,
+							  int64 liveRowCount, int64 positionDeletedRowCount);
+static void RecordAddedFile(CompactionStats * runStats, int64 fileSize, int64 rowCount);
 
 
 /* pg_lake_table.copy_on_write_threshold */
@@ -871,13 +874,9 @@ TryCompactDataFiles(Oid relationId, TupleDesc tupleDescriptor, List *candidates,
 
 		fileSizeSum += dataFile->stats.fileSize;
 
-		if (runStats != NULL)
-		{
-			runStats->filesRemoved++;
-			runStats->bytesRemoved += dataFile->stats.fileSize;
-			runStats->rowsRemoved += dataFile->stats.rowCount - dataFile->stats.deletedRowCount;
-			runStats->positionDeletedRowsResolved += dataFile->stats.deletedRowCount;
-		}
+		RecordRemovedFile(runStats, dataFile->stats.fileSize,
+						  dataFile->stats.rowCount - dataFile->stats.deletedRowCount,
+						  dataFile->stats.deletedRowCount);
 
 		filePathsToCompact = lappend(filePathsToCompact, dataFile->path);
 	}
@@ -966,7 +965,6 @@ TryCompactDataFiles(Oid relationId, TupleDesc tupleDescriptor, List *candidates,
 
 	metadataOperations = list_concat(metadataOperations, newFileOps);
 
-	if (runStats != NULL)
 	{
 		ListCell   *newFileCell = NULL;
 
@@ -974,9 +972,8 @@ TryCompactDataFiles(Oid relationId, TupleDesc tupleDescriptor, List *candidates,
 		{
 			TableMetadataOperation *addOp = lfirst(newFileCell);
 
-			runStats->filesAdded++;
-			runStats->bytesAdded += addOp->dataFileStats.fileSize;
-			runStats->rowsAdded += addOp->dataFileStats.rowCount;
+			RecordAddedFile(runStats, addOp->dataFileStats.fileSize,
+							addOp->dataFileStats.rowCount);
 		}
 	}
 
@@ -1433,6 +1430,40 @@ ApplyMetadataChanges(Oid relationId, List *metadataOperations)
 								   "table type %d",
 								   tableType)));
 	}
+}
+
+
+/*
+ * RecordRemovedFile bumps the removed-file counters in runStats for a single
+ * compaction input. No-op when runStats is NULL.
+ */
+static void
+RecordRemovedFile(CompactionStats * runStats, int64 fileSize,
+				  int64 liveRowCount, int64 positionDeletedRowCount)
+{
+	if (runStats == NULL)
+		return;
+
+	runStats->filesRemoved++;
+	runStats->bytesRemoved += fileSize;
+	runStats->rowsRemoved += liveRowCount;
+	runStats->positionDeletedRowsResolved += positionDeletedRowCount;
+}
+
+
+/*
+ * RecordAddedFile bumps the added-file counters in runStats for a single
+ * compaction output. No-op when runStats is NULL.
+ */
+static void
+RecordAddedFile(CompactionStats * runStats, int64 fileSize, int64 rowCount)
+{
+	if (runStats == NULL)
+		return;
+
+	runStats->filesAdded++;
+	runStats->bytesAdded += fileSize;
+	runStats->rowsAdded += rowCount;
 }
 
 

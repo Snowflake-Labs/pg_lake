@@ -479,6 +479,61 @@ def test_vacuum_verbose(s3, pg_conn, extension):
     pg_conn.autocommit = False
 
 
+def test_vacuum_compaction_summary_log(s3, pg_conn, extension):
+    """VACUUM should emit a single compacted-table summary line at LOG level
+    listing files/bytes/rows in and out, and the post-compaction table size."""
+    location = f"s3://{TEST_BUCKET}/test_vacuum_compaction_summary_log/"
+
+    pg_conn.autocommit = True
+
+    run_command(
+        f"""
+        CREATE TABLE test_vacuum_compaction_summary_log (
+            id int,
+            value text
+        )
+        USING pg_lake_iceberg
+        WITH (location = '{location}');
+        INSERT INTO test_vacuum_compaction_summary_log VALUES (1, 'hello');
+        INSERT INTO test_vacuum_compaction_summary_log VALUES (2, 'world');
+        SET pg_lake_iceberg.max_snapshot_age TO 0;
+        SET pg_lake_table.vacuum_compact_min_input_files TO 1;
+        SET client_min_messages TO LOG;
+    """,
+        pg_conn,
+    )
+
+    pg_conn.notices.clear()
+
+    run_command("VACUUM test_vacuum_compaction_summary_log;", pg_conn)
+
+    summary_lines = [
+        line
+        for line in pg_conn.notices
+        if "compacted iceberg table" in line
+        and "test_vacuum_compaction_summary_log" in line
+    ]
+    assert (
+        len(summary_lines) == 1
+    ), f"expected exactly one compaction summary log line, got: {summary_lines}"
+    summary = summary_lines[0]
+    assert "rewrote 2 files" in summary
+    assert "into 1 files" in summary
+    assert "table is now" in summary
+
+    run_command(
+        f"""
+        RESET client_min_messages;
+        RESET pg_lake_iceberg.max_snapshot_age;
+        RESET pg_lake_table.vacuum_compact_min_input_files;
+        DROP TABLE test_vacuum_compaction_summary_log;
+    """,
+        pg_conn,
+    )
+
+    pg_conn.autocommit = False
+
+
 def test_vacuum_multiple_metadata_ops(s3, pg_conn, extension, with_default_location):
     pg_conn.autocommit = True
 
