@@ -98,7 +98,6 @@ static bool AreSchemasEqual(IcebergTableSchema * existingSchema, DataFileSchema 
 static int32_t GetSchemaIdForIcebergTableIfExists(const TableMetadataOperationTracker * opTracker, DataFileSchema * schema);
 static int	ComparePartitionSpecsById(const ListCell *a, const ListCell *b);
 
-static char *IdentifierJson(const char *namespaceFlat, const char *tableName);
 static int	GetEffectiveMaxSnapshotAgeInSecs(Oid relationId);
 
 
@@ -429,17 +428,17 @@ PostAllRestCatalogRequests(void)
  * IdentifierJson creates a JSON representation of an iceberg table identifier
  * given its namespace and table name.
  */
-static char *
+char *
 IdentifierJson(const char *namespaceFlat, const char *tableName)
 {
 	StringInfoData out;
 
 	initStringInfo(&out);
 	appendStringInfoChar(&out, '{');
-	appendStringInfoString(&out, "\"namespace\":");
-	appendStringInfo(&out, "[\"%s\"]", namespaceFlat);
-	appendStringInfoString(&out, ",\"name\":");
-	appendStringInfo(&out, "\"%s\"", tableName);
+	appendStringInfoString(&out, "\"namespace\":[");
+	appendStringInfoString(&out, EscapeJson(namespaceFlat));
+	appendStringInfoString(&out, "],\"name\":");
+	appendStringInfoString(&out, EscapeJson(tableName));
 	appendStringInfoChar(&out, '}');
 	return out.data;
 }

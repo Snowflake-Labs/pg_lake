@@ -920,7 +920,8 @@ GetAddSnapshotCatalogRequest(IcebergSnapshot * newSnapshot, Oid relationId)
 
 	appendStringInfo(body, ",\"sequence-number\":%" PRId64, newSnapshot->sequence_number);
 	appendStringInfo(body, ",\"timestamp-ms\":%ld", (long) (PostgresTimestampToIcebergTimestampMs()));	/* coarse ms */
-	appendStringInfo(body, ",\"manifest-list\":\"%s\"", newSnapshot->manifest_list);
+	appendStringInfoString(body, ",\"manifest-list\":");
+	appendStringInfoString(body, EscapeJson(newSnapshot->manifest_list));
 	appendStringInfoString(body, ",\"summary\":{\"operation\": \"append\"}");
 	appendStringInfo(body, ",\"schema-id\":%d", newSnapshot->schema_id);
 	appendStringInfoString(body, "}}, ");	/* end add-snapshot */
