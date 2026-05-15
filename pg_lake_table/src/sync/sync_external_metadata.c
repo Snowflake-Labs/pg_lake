@@ -100,9 +100,10 @@ sync_iceberg_metadata_from_external_write(PG_FUNCTION_ARGS)
 
 	/*
 	 * Suppress the ProcessAlterTable / PostProcessRename hooks' Iceberg DDL
-	 * processing while we add/drop/rename columns. We manage field_id_mappings
-	 * ourselves and the metadata is already final on disk, so we don't want
-	 * the hooks to register duplicate mappings or schedule a metadata write.
+	 * processing while we add/drop/rename columns. We manage
+	 * field_id_mappings ourselves and the metadata is already final on disk,
+	 * so we don't want the hooks to register duplicate mappings or schedule a
+	 * metadata write.
 	 *
 	 * This is the only intended caller of SkipIcebergDDLProcessing. The flag
 	 * is process-global; we restore it in PG_FINALLY to avoid leaking state
