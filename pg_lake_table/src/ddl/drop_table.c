@@ -378,13 +378,7 @@ CheckIfTypeIsUsedInIcebergTable(Oid typeId)
 
 
 	/* set the user context */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeIceberg), SECURITY_LOCAL_USERID_CHANGE);
-
-	SPI_START();
+	SPI_START_EXTENSION_OWNER(PgLakeIceberg);
 
 	/* SPI_END will rollback this setting to previous value */
 	PreventCitusTableVisibility();
@@ -408,8 +402,6 @@ CheckIfTypeIsUsedInIcebergTable(Oid typeId)
 	bool		exists = GET_SPI_VALUE(BOOLOID, 0, 1, &isNull);
 
 	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 
 	return exists;
 }
