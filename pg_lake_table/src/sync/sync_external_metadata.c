@@ -56,6 +56,7 @@
 #include "pg_lake/iceberg/data_file_stats.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/iceberg/iceberg_type_binary_serde.h"
+#include "pg_lake/iceberg/operations/find_referenced_files.h"
 #include "pg_lake/partitioning/partition_spec_catalog.h"
 #include "pg_extension_base/spi_helpers.h"
 #include "utils/hsearch.h"
@@ -67,7 +68,8 @@ static void FetchExistingFieldMappings(Oid relationId, int **fieldIds,
 									   int16 **attnums, int *count);
 static void ExecuteAlterTableViaSPI(const char *cmd);
 static void SyncPartitionSpecsFromMetadata(Oid relationId, IcebergTableMetadata * metadata);
-static void SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata * metadata);
+static void SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
+									  const char *metadataLocation);
 static char *ColumnBoundBinaryToText(ColumnBound * bound, int fieldId,
 									 IcebergTableSchema * schema);
 static List *BuildColumnStatsForManifestEntry(IcebergManifestEntry * manifestEntry,
@@ -97,10 +99,14 @@ sync_iceberg_metadata_from_external_write(PG_FUNCTION_ARGS)
 	IcebergTableMetadata *metadata = ReadIcebergTableMetadata(metadataLocation);
 
 	/*
-	 * Suppress the ProcessAlterTable hook's Iceberg DDL processing while we
-	 * add/drop columns.  We manage field_id_mappings ourselves and do not
-	 * want the hook to register duplicate mappings or schedule a metadata
-	 * write.
+	 * Suppress the ProcessAlterTable / PostProcessRename hooks' Iceberg DDL
+	 * processing while we add/drop/rename columns. We manage field_id_mappings
+	 * ourselves and the metadata is already final on disk, so we don't want
+	 * the hooks to register duplicate mappings or schedule a metadata write.
+	 *
+	 * This is the only intended caller of SkipIcebergDDLProcessing. The flag
+	 * is process-global; we restore it in PG_FINALLY to avoid leaking state
+	 * if the sync errors out partway through.
 	 */
 	SkipIcebergDDLProcessing = true;
 
@@ -108,7 +114,7 @@ sync_iceberg_metadata_from_external_write(PG_FUNCTION_ARGS)
 	{
 		SyncSchemaFromMetadata(relationId, metadata);
 		SyncPartitionSpecsFromMetadata(relationId, metadata);
-		SyncDataFilesFromMetadata(relationId, metadata);
+		SyncDataFilesFromMetadata(relationId, metadata, metadataLocation);
 	}
 	PG_FINALLY();
 	{
@@ -218,18 +224,66 @@ SyncSchemaFromMetadata(Oid relationId, IcebergTableMetadata * metadata)
 
 		/* check if this field_id already has a mapping */
 		bool		found = false;
+		AttrNumber	existingAttnum = InvalidAttrNumber;
 
 		for (int mappingIdx = 0; mappingIdx < existingMappingCount; mappingIdx++)
 		{
 			if (existingFieldIds[mappingIdx] == fieldId)
 			{
 				found = true;
+				existingAttnum = existingAttnums[mappingIdx];
 				break;
 			}
 		}
 
 		if (found)
+		{
+			/*
+			 * Field is already mapped — but the new schema may have renamed
+			 * it. Compare names and issue RENAME COLUMN if so. Iceberg field
+			 * IDs are stable across rename, so this is the only signal we
+			 * have that a rename happened.
+			 */
+			Relation	rel = RelationIdGetRelation(relationId);
+			TupleDesc	tupdesc = RelationGetDescr(rel);
+
+			if (existingAttnum <= 0 || existingAttnum > tupdesc->natts)
+			{
+				RelationClose(rel);
+				continue;
+			}
+
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, existingAttnum - 1);
+
+			if (attr->attisdropped)
+			{
+				RelationClose(rel);
+				continue;
+			}
+
+			if (strcmp(NameStr(attr->attname), icebergField->name) == 0)
+			{
+				RelationClose(rel);
+				continue;
+			}
+
+			char	   *currentName = pstrdup(NameStr(attr->attname));
+
+			RelationClose(rel);
+
+			StringInfo	renameCmd = makeStringInfo();
+
+			appendStringInfo(renameCmd,
+							 "ALTER FOREIGN TABLE %s.%s RENAME COLUMN %s TO %s",
+							 quote_identifier(schemaName),
+							 quote_identifier(tableName),
+							 quote_identifier(currentName),
+							 quote_identifier(icebergField->name));
+
+			ExecuteAlterTableViaSPI(renameCmd->data);
+
 			continue;
+		}
 
 		/* new field: convert Iceberg type to Postgres type */
 		PGType		pgType = IcebergFieldToPostgresType(icebergField->type);
@@ -385,17 +439,27 @@ SyncPartitionSpecsFromMetadata(Oid relationId, IcebergTableMetadata * metadata)
  * SyncDataFilesFromMetadata performs a full resync of the data files in the
  * pg_lake catalog from the current snapshot in the Iceberg metadata.
  *
- * This clears all existing data files and repopulates them from the metadata.
- * Files that are no longer referenced are added to the deletion queue.
+ * The pg_lake catalog only ever indexes the current snapshot (we don't expose
+ * time-travel reads), so we clear the catalog and repopulate it by walking
+ * the current snapshot's manifests.
+ *
+ * For deletion-queue purposes we need to be more careful: Iceberg metadata
+ * typically retains older snapshots, and external clients may keep them for
+ * their own time-travel reads. A file referenced only by a non-current but
+ * still-retained snapshot must NOT be queued for deletion. We compute the
+ * set of files referenced by ANY snapshot in the new metadata using
+ * IcebergFindAllReferencedFiles, and only queue old cataloged files that
+ * are absent from that set.
  */
 static void
-SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata * metadata)
+SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
+						  const char *metadataLocation)
 {
 	TimestampTz orphanedAt = GetCurrentTransactionStartTimestamp();
 
 	/*
-	 * Get the list of old file paths before clearing, so we can queue
-	 * unreferenced files for deletion.
+	 * Get the list of old cataloged file paths before clearing, so we can
+	 * later queue files no longer referenced by any retained snapshot.
 	 */
 	bool		dataOnly = false;
 	bool		newFilesOnly = false;
@@ -406,184 +470,123 @@ SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata * metadata)
 															newFilesOnly, forUpdate,
 															NULL, snapshot);
 
-	/* build a hash table of old file paths for quick lookup */
-	HTAB	   *oldFileHash = NULL;
+	/*
+	 * Build the set of files referenced by ANY snapshot in the new metadata.
+	 * IcebergFindAllReferencedFiles walks every snapshot in the metadata, not
+	 * just the current one, so files held only by retained-but-not-current
+	 * snapshots stay in this set and won't be queued for deletion below.
+	 */
+	HTAB	   *referencedFileHash = CreateFilesHash();
 
 	if (oldDataFiles != NIL)
 	{
-		HASHCTL		hashCtl;
+		List	   *referencedFiles = IcebergFindAllReferencedFiles((char *) metadataLocation);
+		ListCell   *fileCell = NULL;
 
-		memset(&hashCtl, 0, sizeof(hashCtl));
-		hashCtl.keysize = MAX_S3_PATH_LENGTH;
-		hashCtl.entrysize = MAX_S3_PATH_LENGTH;
-		hashCtl.hcxt = CurrentMemoryContext;
-
-		oldFileHash = hash_create("old file paths",
-								  list_length(oldDataFiles),
-								  &hashCtl,
-								  HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
-
-		ListCell   *oldFileCell = NULL;
-
-		foreach(oldFileCell, oldDataFiles)
+		foreach(fileCell, referencedFiles)
 		{
-			TableDataFile *oldFile = lfirst(oldFileCell);
-			bool		found = false;
+			char	   *path = lfirst(fileCell);
 
-			hash_search(oldFileHash, oldFile->path, HASH_ENTER, &found);
+			AppendFileToHash(path, referencedFileHash);
 		}
 	}
 
 	/* clear all existing data files from the catalog */
 	RemoveAllDataFilesFromPgLakeCatalogFromTable(relationId);
 
-	/* get the current snapshot */
+	/* repopulate the catalog from the current snapshot, if any */
 	bool		missingOk = true;
 	IcebergSnapshot *currentSnapshot = GetCurrentSnapshot(metadata, missingOk);
 
-	if (currentSnapshot == NULL)
+	if (currentSnapshot != NULL)
 	{
-		/*
-		 * Empty table after external write. All old files are now
-		 * unreferenced, queue them for deletion.
-		 */
-		if (oldFileHash != NULL)
+		IcebergTableSchema *icebergSchema = GetCurrentIcebergTableSchema(metadata);
+
+		List	   *manifests = FetchManifestsFromSnapshot(currentSnapshot, NULL);
+		ListCell   *manifestCell = NULL;
+
+		foreach(manifestCell, manifests)
 		{
-			HASH_SEQ_STATUS hashSeq;
-			char	   *filePath = NULL;
+			IcebergManifest *manifest = lfirst(manifestCell);
 
-			hash_seq_init(&hashSeq, oldFileHash);
-			while ((filePath = hash_seq_search(&hashSeq)) != NULL)
+			List	   *manifestEntries =
+				FetchManifestEntriesFromManifest(manifest,
+												 IsManifestEntryStatusScannable);
+
+			ListCell   *entryCell = NULL;
+
+			foreach(entryCell, manifestEntries)
 			{
-				InsertDeletionQueueRecord(filePath, relationId, orphanedAt);
-			}
-		}
-		return;
-	}
+				IcebergManifestEntry *entry = lfirst(entryCell);
 
-	IcebergTableSchema *icebergSchema = GetCurrentIcebergTableSchema(metadata);
+				DataFile   *dataFile = &entry->data_file;
 
-	/* fetch all manifests from the current snapshot */
-	List	   *manifests = FetchManifestsFromSnapshot(currentSnapshot, NULL);
+				/* map Iceberg content type to pg_lake content type */
+				DataFileContent content;
 
-	/* track new file paths to identify unreferenced files later */
-	HTAB	   *newFileHash = NULL;
+				switch (dataFile->content)
+				{
+					case ICEBERG_DATA_FILE_CONTENT_DATA:
+						content = CONTENT_DATA;
+						break;
+					case ICEBERG_DATA_FILE_CONTENT_POSITION_DELETES:
+						content = CONTENT_POSITION_DELETES;
+						break;
+					case ICEBERG_DATA_FILE_CONTENT_EQUALITY_DELETES:
+						content = CONTENT_EQUALITY_DELETES;
+						break;
+					default:
+						elog(ERROR, "unsupported data file content type: %d",
+							 dataFile->content);
+				}
 
-	if (oldFileHash != NULL)
-	{
-		HASHCTL		hashCtl;
+				int64		fileId = AddDataFileToTable(relationId,
+														dataFile->file_path,
+														dataFile->record_count,
+														dataFile->file_size_in_bytes,
+														content,
+														INVALID_ROW_ID);
 
-		memset(&hashCtl, 0, sizeof(hashCtl));
-		hashCtl.keysize = MAX_S3_PATH_LENGTH;
-		hashCtl.entrysize = MAX_S3_PATH_LENGTH;
-		hashCtl.hcxt = CurrentMemoryContext;
+				if (content == CONTENT_DATA)
+				{
+					List	   *columnStatsList =
+						BuildColumnStatsForManifestEntry(entry, icebergSchema);
 
-		newFileHash = hash_create("new file paths",
-								  1024, /* initial estimate */
-								  &hashCtl,
-								  HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
-	}
+					if (columnStatsList != NIL)
+						AddDataFileColumnStatsToCatalog(relationId,
+														dataFile->file_path,
+														columnStatsList);
+				}
 
-	ListCell   *manifestCell = NULL;
-
-	foreach(manifestCell, manifests)
-	{
-		IcebergManifest *manifest = lfirst(manifestCell);
-
-		List	   *manifestEntries =
-			FetchManifestEntriesFromManifest(manifest,
-											 IsManifestEntryStatusScannable);
-
-		ListCell   *entryCell = NULL;
-
-		foreach(entryCell, manifestEntries)
-		{
-			IcebergManifestEntry *entry = lfirst(entryCell);
-
-			DataFile   *dataFile = &entry->data_file;
-
-			/* track this new file path */
-			if (newFileHash != NULL)
-			{
-				bool		found = false;
-
-				hash_search(newFileHash, dataFile->file_path, HASH_ENTER, &found);
-			}
-
-			/* map Iceberg content type to pg_lake content type */
-			DataFileContent content;
-
-			switch (dataFile->content)
-			{
-				case ICEBERG_DATA_FILE_CONTENT_DATA:
-					content = CONTENT_DATA;
-					break;
-				case ICEBERG_DATA_FILE_CONTENT_POSITION_DELETES:
-					content = CONTENT_POSITION_DELETES;
-					break;
-				case ICEBERG_DATA_FILE_CONTENT_EQUALITY_DELETES:
-					content = CONTENT_EQUALITY_DELETES;
-					break;
-				default:
-					elog(ERROR, "unsupported data file content type: %d",
-						 dataFile->content);
-			}
-
-			/* insert the data file into the catalog */
-			int64		fileId = AddDataFileToTable(relationId,
-													dataFile->file_path,
-													dataFile->record_count,
-													dataFile->file_size_in_bytes,
-													content,
-													INVALID_ROW_ID);
-
-			/* insert column stats if available */
-			if (content == CONTENT_DATA)
-			{
-				List	   *columnStatsList =
-					BuildColumnStatsForManifestEntry(entry, icebergSchema);
-
-				if (columnStatsList != NIL)
-					AddDataFileColumnStatsToCatalog(relationId,
-													dataFile->file_path,
-													columnStatsList);
-			}
-
-			/* insert partition values if available */
-			if (dataFile->partition.fields_length > 0 &&
-				(content == CONTENT_DATA ||
-				 content == CONTENT_POSITION_DELETES))
-			{
-				AddDataFilePartitionValueToCatalog(relationId,
-												   manifest->partition_spec_id,
-												   fileId,
-												   &dataFile->partition);
+				if (dataFile->partition.fields_length > 0 &&
+					(content == CONTENT_DATA ||
+					 content == CONTENT_POSITION_DELETES))
+				{
+					AddDataFilePartitionValueToCatalog(relationId,
+													   manifest->partition_spec_id,
+													   fileId,
+													   &dataFile->partition);
+				}
 			}
 		}
 	}
 
 	/*
-	 * Queue old files that are no longer referenced for deletion. Compare
-	 * oldFileHash with newFileHash to find unreferenced files.
+	 * Queue any previously-cataloged file that is not referenced by any
+	 * retained snapshot in the new metadata. Files referenced only by older
+	 * but still-retained snapshots are intentionally left alone.
 	 */
-	if (oldFileHash != NULL && newFileHash != NULL)
+	ListCell   *oldFileCell = NULL;
+
+	foreach(oldFileCell, oldDataFiles)
 	{
-		HASH_SEQ_STATUS hashSeq;
-		char	   *oldFilePath = NULL;
+		TableDataFile *oldFile = lfirst(oldFileCell);
+		bool		found = false;
 
-		hash_seq_init(&hashSeq, oldFileHash);
-		while ((oldFilePath = hash_seq_search(&hashSeq)) != NULL)
-		{
-			bool		found = false;
+		hash_search(referencedFileHash, oldFile->path, HASH_FIND, &found);
 
-			hash_search(newFileHash, oldFilePath, HASH_FIND, &found);
-
-			if (!found)
-			{
-				/* file is no longer referenced, queue for deletion */
-				InsertDeletionQueueRecord(oldFilePath, relationId, orphanedAt);
-			}
-		}
+		if (!found)
+			InsertDeletionQueueRecord(oldFile->path, relationId, orphanedAt);
 	}
 }
 
