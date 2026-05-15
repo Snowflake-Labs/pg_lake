@@ -25,6 +25,8 @@
 #include "catalog/pg_class.h"
 #include "commands/sequence.h"
 #include "commands/tablecmds.h"
+#include "pg_extension_base/extension_ids.h"
+#include "pg_extension_base/spi_helpers.h"
 #include "pg_lake/csv/csv_options.h"
 #include "pg_lake/extensions/pg_lake_table.h"
 #include "pg_lake/fdw/catalog/row_id_mappings.h"
@@ -101,11 +103,7 @@ void
 CreateRelationRowIdSequence(Oid relationId)
 {
 	/* create sequence as superuser */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeTable), SECURITY_LOCAL_USERID_CHANGE);
+	BEGIN_EXTENSION_OWNER_CONTEXT(PgLakeTable);
 
 	RangeVar   *sequenceName = RowIdSequenceGetRangeVar(relationId);
 
@@ -128,7 +126,7 @@ CreateRelationRowIdSequence(Oid relationId)
 
 	CommandCounterIncrement();
 
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
+	END_EXTENSION_OWNER_CONTEXT();
 }
 
 
@@ -181,16 +179,12 @@ DropRowIdSequenceForRelation(Oid relationId)
 	dropStmt->removeType = OBJECT_SEQUENCE;
 	dropStmt->missing_ok = true;
 
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeTable), SECURITY_LOCAL_USERID_CHANGE);
+	BEGIN_EXTENSION_OWNER_CONTEXT(PgLakeTable);
 
 	/* a sequence is a type of relation */
 	RemoveRelations(dropStmt);
 
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
+	END_EXTENSION_OWNER_CONTEXT();
 }
 
 
@@ -214,11 +208,7 @@ CreateRowIdRangeForNewFile(Oid relationId, int64 rowCount, int64 rowIdStart)
 	Assert(rowCount > 0);
 
 	/* setval checks permissions, so switch to superuser */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeTable), SECURITY_LOCAL_USERID_CHANGE);
+	BEGIN_EXTENSION_OWNER_CONTEXT(PgLakeTable);
 
 	if (rowIdStart == 0)
 	{
@@ -250,7 +240,7 @@ CreateRowIdRangeForNewFile(Oid relationId, int64 rowCount, int64 rowIdStart)
 	rowIdRange->rowStartNum = 0;
 	rowIdRange->numRows = rowCount;
 
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
+	END_EXTENSION_OWNER_CONTEXT();
 
 	return rowIdRange;
 }
@@ -287,11 +277,7 @@ StartReservingRowIdRange(Oid icebergRelationId)
 void
 FinishReservingRowIdRange(Oid icebergRelation, int64 rowIdOffset, int64 rowCount)
 {
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeTable), SECURITY_LOCAL_USERID_CHANGE);
+	BEGIN_EXTENSION_OWNER_CONTEXT(PgLakeTable);
 
 	Oid			sequenceOid = FindRelationRowIdSequence(icebergRelation);
 
@@ -307,7 +293,7 @@ FinishReservingRowIdRange(Oid icebergRelation, int64 rowIdOffset, int64 rowCount
 	/* Release the sequence relation lock */
 	UnlockRelationOid(sequenceOid, ExclusiveLock);
 
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
+	END_EXTENSION_OWNER_CONTEXT();
 }
 
 

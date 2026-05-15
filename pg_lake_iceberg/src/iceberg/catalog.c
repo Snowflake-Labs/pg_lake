@@ -48,13 +48,6 @@ static void ErrorIfSameTableExistsInExternalCatalog(Oid relationId);
 void
 InsertInternalIcebergCatalogTable(Oid relationId, const char *metadataLocation, bool hasCustomLocation)
 {
-	/* switch to schema owner */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeIceberg), SECURITY_LOCAL_USERID_CHANGE);
-
 	/* first, make sure a table with the same info doesn't exist */
 	ErrorIfSameTableExistsInExternalCatalog(relationId);
 
@@ -70,15 +63,13 @@ InsertInternalIcebergCatalogTable(Oid relationId, const char *metadataLocation, 
 	SPI_ARG_VALUE(2, TEXTOID, metadataLocation, metadataLocation == NULL);
 	SPI_ARG_VALUE(3, BOOLOID, hasCustomLocation, false);
 
-	SPI_START();
+	SPI_START_EXTENSION_OWNER(PgLakeIceberg);
 
 	bool		readOnly = false;
 
 	SPI_EXECUTE(query->data, readOnly);
 
 	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 }
 
 
@@ -95,18 +86,11 @@ HasCustomLocation(Oid relationId)
 					 "SELECT has_custom_location FROM %s WHERE table_name OPERATOR(pg_catalog.=) $1",
 					 ICEBERG_INTERNAL_CATALOG_TABLE_QUALIFIED);
 
-	/* add context security etc */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeIceberg), SECURITY_LOCAL_USERID_CHANGE);
-
 	DECLARE_SPI_ARGS(1);
 
 	SPI_ARG_VALUE(1, OIDOID, relationId, false);
 
-	SPI_START();
+	SPI_START_EXTENSION_OWNER(PgLakeIceberg);
 
 	bool		readOnly = true;
 
@@ -117,8 +101,6 @@ HasCustomLocation(Oid relationId)
 	bool		hasCustomLocation = GET_SPI_VALUE(BOOLOID, 0, 1, &isNull);
 
 	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 
 	/*
 	 * If it is null, it means the table is created before we introduced the
@@ -154,7 +136,7 @@ ErrorIfSameTableExistsInExternalCatalog(Oid relationId)
 	SPI_ARG_VALUE(2, TEXTOID, schemaName, false);
 	SPI_ARG_VALUE(3, TEXTOID, tableName, false);
 
-	SPI_START();
+	SPI_START_EXTENSION_OWNER(PgLakeIceberg);
 
 	bool		readOnly = true;
 
@@ -181,13 +163,6 @@ void
 InsertExternalIcebergCatalogTable(const char *catalogName, const char *tableNamespace,
 								  const char *tableName, const char *metadataLocation)
 {
-	/* switch to schema owner */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeIceberg), SECURITY_LOCAL_USERID_CHANGE);
-
 	StringInfo	query = makeStringInfo();
 
 	appendStringInfo(query,
@@ -201,16 +176,13 @@ InsertExternalIcebergCatalogTable(const char *catalogName, const char *tableName
 	SPI_ARG_VALUE(2, TEXTOID, tableNamespace, false);
 	SPI_ARG_VALUE(3, TEXTOID, tableName, false);
 	SPI_ARG_VALUE(4, TEXTOID, metadataLocation, false);
-	SPI_START();
+	SPI_START_EXTENSION_OWNER(PgLakeIceberg);
 
 	bool		readOnly = false;
 
 	SPI_EXECUTE(query->data, readOnly);
 
 	SPI_END();
-
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 }
 
 
@@ -221,13 +193,6 @@ InsertExternalIcebergCatalogTable(const char *catalogName, const char *tableName
 void
 DeleteInternalIcebergCatalogTable(Oid relationId)
 {
-	/* switch to schema owner */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeIceberg), SECURITY_LOCAL_USERID_CHANGE);
-
 	StringInfo	query = makeStringInfo();
 
 	appendStringInfo(query,
@@ -239,15 +204,13 @@ DeleteInternalIcebergCatalogTable(Oid relationId)
 
 	SPI_ARG_VALUE(1, OIDOID, relationId, false);
 
-	SPI_START();
+	SPI_START_EXTENSION_OWNER(PgLakeIceberg);
 
 	bool		readOnly = false;
 
 	SPI_EXECUTE(query->data, readOnly);
 
 	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 }
 
 /*
@@ -257,12 +220,6 @@ DeleteInternalIcebergCatalogTable(Oid relationId)
 void
 DeleteExternalIcebergCatalogTable(char *catalogName, char *schemaName, char *tableName)
 {
-	/* switch to schema owner */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeIceberg), SECURITY_LOCAL_USERID_CHANGE);
 	StringInfo	query = makeStringInfo();
 
 	appendStringInfo(query,
@@ -278,15 +235,13 @@ DeleteExternalIcebergCatalogTable(char *catalogName, char *schemaName, char *tab
 	SPI_ARG_VALUE(3, TEXTOID, tableName, false);
 
 
-	SPI_START();
+	SPI_START_EXTENSION_OWNER(PgLakeIceberg);
 
 	bool		readOnly = false;
 
 	SPI_EXECUTE(query->data, readOnly);
 
 	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 }
 
 /*
@@ -301,13 +256,6 @@ DeleteExternalIcebergCatalogTable(char *catalogName, char *schemaName, char *tab
 List *
 GetAllInternalIcebergRelationIds(void)
 {
-	/* switch to schema owner */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeIceberg), SECURITY_LOCAL_USERID_CHANGE);
-
 	MemoryContext oldcontext = CurrentMemoryContext;
 	StringInfo	query = makeStringInfo();
 
@@ -317,7 +265,7 @@ GetAllInternalIcebergRelationIds(void)
 					 "c ON t.table_name OPERATOR(pg_catalog.=) c.oid;",
 					 ICEBERG_INTERNAL_CATALOG_TABLE_QUALIFIED);
 
-	SPI_START();
+	SPI_START_EXTENSION_OWNER(PgLakeIceberg);
 
 	bool		readOnly = true;
 
@@ -339,8 +287,6 @@ GetAllInternalIcebergRelationIds(void)
 	}
 
 	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 
 	return relationIds;
 }
@@ -552,13 +498,6 @@ RelationExistsInTheIcebergCatalog(Oid relationId)
 static char *
 GetIcebergCatalogColumnInternal(Oid relationId, char *columnName, bool forUpdate, bool errorIfNotFound)
 {
-	/* switch to schema owner */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeIceberg), SECURITY_LOCAL_USERID_CHANGE);
-
 	MemoryContext oldcontext = CurrentMemoryContext;
 	StringInfo	query = makeStringInfo();
 
@@ -575,7 +514,7 @@ GetIcebergCatalogColumnInternal(Oid relationId, char *columnName, bool forUpdate
 	DECLARE_SPI_ARGS(1);
 	SPI_ARG_VALUE(1, OIDOID, relationId, false);
 
-	SPI_START();
+	SPI_START_EXTENSION_OWNER(PgLakeIceberg);
 
 	bool		readOnly = false;
 
@@ -590,7 +529,6 @@ GetIcebergCatalogColumnInternal(Oid relationId, char *columnName, bool forUpdate
 	else if (SPI_processed == 0)
 	{
 		SPI_END();
-		SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 
 		return NULL;
 	}
@@ -606,8 +544,6 @@ GetIcebergCatalogColumnInternal(Oid relationId, char *columnName, bool forUpdate
 
 	SPI_END();
 
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
-
 	return metadataLocation;
 }
 
@@ -615,13 +551,6 @@ void
 UpdateExternalCatalogMetadataLocation(char *catalogName, char *schemaName, char *tableName, const char *metadataLocation,
 									  const char *previousMetadataLocation)
 {
-	/* switch to schema owner */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeIceberg), SECURITY_LOCAL_USERID_CHANGE);
-
 	StringInfo	query = makeStringInfo();
 
 	appendStringInfo(query,
@@ -639,15 +568,13 @@ UpdateExternalCatalogMetadataLocation(char *catalogName, char *schemaName, char 
 	SPI_ARG_VALUE(4, TEXTOID, schemaName, false);
 	SPI_ARG_VALUE(5, TEXTOID, tableName, false);
 
-	SPI_START();
+	SPI_START_EXTENSION_OWNER(PgLakeIceberg);
 
 	bool		readOnly = false;
 
 	SPI_EXECUTE(query->data, readOnly);
 
 	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 }
 
 /*
@@ -659,13 +586,6 @@ void
 UpdateInternalCatalogMetadataLocation(Oid relationId, const char *metadataLocation,
 									  const char *previousMetadataLocation)
 {
-	/* switch to schema owner */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeIceberg), SECURITY_LOCAL_USERID_CHANGE);
-
 	StringInfo	query = makeStringInfo();
 
 	appendStringInfo(query,
@@ -679,15 +599,13 @@ UpdateInternalCatalogMetadataLocation(Oid relationId, const char *metadataLocati
 	SPI_ARG_VALUE(2, TEXTOID, previousMetadataLocation, (previousMetadataLocation == NULL));
 	SPI_ARG_VALUE(3, OIDOID, relationId, false);
 
-	SPI_START();
+	SPI_START_EXTENSION_OWNER(PgLakeIceberg);
 
 	bool		readOnly = false;
 
 	SPI_EXECUTE(query->data, readOnly);
 
 	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 }
 
 /*
@@ -697,28 +615,19 @@ UpdateInternalCatalogMetadataLocation(Oid relationId, const char *metadataLocati
 void
 UpdateAllInternalIcebergTablesToReadOnly(void)
 {
-	/* switch to schema owner */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeIceberg), SECURITY_LOCAL_USERID_CHANGE);
-
 	StringInfo	query = makeStringInfo();
 
 	appendStringInfo(query,
 					 "UPDATE %s SET read_only = true; ",
 					 ICEBERG_INTERNAL_CATALOG_TABLE_QUALIFIED);
 
-	SPI_START();
+	SPI_START_EXTENSION_OWNER(PgLakeIceberg);
 
 	bool		readOnly = false;
 
 	SPI_execute(query->data, readOnly, 0);
 
 	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 }
 
 /*

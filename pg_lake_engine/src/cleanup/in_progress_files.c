@@ -221,14 +221,6 @@ GetInProgressFileRecords(char *location, bool isFull, List **fileRecords)
 
 	*fileRecords = NIL;
 
-	/* switch to schema owner, we assume callers checked permissions */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeEngine),
-						   SECURITY_LOCAL_USERID_CHANGE);
-
 	MemoryContext callerContext = CurrentMemoryContext;
 
 	/* filter anything under "location" */
@@ -252,7 +244,8 @@ GetInProgressFileRecords(char *location, bool isFull, List **fileRecords)
 						 "    LIMIT " PG_LAKE_TOSTRING(PER_LOOP_IN_PROGRESS_FILE_CLEANUP_LIMIT));
 	}
 
-	SPI_START();
+	/* switch to schema owner, we assume callers checked permissions */
+	SPI_START_EXTENSION_OWNER(PgLakeEngine);
 
 	bool		readOnly = false;
 
@@ -274,8 +267,6 @@ GetInProgressFileRecords(char *location, bool isFull, List **fileRecords)
 	}
 
 	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 
 	if (isFull)
 	{
@@ -307,14 +298,7 @@ DeleteInProgressFileRecord(char *path)
 	SPI_ARG_VALUE(1, TEXTOID, path, false);
 
 	/* switch to schema owner, we assume callers checked permissions */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeEngine),
-						   SECURITY_LOCAL_USERID_CHANGE);
-
-	SPI_START();
+	SPI_START_EXTENSION_OWNER(PgLakeEngine);
 	SPIPlanPtr	queryPlan = GetCachedQueryPlan(queryBuf->data, spiArgCount, spiArgTypes);
 
 	bool		readOnly = false;
@@ -337,8 +321,6 @@ DeleteInProgressFileRecord(char *path)
 	}
 
 	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 
 	CommandCounterIncrement();
 }
@@ -497,14 +479,7 @@ InsertInProgressFileRecordExtended(char *path, bool isPrefix, bool autoDeleteRec
 
 
 	/* switch to schema owner, we assume callers checked permissions */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeEngine),
-						   SECURITY_LOCAL_USERID_CHANGE);
-
-	SPI_START();
+	SPI_START_EXTENSION_OWNER(PgLakeEngine);
 
 	bool		readOnly = false;
 
@@ -516,8 +491,6 @@ InsertInProgressFileRecordExtended(char *path, bool isPrefix, bool autoDeleteRec
 	}
 
 	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 
 	/*
 	 * Huh? We just inserted the record, why are we removing it?
@@ -728,14 +701,7 @@ FileInProgressRecordExists(char *path)
 	SPI_ARG_VALUE(1, TEXTOID, path, false);
 
 	/* switch to schema owner, we assume callers checked permissions */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeEngine),
-						   SECURITY_LOCAL_USERID_CHANGE);
-
-	SPI_START();
+	SPI_START_EXTENSION_OWNER(PgLakeEngine);
 	SPIPlanPtr	queryPlan = GetCachedQueryPlan(queryBuf->data, spiArgCount, spiArgTypes);
 
 	bool		readOnly = true;
@@ -767,8 +733,6 @@ FileInProgressRecordExists(char *path)
 	}
 
 	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 
 	return exists;
 }

@@ -749,13 +749,6 @@ GetPossiblePositionDeleteFilesFromCatalog(Oid relationId, List *sourcePathList, 
 	if (sourcePathList == NIL)
 		return NIL;
 
-	/* switch to schema owner, we assume callers checked permissions */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeTable), SECURITY_LOCAL_USERID_CHANGE);
-
 	MemoryContext callerContext = CurrentMemoryContext;
 
 	char	   *query =
@@ -765,7 +758,8 @@ GetPossiblePositionDeleteFilesFromCatalog(Oid relationId, List *sourcePathList, 
 		"where table_name OPERATOR(pg_catalog.=) $1 "
 		"and deleted_from OPERATOR(pg_catalog.=) ANY($2)";
 
-	SPI_START();
+	/* switch to schema owner, we assume callers checked permissions */
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
 
 	DECLARE_SPI_ARGS(2);
 	SPI_ARG_VALUE(1, OIDOID, relationId, false);
@@ -818,8 +812,6 @@ GetPossiblePositionDeleteFilesFromCatalog(Oid relationId, List *sourcePathList, 
 
 	SPI_END();
 
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
-
 	return result;
 }
 
@@ -836,13 +828,6 @@ GetTableSizeFromCatalog(Oid relationId)
 {
 	int64		tableSize = 0;
 
-	/* switch to schema owner, we assume callers checked permissions */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeTable), SECURITY_LOCAL_USERID_CHANGE);
-
 	/* cast sum result to bigint to avoid returning numeric */
 	char	   *metadataQuery =
 		"select "
@@ -850,10 +835,11 @@ GetTableSizeFromCatalog(Oid relationId)
 		"from " DATA_FILES_TABLE_QUALIFIED " "
 		"where table_name OPERATOR(pg_catalog.=) $1";
 
-	SPI_START();
-
 	DECLARE_SPI_ARGS(1);
 	SPI_ARG_VALUE(1, OIDOID, relationId, false);
+
+	/* switch to schema owner, we assume callers checked permissions */
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
 
 	bool		readOnly = true;
 
@@ -873,8 +859,6 @@ GetTableSizeFromCatalog(Oid relationId)
 	}
 
 	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 
 	return tableSize;
 }
@@ -941,13 +925,6 @@ static int64
 AddDataFileToTable(Oid relationId, const char *path, int64 rowCount, int64 fileSize,
 				   DataFileContent content, int64 rowIdStart)
 {
-	/* switch to schema owner, we assume callers checked permissions */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeTable), SECURITY_LOCAL_USERID_CHANGE);
-
 	char	   *query =
 		"insert into " DATA_FILES_TABLE_QUALIFIED " "
 		"(id, table_name, path, row_count, file_size, content, first_row_id) "
@@ -964,15 +941,14 @@ AddDataFileToTable(Oid relationId, const char *path, int64 rowCount, int64 fileS
 	SPI_ARG_VALUE(6, INT4OID, (int) content, false);
 	SPI_ARG_VALUE(7, INT8OID, rowIdStart, rowIdStart == INVALID_ROW_ID);
 
-	SPI_START();
+	/* switch to schema owner, we assume callers checked permissions */
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
 
 	bool		readOnly = false;
 
 	SPI_EXECUTE(query, readOnly);
 
 	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 
 	return fileId;
 }
@@ -1002,13 +978,6 @@ static void
 AddDeletionFileMapping(Oid relationId, const char *deletionFilePath,
 					   const char *dataFilePath)
 {
-	/* switch to schema owner, we assume callers checked permissions */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeTable), SECURITY_LOCAL_USERID_CHANGE);
-
 	char	   *query =
 		"insert into " DELETION_FILE_MAP_TABLE " "
 		"(table_name, path, deleted_from) "
@@ -1019,15 +988,14 @@ AddDeletionFileMapping(Oid relationId, const char *deletionFilePath,
 	SPI_ARG_VALUE(2, TEXTOID, deletionFilePath, false);
 	SPI_ARG_VALUE(3, TEXTOID, dataFilePath, false);
 
-	SPI_START();
+	/* switch to schema owner, we assume callers checked permissions */
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
 
 	bool		readOnly = false;
 
 	SPI_EXECUTE(query, readOnly);
 
 	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 }
 
 
@@ -1104,13 +1072,6 @@ GetFileIdForPath(Oid relationId, const char *path)
 static void
 UpdateDeletedRowCount(Oid relationId, const char *path, int64 deletedRowCount)
 {
-	/* switch to schema owner, we assume callers checked permissions */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeTable), SECURITY_LOCAL_USERID_CHANGE);
-
 	char	   *query =
 		"update " DATA_FILES_TABLE_QUALIFIED " "
 		"set deleted_row_count = $3 "
@@ -1121,15 +1082,14 @@ UpdateDeletedRowCount(Oid relationId, const char *path, int64 deletedRowCount)
 	SPI_ARG_VALUE(2, TEXTOID, path, false);
 	SPI_ARG_VALUE(3, INT8OID, deletedRowCount, false);
 
-	SPI_START();
+	/* switch to schema owner, we assume callers checked permissions */
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
 
 	bool		readOnly = false;
 
 	SPI_EXECUTE(query, readOnly);
 
 	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 }
 
 
@@ -1167,13 +1127,6 @@ UpdateDataFileFirstRowId(Oid relationId, int64 fileId, int64 firstRowId)
 static void
 RemoveDataFileFromTable(Oid relationId, const char *path)
 {
-	/* switch to schema owner, we assume callers checked permissions */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeTable), SECURITY_LOCAL_USERID_CHANGE);
-
 	/*
 	 * A deletion file can delete from 1 or more data files. When adding a
 	 * deletion file, we also store mappings to each of the data files it
@@ -1233,15 +1186,14 @@ RemoveDataFileFromTable(Oid relationId, const char *path)
 	SPI_ARG_VALUE(1, OIDOID, relationId, false);
 	SPI_ARG_VALUE(2, TEXTOID, path, false);
 
-	SPI_START();
+	/* switch to schema owner, we assume callers checked permissions */
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
 
 	bool		readOnly = false;
 
 	SPI_EXECUTE(query, readOnly);
 
 	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 }
 
 
@@ -1252,13 +1204,6 @@ RemoveDataFileFromTable(Oid relationId, const char *path)
 static void
 RemoveAllDataFilesFromCatalog(Oid relationId)
 {
-	/* switch to schema owner, we assume callers checked permissions */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeTable), SECURITY_LOCAL_USERID_CHANGE);
-
 	char	   *query =
 		"delete from " DATA_FILES_TABLE_QUALIFIED " "
 		"where table_name OPERATOR(pg_catalog.=) $1";
@@ -1266,15 +1211,14 @@ RemoveAllDataFilesFromCatalog(Oid relationId)
 	DECLARE_SPI_ARGS(1);
 	SPI_ARG_VALUE(1, OIDOID, relationId, false);
 
-	SPI_START();
+	/* switch to schema owner, we assume callers checked permissions */
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
 
 	bool		readOnly = false;
 
 	SPI_EXECUTE(query, readOnly);
 
 	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 }
 
 
@@ -1520,13 +1464,7 @@ AddDataFilePartitionValueToCatalog(Oid relationId, int32 partitionSpecId, int64 
 	List	   *transforms = AllPartitionTransformList(relationId);
 
 	/* switch to schema owner, we assume callers checked permissions */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeTable), SECURITY_LOCAL_USERID_CHANGE);
-
-	SPI_START();
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
 
 	for (size_t fieldIndex = 0; fieldIndex < partition->fields_length; fieldIndex++)
 	{
@@ -1560,8 +1498,6 @@ AddDataFilePartitionValueToCatalog(Oid relationId, int32 partitionSpecId, int64 
 	}
 
 	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 }
 
 

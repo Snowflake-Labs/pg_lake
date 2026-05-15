@@ -54,13 +54,6 @@ AddDataFileColumnStatsToCatalog(Oid relationId, const char *path, List *columnSt
 			continue;
 		}
 
-		/* switch to schema owner, we assume callers checked permissions */
-		Oid			savedUserId = InvalidOid;
-		int			savedSecurityContext = 0;
-
-		GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-		SetUserIdAndSecContext(ExtensionOwnerId(PgLakeTable), SECURITY_LOCAL_USERID_CHANGE);
-
 		char	   *query =
 			"insert into " DATA_FILE_COLUMN_STATS_TABLE_QUALIFIED " "
 			"(table_name, path, field_id, lower_bound, upper_bound) "
@@ -73,15 +66,14 @@ AddDataFileColumnStatsToCatalog(Oid relationId, const char *path, List *columnSt
 		SPI_ARG_VALUE(4, TEXTOID, columnStats->lowerBoundText, columnStats->lowerBoundText == NULL);
 		SPI_ARG_VALUE(5, TEXTOID, columnStats->upperBoundText, columnStats->upperBoundText == NULL);
 
-		SPI_START();
+		/* switch to schema owner, we assume callers checked permissions */
+		SPI_START_EXTENSION_OWNER(PgLakeTable);
 
 		bool		readOnly = false;
 
 		SPI_EXECUTE(query, readOnly);
 
 		SPI_END();
-
-		SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 	}
 }
 

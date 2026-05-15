@@ -162,15 +162,6 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose)
 static void
 RemoveDeletionQueuePathsFromCatalog(List *filePaths)
 {
-	/* switch to schema owner, we assume callers checked permissions */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeTable),
-						   SECURITY_LOCAL_USERID_CHANGE);
-
-
 	ArrayType  *failedRemovalPathsArray = StringListToArray(filePaths);
 
 	char	   *query =
@@ -181,15 +172,14 @@ RemoveDeletionQueuePathsFromCatalog(List *filePaths)
 
 	SPI_ARG_VALUE(1, TEXTARRAYOID, failedRemovalPathsArray, false);
 
-	SPI_START();
+	/* switch to schema owner, we assume callers checked permissions */
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
 
 	bool		readOnly = false;
 
 	SPI_EXECUTE(query, readOnly);
 
 	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 }
 
 
@@ -200,14 +190,6 @@ RemoveDeletionQueuePathsFromCatalog(List *filePaths)
 static void
 IncrementDeletionQueueRetryCount(List *failedRemovalPaths)
 {
-	/* switch to schema owner, we assume callers checked permissions */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeTable),
-						   SECURITY_LOCAL_USERID_CHANGE);
-
 	ArrayType  *failedRemovalPathsArray = StringListToArray(failedRemovalPaths);
 	bool		readOnly = false;
 
@@ -220,13 +202,12 @@ IncrementDeletionQueueRetryCount(List *failedRemovalPaths)
 
 	SPI_ARG_VALUE(1, TEXTARRAYOID, failedRemovalPathsArray, false);
 
-	SPI_START();
+	/* switch to schema owner, we assume callers checked permissions */
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
 
 	SPI_EXECUTE(updateQuery, readOnly);
 
 	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 }
 
 
@@ -237,14 +218,6 @@ IncrementDeletionQueueRetryCount(List *failedRemovalPaths)
 List *
 GetDeletionQueueRecords(Oid relationId, bool isFull)
 {
-	/* switch to schema owner, we assume callers checked permissions */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeTable),
-						   SECURITY_LOCAL_USERID_CHANGE);
-
 	MemoryContext callerContext = CurrentMemoryContext;
 	List	   *result = NIL;
 
@@ -290,7 +263,8 @@ GetDeletionQueueRecords(Oid relationId, bool isFull)
 					 ") "
 					 "SELECT path, orphaned_at, retry_count, is_prefix FROM del");
 
-	SPI_START();
+	/* switch to schema owner, we assume callers checked permissions */
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
 
 	bool		readOnly = false;
 
@@ -314,8 +288,6 @@ GetDeletionQueueRecords(Oid relationId, bool isFull)
 	}
 
 	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 
 	return result;
 }
@@ -351,14 +323,6 @@ void
 InsertDeletionQueueRecordExtended(char *path, Oid relationId, TimestampTz orphanedAt,
 								  bool isPrefix)
 {
-	/* switch to schema owner, we assume callers checked permissions */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeTable),
-						   SECURITY_LOCAL_USERID_CHANGE);
-
 	char	   *query =
 		"insert into " DELETION_QUEUE_TABLE " "
 		"(path, table_name, orphaned_at, is_prefix) "
@@ -370,13 +334,12 @@ InsertDeletionQueueRecordExtended(char *path, Oid relationId, TimestampTz orphan
 	SPI_ARG_VALUE(3, TIMESTAMPTZOID, orphanedAt, orphanedAt == 0);
 	SPI_ARG_VALUE(4, BOOLOID, isPrefix, false);
 
-	SPI_START();
+	/* switch to schema owner, we assume callers checked permissions */
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
 
 	bool		readOnly = false;
 
 	SPI_EXECUTE(query, readOnly);
 
 	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 }

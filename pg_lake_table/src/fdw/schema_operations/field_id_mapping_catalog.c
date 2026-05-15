@@ -78,13 +78,6 @@ GetRegisteredFieldForAttributes(Oid relationId, List *attrNos)
 
 	List	   *fields = NIL;
 
-	/* switch to schema owner */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeIceberg), SECURITY_LOCAL_USERID_CHANGE);
-
 	/*
 	 * Now, with SPI select from field_id_mappings (relation_id, pg_attnum)
 	 */
@@ -104,7 +97,8 @@ GetRegisteredFieldForAttributes(Oid relationId, List *attrNos)
 	SPI_ARG_VALUE(1, OIDOID, relationId, false);
 	SPI_ARG_VALUE(2, INT2ARRAYOID, INT16ListToArray(attrNos), false);
 
-	SPI_START();
+	/* switch to schema owner */
+	SPI_START_EXTENSION_OWNER(PgLakeIceberg);
 
 	/*
 	 * Although this is a read-only query, we need the execution to use the
@@ -138,9 +132,6 @@ GetRegisteredFieldForAttributes(Oid relationId, List *attrNos)
 	MemoryContextSwitchTo(spiContext);
 
 	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
-
 
 	return fields;
 
@@ -446,13 +437,6 @@ GetLeafFieldsForInternalIcebergTable(Oid relationId)
 
 	MemoryContext currentContext = CurrentMemoryContext;
 
-	/* switch to schema owner */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeIceberg), SECURITY_LOCAL_USERID_CHANGE);
-
 	StringInfo	query = makeStringInfo();
 
 	appendStringInfo(query,
@@ -503,7 +487,8 @@ GetLeafFieldsForInternalIcebergTable(Oid relationId)
 
 	SPI_ARG_VALUE(1, OIDOID, relationId, false);
 
-	SPI_START();
+	/* switch to schema owner */
+	SPI_START_EXTENSION_OWNER(PgLakeIceberg);
 
 	/*
 	 * Although this is a read-only query, we need the execution to use the
@@ -551,9 +536,6 @@ GetLeafFieldsForInternalIcebergTable(Oid relationId)
 
 	SPI_END();
 
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
-
-
 	return leafFields;
 }
 
@@ -564,13 +546,6 @@ GetLeafFieldsForInternalIcebergTable(Oid relationId)
 void
 UpdateRegisteredFieldWriteDefaultForAttribute(Oid relationId, AttrNumber attNum, const char *writeDefault)
 {
-	/* switch to schema owner */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeIceberg), SECURITY_LOCAL_USERID_CHANGE);
-
 	/*
 	 * Now, with SPI select from field_id_mappings (relation_id, pg_attnum)
 	 */
@@ -589,7 +564,8 @@ UpdateRegisteredFieldWriteDefaultForAttribute(Oid relationId, AttrNumber attNum,
 	SPI_ARG_VALUE(2, OIDOID, relationId, false);
 	SPI_ARG_VALUE(3, INT2OID, attNum, false);
 
-	SPI_START();
+	/* switch to schema owner */
+	SPI_START_EXTENSION_OWNER(PgLakeIceberg);
 
 	bool		readOnly = false;
 
@@ -603,8 +579,6 @@ UpdateRegisteredFieldWriteDefaultForAttribute(Oid relationId, AttrNumber attNum,
 	}
 
 	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 }
 
 /*
@@ -614,13 +588,6 @@ int
 GetLargestRegisteredFieldId(Oid relationId)
 {
 	int			fieldId = INVALID_FIELD_ID;
-
-	/* switch to schema owner */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeIceberg), SECURITY_LOCAL_USERID_CHANGE);
 
 	/*
 	 * Now, with SPI select from field_id_mappings (relation_id, pg_attnum)
@@ -634,7 +601,8 @@ GetLargestRegisteredFieldId(Oid relationId)
 
 	SPI_ARG_VALUE(1, OIDOID, relationId, false);
 
-	SPI_START();
+	/* switch to schema owner */
+	SPI_START_EXTENSION_OWNER(PgLakeIceberg);
 
 	/*
 	 * Although this is a read-only query, we need the execution to use the
@@ -659,8 +627,6 @@ GetLargestRegisteredFieldId(Oid relationId)
 	}
 
 	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 
 	return fieldId;
 }
@@ -822,13 +788,6 @@ static void
 InsertFieldMapping(Oid relationId, int fieldId, AttrNumber attrNo, PGType pgType,
 				   const char *writeDefault, const char *initialDefault, int parentFieldId)
 {
-	/* switch to schema owner */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeIceberg), SECURITY_LOCAL_USERID_CHANGE);
-
 	/*
 	 * Now, with SPI select from field_id_mappings (relation_id, pg_attnum)
 	 */
@@ -852,15 +811,14 @@ InsertFieldMapping(Oid relationId, int fieldId, AttrNumber attrNo, PGType pgType
 	SPI_ARG_VALUE(7, TEXTOID, initialDefault, initialDefault == NULL);
 	SPI_ARG_VALUE(8, TEXTOID, writeDefault, writeDefault == NULL);
 
-	SPI_START();
+	/* switch to schema owner */
+	SPI_START_EXTENSION_OWNER(PgLakeIceberg);
 
 	bool		readOnly = false;
 
 	SPI_EXECUTE(query->data, readOnly);
 
 	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 }
 
 
@@ -918,13 +876,6 @@ AssertAllNonDroppedColumnsHaveRegisteredFieldIds(Oid relationId)
 static List *
 GetAllRegisteredAttnumsForTopLevelColumns(Oid relationId)
 {
-	/* switch to schema owner */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeIceberg), SECURITY_LOCAL_USERID_CHANGE);
-
 	MemoryContext currentContext = CurrentMemoryContext;
 
 	/*
@@ -940,7 +891,8 @@ GetAllRegisteredAttnumsForTopLevelColumns(Oid relationId)
 
 	SPI_ARG_VALUE(1, OIDOID, relationId, false);
 
-	SPI_START();
+	/* switch to schema owner */
+	SPI_START_EXTENSION_OWNER(PgLakeIceberg);
 
 	bool		readOnly = false;
 
@@ -964,8 +916,6 @@ GetAllRegisteredAttnumsForTopLevelColumns(Oid relationId)
 	}
 
 	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 
 	return fieldIds;
 }

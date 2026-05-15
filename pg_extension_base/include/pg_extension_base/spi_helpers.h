@@ -155,13 +155,31 @@
  * This requires the caller to have ExtensionOwnerId() available
  * (from pg_extension_base/extension_ids.h).
  *
+ * Because the SPI queries that follow are evaluated as the extension owner
+ * (which often coincides with the bootstrap superuser), we lock down the
+ * search-path to pg_catalog,pg_temp and add SECURITY_RESTRICTED_OPERATION
+ * so that:
+ *   - unqualified references in our SPI queries (operators like ->, casts
+ *     like ::jsonb, set-returning functions like jsonb_array_elements) cannot
+ *     be hijacked by overloads the calling user placed in their search_path,
+ *   - SET, RESET, role changes, and other side-effecting commands the caller
+ *     might smuggle in via parameters are rejected.
+ *
+ * GUC_ACTION_SAVE causes AtEOXact_GUC (via RESET_QUERY_TRACKING in SPI_END)
+ * to restore the prior search_path even if the SPI block raises.
+ *
  * Usage: SPI_START_EXTENSION_OWNER(PgLakeTable)
  */
 #define SPI_START_EXTENSION_OWNER(Extension) \
 	SPI_START_VARS() \
 	GetUserIdAndSecContext(&_savedUserId, &_savedSecurityContext); \
-	SetUserIdAndSecContext(ExtensionOwnerId(Extension), SECURITY_LOCAL_USERID_CHANGE); \
+	SetUserIdAndSecContext(ExtensionOwnerId(Extension), \
+						   SECURITY_LOCAL_USERID_CHANGE | \
+						   SECURITY_RESTRICTED_OPERATION); \
 	DISABLE_QUERY_TRACKING() \
+	(void) set_config_option("search_path", "pg_catalog, pg_temp", \
+							 PGC_SUSET, PGC_S_SESSION, \
+							 GUC_ACTION_SAVE, true, 0, false); \
 	SPI_connect();
 
 #define SPI_END() \
@@ -169,5 +187,39 @@
 		SetUserIdAndSecContext(_savedUserId, _savedSecurityContext); \
 	RESET_QUERY_TRACKING(); \
 	SPI_finish();
+
+/*
+ * BEGIN_EXTENSION_OWNER_CONTEXT / END_EXTENSION_OWNER_CONTEXT are the non-SPI
+ * counterparts to SPI_START_EXTENSION_OWNER / SPI_END. Use them when running
+ * direct PostgreSQL operations (DefineSequence, RemoveRelations, setval(),
+ * etc.) under the extension owner's identity, where the SPI machinery is not
+ * involved.
+ *
+ * They apply the same SECURITY_RESTRICTED_OPERATION + pinned search_path
+ * lockdown as the SPI variant, so that unqualified function/operator lookups
+ * in any indirectly-invoked SQL (sequence default expressions, RLS policies,
+ * etc.) cannot be hijacked via the caller's search_path, and the called
+ * operation cannot smuggle in SET / role changes.
+ *
+ * Usage:
+ *     BEGIN_EXTENSION_OWNER_CONTEXT(PgLakeTable);
+ *     ... direct calls ...
+ *     END_EXTENSION_OWNER_CONTEXT();
+ */
+#define BEGIN_EXTENSION_OWNER_CONTEXT(Extension) \
+	SPI_START_VARS() \
+	GetUserIdAndSecContext(&_savedUserId, &_savedSecurityContext); \
+	SetUserIdAndSecContext(ExtensionOwnerId(Extension), \
+						   SECURITY_LOCAL_USERID_CHANGE | \
+						   SECURITY_RESTRICTED_OPERATION); \
+	int			_extOwnerGUCNestLevel = NewGUCNestLevel(); \
+	(void) set_config_option("search_path", "pg_catalog, pg_temp", \
+							 PGC_SUSET, PGC_S_SESSION, \
+							 GUC_ACTION_SAVE, true, 0, false);
+
+#define END_EXTENSION_OWNER_CONTEXT() \
+	AtEOXact_GUC(true, _extOwnerGUCNestLevel); \
+	if (_savedUserId != InvalidOid) \
+		SetUserIdAndSecContext(_savedUserId, _savedSecurityContext);
 
 #endif

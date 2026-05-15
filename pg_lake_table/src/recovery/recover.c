@@ -82,14 +82,7 @@ RunAttachedCommand(char *command, char *databaseName)
 					 quote_literal_cstr(command), quote_literal_cstr(databaseName));
 
 	/* switch to schema owner, we assume callers checked permissions */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeTable),
-						   SECURITY_LOCAL_USERID_CHANGE);
-
-	SPI_START();
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
 
 	bool		readOnly = false;
 
@@ -101,8 +94,6 @@ RunAttachedCommand(char *command, char *databaseName)
 	}
 
 	SPI_END();
-
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
 }
 
 
