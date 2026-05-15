@@ -1,4 +1,6 @@
 import os
+from decimal import Decimal
+
 import pytest
 from utils_pytest import *
 
@@ -21,19 +23,19 @@ def test_list_files_s3(pgduck_conn, s3):
     assert len(result) == 2
     assert result[0] == [
         prefix + "/large.csv",
-        "707",
+        707,
         '"81d51ab47a013964a866395b6921e30d"',
     ]
     assert result[1] == [
         prefix + "/small.csv",
-        "14",
+        14,
         '"18a74ddc08d592acc32079bdedf76b99"',
     ]
 
     result = run_query(
         f"select sum(file_size) from pg_lake_list_files('{prefix}/*')", pgduck_conn
     )
-    assert result[0][0] == "721"
+    assert result[0][0] == Decimal("721")
 
 
 def test_list_files_azure(pgduck_conn, azure):
@@ -53,13 +55,13 @@ def test_list_files_azure(pgduck_conn, azure):
         pgduck_conn,
     )
     assert len(result) == 2
-    assert result[0] == [prefix + "/large.csv", "707"]
-    assert result[1] == [prefix + "/small.csv", "14"]
+    assert result[0] == [prefix + "/large.csv", 707]
+    assert result[1] == [prefix + "/small.csv", 14]
 
     result = run_query(
         f"select sum(file_size) from pg_lake_list_files('{prefix}/*')", pgduck_conn
     )
-    assert result[0][0] == "721"
+    assert result[0][0] == Decimal("721")
 
 
 def test_list_files_paginate(pgduck_conn, s3, azure):

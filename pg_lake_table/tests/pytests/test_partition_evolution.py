@@ -104,7 +104,7 @@ def test_partition_evolution(
 
     for p in files_stage1:
         rows = run_query(f"SELECT count(*) FROM '{p}'", pgduck_conn)[0][0]
-        assert rows == "2"
+        assert rows == 2
         _file_holds_single_key(p, KEY_STAGE1, pgduck_conn)
 
     # ─── stage 2  ── ALTER SET … + second insert (8 new partitions) ────────
@@ -135,7 +135,7 @@ def test_partition_evolution(
     assert len(files_stage2) == 8
 
     for p in files_stage2:
-        assert run_query(f"SELECT count(*) FROM '{p}'", pgduck_conn)[0][0] == "2"
+        assert run_query(f"SELECT count(*) FROM '{p}'", pgduck_conn)[0][0] == 2
         _file_holds_single_key(p, KEY_STAGE2, pgduck_conn)
 
     # ─── stage 3  ── ALTER DROP partition_by + final insert (un-partitioned) ─
@@ -153,7 +153,7 @@ def test_partition_evolution(
     assert len(files_stage3) == 1
 
     path = next(iter(files_stage3))
-    assert run_query(f"SELECT count(*) FROM '{path}'", pgduck_conn)[0][0] == "4"
+    assert run_query(f"SELECT count(*) FROM '{path}'", pgduck_conn)[0][0] == 4
 
     # ─── cleanup session GUC ────────────────────────────────────────────────
     pg_conn.rollback()

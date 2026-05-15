@@ -1,6 +1,7 @@
 import os
 import pytest
 import time
+from decimal import Decimal
 from utils_pytest import *
 
 CACHE_FILE_PREFIX = "pgl-cache."
@@ -63,11 +64,11 @@ def run_pg_lake_cache_file_test_for_protocol(protocol, prefix, pgduck_conn, clie
         f"SELECT file_size FROM pg_lake_list_cache() WHERE url = '{url}'", pgduck_conn
     )
     assert len(results) == 1
-    assert results[0][0] == str(cached_path.stat().st_size)
+    assert results[0][0] == cached_path.stat().st_size
 
     # Verify that we go the result from S3
     results = run_query(f"SELECT count(*) FROM '{url}'", pgduck_conn)
-    assert results[0][0] == "100"
+    assert results[0][0] == 100
 
     # Sneakily write something else to the cached file
     run_command(
@@ -79,11 +80,11 @@ def run_pg_lake_cache_file_test_for_protocol(protocol, prefix, pgduck_conn, clie
 
     # Verify that we are indeed reading from cache when using the URL
     results = run_query(f"SELECT count(*) FROM '{url}'", pgduck_conn)
-    assert results[0][0] == "50"
+    assert results[0][0] == 50
 
     # Can bypass cache using nocache prefix
     results = run_query(f"SELECT count(*) FROM 'nocache{url}'", pgduck_conn)
-    assert results[0][0] == "100"
+    assert results[0][0] == 100
 
     # Calling pg_lake_cache_file without force does not change that
     run_command(
@@ -95,7 +96,7 @@ def run_pg_lake_cache_file_test_for_protocol(protocol, prefix, pgduck_conn, clie
 
     # Verify that we are still from cache when using the URL
     results = run_query(f"SELECT count(*) FROM '{url}'", pgduck_conn)
-    assert results[0][0] == "50"
+    assert results[0][0] == 50
 
     # Calling pg_lake_cache_file with force will restore the real file
     run_command(
@@ -107,11 +108,11 @@ def run_pg_lake_cache_file_test_for_protocol(protocol, prefix, pgduck_conn, clie
 
     # Verify that we go the result from S3
     results = run_query(f"SELECT count(*) FROM '{url}'", pgduck_conn)
-    assert results[0][0] == "100"
+    assert results[0][0] == 100
 
     # Remove the cached file
     results = run_query(f"CALL pg_lake_uncache_file('{url}');", pgduck_conn)
-    assert results[0][0] == "t"
+    assert results[0][0] is True
 
     # Verify the file is gone
     assert not cached_path.exists()
@@ -143,7 +144,7 @@ def test_invalid_url(s3, pgduck_conn):
 
     # Trying to remove a non-existent URL just returns false
     results = run_query(f"CALL pg_lake_uncache_file('{url_notexists}');", pgduck_conn)
-    assert results[0][0] == "f"
+    assert results[0][0] is False
 
     pgduck_conn.rollback()
 
@@ -575,7 +576,7 @@ def test_concurrent_cache_same_file_no_force(s3, pgduck_conn):
 
     # ensure that this waited until the other pg_lake_cache_file
     # finished, then returned 0 bytes
-    assert results[0][0] == "0"
+    assert results[0][0] == 0
 
     t1.join()
 
@@ -746,7 +747,7 @@ def test_copy_concurrently(s3, pgduck_conn):
 
     # Verify that we always have the final results by the second COPY
     results = run_query(f"SELECT count(*) FROM '{url_1}'", pgduck_conn)
-    assert results[0][0] == "2000"
+    assert results[0][0] == 2000
 
 
 def test_pg_lake_remove_file(s3, pgduck_conn):
@@ -773,7 +774,7 @@ def run_test_pg_lake_remove_file(query_arg, s3, pgduck_conn):
 
     # Verify that we can read from the file
     results = run_query(f"SELECT sum(s) FROM '{url}'", pgduck_conn)
-    assert results[0][0] == "5050"
+    assert results[0][0] == Decimal("5050")
 
     # Remove the file
     run_command(

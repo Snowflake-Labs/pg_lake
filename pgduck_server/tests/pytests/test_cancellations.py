@@ -117,7 +117,7 @@ def test_query_cancellation_for_multiple_clients(pgduck_server, num_clients=20):
         # make sure we can still run queries successfully
         cur = conn.cursor()
         cur.execute("SELECT 1")
-        assert cur.fetchall() == [("1",)]
+        assert cur.fetchall() == [(1,)]
 
     # Wait for all threads to finish
     for _, thread in threads:

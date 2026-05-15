@@ -30,7 +30,7 @@ def test_copy_to_parquet_s3(s3, pgduck_conn):
 
     results = perform_query_on_cursor("SELECT count(*) FROM mytable", pgduck_conn)
     assert len(results) == 1
-    assert results[0][0] == "100"
+    assert results[0][0] == 100
 
     pgduck_conn.rollback()
 
@@ -59,7 +59,7 @@ def test_copy_to_parquet_gcs(gcs, pgduck_conn):
 
     results = perform_query_on_cursor("SELECT count(*) FROM mytable", pgduck_conn)
     assert len(results) == 1
-    assert results[0][0] == "100"
+    assert results[0][0] == 100
 
     pgduck_conn.rollback()
 
@@ -88,7 +88,7 @@ def test_copy_to_parquet_azure(azure, pgduck_conn):
 
     results = perform_query_on_cursor("SELECT count(*) FROM mytable", pgduck_conn)
     assert len(results) == 1
-    assert results[0][0] == "100"
+    assert results[0][0] == 100
 
     pgduck_conn.rollback()
 
@@ -120,7 +120,7 @@ def test_copy_to_parquet_azure_long_prefix(azure, pgduck_conn):
 
     results = perform_query_on_cursor("SELECT count(*) FROM mytable", pgduck_conn)
     assert len(results) == 1
-    assert results[0][0] == "100"
+    assert results[0][0] == 100
 
     pgduck_conn.rollback()
 
