@@ -1,6 +1,7 @@
 import pytest
 import pyarrow as pa
 from pyiceberg.catalog.sql import SqlCatalog
+from pyiceberg.transforms import IdentityTransform
 from pyiceberg.types import LongType
 
 from utils_pytest import *
@@ -362,8 +363,12 @@ def test_external_write_deletion_queue_on_overwrite(
     iceberg_catalog,
 ):
     """
-    Verify that when PyIceberg overwrites a table, the old data files are
-    added to the deletion queue.
+    PyIceberg overwrite() retains the previous snapshot by default, so
+    the old data files are still referenced via that snapshot. The sync
+    must NOT queue them for deletion — doing so would break time-travel
+    reads from external clients. (Snapshot expiration eventually orphans
+    them, but that's a separate path not exercised here; pyiceberg has
+    no Python API for expiration as of this writing.)
     """
     tbl = f"{TABLE_NAMESPACE}.{TABLE_NAME}_del_overwrite"
 
@@ -403,38 +408,23 @@ def test_external_write_deletion_queue_on_overwrite(
     result = run_query(f"SELECT count(*) FROM {tbl}", pg_conn)
     assert result[0][0] == 2
 
-    # verify old files are in the deletion queue
+    # the old data files are still referenced by the retained pre-overwrite
+    # snapshot, so they must NOT be in the deletion queue.
     queued_files = run_query(
         f"""
         SELECT dq.path
         FROM lake_engine.deletion_queue dq
         JOIN pg_class c ON c.oid = dq.table_name
         WHERE c.relname = '{TABLE_NAME}_del_overwrite'
-        ORDER BY dq.path
         """,
         superuser_conn,
     )
     queued_file_paths = [row[0] for row in queued_files]
 
-    # all old files should be in the deletion queue
     for old_path in old_file_paths:
         assert (
-            old_path in queued_file_paths
-        ), f"Old file {old_path} should be in deletion queue"
-
-    # verify orphaned_at timestamp is set
-    timestamps = run_query(
-        f"""
-        SELECT dq.orphaned_at IS NOT NULL
-        FROM lake_engine.deletion_queue dq
-        JOIN pg_class c ON c.oid = dq.table_name
-        WHERE c.relname = '{TABLE_NAME}_del_overwrite'
-        """,
-        superuser_conn,
-    )
-    assert all(
-        row[0] for row in timestamps
-    ), "All queued files should have orphaned_at timestamp"
+            old_path not in queued_file_paths
+        ), f"Old file {old_path} is still referenced by a retained snapshot and must not be queued"
 
     pg_conn.rollback()
 
@@ -448,8 +438,11 @@ def test_external_write_deletion_queue_on_empty(
     iceberg_catalog,
 ):
     """
-    Verify that when PyIceberg overwrites a table with empty data,
-    ALL old data files are added to the deletion queue.
+    Overwriting with empty data via PyIceberg still retains the previous
+    snapshot (which references the original data files), so those files
+    must NOT be queued for deletion despite the table being logically
+    empty. They become orphaned only after the retaining snapshot is
+    expired.
     """
     tbl = f"{TABLE_NAMESPACE}.{TABLE_NAME}_del_empty"
 
@@ -485,27 +478,23 @@ def test_external_write_deletion_queue_on_empty(
     result = run_query(f"SELECT count(*) FROM {tbl}", pg_conn)
     assert result[0][0] == 0
 
-    # verify ALL old files are in the deletion queue
+    # the original files are still referenced by the retained pre-overwrite
+    # snapshot, so they must NOT be in the deletion queue.
     queued_files = run_query(
         f"""
         SELECT dq.path
         FROM lake_engine.deletion_queue dq
         JOIN pg_class c ON c.oid = dq.table_name
         WHERE c.relname = '{TABLE_NAME}_del_empty'
-        ORDER BY dq.path
         """,
         superuser_conn,
     )
     queued_file_paths = [row[0] for row in queued_files]
 
-    assert (
-        len(queued_file_paths) == old_file_count
-    ), f"Expected {old_file_count} files in deletion queue, got {len(queued_file_paths)}"
-
     for old_path in old_file_paths:
         assert (
-            old_path in queued_file_paths
-        ), f"Old file {old_path} should be in deletion queue"
+            old_path not in queued_file_paths
+        ), f"Old file {old_path} is still referenced by a retained snapshot and must not be queued"
 
     pg_conn.rollback()
 
@@ -519,8 +508,12 @@ def test_external_write_deletion_queue_only_old_files(
     iceberg_catalog,
 ):
     """
-    Verify that only old files (not new files) are added to the deletion queue
-    after an external write that keeps some files.
+    Across an append + overwrite sequence, the deletion queue must stay
+    empty: every file remains referenced by at least one retained snapshot
+    (the pre-append snapshot for the originals, the post-append snapshot
+    for the appended ones, the post-overwrite snapshot for the new ones).
+    Nothing is orphaned until snapshot expiration runs, which happens
+    outside the sync path.
     """
     tbl = f"{TABLE_NAMESPACE}.{TABLE_NAME}_del_selective"
 
@@ -529,48 +522,21 @@ def test_external_write_deletion_queue_only_old_files(
     run_command(f"INSERT INTO {tbl} VALUES (1), (2), (3)", pg_conn)
     pg_conn.commit()
 
-    # get old data files
-    old_files = run_query(
-        f"""
-        SELECT f.path
-        FROM lake_table.files f
-        JOIN pg_class c ON c.oid = f.table_name
-        WHERE c.relname = '{TABLE_NAME}_del_selective'
-        ORDER BY f.path
-        """,
-        superuser_conn,
-    )
-    old_file_paths = [row[0] for row in old_files]
-
-    # append more data via PyIceberg
+    # append more data via PyIceberg (creates a second snapshot)
     pyiceberg_table = iceberg_catalog.load_table(
         f"{TABLE_NAMESPACE}.{TABLE_NAME}_del_selective"
     )
-    new_data = pa.table(
-        {"a": [4, 5, 6]},
-        schema=pa.schema([pa.field("a", pa.int32())]),
+    pyiceberg_table.append(
+        pa.table(
+            {"a": [4, 5, 6]},
+            schema=pa.schema([pa.field("a", pa.int32())]),
+        )
     )
-    pyiceberg_table.append(new_data)
 
-    # verify we have 6 rows
     result = run_query(f"SELECT count(*) FROM {tbl}", pg_conn)
     assert result[0][0] == 6
 
-    # get new data files (after append)
-    new_files = run_query(
-        f"""
-        SELECT f.path
-        FROM lake_table.files f
-        JOIN pg_class c ON c.oid = f.table_name
-        WHERE c.relname = '{TABLE_NAME}_del_selective'
-        ORDER BY f.path
-        """,
-        superuser_conn,
-    )
-    new_file_paths = [row[0] for row in new_files]
-
-    # after append, old files should still be there (no files queued for deletion)
-    queued_files_after_append = run_query(
+    queued_after_append = run_query(
         f"""
         SELECT dq.path
         FROM lake_engine.deletion_queue dq
@@ -580,55 +546,233 @@ def test_external_write_deletion_queue_only_old_files(
         superuser_conn,
     )
     assert (
-        len(queued_files_after_append) == 0
-    ), "After append, no files should be in deletion queue"
+        len(queued_after_append) == 0
+    ), "After append, no files should be queued for deletion"
 
-    # now overwrite the table
-    overwrite_data = pa.table(
-        {"a": [100, 200]},
-        schema=pa.schema([pa.field("a", pa.int32())]),
+    # now overwrite (creates a third snapshot; the first two are still retained)
+    pyiceberg_table.overwrite(
+        pa.table(
+            {"a": [100, 200]},
+            schema=pa.schema([pa.field("a", pa.int32())]),
+        )
     )
-    pyiceberg_table.overwrite(overwrite_data)
 
-    # verify we have 2 rows
     result = run_query(f"SELECT count(*) FROM {tbl}", pg_conn)
     assert result[0][0] == 2
 
-    # verify ALL old files (both original and appended) are in deletion queue
-    queued_files = run_query(
+    queued_after_overwrite = run_query(
         f"""
         SELECT dq.path
         FROM lake_engine.deletion_queue dq
         JOIN pg_class c ON c.oid = dq.table_name
         WHERE c.relname = '{TABLE_NAME}_del_selective'
-        ORDER BY dq.path
         """,
         superuser_conn,
     )
-    queued_file_paths = [row[0] for row in queued_files]
+    assert (
+        len(queued_after_overwrite) == 0
+    ), "After overwrite, files retained by older snapshots must not be queued"
 
-    # all files from before the overwrite should be queued
-    for old_path in new_file_paths:
-        assert (
-            old_path in queued_file_paths
-        ), f"File {old_path} should be in deletion queue after overwrite"
+    pg_conn.rollback()
 
-    # get current data files (after overwrite)
-    current_files = run_query(
+
+def test_external_write_preserves_history_files(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+):
+    """
+    After an external append, the data files from the previous (now
+    historic) snapshot must NOT be queued for deletion: they are still
+    referenced by retained snapshots and external clients may rely on
+    them for time-travel reads.
+    """
+    tbl = f"{TABLE_NAMESPACE}.{TABLE_NAME}_history"
+
+    run_command(f"CREATE TABLE {tbl} (a int, b text) USING iceberg", pg_conn)
+    run_command(
+        f"INSERT INTO {tbl} SELECT i, 'row' || i FROM generate_series(1,3) i",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # snapshot the file paths before the external append
+    historic_files = run_query(
         f"""
         SELECT f.path
         FROM lake_table.files f
         JOIN pg_class c ON c.oid = f.table_name
-        WHERE c.relname = '{TABLE_NAME}_del_selective'
+        WHERE c.relname = '{TABLE_NAME}_history'
+        ORDER BY f.path
         """,
         superuser_conn,
     )
-    current_file_paths = [row[0] for row in current_files]
+    historic_paths = [row[0] for row in historic_files]
+    assert len(historic_paths) > 0
 
-    # current files should NOT be in the deletion queue
-    for current_path in current_file_paths:
+    # external client appends. Old snapshot is retained by default; new
+    # snapshot is what pg_lake reads from.
+    pyiceberg_table = iceberg_catalog.load_table(
+        f"{TABLE_NAMESPACE}.{TABLE_NAME}_history"
+    )
+    pyiceberg_table.append(
+        pa.table(
+            {"a": [4, 5], "b": ["ext4", "ext5"]},
+            schema=pa.schema(
+                [pa.field("a", pa.int32()), pa.field("b", pa.string())]
+            ),
+        )
+    )
+
+    # historic files must NOT be in the deletion queue — they remain
+    # referenced by the retained pre-append snapshot.
+    queued = run_query(
+        f"""
+        SELECT dq.path
+        FROM lake_engine.deletion_queue dq
+        JOIN pg_class c ON c.oid = dq.table_name
+        WHERE c.relname = '{TABLE_NAME}_history'
+        """,
+        superuser_conn,
+    )
+    queued_paths = [row[0] for row in queued]
+
+    for hp in historic_paths:
         assert (
-            current_path not in queued_file_paths
-        ), f"Current file {current_path} should NOT be in deletion queue"
+            hp not in queued_paths
+        ), f"Historic file {hp} must not be queued for deletion"
+
+    # sanity: the table reads correctly after the append (5 total rows)
+    result = run_query(f"SELECT count(*) FROM {tbl}", pg_conn)
+    assert result[0][0] == 5
+
+    pg_conn.rollback()
+
+
+def test_external_write_partition_spec_evolution(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+):
+    """
+    External client evolves the partition spec (adds a new identity-
+    partitioned column). pg_lake must register the new spec and serve
+    correct results when reading rows written under it.
+    """
+    tbl = f"{TABLE_NAMESPACE}.{TABLE_NAME}_part_evol"
+
+    run_command(
+        f"CREATE TABLE {tbl} (a int, b int) USING iceberg",
+        pg_conn,
+    )
+    run_command(
+        f"INSERT INTO {tbl} SELECT i, i * 10 FROM generate_series(1,3) i",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    pyiceberg_table = iceberg_catalog.load_table(
+        f"{TABLE_NAMESPACE}.{TABLE_NAME}_part_evol"
+    )
+
+    with pyiceberg_table.update_spec() as update:
+        update.add_field("b", IdentityTransform())
+
+    pyiceberg_table = iceberg_catalog.load_table(
+        f"{TABLE_NAMESPACE}.{TABLE_NAME}_part_evol"
+    )
+    pyiceberg_table.append(
+        pa.table(
+            {"a": [4, 5], "b": [40, 50]},
+            schema=pa.schema(
+                [pa.field("a", pa.int32()), pa.field("b", pa.int32())]
+            ),
+        )
+    )
+
+    # the new spec must be visible in the pg_lake catalog
+    spec_count = run_query(
+        f"""
+        SELECT count(*)
+        FROM lake_table.partition_specs ps
+        JOIN pg_class c ON c.oid = ps.table_name
+        WHERE c.relname = '{TABLE_NAME}_part_evol'
+        """,
+        superuser_conn,
+    )
+    assert spec_count[0][0] >= 2, "expected the new partition spec to be registered"
+
+    # full result set is correct across both specs
+    result = run_query(f"SELECT a, b FROM {tbl} ORDER BY a", pg_conn)
+    assert result == [
+        [1, 10],
+        [2, 20],
+        [3, 30],
+        [4, 40],
+        [5, 50],
+    ]
+
+    pg_conn.rollback()
+
+
+def test_external_write_rename_column(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+):
+    """
+    External client renames a column. Iceberg field IDs are stable across
+    rename, so the sync must detect the name change and issue an ALTER
+    FOREIGN TABLE RENAME COLUMN — not silently drop+add (which would lose
+    the column's data on subsequent reads through the old name) and not
+    leave the foreign table out of sync with the new schema.
+    """
+    tbl = f"{TABLE_NAMESPACE}.{TABLE_NAME}_rename"
+
+    run_command(
+        f"CREATE TABLE {tbl} (a int, b text) USING iceberg",
+        pg_conn,
+    )
+    run_command(
+        f"INSERT INTO {tbl} SELECT i, 'row' || i FROM generate_series(1,3) i",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    pyiceberg_table = iceberg_catalog.load_table(
+        f"{TABLE_NAMESPACE}.{TABLE_NAME}_rename"
+    )
+
+    with pyiceberg_table.update_schema() as update:
+        update.rename_column("b", "b_renamed")
+
+    # the new column name must exist in the foreign table; old name must not
+    columns = run_query(
+        f"""
+        SELECT attname
+        FROM pg_attribute
+        WHERE attrelid = '{tbl}'::regclass
+          AND attnum > 0
+          AND NOT attisdropped
+        ORDER BY attnum
+        """,
+        pg_conn,
+    )
+    column_names = [row[0] for row in columns]
+    assert "b_renamed" in column_names, f"expected 'b_renamed' in {column_names}"
+    assert "b" not in column_names, f"old name 'b' still present in {column_names}"
+
+    # data is intact — the rename is non-destructive
+    result = run_query(f"SELECT a, b_renamed FROM {tbl} ORDER BY a", pg_conn)
+    assert result == [[1, "row1"], [2, "row2"], [3, "row3"]]
 
     pg_conn.rollback()
