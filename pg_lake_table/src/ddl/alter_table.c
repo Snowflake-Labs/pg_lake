@@ -692,6 +692,14 @@ PostProcessRenameWritablePgLakeTable(ProcessUtilityParams * params, void *arg)
 		!(renameStmt->renameType == OBJECT_TABLE ||
 		  renameStmt->renameType == OBJECT_FOREIGN_TABLE))
 	{
+		/*
+		 * When syncing from externally-written Iceberg metadata, the rename
+		 * is already reflected in the new metadata file; skip our own DDL
+		 * tracking and metadata write.
+		 */
+		if (SkipIcebergDDLProcessing)
+			return;
+
 		/* schema has changed, update the metadata */
 		IcebergDDLOperation *ddlOperation = palloc0(sizeof(IcebergDDLOperation));
 
