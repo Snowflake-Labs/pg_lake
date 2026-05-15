@@ -238,7 +238,7 @@ HandleInternalCatalogUpdate(char *namespaceName, char *tableName,
 	 */
 	bool		forUpdate = true;
 	char	   *currentMetadataLocation =
-		GetIcebergCatalogMetadataLocation(relationId, forUpdate);
+		GetIcebergMetadataLocation(relationId, forUpdate);
 
 	if (currentMetadataLocation == NULL ||
 		strcmp(currentMetadataLocation, prevMetadataLocation) != 0)
