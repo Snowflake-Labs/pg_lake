@@ -797,4 +797,7 @@ def adjust_object_store_settings(superuser_conn):
     superuser_conn.autocommit = False
 
     run_command("SELECT pg_reload_conf()", superuser_conn)
+    # match the setup path: bg workers need a moment to pick up the reload,
+    # otherwise the next test can see the still-set ALTER SYSTEM value
+    run_command("SELECT pg_sleep(0.1)", superuser_conn)
     superuser_conn.commit()
