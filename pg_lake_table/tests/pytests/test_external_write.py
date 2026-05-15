@@ -621,9 +621,7 @@ def test_external_write_preserves_history_files(
     pyiceberg_table.append(
         pa.table(
             {"a": [4, 5], "b": ["ext4", "ext5"]},
-            schema=pa.schema(
-                [pa.field("a", pa.int32()), pa.field("b", pa.string())]
-            ),
+            schema=pa.schema([pa.field("a", pa.int32()), pa.field("b", pa.string())]),
         )
     )
 
@@ -690,9 +688,7 @@ def test_external_write_partition_spec_evolution(
     pyiceberg_table.append(
         pa.table(
             {"a": [4, 5], "b": [40, 50]},
-            schema=pa.schema(
-                [pa.field("a", pa.int32()), pa.field("b", pa.int32())]
-            ),
+            schema=pa.schema([pa.field("a", pa.int32()), pa.field("b", pa.int32())]),
         )
     )
 
