@@ -42,14 +42,24 @@
 
 #include "executor/spi.h"
 #include "utils/builtins.h"
+#include "utils/dynahash.h"
+
+/* path -> int64 file id, built from RETURNING output of BulkInsertDataFiles */
+typedef struct FileIdHashEntry
+{
+	char		path[MAX_S3_PATH_LENGTH];
+	int64		fileId;
+}			FileIdHashEntry;
 
 /* caller-above-callee forward decls for the statics below */
 static void FlushDataFileAddBatch(Oid relationId, List *addOps);
-static void BulkInsertDataFiles(Oid relationId, List *addOps);
+static HTAB *BulkInsertDataFiles(Oid relationId, List *addOps);
 static void BulkInsertDataFileColumnStats(Oid relationId, List *addOps);
-static void BulkInsertDataFilePartitionValues(Oid relationId, List *addOps);
+static void BulkInsertDataFilePartitionValues(Oid relationId, List *addOps,
+											  HTAB *pathToFileId);
 static bool AddOpHasPartitionValues(TableMetadataOperation * operation);
-static void BulkInsertTrackedFileIds(Oid relationId, List *addOps);
+static void BulkInsertTrackedFileIds(Oid relationId, List *addOps,
+									 HTAB *pathToFileId);
 static void CreateTxDataFileIdsTempTableIfNotExists(void);
 #ifdef USE_ASSERT_CHECKING
 static void AssertAllOpsAreType(List *ops, TableMetadataOperationType type);
@@ -113,25 +123,30 @@ FlushDataFileAddBatch(Oid relationId, List *addOps)
 #endif
 
 	/*
-	 * BulkInsertDataFiles runs first and lets the files_id_seq default assign
-	 * ids; the partition-values and tracked-ids helpers then join back to
-	 * lake_table.files by (table_name, path) to discover those ids in SQL.
+	 * BulkInsertDataFiles runs first; RETURNING captures the sequence-assigned
+	 * ids into a path->id hash. The downstream helpers use that hash for O(1)
+	 * id lookup instead of JOINing back to lake_table.files.
 	 */
-	BulkInsertDataFiles(relationId, addOps);
+	HTAB	   *pathToFileId = BulkInsertDataFiles(relationId, addOps);
 	BulkInsertDataFileColumnStats(relationId, addOps);
-	BulkInsertDataFilePartitionValues(relationId, addOps);
-	BulkInsertTrackedFileIds(relationId, addOps);
+	BulkInsertDataFilePartitionValues(relationId, addOps, pathToFileId);
+	BulkInsertTrackedFileIds(relationId, addOps, pathToFileId);
+	hash_destroy(pathToFileId);
 }
 
 
-/* Insert one row per addOp into lake_table.files using parallel-arrays unnest. */
-static void
+/*
+ * Insert one row per addOp into lake_table.files using parallel-arrays unnest.
+ * Returns a path->int64 HTAB built from the RETURNING clause so callers can
+ * resolve sequence-assigned file ids without a second JOIN to lake_table.files.
+ * Caller must hash_destroy() the returned table when done.
+ */
+static HTAB *
 BulkInsertDataFiles(Oid relationId, List *addOps)
 {
 	int			count = list_length(addOps);
 
-	if (count == 0)
-		return;
+	Assert(count > 0);
 
 	Datum	   *pathDatums = palloc(sizeof(Datum) * count);
 	Datum	   *rowCountDatums = palloc(sizeof(Datum) * count);
@@ -169,23 +184,21 @@ BulkInsertDataFiles(Oid relationId, List *addOps)
 													  count, INT8OID);
 
 	/*
-	 * Multi-arg unnest() in FROM produces rows in lockstep: $2[i]/$3[i]/...
-	 * always land in the same output row, by construction. No WITH ORDINALITY
-	 * needed - and we don't need positional ordering downstream either, since
-	 * BulkInsertDataFilePartitionValues / BulkInsertTrackedFileIds resolve
-	 * file ids by JOINing files_pkey on (table_name, path).
+	 * RETURNING id, path lets us capture sequence-assigned ids in C.
+	 * We key the downstream hash on path (text) so BulkInsertDataFilePartitionValues
+	 * and BulkInsertTrackedFileIds can do O(1) lookups instead of JOINing
+	 * back to lake_table.files.
 	 *
 	 * No ::text[] / ::int8[] casts on the $N placeholders: SPI_ARG_VALUE
-	 * already declares each parameter's type to the planner, so the casts
-	 * would just duplicate that source of truth (and rot if someone flips a
-	 * C-side TYPEARRAYOID without updating the SQL).
+	 * already declares each parameter's type to the planner.
 	 */
 	char	   *query =
 		"INSERT INTO " DATA_FILES_TABLE_QUALIFIED " "
 		"(table_name, path, row_count, file_size, content, first_row_id) "
 		"SELECT $1, path, row_count, file_size, content, first_row_id "
 		"FROM unnest($2, $3, $4, $5, $6) "
-		"AS t(path, row_count, file_size, content, first_row_id)";
+		"AS t(path, row_count, file_size, content, first_row_id) "
+		"RETURNING id, path";
 
 	DECLARE_SPI_ARGS(6);
 	SPI_ARG_VALUE(1, OIDOID, relationId, false);
@@ -197,7 +210,46 @@ BulkInsertDataFiles(Oid relationId, List *addOps)
 
 	SPI_START_EXTENSION_OWNER(PgLakeTable);
 	SPI_EXECUTE(query, /* readOnly = */ false);
+
+	/* Build path->id hash from RETURNING rows while still inside SPI. */
+	HASHCTL		hashCtl;
+
+	memset(&hashCtl, 0, sizeof(hashCtl));
+	hashCtl.keysize = MAX_S3_PATH_LENGTH;
+	hashCtl.entrysize = sizeof(FileIdHashEntry);
+	hashCtl.hcxt = CurrentMemoryContext;
+
+	HTAB	   *pathToFileId = hash_create("inserted file ids by path",
+										   count * 2,
+										   &hashCtl,
+										   HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
+
+	uint64		nRows = SPI_processed;
+
+	for (uint64 i = 0; i < nRows; i++)
+	{
+		bool		idIsNull;
+		bool		pathIsNull;
+
+		/* column 1 = id (int8), column 2 = path (text) */
+		int64		fileId = GET_SPI_VALUE(INT8OID, i, 1, &idIsNull);
+		char	   *path = GET_SPI_VALUE(TEXTOID, i, 2, &pathIsNull);
+
+		Assert(!idIsNull && !pathIsNull);
+
+		bool		found;
+		FileIdHashEntry *entry = (FileIdHashEntry *)
+			hash_search(pathToFileId, path, HASH_ENTER, &found);
+
+		Assert(!found);			/* each path is unique in lake_table.files */
+		entry->fileId = fileId;
+	}
+
+	Assert((int) nRows == count);
+
 	SPI_END();
+
+	return pathToFileId;
 }
 
 
@@ -300,12 +352,11 @@ BulkInsertDataFileColumnStats(Oid relationId, List *addOps)
 
 /*
  * Insert one row per (file, partition field) for every addOp that carries
- * partition values. File ids are resolved by JOINing back to lake_table.files
- * on (table_name, path) - the PK of that catalog - rather than threading a
- * fileIds array through the bulk helpers.
+ * partition values. File ids are resolved via pathToFileId (built from
+ * RETURNING in BulkInsertDataFiles) rather than a JOIN back to lake_table.files.
  */
 static void
-BulkInsertDataFilePartitionValues(Oid relationId, List *addOps)
+BulkInsertDataFilePartitionValues(Oid relationId, List *addOps, HTAB *pathToFileId)
 {
 	int			capacity = 0;
 	ListCell   *operationCell = NULL;
@@ -327,7 +378,7 @@ BulkInsertDataFilePartitionValues(Oid relationId, List *addOps)
 	 */
 	List	   *transforms = AllPartitionTransformList(relationId);
 
-	Datum	   *pathDatums = palloc(sizeof(Datum) * capacity);
+	Datum	   *fileIdDatums = palloc(sizeof(Datum) * capacity);
 	Datum	   *partitionFieldIdDatums = palloc(sizeof(Datum) * capacity);
 	Datum	   *valueDatums = palloc(sizeof(Datum) * capacity);
 	bool	   *valueNulls = palloc(sizeof(bool) * capacity);
@@ -342,6 +393,12 @@ BulkInsertDataFilePartitionValues(Oid relationId, List *addOps)
 			continue;
 
 		Assert(operation->partitionSpecId != DEFAULT_SPEC_ID);
+
+		FileIdHashEntry *entry = (FileIdHashEntry *)
+			hash_search(pathToFileId, operation->path, HASH_FIND, NULL);
+
+		Assert(entry != NULL);
+		int64		fileId = entry->fileId;
 
 		int			nfields = (int) operation->partition->fields_length;
 
@@ -360,7 +417,7 @@ BulkInsertDataFilePartitionValues(Oid relationId, List *addOps)
 												partitionField->value_length,
 												transform);
 
-			pathDatums[outRow] = CStringGetTextDatum(operation->path);
+			fileIdDatums[outRow] = Int64GetDatum(fileId);
 			partitionFieldIdDatums[outRow] = Int32GetDatum(partitionField->field_id);
 			if (partitionValue == NULL)
 			{
@@ -378,31 +435,21 @@ BulkInsertDataFilePartitionValues(Oid relationId, List *addOps)
 	}
 	Assert(outRow == capacity);
 
-	ArrayType  *pathArray = MakeArrayFromDatums(pathDatums, NULL, outRow, TEXTOID);
+	ArrayType  *fileIdArray = MakeArrayFromDatums(fileIdDatums, NULL, outRow, INT8OID);
 	ArrayType  *partitionFieldIdArray = MakeArrayFromDatums(partitionFieldIdDatums, NULL,
 															outRow, INT4OID);
 	ArrayType  *valueArray = MakeArrayFromDatums(valueDatums, valueNulls, outRow, TEXTOID);
 
-	/*
-	 * JOIN drives off files_pkey (table_name, path). Equality on a unique
-	 * index keeps the plan on an index nested loop even though pg_class.
-	 * reltuples for lake_table.files is stale here: the commit-time ANALYZE
-	 * (EnsureFreshStatsForCommitTimeDiff in the pre-commit hook) runs later
-	 * and gates the per-table diff query, not this write path. So per outer
-	 * row we pay one btree descent (O(log n), ~4-5 pages in practice).
-	 */
 	char	   *query =
 		"INSERT INTO " DATA_FILE_PARTITION_VALUES_TABLE_QUALIFIED " "
 		"(table_name, id, partition_field_id, value) "
-		"SELECT $1, f.id, t.partition_field_id, t.value "
+		"SELECT $1, id, partition_field_id, value "
 		"FROM unnest($2, $3, $4) "
-		"     AS t(path, partition_field_id, value) "
-		"JOIN " DATA_FILES_TABLE_QUALIFIED " f "
-		"  ON f.table_name = $1 AND f.path = t.path";
+		"AS t(id, partition_field_id, value)";
 
 	DECLARE_SPI_ARGS(4);
 	SPI_ARG_VALUE(1, OIDOID, relationId, false);
-	SPI_ARG_VALUE(2, TEXTARRAYOID, pathArray, false);
+	SPI_ARG_VALUE(2, INT8ARRAYOID, fileIdArray, false);
 	SPI_ARG_VALUE(3, INT4ARRAYOID, partitionFieldIdArray, false);
 	SPI_ARG_VALUE(4, TEXTARRAYOID, valueArray, false);
 
@@ -430,10 +477,10 @@ AddOpHasPartitionValues(TableMetadataOperation * operation)
 /*
  * Record the file ids opted in by PgLakeAddDataFileHook in a tx-scoped temp
  * table. The hook fires once per CONTENT_DATA op (it inspects per-file state)
- * and ids are resolved in SQL by joining lake_table.files on path.
+ * and ids are resolved via pathToFileId rather than a JOIN to lake_table.files.
  */
 static void
-BulkInsertTrackedFileIds(Oid relationId, List *addOps)
+BulkInsertTrackedFileIds(Oid relationId, List *addOps, HTAB *pathToFileId)
 {
 	if (PgLakeAddDataFileHook == NULL)
 		return;
@@ -446,7 +493,7 @@ BulkInsertTrackedFileIds(Oid relationId, List *addOps)
 	 * opts in). Defer the allocation to the first hit so partition-only or
 	 * deletes-only runs don't pay for an array they'll never use.
 	 */
-	Datum	   *pathDatums = NULL;
+	Datum	   *fileIdDatums = NULL;
 	int			trackedCount = 0;
 	ListCell   *operationCell = NULL;
 
@@ -459,10 +506,14 @@ BulkInsertTrackedFileIds(Oid relationId, List *addOps)
 		if (!PgLakeAddDataFileHook())
 			continue;
 
-		if (pathDatums == NULL)
-			pathDatums = palloc(sizeof(Datum) * count);
+		if (fileIdDatums == NULL)
+			fileIdDatums = palloc(sizeof(Datum) * count);
 
-		pathDatums[trackedCount++] = CStringGetTextDatum(operation->path);
+		FileIdHashEntry *entry = (FileIdHashEntry *)
+			hash_search(pathToFileId, operation->path, HASH_FIND, NULL);
+
+		Assert(entry != NULL);
+		fileIdDatums[trackedCount++] = Int64GetDatum(entry->fileId);
 	}
 
 	if (trackedCount == 0)
@@ -471,23 +522,14 @@ BulkInsertTrackedFileIds(Oid relationId, List *addOps)
 
 	CreateTxDataFileIdsTempTableIfNotExists();
 
-	ArrayType  *pathArray = MakeArrayFromDatums(pathDatums, NULL, trackedCount, TEXTOID);
+	ArrayType  *fileIdArray = MakeArrayFromDatums(fileIdDatums, NULL, trackedCount, INT8OID);
 
-	/*
-	 * Same files_pkey JOIN as BulkInsertDataFilePartitionValues: unique-index
-	 * equality keeps the plan on an index nested loop even with stale stats.
-	 * $1 = relationId, $2 = pathArray to match the partition-values JOIN.
-	 */
 	char	   *query =
 		"INSERT INTO " TX_DATA_FILES_QUALIFIED_TABLE_NAME " (id) "
-		"SELECT f.id "
-		"FROM unnest($2) AS t(path) "
-		"JOIN " DATA_FILES_TABLE_QUALIFIED " f "
-		"  ON f.table_name = $1 AND f.path = t.path";
+		"SELECT id FROM unnest($1) AS t(id)";
 
-	DECLARE_SPI_ARGS(2);
-	SPI_ARG_VALUE(1, OIDOID, relationId, false);
-	SPI_ARG_VALUE(2, TEXTARRAYOID, pathArray, false);
+	DECLARE_SPI_ARGS(1);
+	SPI_ARG_VALUE(1, INT8ARRAYOID, fileIdArray, false);
 
 	SPI_START_EXTENSION_OWNER(PgLakeTable);
 	SPI_EXECUTE(query, /* readOnly = */ false);
