@@ -489,12 +489,16 @@ LoadColumnStatsForFiles(Oid relationId, HTAB *filesByPath, List *dataFiles)
 		if (entry == NULL)
 		{
 			/*
-			 * Stats row points at a path that isn't in the caller's hash.
-			 * Shouldn't happen given the WHERE path = ANY($2) filter, but
-			 * tolerate it to avoid crashing on a corrupt catalog.
+			 * SPI filters with WHERE s.path = ANY($2), so every returned row
+			 * should resolve through filesByPath (built from the same path
+			 * set). A miss is an internal inconsistency (catalog vs in-memory
+			 * map), not a user error.
 			 */
-			MemoryContextSwitchTo(spiContext);
-			continue;
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("internal error: column stats row does not map to any tracked data file path"),
+					 errdetail("SPI returned statistics for path \"%s\", field_id %lld, relation OID %u, but that path is missing from the caller's path-to-file hash (the query was restricted with WHERE path = ANY($2)). This usually indicates inconsistent lake_table.data_file_column_stats data or an extension bug.",
+							   path, (long long) fieldId, relationId)));
 		}
 
 		TableDataFile *dataFile = &entry->dataFile;
