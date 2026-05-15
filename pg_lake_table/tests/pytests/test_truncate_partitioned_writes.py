@@ -154,7 +154,7 @@ def test_truncate_partition_write(
         res = run_query(
             f"SELECT count(DISTINCT {part_expr}), count(*) FROM '{path}'", pgduck_conn
         )
-        assert res[0][0] == "1"
+        assert res[0][0] == 1
         assert int(res[0][1]) == row_count
 
         res = run_query(f"SELECT DISTINCT {part_expr} FROM '{path}'", pgduck_conn)
@@ -163,7 +163,9 @@ def test_truncate_partition_write(
             f"SELECT value FROM lake_table.data_file_partition_values WHERE id='{id}'",
             pg_conn,
         )
-        assert res_partition[0][0].strip() == res[0][0].strip()
+        # res_partition[0][0] is text; res[0][0] is now native (int for
+        # numeric truncations, string for varchar/char/text).
+        assert res_partition[0][0].strip() == str(res[0][0]).strip()
 
     # register the same table to spark
     # and make sure it can understand our partitioning

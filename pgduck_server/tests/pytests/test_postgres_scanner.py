@@ -11,6 +11,8 @@ Scenarios covered:
 - Multidimensional array values in int[] column clamped to NULL
 """
 
+from decimal import Decimal
+
 import pytest
 from utils_pytest import *
 
@@ -231,7 +233,7 @@ def test_composite_type(pg_tables, pgduck_conn):
         f"FROM {scan} ORDER BY struct_extract(c, 'id') NULLS LAST",
         pgduck_conn,
     )
-    assert rows == [("42", "hello"), ("99", "world"), (None, None)]
+    assert rows == [(42, "hello"), (99, "world"), (None, None)]
 
 
 def test_composite_same_name_different_schemas(pg_tables, pgduck_conn):
@@ -241,7 +243,7 @@ def test_composite_same_name_different_schemas(pg_tables, pgduck_conn):
         f"SELECT struct_extract(c, 'id'), struct_extract(c, 'name') " f"FROM {scan_a}",
         pgduck_conn,
     )
-    assert rows_a == [("1", "alpha")]
+    assert rows_a == [(1, "alpha")]
 
     scan_b = _scan("comp_tbl", schema="scanner_schema_b")
     rows_b = perform_query_on_cursor(
@@ -250,7 +252,7 @@ def test_composite_same_name_different_schemas(pg_tables, pgduck_conn):
         f"FROM {scan_b}",
         pgduck_conn,
     )
-    assert rows_b == [("2", "beta", "42")]
+    assert rows_b == [(2, "beta", 42)]
 
 
 def test_composite_special_characters(pg_tables, pgduck_conn):
@@ -263,7 +265,7 @@ def test_composite_special_characters(pg_tables, pgduck_conn):
         f"FROM {scan}",
         pgduck_conn,
     )
-    assert rows == [("7", 'hi "there', "99")]
+    assert rows == [(7, 'hi "there', 99)]
 
 
 def test_composite_with_array_field(pg_tables, pgduck_conn):
@@ -274,7 +276,7 @@ def test_composite_with_array_field(pg_tables, pgduck_conn):
         f"FROM {scan} ORDER BY struct_extract(c, 'id') NULLS LAST",
         pgduck_conn,
     )
-    assert rows == [("1", "{a,b}"), ("2", "{x}"), (None, None)]
+    assert rows == [(1, "{a,b}"), (2, "{x}"), (None, None)]
 
 
 def test_array_of_composite(pg_tables, pgduck_conn):
@@ -324,7 +326,7 @@ def test_bounded_numeric_nan_to_null(pg_tables, pgduck_conn, use_text_protocol):
         )
         # Source: 123.45, NaN, NULL, 0.00
         # After:  0.00, 123.45, NULL (NaN→NULL), NULL (original)
-        assert rows == [("0.00",), ("123.45",), (None,), (None,)]
+        assert rows == [(Decimal("0.00"),), (Decimal("123.45"),), (None,), (None,)]
     finally:
         if use_text_protocol:
             perform_query_on_cursor("SET pg_use_text_protocol = false", pgduck_conn)
@@ -429,9 +431,9 @@ def test_special_values_across_types(pg_tables, pgduck_conn, use_text_protocol):
         )
 
         assert rows == [
-            ("1", "nan", "nan", "nan", "nan", "null"),  # NaN (bounded → NULL)
+            (1, "nan", "nan", "nan", "nan", "null"),  # NaN (bounded → NULL)
             (
-                "2",
+                2,
                 "+inf",
                 "+inf",
                 "+inf",
@@ -439,15 +441,15 @@ def test_special_values_across_types(pg_tables, pgduck_conn, use_text_protocol):
                 "null",
             ),  # +Inf (large/bounded NULL in PG)
             (
-                "3",
+                3,
                 "-inf",
                 "-inf",
                 "-inf",
                 "null",
                 "null",
             ),  # -Inf (large/bounded NULL in PG)
-            ("4", "null", "null", "null", "null", "null"),  # NULL
-            ("5", "value", "value", "value", "value", "value"),  # 1.5
+            (4, "null", "null", "null", "null", "null"),  # NULL
+            (5, "value", "value", "value", "value", "value"),  # 1.5
         ]
     finally:
         if use_text_protocol:

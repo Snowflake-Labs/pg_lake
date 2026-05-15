@@ -105,7 +105,7 @@ def test_multi_expression_partition_write(
             """,
             pgduck_conn,
         )[0][0]
-        assert part_key_cnt == "1"
+        assert part_key_cnt == 1
 
     # 5) tidy up session GUC
     run_command("RESET pg_lake_table.enable_insert_select_pushdown;", pg_conn)

@@ -260,21 +260,30 @@ def test_identity_partition_write(
             pg_conn,
         )
 
-        if col_type == "BOOLEAN":
-            assert bool(res_partition[0][0]) == bool(res[0][0])
-        elif col_type in ("TIMESTAMP", "TIMESTAMPTZ"):
-            expected = datetime.datetime.fromisoformat(res_partition[0][0])
-            actual = datetime.datetime.fromisoformat(res[0][0])
+        # res_partition is the partition-value text from
+        # lake_table.data_file_partition_values; res[0][0] now comes back as a
+        # native Python type from pgduck_server (the type depends on col_type).
+        partition_text = res_partition[0][0]
+        actual_value = res[0][0]
 
-            if actual.tzinfo is not None:
+        if col_type == "BOOLEAN":
+            # partition value is PG bool short form ("t" / "f")
+            expected_bool = partition_text == "t"
+            assert expected_bool == actual_value
+        elif col_type in ("TIMESTAMP", "TIMESTAMPTZ"):
+            expected = datetime.datetime.fromisoformat(partition_text)
+            if actual_value.tzinfo is not None and expected.tzinfo is None:
                 expected = expected.replace(tzinfo=datetime.timezone.utc)
-            assert expected == actual
+            assert expected == actual_value
         elif col_type == "DATE":
-            expected = datetime.date.fromisoformat(res_partition[0][0])
-            actual = datetime.date.fromisoformat(res[0][0])
-            assert expected == actual
+            expected = datetime.date.fromisoformat(partition_text)
+            assert expected == actual_value
+        elif col_type == "BYTEA":
+            # partition value is "\\x..." text; cursor returns memoryview
+            assert partition_text == "\\x" + bytes(actual_value).hex()
         else:
-            assert res_partition[0][0] == res[0][0]
+            # All other types compare cleanly via stringification.
+            assert partition_text == str(actual_value)
 
         res = run_query(f"SELECT count(*) FROM '{file_path}'", pgduck_conn)
         # each file should have a distinct value

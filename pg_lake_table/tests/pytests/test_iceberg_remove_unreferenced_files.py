@@ -900,7 +900,7 @@ def test_remove_unreferenced_files_13(
     res = run_query(
         f"SELECT count(*) FROM read_parquet('{file_paths_q[0][0]}/*')", pgduck_conn
     )
-    assert res[0][0] == "0"
+    assert res[0][0] == 0
 
     # no files inserted
     file_paths = run_query(

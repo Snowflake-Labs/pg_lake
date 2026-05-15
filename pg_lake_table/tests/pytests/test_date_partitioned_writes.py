@@ -164,7 +164,7 @@ def test_calendar_partition_write(
             f"SELECT count(DISTINCT {part_expr}), count(*) FROM '{path}'",
             pgduck_conn,
         )
-        assert res[0][0] == "1"
+        assert res[0][0] == 1
         assert int(res[0][1]) == row_count
 
         res = run_query(
@@ -177,7 +177,9 @@ def test_calendar_partition_write(
             pg_conn,
         )
 
-        assert res_partition[0][0] == res[0][0]
+        # res_partition[0][0] is text; res[0][0] is now native (int for
+        # year/month/day partitions).
+        assert res_partition[0][0] == str(res[0][0])
 
     # register the same table to spark
     # and make sure it can understand our partitioning

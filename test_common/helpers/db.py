@@ -90,7 +90,7 @@ def run_simple_command(hostname, serverport):
     cur.execute("SELECT 1")
     r = cur.fetchall()
     print(r)
-    assert r == [("1",)]
+    assert r == [(1,)]
 
 
 def run_pgbench_command(commands):

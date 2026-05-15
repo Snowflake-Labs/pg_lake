@@ -119,9 +119,9 @@ def test_basic_parquet_copy_and_query(pgduck_server):
 
     assert len(results) == 1
     assert len(results[0]) == 4
-    assert results[0][0] == "1001"
-    assert results[0][1] == "500500"
-    assert results[0][2] == "1001000"
+    assert results[0][0] == 1001
+    assert results[0][1] == 500500
+    assert results[0][2] == 1001000
     assert results[0][3] == None
 
     conn.close()

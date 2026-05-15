@@ -412,12 +412,12 @@ def test_boolean(setup_table, duckdb_conn, pgduck_conn, tmp_path):
     pg_results = perform_query_on_cursor(query, pgduck_conn)
     transmit_results = perform_transmit_query(query, pgduck_conn, tmp_path)
 
-    # Convert each element in pg_results to a boolean
-    pg_results_bool = [(strtobool(item[0]),) for item in pg_results]
+    # pg_results already contains native bool values. Transmit goes through CSV
+    # so we still need to parse the "t"/"f" text into bool.
     transmit_results_bool = [(strtobool(item[0]),) for item in transmit_results]
 
     assert (
-        pg_results_bool == duckdb_results == transmit_results_bool == expected
+        pg_results == duckdb_results == transmit_results_bool == expected
     ), "BOOLEAN results do not match expected values!"
 
 
@@ -437,12 +437,16 @@ def test_blob(setup_table, duckdb_conn, pgduck_conn, tmp_path):
     pg_results = perform_query_on_cursor(query, pgduck_conn)
     print(pg_results)
 
+    # psycopg2 returns bytea as memoryview; convert back to the "\x..." text form
+    # the rest of the test compares against.
+    pg_results_str = [("\\x" + bytes(item[0]).hex(),) for item in pg_results]
+
     # Get normalized transmit results
     transmit_results = perform_transmit_query(query, pgduck_conn, tmp_path)
     transmit_results = [(item[0],) for item in transmit_results]
 
     assert (
-        pg_results == transmit_results == expected
+        pg_results_str == transmit_results == expected
     ), "BLOB results do not match expected values!"
 
 
@@ -452,15 +456,16 @@ def test_tinyint(setup_table, duckdb_conn, pgduck_conn, tmp_path):
     duckdb_results = perform_query_on_cursor(query, duckdb_conn)
     pg_results = perform_query_on_cursor(query, pgduck_conn)
 
-    # Convert each element in duckdb_results to a string
+    # Convert duckdb (int) and pg (int) results to strings for comparison.
     duckdb_results_str = [(str(item[0]),) for item in duckdb_results]
+    pg_results_str = [(str(item[0]),) for item in pg_results]
 
     # Get normalized transmit results
     transmit_results = perform_transmit_query(query, pgduck_conn, tmp_path)
     transmit_results = [(item[0],) for item in transmit_results]
 
     assert (
-        duckdb_results_str == pg_results == transmit_results == expected
+        duckdb_results_str == pg_results_str == transmit_results == expected
     ), "TINYINT results do not match expected values!"
 
 
@@ -470,15 +475,15 @@ def test_smallint(setup_table, duckdb_conn, pgduck_conn, tmp_path):
     duckdb_results = perform_query_on_cursor(query, duckdb_conn)
     pg_results = perform_query_on_cursor(query, pgduck_conn)
 
-    # Convert each element in duckdb_results to a string
     duckdb_results_str = [(str(item[0]),) for item in duckdb_results]
+    pg_results_str = [(str(item[0]),) for item in pg_results]
 
     # Get normalized transmit results
     transmit_results = perform_transmit_query(query, pgduck_conn, tmp_path)
     transmit_results = [(item[0],) for item in transmit_results]
 
     assert (
-        duckdb_results_str == pg_results == transmit_results == expected
+        duckdb_results_str == pg_results_str == transmit_results == expected
     ), "SMALLINT results do not match expected values!"
 
 
@@ -488,15 +493,15 @@ def test_int(setup_table, duckdb_conn, pgduck_conn, tmp_path):
     duckdb_results = perform_query_on_cursor(query, duckdb_conn)
     pg_results = perform_query_on_cursor(query, pgduck_conn)
 
-    # Convert each element in duckdb_results to a string
     duckdb_results_str = [(str(item[0]),) for item in duckdb_results]
+    pg_results_str = [(str(item[0]),) for item in pg_results]
 
     # Get normalized transmit results
     transmit_results = perform_transmit_query(query, pgduck_conn, tmp_path)
     transmit_results = [(item[0],) for item in transmit_results]
 
     assert (
-        duckdb_results_str == pg_results == transmit_results == expected
+        duckdb_results_str == pg_results_str == transmit_results == expected
     ), "INT results do not match expected values!"
 
 
@@ -506,15 +511,15 @@ def test_bigint(setup_table, duckdb_conn, pgduck_conn, tmp_path):
     duckdb_results = perform_query_on_cursor(query, duckdb_conn)
     pg_results = perform_query_on_cursor(query, pgduck_conn)
 
-    # Convert each element in duckdb_results to a string
     duckdb_results_str = [(str(item[0]),) for item in duckdb_results]
+    pg_results_str = [(str(item[0]),) for item in pg_results]
 
     # Get normalized transmit results
     transmit_results = perform_transmit_query(query, pgduck_conn, tmp_path)
     transmit_results = [(item[0],) for item in transmit_results]
 
     assert (
-        duckdb_results_str == pg_results == transmit_results == expected
+        duckdb_results_str == pg_results_str == transmit_results == expected
     ), "BIGINT results do not match expected values!"
 
 
@@ -524,15 +529,15 @@ def test_utinyint(setup_table, duckdb_conn, pgduck_conn, tmp_path):
     duckdb_results = perform_query_on_cursor(query, duckdb_conn)
     pg_results = perform_query_on_cursor(query, pgduck_conn)
 
-    # Convert each element in duckdb_results to a string
     duckdb_results_str = [(str(item[0]),) for item in duckdb_results]
+    pg_results_str = [(str(item[0]),) for item in pg_results]
 
     # Get normalized transmit results
     transmit_results = perform_transmit_query(query, pgduck_conn, tmp_path)
     transmit_results = [(item[0],) for item in transmit_results]
 
     assert (
-        duckdb_results_str == pg_results == transmit_results == expected
+        duckdb_results_str == pg_results_str == transmit_results == expected
     ), "UTINYINT results do not match expected values!"
 
 
@@ -542,15 +547,15 @@ def test_usmallint(setup_table, duckdb_conn, pgduck_conn, tmp_path):
     duckdb_results = perform_query_on_cursor(query, duckdb_conn)
     pg_results = perform_query_on_cursor(query, pgduck_conn)
 
-    # Convert each element in duckdb_results to a string
     duckdb_results_str = [(str(item[0]),) for item in duckdb_results]
+    pg_results_str = [(str(item[0]),) for item in pg_results]
 
     # Get normalized transmit results
     transmit_results = perform_transmit_query(query, pgduck_conn, tmp_path)
     transmit_results = [(item[0],) for item in transmit_results]
 
     assert (
-        duckdb_results_str == pg_results == transmit_results == expected
+        duckdb_results_str == pg_results_str == transmit_results == expected
     ), "USMALLINT results do not match expected values!"
 
 
@@ -560,15 +565,15 @@ def test_uinteger(setup_table, duckdb_conn, pgduck_conn, tmp_path):
     duckdb_results = perform_query_on_cursor(query, duckdb_conn)
     pg_results = perform_query_on_cursor(query, pgduck_conn)
 
-    # Convert each element in duckdb_results to a string
     duckdb_results_str = [(str(item[0]),) for item in duckdb_results]
+    pg_results_str = [(str(item[0]),) for item in pg_results]
 
     # Get normalized transmit results
     transmit_results = perform_transmit_query(query, pgduck_conn, tmp_path)
     transmit_results = [(item[0],) for item in transmit_results]
 
     assert (
-        duckdb_results_str == pg_results == transmit_results == expected
+        duckdb_results_str == pg_results_str == transmit_results == expected
     ), "UINTEGER results do not match expected values!"
 
 
@@ -578,15 +583,15 @@ def test_uint64(setup_table, duckdb_conn, pgduck_conn, tmp_path):
     duckdb_results = perform_query_on_cursor(query, duckdb_conn)
     pg_results = perform_query_on_cursor(query, pgduck_conn)
 
-    # Convert each element in duckdb_results to a string
     duckdb_results_str = [(str(item[0]),) for item in duckdb_results]
+    pg_results_str = [(str(item[0]),) for item in pg_results]
 
     # Get normalized transmit results
     transmit_results = perform_transmit_query(query, pgduck_conn, tmp_path)
     transmit_results = [(item[0],) for item in transmit_results]
 
     assert (
-        duckdb_results_str == pg_results == transmit_results == expected
+        duckdb_results_str == pg_results_str == transmit_results == expected
     ), "UINT64 results do not match expected values!"
 
 
@@ -719,19 +724,17 @@ def test_decimal(setup_table, duckdb_conn, pgduck_conn, tmp_path):
         ("99999999999999.999",),
     ]
     duckdb_results = perform_query_on_cursor(query, duckdb_conn)
-    # Assuming pg_results is correctly fetched and formatted
-    pg_results = perform_query_on_cursor(
-        query, pgduck_conn
-    )  # This should be adjusted to your actual comparison
+    pg_results = perform_query_on_cursor(query, pgduck_conn)
 
     duckdb_results_str = [(str(item[0]),) for item in duckdb_results]
+    pg_results_str = [(str(item[0]),) for item in pg_results]
 
     # Get normalized transmit results
     transmit_results = perform_transmit_query(query, pgduck_conn, tmp_path)
     transmit_results = [(item[0],) for item in transmit_results]
 
     assert (
-        duckdb_results_str == pg_results == transmit_results == expected
+        duckdb_results_str == pg_results_str == transmit_results == expected
     ), "Decimal results do not match expected values!"
 
 
@@ -780,18 +783,17 @@ def test_hugeint(setup_table, duckdb_conn, pgduck_conn, tmp_path):
         ("17014118346046923173168730371588410572",),
     ]
     duckdb_results = perform_query_on_cursor(query, duckdb_conn)
-    pg_results = perform_query_on_cursor(
-        query, pgduck_conn
-    )  # Adjust accordingly if comparing with PostgreSQL
+    pg_results = perform_query_on_cursor(query, pgduck_conn)
 
     duckdb_results_str = [(str(item[0]),) for item in duckdb_results]
+    pg_results_str = [(str(item[0]),) for item in pg_results]
 
     # Get normalized transmit results
     transmit_results = perform_transmit_query(query, pgduck_conn, tmp_path)
     transmit_results = [(item[0],) for item in transmit_results]
 
     assert (
-        duckdb_results_str == pg_results == transmit_results == expected
+        duckdb_results_str == pg_results_str == transmit_results == expected
     ), "HUGEINT results do not match expected values!"
 
 
@@ -806,18 +808,17 @@ def test_uhugeint(setup_table, duckdb_conn, pgduck_conn, tmp_path):
         ("340282366920938463463374607431768211455",),
     ]
     duckdb_results = perform_query_on_cursor(query, duckdb_conn)
-    pg_results = perform_query_on_cursor(
-        query, pgduck_conn
-    )  # Adjust accordingly if comparing with PostgreSQL
+    pg_results = perform_query_on_cursor(query, pgduck_conn)
 
     duckdb_results_str = [(str(item[0]),) for item in duckdb_results]
+    pg_results_str = [(str(item[0]),) for item in pg_results]
 
     # Get normalized transmit results
     transmit_results = perform_transmit_query(query, pgduck_conn, tmp_path)
     transmit_results = [(item[0],) for item in transmit_results]
 
     assert (
-        duckdb_results_str == pg_results == transmit_results == expected
+        duckdb_results_str == pg_results_str == transmit_results == expected
     ), "UHUGEINT results do not match expected values!"
 
 
@@ -827,18 +828,14 @@ import re
 
 def normalize_interval_to_timedelta(interval):
     """Normalize interval strings or timedelta objects to timedelta for comparison."""
+    if isinstance(interval, tuple):
+        # Cursor rows arrive as 1-tuples; unwrap and recurse.
+        return normalize_interval_to_timedelta(interval[0])
     if isinstance(interval, timedelta):
-        # Directly return timedelta objects from DuckDB
         return interval
-    elif isinstance(interval, tuple):
-        # Convert PostgreSQL interval string to timedelta
-        interval_str = interval[0]
-        return parse_interval_str_to_timedelta(interval_str)
-    elif isinstance(interval, str):
-        # Convert expected interval string to timedelta
+    if isinstance(interval, str):
         return parse_interval_str_to_timedelta(interval)
-    else:
-        raise ValueError("Unsupported interval format")
+    raise ValueError("Unsupported interval format")
 
 
 def parse_interval_str_to_timedelta(interval_str):
@@ -877,13 +874,24 @@ def test_interval_types(duckdb_conn, pgduck_conn, tmp_path):
     duckdb_results = perform_query_on_cursor(query, duckdb_conn)
     pg_results = perform_query_on_cursor(query, pgduck_conn)
 
-    # Normalize all intervals to timedelta for comparison
+    # Normalize duckdb and transmit (CSV string) results to timedelta using a
+    # simple averaging calendar (360-day year, 30-day month).
     duckdb_intervals_td = [
         normalize_interval_to_timedelta(item[0]) for item in duckdb_results
     ]
-    pg_intervals_td = [normalize_interval_to_timedelta(item) for item in pg_results]
     expected_intervals_td = [
         normalize_interval_to_timedelta(interval) for interval in expected_intervals
+    ]
+
+    # psycopg2 converts PG `interval` directly to timedelta with its own
+    # calendar (365-day year, 30-day month, with month/year normalization).
+    # PG normalizes "16 MONTHS 15 DAYS" -> "1 year 4 mons 15 days".
+    pg_intervals_td = [item[0] for item in pg_results]
+    expected_pg_intervals_td = [
+        timedelta(days=10),
+        timedelta(days=60),
+        timedelta(days=365),
+        timedelta(days=365 + 4 * 30 + 15),
     ]
 
     print(duckdb_intervals_td)
@@ -901,7 +909,7 @@ def test_interval_types(duckdb_conn, pgduck_conn, tmp_path):
         duckdb_intervals_td == expected_intervals_td
     ), "DuckDB interval results do not match expected values!"
     assert (
-        pg_intervals_td == expected_intervals_td
+        pg_intervals_td == expected_pg_intervals_td
     ), "PostgreSQL interval results do not match expected values!"
     assert (
         transmit_results == expected_intervals_td
@@ -981,12 +989,13 @@ def test_timestamp(setup_table, duckdb_conn, pgduck_conn, tmp_path):
     pg_results = perform_query_on_cursor(query, pgduck_conn)
 
     duckdb_results_str = convert_datetime_to_str(duckdb_results)
+    pg_results_str = convert_datetime_to_str(pg_results)
     print(duckdb_results_str)
-    print(pg_results)
+    print(pg_results_str)
     print(expected)
 
     assert (
-        duckdb_results_str == pg_results == expected
+        duckdb_results_str == pg_results_str == expected
     ), "Timestamp results do not match expected values!"
 
 
@@ -997,13 +1006,14 @@ def test_timestamp_ms(setup_table, duckdb_conn, pgduck_conn, tmp_path):
     pg_results = perform_query_on_cursor(query, pgduck_conn)
 
     duckdb_results_str = convert_datetime_to_str(duckdb_results)
+    pg_results_str = convert_datetime_to_str(pg_results)
 
     # Get normalized transmit results
     transmit_results = perform_transmit_query(query, pgduck_conn, tmp_path)
     transmit_results = [(item[0],) for item in transmit_results]
 
     assert (
-        duckdb_results_str == pg_results == transmit_results == expected
+        duckdb_results_str == pg_results_str == transmit_results == expected
     ), "Timestamp_ms results do not match expected values!"
 
 
@@ -1014,13 +1024,14 @@ def test_timestamp_ns(setup_table, duckdb_conn, pgduck_conn, tmp_path):
     pg_results = perform_query_on_cursor(query, pgduck_conn)
 
     duckdb_results_str = convert_datetime_to_str(duckdb_results)
+    pg_results_str = convert_datetime_to_str(pg_results)
 
     # Get normalized transmit results
     transmit_results = perform_transmit_query(query, pgduck_conn, tmp_path)
     transmit_results = [(item[0],) for item in transmit_results]
 
     assert (
-        duckdb_results_str == pg_results == transmit_results == expected
+        duckdb_results_str == pg_results_str == transmit_results == expected
     ), "Timestamp_ns results do not match expected values!"
 
 
@@ -1031,19 +1042,21 @@ def test_timestamp_sec(setup_table, duckdb_conn, pgduck_conn, tmp_path):
     pg_results = perform_query_on_cursor(query, pgduck_conn)
 
     duckdb_results_str = convert_datetime_to_str(duckdb_results)
+    pg_results_str = convert_datetime_to_str(pg_results)
 
     # Get normalized transmit results
     transmit_results = perform_transmit_query(query, pgduck_conn, tmp_path)
     transmit_results = [(item[0],) for item in transmit_results]
 
     assert (
-        duckdb_results_str == pg_results == transmit_results == expected
+        duckdb_results_str == pg_results_str == transmit_results == expected
     ), "Timestamp_sec results do not match expected values!"
 
 
 def test_timestamp_tz(setup_table, duckdb_conn, pgduck_conn, tmp_path):
     query = "SELECT timestamp_tz_col FROM duckdb_supported_types_table WHERE timestamp_tz_col IS NOT NULL ORDER BY timestamp_tz_col"
-    expected = [("2024-02-08 09:00:00+00",)]
+    expected_text = [("2024-02-08 09:00:00+00",)]
+    expected_dt = [(datetime(2024, 2, 8, 9, 0, 0, tzinfo=timezone.utc),)]
     pg_results = perform_query_on_cursor(query, pgduck_conn)
 
     # We skip getting duckdb_results, because the output
@@ -1053,9 +1066,12 @@ def test_timestamp_tz(setup_table, duckdb_conn, pgduck_conn, tmp_path):
     transmit_results = perform_transmit_query(query, pgduck_conn, tmp_path)
     transmit_results = [(item[0],) for item in transmit_results]
 
+    # pg cursor returns timezone-aware datetime; transmit (CSV) is the original
+    # text format ("...+00").
+    assert pg_results == expected_dt, "Timestamp_tz pg cursor results mismatch!"
     assert (
-        pg_results == transmit_results == expected
-    ), "Timestamp_tz results do not match expected values!"
+        transmit_results == expected_text
+    ), "Timestamp_tz transmit results do not match expected values!"
 
 
 def test_time(setup_table, duckdb_conn, pgduck_conn, tmp_path):
@@ -1065,19 +1081,21 @@ def test_time(setup_table, duckdb_conn, pgduck_conn, tmp_path):
     pg_results = perform_query_on_cursor(query, pgduck_conn)
 
     duckdb_results_str = convert_time_to_str(duckdb_results)
+    pg_results_str = convert_time_to_str(pg_results)
 
     # Get normalized transmit results
     transmit_results = perform_transmit_query(query, pgduck_conn, tmp_path)
     transmit_results = [(item[0],) for item in transmit_results]
 
     assert (
-        duckdb_results_str == pg_results == transmit_results == expected
+        duckdb_results_str == pg_results_str == transmit_results == expected
     ), "Time results do not match expected values!"
 
 
 def test_tz_time(setup_table, duckdb_conn, pgduck_conn, tmp_path):
     query = "SELECT time_tz_col FROM duckdb_supported_types_table WHERE time_tz_col IS NOT NULL ORDER BY time_tz_col"
-    expected = [("12:00:00+03",)]
+    expected_text = [("12:00:00+03",)]
+    expected_t = [(time(12, 0, 0, tzinfo=timezone(timedelta(hours=3))),)]
 
     # We skip getting duckdb_results, because time_tz handling is not currently
     # implemented in the Python DuckDB module (to be revisited)
@@ -1088,9 +1106,12 @@ def test_tz_time(setup_table, duckdb_conn, pgduck_conn, tmp_path):
     transmit_results = perform_transmit_query(query, pgduck_conn, tmp_path)
     transmit_results = [(item[0],) for item in transmit_results]
 
+    # pg cursor returns timezone-aware time; transmit (CSV) is the original
+    # text format ("...+03").
+    assert pg_results == expected_t, "Time_tz pg cursor results mismatch!"
     assert (
-        pg_results == transmit_results == expected
-    ), "Time_tz results do not match expected values!"
+        transmit_results == expected_text
+    ), "Time_tz transmit results do not match expected values!"
 
 
 def test_struct(setup_table, duckdb_conn, pgduck_conn, tmp_path):
