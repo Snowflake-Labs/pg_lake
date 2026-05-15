@@ -135,10 +135,10 @@ external_catalog_modification(PG_FUNCTION_ARGS)
 	if (isInternalCatalog)
 	{
 		/*
-		 * For the current database catalog, only UPDATE is supported.
-		 * This allows external Iceberg clients to write new metadata
-		 * and then update the metadata_location, triggering a sync
-		 * of the internal pg_lake catalog state.
+		 * For the current database catalog, only UPDATE is supported. This
+		 * allows external Iceberg clients to write new metadata and then
+		 * update the metadata_location, triggering a sync of the internal
+		 * pg_lake catalog state.
 		 */
 		if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
 		{
@@ -266,19 +266,20 @@ HandleInternalCatalogUpdate(char *namespaceName, char *tableName,
 
 		GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
 		SetUserIdAndSecContext(ExtensionOwnerId(PgLakeIceberg),
-							  SECURITY_LOCAL_USERID_CHANGE);
+							   SECURITY_LOCAL_USERID_CHANGE);
 
 		/*
-		 * Use OidFunctionCall1 to call the sync function. This is safe because
-		 * OidFunctionCall doesn't use SPI - it calls the function directly via
-		 * the function manager. The sync function itself uses SPI internally,
-		 * but that's fine since we're not in an SPI context here.
+		 * Use OidFunctionCall1 to call the sync function. This is safe
+		 * because OidFunctionCall doesn't use SPI - it calls the function
+		 * directly via the function manager. The sync function itself uses
+		 * SPI internally, but that's fine since we're not in an SPI context
+		 * here.
 		 */
 		Oid			argTypes[1] = {REGCLASSOID};
 		Oid			syncFuncOid = LookupFuncName(
-											list_make2(makeString("lake_table"),
-													  makeString("sync_iceberg_metadata_from_external_write")),
-											1, argTypes, true);
+												 list_make2(makeString("lake_table"),
+															makeString("sync_iceberg_metadata_from_external_write")),
+												 1, argTypes, true);
 
 		if (OidIsValid(syncFuncOid))
 		{
