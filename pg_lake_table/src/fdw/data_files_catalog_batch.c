@@ -54,6 +54,7 @@ typedef struct FileIdHashEntry
 /* caller-above-callee forward decls for the statics below */
 static void FlushDataFileAddBatch(Oid relationId, List *addOps);
 static HTAB *BulkInsertDataFiles(Oid relationId, List *addOps);
+static HTAB *BuildFileIdHashFromReturning(int count);
 static void BulkInsertDataFileColumnStats(Oid relationId, List *addOps);
 static void BulkInsertDataFilePartitionValues(Oid relationId, List *addOps,
 											  HTAB *pathToFileId);
@@ -184,10 +185,7 @@ BulkInsertDataFiles(Oid relationId, List *addOps)
 													  count, INT8OID);
 
 	/*
-	 * RETURNING id, path lets us capture sequence-assigned ids in C.
-	 * We key the downstream hash on path (text) so BulkInsertDataFilePartitionValues
-	 * and BulkInsertTrackedFileIds can do O(1) lookups instead of JOINing
-	 * back to lake_table.files.
+	 * RETURNING id, path captures sequence-assigned ids for BuildFileIdHashFromReturning.
 	 *
 	 * No ::text[] / ::int8[] casts on the $N placeholders: SPI_ARG_VALUE
 	 * already declares each parameter's type to the planner.
@@ -210,8 +208,21 @@ BulkInsertDataFiles(Oid relationId, List *addOps)
 
 	SPI_START_EXTENSION_OWNER(PgLakeTable);
 	SPI_EXECUTE(query, /* readOnly = */ false);
+	HTAB	   *pathToFileId = BuildFileIdHashFromReturning(count);
+	SPI_END();
 
-	/* Build path->id hash from RETURNING rows while still inside SPI. */
+	return pathToFileId;
+}
+
+
+/*
+ * Build a path->fileId HTAB from SPI_tuptable after an INSERT ... RETURNING id, path.
+ * Must be called while still inside an SPI session (before SPI_END).
+ * Caller must hash_destroy() the returned table when done.
+ */
+static HTAB *
+BuildFileIdHashFromReturning(int count)
+{
 	HASHCTL		hashCtl;
 
 	memset(&hashCtl, 0, sizeof(hashCtl));
@@ -225,6 +236,8 @@ BulkInsertDataFiles(Oid relationId, List *addOps)
 										   HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
 
 	uint64		nRows = SPI_processed;
+
+	Assert((int) nRows == count);
 
 	for (uint64 i = 0; i < nRows; i++)
 	{
@@ -244,10 +257,6 @@ BulkInsertDataFiles(Oid relationId, List *addOps)
 		Assert(!found);			/* each path is unique in lake_table.files */
 		entry->fileId = fileId;
 	}
-
-	Assert((int) nRows == count);
-
-	SPI_END();
 
 	return pathToFileId;
 }
