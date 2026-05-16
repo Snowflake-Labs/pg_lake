@@ -35,9 +35,9 @@ def polaris_no_register(polaris_schema, extension, superuser_conn, app_user):
 
     run_command(
         f"""
+        DROP EXTENSION pg_lake_polaris CASCADE;
         DELETE FROM polaris_schema.entities
             WHERE id NOT IN (0, {POLARIS_CATALOG_ID});
-        DROP EXTENSION pg_lake_polaris CASCADE;
         """,
         superuser_conn,
     )
