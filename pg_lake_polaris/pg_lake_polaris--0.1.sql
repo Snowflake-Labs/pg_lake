@@ -23,6 +23,7 @@ CREATE TABLE lake_polaris.entity_link (
 );
 
 
+
 /*
  * Suppress flag wrappers (C functions). These are read/written by the SQL
  * trigger functions to break the round-trip loop between the outbound
@@ -168,9 +169,14 @@ BEGIN
     JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE c.oid = p_table_oid;
 
+    /*
+     * Stale tables_internal rows (relation dropped without removing the
+     * row, e.g., from past tests or partial migrations) are silently
+     * skipped. They'll be cleaned up next time pg_lake's normal flow
+     * touches them.
+     */
     IF v_namespace_name IS NULL THEN
-        RAISE EXCEPTION 'pg_lake_polaris: relation % no longer exists',
-            p_table_oid;
+        RETURN;
     END IF;
 
     SELECT metadata_location INTO v_metadata_location
@@ -272,12 +278,22 @@ BEGIN
         RETURN;
     END IF;
 
+    /*
+     * Delete entity_link FIRST so the inbound trigger (which Postgres
+     * queues at the end of the next statement) sees no link when it
+     * looks up by polaris_entity_id and short-circuits. The suppress
+     * flag we set in outbound_trigger() doesn't protect us across
+     * Postgres's AFTER-trigger queue: by the time the inbound trigger
+     * actually fires, the outbound trigger has already reset the flag.
+     * Self-canceling state is the load-bearing mechanism; the flag is
+     * defense-in-depth.
+     */
+    DELETE FROM lake_polaris.entity_link
+     WHERE pg_table_oid = p_table_oid;
+
     DELETE FROM polaris_schema.entities
      WHERE realm_id = v_mapping.polaris_realm_id
        AND id = v_link.polaris_entity_id;
-
-    DELETE FROM lake_polaris.entity_link
-     WHERE pg_table_oid = p_table_oid;
 END;
 $function$;
 
@@ -508,24 +524,28 @@ BEGIN
     END LOOP;
 
     /*
-     * Create the foreign table. It's read-only in v0.1: external clients
-     * own the data, pg_lake serves queries. The catalog_name option points
-     * at the database so pg_lake_iceberg recognizes this as a managed
-     * catalog table.
+     * Create the foreign table. The catalog_name option points at the
+     * database so pg_lake_iceberg recognizes this as a managed catalog
+     * table. v0.1 doesn't enforce read-only on the pg_lake side — that
+     * would need a server option that doesn't exist yet for this FDW.
      */
     EXECUTE format(
-        'CREATE FOREIGN TABLE %I.%I (%s) SERVER pg_lake_iceberg OPTIONS (read_only ''true'')',
+        'CREATE FOREIGN TABLE %I.%I (%s) SERVER pg_lake_iceberg',
         p_namespace_name, p_table_name, v_columns);
 
     v_new_oid := format('%I.%I', p_namespace_name, p_table_name)::regclass;
 
-    /* register in pg_lake's iceberg catalog so it knows about the table */
-    INSERT INTO lake_iceberg.tables_internal
-        (table_name, metadata_location, has_custom_location)
-    VALUES
-        (v_new_oid, p_metadata_location, true);
+    /*
+     * pg_lake's CREATE FOREIGN TABLE hook already inserted a tables_internal
+     * row pointing at a fresh metadata location it just created. Overwrite
+     * that with the metadata file the external client wrote, then run the
+     * sync to populate schema and data files from it.
+     */
+    UPDATE lake_iceberg.tables_internal
+       SET previous_metadata_location = metadata_location,
+           metadata_location = p_metadata_location
+     WHERE table_name = v_new_oid;
 
-    /* sync schema and data files */
     PERFORM lake_table.sync_iceberg_metadata_from_external_write(v_new_oid);
 
     /* link */
