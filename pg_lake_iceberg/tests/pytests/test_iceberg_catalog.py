@@ -69,7 +69,7 @@ def test_create_in_internal_catalog(iceberg_catalog, iceberg_extension):
             location=f"s3://{TEST_BUCKET}/iceberg/public/simple_internal_table",
         )
 
-    assert "currently only supported via pg_lake_iceberg tables" in str(exc_info.value)
+    assert "requires the pg_lake_table extension" in str(exc_info.value)
 
 
 def test_create_in_external_catalog(
@@ -105,7 +105,9 @@ def test_create_in_external_catalog(
         catalog_conn,
         raise_error=False,
     )
-    assert "currently only supported via pg_lake_iceberg tables" in error
+    assert (
+        "changing catalog_name across the internal/external catalog boundary" in error
+    )
 
     catalog_conn.rollback()
 

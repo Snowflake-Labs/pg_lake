@@ -990,43 +990,69 @@ def test_external_write_stats_populated(
     pg_conn.rollback()
 
 
-def test_external_write_internal_catalog_insert_rejected(
+def test_external_write_create_table_via_pyiceberg(
     s3,
     pg_conn,
     superuser_conn,
     extension,
     with_default_location,
-    grant_iceberg_tables_full_access,
+    iceberg_catalog,
 ):
     """
-    INSERT into iceberg_tables for the current database catalog must be
-    rejected — internal catalog is only mutable via pg_lake DDL.
+    PyIceberg's create_table goes through INSERT INTO iceberg_tables for
+    the current database catalog. The trigger must read the metadata
+    file, synthesize a CREATE FOREIGN TABLE, and run the sync — making
+    the new table queryable from pg_lake immediately.
     """
-    db_name = run_query("SELECT current_database()", pg_conn)[0][0]
+    name = f"{TABLE_NAME}_pyice_create"
 
-    error_raised = False
+    pyiceberg_table = iceberg_catalog.create_table(
+        f"{TABLE_NAMESPACE}.{name}",
+        schema=pa.schema(
+            [
+                pa.field("a", pa.int32()),
+                pa.field("b", pa.string()),
+            ]
+        ),
+    )
+    pyiceberg_table.append(
+        pa.table(
+            {"a": [1, 2], "b": ["one", "two"]},
+            schema=pa.schema([pa.field("a", pa.int32()), pa.field("b", pa.string())]),
+        )
+    )
+
     try:
-        run_command(
+        # the foreign table must exist in pg_lake
+        cnt = run_query(
             f"""
-            INSERT INTO iceberg_tables
-                (catalog_name, table_namespace, table_name, metadata_location)
-            VALUES
-                ('{db_name}', '{TABLE_NAMESPACE}', 'fake_internal',
-                 's3://fake/v1.metadata.json')
+            SELECT count(*) FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = '{TABLE_NAMESPACE}'
+              AND c.relname = '{name}' AND c.relkind = 'f'
             """,
-            pg_conn,
+            superuser_conn,
+        )[0][0]
+        assert cnt == 1
+
+        # and reading through it must return the rows PyIceberg wrote.
+        # Use superuser_conn since the synthesized table is owned by the
+        # extension owner; ownership transfer to the connected user is a
+        # follow-up.
+        result = run_query(
+            f"SELECT a, b FROM {TABLE_NAMESPACE}.{name} ORDER BY a",
+            superuser_conn,
         )
-    except Exception as e:
-        error_raised = True
-        assert (
-            "internal catalog is currently only supported via pg_lake_iceberg" in str(e)
+        assert result == [[1, "one"], [2, "two"]]
+    finally:
+        run_command(
+            f"DROP FOREIGN TABLE IF EXISTS {TABLE_NAMESPACE}.{name}",
+            superuser_conn,
         )
-        pg_conn.rollback()
-
-    assert error_raised
+        superuser_conn.commit()
 
 
-def test_external_write_internal_catalog_delete_rejected(
+def test_external_write_drop_table_via_iceberg_tables(
     s3,
     pg_conn,
     superuser_conn,
@@ -1035,12 +1061,64 @@ def test_external_write_internal_catalog_delete_rejected(
     grant_iceberg_tables_full_access,
 ):
     """
-    DELETE from iceberg_tables for the current database catalog must be
-    rejected — dropping internal tables goes through pg_lake DDL.
+    DELETE from iceberg_tables for the current database catalog must
+    drop the corresponding pg_lake foreign table (CASCADE), removing it
+    from pg_class and from lake_iceberg.tables_internal.
     """
-    tbl = f"{TABLE_NAMESPACE}.{TABLE_NAME}_del_internal"
+    name = f"{TABLE_NAME}_del_internal"
+    tbl = f"{TABLE_NAMESPACE}.{name}"
 
     run_command(f"CREATE TABLE {tbl} (a int) USING iceberg", pg_conn)
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        DELETE FROM iceberg_tables
+        WHERE table_namespace = '{TABLE_NAMESPACE}'
+          AND table_name = '{name}'
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    cnt = run_query(
+        f"SELECT count(*) FROM pg_class WHERE relname = '{name}'",
+        superuser_conn,
+    )[0][0]
+    assert cnt == 0
+
+    cnt = run_query(
+        f"""
+        SELECT count(*) FROM lake_iceberg.tables_internal ti
+        JOIN pg_class c ON c.oid = ti.table_name
+        WHERE c.relname = '{name}'
+        """,
+        superuser_conn,
+    )[0][0]
+    assert cnt == 0
+
+
+def test_external_write_drop_with_dependent_view_errors(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    grant_iceberg_tables_full_access,
+):
+    """
+    DELETE from iceberg_tables must fail (no CASCADE) when a Postgres
+    object depends on the foreign table — e.g., a materialized view that
+    a Postgres-side user created. Otherwise an external client could
+    silently destroy local objects on the Postgres side.
+    """
+    name = f"{TABLE_NAME}_del_blocked"
+    tbl = f"{TABLE_NAMESPACE}.{name}"
+    view_name = f"{TABLE_NAMESPACE}.{name}_view"
+
+    run_command(f"CREATE TABLE {tbl} (a int) USING iceberg", pg_conn)
+    run_command(f"INSERT INTO {tbl} VALUES (1), (2)", pg_conn)
+    run_command(f"CREATE VIEW {view_name} AS SELECT * FROM {tbl}", pg_conn)
     pg_conn.commit()
 
     error_raised = False
@@ -1049,20 +1127,71 @@ def test_external_write_internal_catalog_delete_rejected(
             f"""
             DELETE FROM iceberg_tables
             WHERE table_namespace = '{TABLE_NAMESPACE}'
-              AND table_name = '{TABLE_NAME}_del_internal'
+              AND table_name = '{name}'
             """,
             pg_conn,
         )
     except Exception as e:
         error_raised = True
-        assert (
-            "internal catalog is currently only supported via pg_lake_iceberg" in str(e)
-        )
+        assert "cannot drop foreign table" in str(e) or "depends on" in str(e)
         pg_conn.rollback()
 
     assert error_raised
 
-    pg_conn.rollback()
+    # foreign table and view must both still exist
+    cnt = run_query(
+        f"SELECT count(*) FROM pg_class WHERE relname = '{name}'",
+        superuser_conn,
+    )[0][0]
+    assert cnt == 1
+
+    run_command(f"DROP VIEW {view_name}", pg_conn)
+    run_command(f"DROP TABLE {tbl}", pg_conn)
+    pg_conn.commit()
+
+
+def test_external_write_create_existing_table_errors(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    grant_iceberg_tables_full_access,
+):
+    """
+    INSERT into iceberg_tables for a table_name that already exists in
+    the target schema must error — silently redirecting an existing
+    table to new metadata would silently corrupt state.
+    """
+    name = f"{TABLE_NAME}_dup"
+    tbl = f"{TABLE_NAMESPACE}.{name}"
+    db_name = run_query("SELECT current_database()", pg_conn)[0][0]
+
+    run_command(f"CREATE TABLE {tbl} (a int) USING iceberg", pg_conn)
+    pg_conn.commit()
+
+    try:
+        error_raised = False
+        try:
+            run_command(
+                f"""
+                INSERT INTO iceberg_tables
+                    (catalog_name, table_namespace, table_name, metadata_location)
+                VALUES
+                    ('{db_name}', '{TABLE_NAMESPACE}', '{name}',
+                     's3://fake/v1.metadata.json')
+                """,
+                pg_conn,
+            )
+        except Exception as e:
+            error_raised = True
+            assert "already exists" in str(e)
+            pg_conn.rollback()
+
+        assert error_raised
+    finally:
+        run_command(f"DROP TABLE IF EXISTS {tbl}", pg_conn)
+        pg_conn.commit()
 
 
 def test_external_write_catalog_name_change_rejected(
@@ -1099,8 +1228,8 @@ def test_external_write_catalog_name_change_rejected(
         )
     except Exception as e:
         error_raised = True
-        assert (
-            "internal catalog is currently only supported via pg_lake_iceberg" in str(e)
+        assert "across the internal/external catalog boundary is not supported" in str(
+            e
         )
         pg_conn.rollback()
 

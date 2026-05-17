@@ -18,23 +18,22 @@
 /*
  * sync_external_metadata.c
  *
- * Syncs the internal pg_lake catalog state (schema, partition specs, data files)
- * from new Iceberg metadata written by an external client.
- *
- * Called via:
- *   SELECT lake_table.sync_iceberg_metadata_from_external_write(regclass)
- *
- * This is triggered by an UPDATE to the iceberg_tables view for tables in the
- * current database catalog.
+ * Syncs the internal pg_lake catalog state (schema, partition specs, data
+ * files) from new Iceberg metadata written by an external client. Driven
+ * by the INSTEAD OF trigger on pg_catalog.iceberg_tables (UPDATE for
+ * existing tables, INSERT for newly registered tables).
  */
 
 #include "postgres.h"
 #include "fmgr.h"
 #include "miscadmin.h"
 
+#include "access/htup_details.h"
 #include "access/relation.h"
 #include "access/table.h"
 #include "catalog/namespace.h"
+#include "commands/dbcommands.h"
+#include "commands/trigger.h"
 #include "executor/spi.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
@@ -61,8 +60,14 @@
 #include "pg_extension_base/spi_helpers.h"
 #include "utils/hsearch.h"
 
-PG_FUNCTION_INFO_V1(sync_iceberg_metadata_from_external_write);
+PG_FUNCTION_INFO_V1(internal_catalog_modification);
 
+static void SyncFromExternalMetadata(Oid relationId);
+static void HandleInternalCatalogUpdate(char *namespaceName, char *tableName,
+										char *metadataLocation, char *prevMetadataLocation);
+static void HandleInternalCatalogInsert(char *namespaceName, char *tableName,
+										char *metadataLocation);
+static void HandleInternalCatalogDelete(char *namespaceName, char *tableName);
 static void SyncSchemaFromMetadata(Oid relationId, IcebergTableMetadata * metadata);
 static void FetchExistingFieldMappings(Oid relationId, int **fieldIds,
 									   int16 **attnums, int *count);
@@ -77,21 +82,20 @@ static List *BuildColumnStatsForManifestEntry(IcebergManifestEntry * manifestEnt
 
 
 /*
- * sync_iceberg_metadata_from_external_write syncs the pg_lake internal
- * catalog state from the current Iceberg metadata for the given table.
+ * SyncFromExternalMetadata syncs the pg_lake internal catalog state from
+ * the current Iceberg metadata for the given table:
+ *   1. Schema sync: add/drop columns on the foreign table to match the
+ *      Iceberg schema, and update field_id_mappings.
+ *   2. Partition spec sync: register any new partition specs.
+ *   3. Data file full resync: clear and repopulate lake_table.files and
+ *      associated stats/partition values from the metadata snapshot.
  *
- * This performs three sub-steps:
- * 1. Schema sync: add/drop columns on the foreign table to match the
- *    Iceberg schema, and update field_id_mappings.
- * 2. Partition spec sync: register any new partition specs.
- * 3. Data file full resync: clear and repopulate lake_table.files and
- *    associated stats/partition values from the metadata snapshot.
+ * Used by both the UPDATE trigger path (existing tables) and the INSERT
+ * trigger path (newly registered tables).
  */
-Datum
-sync_iceberg_metadata_from_external_write(PG_FUNCTION_ARGS)
+static void
+SyncFromExternalMetadata(Oid relationId)
 {
-	Oid			relationId = PG_GETARG_OID(0);
-
 	/* read the new metadata from object storage */
 	bool		forUpdate = false;
 	char	   *metadataLocation = GetIcebergMetadataLocation(relationId, forUpdate);
@@ -105,10 +109,11 @@ sync_iceberg_metadata_from_external_write(PG_FUNCTION_ARGS)
 	 * so we don't want the hooks to register duplicate mappings or schedule a
 	 * metadata write.
 	 *
-	 * This is the only intended caller of SkipIcebergDDLProcessing. The flag
-	 * is process-global; we restore it in PG_FINALLY to avoid leaking state
-	 * if the sync errors out partway through.
+	 * The flag is process-global; we restore it in PG_FINALLY to avoid
+	 * leaking state if the sync errors out partway through.
 	 */
+	bool		previousSkip = SkipIcebergDDLProcessing;
+
 	SkipIcebergDDLProcessing = true;
 
 	PG_TRY();
@@ -119,11 +124,9 @@ sync_iceberg_metadata_from_external_write(PG_FUNCTION_ARGS)
 	}
 	PG_FINALLY();
 	{
-		SkipIcebergDDLProcessing = false;
+		SkipIcebergDDLProcessing = previousSkip;
 	}
 	PG_END_TRY();
-
-	PG_RETURN_VOID();
 }
 
 
@@ -286,27 +289,16 @@ SyncSchemaFromMetadata(Oid relationId, IcebergTableMetadata * metadata)
 			continue;
 		}
 
-		/* new field: convert Iceberg type to Postgres type */
+		/*
+		 * No mapping for this field_id yet. The column may or may not already
+		 * exist in the foreign table — if the table was created via an
+		 * iceberg_tables INSERT trigger from an external client, the columns
+		 * are already there from the CREATE FOREIGN TABLE but no
+		 * field_id_mappings have been registered yet. Look up pg_attribute by
+		 * name first; only ADD COLUMN if it isn't there.
+		 */
 		PGType		pgType = IcebergFieldToPostgresType(icebergField->type);
 
-		char	   *pgTypeName = format_type_with_typemod(pgType.postgresTypeOid,
-														  pgType.postgresTypeMod);
-
-		/* execute ALTER FOREIGN TABLE ... ADD COLUMN via SPI */
-		StringInfo	alterCmd = makeStringInfo();
-
-		appendStringInfo(alterCmd,
-						 "ALTER FOREIGN TABLE %s.%s ADD COLUMN %s %s",
-						 quote_identifier(schemaName),
-						 quote_identifier(tableName),
-						 quote_identifier(icebergField->name),
-						 pgTypeName);
-
-		ExecuteAlterTableViaSPI(alterCmd->data);
-
-		/*
-		 * After ADD COLUMN, look up the new attnum from pg_attribute.
-		 */
 		Relation	rel = RelationIdGetRelation(relationId);
 		TupleDesc	tupdesc = RelationGetDescr(rel);
 		AttrNumber	newAttNum = InvalidAttrNumber;
@@ -326,8 +318,42 @@ SyncSchemaFromMetadata(Oid relationId, IcebergTableMetadata * metadata)
 		RelationClose(rel);
 
 		if (newAttNum == InvalidAttrNumber)
-			elog(ERROR, "could not find column \"%s\" after ADD COLUMN",
-				 icebergField->name);
+		{
+			char	   *pgTypeName = format_type_with_typemod(pgType.postgresTypeOid,
+															  pgType.postgresTypeMod);
+
+			StringInfo	alterCmd = makeStringInfo();
+
+			appendStringInfo(alterCmd,
+							 "ALTER FOREIGN TABLE %s.%s ADD COLUMN %s %s",
+							 quote_identifier(schemaName),
+							 quote_identifier(tableName),
+							 quote_identifier(icebergField->name),
+							 pgTypeName);
+
+			ExecuteAlterTableViaSPI(alterCmd->data);
+
+			rel = RelationIdGetRelation(relationId);
+			tupdesc = RelationGetDescr(rel);
+
+			for (int attIdx = 0; attIdx < tupdesc->natts; attIdx++)
+			{
+				Form_pg_attribute attr = TupleDescAttr(tupdesc, attIdx);
+
+				if (!attr->attisdropped &&
+					strcmp(NameStr(attr->attname), icebergField->name) == 0)
+				{
+					newAttNum = attr->attnum;
+					break;
+				}
+			}
+
+			RelationClose(rel);
+
+			if (newAttNum == InvalidAttrNumber)
+				elog(ERROR, "could not find column \"%s\" after ADD COLUMN",
+					 icebergField->name);
+		}
 
 		/* register the field mapping */
 		int			parentFieldId = INVALID_FIELD_ID;
@@ -721,4 +747,332 @@ ColumnBoundBinaryToText(ColumnBound * bound, int fieldId,
 	char	   *boundText = OidOutputFunctionCall(typoutput, boundDatum);
 
 	return boundText;
+}
+
+
+/*
+ * LocationPrefixFromMetadataLocation strips the trailing
+ * "metadata/<n>-<uuid>.metadata.json" off an Iceberg metadata file URI to
+ * derive the table's storage prefix, which is what pg_lake_iceberg
+ * requires as its `location` server option.
+ *
+ * Iceberg metadata files always live at <prefix>/metadata/<file>.json,
+ * so a string-level rfind on "/metadata/" is enough.
+ */
+static char *
+LocationPrefixFromMetadataLocation(const char *metadataLocation)
+{
+	const char *cursor = strstr(metadataLocation, "/metadata/");
+	const char *lastMarker = cursor;
+
+	while (cursor != NULL)
+	{
+		lastMarker = cursor;
+		cursor = strstr(cursor + 1, "/metadata/");
+	}
+
+	if (lastMarker == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("metadata_location \"%s\" does not contain a /metadata/ path segment",
+						metadataLocation)));
+
+	return pnstrdup(metadataLocation, lastMarker - metadataLocation);
+}
+
+
+/*
+ * internal_catalog_modification is the INSTEAD OF trigger on
+ * pg_catalog.iceberg_tables that pg_lake_table installs. It handles
+ * only the *internal*-catalog path: rows whose catalog_name matches
+ * the current database, i.e., tables backed by pg_lake foreign tables.
+ *
+ *   UPDATE  -> apply external metadata write to an existing pg_lake
+ *              iceberg table (run sync on new metadata).
+ *   INSERT  -> register a brand-new pg_lake iceberg table from a
+ *              metadata file an external client wrote (synthesize
+ *              CREATE FOREIGN TABLE, then sync).
+ *   DELETE  -> drop the corresponding foreign table.
+ *
+ * The external-catalog path is owned by a sibling trigger in
+ * pg_lake_iceberg — see lake_iceberg.external_catalog_modification.
+ * Cross-boundary catalog renames are rejected by the sibling trigger
+ * before we get here, so we don't re-validate.
+ */
+Datum
+internal_catalog_modification(PG_FUNCTION_ARGS)
+{
+	TriggerData *trigdata = (TriggerData *) fcinfo->context;
+	HeapTuple	rettuple;
+
+	if (!CALLED_AS_TRIGGER(fcinfo))
+		ereport(ERROR,
+				(errcode(ERRCODE_TRIGGERED_ACTION_EXCEPTION),
+				 errmsg("must be called as a trigger")));
+
+	if (!TRIGGER_FIRED_INSTEAD(trigdata->tg_event))
+		ereport(ERROR,
+				(errcode(ERRCODE_TRIGGERED_ACTION_EXCEPTION),
+				 errmsg("must be called as an INSTEAD OF trigger")));
+
+	if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
+		rettuple = trigdata->tg_newtuple;
+	else
+		rettuple = trigdata->tg_trigtuple;
+
+	bool		isnull = false;
+	Datum		catalogNameDatum = heap_getattr(rettuple, 1,
+												trigdata->tg_relation->rd_att, &isnull);
+
+	if (isnull)
+		elog(ERROR, "catalog_name cannot be NULL");
+
+	Datum		namespaceDatum = heap_getattr(rettuple, 2,
+											  trigdata->tg_relation->rd_att, &isnull);
+
+	if (isnull)
+		elog(ERROR, "table_namespace cannot be NULL");
+
+	Datum		tableNameDatum = heap_getattr(rettuple, 3,
+											  trigdata->tg_relation->rd_att, &isnull);
+
+	if (isnull)
+		elog(ERROR, "table_name cannot be NULL");
+
+	bool		metadataLocationIsNull = false;
+	Datum		metadataLocationDatum = heap_getattr(rettuple, 4,
+													 trigdata->tg_relation->rd_att,
+													 &metadataLocationIsNull);
+	bool		prevMetadataLocationIsNull = false;
+	Datum		prevMetadataLocationDatum = heap_getattr(rettuple, 5,
+														 trigdata->tg_relation->rd_att,
+														 &prevMetadataLocationIsNull);
+
+	char	   *catalogName = TextDatumGetCString(catalogNameDatum);
+	char	   *namespaceName = TextDatumGetCString(namespaceDatum);
+	char	   *tableName = TextDatumGetCString(tableNameDatum);
+	char	   *metadataLocation = metadataLocationIsNull ? NULL :
+		TextDatumGetCString(metadataLocationDatum);
+	char	   *prevMetadataLocation = prevMetadataLocationIsNull ? NULL :
+		TextDatumGetCString(prevMetadataLocationDatum);
+
+	char	   *databaseName = get_database_name(MyDatabaseId);
+	bool		isInternalCatalog = (strcmp(catalogName, databaseName) == 0);
+
+	/* External-catalog rows are pg_lake_iceberg's responsibility. */
+	if (!isInternalCatalog)
+		return PointerGetDatum(rettuple);
+
+	if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
+		HandleInternalCatalogUpdate(namespaceName, tableName,
+									metadataLocation, prevMetadataLocation);
+	else if (TRIGGER_FIRED_BY_INSERT(trigdata->tg_event))
+		HandleInternalCatalogInsert(namespaceName, tableName, metadataLocation);
+	else if (TRIGGER_FIRED_BY_DELETE(trigdata->tg_event))
+		HandleInternalCatalogDelete(namespaceName, tableName);
+	else
+		pg_unreachable();
+
+	return PointerGetDatum(rettuple);
+}
+
+
+/*
+ * HandleInternalCatalogUpdate: UPDATE on iceberg_tables for tables in
+ * the current database catalog. Validates optimistic concurrency via
+ * previous_metadata_location, updates the internal catalog's stored
+ * metadata location, and runs the sync.
+ */
+static void
+HandleInternalCatalogUpdate(char *namespaceName, char *tableName,
+							char *metadataLocation, char *prevMetadataLocation)
+{
+	if (metadataLocation == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("metadata_location cannot be NULL")));
+
+	if (prevMetadataLocation == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("previous_metadata_location is required for "
+						"optimistic concurrency control")));
+
+	bool		missingOk = false;
+	Oid			namespaceOid = get_namespace_oid(namespaceName, missingOk);
+	Oid			relationId = get_relname_relid(tableName, namespaceOid);
+
+	if (!OidIsValid(relationId))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_TABLE),
+				 errmsg("table \"%s.%s\" does not exist",
+						namespaceName, tableName)));
+
+	bool		forUpdate = true;
+	char	   *currentMetadataLocation =
+		GetIcebergMetadataLocation(relationId, forUpdate);
+
+	if (currentMetadataLocation == NULL ||
+		strcmp(currentMetadataLocation, prevMetadataLocation) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+				 errmsg("metadata_location has been modified concurrently"),
+				 errdetail("Expected previous_metadata_location \"%s\" but found \"%s\".",
+						   prevMetadataLocation,
+						   currentMetadataLocation ? currentMetadataLocation : "(null)")));
+
+	UpdateInternalCatalogMetadataLocation(relationId, metadataLocation,
+										  prevMetadataLocation);
+
+	SyncFromExternalMetadata(relationId);
+}
+
+
+/*
+ * HandleInternalCatalogInsert: INSERT into iceberg_tables for the
+ * current database catalog. The metadata_location must point at a
+ * real Iceberg metadata file the external client wrote; we read it,
+ * translate the schema to Postgres column types, issue a
+ * CREATE FOREIGN TABLE that pg_lake's own hook turns into a
+ * tables_internal row, then overwrite that row's metadata_location
+ * with the user-supplied one and run the sync. The sync runs eagerly
+ * so type-translation or unreachable-metadata errors surface at INSERT
+ * time.
+ *
+ * SkipIcebergDDLProcessing is set around the CREATE FOREIGN TABLE so
+ * pg_lake_table's own DDL path does not re-validate the
+ * location-is-empty invariant (the caller wrote a metadata file there)
+ * and does not queue a metadata write that would clobber it.
+ */
+static void
+HandleInternalCatalogInsert(char *namespaceName, char *tableName,
+							char *metadataLocation)
+{
+	if (metadataLocation == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("metadata_location cannot be NULL")));
+
+	bool		missingOk = true;
+	Oid			namespaceOid = get_namespace_oid(namespaceName, missingOk);
+
+	if (!OidIsValid(namespaceOid))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_SCHEMA),
+				 errmsg("schema \"%s\" does not exist", namespaceName)));
+
+	Oid			existingId = get_relname_relid(tableName, namespaceOid);
+
+	if (OidIsValid(existingId))
+		ereport(ERROR,
+				(errcode(ERRCODE_DUPLICATE_TABLE),
+				 errmsg("table \"%s.%s\" already exists",
+						namespaceName, tableName)));
+
+	IcebergTableMetadata *metadata = ReadIcebergTableMetadata(metadataLocation);
+	IcebergTableSchema *schema = GetCurrentIcebergTableSchema(metadata);
+
+	StringInfo	columns = makeStringInfo();
+
+	for (size_t i = 0; i < schema->fields_length; i++)
+	{
+		DataFileSchemaField *field = &schema->fields[i];
+
+		PGType		pgType = IcebergFieldToPostgresType(field->type);
+		char	   *typeName = format_type_with_typemod(pgType.postgresTypeOid,
+														pgType.postgresTypeMod);
+
+		if (i > 0)
+			appendStringInfoString(columns, ", ");
+
+		appendStringInfo(columns, "%s %s",
+						 quote_identifier(field->name), typeName);
+	}
+
+	char	   *locationPrefix = LocationPrefixFromMetadataLocation(metadataLocation);
+
+	StringInfo	createCmd = makeStringInfo();
+
+	appendStringInfo(createCmd,
+					 "CREATE FOREIGN TABLE %s.%s (%s) SERVER pg_lake_iceberg "
+					 "OPTIONS (location %s)",
+					 quote_identifier(namespaceName),
+					 quote_identifier(tableName),
+					 columns->data,
+					 quote_literal_cstr(locationPrefix));
+
+	SkipIcebergDDLProcessing = true;
+
+	PG_TRY();
+	{
+		SPI_START_EXTENSION_OWNER(PgLakeTable);
+		SPI_execute(createCmd->data, false, 0);
+		SPI_END();
+	}
+	PG_FINALLY();
+	{
+		SkipIcebergDDLProcessing = false;
+	}
+	PG_END_TRY();
+
+	/*
+	 * pg_lake's CREATE FOREIGN TABLE hook inserted a tables_internal row
+	 * (with NULL metadata_location, since we suppressed the metadata write).
+	 * Update it to the caller's metadata, then sync.
+	 */
+	Oid			newRelationId = get_relname_relid(tableName, namespaceOid);
+
+	if (!OidIsValid(newRelationId))
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("failed to resolve newly-created table \"%s.%s\"",
+						namespaceName, tableName)));
+
+	bool		forUpdate = true;
+	char	   *currentLocation = GetIcebergMetadataLocation(newRelationId, forUpdate);
+
+	UpdateInternalCatalogMetadataLocation(newRelationId, metadataLocation,
+										  currentLocation);
+
+	SyncFromExternalMetadata(newRelationId);
+}
+
+
+/*
+ * HandleInternalCatalogDelete: DELETE on iceberg_tables for the current
+ * database catalog. Drops the corresponding foreign table — pg_lake's
+ * own DROP hook removes the tables_internal row, completing the
+ * deregistration. No CASCADE: dependent objects (views, materialized
+ * views) belong to Postgres-side users, not the external client; the
+ * user must drop them first.
+ */
+static void
+HandleInternalCatalogDelete(char *namespaceName, char *tableName)
+{
+	bool		missingOk = true;
+	Oid			namespaceOid = get_namespace_oid(namespaceName, missingOk);
+
+	if (!OidIsValid(namespaceOid))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_SCHEMA),
+				 errmsg("schema \"%s\" does not exist", namespaceName)));
+
+	Oid			relationId = get_relname_relid(tableName, namespaceOid);
+
+	if (!OidIsValid(relationId))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_TABLE),
+				 errmsg("table \"%s.%s\" does not exist",
+						namespaceName, tableName)));
+
+	StringInfo	dropCmd = makeStringInfo();
+
+	appendStringInfo(dropCmd,
+					 "DROP FOREIGN TABLE %s.%s",
+					 quote_identifier(namespaceName),
+					 quote_identifier(tableName));
+
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
+	SPI_execute(dropCmd->data, false, 0);
+	SPI_END();
 }

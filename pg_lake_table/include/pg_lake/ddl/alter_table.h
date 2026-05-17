@@ -34,9 +34,11 @@ extern PGDLLEXPORT PgLakeAlterTableHookType PgLakeAlterTableHook;
 extern PGDLLEXPORT PgLakeAlterTableRenameColumnHookType PgLakeAlterTableRenameColumnHook;
 
 /*
- * When true, ProcessAlterTable skips Iceberg DDL processing (field_id
- * registration and metadata tracking).  Used by
- * sync_iceberg_metadata_from_external_write to add/drop columns without
- * triggering a new metadata write.
+ * When true, ProcessAlterTable / ProcessCreateIcebergTable skip Iceberg
+ * DDL processing (field_id registration and metadata tracking). Used by
+ * the iceberg_tables INSTEAD OF trigger when applying an external
+ * client's metadata file: we issue ALTER / CREATE FOREIGN TABLE for
+ * its side effects on pg_class, but the metadata is already final on
+ * disk and pg_lake's own metadata write would clobber it.
  */
 extern bool SkipIcebergDDLProcessing;

@@ -19,6 +19,7 @@
 #include "miscadmin.h"
 
 #include "pg_lake/cleanup/deletion_queue.h"
+#include "pg_lake/ddl/alter_table.h"
 #include "pg_lake/ddl/ddl_changes.h"
 #include "pg_lake/ddl/drop_table.h"
 #include "pg_lake/extensions/pg_lake_engine.h"
@@ -63,6 +64,13 @@ ApplyDDLChanges(Oid relationId, List *ddlOperations)
 
 	ApplyDDLCatalogChanges(relationId, ddlOperations, &droppedColumns, &metadataLocation, &partitionSpec, &isIcebergTableCreated);
 	bool		isPartitionByChange = partitionSpec != NULL;
+
+	/*
+	 * SkipIcebergDDLProcessing means an external client supplied the metadata
+	 * file; don't queue any metadata write that would overwrite it.
+	 */
+	if (SkipIcebergDDLProcessing)
+		return;
 
 	if (isIcebergTableCreated)
 		TrackIcebergMetadataChangesInTx(relationId, list_make1_int(TABLE_CREATE));
@@ -118,13 +126,22 @@ ApplyDDLCatalogChanges(Oid relationId, List *ddlOperations,
 			*metadataLocation = catalogType == REST_CATALOG_READ_WRITE ? NULL : GenerateInitialIcebergTableMetadataPath(relationId);
 			InsertInternalIcebergCatalogTable(relationId, *metadataLocation, ddlOperation->hasCustomLocation);
 
-			/* register mappings for new columns */
-			bool		forAddColumn = false;
-			List	   *columnMappings = CreatePostgresColumnMappingsForColumnDefs(relationId,
-																				   ddlOperation->columnDefs,
-																				   forAddColumn);
+			/*
+			 * When SkipIcebergDDLProcessing is set, an external client owns
+			 * the metadata file and its field_ids. The sync that runs
+			 * afterwards registers field_id_mappings keyed off the external
+			 * metadata, so we skip the local registration here to avoid a
+			 * conflicting field_id assignment.
+			 */
+			if (!SkipIcebergDDLProcessing)
+			{
+				bool		forAddColumn = false;
+				List	   *columnMappings = CreatePostgresColumnMappingsForColumnDefs(relationId,
+																					   ddlOperation->columnDefs,
+																					   forAddColumn);
 
-			RegisterPostgresColumnMappings(columnMappings);
+				RegisterPostgresColumnMappings(columnMappings);
+			}
 		}
 		else if (ddlOperation->type == DDL_TABLE_DROP)
 		{

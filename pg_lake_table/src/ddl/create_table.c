@@ -915,8 +915,13 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 																  schemaName, tableName);
 	}
 
-	/* we do not allow non-empty locations */
-	ErrorIfLocationIsNotEmpty(location);
+	/*
+	 * we do not allow non-empty locations, except when an external client is
+	 * registering a pre-existing iceberg table via INSERT INTO iceberg_tables
+	 * (the metadata file already lives at this location).
+	 */
+	if (!SkipIcebergDDLProcessing)
+		ErrorIfLocationIsNotEmpty(location);
 
 	/* we currently only allow Iceberg tables in the managed storage region */
 	ErrorIfNotInManagedStorageRegion(location);
