@@ -98,6 +98,7 @@ static bool AreSchemasEqual(IcebergTableSchema * existingSchema, DataFileSchema 
 static int32_t GetSchemaIdForIcebergTableIfExists(const TableMetadataOperationTracker * opTracker, DataFileSchema * schema);
 static int	ComparePartitionSpecsById(const ListCell *a, const ListCell *b);
 
+static char *IdentifierJson(const char *namespaceFlat, const char *tableName);
 static int	GetEffectiveMaxSnapshotAgeInSecs(Oid relationId);
 
 
