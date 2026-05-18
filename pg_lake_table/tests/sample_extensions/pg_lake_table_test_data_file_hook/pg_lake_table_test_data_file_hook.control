@@ -1,0 +1,6 @@
+comment = 'Test extension that registers PgLakeAddDataFileHook to exercise the in-transaction temp table'
+default_version = '1.0'
+module_pathname = '$libdir/pg_lake_table_test_data_file_hook'
+relocatable = false
+requires = 'pg_lake_table'
+schema = pg_catalog

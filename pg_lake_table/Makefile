@@ -40,15 +40,19 @@ $(EXTENSION)--1.0.sql: $(EXTENSION).sql
 
 pg_lake_table-test:
 	$(MAKE) -C tests/sample_extensions/pg_lake_table_test_hideable/
+	$(MAKE) -C tests/sample_extensions/pg_lake_table_test_data_file_hook/
 
 install-pg_lake_table-test: pg_lake_table-test
 	$(MAKE) -C tests/sample_extensions/pg_lake_table_test_hideable/ install
+	$(MAKE) -C tests/sample_extensions/pg_lake_table_test_data_file_hook/ install
 
 uninstall-pg_lake_table-test:
 	$(MAKE) -C tests/sample_extensions/pg_lake_table_test_hideable/ uninstall
+	$(MAKE) -C tests/sample_extensions/pg_lake_table_test_data_file_hook/ uninstall
 
 clean-pg_lake_table-test:
 	$(MAKE) -C tests/sample_extensions/pg_lake_table_test_hideable/ clean
+	$(MAKE) -C tests/sample_extensions/pg_lake_table_test_data_file_hook/ clean
 
 prepare-check: install install-pg_lake_table-test
 finish-check: uninstall-pg_lake_table-test

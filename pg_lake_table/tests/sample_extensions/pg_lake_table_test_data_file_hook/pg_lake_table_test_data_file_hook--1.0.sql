@@ -1,0 +1,9 @@
+-- pg_lake_table_test_data_file_hook
+--
+-- Loading the .so via LOAD or `requires`-cascade installs an _PG_init that
+-- registers PgLakeAddDataFileHook to always return true.  That causes
+-- pg_lake_table to insert added file IDs into the per-transaction temp
+-- table inside SPI_START_EXTENSION_OWNER, which is the codepath this
+-- extension exists to exercise.
+--
+-- No SQL objects are needed; the .so does the work in _PG_init.

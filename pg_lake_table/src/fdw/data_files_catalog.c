@@ -1295,6 +1295,11 @@ DataFilesPartitionValuesCatalogExists(void)
 /*
  * CreateTxDataFileIdsTempTableIfNotExists creates a temporary table
  * to track data file IDs that are being added in the current transaction.
+ *
+ * PostgreSQL forbids CREATE TEMP TABLE under SECURITY_RESTRICTED_OPERATION,
+ * so we narrowly lift the restricted-op flag around the SPI_execute via
+ * ALLOW_TEMP_OBJECTS_{BEGIN,END}.  The search_path lockdown stays in
+ * effect; the DDL is a fixed string with no caller-supplied input.
  */
 static void
 CreateTxDataFileIdsTempTableIfNotExists(void)
@@ -1307,7 +1312,9 @@ CreateTxDataFileIdsTempTableIfNotExists(void)
 
 	bool		readOnly = false;
 
+	ALLOW_TEMP_OBJECTS_BEGIN();
 	SPI_execute(query, readOnly, 0);
+	ALLOW_TEMP_OBJECTS_END();
 
 	SPI_END();
 }
