@@ -144,10 +144,14 @@ GetPGDuckConnection(void)
 		PQfinish(connection);
 
 #ifdef USE_ASSERT_CHECKING
-		ereport(ERROR, (errmsg("could not start query engine: %s", errorMessage)));
+		ereport(ERROR,
+				(errmsg("could not start query engine: %s", errorMessage),
+				 errdetail("connection string: %s", PgduckServerConninfo)));
 #else
 		/* hide internals from users */
-		ereport(ERROR, (errmsg("could not start query engine")));
+		ereport(ERROR,
+				(errmsg("could not start query engine"),
+				 errdetail("connection string: %s", PgduckServerConninfo)));
 #endif
 	}
 
