@@ -42,8 +42,13 @@ def test_writable_iceberg_table_tx(
     )
     pg_conn.commit()
 
+    # Drop any leftover schema from a previous attempt before recreating it.
+    # The test is marked flaky(reruns=2); if the first attempt fails mid-test
+    # (e.g. moto S3 transient 404) the cleanup at the bottom never runs, and
+    # the rerun would then fail on CREATE SCHEMA without this guard.
     run_command(
         """
+                DROP SCHEMA IF EXISTS test_writable_iceberg_table_tx CASCADE;
                 CREATE SCHEMA test_writable_iceberg_table_tx;
                 """,
         pg_conn,
