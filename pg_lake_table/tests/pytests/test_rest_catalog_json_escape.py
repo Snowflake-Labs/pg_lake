@@ -35,30 +35,35 @@ def test_rest_catalog_json_escape_hostile_identifier(
     # Backslash is a JSON meta-character that is valid in PostgreSQL
     # quoted identifiers and S3 object keys. Pre-fix, this byte would
     # land unescaped in the REST commit body and break JSON parsing.
-    quoted_schema = r'"json\escape_sc"'
+    # The Polaris namespace validator rejects backslashes, so we put
+    # the hostile bytes only in the *table* name -- which still flows
+    # through IdentifierJson() and appears literally in the
+    # auto-generated manifest-list S3 path embedded in the
+    # add-snapshot request body.
+    schema = "json_escape_sc"
     quoted_table = r'"evil\name"'
 
-    run_command(f"CREATE SCHEMA {quoted_schema}", pg_conn)
+    run_command(f"CREATE SCHEMA {schema}", pg_conn)
     pg_conn.commit()
     try:
         run_command(
-            f"CREATE TABLE {quoted_schema}.{quoted_table} "
+            f"CREATE TABLE {schema}.{quoted_table} "
             f"USING iceberg WITH (catalog='REST') AS SELECT 1 AS a",
             pg_conn,
         )
         pg_conn.commit()
 
         run_command(
-            f"INSERT INTO {quoted_schema}.{quoted_table} VALUES (2), (3)",
+            f"INSERT INTO {schema}.{quoted_table} VALUES (2), (3)",
             pg_conn,
         )
         pg_conn.commit()
 
         rows = run_query(
-            f"SELECT a FROM {quoted_schema}.{quoted_table} ORDER BY a",
+            f"SELECT a FROM {schema}.{quoted_table} ORDER BY a",
             pg_conn,
         )
         assert [r[0] for r in rows] == [1, 2, 3]
     finally:
-        run_command(f"DROP SCHEMA {quoted_schema} CASCADE", pg_conn)
+        run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
         pg_conn.commit()
