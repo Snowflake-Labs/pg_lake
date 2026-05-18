@@ -44,4 +44,3 @@ extern PGDLLEXPORT void ResetRestCatalogRequests(void);
 extern PGDLLEXPORT HTAB *GetTrackedIcebergMetadataOperations(void);
 extern PGDLLEXPORT bool HasAnyTrackedIcebergMetadataChanges(void);
 extern PGDLLEXPORT bool IsIcebergTableCreatedInCurrentTransaction(Oid relation);
-extern PGDLLEXPORT char *IdentifierJson(const char *namespaceFlat, const char *tableName);

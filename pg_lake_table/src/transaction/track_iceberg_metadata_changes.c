@@ -428,7 +428,7 @@ PostAllRestCatalogRequests(void)
  * IdentifierJson creates a JSON representation of an iceberg table identifier
  * given its namespace and table name.
  */
-char *
+static char *
 IdentifierJson(const char *namespaceFlat, const char *tableName)
 {
 	StringInfoData out;
