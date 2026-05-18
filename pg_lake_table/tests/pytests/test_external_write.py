@@ -1280,3 +1280,421 @@ def test_external_write_unknown_table_rejected(
     assert error_raised
 
     pg_conn.rollback()
+
+
+def test_external_append_then_pg_insert_round_trip(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+):
+    """
+    PG creates → pyiceberg appends → PG inserts again. The PG-side INSERT
+    must build on the external client's snapshot (current
+    metadata_location), not silently re-write from a stale view that loses
+    pyiceberg's rows. All three batches must be present at the end.
+    """
+    tbl = f"{TABLE_NAMESPACE}.{TABLE_NAME}_round_trip"
+
+    run_command(f"CREATE TABLE {tbl} (a int, b text) USING iceberg", pg_conn)
+    run_command(
+        f"INSERT INTO {tbl} SELECT i, 'pg' || i FROM generate_series(1,3) i",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    pyiceberg_table = iceberg_catalog.load_table(
+        f"{TABLE_NAMESPACE}.{TABLE_NAME}_round_trip"
+    )
+    pyiceberg_table.append(
+        pa.table(
+            {"a": [10, 11], "b": ["ext10", "ext11"]},
+            schema=pa.schema([pa.field("a", pa.int32()), pa.field("b", pa.string())]),
+        )
+    )
+
+    # PG-side INSERT after the external write — must commit on top of the
+    # post-pyiceberg metadata, not the pre-pyiceberg one.
+    run_command(
+        f"INSERT INTO {tbl} VALUES (100, 'pg_after'), (101, 'pg_after2')",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(f"SELECT a, b FROM {tbl} ORDER BY a", pg_conn)
+    assert result == [
+        [1, "pg1"],
+        [2, "pg2"],
+        [3, "pg3"],
+        [10, "ext10"],
+        [11, "ext11"],
+        [100, "pg_after"],
+        [101, "pg_after2"],
+    ]
+
+
+def test_external_append_then_pg_delete_round_trip(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+):
+    """
+    pyiceberg appends, then PG deletes a row that lives in pyiceberg's
+    snapshot. The DELETE must target the externally-written file (via the
+    catalog post-sync) and produce the right post-state.
+    """
+    tbl = f"{TABLE_NAMESPACE}.{TABLE_NAME}_rt_delete"
+
+    run_command(f"CREATE TABLE {tbl} (a int, b text) USING iceberg", pg_conn)
+    run_command(
+        f"INSERT INTO {tbl} SELECT i, 'pg' || i FROM generate_series(1,3) i",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    pyiceberg_table = iceberg_catalog.load_table(
+        f"{TABLE_NAMESPACE}.{TABLE_NAME}_rt_delete"
+    )
+    pyiceberg_table.append(
+        pa.table(
+            {"a": [10, 11, 12], "b": ["ext10", "ext11", "ext12"]},
+            schema=pa.schema([pa.field("a", pa.int32()), pa.field("b", pa.string())]),
+        )
+    )
+
+    # delete one PG-written row and one pyiceberg-written row
+    run_command(f"DELETE FROM {tbl} WHERE a IN (2, 11)", pg_conn)
+    pg_conn.commit()
+
+    result = run_query(f"SELECT a, b FROM {tbl} ORDER BY a", pg_conn)
+    assert result == [
+        [1, "pg1"],
+        [3, "pg3"],
+        [10, "ext10"],
+        [12, "ext12"],
+    ]
+
+
+def test_pg_external_pg_alternating_writes(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+):
+    """
+    Alternate PG and pyiceberg writes several times. Each commit on either
+    side must observe everything committed before it. This catches drift
+    where the catalog's metadata_location pointer falls behind the actual
+    Iceberg metadata after a sync.
+    """
+    tbl = f"{TABLE_NAMESPACE}.{TABLE_NAME}_alt"
+
+    run_command(f"CREATE TABLE {tbl} (a int) USING iceberg", pg_conn)
+    run_command(f"INSERT INTO {tbl} VALUES (1)", pg_conn)
+    pg_conn.commit()
+
+    pyiceberg_table = iceberg_catalog.load_table(f"{TABLE_NAMESPACE}.{TABLE_NAME}_alt")
+    pyiceberg_table.append(
+        pa.table({"a": [2]}, schema=pa.schema([pa.field("a", pa.int32())]))
+    )
+
+    run_command(f"INSERT INTO {tbl} VALUES (3)", pg_conn)
+    pg_conn.commit()
+
+    pyiceberg_table = iceberg_catalog.load_table(f"{TABLE_NAMESPACE}.{TABLE_NAME}_alt")
+    pyiceberg_table.append(
+        pa.table({"a": [4]}, schema=pa.schema([pa.field("a", pa.int32())]))
+    )
+
+    run_command(f"INSERT INTO {tbl} VALUES (5)", pg_conn)
+    pg_conn.commit()
+
+    result = run_query(f"SELECT a FROM {tbl} ORDER BY a", pg_conn)
+    assert result == [[1], [2], [3], [4], [5]]
+
+
+def test_external_add_column_then_pg_insert_uses_new_column(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+):
+    """
+    pyiceberg adds a column; PG must then be able to INSERT into the
+    foreign table referencing the new column (i.e. the sync's ADD COLUMN
+    + field_id_mapping registration left the table writable from the PG
+    side, not just queryable).
+    """
+    tbl = f"{TABLE_NAMESPACE}.{TABLE_NAME}_addcol_rt"
+
+    run_command(f"CREATE TABLE {tbl} (a int) USING iceberg", pg_conn)
+    run_command(f"INSERT INTO {tbl} VALUES (1), (2)", pg_conn)
+    pg_conn.commit()
+
+    pyiceberg_table = iceberg_catalog.load_table(
+        f"{TABLE_NAMESPACE}.{TABLE_NAME}_addcol_rt"
+    )
+    with pyiceberg_table.update_schema() as update:
+        update.add_column("b", LongType())
+
+    # PG INSERT writing to the newly-added column
+    run_command(f"INSERT INTO {tbl} (a, b) VALUES (3, 30), (4, 40)", pg_conn)
+    pg_conn.commit()
+
+    result = run_query(f"SELECT a, b FROM {tbl} ORDER BY a", pg_conn)
+    assert result == [
+        [1, None],
+        [2, None],
+        [3, 30],
+        [4, 40],
+    ]
+
+
+def test_external_two_appends_in_a_row(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+):
+    """
+    Two consecutive pyiceberg appends without any PG write in between.
+    Each append fires the trigger and runs the sync; the second sync
+    must build on the post-first-append state, not on the original
+    pre-append catalog. Catches bugs where the sync reads stale
+    field_id_mappings or stale data-file rows.
+    """
+    tbl = f"{TABLE_NAMESPACE}.{TABLE_NAME}_two_appends"
+
+    run_command(f"CREATE TABLE {tbl} (a int) USING iceberg", pg_conn)
+    run_command(f"INSERT INTO {tbl} VALUES (1)", pg_conn)
+    pg_conn.commit()
+
+    pyiceberg_table = iceberg_catalog.load_table(
+        f"{TABLE_NAMESPACE}.{TABLE_NAME}_two_appends"
+    )
+    pyiceberg_table.append(
+        pa.table({"a": [2, 3]}, schema=pa.schema([pa.field("a", pa.int32())]))
+    )
+
+    # reload to pick up the new metadata_location, then append again
+    pyiceberg_table = iceberg_catalog.load_table(
+        f"{TABLE_NAMESPACE}.{TABLE_NAME}_two_appends"
+    )
+    pyiceberg_table.append(
+        pa.table({"a": [4, 5]}, schema=pa.schema([pa.field("a", pa.int32())]))
+    )
+
+    result = run_query(f"SELECT a FROM {tbl} ORDER BY a", pg_conn)
+    assert result == [[1], [2], [3], [4], [5]]
+
+    # both appends should be retained as snapshots; nothing should be
+    # queued for deletion because every file is still referenced by some
+    # retained snapshot.
+    queued = run_query(
+        f"""
+        SELECT count(*)
+        FROM lake_engine.deletion_queue dq
+        JOIN pg_class c ON c.oid = dq.table_name
+        WHERE c.relname = '{TABLE_NAME}_two_appends'
+        """,
+        superuser_conn,
+    )
+    assert queued[0][0] == 0
+
+    pg_conn.rollback()
+
+
+def test_external_create_then_pyiceberg_drop_round_trip(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+):
+    """
+    pyiceberg creates a table, writes some rows, then drops it. The DROP
+    fires DELETE on iceberg_tables, which must remove the foreign table
+    pg_lake synthesised on the create. Afterwards the relation must not
+    be visible from PG.
+    """
+    name = f"{TABLE_NAME}_pyice_create_drop"
+
+    pyiceberg_table = iceberg_catalog.create_table(
+        f"{TABLE_NAMESPACE}.{name}",
+        schema=pa.schema(
+            [
+                pa.field("a", pa.int32()),
+                pa.field("b", pa.string()),
+            ]
+        ),
+    )
+    pyiceberg_table.append(
+        pa.table(
+            {"a": [1], "b": ["one"]},
+            schema=pa.schema([pa.field("a", pa.int32()), pa.field("b", pa.string())]),
+        )
+    )
+
+    cnt = run_query(
+        f"""
+        SELECT count(*) FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = '{TABLE_NAMESPACE}'
+          AND c.relname = '{name}' AND c.relkind = 'f'
+        """,
+        superuser_conn,
+    )[0][0]
+    assert cnt == 1
+
+    iceberg_catalog.drop_table(f"{TABLE_NAMESPACE}.{name}")
+
+    cnt = run_query(
+        f"SELECT count(*) FROM pg_class WHERE relname = '{name}'",
+        superuser_conn,
+    )[0][0]
+    assert cnt == 0
+
+
+def test_external_write_insert_null_metadata_location_errors(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    grant_iceberg_tables_full_access,
+):
+    """
+    INSERT into iceberg_tables with NULL metadata_location must be
+    rejected — there is nothing to read from object storage, and a NULL
+    insert would leave the catalog row in a state pg_lake cannot recover
+    from on the next read.
+    """
+    name = f"{TABLE_NAME}_null_meta"
+    db_name = run_query("SELECT current_database()", pg_conn)[0][0]
+
+    error_raised = False
+    try:
+        run_command(
+            f"""
+            INSERT INTO iceberg_tables
+                (catalog_name, table_namespace, table_name, metadata_location)
+            VALUES
+                ('{db_name}', '{TABLE_NAMESPACE}', '{name}', NULL)
+            """,
+            pg_conn,
+        )
+    except Exception as e:
+        error_raised = True
+        assert "metadata_location" in str(e) and (
+            "cannot be NULL" in str(e) or "null" in str(e).lower()
+        )
+        pg_conn.rollback()
+
+    assert error_raised
+
+
+def test_external_write_insert_unreachable_metadata_errors(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    grant_iceberg_tables_full_access,
+):
+    """
+    INSERT into iceberg_tables with a metadata_location that doesn't
+    point at a real Iceberg metadata file must error during the
+    synchronous metadata read — and leave nothing behind in pg_class
+    (the create must not partially succeed).
+    """
+    name = f"{TABLE_NAME}_bad_meta"
+    db_name = run_query("SELECT current_database()", pg_conn)[0][0]
+
+    error_raised = False
+    try:
+        run_command(
+            f"""
+            INSERT INTO iceberg_tables
+                (catalog_name, table_namespace, table_name, metadata_location)
+            VALUES
+                ('{db_name}', '{TABLE_NAMESPACE}',
+                 '{name}',
+                 's3://{TEST_BUCKET}/iceberg/no/such/path/v1.metadata.json')
+            """,
+            pg_conn,
+        )
+    except Exception:
+        error_raised = True
+        pg_conn.rollback()
+
+    assert error_raised
+
+    cnt = run_query(
+        f"SELECT count(*) FROM pg_class WHERE relname = '{name}'",
+        superuser_conn,
+    )[0][0]
+    assert cnt == 0
+
+
+def test_external_write_pg_insert_after_drop_column(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+):
+    """
+    pyiceberg drops a column; subsequent PG INSERT must not include that
+    column (the field_id_mapping is retained for reading old files but
+    the column is gone from the foreign table). Catches bugs where the
+    foreign table is left with a stale column that PG would still try to
+    write.
+    """
+    tbl = f"{TABLE_NAMESPACE}.{TABLE_NAME}_dropcol_rt"
+
+    run_command(
+        f"CREATE TABLE {tbl} (a int, b text, c int) USING iceberg",
+        pg_conn,
+    )
+    run_command(
+        f"INSERT INTO {tbl} VALUES (1, 'one', 10)",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    pyiceberg_table = iceberg_catalog.load_table(
+        f"{TABLE_NAMESPACE}.{TABLE_NAME}_dropcol_rt"
+    )
+    with pyiceberg_table.update_schema() as update:
+        update.delete_column("c")
+
+    # PG INSERT after the drop. Inserting (a, b) only — the table no
+    # longer has c.
+    run_command(f"INSERT INTO {tbl} (a, b) VALUES (2, 'two')", pg_conn)
+    pg_conn.commit()
+
+    result = run_query(f"SELECT a, b FROM {tbl} ORDER BY a", pg_conn)
+    assert result == [[1, "one"], [2, "two"]]
+
+    # writing to dropped column c must error
+    error_raised = False
+    try:
+        run_command(f"INSERT INTO {tbl} (a, c) VALUES (3, 30)", pg_conn)
+    except Exception:
+        error_raised = True
+        pg_conn.rollback()
+
+    assert error_raised
