@@ -1617,24 +1617,17 @@ CopyOptionsToReadCSVParams(List *copyOptions)
 
 
 /*
- * AppendReadCSVClause - append a complete read_csv(...) clause to buf.
+ * AppendReadCSVTail - shared tail of read_csv(...) construction.
  *
- * Builds the DuckDB read_csv() expression used to read back a CSV file
- * that was previously written with InternalCSVOptions.  This centralises
- * the max_line_size / parallel-disable / columns-map / CSV-options logic.
- *
- * filePath    - unquoted path; will be quoted internally
- * maxLineSize - observed max line size from writing; pass -1 to omit
- * columnsMap  - pre-built DuckDB {col:type,...} string; NULL → auto_detect
- * csvOptions  - COPY options list (e.g. from InternalCSVOptions)
+ * Emits the max_line_size / parallel-disable / columns-map / csv-options
+ * suffix shared by AppendReadCSVClause and AppendReadCSVListClause, plus
+ * the closing paren.  The caller is responsible for emitting the leading
+ * "read_csv(<path-expr>" prefix.
  */
-void
-AppendReadCSVClause(StringInfo buf, const char *filePath,
-					int maxLineSize, const char *columnsMap,
-					List *csvOptions)
+static void
+AppendReadCSVTail(StringInfo buf, int maxLineSize, const char *columnsMap,
+				  List *csvOptions)
 {
-	appendStringInfo(buf, "read_csv(%s", quote_literal_cstr(filePath));
-
 	if (maxLineSize > 0)
 	{
 		/* use maxLineSize + 1 to include end-of-line */
@@ -1664,6 +1657,48 @@ AppendReadCSVClause(StringInfo buf, const char *filePath,
 	appendStringInfoString(buf, CopyOptionsToReadCSVParams(csvOptions));
 
 	appendStringInfoChar(buf, ')');
+}
+
+
+/*
+ * AppendReadCSVClause - append a complete read_csv(...) clause to buf.
+ *
+ * Builds the DuckDB read_csv() expression used to read back a CSV file
+ * that was previously written with InternalCSVOptions.  This centralises
+ * the max_line_size / parallel-disable / columns-map / CSV-options logic.
+ *
+ * filePath    - unquoted path; will be quoted internally
+ * maxLineSize - observed max line size from writing; pass -1 to omit
+ * columnsMap  - pre-built DuckDB {col:type,...} string; NULL → auto_detect
+ * csvOptions  - COPY options list (e.g. from InternalCSVOptions)
+ */
+void
+AppendReadCSVClause(StringInfo buf, const char *filePath,
+					int maxLineSize, const char *columnsMap,
+					List *csvOptions)
+{
+	appendStringInfo(buf, "read_csv(%s", quote_literal_cstr(filePath));
+	AppendReadCSVTail(buf, maxLineSize, columnsMap, csvOptions);
+}
+
+
+/*
+ * AppendReadCSVListClause - append a read_csv(...) clause for a list of paths.
+ *
+ * Variant of AppendReadCSVClause for cases where multiple CSV files share
+ * a schema and should be scanned as one logical input (e.g. several batches
+ * for the same relation).  maxLineSize must be the maximum across all paths.
+ * filePaths is a List of char * and must be non-empty.
+ */
+void
+AppendReadCSVListClause(StringInfo buf, List *filePaths,
+						int maxLineSize, const char *columnsMap,
+						List *csvOptions)
+{
+	Assert(filePaths != NIL);
+
+	appendStringInfo(buf, "read_csv(%s", PathListToString(filePaths));
+	AppendReadCSVTail(buf, maxLineSize, columnsMap, csvOptions);
 }
 
 
