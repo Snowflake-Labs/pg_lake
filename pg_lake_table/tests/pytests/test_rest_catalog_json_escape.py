@@ -22,7 +22,6 @@ from helpers.polaris import *
 
 def test_rest_catalog_json_escape_hostile_identifier(
     pg_conn,
-    superuser_conn,
     s3,
     polaris_session,
     set_polaris_gucs,
@@ -39,8 +38,8 @@ def test_rest_catalog_json_escape_hostile_identifier(
     quoted_schema = r'"json\escape_sc"'
     quoted_table = r'"evil\name"'
 
-    run_command(f"CREATE SCHEMA {quoted_schema}", superuser_conn)
-    superuser_conn.commit()
+    run_command(f"CREATE SCHEMA {quoted_schema}", pg_conn)
+    pg_conn.commit()
     try:
         run_command(
             f"CREATE TABLE {quoted_schema}.{quoted_table} "
@@ -61,5 +60,5 @@ def test_rest_catalog_json_escape_hostile_identifier(
         )
         assert [r[0] for r in rows] == [1, 2, 3]
     finally:
-        run_command(f"DROP SCHEMA {quoted_schema} CASCADE", superuser_conn)
-        superuser_conn.commit()
+        run_command(f"DROP SCHEMA {quoted_schema} CASCADE", pg_conn)
+        pg_conn.commit()
