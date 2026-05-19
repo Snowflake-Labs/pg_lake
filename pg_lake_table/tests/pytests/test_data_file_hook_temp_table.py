@@ -81,16 +81,7 @@ def test_iceberg_insert_with_data_file_hook(
     assert res == [[3]]
 
 
-@pytest.mark.parametrize(
-    "dml",
-    [
-        "DELETE FROM public.test_iceberg_dml_under_owner WHERE a OPERATOR(pg_catalog.>=) 2",
-        "UPDATE public.test_iceberg_dml_under_owner "
-        "SET b = b OPERATOR(pg_catalog.||) '!' "
-        "WHERE a OPERATOR(pg_catalog.>=) 2",
-    ],
-    ids=["delete", "update"],
-)
+@pytest.mark.parametrize("operation", ["delete", "update"])
 def test_iceberg_dml_under_extension_owner(
     s3,
     superuser_conn,
@@ -98,7 +89,7 @@ def test_iceberg_dml_under_extension_owner(
     extension,
     with_default_location,
     with_data_file_hook,
-    dml,
+    operation,
 ):
     """UPDATE/DELETE on an Iceberg foreign table issued from inside
     SPI_START_EXTENSION_OWNER must succeed.
@@ -115,13 +106,25 @@ def test_iceberg_dml_under_extension_owner(
     motivating example was sfpg-extension-pg_lake_replication's expiry path
     running DELETE on the change-log Iceberg table.
     """
+    # pg_conn is module-scoped, so each parametrization needs a distinct
+    # table to avoid "relation already exists" on the second run.
+    table = f"test_iceberg_dml_under_owner_{operation}"
+
+    if operation == "delete":
+        dml = f"DELETE FROM public.{table} " "WHERE a OPERATOR(pg_catalog.>=) 2"
+    else:
+        dml = (
+            f"UPDATE public.{table} "
+            "SET b = b OPERATOR(pg_catalog.||) '!' "
+            "WHERE a OPERATOR(pg_catalog.>=) 2"
+        )
+
     run_command(
-        "CREATE TABLE test_iceberg_dml_under_owner(a int, b text) USING iceberg",
+        f"CREATE TABLE {table}(a int, b text) USING iceberg",
         pg_conn,
     )
     run_command(
-        "INSERT INTO test_iceberg_dml_under_owner VALUES "
-        "(1, 'one'), (2, 'two'), (3, 'three')",
+        f"INSERT INTO {table} VALUES (1, 'one'), (2, 'two'), (3, 'three')",
         pg_conn,
     )
     pg_conn.commit()
@@ -133,17 +136,11 @@ def test_iceberg_dml_under_extension_owner(
     )
     superuser_conn.commit()
 
-    if dml.startswith("DELETE"):
-        res = run_query(
-            "SELECT count(*) FROM test_iceberg_dml_under_owner",
-            pg_conn,
-        )
+    if operation == "delete":
+        res = run_query(f"SELECT count(*) FROM {table}", pg_conn)
         assert res == [[1]]
     else:
-        res = run_query(
-            "SELECT a, b FROM test_iceberg_dml_under_owner ORDER BY a",
-            pg_conn,
-        )
+        res = run_query(f"SELECT a, b FROM {table} ORDER BY a", pg_conn)
         assert res == [[1, "one"], [2, "two!"], [3, "three!"]]
 
 
