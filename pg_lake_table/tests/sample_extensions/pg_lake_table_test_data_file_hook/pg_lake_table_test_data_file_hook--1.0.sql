@@ -6,4 +6,12 @@
 -- table inside SPI_START_EXTENSION_OWNER, which is the codepath this
 -- extension exists to exercise.
 --
--- No SQL objects are needed; the .so does the work in _PG_init.
+-- The extension also exposes run_iceberg_dml_under_extension_owner so
+-- tests can drive an UPDATE/DELETE on an Iceberg foreign table from
+-- inside SPI_START_EXTENSION_OWNER, exercising the temp-table create in
+-- CreateUpdateTrackingTable.
+
+CREATE FUNCTION run_iceberg_dml_under_extension_owner(query text)
+RETURNS void
+LANGUAGE c
+AS 'MODULE_PATHNAME', 'run_iceberg_dml_under_extension_owner';
