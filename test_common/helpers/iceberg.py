@@ -80,8 +80,61 @@ def iceberg_sample_table_folder_path():
     return str(Path(__file__).parent.parent / "sample" / "iceberg" / "sample_tables")
 
 
+def iceberg_v3_sample_table_folder_path():
+    """Root of the Spark-generated Iceberg format-version 3 fixture corpus.
+
+    Produced by ``test_common/sample/iceberg/scripts/generate_v3_fixtures.py``;
+    organised as ``<root>/<namespace>/<table>/{data,metadata}/...``.
+    """
+    return str(
+        Path(__file__).parent.parent / "sample" / "iceberg" / "sample_tables_v3"
+    )
+
+
 def iceberg_metadata_manifest_folder_path():
     return str(Path(__file__).parent.parent / "sample" / "iceberg" / "manifests")
+
+
+def collect_v3_latest_metadata_files():
+    """Return ``[(label, abs_path_to_latest_metadata_json), ...]`` for every
+    table under :func:`iceberg_v3_sample_table_folder_path`.
+
+    The "latest" file in a given table is the ``v<N>.metadata.json`` with the
+    highest ``N`` (Hadoop-catalog naming convention used by the generator).
+    Output is sorted by ``label`` so test ids are stable.
+
+    Used to parametrize tests that round-trip the v3 corpus.
+    """
+    root = Path(iceberg_v3_sample_table_folder_path())
+    if not root.exists():
+        return []
+
+    out = []
+    for db_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        for table_dir in sorted(p for p in db_dir.iterdir() if p.is_dir()):
+            metadata_dir = table_dir / "metadata"
+            if not metadata_dir.is_dir():
+                continue
+            versioned = []
+            for f in metadata_dir.iterdir():
+                if not (
+                    f.is_file()
+                    and f.name.startswith("v")
+                    and f.name.endswith(".metadata.json")
+                ):
+                    continue
+                try:
+                    n = int(f.name[1:].split(".", 1)[0])
+                except ValueError:
+                    continue
+                versioned.append((n, f))
+            if not versioned:
+                continue
+            versioned.sort(reverse=True)
+            latest = versioned[0][1]
+            out.append((f"{db_dir.name}/{table_dir.name}", str(latest)))
+    out.sort(key=lambda kv: kv[0])
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -466,6 +519,47 @@ def spark_generated_iceberg_test(s3):
                     TEST_BUCKET,
                     f"{iceberg_prefix}/metadata/{filename}",
                 )
+
+
+@pytest.fixture(scope="module")
+def spark_generated_iceberg_v3_test(s3):
+    """Upload the Spark-generated Iceberg v3 sample tables to moto S3.
+
+    Mirrors :func:`spark_generated_iceberg_test` but sources its files from
+    ``test_common/sample/iceberg/sample_tables_v3/<db>/<table>/{data,metadata}/``
+    and uploads them to ``s3://{TEST_BUCKET}/spark_test_v3/<db>/<table>/``.
+
+    Tables produced by ``scripts/generate_v3_fixtures.py`` use Hadoop-catalog
+    file layout, so they include a ``metadata/version-hint.text`` pointer file
+    alongside the ``v<N>.metadata.json`` versions. The uploader does not
+    interpret either — it preserves the on-disk layout verbatim so tests can
+    address the latest metadata.json directly.
+    """
+    root_path = iceberg_v3_sample_table_folder_path()
+    if not os.path.isdir(root_path):
+        return
+
+    for db_name in sorted(os.listdir(root_path)):
+        db_path = os.path.join(root_path, db_name)
+        if not os.path.isdir(db_path):
+            continue
+        for table_name in sorted(os.listdir(db_path)):
+            table_path = os.path.join(db_path, table_name)
+            if not os.path.isdir(table_path):
+                continue
+            for subdir in ("data", "metadata"):
+                sub_path = os.path.join(table_path, subdir)
+                if not os.path.isdir(sub_path):
+                    continue
+                for root, _dirs, files in os.walk(sub_path):
+                    for filename in files:
+                        local = os.path.join(root, filename)
+                        rel = os.path.relpath(local, table_path)
+                        key = (
+                            f"spark_test_v3/{db_name}/{table_name}/"
+                            + rel.replace(os.sep, "/")
+                        )
+                        s3.upload_file(local, TEST_BUCKET, key)
 
 
 @pytest.fixture(scope="module")
