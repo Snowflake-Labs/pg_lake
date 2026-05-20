@@ -27,10 +27,10 @@ from .db import (
 )
 from .json import write_json_to_file
 
-
 # ---------------------------------------------------------------------------
 # Iceberg file sorting / normalisation helpers
 # ---------------------------------------------------------------------------
+
 
 # for test consistency
 def file_sort_key(file_entry):
@@ -72,6 +72,7 @@ def normalize_dictrow(row):
 # Iceberg sample-data paths
 # ---------------------------------------------------------------------------
 
+
 def iceberg_metadata_json_folder_path():
     return str(Path(__file__).parent.parent / "sample" / "iceberg" / "metadata_json")
 
@@ -86,9 +87,7 @@ def iceberg_v3_sample_table_folder_path():
     Produced by ``test_common/sample/iceberg/scripts/generate_v3_fixtures.py``;
     organised as ``<root>/<namespace>/<table>/{data,metadata}/...``.
     """
-    return str(
-        Path(__file__).parent.parent / "sample" / "iceberg" / "sample_tables_v3"
-    )
+    return str(Path(__file__).parent.parent / "sample" / "iceberg" / "sample_tables_v3")
 
 
 def iceberg_metadata_manifest_folder_path():
@@ -141,6 +140,7 @@ def collect_v3_latest_metadata_files():
 # Iceberg catalog helpers
 # ---------------------------------------------------------------------------
 
+
 def create_iceberg_test_catalog(pg_conn):
     catalog_user = "iceberg_test_catalog"
 
@@ -171,6 +171,7 @@ def create_iceberg_test_catalog(pg_conn):
 # ---------------------------------------------------------------------------
 # Iceberg S3 file inspection / consistency checks
 # ---------------------------------------------------------------------------
+
 
 def assert_iceberg_s3_file_consistency(
     pg_conn,
@@ -319,6 +320,7 @@ def table_partition_specs(pg_conn, table_name):
 # ---------------------------------------------------------------------------
 # Iceberg metadata regeneration helpers
 # ---------------------------------------------------------------------------
+
 
 def regenerate_metadata_json(superuser_conn, metadata_location, s3):
 
@@ -555,11 +557,60 @@ def spark_generated_iceberg_v3_test(s3):
                     for filename in files:
                         local = os.path.join(root, filename)
                         rel = os.path.relpath(local, table_path)
-                        key = (
-                            f"spark_test_v3/{db_name}/{table_name}/"
-                            + rel.replace(os.sep, "/")
+                        key = f"spark_test_v3/{db_name}/{table_name}/" + rel.replace(
+                            os.sep, "/"
                         )
                         s3.upload_file(local, TEST_BUCKET, key)
+
+
+@pytest.fixture(scope="module")
+def create_format_version_test_functions(superuser_conn, iceberg_extension):
+    """Register the C test UDFs that expose IcebergFormatVersion's int↔enum
+    conversion and capability predicates.
+
+    Implemented in ``pg_lake_iceberg/src/test/test_format_version.c`` and
+    fronted in SQL by ``lake_iceberg.iceberg_format_version_name`` and
+    ``lake_iceberg.iceberg_format_version_supports``. Both take the wire
+    integer (not the C enum) so tests can probe the int → enum boundary,
+    including the error path for unknown versions.
+    """
+    run_command(
+        """
+        CREATE OR REPLACE FUNCTION lake_iceberg.iceberg_format_version_name(
+                version_int int
+        ) RETURNS text
+          LANGUAGE C
+          IMMUTABLE STRICT
+        AS 'pg_lake_iceberg', $function$iceberg_format_version_name$function$;
+
+        CREATE OR REPLACE FUNCTION lake_iceberg.iceberg_format_version_supports(
+                version_int int,
+                feature text
+        ) RETURNS bool
+          LANGUAGE C
+          IMMUTABLE STRICT
+        AS 'pg_lake_iceberg', $function$iceberg_format_version_supports$function$;
+        """,
+        superuser_conn,
+    )
+    # Commit so the CREATE OR REPLACE FUNCTION DDL is durable across the
+    # per-test `superuser_conn.rollback()` calls that happen after the
+    # `pytest.raises` blocks below. Without this, the first rollback wipes
+    # the function definitions and every subsequent call fails with
+    # `function ... does not exist`. Mirrors the explicit commit in
+    # iceberg_extension above.
+    superuser_conn.commit()
+
+    yield
+
+    run_command(
+        """
+        DROP FUNCTION IF EXISTS lake_iceberg.iceberg_format_version_name(int);
+        DROP FUNCTION IF EXISTS lake_iceberg.iceberg_format_version_supports(int, text);
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
 
 
 @pytest.fixture(scope="module")
