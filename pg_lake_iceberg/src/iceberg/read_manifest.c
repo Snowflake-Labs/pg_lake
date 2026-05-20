@@ -242,6 +242,24 @@ static void
 ReadDataFileFromAvro(avro_value_t * record, DataFile * dataFile, ManifestReaderContext * context)
 {
 	memset(dataFile, '\0', sizeof(DataFile));
+
+	/*
+	 * v3 §deletes: a non-null `referenced_data_file` (field-id 143) on the
+	 * data_file record means this row is actually a deletion-vector pointer
+	 * and the manifest is v3-style. pg_lake doesn't read or write DVs yet, so
+	 * we refuse the table rather than silently treating the DV as a regular
+	 * data file. The check fires *before* any required-field reads so v3
+	 * manifests with optional v3-only fields surface this specific error
+	 * rather than a generic "missing field" one.
+	 */
+	if (AvroFieldExists(record, "referenced_data_file"))
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("Iceberg deletion vectors are not yet supported by pg_lake"),
+				 errhint("Deletion vectors (manifest-entry field \"referenced_data_file\") are an Iceberg v3 feature; pg_lake support is tracked separately.")));
+	}
+
 	AvroGetInt32Field(record, "content", AVRO_FIELD_REQUIRED, (int32_t *) &dataFile->content);
 	AvroGetStringField(record, "file_path", AVRO_FIELD_REQUIRED, &dataFile->file_path, &dataFile->file_path_length);
 	AvroGetStringField(record, "file_format", AVRO_FIELD_REQUIRED, &dataFile->file_format, &dataFile->file_format_length);

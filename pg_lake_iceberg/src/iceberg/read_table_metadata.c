@@ -91,19 +91,38 @@ ReadIcebergTableMetadataFromJson(JsonbContainer *json, IcebergTableMetadata * me
 	 * downstream parse step, so funnel it through the IcebergFormatVersion
 	 * enum here -- this is the single point in the reader that converts the
 	 * on-disk wire integer to the typed handle the rest of the code reads.
-	 * IcebergFormatVersionFromInt() rejects unknown integers (v1, v4, ...); a
-	 * structurally-known v3 metadata is rejected at this same site until the
-	 * v3-feature error choke points in read_manifest / iceberg_field land
-	 * later in the v3 series.
+	 * IcebergFormatVersionFromInt() rejects unknown integers (v1, v4, ...).
+	 *
+	 * Structurally we accept both v2 and v3 metadata. Feature-level
+	 * incompatibilities (v3-only types, deletion vectors, encryption) raise
+	 * specific errors at the relevant downstream choke points: type names in
+	 * iceberg_field.c, DV indicators in read_manifest.c, encryption keys just
+	 * below.
 	 */
 	int32_t		format_version_int;
 
 	JsonExtractInt32Field(json, "format-version", FIELD_REQUIRED, &format_version_int);
 	metadata->format_version = IcebergFormatVersionFromInt(format_version_int);
-	if (metadata->format_version != ICEBERG_FORMAT_VERSION_V2)
+	EnsureIcebergFormatVersionForRead(metadata->format_version);
+
+	/*
+	 * Encryption: v3 introduces table-level `encryption-keys` and
+	 * per-snapshot `key-id`. pg_lake does not implement either yet, so refuse
+	 * to read any metadata that declares them rather than silently dropping
+	 * the field on a subsequent write.
+	 */
+	const char *encryptionKeysJson = NULL;
+	size_t		encryptionKeysJsonLength = 0;
+
+	if (JsonExtractFieldAsJsonString(json, "encryption-keys", FIELD_OPTIONAL,
+									 &encryptionKeysJson, &encryptionKeysJsonLength) &&
+		encryptionKeysJsonLength > 2)
 	{
-		ereport(ERROR, (errmsg("unsupported iceberg format version %d",
-							   format_version_int)));
+		/* "[]" has length 2; anything longer is a non-empty key list */
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("encrypted Iceberg tables are not yet supported by pg_lake"),
+				 errhint("Per-table \"encryption-keys\" and per-snapshot \"key-id\" are Iceberg v3 features; pg_lake support is tracked separately.")));
 	}
 
 	JsonExtractStringField(json, "table-uuid", FIELD_REQUIRED, &metadata->table_uuid, &metadata->table_uuid_length);
@@ -206,6 +225,13 @@ ReadIcebergTableSchemaField(JsonbContainer *json, DataFileSchemaField * field)
 
 	JsonExtractField(json, "type", FIELD_OPTIONAL, &field->type);
 	EnsureIcebergField(field->type);
+
+	/*
+	 * Always-on counterpart to the heavy-asserts EnsureIcebergField. Refuses
+	 * v3-only types we cannot serialise back yet (variant, unknown, geometry,
+	 * geography, timestamp_ns, timestamptz_ns) on every backend.
+	 */
+	EnsureIcebergFieldTypeIsSupported(field->type);
 
 	JsonExtractBoolField(json, "required", FIELD_REQUIRED, &field->required);
 
@@ -342,6 +368,25 @@ ReadIcebergSnapshot(JsonbContainer *json, IcebergSnapshot * snapshot)
 						sizeof(Property),
 						(void **) &snapshot->summary, &snapshot->summary_length);
 	snapshot->schema_id_set = JsonExtractInt32Field(json, "schema-id", FIELD_OPTIONAL, &snapshot->schema_id);
+
+	/*
+	 * v3 §encryption: a snapshot may carry `key-id` pointing at one of the
+	 * table-level `encryption-keys`. We refuse encrypted snapshots at the
+	 * read-side until pg_lake learns to decrypt the data files they cover.
+	 * (The table-level check above will also fire for properly-written
+	 * encrypted tables, but per-snapshot detection is the spec's normative
+	 * trigger.)
+	 */
+	const char *keyId = NULL;
+	size_t		keyIdLength = 0;
+
+	if (JsonExtractStringField(json, "key-id", FIELD_OPTIONAL, &keyId, &keyIdLength))
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("encrypted Iceberg snapshots are not yet supported by pg_lake"),
+				 errhint("Snapshot \"key-id\" is an Iceberg v3 encryption feature; pg_lake support is tracked separately.")));
+	}
 }
 
 static void

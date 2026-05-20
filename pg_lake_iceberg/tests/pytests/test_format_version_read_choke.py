@@ -24,14 +24,11 @@ This file pins both behaviours into CI so that:
 2. Hand-crafted metadata with a bad ``format-version`` integer surfaces
    *the new* error message -- if a future refactor accidentally bypasses
    ``IcebergFormatVersionFromInt`` this assertion catches it.
-3. A ``format-version: 3`` metadata is still rejected at the read site
-   (Stage 4 invariant), with a v3-specific error that *omits* the
-   "supports 2 and 3" hint (because v3 is structurally known but not yet
-   readable).
-
-When Stage 7 lands and the reader accepts v3, the v3 case becomes a
-positive read assertion and the parametrization here gets pared back to
-the truly-unknown integers.
+3. A ``format-version: 3`` metadata is now accepted structurally
+   (Stage 7 acceptance switch) and round-trips with `format-version: 3`
+   preserved. Feature-level rejections (deletion vectors, encryption,
+   v3-only types) live in their own test file
+   (``test_v3_read_errors.py``).
 """
 
 import json
@@ -98,32 +95,48 @@ def test_unknown_format_version_rejected_via_enum_conversion(
         superuser_conn.rollback()
 
 
-def test_v3_format_version_rejected_at_read_site(
+def test_v3_format_version_accepted_at_read_site(
     create_reserialize_helper_functions,
     superuser_conn,
     tmp_path,
 ):
-    """A structurally-known v3 metadata is rejected by the local
-    ``!= ICEBERG_FORMAT_VERSION_V2`` check, *not* by
-    :c:func:`IcebergFormatVersionFromInt` (which accepts v3 as a known
-    enum member).
+    """Stage 7 of the v3 rollout flipped the read-side acceptance switch:
+    a structurally-valid v3 metadata.json must now round-trip with
+    ``format-version: 3`` preserved.
 
-    Stage 7 of the v3 effort flips this to an accept; until then it is
-    an explicit error and this test prevents accidental relaxation.
+    Feature-level rejections (deletion vectors, encryption, v3-only
+    types) are exercised separately in ``test_v3_read_errors.py``; this
+    test only proves the *structural* version field is honoured.
+
+    The fixture is built by overriding ``format-version: 3`` on top of
+    the smallest committed v2 metadata, then stripping the v2-only
+    ``snapshots`` (so we don't touch the snapshot-write code path -- the
+    Stage 7 acceptance is about the metadata header, not the snapshot
+    encoding which still goes through several v3-feature gates).
     """
-    metadata_path = _write_metadata_with_version(tmp_path, 3)
+    metadata = _load_v2_template()
+    metadata["format-version"] = 3
+    # The v2 template carries snapshots that point to manifest-list files
+    # which are not on disk here. Drop them; the read path is happy with
+    # zero snapshots when current-snapshot-id is absent / -1.
+    metadata.pop("snapshots", None)
+    metadata.pop("snapshot-log", None)
+    metadata.pop("refs", None)
+    metadata["current-snapshot-id"] = -1
 
-    try:
-        with pytest.raises(
-            psycopg2.DatabaseError,
-            match="unsupported iceberg format version 3",
-        ):
-            run_query(
-                f"SELECT lake_iceberg.reserialize_iceberg_table_metadata('{metadata_path}')",
-                superuser_conn,
-            )
-    finally:
-        superuser_conn.rollback()
+    target = tmp_path / "format-version-3.metadata.json"
+    with open(target, "w") as f:
+        json.dump(metadata, f)
+
+    result = run_query(
+        f"SELECT lake_iceberg.reserialize_iceberg_table_metadata('{target}')::json",
+        superuser_conn,
+    )
+    returned_json = result[0][0]
+    assert returned_json["format-version"] == 3, (
+        "Stage 7 read-side acceptance must preserve the v3 wire integer; "
+        f"got {returned_json.get('format-version')!r}"
+    )
 
 
 def test_v2_format_version_still_round_trips(

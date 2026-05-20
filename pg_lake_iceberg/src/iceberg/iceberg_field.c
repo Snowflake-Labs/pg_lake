@@ -517,12 +517,83 @@ IcebergTypeNameToDuckdbTypeName(const char *icebergTypeName)
  * GetIcebergTypeInfoFromTypeName returns corresponding Iceberg type info for
  * given Iceberg type name.
  */
+/*
+ * Iceberg v3-only type names. They are checked *before* the prefix-match
+ * loop below so that the spec-correct v3 names (`timestamp_ns`,
+ * `timestamptz_ns`) are not silently swallowed by the longer v2 prefixes
+ * `timestamp` / `timestamptz`. Each name maps to a precise, user-facing
+ * "not yet supported" error mentioning the v3 spec so users know exactly
+ * which v3 feature pg_lake doesn't implement yet.
+ */
+static const struct
+{
+	const char *icebergTypeName;
+	const char *displayName;
+}			IcebergV3OnlyTypeNames[] =
+
+{
+	{
+		"timestamp_ns", "timestamp_ns"
+	},
+	{
+		"timestamptz_ns", "timestamptz_ns"
+	},
+	{
+		"unknown", "unknown"
+	},
+	{
+		"variant", "variant"
+	},
+	{
+		"geometry", "geometry"
+	},
+	{
+		"geography", "geography"
+	},
+};
+
+
+/*
+ * EnsureScalarTypeNameIsSupported raises a precise error if `typeName` matches
+ * any of the v3-only type names. Doing the check by exact string match (not
+ * prefix) is critical because some v3 names extend a v2 prefix:
+ *   - `timestamp_ns` extends `timestamp`
+ *   - `timestamptz_ns` extends `timestamptz`
+ * If we left the v3-only rejection to GetIcebergTypeInfoFromTypeName's prefix
+ * loop, the v3 names would silently match v2 entries and we'd lose the chance
+ * to point users at the actual missing feature.
+ *
+ * Note: this runs *unconditionally*, not under USE_ASSERT_CHECKING. The
+ * read path needs a real defence on every build (CI runs without heavy
+ * asserts), not just an assertion.
+ */
+static void
+EnsureScalarTypeNameIsSupported(const char *typeName)
+{
+	int			v3Count = sizeof(IcebergV3OnlyTypeNames) / sizeof(IcebergV3OnlyTypeNames[0]);
+
+	for (int v3Index = 0; v3Index < v3Count; v3Index++)
+	{
+		if (strcasecmp(typeName, IcebergV3OnlyTypeNames[v3Index].icebergTypeName) == 0)
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("iceberg type \"%s\" is not yet supported by pg_lake",
+							IcebergV3OnlyTypeNames[v3Index].displayName),
+					 errhint("This is an Iceberg v3 type; pg_lake support is tracked separately.")));
+		}
+	}
+}
+
+
 static IcebergTypeInfo *
 GetIcebergTypeInfoFromTypeName(const char *typeName)
 {
 	IcebergTypeInfo *icebergTypeInfo = palloc0(sizeof(IcebergTypeInfo));
 
 	icebergTypeInfo->type = ICEBERG_TYPE_INVALID;
+
+	EnsureScalarTypeNameIsSupported(typeName);
 
 	int			totalTypes = sizeof(IcebergToDuckDBTypes) / sizeof(IcebergToDuckDBTypes[0]);
 
@@ -802,6 +873,72 @@ GetIcebergJsonSerializedConstDefaultIfExists(const char *attrName, Field * field
 	}
 
 	return NULL;
+}
+
+
+/*
+ * EnsureIcebergFieldTypeIsSupported runs the v3-only-type choke point
+ * recursively over the field tree. Unlike EnsureIcebergField, this validator
+ * runs on every build and on every reader path -- so a v3 metadata.json with
+ * a column of type `unknown`/`variant`/`geometry`/`geography`/`timestamp_ns`/
+ * `timestamptz_ns` is refused at metadata-read time, not silently widened
+ * into a v2 type by the prefix matcher in GetIcebergTypeInfoFromTypeName.
+ *
+ * This is the always-on read-side counterpart to EnsureIcebergField (which
+ * is a heavy-asserts development aid). The two functions intentionally live
+ * apart because their contracts differ: one is "validate the tree shape in
+ * dev builds", the other is "refuse unsupported types on every backend".
+ */
+void
+EnsureIcebergFieldTypeIsSupported(Field * field)
+{
+	if (field == NULL)
+		return;
+
+	switch (field->type)
+	{
+		case FIELD_TYPE_SCALAR:
+			{
+				if (field->field.scalar.typeName != NULL)
+					EnsureScalarTypeNameIsSupported(field->field.scalar.typeName);
+				break;
+			}
+
+		case FIELD_TYPE_LIST:
+			{
+				EnsureIcebergFieldTypeIsSupported(field->field.list.element);
+				break;
+			}
+
+		case FIELD_TYPE_MAP:
+			{
+				EnsureIcebergFieldTypeIsSupported(field->field.map.key);
+				EnsureIcebergFieldTypeIsSupported(field->field.map.value);
+				break;
+			}
+
+		case FIELD_TYPE_STRUCT:
+			{
+				size_t		totalFields = field->field.structType.nfields;
+
+				for (size_t fieldIndex = 0; fieldIndex < totalFields; fieldIndex++)
+				{
+					FieldStructElement *structElementField =
+						&field->field.structType.fields[fieldIndex];
+
+					EnsureIcebergFieldTypeIsSupported(structElementField->type);
+				}
+				break;
+			}
+
+		default:
+
+			/*
+			 * tree-shape errors are caught by EnsureIcebergField in dev
+			 * builds
+			 */
+			break;
+	}
 }
 
 
