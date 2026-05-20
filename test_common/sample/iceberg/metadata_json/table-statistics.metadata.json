@@ -93,5 +93,6 @@
     }
   ],
   "snapshot-log": [],
-  "metadata-log": []
+  "metadata-log": [],
+  "partition-statistics": []
 }

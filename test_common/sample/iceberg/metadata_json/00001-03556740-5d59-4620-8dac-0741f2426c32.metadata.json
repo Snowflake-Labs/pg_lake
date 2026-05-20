@@ -104,5 +104,6 @@
   "metadata-log" : [ {
     "timestamp-ms" : 1719323694977,
     "metadata-file" : "s3://cdwtestdatasets/test_spark_metadata/v4/public/partitioned_table/metadata/00000-16d66250-33fd-432a-b404-3a9f2cf851c3.metadata.json"
-  } ]
+  } ],
+  "partition-statistics" : []
 }

@@ -336,40 +336,46 @@ AdjustFieldSummaryTextToSpark(const char *fieldSummaryText, PGType sourceType,
 	else if (sourceType.postgresTypeOid == TIMESTAMPOID && transformType == PARTITION_TRANSFORM_IDENTITY)
 	{
 		/*
-		 * spark prints '2020-01-01T20:00:00' whereas pg prints '2020-01-01
-		 * 20:00:00'
+		 * Spark surfaces timestamp (no-tz) partition-summary bounds via
+		 * Iceberg's DateTimeUtil.microsToIsoTimestamp, which formats a
+		 * LocalDateTime via ISO_LOCAL_DATE_TIME. That formatter always emits
+		 * the seconds field, so the output is `2020-01-01T20:00:00` even when
+		 * the second-of-minute is zero. PostgreSQL's default timestamp text
+		 * representation uses a space separator and no `T`, so reformat to
+		 * match. There is no `Z` (this is timestamp without time zone --
+		 * Iceberg's `timestamp_ntz`).
 		 */
 		Datum		tsDatum = DirectFunctionCall3(timestamp_in,
 												  CStringGetDatum(fieldSummaryText),
 												  ObjectIdGetDatum(InvalidOid),
 												  Int32GetDatum(sourceType.postgresTypeMod));
 
-		Datum		numericSecondsDatum = DirectFunctionCall2(extract_timestamp,
-															  CStringGetTextDatum("second"),
-															  tsDatum);
-		float8		seconds = DatumGetFloat8(DirectFunctionCall1(numeric_float8_no_overflow, numericSecondsDatum));
-
-		const char *formatStr = (seconds == 0.0) ? "YYYY-MM-DD\"T\"HH24:MI" : "YYYY-MM-DD\"T\"HH24:MI:SS";
+		const char *formatStr = "YYYY-MM-DD\"T\"HH24:MI:SS";
 
 		return DirectFunctionCall2(timestamp_to_char, tsDatum, CStringGetTextDatum(formatStr));
 	}
 	else if (sourceType.postgresTypeOid == TIMESTAMPTZOID && transformType == PARTITION_TRANSFORM_IDENTITY)
 	{
 		/*
-		 * spark prints '2020-01-01T20:00:00' whereas pg prints '2020-01-01
-		 * 20:00:00'
+		 * Spark surfaces timestamptz partition-summary bounds via Iceberg's
+		 * DateTimeUtil.microsToIsoTimestamptz, which uses
+		 * `ISO_LOCAL_DATE_TIME + appendOffset("+HH:MM:ss", "+00:00")`. That
+		 * formatter always emits seconds (even when zero) and renders a UTC
+		 * instant with the literal `+00:00` offset, not `Z`. Match that exact
+		 * shape here: `2020-01-01T20:00:00+00:00`.
+		 *
+		 * pg_lake previously emitted `Z` because Spark's older surfacing path
+		 * went through OffsetDateTime.toString(), which uses `Z` for UTC and
+		 * elides trailing zero subfields. Iceberg-spark-runtime 1.10.x routes
+		 * the partition-summaries view through DateTimeUtil directly, hence
+		 * the format change tracked here.
 		 */
 		Datum		tsDatum = DirectFunctionCall3(timestamptz_in,
 												  CStringGetDatum(fieldSummaryText),
 												  ObjectIdGetDatum(InvalidOid),
 												  Int32GetDatum(sourceType.postgresTypeMod));
 
-		Datum		numericSecondsDatum = DirectFunctionCall2(extract_timestamp,
-															  CStringGetTextDatum("second"),
-															  tsDatum);
-		float8		seconds = DatumGetFloat8(DirectFunctionCall1(numeric_float8_no_overflow, numericSecondsDatum));
-
-		const char *formatStr = (seconds == 0.0) ? "YYYY-MM-DD\"T\"HH24:MI\"Z\"" : "YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"";
+		const char *formatStr = "YYYY-MM-DD\"T\"HH24:MI:SS\"+00:00\"";
 
 		return DirectFunctionCall2(timestamptz_to_char, tsDatum, CStringGetTextDatum(formatStr));
 	}

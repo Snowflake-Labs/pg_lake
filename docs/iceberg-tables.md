@@ -765,7 +765,7 @@ export JDBC_CONN_STR="jdbc:postgresql://${PGHOST}/${PGDATABASE}?user=${PGUSER}&p
 This is an example of Spark connection configurations:
 
 ```
-spark-sql --packages org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.4.1 \
+spark-sql --packages org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.10.1 \
 --conf spark.sql.catalog.postgres=org.apache.iceberg.spark.SparkCatalog \
 --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
 --conf spark.sql.catalog.demo=org.apache.iceberg.spark.SparkCatalog \

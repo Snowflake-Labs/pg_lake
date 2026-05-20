@@ -294,7 +294,7 @@ def bids_table(iceberg_catalog):
 """
 Table created in spark-sql using:
 
-spark-sql --packages org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.4.1 \
+spark-sql --packages org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.10.1 \
     --conf spark.sql.catalog.my_catalog=org.apache.iceberg.spark.SparkCatalog \
     --conf spark.sql.catalog.my_catalog.catalog-impl=org.apache.iceberg.jdbc.JdbcCatalog \
     --conf spark.sql.catalog.my_catalog.warehouse=s3://testbucketcdw/iceberg/ \

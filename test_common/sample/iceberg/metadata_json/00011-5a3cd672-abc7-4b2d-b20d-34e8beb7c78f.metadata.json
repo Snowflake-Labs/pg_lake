@@ -648,5 +648,6 @@
   }, {
     "timestamp-ms" : 1719323702685,
     "metadata-file" : "s3://cdwtestdatasets/test_spark_metadata/v4/public/partitioned_table/metadata/00010-731c9bb2-a95c-4a0c-bbb7-be49c5f899c8.metadata.json"
-  } ]
+  } ],
+  "partition-statistics" : []
 }

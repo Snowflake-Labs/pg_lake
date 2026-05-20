@@ -122,14 +122,24 @@ WriteIcebergTableMetadataToJson(IcebergTableMetadata * metadata)
 	appendStringInfoString(command, "\"snapshot-log\":");
 	AppendIcebergSnapshotLogEntries(command, metadata->snapshot_log, metadata->snapshot_log_length);
 
-	/* Append partition_statistics */
-	if (metadata->partition_statistics_length > 0)
-	{
-		appendStringInfoString(command, ", ");
+	/*
+	 * Append partition-statistics.
+	 *
+	 * We always emit this field, even when the array is empty, to match the
+	 * convention adopted by the Iceberg reference Java writer (and therefore
+	 * Spark) starting in iceberg-spark-runtime 1.10.x: empty optional arrays
+	 * at the top level of the table metadata JSON are serialized as `[]`
+	 * rather than being elided. Always emitting it keeps our round-trip tests
+	 * (which compare pg_lake's output to Spark's) byte-stable against the new
+	 * reference behaviour, and lets pg_lake be drop-in compatible with
+	 * engines that key off the field's presence.
+	 */
+	appendStringInfoString(command, ", ");
 
-		appendStringInfoString(command, "\"partition-statistics\":");
-		AppendcebergPartitionStatistics(command, metadata->partition_statistics, metadata->partition_statistics_length);
-	}
+	appendStringInfoString(command, "\"partition-statistics\":");
+	AppendcebergPartitionStatistics(command,
+									metadata->partition_statistics,
+									metadata->partition_statistics_length);
 
 	appendStringInfoString(command, ", ");
 

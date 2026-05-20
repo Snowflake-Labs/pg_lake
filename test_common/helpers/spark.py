@@ -177,7 +177,7 @@ def spark_session(installcheck, create_spark_catalog_database):
         # got these versions from pyiceberg tests
         # (https://github.com/apache/iceberg-python/blob/ff3a24981c59c2d1935cde02b72ff4249e4d8525/tests/conftest.py#L2224)
         scala_version = "2.12"
-        iceberg_version = "1.4.3"
+        iceberg_version = "1.10.1"
 
         os.environ["PYSPARK_SUBMIT_ARGS"] = (
             f"--packages org.apache.iceberg:iceberg-spark-runtime-{spark_version}_{scala_version}:{iceberg_version},"
