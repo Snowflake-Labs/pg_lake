@@ -38,6 +38,17 @@ inputs:
     description: 'Worker ID for split tests'
     required: false
     default: ''
+  iceberg_format_version:
+    description: >-
+      Iceberg format-version to run tests under. Sets the
+      PG_LAKE_TEST_ICEBERG_VERSION environment variable, which the
+      iceberg_format_version pytest fixture in test_common reads to drive
+      the pg_lake_iceberg.default_format_version GUC for every test that
+      consumes it. Tests not consuming the fixture are unaffected.
+      Allowed values: '2' (default, Iter 1 stable) or '3' (Iter 2+; v3
+      write tests skip cleanly via skip_if_v3_writes_unsupported).
+    required: false
+    default: '2'
 
 runs:
   using: "composite"
@@ -48,6 +59,15 @@ runs:
       run: |
         echo "CI_WORKER_COUNT=${{ inputs.worker_count }}" >> $GITHUB_ENV
         echo "CI_WORKER_ID=${{ inputs.worker_id }}" >> $GITHUB_ENV
+
+    - name: Export PG_LAKE_TEST_ICEBERG_VERSION
+      shell: bash
+      run: |
+        # Consumed by the iceberg_format_version pytest fixture in
+        # test_common/helpers/iceberg.py. CI keeps this at '2' until v3
+        # writes are wired (Stage 12 of the v3 rollout). A separate
+        # matrix entry can override it without re-touching this action.
+        echo "PG_LAKE_TEST_ICEBERG_VERSION=${{ inputs.iceberg_format_version }}" >> $GITHUB_ENV
 
     - name: Export PGDIR, PATH and PG_REGRESS_DIR
       shell: bash

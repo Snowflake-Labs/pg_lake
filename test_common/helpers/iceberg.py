@@ -961,3 +961,118 @@ def adjust_object_store_settings(superuser_conn):
 
     run_command("SELECT pg_reload_conf()", superuser_conn)
     superuser_conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Iceberg format-version test plumbing (Stage 9 of the v3 rollout)
+#
+# `iceberg_format_version` is a function-scoped fixture that drives every
+# test that wants to be exercised under both v2 and v3 of the Iceberg spec.
+#
+# Usage patterns:
+#
+#   1. Default (no `@pytest.mark.parametrize`):
+#         def test_x(iceberg_format_version, ...):
+#             ...
+#      The fixture reads the `PG_LAKE_TEST_ICEBERG_VERSION` env var. CI
+#      defaults to v2 today (Iteration 1: v3 writes still error). When a
+#      future CI matrix entry exports `PG_LAKE_TEST_ICEBERG_VERSION=3` the
+#      same test re-runs under v3 without source changes.
+#
+#   2. Explicit parametrization:
+#         @pytest.mark.parametrize(
+#             "iceberg_format_version", [2, 3], indirect=True
+#         )
+#         def test_format_specific(iceberg_format_version, ...):
+#             ...
+#      Both versions are exercised in a single CI lane; v3 cases must
+#      either pass or fail with the well-known writer-gate message (use
+#      `skip_if_v3_writes_unsupported` to short-circuit cleanly).
+#
+# In every case the fixture issues a session-level
+# `SET pg_lake_iceberg.default_format_version = ...` so any CREATE TABLE
+# inside the test inherits the right writer-side gate, and RESETs the GUC
+# on teardown so cross-test state never leaks. The yielded value is the
+# integer version (2 or 3) so the test can branch on it explicitly.
+#
+# The `skip_if_v3_writes_unsupported` helper exists so the test author
+# does not have to grep for the exact ereport string in two places; today
+# every v3 write path errors with "writing Iceberg format-version 3
+# tables is not yet supported", and once Stage 12 lifts that for the
+# basic v3 append path this helper is the single site to relax.
+# ---------------------------------------------------------------------------
+
+
+PG_LAKE_TEST_ICEBERG_VERSION_ENV = "PG_LAKE_TEST_ICEBERG_VERSION"
+ICEBERG_FORMAT_VERSION_GUC = "pg_lake_iceberg.default_format_version"
+
+
+def _format_version_to_guc_value(version: int) -> str:
+    if version == 2:
+        return "v2"
+    if version == 3:
+        return "v3"
+    raise ValueError(
+        f"unsupported iceberg format-version {version}; pg_lake supports v2 and v3"
+    )
+
+
+@pytest.fixture
+def iceberg_format_version(request, pg_conn, extension):
+    """Session-level toggle for the Iceberg format-version under test.
+
+    See the module-level comment above for the full contract.
+
+    Depends on ``extension`` so the pg_lake_iceberg shared library is
+    guaranteed to be loaded into the backend before we try to SET the
+    GUC. Custom GUCs from a not-yet-loaded extension act as placeholders
+    until the .so loads; depending on ``extension`` makes the SET fail
+    loudly if the extension isn't actually installed, rather than
+    silently no-op'ing.
+    """
+    explicit = getattr(request, "param", None)
+    if explicit is not None:
+        version = int(explicit)
+    else:
+        version = int(os.environ.get(PG_LAKE_TEST_ICEBERG_VERSION_ENV, "2"))
+
+    guc_value = _format_version_to_guc_value(version)
+
+    run_command(f"SET {ICEBERG_FORMAT_VERSION_GUC} TO '{guc_value}';", pg_conn)
+    pg_conn.commit()
+    try:
+        yield version
+    finally:
+        # RESET unconditionally; we want a clean slate even if the test
+        # rolled back its own transaction in an error path.
+        try:
+            run_command(f"RESET {ICEBERG_FORMAT_VERSION_GUC};", pg_conn)
+            pg_conn.commit()
+        except Exception:
+            # Connection might already be in a bad state if the test
+            # left an aborted transaction lying around.
+            pg_conn.rollback()
+            run_command(f"RESET {ICEBERG_FORMAT_VERSION_GUC};", pg_conn)
+            pg_conn.commit()
+
+
+# Exact wording is asserted in test_default_format_version_guc.py to keep
+# the contract honest; everything else just imports this constant.
+V3_WRITE_UNSUPPORTED_ERROR = (
+    "writing Iceberg format-version 3 tables is not yet supported"
+)
+
+
+def skip_if_v3_writes_unsupported(version: int) -> None:
+    """Skip the current test if v3 writes are still gated off.
+
+    Tests that want to exercise the *write* path on both v2 and v3 call
+    this near the top, immediately after destructuring the fixture's
+    version. Once v3 writes are functional (Stage 12 of the rollout), the
+    body of this helper collapses to a no-op.
+    """
+    if version == 3:
+        pytest.skip(
+            "iceberg v3 writes are not yet supported "
+            "(pg_lake v3 rollout, end of iteration 1)"
+        )
