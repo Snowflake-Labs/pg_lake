@@ -34,6 +34,7 @@
 #include "pg_lake/http/http_client.h"
 #include "pg_lake/iceberg/api/table_schema.h"
 #include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/iceberg/format_version.h"
 #include "pg_lake/iceberg/metadata_spec.h"
 #include "pg_lake/util/temporal_utils.h"
 #include "pg_lake/json/json_utils.h"
@@ -88,12 +89,26 @@ typedef enum RestCatalogRequestRetryAction
 * a table. The schema will be updated when we make this table visible/committed.
 * The main reason for staging early is to be able to get the vended credentials
 * for writable tables.
+*
+* formatVersion is encoded as a string under the body's
+* ``properties.format-version`` key (this is the only place the Iceberg
+* REST ``CreateTableRequest`` looks for it -- see the long comment in
+* BuildStageCreateBody for the spec citation). Today every caller passes
+* ICEBERG_FORMAT_VERSION_V2; when v3 writes go live the same caller path
+* flips to v3 with no body-structure change (the v2 -> v3 switch is a
+* single value flip in Stage 14 of the v3 effort).
 */
-void
-StartStageRestCatalogIcebergTableCreate(Oid relationId)
+/*
+* BuildStageCreateBody constructs the JSON body sent to the REST catalog when
+* staging an iceberg table create. The output is deterministic for a given
+* (relationName, formatVersion) pair so it can be unit-tested without an
+* actual catalog over HTTP. ``format-version`` is emitted inside the
+* ``properties`` map as a string to match the Iceberg REST contract --
+* see the in-function comment for the full citation.
+*/
+char *
+BuildStageCreateBody(const char *relationName, IcebergFormatVersion formatVersion)
 {
-	const char *relationName = GetRestCatalogTableName(relationId);
-
 	StringInfo	body = makeStringInfo();
 
 	appendStringInfoChar(body, '{');	/* start body */
@@ -113,9 +128,61 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId)
 	appendStringInfoChar(body, '}');	/* close schema object */
 	appendStringInfoString(body, ", ");
 
+	/*
+	 * Send the format-version through ``properties`` -- that is the *only*
+	 * place the Iceberg REST ``CreateTableRequest`` recognises it. The
+	 * canonical request shape (see Iceberg
+	 * ``core/src/main/java/org/apache/iceberg/rest/requests/
+	 * CreateTableRequest.java`` for Iceberg 1.10.x, which Polaris >=1.2.0
+	 * runs) has exactly these top-level keys:
+	 *
+	 * name, location, schema, partition-spec, write-order, properties,
+	 * stage-create
+	 *
+	 * ``format-version`` is *not* a top-level field; it is a well-known
+	 * Iceberg ``TableProperty`` (``TableProperties.FORMAT_VERSION``) that
+	 * lives inside the ``properties`` ``Map<String, String>`` *as a string*
+	 * -- Iceberg's ``TableMetadata.newTableMetadata`` reads it with
+	 * ``PropertyUtil.propertyAsInt(properties, "format-version",
+	 * DEFAULT_TABLE_FORMAT_VERSION)``, which does
+	 * ``Integer.parseInt(map.get(key))`` on the string value.
+	 *
+	 * Emitting ``"format-version": <int>`` at the body root, as an earlier
+	 * iteration of this file did, made Jackson on the Polaris side silently
+	 * drop the field (unknown top-level keys are ignored by default in
+	 * Iceberg's REST request DTOs) and the table was created at the implicit
+	 * default v2 regardless of the caller's request -- silently breaking v3
+	 * stage-create end-to-end. Stage 14 of the v3 rollout exercises this
+	 * through Polaris in ``test_polaris_v3_table.py``; the unit test for this
+	 * body in ``test_rest_stage_create_body.py`` pins both invariants
+	 * (in-properties, string-typed).
+	 */
+	{
+		char		formatVersionStr[16];
+
+		snprintf(formatVersionStr, sizeof(formatVersionStr), "%d",
+				 IcebergFormatVersionToInt(formatVersion));
+
+		appendJsonKey(body, "properties");
+		appendStringInfoChar(body, '{');	/* start properties object */
+		appendJsonString(body, "format-version", formatVersionStr);
+		appendStringInfoChar(body, '}');	/* close properties object */
+	}
+	appendStringInfoString(body, ", ");
+
 	appendJsonString(body, "stage-create", "true");
 
 	appendStringInfoChar(body, '}');	/* close body */
+
+	return body->data;
+}
+
+
+void
+StartStageRestCatalogIcebergTableCreate(Oid relationId, IcebergFormatVersion formatVersion)
+{
+	const char *relationName = GetRestCatalogTableName(relationId);
+	char	   *body = BuildStageCreateBody(relationName, formatVersion);
 
 	const char *catalogName = GetRestCatalogName(relationId);
 	const char *namespaceName = GetRestCatalogNamespace(relationId);
@@ -132,7 +199,7 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId)
 		headers = lappend(headers, vendedCreds);
 	}
 
-	HttpResult	httpResult = SendRequestToRestCatalog(HTTP_POST, postUrl, body->data, headers);
+	HttpResult	httpResult = SendRequestToRestCatalog(HTTP_POST, postUrl, body, headers);
 
 	if (httpResult.status != 200)
 	{

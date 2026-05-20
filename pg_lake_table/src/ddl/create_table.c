@@ -979,7 +979,14 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		 * table creation in the rest catalog after the local table creation
 		 * is successful in post-commit.
 		 */
-		StartStageRestCatalogIcebergTableCreate(relationId);
+
+		/*
+		 * pg_lake only writes v2 tables today; Stage 8 of the Iceberg v3
+		 * rollout will source this from the GUC / WITH (format_version=N)
+		 * option and Stage 14 will let Polaris see the v3 value. Pinning to
+		 * v2 here keeps the body shape stable in the meantime.
+		 */
+		StartStageRestCatalogIcebergTableCreate(relationId, ICEBERG_FORMAT_VERSION_V2);
 
 		/*
 		 * Record the create table operation in the rest catalog. Note that

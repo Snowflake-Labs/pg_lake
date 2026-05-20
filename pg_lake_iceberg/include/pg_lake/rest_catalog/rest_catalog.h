@@ -22,6 +22,7 @@
 #include "pg_lake/util/rel_utils.h"
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/iceberg/api/snapshot.h"
+#include "pg_lake/iceberg/format_version.h"
 
 #define REST_CATALOG_AUTH_TYPE_DEFAULT (0)
 #define REST_CATALOG_AUTH_TYPE_HORIZON (1)
@@ -78,7 +79,10 @@ typedef struct RestCatalogRequest
 #define GET_REST_CATALOG_METADATA_LOCATION "%s/api/catalog/v1/%s/namespaces/%s/tables/%s"
 
 extern PGDLLEXPORT void RegisterNamespaceToRestCatalog(const char *catalogName, const char *namespaceName);
-extern PGDLLEXPORT void StartStageRestCatalogIcebergTableCreate(Oid relationId);
+extern PGDLLEXPORT void StartStageRestCatalogIcebergTableCreate(Oid relationId,
+																IcebergFormatVersion formatVersion);
+extern PGDLLEXPORT char *BuildStageCreateBody(const char *relationName,
+											  IcebergFormatVersion formatVersion);
 extern PGDLLEXPORT char *FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSchema * dataFileSchema, List *partitionSpecs);
 extern PGDLLEXPORT void ErrorIfRestNamespaceDoesNotExist(const char *catalogName, const char *namespaceName);
 extern PGDLLEXPORT char *GetRestCatalogName(Oid relationId);

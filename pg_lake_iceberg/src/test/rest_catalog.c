@@ -23,9 +23,11 @@
 #include "funcapi.h"
 #include "utils/builtins.h"
 
+#include "pg_lake/iceberg/format_version.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 
 PG_FUNCTION_INFO_V1(register_namespace_to_rest_catalog);
+PG_FUNCTION_INFO_V1(build_stage_create_body);
 
 /*
 * register_namespace_to_rest_catalog is a test function that registers
@@ -39,4 +41,22 @@ register_namespace_to_rest_catalog(PG_FUNCTION_ARGS)
 
 	RegisterNamespaceToRestCatalog(catalogName, namespaceName);
 	PG_RETURN_VOID();
+}
+
+
+/*
+* build_stage_create_body returns the JSON body that
+* StartStageRestCatalogIcebergTableCreate would POST for the given
+* (relationName, formatVersion).
+*/
+Datum
+build_stage_create_body(PG_FUNCTION_ARGS)
+{
+	char	   *relationName = text_to_cstring(PG_GETARG_TEXT_P(0));
+	int32		versionInt = PG_GETARG_INT32(1);
+	IcebergFormatVersion formatVersion = IcebergFormatVersionFromInt(versionInt);
+
+	char	   *body = BuildStageCreateBody(relationName, formatVersion);
+
+	PG_RETURN_TEXT_P(cstring_to_text(body));
 }

@@ -806,6 +806,12 @@ def create_http_helper_functions(superuser_conn, iceberg_extension):
          VOLATILE STRICT
         AS 'pg_lake_iceberg', $function$register_namespace_to_rest_catalog$function$;
 
+        CREATE OR REPLACE FUNCTION lake_iceberg.build_stage_create_body(relationName TEXT, formatVersion INT)
+        RETURNS text
+         LANGUAGE C
+         IMMUTABLE STRICT
+        AS 'pg_lake_iceberg', $function$build_stage_create_body$function$;
+
 """,
         superuser_conn,
     )
@@ -825,6 +831,7 @@ def create_http_helper_functions(superuser_conn, iceberg_extension):
         DROP TYPE lake_iceberg.http_result;
         DROP FUNCTION IF EXISTS lake_iceberg.url_encode_path;
         DROP FUNCTION IF EXISTS lake_iceberg.register_namespace_to_rest_catalog;
+        DROP FUNCTION IF EXISTS lake_iceberg.build_stage_create_body;
                 """,
         superuser_conn,
     )
