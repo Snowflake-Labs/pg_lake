@@ -28,6 +28,7 @@
 #include "pg_lake/iceberg/api/partitioning.h"
 #include "pg_lake/iceberg/api/table_metadata.h"
 #include "pg_lake/iceberg/api/table_schema.h"
+#include "pg_lake/iceberg/format_version.h"
 #include "pg_lake/iceberg/iceberg_type_json_serde.h"
 #include "pg_lake/iceberg/metadata_spec.h"
 #include "pg_lake/iceberg/partitioning/spec_generation.h"
@@ -91,7 +92,7 @@ GenerateEmptyTableMetadata(char *location)
 {
 	IcebergTableMetadata *metadata = palloc0(sizeof(IcebergTableMetadata));
 
-	metadata->format_version = 2;
+	metadata->format_version = ICEBERG_FORMAT_VERSION_V2;
 	metadata->table_uuid = GenerateUUID();
 	metadata->location = pstrdup(location);
 	metadata->last_sequence_number = 0;

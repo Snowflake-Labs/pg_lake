@@ -32,6 +32,7 @@
 #include "postgres.h"
 #include "utils/jsonb.h"
 
+#include "pg_lake/iceberg/format_version.h"
 #include "pg_lake/parquet/field.h"
 
 
@@ -238,7 +239,7 @@ typedef struct IcebergStatistics
 */
 typedef struct IcebergTableMetadata
 {
-	int32_t		format_version;
+	IcebergFormatVersion format_version;
 
 	const char *table_uuid;
 	size_t		table_uuid_length;

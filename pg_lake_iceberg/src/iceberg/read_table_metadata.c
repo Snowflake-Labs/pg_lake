@@ -21,6 +21,7 @@
 #include "libpq-fe.h"
 #include "miscadmin.h"
 
+#include "pg_lake/iceberg/format_version.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/iceberg/metadata_spec.h"
 #include "pg_lake/json/json_reader.h"
@@ -85,11 +86,24 @@ ReadIcebergTableMetadataFromJson(JsonbContainer *json, IcebergTableMetadata * me
 {
 	memset(metadata, '\0', sizeof(IcebergTableMetadata));
 
-	JsonExtractInt32Field(json, "format-version", FIELD_REQUIRED, &metadata->format_version);
-	if (metadata->format_version != 2)
+	/*
+	 * `format-version` is the only field that gates the type system of every
+	 * downstream parse step, so funnel it through the IcebergFormatVersion
+	 * enum here -- this is the single point in the reader that converts the
+	 * on-disk wire integer to the typed handle the rest of the code reads.
+	 * IcebergFormatVersionFromInt() rejects unknown integers (v1, v4, ...); a
+	 * structurally-known v3 metadata is rejected at this same site until the
+	 * v3-feature error choke points in read_manifest / iceberg_field land
+	 * later in the v3 series.
+	 */
+	int32_t		format_version_int;
+
+	JsonExtractInt32Field(json, "format-version", FIELD_REQUIRED, &format_version_int);
+	metadata->format_version = IcebergFormatVersionFromInt(format_version_int);
+	if (metadata->format_version != ICEBERG_FORMAT_VERSION_V2)
 	{
 		ereport(ERROR, (errmsg("unsupported iceberg format version %d",
-							   metadata->format_version)));
+							   format_version_int)));
 	}
 
 	JsonExtractStringField(json, "table-uuid", FIELD_REQUIRED, &metadata->table_uuid, &metadata->table_uuid_length);

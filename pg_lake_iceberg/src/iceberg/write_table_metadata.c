@@ -22,6 +22,7 @@
 #include "miscadmin.h"
 
 #include "pg_lake/iceberg/api/table_metadata.h"
+#include "pg_lake/iceberg/format_version.h"
 #include "pg_lake/iceberg/metadata_spec.h"
 #include "pg_lake/json/json_reader.h"
 #include "pg_lake/json/json_utils.h"
@@ -59,7 +60,7 @@ WriteIcebergTableMetadataToJson(IcebergTableMetadata * metadata)
 	appendStringInfoString(command, "{");
 
 	/* Append format_version */
-	appendJsonInt32(command, "format-version", metadata->format_version);
+	appendJsonInt32(command, "format-version", IcebergFormatVersionToInt(metadata->format_version));
 	appendStringInfoString(command, ", ");
 
 	/* Append table_uuid */

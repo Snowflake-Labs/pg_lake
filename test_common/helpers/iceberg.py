@@ -696,6 +696,14 @@ def create_reserialize_helper_functions(superuser_conn, iceberg_extension):
 """,
         superuser_conn,
     )
+    # Commit so the CREATE OR REPLACE FUNCTION DDL is durable across any
+    # per-test `superuser_conn.rollback()` that consumer tests may perform
+    # (e.g. test_format_version_read_choke.py wraps `pytest.raises` with
+    # `finally: superuser_conn.rollback()`). Without this commit, the first
+    # such rollback wipes every function defined here and the rest of the
+    # module fails with `function ... does not exist`. Mirrors the explicit
+    # commit in iceberg_extension and create_format_version_test_functions.
+    superuser_conn.commit()
 
     yield
 
@@ -712,6 +720,7 @@ def create_reserialize_helper_functions(superuser_conn, iceberg_extension):
                 """,
         superuser_conn,
     )
+    superuser_conn.commit()
 
 
 @pytest.fixture(scope="module")
