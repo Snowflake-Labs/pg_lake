@@ -28,12 +28,13 @@
 #include "pg_lake/avro/avro_writer.h"
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/iceberg/api.h"
-#include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/iceberg/format_version.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/iceberg/operations/manifest_merge.h"
 #include "pg_lake/iceberg/operations/vacuum.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
+#include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 
 #define GUC_STANDARD 0
@@ -61,6 +62,20 @@ void		_PG_init(void);
 static const struct config_enum_entry RestCatalogAuthTypeOptions[] = {
 	{"default", REST_CATALOG_AUTH_TYPE_DEFAULT, false},
 	{"horizon", REST_CATALOG_AUTH_TYPE_HORIZON, false},
+	{NULL, 0, false},
+};
+
+/*
+ * pg_lake_iceberg.default_format_version
+ *
+ * Enum GUC backing IcebergDefaultFormatVersion. We deliberately do not
+ * accept anything other than "v2" / "v3": there is no v1 in pg_lake and an
+ * unknown future "v4" would silently change schema-evolution semantics.
+ * Adding a value here is a deliberate spec uptake, not configuration drift.
+ */
+static const struct config_enum_entry DefaultFormatVersionOptions[] = {
+	{"v2", ICEBERG_FORMAT_VERSION_V2, false},
+	{"v3", ICEBERG_FORMAT_VERSION_V3, false},
 	{NULL, 0, false},
 };
 
@@ -315,6 +330,17 @@ _PG_init(void)
 							 true,
 							 PGC_SUSET,
 							 GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
+	DefineCustomEnumVariable("pg_lake_iceberg.default_format_version",
+							 gettext_noop("Iceberg format-version used for new tables when "
+										  "WITH (format_version = N) is not provided."),
+							 NULL,
+							 (int *) &IcebergDefaultFormatVersion,
+							 ICEBERG_FORMAT_VERSION_V2,
+							 DefaultFormatVersionOptions,
+							 PGC_USERSET,
+							 0,
 							 NULL, NULL, NULL);
 
 	DefineCustomBoolVariable("pg_lake_iceberg.unsupported_numeric_as_double",

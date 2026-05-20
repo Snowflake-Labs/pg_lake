@@ -61,6 +61,7 @@
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/iceberg/format_version.h"
 #include "pg_lake/util/numeric.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_lake/util/url_encode.h"
@@ -650,6 +651,33 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 	/* we might adjust the parse tree */
 	if (params->readOnlyTree)
 		createStmt = (CreateForeignTableStmt *) CopyUtilityStmt(params);
+
+	/*
+	 * Resolve the table's Iceberg format-version from the WITH options +
+	 * default GUC and gate writes immediately. Today every v3 write path is
+	 * incomplete (row lineage missing, no v3 Avro schema dispatch), so we
+	 * refuse the CREATE up front rather than silently producing a v3
+	 * metadata.json whose first INSERT will fail. Later v3 rollout stages
+	 * relax this writer choke point as each missing piece lands.
+	 *
+	 * The resolved version is also surfaced as an explicit `format_version =
+	 * N` foreign-table option so downstream code paths (metadata writer, REST
+	 * catalog body, ...) all see the same value.
+	 */
+	IcebergFormatVersion icebergFormatVersion =
+		ResolveIcebergFormatVersionFromOptions(createStmt->options);
+
+	EnsureIcebergFormatVersionForWrite(icebergFormatVersion);
+
+	if (GetOption(createStmt->options, "format_version") == NULL)
+	{
+		char	   *versionStr = psprintf("%d",
+										  IcebergFormatVersionToInt(icebergFormatVersion));
+		DefElem    *versionOption = makeDefElem("format_version",
+												(Node *) makeString(versionStr), -1);
+
+		createStmt->options = lappend(createStmt->options, versionOption);
+	}
 
 	DefElem    *catalogOption = GetOption(createStmt->options, "catalog");
 

@@ -44,6 +44,8 @@
 
 #include "postgres.h"
 
+#include "nodes/pg_list.h"
+
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -65,15 +67,15 @@ typedef enum IcebergFormatVersion
  * return value being a valid enum member.
  * ----------------------------------------------------------------------*/
 
-extern IcebergFormatVersion IcebergFormatVersionFromInt(int32_t version);
-extern int32_t IcebergFormatVersionToInt(IcebergFormatVersion v);
+extern PGDLLEXPORT IcebergFormatVersion IcebergFormatVersionFromInt(int32_t version);
+extern PGDLLEXPORT int32_t IcebergFormatVersionToInt(IcebergFormatVersion v);
 
 /*
  * Lowercase short name suitable for log lines, GUC values, and
  * user-facing error messages: "v2", "v3". Backed by static strings;
  * callers must not free the result.
  */
-extern const char *IcebergFormatVersionName(IcebergFormatVersion v);
+extern PGDLLEXPORT const char *IcebergFormatVersionName(IcebergFormatVersion v);
 
 
 /* ------------------------------------------------------------------------
@@ -98,8 +100,27 @@ extern const char *IcebergFormatVersionName(IcebergFormatVersion v);
  * them into the read / write paths.
  * ----------------------------------------------------------------------*/
 
-extern void EnsureIcebergFormatVersionForRead(IcebergFormatVersion v);
-extern void EnsureIcebergFormatVersionForWrite(IcebergFormatVersion v);
+extern PGDLLEXPORT void EnsureIcebergFormatVersionForRead(IcebergFormatVersion v);
+extern PGDLLEXPORT void EnsureIcebergFormatVersionForWrite(IcebergFormatVersion v);
+
+
+/* ------------------------------------------------------------------------
+ * Default format-version GUC plumbing
+ *
+ * `pg_lake_iceberg.default_format_version` (enum GUC, values v2 / v3,
+ * default v2) controls the format-version chosen for new tables when the
+ * caller did not pass `WITH (format_version = N)`. `IcebergDefaultFormatVersion`
+ * is the live value of that GUC.
+ *
+ * `ResolveIcebergFormatVersionFromOptions(options)` is the single sanctioned
+ * way to derive the version for a CREATE TABLE: it honours `WITH
+ * (format_version = N)` when present, falls back to the GUC otherwise, and
+ * raises `ereport(ERROR, ...)` on unparsable / unsupported values.
+ * ----------------------------------------------------------------------*/
+
+extern PGDLLEXPORT IcebergFormatVersion IcebergDefaultFormatVersion;
+
+extern PGDLLEXPORT IcebergFormatVersion ResolveIcebergFormatVersionFromOptions(List *options);
 
 
 /* ------------------------------------------------------------------------
@@ -118,43 +139,43 @@ extern void EnsureIcebergFormatVersionForWrite(IcebergFormatVersion v);
  * ----------------------------------------------------------------------*/
 
 /* v3 §schema: per-field `initial-default` / `write-default`. */
-extern bool IcebergFormatVersionSupportsColumnDefaults(IcebergFormatVersion v);
+extern PGDLLEXPORT bool IcebergFormatVersionSupportsColumnDefaults(IcebergFormatVersion v);
 
 /*
  * v3 §row-lineage: table `next-row-id`, snapshot `first-row-id` /
  * `added-rows`, data-file `first_row_id`.
  */
-extern bool IcebergFormatVersionSupportsRowLineage(IcebergFormatVersion v);
+extern PGDLLEXPORT bool IcebergFormatVersionSupportsRowLineage(IcebergFormatVersion v);
 
 /* v3 §deletes: Puffin-encoded deletion vectors replace v2 PDFs. */
-extern bool IcebergFormatVersionSupportsDeletionVectors(IcebergFormatVersion v);
+extern PGDLLEXPORT bool IcebergFormatVersionSupportsDeletionVectors(IcebergFormatVersion v);
 
 /* v3 §types: `timestamp_ns` / `timestamptz_ns` (nanosecond precision). */
-extern bool IcebergFormatVersionSupportsNanoTimestamp(IcebergFormatVersion v);
+extern PGDLLEXPORT bool IcebergFormatVersionSupportsNanoTimestamp(IcebergFormatVersion v);
 
 /* v3 §types: `variant` (self-describing semi-structured). */
-extern bool IcebergFormatVersionSupportsVariantType(IcebergFormatVersion v);
+extern PGDLLEXPORT bool IcebergFormatVersionSupportsVariantType(IcebergFormatVersion v);
 
 /* v3 §types: `unknown` (null-only placeholder). */
-extern bool IcebergFormatVersionSupportsUnknownType(IcebergFormatVersion v);
+extern PGDLLEXPORT bool IcebergFormatVersionSupportsUnknownType(IcebergFormatVersion v);
 
 /* v3 §types: `geometry` / `geography`. */
-extern bool IcebergFormatVersionSupportsGeospatialTypes(IcebergFormatVersion v);
+extern PGDLLEXPORT bool IcebergFormatVersionSupportsGeospatialTypes(IcebergFormatVersion v);
 
 /* v3 §partitioning / sorting: `source-ids` (plural). */
-extern bool IcebergFormatVersionSupportsMultiArgTransforms(IcebergFormatVersion v);
+extern PGDLLEXPORT bool IcebergFormatVersionSupportsMultiArgTransforms(IcebergFormatVersion v);
 
 /* v3 §encryption: table `encryption-keys`, snapshot `key-id`. */
-extern bool IcebergFormatVersionSupportsEncryption(IcebergFormatVersion v);
+extern PGDLLEXPORT bool IcebergFormatVersionSupportsEncryption(IcebergFormatVersion v);
 
 /*
  * v3 §metadata: empty tables write JSON `null` for `current-snapshot-id`
  * instead of the v2 sentinel `-1`.
  */
-extern bool IcebergFormatVersionSupportsNullCurrentSnapshotId(IcebergFormatVersion v);
+extern PGDLLEXPORT bool IcebergFormatVersionSupportsNullCurrentSnapshotId(IcebergFormatVersion v);
 
 /*
  * v3 §evolution: readers MUST ignore unknown partition / sort
  * transforms (forward-compatibility hook); v2 hard-errored.
  */
-extern bool IcebergFormatVersionIgnoresUnknownTransforms(IcebergFormatVersion v);
+extern PGDLLEXPORT bool IcebergFormatVersionIgnoresUnknownTransforms(IcebergFormatVersion v);

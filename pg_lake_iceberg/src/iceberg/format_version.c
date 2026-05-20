@@ -26,7 +26,19 @@
 
 #include "postgres.h"
 
+#include "nodes/parsenodes.h"
+#include "commands/defrem.h"
+
 #include "pg_lake/iceberg/format_version.h"
+#include "pg_lake/parsetree/options.h"
+
+
+/*
+ * Live value of the `pg_lake_iceberg.default_format_version` GUC. Defined
+ * here so every translation unit can rely on a single linker symbol; the
+ * GUC itself is registered from pg_lake_iceberg's _PG_init.
+ */
+IcebergFormatVersion IcebergDefaultFormatVersion = ICEBERG_FORMAT_VERSION_V2;
 
 
 IcebergFormatVersion
@@ -74,6 +86,49 @@ IcebergFormatVersionName(IcebergFormatVersion v)
 	 * analyses.
 	 */
 	return "<invalid>";
+}
+
+
+IcebergFormatVersion
+ResolveIcebergFormatVersionFromOptions(List *options)
+{
+	DefElem    *option = GetOption(options, "format_version");
+
+	if (option == NULL)
+	{
+		return IcebergDefaultFormatVersion;
+	}
+
+	/*
+	 * Accept both the SQL grammar's integer literal (parsed as Integer node
+	 * by the parser when the user wrote `WITH (format_version = 3)`) and a
+	 * string ('3') for callers that build the options programmatically.
+	 * Either way the value is funnelled through IcebergFormatVersionFromInt
+	 * so the rejection of unknown integers has a single source of truth.
+	 */
+	int32_t		versionInt;
+
+	if (IsA(option->arg, Integer))
+	{
+		versionInt = intVal(option->arg);
+	}
+	else
+	{
+		char	   *raw = defGetString(option);
+		char	   *endptr = NULL;
+		long		parsed = strtol(raw, &endptr, 10);
+
+		if (endptr == raw || (endptr != NULL && *endptr != '\0'))
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("invalid value for \"format_version\": %s", raw),
+					 errhint("pg_lake supports Iceberg format-version 2 and 3.")));
+		}
+		versionInt = (int32_t) parsed;
+	}
+
+	return IcebergFormatVersionFromInt(versionInt);
 }
 
 

@@ -50,6 +50,7 @@
 #include "access/relation.h"
 #include "access/table.h"
 #include "access/xact.h"
+#include "foreign/foreign.h"
 #include "catalog/pg_type.h"
 #include "catalog/pg_type_d.h"
 #include "commands/comment.h"
@@ -88,11 +89,21 @@ static int32_t MaxSchemaId(IcebergTableSchema * schemas, size_t schemasLength);
 * table metadata generation.
 */
 IcebergTableMetadata *
-GenerateEmptyTableMetadata(char *location)
+GenerateEmptyTableMetadata(char *location, IcebergFormatVersion formatVersion)
 {
+	/*
+	 * Refuse to materialise an in-memory IcebergTableMetadata that we cannot
+	 * faithfully serialise yet. Callers should already have gated the
+	 * caller-visible action (CREATE TABLE, ALTER ... INHERIT, ...) on
+	 * EnsureIcebergFormatVersionForWrite, but this second line of defence
+	 * makes the invariant local: every IcebergTableMetadata produced here is
+	 * one the writer can round-trip end-to-end.
+	 */
+	EnsureIcebergFormatVersionForWrite(formatVersion);
+
 	IcebergTableMetadata *metadata = palloc0(sizeof(IcebergTableMetadata));
 
-	metadata->format_version = ICEBERG_FORMAT_VERSION_V2;
+	metadata->format_version = formatVersion;
 	metadata->table_uuid = GenerateUUID();
 	metadata->location = pstrdup(location);
 	metadata->last_sequence_number = 0;
@@ -360,9 +371,30 @@ GenerateInitialIcebergTableMetadata(Oid relationId)
 {
 	char	   *queryArguments = "";
 	char	   *location = GetWritableTableLocation(relationId, &queryArguments);
-	IcebergTableMetadata *metadata = GenerateEmptyTableMetadata(location);
+	IcebergFormatVersion formatVersion = GetIcebergFormatVersionFromTableOptions(relationId);
+
+	IcebergTableMetadata *metadata = GenerateEmptyTableMetadata(location, formatVersion);
 
 	return metadata;
+}
+
+
+/*
+ * GetIcebergFormatVersionFromTableOptions returns the Iceberg format-version
+ * recorded on the foreign-table OPTIONS for the given relation, falling back
+ * to the default GUC when the option is absent (e.g. older tables created
+ * before format_version was wired through).
+ *
+ * The CREATE TABLE path in create_table.c persists the resolved version as a
+ * "format_version" option so every subsequent read of the foreign-table
+ * options observes a stable value, independent of subsequent GUC changes.
+ */
+IcebergFormatVersion
+GetIcebergFormatVersionFromTableOptions(Oid relationId)
+{
+	ForeignTable *table = GetForeignTable(relationId);
+
+	return ResolveIcebergFormatVersionFromOptions(table->options);
 }
 
 /*

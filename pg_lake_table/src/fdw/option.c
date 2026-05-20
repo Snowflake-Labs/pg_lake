@@ -573,6 +573,13 @@ InitPgLakeIcebergOptions(void)
 		{"catalog_namespace", ForeignTableRelationId},
 
 		/*
+		 * Iceberg format-version selected for this table. Accepted values are
+		 * the integers 2 and 3. When absent, the table's format-version is
+		 * sourced from the pg_lake_iceberg.default_format_version GUC.
+		 */
+		{"format_version", ForeignTableRelationId},
+
+		/*
 		 * out-of-range value handling during writes: 'error' (default) or
 		 * 'clamp'
 		 */
