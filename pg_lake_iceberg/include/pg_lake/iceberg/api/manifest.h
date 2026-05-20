@@ -42,11 +42,13 @@ extern PGDLLEXPORT List *FetchManifestsFromSnapshot(IcebergSnapshot * snapshot, 
 
 /* write api */
 extern PGDLLEXPORT char *GenerateRemoteManifestPath(const char *location, const char *snapshotUUID, int manifestIndex, char *queryArguments);
-extern PGDLLEXPORT int64_t UploadIcebergManifestToURI(List *manifestEntries, char *manifestURI);
+extern PGDLLEXPORT int64_t UploadIcebergManifestToURI(List *manifestEntries, char *manifestURI,
+													  IcebergFormatVersion formatVersion);
 extern PGDLLEXPORT IcebergManifest * CreateNewIcebergManifest(IcebergSnapshot * snapshot,
 															  int32_t partitionSpecId,
 															  List *allTransforms,
 															  int64 manifestFileSize,
 															  IcebergManifestContentType contentType,
 															  char *manifestPath,
-															  List *manifestEntries);
+															  List *manifestEntries,
+															  IcebergFormatVersion formatVersion);

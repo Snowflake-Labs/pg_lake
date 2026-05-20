@@ -61,6 +61,16 @@
  */
 typedef struct IcebergSnapshotBuilder
 {
+	/*
+	 * Iceberg format-version of the table whose snapshot we are building.
+	 * Cached on the builder so every downstream writer (manifest, manifest
+	 * list, manifest merge, manifest-entry mutation) gets its dispatch source
+	 * from one place rather than re-reading metadata->format_version inside
+	 * every helper. Today this only selects the v2 Avro schemas; v3 will gate
+	 * row-lineage and deletion-vector fields.
+	 */
+	IcebergFormatVersion formatVersion;
+
 	/* snapshot which we're modifying */
 	IcebergSnapshot *baseSnapshot;
 
@@ -134,14 +144,16 @@ static List *CreateNewManifestsForDeletedEntries(List *allManifestEntries, List 
 												 IcebergSnapshot * newSnapshot, const char *metadataLocation,
 												 const char *snapshotUUID, int *manifestIndex,
 												 int partitionSpecId, List *partitionTransforms,
-												 IcebergManifestContentType contentType);
+												 IcebergManifestContentType contentType,
+												 IcebergFormatVersion formatVersion);
 static bool RewriteManifestForRemoval(IcebergManifest * manifest,
 									  List *removedEntries, bool removeAllEntries,
 									  int64_t snapshotId, IcebergSnapshot * newSnapshot,
 									  const char *metadataLocation, const char *snapshotUUID,
 									  int *manifestIndex, List *allTransforms,
 									  List **finalDataManifestList,
-									  List **finalDeleteManifestList);
+									  List **finalDeleteManifestList,
+									  IcebergFormatVersion formatVersion);
 static IcebergSnapshot * CopyIcebergSnapshot(IcebergSnapshot * src);
 static Property * CopyPropertiesArray(Property * src, int length);
 static HTAB *MakePartitionManifestEntryHash(void);
@@ -419,6 +431,13 @@ static IcebergSnapshotBuilder *
 CreateIcebergSnapshotBuilder(IcebergTableMetadata * metadata, List *metadataOperations)
 {
 	IcebergSnapshotBuilder *builder = palloc0(sizeof(IcebergSnapshotBuilder));
+
+	/*
+	 * Inherit the table's format-version into the builder so every writer
+	 * call invoked from FinalizeNewSnapshot can dispatch on it without
+	 * reaching back to the metadata pointer.
+	 */
+	builder->formatVersion = metadata->format_version;
 
 	/*
 	 * Get the current snapshot, and also prepare new snapshot for adding
@@ -882,11 +901,13 @@ FinalizeNewSnapshot(IcebergSnapshotBuilder * builder, Oid relationId, const char
 		 */
 		bool		anyDataManifestModified = RemoveDeletedManifestEntries(currentSnapshot, allTransforms, &finalDataManifestList,
 																		   ICEBERG_MANIFEST_FILE_CONTENT_DATA, metadataLocation,
-																		   snapshotUUID, isVerbose, &manifestIndex);
+																		   snapshotUUID, isVerbose, &manifestIndex,
+																		   builder->formatVersion);
 
 		bool		anyDeleteManifestModified = RemoveDeletedManifestEntries(currentSnapshot, allTransforms, &finalDeleteManifestList,
 																			 ICEBERG_MANIFEST_FILE_CONTENT_DELETES, metadataLocation,
-																			 snapshotUUID, isVerbose, &manifestIndex);
+																			 snapshotUUID, isVerbose, &manifestIndex,
+																			 builder->formatVersion);
 
 		if (anyDataManifestModified || anyDeleteManifestModified)
 			createNewSnapshot = true;
@@ -913,12 +934,15 @@ FinalizeNewSnapshot(IcebergSnapshotBuilder * builder, Oid relationId, const char
 										   snapshotUUID,
 										   manifestIndex++, "");
 
-			int64_t		manifestSize = UploadIcebergManifestToURI(manifestEntries, remoteManifestPath);
+			int64_t		manifestSize = UploadIcebergManifestToURI(manifestEntries,
+																  remoteManifestPath,
+																  builder->formatVersion);
 
 			IcebergManifest *newDataManifest =
 				CreateNewIcebergManifest(newSnapshot, partitionSpecId, allTransforms,
 										 manifestSize, ICEBERG_MANIFEST_FILE_CONTENT_DATA,
-										 remoteManifestPath, manifestEntries);
+										 remoteManifestPath, manifestEntries,
+										 builder->formatVersion);
 
 			finalDataManifestList = lappend(finalDataManifestList, newDataManifest);
 
@@ -948,12 +972,14 @@ FinalizeNewSnapshot(IcebergSnapshotBuilder * builder, Oid relationId, const char
 										   snapshotUUID,
 										   manifestIndex++, "");
 
-			int64_t		manifestSize = UploadIcebergManifestToURI(manifestEntries, remoteManifestPath);
+			int64_t		manifestSize = UploadIcebergManifestToURI(manifestEntries,
+																  remoteManifestPath,
+																  builder->formatVersion);
 
 			IcebergManifest *newDeleteManifest =
 				CreateNewIcebergManifest(newSnapshot, partitionSpecId, allTransforms, manifestSize,
 										 ICEBERG_MANIFEST_FILE_CONTENT_DELETES, remoteManifestPath,
-										 manifestEntries);
+										 manifestEntries, builder->formatVersion);
 
 			finalDeleteManifestList = lappend(finalDeleteManifestList, newDeleteManifest);
 
@@ -984,7 +1010,8 @@ FinalizeNewSnapshot(IcebergSnapshotBuilder * builder, Oid relationId, const char
 										  metadataLocation, snapshotUUID,
 										  &manifestIndex, allTransforms,
 										  &finalDataManifestList,
-										  &finalDeleteManifestList))
+										  &finalDeleteManifestList,
+										  builder->formatVersion))
 			{
 				createNewSnapshot = true;
 			}
@@ -1001,7 +1028,8 @@ FinalizeNewSnapshot(IcebergSnapshotBuilder * builder, Oid relationId, const char
 		int			beforeMergeCount = list_length(finalDataManifestList);
 
 		finalDataManifestList = MergeDataManifests(newSnapshot, allTransforms, finalDataManifestList,
-												   metadataLocation, snapshotUUID, isVerbose, &manifestIndex);
+												   metadataLocation, snapshotUUID, isVerbose, &manifestIndex,
+												   builder->formatVersion);
 
 		int			afterMergeCount = list_length(finalDataManifestList);
 
@@ -1037,7 +1065,7 @@ FinalizeNewSnapshot(IcebergSnapshotBuilder * builder, Oid relationId, const char
 
 	List	   *finalManifestList = list_concat(finalDataManifestList, finalDeleteManifestList);
 
-	UploadIcebergManifestListToURI(finalManifestList, manifestListPath);
+	UploadIcebergManifestListToURI(finalManifestList, manifestListPath, builder->formatVersion);
 	newSnapshot->manifest_list = manifestListPath;
 
 	/* schema may have been updated by the current operation */
@@ -1057,15 +1085,19 @@ FinalizeNewSnapshot(IcebergSnapshotBuilder * builder, Oid relationId, const char
 static List *
 CreateNewManifestsForDeletedEntries(List *allManifestEntries, List *deletedManifestEntries, IcebergSnapshot * newSnapshot,
 									const char *metadataLocation, const char *snapshotUUID, int *manifestIndex,
-									int partitionSpecId, List *partitionTransforms, IcebergManifestContentType contentType)
+									int partitionSpecId, List *partitionTransforms, IcebergManifestContentType contentType,
+									IcebergFormatVersion formatVersion)
 {
 	char	   *deleteManifestPath = GenerateRemoteManifestPath(metadataLocation,
 																snapshotUUID, (*manifestIndex)++, "");
-	int64_t		manifestSize = UploadIcebergManifestToURI(deletedManifestEntries, deleteManifestPath);
+	int64_t		manifestSize = UploadIcebergManifestToURI(deletedManifestEntries,
+														  deleteManifestPath,
+														  formatVersion);
 
 	IcebergManifest *deleteManifest =
 		CreateNewIcebergManifest(newSnapshot, partitionSpecId, partitionTransforms, manifestSize,
-								 contentType, deleteManifestPath, deletedManifestEntries);
+								 contentType, deleteManifestPath, deletedManifestEntries,
+								 formatVersion);
 
 	List	   *remainingManifestEntries = list_difference_ptr(allManifestEntries, deletedManifestEntries);
 
@@ -1086,14 +1118,17 @@ CreateNewManifestsForDeletedEntries(List *allManifestEntries, List *deletedManif
 	 */
 	char	   *remainingManifestPath = GenerateRemoteManifestPath(metadataLocation,
 																   snapshotUUID, (*manifestIndex)++, "");
-	int64_t		remainingManifestSize = UploadIcebergManifestToURI(remainingManifestEntries, remainingManifestPath);
+	int64_t		remainingManifestSize = UploadIcebergManifestToURI(remainingManifestEntries,
+																   remainingManifestPath,
+																   formatVersion);
 
 	SetExistingStatusForOldSnapshotAddedEntries(remainingManifestEntries, newSnapshot->snapshot_id);
 
 	IcebergManifest *remainingManifest =
 		CreateNewIcebergManifest(newSnapshot, partitionSpecId, partitionTransforms,
 								 remainingManifestSize, contentType,
-								 remainingManifestPath, remainingManifestEntries);
+								 remainingManifestPath, remainingManifestEntries,
+								 formatVersion);
 
 	return list_make2(deleteManifest, remainingManifest);
 }
@@ -1140,7 +1175,8 @@ RewriteManifestForRemoval(IcebergManifest * manifest,
 						  const char *metadataLocation, const char *snapshotUUID,
 						  int *manifestIndex, List *allTransforms,
 						  List **finalDataManifestList,
-						  List **finalDeleteManifestList)
+						  List **finalDeleteManifestList,
+						  IcebergFormatVersion formatVersion)
 {
 	bool		rewritten = false;
 
@@ -1169,7 +1205,8 @@ RewriteManifestForRemoval(IcebergManifest * manifest,
 			CreateNewManifestsForDeletedEntries(manifestEntries, deletedManifestEntries,
 												newSnapshot, metadataLocation, snapshotUUID,
 												manifestIndex, manifest->partition_spec_id,
-												allTransforms, content);
+												allTransforms, content,
+												formatVersion);
 
 		if (content == ICEBERG_MANIFEST_FILE_CONTENT_DATA)
 		{

@@ -45,7 +45,8 @@ extern PGDLLEXPORT List *MergeDataManifests(IcebergSnapshot * currentSnapshot,
 											const char *metadataLocation,
 											const char *snapshotUUID,
 											bool isVerbose,
-											int *manifestIndex);
+											int *manifestIndex,
+											IcebergFormatVersion formatVersion);
 extern PGDLLEXPORT bool RemoveDeletedManifestEntries(IcebergSnapshot * currentSnapshot,
 													 List *allTransforms,
 													 List **manifests,
@@ -53,5 +54,6 @@ extern PGDLLEXPORT bool RemoveDeletedManifestEntries(IcebergSnapshot * currentSn
 													 const char *metadataLocation,
 													 const char *snapshotUUID,
 													 bool isVerbose,
-													 int *manifestIndex);
+													 int *manifestIndex,
+													 IcebergFormatVersion formatVersion);
 extern PGDLLEXPORT bool HasMergeableManifests(List *dataManifests);

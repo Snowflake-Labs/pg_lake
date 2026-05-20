@@ -625,7 +625,8 @@ def create_reserialize_helper_functions(superuser_conn, iceberg_extension):
 
         CREATE OR REPLACE FUNCTION lake_iceberg.reserialize_iceberg_manifest(
                 manifestInputPath TEXT,
-                manifestOutputPath TEXT
+                manifestOutputPath TEXT,
+                formatVersion INT DEFAULT 2
         ) RETURNS VOID
           LANGUAGE C
           IMMUTABLE STRICT
@@ -633,7 +634,8 @@ def create_reserialize_helper_functions(superuser_conn, iceberg_extension):
 
         CREATE OR REPLACE FUNCTION lake_iceberg.reserialize_iceberg_manifest_list(
                 manifestListInputPath TEXT,
-                manifestListOutputPath TEXT
+                manifestListOutputPath TEXT,
+                formatVersion INT DEFAULT 2
         ) RETURNS VOID
           LANGUAGE C
           IMMUTABLE STRICT
@@ -710,8 +712,8 @@ def create_reserialize_helper_functions(superuser_conn, iceberg_extension):
     run_command(
         """
         DROP FUNCTION IF EXISTS lake_iceberg.reserialize_iceberg_table_metadata(TEXT);
-        DROP FUNCTION IF EXISTS lake_iceberg.reserialize_iceberg_manifest(TEXT, TEXT);
-        DROP FUNCTION IF EXISTS lake_iceberg.reserialize_iceberg_manifest_list(TEXT, TEXT);
+        DROP FUNCTION IF EXISTS lake_iceberg.reserialize_iceberg_manifest(TEXT, TEXT, INT);
+        DROP FUNCTION IF EXISTS lake_iceberg.reserialize_iceberg_manifest_list(TEXT, TEXT, INT);
         DROP FUNCTION IF EXISTS lake_iceberg.manifest_list_path_from_table_metadata(TEXT);
         DROP FUNCTION IF EXISTS lake_iceberg.manifest_paths_from_manifest_list(TEXT);
         DROP FUNCTION IF EXISTS lake_iceberg.datafile_paths_from_table_metadata(TEXT, bool);

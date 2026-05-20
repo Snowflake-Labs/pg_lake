@@ -24,4 +24,5 @@
 
 /* write api */
 extern PGDLLEXPORT char *GenerateRemoteManifestListPath(int64_t snapshotId, const char *location, const char *snapshotUUID, int manifestListIndex, char *queryArguments);
-extern PGDLLEXPORT int64_t UploadIcebergManifestListToURI(List *manifestList, char *manifestListURI);
+extern PGDLLEXPORT int64_t UploadIcebergManifestListToURI(List *manifestList, char *manifestListURI,
+														  IcebergFormatVersion formatVersion);

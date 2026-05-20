@@ -38,6 +38,8 @@
 
 #include "nodes/pg_list.h"
 
+#include "pg_lake/iceberg/format_version.h"
+
 
 typedef enum IcebergManifestEntryStatus
 {
@@ -235,5 +237,5 @@ typedef struct IcebergManifestEntry
 extern List *ReadIcebergManifests(const char *manifestListPath);
 extern PGDLLEXPORT List *ReadManifestEntries(const char *manifestPath);
 
-extern PGDLLEXPORT void WriteIcebergManifestList(const char *manifestListPath, List *manifests);
-extern PGDLLEXPORT void WriteIcebergManifest(const char *manifestPath, List *manifestEntries);
+extern PGDLLEXPORT void WriteIcebergManifestList(const char *manifestListPath, List *manifests, IcebergFormatVersion formatVersion);
+extern PGDLLEXPORT void WriteIcebergManifest(const char *manifestPath, List *manifestEntries, IcebergFormatVersion formatVersion);

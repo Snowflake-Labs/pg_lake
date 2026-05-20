@@ -91,15 +91,19 @@ FetchManifestsFromSnapshot(IcebergSnapshot * snapshot, ManifestPredicateFn manif
 }
 
 /*
- * UploadIcebergManifestToURI writes the manifest to a file and uploads it to given uri.
- * It returns the size of the manifest file.
+ * UploadIcebergManifestToURI writes the manifest to a file and uploads it to
+ * the given uri. It returns the size of the manifest file.
+ *
+ * `formatVersion` is forwarded to WriteIcebergManifest so the on-disk Avro
+ * schema matches the table's format-version.
  */
 int64_t
-UploadIcebergManifestToURI(List *manifestEntries, char *manifestURI)
+UploadIcebergManifestToURI(List *manifestEntries, char *manifestURI,
+						   IcebergFormatVersion formatVersion)
 {
 	char	   *localManifestPath = GenerateTempFileName(PG_LAKE_ICEBERG, true);
 
-	WriteIcebergManifest(localManifestPath, manifestEntries);
+	WriteIcebergManifest(localManifestPath, manifestEntries, formatVersion);
 
 	/*
 	 * Manifest files will get auto-deleted on commit unless
@@ -131,7 +135,14 @@ GenerateRemoteManifestPath(const char *location, const char *snapshotUUID, int m
 }
 
 /*
-* CreateNewIcebergManifest creates a new Iceberg manifest with the given parameters.
+* CreateNewIcebergManifest creates a new Iceberg manifest with the given
+* parameters.
+*
+* `formatVersion` is accepted (and forwarded through the writer chain) even
+* though the in-memory IcebergManifest structure is currently version-agnostic.
+* The v3 spec adds `first_row_id` to the manifest entry; staging the
+* signature here means callers do not need a follow-up edit when that field
+* lands.
 */
 IcebergManifest *
 CreateNewIcebergManifest(IcebergSnapshot * snapshot,
@@ -140,8 +151,11 @@ CreateNewIcebergManifest(IcebergSnapshot * snapshot,
 						 int64 manifestFileSize,
 						 IcebergManifestContentType contentType,
 						 char *manifestPath,
-						 List *manifestEntries)
+						 List *manifestEntries,
+						 IcebergFormatVersion formatVersion)
 {
+	(void) formatVersion;
+
 	IcebergManifest *newManifest = palloc0(sizeof(IcebergManifest));
 
 	newManifest->manifest_length = manifestFileSize;

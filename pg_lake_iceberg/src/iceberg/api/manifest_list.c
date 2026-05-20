@@ -29,15 +29,20 @@
 #include "utils/lsyscache.h"
 
 /*
-* UploadIcebergManifestListToURI writes the manifest list to a file
-* and uploads it to given uri. It returns the size of the local manifest list file.
+* UploadIcebergManifestListToURI writes the manifest list to a file and
+* uploads it to the given uri. It returns the size of the local manifest
+* list file.
+*
+* `formatVersion` is forwarded to WriteIcebergManifestList so the on-disk
+* Avro schema matches the table's format-version.
 */
 int64_t
-UploadIcebergManifestListToURI(List *manifestList, char *manifestListURI)
+UploadIcebergManifestListToURI(List *manifestList, char *manifestListURI,
+							   IcebergFormatVersion formatVersion)
 {
 	char	   *localManifestListPath = GenerateTempFileName(PG_LAKE_ICEBERG, true);
 
-	WriteIcebergManifestList(localManifestListPath, manifestList);
+	WriteIcebergManifestList(localManifestListPath, manifestList, formatVersion);
 
 	bool		autoDeleteRecord = true;
 

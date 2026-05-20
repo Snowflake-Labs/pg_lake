@@ -22,6 +22,7 @@
 #include "miscadmin.h"
 
 #include "pg_lake/iceberg/api.h"
+#include "pg_lake/iceberg/format_version.h"
 #include "pg_lake/iceberg/manifest_spec.h"
 #include "pg_lake/iceberg/metadata_spec.h"
 #include "pg_lake/iceberg/utils.h"
@@ -44,35 +45,48 @@ PG_FUNCTION_INFO_V1(current_manifest_entries);
 PG_FUNCTION_INFO_V1(current_partition_fields);
 
 /*
-* reserialize_iceberg_manifest_list is a test function that reads the manifest
-* list of an Iceberg table from input file and then reserializes it back to output file.
+* reserialize_iceberg_manifest_list is a test function that reads the
+* manifest list of an Iceberg table from input file and then reserializes it
+* back to output file.
+*
+* The third argument is the integer Iceberg format-version to use when
+* writing the output (default `2` at the SQL layer). It is converted to the
+* enum via IcebergFormatVersionFromInt so unknown integers (e.g. v3 before
+* writer support lands) raise the canonical error message rather than
+* silently producing a v2 file.
 */
 Datum
 reserialize_iceberg_manifest_list(PG_FUNCTION_ARGS)
 {
 	char	   *manifestListReadPath = text_to_cstring(PG_GETARG_TEXT_P(0));
 	char	   *manifestListWritePath = text_to_cstring(PG_GETARG_TEXT_P(1));
+	IcebergFormatVersion formatVersion = IcebergFormatVersionFromInt(PG_GETARG_INT32(2));
 
 	List	   *manifests = ReadIcebergManifests(manifestListReadPath);
 
-	WriteIcebergManifestList(manifestListWritePath, manifests);
+	WriteIcebergManifestList(manifestListWritePath, manifests, formatVersion);
 
 	PG_RETURN_VOID();
 }
 
 /*
-* reserialize_iceberg_manifest is a test function that reads the manifest
-* of an Iceberg table from input file and then reserializes it back to output file.
+* reserialize_iceberg_manifest is a test function that reads the manifest of
+* an Iceberg table from input file and then reserializes it back to output
+* file.
+*
+* The third argument is the integer Iceberg format-version to use when
+* writing the output (default `2` at the SQL layer).
 */
 Datum
 reserialize_iceberg_manifest(PG_FUNCTION_ARGS)
 {
 	char	   *manifestReadPath = text_to_cstring(PG_GETARG_TEXT_P(0));
 	char	   *manifestWritePath = text_to_cstring(PG_GETARG_TEXT_P(1));
+	IcebergFormatVersion formatVersion = IcebergFormatVersionFromInt(PG_GETARG_INT32(2));
 
 	List	   *manifestEntries = ReadManifestEntries(manifestReadPath);
 
-	WriteIcebergManifest(manifestWritePath, manifestEntries);
+	WriteIcebergManifest(manifestWritePath, manifestEntries, formatVersion);
 
 	PG_RETURN_VOID();
 }

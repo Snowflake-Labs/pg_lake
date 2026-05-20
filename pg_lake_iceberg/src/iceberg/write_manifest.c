@@ -23,6 +23,7 @@
 
 #include "pg_lake/avro/avro_writer.h"
 #include "pg_lake/iceberg/api/manifest_entry.h"
+#include "pg_lake/iceberg/format_version.h"
 #include "pg_lake/iceberg/manifest_spec.h"
 #include "pg_lake/iceberg/manifest_list_schema_v2.h"
 #include "pg_lake/iceberg/manifest_schema_v2.h"
@@ -41,10 +42,18 @@ static const char *AdjustPartitionsInManifestJsonSchema(char *manifestSchema, Pa
 
 /*
  * WriteIcebergManifest writes given manifest entries to the given manifest file.
+ *
+ * `formatVersion` selects the Avro schema. v2 uses `manifest_schema_v2_json`
+ * via GetIcebergManifestJsonSchema; v3 introduces row-lineage and
+ * deletion-vector columns and is not yet supported -- writes raise the
+ * deferred-feature error from EnsureIcebergFormatVersionForWrite.
  */
 void
-WriteIcebergManifest(const char *manifestPath, List *manifestEntries)
+WriteIcebergManifest(const char *manifestPath, List *manifestEntries,
+					 IcebergFormatVersion formatVersion)
 {
+	EnsureIcebergFormatVersionForWrite(formatVersion);
+
 	const char *manifestSchema = GetIcebergManifestJsonSchema(manifestEntries);
 
 	AvroWriter *manifestWriter =
@@ -160,11 +169,19 @@ AdjustPartitionsInManifestJsonSchema(char *manifestSchema, Partition * partition
 
 
 /*
- * WriteIcebergManifestList writes given manifests to the given manifest list file.
+ * WriteIcebergManifestList writes given manifests to the given manifest list
+ * file.
+ *
+ * `formatVersion` selects the Avro schema. v2 uses
+ * `manifest_list_schema_v2_json`; v3 adds `first_row_id` and `key_id` and is
+ * not yet supported -- writes raise the deferred-feature error from
+ * EnsureIcebergFormatVersionForWrite.
  */
 void
-WriteIcebergManifestList(const char *manifestListPath, List *manifests)
+WriteIcebergManifestList(const char *manifestListPath, List *manifests,
+						 IcebergFormatVersion formatVersion)
 {
+	EnsureIcebergFormatVersionForWrite(formatVersion);
 
 	AvroWriter *manifestListWriter =
 		AvroWriterCreateWithJsonSchema(manifestListPath, manifest_list_schema_v2_json);
