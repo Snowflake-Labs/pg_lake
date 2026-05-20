@@ -52,7 +52,10 @@ runs:
       id: cache_polaris
       name: Cache Polaris
       with:
-        key: polaris-${{ inputs.container_os }}-${{ hashFiles('test_common/rest_catalog/Makefile') }}
+        # Key includes polaris/version.txt so that a submodule-only bump
+        # (without touching the Makefile) still invalidates the jar cache
+        # and forces a real rebuild against the new Polaris version.
+        key: polaris-${{ inputs.container_os }}-${{ hashFiles('test_common/rest_catalog/Makefile', 'test_common/rest_catalog/polaris/version.txt') }}
         path: |
           /home/postgres/pgsql-${{ inputs.pg_version }}/bin/polaris-admin.jar
           /home/postgres/pgsql-${{ inputs.pg_version }}/bin/polaris-server.jar

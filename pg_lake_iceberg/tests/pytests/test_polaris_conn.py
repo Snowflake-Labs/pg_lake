@@ -1,3 +1,6 @@
+import subprocess
+from pathlib import Path
+
 from utils_pytest import *
 from helpers.polaris import *
 
@@ -12,6 +15,63 @@ def test_polaris_catalog_running(pg_conn, polaris_session, installcheck):
     url = f"http://{server_params.POLARIS_HOSTNAME}:{server_params.POLARIS_PORT}/api/catalog/v1/config?warehouse={server_params.PG_DATABASE}"
     resp = polaris_session.get(url, timeout=1)
     assert resp.ok, f"Polaris is not running: {resp.status_code} {resp.text}"
+
+
+def test_polaris_jar_matches_expected_version(pg_conn, polaris_session, installcheck):
+    """
+    Assert the installed polaris-admin.jar reports the same version that
+    test_common/rest_catalog/Makefile's JAR_VERSION declares -- i.e. the
+    version the install step actually copied into $PG_BINDIR.
+
+    Guards against a CI cache-key regression where the cached jars from
+    an earlier Polaris pin are served while the Makefile/submodule have
+    moved on, making every other Polaris test silently exercise the
+    wrong server version.
+
+    We read JAR_VERSION from the Makefile rather than the submodule's
+    polaris/version.txt because the test job only checks out the parent
+    repo (no submodule init); the Makefile is always present and is
+    what physically named the jar that the install step cp'd.
+    """
+    if installcheck:
+        return
+
+    # repo root: .../<repo>/pg_lake_iceberg/tests/pytests/<this file>
+    repo_root = Path(__file__).resolve().parents[3]
+    makefile = repo_root / "test_common" / "rest_catalog" / "Makefile"
+    expected_version = None
+    for raw_line in makefile.read_text().splitlines():
+        line = raw_line.strip()
+        if line.startswith("JAR_VERSION="):
+            expected_version = line.split("=", 1)[1].strip()
+            break
+    assert expected_version, (
+        f"could not parse JAR_VERSION=... from {makefile}; "
+        "expected a line like 'JAR_VERSION=1.5.0'"
+    )
+
+    pg_bindir = subprocess.run(
+        ["pg_config", "--bindir"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    polaris_admin_jar = Path(pg_bindir) / "polaris-admin.jar"
+    assert polaris_admin_jar.exists(), f"missing {polaris_admin_jar}"
+
+    proc = subprocess.run(
+        ["java", "-jar", str(polaris_admin_jar), "--version"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    output = (proc.stdout or "") + (proc.stderr or "")
+
+    assert expected_version in output, (
+        f"polaris-admin.jar version mismatch: expected {expected_version!r} "
+        f"(from JAR_VERSION in {makefile}); java --version "
+        f"exit={proc.returncode}, output:\n{output}"
+    )
 
 
 def test_polaris_catalog_test_http_get(
@@ -47,7 +107,12 @@ def test_polaris_catalog_test_namespace_and_policy(
     url = f"http://{server_params.POLARIS_HOSTNAME}:{server_params.POLARIS_PORT}/api/catalog/v1/{server_params.PG_DATABASE}/namespaces"
     token = get_polaris_access_token()
 
-    namespace_name = "prod/team_a"
+    # Apache Polaris 1.4+ rejects '/' in entity names with HTTP 400
+    # ("Entity name must not contain '/'"), so use an underscore here.
+    # The test still exercises lake_iceberg.url_encode() on a name with
+    # non-trivial characters (letters, digits, underscore are all
+    # percent-encoding-safe but the helper is exercised regardless).
+    namespace_name = "prod_team_a"
     url_encoded_namespace_name = run_query(
         f"SELECT lake_iceberg.url_encode('{namespace_name}')", pg_conn
     )[0][0]

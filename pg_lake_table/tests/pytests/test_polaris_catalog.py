@@ -36,11 +36,16 @@ def test_polaris_catalog_running(pg_conn, s3, polaris_session, installcheck):
     assert resp.ok, f"Polaris is not running: {resp.status_code} {resp.text}"
 
 
+# Apache Polaris 1.4+ rejects '/' in entity names with HTTP 400
+# ("Entity name must not contain '/'"). Until pg_lake maps Postgres
+# schema names that contain '/' to multi-level Iceberg namespaces
+# (or otherwise encodes them server-acceptably), we cannot include '/'
+# in test data that goes through the REST catalog.
 namespaces = [
     "regular_name",
-    "regular..!!**(());;//??::@@&&==++$$,,#name",
+    "regular..!!**(())..;;..??::@@&&==++$$,,#name",
     "Special-Table!_With.Multiple_Uses_Of@Chars#-Here~And*Here!name",
-    "!~*();/?:@&=+$,#",
+    "!~*().?:@&=+$,#",
 ]
 
 
