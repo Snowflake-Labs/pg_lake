@@ -24,9 +24,11 @@
 #include "pg_lake/avro/avro_writer.h"
 #include "pg_lake/iceberg/api/manifest_entry.h"
 #include "pg_lake/iceberg/format_version.h"
-#include "pg_lake/iceberg/manifest_spec.h"
 #include "pg_lake/iceberg/manifest_list_schema_v2.h"
+#include "pg_lake/iceberg/manifest_list_schema_v3.h"
 #include "pg_lake/iceberg/manifest_schema_v2.h"
+#include "pg_lake/iceberg/manifest_schema_v3.h"
+#include "pg_lake/iceberg/manifest_spec.h"
 #include "pg_lake/util/string_utils.h"
 
 static void WriteColumnStatToAvro(ColumnStat * stat, avro_value_t * record);
@@ -36,25 +38,26 @@ static void WriteDataFileToAvro(DataFile * dataFile, avro_value_t * record);
 static void WritePartitionToAvro(Partition * partition, avro_value_t * record);
 static void WriteIcebergManifestToAvro(IcebergManifest * manifest, avro_value_t * record);
 static void WriteIcebergManifestEntryToAvro(IcebergManifestEntry * entry, avro_value_t * record);
-static const char *GetIcebergManifestJsonSchema(List *manifestEntries);
+static const char *GetIcebergManifestJsonSchema(List *manifestEntries, IcebergFormatVersion formatVersion);
 static const char *AdjustPartitionsInManifestJsonSchema(char *manifestSchema, Partition * partition);
 
 
 /*
  * WriteIcebergManifest writes given manifest entries to the given manifest file.
  *
- * `formatVersion` selects the Avro schema. v2 uses `manifest_schema_v2_json`
- * via GetIcebergManifestJsonSchema; v3 introduces row-lineage and
- * deletion-vector columns and is not yet supported -- writes raise the
- * deferred-feature error from EnsureIcebergFormatVersionForWrite.
+ * `formatVersion` selects the Avro schema. v2 uses `manifest_schema_v2_json`,
+ * v3 uses `manifest_schema_v3_json` which adds row-lineage (field-id 142)
+ * and deletion-vector columns (143/144/145) as optional fields. The
+ * writer-level hard error against v3 lives in callers (CREATE TABLE,
+ * INSERT/UPDATE/DELETE planning); this routine is also reachable from
+ * test C UDFs that pin the v3 wire shape without going through the
+ * full CREATE+INSERT pipeline.
  */
 void
 WriteIcebergManifest(const char *manifestPath, List *manifestEntries,
 					 IcebergFormatVersion formatVersion)
 {
-	EnsureIcebergFormatVersionForWrite(formatVersion);
-
-	const char *manifestSchema = GetIcebergManifestJsonSchema(manifestEntries);
+	const char *manifestSchema = GetIcebergManifestJsonSchema(manifestEntries, formatVersion);
 
 	AvroWriter *manifestWriter =
 		AvroWriterCreateWithJsonSchema(manifestPath, manifestSchema);
@@ -75,16 +78,70 @@ WriteIcebergManifest(const char *manifestPath, List *manifestEntries,
 }
 
 /*
+ * IcebergManifestSchemaJsonForVersion returns the static Avro JSON schema
+ * for the given Iceberg format-version. Centralising the dispatch here
+ * keeps GetIcebergManifestJsonSchema (which also has to splice in the
+ * dynamic partition schema) free of per-version conditionals.
+ */
+const char *
+IcebergManifestSchemaJsonForVersion(IcebergFormatVersion formatVersion)
+{
+	switch (formatVersion)
+	{
+		case ICEBERG_FORMAT_VERSION_V2:
+			return manifest_schema_v2_json;
+		case ICEBERG_FORMAT_VERSION_V3:
+			return manifest_schema_v3_json;
+	}
+
+	/*
+	 * Unreachable: IcebergFormatVersionFromInt is the only sanctioned way to
+	 * obtain an IcebergFormatVersion and it rejects everything outside the
+	 * enum. The default branch makes the compiler happy on platforms with
+	 * stricter -Wreturn-type analyses.
+	 */
+	ereport(ERROR,
+			(errmsg("no Iceberg manifest schema for format-version %d",
+					(int) formatVersion)));
+	pg_unreachable();
+}
+
+
+/*
+ * IcebergManifestListSchemaJsonForVersion is the manifest-list counterpart
+ * to IcebergManifestSchemaJsonForVersion.
+ */
+const char *
+IcebergManifestListSchemaJsonForVersion(IcebergFormatVersion formatVersion)
+{
+	switch (formatVersion)
+	{
+		case ICEBERG_FORMAT_VERSION_V2:
+			return manifest_list_schema_v2_json;
+		case ICEBERG_FORMAT_VERSION_V3:
+			return manifest_list_schema_v3_json;
+	}
+
+	ereport(ERROR,
+			(errmsg("no Iceberg manifest list schema for format-version %d",
+					(int) formatVersion)));
+	pg_unreachable();
+}
+
+
+/*
  * GetIcebergManifestJsonSchema creates a json avro schema for the manifest file with
  * the given manifest entries. It adjusts the schema based on the partition fields
  * of the first manifest entry, if any.
  */
 static const char *
-GetIcebergManifestJsonSchema(List *manifestEntries)
+GetIcebergManifestJsonSchema(List *manifestEntries, IcebergFormatVersion formatVersion)
 {
+	const char *baseSchema = IcebergManifestSchemaJsonForVersion(formatVersion);
+
 	if (manifestEntries == NIL)
 	{
-		return manifest_schema_v2_json;
+		return baseSchema;
 	}
 
 	/*
@@ -97,13 +154,13 @@ GetIcebergManifestJsonSchema(List *manifestEntries)
 
 	if (totalPartitionFields == 0)
 	{
-		return manifest_schema_v2_json;
+		return baseSchema;
 	}
 
 	Partition  *partition = &firstManifestEntry->data_file.partition;
 
 	/* do not modify original static schema */
-	char	   *manifestSchema = pstrdup(manifest_schema_v2_json);
+	char	   *manifestSchema = pstrdup(baseSchema);
 
 	return AdjustPartitionsInManifestJsonSchema(manifestSchema, partition);
 }
@@ -173,18 +230,19 @@ AdjustPartitionsInManifestJsonSchema(char *manifestSchema, Partition * partition
  * file.
  *
  * `formatVersion` selects the Avro schema. v2 uses
- * `manifest_list_schema_v2_json`; v3 adds `first_row_id` and `key_id` and is
- * not yet supported -- writes raise the deferred-feature error from
- * EnsureIcebergFormatVersionForWrite.
+ * `manifest_list_schema_v2_json`; v3 uses `manifest_list_schema_v3_json`
+ * which adds the optional `first_row_id` (field-id 520) row-lineage start.
+ * The writer-level hard error against v3 lives in callers (CREATE TABLE,
+ * DML planning); this routine is also reachable from test C UDFs.
  */
 void
 WriteIcebergManifestList(const char *manifestListPath, List *manifests,
 						 IcebergFormatVersion formatVersion)
 {
-	EnsureIcebergFormatVersionForWrite(formatVersion);
+	const char *manifestListSchema = IcebergManifestListSchemaJsonForVersion(formatVersion);
 
 	AvroWriter *manifestListWriter =
-		AvroWriterCreateWithJsonSchema(manifestListPath, manifest_list_schema_v2_json);
+		AvroWriterCreateWithJsonSchema(manifestListPath, manifestListSchema);
 
 	ListCell   *manifestCell = NULL;
 

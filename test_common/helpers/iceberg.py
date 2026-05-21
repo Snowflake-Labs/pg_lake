@@ -695,6 +695,20 @@ def create_reserialize_helper_functions(superuser_conn, iceberg_extension):
           LANGUAGE C
           IMMUTABLE STRICT
         AS 'pg_lake_iceberg', $function$current_partition_fields$function$;
+
+        CREATE OR REPLACE FUNCTION lake_iceberg.iceberg_manifest_schema_for_version(
+                version_int INT
+        ) RETURNS TEXT
+          LANGUAGE C
+          IMMUTABLE STRICT
+        AS 'pg_lake_iceberg', $function$iceberg_manifest_schema_for_version$function$;
+
+        CREATE OR REPLACE FUNCTION lake_iceberg.iceberg_manifest_list_schema_for_version(
+                version_int INT
+        ) RETURNS TEXT
+          LANGUAGE C
+          IMMUTABLE STRICT
+        AS 'pg_lake_iceberg', $function$iceberg_manifest_list_schema_for_version$function$;
 """,
         superuser_conn,
     )
@@ -719,6 +733,8 @@ def create_reserialize_helper_functions(superuser_conn, iceberg_extension):
         DROP FUNCTION IF EXISTS lake_iceberg.datafile_paths_from_table_metadata(TEXT, bool);
         DROP FUNCTION IF EXISTS lake_iceberg.current_manifests(TEXT);
         DROP FUNCTION IF EXISTS lake_iceberg.current_partition_fields(TEXT);
+        DROP FUNCTION IF EXISTS lake_iceberg.iceberg_manifest_schema_for_version(INT);
+        DROP FUNCTION IF EXISTS lake_iceberg.iceberg_manifest_list_schema_for_version(INT);
                 """,
         superuser_conn,
     )

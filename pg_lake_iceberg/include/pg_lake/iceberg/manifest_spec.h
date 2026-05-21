@@ -239,3 +239,12 @@ extern PGDLLEXPORT List *ReadManifestEntries(const char *manifestPath);
 
 extern PGDLLEXPORT void WriteIcebergManifestList(const char *manifestListPath, List *manifests, IcebergFormatVersion formatVersion);
 extern PGDLLEXPORT void WriteIcebergManifest(const char *manifestPath, List *manifestEntries, IcebergFormatVersion formatVersion);
+
+/*
+ * Return the static Avro JSON schema text for the given Iceberg
+ * format-version. Public so that test UDFs and any future inspection
+ * code (catalogue-side validators, etc.) can pin the schema shape
+ * without duplicating the dispatch table.
+ */
+extern PGDLLEXPORT const char *IcebergManifestSchemaJsonForVersion(IcebergFormatVersion formatVersion);
+extern PGDLLEXPORT const char *IcebergManifestListSchemaJsonForVersion(IcebergFormatVersion formatVersion);

@@ -43,6 +43,51 @@ PG_FUNCTION_INFO_V1(datafile_paths_from_table_metadata);
 PG_FUNCTION_INFO_V1(current_manifests);
 PG_FUNCTION_INFO_V1(current_manifest_entries);
 PG_FUNCTION_INFO_V1(current_partition_fields);
+PG_FUNCTION_INFO_V1(iceberg_manifest_schema_for_version);
+PG_FUNCTION_INFO_V1(iceberg_manifest_list_schema_for_version);
+
+
+/*
+ * lake_iceberg.iceberg_manifest_schema_for_version(version_int int)
+ *
+ * Test-only wrapper around IcebergManifestSchemaJsonForVersion: returns the
+ * raw Avro JSON schema text that the writer would feed AvroWriterCreate
+ * with for the given Iceberg format-version. Pytest uses this to assert the
+ * presence (v3) / absence (v2) of the v3-only fields row-lineage
+ * (`first_row_id`) and the deletion-vector pointers
+ * (`referenced_data_file`, `content_offset`, `content_size_in_bytes`)
+ * without having to write a v3 manifest end-to-end.
+ */
+Datum
+iceberg_manifest_schema_for_version(PG_FUNCTION_ARGS)
+{
+	int32		raw = PG_GETARG_INT32(0);
+	IcebergFormatVersion v = IcebergFormatVersionFromInt((int32_t) raw);
+
+	const char *schema = IcebergManifestSchemaJsonForVersion(v);
+
+	PG_RETURN_TEXT_P(cstring_to_text(schema));
+}
+
+
+/*
+ * lake_iceberg.iceberg_manifest_list_schema_for_version(version_int int)
+ *
+ * Manifest-list counterpart to iceberg_manifest_schema_for_version: pins the
+ * shape that pg_lake's WriteIcebergManifestList feeds the Avro writer per
+ * version, including the v3-only ``first_row_id`` (field-id 520) carrying
+ * the manifest-level row-lineage start.
+ */
+Datum
+iceberg_manifest_list_schema_for_version(PG_FUNCTION_ARGS)
+{
+	int32		raw = PG_GETARG_INT32(0);
+	IcebergFormatVersion v = IcebergFormatVersionFromInt((int32_t) raw);
+
+	const char *schema = IcebergManifestListSchemaJsonForVersion(v);
+
+	PG_RETURN_TEXT_P(cstring_to_text(schema));
+}
 
 /*
 * reserialize_iceberg_manifest_list is a test function that reads the
