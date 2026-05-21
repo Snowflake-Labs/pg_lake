@@ -1001,9 +1001,7 @@ def adjust_object_store_settings(superuser_conn):
 #         )
 #         def test_format_specific(iceberg_format_version, ...):
 #             ...
-#      Both versions are exercised in a single CI lane; v3 cases must
-#      either pass or fail with the well-known writer-gate message (use
-#      `skip_if_v3_writes_unsupported` to short-circuit cleanly).
+#      Both versions are exercised in a single CI lane.
 #
 # In every case the fixture issues a session-level
 # `SET pg_lake_iceberg.default_format_version = ...` so any CREATE TABLE
@@ -1011,11 +1009,10 @@ def adjust_object_store_settings(superuser_conn):
 # on teardown so cross-test state never leaks. The yielded value is the
 # integer version (2 or 3) so the test can branch on it explicitly.
 #
-# The `skip_if_v3_writes_unsupported` helper exists so the test author
-# does not have to grep for the exact ereport string in two places; today
-# every v3 write path errors with "writing Iceberg format-version 3
-# tables is not yet supported", and once Stage 12 lifts that for the
-# basic v3 append path this helper is the single site to relax.
+# `skip_if_v3_writes_unsupported` used to short-circuit v3 lanes back when
+# the writer hard-errored on v3 (Iteration 1 of the rollout). Stage 12
+# lifts that gate, so the helper is now a no-op kept as a callable stub
+# for tests written before Stage 12 landed; new tests should not call it.
 # ---------------------------------------------------------------------------
 
 
@@ -1072,23 +1069,29 @@ def iceberg_format_version(request, pg_conn, extension):
             pg_conn.commit()
 
 
-# Exact wording is asserted in test_default_format_version_guc.py to keep
-# the contract honest; everything else just imports this constant.
+# The original Iteration-1 writer-gate message. Stage 12 of the rollout
+# lifts the gate, so nothing in pg_lake emits this string anymore. It is
+# retained on the helper module as historical documentation and because
+# downstream test branches that were authored against Iter-1 still
+# import it; new code should not match on this constant.
 V3_WRITE_UNSUPPORTED_ERROR = (
     "writing Iceberg format-version 3 tables is not yet supported"
 )
 
 
 def skip_if_v3_writes_unsupported(version: int) -> None:
-    """Skip the current test if v3 writes are still gated off.
+    """Historical short-circuit for v3 lanes; now a no-op.
 
-    Tests that want to exercise the *write* path on both v2 and v3 call
-    this near the top, immediately after destructuring the fixture's
-    version. Once v3 writes are functional (Stage 12 of the rollout), the
-    body of this helper collapses to a no-op.
+    Before Stage 12 of the v3 rollout, every v3 write hard-errored with
+    ``V3_WRITE_UNSUPPORTED_ERROR``; tests that wanted to exercise the
+    write path on both v2 and v3 called this near the top, immediately
+    after destructuring the fixture's version, to skip the v3 lane.
+
+    Stage 12 wires the basic v3 append path end-to-end (row-lineage
+    allocator, Avro schema dispatch, snapshot publishing), so the body
+    here collapses to a no-op. The helper is kept as a callable stub so
+    pre-Stage-12 tests can continue to call it; new tests should rely on
+    the format-version-specific feature gates (e.g. UPDATE/DELETE on v3,
+    encryption, ...) at their own choke points instead.
     """
-    if version == 3:
-        pytest.skip(
-            "iceberg v3 writes are not yet supported "
-            "(pg_lake v3 rollout, end of iteration 1)"
-        )
+    del version  # Stage 12: every supported version is writable.

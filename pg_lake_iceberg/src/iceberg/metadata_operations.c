@@ -113,6 +113,27 @@ typedef struct IcebergSnapshotBuilder
 
 	/* snapshot operation */
 	SnapshotOperation operation;
+
+	/*
+	 * Iceberg v3 row-lineage allocator state (spec §row-lineage).
+	 *
+	 * ``nextRowIdAtStart`` is a snapshot of the table-level ``next-row-id``
+	 * cursor at the moment we began building this snapshot. Stashing it on
+	 * the builder lets the allocator (a) compute every new data file's
+	 * ``first_row_id`` deterministically from a single base value without
+	 * re-reading the metadata, and (b) keep the allocation invariant local to
+	 * FinalizeNewSnapshot -- the only function that walks the new manifest
+	 * entries in their on-disk order.
+	 *
+	 * ``allocatedRows`` is filled in by the allocator at commit time and is
+	 * the width of the row-id range this snapshot claims. The caller of
+	 * FinalizeNewSnapshot reads it back to advance metadata->next_row_id.
+	 * Zero is a legal value (e.g. a metadata-only commit) and is
+	 * distinguishable from "allocator did not run" via the format-version
+	 * check.
+	 */
+	int64_t		nextRowIdAtStart;
+	int64_t		allocatedRows;
 }			IcebergSnapshotBuilder;
 
 
@@ -134,6 +155,7 @@ static void ProcessIcebergMetadataOperations(Oid relationId, List *metadataOpera
 static IcebergManifestEntry * CreateIcebergManifestEntryFromMetadataOperation(TableMetadataOperation * operation,
 																			  int64_t newSnapshotId,
 																			  int64_t sequenceNumber);
+static void AllocateRowLineageForNewManifestEntries(IcebergSnapshotBuilder * builder);
 static IcebergSnapshot * FinalizeNewSnapshot(IcebergSnapshotBuilder * builder,
 											 Oid relationId,
 											 const char *metadataLocation,
@@ -322,7 +344,29 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 
 		/* update metadata's snapshot */
 		if (!writableRestCatalogTable)
+		{
 			UpdateLatestSnapshot(metadata, newSnapshot);
+
+			/*
+			 * v3 §row-lineage: bump the table-level cursor by exactly the
+			 * width of the range the allocator just claimed. We do this here
+			 * (next to UpdateLatestSnapshot) rather than inside the allocator
+			 * so the metadata side-effect lives in the same critical section
+			 * as adding the new snapshot -- aborting the commit later means
+			 * none of these mutations land.
+			 *
+			 * `has_next_row_id=true` is sticky: once a v3 table has seen even
+			 * one commit, every subsequent metadata.json carries the field so
+			 * external readers always know where the next row-id range will
+			 * start.
+			 */
+			if (IcebergFormatVersionSupportsRowLineage(builder->formatVersion))
+			{
+				metadata->next_row_id =
+					builder->nextRowIdAtStart + builder->allocatedRows;
+				metadata->has_next_row_id = true;
+			}
+		}
 		else
 		{
 			newSnapshot->sequence_number = metadata->last_sequence_number + 1;
@@ -438,6 +482,16 @@ CreateIcebergSnapshotBuilder(IcebergTableMetadata * metadata, List *metadataOper
 	 * reaching back to the metadata pointer.
 	 */
 	builder->formatVersion = metadata->format_version;
+
+	/*
+	 * Stash the current row-lineage cursor. v2 tables never carry it on the
+	 * wire; v3 tables built before any append have has_next_row_id==false,
+	 * which we treat as a zero cursor (the spec's "next is 0" semantics). The
+	 * allocator in FinalizeNewSnapshot reads this and writes back
+	 * allocatedRows for the caller to bump the table-level cursor.
+	 */
+	builder->nextRowIdAtStart = metadata->has_next_row_id ? metadata->next_row_id : 0;
+	builder->allocatedRows = 0;
 
 	/*
 	 * Get the current snapshot, and also prepare new snapshot for adding
@@ -871,6 +925,16 @@ FinalizeNewSnapshot(IcebergSnapshotBuilder * builder, Oid relationId, const char
 	int64_t		snapshotId = newSnapshot->snapshot_id;
 	const char *snapshotUUID = GenerateUUID();
 
+	/*
+	 * v3 §row-lineage: assign first_row_id to every newly-added data file
+	 * BEFORE the manifests are serialised to disk -- the row-id is an on-Avro
+	 * field on the data_file record and there is no way to retrofit it after
+	 * upload. The allocator is a no-op on v2 (which has no row-lineage in its
+	 * schema) and on commits that did not add data (e.g. metadata-only DDL).
+	 * See AllocateRowLineageForNewManifestEntries.
+	 */
+	AllocateRowLineageForNewManifestEntries(builder);
+
 	/* within the new same snapshot, we might have multiple manifests */
 	int			manifestIndex = 0;
 	int			manifestListIndex = 1;
@@ -943,6 +1007,36 @@ FinalizeNewSnapshot(IcebergSnapshotBuilder * builder, Oid relationId, const char
 										 manifestSize, ICEBERG_MANIFEST_FILE_CONTENT_DATA,
 										 remoteManifestPath, manifestEntries,
 										 builder->formatVersion);
+
+			/*
+			 * v3 §row-lineage on the manifest list entry: the manifest's
+			 * first_row_id (field-id 520) is the absolute starting row-id of
+			 * any newly-added row this manifest contributes. Since the
+			 * allocator above walked manifestEntries in iteration order, the
+			 * lowest first_row_id is on the first ADDED entry. We scan once
+			 * to find it -- callers may interleave EXISTING entries in front
+			 * of newly-added ones during a manifest rewrite, and we want the
+			 * row-lineage cursor to point at the first *new* row, not the
+			 * inherited ones (which carry their own first_row_id from a prior
+			 * snapshot).
+			 */
+			if (IcebergFormatVersionSupportsRowLineage(builder->formatVersion))
+			{
+				ListCell   *cell = NULL;
+
+				foreach(cell, manifestEntries)
+				{
+					IcebergManifestEntry *entry = lfirst(cell);
+
+					if (entry->status == ICEBERG_MANIFEST_ENTRY_STATUS_ADDED &&
+						entry->data_file.has_first_row_id)
+					{
+						newDataManifest->first_row_id = entry->data_file.first_row_id;
+						newDataManifest->has_first_row_id = true;
+						break;
+					}
+				}
+			}
 
 			finalDataManifestList = lappend(finalDataManifestList, newDataManifest);
 
@@ -1071,7 +1165,113 @@ FinalizeNewSnapshot(IcebergSnapshotBuilder * builder, Oid relationId, const char
 	/* schema may have been updated by the current operation */
 	newSnapshot->schema_id = currentSchemaId;
 
+	/*
+	 * v3 §row-lineage on the snapshot: publish the absolute range claimed by
+	 * this commit. The allocator already pinned ``nextRowIdAtStart`` and
+	 * counted ``allocatedRows``; we mirror them onto the snapshot now (only
+	 * when the table is actually v3 -- v2 snapshots must not grow these
+	 * fields).
+	 *
+	 * Both fields are emitted whenever the table is v3, even when zero rows
+	 * were added: a v3 metadata-only commit still carries a (0-width) lineage
+	 * range so external readers see a complete row-id timeline. The
+	 * allocator's _set companion bits on the IcebergSnapshot struct let the
+	 * writer pick the "always emit on v3" policy without losing the read-side
+	 * distinction between "absent on disk" and "present-and-zero" for tables
+	 * that came from other writers.
+	 */
+	if (IcebergFormatVersionSupportsRowLineage(builder->formatVersion))
+	{
+		newSnapshot->first_row_id = builder->nextRowIdAtStart;
+		newSnapshot->first_row_id_set = true;
+		newSnapshot->added_rows = builder->allocatedRows;
+		newSnapshot->added_rows_set = true;
+	}
+
 	return newSnapshot;
+}
+
+
+/*
+ * AllocateRowLineageForNewManifestEntries assigns ``first_row_id`` to every
+ * newly-added DataFile in the builder's manifest-entry hashes, and records
+ * the total number of rows allocated in builder->allocatedRows.
+ *
+ * No-ops on v2 (the v2 manifest schema has no row-lineage fields, so even a
+ * has_first_row_id=true struct would fail at Avro write time).
+ *
+ * Iteration order:
+ *
+ *   The data and positional-delete hash tables are keyed by partition spec
+ *   id, but the order between partition spec ids is unspecified. *Within* a
+ *   given spec id, manifestEntries is the list built up as rows were added
+ *   during the current transaction, which preserves insertion order. We
+ *   walk both hashes in HASH_SEQ order and inside each bucket walk the list
+ *   front-to-back; the result is deterministic for a single backend's
+ *   transaction (the only ordering guarantee the spec demands).
+ *
+ *   Delete entries are also assigned row-ids because deletion-vector
+ *   pointers (Stage 20+) will key off the same allocator output; assigning
+ *   the id eagerly here means the data-file's row-id is durable on the
+ *   manifest entry before the DV blob path picks it up.
+ *
+ * Inherited (EXISTING) entries keep whatever first_row_id they were read
+ * with -- the spec is explicit that row-ids persist across snapshots, and
+ * mutating one would change a logical row's identity.
+ */
+static void
+AllocateRowLineageForNewManifestEntries(IcebergSnapshotBuilder * builder)
+{
+	if (!IcebergFormatVersionSupportsRowLineage(builder->formatVersion))
+		return;
+
+	int64_t		cursor = builder->nextRowIdAtStart;
+	int64_t		startCursor = cursor;
+
+	HTAB	   *hashes[2] = {
+		builder->dataEntries,
+		builder->positionalDeleteEntries,
+	};
+
+	for (int hashIndex = 0; hashIndex < 2; hashIndex++)
+	{
+		HTAB	   *htab = hashes[hashIndex];
+
+		if (htab == NULL || hash_get_num_entries(htab) == 0)
+			continue;
+
+		HASH_SEQ_STATUS status;
+
+		hash_seq_init(&status, htab);
+
+		PartitionSpecManifestsEntries *partitionEntries = NULL;
+
+		while ((partitionEntries = hash_seq_search(&status)) != NULL)
+		{
+			ListCell   *entryCell = NULL;
+
+			foreach(entryCell, partitionEntries->manifestEntries)
+			{
+				IcebergManifestEntry *entry = lfirst(entryCell);
+
+				/*
+				 * Only newly-added files get a fresh row-id range; EXISTING
+				 * entries inherited from a prior snapshot keep their
+				 * already-recorded first_row_id, and DELETED markers point
+				 * back at the original data file's id, which is already set.
+				 */
+				if (entry->status != ICEBERG_MANIFEST_ENTRY_STATUS_ADDED)
+					continue;
+
+				entry->data_file.first_row_id = cursor;
+				entry->data_file.has_first_row_id = true;
+
+				cursor += entry->data_file.record_count;
+			}
+		}
+	}
+
+	builder->allocatedRows = cursor - startCursor;
 }
 
 

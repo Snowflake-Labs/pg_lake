@@ -149,10 +149,21 @@ EnsureIcebergFormatVersionForRead(IcebergFormatVersion v)
 void
 EnsureIcebergFormatVersionForWrite(IcebergFormatVersion v)
 {
-	if (v == ICEBERG_FORMAT_VERSION_V3)
-		ereport(ERROR,
-				(errmsg("writing Iceberg format-version 3 tables is not yet supported"),
-				 errhint("Use format-version 2 (the current default) until v3 write paths land.")));
+	/*
+	 * Stage 12 of the v3 rollout: the basic v3 append path is wired
+	 * end-to-end (row-lineage allocator at commit, Avro schema dispatch in
+	 * the writer chain), so creating a v3 table and inserting into it no
+	 * longer crashes here. Feature-level rejections that still apply
+	 * (UPDATE/DELETE on v3 -- Stage 16; encryption -- always; etc.) live at
+	 * their own choke points where the user-visible error message can include
+	 * the operation-specific hint.
+	 *
+	 * Both versions in the enum are now writable; the function stays for two
+	 * reasons: (a) it documents the writer-side contract, mirroring
+	 * EnsureIcebergFormatVersionForRead, and (b) when v4 lands we add the
+	 * "writable bound" check here without touching every caller.
+	 */
+	(void) v;
 }
 
 

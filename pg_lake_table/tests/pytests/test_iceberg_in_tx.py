@@ -4,6 +4,20 @@ from helpers.spark import *
 
 from test_writable_iceberg_common import *
 
+# Stage 9 of the v3 rollout introduced the ``iceberg_format_version`` fixture
+# (test_common/helpers/iceberg.py) to drive a session-level GUC that selects
+# which Iceberg format-version CREATE TABLE produces. This module is one of
+# the "complex transaction scenario" suites the v3 series wants exercised
+# under both v2 and v3, so every test in this file now runs twice -- once
+# with the writer pinned to v2 and once with it pinned to v3. None of these
+# tests use UPDATE/DELETE/MERGE (Stage 16 hard-errors v3 UPDATE/DELETE until
+# deletion vectors land), so v3 is a strictly additive coverage win.
+#
+# The fixture is also imported into each test signature so the GUC is set
+# before any CREATE TABLE runs; the fixture's per-test SET/RESET keeps
+# v2 lanes free of v3 leakage even if a v3 lane errored out mid-test.
+pytestmark = pytest.mark.parametrize("iceberg_format_version", [2, 3], indirect=True)
+
 
 def test_in_tx_with_partition_by(
     installcheck,
@@ -14,6 +28,7 @@ def test_in_tx_with_partition_by(
     extension,
     with_default_location,
     create_test_helper_functions,
+    iceberg_format_version,
 ):
     TABLE_NAMESPACE = "test_multiple_ddl_dml_in_tx"
     TABLE_NAME = "test_in_tx_with_partition_by"
@@ -88,6 +103,7 @@ def test_in_tx_with_insert_only(
     extension,
     with_default_location,
     create_test_helper_functions,
+    iceberg_format_version,
 ):
     TABLE_NAMESPACE = "test_multiple_ddl_dml_in_tx"
     TABLE_NAME = "test_in_tx_with_insert_only"
@@ -179,6 +195,7 @@ def test_in_tx_with_ddls(
     extension,
     with_default_location,
     create_test_helper_functions,
+    iceberg_format_version,
 ):
     TABLE_NAMESPACE = "test_multiple_ddl_dml_in_tx"
     TABLE_NAME = "test_in_tx_with_ddls"
@@ -333,6 +350,7 @@ def test_in_tx_with_create_drop_success(
     extension,
     with_default_location,
     create_test_helper_functions,
+    iceberg_format_version,
 ):
     TABLE_NAMESPACE = "test_multiple_ddl_dml_in_tx"
     TABLE_NAME = "test_in_tx_with_create_drop_success"
@@ -394,6 +412,7 @@ def test_in_tx_with_create_drop_fail(
     extension,
     with_default_location,
     create_test_helper_functions,
+    iceberg_format_version,
 ):
     TABLE_NAMESPACE = "test_multiple_ddl_dml_in_tx"
     TABLE_NAME = "test_in_tx_with_create_drop_fail"
@@ -451,6 +470,7 @@ def test_in_tx_with_drop_success(
     extension,
     with_default_location,
     create_test_helper_functions,
+    iceberg_format_version,
 ):
     TABLE_NAMESPACE = "test_multiple_ddl_dml_in_tx"
     TABLE_NAME = "test_in_tx_with_drop_success"
@@ -523,6 +543,7 @@ def test_in_tx_with_drop_fail(
     extension,
     with_default_location,
     create_test_helper_functions,
+    iceberg_format_version,
 ):
     TABLE_NAMESPACE = "test_multiple_ddl_dml_in_tx"
     TABLE_NAME = "test_in_tx_with_drop_fail"
@@ -596,6 +617,7 @@ def test_in_subtx_fail_with_drop(
     extension,
     with_default_location,
     create_test_helper_functions,
+    iceberg_format_version,
 ):
     TABLE_NAMESPACE = "test_multiple_ddl_dml_in_tx"
     TABLE_NAME = "test_in_subtx_fail_with_drop"
@@ -676,6 +698,7 @@ def test_in_subtx_success_with_drop(
     extension,
     with_default_location,
     create_test_helper_functions,
+    iceberg_format_version,
 ):
     TABLE_NAMESPACE = "test_multiple_ddl_dml_in_tx"
     TABLE_NAME = "test_in_subtx_success_with_drop"
@@ -756,7 +779,15 @@ def test_in_tx_with_truncate(
     extension,
     with_default_location,
     create_test_helper_functions,
+    iceberg_format_version,
 ):
+    if iceberg_format_version == 3:
+        pytest.skip(
+            "uses UPDATE in test setup; Stage 16 of the v3 rollout hard-errors "
+            "v3 UPDATE/DELETE until deletion vectors land. Re-enable once v3 "
+            "writes support row-level updates."
+        )
+
     TABLE_NAMESPACE = "test_multiple_ddl_dml_in_tx"
     TABLE_NAME = "test_in_tx_with_truncate"
 
@@ -826,7 +857,14 @@ def test_in_subtx_fail_with_truncate(
     extension,
     with_default_location,
     create_test_helper_functions,
+    iceberg_format_version,
 ):
+    if iceberg_format_version == 3:
+        pytest.skip(
+            "uses UPDATE inside the savepoint; Stage 16 of the v3 rollout "
+            "hard-errors v3 UPDATE/DELETE until deletion vectors land."
+        )
+
     TABLE_NAMESPACE = "test_multiple_ddl_dml_in_tx"
     TABLE_NAME = "test_in_subtx_fail_with_truncate"
 
@@ -899,7 +937,14 @@ def test_in_subtx_success_with_truncate(
     extension,
     with_default_location,
     create_test_helper_functions,
+    iceberg_format_version,
 ):
+    if iceberg_format_version == 3:
+        pytest.skip(
+            "uses UPDATE inside the committed savepoint; Stage 16 of the v3 "
+            "rollout hard-errors v3 UPDATE/DELETE until deletion vectors land."
+        )
+
     TABLE_NAMESPACE = "test_multiple_ddl_dml_in_tx"
     TABLE_NAME = "test_in_subtx_success_with_truncate"
 
@@ -973,6 +1018,7 @@ def test_deleted_manifest_entry_pruning(
     with_default_location,
     create_test_helper_functions,
     create_iceberg_table,
+    iceberg_format_version,
 ):
     if installcheck:
         return
@@ -1105,6 +1151,7 @@ def test_in_tx_with_multiple_partition_by(
     extension,
     with_default_location,
     create_test_helper_functions,
+    iceberg_format_version,
 ):
     TABLE_NAMESPACE = "test_multiple_ddl_dml_in_tx"
     TABLE_NAME = "test_in_tx_with_multiple_partition_by"
@@ -1193,7 +1240,16 @@ def test_in_tx_transient_files(
     extension,
     with_default_location,
     create_test_helper_functions,
+    iceberg_format_version,
 ):
+    if iceberg_format_version == 3:
+        pytest.skip(
+            "uses UPDATE to generate the transient-file mix; Stage 16 of the "
+            "v3 rollout hard-errors v3 UPDATE/DELETE until deletion vectors "
+            "land. Transient-file accounting under v3-friendly DML "
+            "(INSERT/TRUNCATE only) is covered elsewhere."
+        )
+
     TABLE_NAMESPACE = "test_multiple_ddl_dml_in_tx"
     TABLE_NAME = "test_in_tx_transient_files"
 
