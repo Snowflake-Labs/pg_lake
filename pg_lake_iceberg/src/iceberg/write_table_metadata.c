@@ -895,8 +895,23 @@ AppendIcebergPartitionSpecFields(StringInfo command, IcebergPartitionSpecField *
 		/* Append source_id */
 		appendJsonInt32(command, "source-id", fields[i].source_id);
 
-		/* Append source_ids */
-		if (fields[i].source_ids_length > 0)
+		/*
+		 * Append source-ids (plural).
+		 *
+		 * source-ids was introduced in Iceberg v3 to carry multi-argument
+		 * partition transforms (e.g. a future bucket(N, x, y)). v2
+		 * metadata.json never carries it; the upstream pg_lake commit that
+		 * introduced the field populated source_ids_length=1 for every v2
+		 * spec field "to comply with the reference implementation", but that
+		 * reading of the spec was too liberal -- the reference v2 writers
+		 * don't emit source-ids at all.
+		 *
+		 * Stage 18 of the v3 rollout tightens the writer to gate the emission
+		 * on the format-version we're serialising for, keeping v2 outputs
+		 * byte-identical to Spark / PyIceberg.
+		 */
+		if (IcebergFormatVersionSupportsMultiArgTransforms(formatVersion) &&
+			fields[i].source_ids_length > 0)
 		{
 			appendStringInfoString(command, ", ");
 			appendStringInfoString(command, "\"source-ids\":");

@@ -258,8 +258,30 @@ EnsureIcebergPartitionMetadataInSync(Oid relationId, int currentSpecId, int larg
 									   field->source_id, fieldFromCatalog->source_id)));
 			}
 
-			/* error if sourceIds are not equal */
-			if (field->source_ids_length != fieldFromCatalog->source_ids_length)
+			/*
+			 * Compare ``source-ids`` (plural) between metadata.json and the
+			 * local catalog.
+			 *
+			 * Stage 18 of the v3 rollout adds a writer-side gate in
+			 * write_table_metadata.c::AppendIcebergPartitionSpecFields that
+			 * *drops* this field on v2 emission (it is a v3-only spec
+			 * addition for multi-argument partition transforms). The
+			 * in-memory partition spec builder still populates ``source_ids``
+			 * uniformly across versions -- the writer is the sole gate -- so
+			 * the local ``lake_table.partition_fields`` catalog row keeps its
+			 * single-source entry on v2 too. The round-trip therefore looks
+			 * like ``metadata.json source_ids_length == 0`` vs
+			 * ``fieldFromCatalog->source_ids_length == 1`` on a v2 table.
+			 *
+			 * The semantic this assertion needs is "if metadata.json carries
+			 * source-ids, the catalog must match"; we don't constrain the
+			 * catalog when metadata.json was gate-dropped. Same shape as the
+			 * column-defaults assertion above (cf.
+			 * AssertInternalAndExternalTableSchemaMatch) -- the on-disk
+			 * metadata is treated as a subset of the internal catalog state.
+			 */
+			if (field->source_ids_length > 0 &&
+				field->source_ids_length != fieldFromCatalog->source_ids_length)
 			{
 				ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
 								errmsg("Iceberg partition field source ids length in metadata.json and "

@@ -49,8 +49,7 @@
           "name": "x",
           "transform": "identity",
           "source-id": 1,
-          "field-id": 1000,
-          "source-ids": [1, 2, 3]
+          "field-id": 1000
         }
       ]
     }

@@ -3,7 +3,6 @@ from collections import namedtuple
 from utils_pytest import *
 from pyiceberg.table import StaticTable
 
-
 SpecTransform = namedtuple(
     "SpecTransform",
     [
@@ -549,7 +548,12 @@ def test_create_iceberg_table_partition_by(
             assert field["field-id"] == expected_spec[i].partition_field_id
             assert field["source-id"] == expected_spec[i].source_id
             assert field["transform"] == expected_spec[i].transform_name
-            assert field["source-ids"] == expected_spec[i].source_ids
+            # `source-ids` (plural) is a v3-only addition to the partition
+            # spec field schema (Iceberg v3 §partitioning). pg_lake's writer
+            # gates the emission on the active format version (Stage 18 of
+            # the v3 rollout), so a v2 metadata.json must not carry it; the
+            # v3 emission contract is pinned in test_v3_multi_arg_partition.
+            assert "source-ids" not in field, field
 
         run_command("DROP TABLE test_create_iceberg_table_partition_by", pg_conn)
         pg_conn.commit()
@@ -621,7 +625,9 @@ def test_alter_iceberg_table_partition_by(
             assert field["field-id"] == current_expected_last_partition_field_id
             assert field["source-id"] == expected_spec[i].source_id
             assert field["transform"] == expected_spec[i].transform_name
-            assert field["source-ids"] == expected_spec[i].source_ids
+            # See note in test_create_iceberg_table_partition_by: source-ids
+            # is a v3-only field.
+            assert "source-ids" not in field, field
 
             current_expected_last_partition_field_id += 1
 
