@@ -31,17 +31,46 @@
 #include "utils/jsonb.h"
 #include "utils/builtins.h"
 
+/*
+ * Per-call writer context.
+ *
+ * Threaded explicitly through every internal Append* helper that has to
+ * branch on a format-version-gated feature. Each version-aware field is
+ * its own bool so the two known entry points -- the local metadata.json
+ * writer and the REST add-schema request builder -- can disagree where
+ * they need to without sharing file-scope state.
+ *
+ * The single asymmetry: ``allowColumnDefaults`` is *not* derived from
+ * ``formatVersion`` for the REST add-schema path. The REST catalog (e.g.
+ * Polaris) is its own Iceberg implementation: it owns its on-disk
+ * metadata.json and is responsible for its own format-version compliance.
+ * pg_lake therefore always sends the full schema (defaults and all) over
+ * the REST wire and lets the catalog decide what to persist. Stripping
+ * defaults on the REST wire makes consecutive ALTERs look idempotent to
+ * the catalog -- the new metadata.json revision is collapsed away and
+ * pg_lake's local ``metadata_location`` cache never advances, so the next
+ * ALTER tries to enqueue the same already-deleted path in
+ * ``deletion_queue`` a second time and trips the PK. See
+ * test_set_default_on_one_column_drop_default_on_another for the
+ * regression that drove this gate apart from the metadata.json gate.
+ */
+typedef struct IcebergMetadataWriteContext
+{
+	IcebergFormatVersion formatVersion;
+	bool		allowColumnDefaults;
+}			IcebergMetadataWriteContext;
+
 static void AppendProperties(StringInfo command, Property * properties, size_t properties_length);
-static void AppendField(StringInfo command, Field * field);
-static void AppendIcebergStructFields(StringInfo command, FieldStructElement * fields, size_t fields_length);
-static void AppendIcebergTableSchemas(StringInfo command, IcebergTableSchema * schemas, size_t schemas_length);
-static void AppendIcebergPartitionSpecs(StringInfo command, IcebergPartitionSpec * specs, size_t specs_length);
+static void AppendField(StringInfo command, Field * field, const IcebergMetadataWriteContext * ctx);
+static void AppendIcebergStructFields(StringInfo command, FieldStructElement * fields, size_t fields_length, const IcebergMetadataWriteContext * ctx);
+static void AppendIcebergTableSchemas(StringInfo command, IcebergTableSchema * schemas, size_t schemas_length, const IcebergMetadataWriteContext * ctx);
+static void AppendIcebergPartitionSpecs(StringInfo command, IcebergPartitionSpec * specs, size_t specs_length, const IcebergMetadataWriteContext * ctx);
 static void AppendIcebergSnapshots(StringInfo command, IcebergSnapshot * snapshots, size_t snapshots_length);
 static void AppendIcebergSnapshotLogEntries(StringInfo command, IcebergSnapshotLogEntry * entries, size_t entries_length);
 static void AppendcebergPartitionStatistics(StringInfo command, IcebergPartitionStatistics * entries, size_t entries_length);
 static void AppendIcebergMetadataLogEntries(StringInfo command, IcebergMetadataLogEntry * entries, size_t entries_length);
-static void AppendIcebergSortOrderFields(StringInfo command, IcebergSortOrderField * fields, size_t fields_length);
-static void AppendIcebergSortOrders(StringInfo command, IcebergSortOrder * orders, size_t orders_length);
+static void AppendIcebergSortOrderFields(StringInfo command, IcebergSortOrderField * fields, size_t fields_length, const IcebergMetadataWriteContext * ctx);
+static void AppendIcebergSortOrders(StringInfo command, IcebergSortOrder * orders, size_t orders_length, const IcebergMetadataWriteContext * ctx);
 static void AppendSnapshotReferences(StringInfo command, SnapshotReference * refs, size_t refs_length);
 static void AppendIcebergStatistics(StringInfo command, IcebergStatistics * statistics, size_t statistics_length);
 static void AppendBlobMetadata(StringInfo command, BlobMetadata * metadata, size_t metadata_length);
@@ -56,6 +85,28 @@ char *
 WriteIcebergTableMetadataToJson(IcebergTableMetadata * metadata)
 {
 	StringInfo	command = makeStringInfo();
+
+	/*
+	 * Per-call context for the metadata.json write path. ``allowColumn-
+	 * Defaults`` is derived from the active format version: v3 emits column
+	 * defaults, v2 must not (a v2 spec violation that some external readers
+	 * reject). The companion writer-side gate at the ADD COLUMN site
+	 * (register_field_ids.c::CreatePostgresColumnMappingsForColumnDefs)
+	 * prevents users from *adding* a v2 column with a default in the first
+	 * place; this gate is the belt-and-braces for legacy v2 tables that still
+	 * have a writeDefault sitting in pg_lake's local catalog.
+	 *
+	 * For the REST add-schema path see AppendIcebergTableSchemaForRest-
+	 * Catalog below, which builds its own context with ``allowColumn-
+	 * Defaults = true`` regardless of the active version (the REST catalog
+	 * owns its own format-version compliance and stripping on the wire causes
+	 * a Polaris idempotency collapse -- see the typedef comment).
+	 */
+	IcebergMetadataWriteContext ctx = {
+		.formatVersion = metadata->format_version,
+		.allowColumnDefaults =
+		IcebergFormatVersionSupportsColumnDefaults(metadata->format_version),
+	};
 
 	appendStringInfoString(command, "{");
 
@@ -89,7 +140,7 @@ WriteIcebergTableMetadataToJson(IcebergTableMetadata * metadata)
 
 	/* Append schemas */
 	appendStringInfoString(command, "\"schemas\":");
-	AppendIcebergTableSchemas(command, metadata->schemas, metadata->schemas_length);
+	AppendIcebergTableSchemas(command, metadata->schemas, metadata->schemas_length, &ctx);
 	appendStringInfoString(command, ", ");
 
 	/* Append default_spec_id */
@@ -98,7 +149,7 @@ WriteIcebergTableMetadataToJson(IcebergTableMetadata * metadata)
 
 	/* Append partition_specs */
 	appendStringInfoString(command, "\"partition-specs\":");
-	AppendIcebergPartitionSpecs(command, metadata->partition_specs, metadata->partition_specs_length);
+	AppendIcebergPartitionSpecs(command, metadata->partition_specs, metadata->partition_specs_length, &ctx);
 	appendStringInfoString(command, ", ");
 
 	/* Append last_partition_id */
@@ -178,7 +229,7 @@ WriteIcebergTableMetadataToJson(IcebergTableMetadata * metadata)
 
 	/* Append sort_orders */
 	appendStringInfo(command, "\"sort-orders\":");
-	AppendIcebergSortOrders(command, metadata->sort_orders, metadata->sort_orders_length);
+	AppendIcebergSortOrders(command, metadata->sort_orders, metadata->sort_orders_length, &ctx);
 	appendStringInfoString(command, ", ");
 
 	/* Append default_sort_order_id */
@@ -254,7 +305,7 @@ AppendIntArray(StringInfo command, int *array, size_t array_length)
 }
 
 static void
-AppendIcebergTableSchemas(StringInfo command, IcebergTableSchema * schemas, size_t schemas_length)
+AppendIcebergTableSchemas(StringInfo command, IcebergTableSchema * schemas, size_t schemas_length, const IcebergMetadataWriteContext * ctx)
 {
 	appendStringInfoString(command, "[");
 
@@ -281,7 +332,7 @@ AppendIcebergTableSchemas(StringInfo command, IcebergTableSchema * schemas, size
 		appendStringInfoString(command, ", ");
 
 		appendStringInfoString(command, "\"fields\":");
-		AppendIcebergStructFields(command, schemas[i].fields, schemas[i].fields_length);
+		AppendIcebergStructFields(command, schemas[i].fields, schemas[i].fields_length, ctx);
 
 		appendStringInfoString(command, "}");
 
@@ -300,8 +351,28 @@ AppendIcebergTableSchemas(StringInfo command, IcebergTableSchema * schemas, size
 * API calls.
 */
 void
-AppendIcebergTableSchemaForRestCatalog(StringInfo command, IcebergTableSchema * schemas, size_t schemas_length)
+AppendIcebergTableSchemaForRestCatalog(StringInfo command, IcebergTableSchema * schemas, size_t schemas_length, IcebergFormatVersion formatVersion)
 {
+	/*
+	 * REST catalog (e.g. Polaris) is its own Iceberg implementation and is
+	 * responsible for its own format-version compliance, so we send the full
+	 * schema -- column defaults and all -- regardless of the active version.
+	 * See the typedef comment on IcebergMetadataWriteContext and the public
+	 * doc on AppendIcebergTableSchemaForRestCatalog in metadata_spec.h for
+	 * the wire-level rationale, and the test_set_default_on_one_column_drop_
+	 * default_on_another regression that this independence guards.
+	 *
+	 * The version still flows through ctx for the partition/sort-order
+	 * ``source-ids`` plural gate, but those keys are not reachable from this
+	 * helper -- it only writes schema fields. The version is harmless extra
+	 * baggage here; threading it keeps every entry-point's ctx construction
+	 * identical and resilient to a future v3-only schema-field gate.
+	 */
+	IcebergMetadataWriteContext ctx = {
+		.formatVersion = formatVersion,
+		.allowColumnDefaults = true,
+	};
+
 	appendStringInfoString(command, "\"schema\":");
 
 	for (size_t i = 0; i < schemas_length; i++)
@@ -323,7 +394,7 @@ AppendIcebergTableSchemaForRestCatalog(StringInfo command, IcebergTableSchema * 
 		appendStringInfoString(command, ", ");
 
 		appendStringInfoString(command, "\"fields\":");
-		AppendIcebergStructFields(command, schemas[i].fields, schemas[i].fields_length);
+		AppendIcebergStructFields(command, schemas[i].fields, schemas[i].fields_length, &ctx);
 
 		appendStringInfoString(command, "}");
 
@@ -336,7 +407,7 @@ AppendIcebergTableSchemaForRestCatalog(StringInfo command, IcebergTableSchema * 
 
 
 static void
-AppendIcebergPartitionSpecs(StringInfo command, IcebergPartitionSpec * specs, size_t specs_length)
+AppendIcebergPartitionSpecs(StringInfo command, IcebergPartitionSpec * specs, size_t specs_length, const IcebergMetadataWriteContext * ctx)
 {
 	appendStringInfoString(command, "[");
 
@@ -350,7 +421,7 @@ AppendIcebergPartitionSpecs(StringInfo command, IcebergPartitionSpec * specs, si
 
 		/* Append fields */
 		appendStringInfoString(command, "\"fields\":");
-		AppendIcebergPartitionSpecFields(command, specs[i].fields, specs[i].fields_length);
+		AppendIcebergPartitionSpecFields(command, specs[i].fields, specs[i].fields_length, ctx->formatVersion);
 
 		appendStringInfoString(command, "}");
 
@@ -519,7 +590,7 @@ AppendIcebergMetadataLogEntries(StringInfo command, IcebergMetadataLogEntry * en
 }
 
 static void
-AppendIcebergSortOrders(StringInfo command, IcebergSortOrder * orders, size_t orders_length)
+AppendIcebergSortOrders(StringInfo command, IcebergSortOrder * orders, size_t orders_length, const IcebergMetadataWriteContext * ctx)
 {
 	appendStringInfoString(command, "[");
 
@@ -533,7 +604,7 @@ AppendIcebergSortOrders(StringInfo command, IcebergSortOrder * orders, size_t or
 
 		/* Append fields */
 		appendStringInfoString(command, "\"fields\":");
-		AppendIcebergSortOrderFields(command, orders[i].fields, orders[i].fields_length);
+		AppendIcebergSortOrderFields(command, orders[i].fields, orders[i].fields_length, ctx);
 
 		appendStringInfoString(command, "}");
 
@@ -664,7 +735,7 @@ AppendIcebergStatistics(StringInfo command, IcebergStatistics * statistics, size
 
 
 static void
-AppendField(StringInfo command, Field * field)
+AppendField(StringInfo command, Field * field, const IcebergMetadataWriteContext * ctx)
 {
 	switch (field->type)
 	{
@@ -678,7 +749,7 @@ AppendField(StringInfo command, Field * field)
 			appendStringInfo(command, "\"element-id\":%d", field->field.list.elementId);
 			appendStringInfoString(command, ", ");
 			appendJsonKey(command, "element");
-			AppendField(command, field->field.list.element);
+			AppendField(command, field->field.list.element, ctx);
 			appendStringInfoString(command, ", ");
 			appendJsonBool(command, "element-required", field->field.list.elementRequired);
 			appendStringInfoString(command, "}");
@@ -690,12 +761,12 @@ AppendField(StringInfo command, Field * field)
 			appendStringInfo(command, "\"key-id\":%d", field->field.map.keyId);
 			appendStringInfoString(command, ", ");
 			appendJsonKey(command, "key");
-			AppendField(command, field->field.map.key);
+			AppendField(command, field->field.map.key, ctx);
 			appendStringInfoString(command, ", ");
 			appendStringInfo(command, "\"value-id\":%d", field->field.map.valueId);
 			appendStringInfoString(command, ", ");
 			appendJsonKey(command, "value");
-			AppendField(command, field->field.map.value);
+			AppendField(command, field->field.map.value, ctx);
 			appendStringInfoString(command, ", ");
 			appendJsonBool(command, "value-required", field->field.map.valueRequired);
 			appendStringInfoString(command, "}");
@@ -705,7 +776,7 @@ AppendField(StringInfo command, Field * field)
 			appendJsonString(command, "type", "struct");
 			appendStringInfoString(command, ", ");
 			appendStringInfoString(command, "\"fields\":");
-			AppendIcebergStructFields(command, field->field.structType.fields, field->field.structType.nfields);
+			AppendIcebergStructFields(command, field->field.structType.fields, field->field.structType.nfields, ctx);
 			appendStringInfoString(command, "}");
 			break;
 
@@ -715,7 +786,7 @@ AppendField(StringInfo command, Field * field)
 }
 
 static void
-AppendIcebergStructFields(StringInfo command, FieldStructElement * fields, size_t fields_length)
+AppendIcebergStructFields(StringInfo command, FieldStructElement * fields, size_t fields_length, const IcebergMetadataWriteContext * ctx)
 {
 	appendStringInfoString(command, "[");
 
@@ -746,14 +817,14 @@ AppendIcebergStructFields(StringInfo command, FieldStructElement * fields, size_
 		else if (field->type->type == FIELD_TYPE_SCALAR)
 		{
 			appendJsonKey(command, "type");
-			AppendField(command, field->type);
+			AppendField(command, field->type, ctx);
 		}
 		else if (field->type->type == FIELD_TYPE_MAP ||
 				 field->type->type == FIELD_TYPE_LIST ||
 				 field->type->type == FIELD_TYPE_STRUCT)
 		{
 			appendJsonKey(command, "type");
-			AppendField(command, field->type);
+			AppendField(command, field->type, ctx);
 		}
 		else
 		{
@@ -771,18 +842,38 @@ AppendIcebergStructFields(StringInfo command, FieldStructElement * fields, size_
 			appendStringInfoString(command, ", ");
 			appendJsonString(command, "doc", field->doc);
 		}
-		/* Append already escaped initial_default */
-		if (fields[i].initialDefault != NULL)
-		{
-			appendStringInfoString(command, ", ");
-			appendJsonStringWithEscapedValue(command, "initial-default", fields[i].initialDefault);
-		}
 
-		/* Append already escaped write_default */
-		if (fields[i].writeDefault != NULL)
+		/*
+		 * Append already escaped initial_default / write_default.
+		 *
+		 * Column defaults are a v3-only spec feature. The per-context
+		 * ``allowColumnDefaults`` flag gates emission: the metadata.json
+		 * write path sets it from the active format version (strip on v2),
+		 * the REST add-schema path leaves it ``true`` (the catalog is its own
+		 * Iceberg implementation -- see typedef comment / Polaris-
+		 * idempotency rationale on test_set_default_on_one_column_drop_
+		 * default_on_another).
+		 *
+		 * The companion gate at the ADD COLUMN site
+		 * (register_field_ids.c::CreatePostgresColumnMappingsForColumnDefs)
+		 * prevents users from *adding* a v2 column with a default in the
+		 * first place, so the v2 metadata.json strip should only be exercised
+		 * for legacy fields carried in pg_lake's local catalog from before
+		 * that gate landed.
+		 */
+		if (ctx->allowColumnDefaults)
 		{
-			appendStringInfoString(command, ", ");
-			appendJsonStringWithEscapedValue(command, "write-default", fields[i].writeDefault);
+			if (fields[i].initialDefault != NULL)
+			{
+				appendStringInfoString(command, ", ");
+				appendJsonStringWithEscapedValue(command, "initial-default", fields[i].initialDefault);
+			}
+
+			if (fields[i].writeDefault != NULL)
+			{
+				appendStringInfoString(command, ", ");
+				appendJsonStringWithEscapedValue(command, "write-default", fields[i].writeDefault);
+			}
 		}
 		appendStringInfoString(command, "}");
 		addComma = true;
@@ -793,7 +884,7 @@ AppendIcebergStructFields(StringInfo command, FieldStructElement * fields, size_
 
 
 void
-AppendIcebergPartitionSpecFields(StringInfo command, IcebergPartitionSpecField * fields, size_t fields_length)
+AppendIcebergPartitionSpecFields(StringInfo command, IcebergPartitionSpecField * fields, size_t fields_length, IcebergFormatVersion formatVersion)
 {
 	appendStringInfoString(command, "[");
 
@@ -836,7 +927,7 @@ AppendIcebergPartitionSpecFields(StringInfo command, IcebergPartitionSpecField *
 }
 
 static void
-AppendIcebergSortOrderFields(StringInfo command, IcebergSortOrderField * fields, size_t fields_length)
+AppendIcebergSortOrderFields(StringInfo command, IcebergSortOrderField * fields, size_t fields_length, const IcebergMetadataWriteContext * ctx)
 {
 	appendStringInfoString(command, "[");
 

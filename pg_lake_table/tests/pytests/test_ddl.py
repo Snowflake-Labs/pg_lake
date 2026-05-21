@@ -205,9 +205,20 @@ def test_alter_table_ddl(
 
     format_str = ""
     writable_str = ""
+    format_version_str = ""
     if pglake_fdw_name == "pg_lake":
         format_str = ", format 'parquet'"
         writable_str = ", writable 'true'"
+    elif pglake_fdw_name == "pg_lake_iceberg":
+        # Stage 15 of the v3 rollout makes ``ALTER TABLE ... ADD COLUMN
+        # ... DEFAULT`` a v3-only feature (column defaults graduated into
+        # the spec at format-version 3). The alter_stmts fixture below
+        # exercises that ALTER on the iceberg flavour of this fdw and
+        # expects it to succeed; pin the table at v3 so the success path
+        # actually fires under CI's default v2 matrix. The unrelated
+        # ALTERs in the same fixture (RENAME COLUMN, DROP COLUMN, ...)
+        # are spec-version-agnostic and behave identically on v2 and v3.
+        format_version_str = ", format_version '3'"
 
     # create the same table as an fdw and heap table
     run_command(
@@ -226,7 +237,8 @@ def test_alter_table_ddl(
                 e int
         ) SERVER {pglake_fdw_name} OPTIONS (location '{url}_1'
                                              {format_str}
-                                             {writable_str});
+                                             {writable_str}
+                                             {format_version_str});
 
         CREATE FOREIGN TABLE test_ddl.fdw_for_rename (
                 a int not null,
@@ -235,7 +247,8 @@ def test_alter_table_ddl(
                 d text generated always as ('abc') stored
         ) SERVER {pglake_fdw_name} OPTIONS (location '{url}_2'
                                              {format_str}
-                                             {writable_str});
+                                             {writable_str}
+                                             {format_version_str});
 
         CREATE FOREIGN TABLE test_ddl.fdw_for_set_schema (
                 a int not null,
@@ -244,7 +257,8 @@ def test_alter_table_ddl(
                 d text generated always as ('abc') stored
         ) SERVER {pglake_fdw_name} OPTIONS (location '{url}_3'
                                              {format_str}
-                                             {writable_str});
+                                             {writable_str}
+                                             {format_version_str});
 
         CREATE TABLE test_ddl.heap (LIKE test_ddl.fdw);
     """,

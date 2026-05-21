@@ -333,5 +333,24 @@ typedef struct IcebergTableMetadata
 
 extern PGDLLEXPORT IcebergTableMetadata * ReadIcebergTableMetadata(const char *tableMetadataPath);
 extern PGDLLEXPORT char *WriteIcebergTableMetadataToJson(IcebergTableMetadata * metadata);
-extern PGDLLEXPORT void AppendIcebergTableSchemaForRestCatalog(StringInfo command, IcebergTableSchema * schemas, size_t schemas_length);
-extern PGDLLEXPORT void AppendIcebergPartitionSpecFields(StringInfo command, IcebergPartitionSpecField * fields, size_t fields_length);
+
+/*
+ * AppendIcebergTableSchemaForRestCatalog and AppendIcebergPartitionSpecFields
+ * take an explicit IcebergFormatVersion so callers thread the active version
+ * through every site that can encode v3-only on-disk shapes (column defaults,
+ * multi-argument partition / sort-order transforms). No file-scope statics
+ * carry version state in the writer -- per-call context is the only source
+ * of truth.
+ *
+ * REST add-schema bodies always serialise column defaults regardless of the
+ * version passed here: the REST catalog (e.g. Polaris) is its own Iceberg
+ * implementation and is responsible for its own format-version compliance.
+ * Stripping defaults on the REST wire would make consecutive ALTERs look
+ * idempotent to the catalog and break pg_lake's deletion-queue accounting --
+ * see test_set_default_on_one_column_drop_default_on_another for the
+ * regression that gate prevents. The version still drives the
+ * partition/sort-order ``source-ids`` plural gate, which the catalog and
+ * pg_lake agree on by version.
+ */
+extern PGDLLEXPORT void AppendIcebergTableSchemaForRestCatalog(StringInfo command, IcebergTableSchema * schemas, size_t schemas_length, IcebergFormatVersion formatVersion);
+extern PGDLLEXPORT void AppendIcebergPartitionSpecFields(StringInfo command, IcebergPartitionSpecField * fields, size_t fields_length, IcebergFormatVersion formatVersion);

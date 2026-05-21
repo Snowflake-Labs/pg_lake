@@ -32,6 +32,7 @@
 
 #include "pg_extension_base/base_workers.h"
 #include "pg_lake/http/http_client.h"
+#include "pg_lake/iceberg/api/table_metadata.h"
 #include "pg_lake/iceberg/api/table_schema.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/format_version.h"
@@ -66,7 +67,7 @@ static void CreateNamespaceOnRestCatalog(const char *catalogName, const char *na
 static char *EncodeBasicAuth(const char *clientId, const char *clientSecret);
 static char *JsonbGetStringByPath(const char *jsonb_text, int nkeys,...);
 static List *GetHeadersWithAuth(void);
-static char *AppendIcebergPartitionSpecForRestCatalog(List *partitionSpecs);
+static char *AppendIcebergPartitionSpecForRestCatalog(List *partitionSpecs, IcebergFormatVersion formatVersion);
 static void UpdateAuthorizationHeader(List *headers, const char *token);
 
 /*
@@ -218,6 +219,17 @@ FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSche
 {
 	StringInfo	body = makeStringInfo();
 
+	/*
+	 * Resolve the active Iceberg format-version once for the whole request
+	 * body: every helper below that has to gate a v3-only key (column
+	 * defaults, partition source-ids plural, etc.) is fed it explicitly. The
+	 * relation has its ``format_version`` foreign-table option already
+	 * appended by the time finalize-stage runs (see create_table.c -- Stage
+	 * 14 of the v3 rollout writes the resolved version into the options
+	 * during the CREATE), so this lookup is always well-defined.
+	 */
+	IcebergFormatVersion formatVersion = GetIcebergFormatVersionFromTableOptions(relationId);
+
 	appendStringInfoChar(body, '{');
 
 	appendJsonKey(body, "requirements");
@@ -244,7 +256,7 @@ FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSche
 		RebuildIcebergSchemaFromDataFileSchema(relationId, dataFileSchema, &lastColumnId);
 	int			schemaCount = 1;
 
-	AppendIcebergTableSchemaForRestCatalog(body, newSchema, schemaCount);
+	AppendIcebergTableSchemaForRestCatalog(body, newSchema, schemaCount, formatVersion);
 	appendStringInfoChar(body, '}');	/* close updates element */
 
 	appendStringInfoChar(body, ',');
@@ -294,7 +306,7 @@ FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSche
 		appendJsonString(body, "action", "add-spec");
 		appendStringInfoString(body, ", ");
 
-		appendStringInfoString(body, AppendIcebergPartitionSpecForRestCatalog(list_make1(spec)));
+		appendStringInfoString(body, AppendIcebergPartitionSpecForRestCatalog(list_make1(spec), formatVersion));
 
 		appendStringInfoChar(body, '}');	/* finish add-partition-spec */
 		appendStringInfoString(body, ", ");
@@ -941,9 +953,14 @@ GetRestCatalogName(Oid relationId)
 /*
 * Appends the given IcebergPartitionSpec list as JSON to the given StringInfo, specifically
 * for use in Rest Catalog requests.
+*
+* ``formatVersion`` is the resolved Iceberg format-version for the table being
+* created or altered. It only gates the v3-only ``source-ids`` plural emission
+* in AppendIcebergPartitionSpecFields; the rest of the partition-spec body is
+* version-stable.
 */
 static char *
-AppendIcebergPartitionSpecForRestCatalog(List *partitionSpecs)
+AppendIcebergPartitionSpecForRestCatalog(List *partitionSpecs, IcebergFormatVersion formatVersion)
 {
 	StringInfo	command = makeStringInfo();
 
@@ -961,7 +978,7 @@ AppendIcebergPartitionSpecForRestCatalog(List *partitionSpecs)
 
 		/* Append fields */
 		appendStringInfoString(command, ", \"fields\":");
-		AppendIcebergPartitionSpecFields(command, spec->fields, spec->fields_length);
+		AppendIcebergPartitionSpecFields(command, spec->fields, spec->fields_length, formatVersion);
 
 		appendStringInfoString(command, "}");
 	}
@@ -1022,8 +1039,9 @@ GetAddSchemaCatalogRequest(Oid relationId, DataFileSchema * dataFileSchema)
 		RebuildIcebergSchemaFromDataFileSchema(relationId, dataFileSchema, &lastColumnId);
 
 	int			schemaCount = 1;
+	IcebergFormatVersion formatVersion = GetIcebergFormatVersionFromTableOptions(relationId);
 
-	AppendIcebergTableSchemaForRestCatalog(body, newSchema, schemaCount);
+	AppendIcebergTableSchemaForRestCatalog(body, newSchema, schemaCount, formatVersion);
 
 	/* set-current-schema to the one we just added */
 	appendStringInfoString(body, "}, {\"action\":\"set-current-schema\",\"schema-id\":-1}");
@@ -1071,7 +1089,8 @@ GetAddPartitionCatalogRequest(Oid relationId, List *partitionSpecs)
 	/* add-spec */
 	appendStringInfoString(body, "{\"action\":\"add-spec\",");
 
-	char	   *bodyPart = AppendIcebergPartitionSpecForRestCatalog(partitionSpecs);
+	IcebergFormatVersion formatVersion = GetIcebergFormatVersionFromTableOptions(relationId);
+	char	   *bodyPart = AppendIcebergPartitionSpecForRestCatalog(partitionSpecs, formatVersion);
 
 	appendStringInfoString(body, bodyPart);
 	appendStringInfoChar(body, '}');

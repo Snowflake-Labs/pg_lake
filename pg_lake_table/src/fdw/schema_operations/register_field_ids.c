@@ -40,6 +40,7 @@
 #include "pg_lake/fdw/schema_operations/field_id_mapping_catalog.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/iceberg/api/table_metadata.h"
+#include "pg_lake/iceberg/format_version.h"
 #include "pg_lake/iceberg/api/table_schema.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/iceberg_field.h"
@@ -195,6 +196,35 @@ CreatePostgresColumnMappingsForColumnDefs(Oid relationId, List *columnDefList, b
 
 		if (forAddColumn && field->writeDefault != NULL)
 		{
+			/*
+			 * Stage 15 of the v3 rollout: ``ADD COLUMN ... DEFAULT`` is a
+			 * v3-only Iceberg feature (the ``initial-default`` /
+			 * ``write-default`` schema-field keys land in the spec at
+			 * format-version 3). On v2 we historically emitted these keys
+			 * anyway, which is tolerated by v2 readers but is out-of-spec and
+			 * can confuse strict consumers. We accept the intentional
+			 * regression here -- existing v2 tables can no longer grow a
+			 * defaulted column via ALTER TABLE -- in exchange for a clean,
+			 * spec-compliant metadata.json on both v2 and v3.
+			 *
+			 * The error fires from the ALTER TABLE codepath only
+			 * (forAddColumn is set in ddl_changes.c for DDL_COLUMN_ADD). The
+			 * companion writer-side gate in write_table_metadata.c
+			 * additionally drops any stale write-default still hanging on
+			 * legacy v2 catalog rows so they never leak into a fresh
+			 * metadata.json.
+			 */
+			IcebergFormatVersion formatVersion =
+				GetIcebergFormatVersionFromTableOptions(relationId);
+
+			if (!IcebergFormatVersionSupportsColumnDefaults(formatVersion))
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("ALTER TABLE ADD COLUMN ... DEFAULT requires Iceberg format-version 3"),
+						 errhint("Recreate the table with WITH (format_version = 3), or "
+								 "ADD COLUMN without DEFAULT and follow up with an "
+								 "UPDATE to populate existing rows.")));
+
 			field->initialDefault = field->writeDefault;
 			field->duckSerializedInitialDefault =
 				GetDuckSerializedIcebergFieldInitialDefault(field->initialDefault, field->type);

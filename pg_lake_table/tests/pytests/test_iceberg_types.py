@@ -44,7 +44,7 @@ def test_iceberg_base_types(pg_conn, s3, extension, create_helper_functions):
                     time_col TIME DEFAULT '12:34:56',
                     date_col DATE DEFAULT '2024-01-01',
                     escaping_varchar_col VARCHAR DEFAULT 'test"  \\ "dummy_A!"@#$%^&* <>?`~'
-                ) SERVER pg_lake_iceberg OPTIONS (location '{location}');
+                ) SERVER pg_lake_iceberg OPTIONS (location '{location}', format_version '3');
 
 
     """,
@@ -750,7 +750,7 @@ def test_iceberg_types_composite(pg_conn, create_helper_functions, s3, extension
             "b with escape" test_iceberg_composite_types."t type" DEFAULT ROW(1, NULL),
             c test_iceberg_composite_types.t_type_2,
             d test_iceberg_composite_types.t_type_2[] DEFAULT ARRAY[ROW(1, 2, ROW(3, 4))::test_iceberg_composite_types.t_type_2, NULL]
-        ) SERVER pg_lake_iceberg OPTIONS (location '{location}');
+        ) SERVER pg_lake_iceberg OPTIONS (location '{location}', format_version '3');
     """.format(
             location=location
         ),
@@ -1030,7 +1030,7 @@ def test_iceberg_types_converted_to_string(
                 hstore_col hstore DEFAULT '"a"=>"1", "b"=>"2"',
                 json_col json DEFAULT '{{"a": 1, "b": 2}}',
                 jsonb_col json DEFAULT '{{"hello": [3,4]}}'
-        ) SERVER pg_lake_iceberg OPTIONS (location '{location}');
+        ) SERVER pg_lake_iceberg OPTIONS (location '{location}', format_version '3');
     """.format(
             location=location
         ),
@@ -1176,7 +1176,7 @@ def test_iceberg_map_type(pg_conn, create_helper_functions, s3, extension):
             simple_map map_type.key_int_val_text DEFAULT ARRAY[(2, 'me'), (3, 'myself'), (4, 'i')]::map_type.key_int_val_text,
             "complex map" {complex_map_type_name}
 
-       ) SERVER pg_lake_iceberg OPTIONS (location '{location}');
+       ) SERVER pg_lake_iceberg OPTIONS (location '{location}', format_version '3');
     """.format(
             location=location, complex_map_type_name=complex_map_type_name
         ),
@@ -1636,7 +1636,7 @@ def test_initial_and_write_defaults_composite_keys(
             CREATE TABLE example_table (
                 create_table_col_with_default main_type DEFAULT (ROW(1, ROW(0, 'default_text'), 'default_description')::main_type),
                 create_table_col_without_default main_type
-            ) USING iceberg;
+            ) USING iceberg WITH (format_version = 3);
 
             ALTER TABLE example_table ADD COLUMN add_column_with_default main_type DEFAULT (ROW(2, ROW(1, 'another_default'), 'additional_description')::main_type);
             ALTER TABLE example_table ADD COLUMN add_column_without_default main_type;
@@ -1828,7 +1828,7 @@ def test_complex_ddl_history_re_register(
     run_command(
         """
                 CREATE SCHEMA test_complex_ddl_history_re_register;
-                CREATE TABLE test_complex_ddl_history_re_register.tb1(a int, b text DEFAULT 'test') USING iceberg;
+                CREATE TABLE test_complex_ddl_history_re_register.tb1(a int, b text DEFAULT 'test') USING iceberg WITH (format_version = 3);
                 INSERT INTO test_complex_ddl_history_re_register.tb1 VALUES (1), (2);
 
                 ALTER TABLE test_complex_ddl_history_re_register.tb1 DROP COLUMN a, ADD COLUMN a_new INT DEFAULT 100;
@@ -1871,7 +1871,7 @@ def test_initial_and_write_defaults_arrays(
             CREATE TABLE example_table (
                 create_table_col_with_default numeric[] DEFAULT ARRAY[1.0, 2.1, 3.2],
                 create_table_col_without_default text[]
-            ) USING iceberg;
+            ) USING iceberg WITH (format_version = 3);
 
             ALTER TABLE example_table ADD COLUMN add_column_with_default numeric[] DEFAULT ARRAY[10.0, 20.1, 30.2];
             ALTER TABLE example_table ADD COLUMN add_column_without_default numeric[];
@@ -2007,7 +2007,7 @@ def test_initial_and_write_defaults_maps(
             CREATE TABLE example_table (
                 create_table_col_with_default {map_type_name} DEFAULT ARRAY[(1,'onder'), (2, 'marco'), (3, 'aykut')]::{map_type_name},
                 create_table_col_without_default {map_type_name}
-            ) USING iceberg;
+            ) USING iceberg WITH (format_version = 3);
 
             ALTER TABLE example_table ADD COLUMN add_column_with_default {map_type_name} DEFAULT ARRAY[(4,'utku'), (5, 'david')]::{map_type_name};
             ALTER TABLE example_table ADD COLUMN add_column_without_default {map_type_name};

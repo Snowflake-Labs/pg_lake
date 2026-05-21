@@ -888,20 +888,50 @@ AssertInternalAndExternalTableSchemaMatch(Oid relationId, DataFileSchema * inter
 					 errmsg("internalField and externalField have different names")));
 		}
 
-		if (internalField->initialDefault != NULL &&
-			strcmp(internalField->initialDefault, externalField->initialDefault) != 0)
+		/*
+		 * Compare the column-default keys (initial-default / write-default).
+		 *
+		 * Stage 15 of the v3 rollout adds a writer-side gate in
+		 * write_table_metadata.c that *drops* these keys on the wire when the
+		 * active format version doesn't support column defaults (i.e. v2
+		 * tables). That gate is one-way: ``write-default`` may still be
+		 * populated on the internal pg_lake catalog (e.g. from a v2 CREATE
+		 * TABLE with a Postgres ``DEFAULT 5`` clause) but the external
+		 * metadata.json that we just re-read won't carry it.
+		 *
+		 * The semantic we assert here is therefore *not* "internal and
+		 * external are byte-for-byte identical" but "the on-disk metadata is
+		 * a subset of the internal catalog state": if the external side
+		 * carries a default, the internal side must carry the same one; if
+		 * the external side is absent (gate-dropped on v2, or never set on
+		 * v3) we accept whatever the internal catalog has and leave it alone.
+		 * Comparing the other direction would force us to re-implement the
+		 * writer-side gate here, which is exactly the kind of
+		 * double-source-of-truth that bit us in Iteration 1 (cf.
+		 * test_v2_create_table_with_postgres_default_does_not_emit_iceberg_default).
+		 *
+		 * The NULL probes on the *external* side are load-bearing: prior to
+		 * Stage 15 this block went straight into ``strcmp(internal,
+		 * external)`` and crashed the backend whenever the writer-side gate
+		 * dropped the external value while the internal one was still
+		 * populated.
+		 */
+		if (externalField->initialDefault != NULL &&
+			(internalField->initialDefault == NULL ||
+			 strcmp(internalField->initialDefault, externalField->initialDefault) != 0))
 		{
 			ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
 							errmsg("internalField and externalField have different initialDefault")));
 		}
 
-		if (internalField->writeDefault != NULL &&
-			strcmp(internalField->writeDefault, externalField->writeDefault) != 0)
-
+		if (externalField->writeDefault != NULL &&
+			(internalField->writeDefault == NULL ||
+			 strcmp(internalField->writeDefault, externalField->writeDefault) != 0))
 		{
 			ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
 							errmsg("internalField and externalField have different writeDefault %s and %s",
-								   internalField->writeDefault, externalField->writeDefault)));
+								   internalField->writeDefault != NULL ? internalField->writeDefault : "(null)",
+								   externalField->writeDefault)));
 		}
 	}
 }

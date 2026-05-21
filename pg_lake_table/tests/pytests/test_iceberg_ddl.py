@@ -311,8 +311,13 @@ def test_iceberg_add_column(pg_conn, s3, extension, with_default_location):
 def test_iceberg_add_column_default(pg_conn, s3, extension, with_default_location):
     # add multiple columns
     run_command("CREATE SCHEMA add_column_test;", pg_conn)
+    # Stage 15 of the v3 rollout makes ``ADD COLUMN ... DEFAULT`` a
+    # v3-only Iceberg spec feature; opt the table into v3 so the
+    # default columns added below land in metadata.json instead of
+    # being rejected by the v2 gate.
     run_command(
-        "CREATE TABLE add_column_test.test_iceberg_add_column (a int, b int) USING iceberg",
+        "CREATE TABLE add_column_test.test_iceberg_add_column (a int, b int) "
+        "USING iceberg WITH (format_version = 3)",
         pg_conn,
     )
     run_command(
@@ -393,8 +398,12 @@ def test_iceberg_add_column_bc_date_default(
     PGIcebergJsonDeserialize (ConvertISOYearToBC).
     """
     run_command("CREATE SCHEMA bc_default_test;", pg_conn)
+    # ``ADD COLUMN ... DEFAULT`` is v3-only (Stage 15 of the rollout);
+    # pin this table at v3 so the BC date / early-AD timestamp defaults
+    # added below actually land in metadata.json on a CI matrix that
+    # defaults to v2.
     run_command(
-        "CREATE TABLE bc_default_test.tbl (a int) USING iceberg",
+        "CREATE TABLE bc_default_test.tbl (a int) USING iceberg WITH (format_version = 3)",
         pg_conn,
     )
     # row inserted before the default columns exist
@@ -472,8 +481,12 @@ def test_iceberg_add_nested_column_default(
 ):
     run_command("CREATE SCHEMA add_column_test;", pg_conn)
 
+    # ``ADD COLUMN ... DEFAULT`` for the array / composite columns below
+    # is a v3-only Iceberg feature (Stage 15 of the rollout), so opt the
+    # table into v3 explicitly.
     run_command(
-        "CREATE TABLE add_column_test.test_iceberg_add_column (a int, b int) USING iceberg",
+        "CREATE TABLE add_column_test.test_iceberg_add_column (a int, b int) "
+        "USING iceberg WITH (format_version = 3)",
         pg_conn,
     )
     run_command(
@@ -823,8 +836,12 @@ def test_rename_column(pg_conn, with_default_location):
 def test_set_drop_default(pg_conn, s3, with_default_location):
     # Create schema and table
     run_command("CREATE SCHEMA set_drop_default;", pg_conn)
+    # Test asserts the ``ALTER COLUMN SET DEFAULT`` chain lands
+    # ``write-default`` keys in metadata.json. Column defaults are v3-only
+    # (Stage 15 of the v3 rollout), so opt the table into v3 explicitly.
     run_command(
-        "CREATE TABLE set_drop_default.test_table (a int, b int, c int) USING iceberg;",
+        "CREATE TABLE set_drop_default.test_table (a int, b int, c int) "
+        "USING iceberg WITH (format_version = 3);",
         pg_conn,
     )
     pg_conn.commit()
