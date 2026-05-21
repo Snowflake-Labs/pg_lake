@@ -100,6 +100,8 @@
 #include "pg_lake/planner/restriction_collector.h"
 #include "pg_lake/storage/local_storage.h"
 #include "pg_lake/util/item_pointer_utils.h"
+#include "pg_lake/iceberg/api/table_metadata.h"
+#include "pg_lake/iceberg/format_version.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_lake/util/string_utils.h"
 
@@ -2016,6 +2018,51 @@ postgresPlanForeignModify(PlannerInfo *root,
 						  int subplan_index)
 {
 	RangeTblEntry *rte = planner_rt_fetch(resultRelation, root);
+
+	/*
+	 * Stage 16 of the v3 rollout (end of Iteration 2): UPDATE / DELETE /
+	 * MERGE against an Iceberg format-version 3 table require deletion
+	 * vectors -- the v3 spec replaces positional delete files with DVs and
+	 * pg_lake's DV emission path is queued for Iteration 4 (Stages 20+).
+	 * Until then we refuse the operation up front with a spec-aware error
+	 * rather than producing a v3 metadata.json that mixes v2-style PDFs with
+	 * v3 row lineage (which the spec forbids).
+	 *
+	 * INSERT is allowed -- the row-lineage allocator from Stage 12 makes v3
+	 * appends spec-clean.
+	 *
+	 * Catching this in PlanForeignModify lets us error before any planner
+	 * state is built, so EXPLAIN reports the same message and there is no
+	 * partial work to roll back. The gate is iceberg-only (the check is cheap
+	 * on non-iceberg tables: IsPgLakeIcebergForeignTableById bails out via a
+	 * foreign-table option lookup).
+	 */
+	if ((plan->operation == CMD_UPDATE ||
+		 plan->operation == CMD_DELETE ||
+		 plan->operation == CMD_MERGE) &&
+		IsPgLakeIcebergForeignTableById(rte->relid))
+	{
+		IcebergFormatVersion formatVersion =
+			GetIcebergFormatVersionFromTableOptions(rte->relid);
+
+		if (formatVersion >= ICEBERG_FORMAT_VERSION_V3)
+		{
+			const char *op =
+				plan->operation == CMD_UPDATE ? "UPDATE" :
+				plan->operation == CMD_DELETE ? "DELETE" : "MERGE";
+
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("%s on Iceberg format-version 3 tables is not yet supported",
+							op),
+					 errdetail("Iceberg v3 replaces positional delete files with "
+							   "deletion vectors, which pg_lake does not yet emit."),
+					 errhint("INSERT is supported on v3 tables; for mutating "
+							 "workloads, either recreate the table with "
+							 "WITH (format_version = 2) or rewrite the operation "
+							 "as INSERT plus DROP/RECREATE.")));
+		}
+	}
 
 	/*
 	 * Extract the relevant RETURNING list if any.
