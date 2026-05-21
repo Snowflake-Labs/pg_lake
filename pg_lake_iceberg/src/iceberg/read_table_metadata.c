@@ -494,6 +494,19 @@ ReadIcebergSortOrderField(JsonbContainer *json, IcebergSortOrderField * field)
 	memset(field, '\0', sizeof(IcebergSortOrderField));
 	JsonExtractStringField(json, "transform", FIELD_REQUIRED, &field->transform, &field->transform_length);
 	JsonExtractInt32Field(json, "source-id", FIELD_REQUIRED, &field->source_id);
+
+	/*
+	 * source-ids is a v3 addition (Iceberg v3 §sorting), structurally
+	 * optional in both v2 and v3 metadata.json so we don't need a
+	 * format-version-aware required/optional dispatch here. If the field is
+	 * absent the reader leaves source_ids_length == 0, which is how the
+	 * writer recognises "synthesise nothing".
+	 */
+	JsonExtractInt32ArrayField(json, "source-ids", FIELD_OPTIONAL,
+							   (JsonParseNumericFunction) ReadInt32,
+							   sizeof(int),
+							   (void **) &field->source_ids, &field->source_ids_length);
+
 	JsonExtractStringField(json, "direction", FIELD_REQUIRED, &field->direction, &field->direction_length);
 	JsonExtractStringField(json, "null-order", FIELD_REQUIRED, &field->null_order, &field->null_order_length);
 }

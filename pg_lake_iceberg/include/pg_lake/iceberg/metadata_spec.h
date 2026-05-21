@@ -174,6 +174,21 @@ typedef struct IcebergSortOrderField
 	const char *transform;
 	size_t		transform_length;
 	int32_t		source_id;
+
+	/*
+	 * v3 §sorting introduced ``source-ids`` (plural) on sort-order fields,
+	 * the analogue of the same field on partition-spec fields. It carries the
+	 * source-field-id list for multi-argument sort transforms (e.g. a
+	 * hypothetical truncate of a concatenation of two columns); the
+	 * single-source case fills the array with one element. v2 sort-order
+	 * fields never carry this field. ``source_ids_length == 0`` means "not
+	 * present" on disk; the reader leaves it at 0 for v2 inputs, and the
+	 * writer emits the field only when the active metadata format version
+	 * supports it (see write_table_metadata.c).
+	 */
+	int		   *source_ids;
+	size_t		source_ids_length;
+
 	const char *direction;
 	size_t		direction_length;
 	const char *null_order;

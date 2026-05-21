@@ -956,6 +956,21 @@ AppendIcebergSortOrderFields(StringInfo command, IcebergSortOrderField * fields,
 
 		/* Append source_id */
 		appendJsonInt32(command, "source-id", fields[i].source_id);
+
+		/*
+		 * Append source-ids (plural) -- v3-only, see the matching block in
+		 * AppendIcebergPartitionSpecFields for the spec citation and the
+		 * rationale behind keeping the gate at the writer (single choke
+		 * point; in-memory model stays uniform across versions).
+		 */
+		if (IcebergFormatVersionSupportsMultiArgTransforms(ctx->formatVersion) &&
+			fields[i].source_ids_length > 0)
+		{
+			appendStringInfoString(command, ", ");
+			appendStringInfoString(command, "\"source-ids\":");
+			AppendIntArray(command, fields[i].source_ids, fields[i].source_ids_length);
+		}
+
 		appendStringInfoString(command, ", ");
 
 		/* Append direction */
