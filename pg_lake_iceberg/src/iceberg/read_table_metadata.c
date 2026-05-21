@@ -146,7 +146,25 @@ ReadIcebergTableMetadataFromJson(JsonbContainer *json, IcebergTableMetadata * me
 						sizeof(Property),
 						(void **) &metadata->properties, &metadata->properties_length);
 
-	JsonExtractInt64Field(json, "current-snapshot-id", FIELD_OPTIONAL, &metadata->current_snapshot_id);
+	/*
+	 * "current-snapshot-id": the iceberg spec lets this be "no current
+	 * snapshot" in three forms across the wire -- v1/v2 use the numeric
+	 * sentinel -1, v3 either emits JSON null or omits the field entirely.
+	 *
+	 * In memory we represent all three uniformly as -1 (matching
+	 * InitializeIcebergTableMetadata in api/table_metadata.c, which seeds new
+	 * tables with that sentinel). JsonExtractInt64Field returns false both
+	 * when the key is missing and when the value is JSON null, so a single
+	 * fallback covers v3's two shapes plus v1/v2's "field absent" edge case
+	 * (legacy fixtures sometimes leave it off entirely).
+	 *
+	 * v2 wire values of -1 fall through the true branch and are stored
+	 * verbatim as -1, which is the same sentinel -- the round-trip is
+	 * lossless for both versions without needing a "has" companion.
+	 */
+	if (!JsonExtractInt64Field(json, "current-snapshot-id", FIELD_OPTIONAL,
+							   &metadata->current_snapshot_id))
+		metadata->current_snapshot_id = -1;
 
 	JsonExtractObjectArrayField(json, "snapshots", FIELD_OPTIONAL,
 								(JsonParseFunction) ReadIcebergSnapshot,

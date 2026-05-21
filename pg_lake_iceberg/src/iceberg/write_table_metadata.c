@@ -110,8 +110,34 @@ WriteIcebergTableMetadataToJson(IcebergTableMetadata * metadata)
 	AppendProperties(command, metadata->properties, metadata->properties_length);
 	appendStringInfoString(command, ", ");
 
-	/* Append current_snapshot_id */
-	appendJsonInt64(command, "current-snapshot-id", metadata->current_snapshot_id);
+	/*
+	 * Append current_snapshot_id.
+	 *
+	 * Per Iceberg spec, ``current-snapshot-id`` is the id of the latest
+	 * referenced snapshot, or a sentinel meaning "no snapshot exists yet".
+	 * The shape of that sentinel changed between format versions:
+	 *
+	 * * v1 / v2: a JSON integer of -1. * v3:      JSON ``null`` (or the field
+	 * omitted entirely; we always emit it for symmetry with every other
+	 * Spark-reference output and so external readers do not have to fall back
+	 * to ``find`` semantics).
+	 *
+	 * We use ``current_snapshot_id == -1`` as the in-memory sentinel for "no
+	 * snapshot exists" in both versions (see InitializeIcebergTableMetadata
+	 * in api/table_metadata.c). The version-aware predicate keeps the
+	 * version-specific JSON shape isolated to this one branch -- callers
+	 * never have to know whether the table is v2 or v3.
+	 */
+	if (metadata->current_snapshot_id == -1 &&
+		IcebergFormatVersionSupportsNullCurrentSnapshotId(metadata->format_version))
+	{
+		appendJsonKey(command, "current-snapshot-id");
+		appendStringInfoString(command, "null");
+	}
+	else
+	{
+		appendJsonInt64(command, "current-snapshot-id", metadata->current_snapshot_id);
+	}
 	appendStringInfoString(command, ", ");
 
 	/* Append snapshots */
