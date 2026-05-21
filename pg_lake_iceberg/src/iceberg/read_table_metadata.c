@@ -190,6 +190,29 @@ ReadIcebergTableMetadataFromJson(JsonbContainer *json, IcebergTableMetadata * me
 								sizeof(IcebergStatistics),
 								(void **) &metadata->statistics,
 								&metadata->statistics_length);
+
+	/*
+	 * Iceberg v3 row lineage: ``next-row-id`` is the table-level cursor that
+	 * names the next row-id any new snapshot will claim. It is omitted on v2
+	 * metadata (spec calls it "v3 only") and present-but-zero on a freshly
+	 * created v3 table that has no snapshots yet. Track the "did we observe
+	 * it on the wire" flag separately from the value so the writer can emit
+	 * it byte-faithfully -- present-with-0 stays present, absent stays
+	 * absent. Stage 12 wires this into the actual allocator; here we only
+	 * round-trip it.
+	 */
+	metadata->has_next_row_id =
+		JsonExtractInt64Field(json, "next-row-id", FIELD_OPTIONAL,
+							  &metadata->next_row_id);
+
+	if (metadata->has_next_row_id &&
+		metadata->format_version != ICEBERG_FORMAT_VERSION_V3)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("Iceberg metadata declares \"next-row-id\" on a non-v3 table"),
+				 errhint("Row lineage is an Iceberg v3 feature; upgrade the table's format-version or remove the field.")));
+	}
 }
 
 
@@ -387,6 +410,26 @@ ReadIcebergSnapshot(JsonbContainer *json, IcebergSnapshot * snapshot)
 				 errmsg("encrypted Iceberg snapshots are not yet supported by pg_lake"),
 				 errhint("Snapshot \"key-id\" is an Iceberg v3 encryption feature; pg_lake support is tracked separately.")));
 	}
+
+	/*
+	 * Iceberg v3 row lineage: ``first-row-id`` is the inclusive start of the
+	 * row-id range this snapshot claims for newly appended rows;
+	 * ``added-rows`` is the count of rows in that range. Both are spec
+	 * v3-only. Reading is OPTIONAL because (a) v2 snapshots never carry them
+	 * and (b) v3 snapshots that didn't append rows (e.g. metadata-only
+	 * snapshots in future iterations) may legitimately omit them. We capture
+	 * the "field-was-present" bit so the writer's reserialisation reproduces
+	 * the original on-disk shape exactly -- regenerating a metadata.json that
+	 * spontaneously gains or loses a v3 field would break byte-equality
+	 * comparisons in fixture tests and could confuse external readers that
+	 * key off field presence.
+	 */
+	snapshot->first_row_id_set =
+		JsonExtractInt64Field(json, "first-row-id", FIELD_OPTIONAL,
+							  &snapshot->first_row_id);
+	snapshot->added_rows_set =
+		JsonExtractInt64Field(json, "added-rows", FIELD_OPTIONAL,
+							  &snapshot->added_rows);
 }
 
 static void

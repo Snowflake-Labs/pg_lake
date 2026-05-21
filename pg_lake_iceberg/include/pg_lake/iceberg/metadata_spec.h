@@ -110,6 +110,29 @@ typedef struct IcebergSnapshot
 	size_t		summary_length;
 	int32_t		schema_id;
 	bool		schema_id_set;
+
+	/*
+	 * Row lineage (Iceberg v3 only).
+	 *
+	 * ``first_row_id`` is the inclusive starting row-id assigned to all
+	 * *newly appended* rows in this snapshot; readers reconstruct each row's
+	 * logical id from snapshot.first_row_id + data_file.first_row_id +
+	 * row_position. ``added_rows`` is the count of newly-appended rows in
+	 * this snapshot (i.e. the width of the [first_row_id, first_row_id +
+	 * added_rows) range this snapshot claims from the table-level next-row-id
+	 * counter).
+	 *
+	 * Both fields are optional in the v3 spec and omitted on v2; the
+	 * accompanying _set flags distinguish "omitted" from "explicitly zero",
+	 * matching the rest of this struct's convention.
+	 *
+	 * Allocator + emit wiring lands in Stage 12; this stage only parses and
+	 * serialises the values as-is so v3 read fixtures round-trip cleanly.
+	 */
+	int64_t		first_row_id;
+	bool		first_row_id_set;
+	int64_t		added_rows;
+	bool		added_rows_set;
 }			IcebergSnapshot;
 
 /*
@@ -287,6 +310,25 @@ typedef struct IcebergTableMetadata
 
 	IcebergStatistics *statistics;
 	size_t		statistics_length;
+
+	/*
+	 * Row lineage (Iceberg v3 only, spec ``next-row-id``).
+	 *
+	 * ``next_row_id`` is the *exclusive* upper bound of all row-ids assigned
+	 * so far across the table's history. The next snapshot's ``first_row_id``
+	 * starts here. Tracked as an int64_t so a 1-trillion-row append still has
+	 * head-room. ``has_next_row_id`` distinguishes "this v3 metadata has no
+	 * snapshots yet (omit the field)" from "the value is 0 because no rows
+	 * have been written yet" -- the former skips serialisation, the latter
+	 * emits ``"next-row-id": 0``. For v2 metadata ``has_next_row_id`` is
+	 * always false (the field is v3-only per spec).
+	 *
+	 * Allocator wiring lands in Stage 12 of the v3 rollout; this stage only
+	 * parses and writes through the value byte-for-byte so the data model is
+	 * v3-complete and v3 read fixtures round-trip with row lineage preserved.
+	 */
+	int64_t		next_row_id;
+	bool		has_next_row_id;
 }			IcebergTableMetadata;
 
 extern PGDLLEXPORT IcebergTableMetadata * ReadIcebergTableMetadata(const char *tableMetadataPath);

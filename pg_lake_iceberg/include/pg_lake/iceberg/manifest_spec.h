@@ -162,6 +162,19 @@ typedef struct IcebergManifest
 
 	char	   *key_metadata;
 	size_t		key_metadata_length;
+
+	/*
+	 * Iceberg v3 row lineage (manifest_list_schema_v3).
+	 *
+	 * ``first_row_id`` (field-id 520) is the inclusive starting row-id of all
+	 * *new* rows the data files in this manifest contributed. Optional on the
+	 * wire (omitted for v2 lists and for v3 lists whose manifests did not
+	 * append rows), so we carry a ``has_first_row_id`` companion to
+	 * disambiguate "absent" from "present-and-zero" -- mirrors the convention
+	 * used elsewhere in this struct.
+	 */
+	bool		has_first_row_id;
+	int64_t		first_row_id;
 }			IcebergManifest;
 
 /*
@@ -212,6 +225,39 @@ typedef struct DataFile
 
 	bool		has_sort_order_id;
 	int32_t		sort_order_id;
+
+	/*
+	 * Iceberg v3 row lineage + deletion-vector pointers (manifest_schema_v3).
+	 *
+	 * ``first_row_id`` (field-id 142): inclusive starting row-id of the rows
+	 * in *this* data file, relative to the snapshot's first_row_id. The
+	 * on-disk Avro field is optional; readers should reconstruct the absolute
+	 * row-id of row R inside this file as snapshot.first_row_id +
+	 * data_file.first_row_id + R.
+	 *
+	 * ``referenced_data_file`` (143): puffin DV blob points at the data file
+	 * that the deletes target. Always paired with ``content_offset`` (144)
+	 * and ``content_size_in_bytes`` (145) which jointly locate the DV inside
+	 * the puffin file. These three fields are only meaningful on
+	 * deletion-vector entries (Stage 20+); pg_lake currently rejects any read
+	 * that observes them populated.
+	 *
+	 * All four are represented with explicit ``has_*`` flags so the writer
+	 * can produce a v3 binary that is byte-equivalent to the read input, and
+	 * so the eventual Stage 12 allocator and DV reader can mutate one field
+	 * without having to special-case missing-versus-zero ambiguity.
+	 */
+	bool		has_first_row_id;
+	int64_t		first_row_id;
+
+	const char *referenced_data_file;
+	size_t		referenced_data_file_length;
+
+	bool		has_content_offset;
+	int64_t		content_offset;
+
+	bool		has_content_size_in_bytes;
+	int64_t		content_size_in_bytes;
 }			DataFile;
 
 /*

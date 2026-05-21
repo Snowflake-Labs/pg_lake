@@ -223,6 +223,24 @@ ReadIcebergManifestFromAvro(avro_value_t * record, IcebergManifest * manifest, v
 
 	AvroGetBinaryField(record, "key_metadata", AVRO_FIELD_OPTIONAL, (const
 																	 void **) &manifest->key_metadata, &manifest->key_metadata_length);
+
+	/*
+	 * Iceberg v3 row lineage on the manifest list record
+	 * (manifest_list_schema_v3, field-id 520). Gated on the underlying Avro
+	 * schema actually declaring the field, since
+	 * ``AvroGetNullableInt64Field`` errors with "<field> not found in schema"
+	 * when called against a v2 manifest list whose schema doesn't include it.
+	 * The same pattern is used for the v3 data_file row lineage / DV pointer
+	 * fields below in ``ReadDataFileFromAvro``; see that block for the full
+	 * rationale on probing instead of threading the format version into the
+	 * reader.
+	 */
+	if (AvroFieldExists(record, "first_row_id"))
+	{
+		AvroGetNullableInt64Field(record, "first_row_id",
+								  &manifest->first_row_id,
+								  &manifest->has_first_row_id);
+	}
 }
 
 
@@ -304,6 +322,50 @@ ReadDataFileFromAvro(avro_value_t * record, DataFile * dataFile, ManifestReaderC
 						   &dataFile->equality_ids, &dataFile->equality_ids_length);
 	AvroGetNullableInt32Field(record, "sort_order_id",
 							  &dataFile->sort_order_id, &dataFile->has_sort_order_id);
+
+	/*
+	 * Iceberg v3 row lineage and DV blob pointers on the data_file record
+	 * (manifest_schema_v3, field-ids 142 / 143 / 144 / 145). We *only* probe
+	 * these fields when the underlying Avro schema actually declares them --
+	 * ``AvroGetNullableInt64Field`` errors with "<field> not found in schema"
+	 * if the field is absent, which is the wire-level shape of a v2 manifest.
+	 * The DV-refusal check above already proved the v3-only indicator
+	 * ``referenced_data_file`` is absent (otherwise we hard- errored), so the
+	 * row-lineage / DV-size group either travels together with a v3 schema or
+	 * not at all.
+	 *
+	 * Gating on ``AvroFieldExists`` rather than threading the format version
+	 * into the reader matches the DV refusal pattern just above and keeps the
+	 * reader entry points version-agnostic: the public
+	 * ``ReadIcebergManifest`` API takes an Avro record, not a metadata
+	 * format-version, and we want a single reader that handles both v2 and v3
+	 * manifests without callers having to pin the version.
+	 *
+	 * Read order: row lineage before the DV-size pair so a v3 manifest that
+	 * combines populated DV pointers with a populated first_row_id still
+	 * surfaces the DV error first (already done above) -- the DV error is the
+	 * user-actionable problem (pg_lake won't read the data), whereas
+	 * first_row_id alone is harmless to passthrough.
+	 */
+	if (AvroFieldExists(record, "first_row_id"))
+	{
+		AvroGetNullableInt64Field(record, "first_row_id",
+								  &dataFile->first_row_id,
+								  &dataFile->has_first_row_id);
+	}
+
+	if (AvroFieldExists(record, "content_offset"))
+	{
+		AvroGetNullableInt64Field(record, "content_offset",
+								  &dataFile->content_offset,
+								  &dataFile->has_content_offset);
+	}
+	if (AvroFieldExists(record, "content_size_in_bytes"))
+	{
+		AvroGetNullableInt64Field(record, "content_size_in_bytes",
+								  &dataFile->content_size_in_bytes,
+								  &dataFile->has_content_size_in_bytes);
+	}
 }
 
 

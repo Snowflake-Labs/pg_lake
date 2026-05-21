@@ -170,6 +170,20 @@ WriteIcebergTableMetadataToJson(IcebergTableMetadata * metadata)
 	appendStringInfoString(command, "\"statistics\":");
 	AppendIcebergStatistics(command, metadata->statistics, metadata->statistics_length);
 
+	/*
+	 * Iceberg v3 row lineage: emit ``next-row-id`` byte-faithfully relative
+	 * to the input metadata. The struct flag ``has_next_row_id`` is set by
+	 * the reader iff the field was present on disk and is set by the upcoming
+	 * Stage 12 allocator whenever it owns the value; in all other cases we
+	 * must not emit it (v2 metadata never has it, and v3 readers key off
+	 * presence to know whether to walk per-snapshot row-ranges).
+	 */
+	if (metadata->has_next_row_id)
+	{
+		appendStringInfoString(command, ", ");
+		appendJsonInt64(command, "next-row-id", metadata->next_row_id);
+	}
+
 	appendStringInfoString(command, "}");
 
 	return command->data;
@@ -362,6 +376,26 @@ AppendIcebergSnapshots(StringInfo command, IcebergSnapshot * snapshots, size_t s
 		{
 			appendStringInfoString(command, ", ");
 			appendJsonInt32(command, "schema-id", snapshots[i].schema_id);
+		}
+
+		/*
+		 * Iceberg v3 row lineage emission. Both fields are optional per spec
+		 * (a v3 snapshot that didn't append rows -- e.g. a future
+		 * metadata-only commit -- may legitimately omit them) so we mirror
+		 * the read side and only emit when the corresponding _set bit is on.
+		 * This keeps reserialise round-trips byte-equal and avoids
+		 * accidentally promoting a v2 snapshot to v3 wire shape if the struct
+		 * is later reused across format versions.
+		 */
+		if (snapshots[i].first_row_id_set)
+		{
+			appendStringInfoString(command, ", ");
+			appendJsonInt64(command, "first-row-id", snapshots[i].first_row_id);
+		}
+		if (snapshots[i].added_rows_set)
+		{
+			appendStringInfoString(command, ", ");
+			appendJsonInt64(command, "added-rows", snapshots[i].added_rows);
 		}
 		appendStringInfoString(command, "}");
 

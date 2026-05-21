@@ -43,6 +43,22 @@ static const char *AdjustPartitionsInManifestJsonSchema(char *manifestSchema, Pa
 
 
 /*
+ * Format-version of the manifest currently being serialised, threaded into
+ * the Avro callback path so v3-only fields (row lineage 142, deletion-vector
+ * 143/144/145, manifest-list 520) are only emitted when the active schema
+ * actually contains them. The Avro library's serialise callback signature
+ * does not carry a user context pointer, but every public writer entry
+ * point in this file synchronously and non-recursively walks its record
+ * list, so a single file-scope value is sufficient. The writer entry points
+ * set this on entry and reset it on exit so a future caller that mixes v2
+ * and v3 serialisations in the same backend lifetime cannot leak the wrong
+ * version between calls.
+ */
+static IcebergFormatVersion CurrentManifestWriterFormatVersion =
+ICEBERG_FORMAT_VERSION_V2;
+
+
+/*
  * WriteIcebergManifest writes given manifest entries to the given manifest file.
  *
  * `formatVersion` selects the Avro schema. v2 uses `manifest_schema_v2_json`,
@@ -64,17 +80,29 @@ WriteIcebergManifest(const char *manifestPath, List *manifestEntries,
 
 	ListCell   *manifestEntryCell = NULL;
 
-	foreach(manifestEntryCell, manifestEntries)
+	IcebergFormatVersion savedVersion = CurrentManifestWriterFormatVersion;
+
+	CurrentManifestWriterFormatVersion = formatVersion;
+
+	PG_TRY();
 	{
-		IcebergManifestEntry *manifestEntry = lfirst(manifestEntryCell);
+		foreach(manifestEntryCell, manifestEntries)
+		{
+			IcebergManifestEntry *manifestEntry = lfirst(manifestEntryCell);
 
-		AvroWriterWriteRecord(manifestWriter,
-							  (AvroSerializeFunction) WriteIcebergManifestEntryToAvro,
-							  manifestEntry);
+			AvroWriterWriteRecord(manifestWriter,
+								  (AvroSerializeFunction) WriteIcebergManifestEntryToAvro,
+								  manifestEntry);
 
+		}
+
+		AvroWriterClose(manifestWriter);
 	}
-
-	AvroWriterClose(manifestWriter);
+	PG_FINALLY();
+	{
+		CurrentManifestWriterFormatVersion = savedVersion;
+	}
+	PG_END_TRY();
 }
 
 /*
@@ -246,16 +274,28 @@ WriteIcebergManifestList(const char *manifestListPath, List *manifests,
 
 	ListCell   *manifestCell = NULL;
 
-	foreach(manifestCell, manifests)
+	IcebergFormatVersion savedVersion = CurrentManifestWriterFormatVersion;
+
+	CurrentManifestWriterFormatVersion = formatVersion;
+
+	PG_TRY();
 	{
-		IcebergManifest *manifest = lfirst(manifestCell);
+		foreach(manifestCell, manifests)
+		{
+			IcebergManifest *manifest = lfirst(manifestCell);
 
-		AvroWriterWriteRecord(manifestListWriter,
-							  (AvroSerializeFunction) WriteIcebergManifestToAvro,
-							  manifest);
+			AvroWriterWriteRecord(manifestListWriter,
+								  (AvroSerializeFunction) WriteIcebergManifestToAvro,
+								  manifest);
+		}
+
+		AvroWriterClose(manifestListWriter);
 	}
-
-	AvroWriterClose(manifestListWriter);
+	PG_FINALLY();
+	{
+		CurrentManifestWriterFormatVersion = savedVersion;
+	}
+	PG_END_TRY();
 }
 
 static void
@@ -285,6 +325,21 @@ WriteIcebergManifestToAvro(IcebergManifest * manifest, avro_value_t * record)
 	AvroSetNullableBinaryField(record, "key_metadata",
 							   manifest->key_metadata, manifest->key_metadata_length,
 							   manifest->key_metadata != NULL);
+
+	/*
+	 * Iceberg v3 manifest list row-lineage start (field-id 520). Gated on the
+	 * caller-pinned format version for the same reason as the data_file
+	 * fields: v2 schema does not declare this field, so emitting it would
+	 * fail inside libavro. The per-manifest has_first_row_id flag lets v3
+	 * round-trips preserve "absent" semantics for manifests that did not
+	 * contribute new rows.
+	 */
+	if (CurrentManifestWriterFormatVersion == ICEBERG_FORMAT_VERSION_V3)
+	{
+		AvroSetNullableInt64Field(record, "first_row_id",
+								  manifest->first_row_id,
+								  manifest->has_first_row_id);
+	}
 }
 
 
@@ -343,6 +398,36 @@ WriteDataFileToAvro(DataFile * dataFile, avro_value_t * record)
 						   dataFile->equality_ids, dataFile->equality_ids_length);
 	AvroSetNullableInt32Field(record, "sort_order_id",
 							  dataFile->sort_order_id, dataFile->has_sort_order_id);
+
+	/*
+	 * Iceberg v3 manifest data_file fields (field-ids 142-145). Only the v3
+	 * Avro schema declares these, so emitting them under the v2 schema would
+	 * fail with "field not found in schema" inside libavro. Gate on the
+	 * caller-pinned format version rather than on the DataFile flags so a
+	 * v3-shaped struct accidentally fed to a v2 writer fails-closed (drops
+	 * the lineage data) instead of corrupting the on-disk record.
+	 *
+	 * Within v3, we still honour the per-field has_* flags so reserialise
+	 * round-trips of v3 manifests that don't yet carry row lineage produce
+	 * identical output. Stage 12's allocator will be the first caller to set
+	 * has_first_row_id on the way in; DV blob pointers (143/144/145) stay
+	 * unset until pg_lake learns to emit deletion vectors.
+	 */
+	if (CurrentManifestWriterFormatVersion == ICEBERG_FORMAT_VERSION_V3)
+	{
+		AvroSetNullableInt64Field(record, "first_row_id",
+								  dataFile->first_row_id,
+								  dataFile->has_first_row_id);
+		AvroSetNullableStringField(record, "referenced_data_file",
+								   dataFile->referenced_data_file,
+								   dataFile->referenced_data_file != NULL);
+		AvroSetNullableInt64Field(record, "content_offset",
+								  dataFile->content_offset,
+								  dataFile->has_content_offset);
+		AvroSetNullableInt64Field(record, "content_size_in_bytes",
+								  dataFile->content_size_in_bytes,
+								  dataFile->has_content_size_in_bytes);
+	}
 }
 
 static void
