@@ -1009,12 +1009,19 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		 */
 
 		/*
-		 * pg_lake only writes v2 tables today; Stage 8 of the Iceberg v3
-		 * rollout will source this from the GUC / WITH (format_version=N)
-		 * option and Stage 14 will let Polaris see the v3 value. Pinning to
-		 * v2 here keeps the body shape stable in the meantime.
+		 * Stage 14: Polaris (and any other REST catalog) is now told the
+		 * actual resolved format-version of the CREATE -- v2 for legacy
+		 * tables, v3 when the WITH option or default_format_version GUC
+		 * opt-in. The body shape itself was already version-stable since
+		 * Stage 6 (the only line that varies is the integer value).
+		 *
+		 * We pass icebergFormatVersion (resolved earlier in this function,
+		 * see ResolveIcebergFormatVersionFromOptions above) rather than
+		 * re-reading the now-appended foreign-table option string, so a REST
+		 * round-trip can never disagree with the local metadata.json we're
+		 * about to drop in pg_lake's writer.
 		 */
-		StartStageRestCatalogIcebergTableCreate(relationId, ICEBERG_FORMAT_VERSION_V2);
+		StartStageRestCatalogIcebergTableCreate(relationId, icebergFormatVersion);
 
 		/*
 		 * Record the create table operation in the rest catalog. Note that
