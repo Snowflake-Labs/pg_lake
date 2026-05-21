@@ -151,6 +151,28 @@ static IcebergToDuckDBType IcebergToDuckDBTypes[] =
 	{
 		"struct", ICEBERG_TYPE_STRUCT, DUCKDB_TYPE_STRUCT
 	},
+
+	/*
+	 * Iceberg v3 §unknown type. The spec requires every "unknown" column to
+	 * be all-null on disk -- it exists so writers that don't know a column's
+	 * logical type can still register the field-id and let later schema
+	 * evolution upgrade it. There is no Postgres type with the same "always
+	 * null" guarantee at the type level (CREATE DOMAIN with NOT NULL is the
+	 * opposite), so we project to VARCHAR/text on the Postgres side: this
+	 * gives a column users can SELECT (always getting NULL, which matches the
+	 * spec's runtime semantics) and means the field-id <-> column mapping in
+	 * the FDW catalog stays uniform with every other scalar type.
+	 *
+	 * Round-trip fidelity is preserved by field->field.scalar.typeName (the
+	 * original "unknown" string is carried through every read/serialise
+	 * pair), so re-writing a v3 metadata.json never silently rewrites
+	 * "unknown" as "string". pg_lake itself never *produces* an "unknown"
+	 * field from Postgres types (the Postgres->Iceberg direction emits
+	 * "string" for text), so the mapping is read-only by construction.
+	 */
+	{
+		"unknown", ICEBERG_TYPE_STRING, DUCKDB_TYPE_VARCHAR
+	},
 };
 
 static DuckDBType GetDuckDBTypeFromIcebergType(IcebergType icebergType);
@@ -538,9 +560,12 @@ static const struct
 	{
 		"timestamptz_ns", "timestamptz_ns"
 	},
-	{
-		"unknown", "unknown"
-	},
+
+	/*
+	 * Stage 17 of the v3 rollout: "unknown" has graduated out of the
+	 * not-yet-supported list. See IcebergToDuckDBTypes for the mapping we use
+	 * to keep the column readable on the Postgres side.
+	 */
 	{
 		"variant", "variant"
 	},

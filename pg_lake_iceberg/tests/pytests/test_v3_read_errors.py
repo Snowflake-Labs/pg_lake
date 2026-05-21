@@ -33,7 +33,6 @@ import pytest
 from utils_pytest import *
 from helpers.iceberg import iceberg_v3_sample_table_folder_path
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -220,7 +219,9 @@ def _v3_metadata_with_type(tmp_path: Path, type_name: str) -> str:
 @pytest.mark.parametrize(
     "iceberg_type,expected_match",
     [
-        ("unknown", r"\"unknown\" is not yet supported"),
+        # ``unknown`` graduated out of this list in Stage 17 of the v3
+        # rollout -- it now reads back as a NULL-only Postgres text column
+        # (see test_v3_unknown_type.py for the positive contract).
         ("variant", r"\"variant\" is not yet supported"),
         ("geometry", r"\"geometry\" is not yet supported"),
         ("geography", r"\"geography\" is not yet supported"),
