@@ -143,15 +143,22 @@ GetPGDuckConnection(void)
 
 		PQfinish(connection);
 
-#ifdef USE_ASSERT_CHECKING
-		ereport(ERROR,
-				(errmsg("could not start query engine: %s", errorMessage),
-				 errdetail("connection string: %s", PgduckServerConninfo)));
-#else
-		/* hide internals from users */
-		ereport(ERROR,
+		/*
+		 * Log the conninfo to the server log so an administrator can debug
+		 * misconfigured servers (issue #293) without exposing the connection
+		 * string -- which may include credentials -- to the client.  We
+		 * intentionally do not include the libpq error message here; it is
+		 * surfaced only in the assertion-enabled ERROR below.
+		 */
+		ereport(LOG_SERVER_ONLY,
 				(errmsg("could not start query engine"),
 				 errdetail("connection string: %s", PgduckServerConninfo)));
+
+#ifdef USE_ASSERT_CHECKING
+		ereport(ERROR, (errmsg("could not start query engine: %s", errorMessage)));
+#else
+		/* hide internals from users */
+		ereport(ERROR, (errmsg("could not start query engine")));
 #endif
 	}
 
