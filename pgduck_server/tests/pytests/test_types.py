@@ -452,146 +452,114 @@ def test_blob(setup_table, duckdb_conn, pgduck_conn, tmp_path):
 
 def test_tinyint(setup_table, duckdb_conn, pgduck_conn, tmp_path):
     query = "SELECT tiny_int_col FROM duckdb_supported_types_table WHERE tiny_int_col IS NOT NULL ORDER BY tiny_int_col"
-    expected = [("-128",), ("0",), ("127",)]
+    expected = [(-128,), (0,), (127,)]
     duckdb_results = perform_query_on_cursor(query, duckdb_conn)
     pg_results = perform_query_on_cursor(query, pgduck_conn)
 
-    # Convert duckdb (int) and pg (int) results to strings for comparison.
-    duckdb_results_str = [(str(item[0]),) for item in duckdb_results]
-    pg_results_str = [(str(item[0]),) for item in pg_results]
-
-    # Get normalized transmit results
+    # Transmit goes through CSV so values come back as text; parse to int.
     transmit_results = perform_transmit_query(query, pgduck_conn, tmp_path)
-    transmit_results = [(item[0],) for item in transmit_results]
+    transmit_results = [(int(item[0]),) for item in transmit_results]
 
     assert (
-        duckdb_results_str == pg_results_str == transmit_results == expected
+        duckdb_results == pg_results == transmit_results == expected
     ), "TINYINT results do not match expected values!"
 
 
 def test_smallint(setup_table, duckdb_conn, pgduck_conn, tmp_path):
     query = "SELECT smallint_col FROM duckdb_supported_types_table WHERE smallint_col IS NOT NULL ORDER BY smallint_col"
-    expected = [("-32768",), ("0",), ("32767",)]
+    expected = [(-32768,), (0,), (32767,)]
     duckdb_results = perform_query_on_cursor(query, duckdb_conn)
     pg_results = perform_query_on_cursor(query, pgduck_conn)
 
-    duckdb_results_str = [(str(item[0]),) for item in duckdb_results]
-    pg_results_str = [(str(item[0]),) for item in pg_results]
-
-    # Get normalized transmit results
     transmit_results = perform_transmit_query(query, pgduck_conn, tmp_path)
-    transmit_results = [(item[0],) for item in transmit_results]
+    transmit_results = [(int(item[0]),) for item in transmit_results]
 
     assert (
-        duckdb_results_str == pg_results_str == transmit_results == expected
+        duckdb_results == pg_results == transmit_results == expected
     ), "SMALLINT results do not match expected values!"
 
 
 def test_int(setup_table, duckdb_conn, pgduck_conn, tmp_path):
     query = "SELECT int_col FROM duckdb_supported_types_table WHERE int_col IS NOT NULL ORDER BY int_col"
-    expected = [("-2147483648",), ("0",), ("2147483647",)]
+    expected = [(-2147483648,), (0,), (2147483647,)]
     duckdb_results = perform_query_on_cursor(query, duckdb_conn)
     pg_results = perform_query_on_cursor(query, pgduck_conn)
 
-    duckdb_results_str = [(str(item[0]),) for item in duckdb_results]
-    pg_results_str = [(str(item[0]),) for item in pg_results]
-
-    # Get normalized transmit results
     transmit_results = perform_transmit_query(query, pgduck_conn, tmp_path)
-    transmit_results = [(item[0],) for item in transmit_results]
+    transmit_results = [(int(item[0]),) for item in transmit_results]
 
     assert (
-        duckdb_results_str == pg_results_str == transmit_results == expected
+        duckdb_results == pg_results == transmit_results == expected
     ), "INT results do not match expected values!"
 
 
 def test_bigint(setup_table, duckdb_conn, pgduck_conn, tmp_path):
     query = "SELECT bigint_col FROM duckdb_supported_types_table WHERE bigint_col IS NOT NULL ORDER BY bigint_col"
-    expected = [("-9223372036854775808",), ("0",), ("9223372036854775807",)]
+    expected = [(-9223372036854775808,), (0,), (9223372036854775807,)]
     duckdb_results = perform_query_on_cursor(query, duckdb_conn)
     pg_results = perform_query_on_cursor(query, pgduck_conn)
 
-    duckdb_results_str = [(str(item[0]),) for item in duckdb_results]
-    pg_results_str = [(str(item[0]),) for item in pg_results]
-
-    # Get normalized transmit results
     transmit_results = perform_transmit_query(query, pgduck_conn, tmp_path)
-    transmit_results = [(item[0],) for item in transmit_results]
+    transmit_results = [(int(item[0]),) for item in transmit_results]
 
     assert (
-        duckdb_results_str == pg_results_str == transmit_results == expected
+        duckdb_results == pg_results == transmit_results == expected
     ), "BIGINT results do not match expected values!"
 
 
 def test_utinyint(setup_table, duckdb_conn, pgduck_conn, tmp_path):
     query = "SELECT utinyint_col FROM duckdb_supported_types_table WHERE utinyint_col IS NOT NULL ORDER BY utinyint_col"
-    expected = [("0",), ("255",)]
+    expected = [(0,), (255,)]
     duckdb_results = perform_query_on_cursor(query, duckdb_conn)
     pg_results = perform_query_on_cursor(query, pgduck_conn)
 
-    duckdb_results_str = [(str(item[0]),) for item in duckdb_results]
-    pg_results_str = [(str(item[0]),) for item in pg_results]
-
-    # Get normalized transmit results
     transmit_results = perform_transmit_query(query, pgduck_conn, tmp_path)
-    transmit_results = [(item[0],) for item in transmit_results]
+    transmit_results = [(int(item[0]),) for item in transmit_results]
 
     assert (
-        duckdb_results_str == pg_results_str == transmit_results == expected
+        duckdb_results == pg_results == transmit_results == expected
     ), "UTINYINT results do not match expected values!"
 
 
 def test_usmallint(setup_table, duckdb_conn, pgduck_conn, tmp_path):
     query = "SELECT usmallint_col FROM duckdb_supported_types_table WHERE usmallint_col IS NOT NULL ORDER BY usmallint_col"
-    expected = [("0",), ("65535",)]
+    expected = [(0,), (65535,)]
     duckdb_results = perform_query_on_cursor(query, duckdb_conn)
     pg_results = perform_query_on_cursor(query, pgduck_conn)
 
-    duckdb_results_str = [(str(item[0]),) for item in duckdb_results]
-    pg_results_str = [(str(item[0]),) for item in pg_results]
-
-    # Get normalized transmit results
     transmit_results = perform_transmit_query(query, pgduck_conn, tmp_path)
-    transmit_results = [(item[0],) for item in transmit_results]
+    transmit_results = [(int(item[0]),) for item in transmit_results]
 
     assert (
-        duckdb_results_str == pg_results_str == transmit_results == expected
+        duckdb_results == pg_results == transmit_results == expected
     ), "USMALLINT results do not match expected values!"
 
 
 def test_uinteger(setup_table, duckdb_conn, pgduck_conn, tmp_path):
     query = "SELECT uinteger_col FROM duckdb_supported_types_table WHERE uinteger_col IS NOT NULL ORDER BY uinteger_col"
-    expected = [("0",), ("4294967295",)]
+    expected = [(0,), (4294967295,)]
     duckdb_results = perform_query_on_cursor(query, duckdb_conn)
     pg_results = perform_query_on_cursor(query, pgduck_conn)
 
-    duckdb_results_str = [(str(item[0]),) for item in duckdb_results]
-    pg_results_str = [(str(item[0]),) for item in pg_results]
-
-    # Get normalized transmit results
     transmit_results = perform_transmit_query(query, pgduck_conn, tmp_path)
-    transmit_results = [(item[0],) for item in transmit_results]
+    transmit_results = [(int(item[0]),) for item in transmit_results]
 
     assert (
-        duckdb_results_str == pg_results_str == transmit_results == expected
+        duckdb_results == pg_results == transmit_results == expected
     ), "UINTEGER results do not match expected values!"
 
 
 def test_uint64(setup_table, duckdb_conn, pgduck_conn, tmp_path):
     query = "SELECT uint64_col FROM duckdb_supported_types_table WHERE uint64_col IS NOT NULL ORDER BY uint64_col"
-    expected = [("0",), ("9223372036854775807",), ("18446744073709551615",)]
+    expected = [(0,), (9223372036854775807,), (18446744073709551615,)]
     duckdb_results = perform_query_on_cursor(query, duckdb_conn)
     pg_results = perform_query_on_cursor(query, pgduck_conn)
 
-    duckdb_results_str = [(str(item[0]),) for item in duckdb_results]
-    pg_results_str = [(str(item[0]),) for item in pg_results]
-
-    # Get normalized transmit results
     transmit_results = perform_transmit_query(query, pgduck_conn, tmp_path)
-    transmit_results = [(item[0],) for item in transmit_results]
+    transmit_results = [(int(item[0]),) for item in transmit_results]
 
     assert (
-        duckdb_results_str == pg_results_str == transmit_results == expected
+        duckdb_results == pg_results == transmit_results == expected
     ), "UINT64 results do not match expected values!"
 
 
@@ -770,55 +738,48 @@ def test_uuid(setup_table, duckdb_conn, pgduck_conn, tmp_path):
 def test_hugeint(setup_table, duckdb_conn, pgduck_conn, tmp_path):
     query = "SELECT hugeint_col FROM duckdb_supported_types_table WHERE hugeint_col IS NOT NULL ORDER BY hugeint_col"
     expected = [
-        ("-17014118346046923173168730371588410572",),
-        ("-9223372036854775808",),
-        ("-2147483648",),
-        ("-32768",),
-        ("-1",),
-        ("0",),
-        ("1",),
-        ("32767",),
-        ("2147483647",),
-        ("9223372036854775807",),
-        ("17014118346046923173168730371588410572",),
+        (-17014118346046923173168730371588410572,),
+        (-9223372036854775808,),
+        (-2147483648,),
+        (-32768,),
+        (-1,),
+        (0,),
+        (1,),
+        (32767,),
+        (2147483647,),
+        (9223372036854775807,),
+        (17014118346046923173168730371588410572,),
     ]
     duckdb_results = perform_query_on_cursor(query, duckdb_conn)
     pg_results = perform_query_on_cursor(query, pgduck_conn)
 
-    duckdb_results_str = [(str(item[0]),) for item in duckdb_results]
-    pg_results_str = [(str(item[0]),) for item in pg_results]
-
-    # Get normalized transmit results
+    # pg_results arrive as Decimal (NUMERIC OID); Decimal == int compares equal.
     transmit_results = perform_transmit_query(query, pgduck_conn, tmp_path)
-    transmit_results = [(item[0],) for item in transmit_results]
+    transmit_results = [(int(item[0]),) for item in transmit_results]
 
     assert (
-        duckdb_results_str == pg_results_str == transmit_results == expected
+        duckdb_results == pg_results == transmit_results == expected
     ), "HUGEINT results do not match expected values!"
 
 
 def test_uhugeint(setup_table, duckdb_conn, pgduck_conn, tmp_path):
     query = "SELECT uhugeint_col FROM duckdb_supported_types_table WHERE uhugeint_col IS NOT NULL ORDER BY uhugeint_col"
     expected = [
-        ("0",),
-        ("1",),
-        ("65535",),
-        ("4294967295",),
-        ("18446744073709551615",),
-        ("340282366920938463463374607431768211455",),
+        (0,),
+        (1,),
+        (65535,),
+        (4294967295,),
+        (18446744073709551615,),
+        (340282366920938463463374607431768211455,),
     ]
     duckdb_results = perform_query_on_cursor(query, duckdb_conn)
     pg_results = perform_query_on_cursor(query, pgduck_conn)
 
-    duckdb_results_str = [(str(item[0]),) for item in duckdb_results]
-    pg_results_str = [(str(item[0]),) for item in pg_results]
-
-    # Get normalized transmit results
     transmit_results = perform_transmit_query(query, pgduck_conn, tmp_path)
-    transmit_results = [(item[0],) for item in transmit_results]
+    transmit_results = [(int(item[0]),) for item in transmit_results]
 
     assert (
-        duckdb_results_str == pg_results_str == transmit_results == expected
+        duckdb_results == pg_results == transmit_results == expected
     ), "UHUGEINT results do not match expected values!"
 
 
