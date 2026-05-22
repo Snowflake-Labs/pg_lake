@@ -1308,13 +1308,11 @@ CreateTxDataFileIdsTempTableIfNotExists(void)
 		"create temporary table if not exists " TX_DATA_FILES_QUALIFIED_TABLE_NAME " "
 		"(id bigint primary key) USING heap ON COMMIT DELETE ROWS;";
 
-	SPI_START_EXTENSION_OWNER(PgLakeTable);
+	SPI_START_EXTENSION_OWNER_ALLOWING_TEMP_OBJECTS(PgLakeTable);
 
 	bool		readOnly = false;
 
-	ALLOW_TEMP_OBJECTS_BEGIN();
 	SPI_execute(query, readOnly, 0);
-	ALLOW_TEMP_OBJECTS_END();
 
 	SPI_END();
 }

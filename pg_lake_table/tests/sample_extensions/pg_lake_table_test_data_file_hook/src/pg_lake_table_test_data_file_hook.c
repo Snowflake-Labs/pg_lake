@@ -23,7 +23,7 @@
  *    calls this hook on each newly-added data file; when the hook is set
  *    and returns true, pg_lake_table records the file ID in a
  *    per-transaction temp table.  That site exercises the
- *    ALLOW_TEMP_OBJECTS scope around SPI in
+ *    SPI_START_EXTENSION_OWNER_ALLOWING_TEMP_OBJECTS variant in
  *    CreateTxDataFileIdsTempTableIfNotExists.
  *
  * 2. Exposes run_iceberg_dml_under_extension_owner(query text), a SQL

@@ -189,34 +189,58 @@
 	SPI_finish();
 
 /*
+ * SPI_START_EXTENSION_OWNER_ALLOWING_TEMP_OBJECTS is the temp-object-friendly
+ * variant of SPI_START_EXTENSION_OWNER.  It applies the same extension-owner
+ * identity switch and search_path = pg_catalog, pg_temp lockdown, but omits
+ * SECURITY_RESTRICTED_OPERATION so the enclosed SPI block may create temporary
+ * objects (CREATE TEMP TABLE, CREATE TEMP SEQUENCE, etc.).  PostgreSQL
+ * forbids creating temp objects under SECURITY_RESTRICTED_OPERATION because
+ * the temp namespace cannot be safely established within a restricted
+ * context.
+ *
+ * Use only around fixed, statically-known DDL with no caller-supplied values
+ * flowing into the SPI query: dropping the restricted-op flag re-permits
+ * SET / role-change side-effects, so the search_path lockdown is the only
+ * defense against hijack via the caller's environment.  Pair with SPI_END.
+ *
+ * Usage: SPI_START_EXTENSION_OWNER_ALLOWING_TEMP_OBJECTS(PgLakeTable)
+ */
+#define SPI_START_EXTENSION_OWNER_ALLOWING_TEMP_OBJECTS(Extension) \
+	SPI_START_VARS() \
+	GetUserIdAndSecContext(&_savedUserId, &_savedSecurityContext); \
+	SetUserIdAndSecContext(ExtensionOwnerId(Extension), \
+						   SECURITY_LOCAL_USERID_CHANGE); \
+	DISABLE_QUERY_TRACKING() \
+	(void) set_config_option("search_path", "pg_catalog, pg_temp", \
+							 PGC_SUSET, PGC_S_SESSION, \
+							 GUC_ACTION_SAVE, true, 0, false); \
+	SPI_connect();
+
+/*
  * ALLOW_TEMP_OBJECTS_BEGIN / ALLOW_TEMP_OBJECTS_END
  *
  * Temporarily clear SECURITY_RESTRICTED_OPERATION around a small region of
  * code so the enclosed operation can create or mutate temporary objects
- * (CREATE TEMP TABLE, CREATE TEMP SEQUENCE, etc.).  PostgreSQL forbids those
- * under SECURITY_RESTRICTED_OPERATION because the temp namespace cannot be
- * safely established within a restricted context.
+ * (CREATE TEMP TABLE, CREATE TEMP SEQUENCE, etc.).  Use this for non-SPI
+ * call sites where the restricted-op flag was set by a caller further up the
+ * stack -- e.g. inside an FDW callback invoked from a user query running
+ * under SPI_START_EXTENSION_OWNER.  For SPI sites that the current code
+ * controls directly, use SPI_START_EXTENSION_OWNER_ALLOWING_TEMP_OBJECTS
+ * instead so the opt-out is visible at the SPI entry helper.
  *
- * Independent of SPI: works wherever the current security context has
- * SECURITY_RESTRICTED_OPERATION set, including inside SPI_START_EXTENSION_OWNER
- * blocks, BEGIN_EXTENSION_OWNER_CONTEXT blocks, or any caller that set the
- * flag itself.  The search_path lockdown that the surrounding
- * extension-owner helpers establish is unaffected; only the rejection of
- * SET / role-change side-effects is lifted.
+ * The search_path lockdown that the surrounding extension-owner helpers
+ * establish is unaffected; only the rejection of SET / role-change
+ * side-effects is lifted.
  *
  * Use only around fixed, statically-known DDL.  Keep the region as small as
- * possible -- ideally a single SPI_execute() / DefineRelation() / similar
- * call with no caller-supplied values flowing into the operation.  Always
- * pair BEGIN with END.
+ * possible -- ideally a single DefineRelation() / DefineIndex() call with no
+ * caller-supplied values flowing into the operation.  Always pair BEGIN with
+ * END.
  *
  * Usage:
- *     SPI_START_EXTENSION_OWNER(PgLakeTable);
- *     ...
  *     ALLOW_TEMP_OBJECTS_BEGIN();
- *     SPI_execute("create temporary table ...", false, 0);
+ *     DefineRelation(...);
  *     ALLOW_TEMP_OBJECTS_END();
- *     ...
- *     SPI_END();
  */
 #define ALLOW_TEMP_OBJECTS_BEGIN() \
 	Oid			_allowTempUserId; \
