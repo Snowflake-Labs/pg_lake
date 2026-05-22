@@ -173,7 +173,7 @@ ProcessCreateFromFile(CreateStmt *createStmt,
 		if (!IsSupportedURL(definitionFromURL))
 		{
 			ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							errmsg("pg_lake_copy: only s3://, gs://, az://, azure://, and abfss:// URLs are "
+							errmsg("pg_lake_copy: only s3://, gs://, az://, azure://, abfss://, hf://, and r2:// URLs are "
 								   "currently supported")));
 		}
 
@@ -194,7 +194,7 @@ ProcessCreateFromFile(CreateStmt *createStmt,
 		if (!IsSupportedURL(loadFromURL))
 		{
 			ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							errmsg("pg_lake_copy: only s3://, gs://, az://, azure://, and abfss:// URLs are "
+							errmsg("pg_lake_copy: only s3://, gs://, az://, azure://, abfss://, hf://, and r2:// URLs are "
 								   "currently supported")));
 		}
 

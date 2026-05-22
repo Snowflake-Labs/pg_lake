@@ -49,7 +49,7 @@ def test_pg_lake_iceberg_table_metadata(
     )
 
     assert (
-        "pg_lake_iceberg: only s3://, gs://, az://, azure://, and abfss:// are supported"
+        "pg_lake_iceberg: only s3://, gs://, az://, azure://, abfss://, hf://, and r2:// are supported"
         in error
     )
 
@@ -111,7 +111,7 @@ def test_unsupported_url(installcheck, superuser_conn, iceberg_extension, s3):
     error = run_query(query, superuser_conn, raise_error=False)
 
     assert (
-        "pg_lake_iceberg: only s3://, gs://, az://, azure://, and abfss:// are supported"
+        "pg_lake_iceberg: only s3://, gs://, az://, azure://, abfss://, hf://, and r2:// are supported"
         in error
     )
 

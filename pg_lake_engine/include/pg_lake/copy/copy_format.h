@@ -30,6 +30,7 @@
 #define HTTP_URL_PREFIX "http://"
 #define HTTPS_URL_PREFIX "https://"
 #define HUGGING_FACE_URL_PREFIX "hf://"
+#define R2_URL_PREFIX "r2://"
 #define STAGE_URL_PREFIX "@STAGE/"
 
 
