@@ -349,8 +349,6 @@ find_duck_type_info(duckdb_type duckType)
  * complex logical types), we fall back to TEXTOID so the client can still
  * consume the text-serialised value we always send.
  *
- * Note: consider falling back to InvalidOid (0).
- *
  * For DECIMAL we always return NUMERICOID regardless of width/scale;
  * callers that need the typmod should handle that separately.
  */
