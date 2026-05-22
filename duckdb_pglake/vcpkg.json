@@ -9,7 +9,9 @@
     },
     "zlib",
     "openssl",
-    "curl"
+    "curl",
+    "roaring",
+    "avro-c"
   ],
   "vcpkg-configuration": {
     "overlay-ports": [

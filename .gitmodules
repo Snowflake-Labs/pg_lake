@@ -10,3 +10,7 @@
 [submodule "test_common/rest_catalog/polaris"]
 	path = test_common/rest_catalog/polaris
 	url = https://github.com/apache/polaris.git
+[submodule "duckdb_pglake/duckdb-iceberg"]
+	path = duckdb_pglake/duckdb-iceberg
+	url = https://github.com/duckdb/duckdb-iceberg.git
+	branch = v1.5-variegata

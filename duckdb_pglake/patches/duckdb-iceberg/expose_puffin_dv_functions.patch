@@ -1,0 +1,1336 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index e500ccd3..8d33f624 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -38,6 +38,7 @@ set(EXTENSION_SOURCES
+ 	src/catalog/rest/transaction/iceberg_transaction_update.cpp
+ 	src/common/iceberg_utils.cpp
+ 	src/common/iceberg_default.cpp
++	src/common/iceberg_puffin.cpp
+ 	src/core/deletes/iceberg_deletion_vector.cpp
+ 	src/core/deletes/iceberg_equality_delete.cpp
+ 	src/core/deletes/iceberg_positional_delete.cpp
+@@ -73,6 +74,7 @@ set(EXTENSION_SOURCES
+ 	src/function/ducklake/ducklake_data_file.cpp
+ 	src/function/ducklake/ducklake_delete_file.cpp
+ 	src/function/iceberg_functions.cpp
++	src/function/iceberg_puffin_dv_functions.cpp
+ 	src/function/iceberg_scalar_functions.cpp
+ 	src/function/metadata/iceberg_column_stats.cpp
+ 	src/function/metadata/iceberg_load_table_response.cpp
+diff --git a/src/common/iceberg_puffin.cpp b/src/common/iceberg_puffin.cpp
+new file mode 100644
+index 00000000..7f800b6e
+--- /dev/null
++++ b/src/common/iceberg_puffin.cpp
+@@ -0,0 +1,359 @@
++//===----------------------------------------------------------------------===//
++//                         duckdb-iceberg
++//
++// iceberg_puffin.cpp
++//
++// Implementation notes:
++//
++//   File layout (Iceberg Puffin spec, all multi-byte ints are little-endian
++//   unless noted):
++//
++//     +-----------------------------+ offset 0
++//     | head magic "PFA1" (4 bytes) |
++//     +-----------------------------+
++//     | blob[0] payload bytes       |
++//     | ...                         |
++//     | blob[N-1] payload bytes     |
++//     +-----------------------------+
++//     | footer start magic "PFA1"   |
++//     | footer payload JSON         |  <-- footer_payload_length bytes,
++//     |                             |      may be LZ4-compressed (flag bit 0)
++//     | footer_payload_length (i32) |
++//     | flags                 (i32) |
++//     | tail magic "PFA1"           |
++//     +-----------------------------+ EOF
++//
++// We always write Flags=0 (uncompressed footer). The reader rejects
++// Flags != 0 with a clear error instead of silently producing garbage.
++//
++//===----------------------------------------------------------------------===//
++
++#include "common/iceberg_puffin.hpp"
++
++#include "duckdb/common/exception.hpp"
++#include "duckdb/common/file_system.hpp"
++#include "duckdb/common/types/uuid.hpp"
++#include "yyjson.hpp"
++
++using namespace duckdb_yyjson;
++
++namespace duckdb {
++
++const char ICEBERG_PUFFIN_MAGIC[4] = {'P', 'F', 'A', '1'};
++
++namespace {
++
++constexpr idx_t PUFFIN_MAGIC_SIZE = 4;
++//! footer_payload_length(4) + flags(4) + tail magic(4) = 12 bytes
++constexpr idx_t PUFFIN_FOOTER_TRAILER_SIZE = sizeof(int32_t) + sizeof(int32_t) + PUFFIN_MAGIC_SIZE;
++
++static int32_t LoadLittleEndian32(const data_t *src) {
++	int32_t v = 0;
++	memcpy(&v, src, sizeof(int32_t));
++	return v;
++}
++
++static void StoreLittleEndian32(int32_t v, data_t *dst) {
++	memcpy(dst, &v, sizeof(int32_t));
++}
++
++static yyjson_mut_val *BuildFieldsArray(yyjson_mut_doc *doc, const vector<int32_t> &fields) {
++	auto arr = yyjson_mut_arr(doc);
++	for (auto field : fields) {
++		yyjson_mut_arr_add_int(doc, arr, field);
++	}
++	return arr;
++}
++
++static yyjson_mut_val *BuildPropertiesObject(yyjson_mut_doc *doc, const map<string, string> &props) {
++	auto obj = yyjson_mut_obj(doc);
++	for (auto &kv : props) {
++		yyjson_mut_obj_add_strcpy(doc, obj, kv.first.c_str(), kv.second.c_str());
++	}
++	return obj;
++}
++
++static string BuildFooterJSON(const vector<IcebergPuffinBlob> &blobs, const map<string, string> &file_properties) {
++	auto doc = yyjson_mut_doc_new(nullptr);
++	if (!doc) {
++		throw IOException("Failed to allocate yyjson document for Puffin footer");
++	}
++	auto root = yyjson_mut_obj(doc);
++	yyjson_mut_doc_set_root(doc, root);
++
++	auto blobs_arr = yyjson_mut_arr(doc);
++	yyjson_mut_obj_add_val(doc, root, "blobs", blobs_arr);
++	for (auto &b : blobs) {
++		auto bobj = yyjson_mut_obj(doc);
++		//! Field order mirrors apache/iceberg's FileMetadataParser.toJson so a
++		//! byte-equal hash against Spark's writer output is achievable for the
++		//! same input. Required fields per the Puffin spec are: type, fields,
++		//! snapshot-id, sequence-number, offset, length. snapshot-id and
++		//! sequence-number MUST be present for any Puffin v1 file - for
++		//! deletion-vector-v1 blobs the spec mandates -1 (which is exactly the
++		//! default value of IcebergPuffinBlob::{snapshot_id,sequence_number}).
++		yyjson_mut_obj_add_strcpy(doc, bobj, "type", b.type.c_str());
++		yyjson_mut_obj_add_val(doc, bobj, "fields", BuildFieldsArray(doc, b.fields));
++		yyjson_mut_obj_add_int(doc, bobj, "snapshot-id", b.snapshot_id);
++		yyjson_mut_obj_add_int(doc, bobj, "sequence-number", b.sequence_number);
++		yyjson_mut_obj_add_int(doc, bobj, "offset", b.offset);
++		yyjson_mut_obj_add_int(doc, bobj, "length", b.length);
++		if (!b.compression_codec.empty()) {
++			yyjson_mut_obj_add_strcpy(doc, bobj, "compression-codec", b.compression_codec.c_str());
++		}
++		if (!b.properties.empty()) {
++			yyjson_mut_obj_add_val(doc, bobj, "properties", BuildPropertiesObject(doc, b.properties));
++		}
++		yyjson_mut_arr_add_val(blobs_arr, bobj);
++	}
++	if (!file_properties.empty()) {
++		yyjson_mut_obj_add_val(doc, root, "properties", BuildPropertiesObject(doc, file_properties));
++	}
++
++	size_t json_len = 0;
++	char *json_str = yyjson_mut_write(doc, 0, &json_len);
++	if (!json_str) {
++		yyjson_mut_doc_free(doc);
++		throw IOException("Failed to serialize Puffin footer JSON");
++	}
++	string out(json_str, json_len);
++	free(json_str);
++	yyjson_mut_doc_free(doc);
++	return out;
++}
++
++static IcebergPuffinBlob ParseBlobObject(yyjson_val *obj) {
++	IcebergPuffinBlob blob;
++	auto type_val = yyjson_obj_get(obj, "type");
++	if (!type_val || !yyjson_is_str(type_val)) {
++		throw InvalidInputException("Puffin footer blob is missing required string field 'type'");
++	}
++	blob.type = yyjson_get_str(type_val);
++
++	auto offset_val = yyjson_obj_get(obj, "offset");
++	auto length_val = yyjson_obj_get(obj, "length");
++	if (!offset_val || !yyjson_is_int(offset_val) || !length_val || !yyjson_is_int(length_val)) {
++		throw InvalidInputException("Puffin footer blob is missing required integer 'offset'/'length'");
++	}
++	blob.offset = yyjson_get_sint(offset_val);
++	blob.length = yyjson_get_sint(length_val);
++
++	if (auto fields_val = yyjson_obj_get(obj, "fields")) {
++		if (!yyjson_is_arr(fields_val)) {
++			throw InvalidInputException("Puffin footer blob 'fields' must be an array");
++		}
++		size_t idx, max;
++		yyjson_val *item;
++		yyjson_arr_foreach(fields_val, idx, max, item) {
++			blob.fields.push_back(static_cast<int32_t>(yyjson_get_sint(item)));
++		}
++	}
++	if (auto snap_val = yyjson_obj_get(obj, "snapshot-id")) {
++		if (yyjson_is_int(snap_val)) {
++			blob.snapshot_id = yyjson_get_sint(snap_val);
++		}
++	}
++	if (auto seq_val = yyjson_obj_get(obj, "sequence-number")) {
++		if (yyjson_is_int(seq_val)) {
++			blob.sequence_number = yyjson_get_sint(seq_val);
++		}
++	}
++	if (auto codec_val = yyjson_obj_get(obj, "compression-codec")) {
++		if (yyjson_is_str(codec_val)) {
++			blob.compression_codec = yyjson_get_str(codec_val);
++		}
++	}
++	if (auto props_val = yyjson_obj_get(obj, "properties")) {
++		if (!yyjson_is_obj(props_val)) {
++			throw InvalidInputException("Puffin footer blob 'properties' must be an object");
++		}
++		size_t idx, max;
++		yyjson_val *key, *val;
++		yyjson_obj_foreach(props_val, idx, max, key, val) {
++			if (yyjson_is_str(key) && yyjson_is_str(val)) {
++				blob.properties[yyjson_get_str(key)] = yyjson_get_str(val);
++			}
++		}
++	}
++	return blob;
++}
++
++static IcebergPuffinMetadata ParseFooterJSON(const char *json, size_t json_len, int64_t file_size,
++                                             bool footer_compressed) {
++	yyjson_doc *doc = yyjson_read(json, json_len, 0);
++	if (!doc) {
++		throw InvalidInputException("Puffin footer JSON is not valid: parse error");
++	}
++	yyjson_val *root = yyjson_doc_get_root(doc);
++	if (!root || !yyjson_is_obj(root)) {
++		yyjson_doc_free(doc);
++		throw InvalidInputException("Puffin footer JSON root must be a JSON object");
++	}
++
++	IcebergPuffinMetadata result;
++	result.file_size = file_size;
++	result.footer_compressed = footer_compressed;
++
++	auto blobs_val = yyjson_obj_get(root, "blobs");
++	if (!blobs_val || !yyjson_is_arr(blobs_val)) {
++		yyjson_doc_free(doc);
++		throw InvalidInputException("Puffin footer is missing the required 'blobs' array");
++	}
++	size_t idx, max;
++	yyjson_val *item;
++	yyjson_arr_foreach(blobs_val, idx, max, item) {
++		result.blobs.push_back(ParseBlobObject(item));
++	}
++	if (auto props_val = yyjson_obj_get(root, "properties")) {
++		if (yyjson_is_obj(props_val)) {
++			size_t pi, pmax;
++			yyjson_val *pkey, *pval;
++			yyjson_obj_foreach(props_val, pi, pmax, pkey, pval) {
++				if (yyjson_is_str(pkey) && yyjson_is_str(pval)) {
++					result.properties[yyjson_get_str(pkey)] = yyjson_get_str(pval);
++				}
++			}
++		}
++	}
++	yyjson_doc_free(doc);
++	return result;
++}
++
++} // namespace
++
++//===--------------------------------------------------------------------===//
++// IcebergPuffinFile::ReadMetadata
++//===--------------------------------------------------------------------===//
++IcebergPuffinMetadata IcebergPuffinFile::ReadMetadata(FileSystem &fs, const string &path) {
++	auto handle = fs.OpenFile(path, FileOpenFlags::FILE_FLAGS_READ);
++	int64_t file_size = handle->GetFileSize();
++	if (file_size < (int64_t)(PUFFIN_MAGIC_SIZE + PUFFIN_FOOTER_TRAILER_SIZE + PUFFIN_MAGIC_SIZE)) {
++		throw InvalidInputException("File '%s' is too small (%lld bytes) to be a valid Puffin file", path, file_size);
++	}
++
++	//! Verify head magic.
++	data_t head[PUFFIN_MAGIC_SIZE];
++	handle->Read(head, PUFFIN_MAGIC_SIZE, 0);
++	if (memcmp(head, ICEBERG_PUFFIN_MAGIC, PUFFIN_MAGIC_SIZE) != 0) {
++		throw InvalidInputException("File '%s' is not a Puffin file: head magic mismatch (expected 'PFA1')", path);
++	}
++
++	//! Read the trailer: footer_payload_length (4 LE) + flags (4 LE) + tail magic (4).
++	data_t trailer[PUFFIN_FOOTER_TRAILER_SIZE];
++	handle->Read(trailer, PUFFIN_FOOTER_TRAILER_SIZE, file_size - (int64_t)PUFFIN_FOOTER_TRAILER_SIZE);
++	if (memcmp(trailer + sizeof(int32_t) * 2, ICEBERG_PUFFIN_MAGIC, PUFFIN_MAGIC_SIZE) != 0) {
++		throw InvalidInputException("File '%s' is not a Puffin file: tail magic mismatch (expected 'PFA1')", path);
++	}
++	int32_t footer_payload_length = LoadLittleEndian32(trailer);
++	int32_t flags = LoadLittleEndian32(trailer + sizeof(int32_t));
++	bool footer_compressed = (flags & 0x1) != 0;
++	if (flags & ~0x1) {
++		throw InvalidInputException("File '%s' has unknown Puffin footer flags (0x%x)", path, flags);
++	}
++	if (footer_compressed) {
++		throw NotImplementedException(
++		    "File '%s' has an LZ4-compressed Puffin footer; this reader currently supports uncompressed footers only",
++		    path);
++	}
++	if (footer_payload_length < 0) {
++		throw InvalidInputException("File '%s' has a negative Puffin footer payload length (%d)", path,
++		                            footer_payload_length);
++	}
++
++	//! Footer payload sits immediately before the trailer, prefixed by the footer-start magic.
++	int64_t footer_start = file_size - (int64_t)PUFFIN_FOOTER_TRAILER_SIZE - (int64_t)footer_payload_length -
++	                       (int64_t)PUFFIN_MAGIC_SIZE;
++	if (footer_start < (int64_t)PUFFIN_MAGIC_SIZE) {
++		throw InvalidInputException("File '%s' Puffin footer offsets are inconsistent (footer_start=%lld)", path,
++		                            footer_start);
++	}
++	data_t footer_magic[PUFFIN_MAGIC_SIZE];
++	handle->Read(footer_magic, PUFFIN_MAGIC_SIZE, footer_start);
++	if (memcmp(footer_magic, ICEBERG_PUFFIN_MAGIC, PUFFIN_MAGIC_SIZE) != 0) {
++		throw InvalidInputException("File '%s' Puffin footer-start magic mismatch", path);
++	}
++	vector<char> footer_payload(footer_payload_length);
++	if (footer_payload_length > 0) {
++		handle->Read((data_ptr_t)footer_payload.data(), footer_payload_length,
++		             footer_start + (int64_t)PUFFIN_MAGIC_SIZE);
++	}
++	return ParseFooterJSON(footer_payload.data(), footer_payload_length, file_size, footer_compressed);
++}
++
++//===--------------------------------------------------------------------===//
++// IcebergPuffinFile::ReadBlobPayload
++//===--------------------------------------------------------------------===//
++vector<data_t> IcebergPuffinFile::ReadBlobPayload(FileSystem &fs, const string &path, int64_t offset, int64_t length) {
++	if (offset < 0 || length < 0) {
++		throw InvalidInputException("iceberg_puffin: negative blob offset (%lld) or length (%lld)", offset, length);
++	}
++	auto handle = fs.OpenFile(path, FileOpenFlags::FILE_FLAGS_READ);
++	vector<data_t> out(length);
++	if (length > 0) {
++		handle->Read(out.data(), length, offset);
++	}
++	return out;
++}
++
++//===--------------------------------------------------------------------===//
++// IcebergPuffinFile::Write
++//===--------------------------------------------------------------------===//
++IcebergPuffinMetadata IcebergPuffinFile::Write(FileSystem &fs, const string &path, vector<IcebergPuffinBlob> blobs,
++                                               const map<string, string> &file_properties) {
++	if (blobs.empty()) {
++		throw InvalidInputException("iceberg_puffin_write: at least one blob is required");
++	}
++
++	auto handle = fs.OpenFile(path, FileOpenFlags::FILE_FLAGS_WRITE | FileOpenFlags::FILE_FLAGS_FILE_CREATE);
++
++	//! Head magic.
++	handle->Write((void *)ICEBERG_PUFFIN_MAGIC, PUFFIN_MAGIC_SIZE);
++	int64_t cursor = (int64_t)PUFFIN_MAGIC_SIZE;
++
++	//! Write blob payloads, capturing their absolute offsets and lengths.
++	for (auto &blob : blobs) {
++		blob.offset = cursor;
++		blob.length = static_cast<int64_t>(blob.payload.size());
++		if (blob.length > 0) {
++			handle->Write(blob.payload.data(), blob.length);
++		}
++		cursor += blob.length;
++	}
++
++	//! Footer start magic.
++	handle->Write((void *)ICEBERG_PUFFIN_MAGIC, PUFFIN_MAGIC_SIZE);
++	cursor += (int64_t)PUFFIN_MAGIC_SIZE;
++
++	//! Footer payload JSON.
++	string footer_json = BuildFooterJSON(blobs, file_properties);
++	if (footer_json.size() > (size_t)INT32_MAX) {
++		throw IOException("Puffin footer payload exceeds 2 GiB");
++	}
++	if (!footer_json.empty()) {
++		handle->Write((void *)footer_json.data(), footer_json.size());
++	}
++	cursor += (int64_t)footer_json.size();
++
++	//! footer_payload_length, flags (uncompressed), tail magic.
++	data_t trailer[PUFFIN_FOOTER_TRAILER_SIZE];
++	StoreLittleEndian32(static_cast<int32_t>(footer_json.size()), trailer);
++	StoreLittleEndian32(0, trailer + sizeof(int32_t));
++	memcpy(trailer + sizeof(int32_t) * 2, ICEBERG_PUFFIN_MAGIC, PUFFIN_MAGIC_SIZE);
++	handle->Write(trailer, PUFFIN_FOOTER_TRAILER_SIZE);
++	cursor += (int64_t)PUFFIN_FOOTER_TRAILER_SIZE;
++
++	handle->Close();
++
++	IcebergPuffinMetadata meta;
++	meta.file_size = cursor;
++	meta.properties = file_properties;
++	meta.blobs = std::move(blobs);
++	//! Caller does not need the payload anymore; drop it to keep the result light.
++	for (auto &b : meta.blobs) {
++		b.payload.clear();
++		b.payload.shrink_to_fit();
++	}
++	return meta;
++}
++
++} // namespace duckdb
+diff --git a/src/core/deletes/iceberg_deletion_vector.cpp b/src/core/deletes/iceberg_deletion_vector.cpp
+index 0a4d50bd..d7d87f34 100644
+--- a/src/core/deletes/iceberg_deletion_vector.cpp
++++ b/src/core/deletes/iceberg_deletion_vector.cpp
+@@ -65,8 +65,8 @@ bool CRC32::table_initialized = false;
+ 
+ } // namespace
+ 
+-shared_ptr<IcebergDeletionVectorData> IcebergDeletionVectorData::FromBlob(const BoundIcebergManifestEntry &entry,
+-                                                                          data_ptr_t blob_start, idx_t blob_length) {
++void IcebergDeletionVectorData::ParseBlob(data_ptr_t blob_start, idx_t blob_length,
++                                          unordered_map<int32_t, roaring::Roaring> &out_bitmaps) {
+ 	//! https://iceberg.apache.org/puffin-spec/#deletion-vector-v1-blob-type
+ 
+ 	auto blob_end = blob_start + blob_length;
+@@ -98,9 +98,8 @@ shared_ptr<IcebergDeletionVectorData> IcebergDeletionVectorData::FromBlob(const
+ 	vector_size -= sizeof(int64_t);
+ 	D_ASSERT(blob_start < blob_end);
+ 
+-	auto result_p = make_shared_ptr<IcebergDeletionVectorData>(entry);
+-	auto &result = *result_p;
+-	result.bitmaps.reserve(amount_of_bitmaps);
++	out_bitmaps.clear();
++	out_bitmaps.reserve(amount_of_bitmaps);
+ 	for (int64_t i = 0; i < amount_of_bitmaps; i++) {
+ 		auto key = Load<int32_t>(blob_start);
+ 		blob_start += sizeof(int32_t);
+@@ -113,7 +112,7 @@ shared_ptr<IcebergDeletionVectorData> IcebergDeletionVectorData::FromBlob(const
+ 		blob_start += bitmap_size;
+ 		vector_size -= bitmap_size;
+ 		D_ASSERT(blob_start < blob_end);
+-		result.bitmaps.emplace(key, std::move(bitmap));
++		out_bitmaps.emplace(key, std::move(bitmap));
+ 	}
+ 	//! Compute and compare the checksum
+ 	auto checksummed_data_length = blob_start - checksummed_data_start;
+@@ -129,6 +128,12 @@ shared_ptr<IcebergDeletionVectorData> IcebergDeletionVectorData::FromBlob(const
+ 		    "Stored checksum (%d) does not match computed checksum (%d), the DeletionVector is corrupted",
+ 		    stored_checksum, checksum);
+ 	}
++}
++
++shared_ptr<IcebergDeletionVectorData> IcebergDeletionVectorData::FromBlob(const BoundIcebergManifestEntry &entry,
++                                                                          data_ptr_t blob_start, idx_t blob_length) {
++	auto result_p = make_shared_ptr<IcebergDeletionVectorData>(entry);
++	ParseBlob(blob_start, blob_length, result_p->bitmaps);
+ 	return result_p;
+ }
+ 
+diff --git a/src/execution/operator/physical_iceberg_create_table.cpp b/src/execution/operator/physical_iceberg_create_table.cpp
+index 9ba0a8bc..7e5fb68e 100644
+--- a/src/execution/operator/physical_iceberg_create_table.cpp
++++ b/src/execution/operator/physical_iceberg_create_table.cpp
+@@ -24,7 +24,9 @@ PhysicalIcebergCreateTable::PhysicalIcebergCreateTable(PhysicalPlan &physical_pl
+ unique_ptr<GlobalOperatorState> PhysicalIcebergCreateTable::GetGlobalOperatorState(ClientContext &context) const {
+ 	auto global_state = make_uniq<IcebergCreateTableGlobalState>();
+ 	MakeCreateTableRequest(context, *global_state);
+-	return global_state;
++	//! Explicit std::move: derived->base unique_ptr conversion. gcc requires
++	//! this; clang accepts the implicit move silently.
++	return std::move(global_state);
+ }
+ 
+ void PhysicalIcebergCreateTable::MakeCreateTableRequest(ClientContext &client_context,
+diff --git a/src/function/iceberg_functions.cpp b/src/function/iceberg_functions.cpp
+index ba33efc4..e372d15f 100644
+--- a/src/function/iceberg_functions.cpp
++++ b/src/function/iceberg_functions.cpp
+@@ -1,4 +1,5 @@
+ #include "function/iceberg_functions.hpp"
++#include "function/iceberg_puffin_dv_functions.hpp"
+ 
+ #include "duckdb/execution/expression_executor.hpp"
+ #include "duckdb/function/cast/cast_function_set.hpp"
+@@ -25,6 +26,15 @@ vector<TableFunctionSet> IcebergFunctions::GetTableFunctions(ExtensionLoader &lo
+ 	functions.push_back(GetIcebergToDuckLakeFunction());
+ 	functions.push_back(GetIcebergLoadTableResponseFunction());
+ 
++	//! Public Puffin envelope + Deletion Vector primitives. See
++	//! `function/iceberg_puffin_dv_functions.hpp`.
++	functions.push_back(IcebergPuffinDvFunctions::GetReadMetadataFunction());
++	functions.push_back(IcebergPuffinDvFunctions::GetReadBlobFunction());
++	functions.push_back(IcebergPuffinDvFunctions::GetWriteFunction());
++	functions.push_back(IcebergPuffinDvFunctions::GetDecodeFunction());
++	functions.push_back(IcebergPuffinDvFunctions::GetDvPositionsFunction());
++	functions.push_back(IcebergPuffinDvFunctions::GetWriteDvsFunction());
++
+ 	return functions;
+ }
+ 
+@@ -33,6 +43,7 @@ vector<ScalarFunctionSet> IcebergFunctions::GetScalarFunctions() {
+ 
+ 	functions.push_back(GetIcebergBucketFunction());
+ 	functions.push_back(GetIcebergTruncateFunction());
++	functions.push_back(IcebergPuffinDvFunctions::GetEncodeFunction());
+ 
+ 	return functions;
+ }
+diff --git a/src/function/iceberg_puffin_dv_functions.cpp b/src/function/iceberg_puffin_dv_functions.cpp
+new file mode 100644
+index 00000000..debdfa19
+--- /dev/null
++++ b/src/function/iceberg_puffin_dv_functions.cpp
+@@ -0,0 +1,652 @@
++//===----------------------------------------------------------------------===//
++//                         duckdb-iceberg
++//
++// iceberg_puffin_dv_functions.cpp
++//
++// Public SQL surface for Iceberg V3 Puffin envelope + Deletion Vector
++// primitives. The functions in this file are thin wrappers around
++//   - IcebergPuffinFile  (common/iceberg_puffin.{hpp,cpp}) and
++//   - IcebergDeletionVectorData::{ToBlob,ParseBlob} (core/deletes/...)
++// so the underlying behaviour is identical to duckdb-iceberg's internal
++// V3 read/write path. They exist to let projects that don't link
++// duckdb-iceberg as a C++ library (e.g. pg_lake's pgduck_server) consume
++// the codec via SQL.
++//
++//===----------------------------------------------------------------------===//
++
++#include "function/iceberg_puffin_dv_functions.hpp"
++
++#include "common/iceberg_puffin.hpp"
++#include "core/deletes/iceberg_deletion_vector.hpp"
++
++#include "duckdb/common/exception.hpp"
++#include "duckdb/common/file_system.hpp"
++#include "duckdb/common/string_util.hpp"
++#include "duckdb/common/types/blob.hpp"
++#include "duckdb/common/vector_operations/binary_executor.hpp"
++#include "duckdb/common/vector_operations/unary_executor.hpp"
++#include "duckdb/function/scalar_function.hpp"
++#include "duckdb/function/table_function.hpp"
++#include "duckdb/main/client_context.hpp"
++#include "duckdb/main/database.hpp"
++
++#include <algorithm>
++
++namespace duckdb {
++
++namespace {
++
++//===--------------------------------------------------------------------===//
++// Helpers
++//===--------------------------------------------------------------------===//
++
++//! Build the high32 -> Roaring map from a vector of 64-bit positions.
++static unordered_map<int32_t, roaring::Roaring> BuildBitmaps(const vector<int64_t> &positions) {
++	unordered_map<int32_t, roaring::Roaring> bitmaps;
++	for (auto pos : positions) {
++		if (pos < 0) {
++			throw InvalidInputException("iceberg deletion vector: positions must be non-negative, got %lld", pos);
++		}
++		int32_t high = static_cast<int32_t>(static_cast<uint64_t>(pos) >> 32);
++		uint32_t low = static_cast<uint32_t>(static_cast<uint64_t>(pos) & 0xFFFFFFFFu);
++		bitmaps[high].add(low);
++	}
++	return bitmaps;
++}
++
++//! Drain a bitmap map into a sorted vector of full 64-bit positions.
++static vector<int64_t> MaterializeSortedPositions(const unordered_map<int32_t, roaring::Roaring> &bitmaps) {
++	vector<int64_t> out;
++	uint64_t total = 0;
++	for (auto &kv : bitmaps) {
++		total += kv.second.cardinality();
++	}
++	out.reserve(total);
++	struct IterCtx {
++		vector<int64_t> *out;
++		int32_t high;
++	};
++	for (auto &kv : bitmaps) {
++		IterCtx ctx {&out, kv.first};
++		kv.second.iterate(
++		    [](uint32_t value, void *ptr) -> bool {
++			    auto *c = static_cast<IterCtx *>(ptr);
++			    uint64_t combined =
++			        (static_cast<uint64_t>(static_cast<uint32_t>(c->high)) << 32) | static_cast<uint64_t>(value);
++			    c->out->push_back(static_cast<int64_t>(combined));
++			    return true;
++		    },
++		    &ctx);
++	}
++	std::sort(out.begin(), out.end());
++	return out;
++}
++
++//! Extract a flat vector of int64 positions from a LIST(BIGINT) Value.
++static vector<int64_t> ListValueToInt64Vector(const Value &list_val) {
++	if (list_val.IsNull()) {
++		return {};
++	}
++	auto &children = ListValue::GetChildren(list_val);
++	vector<int64_t> out;
++	out.reserve(children.size());
++	for (auto &child : children) {
++		if (child.IsNull()) {
++			continue;
++		}
++		out.push_back(child.GetValue<int64_t>());
++	}
++	return out;
++}
++
++//===--------------------------------------------------------------------===//
++// Scalar: iceberg_dv_encode(BIGINT[]) -> BLOB
++//===--------------------------------------------------------------------===//
++
++static void IcebergDvEncodeFunction(DataChunk &input, ExpressionState &state, Vector &result) {
++	auto count = input.size();
++	auto &list_vec = input.data[0];
++	UnifiedVectorFormat list_format;
++	list_vec.ToUnifiedFormat(count, list_format);
++	auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_format);
++
++	auto &child_vec = ListVector::GetEntry(list_vec);
++	auto child_size = ListVector::GetListSize(list_vec);
++	UnifiedVectorFormat child_format;
++	child_vec.ToUnifiedFormat(child_size, child_format);
++	auto child_data = UnifiedVectorFormat::GetData<int64_t>(child_format);
++
++	auto result_data = FlatVector::GetData<string_t>(result);
++	auto &result_validity = FlatVector::Validity(result);
++
++	for (idx_t i = 0; i < count; i++) {
++		auto list_idx = list_format.sel->get_index(i);
++		if (!list_format.validity.RowIsValid(list_idx)) {
++			result_validity.SetInvalid(i);
++			continue;
++		}
++		auto entry = list_entries[list_idx];
++
++		vector<int64_t> positions;
++		positions.reserve(entry.length);
++		for (idx_t j = 0; j < entry.length; j++) {
++			auto child_idx = child_format.sel->get_index(entry.offset + j);
++			if (!child_format.validity.RowIsValid(child_idx)) {
++				continue;
++			}
++			positions.push_back(child_data[child_idx]);
++		}
++
++		auto bitmaps = BuildBitmaps(positions);
++		auto blob_bytes = IcebergDeletionVectorData::ToBlob(bitmaps);
++		result_data[i] =
++		    StringVector::AddStringOrBlob(result, string_t((const char *)blob_bytes.data(), blob_bytes.size()));
++	}
++	if (count == 1) {
++		result.SetVectorType(VectorType::CONSTANT_VECTOR);
++	}
++}
++
++} // namespace
++
++ScalarFunctionSet IcebergPuffinDvFunctions::GetEncodeFunction() {
++	ScalarFunctionSet set("iceberg_dv_encode");
++	set.AddFunction(ScalarFunction({LogicalType::LIST(LogicalType::BIGINT)}, LogicalType::BLOB,
++	                               IcebergDvEncodeFunction));
++	return set;
++}
++
++//===--------------------------------------------------------------------===//
++// TVF: iceberg_puffin_read_metadata(path) -> per-blob row
++//===--------------------------------------------------------------------===//
++
++namespace {
++
++struct PuffinMetadataBindData : public TableFunctionData {
++	IcebergPuffinMetadata metadata;
++};
++
++struct PuffinMetadataGlobalState : public GlobalTableFunctionState {
++	idx_t emit_offset = 0;
++};
++
++static unique_ptr<FunctionData> PuffinReadMetadataBind(ClientContext &context, TableFunctionBindInput &input,
++                                                      vector<LogicalType> &return_types, vector<string> &names) {
++	auto result = make_uniq<PuffinMetadataBindData>();
++	auto path = input.inputs[0].GetValue<string>();
++	auto &fs = FileSystem::GetFileSystem(context);
++	result->metadata = IcebergPuffinFile::ReadMetadata(fs, path);
++
++	return_types = {LogicalType::INTEGER,
++	                LogicalType::VARCHAR,
++	                LogicalType::LIST(LogicalType::INTEGER),
++	                LogicalType::BIGINT,
++	                LogicalType::BIGINT,
++	                LogicalType::BIGINT,
++	                LogicalType::BIGINT,
++	                LogicalType::VARCHAR,
++	                LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR),
++	                LogicalType::BIGINT,
++	                LogicalType::BOOLEAN};
++	names = {"blob_idx", "blob_type",         "fields",     "snapshot_id", "sequence_number",  "blob_offset",
++	         "blob_length", "compression_codec", "properties", "file_size",   "footer_compressed"};
++	return std::move(result);
++}
++
++static unique_ptr<GlobalTableFunctionState> PuffinReadMetadataInit(ClientContext &context,
++                                                                  TableFunctionInitInput &input) {
++	return make_uniq<PuffinMetadataGlobalState>();
++}
++
++static Value FieldsAsValue(const vector<int32_t> &fields) {
++	vector<Value> vals;
++	vals.reserve(fields.size());
++	for (auto f : fields) {
++		vals.push_back(Value::INTEGER(f));
++	}
++	return Value::LIST(LogicalType::INTEGER, std::move(vals));
++}
++
++static Value PropertiesAsMapValue(const map<string, string> &props) {
++	vector<Value> keys;
++	vector<Value> values;
++	for (auto &kv : props) {
++		keys.push_back(Value(kv.first));
++		values.push_back(Value(kv.second));
++	}
++	return Value::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR, std::move(keys), std::move(values));
++}
++
++static void PuffinReadMetadataFunction(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
++	auto &bind_data = input.bind_data->Cast<PuffinMetadataBindData>();
++	auto &state = input.global_state->Cast<PuffinMetadataGlobalState>();
++	auto &md = bind_data.metadata;
++	idx_t remaining = md.blobs.size() - state.emit_offset;
++	idx_t emit = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
++	output.SetCardinality(emit);
++	for (idx_t i = 0; i < emit; i++) {
++		auto idx = state.emit_offset + i;
++		auto &b = md.blobs[idx];
++		output.SetValue(0, i, Value::INTEGER(static_cast<int32_t>(idx)));
++		output.SetValue(1, i, Value(b.type));
++		output.SetValue(2, i, FieldsAsValue(b.fields));
++		output.SetValue(3, i, b.snapshot_id >= 0 ? Value::BIGINT(b.snapshot_id) : Value(LogicalType::BIGINT));
++		output.SetValue(4, i,
++		                b.sequence_number >= 0 ? Value::BIGINT(b.sequence_number) : Value(LogicalType::BIGINT));
++		output.SetValue(5, i, Value::BIGINT(b.offset));
++		output.SetValue(6, i, Value::BIGINT(b.length));
++		output.SetValue(7, i, b.compression_codec.empty() ? Value(LogicalType::VARCHAR) : Value(b.compression_codec));
++		output.SetValue(8, i, PropertiesAsMapValue(b.properties));
++		output.SetValue(9, i, Value::BIGINT(md.file_size));
++		output.SetValue(10, i, Value::BOOLEAN(md.footer_compressed));
++	}
++	state.emit_offset += emit;
++}
++
++} // namespace
++
++TableFunctionSet IcebergPuffinDvFunctions::GetReadMetadataFunction() {
++	TableFunctionSet set("iceberg_puffin_read_metadata");
++	set.AddFunction(TableFunction({LogicalType::VARCHAR}, PuffinReadMetadataFunction, PuffinReadMetadataBind,
++	                              PuffinReadMetadataInit));
++	return set;
++}
++
++//===--------------------------------------------------------------------===//
++// TVF: iceberg_puffin_read_blob(path, offset, length) -> (blob)
++//===--------------------------------------------------------------------===//
++
++namespace {
++
++struct PuffinReadBlobBindData : public TableFunctionData {
++	vector<data_t> payload;
++};
++
++struct PuffinReadBlobGlobalState : public GlobalTableFunctionState {
++	bool emitted = false;
++};
++
++static unique_ptr<FunctionData> PuffinReadBlobBind(ClientContext &context, TableFunctionBindInput &input,
++                                                   vector<LogicalType> &return_types, vector<string> &names) {
++	auto result = make_uniq<PuffinReadBlobBindData>();
++	auto path = input.inputs[0].GetValue<string>();
++	auto offset = input.inputs[1].GetValue<int64_t>();
++	auto length = input.inputs[2].GetValue<int64_t>();
++	auto &fs = FileSystem::GetFileSystem(context);
++	result->payload = IcebergPuffinFile::ReadBlobPayload(fs, path, offset, length);
++
++	return_types = {LogicalType::BLOB};
++	names = {"blob"};
++	return std::move(result);
++}
++
++static unique_ptr<GlobalTableFunctionState> PuffinReadBlobInit(ClientContext &context,
++                                                              TableFunctionInitInput &input) {
++	return make_uniq<PuffinReadBlobGlobalState>();
++}
++
++static void PuffinReadBlobFunction(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
++	auto &bind_data = input.bind_data->Cast<PuffinReadBlobBindData>();
++	auto &state = input.global_state->Cast<PuffinReadBlobGlobalState>();
++	if (state.emitted) {
++		output.SetCardinality(0);
++		return;
++	}
++	output.SetCardinality(1);
++	output.SetValue(0, 0, Value::BLOB(bind_data.payload.data(), bind_data.payload.size()));
++	state.emitted = true;
++}
++
++} // namespace
++
++TableFunctionSet IcebergPuffinDvFunctions::GetReadBlobFunction() {
++	TableFunctionSet set("iceberg_puffin_read_blob");
++	set.AddFunction(TableFunction({LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT},
++	                              PuffinReadBlobFunction, PuffinReadBlobBind, PuffinReadBlobInit));
++	return set;
++}
++
++//===--------------------------------------------------------------------===//
++// TVF: iceberg_puffin_write(path, blob_types VARCHAR[], blob_payloads BLOB[])
++//===--------------------------------------------------------------------===//
++
++namespace {
++
++struct PuffinWriteBindData : public TableFunctionData {
++	IcebergPuffinMetadata result_metadata;
++};
++
++struct PuffinWriteGlobalState : public GlobalTableFunctionState {
++	idx_t emit_offset = 0;
++};
++
++static unique_ptr<FunctionData> PuffinWriteBind(ClientContext &context, TableFunctionBindInput &input,
++                                                vector<LogicalType> &return_types, vector<string> &names) {
++	auto result = make_uniq<PuffinWriteBindData>();
++	auto path = input.inputs[0].GetValue<string>();
++
++	auto &types_val = input.inputs[1];
++	auto &payloads_val = input.inputs[2];
++	auto &types_children = ListValue::GetChildren(types_val);
++	auto &payloads_children = ListValue::GetChildren(payloads_val);
++	if (types_children.size() != payloads_children.size()) {
++		throw InvalidInputException(
++		    "iceberg_puffin_write: blob_types and blob_payloads must have the same length (got %lld vs %lld)",
++		    (int64_t)types_children.size(), (int64_t)payloads_children.size());
++	}
++	if (types_children.empty()) {
++		throw InvalidInputException("iceberg_puffin_write: at least one blob is required");
++	}
++
++	vector<IcebergPuffinBlob> blobs;
++	blobs.reserve(types_children.size());
++	for (idx_t i = 0; i < types_children.size(); i++) {
++		IcebergPuffinBlob b;
++		b.type = types_children[i].GetValue<string>();
++		auto &payload_val = payloads_children[i];
++		auto payload_str = payload_val.GetValueUnsafe<string_t>();
++		b.payload.assign((const data_t *)payload_str.GetData(),
++		                 (const data_t *)payload_str.GetData() + payload_str.GetSize());
++		blobs.push_back(std::move(b));
++	}
++	auto &fs = FileSystem::GetFileSystem(context);
++	result->result_metadata = IcebergPuffinFile::Write(fs, path, std::move(blobs));
++
++	return_types = {LogicalType::INTEGER, LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT,
++	                LogicalType::BIGINT};
++	names = {"blob_idx", "blob_type", "blob_offset", "blob_length", "file_size"};
++	return std::move(result);
++}
++
++static unique_ptr<GlobalTableFunctionState> PuffinWriteInit(ClientContext &context, TableFunctionInitInput &input) {
++	return make_uniq<PuffinWriteGlobalState>();
++}
++
++static void PuffinWriteFunction(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
++	auto &bind_data = input.bind_data->Cast<PuffinWriteBindData>();
++	auto &state = input.global_state->Cast<PuffinWriteGlobalState>();
++	auto &md = bind_data.result_metadata;
++	idx_t remaining = md.blobs.size() - state.emit_offset;
++	idx_t emit = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
++	output.SetCardinality(emit);
++	for (idx_t i = 0; i < emit; i++) {
++		auto idx = state.emit_offset + i;
++		auto &b = md.blobs[idx];
++		output.SetValue(0, i, Value::INTEGER(static_cast<int32_t>(idx)));
++		output.SetValue(1, i, Value(b.type));
++		output.SetValue(2, i, Value::BIGINT(b.offset));
++		output.SetValue(3, i, Value::BIGINT(b.length));
++		output.SetValue(4, i, Value::BIGINT(md.file_size));
++	}
++	state.emit_offset += emit;
++}
++
++} // namespace
++
++TableFunctionSet IcebergPuffinDvFunctions::GetWriteFunction() {
++	TableFunctionSet set("iceberg_puffin_write");
++	set.AddFunction(TableFunction({LogicalType::VARCHAR, LogicalType::LIST(LogicalType::VARCHAR),
++	                               LogicalType::LIST(LogicalType::BLOB)},
++	                              PuffinWriteFunction, PuffinWriteBind, PuffinWriteInit));
++	return set;
++}
++
++//===--------------------------------------------------------------------===//
++// TVF: iceberg_dv_decode(blob) -> (pos BIGINT)
++//===--------------------------------------------------------------------===//
++
++namespace {
++
++struct DvDecodeBindData : public TableFunctionData {
++	vector<int64_t> positions;
++};
++
++struct DvDecodeGlobalState : public GlobalTableFunctionState {
++	idx_t emit_offset = 0;
++};
++
++static unique_ptr<FunctionData> DvDecodeBind(ClientContext &context, TableFunctionBindInput &input,
++                                             vector<LogicalType> &return_types, vector<string> &names) {
++	auto result = make_uniq<DvDecodeBindData>();
++	auto blob_str = input.inputs[0].GetValueUnsafe<string_t>();
++
++	unordered_map<int32_t, roaring::Roaring> bitmaps;
++	IcebergDeletionVectorData::ParseBlob((data_ptr_t)blob_str.GetData(), blob_str.GetSize(), bitmaps);
++	result->positions = MaterializeSortedPositions(bitmaps);
++
++	return_types = {LogicalType::BIGINT};
++	names = {"pos"};
++	return std::move(result);
++}
++
++static unique_ptr<GlobalTableFunctionState> DvDecodeInit(ClientContext &context, TableFunctionInitInput &input) {
++	return make_uniq<DvDecodeGlobalState>();
++}
++
++static void DvDecodeFunction(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
++	auto &bind_data = input.bind_data->Cast<DvDecodeBindData>();
++	auto &state = input.global_state->Cast<DvDecodeGlobalState>();
++	idx_t remaining = bind_data.positions.size() - state.emit_offset;
++	idx_t emit = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
++	output.SetCardinality(emit);
++	auto data = FlatVector::GetData<int64_t>(output.data[0]);
++	for (idx_t i = 0; i < emit; i++) {
++		data[i] = bind_data.positions[state.emit_offset + i];
++	}
++	state.emit_offset += emit;
++}
++
++} // namespace
++
++TableFunctionSet IcebergPuffinDvFunctions::GetDecodeFunction() {
++	TableFunctionSet set("iceberg_dv_decode");
++	set.AddFunction(TableFunction({LogicalType::BLOB}, DvDecodeFunction, DvDecodeBind, DvDecodeInit));
++	return set;
++}
++
++//===--------------------------------------------------------------------===//
++// TVF: iceberg_dv_positions(paths VARCHAR[], offsets BIGINT[],
++//                           sizes BIGINT[], referenced_data_files VARCHAR[])
++//      -> TABLE(file_path VARCHAR, pos BIGINT)
++//
++// Multi-blob deletion-vector reader. For every i in [0, len(paths)) it
++// reads the deletion-vector-v1 blob at [offsets[i], offsets[i]+sizes[i])
++// inside the Puffin file at paths[i], decodes it, and emits one row per
++// deleted position with `file_path = referenced_data_files[i]`.
++//
++// The shape mirrors `read_parquet(<positional-delete-files>)`: one TVF
++// call covers a whole scan's worth of DVs, so a query that touches N
++// data files no longer needs an N-leg UNION ALL. The caller (in
++// pg_lake_engine/src/pgduck/read_data.c) builds the four parallel
++// arrays directly from its in-memory `DataFile[]`:
++//
++//   SELECT file_path, pos
++//   FROM iceberg_dv_positions(
++//       ['<p_1>',   '<p_2>',   ...],   -- puffin file paths
++//       [<offset_1>, <offset_2>, ...], -- manifest entry's content_offset (144)
++//       [<size_1>,   <size_2>,   ...], -- manifest entry's content_size_in_bytes (145)
++//       ['<ref_1>', '<ref_2>', ...]    -- manifest entry's referenced_data_file (143)
++//   );
++//
++// `referenced_data_files[i]` is purely the per-blob label stamped onto
++// each output row (the Puffin DV blob itself does not carry a required
++// pointer to its data file - the spec stores that in the manifest
++// entry, and the TVF receives it from the manifest reader).
++//
++// If multiple manifest entries share the same Puffin file (multi-blob
++// Puffin pattern), simply pass the same path multiple times with
++// different (offset, size, ref) triples; each blob is read independently.
++//===--------------------------------------------------------------------===//
++
++namespace {
++
++struct DvPositionsBindData : public TableFunctionData {
++	//! Parallel vectors: positions[i] is a deleted row position whose source
++	//! data file is file_paths[i]. We materialise a flat (file_path, pos)
++	//! tuple stream at bind time so the function can emit STANDARD_VECTOR_SIZE
++	//! chunks without touching the file system.
++	vector<string> file_paths;
++	vector<int64_t> positions;
++};
++
++static unique_ptr<FunctionData> DvPositionsBind(ClientContext &context, TableFunctionBindInput &input,
++                                                vector<LogicalType> &return_types, vector<string> &names) {
++	auto result = make_uniq<DvPositionsBindData>();
++
++	auto &paths_children = ListValue::GetChildren(input.inputs[0]);
++	auto &offsets_children = ListValue::GetChildren(input.inputs[1]);
++	auto &sizes_children = ListValue::GetChildren(input.inputs[2]);
++	auto &refs_children = ListValue::GetChildren(input.inputs[3]);
++	idx_t n = paths_children.size();
++	if (offsets_children.size() != n || sizes_children.size() != n || refs_children.size() != n) {
++		throw InvalidInputException(
++		    "iceberg_dv_positions: the four input arrays must have equal length, "
++		    "got paths=%lld, offsets=%lld, sizes=%lld, referenced_data_files=%lld",
++		    (int64_t)n, (int64_t)offsets_children.size(), (int64_t)sizes_children.size(),
++		    (int64_t)refs_children.size());
++	}
++
++	auto &fs = FileSystem::GetFileSystem(context);
++	for (idx_t i = 0; i < n; i++) {
++		if (paths_children[i].IsNull() || offsets_children[i].IsNull() || sizes_children[i].IsNull() ||
++		    refs_children[i].IsNull()) {
++			throw InvalidInputException("iceberg_dv_positions: NULL element at index %lld", (int64_t)i);
++		}
++		auto path = paths_children[i].GetValue<string>();
++		auto offset = offsets_children[i].GetValue<int64_t>();
++		auto length = sizes_children[i].GetValue<int64_t>();
++		auto ref = refs_children[i].GetValue<string>();
++
++		auto payload = IcebergPuffinFile::ReadBlobPayload(fs, path, offset, length);
++		unordered_map<int32_t, roaring::Roaring> bitmaps;
++		IcebergDeletionVectorData::ParseBlob(payload.data(), payload.size(), bitmaps);
++		auto positions = MaterializeSortedPositions(bitmaps);
++		result->file_paths.insert(result->file_paths.end(), positions.size(), ref);
++		result->positions.insert(result->positions.end(), positions.begin(), positions.end());
++	}
++
++	return_types = {LogicalType::VARCHAR, LogicalType::BIGINT};
++	names = {"file_path", "pos"};
++	return std::move(result);
++}
++
++static void DvPositionsFunction(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
++	auto &bind_data = input.bind_data->Cast<DvPositionsBindData>();
++	auto &state = input.global_state->Cast<DvDecodeGlobalState>();
++	idx_t remaining = bind_data.positions.size() - state.emit_offset;
++	idx_t emit = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
++	output.SetCardinality(emit);
++	auto pos_data = FlatVector::GetData<int64_t>(output.data[1]);
++	for (idx_t i = 0; i < emit; i++) {
++		auto idx = state.emit_offset + i;
++		output.SetValue(0, i, Value(bind_data.file_paths[idx]));
++		pos_data[i] = bind_data.positions[idx];
++	}
++	state.emit_offset += emit;
++}
++
++} // namespace
++
++TableFunctionSet IcebergPuffinDvFunctions::GetDvPositionsFunction() {
++	TableFunctionSet set("iceberg_dv_positions");
++	set.AddFunction(TableFunction({LogicalType::LIST(LogicalType::VARCHAR), LogicalType::LIST(LogicalType::BIGINT),
++	                               LogicalType::LIST(LogicalType::BIGINT), LogicalType::LIST(LogicalType::VARCHAR)},
++	                              DvPositionsFunction, DvPositionsBind, DvDecodeInit));
++	return set;
++}
++
++//===--------------------------------------------------------------------===//
++// TVF: iceberg_write_dvs(path, referenced_data_file, positions BIGINT[])
++//
++// Writes a single-blob Puffin file containing one deletion-vector-v1 blob
++// for the given referenced_data_file. Returns one row with the manifest
++// fields the future pg_lake_iceberg V3 writer will persist.
++//===--------------------------------------------------------------------===//
++
++namespace {
++
++struct WriteDvsBindData : public TableFunctionData {
++	string referenced_data_file;
++	int64_t content_offset = 0;
++	int64_t content_size_in_bytes = 0;
++	int64_t cardinality = 0;
++	int64_t file_size = 0;
++};
++
++struct WriteDvsGlobalState : public GlobalTableFunctionState {
++	bool emitted = false;
++};
++
++static unique_ptr<FunctionData> WriteDvsBind(ClientContext &context, TableFunctionBindInput &input,
++                                             vector<LogicalType> &return_types, vector<string> &names) {
++	auto result = make_uniq<WriteDvsBindData>();
++	auto path = input.inputs[0].GetValue<string>();
++	result->referenced_data_file = input.inputs[1].GetValue<string>();
++	auto positions = ListValueToInt64Vector(input.inputs[2]);
++	result->cardinality = static_cast<int64_t>(positions.size());
++
++	auto bitmaps = BuildBitmaps(positions);
++	auto blob_bytes = IcebergDeletionVectorData::ToBlob(bitmaps);
++
++	IcebergPuffinBlob blob;
++	blob.type = "deletion-vector-v1";
++	//! Puffin spec requires `fields = [<row-position field id>]` for
++	//! `deletion-vector-v1` blobs. The row-position field id is the Iceberg
++	//! reserved id for `_pos` in any data file's schema (apache/iceberg's
++	//! MetadataColumns.ROW_POSITION). Spark/Iceberg-Java write this; without
++	//! it, conformant readers reject the blob.
++	constexpr int32_t ICEBERG_ROW_POSITION_FIELD_ID = 2147483546;
++	blob.fields = {ICEBERG_ROW_POSITION_FIELD_ID};
++	//! Spec-required: `cardinality` reports the number of deleted positions
++	//! encoded by this DV. Optional but Spark-emitted: `referenced-data-file`
++	//! mirrors the manifest entry's field 143 inside the blob itself. The
++	//! reader resolves the data file via the manifest (entry's
++	//! `referenced_data_file`), so the blob property is purely informational.
++	blob.properties["cardinality"] = StringUtil::Format("%lld", result->cardinality);
++	blob.properties["referenced-data-file"] = result->referenced_data_file;
++	blob.payload.assign(blob_bytes.begin(), blob_bytes.end());
++
++	vector<IcebergPuffinBlob> blobs;
++	blobs.push_back(std::move(blob));
++	auto &fs = FileSystem::GetFileSystem(context);
++	auto written = IcebergPuffinFile::Write(fs, path, std::move(blobs));
++	result->content_offset = written.blobs[0].offset;
++	result->content_size_in_bytes = written.blobs[0].length;
++	result->file_size = written.file_size;
++
++	return_types = {LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT, LogicalType::BIGINT,
++	                LogicalType::BIGINT};
++	names = {"referenced_data_file", "content_offset", "content_size_in_bytes", "cardinality", "file_size"};
++	return std::move(result);
++}
++
++static unique_ptr<GlobalTableFunctionState> WriteDvsInit(ClientContext &context, TableFunctionInitInput &input) {
++	return make_uniq<WriteDvsGlobalState>();
++}
++
++static void WriteDvsFunction(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
++	auto &bind_data = input.bind_data->Cast<WriteDvsBindData>();
++	auto &state = input.global_state->Cast<WriteDvsGlobalState>();
++	if (state.emitted) {
++		output.SetCardinality(0);
++		return;
++	}
++	output.SetCardinality(1);
++	output.SetValue(0, 0, Value(bind_data.referenced_data_file));
++	output.SetValue(1, 0, Value::BIGINT(bind_data.content_offset));
++	output.SetValue(2, 0, Value::BIGINT(bind_data.content_size_in_bytes));
++	output.SetValue(3, 0, Value::BIGINT(bind_data.cardinality));
++	output.SetValue(4, 0, Value::BIGINT(bind_data.file_size));
++	state.emitted = true;
++}
++
++} // namespace
++
++TableFunctionSet IcebergPuffinDvFunctions::GetWriteDvsFunction() {
++	TableFunctionSet set("iceberg_write_dvs");
++	set.AddFunction(TableFunction({LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::LIST(LogicalType::BIGINT)},
++	                              WriteDvsFunction, WriteDvsBind, WriteDvsInit));
++	return set;
++}
++
++} // namespace duckdb
+diff --git a/src/include/common/iceberg_puffin.hpp b/src/include/common/iceberg_puffin.hpp
+new file mode 100644
+index 00000000..fcf63429
+--- /dev/null
++++ b/src/include/common/iceberg_puffin.hpp
+@@ -0,0 +1,104 @@
++//===----------------------------------------------------------------------===//
++//                         duckdb-iceberg
++//
++// iceberg_puffin.hpp
++//
++// Minimal, spec-compliant reader/writer for the Iceberg Puffin file format
++// (https://iceberg.apache.org/puffin-spec/). Supports:
++//
++//   * Magic-prefixed envelope (`PFA1` head + tail magic)
++//   * One or more arbitrary blobs concatenated between the magics
++//   * Footer JSON describing each blob's type, offset, length, optional
++//     fields[], snapshot-id, sequence-number, compression-codec, properties
++//   * Uncompressed footer payload on write (Flags=0)
++//   * Tolerant reader (raises a clear error on compressed footers since we
++//     do not yet decode LZ4_FRAME; otherwise reads any spec-conformant file)
++//
++// This is the foundation the public iceberg_puffin_* and iceberg_dv_*
++// table-valued and scalar functions sit on top of (see
++// `function/iceberg_puffin_dv_functions.hpp`).
++//
++//===----------------------------------------------------------------------===//
++
++#pragma once
++
++#include "duckdb/common/common.hpp"
++#include "duckdb/common/file_system.hpp"
++#include "duckdb/common/types.hpp"
++#include "duckdb/common/types/value.hpp"
++
++namespace duckdb {
++
++//! Iceberg Puffin file magic ("PFA1") - appears at offset 0, immediately
++//! before the footer payload, and as the very last 4 bytes of the file.
++extern const char ICEBERG_PUFFIN_MAGIC[4];
++
++//! Metadata for a single blob inside a Puffin file. Mirrors the JSON object
++//! shape described in the Iceberg Puffin spec under "Blob metadata".
++struct IcebergPuffinBlob {
++	string type;
++	//! Optional list of field-ids the blob applies to (Iceberg V3 manifest
++	//! field 142 for deletion vectors). May be empty.
++	vector<int32_t> fields;
++	//! Optional Iceberg snapshot id this blob was written under; -1 if absent.
++	int64_t snapshot_id = -1;
++	//! Optional sequence number; -1 if absent.
++	int64_t sequence_number = -1;
++	//! Byte offset of the blob payload inside the Puffin file. For files we
++	//! write this is always >= 4 (the head magic is at offset 0..3).
++	int64_t offset = 0;
++	//! Byte length of the blob payload.
++	int64_t length = 0;
++	//! Compression codec for the blob payload itself. Empty string means
++	//! uncompressed (the typical case for deletion-vector-v1 blobs).
++	string compression_codec;
++	//! Free-form per-blob properties.
++	map<string, string> properties;
++
++	//! Raw blob payload bytes. Only populated by the writer (input side) and
++	//! by reader call paths that explicitly request payload materialization.
++	vector<data_t> payload;
++};
++
++//! Convenience holder for the parsed file-level metadata (everything from the
++//! footer JSON, plus the absolute file size). `blobs[*].payload` is empty
++//! when produced by `IcebergPuffinFile::ReadMetadata` - call
++//! `IcebergPuffinFile::ReadBlobPayload` (or read raw bytes via DuckDB's
++//! filesystem) to materialize a single blob without re-parsing the footer.
++struct IcebergPuffinMetadata {
++	vector<IcebergPuffinBlob> blobs;
++	map<string, string> properties;
++	int64_t file_size = 0;
++	//! True if the file was written with a compressed footer payload.
++	//! `ReadMetadata` raises rather than returns true today, because we do
++	//! not yet decompress LZ4_FRAME footers; the field is preserved here for
++	//! future-proofing.
++	bool footer_compressed = false;
++};
++
++//! Public Puffin reader: open + parse footer JSON, then optionally read
++//! individual blob payloads. All I/O goes through DuckDB's FileSystem, so
++//! S3 / Azure / local paths are supported uniformly.
++class IcebergPuffinFile {
++public:
++	//! Read the Puffin envelope at `path` and return its parsed metadata
++	//! (file_size, blobs[], properties). Does NOT materialize blob bytes.
++	static IcebergPuffinMetadata ReadMetadata(FileSystem &fs, const string &path);
++
++	//! Read a single blob payload by absolute byte offset + length (these are
++	//! the values stored in the Iceberg manifest's content_offset and
++	//! content_size_in_bytes fields for V3 deletion-vector entries, or
++	//! `blob.offset` and `blob.length` from `ReadMetadata`).
++	static vector<data_t> ReadBlobPayload(FileSystem &fs, const string &path, int64_t offset, int64_t length);
++
++	//! Write `blobs` (in order) into a new Puffin file at `path`. Each
++	//! `IcebergPuffinBlob::payload` must contain the blob bytes to write;
++	//! `offset` and `length` are populated by the writer and returned in the
++	//! result. The footer is always written uncompressed (Flags=0). Returns
++	//! a metadata object whose blobs[] mirror the input with offset/length
++	//! filled in, plus the total `file_size`.
++	static IcebergPuffinMetadata Write(FileSystem &fs, const string &path, vector<IcebergPuffinBlob> blobs,
++	                                   const map<string, string> &file_properties = {});
++};
++
++} // namespace duckdb
+diff --git a/src/include/core/deletes/iceberg_deletion_vector.hpp b/src/include/core/deletes/iceberg_deletion_vector.hpp
+index fdfb5747..0382e7cb 100644
+--- a/src/include/core/deletes/iceberg_deletion_vector.hpp
++++ b/src/include/core/deletes/iceberg_deletion_vector.hpp
+@@ -19,6 +19,13 @@ public:
+ 	                                                      idx_t blob_length);
+ 	static vector<data_t> ToBlob(const unordered_map<int32_t, roaring::Roaring> &bitmaps);
+ 
++	//! Parse a deletion-vector-v1 blob (magic + bitmaps + CRC) into a bitmap map.
++	//! This is the codec-only entry point: it does not depend on iceberg manifest
++	//! state and is reused by the public iceberg_dv_decode TVF added by
++	//! `patches/duckdb-iceberg/expose_puffin_dv_functions.patch` in pg_lake.
++	static void ParseBlob(data_ptr_t blob_start, idx_t blob_length,
++	                      unordered_map<int32_t, roaring::Roaring> &out_bitmaps);
++
+ public:
+ 	unique_ptr<DeleteFilter> ToFilter() const override;
+ 	void ToSet(set<idx_t> &out) const override;
+diff --git a/src/include/function/iceberg_puffin_dv_functions.hpp b/src/include/function/iceberg_puffin_dv_functions.hpp
+new file mode 100644
+index 00000000..7ce20c00
+--- /dev/null
++++ b/src/include/function/iceberg_puffin_dv_functions.hpp
+@@ -0,0 +1,61 @@
++//===----------------------------------------------------------------------===//
++//                         duckdb-iceberg
++//
++// iceberg_puffin_dv_functions.hpp
++//
++// Public DuckDB SQL surface for Puffin file + Iceberg V3 Deletion Vector
++// primitives. Registered by IcebergFunctions::GetTableFunctions / ::GetScalarFunctions.
++//
++//   Scalar functions:
++//     - iceberg_dv_encode(positions BIGINT[]) -> BLOB
++//
++//   Table functions:
++//     - iceberg_puffin_read_metadata(path VARCHAR) -> per-blob row
++//     - iceberg_puffin_read_blob(path VARCHAR, offset BIGINT, length BIGINT) -> BLOB
++//     - iceberg_puffin_write(path VARCHAR, blob_types VARCHAR[], blob_payloads BLOB[]) -> per-blob row
++//     - iceberg_dv_decode(blob BLOB) -> pos BIGINT
++//     - iceberg_dv_positions(paths VARCHAR[], offsets BIGINT[], sizes BIGINT[],
++//                            referenced_data_files VARCHAR[]) -> (file_path, pos)
++//       (one TVF call covers a whole scan: parallel arrays, no UNION ALL,
++//        result has the same shape as `read_parquet(<positional-delete-files>)`).
++//     - iceberg_write_dvs(path VARCHAR, referenced_data_file VARCHAR, positions BIGINT[]) ->
++//                  (referenced_data_file, content_offset, content_size_in_bytes, cardinality, file_size)
++//
++// See patches/duckdb-iceberg/README.md in the pg_lake repo for rationale.
++//
++//===----------------------------------------------------------------------===//
++
++#pragma once
++
++#include "duckdb/function/scalar_function.hpp"
++#include "duckdb/function/table_function.hpp"
++
++namespace duckdb {
++
++class IcebergPuffinDvFunctions {
++public:
++	//! BLOB iceberg_dv_encode(BIGINT[] positions)
++	static ScalarFunctionSet GetEncodeFunction();
++
++	//! TABLE iceberg_puffin_read_metadata(VARCHAR path)
++	static TableFunctionSet GetReadMetadataFunction();
++
++	//! TABLE iceberg_puffin_read_blob(VARCHAR path, BIGINT offset, BIGINT length)
++	static TableFunctionSet GetReadBlobFunction();
++
++	//! TABLE iceberg_puffin_write(VARCHAR path, VARCHAR[] blob_types, BLOB[] blob_payloads)
++	static TableFunctionSet GetWriteFunction();
++
++	//! TABLE iceberg_dv_decode(BLOB blob)
++	static TableFunctionSet GetDecodeFunction();
++
++	//! TABLE iceberg_dv_positions(VARCHAR[] paths, BIGINT[] offsets, BIGINT[] sizes,
++	//!                            VARCHAR[] referenced_data_files)
++	//!     -> TABLE(file_path VARCHAR, pos BIGINT)
++	static TableFunctionSet GetDvPositionsFunction();
++
++	//! TABLE iceberg_write_dvs(VARCHAR path, VARCHAR referenced_data_file, BIGINT[] positions)
++	static TableFunctionSet GetWriteDvsFunction();
++};
++
++} // namespace duckdb

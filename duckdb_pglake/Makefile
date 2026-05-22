@@ -133,9 +133,11 @@ release: patch_duckdb
 #### Misc
 
 patch_duckdb: $(shell find patches -type f -name '*.patch')
-	for patchdir in duckdb duckdb-postgres ; do \
+	for patchdir in duckdb duckdb-postgres duckdb-iceberg ; do \
 		(cd $$patchdir && \
+		git reset HEAD -- . 2>/dev/null || true ; \
 		git checkout -f . && \
+		git clean -fdx src/common src/function src/include 2>/dev/null || true ; \
 		find ../patches/$$patchdir -type f -name '*.patch' -print | sort | xargs -0 printf '%s ' | \
 		while read -r patch; do \
 			echo "applying $$patch to $$patchdir" ; \
@@ -144,9 +146,11 @@ patch_duckdb: $(shell find patches -type f -name '*.patch')
 	done
 
 clean_patches:
-	for patchdir in duckdb duckdb-postgres ; do \
+	for patchdir in duckdb duckdb-postgres duckdb-iceberg ; do \
 		(cd $$patchdir && \
-		git checkout -f . ); \
+		git reset HEAD -- . 2>/dev/null || true ; \
+		git checkout -f . && \
+		git clean -fdx src/common src/function src/include 2>/dev/null || true ); \
 	done
 
 format:
