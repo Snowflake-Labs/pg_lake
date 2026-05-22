@@ -31,7 +31,7 @@ def test_list_files_non_s3_url(pg_conn, generate_data_on_s3):
         raise_error=False,
     )
     assert (
-        "only s3://, gs://, az://, azure://, abfss://, and hf:// urls are supported"
+        "only s3://, gs://, az://, azure://, abfss://, hf://, and r2:// urls are supported"
         in error
     )
     pg_conn.rollback()

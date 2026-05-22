@@ -437,7 +437,8 @@ IsSupportedURL(const char *path)
 		strncmp(path, AZURE_DLS_URL_PREFIX, strlen(AZURE_DLS_URL_PREFIX)) == 0 ||
 		strncmp(path, HTTP_URL_PREFIX, strlen(HTTP_URL_PREFIX)) == 0 ||
 		strncmp(path, HTTPS_URL_PREFIX, strlen(HTTPS_URL_PREFIX)) == 0 ||
-		strncmp(path, HUGGING_FACE_URL_PREFIX, strlen(HUGGING_FACE_URL_PREFIX)) == 0;
+		strncmp(path, HUGGING_FACE_URL_PREFIX, strlen(HUGGING_FACE_URL_PREFIX)) == 0 ||
+		strncmp(path, R2_URL_PREFIX, strlen(R2_URL_PREFIX)) == 0;
 }
 
 

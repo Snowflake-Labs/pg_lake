@@ -1331,7 +1331,7 @@ def test_fdw_table_without_path(pg_conn, s3, extension):
 
     except psycopg2.errors.FeatureNotSupported as e:
         assert (
-            "pg_lake_table: only s3://, gs://, az://, azure://, and abfss:// URLs are currently supported"
+            "pg_lake_table: only s3://, gs://, az://, azure://, abfss://, hf://, and r2:// URLs are currently supported"
             in str(e)
         )
         cur.close()
@@ -1356,7 +1356,7 @@ def test_fdw_table_without_path(pg_conn, s3, extension):
     except psycopg2.errors.FeatureNotSupported as e:
         assert (
             str(e)
-            == 'pg_lake_table: only s3://, gs://, az://, azure://, and abfss:// URLs are currently supported for the "path" option.\n'
+            == 'pg_lake_table: only s3://, gs://, az://, azure://, abfss://, hf://, and r2:// URLs are currently supported for the "path" option.\n'
         )
         cur.close()
         pg_conn.commit()
