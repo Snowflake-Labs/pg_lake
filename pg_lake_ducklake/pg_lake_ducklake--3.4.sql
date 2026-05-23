@@ -619,9 +619,9 @@ SELECT * FROM lake_ducklake.schema_versions;
 CREATE VIEW public.ducklake_snapshot_changes AS
 SELECT
     snapshot_id,
-    changes_made AS operations,
+    changes_made,
     author,
-    commit_message AS description,
+    commit_message,
     commit_extra_info
 FROM lake_ducklake.snapshot_changes;
 
