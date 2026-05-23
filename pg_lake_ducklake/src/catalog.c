@@ -986,10 +986,6 @@ DucklakeAddColumn(Oid tableOid, const char *columnName, const char *columnType,
 	}
 
 	SPI_finish();
-
-	pfree(metadata);
-	pfree(currentSnapshot);
-	pfree(newSnapshot);
 }
 
 /*
@@ -1032,9 +1028,6 @@ DucklakeDropColumn(Oid tableOid, const char *columnName)
 		elog(WARNING, "Column %s not found in DuckLake catalog for drop", columnName);
 
 	SPI_finish();
-
-	pfree(metadata);
-	pfree(newSnapshot);
 }
 
 /*
@@ -1077,6 +1070,4 @@ DucklakeRenameColumn(Oid tableOid, const char *oldName, const char *newName)
 	SPI_exec(query.data, 0);
 
 	SPI_finish();
-
-	pfree(metadata);
 }
