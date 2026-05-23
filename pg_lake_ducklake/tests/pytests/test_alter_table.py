@@ -44,9 +44,9 @@ def test_alter_writes_v1_snapshot_changes_and_schema_versions(pg_cursor):
     pg_cursor.execute(
         """
         SELECT schema_version FROM lake_ducklake.schema_versions
-        WHERE begin_snapshot = %s AND table_id = %s
+        WHERE begin_snapshot = %s
         """,
-        (add_snap, table_id),
+        (add_snap,),
     )
     sv = pg_cursor.fetchone()
     assert sv is not None, "ADD COLUMN must write a schema_versions row"
@@ -72,9 +72,9 @@ def test_alter_writes_v1_snapshot_changes_and_schema_versions(pg_cursor):
     pg_cursor.execute(
         """
         SELECT schema_version FROM lake_ducklake.schema_versions
-        WHERE begin_snapshot = %s AND table_id = %s
+        WHERE begin_snapshot = %s
         """,
-        (drop_snap, table_id),
+        (drop_snap,),
     )
     sv = pg_cursor.fetchone()
     assert sv is not None, "DROP COLUMN must write a schema_versions row"

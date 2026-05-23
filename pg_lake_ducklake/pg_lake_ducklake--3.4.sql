@@ -117,7 +117,7 @@ CREATE TABLE lake_ducklake.data_file (
     row_id_start BIGINT,
     partition_id BIGINT,
     encryption_key VARCHAR,
-    partial_max BIGINT,
+    partial_file_info VARCHAR,
     mapping_id BIGINT
 );
 
@@ -271,12 +271,11 @@ CREATE TABLE lake_ducklake.column_tag (
     PRIMARY KEY (table_id, column_id, key, begin_snapshot)
 );
 
--- Schema versions (per-table schema version history)
+-- Schema versions (records the snapshot at which each schema_version became
+-- current; v0.3 schema, no per-table column).
 CREATE TABLE lake_ducklake.schema_versions (
-    begin_snapshot BIGINT NOT NULL,
-    table_id BIGINT NOT NULL,
-    schema_version BIGINT NOT NULL,
-    PRIMARY KEY (begin_snapshot, table_id)
+    begin_snapshot BIGINT PRIMARY KEY,
+    schema_version BIGINT NOT NULL
 );
 
 -- ============================================================================
@@ -396,8 +395,8 @@ FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_snapshot_insert();
 CREATE FUNCTION lake_ducklake.ducklake_data_file_insert()
 RETURNS TRIGGER AS $$
 BEGIN
-    INSERT INTO lake_ducklake.data_file (data_file_id, table_id, begin_snapshot, end_snapshot, file_order, path, path_is_relative, file_format, record_count, file_size_bytes, footer_size, row_id_start, partition_id, encryption_key, partial_max, mapping_id)
-    VALUES (NEW.data_file_id, NEW.table_id, NEW.begin_snapshot, NEW.end_snapshot, NEW.file_order, NEW.path, NEW.path_is_relative, NEW.file_format, NEW.record_count, NEW.file_size_bytes, NEW.footer_size, NEW.row_id_start, NEW.partition_id, NEW.encryption_key, NEW.partial_max, NEW.mapping_id);
+    INSERT INTO lake_ducklake.data_file (data_file_id, table_id, begin_snapshot, end_snapshot, file_order, path, path_is_relative, file_format, record_count, file_size_bytes, footer_size, row_id_start, partition_id, encryption_key, partial_file_info, mapping_id)
+    VALUES (NEW.data_file_id, NEW.table_id, NEW.begin_snapshot, NEW.end_snapshot, NEW.file_order, NEW.path, NEW.path_is_relative, NEW.file_format, NEW.record_count, NEW.file_size_bytes, NEW.footer_size, NEW.row_id_start, NEW.partition_id, NEW.encryption_key, NEW.partial_file_info, NEW.mapping_id);
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -561,7 +560,7 @@ INSERT INTO lake_ducklake.snapshot (snapshot_id, schema_version, next_catalog_id
 VALUES (0, 0, 1, 1);
 
 INSERT INTO lake_ducklake.metadata (key, value, scope, scope_id)
-VALUES ('ducklake_version', '1.0', NULL, NULL);
+VALUES ('ducklake_version', '0.3', NULL, NULL);
 
 -- ============================================================================
 -- Additional Public Views (remaining 16 tables)
@@ -812,7 +811,7 @@ BEGIN
         row_id_start = NEW.row_id_start,
         partition_id = NEW.partition_id,
         encryption_key = NEW.encryption_key,
-        partial_max = NEW.partial_max,
+        partial_file_info = NEW.partial_file_info,
         mapping_id = NEW.mapping_id
     WHERE data_file_id = OLD.data_file_id;
     RETURN NEW;
