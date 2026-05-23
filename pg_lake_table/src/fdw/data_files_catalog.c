@@ -1493,6 +1493,35 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 {
 	ListCell   *operationCell = NULL;
 
+	/*
+	 * For DuckLake tables, every batch of file changes must land in a new
+	 * snapshot so DuckDB readers can time-travel and so the per-file
+	 * begin_snapshot is recorded correctly. Create that snapshot once up
+	 * front; the DucklakeAdd / DucklakeRemove helpers below pick it up
+	 * via lake_ducklake.snapshot ORDER BY snapshot_id DESC LIMIT 1.
+	 */
+	if (IsDucklakeTable(relationId))
+	{
+		bool		needsSnapshot = false;
+		ListCell   *probeCell;
+
+		foreach(probeCell, metadataOperations)
+		{
+			TableMetadataOperation *op = lfirst(probeCell);
+
+			if (op->type == DATA_FILE_ADD || op->type == DATA_FILE_REMOVE ||
+				op->type == DATA_FILE_REMOVE_ALL)
+			{
+				needsSnapshot = true;
+				break;
+			}
+		}
+
+		if (needsSnapshot)
+			(void) DucklakeCreateSnapshot("INSERT/UPDATE/DELETE operation",
+										  NULL, NULL);
+	}
+
 	foreach(operationCell, metadataOperations)
 	{
 		TableMetadataOperation *operation = lfirst(operationCell);

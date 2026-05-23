@@ -71,11 +71,19 @@ def cleanup_test_tables(pg_cursor):
     # Clean up DuckLake metadata (keep only initial snapshot)
     try:
         pg_cursor.execute("DELETE FROM lake_ducklake.snapshot_changes WHERE snapshot_id > 0")
+        pg_cursor.execute("DELETE FROM lake_ducklake.file_column_stats WHERE data_file_id > 0")
         pg_cursor.execute("DELETE FROM lake_ducklake.data_file WHERE data_file_id > 0")
+        pg_cursor.execute("DELETE FROM lake_ducklake.name_mapping WHERE mapping_id > 0")
+        pg_cursor.execute("DELETE FROM lake_ducklake.column_mapping WHERE mapping_id > 0")
         pg_cursor.execute("DELETE FROM lake_ducklake.column WHERE column_id > 0")
+        pg_cursor.execute("DELETE FROM lake_ducklake.schema_versions")
         pg_cursor.execute("DELETE FROM lake_ducklake.table WHERE table_id > 0")
         pg_cursor.execute("DELETE FROM lake_ducklake.schema WHERE schema_id > 0")
         pg_cursor.execute("DELETE FROM lake_ducklake.snapshot WHERE snapshot_id > 0")
+        pg_cursor.execute(
+            "UPDATE lake_ducklake.snapshot SET next_catalog_id = 1, next_file_id = 1 "
+            "WHERE snapshot_id = 0"
+        )
         pg_cursor.connection.commit()
     except Exception as e:
         print(f"Warning: Could not clean metadata: {e}")

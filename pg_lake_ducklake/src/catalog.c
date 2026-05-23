@@ -247,8 +247,21 @@ DucklakeRegisterTableColumns(Oid tableOid, int64 tableId)
 					 snapshot->nextCatalogId, snapshot->snapshotId);
 	SPI_exec(query.data, 0);
 
+	/*
+	 * Register an initial schema_versions row for this table at the current
+	 * snapshot. v1 spec requires per-table schema-version history; subsequent
+	 * ALTERs (DucklakeAddColumn / DucklakeDropColumn) append more rows.
+	 */
+	resetStringInfo(&query);
+	appendStringInfo(&query,
+					 "INSERT INTO lake_ducklake.schema_versions "
+					 "(begin_snapshot, table_id, schema_version) "
+					 "VALUES (%ld, %ld, "
+					 "(SELECT schema_version FROM lake_ducklake.snapshot WHERE snapshot_id = %ld))",
+					 snapshot->snapshotId, tableId, snapshot->snapshotId);
+	SPI_exec(query.data, 0);
+
 	SPI_finish();
-	pfree(snapshot);
 }
 
 int64
@@ -270,7 +283,12 @@ DucklakeRegisterTable(const char *schemaName, const char *tableName, const char 
 
 	bool isnull;
 
-	snapshot = DucklakeGetCurrentSnapshot();
+	/*
+	 * CREATE TABLE in DuckLake v1 must produce a new snapshot so the new
+	 * schema/table/column rows have a meaningful begin_snapshot. Without a
+	 * fresh snapshot every CREATE TABLE would land on snapshot 0.
+	 */
+	snapshot = DucklakeCreateSnapshot("CREATE TABLE", NULL, NULL);
 
 	SPI_connect();
 
@@ -1072,33 +1090,75 @@ DucklakeDropColumn(Oid tableOid, const char *columnName)
 
 /*
  * DucklakeRenameColumn renames a column in the DuckLake catalog.
+ *
+ * v1 spec models RENAME as a new column version: end_snapshot the previous
+ * (column_id, begin_snapshot) row at the new snapshot and insert a fresh
+ * row with the same column_id and the new name.
  */
 void
 DucklakeRenameColumn(Oid tableOid, const char *oldName, const char *newName)
 {
 	StringInfoData query;
 	DucklakeTableMetadata *metadata;
+	DucklakeSnapshot *newSnapshot;
 	int ret;
 
 	metadata = DucklakeGetTableMetadata(tableOid);
 	if (!metadata)
 		elog(ERROR, "DuckLake table metadata not found for table OID %u", tableOid);
 
+	/* Create a new snapshot for this schema change */
+	newSnapshot = DucklakeCreateSnapshot("RENAME COLUMN", NULL, NULL);
+
 	SPI_connect();
 
-	/* Update the column name */
+	/* Increment schema_version on the new snapshot */
 	initStringInfo(&query);
 	appendStringInfo(&query,
-					 "UPDATE lake_ducklake.column SET column_name = %s "
-					 "WHERE table_id = %ld AND column_name = %s AND end_snapshot IS NULL",
-					 quote_literal_cstr(newName), metadata->tableId,
-					 quote_literal_cstr(oldName));
+					 "UPDATE lake_ducklake.snapshot SET schema_version = schema_version + 1 "
+					 "WHERE snapshot_id = %ld",
+					 newSnapshot->snapshotId);
+	SPI_exec(query.data, 0);
 
+	/*
+	 * Insert a new column-version row reusing the same column_id with the
+	 * new name. We INSERT...SELECT from the live row so all other column
+	 * attributes (type, defaults, parent_column, etc.) carry forward.
+	 */
+	resetStringInfo(&query);
+	appendStringInfo(&query,
+					 "INSERT INTO lake_ducklake.column "
+					 "(column_id, begin_snapshot, end_snapshot, table_id, column_order, "
+					 "column_name, column_type, initial_default, default_value, "
+					 "default_value_type, default_value_dialect, nulls_allowed, parent_column) "
+					 "SELECT column_id, %ld, NULL, table_id, column_order, "
+					 "%s, column_type, initial_default, default_value, "
+					 "default_value_type, default_value_dialect, nulls_allowed, parent_column "
+					 "FROM lake_ducklake.column "
+					 "WHERE table_id = %ld AND column_name = %s AND end_snapshot IS NULL",
+					 newSnapshot->snapshotId,
+					 quote_literal_cstr(newName),
+					 metadata->tableId,
+					 quote_literal_cstr(oldName));
 	ret = SPI_exec(query.data, 0);
-	if (ret != SPI_OK_UPDATE || SPI_processed == 0)
+	if (ret != SPI_OK_INSERT || SPI_processed == 0)
 		elog(WARNING, "Column %s not found in DuckLake catalog for rename", oldName);
 
-	/* Also update name_mapping if it exists */
+	/* End-snapshot the previous live row */
+	resetStringInfo(&query);
+	appendStringInfo(&query,
+					 "UPDATE lake_ducklake.column SET end_snapshot = %ld "
+					 "WHERE table_id = %ld AND column_name = %s AND end_snapshot IS NULL "
+					 "AND begin_snapshot < %ld",
+					 newSnapshot->snapshotId, metadata->tableId,
+					 quote_literal_cstr(oldName), newSnapshot->snapshotId);
+	SPI_exec(query.data, 0);
+
+	/*
+	 * Update name_mapping.source_name in place. The (column_id, mapping_id)
+	 * identity is unchanged by a rename — only the user-visible name maps
+	 * to the new identifier.
+	 */
 	resetStringInfo(&query);
 	appendStringInfo(&query,
 					 "UPDATE lake_ducklake.name_mapping nm SET source_name = %s "
@@ -1107,6 +1167,16 @@ DucklakeRenameColumn(Oid tableOid, const char *oldName, const char *newName)
 					 "AND c.table_id = %ld AND nm.source_name = %s",
 					 quote_literal_cstr(newName), metadata->tableId,
 					 quote_literal_cstr(oldName));
+	SPI_exec(query.data, 0);
+
+	/* Record schema version for this snapshot */
+	resetStringInfo(&query);
+	appendStringInfo(&query,
+					 "INSERT INTO lake_ducklake.schema_versions "
+					 "(begin_snapshot, table_id, schema_version) "
+					 "VALUES (%ld, %ld, "
+					 "(SELECT schema_version FROM lake_ducklake.snapshot WHERE snapshot_id = %ld))",
+					 newSnapshot->snapshotId, metadata->tableId, newSnapshot->snapshotId);
 	SPI_exec(query.data, 0);
 
 	SPI_finish();
