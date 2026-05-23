@@ -1095,7 +1095,7 @@ AddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc,
 {
 	Assert(queryTupleDesc != NULL && queryTupleDesc->natts > 0);
 
-	ValidateXactRestCatalog(relationId);
+	BindRelationToXactRestCatalog(relationId);
 
 	int64		rowsProcessed = 0;
 	ForeignTable *foreignTable = GetForeignTable(relationId);

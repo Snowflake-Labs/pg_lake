@@ -27,6 +27,7 @@
 #include "pg_lake/avro/avro_reader.h"
 #include "pg_lake/avro/avro_writer.h"
 #include "pg_lake/copy/copy_format.h"
+#include "pg_lake/ddl/utility_hook.h"
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/iceberg/catalog.h"
@@ -332,6 +333,8 @@ _PG_init(void)
 							 NULL, NULL, NULL);
 
 	AvroInit();
+
+	RegisterUtilityStatementHandler(ValidateIcebergCatalogServerDDL, NULL);
 }
 
 

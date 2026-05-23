@@ -111,19 +111,43 @@ def test_create_server_horizon_auth(superuser_conn, extension):
 
 
 def test_reject_unknown_server_option(superuser_conn, extension):
-    """Unknown options should be rejected by the validator."""
-    err = run_command(
-        """
-        CREATE SERVER test_bad_opt TYPE 'rest'
-            FOREIGN DATA WRAPPER iceberg_catalog
-            OPTIONS (rest_endpoint 'http://localhost:8181', bogus_option 'x')
-        """,
-        superuser_conn,
-        raise_error=False,
-    )
-    assert "invalid option" in str(err)
-    assert "bogus_option" in str(err)
-    superuser_conn.rollback()
+    """
+    Unknown options should be rejected by the validator.
+
+    Issued twice on the same connection because the validator caches the
+    hint string in a static; the second call must hit the cached path and
+    must still produce a well-formed hint (regression guard against the
+    hint being palloc'd in a per-statement memory context).
+    """
+    EXPECTED_OPTIONS = [
+        "rest_endpoint",
+        "rest_auth_type",
+        "oauth_endpoint",
+        "scope",
+        "enable_vended_credentials",
+        "location_prefix",
+        "catalog_name",
+        "client_id",
+        "client_secret",
+    ]
+
+    for typo in ("bogus_option", "another_typo"):
+        err = run_command(
+            f"""
+            CREATE SERVER test_bad_opt_{typo} TYPE 'rest'
+                FOREIGN DATA WRAPPER iceberg_catalog
+                OPTIONS (rest_endpoint 'http://localhost:8181', {typo} 'x')
+            """,
+            superuser_conn,
+            raise_error=False,
+        )
+        msg = str(err)
+        assert "invalid option" in msg
+        assert typo in msg
+        assert "Valid options are:" in msg
+        for opt in EXPECTED_OPTIONS:
+            assert opt in msg, f"hint missing {opt!r} on attempt {typo!r}: {msg}"
+        superuser_conn.rollback()
 
 
 def test_reject_invalid_auth_type(superuser_conn, extension):

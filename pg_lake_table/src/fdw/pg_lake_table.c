@@ -2206,7 +2206,7 @@ postgresBeginForeignModify(ModifyTableState *mtstate,
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
 		return;
 
-	ValidateXactRestCatalog(RelationGetRelid(resultRelInfo->ri_RelationDesc));
+	BindRelationToXactRestCatalog(RelationGetRelid(resultRelInfo->ri_RelationDesc));
 
 	/* Construct an execution state. */
 	fmstate = create_foreign_modify(resultRelInfo->ri_RelationDesc,

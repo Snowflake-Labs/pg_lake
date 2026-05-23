@@ -609,40 +609,68 @@ InitRestCatalogRequestsHashIfNeeded(void)
 
 
 /*
- * ValidateXactRestCatalog is a fail-fast guard that prevents cross-catalog
- * DML within a single transaction.  It resolves the relation's catalog
- * identifier and, if a different catalog was already locked in for this
- * transaction, errors out immediately — before any Parquet data is written
- * to S3.
+ * BindRelationToXactRestCatalog binds the current transaction to the REST
+ * catalog associated with `relationId`, failing fast if a *different* REST
+ * catalog was already locked in for this transaction.
  *
- * No-ops for relations that are not REST-backed writable iceberg tables,
- * or when no catalog has been locked in yet (first DML in the xact).
+ * Semantics:
+ *   - For relations that are not REST-backed writable iceberg tables: no-op.
+ *   - For the first REST-backed write of the transaction: pre-resolves the
+ *     full catalog options and stashes them in TopTransactionContext, so
+ *     subsequent calls within the same transaction can be checked without
+ *     touching pg_foreign_server again at XACT_EVENT_COMMIT.
+ *   - For any subsequent REST-backed write whose catalog differs from the
+ *     locked-in one: raises ERRCODE_FEATURE_NOT_SUPPORTED *before* any
+ *     Parquet data is written to S3.
+ *
+ * Called at the top of every DML entry point that can mutate REST-backed
+ * iceberg tables: postgresBeginForeignModify() for row-by-row DML, and
+ * AddQueryResultToTable() for the INSERT...SELECT and COPY..FROM pushdown
+ * paths.  DDL paths (CREATE TABLE / DROP TABLE) reach the same protection
+ * indirectly via RecordRestCatalogRequestInTx(), which is invoked
+ * synchronously at statement time from the utility hook.
  */
 void
-ValidateXactRestCatalog(Oid relationId)
+BindRelationToXactRestCatalog(Oid relationId)
 {
 	if (!IsPgLakeIcebergForeignTableById(relationId) ||
 		GetIcebergCatalogType(relationId) != REST_CATALOG_READ_WRITE)
 		return;
 
-	if (PgLakeXactRestCatalog == NULL ||
-		PgLakeXactRestCatalog->catalogOpts == NULL)
+	/*
+	 * Resolve the relation's catalog options up front.  We need the full
+	 * resolved struct (host, credentials, ...), not just the user-facing
+	 * identifier, because XACT_EVENT_PRE_COMMIT reuses these fields when
+	 * issuing the REST API requests and is not allowed to do syscache lookups
+	 * by then.
+	 */
+	RestCatalogOptions *resolvedOpts = GetRestCatalogOptionsForRelation(relationId);
+
+	InitRestCatalogRequestsHashIfNeeded();
+
+	if (PgLakeXactRestCatalog->catalogOpts == NULL)
+	{
+		PgLakeXactRestCatalog->catalogOpts =
+			CopyRestCatalogOptions(TopTransactionContext, resolvedOpts);
 		return;
+	}
 
-	char	   *catalog = GetStringOption(GetForeignTable(relationId)->options,
-										  "catalog", false);
-
-	if (catalog == NULL)
-		return;
-
-	if (pg_strcasecmp(PgLakeXactRestCatalog->catalogOpts->catalog, catalog) != 0)
+	/*
+	 * Both sides of the comparison are the canonical catalog name (lowercase
+	 * "rest" for the built-in catalog, server name as stored in
+	 * pg_foreign_server for user-defined ones).  pg_strcasecmp matches the
+	 * casing rules PostgreSQL applies to identifier resolution.
+	 */
+	if (pg_strcasecmp(PgLakeXactRestCatalog->catalogOpts->catalog,
+					  resolvedOpts->catalog) != 0)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot modify tables from different REST catalogs "
 						"in the same transaction"),
 				 errdetail("This transaction already targets catalog \"%s\", "
 						   "but the current statement targets \"%s\".",
-						   PgLakeXactRestCatalog->catalogOpts->catalog, catalog)));
+						   PgLakeXactRestCatalog->catalogOpts->catalog,
+						   resolvedOpts->catalog)));
 }
 
 
@@ -668,6 +696,14 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 		/* Resolve the options for this relation's REST catalog */
 		RestCatalogOptions *resolvedOpts = GetRestCatalogOptionsForRelation(relationId);
 
+		/*
+		 * DDL paths (CREATE TABLE / DROP TABLE) call us directly from the
+		 * utility hook and may be the very first thing to touch a REST
+		 * catalog in this transaction, so this branch is still genuinely
+		 * reached.  DML paths reach us only from XACT_EVENT_PRE_COMMIT, by
+		 * which time BindRelationToXactRestCatalog() has already populated
+		 * catalogOpts.
+		 */
 		if (PgLakeXactRestCatalog->catalogOpts == NULL)
 		{
 			PgLakeXactRestCatalog->catalogOpts =
@@ -675,10 +711,11 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 		}
 
 		/*
-		 * Belt-and-suspenders check.  All DML and DDL entry points already
-		 * call ValidateXactRestCatalog() at statement time, so in practice we
-		 * should never reach here with a mismatched catalog.  Kept as a last
-		 * line of defense for any future code path that forgets to do so.
+		 * Belt-and-suspenders check.  All DML and DDL entry points either
+		 * bind through BindRelationToXactRestCatalog() at statement time or
+		 * populate catalogOpts via the branch above, so in practice we never
+		 * reach here with a mismatched catalog.  Kept as a last line of
+		 * defense for any future code path that forgets to do so.
 		 */
 		else if (pg_strcasecmp(PgLakeXactRestCatalog->catalogOpts->catalog, resolvedOpts->catalog) != 0)
 			ereport(ERROR,

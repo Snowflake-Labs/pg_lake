@@ -173,6 +173,12 @@ FindCatalogOptionDesc(const char *name)
 
 /*
  * Build the "Valid options are: ?" hint string.  Cached after first call.
+ *
+ * The cache must outlive any individual transaction: this helper is only
+ * called on validator error paths, and ereport(ERROR) immediately aborts
+ * the current transaction, freeing whatever short-lived context the
+ * validator was running under.  Allocate the buffer in TopMemoryContext
+ * so the static pointer remains valid for the lifetime of the backend.
  */
 static const char *
 GetValidCatalogOptionsHint(void)
@@ -181,8 +187,10 @@ GetValidCatalogOptionsHint(void)
 
 	if (hint == NULL)
 	{
+		MemoryContext oldcxt;
 		StringInfoData buf;
 
+		oldcxt = MemoryContextSwitchTo(TopMemoryContext);
 		initStringInfo(&buf);
 		appendStringInfoString(&buf, "Valid options are: ");
 		for (int i = 0; i < NUM_CATALOG_OPTIONS; i++)
@@ -193,6 +201,7 @@ GetValidCatalogOptionsHint(void)
 		}
 		appendStringInfoChar(&buf, '.');
 		hint = buf.data;
+		MemoryContextSwitchTo(oldcxt);
 	}
 
 	return hint;
@@ -334,13 +343,15 @@ iceberg_catalog_validator(PG_FUNCTION_ARGS)
 
 
 /*
- * ServerHasDependentWritableTable returns true if the given server
- * has at least one dependent writable iceberg table recorded in
- * pg_depend.  Used to block ALTER SERVER changes that would silently
- * break existing tables.
+ * ServerHasDependentRestIcebergTable returns true if the given server
+ * has at least one dependent REST-backed iceberg table (read-only or
+ * writable) recorded in pg_depend.  Used to block ALTER SERVER changes
+ * that would silently break existing tables, since both writable and
+ * read-only REST tables make REST API calls at runtime against the
+ * server's rest_endpoint.
  */
 static bool
-ServerHasDependentWritableTable(Oid serverOid)
+ServerHasDependentRestIcebergTable(Oid serverOid)
 {
 	Relation	depRel;
 	ScanKeyData key[2];
@@ -369,7 +380,9 @@ ServerHasDependentWritableTable(Oid serverOid)
 		if (depForm->classid != RelationRelationId)
 			continue;
 
-		if (GetIcebergCatalogType(depForm->objid) == REST_CATALOG_READ_WRITE)
+		IcebergCatalogType type = GetIcebergCatalogType(depForm->objid);
+
+		if (type == REST_CATALOG_READ_WRITE || type == REST_CATALOG_READ_ONLY)
 		{
 			found = true;
 			break;
@@ -488,9 +501,9 @@ ValidateIcebergCatalogServerDDL(ProcessUtilityParams * processUtilityParams,
 			return false;
 
 		/*
-		 * Changing rest_endpoint on a server with dependent writable tables
-		 * would silently point them at a different REST catalog, breaking the
-		 * metadata chain.
+		 * Changing rest_endpoint on a server with dependent iceberg tables
+		 * (writable or read-only) would silently point them at a different
+		 * REST catalog, breaking the metadata chain.
 		 */
 		ListCell   *lc;
 
@@ -499,12 +512,12 @@ ValidateIcebergCatalogServerDDL(ProcessUtilityParams * processUtilityParams,
 			DefElem    *def = (DefElem *) lfirst(lc);
 
 			if (pg_strcasecmp(def->defname, "rest_endpoint") == 0 &&
-				ServerHasDependentWritableTable(server->serverid))
+				ServerHasDependentRestIcebergTable(server->serverid))
 			{
 				ereport(ERROR,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						 errmsg("cannot change \"rest_endpoint\" on server \"%s\" "
-								"because it has dependent writable iceberg tables",
+								"because it has dependent iceberg tables",
 								stmt->servername),
 						 errhint("Drop the dependent tables first, or create a "
 								 "new server with the desired endpoint.")));
@@ -524,6 +537,8 @@ ValidateIcebergCatalogServerDDL(ProcessUtilityParams * processUtilityParams,
 static void
 ApplyGUCDefaults(RestCatalogOptions * opts)
 {
+	char	   *defaultLocationPrefix = GetIcebergDefaultLocationPrefix();
+
 	opts->host = RestCatalogHost ? pstrdup(RestCatalogHost) : NULL;
 	opts->oauthHostPath = RestCatalogOauthHostPath ? pstrdup(RestCatalogOauthHostPath) : NULL;
 	opts->clientId = RestCatalogClientId ? pstrdup(RestCatalogClientId) : NULL;
@@ -531,7 +546,7 @@ ApplyGUCDefaults(RestCatalogOptions * opts)
 	opts->scope = RestCatalogScope ? pstrdup(RestCatalogScope) : NULL;
 	opts->authType = RestCatalogAuthType;
 	opts->enableVendedCredentials = RestCatalogEnableVendedCredentials;
-	opts->locationPrefix = GetIcebergDefaultLocationPrefix();
+	opts->locationPrefix = defaultLocationPrefix ? pstrdup(defaultLocationPrefix) : NULL;
 }
 
 

@@ -5,6 +5,8 @@ from helpers.polaris import *
 from helpers.spark import *
 import json
 import re
+import threading
+import time
 
 from test_writable_iceberg_common import *
 
@@ -746,7 +748,10 @@ def test_reject_modify_different_rest_catalogs_in_single_transaction(
 ):
     """
     Modifying tables from two different REST catalog servers in the same
-    transaction must be rejected.
+    transaction must be rejected at statement time -- before any Parquet is
+    written to S3 for the offending statement.  The first DML binds the
+    transaction to its REST catalog; the second DML to a different catalog
+    must raise immediately rather than waiting for XACT_EVENT_PRE_COMMIT.
     """
     if installcheck:
         return
@@ -783,19 +788,25 @@ def test_reject_modify_different_rest_catalogs_in_single_transaction(
         )
         pg_conn.commit()
 
+    # First INSERT succeeds and binds the transaction to rest_catalog_a.
     run_command(
         f"INSERT INTO {TABLE_NAMESPACE}.table_a SELECT i FROM generate_series(1, 10) i",
         pg_conn,
     )
-    run_command(
-        f"INSERT INTO {TABLE_NAMESPACE}.table_b SELECT i FROM generate_series(1, 10) i",
-        pg_conn,
-    )
 
+    # Second INSERT must raise at statement time, not at COMMIT.  The
+    # "the current statement targets" detail wording is emitted only by
+    # BindRelationToXactRestCatalog(); the XACT_EVENT_PRE_COMMIT fallback
+    # uses "table %u belongs to" instead, so this match also pins down
+    # which code path fired.
     with pytest.raises(
-        psycopg2.errors.FeatureNotSupported, match="different REST catalogs"
+        psycopg2.errors.FeatureNotSupported,
+        match=r"the current statement targets",
     ):
-        pg_conn.commit()
+        run_command(
+            f"INSERT INTO {TABLE_NAMESPACE}.table_b SELECT i FROM generate_series(1, 10) i",
+            pg_conn,
+        )
 
     pg_conn.rollback()
 
@@ -1125,7 +1136,7 @@ def test_alter_server_credentials_invalidates_token_cache(
     superuser_conn.commit()
 
 
-def test_drop_server_blocked_by_dependent_table(
+def test_drop_server_with_dependent_iceberg_table(
     installcheck,
     superuser_conn,
     pg_conn,
@@ -1195,6 +1206,228 @@ def test_drop_server_blocked_by_dependent_table(
         pg_conn,
     )
     assert result[0][0] == 0
+
+
+def test_drop_owned_by_with_dependent_iceberg_table(
+    installcheck,
+    superuser_conn,
+    pg_conn,
+    s3,
+    extension,
+    with_default_location,
+    polaris_session,
+    create_http_helper_functions,
+):
+    """
+    When a role owns an iceberg_catalog server that has dependent iceberg
+    tables, DROP OWNED BY must propagate the dependency:
+      - DROP OWNED BY <role> RESTRICT  -> blocked
+      - DROP OWNED BY <role> CASCADE   -> drops the dependent table too
+    """
+    if installcheck:
+        return
+
+    ROLE_NAME = "rest_owned_test_role"
+    SERVER_NAME = "rest_owned_test_srv"
+    SCHEMA_NAME = TABLE_NAMESPACE
+    TABLE_NAME = "owned_dep_tbl"
+
+    creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
+    client_id = creds["credentials"]["clientId"]
+    client_secret = creds["credentials"]["clientSecret"]
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}"
+
+    run_command(f"DROP ROLE IF EXISTS {ROLE_NAME}", superuser_conn, raise_error=False)
+    superuser_conn.commit()
+
+    run_command(
+        f"CREATE ROLE {ROLE_NAME} WITH CREATEDB LOGIN",
+        superuser_conn,
+    )
+    run_command(
+        f"GRANT USAGE ON FOREIGN DATA WRAPPER iceberg_catalog TO {ROLE_NAME}",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    run_command(f"SET ROLE {ROLE_NAME}", superuser_conn)
+    run_command(
+        f"""
+        CREATE SERVER {SERVER_NAME} TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint '{endpoint}',
+                     client_id '{client_id}',
+                     client_secret '{client_secret}')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        f"GRANT USAGE ON FOREIGN SERVER {SERVER_NAME} TO PUBLIC",
+        superuser_conn,
+    )
+    run_command("RESET ROLE", superuser_conn)
+    superuser_conn.commit()
+
+    run_command(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA_NAME}", pg_conn)
+    pg_conn.commit()
+
+    run_command(
+        f"CREATE TABLE {SCHEMA_NAME}.{TABLE_NAME} (id bigint) "
+        f"USING iceberg WITH (catalog='{SERVER_NAME}')",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    err = run_command(
+        f"DROP OWNED BY {ROLE_NAME} RESTRICT",
+        superuser_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert "cannot drop" in str(err).lower()
+    superuser_conn.rollback()
+
+    server_exists = run_query(
+        f"SELECT count(*) FROM pg_foreign_server WHERE srvname = '{SERVER_NAME}'",
+        superuser_conn,
+    )
+    assert server_exists[0][0] == 1
+
+    table_exists = run_query(
+        f"SELECT count(*) FROM pg_class WHERE relname = '{TABLE_NAME}'",
+        pg_conn,
+    )
+    assert table_exists[0][0] == 1
+
+    run_command(f"DROP OWNED BY {ROLE_NAME} CASCADE", superuser_conn)
+    superuser_conn.commit()
+
+    server_exists = run_query(
+        f"SELECT count(*) FROM pg_foreign_server WHERE srvname = '{SERVER_NAME}'",
+        superuser_conn,
+    )
+    assert server_exists[0][0] == 0
+
+    table_exists = run_query(
+        f"SELECT count(*) FROM pg_class WHERE relname = '{TABLE_NAME}'",
+        pg_conn,
+    )
+    assert table_exists[0][0] == 0
+
+    run_command(f"DROP ROLE {ROLE_NAME}", superuser_conn)
+    superuser_conn.commit()
+
+
+def test_drop_server_blocks_on_active_query(
+    installcheck,
+    superuser_conn,
+    s3,
+    extension,
+    with_default_location,
+    polaris_session,
+    create_http_helper_functions,
+):
+    """
+    DROP SERVER ... CASCADE on a server with a dependent iceberg table must
+    block while another transaction holds AccessShareLock on that table.
+    This verifies that the pg_depend edge registered by
+    RecordIcebergCatalogServerDependency is honored by core's dependency
+    walker, which acquires AccessExclusiveLock on each dependent table.
+    """
+    if installcheck:
+        return
+
+    SERVER_NAME = "rest_lock_test_srv"
+    SCHEMA_NAME = TABLE_NAMESPACE
+    TABLE_NAME = "lock_dep_tbl"
+
+    creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
+    client_id = creds["credentials"]["clientId"]
+    client_secret = creds["credentials"]["clientSecret"]
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}"
+
+    run_command(
+        f"""
+        CREATE SERVER {SERVER_NAME} TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint '{endpoint}',
+                     client_id '{client_id}',
+                     client_secret '{client_secret}')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    run_command(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA_NAME}", superuser_conn)
+    run_command(
+        f"CREATE TABLE {SCHEMA_NAME}.{TABLE_NAME} (id bigint) "
+        f"USING iceberg WITH (catalog='{SERVER_NAME}')",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    holder_conn = open_pg_conn("postgres")
+    dropper_conn = open_pg_conn("postgres")
+    try:
+        run_command("BEGIN", holder_conn)
+        run_command(
+            f"SELECT count(*) FROM {SCHEMA_NAME}.{TABLE_NAME}",
+            holder_conn,
+        )
+
+        drop_done = threading.Event()
+        drop_error = []
+
+        def run_drop():
+            try:
+                run_command(f"DROP SERVER {SERVER_NAME} CASCADE", dropper_conn)
+                dropper_conn.commit()
+            except Exception as e:
+                drop_error.append(e)
+            finally:
+                drop_done.set()
+
+        drop_thread = threading.Thread(target=run_drop)
+        drop_thread.start()
+
+        deadline = time.time() + 10
+        blocked = False
+        while time.time() < deadline:
+            rows = run_query(
+                """
+                SELECT count(*) FROM pg_stat_activity
+                WHERE wait_event_type = 'Lock'
+                  AND query LIKE 'DROP SERVER%'
+                """,
+                superuser_conn,
+            )
+            superuser_conn.rollback()
+            if int(rows[0][0]) == 1:
+                blocked = True
+                break
+            time.sleep(0.1)
+
+        assert blocked, "Expected DROP SERVER to be blocked on AccessShareLock"
+        assert not drop_done.is_set(), "DROP SERVER should not have completed yet"
+
+        run_command("COMMIT", holder_conn)
+
+        drop_thread.join(timeout=15)
+        assert drop_done.is_set(), "DROP SERVER did not complete after lock released"
+        assert not drop_error, f"DROP SERVER failed: {drop_error[0]}"
+
+        result = run_query(
+            f"SELECT count(*) FROM pg_class WHERE relname = '{TABLE_NAME}'",
+            superuser_conn,
+        )
+        assert result[0][0] == 0
+    finally:
+        try:
+            holder_conn.rollback()
+        except Exception:
+            pass
+        holder_conn.close()
+        dropper_conn.close()
 
 
 def test_reject_writable_table_on_server_with_catalog_name(
@@ -1342,7 +1575,7 @@ def test_alter_server_add_catalog_name_does_not_reroute_writable_table(
     superuser_conn.commit()
 
 
-def test_alter_server_rest_endpoint_blocked_with_dependent_writable_tables(
+def test_alter_server_rest_endpoint_blocked_with_dependent_tables(
     installcheck,
     superuser_conn,
     s3,
@@ -1352,8 +1585,9 @@ def test_alter_server_rest_endpoint_blocked_with_dependent_writable_tables(
     create_http_helper_functions,
 ):
     """
-    Changing rest_endpoint on a server that has dependent writable iceberg
-    tables must be blocked.
+    Changing rest_endpoint on a server that has dependent iceberg tables
+    (writable or read-only) must be blocked, because both types make REST
+    API calls against the server's endpoint at runtime.
     """
     if installcheck:
         return
@@ -1396,7 +1630,7 @@ def test_alter_server_rest_endpoint_blocked_with_dependent_writable_tables(
         raise_error=False,
     )
     assert err is not None
-    assert "dependent writable iceberg tables" in str(err)
+    assert "dependent iceberg tables" in str(err)
     superuser_conn.rollback()
 
     run_command(
