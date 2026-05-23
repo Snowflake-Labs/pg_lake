@@ -15,8 +15,12 @@ or DuckDB grows a knob to point at an existing schema, the
 test_attach_ducklake_extension test below should be widened to do a
 catalog-level round trip.
 """
-import os
 import pytest
+from utils_pytest import (
+    TEST_BUCKET,
+    create_duckdb_conn,
+    server_params,
+)
 
 try:
     import duckdb
@@ -25,44 +29,19 @@ except ImportError:
     DUCKDB_AVAILABLE = False
 
 
-MINIO_AVAILABLE = bool(os.environ.get("PGLAKE_MINIO_BUCKET"))
-
-
-def _minio_location(suffix):
-    bucket = os.environ.get("PGLAKE_MINIO_BUCKET", "localbucket")
-    prefix = os.environ.get("PGLAKE_MINIO_PREFIX", "pglake")
-    return f"s3://{bucket}/{prefix}/{suffix}"
-
-
-def _duckdb_with_minio():
-    """Return a fresh DuckDB connection configured for the local MinIO."""
-    conn = duckdb.connect()
-    endpoint = os.environ.get("PGLAKE_MINIO_ENDPOINT", "localhost:9000")
-    key = os.environ.get("PGLAKE_MINIO_KEY", "testkey")
-    secret = os.environ.get("PGLAKE_MINIO_SECRET", "testpassword")
-    conn.execute(
-        f"""
-        CREATE SECRET (TYPE S3,
-                       KEY_ID '{key}',
-                       SECRET '{secret}',
-                       ENDPOINT '{endpoint}',
-                       URL_STYLE 'path',
-                       USE_SSL false)
-        """
-    )
-    return conn
+def _location(suffix):
+    return f"s3://{TEST_BUCKET}/ducklake_round_trip/{suffix}"
 
 
 @pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="duckdb python module not installed")
-@pytest.mark.skipif(not MINIO_AVAILABLE, reason="set PGLAKE_MINIO_BUCKET to run")
-def test_pg_lake_parquet_readable_by_duckdb(pg_cursor):
+def test_pg_lake_parquet_readable_by_duckdb(pg_cursor, s3):
     """
     pg_lake writes parquet to s3 via INSERT; DuckDB reads the parquet
     file directly. Validates pg_lake's parquet output is well-formed
     against a non-pg_lake reader.
     """
-    location = _minio_location("rt_parquet")
-    pg_cursor.execute(f"DROP TABLE IF EXISTS rt_parquet")
+    location = _location("rt_parquet")
+    pg_cursor.execute("DROP TABLE IF EXISTS rt_parquet")
     pg_cursor.execute(
         f"""
         CREATE TABLE rt_parquet (id INT, name TEXT, qty NUMERIC(10, 2))
@@ -74,7 +53,6 @@ def test_pg_lake_parquet_readable_by_duckdb(pg_cursor):
     )
     pg_cursor.connection.commit()
 
-    # Look up the parquet path pg_lake recorded
     pg_cursor.execute(
         """
         SELECT df.path
@@ -88,8 +66,7 @@ def test_pg_lake_parquet_readable_by_duckdb(pg_cursor):
     parquet_path = rows[0][0]
     assert parquet_path.startswith("s3://"), parquet_path
 
-    # DuckDB reads the parquet directly
-    duck = _duckdb_with_minio()
+    duck = create_duckdb_conn()
     result = duck.execute(
         f"SELECT id, name, qty FROM read_parquet('{parquet_path}') ORDER BY id"
     ).fetchall()
@@ -118,11 +95,12 @@ def test_attach_ducklake_extension(pg_cursor):
     except Exception as e:
         pytest.skip(f"ducklake extension not available: {e}")
 
-    user = os.environ.get("PGUSER", "postgres")
-    port = os.environ.get("PGPORT", "5432")
-    db = os.environ.get("PGDATABASE", "postgres")
-    host = os.environ.get("PGHOST", "localhost")
-    conn_str = f"host={host} port={port} dbname={db} user={user}"
+    conn_str = (
+        f"host={server_params.PG_HOST} "
+        f"port={server_params.PG_PORT} "
+        f"dbname={server_params.PG_DATABASE} "
+        f"user={server_params.PG_USER}"
+    )
     try:
         duck.execute(f"ATTACH '{conn_str}' AS dl (TYPE DUCKLAKE)")
     except Exception as e:
@@ -161,7 +139,7 @@ def test_public_ducklake_views_match_extension_schema(pg_cursor):
     DuckDB's ducklake extension expects. This is what gets us to read
     parity once the schema-name mismatch is resolved. Sourced from a
     live DuckDB ducklake-extension probe rather than the spec website
-    so it tracks the actual extension contract.
+    (which currently describes v1 while the shipping extension is v0.3).
     """
     expected = {
         "ducklake_snapshot": {
@@ -211,15 +189,13 @@ def test_public_ducklake_views_match_extension_schema(pg_cursor):
 
 
 @pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="duckdb python module not installed")
-@pytest.mark.skipif(not MINIO_AVAILABLE, reason="set PGLAKE_MINIO_BUCKET to run")
-def test_multi_insert_each_lands_on_a_new_snapshot(pg_cursor):
+def test_multi_insert_each_lands_on_a_new_snapshot(pg_cursor, s3):
     """
     Multiple INSERTs into one table produce one parquet file per INSERT
     each on its own snapshot, and DuckDB can read each parquet
-    independently. Pins the per-statement snapshot semantics added in
-    "Create a new ducklake snapshot for CREATE TABLE / INSERT / RENAME".
+    independently. Pins the per-statement snapshot semantics.
     """
-    location = _minio_location("rt_multi")
+    location = _location("rt_multi")
     pg_cursor.execute("DROP TABLE IF EXISTS rt_multi")
     pg_cursor.execute(
         f"""
@@ -251,15 +227,11 @@ def test_multi_insert_each_lands_on_a_new_snapshot(pg_cursor):
     files = pg_cursor.fetchall()
     assert len(files) == 3, f"expected one data file per INSERT, got {len(files)}"
 
-    # Each INSERT must land on a fresh snapshot
     snaps = [row[2] for row in files]
     assert snaps == [after_create + 1, after_create + 2, after_create + 3], snaps
-
-    # Records-per-file matches what we wrote
     assert [row[1] for row in files] == [2, 1, 3]
 
-    # And each parquet file is independently readable
-    duck = _duckdb_with_minio()
+    duck = create_duckdb_conn()
     rows = []
     for path, _, _ in files:
         rows.extend(
@@ -269,7 +241,6 @@ def test_multi_insert_each_lands_on_a_new_snapshot(pg_cursor):
         )
     assert sorted(rows) == [(1, "a"), (2, "b"), (3, "c"), (4, "d"), (5, "e"), (6, "f")]
 
-    # snapshot_changes records each INSERT
     pg_cursor.execute(
         "SELECT changes_made FROM lake_ducklake.snapshot_changes "
         "WHERE snapshot_id > %s ORDER BY snapshot_id",
@@ -284,13 +255,12 @@ def test_multi_insert_each_lands_on_a_new_snapshot(pg_cursor):
 
 
 @pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="duckdb python module not installed")
-@pytest.mark.skipif(not MINIO_AVAILABLE, reason="set PGLAKE_MINIO_BUCKET to run")
-def test_alter_then_insert_round_trip(pg_cursor):
+def test_alter_then_insert_round_trip(pg_cursor, s3):
     """
     ADD COLUMN followed by INSERT writes parquet matching the new schema
     and DuckDB reads back all columns including the new one.
     """
-    location = _minio_location("rt_alter")
+    location = _location("rt_alter")
     pg_cursor.execute("DROP TABLE IF EXISTS rt_alter")
     pg_cursor.execute(
         f"""
@@ -317,18 +287,7 @@ def test_alter_then_insert_round_trip(pg_cursor):
     files = pg_cursor.fetchall()
     assert len(files) == 2, f"expected 2 parquet files, got {len(files)}"
 
-    duck = _duckdb_with_minio()
-
-    # First file (pre-alter) has only id, val
-    cols0 = duck.execute(
-        f"DESCRIBE SELECT * FROM read_parquet('{files[0][0]}')"
-    ).fetchall()
-    names0 = {row[0] for row in cols0}
-    assert "id" in names0 and "val" in names0
-    # The first parquet may or may not include qty depending on writer
-    # behaviour; what matters is that the post-alter parquet does.
-
-    # Second file (post-alter) has id, val, qty
+    duck = create_duckdb_conn()
     cols1 = duck.execute(
         f"DESCRIBE SELECT * FROM read_parquet('{files[1][0]}')"
     ).fetchall()
@@ -337,14 +296,13 @@ def test_alter_then_insert_round_trip(pg_cursor):
 
 
 @pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="duckdb python module not installed")
-@pytest.mark.skipif(not MINIO_AVAILABLE, reason="set PGLAKE_MINIO_BUCKET to run")
-def test_file_column_stats_match_parquet(pg_cursor):
+def test_file_column_stats_match_parquet(pg_cursor, s3):
     """
     The min/max we record in lake_ducklake.file_column_stats must agree
     with what DuckDB extracts from the actual parquet footer. Mismatched
     stats are a silent correctness bug for predicate pushdown.
     """
-    location = _minio_location("rt_stats")
+    location = _location("rt_stats")
     pg_cursor.execute("DROP TABLE IF EXISTS rt_stats")
     pg_cursor.execute(
         f"""
@@ -375,7 +333,7 @@ def test_file_column_stats_match_parquet(pg_cursor):
 
     catalog_stats = {row[4]: (row[2], row[3]) for row in rows}
 
-    duck = _duckdb_with_minio()
+    duck = create_duckdb_conn()
     actual = duck.execute(
         f"SELECT MIN(id), MAX(id), MIN(label), MAX(label) "
         f"FROM read_parquet('{parquet_path}')"
