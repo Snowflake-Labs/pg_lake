@@ -77,6 +77,8 @@ CREATE TABLE lake_ducklake.column (
     column_type VARCHAR NOT NULL,
     initial_default VARCHAR,
     default_value VARCHAR,
+    default_value_type VARCHAR,
+    default_value_dialect VARCHAR,
     nulls_allowed BOOLEAN DEFAULT true,
     parent_column BIGINT,
     PRIMARY KEY (column_id, begin_snapshot)
@@ -115,7 +117,7 @@ CREATE TABLE lake_ducklake.data_file (
     row_id_start BIGINT,
     partition_id BIGINT,
     encryption_key VARCHAR,
-    partial_file_info VARCHAR,
+    partial_max BIGINT,
     mapping_id BIGINT
 );
 
@@ -132,7 +134,8 @@ CREATE TABLE lake_ducklake.delete_file (
     delete_count BIGINT NOT NULL,
     file_size_bytes BIGINT NOT NULL,
     footer_size BIGINT,
-    encryption_key VARCHAR
+    encryption_key VARCHAR,
+    partial_max BIGINT
 );
 
 -- Files scheduled for deletion (cleanup queue)
@@ -268,10 +271,12 @@ CREATE TABLE lake_ducklake.column_tag (
     PRIMARY KEY (table_id, column_id, key, begin_snapshot)
 );
 
--- Schema versions (tracks schema evolution)
+-- Schema versions (per-table schema version history)
 CREATE TABLE lake_ducklake.schema_versions (
-    begin_snapshot BIGINT PRIMARY KEY,
-    schema_version BIGINT NOT NULL
+    begin_snapshot BIGINT NOT NULL,
+    table_id BIGINT NOT NULL,
+    schema_version BIGINT NOT NULL,
+    PRIMARY KEY (begin_snapshot, table_id)
 );
 
 -- ============================================================================
@@ -363,8 +368,8 @@ FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_schema_insert();
 CREATE FUNCTION lake_ducklake.ducklake_column_insert()
 RETURNS TRIGGER AS $$
 BEGIN
-    INSERT INTO lake_ducklake.column (column_id, begin_snapshot, end_snapshot, table_id, column_order, column_name, column_type, initial_default, default_value, nulls_allowed, parent_column)
-    VALUES (NEW.column_id, NEW.begin_snapshot, NEW.end_snapshot, NEW.table_id, NEW.column_order, NEW.column_name, NEW.column_type, NEW.initial_default, NEW.default_value, NEW.nulls_allowed, NEW.parent_column);
+    INSERT INTO lake_ducklake.column (column_id, begin_snapshot, end_snapshot, table_id, column_order, column_name, column_type, initial_default, default_value, default_value_type, default_value_dialect, nulls_allowed, parent_column)
+    VALUES (NEW.column_id, NEW.begin_snapshot, NEW.end_snapshot, NEW.table_id, NEW.column_order, NEW.column_name, NEW.column_type, NEW.initial_default, NEW.default_value, NEW.default_value_type, NEW.default_value_dialect, NEW.nulls_allowed, NEW.parent_column);
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -391,8 +396,8 @@ FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_snapshot_insert();
 CREATE FUNCTION lake_ducklake.ducklake_data_file_insert()
 RETURNS TRIGGER AS $$
 BEGIN
-    INSERT INTO lake_ducklake.data_file (data_file_id, table_id, begin_snapshot, end_snapshot, file_order, path, path_is_relative, file_format, record_count, file_size_bytes, footer_size, row_id_start, partition_id, encryption_key, partial_file_info, mapping_id)
-    VALUES (NEW.data_file_id, NEW.table_id, NEW.begin_snapshot, NEW.end_snapshot, NEW.file_order, NEW.path, NEW.path_is_relative, NEW.file_format, NEW.record_count, NEW.file_size_bytes, NEW.footer_size, NEW.row_id_start, NEW.partition_id, NEW.encryption_key, NEW.partial_file_info, NEW.mapping_id);
+    INSERT INTO lake_ducklake.data_file (data_file_id, table_id, begin_snapshot, end_snapshot, file_order, path, path_is_relative, file_format, record_count, file_size_bytes, footer_size, row_id_start, partition_id, encryption_key, partial_max, mapping_id)
+    VALUES (NEW.data_file_id, NEW.table_id, NEW.begin_snapshot, NEW.end_snapshot, NEW.file_order, NEW.path, NEW.path_is_relative, NEW.file_format, NEW.record_count, NEW.file_size_bytes, NEW.footer_size, NEW.row_id_start, NEW.partition_id, NEW.encryption_key, NEW.partial_max, NEW.mapping_id);
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -555,11 +560,8 @@ $$;
 INSERT INTO lake_ducklake.snapshot (snapshot_id, schema_version, next_catalog_id, next_file_id)
 VALUES (0, 0, 1, 1);
 
-INSERT INTO lake_ducklake.schema_versions (begin_snapshot, schema_version)
-VALUES (0, 0);
-
 INSERT INTO lake_ducklake.metadata (key, value, scope, scope_id)
-VALUES ('ducklake_version', '0.3', NULL, NULL);
+VALUES ('ducklake_version', '1.0', NULL, NULL);
 
 -- ============================================================================
 -- Additional Public Views (remaining 16 tables)
@@ -810,7 +812,7 @@ BEGIN
         row_id_start = NEW.row_id_start,
         partition_id = NEW.partition_id,
         encryption_key = NEW.encryption_key,
-        partial_file_info = NEW.partial_file_info,
+        partial_max = NEW.partial_max,
         mapping_id = NEW.mapping_id
     WHERE data_file_id = OLD.data_file_id;
     RETURN NEW;
@@ -1006,8 +1008,8 @@ FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_file_column_stats_delete();
 CREATE OR REPLACE FUNCTION lake_ducklake.ducklake_file_partition_value_insert()
 RETURNS TRIGGER AS $$
 BEGIN
-    INSERT INTO lake_ducklake.file_partition_value (data_file_id, partition_key_index, value)
-    VALUES (NEW.data_file_id, NEW.partition_key_index, NEW.value);
+    INSERT INTO lake_ducklake.file_partition_value (data_file_id, table_id, partition_key_index, partition_value)
+    VALUES (NEW.data_file_id, NEW.table_id, NEW.partition_key_index, NEW.partition_value);
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -1034,8 +1036,8 @@ FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_file_partition_value_delete
 CREATE OR REPLACE FUNCTION lake_ducklake.ducklake_files_scheduled_for_deletion_insert()
 RETURNS TRIGGER AS $$
 BEGIN
-    INSERT INTO lake_ducklake.files_scheduled_for_deletion (data_file_id, scheduled_at)
-    VALUES (NEW.data_file_id, NEW.scheduled_at);
+    INSERT INTO lake_ducklake.files_scheduled_for_deletion (data_file_id, path, path_is_relative, schedule_start)
+    VALUES (NEW.data_file_id, NEW.path, NEW.path_is_relative, NEW.schedule_start);
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -1067,8 +1069,8 @@ FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_files_scheduled_for_deletio
 CREATE OR REPLACE FUNCTION lake_ducklake.ducklake_inlined_data_tables_insert()
 RETURNS TRIGGER AS $$
 BEGIN
-    INSERT INTO lake_ducklake.inlined_data_tables (table_id, schema_version, data)
-    VALUES (NEW.table_id, NEW.schema_version, NEW.data);
+    INSERT INTO lake_ducklake.inlined_data_tables (table_id, table_name, schema_version)
+    VALUES (NEW.table_id, NEW.table_name, NEW.schema_version);
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -1332,8 +1334,8 @@ FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_tag_delete();
 CREATE OR REPLACE FUNCTION lake_ducklake.ducklake_view_insert()
 RETURNS TRIGGER AS $$
 BEGIN
-    INSERT INTO lake_ducklake.view (view_id, table_id, view_definition)
-    VALUES (NEW.view_id, NEW.table_id, NEW.view_definition);
+    INSERT INTO lake_ducklake.view (view_id, view_uuid, begin_snapshot, end_snapshot, schema_id, view_name, dialect, sql, column_aliases)
+    VALUES (NEW.view_id, NEW.view_uuid, NEW.begin_snapshot, NEW.end_snapshot, NEW.schema_id, NEW.view_name, NEW.dialect, NEW.sql, NEW.column_aliases);
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;

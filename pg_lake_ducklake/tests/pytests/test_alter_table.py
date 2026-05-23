@@ -369,7 +369,7 @@ def test_drop_column_visible_in_duckdb(pg_cursor):
         pytest.skip(f"DuckDB ducklake extension not available: {e}")
 
     # Attach to PostgreSQL ducklake catalog using TYPE DUCKLAKE
-    pg_conn_str = f"host=localhost port=5432 dbname=postgres user={os.environ.get('PGUSER', 'postgres')}"
+    pg_conn_str = f"host=localhost port={os.environ.get('PGPORT', '5432')} dbname={os.environ.get('PGDATABASE', 'postgres')} user={os.environ.get('PGUSER', 'postgres')}"
     try:
         duckdb_conn.execute(f"ATTACH '{pg_conn_str}' AS dl (TYPE DUCKLAKE)")
     except Exception as e:
@@ -447,7 +447,7 @@ def test_add_column_visible_in_duckdb(pg_cursor):
         pytest.skip(f"DuckDB ducklake extension not available: {e}")
 
     # Attach to PostgreSQL ducklake catalog using TYPE DUCKLAKE
-    pg_conn_str = f"host=localhost port=5432 dbname=postgres user={os.environ.get('PGUSER', 'postgres')}"
+    pg_conn_str = f"host=localhost port={os.environ.get('PGPORT', '5432')} dbname={os.environ.get('PGDATABASE', 'postgres')} user={os.environ.get('PGUSER', 'postgres')}"
     try:
         duckdb_conn.execute(f"ATTACH '{pg_conn_str}' AS dl (TYPE DUCKLAKE)")
     except Exception as e:
@@ -528,7 +528,7 @@ def test_schema_evolution_in_duckdb(pg_cursor):
         pytest.skip(f"DuckDB ducklake extension not available: {e}")
 
     # Attach to PostgreSQL ducklake catalog using TYPE DUCKLAKE
-    pg_conn_str = f"host=localhost port=5432 dbname=postgres user={os.environ.get('PGUSER', 'postgres')}"
+    pg_conn_str = f"host=localhost port={os.environ.get('PGPORT', '5432')} dbname={os.environ.get('PGDATABASE', 'postgres')} user={os.environ.get('PGUSER', 'postgres')}"
     try:
         duckdb_conn.execute(f"ATTACH '{pg_conn_str}' AS dl (TYPE DUCKLAKE)")
     except Exception as e:
@@ -594,7 +594,7 @@ def test_duckdb_views_reflect_alter_operations(pg_cursor):
         pytest.skip(f"DuckDB ducklake extension not available: {e}")
 
     # Attach to PostgreSQL ducklake catalog using TYPE DUCKLAKE
-    pg_conn_str = f"host=localhost port=5432 dbname=postgres user={os.environ.get('PGUSER', 'postgres')}"
+    pg_conn_str = f"host=localhost port={os.environ.get('PGPORT', '5432')} dbname={os.environ.get('PGDATABASE', 'postgres')} user={os.environ.get('PGUSER', 'postgres')}"
     try:
         duckdb_conn.execute(f"ATTACH '{pg_conn_str}' AS dl (TYPE DUCKLAKE)")
     except Exception as e:

@@ -80,6 +80,22 @@ DucklakeCreateSnapshot(const char *changesMade, const char *author, const char *
 	int64 newSnapshotId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
 														  SPI_tuptable->tupdesc, 1, &isnull));
 
+	/*
+	 * Record the change in snapshot_changes. Required by DuckLake v1 spec for
+	 * any snapshot beyond the initial one — DuckDB's ducklake extension uses
+	 * this row to surface a description of what each snapshot changed.
+	 */
+	resetStringInfo(&query);
+	appendStringInfo(&query,
+					 "INSERT INTO lake_ducklake.snapshot_changes "
+					 "(snapshot_id, changes_made, author, commit_message) "
+					 "VALUES (%ld, %s, %s, %s)",
+					 newSnapshotId,
+					 changesMade ? quote_literal_cstr(changesMade) : "NULL",
+					 author ? quote_literal_cstr(author) : "NULL",
+					 commitMessage ? quote_literal_cstr(commitMessage) : "NULL");
+	SPI_exec(query.data, 0);
+
 	SPI_finish();
 
 	/* Allocate new snapshot in caller's memory context after SPI_finish */
@@ -89,7 +105,6 @@ DucklakeCreateSnapshot(const char *changesMade, const char *author, const char *
 	newSnapshot->nextCatalogId = currentSnapshot->nextCatalogId;
 	newSnapshot->nextFileId = currentSnapshot->nextFileId;
 
-	pfree(currentSnapshot);
 	return newSnapshot;
 }
 
