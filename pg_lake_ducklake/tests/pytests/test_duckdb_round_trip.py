@@ -208,3 +208,185 @@ def test_public_ducklake_views_match_extension_schema(pg_cursor):
         got = {row[0] for row in pg_cursor.fetchall()}
         missing = want_cols - got
         assert not missing, f"public.{view} missing columns DuckDB needs: {missing}"
+
+
+@pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="duckdb python module not installed")
+@pytest.mark.skipif(not MINIO_AVAILABLE, reason="set PGLAKE_MINIO_BUCKET to run")
+def test_multi_insert_each_lands_on_a_new_snapshot(pg_cursor):
+    """
+    Multiple INSERTs into one table produce one parquet file per INSERT
+    each on its own snapshot, and DuckDB can read each parquet
+    independently. Pins the per-statement snapshot semantics added in
+    "Create a new ducklake snapshot for CREATE TABLE / INSERT / RENAME".
+    """
+    location = _minio_location("rt_multi")
+    pg_cursor.execute("DROP TABLE IF EXISTS rt_multi")
+    pg_cursor.execute(
+        f"""
+        CREATE TABLE rt_multi (id INT, val TEXT)
+            USING ducklake WITH (location = '{location}')
+        """
+    )
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute("SELECT MAX(snapshot_id) FROM lake_ducklake.snapshot")
+    after_create = pg_cursor.fetchone()[0]
+
+    pg_cursor.execute("INSERT INTO rt_multi VALUES (1, 'a'), (2, 'b')")
+    pg_cursor.connection.commit()
+    pg_cursor.execute("INSERT INTO rt_multi VALUES (3, 'c')")
+    pg_cursor.connection.commit()
+    pg_cursor.execute("INSERT INTO rt_multi VALUES (4, 'd'), (5, 'e'), (6, 'f')")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        """
+        SELECT df.path, df.record_count, df.begin_snapshot
+          FROM lake_ducklake.data_file df
+          JOIN lake_ducklake.table t USING (table_id)
+         WHERE t.table_name = 'rt_multi'
+         ORDER BY df.begin_snapshot
+        """
+    )
+    files = pg_cursor.fetchall()
+    assert len(files) == 3, f"expected one data file per INSERT, got {len(files)}"
+
+    # Each INSERT must land on a fresh snapshot
+    snaps = [row[2] for row in files]
+    assert snaps == [after_create + 1, after_create + 2, after_create + 3], snaps
+
+    # Records-per-file matches what we wrote
+    assert [row[1] for row in files] == [2, 1, 3]
+
+    # And each parquet file is independently readable
+    duck = _duckdb_with_minio()
+    rows = []
+    for path, _, _ in files:
+        rows.extend(
+            duck.execute(
+                f"SELECT id, val FROM read_parquet('{path}') ORDER BY id"
+            ).fetchall()
+        )
+    assert sorted(rows) == [(1, "a"), (2, "b"), (3, "c"), (4, "d"), (5, "e"), (6, "f")]
+
+    # snapshot_changes records each INSERT
+    pg_cursor.execute(
+        "SELECT changes_made FROM lake_ducklake.snapshot_changes "
+        "WHERE snapshot_id > %s ORDER BY snapshot_id",
+        (after_create,),
+    )
+    changes = [row[0] for row in pg_cursor.fetchall()]
+    assert changes == [
+        "INSERT/UPDATE/DELETE operation",
+        "INSERT/UPDATE/DELETE operation",
+        "INSERT/UPDATE/DELETE operation",
+    ]
+
+
+@pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="duckdb python module not installed")
+@pytest.mark.skipif(not MINIO_AVAILABLE, reason="set PGLAKE_MINIO_BUCKET to run")
+def test_alter_then_insert_round_trip(pg_cursor):
+    """
+    ADD COLUMN followed by INSERT writes parquet matching the new schema
+    and DuckDB reads back all columns including the new one.
+    """
+    location = _minio_location("rt_alter")
+    pg_cursor.execute("DROP TABLE IF EXISTS rt_alter")
+    pg_cursor.execute(
+        f"""
+        CREATE TABLE rt_alter (id INT, val TEXT)
+            USING ducklake WITH (location = '{location}')
+        """
+    )
+    pg_cursor.execute("INSERT INTO rt_alter VALUES (1, 'before')")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute("ALTER TABLE rt_alter ADD COLUMN qty INT")
+    pg_cursor.execute("INSERT INTO rt_alter VALUES (2, 'after', 99)")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        """
+        SELECT df.path, df.begin_snapshot, df.record_count
+          FROM lake_ducklake.data_file df
+          JOIN lake_ducklake.table t USING (table_id)
+         WHERE t.table_name = 'rt_alter'
+         ORDER BY df.begin_snapshot
+        """
+    )
+    files = pg_cursor.fetchall()
+    assert len(files) == 2, f"expected 2 parquet files, got {len(files)}"
+
+    duck = _duckdb_with_minio()
+
+    # First file (pre-alter) has only id, val
+    cols0 = duck.execute(
+        f"DESCRIBE SELECT * FROM read_parquet('{files[0][0]}')"
+    ).fetchall()
+    names0 = {row[0] for row in cols0}
+    assert "id" in names0 and "val" in names0
+    # The first parquet may or may not include qty depending on writer
+    # behaviour; what matters is that the post-alter parquet does.
+
+    # Second file (post-alter) has id, val, qty
+    cols1 = duck.execute(
+        f"DESCRIBE SELECT * FROM read_parquet('{files[1][0]}')"
+    ).fetchall()
+    names1 = {row[0] for row in cols1}
+    assert {"id", "val", "qty"}.issubset(names1), names1
+
+
+@pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="duckdb python module not installed")
+@pytest.mark.skipif(not MINIO_AVAILABLE, reason="set PGLAKE_MINIO_BUCKET to run")
+def test_file_column_stats_match_parquet(pg_cursor):
+    """
+    The min/max we record in lake_ducklake.file_column_stats must agree
+    with what DuckDB extracts from the actual parquet footer. Mismatched
+    stats are a silent correctness bug for predicate pushdown.
+    """
+    location = _minio_location("rt_stats")
+    pg_cursor.execute("DROP TABLE IF EXISTS rt_stats")
+    pg_cursor.execute(
+        f"""
+        CREATE TABLE rt_stats (id INT, label TEXT)
+            USING ducklake WITH (location = '{location}')
+        """
+    )
+    pg_cursor.execute(
+        "INSERT INTO rt_stats VALUES (5, 'banana'), (1, 'apple'), (9, 'cherry')"
+    )
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        """
+        SELECT df.path, fcs.column_id, fcs.min_value, fcs.max_value, c.column_name
+          FROM lake_ducklake.data_file df
+          JOIN lake_ducklake.table t USING (table_id)
+          JOIN lake_ducklake.file_column_stats fcs USING (data_file_id)
+          JOIN lake_ducklake.column c
+            ON c.column_id = fcs.column_id AND c.end_snapshot IS NULL
+         WHERE t.table_name = 'rt_stats'
+         ORDER BY c.column_order
+        """
+    )
+    rows = pg_cursor.fetchall()
+    assert len(rows) >= 1, "expected file column stats rows"
+    parquet_path = rows[0][0]
+
+    catalog_stats = {row[4]: (row[2], row[3]) for row in rows}
+
+    duck = _duckdb_with_minio()
+    actual = duck.execute(
+        f"SELECT MIN(id), MAX(id), MIN(label), MAX(label) "
+        f"FROM read_parquet('{parquet_path}')"
+    ).fetchone()
+    actual_min_id, actual_max_id, actual_min_label, actual_max_label = actual
+
+    if "id" in catalog_stats:
+        cmin, cmax = catalog_stats["id"]
+        assert int(cmin) == actual_min_id, (cmin, actual_min_id)
+        assert int(cmax) == actual_max_id, (cmax, actual_max_id)
+    if "label" in catalog_stats:
+        cmin, cmax = catalog_stats["label"]
+        assert cmin == actual_min_label, (cmin, actual_min_label)
+        assert cmax == actual_max_label, (cmax, actual_max_label)
