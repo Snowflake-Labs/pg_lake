@@ -31,7 +31,7 @@
  *    inside SPI_START_EXTENSION_OWNER.  pg_lake_table's BeginForeignModify
  *    creates a per-statement temp tracking table for both UPDATE and
  *    DELETE; the temp create must succeed under
- *    SECURITY_RESTRICTED_OPERATION.  Without ALLOW_TEMP_OBJECTS_BEGIN/END
+ *    SECURITY_RESTRICTED_OPERATION.  Without the narrow restricted-op clear
  *    in CreateUpdateTrackingTable this fails with "cannot create temporary
  *    table within security-restricted operation".
  *
@@ -76,8 +76,8 @@ PG_FUNCTION_INFO_V1(run_iceberg_dml_under_extension_owner);
  * Runs an arbitrary SQL string from inside SPI_START_EXTENSION_OWNER, i.e.
  * with SECURITY_RESTRICTED_OPERATION set and search_path pinned to
  * pg_catalog,pg_temp.  Tests pass an UPDATE/DELETE on an Iceberg foreign
- * table to exercise CreateUpdateTrackingTable's narrow ALLOW_TEMP_OBJECTS
- * scope.
+ * table to exercise CreateUpdateTrackingTable's narrow restricted-op clear
+ * around DefineRelation/DefineIndex.
  *
  * Test-only.  Not safe to expose to untrusted callers since it executes
  * caller-supplied SQL as the extension owner.

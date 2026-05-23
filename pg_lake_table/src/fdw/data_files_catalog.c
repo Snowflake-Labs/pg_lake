@@ -1297,8 +1297,8 @@ DataFilesPartitionValuesCatalogExists(void)
  * to track data file IDs that are being added in the current transaction.
  *
  * PostgreSQL forbids CREATE TEMP TABLE under SECURITY_RESTRICTED_OPERATION,
- * so we narrowly lift the restricted-op flag around the SPI_execute via
- * ALLOW_TEMP_OBJECTS_{BEGIN,END}.  The search_path lockdown stays in
+ * so we use the SPI_START_EXTENSION_OWNER_ALLOWING_TEMP_OBJECTS variant
+ * which omits the restricted-op flag.  The search_path lockdown stays in
  * effect; the DDL is a fixed string with no caller-supplied input.
  */
 static void

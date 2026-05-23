@@ -217,42 +217,6 @@
 	SPI_connect();
 
 /*
- * ALLOW_TEMP_OBJECTS_BEGIN / ALLOW_TEMP_OBJECTS_END
- *
- * Temporarily clear SECURITY_RESTRICTED_OPERATION around a small region of
- * code so the enclosed operation can create or mutate temporary objects
- * (CREATE TEMP TABLE, CREATE TEMP SEQUENCE, etc.).  Use this for non-SPI
- * call sites where the restricted-op flag was set by a caller further up the
- * stack -- e.g. inside an FDW callback invoked from a user query running
- * under SPI_START_EXTENSION_OWNER.  For SPI sites that the current code
- * controls directly, use SPI_START_EXTENSION_OWNER_ALLOWING_TEMP_OBJECTS
- * instead so the opt-out is visible at the SPI entry helper.
- *
- * The search_path lockdown that the surrounding extension-owner helpers
- * establish is unaffected; only the rejection of SET / role-change
- * side-effects is lifted.
- *
- * Use only around fixed, statically-known DDL.  Keep the region as small as
- * possible -- ideally a single DefineRelation() / DefineIndex() call with no
- * caller-supplied values flowing into the operation.  Always pair BEGIN with
- * END.
- *
- * Usage:
- *     ALLOW_TEMP_OBJECTS_BEGIN();
- *     DefineRelation(...);
- *     ALLOW_TEMP_OBJECTS_END();
- */
-#define ALLOW_TEMP_OBJECTS_BEGIN() \
-	Oid			_allowTempUserId; \
-	int			_allowTempSecContext; \
-	GetUserIdAndSecContext(&_allowTempUserId, &_allowTempSecContext); \
-	SetUserIdAndSecContext(_allowTempUserId, \
-						   _allowTempSecContext & ~SECURITY_RESTRICTED_OPERATION);
-
-#define ALLOW_TEMP_OBJECTS_END() \
-	SetUserIdAndSecContext(_allowTempUserId, _allowTempSecContext);
-
-/*
  * BEGIN_EXTENSION_OWNER_CONTEXT / END_EXTENSION_OWNER_CONTEXT are the non-SPI
  * counterparts to SPI_START_EXTENSION_OWNER / SPI_END. Use them when running
  * direct PostgreSQL operations (DefineSequence, RemoveRelations, setval(),

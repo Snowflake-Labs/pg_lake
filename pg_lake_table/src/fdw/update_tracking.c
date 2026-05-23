@@ -159,12 +159,12 @@ GetUpdateTableRangeVar(Oid relationId)
  * for every UPDATE/DELETE on a pg_lake_table foreign table -- including
  * UPDATE/DELETE issued from inside a SECURITY_RESTRICTED_OPERATION context
  * such as SPI_START_EXTENSION_OWNER.  PostgreSQL forbids creating temporary
- * objects under SECURITY_RESTRICTED_OPERATION, so we narrowly lift the flag
- * around the DefineRelation + DefineIndex pair via ALLOW_TEMP_OBJECTS_BEGIN /
- * ALLOW_TEMP_OBJECTS_END.  The relation/index parameters are derived from
- * the target relation OID, not from caller-supplied SQL, so lifting the
- * restricted-op flag does not reopen a hijack vector; the search_path
- * lockdown set up by the surrounding SPI helper stays in effect.
+ * objects under SECURITY_RESTRICTED_OPERATION, so we narrowly clear the flag
+ * around the DefineRelation + DefineIndex pair.  The relation/index
+ * parameters are derived from the target relation OID, not from
+ * caller-supplied SQL, so lifting the restricted-op flag does not reopen a
+ * hijack vector; the search_path lockdown set up by the surrounding SPI
+ * helper stays in effect.
  */
 static Oid
 CreateUpdateTrackingTable(RangeVar *updateTableName)
@@ -186,7 +186,17 @@ CreateUpdateTrackingTable(RangeVar *updateTableName)
 	column->is_not_null = true;
 	createTempTable->tableElts = list_make1(column);
 
-	ALLOW_TEMP_OBJECTS_BEGIN();
+	/*
+	 * Clear SECURITY_RESTRICTED_OPERATION around the DefineRelation +
+	 * DefineIndex pair so the temp objects can be created.  See function
+	 * comment above for the rationale.
+	 */
+	Oid			savedUserId;
+	int			savedSecContext;
+
+	GetUserIdAndSecContext(&savedUserId, &savedSecContext);
+	SetUserIdAndSecContext(savedUserId,
+						   savedSecContext & ~SECURITY_RESTRICTED_OPERATION);
 
 	ObjectAddress updateTableAddress =
 		DefineRelation(createTempTable, RELKIND_RELATION, InvalidOid, NULL, "");
@@ -221,7 +231,7 @@ CreateUpdateTrackingTable(RangeVar *updateTableName)
 				 /* skip_builds */ false,
 				 /* quiet */ true);
 
-	ALLOW_TEMP_OBJECTS_END();
+	SetUserIdAndSecContext(savedUserId, savedSecContext);
 
 	CommandCounterIncrement();
 
