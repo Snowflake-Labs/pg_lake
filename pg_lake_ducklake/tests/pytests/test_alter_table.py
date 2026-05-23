@@ -5,6 +5,84 @@ import pytest
 import os
 
 
+def test_alter_writes_v1_snapshot_changes_and_schema_versions(pg_cursor):
+    """
+    DuckLake v1 spec requires that every snapshot beyond snapshot 0 has a
+    matching ducklake_snapshot_changes row, and every per-table schema
+    change also writes ducklake_schema_versions(begin_snapshot, table_id,
+    schema_version). This test pins both behaviors for ADD COLUMN and
+    DROP COLUMN.
+    """
+    pg_cursor.execute(
+        """
+        CREATE TABLE test_v1_alter (id INT, name TEXT)
+            USING ducklake WITH (location = 's3://test-bucket/test_v1_alter')
+        """
+    )
+
+    pg_cursor.execute(
+        "SELECT table_id FROM lake_ducklake.table WHERE table_name = 'test_v1_alter'"
+    )
+    table_id = pg_cursor.fetchone()[0]
+
+    # ADD COLUMN
+    pg_cursor.execute("ALTER TABLE test_v1_alter ADD COLUMN email TEXT")
+    pg_cursor.execute("SELECT MAX(snapshot_id) FROM lake_ducklake.snapshot")
+    add_snap = pg_cursor.fetchone()[0]
+
+    pg_cursor.execute(
+        """
+        SELECT changes_made FROM lake_ducklake.snapshot_changes
+        WHERE snapshot_id = %s
+        """,
+        (add_snap,),
+    )
+    row = pg_cursor.fetchone()
+    assert row is not None, "ADD COLUMN must write a snapshot_changes row"
+    assert row[0] == "ADD COLUMN"
+
+    pg_cursor.execute(
+        """
+        SELECT schema_version FROM lake_ducklake.schema_versions
+        WHERE begin_snapshot = %s AND table_id = %s
+        """,
+        (add_snap, table_id),
+    )
+    sv = pg_cursor.fetchone()
+    assert sv is not None, "ADD COLUMN must write a schema_versions row"
+    assert sv[0] >= 1
+
+    # DROP COLUMN
+    pg_cursor.execute("ALTER TABLE test_v1_alter DROP COLUMN name")
+    pg_cursor.execute("SELECT MAX(snapshot_id) FROM lake_ducklake.snapshot")
+    drop_snap = pg_cursor.fetchone()[0]
+    assert drop_snap == add_snap + 1
+
+    pg_cursor.execute(
+        """
+        SELECT changes_made FROM lake_ducklake.snapshot_changes
+        WHERE snapshot_id = %s
+        """,
+        (drop_snap,),
+    )
+    row = pg_cursor.fetchone()
+    assert row is not None, "DROP COLUMN must write a snapshot_changes row"
+    assert row[0] == "DROP COLUMN"
+
+    pg_cursor.execute(
+        """
+        SELECT schema_version FROM lake_ducklake.schema_versions
+        WHERE begin_snapshot = %s AND table_id = %s
+        """,
+        (drop_snap, table_id),
+    )
+    sv = pg_cursor.fetchone()
+    assert sv is not None, "DROP COLUMN must write a schema_versions row"
+    assert sv[0] >= 2
+
+    pg_cursor.execute("DROP TABLE test_v1_alter")
+
+
 def test_drop_column_creates_snapshot(pg_cursor):
     """
     Test that DROP COLUMN creates a new snapshot and sets end_snapshot correctly.

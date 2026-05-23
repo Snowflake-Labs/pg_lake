@@ -1000,6 +1000,19 @@ DucklakeAddColumn(Oid tableOid, const char *columnName, const char *columnType,
 		SPI_exec(query.data, 0);
 	}
 
+	/*
+	 * Record per-table schema version for this snapshot. v1 spec uses
+	 * lake_ducklake.schema_versions for DuckDB compaction and schema lookups.
+	 */
+	resetStringInfo(&query);
+	appendStringInfo(&query,
+					 "INSERT INTO lake_ducklake.schema_versions "
+					 "(begin_snapshot, table_id, schema_version) "
+					 "VALUES (%ld, %ld, "
+					 "(SELECT schema_version FROM lake_ducklake.snapshot WHERE snapshot_id = %ld))",
+					 newSnapshot->snapshotId, metadata->tableId, newSnapshot->snapshotId);
+	SPI_exec(query.data, 0);
+
 	SPI_finish();
 }
 
@@ -1041,6 +1054,18 @@ DucklakeDropColumn(Oid tableOid, const char *columnName)
 	ret = SPI_exec(query.data, 0);
 	if (ret != SPI_OK_UPDATE || SPI_processed == 0)
 		elog(WARNING, "Column %s not found in DuckLake catalog for drop", columnName);
+
+	/*
+	 * Record per-table schema version for this snapshot.
+	 */
+	resetStringInfo(&query);
+	appendStringInfo(&query,
+					 "INSERT INTO lake_ducklake.schema_versions "
+					 "(begin_snapshot, table_id, schema_version) "
+					 "VALUES (%ld, %ld, "
+					 "(SELECT schema_version FROM lake_ducklake.snapshot WHERE snapshot_id = %ld))",
+					 newSnapshot->snapshotId, metadata->tableId, newSnapshot->snapshotId);
+	SPI_exec(query.data, 0);
 
 	SPI_finish();
 }
