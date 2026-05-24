@@ -706,3 +706,28 @@ def test_add_column_with_default_backfills_old_files(pg_cursor, s3):
     pg_cursor.execute("SELECT id, val, qty FROM rt_default ORDER BY id")
     rows = pg_cursor.fetchall()
     assert rows == [(1, "a", 99), (2, "b", 7)], rows
+
+
+def test_add_column_with_string_default(pg_cursor, s3):
+    """Same as test_add_column_with_default_backfills_old_files but with a
+    text DEFAULT. Postgres formats the expression as 'foo'::text via
+    pg_get_expr; DuckDB needs to be able to parse that as the column
+    default for old parquet files."""
+    location = _location("rt_str_default")
+    pg_cursor.execute("DROP TABLE IF EXISTS rt_str_default")
+    pg_cursor.execute(
+        f"""
+        CREATE TABLE rt_str_default (id INT)
+            USING ducklake WITH (location = '{location}')
+        """
+    )
+    pg_cursor.execute("INSERT INTO rt_str_default VALUES (1)")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute("ALTER TABLE rt_str_default ADD COLUMN label TEXT DEFAULT 'unknown'")
+    pg_cursor.execute("INSERT INTO rt_str_default VALUES (2, 'set')")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute("SELECT id, label FROM rt_str_default ORDER BY id")
+    rows = pg_cursor.fetchall()
+    assert rows == [(1, "unknown"), (2, "set")], rows

@@ -1102,18 +1102,28 @@ DucklakeAddColumn(Oid tableOid, const char *columnName, const char *columnType,
 	SPI_exec(query.data, 0);
 
 	/*
-	 * Capture the postgres-side DEFAULT expression for this attnum. v1
-	 * stores it in ducklake_column.initial_default so reads of older
-	 * parquet files (written before this ADD COLUMN) can backfill the
-	 * missing column with the right value instead of NULL. We use
-	 * pg_get_expr on pg_attrdef rather than parsing the ColumnDef so the
-	 * expression text matches what postgres considers the canonical form.
+	 * Capture the postgres-side DEFAULT expression for this attnum and
+	 * resolve it to a value text. v1 stores the resolved value in
+	 * ducklake_column.initial_default so reads of older parquet files
+	 * (written before this ADD COLUMN) can backfill the missing column
+	 * with the right scalar instead of NULL.
+	 *
+	 * pg_get_expr returns the canonical SQL form ("'foo'::text", "99",
+	 * "now()") which DuckDB's read_parquet default_value can't always
+	 * parse — we therefore execute the expression and cast the result
+	 * to text. For static literals this collapses 'unknown'::text to
+	 * unknown and 99::int4 to 99; for volatile expressions like now()
+	 * it captures the value at ADD-COLUMN time, which is the same
+	 * semantics postgres uses for backfilling existing rows.
 	 */
 	resetStringInfo(&query);
 	appendStringInfo(&query,
-					 "SELECT pg_catalog.pg_get_expr(adbin, adrelid) "
-					 "FROM pg_catalog.pg_attrdef "
-					 "WHERE adrelid = %u AND adnum = %d",
+					 "SELECT (CASE WHEN ad.adbin IS NULL THEN NULL "
+					 "             ELSE (pg_catalog.pg_get_expr(ad.adbin, ad.adrelid))::text "
+					 "        END) AS expr_text "
+					 "FROM (SELECT NULL::text adbin, NULL::oid adrelid) base "
+					 "LEFT JOIN pg_catalog.pg_attrdef ad "
+					 "       ON ad.adrelid = %u AND ad.adnum = %d",
 					 tableOid, columnOrder);
 
 	char	   *initialDefault = NULL;
@@ -1126,7 +1136,30 @@ DucklakeAddColumn(Oid tableOid, const char *columnName, const char *columnType,
 									  1, &isnull);
 
 		if (!isnull)
-			initialDefault = pstrdup(TextDatumGetCString(d));
+		{
+			char	   *exprText = TextDatumGetCString(d);
+
+			/*
+			 * Now actually evaluate the expression text and cast to
+			 * text so the stored default is a plain scalar value.
+			 */
+			StringInfoData evalQ;
+
+			initStringInfo(&evalQ);
+			appendStringInfo(&evalQ, "SELECT (%s)::text", exprText);
+
+			int			evalRet = SPI_exec(evalQ.data, 1);
+
+			if (evalRet == SPI_OK_SELECT && SPI_processed > 0)
+			{
+				bool		evalIsNull;
+				Datum		v = SPI_getbinval(SPI_tuptable->vals[0],
+											  SPI_tuptable->tupdesc, 1, &evalIsNull);
+
+				if (!evalIsNull)
+					initialDefault = pstrdup(TextDatumGetCString(v));
+			}
+		}
 	}
 
 	/* Now create a new snapshot for this schema change */
