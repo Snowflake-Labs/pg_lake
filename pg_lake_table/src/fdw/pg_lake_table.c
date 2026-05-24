@@ -4523,6 +4523,15 @@ postgresExecForeignTruncate(List *relations,
 
 			if (metadata)
 			{
+				/*
+				 * TRUNCATE is its own logical change. Stamp a fresh
+				 * "TRUNCATE" snapshot so DucklakeRemoveAllDataFiles
+				 * end-snapshots the live data files at this snapshot,
+				 * giving DuckDB readers a time-travel point to before
+				 * and after the truncation.
+				 */
+				(void) DucklakeCreateSnapshot("TRUNCATE", NULL, NULL);
+
 				DucklakeRemoveAllDataFiles(metadata->tableId);
 
 				/* Clean up allocated memory */

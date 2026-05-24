@@ -278,6 +278,44 @@ DucklakeRegisterTable(const char *schemaName, const char *tableName, const char 
 	bool isnull;
 
 	/*
+	 * CREATE FOREIGN TABLE IF NOT EXISTS lets ProcessUtility succeed
+	 * silently when the postgres-side foreign table already exists, but
+	 * our post-process hook still runs and used to call this function
+	 * regardless, leading to duplicate (begin_snapshot, table_name) rows
+	 * in lake_ducklake.table. Short-circuit here when a live row for
+	 * the same (schema_name, table_name) already exists.
+	 */
+	{
+		StringInfoData probeQuery;
+
+		initStringInfo(&probeQuery);
+		appendStringInfo(&probeQuery,
+						 "SELECT t.table_id FROM lake_ducklake.table t "
+						 "JOIN lake_ducklake.schema s ON t.schema_id = s.schema_id "
+						 "WHERE s.schema_name = %s AND t.table_name = %s "
+						 "AND t.end_snapshot IS NULL "
+						 "AND s.end_snapshot IS NULL",
+						 quote_literal_cstr(schemaName), quote_literal_cstr(tableName));
+
+		SPI_connect();
+		ret = SPI_exec(probeQuery.data, 0);
+
+		if (ret == SPI_OK_SELECT && SPI_processed > 0)
+		{
+			int64		existingTableId =
+				DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+											SPI_tuptable->tupdesc, 1, &isnull));
+
+			SPI_finish();
+			elog(LOG,
+				 "DucklakeRegisterTable: %s.%s already registered as table_id=%ld; skipping",
+				 schemaName, tableName, existingTableId);
+			return existingTableId;
+		}
+		SPI_finish();
+	}
+
+	/*
 	 * CREATE TABLE in DuckLake v1 must produce a new snapshot so the new
 	 * schema/table/column rows have a meaningful begin_snapshot. Without a
 	 * fresh snapshot every CREATE TABLE would land on snapshot 0.
@@ -498,17 +536,53 @@ void
 DucklakeDropTable(int64 tableId)
 {
 	StringInfoData query;
+	DucklakeSnapshot *newSnapshot;
+
+	/*
+	 * DuckLake v1 keeps dropped tables in metadata so time-travel queries
+	 * can still see them. Instead of DELETE we create a new "DROP TABLE"
+	 * snapshot and end-snapshot the live row plus all live data/delete
+	 * files belonging to it. The old DELETE path lost history and would
+	 * have cascade-removed columns/data_files via ON DELETE CASCADE.
+	 */
+	newSnapshot = DucklakeCreateSnapshot("DROP TABLE", NULL, NULL);
 
 	SPI_connect();
 
-	/*
-	 * Delete the table record. Due to ON DELETE CASCADE foreign keys,
-	 * this will automatically delete all related records (columns, data_files,
-	 * delete_files, file_column_stats, column_mapping, name_mapping, etc.)
-	 */
 	initStringInfo(&query);
 	appendStringInfo(&query,
-					 "DELETE FROM lake_ducklake.table WHERE table_id = %ld",
+					 "UPDATE lake_ducklake.table SET end_snapshot = %ld "
+					 "WHERE table_id = %ld AND end_snapshot IS NULL",
+					 newSnapshot->snapshotId, tableId);
+	SPI_exec(query.data, 0);
+
+	resetStringInfo(&query);
+	appendStringInfo(&query,
+					 "UPDATE lake_ducklake.column SET end_snapshot = %ld "
+					 "WHERE table_id = %ld AND end_snapshot IS NULL",
+					 newSnapshot->snapshotId, tableId);
+	SPI_exec(query.data, 0);
+
+	resetStringInfo(&query);
+	appendStringInfo(&query,
+					 "UPDATE lake_ducklake.data_file SET end_snapshot = %ld "
+					 "WHERE table_id = %ld AND end_snapshot IS NULL",
+					 newSnapshot->snapshotId, tableId);
+	SPI_exec(query.data, 0);
+
+	resetStringInfo(&query);
+	appendStringInfo(&query,
+					 "UPDATE lake_ducklake.delete_file SET end_snapshot = %ld "
+					 "WHERE table_id = %ld AND end_snapshot IS NULL",
+					 newSnapshot->snapshotId, tableId);
+	SPI_exec(query.data, 0);
+
+	/* Clear the table_stats counters so reads after the drop see zero rows */
+	resetStringInfo(&query);
+	appendStringInfo(&query,
+					 "UPDATE lake_ducklake.table_stats "
+					 "SET record_count = 0, file_size_bytes = 0 "
+					 "WHERE table_id = %ld",
 					 tableId);
 	SPI_exec(query.data, 0);
 
