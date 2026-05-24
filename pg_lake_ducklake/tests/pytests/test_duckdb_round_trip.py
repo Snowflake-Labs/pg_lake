@@ -599,3 +599,83 @@ def test_select_after_drop_column(pg_cursor, s3):
     pg_cursor.execute("SELECT id, val FROM rt_drop_col_read ORDER BY id")
     rows = pg_cursor.fetchall()
     assert rows == [(1, "a"), (2, "b")], rows
+
+
+def test_select_after_rename_column(pg_cursor, s3):
+    """
+    RENAME COLUMN in DuckLake v1 produces a new column-version row with
+    the same column_id and the new name. The physical parquet field_id
+    is column_order which matches postgres attnum, so a SELECT after
+    rename must still surface the rows from the older parquet file (it
+    was written under the previous name) using the new name.
+    """
+    location = _location("rt_rename")
+    pg_cursor.execute("DROP TABLE IF EXISTS rt_rename")
+    pg_cursor.execute(
+        f"""
+        CREATE TABLE rt_rename (id INT, val TEXT)
+            USING ducklake WITH (location = '{location}')
+        """
+    )
+    pg_cursor.execute("INSERT INTO rt_rename VALUES (1, 'a'), (2, 'b')")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute("ALTER TABLE rt_rename RENAME COLUMN val TO label")
+    pg_cursor.execute("INSERT INTO rt_rename VALUES (3, 'c')")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute("SELECT id, label FROM rt_rename ORDER BY id")
+    rows = pg_cursor.fetchall()
+    assert rows == [(1, "a"), (2, "b"), (3, "c")], rows
+
+
+def test_create_drop_create_same_name_keeps_history(pg_cursor, s3):
+    """
+    DROP TABLE end-snapshots the table row; recreating the same name
+    must work because the previous registration is no longer live.
+    Pin both halves: the original table_id is preserved in history
+    with end_snapshot set, and the new CREATE inserts a fresh row.
+    """
+    location = _location("rt_recreate")
+    pg_cursor.execute("DROP TABLE IF EXISTS rt_recreate")
+    pg_cursor.execute(
+        f"""
+        CREATE TABLE rt_recreate (id INT) USING ducklake
+            WITH (location = '{location}')
+        """
+    )
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        "SELECT table_id FROM lake_ducklake.table "
+        "WHERE table_name = 'rt_recreate' AND end_snapshot IS NULL"
+    )
+    first_id = pg_cursor.fetchone()[0]
+
+    pg_cursor.execute("DROP TABLE rt_recreate")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        "SELECT table_id, end_snapshot FROM lake_ducklake.table "
+        "WHERE table_name = 'rt_recreate' AND table_id = %s",
+        (first_id,),
+    )
+    row = pg_cursor.fetchone()
+    assert row is not None and row[1] is not None, (
+        f"DROP TABLE must keep the table row with end_snapshot set, got {row}"
+    )
+
+    pg_cursor.execute(
+        f"""
+        CREATE TABLE rt_recreate (id INT) USING ducklake
+            WITH (location = '{location}/round2')
+        """
+    )
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        "SELECT table_id FROM lake_ducklake.table "
+        "WHERE table_name = 'rt_recreate' AND end_snapshot IS NULL"
+    )
+    second_id = pg_cursor.fetchone()[0]
+    assert second_id != first_id, (first_id, second_id)
