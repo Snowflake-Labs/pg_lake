@@ -791,6 +791,30 @@ DucklakeAddDataFile(int64 tableId, const char *path, int64 recordCount,
 					 tableId, tableId);
 	SPI_exec(query.data, 0);
 
+	/*
+	 * Also seed lake_ducklake.table_column_stats with one row per live
+	 * column for this table. DuckDB's GetGlobalTableStats query (in
+	 * ducklake_metadata_manager.cpp) does
+	 *   SELECT ... FROM ducklake_table_stats LEFT JOIN ducklake_table_column_stats USING (table_id)
+	 * and then reads column_id at row index 1 with GetValue<uint64_t> —
+	 * NULL there raises "Calling GetValueInternal on a value that is NULL".
+	 * We don't compute aggregate per-column stats yet, so insert
+	 * placeholder rows with NULL min/max/contains_null and let DuckDB's
+	 * NULL-checks for those individual columns kick in (see COLUMN_STATS_START
+	 * branch in TransformGlobalStatsRow).
+	 */
+	resetStringInfo(&query);
+	appendStringInfo(&query,
+					 "INSERT INTO lake_ducklake.table_column_stats "
+					 "(table_id, column_id, contains_null, contains_nan, "
+					 "min_value, max_value, extra_stats) "
+					 "SELECT %ld, column_id, NULL, NULL, NULL, NULL, NULL "
+					 "  FROM lake_ducklake.column "
+					 " WHERE table_id = %ld AND end_snapshot IS NULL "
+					 "ON CONFLICT (table_id, column_id) DO NOTHING",
+					 tableId, tableId);
+	SPI_exec(query.data, 0);
+
 	SPI_finish();
 	pfree(snapshot);
 

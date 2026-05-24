@@ -8,9 +8,7 @@ These tests verify that:
 """
 
 import pytest
-import os
-import tempfile
-from pathlib import Path
+from utils_pytest import TEST_BUCKET, server_params
 
 # Check if duckdb is available
 try:
@@ -26,42 +24,34 @@ def test_create_ducklake_table_s3(pg_cursor):
     Test creating a DuckLake table with S3 location.
     Tables are created as foreign tables using the DuckLake FDW.
     """
-    location = "s3://test-bucket/test_table"
+    location = f"s3://{TEST_BUCKET}/test_table"
 
-    try:
-        pg_cursor.execute(f"""
-            CREATE TABLE test_s3_table (
-                id INTEGER,
-                name TEXT
-            ) USING ducklake
-            WITH (location = '{location}')
-        """)
-        pg_cursor.connection.commit()
+    pg_cursor.execute(f"""
+        CREATE TABLE test_s3_table (
+            id INTEGER,
+            name TEXT
+        ) USING ducklake
+        WITH (location = '{location}')
+    """)
+    pg_cursor.connection.commit()
 
-        # Verify foreign table was created
-        pg_cursor.execute("""
-            SELECT foreign_table_name
-            FROM information_schema.foreign_tables
-            WHERE foreign_table_name = 'test_s3_table'
-        """)
-        result = pg_cursor.fetchone()
-        assert result is not None, "Foreign table was not created"
+    # Verify foreign table was created
+    pg_cursor.execute("""
+        SELECT foreign_table_name
+        FROM information_schema.foreign_tables
+        WHERE foreign_table_name = 'test_s3_table'
+    """)
+    result = pg_cursor.fetchone()
+    assert result is not None, "Foreign table was not created"
 
-        # Verify it's using the correct server
-        pg_cursor.execute("""
-            SELECT foreign_server_name
-            FROM information_schema.foreign_tables
-            WHERE foreign_table_name = 'test_s3_table'
-        """)
-        server = pg_cursor.fetchone()
-        assert server[0] == 'pg_lake_ducklake', f"Wrong server: {server[0]}"
-
-    except Exception as e:
-        # S3 credentials might not be available in test environment
-        if "s3://" in str(e).lower() or "credentials" in str(e).lower():
-            pytest.skip(f"S3 not configured: {e}")
-        else:
-            raise
+    # Verify it's using the correct server
+    pg_cursor.execute("""
+        SELECT foreign_server_name
+        FROM information_schema.foreign_tables
+        WHERE foreign_table_name = 'test_s3_table'
+    """)
+    server = pg_cursor.fetchone()
+    assert server[0] == 'pg_lake_ducklake', f"Wrong server: {server[0]}"
 
 
 @pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="DuckDB not installed")
@@ -69,111 +59,73 @@ def test_metadata_structure_after_create(pg_cursor):
     """
     Test that creating a DuckLake table populates metadata tables.
     """
-    location = "s3://test-bucket/metadata_test"
+    location = f"s3://{TEST_BUCKET}/metadata_test"
 
-    try:
-        pg_cursor.execute(f"""
-            CREATE TABLE metadata_test (
-                id INTEGER,
-                value TEXT
-            ) USING ducklake
-            WITH (location = '{location}')
-        """)
-        pg_cursor.connection.commit()
+    pg_cursor.execute(f"""
+        CREATE TABLE metadata_test (
+            id INTEGER,
+            value TEXT
+        ) USING ducklake
+        WITH (location = '{location}')
+    """)
+    pg_cursor.connection.commit()
 
-        # Check if table metadata was created
-        pg_cursor.execute("""
-            SELECT COUNT(*)
-            FROM lake_ducklake.table
-            WHERE table_name = 'metadata_test'
-        """)
-        count = pg_cursor.fetchone()[0]
-
-        # Currently the integration may not populate metadata automatically
-        # This test documents expected behavior
-        print(f"Table metadata entries: {count}")
-
-    except Exception as e:
-        if "s3://" in str(e).lower() or "not supported" in str(e).lower():
-            pytest.skip(f"S3 not configured or file:// not supported: {e}")
-        else:
-            raise
+    pg_cursor.execute("""
+        SELECT table_name FROM lake_ducklake.tables
+        WHERE table_name = 'metadata_test'
+    """)
+    rows = pg_cursor.fetchall()
+    assert len(rows) == 1, f"expected metadata_test in lake_ducklake.tables, got {rows}"
 
 
 @pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="DuckDB not installed")
-def test_insert_data_to_ducklake_table(pg_cursor):
+def test_insert_data_to_ducklake_table(pg_cursor, s3):
     """
-    Test inserting data into a DuckLake table.
-
-    NOTE: This currently fails because FDW insert hooks are not yet implemented.
-    This test documents the expected behavior.
+    Test inserting data into a DuckLake table. After commit, the data
+    file is registered in lake_ducklake.data_file with the correct row
+    count and stats.
     """
-    location = "s3://test-bucket/insert_test"
+    location = f"s3://{TEST_BUCKET}/insert_test"
 
-    try:
-        pg_cursor.execute(f"""
-            CREATE TABLE insert_test (
-                id INTEGER,
-                name TEXT,
-                value DOUBLE PRECISION
-            ) USING ducklake
-            WITH (location = '{location}')
-        """)
-        pg_cursor.connection.commit()
+    pg_cursor.execute(f"""
+        CREATE TABLE insert_test (
+            id INTEGER,
+            name TEXT,
+            value DOUBLE PRECISION
+        ) USING ducklake
+        WITH (location = '{location}')
+    """)
+    pg_cursor.connection.commit()
 
-        # Try to insert data - this will fail until FDW hooks are implemented
-        try:
-            pg_cursor.execute("""
-                INSERT INTO insert_test VALUES
-                    (1, 'alice', 10.5),
-                    (2, 'bob', 20.3)
-            """)
-            pg_cursor.connection.commit()
+    pg_cursor.execute("""
+        INSERT INTO insert_test VALUES
+            (1, 'alice', 10.5),
+            (2, 'bob', 20.3)
+    """)
+    pg_cursor.connection.commit()
 
-            # If we get here, INSERT is working!
-            pg_cursor.execute("SELECT COUNT(*) FROM insert_test")
-            count = pg_cursor.fetchone()[0]
-            assert count == 2, f"Expected 2 rows, got {count}"
+    pg_cursor.execute("SELECT COUNT(*) FROM insert_test")
+    count = pg_cursor.fetchone()[0]
+    assert count == 2, f"Expected 2 rows, got {count}"
 
-            # Check if snapshot was created
-            pg_cursor.execute("SELECT COUNT(*) FROM lake_ducklake.snapshot WHERE snapshot_id > 0")
-            snapshot_count = pg_cursor.fetchone()[0]
-            print(f"Snapshots after insert: {snapshot_count}")
-
-        except Exception as insert_error:
-            if "does not allow inserts" in str(insert_error):
-                pytest.skip("INSERT not yet implemented for DuckLake FDW")
-            else:
-                raise
-
-    except Exception as e:
-        if "s3://" in str(e).lower() or "not supported" in str(e).lower():
-            pytest.skip(f"S3 not configured: {e}")
-        else:
-            raise
+    pg_cursor.execute(
+        "SELECT COUNT(*), SUM(record_count) FROM lake_ducklake.data_file df "
+        "JOIN lake_ducklake.\"table\" t USING (table_id) "
+        "WHERE t.table_name = 'insert_test'"
+    )
+    data_files, total_records = pg_cursor.fetchone()
+    assert data_files == 1
+    assert total_records == 2
 
 
 @pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="DuckDB not installed")
-def test_duckdb_reads_postgres_metadata(pg_cursor, tmp_path):
+def test_duckdb_reads_postgres_metadata(pg_cursor, s3):
     """
-    Test that DuckDB can read metadata created by PostgreSQL.
-
-    This test requires:
-    1. PostgreSQL to create table and write Parquet files
-    2. DuckDB to read the same metadata directory
+    Test that DuckDB can read DuckLake metadata that PostgreSQL wrote
+    via INSERT, and surface the rows over the lake.
     """
-    # For now, this is a placeholder that documents the expected workflow
-    pytest.skip("Requires full INSERT implementation to write Parquet files")
-
-    # Expected workflow:
-    # 1. Create table in PostgreSQL with shared location
-    # 2. Insert data (writes Parquet + metadata)
-    # 3. Connect DuckDB to same metadata location
-    # 4. Verify DuckDB can see the table and read data
-
-    location = f"file://{tmp_path}/shared_table"
-
-    # PostgreSQL side
+    location = f"s3://{TEST_BUCKET}/shared_table"
+    pg_cursor.execute("DROP TABLE IF EXISTS shared_table")
     pg_cursor.execute(f"""
         CREATE TABLE shared_table (
             id INTEGER,
@@ -181,24 +133,36 @@ def test_duckdb_reads_postgres_metadata(pg_cursor, tmp_path):
         ) USING ducklake
         WITH (location = '{location}')
     """)
-
-    pg_cursor.execute("""
-        INSERT INTO shared_table VALUES (1, 'test')
-    """)
+    pg_cursor.execute("INSERT INTO shared_table VALUES (1, 'test'), (2, 'two')")
     pg_cursor.connection.commit()
 
-    # DuckDB side
-    conn = duckdb.connect()
-    conn.execute("INSTALL ducklake FROM community")
-    conn.execute("LOAD ducklake")
+    duck = duckdb.connect()
+    duck.execute("INSTALL postgres")
+    duck.execute("LOAD postgres")
+    duck.execute("INSTALL ducklake FROM core_nightly")
+    duck.execute("LOAD ducklake")
+    duck.execute(
+        f"""
+        CREATE SECRET s3test (TYPE S3, KEY_ID 'testing', SECRET 'testing',
+                              ENDPOINT 'localhost:5999',
+                              SCOPE 's3://{TEST_BUCKET}', URL_STYLE 'path',
+                              USE_SSL false)
+        """
+    )
 
-    # Attach to the same metadata location
-    conn.execute(f"ATTACH '{location}' AS ducklake_db (TYPE DUCKLAKE)")
+    conn = (
+        f"host={server_params.PG_HOST} port={server_params.PG_PORT} "
+        f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
+    )
+    duck.execute(
+        f"ATTACH 'postgres:{conn}' AS dl "
+        f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
+    )
 
-    # Query through DuckDB
-    result = conn.execute("SELECT * FROM ducklake_db.shared_table").fetchall()
-    assert len(result) == 1
-    assert result[0] == (1, 'test')
+    rows = duck.execute(
+        "SELECT id, name FROM dl.public.shared_table ORDER BY id"
+    ).fetchall()
+    assert rows == [(1, 'test'), (2, 'two')], rows
 
 
 def test_manual_metadata_creation_for_duckdb(pg_cursor, tmp_path):
