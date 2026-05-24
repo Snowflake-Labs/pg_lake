@@ -696,6 +696,31 @@ DucklakeAddDataFile(int64 tableId, const char *path, int64 recordCount,
 					 snapshot->nextFileId, snapshot->snapshotId);
 	SPI_exec(query.data, 0);
 
+	/*
+	 * Re-roll up lake_ducklake.table_stats from live data_file rows. v1
+	 * spec exposes per-table totals (record_count, next_row_id,
+	 * file_size_bytes) and DuckDB's read path queries this table for
+	 * planning. Without it record_count() / SUM(file_size) on a DuckLake
+	 * table goes through a full file scan, and DuckDB returns 0 rows for
+	 * its built-in metadata views.
+	 */
+	resetStringInfo(&query);
+	appendStringInfo(&query,
+					 "INSERT INTO lake_ducklake.table_stats "
+					 "(table_id, record_count, next_row_id, file_size_bytes) "
+					 "SELECT %ld, "
+					 "       COALESCE(SUM(record_count), 0), "
+					 "       COALESCE(MAX(row_id_start + record_count), 0), "
+					 "       COALESCE(SUM(file_size_bytes), 0) "
+					 "  FROM lake_ducklake.data_file "
+					 " WHERE table_id = %ld AND end_snapshot IS NULL "
+					 "ON CONFLICT (table_id) DO UPDATE SET "
+					 "  record_count = EXCLUDED.record_count, "
+					 "  next_row_id = EXCLUDED.next_row_id, "
+					 "  file_size_bytes = EXCLUDED.file_size_bytes",
+					 tableId, tableId);
+	SPI_exec(query.data, 0);
+
 	SPI_finish();
 	pfree(snapshot);
 
@@ -717,6 +742,33 @@ DucklakeRemoveDataFile(int64 dataFileId)
 
 	SPI_connect();
 	SPI_exec(query.data, 0);
+
+	/*
+	 * Recompute table_stats from live data files now that this one is
+	 * end-snapshotted. Joining through data_file gives us the table_id
+	 * so we don't have to look it up before SPI_connect.
+	 */
+	resetStringInfo(&query);
+	appendStringInfo(&query,
+					 "INSERT INTO lake_ducklake.table_stats "
+					 "(table_id, record_count, next_row_id, file_size_bytes) "
+					 "SELECT df_target.table_id, "
+					 "       COALESCE(SUM(df_live.record_count), 0), "
+					 "       COALESCE(MAX(df_live.row_id_start + df_live.record_count), 0), "
+					 "       COALESCE(SUM(df_live.file_size_bytes), 0) "
+					 "  FROM lake_ducklake.data_file df_target "
+					 "  LEFT JOIN lake_ducklake.data_file df_live "
+					 "         ON df_live.table_id = df_target.table_id "
+					 "        AND df_live.end_snapshot IS NULL "
+					 " WHERE df_target.data_file_id = %ld "
+					 " GROUP BY df_target.table_id "
+					 "ON CONFLICT (table_id) DO UPDATE SET "
+					 "  record_count = EXCLUDED.record_count, "
+					 "  next_row_id = EXCLUDED.next_row_id, "
+					 "  file_size_bytes = EXCLUDED.file_size_bytes",
+					 dataFileId);
+	SPI_exec(query.data, 0);
+
 	SPI_finish();
 
 	pfree(snapshot);
@@ -738,6 +790,18 @@ DucklakeRemoveAllDataFiles(int64 tableId)
 
 	SPI_connect();
 	SPI_exec(query.data, 0);
+
+	/* Table is empty now: zero out table_stats. */
+	resetStringInfo(&query);
+	appendStringInfo(&query,
+					 "INSERT INTO lake_ducklake.table_stats "
+					 "(table_id, record_count, next_row_id, file_size_bytes) "
+					 "VALUES (%ld, 0, 0, 0) "
+					 "ON CONFLICT (table_id) DO UPDATE SET "
+					 "  record_count = 0, file_size_bytes = 0",
+					 tableId);
+	SPI_exec(query.data, 0);
+
 	SPI_finish();
 
 	pfree(snapshot);

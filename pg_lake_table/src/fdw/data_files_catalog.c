@@ -189,10 +189,10 @@ GetDucklakeDataFilesHash(Oid relationId, bool dataOnly, int64 snapshotId)
 
 			tableFile->path = resolvedPath;
 			tableFile->fileId = ducklakeFile->dataFileId;
-			tableFile->content = CONTENT_DATA;	/* Assume data files for now */
+			tableFile->content = CONTENT_DATA;
 			tableFile->stats.rowCount = ducklakeFile->recordCount;
 			tableFile->stats.fileSize = ducklakeFile->fileSizeBytes;
-			tableFile->stats.deletedRowCount = 0;	/* DuckLake doesn't track this separately yet */
+			tableFile->stats.deletedRowCount = 0;	/* filled in below from delete_file */
 			tableFile->stats.rowIdStart = ducklakeFile->rowIdStart;
 			tableFile->stats.columnStats = NIL;
 			tableFile->partition = NULL;
@@ -200,6 +200,80 @@ GetDucklakeDataFilesHash(Oid relationId, bool dataOnly, int64 snapshotId)
 			/* Restore previous memory context */
 			MemoryContextSwitchTo(oldContext);
 		}
+	}
+
+	/*
+	 * Pull delete files in so the FDW can either (a) apply position
+	 * deletes when scanning, or (b) account for them in row-count
+	 * estimates. When dataOnly is true the caller is just enumerating
+	 * data files (e.g. for compaction planning); we still update each
+	 * data file's deletedRowCount so estimates aren't inflated, but we
+	 * do not add separate CONTENT_POSITION_DELETES entries.
+	 */
+	List	   *deleteFiles = DucklakeGetDeleteFiles(metadata->tableId, snapshotId);
+	ListCell   *delCell;
+
+	foreach(delCell, deleteFiles)
+	{
+		DucklakeDeleteFile *del = (DucklakeDeleteFile *) lfirst(delCell);
+
+		/* Charge the delete count back to the source data file's row-count estimate. */
+		if (del->dataFileId > 0)
+		{
+			bool		found;
+			TableDataFile *tableFile = hash_search(dataFilesHash,
+												   &del->dataFileId,
+												   HASH_FIND,
+												   &found);
+
+			if (found)
+				tableFile->stats.deletedRowCount += del->deleteCount;
+		}
+
+		if (dataOnly)
+			continue;
+
+		MemoryContext oldContext = MemoryContextSwitchTo(callerContext);
+		bool		found;
+		TableDataFile *deleteEntry = hash_search(dataFilesHash,
+												 &del->deleteFileId,
+												 HASH_ENTER,
+												 &found);
+
+		if (!found)
+		{
+			char	   *resolvedPath;
+
+			if (del->pathIsRelative && metadata->path)
+			{
+				const char *rel = del->path;
+
+				if (rel[0] == '/')
+					rel++;
+
+				StringInfoData pathBuf;
+
+				initStringInfo(&pathBuf);
+				appendStringInfo(&pathBuf, "%s/%s", metadata->path, rel);
+				resolvedPath = pathBuf.data;
+			}
+			else
+			{
+				resolvedPath = pstrdup(del->path);
+			}
+
+			deleteEntry->path = resolvedPath;
+			deleteEntry->fileId = del->deleteFileId;
+			deleteEntry->content = CONTENT_POSITION_DELETES;
+			deleteEntry->stats.rowCount = del->deleteCount;
+			deleteEntry->stats.fileSize = del->fileSizeBytes;
+			deleteEntry->stats.deletedRowCount = 0;
+			deleteEntry->stats.rowIdStart = 0;
+			deleteEntry->stats.columnStats = NIL;
+			deleteEntry->partition = NULL;
+		}
+
+		MemoryContextSwitchTo(oldContext);
 	}
 
 	/* Clean up metadata */

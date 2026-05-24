@@ -348,3 +348,149 @@ def test_file_column_stats_match_parquet(pg_cursor, s3):
         cmin, cmax = catalog_stats["label"]
         assert cmin == actual_min_label, (cmin, actual_min_label)
         assert cmax == actual_max_label, (cmax, actual_max_label)
+
+
+@pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="duckdb python module not installed")
+def test_table_stats_rolls_up_after_writes(pg_cursor, s3):
+    """
+    After every INSERT and TRUNCATE, lake_ducklake.table_stats must
+    reflect the live data files: SUM(record_count), SUM(file_size_bytes),
+    MAX(row_id_start + record_count). DuckDB's read path queries this
+    table for plan-time row-count estimates; before this commit it was
+    never populated.
+    """
+    location = _location("rt_stats_rollup")
+    pg_cursor.execute("DROP TABLE IF EXISTS rt_stats_rollup")
+    pg_cursor.execute(
+        f"""
+        CREATE TABLE rt_stats_rollup (id INT, val TEXT)
+            USING ducklake WITH (location = '{location}')
+        """
+    )
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        "SELECT table_id FROM lake_ducklake.table WHERE table_name = 'rt_stats_rollup'"
+    )
+    table_id = pg_cursor.fetchone()[0]
+
+    # No inserts yet -> table_stats either absent or zeroed.
+    pg_cursor.execute(
+        "SELECT record_count, file_size_bytes FROM lake_ducklake.table_stats "
+        "WHERE table_id = %s",
+        (table_id,),
+    )
+    row = pg_cursor.fetchone()
+    if row is not None:
+        assert row[0] in (0, None), row
+        assert row[1] in (0, None), row
+
+    pg_cursor.execute("INSERT INTO rt_stats_rollup VALUES (1, 'a'), (2, 'b'), (3, 'c')")
+    pg_cursor.connection.commit()
+    pg_cursor.execute("INSERT INTO rt_stats_rollup VALUES (4, 'd'), (5, 'e')")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        """
+        SELECT SUM(record_count), SUM(file_size_bytes),
+               COALESCE(MAX(row_id_start + record_count), 0)
+          FROM lake_ducklake.data_file
+         WHERE table_id = %s AND end_snapshot IS NULL
+        """,
+        (table_id,),
+    )
+    expected_records, expected_size, expected_next_row = pg_cursor.fetchone()
+
+    pg_cursor.execute(
+        """
+        SELECT record_count, next_row_id, file_size_bytes
+          FROM lake_ducklake.table_stats
+         WHERE table_id = %s
+        """,
+        (table_id,),
+    )
+    stats = pg_cursor.fetchone()
+    assert stats is not None, "INSERT must populate table_stats"
+    assert stats[0] == expected_records, (stats[0], expected_records)
+    assert stats[1] == expected_next_row, (stats[1], expected_next_row)
+    assert stats[2] == expected_size, (stats[2], expected_size)
+
+    # TRUNCATE-equivalent: drop and recreate clears live data files.
+    pg_cursor.execute("DROP TABLE rt_stats_rollup")
+    pg_cursor.execute(
+        f"""
+        CREATE TABLE rt_stats_rollup (id INT, val TEXT)
+            USING ducklake WITH (location = '{location}')
+        """
+    )
+    pg_cursor.connection.commit()
+
+
+@pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="duckdb python module not installed")
+def test_delete_rewrites_data_file(pg_cursor, s3):
+    """
+    DELETE on a DuckLake table currently goes through a copy-on-write
+    path: pg_lake reads the source parquet, writes a fresh parquet with
+    the surviving rows, end-snapshots the source data_file row, and
+    inserts a new live data_file row. There is no position-delete file.
+
+    Pin that behavior so a future change to merge-on-read (which would
+    instead append a row to ducklake_delete_file) deliberately fails
+    this test and prompts updating GetDucklakeDataFilesHash to surface
+    the delete file. Also exercises the table_stats roll-up: after the
+    rewrite only the surviving rows count.
+    """
+    location = _location("rt_delete")
+    pg_cursor.execute("DROP TABLE IF EXISTS rt_delete")
+    pg_cursor.execute(
+        f"""
+        CREATE TABLE rt_delete (id INT, val TEXT)
+            USING ducklake WITH (location = '{location}')
+        """
+    )
+    pg_cursor.execute(
+        "INSERT INTO rt_delete VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd')"
+    )
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        "SELECT table_id FROM lake_ducklake.table WHERE table_name = 'rt_delete'"
+    )
+    table_id = pg_cursor.fetchone()[0]
+
+    pg_cursor.execute(
+        "SELECT data_file_id FROM lake_ducklake.data_file "
+        "WHERE table_id = %s AND end_snapshot IS NULL",
+        (table_id,),
+    )
+    pre_delete_file_id = pg_cursor.fetchone()[0]
+
+    pg_cursor.execute("DELETE FROM rt_delete WHERE id = 2")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        """
+        SELECT data_file_id, end_snapshot, record_count
+          FROM lake_ducklake.data_file
+         WHERE table_id = %s
+         ORDER BY data_file_id
+        """,
+        (table_id,),
+    )
+    files = pg_cursor.fetchall()
+    assert len(files) == 2, f"expected old + rewritten data file, got {files}"
+
+    old = next(f for f in files if f[0] == pre_delete_file_id)
+    assert old[1] is not None, f"old data file should be end-snapshotted, got {old}"
+    assert old[2] == 4
+
+    new = next(f for f in files if f[0] != pre_delete_file_id)
+    assert new[1] is None
+    assert new[2] == 3
+
+    pg_cursor.execute(
+        "SELECT record_count FROM lake_ducklake.table_stats WHERE table_id = %s",
+        (table_id,),
+    )
+    stats = pg_cursor.fetchone()
+    assert stats is not None and stats[0] == 3, stats
