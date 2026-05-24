@@ -1101,6 +1101,34 @@ DucklakeAddColumn(Oid tableOid, const char *columnName, const char *columnType,
 					 currentSnapshot->nextCatalogId, currentSnapshot->snapshotId);
 	SPI_exec(query.data, 0);
 
+	/*
+	 * Capture the postgres-side DEFAULT expression for this attnum. v1
+	 * stores it in ducklake_column.initial_default so reads of older
+	 * parquet files (written before this ADD COLUMN) can backfill the
+	 * missing column with the right value instead of NULL. We use
+	 * pg_get_expr on pg_attrdef rather than parsing the ColumnDef so the
+	 * expression text matches what postgres considers the canonical form.
+	 */
+	resetStringInfo(&query);
+	appendStringInfo(&query,
+					 "SELECT pg_catalog.pg_get_expr(adbin, adrelid) "
+					 "FROM pg_catalog.pg_attrdef "
+					 "WHERE adrelid = %u AND adnum = %d",
+					 tableOid, columnOrder);
+
+	char	   *initialDefault = NULL;
+	int			defaultRet = SPI_exec(query.data, 1);
+
+	if (defaultRet == SPI_OK_SELECT && SPI_processed > 0)
+	{
+		bool		isnull;
+		Datum		d = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc,
+									  1, &isnull);
+
+		if (!isnull)
+			initialDefault = pstrdup(TextDatumGetCString(d));
+	}
+
 	/* Now create a new snapshot for this schema change */
 	DucklakeSnapshot *newSnapshot = DucklakeCreateSnapshot("ADD COLUMN", NULL, NULL);
 
@@ -1116,11 +1144,16 @@ DucklakeAddColumn(Oid tableOid, const char *columnName, const char *columnType,
 	resetStringInfo(&query);
 	appendStringInfo(&query,
 					 "INSERT INTO lake_ducklake.column "
-					 "(column_id, begin_snapshot, table_id, column_order, column_name, column_type, nulls_allowed) "
-					 "VALUES (%ld, %ld, %ld, %d, %s, lake_ducklake.pg_type_to_duckdb_type(%s), %s)",
+					 "(column_id, begin_snapshot, table_id, column_order, column_name, "
+					 "column_type, initial_default, default_value, nulls_allowed) "
+					 "VALUES (%ld, %ld, %ld, %d, %s, lake_ducklake.pg_type_to_duckdb_type(%s), "
+					 "%s, %s, %s)",
 					 columnId, newSnapshot->snapshotId, metadata->tableId,
 					 columnOrder, quote_literal_cstr(columnName),
-					 quote_literal_cstr(columnType), nullsAllowed ? "true" : "false");
+					 quote_literal_cstr(columnType),
+					 initialDefault ? quote_literal_cstr(initialDefault) : "NULL",
+					 initialDefault ? quote_literal_cstr(initialDefault) : "NULL",
+					 nullsAllowed ? "true" : "false");
 
 	ret = SPI_exec(query.data, 0);
 	if (ret != SPI_OK_INSERT)

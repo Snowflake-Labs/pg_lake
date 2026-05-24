@@ -679,3 +679,30 @@ def test_create_drop_create_same_name_keeps_history(pg_cursor, s3):
     )
     second_id = pg_cursor.fetchone()[0]
     assert second_id != first_id, (first_id, second_id)
+
+
+def test_add_column_with_default_backfills_old_files(pg_cursor, s3):
+    """
+    ALTER TABLE ADD COLUMN ... DEFAULT N should backfill N (not NULL)
+    when reading rows from parquet files written before the alter.
+    DuckLake stores this as ducklake_column.initial_default and the
+    read-side schema map applies it via read_parquet's default_value.
+    """
+    location = _location("rt_default")
+    pg_cursor.execute("DROP TABLE IF EXISTS rt_default")
+    pg_cursor.execute(
+        f"""
+        CREATE TABLE rt_default (id INT, val TEXT)
+            USING ducklake WITH (location = '{location}')
+        """
+    )
+    pg_cursor.execute("INSERT INTO rt_default VALUES (1, 'a')")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute("ALTER TABLE rt_default ADD COLUMN qty INT DEFAULT 99")
+    pg_cursor.execute("INSERT INTO rt_default VALUES (2, 'b', 7)")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute("SELECT id, val, qty FROM rt_default ORDER BY id")
+    rows = pg_cursor.fetchall()
+    assert rows == [(1, "a", 99), (2, "b", 7)], rows

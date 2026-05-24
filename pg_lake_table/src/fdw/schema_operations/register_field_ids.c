@@ -31,12 +31,15 @@
 #include "access/table.h"
 #include "commands/defrem.h"
 #include "commands/comment.h"
+#include "executor/spi.h"
 #include "foreign/foreign.h"
+#include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "parser/parse_type.h"
 
 #include "pg_lake/data_file/data_file_stats.h"
+#include "pg_lake/ducklake/catalog.h"
 #include "pg_lake/fdw/schema_operations/field_id_mapping_catalog.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/iceberg/api/table_metadata.h"
@@ -294,7 +297,9 @@ CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(Oid relationId)
 /*
  * GetDataFileSchemaForDucklakeTable gets a table schema for a DuckLake table
  * by reading pg_attribute. Field IDs are set to column attnum, which maps
- * to column_order in lake_ducklake.column.
+ * to column_order in lake_ducklake.column. initial_default is sourced from
+ * lake_ducklake.column so reads of older parquet files (written before an
+ * ADD COLUMN ... DEFAULT) backfill the right value rather than NULL.
  */
 static DataFileSchema *
 GetDataFileSchemaForDucklakeTable(Oid relationId)
@@ -317,6 +322,94 @@ GetDataFileSchemaForDucklakeTable(Oid relationId)
 
 	schema->fields = palloc0(sizeof(DataFileSchemaField) * nonDroppedCount);
 	schema->nfields = 0;
+
+	/*
+	 * Build (column_order -> initial_default) lookup from lake_ducklake.column
+	 * for the live (end_snapshot IS NULL) rows of this table. We pull this
+	 * once into a palloc'd array indexed by attnum so the per-attribute loop
+	 * below can attach the default without an SPI call per column.
+	 */
+	int64	   *defaultsByAttnum = NULL;
+	char	  **defaultStrings = NULL;
+	int			maxAttnum = 0;
+	{
+		DucklakeTableMetadata *metadata = DucklakeGetTableMetadata(relationId);
+
+		if (metadata != NULL)
+		{
+			for (int i = 0; i < tupdesc->natts; i++)
+			{
+				Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+				if (!attr->attisdropped && attr->attnum > maxAttnum)
+					maxAttnum = attr->attnum;
+			}
+
+			if (maxAttnum > 0)
+			{
+				defaultStrings = palloc0(sizeof(char *) * (maxAttnum + 1));
+
+				/*
+				 * Capture the caller's memory context BEFORE SPI_connect
+				 * so we can extract default expressions into a context
+				 * that survives SPI_finish.
+				 */
+				MemoryContext callerContext = CurrentMemoryContext;
+
+				StringInfoData q;
+
+				initStringInfo(&q);
+				appendStringInfo(&q,
+								 "SELECT column_order, initial_default "
+								 "FROM lake_ducklake.column "
+								 "WHERE table_id = %ld "
+								 "AND end_snapshot IS NULL "
+								 "AND initial_default IS NOT NULL",
+								 metadata->tableId);
+
+				SPI_connect();
+				int			ret = SPI_exec(q.data, 0);
+
+				if (ret == SPI_OK_SELECT)
+				{
+					for (uint64 row = 0; row < SPI_processed; row++)
+					{
+						bool		isnull;
+						int64		colOrder = DatumGetInt64(SPI_getbinval(
+												SPI_tuptable->vals[row],
+												SPI_tuptable->tupdesc, 1, &isnull));
+
+						if (isnull || colOrder <= 0 || colOrder > maxAttnum)
+							continue;
+
+						Datum		d = SPI_getbinval(SPI_tuptable->vals[row],
+													  SPI_tuptable->tupdesc, 2, &isnull);
+
+						if (!isnull)
+						{
+							MemoryContext oldcxt =
+								MemoryContextSwitchTo(callerContext);
+
+							defaultStrings[colOrder] = TextDatumGetCString(d);
+							MemoryContextSwitchTo(oldcxt);
+						}
+					}
+				}
+
+				SPI_finish();
+			}
+
+			if (metadata->tableName)
+				pfree(metadata->tableName);
+			if (metadata->schemaName)
+				pfree(metadata->schemaName);
+			if (metadata->path)
+				pfree(metadata->path);
+			pfree(metadata);
+		}
+
+		(void) defaultsByAttnum;	/* unused; we use defaultStrings directly */
+	}
 
 	for (int i = 0; i < tupdesc->natts; i++)
 	{
@@ -345,6 +438,21 @@ GetDataFileSchemaForDucklakeTable(Oid relationId)
 		int			subFieldIndex = field->id;
 
 		field->type = PostgresTypeToIcebergField(pgType, forAddColumn, &subFieldIndex);
+
+		if (defaultStrings != NULL && attr->attnum <= maxAttnum &&
+			defaultStrings[attr->attnum] != NULL)
+		{
+			/*
+			 * Our DucklakeAddColumn writes the postgres-formatted default
+			 * expression (e.g. "99" or "'foo'::text") into
+			 * lake_ducklake.column.initial_default. The Iceberg JSON
+			 * serializer used for iceberg tables doesn't apply here, so
+			 * pass the expression through verbatim — read_parquet's
+			 * default_value will handle simple constants.
+			 */
+			field->initialDefault = defaultStrings[attr->attnum];
+			field->duckSerializedInitialDefault = defaultStrings[attr->attnum];
+		}
 
 		schema->nfields++;
 	}
