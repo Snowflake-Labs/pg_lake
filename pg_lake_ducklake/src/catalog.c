@@ -255,10 +255,11 @@ DucklakeRegisterTableColumns(Oid tableOid, int64 tableId)
 	resetStringInfo(&query);
 	appendStringInfo(&query,
 					 "INSERT INTO lake_ducklake.schema_versions "
-					 "(begin_snapshot, schema_version) "
+					 "(begin_snapshot, schema_version, table_id) "
 					 "VALUES (%ld, "
-					 "(SELECT schema_version FROM lake_ducklake.snapshot WHERE snapshot_id = %ld))",
-					 snapshot->snapshotId, snapshot->snapshotId);
+					 "(SELECT schema_version FROM lake_ducklake.snapshot WHERE snapshot_id = %ld), "
+					 "%ld)",
+					 snapshot->snapshotId, snapshot->snapshotId, tableId);
 	SPI_exec(query.data, 0);
 
 	SPI_finish();
@@ -1224,10 +1225,11 @@ DucklakeAddColumn(Oid tableOid, const char *columnName, const char *columnType,
 	resetStringInfo(&query);
 	appendStringInfo(&query,
 					 "INSERT INTO lake_ducklake.schema_versions "
-					 "(begin_snapshot, schema_version) "
+					 "(begin_snapshot, schema_version, table_id) "
 					 "VALUES (%ld, "
-					 "(SELECT schema_version FROM lake_ducklake.snapshot WHERE snapshot_id = %ld))",
-					 newSnapshot->snapshotId, newSnapshot->snapshotId);
+					 "(SELECT schema_version FROM lake_ducklake.snapshot WHERE snapshot_id = %ld), "
+					 "%ld)",
+					 newSnapshot->snapshotId, newSnapshot->snapshotId, metadata->tableId);
 	SPI_exec(query.data, 0);
 
 	SPI_finish();
@@ -1278,10 +1280,11 @@ DucklakeDropColumn(Oid tableOid, const char *columnName)
 	resetStringInfo(&query);
 	appendStringInfo(&query,
 					 "INSERT INTO lake_ducklake.schema_versions "
-					 "(begin_snapshot, schema_version) "
+					 "(begin_snapshot, schema_version, table_id) "
 					 "VALUES (%ld, "
-					 "(SELECT schema_version FROM lake_ducklake.snapshot WHERE snapshot_id = %ld))",
-					 newSnapshot->snapshotId, newSnapshot->snapshotId);
+					 "(SELECT schema_version FROM lake_ducklake.snapshot WHERE snapshot_id = %ld), "
+					 "%ld)",
+					 newSnapshot->snapshotId, newSnapshot->snapshotId, metadata->tableId);
 	SPI_exec(query.data, 0);
 
 	SPI_finish();
@@ -1372,10 +1375,11 @@ DucklakeRenameColumn(Oid tableOid, const char *oldName, const char *newName)
 	resetStringInfo(&query);
 	appendStringInfo(&query,
 					 "INSERT INTO lake_ducklake.schema_versions "
-					 "(begin_snapshot, schema_version) "
+					 "(begin_snapshot, schema_version, table_id) "
 					 "VALUES (%ld, "
-					 "(SELECT schema_version FROM lake_ducklake.snapshot WHERE snapshot_id = %ld))",
-					 newSnapshot->snapshotId, newSnapshot->snapshotId);
+					 "(SELECT schema_version FROM lake_ducklake.snapshot WHERE snapshot_id = %ld), "
+					 "%ld)",
+					 newSnapshot->snapshotId, newSnapshot->snapshotId, metadata->tableId);
 	SPI_exec(query.data, 0);
 
 	SPI_finish();

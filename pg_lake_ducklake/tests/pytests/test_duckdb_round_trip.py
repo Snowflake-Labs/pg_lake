@@ -102,7 +102,7 @@ def test_attach_ducklake_extension(pg_cursor):
         f"user={server_params.PG_USER}"
     )
     try:
-        duck.execute(f"ATTACH '{conn_str}' AS dl (TYPE DUCKLAKE)")
+        duck.execute(f"ATTACH 'postgres:{conn_str}' AS dl (TYPE DUCKLAKE)")
     except Exception as e:
         pytest.skip(f"could not ATTACH TYPE DUCKLAKE: {e}")
 
@@ -162,16 +162,17 @@ def test_public_ducklake_views_match_extension_schema(pg_cursor):
             "column_id", "begin_snapshot", "end_snapshot", "table_id",
             "column_order", "column_name", "column_type", "initial_default",
             "default_value", "nulls_allowed", "parent_column",
+            "default_value_type", "default_value_dialect",
         },
         "ducklake_data_file": {
             "data_file_id", "table_id", "begin_snapshot", "end_snapshot",
             "file_order", "path", "path_is_relative", "file_format",
             "record_count", "file_size_bytes", "footer_size", "row_id_start",
-            "partition_id", "encryption_key", "partial_file_info",
+            "partition_id", "encryption_key", "partial_max",
             "mapping_id",
         },
         "ducklake_schema_versions": {
-            "begin_snapshot", "schema_version",
+            "begin_snapshot", "schema_version", "table_id",
         },
     }
 

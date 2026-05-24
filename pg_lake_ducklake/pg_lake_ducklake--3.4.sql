@@ -117,7 +117,7 @@ CREATE TABLE lake_ducklake.data_file (
     row_id_start BIGINT,
     partition_id BIGINT,
     encryption_key VARCHAR,
-    partial_file_info VARCHAR,
+    partial_max BIGINT,
     mapping_id BIGINT
 );
 
@@ -271,11 +271,81 @@ CREATE TABLE lake_ducklake.column_tag (
     PRIMARY KEY (table_id, column_id, key, begin_snapshot)
 );
 
--- Schema versions (records the snapshot at which each schema_version became
--- current; v0.3 schema, no per-table column).
+-- Schema versions (per-table schema version history; v1 spec).
+-- Mirrors DuckLake v1's ducklake_schema_versions: each row records the
+-- (begin_snapshot, table_id, schema_version) triple so DuckDB compaction
+-- and per-table schema lookups can resolve the right column shape at any
+-- snapshot.
 CREATE TABLE lake_ducklake.schema_versions (
-    begin_snapshot BIGINT PRIMARY KEY,
-    schema_version BIGINT NOT NULL
+    begin_snapshot BIGINT NOT NULL,
+    schema_version BIGINT NOT NULL,
+    table_id BIGINT NOT NULL,
+    PRIMARY KEY (begin_snapshot, table_id)
+);
+
+-- ============================================================================
+-- Macro / sort metadata tables (DuckLake v1)
+-- We don't write to these from C — they're empty until DuckDB-side or
+-- pg_lake adds support — but they must exist because DuckDB's ducklake
+-- extension queries them on every catalog load (LoadMacros, LoadSortInfo).
+-- ============================================================================
+
+CREATE TABLE lake_ducklake.macro (
+    schema_id BIGINT NOT NULL,
+    macro_id BIGINT NOT NULL,
+    macro_name VARCHAR NOT NULL,
+    begin_snapshot BIGINT NOT NULL,
+    end_snapshot BIGINT
+);
+
+CREATE TABLE lake_ducklake.macro_impl (
+    macro_id BIGINT NOT NULL,
+    impl_id BIGINT NOT NULL,
+    dialect VARCHAR,
+    sql VARCHAR,
+    type VARCHAR
+);
+
+CREATE TABLE lake_ducklake.macro_parameters (
+    macro_id BIGINT NOT NULL,
+    impl_id BIGINT NOT NULL,
+    column_id BIGINT,
+    parameter_name VARCHAR,
+    parameter_type VARCHAR,
+    default_value VARCHAR,
+    default_value_type VARCHAR
+);
+
+CREATE TABLE lake_ducklake.sort_info (
+    sort_id BIGINT NOT NULL,
+    table_id BIGINT NOT NULL,
+    begin_snapshot BIGINT NOT NULL,
+    end_snapshot BIGINT
+);
+
+CREATE TABLE lake_ducklake.sort_expression (
+    sort_id BIGINT NOT NULL,
+    table_id BIGINT NOT NULL,
+    sort_key_index BIGINT NOT NULL,
+    expression VARCHAR,
+    dialect VARCHAR,
+    sort_direction VARCHAR,
+    null_order VARCHAR
+);
+
+CREATE TABLE lake_ducklake.file_variant_stats (
+    data_file_id BIGINT NOT NULL,
+    table_id BIGINT NOT NULL,
+    column_id BIGINT NOT NULL,
+    variant_path VARCHAR,
+    shredded_type VARCHAR,
+    column_size_bytes BIGINT,
+    value_count BIGINT,
+    null_count BIGINT,
+    min_value VARCHAR,
+    max_value VARCHAR,
+    contains_nan BOOLEAN,
+    extra_stats VARCHAR
 );
 
 -- ============================================================================
@@ -330,6 +400,20 @@ GRANT SELECT ON public.ducklake_column TO public;
 GRANT SELECT ON public.ducklake_view TO public;
 GRANT SELECT ON public.ducklake_snapshot TO public;
 GRANT SELECT ON public.ducklake_data_file TO public;
+
+-- v1 macro/sort/variant tables exposed under spec names so DuckDB can read them.
+CREATE VIEW public.ducklake_macro AS SELECT * FROM lake_ducklake.macro;
+CREATE VIEW public.ducklake_macro_impl AS SELECT * FROM lake_ducklake.macro_impl;
+CREATE VIEW public.ducklake_macro_parameters AS SELECT * FROM lake_ducklake.macro_parameters;
+CREATE VIEW public.ducklake_sort_info AS SELECT * FROM lake_ducklake.sort_info;
+CREATE VIEW public.ducklake_sort_expression AS SELECT * FROM lake_ducklake.sort_expression;
+CREATE VIEW public.ducklake_file_variant_stats AS SELECT * FROM lake_ducklake.file_variant_stats;
+GRANT SELECT ON public.ducklake_macro TO public;
+GRANT SELECT ON public.ducklake_macro_impl TO public;
+GRANT SELECT ON public.ducklake_macro_parameters TO public;
+GRANT SELECT ON public.ducklake_sort_info TO public;
+GRANT SELECT ON public.ducklake_sort_expression TO public;
+GRANT SELECT ON public.ducklake_file_variant_stats TO public;
 
 -- ============================================================================
 -- INSTEAD OF Triggers for Writable Views
@@ -395,8 +479,8 @@ FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_snapshot_insert();
 CREATE FUNCTION lake_ducklake.ducklake_data_file_insert()
 RETURNS TRIGGER AS $$
 BEGIN
-    INSERT INTO lake_ducklake.data_file (data_file_id, table_id, begin_snapshot, end_snapshot, file_order, path, path_is_relative, file_format, record_count, file_size_bytes, footer_size, row_id_start, partition_id, encryption_key, partial_file_info, mapping_id)
-    VALUES (NEW.data_file_id, NEW.table_id, NEW.begin_snapshot, NEW.end_snapshot, NEW.file_order, NEW.path, NEW.path_is_relative, NEW.file_format, NEW.record_count, NEW.file_size_bytes, NEW.footer_size, NEW.row_id_start, NEW.partition_id, NEW.encryption_key, NEW.partial_file_info, NEW.mapping_id);
+    INSERT INTO lake_ducklake.data_file (data_file_id, table_id, begin_snapshot, end_snapshot, file_order, path, path_is_relative, file_format, record_count, file_size_bytes, footer_size, row_id_start, partition_id, encryption_key, partial_max, mapping_id)
+    VALUES (NEW.data_file_id, NEW.table_id, NEW.begin_snapshot, NEW.end_snapshot, NEW.file_order, NEW.path, NEW.path_is_relative, NEW.file_format, NEW.record_count, NEW.file_size_bytes, NEW.footer_size, NEW.row_id_start, NEW.partition_id, NEW.encryption_key, NEW.partial_max, NEW.mapping_id);
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -560,7 +644,7 @@ INSERT INTO lake_ducklake.snapshot (snapshot_id, schema_version, next_catalog_id
 VALUES (0, 0, 1, 1);
 
 INSERT INTO lake_ducklake.metadata (key, value, scope, scope_id)
-VALUES ('ducklake_version', '0.3', NULL, NULL);
+VALUES ('ducklake_version', '1.0', NULL, NULL);
 
 -- ============================================================================
 -- Additional Public Views (remaining 16 tables)
@@ -811,7 +895,7 @@ BEGIN
         row_id_start = NEW.row_id_start,
         partition_id = NEW.partition_id,
         encryption_key = NEW.encryption_key,
-        partial_file_info = NEW.partial_file_info,
+        partial_max = NEW.partial_max,
         mapping_id = NEW.mapping_id
     WHERE data_file_id = OLD.data_file_id;
     RETURN NEW;
@@ -1204,8 +1288,8 @@ FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_partition_info_delete();
 CREATE OR REPLACE FUNCTION lake_ducklake.ducklake_schema_versions_insert()
 RETURNS TRIGGER AS $$
 BEGIN
-    INSERT INTO lake_ducklake.schema_versions (begin_snapshot, schema_version)
-    VALUES (NEW.begin_snapshot, NEW.schema_version);
+    INSERT INTO lake_ducklake.schema_versions (begin_snapshot, schema_version, table_id)
+    VALUES (NEW.begin_snapshot, NEW.schema_version, NEW.table_id);
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;

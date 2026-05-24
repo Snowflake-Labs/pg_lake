@@ -44,9 +44,9 @@ def test_alter_writes_v1_snapshot_changes_and_schema_versions(pg_cursor):
     pg_cursor.execute(
         """
         SELECT schema_version FROM lake_ducklake.schema_versions
-        WHERE begin_snapshot = %s
+        WHERE begin_snapshot = %s AND table_id = %s
         """,
-        (add_snap,),
+        (add_snap, table_id),
     )
     sv = pg_cursor.fetchone()
     assert sv is not None, "ADD COLUMN must write a schema_versions row"
@@ -72,9 +72,9 @@ def test_alter_writes_v1_snapshot_changes_and_schema_versions(pg_cursor):
     pg_cursor.execute(
         """
         SELECT schema_version FROM lake_ducklake.schema_versions
-        WHERE begin_snapshot = %s
+        WHERE begin_snapshot = %s AND table_id = %s
         """,
-        (drop_snap,),
+        (drop_snap, table_id),
     )
     sv = pg_cursor.fetchone()
     assert sv is not None, "DROP COLUMN must write a schema_versions row"
@@ -406,13 +406,6 @@ except ImportError:
     DUCKDB_AVAILABLE = False
 
 
-@pytest.mark.xfail(
-    reason="DuckDB ducklake extension v0.3 bootstraps its own "
-    "__ducklake_metadata_<alias> schema rather than reading our "
-    "lake_ducklake.* tables; needs ducklake_-prefixed naming + a "
-    "DuckDB option to point at an existing schema. Tracked separately.",
-    strict=False,
-)
 @pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="DuckDB not installed")
 def test_drop_column_visible_in_duckdb(pg_cursor):
     """
@@ -454,16 +447,20 @@ def test_drop_column_visible_in_duckdb(pg_cursor):
         pytest.skip(f"DuckDB ducklake extension not available: {e}")
 
     # Attach to PostgreSQL ducklake catalog using TYPE DUCKLAKE
-    pg_conn_str = f"host=localhost port={os.environ.get('PGPORT', '5432')} dbname={os.environ.get('PGDATABASE', 'postgres')} user={os.environ.get('PGUSER', 'postgres')}"
+    from utils_pytest import server_params
+    pg_conn_str = (
+        f"host={server_params.PG_HOST} port={server_params.PG_PORT} "
+        f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
+    )
     try:
-        duckdb_conn.execute(f"ATTACH '{pg_conn_str}' AS dl (TYPE DUCKLAKE)")
+        duckdb_conn.execute(f"ATTACH \'postgres:{pg_conn_str}\' AS dl (TYPE DUCKLAKE, METADATA_SCHEMA 'public')")
     except Exception as e:
         pytest.skip(f"Could not attach to PostgreSQL with TYPE DUCKLAKE: {e}")
 
     # Query the actual table from DuckDB to see what columns are visible
     try:
         result = duckdb_conn.execute("""
-            DESCRIBE dl.test_e2e_drop
+            DESCRIBE dl.public.test_e2e_drop
         """).fetchall()
 
         # Extract column names from DESCRIBE output
@@ -479,7 +476,7 @@ def test_drop_column_visible_in_duckdb(pg_cursor):
     except Exception as e:
         # If DESCRIBE doesn't work, try selecting from the table
         result = duckdb_conn.execute("""
-            SELECT * FROM dl.test_e2e_drop LIMIT 0
+            SELECT * FROM dl.public.test_e2e_drop LIMIT 0
         """).description
 
         visible_columns = [col[0] for col in result]
@@ -493,13 +490,6 @@ def test_drop_column_visible_in_duckdb(pg_cursor):
     pg_cursor.connection.commit()
 
 
-@pytest.mark.xfail(
-    reason="DuckDB ducklake extension v0.3 bootstraps its own "
-    "__ducklake_metadata_<alias> schema rather than reading our "
-    "lake_ducklake.* tables; needs ducklake_-prefixed naming + a "
-    "DuckDB option to point at an existing schema. Tracked separately.",
-    strict=False,
-)
 @pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="DuckDB not installed")
 def test_add_column_visible_in_duckdb(pg_cursor):
     """
@@ -539,16 +529,20 @@ def test_add_column_visible_in_duckdb(pg_cursor):
         pytest.skip(f"DuckDB ducklake extension not available: {e}")
 
     # Attach to PostgreSQL ducklake catalog using TYPE DUCKLAKE
-    pg_conn_str = f"host=localhost port={os.environ.get('PGPORT', '5432')} dbname={os.environ.get('PGDATABASE', 'postgres')} user={os.environ.get('PGUSER', 'postgres')}"
+    from utils_pytest import server_params
+    pg_conn_str = (
+        f"host={server_params.PG_HOST} port={server_params.PG_PORT} "
+        f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
+    )
     try:
-        duckdb_conn.execute(f"ATTACH '{pg_conn_str}' AS dl (TYPE DUCKLAKE)")
+        duckdb_conn.execute(f"ATTACH \'postgres:{pg_conn_str}\' AS dl (TYPE DUCKLAKE, METADATA_SCHEMA 'public')")
     except Exception as e:
         pytest.skip(f"Could not attach to PostgreSQL with TYPE DUCKLAKE: {e}")
 
     # Query the actual table from DuckDB to see what columns are visible
     try:
         result = duckdb_conn.execute("""
-            DESCRIBE dl.test_e2e_add
+            DESCRIBE dl.public.test_e2e_add
         """).fetchall()
 
         # Extract column names from DESCRIBE output
@@ -563,7 +557,7 @@ def test_add_column_visible_in_duckdb(pg_cursor):
     except Exception as e:
         # If DESCRIBE doesn't work, try selecting from the table
         result = duckdb_conn.execute("""
-            SELECT * FROM dl.test_e2e_add LIMIT 0
+            SELECT * FROM dl.public.test_e2e_add LIMIT 0
         """).description
 
         visible_columns = [col[0] for col in result]
@@ -577,13 +571,6 @@ def test_add_column_visible_in_duckdb(pg_cursor):
     pg_cursor.connection.commit()
 
 
-@pytest.mark.xfail(
-    reason="DuckDB ducklake extension v0.3 bootstraps its own "
-    "__ducklake_metadata_<alias> schema rather than reading our "
-    "lake_ducklake.* tables; needs ducklake_-prefixed naming + a "
-    "DuckDB option to point at an existing schema. Tracked separately.",
-    strict=False,
-)
 @pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="DuckDB not installed")
 def test_schema_evolution_in_duckdb(pg_cursor):
     """
@@ -627,16 +614,20 @@ def test_schema_evolution_in_duckdb(pg_cursor):
         pytest.skip(f"DuckDB ducklake extension not available: {e}")
 
     # Attach to PostgreSQL ducklake catalog using TYPE DUCKLAKE
-    pg_conn_str = f"host=localhost port={os.environ.get('PGPORT', '5432')} dbname={os.environ.get('PGDATABASE', 'postgres')} user={os.environ.get('PGUSER', 'postgres')}"
+    from utils_pytest import server_params
+    pg_conn_str = (
+        f"host={server_params.PG_HOST} port={server_params.PG_PORT} "
+        f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
+    )
     try:
-        duckdb_conn.execute(f"ATTACH '{pg_conn_str}' AS dl (TYPE DUCKLAKE)")
+        duckdb_conn.execute(f"ATTACH \'postgres:{pg_conn_str}\' AS dl (TYPE DUCKLAKE, METADATA_SCHEMA 'public')")
     except Exception as e:
         pytest.skip(f"Could not attach to PostgreSQL with TYPE DUCKLAKE: {e}")
 
     # Query the actual table from DuckDB to see the final schema
     try:
         result = duckdb_conn.execute("""
-            DESCRIBE dl.test_e2e_evolution
+            DESCRIBE dl.public.test_e2e_evolution
         """).fetchall()
 
         # Extract column names from DESCRIBE output
@@ -653,7 +644,7 @@ def test_schema_evolution_in_duckdb(pg_cursor):
     except Exception as e:
         # If DESCRIBE doesn't work, try selecting from the table
         result = duckdb_conn.execute("""
-            SELECT * FROM dl.test_e2e_evolution LIMIT 0
+            SELECT * FROM dl.public.test_e2e_evolution LIMIT 0
         """).description
 
         visible_columns = [col[0] for col in result]
@@ -667,13 +658,6 @@ def test_schema_evolution_in_duckdb(pg_cursor):
     pg_cursor.connection.commit()
 
 
-@pytest.mark.xfail(
-    reason="DuckDB ducklake extension v0.3 bootstraps its own "
-    "__ducklake_metadata_<alias> schema rather than reading our "
-    "lake_ducklake.* tables; needs ducklake_-prefixed naming + a "
-    "DuckDB option to point at an existing schema. Tracked separately.",
-    strict=False,
-)
 @pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="DuckDB not installed")
 def test_duckdb_views_reflect_alter_operations(pg_cursor):
     """
@@ -700,16 +684,20 @@ def test_duckdb_views_reflect_alter_operations(pg_cursor):
         pytest.skip(f"DuckDB ducklake extension not available: {e}")
 
     # Attach to PostgreSQL ducklake catalog using TYPE DUCKLAKE
-    pg_conn_str = f"host=localhost port={os.environ.get('PGPORT', '5432')} dbname={os.environ.get('PGDATABASE', 'postgres')} user={os.environ.get('PGUSER', 'postgres')}"
+    from utils_pytest import server_params
+    pg_conn_str = (
+        f"host={server_params.PG_HOST} port={server_params.PG_PORT} "
+        f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
+    )
     try:
-        duckdb_conn.execute(f"ATTACH '{pg_conn_str}' AS dl (TYPE DUCKLAKE)")
+        duckdb_conn.execute(f"ATTACH \'postgres:{pg_conn_str}\' AS dl (TYPE DUCKLAKE, METADATA_SCHEMA 'public')")
     except Exception as e:
         pytest.skip(f"Could not attach to PostgreSQL with TYPE DUCKLAKE: {e}")
 
     # Check initial columns from DuckDB
     try:
         result = duckdb_conn.execute("""
-            DESCRIBE dl.test_e2e_views
+            DESCRIBE dl.public.test_e2e_views
         """).fetchall()
 
         initial_columns = [row[0] for row in result]
@@ -728,10 +716,10 @@ def test_duckdb_views_reflect_alter_operations(pg_cursor):
     duckdb_conn.close()
     duckdb_conn = duckdb.connect()
     duckdb_conn.execute("LOAD ducklake")
-    duckdb_conn.execute(f"ATTACH '{pg_conn_str}' AS dl (TYPE DUCKLAKE)")
+    duckdb_conn.execute(f"ATTACH \'postgres:{pg_conn_str}\' AS dl (TYPE DUCKLAKE, METADATA_SCHEMA 'public')")
 
     result = duckdb_conn.execute("""
-        DESCRIBE dl.test_e2e_views
+        DESCRIBE dl.public.test_e2e_views
     """).fetchall()
 
     final_columns = [row[0] for row in result]

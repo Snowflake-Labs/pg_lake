@@ -79,7 +79,7 @@ def test_ducklake_version_metadata(pg_cursor):
     """)
     result = pg_cursor.fetchone()
     assert result is not None, "ducklake_version metadata not found"
-    assert result[0] == '0.3', f"Expected version 0.3, got {result[0]}"
+    assert result[0] == '1.0', f"Expected version 1.0, got {result[0]}"
 
 
 def test_sql_functions_exist(pg_cursor):
