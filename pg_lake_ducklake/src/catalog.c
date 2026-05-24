@@ -240,6 +240,106 @@ DucklakeRegisterTableColumns(Oid tableOid, int64 tableId)
 		elog(ERROR, "Failed to create name mapping");
 	}
 
+	/*
+	 * Capture postgres-side DEFAULTs declared in CREATE TABLE for each
+	 * column with one in pg_attrdef, evaluate it to a scalar via SPI,
+	 * and update lake_ducklake.column.initial_default / default_value /
+	 * default_value_type. Mirrors DucklakeAddColumn — without it, a
+	 * CREATE TABLE foo (col TYPE DEFAULT expr) put no default in our
+	 * metadata, so reads of pre-INSERT parquet (after ALTER widens the
+	 * schema) wouldn't backfill correctly.
+	 */
+	{
+		StringInfoData defaultQ;
+
+		initStringInfo(&defaultQ);
+		appendStringInfo(&defaultQ,
+						 "SELECT a.attnum, pg_catalog.pg_get_expr(ad.adbin, ad.adrelid) "
+						 "FROM pg_catalog.pg_attribute a "
+						 "JOIN pg_catalog.pg_attrdef ad "
+						 "       ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum "
+						 "WHERE a.attrelid = %u AND a.attnum > 0 AND NOT a.attisdropped",
+						 tableOid);
+
+		int			drRet = SPI_exec(defaultQ.data, 0);
+
+		if (drRet == SPI_OK_SELECT)
+		{
+			uint64		nDefaults = SPI_processed;
+
+			for (uint64 i = 0; i < nDefaults; i++)
+			{
+				bool		dr_isnull;
+				int32		attnum = DatumGetInt32(SPI_getbinval(
+									SPI_tuptable->vals[i],
+									SPI_tuptable->tupdesc, 1, &dr_isnull));
+				Datum		exprDat = SPI_getbinval(
+									SPI_tuptable->vals[i],
+									SPI_tuptable->tupdesc, 2, &dr_isnull);
+
+				if (dr_isnull)
+					continue;
+
+				char	   *exprText = TextDatumGetCString(exprDat);
+
+				/*
+				 * Evaluate the expression to a scalar text — same trick
+				 * as DucklakeAddColumn. Save the rowset before the inner
+				 * SPI_exec because SPI_tuptable is shared.
+				 */
+				char	   *defaultExprCopy = pstrdup(exprText);
+				StringInfoData evalQ;
+
+				initStringInfo(&evalQ);
+				appendStringInfo(&evalQ, "SELECT (%s)::text", defaultExprCopy);
+				int			evalRet = SPI_exec(evalQ.data, 1);
+				char	   *resolved = NULL;
+
+				if (evalRet == SPI_OK_SELECT && SPI_processed > 0)
+				{
+					bool		evalIsNull;
+					Datum		v = SPI_getbinval(SPI_tuptable->vals[0],
+												  SPI_tuptable->tupdesc, 1, &evalIsNull);
+
+					if (!evalIsNull)
+						resolved = pstrdup(TextDatumGetCString(v));
+				}
+
+				if (resolved == NULL)
+					continue;
+
+				StringInfoData updQ;
+
+				initStringInfo(&updQ);
+				appendStringInfo(&updQ,
+								 "UPDATE lake_ducklake.column SET "
+								 "initial_default = %s, "
+								 "default_value = %s, "
+								 "default_value_type = 'literal' "
+								 "WHERE table_id = %ld "
+								 "AND column_order = %d "
+								 "AND begin_snapshot = %ld",
+								 quote_literal_cstr(resolved),
+								 quote_literal_cstr(resolved),
+								 tableId, attnum, snapshot->snapshotId);
+				SPI_exec(updQ.data, 0);
+
+				/*
+				 * Re-run the lookup query so subsequent iterations see
+				 * the right SPI_tuptable. We have to re-execute the
+				 * outer SELECT every time we burn the rowset.
+				 */
+				if (i + 1 < nDefaults)
+				{
+					int			rerun = SPI_exec(defaultQ.data, 0);
+
+					if (rerun != SPI_OK_SELECT)
+						break;
+				}
+			}
+		}
+	}
+
 	/* Update snapshot with final next_catalog_id */
 	resetStringInfo(&query);
 	appendStringInfo(&query,

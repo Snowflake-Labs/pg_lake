@@ -769,3 +769,42 @@ def test_add_column_default_records_default_value_type_literal(pg_cursor, s3):
     assert rows["id"] == (None, None, None), rows["id"]
     assert rows["qty"] == ("7", "7", "literal"), rows["qty"]
     assert rows["note"] == (None, None, None), rows["note"]
+
+
+def test_create_table_captures_postgres_defaults(pg_cursor, s3):
+    """
+    CREATE TABLE foo (col TYPE DEFAULT expr) USING ducklake should
+    record the resolved default in lake_ducklake.column.initial_default
+    so the v0 reader (and later DuckDB reads of pre-INSERT parquet)
+    can backfill the column with the right value. Mirrors the
+    DucklakeAddColumn DEFAULT capture, but at table-creation time.
+    """
+    location = _location("rt_create_default")
+    pg_cursor.execute("DROP TABLE IF EXISTS rt_create_default")
+    pg_cursor.execute(
+        f"""
+        CREATE TABLE rt_create_default (
+            id INT,
+            label TEXT DEFAULT 'unknown',
+            qty INT DEFAULT 42,
+            note TEXT
+        ) USING ducklake WITH (location = '{location}')
+        """
+    )
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        """
+        SELECT column_name, initial_default, default_value, default_value_type
+          FROM lake_ducklake.column c
+          JOIN lake_ducklake.table t USING (table_id)
+         WHERE t.table_name = 'rt_create_default' AND c.end_snapshot IS NULL
+         ORDER BY column_order
+        """
+    )
+    rows = {r[0]: (r[1], r[2], r[3]) for r in pg_cursor.fetchall()}
+
+    assert rows["id"] == (None, None, None), rows["id"]
+    assert rows["label"] == ("unknown", "unknown", "literal"), rows["label"]
+    assert rows["qty"] == ("42", "42", "literal"), rows["qty"]
+    assert rows["note"] == (None, None, None), rows["note"]
