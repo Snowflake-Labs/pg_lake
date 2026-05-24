@@ -717,12 +717,19 @@ DucklakeAddDataFile(int64 tableId, const char *path, int64 recordCount,
 	}
 
 	/*
-	 * For now, always store absolute paths with path_is_relative = false.
-	 * This ensures compatibility with the current pg_lake_table query generation.
-	 * TODO: Implement proper relative path support in pg_lake_table FDW.
+	 * Path is stored absolute. The v1 spec encourages relative-to-table
+	 * paths so the catalog stays portable across bucket renames, but the
+	 * pg_lake_table FDW currently looks up data_files by absolute path
+	 * (DucklakeRemoveDataFile, DATA_FILE_ADD_DELETE_MAPPING, …) and
+	 * issuing the relative form here without updating every lookup
+	 * silently breaks DELETE / UPDATE. Switching to relative paths is
+	 * a follow-up that needs to land alongside FDW-side resolution.
+	 * tablePath is captured above so the migration is one-line when ready.
 	 */
 	const char *storedPath = path;
-	bool pathIsRelative = false;
+	bool		pathIsRelative = false;
+
+	(void) tablePath;
 
 	/* Insert data file with mapping_id and proper path_is_relative */
 	resetStringInfo(&query);
