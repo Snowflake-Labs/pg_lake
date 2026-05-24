@@ -211,8 +211,15 @@ BuildReadDataSourceQueryForTableScan(PgLakeTableScan * tableScan, bool skipFullM
 
 	DataFileSchema *schema = NULL;
 
-	if (tableType == PG_LAKE_ICEBERG_TABLE_TYPE || format == DATA_FORMAT_ICEBERG)
+	if (tableType == PG_LAKE_ICEBERG_TABLE_TYPE || format == DATA_FORMAT_ICEBERG ||
+		tableType == PG_LAKE_DUCKLAKE_TABLE_TYPE)
 	{
+		/*
+		 * DuckLake also needs the schema so read_parquet gets the field-id
+		 * map: parquet files written before an ALTER ADD COLUMN won't have
+		 * the new column physically present, and the schema map is what
+		 * lets DuckDB fill those slots with NULL or the column's default.
+		 */
 		schema = GetDataFileSchemaForTable(relationId);
 	}
 

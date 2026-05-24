@@ -545,3 +545,57 @@ def test_create_table_records_real_uuid_and_absolute_path(pg_cursor, s3):
     assert str(schema_row[1]) != zero_uuid, (
         f"schema_uuid must be a real UUID, got {schema_row[1]}"
     )
+
+
+def test_select_after_schema_evolution(pg_cursor, s3):
+    """
+    DuckLake v1 keeps physical column IDs stable across ALTER. After
+    ADD/DROP COLUMN the FDW must still surface the correct logical
+    columns when reading old parquet files (which were written under
+    the previous schema). This pins the read-side behavior end-to-end.
+    """
+    location = _location("rt_schema_evol")
+    pg_cursor.execute("DROP TABLE IF EXISTS rt_schema_evol")
+    pg_cursor.execute(
+        f"""
+        CREATE TABLE rt_schema_evol (id INT, val TEXT)
+            USING ducklake WITH (location = '{location}')
+        """
+    )
+    pg_cursor.execute("INSERT INTO rt_schema_evol VALUES (1, 'a')")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute("ALTER TABLE rt_schema_evol ADD COLUMN qty INT")
+    pg_cursor.execute("INSERT INTO rt_schema_evol VALUES (2, 'b', 99)")
+    pg_cursor.connection.commit()
+
+    # SELECT after the schema change must surface 2 rows: the old one
+    # with qty=NULL and the new one.
+    pg_cursor.execute("SELECT id, val, qty FROM rt_schema_evol ORDER BY id")
+    rows = pg_cursor.fetchall()
+    assert rows == [(1, "a", None), (2, "b", 99)], rows
+
+
+def test_select_after_drop_column(pg_cursor, s3):
+    """
+    DROP COLUMN must hide the dropped column on subsequent SELECTs but
+    the parquet files containing it (written before the drop) must
+    still be readable for the surviving columns.
+    """
+    location = _location("rt_drop_col_read")
+    pg_cursor.execute("DROP TABLE IF EXISTS rt_drop_col_read")
+    pg_cursor.execute(
+        f"""
+        CREATE TABLE rt_drop_col_read (id INT, val TEXT, qty INT)
+            USING ducklake WITH (location = '{location}')
+        """
+    )
+    pg_cursor.execute("INSERT INTO rt_drop_col_read VALUES (1, 'a', 10), (2, 'b', 20)")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute("ALTER TABLE rt_drop_col_read DROP COLUMN qty")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute("SELECT id, val FROM rt_drop_col_read ORDER BY id")
+    rows = pg_cursor.fetchall()
+    assert rows == [(1, "a"), (2, "b")], rows
