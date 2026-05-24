@@ -387,6 +387,56 @@ def test_parquet_metadata_cache_invalidation(s3, pgduck_conn):
     assert len(results[0]) == 4
 
 
+def test_parquet_metadata_cache_invalidation_if_uncache_finds_no_local_file(
+    s3, pgduck_conn
+):
+    url = (
+        f"s3://{TEST_BUCKET}/"
+        "test_parquet_metadata_cache_invalidation_if_uncache_finds_no_local_file/"
+        "data1.parquet"
+    )
+    cached_path = Path(
+        f"{server_params.PGDUCK_CACHE_DIR}/s3/{TEST_BUCKET}/"
+        "test_parquet_metadata_cache_invalidation_if_uncache_finds_no_local_file/"
+        f"{CACHE_FILE_PREFIX}data1.parquet"
+    )
+
+    run_command(
+        f"""
+        COPY (SELECT 1 AS a, 2 AS b) TO '{url}'
+    """,
+        pgduck_conn,
+    )
+
+    results = run_query(f"SELECT * FROM '{url}'", pgduck_conn)
+    assert len(results[0]) == 2
+
+    run_command(
+        f"""
+        SELECT * FROM pg_lake_cache_file('{url}')
+    """,
+        pgduck_conn,
+    )
+
+    results = run_query(f"SELECT * FROM '{url}'", pgduck_conn)
+    assert len(results[0]) == 2
+
+    run_command(
+        f"""
+        COPY (SELECT 1 AS a, 2 AS b, 3 AS c) TO '{url}'
+    """,
+        pgduck_conn,
+    )
+
+    cached_path.unlink()
+
+    results = run_query(f"SELECT * FROM pg_lake_uncache_file('{url}')", pgduck_conn)
+    assert results[0][0] is False
+
+    results = run_query(f"SELECT * FROM '{url}'", pgduck_conn)
+    assert len(results[0]) == 3
+
+
 # we can cache two different files concurrently
 def test_concurrent_cache_uncache_different_files(s3, pgduck_conn):
     url_1 = f"s3://{TEST_BUCKET}/test_concurrent_cache_file/file_1.csv"

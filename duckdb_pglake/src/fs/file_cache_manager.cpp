@@ -415,7 +415,7 @@ FileCacheManager::RemoveCacheFile(ClientContext &context, string url, bool waitF
 	/* remove the file from the cache */
 	CacheRemoveStatus status =
 		RemoveCacheFileInternal(file_system, finalCacheFilePath, finalCacheFilePath, waitForLock);
-	if (status == CacheRemoveStatus::FILE_EXISTS)
+	if (status != CacheRemoveStatus::LOCK_NOT_ACQUIRED)
 	{
 		/*
 		* Also remove Parquet metadata from in-memory cache to not leak
@@ -423,7 +423,9 @@ FileCacheManager::RemoveCacheFile(ClientContext &context, string url, bool waitF
 		* the file changed. We do this after removing the file, to ensure
 		* future readers do not see metadata. We also do it if there was
 		* no file, to not leave any cache remnants when explicitly uncaching
-		* a file.
+		* a file. If we could not acquire the lock, then a concurrent cache
+		* mutation is still in progress and we must not invalidate its
+		* metadata view underneath it.
 		*/
 		parquetMetadataCache.Delete(url);
 	}
