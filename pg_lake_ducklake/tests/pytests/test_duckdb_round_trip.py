@@ -494,3 +494,54 @@ def test_delete_rewrites_data_file(pg_cursor, s3):
     )
     stats = pg_cursor.fetchone()
     assert stats is not None and stats[0] == 3, stats
+
+
+def test_create_table_records_real_uuid_and_absolute_path(pg_cursor, s3):
+    """
+    DuckLake v1 expects schema_uuid and table_uuid to be unique per
+    object. Earlier the implementation seeded both with the all-zero
+    UUID so DuckDB readers could not distinguish recreated tables, and
+    table.path_is_relative defaulted to true even though we always
+    store the full s3:// location. Pin both invariants.
+    """
+    location = _location("rt_uuid_and_path")
+    pg_cursor.execute("DROP TABLE IF EXISTS rt_uuid_and_path")
+    pg_cursor.execute(
+        f"""
+        CREATE TABLE rt_uuid_and_path (id INT, val TEXT)
+            USING ducklake WITH (location = '{location}')
+        """
+    )
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        """
+        SELECT table_id, table_uuid, path, path_is_relative
+          FROM lake_ducklake.table
+         WHERE table_name = 'rt_uuid_and_path'
+        """
+    )
+    row = pg_cursor.fetchone()
+    assert row is not None
+    table_id, table_uuid, table_path, path_is_relative = row
+
+    zero_uuid = "00000000-0000-0000-0000-000000000000"
+    assert str(table_uuid) != zero_uuid, (
+        f"table_uuid must be a real UUID, got {table_uuid}"
+    )
+    assert path_is_relative is False, (
+        f"absolute s3:// location must store path_is_relative=false, got {path_is_relative}"
+    )
+    assert table_path == location, (table_path, location)
+
+    pg_cursor.execute(
+        """
+        SELECT schema_id, schema_uuid FROM lake_ducklake.schema
+         WHERE schema_name = 'public'
+        """
+    )
+    schema_row = pg_cursor.fetchone()
+    assert schema_row is not None
+    assert str(schema_row[1]) != zero_uuid, (
+        f"schema_uuid must be a real UUID, got {schema_row[1]}"
+    )

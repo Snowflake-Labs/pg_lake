@@ -271,15 +271,9 @@ DucklakeRegisterTable(const char *schemaName, const char *tableName, const char 
 	int64 schemaId, tableId;
 	int ret;
 	DucklakeSnapshot *snapshot;
-	pg_uuid_t tableUuid;
 
 	elog(LOG, "DucklakeRegisterTable called: schema=%s, table=%s, path=%s",
 		 schemaName, tableName, path ? path : "(null)");
-
-	/* Generate new UUIDs */
-	pg_uuid_t schemaUuid;
-	memset(&schemaUuid, 0, sizeof(pg_uuid_t));
-	memset(&tableUuid, 0, sizeof(pg_uuid_t));
 
 	bool isnull;
 
@@ -311,8 +305,8 @@ DucklakeRegisterTable(const char *schemaName, const char *tableName, const char 
 		resetStringInfo(&query);
 		appendStringInfo(&query,
 						 "INSERT INTO lake_ducklake.schema (schema_id, schema_uuid, begin_snapshot, schema_name) "
-						 "VALUES (%ld, '%s', %ld, %s)",
-						 schemaId, "00000000-0000-0000-0000-000000000000",
+						 "VALUES (%ld, gen_random_uuid(), %ld, %s)",
+						 schemaId,
 						 snapshot->snapshotId, quote_literal_cstr(schemaName));
 		SPI_exec(query.data, 0);
 	}
@@ -321,9 +315,10 @@ DucklakeRegisterTable(const char *schemaName, const char *tableName, const char 
 	tableId = snapshot->nextCatalogId++;
 	resetStringInfo(&query);
 	appendStringInfo(&query,
-					 "INSERT INTO lake_ducklake.table (table_id, table_uuid, begin_snapshot, schema_id, table_name, path) "
-					 "VALUES (%ld, '%s', %ld, %ld, %s, %s) RETURNING table_id",
-					 tableId, "00000000-0000-0000-0000-000000000000",
+					 "INSERT INTO lake_ducklake.table "
+					 "(table_id, table_uuid, begin_snapshot, schema_id, table_name, path, path_is_relative) "
+					 "VALUES (%ld, gen_random_uuid(), %ld, %ld, %s, %s, false) RETURNING table_id",
+					 tableId,
 					 snapshot->snapshotId, schemaId,
 					 quote_literal_cstr(tableName), quote_literal_cstr(path));
 	ret = SPI_exec(query.data, 0);
