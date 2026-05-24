@@ -4,25 +4,17 @@ from utils_pytest import *
 
 @pytest.fixture(scope="module", autouse=True)
 def ducklake_server(extension, superuser_conn, app_user):
-    """Create pg_lake_ducklake server for DuckLake tests"""
-    # Create the pg_lake_ducklake extension which creates the server
+    """
+    The `extension` fixture has already run CREATE EXTENSION pg_lake_table
+    CASCADE which pulls in pg_lake_ducklake. Just grant the test app_user
+    membership in ducklake_catalog so it can write to the lake_ducklake
+    metadata tables. Don't DROP pg_lake_ducklake on teardown — it would
+    cascade-drop pg_lake_table out from under the parent fixture.
+    """
     run_command(
-        f"""
-        CREATE EXTENSION IF NOT EXISTS pg_lake_ducklake CASCADE;
-        -- Grant ducklake_catalog role to the test app_user
-        GRANT ducklake_catalog TO {app_user};
-        """,
+        f"GRANT ducklake_catalog TO {app_user};",
         superuser_conn,
     )
     superuser_conn.commit()
 
     yield
-
-    # Cleanup
-    run_command(
-        """
-        DROP EXTENSION IF EXISTS pg_lake_ducklake CASCADE;
-        """,
-        superuser_conn,
-    )
-    superuser_conn.commit()
