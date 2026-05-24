@@ -24,10 +24,10 @@ CREATE TABLE lake_ducklake.metadata (
 -- Snapshot tracking - each data modification creates a new snapshot
 CREATE TABLE lake_ducklake.snapshot (
     snapshot_id BIGINT PRIMARY KEY,
-    snapshot_time TIMESTAMPTZ NOT NULL DEFAULT now(),
-    schema_version BIGINT NOT NULL,
-    next_catalog_id BIGINT NOT NULL,
-    next_file_id BIGINT NOT NULL
+    snapshot_time TIMESTAMPTZ DEFAULT now(),
+    schema_version BIGINT,
+    next_catalog_id BIGINT,
+    next_file_id BIGINT
 );
 
 -- Snapshot change tracking for audit/CDC
@@ -46,10 +46,10 @@ CREATE TABLE lake_ducklake.snapshot_changes (
 -- Schema (namespace) definitions
 CREATE TABLE lake_ducklake.schema (
     schema_id BIGINT PRIMARY KEY,
-    schema_uuid UUID NOT NULL,
-    begin_snapshot BIGINT NOT NULL,
+    schema_uuid UUID,
+    begin_snapshot BIGINT,
     end_snapshot BIGINT,
-    schema_name VARCHAR NOT NULL,
+    schema_name VARCHAR,
     path VARCHAR,
     path_is_relative BOOLEAN DEFAULT true
 );
@@ -57,24 +57,24 @@ CREATE TABLE lake_ducklake.schema (
 -- Table definitions
 CREATE TABLE lake_ducklake.table (
     table_id BIGINT PRIMARY KEY,
-    table_uuid UUID NOT NULL,
-    begin_snapshot BIGINT NOT NULL,
+    table_uuid UUID,
+    begin_snapshot BIGINT,
     end_snapshot BIGINT,
-    schema_id BIGINT NOT NULL REFERENCES lake_ducklake.schema(schema_id) ON DELETE CASCADE,
-    table_name VARCHAR NOT NULL,
+    schema_id BIGINT REFERENCES lake_ducklake.schema(schema_id),
+    table_name VARCHAR,
     path VARCHAR,
     path_is_relative BOOLEAN DEFAULT true
 );
 
 -- Column definitions with schema evolution support
 CREATE TABLE lake_ducklake.column (
-    column_id BIGINT NOT NULL,
-    begin_snapshot BIGINT NOT NULL,
+    column_id BIGINT,
+    begin_snapshot BIGINT,
     end_snapshot BIGINT,
-    table_id BIGINT NOT NULL REFERENCES lake_ducklake.table(table_id) ON DELETE CASCADE,
-    column_order BIGINT NOT NULL,
-    column_name VARCHAR NOT NULL,
-    column_type VARCHAR NOT NULL,
+    table_id BIGINT REFERENCES lake_ducklake.table(table_id),
+    column_order BIGINT,
+    column_name VARCHAR,
+    column_type VARCHAR,
     initial_default VARCHAR,
     default_value VARCHAR,
     default_value_type VARCHAR,
@@ -87,13 +87,13 @@ CREATE TABLE lake_ducklake.column (
 -- View definitions
 CREATE TABLE lake_ducklake.view (
     view_id BIGINT PRIMARY KEY,
-    view_uuid UUID NOT NULL,
-    begin_snapshot BIGINT NOT NULL,
+    view_uuid UUID,
+    begin_snapshot BIGINT,
     end_snapshot BIGINT,
-    schema_id BIGINT NOT NULL REFERENCES lake_ducklake.schema(schema_id),
-    view_name VARCHAR NOT NULL,
+    schema_id BIGINT REFERENCES lake_ducklake.schema(schema_id),
+    view_name VARCHAR,
     dialect VARCHAR,
-    sql VARCHAR NOT NULL,
+    sql VARCHAR,
     column_aliases VARCHAR
 );
 
@@ -104,15 +104,15 @@ CREATE TABLE lake_ducklake.view (
 -- Data files (Parquet files containing table data)
 CREATE TABLE lake_ducklake.data_file (
     data_file_id BIGINT PRIMARY KEY,
-    table_id BIGINT NOT NULL REFERENCES lake_ducklake.table(table_id) ON DELETE CASCADE,
-    begin_snapshot BIGINT NOT NULL,
+    table_id BIGINT REFERENCES lake_ducklake.table(table_id),
+    begin_snapshot BIGINT,
     end_snapshot BIGINT,
     file_order BIGINT,
-    path VARCHAR NOT NULL,
+    path VARCHAR,
     path_is_relative BOOLEAN DEFAULT true,
     file_format VARCHAR DEFAULT 'parquet',
-    record_count BIGINT NOT NULL,
-    file_size_bytes BIGINT NOT NULL,
+    record_count BIGINT,
+    file_size_bytes BIGINT,
     footer_size BIGINT,
     row_id_start BIGINT,
     partition_id BIGINT,
@@ -124,15 +124,15 @@ CREATE TABLE lake_ducklake.data_file (
 -- Delete files (track deleted rows)
 CREATE TABLE lake_ducklake.delete_file (
     delete_file_id BIGINT PRIMARY KEY,
-    table_id BIGINT NOT NULL REFERENCES lake_ducklake.table(table_id) ON DELETE CASCADE,
-    begin_snapshot BIGINT NOT NULL,
+    table_id BIGINT REFERENCES lake_ducklake.table(table_id),
+    begin_snapshot BIGINT,
     end_snapshot BIGINT,
-    data_file_id BIGINT REFERENCES lake_ducklake.data_file(data_file_id) ON DELETE CASCADE,
-    path VARCHAR NOT NULL,
+    data_file_id BIGINT REFERENCES lake_ducklake.data_file(data_file_id),
+    path VARCHAR,
     path_is_relative BOOLEAN DEFAULT true,
     format VARCHAR DEFAULT 'parquet',
-    delete_count BIGINT NOT NULL,
-    file_size_bytes BIGINT NOT NULL,
+    delete_count BIGINT,
+    file_size_bytes BIGINT,
     footer_size BIGINT,
     encryption_key VARCHAR,
     partial_max BIGINT
@@ -141,16 +141,16 @@ CREATE TABLE lake_ducklake.delete_file (
 -- Files scheduled for deletion (cleanup queue)
 CREATE TABLE lake_ducklake.files_scheduled_for_deletion (
     data_file_id BIGINT PRIMARY KEY,
-    path VARCHAR NOT NULL,
+    path VARCHAR,
     path_is_relative BOOLEAN DEFAULT true,
-    schedule_start TIMESTAMPTZ NOT NULL DEFAULT now()
+    schedule_start TIMESTAMPTZ DEFAULT now()
 );
 
 -- Inlined data tables (small tables stored in metadata)
 CREATE TABLE lake_ducklake.inlined_data_tables (
-    table_id BIGINT NOT NULL REFERENCES lake_ducklake.table(table_id) ON DELETE CASCADE,
-    table_name VARCHAR NOT NULL,
-    schema_version BIGINT NOT NULL,
+    table_id BIGINT REFERENCES lake_ducklake.table(table_id),
+    table_name VARCHAR,
+    schema_version BIGINT,
     PRIMARY KEY (table_id, schema_version)
 );
 
@@ -160,7 +160,7 @@ CREATE TABLE lake_ducklake.inlined_data_tables (
 
 -- Table-level statistics
 CREATE TABLE lake_ducklake.table_stats (
-    table_id BIGINT PRIMARY KEY REFERENCES lake_ducklake.table(table_id) ON DELETE CASCADE,
+    table_id BIGINT PRIMARY KEY REFERENCES lake_ducklake.table(table_id),
     record_count BIGINT,
     next_row_id BIGINT,
     file_size_bytes BIGINT
@@ -168,8 +168,8 @@ CREATE TABLE lake_ducklake.table_stats (
 
 -- Table column statistics (aggregated across all files)
 CREATE TABLE lake_ducklake.table_column_stats (
-    table_id BIGINT NOT NULL REFERENCES lake_ducklake.table(table_id) ON DELETE CASCADE,
-    column_id BIGINT NOT NULL,
+    table_id BIGINT REFERENCES lake_ducklake.table(table_id),
+    column_id BIGINT,
     contains_null BOOLEAN,
     contains_nan BOOLEAN,
     min_value VARCHAR,
@@ -180,9 +180,9 @@ CREATE TABLE lake_ducklake.table_column_stats (
 
 -- Per-file column statistics
 CREATE TABLE lake_ducklake.file_column_stats (
-    data_file_id BIGINT NOT NULL REFERENCES lake_ducklake.data_file(data_file_id) ON DELETE CASCADE,
-    table_id BIGINT NOT NULL REFERENCES lake_ducklake.table(table_id) ON DELETE CASCADE,
-    column_id BIGINT NOT NULL,
+    data_file_id BIGINT REFERENCES lake_ducklake.data_file(data_file_id),
+    table_id BIGINT REFERENCES lake_ducklake.table(table_id),
+    column_id BIGINT,
     column_size_bytes BIGINT,
     value_count BIGINT,
     null_count BIGINT,
@@ -200,26 +200,26 @@ CREATE TABLE lake_ducklake.file_column_stats (
 -- Partition info (partition spec per table)
 CREATE TABLE lake_ducklake.partition_info (
     partition_id BIGINT PRIMARY KEY,
-    table_id BIGINT NOT NULL REFERENCES lake_ducklake.table(table_id) ON DELETE CASCADE,
-    begin_snapshot BIGINT NOT NULL,
+    table_id BIGINT REFERENCES lake_ducklake.table(table_id),
+    begin_snapshot BIGINT,
     end_snapshot BIGINT
 );
 
 -- Partition columns (which columns are used for partitioning)
 CREATE TABLE lake_ducklake.partition_column (
-    partition_id BIGINT NOT NULL REFERENCES lake_ducklake.partition_info(partition_id) ON DELETE CASCADE,
-    table_id BIGINT NOT NULL REFERENCES lake_ducklake.table(table_id) ON DELETE CASCADE,
-    partition_key_index BIGINT NOT NULL,
-    column_id BIGINT NOT NULL,
+    partition_id BIGINT REFERENCES lake_ducklake.partition_info(partition_id),
+    table_id BIGINT REFERENCES lake_ducklake.table(table_id),
+    partition_key_index BIGINT,
+    column_id BIGINT,
     transform VARCHAR,
     PRIMARY KEY (partition_id, partition_key_index)
 );
 
 -- File partition values
 CREATE TABLE lake_ducklake.file_partition_value (
-    data_file_id BIGINT NOT NULL REFERENCES lake_ducklake.data_file(data_file_id) ON DELETE CASCADE,
-    table_id BIGINT NOT NULL REFERENCES lake_ducklake.table(table_id) ON DELETE CASCADE,
-    partition_key_index BIGINT NOT NULL,
+    data_file_id BIGINT REFERENCES lake_ducklake.data_file(data_file_id),
+    table_id BIGINT REFERENCES lake_ducklake.table(table_id),
+    partition_key_index BIGINT,
     partition_value VARCHAR,
     PRIMARY KEY (data_file_id, partition_key_index)
 );
@@ -231,14 +231,14 @@ CREATE TABLE lake_ducklake.file_partition_value (
 -- Column mapping (for schema evolution)
 CREATE TABLE lake_ducklake.column_mapping (
     mapping_id BIGINT PRIMARY KEY,
-    table_id BIGINT NOT NULL REFERENCES lake_ducklake.table(table_id) ON DELETE CASCADE,
+    table_id BIGINT REFERENCES lake_ducklake.table(table_id),
     type VARCHAR
 );
 
 -- Name mapping (field ID to name mapping)
 CREATE TABLE lake_ducklake.name_mapping (
-    mapping_id BIGINT NOT NULL REFERENCES lake_ducklake.column_mapping(mapping_id) ON DELETE CASCADE,
-    column_id BIGINT NOT NULL,
+    mapping_id BIGINT REFERENCES lake_ducklake.column_mapping(mapping_id),
+    column_id BIGINT,
     source_name VARCHAR,
     target_field_id BIGINT,
     parent_column BIGINT,
@@ -252,21 +252,21 @@ CREATE TABLE lake_ducklake.name_mapping (
 
 -- Object tags (for tables, schemas, etc.)
 CREATE TABLE lake_ducklake.tag (
-    object_id BIGINT NOT NULL,
-    begin_snapshot BIGINT NOT NULL,
+    object_id BIGINT,
+    begin_snapshot BIGINT,
     end_snapshot BIGINT,
-    key VARCHAR NOT NULL,
+    key VARCHAR,
     value VARCHAR,
     PRIMARY KEY (object_id, key, begin_snapshot)
 );
 
 -- Column-specific tags
 CREATE TABLE lake_ducklake.column_tag (
-    table_id BIGINT NOT NULL REFERENCES lake_ducklake.table(table_id) ON DELETE CASCADE,
-    column_id BIGINT NOT NULL,
-    begin_snapshot BIGINT NOT NULL,
+    table_id BIGINT REFERENCES lake_ducklake.table(table_id),
+    column_id BIGINT,
+    begin_snapshot BIGINT,
     end_snapshot BIGINT,
-    key VARCHAR NOT NULL,
+    key VARCHAR,
     value VARCHAR,
     PRIMARY KEY (table_id, column_id, key, begin_snapshot)
 );
@@ -277,9 +277,9 @@ CREATE TABLE lake_ducklake.column_tag (
 -- and per-table schema lookups can resolve the right column shape at any
 -- snapshot.
 CREATE TABLE lake_ducklake.schema_versions (
-    begin_snapshot BIGINT NOT NULL,
-    schema_version BIGINT NOT NULL,
-    table_id BIGINT NOT NULL,
+    begin_snapshot BIGINT,
+    schema_version BIGINT,
+    table_id BIGINT,
     PRIMARY KEY (begin_snapshot, table_id)
 );
 
@@ -291,24 +291,24 @@ CREATE TABLE lake_ducklake.schema_versions (
 -- ============================================================================
 
 CREATE TABLE lake_ducklake.macro (
-    schema_id BIGINT NOT NULL,
-    macro_id BIGINT NOT NULL,
-    macro_name VARCHAR NOT NULL,
-    begin_snapshot BIGINT NOT NULL,
+    schema_id BIGINT,
+    macro_id BIGINT,
+    macro_name VARCHAR,
+    begin_snapshot BIGINT,
     end_snapshot BIGINT
 );
 
 CREATE TABLE lake_ducklake.macro_impl (
-    macro_id BIGINT NOT NULL,
-    impl_id BIGINT NOT NULL,
+    macro_id BIGINT,
+    impl_id BIGINT,
     dialect VARCHAR,
     sql VARCHAR,
     type VARCHAR
 );
 
 CREATE TABLE lake_ducklake.macro_parameters (
-    macro_id BIGINT NOT NULL,
-    impl_id BIGINT NOT NULL,
+    macro_id BIGINT,
+    impl_id BIGINT,
     column_id BIGINT,
     parameter_name VARCHAR,
     parameter_type VARCHAR,
@@ -317,16 +317,16 @@ CREATE TABLE lake_ducklake.macro_parameters (
 );
 
 CREATE TABLE lake_ducklake.sort_info (
-    sort_id BIGINT NOT NULL,
-    table_id BIGINT NOT NULL,
-    begin_snapshot BIGINT NOT NULL,
+    sort_id BIGINT,
+    table_id BIGINT,
+    begin_snapshot BIGINT,
     end_snapshot BIGINT
 );
 
 CREATE TABLE lake_ducklake.sort_expression (
-    sort_id BIGINT NOT NULL,
-    table_id BIGINT NOT NULL,
-    sort_key_index BIGINT NOT NULL,
+    sort_id BIGINT,
+    table_id BIGINT,
+    sort_key_index BIGINT,
     expression VARCHAR,
     dialect VARCHAR,
     sort_direction VARCHAR,
@@ -334,9 +334,9 @@ CREATE TABLE lake_ducklake.sort_expression (
 );
 
 CREATE TABLE lake_ducklake.file_variant_stats (
-    data_file_id BIGINT NOT NULL,
-    table_id BIGINT NOT NULL,
-    column_id BIGINT NOT NULL,
+    data_file_id BIGINT,
+    table_id BIGINT,
+    column_id BIGINT,
     variant_path VARCHAR,
     shredded_type VARCHAR,
     column_size_bytes BIGINT,
