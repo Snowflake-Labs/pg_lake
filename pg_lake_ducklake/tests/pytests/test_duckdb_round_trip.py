@@ -732,3 +732,40 @@ def test_add_column_with_string_default(pg_cursor, s3):
     pg_cursor.execute("SELECT id, label FROM rt_str_default ORDER BY id")
     rows = pg_cursor.fetchall()
     assert rows == [(1, "unknown"), (2, "set")], rows
+
+
+def test_add_column_default_records_default_value_type_literal(pg_cursor, s3):
+    """
+    DuckLake v1 added a default_value_type discriminator on
+    ducklake_column. The v0.3 -> v1.0 migration sets it to 'literal'
+    for any column with a default. Newly-written rows should match: a
+    column with a non-NULL initial_default needs default_value_type =
+    'literal' so DuckDB's reader interprets the default correctly. A
+    column without a default keeps default_value_type = NULL.
+    """
+    location = _location("rt_dvt")
+    pg_cursor.execute("DROP TABLE IF EXISTS rt_dvt")
+    pg_cursor.execute(
+        f"""
+        CREATE TABLE rt_dvt (id INT)
+            USING ducklake WITH (location = '{location}')
+        """
+    )
+    pg_cursor.execute("ALTER TABLE rt_dvt ADD COLUMN qty INT DEFAULT 7")
+    pg_cursor.execute("ALTER TABLE rt_dvt ADD COLUMN note TEXT")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        """
+        SELECT column_name, initial_default, default_value, default_value_type
+          FROM lake_ducklake.column c
+          JOIN lake_ducklake.table t USING (table_id)
+         WHERE t.table_name = 'rt_dvt' AND c.end_snapshot IS NULL
+         ORDER BY column_order
+        """
+    )
+    rows = {r[0]: (r[1], r[2], r[3]) for r in pg_cursor.fetchall()}
+
+    assert rows["id"] == (None, None, None), rows["id"]
+    assert rows["qty"] == ("7", "7", "literal"), rows["qty"]
+    assert rows["note"] == (None, None, None), rows["note"]

@@ -1203,14 +1203,23 @@ DucklakeAddColumn(Oid tableOid, const char *columnName, const char *columnType,
 	appendStringInfo(&query,
 					 "INSERT INTO lake_ducklake.column "
 					 "(column_id, begin_snapshot, table_id, column_order, column_name, "
-					 "column_type, initial_default, default_value, nulls_allowed) "
+					 "column_type, initial_default, default_value, default_value_type, "
+					 "nulls_allowed) "
 					 "VALUES (%ld, %ld, %ld, %d, %s, lake_ducklake.pg_type_to_duckdb_type(%s), "
-					 "%s, %s, %s)",
+					 "%s, %s, %s, %s)",
 					 columnId, newSnapshot->snapshotId, metadata->tableId,
 					 columnOrder, quote_literal_cstr(columnName),
 					 quote_literal_cstr(columnType),
 					 initialDefault ? quote_literal_cstr(initialDefault) : "NULL",
 					 initialDefault ? quote_literal_cstr(initialDefault) : "NULL",
+					 /*
+					  * v1 spec: when a default value is present, the
+					  * default_value_type discriminator must say what the
+					  * default text means. We resolve postgres expressions
+					  * to a literal scalar earlier, so 'literal' is the
+					  * correct tag. NULL when there is no default.
+					  */
+					 initialDefault ? "'literal'" : "NULL",
 					 nullsAllowed ? "true" : "false");
 
 	ret = SPI_exec(query.data, 0);
