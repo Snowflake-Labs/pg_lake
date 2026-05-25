@@ -32,56 +32,9 @@
 
 
 /*
- * AddDataFileColumnStatsToCatalog inserts column stats for a data file into
- * lake_table.data_file_column_stats.
+ * DataFileColumnStatsCatalogExists checks if the
+ * lake_table.data_file_column_stats catalog exists.
  */
-void
-AddDataFileColumnStatsToCatalog(Oid relationId, const char *path, List *columnStatsList)
-{
-	ListCell   *columnStatsCell = NULL;
-
-	foreach(columnStatsCell, columnStatsList)
-	{
-		DataFileColumnStats *columnStats = lfirst(columnStatsCell);
-
-		/*
-		 * do not insert stats if bounds are empty. (we do not write them to
-		 * iceberg metadata as well)
-		 */
-		if (columnStats->lowerBoundText == NULL)
-		{
-			Assert(columnStats->upperBoundText == NULL);
-			continue;
-		}
-
-		char	   *query =
-			"insert into " DATA_FILE_COLUMN_STATS_TABLE_QUALIFIED " "
-			"(table_name, path, field_id, lower_bound, upper_bound) "
-			"values ($1,$2,$3,$4,$5)";
-
-		DECLARE_SPI_ARGS(5);
-		SPI_ARG_VALUE(1, OIDOID, relationId, false);
-		SPI_ARG_VALUE(2, TEXTOID, path, false);
-		SPI_ARG_VALUE(3, INT8OID, columnStats->leafField.fieldId, false);
-		SPI_ARG_VALUE(4, TEXTOID, columnStats->lowerBoundText, columnStats->lowerBoundText == NULL);
-		SPI_ARG_VALUE(5, TEXTOID, columnStats->upperBoundText, columnStats->upperBoundText == NULL);
-
-		/* switch to schema owner, we assume callers checked permissions */
-		SPI_START_EXTENSION_OWNER(PgLakeTable);
-
-		bool		readOnly = false;
-
-		SPI_EXECUTE(query, readOnly);
-
-		SPI_END();
-	}
-}
-
-
- /*
-  * DataFileColumnStatsCatalogExists checks if the
-  * lake_table.data_file_column_stats catalog exists.
-  */
 bool
 DataFileColumnStatsCatalogExists(void)
 {
