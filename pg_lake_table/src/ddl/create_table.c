@@ -391,19 +391,22 @@ ErrorIfCreateForeignTableOnIcebergCatalog(CreateForeignTableStmt *createStmt)
  * DROP SERVER is blocked while dependent tables exist (and
  * DROP SERVER CASCADE drops them).
  *
- * Only user-created iceberg_catalog servers get a dependency entry;
- * built-in catalog names ('rest', 'postgres', 'object_store') are not
- * backed by a pg_foreign_server row managed by the user.
+ * Both user-created iceberg_catalog servers and the three pre-created
+ * built-in catalog servers get a dependency entry: the short reserved
+ * names ('rest', 'postgres', 'object_store') are mapped to the
+ * corresponding built-in server (e.g. 'pg_lake_rest_catalog') via
+ * ResolveCatalogServerName.
  */
 static void
 RecordIcebergCatalogServerDependency(Oid relationId, List *options)
 {
 	char	   *catalog = GetStringOption(options, "catalog", false);
 
-	if (catalog == NULL || IsCatalogOwnedByExtension(catalog))
+	if (catalog == NULL)
 		return;
 
-	ForeignServer *server = GetForeignServerByName(catalog, true);
+	const char *serverName = ResolveCatalogServerName(catalog);
+	ForeignServer *server = GetForeignServerByName(serverName, true);
 
 	if (server == NULL)
 		return;
@@ -730,6 +733,28 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		DefElem    *defaultCatalog = makeDefElem("catalog", (Node *) makeString(IcebergDefaultCatalog), -1);
 
 		createStmt->options = lappend(createStmt->options, defaultCatalog);
+	}
+	else
+	{
+		/*
+		 * The pre-created built-in catalog servers (pg_lake_rest_catalog,
+		 * pg_lake_postgres_catalog, pg_lake_object_store_catalog) are
+		 * internal anchors and must not be addressable via the user-facing
+		 * catalog= option.  Users say catalog='rest' / 'postgres' /
+		 * 'object_store' and we map short -> long internally.
+		 */
+		char	   *catalogVal = strVal(catalogOption->arg);
+
+		if (IsBuiltinCatalogServerName(catalogVal))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("catalog name \"%s\" is reserved for an internal "
+							"pg_lake_iceberg catalog server",
+							catalogVal),
+					 errhint("Use catalog='%s', '%s', or '%s' instead.",
+							 REST_CATALOG_NAME,
+							 POSTGRES_CATALOG_NAME,
+							 OBJECT_STORE_CATALOG_NAME)));
 	}
 
 	bool		hasRestCatalogOption = HasRestCatalogTableOption(createStmt->options);

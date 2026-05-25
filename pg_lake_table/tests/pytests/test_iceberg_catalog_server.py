@@ -845,3 +845,249 @@ def test_case_sensitive_server_names(superuser_conn, extension):
     run_command("DROP SERVER test_cs", superuser_conn)
     run_command('DROP SERVER "TEST_CS"', superuser_conn)
     superuser_conn.rollback()
+
+
+# ── Built-in catalog servers ───────────────────────────────────────────────
+
+
+BUILTIN_CATALOG_SERVERS = [
+    ("pg_lake_postgres_catalog", "postgres"),
+    ("pg_lake_object_store_catalog", "object_store"),
+    ("pg_lake_rest_catalog", "rest"),
+]
+
+
+def test_builtin_catalog_servers_exist(pg_conn, extension):
+    """The three built-in iceberg_catalog servers are pre-created by the
+    extension and survive as anchors for pg_depend edges."""
+    result = run_query(
+        """
+        SELECT srvname, srvtype
+        FROM pg_foreign_server s
+        JOIN pg_foreign_data_wrapper fdw ON s.srvfdw = fdw.oid
+        WHERE fdw.fdwname = 'iceberg_catalog'
+          AND srvname LIKE 'pg_lake_%_catalog'
+        ORDER BY srvname
+        """,
+        pg_conn,
+    )
+    names_types = [(row["srvname"], row["srvtype"]) for row in result]
+    assert names_types == sorted(BUILTIN_CATALOG_SERVERS)
+
+
+def test_builtin_servers_are_extension_owned(pg_conn, extension):
+    """Built-in servers are members of the pg_lake_iceberg extension so
+    they get included in pg_dump's CREATE EXTENSION shadow rather than
+    emitted as standalone CREATE SERVER statements."""
+    result = run_query(
+        """
+        SELECT srvname
+        FROM pg_foreign_server s
+        JOIN pg_depend d ON d.objid = s.oid
+        JOIN pg_extension e ON e.oid = d.refobjid
+        WHERE e.extname = 'pg_lake_iceberg'
+          AND d.deptype = 'e'
+          AND d.classid = 'pg_foreign_server'::regclass
+        ORDER BY srvname
+        """,
+        pg_conn,
+    )
+    assert [r["srvname"] for r in result] == [
+        name for name, _ in sorted(BUILTIN_CATALOG_SERVERS)
+    ]
+
+
+@pytest.mark.parametrize("long_name,_short_name", BUILTIN_CATALOG_SERVERS)
+def test_reject_create_server_with_builtin_long_name(
+    long_name, _short_name, superuser_conn, extension
+):
+    """CREATE SERVER with the internal long name is blocked; the long
+    names are implementation details and must never be addressable as
+    a user-typed server name."""
+    err = run_command(
+        f"""
+        CREATE SERVER {long_name} TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert "reserved for an internal" in str(err)
+    superuser_conn.rollback()
+
+
+@pytest.mark.parametrize("long_name,_short_name", BUILTIN_CATALOG_SERVERS)
+def test_reject_rename_to_builtin_long_name(
+    long_name, _short_name, superuser_conn, extension
+):
+    """Renaming a user-created server TO an internal long name is blocked."""
+    run_command(
+        """
+        CREATE SERVER rn_long_src TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    err = run_command(
+        f"ALTER SERVER rn_long_src RENAME TO {long_name}",
+        superuser_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert "reserved for an internal" in str(err)
+    superuser_conn.rollback()
+
+
+@pytest.mark.parametrize("long_name,_short_name", BUILTIN_CATALOG_SERVERS)
+def test_alter_options_on_builtin_server_blocked(
+    long_name, _short_name, superuser_conn, extension
+):
+    """ALTER SERVER OPTIONS on a built-in server is unconditionally blocked
+    — built-ins are immutable structural anchors and all configuration
+    lives in GUCs."""
+    err = run_command(
+        f"ALTER SERVER {long_name} OPTIONS (ADD rest_endpoint 'http://x:8181')",
+        superuser_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert "cannot alter the built-in pg_lake_iceberg catalog server" in str(err)
+    superuser_conn.rollback()
+
+
+@pytest.mark.parametrize("long_name,_short_name", BUILTIN_CATALOG_SERVERS)
+def test_alter_owner_on_builtin_server_blocked(
+    long_name, _short_name, superuser_conn, extension
+):
+    """ALTER SERVER ... OWNER TO on a built-in server is blocked."""
+    err = run_command(
+        f"ALTER SERVER {long_name} OWNER TO lake_write",
+        superuser_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert "cannot change owner of the built-in" in str(err)
+    superuser_conn.rollback()
+
+
+@pytest.mark.parametrize("long_name,_short_name", BUILTIN_CATALOG_SERVERS)
+def test_drop_builtin_server_blocked(long_name, _short_name, superuser_conn, extension):
+    """DROP SERVER on a built-in server is blocked by PostgreSQL itself,
+    because the server is extension-owned (pg_depend deptype = 'e')."""
+    err = run_command(f"DROP SERVER {long_name}", superuser_conn, raise_error=False)
+    assert err is not None
+    assert "extension pg_lake_iceberg" in str(err) or "depends on" in str(err)
+    superuser_conn.rollback()
+
+
+def test_reject_rename_builtin_server(superuser_conn, extension):
+    """Renaming the built-in servers is blocked by the iceberg_catalog
+    rename guard (which already blocks renaming any iceberg_catalog
+    server, built-in or user-created)."""
+    err = run_command(
+        "ALTER SERVER pg_lake_rest_catalog RENAME TO renamed_builtin",
+        superuser_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert "cannot rename iceberg_catalog server" in str(err)
+    superuser_conn.rollback()
+
+
+@pytest.mark.parametrize("long_name,_short_name", BUILTIN_CATALOG_SERVERS)
+def test_reject_catalog_option_with_builtin_long_name(
+    long_name, _short_name, pg_conn, extension
+):
+    """The catalog= option on CREATE TABLE must use the short names
+    ('rest', 'postgres', 'object_store'); the internal long names are
+    rejected with a clear error pointing to the short forms."""
+    err = run_command(
+        f"CREATE TABLE long_name_tbl (id int) USING iceberg WITH (catalog='{long_name}')",
+        pg_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert "reserved for an internal" in str(err)
+    pg_conn.rollback()
+
+
+def test_postgres_fdw_named_postgres_does_not_conflict(superuser_conn, extension):
+    """A pre-existing CREATE SERVER named 'postgres' (e.g. from postgres_fdw)
+    does not collide with pg_lake's built-in postgres catalog.  The user-facing
+    short name 'postgres' maps internally to 'pg_lake_postgres_catalog', so the
+    two coexist without interaction."""
+    err = run_command(
+        "CREATE EXTENSION IF NOT EXISTS postgres_fdw", superuser_conn, raise_error=False
+    )
+    if err is not None:
+        pytest.skip(f"postgres_fdw not available: {err}")
+
+    run_command(
+        """
+        CREATE SERVER postgres FOREIGN DATA WRAPPER postgres_fdw
+            OPTIONS (host 'localhost', port '5432', dbname 'postgres')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    try:
+        coexist = run_query(
+            """
+            SELECT srvname, fdw.fdwname
+            FROM pg_foreign_server s
+            JOIN pg_foreign_data_wrapper fdw ON s.srvfdw = fdw.oid
+            WHERE srvname IN ('postgres', 'pg_lake_postgres_catalog')
+            ORDER BY srvname
+            """,
+            superuser_conn,
+        )
+        rows = [(r["srvname"], r["fdwname"]) for r in coexist]
+        assert ("postgres", "postgres_fdw") in rows
+        assert ("pg_lake_postgres_catalog", "iceberg_catalog") in rows
+    finally:
+        run_command("DROP SERVER postgres", superuser_conn)
+        superuser_conn.commit()
+
+
+def test_pg_depend_edge_for_builtin_postgres_catalog_table(
+    pg_conn, s3, extension, with_default_location
+):
+    """A table created with catalog='postgres' (the short reserved name)
+    records a pg_depend edge against the built-in pg_lake_postgres_catalog
+    server.  This is what makes DROP EXTENSION CASCADE clean up such
+    tables, and is the structural reason for pre-creating the built-in
+    servers in the first place."""
+    run_command(
+        """
+        CREATE TABLE pg_depend_tbl (id int)
+            USING iceberg
+            WITH (catalog = 'postgres')
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    try:
+        result = run_query(
+            """
+            SELECT s.srvname
+            FROM pg_class c
+            JOIN pg_depend d ON d.objid = c.oid
+                            AND d.classid = 'pg_class'::regclass
+                            AND d.refclassid = 'pg_foreign_server'::regclass
+            JOIN pg_foreign_server s ON s.oid = d.refobjid
+            JOIN pg_foreign_data_wrapper fdw ON s.srvfdw = fdw.oid
+            WHERE c.relname = 'pg_depend_tbl'
+              AND fdw.fdwname = 'iceberg_catalog'
+            """,
+            pg_conn,
+        )
+        assert len(result) == 1
+        assert result[0]["srvname"] == "pg_lake_postgres_catalog"
+    finally:
+        run_command("DROP TABLE pg_depend_tbl", pg_conn)
+        pg_conn.commit()

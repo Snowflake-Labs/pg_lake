@@ -22,10 +22,28 @@
 
 /*
 * The allowed values for IcebergDefaultCatalog, case insensitive.
+*
+* These are the user-facing short names used as the catalog= option value
+* on CREATE TABLE ... USING iceberg.  Internally they map to the
+* prefixed built-in server names below; users never type the prefixed
+* names directly.
 */
 #define POSTGRES_CATALOG_NAME "postgres"
 #define OBJECT_STORE_CATALOG_NAME "object_store"
 #define REST_CATALOG_NAME "rest"
+
+/*
+ * Built-in iceberg_catalog server names.  Pre-created by the extension
+ * upgrade script and exist purely as anchors for pg_depend edges and the
+ * uniform server-lookup path.  All ALTER/DROP/RENAME on these names is
+ * blocked (configuration for the built-in catalogs lives in GUCs).
+ *
+ * The prefix keeps them clear of names users are likely to have already
+ * used (notably the very common "CREATE SERVER postgres FDW postgres_fdw").
+ */
+#define PG_LAKE_POSTGRES_CATALOG_SERVER_NAME     "pg_lake_postgres_catalog"
+#define PG_LAKE_OBJECT_STORE_CATALOG_SERVER_NAME "pg_lake_object_store_catalog"
+#define PG_LAKE_REST_CATALOG_SERVER_NAME         "pg_lake_rest_catalog"
 
 typedef enum IcebergCatalogType
 {
@@ -66,3 +84,5 @@ extern PGDLLEXPORT bool HasObjectStoreCatalogTableOption(List *options);
 extern PGDLLEXPORT bool HasReadOnlyOption(List *options);
 extern PGDLLEXPORT bool IsCatalogOwnedByExtension(const char *catalog);
 extern PGDLLEXPORT bool IsRestCatalog(const char *catalog);
+extern PGDLLEXPORT const char *ResolveCatalogServerName(const char *catalog);
+extern PGDLLEXPORT bool IsBuiltinCatalogServerName(const char *serverName);

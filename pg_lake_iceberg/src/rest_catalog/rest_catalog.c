@@ -397,18 +397,72 @@ ServerHasDependentRestIcebergTable(Oid serverOid)
 
 
 /*
- * ValidateIcebergCatalogServerDDL validates DDL on iceberg_catalog servers:
+ * RejectIfBuiltinCatalogServerName errors out if `name` is one of the
+ * three internal pg_lake_iceberg catalog server names.  Shared by the
+ * CREATE SERVER and ALTER SERVER ... RENAME TO branches, where the
+ * concern is "users must not be able to create or end up with a server
+ * carrying one of these reserved names".
+ */
+static void
+RejectIfBuiltinCatalogServerName(const char *name)
+{
+	if (!IsBuiltinCatalogServerName(name))
+		return;
+
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("server name \"%s\" is reserved for an internal "
+					"pg_lake_iceberg catalog server", name),
+			 errhint("Choose a different server name.")));
+}
+
+
+/*
+ * RejectIfModifyingBuiltinCatalogServer errors out if `name` refers to
+ * one of the three built-in pg_lake_iceberg catalog servers.  The
+ * `operation` verb fills in the user-facing error ("cannot %s the
+ * built-in...") and should read naturally in that template (e.g.
+ * "alter", "change owner of").  Shared by the ALTER SERVER OPTIONS
+ * and ALTER SERVER ... OWNER TO branches.
+ */
+static void
+RejectIfModifyingBuiltinCatalogServer(const char *name, const char *operation)
+{
+	if (!IsBuiltinCatalogServerName(name))
+		return;
+
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("cannot %s the built-in pg_lake_iceberg "
+					"catalog server \"%s\"", operation, name),
+			 errhint("Configure built-in catalogs via "
+					 "pg_lake_iceberg GUCs, or create a "
+					 "user-defined iceberg_catalog server.")));
+}
+
+
+/*
+ * ValidateIcebergCatalogServerDDL validates DDL on iceberg_catalog servers.
  *
- *  - CREATE SERVER: rejects reserved names ('postgres', 'object_store',
- *    'rest'), rejects TYPE 'postgres'/'object_store', and requires
- *    TYPE 'rest'.
- *  - ALTER SERVER RENAME TO: rejects renaming to a reserved name.
- *  - ALTER SERVER OPTIONS: blocks SET/ADD rest_endpoint when dependent
- *    writable tables exist (the table was registered at the original
- *    endpoint and moving it would break the metadata chain).
+ * Two layers of protection:
  *
- * ALTER/DROP/OWNER on reserved names will fail naturally because no
- * server object exists.
+ * 1. Short reserved names ('postgres', 'object_store', 'rest') -- these
+ *    are the user-facing catalog= values.  We block CREATE SERVER and
+ *    RENAME TO these names so users can't shadow the built-in catalogs.
+ *
+ * 2. Built-in long server names ('pg_lake_postgres_catalog', etc.) --
+ *    these are the pre-created anchors.  Outside of CREATE/ALTER
+ *    EXTENSION we block CREATE/ALTER/RENAME/OWNER on them entirely so
+ *    they remain pure structural anchors with all configuration in
+ *    GUCs.  DROP is blocked by core via extension membership.
+ *
+ * Additionally:
+ *  - CREATE SERVER must specify TYPE 'rest'; TYPE 'postgres' and
+ *    'object_store' are reserved for the built-in servers.
+ *  - Renaming any iceberg_catalog server is blocked (dependent tables
+ *    record the server name as a string option in ftoptions).
+ *  - For user-created REST servers, ALTER SERVER OPTIONS may not change
+ *    rest_endpoint while dependent iceberg tables exist.
  */
 bool
 ValidateIcebergCatalogServerDDL(ProcessUtilityParams * processUtilityParams,
@@ -433,6 +487,8 @@ ValidateIcebergCatalogServerDDL(ProcessUtilityParams * processUtilityParams,
 					 errmsg("server name \"%s\" is reserved for the extension-owned catalog",
 							stmt->servername),
 					 errhint("Choose a different server name.")));
+
+		RejectIfBuiltinCatalogServerName(stmt->servername);
 
 		if (stmt->servertype != NULL &&
 			(pg_strcasecmp(stmt->servertype, POSTGRES_CATALOG_NAME) == 0 ||
@@ -465,11 +521,14 @@ ValidateIcebergCatalogServerDDL(ProcessUtilityParams * processUtilityParams,
 							stmt->newname),
 					 errhint("Choose a different server name.")));
 
+		RejectIfBuiltinCatalogServerName(stmt->newname);
+
 		/*
 		 * Renaming an iceberg_catalog server is blocked because dependent
 		 * iceberg tables store the server name as a string option
 		 * (catalog='<name>') in pg_foreign_table.ftoptions.  A rename would
-		 * silently break those references.
+		 * silently break those references.  This covers both user-created
+		 * servers and the three built-in ones.
 		 */
 		ForeignServer *server = GetForeignServerByName(strVal(stmt->object),
 													   true);
@@ -486,6 +545,17 @@ ValidateIcebergCatalogServerDDL(ProcessUtilityParams * processUtilityParams,
 						 errhint("Drop and recreate the server with the new name.")));
 		}
 	}
+	else if (IsA(parsetree, AlterOwnerStmt))
+	{
+		AlterOwnerStmt *stmt = (AlterOwnerStmt *) parsetree;
+
+		if (stmt->objectType != OBJECT_FOREIGN_SERVER)
+			return false;
+
+		const char *serverName = strVal(stmt->object);
+
+		RejectIfModifyingBuiltinCatalogServer(serverName, "change owner of");
+	}
 	else if (IsA(parsetree, AlterForeignServerStmt))
 	{
 		AlterForeignServerStmt *stmt = (AlterForeignServerStmt *) parsetree;
@@ -501,9 +571,18 @@ ValidateIcebergCatalogServerDDL(ProcessUtilityParams * processUtilityParams,
 			return false;
 
 		/*
-		 * Changing rest_endpoint on a server with dependent iceberg tables
-		 * (writable or read-only) would silently point them at a different
-		 * REST catalog, breaking the metadata chain.
+		 * The three built-in servers are immutable structural anchors.
+		 * Configuration for the built-in catalogs lives in GUCs; reject any
+		 * option, version, or other ALTER change so we never end up with
+		 * hidden server-side state that pg_dump cannot round-trip cleanly for
+		 * an extension-owned object.
+		 */
+		RejectIfModifyingBuiltinCatalogServer(stmt->servername, "alter");
+
+		/*
+		 * Changing rest_endpoint on a user-created server with dependent
+		 * iceberg tables (writable or read-only) would silently point them at
+		 * a different REST catalog, breaking the metadata chain.
 		 */
 		ListCell   *lc;
 
@@ -588,26 +667,25 @@ ValidateRestCatalogOptions(const RestCatalogOptions * opts, const char *catalog)
 
 
 /*
- * Built-in 'rest' catalog: GUCs only, no server lookup.
+ * Build RestCatalogOptions for an iceberg_catalog server.
+ *
+ * The built-in pg_lake_rest_catalog server and any user-created
+ * iceberg_catalog REST server go through the same path: GUC defaults
+ * first, then server-level options applied on top.  ALTER SERVER OPTIONS
+ * is blocked on the built-in server, so in practice its option set is
+ * always empty and the GUC defaults survive untouched -- which is
+ * exactly the historical "GUCs-only built-in REST" behavior, now
+ * reached through a single code path.
+ *
+ * `userVisibleCatalog` is the short identifier the user typed
+ * (e.g. "rest" or a user server name); it is what we store in
+ * opts->catalog so that error messages, the cross-catalog DML check,
+ * and the token cache key all stay in user-facing terms.  The long
+ * built-in server name never leaks past this function.
  */
 static RestCatalogOptions *
-BuildRestCatalogOptionsFromGUCs(void)
-{
-	RestCatalogOptions *opts = palloc0(sizeof(RestCatalogOptions));
-
-	opts->catalog = pstrdup(REST_CATALOG_NAME);
-	ApplyGUCDefaults(opts);
-	ValidateRestCatalogOptions(opts, REST_CATALOG_NAME);
-	return opts;
-}
-
-
-/*
- * User-created iceberg_catalog server: GUC defaults + server option
- * overrides.
- */
-static RestCatalogOptions *
-BuildRestCatalogOptionsFromServer(const char *serverName)
+BuildRestCatalogOptionsFromServer(const char *serverName,
+								  const char *userVisibleCatalog)
 {
 	ForeignServer *server = GetForeignServerByName(serverName, false);
 	ForeignDataWrapper *fdw = GetForeignDataWrapper(server->fdwid);
@@ -616,26 +694,26 @@ BuildRestCatalogOptionsFromServer(const char *serverName)
 
 	RestCatalogOptions *opts = palloc0(sizeof(RestCatalogOptions));
 
-	opts->catalog = pstrdup(serverName);
+	opts->catalog = pstrdup(userVisibleCatalog);
 	ApplyGUCDefaults(opts);
 	ApplyServerOptionOverrides(opts, server);
-	ValidateRestCatalogOptions(opts, serverName);
+	ValidateRestCatalogOptions(opts, userVisibleCatalog);
 	return opts;
 }
 
 
 /*
- * ResolveRestCatalogOptions picks the right source based on the catalog
- * identifier: GUCs for the built-in 'rest' name, server object for
- * user-created iceberg_catalog servers.
+ * ResolveRestCatalogOptions builds RestCatalogOptions for the catalog
+ * identifier the user typed.  The short reserved names ('postgres',
+ * 'object_store', 'rest') are mapped to their pre-created built-in
+ * server names; all other inputs are looked up verbatim.
  */
 RestCatalogOptions *
 ResolveRestCatalogOptions(const char *catalog)
 {
-	if (pg_strcasecmp(catalog, REST_CATALOG_NAME) == 0)
-		return BuildRestCatalogOptionsFromGUCs();
+	const char *serverName = ResolveCatalogServerName(catalog);
 
-	return BuildRestCatalogOptionsFromServer(catalog);
+	return BuildRestCatalogOptionsFromServer(serverName, catalog);
 }
 
 
