@@ -27,3 +27,5 @@ extern PGDLLEXPORT List *Int64ArrayToList(ArrayType *array);
 extern PGDLLEXPORT ArrayType *StringListToArray(List *stringList);
 extern PGDLLEXPORT ArrayType *INT16ListToArray(List *stringList);
 extern PGDLLEXPORT ArrayType *OidListToArray(List *oidList);
+extern PGDLLEXPORT ArrayType *MakeArrayFromDatums(Datum *datums, bool *nulls, int count,
+												  Oid elementType);

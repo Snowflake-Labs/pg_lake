@@ -26,7 +26,4 @@
 #define DATA_FILE_COLUMN_STATS_TABLE_QUALIFIED \
  	PG_LAKE_TABLE_SCHEMA "." PG_LAKE_TABLE_DATA_FILE_COLUMN_STATS_TABLE_NAME
 
-extern void AddDataFileColumnStatsToCatalog(Oid relationId, const char *path, List *columnStatsList);
-extern void AddDataFilePartitionValueToCatalog(Oid relationId, int32 partitionSpecId, int64 fileId,
-											   Partition * partition);
 extern bool DataFileColumnStatsCatalogExists(void);
