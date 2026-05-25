@@ -79,6 +79,15 @@ typedef enum IcebergType
 	ICEBERG_TYPE_LIST,
 	ICEBERG_TYPE_MAP,
 	ICEBERG_TYPE_STRUCT,
+	/*
+	 * Iceberg v3 §types: `variant` (self-describing semi-structured). pg_lake
+	 * surfaces this as JSONB on the PG side, gated on
+	 * pg_lake_engine.variant_as_jsonb. For this POC the on-disk
+	 * format-version stays at 2; the `variant` type tag in the manifest is
+	 * therefore a pg_lake-internal extension on top of v2 and is not
+	 * cross-engine compatible (Spark / Iceberg-Java would reject it).
+	 */
+	ICEBERG_TYPE_VARIANT,
 }			IcebergType;
 
 typedef struct IcebergTypeInfo
@@ -150,6 +159,9 @@ static IcebergToDuckDBType IcebergToDuckDBTypes[] =
 	},
 	{
 		"struct", ICEBERG_TYPE_STRUCT, DUCKDB_TYPE_STRUCT
+	},
+	{
+		"variant", ICEBERG_TYPE_VARIANT, DUCKDB_TYPE_VARIANT
 	},
 };
 
@@ -612,6 +624,21 @@ PostgresBaseTypeIdToIcebergTypeName(PGType pgType)
 		case TEXTOID:
 		case BPCHAROID:
 		case VARCHAROID:
+			return "string";
+		case JSONBOID:
+		case JSONOID:
+
+			/*
+			 * POC: JSONB columns map to Iceberg `variant` only when the user
+			 * has explicitly opted in via pg_lake_engine.variant_as_jsonb.
+			 * Otherwise we fall through to the default `string` mapping that
+			 * matches today's behavior for JSONB on iceberg tables. The GUC
+			 * is read at CREATE TABLE / ADD COLUMN time and frozen into the
+			 * manifest from then on; toggling the GUC after table creation
+			 * does not retroactively change a column's iceberg type.
+			 */
+			if (VariantAsJsonb)
+				return "variant";
 			return "string";
 		case UUIDOID:
 			return "uuid";

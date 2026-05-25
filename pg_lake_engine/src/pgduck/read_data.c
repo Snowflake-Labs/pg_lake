@@ -25,6 +25,7 @@
 #include "commands/defrem.h"
 #include "common/string.h"
 #include "pg_lake/csv/csv_options.h"
+#include "pg_lake/extensions/pg_lake_engine.h"
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/parquet/field.h"
@@ -1499,6 +1500,29 @@ BuildColumnProjection(char *columnName,
 							quote_identifier(columnName),
 							columnAliasString);
 	}
+
+	/*
+	 * VARIANT (DuckDB v1.5+) cannot be transmitted directly over the
+	 * pgduck_server wire protocol because duckdb.h's `duckdb_type` enum
+	 * doesn't yet expose VARIANT, so the type-info lookup returns INVALID
+	 * and serialization aborts. Cast to JSON in DuckDB so the value reaches
+	 * pgduck_server as a JSON-typed text scalar, which is in the wire
+	 * mapping table.
+	 *
+	 * Triggered on PG-side JSONB (DUCKDB_TYPE_JSON) for iceberg + parquet
+	 * sources, gated on pg_lake_engine.variant_as_jsonb. The cast is a
+	 * no-op for sources that already produce JSON / VARCHAR JSON-text, and
+	 * the only path that produces a true VARIANT column is the variant
+	 * write path, which is itself GUC-gated.
+	 */
+	if (engineType.typeId == DUCKDB_TYPE_JSON &&
+		!engineType.isArrayType &&
+		(sourceFormat == DATA_FORMAT_ICEBERG ||
+		 sourceFormat == DATA_FORMAT_PARQUET) &&
+		VariantAsJsonb)
+		return psprintf("CAST(%s AS JSON)%s",
+						quote_identifier(columnName),
+						columnAliasString);
 
 	if (engineType.typeId == DUCKDB_TYPE_TIME_TZ)
 	{

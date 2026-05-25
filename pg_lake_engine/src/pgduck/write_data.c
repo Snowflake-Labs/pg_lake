@@ -26,6 +26,7 @@
 #include "pg_lake/csv/csv_options.h"
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/data_file/data_file_stats.h"
+#include "pg_lake/extensions/pg_lake_engine.h"
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/parquet/geoparquet.h"
@@ -411,6 +412,25 @@ TupleDescToProjectionListForWrite(TupleDesc tupleDesc, CopyDataFormat destinatio
 		 */
 		if (columnTypeId == TIMETZOID && destinationFormat == DATA_FORMAT_ICEBERG)
 			appendStringInfo(&projection, "CAST(%s AS TIME) AS ",
+							 quote_identifier(columnName));
+
+		/*
+		 * Iceberg variant write path. The PG column is JSONB; the CSV
+		 * intermediate carries it as JSON text and read_csv parses it as
+		 * DuckDB JSON. Casting JSON->VARIANT here lets the COPY emit a
+		 * Parquet column with VARIANT logical type, matching the iceberg
+		 * field's `variant` type tag (set in iceberg_field.c when the GUC
+		 * was on at CREATE TABLE).
+		 *
+		 * We do not narrow this to "only when the iceberg manifest tagged
+		 * the column as variant"; the GUC + JSONB combo is a sufficient
+		 * gate for the POC and avoids piping per-column iceberg type tags
+		 * down into the engine write path.
+		 */
+		if ((columnTypeId == JSONBOID || columnTypeId == JSONOID) &&
+			destinationFormat == DATA_FORMAT_ICEBERG &&
+			VariantAsJsonb)
+			appendStringInfo(&projection, "CAST(%s AS VARIANT) AS ",
 							 quote_identifier(columnName));
 
 		/*

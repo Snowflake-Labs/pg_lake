@@ -23,6 +23,7 @@
 #include "pg_lake/pgduck/type.h"
 #include "pg_lake/pgduck/map.h"
 #include "pg_extension_base/extension_ids.h"
+#include "pg_lake/extensions/pg_lake_engine.h"
 #include "pg_lake/extensions/pg_map.h"
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/util/numeric.h"
@@ -339,6 +340,16 @@ static DuckDBTypeMap TypeMap[] =
 	},
 
 	/*
+	 * VARIANT (DuckDB v1.5+) maps to PG JSONB when the GUC
+	 * pg_lake_engine.variant_as_jsonb is on. The GUC gate is enforced in
+	 * GetPGTypeForDuckDBTypeNameBuiltin so the schema-inference path errors
+	 * loudly when off; the mapping itself has only one shape.
+	 */
+	{
+		DUCKDB_TYPE_VARIANT, "VARIANT", JSONBOID, JSONBARRAYOID, NULL
+	},
+
+	/*
 	 * Queries using duckdb spatial may return GEOMETRY in their describe,
 	 * though they are internally represented as blob. In Parquet, they are
 	 * stored as blob an explicit conversion (e.g. via ST_GeomFromWKB) is
@@ -619,6 +630,27 @@ GetPGTypeForDuckDBTypeNameBuiltin(const char *name, int *typeMod, bool isArray)
 			/* geometry type is not built-in, need to get current OID */
 			if (typeMapEntry->duckDBType == DUCKDB_TYPE_GEOMETRY)
 				return isArray ? GeometryArrayTypeId() : GeometryTypeId();
+			else if (typeMapEntry->duckDBType == DUCKDB_TYPE_VARIANT)
+			{
+				/*
+				 * VARIANT is gated behind pg_lake_engine.variant_as_jsonb so
+				 * the POC's user-facing surface stays small until the user
+				 * explicitly opts in. Without this gate, any FDW
+				 * (foreign parquet, foreign iceberg via metadata.json,
+				 * managed iceberg) would silently expose VARIANT columns as
+				 * JSONB; we'd rather fail loud and force the user to opt in.
+				 */
+				if (!VariantAsJsonb)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("DuckDB VARIANT columns are not enabled"),
+							 errdetail("Encountered a column of type VARIANT but "
+									   "pg_lake_engine.variant_as_jsonb is off."),
+							 errhint("SET pg_lake_engine.variant_as_jsonb = on "
+									 "to expose VARIANT columns to PostgreSQL as JSONB.")));
+
+				return isArray ? typeMapEntry->postgresArrayTypeId : typeMapEntry->postgresTypeId;
+			}
 			else
 			{
 				/* TODO: typemod, compare remainder */

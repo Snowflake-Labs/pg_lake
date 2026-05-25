@@ -62,6 +62,17 @@ bool		EnableHeavyAsserts = false;
 /* pg_lake.stage_location setting */
 char	   *PgLakeStageLocation = NULL;
 
+/*
+ * pg_lake_engine.variant_as_jsonb setting.
+ *
+ * POC switch: when on, DuckDB VARIANT-typed columns surface to PostgreSQL as
+ * JSONB. When off (default), encountering a VARIANT column on the read path
+ * raises an ereport(ERROR) so the surface area stays small until the user
+ * explicitly opts in. This GUC also unlocks the iceberg-side write path that
+ * maps JSONB columns to the Iceberg `variant` type tag.
+ */
+bool		VariantAsJsonb = false;
+
 
 /*
  * _PG_init is the entry-point for the library.
@@ -127,6 +138,22 @@ _PG_init(void)
 							 true,
 							 PGC_POSTMASTER,
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+							 "pg_lake_engine.variant_as_jsonb",
+							 gettext_noop("Surface DuckDB VARIANT columns to PostgreSQL "
+										  "as JSONB on read, and map JSONB to the Iceberg "
+										  "`variant` type tag on write for iceberg tables."),
+							 gettext_noop("When off (default), encountering a VARIANT "
+										  "column on the read path raises an error so the "
+										  "POC surface area stays narrow. This is a POC "
+										  "switch; the long-term plan is to drive the same "
+										  "behavior off Iceberg format-version=3 detection."),
+							 &VariantAsJsonb,
+							 false,
+							 PGC_USERSET,
+							 0,
 							 NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(
