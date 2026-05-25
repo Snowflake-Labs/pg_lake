@@ -68,14 +68,12 @@ int			RestCatalogAuthType = REST_CATALOG_AUTH_TYPE_OAUTH2;
 bool		RestCatalogEnableVendedCredentials = true;
 
 /*
- * Per-rest-catalog token cache. Keyed by catalog.
- * Should always be accessed via GetRestCatalogAccessToken()
+ * Per-rest-catalog token cache, keyed by the iceberg_catalog server OID.
+ * Should always be accessed via GetRestCatalogAccessToken().
  */
-#define TOKEN_CACHE_KEY_LEN NAMEDATALEN
-
 typedef struct RestCatalogTokenCacheEntry
 {
-	char		key[TOKEN_CACHE_KEY_LEN];
+	Oid			serverOid;		/* hash key */
 	char	   *accessToken;
 	TimestampTz accessTokenExpiry;
 }			RestCatalogTokenCacheEntry;
@@ -527,8 +525,7 @@ ValidateIcebergCatalogServerDDL(ProcessUtilityParams * processUtilityParams,
 		 * Renaming an iceberg_catalog server is blocked because dependent
 		 * iceberg tables store the server name as a string option
 		 * (catalog='<name>') in pg_foreign_table.ftoptions.  A rename would
-		 * silently break those references.  This covers both user-created
-		 * servers and the three built-in ones.
+		 * silently break those references.
 		 */
 		ForeignServer *server = GetForeignServerByName(strVal(stmt->object),
 													   true);
@@ -694,6 +691,7 @@ BuildRestCatalogOptionsFromServer(const char *serverName,
 
 	RestCatalogOptions *opts = palloc0(sizeof(RestCatalogOptions));
 
+	opts->serverOid = server->serverid;
 	opts->catalog = pstrdup(userVisibleCatalog);
 	ApplyGUCDefaults(opts);
 	ApplyServerOptionOverrides(opts, server);
@@ -748,6 +746,7 @@ CopyRestCatalogOptions(MemoryContext dst, const RestCatalogOptions * src)
 	MemoryContext oldctx = MemoryContextSwitchTo(dst);
 	RestCatalogOptions *copy = palloc0(sizeof(RestCatalogOptions));
 
+	copy->serverOid = src->serverOid;
 	copy->catalog = pstrdup(src->catalog);
 	copy->host = pstrdup(src->host);
 	copy->oauthHostPath = src->oauthHostPath ? pstrdup(src->oauthHostPath) : NULL;
@@ -1231,28 +1230,16 @@ ReportHTTPError(HttpResult httpResult, int level)
 
 
 /*
- * Build a cache key for the per-catalog token cache.
- */
-static void
-BuildTokenCacheKey(char *key, const RestCatalogOptions * opts)
-{
-	Assert(opts->catalog != NULL);
-	MemSet(key, 0, TOKEN_CACHE_KEY_LEN);
-	strlcpy(key, opts->catalog, TOKEN_CACHE_KEY_LEN);
-}
-
-
-/*
  * Syscache invalidation callback for pg_foreign_server changes.
  * Any ALTER/DROP SERVER blows away the entire token cache so stale
  * credentials are never reused.  The cache is rebuilt lazily on the
  * next token lookup.
  *
  * We ignore hashvalue and reset the whole cache rather than selectively
- * invalidating a single server's entry (as postgres_fdw does).  With a
- * handful of servers and infrequent ALTER SERVER, the cost of a few
- * extra OAuth round-trips is negligible compared to the complexity of
- * keying the cache by OID for selective invalidation.
+ * invalidating a single server's entry.  With a handful of servers and
+ * infrequent ALTER SERVER, the cost of a few extra OAuth round-trips is
+ * negligible compared to the complexity of tracking per-entry hash
+ * values for targeted invalidation.
  */
 static void
 InvalidateRestTokenCache(Datum arg, int cacheid, uint32 hashvalue)
@@ -1297,7 +1284,7 @@ InitTokenCacheIfNeeded(void)
 	HASHCTL		ctl;
 
 	memset(&ctl, 0, sizeof(ctl));
-	ctl.keysize = TOKEN_CACHE_KEY_LEN;
+	ctl.keysize = sizeof(Oid);
 	ctl.entrysize = sizeof(RestCatalogTokenCacheEntry);
 	ctl.hcxt = RestTokenCacheCtx;
 
@@ -1309,7 +1296,7 @@ InitTokenCacheIfNeeded(void)
 
 /*
  * Gets an access token from rest catalog. Caches the token per catalog
- * (keyed by catalog) until it is about to expire.
+ * (keyed by iceberg_catalog server OID) until it is about to expire.
  */
 static char *
 GetRestCatalogAccessToken(RestCatalogOptions * opts, bool forceRefreshToken)
@@ -1319,15 +1306,19 @@ GetRestCatalogAccessToken(RestCatalogOptions * opts, bool forceRefreshToken)
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("REST catalog options must not be NULL when fetching access token")));
 
+	/*
+	 * Every resolved RestCatalogOptions originates from
+	 * BuildRestCatalogOptionsFromServer, which always sets serverOid. A
+	 * missing OID would silently funnel every catalog into the same cache
+	 * slot, so trap it loudly here.
+	 */
+	Assert(OidIsValid(opts->serverOid));
+
 	InitTokenCacheIfNeeded();
-
-	char		cacheKey[TOKEN_CACHE_KEY_LEN];
-
-	BuildTokenCacheKey(cacheKey, opts);
 
 	bool		found = false;
 	RestCatalogTokenCacheEntry *entry =
-		hash_search(RestCatalogTokenCache, cacheKey, HASH_ENTER, &found);
+		hash_search(RestCatalogTokenCache, &opts->serverOid, HASH_ENTER, &found);
 
 	if (!found)
 	{

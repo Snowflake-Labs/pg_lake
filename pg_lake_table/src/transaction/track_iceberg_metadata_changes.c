@@ -656,13 +656,14 @@ BindRelationToXactRestCatalog(Oid relationId)
 	}
 
 	/*
-	 * Both sides of the comparison are the canonical catalog name (lowercase
-	 * "rest" for the built-in catalog, server name as stored in
-	 * pg_foreign_server for user-defined ones).  pg_strcasecmp matches the
-	 * casing rules PostgreSQL applies to identifier resolution.
+	 * Identity is the iceberg_catalog server OID, not the user-typed name.
+	 * Two requests for the same physical server -- whether the user spelled
+	 * the catalog as 'rest', 'REST', or as the underlying built-in server
+	 * name on different statements -- collapse to the same OID and are
+	 * treated as one catalog.  The user-facing names are still reported in
+	 * the error message.
 	 */
-	if (pg_strcasecmp(PgLakeXactRestCatalog->catalogOpts->catalog,
-					  resolvedOpts->catalog) != 0)
+	if (PgLakeXactRestCatalog->catalogOpts->serverOid != resolvedOpts->serverOid)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot modify tables from different REST catalogs "
@@ -715,9 +716,11 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 		 * bind through BindRelationToXactRestCatalog() at statement time or
 		 * populate catalogOpts via the branch above, so in practice we never
 		 * reach here with a mismatched catalog.  Kept as a last line of
-		 * defense for any future code path that forgets to do so.
+		 * defense for any future code path that forgets to do so.  See the
+		 * companion comment in BindRelationToXactRestCatalog for why identity
+		 * is the server OID, not the user-typed name.
 		 */
-		else if (pg_strcasecmp(PgLakeXactRestCatalog->catalogOpts->catalog, resolvedOpts->catalog) != 0)
+		else if (PgLakeXactRestCatalog->catalogOpts->serverOid != resolvedOpts->serverOid)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("cannot modify tables from different REST catalogs "

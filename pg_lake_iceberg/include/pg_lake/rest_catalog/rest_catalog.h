@@ -36,16 +36,25 @@ extern int	RestCatalogAuthType;
 extern bool RestCatalogEnableVendedCredentials;
 
 /*
- * Resolved REST catalog connection options.  For the built-in 'rest'
- * catalog the fields come entirely from GUC settings.  For user-created
- * catalogs (CREATE SERVER ... FOREIGN DATA WRAPPER iceberg_catalog) the
- * server options override the GUC defaults.
+ * Resolved REST catalog connection options.  All REST catalogs --
+ * built-in ('rest') and user-created (CREATE SERVER ... FOREIGN DATA
+ * WRAPPER iceberg_catalog) -- are backed by a real pg_foreign_server
+ * row; ApplyGUCDefaults populates the defaults, ApplyServerOptionOverrides
+ * layers on any per-server options.
+ *
+ * The canonical identity of a catalog is `serverOid` (the OID of the
+ * iceberg_catalog server row).  Use it for in-memory equality, token
+ * cache keys, and syscache-driven invalidation.  `catalog` stores the
+ * user-visible short name (e.g. 'rest', 'my_polaris') purely for error
+ * messages.
  */
 typedef struct RestCatalogOptions
 {
-	char	   *catalog;		/* catalog name, used for token cache keying;
-								 * can be 'rest' or a user-created server name
-								 * of TYPE 'rest' */
+	Oid			serverOid;		/* iceberg_catalog server OID; canonical
+								 * identity, never InvalidOid for resolved
+								 * opts */
+	char	   *catalog;		/* short user-facing name; used in error
+								 * messages, never for equality */
 	char	   *host;
 	char	   *oauthHostPath;
 	char	   *clientId;
