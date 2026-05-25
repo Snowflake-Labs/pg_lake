@@ -585,6 +585,22 @@ InitPgLakeIcebergOptions(void)
 		 */
 		{"out_of_range_values", ForeignTableRelationId},
 
+		/*
+		 * Per-column override of the Iceberg field type for a foreign
+		 * table column. AttributeRelationId scopes this to
+		 * `CREATE FOREIGN TABLE (... colname pgtype OPTIONS (iceberg_type '...'))`.
+		 *
+		 * Tier-1 lossy POC: today the only accepted value is
+		 * `'timestamp_ns'` on a PostgreSQL TIMESTAMP column. The point of
+		 * this option is to let users declare an Iceberg v3 `timestamp_ns`
+		 * field even though the PostgreSQL side stays on plain TIMESTAMP
+		 * (microsecond resolution). The lossy round-trip is documented at
+		 * the GUC `pg_lake_engine.allow_lossy_ns_timestamp`. Without this
+		 * option, writes from PostgreSQL TIMESTAMP keep producing v2
+		 * `timestamp` fields, so existing schemas are unchanged.
+		 */
+		{"iceberg_type", AttributeRelationId},
+
 		{NULL, InvalidOid}
 	};
 
@@ -892,6 +908,26 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 								outOfRangeValues),
 						 errhint("Valid values are \"error\" and \"clamp\".")));
 			}
+		}
+		else if (catalog == AttributeRelationId && strcmp(def->defname, "iceberg_type") == 0)
+		{
+			/*
+			 * Tier-1 POC: only `timestamp_ns` is accepted today. The
+			 * pairing with a PostgreSQL TIMESTAMP column and the
+			 * pg_lake_engine.allow_lossy_ns_timestamp GUC check happen
+			 * later, in CreatePostgresColumnMappingsForColumnDefs (we
+			 * don't have the column type here at validator time -- only
+			 * the option list).
+			 */
+			const char *icebergType = defGetString(def);
+
+			if (strcmp(icebergType, "timestamp_ns") != 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("invalid iceberg_type column option: \"%s\"",
+								icebergType),
+						 errhint("Only \"timestamp_ns\" is accepted today; "
+								 "see pg_lake_engine.allow_lossy_ns_timestamp.")));
 		}
 	}
 

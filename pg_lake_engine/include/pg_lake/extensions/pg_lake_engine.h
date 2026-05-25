@@ -27,6 +27,15 @@
 
 
 extern PGDLLEXPORT bool EnableHeavyAsserts;
+
+/*
+ * pg_lake_engine.allow_lossy_ns_timestamp -- Tier-1 POC opt-in for the
+ * lossy Iceberg v3 `timestamp_ns` <-> PostgreSQL `timestamp` mapping.
+ * Default is off; see init.c for the lossy-conversion contract this
+ * controls.
+ */
+extern PGDLLEXPORT bool AllowLossyNsTimestamp;
+
 extern PGDLLEXPORT char *PgLakeStageLocation;
 
 /* cached extension IDs for pg_lake_engine */

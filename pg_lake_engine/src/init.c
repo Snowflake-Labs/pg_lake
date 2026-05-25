@@ -59,6 +59,38 @@ static bool QueryEngineEnabled = true;
 /* pg_lake_engine.enable_heavy_asserts setting */
 bool		EnableHeavyAsserts = false;
 
+/*
+ * pg_lake_engine.allow_lossy_ns_timestamp setting.
+ *
+ * Tier-1 POC opt-in for Iceberg v3 `timestamp_ns` (and, intentionally,
+ * `timestamptz_ns` once it stops blocking on DuckDB). When OFF (default),
+ * the read path errors as soon as schema inference encounters a nanosecond
+ * timestamp column, and the per-column `iceberg_type 'timestamp_ns'` write
+ * option errors at CREATE / ALTER FOREIGN TABLE time.
+ *
+ * The mapping is *deliberately lossy* in both directions and the GUC name
+ * spells that out:
+ *
+ *   - Read path: parquet INT64 nanoseconds is read by DuckDB as
+ *     TIMESTAMP_NS, then surfaced to PostgreSQL as TIMESTAMP -- which has
+ *     microsecond resolution, so the bottom three digits of every value
+ *     are silently discarded by PostgreSQL's text-input parser.
+ *
+ *   - Write path: PostgreSQL TIMESTAMP values are CAST(.. AS TIMESTAMP_NS)
+ *     before the COPY (...) TO 'parquet' call, which pads the missing
+ *     three nanosecond digits with zeros. The Iceberg field is tagged as
+ *     `timestamp_ns` in the manifest, so cross-engine readers see the
+ *     spec-correct type even though pg_lake itself only contributes
+ *     microsecond-precision data on this branch.
+ *
+ * Tier 2 (a real `pg_lake_nanosecond` PostgreSQL type that round-trips the
+ * full nanosecond field) is deliberately out of scope here; that's a
+ * separate, much larger effort. We pin this GUC to off-by-default so users
+ * have to make the lossy trade-off explicit, the same way the Variant POC
+ * gates `JSONB <-> VARIANT` behind `pg_lake_engine.variant_as_jsonb`.
+ */
+bool		AllowLossyNsTimestamp = false;
+
 /* pg_lake.stage_location setting */
 char	   *PgLakeStageLocation = NULL;
 
@@ -127,6 +159,28 @@ _PG_init(void)
 							 true,
 							 PGC_POSTMASTER,
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+							 "pg_lake_engine.allow_lossy_ns_timestamp",
+							 gettext_noop("Allow lossy mapping between Iceberg v3 "
+										  "`timestamp_ns` and PostgreSQL `timestamp`."),
+							 gettext_noop("When ON, pg_lake reads Iceberg v3 "
+										  "`timestamp_ns` columns as PostgreSQL "
+										  "`timestamp` (truncating each value's "
+										  "bottom three digits) and lets foreign "
+										  "tables declare `iceberg_type "
+										  "'timestamp_ns'` on `timestamp` columns "
+										  "to write `timestamp_ns`-tagged manifests "
+										  "(padding zeros). When OFF (default), "
+										  "schema inference errors on `timestamp_ns` "
+										  "and the `iceberg_type 'timestamp_ns'` "
+										  "column option is rejected at CREATE / "
+										  "ALTER FOREIGN TABLE time."),
+							 &AllowLossyNsTimestamp,
+							 false,
+							 PGC_USERSET,
+							 0,
 							 NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(

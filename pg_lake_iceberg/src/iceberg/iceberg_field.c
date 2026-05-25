@@ -79,6 +79,12 @@ typedef enum IcebergType
 	ICEBERG_TYPE_LIST,
 	ICEBERG_TYPE_MAP,
 	ICEBERG_TYPE_STRUCT,
+
+	/*
+	 * Iceberg v3 §types: `timestamp_ns` (nanosecond precision, no time
+	 * zone). Lossy <-> PostgreSQL TIMESTAMP, see IcebergToDuckDBTypes.
+	 */
+	ICEBERG_TYPE_TIMESTAMP_NS,
 }			IcebergType;
 
 typedef struct IcebergTypeInfo
@@ -129,6 +135,43 @@ static IcebergToDuckDBType IcebergToDuckDBTypes[] =
 	},
 	{
 		"timestamptz", ICEBERG_TYPE_TIMESTAMPTZ, DUCKDB_TYPE_TIMESTAMP_TZ
+	},
+
+	/*
+	 * Iceberg v3 §types: `timestamp_ns` (nanosecond precision, no time zone).
+	 *
+	 * Tier-1 lossy plumbing -- the *iceberg field type name* survives the
+	 * round-trip ("timestamp_ns" goes into and out of metadata.json
+	 * faithfully via field->field.scalar.typeName), but the data plane is
+	 * nanoseconds <-> microseconds with truncation/padding:
+	 *
+	 *   - On read, DuckDB returns a column of type TIMESTAMP_NS, which
+	 *     pgduck_server text-encodes; PostgreSQL's TIMESTAMP parser then
+	 *     truncates the bottom three digits.  See
+	 *     pg_lake_engine.allow_lossy_ns_timestamp for the runtime opt-in.
+	 *
+	 *   - On write, the engine inserts a CAST(<expr> AS TIMESTAMP_NS) before
+	 *     the COPY-to-parquet, which pads zeros for the missing three
+	 *     digits.  The opt-in is *per-column*, via the foreign-table option
+	 *     `iceberg_type 'timestamp_ns'`; columns without that option keep
+	 *     writing as v2 `timestamp` (microseconds), so this commit does not
+	 *     change the meaning of any pre-existing schema.
+	 *
+	 * Cross-engine readers (Spark, Trino, ...) see a spec-correct
+	 * `timestamp_ns` field even though pg_lake itself only contributes
+	 * microsecond-precision data on this branch -- that is the whole point
+	 * of the per-column opt-in: it closes the schema-compatibility gap
+	 * without forcing pg_lake to invent a new PostgreSQL type.
+	 *
+	 * `timestamptz_ns` is intentionally *not* in this table on this branch:
+	 * DuckDB v1.5 does not yet expose a TIMESTAMP_TZ_NS logical type, so we
+	 * cannot round-trip the UTC-adjusted nanosecond shape losslessly even
+	 * within DuckDB. Callers reading a manifest that already contains
+	 * `timestamptz_ns` will hit EnsureScalarTypeNameIsSupported's "not yet
+	 * supported" error.
+	 */
+	{
+		"timestamp_ns", ICEBERG_TYPE_TIMESTAMP_NS, DUCKDB_TYPE_TIMESTAMP_NS
 	},
 	{
 		"string", ICEBERG_TYPE_STRING, DUCKDB_TYPE_VARCHAR
@@ -554,9 +597,13 @@ static const struct
 }			IcebergV3OnlyTypeNames[] =
 
 {
-	{
-		"timestamp_ns", "timestamp_ns"
-	},
+	/*
+	 * `timestamp_ns` has graduated to a supported (lossy) mapping; see the
+	 * dedicated IcebergToDuckDBTypes entry above. `timestamptz_ns` stays in
+	 * the v3-only-rejection list because DuckDB does not yet expose a
+	 * TIMESTAMP_TZ_NS logical type, so we cannot round-trip the UTC-adjusted
+	 * nanosecond shape even internally.
+	 */
 	{
 		"timestamptz_ns", "timestamptz_ns"
 	},

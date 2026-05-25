@@ -32,11 +32,13 @@
 #include "commands/defrem.h"
 #include "commands/comment.h"
 #include "foreign/foreign.h"
+#include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "parser/parse_type.h"
 
 #include "pg_lake/data_file/data_file_stats.h"
+#include "pg_lake/extensions/pg_lake_engine.h"
 #include "pg_lake/fdw/schema_operations/field_id_mapping_catalog.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/iceberg/api/table_metadata.h"
@@ -182,6 +184,103 @@ CreatePostgresColumnMappingsForColumnDefs(Oid relationId, List *columnDefList, b
 
 		field->type =
 			PostgresTypeToIcebergField(pgType, forAddColumn, &subFieldIndex);
+
+		/*
+		 * Per-column `iceberg_type` foreign-table option (Tier-1 lossy POC,
+		 * see commit message and pg_lake_engine.allow_lossy_ns_timestamp).
+		 *
+		 * Why post-process instead of plumbing through PostgresTypeToIcebergField:
+		 *
+		 *   - The override only applies at CREATE / ALTER FOREIGN TABLE
+		 *     time, when columnDef->fdwoptions is populated. Every other
+		 *     caller of PostgresTypeToIcebergField (catalog re-read,
+		 *     partition transforms, ...) reconstructs Field from already-
+		 *     persisted data, where the typeName is already the override.
+		 *
+		 *   - The override is intentionally restricted to top-level scalar
+		 *     fields (no array / composite / map nesting), so we can
+		 *     post-process the returned Field by replacing only
+		 *     field->field.scalar.typeName.
+		 *
+		 * Validation order is important: we want a useful error if the GUC
+		 * is off, before we surface the bare PostgreSQL "type mismatch"
+		 * message.
+		 */
+		const char *icebergTypeOverride = NULL;
+
+		if (columnDef->fdwoptions != NIL)
+		{
+			ListCell   *opt;
+
+			foreach(opt, columnDef->fdwoptions)
+			{
+				DefElem    *def = (DefElem *) lfirst(opt);
+
+				if (strcmp(def->defname, "iceberg_type") == 0)
+				{
+					icebergTypeOverride = defGetString(def);
+					break;
+				}
+			}
+		}
+
+		if (icebergTypeOverride != NULL)
+		{
+			if (strcmp(icebergTypeOverride, "timestamp_ns") == 0)
+			{
+				/*
+				 * timestamp_ns is v3-only in the Iceberg spec
+				 * (https://iceberg.apache.org/spec/#nanosecond-precision-timestamps).
+				 * v2 readers don't know the type and would fail; emitting it
+				 * on a v2 table would also leak out-of-spec metadata.
+				 */
+				IcebergFormatVersion formatVersion =
+					GetIcebergFormatVersionFromTableOptions(relationId);
+
+				if (!IcebergFormatVersionSupportsNanoTimestamp(formatVersion))
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("iceberg_type 'timestamp_ns' requires Iceberg format-version 3"),
+							 errhint("Recreate the table with WITH (format_version = 3) "
+									 "or drop the iceberg_type column option.")));
+
+				if (!AllowLossyNsTimestamp)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("iceberg_type 'timestamp_ns' is not enabled"),
+							 errdetail("The PostgreSQL TIMESTAMP <-> Iceberg "
+									   "timestamp_ns mapping is *lossy*: nanosecond "
+									   "precision is truncated on read and padded "
+									   "with zeros on write."),
+							 errhint("SET pg_lake_engine.allow_lossy_ns_timestamp = on "
+									 "before CREATE / ALTER FOREIGN TABLE if you "
+									 "accept the lossy round-trip.")));
+
+				if (typeOid != TIMESTAMPOID)
+					ereport(ERROR,
+							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+							 errmsg("iceberg_type 'timestamp_ns' is only supported on "
+									"PostgreSQL TIMESTAMP columns"),
+							 errdetail("Column \"%s\" has PostgreSQL type %s.",
+									   columnName, format_type_be(typeOid))));
+
+				if (field->type->type != FIELD_TYPE_SCALAR)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("iceberg_type 'timestamp_ns' is only supported on "
+									"top-level scalar columns")));
+
+				field->type->field.scalar.typeName = pstrdup("timestamp_ns");
+			}
+			else
+			{
+				/* The validator already rejects unknown values, but be defensive. */
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("invalid iceberg_type column option: \"%s\"",
+								icebergTypeOverride)));
+			}
+		}
 
 		field->required = columnDef->is_not_null;
 

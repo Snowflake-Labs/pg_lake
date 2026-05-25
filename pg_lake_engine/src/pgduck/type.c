@@ -23,6 +23,7 @@
 #include "pg_lake/pgduck/type.h"
 #include "pg_lake/pgduck/map.h"
 #include "pg_extension_base/extension_ids.h"
+#include "pg_lake/extensions/pg_lake_engine.h"
 #include "pg_lake/extensions/pg_map.h"
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/util/numeric.h"
@@ -626,6 +627,32 @@ GetPGTypeForDuckDBTypeNameBuiltin(const char *name, int *typeMod, bool isArray)
 				{
 					*typeMod = ParseDecimalTypeModFromTypeName(name);
 				}
+
+				/*
+				 * Iceberg v3 nanosecond timestamps surface here as
+				 * DUCKDB_TYPE_TIMESTAMP_NS during schema inference (the read
+				 * path: read_iceberg / read_parquet returns TIMESTAMP_NS,
+				 * pgduck_server probes the column type, and we map it back
+				 * to a PostgreSQL Oid for the foreign-table column). The
+				 * DEFAULT mapping (TIMESTAMP_NS -> PostgreSQL TIMESTAMP) is
+				 * *lossy*: PostgreSQL's TIMESTAMP only carries microsecond
+				 * resolution, so the bottom three nanosecond digits are
+				 * silently discarded by the wire-format parser on every
+				 * value. We refuse to do that silently -- callers must opt
+				 * in via pg_lake_engine.allow_lossy_ns_timestamp.
+				 */
+				if (typeMapEntry->duckDBType == DUCKDB_TYPE_TIMESTAMP_NS &&
+					!AllowLossyNsTimestamp)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("Iceberg v3 \"timestamp_ns\" columns are not enabled"),
+							 errdetail("Encountered a column of type TIMESTAMP_NS but "
+									   "pg_lake_engine.allow_lossy_ns_timestamp is off."),
+							 errhint("SET pg_lake_engine.allow_lossy_ns_timestamp = on "
+									 "to expose Iceberg v3 timestamp_ns columns to "
+									 "PostgreSQL as TIMESTAMP. Note: the conversion is "
+									 "*lossy* -- nanosecond precision is truncated to "
+									 "microseconds on read.")));
 
 				return isArray ? typeMapEntry->postgresArrayTypeId : typeMapEntry->postgresTypeId;
 			}

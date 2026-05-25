@@ -23,6 +23,7 @@
 #include "access/tupdesc.h"
 #include "commands/defrem.h"
 #include "common/string.h"
+#include "foreign/foreign.h"
 #include "pg_lake/csv/csv_options.h"
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/data_file/data_file_stats.h"
@@ -411,6 +412,36 @@ TupleDescToProjectionListForWrite(TupleDesc tupleDesc, CopyDataFormat destinatio
 		if (columnTypeId == TIMETZOID && destinationFormat == DATA_FORMAT_ICEBERG)
 			appendStringInfo(&projection, "CAST(%s AS TIME) AS ",
 							 duckdb_quote_identifier(columnName));
+
+		/*
+		 * Tier-1 lossy POC for Iceberg v3 timestamp_ns. When the foreign
+		 * table column is a TIMESTAMP carrying the per-column option
+		 * `iceberg_type 'timestamp_ns'`, lift it to TIMESTAMP_NS so DuckDB
+		 * writes parquet INT64 nanoseconds (padding three zero digits).
+		 * GetForeignColumnOptions returns NIL for non-foreign relations,
+		 * so this is safe for every COPY destination.
+		 */
+		if (columnTypeId == TIMESTAMPOID &&
+			destinationFormat == DATA_FORMAT_ICEBERG &&
+			OidIsValid(column->attrelid) && column->attnum > 0)
+		{
+			List	   *colOptions = GetForeignColumnOptions(column->attrelid,
+															 column->attnum);
+			ListCell   *opt;
+
+			foreach(opt, colOptions)
+			{
+				DefElem    *def = (DefElem *) lfirst(opt);
+
+				if (strcmp(def->defname, "iceberg_type") == 0 &&
+					strcmp(defGetString(def), "timestamp_ns") == 0)
+				{
+					appendStringInfo(&projection, "CAST(%s AS TIMESTAMP_NS) AS ",
+									 duckdb_quote_identifier(columnName));
+					break;
+				}
+			}
+		}
 
 		/*
 		 * In case of geometry, we write WKT in csv_writer.c and parse it as

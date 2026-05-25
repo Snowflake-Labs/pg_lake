@@ -42,6 +42,8 @@
 
 #include "access/tupdesc.h"
 #include "catalog/pg_type.h"
+#include "commands/defrem.h"
+#include "foreign/foreign.h"
 #include "pg_lake/pgduck/iceberg_query_validation.h"
 #include "pg_lake/pgduck/keywords.h"
 #include "pg_lake/pgduck/map.h"
@@ -78,6 +80,7 @@ static void AppendTimeTzUtcCast(StringInfo buf, const char *expr);
 static bool AppendNativeConversionExpression(StringInfo buf, const char *expr,
 											 Oid typeOid, int32 typmod,
 											 int depth);
+static bool AttributeHasIcebergTypeNsOption(Form_pg_attribute attr);
 
 
 /* ================================================================
@@ -544,6 +547,50 @@ TupleDescHasNativeConversionColumn(TupleDesc tupleDesc)
 
 		if (TypeNeedsNativeConversion(attr->atttypid))
 			return true;
+
+		/*
+		 * Tier-1 lossy POC for Iceberg v3 timestamp_ns: a TIMESTAMP column
+		 * marked with the per-column foreign-table option
+		 * `iceberg_type 'timestamp_ns'` needs an outer CAST to TIMESTAMP_NS
+		 * so DuckDB writes the parquet column as INT64 nanoseconds. This
+		 * pads three zero digits per value -- the underlying PostgreSQL
+		 * type still has microsecond resolution. See
+		 * pg_lake_engine.allow_lossy_ns_timestamp.
+		 */
+		if (AttributeHasIcebergTypeNsOption(attr))
+			return true;
+	}
+
+	return false;
+}
+
+
+/*
+ * AttributeHasIcebergTypeNsOption returns true if the per-column
+ * foreign-table option `iceberg_type` equals `timestamp_ns`. Returns
+ * false for ad-hoc tuple descriptors (no attrelid), for non-foreign
+ * relations, and for columns without the option.
+ *
+ * GetForeignColumnOptions returns NIL for non-foreign relations, so the
+ * call is safe regardless of whether attrelid points to a foreign or
+ * regular table.
+ */
+static bool
+AttributeHasIcebergTypeNsOption(Form_pg_attribute attr)
+{
+	if (!OidIsValid(attr->attrelid) || attr->attnum <= 0)
+		return false;
+
+	List	   *options = GetForeignColumnOptions(attr->attrelid, attr->attnum);
+	ListCell   *lc;
+
+	foreach(lc, options)
+	{
+		DefElem    *def = (DefElem *) lfirst(lc);
+
+		if (strcmp(def->defname, "iceberg_type") == 0 &&
+			strcmp(defGetString(def), "timestamp_ns") == 0)
+			return true;
 	}
 
 	return false;
@@ -820,6 +867,25 @@ IcebergWrapQueryWithNativeTypeConversion(char *query, TupleDesc tupleDesc,
 											 attr->atttypmod, 0))
 		{
 			appendStringInfo(&wrapped, "%s AS %s", exprBuf.data, quotedName);
+		}
+		else if (AttributeHasIcebergTypeNsOption(attr))
+		{
+			/*
+			 * Tier-1 lossy POC: this column is declared
+			 * `iceberg_type 'timestamp_ns'` on a PostgreSQL TIMESTAMP. The
+			 * inbound DuckDB type is plain TIMESTAMP (microseconds);
+			 * casting to TIMESTAMP_NS lifts it to nanoseconds, padding
+			 * zeros, so DuckDB's COPY-to-parquet emits an INT64 nanosecond
+			 * column matching the manifest's timestamp_ns type tag.
+			 *
+			 * Top-level scalar only: the per-column option is gated to
+			 * TIMESTAMP at CREATE / ALTER time
+			 * (CreatePostgresColumnMappingsForColumnDefs), so we can rely
+			 * on the inbound shape being a scalar TIMESTAMP here. Nesting
+			 * is intentionally out of POC scope.
+			 */
+			appendStringInfo(&wrapped, "CAST(%s AS TIMESTAMP_NS) AS %s",
+							 quotedName, quotedName);
 		}
 		else
 		{
