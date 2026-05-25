@@ -79,6 +79,11 @@ typedef enum IcebergType
 	ICEBERG_TYPE_LIST,
 	ICEBERG_TYPE_MAP,
 	ICEBERG_TYPE_STRUCT,
+	/*
+	 * Iceberg v3 variant, surfaced as PostgreSQL JSONB when
+	 * pg_lake_engine.variant_as_jsonb is enabled.
+	 */
+	ICEBERG_TYPE_VARIANT,
 }			IcebergType;
 
 typedef struct IcebergTypeInfo
@@ -150,6 +155,9 @@ static IcebergToDuckDBType IcebergToDuckDBTypes[] =
 	},
 	{
 		"struct", ICEBERG_TYPE_STRUCT, DUCKDB_TYPE_STRUCT
+	},
+	{
+		"variant", ICEBERG_TYPE_VARIANT, DUCKDB_TYPE_VARIANT
 	},
 };
 

@@ -20,6 +20,7 @@
 
 #include "common/int.h"
 
+#include "pg_lake/extensions/pg_lake_engine.h"
 #include "pg_lake/extensions/pg_lake_spatial.h"
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/parquet/field.h"
@@ -309,6 +310,9 @@ PostgresBaseTypeIdToIcebergTypeName(PGType pgType)
 		case BPCHAROID:
 		case VARCHAROID:
 			return "string";
+		case JSONBOID:
+		case JSONOID:
+			return VariantAsJsonb ? "variant" : "string";
 		case UUIDOID:
 			return "uuid";
 		case BYTEAOID:
