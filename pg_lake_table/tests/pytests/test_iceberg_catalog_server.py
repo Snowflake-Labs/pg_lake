@@ -1,3 +1,6 @@
+import os
+import tempfile
+
 import pytest
 from utils_pytest import *
 
@@ -28,7 +31,9 @@ def test_iceberg_catalog_fdw_has_no_handler(pg_conn, extension):
 
 
 def test_create_rest_server_with_all_options(superuser_conn, extension):
-    """All documented options should be accepted for a REST-type server.
+    """All server-context options should be accepted for a REST-type server.
+    Credentials (client_id, client_secret) live on user mappings now and
+    are exercised in test_create_user_mapping_with_credentials below.
     Uses a mix of quoted upper-case and plain lower-case option names to
     verify case-insensitive matching."""
     run_command(
@@ -42,9 +47,7 @@ def test_create_rest_server_with_all_options(superuser_conn, extension):
                 scope 'PRINCIPAL_ROLE:ALL',
                 enable_vended_credentials 'true',
                 "Location_Prefix" 's3://bucket/prefix',
-                catalog_name 'my_catalog',
-                "Client_Id" 'test-id',
-                "Client_Secret" 'test-secret'
+                catalog_name 'my_catalog'
             )
         """,
         superuser_conn,
@@ -91,16 +94,23 @@ def test_create_rest_server_minimal(superuser_conn, extension):
 
 
 def test_create_server_horizon_auth(superuser_conn, extension):
-    """Horizon auth type should be accepted."""
+    """Horizon auth type should be accepted at the SERVER level; the
+    matching credentials are carried by the user mapping."""
     run_command(
         """
         CREATE SERVER test_horizon TYPE 'rest'
             FOREIGN DATA WRAPPER iceberg_catalog
             OPTIONS (
                 rest_endpoint 'https://horizon.example.com',
-                rest_auth_type 'horizon',
-                client_secret 'secret'
+                rest_auth_type 'horizon'
             )
+        """,
+        superuser_conn,
+    )
+    run_command(
+        """
+        CREATE USER MAPPING FOR PUBLIC SERVER test_horizon
+            OPTIONS (client_secret 'secret')
         """,
         superuser_conn,
     )
@@ -118,6 +128,9 @@ def test_reject_unknown_server_option(superuser_conn, extension):
     hint string in a static; the second call must hit the cached path and
     must still produce a well-formed hint (regression guard against the
     hint being palloc'd in a per-statement memory context).
+
+    The SERVER hint must NOT mention user-mapping-only options
+    (client_id, client_secret); credentials live on user mappings.
     """
     EXPECTED_OPTIONS = [
         "rest_endpoint",
@@ -127,9 +140,8 @@ def test_reject_unknown_server_option(superuser_conn, extension):
         "enable_vended_credentials",
         "location_prefix",
         "catalog_name",
-        "client_id",
-        "client_secret",
     ]
+    USER_MAPPING_ONLY_OPTIONS = ["client_id", "client_secret"]
 
     for typo in ("bogus_option", "another_typo"):
         err = run_command(
@@ -143,10 +155,16 @@ def test_reject_unknown_server_option(superuser_conn, extension):
         )
         msg = str(err)
         assert "invalid option" in msg
+        assert "iceberg_catalog server" in msg
         assert typo in msg
         assert "Valid options are:" in msg
         for opt in EXPECTED_OPTIONS:
             assert opt in msg, f"hint missing {opt!r} on attempt {typo!r}: {msg}"
+        for opt in USER_MAPPING_ONLY_OPTIONS:
+            assert opt not in msg, (
+                f"hint should NOT list user-mapping-only option {opt!r} "
+                f"on attempt {typo!r}: {msg}"
+            )
         superuser_conn.rollback()
 
 
@@ -207,14 +225,13 @@ def test_reject_options_on_non_server(superuser_conn, extension):
         ("location_prefix", "", "must not be empty"),
         ("location_prefix", "my-bucket/prefix", "URI scheme"),
         ("catalog_name", "", "must not be empty"),
-        ("client_id", "", "must not be empty"),
-        ("client_secret", "", "must not be empty"),
         ("scope", "", "must not be empty"),
     ],
 )
-def test_reject_bad_option_values(
+def test_reject_bad_server_option_values(
     superuser_conn, extension, option, bad_value, expected_error
 ):
+    """Value-level validation on SERVER options."""
     err = run_command(
         f"""
         CREATE SERVER test_bad_val TYPE 'rest'
@@ -226,6 +243,359 @@ def test_reject_bad_option_values(
     )
     assert err is not None, f"Expected error for {option}='{bad_value}'"
     assert expected_error in str(err), f"Expected '{expected_error}' in: {err}"
+    superuser_conn.rollback()
+
+
+@pytest.mark.parametrize(
+    "option, bad_value, expected_error",
+    [
+        ("client_id", "", "must not be empty"),
+        ("client_secret", "", "must not be empty"),
+        ("scope", "", "must not be empty"),
+    ],
+)
+def test_reject_bad_user_mapping_option_values(
+    superuser_conn, extension, option, bad_value, expected_error
+):
+    """Value-level validation on USER MAPPING options (client_id,
+    client_secret, and scope when set on the mapping).
+
+    CREATE SERVER is committed first so that the rollback() triggered by
+    the failed CREATE USER MAPPING below does not undo it; the server
+    is then dropped CASCADE in a finally block."""
+    run_command(
+        """
+        CREATE SERVER test_bad_um_val TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+    try:
+        err = run_command(
+            f"""
+            CREATE USER MAPPING FOR PUBLIC SERVER test_bad_um_val
+                OPTIONS ({option} '{bad_value}')
+            """,
+            superuser_conn,
+            raise_error=False,
+        )
+        assert err is not None, f"Expected error for {option}='{bad_value}'"
+        assert expected_error in str(err), f"Expected '{expected_error}' in: {err}"
+        superuser_conn.rollback()
+    finally:
+        run_command("DROP SERVER IF EXISTS test_bad_um_val CASCADE", superuser_conn)
+        superuser_conn.commit()
+
+
+# ── USER MAPPING context: validator rejects server-only options ─────────────
+
+
+def test_reject_server_option_on_user_mapping(superuser_conn, extension):
+    """Server-only options (rest_endpoint, location_prefix, etc.) must
+    be rejected when set on a USER MAPPING.  The validator branch on
+    UserMappingRelationId picks them out from the descriptor table by
+    context bit."""
+    run_command(
+        """
+        CREATE SERVER test_um_rej_srv TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    # Commit the SERVER outside the txn that the failed CREATE USER
+    # MAPPING below will abort -- otherwise rollback() in each iteration
+    # would also undo the SERVER, breaking the loop on the second pass.
+    superuser_conn.commit()
+    try:
+        for srv_only in [
+            ("rest_endpoint", "http://other:8181"),
+            ("location_prefix", "s3://bucket/x"),
+            ("catalog_name", "foo"),
+            ("oauth_endpoint", "http://o:8181/t"),
+            ("rest_auth_type", "OAuth2"),
+            ("enable_vended_credentials", "true"),
+        ]:
+            err = run_command(
+                f"""
+                CREATE USER MAPPING FOR PUBLIC SERVER test_um_rej_srv
+                    OPTIONS ({srv_only[0]} '{srv_only[1]}')
+                """,
+                superuser_conn,
+                raise_error=False,
+            )
+            assert (
+                err is not None
+            ), f"Expected rejection for {srv_only[0]} on user mapping"
+            msg = str(err)
+            assert "invalid option" in msg
+            assert srv_only[0] in msg
+            assert (
+                "iceberg_catalog user mapping" in msg
+            ), f"Error should identify user-mapping context: {msg}"
+            superuser_conn.rollback()
+    finally:
+        run_command("DROP SERVER IF EXISTS test_um_rej_srv CASCADE", superuser_conn)
+        superuser_conn.commit()
+
+
+def test_reject_user_mapping_option_on_server(superuser_conn, extension):
+    """User-mapping-only options (client_id, client_secret) must be
+    rejected when set on a SERVER.  This is the inverse of the test
+    above and proves the context bitmap denies in both directions."""
+    for um_only in ["client_id", "client_secret"]:
+        err = run_command(
+            f"""
+            CREATE SERVER test_srv_rej_um TYPE 'rest'
+                FOREIGN DATA WRAPPER iceberg_catalog
+                OPTIONS (rest_endpoint 'http://localhost:8181', {um_only} 'x')
+            """,
+            superuser_conn,
+            raise_error=False,
+        )
+        assert err is not None, f"Expected rejection for {um_only} on server"
+        msg = str(err)
+        assert "invalid option" in msg
+        assert um_only in msg
+        assert "iceberg_catalog server" in msg
+        superuser_conn.rollback()
+
+
+def test_user_mapping_hint_lists_user_mapping_options_only(superuser_conn, extension):
+    """When an unknown option is rejected at USER MAPPING context, the
+    hint must enumerate ONLY user-mapping-context options (client_id,
+    client_secret, scope) -- never server-only ones.
+
+    Issued twice on the same connection to exercise the per-context
+    static hint cache, mirroring the SERVER-side hint test."""
+    run_command(
+        """
+        CREATE SERVER test_um_hint_srv TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    EXPECTED = ["client_id", "client_secret", "scope"]
+    SERVER_ONLY_NEGATIVES = [
+        "rest_endpoint",
+        "rest_auth_type",
+        "oauth_endpoint",
+        "enable_vended_credentials",
+        "location_prefix",
+        "catalog_name",
+    ]
+
+    try:
+        for typo in ("um_bogus", "um_another"):
+            err = run_command(
+                f"""
+                CREATE USER MAPPING FOR PUBLIC SERVER test_um_hint_srv
+                    OPTIONS ({typo} 'x')
+                """,
+                superuser_conn,
+                raise_error=False,
+            )
+            msg = str(err)
+            assert "invalid option" in msg
+            assert "iceberg_catalog user mapping" in msg
+            assert "Valid options are:" in msg
+            for opt in EXPECTED:
+                assert opt in msg, f"hint missing {opt!r} on attempt {typo!r}: {msg}"
+            for opt in SERVER_ONLY_NEGATIVES:
+                assert opt not in msg, (
+                    f"USER MAPPING hint should NOT list server-only option "
+                    f"{opt!r} on attempt {typo!r}: {msg}"
+                )
+            superuser_conn.rollback()
+    finally:
+        run_command("DROP SERVER IF EXISTS test_um_hint_srv CASCADE", superuser_conn)
+        superuser_conn.commit()
+
+
+# ── USER MAPPING happy paths (acceptance + per-user storage) ────────────────
+
+
+def test_create_user_mapping_for_current_user_with_all_options(
+    superuser_conn, extension
+):
+    """USER MAPPING FOR CURRENT_USER must accept the full credential
+    bundle (client_id, client_secret, scope) in a single DDL.  Other
+    tests exercise each option in isolation or only against PUBLIC;
+    this is the explicit guard for the common "wire up my own
+    credentials" path with a real umuser != InvalidOid."""
+    run_command(
+        """
+        CREATE SERVER test_um_full TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        """
+        CREATE USER MAPPING FOR CURRENT_USER SERVER test_um_full
+            OPTIONS (
+                client_id 'my-id',
+                client_secret 'my-secret',
+                scope 'PRINCIPAL_ROLE:ADMIN'
+            )
+        """,
+        superuser_conn,
+    )
+    superuser_conn.rollback()
+
+
+def test_per_role_user_mappings_on_same_server(superuser_conn, extension):
+    """Two distinct roles can each hold their own credentials and
+    scope on the same iceberg_catalog server.  This is the headline
+    reason credentials live on USER MAPPING and not on SERVER -- the
+    SERVER is shared infrastructure, the credentials are per-identity.
+
+    Asserts on pg_user_mapping rather than running a real REST call,
+    because the runtime resolution path is exercised separately under
+    test_modify_iceberg_rest_table; here the contract is just "DDL
+    accepts two independent mappings, and the umoptions land
+    correctly per umuser"."""
+    ANALYST = "test_um_analyst"
+    ADMIN = "test_um_admin"
+
+    # CREATE ROLE outside the transaction guarded by `try` so cleanup
+    # is robust even if any of the DDL below errors.
+    run_command(f"CREATE ROLE {ANALYST} LOGIN", superuser_conn)
+    run_command(f"CREATE ROLE {ADMIN} LOGIN", superuser_conn)
+    run_command(
+        """
+        CREATE SERVER test_per_role_srv TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    try:
+        run_command(
+            f"""
+            CREATE USER MAPPING FOR {ANALYST} SERVER test_per_role_srv
+                OPTIONS (
+                    client_id 'a-id', client_secret 'a-secret',
+                    scope 'PRINCIPAL_ROLE:READER'
+                )
+            """,
+            superuser_conn,
+        )
+        run_command(
+            f"""
+            CREATE USER MAPPING FOR {ADMIN} SERVER test_per_role_srv
+                OPTIONS (
+                    client_id 'b-id', client_secret 'b-secret',
+                    scope 'PRINCIPAL_ROLE:ALL'
+                )
+            """,
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        rows = run_query(
+            f"""
+            SELECT u.rolname,
+                   array_to_string(um.umoptions, ', ') AS opts
+            FROM pg_user_mapping um
+            JOIN pg_roles u ON u.oid = um.umuser
+            WHERE um.umserver = (
+                SELECT oid FROM pg_foreign_server
+                WHERE srvname = 'test_per_role_srv'
+            )
+              AND u.rolname IN ('{ANALYST}', '{ADMIN}')
+            """,
+            superuser_conn,
+        )
+        assert len(rows) == 2, f"expected 2 mappings on test_per_role_srv, got {rows}"
+
+        admin_opts = next(r["opts"] for r in rows if r["rolname"] == ADMIN)
+        analyst_opts = next(r["opts"] for r in rows if r["rolname"] == ANALYST)
+
+        # The two mappings must NOT cross-contaminate -- each role's
+        # credentials and scope are stored verbatim and independently.
+        assert "client_id=b-id" in admin_opts
+        assert "client_secret=b-secret" in admin_opts
+        assert "scope=PRINCIPAL_ROLE:ALL" in admin_opts
+        assert "a-id" not in admin_opts
+        assert "READER" not in admin_opts
+
+        assert "client_id=a-id" in analyst_opts
+        assert "client_secret=a-secret" in analyst_opts
+        assert "scope=PRINCIPAL_ROLE:READER" in analyst_opts
+        assert "b-id" not in analyst_opts
+        assert "ALL" not in analyst_opts
+    finally:
+        # CASCADE on the server unhooks both user mappings in one
+        # statement; the roles then drop cleanly.  IF EXISTS keeps
+        # this robust even if the body bailed early.
+        run_command("DROP SERVER IF EXISTS test_per_role_srv CASCADE", superuser_conn)
+        run_command(f"DROP ROLE IF EXISTS {ANALYST}", superuser_conn)
+        run_command(f"DROP ROLE IF EXISTS {ADMIN}", superuser_conn)
+        superuser_conn.commit()
+
+
+# ── USER MAPPING blocked on built-in iceberg_catalog servers ────────────────
+
+
+BUILTIN_LONG_NAMES_FOR_UM = [
+    "pg_lake_rest_catalog",
+    "pg_lake_postgres_catalog",
+    "pg_lake_object_store_catalog",
+]
+
+
+@pytest.mark.parametrize("long_name", BUILTIN_LONG_NAMES_FOR_UM)
+def test_reject_create_user_mapping_on_builtin_server(
+    long_name, superuser_conn, extension
+):
+    """CREATE USER MAPPING on the three internal long names is blocked:
+    pg_lake_rest_catalog never reads user mappings (GUCs only), and the
+    postgres / object_store built-ins have no notion of OAuth at all.
+    Blocked uniformly at DDL time rather than silently ignored."""
+    err = run_command(
+        f"""
+        CREATE USER MAPPING FOR PUBLIC SERVER {long_name}
+            OPTIONS (client_id 'x', client_secret 'y')
+        """,
+        superuser_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    msg = str(err)
+    assert "cannot create user mapping for the built-in" in msg
+    assert long_name in msg
+    superuser_conn.rollback()
+
+
+@pytest.mark.parametrize("long_name", BUILTIN_LONG_NAMES_FOR_UM)
+def test_reject_alter_user_mapping_on_builtin_server(
+    long_name, superuser_conn, extension
+):
+    """ALTER USER MAPPING on the built-in long names is blocked.
+    There can never be a mapping to alter (CREATE is blocked too), but
+    we trap ALTER at the parser-level guard so the user sees a clean
+    pg_lake error rather than the generic "user mapping not found"."""
+    err = run_command(
+        f"""
+        ALTER USER MAPPING FOR PUBLIC SERVER {long_name}
+            OPTIONS (ADD client_id 'x')
+        """,
+        superuser_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    msg = str(err)
+    assert "cannot alter user mapping for the built-in" in msg
+    assert long_name in msg
     superuser_conn.rollback()
 
 
@@ -376,11 +746,14 @@ def test_create_table_with_server_catalog(
         """
         CREATE SERVER test_srv_catalog TYPE 'rest'
             FOREIGN DATA WRAPPER iceberg_catalog
-            OPTIONS (
-                rest_endpoint 'http://localhost:8181',
-                client_id 'id',
-                client_secret 'secret'
-            )
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        """
+        CREATE USER MAPPING FOR PUBLIC SERVER test_srv_catalog
+            OPTIONS (client_id 'id', client_secret 'secret')
         """,
         superuser_conn,
     )
@@ -1141,3 +1514,920 @@ def test_pg_depend_edge_for_builtin_postgres_catalog_table(
     finally:
         run_command("DROP TABLE pg_depend_tbl", pg_conn)
         pg_conn.commit()
+
+
+# ── User-mapping secret redaction in queryString ────────────────────────────
+#
+# The ProcessUtility hook RedactRestCatalogUserMappingSecrets scrubs
+# client_id / client_secret out of the queryString in CREATE/ALTER
+# USER MAPPING on iceberg_catalog servers, before any downstream
+# observer (pg_stat_statements, ereport error context,
+# log_min_duration_statement) reads it.  These tests pin that
+# behaviour: secrets must never round-trip back via pg_stat_statements
+# in plaintext.
+
+
+SECRET_VALUE = "topsecretvalue"
+ANOTHER_SECRET = "anothertopsecretvalue"
+
+
+def _latest_user_mapping_stmt_text(superuser_conn, like_pattern):
+    """Return the most recent pg_stat_statements row whose query matches
+    `like_pattern`.  Sorting by total_exec_time is sufficient because
+    each test issues exactly one matching utility statement after a
+    fresh _reset()."""
+    rows = run_query(
+        f"""
+        SELECT query
+        FROM pg_stat_statements
+        WHERE query ILIKE '{like_pattern}'
+        ORDER BY total_exec_time DESC
+        LIMIT 1
+        """,
+        superuser_conn,
+    )
+    assert len(rows) == 1, (
+        f"expected exactly one pg_stat_statements row for "
+        f"{like_pattern!r}, got: {rows}"
+    )
+    return rows[0]["query"]
+
+
+def _reset_pg_stat_statements(superuser_conn):
+    run_command("CREATE EXTENSION IF NOT EXISTS pg_stat_statements", superuser_conn)
+    run_command("SELECT pg_stat_statements_reset()", superuser_conn)
+    superuser_conn.commit()
+
+
+def test_redact_create_user_mapping_client_secret(
+    installcheck, superuser_conn, extension
+):
+    """Plain CREATE USER MAPPING with client_secret 'topsecretvalue'
+    must NOT leave the literal secret in pg_stat_statements; the value
+    must be replaced with asterisks of the same length."""
+    if installcheck:
+        return
+
+    run_command(
+        """
+        CREATE SERVER test_redact_create TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    try:
+        _reset_pg_stat_statements(superuser_conn)
+        run_command(
+            f"""
+            CREATE USER MAPPING FOR PUBLIC SERVER test_redact_create
+                OPTIONS (client_id 'someid', client_secret '{SECRET_VALUE}')
+            """,
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        stored = _latest_user_mapping_stmt_text(
+            superuser_conn, "%CREATE USER MAPPING%test_redact_create%"
+        )
+        assert (
+            SECRET_VALUE not in stored
+        ), f"plaintext client_secret leaked to pg_stat_statements: {stored}"
+        assert (
+            "someid" not in stored
+        ), f"plaintext client_id leaked to pg_stat_statements: {stored}"
+        # length-preserving redaction, so we still see the same number
+        # of asterisks as the original value had characters
+        assert "*" * len(SECRET_VALUE) in stored
+        assert "*" * len("someid") in stored
+    finally:
+        run_command("DROP SERVER IF EXISTS test_redact_create CASCADE", superuser_conn)
+        superuser_conn.commit()
+
+
+def test_redact_alter_user_mapping_client_secret(
+    installcheck, superuser_conn, extension
+):
+    """ALTER USER MAPPING ... OPTIONS (SET client_secret '<secret>')
+    must also be redacted.  SET / ADD / DROP all flow through the same
+    AlterUserMappingStmt parsetree, so this exercises a different
+    DefElem defaction than CREATE."""
+    if installcheck:
+        return
+
+    run_command(
+        """
+        CREATE SERVER test_redact_alter TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        """
+        CREATE USER MAPPING FOR PUBLIC SERVER test_redact_alter
+            OPTIONS (client_id 'initial_id', client_secret 'initial_secret')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    try:
+        _reset_pg_stat_statements(superuser_conn)
+        run_command(
+            f"""
+            ALTER USER MAPPING FOR PUBLIC SERVER test_redact_alter
+                OPTIONS (SET client_secret '{ANOTHER_SECRET}')
+            """,
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        stored = _latest_user_mapping_stmt_text(
+            superuser_conn, "%ALTER USER MAPPING%test_redact_alter%"
+        )
+        assert (
+            ANOTHER_SECRET not in stored
+        ), f"plaintext client_secret leaked via ALTER: {stored}"
+        assert "*" * len(ANOTHER_SECRET) in stored
+    finally:
+        run_command("DROP SERVER IF EXISTS test_redact_alter CASCADE", superuser_conn)
+        superuser_conn.commit()
+
+
+def test_redact_handles_doubled_quote_escape(installcheck, superuser_conn, extension):
+    """A secret containing an embedded single quote written via the
+    standard '' escape (e.g. 'foo''bar') is the most common non-trivial
+    string form for credentials.  The redactor must consume the '' as
+    a single character and continue replacing past it instead of
+    stopping at the first quote and leaking the suffix."""
+    if installcheck:
+        return
+
+    run_command(
+        """
+        CREATE SERVER test_redact_dq TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    try:
+        _reset_pg_stat_statements(superuser_conn)
+        # SQL string 'foo''bar' represents the value foo'bar.  After
+        # redaction the queryString contains ************ (8 stars
+        # between the surrounding single quotes -- one per source
+        # char, including the doubled-quote pair).
+        run_command(
+            """
+            CREATE USER MAPPING FOR PUBLIC SERVER test_redact_dq
+                OPTIONS (client_secret 'foo''bar')
+            """,
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        stored = _latest_user_mapping_stmt_text(
+            superuser_conn, "%CREATE USER MAPPING%test_redact_dq%"
+        )
+        # neither half of the value, nor any subsequence of it
+        assert "foo" not in stored.replace(
+            "'", "*"
+        ), f"prefix 'foo' leaked through doubled-quote escape: {stored}"
+        assert (
+            "bar" not in stored
+        ), f"suffix 'bar' leaked through doubled-quote escape: {stored}"
+    finally:
+        run_command("DROP SERVER IF EXISTS test_redact_dq CASCADE", superuser_conn)
+        superuser_conn.commit()
+
+
+def test_redact_handles_e_string_escape(installcheck, superuser_conn, extension):
+    """E'foo\\\\bar' is an extended-quote string with a literal
+    backslash escape.  Inside an E'' literal, \\X is a two-byte escape,
+    not a closing quote followed by something, so the redactor must
+    consume both bytes and keep scanning to the real closing quote."""
+    if installcheck:
+        return
+
+    run_command(
+        """
+        CREATE SERVER test_redact_e TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    try:
+        _reset_pg_stat_statements(superuser_conn)
+        run_command(
+            r"""
+            CREATE USER MAPPING FOR PUBLIC SERVER test_redact_e
+                OPTIONS (client_secret E'pref\'redactedsuffix')
+            """,
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        stored = _latest_user_mapping_stmt_text(
+            superuser_conn, "%CREATE USER MAPPING%test_redact_e%"
+        )
+        assert "pref" not in stored, f"prefix leaked from E-string escape: {stored}"
+        assert (
+            "redactedsuffix" not in stored
+        ), f"suffix leaked from E-string escape: {stored}"
+    finally:
+        run_command("DROP SERVER IF EXISTS test_redact_e CASCADE", superuser_conn)
+        superuser_conn.commit()
+
+
+def test_redact_does_not_touch_scope_option(installcheck, superuser_conn, extension):
+    """`scope` is configuration, not a secret, and is visible on both
+    server and user mapping.  The redactor must leave it untouched so
+    operators can still grep their statement history for it."""
+    if installcheck:
+        return
+
+    run_command(
+        """
+        CREATE SERVER test_redact_scope TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    try:
+        _reset_pg_stat_statements(superuser_conn)
+        run_command(
+            f"""
+            CREATE USER MAPPING FOR PUBLIC SERVER test_redact_scope
+                OPTIONS (
+                    scope 'PRINCIPAL_ROLE:VISIBLE',
+                    client_secret '{SECRET_VALUE}'
+                )
+            """,
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        stored = _latest_user_mapping_stmt_text(
+            superuser_conn, "%CREATE USER MAPPING%test_redact_scope%"
+        )
+        assert SECRET_VALUE not in stored
+        assert (
+            "PRINCIPAL_ROLE:VISIBLE" in stored
+        ), f"non-secret scope value was wrongly redacted: {stored}"
+    finally:
+        run_command("DROP SERVER IF EXISTS test_redact_scope CASCADE", superuser_conn)
+        superuser_conn.commit()
+
+
+def test_redact_skips_non_iceberg_catalog_server(
+    installcheck, superuser_conn, extension
+):
+    """A USER MAPPING on a non-iceberg_catalog FDW (postgres_fdw here)
+    must NOT be redacted.  The redactor scopes itself by FDW so it
+    never touches statements unrelated to pg_lake_iceberg."""
+    if installcheck:
+        return
+
+    run_command("CREATE EXTENSION IF NOT EXISTS postgres_fdw", superuser_conn)
+    run_command(
+        """
+        CREATE SERVER test_redact_other_fdw
+            FOREIGN DATA WRAPPER postgres_fdw
+            OPTIONS (host 'localhost', dbname 'postgres')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    try:
+        _reset_pg_stat_statements(superuser_conn)
+        # postgres_fdw accepts 'user' and 'password' on user mappings;
+        # neither is in our redaction list, and the FDW gate should
+        # short-circuit us out before we inspect option names anyway.
+        run_command(
+            f"""
+            CREATE USER MAPPING FOR PUBLIC SERVER test_redact_other_fdw
+                OPTIONS (user 'fdw_user', password '{SECRET_VALUE}')
+            """,
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        stored = _latest_user_mapping_stmt_text(
+            superuser_conn, "%CREATE USER MAPPING%test_redact_other_fdw%"
+        )
+        # If the FDW gate were wrong we would scrub by option name
+        # match alone; since postgres_fdw uses different option names
+        # (user/password) AND the server is non-iceberg, the literal
+        # secret must survive verbatim.
+        assert (
+            SECRET_VALUE in stored
+        ), f"redactor incorrectly fired on non-iceberg_catalog server: {stored}"
+    finally:
+        run_command(
+            "DROP SERVER IF EXISTS test_redact_other_fdw CASCADE", superuser_conn
+        )
+        superuser_conn.commit()
+
+
+@pytest.mark.parametrize("long_name", BUILTIN_LONG_NAMES_FOR_UM)
+def test_redact_runs_before_builtin_rejection(
+    long_name, installcheck, superuser_conn, extension
+):
+    """CREATE USER MAPPING on a built-in catalog server is rejected by
+    ValidateIcebergCatalogServerDDL.  The redaction handler is
+    registered AFTER the validator so it runs FIRST (handlers are
+    prepend-LIFO).  Therefore the error context surfaced via ereport
+    -- and any pg_stat_statements row recorded for the failed
+    statement -- must already carry the redacted form.
+
+    We use the DETAIL-style error string: run_command(raise_error=False)
+    captures the libpq exception whose .pgerror surfaces the
+    PostgreSQL error message (which does NOT include queryString by
+    default), so we mainly assert the secret never landed in
+    pg_stat_statements.  Many builds skip pgss recording for failed
+    utility statements; in that case the redaction is still observable
+    because the error message and any log_statement entry would have
+    seen the scrubbed buffer.  Either way the secret must not leak."""
+    if installcheck:
+        return
+
+    _reset_pg_stat_statements(superuser_conn)
+
+    err = run_command(
+        f"""
+        CREATE USER MAPPING FOR PUBLIC SERVER {long_name}
+            OPTIONS (client_secret '{SECRET_VALUE}')
+        """,
+        superuser_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    superuser_conn.rollback()
+
+    # The validator must have rejected it.
+    assert "cannot create user mapping for the built-in" in str(err)
+    # Whatever did get captured anywhere must NOT have the secret.
+    assert SECRET_VALUE not in str(err)
+
+    rows = run_query(
+        f"""
+        SELECT query FROM pg_stat_statements
+        WHERE query ILIKE '%CREATE USER MAPPING%{long_name}%'
+        """,
+        superuser_conn,
+    )
+    for r in rows:
+        assert SECRET_VALUE not in r["query"], (
+            f"failed CREATE USER MAPPING leaked secret to pg_stat_statements: "
+            f"{r['query']}"
+        )
+
+
+def test_redact_preserves_stored_credentials(superuser_conn, extension):
+    """Redaction scrubs queryString *in place* so observers
+    (pg_stat_statements, ereport context, log_min_duration_statement)
+    see asterisks.  The DDL itself, however, reads option values from
+    DefElem->arg -- a separate buffer untouched by the redactor --
+    so pg_user_mapping must still carry the real plaintext.
+
+    Without this guard, a future refactor that copied the redacted
+    queryString back into DefElem nodes would silently corrupt every
+    stored credential.  Test #3 in the design spec pins exactly this
+    invariant."""
+    run_command(
+        """
+        CREATE SERVER test_redact_storage TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181')
+        """,
+        superuser_conn,
+    )
+    try:
+        run_command(
+            """
+            CREATE USER MAPPING FOR PUBLIC SERVER test_redact_storage
+                OPTIONS (client_id 'real_id_xyz', client_secret 'real_secret_abc')
+            """,
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        rows = run_query(
+            """
+            SELECT umoptions
+              FROM pg_user_mapping um
+              JOIN pg_foreign_server fs ON um.umserver = fs.oid
+             WHERE fs.srvname = 'test_redact_storage'
+            """,
+            superuser_conn,
+        )
+        assert len(rows) == 1, (
+            f"expected exactly one user mapping for test_redact_storage, "
+            f"got: {rows}"
+        )
+        # umoptions is text[] of "key=value" entries; psycopg2 returns it
+        # as a Python list of strings.
+        opts = rows[0]["umoptions"]
+        joined = ",".join(opts)
+        assert "client_id=real_id_xyz" in joined, (
+            f"client_id was not stored verbatim (queryString redaction must "
+            f"not touch DefElem->arg): umoptions={opts}"
+        )
+        assert "client_secret=real_secret_abc" in joined, (
+            f"client_secret was not stored verbatim (queryString redaction "
+            f"must not touch DefElem->arg): umoptions={opts}"
+        )
+    finally:
+        run_command("DROP SERVER IF EXISTS test_redact_storage CASCADE", superuser_conn)
+        superuser_conn.commit()
+
+
+# ── Credential resolution: catalogs.conf ────────────────────────────────────
+#
+# REST credentials are resolved in BuildRestCatalogOptionsFromServer
+# in this order, lowest to highest priority:
+#
+#   1. GUC defaults                       (always)
+#   2. Server options                     (always; never carries
+#                                          client_id/secret -- the
+#                                          validator rejects those at
+#                                          DDL time)
+#   3. $PGDATA/catalogs.conf credentials  (user-created servers only)
+#   4. pg_user_mapping options            (user-created servers only)
+#
+# The built-in pg_lake_rest_catalog (catalog='rest') deliberately stops
+# after step 2: its credentials live exclusively in
+# pg_lake_iceberg.rest_catalog_* GUCs so the built-in is one global,
+# instance-wide configuration.  These tests pin both sides of that
+# contract.
+
+
+@pytest.fixture
+def pg_data_dir(superuser_conn):
+    """Return $PGDATA via SHOW data_directory.  catalogs.conf lives
+    here when the catalogs_conf_path GUC keeps its default ('catalogs.conf',
+    a relative path resolved against DataDir)."""
+    rows = run_query("SHOW data_directory", superuser_conn)
+    return rows[0]["data_directory"]
+
+
+@pytest.fixture
+def catalogs_conf(pg_data_dir):
+    """Write a controlled $PGDATA/catalogs.conf and restore the
+    original on teardown.  Because catalogs_conf_path defaults to
+    'catalogs.conf' (relative), no SIGHUP is needed -- the resolver
+    re-opens the file on every credential lookup."""
+    conf_path = os.path.join(pg_data_dir, "catalogs.conf")
+    pre_existed = os.path.exists(conf_path)
+    original = None
+    if pre_existed:
+        with open(conf_path, "r") as f:
+            original = f.read()
+
+    def _write(content):
+        with open(conf_path, "w") as f:
+            f.write(content)
+
+    yield _write
+
+    if pre_existed:
+        with open(conf_path, "w") as f:
+            f.write(original or "")
+    elif os.path.exists(conf_path):
+        os.remove(conf_path)
+
+
+def _clear_credential_gucs_globally():
+    """Clear the GUC layer cluster-wide so it cannot mask the
+    catalogs.conf / user-mapping layers under test.  Uses ALTER
+    SYSTEM + pg_reload_conf rather than SET, because the PGC_SUSET
+    rest_catalog_client_* GUCs need to be empty in the app_user
+    backend (pg_conn) -- not just in superuser_conn -- and SET only
+    affects the issuing session."""
+    run_command_outside_tx(
+        [
+            "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_id TO ''",
+            "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_secret TO ''",
+            "SELECT pg_reload_conf()",
+        ]
+    )
+
+
+def _restore_credential_gucs_globally():
+    run_command_outside_tx(
+        [
+            "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_id",
+            "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_secret",
+            "SELECT pg_reload_conf()",
+        ]
+    )
+
+
+def _attempt_read_only_dml(conn, server_name, table_name):
+    """Issue a read-only iceberg CREATE TABLE that forces the REST
+    catalog resolver to run (ResolveRestCatalogOptions ->
+    BuildRestCatalogOptionsFromServer -> ValidateRestCatalogOptions,
+    which is where 'no credentials found' originates).  The endpoint
+    is fake, so the only question the test cares about is *which*
+    error fires:
+
+      - "no credentials found"  -> credentials were missing from every
+        layer (GUC, catalogs.conf, USER MAPPING)
+      - anything else (HTTP / connection / DNS)  -> credentials WERE
+        resolved, and the failure is at the network layer
+    """
+    return run_command(
+        f"""
+        CREATE TABLE {table_name} ()
+            USING iceberg
+            WITH (catalog = '{server_name}', read_only = 'true',
+                  catalog_namespace = 'ns', catalog_table_name = 'tbl')
+        """,
+        conn,
+        raise_error=False,
+    )
+
+
+def test_credentials_from_catalogs_conf_user_server(
+    installcheck,
+    pg_conn,
+    superuser_conn,
+    s3,
+    extension,
+    with_default_location,
+    catalogs_conf,
+):
+    """catalogs.conf supplies credentials for a user-created
+    iceberg_catalog server when no user mapping exists.
+
+    GUCs are cleared globally so the catalogs.conf layer is observable
+    in isolation.  We then check that the resolver's
+    "no credentials found" pre-flight does NOT fire -- the only way
+    that pre-flight can pass with empty GUCs and no USER MAPPING is
+    if catalogs.conf was actually read."""
+    if installcheck:
+        return
+
+    _clear_credential_gucs_globally()
+    try:
+        catalogs_conf(
+            "test_creds_conf_srv.client_id = 'conf-id'\n"
+            "test_creds_conf_srv.client_secret = 'conf-secret'\n"
+        )
+        run_command(
+            """
+            CREATE SERVER test_creds_conf_srv TYPE 'rest'
+                FOREIGN DATA WRAPPER iceberg_catalog
+                OPTIONS (rest_endpoint 'http://localhost:8181')
+            """,
+            superuser_conn,
+        )
+        run_command(
+            "GRANT USAGE ON FOREIGN SERVER test_creds_conf_srv TO PUBLIC",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        try:
+            err = _attempt_read_only_dml(
+                pg_conn, "test_creds_conf_srv", "test_creds_conf_tbl"
+            )
+            assert err is not None
+            assert "no credentials found" not in str(
+                err
+            ), f"credentials in catalogs.conf were not picked up: {err}"
+            pg_conn.rollback()
+        finally:
+            run_command(
+                "DROP SERVER IF EXISTS test_creds_conf_srv CASCADE",
+                superuser_conn,
+            )
+            superuser_conn.commit()
+    finally:
+        _restore_credential_gucs_globally()
+
+
+def test_user_mapping_overrides_catalogs_conf(
+    installcheck,
+    pg_conn,
+    superuser_conn,
+    s3,
+    extension,
+    with_default_location,
+    catalogs_conf,
+):
+    """USER MAPPING wins over catalogs.conf.
+
+    The direction is proved structurally: catalogs.conf is seeded with
+    EMPTY credential values that, if catalogs.conf had higher priority
+    than the user mapping, would leave opts->client* empty and trip
+    the 'no credentials found' pre-flight.  Because the resolver
+    applies catalogs.conf BEFORE the user mapping in
+    BuildRestCatalogOptionsFromServer, the empty values are stomped
+    by the mapping's real values and the call proceeds past the
+    pre-flight check."""
+    if installcheck:
+        return
+
+    _clear_credential_gucs_globally()
+    try:
+        catalogs_conf(
+            "test_um_wins_srv.client_id = ''\n" "test_um_wins_srv.client_secret = ''\n"
+        )
+        run_command(
+            """
+            CREATE SERVER test_um_wins_srv TYPE 'rest'
+                FOREIGN DATA WRAPPER iceberg_catalog
+                OPTIONS (rest_endpoint 'http://localhost:8181')
+            """,
+            superuser_conn,
+        )
+        run_command(
+            """
+            CREATE USER MAPPING FOR PUBLIC SERVER test_um_wins_srv
+                OPTIONS (client_id 'um-id', client_secret 'um-secret')
+            """,
+            superuser_conn,
+        )
+        run_command(
+            "GRANT USAGE ON FOREIGN SERVER test_um_wins_srv TO PUBLIC",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        try:
+            err = _attempt_read_only_dml(
+                pg_conn, "test_um_wins_srv", "test_um_wins_tbl"
+            )
+            assert err is not None
+            assert "no credentials found" not in str(
+                err
+            ), f"USER MAPPING did not override empty catalogs.conf: {err}"
+            pg_conn.rollback()
+        finally:
+            run_command(
+                "DROP SERVER IF EXISTS test_um_wins_srv CASCADE", superuser_conn
+            )
+            superuser_conn.commit()
+    finally:
+        _restore_credential_gucs_globally()
+
+
+def test_no_credentials_anywhere_raises_user_server(
+    installcheck,
+    pg_conn,
+    superuser_conn,
+    s3,
+    extension,
+    with_default_location,
+):
+    """With GUCs cleared, no catalogs.conf entry for this server, and
+    no user mapping, the resolver must surface the actionable
+    'no credentials found for REST catalog \"...\"' error instead of
+    silently sending empty credentials to the OAuth endpoint.
+
+    ValidateRestCatalogOptions performs this check at resolution time
+    (auth-type-aware: client_secret always, client_id unless Horizon),
+    so it fires on the first DML against the catalog rather than
+    waiting until FetchRestCatalogAccessToken's defense-in-depth
+    fallback."""
+    if installcheck:
+        return
+
+    _clear_credential_gucs_globally()
+    try:
+        run_command(
+            """
+            CREATE SERVER test_no_creds_srv TYPE 'rest'
+                FOREIGN DATA WRAPPER iceberg_catalog
+                OPTIONS (rest_endpoint 'http://localhost:8181')
+            """,
+            superuser_conn,
+        )
+        run_command(
+            "GRANT USAGE ON FOREIGN SERVER test_no_creds_srv TO PUBLIC",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        try:
+            err = _attempt_read_only_dml(
+                pg_conn, "test_no_creds_srv", "test_no_creds_tbl"
+            )
+            assert err is not None
+            assert "no credentials found" in str(
+                err
+            ), f"expected an explicit credential-missing error, got: {err}"
+            pg_conn.rollback()
+        finally:
+            run_command(
+                "DROP SERVER IF EXISTS test_no_creds_srv CASCADE", superuser_conn
+            )
+            superuser_conn.commit()
+    finally:
+        _restore_credential_gucs_globally()
+
+
+def test_scope_from_catalogs_conf_user_server(
+    installcheck,
+    pg_conn,
+    superuser_conn,
+    s3,
+    extension,
+    with_default_location,
+    catalogs_conf,
+):
+    """catalogs.conf can also carry `scope` alongside client_id and
+    client_secret.  ReadCatalogsConfCredentials recognises the
+    "<server>.scope = ..." key explicitly, so this test pins that
+    contract -- if the parser ever silently drops scope keys, future
+    deployments that lean on per-server scopes break in production."""
+    if installcheck:
+        return
+
+    _clear_credential_gucs_globally()
+    try:
+        catalogs_conf(
+            "test_scope_conf_srv.client_id = 'conf-id'\n"
+            "test_scope_conf_srv.client_secret = 'conf-secret'\n"
+            "test_scope_conf_srv.scope = 'PRINCIPAL_ROLE:CONF_SCOPE'\n"
+        )
+        run_command(
+            """
+            CREATE SERVER test_scope_conf_srv TYPE 'rest'
+                FOREIGN DATA WRAPPER iceberg_catalog
+                OPTIONS (rest_endpoint 'http://localhost:8181')
+            """,
+            superuser_conn,
+        )
+        run_command(
+            "GRANT USAGE ON FOREIGN SERVER test_scope_conf_srv TO PUBLIC",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        try:
+            err = _attempt_read_only_dml(
+                pg_conn, "test_scope_conf_srv", "test_scope_conf_tbl"
+            )
+            assert err is not None
+            assert "no credentials found" not in str(err)
+            pg_conn.rollback()
+        finally:
+            run_command(
+                "DROP SERVER IF EXISTS test_scope_conf_srv CASCADE",
+                superuser_conn,
+            )
+            superuser_conn.commit()
+    finally:
+        _restore_credential_gucs_globally()
+
+
+def test_catalogs_conf_path_outside_pgdata(
+    installcheck,
+    s3,
+    extension,
+    with_default_location,
+):
+    """The pg_lake_iceberg.catalogs_conf_path GUC accepts an absolute
+    path: ReadCatalogsConfCredentials short-circuits via
+    is_absolute_path() so the file is taken verbatim instead of
+    being resolved against DataDir.
+
+    The GUC is PGC_SIGHUP, so the test uses ALTER SYSTEM + reload
+    and then opens fresh backends to read the updated value -- no
+    in-session SET path is available."""
+    if installcheck:
+        return
+
+    fd, tmp_path = tempfile.mkstemp(suffix=".conf", prefix="catalogs_outside_")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(
+                "test_conf_path_srv.client_id = 'absolute-path-id'\n"
+                "test_conf_path_srv.client_secret = 'absolute-path-secret'\n"
+            )
+
+        run_command_outside_tx(
+            [
+                "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_id TO ''",
+                "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_secret TO ''",
+                f"ALTER SYSTEM SET pg_lake_iceberg.catalogs_conf_path TO '{tmp_path}'",
+                "SELECT pg_reload_conf()",
+            ]
+        )
+
+        # Fresh backends read catalogs_conf_path at startup, which is
+        # race-free vs the just-delivered SIGHUP.  Reusing pg_conn /
+        # superuser_conn would otherwise risk seeing the old value.
+        super_fresh = open_pg_conn()
+        app_fresh = open_pg_conn()
+        try:
+            run_command(
+                """
+                CREATE SERVER test_conf_path_srv TYPE 'rest'
+                    FOREIGN DATA WRAPPER iceberg_catalog
+                    OPTIONS (rest_endpoint 'http://localhost:8181')
+                """,
+                super_fresh,
+            )
+            run_command(
+                "GRANT USAGE ON FOREIGN SERVER test_conf_path_srv TO PUBLIC",
+                super_fresh,
+            )
+            super_fresh.commit()
+
+            err = _attempt_read_only_dml(
+                app_fresh, "test_conf_path_srv", "test_conf_path_tbl"
+            )
+            assert err is not None
+            assert "no credentials found" not in str(
+                err
+            ), f"absolute catalogs_conf_path was not read: {err}"
+            app_fresh.rollback()
+        finally:
+            run_command(
+                "DROP SERVER IF EXISTS test_conf_path_srv CASCADE",
+                super_fresh,
+            )
+            super_fresh.commit()
+            super_fresh.close()
+            app_fresh.close()
+    finally:
+        run_command_outside_tx(
+            [
+                "ALTER SYSTEM RESET pg_lake_iceberg.catalogs_conf_path",
+                "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_id",
+                "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_secret",
+                "SELECT pg_reload_conf()",
+            ]
+        )
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
+def test_catalogs_conf_ignored_for_builtin_rest(
+    installcheck,
+    pg_conn,
+    superuser_conn,
+    s3,
+    extension,
+    with_default_location,
+    catalogs_conf,
+):
+    """The built-in 'rest' catalog (pg_lake_rest_catalog) is fed only
+    by pg_lake_iceberg.rest_catalog_* GUCs:
+    BuildRestCatalogOptionsFromServer guards ApplyCatalogsConfOverrides
+    with `!IsBuiltinCatalogServerName(serverName)`, keeping the
+    built-in's configuration globally consistent with no hidden
+    per-user view.
+
+    This is the inverse of the user-server tests above: writing valid
+    'rest.client_*' AND 'pg_lake_rest_catalog.client_*' entries to
+    catalogs.conf MUST NOT satisfy the built-in catalog when the
+    GUCs are empty -- the resolver must still raise 'no credentials
+    found'.  Both the short user-facing name ('rest') and the long
+    internal anchor ('pg_lake_rest_catalog') are seeded to rule out
+    either being silently read."""
+    if installcheck:
+        return
+
+    _clear_credential_gucs_globally()
+    try:
+        catalogs_conf(
+            "rest.client_id = 'ignored-id'\n"
+            "rest.client_secret = 'ignored-secret'\n"
+            "pg_lake_rest_catalog.client_id = 'ignored-id'\n"
+            "pg_lake_rest_catalog.client_secret = 'ignored-secret'\n"
+        )
+
+        err = run_command(
+            """
+            CREATE TABLE test_builtin_rest_tbl ()
+                USING iceberg
+                WITH (catalog = 'rest', read_only = 'true',
+                      catalog_namespace = 'ns', catalog_table_name = 'tbl')
+            """,
+            pg_conn,
+            raise_error=False,
+        )
+        assert err is not None
+        assert "no credentials found" in str(err), (
+            f"catalogs.conf entries for the built-in 'rest' catalog must "
+            f"NOT satisfy credential resolution, but got: {err}"
+        )
+        pg_conn.rollback()
+    finally:
+        _restore_credential_gucs_globally()

@@ -26,6 +26,7 @@
 #include "catalog/pg_class.h"
 #include "catalog/pg_depend.h"
 #include "catalog/pg_foreign_server.h"
+#include "catalog/pg_user_mapping.h"
 #include "common/base64.h"
 #include "commands/dbcommands.h"
 #include "commands/defrem.h"
@@ -33,8 +34,11 @@
 #include "foreign/foreign.h"
 #include "fmgr.h"
 #include "lib/stringinfo.h"
+#include "storage/fd.h"
 #include "utils/builtins.h"
+#include "utils/conffiles.h"
 #include "utils/fmgroids.h"
+#include "utils/guc.h"
 #include "utils/inval.h"
 #include "utils/jsonb.h"
 #include "utils/lsyscache.h"
@@ -68,12 +72,35 @@ int			RestCatalogAuthType = REST_CATALOG_AUTH_TYPE_OAUTH2;
 bool		RestCatalogEnableVendedCredentials = true;
 
 /*
- * Per-rest-catalog token cache, keyed by the iceberg_catalog server OID.
+ * Path to the optional credentials file consulted between server
+ * options and pg_user_mapping during REST catalog resolution.  Defined
+ * via the pg_lake_iceberg.catalogs_conf_path GUC in init.c.  Relative
+ * paths are resolved against DataDir.
+ */
+char	   *CatalogsConfPath = NULL;
+
+/*
+ * Per-rest-catalog token cache.  Keyed by the pair (serverOid, umid):
+ *   - serverOid identifies which iceberg_catalog server the token
+ *     belongs to, so an ALTER SERVER on one server never reuses
+ *     another's credentials.
+ *   - umid scopes tokens to the contributing pg_user_mapping row, so
+ *     different SET ROLEs in the same backend each get the credentials
+ *     of their own user mapping (or PUBLIC).  umid is InvalidOid when
+ *     no user mapping is involved (built-in pg_lake_rest_catalog, or a
+ *     user-created server falling back to catalogs.conf / GUCs).
+ *
  * Should always be accessed via GetRestCatalogAccessToken().
  */
+typedef struct RestCatalogTokenCacheKey
+{
+	Oid			serverOid;
+	Oid			umid;
+}			RestCatalogTokenCacheKey;
+
 typedef struct RestCatalogTokenCacheEntry
 {
-	Oid			serverOid;		/* hash key */
+	RestCatalogTokenCacheKey key;	/* hash key */
 	char	   *accessToken;
 	TimestampTz accessTokenExpiry;
 }			RestCatalogTokenCacheEntry;
@@ -107,9 +134,10 @@ PG_FUNCTION_INFO_V1(iceberg_catalog_validator);
 
 
 /*
- * Descriptor for a single iceberg_catalog server option.  This is the
- * single source of truth: validation, the user-facing hint, and the
- * option-to-struct applier all derive from this table.
+ * Descriptor for a single iceberg_catalog option.  This is the single
+ * source of truth: validation, the user-facing hint, and the
+ * option-to-struct applier all derive from this table.  An option may
+ * be valid on a SERVER, on a USER MAPPING, or both (see contexts).
  */
 typedef enum IcebergCatalogOptionType
 {
@@ -119,9 +147,18 @@ typedef enum IcebergCatalogOptionType
 	CATALOG_OPT_LOCATION_PREFIX
 }			IcebergCatalogOptionType;
 
-/* Validation flags checked at CREATE/ALTER SERVER time. */
+/* Validation flags checked at CREATE/ALTER time. */
 #define CATALOG_OPT_NONEMPTY    0x01	/* reject empty string */
 #define CATALOG_OPT_HAS_SCHEME  0x02	/* must contain "://" */
+
+/*
+ * Where an option may legally appear.  An option can carry any bitwise
+ * combination -- `scope`, for instance, is accepted in both contexts
+ * with USER MAPPING winning by virtue of being applied last during
+ * resolution.
+ */
+#define CATALOG_OPT_CTX_SERVER       0x01
+#define CATALOG_OPT_CTX_USER_MAPPING 0x02
 
 typedef struct IcebergCatalogOptionDesc
 {
@@ -130,25 +167,38 @@ typedef struct IcebergCatalogOptionDesc
 	size_t		offset;			/* offsetof into RestCatalogOptions */
 	int			flags;			/* CATALOG_OPT_NONEMPTY |
 								 * CATALOG_OPT_HAS_SCHEME */
+	int			contexts;		/* CATALOG_OPT_CTX_SERVER |
+								 * CATALOG_OPT_CTX_USER_MAPPING */
 }			IcebergCatalogOptionDesc;
 
 static const IcebergCatalogOptionDesc iceberg_catalog_option_descs[] = {
 	{"rest_endpoint", CATALOG_OPT_STRING, offsetof(RestCatalogOptions, host),
-	CATALOG_OPT_NONEMPTY | CATALOG_OPT_HAS_SCHEME},
-	{"rest_auth_type", CATALOG_OPT_AUTH_TYPE, offsetof(RestCatalogOptions, authType), 0},
+		CATALOG_OPT_NONEMPTY | CATALOG_OPT_HAS_SCHEME,
+	CATALOG_OPT_CTX_SERVER},
+	{"rest_auth_type", CATALOG_OPT_AUTH_TYPE, offsetof(RestCatalogOptions, authType),
+		0,
+	CATALOG_OPT_CTX_SERVER},
 	{"oauth_endpoint", CATALOG_OPT_STRING, offsetof(RestCatalogOptions, oauthHostPath),
-	CATALOG_OPT_NONEMPTY | CATALOG_OPT_HAS_SCHEME},
+		CATALOG_OPT_NONEMPTY | CATALOG_OPT_HAS_SCHEME,
+	CATALOG_OPT_CTX_SERVER},
 	{"scope", CATALOG_OPT_STRING, offsetof(RestCatalogOptions, scope),
-	CATALOG_OPT_NONEMPTY},
-	{"enable_vended_credentials", CATALOG_OPT_BOOL, offsetof(RestCatalogOptions, enableVendedCredentials), 0},
+		CATALOG_OPT_NONEMPTY,
+	CATALOG_OPT_CTX_SERVER | CATALOG_OPT_CTX_USER_MAPPING},
+	{"enable_vended_credentials", CATALOG_OPT_BOOL, offsetof(RestCatalogOptions, enableVendedCredentials),
+		0,
+	CATALOG_OPT_CTX_SERVER},
 	{"location_prefix", CATALOG_OPT_LOCATION_PREFIX, offsetof(RestCatalogOptions, locationPrefix),
-	CATALOG_OPT_NONEMPTY | CATALOG_OPT_HAS_SCHEME},
+		CATALOG_OPT_NONEMPTY | CATALOG_OPT_HAS_SCHEME,
+	CATALOG_OPT_CTX_SERVER},
 	{"catalog_name", CATALOG_OPT_STRING, offsetof(RestCatalogOptions, catalogName),
-	CATALOG_OPT_NONEMPTY},
+		CATALOG_OPT_NONEMPTY,
+	CATALOG_OPT_CTX_SERVER},
 	{"client_id", CATALOG_OPT_STRING, offsetof(RestCatalogOptions, clientId),
-	CATALOG_OPT_NONEMPTY},
+		CATALOG_OPT_NONEMPTY,
+	CATALOG_OPT_CTX_USER_MAPPING},
 	{"client_secret", CATALOG_OPT_STRING, offsetof(RestCatalogOptions, clientSecret),
-	CATALOG_OPT_NONEMPTY},
+		CATALOG_OPT_NONEMPTY,
+	CATALOG_OPT_CTX_USER_MAPPING},
 };
 
 #define NUM_CATALOG_OPTIONS lengthof(iceberg_catalog_option_descs)
@@ -170,20 +220,31 @@ FindCatalogOptionDesc(const char *name)
 
 
 /*
- * Build the "Valid options are: ?" hint string.
+ * Build the "Valid options are: ?" hint string for the given context
+ * (either CATALOG_OPT_CTX_SERVER or CATALOG_OPT_CTX_USER_MAPPING).
+ *
+ * Only called on validator error paths, so ereport(ERROR) copies the
+ * string into ErrorContext before aborting.  CurrentMemoryContext is fine.
  */
 static const char *
-GetValidCatalogOptionsHint(void)
+GetValidCatalogOptionsHint(int contextBit)
 {
 	StringInfoData buf;
+	bool		first = true;
+
+	Assert(contextBit == CATALOG_OPT_CTX_SERVER ||
+		   contextBit == CATALOG_OPT_CTX_USER_MAPPING);
 
 	initStringInfo(&buf);
 	appendStringInfoString(&buf, "Valid options are: ");
 	for (int i = 0; i < NUM_CATALOG_OPTIONS; i++)
 	{
-		if (i > 0)
+		if (!(iceberg_catalog_option_descs[i].contexts & contextBit))
+			continue;
+		if (!first)
 			appendStringInfoString(&buf, ", ");
 		appendStringInfoString(&buf, iceberg_catalog_option_descs[i].name);
+		first = false;
 	}
 	appendStringInfoChar(&buf, '.');
 
@@ -281,7 +342,26 @@ ApplyCatalogOptionValue(RestCatalogOptions * opts,
 
 /*
  * iceberg_catalog_validator validates options for the iceberg_catalog FDW.
- * Only server-level options are supported.
+ *
+ * Options are accepted on two catalog objects:
+ *
+ *   - ForeignServerRelationId:  CREATE SERVER / ALTER SERVER OPTIONS.
+ *     Anything non-credential: rest_endpoint, rest_auth_type,
+ *     oauth_endpoint, scope, enable_vended_credentials, location_prefix,
+ *     catalog_name.
+ *
+ *   - UserMappingRelationId:    CREATE USER MAPPING / ALTER USER MAPPING
+ *     OPTIONS.  Per-user credentials: client_id, client_secret, and
+ *     optionally scope (overrides whatever is set on the server).
+ *
+ * client_id and client_secret are credentials and therefore belong on
+ * a user mapping; they may also be supplied by $PGDATA/catalogs.conf
+ * or GUCs.  Each option's descriptor carries a CATALOG_OPT_CTX_*
+ * bitmask saying where it is legal.
+ *
+ * PostgreSQL also calls the validator for CREATE FOREIGN DATA WRAPPER
+ * itself (with ForeignDataWrapperRelationId); allow empty option lists
+ * there so extension creation succeeds.
  */
 Datum
 iceberg_catalog_validator(PG_FUNCTION_ARGS)
@@ -289,20 +369,26 @@ iceberg_catalog_validator(PG_FUNCTION_ARGS)
 	List	   *options_list = untransformRelOptions(PG_GETARG_DATUM(0));
 	Oid			catalogRelId = PG_GETARG_OID(1);
 	ListCell   *cell;
+	int			contextBit;
+	const char *contextLabel;
 
-	/*
-	 * PostgreSQL calls the validator for CREATE FOREIGN DATA WRAPPER itself
-	 * (with ForeignDataWrapperRelationId), not just for CREATE SERVER.  Allow
-	 * empty option lists for non-server contexts so extension creation
-	 * succeeds, but still reject if someone passes options where they don't
-	 * belong.
-	 */
-	if (catalogRelId != ForeignServerRelationId)
+	if (catalogRelId == ForeignServerRelationId)
+	{
+		contextBit = CATALOG_OPT_CTX_SERVER;
+		contextLabel = "server";
+	}
+	else if (catalogRelId == UserMappingRelationId)
+	{
+		contextBit = CATALOG_OPT_CTX_USER_MAPPING;
+		contextLabel = "user mapping";
+	}
+	else
 	{
 		if (list_length(options_list) > 0)
 			ereport(ERROR,
 					(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
-					 errmsg("iceberg_catalog options are only valid for SERVER objects")));
+					 errmsg("iceberg_catalog options are only valid for "
+							"SERVER and USER MAPPING objects")));
 		PG_RETURN_VOID();
 	}
 
@@ -311,12 +397,12 @@ iceberg_catalog_validator(PG_FUNCTION_ARGS)
 		DefElem    *def = (DefElem *) lfirst(cell);
 		const		IcebergCatalogOptionDesc *desc = FindCatalogOptionDesc(def->defname);
 
-		if (desc == NULL)
+		if (desc == NULL || !(desc->contexts & contextBit))
 			ereport(ERROR,
 					(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
-					 errmsg("invalid option \"%s\" for iceberg_catalog server",
-							def->defname),
-					 errhint("%s", GetValidCatalogOptionsHint())));
+					 errmsg("invalid option \"%s\" for iceberg_catalog %s",
+							def->defname, contextLabel),
+					 errhint("%s", GetValidCatalogOptionsHint(contextBit))));
 
 		ValidateCatalogOptionValue(desc, def);
 	}
@@ -426,10 +512,10 @@ RejectIfModifyingBuiltinCatalogServer(const char *name, const char *operation)
 
 /*
  * ValidateIcebergCatalogServerDDL validates DDL on iceberg_catalog
- * servers and the iceberg_catalog FDW itself, and
- * extension-membership changes that affect any of these objects.
+ * servers and on user mappings that target them, the iceberg_catalog FDW itself,
+ * and extension-membership changes that affect any of these objects.
  *
- * Two layers of protection:
+ * Two layers of protection for server DDL:
  *
  * 1. Short reserved names ('postgres', 'object_store', 'rest') -- these
  *    are the user-facing catalog= values.  We block CREATE SERVER and
@@ -448,6 +534,12 @@ RejectIfModifyingBuiltinCatalogServer(const char *name, const char *operation)
  *    record the server name as a string option in ftoptions).
  *  - For user-created REST servers, ALTER SERVER OPTIONS may not change
  *    rest_endpoint while dependent iceberg tables exist.
+ *  - CREATE/ALTER USER MAPPING is rejected against the three built-in
+ *    catalog servers.  The built-in pg_lake_rest_catalog reads
+ *    credentials from GUCs only (and ignores both pg_user_mapping and
+ *    $PGDATA/catalogs.conf), while the postgres / object_store built-ins
+ *    have no notion of OAuth credentials at all.  User mappings on
+ *    user-created REST servers are unaffected.
  *  - ALTER EXTENSION ... DROP SERVER/FOREIGN DATA WRAPPER is rejected
  *    for iceberg_catalog objects, preventing detachment of the
  *    DEPENDENCY_EXTENSION edge that shields them from standalone DROP.
@@ -597,6 +689,27 @@ ValidateIcebergCatalogServerDDL(ProcessUtilityParams * processUtilityParams,
 			}
 		}
 	}
+	else if (IsA(parsetree, CreateUserMappingStmt))
+	{
+		CreateUserMappingStmt *stmt = (CreateUserMappingStmt *) parsetree;
+
+		/*
+		 * Name-only check: the three built-in long names are reserved for
+		 * iceberg_catalog servers and can never be backed by any other FDW
+		 * (the extension creates them and the CREATE SERVER guard above
+		 * blocks anyone from grabbing the name).  No GetForeignServerByName
+		 * lookup needed here.
+		 */
+		RejectIfModifyingBuiltinCatalogServer(stmt->servername,
+											  "create user mapping for");
+	}
+	else if (IsA(parsetree, AlterUserMappingStmt))
+	{
+		AlterUserMappingStmt *stmt = (AlterUserMappingStmt *) parsetree;
+
+		RejectIfModifyingBuiltinCatalogServer(stmt->servername,
+											  "alter user mapping for");
+	}
 	else if (IsA(parsetree, AlterExtensionContentsStmt))
 	{
 		AlterExtensionContentsStmt *stmt =
@@ -671,6 +784,453 @@ ValidateIcebergCatalogServerDDL(ProcessUtilityParams * processUtilityParams,
 }
 
 
+/*
+ * IsRedactableUserMappingSecret returns true for option names whose
+ * values are secrets that must never appear in queryString-derived
+ * surfaces (pg_stat_statements, log_min_duration_statement, ereport
+ * error contexts).  Kept in lockstep with the descriptor table above:
+ * any option carrying credential material should be added here as
+ * well.
+ */
+static bool
+IsRedactableUserMappingSecret(const char *name)
+{
+	return pg_strcasecmp(name, "client_id") == 0 ||
+		pg_strcasecmp(name, "client_secret") == 0;
+}
+
+
+/*
+ * IsIcebergCatalogServerByName returns true when `serverName` refers
+ * to an iceberg_catalog server.  Both shapes count:
+ *
+ *   1. Any of the three built-in long names
+ *      (pg_lake_postgres_catalog, ...).  These are reserved and only
+ *      ever back the extension's catalog servers, so we can recognise
+ *      them by name alone without a syscache lookup -- and we must,
+ *      so that we still redact the queryString for the failing
+ *      CREATE/ALTER USER MAPPING that ValidateIcebergCatalogServerDDL
+ *      is about to reject.
+ *   2. A user-created server whose FDW is iceberg_catalog.
+ *
+ * Never raises: a missing server returns false.  In that case the
+ * surrounding CREATE/ALTER USER MAPPING will itself fail in core, and
+ * we cannot know whether the user intended an iceberg_catalog target,
+ * so we leave the queryString untouched.
+ */
+static bool
+IsIcebergCatalogServerByName(const char *serverName)
+{
+	ForeignServer *server;
+	ForeignDataWrapper *fdw;
+
+	if (serverName == NULL)
+		return false;
+
+	if (IsBuiltinCatalogServerName(serverName))
+		return true;
+
+	server = GetForeignServerByName(serverName, /* missing_ok */ true);
+	if (server == NULL)
+		return false;
+
+	fdw = GetForeignDataWrapper(server->fdwid);
+	return strcmp(fdw->fdwname, ICEBERG_CATALOG_FDW_NAME) == 0;
+}
+
+
+/*
+ * RedactUserMappingSecrets overwrites secret option values in the
+ * supplied queryString in place, replacing each character between the
+ * opening and closing quote with '*'.  Callers must have already
+ * confirmed that the target server is iceberg_catalog.
+ *
+ * In-place mutation is essential: pg_stat_statements and ereport
+ * error contexts both retain the original queryString pointer.  A
+ * copy via pstrdup would be invisible to them.  By overwriting the
+ * backing buffer, every holder of the pointer sees the redacted
+ * version.  DDL execution is unaffected because CREATE/ALTER USER
+ * MAPPING reads option values from DefElem->arg, not from queryString.
+ *
+ * Each DefElem carries a parse `location` pointing at the start of
+ * its option name in queryString (see gram.y: generic_option_elem
+ * uses makeDefElem(name, value, @1)).  From there we walk forward to
+ * the opening quote of the Sconst literal and then overwrite up to
+ * (but not including) the matching closing quote.  Three string
+ * shapes are recognised:
+ *
+ *   'foo''bar'   -- plain Sconst with '' as the only escape
+ *   E'foo\nbar'  -- extended-quote string with backslash escapes
+ *   U&'foo\0021' -- unicode string with backslash unicode escapes
+ *
+ * For E'' / U&'' strings we additionally consume `\X` as a two-byte
+ * escape so that `\'` inside the literal does not look like a closing
+ * quote and leak the suffix.  String continuation across whitespace +
+ * newline (the SQL standard `'foo'\n'bar'` form) is rare in DDL
+ * OPTIONS and is not handled; only the first segment is redacted in
+ * that case.
+ */
+static void
+RedactUserMappingSecrets(const char *queryString, List *options)
+{
+	ListCell   *lc;
+	size_t		querylen;
+
+	if (queryString == NULL || options == NIL)
+		return;
+
+	querylen = strlen(queryString);
+
+	foreach(lc, options)
+	{
+		DefElem    *def = (DefElem *) lfirst(lc);
+		char	   *p;
+		char	   *qend;
+		bool		escapeStrings = false;
+
+		/* DROP options have no value to scrub. */
+		if (def->arg == NULL)
+			continue;
+
+		if (!IsRedactableUserMappingSecret(def->defname))
+			continue;
+
+		/*
+		 * Synthetic DefElems built outside the parser carry no location and
+		 * cannot be placed back into queryString.
+		 */
+		if (def->location < 0 || (size_t) def->location >= querylen)
+			continue;
+
+		p = (char *) queryString + def->location;
+		qend = (char *) queryString + querylen;
+
+		/*
+		 * Scan from the option name to the opening quote of the value,
+		 * detecting an optional E / U& prefix that enables backslash escapes
+		 * inside the literal.  Whitespace, comments and the option name
+		 * itself are skipped.
+		 */
+		while (p < qend && *p != '\'')
+		{
+			if ((*p == 'E' || *p == 'e') &&
+				p + 1 < qend && p[1] == '\'')
+			{
+				escapeStrings = true;
+				p++;
+				break;
+			}
+			if ((*p == 'U' || *p == 'u') &&
+				p + 2 < qend && p[1] == '&' && p[2] == '\'')
+			{
+				escapeStrings = true;
+				p += 2;
+				break;
+			}
+			p++;
+		}
+
+		if (p >= qend || *p != '\'')
+			continue;			/* no opening quote located */
+
+		p++;					/* skip opening quote */
+
+		while (p < qend)
+		{
+			if (*p == '\'')
+			{
+				if (p + 1 < qend && p[1] == '\'')
+				{
+					/* '' inside the value: doubled-quote escape. */
+					*p++ = '*';
+					*p++ = '*';
+					continue;
+				}
+				break;			/* closing quote: stop, leave it intact */
+			}
+
+			if (escapeStrings && *p == '\\' && p + 1 < qend)
+			{
+				/* \X inside an E'' or U&'' literal: two-byte escape. */
+				*p++ = '*';
+				*p++ = '*';
+				continue;
+			}
+
+			*p++ = '*';
+		}
+	}
+}
+
+
+/*
+ * RedactRestCatalogUserMappingSecrets is a ProcessUtility handler
+ * that detects CREATE/ALTER USER MAPPING targeting an iceberg_catalog
+ * server and scrubs secret option values (client_id, client_secret)
+ * out of the queryString in place.  Returns false so that downstream
+ * handlers (notably ValidateIcebergCatalogServerDDL) and the rest of
+ * ProcessUtility continue to run unaffected.
+ *
+ * Registered AFTER ValidateIcebergCatalogServerDDL on purpose:
+ * RegisterUtilityStatementHandler prepends to the handler list, so
+ * the last registration is the head and runs first.  Redaction must
+ * happen before the validator's ereport(ERROR), so that the failing
+ * "cannot create user mapping for the built-in ..." path never
+ * surfaces an unredacted queryString in its error context.
+ */
+bool
+RedactRestCatalogUserMappingSecrets(ProcessUtilityParams * processUtilityParams,
+									void *arg)
+{
+	Node	   *parsetree = processUtilityParams->plannedStmt->utilityStmt;
+	const char *serverName = NULL;
+	List	   *options = NIL;
+
+	if (IsA(parsetree, CreateUserMappingStmt))
+	{
+		CreateUserMappingStmt *stmt = (CreateUserMappingStmt *) parsetree;
+
+		serverName = stmt->servername;
+		options = stmt->options;
+	}
+	else if (IsA(parsetree, AlterUserMappingStmt))
+	{
+		AlterUserMappingStmt *stmt = (AlterUserMappingStmt *) parsetree;
+
+		serverName = stmt->servername;
+		options = stmt->options;
+	}
+	else
+		return false;
+
+	if (serverName == NULL || options == NIL)
+		return false;
+
+	if (!IsIcebergCatalogServerByName(serverName))
+		return false;
+
+	RedactUserMappingSecrets(processUtilityParams->queryString, options);
+
+	return false;
+}
+
+
+/*
+ * LookupUserMappingOptions returns the option list for the user mapping
+ * that applies to the current user on the given server, or NIL if none
+ * exists.  Resolution mirrors core's GetUserMapping: a mapping for the
+ * current user wins, otherwise PUBLIC (umuser = InvalidOid) is the
+ * fallback.
+ *
+ * Unlike GetUserMapping, this never raises on a miss -- the caller is
+ * expected to fall through to lower-priority credential sources
+ * (catalogs.conf, GUCs).  The matched mapping's OID is returned via
+ * *umidOut for use as part of the token cache key; *umidOut is left
+ * InvalidOid when nothing matched.
+ */
+static List *
+LookupUserMappingOptions(Oid serverOid, Oid *umidOut)
+{
+	HeapTuple	tp;
+	Datum		datum;
+	bool		isnull;
+	List	   *options = NIL;
+
+	*umidOut = InvalidOid;
+
+	tp = SearchSysCache2(USERMAPPINGUSERSERVER,
+						 ObjectIdGetDatum(GetUserId()),
+						 ObjectIdGetDatum(serverOid));
+	if (!HeapTupleIsValid(tp))
+		tp = SearchSysCache2(USERMAPPINGUSERSERVER,
+							 ObjectIdGetDatum(InvalidOid),
+							 ObjectIdGetDatum(serverOid));
+
+	if (!HeapTupleIsValid(tp))
+		return NIL;
+
+	*umidOut = ((Form_pg_user_mapping) GETSTRUCT(tp))->oid;
+
+	datum = SysCacheGetAttr(USERMAPPINGUSERSERVER, tp,
+							Anum_pg_user_mapping_umoptions, &isnull);
+	if (!isnull)
+		options = untransformRelOptions(datum);
+
+	ReleaseSysCache(tp);
+	return options;
+}
+
+
+/*
+ * ReadCatalogsConfCredentials reads $PGDATA/catalogs.conf (or whatever
+ * path the pg_lake_iceberg.catalogs_conf_path GUC points at) and
+ * extracts credentials for the given server name.
+ *
+ * The file uses PostgreSQL's standard "key = value" config grammar
+ * (ParseConfigFp), with dotted keys scoping each setting to a server:
+ *
+ *   horizon.client_id     = 'platform_id'
+ *   horizon.client_secret = 'platform_secret'
+ *   horizon.scope         = 'PRINCIPAL_ROLE:ALL'
+ *
+ * The file is re-read on every call -- catalog operations are
+ * infrequent, and the simpler "no caching" path avoids needing
+ * per-file mtime tracking or SIGHUP wiring.  *clientId, *clientSecret,
+ * *scope are written only when a matching key is found; existing
+ * values are left untouched.
+ *
+ * A missing file is treated as "no credentials, no error".  A
+ * permission or I/O error is logged at WARNING and treated likewise so
+ * one bad config file does not break the whole catalog path.
+ *
+ * Returns true iff at least one credential was extracted.
+ */
+static bool
+ReadCatalogsConfCredentials(const char *serverName,
+							char **clientId, char **clientSecret,
+							char **scope)
+{
+	char		path[MAXPGPATH];
+	FILE	   *fp;
+	ConfigVariable *head = NULL;
+	ConfigVariable *tail = NULL;
+	ConfigVariable *item;
+	bool		found = false;
+	size_t		serverNameLen;
+
+	if (CatalogsConfPath == NULL || CatalogsConfPath[0] == '\0')
+		return false;
+
+	if (is_absolute_path(CatalogsConfPath))
+		strlcpy(path, CatalogsConfPath, MAXPGPATH);
+	else if (DataDir != NULL)
+		snprintf(path, MAXPGPATH, "%s/%s", DataDir, CatalogsConfPath);
+	else
+		strlcpy(path, CatalogsConfPath, MAXPGPATH);
+
+	fp = AllocateFile(path, "r");
+	if (fp == NULL)
+	{
+		if (errno == ENOENT)
+			return false;
+		ereport(WARNING,
+				(errcode_for_file_access(),
+				 errmsg("could not open catalog config file \"%s\": %m",
+						path)));
+		return false;
+	}
+
+	(void) ParseConfigFp(fp, path, CONF_FILE_START_DEPTH, WARNING,
+						 &head, &tail);
+	FreeFile(fp);
+
+	serverNameLen = strlen(serverName);
+
+	for (item = head; item != NULL; item = item->next)
+	{
+		const char *key;
+
+		if (item->errmsg != NULL)
+			continue;
+
+		/*
+		 * Match entries of the form "<servername>.<key> = <value>".  The dot
+		 * separates the server scope from the property name; require at least
+		 * one character after the dot.
+		 */
+		if (strncmp(item->name, serverName, serverNameLen) != 0 ||
+			item->name[serverNameLen] != '.' ||
+			item->name[serverNameLen + 1] == '\0')
+			continue;
+
+		key = item->name + serverNameLen + 1;
+
+		if (strcmp(key, "client_id") == 0)
+		{
+			*clientId = pstrdup(item->value);
+			found = true;
+		}
+		else if (strcmp(key, "client_secret") == 0)
+		{
+			*clientSecret = pstrdup(item->value);
+			found = true;
+		}
+		else if (strcmp(key, "scope") == 0)
+		{
+			*scope = pstrdup(item->value);
+			found = true;
+		}
+		/* unknown keys are silently ignored -- room to grow */
+	}
+
+	FreeConfigVariables(head);
+	return found;
+}
+
+
+/*
+ * ApplyCatalogsConfOverrides overlays credentials read from
+ * catalogs.conf onto opts.  Only the credentials actually present in
+ * the file overwrite the existing fields; unset entries leave whatever
+ * lower-priority layer (server options for `scope`, GUCs for
+ * client_id/client_secret/scope) populated.
+ */
+static void
+ApplyCatalogsConfOverrides(RestCatalogOptions * opts, const char *serverName)
+{
+	char	   *clientId = NULL;
+	char	   *clientSecret = NULL;
+	char	   *scope = NULL;
+
+	if (!ReadCatalogsConfCredentials(serverName,
+									 &clientId, &clientSecret, &scope))
+		return;
+
+	if (clientId != NULL)
+		opts->clientId = clientId;
+	if (clientSecret != NULL)
+		opts->clientSecret = clientSecret;
+	if (scope != NULL)
+		opts->scope = scope;
+}
+
+
+/*
+ * ApplyUserMappingOverrides overlays credentials from pg_user_mapping
+ * onto opts and records the matched mapping's OID in opts->umid.  Has
+ * no effect if no user mapping applies; the caller may then fall back
+ * to catalogs.conf-derived or GUC-derived values.
+ *
+ * Only options carrying CATALOG_OPT_CTX_USER_MAPPING are applied here.
+ * The validator already rejects anything else at DDL time, so the
+ * defensive contexts check is just belt-and-suspenders against options
+ * that might have slipped in before this code path existed.
+ */
+static void
+ApplyUserMappingOverrides(RestCatalogOptions * opts, ForeignServer *server)
+{
+	List	   *options;
+	ListCell   *lc;
+	Oid			umid;
+
+	options = LookupUserMappingOptions(server->serverid, &umid);
+	if (options == NIL)
+		return;
+
+	opts->umid = umid;
+
+	foreach(lc, options)
+	{
+		DefElem    *def = (DefElem *) lfirst(lc);
+		const		IcebergCatalogOptionDesc *desc = FindCatalogOptionDesc(def->defname);
+
+		if (desc == NULL || !(desc->contexts & CATALOG_OPT_CTX_USER_MAPPING))
+			continue;
+
+		ApplyCatalogOptionValue(opts, desc, def);
+	}
+}
+
 
 /*
  * ApplyGUCDefaults populates opts with the current GUC values.
@@ -713,12 +1273,30 @@ ApplyServerOptionOverrides(RestCatalogOptions * opts, ForeignServer *server)
 
 
 /*
- * ValidateRestCatalogOptions checks that the resolved options have
- * the minimum required fields (e.g. rest_endpoint).
+ * ValidateRestCatalogOptions checks that the resolved options carry
+ * the minimum fields needed to talk to a REST catalog: the endpoint
+ * and the credentials required by the configured auth flow.  Running
+ * this at resolution time -- after GUCs, catalogs.conf, and the user
+ * mapping have all been folded in -- means an incompletely-configured
+ * catalog fails up front on first DML, instead of silently issuing an
+ * unauthenticated request to the OAuth endpoint.
+ *
+ * Credential requirements are auth-type specific:
+ *   OAuth2:  client_id AND client_secret (Basic auth header).
+ *   Horizon: client_secret only (carried in the form body;
+ *            client_id is intentionally ignored).
+ *
+ * FetchRestCatalogAccessToken still re-checks the fields it actually
+ * dereferences.  Those late checks are defense in depth in case any
+ * future code path constructs RestCatalogOptions without going
+ * through this resolver.
  */
 static void
 ValidateRestCatalogOptions(const RestCatalogOptions * opts, const char *catalog)
 {
+	bool		missingSecret;
+	bool		missingId;
+
 	if (opts->host == NULL || opts->host[0] == '\0')
 		ereport(ERROR,
 				(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
@@ -726,25 +1304,46 @@ ValidateRestCatalogOptions(const RestCatalogOptions * opts, const char *catalog)
 						catalog),
 				 errhint("Set the pg_lake_iceberg.rest_catalog_host GUC or "
 						 "the \"rest_endpoint\" option on the server.")));
+
+	missingSecret = (opts->clientSecret == NULL || opts->clientSecret[0] == '\0');
+	missingId = (opts->authType != REST_CATALOG_AUTH_TYPE_HORIZON) &&
+		(opts->clientId == NULL || opts->clientId[0] == '\0');
+
+	if (missingSecret || missingId)
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
+				 errmsg("no credentials found for REST catalog \"%s\"",
+						catalog),
+				 errhint("Provide client_id and client_secret via a "
+						 "USER MAPPING, $PGDATA/catalogs.conf, or the "
+						 "pg_lake_iceberg.rest_catalog_client_id / "
+						 "pg_lake_iceberg.rest_catalog_client_secret GUCs.")));
 }
 
 
 /*
  * Build RestCatalogOptions for an iceberg_catalog server.
  *
- * The built-in pg_lake_rest_catalog server and any user-created
- * iceberg_catalog REST server go through the same path: GUC defaults
- * first, then server-level options applied on top.  ALTER SERVER OPTIONS
- * is blocked on the built-in server, so in practice its option set is
- * always empty and the GUC defaults survive untouched -- which is
- * exactly the historical "GUCs-only built-in REST" behavior, now
- * reached through a single code path.
+ * Resolution proceeds from lowest to highest priority:
+ *
+ *   1. GUC defaults                       (always)
+ *   2. Server options                     (always; no-op for built-ins
+ *                                          since ALTER SERVER is blocked)
+ *   3. $PGDATA/catalogs.conf credentials  (user-created servers only)
+ *   4. pg_user_mapping options            (user-created servers only)
+ *
+ * The built-in pg_lake_rest_catalog deliberately stops after step 2.
+ * Its credentials live exclusively in pg_lake_iceberg.rest_catalog_*
+ * GUCs so the built-in catalog stays a single, global, instance-wide
+ * configuration with no hidden per-user view.  postgres / object_store
+ * never reach this function; their resolution stays in their own
+ * modules.
  *
  * `userVisibleCatalog` is the short identifier the user typed
  * (e.g. "rest" or a user server name); it is what we store in
- * opts->catalog so that error messages, the cross-catalog DML check,
- * and the token cache key all stay in user-facing terms.  The long
- * built-in server name never leaks past this function.
+ * opts->catalog so that error messages and the cross-catalog DML check
+ * stay in user-facing terms.  The long built-in server name never
+ * leaks past this function.
  */
 static RestCatalogOptions *
 BuildRestCatalogOptionsFromServer(const char *serverName,
@@ -758,9 +1357,17 @@ BuildRestCatalogOptionsFromServer(const char *serverName,
 	RestCatalogOptions *opts = palloc0(sizeof(RestCatalogOptions));
 
 	opts->serverOid = server->serverid;
+	opts->umid = InvalidOid;
 	opts->catalog = pstrdup(userVisibleCatalog);
 	ApplyGUCDefaults(opts);
 	ApplyServerOptionOverrides(opts, server);
+
+	if (!IsBuiltinCatalogServerName(serverName))
+	{
+		ApplyCatalogsConfOverrides(opts, serverName);
+		ApplyUserMappingOverrides(opts, server);
+	}
+
 	ValidateRestCatalogOptions(opts, userVisibleCatalog);
 	return opts;
 }
@@ -813,6 +1420,7 @@ CopyRestCatalogOptions(MemoryContext dst, const RestCatalogOptions * src)
 	RestCatalogOptions *copy = palloc0(sizeof(RestCatalogOptions));
 
 	copy->serverOid = src->serverOid;
+	copy->umid = src->umid;
 	copy->catalog = src->catalog ? pstrdup(src->catalog) : NULL;
 	copy->host = src->host ? pstrdup(src->host) : NULL;
 	copy->oauthHostPath = src->oauthHostPath ? pstrdup(src->oauthHostPath) : NULL;
@@ -1296,16 +1904,16 @@ ReportHTTPError(HttpResult httpResult, int level)
 
 
 /*
- * Syscache invalidation callback for pg_foreign_server changes.
- * Any ALTER/DROP SERVER blows away the entire token cache so stale
- * credentials are never reused.  The cache is rebuilt lazily on the
- * next token lookup.
+ * Syscache invalidation callback for pg_foreign_server and
+ * pg_user_mapping changes.  Any ALTER/DROP on either object blows away
+ * the entire token cache so stale credentials are never reused.  The
+ * cache is rebuilt lazily on the next token lookup.
  *
  * We ignore hashvalue and reset the whole cache rather than selectively
- * invalidating a single server's entry.  With a handful of servers and
- * infrequent ALTER SERVER, the cost of a few extra OAuth round-trips is
- * negligible compared to the complexity of tracking per-entry hash
- * values for targeted invalidation.
+ * invalidating a single server / user-mapping entry.  With a handful of
+ * servers and infrequent ALTER, the cost of a few extra OAuth round
+ * trips is negligible compared to the complexity of tracking per-entry
+ * hash values for targeted invalidation.
  */
 static void
 InvalidateRestTokenCache(Datum arg, int cacheid, uint32 hashvalue)
@@ -1336,6 +1944,9 @@ InitTokenCacheIfNeeded(void)
 		CacheRegisterSyscacheCallback(FOREIGNSERVEROID,
 									  InvalidateRestTokenCache,
 									  (Datum) 0);
+		CacheRegisterSyscacheCallback(USERMAPPINGOID,
+									  InvalidateRestTokenCache,
+									  (Datum) 0);
 		TokenCacheCallbackRegistered = true;
 	}
 
@@ -1350,7 +1961,7 @@ InitTokenCacheIfNeeded(void)
 	HASHCTL		ctl;
 
 	memset(&ctl, 0, sizeof(ctl));
-	ctl.keysize = sizeof(Oid);
+	ctl.keysize = sizeof(RestCatalogTokenCacheKey);
 	ctl.entrysize = sizeof(RestCatalogTokenCacheEntry);
 	ctl.hcxt = RestTokenCacheCtx;
 
@@ -1361,12 +1972,19 @@ InitTokenCacheIfNeeded(void)
 
 
 /*
- * Gets an access token from rest catalog. Caches the token per catalog
- * (keyed by iceberg_catalog server OID) until it is about to expire.
+ * Gets an access token from rest catalog.  Caches the token per
+ * (server, user-mapping) pair so that different SET ROLEs in the same
+ * backend each see the credentials of their own user mapping (or
+ * PUBLIC), while still letting the built-in pg_lake_rest_catalog share
+ * a single (server, InvalidOid) slot across all sessions and roles.
  */
 static char *
 GetRestCatalogAccessToken(RestCatalogOptions * opts, bool forceRefreshToken)
 {
+	RestCatalogTokenCacheKey key;
+	RestCatalogTokenCacheEntry *entry;
+	bool		found = false;
+
 	if (opts == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
@@ -1376,15 +1994,19 @@ GetRestCatalogAccessToken(RestCatalogOptions * opts, bool forceRefreshToken)
 	 * Every resolved RestCatalogOptions originates from
 	 * BuildRestCatalogOptionsFromServer, which always sets serverOid. A
 	 * missing OID would silently funnel every catalog into the same cache
-	 * slot, so trap it loudly here.
+	 * slot, so trap it loudly here.  umid is allowed to be InvalidOid: that
+	 * simply means "no user mapping contributed credentials".
 	 */
 	Assert(OidIsValid(opts->serverOid));
 
 	InitTokenCacheIfNeeded();
 
-	bool		found = false;
-	RestCatalogTokenCacheEntry *entry =
-		hash_search(RestCatalogTokenCache, &opts->serverOid, HASH_ENTER, &found);
+	memset(&key, 0, sizeof(key));	/* zero out any compiler padding so
+									 * HASH_BLOBS keys compare cleanly */
+	key.serverOid = opts->serverOid;
+	key.umid = opts->umid;
+
+	entry = hash_search(RestCatalogTokenCache, &key, HASH_ENTER, &found);
 
 	if (!found)
 	{
@@ -1432,11 +2054,21 @@ static void
 FetchRestCatalogAccessToken(RestCatalogOptions * opts, char **accessToken, int *expiresIn)
 {
 	Assert(opts->host != NULL && opts->host[0] != '\0');
+
+	/*
+	 * Defense in depth: ValidateRestCatalogOptions already rejected resolved
+	 * options without credentials at resolution time.  These checks are kept
+	 * so that any future code path that builds RestCatalogOptions outside
+	 * ResolveRestCatalogOptions still gets an actionable error before we POST
+	 * empty credentials to the OAuth endpoint.
+	 */
 	if (!opts->clientSecret || !*opts->clientSecret)
 		ereport(ERROR,
-				(errmsg("REST catalog client_secret is not configured"),
-				 errhint("Set the \"client_secret\" option on the server "
-						 "or the pg_lake_iceberg.rest_catalog_client_secret GUC.")));
+				(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
+				 errmsg("REST catalog client_secret is not configured"),
+				 errhint("Set client_secret via a USER MAPPING, "
+						 "$PGDATA/catalogs.conf, or the "
+						 "pg_lake_iceberg.rest_catalog_client_secret GUC.")));
 
 	char	   *accessTokenUrl = opts->oauthHostPath;
 
@@ -1465,9 +2097,11 @@ FetchRestCatalogAccessToken(RestCatalogOptions * opts, char **accessToken, int *
 	{
 		if (!opts->clientId || !*opts->clientId)
 			ereport(ERROR,
-					(errmsg("REST catalog client_id is not configured"),
-					 errhint("Set the \"client_id\" option on the server "
-							 "or the pg_lake_iceberg.rest_catalog_client_id GUC.")));
+					(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
+					 errmsg("REST catalog client_id is not configured"),
+					 errhint("Set client_id via a USER MAPPING, "
+							 "$PGDATA/catalogs.conf, or the "
+							 "pg_lake_iceberg.rest_catalog_client_id GUC.")));
 
 		/* Build Authorization: Basic <base64(clientId:clientSecret)> */
 		char	   *encodedAuth = EncodeBasicAuth(opts->clientId, opts->clientSecret);

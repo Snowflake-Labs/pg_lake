@@ -582,18 +582,6 @@ server_option_override_params = [
         id="rest_endpoint",
     ),
     pytest.param(
-        "client_id",
-        "pg_lake_iceberg.rest_catalog_client_id",
-        "wrong_id",
-        id="client_id",
-    ),
-    pytest.param(
-        "client_secret",
-        "pg_lake_iceberg.rest_catalog_client_secret",
-        "wrong_secret",
-        id="client_secret",
-    ),
-    pytest.param(
         "location_prefix",
         "pg_lake_iceberg.default_location_prefix",
         "s3://nonexistent-broken-bucket-xyz",
@@ -605,6 +593,9 @@ server_option_override_params = [
         None,
         id="catalog_name",
     ),
+    # client_id / client_secret are user-mapping options, not server
+    # options; see test_user_mapping_credential_overrides_guc below for
+    # the equivalent override coverage.
 ]
 
 
@@ -645,8 +636,6 @@ def test_server_option_overrides_guc(
 
     server_options = {
         "rest_endpoint": endpoint,
-        "client_id": client_id,
-        "client_secret": client_secret,
         "location_prefix": VALID_PREFIX,
     }
 
@@ -667,6 +656,13 @@ def test_server_option_overrides_guc(
         CREATE SERVER {SERVER_NAME} TYPE 'rest'
             FOREIGN DATA WRAPPER iceberg_catalog
             OPTIONS ({options_sql})
+        """,
+        superuser_conn,
+    )
+    run_command(
+        f"""
+        CREATE USER MAPPING FOR PUBLIC SERVER {SERVER_NAME}
+            OPTIONS (client_id '{client_id}', client_secret '{client_secret}')
         """,
         superuser_conn,
     )
@@ -736,6 +732,104 @@ def test_server_option_overrides_guc(
         superuser_conn.commit()
 
 
+@pytest.mark.parametrize(
+    "option_name, guc_name",
+    [
+        ("client_id", "pg_lake_iceberg.rest_catalog_client_id"),
+        ("client_secret", "pg_lake_iceberg.rest_catalog_client_secret"),
+    ],
+)
+def test_user_mapping_credential_overrides_guc(
+    installcheck,
+    superuser_conn,
+    pg_conn,
+    s3,
+    extension,
+    polaris_session,
+    create_http_helper_functions,
+    option_name,
+    guc_name,
+):
+    """
+    Credentials on a USER MAPPING win over the corresponding GUC: we
+    poison the GUC, place the correct value on the mapping, and prove
+    DML still works.  This is the resolution-order test for steps 1
+    (user mapping, highest) and 3 (GUC, lowest); catalogs.conf is
+    intentionally left out of the picture (no file present).
+    """
+    if installcheck:
+        return
+
+    creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
+    client_id = creds["credentials"]["clientId"]
+    client_secret = creds["credentials"]["clientSecret"]
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}"
+    VALID_PREFIX = f"s3://{TEST_BUCKET}/"
+
+    SERVER_NAME = f"rest_um_override_{option_name}"
+    SCHEMA_NAME = TABLE_NAMESPACE
+    TABLE_NAME = f"um_override_{option_name}"
+
+    um_options = {"client_id": client_id, "client_secret": client_secret}
+
+    run_command(f"SET {guc_name} TO 'wrong-{option_name}'", superuser_conn)
+    superuser_conn.commit()
+
+    run_command(
+        f"""
+        CREATE SERVER {SERVER_NAME} TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint '{endpoint}',
+                     location_prefix '{VALID_PREFIX}')
+        """,
+        superuser_conn,
+    )
+    um_sql = ", ".join(f"{k} '{v}'" for k, v in um_options.items())
+    run_command(
+        f"""
+        CREATE USER MAPPING FOR PUBLIC SERVER {SERVER_NAME}
+            OPTIONS ({um_sql})
+        """,
+        superuser_conn,
+    )
+    run_command(
+        f"GRANT USAGE ON FOREIGN SERVER {SERVER_NAME} TO PUBLIC",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    run_command(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA_NAME}", pg_conn)
+    pg_conn.commit()
+
+    run_command(
+        f"CREATE TABLE {SCHEMA_NAME}.{TABLE_NAME} (id bigint, value text) "
+        f"USING iceberg WITH (catalog='{SERVER_NAME}')",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"INSERT INTO {SCHEMA_NAME}.{TABLE_NAME} "
+        f"SELECT i, i::text FROM generate_series(1, 5) i",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    results = run_query(f"SELECT count(*) FROM {SCHEMA_NAME}.{TABLE_NAME}", pg_conn)
+    assert results[0][0] == 5
+
+    pg_conn.rollback()
+    run_command(f"DROP SCHEMA {SCHEMA_NAME} CASCADE", pg_conn)
+    pg_conn.commit()
+
+    superuser_conn.rollback()
+    run_command(f"DROP SERVER {SERVER_NAME} CASCADE", superuser_conn)
+    superuser_conn.commit()
+
+    run_command(f"RESET {guc_name}", superuser_conn)
+    superuser_conn.commit()
+
+
 def test_reject_modify_different_rest_catalogs_in_single_transaction(
     installcheck,
     superuser_conn,
@@ -773,9 +867,14 @@ def test_reject_modify_different_rest_catalogs_in_single_transaction(
             f"""
             CREATE SERVER {name} TYPE 'rest'
                 FOREIGN DATA WRAPPER iceberg_catalog
-                OPTIONS (rest_endpoint '{endpoint}',
-                         client_id '{client_id}',
-                         client_secret '{client_secret}')
+                OPTIONS (rest_endpoint '{endpoint}')
+            """,
+            superuser_conn,
+        )
+        run_command(
+            f"""
+            CREATE USER MAPPING FOR PUBLIC SERVER {name}
+                OPTIONS (client_id '{client_id}', client_secret '{client_secret}')
             """,
             superuser_conn,
         )
@@ -845,7 +944,7 @@ def test_reject_modify_different_rest_catalogs_in_single_transaction(
 
     superuser_conn.rollback()
     for name in ["rest_catalog_a", "rest_catalog_b"]:
-        run_command(f"DROP SERVER IF EXISTS {name}", superuser_conn)
+        run_command(f"DROP SERVER IF EXISTS {name} CASCADE", superuser_conn)
     superuser_conn.commit()
 
 
@@ -879,9 +978,14 @@ def test_multi_table_single_transaction_on_same_server(
         CREATE SERVER {SERVER_NAME} TYPE 'rest'
             FOREIGN DATA WRAPPER iceberg_catalog
             OPTIONS (rest_endpoint '{endpoint}',
-                     client_id '{client_id}',
-                     client_secret '{client_secret}',
                      location_prefix 's3://{TEST_BUCKET}')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        f"""
+        CREATE USER MAPPING FOR PUBLIC SERVER {SERVER_NAME}
+            OPTIONS (client_id '{client_id}', client_secret '{client_secret}')
         """,
         superuser_conn,
     )
@@ -935,7 +1039,7 @@ def test_multi_table_single_transaction_on_same_server(
     pg_conn.commit()
 
     superuser_conn.rollback()
-    run_command(f"DROP SERVER {SERVER_NAME}", superuser_conn)
+    run_command(f"DROP SERVER {SERVER_NAME} CASCADE", superuser_conn)
     superuser_conn.commit()
 
 
@@ -1006,7 +1110,7 @@ def test_token_cache_reuses_token_across_catalog_ops(
     pg_conn.commit()
 
 
-def test_alter_server_credentials_invalidates_token_cache(
+def test_alter_user_mapping_credentials_invalidates_token_cache(
     installcheck,
     superuser_conn,
     s3,
@@ -1016,12 +1120,17 @@ def test_alter_server_credentials_invalidates_token_cache(
     create_http_helper_functions,
 ):
     """
-    After ALTER SERVER, the cached OAuth token must be discarded so the
-    next catalog operation re-fetches it.  We verify this by enabling
-    HTTP traffic tracing and checking that a POST to .../oauth/tokens
-    appears after the ALTER SERVER (proving the cache was invalidated).
-    Test that cache is invalidated on bogus credentials (1 fetch, commit fails),
-    then cache is invalidated again on restored credentials (1 fetch, commit succeeds).
+    After ALTER USER MAPPING, the cached OAuth token must be discarded
+    so the next catalog operation re-fetches.  Credentials live on the
+    user mapping, so the relevant invalidation arm is the
+    USERMAPPINGOID syscache callback (registered next to
+    FOREIGNSERVEROID in InitTokenCacheIfNeeded).
+
+    We verify the behaviour by enabling HTTP traffic tracing and
+    counting POSTs to .../oauth/tokens around each rotation: cache is
+    invalidated on bogus credentials (1 fetch, commit fails), then
+    invalidated again on restored credentials (1 fetch, commit
+    succeeds).
     """
     if installcheck:
         return
@@ -1040,9 +1149,14 @@ def test_alter_server_credentials_invalidates_token_cache(
         CREATE SERVER {SERVER_NAME} TYPE 'rest'
             FOREIGN DATA WRAPPER iceberg_catalog
             OPTIONS (rest_endpoint '{endpoint}',
-                     client_id '{client_id}',
-                     client_secret '{client_secret}',
                      location_prefix 's3://{TEST_BUCKET}')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        f"""
+        CREATE USER MAPPING FOR PUBLIC SERVER {SERVER_NAME}
+            OPTIONS (client_id '{client_id}', client_secret '{client_secret}')
         """,
         superuser_conn,
     )
@@ -1080,12 +1194,13 @@ def test_alter_server_credentials_invalidates_token_cache(
         1 for n in superuser_conn.notices if "oauth/tokens" in n and "POST" in n
     )
     assert pre_alter_fetches == 0, (
-        f"Expected no token fetch before ALTER SERVER (token cached), "
+        f"Expected no token fetch before ALTER USER MAPPING (token cached), "
         f"got {pre_alter_fetches}. Notices:\n" + "\n".join(superuser_conn.notices)
     )
 
     run_command(
-        f"ALTER SERVER {SERVER_NAME} OPTIONS (SET client_id 'rotated-id')",
+        f"ALTER USER MAPPING FOR PUBLIC SERVER {SERVER_NAME} "
+        f"OPTIONS (SET client_id 'rotated-id')",
         superuser_conn,
     )
     superuser_conn.commit()
@@ -1110,17 +1225,18 @@ def test_alter_server_credentials_invalidates_token_cache(
     )
 
     assert commit_failed, (
-        "Expected COMMIT to fail after ALTER SERVER set bogus client_id "
+        "Expected COMMIT to fail after ALTER USER MAPPING set bogus client_id "
         "(cache should have been invalidated, forcing re-auth with bad creds)"
     )
     assert post_alter_fetches == 1, (
-        f"Expected exactly 1 token re-fetch after ALTER SERVER (cache invalidated), "
-        f"got {post_alter_fetches}. Notices ({len(post_alter_notices)}):\n"
-        + "\n".join(post_alter_notices)
+        f"Expected exactly 1 token re-fetch after ALTER USER MAPPING "
+        f"(cache invalidated), got {post_alter_fetches}. Notices "
+        f"({len(post_alter_notices)}):\n" + "\n".join(post_alter_notices)
     )
 
     run_command(
-        f"ALTER SERVER {SERVER_NAME} OPTIONS (SET client_id '{client_id}')",
+        f"ALTER USER MAPPING FOR PUBLIC SERVER {SERVER_NAME} "
+        f"OPTIONS (SET client_id '{client_id}')",
         superuser_conn,
     )
     superuser_conn.commit()
@@ -1155,7 +1271,7 @@ def test_alter_server_credentials_invalidates_token_cache(
     run_command(f"DROP SCHEMA {SCHEMA_NAME} CASCADE", superuser_conn)
     superuser_conn.commit()
 
-    run_command(f"DROP SERVER {SERVER_NAME}", superuser_conn)
+    run_command(f"DROP SERVER {SERVER_NAME} CASCADE", superuser_conn)
     superuser_conn.commit()
 
 
@@ -1190,9 +1306,14 @@ def test_drop_server_with_dependent_iceberg_table(
         f"""
         CREATE SERVER {SERVER_NAME} TYPE 'rest'
             FOREIGN DATA WRAPPER iceberg_catalog
-            OPTIONS (rest_endpoint '{endpoint}',
-                     client_id '{client_id}',
-                     client_secret '{client_secret}')
+            OPTIONS (rest_endpoint '{endpoint}')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        f"""
+        CREATE USER MAPPING FOR PUBLIC SERVER {SERVER_NAME}
+            OPTIONS (client_id '{client_id}', client_secret '{client_secret}')
         """,
         superuser_conn,
     )
@@ -1278,9 +1399,14 @@ def test_drop_owned_by_with_dependent_iceberg_table(
         f"""
         CREATE SERVER {SERVER_NAME} TYPE 'rest'
             FOREIGN DATA WRAPPER iceberg_catalog
-            OPTIONS (rest_endpoint '{endpoint}',
-                     client_id '{client_id}',
-                     client_secret '{client_secret}')
+            OPTIONS (rest_endpoint '{endpoint}')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        f"""
+        CREATE USER MAPPING FOR PUBLIC SERVER {SERVER_NAME}
+            OPTIONS (client_id '{client_id}', client_secret '{client_secret}')
         """,
         superuser_conn,
     )
@@ -1373,9 +1499,14 @@ def test_drop_server_blocks_on_active_query(
         f"""
         CREATE SERVER {SERVER_NAME} TYPE 'rest'
             FOREIGN DATA WRAPPER iceberg_catalog
-            OPTIONS (rest_endpoint '{endpoint}',
-                     client_id '{client_id}',
-                     client_secret '{client_secret}')
+            OPTIONS (rest_endpoint '{endpoint}')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        f"""
+        CREATE USER MAPPING FOR PUBLIC SERVER {SERVER_NAME}
+            OPTIONS (client_id '{client_id}', client_secret '{client_secret}')
         """,
         superuser_conn,
     )
@@ -1484,10 +1615,15 @@ def test_reject_writable_table_on_server_with_catalog_name(
         CREATE SERVER {SERVER_NAME} TYPE 'rest'
             FOREIGN DATA WRAPPER iceberg_catalog
             OPTIONS (rest_endpoint '{endpoint}',
-                     client_id '{client_id}',
-                     client_secret '{client_secret}',
                      catalog_name '{server_params.PG_DATABASE}',
                      location_prefix 's3://{TEST_BUCKET}')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        f"""
+        CREATE USER MAPPING FOR PUBLIC SERVER {SERVER_NAME}
+            OPTIONS (client_id '{client_id}', client_secret '{client_secret}')
         """,
         superuser_conn,
     )
@@ -1514,7 +1650,7 @@ def test_reject_writable_table_on_server_with_catalog_name(
     pg_conn.rollback()
 
     superuser_conn.rollback()
-    run_command(f"DROP SERVER {SERVER_NAME}", superuser_conn)
+    run_command(f"DROP SERVER {SERVER_NAME} CASCADE", superuser_conn)
     superuser_conn.commit()
 
 
@@ -1549,9 +1685,14 @@ def test_alter_server_add_catalog_name_does_not_reroute_writable_table(
         CREATE SERVER {SERVER_NAME} TYPE 'rest'
             FOREIGN DATA WRAPPER iceberg_catalog
             OPTIONS (rest_endpoint '{endpoint}',
-                     client_id '{client_id}',
-                     client_secret '{client_secret}',
                      location_prefix 's3://{TEST_BUCKET}')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        f"""
+        CREATE USER MAPPING FOR PUBLIC SERVER {SERVER_NAME}
+            OPTIONS (client_id '{client_id}', client_secret '{client_secret}')
         """,
         superuser_conn,
     )
@@ -1594,7 +1735,7 @@ def test_alter_server_add_catalog_name_does_not_reroute_writable_table(
     run_command(f"DROP SCHEMA {SCHEMA_NAME} CASCADE", superuser_conn)
     superuser_conn.commit()
 
-    run_command(f"DROP SERVER {SERVER_NAME}", superuser_conn)
+    run_command(f"DROP SERVER {SERVER_NAME} CASCADE", superuser_conn)
     superuser_conn.commit()
 
 
@@ -1629,9 +1770,14 @@ def test_alter_server_rest_endpoint_blocked_with_dependent_tables(
         CREATE SERVER {SERVER_NAME} TYPE 'rest'
             FOREIGN DATA WRAPPER iceberg_catalog
             OPTIONS (rest_endpoint '{endpoint}',
-                     client_id '{client_id}',
-                     client_secret '{client_secret}',
                      location_prefix 's3://{TEST_BUCKET}')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        f"""
+        CREATE USER MAPPING FOR PUBLIC SERVER {SERVER_NAME}
+            OPTIONS (client_id '{client_id}', client_secret '{client_secret}')
         """,
         superuser_conn,
     )
@@ -1656,8 +1802,11 @@ def test_alter_server_rest_endpoint_blocked_with_dependent_tables(
     assert "dependent iceberg tables" in str(err)
     superuser_conn.rollback()
 
+    # Confirm a non-endpoint server-level ALTER still works while
+    # dependent tables exist (scope is a SERVER-context option, so the
+    # rest_endpoint guard above does not fire on it).
     run_command(
-        f"ALTER SERVER {SERVER_NAME} OPTIONS (SET client_id '{client_id}')",
+        f"ALTER SERVER {SERVER_NAME} OPTIONS (ADD scope 'PRINCIPAL_ROLE:ALL')",
         superuser_conn,
     )
     superuser_conn.commit()
@@ -1675,7 +1824,7 @@ def test_alter_server_rest_endpoint_blocked_with_dependent_tables(
     ), "ALTER SERVER rest_endpoint should succeed after dependent tables are dropped"
     superuser_conn.rollback()
 
-    run_command(f"DROP SERVER {SERVER_NAME}", superuser_conn)
+    run_command(f"DROP SERVER {SERVER_NAME} CASCADE", superuser_conn)
     superuser_conn.commit()
 
 
@@ -1732,9 +1881,14 @@ def test_table_catalog_name_overrides_server(
         CREATE SERVER {SERVER_NAME} TYPE 'rest'
             FOREIGN DATA WRAPPER iceberg_catalog
             OPTIONS (rest_endpoint '{endpoint}',
-                     client_id '{client_id}',
-                     client_secret '{client_secret}',
                      catalog_name 'nonexistent_catalog')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        f"""
+        CREATE USER MAPPING FOR PUBLIC SERVER {SERVER_NAME}
+            OPTIONS (client_id '{client_id}', client_secret '{client_secret}')
         """,
         superuser_conn,
     )
@@ -1762,5 +1916,5 @@ def test_table_catalog_name_overrides_server(
     pg_conn.commit()
 
     superuser_conn.rollback()
-    run_command(f"DROP SERVER {SERVER_NAME}", superuser_conn)
+    run_command(f"DROP SERVER {SERVER_NAME} CASCADE", superuser_conn)
     superuser_conn.commit()
