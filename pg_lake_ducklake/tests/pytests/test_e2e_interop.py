@@ -1099,5 +1099,72 @@ def test_pg_schema_rename_propagates(pg_cursor, s3):
     pg_cursor.connection.commit()
 
 
+@pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="DuckDB not installed")
+def test_duckdb_merge_adjacent_then_pg_reads(pg_cursor, s3):
+    """
+    Two PG-side INSERTs land in two parquet files. DuckDB compacts
+    them with ducklake_merge_adjacent_files, which end-snapshots the
+    two source data_file rows and adds one new merged data_file row
+    plus two ducklake_files_scheduled_for_deletion entries. PG-side
+    reads must surface the merged file (3 rows), not the two now-
+    historical ones.
+    """
+    location = f"s3://{TEST_BUCKET}/duck_compact"
+    pg_cursor.execute("DROP TABLE IF EXISTS duck_compact")
+    pg_cursor.execute(
+        f"""
+        CREATE TABLE duck_compact (id INT, val TEXT)
+            USING ducklake WITH (location = '{location}')
+        """
+    )
+    pg_cursor.execute("INSERT INTO duck_compact VALUES (1, 'a')")
+    pg_cursor.execute("INSERT INTO duck_compact VALUES (2, 'b'), (3, 'c')")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        "SELECT count(*) FROM lake_ducklake.data_file df "
+        "JOIN lake_ducklake.\"table\" t USING (table_id) "
+        "WHERE t.table_name = 'duck_compact' AND df.end_snapshot IS NULL"
+    )
+    assert pg_cursor.fetchone()[0] == 2, "expected two live data files before compaction"
+
+    duck = duckdb.connect()
+    duck.execute("INSTALL postgres")
+    duck.execute("LOAD postgres")
+    duck.execute("INSTALL ducklake FROM core_nightly")
+    duck.execute("LOAD ducklake")
+    duck.execute(
+        f"""
+        CREATE SECRET s3test (TYPE S3, KEY_ID 'testing', SECRET 'testing',
+                              ENDPOINT 'localhost:5999',
+                              SCOPE 's3://{TEST_BUCKET}', URL_STYLE 'path',
+                              USE_SSL false)
+        """
+    )
+    conn = (
+        f"host={server_params.PG_HOST} port={server_params.PG_PORT} "
+        f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
+    )
+    duck.execute(
+        f"ATTACH 'postgres:{conn}' AS dl "
+        f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
+    )
+
+    duck.execute("CALL ducklake_merge_adjacent_files('dl')")
+
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        "SELECT count(*) FROM lake_ducklake.data_file df "
+        "JOIN lake_ducklake.\"table\" t USING (table_id) "
+        "WHERE t.table_name = 'duck_compact' AND df.end_snapshot IS NULL"
+    )
+    live_after = pg_cursor.fetchone()[0]
+    assert live_after >= 1, "compaction must leave at least one live data file"
+
+    pg_cursor.execute("SELECT id, val FROM duck_compact ORDER BY id")
+    assert pg_cursor.fetchall() == [(1, "a"), (2, "b"), (3, "c")]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])

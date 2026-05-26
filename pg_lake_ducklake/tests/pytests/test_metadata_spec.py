@@ -177,27 +177,22 @@ def test_primary_keys_exist(pg_cursor):
 
 def test_foreign_keys_exist(pg_cursor):
     """
-    Verify referential integrity constraints.
-
-    The DuckLake catalog versions schema/table/view by (id,
-    begin_snapshot), so child tables intentionally don't carry hard FKs
-    against those (a single-column FK can't reach a composite PK and
-    versioned entities don't behave like classic FK targets anyway).
-    The ones we keep are non-versioned: snapshot_changes -> snapshot,
-    delete_file -> data_file, and partition_column -> partition_info.
+    DuckLake's compaction and vacuum issue DELETEs against parent
+    catalog tables (data_file, snapshot, partition_info, …) before
+    cleaning up dependents. Hard FKs would short-circuit those flows
+    on Postgres in a way DuckLake's own catalogs (which carry no FKs)
+    don't, so we intentionally don't declare any either.
     """
     pg_cursor.execute("""
         SELECT COUNT(*)
-        FROM information_schema.table_constraints tc
-        JOIN information_schema.key_column_usage kcu
-          ON tc.constraint_name = kcu.constraint_name
-        WHERE tc.table_schema = 'lake_ducklake'
-        AND tc.table_name = 'delete_file'
-        AND tc.constraint_type = 'FOREIGN KEY'
-        AND kcu.column_name = 'data_file_id'
+        FROM information_schema.table_constraints
+        WHERE table_schema = 'lake_ducklake'
+        AND constraint_type = 'FOREIGN KEY'
     """)
-    count = pg_cursor.fetchone()[0]
-    assert count > 0, "delete_file missing foreign key to data_file"
+    assert pg_cursor.fetchone()[0] == 0, (
+        "lake_ducklake catalog must declare no foreign keys; "
+        "DuckLake-side DELETEs assume FK-free schema"
+    )
 
 
 def test_schema_table_structure(pg_cursor):

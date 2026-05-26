@@ -30,9 +30,11 @@ CREATE TABLE lake_ducklake.snapshot (
     next_file_id BIGINT
 );
 
--- Snapshot change tracking for audit/CDC
+-- Snapshot change tracking for audit/CDC. No FKs to lake_ducklake.snapshot:
+-- DuckLake's compaction / vacuum operations DELETE from a parent table
+-- before its dependents and rely on no FK getting in the way.
 CREATE TABLE lake_ducklake.snapshot_changes (
-    snapshot_id BIGINT PRIMARY KEY REFERENCES lake_ducklake.snapshot(snapshot_id),
+    snapshot_id BIGINT PRIMARY KEY,
     changes_made VARCHAR,
     author VARCHAR,
     commit_message VARCHAR,
@@ -134,7 +136,7 @@ CREATE TABLE lake_ducklake.delete_file (
     table_id BIGINT,
     begin_snapshot BIGINT,
     end_snapshot BIGINT,
-    data_file_id BIGINT REFERENCES lake_ducklake.data_file(data_file_id),
+    data_file_id BIGINT,
     path VARCHAR,
     path_is_relative BOOLEAN DEFAULT true,
     format VARCHAR DEFAULT 'parquet',
@@ -191,7 +193,7 @@ CREATE TABLE lake_ducklake.table_column_stats (
 
 -- Per-file column statistics
 CREATE TABLE lake_ducklake.file_column_stats (
-    data_file_id BIGINT REFERENCES lake_ducklake.data_file(data_file_id),
+    data_file_id BIGINT,
     table_id BIGINT,
     column_id BIGINT,
     column_size_bytes BIGINT,
@@ -218,7 +220,7 @@ CREATE TABLE lake_ducklake.partition_info (
 
 -- Partition columns (which columns are used for partitioning)
 CREATE TABLE lake_ducklake.partition_column (
-    partition_id BIGINT REFERENCES lake_ducklake.partition_info(partition_id),
+    partition_id BIGINT,
     table_id BIGINT,
     partition_key_index BIGINT,
     column_id BIGINT,
@@ -228,7 +230,7 @@ CREATE TABLE lake_ducklake.partition_column (
 
 -- File partition values
 CREATE TABLE lake_ducklake.file_partition_value (
-    data_file_id BIGINT REFERENCES lake_ducklake.data_file(data_file_id),
+    data_file_id BIGINT,
     table_id BIGINT,
     partition_key_index BIGINT,
     partition_value VARCHAR,
@@ -248,7 +250,7 @@ CREATE TABLE lake_ducklake.column_mapping (
 
 -- Name mapping (field ID to name mapping)
 CREATE TABLE lake_ducklake.name_mapping (
-    mapping_id BIGINT REFERENCES lake_ducklake.column_mapping(mapping_id),
+    mapping_id BIGINT,
     column_id BIGINT,
     source_name VARCHAR,
     target_field_id BIGINT,
