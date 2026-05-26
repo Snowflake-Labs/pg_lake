@@ -163,18 +163,44 @@ CreatePgLakeTableCheckUnsupportedFeaturesPostProcess(ProcessUtilityParams * para
 
 	/* cannot use geometry without pg_lake_spatial */
 	ErrorIfUsingGeometryWithoutSpatialAnalytics(createStmt->base.tableElts);
+}
 
-	/* Register DuckLake tables in metadata catalog */
-	if (tableType == PG_LAKE_DUCKLAKE_TABLE_TYPE)
-	{
-		Oid			relationId = RangeVarGetRelid(createStmt->base.relation, NoLock, false);
-		char	   *schemaName = get_namespace_name(get_rel_namespace(relationId));
-		char	   *tableName = get_rel_name(relationId);
-		DefElem    *locationOption = GetOption(options, "location");
-		char	   *location = locationOption ? defGetString(locationOption) : NULL;
 
-		DucklakeRegisterTable(schemaName, tableName, location, relationId);
-	}
+/*
+ * CreateDucklakeTablePostProcess registers a freshly-created DuckLake
+ * foreign table in the lake_ducklake.* catalog. Distinct from the
+ * generic post-process above because IsCreateLakeTable is intentionally
+ * narrow ("tables backed by parquet/csv/etc.") and excludes DuckLake.
+ */
+void
+CreateDucklakeTablePostProcess(ProcessUtilityParams * params, void *arg)
+{
+	PlannedStmt *plannedStmt = params->plannedStmt;
+	CreateForeignTableStmt *createStmt;
+	Oid			relationId;
+	char	   *schemaName;
+	char	   *tableName;
+	DefElem    *locationOption;
+	char	   *location;
+
+	if (!IsA(plannedStmt->utilityStmt, CreateForeignTableStmt))
+		return;
+
+	createStmt = (CreateForeignTableStmt *) plannedStmt->utilityStmt;
+
+	if (!IsPgLakeDucklakeServerName(createStmt->servername))
+		return;
+
+	if (DucklakeInDDLReplay)
+		return;
+
+	relationId = RangeVarGetRelid(createStmt->base.relation, NoLock, false);
+	schemaName = get_namespace_name(get_rel_namespace(relationId));
+	tableName = get_rel_name(relationId);
+	locationOption = GetOption(createStmt->options, "location");
+	location = locationOption ? defGetString(locationOption) : NULL;
+
+	DucklakeRegisterTable(schemaName, tableName, location, relationId);
 }
 
 
@@ -1346,9 +1372,7 @@ IsCreateLakeTable(CreateForeignTableStmt *createStmt)
 		GetForeignDataWrapper(foreignServer->fdwid);
 
 	/* Check if it's any of our lake FDWs */
-	if (strncasecmp(foreignDataWrapper->fdwname, PG_LAKE_TABLE, strlen(PG_LAKE_TABLE)) != 0 &&
-		strncasecmp(foreignDataWrapper->fdwname, "pg_lake_iceberg", 15) != 0 &&
-		strncasecmp(foreignDataWrapper->fdwname, "pg_lake_ducklake", 16) != 0)
+	if (strncasecmp(foreignDataWrapper->fdwname, PG_LAKE_TABLE, strlen(PG_LAKE_TABLE)) != 0)
 	{
 		/* not our FDW */
 		return false;

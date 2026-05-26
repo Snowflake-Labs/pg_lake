@@ -3,4 +3,4 @@ default_version = '3.4'
 module_pathname = '$libdir/pg_lake_ducklake'
 relocatable = false
 schema = pg_catalog
-requires = 'pg_lake_engine'
+requires = 'pg_lake'

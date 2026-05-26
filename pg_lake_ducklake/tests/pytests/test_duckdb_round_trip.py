@@ -352,6 +352,57 @@ def test_file_column_stats_match_parquet(pg_cursor, s3):
 
 
 @pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="duckdb python module not installed")
+def test_file_column_stats_extended_fields(pg_cursor, s3):
+    """
+    DuckLake v1's file_column_stats has column_size_bytes / value_count /
+    null_count alongside min/max. We populate them from DuckDB's COPY
+    return_stats payload — pin them so a future regression doesn't
+    silently revert them to NULL.
+    """
+    location = _location("rt_stats_ext")
+    pg_cursor.execute("DROP TABLE IF EXISTS rt_stats_ext")
+    pg_cursor.execute(
+        f"""
+        CREATE TABLE rt_stats_ext (id INT, label TEXT)
+            USING ducklake WITH (location = '{location}')
+        """
+    )
+    # Mix of NULL and non-NULL values so null_count is not zero, value_count
+    # excludes NULLs, and column_size_bytes is positive.
+    pg_cursor.execute(
+        "INSERT INTO rt_stats_ext VALUES (1, 'a'), (2, NULL), (3, 'c'), (NULL, 'd')"
+    )
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        """
+        SELECT c.column_name,
+               fcs.column_size_bytes,
+               fcs.value_count,
+               fcs.null_count
+          FROM lake_ducklake.file_column_stats fcs
+          JOIN lake_ducklake.data_file df USING (data_file_id)
+          JOIN lake_ducklake.table t ON t.table_id = df.table_id
+          JOIN lake_ducklake.column c
+            ON c.column_id = fcs.column_id AND c.end_snapshot IS NULL
+         WHERE t.table_name = 'rt_stats_ext'
+         ORDER BY c.column_order
+        """
+    )
+    rows = {r[0]: (r[1], r[2], r[3]) for r in pg_cursor.fetchall()}
+    assert set(rows.keys()) == {"id", "label"}, rows
+
+    for col, (size_bytes, value_count, null_count) in rows.items():
+        # All three should be populated, not NULL.
+        assert size_bytes is not None and size_bytes > 0, (col, size_bytes)
+        assert value_count is not None, (col, value_count)
+        assert null_count is not None, (col, null_count)
+        # value_count excludes NULLs; we inserted 4 rows with one NULL each.
+        assert value_count == 3, (col, value_count)
+        assert null_count == 1, (col, null_count)
+
+
+@pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="duckdb python module not installed")
 def test_table_stats_rolls_up_after_writes(pg_cursor, s3):
     """
     After every INSERT and TRUNCATE, lake_ducklake.table_stats must
@@ -808,3 +859,177 @@ def test_create_table_captures_postgres_defaults(pg_cursor, s3):
     assert rows["label"] == ("unknown", "unknown", "literal"), rows["label"]
     assert rows["qty"] == ("42", "42", "literal"), rows["qty"]
     assert rows["note"] == (None, None, None), rows["note"]
+
+
+def test_table_column_stats_carries_single_file_minmax(pg_cursor, s3):
+    """
+    After a single-INSERT table is written, table_column_stats carries
+    the single file's per-column min/max bounds verbatim. After a
+    second INSERT, the multi-file aggregate falls back to NULL because
+    text-domain aggregation would mis-prune numerics. Both branches
+    keep one row per (table_id, column_id) so DuckDB's
+    GetGlobalTableStats LEFT JOIN doesn't NULL-deref column_id.
+    """
+    location = _location("rt_tcs")
+    pg_cursor.execute("DROP TABLE IF EXISTS rt_tcs")
+    pg_cursor.execute(
+        f"""
+        CREATE TABLE rt_tcs (id INT, label TEXT)
+            USING ducklake WITH (location = '{location}')
+        """
+    )
+    pg_cursor.execute("INSERT INTO rt_tcs VALUES (1, 'apple'), (5, 'cherry')")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        """
+        SELECT c.column_name, tcs.min_value, tcs.max_value
+          FROM lake_ducklake.table_column_stats tcs
+          JOIN lake_ducklake.column c USING (column_id)
+          JOIN lake_ducklake.table t ON c.table_id = t.table_id
+         WHERE t.table_name = 'rt_tcs' AND c.end_snapshot IS NULL
+         ORDER BY c.column_order
+        """
+    )
+    rows = {r[0]: (r[1], r[2]) for r in pg_cursor.fetchall()}
+
+    # After one INSERT, table_column_stats carries the file's min/max
+    assert rows["id"] == ("1", "5"), rows["id"]
+    assert rows["label"] == ("apple", "cherry"), rows["label"]
+
+    # Add a second INSERT — multi-file aggregate must drop to NULL
+    pg_cursor.execute("INSERT INTO rt_tcs VALUES (10, 'date')")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        """
+        SELECT c.column_name, tcs.min_value, tcs.max_value
+          FROM lake_ducklake.table_column_stats tcs
+          JOIN lake_ducklake.column c USING (column_id)
+          JOIN lake_ducklake.table t ON c.table_id = t.table_id
+         WHERE t.table_name = 'rt_tcs' AND c.end_snapshot IS NULL
+         ORDER BY c.column_order
+        """
+    )
+    rows2 = {r[0]: (r[1], r[2]) for r in pg_cursor.fetchall()}
+    assert rows2["id"] == (None, None), rows2["id"]
+    assert rows2["label"] == (None, None), rows2["label"]
+
+    # And the row-per-(table_id, column_id) invariant still holds
+    pg_cursor.execute(
+        """
+        SELECT count(*)
+          FROM lake_ducklake.table_column_stats tcs
+          JOIN lake_ducklake.table t ON tcs.table_id = t.table_id
+         WHERE t.table_name = 'rt_tcs'
+        """
+    )
+    assert pg_cursor.fetchone()[0] == 2, "one row per column expected"
+
+
+@pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="duckdb python module not installed")
+def test_pg_update_replaces_old_rows(pg_cursor, s3):
+    """
+    PG-side UPDATE on a DuckLake table must not double-count rows.
+    Whether the writer chose copy-on-write (entire source file rewritten
+    minus the deleted rows) or merge-on-read (a position-delete file
+    pointing back at the source data_file_id), a subsequent SELECT must
+    return only the post-update view.
+    """
+    location = _location("rt_update")
+    pg_cursor.execute("DROP TABLE IF EXISTS rt_update")
+    pg_cursor.execute(
+        f"""
+        CREATE TABLE rt_update (x INT, y INT)
+            USING ducklake WITH (location = '{location}')
+        """
+    )
+    pg_cursor.execute("INSERT INTO rt_update VALUES (1, 7), (3, 7)")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute("SELECT x, y FROM rt_update ORDER BY x")
+    assert pg_cursor.fetchall() == [(1, 7), (3, 7)]
+
+    pg_cursor.execute("UPDATE rt_update SET y = 4")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute("SELECT x, y FROM rt_update ORDER BY x")
+    assert pg_cursor.fetchall() == [(1, 4), (3, 4)]
+    pg_cursor.execute("SELECT count(*) FROM rt_update")
+    assert pg_cursor.fetchone()[0] == 2
+
+    # When merge-on-read is the chosen path, the delete file must be
+    # linked to its source data_file_id so compaction/snapshot expiry
+    # can reason about it. (Copy-on-write writes no delete file at all,
+    # so we only assert when one exists.)
+    pg_cursor.execute(
+        """
+        SELECT df.data_file_id
+          FROM lake_ducklake.delete_file df
+          JOIN lake_ducklake.table t USING (table_id)
+         WHERE t.table_name = 'rt_update' AND df.end_snapshot IS NULL
+        """
+    )
+    delete_rows = pg_cursor.fetchall()
+    for (data_file_id,) in delete_rows:
+        assert data_file_id is not None, (
+            "delete file is missing the link back to its source data_file_id"
+        )
+
+
+@pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="duckdb python module not installed")
+def test_pg_partial_update_uses_position_deletes(pg_cursor, s3):
+    """
+    Below the copy-on-write threshold (default 20% of rows updated),
+    pg_lake should use merge-on-read: a position-delete file is added
+    pointing back at the source data file's data_file_id, plus a new
+    data file with the updated rows. Pinning this exercises the path
+    DucklakeAddDeleteFile + the DATA_FILE_ADD_DELETE_MAPPING resolver
+    that fills in data_file_id.
+    """
+    location = _location("rt_update_partial")
+    pg_cursor.execute("DROP TABLE IF EXISTS rt_update_partial")
+    pg_cursor.execute(
+        f"""
+        CREATE TABLE rt_update_partial (x INT, y INT)
+            USING ducklake WITH (location = '{location}')
+        """
+    )
+    # 100 rows so a 1-row update is well under the 20% COW threshold.
+    pg_cursor.execute(
+        "INSERT INTO rt_update_partial SELECT g, g FROM generate_series(1,100) g"
+    )
+    pg_cursor.connection.commit()
+
+    # Sanity: read should see 100 rows after a fresh insert.
+    pg_cursor.execute("SELECT count(*) FROM rt_update_partial")
+    assert pg_cursor.fetchone()[0] == 100, "INSERT path is broken; can't test UPDATE"
+
+    pg_cursor.execute("UPDATE rt_update_partial SET y = -1 WHERE x = 42")
+    pg_cursor.connection.commit()
+
+    # Check the catalog state directly first; the FDW scan path may
+    # have a separate bug we don't want to mask the metadata bug with.
+    pg_cursor.execute(
+        """
+        SELECT df.path, df.data_file_id, df.delete_count
+          FROM lake_ducklake.delete_file df
+          JOIN lake_ducklake.table t USING (table_id)
+         WHERE t.table_name = 'rt_update_partial' AND df.end_snapshot IS NULL
+        """
+    )
+    rows = pg_cursor.fetchall()
+    assert len(rows) >= 1, "expected at least one position-delete file row"
+    for path, data_file_id, delete_count in rows:
+        assert data_file_id is not None, (
+            f"delete_file row {path} missing source data_file_id link"
+        )
+        assert delete_count >= 1, (path, delete_count)
+
+    pg_cursor.execute("SELECT count(*) FROM rt_update_partial")
+    assert pg_cursor.fetchone()[0] == 100, "row count must not double after merge-on-read UPDATE"
+
+    pg_cursor.execute(
+        "SELECT y FROM rt_update_partial WHERE x = 42"
+    )
+    assert pg_cursor.fetchone()[0] == -1

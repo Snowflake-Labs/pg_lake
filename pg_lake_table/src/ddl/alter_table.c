@@ -348,32 +348,41 @@ ProcessAlterTable(ProcessUtilityParams * processUtilityParams, void *arg)
 	/*
 	 * Handle DuckLake ALTER TABLE operations.
 	 * Update lake_ducklake.column table for ADD/DROP COLUMN.
+	 *
+	 * Skipped when pg_lake_ducklake.in_ddl_replay = on: that
+	 * means we got here because the snapshot_changes-based
+	 * replay trigger fired ALTER FOREIGN TABLE … ADD/DROP COLUMN
+	 * to bring pg_attribute into sync after a DuckDB-side
+	 * column ALTER, and the catalog is already up to date.
 	 */
 	if (isDucklakeTable)
 	{
-		ListCell   *cmdCell;
-
-		foreach(cmdCell, alterStmt->cmds)
+		if (!DucklakeInDDLReplay)
 		{
-			AlterTableCmd *cmd = lfirst(cmdCell);
+			ListCell   *cmdCell;
 
-			if (cmd->subtype == AT_AddColumn)
+			foreach(cmdCell, alterStmt->cmds)
 			{
-				ColumnDef  *colDef = castNode(ColumnDef, cmd->def);
-				int32		typmod = 0;
-				Oid			typeOid = InvalidOid;
+				AlterTableCmd *cmd = lfirst(cmdCell);
 
-				typenameTypeIdAndMod(NULL, colDef->typeName, &typeOid, &typmod);
+				if (cmd->subtype == AT_AddColumn)
+				{
+					ColumnDef  *colDef = castNode(ColumnDef, cmd->def);
+					int32		typmod = 0;
+					Oid			typeOid = InvalidOid;
 
-				/* Convert PostgreSQL type to DuckLake type string */
-				char	   *duckType = format_type_be(typeOid);
+					typenameTypeIdAndMod(NULL, colDef->typeName, &typeOid, &typmod);
 
-				DucklakeAddColumn(relationId, colDef->colname, duckType,
-								  !colDef->is_not_null);
-			}
-			else if (cmd->subtype == AT_DropColumn)
-			{
-				DucklakeDropColumn(relationId, cmd->name);
+					/* Convert PostgreSQL type to DuckLake type string */
+					char	   *duckType = format_type_be(typeOid);
+
+					DucklakeAddColumn(relationId, colDef->colname, duckType,
+									  !colDef->is_not_null);
+				}
+				else if (cmd->subtype == AT_DropColumn)
+				{
+					DucklakeDropColumn(relationId, cmd->name);
+				}
 			}
 		}
 	}
@@ -748,10 +757,46 @@ PostProcessRenameWritablePgLakeTable(ProcessUtilityParams * params, void *arg)
 	/*
 	 * Handle DuckLake table column renames.
 	 * Update the column name in lake_ducklake.column table.
+	 *
+	 * Skip when in_ddl_replay is on (we're applying a DuckDB-side
+	 * RENAME COLUMN to pg_attribute and the catalog is already in
+	 * sync; calling DucklakeRenameColumn here would create a duplicate
+	 * version row).
 	 */
 	if (isDucklakeTable && renameStmt->renameType == OBJECT_COLUMN)
 	{
-		DucklakeRenameColumn(relationId, renameStmt->subname, renameStmt->newname);
+		if (!DucklakeInDDLReplay)
+			DucklakeRenameColumn(relationId, renameStmt->subname, renameStmt->newname);
+	}
+
+	/*
+	 * Handle DuckLake table renames. For OBJECT_TABLE / OBJECT_FOREIGN_TABLE
+	 * the OLD name lives on renameStmt->relation->relname (subname is
+	 * NULL for table renames); newname is the target. namespaceId is the
+	 * resolved schema of the target relation, which doesn't change on a
+	 * plain RENAME, so pass its name explicitly because by the time this
+	 * hook fires PostgreSQL has already renamed pg_class so a name-based
+	 * lookup via the relation OID would miss the old catalog row.
+	 *
+	 * We skip this when pg_lake_ducklake.in_ddl_replay is on: that
+	 * means we got here because the ducklake_table_insert trigger
+	 * issued ALTER FOREIGN TABLE … RENAME TO … to propagate a
+	 * DuckDB-driven rename, and the catalog already has the new
+	 * version row. Re-applying the rename here would insert a second
+	 * one and bump the snapshot for nothing.
+	 */
+	if (isDucklakeTable &&
+		(renameStmt->renameType == OBJECT_TABLE ||
+		 renameStmt->renameType == OBJECT_FOREIGN_TABLE))
+	{
+		if (!DucklakeInDDLReplay)
+		{
+			char	   *schemaName = get_namespace_name(namespaceId);
+			const char *oldName = renameStmt->relation ? renameStmt->relation->relname : NULL;
+
+			if (schemaName != NULL && oldName != NULL)
+				DucklakeRenameTable(schemaName, oldName, renameStmt->newname);
+		}
 	}
 }
 

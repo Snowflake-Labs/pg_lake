@@ -66,6 +66,23 @@ typedef struct DataFileColumnStats
 
 	/* upper bound of the column in text representation of the field's type */
 	char	   *upperBoundText;
+
+	/*
+	 * Extended per-column-per-file stats sourced from DuckDB's
+	 * return_stats payload (column_size_bytes / null_count / num_values).
+	 * -1 means "unknown" — palloc0 zeros, so each construction site that
+	 * doesn't know these stats must keep them at -1, while construction
+	 * sites that DO know set the actual value (including 0).
+	 */
+	int64		columnSizeBytes;
+	int64		nullCount;
+	int64		valueCount;
+
+	/*
+	 * Tri-state NaN indicator. -1 = unknown (DuckDB didn't emit has_nan
+	 * for this column type), 0 = no NaN observed, 1 = at least one NaN.
+	 */
+	int8		containsNan;
 }			DataFileColumnStats;
 
  /*

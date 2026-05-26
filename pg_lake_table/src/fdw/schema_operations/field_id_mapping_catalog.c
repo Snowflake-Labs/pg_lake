@@ -49,7 +49,10 @@
 #include "pg_lake/pgduck/serialize.h"
 #include "pg_lake/util/array_utils.h"
 #include "pg_lake/util/rel_utils.h"
+#include "pg_lake/ducklake/catalog.h"
 #include "pg_extension_base/spi_helpers.h"
+#include "executor/spi.h"
+#include "utils/snapmgr.h"
 
 static DataFileSchemaField * CreateRegisteredFieldForAttribute(Oid relationId, int spiIndex);
 static void InsertFieldMapping(Oid relationId, int attrIcebergFieldId,
@@ -542,8 +545,11 @@ GetLeafFieldsForInternalIcebergTable(Oid relationId)
 
 /*
  * GetLeafFieldsForDucklakeTable gets the leaf fields for a DuckLake table
- * by querying pg_attribute and using column_order as the fieldId.
- * This allows column stats to be collected during parquet writes.
+ * by joining pg_attribute against lake_ducklake.column to look up the
+ * catalog column_id and using it as the fieldId. We use column_id (not
+ * attnum) because that is what DuckDB's ducklake extension stamps in
+ * the parquet file_id metadata, and we want a single field-id space
+ * across writers.
  */
 List *
 GetLeafFieldsForDucklakeTable(Oid relationId)
@@ -554,6 +560,95 @@ GetLeafFieldsForDucklakeTable(Oid relationId)
 
 	rel = relation_open(relationId, AccessShareLock);
 	tupdesc = RelationGetDescr(rel);
+
+	/*
+	 * Build a per-attnum lookup of column_id from lake_ducklake.column
+	 * for the live (end_snapshot IS NULL) rows of this table, so the
+	 * per-attribute loop below can resolve fieldId without an SPI call
+	 * per column.
+	 */
+	int			maxAttnum = 0;
+
+	for (int i = 0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+		if (!attr->attisdropped && attr->attnum > maxAttnum)
+			maxAttnum = attr->attnum;
+	}
+
+	int64	   *columnIdsByAttnum = NULL;
+
+	/*
+	 * SPI requires an active snapshot, but this function is reachable
+	 * from query-planning paths (e.g. data file pruning) where the
+	 * planner has not yet pushed a snapshot. Push one if missing and
+	 * pop it on the way out.
+	 */
+	bool		pushedSnapshot = false;
+
+	if (!ActiveSnapshotSet())
+	{
+		PushActiveSnapshot(GetTransactionSnapshot());
+		pushedSnapshot = true;
+	}
+
+	if (maxAttnum > 0)
+	{
+		DucklakeTableMetadata *metadata = DucklakeGetTableMetadata(relationId);
+
+		if (metadata != NULL)
+		{
+			columnIdsByAttnum = palloc0(sizeof(int64) * (maxAttnum + 1));
+
+			StringInfoData q;
+
+			initStringInfo(&q);
+			appendStringInfo(&q,
+							 "SELECT column_order, column_id "
+							 "FROM lake_ducklake.column "
+							 "WHERE table_id = %ld "
+							 "AND end_snapshot IS NULL",
+							 metadata->tableId);
+
+			SPI_connect();
+			int			ret = SPI_exec(q.data, 0);
+
+			if (ret == SPI_OK_SELECT)
+			{
+				for (uint64 row = 0; row < SPI_processed; row++)
+				{
+					bool		isnull;
+					int64		colOrder = DatumGetInt64(SPI_getbinval(
+											SPI_tuptable->vals[row],
+											SPI_tuptable->tupdesc, 1, &isnull));
+
+					if (isnull || colOrder <= 0 || colOrder > maxAttnum)
+						continue;
+
+					int64		colId = DatumGetInt64(SPI_getbinval(
+											SPI_tuptable->vals[row],
+											SPI_tuptable->tupdesc, 2, &isnull));
+
+					if (!isnull)
+						columnIdsByAttnum[colOrder] = colId;
+				}
+			}
+
+			SPI_finish();
+
+			if (metadata->tableName)
+				pfree(metadata->tableName);
+			if (metadata->schemaName)
+				pfree(metadata->schemaName);
+			if (metadata->path)
+				pfree(metadata->path);
+			pfree(metadata);
+		}
+	}
+
+	if (pushedSnapshot)
+		PopActiveSnapshot();
 
 	for (int i = 0; i < tupdesc->natts; i++)
 	{
@@ -566,10 +661,14 @@ GetLeafFieldsForDucklakeTable(Oid relationId)
 		PGType		pgType = MakePGType(attr->atttypid, attr->atttypmod);
 
 		/*
-		 * For DuckLake tables, we use column_order (= attnum) as the fieldId.
-		 * This maps directly to lake_ducklake.column.column_order.
+		 * Use column_id from lake_ducklake.column when known; fall back
+		 * to attnum to keep the read path working when the catalog row
+		 * isn't yet visible.
 		 */
-		int			fieldId = attr->attnum;
+		int64		columnId = (columnIdsByAttnum != NULL && attr->attnum <= maxAttnum)
+									? columnIdsByAttnum[attr->attnum]
+									: 0;
+		int			fieldId = (columnId > 0) ? (int) columnId : attr->attnum;
 
 		bool		forAddColumn = false;
 		int			subFieldIndex = fieldId;

@@ -16,6 +16,14 @@ extern int	DucklakeAutovacuumNaptime;
 extern int	DucklakeMaxSnapshotAge;
 extern int	DucklakeLogAutovacuumMinDuration;
 
+/*
+ * Process-local flag set while the snapshot_changes-based DDL replay
+ * trigger is applying CREATE / DROP / ALTER FOREIGN TABLE on the PG
+ * side after a DuckDB-driven catalog change. pg_lake_table reads it
+ * directly to short-circuit its DDL hooks.
+ */
+extern PGDLLEXPORT bool DucklakeInDDLReplay;
+
 /* Schema and table name constants */
 #define DUCKLAKE_SCHEMA_NAME "lake_ducklake"
 #define DUCKLAKE_METADATA_TABLE "metadata"
@@ -130,9 +138,13 @@ extern PGDLLEXPORT int64 DucklakeAddDeleteFile(int64 tableId,
 /* File column stats operations */
 extern PGDLLEXPORT void DucklakeAddFileColumnStats(int64 dataFileId,
 												   int64 tableId,
-												   int columnOrder,
+												   int64 columnId,
 												   const char *minValue,
-												   const char *maxValue);
+												   const char *maxValue,
+												   int64 columnSizeBytes,
+												   int64 valueCount,
+												   int64 nullCount,
+												   int8 containsNan);
 
 /* Column operations for ALTER TABLE support */
 extern PGDLLEXPORT void DucklakeAddColumn(Oid tableOid, const char *columnName,
@@ -140,5 +152,8 @@ extern PGDLLEXPORT void DucklakeAddColumn(Oid tableOid, const char *columnName,
 extern PGDLLEXPORT void DucklakeDropColumn(Oid tableOid, const char *columnName);
 extern PGDLLEXPORT void DucklakeRenameColumn(Oid tableOid, const char *oldName,
 											 const char *newName);
+extern PGDLLEXPORT void DucklakeRenameTable(const char *schemaName,
+											const char *oldName,
+											const char *newName);
 
 #endif							/* PG_LAKE_DUCKLAKE_CATALOG_H */

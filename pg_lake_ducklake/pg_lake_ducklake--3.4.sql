@@ -44,26 +44,32 @@ CREATE TABLE lake_ducklake.snapshot_changes (
 -- ============================================================================
 
 -- Schema (namespace) definitions
+-- Versioned: each rename closes the live row (end_snapshot = N) and
+-- inserts a new row reusing the same schema_id with begin_snapshot = N.
 CREATE TABLE lake_ducklake.schema (
-    schema_id BIGINT PRIMARY KEY,
+    schema_id BIGINT,
     schema_uuid UUID,
     begin_snapshot BIGINT,
     end_snapshot BIGINT,
     schema_name VARCHAR,
     path VARCHAR,
-    path_is_relative BOOLEAN DEFAULT true
+    path_is_relative BOOLEAN DEFAULT true,
+    PRIMARY KEY (schema_id, begin_snapshot)
 );
 
--- Table definitions
+-- Table definitions (versioned, see schema above for the model).
+-- schema_id is intentionally NOT a FK: schema is itself versioned,
+-- so a single-column FK against the schema PK doesn't fit.
 CREATE TABLE lake_ducklake.table (
-    table_id BIGINT PRIMARY KEY,
+    table_id BIGINT,
     table_uuid UUID,
     begin_snapshot BIGINT,
     end_snapshot BIGINT,
-    schema_id BIGINT REFERENCES lake_ducklake.schema(schema_id),
+    schema_id BIGINT,
     table_name VARCHAR,
     path VARCHAR,
-    path_is_relative BOOLEAN DEFAULT true
+    path_is_relative BOOLEAN DEFAULT true,
+    PRIMARY KEY (table_id, begin_snapshot)
 );
 
 -- Column definitions with schema evolution support
@@ -71,30 +77,31 @@ CREATE TABLE lake_ducklake.column (
     column_id BIGINT,
     begin_snapshot BIGINT,
     end_snapshot BIGINT,
-    table_id BIGINT REFERENCES lake_ducklake.table(table_id),
+    table_id BIGINT,
     column_order BIGINT,
     column_name VARCHAR,
     column_type VARCHAR,
     initial_default VARCHAR,
     default_value VARCHAR,
-    default_value_type VARCHAR,
-    default_value_dialect VARCHAR,
     nulls_allowed BOOLEAN DEFAULT true,
     parent_column BIGINT,
+    default_value_type VARCHAR,
+    default_value_dialect VARCHAR,
     PRIMARY KEY (column_id, begin_snapshot)
 );
 
--- View definitions
+-- View definitions (versioned)
 CREATE TABLE lake_ducklake.view (
-    view_id BIGINT PRIMARY KEY,
+    view_id BIGINT,
     view_uuid UUID,
     begin_snapshot BIGINT,
     end_snapshot BIGINT,
-    schema_id BIGINT REFERENCES lake_ducklake.schema(schema_id),
+    schema_id BIGINT,
     view_name VARCHAR,
     dialect VARCHAR,
     sql VARCHAR,
-    column_aliases VARCHAR
+    column_aliases VARCHAR,
+    PRIMARY KEY (view_id, begin_snapshot)
 );
 
 -- ============================================================================
@@ -104,7 +111,7 @@ CREATE TABLE lake_ducklake.view (
 -- Data files (Parquet files containing table data)
 CREATE TABLE lake_ducklake.data_file (
     data_file_id BIGINT PRIMARY KEY,
-    table_id BIGINT REFERENCES lake_ducklake.table(table_id),
+    table_id BIGINT,
     begin_snapshot BIGINT,
     end_snapshot BIGINT,
     file_order BIGINT,
@@ -124,7 +131,7 @@ CREATE TABLE lake_ducklake.data_file (
 -- Delete files (track deleted rows)
 CREATE TABLE lake_ducklake.delete_file (
     delete_file_id BIGINT PRIMARY KEY,
-    table_id BIGINT REFERENCES lake_ducklake.table(table_id),
+    table_id BIGINT,
     begin_snapshot BIGINT,
     end_snapshot BIGINT,
     data_file_id BIGINT REFERENCES lake_ducklake.data_file(data_file_id),
@@ -148,7 +155,7 @@ CREATE TABLE lake_ducklake.files_scheduled_for_deletion (
 
 -- Inlined data tables (small tables stored in metadata)
 CREATE TABLE lake_ducklake.inlined_data_tables (
-    table_id BIGINT REFERENCES lake_ducklake.table(table_id),
+    table_id BIGINT,
     table_name VARCHAR,
     schema_version BIGINT,
     PRIMARY KEY (table_id, schema_version)
@@ -159,8 +166,12 @@ CREATE TABLE lake_ducklake.inlined_data_tables (
 -- ============================================================================
 
 -- Table-level statistics
+-- table_stats stores one row per logical table (not versioned), so the
+-- PK on table_id alone is fine. The FK to lake_ducklake.table is gone
+-- because the table itself is versioned by (table_id, begin_snapshot)
+-- and a single-column FK can't reach that.
 CREATE TABLE lake_ducklake.table_stats (
-    table_id BIGINT PRIMARY KEY REFERENCES lake_ducklake.table(table_id),
+    table_id BIGINT PRIMARY KEY,
     record_count BIGINT,
     next_row_id BIGINT,
     file_size_bytes BIGINT
@@ -168,7 +179,7 @@ CREATE TABLE lake_ducklake.table_stats (
 
 -- Table column statistics (aggregated across all files)
 CREATE TABLE lake_ducklake.table_column_stats (
-    table_id BIGINT REFERENCES lake_ducklake.table(table_id),
+    table_id BIGINT,
     column_id BIGINT,
     contains_null BOOLEAN,
     contains_nan BOOLEAN,
@@ -181,7 +192,7 @@ CREATE TABLE lake_ducklake.table_column_stats (
 -- Per-file column statistics
 CREATE TABLE lake_ducklake.file_column_stats (
     data_file_id BIGINT REFERENCES lake_ducklake.data_file(data_file_id),
-    table_id BIGINT REFERENCES lake_ducklake.table(table_id),
+    table_id BIGINT,
     column_id BIGINT,
     column_size_bytes BIGINT,
     value_count BIGINT,
@@ -200,7 +211,7 @@ CREATE TABLE lake_ducklake.file_column_stats (
 -- Partition info (partition spec per table)
 CREATE TABLE lake_ducklake.partition_info (
     partition_id BIGINT PRIMARY KEY,
-    table_id BIGINT REFERENCES lake_ducklake.table(table_id),
+    table_id BIGINT,
     begin_snapshot BIGINT,
     end_snapshot BIGINT
 );
@@ -208,7 +219,7 @@ CREATE TABLE lake_ducklake.partition_info (
 -- Partition columns (which columns are used for partitioning)
 CREATE TABLE lake_ducklake.partition_column (
     partition_id BIGINT REFERENCES lake_ducklake.partition_info(partition_id),
-    table_id BIGINT REFERENCES lake_ducklake.table(table_id),
+    table_id BIGINT,
     partition_key_index BIGINT,
     column_id BIGINT,
     transform VARCHAR,
@@ -218,7 +229,7 @@ CREATE TABLE lake_ducklake.partition_column (
 -- File partition values
 CREATE TABLE lake_ducklake.file_partition_value (
     data_file_id BIGINT REFERENCES lake_ducklake.data_file(data_file_id),
-    table_id BIGINT REFERENCES lake_ducklake.table(table_id),
+    table_id BIGINT,
     partition_key_index BIGINT,
     partition_value VARCHAR,
     PRIMARY KEY (data_file_id, partition_key_index)
@@ -231,7 +242,7 @@ CREATE TABLE lake_ducklake.file_partition_value (
 -- Column mapping (for schema evolution)
 CREATE TABLE lake_ducklake.column_mapping (
     mapping_id BIGINT PRIMARY KEY,
-    table_id BIGINT REFERENCES lake_ducklake.table(table_id),
+    table_id BIGINT,
     type VARCHAR
 );
 
@@ -262,7 +273,7 @@ CREATE TABLE lake_ducklake.tag (
 
 -- Column-specific tags
 CREATE TABLE lake_ducklake.column_tag (
-    table_id BIGINT REFERENCES lake_ducklake.table(table_id),
+    table_id BIGINT,
     column_id BIGINT,
     begin_snapshot BIGINT,
     end_snapshot BIGINT,
@@ -419,12 +430,54 @@ GRANT SELECT ON public.ducklake_file_variant_stats TO public;
 -- INSTEAD OF Triggers for Writable Views
 -- ============================================================================
 
--- ducklake_table INSERT trigger
+-- ducklake_table INSERT trigger — also propagates DuckDB-driven
+-- renames back to pg_class (see comment block below the function).
 CREATE FUNCTION lake_ducklake.ducklake_table_insert()
 RETURNS TRIGGER AS $$
+DECLARE
+    old_name text;
+    schema_nm text;
 BEGIN
     INSERT INTO lake_ducklake.table (table_id, table_uuid, begin_snapshot, end_snapshot, schema_id, table_name, path, path_is_relative)
     VALUES (NEW.table_id, NEW.table_uuid, NEW.begin_snapshot, NEW.end_snapshot, NEW.schema_id, NEW.table_name, NEW.path, NEW.path_is_relative);
+
+    /*
+     * Detect a DuckDB-side rename: NEW row reuses an existing
+     * table_id while a recent end-snapshotted version of that
+     * table_id has a different name. If so, propagate the rename
+     * to pg_class via ALTER FOREIGN TABLE. The session-local
+     * pg_lake_ducklake.in_rename_replay GUC suppresses
+     * pg_lake_table's PG-side rename hook from re-applying the
+     * rename to the catalog (which would create a duplicate
+     * version row).
+     */
+    SELECT t.table_name
+      INTO old_name
+      FROM lake_ducklake.table t
+     WHERE t.table_id = NEW.table_id
+       AND t.end_snapshot IS NOT NULL
+       AND t.table_name <> NEW.table_name
+     ORDER BY t.end_snapshot DESC
+     LIMIT 1;
+
+    IF old_name IS NOT NULL THEN
+        SELECT s.schema_name
+          INTO schema_nm
+          FROM lake_ducklake.schema s
+         WHERE s.schema_id = NEW.schema_id
+           AND s.end_snapshot IS NULL
+         LIMIT 1;
+
+        IF schema_nm IS NOT NULL THEN
+            PERFORM lake_ducklake.set_ddl_replay(true);
+            EXECUTE format(
+                'ALTER FOREIGN TABLE IF EXISTS %I.%I RENAME TO %I',
+                schema_nm, old_name, NEW.table_name
+            );
+            PERFORM lake_ducklake.set_ddl_replay(false);
+        END IF;
+    END IF;
+
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -451,8 +504,8 @@ FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_schema_insert();
 CREATE FUNCTION lake_ducklake.ducklake_column_insert()
 RETURNS TRIGGER AS $$
 BEGIN
-    INSERT INTO lake_ducklake.column (column_id, begin_snapshot, end_snapshot, table_id, column_order, column_name, column_type, initial_default, default_value, default_value_type, default_value_dialect, nulls_allowed, parent_column)
-    VALUES (NEW.column_id, NEW.begin_snapshot, NEW.end_snapshot, NEW.table_id, NEW.column_order, NEW.column_name, NEW.column_type, NEW.initial_default, NEW.default_value, NEW.default_value_type, NEW.default_value_dialect, NEW.nulls_allowed, NEW.parent_column);
+    INSERT INTO lake_ducklake.column (column_id, begin_snapshot, end_snapshot, table_id, column_order, column_name, column_type, initial_default, default_value, nulls_allowed, parent_column, default_value_type, default_value_dialect)
+    VALUES (NEW.column_id, NEW.begin_snapshot, NEW.end_snapshot, NEW.table_id, NEW.column_order, NEW.column_name, NEW.column_type, NEW.initial_default, NEW.default_value, NEW.nulls_allowed, NEW.parent_column, NEW.default_value_type, NEW.default_value_dialect);
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -544,6 +597,40 @@ AS $$
         ELSE pg_type
     END;
 $$;
+
+
+/*
+ * SQL-callable wrappers around the C helpers in src/replay.c. These
+ * back the snapshot_changes-based DDL replay trigger:
+ *   - lake_ducklake.duckdb_type_to_pg_type(text) maps a DuckLake
+ *     column_type spelling onto a PostgreSQL type spelling for use
+ *     in CREATE / ALTER FOREIGN TABLE.
+ *   - lake_ducklake.set_ddl_replay(bool) flips a per-process flag
+ *     in pg_lake_ducklake.so so pg_lake_table's PG-side hooks
+ *     short-circuit while we're applying a DuckDB-driven catalog
+ *     change to pg_class / pg_attribute.
+ *   - lake_ducklake.is_ddl_replay() is the read side of the same
+ *     flag, used by the dispatcher to avoid re-entering itself.
+ */
+CREATE FUNCTION lake_ducklake.duckdb_type_to_pg_type(duck_type TEXT)
+RETURNS TEXT
+LANGUAGE C IMMUTABLE STRICT
+AS 'MODULE_PATHNAME', 'lake_ducklake_duckdb_type_to_pg_type';
+
+CREATE FUNCTION lake_ducklake.set_ddl_replay(replaying BOOLEAN)
+RETURNS VOID
+LANGUAGE C STRICT
+AS 'MODULE_PATHNAME', 'lake_ducklake_set_ddl_replay';
+
+CREATE FUNCTION lake_ducklake.is_ddl_replay()
+RETURNS BOOLEAN
+LANGUAGE C STABLE
+AS 'MODULE_PATHNAME', 'lake_ducklake_is_ddl_replay';
+
+CREATE FUNCTION lake_ducklake.ducklake_snapshot_changes_insert()
+RETURNS TRIGGER
+LANGUAGE C
+AS 'MODULE_PATHNAME', 'lake_ducklake_snapshot_changes_insert';
 
 -- Get snapshots for a table
 CREATE FUNCTION lake_ducklake.snapshots(catalog_name TEXT)
@@ -645,6 +732,15 @@ VALUES (0, 0, 1, 1);
 
 INSERT INTO lake_ducklake.metadata (key, value, scope, scope_id)
 VALUES ('ducklake_version', '1.0', NULL, NULL);
+
+-- Disable DuckDB's inlined-data path: with this option set to 0, DuckDB
+-- always writes a parquet file on INSERT/UPDATE instead of materializing
+-- rows into a per-table ducklake_inlined_data_* table inside the
+-- catalog. We don't yet read inlined data from the FDW side, so without
+-- this row small DuckDB-driven INSERTs would commit successfully but
+-- not be visible to PostgreSQL queries.
+INSERT INTO lake_ducklake.metadata (key, value, scope, scope_id)
+VALUES ('data_inlining_row_limit', '0', NULL, NULL);
 
 -- ============================================================================
 -- Additional Public Views (remaining 16 tables)
@@ -769,8 +865,10 @@ GRANT SELECT ON lake_ducklake.tables TO public;
 CREATE OR REPLACE FUNCTION lake_ducklake.ducklake_schema_delete()
 RETURNS TRIGGER AS $$
 BEGIN
+    -- versioned by (schema_id, begin_snapshot); pin both so we don't
+    -- delete sibling historical versions of the same schema_id.
     DELETE FROM lake_ducklake.schema
-    WHERE schema_id = OLD.schema_id;
+    WHERE schema_id = OLD.schema_id AND begin_snapshot = OLD.begin_snapshot;
     RETURN OLD;
 END;
 $$ LANGUAGE plpgsql;
@@ -783,8 +881,9 @@ FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_schema_delete();
 CREATE OR REPLACE FUNCTION lake_ducklake.ducklake_table_delete()
 RETURNS TRIGGER AS $$
 BEGIN
+    -- versioned by (table_id, begin_snapshot); pin both.
     DELETE FROM lake_ducklake.table
-    WHERE table_id = OLD.table_id;
+    WHERE table_id = OLD.table_id AND begin_snapshot = OLD.begin_snapshot;
     RETURN OLD;
 END;
 $$ LANGUAGE plpgsql;
@@ -797,6 +896,11 @@ FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_table_delete();
 CREATE OR REPLACE FUNCTION lake_ducklake.ducklake_table_update()
 RETURNS TRIGGER AS $$
 BEGIN
+    -- lake_ducklake.table is versioned by (table_id, begin_snapshot),
+    -- so an UPDATE keyed only on table_id would match every historical
+    -- version and trigger PK collisions when DuckDB rewrites SET
+    -- end_snapshot = N on the live row only. Pin the row by both
+    -- columns so we touch exactly one version.
     UPDATE lake_ducklake.table
     SET
         table_uuid = NEW.table_uuid,
@@ -806,7 +910,7 @@ BEGIN
         table_name = NEW.table_name,
         path = NEW.path,
         path_is_relative = NEW.path_is_relative
-    WHERE table_id = OLD.table_id;
+    WHERE table_id = OLD.table_id AND begin_snapshot = OLD.begin_snapshot;
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -1317,16 +1421,14 @@ FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_schema_versions_delete();
 -- Triggers for snapshot_changes, table_column_stats, tag, view
 -- ============================================================================
 
--- snapshot_changes INSERT trigger
-CREATE OR REPLACE FUNCTION lake_ducklake.ducklake_snapshot_changes_insert()
-RETURNS TRIGGER AS $$
-BEGIN
-    INSERT INTO lake_ducklake.snapshot_changes (snapshot_id, changes_made, author, commit_message, commit_extra_info)
-    VALUES (NEW.snapshot_id, NEW.operations, NEW.author, NEW.description, NEW.commit_extra_info);
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
 
+-- snapshot_changes INSERT trigger.
+--
+-- Beyond writing the audit row, this is where DuckDB-driven catalog
+-- mutations are replayed onto pg_class / pg_attribute. The dispatcher
+-- and per-op replay helpers (CREATE / DROP / ALTER FOREIGN TABLE)
+-- live in src/replay.c so all DDL replay logic is in C and can read
+-- DucklakeInDDLReplay directly without round-tripping through SQL.
 CREATE TRIGGER ducklake_snapshot_changes_insert_trigger
 INSTEAD OF INSERT ON public.ducklake_snapshot_changes
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_snapshot_changes_insert();
@@ -1431,8 +1533,9 @@ FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_view_insert();
 CREATE OR REPLACE FUNCTION lake_ducklake.ducklake_view_delete()
 RETURNS TRIGGER AS $$
 BEGIN
+    -- versioned by (view_id, begin_snapshot); pin both.
     DELETE FROM lake_ducklake.view
-    WHERE view_id = OLD.view_id;
+    WHERE view_id = OLD.view_id AND begin_snapshot = OLD.begin_snapshot;
     RETURN OLD;
 END;
 $$ LANGUAGE plpgsql;
@@ -1713,6 +1816,8 @@ FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_name_mapping_update();
 CREATE OR REPLACE FUNCTION lake_ducklake.ducklake_schema_update()
 RETURNS TRIGGER AS $$
 BEGIN
+    -- versioned by (schema_id, begin_snapshot); see comment on
+    -- ducklake_table_update for why we pin both.
     UPDATE lake_ducklake.schema
     SET
         schema_uuid = NEW.schema_uuid,
@@ -1721,7 +1826,7 @@ BEGIN
         schema_name = NEW.schema_name,
         path = NEW.path,
         path_is_relative = NEW.path_is_relative
-    WHERE schema_id = OLD.schema_id;
+    WHERE schema_id = OLD.schema_id AND begin_snapshot = OLD.begin_snapshot;
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -1757,9 +1862,9 @@ RETURNS TRIGGER AS $$
 BEGIN
     UPDATE lake_ducklake.snapshot_changes
     SET
-        changes_made = NEW.operations,
+        changes_made = NEW.changes_made,
         author = NEW.author,
-        commit_message = NEW.description,
+        commit_message = NEW.commit_message,
         commit_extra_info = NEW.commit_extra_info
     WHERE snapshot_id = OLD.snapshot_id;
     RETURN NEW;
@@ -1811,6 +1916,8 @@ FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_tag_update();
 CREATE OR REPLACE FUNCTION lake_ducklake.ducklake_view_update()
 RETURNS TRIGGER AS $$
 BEGIN
+    -- versioned by (view_id, begin_snapshot); see comment on
+    -- ducklake_table_update for why we pin both.
     UPDATE lake_ducklake.view
     SET
         view_uuid = NEW.view_uuid,
@@ -1821,7 +1928,7 @@ BEGIN
         dialect = NEW.dialect,
         sql = NEW.sql,
         column_aliases = NEW.column_aliases
-    WHERE view_id = OLD.view_id;
+    WHERE view_id = OLD.view_id AND begin_snapshot = OLD.begin_snapshot;
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -1829,4 +1936,40 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER ducklake_view_update_trigger
 INSTEAD OF UPDATE ON public.ducklake_view
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_view_update();
+
+-- ============================================================================
+-- DuckLake access method, foreign-data wrapper, and server
+-- ============================================================================
+--
+-- These moved from pg_lake_table--3.3--3.4.sql so that pg_lake_table no
+-- longer needs to require pg_lake_ducklake. The FDW handler still lives
+-- in pg_lake_table.so (pg_lake_table_handler) and the option validator
+-- still lives in pg_lake_table.so (pg_lake_ducklake_validator); we
+-- reference them explicitly via $libdir/pg_lake_table because
+-- MODULE_PATHNAME here resolves to pg_lake_ducklake.
+
+CREATE FUNCTION pg_lake_ducklake_am_handler(internal)
+    RETURNS table_am_handler
+    LANGUAGE C
+AS 'MODULE_PATHNAME';
+
+CREATE ACCESS METHOD pg_lake_ducklake TYPE TABLE HANDLER pg_lake_ducklake_am_handler;
+COMMENT ON ACCESS METHOD pg_lake_ducklake IS 'pg_lake_ducklake table access method';
+
+CREATE ACCESS METHOD ducklake TYPE TABLE HANDLER pg_lake_ducklake_am_handler;
+COMMENT ON ACCESS METHOD ducklake IS 'ducklake table access method, alias for pg_lake_ducklake';
+
+CREATE FUNCTION pg_lake_ducklake_validator(text[], oid)
+RETURNS void
+AS '$libdir/pg_lake_table', 'pg_lake_ducklake_validator'
+LANGUAGE C STRICT;
+
+CREATE FOREIGN DATA WRAPPER pg_lake_ducklake
+  HANDLER pg_lake_table_handler
+  VALIDATOR pg_lake_ducklake_validator;
+
+CREATE SERVER pg_lake_ducklake
+  FOREIGN DATA WRAPPER pg_lake_ducklake;
+
+GRANT USAGE ON FOREIGN SERVER pg_lake_ducklake TO lake_read_write;
 

@@ -1641,21 +1641,47 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 										 * column_order = pg attnum, and for non-Iceberg tables
 										 * fieldId is also based on attnum.
 										 */
+
+										/*
+										 * RETURN_STATS gives us null_count but not the
+										 * non-null value_count DuckLake stores. When we know
+										 * the file's row count and the column's null_count,
+										 * derive value_count; otherwise pass -1 (unknown).
+										 */
+										int64		fileRowCount = operation->dataFileStats.rowCount;
+										int64		valueCount = -1;
+
+										if (stat->nullCount >= 0 && fileRowCount >= 0)
+											valueCount = fileRowCount - stat->nullCount;
+
 										DucklakeAddFileColumnStats(ducklakeFileId,
 																   metadata->tableId,
 																   stat->leafField.fieldId,
 																   stat->lowerBoundText,
-																   stat->upperBoundText);
+																   stat->upperBoundText,
+																   stat->columnSizeBytes,
+																   valueCount,
+																   stat->nullCount,
+																   stat->containsNan);
 									}
 								}
 							}
 							else if (operation->content == CONTENT_POSITION_DELETES)
 							{
-								/* Add delete file to DuckLake catalog */
-								/* We need to find the data_file_id for the source file */
-								/* For now, pass 0 for dataFileId - this needs to be fixed */
+								/*
+								 * Position-delete file. We do not yet know
+								 * the source data file's data_file_id at
+								 * this stage of the operation stream — pass
+								 * -1 so DucklakeAddDeleteFile leaves
+								 * data_file_id NULL (it is FK'd to
+								 * lake_ducklake.data_file, so 0 would
+								 * violate the constraint). The follow-up
+								 * DATA_FILE_ADD_DELETE_MAPPING op resolves
+								 * the source path to a data_file_id and
+								 * UPDATEs this row below.
+								 */
 								DucklakeAddDeleteFile(metadata->tableId,
-													  0,	/* dataFileId - TODO: look up from mapping */
+													  -1,
 													  operation->path,
 													  operation->dataFileStats.rowCount,
 													  operation->dataFileStats.fileSize);
@@ -1723,13 +1749,16 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 				}
 
 			case DATA_FILE_ADD_DELETE_MAPPING:
-				AddDeletionFileMapping(relationId,
-									   operation->path,
-									   operation->deletedFrom);
-
-				/* Update DuckLake delete file with correct data_file_id */
 				if (IsDucklakeTable(relationId))
 				{
+					/*
+					 * DuckLake stores delete-file -> data-file linkage in
+					 * lake_ducklake.delete_file.data_file_id, not in
+					 * lake_table.deletion_file_map. The lake_table mapping
+					 * has an FK on lake_table.files, which DuckLake
+					 * tables intentionally don't populate, so calling
+					 * AddDeletionFileMapping() would FK-violate.
+					 */
 					DucklakeTableMetadata *metadata = DucklakeGetTableMetadata(relationId);
 
 					if (metadata)
@@ -1748,6 +1777,7 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 
 						SPI_connect();
 						ret = SPI_execute(query.data, true, 1);
+
 
 						if (ret == SPI_OK_SELECT && SPI_processed > 0)
 						{
@@ -1769,7 +1799,8 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 												 metadata->tableId,
 												 quote_literal_cstr(operation->path));
 
-								SPI_execute(updateQuery.data, false, 0);
+								(void) SPI_execute(updateQuery.data, false, 0);
+
 							}
 						}
 
@@ -1784,6 +1815,12 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 							pfree(metadata->path);
 						pfree(metadata);
 					}
+				}
+				else
+				{
+					AddDeletionFileMapping(relationId,
+										   operation->path,
+										   operation->deletedFrom);
 				}
 				break;
 
@@ -1968,6 +2005,15 @@ CreateDataFileColumnStats(int fieldId, PGType pgType, char *lowerBoundText, char
 	columnStats->lowerBoundText = lowerBoundText;
 	columnStats->upperBoundText = upperBoundText;
 	columnStats->leafField.pgType = pgType;
+
+	/*
+	 * Hydrating from Iceberg manifests doesn't carry DuckDB return_stats,
+	 * so the extended fields remain at the "unknown" sentinel.
+	 */
+	columnStats->columnSizeBytes = -1;
+	columnStats->nullCount = -1;
+	columnStats->valueCount = -1;
+	columnStats->containsNan = -1;
 
 	bool		forAddColumn = false;
 	int			subFieldIndex = fieldId;

@@ -23,7 +23,6 @@
 #include "pg_lake/access_method/access_method.h"
 
 PG_FUNCTION_INFO_V1(pg_lake_iceberg_am_handler);
-PG_FUNCTION_INFO_V1(pg_lake_ducklake_am_handler);
 
 
 Datum
@@ -33,16 +32,6 @@ pg_lake_iceberg_am_handler(PG_FUNCTION_ARGS)
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 			 errmsg("%s access method is a placeholder "
 					"and should not be used", PG_LAKE_ICEBERG_AM)));
-}
-
-
-Datum
-pg_lake_ducklake_am_handler(PG_FUNCTION_ARGS)
-{
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("%s access method is a placeholder "
-					"and should not be used", PG_LAKE_DUCKLAKE_AM)));
 }
 
 

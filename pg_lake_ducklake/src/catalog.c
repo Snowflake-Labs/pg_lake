@@ -502,15 +502,35 @@ DucklakeGetTableMetadata(Oid tableOid)
 	/* Save the caller's memory context before entering SPI */
 	oldcontext = CurrentMemoryContext;
 
-	/* Look up the table in DuckLake metadata by schema and table name */
+	/*
+	 * Look up the table in DuckLake metadata.
+	 *
+	 * lake_ducklake.table is versioned by (table_id, begin_snapshot),
+	 * and DuckDB's ducklake extension can rename a table without
+	 * touching pg_class. So a strict match on the current PG name may
+	 * miss the live row if it has since been renamed in the catalog
+	 * (the row matching pg_class is then end-snapshotted while the
+	 * live row carries the new name). The query first finds any
+	 * version (live OR historical) for which schema+name match the
+	 * caller's identifiers; the outer SELECT then walks back to the
+	 * current live row of that table_id.
+	 */
 	initStringInfo(&query);
 	appendStringInfo(&query,
+					 "WITH name_match AS ( "
+					 "  SELECT t.table_id "
+					 "    FROM lake_ducklake.table t "
+					 "    JOIN lake_ducklake.schema s ON t.schema_id = s.schema_id "
+					 "   WHERE s.schema_name = %s AND t.table_name = %s "
+					 ") "
 					 "SELECT t.table_id, t.table_uuid, t.schema_id, t.table_name, "
-					 "s.schema_name, t.path, t.path_is_relative, t.begin_snapshot, t.end_snapshot "
-					 "FROM lake_ducklake.table t "
-					 "JOIN lake_ducklake.schema s ON t.schema_id = s.schema_id "
-					 "WHERE s.schema_name = %s AND t.table_name = %s "
-					 "AND t.end_snapshot IS NULL",
+					 "       s.schema_name, t.path, t.path_is_relative, t.begin_snapshot, t.end_snapshot "
+					 "  FROM lake_ducklake.table t "
+					 "  JOIN lake_ducklake.schema s ON t.schema_id = s.schema_id "
+					 " WHERE t.table_id IN (SELECT table_id FROM name_match) "
+					 "   AND t.end_snapshot IS NULL "
+					 " ORDER BY t.begin_snapshot DESC "
+					 " LIMIT 1",
 					 quote_literal_cstr(schemaName), quote_literal_cstr(tableName));
 
 	SPI_connect();
@@ -899,27 +919,58 @@ DucklakeAddDataFile(int64 tableId, const char *path, int64 recordCount,
 	SPI_exec(query.data, 0);
 
 	/*
-	 * Also seed lake_ducklake.table_column_stats with one row per live
-	 * column for this table. DuckDB's GetGlobalTableStats query (in
-	 * ducklake_metadata_manager.cpp) does
-	 *   SELECT ... FROM ducklake_table_stats LEFT JOIN ducklake_table_column_stats USING (table_id)
-	 * and then reads column_id at row index 1 with GetValue<uint64_t> —
-	 * NULL there raises "Calling GetValueInternal on a value that is NULL".
-	 * We don't compute aggregate per-column stats yet, so insert
-	 * placeholder rows with NULL min/max/contains_null and let DuckDB's
-	 * NULL-checks for those individual columns kick in (see COLUMN_STATS_START
-	 * branch in TransformGlobalStatsRow).
+	 * Roll lake_ducklake.table_column_stats forward from the live
+	 * file_column_stats.
+	 *
+	 * v1 spec uses table_column_stats for cross-file pruning: a query
+	 * planner reads the (min, max) bounds and contains_null/contains_nan
+	 * flags to decide whether a query that filters on the column needs
+	 * to even open the data files for that table.
+	 *
+	 * Aggregating min/max across files in SQL would require typed MIN/MAX
+	 * — text MIN over '5','42' yields '42' (lex order) which is wrong for
+	 * any numeric column and silently breaks predicate pushdown. We don't
+	 * have the column's storage type cheaply available here, so:
+	 *
+	 *   - For tables with exactly one live data file we copy the file's
+	 *     min/max directly (always correct, no aggregation needed).
+	 *   - For tables with multiple live data files we leave min/max NULL.
+	 *     "Unknown bounds" is safe — DuckDB / pg_lake disable the column's
+	 *     pruning rather than mis-prune.
+	 *
+	 * We still always insert a row per (table_id, column_id) so DuckDB's
+	 * GetGlobalTableStats LEFT JOIN at column_id index 1 doesn't NPE.
 	 */
 	resetStringInfo(&query);
 	appendStringInfo(&query,
+					 "WITH agg AS ( "
+					 "  SELECT df.table_id, "
+					 "         fcs.column_id, "
+					 "         COUNT(*) AS file_count, "
+					 "         MIN(fcs.min_value) AS only_min, "
+					 "         MAX(fcs.max_value) AS only_max, "
+					 "         BOOL_OR(fcs.contains_nan) AS any_nan "
+					 "    FROM lake_ducklake.file_column_stats fcs "
+					 "    JOIN lake_ducklake.data_file df USING (data_file_id) "
+					 "   WHERE df.table_id = %ld AND df.end_snapshot IS NULL "
+					 "   GROUP BY df.table_id, fcs.column_id "
+					 ") "
 					 "INSERT INTO lake_ducklake.table_column_stats "
 					 "(table_id, column_id, contains_null, contains_nan, "
-					 "min_value, max_value, extra_stats) "
-					 "SELECT %ld, column_id, NULL, NULL, NULL, NULL, NULL "
-					 "  FROM lake_ducklake.column "
-					 " WHERE table_id = %ld AND end_snapshot IS NULL "
-					 "ON CONFLICT (table_id, column_id) DO NOTHING",
-					 tableId, tableId);
+					 " min_value, max_value, extra_stats) "
+					 "SELECT %ld, c.column_id, NULL, "
+					 "       agg.any_nan, "
+					 "       CASE WHEN agg.file_count = 1 THEN agg.only_min END, "
+					 "       CASE WHEN agg.file_count = 1 THEN agg.only_max END, "
+					 "       NULL "
+					 "  FROM lake_ducklake.column c "
+					 "  LEFT JOIN agg ON agg.column_id = c.column_id "
+					 " WHERE c.table_id = %ld AND c.end_snapshot IS NULL "
+					 "ON CONFLICT (table_id, column_id) DO UPDATE SET "
+					 "  contains_nan = EXCLUDED.contains_nan, "
+					 "  min_value = EXCLUDED.min_value, "
+					 "  max_value = EXCLUDED.max_value",
+					 tableId, tableId, tableId);
 	SPI_exec(query.data, 0);
 
 	SPI_finish();
@@ -1032,6 +1083,13 @@ DucklakeGetDeleteFiles(int64 tableId, int64 snapshotId)
 					 "AND (end_snapshot IS NULL OR end_snapshot > %ld)",
 					 tableId, snapshotId, snapshotId);
 
+	/*
+	 * Capture caller's memory context BEFORE SPI_connect so result list
+	 * and its strings outlive SPI_finish; otherwise consumers chase
+	 * already-freed memory and crash 100ms+ later.
+	 */
+	MemoryContext callerContext = CurrentMemoryContext;
+
 	SPI_connect();
 	ret = SPI_exec(query.data, 0);
 
@@ -1041,11 +1099,12 @@ DucklakeGetDeleteFiles(int64 tableId, int64 snapshotId)
 		return NIL;
 	}
 
-	/* Build the result list directly from SPI results */
 	for (i = 0; i < SPI_processed; i++)
 	{
 		bool isnull;
-		DucklakeDeleteFile *deleteFile = (DucklakeDeleteFile *) MemoryContextAlloc(CurrentMemoryContext, sizeof(DucklakeDeleteFile));
+		MemoryContext spiContext = MemoryContextSwitchTo(callerContext);
+		DucklakeDeleteFile *deleteFile = palloc0(sizeof(DucklakeDeleteFile));
+		MemoryContextSwitchTo(spiContext);
 
 		deleteFile->deleteFileId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[i],
 															   SPI_tuptable->tupdesc, 1, &isnull));
@@ -1062,7 +1121,10 @@ DucklakeGetDeleteFiles(int64 tableId, int64 snapshotId)
 
 		char *pathStr = TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[i],
 														   SPI_tuptable->tupdesc, 6, &isnull));
-		deleteFile->path = MemoryContextStrdup(CurrentMemoryContext, pathStr);
+		spiContext = MemoryContextSwitchTo(callerContext);
+		deleteFile->path = pstrdup(pathStr);
+		MemoryContextSwitchTo(spiContext);
+
 		deleteFile->pathIsRelative = DatumGetBool(SPI_getbinval(SPI_tuptable->vals[i],
 																SPI_tuptable->tupdesc, 7, &isnull));
 		deleteFile->deleteCount = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[i],
@@ -1070,7 +1132,9 @@ DucklakeGetDeleteFiles(int64 tableId, int64 snapshotId)
 		deleteFile->fileSizeBytes = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[i],
 																SPI_tuptable->tupdesc, 9, &isnull));
 
+		spiContext = MemoryContextSwitchTo(callerContext);
 		deleteFiles = lappend(deleteFiles, deleteFile);
+		MemoryContextSwitchTo(spiContext);
 	}
 
 	SPI_finish();
@@ -1095,8 +1159,8 @@ DucklakeAddDeleteFile(int64 tableId, int64 dataFileId, const char *path,
 		appendStringInfo(&query,
 						 "INSERT INTO lake_ducklake.delete_file "
 						 "(delete_file_id, table_id, begin_snapshot, data_file_id, path, "
-						 "delete_count, file_size_bytes) "
-						 "VALUES (%ld, %ld, %ld, %ld, %s, %ld, %ld) RETURNING delete_file_id",
+						 " path_is_relative, delete_count, file_size_bytes) "
+						 "VALUES (%ld, %ld, %ld, %ld, %s, false, %ld, %ld) RETURNING delete_file_id",
 						 deleteFileId, tableId, snapshot->snapshotId, dataFileId,
 						 quote_literal_cstr(path), deleteCount, fileSizeBytes);
 	}
@@ -1105,8 +1169,8 @@ DucklakeAddDeleteFile(int64 tableId, int64 dataFileId, const char *path,
 		appendStringInfo(&query,
 						 "INSERT INTO lake_ducklake.delete_file "
 						 "(delete_file_id, table_id, begin_snapshot, path, "
-						 "delete_count, file_size_bytes) "
-						 "VALUES (%ld, %ld, %ld, %s, %ld, %ld) RETURNING delete_file_id",
+						 " path_is_relative, delete_count, file_size_bytes) "
+						 "VALUES (%ld, %ld, %ld, %s, false, %ld, %ld) RETURNING delete_file_id",
 						 deleteFileId, tableId, snapshot->snapshotId,
 						 quote_literal_cstr(path), deleteCount, fileSizeBytes);
 	}
@@ -1135,52 +1199,66 @@ DucklakeAddDeleteFile(int64 tableId, int64 dataFileId, const char *path,
 }
 
 void
-DucklakeAddFileColumnStats(int64 dataFileId, int64 tableId, int columnOrder,
-						   const char *minValue, const char *maxValue)
+DucklakeAddFileColumnStats(int64 dataFileId, int64 tableId, int64 columnId,
+						   const char *minValue, const char *maxValue,
+						   int64 columnSizeBytes, int64 valueCount, int64 nullCount,
+						   int8 containsNan)
 {
 	StringInfoData query;
 	int			ret;
-	int64		columnId = -1;
 
-	SPI_connect();
-
-	/* Look up the column_id from column_order */
-	initStringInfo(&query);
-	appendStringInfo(&query,
-					 "SELECT column_id FROM lake_ducklake.column "
-					 "WHERE table_id = %ld AND column_order = %d AND end_snapshot IS NULL",
-					 tableId, columnOrder);
-	ret = SPI_exec(query.data, 1);
-
-	if (ret == SPI_OK_SELECT && SPI_processed > 0)
+	if (columnId <= 0)
 	{
-		bool		isnull;
-
-		columnId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
-											   SPI_tuptable->tupdesc, 1, &isnull));
-		if (isnull)
-			columnId = -1;
-	}
-
-	if (columnId < 0)
-	{
-		SPI_finish();
-		elog(WARNING, "Could not find column_id for table_id=%ld column_order=%d",
-			 tableId, columnOrder);
+		elog(WARNING, "Invalid column_id=%ld for table_id=%ld", columnId, tableId);
 		return;
 	}
 
-	/* Insert file column stats */
+	SPI_connect();
+
+	initStringInfo(&query);
+
+	/*
+	 * Insert per-file column stats. -1 in the int64 fields encodes
+	 * "unknown" (the default at construction time), so we write SQL NULL
+	 * in that case rather than persisting the sentinel. containsNan is a
+	 * tri-state: -1 unknown -> NULL, 0 -> false, 1 -> true.
+	 */
 	resetStringInfo(&query);
 	appendStringInfo(&query,
 					 "INSERT INTO lake_ducklake.file_column_stats "
-					 "(data_file_id, table_id, column_id, min_value, max_value) "
-					 "VALUES (%ld, %ld, %ld, %s, %s) "
+					 "(data_file_id, table_id, column_id, column_size_bytes, "
+					 " value_count, null_count, min_value, max_value, contains_nan) "
+					 "VALUES (%ld, %ld, %ld, ",
+					 dataFileId, tableId, columnId);
+
+	if (columnSizeBytes < 0)
+		appendStringInfoString(&query, "NULL, ");
+	else
+		appendStringInfo(&query, "%ld, ", columnSizeBytes);
+
+	if (valueCount < 0)
+		appendStringInfoString(&query, "NULL, ");
+	else
+		appendStringInfo(&query, "%ld, ", valueCount);
+
+	if (nullCount < 0)
+		appendStringInfoString(&query, "NULL, ");
+	else
+		appendStringInfo(&query, "%ld, ", nullCount);
+
+	appendStringInfo(&query,
+					 "%s, %s, %s) "
 					 "ON CONFLICT (data_file_id, column_id) DO UPDATE SET "
-					 "min_value = EXCLUDED.min_value, max_value = EXCLUDED.max_value",
-					 dataFileId, tableId, columnId,
+					 "min_value = EXCLUDED.min_value, "
+					 "max_value = EXCLUDED.max_value, "
+					 "column_size_bytes = EXCLUDED.column_size_bytes, "
+					 "value_count = EXCLUDED.value_count, "
+					 "null_count = EXCLUDED.null_count, "
+					 "contains_nan = EXCLUDED.contains_nan",
 					 minValue ? quote_literal_cstr(minValue) : "NULL",
-					 maxValue ? quote_literal_cstr(maxValue) : "NULL");
+					 maxValue ? quote_literal_cstr(maxValue) : "NULL",
+					 containsNan < 0 ? "NULL" :
+					 (containsNan == 0 ? "FALSE" : "TRUE"));
 
 	ret = SPI_exec(query.data, 0);
 
@@ -1189,6 +1267,44 @@ DucklakeAddFileColumnStats(int64 dataFileId, int64 tableId, int columnOrder,
 		elog(WARNING, "Failed to add file column stats for data_file_id=%ld column_id=%ld",
 			 dataFileId, columnId);
 	}
+
+	/*
+	 * Roll the new per-file stats up into table_column_stats. DucklakeAddDataFile
+	 * seeded a placeholder row with NULL bounds before this column stat
+	 * arrived; now that the per-file row exists, re-aggregate so the
+	 * single-file case carries verbatim min/max while multi-file cases stay
+	 * NULL (text MIN/MAX would mis-prune numerics). See the longer comment
+	 * in DucklakeAddDataFile.
+	 */
+	resetStringInfo(&query);
+	appendStringInfo(&query,
+					 "WITH agg AS ( "
+					 "  SELECT df.table_id, fcs.column_id, "
+					 "         COUNT(*) AS file_count, "
+					 "         MIN(fcs.min_value) AS only_min, "
+					 "         MAX(fcs.max_value) AS only_max, "
+					 "         BOOL_OR(fcs.contains_nan) AS any_nan "
+					 "    FROM lake_ducklake.file_column_stats fcs "
+					 "    JOIN lake_ducklake.data_file df USING (data_file_id) "
+					 "   WHERE df.table_id = %ld AND df.end_snapshot IS NULL "
+					 "     AND fcs.column_id = %ld "
+					 "   GROUP BY df.table_id, fcs.column_id "
+					 ") "
+					 "INSERT INTO lake_ducklake.table_column_stats "
+					 "(table_id, column_id, contains_null, contains_nan, "
+					 " min_value, max_value, extra_stats) "
+					 "SELECT %ld, %ld, NULL, "
+					 "       agg.any_nan, "
+					 "       CASE WHEN agg.file_count = 1 THEN agg.only_min END, "
+					 "       CASE WHEN agg.file_count = 1 THEN agg.only_max END, "
+					 "       NULL "
+					 "  FROM agg "
+					 "ON CONFLICT (table_id, column_id) DO UPDATE SET "
+					 "  contains_nan = EXCLUDED.contains_nan, "
+					 "  min_value = EXCLUDED.min_value, "
+					 "  max_value = EXCLUDED.max_value",
+					 tableId, columnId, tableId, columnId);
+	SPI_exec(query.data, 0);
 
 	SPI_finish();
 }
@@ -1520,6 +1636,133 @@ DucklakeRenameColumn(Oid tableOid, const char *oldName, const char *newName)
 					 "(SELECT schema_version FROM lake_ducklake.snapshot WHERE snapshot_id = %ld), "
 					 "%ld)",
 					 newSnapshot->snapshotId, newSnapshot->snapshotId, metadata->tableId);
+	SPI_exec(query.data, 0);
+
+	SPI_finish();
+}
+
+
+/*
+ * DucklakeRenameTable renames a table in the DuckLake catalog.
+ *
+ * v1 spec models RENAME as a new table version: end_snapshot the previous
+ * (table_id, begin_snapshot) row at the new snapshot and insert a fresh
+ * row with the same table_id and the new name.
+ *
+ * Caller must pass the schema name explicitly because by the time this
+ * runs, PostgreSQL has already renamed the foreign table — looking up
+ * by the new pg_class name would miss the lake_ducklake.table row,
+ * which still carries the old name.
+ */
+void
+DucklakeRenameTable(const char *schemaName, const char *oldName, const char *newName)
+{
+	StringInfoData query;
+	DucklakeSnapshot *newSnapshot;
+	int64		tableId = -1;
+	int			ret;
+
+	/* Look up the table_id for the OLD name within the given schema */
+	SPI_connect();
+	initStringInfo(&query);
+	appendStringInfo(&query,
+					 "SELECT t.table_id FROM lake_ducklake.table t "
+					 "JOIN lake_ducklake.schema s ON t.schema_id = s.schema_id "
+					 "WHERE s.schema_name = %s AND t.table_name = %s "
+					 "AND t.end_snapshot IS NULL "
+					 "AND s.end_snapshot IS NULL",
+					 quote_literal_cstr(schemaName),
+					 quote_literal_cstr(oldName));
+	ret = SPI_exec(query.data, 1);
+
+	if (ret == SPI_OK_SELECT && SPI_processed > 0)
+	{
+		bool		isnull;
+
+		tableId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+											  SPI_tuptable->tupdesc, 1, &isnull));
+		if (isnull)
+			tableId = -1;
+	}
+
+	SPI_finish();
+
+	if (tableId < 0)
+	{
+		elog(WARNING,
+			 "DuckLake table %s.%s not found in catalog for rename — "
+			 "metadata will not reflect the PG-side rename",
+			 schemaName, oldName);
+		return;
+	}
+
+	/*
+	 * Create a new snapshot for this schema change. DucklakeCreateSnapshot
+	 * uses its own SPI block, so do it before we re-open SPI below.
+	 */
+	newSnapshot = DucklakeCreateSnapshot("RENAME TABLE", NULL, NULL);
+
+	SPI_connect();
+
+	/* Bump schema_version on the new snapshot */
+	initStringInfo(&query);
+	appendStringInfo(&query,
+					 "UPDATE lake_ducklake.snapshot SET schema_version = schema_version + 1 "
+					 "WHERE snapshot_id = %ld",
+					 newSnapshot->snapshotId);
+	SPI_exec(query.data, 0);
+
+	/*
+	 * Insert a new table-version row reusing the same table_id with the
+	 * new name. INSERT...SELECT from the live row so table_uuid,
+	 * schema_id, path, path_is_relative carry forward unchanged.
+	 */
+	resetStringInfo(&query);
+	appendStringInfo(&query,
+					 "INSERT INTO lake_ducklake.table "
+					 "(table_id, table_uuid, begin_snapshot, end_snapshot, "
+					 " schema_id, table_name, path, path_is_relative) "
+					 "SELECT table_id, table_uuid, %ld, NULL, "
+					 "       schema_id, %s, path, path_is_relative "
+					 "FROM lake_ducklake.table "
+					 "WHERE table_id = %ld AND end_snapshot IS NULL",
+					 newSnapshot->snapshotId,
+					 quote_literal_cstr(newName),
+					 tableId);
+	ret = SPI_exec(query.data, 0);
+	if (ret != SPI_OK_INSERT || SPI_processed == 0)
+	{
+		SPI_finish();
+		elog(ERROR, "Failed to insert renamed table row for %s -> %s",
+			 oldName, newName);
+	}
+
+	/*
+	 * End-snapshot the previous live row. Restrict to begin_snapshot <
+	 * the new snapshot so we don't accidentally end-snapshot the row we
+	 * just inserted.
+	 */
+	resetStringInfo(&query);
+	appendStringInfo(&query,
+					 "UPDATE lake_ducklake.table SET end_snapshot = %ld "
+					 "WHERE table_id = %ld AND end_snapshot IS NULL "
+					 "AND begin_snapshot < %ld",
+					 newSnapshot->snapshotId, tableId, newSnapshot->snapshotId);
+	SPI_exec(query.data, 0);
+
+	/*
+	 * Record the schema version pinning this table at the new
+	 * snapshot — this is what DuckDB uses to figure out which table
+	 * row is current at a given catalog version.
+	 */
+	resetStringInfo(&query);
+	appendStringInfo(&query,
+					 "INSERT INTO lake_ducklake.schema_versions "
+					 "(begin_snapshot, schema_version, table_id) "
+					 "VALUES (%ld, "
+					 "(SELECT schema_version FROM lake_ducklake.snapshot WHERE snapshot_id = %ld), "
+					 "%ld)",
+					 newSnapshot->snapshotId, newSnapshot->snapshotId, tableId);
 	SPI_exec(query.data, 0);
 
 	SPI_finish();

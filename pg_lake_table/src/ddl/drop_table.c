@@ -231,6 +231,15 @@ DropTableAccessHook(ObjectAccessType access, Oid classId, Oid objectId,
 	{
 		if (!isColumn)
 		{
+			/*
+			 * Suppress catalog write-back when we're replaying a
+			 * DuckDB-side DROP onto pg_class — DuckDB already
+			 * end-snapshotted the table row, calling DucklakeDropTable
+			 * here would just touch already-historical rows.
+			 */
+			if (DucklakeInDDLReplay)
+				return;
+
 			/* Mark table as ended in DuckLake metadata */
 			DucklakeTableMetadata *metadata = DucklakeGetTableMetadata(objectId);
 

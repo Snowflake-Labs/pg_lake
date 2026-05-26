@@ -36,6 +36,7 @@
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/snapmgr.h"
 #include "parser/parse_type.h"
 
 #include "pg_lake/data_file/data_file_stats.h"
@@ -296,10 +297,12 @@ CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(Oid relationId)
 
 /*
  * GetDataFileSchemaForDucklakeTable gets a table schema for a DuckLake table
- * by reading pg_attribute. Field IDs are set to column attnum, which maps
- * to column_order in lake_ducklake.column. initial_default is sourced from
- * lake_ducklake.column so reads of older parquet files (written before an
- * ADD COLUMN ... DEFAULT) backfill the right value rather than NULL.
+ * by reading pg_attribute. Field IDs are sourced from
+ * lake_ducklake.column.column_id so they line up with what DuckDB's
+ * ducklake extension embeds in parquet files (DuckDB writes the catalog
+ * column_id as the parquet field_id). initial_default is sourced from
+ * lake_ducklake.column so reads of older parquet files (written before
+ * an ADD COLUMN ... DEFAULT) backfill the right value rather than NULL.
  */
 static DataFileSchema *
 GetDataFileSchemaForDucklakeTable(Oid relationId)
@@ -324,15 +327,30 @@ GetDataFileSchemaForDucklakeTable(Oid relationId)
 	schema->nfields = 0;
 
 	/*
-	 * Build (column_order -> initial_default) lookup from lake_ducklake.column
-	 * for the live (end_snapshot IS NULL) rows of this table. We pull this
-	 * once into a palloc'd array indexed by attnum so the per-attribute loop
-	 * below can attach the default without an SPI call per column.
+	 * Build per-attnum lookups for (column_id, initial_default) from
+	 * lake_ducklake.column for the live (end_snapshot IS NULL) rows of
+	 * this table. We pull this once into palloc'd arrays indexed by
+	 * attnum so the per-attribute loop below can attach both without an
+	 * SPI call per column.
 	 */
-	int64	   *defaultsByAttnum = NULL;
+	int64	   *columnIdsByAttnum = NULL;
 	char	  **defaultStrings = NULL;
 	int			maxAttnum = 0;
 	{
+		/*
+		 * SPI requires an active snapshot, but this function is reached
+		 * from query planning where the planner may not have pushed
+		 * one. Push a snapshot if missing so DucklakeGetTableMetadata
+		 * and our SPI block below can run.
+		 */
+		bool		pushedSnapshot = false;
+
+		if (!ActiveSnapshotSet())
+		{
+			PushActiveSnapshot(GetTransactionSnapshot());
+			pushedSnapshot = true;
+		}
+
 		DucklakeTableMetadata *metadata = DucklakeGetTableMetadata(relationId);
 
 		if (metadata != NULL)
@@ -347,6 +365,7 @@ GetDataFileSchemaForDucklakeTable(Oid relationId)
 
 			if (maxAttnum > 0)
 			{
+				columnIdsByAttnum = palloc0(sizeof(int64) * (maxAttnum + 1));
 				defaultStrings = palloc0(sizeof(char *) * (maxAttnum + 1));
 
 				/*
@@ -360,11 +379,10 @@ GetDataFileSchemaForDucklakeTable(Oid relationId)
 
 				initStringInfo(&q);
 				appendStringInfo(&q,
-								 "SELECT column_order, initial_default "
+								 "SELECT column_order, column_id, initial_default "
 								 "FROM lake_ducklake.column "
 								 "WHERE table_id = %ld "
-								 "AND end_snapshot IS NULL "
-								 "AND initial_default IS NOT NULL",
+								 "AND end_snapshot IS NULL",
 								 metadata->tableId);
 
 				SPI_connect();
@@ -382,8 +400,15 @@ GetDataFileSchemaForDucklakeTable(Oid relationId)
 						if (isnull || colOrder <= 0 || colOrder > maxAttnum)
 							continue;
 
+						int64		colId = DatumGetInt64(SPI_getbinval(
+												SPI_tuptable->vals[row],
+												SPI_tuptable->tupdesc, 2, &isnull));
+
+						if (!isnull)
+							columnIdsByAttnum[colOrder] = colId;
+
 						Datum		d = SPI_getbinval(SPI_tuptable->vals[row],
-													  SPI_tuptable->tupdesc, 2, &isnull);
+													  SPI_tuptable->tupdesc, 3, &isnull);
 
 						if (!isnull)
 						{
@@ -408,7 +433,8 @@ GetDataFileSchemaForDucklakeTable(Oid relationId)
 			pfree(metadata);
 		}
 
-		(void) defaultsByAttnum;	/* unused; we use defaultStrings directly */
+		if (pushedSnapshot)
+			PopActiveSnapshot();
 	}
 
 	for (int i = 0; i < tupdesc->natts; i++)
@@ -422,10 +448,18 @@ GetDataFileSchemaForDucklakeTable(Oid relationId)
 		DataFileSchemaField *field = &schema->fields[schema->nfields];
 
 		/*
-		 * For DuckLake tables, we use attnum as the field ID.
-		 * This maps to column_order in lake_ducklake.column.
+		 * For DuckLake tables, the parquet field_id is the catalog
+		 * column_id so files written by DuckDB's ducklake extension and
+		 * by pg_lake share a single ID space. If we couldn't find a
+		 * matching catalog row (e.g. the table just got registered and
+		 * the column row hasn't landed yet), fall back to attnum to
+		 * keep the read path working at all.
 		 */
-		field->id = attr->attnum;
+		int64		columnId = (columnIdsByAttnum != NULL && attr->attnum <= maxAttnum)
+									? columnIdsByAttnum[attr->attnum]
+									: 0;
+
+		field->id = (columnId > 0) ? (int) columnId : attr->attnum;
 		field->name = pstrdup(NameStr(attr->attname));
 		field->required = attr->attnotnull;
 		field->doc = NULL;

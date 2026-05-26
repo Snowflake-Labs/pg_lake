@@ -35,6 +35,17 @@ int			DucklakeAutovacuumNaptime = 10 * 60;	/* 10 minutes */
 int			DucklakeMaxSnapshotAge = 30 * 60;		/* 30 minutes */
 int			DucklakeLogAutovacuumMinDuration = 600000;	/* 10 minutes in ms */
 
+/*
+ * Process-local flag set while the snapshot_changes-based DDL replay
+ * trigger (or the ducklake_table_insert rename-replay path) applies
+ * CREATE / DROP / ALTER FOREIGN TABLE on the PG side after a
+ * DuckDB-driven catalog change. pg_lake_table's hooks read this
+ * directly via the catalog.h extern and short-circuit so they don't
+ * write the same change BACK to lake_ducklake.* (which would create
+ * a duplicate version row). Not a GUC — no user-tunable knob here.
+ */
+bool		DucklakeInDDLReplay = false;
+
 /* Hook check functions */
 static bool DucklakeDefaultLocationCheckHook(char **newvalue, void **extra,
 											 GucSource source);
