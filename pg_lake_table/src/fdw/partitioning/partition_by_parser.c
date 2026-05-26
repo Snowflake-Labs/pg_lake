@@ -923,10 +923,10 @@ EnsureValidTypeForDayTransform(Oid typeOid)
 static void
 EnsureValidTypeForHourTransform(Oid typeOid)
 {
-	if (!IsTimeOrTimestampType(typeOid))
+	if (typeOid != TIMESTAMPOID && typeOid != TIMESTAMPTZOID)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATATYPE_MISMATCH),
-				 errmsg("hour transform requires a time(tz) or timestamp(tz) column, but type is %s",
+				 errmsg("hour transform requires a timestamp(tz) column, but type is %s",
 						format_type_be(typeOid))));
 }
 

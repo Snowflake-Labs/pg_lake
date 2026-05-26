@@ -118,7 +118,6 @@ COLUMN_TRANSFORMS = [
     ("day(col_ts)", [SpecTransform("day", "col_ts_day", 1000, 7, [7])]),
     # hour only
     ("hour(col_ts)", [SpecTransform("hour", "col_ts_hour", 1000, 7, [7])]),
-    ("hour(col_time)", [SpecTransform("hour", "col_time_hour", 1000, 8, [8])]),
     # combinations with different applicable transforms and whitespaces and quotes
     (
         "col_short, col_int",
@@ -128,10 +127,10 @@ COLUMN_TRANSFORMS = [
         ],
     ),
     (
-        "col_short, hour(col_time)",
+        "col_short, hour(col_ts)",
         [
             SpecTransform("identity", "col_short", 1000, 1, [1]),
-            SpecTransform("hour", "col_time_hour", 1001, 8, [8]),
+            SpecTransform("hour", "col_ts_hour", 1001, 7, [7]),
         ],
     ),
     (
@@ -142,10 +141,10 @@ COLUMN_TRANSFORMS = [
         ],
     ),
     (
-        'truncate(2,col_short), hour( "col_time"    )',
+        'truncate(2,col_short), hour( "col_ts"    )',
         [
             SpecTransform("truncate[2]", "col_short_trunc_2", 1000, 1, [1]),
-            SpecTransform("hour", "col_time_hour", 1001, 8, [8]),
+            SpecTransform("hour", "col_ts_hour", 1001, 7, [7]),
         ],
     ),
     (
@@ -459,6 +458,8 @@ def test_create_iceberg_table_partition_by_inapplicable_transform_types(
         "day(col_int)",
         "month(col_text)",
         "year(col_binary)",
+        "hour(col_time)",
+        "hour(col_timetz)",
         "bucket(4,col_bool)",
         "truncate(4,col_bool)",
         "truncate(1231232134234324324,col_short)",
@@ -469,7 +470,7 @@ def test_create_iceberg_table_partition_by_inapplicable_transform_types(
         error = run_command(
             f"""
             CREATE TABLE test_create_iceberg_table_partition_by (col_short int2, col_int int4, col_bigint int8, col_text text, col_numeric numeric,
-                                                                 col_binary bytea, col_date date, col_ts timestamp, col_time time, col_bool bool, col_json json
+                                                                 col_binary bytea, col_date date, col_ts timestamp, col_time time, col_timetz timetz, col_bool bool, col_json json
                                                                 ) USING iceberg WITH (partition_by = '{transform}');
             """,
             pg_conn,
