@@ -53,7 +53,7 @@ StripTablePathPrefix(const char *tablePath, const char *absolutePath,
 char *
 DucklakeResolvePath(const char *basePath, const char *relPath, bool isRelative)
 {
-	if (!isRelative || basePath == NULL)
+	if (!isRelative || basePath == NULL || basePath[0] == '\0')
 		return pstrdup(relPath ? relPath : "");
 
 	if (relPath == NULL)
@@ -73,6 +73,25 @@ DucklakeResolvePath(const char *basePath, const char *relPath, bool isRelative)
 		appendStringInfo(&buf, "%.*s/%s", (int) baseLen, basePath, relPath);
 		return buf.data;
 	}
+}
+
+
+/*
+ * ResolveAbsoluteTablePath chains data_path → schema.path → table.path
+ * into a single absolute URL. Each piece may be NULL (the higher level
+ * is treated as the URL for that subtree) or marked relative. Used by
+ * DucklakeGetTableMetadata so all downstream consumers see absolute
+ * paths regardless of how the catalog stores them.
+ */
+static char *
+ResolveAbsoluteTablePath(const char *dataPath,
+						 const char *schemaPath, bool schemaRel,
+						 const char *tablePath, bool tableRel)
+{
+	char	   *schemaAbs = DucklakeResolvePath(dataPath, schemaPath, schemaRel);
+	char	   *tableAbs = DucklakeResolvePath(schemaAbs, tablePath, tableRel);
+
+	return tableAbs;
 }
 
 DucklakeSnapshot *
@@ -488,8 +507,52 @@ DucklakeRegisterTable(const char *schemaName, const char *tableName, const char 
 
 	SPI_connect();
 
-	/* Check if schema exists */
 	initStringInfo(&query);
+
+	/*
+	 * Establish the catalog's data_path. If pg_lake_ducklake.default_location_prefix
+	 * is set and metadata.data_path is unset, seed it now so this CREATE
+	 * TABLE and every subsequent one can store paths relative to it.
+	 */
+	if (DucklakeDefaultLocationPrefix != NULL && DucklakeDefaultLocationPrefix[0] != '\0')
+	{
+		char	   *prefixWithSlash;
+		size_t		plen = strlen(DucklakeDefaultLocationPrefix);
+
+		if (plen > 0 && DucklakeDefaultLocationPrefix[plen - 1] == '/')
+			prefixWithSlash = pstrdup(DucklakeDefaultLocationPrefix);
+		else
+			prefixWithSlash = psprintf("%s/", DucklakeDefaultLocationPrefix);
+
+		resetStringInfo(&query);
+		appendStringInfo(&query,
+						 "INSERT INTO lake_ducklake.metadata (key, value) "
+						 "VALUES ('data_path', %s) "
+						 "ON CONFLICT DO NOTHING",
+						 quote_literal_cstr(prefixWithSlash));
+		SPI_exec(query.data, 0);
+	}
+
+	/* Read the (possibly just-seeded) data_path back out. */
+	char	   *dataPath = NULL;
+	{
+		resetStringInfo(&query);
+		appendStringInfoString(&query,
+							   "SELECT value FROM lake_ducklake.metadata "
+							   "WHERE key = 'data_path' LIMIT 1");
+		ret = SPI_exec(query.data, 1);
+		if (ret == SPI_OK_SELECT && SPI_processed > 0)
+		{
+			Datum		d = SPI_getbinval(SPI_tuptable->vals[0],
+										  SPI_tuptable->tupdesc, 1, &isnull);
+
+			if (!isnull)
+				dataPath = TextDatumGetCString(d);
+		}
+	}
+
+	/* Check if schema exists */
+	resetStringInfo(&query);
 	appendStringInfo(&query,
 					 "SELECT schema_id FROM lake_ducklake.schema WHERE schema_name = %s AND end_snapshot IS NULL",
 					 quote_literal_cstr(schemaName));
@@ -502,14 +565,36 @@ DucklakeRegisterTable(const char *schemaName, const char *tableName, const char 
 	}
 	else
 	{
-		/* Create new schema */
+		/*
+		 * Create new schema. When data_path is set, store the schema's
+		 * own path as '<schema>/' relative so DuckLake-side readers can
+		 * compose the full URL the spec way. When data_path is unset
+		 * (no GUC, mixed-state legacy catalog), fall back to a NULL
+		 * relative path — matches the pre-Phase-2 behaviour.
+		 */
 		schemaId = snapshot->nextCatalogId++;
 		resetStringInfo(&query);
-		appendStringInfo(&query,
-						 "INSERT INTO lake_ducklake.schema (schema_id, schema_uuid, begin_snapshot, schema_name) "
-						 "VALUES (%ld, gen_random_uuid(), %ld, %s)",
-						 schemaId,
-						 snapshot->snapshotId, quote_literal_cstr(schemaName));
+		if (dataPath != NULL)
+		{
+			char	   *schemaRel = psprintf("%s/", schemaName);
+
+			appendStringInfo(&query,
+							 "INSERT INTO lake_ducklake.schema "
+							 "(schema_id, schema_uuid, begin_snapshot, schema_name, path, path_is_relative) "
+							 "VALUES (%ld, gen_random_uuid(), %ld, %s, %s, true)",
+							 schemaId, snapshot->snapshotId,
+							 quote_literal_cstr(schemaName),
+							 quote_literal_cstr(schemaRel));
+		}
+		else
+		{
+			appendStringInfo(&query,
+							 "INSERT INTO lake_ducklake.schema "
+							 "(schema_id, schema_uuid, begin_snapshot, schema_name) "
+							 "VALUES (%ld, gen_random_uuid(), %ld, %s)",
+							 schemaId, snapshot->snapshotId,
+							 quote_literal_cstr(schemaName));
+		}
 		SPI_exec(query.data, 0);
 	}
 
@@ -528,16 +613,40 @@ DucklakeRegisterTable(const char *schemaName, const char *tableName, const char 
 		normalizedPath = pathWithSlash;
 	}
 
+	/*
+	 * Decide whether the table fits the relative shape: if data_path is
+	 * known and the user's normalized location equals
+	 * '<data_path><schema>/<table>/', store table.path = '<table>/' with
+	 * path_is_relative=true. Otherwise store the absolute location with
+	 * path_is_relative=false (the legacy / explicit-location flow).
+	 */
+	const char *storedTablePath = normalizedPath;
+	bool		tablePathIsRelative = false;
+
+	if (dataPath != NULL && normalizedPath != NULL)
+	{
+		char	   *expected = psprintf("%s%s/%s/", dataPath, schemaName, tableName);
+
+		if (strcmp(normalizedPath, expected) == 0)
+		{
+			storedTablePath = psprintf("%s/", tableName);
+			tablePathIsRelative = true;
+		}
+		pfree(expected);
+	}
+
 	/* Create new table */
 	tableId = snapshot->nextCatalogId++;
 	resetStringInfo(&query);
 	appendStringInfo(&query,
 					 "INSERT INTO lake_ducklake.table "
 					 "(table_id, table_uuid, begin_snapshot, schema_id, table_name, path, path_is_relative) "
-					 "VALUES (%ld, gen_random_uuid(), %ld, %ld, %s, %s, false) RETURNING table_id",
+					 "VALUES (%ld, gen_random_uuid(), %ld, %ld, %s, %s, %s) RETURNING table_id",
 					 tableId,
 					 snapshot->snapshotId, schemaId,
-					 quote_literal_cstr(tableName), quote_literal_cstr(normalizedPath));
+					 quote_literal_cstr(tableName),
+					 quote_literal_cstr(storedTablePath),
+					 tablePathIsRelative ? "true" : "false");
 	ret = SPI_exec(query.data, 0);
 
 	if (ret != SPI_OK_INSERT_RETURNING)
@@ -602,7 +711,11 @@ DucklakeGetTableMetadata(Oid tableOid)
 					 "   WHERE s.schema_name = %s AND t.table_name = %s "
 					 ") "
 					 "SELECT t.table_id, t.table_uuid, t.schema_id, t.table_name, "
-					 "       s.schema_name, t.path, t.path_is_relative, t.begin_snapshot, t.end_snapshot "
+					 "       s.schema_name, t.path, t.path_is_relative, "
+					 "       t.begin_snapshot, t.end_snapshot, "
+					 "       s.path, s.path_is_relative, "
+					 "       (SELECT value FROM lake_ducklake.metadata "
+					 "         WHERE key = 'data_path' LIMIT 1) "
 					 "  FROM lake_ducklake.table t "
 					 "  JOIN lake_ducklake.schema s ON t.schema_id = s.schema_id "
 					 " WHERE t.table_id IN (SELECT table_id FROM name_match) "
@@ -638,16 +751,31 @@ DucklakeGetTableMetadata(Oid tableOid)
 																	 SPI_tuptable->tupdesc, 5, &isnull)));
 
 	Datum pathDatum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 6, &isnull);
-	bool pathIsNull = isnull;
-
-	char *pathStr = pathIsNull ? NULL : pstrdup(TextDatumGetCString(pathDatum));
-
-	bool pathIsRelative = DatumGetBool(SPI_getbinval(SPI_tuptable->vals[0],
-													  SPI_tuptable->tupdesc, 7, &isnull));
+	char *tablePathStr = isnull ? NULL : pstrdup(TextDatumGetCString(pathDatum));
+	bool tablePathIsRel = DatumGetBool(SPI_getbinval(SPI_tuptable->vals[0],
+													 SPI_tuptable->tupdesc, 7, &isnull));
 	int64 beginSnapshot = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
 													   SPI_tuptable->tupdesc, 8, &isnull));
 
+	Datum schemaPathDatum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 10, &isnull);
+	char *schemaPathStr = isnull ? NULL : pstrdup(TextDatumGetCString(schemaPathDatum));
+	bool schemaPathIsRel = DatumGetBool(SPI_getbinval(SPI_tuptable->vals[0],
+													  SPI_tuptable->tupdesc, 11, &isnull));
+
+	Datum dataPathDatum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 12, &isnull);
+	char *dataPathStr = isnull ? NULL : pstrdup(TextDatumGetCString(dataPathDatum));
+
 	SPI_finish();
+
+	/*
+	 * Resolve to absolute. Downstream consumers receive path as an
+	 * absolute URL with pathIsRelative=false regardless of how the
+	 * catalog stores it, so all path-using code paths stay agnostic of
+	 * the relative/absolute storage shape.
+	 */
+	char *pathStr = ResolveAbsoluteTablePath(dataPathStr,
+											  schemaPathStr, schemaPathIsRel,
+											  tablePathStr, tablePathIsRel);
 
 	/* Allocate metadata in caller's memory context after SPI_finish */
 	metadata = (DucklakeTableMetadata *) palloc(sizeof(DucklakeTableMetadata));
@@ -656,7 +784,7 @@ DucklakeGetTableMetadata(Oid tableOid)
 	metadata->tableName = tableNameStr;
 	metadata->schemaName = schemaNameStr;
 	metadata->path = pathStr;
-	metadata->pathIsRelative = pathIsRelative;
+	metadata->pathIsRelative = false;
 	metadata->beginSnapshot = beginSnapshot;
 
 	return metadata;
@@ -676,10 +804,14 @@ DucklakeGetTableMetadataById(int64 tableId)
 	initStringInfo(&query);
 	appendStringInfo(&query,
 					 "SELECT t.table_id, t.table_uuid, t.schema_id, t.table_name, "
-					 "s.schema_name, t.path, t.path_is_relative, t.begin_snapshot, t.end_snapshot "
-					 "FROM lake_ducklake.table t "
-					 "JOIN lake_ducklake.schema s ON t.schema_id = s.schema_id "
-					 "WHERE t.table_id = %ld AND t.end_snapshot IS NULL",
+					 "       s.schema_name, t.path, t.path_is_relative, "
+					 "       t.begin_snapshot, t.end_snapshot, "
+					 "       s.path, s.path_is_relative, "
+					 "       (SELECT value FROM lake_ducklake.metadata "
+					 "         WHERE key = 'data_path' LIMIT 1) "
+					 "  FROM lake_ducklake.table t "
+					 "  JOIN lake_ducklake.schema s ON t.schema_id = s.schema_id "
+					 " WHERE t.table_id = %ld AND t.end_snapshot IS NULL",
 					 tableId);
 
 	SPI_connect();
@@ -708,15 +840,25 @@ DucklakeGetTableMetadataById(int64 tableId)
 	char *schemaNameStr = pstrdup(TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[0],
 																	 SPI_tuptable->tupdesc, 5, &isnull)));
 	Datum pathDatum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 6, &isnull);
-	bool pathIsNull = isnull;
-
-	char *pathStr = pathIsNull ? NULL : pstrdup(TextDatumGetCString(pathDatum));
-	bool pathIsRelative = DatumGetBool(SPI_getbinval(SPI_tuptable->vals[0],
+	char *tablePathStr = isnull ? NULL : pstrdup(TextDatumGetCString(pathDatum));
+	bool tablePathIsRel = DatumGetBool(SPI_getbinval(SPI_tuptable->vals[0],
 													  SPI_tuptable->tupdesc, 7, &isnull));
 	int64 beginSnapshot = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
 													   SPI_tuptable->tupdesc, 8, &isnull));
 
+	Datum schemaPathDatum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 10, &isnull);
+	char *schemaPathStr = isnull ? NULL : pstrdup(TextDatumGetCString(schemaPathDatum));
+	bool schemaPathIsRel = DatumGetBool(SPI_getbinval(SPI_tuptable->vals[0],
+													  SPI_tuptable->tupdesc, 11, &isnull));
+
+	Datum dataPathDatum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 12, &isnull);
+	char *dataPathStr = isnull ? NULL : pstrdup(TextDatumGetCString(dataPathDatum));
+
 	SPI_finish();
+
+	char *pathStr = ResolveAbsoluteTablePath(dataPathStr,
+											  schemaPathStr, schemaPathIsRel,
+											  tablePathStr, tablePathIsRel);
 
 	/* Allocate metadata in caller's memory context after SPI_finish */
 	metadata = (DucklakeTableMetadata *) palloc(sizeof(DucklakeTableMetadata));
@@ -725,7 +867,7 @@ DucklakeGetTableMetadataById(int64 tableId)
 	metadata->tableName = tableNameStr;
 	metadata->schemaName = schemaNameStr;
 	metadata->path = pathStr;
-	metadata->pathIsRelative = pathIsRelative;
+	metadata->pathIsRelative = false;
 	metadata->beginSnapshot = beginSnapshot;
 
 	return metadata;
@@ -890,13 +1032,25 @@ DucklakeAddDataFile(int64 tableId, const char *path, int64 recordCount,
 
 	SPI_connect();
 
-	/* Look up the mapping_id and table path for this table */
+	/*
+	 * Look up the mapping_id and the fully-resolved absolute table path
+	 * for this table. table.path may itself be relative (Phase 2), so
+	 * we have to chain through schema.path and metadata.data_path.
+	 */
 	initStringInfo(&query);
 	appendStringInfo(&query,
-					 "SELECT cm.mapping_id, t.path "
-					 "FROM lake_ducklake.column_mapping cm "
-					 "JOIN lake_ducklake.table t ON cm.table_id = t.table_id "
-					 "WHERE cm.table_id = %ld",
+					 "SELECT cm.mapping_id, "
+					 "       t.path, t.path_is_relative, "
+					 "       s.path, s.path_is_relative, "
+					 "       (SELECT value FROM lake_ducklake.metadata "
+					 "         WHERE key = 'data_path' LIMIT 1) "
+					 "  FROM lake_ducklake.column_mapping cm "
+					 "  JOIN lake_ducklake.table t ON cm.table_id = t.table_id "
+					 "                              AND t.end_snapshot IS NULL "
+					 "  JOIN lake_ducklake.schema s ON s.schema_id = t.schema_id "
+					 "                              AND s.end_snapshot IS NULL "
+					 " WHERE cm.table_id = %ld "
+					 " ORDER BY t.begin_snapshot DESC LIMIT 1",
 					 tableId);
 	ret = SPI_exec(query.data, 0);
 
@@ -904,14 +1058,24 @@ DucklakeAddDataFile(int64 tableId, const char *path, int64 recordCount,
 	char *tablePath = NULL;
 	if (ret == SPI_OK_SELECT && SPI_processed > 0)
 	{
-		bool isnull;
-		mappingId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
-												 SPI_tuptable->tupdesc, 1, &isnull));
+		bool		isnull;
+		HeapTuple	row = SPI_tuptable->vals[0];
+		TupleDesc	desc = SPI_tuptable->tupdesc;
 
-		/* Get table path (may be NULL) */
-		Datum tablePathDatum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 2, &isnull);
-		if (!isnull)
-			tablePath = TextDatumGetCString(tablePathDatum);
+		mappingId = DatumGetInt64(SPI_getbinval(row, desc, 1, &isnull));
+
+		Datum		d = SPI_getbinval(row, desc, 2, &isnull);
+		char	   *tp = isnull ? NULL : TextDatumGetCString(d);
+		bool		tpRel = DatumGetBool(SPI_getbinval(row, desc, 3, &isnull));
+
+		d = SPI_getbinval(row, desc, 4, &isnull);
+		char	   *sp = isnull ? NULL : TextDatumGetCString(d);
+		bool		spRel = DatumGetBool(SPI_getbinval(row, desc, 5, &isnull));
+
+		d = SPI_getbinval(row, desc, 6, &isnull);
+		char	   *dp = isnull ? NULL : TextDatumGetCString(d);
+
+		tablePath = ResolveAbsoluteTablePath(dp, sp, spRel, tp, tpRel);
 	}
 
 	/*
@@ -1230,22 +1394,42 @@ DucklakeAddDeleteFile(int64 tableId, int64 dataFileId, const char *path,
 
 	SPI_connect();
 
-	/* Look up the table path so we can store the delete-file path relative. */
+	/*
+	 * Look up the fully-resolved absolute table path (Phase 2: chain
+	 * data_path → schema.path → table.path). StripTablePathPrefix
+	 * needs the absolute prefix to do its compare.
+	 */
 	initStringInfo(&query);
 	appendStringInfo(&query,
-					 "SELECT path FROM lake_ducklake.table "
-					 "WHERE table_id = %ld AND end_snapshot IS NULL "
-					 "ORDER BY begin_snapshot DESC LIMIT 1",
+					 "SELECT t.path, t.path_is_relative, "
+					 "       s.path, s.path_is_relative, "
+					 "       (SELECT value FROM lake_ducklake.metadata "
+					 "         WHERE key = 'data_path' LIMIT 1) "
+					 "  FROM lake_ducklake.table t "
+					 "  JOIN lake_ducklake.schema s ON s.schema_id = t.schema_id "
+					 "                              AND s.end_snapshot IS NULL "
+					 " WHERE t.table_id = %ld AND t.end_snapshot IS NULL "
+					 " ORDER BY t.begin_snapshot DESC LIMIT 1",
 					 tableId);
 	ret = SPI_exec(query.data, 1);
 	if (ret == SPI_OK_SELECT && SPI_processed > 0)
 	{
 		bool		isnull;
-		Datum		d = SPI_getbinval(SPI_tuptable->vals[0],
-									  SPI_tuptable->tupdesc, 1, &isnull);
+		HeapTuple	row = SPI_tuptable->vals[0];
+		TupleDesc	desc = SPI_tuptable->tupdesc;
 
-		if (!isnull)
-			tablePath = TextDatumGetCString(d);
+		Datum		d = SPI_getbinval(row, desc, 1, &isnull);
+		char	   *tp = isnull ? NULL : TextDatumGetCString(d);
+		bool		tpRel = DatumGetBool(SPI_getbinval(row, desc, 2, &isnull));
+
+		d = SPI_getbinval(row, desc, 3, &isnull);
+		char	   *sp = isnull ? NULL : TextDatumGetCString(d);
+		bool		spRel = DatumGetBool(SPI_getbinval(row, desc, 4, &isnull));
+
+		d = SPI_getbinval(row, desc, 5, &isnull);
+		char	   *dp = isnull ? NULL : TextDatumGetCString(d);
+
+		tablePath = ResolveAbsoluteTablePath(dp, sp, spRel, tp, tpRel);
 	}
 
 	storedPath = StripTablePathPrefix(tablePath, path, &pathIsRelative);

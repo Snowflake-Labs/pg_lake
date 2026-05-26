@@ -29,7 +29,7 @@
 PG_MODULE_MAGIC;
 
 /* GUC variables */
-char	   *DucklakeDefaultLocationPrefix = NULL;
+char	   *PGDLLEXPORT DucklakeDefaultLocationPrefix = NULL;
 bool		DucklakeAutovacuumEnabled = true;
 int			DucklakeAutovacuumNaptime = 10 * 60;	/* 10 minutes */
 int			DucklakeMaxSnapshotAge = 30 * 60;		/* 30 minutes */

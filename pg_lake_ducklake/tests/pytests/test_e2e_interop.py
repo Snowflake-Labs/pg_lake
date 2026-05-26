@@ -933,5 +933,120 @@ def test_pg_drop_then_duckdb_readd_column_returns_null(pg_cursor, s3):
     )
 
 
+def test_default_location_prefix_makes_paths_relative(pg_cursor, s3):
+    """
+    With pg_lake_ducklake.default_location_prefix set and CREATE TABLE
+    issued without an explicit location, the catalog should record:
+      - lake_ducklake.metadata.data_path = '<prefix>/'
+      - lake_ducklake.schema.path        = '<schema>/' (relative)
+      - lake_ducklake.table.path         = '<table>/' (relative)
+    INSERT/SELECT must round-trip via the resolver chain.
+    """
+    prefix = f"s3://{TEST_BUCKET}/relpath_phase2"
+    pg_cursor.execute(f"SET pg_lake_ducklake.default_location_prefix TO '{prefix}'")
+    pg_cursor.execute("DROP TABLE IF EXISTS rp2_auto")
+    pg_cursor.execute("CREATE TABLE rp2_auto (id INT, name TEXT) USING ducklake")
+    pg_cursor.execute("INSERT INTO rp2_auto VALUES (1, 'a'), (2, 'b')")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        "SELECT value FROM lake_ducklake.metadata WHERE key = 'data_path'"
+    )
+    row = pg_cursor.fetchone()
+    assert row is not None and row[0] == f"{prefix}/", row
+
+    pg_cursor.execute(
+        "SELECT path, path_is_relative FROM lake_ducklake.schema "
+        "WHERE schema_name = 'public' AND end_snapshot IS NULL"
+    )
+    schema_row = pg_cursor.fetchone()
+    assert schema_row == ("public/", True), schema_row
+
+    pg_cursor.execute(
+        "SELECT path, path_is_relative FROM lake_ducklake.table "
+        "WHERE table_name = 'rp2_auto' AND end_snapshot IS NULL"
+    )
+    table_row = pg_cursor.fetchone()
+    assert table_row == ("rp2_auto/", True), table_row
+
+    pg_cursor.execute("SELECT id, name FROM rp2_auto ORDER BY id")
+    assert pg_cursor.fetchall() == [(1, "a"), (2, "b")]
+
+
+def test_default_location_prefix_explicit_location_overrides(pg_cursor, s3):
+    """
+    Even with the GUC set, an explicit WITH (location = ...) keeps the
+    Phase 1 absolute behaviour: schema.path stays NULL, table.path is
+    stored absolute with path_is_relative=false.
+    """
+    prefix = f"s3://{TEST_BUCKET}/relpath_phase2_b"
+    explicit = f"s3://{TEST_BUCKET}/elsewhere/rp2_explicit"
+
+    pg_cursor.execute(f"SET pg_lake_ducklake.default_location_prefix TO '{prefix}'")
+    pg_cursor.execute("DROP TABLE IF EXISTS rp2_explicit")
+    pg_cursor.execute(
+        f"""
+        CREATE TABLE rp2_explicit (id INT)
+            USING ducklake WITH (location = '{explicit}')
+        """
+    )
+    pg_cursor.execute("INSERT INTO rp2_explicit VALUES (10), (20)")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        "SELECT path, path_is_relative FROM lake_ducklake.table "
+        "WHERE table_name = 'rp2_explicit' AND end_snapshot IS NULL"
+    )
+    row = pg_cursor.fetchone()
+    assert row is not None
+    assert row[0].rstrip("/") == explicit.rstrip("/"), row
+    assert row[1] is False, row
+
+    pg_cursor.execute("SELECT id FROM rp2_explicit ORDER BY id")
+    assert pg_cursor.fetchall() == [(10,), (20,)]
+
+
+@pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="DuckDB not installed")
+def test_default_location_prefix_duckdb_interop(pg_cursor, s3):
+    """
+    GUC-mode CREATE TABLE on the PG side, INSERT, then DuckDB ATTACHes
+    and SELECTs back. Verifies DuckDB resolves the data_path → schema
+    → table chain and reads our parquet file at the right URL.
+    """
+    prefix = f"s3://{TEST_BUCKET}/relpath_phase2_d"
+    pg_cursor.execute(f"SET pg_lake_ducklake.default_location_prefix TO '{prefix}'")
+    pg_cursor.execute("DROP TABLE IF EXISTS rp2_duck")
+    pg_cursor.execute("CREATE TABLE rp2_duck (id INT, val TEXT) USING ducklake")
+    pg_cursor.execute("INSERT INTO rp2_duck VALUES (1, 'x'), (2, 'y')")
+    pg_cursor.connection.commit()
+
+    duck = duckdb.connect()
+    duck.execute("INSTALL postgres")
+    duck.execute("LOAD postgres")
+    duck.execute("INSTALL ducklake FROM core_nightly")
+    duck.execute("LOAD ducklake")
+    duck.execute(
+        f"""
+        CREATE SECRET s3test (TYPE S3, KEY_ID 'testing', SECRET 'testing',
+                              ENDPOINT 'localhost:5999',
+                              SCOPE 's3://{TEST_BUCKET}', URL_STYLE 'path',
+                              USE_SSL false)
+        """
+    )
+    conn = (
+        f"host={server_params.PG_HOST} port={server_params.PG_PORT} "
+        f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
+    )
+    duck.execute(
+        f"ATTACH 'postgres:{conn}' AS dl "
+        f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
+    )
+
+    rows = duck.execute(
+        "SELECT id, val FROM dl.public.rp2_duck ORDER BY id"
+    ).fetchall()
+    assert rows == [(1, "x"), (2, "y")], rows
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])

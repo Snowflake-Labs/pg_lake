@@ -1985,6 +1985,39 @@ ProcessCreateDucklakeTableFromForeignTableStmt(ProcessUtilityParams * params)
 		createStmt->options = lappend(createStmt->options, format);
 	}
 
+	/*
+	 * If the user didn't specify location and pg_lake_ducklake.default_location_prefix
+	 * is set, synthesize '<prefix>/<schema>/<table>/' so the catalog can
+	 * store schema.path and table.path relative to the prefix.
+	 */
+	DefElem    *locationOption = GetOption(createStmt->options, "location");
+
+	if (locationOption == NULL &&
+		DucklakeDefaultLocationPrefix != NULL &&
+		DucklakeDefaultLocationPrefix[0] != '\0')
+	{
+		const char *schemaName = createStmt->base.relation->schemaname;
+		const char *tableName = createStmt->base.relation->relname;
+		size_t		plen;
+		char	   *synthesized;
+
+		if (schemaName == NULL)
+			schemaName = "public";
+
+		plen = strlen(DucklakeDefaultLocationPrefix);
+		if (plen > 0 && DucklakeDefaultLocationPrefix[plen - 1] == '/')
+			synthesized = psprintf("%s%s/%s/", DucklakeDefaultLocationPrefix,
+								   schemaName, tableName);
+		else
+			synthesized = psprintf("%s/%s/%s/", DucklakeDefaultLocationPrefix,
+								   schemaName, tableName);
+
+		createStmt->options = lappend(createStmt->options,
+									  makeDefElem("location",
+												  (Node *) makeString(synthesized),
+												  -1));
+	}
+
 	params->plannedStmt->utilityStmt = (Node *) createStmt;
 
 	/* Return false to let normal foreign table creation continue */

@@ -10,7 +10,7 @@
 #include "utils/uuid.h"
 
 /* GUC variables */
-extern char *DucklakeDefaultLocationPrefix;
+extern PGDLLEXPORT char *DucklakeDefaultLocationPrefix;
 extern bool DucklakeAutovacuumEnabled;
 extern int	DucklakeAutovacuumNaptime;
 extern int	DucklakeMaxSnapshotAge;

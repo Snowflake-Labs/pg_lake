@@ -665,6 +665,45 @@ AS $$
            END
 $$;
 
+-- absolute_table_path resolves a table_id to its fully-qualified URL by
+-- chaining lake_ducklake.metadata.data_path → schema.path → table.path,
+-- honouring path_is_relative on each level. Used by FDW-side lookups
+-- (DATA_FILE_ADD_DELETE_MAPPING, DATA_FILE_REMOVE) so the catalog can
+-- store table.path relative without forcing the FDW to learn the chain.
+CREATE FUNCTION lake_ducklake.absolute_table_path(p_table_id BIGINT)
+RETURNS TEXT
+LANGUAGE SQL STABLE
+AS $$
+    SELECT lake_ducklake.resolve_path(
+             t.path, t.path_is_relative,
+             lake_ducklake.resolve_path(
+               s.path, s.path_is_relative,
+               (SELECT value FROM lake_ducklake.metadata
+                 WHERE key = 'data_path' LIMIT 1)))
+      FROM lake_ducklake.table t
+      JOIN lake_ducklake.schema s ON s.schema_id = t.schema_id
+                                  AND s.end_snapshot IS NULL
+     WHERE t.table_id = p_table_id
+       AND t.end_snapshot IS NULL
+     ORDER BY t.begin_snapshot DESC
+     LIMIT 1
+$$;
+
+-- absolute_data_file_path resolves a data_file_id (or delete_file_id) to
+-- its fully-qualified URL by chaining the file's path through the table
+-- chain. Convenience wrapper used by tests that want an absolute URL
+-- regardless of how the catalog stores the row.
+CREATE FUNCTION lake_ducklake.absolute_data_file_path(p_data_file_id BIGINT)
+RETURNS TEXT
+LANGUAGE SQL STABLE
+AS $$
+    SELECT lake_ducklake.resolve_path(
+             df.path, df.path_is_relative,
+             lake_ducklake.absolute_table_path(df.table_id))
+      FROM lake_ducklake.data_file df
+     WHERE df.data_file_id = p_data_file_id
+$$;
+
 -- Get snapshots for a table
 CREATE FUNCTION lake_ducklake.snapshots(catalog_name TEXT)
 RETURNS TABLE(

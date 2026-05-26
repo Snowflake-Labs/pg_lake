@@ -55,7 +55,7 @@ def test_pg_lake_parquet_readable_by_duckdb(pg_cursor, s3):
 
     pg_cursor.execute(
         """
-        SELECT lake_ducklake.resolve_path(df.path, df.path_is_relative, t.path)
+        SELECT lake_ducklake.absolute_data_file_path(df.data_file_id)
           FROM lake_ducklake.data_file df
           JOIN lake_ducklake.table t USING (table_id)
          WHERE t.table_name = 'rt_parquet'
@@ -218,7 +218,7 @@ def test_multi_insert_each_lands_on_a_new_snapshot(pg_cursor, s3):
 
     pg_cursor.execute(
         """
-        SELECT lake_ducklake.resolve_path(df.path, df.path_is_relative, t.path),
+        SELECT lake_ducklake.absolute_data_file_path(df.data_file_id),
                df.record_count, df.begin_snapshot
           FROM lake_ducklake.data_file df
           JOIN lake_ducklake.table t USING (table_id)
@@ -279,7 +279,7 @@ def test_alter_then_insert_round_trip(pg_cursor, s3):
 
     pg_cursor.execute(
         """
-        SELECT lake_ducklake.resolve_path(df.path, df.path_is_relative, t.path),
+        SELECT lake_ducklake.absolute_data_file_path(df.data_file_id),
                df.begin_snapshot, df.record_count
           FROM lake_ducklake.data_file df
           JOIN lake_ducklake.table t USING (table_id)
@@ -320,7 +320,7 @@ def test_file_column_stats_match_parquet(pg_cursor, s3):
 
     pg_cursor.execute(
         """
-        SELECT lake_ducklake.resolve_path(df.path, df.path_is_relative, t.path),
+        SELECT lake_ducklake.absolute_data_file_path(df.data_file_id),
                fcs.column_id, fcs.min_value, fcs.max_value, c.column_name
           FROM lake_ducklake.data_file df
           JOIN lake_ducklake.table t USING (table_id)
@@ -1015,7 +1015,7 @@ def test_pg_partial_update_uses_position_deletes(pg_cursor, s3):
     # have a separate bug we don't want to mask the metadata bug with.
     pg_cursor.execute(
         """
-        SELECT lake_ducklake.resolve_path(df.path, df.path_is_relative, t.path),
+        SELECT lake_ducklake.absolute_data_file_path(df.data_file_id),
                df.data_file_id, df.delete_count
           FROM lake_ducklake.delete_file df
           JOIN lake_ducklake.table t USING (table_id)

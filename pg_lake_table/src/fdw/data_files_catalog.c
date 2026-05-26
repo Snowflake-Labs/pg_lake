@@ -1752,10 +1752,12 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 						appendStringInfo(&query,
 										 "SELECT df.data_file_id "
 										 "  FROM lake_ducklake.data_file df "
-										 "  JOIN lake_ducklake.table t USING (table_id) "
 										 " WHERE df.table_id = %ld "
 										 "   AND df.end_snapshot IS NULL "
-										 "   AND lake_ducklake.resolve_path(df.path, df.path_is_relative, t.path) = %s",
+										 "   AND lake_ducklake.resolve_path("
+										 "         df.path, df.path_is_relative, "
+										 "         lake_ducklake.absolute_table_path(df.table_id)"
+										 "       ) = %s",
 										 metadata->tableId,
 										 quote_literal_cstr(operation->deletedFrom));
 
@@ -1778,11 +1780,12 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 								appendStringInfo(&updateQuery,
 												 "UPDATE lake_ducklake.delete_file df "
 												 "   SET data_file_id = %ld "
-												 "  FROM lake_ducklake.table t "
-												 " WHERE t.table_id = df.table_id "
-												 "   AND df.table_id = %ld "
+												 " WHERE df.table_id = %ld "
 												 "   AND df.end_snapshot IS NULL "
-												 "   AND lake_ducklake.resolve_path(df.path, df.path_is_relative, t.path) = %s",
+												 "   AND lake_ducklake.resolve_path("
+												 "         df.path, df.path_is_relative, "
+												 "         lake_ducklake.absolute_table_path(df.table_id)"
+												 "       ) = %s",
 												 dataFileId,
 												 metadata->tableId,
 												 quote_literal_cstr(operation->path));
@@ -1836,10 +1839,12 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 						appendStringInfo(&query,
 										 "SELECT df.data_file_id "
 										 "  FROM lake_ducklake.data_file df "
-										 "  JOIN lake_ducklake.table t USING (table_id) "
 										 " WHERE df.table_id = %ld "
 										 "   AND df.end_snapshot IS NULL "
-										 "   AND lake_ducklake.resolve_path(df.path, df.path_is_relative, t.path) = %s",
+										 "   AND lake_ducklake.resolve_path("
+										 "         df.path, df.path_is_relative, "
+										 "         lake_ducklake.absolute_table_path(df.table_id)"
+										 "       ) = %s",
 										 metadata->tableId,
 										 quote_literal_cstr(operation->path));
 

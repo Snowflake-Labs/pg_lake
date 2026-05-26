@@ -71,8 +71,8 @@ def cleanup_test_tables(pg_cursor):
         pg_cursor.execute("DELETE FROM lake_ducklake.snapshot_changes WHERE snapshot_id > 0")
         pg_cursor.execute("DELETE FROM lake_ducklake.file_column_stats WHERE data_file_id > 0")
         pg_cursor.execute("DELETE FROM lake_ducklake.file_partition_value WHERE data_file_id > 0")
-        pg_cursor.execute("DELETE FROM lake_ducklake.data_file WHERE data_file_id > 0")
         pg_cursor.execute("DELETE FROM lake_ducklake.delete_file WHERE delete_file_id > 0")
+        pg_cursor.execute("DELETE FROM lake_ducklake.data_file WHERE data_file_id > 0")
         pg_cursor.execute("DELETE FROM lake_ducklake.partition_column")
         pg_cursor.execute("DELETE FROM lake_ducklake.partition_info WHERE partition_id > 0")
         pg_cursor.execute("DELETE FROM lake_ducklake.table_column_stats")
@@ -86,10 +86,21 @@ def cleanup_test_tables(pg_cursor):
         pg_cursor.execute("DELETE FROM lake_ducklake.schema WHERE schema_id > 0")
         pg_cursor.execute("DELETE FROM lake_ducklake.snapshot WHERE snapshot_id > 0")
         pg_cursor.execute(
+            "DELETE FROM lake_ducklake.metadata "
+            "WHERE key NOT IN ('ducklake_version', 'data_inlining_row_limit')"
+        )
+        pg_cursor.execute(
             "UPDATE lake_ducklake.snapshot SET next_catalog_id = 1, next_file_id = 1 "
             "WHERE snapshot_id = 0"
         )
         pg_cursor.connection.commit()
+        # Reset GUCs after the metadata cleanup commits — RESET is a
+        # session-state change but doesn't need to be in the same xact.
+        try:
+            pg_cursor.execute("RESET pg_lake_ducklake.default_location_prefix")
+            pg_cursor.connection.commit()
+        except Exception:
+            pg_cursor.connection.rollback()
     except Exception as e:
         print(f"Warning: Could not clean metadata: {e}")
         pg_cursor.connection.rollback()
