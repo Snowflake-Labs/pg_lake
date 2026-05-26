@@ -230,31 +230,9 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 		{
 			TableDataFile *dataFile = palloc0(sizeof(TableDataFile));
 
-			/* Resolve relative paths against table base path */
-			if (duckFile->pathIsRelative && tableMetadata->path)
-			{
-				/*
-				 * DuckLake relative paths may start with '/' but should be
-				 * appended to the table base path
-				 */
-				const char *relativePath = duckFile->path;
-
-				/* Skip leading '/' if present */
-				if (relativePath[0] == '/')
-					relativePath++;
-
-				/* Concatenate table base path with relative file path */
-				StringInfoData pathBuf;
-
-				initStringInfo(&pathBuf);
-				appendStringInfo(&pathBuf, "%s/%s", tableMetadata->path, relativePath);
-				dataFile->path = pathBuf.data;
-			}
-			else
-			{
-				/* Use absolute path as-is */
-				dataFile->path = pstrdup(duckFile->path);
-			}
+			dataFile->path = DucklakeResolvePath(tableMetadata->path,
+												  duckFile->path,
+												  duckFile->pathIsRelative);
 
 			dataFile->stats.rowCount = duckFile->recordCount;
 			dataFile->stats.fileSize = duckFile->fileSizeBytes;
@@ -268,29 +246,9 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 		{
 			TableDataFile *deleteFile = palloc0(sizeof(TableDataFile));
 
-			/* Resolve relative paths against table base path */
-			if (duckDelFile->pathIsRelative && tableMetadata->path)
-			{
-				const char *relativePath = duckDelFile->path;
-
-				/* Skip leading '/' if present */
-				if (relativePath[0] == '/')
-					relativePath++;
-
-				/* Concatenate table base path with relative file path */
-				StringInfoData pathBuf;
-
-				initStringInfo(&pathBuf);
-				appendStringInfo(&pathBuf, "%s/%s", tableMetadata->path, relativePath);
-				deleteFile->path = pathBuf.data;
-
-				elog(NOTICE, "Resolved relative delete path: %s -> %s", duckDelFile->path, deleteFile->path);
-			}
-			else
-			{
-				/* Use absolute path as-is */
-				deleteFile->path = pstrdup(duckDelFile->path);
-			}
+			deleteFile->path = DucklakeResolvePath(tableMetadata->path,
+												    duckDelFile->path,
+												    duckDelFile->pathIsRelative);
 
 			deleteFile->stats.rowCount = duckDelFile->deleteCount;
 			deleteFile->stats.fileSize = duckDelFile->fileSizeBytes;

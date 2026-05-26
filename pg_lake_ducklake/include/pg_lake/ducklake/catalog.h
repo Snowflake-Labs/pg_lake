@@ -101,6 +101,18 @@ typedef struct DucklakeDeleteFile
 
 /* Catalog operations */
 extern PGDLLEXPORT DucklakeSnapshot *DucklakeGetCurrentSnapshot(void);
+
+/*
+ * DucklakeResolvePath joins basePath and relPath when isRelative is
+ * true, normalizing trailing slashes on basePath and leading slashes
+ * on relPath so the join produces exactly one separator '/'. When
+ * isRelative is false, returns a pstrdup of relPath. Result is
+ * palloc'd in CurrentMemoryContext.
+ */
+extern PGDLLEXPORT char *DucklakeResolvePath(const char *basePath,
+											  const char *relPath,
+											  bool isRelative);
+
 extern PGDLLEXPORT DucklakeSnapshot *DucklakeCreateSnapshot(const char *changesMade,
 															 const char *author,
 															 const char *commitMessage);

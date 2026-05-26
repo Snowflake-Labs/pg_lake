@@ -531,9 +531,23 @@ FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_snapshot_insert();
 -- ducklake_data_file INSERT trigger
 CREATE FUNCTION lake_ducklake.ducklake_data_file_insert()
 RETURNS TRIGGER AS $$
+DECLARE
+    norm_path text := NEW.path;
 BEGIN
+    /*
+     * DuckDB-side ducklake writes a relative path with a leading
+     * slash (e.g. '/ducklake-uuid.parquet'). DuckLake's reader
+     * concatenates table.path || df.path with no separator, so a
+     * stored leading slash produces 's3://b/duck_writes//ducklake-…'
+     * with a double slash. Normalize the leading slash off so both
+     * DuckLake's reader and our resolve_path() produce the same URL.
+     */
+    IF NEW.path_is_relative AND norm_path IS NOT NULL THEN
+        norm_path := ltrim(norm_path, '/');
+    END IF;
+
     INSERT INTO lake_ducklake.data_file (data_file_id, table_id, begin_snapshot, end_snapshot, file_order, path, path_is_relative, file_format, record_count, file_size_bytes, footer_size, row_id_start, partition_id, encryption_key, partial_max, mapping_id)
-    VALUES (NEW.data_file_id, NEW.table_id, NEW.begin_snapshot, NEW.end_snapshot, NEW.file_order, NEW.path, NEW.path_is_relative, NEW.file_format, NEW.record_count, NEW.file_size_bytes, NEW.footer_size, NEW.row_id_start, NEW.partition_id, NEW.encryption_key, NEW.partial_max, NEW.mapping_id);
+    VALUES (NEW.data_file_id, NEW.table_id, NEW.begin_snapshot, NEW.end_snapshot, NEW.file_order, norm_path, NEW.path_is_relative, NEW.file_format, NEW.record_count, NEW.file_size_bytes, NEW.footer_size, NEW.row_id_start, NEW.partition_id, NEW.encryption_key, NEW.partial_max, NEW.mapping_id);
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -631,6 +645,25 @@ CREATE FUNCTION lake_ducklake.ducklake_snapshot_changes_insert()
 RETURNS TRIGGER
 LANGUAGE C
 AS 'MODULE_PATHNAME', 'lake_ducklake_snapshot_changes_insert';
+
+-- resolve_path turns a (rel_path, is_relative, table_path) triple into
+-- the absolute file URL. Used by lookups that receive an absolute path
+-- from the FDW writer and need to match it against rows that may be
+-- stored either absolute (legacy) or relative-to-table (new). DuckDB
+-- can store relative paths with a leading slash, and PG-side writes
+-- normalize table.path with a trailing slash, so both sides are
+-- stripped before joining with a single '/'.
+CREATE FUNCTION lake_ducklake.resolve_path(rel_path TEXT,
+                                           is_relative BOOLEAN,
+                                           table_path TEXT)
+RETURNS TEXT
+LANGUAGE SQL IMMUTABLE
+AS $$
+    SELECT CASE WHEN is_relative
+                THEN rtrim(table_path, '/') || '/' || ltrim(rel_path, '/')
+                ELSE rel_path
+           END
+$$;
 
 -- Get snapshots for a table
 CREATE FUNCTION lake_ducklake.snapshots(catalog_name TEXT)
@@ -1133,7 +1166,14 @@ FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_column_tag_delete();
 -- delete_file INSERT trigger
 CREATE OR REPLACE FUNCTION lake_ducklake.ducklake_delete_file_insert()
 RETURNS TRIGGER AS $$
+DECLARE
+    norm_path text := NEW.path;
 BEGIN
+    /* See ducklake_data_file_insert: same leading-slash normalization. */
+    IF NEW.path_is_relative AND norm_path IS NOT NULL THEN
+        norm_path := ltrim(norm_path, '/');
+    END IF;
+
     INSERT INTO lake_ducklake.delete_file (
         delete_file_id, table_id, begin_snapshot, end_snapshot, data_file_id,
         path, path_is_relative, format, delete_count, file_size_bytes,
@@ -1141,7 +1181,7 @@ BEGIN
     )
     VALUES (
         NEW.delete_file_id, NEW.table_id, NEW.begin_snapshot, NEW.end_snapshot, NEW.data_file_id,
-        NEW.path, NEW.path_is_relative, NEW.format, NEW.delete_count, NEW.file_size_bytes,
+        norm_path, NEW.path_is_relative, NEW.format, NEW.delete_count, NEW.file_size_bytes,
         NEW.footer_size, NEW.encryption_key
     );
     RETURN NEW;

@@ -881,5 +881,57 @@ def test_duckdb_alter_columns_propagate(pg_cursor, s3):
     assert [r[0] for r in pg_cursor.fetchall()] == ['bb', 'c']
 
 
+@pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="DuckDB not installed")
+def test_pg_drop_then_duckdb_readd_column_returns_null(pg_cursor, s3):
+    """
+    Pin the regression where PG drops column 'val' and DuckDB later
+    re-adds a column with the same name: the new column must read as
+    NULL (matching what PG-only DROP+ADD does), not surface the
+    original column's parquet data through stale name_mapping rows.
+    """
+    location = f"s3://{TEST_BUCKET}/drop_readd"
+    pg_cursor.execute("DROP TABLE IF EXISTS drop_readd")
+    pg_cursor.execute(
+        f"""
+        CREATE TABLE drop_readd (id INT, val TEXT)
+            USING ducklake WITH (location = '{location}')
+        """
+    )
+    pg_cursor.execute("INSERT INTO drop_readd VALUES (1, 'one'), (2, 'two')")
+    pg_cursor.execute("ALTER TABLE drop_readd DROP COLUMN val")
+    pg_cursor.connection.commit()
+
+    duck = duckdb.connect()
+    duck.execute("INSTALL postgres")
+    duck.execute("LOAD postgres")
+    duck.execute("INSTALL ducklake FROM core_nightly")
+    duck.execute("LOAD ducklake")
+    duck.execute(
+        f"""
+        CREATE SECRET s3test (TYPE S3, KEY_ID 'testing', SECRET 'testing',
+                              ENDPOINT 'localhost:5999',
+                              SCOPE 's3://{TEST_BUCKET}', URL_STYLE 'path',
+                              USE_SSL false)
+        """
+    )
+    conn = (
+        f"host={server_params.PG_HOST} port={server_params.PG_PORT} "
+        f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
+    )
+    duck.execute(
+        f"ATTACH 'postgres:{conn}' AS dl "
+        f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
+    )
+
+    duck.execute("ALTER TABLE dl.public.drop_readd ADD COLUMN val TEXT")
+
+    pg_cursor.connection.commit()
+    pg_cursor.execute("SELECT id, val FROM drop_readd ORDER BY id")
+    rows = pg_cursor.fetchall()
+    assert rows == [(1, None), (2, None)], (
+        f"after PG DROP + DuckDB re-ADD, val must be NULL; got {rows}"
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])

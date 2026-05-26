@@ -55,7 +55,7 @@ def test_pg_lake_parquet_readable_by_duckdb(pg_cursor, s3):
 
     pg_cursor.execute(
         """
-        SELECT df.path
+        SELECT lake_ducklake.resolve_path(df.path, df.path_is_relative, t.path)
           FROM lake_ducklake.data_file df
           JOIN lake_ducklake.table t USING (table_id)
          WHERE t.table_name = 'rt_parquet'
@@ -218,7 +218,8 @@ def test_multi_insert_each_lands_on_a_new_snapshot(pg_cursor, s3):
 
     pg_cursor.execute(
         """
-        SELECT df.path, df.record_count, df.begin_snapshot
+        SELECT lake_ducklake.resolve_path(df.path, df.path_is_relative, t.path),
+               df.record_count, df.begin_snapshot
           FROM lake_ducklake.data_file df
           JOIN lake_ducklake.table t USING (table_id)
          WHERE t.table_name = 'rt_multi'
@@ -278,7 +279,8 @@ def test_alter_then_insert_round_trip(pg_cursor, s3):
 
     pg_cursor.execute(
         """
-        SELECT df.path, df.begin_snapshot, df.record_count
+        SELECT lake_ducklake.resolve_path(df.path, df.path_is_relative, t.path),
+               df.begin_snapshot, df.record_count
           FROM lake_ducklake.data_file df
           JOIN lake_ducklake.table t USING (table_id)
          WHERE t.table_name = 'rt_alter'
@@ -318,7 +320,8 @@ def test_file_column_stats_match_parquet(pg_cursor, s3):
 
     pg_cursor.execute(
         """
-        SELECT df.path, fcs.column_id, fcs.min_value, fcs.max_value, c.column_name
+        SELECT lake_ducklake.resolve_path(df.path, df.path_is_relative, t.path),
+               fcs.column_id, fcs.min_value, fcs.max_value, c.column_name
           FROM lake_ducklake.data_file df
           JOIN lake_ducklake.table t USING (table_id)
           JOIN lake_ducklake.file_column_stats fcs USING (data_file_id)
@@ -584,7 +587,7 @@ def test_create_table_records_real_uuid_and_absolute_path(pg_cursor, s3):
     assert path_is_relative is False, (
         f"absolute s3:// location must store path_is_relative=false, got {path_is_relative}"
     )
-    assert table_path == location, (table_path, location)
+    assert table_path.rstrip("/") == location.rstrip("/"), (table_path, location)
 
     pg_cursor.execute(
         """
@@ -1012,7 +1015,8 @@ def test_pg_partial_update_uses_position_deletes(pg_cursor, s3):
     # have a separate bug we don't want to mask the metadata bug with.
     pg_cursor.execute(
         """
-        SELECT df.path, df.data_file_id, df.delete_count
+        SELECT lake_ducklake.resolve_path(df.path, df.path_is_relative, t.path),
+               df.data_file_id, df.delete_count
           FROM lake_ducklake.delete_file df
           JOIN lake_ducklake.table t USING (table_id)
          WHERE t.table_name = 'rt_update_partial' AND df.end_snapshot IS NULL

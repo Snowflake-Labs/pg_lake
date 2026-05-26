@@ -377,13 +377,26 @@ GetDataFileSchemaForDucklakeTable(Oid relationId)
 
 				StringInfoData q;
 
+				/*
+				 * Match catalog rows to pg_attribute by NAME, not by
+				 * column_order. After DROP+ADD column the new live
+				 * row's column_order (allocated sequentially in the
+				 * catalog) no longer matches pg_attribute.attnum (which
+				 * skips dropped slots), so order-based lookup would
+				 * miss the column entirely and stamp field_id=0 on it.
+				 */
 				initStringInfo(&q);
 				appendStringInfo(&q,
-								 "SELECT column_order, column_id, initial_default "
-								 "FROM lake_ducklake.column "
-								 "WHERE table_id = %ld "
-								 "AND end_snapshot IS NULL",
-								 metadata->tableId);
+								 "SELECT a.attnum, c.column_id, c.initial_default "
+								 "  FROM pg_attribute a "
+								 "  JOIN lake_ducklake.column c "
+								 "    ON c.column_name = a.attname::text "
+								 " WHERE a.attrelid = %u "
+								 "   AND a.attnum > 0 AND NOT a.attisdropped "
+								 "   AND c.table_id = %ld "
+								 "   AND c.end_snapshot IS NULL "
+								 "   AND c.parent_column IS NULL",
+								 relationId, metadata->tableId);
 
 				SPI_connect();
 				int			ret = SPI_exec(q.data, 0);
@@ -393,19 +406,19 @@ GetDataFileSchemaForDucklakeTable(Oid relationId)
 					for (uint64 row = 0; row < SPI_processed; row++)
 					{
 						bool		isnull;
-						int64		colOrder = DatumGetInt64(SPI_getbinval(
-												SPI_tuptable->vals[row],
-												SPI_tuptable->tupdesc, 1, &isnull));
+						int32		attno = DatumGetInt32(SPI_getbinval(
+													SPI_tuptable->vals[row],
+													SPI_tuptable->tupdesc, 1, &isnull));
 
-						if (isnull || colOrder <= 0 || colOrder > maxAttnum)
+						if (isnull || attno <= 0 || attno > maxAttnum)
 							continue;
 
 						int64		colId = DatumGetInt64(SPI_getbinval(
-												SPI_tuptable->vals[row],
-												SPI_tuptable->tupdesc, 2, &isnull));
+													SPI_tuptable->vals[row],
+													SPI_tuptable->tupdesc, 2, &isnull));
 
 						if (!isnull)
-							columnIdsByAttnum[colOrder] = colId;
+							columnIdsByAttnum[attno] = colId;
 
 						Datum		d = SPI_getbinval(SPI_tuptable->vals[row],
 													  SPI_tuptable->tupdesc, 3, &isnull);
@@ -415,7 +428,7 @@ GetDataFileSchemaForDucklakeTable(Oid relationId)
 							MemoryContext oldcxt =
 								MemoryContextSwitchTo(callerContext);
 
-							defaultStrings[colOrder] = TextDatumGetCString(d);
+							defaultStrings[attno] = TextDatumGetCString(d);
 							MemoryContextSwitchTo(oldcxt);
 						}
 					}

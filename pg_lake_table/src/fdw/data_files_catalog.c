@@ -164,22 +164,9 @@ GetDucklakeDataFilesHash(Oid relationId, bool dataOnly, int64 snapshotId)
 
 			if (ducklakeFile->pathIsRelative && metadata->path)
 			{
-				/*
-				 * DuckLake relative paths may start with '/' but should be
-				 * appended to the table base path
-				 */
-				const char *relativePath = ducklakeFile->path;
-
-				/* Skip leading '/' if present */
-				if (relativePath[0] == '/')
-					relativePath++;
-
-				/* Concatenate table base path with relative file path */
-				StringInfoData pathBuf;
-
-				initStringInfo(&pathBuf);
-				appendStringInfo(&pathBuf, "%s/%s", metadata->path, relativePath);
-				resolvedPath = pathBuf.data;
+				resolvedPath = DucklakeResolvePath(metadata->path,
+												   ducklakeFile->path,
+												   true);
 			}
 			else
 			{
@@ -246,16 +233,9 @@ GetDucklakeDataFilesHash(Oid relationId, bool dataOnly, int64 snapshotId)
 
 			if (del->pathIsRelative && metadata->path)
 			{
-				const char *rel = del->path;
-
-				if (rel[0] == '/')
-					rel++;
-
-				StringInfoData pathBuf;
-
-				initStringInfo(&pathBuf);
-				appendStringInfo(&pathBuf, "%s/%s", metadata->path, rel);
-				resolvedPath = pathBuf.data;
+				resolvedPath = DucklakeResolvePath(metadata->path,
+												   del->path,
+												   true);
 			}
 			else
 			{
@@ -1770,8 +1750,12 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 
 						initStringInfo(&query);
 						appendStringInfo(&query,
-										 "SELECT data_file_id FROM lake_ducklake.data_file "
-										 "WHERE table_id = %ld AND path = %s AND end_snapshot IS NULL",
+										 "SELECT df.data_file_id "
+										 "  FROM lake_ducklake.data_file df "
+										 "  JOIN lake_ducklake.table t USING (table_id) "
+										 " WHERE df.table_id = %ld "
+										 "   AND df.end_snapshot IS NULL "
+										 "   AND lake_ducklake.resolve_path(df.path, df.path_is_relative, t.path) = %s",
 										 metadata->tableId,
 										 quote_literal_cstr(operation->deletedFrom));
 
@@ -1792,9 +1776,13 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 
 								initStringInfo(&updateQuery);
 								appendStringInfo(&updateQuery,
-												 "UPDATE lake_ducklake.delete_file "
-												 "SET data_file_id = %ld "
-												 "WHERE table_id = %ld AND path = %s AND end_snapshot IS NULL",
+												 "UPDATE lake_ducklake.delete_file df "
+												 "   SET data_file_id = %ld "
+												 "  FROM lake_ducklake.table t "
+												 " WHERE t.table_id = df.table_id "
+												 "   AND df.table_id = %ld "
+												 "   AND df.end_snapshot IS NULL "
+												 "   AND lake_ducklake.resolve_path(df.path, df.path_is_relative, t.path) = %s",
 												 dataFileId,
 												 metadata->tableId,
 												 quote_literal_cstr(operation->path));
@@ -1846,8 +1834,12 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 
 						initStringInfo(&query);
 						appendStringInfo(&query,
-										 "SELECT data_file_id FROM lake_ducklake.data_file "
-										 "WHERE table_id = %ld AND path = %s AND end_snapshot IS NULL",
+										 "SELECT df.data_file_id "
+										 "  FROM lake_ducklake.data_file df "
+										 "  JOIN lake_ducklake.table t USING (table_id) "
+										 " WHERE df.table_id = %ld "
+										 "   AND df.end_snapshot IS NULL "
+										 "   AND lake_ducklake.resolve_path(df.path, df.path_is_relative, t.path) = %s",
 										 metadata->tableId,
 										 quote_literal_cstr(operation->path));
 

@@ -12,6 +12,69 @@
 
 #include "pg_lake/ducklake/catalog.h"
 
+/*
+ * StripTablePathPrefix returns the suffix of absolutePath relative to
+ * tablePath when absolutePath sits under tablePath, with
+ * *pathIsRelativeOut set to true. Otherwise returns a pstrdup of
+ * absolutePath unchanged with *pathIsRelativeOut set to false.
+ *
+ * Trailing-slash-on-tablePath is normalized (so 's3://b/foo' and
+ * 's3://b/foo/' both consume the same number of bytes off the
+ * candidate). The returned suffix never has a leading '/'.
+ */
+static char *
+StripTablePathPrefix(const char *tablePath, const char *absolutePath,
+					 bool *pathIsRelativeOut)
+{
+	size_t		prefixLen;
+
+	if (tablePath == NULL || absolutePath == NULL)
+	{
+		*pathIsRelativeOut = false;
+		return pstrdup(absolutePath ? absolutePath : "");
+	}
+
+	prefixLen = strlen(tablePath);
+	while (prefixLen > 0 && tablePath[prefixLen - 1] == '/')
+		prefixLen--;
+
+	if (prefixLen == 0 ||
+		strncmp(absolutePath, tablePath, prefixLen) != 0 ||
+		absolutePath[prefixLen] != '/')
+	{
+		*pathIsRelativeOut = false;
+		return pstrdup(absolutePath);
+	}
+
+	*pathIsRelativeOut = true;
+	return pstrdup(absolutePath + prefixLen + 1);
+}
+
+char *
+DucklakeResolvePath(const char *basePath, const char *relPath, bool isRelative)
+{
+	if (!isRelative || basePath == NULL)
+		return pstrdup(relPath ? relPath : "");
+
+	if (relPath == NULL)
+		return pstrdup(basePath);
+
+	{
+		size_t		baseLen = strlen(basePath);
+		StringInfoData buf;
+
+		while (baseLen > 0 && basePath[baseLen - 1] == '/')
+			baseLen--;
+
+		while (relPath[0] == '/')
+			relPath++;
+
+		initStringInfo(&buf);
+		appendStringInfo(&buf, "%.*s/%s", (int) baseLen, basePath, relPath);
+		return buf.data;
+	}
+}
+
 DucklakeSnapshot *
 DucklakeGetCurrentSnapshot(void)
 {
@@ -450,6 +513,21 @@ DucklakeRegisterTable(const char *schemaName, const char *tableName, const char 
 		SPI_exec(query.data, 0);
 	}
 
+	/*
+	 * Normalize the user-provided location to end with '/'. DuckLake's
+	 * file readers concatenate `table.path || data_file.path` without
+	 * inserting a separator, so omitting the trailing slash produces
+	 * URLs like 's3://b/footable/data/x.parquet' on the DuckDB side.
+	 */
+	const char *normalizedPath = path;
+	char	   *pathWithSlash = NULL;
+
+	if (path != NULL && *path != '\0' && path[strlen(path) - 1] != '/')
+	{
+		pathWithSlash = psprintf("%s/", path);
+		normalizedPath = pathWithSlash;
+	}
+
 	/* Create new table */
 	tableId = snapshot->nextCatalogId++;
 	resetStringInfo(&query);
@@ -459,7 +537,7 @@ DucklakeRegisterTable(const char *schemaName, const char *tableName, const char 
 					 "VALUES (%ld, gen_random_uuid(), %ld, %ld, %s, %s, false) RETURNING table_id",
 					 tableId,
 					 snapshot->snapshotId, schemaId,
-					 quote_literal_cstr(tableName), quote_literal_cstr(path));
+					 quote_literal_cstr(tableName), quote_literal_cstr(normalizedPath));
 	ret = SPI_exec(query.data, 0);
 
 	if (ret != SPI_OK_INSERT_RETURNING)
@@ -837,19 +915,13 @@ DucklakeAddDataFile(int64 tableId, const char *path, int64 recordCount,
 	}
 
 	/*
-	 * Path is stored absolute. The v1 spec encourages relative-to-table
-	 * paths so the catalog stays portable across bucket renames, but the
-	 * pg_lake_table FDW currently looks up data_files by absolute path
-	 * (DucklakeRemoveDataFile, DATA_FILE_ADD_DELETE_MAPPING, …) and
-	 * issuing the relative form here without updating every lookup
-	 * silently breaks DELETE / UPDATE. Switching to relative paths is
-	 * a follow-up that needs to land alongside FDW-side resolution.
-	 * tablePath is captured above so the migration is one-line when ready.
+	 * Store the path relative to the table's path when it sits under it,
+	 * so the catalog stays portable across bucket renames. Falls back to
+	 * absolute when the file lives outside the table prefix (e.g. an
+	 * add_files import) so legacy lookups still work.
 	 */
-	const char *storedPath = path;
 	bool		pathIsRelative = false;
-
-	(void) tablePath;
+	const char *storedPath = StripTablePathPrefix(tablePath, path, &pathIsRelative);
 
 	/* Insert data file with mapping_id and proper path_is_relative */
 	resetStringInfo(&query);
@@ -1149,20 +1221,47 @@ DucklakeAddDeleteFile(int64 tableId, int64 dataFileId, const char *path,
 	DucklakeSnapshot *snapshot;
 	int64 deleteFileId;
 	int ret;
+	char	   *tablePath = NULL;
+	bool		pathIsRelative = false;
+	const char *storedPath;
 
 	snapshot = DucklakeGetCurrentSnapshot();
 	deleteFileId = snapshot->nextFileId++;
 
+	SPI_connect();
+
+	/* Look up the table path so we can store the delete-file path relative. */
 	initStringInfo(&query);
+	appendStringInfo(&query,
+					 "SELECT path FROM lake_ducklake.table "
+					 "WHERE table_id = %ld AND end_snapshot IS NULL "
+					 "ORDER BY begin_snapshot DESC LIMIT 1",
+					 tableId);
+	ret = SPI_exec(query.data, 1);
+	if (ret == SPI_OK_SELECT && SPI_processed > 0)
+	{
+		bool		isnull;
+		Datum		d = SPI_getbinval(SPI_tuptable->vals[0],
+									  SPI_tuptable->tupdesc, 1, &isnull);
+
+		if (!isnull)
+			tablePath = TextDatumGetCString(d);
+	}
+
+	storedPath = StripTablePathPrefix(tablePath, path, &pathIsRelative);
+
+	resetStringInfo(&query);
 	if (dataFileId >= 0)
 	{
 		appendStringInfo(&query,
 						 "INSERT INTO lake_ducklake.delete_file "
 						 "(delete_file_id, table_id, begin_snapshot, data_file_id, path, "
 						 " path_is_relative, delete_count, file_size_bytes) "
-						 "VALUES (%ld, %ld, %ld, %ld, %s, false, %ld, %ld) RETURNING delete_file_id",
+						 "VALUES (%ld, %ld, %ld, %ld, %s, %s, %ld, %ld) RETURNING delete_file_id",
 						 deleteFileId, tableId, snapshot->snapshotId, dataFileId,
-						 quote_literal_cstr(path), deleteCount, fileSizeBytes);
+						 quote_literal_cstr(storedPath),
+						 pathIsRelative ? "true" : "false",
+						 deleteCount, fileSizeBytes);
 	}
 	else
 	{
@@ -1170,12 +1269,13 @@ DucklakeAddDeleteFile(int64 tableId, int64 dataFileId, const char *path,
 						 "INSERT INTO lake_ducklake.delete_file "
 						 "(delete_file_id, table_id, begin_snapshot, path, "
 						 " path_is_relative, delete_count, file_size_bytes) "
-						 "VALUES (%ld, %ld, %ld, %s, false, %ld, %ld) RETURNING delete_file_id",
+						 "VALUES (%ld, %ld, %ld, %s, %s, %ld, %ld) RETURNING delete_file_id",
 						 deleteFileId, tableId, snapshot->snapshotId,
-						 quote_literal_cstr(path), deleteCount, fileSizeBytes);
+						 quote_literal_cstr(storedPath),
+						 pathIsRelative ? "true" : "false",
+						 deleteCount, fileSizeBytes);
 	}
 
-	SPI_connect();
 	ret = SPI_exec(query.data, 0);
 
 	if (ret != SPI_OK_INSERT_RETURNING)

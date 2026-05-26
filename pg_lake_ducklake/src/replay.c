@@ -638,7 +638,7 @@ ReplayAlteredTable(int64 tableId)
 	/* Step 2 — ADD COLUMN. */
 	resetStringInfo(&query);
 	appendStringInfo(&query,
-					 "SELECT c.column_name, c.column_type "
+					 "SELECT c.column_id, c.column_name, c.column_type "
 					 "  FROM lake_ducklake.column c "
 					 " WHERE c.table_id = %ld "
 					 "   AND c.end_snapshot IS NULL "
@@ -662,19 +662,22 @@ ReplayAlteredTable(int64 tableId)
 			HeapTuple	row = SPI_tuptable->vals[i];
 			TupleDesc	desc = SPI_tuptable->tupdesc;
 			bool		isnull;
-			char	   *colName = TextDatumGetCString(SPI_getbinval(row, desc, 1, &isnull));
-			char	   *duckType = TextDatumGetCString(SPI_getbinval(row, desc, 2, &isnull));
+			int64		colId = DatumGetInt64(SPI_getbinval(row, desc, 1, &isnull));
+			char	   *colName = TextDatumGetCString(SPI_getbinval(row, desc, 2, &isnull));
+			char	   *duckType = TextDatumGetCString(SPI_getbinval(row, desc, 3, &isnull));
 			char	   *pgType = DuckdbTypeNameToPgTypeName(duckType);
 
-			adds = lappend(adds, list_make2(makeString(colName),
+			adds = lappend(adds, list_make3(makeInteger((int) colId),
+											makeString(colName),
 											makeString(pgType)));
 		}
 		MemoryContextSwitchTo(oldContext);
 
-		foreach_ptr(List, pair, adds)
+		foreach_ptr(List, triple, adds)
 		{
-			char	   *colName = strVal(linitial(pair));
-			char	   *pgType = strVal(lsecond(pair));
+			int64		colId = (int64) intVal(linitial(triple));
+			char	   *colName = strVal(lsecond(triple));
+			char	   *pgType = strVal(lthird(triple));
 
 			initStringInfo(&ddl);
 			appendStringInfo(&ddl,
@@ -682,6 +685,37 @@ ReplayAlteredTable(int64 tableId)
 							 quote_identifier(schemaName), quote_identifier(tableName),
 							 quote_identifier(colName), pgType);
 			RunReplayDDL(ddl.data);
+
+			/*
+			 * DuckLake reads parquet by NAME (column_mapping.type =
+			 * 'map_by_name'), so a stale name_mapping row pointing at
+			 * a previously-dropped column with the same source_name
+			 * would surface the dropped column's data into the new
+			 * column. DuckDB-side ADD COLUMN doesn't add a fresh
+			 * name_mapping row, so do it here: replace any stale row
+			 * with one that maps source_name to the new column_id and
+			 * gives it a target_field_id equal to its column_id, so
+			 * the parquet's old field_id no longer matches.
+			 */
+			resetStringInfo(&ddl);
+			appendStringInfo(&ddl,
+							 "DELETE FROM lake_ducklake.name_mapping nm "
+							 " USING lake_ducklake.column_mapping cm "
+							 " WHERE nm.mapping_id = cm.mapping_id "
+							 "   AND cm.table_id = %ld "
+							 "   AND nm.source_name = %s",
+							 tableId, quote_literal_cstr(colName));
+			SPI_exec(ddl.data, 0);
+
+			resetStringInfo(&ddl);
+			appendStringInfo(&ddl,
+							 "INSERT INTO lake_ducklake.name_mapping "
+							 "(mapping_id, column_id, source_name, target_field_id, is_partition) "
+							 "SELECT mapping_id, %ld, %s, %ld, false "
+							 "  FROM lake_ducklake.column_mapping "
+							 " WHERE table_id = %ld",
+							 colId, quote_literal_cstr(colName), colId, tableId);
+			SPI_exec(ddl.data, 0);
 		}
 	}
 
