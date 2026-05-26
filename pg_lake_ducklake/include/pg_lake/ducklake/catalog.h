@@ -167,5 +167,7 @@ extern PGDLLEXPORT void DucklakeRenameColumn(Oid tableOid, const char *oldName,
 extern PGDLLEXPORT void DucklakeRenameTable(const char *schemaName,
 											const char *oldName,
 											const char *newName);
+extern PGDLLEXPORT void DucklakeRenameSchema(const char *oldName,
+											 const char *newName);
 
 #endif							/* PG_LAKE_DUCKLAKE_CATALOG_H */

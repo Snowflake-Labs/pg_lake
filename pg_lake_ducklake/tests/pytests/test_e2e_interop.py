@@ -1048,5 +1048,56 @@ def test_default_location_prefix_duckdb_interop(pg_cursor, s3):
     assert rows == [(1, "x"), (2, "y")], rows
 
 
+def test_pg_schema_rename_propagates(pg_cursor, s3):
+    """
+    PG-side ALTER SCHEMA RENAME TO must end-snapshot the live
+    lake_ducklake.schema row and insert a new versioned row reusing
+    the same schema_id with the new name. schema.path is preserved
+    (data files don't move on a rename).
+    """
+    pg_cursor.execute("DROP SCHEMA IF EXISTS rs_old CASCADE")
+    pg_cursor.execute("DROP SCHEMA IF EXISTS rs_new CASCADE")
+    pg_cursor.execute("CREATE SCHEMA rs_old")
+    pg_cursor.execute(
+        f"""
+        CREATE TABLE rs_old.t (id INT)
+            USING ducklake WITH (location = 's3://{TEST_BUCKET}/rs_rename')
+        """
+    )
+    pg_cursor.execute("INSERT INTO rs_old.t VALUES (1), (2)")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        "SELECT schema_id FROM lake_ducklake.schema "
+        "WHERE schema_name = 'rs_old' AND end_snapshot IS NULL"
+    )
+    schema_id_before = pg_cursor.fetchone()[0]
+
+    pg_cursor.execute("ALTER SCHEMA rs_old RENAME TO rs_new")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        "SELECT schema_id, schema_name, path "
+        "FROM lake_ducklake.schema WHERE end_snapshot IS NULL"
+    )
+    rows = pg_cursor.fetchall()
+    assert (schema_id_before, "rs_new", None) in rows or any(
+        r[0] == schema_id_before and r[1] == "rs_new" for r in rows
+    ), rows
+
+    pg_cursor.execute(
+        "SELECT count(*) FROM lake_ducklake.schema "
+        "WHERE schema_id = %s AND schema_name = 'rs_old' AND end_snapshot IS NOT NULL",
+        (schema_id_before,),
+    )
+    assert pg_cursor.fetchone()[0] == 1, "old schema-version row must be end-snapshotted"
+
+    pg_cursor.execute("SELECT id FROM rs_new.t ORDER BY id")
+    assert pg_cursor.fetchall() == [(1,), (2,)]
+
+    pg_cursor.execute("DROP SCHEMA rs_new CASCADE")
+    pg_cursor.connection.commit()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])

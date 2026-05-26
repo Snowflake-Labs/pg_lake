@@ -690,6 +690,24 @@ PostProcessRenameWritablePgLakeTable(ProcessUtilityParams * params, void *arg)
 	{
 		/* we are in post-process, use new name */
 		ErrorIfAnyRestCatalogTablesInSchema(renameStmt->newname);
+	}
+
+	if (renameStmt->renameType == OBJECT_SCHEMA)
+	{
+		/*
+		 * Propagate to the DuckLake catalog. DucklakeRenameSchema
+		 * end-snapshots the old schema row and inserts a new one
+		 * reusing the same schema_id with the new name. It is a
+		 * no-op (with a WARNING) when the schema isn't tracked by
+		 * DuckLake, so we don't have to scan pg_class to decide.
+		 *
+		 * Skip during DDL replay: an inbound DuckDB-driven rename
+		 * would have already updated lake_ducklake.schema, and the
+		 * ALTER SCHEMA we issue from the replay path would otherwise
+		 * insert a second version row.
+		 */
+		if (!DucklakeInDDLReplay && renameStmt->subname != NULL)
+			DucklakeRenameSchema(renameStmt->subname, renameStmt->newname);
 		return;
 	}
 

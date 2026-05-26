@@ -2051,3 +2051,103 @@ DucklakeRenameTable(const char *schemaName, const char *oldName, const char *new
 
 	SPI_finish();
 }
+
+
+/*
+ * DucklakeRenameSchema renames a schema in the DuckLake catalog.
+ *
+ * Mirrors DucklakeRenameTable: end-snapshot the previous live row at
+ * the new snapshot and insert a fresh row reusing the same schema_id
+ * with the new name. schema.path is intentionally preserved — DuckLake
+ * paths point at file locations, not at the user-visible schema name,
+ * so a rename does NOT move data files in object storage.
+ *
+ * No-op (with a WARNING) when there is no live schema row for oldName,
+ * which lets the caller hook every ALTER SCHEMA RENAME without first
+ * checking whether DuckLake even tracks the schema.
+ */
+void
+DucklakeRenameSchema(const char *oldName, const char *newName)
+{
+	StringInfoData query;
+	DucklakeSnapshot *newSnapshot;
+	int64		schemaId = -1;
+	int			ret;
+
+	SPI_connect();
+	initStringInfo(&query);
+	appendStringInfo(&query,
+					 "SELECT schema_id FROM lake_ducklake.schema "
+					 "WHERE schema_name = %s AND end_snapshot IS NULL",
+					 quote_literal_cstr(oldName));
+	ret = SPI_exec(query.data, 1);
+
+	if (ret == SPI_OK_SELECT && SPI_processed > 0)
+	{
+		bool		isnull;
+
+		schemaId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+											   SPI_tuptable->tupdesc, 1, &isnull));
+		if (isnull)
+			schemaId = -1;
+	}
+
+	SPI_finish();
+
+	if (schemaId < 0)
+	{
+		elog(WARNING,
+			 "DuckLake schema %s not found in catalog for rename — "
+			 "metadata will not reflect the PG-side rename",
+			 oldName);
+		return;
+	}
+
+	newSnapshot = DucklakeCreateSnapshot("RENAME SCHEMA", NULL, NULL);
+
+	SPI_connect();
+
+	/* Bump schema_version on the new snapshot */
+	initStringInfo(&query);
+	appendStringInfo(&query,
+					 "UPDATE lake_ducklake.snapshot SET schema_version = schema_version + 1 "
+					 "WHERE snapshot_id = %ld",
+					 newSnapshot->snapshotId);
+	SPI_exec(query.data, 0);
+
+	/*
+	 * Insert a new schema-version row reusing the same schema_id with
+	 * the new name. INSERT...SELECT from the live row so schema_uuid,
+	 * path, path_is_relative carry forward unchanged.
+	 */
+	resetStringInfo(&query);
+	appendStringInfo(&query,
+					 "INSERT INTO lake_ducklake.schema "
+					 "(schema_id, schema_uuid, begin_snapshot, end_snapshot, "
+					 " schema_name, path, path_is_relative) "
+					 "SELECT schema_id, schema_uuid, %ld, NULL, "
+					 "       %s, path, path_is_relative "
+					 "FROM lake_ducklake.schema "
+					 "WHERE schema_id = %ld AND end_snapshot IS NULL",
+					 newSnapshot->snapshotId,
+					 quote_literal_cstr(newName),
+					 schemaId);
+	ret = SPI_exec(query.data, 0);
+	if (ret != SPI_OK_INSERT || SPI_processed == 0)
+	{
+		SPI_finish();
+		elog(ERROR, "Failed to insert renamed schema row for %s -> %s",
+			 oldName, newName);
+	}
+
+	/* End-snapshot the previous live row, but not the one we just inserted. */
+	resetStringInfo(&query);
+	appendStringInfo(&query,
+					 "UPDATE lake_ducklake.schema SET end_snapshot = %ld "
+					 "WHERE schema_id = %ld AND end_snapshot IS NULL "
+					 "AND begin_snapshot < %ld",
+					 newSnapshot->snapshotId, schemaId, newSnapshot->snapshotId);
+	SPI_exec(query.data, 0);
+
+	SPI_finish();
+}
