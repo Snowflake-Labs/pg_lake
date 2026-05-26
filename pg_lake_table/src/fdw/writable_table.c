@@ -54,7 +54,7 @@
 #include "pg_lake/pgduck/write_data.h"
 #include "pg_lake/pgduck/iceberg_validation.h"
 #include "pg_lake/transaction/track_iceberg_metadata_changes.h"
-#include "pg_lake/transaction/track_ducklake_changes.h"
+#include "pg_lake/ducklake/track_changes.h"
 #include "pg_lake/ducklake/catalog.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_extension_base/spi_helpers.h"

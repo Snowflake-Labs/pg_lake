@@ -1,6 +1,10 @@
 /*
  * Copyright 2025 Snowflake Inc.
  * SPDX-License-Identifier: Apache-2.0
+ *
+ * Per-transaction tracking of DuckLake metadata changes. Lifted from
+ * pg_lake_table/src/transaction/track_ducklake_changes.c so the
+ * implementation lives next to the catalog code it consumes.
  */
 
 #include "postgres.h"
@@ -12,9 +16,7 @@
 
 #include "pg_lake/data_file/data_files.h"
 #include "pg_lake/ducklake/catalog.h"
-#include "pg_lake/fdw/data_files_catalog.h"
-#include "pg_lake/transaction/track_ducklake_changes.h"
-#include "pg_lake/transaction/transaction_hooks.h"
+#include "pg_lake/ducklake/track_changes.h"
 #include "pg_lake/util/rel_utils.h"
 
 /*

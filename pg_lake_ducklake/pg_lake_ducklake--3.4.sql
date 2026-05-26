@@ -2022,10 +2022,9 @@ FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_view_update();
 --
 -- These moved from pg_lake_table--3.3--3.4.sql so that pg_lake_table no
 -- longer needs to require pg_lake_ducklake. The FDW handler still lives
--- in pg_lake_table.so (pg_lake_table_handler) and the option validator
--- still lives in pg_lake_table.so (pg_lake_ducklake_validator); we
--- reference them explicitly via $libdir/pg_lake_table because
--- MODULE_PATHNAME here resolves to pg_lake_ducklake.
+-- in pg_lake_table.so (pg_lake_table_handler); we reference it explicitly
+-- via $libdir/pg_lake_table because MODULE_PATHNAME here resolves to
+-- pg_lake_ducklake.
 
 CREATE FUNCTION pg_lake_ducklake_am_handler(internal)
     RETURNS table_am_handler
@@ -2040,7 +2039,7 @@ COMMENT ON ACCESS METHOD ducklake IS 'ducklake table access method, alias for pg
 
 CREATE FUNCTION pg_lake_ducklake_validator(text[], oid)
 RETURNS void
-AS '$libdir/pg_lake_table', 'pg_lake_ducklake_validator'
+AS 'MODULE_PATHNAME', 'pg_lake_ducklake_validator'
 LANGUAGE C STRICT;
 
 CREATE FOREIGN DATA WRAPPER pg_lake_ducklake

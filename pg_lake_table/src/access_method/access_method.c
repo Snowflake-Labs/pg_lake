@@ -82,15 +82,3 @@ IsPgLakeIcebergAccessMethod(const char *accessMethod)
 	return strcmp(accessMethod, PG_LAKE_ICEBERG_AM) == 0 ||
 		strcmp(accessMethod, PG_LAKE_ICEBERG_AM_ALIAS) == 0;
 }
-
-
-/*
- * IsPgLakeDucklakeAccessMethod returns whether the given access method
- * name belongs to pg_lake_ducklake.
- */
-bool
-IsPgLakeDucklakeAccessMethod(const char *accessMethod)
-{
-	return strcmp(accessMethod, PG_LAKE_DUCKLAKE_AM) == 0 ||
-		strcmp(accessMethod, PG_LAKE_DUCKLAKE_AM_ALIAS) == 0;
-}

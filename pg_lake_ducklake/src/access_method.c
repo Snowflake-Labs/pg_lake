@@ -15,6 +15,9 @@
 
 #include "access/tableam.h"
 
+#include "pg_lake/util/rel_utils.h"
+#include "pg_lake/access_method/access_method.h"
+
 PG_FUNCTION_INFO_V1(pg_lake_ducklake_am_handler);
 
 Datum
@@ -24,4 +27,19 @@ pg_lake_ducklake_am_handler(PG_FUNCTION_ARGS)
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 			 errmsg("pg_lake_ducklake access method is a placeholder "
 					"and should not be used")));
+}
+
+
+/*
+ * IsPgLakeDucklakeAccessMethod returns whether the given access method
+ * name belongs to pg_lake_ducklake. Lives here so the matcher and the
+ * handler stay together; pg_lake_table's CREATE TABLE flow calls into
+ * this via the existing PGDLLEXPORT extern declaration in
+ * pg_lake/access_method/access_method.h.
+ */
+bool
+IsPgLakeDucklakeAccessMethod(const char *accessMethod)
+{
+	return strcmp(accessMethod, PG_LAKE_DUCKLAKE_AM) == 0 ||
+		strcmp(accessMethod, PG_LAKE_DUCKLAKE_AM_ALIAS) == 0;
 }

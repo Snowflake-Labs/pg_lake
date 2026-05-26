@@ -7,7 +7,7 @@ DATA = $(wildcard $(EXTENSION)--*--*.sql) $(EXTENSION)--3.4.sql
 PG_CONFIG ?= pg_config
 PG_LIBDIR := $(shell $(PG_CONFIG) --libdir)
 
-PG_CPPFLAGS = -I$(libpq_srcdir) -Iinclude -std=gnu99 -g -I../pg_lake_engine/include -I../pg_extension_base/include
+PG_CPPFLAGS = -I$(libpq_srcdir) -Iinclude -std=gnu99 -g -I../pg_lake_engine/include -I../pg_extension_base/include -I../pg_lake_table/include -I../pg_lake_iceberg/include
 SHLIB_LINK_INTERNAL = $(libpq)
 PG_LDFLAGS = -L$(PG_LIBDIR) -Wl,-rpath,$(PG_LIBDIR)
 
