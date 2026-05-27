@@ -80,7 +80,7 @@ static bool is_valid_option_pg_lake_iceberg(const char *keyword, Oid context);
  *
  * Raise an ERROR if the option or its value is considered invalid.
  *
- * pg_lake_ducklake_validator now lives in pg_lake_ducklake.so — see
+ * pg_lake_ducklake_validator now lives in pg_lake_ducklake.so -- see
  * pg_lake_ducklake/src/options.c.
  */
 PG_FUNCTION_INFO_V1(pg_lake_table_validator);
@@ -960,4 +960,3 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 	}
 	PG_RETURN_VOID();
 }
-

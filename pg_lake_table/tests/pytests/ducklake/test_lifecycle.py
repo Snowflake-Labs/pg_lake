@@ -344,7 +344,10 @@ def test_concurrent_tables(s3, pg_conn, extension):
     assert result[0][0] == 10
 
     # Drop all tables
-    run_command("DROP FOREIGN TABLE test_ducklake_concurrent1, test_ducklake_concurrent2, test_ducklake_concurrent3", pg_conn)
+    run_command(
+        "DROP FOREIGN TABLE test_ducklake_concurrent1, test_ducklake_concurrent2, test_ducklake_concurrent3",
+        pg_conn,
+    )
     pg_conn.commit()
 
     # Verify all tables are marked as ended

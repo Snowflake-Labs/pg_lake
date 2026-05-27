@@ -100,7 +100,7 @@ typedef struct DucklakeDeleteFile
 }			DucklakeDeleteFile;
 
 /* Catalog operations */
-extern PGDLLEXPORT DucklakeSnapshot *DucklakeGetCurrentSnapshot(void);
+extern PGDLLEXPORT DucklakeSnapshot * DucklakeGetCurrentSnapshot(void);
 
 /*
  * DucklakeResolvePath joins basePath and relPath when isRelative is
@@ -110,18 +110,18 @@ extern PGDLLEXPORT DucklakeSnapshot *DucklakeGetCurrentSnapshot(void);
  * palloc'd in CurrentMemoryContext.
  */
 extern PGDLLEXPORT char *DucklakeResolvePath(const char *basePath,
-											  const char *relPath,
-											  bool isRelative);
+											 const char *relPath,
+											 bool isRelative);
 
-extern PGDLLEXPORT DucklakeSnapshot *DucklakeCreateSnapshot(const char *changesMade,
+extern PGDLLEXPORT DucklakeSnapshot * DucklakeCreateSnapshot(const char *changesMade,
 															 const char *author,
 															 const char *commitMessage);
 extern PGDLLEXPORT int64 DucklakeGetNextCatalogId(void);
 extern PGDLLEXPORT int64 DucklakeGetNextFileId(void);
 
 /* Table operations */
-extern PGDLLEXPORT DucklakeTableMetadata *DucklakeGetTableMetadata(Oid tableOid);
-extern PGDLLEXPORT DucklakeTableMetadata *DucklakeGetTableMetadataById(int64 tableId);
+extern PGDLLEXPORT DucklakeTableMetadata * DucklakeGetTableMetadata(Oid tableOid);
+extern PGDLLEXPORT DucklakeTableMetadata * DucklakeGetTableMetadataById(int64 tableId);
 extern PGDLLEXPORT int64 DucklakeRegisterTable(const char *schemaName,
 											   const char *tableName,
 											   const char *path,
@@ -174,8 +174,8 @@ extern PGDLLEXPORT void DucklakeRenameSchema(const char *oldName,
 /* Partitioning support */
 extern PGDLLEXPORT void DucklakeInsertPartitionSpec(int64 tableId, List *transforms);
 extern PGDLLEXPORT void DucklakeAddFilePartitionValue(int64 dataFileId,
-													   int64 tableId,
-													   int64 partitionKeyIndex,
-													   const char *value);
+													  int64 tableId,
+													  int64 partitionKeyIndex,
+													  const char *value);
 
 #endif							/* PG_LAKE_DUCKLAKE_CATALOG_H */

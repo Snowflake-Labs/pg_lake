@@ -202,10 +202,12 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 		List	   *deleteFiles = NIL;
 
 		/*
-		 * Push an active snapshot if needed for SPI operations in catalog functions.
-		 * Check if we already have an active snapshot to avoid nested pushes.
+		 * Push an active snapshot if needed for SPI operations in catalog
+		 * functions. Check if we already have an active snapshot to avoid
+		 * nested pushes.
 		 */
 		bool		pushedSnapshot = false;
+
 		if (!ActiveSnapshotSet())
 		{
 			PushActiveSnapshot(GetTransactionSnapshot());
@@ -215,10 +217,12 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 		/* Get current snapshot ID */
 		DucklakeSnapshot *ducklakeSnapshot = DucklakeGetCurrentSnapshot();
 		int64		snapshotId = ducklakeSnapshot->snapshotId;
+
 		pfree(ducklakeSnapshot);
 
 		/* Get table metadata */
 		DucklakeTableMetadata *tableMetadata = DucklakeGetTableMetadata(relationId);
+
 		if (!tableMetadata)
 			ereport(ERROR,
 					(errcode(ERRCODE_UNDEFINED_TABLE),
@@ -234,28 +238,28 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 
 			dataFile->fileId = duckFile->dataFileId;
 			dataFile->path = DucklakeResolvePath(tableMetadata->path,
-												  duckFile->path,
-												  duckFile->pathIsRelative);
+												 duckFile->path,
+												 duckFile->pathIsRelative);
 			dataFile->content = CONTENT_DATA;
 			dataFile->stats.rowCount = duckFile->recordCount;
 			dataFile->stats.fileSize = duckFile->fileSizeBytes;
 			dataFile->stats.deletedRowCount = 0;
 			dataFile->partitionSpecId = (duckFile->partitionId >= 0)
-										? (int32) duckFile->partitionId
-										: 0;
+				? (int32) duckFile->partitionId
+				: 0;
 			dataFiles = lappend(dataFiles, dataFile);
 		}
 
 		/*
 		 * Attach per-file partition values from
-		 * lake_ducklake.file_partition_value so PruneDataFiles can
-		 * compare them against the WHERE clause.
+		 * lake_ducklake.file_partition_value so PruneDataFiles can compare
+		 * them against the WHERE clause.
 		 */
 		List	   *partitionTransforms = CurrentPartitionTransformList(relationId);
 
 		if (partitionTransforms != NIL)
 			AttachDucklakePartitionsToDataFiles(tableMetadata->tableId,
-												 partitionTransforms, dataFiles);
+												partitionTransforms, dataFiles);
 
 		/* Prune data files using the same WHERE clauses Iceberg uses. */
 		dataFiles = PruneDataFiles(relationId, dataFiles, baseRestrictInfoList,
@@ -263,13 +267,14 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 
 		/* Get delete files for this snapshot */
 		List	   *ducklakeDeleteFiles = DucklakeGetDeleteFiles(tableMetadata->tableId, snapshotId);
+
 		foreach_ptr(DucklakeDeleteFile, duckDelFile, ducklakeDeleteFiles)
 		{
 			TableDataFile *deleteFile = palloc0(sizeof(TableDataFile));
 
 			deleteFile->path = DucklakeResolvePath(tableMetadata->path,
-												    duckDelFile->path,
-												    duckDelFile->pathIsRelative);
+												   duckDelFile->path,
+												   duckDelFile->pathIsRelative);
 
 			deleteFile->stats.rowCount = duckDelFile->deleteCount;
 			deleteFile->stats.fileSize = duckDelFile->fileSizeBytes;
@@ -280,6 +285,7 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 		foreach_ptr(TableDataFile, dataFile, dataFiles)
 		{
 			PgLakeFileScan *fileScan = palloc0(sizeof(PgLakeFileScan));
+
 			fileScan->path = dataFile->path;
 			fileScan->rowCount = dataFile->stats.rowCount;
 			fileScan->deletedRowCount = dataFile->stats.deletedRowCount;
@@ -291,6 +297,7 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 		foreach_ptr(TableDataFile, deleteFile, deleteFiles)
 		{
 			PgLakeFileScan *deleteScan = palloc0(sizeof(PgLakeFileScan));
+
 			deleteScan->path = deleteFile->path;
 			deleteScan->rowCount = deleteFile->stats.rowCount;
 			positionDeleteScans = lappend(positionDeleteScans, deleteScan);

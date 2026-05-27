@@ -18,6 +18,6 @@
  * Lives here so register_field_ids.c in pg_lake_table can stay free
  * of DuckLake-specific catalog reads.
  */
-extern PGDLLEXPORT DataFileSchema *DucklakeBuildDataFileSchema(Oid relationId);
+extern PGDLLEXPORT DataFileSchema * DucklakeBuildDataFileSchema(Oid relationId);
 
-#endif /* PG_LAKE_DUCKLAKE_DATA_FILE_SCHEMA_H */
+#endif							/* PG_LAKE_DUCKLAKE_DATA_FILE_SCHEMA_H */

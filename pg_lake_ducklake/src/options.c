@@ -30,7 +30,7 @@ typedef struct PgLakeDucklakeOption
 	Oid			optcontext;
 }			PgLakeDucklakeOption;
 
-static PgLakeDucklakeOption *pg_lake_ducklake_options;
+static PgLakeDucklakeOption * pg_lake_ducklake_options;
 
 static void
 InitPgLakeDucklakeOptions(void)

@@ -64,7 +64,7 @@ lake_ducklake_is_ddl_replay(PG_FUNCTION_ARGS)
  * The catalog stores types in DuckDB's syntax (INTEGER, BIGINT,
  * VARCHAR, TIMESTAMP, DECIMAL(p,s), etc.). We map back to PG names
  * (integer, bigint, text, timestamp, numeric(p,s), …). Anything we
- * don't know is passed through verbatim — DDL synthesis treats
+ * don't know is passed through verbatim -- DDL synthesis treats
  * `format_type`-like fall-through as an acceptable last resort.
  */
 static char *
@@ -162,7 +162,7 @@ lake_ducklake_duckdb_type_to_pg_type(PG_FUNCTION_ARGS)
  * Run a single SQL statement under the DucklakeInDDLReplay guard so
  * pg_lake_table's hooks know not to re-apply the resulting DDL to the
  * catalog. Errors are caught (via an internal sub-transaction) and
- * demoted to LOG: replay is best-effort — if a foreign table is
+ * demoted to LOG: replay is best-effort -- if a foreign table is
  * missing, was renamed concurrently, or our synthesized DDL is
  * invalid, we don't want one bad change to abort the entire DuckLake
  * commit.
@@ -243,6 +243,7 @@ LookupTableNameById(int64 tableId, char **schemaNameOut, char **tableNameOut,
 		if (!isnull)
 		{
 			MemoryContext oldContext = MemoryContextSwitchTo(callerContext);
+
 			*schemaNameOut = TextDatumGetCString(dSchema);
 			MemoryContextSwitchTo(oldContext);
 		}
@@ -256,6 +257,7 @@ LookupTableNameById(int64 tableId, char **schemaNameOut, char **tableNameOut,
 		if (!isnull)
 		{
 			MemoryContext oldContext = MemoryContextSwitchTo(callerContext);
+
 			*tableNameOut = TextDatumGetCString(dTable);
 			MemoryContextSwitchTo(oldContext);
 		}
@@ -275,7 +277,7 @@ LookupTableNameById(int64 tableId, char **schemaNameOut, char **tableNameOut,
  * Replay a DuckDB-side DROP TABLE.
  *
  * By the time we get here DuckDB has end-snapshotted every live row
- * for table_id, so pick the row with the largest begin_snapshot —
+ * for table_id, so pick the row with the largest begin_snapshot --
  * that's the version pg_class still has.
  */
 static void
@@ -326,7 +328,7 @@ ComputeFullTablePath(const char *schemaPath, bool schemaRel,
 		return buf.data;
 	}
 
-	/* Both parts relative — need data_path. */
+	/* Both parts relative -- need data_path. */
 	ret = SPI_exec("SELECT value FROM lake_ducklake.metadata "
 				   "WHERE key = 'data_path' LIMIT 1",
 				   1);
@@ -354,7 +356,7 @@ ComputeFullTablePath(const char *schemaPath, bool schemaRel,
 		return NULL;
 	}
 
-	/* Strip trailing slashes — pg_lake_table validator rejects them. */
+	/* Strip trailing slashes -- pg_lake_table validator rejects them. */
 	while (buf.len > 0 && buf.data[buf.len - 1] == '/')
 	{
 		buf.data[buf.len - 1] = '\0';
@@ -506,7 +508,7 @@ ReplayCreateTable(const char *schemaName, const char *tableName)
 		return;
 	}
 
-	/* CREATE SCHEMA IF NOT EXISTS — separate SPI run, no replay flag yet. */
+	/* CREATE SCHEMA IF NOT EXISTS -- separate SPI run, no replay flag yet. */
 	resetStringInfo(&query);
 	appendStringInfo(&query, "CREATE SCHEMA IF NOT EXISTS %s",
 					 quote_identifier(schemaName));
@@ -575,7 +577,7 @@ ReplayAlteredTable(int64 tableId)
 		return;
 	}
 
-	/* Step 1 — RENAME COLUMN. Match prev → live by column_id. */
+	/* Step 1 -- RENAME COLUMN. Match prev → live by column_id. */
 	resetStringInfo(&query);
 	appendStringInfo(&query,
 					 "SELECT live.column_name AS new_name, prev.column_name AS old_name "
@@ -635,7 +637,7 @@ ReplayAlteredTable(int64 tableId)
 		}
 	}
 
-	/* Step 2 — ADD COLUMN. */
+	/* Step 2 -- ADD COLUMN. */
 	resetStringInfo(&query);
 	appendStringInfo(&query,
 					 "SELECT c.column_id, c.column_name, c.column_type "
@@ -688,14 +690,14 @@ ReplayAlteredTable(int64 tableId)
 
 			/*
 			 * DuckLake reads parquet by NAME (column_mapping.type =
-			 * 'map_by_name'), so a stale name_mapping row pointing at
-			 * a previously-dropped column with the same source_name
-			 * would surface the dropped column's data into the new
-			 * column. DuckDB-side ADD COLUMN doesn't add a fresh
-			 * name_mapping row, so do it here: replace any stale row
-			 * with one that maps source_name to the new column_id and
-			 * gives it a target_field_id equal to its column_id, so
-			 * the parquet's old field_id no longer matches.
+			 * 'map_by_name'), so a stale name_mapping row pointing at a
+			 * previously-dropped column with the same source_name would
+			 * surface the dropped column's data into the new column.
+			 * DuckDB-side ADD COLUMN doesn't add a fresh name_mapping row, so
+			 * do it here: replace any stale row with one that maps
+			 * source_name to the new column_id and gives it a target_field_id
+			 * equal to its column_id, so the parquet's old field_id no longer
+			 * matches.
 			 */
 			resetStringInfo(&ddl);
 			appendStringInfo(&ddl,
@@ -719,7 +721,7 @@ ReplayAlteredTable(int64 tableId)
 		}
 	}
 
-	/* Step 3 — DROP COLUMN. */
+	/* Step 3 -- DROP COLUMN. */
 	resetStringInfo(&query);
 	appendStringInfo(&query,
 					 "SELECT a.attname::text FROM pg_attribute a "
@@ -819,7 +821,7 @@ ParseQualifiedIdent(const char *payload, char **schemaOut, char **tableOut)
  * INSTEAD OF INSERT trigger on public.ducklake_snapshot_changes.
  *
  * 1. Insert the raw row into lake_ducklake.snapshot_changes.
- * 2. If we're already replaying DDL, don't recurse — the inner DDL's
+ * 2. If we're already replaying DDL, don't recurse -- the inner DDL's
  *    own snapshot_changes row would re-enter and loop.
  * 3. Otherwise parse changes_made and dispatch each entry to the
  *    matching replay helper above.
@@ -967,11 +969,12 @@ lake_ducklake_snapshot_changes_insert(PG_FUNCTION_ARGS)
 			if (ParseQualifiedIdent(payload, &schemaName, &tableName))
 				ReplayCreateTable(schemaName, tableName);
 		}
+
 		/*
 		 * created_view / altered_view / dropped_view / created_schema /
 		 * dropped_schema / inserted_into_table / deleted_from_table /
-		 * inlined_* / merge_adjacent / rewrite_delete are not yet
-		 * propagated to the PG side. Those are tracked as follow-ups.
+		 * inlined_* / merge_adjacent / rewrite_delete are not yet propagated
+		 * to the PG side. Those are tracked as follow-ups.
 		 */
 	}
 

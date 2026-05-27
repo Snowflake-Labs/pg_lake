@@ -48,14 +48,15 @@ DucklakeBuildDataFileSchema(Oid relationId)
 
 	/*
 	 * Build per-attnum lookups for (column_id, initial_default) from
-	 * lake_ducklake.column for the live (end_snapshot IS NULL) rows of
-	 * this table. We pull this once into palloc'd arrays indexed by
-	 * attnum so the per-attribute loop below can attach both without an
-	 * SPI call per column.
+	 * lake_ducklake.column for the live (end_snapshot IS NULL) rows of this
+	 * table. We pull this once into palloc'd arrays indexed by attnum so the
+	 * per-attribute loop below can attach both without an SPI call per
+	 * column.
 	 */
 	int64	   *columnIdsByAttnum = NULL;
 	char	  **defaultStrings = NULL;
 	int			maxAttnum = 0;
+
 	{
 		bool		pushedSnapshot = false;
 
@@ -88,11 +89,11 @@ DucklakeBuildDataFileSchema(Oid relationId)
 
 				/*
 				 * Match catalog rows to pg_attribute by NAME, not by
-				 * column_order. After DROP+ADD column the new live
-				 * row's column_order (allocated sequentially in the
-				 * catalog) no longer matches pg_attribute.attnum (which
-				 * skips dropped slots), so order-based lookup would
-				 * miss the column entirely and stamp field_id=0 on it.
+				 * column_order. After DROP+ADD column the new live row's
+				 * column_order (allocated sequentially in the catalog) no
+				 * longer matches pg_attribute.attnum (which skips dropped
+				 * slots), so order-based lookup would miss the column
+				 * entirely and stamp field_id=0 on it.
 				 */
 				initStringInfo(&q);
 				appendStringInfo(&q,
@@ -116,15 +117,15 @@ DucklakeBuildDataFileSchema(Oid relationId)
 					{
 						bool		isnull;
 						int32		attno = DatumGetInt32(SPI_getbinval(
-													SPI_tuptable->vals[row],
-													SPI_tuptable->tupdesc, 1, &isnull));
+																		SPI_tuptable->vals[row],
+																		SPI_tuptable->tupdesc, 1, &isnull));
 
 						if (isnull || attno <= 0 || attno > maxAttnum)
 							continue;
 
 						int64		colId = DatumGetInt64(SPI_getbinval(
-													SPI_tuptable->vals[row],
-													SPI_tuptable->tupdesc, 2, &isnull));
+																		SPI_tuptable->vals[row],
+																		SPI_tuptable->tupdesc, 2, &isnull));
 
 						if (!isnull)
 							columnIdsByAttnum[attno] = colId;
@@ -169,8 +170,8 @@ DucklakeBuildDataFileSchema(Oid relationId)
 		DataFileSchemaField *field = &schema->fields[schema->nfields];
 
 		int64		columnId = (columnIdsByAttnum != NULL && attr->attnum <= maxAttnum)
-									? columnIdsByAttnum[attr->attnum]
-									: 0;
+			? columnIdsByAttnum[attr->attnum]
+			: 0;
 
 		field->id = (columnId > 0) ? (int) columnId : attr->attnum;
 		field->name = pstrdup(NameStr(attr->attname));

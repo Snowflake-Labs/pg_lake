@@ -11,6 +11,6 @@
 
 #include "pg_lake/data_file/data_files.h"
 
-extern PGDLLEXPORT void TrackDucklakeTableDataFileAddition(Oid relationId, TableDataFile *dataFile);
+extern PGDLLEXPORT void TrackDucklakeTableDataFileAddition(Oid relationId, TableDataFile * dataFile);
 extern PGDLLEXPORT void TrackDucklakeTableDataFileRemoval(Oid relationId, int64 dataFileId);
 extern PGDLLEXPORT void TrackDucklakeMetadataChangesInTx(Oid relationId, List *metadataOperationTypes);

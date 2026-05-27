@@ -4526,9 +4526,9 @@ postgresExecForeignTruncate(List *relations,
 				/*
 				 * TRUNCATE is its own logical change. Stamp a fresh
 				 * "TRUNCATE" snapshot so DucklakeRemoveAllDataFiles
-				 * end-snapshots the live data files at this snapshot,
-				 * giving DuckDB readers a time-travel point to before
-				 * and after the truncation.
+				 * end-snapshots the live data files at this snapshot, giving
+				 * DuckDB readers a time-travel point to before and after the
+				 * truncation.
 				 */
 				(void) DucklakeCreateSnapshot("TRUNCATE", NULL, NULL);
 

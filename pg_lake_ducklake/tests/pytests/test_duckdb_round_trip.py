@@ -15,6 +15,7 @@ or DuckDB grows a knob to point at an existing schema, the
 test_attach_ducklake_extension test below should be widened to do a
 catalog-level round trip.
 """
+
 import pytest
 from utils_pytest import (
     TEST_BUCKET,
@@ -24,6 +25,7 @@ from utils_pytest import (
 
 try:
     import duckdb
+
     DUCKDB_AVAILABLE = True
 except ImportError:
     DUCKDB_AVAILABLE = False
@@ -143,36 +145,75 @@ def test_public_ducklake_views_match_extension_schema(pg_cursor):
     """
     expected = {
         "ducklake_snapshot": {
-            "snapshot_id", "snapshot_time", "schema_version",
-            "next_catalog_id", "next_file_id",
+            "snapshot_id",
+            "snapshot_time",
+            "schema_version",
+            "next_catalog_id",
+            "next_file_id",
         },
         "ducklake_snapshot_changes": {
-            "snapshot_id", "changes_made", "author", "commit_message",
+            "snapshot_id",
+            "changes_made",
+            "author",
+            "commit_message",
             "commit_extra_info",
         },
         "ducklake_schema": {
-            "schema_id", "schema_uuid", "begin_snapshot", "end_snapshot",
-            "schema_name", "path", "path_is_relative",
+            "schema_id",
+            "schema_uuid",
+            "begin_snapshot",
+            "end_snapshot",
+            "schema_name",
+            "path",
+            "path_is_relative",
         },
         "ducklake_table": {
-            "table_id", "table_uuid", "begin_snapshot", "end_snapshot",
-            "schema_id", "table_name", "path", "path_is_relative",
+            "table_id",
+            "table_uuid",
+            "begin_snapshot",
+            "end_snapshot",
+            "schema_id",
+            "table_name",
+            "path",
+            "path_is_relative",
         },
         "ducklake_column": {
-            "column_id", "begin_snapshot", "end_snapshot", "table_id",
-            "column_order", "column_name", "column_type", "initial_default",
-            "default_value", "nulls_allowed", "parent_column",
-            "default_value_type", "default_value_dialect",
+            "column_id",
+            "begin_snapshot",
+            "end_snapshot",
+            "table_id",
+            "column_order",
+            "column_name",
+            "column_type",
+            "initial_default",
+            "default_value",
+            "nulls_allowed",
+            "parent_column",
+            "default_value_type",
+            "default_value_dialect",
         },
         "ducklake_data_file": {
-            "data_file_id", "table_id", "begin_snapshot", "end_snapshot",
-            "file_order", "path", "path_is_relative", "file_format",
-            "record_count", "file_size_bytes", "footer_size", "row_id_start",
-            "partition_id", "encryption_key", "partial_max",
+            "data_file_id",
+            "table_id",
+            "begin_snapshot",
+            "end_snapshot",
+            "file_order",
+            "path",
+            "path_is_relative",
+            "file_format",
+            "record_count",
+            "file_size_bytes",
+            "footer_size",
+            "row_id_start",
+            "partition_id",
+            "encryption_key",
+            "partial_max",
             "mapping_id",
         },
         "ducklake_schema_versions": {
-            "begin_snapshot", "schema_version", "table_id",
+            "begin_snapshot",
+            "schema_version",
+            "table_id",
         },
     }
 
@@ -581,12 +622,12 @@ def test_create_table_records_real_uuid_and_absolute_path(pg_cursor, s3):
     table_id, table_uuid, table_path, path_is_relative = row
 
     zero_uuid = "00000000-0000-0000-0000-000000000000"
-    assert str(table_uuid) != zero_uuid, (
-        f"table_uuid must be a real UUID, got {table_uuid}"
-    )
-    assert path_is_relative is False, (
-        f"absolute s3:// location must store path_is_relative=false, got {path_is_relative}"
-    )
+    assert (
+        str(table_uuid) != zero_uuid
+    ), f"table_uuid must be a real UUID, got {table_uuid}"
+    assert (
+        path_is_relative is False
+    ), f"absolute s3:// location must store path_is_relative=false, got {path_is_relative}"
     assert table_path.rstrip("/") == location.rstrip("/"), (table_path, location)
 
     pg_cursor.execute(
@@ -597,9 +638,9 @@ def test_create_table_records_real_uuid_and_absolute_path(pg_cursor, s3):
     )
     schema_row = pg_cursor.fetchone()
     assert schema_row is not None
-    assert str(schema_row[1]) != zero_uuid, (
-        f"schema_uuid must be a real UUID, got {schema_row[1]}"
-    )
+    assert (
+        str(schema_row[1]) != zero_uuid
+    ), f"schema_uuid must be a real UUID, got {schema_row[1]}"
 
 
 def test_select_after_schema_evolution(pg_cursor, s3):
@@ -716,9 +757,9 @@ def test_create_drop_create_same_name_keeps_history(pg_cursor, s3):
         (first_id,),
     )
     row = pg_cursor.fetchone()
-    assert row is not None and row[1] is not None, (
-        f"DROP TABLE must keep the table row with end_snapshot set, got {row}"
-    )
+    assert (
+        row is not None and row[1] is not None
+    ), f"DROP TABLE must keep the table row with end_snapshot set, got {row}"
 
     pg_cursor.execute(
         f"""
@@ -779,7 +820,9 @@ def test_add_column_with_string_default(pg_cursor, s3):
     pg_cursor.execute("INSERT INTO rt_str_default VALUES (1)")
     pg_cursor.connection.commit()
 
-    pg_cursor.execute("ALTER TABLE rt_str_default ADD COLUMN label TEXT DEFAULT 'unknown'")
+    pg_cursor.execute(
+        "ALTER TABLE rt_str_default ADD COLUMN label TEXT DEFAULT 'unknown'"
+    )
     pg_cursor.execute("INSERT INTO rt_str_default VALUES (2, 'set')")
     pg_cursor.connection.commit()
 
@@ -869,7 +912,7 @@ def test_table_column_stats_carries_single_file_minmax(pg_cursor, s3):
     After a single-INSERT table is written, table_column_stats carries
     the single file's per-column min/max bounds verbatim. After a
     second INSERT, the multi-file aggregate falls back to NULL because
-    text-domain aggregation would mis-prune numerics. Both branches
+    text-domain aggregation would misprune numerics. Both branches
     keep one row per (table_id, column_id) so DuckDB's
     GetGlobalTableStats LEFT JOIN doesn't NULL-deref column_id.
     """
@@ -975,9 +1018,9 @@ def test_pg_update_replaces_old_rows(pg_cursor, s3):
     )
     delete_rows = pg_cursor.fetchall()
     for (data_file_id,) in delete_rows:
-        assert data_file_id is not None, (
-            "delete file is missing the link back to its source data_file_id"
-        )
+        assert (
+            data_file_id is not None
+        ), "delete file is missing the link back to its source data_file_id"
 
 
 @pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="duckdb python module not installed")
@@ -1025,15 +1068,15 @@ def test_pg_partial_update_uses_position_deletes(pg_cursor, s3):
     rows = pg_cursor.fetchall()
     assert len(rows) >= 1, "expected at least one position-delete file row"
     for path, data_file_id, delete_count in rows:
-        assert data_file_id is not None, (
-            f"delete_file row {path} missing source data_file_id link"
-        )
+        assert (
+            data_file_id is not None
+        ), f"delete_file row {path} missing source data_file_id link"
         assert delete_count >= 1, (path, delete_count)
 
     pg_cursor.execute("SELECT count(*) FROM rt_update_partial")
-    assert pg_cursor.fetchone()[0] == 100, "row count must not double after merge-on-read UPDATE"
+    assert (
+        pg_cursor.fetchone()[0] == 100
+    ), "row count must not double after merge-on-read UPDATE"
 
-    pg_cursor.execute(
-        "SELECT y FROM rt_update_partial WHERE x = 42"
-    )
+    pg_cursor.execute("SELECT y FROM rt_update_partial WHERE x = 42")
     assert pg_cursor.fetchone()[0] == -1

@@ -156,7 +156,9 @@ def test_create_multiple_ducklake_tables(s3, pg_conn, extension):
     assert result[0][0] == "test_ducklake_multi1"
     assert result[1][0] == "test_ducklake_multi2"
 
-    run_command("DROP FOREIGN TABLE test_ducklake_multi1, test_ducklake_multi2", pg_conn)
+    run_command(
+        "DROP FOREIGN TABLE test_ducklake_multi1, test_ducklake_multi2", pg_conn
+    )
     pg_conn.rollback()
 
 

@@ -156,7 +156,10 @@ GetDucklakeDataFilesHash(Oid relationId, bool dataOnly, int64 snapshotId)
 
 		if (!found)
 		{
-			/* Switch to caller's memory context for allocations that need to persist */
+			/*
+			 * Switch to caller's memory context for allocations that need to
+			 * persist
+			 */
 			MemoryContext oldContext = MemoryContextSwitchTo(callerContext);
 
 			/* Resolve relative paths against table base path */
@@ -179,7 +182,8 @@ GetDucklakeDataFilesHash(Oid relationId, bool dataOnly, int64 snapshotId)
 			tableFile->content = CONTENT_DATA;
 			tableFile->stats.rowCount = ducklakeFile->recordCount;
 			tableFile->stats.fileSize = ducklakeFile->fileSizeBytes;
-			tableFile->stats.deletedRowCount = 0;	/* filled in below from delete_file */
+			tableFile->stats.deletedRowCount = 0;	/* filled in below from
+													 * delete_file */
 			tableFile->stats.rowIdStart = ducklakeFile->rowIdStart;
 			tableFile->stats.columnStats = NIL;
 			tableFile->partition = NULL;
@@ -190,12 +194,12 @@ GetDucklakeDataFilesHash(Oid relationId, bool dataOnly, int64 snapshotId)
 	}
 
 	/*
-	 * Pull delete files in so the FDW can either (a) apply position
-	 * deletes when scanning, or (b) account for them in row-count
-	 * estimates. When dataOnly is true the caller is just enumerating
-	 * data files (e.g. for compaction planning); we still update each
-	 * data file's deletedRowCount so estimates aren't inflated, but we
-	 * do not add separate CONTENT_POSITION_DELETES entries.
+	 * Pull delete files in so the FDW can either (a) apply position deletes
+	 * when scanning, or (b) account for them in row-count estimates. When
+	 * dataOnly is true the caller is just enumerating data files (e.g. for
+	 * compaction planning); we still update each data file's deletedRowCount
+	 * so estimates aren't inflated, but we do not add separate
+	 * CONTENT_POSITION_DELETES entries.
 	 */
 	List	   *deleteFiles = DucklakeGetDeleteFiles(metadata->tableId, snapshotId);
 	ListCell   *delCell;
@@ -204,7 +208,10 @@ GetDucklakeDataFilesHash(Oid relationId, bool dataOnly, int64 snapshotId)
 	{
 		DucklakeDeleteFile *del = (DucklakeDeleteFile *) lfirst(delCell);
 
-		/* Charge the delete count back to the source data file's row-count estimate. */
+		/*
+		 * Charge the delete count back to the source data file's row-count
+		 * estimate.
+		 */
 		if (del->dataFileId > 0)
 		{
 			bool		found;
@@ -291,7 +298,7 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
 	if (IsDucklakeTable(relationId))
 	{
 		/* For DuckLake tables, use the DuckLake catalog */
-		return GetDucklakeDataFilesHash(relationId, dataOnly, -1 /* current snapshot */);
+		return GetDucklakeDataFilesHash(relationId, dataOnly, -1 /* current snapshot */ );
 	}
 
 	/* For non-DuckLake tables, use lake_table metadata */
@@ -1551,8 +1558,8 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 	 * For DuckLake tables, every batch of file changes must land in a new
 	 * snapshot so DuckDB readers can time-travel and so the per-file
 	 * begin_snapshot is recorded correctly. Create that snapshot once up
-	 * front; the DucklakeAdd / DucklakeRemove helpers below pick it up
-	 * via lake_ducklake.snapshot ORDER BY snapshot_id DESC LIMIT 1.
+	 * front; the DucklakeAdd / DucklakeRemove helpers below pick it up via
+	 * lake_ducklake.snapshot ORDER BY snapshot_id DESC LIMIT 1.
 	 */
 	if (IsDucklakeTable(relationId))
 	{
@@ -1600,18 +1607,18 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 							if (operation->content == CONTENT_DATA)
 							{
 								/*
-								 * partitionSpecId on the operation is set
-								 * by AssignPartitionForModificationList
-								 * when the writer routed through
-								 * PartitionedDestReceiver. For DuckLake,
-								 * the spec id IS the partition_info.partition_id
+								 * partitionSpecId on the operation is set by
+								 * AssignPartitionForModificationList when the
+								 * writer routed through
+								 * PartitionedDestReceiver. For DuckLake, the
+								 * spec id IS the partition_info.partition_id
 								 * (we make GetCurrentSpecId return it).
 								 * DEFAULT_SPEC_ID (0) means unpartitioned.
 								 */
 								int64		ducklakePartitionId =
 									(operation->partitionSpecId == DEFAULT_SPEC_ID)
-										? -1
-										: (int64) operation->partitionSpecId;
+									? -1
+									: (int64) operation->partitionSpecId;
 
 								/* Add data file to DuckLake catalog */
 								int64		ducklakeFileId = DucklakeAddDataFile(metadata->tableId,
@@ -1623,12 +1630,12 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 
 								/*
 								 * Per-file partition values. Iceberg's
-								 * AddDataFilePartitionValueToCatalog
-								 * (line 1943) does the same for the
-								 * Iceberg path — we mirror it here, but
-								 * key by partition_key_index (the field's
-								 * position in the spec) instead of the
-								 * Iceberg field_id, and store the
+								 * AddDataFilePartitionValueToCatalog (line
+								 * 1943) does the same for the Iceberg path --
+								 * we mirror it here, but key by
+								 * partition_key_index (the field's position
+								 * in the spec) instead of the Iceberg
+								 * field_id, and store the
 								 * already-text-serialized value DuckLake
 								 * expects.
 								 */
@@ -1670,17 +1677,21 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 									if (stat->lowerBoundText != NULL || stat->upperBoundText != NULL)
 									{
 										/*
-										 * For DuckLake tables, fieldId maps to column_order.
-										 * This works because DuckLake columns are created with
-										 * column_order = pg attnum, and for non-Iceberg tables
-										 * fieldId is also based on attnum.
+										 * For DuckLake tables, fieldId maps
+										 * to column_order. This works because
+										 * DuckLake columns are created with
+										 * column_order = pg attnum, and for
+										 * non-Iceberg tables fieldId is also
+										 * based on attnum.
 										 */
 
 										/*
-										 * RETURN_STATS gives us null_count but not the
-										 * non-null value_count DuckLake stores. When we know
-										 * the file's row count and the column's null_count,
-										 * derive value_count; otherwise pass -1 (unknown).
+										 * RETURN_STATS gives us null_count
+										 * but not the non-null value_count
+										 * DuckLake stores. When we know the
+										 * file's row count and the column's
+										 * null_count, derive value_count;
+										 * otherwise pass -1 (unknown).
 										 */
 										int64		fileRowCount = operation->dataFileStats.rowCount;
 										int64		valueCount = -1;
@@ -1704,12 +1715,12 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 							{
 								/*
 								 * Position-delete file. We do not yet know
-								 * the source data file's data_file_id at
-								 * this stage of the operation stream — pass
-								 * -1 so DucklakeAddDeleteFile leaves
-								 * data_file_id NULL (it is FK'd to
-								 * lake_ducklake.data_file, so 0 would
-								 * violate the constraint). The follow-up
+								 * the source data file's data_file_id at this
+								 * stage of the operation stream -- pass -1 so
+								 * DucklakeAddDeleteFile leaves data_file_id
+								 * NULL (it is FK'd to
+								 * lake_ducklake.data_file, so 0 would violate
+								 * the constraint). The follow-up
 								 * DATA_FILE_ADD_DELETE_MAPPING op resolves
 								 * the source path to a data_file_id and
 								 * UPDATEs this row below.
@@ -1750,16 +1761,18 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 															columnStats);
 
 						/*
-						 * Add partition values only for data files. Even if the
-						 * table is not partitioned, we record the partition spec
-						 * id as the table might be partitioned in the future.
+						 * Add partition values only for data files. Even if
+						 * the table is not partitioned, we record the
+						 * partition spec id as the table might be partitioned
+						 * in the future.
 						 *
-						 * For non-partitioned tables, if the table has never been
-						 * partitioned, we record the partition spec id as 0,
-						 * which is the default spec id for non-partitioned
-						 * tables. If the table has been partitioned before, and
-						 * now it is not, we record the partition spec id as the
-						 * current/largest spec id.
+						 * For non-partitioned tables, if the table has never
+						 * been partitioned, we record the partition spec id
+						 * as 0, which is the default spec id for
+						 * non-partitioned tables. If the table has been
+						 * partitioned before, and now it is not, we record
+						 * the partition spec id as the current/largest spec
+						 * id.
 						 */
 						if (operation->partition != NULL &&
 							operation->partition->fields_length > 0 &&
@@ -1775,7 +1788,11 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 						if (PgLakeAddDataFileHook)
 						{
 							if (operation->content == CONTENT_DATA && PgLakeAddDataFileHook())
-								/* add the file ID to the transaction's temp table */
+
+								/*
+								 * add the file ID to the transaction's temp
+								 * table
+								 */
 								InsertDataFileIdIntoTransactionTable(fileId);
 						}
 					}
@@ -1789,15 +1806,18 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 					 * DuckLake stores delete-file -> data-file linkage in
 					 * lake_ducklake.delete_file.data_file_id, not in
 					 * lake_table.deletion_file_map. The lake_table mapping
-					 * has an FK on lake_table.files, which DuckLake
-					 * tables intentionally don't populate, so calling
+					 * has an FK on lake_table.files, which DuckLake tables
+					 * intentionally don't populate, so calling
 					 * AddDeletionFileMapping() would FK-violate.
 					 */
 					DucklakeTableMetadata *metadata = DucklakeGetTableMetadata(relationId);
 
 					if (metadata)
 					{
-						/* Look up the DuckLake data_file_id for the source file */
+						/*
+						 * Look up the DuckLake data_file_id for the source
+						 * file
+						 */
 						int			ret;
 						bool		isnull;
 						StringInfoData query;
@@ -1822,12 +1842,15 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 						if (ret == SPI_OK_SELECT && SPI_processed > 0)
 						{
 							int64		dataFileId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
-																				  SPI_tuptable->tupdesc,
-																				  1, &isnull));
+																				 SPI_tuptable->tupdesc,
+																				 1, &isnull));
 
 							if (!isnull)
 							{
-								/* Update the delete file with the correct data_file_id */
+								/*
+								 * Update the delete file with the correct
+								 * data_file_id
+								 */
 								StringInfoData updateQuery;
 
 								initStringInfo(&updateQuery);
@@ -1908,8 +1931,8 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 						if (ret == SPI_OK_SELECT && SPI_processed > 0)
 						{
 							dataFileId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
-																	  SPI_tuptable->tupdesc,
-																	  1, &isnull));
+																	 SPI_tuptable->tupdesc,
+																	 1, &isnull));
 							if (isnull)
 								dataFileId = -1;
 						}
@@ -2058,8 +2081,8 @@ CreateDataFileColumnStats(int fieldId, PGType pgType, char *lowerBoundText, char
 	columnStats->leafField.pgType = pgType;
 
 	/*
-	 * Hydrating from Iceberg manifests doesn't carry DuckDB return_stats,
-	 * so the extended fields remain at the "unknown" sentinel.
+	 * Hydrating from Iceberg manifests doesn't carry DuckDB return_stats, so
+	 * the extended fields remain at the "unknown" sentinel.
 	 */
 	columnStats->columnSizeBytes = -1;
 	columnStats->nullCount = -1;

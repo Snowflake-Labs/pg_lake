@@ -305,9 +305,10 @@ ExtractMinMaxForColumn(Datum map, char *colName, List **names, List **mins, List
 		*mins = lappend(*mins, minText);
 		*maxs = lappend(*maxs, maxText);
 		*nullCounts = lappend(*nullCounts, nullCountText);
+
 		/*
-		 * value_count isn't surfaced by RETURN_STATS — leave it unknown here
-		 * (NULL pointer) and let the caller derive it from row_count -
+		 * value_count isn't surfaced by RETURN_STATS — leave it unknown
+		 * here (NULL pointer) and let the caller derive it from row_count -
 		 * null_count when both are known.
 		 */
 		*valueCounts = lappend(*valueCounts, NULL);
@@ -516,9 +517,9 @@ GetDataFileColumnStatsList(List *names, List *mins, List *maxs,
 		colStats->columnSizeBytes = (columnSizeBytesStr != NULL) ? atoll(columnSizeBytesStr) : -1;
 
 		/*
-		 * has_nan arrives as the canonical text "true"/"false". Anything
-		 * else (including NULL) means DuckDB didn't emit it for this
-		 * column type, so leave the tri-state at "unknown".
+		 * has_nan arrives as the canonical text "true"/"false". Anything else
+		 * (including NULL) means DuckDB didn't emit it for this column type,
+		 * so leave the tri-state at "unknown".
 		 */
 		if (hasNanStr == NULL)
 			colStats->containsNan = -1;

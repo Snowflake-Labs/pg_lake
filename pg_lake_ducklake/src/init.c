@@ -32,7 +32,7 @@ PG_MODULE_MAGIC;
 char	   *PGDLLEXPORT DucklakeDefaultLocationPrefix = NULL;
 bool		DucklakeAutovacuumEnabled = true;
 int			DucklakeAutovacuumNaptime = 10 * 60;	/* 10 minutes */
-int			DucklakeMaxSnapshotAge = 30 * 60;		/* 30 minutes */
+int			DucklakeMaxSnapshotAge = 30 * 60;	/* 30 minutes */
 int			DucklakeLogAutovacuumMinDuration = 600000;	/* 10 minutes in ms */
 
 /*
@@ -42,7 +42,7 @@ int			DucklakeLogAutovacuumMinDuration = 600000;	/* 10 minutes in ms */
  * DuckDB-driven catalog change. pg_lake_table's hooks read this
  * directly via the catalog.h extern and short-circuit so they don't
  * write the same change BACK to lake_ducklake.* (which would create
- * a duplicate version row). Not a GUC — no user-tunable knob here.
+ * a duplicate version row). Not a GUC -- no user-tunable knob here.
  */
 bool		DucklakeInDDLReplay = false;
 
@@ -139,14 +139,14 @@ DucklakeDefaultLocationCheckHook(char **newvalue, void **extra, GucSource source
 		strncmp(newLocationPrefix, "abfss://", 8) != 0)
 	{
 		GUC_check_errdetail("pg_lake_ducklake: only s3://, gs://, az://, and abfss:// URLs are "
-						   "supported as the default location prefix");
+							"supported as the default location prefix");
 		return false;
 	}
 
 	if (strchr(newLocationPrefix, '?') != NULL)
 	{
 		GUC_check_errdetail("pg_lake_ducklake: configuration parameters are not allowed "
-						   "in the default location prefix");
+							"in the default location prefix");
 		return false;
 	}
 

@@ -171,8 +171,8 @@ IsExternalIcebergTable(Oid relationId)
 bool
 IsDucklakeTable(Oid relationId)
 {
-	bool isPgLake = IsPgLakeForeignTableById(relationId);
-	bool isDucklake = IsPgLakeDucklakeForeignTableById(relationId);
+	bool		isPgLake = IsPgLakeForeignTableById(relationId);
+	bool		isDucklake = IsPgLakeDucklakeForeignTableById(relationId);
 
 	if (!isPgLake && !isDucklake)
 	{

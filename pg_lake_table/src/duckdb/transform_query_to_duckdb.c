@@ -217,8 +217,8 @@ BuildReadDataSourceQueryForTableScan(PgLakeTableScan * tableScan, bool skipFullM
 		/*
 		 * DuckLake also needs the schema so read_parquet gets the field-id
 		 * map: parquet files written before an ALTER ADD COLUMN won't have
-		 * the new column physically present, and the schema map is what
-		 * lets DuckDB fill those slots with NULL or the column's default.
+		 * the new column physically present, and the schema map is what lets
+		 * DuckDB fill those slots with NULL or the column's default.
 		 */
 		schema = GetDataFileSchemaForTable(relationId);
 	}

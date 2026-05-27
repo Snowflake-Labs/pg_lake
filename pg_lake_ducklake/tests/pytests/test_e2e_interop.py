@@ -13,6 +13,7 @@ from utils_pytest import TEST_BUCKET, server_params
 # Check if duckdb is available
 try:
     import duckdb
+
     DUCKDB_AVAILABLE = True
 except ImportError:
     DUCKDB_AVAILABLE = False
@@ -26,32 +27,38 @@ def test_create_ducklake_table_s3(pg_cursor):
     """
     location = f"s3://{TEST_BUCKET}/test_table"
 
-    pg_cursor.execute(f"""
+    pg_cursor.execute(
+        f"""
         CREATE TABLE test_s3_table (
             id INTEGER,
             name TEXT
         ) USING ducklake
         WITH (location = '{location}')
-    """)
+    """
+    )
     pg_cursor.connection.commit()
 
     # Verify foreign table was created
-    pg_cursor.execute("""
+    pg_cursor.execute(
+        """
         SELECT foreign_table_name
         FROM information_schema.foreign_tables
         WHERE foreign_table_name = 'test_s3_table'
-    """)
+    """
+    )
     result = pg_cursor.fetchone()
     assert result is not None, "Foreign table was not created"
 
     # Verify it's using the correct server
-    pg_cursor.execute("""
+    pg_cursor.execute(
+        """
         SELECT foreign_server_name
         FROM information_schema.foreign_tables
         WHERE foreign_table_name = 'test_s3_table'
-    """)
+    """
+    )
     server = pg_cursor.fetchone()
-    assert server[0] == 'pg_lake_ducklake', f"Wrong server: {server[0]}"
+    assert server[0] == "pg_lake_ducklake", f"Wrong server: {server[0]}"
 
 
 @pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="DuckDB not installed")
@@ -61,19 +68,23 @@ def test_metadata_structure_after_create(pg_cursor):
     """
     location = f"s3://{TEST_BUCKET}/metadata_test"
 
-    pg_cursor.execute(f"""
+    pg_cursor.execute(
+        f"""
         CREATE TABLE metadata_test (
             id INTEGER,
             value TEXT
         ) USING ducklake
         WITH (location = '{location}')
-    """)
+    """
+    )
     pg_cursor.connection.commit()
 
-    pg_cursor.execute("""
+    pg_cursor.execute(
+        """
         SELECT table_name FROM lake_ducklake.tables
         WHERE table_name = 'metadata_test'
-    """)
+    """
+    )
     rows = pg_cursor.fetchall()
     assert len(rows) == 1, f"expected metadata_test in lake_ducklake.tables, got {rows}"
 
@@ -87,21 +98,25 @@ def test_insert_data_to_ducklake_table(pg_cursor, s3):
     """
     location = f"s3://{TEST_BUCKET}/insert_test"
 
-    pg_cursor.execute(f"""
+    pg_cursor.execute(
+        f"""
         CREATE TABLE insert_test (
             id INTEGER,
             name TEXT,
             value DOUBLE PRECISION
         ) USING ducklake
         WITH (location = '{location}')
-    """)
+    """
+    )
     pg_cursor.connection.commit()
 
-    pg_cursor.execute("""
+    pg_cursor.execute(
+        """
         INSERT INTO insert_test VALUES
             (1, 'alice', 10.5),
             (2, 'bob', 20.3)
-    """)
+    """
+    )
     pg_cursor.connection.commit()
 
     pg_cursor.execute("SELECT COUNT(*) FROM insert_test")
@@ -110,7 +125,7 @@ def test_insert_data_to_ducklake_table(pg_cursor, s3):
 
     pg_cursor.execute(
         "SELECT COUNT(*), SUM(record_count) FROM lake_ducklake.data_file df "
-        "JOIN lake_ducklake.\"table\" t USING (table_id) "
+        'JOIN lake_ducklake."table" t USING (table_id) '
         "WHERE t.table_name = 'insert_test'"
     )
     data_files, total_records = pg_cursor.fetchone()
@@ -126,13 +141,15 @@ def test_duckdb_reads_postgres_metadata(pg_cursor, s3):
     """
     location = f"s3://{TEST_BUCKET}/shared_table"
     pg_cursor.execute("DROP TABLE IF EXISTS shared_table")
-    pg_cursor.execute(f"""
+    pg_cursor.execute(
+        f"""
         CREATE TABLE shared_table (
             id INTEGER,
             name TEXT
         ) USING ducklake
         WITH (location = '{location}')
-    """)
+    """
+    )
     pg_cursor.execute("INSERT INTO shared_table VALUES (1, 'test'), (2, 'two')")
     pg_cursor.connection.commit()
 
@@ -155,14 +172,13 @@ def test_duckdb_reads_postgres_metadata(pg_cursor, s3):
         f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
     )
     duck.execute(
-        f"ATTACH 'postgres:{conn}' AS dl "
-        f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
+        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
     )
 
     rows = duck.execute(
         "SELECT id, name FROM dl.public.shared_table ORDER BY id"
     ).fetchall()
-    assert rows == [(1, 'test'), (2, 'two')], rows
+    assert rows == [(1, "test"), (2, "two")], rows
 
 
 @pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="DuckDB not installed")
@@ -204,15 +220,12 @@ def test_duckdb_writes_through_postgres_metadata(pg_cursor, s3):
         f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
     )
     duck.execute(
-        f"ATTACH 'postgres:{conn}' AS dl "
-        f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
+        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
     )
 
     duck.execute("INSERT INTO dl.public.duck_writes VALUES (3, 4)")
 
-    rows = duck.execute(
-        "SELECT x, y FROM dl.public.duck_writes ORDER BY x"
-    ).fetchall()
+    rows = duck.execute("SELECT x, y FROM dl.public.duck_writes ORDER BY x").fetchall()
     assert rows == [(3, 4)], rows
 
     pg_cursor.connection.commit()
@@ -242,9 +255,9 @@ def test_duckdb_writes_through_postgres_metadata(pg_cursor, s3):
         """
     )
     inlined_tables = pg_cursor.fetchone()[0]
-    assert inlined_tables == 0, (
-        f"expected no per-table inlined data tables, found {inlined_tables}"
-    )
+    assert (
+        inlined_tables == 0
+    ), f"expected no per-table inlined data tables, found {inlined_tables}"
 
     # And the same row must be visible from the PostgreSQL FDW side.
     # This works because both DuckDB's ducklake extension and pg_lake's
@@ -265,7 +278,8 @@ def test_manual_metadata_creation_for_duckdb(pg_cursor, tmp_path):
         pytest.skip("DuckDB not installed")
 
     # Manually populate metadata tables to simulate a complete DuckLake table
-    pg_cursor.execute("""
+    pg_cursor.execute(
+        """
         -- Create schema entry
         INSERT INTO lake_ducklake.schema
         (schema_id, schema_uuid, begin_snapshot, schema_name, path)
@@ -282,29 +296,34 @@ def test_manual_metadata_creation_for_duckdb(pg_cursor, tmp_path):
         VALUES
         (1, 0, 100, 0, 'id', 'INTEGER'),
         (2, 0, 100, 1, 'name', 'VARCHAR');
-    """)
+    """
+    )
     pg_cursor.connection.commit()
 
     # Verify metadata was created correctly
-    pg_cursor.execute("""
+    pg_cursor.execute(
+        """
         SELECT t.table_name, s.schema_name, COUNT(c.column_id) as col_count
         FROM lake_ducklake.table t
         JOIN lake_ducklake.schema s ON t.schema_id = s.schema_id
         LEFT JOIN lake_ducklake.column c ON t.table_id = c.table_id
         WHERE t.table_id = 100
         GROUP BY t.table_name, s.schema_name
-    """)
+    """
+    )
     result = pg_cursor.fetchone()
-    assert result[0] == 'manual_table'
-    assert result[1] == 'default'
+    assert result[0] == "manual_table"
+    assert result[1] == "default"
     assert result[2] == 2, "Should have 2 columns"
 
     # Verify using the view
-    pg_cursor.execute("""
+    pg_cursor.execute(
+        """
         SELECT table_name
         FROM public.ducklake_table
         WHERE table_name = 'manual_table'
-    """)
+    """
+    )
     view_result = pg_cursor.fetchone()
     assert view_result is not None, "Table should appear in ducklake_table view"
 
@@ -314,25 +333,31 @@ def test_snapshot_creation_workflow(pg_cursor):
     Test the snapshot creation workflow for DuckLake tables.
     """
     # Create a snapshot for a table modification
-    pg_cursor.execute("""
+    pg_cursor.execute(
+        """
         INSERT INTO lake_ducklake.snapshot
         (snapshot_id, schema_version, next_catalog_id, next_file_id)
         VALUES (200, 0, 101, 1)
-    """)
+    """
+    )
 
     # Add snapshot changes metadata
-    pg_cursor.execute("""
+    pg_cursor.execute(
+        """
         INSERT INTO lake_ducklake.snapshot_changes
         (snapshot_id, changes_made, author)
         VALUES (200, 'INSERT', 'test_user')
-    """)
+    """
+    )
     pg_cursor.connection.commit()
 
     # Verify snapshot query works
-    pg_cursor.execute("""
+    pg_cursor.execute(
+        """
         SELECT * FROM lake_ducklake.snapshots('test_catalog')
         WHERE snapshot_id = 200
-    """)
+    """
+    )
     result = pg_cursor.fetchone()
     assert result is not None
     assert result[0] == 200  # snapshot_id
@@ -377,8 +402,7 @@ def test_pg_select_after_duckdb_delete(pg_cursor, s3):
         f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
     )
     duck.execute(
-        f"ATTACH 'postgres:{conn}' AS dl "
-        f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
+        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
     )
 
     duck.execute("DELETE FROM dl.public.duck_delete WHERE x = 2")
@@ -386,9 +410,10 @@ def test_pg_select_after_duckdb_delete(pg_cursor, s3):
     pg_cursor.connection.commit()
     pg_cursor.execute("SELECT x, y FROM duck_delete ORDER BY x")
     rows = pg_cursor.fetchall()
-    assert rows == [(1, 7), (3, 7)], (
-        f"DuckDB DELETE x=2 should be visible on PG side, got {rows}"
-    )
+    assert rows == [
+        (1, 7),
+        (3, 7),
+    ], f"DuckDB DELETE x=2 should be visible on PG side, got {rows}"
 
 
 @pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="DuckDB not installed")
@@ -427,8 +452,7 @@ def test_pg_select_after_duckdb_insert_and_delete(pg_cursor, s3):
         f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
     )
     duck.execute(
-        f"ATTACH 'postgres:{conn}' AS dl "
-        f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
+        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
     )
 
     duck.execute("INSERT INTO dl.public.duck_ins_del VALUES (1, 7), (2, 7), (3, 7)")
@@ -436,9 +460,10 @@ def test_pg_select_after_duckdb_insert_and_delete(pg_cursor, s3):
 
     pg_cursor.execute("SELECT x, y FROM duck_ins_del ORDER BY x")
     rows = pg_cursor.fetchall()
-    assert rows == [(1, 7), (3, 7)], (
-        f"DuckDB INSERT+DELETE must be applied on PG side, got {rows}"
-    )
+    assert rows == [
+        (1, 7),
+        (3, 7),
+    ], f"DuckDB INSERT+DELETE must be applied on PG side, got {rows}"
 
 
 @pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="DuckDB not installed")
@@ -478,8 +503,7 @@ def test_pg_select_after_duckdb_delete_many(pg_cursor, s3):
         f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
     )
     duck.execute(
-        f"ATTACH 'postgres:{conn}' AS dl "
-        f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
+        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
     )
 
     duck.execute("DELETE FROM dl.public.duck_del_many WHERE x = 17")
@@ -535,16 +559,16 @@ def test_duckdb_reads_pg_added_column(pg_cursor, s3):
         f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
     )
     duck.execute(
-        f"ATTACH 'postgres:{conn}' AS dl "
-        f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
+        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
     )
 
     rows = duck.execute(
         "SELECT x, y, z FROM dl.public.duck_alter_add ORDER BY x"
     ).fetchall()
-    assert rows == [(1, 4, None), (2, 4, 5)], (
-        f"DuckDB must see z=5 for the row pg_lake INSERTed after ALTER, got {rows}"
-    )
+    assert rows == [
+        (1, 4, None),
+        (2, 4, 5),
+    ], f"DuckDB must see z=5 for the row pg_lake inserted after ALTER, got {rows}"
 
 
 @pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="DuckDB not installed")
@@ -589,13 +613,13 @@ def test_pg_rename_table_propagates(pg_cursor, s3):
     versions = pg_cursor.fetchall()
     assert len(versions) == 2, versions
     # Old version: end_snapshot is the new snapshot id (not NULL).
-    assert versions[0][1] is not None and versions[0][2] == 'pg_rename_old', versions
+    assert versions[0][1] is not None and versions[0][2] == "pg_rename_old", versions
     # New version: end_snapshot NULL, name updated.
-    assert versions[1][1] is None and versions[1][2] == 'pg_rename_new', versions
+    assert versions[1][1] is None and versions[1][2] == "pg_rename_new", versions
 
     # Data is still readable through PG under the new name.
     pg_cursor.execute("SELECT id, label FROM pg_rename_new ORDER BY id")
-    assert pg_cursor.fetchall() == [(1, 'a'), (2, 'b')]
+    assert pg_cursor.fetchall() == [(1, "a"), (2, "b")]
 
     # And DuckDB sees the new name too.
     duck = duckdb.connect()
@@ -616,13 +640,12 @@ def test_pg_rename_table_propagates(pg_cursor, s3):
         f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
     )
     duck.execute(
-        f"ATTACH 'postgres:{conn}' AS dl "
-        f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
+        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
     )
     rows = duck.execute(
         "SELECT id, label FROM dl.public.pg_rename_new ORDER BY id"
     ).fetchall()
-    assert rows == [(1, 'a'), (2, 'b')], rows
+    assert rows == [(1, "a"), (2, "b")], rows
 
 
 @pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="DuckDB not installed")
@@ -664,8 +687,7 @@ def test_duckdb_rename_table_no_pk_violation(pg_cursor, s3):
         f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
     )
     duck.execute(
-        f"ATTACH 'postgres:{conn}' AS dl "
-        f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
+        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
     )
 
     duck.execute("ALTER TABLE dl.public.duck_rename_old RENAME TO duck_rename_new")
@@ -689,19 +711,19 @@ def test_duckdb_rename_table_no_pk_violation(pg_cursor, s3):
     pg_cursor.execute(
         "SELECT 1 FROM pg_class WHERE relname = 'duck_rename_new' AND relkind = 'f'"
     )
-    assert pg_cursor.fetchone() is not None, (
-        "pg_class should have been renamed by the replay trigger"
-    )
+    assert (
+        pg_cursor.fetchone() is not None
+    ), "pg_class should have been renamed by the replay trigger"
     pg_cursor.execute(
         "SELECT 1 FROM pg_class WHERE relname = 'duck_rename_old' AND relkind = 'f'"
     )
-    assert pg_cursor.fetchone() is None, (
-        "old pg_class entry should be gone after replay"
-    )
+    assert (
+        pg_cursor.fetchone() is None
+    ), "old pg_class entry should be gone after replay"
 
     pg_cursor.execute("SELECT id, label FROM duck_rename_new ORDER BY id")
     rows = pg_cursor.fetchall()
-    assert rows == [(1, 'a')], rows
+    assert rows == [(1, "a")], rows
     # Commit so pg_cursor releases its AccessShare lock on the foreign
     # table; otherwise the next DuckDB-side rename's in-trigger ALTER
     # FOREIGN TABLE blocks waiting for AccessExclusive.
@@ -732,7 +754,7 @@ def test_duckdb_rename_table_no_pk_violation(pg_cursor, s3):
     assert pg_cursor.fetchone() is not None
     pg_cursor.execute("SELECT id, label FROM duck_rename_old ORDER BY id")
     rows = pg_cursor.fetchall()
-    assert rows == [(1, 'a')], rows
+    assert rows == [(1, "a")], rows
 
 
 @pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="DuckDB not installed")
@@ -773,8 +795,7 @@ def test_duckdb_drop_table_propagates(pg_cursor, s3):
         f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
     )
     duck.execute(
-        f"ATTACH 'postgres:{conn}' AS dl "
-        f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
+        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
     )
 
     duck.execute("DROP TABLE dl.public.duck_drop")
@@ -795,9 +816,9 @@ def test_duckdb_drop_table_propagates(pg_cursor, s3):
     pg_cursor.execute(
         "SELECT 1 FROM pg_class WHERE relname = 'duck_drop' AND relkind = 'f'"
     )
-    assert pg_cursor.fetchone() is None, (
-        "pg_class entry should have been dropped by the replay trigger"
-    )
+    assert (
+        pg_cursor.fetchone() is None
+    ), "pg_class entry should have been dropped by the replay trigger"
 
 
 @pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="DuckDB not installed")
@@ -837,8 +858,7 @@ def test_duckdb_alter_columns_propagate(pg_cursor, s3):
         f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
     )
     duck.execute(
-        f"ATTACH 'postgres:{conn}' AS dl "
-        f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
+        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
     )
 
     # ADD COLUMN c INT
@@ -852,7 +872,7 @@ def test_duckdb_alter_columns_propagate(pg_cursor, s3):
          ORDER BY attnum
         """
     )
-    assert [r[0] for r in pg_cursor.fetchall()] == ['a', 'b', 'c']
+    assert [r[0] for r in pg_cursor.fetchall()] == ["a", "b", "c"]
 
     # RENAME COLUMN b -> bb
     duck.execute("ALTER TABLE dl.public.duck_alter_cols RENAME COLUMN b TO bb")
@@ -865,7 +885,7 @@ def test_duckdb_alter_columns_propagate(pg_cursor, s3):
          ORDER BY attnum
         """
     )
-    assert [r[0] for r in pg_cursor.fetchall()] == ['a', 'bb', 'c']
+    assert [r[0] for r in pg_cursor.fetchall()] == ["a", "bb", "c"]
 
     # DROP COLUMN a
     duck.execute("ALTER TABLE dl.public.duck_alter_cols DROP COLUMN a")
@@ -878,7 +898,7 @@ def test_duckdb_alter_columns_propagate(pg_cursor, s3):
          ORDER BY attnum
         """
     )
-    assert [r[0] for r in pg_cursor.fetchall()] == ['bb', 'c']
+    assert [r[0] for r in pg_cursor.fetchall()] == ["bb", "c"]
 
 
 @pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="DuckDB not installed")
@@ -919,8 +939,7 @@ def test_pg_drop_then_duckdb_readd_column_returns_null(pg_cursor, s3):
         f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
     )
     duck.execute(
-        f"ATTACH 'postgres:{conn}' AS dl "
-        f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
+        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
     )
 
     duck.execute("ALTER TABLE dl.public.drop_readd ADD COLUMN val TEXT")
@@ -928,9 +947,10 @@ def test_pg_drop_then_duckdb_readd_column_returns_null(pg_cursor, s3):
     pg_cursor.connection.commit()
     pg_cursor.execute("SELECT id, val FROM drop_readd ORDER BY id")
     rows = pg_cursor.fetchall()
-    assert rows == [(1, None), (2, None)], (
-        f"after PG DROP + DuckDB re-ADD, val must be NULL; got {rows}"
-    )
+    assert rows == [
+        (1, None),
+        (2, None),
+    ], f"after PG DROP + DuckDB re-ADD, val must be NULL; got {rows}"
 
 
 def test_default_location_prefix_makes_paths_relative(pg_cursor, s3):
@@ -1038,13 +1058,10 @@ def test_default_location_prefix_duckdb_interop(pg_cursor, s3):
         f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
     )
     duck.execute(
-        f"ATTACH 'postgres:{conn}' AS dl "
-        f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
+        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
     )
 
-    rows = duck.execute(
-        "SELECT id, val FROM dl.public.rp2_duck ORDER BY id"
-    ).fetchall()
+    rows = duck.execute("SELECT id, val FROM dl.public.rp2_duck ORDER BY id").fetchall()
     assert rows == [(1, "x"), (2, "y")], rows
 
 
@@ -1090,7 +1107,9 @@ def test_pg_schema_rename_propagates(pg_cursor, s3):
         "WHERE schema_id = %s AND schema_name = 'rs_old' AND end_snapshot IS NOT NULL",
         (schema_id_before,),
     )
-    assert pg_cursor.fetchone()[0] == 1, "old schema-version row must be end-snapshotted"
+    assert (
+        pg_cursor.fetchone()[0] == 1
+    ), "old schema-version row must be end-snapshotted"
 
     pg_cursor.execute("SELECT id FROM rs_new.t ORDER BY id")
     assert pg_cursor.fetchall() == [(1,), (2,)]
@@ -1123,10 +1142,12 @@ def test_duckdb_merge_adjacent_then_pg_reads(pg_cursor, s3):
 
     pg_cursor.execute(
         "SELECT count(*) FROM lake_ducklake.data_file df "
-        "JOIN lake_ducklake.\"table\" t USING (table_id) "
+        'JOIN lake_ducklake."table" t USING (table_id) '
         "WHERE t.table_name = 'duck_compact' AND df.end_snapshot IS NULL"
     )
-    assert pg_cursor.fetchone()[0] == 2, "expected two live data files before compaction"
+    assert (
+        pg_cursor.fetchone()[0] == 2
+    ), "expected two live data files before compaction"
 
     duck = duckdb.connect()
     duck.execute("INSTALL postgres")
@@ -1146,8 +1167,7 @@ def test_duckdb_merge_adjacent_then_pg_reads(pg_cursor, s3):
         f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
     )
     duck.execute(
-        f"ATTACH 'postgres:{conn}' AS dl "
-        f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
+        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
     )
 
     duck.execute("CALL ducklake_merge_adjacent_files('dl')")
@@ -1156,7 +1176,7 @@ def test_duckdb_merge_adjacent_then_pg_reads(pg_cursor, s3):
 
     pg_cursor.execute(
         "SELECT count(*) FROM lake_ducklake.data_file df "
-        "JOIN lake_ducklake.\"table\" t USING (table_id) "
+        'JOIN lake_ducklake."table" t USING (table_id) '
         "WHERE t.table_name = 'duck_compact' AND df.end_snapshot IS NULL"
     )
     live_after = pg_cursor.fetchone()[0]
@@ -1223,7 +1243,7 @@ def test_fresh_pg_session_sees_duckdb_writes(pg_cursor, s3):
     try:
         cur = fresh.cursor()
         cur.execute("SELECT id, label FROM duck_xsession ORDER BY id")
-        assert cur.fetchall() == [(1, 'a'), (3, 'c')]
+        assert cur.fetchall() == [(1, "a"), (3, "c")]
     finally:
         fresh.close()
 

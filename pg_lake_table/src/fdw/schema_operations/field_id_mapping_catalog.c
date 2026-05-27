@@ -582,10 +582,10 @@ GetLeafFieldsForDucklakeTable(Oid relationId)
 	tupdesc = RelationGetDescr(rel);
 
 	/*
-	 * Build a per-attnum lookup of column_id from lake_ducklake.column
-	 * for the live (end_snapshot IS NULL) rows of this table, so the
-	 * per-attribute loop below can resolve fieldId without an SPI call
-	 * per column.
+	 * Build a per-attnum lookup of column_id from lake_ducklake.column for
+	 * the live (end_snapshot IS NULL) rows of this table, so the
+	 * per-attribute loop below can resolve fieldId without an SPI call per
+	 * column.
 	 */
 	int			maxAttnum = 0;
 
@@ -600,10 +600,9 @@ GetLeafFieldsForDucklakeTable(Oid relationId)
 	int64	   *columnIdsByAttnum = NULL;
 
 	/*
-	 * SPI requires an active snapshot, but this function is reachable
-	 * from query-planning paths (e.g. data file pruning) where the
-	 * planner has not yet pushed a snapshot. Push one if missing and
-	 * pop it on the way out.
+	 * SPI requires an active snapshot, but this function is reachable from
+	 * query-planning paths (e.g. data file pruning) where the planner has not
+	 * yet pushed a snapshot. Push one if missing and pop it on the way out.
 	 */
 	bool		pushedSnapshot = false;
 
@@ -640,15 +639,15 @@ GetLeafFieldsForDucklakeTable(Oid relationId)
 				{
 					bool		isnull;
 					int64		colOrder = DatumGetInt64(SPI_getbinval(
-											SPI_tuptable->vals[row],
-											SPI_tuptable->tupdesc, 1, &isnull));
+																	   SPI_tuptable->vals[row],
+																	   SPI_tuptable->tupdesc, 1, &isnull));
 
 					if (isnull || colOrder <= 0 || colOrder > maxAttnum)
 						continue;
 
 					int64		colId = DatumGetInt64(SPI_getbinval(
-											SPI_tuptable->vals[row],
-											SPI_tuptable->tupdesc, 2, &isnull));
+																	SPI_tuptable->vals[row],
+																	SPI_tuptable->tupdesc, 2, &isnull));
 
 					if (!isnull)
 						columnIdsByAttnum[colOrder] = colId;
@@ -681,13 +680,13 @@ GetLeafFieldsForDucklakeTable(Oid relationId)
 		PGType		pgType = MakePGType(attr->atttypid, attr->atttypmod);
 
 		/*
-		 * Use column_id from lake_ducklake.column when known; fall back
-		 * to attnum to keep the read path working when the catalog row
-		 * isn't yet visible.
+		 * Use column_id from lake_ducklake.column when known; fall back to
+		 * attnum to keep the read path working when the catalog row isn't yet
+		 * visible.
 		 */
 		int64		columnId = (columnIdsByAttnum != NULL && attr->attnum <= maxAttnum)
-									? columnIdsByAttnum[attr->attnum]
-									: 0;
+			? columnIdsByAttnum[attr->attnum]
+			: 0;
 		int			fieldId = (columnId > 0) ? (int) columnId : attr->attnum;
 
 		bool		forAddColumn = false;

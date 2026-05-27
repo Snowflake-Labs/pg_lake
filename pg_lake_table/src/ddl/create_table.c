@@ -203,9 +203,9 @@ CreateDucklakeTablePostProcess(ProcessUtilityParams * params, void *arg)
 	int64		tableId = DucklakeRegisterTable(schemaName, tableName, location, relationId);
 
 	/*
-	 * Honour the partition_by FDW option: parse via the existing
-	 * Iceberg partition-spec parser (the parser only reads pg_attribute
-	 * + the option string, so it works for any relation), then write
+	 * Honour the partition_by FDW option: parse via the existing Iceberg
+	 * partition-spec parser (the parser only reads pg_attribute + the option
+	 * string, so it works for any relation), then write
 	 * lake_ducklake.partition_info / partition_column rows.
 	 */
 	DefElem    *partitionByOpt = GetOption(createStmt->options, "partition_by");
@@ -615,7 +615,8 @@ ProcessCreatePgLakeTable(ProcessUtilityParams * params, void *arg)
 	}
 	else if (IsA(plannedStmt->utilityStmt, CreateStmt))
 	{
-		bool processed = ProcessCreateIcebergTableFromCreateStmt(params);
+		bool		processed = ProcessCreateIcebergTableFromCreateStmt(params);
+
 		if (processed)
 			return true;
 
@@ -1952,6 +1953,7 @@ ProcessCreateDucklakeTableFromCreateStmt(ProcessUtilityParams * params)
 
 	/* Convert to foreign table statement */
 	CreateForeignTableStmt *foreignTableStmt = makeNode(CreateForeignTableStmt);
+
 	foreignTableStmt->servername = PG_LAKE_DUCKLAKE_SERVER_NAME;
 	foreignTableStmt->options = createStmt->options;
 	foreignTableStmt->base = *createStmt;
@@ -2002,9 +2004,10 @@ ProcessCreateDucklakeTableFromForeignTableStmt(ProcessUtilityParams * params)
 	}
 
 	/*
-	 * If the user didn't specify location and pg_lake_ducklake.default_location_prefix
-	 * is set, synthesize '<prefix>/<schema>/<table>/' so the catalog can
-	 * store schema.path and table.path relative to the prefix.
+	 * If the user didn't specify location and
+	 * pg_lake_ducklake.default_location_prefix is set, synthesize
+	 * '<prefix>/<schema>/<table>/' so the catalog can store schema.path and
+	 * table.path relative to the prefix.
 	 */
 	DefElem    *locationOption = GetOption(createStmt->options, "location");
 
@@ -2040,4 +2043,3 @@ ProcessCreateDucklakeTableFromForeignTableStmt(ProcessUtilityParams * params)
 	/* Calling PgLakeCommonProcessUtility here would cause infinite recursion */
 	return false;
 }
-

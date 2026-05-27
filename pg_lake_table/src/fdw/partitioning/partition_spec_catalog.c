@@ -94,9 +94,9 @@ GetCurrentSpecId(Oid relationId)
 	/*
 	 * DuckLake stores the live partition spec in lake_ducklake.partition_info
 	 * (versioned by begin_snapshot/end_snapshot). The spec_id concept maps
-	 * onto partition_id, so we return that directly. lake_iceberg.tables_internal
-	 * isn't populated for DuckLake tables, so the Iceberg branch below would
-	 * always return DEFAULT_SPEC_ID.
+	 * onto partition_id, so we return that directly.
+	 * lake_iceberg.tables_internal isn't populated for DuckLake tables, so
+	 * the Iceberg branch below would always return DEFAULT_SPEC_ID.
 	 */
 	if (IsDucklakeTable(relationId))
 	{
@@ -122,8 +122,8 @@ GetCurrentSpecId(Oid relationId)
 			bool		isnull;
 
 			currentSpecId = (int) DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
-															   SPI_tuptable->tupdesc,
-															   1, &isnull));
+															  SPI_tuptable->tupdesc,
+															  1, &isnull));
 		}
 		SPI_finish();
 

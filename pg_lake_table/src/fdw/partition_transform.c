@@ -186,7 +186,7 @@ PartitionTransformsEqual(IcebergPartitionSpec * spec, List *partitionTransforms)
  * If `currentOnly` is true, only the live partition spec is returned;
  * otherwise all (versioned) partition rows for this table are
  * returned. Today DuckLake doesn't allow partition spec evolution, so
- * the two are equivalent — but we keep the parameter to mirror the
+ * the two are equivalent -- but we keep the parameter to mirror the
  * Iceberg pair (CurrentPartitionTransformList vs
  * AllPartitionTransformList).
  */
@@ -200,8 +200,8 @@ DucklakePartitionTransformList(Oid relationId, bool currentOnly)
 		return NIL;
 
 	/*
-	 * Build the field schema once so each transform's `sourceField`
-	 * lookup hits an in-memory array instead of re-reading the catalog.
+	 * Build the field schema once so each transform's `sourceField` lookup
+	 * hits an in-memory array instead of re-reading the catalog.
 	 */
 	DataFileSchema *schema = DucklakeBuildDataFileSchema(relationId);
 
@@ -491,7 +491,7 @@ ParseTransformName(const char *name,
  * ParseBracketUintSize parses a string of the form "prefix[digits]"
  * or "prefix(digits)" and returns the numeric size. The square-bracket
  * form is what Iceberg writes; the paren form is what DuckLake writes
- * — accept both so reads stay catalog-agnostic.
+ * -- accept both so reads stay catalog-agnostic.
  */
 static bool
 ParseBracketUintSize(const char *name, const char *prefix, size_t *outVal)

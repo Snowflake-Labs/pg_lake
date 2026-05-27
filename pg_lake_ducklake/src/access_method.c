@@ -5,7 +5,7 @@
  * Placeholder access-method handler for the "pg_lake_ducklake" / "ducklake"
  * table access methods. The handler must exist as a SQL-callable C function
  * because CREATE ACCESS METHOD requires it, but the code path that would
- * use a real table_am_handler is never taken — DuckLake tables are foreign
+ * use a real table_am_handler is never taken -- DuckLake tables are foreign
  * tables managed by the pg_lake_table FDW. Calling this would mean
  * something tried to use the AM as a heap-style storage engine, which we
  * explicitly reject.

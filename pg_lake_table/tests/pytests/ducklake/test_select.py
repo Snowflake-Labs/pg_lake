@@ -270,7 +270,9 @@ def test_select_with_joins(s3, pg_conn, extension):
     assert result[0] == ["Alice", 2, 250.0]
     assert result[1] == ["Bob", 1, 200.0]
 
-    run_command("DROP FOREIGN TABLE test_ducklake_orders, test_ducklake_customers", pg_conn)
+    run_command(
+        "DROP FOREIGN TABLE test_ducklake_orders, test_ducklake_customers", pg_conn
+    )
     pg_conn.rollback()
 
 

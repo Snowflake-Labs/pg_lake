@@ -157,7 +157,10 @@ def test_drop_multiple_tables(s3, pg_conn, extension):
     assert len(table_ids) == 2
 
     # Drop both tables
-    run_command("DROP FOREIGN TABLE test_ducklake_drop_multi1, test_ducklake_drop_multi2", pg_conn)
+    run_command(
+        "DROP FOREIGN TABLE test_ducklake_drop_multi1, test_ducklake_drop_multi2",
+        pg_conn,
+    )
     pg_conn.commit()
 
     # Verify both tables are marked as ended

@@ -1376,7 +1376,10 @@ ApplyMetadataChanges(Oid relationId, List *metadataOperations)
 			{
 				ApplyDataFileCatalogChanges(relationId, metadataOperations);
 
-				/* Track DuckLake metadata changes for commit-time snapshot creation */
+				/*
+				 * Track DuckLake metadata changes for commit-time snapshot
+				 * creation
+				 */
 				List	   *operationTypes = GetMetadataOperationTypes(metadataOperations);
 
 				TrackDucklakeMetadataChangesInTx(relationId, operationTypes);

@@ -346,14 +346,13 @@ ProcessAlterTable(ProcessUtilityParams * processUtilityParams, void *arg)
 	ApplyDDLChanges(relationId, schemaDDLOperations);
 
 	/*
-	 * Handle DuckLake ALTER TABLE operations.
-	 * Update lake_ducklake.column table for ADD/DROP COLUMN.
+	 * Handle DuckLake ALTER TABLE operations. Update lake_ducklake.column
+	 * table for ADD/DROP COLUMN.
 	 *
-	 * Skipped when pg_lake_ducklake.in_ddl_replay = on: that
-	 * means we got here because the snapshot_changes-based
-	 * replay trigger fired ALTER FOREIGN TABLE … ADD/DROP COLUMN
-	 * to bring pg_attribute into sync after a DuckDB-side
-	 * column ALTER, and the catalog is already up to date.
+	 * Skipped when pg_lake_ducklake.in_ddl_replay = on: that means we got
+	 * here because the snapshot_changes-based replay trigger fired ALTER
+	 * FOREIGN TABLE … ADD/DROP COLUMN to bring pg_attribute into sync after
+	 * a DuckDB-side column ALTER, and the catalog is already up to date.
 	 */
 	if (isDucklakeTable)
 	{
@@ -696,15 +695,14 @@ PostProcessRenameWritablePgLakeTable(ProcessUtilityParams * params, void *arg)
 	{
 		/*
 		 * Propagate to the DuckLake catalog. DucklakeRenameSchema
-		 * end-snapshots the old schema row and inserts a new one
-		 * reusing the same schema_id with the new name. It is a
-		 * no-op (with a WARNING) when the schema isn't tracked by
-		 * DuckLake, so we don't have to scan pg_class to decide.
+		 * end-snapshots the old schema row and inserts a new one reusing the
+		 * same schema_id with the new name. It is a no-op (with a WARNING)
+		 * when the schema isn't tracked by DuckLake, so we don't have to scan
+		 * pg_class to decide.
 		 *
-		 * Skip during DDL replay: an inbound DuckDB-driven rename
-		 * would have already updated lake_ducklake.schema, and the
-		 * ALTER SCHEMA we issue from the replay path would otherwise
-		 * insert a second version row.
+		 * Skip during DDL replay: an inbound DuckDB-driven rename would have
+		 * already updated lake_ducklake.schema, and the ALTER SCHEMA we issue
+		 * from the replay path would otherwise insert a second version row.
 		 */
 		if (!DucklakeInDDLReplay && renameStmt->subname != NULL)
 			DucklakeRenameSchema(renameStmt->subname, renameStmt->newname);
@@ -773,13 +771,12 @@ PostProcessRenameWritablePgLakeTable(ProcessUtilityParams * params, void *arg)
 	}
 
 	/*
-	 * Handle DuckLake table column renames.
-	 * Update the column name in lake_ducklake.column table.
+	 * Handle DuckLake table column renames. Update the column name in
+	 * lake_ducklake.column table.
 	 *
-	 * Skip when in_ddl_replay is on (we're applying a DuckDB-side
-	 * RENAME COLUMN to pg_attribute and the catalog is already in
-	 * sync; calling DucklakeRenameColumn here would create a duplicate
-	 * version row).
+	 * Skip when in_ddl_replay is on (we're applying a DuckDB-side RENAME
+	 * COLUMN to pg_attribute and the catalog is already in sync; calling
+	 * DucklakeRenameColumn here would create a duplicate version row).
 	 */
 	if (isDucklakeTable && renameStmt->renameType == OBJECT_COLUMN)
 	{
@@ -789,19 +786,18 @@ PostProcessRenameWritablePgLakeTable(ProcessUtilityParams * params, void *arg)
 
 	/*
 	 * Handle DuckLake table renames. For OBJECT_TABLE / OBJECT_FOREIGN_TABLE
-	 * the OLD name lives on renameStmt->relation->relname (subname is
-	 * NULL for table renames); newname is the target. namespaceId is the
-	 * resolved schema of the target relation, which doesn't change on a
-	 * plain RENAME, so pass its name explicitly because by the time this
-	 * hook fires PostgreSQL has already renamed pg_class so a name-based
-	 * lookup via the relation OID would miss the old catalog row.
+	 * the OLD name lives on renameStmt->relation->relname (subname is NULL
+	 * for table renames); newname is the target. namespaceId is the resolved
+	 * schema of the target relation, which doesn't change on a plain RENAME,
+	 * so pass its name explicitly because by the time this hook fires
+	 * PostgreSQL has already renamed pg_class so a name-based lookup via the
+	 * relation OID would miss the old catalog row.
 	 *
-	 * We skip this when pg_lake_ducklake.in_ddl_replay is on: that
-	 * means we got here because the ducklake_table_insert trigger
-	 * issued ALTER FOREIGN TABLE … RENAME TO … to propagate a
-	 * DuckDB-driven rename, and the catalog already has the new
-	 * version row. Re-applying the rename here would insert a second
-	 * one and bump the snapshot for nothing.
+	 * We skip this when pg_lake_ducklake.in_ddl_replay is on: that means we
+	 * got here because the ducklake_table_insert trigger issued ALTER FOREIGN
+	 * TABLE … RENAME TO … to propagate a DuckDB-driven rename, and the
+	 * catalog already has the new version row. Re-applying the rename here
+	 * would insert a second one and bump the snapshot for nothing.
 	 */
 	if (isDucklakeTable &&
 		(renameStmt->renameType == OBJECT_TABLE ||

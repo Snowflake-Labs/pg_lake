@@ -429,11 +429,11 @@ AddFieldIdsUsedInQuery(HTAB *fieldIdsUsedInQuery, Oid relationId, PgLakeTablePro
 	else if (IsDucklakeTable(relationId))
 	{
 		/*
-		 * DuckLake doesn't populate lake_table.field_id_mapping; resolve
-		 * each attnum through the per-relation DataFileSchema instead, which
-		 * reads lake_ducklake.column. The fields list must be in the same
-		 * order as columnsUsedInFilters so the columnIndex loop below stays
-		 * in lockstep.
+		 * DuckLake doesn't populate lake_table.field_id_mapping; resolve each
+		 * attnum through the per-relation DataFileSchema instead, which reads
+		 * lake_ducklake.column. The fields list must be in the same order as
+		 * columnsUsedInFilters so the columnIndex loop below stays in
+		 * lockstep.
 		 */
 		DataFileSchema *schema = DucklakeBuildDataFileSchema(relationId);
 		ListCell   *attrCell;

@@ -41,7 +41,7 @@ static void DucklakeTransactionCallback(XactEvent event, void *arg);
  * TrackDucklakeTableDataFileAddition tracks a data file addition for commit time
  */
 void
-TrackDucklakeTableDataFileAddition(Oid relationId, TableDataFile *dataFile)
+TrackDucklakeTableDataFileAddition(Oid relationId, TableDataFile * dataFile)
 {
 	MemoryContext oldcontext;
 
@@ -182,10 +182,11 @@ ApplyTrackedDucklakeChanges(void)
 		return;
 
 	/*
-	 * Push an active snapshot for SPI operations in catalog functions.
-	 * During transaction commit, there may not be an active snapshot.
+	 * Push an active snapshot for SPI operations in catalog functions. During
+	 * transaction commit, there may not be an active snapshot.
 	 */
 	bool		pushedSnapshot = false;
+
 	if (!ActiveSnapshotSet())
 	{
 		PushActiveSnapshot(GetTransactionSnapshot());
@@ -213,9 +214,9 @@ ApplyTrackedDucklakeChanges(void)
 
 		/* Create a new snapshot */
 		DucklakeSnapshot *newSnapshot = DucklakeCreateSnapshot(
-			"INSERT/UPDATE/DELETE operation",
-			GetUserNameFromId(GetUserId(), false),
-			NULL);
+															   "INSERT/UPDATE/DELETE operation",
+															   GetUserNameFromId(GetUserId(), false),
+															   NULL);
 
 		/* Add new data files */
 		ListCell   *cell;
@@ -229,7 +230,8 @@ ApplyTrackedDucklakeChanges(void)
 								dataFile->stats.rowCount,
 								dataFile->stats.fileSize,
 								0,	/* rowIdStart */
-								-1);	/* partitionId — track_changes is unpartitioned */
+								-1);	/* partitionId -- track_changes is
+										 * unpartitioned */
 		}
 
 		/* Mark removed files */

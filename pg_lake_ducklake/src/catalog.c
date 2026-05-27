@@ -98,7 +98,7 @@ ResolveAbsoluteTablePath(const char *dataPath,
 DucklakeSnapshot *
 DucklakeGetCurrentSnapshot(void)
 {
-	int ret;
+	int			ret;
 	DucklakeSnapshot *snapshot;
 
 	SPI_connect();
@@ -110,17 +110,17 @@ DucklakeGetCurrentSnapshot(void)
 		elog(ERROR, "Failed to get current snapshot");
 
 	/* Extract values while SPI context is still active */
-	bool isnull;
-	int64 snapshotId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
-													   SPI_tuptable->tupdesc, 1, &isnull));
+	bool		isnull;
+	int64		snapshotId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+														 SPI_tuptable->tupdesc, 1, &isnull));
 	TimestampTz snapshotTime = DatumGetTimestampTz(SPI_getbinval(SPI_tuptable->vals[0],
-															   SPI_tuptable->tupdesc, 2, &isnull));
-	int64 schemaVersion = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
-														  SPI_tuptable->tupdesc, 3, &isnull));
-	int64 nextCatalogId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
-														  SPI_tuptable->tupdesc, 4, &isnull));
-	int64 nextFileId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
-													   SPI_tuptable->tupdesc, 5, &isnull));
+																 SPI_tuptable->tupdesc, 2, &isnull));
+	int64		schemaVersion = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+															SPI_tuptable->tupdesc, 3, &isnull));
+	int64		nextCatalogId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+															SPI_tuptable->tupdesc, 4, &isnull));
+	int64		nextFileId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+														 SPI_tuptable->tupdesc, 5, &isnull));
 
 	SPI_finish();
 
@@ -141,7 +141,7 @@ DucklakeCreateSnapshot(const char *changesMade, const char *author, const char *
 	DucklakeSnapshot *currentSnapshot = DucklakeGetCurrentSnapshot();
 	DucklakeSnapshot *newSnapshot;
 	StringInfoData query;
-	int ret;
+	int			ret;
 
 	initStringInfo(&query);
 	appendStringInfo(&query,
@@ -159,13 +159,13 @@ DucklakeCreateSnapshot(const char *changesMade, const char *author, const char *
 		elog(ERROR, "Failed to create snapshot");
 
 	/* Extract snapshot ID while SPI context is still active */
-	bool isnull;
-	int64 newSnapshotId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
-														  SPI_tuptable->tupdesc, 1, &isnull));
+	bool		isnull;
+	int64		newSnapshotId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+															SPI_tuptable->tupdesc, 1, &isnull));
 
 	/*
 	 * Record the change in snapshot_changes. Required by DuckLake v1 spec for
-	 * any snapshot beyond the initial one — DuckDB's ducklake extension uses
+	 * any snapshot beyond the initial one -- DuckDB's ducklake extension uses
 	 * this row to surface a description of what each snapshot changed.
 	 */
 	resetStringInfo(&query);
@@ -195,7 +195,8 @@ int64
 DucklakeGetNextCatalogId(void)
 {
 	DucklakeSnapshot *snapshot = DucklakeGetCurrentSnapshot();
-	int64 nextId = snapshot->nextCatalogId;
+	int64		nextId = snapshot->nextCatalogId;
+
 	pfree(snapshot);
 	return nextId;
 }
@@ -204,7 +205,8 @@ int64
 DucklakeGetNextFileId(void)
 {
 	DucklakeSnapshot *snapshot = DucklakeGetCurrentSnapshot();
-	int64 nextId = snapshot->nextFileId;
+	int64		nextId = snapshot->nextFileId;
+
 	pfree(snapshot);
 	return nextId;
 }
@@ -214,8 +216,8 @@ DucklakeRegisterTableColumns(Oid tableOid, int64 tableId)
 {
 	StringInfoData query;
 	DucklakeSnapshot *snapshot;
-	int ret;
-	int64 numColumns;
+	int			ret;
+	int64		numColumns;
 
 	snapshot = DucklakeGetCurrentSnapshot();
 
@@ -236,9 +238,10 @@ DucklakeRegisterTableColumns(Oid tableOid, int64 tableId)
 		elog(ERROR, "Failed to count table columns");
 	}
 
-	bool isnull;
+	bool		isnull;
+
 	numColumns = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
-											  SPI_tuptable->tupdesc, 1, &isnull));
+											 SPI_tuptable->tupdesc, 1, &isnull));
 
 	if (numColumns == 0)
 	{
@@ -247,19 +250,22 @@ DucklakeRegisterTableColumns(Oid tableOid, int64 tableId)
 		return;
 	}
 
-	/* Insert all columns in one query using INSERT...SELECT with generate_series for column_id */
+	/*
+	 * Insert all columns in one query using INSERT...SELECT with
+	 * generate_series for column_id
+	 */
 	resetStringInfo(&query);
 	appendStringInfo(&query,
 					 "INSERT INTO lake_ducklake.column "
 					 "(column_id, begin_snapshot, table_id, column_order, column_name, column_type, nulls_allowed) "
 					 "SELECT "
-					 "  %ld + (ROW_NUMBER() OVER (ORDER BY attnum) - 1), "  /* column_id */
-					 "  %ld, "                                              /* begin_snapshot */
-					 "  %ld, "                                              /* table_id */
-					 "  attnum, "                                           /* column_order */
-					 "  attname, "                                          /* column_name */
-					 "  lake_ducklake.pg_type_to_duckdb_type(format_type(atttypid, atttypmod)), "  /* column_type */
-					 "  NOT attnotnull "                                    /* nulls_allowed */
+					 "  %ld + (ROW_NUMBER() OVER (ORDER BY attnum) - 1), "	/* column_id */
+					 "  %ld, "	/* begin_snapshot */
+					 "  %ld, "	/* table_id */
+					 "  attnum, "	/* column_order */
+					 "  attname, "	/* column_name */
+					 "  lake_ducklake.pg_type_to_duckdb_type(format_type(atttypid, atttypmod)), "	/* column_type */
+					 "  NOT attnotnull "	/* nulls_allowed */
 					 "FROM pg_attribute "
 					 "WHERE attrelid = %u AND attnum > 0 AND NOT attisdropped "
 					 "ORDER BY attnum",
@@ -285,10 +291,11 @@ DucklakeRegisterTableColumns(Oid tableOid, int64 tableId)
 	SPI_exec(query.data, 0);
 
 	/*
-	 * Create column mapping for field ID mapping.
-	 * This is required for DuckDB to map Parquet file columns to table columns.
+	 * Create column mapping for field ID mapping. This is required for DuckDB
+	 * to map Parquet file columns to table columns.
 	 */
-	int64 mappingId = snapshot->nextCatalogId;
+	int64		mappingId = snapshot->nextCatalogId;
+
 	snapshot->nextCatalogId++;
 
 	/* Create column_mapping entry */
@@ -324,13 +331,13 @@ DucklakeRegisterTableColumns(Oid tableOid, int64 tableId)
 	}
 
 	/*
-	 * Capture postgres-side DEFAULTs declared in CREATE TABLE for each
-	 * column with one in pg_attrdef, evaluate it to a scalar via SPI,
-	 * and update lake_ducklake.column.initial_default / default_value /
-	 * default_value_type. Mirrors DucklakeAddColumn — without it, a
-	 * CREATE TABLE foo (col TYPE DEFAULT expr) put no default in our
-	 * metadata, so reads of pre-INSERT parquet (after ALTER widens the
-	 * schema) wouldn't backfill correctly.
+	 * Capture postgres-side defaults declared in CREATE TABLE for each column
+	 * with one in pg_attrdef, evaluate it to a scalar via SPI, and update
+	 * lake_ducklake.column.initial_default / default_value /
+	 * default_value_type. Mirrors DucklakeAddColumn -- without it, a CREATE
+	 * TABLE foo (col TYPE DEFAULT expr) put no default in our metadata, so
+	 * reads of pre-INSERT parquet (after ALTER widens the schema) wouldn't
+	 * backfill correctly.
 	 */
 	{
 		StringInfoData defaultQ;
@@ -354,11 +361,11 @@ DucklakeRegisterTableColumns(Oid tableOid, int64 tableId)
 			{
 				bool		dr_isnull;
 				int32		attnum = DatumGetInt32(SPI_getbinval(
-									SPI_tuptable->vals[i],
-									SPI_tuptable->tupdesc, 1, &dr_isnull));
+																 SPI_tuptable->vals[i],
+																 SPI_tuptable->tupdesc, 1, &dr_isnull));
 				Datum		exprDat = SPI_getbinval(
-									SPI_tuptable->vals[i],
-									SPI_tuptable->tupdesc, 2, &dr_isnull);
+													SPI_tuptable->vals[i],
+													SPI_tuptable->tupdesc, 2, &dr_isnull);
 
 				if (dr_isnull)
 					continue;
@@ -366,8 +373,8 @@ DucklakeRegisterTableColumns(Oid tableOid, int64 tableId)
 				char	   *exprText = TextDatumGetCString(exprDat);
 
 				/*
-				 * Evaluate the expression to a scalar text — same trick
-				 * as DucklakeAddColumn. Save the rowset before the inner
+				 * Evaluate the expression to a scalar text -- same trick as
+				 * DucklakeAddColumn. Save the rowset before the inner
 				 * SPI_exec because SPI_tuptable is shared.
 				 */
 				char	   *defaultExprCopy = pstrdup(exprText);
@@ -408,9 +415,9 @@ DucklakeRegisterTableColumns(Oid tableOid, int64 tableId)
 				SPI_exec(updQ.data, 0);
 
 				/*
-				 * Re-run the lookup query so subsequent iterations see
-				 * the right SPI_tuptable. We have to re-execute the
-				 * outer SELECT every time we burn the rowset.
+				 * Re-run the lookup query so subsequent iterations see the
+				 * right SPI_tuptable. We have to re-execute the outer SELECT
+				 * every time we burn the rowset.
 				 */
 				if (i + 1 < nDefaults)
 				{
@@ -452,22 +459,23 @@ int64
 DucklakeRegisterTable(const char *schemaName, const char *tableName, const char *path, Oid tableOid)
 {
 	StringInfoData query;
-	int64 schemaId, tableId;
-	int ret;
+	int64		schemaId,
+				tableId;
+	int			ret;
 	DucklakeSnapshot *snapshot;
 
 	elog(LOG, "DucklakeRegisterTable called: schema=%s, table=%s, path=%s",
 		 schemaName, tableName, path ? path : "(null)");
 
-	bool isnull;
+	bool		isnull;
 
 	/*
-	 * CREATE FOREIGN TABLE IF NOT EXISTS lets ProcessUtility succeed
-	 * silently when the postgres-side foreign table already exists, but
-	 * our post-process hook still runs and used to call this function
-	 * regardless, leading to duplicate (begin_snapshot, table_name) rows
-	 * in lake_ducklake.table. Short-circuit here when a live row for
-	 * the same (schema_name, table_name) already exists.
+	 * CREATE FOREIGN TABLE IF NOT EXISTS lets ProcessUtility succeed silently
+	 * when the postgres-side foreign table already exists, but our
+	 * post-process hook still runs and used to call this function regardless,
+	 * leading to duplicate (begin_snapshot, table_name) rows in
+	 * lake_ducklake.table. Short-circuit here when a live row for the same
+	 * (schema_name, table_name) already exists.
 	 */
 	{
 		StringInfoData probeQuery;
@@ -511,9 +519,10 @@ DucklakeRegisterTable(const char *schemaName, const char *tableName, const char 
 	initStringInfo(&query);
 
 	/*
-	 * Establish the catalog's data_path. If pg_lake_ducklake.default_location_prefix
-	 * is set and metadata.data_path is unset, seed it now so this CREATE
-	 * TABLE and every subsequent one can store paths relative to it.
+	 * Establish the catalog's data_path. If
+	 * pg_lake_ducklake.default_location_prefix is set and metadata.data_path
+	 * is unset, seed it now so this CREATE TABLE and every subsequent one can
+	 * store paths relative to it.
 	 */
 	if (DucklakeDefaultLocationPrefix != NULL && DucklakeDefaultLocationPrefix[0] != '\0')
 	{
@@ -536,6 +545,7 @@ DucklakeRegisterTable(const char *schemaName, const char *tableName, const char 
 
 	/* Read the (possibly just-seeded) data_path back out. */
 	char	   *dataPath = NULL;
+
 	{
 		resetStringInfo(&query);
 		appendStringInfoString(&query,
@@ -567,11 +577,11 @@ DucklakeRegisterTable(const char *schemaName, const char *tableName, const char 
 	else
 	{
 		/*
-		 * Create new schema. When data_path is set, store the schema's
-		 * own path as '<schema>/' relative so DuckLake-side readers can
-		 * compose the full URL the spec way. When data_path is unset
-		 * (no GUC, mixed-state legacy catalog), fall back to a NULL
-		 * relative path — matches the pre-Phase-2 behaviour.
+		 * Create new schema. When data_path is set, store the schema's own
+		 * path as '<schema>/' relative so DuckLake-side readers can compose
+		 * the full URL the spec way. When data_path is unset (no GUC,
+		 * mixed-state legacy catalog), fall back to a NULL relative path --
+		 * matches the pre-Phase-2 behaviour.
 		 */
 		schemaId = snapshot->nextCatalogId++;
 		resetStringInfo(&query);
@@ -600,10 +610,10 @@ DucklakeRegisterTable(const char *schemaName, const char *tableName, const char 
 	}
 
 	/*
-	 * Normalize the user-provided location to end with '/'. DuckLake's
-	 * file readers concatenate `table.path || data_file.path` without
-	 * inserting a separator, so omitting the trailing slash produces
-	 * URLs like 's3://b/footable/data/x.parquet' on the DuckDB side.
+	 * Normalize the user-provided location to end with '/'. DuckLake's file
+	 * readers concatenate `table.path || data_file.path` without inserting a
+	 * separator, so omitting the trailing slash produces URLs like
+	 * 's3://b/footable/data/x.parquet' on the DuckDB side.
 	 */
 	const char *normalizedPath = path;
 	char	   *pathWithSlash = NULL;
@@ -615,8 +625,8 @@ DucklakeRegisterTable(const char *schemaName, const char *tableName, const char 
 	}
 
 	/*
-	 * Decide whether the table fits the relative shape: if data_path is
-	 * known and the user's normalized location equals
+	 * Decide whether the table fits the relative shape: if data_path is known
+	 * and the user's normalized location equals
 	 * '<data_path><schema>/<table>/', store table.path = '<table>/' with
 	 * path_is_relative=true. Otherwise store the absolute location with
 	 * path_is_relative=false (the legacy / explicit-location flow).
@@ -675,7 +685,7 @@ DucklakeGetTableMetadata(Oid tableOid)
 {
 	StringInfoData query;
 	DucklakeTableMetadata *metadata;
-	int ret;
+	int			ret;
 	char	   *schemaName;
 	char	   *tableName;
 	MemoryContext oldcontext;
@@ -693,15 +703,14 @@ DucklakeGetTableMetadata(Oid tableOid)
 	/*
 	 * Look up the table in DuckLake metadata.
 	 *
-	 * lake_ducklake.table is versioned by (table_id, begin_snapshot),
-	 * and DuckDB's ducklake extension can rename a table without
-	 * touching pg_class. So a strict match on the current PG name may
-	 * miss the live row if it has since been renamed in the catalog
-	 * (the row matching pg_class is then end-snapshotted while the
-	 * live row carries the new name). The query first finds any
-	 * version (live OR historical) for which schema+name match the
-	 * caller's identifiers; the outer SELECT then walks back to the
-	 * current live row of that table_id.
+	 * lake_ducklake.table is versioned by (table_id, begin_snapshot), and
+	 * DuckDB's ducklake extension can rename a table without touching
+	 * pg_class. So a strict match on the current PG name may miss the live
+	 * row if it has since been renamed in the catalog (the row matching
+	 * pg_class is then end-snapshotted while the live row carries the new
+	 * name). The query first finds any version (live OR historical) for which
+	 * schema+name match the caller's identifiers; the outer SELECT then walks
+	 * back to the current live row of that table_id.
 	 */
 	initStringInfo(&query);
 	appendStringInfo(&query,
@@ -735,48 +744,49 @@ DucklakeGetTableMetadata(Oid tableOid)
 	}
 
 	/*
-	 * Switch to caller's memory context before extracting values.
-	 * This ensures that strings duplicated with pstrdup() persist after SPI_finish().
+	 * Switch to caller's memory context before extracting values. This
+	 * ensures that strings duplicated with pstrdup() persist after
+	 * SPI_finish().
 	 */
 	MemoryContextSwitchTo(oldcontext);
 
 	/* Extract all values and duplicate strings in caller's context */
-	bool isnull;
-	int64 tableId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
-												 SPI_tuptable->tupdesc, 1, &isnull));
-	int64 schemaId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
-												  SPI_tuptable->tupdesc, 3, &isnull));
-	char *tableNameStr = pstrdup(TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[0],
-																	SPI_tuptable->tupdesc, 4, &isnull)));
-	char *schemaNameStr = pstrdup(TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[0],
-																	 SPI_tuptable->tupdesc, 5, &isnull)));
+	bool		isnull;
+	int64		tableId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+													  SPI_tuptable->tupdesc, 1, &isnull));
+	int64		schemaId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+													   SPI_tuptable->tupdesc, 3, &isnull));
+	char	   *tableNameStr = pstrdup(TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[0],
+																		 SPI_tuptable->tupdesc, 4, &isnull)));
+	char	   *schemaNameStr = pstrdup(TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[0],
+																		  SPI_tuptable->tupdesc, 5, &isnull)));
 
-	Datum pathDatum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 6, &isnull);
-	char *tablePathStr = isnull ? NULL : pstrdup(TextDatumGetCString(pathDatum));
-	bool tablePathIsRel = DatumGetBool(SPI_getbinval(SPI_tuptable->vals[0],
-													 SPI_tuptable->tupdesc, 7, &isnull));
-	int64 beginSnapshot = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
-													   SPI_tuptable->tupdesc, 8, &isnull));
+	Datum		pathDatum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 6, &isnull);
+	char	   *tablePathStr = isnull ? NULL : pstrdup(TextDatumGetCString(pathDatum));
+	bool		tablePathIsRel = DatumGetBool(SPI_getbinval(SPI_tuptable->vals[0],
+															SPI_tuptable->tupdesc, 7, &isnull));
+	int64		beginSnapshot = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+															SPI_tuptable->tupdesc, 8, &isnull));
 
-	Datum schemaPathDatum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 10, &isnull);
-	char *schemaPathStr = isnull ? NULL : pstrdup(TextDatumGetCString(schemaPathDatum));
-	bool schemaPathIsRel = DatumGetBool(SPI_getbinval(SPI_tuptable->vals[0],
-													  SPI_tuptable->tupdesc, 11, &isnull));
+	Datum		schemaPathDatum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 10, &isnull);
+	char	   *schemaPathStr = isnull ? NULL : pstrdup(TextDatumGetCString(schemaPathDatum));
+	bool		schemaPathIsRel = DatumGetBool(SPI_getbinval(SPI_tuptable->vals[0],
+															 SPI_tuptable->tupdesc, 11, &isnull));
 
-	Datum dataPathDatum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 12, &isnull);
-	char *dataPathStr = isnull ? NULL : pstrdup(TextDatumGetCString(dataPathDatum));
+	Datum		dataPathDatum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 12, &isnull);
+	char	   *dataPathStr = isnull ? NULL : pstrdup(TextDatumGetCString(dataPathDatum));
 
 	SPI_finish();
 
 	/*
-	 * Resolve to absolute. Downstream consumers receive path as an
-	 * absolute URL with pathIsRelative=false regardless of how the
-	 * catalog stores it, so all path-using code paths stay agnostic of
-	 * the relative/absolute storage shape.
+	 * Resolve to absolute. Downstream consumers receive path as an absolute
+	 * URL with pathIsRelative=false regardless of how the catalog stores it,
+	 * so all path-using code paths stay agnostic of the relative/absolute
+	 * storage shape.
 	 */
-	char *pathStr = ResolveAbsoluteTablePath(dataPathStr,
-											  schemaPathStr, schemaPathIsRel,
-											  tablePathStr, tablePathIsRel);
+	char	   *pathStr = ResolveAbsoluteTablePath(dataPathStr,
+												   schemaPathStr, schemaPathIsRel,
+												   tablePathStr, tablePathIsRel);
 
 	/* Allocate metadata in caller's memory context after SPI_finish */
 	metadata = (DucklakeTableMetadata *) palloc(sizeof(DucklakeTableMetadata));
@@ -796,7 +806,7 @@ DucklakeGetTableMetadataById(int64 tableId)
 {
 	StringInfoData query;
 	DucklakeTableMetadata *metadata;
-	int ret;
+	int			ret;
 	MemoryContext oldcontext;
 
 	/* Save the caller's memory context before entering SPI */
@@ -825,41 +835,42 @@ DucklakeGetTableMetadataById(int64 tableId)
 	}
 
 	/*
-	 * Switch to caller's memory context before extracting values.
-	 * This ensures that strings duplicated with pstrdup() persist after SPI_finish().
+	 * Switch to caller's memory context before extracting values. This
+	 * ensures that strings duplicated with pstrdup() persist after
+	 * SPI_finish().
 	 */
 	MemoryContextSwitchTo(oldcontext);
 
 	/* Extract all values and duplicate strings in caller's context */
-	bool isnull;
-	int64 tableIdResult = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
-													   SPI_tuptable->tupdesc, 1, &isnull));
-	int64 schemaId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
-												  SPI_tuptable->tupdesc, 3, &isnull));
-	char *tableNameStr = pstrdup(TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[0],
-																	SPI_tuptable->tupdesc, 4, &isnull)));
-	char *schemaNameStr = pstrdup(TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[0],
-																	 SPI_tuptable->tupdesc, 5, &isnull)));
-	Datum pathDatum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 6, &isnull);
-	char *tablePathStr = isnull ? NULL : pstrdup(TextDatumGetCString(pathDatum));
-	bool tablePathIsRel = DatumGetBool(SPI_getbinval(SPI_tuptable->vals[0],
-													  SPI_tuptable->tupdesc, 7, &isnull));
-	int64 beginSnapshot = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
-													   SPI_tuptable->tupdesc, 8, &isnull));
+	bool		isnull;
+	int64		tableIdResult = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+															SPI_tuptable->tupdesc, 1, &isnull));
+	int64		schemaId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+													   SPI_tuptable->tupdesc, 3, &isnull));
+	char	   *tableNameStr = pstrdup(TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[0],
+																		 SPI_tuptable->tupdesc, 4, &isnull)));
+	char	   *schemaNameStr = pstrdup(TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[0],
+																		  SPI_tuptable->tupdesc, 5, &isnull)));
+	Datum		pathDatum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 6, &isnull);
+	char	   *tablePathStr = isnull ? NULL : pstrdup(TextDatumGetCString(pathDatum));
+	bool		tablePathIsRel = DatumGetBool(SPI_getbinval(SPI_tuptable->vals[0],
+															SPI_tuptable->tupdesc, 7, &isnull));
+	int64		beginSnapshot = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+															SPI_tuptable->tupdesc, 8, &isnull));
 
-	Datum schemaPathDatum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 10, &isnull);
-	char *schemaPathStr = isnull ? NULL : pstrdup(TextDatumGetCString(schemaPathDatum));
-	bool schemaPathIsRel = DatumGetBool(SPI_getbinval(SPI_tuptable->vals[0],
-													  SPI_tuptable->tupdesc, 11, &isnull));
+	Datum		schemaPathDatum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 10, &isnull);
+	char	   *schemaPathStr = isnull ? NULL : pstrdup(TextDatumGetCString(schemaPathDatum));
+	bool		schemaPathIsRel = DatumGetBool(SPI_getbinval(SPI_tuptable->vals[0],
+															 SPI_tuptable->tupdesc, 11, &isnull));
 
-	Datum dataPathDatum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 12, &isnull);
-	char *dataPathStr = isnull ? NULL : pstrdup(TextDatumGetCString(dataPathDatum));
+	Datum		dataPathDatum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 12, &isnull);
+	char	   *dataPathStr = isnull ? NULL : pstrdup(TextDatumGetCString(dataPathDatum));
 
 	SPI_finish();
 
-	char *pathStr = ResolveAbsoluteTablePath(dataPathStr,
-											  schemaPathStr, schemaPathIsRel,
-											  tablePathStr, tablePathIsRel);
+	char	   *pathStr = ResolveAbsoluteTablePath(dataPathStr,
+												   schemaPathStr, schemaPathIsRel,
+												   tablePathStr, tablePathIsRel);
 
 	/* Allocate metadata in caller's memory context after SPI_finish */
 	metadata = (DucklakeTableMetadata *) palloc(sizeof(DucklakeTableMetadata));
@@ -881,11 +892,11 @@ DucklakeDropTable(int64 tableId)
 	DucklakeSnapshot *newSnapshot;
 
 	/*
-	 * DuckLake v1 keeps dropped tables in metadata so time-travel queries
-	 * can still see them. Instead of DELETE we create a new "DROP TABLE"
-	 * snapshot and end-snapshot the live row plus all live data/delete
-	 * files belonging to it. The old DELETE path lost history and would
-	 * have cascade-removed columns/data_files via ON DELETE CASCADE.
+	 * DuckLake v1 keeps dropped tables in metadata so time-travel queries can
+	 * still see them. Instead of DELETE we create a new "DROP TABLE" snapshot
+	 * and end-snapshot the live row plus all live data/delete files belonging
+	 * to it. The old DELETE path lost history and would have cascade-removed
+	 * columns/data_files via ON DELETE CASCADE.
 	 */
 	newSnapshot = DucklakeCreateSnapshot("DROP TABLE", NULL, NULL);
 
@@ -935,14 +946,15 @@ List *
 DucklakeGetDataFiles(int64 tableId, int64 snapshotId)
 {
 	StringInfoData query;
-	List *dataFiles = NIL;
-	int ret;
-	uint64 i;
+	List	   *dataFiles = NIL;
+	int			ret;
+	uint64		i;
 	MemoryContext oldcontext;
 
 	if (snapshotId < 0)
 	{
 		DucklakeSnapshot *snapshot = DucklakeGetCurrentSnapshot();
+
 		snapshotId = snapshot->snapshotId;
 		pfree(snapshot);
 	}
@@ -971,45 +983,50 @@ DucklakeGetDataFiles(int64 tableId, int64 snapshotId)
 	}
 
 	/*
-	 * Switch to caller's memory context before building the result list.
-	 * This ensures both the list cells and the data structures persist
-	 * after SPI_finish().
+	 * Switch to caller's memory context before building the result list. This
+	 * ensures both the list cells and the data structures persist after
+	 * SPI_finish().
 	 */
 	MemoryContextSwitchTo(oldcontext);
 
 	/* Build the result list directly from SPI results */
 	for (i = 0; i < SPI_processed; i++)
 	{
-		bool isnull;
+		bool		isnull;
 		DucklakeDataFile *dataFile = (DucklakeDataFile *) palloc0(sizeof(DucklakeDataFile));
 
 		dataFile->dataFileId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[i],
 														   SPI_tuptable->tupdesc, 1, &isnull));
 		dataFile->tableId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[i],
-													   SPI_tuptable->tupdesc, 2, &isnull));
+														SPI_tuptable->tupdesc, 2, &isnull));
 		dataFile->beginSnapshot = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[i],
 															  SPI_tuptable->tupdesc, 3, &isnull));
 
-		Datum endSnapshotDatum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 4, &isnull);
+		Datum		endSnapshotDatum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 4, &isnull);
+
 		dataFile->endSnapshot = isnull ? -1 : DatumGetInt64(endSnapshotDatum);
 
-		char *pathStr = TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[i],
-														   SPI_tuptable->tupdesc, 5, &isnull));
+		char	   *pathStr = TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[i],
+																SPI_tuptable->tupdesc, 5, &isnull));
+
 		dataFile->path = pstrdup(pathStr);
 		dataFile->pathIsRelative = DatumGetBool(SPI_getbinval(SPI_tuptable->vals[i],
 															  SPI_tuptable->tupdesc, 6, &isnull));
-		char *fileFormatStr = TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[i],
-																 SPI_tuptable->tupdesc, 7, &isnull));
+		char	   *fileFormatStr = TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[i],
+																	  SPI_tuptable->tupdesc, 7, &isnull));
+
 		dataFile->fileFormat = pstrdup(fileFormatStr);
 		dataFile->recordCount = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[i],
-														   SPI_tuptable->tupdesc, 8, &isnull));
+															SPI_tuptable->tupdesc, 8, &isnull));
 		dataFile->fileSizeBytes = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[i],
 															  SPI_tuptable->tupdesc, 9, &isnull));
 
-		Datum rowIdStartDatum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 10, &isnull);
+		Datum		rowIdStartDatum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 10, &isnull);
+
 		dataFile->rowIdStart = isnull ? 0 : DatumGetInt64(rowIdStartDatum);
 
-		Datum partitionIdDatum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 11, &isnull);
+		Datum		partitionIdDatum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 11, &isnull);
+
 		dataFile->partitionId = isnull ? -1 : DatumGetInt64(partitionIdDatum);
 
 		dataFiles = lappend(dataFiles, dataFile);
@@ -1025,8 +1042,8 @@ DucklakeAddDataFile(int64 tableId, const char *path, int64 recordCount,
 {
 	StringInfoData query;
 	DucklakeSnapshot *snapshot;
-	int64 dataFileId;
-	int ret;
+	int64		dataFileId;
+	int			ret;
 
 	snapshot = DucklakeGetCurrentSnapshot();
 	dataFileId = snapshot->nextFileId++;
@@ -1034,9 +1051,9 @@ DucklakeAddDataFile(int64 tableId, const char *path, int64 recordCount,
 	SPI_connect();
 
 	/*
-	 * Look up the mapping_id and the fully-resolved absolute table path
-	 * for this table. table.path may itself be relative (Phase 2), so
-	 * we have to chain through schema.path and metadata.data_path.
+	 * Look up the mapping_id and the fully-resolved absolute table path for
+	 * this table. table.path may itself be relative (Phase 2), so we have to
+	 * chain through schema.path and metadata.data_path.
 	 */
 	initStringInfo(&query);
 	appendStringInfo(&query,
@@ -1055,8 +1072,9 @@ DucklakeAddDataFile(int64 tableId, const char *path, int64 recordCount,
 					 tableId);
 	ret = SPI_exec(query.data, 0);
 
-	int64 mappingId = -1;
-	char *tablePath = NULL;
+	int64		mappingId = -1;
+	char	   *tablePath = NULL;
+
 	if (ret == SPI_OK_SELECT && SPI_processed > 0)
 	{
 		bool		isnull;
@@ -1080,8 +1098,8 @@ DucklakeAddDataFile(int64 tableId, const char *path, int64 recordCount,
 	}
 
 	/*
-	 * Store the path relative to the table's path when it sits under it,
-	 * so the catalog stays portable across bucket renames. Falls back to
+	 * Store the path relative to the table's path when it sits under it, so
+	 * the catalog stays portable across bucket renames. Falls back to
 	 * absolute when the file lives outside the table prefix (e.g. an
 	 * add_files import) so legacy lookups still work.
 	 */
@@ -1133,12 +1151,11 @@ DucklakeAddDataFile(int64 tableId, const char *path, int64 recordCount,
 	SPI_exec(query.data, 0);
 
 	/*
-	 * Re-roll up lake_ducklake.table_stats from live data_file rows. v1
-	 * spec exposes per-table totals (record_count, next_row_id,
-	 * file_size_bytes) and DuckDB's read path queries this table for
-	 * planning. Without it record_count() / SUM(file_size) on a DuckLake
-	 * table goes through a full file scan, and DuckDB returns 0 rows for
-	 * its built-in metadata views.
+	 * Re-roll up lake_ducklake.table_stats from live data_file rows. v1 spec
+	 * exposes per-table totals (record_count, next_row_id, file_size_bytes)
+	 * and DuckDB's read path queries this table for planning. Without it
+	 * record_count() / SUM(file_size) on a DuckLake table goes through a full
+	 * file scan, and DuckDB returns 0 rows for its built-in metadata views.
 	 */
 	resetStringInfo(&query);
 	appendStringInfo(&query,
@@ -1161,21 +1178,21 @@ DucklakeAddDataFile(int64 tableId, const char *path, int64 recordCount,
 	 * Roll lake_ducklake.table_column_stats forward from the live
 	 * file_column_stats.
 	 *
-	 * v1 spec uses table_column_stats for cross-file pruning: a query
-	 * planner reads the (min, max) bounds and contains_null/contains_nan
-	 * flags to decide whether a query that filters on the column needs
-	 * to even open the data files for that table.
+	 * v1 spec uses table_column_stats for cross-file pruning: a query planner
+	 * reads the (min, max) bounds and contains_null/contains_nan flags to
+	 * decide whether a query that filters on the column needs to even open
+	 * the data files for that table.
 	 *
-	 * Aggregating min/max across files in SQL would require typed MIN/MAX
-	 * — text MIN over '5','42' yields '42' (lex order) which is wrong for
-	 * any numeric column and silently breaks predicate pushdown. We don't
-	 * have the column's storage type cheaply available here, so:
+	 * Aggregating min/max across files in SQL would require typed MIN/MAX --
+	 * text MIN over '5','42' yields '42' (lex order) which is wrong for any
+	 * numeric column and silently breaks predicate pushdown. We don't have
+	 * the column's storage type cheaply available here, so:
 	 *
-	 *   - For tables with exactly one live data file we copy the file's
-	 *     min/max directly (always correct, no aggregation needed).
-	 *   - For tables with multiple live data files we leave min/max NULL.
-	 *     "Unknown bounds" is safe — DuckDB / pg_lake disable the column's
-	 *     pruning rather than mis-prune.
+	 * - For tables with exactly one live data file we copy the file's min/max
+	 * directly (always correct, no aggregation needed). - For tables with
+	 * multiple live data files we leave min/max NULL. "Unknown bounds" is
+	 * safe -- DuckDB / pg_lake disable the column's pruning rather than
+	 * misprune.
 	 *
 	 * We still always insert a row per (table_id, column_id) so DuckDB's
 	 * GetGlobalTableStats LEFT JOIN at column_id index 1 doesn't NPE.
@@ -1236,8 +1253,8 @@ DucklakeRemoveDataFile(int64 dataFileId)
 
 	/*
 	 * Recompute table_stats from live data files now that this one is
-	 * end-snapshotted. Joining through data_file gives us the table_id
-	 * so we don't have to look it up before SPI_connect.
+	 * end-snapshotted. Joining through data_file gives us the table_id so we
+	 * don't have to look it up before SPI_connect.
 	 */
 	resetStringInfo(&query);
 	appendStringInfo(&query,
@@ -1302,13 +1319,14 @@ List *
 DucklakeGetDeleteFiles(int64 tableId, int64 snapshotId)
 {
 	StringInfoData query;
-	List *deleteFiles = NIL;
-	int ret;
-	uint64 i;
+	List	   *deleteFiles = NIL;
+	int			ret;
+	uint64		i;
 
 	if (snapshotId < 0)
 	{
 		DucklakeSnapshot *snapshot = DucklakeGetCurrentSnapshot();
+
 		snapshotId = snapshot->snapshotId;
 		pfree(snapshot);
 	}
@@ -1323,9 +1341,9 @@ DucklakeGetDeleteFiles(int64 tableId, int64 snapshotId)
 					 tableId, snapshotId, snapshotId);
 
 	/*
-	 * Capture caller's memory context BEFORE SPI_connect so result list
-	 * and its strings outlive SPI_finish; otherwise consumers chase
-	 * already-freed memory and crash 100ms+ later.
+	 * Capture caller's memory context BEFORE SPI_connect so result list and
+	 * its strings outlive SPI_finish; otherwise consumers chase already-freed
+	 * memory and crash 100ms+ later.
 	 */
 	MemoryContext callerContext = CurrentMemoryContext;
 
@@ -1340,9 +1358,10 @@ DucklakeGetDeleteFiles(int64 tableId, int64 snapshotId)
 
 	for (i = 0; i < SPI_processed; i++)
 	{
-		bool isnull;
+		bool		isnull;
 		MemoryContext spiContext = MemoryContextSwitchTo(callerContext);
 		DucklakeDeleteFile *deleteFile = palloc0(sizeof(DucklakeDeleteFile));
+
 		MemoryContextSwitchTo(spiContext);
 
 		deleteFile->deleteFileId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[i],
@@ -1352,14 +1371,17 @@ DucklakeGetDeleteFiles(int64 tableId, int64 snapshotId)
 		deleteFile->beginSnapshot = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[i],
 																SPI_tuptable->tupdesc, 3, &isnull));
 
-		Datum endSnapshotDatum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 4, &isnull);
+		Datum		endSnapshotDatum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 4, &isnull);
+
 		deleteFile->endSnapshot = isnull ? -1 : DatumGetInt64(endSnapshotDatum);
 
-		Datum dataFileIdDatum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 5, &isnull);
+		Datum		dataFileIdDatum = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 5, &isnull);
+
 		deleteFile->dataFileId = isnull ? -1 : DatumGetInt64(dataFileIdDatum);
 
-		char *pathStr = TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[i],
-														   SPI_tuptable->tupdesc, 6, &isnull));
+		char	   *pathStr = TextDatumGetCString(SPI_getbinval(SPI_tuptable->vals[i],
+																SPI_tuptable->tupdesc, 6, &isnull));
+
 		spiContext = MemoryContextSwitchTo(callerContext);
 		deleteFile->path = pstrdup(pathStr);
 		MemoryContextSwitchTo(spiContext);
@@ -1386,8 +1408,8 @@ DucklakeAddDeleteFile(int64 tableId, int64 dataFileId, const char *path,
 {
 	StringInfoData query;
 	DucklakeSnapshot *snapshot;
-	int64 deleteFileId;
-	int ret;
+	int64		deleteFileId;
+	int			ret;
 	char	   *tablePath = NULL;
 	bool		pathIsRelative = false;
 	const char *storedPath;
@@ -1399,8 +1421,8 @@ DucklakeAddDeleteFile(int64 tableId, int64 dataFileId, const char *path,
 
 	/*
 	 * Look up the fully-resolved absolute table path (Phase 2: chain
-	 * data_path → schema.path → table.path). StripTablePathPrefix
-	 * needs the absolute prefix to do its compare.
+	 * data_path → schema.path → table.path). StripTablePathPrefix needs
+	 * the absolute prefix to do its compare.
 	 */
 	initStringInfo(&query);
 	appendStringInfo(&query,
@@ -1505,10 +1527,10 @@ DucklakeAddFileColumnStats(int64 dataFileId, int64 tableId, int64 columnId,
 	initStringInfo(&query);
 
 	/*
-	 * Insert per-file column stats. -1 in the int64 fields encodes
-	 * "unknown" (the default at construction time), so we write SQL NULL
-	 * in that case rather than persisting the sentinel. containsNan is a
-	 * tri-state: -1 unknown -> NULL, 0 -> false, 1 -> true.
+	 * Insert per-file column stats. -1 in the int64 fields encodes "unknown"
+	 * (the default at construction time), so we write SQL NULL in that case
+	 * rather than persisting the sentinel. containsNan is a tri-state: -1
+	 * unknown -> NULL, 0 -> false, 1 -> true.
 	 */
 	resetStringInfo(&query);
 	appendStringInfo(&query,
@@ -1556,12 +1578,12 @@ DucklakeAddFileColumnStats(int64 dataFileId, int64 tableId, int64 columnId,
 	}
 
 	/*
-	 * Roll the new per-file stats up into table_column_stats. DucklakeAddDataFile
-	 * seeded a placeholder row with NULL bounds before this column stat
-	 * arrived; now that the per-file row exists, re-aggregate so the
-	 * single-file case carries verbatim min/max while multi-file cases stay
-	 * NULL (text MIN/MAX would mis-prune numerics). See the longer comment
-	 * in DucklakeAddDataFile.
+	 * Roll the new per-file stats up into table_column_stats.
+	 * DucklakeAddDataFile seeded a placeholder row with NULL bounds before
+	 * this column stat arrived; now that the per-file row exists,
+	 * re-aggregate so the single-file case carries verbatim min/max while
+	 * multi-file cases stay NULL (text MIN/MAX would misprune numerics). See
+	 * the longer comment in DucklakeAddDataFile.
 	 */
 	resetStringInfo(&query);
 	appendStringInfo(&query,
@@ -1606,9 +1628,9 @@ DucklakeAddColumn(Oid tableOid, const char *columnName, const char *columnType,
 				  bool nullsAllowed)
 {
 	DucklakeTableMetadata *metadata;
-	int ret;
-	int64 columnId;
-	AttrNumber columnOrder;
+	int			ret;
+	int64		columnId;
+	AttrNumber	columnOrder;
 
 	metadata = DucklakeGetTableMetadata(tableOid);
 	if (!metadata)
@@ -1627,6 +1649,7 @@ DucklakeAddColumn(Oid tableOid, const char *columnName, const char *columnType,
 
 	/* Initialize StringInfo in caller's memory context before SPI operations */
 	StringInfoData query;
+
 	initStringInfo(&query);
 
 	/* Update current snapshot with new next_catalog_id */
@@ -1640,16 +1663,16 @@ DucklakeAddColumn(Oid tableOid, const char *columnName, const char *columnType,
 	 * Capture the postgres-side DEFAULT expression for this attnum and
 	 * resolve it to a value text. v1 stores the resolved value in
 	 * ducklake_column.initial_default so reads of older parquet files
-	 * (written before this ADD COLUMN) can backfill the missing column
-	 * with the right scalar instead of NULL.
+	 * (written before this ADD COLUMN) can backfill the missing column with
+	 * the right scalar instead of NULL.
 	 *
 	 * pg_get_expr returns the canonical SQL form ("'foo'::text", "99",
-	 * "now()") which DuckDB's read_parquet default_value can't always
-	 * parse — we therefore execute the expression and cast the result
-	 * to text. For static literals this collapses 'unknown'::text to
-	 * unknown and 99::int4 to 99; for volatile expressions like now()
-	 * it captures the value at ADD-COLUMN time, which is the same
-	 * semantics postgres uses for backfilling existing rows.
+	 * "now()") which DuckDB's read_parquet default_value can't always parse
+	 * -- we therefore execute the expression and cast the result to text. For
+	 * static literals this collapses 'unknown'::text to unknown and 99::int4
+	 * to 99; for volatile expressions like now() it captures the value at
+	 * ADD-COLUMN time, which is the same semantics postgres uses for
+	 * backfilling existing rows.
 	 */
 	resetStringInfo(&query);
 	appendStringInfo(&query,
@@ -1675,8 +1698,8 @@ DucklakeAddColumn(Oid tableOid, const char *columnName, const char *columnType,
 			char	   *exprText = TextDatumGetCString(d);
 
 			/*
-			 * Now actually evaluate the expression text and cast to
-			 * text so the stored default is a plain scalar value.
+			 * Now actually evaluate the expression text and cast to text so
+			 * the stored default is a plain scalar value.
 			 */
 			StringInfoData evalQ;
 
@@ -1700,7 +1723,10 @@ DucklakeAddColumn(Oid tableOid, const char *columnName, const char *columnType,
 	/* Now create a new snapshot for this schema change */
 	DucklakeSnapshot *newSnapshot = DucklakeCreateSnapshot("ADD COLUMN", NULL, NULL);
 
-	/* Increment schema_version and insert column - all within same SPI context */
+	/*
+	 * Increment schema_version and insert column - all within same SPI
+	 * context
+	 */
 	resetStringInfo(&query);
 	appendStringInfo(&query,
 					 "UPDATE lake_ducklake.snapshot SET schema_version = schema_version + 1 "
@@ -1708,7 +1734,10 @@ DucklakeAddColumn(Oid tableOid, const char *columnName, const char *columnType,
 					 newSnapshot->snapshotId);
 	SPI_exec(query.data, 0);
 
-	/* Insert the new column with the new snapshot, converting PostgreSQL type to DuckLake type */
+	/*
+	 * Insert the new column with the new snapshot, converting PostgreSQL type
+	 * to DuckLake type
+	 */
 	resetStringInfo(&query);
 	appendStringInfo(&query,
 					 "INSERT INTO lake_ducklake.column "
@@ -1722,13 +1751,13 @@ DucklakeAddColumn(Oid tableOid, const char *columnName, const char *columnType,
 					 quote_literal_cstr(columnType),
 					 initialDefault ? quote_literal_cstr(initialDefault) : "NULL",
 					 initialDefault ? quote_literal_cstr(initialDefault) : "NULL",
-					 /*
-					  * v1 spec: when a default value is present, the
-					  * default_value_type discriminator must say what the
-					  * default text means. We resolve postgres expressions
-					  * to a literal scalar earlier, so 'literal' is the
-					  * correct tag. NULL when there is no default.
-					  */
+
+	/*
+	 * v1 spec: when a default value is present, the default_value_type
+	 * discriminator must say what the default text means. We resolve postgres
+	 * expressions to a literal scalar earlier, so 'literal' is the correct
+	 * tag. NULL when there is no default.
+	 */
 					 initialDefault ? "'literal'" : "NULL",
 					 nullsAllowed ? "true" : "false");
 
@@ -1737,7 +1766,8 @@ DucklakeAddColumn(Oid tableOid, const char *columnName, const char *columnType,
 		elog(ERROR, "Failed to add column %s to DuckLake catalog", columnName);
 
 	/* Update name_mapping for the new column */
-	int64 mappingId = -1;
+	int64		mappingId = -1;
+
 	resetStringInfo(&query);
 	appendStringInfo(&query,
 					 "SELECT mapping_id FROM lake_ducklake.column_mapping WHERE table_id = %ld",
@@ -1745,7 +1775,8 @@ DucklakeAddColumn(Oid tableOid, const char *columnName, const char *columnType,
 	ret = SPI_exec(query.data, 0);
 	if (ret == SPI_OK_SELECT && SPI_processed > 0)
 	{
-		bool isnull;
+		bool		isnull;
+
 		mappingId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
 												SPI_tuptable->tupdesc, 1, &isnull));
 	}
@@ -1788,7 +1819,7 @@ DucklakeDropColumn(Oid tableOid, const char *columnName)
 	StringInfoData query;
 	DucklakeTableMetadata *metadata;
 	DucklakeSnapshot *newSnapshot;
-	int ret;
+	int			ret;
 
 	metadata = DucklakeGetTableMetadata(tableOid);
 	if (!metadata)
@@ -1846,7 +1877,7 @@ DucklakeRenameColumn(Oid tableOid, const char *oldName, const char *newName)
 	StringInfoData query;
 	DucklakeTableMetadata *metadata;
 	DucklakeSnapshot *newSnapshot;
-	int ret;
+	int			ret;
 
 	metadata = DucklakeGetTableMetadata(tableOid);
 	if (!metadata)
@@ -1866,8 +1897,8 @@ DucklakeRenameColumn(Oid tableOid, const char *oldName, const char *newName)
 	SPI_exec(query.data, 0);
 
 	/*
-	 * Insert a new column-version row reusing the same column_id with the
-	 * new name. We INSERT...SELECT from the live row so all other column
+	 * Insert a new column-version row reusing the same column_id with the new
+	 * name. We INSERT...SELECT from the live row so all other column
 	 * attributes (type, defaults, parent_column, etc.) carry forward.
 	 */
 	resetStringInfo(&query);
@@ -1901,8 +1932,8 @@ DucklakeRenameColumn(Oid tableOid, const char *oldName, const char *newName)
 
 	/*
 	 * Update name_mapping.source_name in place. The (column_id, mapping_id)
-	 * identity is unchanged by a rename — only the user-visible name maps
-	 * to the new identifier.
+	 * identity is unchanged by a rename -- only the user-visible name maps to
+	 * the new identifier.
 	 */
 	resetStringInfo(&query);
 	appendStringInfo(&query,
@@ -1937,7 +1968,7 @@ DucklakeRenameColumn(Oid tableOid, const char *oldName, const char *newName)
  * row with the same table_id and the new name.
  *
  * Caller must pass the schema name explicitly because by the time this
- * runs, PostgreSQL has already renamed the foreign table — looking up
+ * runs, PostgreSQL has already renamed the foreign table -- looking up
  * by the new pg_class name would miss the lake_ducklake.table row,
  * which still carries the old name.
  */
@@ -1977,7 +2008,7 @@ DucklakeRenameTable(const char *schemaName, const char *oldName, const char *new
 	if (tableId < 0)
 	{
 		elog(WARNING,
-			 "DuckLake table %s.%s not found in catalog for rename — "
+			 "DuckLake table %s.%s not found in catalog for rename �98� "
 			 "metadata will not reflect the PG-side rename",
 			 schemaName, oldName);
 		return;
@@ -2000,9 +2031,9 @@ DucklakeRenameTable(const char *schemaName, const char *oldName, const char *new
 	SPI_exec(query.data, 0);
 
 	/*
-	 * Insert a new table-version row reusing the same table_id with the
-	 * new name. INSERT...SELECT from the live row so table_uuid,
-	 * schema_id, path, path_is_relative carry forward unchanged.
+	 * Insert a new table-version row reusing the same table_id with the new
+	 * name. INSERT...SELECT from the live row so table_uuid, schema_id, path,
+	 * path_is_relative carry forward unchanged.
 	 */
 	resetStringInfo(&query);
 	appendStringInfo(&query,
@@ -2025,9 +2056,9 @@ DucklakeRenameTable(const char *schemaName, const char *oldName, const char *new
 	}
 
 	/*
-	 * End-snapshot the previous live row. Restrict to begin_snapshot <
-	 * the new snapshot so we don't accidentally end-snapshot the row we
-	 * just inserted.
+	 * End-snapshot the previous live row. Restrict to begin_snapshot < the
+	 * new snapshot so we don't accidentally end-snapshot the row we just
+	 * inserted.
 	 */
 	resetStringInfo(&query);
 	appendStringInfo(&query,
@@ -2038,9 +2069,9 @@ DucklakeRenameTable(const char *schemaName, const char *oldName, const char *new
 	SPI_exec(query.data, 0);
 
 	/*
-	 * Record the schema version pinning this table at the new
-	 * snapshot — this is what DuckDB uses to figure out which table
-	 * row is current at a given catalog version.
+	 * Record the schema version pinning this table at the new snapshot --
+	 * this is what DuckDB uses to figure out which table row is current at a
+	 * given catalog version.
 	 */
 	resetStringInfo(&query);
 	appendStringInfo(&query,
@@ -2061,7 +2092,7 @@ DucklakeRenameTable(const char *schemaName, const char *oldName, const char *new
  *
  * Mirrors DucklakeRenameTable: end-snapshot the previous live row at
  * the new snapshot and insert a fresh row reusing the same schema_id
- * with the new name. schema.path is intentionally preserved — DuckLake
+ * with the new name. schema.path is intentionally preserved -- DuckLake
  * paths point at file locations, not at the user-visible schema name,
  * so a rename does NOT move data files in object storage.
  *
@@ -2100,7 +2131,7 @@ DucklakeRenameSchema(const char *oldName, const char *newName)
 	if (schemaId < 0)
 	{
 		elog(WARNING,
-			 "DuckLake schema %s not found in catalog for rename — "
+			 "DuckLake schema %s not found in catalog for rename �98� "
 			 "metadata will not reflect the PG-side rename",
 			 oldName);
 		return;
@@ -2119,9 +2150,9 @@ DucklakeRenameSchema(const char *oldName, const char *newName)
 	SPI_exec(query.data, 0);
 
 	/*
-	 * Insert a new schema-version row reusing the same schema_id with
-	 * the new name. INSERT...SELECT from the live row so schema_uuid,
-	 * path, path_is_relative carry forward unchanged.
+	 * Insert a new schema-version row reusing the same schema_id with the new
+	 * name. INSERT...SELECT from the live row so schema_uuid, path,
+	 * path_is_relative carry forward unchanged.
 	 */
 	resetStringInfo(&query);
 	appendStringInfo(&query,
@@ -2215,9 +2246,9 @@ DucklakeInsertPartitionSpec(int64 tableId, List *transforms)
 	SPI_connect();
 
 	/*
-	 * Look up the table's live begin_snapshot — DucklakeRegisterTable
-	 * just inserted the row, so we anchor the partition spec to the
-	 * same snapshot for v1 spec compliance.
+	 * Look up the table's live begin_snapshot -- DucklakeRegisterTable just
+	 * inserted the row, so we anchor the partition spec to the same snapshot
+	 * for v1 spec compliance.
 	 */
 	initStringInfo(&query);
 	appendStringInfo(&query,
