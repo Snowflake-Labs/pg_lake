@@ -39,6 +39,7 @@
 
 static void InitializePGDuckClient(void);
 static void SetupPgDuckConnectionHash(void);
+static char *ResolvePgduckConninfo(void);
 
 static void PGDuckClientTransactionCallback(XactEvent event, void *arg);
 static void PGDuckClientSubtransactionCallback(SubXactEvent event,
@@ -128,6 +129,77 @@ SetupPgDuckConnectionHash(void)
 
 
 /*
+ * ResolvePgduckConninfo returns a palloc'd connection string showing the
+ * options libpq would actually use to reach pgduck_server, including values
+ * supplied via environment variables (e.g. PGHOSTADDR, PGPORT) and libpq's
+ * compiled-in defaults.  This is what an administrator needs to debug a
+ * misconfigured server -- PgduckServerConninfo alone hides any env-supplied
+ * overrides.
+ *
+ * We resolve options without opening a socket: PQconndefaults() returns the
+ * options with environment variables and compiled-in defaults applied, and
+ * PQconninfoParse() returns the values from the configured conninfo string.
+ * Configured values override defaults.  Options whose dispchar starts with
+ * '*' (passwords) or 'D' (debug-only) are omitted, as are empty values.
+ */
+static char *
+ResolvePgduckConninfo(void)
+{
+	StringInfoData buf;
+
+	initStringInfo(&buf);
+
+	PQconninfoOption *defaults = PQconndefaults();
+	PQconninfoOption *configured = PQconninfoParse(PgduckServerConninfo, NULL);
+
+	if (defaults == NULL)
+	{
+		/* OOM inside libpq; fall back to the raw configured string */
+		if (configured != NULL)
+			PQconninfoFree(configured);
+		appendStringInfoString(&buf, PgduckServerConninfo);
+		return buf.data;
+	}
+
+	bool		first = true;
+
+	for (PQconninfoOption *opt = defaults; opt->keyword != NULL; opt++)
+	{
+		const char *val = opt->val;
+
+		if (configured != NULL)
+		{
+			for (PQconninfoOption *c = configured; c->keyword != NULL; c++)
+			{
+				if (strcmp(c->keyword, opt->keyword) == 0)
+				{
+					if (c->val != NULL)
+						val = c->val;
+					break;
+				}
+			}
+		}
+
+		if (val == NULL || val[0] == '\0')
+			continue;
+		if (opt->dispchar != NULL &&
+			(opt->dispchar[0] == '*' || opt->dispchar[0] == 'D'))
+			continue;
+
+		appendStringInfo(&buf, "%s%s='%s'",
+						 first ? "" : " ", opt->keyword, val);
+		first = false;
+	}
+
+	PQconninfoFree(defaults);
+	if (configured != NULL)
+		PQconninfoFree(configured);
+
+	return buf.data;
+}
+
+
+/*
  * GetPGDuckConnection returns the main PGDuck connection.
  */
 PGDuckConnection *
@@ -150,9 +222,12 @@ GetPGDuckConnection(void)
 		 * intentionally do not include the libpq error message here; it is
 		 * surfaced only in the assertion-enabled ERROR below.
 		 */
+		char	   *resolved = ResolvePgduckConninfo();
+
 		ereport(LOG_SERVER_ONLY,
 				(errmsg("could not start query engine"),
-				 errdetail("connection string: %s", PgduckServerConninfo)));
+				 errdetail("connection string: %s", resolved)));
+		pfree(resolved);
 
 #ifdef USE_ASSERT_CHECKING
 		ereport(ERROR, (errmsg("could not start query engine: %s", errorMessage)));
