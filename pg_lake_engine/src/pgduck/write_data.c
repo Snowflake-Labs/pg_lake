@@ -32,6 +32,7 @@
 #include "pg_lake/pgduck/keywords.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/pgduck/read_data.h"
+#include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/type.h"
 #include "pg_lake/pgduck/iceberg_query_validation.h"
 #include "pg_lake/pgduck/write_data.h"
@@ -625,6 +626,15 @@ ChooseDuckDBEngineTypeForWrite(PGType postgresType,
 	 */
 	if (isArrayType)
 		postgresType.postgresTypeOid = elementTypeId;
+
+	/*
+	 * Unwrap domain types so that e.g. a domain over bytea is written as BLOB
+	 * rather than falling through to VARCHAR.  Map types are domains with
+	 * special semantics and must not be unwrapped.
+	 */
+	if (!IsMapTypeOid(postgresType.postgresTypeOid) &&
+		get_typtype(postgresType.postgresTypeOid) == TYPTYPE_DOMAIN)
+		postgresType.postgresTypeOid = getBaseType(postgresType.postgresTypeOid);
 
 	DuckDBType	duckTypeId = GetDuckDBTypeForPGType(postgresType);
 

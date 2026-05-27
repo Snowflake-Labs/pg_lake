@@ -35,6 +35,7 @@
 #include "pg_lake/csv/csv_writer.h"
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/pgduck/numeric.h"
+#include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/serialize.h"
 #include "pg_lake/util/numeric.h"
 #include "executor/executor.h"
@@ -1222,6 +1223,11 @@ GetCSVDestReceiverFileSize(DestReceiver *dest)
 bool
 ShouldUseDuckSerialization(CopyDataFormat targetFormat, PGType postgresType)
 {
+	/* unwrap domain to base type so per-type checks below see the real type */
+	if (!IsMapTypeOid(postgresType.postgresTypeOid) &&
+		get_typtype(postgresType.postgresTypeOid) == TYPTYPE_DOMAIN)
+		postgresType.postgresTypeOid = getBaseType(postgresType.postgresTypeOid);
+
 	Oid			typeId = postgresType.postgresTypeOid;
 
 	if (IsGeometryType(postgresType))

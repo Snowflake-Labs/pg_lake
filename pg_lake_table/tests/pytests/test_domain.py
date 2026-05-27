@@ -82,8 +82,12 @@ def test_domain_iceberg_field_type(extension, pg_conn, s3, with_default_location
     parsed = json.loads(data)
     fields = {f["name"]: f["type"] for f in parsed["schemas"][0]["fields"]}
 
-    assert fields["y"] == "int", f"domain over integer should be 'int', got {fields['y']!r}"
-    assert fields["d"] == "double", f"domain over double precision should be 'double', got {fields['d']!r}"
+    assert (
+        fields["y"] == "int"
+    ), f"domain over integer should be 'int', got {fields['y']!r}"
+    assert (
+        fields["d"] == "double"
+    ), f"domain over double precision should be 'double', got {fields['d']!r}"
     assert fields["t"] == "string"
 
     result = run_query("SELECT y, d, t FROM domain_types", pg_conn)
