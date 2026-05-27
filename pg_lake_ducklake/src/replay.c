@@ -36,6 +36,7 @@
 #include "utils/memutils.h"
 
 #include "pg_lake/ducklake/catalog.h"
+#include "pg_lake/ducklake/spi_priv.h"
 
 PG_FUNCTION_INFO_V1(lake_ducklake_set_ddl_replay);
 PG_FUNCTION_INFO_V1(lake_ducklake_is_ddl_replay);
@@ -178,9 +179,11 @@ RunReplayDDL(const char *sql)
 	BeginInternalSubTransaction(NULL);
 	PG_TRY();
 	{
-		SPI_connect();
+		DucklakePrivSPIState _ducklakeSpi1;
+
+		DucklakeBeginPrivilegedSPI(&_ducklakeSpi1);
 		SPI_exec(sql, 0);
-		SPI_finish();
+		DucklakeEndPrivilegedSPI(&_ducklakeSpi1);
 		ReleaseCurrentSubTransaction();
 		MemoryContextSwitchTo(outerContext);
 		CurrentResourceOwner = outerOwner;
@@ -231,7 +234,9 @@ LookupTableNameById(int64 tableId, char **schemaNameOut, char **tableNameOut,
 		appendStringInfoString(&query, "   AND t.end_snapshot IS NULL ");
 	appendStringInfoString(&query, " ORDER BY t.begin_snapshot DESC LIMIT 1");
 
-	SPI_connect();
+	DucklakePrivSPIState _ducklakeSpi2;
+
+	DucklakeBeginPrivilegedSPI(&_ducklakeSpi2);
 	ret = SPI_exec(query.data, 1);
 	if (ret == SPI_OK_SELECT && SPI_processed == 1)
 	{
@@ -268,7 +273,7 @@ LookupTableNameById(int64 tableId, char **schemaNameOut, char **tableNameOut,
 
 		found = (*schemaNameOut != NULL && *tableNameOut != NULL);
 	}
-	SPI_finish();
+	DucklakeEndPrivilegedSPI(&_ducklakeSpi2);
 	return found;
 }
 
@@ -428,11 +433,13 @@ ReplayCreateTable(const char *schemaName, const char *tableName)
 					 quote_literal_cstr(tableName),
 					 quote_literal_cstr(schemaName));
 
-	SPI_connect();
+	DucklakePrivSPIState _ducklakeSpi3;
+
+	DucklakeBeginPrivilegedSPI(&_ducklakeSpi3);
 	ret = SPI_exec(query.data, 1);
 	if (ret == SPI_OK_SELECT && SPI_processed > 0)
 	{
-		SPI_finish();
+		DucklakeEndPrivilegedSPI(&_ducklakeSpi3);
 		return;
 	}
 
@@ -485,14 +492,14 @@ ReplayCreateTable(const char *schemaName, const char *tableName)
 
 	if (!found)
 	{
-		SPI_finish();
+		DucklakeEndPrivilegedSPI(&_ducklakeSpi3);
 		return;
 	}
 
 	fullPath = ComputeFullTablePath(schemaPath, schemaRel, tablePath, tableRel);
 	if (fullPath == NULL)
 	{
-		SPI_finish();
+		DucklakeEndPrivilegedSPI(&_ducklakeSpi3);
 		return;
 	}
 
@@ -532,7 +539,7 @@ ReplayCreateTable(const char *schemaName, const char *tableName)
 
 	if (colList.len == 0)
 	{
-		SPI_finish();
+		DucklakeEndPrivilegedSPI(&_ducklakeSpi3);
 		return;
 	}
 
@@ -553,7 +560,7 @@ ReplayCreateTable(const char *schemaName, const char *tableName)
 					 quote_literal_cstr(fullPath));
 	RunReplayDDL(ddl.data);
 
-	SPI_finish();
+	DucklakeEndPrivilegedSPI(&_ducklakeSpi3);
 }
 
 
@@ -587,7 +594,9 @@ ReplayAlteredTable(int64 tableId)
 					 quote_literal_cstr(tableName),
 					 quote_literal_cstr(schemaName));
 
-	SPI_connect();
+	DucklakePrivSPIState _ducklakeSpi4;
+
+	DucklakeBeginPrivilegedSPI(&_ducklakeSpi4);
 	ret = SPI_exec(query.data, 1);
 	if (ret == SPI_OK_SELECT && SPI_processed == 1)
 	{
@@ -601,7 +610,7 @@ ReplayAlteredTable(int64 tableId)
 
 	if (!OidIsValid(foreignOid))
 	{
-		SPI_finish();
+		DucklakeEndPrivilegedSPI(&_ducklakeSpi4);
 		return;
 	}
 
@@ -792,7 +801,7 @@ ReplayAlteredTable(int64 tableId)
 		}
 	}
 
-	SPI_finish();
+	DucklakeEndPrivilegedSPI(&_ducklakeSpi4);
 }
 
 
@@ -899,7 +908,9 @@ lake_ducklake_snapshot_changes_insert(PG_FUNCTION_ARGS)
 			commitExtraInfo = TextDatumGetCString(d);
 	}
 
-	SPI_connect();
+	DucklakePrivSPIState _ducklakeSpi5;
+
+	DucklakeBeginPrivilegedSPI(&_ducklakeSpi5);
 
 	initStringInfo(&query);
 	appendStringInfo(&query,
@@ -917,7 +928,7 @@ lake_ducklake_snapshot_changes_insert(PG_FUNCTION_ARGS)
 
 	if (changesMade == NULL || changesMade[0] == '\0' || DucklakeInDDLReplay)
 	{
-		SPI_finish();
+		DucklakeEndPrivilegedSPI(&_ducklakeSpi5);
 		return PointerGetDatum(newTuple);
 	}
 
@@ -956,7 +967,7 @@ lake_ducklake_snapshot_changes_insert(PG_FUNCTION_ARGS)
 		MemoryContextSwitchTo(oldContext);
 	}
 
-	SPI_finish();
+	DucklakeEndPrivilegedSPI(&_ducklakeSpi5);
 
 	/*
 	 * Dispatch each parsed item. Replay helpers manage their own

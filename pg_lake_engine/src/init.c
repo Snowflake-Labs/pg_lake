@@ -33,6 +33,7 @@
 #include "pg_lake/extensions/pg_lake_copy.h"
 #include "pg_lake/extensions/pg_lake.h"
 #include "pg_lake/extensions/pg_lake_iceberg.h"
+#include "pg_lake/extensions/pg_lake_ducklake.h"
 #include "pg_lake/extensions/pg_lake_table.h"
 #include "pg_lake/extensions/pg_map.h"
 #include "pg_lake/extensions/pg_lake_engine.h"
@@ -207,6 +208,7 @@ _PG_init(void)
 		InitializePgLakeIdCache();
 		InitializePgLakeTableIdCache();
 		InitializePgLakeIcebergIdCache();
+		InitializePgLakeDucklakeIdCache();
 		InitializePgLakeCopyIdCache();
 		InitializePgParquetIdCache();
 		InitializePgLakeReplicationIdCache();

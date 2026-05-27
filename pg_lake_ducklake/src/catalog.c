@@ -11,6 +11,7 @@
 #include "utils/uuid.h"
 
 #include "pg_lake/ducklake/catalog.h"
+#include "pg_lake/ducklake/spi_priv.h"
 #include "pg_lake/iceberg/api/partitioning.h"
 
 /*
@@ -101,7 +102,9 @@ DucklakeGetCurrentSnapshot(void)
 	int			ret;
 	DucklakeSnapshot *snapshot;
 
-	SPI_connect();
+	DucklakePrivSPIState _ducklakeSpi1;
+
+	DucklakeBeginPrivilegedSPI(&_ducklakeSpi1);
 	ret = SPI_exec("SELECT snapshot_id, snapshot_time, schema_version, "
 				   "next_catalog_id, next_file_id FROM lake_ducklake.snapshot "
 				   "ORDER BY snapshot_id DESC LIMIT 1", 0);
@@ -122,7 +125,7 @@ DucklakeGetCurrentSnapshot(void)
 	int64		nextFileId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
 														 SPI_tuptable->tupdesc, 5, &isnull));
 
-	SPI_finish();
+	DucklakeEndPrivilegedSPI(&_ducklakeSpi1);
 
 	/* Allocate snapshot in caller's memory context after SPI_finish */
 	snapshot = (DucklakeSnapshot *) palloc(sizeof(DucklakeSnapshot));
@@ -153,7 +156,9 @@ DucklakeCreateSnapshot(const char *changesMade, const char *author, const char *
 					 currentSnapshot->nextCatalogId,
 					 currentSnapshot->nextFileId);
 
-	SPI_connect();
+	DucklakePrivSPIState _ducklakeSpi2;
+
+	DucklakeBeginPrivilegedSPI(&_ducklakeSpi2);
 	ret = SPI_exec(query.data, 0);
 	if (ret != SPI_OK_INSERT_RETURNING)
 		elog(ERROR, "Failed to create snapshot");
@@ -179,7 +184,7 @@ DucklakeCreateSnapshot(const char *changesMade, const char *author, const char *
 					 commitMessage ? quote_literal_cstr(commitMessage) : "NULL");
 	SPI_exec(query.data, 0);
 
-	SPI_finish();
+	DucklakeEndPrivilegedSPI(&_ducklakeSpi2);
 
 	/* Allocate new snapshot in caller's memory context after SPI_finish */
 	newSnapshot = (DucklakeSnapshot *) palloc(sizeof(DucklakeSnapshot));
@@ -221,7 +226,9 @@ DucklakeRegisterTableColumns(Oid tableOid, int64 tableId)
 
 	snapshot = DucklakeGetCurrentSnapshot();
 
-	SPI_connect();
+	DucklakePrivSPIState _ducklakeSpi3;
+
+	DucklakeBeginPrivilegedSPI(&_ducklakeSpi3);
 
 	/* First, count the number of columns */
 	initStringInfo(&query);
@@ -233,7 +240,7 @@ DucklakeRegisterTableColumns(Oid tableOid, int64 tableId)
 
 	if (ret != SPI_OK_SELECT || SPI_processed == 0)
 	{
-		SPI_finish();
+		DucklakeEndPrivilegedSPI(&_ducklakeSpi3);
 		pfree(snapshot);
 		elog(ERROR, "Failed to count table columns");
 	}
@@ -245,7 +252,7 @@ DucklakeRegisterTableColumns(Oid tableOid, int64 tableId)
 
 	if (numColumns == 0)
 	{
-		SPI_finish();
+		DucklakeEndPrivilegedSPI(&_ducklakeSpi3);
 		pfree(snapshot);
 		return;
 	}
@@ -277,7 +284,7 @@ DucklakeRegisterTableColumns(Oid tableOid, int64 tableId)
 	ret = SPI_exec(query.data, 0);
 	if (ret != SPI_OK_INSERT)
 	{
-		SPI_finish();
+		DucklakeEndPrivilegedSPI(&_ducklakeSpi3);
 		pfree(snapshot);
 		elog(ERROR, "Failed to register table columns");
 	}
@@ -307,7 +314,7 @@ DucklakeRegisterTableColumns(Oid tableOid, int64 tableId)
 	ret = SPI_exec(query.data, 0);
 	if (ret != SPI_OK_INSERT)
 	{
-		SPI_finish();
+		DucklakeEndPrivilegedSPI(&_ducklakeSpi3);
 		pfree(snapshot);
 		elog(ERROR, "Failed to create column mapping");
 	}
@@ -325,7 +332,7 @@ DucklakeRegisterTableColumns(Oid tableOid, int64 tableId)
 	ret = SPI_exec(query.data, 0);
 	if (ret != SPI_OK_INSERT)
 	{
-		SPI_finish();
+		DucklakeEndPrivilegedSPI(&_ducklakeSpi3);
 		pfree(snapshot);
 		elog(ERROR, "Failed to create name mapping");
 	}
@@ -452,7 +459,7 @@ DucklakeRegisterTableColumns(Oid tableOid, int64 tableId)
 					 snapshot->snapshotId, snapshot->snapshotId, tableId);
 	SPI_exec(query.data, 0);
 
-	SPI_finish();
+	DucklakeEndPrivilegedSPI(&_ducklakeSpi3);
 }
 
 int64
@@ -489,7 +496,9 @@ DucklakeRegisterTable(const char *schemaName, const char *tableName, const char 
 						 "AND s.end_snapshot IS NULL",
 						 quote_literal_cstr(schemaName), quote_literal_cstr(tableName));
 
-		SPI_connect();
+		DucklakePrivSPIState _ducklakeSpi4;
+
+		DucklakeBeginPrivilegedSPI(&_ducklakeSpi4);
 		ret = SPI_exec(probeQuery.data, 0);
 
 		if (ret == SPI_OK_SELECT && SPI_processed > 0)
@@ -498,13 +507,13 @@ DucklakeRegisterTable(const char *schemaName, const char *tableName, const char 
 				DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
 											SPI_tuptable->tupdesc, 1, &isnull));
 
-			SPI_finish();
+			DucklakeEndPrivilegedSPI(&_ducklakeSpi4);
 			elog(LOG,
 				 "DucklakeRegisterTable: %s.%s already registered as table_id=%ld; skipping",
 				 schemaName, tableName, existingTableId);
 			return existingTableId;
 		}
-		SPI_finish();
+		DucklakeEndPrivilegedSPI(&_ducklakeSpi4);
 	}
 
 	/*
@@ -514,7 +523,9 @@ DucklakeRegisterTable(const char *schemaName, const char *tableName, const char 
 	 */
 	snapshot = DucklakeCreateSnapshot("CREATE TABLE", NULL, NULL);
 
-	SPI_connect();
+	DucklakePrivSPIState _ducklakeSpi5;
+
+	DucklakeBeginPrivilegedSPI(&_ducklakeSpi5);
 
 	initStringInfo(&query);
 
@@ -670,7 +681,7 @@ DucklakeRegisterTable(const char *schemaName, const char *tableName, const char 
 					 snapshot->nextCatalogId, snapshot->snapshotId);
 	SPI_exec(query.data, 0);
 
-	SPI_finish();
+	DucklakeEndPrivilegedSPI(&_ducklakeSpi5);
 	pfree(snapshot);
 
 	/* Register table columns */
@@ -734,12 +745,14 @@ DucklakeGetTableMetadata(Oid tableOid)
 					 " LIMIT 1",
 					 quote_literal_cstr(schemaName), quote_literal_cstr(tableName));
 
-	SPI_connect();
+	DucklakePrivSPIState _ducklakeSpi6;
+
+	DucklakeBeginPrivilegedSPI(&_ducklakeSpi6);
 	ret = SPI_exec(query.data, 0);
 
 	if (ret != SPI_OK_SELECT || SPI_processed == 0)
 	{
-		SPI_finish();
+		DucklakeEndPrivilegedSPI(&_ducklakeSpi6);
 		return NULL;
 	}
 
@@ -776,7 +789,7 @@ DucklakeGetTableMetadata(Oid tableOid)
 	Datum		dataPathDatum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 12, &isnull);
 	char	   *dataPathStr = isnull ? NULL : pstrdup(TextDatumGetCString(dataPathDatum));
 
-	SPI_finish();
+	DucklakeEndPrivilegedSPI(&_ducklakeSpi6);
 
 	/*
 	 * Resolve to absolute. Downstream consumers receive path as an absolute
@@ -825,12 +838,14 @@ DucklakeGetTableMetadataById(int64 tableId)
 					 " WHERE t.table_id = %ld AND t.end_snapshot IS NULL",
 					 tableId);
 
-	SPI_connect();
+	DucklakePrivSPIState _ducklakeSpi7;
+
+	DucklakeBeginPrivilegedSPI(&_ducklakeSpi7);
 	ret = SPI_exec(query.data, 0);
 
 	if (ret != SPI_OK_SELECT || SPI_processed == 0)
 	{
-		SPI_finish();
+		DucklakeEndPrivilegedSPI(&_ducklakeSpi7);
 		return NULL;
 	}
 
@@ -866,7 +881,7 @@ DucklakeGetTableMetadataById(int64 tableId)
 	Datum		dataPathDatum = SPI_getbinval(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 12, &isnull);
 	char	   *dataPathStr = isnull ? NULL : pstrdup(TextDatumGetCString(dataPathDatum));
 
-	SPI_finish();
+	DucklakeEndPrivilegedSPI(&_ducklakeSpi7);
 
 	char	   *pathStr = ResolveAbsoluteTablePath(dataPathStr,
 												   schemaPathStr, schemaPathIsRel,
@@ -900,7 +915,9 @@ DucklakeDropTable(int64 tableId)
 	 */
 	newSnapshot = DucklakeCreateSnapshot("DROP TABLE", NULL, NULL);
 
-	SPI_connect();
+	DucklakePrivSPIState _ducklakeSpi8;
+
+	DucklakeBeginPrivilegedSPI(&_ducklakeSpi8);
 
 	initStringInfo(&query);
 	appendStringInfo(&query,
@@ -939,7 +956,7 @@ DucklakeDropTable(int64 tableId)
 					 tableId);
 	SPI_exec(query.data, 0);
 
-	SPI_finish();
+	DucklakeEndPrivilegedSPI(&_ducklakeSpi8);
 }
 
 List *
@@ -973,12 +990,14 @@ DucklakeGetDataFiles(int64 tableId, int64 snapshotId)
 					 "ORDER BY file_order",
 					 tableId, snapshotId, snapshotId);
 
-	SPI_connect();
+	DucklakePrivSPIState _ducklakeSpi9;
+
+	DucklakeBeginPrivilegedSPI(&_ducklakeSpi9);
 	ret = SPI_exec(query.data, 0);
 
 	if (ret != SPI_OK_SELECT)
 	{
-		SPI_finish();
+		DucklakeEndPrivilegedSPI(&_ducklakeSpi9);
 		return NIL;
 	}
 
@@ -1032,7 +1051,7 @@ DucklakeGetDataFiles(int64 tableId, int64 snapshotId)
 		dataFiles = lappend(dataFiles, dataFile);
 	}
 
-	SPI_finish();
+	DucklakeEndPrivilegedSPI(&_ducklakeSpi9);
 	return dataFiles;
 }
 
@@ -1048,7 +1067,9 @@ DucklakeAddDataFile(int64 tableId, const char *path, int64 recordCount,
 	snapshot = DucklakeGetCurrentSnapshot();
 	dataFileId = snapshot->nextFileId++;
 
-	SPI_connect();
+	DucklakePrivSPIState _ducklakeSpi10;
+
+	DucklakeBeginPrivilegedSPI(&_ducklakeSpi10);
 
 	/*
 	 * Look up the mapping_id and the fully-resolved absolute table path for
@@ -1138,7 +1159,7 @@ DucklakeAddDataFile(int64 tableId, const char *path, int64 recordCount,
 
 	if (ret != SPI_OK_INSERT_RETURNING)
 	{
-		SPI_finish();
+		DucklakeEndPrivilegedSPI(&_ducklakeSpi10);
 		pfree(snapshot);
 		elog(ERROR, "Failed to add data file");
 	}
@@ -1229,7 +1250,7 @@ DucklakeAddDataFile(int64 tableId, const char *path, int64 recordCount,
 					 tableId, tableId, tableId);
 	SPI_exec(query.data, 0);
 
-	SPI_finish();
+	DucklakeEndPrivilegedSPI(&_ducklakeSpi10);
 	pfree(snapshot);
 
 	return dataFileId;
@@ -1248,7 +1269,9 @@ DucklakeRemoveDataFile(int64 dataFileId)
 					 "UPDATE lake_ducklake.data_file SET end_snapshot = %ld WHERE data_file_id = %ld",
 					 snapshot->snapshotId, dataFileId);
 
-	SPI_connect();
+	DucklakePrivSPIState _ducklakeSpi11;
+
+	DucklakeBeginPrivilegedSPI(&_ducklakeSpi11);
 	SPI_exec(query.data, 0);
 
 	/*
@@ -1277,7 +1300,7 @@ DucklakeRemoveDataFile(int64 dataFileId)
 					 dataFileId);
 	SPI_exec(query.data, 0);
 
-	SPI_finish();
+	DucklakeEndPrivilegedSPI(&_ducklakeSpi11);
 
 	pfree(snapshot);
 }
@@ -1296,7 +1319,9 @@ DucklakeRemoveAllDataFiles(int64 tableId)
 					 "WHERE table_id = %ld AND end_snapshot IS NULL",
 					 snapshot->snapshotId, tableId);
 
-	SPI_connect();
+	DucklakePrivSPIState _ducklakeSpi12;
+
+	DucklakeBeginPrivilegedSPI(&_ducklakeSpi12);
 	SPI_exec(query.data, 0);
 
 	/* Table is empty now: zero out table_stats. */
@@ -1310,7 +1335,7 @@ DucklakeRemoveAllDataFiles(int64 tableId)
 					 tableId);
 	SPI_exec(query.data, 0);
 
-	SPI_finish();
+	DucklakeEndPrivilegedSPI(&_ducklakeSpi12);
 
 	pfree(snapshot);
 }
@@ -1347,12 +1372,14 @@ DucklakeGetDeleteFiles(int64 tableId, int64 snapshotId)
 	 */
 	MemoryContext callerContext = CurrentMemoryContext;
 
-	SPI_connect();
+	DucklakePrivSPIState _ducklakeSpi13;
+
+	DucklakeBeginPrivilegedSPI(&_ducklakeSpi13);
 	ret = SPI_exec(query.data, 0);
 
 	if (ret != SPI_OK_SELECT)
 	{
-		SPI_finish();
+		DucklakeEndPrivilegedSPI(&_ducklakeSpi13);
 		return NIL;
 	}
 
@@ -1398,7 +1425,7 @@ DucklakeGetDeleteFiles(int64 tableId, int64 snapshotId)
 		MemoryContextSwitchTo(spiContext);
 	}
 
-	SPI_finish();
+	DucklakeEndPrivilegedSPI(&_ducklakeSpi13);
 	return deleteFiles;
 }
 
@@ -1417,7 +1444,9 @@ DucklakeAddDeleteFile(int64 tableId, int64 dataFileId, const char *path,
 	snapshot = DucklakeGetCurrentSnapshot();
 	deleteFileId = snapshot->nextFileId++;
 
-	SPI_connect();
+	DucklakePrivSPIState _ducklakeSpi14;
+
+	DucklakeBeginPrivilegedSPI(&_ducklakeSpi14);
 
 	/*
 	 * Look up the fully-resolved absolute table path (Phase 2: chain
@@ -1489,7 +1518,7 @@ DucklakeAddDeleteFile(int64 tableId, int64 dataFileId, const char *path,
 
 	if (ret != SPI_OK_INSERT_RETURNING)
 	{
-		SPI_finish();
+		DucklakeEndPrivilegedSPI(&_ducklakeSpi14);
 		pfree(snapshot);
 		elog(ERROR, "Failed to add delete file");
 	}
@@ -1501,7 +1530,7 @@ DucklakeAddDeleteFile(int64 tableId, int64 dataFileId, const char *path,
 					 snapshot->nextFileId, snapshot->snapshotId);
 	SPI_exec(query.data, 0);
 
-	SPI_finish();
+	DucklakeEndPrivilegedSPI(&_ducklakeSpi14);
 	pfree(snapshot);
 
 	return deleteFileId;
@@ -1522,7 +1551,9 @@ DucklakeAddFileColumnStats(int64 dataFileId, int64 tableId, int64 columnId,
 		return;
 	}
 
-	SPI_connect();
+	DucklakePrivSPIState _ducklakeSpi15;
+
+	DucklakeBeginPrivilegedSPI(&_ducklakeSpi15);
 
 	initStringInfo(&query);
 
@@ -1615,7 +1646,7 @@ DucklakeAddFileColumnStats(int64 dataFileId, int64 tableId, int64 columnId,
 					 tableId, columnId, tableId, columnId);
 	SPI_exec(query.data, 0);
 
-	SPI_finish();
+	DucklakeEndPrivilegedSPI(&_ducklakeSpi15);
 }
 
 /*
@@ -1653,7 +1684,9 @@ DucklakeAddColumn(Oid tableOid, const char *columnName, const char *columnType,
 	initStringInfo(&query);
 
 	/* Update current snapshot with new next_catalog_id */
-	SPI_connect();
+	DucklakePrivSPIState _ducklakeSpi16;
+
+	DucklakeBeginPrivilegedSPI(&_ducklakeSpi16);
 	appendStringInfo(&query,
 					 "UPDATE lake_ducklake.snapshot SET next_catalog_id = %ld WHERE snapshot_id = %ld",
 					 currentSnapshot->nextCatalogId, currentSnapshot->snapshotId);
@@ -1806,7 +1839,7 @@ DucklakeAddColumn(Oid tableOid, const char *columnName, const char *columnType,
 					 newSnapshot->snapshotId, newSnapshot->snapshotId, metadata->tableId);
 	SPI_exec(query.data, 0);
 
-	SPI_finish();
+	DucklakeEndPrivilegedSPI(&_ducklakeSpi16);
 }
 
 /*
@@ -1829,7 +1862,9 @@ DucklakeDropColumn(Oid tableOid, const char *columnName)
 	newSnapshot = DucklakeCreateSnapshot("DROP COLUMN", NULL, NULL);
 
 	/* Increment schema_version and set end_snapshot on the column */
-	SPI_connect();
+	DucklakePrivSPIState _ducklakeSpi17;
+
+	DucklakeBeginPrivilegedSPI(&_ducklakeSpi17);
 	initStringInfo(&query);
 	appendStringInfo(&query,
 					 "UPDATE lake_ducklake.snapshot SET schema_version = schema_version + 1 "
@@ -1861,7 +1896,7 @@ DucklakeDropColumn(Oid tableOid, const char *columnName)
 					 newSnapshot->snapshotId, newSnapshot->snapshotId, metadata->tableId);
 	SPI_exec(query.data, 0);
 
-	SPI_finish();
+	DucklakeEndPrivilegedSPI(&_ducklakeSpi17);
 }
 
 /*
@@ -1886,7 +1921,9 @@ DucklakeRenameColumn(Oid tableOid, const char *oldName, const char *newName)
 	/* Create a new snapshot for this schema change */
 	newSnapshot = DucklakeCreateSnapshot("RENAME COLUMN", NULL, NULL);
 
-	SPI_connect();
+	DucklakePrivSPIState _ducklakeSpi18;
+
+	DucklakeBeginPrivilegedSPI(&_ducklakeSpi18);
 
 	/* Increment schema_version on the new snapshot */
 	initStringInfo(&query);
@@ -1956,7 +1993,7 @@ DucklakeRenameColumn(Oid tableOid, const char *oldName, const char *newName)
 					 newSnapshot->snapshotId, newSnapshot->snapshotId, metadata->tableId);
 	SPI_exec(query.data, 0);
 
-	SPI_finish();
+	DucklakeEndPrivilegedSPI(&_ducklakeSpi18);
 }
 
 
@@ -1981,7 +2018,9 @@ DucklakeRenameTable(const char *schemaName, const char *oldName, const char *new
 	int			ret;
 
 	/* Look up the table_id for the OLD name within the given schema */
-	SPI_connect();
+	DucklakePrivSPIState _ducklakeSpi19;
+
+	DucklakeBeginPrivilegedSPI(&_ducklakeSpi19);
 	initStringInfo(&query);
 	appendStringInfo(&query,
 					 "SELECT t.table_id FROM lake_ducklake.table t "
@@ -2003,7 +2042,7 @@ DucklakeRenameTable(const char *schemaName, const char *oldName, const char *new
 			tableId = -1;
 	}
 
-	SPI_finish();
+	DucklakeEndPrivilegedSPI(&_ducklakeSpi19);
 
 	if (tableId < 0)
 	{
@@ -2020,7 +2059,9 @@ DucklakeRenameTable(const char *schemaName, const char *oldName, const char *new
 	 */
 	newSnapshot = DucklakeCreateSnapshot("RENAME TABLE", NULL, NULL);
 
-	SPI_connect();
+	DucklakePrivSPIState _ducklakeSpi20;
+
+	DucklakeBeginPrivilegedSPI(&_ducklakeSpi20);
 
 	/* Bump schema_version on the new snapshot */
 	initStringInfo(&query);
@@ -2050,7 +2091,7 @@ DucklakeRenameTable(const char *schemaName, const char *oldName, const char *new
 	ret = SPI_exec(query.data, 0);
 	if (ret != SPI_OK_INSERT || SPI_processed == 0)
 	{
-		SPI_finish();
+		DucklakeEndPrivilegedSPI(&_ducklakeSpi20);
 		elog(ERROR, "Failed to insert renamed table row for %s -> %s",
 			 oldName, newName);
 	}
@@ -2083,7 +2124,7 @@ DucklakeRenameTable(const char *schemaName, const char *oldName, const char *new
 					 newSnapshot->snapshotId, newSnapshot->snapshotId, tableId);
 	SPI_exec(query.data, 0);
 
-	SPI_finish();
+	DucklakeEndPrivilegedSPI(&_ducklakeSpi20);
 }
 
 
@@ -2108,7 +2149,9 @@ DucklakeRenameSchema(const char *oldName, const char *newName)
 	int64		schemaId = -1;
 	int			ret;
 
-	SPI_connect();
+	DucklakePrivSPIState _ducklakeSpi21;
+
+	DucklakeBeginPrivilegedSPI(&_ducklakeSpi21);
 	initStringInfo(&query);
 	appendStringInfo(&query,
 					 "SELECT schema_id FROM lake_ducklake.schema "
@@ -2126,7 +2169,7 @@ DucklakeRenameSchema(const char *oldName, const char *newName)
 			schemaId = -1;
 	}
 
-	SPI_finish();
+	DucklakeEndPrivilegedSPI(&_ducklakeSpi21);
 
 	if (schemaId < 0)
 	{
@@ -2139,7 +2182,9 @@ DucklakeRenameSchema(const char *oldName, const char *newName)
 
 	newSnapshot = DucklakeCreateSnapshot("RENAME SCHEMA", NULL, NULL);
 
-	SPI_connect();
+	DucklakePrivSPIState _ducklakeSpi22;
+
+	DucklakeBeginPrivilegedSPI(&_ducklakeSpi22);
 
 	/* Bump schema_version on the new snapshot */
 	initStringInfo(&query);
@@ -2169,7 +2214,7 @@ DucklakeRenameSchema(const char *oldName, const char *newName)
 	ret = SPI_exec(query.data, 0);
 	if (ret != SPI_OK_INSERT || SPI_processed == 0)
 	{
-		SPI_finish();
+		DucklakeEndPrivilegedSPI(&_ducklakeSpi22);
 		elog(ERROR, "Failed to insert renamed schema row for %s -> %s",
 			 oldName, newName);
 	}
@@ -2183,7 +2228,7 @@ DucklakeRenameSchema(const char *oldName, const char *newName)
 					 newSnapshot->snapshotId, schemaId, newSnapshot->snapshotId);
 	SPI_exec(query.data, 0);
 
-	SPI_finish();
+	DucklakeEndPrivilegedSPI(&_ducklakeSpi22);
 }
 
 
@@ -2211,7 +2256,9 @@ DucklakeDropSchemaByOid(Oid namespaceOid)
 	if (schemaName == NULL)
 		return;
 
-	SPI_connect();
+	DucklakePrivSPIState _ducklakeSpi23;
+
+	DucklakeBeginPrivilegedSPI(&_ducklakeSpi23);
 	initStringInfo(&query);
 	appendStringInfo(&query,
 					 "SELECT schema_id FROM lake_ducklake.schema "
@@ -2230,14 +2277,16 @@ DucklakeDropSchemaByOid(Oid namespaceOid)
 			schemaId = -1;
 	}
 
-	SPI_finish();
+	DucklakeEndPrivilegedSPI(&_ducklakeSpi23);
 
 	if (schemaId < 0)
 		return;					/* not tracked */
 
 	newSnapshot = DucklakeCreateSnapshot("DROP SCHEMA", NULL, NULL);
 
-	SPI_connect();
+	DucklakePrivSPIState _ducklakeSpi24;
+
+	DucklakeBeginPrivilegedSPI(&_ducklakeSpi24);
 
 	/* Bump schema_version on the new snapshot. */
 	initStringInfo(&query);
@@ -2257,7 +2306,7 @@ DucklakeDropSchemaByOid(Oid namespaceOid)
 					 newSnapshot->snapshotId, schemaId);
 	SPI_exec(query.data, 0);
 
-	SPI_finish();
+	DucklakeEndPrivilegedSPI(&_ducklakeSpi24);
 }
 
 
@@ -2317,7 +2366,9 @@ DucklakeInsertPartitionSpec(int64 tableId, List *transforms)
 	if (transforms == NIL)
 		return;
 
-	SPI_connect();
+	DucklakePrivSPIState _ducklakeSpi25;
+
+	DucklakeBeginPrivilegedSPI(&_ducklakeSpi25);
 
 	/*
 	 * Look up the table's live begin_snapshot -- DucklakeRegisterTable just
@@ -2333,7 +2384,7 @@ DucklakeInsertPartitionSpec(int64 tableId, List *transforms)
 	ret = SPI_exec(query.data, 1);
 	if (ret != SPI_OK_SELECT || SPI_processed == 0)
 	{
-		SPI_finish();
+		DucklakeEndPrivilegedSPI(&_ducklakeSpi25);
 		elog(ERROR, "DuckLake table_id %ld not found when writing partition spec",
 			 tableId);
 	}
@@ -2377,7 +2428,7 @@ DucklakeInsertPartitionSpec(int64 tableId, List *transforms)
 		ret = SPI_exec(query.data, 0);
 		if (ret != SPI_OK_INSERT || SPI_processed == 0)
 		{
-			SPI_finish();
+			DucklakeEndPrivilegedSPI(&_ducklakeSpi25);
 			elog(ERROR, "Failed to write partition_column row for %s "
 				 "(column not found in lake_ducklake.column)",
 				 transform->columnName);
@@ -2386,7 +2437,7 @@ DucklakeInsertPartitionSpec(int64 tableId, List *transforms)
 		partitionKeyIndex++;
 	}
 
-	SPI_finish();
+	DucklakeEndPrivilegedSPI(&_ducklakeSpi25);
 }
 
 
@@ -2401,7 +2452,9 @@ DucklakeAddFilePartitionValue(int64 dataFileId, int64 tableId,
 {
 	StringInfoData query;
 
-	SPI_connect();
+	DucklakePrivSPIState _ducklakeSpi26;
+
+	DucklakeBeginPrivilegedSPI(&_ducklakeSpi26);
 	initStringInfo(&query);
 	appendStringInfo(&query,
 					 "INSERT INTO lake_ducklake.file_partition_value "
@@ -2410,5 +2463,5 @@ DucklakeAddFilePartitionValue(int64 dataFileId, int64 tableId,
 					 dataFileId, tableId, partitionKeyIndex,
 					 value ? quote_literal_cstr(value) : "NULL");
 	SPI_exec(query.data, 0);
-	SPI_finish();
+	DucklakeEndPrivilegedSPI(&_ducklakeSpi26);
 }

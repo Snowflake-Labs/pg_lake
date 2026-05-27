@@ -27,6 +27,7 @@
 #include "utils/lsyscache.h"
 
 #include "pg_lake/ducklake/catalog.h"
+#include "pg_lake/ducklake/spi_priv.h"
 
 static object_access_hook_type PreviousObjectAccessHook = NULL;
 

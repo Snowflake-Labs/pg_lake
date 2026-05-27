@@ -18,6 +18,7 @@
 
 #include "pg_lake/data_file/data_files.h"
 #include "pg_lake/ducklake/catalog.h"
+#include "pg_lake/ducklake/spi_priv.h"
 #include "pg_lake/ducklake/data_file_schema.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/parquet/field.h"
@@ -108,7 +109,9 @@ DucklakeBuildDataFileSchema(Oid relationId)
 								 "   AND c.parent_column IS NULL",
 								 relationId, metadata->tableId);
 
-				SPI_connect();
+				DucklakePrivSPIState _ducklakeSpi1;
+
+				DucklakeBeginPrivilegedSPI(&_ducklakeSpi1);
 				int			ret = SPI_exec(q.data, 0);
 
 				if (ret == SPI_OK_SELECT)
@@ -144,7 +147,7 @@ DucklakeBuildDataFileSchema(Oid relationId)
 					}
 				}
 
-				SPI_finish();
+				DucklakeEndPrivilegedSPI(&_ducklakeSpi1);
 			}
 
 			if (metadata->tableName)
