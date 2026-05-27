@@ -129,11 +129,9 @@ PGDuckSerialize(FmgrInfo *flinfo, Oid columnType, Datum value,
 {
 	/*
 	 * Unwrap domain types so that e.g. a domain-over-bytea is serialized with
-	 * the bytea-specific path rather than the generic text output path. Map
-	 * types are domains with special semantics and must not be unwrapped.
+	 * the bytea-specific path rather than the generic text output path.
 	 */
-	if (!IsMapTypeOid(columnType) && get_typtype(columnType) == TYPTYPE_DOMAIN)
-		columnType = getBaseType(columnType);
+	columnType = ResolveDomainBaseType(columnType);
 
 	if (flinfo->fn_oid == ARRAY_OUT_OID)
 	{

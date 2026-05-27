@@ -24,5 +24,6 @@ char	   *GetDuckDBMapDefinitionForPGType(Oid postgresTypeId,
 											CopyDataFormat format);
 
 extern PGDLLEXPORT bool IsMapTypeOid(Oid typeId);
+extern PGDLLEXPORT Oid ResolveDomainBaseType(Oid typeId);
 extern PGDLLEXPORT PGType GetMapKeyType(Oid mapOid);
 extern PGDLLEXPORT PGType GetMapValueType(Oid mapOid);

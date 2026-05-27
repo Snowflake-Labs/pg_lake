@@ -222,6 +222,21 @@ GetMapCreateFunctionOid()
 
 
 /*
+ * ResolveDomainBaseType returns the base type OID for a domain, or the OID
+ * unchanged if it is not a domain.  Map types are domains with special
+ * semantics and are left as-is.
+ */
+Oid
+ResolveDomainBaseType(Oid typeId)
+{
+	if (!IsMapTypeOid(typeId) && get_typtype(typeId) == TYPTYPE_DOMAIN)
+		return getBaseType(typeId);
+
+	return typeId;
+}
+
+
+/*
  * GetDuckDBMapDefinitionForPGType returns a type definition string for a DuckDB map type.
  */
 char *

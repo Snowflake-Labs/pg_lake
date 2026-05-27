@@ -1224,9 +1224,7 @@ bool
 ShouldUseDuckSerialization(CopyDataFormat targetFormat, PGType postgresType)
 {
 	/* unwrap domain to base type so per-type checks below see the real type */
-	if (!IsMapTypeOid(postgresType.postgresTypeOid) &&
-		get_typtype(postgresType.postgresTypeOid) == TYPTYPE_DOMAIN)
-		postgresType.postgresTypeOid = getBaseType(postgresType.postgresTypeOid);
+	postgresType.postgresTypeOid = ResolveDomainBaseType(postgresType.postgresTypeOid);
 
 	Oid			typeId = postgresType.postgresTypeOid;
 

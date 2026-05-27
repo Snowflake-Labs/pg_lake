@@ -629,12 +629,9 @@ ChooseDuckDBEngineTypeForWrite(PGType postgresType,
 
 	/*
 	 * Unwrap domain types so that e.g. a domain over bytea is written as BLOB
-	 * rather than falling through to VARCHAR.  Map types are domains with
-	 * special semantics and must not be unwrapped.
+	 * rather than falling through to VARCHAR.
 	 */
-	if (!IsMapTypeOid(postgresType.postgresTypeOid) &&
-		get_typtype(postgresType.postgresTypeOid) == TYPTYPE_DOMAIN)
-		postgresType.postgresTypeOid = getBaseType(postgresType.postgresTypeOid);
+	postgresType.postgresTypeOid = ResolveDomainBaseType(postgresType.postgresTypeOid);
 
 	DuckDBType	duckTypeId = GetDuckDBTypeForPGType(postgresType);
 
