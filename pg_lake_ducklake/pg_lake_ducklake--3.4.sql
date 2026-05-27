@@ -6,6 +6,13 @@
 -- DuckLake metadata schema
 -- Implements DuckLake specification v1.0 for full DuckDB interoperability
 
+-- Restrict the search path during install so unqualified operators and
+-- functions in this script can't be hijacked by anything in `public`
+-- (the extension's host schema, which is on the default search_path).
+-- Explicit qualifications elsewhere (lake_ducklake.*, @extschema@.*) are
+-- unaffected.
+SET LOCAL search_path = pg_catalog;
+
 CREATE SCHEMA lake_ducklake;
 GRANT USAGE ON SCHEMA lake_ducklake TO public;
 
@@ -829,6 +836,40 @@ SELECT 'data_path',
        rtrim(current_setting('pg_lake_ducklake.default_location_prefix', true), '/') || '/',
        NULL, NULL
 WHERE coalesce(current_setting('pg_lake_ducklake.default_location_prefix', true), '') <> '';
+
+-- Materialise existing user-visible PG schemas as DuckLake schemas so a
+-- DuckDB ATTACH against this catalog sees them without the user having
+-- to manually CREATE SCHEMA dl.<name>. We exclude system schemas (pg_*,
+-- information_schema) and any schema owned by a PostgreSQL extension --
+-- which catches lake_ducklake itself plus lake, lake_iceberg, lake_table,
+-- lake_engine, postgis, and so on. Schemas the user adds AFTER CREATE
+-- EXTENSION still need an explicit CREATE SCHEMA dl.<name> from the
+-- DuckDB side; propagating those via an event trigger is a follow-up.
+INSERT INTO lake_ducklake.schema
+    (schema_id, schema_uuid, begin_snapshot, schema_name, path, path_is_relative)
+SELECT
+    (SELECT next_catalog_id FROM lake_ducklake.snapshot WHERE snapshot_id = 0) - 1
+        + row_number() OVER (ORDER BY n.nspname),
+    gen_random_uuid(),
+    0,
+    n.nspname,
+    n.nspname || '/',
+    true
+FROM pg_namespace n
+WHERE n.nspname NOT LIKE 'pg_%'
+  AND n.nspname <> 'information_schema'
+  AND NOT EXISTS (
+      SELECT 1 FROM pg_depend d
+       WHERE d.classid = 'pg_namespace'::regclass
+         AND d.objid = n.oid
+         AND d.deptype = 'e'
+  );
+
+UPDATE lake_ducklake.snapshot
+   SET next_catalog_id = next_catalog_id + (
+       SELECT count(*) FROM lake_ducklake.schema WHERE end_snapshot IS NULL
+   )
+ WHERE snapshot_id = 0;
 
 -- ============================================================================
 -- Additional Public Views (remaining 16 tables)

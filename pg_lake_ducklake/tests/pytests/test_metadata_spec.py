@@ -379,5 +379,51 @@ def test_ducklake_metadata_view_synthesizes_data_path_from_guc(pg_cursor):
     ], "real row must hide the synthetic GUC row"
 
 
+def test_install_seeds_user_pg_schemas_into_lake_ducklake_schema(pg_cursor):
+    """
+    CREATE EXTENSION pg_lake_ducklake materialises existing user-visible
+    PG schemas into lake_ducklake.schema, so DuckDB sees them on ATTACH
+    without needing CREATE SCHEMA dl.<name>. System schemas (pg_*,
+    information_schema) and extension-owned schemas (lake, lake_engine,
+    lake_iceberg, lake_table, lake_ducklake, ...) must NOT appear.
+
+    The conftest cleanup runs DELETE on lake_ducklake.schema between
+    tests, so to inspect the seed we DROP and re-CREATE the extension
+    within this test.
+    """
+    pg_cursor.execute("DROP EXTENSION pg_lake_ducklake CASCADE")
+    pg_cursor.execute("CREATE EXTENSION pg_lake_ducklake CASCADE")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        "SELECT schema_name FROM lake_ducklake.schema "
+        "WHERE end_snapshot IS NULL ORDER BY schema_name"
+    )
+    seeded = [r[0] for r in pg_cursor.fetchall()]
+
+    assert "public" in seeded, f"expected public to be seeded, got {seeded}"
+
+    forbidden = {
+        "pg_catalog",
+        "pg_toast",
+        "information_schema",
+        "lake",
+        "lake_ducklake",
+        "lake_engine",
+        "lake_iceberg",
+        "lake_table",
+    }
+    leaked = forbidden.intersection(seeded)
+    assert not leaked, f"system/extension schemas leaked into seed: {leaked}"
+
+    pg_cursor.execute(
+        "SELECT next_catalog_id FROM lake_ducklake.snapshot WHERE snapshot_id = 0"
+    )
+    next_id = pg_cursor.fetchone()[0]
+    assert next_id > len(
+        seeded
+    ), f"snapshot.next_catalog_id {next_id} must be past the seeded ids ({len(seeded)})"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

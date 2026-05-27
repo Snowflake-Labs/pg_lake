@@ -1307,7 +1307,9 @@ def test_duckdb_create_table_appears_as_pg_foreign_table(pg_cursor, s3):
     # No DATA_PATH option -- relies on the seeded metadata row.
     duck.execute(f"ATTACH 'postgres:{conn_str}' AS dl (TYPE DUCKLAKE)")
 
-    duck.execute("CREATE SCHEMA IF NOT EXISTS dl.public")
+    # No CREATE SCHEMA either -- pg_lake_ducklake--3.4.sql seeds existing
+    # PG user schemas (public among them) into lake_ducklake.schema at
+    # CREATE EXTENSION time so DuckDB sees them on ATTACH.
     duck.execute("CREATE TABLE dl.public.from_duckdb (x INT, y INT)")
     duck.execute("INSERT INTO dl.public.from_duckdb VALUES (10, 20)")
 
