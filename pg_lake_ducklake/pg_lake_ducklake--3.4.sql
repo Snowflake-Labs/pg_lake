@@ -852,9 +852,22 @@ SELECT * FROM lake_ducklake.files_scheduled_for_deletion;
 CREATE VIEW @extschema@.ducklake_inlined_data_tables AS
 SELECT * FROM lake_ducklake.inlined_data_tables;
 
--- ducklake_metadata view
+-- ducklake_metadata view: surfaces the underlying metadata table plus,
+-- when no real `data_path` row has been written yet, a synthesized one
+-- derived from the pg_lake_ducklake.default_location_prefix GUC. This
+-- lets DuckDB ATTACH 'postgres:...' AS dl (TYPE DUCKLAKE) succeed
+-- without DATA_PATH on a freshly-created extension, provided the user
+-- has set the GUC. The first explicit write (DuckDB ATTACH ... DATA_PATH,
+-- or the seed in DucklakeRegisterTable) persists a real row, after which
+-- the synthetic one is suppressed by the NOT EXISTS.
 CREATE VIEW @extschema@.ducklake_metadata AS
-SELECT * FROM lake_ducklake.metadata;
+SELECT key, value, scope, scope_id FROM lake_ducklake.metadata
+UNION ALL
+SELECT 'data_path',
+       rtrim(current_setting('pg_lake_ducklake.default_location_prefix', true), '/') || '/',
+       NULL::VARCHAR, NULL::BIGINT
+WHERE coalesce(current_setting('pg_lake_ducklake.default_location_prefix', true), '') <> ''
+  AND NOT EXISTS (SELECT 1 FROM lake_ducklake.metadata WHERE key = 'data_path');
 
 -- ducklake_partition_column view
 CREATE VIEW @extschema@.ducklake_partition_column AS
