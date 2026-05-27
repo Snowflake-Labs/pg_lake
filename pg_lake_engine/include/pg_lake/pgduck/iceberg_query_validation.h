@@ -38,6 +38,27 @@ extern PGDLLEXPORT char *IcebergWrapQueryWithErrorOrClampChecks(char *query,
 																bool queryHasRowId);
 
 /*
+ * IcebergWrapQueryWithSizeClampChecks wraps a query so that values
+ * exceeding the per-column byte caps (pg_lake_engine.iceberg_max_string_bytes,
+ * iceberg_max_binary_bytes, iceberg_max_nested_type_bytes) are either
+ * clamped or rejected, per `policy`:
+ *
+ *   - ICEBERG_OOR_ERROR (default): raise error identifying the column.
+ *   - ICEBERG_OOR_CLAMP: text/varchar/bpchar truncated at a UTF-8
+ *     character boundary; bytea byte-truncated; jsonb/json NULLed when
+ *     the serialized form exceeds the limit; arrays/structs/maps NULLed
+ *     when their measured byte size exceeds the nested-type cap.
+ *   - ICEBERG_OOR_NONE: no-op.
+ *
+ * Returns the original query unchanged when all GUCs are zero or no
+ * column carries a clampable type.
+ */
+extern PGDLLEXPORT char *IcebergWrapQueryWithSizeClampChecks(char *query,
+															 TupleDesc tupleDesc,
+															 IcebergOutOfRangePolicy policy,
+															 bool queryHasRowId);
+
+/*
  * IcebergWrapQueryWithNativeTypeConversion wraps a query to rewrite
  * columns whose native DuckDB shape does not match Iceberg's.  See the
  * implementation for the set of rewrites and why each is required.

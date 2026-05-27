@@ -40,6 +40,16 @@ static IcebergOutOfRangePolicy GetIcebergOutOfRangePolicyFromOptions(List *optio
 
 
 /*
+ * Backing variables for pg_lake_engine.iceberg_max_string_bytes and
+ * pg_lake_engine.iceberg_max_binary_bytes.  Registered in pg_lake_engine
+ * _PG_init().  0 means no limit.
+ */
+int			IcebergMaxStringBytes = 0;
+int			IcebergMaxBinaryBytes = 0;
+int			IcebergMaxNestedTypeBytes = 0;
+
+
+/*
  * GetIcebergOutOfRangePolicyFromOptions reads the "out_of_range_values" option
  * from a list of DefElem options (table options).
  *
@@ -167,6 +177,48 @@ TypeNeedsIcebergValidation(Oid typeOid, int32 typmod, bool isPushdown)
 		ReleaseTupleDesc(tupdesc);
 		return found;
 	}
+
+	return false;
+}
+
+
+/*
+ * TypeNeedsIcebergSizeClamping returns true if a Datum of typeOid contains
+ * any leaf type that could be size-clamped: text/varchar/bpchar/bytea (which
+ * truncate) or jsonb/json (which become NULL).  It also returns true for
+ * any array, composite, or map type, since their aggregate JSON-serialized
+ * size can exceed the downstream consumer's column cap regardless of
+ * element/field types (e.g. an int[] of millions of values).  Recurses
+ * through domains.
+ *
+ * Independent of the current pg_lake_engine.iceberg_max_string_bytes and
+ * pg_lake_engine.iceberg_max_binary_bytes values: this is a static
+ * type-shape check used to gate the per-row clamp call cheaply.
+ */
+bool
+TypeNeedsIcebergSizeClamping(Oid typeOid)
+{
+	if (typeOid == TEXTOID || typeOid == VARCHAROID ||
+		typeOid == BPCHAROID || typeOid == BYTEAOID ||
+		typeOid == JSONBOID || typeOid == JSONOID)
+		return true;
+
+	/* Any array type: aggregate size matters even for non-clampable elements. */
+	if (OidIsValid(get_element_type(typeOid)))
+		return true;
+
+	/* map check must precede the generic domain unwrap (maps are domains) */
+	if (IsMapTypeOid(typeOid))
+		return true;
+
+	char		typtype = get_typtype(typeOid);
+
+	if (typtype == TYPTYPE_DOMAIN)
+		return TypeNeedsIcebergSizeClamping(getBaseType(typeOid));
+
+	/* Any composite type: aggregate size of fields matters. */
+	if (typtype == TYPTYPE_COMPOSITE)
+		return true;
 
 	return false;
 }
