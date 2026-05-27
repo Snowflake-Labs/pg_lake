@@ -41,3 +41,44 @@ extern PGDLLEXPORT Datum IcebergErrorOrClampDatum(Datum value, Oid typeOid,
 												  int32 typmod,
 												  IcebergOutOfRangePolicy policy,
 												  bool *isNull);
+
+/*
+ * IcebergSizeClampDatum truncates, NULLs, or errors on a Datum so that
+ * string, binary, and nested-type values fit the byte limits expressed by
+ * pg_lake_engine.iceberg_max_string_bytes,
+ * pg_lake_engine.iceberg_max_binary_bytes, and
+ * pg_lake_engine.iceberg_max_nested_type_bytes (0 = no limit).
+ *
+ * The behavior on an oversize value is selected by `policy`:
+ *   - ICEBERG_OOR_ERROR (default for Iceberg tables): raise an error
+ *     identifying the column and exceeded GUC.
+ *   - ICEBERG_OOR_CLAMP: silently fix up the value as below.
+ *   - ICEBERG_OOR_NONE: pass through unchanged.
+ *
+ * Under CLAMP, lossless types are truncated:
+ *   - text/varchar/bpchar  -> trimmed at a UTF-8 character boundary to
+ *                             iceberg_max_string_bytes.
+ *   - bytea                -> byte-truncated to iceberg_max_binary_bytes.
+ *
+ * Structured-string types are replaced with NULL via *isNull = true,
+ * since truncation would corrupt them:
+ *   - jsonb/json
+ *
+ * Container types (array / composite / map / domain over either) are
+ * NULLed when their measured size exceeds iceberg_max_nested_type_bytes.
+ * The size is the type's output-function text length when the container
+ * has any jsonb/json leaf (so jsonb leaves contribute their JSON-text
+ * size, which is what the consumer ultimately sees), and the cheaper
+ * varlena content size otherwise.
+ *
+ * `columnName` is included in the error message under ERROR mode; pass
+ * NULL or empty when the column context is unknown.
+ *
+ * If all three GUCs are 0, the value is returned unchanged regardless of
+ * policy or type.
+ */
+extern PGDLLEXPORT Datum IcebergSizeClampDatum(Datum value, Oid typeOid,
+											   int32 typmod,
+											   IcebergOutOfRangePolicy policy,
+											   const char *columnName,
+											   bool *isNull);

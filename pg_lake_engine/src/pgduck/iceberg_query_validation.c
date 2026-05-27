@@ -476,6 +476,304 @@ IcebergWrapQueryWithErrorOrClampChecks(char *query, TupleDesc tupleDesc,
 
 
 /* ================================================================
+ * Query wrapping for downstream byte-cap size clamp.
+ * See IcebergWrapQueryWithSizeClampChecks below.
+ * ================================================================ */
+
+/*
+ * EscapeColumnNameForErrorMessage returns a palloc'd copy of `name`
+ * with single quotes doubled (so it stays inside a SQL string literal)
+ * and, when forPrintfFormat is true, percent signs doubled too (so the
+ * embedded DuckDB printf format string does not consume the column
+ * name as a format specifier).
+ *
+ * Identifiers can contain `'`, `%`, `\` and other characters when
+ * stored quoted (CREATE TABLE t ("o'reilly" text)); without escaping,
+ * such names break the wrapper's CASE expression at SQL parse time or
+ * surface as a malformed runtime error.
+ */
+static char *
+EscapeColumnNameForErrorMessage(const char *name, bool forPrintfFormat)
+{
+	StringInfoData buf;
+
+	initStringInfo(&buf);
+
+	for (const char *p = name; *p != '\0'; p++)
+	{
+		if (*p == '\'')
+			appendStringInfoString(&buf, "''");
+		else if (forPrintfFormat && *p == '%')
+			appendStringInfoString(&buf, "%%");
+		else
+			appendStringInfoChar(&buf, *p);
+	}
+
+	return buf.data;
+}
+
+
+/*
+ * AppendIcebergSizeClampExpression emits DuckDB SQL that enforces the
+ * size limits on `expr` per the policy:
+ *
+ *   ICEBERG_OOR_CLAMP — truncate / NULL the value:
+ *     - text/varchar/bpchar : iceberg_size_clamp_text(expr, $maxStringBytes)
+ *     - bytea               : iceberg_size_clamp_blob(expr, $maxBinaryBytes)
+ *     - jsonb / json        : NULL when strlen(expr::VARCHAR) exceeds the
+ *                             string limit, since truncating the serialized
+ *                             form would yield invalid JSON.
+ *     - array / composite /
+ *       map                 : NULL when iceberg_byte_size(expr) exceeds
+ *                             iceberg_max_nested_type_bytes.
+ *
+ *   ICEBERG_OOR_ERROR — raise on oversize, including the column name in
+ *   the message.  Uses iceberg_size_check_text / _blob for the leaf cases
+ *   and DuckDB's built-in error() inside CASE for jsonb/json/containers.
+ *
+ *   ICEBERG_OOR_NONE — pass through unchanged (function returns false).
+ *
+ * Returns true when a transformed expression was written to buf; false if
+ * the type needs no wrapping (caller emits the bare expression).
+ *
+ * `columnName` is the source column's name (already SQL-quoted by the
+ * caller's call site is not safe — pass the raw string and the helper will
+ * single-quote it for embedding into the error message).
+ */
+static bool
+AppendIcebergSizeClampExpression(StringInfo buf, const char *expr,
+								 const char *columnName,
+								 IcebergOutOfRangePolicy policy,
+								 Oid typeOid, int32 typmod)
+{
+	if (policy == ICEBERG_OOR_NONE)
+		return false;
+
+	if (typeOid == TEXTOID || typeOid == VARCHAROID || typeOid == BPCHAROID)
+	{
+		if (policy == ICEBERG_OOR_ERROR)
+		{
+			char	   *escapedName = EscapeColumnNameForErrorMessage(columnName, false);
+
+			appendStringInfo(buf,
+							 "iceberg_size_check_text(%s, %d, '%s')",
+							 expr, IcebergMaxStringBytes, escapedName);
+			pfree(escapedName);
+		}
+		else
+			appendStringInfo(buf, "iceberg_size_clamp_text(%s, %d)",
+							 expr, IcebergMaxStringBytes);
+		return true;
+	}
+
+	if (typeOid == BYTEAOID)
+	{
+		if (policy == ICEBERG_OOR_ERROR)
+		{
+			char	   *escapedName = EscapeColumnNameForErrorMessage(columnName, false);
+
+			appendStringInfo(buf,
+							 "iceberg_size_check_blob(%s, %d, '%s')",
+							 expr, IcebergMaxBinaryBytes, escapedName);
+			pfree(escapedName);
+		}
+		else
+			appendStringInfo(buf, "iceberg_size_clamp_blob(%s, %d)",
+							 expr, IcebergMaxBinaryBytes);
+		return true;
+	}
+
+	if (typeOid == JSONBOID || typeOid == JSONOID)
+	{
+		const char *typeLabel = (typeOid == JSONBOID) ? "jsonb" : "json";
+
+		if (policy == ICEBERG_OOR_ERROR)
+		{
+			char	   *escapedName = EscapeColumnNameForErrorMessage(columnName, true);
+
+			appendStringInfo(buf,
+							 "(CASE WHEN strlen(%s::VARCHAR) > %d "
+							 "THEN error(printf("
+							 "'value of column \"%s\" (%s, %%d bytes) "
+							 "exceeds iceberg_max_string_bytes (%d). "
+							 "Set out_of_range_values = ''clamp'' on the "
+							 "table to truncate oversize values instead "
+							 "of erroring.', strlen(%s::VARCHAR))) "
+							 "ELSE %s END)",
+							 expr, IcebergMaxStringBytes,
+							 escapedName, typeLabel,
+							 IcebergMaxStringBytes,
+							 expr, expr);
+			pfree(escapedName);
+		}
+		else
+			appendStringInfo(buf,
+							 "(CASE WHEN strlen(%s::VARCHAR) > %d "
+							 "THEN NULL ELSE %s END)",
+							 expr, IcebergMaxStringBytes, expr);
+		return true;
+	}
+
+	/*
+	 * Containers (array / composite / map): aggregate-only check.  Skip
+	 * entirely when the aggregate GUC is disabled.
+	 */
+	if (IcebergMaxNestedTypeBytes <= 0)
+		return false;
+
+	if (OidIsValid(get_element_type(typeOid)) ||
+		IsMapTypeOid(typeOid) ||
+		get_typtype(typeOid) == TYPTYPE_COMPOSITE)
+	{
+		const char *typeLabel =
+			OidIsValid(get_element_type(typeOid)) ? "array" :
+			IsMapTypeOid(typeOid) ? "map" : "composite";
+
+		if (policy == ICEBERG_OOR_ERROR)
+		{
+			char	   *escapedName = EscapeColumnNameForErrorMessage(columnName, true);
+
+			appendStringInfo(buf,
+							 "(CASE WHEN iceberg_byte_size(%s) > %d "
+							 "THEN error(printf("
+							 "'value of column \"%s\" (%s, %%d bytes) "
+							 "exceeds iceberg_max_nested_type_bytes (%d). "
+							 "Set out_of_range_values = ''clamp'' on the "
+							 "table to truncate oversize values instead "
+							 "of erroring.', iceberg_byte_size(%s))) "
+							 "ELSE %s END)",
+							 expr, IcebergMaxNestedTypeBytes,
+							 escapedName, typeLabel,
+							 IcebergMaxNestedTypeBytes,
+							 expr, expr);
+			pfree(escapedName);
+		}
+		else
+			appendStringInfo(buf,
+							 "(CASE WHEN iceberg_byte_size(%s) > %d "
+							 "THEN NULL ELSE %s END)",
+							 expr, IcebergMaxNestedTypeBytes, expr);
+		return true;
+	}
+
+	/* domain: unwrap to base type and recurse */
+	if (get_typtype(typeOid) == TYPTYPE_DOMAIN)
+	{
+		Oid			baseType = getBaseTypeAndTypmod(typeOid, &typmod);
+
+		return AppendIcebergSizeClampExpression(buf, expr, columnName, policy,
+												baseType, typmod);
+	}
+
+	return false;
+}
+
+
+/*
+ * IcebergWrapQueryWithSizeClampChecks wraps a query with an outer SELECT
+ * that enforces the per-column size limits on each clampable column.
+ * Behavior on oversize values is selected by `policy`:
+ *
+ *   - ICEBERG_OOR_ERROR: raise an error identifying the column / type /
+ *     exceeded GUC (default for Iceberg tables).
+ *   - ICEBERG_OOR_CLAMP: silently truncate / NULL.
+ *   - ICEBERG_OOR_NONE: no-op, original query returned.
+ *
+ * When all GUCs are 0 or no column carries a clampable type, the original
+ * query is returned unchanged so the wrapper is free for non-clamping
+ * callers.
+ *
+ * Both the INSERT..SELECT pushdown path (via WriteQueryResultTo) and the
+ * snowflake_cdc snapshot path (via AddQueryResultToTable) flow through
+ * this wrapper, so they share the same policy-driven behavior as the
+ * per-tuple IcebergSizeCheckOrClampSlotInPlace path.
+ */
+char *
+IcebergWrapQueryWithSizeClampChecks(char *query, TupleDesc tupleDesc,
+									IcebergOutOfRangePolicy policy,
+									bool queryHasRowId)
+{
+	if (tupleDesc == NULL || policy == ICEBERG_OOR_NONE)
+		return query;
+
+	if (IcebergMaxStringBytes == 0 && IcebergMaxBinaryBytes == 0 &&
+		IcebergMaxNestedTypeBytes == 0)
+		return query;
+
+	bool		needsAnyClamp = false;
+
+	for (int i = 0; i < tupleDesc->natts; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupleDesc, i);
+
+		if (attr->attisdropped)
+			continue;
+
+		if (TypeNeedsIcebergSizeClamping(attr->atttypid))
+		{
+			needsAnyClamp = true;
+			break;
+		}
+	}
+
+	if (!needsAnyClamp)
+		return query;
+
+	StringInfoData wrapped;
+
+	initStringInfo(&wrapped);
+	appendStringInfoString(&wrapped, "SELECT ");
+
+	bool		firstColumn = true;
+
+	for (int i = 0; i < tupleDesc->natts; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupleDesc, i);
+
+		if (attr->attisdropped)
+			continue;
+
+		if (!firstColumn)
+			appendStringInfoString(&wrapped, ", ");
+
+		const char *quotedName =
+			duckdb_quote_identifier(NameStr(attr->attname));
+
+		StringInfoData exprBuf;
+
+		initStringInfo(&exprBuf);
+
+		if (AppendIcebergSizeClampExpression(&exprBuf, quotedName,
+											 NameStr(attr->attname), policy,
+											 attr->atttypid,
+											 attr->atttypmod))
+		{
+			appendStringInfo(&wrapped, "%s AS %s", exprBuf.data, quotedName);
+		}
+		else
+		{
+			appendStringInfoString(&wrapped, quotedName);
+		}
+
+		pfree(exprBuf.data);
+
+		firstColumn = false;
+	}
+
+	if (queryHasRowId)
+	{
+		if (!firstColumn)
+			appendStringInfoString(&wrapped, ", ");
+		appendStringInfoString(&wrapped, "_row_id");
+	}
+
+	appendStringInfo(&wrapped, " FROM (%s) AS __iceberg_size_clamp", query);
+
+	return wrapped.data;
+}
+
+
+/* ================================================================
  * Query wrapping for native-type -> Iceberg conversion.
  * See IcebergWrapQueryWithNativeTypeConversion below.
  * ================================================================ */

@@ -44,6 +44,7 @@
 #include "pg_extension_base/pg_extension_base_ids.h"
 #include "pg_lake/pgduck/cache_worker.h"
 #include "pg_lake/pgduck/client.h"
+#include "pg_lake/pgduck/iceberg_validation.h"
 #include "pg_lake/util/s3_writer_utils.h"
 #include "utils/guc.h"
 
@@ -184,6 +185,50 @@ _PG_init(void)
 							256,
 							PGC_USERSET,
 							0,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("pg_lake_engine.iceberg_max_string_bytes",
+							gettext_noop("Maximum bytes for string values written to "
+										 "Iceberg tables. Values of text/varchar/bpchar "
+										 "exceeding this size are truncated at a UTF-8 "
+										 "character boundary; values of jsonb/json are "
+										 "replaced with NULL since truncation would "
+										 "corrupt the structure. 0 disables the limit. "
+										 "Intended for downstream consumers (e.g. "
+										 "Snowflake) that impose per-column byte caps."),
+							NULL,
+							&IcebergMaxStringBytes,
+							0, 0, INT_MAX,
+							PGC_USERSET,
+							GUC_UNIT_BYTE,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("pg_lake_engine.iceberg_max_binary_bytes",
+							gettext_noop("Maximum bytes for bytea values written to "
+										 "Iceberg tables. Values exceeding this size are "
+										 "byte-truncated. 0 disables the limit."),
+							NULL,
+							&IcebergMaxBinaryBytes,
+							0, 0, INT_MAX,
+							PGC_USERSET,
+							GUC_UNIT_BYTE,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("pg_lake_engine.iceberg_max_nested_type_bytes",
+							gettext_noop("Maximum bytes for the JSON-serialized form of "
+										 "array, composite, and map values written to "
+										 "Iceberg tables. The whole container is replaced "
+										 "with NULL when the sum of its leaf byte sizes "
+										 "exceeds this size. 0 disables the limit. Distinct "
+										 "from iceberg_max_string_bytes because downstream "
+										 "consumers' OBJECT/ARRAY/VARIANT columns typically "
+										 "have a much larger ceiling than STRING/VARCHAR "
+										 "(e.g. on Snowflake: 128 MiB vs. 16 MiB)."),
+							NULL,
+							&IcebergMaxNestedTypeBytes,
+							0, 0, INT_MAX,
+							PGC_USERSET,
+							GUC_UNIT_BYTE,
 							NULL, NULL, NULL);
 
 	DefineCustomStringVariable(

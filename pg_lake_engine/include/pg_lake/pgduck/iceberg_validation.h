@@ -72,3 +72,23 @@ extern PGDLLEXPORT bool TypeNeedsIcebergValidation(Oid typeOid, int32 typmod,
 #define TEMPORAL_DATE_MIN_YEAR		(-4712)
 #define TEMPORAL_TIMESTAMP_MIN_YEAR	1
 #define TEMPORAL_MAX_YEAR			9999
+
+/*
+ * Downstream byte limits for values written to Iceberg tables, set via the
+ * pg_lake_engine.iceberg_max_string_bytes and
+ * pg_lake_engine.iceberg_max_binary_bytes GUCs.  0 means no limit.  These
+ * caps are imposed by some downstream consumers (e.g. Snowflake VARCHAR
+ * 16 MiB / BINARY 8 MiB) and applied via IcebergSizeClampDatum.
+ */
+extern PGDLLEXPORT int IcebergMaxStringBytes;
+extern PGDLLEXPORT int IcebergMaxBinaryBytes;
+extern PGDLLEXPORT int IcebergMaxNestedTypeBytes;
+
+/*
+ * TypeNeedsIcebergSizeClamping returns true if a Datum of typeOid (or any
+ * lossless string / structured-string / bytea component nested within it)
+ * could potentially be size-clamped by IcebergSizeClampDatum.  Recurses
+ * through arrays, composites, maps, and domains.  Independent of the
+ * current GUC values.
+ */
+extern PGDLLEXPORT bool TypeNeedsIcebergSizeClamping(Oid typeOid);

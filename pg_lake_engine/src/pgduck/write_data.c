@@ -137,6 +137,14 @@ WriteQueryResultTo(char *query,
 													   queryHasRowId);
 	}
 
+	if (IcebergMaxStringBytes > 0 || IcebergMaxBinaryBytes > 0 ||
+		IcebergMaxNestedTypeBytes > 0)
+	{
+		query = IcebergWrapQueryWithSizeClampChecks(query, queryTupleDesc,
+													outOfRangePolicy,
+													queryHasRowId);
+	}
+
 	if (destinationFormat == DATA_FORMAT_ICEBERG)
 	{
 		/*
