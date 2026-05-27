@@ -1248,5 +1248,115 @@ def test_fresh_pg_session_sees_duckdb_writes(pg_cursor, s3):
         fresh.close()
 
 
+@pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="DuckDB not installed")
+def test_duckdb_create_table_appears_as_pg_foreign_table(pg_cursor, s3):
+    """
+    DuckDB CREATE TABLE against a fresh DuckLake catalog must materialise
+    a corresponding PG-side foreign table via the snapshot_changes replay.
+    Reproduces a user report where: (1) CREATE SCHEMA dl.public was
+    needed because the schema wasn't pre-seeded, (2) CREATE TABLE
+    succeeded and rows could be inserted from DuckDB, but the table was
+    never visible from PG because the replay didn't fire (or fired
+    without effect).
+
+    DuckDB doesn't persist DATA_PATH on ATTACH, so the catalog must
+    already have a data_path row before any DuckDB-side write -- otherwise
+    ReplayCreateTable can't compute a fully-qualified location for the
+    foreign table. The fixture re-creates the extension with the
+    pg_lake_ducklake.default_location_prefix GUC set so the install-time
+    seed populates data_path; subsequent DuckDB ATTACHes work without
+    DATA_PATH and replay produces a usable s3:// location.
+    """
+    pg_cursor.connection.commit()
+
+    # Reinstall the extension with the GUC set so data_path gets seeded
+    # at CREATE EXTENSION time. Drop and re-create rather than inserting
+    # directly so the persist-at-install path is exercised.
+    pg_cursor.execute("DROP EXTENSION pg_lake_ducklake CASCADE")
+    pg_cursor.connection.commit()
+    pg_cursor.execute(
+        f"SET pg_lake_ducklake.default_location_prefix = 's3://{TEST_BUCKET}/duck_create/'"
+    )
+    pg_cursor.execute("CREATE EXTENSION pg_lake_ducklake CASCADE")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        "SELECT value FROM lake_ducklake.metadata WHERE key = 'data_path'"
+    )
+    seeded = pg_cursor.fetchone()
+    assert seeded == (
+        f"s3://{TEST_BUCKET}/duck_create/",
+    ), f"GUC seed should have materialised data_path, got {seeded}"
+
+    duck = duckdb.connect()
+    duck.execute("INSTALL postgres; LOAD postgres")
+    duck.execute("INSTALL ducklake FROM core_nightly; LOAD ducklake")
+    duck.execute(
+        f"""
+        CREATE SECRET s3test (TYPE S3, KEY_ID 'testing', SECRET 'testing',
+                              ENDPOINT 'localhost:5999',
+                              SCOPE 's3://{TEST_BUCKET}', URL_STYLE 'path',
+                              USE_SSL false)
+        """
+    )
+    conn_str = (
+        f"host={server_params.PG_HOST} port={server_params.PG_PORT} "
+        f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
+    )
+
+    # No DATA_PATH option -- relies on the seeded metadata row.
+    duck.execute(f"ATTACH 'postgres:{conn_str}' AS dl (TYPE DUCKLAKE)")
+
+    duck.execute("CREATE SCHEMA IF NOT EXISTS dl.public")
+    duck.execute("CREATE TABLE dl.public.from_duckdb (x INT, y INT)")
+    duck.execute("INSERT INTO dl.public.from_duckdb VALUES (10, 20)")
+
+    pg_cursor.connection.commit()
+
+    # Sanity: lake_ducklake catalog has the table + columns.
+    pg_cursor.execute(
+        """
+        SELECT table_name FROM lake_ducklake.table
+         WHERE table_name = 'from_duckdb' AND end_snapshot IS NULL
+        """
+    )
+    assert pg_cursor.fetchall() == [("from_duckdb",)]
+
+    pg_cursor.execute(
+        """
+        SELECT c.column_name FROM lake_ducklake.column c
+          JOIN lake_ducklake.table t USING (table_id)
+         WHERE t.table_name = 'from_duckdb' AND c.end_snapshot IS NULL
+         ORDER BY c.column_order
+        """
+    )
+    assert [r[0] for r in pg_cursor.fetchall()] == ["x", "y"]
+
+    # snapshot_changes audit trail: the created_table op must be present.
+    pg_cursor.execute(
+        """
+        SELECT changes_made FROM lake_ducklake.snapshot_changes
+         WHERE changes_made LIKE '%created_table%'
+         ORDER BY snapshot_id
+        """
+    )
+    create_rows = pg_cursor.fetchall()
+    assert any("from_duckdb" in r[0] for r in create_rows), create_rows
+
+    # The actual claim under test: the foreign table exists in pg_class.
+    pg_cursor.execute(
+        """
+        SELECT n.nspname FROM pg_class c
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE c.relname = 'from_duckdb' AND c.relkind = 'f'
+        """
+    )
+    rows = pg_cursor.fetchall()
+    assert rows == [("public",)], (
+        f"expected from_duckdb foreign table in public, got {rows}; "
+        f"replay of created_table from DuckDB-side CREATE TABLE failed"
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])

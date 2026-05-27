@@ -816,6 +816,20 @@ VALUES ('ducklake_version', '1.0', NULL, NULL);
 INSERT INTO lake_ducklake.metadata (key, value, scope, scope_id)
 VALUES ('data_inlining_row_limit', '0', NULL, NULL);
 
+-- If the user set pg_lake_ducklake.default_location_prefix BEFORE running
+-- CREATE EXTENSION, persist the data_path metadata row up front. DuckDB
+-- needs a real row in the catalog to ATTACH without spelling out
+-- DATA_PATH every time, and it doesn't persist DATA_PATH itself even
+-- when supplied on ATTACH. Skipped silently if the GUC is unset; users
+-- who set it later can still rely on the synthetic row exposed by the
+-- ducklake_metadata view, but cross-session writers (DuckDB) need this
+-- physical row.
+INSERT INTO lake_ducklake.metadata (key, value, scope, scope_id)
+SELECT 'data_path',
+       rtrim(current_setting('pg_lake_ducklake.default_location_prefix', true), '/') || '/',
+       NULL, NULL
+WHERE coalesce(current_setting('pg_lake_ducklake.default_location_prefix', true), '') <> '';
+
 -- ============================================================================
 -- Additional Public Views (remaining 16 tables)
 -- ============================================================================

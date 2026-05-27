@@ -313,9 +313,6 @@ ComputeFullTablePath(const char *schemaPath, bool schemaRel,
 	char	   *dataPath = NULL;
 	int			ret;
 
-	if (schemaPath == NULL && tablePath == NULL)
-		return NULL;
-
 	if (!tableRel && tablePath != NULL)
 		return pstrdup(tablePath);
 
@@ -328,10 +325,41 @@ ComputeFullTablePath(const char *schemaPath, bool schemaRel,
 		return buf.data;
 	}
 
-	/* Both parts relative -- need data_path. */
+	/*
+	 * Either both parts are relative, or both are NULL (a DuckDB-side CREATE
+	 * TABLE leaves table.path / schema.path NULL and relies on data_path +
+	 * UUIDs at scan time). Either way the catalog's data_path is the only
+	 * base we have. Look for a real lake_ducklake.metadata row first, then
+	 * fall back to the pg_lake_ducklake.default_location_prefix GUC -- the
+	 * catalog can be created (CREATE EXTENSION) before anything has had a
+	 * chance to persist data_path, but the user's session may already have
+	 * the GUC set. Mirrors the synthetic row exposed by the ducklake_metadata
+	 * view.
+	 */
 	ret = SPI_exec("SELECT value FROM lake_ducklake.metadata "
 				   "WHERE key = 'data_path' LIMIT 1",
 				   1);
+	if (ret == SPI_OK_SELECT && SPI_processed == 1)
+	{
+		bool		isnull;
+		Datum		d = SPI_getbinval(SPI_tuptable->vals[0],
+									  SPI_tuptable->tupdesc, 1, &isnull);
+
+		if (!isnull)
+			dataPath = TextDatumGetCString(d);
+	}
+
+	if (dataPath == NULL &&
+		DucklakeDefaultLocationPrefix != NULL &&
+		DucklakeDefaultLocationPrefix[0] != '\0')
+	{
+		size_t		plen = strlen(DucklakeDefaultLocationPrefix);
+
+		if (plen > 0 && DucklakeDefaultLocationPrefix[plen - 1] == '/')
+			dataPath = pstrdup(DucklakeDefaultLocationPrefix);
+		else
+			dataPath = psprintf("%s/", DucklakeDefaultLocationPrefix);
+	}
 	if (ret == SPI_OK_SELECT && SPI_processed == 1)
 	{
 		bool		isnull;
