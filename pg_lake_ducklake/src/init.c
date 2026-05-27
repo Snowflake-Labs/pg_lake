@@ -128,6 +128,14 @@ _PG_init(void)
 							600000, -1, INT_MAX,
 							PGC_SIGHUP, GUC_UNIT_MS,
 							NULL, NULL, NULL);
+
+	/*
+	 * Register the object_access_hook that keeps lake_ducklake.schema
+	 * end-snapshotted when a PG schema is dropped (including via cascade).
+	 * Mirrors DucklakeRenameSchema's job for the rename direction; the hook
+	 * itself is a fast-path for non-namespace drops.
+	 */
+	InitializeDucklakeDropSchemaHandler();
 }
 
 

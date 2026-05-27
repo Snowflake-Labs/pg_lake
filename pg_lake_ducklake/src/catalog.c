@@ -2188,6 +2188,80 @@ DucklakeRenameSchema(const char *oldName, const char *newName)
 
 
 /*
+ * DucklakeDropSchemaByOid end-snapshots the live row in
+ * lake_ducklake.schema corresponding to the given pg_namespace OID.
+ * Called from the object_access_hook on OAT_DROP for namespaces, so it
+ * also fires on the cascading-drop path. No-op when no live row tracks
+ * the schema (system schemas, lake_ducklake itself, anything we
+ * filtered out of the install seed).
+ *
+ * SPI queries qualify operators (=, OPERATOR(pg_catalog.=)) so a hijack
+ * via the caller's search_path can't redirect them.
+ */
+void
+DucklakeDropSchemaByOid(Oid namespaceOid)
+{
+	char	   *schemaName;
+	int64		schemaId = -1;
+	int			ret;
+	StringInfoData query;
+	DucklakeSnapshot *newSnapshot;
+
+	schemaName = get_namespace_name(namespaceOid);
+	if (schemaName == NULL)
+		return;
+
+	SPI_connect();
+	initStringInfo(&query);
+	appendStringInfo(&query,
+					 "SELECT schema_id FROM lake_ducklake.schema "
+					 "WHERE schema_name OPERATOR(pg_catalog.=) %s "
+					 "  AND end_snapshot IS NULL",
+					 quote_literal_cstr(schemaName));
+	ret = SPI_exec(query.data, 1);
+
+	if (ret == SPI_OK_SELECT && SPI_processed > 0)
+	{
+		bool		isnull;
+
+		schemaId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+											   SPI_tuptable->tupdesc, 1, &isnull));
+		if (isnull)
+			schemaId = -1;
+	}
+
+	SPI_finish();
+
+	if (schemaId < 0)
+		return;					/* not tracked */
+
+	newSnapshot = DucklakeCreateSnapshot("DROP SCHEMA", NULL, NULL);
+
+	SPI_connect();
+
+	/* Bump schema_version on the new snapshot. */
+	initStringInfo(&query);
+	appendStringInfo(&query,
+					 "UPDATE lake_ducklake.snapshot "
+					 "   SET schema_version = schema_version OPERATOR(pg_catalog.+) 1 "
+					 " WHERE snapshot_id OPERATOR(pg_catalog.=) %ld",
+					 newSnapshot->snapshotId);
+	SPI_exec(query.data, 0);
+
+	/* End-snapshot the live row. */
+	resetStringInfo(&query);
+	appendStringInfo(&query,
+					 "UPDATE lake_ducklake.schema SET end_snapshot = %ld "
+					 " WHERE schema_id OPERATOR(pg_catalog.=) %ld "
+					 "   AND end_snapshot IS NULL",
+					 newSnapshot->snapshotId, schemaId);
+	SPI_exec(query.data, 0);
+
+	SPI_finish();
+}
+
+
+/*
  * IcebergTransformNameToDuckLake translates Iceberg's transform-name
  * spelling into the DuckLake spelling. Iceberg stores `bucket[16]` /
  * `truncate[5]`; DuckLake stores `bucket(16)` / `truncate(5)`.

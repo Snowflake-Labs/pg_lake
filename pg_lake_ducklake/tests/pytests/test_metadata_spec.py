@@ -425,5 +425,42 @@ def test_install_seeds_user_pg_schemas_into_lake_ducklake_schema(pg_cursor):
     ), f"snapshot.next_catalog_id {next_id} must be past the seeded ids ({len(seeded)})"
 
 
+def test_drop_schema_end_snapshots_lake_ducklake_row(pg_cursor):
+    """
+    DROP SCHEMA on the PG side must end-snapshot the matching live row
+    in lake_ducklake.schema so DuckDB doesn't keep seeing a schema after
+    PG has dropped it. Hooked via object_access_hook so cascading drops
+    are covered too.
+    """
+    # Re-create the extension with a fresh user schema present so the
+    # install seed picks it up. (Schemas added AFTER CREATE EXTENSION
+    # are not auto-tracked yet -- only ones present at install time.)
+    pg_cursor.execute("DROP EXTENSION pg_lake_ducklake CASCADE")
+    pg_cursor.execute("DROP SCHEMA IF EXISTS dropme_test CASCADE")
+    pg_cursor.execute("CREATE SCHEMA dropme_test")
+    pg_cursor.execute("CREATE EXTENSION pg_lake_ducklake CASCADE")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        "SELECT schema_id FROM lake_ducklake.schema "
+        "WHERE schema_name = 'dropme_test' AND end_snapshot IS NULL"
+    )
+    seeded = pg_cursor.fetchone()
+    assert seeded is not None, "install seed should include dropme_test"
+    schema_id = seeded[0]
+
+    pg_cursor.execute("DROP SCHEMA dropme_test")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        "SELECT end_snapshot FROM lake_ducklake.schema WHERE schema_id = %s",
+        (schema_id,),
+    )
+    end = pg_cursor.fetchone()
+    assert (
+        end is not None and end[0] is not None
+    ), f"dropme_test row should have end_snapshot set, got {end}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
