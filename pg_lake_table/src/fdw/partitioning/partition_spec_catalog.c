@@ -18,7 +18,11 @@
 #include "postgres.h"
 #include "fmgr.h"
 
+#include "executor/spi.h"
+
+#include "pg_lake/ducklake/catalog.h"
 #include "pg_lake/extensions/pg_lake_table.h"
+#include "pg_lake/util/table_type.h"
 #include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/fdw/data_files_catalog.h"
 #include "pg_lake/iceberg/api/partitioning.h"
@@ -86,6 +90,53 @@ int
 GetCurrentSpecId(Oid relationId)
 {
 	int			currentSpecId = DEFAULT_SPEC_ID;
+
+	/*
+	 * DuckLake stores the live partition spec in lake_ducklake.partition_info
+	 * (versioned by begin_snapshot/end_snapshot). The spec_id concept maps
+	 * onto partition_id, so we return that directly. lake_iceberg.tables_internal
+	 * isn't populated for DuckLake tables, so the Iceberg branch below would
+	 * always return DEFAULT_SPEC_ID.
+	 */
+	if (IsDucklakeTable(relationId))
+	{
+		DucklakeTableMetadata *metadata = DucklakeGetTableMetadata(relationId);
+
+		if (metadata == NULL)
+			return DEFAULT_SPEC_ID;
+
+		StringInfoData q;
+
+		initStringInfo(&q);
+		appendStringInfo(&q,
+						 "SELECT partition_id FROM lake_ducklake.partition_info "
+						 "WHERE table_id = %ld AND end_snapshot IS NULL "
+						 "ORDER BY begin_snapshot DESC LIMIT 1",
+						 metadata->tableId);
+
+		SPI_connect();
+		int			ret = SPI_exec(q.data, 1);
+
+		if (ret == SPI_OK_SELECT && SPI_processed > 0)
+		{
+			bool		isnull;
+
+			currentSpecId = (int) DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+															   SPI_tuptable->tupdesc,
+															   1, &isnull));
+		}
+		SPI_finish();
+
+		if (metadata->tableName)
+			pfree(metadata->tableName);
+		if (metadata->schemaName)
+			pfree(metadata->schemaName);
+		if (metadata->path)
+			pfree(metadata->path);
+		pfree(metadata);
+
+		return currentSpecId;
+	}
 
 	DECLARE_SPI_ARGS(1);
 

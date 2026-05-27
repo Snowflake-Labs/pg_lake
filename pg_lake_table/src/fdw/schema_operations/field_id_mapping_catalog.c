@@ -49,7 +49,9 @@
 #include "pg_lake/pgduck/serialize.h"
 #include "pg_lake/util/array_utils.h"
 #include "pg_lake/util/rel_utils.h"
+#include "pg_lake/util/table_type.h"
 #include "pg_lake/ducklake/catalog.h"
+#include "pg_lake/ducklake/data_file_schema.h"
 #include "pg_extension_base/spi_helpers.h"
 #include "executor/spi.h"
 #include "utils/snapmgr.h"
@@ -225,6 +227,24 @@ CreateRegisteredFieldForAttribute(Oid relationId, int spiIndex)
 DataFileSchemaField *
 GetRegisteredFieldForAttribute(Oid relationId, AttrNumber attrNo)
 {
+	if (IsDucklakeTable(relationId))
+	{
+		DataFileSchema *schema = DucklakeBuildDataFileSchema(relationId);
+
+		for (int i = 0; i < schema->nfields; i++)
+		{
+			DataFileSchemaField *field = &schema->fields[i];
+			AttrNumber	candidate = get_attnum(relationId, field->name);
+
+			if (candidate == attrNo)
+				return field;
+		}
+
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("missing field for column")));
+	}
+
 	List	   *fields = GetRegisteredFieldForAttributes(relationId, list_make1_int(attrNo));
 
 	if (list_length(fields) != 1)

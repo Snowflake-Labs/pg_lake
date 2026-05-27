@@ -228,7 +228,8 @@ ApplyTrackedDucklakeChanges(void)
 								dataFile->path,
 								dataFile->stats.rowCount,
 								dataFile->stats.fileSize,
-								0);	/* rowIdStart */
+								0,	/* rowIdStart */
+								-1);	/* partitionId — track_changes is unpartitioned */
 		}
 
 		/* Mark removed files */

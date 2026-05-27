@@ -1445,8 +1445,10 @@ FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_partition_column_delete();
 CREATE OR REPLACE FUNCTION lake_ducklake.ducklake_partition_info_insert()
 RETURNS TRIGGER AS $$
 BEGIN
-    INSERT INTO lake_ducklake.partition_info (partition_id, table_id, schema_version)
-    VALUES (NEW.partition_id, NEW.table_id, NEW.schema_version);
+    INSERT INTO lake_ducklake.partition_info
+        (partition_id, table_id, begin_snapshot, end_snapshot)
+    VALUES
+        (NEW.partition_id, NEW.table_id, NEW.begin_snapshot, NEW.end_snapshot);
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;

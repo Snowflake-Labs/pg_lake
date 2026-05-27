@@ -200,7 +200,23 @@ CreateDucklakeTablePostProcess(ProcessUtilityParams * params, void *arg)
 	locationOption = GetOption(createStmt->options, "location");
 	location = locationOption ? defGetString(locationOption) : NULL;
 
-	DucklakeRegisterTable(schemaName, tableName, location, relationId);
+	int64		tableId = DucklakeRegisterTable(schemaName, tableName, location, relationId);
+
+	/*
+	 * Honour the partition_by FDW option: parse via the existing
+	 * Iceberg partition-spec parser (the parser only reads pg_attribute
+	 * + the option string, so it works for any relation), then write
+	 * lake_ducklake.partition_info / partition_column rows.
+	 */
+	DefElem    *partitionByOpt = GetOption(createStmt->options, "partition_by");
+
+	if (partitionByOpt != NULL)
+	{
+		List	   *transforms = ParseIcebergTablePartitionBy(relationId);
+
+		transforms = AnalyzeIcebergTablePartitionBy(relationId, transforms);
+		DucklakeInsertPartitionSpec(tableId, transforms);
+	}
 }
 
 

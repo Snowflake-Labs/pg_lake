@@ -1599,12 +1599,66 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 
 							if (operation->content == CONTENT_DATA)
 							{
+								/*
+								 * partitionSpecId on the operation is set
+								 * by AssignPartitionForModificationList
+								 * when the writer routed through
+								 * PartitionedDestReceiver. For DuckLake,
+								 * the spec id IS the partition_info.partition_id
+								 * (we make GetCurrentSpecId return it).
+								 * DEFAULT_SPEC_ID (0) means unpartitioned.
+								 */
+								int64		ducklakePartitionId =
+									(operation->partitionSpecId == DEFAULT_SPEC_ID)
+										? -1
+										: (int64) operation->partitionSpecId;
+
 								/* Add data file to DuckLake catalog */
 								int64		ducklakeFileId = DucklakeAddDataFile(metadata->tableId,
 																				 operation->path,
 																				 operation->dataFileStats.rowCount,
 																				 operation->dataFileStats.fileSize,
-																				 operation->dataFileStats.rowIdStart);
+																				 operation->dataFileStats.rowIdStart,
+																				 ducklakePartitionId);
+
+								/*
+								 * Per-file partition values. Iceberg's
+								 * AddDataFilePartitionValueToCatalog
+								 * (line 1943) does the same for the
+								 * Iceberg path — we mirror it here, but
+								 * key by partition_key_index (the field's
+								 * position in the spec) instead of the
+								 * Iceberg field_id, and store the
+								 * already-text-serialized value DuckLake
+								 * expects.
+								 */
+								if (operation->partition != NULL &&
+									operation->partition->fields_length > 0 &&
+									ducklakePartitionId >= 0)
+								{
+									List	   *transforms = AllPartitionTransformList(relationId);
+
+									for (size_t fieldIndex = 0;
+										 fieldIndex < operation->partition->fields_length;
+										 fieldIndex++)
+									{
+										PartitionField *partitionField =
+											&operation->partition->fields[fieldIndex];
+										IcebergPartitionTransform *transform =
+											FindPartitionTransformById(transforms,
+																	   partitionField->field_id,
+																	   true);
+										const char *valueText =
+											SerializePartitionValueToPGText(partitionField->value,
+																			partitionField->value_length,
+																			transform);
+
+										DucklakeAddFilePartitionValue(ducklakeFileId,
+																	  metadata->tableId,
+																	  (int64) fieldIndex,
+																	  valueText);
+									}
+								}
 
 								/* Add column stats for this data file */
 								ListCell   *statCell;

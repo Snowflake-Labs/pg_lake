@@ -11,6 +11,7 @@
 #include "utils/uuid.h"
 
 #include "pg_lake/ducklake/catalog.h"
+#include "pg_lake/iceberg/api/partitioning.h"
 
 /*
  * StripTablePathPrefix returns the suffix of absolutePath relative to
@@ -1020,7 +1021,7 @@ DucklakeGetDataFiles(int64 tableId, int64 snapshotId)
 
 int64
 DucklakeAddDataFile(int64 tableId, const char *path, int64 recordCount,
-					int64 fileSizeBytes, int64 rowIdStart)
+					int64 fileSizeBytes, int64 rowIdStart, int64 partitionId)
 {
 	StringInfoData query;
 	DucklakeSnapshot *snapshot;
@@ -1089,16 +1090,18 @@ DucklakeAddDataFile(int64 tableId, const char *path, int64 recordCount,
 
 	/* Insert data file with mapping_id and proper path_is_relative */
 	resetStringInfo(&query);
+	const char *partitionIdSql = (partitionId >= 0) ? psprintf("%ld", partitionId) : "NULL";
+
 	if (mappingId >= 0)
 	{
 		appendStringInfo(&query,
 						 "INSERT INTO lake_ducklake.data_file "
 						 "(data_file_id, table_id, begin_snapshot, path, path_is_relative, file_format, "
-						 "record_count, file_size_bytes, row_id_start, mapping_id) "
-						 "VALUES (%ld, %ld, %ld, %s, %s, 'parquet', %ld, %ld, %ld, %ld) RETURNING data_file_id",
+						 "record_count, file_size_bytes, row_id_start, partition_id, mapping_id) "
+						 "VALUES (%ld, %ld, %ld, %s, %s, 'parquet', %ld, %ld, %ld, %s, %ld) RETURNING data_file_id",
 						 dataFileId, tableId, snapshot->snapshotId,
 						 quote_literal_cstr(storedPath), pathIsRelative ? "true" : "false",
-						 recordCount, fileSizeBytes, rowIdStart, mappingId);
+						 recordCount, fileSizeBytes, rowIdStart, partitionIdSql, mappingId);
 	}
 	else
 	{
@@ -1106,11 +1109,11 @@ DucklakeAddDataFile(int64 tableId, const char *path, int64 recordCount,
 		appendStringInfo(&query,
 						 "INSERT INTO lake_ducklake.data_file "
 						 "(data_file_id, table_id, begin_snapshot, path, path_is_relative, file_format, "
-						 "record_count, file_size_bytes, row_id_start) "
-						 "VALUES (%ld, %ld, %ld, %s, %s, 'parquet', %ld, %ld, %ld) RETURNING data_file_id",
+						 "record_count, file_size_bytes, row_id_start, partition_id) "
+						 "VALUES (%ld, %ld, %ld, %s, %s, 'parquet', %ld, %ld, %ld, %s) RETURNING data_file_id",
 						 dataFileId, tableId, snapshot->snapshotId,
 						 quote_literal_cstr(storedPath), pathIsRelative ? "true" : "false",
-						 recordCount, fileSizeBytes, rowIdStart);
+						 recordCount, fileSizeBytes, rowIdStart, partitionIdSql);
 	}
 
 	ret = SPI_exec(query.data, 0);
@@ -2149,5 +2152,158 @@ DucklakeRenameSchema(const char *oldName, const char *newName)
 					 newSnapshot->snapshotId, schemaId, newSnapshot->snapshotId);
 	SPI_exec(query.data, 0);
 
+	SPI_finish();
+}
+
+
+/*
+ * IcebergTransformNameToDuckLake translates Iceberg's transform-name
+ * spelling into the DuckLake spelling. Iceberg stores `bucket[16]` /
+ * `truncate[5]`; DuckLake stores `bucket(16)` / `truncate(5)`.
+ * Identity / year / month / day / hour pass through unchanged.
+ *
+ * Caller-allocated copy returned in CurrentMemoryContext.
+ */
+static char *
+IcebergTransformNameToDuckLake(const char *icebergName)
+{
+	if (icebergName == NULL)
+		return pstrdup("identity");
+
+	if (pg_strncasecmp(icebergName, "bucket[", 7) == 0)
+	{
+		const char *digits = icebergName + 7;
+		size_t		len = strlen(digits);
+
+		if (len > 0 && digits[len - 1] == ']')
+			return psprintf("bucket(%.*s)", (int) (len - 1), digits);
+	}
+
+	if (pg_strncasecmp(icebergName, "truncate[", 9) == 0)
+	{
+		const char *digits = icebergName + 9;
+		size_t		len = strlen(digits);
+
+		if (len > 0 && digits[len - 1] == ']')
+			return psprintf("truncate(%.*s)", (int) (len - 1), digits);
+	}
+
+	return pstrdup(icebergName);
+}
+
+
+/*
+ * DucklakeInsertPartitionSpec writes one lake_ducklake.partition_info
+ * row plus one lake_ducklake.partition_column row per transform. Called
+ * from the CREATE TABLE post-process when the user supplies a
+ * partition_by FDW option. column_id is resolved by name against the
+ * table's live lake_ducklake.column rows.
+ */
+void
+DucklakeInsertPartitionSpec(int64 tableId, List *transforms)
+{
+	StringInfoData query;
+	int			ret;
+	int64		partitionId;
+	int64		beginSnapshot;
+	ListCell   *cell;
+	int64		partitionKeyIndex = 0;
+
+	if (transforms == NIL)
+		return;
+
+	SPI_connect();
+
+	/*
+	 * Look up the table's live begin_snapshot — DucklakeRegisterTable
+	 * just inserted the row, so we anchor the partition spec to the
+	 * same snapshot for v1 spec compliance.
+	 */
+	initStringInfo(&query);
+	appendStringInfo(&query,
+					 "SELECT begin_snapshot FROM lake_ducklake.table "
+					 "WHERE table_id = %ld AND end_snapshot IS NULL "
+					 "ORDER BY begin_snapshot DESC LIMIT 1",
+					 tableId);
+	ret = SPI_exec(query.data, 1);
+	if (ret != SPI_OK_SELECT || SPI_processed == 0)
+	{
+		SPI_finish();
+		elog(ERROR, "DuckLake table_id %ld not found when writing partition spec",
+			 tableId);
+	}
+	{
+		bool		isnull;
+
+		beginSnapshot = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+													SPI_tuptable->tupdesc, 1, &isnull));
+	}
+
+	/* Allocate a fresh partition_id from snapshot.next_catalog_id. */
+	partitionId = DucklakeGetNextCatalogId();
+
+	resetStringInfo(&query);
+	appendStringInfo(&query,
+					 "INSERT INTO lake_ducklake.partition_info "
+					 "(partition_id, table_id, begin_snapshot) "
+					 "VALUES (%ld, %ld, %ld)",
+					 partitionId, tableId, beginSnapshot);
+	SPI_exec(query.data, 0);
+
+	foreach(cell, transforms)
+	{
+		IcebergPartitionTransform *transform = lfirst(cell);
+		char	   *duckTransform = IcebergTransformNameToDuckLake(transform->transformName);
+
+		resetStringInfo(&query);
+		appendStringInfo(&query,
+						 "INSERT INTO lake_ducklake.partition_column "
+						 "(partition_id, table_id, partition_key_index, column_id, transform) "
+						 "SELECT %ld, %ld, %ld, c.column_id, %s "
+						 "  FROM lake_ducklake.column c "
+						 " WHERE c.table_id = %ld "
+						 "   AND c.column_name = %s "
+						 "   AND c.end_snapshot IS NULL "
+						 "   AND c.parent_column IS NULL",
+						 partitionId, tableId, partitionKeyIndex,
+						 quote_literal_cstr(duckTransform),
+						 tableId,
+						 quote_literal_cstr(transform->columnName));
+		ret = SPI_exec(query.data, 0);
+		if (ret != SPI_OK_INSERT || SPI_processed == 0)
+		{
+			SPI_finish();
+			elog(ERROR, "Failed to write partition_column row for %s "
+				 "(column not found in lake_ducklake.column)",
+				 transform->columnName);
+		}
+
+		partitionKeyIndex++;
+	}
+
+	SPI_finish();
+}
+
+
+/*
+ * DucklakeAddFilePartitionValue stores one row in
+ * lake_ducklake.file_partition_value. Called per partition column for
+ * each newly-written data file.
+ */
+void
+DucklakeAddFilePartitionValue(int64 dataFileId, int64 tableId,
+							  int64 partitionKeyIndex, const char *value)
+{
+	StringInfoData query;
+
+	SPI_connect();
+	initStringInfo(&query);
+	appendStringInfo(&query,
+					 "INSERT INTO lake_ducklake.file_partition_value "
+					 "(data_file_id, table_id, partition_key_index, partition_value) "
+					 "VALUES (%ld, %ld, %ld, %s)",
+					 dataFileId, tableId, partitionKeyIndex,
+					 value ? quote_literal_cstr(value) : "NULL");
+	SPI_exec(query.data, 0);
 	SPI_finish();
 }

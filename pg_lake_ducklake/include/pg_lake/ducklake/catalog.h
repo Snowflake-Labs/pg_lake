@@ -135,7 +135,8 @@ extern PGDLLEXPORT int64 DucklakeAddDataFile(int64 tableId,
 											 const char *path,
 											 int64 recordCount,
 											 int64 fileSizeBytes,
-											 int64 rowIdStart);
+											 int64 rowIdStart,
+											 int64 partitionId);
 extern PGDLLEXPORT void DucklakeRemoveDataFile(int64 dataFileId);
 extern PGDLLEXPORT void DucklakeRemoveAllDataFiles(int64 tableId);
 
@@ -169,5 +170,12 @@ extern PGDLLEXPORT void DucklakeRenameTable(const char *schemaName,
 											const char *newName);
 extern PGDLLEXPORT void DucklakeRenameSchema(const char *oldName,
 											 const char *newName);
+
+/* Partitioning support */
+extern PGDLLEXPORT void DucklakeInsertPartitionSpec(int64 tableId, List *transforms);
+extern PGDLLEXPORT void DucklakeAddFilePartitionValue(int64 dataFileId,
+													   int64 tableId,
+													   int64 partitionKeyIndex,
+													   const char *value);
 
 #endif							/* PG_LAKE_DUCKLAKE_CATALOG_H */
