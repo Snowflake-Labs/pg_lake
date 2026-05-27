@@ -71,11 +71,21 @@ _PG_init(void)
 	}
 
 	DefineCustomStringVariable("pg_lake_ducklake.default_location_prefix",
-							   gettext_noop("Specifies the default location prefix for "
-											"DuckLake tables. This is used when the location "
-											"option is not specified at CREATE TABLE "
-											"USING ducklake statements."),
-							   NULL,
+							   gettext_noop("Default S3/GCS prefix under which DuckLake "
+											"tables are stored when CREATE TABLE USING "
+											"ducklake omits the location option."),
+							   gettext_noop("On the first PG-side CREATE TABLE -- or at "
+											"CREATE EXTENSION when this setting is already "
+											"set -- the value is persisted as the catalog's "
+											"data_path metadata row. After that the "
+											"persisted row wins: changing the GUC will not "
+											"redirect new writes (existing relative paths "
+											"stay anchored to the original prefix), it only "
+											"affects catalogs that have not yet seeded a "
+											"data_path. To redirect a catalog that already "
+											"has data, UPDATE the data_path row directly "
+											"and (if the prefix moved) move the underlying "
+											"object-store data."),
 							   &DucklakeDefaultLocationPrefix,
 							   NULL,
 							   PGC_SUSET,
