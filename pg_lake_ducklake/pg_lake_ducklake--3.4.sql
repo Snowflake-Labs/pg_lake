@@ -366,7 +366,7 @@ CREATE TABLE lake_ducklake.file_variant_stats (
 -- ============================================================================
 
 -- ducklake_table view - exposes table metadata (singular, following DuckDB pattern)
-CREATE VIEW public.ducklake_table AS
+CREATE VIEW @extschema@.ducklake_table AS
 SELECT
     table_id,
     table_uuid,
@@ -379,7 +379,7 @@ SELECT
 FROM lake_ducklake.table;
 
 -- ducklake_schema view - exposes schema metadata
-CREATE VIEW public.ducklake_schema AS
+CREATE VIEW @extschema@.ducklake_schema AS
 SELECT
     schema_id,
     schema_uuid,
@@ -391,42 +391,42 @@ SELECT
 FROM lake_ducklake.schema;
 
 -- ducklake_column view - exposes column metadata
-CREATE VIEW public.ducklake_column AS
+CREATE VIEW @extschema@.ducklake_column AS
 SELECT * FROM lake_ducklake.column;
 
 -- ducklake_view view - exposes view metadata
-CREATE VIEW public.ducklake_view AS
+CREATE VIEW @extschema@.ducklake_view AS
 SELECT * FROM lake_ducklake.view;
 
 -- ducklake_snapshot view - exposes snapshot metadata
-CREATE VIEW public.ducklake_snapshot AS
+CREATE VIEW @extschema@.ducklake_snapshot AS
 SELECT * FROM lake_ducklake.snapshot;
 
 -- ducklake_data_file view - exposes data file metadata
-CREATE VIEW public.ducklake_data_file AS
+CREATE VIEW @extschema@.ducklake_data_file AS
 SELECT * FROM lake_ducklake.data_file;
 
 -- Grant permissions
-GRANT SELECT ON public.ducklake_table TO public;
-GRANT SELECT ON public.ducklake_schema TO public;
-GRANT SELECT ON public.ducklake_column TO public;
-GRANT SELECT ON public.ducklake_view TO public;
-GRANT SELECT ON public.ducklake_snapshot TO public;
-GRANT SELECT ON public.ducklake_data_file TO public;
+GRANT SELECT ON @extschema@.ducklake_table TO public;
+GRANT SELECT ON @extschema@.ducklake_schema TO public;
+GRANT SELECT ON @extschema@.ducklake_column TO public;
+GRANT SELECT ON @extschema@.ducklake_view TO public;
+GRANT SELECT ON @extschema@.ducklake_snapshot TO public;
+GRANT SELECT ON @extschema@.ducklake_data_file TO public;
 
 -- v1 macro/sort/variant tables exposed under spec names so DuckDB can read them.
-CREATE VIEW public.ducklake_macro AS SELECT * FROM lake_ducklake.macro;
-CREATE VIEW public.ducklake_macro_impl AS SELECT * FROM lake_ducklake.macro_impl;
-CREATE VIEW public.ducklake_macro_parameters AS SELECT * FROM lake_ducklake.macro_parameters;
-CREATE VIEW public.ducklake_sort_info AS SELECT * FROM lake_ducklake.sort_info;
-CREATE VIEW public.ducklake_sort_expression AS SELECT * FROM lake_ducklake.sort_expression;
-CREATE VIEW public.ducklake_file_variant_stats AS SELECT * FROM lake_ducklake.file_variant_stats;
-GRANT SELECT ON public.ducklake_macro TO public;
-GRANT SELECT ON public.ducklake_macro_impl TO public;
-GRANT SELECT ON public.ducklake_macro_parameters TO public;
-GRANT SELECT ON public.ducklake_sort_info TO public;
-GRANT SELECT ON public.ducklake_sort_expression TO public;
-GRANT SELECT ON public.ducklake_file_variant_stats TO public;
+CREATE VIEW @extschema@.ducklake_macro AS SELECT * FROM lake_ducklake.macro;
+CREATE VIEW @extschema@.ducklake_macro_impl AS SELECT * FROM lake_ducklake.macro_impl;
+CREATE VIEW @extschema@.ducklake_macro_parameters AS SELECT * FROM lake_ducklake.macro_parameters;
+CREATE VIEW @extschema@.ducklake_sort_info AS SELECT * FROM lake_ducklake.sort_info;
+CREATE VIEW @extschema@.ducklake_sort_expression AS SELECT * FROM lake_ducklake.sort_expression;
+CREATE VIEW @extschema@.ducklake_file_variant_stats AS SELECT * FROM lake_ducklake.file_variant_stats;
+GRANT SELECT ON @extschema@.ducklake_macro TO public;
+GRANT SELECT ON @extschema@.ducklake_macro_impl TO public;
+GRANT SELECT ON @extschema@.ducklake_macro_parameters TO public;
+GRANT SELECT ON @extschema@.ducklake_sort_info TO public;
+GRANT SELECT ON @extschema@.ducklake_sort_expression TO public;
+GRANT SELECT ON @extschema@.ducklake_file_variant_stats TO public;
 
 -- ============================================================================
 -- INSTEAD OF Triggers for Writable Views
@@ -485,7 +485,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_table_insert_trigger
-INSTEAD OF INSERT ON public.ducklake_table
+INSTEAD OF INSERT ON @extschema@.ducklake_table
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_table_insert();
 
 -- ducklake_schema INSERT trigger
@@ -499,7 +499,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_schema_insert_trigger
-INSTEAD OF INSERT ON public.ducklake_schema
+INSTEAD OF INSERT ON @extschema@.ducklake_schema
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_schema_insert();
 
 -- ducklake_column INSERT trigger
@@ -513,7 +513,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_column_insert_trigger
-INSTEAD OF INSERT ON public.ducklake_column
+INSTEAD OF INSERT ON @extschema@.ducklake_column
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_column_insert();
 
 -- ducklake_snapshot INSERT trigger
@@ -527,7 +527,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_snapshot_insert_trigger
-INSTEAD OF INSERT ON public.ducklake_snapshot
+INSTEAD OF INSERT ON @extschema@.ducklake_snapshot
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_snapshot_insert();
 
 -- ducklake_data_file INSERT trigger
@@ -555,7 +555,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_data_file_insert_trigger
-INSTEAD OF INSERT ON public.ducklake_data_file
+INSTEAD OF INSERT ON @extschema@.ducklake_data_file
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_data_file_insert();
 
 -- ============================================================================
@@ -821,56 +821,56 @@ VALUES ('data_inlining_row_limit', '0', NULL, NULL);
 -- ============================================================================
 
 -- ducklake_column_mapping view
-CREATE VIEW public.ducklake_column_mapping AS
+CREATE VIEW @extschema@.ducklake_column_mapping AS
 SELECT * FROM lake_ducklake.column_mapping;
 
 -- ducklake_name_mapping view
-CREATE VIEW public.ducklake_name_mapping AS
+CREATE VIEW @extschema@.ducklake_name_mapping AS
 SELECT * FROM lake_ducklake.name_mapping;
 
 -- ducklake_column_tag view
-CREATE VIEW public.ducklake_column_tag AS
+CREATE VIEW @extschema@.ducklake_column_tag AS
 SELECT * FROM lake_ducklake.column_tag;
 
 -- ducklake_delete_file view
-CREATE VIEW public.ducklake_delete_file AS
+CREATE VIEW @extschema@.ducklake_delete_file AS
 SELECT * FROM lake_ducklake.delete_file;
 
 -- ducklake_file_column_stats view
-CREATE VIEW public.ducklake_file_column_stats AS
+CREATE VIEW @extschema@.ducklake_file_column_stats AS
 SELECT * FROM lake_ducklake.file_column_stats;
 
 -- ducklake_file_partition_value view
-CREATE VIEW public.ducklake_file_partition_value AS
+CREATE VIEW @extschema@.ducklake_file_partition_value AS
 SELECT * FROM lake_ducklake.file_partition_value;
 
 -- ducklake_files_scheduled_for_deletion view
-CREATE VIEW public.ducklake_files_scheduled_for_deletion AS
+CREATE VIEW @extschema@.ducklake_files_scheduled_for_deletion AS
 SELECT * FROM lake_ducklake.files_scheduled_for_deletion;
 
 -- ducklake_inlined_data_tables view
-CREATE VIEW public.ducklake_inlined_data_tables AS
+CREATE VIEW @extschema@.ducklake_inlined_data_tables AS
 SELECT * FROM lake_ducklake.inlined_data_tables;
 
 -- ducklake_metadata view
-CREATE VIEW public.ducklake_metadata AS
+CREATE VIEW @extschema@.ducklake_metadata AS
 SELECT * FROM lake_ducklake.metadata;
 
 -- ducklake_partition_column view
-CREATE VIEW public.ducklake_partition_column AS
+CREATE VIEW @extschema@.ducklake_partition_column AS
 SELECT * FROM lake_ducklake.partition_column;
 
 -- ducklake_partition_info view
-CREATE VIEW public.ducklake_partition_info AS
+CREATE VIEW @extschema@.ducklake_partition_info AS
 SELECT * FROM lake_ducklake.partition_info;
 
 -- ducklake_schema_versions view
-CREATE VIEW public.ducklake_schema_versions AS
+CREATE VIEW @extschema@.ducklake_schema_versions AS
 SELECT * FROM lake_ducklake.schema_versions;
 
 -- ducklake_snapshot_changes view
 -- Create column aliases to match DuckDB expectations
-CREATE VIEW public.ducklake_snapshot_changes AS
+CREATE VIEW @extschema@.ducklake_snapshot_changes AS
 SELECT
     snapshot_id,
     changes_made,
@@ -880,34 +880,34 @@ SELECT
 FROM lake_ducklake.snapshot_changes;
 
 -- ducklake_table_column_stats view
-CREATE VIEW public.ducklake_table_column_stats AS
+CREATE VIEW @extschema@.ducklake_table_column_stats AS
 SELECT * FROM lake_ducklake.table_column_stats;
 
 -- ducklake_table_stats view
-CREATE VIEW public.ducklake_table_stats AS
+CREATE VIEW @extschema@.ducklake_table_stats AS
 SELECT * FROM lake_ducklake.table_stats;
 
 -- ducklake_tag view
-CREATE VIEW public.ducklake_tag AS
+CREATE VIEW @extschema@.ducklake_tag AS
 SELECT * FROM lake_ducklake.tag;
 
 -- Grant permissions
-GRANT SELECT ON public.ducklake_column_mapping TO public;
-GRANT SELECT ON public.ducklake_name_mapping TO public;
-GRANT SELECT ON public.ducklake_column_tag TO public;
-GRANT SELECT ON public.ducklake_delete_file TO public;
-GRANT SELECT ON public.ducklake_file_column_stats TO public;
-GRANT SELECT ON public.ducklake_file_partition_value TO public;
-GRANT SELECT ON public.ducklake_files_scheduled_for_deletion TO public;
-GRANT SELECT ON public.ducklake_inlined_data_tables TO public;
-GRANT SELECT ON public.ducklake_metadata TO public;
-GRANT SELECT ON public.ducklake_partition_column TO public;
-GRANT SELECT ON public.ducklake_partition_info TO public;
-GRANT SELECT ON public.ducklake_schema_versions TO public;
-GRANT SELECT ON public.ducklake_snapshot_changes TO public;
-GRANT SELECT ON public.ducklake_table_column_stats TO public;
-GRANT SELECT ON public.ducklake_table_stats TO public;
-GRANT SELECT ON public.ducklake_tag TO public;
+GRANT SELECT ON @extschema@.ducklake_column_mapping TO public;
+GRANT SELECT ON @extschema@.ducklake_name_mapping TO public;
+GRANT SELECT ON @extschema@.ducklake_column_tag TO public;
+GRANT SELECT ON @extschema@.ducklake_delete_file TO public;
+GRANT SELECT ON @extschema@.ducklake_file_column_stats TO public;
+GRANT SELECT ON @extschema@.ducklake_file_partition_value TO public;
+GRANT SELECT ON @extschema@.ducklake_files_scheduled_for_deletion TO public;
+GRANT SELECT ON @extschema@.ducklake_inlined_data_tables TO public;
+GRANT SELECT ON @extschema@.ducklake_metadata TO public;
+GRANT SELECT ON @extschema@.ducklake_partition_column TO public;
+GRANT SELECT ON @extschema@.ducklake_partition_info TO public;
+GRANT SELECT ON @extschema@.ducklake_schema_versions TO public;
+GRANT SELECT ON @extschema@.ducklake_snapshot_changes TO public;
+GRANT SELECT ON @extschema@.ducklake_table_column_stats TO public;
+GRANT SELECT ON @extschema@.ducklake_table_stats TO public;
+GRANT SELECT ON @extschema@.ducklake_tag TO public;
 
 -- ============================================================================
 -- Convenience Views for Compatibility
@@ -948,7 +948,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_schema_delete_trigger
-INSTEAD OF DELETE ON public.ducklake_schema
+INSTEAD OF DELETE ON @extschema@.ducklake_schema
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_schema_delete();
 
 -- Table DELETE trigger
@@ -963,7 +963,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_table_delete_trigger
-INSTEAD OF DELETE ON public.ducklake_table
+INSTEAD OF DELETE ON @extschema@.ducklake_table
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_table_delete();
 
 -- Table UPDATE trigger
@@ -990,7 +990,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_table_update_trigger
-INSTEAD OF UPDATE ON public.ducklake_table
+INSTEAD OF UPDATE ON @extschema@.ducklake_table
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_table_update();
 
 -- Column DELETE trigger
@@ -1004,7 +1004,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_column_delete_trigger
-INSTEAD OF DELETE ON public.ducklake_column
+INSTEAD OF DELETE ON @extschema@.ducklake_column
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_column_delete();
 
 -- Snapshot DELETE trigger
@@ -1018,7 +1018,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_snapshot_delete_trigger
-INSTEAD OF DELETE ON public.ducklake_snapshot
+INSTEAD OF DELETE ON @extschema@.ducklake_snapshot
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_snapshot_delete();
 
 -- Snapshot UPDATE trigger
@@ -1037,7 +1037,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_snapshot_update_trigger
-INSTEAD OF UPDATE ON public.ducklake_snapshot
+INSTEAD OF UPDATE ON @extschema@.ducklake_snapshot
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_snapshot_update();
 
 -- Data file DELETE trigger
@@ -1051,7 +1051,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_data_file_delete_trigger
-INSTEAD OF DELETE ON public.ducklake_data_file
+INSTEAD OF DELETE ON @extschema@.ducklake_data_file
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_data_file_delete();
 
 -- Data file UPDATE trigger
@@ -1081,7 +1081,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_data_file_update_trigger
-INSTEAD OF UPDATE ON public.ducklake_data_file
+INSTEAD OF UPDATE ON @extschema@.ducklake_data_file
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_data_file_update();
 
 -- Delete file DELETE trigger
@@ -1095,7 +1095,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_delete_file_delete_trigger
-INSTEAD OF DELETE ON public.ducklake_delete_file
+INSTEAD OF DELETE ON @extschema@.ducklake_delete_file
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_delete_file_delete();
 
 -- Table stats UPDATE and DELETE triggers  
@@ -1113,7 +1113,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_table_stats_update_trigger
-INSTEAD OF UPDATE ON public.ducklake_table_stats
+INSTEAD OF UPDATE ON @extschema@.ducklake_table_stats
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_table_stats_update();
 
 CREATE OR REPLACE FUNCTION lake_ducklake.ducklake_table_stats_delete()
@@ -1126,7 +1126,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_table_stats_delete_trigger
-INSTEAD OF DELETE ON public.ducklake_table_stats
+INSTEAD OF DELETE ON @extschema@.ducklake_table_stats
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_table_stats_delete();
 
 -- Metadata DELETE trigger
@@ -1140,7 +1140,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_metadata_delete_trigger
-INSTEAD OF DELETE ON public.ducklake_metadata
+INSTEAD OF DELETE ON @extschema@.ducklake_metadata
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_metadata_delete();
 
 
@@ -1159,7 +1159,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_column_mapping_insert_trigger
-INSTEAD OF INSERT ON public.ducklake_column_mapping
+INSTEAD OF INSERT ON @extschema@.ducklake_column_mapping
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_column_mapping_insert();
 
 -- column_mapping DELETE trigger
@@ -1173,7 +1173,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_column_mapping_delete_trigger
-INSTEAD OF DELETE ON public.ducklake_column_mapping
+INSTEAD OF DELETE ON @extschema@.ducklake_column_mapping
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_column_mapping_delete();
 
 -- column_tag INSERT trigger
@@ -1187,7 +1187,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_column_tag_insert_trigger
-INSTEAD OF INSERT ON public.ducklake_column_tag
+INSTEAD OF INSERT ON @extschema@.ducklake_column_tag
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_column_tag_insert();
 
 -- column_tag DELETE trigger
@@ -1201,7 +1201,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_column_tag_delete_trigger
-INSTEAD OF DELETE ON public.ducklake_column_tag
+INSTEAD OF DELETE ON @extschema@.ducklake_column_tag
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_column_tag_delete();
 
 -- delete_file INSERT trigger
@@ -1230,7 +1230,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_delete_file_insert_trigger
-INSTEAD OF INSERT ON public.ducklake_delete_file
+INSTEAD OF INSERT ON @extschema@.ducklake_delete_file
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_delete_file_insert();
 
 
@@ -1255,7 +1255,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_file_column_stats_insert_trigger
-INSTEAD OF INSERT ON public.ducklake_file_column_stats
+INSTEAD OF INSERT ON @extschema@.ducklake_file_column_stats
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_file_column_stats_insert();
 
 -- file_column_stats DELETE trigger
@@ -1269,7 +1269,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_file_column_stats_delete_trigger
-INSTEAD OF DELETE ON public.ducklake_file_column_stats
+INSTEAD OF DELETE ON @extschema@.ducklake_file_column_stats
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_file_column_stats_delete();
 
 -- file_partition_value INSERT trigger
@@ -1283,7 +1283,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_file_partition_value_insert_trigger
-INSTEAD OF INSERT ON public.ducklake_file_partition_value
+INSTEAD OF INSERT ON @extschema@.ducklake_file_partition_value
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_file_partition_value_insert();
 
 -- file_partition_value DELETE trigger
@@ -1297,7 +1297,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_file_partition_value_delete_trigger
-INSTEAD OF DELETE ON public.ducklake_file_partition_value
+INSTEAD OF DELETE ON @extschema@.ducklake_file_partition_value
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_file_partition_value_delete();
 
 -- files_scheduled_for_deletion INSERT trigger
@@ -1311,7 +1311,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_files_scheduled_for_deletion_insert_trigger
-INSTEAD OF INSERT ON public.ducklake_files_scheduled_for_deletion
+INSTEAD OF INSERT ON @extschema@.ducklake_files_scheduled_for_deletion
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_files_scheduled_for_deletion_insert();
 
 -- files_scheduled_for_deletion DELETE trigger
@@ -1325,7 +1325,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_files_scheduled_for_deletion_delete_trigger
-INSTEAD OF DELETE ON public.ducklake_files_scheduled_for_deletion
+INSTEAD OF DELETE ON @extschema@.ducklake_files_scheduled_for_deletion
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_files_scheduled_for_deletion_delete();
 
 
@@ -1344,7 +1344,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_inlined_data_tables_insert_trigger
-INSTEAD OF INSERT ON public.ducklake_inlined_data_tables
+INSTEAD OF INSERT ON @extschema@.ducklake_inlined_data_tables
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_inlined_data_tables_insert();
 
 -- inlined_data_tables DELETE trigger
@@ -1358,7 +1358,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_inlined_data_tables_delete_trigger
-INSTEAD OF DELETE ON public.ducklake_inlined_data_tables
+INSTEAD OF DELETE ON @extschema@.ducklake_inlined_data_tables
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_inlined_data_tables_delete();
 
 -- metadata INSERT trigger
@@ -1372,7 +1372,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_metadata_insert_trigger
-INSTEAD OF INSERT ON public.ducklake_metadata
+INSTEAD OF INSERT ON @extschema@.ducklake_metadata
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_metadata_insert();
 
 -- name_mapping INSERT trigger
@@ -1391,7 +1391,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_name_mapping_insert_trigger
-INSTEAD OF INSERT ON public.ducklake_name_mapping
+INSTEAD OF INSERT ON @extschema@.ducklake_name_mapping
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_name_mapping_insert();
 
 -- name_mapping DELETE trigger
@@ -1405,7 +1405,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_name_mapping_delete_trigger
-INSTEAD OF DELETE ON public.ducklake_name_mapping
+INSTEAD OF DELETE ON @extschema@.ducklake_name_mapping
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_name_mapping_delete();
 
 
@@ -1424,7 +1424,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_partition_column_insert_trigger
-INSTEAD OF INSERT ON public.ducklake_partition_column
+INSTEAD OF INSERT ON @extschema@.ducklake_partition_column
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_partition_column_insert();
 
 -- partition_column DELETE trigger
@@ -1438,7 +1438,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_partition_column_delete_trigger
-INSTEAD OF DELETE ON public.ducklake_partition_column
+INSTEAD OF DELETE ON @extschema@.ducklake_partition_column
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_partition_column_delete();
 
 -- partition_info INSERT trigger
@@ -1454,7 +1454,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_partition_info_insert_trigger
-INSTEAD OF INSERT ON public.ducklake_partition_info
+INSTEAD OF INSERT ON @extschema@.ducklake_partition_info
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_partition_info_insert();
 
 -- partition_info DELETE trigger
@@ -1468,7 +1468,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_partition_info_delete_trigger
-INSTEAD OF DELETE ON public.ducklake_partition_info
+INSTEAD OF DELETE ON @extschema@.ducklake_partition_info
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_partition_info_delete();
 
 -- schema_versions INSERT trigger
@@ -1482,7 +1482,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_schema_versions_insert_trigger
-INSTEAD OF INSERT ON public.ducklake_schema_versions
+INSTEAD OF INSERT ON @extschema@.ducklake_schema_versions
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_schema_versions_insert();
 
 -- schema_versions DELETE trigger
@@ -1496,7 +1496,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_schema_versions_delete_trigger
-INSTEAD OF DELETE ON public.ducklake_schema_versions
+INSTEAD OF DELETE ON @extschema@.ducklake_schema_versions
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_schema_versions_delete();
 
 
@@ -1513,7 +1513,7 @@ FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_schema_versions_delete();
 -- live in src/replay.c so all DDL replay logic is in C and can read
 -- DucklakeInDDLReplay directly without round-tripping through SQL.
 CREATE TRIGGER ducklake_snapshot_changes_insert_trigger
-INSTEAD OF INSERT ON public.ducklake_snapshot_changes
+INSTEAD OF INSERT ON @extschema@.ducklake_snapshot_changes
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_snapshot_changes_insert();
 
 -- snapshot_changes DELETE trigger
@@ -1527,7 +1527,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_snapshot_changes_delete_trigger
-INSTEAD OF DELETE ON public.ducklake_snapshot_changes
+INSTEAD OF DELETE ON @extschema@.ducklake_snapshot_changes
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_snapshot_changes_delete();
 
 -- table_column_stats INSERT trigger
@@ -1553,7 +1553,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_table_column_stats_insert_trigger
-INSTEAD OF INSERT ON public.ducklake_table_column_stats
+INSTEAD OF INSERT ON @extschema@.ducklake_table_column_stats
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_table_column_stats_insert();
 
 -- table_column_stats DELETE trigger
@@ -1567,7 +1567,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_table_column_stats_delete_trigger
-INSTEAD OF DELETE ON public.ducklake_table_column_stats
+INSTEAD OF DELETE ON @extschema@.ducklake_table_column_stats
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_table_column_stats_delete();
 
 -- tag INSERT trigger
@@ -1581,7 +1581,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_tag_insert_trigger
-INSTEAD OF INSERT ON public.ducklake_tag
+INSTEAD OF INSERT ON @extschema@.ducklake_tag
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_tag_insert();
 
 -- tag DELETE trigger
@@ -1595,7 +1595,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_tag_delete_trigger
-INSTEAD OF DELETE ON public.ducklake_tag
+INSTEAD OF DELETE ON @extschema@.ducklake_tag
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_tag_delete();
 
 -- view INSERT trigger
@@ -1609,7 +1609,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_view_insert_trigger
-INSTEAD OF INSERT ON public.ducklake_view
+INSTEAD OF INSERT ON @extschema@.ducklake_view
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_view_insert();
 
 -- view DELETE trigger
@@ -1624,7 +1624,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_view_delete_trigger
-INSTEAD OF DELETE ON public.ducklake_view
+INSTEAD OF DELETE ON @extschema@.ducklake_view
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_view_delete();
 
 
@@ -1651,7 +1651,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_table_stats_insert_trigger
-INSTEAD OF INSERT ON public.ducklake_table_stats
+INSTEAD OF INSERT ON @extschema@.ducklake_table_stats
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_table_stats_insert();
 
 
@@ -1681,7 +1681,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_column_update_trigger
-INSTEAD OF UPDATE ON public.ducklake_column
+INSTEAD OF UPDATE ON @extschema@.ducklake_column
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_column_update();
 
 -- column_mapping UPDATE trigger
@@ -1698,7 +1698,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_column_mapping_update_trigger
-INSTEAD OF UPDATE ON public.ducklake_column_mapping
+INSTEAD OF UPDATE ON @extschema@.ducklake_column_mapping
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_column_mapping_update();
 
 -- column_tag UPDATE trigger
@@ -1716,7 +1716,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_column_tag_update_trigger
-INSTEAD OF UPDATE ON public.ducklake_column_tag
+INSTEAD OF UPDATE ON @extschema@.ducklake_column_tag
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_column_tag_update();
 
 -- delete_file UPDATE trigger
@@ -1742,7 +1742,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_delete_file_update_trigger
-INSTEAD OF UPDATE ON public.ducklake_delete_file
+INSTEAD OF UPDATE ON @extschema@.ducklake_delete_file
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_delete_file_update();
 
 
@@ -1770,7 +1770,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_file_column_stats_update_trigger
-INSTEAD OF UPDATE ON public.ducklake_file_column_stats
+INSTEAD OF UPDATE ON @extschema@.ducklake_file_column_stats
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_file_column_stats_update();
 
 -- file_partition_value UPDATE trigger
@@ -1786,7 +1786,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_file_partition_value_update_trigger
-INSTEAD OF UPDATE ON public.ducklake_file_partition_value
+INSTEAD OF UPDATE ON @extschema@.ducklake_file_partition_value
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_file_partition_value_update();
 
 -- files_scheduled_for_deletion UPDATE trigger
@@ -1802,7 +1802,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_files_scheduled_for_deletion_update_trigger
-INSTEAD OF UPDATE ON public.ducklake_files_scheduled_for_deletion
+INSTEAD OF UPDATE ON @extschema@.ducklake_files_scheduled_for_deletion
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_files_scheduled_for_deletion_update();
 
 -- partition_column UPDATE trigger
@@ -1819,7 +1819,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_partition_column_update_trigger
-INSTEAD OF UPDATE ON public.ducklake_partition_column
+INSTEAD OF UPDATE ON @extschema@.ducklake_partition_column
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_partition_column_update();
 
 -- partition_info UPDATE trigger
@@ -1836,7 +1836,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_partition_info_update_trigger
-INSTEAD OF UPDATE ON public.ducklake_partition_info
+INSTEAD OF UPDATE ON @extschema@.ducklake_partition_info
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_partition_info_update();
 
 
@@ -1857,7 +1857,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_inlined_data_tables_update_trigger
-INSTEAD OF UPDATE ON public.ducklake_inlined_data_tables
+INSTEAD OF UPDATE ON @extschema@.ducklake_inlined_data_tables
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_inlined_data_tables_update();
 
 -- metadata UPDATE trigger
@@ -1873,7 +1873,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_metadata_update_trigger
-INSTEAD OF UPDATE ON public.ducklake_metadata
+INSTEAD OF UPDATE ON @extschema@.ducklake_metadata
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_metadata_update();
 
 -- name_mapping UPDATE trigger
@@ -1892,7 +1892,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_name_mapping_update_trigger
-INSTEAD OF UPDATE ON public.ducklake_name_mapping
+INSTEAD OF UPDATE ON @extschema@.ducklake_name_mapping
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_name_mapping_update();
 
 -- schema UPDATE trigger
@@ -1915,7 +1915,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_schema_update_trigger
-INSTEAD OF UPDATE ON public.ducklake_schema
+INSTEAD OF UPDATE ON @extschema@.ducklake_schema
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_schema_update();
 
 -- schema_versions UPDATE trigger
@@ -1931,7 +1931,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_schema_versions_update_trigger
-INSTEAD OF UPDATE ON public.ducklake_schema_versions
+INSTEAD OF UPDATE ON @extschema@.ducklake_schema_versions
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_schema_versions_update();
 
 
@@ -1955,7 +1955,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_snapshot_changes_update_trigger
-INSTEAD OF UPDATE ON public.ducklake_snapshot_changes
+INSTEAD OF UPDATE ON @extschema@.ducklake_snapshot_changes
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_snapshot_changes_update();
 
 -- table_column_stats UPDATE trigger
@@ -1975,7 +1975,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_table_column_stats_update_trigger
-INSTEAD OF UPDATE ON public.ducklake_table_column_stats
+INSTEAD OF UPDATE ON @extschema@.ducklake_table_column_stats
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_table_column_stats_update();
 
 -- tag UPDATE trigger
@@ -1992,7 +1992,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_tag_update_trigger
-INSTEAD OF UPDATE ON public.ducklake_tag
+INSTEAD OF UPDATE ON @extschema@.ducklake_tag
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_tag_update();
 
 -- view UPDATE trigger
@@ -2017,7 +2017,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER ducklake_view_update_trigger
-INSTEAD OF UPDATE ON public.ducklake_view
+INSTEAD OF UPDATE ON @extschema@.ducklake_view
 FOR EACH ROW EXECUTE FUNCTION lake_ducklake.ducklake_view_update();
 
 -- ============================================================================

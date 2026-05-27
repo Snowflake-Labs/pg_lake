@@ -41,7 +41,7 @@ def test_partition_info_view_trigger_columns(pg_cursor):
 
     pg_cursor.execute(
         """
-        INSERT INTO public.ducklake_partition_info
+        INSERT INTO main.ducklake_partition_info
             (partition_id, table_id, begin_snapshot, end_snapshot)
         VALUES (501, 501, 0, NULL)
     """
@@ -235,7 +235,7 @@ def test_duckdb_reads_partitioned_pg_table(pg_cursor, s3):
         f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
     )
     duck.execute(
-        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
+        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'main')"
     )
 
     rows = duck.execute(
