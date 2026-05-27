@@ -9,6 +9,9 @@
 #include "catalog/namespace.h"
 #include "catalog/pg_namespace.h"
 #include "executor/spi.h"
+#include "miscadmin.h"
+#include "storage/lmgr.h"
+#include "storage/lock.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
@@ -17,6 +20,13 @@
 #include "pg_lake/ducklake/catalog.h"
 #include "pg_lake/ducklake/spi_priv.h"
 #include "pg_lake/iceberg/api/partitioning.h"
+
+/*
+ * Advisory-lock class for pg_lake_ducklake. 101 is pg_lake_table's
+ * per-relation update lock; 102 is ours. Used by DucklakeCreateSnapshot
+ * to serialize PG-side snapshot_id allocation.
+ */
+#define ADV_LOCKTAG_CLASS_PG_LAKE_DUCKLAKE_SNAPSHOT 102
 
 /*
  * StripTablePathPrefix returns the suffix of absolutePath relative to
@@ -145,10 +155,39 @@ DucklakeGetCurrentSnapshot(void)
 DucklakeSnapshot *
 DucklakeCreateSnapshot(const char *changesMade, const char *author, const char *commitMessage)
 {
-	DucklakeSnapshot *currentSnapshot = DucklakeGetCurrentSnapshot();
+	DucklakeSnapshot *currentSnapshot;
 	DucklakeSnapshot *newSnapshot;
 	StringInfoData query;
 	int			ret;
+
+	/*
+	 * Serialize PG-side snapshot allocation. DuckLake's spec uses optimistic
+	 * concurrency on snapshot_id (the lake_ducklake.snapshot primary key is
+	 * the conflict detector) and DuckDB's ducklake extension implements the
+	 * catch-and-retry loop on its side. PG-side writers (pg_lake's PRE_COMMIT
+	 * hook in track_changes.c) don't have an equivalent retry path: a
+	 * duplicate-PK error at commit time would roll back the user's whole
+	 * transaction with no recovery, so two concurrent PG writers occasionally
+	 * lose work. Take a transaction-scoped advisory lock so only one PG
+	 * writer is in the read-then-insert window at a time. DuckDB-side writers
+	 * don't take this lock and rely on their PK-violation retry instead --
+	 * mixed PG/DuckDB concurrency therefore reduces to "DuckDB's retry
+	 * handles the case where it loses to PG", which it does.
+	 *
+	 * Lock class 102 is a pg_lake_ducklake-private advisory tag (101 is
+	 * pg_lake_table's per-relation update lock). We pin both objid fields to
+	 * 0 so this is a single global lock on snapshot allocation, not
+	 * per-table.
+	 */
+	{
+		LOCKTAG		tag;
+
+		SET_LOCKTAG_ADVISORY(tag, MyDatabaseId, 0, 0,
+							 ADV_LOCKTAG_CLASS_PG_LAKE_DUCKLAKE_SNAPSHOT);
+		(void) LockAcquire(&tag, ExclusiveLock, false, false);
+	}
+
+	currentSnapshot = DucklakeGetCurrentSnapshot();
 
 	initStringInfo(&query);
 	appendStringInfo(&query,
