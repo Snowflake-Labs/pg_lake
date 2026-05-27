@@ -44,34 +44,38 @@
 #include "pg_lake/parsetree/columns.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/util/rel_utils.h"
+#include "pg_lake/util/table_type.h"
 #include "pg_extension_base/spi_helpers.h"
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/planner/dbt.h"
 
 
-static bool IsCreateAsSelectIcebergTable(CreateTableAsStmt *createAsStmt);
-static void EnsureCreateAsSelectIcebergTableSupported(CreateTableAsStmt *createAsStmt);
-static CreateForeignTableStmt *GetCreateIcebergForeignTableStmtFromCreateAsSelect(CreateTableAsStmt *createAsStmt);
-static uint64 InsertIntoIcebergTable(Query *selectQuery, char *qualifiedTableName);
+static bool IsCreateAsSelectPgLakeForeignTable(CreateTableAsStmt *createAsStmt,
+											   PgLakeTableType * tableType);
+static void EnsureCreateAsSelectPgLakeTableSupported(CreateTableAsStmt *createAsStmt,
+													 PgLakeTableType tableType);
+static CreateForeignTableStmt *GetCreatePgLakeForeignTableStmtFromCreateAsSelect(
+																				 CreateTableAsStmt *createAsStmt,
+																				 PgLakeTableType tableType);
+static uint64 InsertIntoPgLakeForeignTable(Query *selectQuery, char *qualifiedTableName);
 
 
 /*
  * ProcessCreateAsSelectPgLakeTable is a utility statement handler for handling
- * statements for creating iceberg tables via CREATE AS SELECT syntax. Normally,
- * iceberg tables are stored as foreign tables internally. But, for ease of use,
- * we let users to create iceberg tables using "CREATE TABLE USING pg_lake_iceberg"
- * syntax. Behind the scenes, we convert the "CREATE TABLE USING pg_lake_iceberg AS SELECT"
- * statement to "CREATE FOREIGN TABLE SERVER pg_lake_iceberg" + "INSERT SELECT" statements.
+ * CREATE TABLE ... AS SELECT statements that target an iceberg or ducklake
+ * table. Both end up as foreign tables internally, so we convert the
+ * "CREATE TABLE ... USING <am> AS SELECT" statement to a
+ * "CREATE FOREIGN TABLE SERVER <server>" + "INSERT SELECT" pair.
  *
  * Currently this code handles:
- * - CREATE TABLE name USING pg_lake_iceberg WITH (location = <>) AS SELECT ...
- * - CREATE TABLE name USING pg_lake_iceberg WITH (location = <>) AS TABLE ...
- * - CREATE TABLE name USING pg_lake_iceberg WITH (location = <>) AS VALUES ( ... )
+ * - CREATE TABLE name USING pg_lake_iceberg WITH (...) AS SELECT|TABLE|VALUES ...
+ * - CREATE TABLE name USING ducklake          WITH (...) AS SELECT|TABLE|VALUES ...
  */
 bool
 ProcessCreateAsSelectPgLakeTable(ProcessUtilityParams * params, void *arg)
 {
 	PlannedStmt *plannedStmt = params->plannedStmt;
+	PgLakeTableType tableType = PG_LAKE_INVALID_TABLE_TYPE;
 
 	/*
 	 * EXPLAIN ANALYZE CREATE TABLE .. AS SELECT .. is a bit of a quirky case
@@ -88,13 +92,17 @@ ProcessCreateAsSelectPgLakeTable(ProcessUtilityParams * params, void *arg)
 			HasOption(explainStmt->options, "analyze"))
 		{
 			CreateTableAsStmt *createAsStmt = (CreateTableAsStmt *) query->utilityStmt;
+			PgLakeTableType explainTableType;
 
-			if (IsCreateAsSelectIcebergTable(createAsStmt))
+			if (IsCreateAsSelectPgLakeForeignTable(createAsStmt, &explainTableType))
 			{
+				const char *am = (explainTableType == PG_LAKE_ICEBERG_TABLE_TYPE)
+					? "pg_lake_iceberg" : "ducklake";
+
 				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 								errmsg("EXPLAIN ANALYZE CREATE TABLE .. USING "
-									   "pg_lake_iceberg AS SELECT .. statements are "
-									   "currently not supported")));
+									   "%s AS SELECT .. statements are "
+									   "currently not supported", am)));
 			}
 		}
 
@@ -108,7 +116,7 @@ ProcessCreateAsSelectPgLakeTable(ProcessUtilityParams * params, void *arg)
 
 	CreateTableAsStmt *createAsStmt = (CreateTableAsStmt *) plannedStmt->utilityStmt;
 
-	if (!IsCreateAsSelectIcebergTable(createAsStmt))
+	if (!IsCreateAsSelectPgLakeForeignTable(createAsStmt, &tableType))
 	{
 		return false;
 	}
@@ -143,25 +151,29 @@ ProcessCreateAsSelectPgLakeTable(ProcessUtilityParams * params, void *arg)
 	 * the user-provided default_table_access_method and just override
 	 * ourselves if we need to.
 	 *
-	 * However, if the extension explicitly specifies USING iceberg, we allow
-	 * the iceberg table creation.
+	 * However, if the extension explicitly specifies USING iceberg or USING
+	 * ducklake, we allow the table creation.
 	 */
 	if (creating_extension)
 	{
-		if (createAsStmt->into->accessMethod == NULL &&
-			IsPgLakeIcebergAccessMethod(default_table_access_method))
+		bool		amIsLake = (createAsStmt->into->accessMethod != NULL) &&
+			(IsPgLakeIcebergAccessMethod(createAsStmt->into->accessMethod) ||
+			 IsPgLakeDucklakeAccessMethod(createAsStmt->into->accessMethod));
+		bool		defaultIsLake = IsPgLakeIcebergAccessMethod(default_table_access_method) ||
+			IsPgLakeDucklakeAccessMethod(default_table_access_method);
+
+		if (createAsStmt->into->accessMethod == NULL && defaultIsLake)
 		{
 			createAsStmt->into->accessMethod = DEFAULT_TABLE_ACCESS_METHOD;
 			return false;
 		}
-		else if (createAsStmt->into->accessMethod != NULL &&
-				 !IsPgLakeIcebergAccessMethod(createAsStmt->into->accessMethod))
+		else if (createAsStmt->into->accessMethod != NULL && !amIsLake)
 		{
 			return false;
 		}
 	}
 
-	EnsureCreateAsSelectIcebergTableSupported(createAsStmt);
+	EnsureCreateAsSelectPgLakeTableSupported(createAsStmt, tableType);
 
 	char	   *tableName = createAsStmt->into->rel->relname;
 	char	   *schemaName = createAsStmt->into->rel->schemaname;
@@ -175,10 +187,10 @@ ProcessCreateAsSelectPgLakeTable(ProcessUtilityParams * params, void *arg)
 		schemaName = get_namespace_name(namespaceId);
 	}
 
-	CreateForeignTableStmt *createIcebergTableStmt =
-		GetCreateIcebergForeignTableStmtFromCreateAsSelect(createAsStmt);
+	CreateForeignTableStmt *foreignTableStmt =
+		GetCreatePgLakeForeignTableStmtFromCreateAsSelect(createAsStmt, tableType);
 
-	params->plannedStmt->utilityStmt = (Node *) createIcebergTableStmt;
+	params->plannedStmt->utilityStmt = (Node *) foreignTableStmt;
 
 	/*
 	 * Run the other handlers and the internal ProcessUtility. We will not
@@ -191,7 +203,7 @@ ProcessCreateAsSelectPgLakeTable(ProcessUtilityParams * params, void *arg)
 		Query	   *selectQuery = (Query *) createAsStmt->query;
 
 		char	   *qualifiedTableName = quote_qualified_identifier(schemaName, tableName);
-		uint64		rowCount = InsertIntoIcebergTable(selectQuery, qualifiedTableName);
+		uint64		rowCount = InsertIntoPgLakeForeignTable(selectQuery, qualifiedTableName);
 
 		if (params->completionTag)
 			SetQueryCompletion(params->completionTag, CMDTAG_SELECT, rowCount);
@@ -202,11 +214,11 @@ ProcessCreateAsSelectPgLakeTable(ProcessUtilityParams * params, void *arg)
 }
 
 /*
- * InsertIntoIcebergTable inserts the result of a SELECT statement into given
- * iceberg table.
+ * InsertIntoPgLakeForeignTable inserts the result of a SELECT statement into
+ * the given iceberg or ducklake foreign table.
  */
 static uint64
-InsertIntoIcebergTable(Query *selectQuery, char *qualifiedTableName)
+InsertIntoPgLakeForeignTable(Query *selectQuery, char *qualifiedTableName)
 {
 	char	   *selectQueryStr = pg_get_querydef(selectQuery, false);
 
@@ -229,48 +241,62 @@ InsertIntoIcebergTable(Query *selectQuery, char *qualifiedTableName)
 
 
 /*
- * IsCreateAsSelectIcebergTable returns whether given
- * CREATE TABLE AS SELECT statement will create a pg_lake_iceberg table.
+ * IsCreateAsSelectPgLakeForeignTable returns true when the CREATE TABLE AS
+ * SELECT statement targets an iceberg or ducklake table, and writes the
+ * concrete table type back through *tableType.
  */
 static bool
-IsCreateAsSelectIcebergTable(CreateTableAsStmt *createAsStmt)
+IsCreateAsSelectPgLakeForeignTable(CreateTableAsStmt *createAsStmt,
+								   PgLakeTableType * tableType)
 {
 	char	   *accessMethod = createAsStmt->into->accessMethod;
-	PgLakeTableType tableType = GetPgLakeTableTypeViaAccessMethod(accessMethod);
+	PgLakeTableType resolved = GetPgLakeTableTypeViaAccessMethod(accessMethod);
 
-	return tableType == PG_LAKE_ICEBERG_TABLE_TYPE;
+	if (resolved == PG_LAKE_ICEBERG_TABLE_TYPE ||
+		resolved == PG_LAKE_DUCKLAKE_TABLE_TYPE)
+	{
+		*tableType = resolved;
+		return true;
+	}
+
+	*tableType = PG_LAKE_INVALID_TABLE_TYPE;
+	return false;
 }
 
 
 /*
- * EnsureCreateAsSelectIcebergTableSupported checks whether the given
- * CREATE TABLE USING pg_lake_iceberg AS SELECT statement contains any
- * query parts that is not valid for foreign tables. We need to check
- * this here because Postgres does not check these parts when converting
- * the statement to a foreign table.
+ * EnsureCreateAsSelectPgLakeTableSupported checks whether the given CREATE
+ * TABLE ... USING (iceberg|ducklake) AS SELECT statement contains any query
+ * parts that aren't valid for foreign tables. We need to check this here
+ * because Postgres does not check these parts when converting the statement
+ * to a foreign table.
  */
 static void
-EnsureCreateAsSelectIcebergTableSupported(CreateTableAsStmt *createAsStmt)
+EnsureCreateAsSelectPgLakeTableSupported(CreateTableAsStmt *createAsStmt,
+										 PgLakeTableType tableType)
 {
+	const char *amLabel = (tableType == PG_LAKE_ICEBERG_TABLE_TYPE)
+		? "pg_lake_iceberg" : "ducklake";
+
 	if (createAsStmt->objtype == OBJECT_MATVIEW)
 	{
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						errmsg("pg_lake_table: materialized views are not allowed "
-							   "as pg_lake_iceberg tables")));
+							   "as %s tables", amLabel)));
 	}
 
 	if (createAsStmt->into->rel->relpersistence == RELPERSISTENCE_TEMP)
 	{
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						errmsg("pg_lake_table: temporary tables are not allowed "
-							   "as pg_lake_iceberg tables")));
+							   "as %s tables", amLabel)));
 	}
 
 	if (createAsStmt->into->rel->relpersistence == RELPERSISTENCE_UNLOGGED)
 	{
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						errmsg("pg_lake_table: unlogged tables are not allowed "
-							   "as pg_lake_iceberg tables")));
+							   "as %s tables", amLabel)));
 	}
 
 	Query	   *selectQuery = (Query *) createAsStmt->query;
@@ -280,14 +306,14 @@ EnsureCreateAsSelectIcebergTableSupported(CreateTableAsStmt *createAsStmt)
 		/* set when SELECT AS EXECUTE */
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						errmsg("pg_lake_table: CREATE TABLE AS EXECUTE is not supported "
-							   "for pg_lake_iceberg tables")));
+							   "for %s tables", amLabel)));
 	}
 
 	if (createAsStmt->into->tableSpaceName != NULL)
 	{
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						errmsg("pg_lake_table: tablespace is not supported "
-							   "with pg_lake_iceberg tables")));
+							   "with %s tables", amLabel)));
 	}
 
 	return;
@@ -295,12 +321,13 @@ EnsureCreateAsSelectIcebergTableSupported(CreateTableAsStmt *createAsStmt)
 
 
 /*
- * GetCreateIcebergForeignTableStmtFromCreateAsSelect converts given
- * "CREATE TABLE USING pg_lake_iceberg AS SELECT" statement into
- * "CREATE FOREIGN TABLE SERVER pg_lake_iceberg" statement.
+ * GetCreatePgLakeForeignTableStmtFromCreateAsSelect converts the given
+ * "CREATE TABLE USING (iceberg|ducklake) AS SELECT" statement into a
+ * "CREATE FOREIGN TABLE SERVER <pg_lake_iceberg|pg_lake_ducklake>" statement.
  */
 static CreateForeignTableStmt *
-GetCreateIcebergForeignTableStmtFromCreateAsSelect(CreateTableAsStmt *createAsStmt)
+GetCreatePgLakeForeignTableStmtFromCreateAsSelect(CreateTableAsStmt *createAsStmt,
+												  PgLakeTableType tableType)
 {
 	/* set when AS SELECT, AS TABLE and AS VALUES */
 	Query	   *selectQuery = (Query *) createAsStmt->query;
@@ -312,14 +339,16 @@ GetCreateIcebergForeignTableStmtFromCreateAsSelect(CreateTableAsStmt *createAsSt
 	TupleDesc	tupledesc = BuildTupleDescriptorForTargetList(targetList);
 	List	   *columnDefs = BuildColumnDefListForTupleDesc(tupledesc);
 
-	CreateForeignTableStmt *icebergForeignTableStmt = makeNode(CreateForeignTableStmt);
+	CreateForeignTableStmt *foreignTableStmt = makeNode(CreateForeignTableStmt);
 
-	icebergForeignTableStmt->base.accessMethod = NULL;
-	icebergForeignTableStmt->base.if_not_exists = ifNotExists;
-	icebergForeignTableStmt->base.relation = rel;
-	icebergForeignTableStmt->base.tableElts = columnDefs;
-	icebergForeignTableStmt->servername = PG_LAKE_ICEBERG_SERVER_NAME;
-	icebergForeignTableStmt->options = options;
+	foreignTableStmt->base.accessMethod = NULL;
+	foreignTableStmt->base.if_not_exists = ifNotExists;
+	foreignTableStmt->base.relation = rel;
+	foreignTableStmt->base.tableElts = columnDefs;
+	foreignTableStmt->servername = (tableType == PG_LAKE_ICEBERG_TABLE_TYPE)
+		? PG_LAKE_ICEBERG_SERVER_NAME
+		: PG_LAKE_DUCKLAKE_SERVER_NAME;
+	foreignTableStmt->options = options;
 
-	return icebergForeignTableStmt;
+	return foreignTableStmt;
 }

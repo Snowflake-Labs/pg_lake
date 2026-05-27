@@ -63,6 +63,8 @@
 #include "pg_lake/partitioning/partition_spec_catalog.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/iceberg/hash_utils.h"
+#include "pg_lake/util/table_type.h"
+#include "pg_lake/ducklake/data_file_schema.h"
 #include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/type.h"
 #include "pg_lake/util/rel_utils.h"
@@ -188,12 +190,12 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 	PgLakeTableProperties tableProperties = GetPgLakeTableProperties(relationId);
 
 	if ((!EnableDataFilePruning && !EnablePartitionPruning) ||
-		!IsIcebergTable(relationId))
+		(!IsIcebergTable(relationId) && !IsDucklakeTable(relationId)))
 	{
 		/*
 		 * User disabled or no columns used in filters, so we cannot prune any
-		 * files. We also do not prune files for non-iceberg tables as there
-		 * are no column stats for those.
+		 * files. We also do not prune files for non-iceberg/non-ducklake
+		 * tables as there are no column stats for those.
 		 *
 		 * For full match we say nothing matches,
 		 */
@@ -232,9 +234,38 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 
 	AddFieldIdsUsedInQuery(fieldIdsUsedInQuery, relationId, tableProperties, columnsUsedInFilters);
 
-	/* get partition transforms for the fields used in the query */
-	List	   *partitionFieldsUsedInQuery = GetPartitionSpecFieldsUsedInQuery(relationId, fieldIdsUsedInQuery);
-	List	   *partitionTransformsUsedInQuery = GetPartitionTransformsFromSpecFields(relationId, partitionFieldsUsedInQuery);
+	/*
+	 * Determine which partition transforms touch columns used in the WHERE
+	 * clause. Iceberg goes through the spec_field intermediary because
+	 * source_id (a stable spec field id) is what the catalog stores per file
+	 * and what the per-file partition entries are keyed by; DuckLake doesn't
+	 * have that indirection, so we filter the transform list directly by
+	 * pg_attnum.
+	 */
+	List	   *partitionTransformsUsedInQuery = NIL;
+
+	if (IsDucklakeTable(relationId))
+	{
+		List	   *allTransforms = CurrentPartitionTransformList(relationId);
+		ListCell   *cell;
+
+		foreach(cell, allTransforms)
+		{
+			IcebergPartitionTransform *transform = lfirst(cell);
+			AttrNumber	attnum = transform->attnum;
+			bool		found = false;
+
+			hash_search(fieldIdsUsedInQuery, &attnum, HASH_FIND, &found);
+			if (found)
+				partitionTransformsUsedInQuery = lappend(partitionTransformsUsedInQuery, transform);
+		}
+	}
+	else
+	{
+		List	   *partitionFieldsUsedInQuery = GetPartitionSpecFieldsUsedInQuery(relationId, fieldIdsUsedInQuery);
+
+		partitionTransformsUsedInQuery = GetPartitionTransformsFromSpecFields(relationId, partitionFieldsUsedInQuery);
+	}
 
 	int			dataFileCount = list_length(dataFiles);
 
@@ -250,6 +281,13 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 
 			Assert(tableDataFile->content == CONTENT_DATA);
 			columnStats = tableDataFile->stats.columnStats;
+			partition = tableDataFile->partition;
+		}
+		else if (IsDucklakeTable(relationId))
+		{
+			TableDataFile *tableDataFile = (TableDataFile *) list_nth(dataFiles, dataFileIndex);
+
+			columnStats = NIL;
 			partition = tableDataFile->partition;
 		}
 		else if (IsExternalIcebergTable(relationId))
@@ -386,6 +424,48 @@ AddFieldIdsUsedInQuery(HTAB *fieldIdsUsedInQuery, Oid relationId, PgLakeTablePro
 		 * it is guaranteed that GetRegisteredFieldForAttributes() returns the
 		 * same number of elements
 		 */
+		Assert(list_length(fields) == list_length(columnsUsedInFilters));
+	}
+	else if (IsDucklakeTable(relationId))
+	{
+		/*
+		 * DuckLake doesn't populate lake_table.field_id_mapping; resolve each
+		 * attnum through the per-relation DataFileSchema instead, which reads
+		 * lake_ducklake.column. The fields list must be in the same order as
+		 * columnsUsedInFilters so the columnIndex loop below stays in
+		 * lockstep.
+		 */
+		DataFileSchema *schema = DucklakeBuildDataFileSchema(relationId);
+		ListCell   *attrCell;
+
+		foreach(attrCell, attrNos)
+		{
+			AttrNumber	attnum = lfirst_int(attrCell);
+			DataFileSchemaField *match = NULL;
+
+			for (int i = 0; i < schema->nfields; i++)
+			{
+				DataFileSchemaField *candidate = &schema->fields[i];
+
+				if (get_attnum(relationId, candidate->name) == attnum)
+				{
+					match = candidate;
+					break;
+				}
+			}
+
+			if (match == NULL)
+			{
+				ereport(DEBUG2,
+						(errmsg("Skipping data file pruning for relation %s as we "
+								"could not find the field for attnum %d",
+								GetQualifiedRelationName(relationId), attnum)));
+				return;
+			}
+
+			fields = lappend(fields, match);
+		}
+
 		Assert(list_length(fields) == list_length(columnsUsedInFilters));
 	}
 	else if (IsExternalIcebergTable(relationId))

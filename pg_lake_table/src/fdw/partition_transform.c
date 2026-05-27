@@ -16,16 +16,21 @@
  */
 
 #include "postgres.h"
+#include "executor/spi.h"
 #include "utils/builtins.h"
 #include "utils/date.h"
 #include "utils/lsyscache.h"
 
+#include "pg_extension_base/spi_helpers.h"
 #include "pg_lake/partitioning/partition_by_parser.h"
 #include "pg_lake/partitioning/partition_spec_catalog.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/fdw/schema_operations/field_id_mapping_catalog.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
+#include "pg_lake/ducklake/catalog.h"
+#include "pg_lake/ducklake/data_file_schema.h"
+#include "pg_lake/extensions/pg_lake_ducklake.h"
 #include "pg_lake/iceberg/api/partitioning.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/iceberg_field.h"
@@ -43,6 +48,7 @@
 
 static PartitionField * ApplyPartitionTransformToTuple(IcebergPartitionTransform * transform,
 													   TupleTableSlot *slot);
+static List *DucklakePartitionTransformList(Oid relationId, bool currentOnly);
 static void *ApplyIdentityTransformToColumn(IcebergPartitionTransform * transform,
 											Datum columnValue, bool isNull,
 											size_t *valueSize);
@@ -176,6 +182,106 @@ PartitionTransformsEqual(IcebergPartitionSpec * spec, List *partitionTransforms)
 
 
 /*
+ * DucklakePartitionTransformList builds the list of
+ * IcebergPartitionTransform for a DuckLake table by reading
+ * lake_ducklake.partition_column joined with lake_ducklake.column.
+ *
+ * If `currentOnly` is true, only the live partition spec is returned;
+ * otherwise all (versioned) partition rows for this table are
+ * returned. Today DuckLake doesn't allow partition spec evolution, so
+ * the two are equivalent -- but we keep the parameter to mirror the
+ * Iceberg pair (CurrentPartitionTransformList vs
+ * AllPartitionTransformList).
+ */
+static List *
+DucklakePartitionTransformList(Oid relationId, bool currentOnly)
+{
+	List	   *transforms = NIL;
+	DucklakeTableMetadata *metadata = DucklakeGetTableMetadata(relationId);
+
+	if (metadata == NULL)
+		return NIL;
+
+	/*
+	 * Build the field schema once so each transform's `sourceField` lookup
+	 * hits an in-memory array instead of re-reading the catalog.
+	 */
+	DataFileSchema *schema = DucklakeBuildDataFileSchema(relationId);
+
+	StringInfoData q;
+
+	initStringInfo(&q);
+	appendStringInfo(&q,
+					 "SELECT pc.partition_key_index, pc.column_id, pc.transform, "
+					 "       c.column_name "
+					 "  FROM lake_ducklake.partition_column pc "
+					 "  JOIN lake_ducklake.partition_info pi "
+					 "    ON pi.partition_id OPERATOR(pg_catalog.=) pc.partition_id "
+					 "  JOIN lake_ducklake.column c "
+					 "    ON c.column_id OPERATOR(pg_catalog.=) pc.column_id "
+					 "   AND c.end_snapshot IS NULL "
+					 "   AND c.parent_column IS NULL "
+					 " WHERE pc.table_id OPERATOR(pg_catalog.=) %ld ",
+					 metadata->tableId);
+	if (currentOnly)
+		appendStringInfoString(&q, "   AND pi.end_snapshot IS NULL ");
+	appendStringInfoString(&q, " ORDER BY pi.partition_id, pc.partition_key_index");
+
+	MemoryContext callerContext = CurrentMemoryContext;
+
+	SPI_START_EXTENSION_OWNER(PgLakeDucklake);
+	int			ret = SPI_exec(q.data, 0);
+
+	if (ret == SPI_OK_SELECT)
+	{
+		MemoryContextSwitchTo(callerContext);
+
+		for (uint64 row = 0; row < SPI_processed; row++)
+		{
+			HeapTuple	tup = SPI_tuptable->vals[row];
+			TupleDesc	desc = SPI_tuptable->tupdesc;
+			bool		isnull;
+
+			int64		columnId = DatumGetInt64(SPI_getbinval(tup, desc, 2, &isnull));
+			char	   *transformStr = TextDatumGetCString(SPI_getbinval(tup, desc, 3, &isnull));
+			char	   *columnName = pstrdup(TextDatumGetCString(SPI_getbinval(tup, desc, 4, &isnull)));
+
+			IcebergPartitionTransform *transform = palloc0(sizeof(IcebergPartitionTransform));
+
+			transform->partitionFieldId = (int32) columnId;
+			transform->partitionFieldName = psprintf("%s_%s", columnName, transformStr);
+			transform->transformName = pstrdup(transformStr);
+			transform->columnName = columnName;
+			transform->attnum = get_attnum(relationId, columnName);
+			transform->pgType = GetAttributePGType(relationId, transform->attnum);
+			transform->sourceField = GetDataFileSchemaFieldById(schema, (int) columnId);
+
+			ParseTransformName(transform->transformName,
+							   &transform->type,
+							   &transform->bucketCount,
+							   &transform->truncateLen);
+
+			transform->resultPgType = GetTransformResultPGType(transform);
+
+			transforms = lappend(transforms, transform);
+		}
+	}
+
+	SPI_END();
+
+	if (metadata->tableName)
+		pfree(metadata->tableName);
+	if (metadata->schemaName)
+		pfree(metadata->schemaName);
+	if (metadata->path)
+		pfree(metadata->path);
+	pfree(metadata);
+
+	return transforms;
+}
+
+
+/*
 * For a given relationId, this function returns the list of
 * IcebergPartitionTransform for the table with the current
 * partition spec. For non-partitioned tables, it returns NIL.
@@ -184,6 +290,10 @@ List *
 CurrentPartitionTransformList(Oid relationId)
 {
 	List	   *partitionTransforms = NIL;
+
+	if (IsDucklakeTable(relationId))
+		return DucklakePartitionTransformList(relationId, true);
+
 	int			specId = GetCurrentSpecId(relationId);
 
 	/* partitioned table, fill the partitionTransforms */
@@ -209,6 +319,9 @@ CurrentPartitionTransformList(Oid relationId)
 List *
 AllPartitionTransformList(Oid relationId)
 {
+	if (IsDucklakeTable(relationId))
+		return DucklakePartitionTransformList(relationId, false);
+
 	List	   *partitionFields = GetAllPartitionSpecFields(relationId);
 
 	return GetPartitionTransformsFromSpecFields(relationId, partitionFields);
@@ -352,8 +465,20 @@ ParseTransformName(const char *name,
 		*type = PARTITION_TRANSFORM_BUCKET;
 		return;
 	}
+	else if (pg_strncasecmp(name, "bucket(", strlen("bucket(")) == 0 &&
+			 ParseBracketUintSize(name, "bucket(", bucketCount))
+	{
+		*type = PARTITION_TRANSFORM_BUCKET;
+		return;
+	}
 	else if (pg_strncasecmp(name, "truncate[", strlen("truncate[")) == 0 &&
 			 ParseBracketUintSize(name, "truncate[", truncateLen))
+	{
+		*type = PARTITION_TRANSFORM_TRUNCATE;
+		return;
+	}
+	else if (pg_strncasecmp(name, "truncate(", strlen("truncate(")) == 0 &&
+			 ParseBracketUintSize(name, "truncate(", truncateLen))
 	{
 		*type = PARTITION_TRANSFORM_TRUNCATE;
 		return;
@@ -366,9 +491,11 @@ ParseTransformName(const char *name,
 
 
 /*
-* ParseBracketUintSize parses a string of the form "prefix[digits]"
-* and returns the digits as a size_t value.
-*/
+ * ParseBracketUintSize parses a string of the form "prefix[digits]"
+ * or "prefix(digits)" and returns the numeric size. The square-bracket
+ * form is what Iceberg writes; the paren form is what DuckLake writes
+ * -- accept both so reads stay catalog-agnostic.
+ */
 static bool
 ParseBracketUintSize(const char *name, const char *prefix, size_t *outVal)
 {
@@ -378,7 +505,8 @@ ParseBracketUintSize(const char *name, const char *prefix, size_t *outVal)
 		return false;
 
 	const char *digits = name + prefixLen;
-	const char *endOfStr = strchr(digits, ']');
+	char		closer = (prefix[prefixLen - 1] == '[') ? ']' : ')';
+	const char *endOfStr = strchr(digits, closer);
 
 	if (endOfStr == NULL ||
 		digits == endOfStr ||

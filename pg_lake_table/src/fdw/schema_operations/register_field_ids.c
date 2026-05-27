@@ -31,12 +31,17 @@
 #include "access/table.h"
 #include "commands/defrem.h"
 #include "commands/comment.h"
+#include "executor/spi.h"
 #include "foreign/foreign.h"
+#include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/snapmgr.h"
 #include "parser/parse_type.h"
 
 #include "pg_lake/data_file/data_file_stats.h"
+#include "pg_lake/ducklake/catalog.h"
+#include "pg_lake/ducklake/data_file_schema.h"
 #include "pg_lake/fdw/schema_operations/field_id_mapping_catalog.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/iceberg/api/table_metadata.h"
@@ -49,6 +54,7 @@
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/pgduck/remote_storage.h"
 #include "pg_lake/pgduck/serialize.h"
+#include "pg_lake/util/table_type.h"
 
 
 static DataFileSchema * GetDataFileSchemaForTableInternal(Oid relationId);
@@ -290,6 +296,7 @@ CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(Oid relationId)
 }
 
 
+
 /*
  * GetDataFileSchemaForTableInternal is helper function to get the schema for a given table.
  * It is used by GetDataFileSchemaForTable.
@@ -297,6 +304,9 @@ CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(Oid relationId)
 static DataFileSchema *
 GetDataFileSchemaForTableInternal(Oid relationId)
 {
+	if (IsDucklakeTable(relationId))
+		return DucklakeBuildDataFileSchema(relationId);
+
 	if (!IsIcebergTable(relationId))
 		return NULL;
 
@@ -363,6 +373,9 @@ GetLeafFieldsForExternalIcebergTable(char *metadataPath)
 List *
 GetLeafFieldsForTable(Oid relationId)
 {
+	if (IsDucklakeTable(relationId))
+		return GetLeafFieldsForDucklakeTable(relationId);
+
 	if (!IsIcebergTable(relationId))
 		return NULL;
 

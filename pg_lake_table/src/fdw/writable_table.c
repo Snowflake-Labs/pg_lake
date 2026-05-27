@@ -55,6 +55,8 @@
 #include "pg_lake/pgduck/write_data.h"
 #include "pg_lake/pgduck/iceberg_validation.h"
 #include "pg_lake/transaction/track_iceberg_metadata_changes.h"
+#include "pg_lake/ducklake/track_changes.h"
+#include "pg_lake/ducklake/catalog.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_extension_base/spi_helpers.h"
 #include "pg_lake/util/string_utils.h"
@@ -206,6 +208,31 @@ ApplyInsertFile(Relation rel, char *insertFile, int64 rowCount,
 		/* set the row_id_start for the new data file */
 		addOperation->dataFileStats.rowIdStart = rowIdRange->rowStartId;
 	}
+	else if (IsDucklakeTable(relationId) && rowCount > 0)
+	{
+		/*
+		 * DuckLake doesn't carry a per-table sequence; row_ids come from the
+		 * lake_ducklake.table_stats.next_row_id counter.
+		 * DucklakeAllocateRowIds holds the class-102 advisory lock while it
+		 * bumps the counter so concurrent writers don't collide on the same
+		 * range.
+		 */
+		DucklakeTableMetadata *metadata = DucklakeGetTableMetadata(relationId);
+
+		if (metadata)
+		{
+			addOperation->dataFileStats.rowIdStart =
+				DucklakeAllocateRowIds(metadata->tableId, rowCount);
+
+			if (metadata->tableName)
+				pfree(metadata->tableName);
+			if (metadata->schemaName)
+				pfree(metadata->schemaName);
+			if (metadata->path)
+				pfree(metadata->path);
+			pfree(metadata);
+		}
+	}
 
 	return metadataOperations;
 }
@@ -308,6 +335,12 @@ PrepareCSVInsertion(Oid relationId, char *insertCSV, int64 rowCount,
 	foreach(dataFileStatsCell, statsCollector->dataFileStats)
 	{
 		DataFileStats *stats = lfirst(dataFileStatsCell);
+
+		/*
+		 * Note: DuckLake metadata is written in ApplyDataFileCatalogChanges()
+		 * when the DATA_FILE_ADD operation is processed. We don't need to
+		 * write it here to avoid duplicate entries.
+		 */
 
 		DataFileModification *modification = palloc0(sizeof(DataFileModification));
 
@@ -489,9 +522,22 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 		bool		exceedsRowLimit = (CopyOnWriteMaxDeleteRows >= 0 &&
 									   *totalPositionDeletedRows >= (int64) CopyOnWriteMaxDeleteRows);
 
+		/*
+		 * DuckLake tables stay on the merge-on-read path. Copy-on-write
+		 * end-snapshots the source data_file, but DuckDB's ducklake extension
+		 * always writes merge-on-read position-deletes and does not take
+		 * pg_lake_table's class-101 advisory lock, so a concurrent DuckDB
+		 * UPDATE landing while we COW'd produces a delete_file pointing at a
+		 * now-dead source plus a new data_file with rewritten rows -- and our
+		 * COW survivors file still holds the rows DuckDB updated, so they
+		 * appear unchanged. Forcing merge-on-read makes both engines'
+		 * delete_files compose additively at read time. Compaction is a
+		 * separate operation.
+		 */
 		if ((ShouldRewriteAfterDeletions(sourceRowCount, totalDeletedRowCount) ||
 			 exceedsRowLimit) &&
-			!hasRowIds)
+			!hasRowIds &&
+			tableType != PG_LAKE_DUCKLAKE_TABLE_TYPE)
 		{
 			/*
 			 * Copy-on-write deletion. The FDW produces a CSV file with the
@@ -1198,6 +1244,29 @@ AddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc,
 			/* set the row_id_start for the new data file */
 			addOp->dataFileStats.rowIdStart = rowIdRange->rowStartId;
 		}
+		else if (IsDucklakeTable(relationId) && rowCount > 0)
+		{
+			/*
+			 * DuckLake's row_id range is allocated atomically under the
+			 * snapshot advisory lock so concurrent INSERT-SELECTs don't
+			 * collide. Mirrors the per-row INSERT path in ApplyInsertFile.
+			 */
+			DucklakeTableMetadata *metadata = DucklakeGetTableMetadata(relationId);
+
+			if (metadata)
+			{
+				addOp->dataFileStats.rowIdStart =
+					DucklakeAllocateRowIds(metadata->tableId, rowCount);
+
+				if (metadata->tableName)
+					pfree(metadata->tableName);
+				if (metadata->schemaName)
+					pfree(metadata->schemaName);
+				if (metadata->path)
+					pfree(metadata->path);
+				pfree(metadata);
+			}
+		}
 
 		rowsProcessed += rowCount;
 	}
@@ -1400,6 +1469,20 @@ ApplyMetadataChanges(Oid relationId, List *metadataOperations)
 				List	   *operationTypes = GetMetadataOperationTypes(metadataOperations);
 
 				TrackIcebergMetadataChangesInTx(relationId, operationTypes);
+				break;
+			}
+
+		case PG_LAKE_DUCKLAKE_TABLE_TYPE:
+			{
+				ApplyDataFileCatalogChanges(relationId, metadataOperations);
+
+				/*
+				 * Track DuckLake metadata changes for commit-time snapshot
+				 * creation
+				 */
+				List	   *operationTypes = GetMetadataOperationTypes(metadataOperations);
+
+				TrackDucklakeMetadataChangesInTx(relationId, operationTypes);
 				break;
 			}
 
@@ -1619,6 +1702,7 @@ GetPossiblePositionDeleteFiles(Oid relationId, List *sourcePathList, Snapshot sn
 	{
 		case PG_LAKE_TABLE_TYPE:
 		case PG_LAKE_ICEBERG_TABLE_TYPE:
+		case PG_LAKE_DUCKLAKE_TABLE_TYPE:
 			return GetPossiblePositionDeleteFilesFromCatalog(relationId, sourcePathList, snapshot);
 
 		default:

@@ -954,7 +954,7 @@ ApplyTrackedIcebergMetadataChanges(bool isVerbose)
  * before the per-table data-file diff query. It says yes when:
  *
  *   - any tracked relation saw DATA_FILE_REMOVE_ALL (one op, but maps
- *     to thousands of catalog deletes — always blow away stale stats), or
+ *     to thousands of catalog deletes -- always blow away stale stats), or
  *   - the total number of single-file ADD/REMOVE ops across all tracked
  *     relations reaches pg_lake_table.commit_time_analyze_threshold.
  *
@@ -1239,9 +1239,9 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 	 * We skip per-column min/max stats on this read. The diff against the
 	 * last-pushed metadata below (FindChangedFilesSinceMetadata) only looks
 	 * at paths, and stats are only needed for the small subset of newly added
-	 * files — loaded in a targeted follow-up call below. On large
-	 * changelogs this avoids materializing one SPI row per (file × stats
-	 * column) just to diff paths.
+	 * files -- loaded in a targeted follow-up call below. On large changelogs
+	 * this avoids materializing one SPI row per (file × stats column) just
+	 * to diff paths.
 	 */
 	bool		dataOnly = false;
 	bool		newFilesOnly = false;
@@ -1264,8 +1264,8 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 
 	/*
 	 * Now that we know which files are newly added, load per-column stats
-	 * targeted to just those paths. Removed files don't need stats — the
-	 * manifest DELETE entry carries only the path — so this is bounded by
+	 * targeted to just those paths. Removed files don't need stats -- the
+	 * manifest DELETE entry carries only the path -- so this is bounded by
 	 * the actual write size rather than by total files in the changelog.
 	 */
 	LoadColumnStatsForFiles(opTracker->relationId, currentFilesMap, addedFiles);

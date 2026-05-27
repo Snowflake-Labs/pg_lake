@@ -4,4 +4,4 @@ module_pathname = '$libdir/pg_lake_copy'
 relocatable = false
 schema = pg_catalog
 requires = 'pg_lake_engine,pg_lake_iceberg,pg_lake_table'
-#!shared_preload_libraries = '$libdir/pg_lake_engine,$libdir/pg_lake_iceberg,$libdir/pg_lake_table,$libdir/pg_lake_copy'
+#!shared_preload_libraries = '$libdir/pg_lake_engine,$libdir/pg_lake_iceberg,$libdir/pg_lake_ducklake,$libdir/pg_lake_table,$libdir/pg_lake_copy'

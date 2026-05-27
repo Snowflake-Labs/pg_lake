@@ -34,11 +34,20 @@
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 
-static void ParseDuckdbColumnMinMaxFromText(char *input, List **names, List **mins, List **maxs);
-static void ExtractMinMaxForAllColumns(Datum returnStatsMap, List **names, List **mins, List **maxs);
-static void ExtractMinMaxForColumn(Datum map, char *colName, List **names, List **mins, List **maxs);
+static void ParseDuckdbColumnMinMaxFromText(char *input, List **names, List **mins, List **maxs,
+											List **nullCounts, List **valueCounts,
+											List **columnSizeBytes, List **hasNans);
+static void ExtractMinMaxForAllColumns(Datum returnStatsMap, List **names, List **mins, List **maxs,
+									   List **nullCounts, List **valueCounts,
+									   List **columnSizeBytes, List **hasNans);
+static void ExtractMinMaxForColumn(Datum map, char *colName, List **names, List **mins, List **maxs,
+								   List **nullCounts, List **valueCounts,
+								   List **columnSizeBytes, List **hasNans);
 static char *UnescapeDoubleQuotes(char *s);
-static List *GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields, DataFileSchema * schema);
+static List *GetDataFileColumnStatsList(List *names, List *mins, List *maxs,
+										List *nullCounts, List *valueCounts,
+										List *columnSizeBytes, List *hasNans,
+										List *leafFields, DataFileSchema * schema);
 static int	FindIndexInStringList(List *names, const char *targetName);
 static List *FetchRowGroupStats(PGDuckConnection * pgDuckConn, List *fieldIdList, char *path);
 static char *PrepareRowGroupStatsMinMaxQuery(List *rowGroupStatList);
@@ -175,9 +184,18 @@ GetDataFileStatsListFromPGResult(PGresult *result, List *leafFields, DataFileSch
 				List	   *names = NIL;
 				List	   *mins = NIL;
 				List	   *maxs = NIL;
+				List	   *nullCounts = NIL;
+				List	   *valueCounts = NIL;
+				List	   *columnSizeBytes = NIL;
+				List	   *hasNans = NIL;
 
-				ParseDuckdbColumnMinMaxFromText(resultValue, &names, &mins, &maxs);
-				fileStats->columnStats = GetDataFileColumnStatsList(names, mins, maxs, leafFields, schema);
+				ParseDuckdbColumnMinMaxFromText(resultValue, &names, &mins, &maxs,
+												&nullCounts, &valueCounts, &columnSizeBytes,
+												&hasNans);
+				fileStats->columnStats = GetDataFileColumnStatsList(names, mins, maxs,
+																	nullCounts, valueCounts,
+																	columnSizeBytes, hasNans,
+																	leafFields, schema);
 			}
 			else if (strcmp(resultColName, "file_size_bytes") == 0)
 			{
@@ -212,11 +230,17 @@ GetDataFileStatsListFromPGResult(PGresult *result, List *leafFields, DataFileSch
 
 
 /*
- * ExtractMinMaxFromStatsMapDatum extracts min and max values from given stats map
- * of type map(varchar,varchar).
+ * ExtractMinMaxFromStatsMapDatum extracts min, max, null_count,
+ * column_size_bytes, and has_nan from a single column's stats map.
+ * The integer fields are appended to their parallel lists as
+ * pstrdup'd text so we can encode "unknown" as a NULL pointer; the
+ * consumer atoll's them back to int64. has_nan is a "true"/"false"
+ * text value the consumer maps to a tri-state int8.
  */
 static void
-ExtractMinMaxForColumn(Datum map, char *colName, List **names, List **mins, List **maxs)
+ExtractMinMaxForColumn(Datum map, char *colName, List **names, List **mins, List **maxs,
+					   List **nullCounts, List **valueCounts, List **columnSizeBytes,
+					   List **hasNans)
 {
 	ArrayType  *elementsArray = DatumGetArrayTypeP(map);
 
@@ -230,6 +254,9 @@ ExtractMinMaxForColumn(Datum map, char *colName, List **names, List **mins, List
 
 	char	   *minText = NULL;
 	char	   *maxText = NULL;
+	char	   *nullCountText = NULL;
+	char	   *columnSizeBytesText = NULL;
+	char	   *hasNanText = NULL;
 
 	ArrayIterator arrayIterator = array_create_iterator(elementsArray, 0, NULL);
 	Datum		elemDatum;
@@ -263,6 +290,18 @@ ExtractMinMaxForColumn(Datum map, char *colName, List **names, List **mins, List
 			Assert(maxText == NULL);
 			maxText = TextDatumGetCString(statsValDatum);
 		}
+		else if (strcmp(statsKey, "null_count") == 0)
+		{
+			nullCountText = TextDatumGetCString(statsValDatum);
+		}
+		else if (strcmp(statsKey, "column_size_bytes") == 0)
+		{
+			columnSizeBytesText = TextDatumGetCString(statsValDatum);
+		}
+		else if (strcmp(statsKey, "has_nan") == 0)
+		{
+			hasNanText = TextDatumGetCString(statsValDatum);
+		}
 	}
 
 	if (minText != NULL && maxText != NULL)
@@ -270,6 +309,16 @@ ExtractMinMaxForColumn(Datum map, char *colName, List **names, List **mins, List
 		*names = lappend(*names, colName);
 		*mins = lappend(*mins, minText);
 		*maxs = lappend(*maxs, maxText);
+		*nullCounts = lappend(*nullCounts, nullCountText);
+
+		/*
+		 * value_count isn't surfaced by RETURN_STATS — leave it unknown
+		 * here (NULL pointer) and let the caller derive it from row_count -
+		 * null_count when both are known.
+		 */
+		*valueCounts = lappend(*valueCounts, NULL);
+		*columnSizeBytes = lappend(*columnSizeBytes, columnSizeBytesText);
+		*hasNans = lappend(*hasNans, hasNanText);
 	}
 
 	array_free_iterator(arrayIterator);
@@ -323,7 +372,9 @@ UnescapeDoubleQuotes(char *s)
  * of type map(text,text).
  */
 static void
-ExtractMinMaxForAllColumns(Datum returnStatsMap, List **names, List **mins, List **maxs)
+ExtractMinMaxForAllColumns(Datum returnStatsMap, List **names, List **mins, List **maxs,
+						   List **nullCounts, List **valueCounts, List **columnSizeBytes,
+						   List **hasNans)
 {
 	ArrayType  *elementsArray = DatumGetArrayTypeP(returnStatsMap);
 
@@ -363,7 +414,8 @@ ExtractMinMaxForAllColumns(Datum returnStatsMap, List **names, List **mins, List
 		 */
 		char	   *unescapedColName = UnescapeDoubleQuotes(colName);
 
-		ExtractMinMaxForColumn(colStatsDatum, unescapedColName, names, mins, maxs);
+		ExtractMinMaxForColumn(colStatsDatum, unescapedColName, names, mins, maxs,
+							   nullCounts, valueCounts, columnSizeBytes, hasNans);
 	}
 
 	array_free_iterator(arrayIterator);
@@ -379,7 +431,9 @@ ExtractMinMaxForAllColumns(Datum returnStatsMap, List **names, List **mins, List
  * 		}
  */
 static void
-ParseDuckdbColumnMinMaxFromText(char *input, List **names, List **mins, List **maxs)
+ParseDuckdbColumnMinMaxFromText(char *input, List **names, List **mins, List **maxs,
+								List **nullCounts, List **valueCounts, List **columnSizeBytes,
+								List **hasNans)
 {
 	/*
 	 * e.g. { 'id_col' => {'min' => '12', 'max' => 23, ...}, 'name_col' =>
@@ -404,7 +458,8 @@ ParseDuckdbColumnMinMaxFromText(char *input, List **names, List **mins, List **m
 	 * directly to avoid invoking the set-returning `entries()` function in a
 	 * non-SRF context.
 	 */
-	ExtractMinMaxForAllColumns(statsMapDatum, names, mins, maxs);
+	ExtractMinMaxForAllColumns(statsMapDatum, names, mins, maxs,
+							   nullCounts, valueCounts, columnSizeBytes, hasNans);
 }
 
 
@@ -413,7 +468,10 @@ ParseDuckdbColumnMinMaxFromText(char *input, List **names, List **mins, List **m
  * names, mins, maxs lists and schema.
  */
 static List *
-GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields, DataFileSchema * schema)
+GetDataFileColumnStatsList(List *names, List *mins, List *maxs,
+						   List *nullCounts, List *valueCounts,
+						   List *columnSizeBytes, List *hasNans,
+						   List *leafFields, DataFileSchema * schema)
 {
 	List	   *columnStatsList = NIL;
 
@@ -447,12 +505,36 @@ GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields
 
 		char	   *minStr = list_nth(mins, nameIndex);
 		char	   *maxStr = list_nth(maxs, nameIndex);
+		char	   *nullCountStr = list_nth(nullCounts, nameIndex);
+		char	   *valueCountStr = list_nth(valueCounts, nameIndex);
+		char	   *columnSizeBytesStr = list_nth(columnSizeBytes, nameIndex);
+		char	   *hasNanStr = list_nth(hasNans, nameIndex);
 
 		DataFileColumnStats *colStats = palloc0(sizeof(DataFileColumnStats));
 
 		colStats->leafField = *leafField;
 		colStats->lowerBoundText = pstrdup(minStr);
 		colStats->upperBoundText = pstrdup(maxStr);
+
+		/* -1 sentinel encodes "stat unknown for this column" */
+		colStats->nullCount = (nullCountStr != NULL) ? atoll(nullCountStr) : -1;
+		colStats->valueCount = (valueCountStr != NULL) ? atoll(valueCountStr) : -1;
+		colStats->columnSizeBytes = (columnSizeBytesStr != NULL) ? atoll(columnSizeBytesStr) : -1;
+
+		/*
+		 * has_nan arrives as the canonical text "true"/"false". Anything else
+		 * (including NULL) means DuckDB didn't emit it for this column type,
+		 * so leave the tri-state at "unknown".
+		 */
+		if (hasNanStr == NULL)
+			colStats->containsNan = -1;
+		else if (strcmp(hasNanStr, "true") == 0)
+			colStats->containsNan = 1;
+		else if (strcmp(hasNanStr, "false") == 0)
+			colStats->containsNan = 0;
+		else
+			colStats->containsNan = -1;
+
 		columnStatsList = lappend(columnStatsList, colStats);
 	}
 
@@ -859,6 +941,16 @@ GetFieldMinMaxStats(PGDuckConnection * pgDuckConn, List *rowGroupStatList)
 		{
 			DataFileColumnStats *columnStats = palloc0(sizeof(DataFileColumnStats));
 			int			rowGroupIndex = columnIndex / 3;
+
+			/*
+			 * The remote-parquet path only has access to row-group min/max,
+			 * not to DuckDB's return_stats payload, so the extended fields
+			 * stay at the "unknown" sentinel.
+			 */
+			columnStats->columnSizeBytes = -1;
+			columnStats->nullCount = -1;
+			columnStats->valueCount = -1;
+			columnStats->containsNan = -1;
 
 			RowGroupStats *rowGroupStats = list_nth(rowGroupStatList, rowGroupIndex);
 			LeafField  *leafField = rowGroupStats->leafField;

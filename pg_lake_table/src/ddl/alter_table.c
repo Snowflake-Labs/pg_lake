@@ -53,6 +53,7 @@
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/metadata_operations.h"
+#include "pg_lake/extensions/pg_lake_ducklake.h"
 #include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/partitioning/partition_spec_catalog.h"
@@ -60,6 +61,7 @@
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_lake/util/table_type.h"
+#include "pg_lake/ducklake/catalog.h"
 
 
 typedef enum PgLakeDDLType
@@ -241,8 +243,9 @@ ProcessAlterTable(ProcessUtilityParams * processUtilityParams, void *arg)
 	}
 
 	Oid			relationId = AlterTableLookupRelation(alterStmt, NoLock);
+	bool		isDucklakeTable = IsDucklakeTable(relationId);
 
-	if (!IsWritablePgLakeTable(relationId) && !IsIcebergTable(relationId))
+	if (!IsWritablePgLakeTable(relationId) && !IsIcebergTable(relationId) && !isDucklakeTable)
 	{
 		/* for non-pg_lake tables, error when using SET ACCESS METHOD iceberg */
 		ErrorIfUnsupportedSetAccessMethod(alterStmt);
@@ -254,7 +257,7 @@ ProcessAlterTable(ProcessUtilityParams * processUtilityParams, void *arg)
 	 * allow changing a subset of catalog options. All other operations or any
 	 * other DDLs are disallowed.
 	 */
-	if (HasOnlyCatalogAlterTableOptions(alterStmt))
+	if (!isDucklakeTable && HasOnlyCatalogAlterTableOptions(alterStmt))
 	{
 		IcebergCatalogType icebergCatalogType = GetIcebergCatalogType(relationId);
 
@@ -315,22 +318,30 @@ ProcessAlterTable(ProcessUtilityParams * processUtilityParams, void *arg)
 	 * SET (path/catalog_*) on external Iceberg is handled in the
 	 * HasOnlyCatalogAlterTableOptions block above and returns before this
 	 * check.
+	 *
+	 * DuckLake tables are not Iceberg tables, so the read-only check does not
+	 * apply to them.
 	 */
-	if (!IsExternalIcebergTable(relationId) ||
-		RequiresNewIcebergSchema(alterStmt) ||
-		(GetIcebergCatalogType(relationId) != NONE_CATALOG &&
-		 !IsOwnerOnlyAlter(alterStmt)))
+	if (!isDucklakeTable &&
+		(!IsExternalIcebergTable(relationId) ||
+		 RequiresNewIcebergSchema(alterStmt) ||
+		 (GetIcebergCatalogType(relationId) != NONE_CATALOG &&
+		  !IsOwnerOnlyAlter(alterStmt))))
 	{
 		ErrorIfReadOnlyIcebergTable(relationId);
 	}
 
-	MaybeConvertUnsupportedNumericColumnsToDoubleInAlterStmt(alterStmt);
-	ErrorIfUnsupportedTypeAddedForIcebergTables(alterStmt);
+	if (!isDucklakeTable)
+	{
+		MaybeConvertUnsupportedNumericColumnsToDoubleInAlterStmt(alterStmt);
+		ErrorIfUnsupportedTypeAddedForIcebergTables(alterStmt);
+	}
 
 	/* check whether we are accepting writes for this table */
 	PgLakeTableType tableType = GetPgLakeTableType(relationId);
 
-	ErrorIfUnsupportedAlterWritablePgLakeTableStmt(alterStmt, tableType);
+	if (!isDucklakeTable)
+		ErrorIfUnsupportedAlterWritablePgLakeTableStmt(alterStmt, tableType);
 
 	/* if there is an OPTIONS (...) subcommand, perform additional validation */
 	if (tableType == PG_LAKE_ICEBERG_TABLE_TYPE)
@@ -375,6 +386,47 @@ ProcessAlterTable(ProcessUtilityParams * processUtilityParams, void *arg)
 	}
 
 	ApplyDDLChanges(relationId, schemaDDLOperations);
+
+	/*
+	 * Handle DuckLake ALTER TABLE operations. Update lake_ducklake.column
+	 * table for ADD/DROP COLUMN.
+	 *
+	 * Skipped when pg_lake_ducklake.in_ddl_replay = on: that means we got
+	 * here because the snapshot_changes-based replay trigger fired ALTER
+	 * FOREIGN TABLE … ADD/DROP COLUMN to bring pg_attribute into sync after
+	 * a DuckDB-side column ALTER, and the catalog is already up to date.
+	 */
+	if (isDucklakeTable)
+	{
+		if (!DucklakeInDDLReplay)
+		{
+			ListCell   *cmdCell;
+
+			foreach(cmdCell, alterStmt->cmds)
+			{
+				AlterTableCmd *cmd = lfirst(cmdCell);
+
+				if (cmd->subtype == AT_AddColumn)
+				{
+					ColumnDef  *colDef = castNode(ColumnDef, cmd->def);
+					int32		typmod = 0;
+					Oid			typeOid = InvalidOid;
+
+					typenameTypeIdAndMod(NULL, colDef->typeName, &typeOid, &typmod);
+
+					/* Convert PostgreSQL type to DuckLake type string */
+					char	   *duckType = format_type_be(typeOid);
+
+					DucklakeAddColumn(relationId, colDef->colname, duckType,
+									  !colDef->is_not_null);
+				}
+				else if (cmd->subtype == AT_DropColumn)
+				{
+					DucklakeDropColumn(relationId, cmd->name);
+				}
+			}
+		}
+	}
 
 	if (PgLakeAlterTableHook)
 		PgLakeAlterTableHook(relationId, alterStmt);
@@ -702,6 +754,24 @@ PostProcessRenameWritablePgLakeTable(ProcessUtilityParams * params, void *arg)
 	{
 		/* we are in post-process, use new name */
 		ErrorIfAnyRestCatalogTablesInSchema(renameStmt->newname);
+	}
+
+	if (renameStmt->renameType == OBJECT_SCHEMA)
+	{
+		/*
+		 * Propagate to the DuckLake catalog. DucklakeRenameSchema
+		 * end-snapshots the old schema row and inserts a new one reusing the
+		 * same schema_id with the new name. It is a no-op (with a WARNING)
+		 * when the schema isn't tracked by DuckLake, so we don't have to scan
+		 * pg_class to decide.
+		 *
+		 * Skip during DDL replay: an inbound DuckDB-driven rename would have
+		 * already updated lake_ducklake.schema, and the ALTER SCHEMA we issue
+		 * from the replay path would otherwise insert a second version row.
+		 */
+		if (!DucklakeInDDLReplay && renameStmt->subname != NULL &&
+			IsExtensionCreated(PgLakeDucklake))
+			DucklakeRenameSchema(renameStmt->subname, renameStmt->newname);
 		return;
 	}
 
@@ -727,17 +797,21 @@ PostProcessRenameWritablePgLakeTable(ProcessUtilityParams * params, void *arg)
 	}
 
 	Oid			relationId = get_relname_relid(relationName, namespaceId);
+	bool		isDucklakeTable = IsDucklakeTable(relationId);
 
-	if (!IsWritablePgLakeTable(relationId) && !IsIcebergTable(relationId))
+	if (!IsWritablePgLakeTable(relationId) && !IsIcebergTable(relationId) && !isDucklakeTable)
 	{
 		return;
 	}
 
-	ErrorIfReadOnlyIcebergTable(relationId);
+	if (!isDucklakeTable)
+	{
+		ErrorIfReadOnlyIcebergTable(relationId);
 
-	PgLakeTableType tableType = GetPgLakeTableType(relationId);
+		PgLakeTableType tableType = GetPgLakeTableType(relationId);
 
-	ErrorIfUnsupportedRenameWritablePgLakeTableStmt(relationId, renameStmt, tableType);
+		ErrorIfUnsupportedRenameWritablePgLakeTableStmt(relationId, renameStmt, tableType);
+	}
 
 	bool		pgLakeTable = IsPgLakeIcebergForeignTableById(relationId);
 
@@ -760,6 +834,49 @@ PostProcessRenameWritablePgLakeTable(ProcessUtilityParams * params, void *arg)
 			  renameStmt->renameType == OBJECT_FOREIGN_TABLE))
 	{
 		TriggerCatalogExportIfObjectStoreTable(relationId);
+	}
+
+	/*
+	 * Handle DuckLake table column renames. Update the column name in
+	 * lake_ducklake.column table.
+	 *
+	 * Skip when in_ddl_replay is on (we're applying a DuckDB-side RENAME
+	 * COLUMN to pg_attribute and the catalog is already in sync; calling
+	 * DucklakeRenameColumn here would create a duplicate version row).
+	 */
+	if (isDucklakeTable && renameStmt->renameType == OBJECT_COLUMN)
+	{
+		if (!DucklakeInDDLReplay)
+			DucklakeRenameColumn(relationId, renameStmt->subname, renameStmt->newname);
+	}
+
+	/*
+	 * Handle DuckLake table renames. For OBJECT_TABLE / OBJECT_FOREIGN_TABLE
+	 * the OLD name lives on renameStmt->relation->relname (subname is NULL
+	 * for table renames); newname is the target. namespaceId is the resolved
+	 * schema of the target relation, which doesn't change on a plain RENAME,
+	 * so pass its name explicitly because by the time this hook fires
+	 * PostgreSQL has already renamed pg_class so a name-based lookup via the
+	 * relation OID would miss the old catalog row.
+	 *
+	 * We skip this when pg_lake_ducklake.in_ddl_replay is on: that means we
+	 * got here because the ducklake_table_insert trigger issued ALTER FOREIGN
+	 * TABLE … RENAME TO … to propagate a DuckDB-driven rename, and the
+	 * catalog already has the new version row. Re-applying the rename here
+	 * would insert a second one and bump the snapshot for nothing.
+	 */
+	if (isDucklakeTable &&
+		(renameStmt->renameType == OBJECT_TABLE ||
+		 renameStmt->renameType == OBJECT_FOREIGN_TABLE))
+	{
+		if (!DucklakeInDDLReplay)
+		{
+			char	   *schemaName = get_namespace_name(namespaceId);
+			const char *oldName = renameStmt->relation ? renameStmt->relation->relname : NULL;
+
+			if (schemaName != NULL && oldName != NULL)
+				DucklakeRenameTable(schemaName, oldName, renameStmt->newname);
+		}
 	}
 }
 

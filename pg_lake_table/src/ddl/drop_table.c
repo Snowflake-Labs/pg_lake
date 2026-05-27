@@ -56,6 +56,7 @@
 #include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/parsetree/options.h"
+#include "pg_lake/ducklake/catalog.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/inval.h"
@@ -225,7 +226,39 @@ DropTableAccessHook(ObjectAccessType access, Oid classId, Oid objectId,
 
 	bool		isColumn = subId != 0;
 
-	if (IsWritablePgLakeTable(objectId))
+	/* Check DuckLake tables first, before IsWritablePgLakeTable */
+	if (IsDucklakeTable(objectId))
+	{
+		if (!isColumn)
+		{
+			/*
+			 * Suppress catalog write-back when we're replaying a DuckDB-side
+			 * DROP onto pg_class -- DuckDB already end-snapshotted the table
+			 * row, calling DucklakeDropTable here would just touch
+			 * already-historical rows.
+			 */
+			if (DucklakeInDDLReplay)
+				return;
+
+			/* Mark table as ended in DuckLake metadata */
+			DucklakeTableMetadata *metadata = DucklakeGetTableMetadata(objectId);
+
+			if (metadata)
+			{
+				DucklakeDropTable(metadata->tableId);
+
+				/* Clean up allocated memory */
+				if (metadata->tableName)
+					pfree(metadata->tableName);
+				if (metadata->schemaName)
+					pfree(metadata->schemaName);
+				if (metadata->path)
+					pfree(metadata->path);
+				pfree(metadata);
+			}
+		}
+	}
+	else if (IsWritablePgLakeTable(objectId))
 	{
 		if (isColumn)
 		{

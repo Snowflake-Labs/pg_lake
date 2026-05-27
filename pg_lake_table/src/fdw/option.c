@@ -80,6 +80,9 @@ static bool is_valid_option_pg_lake_iceberg(const char *keyword, Oid context);
  * USER MAPPING or FOREIGN TABLE that uses lake_table.
  *
  * Raise an ERROR if the option or its value is considered invalid.
+ *
+ * pg_lake_ducklake_validator now lives in pg_lake_ducklake.so -- see
+ * pg_lake_ducklake/src/options.c.
  */
 PG_FUNCTION_INFO_V1(pg_lake_table_validator);
 PG_FUNCTION_INFO_V1(pg_lake_iceberg_validator);
@@ -226,7 +229,14 @@ pg_lake_table_validator(PG_FUNCTION_ARGS)
 			char	   *format = defGetString(def);
 
 			copyDataFormat = NameToCopyDataFormat(format);
-			if (copyDataFormat == DATA_FORMAT_INVALID)
+
+			/*
+			 * DuckLake foreign tables go through the separate
+			 * pg_lake_ducklake server; format='ducklake' is not a user-facing
+			 * format on the regular pg_lake_table FDW.
+			 */
+			if (copyDataFormat == DATA_FORMAT_INVALID ||
+				copyDataFormat == DATA_FORMAT_DUCKLAKE)
 				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 								errmsg("pg_lake_table: only csv, json, gdal, and parquet "
 									   "formats are currently supported for the \"format\" option.")));
