@@ -171,6 +171,7 @@ extern PGDLLEXPORT void DucklakeRenameTable(const char *schemaName,
 extern PGDLLEXPORT void DucklakeRenameSchema(const char *oldName,
 											 const char *newName);
 extern PGDLLEXPORT void DucklakeDropSchemaByOid(Oid namespaceOid);
+extern PGDLLEXPORT void DucklakeReviveSchemaByOid(Oid namespaceOid);
 extern PGDLLEXPORT void InitializeDucklakeDropSchemaHandler(void);
 
 /* Partitioning support */

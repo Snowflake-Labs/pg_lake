@@ -2,20 +2,28 @@
  * Copyright 2025 Snowflake Inc.
  * SPDX-License-Identifier: Apache-2.0
  *
- * object_access_hook for DROP SCHEMA.
+ * object_access_hook for PG-side schema lifecycle.
  *
  * The seed in pg_lake_ducklake--3.4.sql writes the user-visible PG
  * schemas into lake_ducklake.schema at install time, and
  * DucklakeRegisterTable / DucklakeRenameSchema keep that table in sync
- * for inserts and renames. DROP SCHEMA is the missing edge: a regular
- * ProcessUtility hook only sees the top-level statement, so a
- * DROP SCHEMA myapp CASCADE that pulls dependent objects with it would
- * leave the schema row in lake_ducklake.schema marked live even after
- * the PG-side schema is gone.
+ * for inserts and renames. PG-side DROP SCHEMA and CREATE SCHEMA are
+ * the missing edges:
  *
- * The object_access_hook fires once per dropped object (including
- * cascade), so we hook there and end-snapshot the row when the dropped
- * object is a namespace.
+ *   - DROP SCHEMA: ProcessUtility only sees the top-level statement,
+ *     so a DROP SCHEMA myapp CASCADE that pulls dependent objects with
+ *     it would leave the schema row in lake_ducklake.schema marked
+ *     live even after the PG-side schema is gone. We end-snapshot.
+ *
+ *   - CREATE SCHEMA: when the user re-creates a schema we previously
+ *     end-snapshotted (so they can preserve grants across a drop),
+ *     DuckDB still sees the schema as dropped. Insert a fresh live row
+ *     reusing the original schema_id when an end-snapshotted row
+ *     exists for the same name.
+ *
+ * Brand-new PG schemas (never tracked) are intentionally not auto-
+ * propagated; broad CREATE SCHEMA -> lake_ducklake.schema propagation
+ * is deferred.
  */
 #include "postgres.h"
 
@@ -33,8 +41,8 @@
 
 static object_access_hook_type PreviousObjectAccessHook = NULL;
 
-static void DropSchemaAccessHook(ObjectAccessType access, Oid classId,
-								 Oid objectId, int subId, void *arg);
+static void SchemaAccessHook(ObjectAccessType access, Oid classId,
+							 Oid objectId, int subId, void *arg);
 static bool LakeDucklakeSchemaCatalogExists(void);
 
 
@@ -42,21 +50,20 @@ void
 InitializeDucklakeDropSchemaHandler(void)
 {
 	PreviousObjectAccessHook = object_access_hook;
-	object_access_hook = DropSchemaAccessHook;
+	object_access_hook = SchemaAccessHook;
 }
 
 
 static void
-DropSchemaAccessHook(ObjectAccessType access, Oid classId, Oid objectId,
-					 int subId, void *arg)
+SchemaAccessHook(ObjectAccessType access, Oid classId, Oid objectId,
+				 int subId, void *arg)
 {
 	if (PreviousObjectAccessHook)
 		PreviousObjectAccessHook(access, classId, objectId, subId, arg);
 
-	if (access != OAT_DROP)
-		return;
-
 	if (classId != NamespaceRelationId)
+		return;
+	if (access != OAT_DROP && access != OAT_POST_CREATE)
 		return;
 
 	/*
@@ -77,14 +84,17 @@ DropSchemaAccessHook(ObjectAccessType access, Oid classId, Oid objectId,
 		return;
 
 	/*
-	 * Skip when DuckDB's DDL replay is the one issuing the drop -- the
-	 * inbound DuckDB transaction already updated lake_ducklake.schema and
-	 * we'd just push a redundant version row.
+	 * Skip when DuckDB's DDL replay is the one issuing the DDL -- the inbound
+	 * DuckDB transaction already updated lake_ducklake.schema and we'd just
+	 * push a redundant version row.
 	 */
 	if (DucklakeInDDLReplay)
 		return;
 
-	DucklakeDropSchemaByOid(objectId);
+	if (access == OAT_DROP)
+		DucklakeDropSchemaByOid(objectId);
+	else
+		DucklakeReviveSchemaByOid(objectId);
 }
 
 

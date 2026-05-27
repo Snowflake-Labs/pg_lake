@@ -4,10 +4,14 @@
  */
 
 #include "postgres.h"
+#include "access/htup_details.h"
+#include "access/xact.h"
 #include "catalog/namespace.h"
+#include "catalog/pg_namespace.h"
 #include "executor/spi.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
+#include "utils/syscache.h"
 #include "utils/uuid.h"
 
 #include "pg_lake/ducklake/catalog.h"
@@ -2307,6 +2311,131 @@ DucklakeDropSchemaByOid(Oid namespaceOid)
 	SPI_exec(query.data, 0);
 
 	DucklakeEndPrivilegedSPI(&_ducklakeSpi24);
+}
+
+
+/*
+ * DucklakeReviveSchemaByOid handles the PG-side CREATE SCHEMA <name>
+ * case where an end-snapshotted lake_ducklake.schema row already exists
+ * for that name (because PG previously dropped the schema and we end-
+ * snapshotted via DucklakeDropSchemaByOid; the user is now recreating
+ * the same name on the PG side, possibly to restore grants).
+ *
+ * Mirrors the versioned-revival shape used by DucklakeRenameSchema:
+ * INSERT a fresh live row reusing the original schema_id, schema_uuid,
+ * path, and path_is_relative -- so DuckDB's catalog continuity is
+ * preserved across the drop+recreate cycle.
+ *
+ * No-op when there's no matching end-snapshotted row, leaving brand-
+ * new PG schemas untracked (broad PG CREATE SCHEMA -> lake_ducklake.schema
+ * propagation is intentionally deferred).
+ */
+void
+DucklakeReviveSchemaByOid(Oid namespaceOid)
+{
+	char	   *schemaName;
+	int64		schemaId = -1;
+	int			ret;
+	StringInfoData query;
+	DucklakeSnapshot *newSnapshot;
+	HeapTuple	tup;
+
+	/*
+	 * The OAT_POST_CREATE hook fires from inside NamespaceCreate before the
+	 * surrounding command's command counter is bumped, so the newly inserted
+	 * pg_namespace row isn't yet visible to syscache lookups. Force
+	 * visibility before reading the schema name.
+	 */
+	CommandCounterIncrement();
+
+	tup = SearchSysCache1(NAMESPACEOID, ObjectIdGetDatum(namespaceOid));
+	if (!HeapTupleIsValid(tup))
+		return;
+	schemaName = pstrdup(NameStr(((Form_pg_namespace) GETSTRUCT(tup))->nspname));
+	ReleaseSysCache(tup);
+
+	if (schemaName[0] == '\0')
+		return;
+
+	/*
+	 * Find the most recently end-snapshotted row with this name. Skip if
+	 * there's already a live row (then there's nothing to revive) or no
+	 * historical row at all.
+	 */
+	{
+		DucklakePrivSPIState spi;
+
+		DucklakeBeginPrivilegedSPI(&spi);
+
+		initStringInfo(&query);
+		appendStringInfo(&query,
+						 "SELECT schema_id FROM lake_ducklake.schema "
+						 "WHERE schema_name OPERATOR(pg_catalog.=) %s "
+						 "  AND end_snapshot IS NOT NULL "
+						 "  AND NOT EXISTS ("
+						 "      SELECT 1 FROM lake_ducklake.schema live "
+						 "       WHERE live.schema_name OPERATOR(pg_catalog.=) %s "
+						 "         AND live.end_snapshot IS NULL"
+						 "  ) "
+						 "ORDER BY end_snapshot DESC LIMIT 1",
+						 quote_literal_cstr(schemaName),
+						 quote_literal_cstr(schemaName));
+		ret = SPI_exec(query.data, 1);
+
+		if (ret == SPI_OK_SELECT && SPI_processed > 0)
+		{
+			bool		isnull;
+
+			schemaId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+												   SPI_tuptable->tupdesc, 1, &isnull));
+			if (isnull)
+				schemaId = -1;
+		}
+
+		DucklakeEndPrivilegedSPI(&spi);
+	}
+
+	if (schemaId < 0)
+		return;					/* nothing to revive */
+
+	newSnapshot = DucklakeCreateSnapshot("CREATE SCHEMA", NULL, NULL);
+
+	{
+		DucklakePrivSPIState spi;
+
+		DucklakeBeginPrivilegedSPI(&spi);
+
+		/* Bump schema_version on the new snapshot. */
+		resetStringInfo(&query);
+		appendStringInfo(&query,
+						 "UPDATE lake_ducklake.snapshot "
+						 "   SET schema_version = schema_version OPERATOR(pg_catalog.+) 1 "
+						 " WHERE snapshot_id OPERATOR(pg_catalog.=) %ld",
+						 newSnapshot->snapshotId);
+		SPI_exec(query.data, 0);
+
+		/*
+		 * Re-insert with the original schema_id, schema_uuid, path,
+		 * path_is_relative carried over from the most recent historical row.
+		 * begin_snapshot becomes the new snapshot, end_snapshot is NULL
+		 * (live).
+		 */
+		resetStringInfo(&query);
+		appendStringInfo(&query,
+						 "INSERT INTO lake_ducklake.schema "
+						 "(schema_id, schema_uuid, begin_snapshot, end_snapshot, "
+						 " schema_name, path, path_is_relative) "
+						 "SELECT schema_id, schema_uuid, %ld, NULL, "
+						 "       schema_name, path, path_is_relative "
+						 "  FROM lake_ducklake.schema "
+						 " WHERE schema_id OPERATOR(pg_catalog.=) %ld "
+						 "   AND end_snapshot IS NOT NULL "
+						 " ORDER BY end_snapshot DESC LIMIT 1",
+						 newSnapshot->snapshotId, schemaId);
+		SPI_exec(query.data, 0);
+
+		DucklakeEndPrivilegedSPI(&spi);
+	}
 }
 
 

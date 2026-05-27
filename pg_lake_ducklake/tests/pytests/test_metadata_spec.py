@@ -462,5 +462,73 @@ def test_drop_schema_end_snapshots_lake_ducklake_row(pg_cursor):
     ), f"dropme_test row should have end_snapshot set, got {end}"
 
 
+def test_recreate_schema_revives_lake_ducklake_row(pg_cursor):
+    """
+    PG-side CREATE SCHEMA after a previous DROP that end-snapshotted a
+    lake_ducklake.schema row should revive that row -- INSERT a fresh
+    live entry reusing the original schema_id, schema_uuid, path. This
+    keeps DuckDB's catalog continuity across drop/recreate cycles a
+    user might do to preserve grants on the PG schema.
+    """
+    pg_cursor.execute("DROP EXTENSION pg_lake_ducklake CASCADE")
+    pg_cursor.execute("DROP SCHEMA IF EXISTS revive_test CASCADE")
+    pg_cursor.execute("CREATE SCHEMA revive_test")
+    pg_cursor.execute("CREATE EXTENSION pg_lake_ducklake CASCADE")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        "SELECT schema_id, schema_uuid FROM lake_ducklake.schema "
+        "WHERE schema_name = 'revive_test' AND end_snapshot IS NULL"
+    )
+    seeded = pg_cursor.fetchone()
+    assert seeded is not None
+    schema_id_before, uuid_before = seeded
+
+    pg_cursor.execute("DROP SCHEMA revive_test")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute("CREATE SCHEMA revive_test")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        "SELECT schema_id, schema_uuid, end_snapshot FROM lake_ducklake.schema "
+        "WHERE schema_name = 'revive_test' AND end_snapshot IS NULL"
+    )
+    revived = pg_cursor.fetchone()
+    assert revived is not None, "revive_test row should be live again"
+    assert (
+        revived[0] == schema_id_before
+    ), f"revived row must reuse original schema_id; got {revived[0]}, expected {schema_id_before}"
+    assert (
+        revived[1] == uuid_before
+    ), f"revived row must reuse original schema_uuid; got {revived[1]}, expected {uuid_before}"
+    assert revived[2] is None
+
+    pg_cursor.execute(
+        "SELECT count(*) FROM lake_ducklake.schema "
+        "WHERE schema_id = %s AND end_snapshot IS NOT NULL",
+        (schema_id_before,),
+    )
+    assert pg_cursor.fetchone()[0] == 1
+
+
+def test_brand_new_schema_does_not_auto_track(pg_cursor):
+    """
+    PG-side CREATE SCHEMA on a name that lake_ducklake.schema has never
+    seen must NOT auto-track. Broad PG CREATE SCHEMA -> lake_ducklake.schema
+    propagation is intentionally deferred; the revive path only kicks in
+    for drop/recreate cycles.
+    """
+    pg_cursor.execute("DROP SCHEMA IF EXISTS new_unrelated_test CASCADE")
+    pg_cursor.execute("CREATE SCHEMA new_unrelated_test")
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        "SELECT count(*) FROM lake_ducklake.schema "
+        "WHERE schema_name = 'new_unrelated_test'"
+    )
+    assert pg_cursor.fetchone()[0] == 0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
