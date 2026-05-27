@@ -55,6 +55,8 @@ def test_domain_iceberg_field_type(extension, pg_conn, s3, with_default_location
     """Domain over a scalar type must produce the base type in Iceberg metadata, not string."""
     run_command(
         """
+        create schema test_domain_field_type;
+        set search_path to test_domain_field_type;
         create domain year_int as integer check (value >= 1 and value <= 9999);
         create domain small_float as double precision check (value > 0);
         create table domain_types (
@@ -66,9 +68,11 @@ def test_domain_iceberg_field_type(extension, pg_conn, s3, with_default_location
     """,
         pg_conn,
     )
+    pg_conn.commit()
 
     results = run_query(
-        "SELECT metadata_location FROM iceberg_tables WHERE table_name = 'domain_types'",
+        "SELECT metadata_location FROM lake_iceberg.tables"
+        " WHERE table_name = 'domain_types' AND table_namespace = 'test_domain_field_type'",
         pg_conn,
     )
     assert len(results) == 1
@@ -88,3 +92,5 @@ def test_domain_iceberg_field_type(extension, pg_conn, s3, with_default_location
     assert result[0]["t"] == "hello"
 
     pg_conn.rollback()
+    run_command("drop schema if exists test_domain_field_type cascade;", pg_conn)
+    pg_conn.commit()

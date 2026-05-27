@@ -1488,16 +1488,16 @@ def test_pruning_for_domains(
         pg_conn,
     )
 
-    # we cannot apply pruning on domain types
-    assert int(fetch_data_files_used(results)) == 2
+    # domain-over-int maps to Iceberg "int" so min/max pruning works
+    assert int(fetch_data_files_used(results)) == 1
 
-    # with explicit cast, do not apply pruning
+    # explicit cast to int also prunes
     results = run_query(
         f"{explain_prefix}  SELECT * FROM users WHERE age = 25::int",
         pg_conn,
     )
 
-    assert int(fetch_data_files_used(results)) == 2
+    assert int(fetch_data_files_used(results)) == 1
 
     pg_conn.rollback()
 

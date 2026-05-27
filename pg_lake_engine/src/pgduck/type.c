@@ -414,6 +414,14 @@ GetDuckDBTypeForPGType(PGType postgresType)
 		return DUCKDB_TYPE_STRUCT;
 	}
 
+	if (typtype == TYPTYPE_DOMAIN)
+	{
+		Oid			baseTypeId = getBaseType(pgTypeId);
+
+		postgresType.postgresTypeOid = baseTypeId;
+		return GetDuckDBTypeForPGType(postgresType);
+	}
+
 	switch (pgTypeId)
 	{
 
