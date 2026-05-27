@@ -42,6 +42,8 @@
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/fdw/data_file_pruning.h"
+#include "pg_lake/fdw/partition_transform.h"
+#include "pg_lake/partitioning/partition_spec_catalog.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/fdw/schema_operations/field_id_mapping_catalog.h"
 #include "pg_lake/util/rel_utils.h"
@@ -230,15 +232,34 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 		{
 			TableDataFile *dataFile = palloc0(sizeof(TableDataFile));
 
+			dataFile->fileId = duckFile->dataFileId;
 			dataFile->path = DucklakeResolvePath(tableMetadata->path,
 												  duckFile->path,
 												  duckFile->pathIsRelative);
-
+			dataFile->content = CONTENT_DATA;
 			dataFile->stats.rowCount = duckFile->recordCount;
 			dataFile->stats.fileSize = duckFile->fileSizeBytes;
 			dataFile->stats.deletedRowCount = 0;
+			dataFile->partitionSpecId = (duckFile->partitionId >= 0)
+										? (int32) duckFile->partitionId
+										: 0;
 			dataFiles = lappend(dataFiles, dataFile);
 		}
+
+		/*
+		 * Attach per-file partition values from
+		 * lake_ducklake.file_partition_value so PruneDataFiles can
+		 * compare them against the WHERE clause.
+		 */
+		List	   *partitionTransforms = CurrentPartitionTransformList(relationId);
+
+		if (partitionTransforms != NIL)
+			AttachDucklakePartitionsToDataFiles(tableMetadata->tableId,
+												 partitionTransforms, dataFiles);
+
+		/* Prune data files using the same WHERE clauses Iceberg uses. */
+		dataFiles = PruneDataFiles(relationId, dataFiles, baseRestrictInfoList,
+								   PARTIAL_MATCH);
 
 		/* Get delete files for this snapshot */
 		List	   *ducklakeDeleteFiles = DucklakeGetDeleteFiles(tableMetadata->tableId, snapshotId);

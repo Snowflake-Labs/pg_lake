@@ -218,5 +218,53 @@ def test_duckdb_reads_partitioned_pg_table(pg_cursor, s3):
     assert rows == [(1, 'us'), (2, 'us'), (3, 'eu')], rows
 
 
+def test_partition_pruning_filter_correctness(pg_cursor, s3):
+    """
+    With per-file partition values attached to TableDataFile, PruneDataFiles
+    must drop files whose partition value can't satisfy the WHERE clause but
+    keep the rest. Verifies correctness end-to-end: SELECTs that target a
+    single partition return only that partition's rows; SELECTs with no
+    filter still return everything.
+    """
+    location = f"s3://{TEST_BUCKET}/p_prune"
+    pg_cursor.execute(f"""
+        CREATE TABLE p_prune (
+            id INTEGER,
+            region TEXT
+        ) USING ducklake
+        WITH (location = '{location}', partition_by = 'region')
+    """)
+    pg_cursor.execute("""
+        INSERT INTO p_prune VALUES
+            (1, 'us'), (2, 'us'),
+            (3, 'eu'), (4, 'eu'),
+            (5, 'apac')
+    """)
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        "SELECT id FROM p_prune WHERE region = 'us' ORDER BY id"
+    )
+    assert [r[0] for r in pg_cursor.fetchall()] == [1, 2]
+
+    pg_cursor.execute(
+        "SELECT id FROM p_prune WHERE region = 'eu' ORDER BY id"
+    )
+    assert [r[0] for r in pg_cursor.fetchall()] == [3, 4]
+
+    pg_cursor.execute(
+        "SELECT id FROM p_prune WHERE region IN ('us','apac') ORDER BY id"
+    )
+    assert [r[0] for r in pg_cursor.fetchall()] == [1, 2, 5]
+
+    pg_cursor.execute("SELECT count(*) FROM p_prune")
+    assert pg_cursor.fetchone()[0] == 5
+
+    pg_cursor.execute(
+        "SELECT id FROM p_prune WHERE region = 'nowhere' ORDER BY id"
+    )
+    assert pg_cursor.fetchall() == []
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

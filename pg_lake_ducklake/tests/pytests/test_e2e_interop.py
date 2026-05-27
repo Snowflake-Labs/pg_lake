@@ -1166,5 +1166,67 @@ def test_duckdb_merge_adjacent_then_pg_reads(pg_cursor, s3):
     assert pg_cursor.fetchall() == [(1, "a"), (2, "b"), (3, "c")]
 
 
+@pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="DuckDB not installed")
+def test_fresh_pg_session_sees_duckdb_writes(pg_cursor, s3):
+    """
+    A fresh PostgreSQL connection (independent of the one that set up
+    the DuckLake table) must see rows that DuckDB inserted and deleted
+    through the metadata views — there is no per-session replay state
+    that would let one session see writes the next session misses.
+    """
+    import psycopg2
+
+    location = f"s3://{TEST_BUCKET}/duck_xsession"
+    pg_cursor.execute("DROP TABLE IF EXISTS duck_xsession")
+    pg_cursor.execute(
+        f"""
+        CREATE TABLE duck_xsession (id INT, label TEXT)
+            USING ducklake WITH (location = '{location}')
+        """
+    )
+    pg_cursor.connection.commit()
+
+    duck = duckdb.connect()
+    duck.execute("INSTALL postgres")
+    duck.execute("LOAD postgres")
+    duck.execute("INSTALL ducklake FROM core_nightly")
+    duck.execute("LOAD ducklake")
+    duck.execute(
+        f"""
+        CREATE SECRET s3test (TYPE S3, KEY_ID 'testing', SECRET 'testing',
+                              ENDPOINT 'localhost:5999',
+                              SCOPE 's3://{TEST_BUCKET}', URL_STYLE 'path',
+                              USE_SSL false)
+        """
+    )
+    conn_str = (
+        f"host={server_params.PG_HOST} port={server_params.PG_PORT} "
+        f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
+    )
+    duck.execute(
+        f"ATTACH 'postgres:{conn_str}' AS dl "
+        f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
+    )
+
+    duck.execute(
+        "INSERT INTO dl.public.duck_xsession VALUES (1, 'a'), (2, 'b'), (3, 'c')"
+    )
+    duck.execute("DELETE FROM dl.public.duck_xsession WHERE id = 2")
+    duck.close()
+
+    fresh = psycopg2.connect(
+        host=server_params.PG_HOST,
+        port=server_params.PG_PORT,
+        dbname=server_params.PG_DATABASE,
+        user=server_params.PG_USER,
+    )
+    try:
+        cur = fresh.cursor()
+        cur.execute("SELECT id, label FROM duck_xsession ORDER BY id")
+        assert cur.fetchall() == [(1, 'a'), (3, 'c')]
+    finally:
+        fresh.close()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])

@@ -754,3 +754,138 @@ CreatePartitionSpecHash(void)
 
 	return partitionSpecsHash;
 }
+
+
+typedef struct DucklakeFilePartitionEntry
+{
+	int64		dataFileId;		/* hash key */
+	Partition  *partition;
+}			DucklakeFilePartitionEntry;
+
+
+/*
+ * AttachDucklakePartitionsToDataFiles populates dataFile->partition for
+ * every DuckLake data file in `dataFiles` (a list of TableDataFile *)
+ * by reading lake_ducklake.file_partition_value in a single SPI batch
+ * and deserialising the per-column-id text values via the supplied
+ * partition transforms.
+ *
+ * fileId on each TableDataFile must already be set to the DuckLake
+ * data_file_id; otherwise that file is left unpartitioned.
+ */
+void
+AttachDucklakePartitionsToDataFiles(int64 tableId, List *partitionTransforms,
+									List *dataFiles)
+{
+	if (partitionTransforms == NIL || dataFiles == NIL)
+		return;
+
+	HASHCTL		hashCtl = {0};
+
+	hashCtl.keysize = sizeof(int64);
+	hashCtl.entrysize = sizeof(DucklakeFilePartitionEntry);
+	hashCtl.hcxt = CurrentMemoryContext;
+
+	HTAB	   *byFileId = hash_create("DucklakeFilePartitions",
+									   list_length(dataFiles), &hashCtl,
+									   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+	StringInfoData q;
+
+	initStringInfo(&q);
+	appendStringInfo(&q,
+					 "SELECT fpv.data_file_id, pc.column_id, fpv.partition_value "
+					 "  FROM lake_ducklake.file_partition_value fpv "
+					 "  JOIN lake_ducklake.partition_column pc "
+					 "    ON pc.partition_key_index = fpv.partition_key_index "
+					 "   AND pc.table_id = fpv.table_id "
+					 " WHERE fpv.table_id = %ld",
+					 tableId);
+
+	MemoryContext callerContext = CurrentMemoryContext;
+
+	SPI_connect();
+
+	int			ret = SPI_exec(q.data, 0);
+
+	if (ret == SPI_OK_SELECT)
+	{
+		for (uint64 row = 0; row < SPI_processed; row++)
+		{
+			HeapTuple	tup = SPI_tuptable->vals[row];
+			TupleDesc	desc = SPI_tuptable->tupdesc;
+			bool		isnull;
+
+			int64		dataFileId = DatumGetInt64(SPI_getbinval(tup, desc, 1, &isnull));
+
+			if (isnull)
+				continue;
+
+			int64		columnId = DatumGetInt64(SPI_getbinval(tup, desc, 2, &isnull));
+
+			if (isnull)
+				continue;
+
+			Datum		valueDatum = SPI_getbinval(tup, desc, 3, &isnull);
+			char	   *valueText = NULL;
+
+			MemoryContext oldcxt = MemoryContextSwitchTo(callerContext);
+
+			if (!isnull)
+				valueText = TextDatumGetCString(valueDatum);
+
+			IcebergPartitionTransform *transform =
+				FindPartitionTransformById(partitionTransforms, (int) columnId, false);
+
+			if (transform == NULL)
+			{
+				MemoryContextSwitchTo(oldcxt);
+				continue;
+			}
+
+			PartitionField *field = palloc0(sizeof(PartitionField));
+
+			field->field_id = (int32) columnId;
+			field->field_name = pstrdup(transform->partitionFieldName
+										? transform->partitionFieldName
+										: transform->columnName);
+			field->value_type = GetTransformResultAvroType(transform);
+			field->value = DeserializePartitionValueFromPGText(transform, valueText,
+															   &field->value_length);
+
+			bool		found = false;
+			DucklakeFilePartitionEntry *entry =
+				hash_search(byFileId, &dataFileId, HASH_ENTER, &found);
+
+			if (!found)
+			{
+				entry->partition = palloc0(sizeof(Partition));
+				entry->partition->fields = NULL;
+				entry->partition->fields_length = 0;
+			}
+
+			AppendPartitionField(entry->partition, field);
+
+			MemoryContextSwitchTo(oldcxt);
+		}
+	}
+
+	SPI_finish();
+
+	ListCell   *cell;
+
+	foreach(cell, dataFiles)
+	{
+		TableDataFile *file = lfirst(cell);
+
+		if (file->fileId == 0)
+			continue;
+
+		bool		found = false;
+		DucklakeFilePartitionEntry *entry =
+			hash_search(byFileId, &file->fileId, HASH_FIND, &found);
+
+		if (found)
+			file->partition = entry->partition;
+	}
+}

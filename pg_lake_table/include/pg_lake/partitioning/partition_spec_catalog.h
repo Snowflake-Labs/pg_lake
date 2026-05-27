@@ -51,5 +51,8 @@ extern List *GetIcebergSpecPartitionFieldsFromCatalog(Oid relationId, int specId
 extern List *GetAllPartitionSpecFields(Oid relationId);
 extern Partition * GetDataFilePartition(Oid relationId, List *partitionTransforms,
 										const char *path, int32 *partitionSpecId);
+extern PGDLLEXPORT void AttachDucklakePartitionsToDataFiles(int64 tableId,
+															 List *partitionTransforms,
+															 List *dataFiles);
 extern HTAB *GetAllPartitionSpecsFromCatalog(Oid relationId);
 extern HTAB *CreatePartitionSpecHash(void);
