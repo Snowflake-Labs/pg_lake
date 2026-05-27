@@ -35,6 +35,7 @@
 #include "utils/elog.h"
 #include "utils/memutils.h"
 
+#include "pg_extension_base/pg_compat.h"
 #include "pg_lake/ducklake/catalog.h"
 #include "pg_lake/ducklake/spi_priv.h"
 
