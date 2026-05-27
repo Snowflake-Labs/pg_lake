@@ -810,6 +810,61 @@ ReplayAlteredTable(int64 tableId)
  * heap-allocated strings. Embedded double quotes are doubled per
  * SQL convention. Returns true on success.
  */
+/*
+ * Parse a single quoted identifier "<name>" from a snapshot_changes
+ * payload. Returns true on success with *nameOut pointing at a freshly
+ * allocated copy. Embedded double quotes are doubled per SQL convention.
+ */
+static bool
+ParseQuotedIdent(const char *payload, char **nameOut)
+{
+	const char *p = payload;
+	StringInfoData buf;
+
+	if (*p != '"')
+		return false;
+	p++;
+
+	initStringInfo(&buf);
+	while (*p != '\0')
+	{
+		if (*p == '"')
+		{
+			if (p[1] == '"')
+			{
+				appendStringInfoChar(&buf, '"');
+				p += 2;
+				continue;
+			}
+			p++;
+			break;
+		}
+		appendStringInfoChar(&buf, *p);
+		p++;
+	}
+	*nameOut = buf.data;
+
+	return *p == '\0';
+}
+
+
+/*
+ * ReplayCreateSchema mirrors a DuckDB-side CREATE SCHEMA dl.<name> as a
+ * PG-side CREATE SCHEMA IF NOT EXISTS <name>. Idempotent: re-firing on a
+ * snapshot_changes row that's been replayed before is a no-op.
+ */
+static void
+ReplayCreateSchema(const char *schemaName)
+{
+	StringInfoData ddl;
+
+	initStringInfo(&ddl);
+	appendStringInfo(&ddl, "CREATE SCHEMA IF NOT EXISTS %s",
+					 quote_identifier(schemaName));
+	RunReplayDDL(ddl.data);
+}
+
+
 static bool
 ParseQualifiedIdent(const char *payload, char **schemaOut, char **tableOut)
 {
@@ -1008,12 +1063,19 @@ lake_ducklake_snapshot_changes_insert(PG_FUNCTION_ARGS)
 			if (ParseQualifiedIdent(payload, &schemaName, &tableName))
 				ReplayCreateTable(schemaName, tableName);
 		}
+		else if (strcmp(op, "created_schema") == 0)
+		{
+			char	   *schemaName = NULL;
+
+			if (ParseQuotedIdent(payload, &schemaName))
+				ReplayCreateSchema(schemaName);
+		}
 
 		/*
-		 * created_view / altered_view / dropped_view / created_schema /
-		 * dropped_schema / inserted_into_table / deleted_from_table /
-		 * inlined_* / merge_adjacent / rewrite_delete are not yet propagated
-		 * to the PG side. Those are tracked as follow-ups.
+		 * created_view / altered_view / dropped_view / dropped_schema /
+		 * inserted_into_table / deleted_from_table / inlined_* /
+		 * merge_adjacent / rewrite_delete are not yet propagated to the PG
+		 * side. Those are tracked as follow-ups.
 		 */
 	}
 

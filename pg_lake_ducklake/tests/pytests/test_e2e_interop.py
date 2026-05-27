@@ -1360,5 +1360,69 @@ def test_duckdb_create_table_appears_as_pg_foreign_table(pg_cursor, s3):
     )
 
 
+@pytest.mark.skipif(not DUCKDB_AVAILABLE, reason="DuckDB not installed")
+def test_duckdb_create_schema_creates_pg_schema(pg_cursor, s3):
+    """
+    DuckDB CREATE SCHEMA dl.<name> emits a created_schema:"<name>" entry in
+    snapshot_changes; the replay must materialise the corresponding PG
+    schema so a follow-up DuckDB CREATE TABLE dl.<name>.<t> can land its
+    foreign-table replay in pg_class.<name>. Without this hook, only
+    schemas present at CREATE EXTENSION time (i.e. ones the install seed
+    picked up) are usable from the DuckDB side.
+    """
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute("DROP EXTENSION pg_lake_ducklake CASCADE")
+    pg_cursor.connection.commit()
+    pg_cursor.execute(
+        f"SET pg_lake_ducklake.default_location_prefix = 's3://{TEST_BUCKET}/duck_create_schema/'"
+    )
+    pg_cursor.execute("CREATE EXTENSION pg_lake_ducklake CASCADE")
+    pg_cursor.connection.commit()
+
+    duck = duckdb.connect()
+    duck.execute("INSTALL postgres; LOAD postgres")
+    duck.execute("INSTALL ducklake FROM core_nightly; LOAD ducklake")
+    duck.execute(
+        f"""
+        CREATE SECRET s3test (TYPE S3, KEY_ID 'testing', SECRET 'testing',
+                              ENDPOINT 'localhost:5999',
+                              SCOPE 's3://{TEST_BUCKET}', URL_STYLE 'path',
+                              USE_SSL false)
+        """
+    )
+    conn_str = (
+        f"host={server_params.PG_HOST} port={server_params.PG_PORT} "
+        f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
+    )
+    duck.execute(f"ATTACH 'postgres:{conn_str}' AS dl (TYPE DUCKLAKE)")
+
+    duck.execute("CREATE SCHEMA dl.from_duckdb_schema")
+    duck.execute("CREATE TABLE dl.from_duckdb_schema.t (id INT, label VARCHAR)")
+    duck.execute("INSERT INTO dl.from_duckdb_schema.t VALUES (1, 'a'), (2, 'b')")
+
+    pg_cursor.connection.commit()
+
+    pg_cursor.execute(
+        "SELECT nspname FROM pg_namespace WHERE nspname = 'from_duckdb_schema'"
+    )
+    assert pg_cursor.fetchone() == (
+        "from_duckdb_schema",
+    ), "DuckDB CREATE SCHEMA must propagate to a PG namespace"
+
+    pg_cursor.execute(
+        """
+        SELECT n.nspname, c.relkind FROM pg_class c
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE c.relname = 't' AND c.relkind = 'f'
+        """
+    )
+    rows = pg_cursor.fetchall()
+    assert rows == [("from_duckdb_schema", "f")], (
+        f"DuckDB CREATE TABLE must replay into pg_class once the schema "
+        f"has been created; got {rows}"
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
