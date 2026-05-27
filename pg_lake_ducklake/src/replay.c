@@ -227,8 +227,8 @@ LookupTableNameById(int64 tableId, char **schemaNameOut, char **tableNameOut,
 	appendStringInfo(&query,
 					 "SELECT s.schema_name, t.table_name "
 					 "  FROM lake_ducklake.table t "
-					 "  JOIN lake_ducklake.schema s ON s.schema_id = t.schema_id "
-					 " WHERE t.table_id = %ld ",
+					 "  JOIN lake_ducklake.schema s ON s.schema_id OPERATOR(pg_catalog.=) t.schema_id "
+					 " WHERE t.table_id OPERATOR(pg_catalog.=) %ld ",
 					 tableId);
 	if (liveOnly)
 		appendStringInfoString(&query, "   AND t.end_snapshot IS NULL ");
@@ -342,7 +342,7 @@ ComputeFullTablePath(const char *schemaPath, bool schemaRel,
 	 * view.
 	 */
 	ret = SPI_exec("SELECT value FROM lake_ducklake.metadata "
-				   "WHERE key = 'data_path' LIMIT 1",
+				   "WHERE key OPERATOR(pg_catalog.=) 'data_path' LIMIT 1",
 				   1);
 	if (ret == SPI_OK_SELECT && SPI_processed == 1)
 	{
@@ -426,10 +426,10 @@ ReplayCreateTable(const char *schemaName, const char *tableName)
 	initStringInfo(&query);
 	appendStringInfo(&query,
 					 "SELECT 1 FROM pg_class c "
-					 "  JOIN pg_namespace n ON n.oid = c.relnamespace "
-					 " WHERE c.relname = %s "
-					 "   AND n.nspname = %s "
-					 "   AND c.relkind = 'f'",
+					 "  JOIN pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace "
+					 " WHERE c.relname OPERATOR(pg_catalog.=) %s "
+					 "   AND n.nspname OPERATOR(pg_catalog.=) %s "
+					 "   AND c.relkind OPERATOR(pg_catalog.=) 'f'",
 					 quote_literal_cstr(tableName),
 					 quote_literal_cstr(schemaName));
 
@@ -449,9 +449,9 @@ ReplayCreateTable(const char *schemaName, const char *tableName)
 					 "SELECT t.table_id, t.path, t.path_is_relative, "
 					 "       s.path, s.path_is_relative "
 					 "  FROM lake_ducklake.table t "
-					 "  JOIN lake_ducklake.schema s ON s.schema_id = t.schema_id "
-					 " WHERE s.schema_name = %s "
-					 "   AND t.table_name = %s "
+					 "  JOIN lake_ducklake.schema s ON s.schema_id OPERATOR(pg_catalog.=) t.schema_id "
+					 " WHERE s.schema_name OPERATOR(pg_catalog.=) %s "
+					 "   AND t.table_name OPERATOR(pg_catalog.=) %s "
 					 "   AND t.end_snapshot IS NULL "
 					 "   AND s.end_snapshot IS NULL "
 					 " ORDER BY t.begin_snapshot DESC LIMIT 1",
@@ -508,7 +508,7 @@ ReplayCreateTable(const char *schemaName, const char *tableName)
 	appendStringInfo(&query,
 					 "SELECT c.column_name, c.column_type "
 					 "  FROM lake_ducklake.column c "
-					 " WHERE c.table_id = %ld "
+					 " WHERE c.table_id OPERATOR(pg_catalog.=) %ld "
 					 "   AND c.end_snapshot IS NULL "
 					 "   AND c.parent_column IS NULL "
 					 " ORDER BY c.column_order",
@@ -587,10 +587,10 @@ ReplayAlteredTable(int64 tableId)
 	initStringInfo(&query);
 	appendStringInfo(&query,
 					 "SELECT c.oid::oid FROM pg_class c "
-					 "  JOIN pg_namespace n ON n.oid = c.relnamespace "
-					 " WHERE c.relname = %s "
-					 "   AND n.nspname = %s "
-					 "   AND c.relkind = 'f'",
+					 "  JOIN pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace "
+					 " WHERE c.relname OPERATOR(pg_catalog.=) %s "
+					 "   AND n.nspname OPERATOR(pg_catalog.=) %s "
+					 "   AND c.relkind OPERATOR(pg_catalog.=) 'f'",
 					 quote_literal_cstr(tableName),
 					 quote_literal_cstr(schemaName));
 
@@ -619,26 +619,26 @@ ReplayAlteredTable(int64 tableId)
 	appendStringInfo(&query,
 					 "SELECT live.column_name AS new_name, prev.column_name AS old_name "
 					 "  FROM lake_ducklake.column live "
-					 "  JOIN lake_ducklake.column prev ON prev.column_id = live.column_id "
-					 " WHERE live.table_id = %ld "
+					 "  JOIN lake_ducklake.column prev ON prev.column_id OPERATOR(pg_catalog.=) live.column_id "
+					 " WHERE live.table_id OPERATOR(pg_catalog.=) %ld "
 					 "   AND live.end_snapshot IS NULL "
 					 "   AND prev.end_snapshot IS NOT NULL "
-					 "   AND prev.column_name <> live.column_name "
-					 "   AND prev.end_snapshot = ( "
+					 "   AND prev.column_name OPERATOR(pg_catalog.<>) live.column_name "
+					 "   AND prev.end_snapshot OPERATOR(pg_catalog.=) ( "
 					 "       SELECT max(c2.end_snapshot) "
 					 "         FROM lake_ducklake.column c2 "
-					 "        WHERE c2.column_id = live.column_id "
+					 "        WHERE c2.column_id OPERATOR(pg_catalog.=) live.column_id "
 					 "          AND c2.end_snapshot IS NOT NULL) "
 					 "   AND EXISTS ( "
 					 "       SELECT 1 FROM pg_attribute a "
-					 "        WHERE a.attrelid = %u "
-					 "          AND a.attname = prev.column_name "
-					 "          AND NOT a.attisdropped AND a.attnum > 0) "
+					 "        WHERE a.attrelid OPERATOR(pg_catalog.=) %u "
+					 "          AND a.attname OPERATOR(pg_catalog.=) prev.column_name "
+					 "          AND NOT a.attisdropped AND a.attnum OPERATOR(pg_catalog.>) 0) "
 					 "   AND NOT EXISTS ( "
 					 "       SELECT 1 FROM pg_attribute a "
-					 "        WHERE a.attrelid = %u "
-					 "          AND a.attname = live.column_name "
-					 "          AND NOT a.attisdropped AND a.attnum > 0)",
+					 "        WHERE a.attrelid OPERATOR(pg_catalog.=) %u "
+					 "          AND a.attname OPERATOR(pg_catalog.=) live.column_name "
+					 "          AND NOT a.attisdropped AND a.attnum OPERATOR(pg_catalog.>) 0)",
 					 tableId, foreignOid, foreignOid);
 	ret = SPI_exec(query.data, 0);
 	if (ret == SPI_OK_SELECT)
@@ -679,14 +679,14 @@ ReplayAlteredTable(int64 tableId)
 	appendStringInfo(&query,
 					 "SELECT c.column_id, c.column_name, c.column_type "
 					 "  FROM lake_ducklake.column c "
-					 " WHERE c.table_id = %ld "
+					 " WHERE c.table_id OPERATOR(pg_catalog.=) %ld "
 					 "   AND c.end_snapshot IS NULL "
 					 "   AND c.parent_column IS NULL "
 					 "   AND NOT EXISTS ( "
 					 "       SELECT 1 FROM pg_attribute a "
-					 "        WHERE a.attrelid = %u "
-					 "          AND a.attname = c.column_name "
-					 "          AND NOT a.attisdropped AND a.attnum > 0) "
+					 "        WHERE a.attrelid OPERATOR(pg_catalog.=) %u "
+					 "          AND a.attname OPERATOR(pg_catalog.=) c.column_name "
+					 "          AND NOT a.attisdropped AND a.attnum OPERATOR(pg_catalog.>) 0) "
 					 " ORDER BY c.column_order",
 					 tableId, foreignOid);
 	ret = SPI_exec(query.data, 0);
@@ -740,9 +740,9 @@ ReplayAlteredTable(int64 tableId)
 			appendStringInfo(&ddl,
 							 "DELETE FROM lake_ducklake.name_mapping nm "
 							 " USING lake_ducklake.column_mapping cm "
-							 " WHERE nm.mapping_id = cm.mapping_id "
-							 "   AND cm.table_id = %ld "
-							 "   AND nm.source_name = %s",
+							 " WHERE nm.mapping_id OPERATOR(pg_catalog.=) cm.mapping_id "
+							 "   AND cm.table_id OPERATOR(pg_catalog.=) %ld "
+							 "   AND nm.source_name OPERATOR(pg_catalog.=) %s",
 							 tableId, quote_literal_cstr(colName));
 			SPI_exec(ddl.data, 0);
 
@@ -752,7 +752,7 @@ ReplayAlteredTable(int64 tableId)
 							 "(mapping_id, column_id, source_name, target_field_id, is_partition) "
 							 "SELECT mapping_id, %ld, %s, %ld, false "
 							 "  FROM lake_ducklake.column_mapping "
-							 " WHERE table_id = %ld",
+							 " WHERE table_id OPERATOR(pg_catalog.=) %ld",
 							 colId, quote_literal_cstr(colName), colId, tableId);
 			SPI_exec(ddl.data, 0);
 		}
@@ -762,13 +762,13 @@ ReplayAlteredTable(int64 tableId)
 	resetStringInfo(&query);
 	appendStringInfo(&query,
 					 "SELECT a.attname::text FROM pg_attribute a "
-					 " WHERE a.attrelid = %u "
-					 "   AND a.attnum > 0 AND NOT a.attisdropped "
+					 " WHERE a.attrelid OPERATOR(pg_catalog.=) %u "
+					 "   AND a.attnum OPERATOR(pg_catalog.>) 0 AND NOT a.attisdropped "
 					 "   AND NOT EXISTS ( "
 					 "       SELECT 1 FROM lake_ducklake.column c "
-					 "        WHERE c.table_id = %ld "
+					 "        WHERE c.table_id OPERATOR(pg_catalog.=) %ld "
 					 "          AND c.end_snapshot IS NULL "
-					 "          AND c.column_name = a.attname)",
+					 "          AND c.column_name OPERATOR(pg_catalog.=) a.attname)",
 					 foreignOid, tableId);
 	ret = SPI_exec(query.data, 0);
 	if (ret == SPI_OK_SELECT)

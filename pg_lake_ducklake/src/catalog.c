@@ -233,8 +233,8 @@ DucklakeRegisterTableColumns(Oid tableOid, int64 tableId)
 	/* First, count the number of columns */
 	initStringInfo(&query);
 	appendStringInfo(&query,
-					 "SELECT COUNT(*) FROM pg_attribute "
-					 "WHERE attrelid = %u AND attnum > 0 AND NOT attisdropped",
+					 "SELECT pg_catalog.count(*) FROM pg_attribute "
+					 "WHERE attrelid OPERATOR(pg_catalog.=) %u AND attnum OPERATOR(pg_catalog.>) 0 AND NOT attisdropped",
 					 tableOid);
 	ret = SPI_exec(query.data, 0);
 
@@ -274,7 +274,7 @@ DucklakeRegisterTableColumns(Oid tableOid, int64 tableId)
 					 "  lake_ducklake.pg_type_to_duckdb_type(format_type(atttypid, atttypmod)), "	/* column_type */
 					 "  NOT attnotnull "	/* nulls_allowed */
 					 "FROM pg_attribute "
-					 "WHERE attrelid = %u AND attnum > 0 AND NOT attisdropped "
+					 "WHERE attrelid OPERATOR(pg_catalog.=) %u AND attnum OPERATOR(pg_catalog.>) 0 AND NOT attisdropped "
 					 "ORDER BY attnum",
 					 snapshot->nextCatalogId,
 					 snapshot->snapshotId,
@@ -293,7 +293,7 @@ DucklakeRegisterTableColumns(Oid tableOid, int64 tableId)
 	snapshot->nextCatalogId += numColumns;
 	resetStringInfo(&query);
 	appendStringInfo(&query,
-					 "UPDATE lake_ducklake.snapshot SET next_catalog_id = %ld WHERE snapshot_id = %ld",
+					 "UPDATE lake_ducklake.snapshot SET next_catalog_id = %ld WHERE snapshot_id OPERATOR(pg_catalog.=) %ld",
 					 snapshot->nextCatalogId, snapshot->snapshotId);
 	SPI_exec(query.data, 0);
 
@@ -326,7 +326,7 @@ DucklakeRegisterTableColumns(Oid tableOid, int64 tableId)
 					 "(mapping_id, column_id, source_name, target_field_id, is_partition) "
 					 "SELECT %ld, column_id, column_name, column_id, false "
 					 "FROM lake_ducklake.column "
-					 "WHERE table_id = %ld AND begin_snapshot = %ld "
+					 "WHERE table_id OPERATOR(pg_catalog.=) %ld AND begin_snapshot OPERATOR(pg_catalog.=) %ld "
 					 "ORDER BY column_order",
 					 mappingId, tableId, snapshot->snapshotId);
 	ret = SPI_exec(query.data, 0);
@@ -354,8 +354,8 @@ DucklakeRegisterTableColumns(Oid tableOid, int64 tableId)
 						 "SELECT a.attnum, pg_catalog.pg_get_expr(ad.adbin, ad.adrelid) "
 						 "FROM pg_catalog.pg_attribute a "
 						 "JOIN pg_catalog.pg_attrdef ad "
-						 "       ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum "
-						 "WHERE a.attrelid = %u AND a.attnum > 0 AND NOT a.attisdropped",
+						 "       ON ad.adrelid OPERATOR(pg_catalog.=) a.attrelid AND ad.adnum OPERATOR(pg_catalog.=) a.attnum "
+						 "WHERE a.attrelid OPERATOR(pg_catalog.=) %u AND a.attnum OPERATOR(pg_catalog.>) 0 AND NOT a.attisdropped",
 						 tableOid);
 
 		int			drRet = SPI_exec(defaultQ.data, 0);
@@ -413,9 +413,9 @@ DucklakeRegisterTableColumns(Oid tableOid, int64 tableId)
 								 "initial_default = %s, "
 								 "default_value = %s, "
 								 "default_value_type = 'literal' "
-								 "WHERE table_id = %ld "
-								 "AND column_order = %d "
-								 "AND begin_snapshot = %ld",
+								 "WHERE table_id OPERATOR(pg_catalog.=) %ld "
+								 "AND column_order OPERATOR(pg_catalog.=) %d "
+								 "AND begin_snapshot OPERATOR(pg_catalog.=) %ld",
 								 quote_literal_cstr(resolved),
 								 quote_literal_cstr(resolved),
 								 tableId, attnum, snapshot->snapshotId);
@@ -440,7 +440,7 @@ DucklakeRegisterTableColumns(Oid tableOid, int64 tableId)
 	/* Update snapshot with final next_catalog_id */
 	resetStringInfo(&query);
 	appendStringInfo(&query,
-					 "UPDATE lake_ducklake.snapshot SET next_catalog_id = %ld WHERE snapshot_id = %ld",
+					 "UPDATE lake_ducklake.snapshot SET next_catalog_id = %ld WHERE snapshot_id OPERATOR(pg_catalog.=) %ld",
 					 snapshot->nextCatalogId, snapshot->snapshotId);
 	SPI_exec(query.data, 0);
 
@@ -454,7 +454,7 @@ DucklakeRegisterTableColumns(Oid tableOid, int64 tableId)
 					 "INSERT INTO lake_ducklake.schema_versions "
 					 "(begin_snapshot, schema_version, table_id) "
 					 "VALUES (%ld, "
-					 "(SELECT schema_version FROM lake_ducklake.snapshot WHERE snapshot_id = %ld), "
+					 "(SELECT schema_version FROM lake_ducklake.snapshot WHERE snapshot_id OPERATOR(pg_catalog.=) %ld), "
 					 "%ld)",
 					 snapshot->snapshotId, snapshot->snapshotId, tableId);
 	SPI_exec(query.data, 0);
@@ -490,8 +490,8 @@ DucklakeRegisterTable(const char *schemaName, const char *tableName, const char 
 		initStringInfo(&probeQuery);
 		appendStringInfo(&probeQuery,
 						 "SELECT t.table_id FROM lake_ducklake.table t "
-						 "JOIN lake_ducklake.schema s ON t.schema_id = s.schema_id "
-						 "WHERE s.schema_name = %s AND t.table_name = %s "
+						 "JOIN lake_ducklake.schema s ON t.schema_id OPERATOR(pg_catalog.=) s.schema_id "
+						 "WHERE s.schema_name OPERATOR(pg_catalog.=) %s AND t.table_name OPERATOR(pg_catalog.=) %s "
 						 "AND t.end_snapshot IS NULL "
 						 "AND s.end_snapshot IS NULL",
 						 quote_literal_cstr(schemaName), quote_literal_cstr(tableName));
@@ -561,7 +561,7 @@ DucklakeRegisterTable(const char *schemaName, const char *tableName, const char 
 		resetStringInfo(&query);
 		appendStringInfoString(&query,
 							   "SELECT value FROM lake_ducklake.metadata "
-							   "WHERE key = 'data_path' LIMIT 1");
+							   "WHERE key OPERATOR(pg_catalog.=) 'data_path' LIMIT 1");
 		ret = SPI_exec(query.data, 1);
 		if (ret == SPI_OK_SELECT && SPI_processed > 0)
 		{
@@ -576,7 +576,7 @@ DucklakeRegisterTable(const char *schemaName, const char *tableName, const char 
 	/* Check if schema exists */
 	resetStringInfo(&query);
 	appendStringInfo(&query,
-					 "SELECT schema_id FROM lake_ducklake.schema WHERE schema_name = %s AND end_snapshot IS NULL",
+					 "SELECT schema_id FROM lake_ducklake.schema WHERE schema_name OPERATOR(pg_catalog.=) %s AND end_snapshot IS NULL",
 					 quote_literal_cstr(schemaName));
 	ret = SPI_exec(query.data, 0);
 
@@ -603,7 +603,7 @@ DucklakeRegisterTable(const char *schemaName, const char *tableName, const char 
 			appendStringInfo(&query,
 							 "INSERT INTO lake_ducklake.schema "
 							 "(schema_id, schema_uuid, begin_snapshot, schema_name, path, path_is_relative) "
-							 "VALUES (%ld, gen_random_uuid(), %ld, %s, %s, true)",
+							 "VALUES (%ld, pg_catalog.gen_random_uuid(), %ld, %s, %s, true)",
 							 schemaId, snapshot->snapshotId,
 							 quote_literal_cstr(schemaName),
 							 quote_literal_cstr(schemaRel));
@@ -613,7 +613,7 @@ DucklakeRegisterTable(const char *schemaName, const char *tableName, const char 
 			appendStringInfo(&query,
 							 "INSERT INTO lake_ducklake.schema "
 							 "(schema_id, schema_uuid, begin_snapshot, schema_name) "
-							 "VALUES (%ld, gen_random_uuid(), %ld, %s)",
+							 "VALUES (%ld, pg_catalog.gen_random_uuid(), %ld, %s)",
 							 schemaId, snapshot->snapshotId,
 							 quote_literal_cstr(schemaName));
 		}
@@ -663,7 +663,7 @@ DucklakeRegisterTable(const char *schemaName, const char *tableName, const char 
 	appendStringInfo(&query,
 					 "INSERT INTO lake_ducklake.table "
 					 "(table_id, table_uuid, begin_snapshot, schema_id, table_name, path, path_is_relative) "
-					 "VALUES (%ld, gen_random_uuid(), %ld, %ld, %s, %s, %s) RETURNING table_id",
+					 "VALUES (%ld, pg_catalog.gen_random_uuid(), %ld, %ld, %s, %s, %s) RETURNING table_id",
 					 tableId,
 					 snapshot->snapshotId, schemaId,
 					 quote_literal_cstr(tableName),
@@ -677,7 +677,7 @@ DucklakeRegisterTable(const char *schemaName, const char *tableName, const char 
 	/* Update snapshot with new next_catalog_id */
 	resetStringInfo(&query);
 	appendStringInfo(&query,
-					 "UPDATE lake_ducklake.snapshot SET next_catalog_id = %ld WHERE snapshot_id = %ld",
+					 "UPDATE lake_ducklake.snapshot SET next_catalog_id = %ld WHERE snapshot_id OPERATOR(pg_catalog.=) %ld",
 					 snapshot->nextCatalogId, snapshot->snapshotId);
 	SPI_exec(query.data, 0);
 
@@ -728,17 +728,17 @@ DucklakeGetTableMetadata(Oid tableOid)
 					 "WITH name_match AS ( "
 					 "  SELECT t.table_id "
 					 "    FROM lake_ducklake.table t "
-					 "    JOIN lake_ducklake.schema s ON t.schema_id = s.schema_id "
-					 "   WHERE s.schema_name = %s AND t.table_name = %s "
+					 "    JOIN lake_ducklake.schema s ON t.schema_id OPERATOR(pg_catalog.=) s.schema_id "
+					 "   WHERE s.schema_name OPERATOR(pg_catalog.=) %s AND t.table_name OPERATOR(pg_catalog.=) %s "
 					 ") "
 					 "SELECT t.table_id, t.table_uuid, t.schema_id, t.table_name, "
 					 "       s.schema_name, t.path, t.path_is_relative, "
 					 "       t.begin_snapshot, t.end_snapshot, "
 					 "       s.path, s.path_is_relative, "
 					 "       (SELECT value FROM lake_ducklake.metadata "
-					 "         WHERE key = 'data_path' LIMIT 1) "
+					 "         WHERE key OPERATOR(pg_catalog.=) 'data_path' LIMIT 1) "
 					 "  FROM lake_ducklake.table t "
-					 "  JOIN lake_ducklake.schema s ON t.schema_id = s.schema_id "
+					 "  JOIN lake_ducklake.schema s ON t.schema_id OPERATOR(pg_catalog.=) s.schema_id "
 					 " WHERE t.table_id IN (SELECT table_id FROM name_match) "
 					 "   AND t.end_snapshot IS NULL "
 					 " ORDER BY t.begin_snapshot DESC "
@@ -832,10 +832,10 @@ DucklakeGetTableMetadataById(int64 tableId)
 					 "       t.begin_snapshot, t.end_snapshot, "
 					 "       s.path, s.path_is_relative, "
 					 "       (SELECT value FROM lake_ducklake.metadata "
-					 "         WHERE key = 'data_path' LIMIT 1) "
+					 "         WHERE key OPERATOR(pg_catalog.=) 'data_path' LIMIT 1) "
 					 "  FROM lake_ducklake.table t "
-					 "  JOIN lake_ducklake.schema s ON t.schema_id = s.schema_id "
-					 " WHERE t.table_id = %ld AND t.end_snapshot IS NULL",
+					 "  JOIN lake_ducklake.schema s ON t.schema_id OPERATOR(pg_catalog.=) s.schema_id "
+					 " WHERE t.table_id OPERATOR(pg_catalog.=) %ld AND t.end_snapshot IS NULL",
 					 tableId);
 
 	DucklakePrivSPIState _ducklakeSpi7;
@@ -922,28 +922,28 @@ DucklakeDropTable(int64 tableId)
 	initStringInfo(&query);
 	appendStringInfo(&query,
 					 "UPDATE lake_ducklake.table SET end_snapshot = %ld "
-					 "WHERE table_id = %ld AND end_snapshot IS NULL",
+					 "WHERE table_id OPERATOR(pg_catalog.=) %ld AND end_snapshot IS NULL",
 					 newSnapshot->snapshotId, tableId);
 	SPI_exec(query.data, 0);
 
 	resetStringInfo(&query);
 	appendStringInfo(&query,
 					 "UPDATE lake_ducklake.column SET end_snapshot = %ld "
-					 "WHERE table_id = %ld AND end_snapshot IS NULL",
+					 "WHERE table_id OPERATOR(pg_catalog.=) %ld AND end_snapshot IS NULL",
 					 newSnapshot->snapshotId, tableId);
 	SPI_exec(query.data, 0);
 
 	resetStringInfo(&query);
 	appendStringInfo(&query,
 					 "UPDATE lake_ducklake.data_file SET end_snapshot = %ld "
-					 "WHERE table_id = %ld AND end_snapshot IS NULL",
+					 "WHERE table_id OPERATOR(pg_catalog.=) %ld AND end_snapshot IS NULL",
 					 newSnapshot->snapshotId, tableId);
 	SPI_exec(query.data, 0);
 
 	resetStringInfo(&query);
 	appendStringInfo(&query,
 					 "UPDATE lake_ducklake.delete_file SET end_snapshot = %ld "
-					 "WHERE table_id = %ld AND end_snapshot IS NULL",
+					 "WHERE table_id OPERATOR(pg_catalog.=) %ld AND end_snapshot IS NULL",
 					 newSnapshot->snapshotId, tableId);
 	SPI_exec(query.data, 0);
 
@@ -952,7 +952,7 @@ DucklakeDropTable(int64 tableId)
 	appendStringInfo(&query,
 					 "UPDATE lake_ducklake.table_stats "
 					 "SET record_count = 0, file_size_bytes = 0 "
-					 "WHERE table_id = %ld",
+					 "WHERE table_id OPERATOR(pg_catalog.=) %ld",
 					 tableId);
 	SPI_exec(query.data, 0);
 
@@ -985,8 +985,8 @@ DucklakeGetDataFiles(int64 tableId, int64 snapshotId)
 					 "path, path_is_relative, file_format, record_count, file_size_bytes, "
 					 "row_id_start, partition_id "
 					 "FROM lake_ducklake.data_file "
-					 "WHERE table_id = %ld AND begin_snapshot <= %ld "
-					 "AND (end_snapshot IS NULL OR end_snapshot > %ld) "
+					 "WHERE table_id OPERATOR(pg_catalog.=) %ld AND begin_snapshot OPERATOR(pg_catalog.<=) %ld "
+					 "AND (end_snapshot IS NULL OR end_snapshot OPERATOR(pg_catalog.>) %ld) "
 					 "ORDER BY file_order",
 					 tableId, snapshotId, snapshotId);
 
@@ -1082,13 +1082,13 @@ DucklakeAddDataFile(int64 tableId, const char *path, int64 recordCount,
 					 "       t.path, t.path_is_relative, "
 					 "       s.path, s.path_is_relative, "
 					 "       (SELECT value FROM lake_ducklake.metadata "
-					 "         WHERE key = 'data_path' LIMIT 1) "
+					 "         WHERE key OPERATOR(pg_catalog.=) 'data_path' LIMIT 1) "
 					 "  FROM lake_ducklake.column_mapping cm "
-					 "  JOIN lake_ducklake.table t ON cm.table_id = t.table_id "
+					 "  JOIN lake_ducklake.table t ON cm.table_id OPERATOR(pg_catalog.=) t.table_id "
 					 "                              AND t.end_snapshot IS NULL "
-					 "  JOIN lake_ducklake.schema s ON s.schema_id = t.schema_id "
+					 "  JOIN lake_ducklake.schema s ON s.schema_id OPERATOR(pg_catalog.=) t.schema_id "
 					 "                              AND s.end_snapshot IS NULL "
-					 " WHERE cm.table_id = %ld "
+					 " WHERE cm.table_id OPERATOR(pg_catalog.=) %ld "
 					 " ORDER BY t.begin_snapshot DESC LIMIT 1",
 					 tableId);
 	ret = SPI_exec(query.data, 0);
@@ -1167,7 +1167,7 @@ DucklakeAddDataFile(int64 tableId, const char *path, int64 recordCount,
 	/* Update snapshot with new next_file_id */
 	resetStringInfo(&query);
 	appendStringInfo(&query,
-					 "UPDATE lake_ducklake.snapshot SET next_file_id = %ld WHERE snapshot_id = %ld",
+					 "UPDATE lake_ducklake.snapshot SET next_file_id = %ld WHERE snapshot_id OPERATOR(pg_catalog.=) %ld",
 					 snapshot->nextFileId, snapshot->snapshotId);
 	SPI_exec(query.data, 0);
 
@@ -1184,10 +1184,10 @@ DucklakeAddDataFile(int64 tableId, const char *path, int64 recordCount,
 					 "(table_id, record_count, next_row_id, file_size_bytes) "
 					 "SELECT %ld, "
 					 "       COALESCE(SUM(record_count), 0), "
-					 "       COALESCE(MAX(row_id_start + record_count), 0), "
+					 "       COALESCE(pg_catalog.max(row_id_start + record_count), 0), "
 					 "       COALESCE(SUM(file_size_bytes), 0) "
 					 "  FROM lake_ducklake.data_file "
-					 " WHERE table_id = %ld AND end_snapshot IS NULL "
+					 " WHERE table_id OPERATOR(pg_catalog.=) %ld AND end_snapshot IS NULL "
 					 "ON CONFLICT (table_id) DO UPDATE SET "
 					 "  record_count = EXCLUDED.record_count, "
 					 "  next_row_id = EXCLUDED.next_row_id, "
@@ -1223,13 +1223,13 @@ DucklakeAddDataFile(int64 tableId, const char *path, int64 recordCount,
 					 "WITH agg AS ( "
 					 "  SELECT df.table_id, "
 					 "         fcs.column_id, "
-					 "         COUNT(*) AS file_count, "
+					 "         pg_catalog.count(*) AS file_count, "
 					 "         MIN(fcs.min_value) AS only_min, "
-					 "         MAX(fcs.max_value) AS only_max, "
+					 "         pg_catalog.max(fcs.max_value) AS only_max, "
 					 "         BOOL_OR(fcs.contains_nan) AS any_nan "
 					 "    FROM lake_ducklake.file_column_stats fcs "
 					 "    JOIN lake_ducklake.data_file df USING (data_file_id) "
-					 "   WHERE df.table_id = %ld AND df.end_snapshot IS NULL "
+					 "   WHERE df.table_id OPERATOR(pg_catalog.=) %ld AND df.end_snapshot IS NULL "
 					 "   GROUP BY df.table_id, fcs.column_id "
 					 ") "
 					 "INSERT INTO lake_ducklake.table_column_stats "
@@ -1241,8 +1241,8 @@ DucklakeAddDataFile(int64 tableId, const char *path, int64 recordCount,
 					 "       CASE WHEN agg.file_count = 1 THEN agg.only_max END, "
 					 "       NULL "
 					 "  FROM lake_ducklake.column c "
-					 "  LEFT JOIN agg ON agg.column_id = c.column_id "
-					 " WHERE c.table_id = %ld AND c.end_snapshot IS NULL "
+					 "  LEFT JOIN agg ON agg.column_id OPERATOR(pg_catalog.=) c.column_id "
+					 " WHERE c.table_id OPERATOR(pg_catalog.=) %ld AND c.end_snapshot IS NULL "
 					 "ON CONFLICT (table_id, column_id) DO UPDATE SET "
 					 "  contains_nan = EXCLUDED.contains_nan, "
 					 "  min_value = EXCLUDED.min_value, "
@@ -1266,7 +1266,7 @@ DucklakeRemoveDataFile(int64 dataFileId)
 
 	initStringInfo(&query);
 	appendStringInfo(&query,
-					 "UPDATE lake_ducklake.data_file SET end_snapshot = %ld WHERE data_file_id = %ld",
+					 "UPDATE lake_ducklake.data_file SET end_snapshot = %ld WHERE data_file_id OPERATOR(pg_catalog.=) %ld",
 					 snapshot->snapshotId, dataFileId);
 
 	DucklakePrivSPIState _ducklakeSpi11;
@@ -1285,13 +1285,13 @@ DucklakeRemoveDataFile(int64 dataFileId)
 					 "(table_id, record_count, next_row_id, file_size_bytes) "
 					 "SELECT df_target.table_id, "
 					 "       COALESCE(SUM(df_live.record_count), 0), "
-					 "       COALESCE(MAX(df_live.row_id_start + df_live.record_count), 0), "
+					 "       COALESCE(pg_catalog.max(df_live.row_id_start + df_live.record_count), 0), "
 					 "       COALESCE(SUM(df_live.file_size_bytes), 0) "
 					 "  FROM lake_ducklake.data_file df_target "
 					 "  LEFT JOIN lake_ducklake.data_file df_live "
-					 "         ON df_live.table_id = df_target.table_id "
+					 "         ON df_live.table_id OPERATOR(pg_catalog.=) df_target.table_id "
 					 "        AND df_live.end_snapshot IS NULL "
-					 " WHERE df_target.data_file_id = %ld "
+					 " WHERE df_target.data_file_id OPERATOR(pg_catalog.=) %ld "
 					 " GROUP BY df_target.table_id "
 					 "ON CONFLICT (table_id) DO UPDATE SET "
 					 "  record_count = EXCLUDED.record_count, "
@@ -1316,7 +1316,7 @@ DucklakeRemoveAllDataFiles(int64 tableId)
 	initStringInfo(&query);
 	appendStringInfo(&query,
 					 "UPDATE lake_ducklake.data_file SET end_snapshot = %ld "
-					 "WHERE table_id = %ld AND end_snapshot IS NULL",
+					 "WHERE table_id OPERATOR(pg_catalog.=) %ld AND end_snapshot IS NULL",
 					 snapshot->snapshotId, tableId);
 
 	DucklakePrivSPIState _ducklakeSpi12;
@@ -1361,8 +1361,8 @@ DucklakeGetDeleteFiles(int64 tableId, int64 snapshotId)
 					 "SELECT delete_file_id, table_id, begin_snapshot, end_snapshot, "
 					 "data_file_id, path, path_is_relative, delete_count, file_size_bytes "
 					 "FROM lake_ducklake.delete_file "
-					 "WHERE table_id = %ld AND begin_snapshot <= %ld "
-					 "AND (end_snapshot IS NULL OR end_snapshot > %ld)",
+					 "WHERE table_id OPERATOR(pg_catalog.=) %ld AND begin_snapshot OPERATOR(pg_catalog.<=) %ld "
+					 "AND (end_snapshot IS NULL OR end_snapshot OPERATOR(pg_catalog.>) %ld)",
 					 tableId, snapshotId, snapshotId);
 
 	/*
@@ -1458,11 +1458,11 @@ DucklakeAddDeleteFile(int64 tableId, int64 dataFileId, const char *path,
 					 "SELECT t.path, t.path_is_relative, "
 					 "       s.path, s.path_is_relative, "
 					 "       (SELECT value FROM lake_ducklake.metadata "
-					 "         WHERE key = 'data_path' LIMIT 1) "
+					 "         WHERE key OPERATOR(pg_catalog.=) 'data_path' LIMIT 1) "
 					 "  FROM lake_ducklake.table t "
-					 "  JOIN lake_ducklake.schema s ON s.schema_id = t.schema_id "
+					 "  JOIN lake_ducklake.schema s ON s.schema_id OPERATOR(pg_catalog.=) t.schema_id "
 					 "                              AND s.end_snapshot IS NULL "
-					 " WHERE t.table_id = %ld AND t.end_snapshot IS NULL "
+					 " WHERE t.table_id OPERATOR(pg_catalog.=) %ld AND t.end_snapshot IS NULL "
 					 " ORDER BY t.begin_snapshot DESC LIMIT 1",
 					 tableId);
 	ret = SPI_exec(query.data, 1);
@@ -1526,7 +1526,7 @@ DucklakeAddDeleteFile(int64 tableId, int64 dataFileId, const char *path,
 	/* Update snapshot with new next_file_id */
 	resetStringInfo(&query);
 	appendStringInfo(&query,
-					 "UPDATE lake_ducklake.snapshot SET next_file_id = %ld WHERE snapshot_id = %ld",
+					 "UPDATE lake_ducklake.snapshot SET next_file_id = %ld WHERE snapshot_id OPERATOR(pg_catalog.=) %ld",
 					 snapshot->nextFileId, snapshot->snapshotId);
 	SPI_exec(query.data, 0);
 
@@ -1620,14 +1620,14 @@ DucklakeAddFileColumnStats(int64 dataFileId, int64 tableId, int64 columnId,
 	appendStringInfo(&query,
 					 "WITH agg AS ( "
 					 "  SELECT df.table_id, fcs.column_id, "
-					 "         COUNT(*) AS file_count, "
+					 "         pg_catalog.count(*) AS file_count, "
 					 "         MIN(fcs.min_value) AS only_min, "
-					 "         MAX(fcs.max_value) AS only_max, "
+					 "         pg_catalog.max(fcs.max_value) AS only_max, "
 					 "         BOOL_OR(fcs.contains_nan) AS any_nan "
 					 "    FROM lake_ducklake.file_column_stats fcs "
 					 "    JOIN lake_ducklake.data_file df USING (data_file_id) "
-					 "   WHERE df.table_id = %ld AND df.end_snapshot IS NULL "
-					 "     AND fcs.column_id = %ld "
+					 "   WHERE df.table_id OPERATOR(pg_catalog.=) %ld AND df.end_snapshot IS NULL "
+					 "     AND fcs.column_id OPERATOR(pg_catalog.=) %ld "
 					 "   GROUP BY df.table_id, fcs.column_id "
 					 ") "
 					 "INSERT INTO lake_ducklake.table_column_stats "
@@ -1688,7 +1688,7 @@ DucklakeAddColumn(Oid tableOid, const char *columnName, const char *columnType,
 
 	DucklakeBeginPrivilegedSPI(&_ducklakeSpi16);
 	appendStringInfo(&query,
-					 "UPDATE lake_ducklake.snapshot SET next_catalog_id = %ld WHERE snapshot_id = %ld",
+					 "UPDATE lake_ducklake.snapshot SET next_catalog_id = %ld WHERE snapshot_id OPERATOR(pg_catalog.=) %ld",
 					 currentSnapshot->nextCatalogId, currentSnapshot->snapshotId);
 	SPI_exec(query.data, 0);
 
@@ -1714,7 +1714,7 @@ DucklakeAddColumn(Oid tableOid, const char *columnName, const char *columnType,
 					 "        END) AS expr_text "
 					 "FROM (SELECT NULL::text adbin, NULL::oid adrelid) base "
 					 "LEFT JOIN pg_catalog.pg_attrdef ad "
-					 "       ON ad.adrelid = %u AND ad.adnum = %d",
+					 "       ON ad.adrelid OPERATOR(pg_catalog.=) %u AND ad.adnum OPERATOR(pg_catalog.=) %d",
 					 tableOid, columnOrder);
 
 	char	   *initialDefault = NULL;
@@ -1763,7 +1763,7 @@ DucklakeAddColumn(Oid tableOid, const char *columnName, const char *columnType,
 	resetStringInfo(&query);
 	appendStringInfo(&query,
 					 "UPDATE lake_ducklake.snapshot SET schema_version = schema_version + 1 "
-					 "WHERE snapshot_id = %ld",
+					 "WHERE snapshot_id OPERATOR(pg_catalog.=) %ld",
 					 newSnapshot->snapshotId);
 	SPI_exec(query.data, 0);
 
@@ -1803,7 +1803,7 @@ DucklakeAddColumn(Oid tableOid, const char *columnName, const char *columnType,
 
 	resetStringInfo(&query);
 	appendStringInfo(&query,
-					 "SELECT mapping_id FROM lake_ducklake.column_mapping WHERE table_id = %ld",
+					 "SELECT mapping_id FROM lake_ducklake.column_mapping WHERE table_id OPERATOR(pg_catalog.=) %ld",
 					 metadata->tableId);
 	ret = SPI_exec(query.data, 0);
 	if (ret == SPI_OK_SELECT && SPI_processed > 0)
@@ -1834,7 +1834,7 @@ DucklakeAddColumn(Oid tableOid, const char *columnName, const char *columnType,
 					 "INSERT INTO lake_ducklake.schema_versions "
 					 "(begin_snapshot, schema_version, table_id) "
 					 "VALUES (%ld, "
-					 "(SELECT schema_version FROM lake_ducklake.snapshot WHERE snapshot_id = %ld), "
+					 "(SELECT schema_version FROM lake_ducklake.snapshot WHERE snapshot_id OPERATOR(pg_catalog.=) %ld), "
 					 "%ld)",
 					 newSnapshot->snapshotId, newSnapshot->snapshotId, metadata->tableId);
 	SPI_exec(query.data, 0);
@@ -1868,14 +1868,14 @@ DucklakeDropColumn(Oid tableOid, const char *columnName)
 	initStringInfo(&query);
 	appendStringInfo(&query,
 					 "UPDATE lake_ducklake.snapshot SET schema_version = schema_version + 1 "
-					 "WHERE snapshot_id = %ld",
+					 "WHERE snapshot_id OPERATOR(pg_catalog.=) %ld",
 					 newSnapshot->snapshotId);
 	SPI_exec(query.data, 0);
 
 	resetStringInfo(&query);
 	appendStringInfo(&query,
 					 "UPDATE lake_ducklake.column SET end_snapshot = %ld "
-					 "WHERE table_id = %ld AND column_name = %s AND end_snapshot IS NULL",
+					 "WHERE table_id OPERATOR(pg_catalog.=) %ld AND column_name OPERATOR(pg_catalog.=) %s AND end_snapshot IS NULL",
 					 newSnapshot->snapshotId, metadata->tableId,
 					 quote_literal_cstr(columnName));
 
@@ -1891,7 +1891,7 @@ DucklakeDropColumn(Oid tableOid, const char *columnName)
 					 "INSERT INTO lake_ducklake.schema_versions "
 					 "(begin_snapshot, schema_version, table_id) "
 					 "VALUES (%ld, "
-					 "(SELECT schema_version FROM lake_ducklake.snapshot WHERE snapshot_id = %ld), "
+					 "(SELECT schema_version FROM lake_ducklake.snapshot WHERE snapshot_id OPERATOR(pg_catalog.=) %ld), "
 					 "%ld)",
 					 newSnapshot->snapshotId, newSnapshot->snapshotId, metadata->tableId);
 	SPI_exec(query.data, 0);
@@ -1929,7 +1929,7 @@ DucklakeRenameColumn(Oid tableOid, const char *oldName, const char *newName)
 	initStringInfo(&query);
 	appendStringInfo(&query,
 					 "UPDATE lake_ducklake.snapshot SET schema_version = schema_version + 1 "
-					 "WHERE snapshot_id = %ld",
+					 "WHERE snapshot_id OPERATOR(pg_catalog.=) %ld",
 					 newSnapshot->snapshotId);
 	SPI_exec(query.data, 0);
 
@@ -1948,7 +1948,7 @@ DucklakeRenameColumn(Oid tableOid, const char *oldName, const char *newName)
 					 "%s, column_type, initial_default, default_value, "
 					 "default_value_type, default_value_dialect, nulls_allowed, parent_column "
 					 "FROM lake_ducklake.column "
-					 "WHERE table_id = %ld AND column_name = %s AND end_snapshot IS NULL",
+					 "WHERE table_id OPERATOR(pg_catalog.=) %ld AND column_name OPERATOR(pg_catalog.=) %s AND end_snapshot IS NULL",
 					 newSnapshot->snapshotId,
 					 quote_literal_cstr(newName),
 					 metadata->tableId,
@@ -1961,8 +1961,8 @@ DucklakeRenameColumn(Oid tableOid, const char *oldName, const char *newName)
 	resetStringInfo(&query);
 	appendStringInfo(&query,
 					 "UPDATE lake_ducklake.column SET end_snapshot = %ld "
-					 "WHERE table_id = %ld AND column_name = %s AND end_snapshot IS NULL "
-					 "AND begin_snapshot < %ld",
+					 "WHERE table_id OPERATOR(pg_catalog.=) %ld AND column_name OPERATOR(pg_catalog.=) %s AND end_snapshot IS NULL "
+					 "AND begin_snapshot OPERATOR(pg_catalog.<) %ld",
 					 newSnapshot->snapshotId, metadata->tableId,
 					 quote_literal_cstr(oldName), newSnapshot->snapshotId);
 	SPI_exec(query.data, 0);
@@ -1976,8 +1976,8 @@ DucklakeRenameColumn(Oid tableOid, const char *oldName, const char *newName)
 	appendStringInfo(&query,
 					 "UPDATE lake_ducklake.name_mapping nm SET source_name = %s "
 					 "FROM lake_ducklake.column c "
-					 "WHERE nm.column_id = c.column_id "
-					 "AND c.table_id = %ld AND nm.source_name = %s",
+					 "WHERE nm.column_id OPERATOR(pg_catalog.=) c.column_id "
+					 "AND c.table_id OPERATOR(pg_catalog.=) %ld AND nm.source_name OPERATOR(pg_catalog.=) %s",
 					 quote_literal_cstr(newName), metadata->tableId,
 					 quote_literal_cstr(oldName));
 	SPI_exec(query.data, 0);
@@ -1988,7 +1988,7 @@ DucklakeRenameColumn(Oid tableOid, const char *oldName, const char *newName)
 					 "INSERT INTO lake_ducklake.schema_versions "
 					 "(begin_snapshot, schema_version, table_id) "
 					 "VALUES (%ld, "
-					 "(SELECT schema_version FROM lake_ducklake.snapshot WHERE snapshot_id = %ld), "
+					 "(SELECT schema_version FROM lake_ducklake.snapshot WHERE snapshot_id OPERATOR(pg_catalog.=) %ld), "
 					 "%ld)",
 					 newSnapshot->snapshotId, newSnapshot->snapshotId, metadata->tableId);
 	SPI_exec(query.data, 0);
@@ -2024,8 +2024,8 @@ DucklakeRenameTable(const char *schemaName, const char *oldName, const char *new
 	initStringInfo(&query);
 	appendStringInfo(&query,
 					 "SELECT t.table_id FROM lake_ducklake.table t "
-					 "JOIN lake_ducklake.schema s ON t.schema_id = s.schema_id "
-					 "WHERE s.schema_name = %s AND t.table_name = %s "
+					 "JOIN lake_ducklake.schema s ON t.schema_id OPERATOR(pg_catalog.=) s.schema_id "
+					 "WHERE s.schema_name OPERATOR(pg_catalog.=) %s AND t.table_name OPERATOR(pg_catalog.=) %s "
 					 "AND t.end_snapshot IS NULL "
 					 "AND s.end_snapshot IS NULL",
 					 quote_literal_cstr(schemaName),
@@ -2067,7 +2067,7 @@ DucklakeRenameTable(const char *schemaName, const char *oldName, const char *new
 	initStringInfo(&query);
 	appendStringInfo(&query,
 					 "UPDATE lake_ducklake.snapshot SET schema_version = schema_version + 1 "
-					 "WHERE snapshot_id = %ld",
+					 "WHERE snapshot_id OPERATOR(pg_catalog.=) %ld",
 					 newSnapshot->snapshotId);
 	SPI_exec(query.data, 0);
 
@@ -2084,7 +2084,7 @@ DucklakeRenameTable(const char *schemaName, const char *oldName, const char *new
 					 "SELECT table_id, table_uuid, %ld, NULL, "
 					 "       schema_id, %s, path, path_is_relative "
 					 "FROM lake_ducklake.table "
-					 "WHERE table_id = %ld AND end_snapshot IS NULL",
+					 "WHERE table_id OPERATOR(pg_catalog.=) %ld AND end_snapshot IS NULL",
 					 newSnapshot->snapshotId,
 					 quote_literal_cstr(newName),
 					 tableId);
@@ -2104,8 +2104,8 @@ DucklakeRenameTable(const char *schemaName, const char *oldName, const char *new
 	resetStringInfo(&query);
 	appendStringInfo(&query,
 					 "UPDATE lake_ducklake.table SET end_snapshot = %ld "
-					 "WHERE table_id = %ld AND end_snapshot IS NULL "
-					 "AND begin_snapshot < %ld",
+					 "WHERE table_id OPERATOR(pg_catalog.=) %ld AND end_snapshot IS NULL "
+					 "AND begin_snapshot OPERATOR(pg_catalog.<) %ld",
 					 newSnapshot->snapshotId, tableId, newSnapshot->snapshotId);
 	SPI_exec(query.data, 0);
 
@@ -2119,7 +2119,7 @@ DucklakeRenameTable(const char *schemaName, const char *oldName, const char *new
 					 "INSERT INTO lake_ducklake.schema_versions "
 					 "(begin_snapshot, schema_version, table_id) "
 					 "VALUES (%ld, "
-					 "(SELECT schema_version FROM lake_ducklake.snapshot WHERE snapshot_id = %ld), "
+					 "(SELECT schema_version FROM lake_ducklake.snapshot WHERE snapshot_id OPERATOR(pg_catalog.=) %ld), "
 					 "%ld)",
 					 newSnapshot->snapshotId, newSnapshot->snapshotId, tableId);
 	SPI_exec(query.data, 0);
@@ -2155,7 +2155,7 @@ DucklakeRenameSchema(const char *oldName, const char *newName)
 	initStringInfo(&query);
 	appendStringInfo(&query,
 					 "SELECT schema_id FROM lake_ducklake.schema "
-					 "WHERE schema_name = %s AND end_snapshot IS NULL",
+					 "WHERE schema_name OPERATOR(pg_catalog.=) %s AND end_snapshot IS NULL",
 					 quote_literal_cstr(oldName));
 	ret = SPI_exec(query.data, 1);
 
@@ -2190,7 +2190,7 @@ DucklakeRenameSchema(const char *oldName, const char *newName)
 	initStringInfo(&query);
 	appendStringInfo(&query,
 					 "UPDATE lake_ducklake.snapshot SET schema_version = schema_version + 1 "
-					 "WHERE snapshot_id = %ld",
+					 "WHERE snapshot_id OPERATOR(pg_catalog.=) %ld",
 					 newSnapshot->snapshotId);
 	SPI_exec(query.data, 0);
 
@@ -2207,7 +2207,7 @@ DucklakeRenameSchema(const char *oldName, const char *newName)
 					 "SELECT schema_id, schema_uuid, %ld, NULL, "
 					 "       %s, path, path_is_relative "
 					 "FROM lake_ducklake.schema "
-					 "WHERE schema_id = %ld AND end_snapshot IS NULL",
+					 "WHERE schema_id OPERATOR(pg_catalog.=) %ld AND end_snapshot IS NULL",
 					 newSnapshot->snapshotId,
 					 quote_literal_cstr(newName),
 					 schemaId);
@@ -2223,8 +2223,8 @@ DucklakeRenameSchema(const char *oldName, const char *newName)
 	resetStringInfo(&query);
 	appendStringInfo(&query,
 					 "UPDATE lake_ducklake.schema SET end_snapshot = %ld "
-					 "WHERE schema_id = %ld AND end_snapshot IS NULL "
-					 "AND begin_snapshot < %ld",
+					 "WHERE schema_id OPERATOR(pg_catalog.=) %ld AND end_snapshot IS NULL "
+					 "AND begin_snapshot OPERATOR(pg_catalog.<) %ld",
 					 newSnapshot->snapshotId, schemaId, newSnapshot->snapshotId);
 	SPI_exec(query.data, 0);
 
@@ -2378,7 +2378,7 @@ DucklakeInsertPartitionSpec(int64 tableId, List *transforms)
 	initStringInfo(&query);
 	appendStringInfo(&query,
 					 "SELECT begin_snapshot FROM lake_ducklake.table "
-					 "WHERE table_id = %ld AND end_snapshot IS NULL "
+					 "WHERE table_id OPERATOR(pg_catalog.=) %ld AND end_snapshot IS NULL "
 					 "ORDER BY begin_snapshot DESC LIMIT 1",
 					 tableId);
 	ret = SPI_exec(query.data, 1);
@@ -2417,8 +2417,8 @@ DucklakeInsertPartitionSpec(int64 tableId, List *transforms)
 						 "(partition_id, table_id, partition_key_index, column_id, transform) "
 						 "SELECT %ld, %ld, %ld, c.column_id, %s "
 						 "  FROM lake_ducklake.column c "
-						 " WHERE c.table_id = %ld "
-						 "   AND c.column_name = %s "
+						 " WHERE c.table_id OPERATOR(pg_catalog.=) %ld "
+						 "   AND c.column_name OPERATOR(pg_catalog.=) %s "
 						 "   AND c.end_snapshot IS NULL "
 						 "   AND c.parent_column IS NULL",
 						 partitionId, tableId, partitionKeyIndex,

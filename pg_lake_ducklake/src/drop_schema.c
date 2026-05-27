@@ -26,8 +26,10 @@
 #include "miscadmin.h"
 #include "utils/lsyscache.h"
 
+#include "pg_extension_base/extension_ids.h"
 #include "pg_lake/ducklake/catalog.h"
 #include "pg_lake/ducklake/spi_priv.h"
+#include "pg_lake/extensions/pg_lake_ducklake.h"
 
 static object_access_hook_type PreviousObjectAccessHook = NULL;
 
@@ -58,20 +60,28 @@ DropSchemaAccessHook(ObjectAccessType access, Oid classId, Oid objectId,
 		return;
 
 	/*
+	 * Skip in databases without pg_lake_ducklake. Cheap syscache hit.
+	 */
+	if (!IsExtensionCreated(PgLakeDucklake))
+		return;
+
+	/*
+	 * Skip during DROP EXTENSION pg_lake_ducklake CASCADE: the lake_ducklake
+	 * schema is dropped LAST (after its tables), and our hook fires on the
+	 * namespace drop while the table lake_ducklake.schema has already been
+	 * removed -- IsExtensionCreated still says true (the pg_extension row
+	 * lingers until the very end), so we need a second check that the
+	 * underlying catalog table is still there.
+	 */
+	if (!LakeDucklakeSchemaCatalogExists())
+		return;
+
+	/*
 	 * Skip when DuckDB's DDL replay is the one issuing the drop -- the
 	 * inbound DuckDB transaction already updated lake_ducklake.schema and
 	 * we'd just push a redundant version row.
 	 */
 	if (DucklakeInDDLReplay)
-		return;
-
-	/*
-	 * Bail out if the extension's own catalog has already been dropped (or
-	 * never existed in this database). This covers the DROP EXTENSION
-	 * pg_lake_ducklake CASCADE path, where lake_ducklake itself is going away
-	 * in the same command.
-	 */
-	if (!LakeDucklakeSchemaCatalogExists())
 		return;
 
 	DucklakeDropSchemaByOid(objectId);

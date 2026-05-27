@@ -101,10 +101,10 @@ DucklakeBuildDataFileSchema(Oid relationId)
 								 "SELECT a.attnum, c.column_id, c.initial_default "
 								 "  FROM pg_attribute a "
 								 "  JOIN lake_ducklake.column c "
-								 "    ON c.column_name = a.attname::text "
-								 " WHERE a.attrelid = %u "
-								 "   AND a.attnum > 0 AND NOT a.attisdropped "
-								 "   AND c.table_id = %ld "
+								 "    ON c.column_name OPERATOR(pg_catalog.=) a.attname::text "
+								 " WHERE a.attrelid OPERATOR(pg_catalog.=) %u "
+								 "   AND a.attnum OPERATOR(pg_catalog.>) 0 AND NOT a.attisdropped "
+								 "   AND c.table_id OPERATOR(pg_catalog.=) %ld "
 								 "   AND c.end_snapshot IS NULL "
 								 "   AND c.parent_column IS NULL",
 								 relationId, metadata->tableId);
