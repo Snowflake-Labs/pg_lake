@@ -17,8 +17,6 @@ def ducklake_extension(extension, superuser_conn, app_user):
     """Ensure pg_lake_ducklake is created and the test app_user can read its schema."""
     run_command(
         f"""
-        CREATE SCHEMA IF NOT EXISTS main;
-        GRANT USAGE ON SCHEMA main TO {app_user};
         CREATE EXTENSION IF NOT EXISTS pg_lake_ducklake CASCADE;
         GRANT USAGE ON SCHEMA lake_ducklake TO {app_user};
         GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA lake_ducklake TO {app_user};

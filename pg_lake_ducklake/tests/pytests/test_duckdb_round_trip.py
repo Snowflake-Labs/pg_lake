@@ -221,7 +221,7 @@ def test_public_ducklake_views_match_extension_schema(pg_cursor):
         pg_cursor.execute(
             """
             SELECT column_name FROM information_schema.columns
-            WHERE table_schema = 'main' AND table_name = %s
+            WHERE table_schema = 'public' AND table_name = %s
             """,
             (view,),
         )

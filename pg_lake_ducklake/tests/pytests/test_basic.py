@@ -146,17 +146,17 @@ def test_views_exist(pg_cursor):
     count = pg_cursor.fetchone()[0]
     assert count == 1, f"Expected lake_ducklake.tables view, found {count}"
 
-    # Check main.ducklake_table exists (extension default schema)
+    # Check public.ducklake_table exists
     pg_cursor.execute(
         """
         SELECT COUNT(*)
         FROM information_schema.views
-        WHERE table_schema = 'main'
+        WHERE table_schema = 'public'
         AND table_name = 'ducklake_table'
     """
     )
     count = pg_cursor.fetchone()[0]
-    assert count == 1, f"Expected main.ducklake_table view, found {count}"
+    assert count == 1, f"Expected public.ducklake_table view, found {count}"
 
 
 if __name__ == "__main__":

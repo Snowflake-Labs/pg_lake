@@ -336,7 +336,7 @@ def test_delete_file_structure(pg_cursor):
 
 def test_ducklake_metadata_view_synthesizes_data_path_from_guc(pg_cursor):
     """
-    The main.ducklake_metadata view must surface a synthetic 'data_path'
+    The public.ducklake_metadata view must surface a synthetic 'data_path'
     row when pg_lake_ducklake.default_location_prefix is set and no real
     row has been written. This is what lets DuckDB ATTACH succeed without
     DATA_PATH against a freshly-created extension.
@@ -345,13 +345,13 @@ def test_ducklake_metadata_view_synthesizes_data_path_from_guc(pg_cursor):
     the persisted value wins.
     """
     pg_cursor.execute(
-        "SELECT key, value FROM main.ducklake_metadata WHERE key = 'data_path'"
+        "SELECT key, value FROM public.ducklake_metadata WHERE key = 'data_path'"
     )
     assert pg_cursor.fetchall() == [], "no real or GUC-derived data_path expected"
 
     pg_cursor.execute("SET pg_lake_ducklake.default_location_prefix = 's3://bucket/x'")
     pg_cursor.execute(
-        "SELECT key, value FROM main.ducklake_metadata WHERE key = 'data_path'"
+        "SELECT key, value FROM public.ducklake_metadata WHERE key = 'data_path'"
     )
     rows = pg_cursor.fetchall()
     assert rows == [
@@ -360,7 +360,7 @@ def test_ducklake_metadata_view_synthesizes_data_path_from_guc(pg_cursor):
 
     pg_cursor.execute("SET pg_lake_ducklake.default_location_prefix = 's3://bucket/y/'")
     pg_cursor.execute(
-        "SELECT value FROM main.ducklake_metadata WHERE key = 'data_path'"
+        "SELECT value FROM public.ducklake_metadata WHERE key = 'data_path'"
     )
     assert pg_cursor.fetchone() == (
         "s3://bucket/y/",
@@ -372,7 +372,7 @@ def test_ducklake_metadata_view_synthesizes_data_path_from_guc(pg_cursor):
         "VALUES ('data_path', 's3://bucket/persisted/', NULL, NULL)"
     )
     pg_cursor.execute(
-        "SELECT value FROM main.ducklake_metadata WHERE key = 'data_path'"
+        "SELECT value FROM public.ducklake_metadata WHERE key = 'data_path'"
     )
     assert pg_cursor.fetchall() == [
         ("s3://bucket/persisted/",)

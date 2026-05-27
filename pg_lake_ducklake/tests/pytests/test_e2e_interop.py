@@ -172,7 +172,7 @@ def test_duckdb_reads_postgres_metadata(pg_cursor, s3):
         f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
     )
     duck.execute(
-        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'main')"
+        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
     )
 
     rows = duck.execute(
@@ -220,7 +220,7 @@ def test_duckdb_writes_through_postgres_metadata(pg_cursor, s3):
         f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
     )
     duck.execute(
-        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'main')"
+        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
     )
 
     duck.execute("INSERT INTO dl.public.duck_writes VALUES (3, 4)")
@@ -320,7 +320,7 @@ def test_manual_metadata_creation_for_duckdb(pg_cursor, tmp_path):
     pg_cursor.execute(
         """
         SELECT table_name
-        FROM main.ducklake_table
+        FROM public.ducklake_table
         WHERE table_name = 'manual_table'
     """
     )
@@ -402,7 +402,7 @@ def test_pg_select_after_duckdb_delete(pg_cursor, s3):
         f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
     )
     duck.execute(
-        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'main')"
+        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
     )
 
     duck.execute("DELETE FROM dl.public.duck_delete WHERE x = 2")
@@ -452,7 +452,7 @@ def test_pg_select_after_duckdb_insert_and_delete(pg_cursor, s3):
         f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
     )
     duck.execute(
-        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'main')"
+        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
     )
 
     duck.execute("INSERT INTO dl.public.duck_ins_del VALUES (1, 7), (2, 7), (3, 7)")
@@ -503,7 +503,7 @@ def test_pg_select_after_duckdb_delete_many(pg_cursor, s3):
         f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
     )
     duck.execute(
-        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'main')"
+        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
     )
 
     duck.execute("DELETE FROM dl.public.duck_del_many WHERE x = 17")
@@ -559,7 +559,7 @@ def test_duckdb_reads_pg_added_column(pg_cursor, s3):
         f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
     )
     duck.execute(
-        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'main')"
+        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
     )
 
     rows = duck.execute(
@@ -640,7 +640,7 @@ def test_pg_rename_table_propagates(pg_cursor, s3):
         f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
     )
     duck.execute(
-        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'main')"
+        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
     )
     rows = duck.execute(
         "SELECT id, label FROM dl.public.pg_rename_new ORDER BY id"
@@ -687,7 +687,7 @@ def test_duckdb_rename_table_no_pk_violation(pg_cursor, s3):
         f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
     )
     duck.execute(
-        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'main')"
+        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
     )
 
     duck.execute("ALTER TABLE dl.public.duck_rename_old RENAME TO duck_rename_new")
@@ -795,7 +795,7 @@ def test_duckdb_drop_table_propagates(pg_cursor, s3):
         f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
     )
     duck.execute(
-        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'main')"
+        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
     )
 
     duck.execute("DROP TABLE dl.public.duck_drop")
@@ -858,7 +858,7 @@ def test_duckdb_alter_columns_propagate(pg_cursor, s3):
         f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
     )
     duck.execute(
-        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'main')"
+        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
     )
 
     # ADD COLUMN c INT
@@ -939,7 +939,7 @@ def test_pg_drop_then_duckdb_readd_column_returns_null(pg_cursor, s3):
         f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
     )
     duck.execute(
-        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'main')"
+        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
     )
 
     duck.execute("ALTER TABLE dl.public.drop_readd ADD COLUMN val TEXT")
@@ -1058,7 +1058,7 @@ def test_default_location_prefix_duckdb_interop(pg_cursor, s3):
         f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
     )
     duck.execute(
-        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'main')"
+        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
     )
 
     rows = duck.execute("SELECT id, val FROM dl.public.rp2_duck ORDER BY id").fetchall()
@@ -1167,7 +1167,7 @@ def test_duckdb_merge_adjacent_then_pg_reads(pg_cursor, s3):
         f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER}"
     )
     duck.execute(
-        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'main')"
+        f"ATTACH 'postgres:{conn}' AS dl " f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
     )
 
     duck.execute("CALL ducklake_merge_adjacent_files('dl')")
@@ -1225,7 +1225,7 @@ def test_fresh_pg_session_sees_duckdb_writes(pg_cursor, s3):
     )
     duck.execute(
         f"ATTACH 'postgres:{conn_str}' AS dl "
-        f"(TYPE DUCKLAKE, METADATA_SCHEMA 'main')"
+        f"(TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
     )
 
     duck.execute(

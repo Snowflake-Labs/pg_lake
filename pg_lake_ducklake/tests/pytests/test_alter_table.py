@@ -513,7 +513,7 @@ def test_drop_column_visible_in_duckdb(pg_cursor):
     )
     try:
         duckdb_conn.execute(
-            f"ATTACH 'postgres:{pg_conn_str}' AS dl (TYPE DUCKLAKE, METADATA_SCHEMA 'main')"
+            f"ATTACH 'postgres:{pg_conn_str}' AS dl (TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
         )
     except Exception as e:
         pytest.skip(f"Could not attach to PostgreSQL with TYPE DUCKLAKE: {e}")
@@ -612,7 +612,7 @@ def test_add_column_visible_in_duckdb(pg_cursor):
     )
     try:
         duckdb_conn.execute(
-            f"ATTACH 'postgres:{pg_conn_str}' AS dl (TYPE DUCKLAKE, METADATA_SCHEMA 'main')"
+            f"ATTACH 'postgres:{pg_conn_str}' AS dl (TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
         )
     except Exception as e:
         pytest.skip(f"Could not attach to PostgreSQL with TYPE DUCKLAKE: {e}")
@@ -708,7 +708,7 @@ def test_schema_evolution_in_duckdb(pg_cursor):
     )
     try:
         duckdb_conn.execute(
-            f"ATTACH 'postgres:{pg_conn_str}' AS dl (TYPE DUCKLAKE, METADATA_SCHEMA 'main')"
+            f"ATTACH 'postgres:{pg_conn_str}' AS dl (TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
         )
     except Exception as e:
         pytest.skip(f"Could not attach to PostgreSQL with TYPE DUCKLAKE: {e}")
@@ -789,7 +789,7 @@ def test_duckdb_views_reflect_alter_operations(pg_cursor):
     )
     try:
         duckdb_conn.execute(
-            f"ATTACH 'postgres:{pg_conn_str}' AS dl (TYPE DUCKLAKE, METADATA_SCHEMA 'main')"
+            f"ATTACH 'postgres:{pg_conn_str}' AS dl (TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
         )
     except Exception as e:
         pytest.skip(f"Could not attach to PostgreSQL with TYPE DUCKLAKE: {e}")
@@ -819,7 +819,7 @@ def test_duckdb_views_reflect_alter_operations(pg_cursor):
     duckdb_conn = duckdb.connect()
     duckdb_conn.execute("LOAD ducklake")
     duckdb_conn.execute(
-        f"ATTACH 'postgres:{pg_conn_str}' AS dl (TYPE DUCKLAKE, METADATA_SCHEMA 'main')"
+        f"ATTACH 'postgres:{pg_conn_str}' AS dl (TYPE DUCKLAKE, METADATA_SCHEMA 'public')"
     )
 
     result = duckdb_conn.execute(
