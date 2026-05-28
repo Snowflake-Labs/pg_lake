@@ -246,8 +246,8 @@ def test_simple_data_pruning_for_data_types(
         if column_type not in ("date", "timestamp", "timestamptz"):
             return
 
-    if partition_type in ("hour"):
-        if column_type not in ("time", "timetz", "timestamp", "timestamptz"):
+    if partition_type == "hour":
+        if column_type not in ("timestamp", "timestamptz"):
             return
 
     if "bucket" in partition_type:
