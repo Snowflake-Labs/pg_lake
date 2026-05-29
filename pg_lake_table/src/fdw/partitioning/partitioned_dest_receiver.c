@@ -38,10 +38,22 @@
 #include "pg_lake/pgduck/write_data.h"
 #include "pg_lake/storage/local_storage.h"
 #include "foreign/foreign.h"
+#include "storage/fd.h"
 #include "tcop/dest.h"
 #include "utils/memutils.h"
 #include "utils/palloc.h"
 #include "utils/rel.h"
+
+/*
+ * Headroom we leave below max_safe_fds when computing how many partition
+ * subreceivers we can keep open at once. PostgreSQL's AllocateDesc machinery
+ * caps the total number of allocated descriptors at max_safe_fds, and the
+ * backend uses some of those for catalog access, temp files, etc. We avoid
+ * approaching that cap so we don't trigger "exceeded maxAllocatedDescs"
+ * errors mid-write. Each active subreceiver currently holds one CSV file
+ * descriptor open via AllocateFile().
+ */
+#define PARTITIONED_DEST_FD_SAFETY_MARGIN 64
 
 
 typedef struct PartitionPartitionDestReceiverHashEntry
@@ -102,7 +114,15 @@ static void DestroyPartitionedDestReceiver(DestReceiver *self);
 
 static HTAB *InitializePartitionsHash(MemoryContext parentContext);
 static void AssignPartitionForModificationList(List *modifications, int32 partitionSpecId, Partition * partition);
-static List *FlushLargestPartitionedDestReceiver(PartitioningDestReceiverData * myState);
+static List *FlushLargestPartitionedDestReceivers(PartitioningDestReceiverData * myState, int maxToFlush);
+
+/*
+ * Maximum number of subreceivers FlushLargestPartitionedDestReceivers will
+ * flush in a single pass. Picked so we can absorb a sudden drop in the
+ * available fd budget without making many full hash scans, while keeping
+ * the top-K insertion-sort cheap.
+ */
+#define PARTITIONED_DEST_MAX_FLUSH_BATCH 5
 
 /* controlled by a GUC */
 int			MaxOpenFilesForPartitionedWrite = 5000;
@@ -240,30 +260,39 @@ PartitionedDestReceiveSlot(TupleTableSlot *slot, DestReceiver *self)
 		entryPtr->rowCount = 0;
 
 		/*
-		 * First, check if we have reached the maximum number of active
-		 * subreceivers.
+		 * Check whether we have room to open another subreceiver, both
+		 * against the user-tunable cap (MaxOpenFilesForPartitionedWrite) and
+		 * against the backend's allocated-descriptor budget. Each subreceiver
+		 * currently holds one descriptor open, so we can use subreceiver
+		 * count as a proxy for fds consumed by this path. We keep flushing
+		 * the largest subreceiver in a loop so we still make room even when
+		 * many other subsystems have eaten into the budget.
+		 *
+		 * The downside is that we push data files that have not reached
+		 * MaxWriteTempFileSizeMB yet, so we may emit small files. That is
+		 * preferable to erroring out with "exceeded maxAllocatedDescs".
 		 */
-		int			numActiveSubreceivers = hash_get_num_entries(myState->partitionsHash);
+		int			fdBudget = max_safe_fds - PARTITIONED_DEST_FD_SAFETY_MARGIN;
 
-		if (numActiveSubreceivers > MaxOpenFilesForPartitionedWrite)
+		if (fdBudget < 1)
+			fdBudget = 1;
+
+		int			cap = Min(MaxOpenFilesForPartitionedWrite, fdBudget);
+		int			over = hash_get_num_entries(myState->partitionsHash) - cap;
+
+		while (over > 0)
 		{
-			/*
-			 * We have reached the maximum number of active subreceivers.
-			 * Flush the largest one to make room for a new one.
-			 *
-			 * The downside is that we push the data file that has not reached
-			 * to MaxWriteTempFileSizeMB yet. So, we might have very small
-			 * data files. But, this is a trade off we have to make, otherwise
-			 * we might hit open file limit.
-			 *
-			 * We also prefer to only flush the largest partitioned dest
-			 * receiver as there is not much point in flushing more than one.
-			 */
+			int			batch = Min(over, PARTITIONED_DEST_MAX_FLUSH_BATCH);
 			List	   *modifications =
-				FlushLargestPartitionedDestReceiver(myState);
+				FlushLargestPartitionedDestReceivers(myState, batch);
+
+			if (modifications == NIL)
+				break;
 
 			myState->alreadyFlushedPartitionModifications =
 				list_concat(myState->alreadyFlushedPartitionModifications, modifications);
+
+			over = hash_get_num_entries(myState->partitionsHash) - cap;
 		}
 
 		DestReceiver *partitionReceiver =
@@ -293,60 +322,94 @@ PartitionedDestReceiveSlot(TupleTableSlot *slot, DestReceiver *self)
 
 
 /*
-* FlushLargestPartitionedDestReceiver flushes the largest partitioned
-* dest receiver. This is used to limit the number of active subreceivers
-* to MaxOpenFilesForPartitionedWrite.
-*/
+ * FlushLargestPartitionedDestReceivers flushes up to maxToFlush of the
+ * largest partitioned dest receivers in a single pass over the hash. We
+ * maintain a top-K array sorted in descending row count by insertion sort
+ * (cheap for the small K we expect, see PARTITIONED_DEST_MAX_FLUSH_BATCH),
+ * then flush the collected entries afterwards. This is used to limit the
+ * number of active subreceivers so we don't exhaust the backend's
+ * allocated-descriptor budget or MaxOpenFilesForPartitionedWrite.
+ */
 static List *
-FlushLargestPartitionedDestReceiver(PartitioningDestReceiverData * myState)
+FlushLargestPartitionedDestReceivers(PartitioningDestReceiverData * myState, int maxToFlush)
 {
 	HTAB	   *partitionsHash = myState->partitionsHash;
 	HASH_SEQ_STATUS seqStatus;
 	PartitionPartitionDestReceiverHashEntry *ent;
-	PartitionPartitionDestReceiverHashEntry *largest = NULL;
+	PartitionPartitionDestReceiverHashEntry *topK[PARTITIONED_DEST_MAX_FLUSH_BATCH];
+	int			topKCount = 0;
+
+	if (maxToFlush <= 0)
+		return NIL;
+	if (maxToFlush > PARTITIONED_DEST_MAX_FLUSH_BATCH)
+		maxToFlush = PARTITIONED_DEST_MAX_FLUSH_BATCH;
 
 	hash_seq_init(&seqStatus, partitionsHash);
 	while ((ent = (PartitionPartitionDestReceiverHashEntry *) hash_seq_search(&seqStatus)) != NULL)
 	{
-		if (largest == NULL || ent->rowCount > largest->rowCount)
-		{
-			largest = ent;
-		}
+		/*
+		 * Skip already-flushed entries (the hash entry is kept around as a
+		 * placeholder until rDestroy time, but its multiDataFileDestReceiver
+		 * is NULL after a prior flush).
+		 */
+		if (ent->multiDataFileDestReceiver == NULL)
+			continue;
+
+		/* If full and this entry isn't larger than our smallest, skip it. */
+		if (topKCount == maxToFlush &&
+			ent->rowCount <= topK[topKCount - 1]->rowCount)
+			continue;
+
+		/* Find insertion position to keep topK[] sorted descending. */
+		int			pos = topKCount;
+
+		while (pos > 0 && topK[pos - 1]->rowCount < ent->rowCount)
+			pos--;
+
+		/* Shift smaller elements right; drop the tail if we're at capacity. */
+		int			end = (topKCount < maxToFlush) ? topKCount : maxToFlush - 1;
+
+		for (int i = end; i > pos; i--)
+			topK[i] = topK[i - 1];
+
+		topK[pos] = ent;
+		if (topKCount < maxToFlush)
+			topKCount++;
 	}
 
-	if (largest != NULL)
-	{
-		/* indicates a bug, not expected, better than assert */
-		if (largest->multiDataFileDestReceiver == NULL)
-			elog(ERROR, "partitioned dest receiver is NULL");
+	List	   *allModifications = NIL;
 
-		largest->multiDataFileDestReceiver->rShutdown((DestReceiver *) largest->multiDataFileDestReceiver);
+	for (int i = 0; i < topKCount; i++)
+	{
+		PartitionPartitionDestReceiverHashEntry *target = topK[i];
+
+		target->multiDataFileDestReceiver->rShutdown((DestReceiver *) target->multiDataFileDestReceiver);
 
 		List	   *modifications =
-			GetMultiDataFileDestReceiverModifications((DestReceiver *) largest->multiDataFileDestReceiver);
+			GetMultiDataFileDestReceiverModifications((DestReceiver *) target->multiDataFileDestReceiver);
 
-		AssignPartitionForModificationList(modifications, myState->currentPartitionSpecId, largest->partition);
+		AssignPartitionForModificationList(modifications, myState->currentPartitionSpecId, target->partition);
 
 		/* also remove from the hash */
 		bool		found = false;
 		PartitionPartitionDestReceiverHashEntry *entryPtr =
-			hash_search(partitionsHash, &largest->hashKey, HASH_REMOVE, &found);
+			hash_search(partitionsHash, &target->hashKey, HASH_REMOVE, &found);
 
 		/* indicates a bug, not expected, better than assert */
 		if (!found)
 			elog(ERROR, "could not find partitioned dest receiver in hash");
 
 		/* indicates a bug, not expected, better than assert */
-		if (entryPtr->hashKey != largest->hashKey)
+		if (entryPtr->hashKey != target->hashKey)
 			elog(ERROR, "partitioned dest receiver hash key mismatch");
 
 		entryPtr->multiDataFileDestReceiver = NULL;
 		entryPtr->rowCount = 0;
 
-		return modifications;
+		allModifications = list_concat(allModifications, modifications);
 	}
 
-	return NIL;
+	return allModifications;
 }
 
 /*
