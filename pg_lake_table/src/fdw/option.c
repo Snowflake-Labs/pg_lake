@@ -794,7 +794,8 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 						 errmsg("invalid catalog option: %s", icebergCatalogName),
-						 errdetail("Only " REST_CATALOG_NAME ", " OBJECT_STORE_CATALOG_NAME " and " POSTGRES_CATALOG_NAME " are supported.")));
+						 errdetail("Only " REST_CATALOG_NAME ", " OBJECT_STORE_CATALOG_NAME " and " POSTGRES_CATALOG_NAME
+								   " are supported for now.")));
 		}
 		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "read_only") == 0)
 		{
@@ -916,43 +917,47 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 		if (icebergCatalogType == REST_CATALOG_READ_ONLY || icebergCatalogType == OBJECT_STORE_READ_ONLY)
 		{
 			/*
-			 * catalog_name and catalog_table_name are required for read-only
-			 * external catalog tables, i.e. catalog=rest and
-			 * catalog=object_store
+			 * catalog_name, catalog_namespace, and catalog_table_name are
+			 * required for read-only external catalog tables, i.e.
+			 * catalog=rest and catalog=object_store.
 			 *
-			 * On CREATE, ProcessCreateIcebergTableFromForeignTableStmt
-			 * auto-fills defaults for these options, so these checks act as a
-			 * safety net for ALTER DROP scenarios.
+			 * In practice these are always auto-populated by create_table.c,
+			 * but we check here as a safety net.
 			 */
 			if (!catalogName)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("\"catalog_name\" option is required for read-only external catalog tables")));
+						 errmsg("\"catalog_name\" option is required for read-only rest and object_store catalog tables")));
+
+			if (!catalogNamespace)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("\"catalog_namespace\" option is required for read-only rest and object_store catalog tables")));
 
 			if (!catalogTableName)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("\"catalog_table_name\" option is required for read-only external catalog tables")));
+						 errmsg("\"catalog_table_name\" option is required for read-only rest and object_store catalog tables")));
 		}
 		else
 		{
 			/*
 			 * For other catalog types these options are not valid.
 			 */
+			if (catalogName)
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("\"catalog_name\" option is only valid for read-only rest and object_store catalog tables")));
+
 			if (catalogNamespace)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("\"catalog_namespace\" option is only valid for read-only external catalog tables")));
+						 errmsg("\"catalog_namespace\" option is only valid for read-only rest and object_store catalog tables")));
 
 			if (catalogTableName)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("\"catalog_table_name\" option is only valid for read-only external catalog tables")));
-
-			if (catalogName)
-				ereport(ERROR,
-						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("\"catalog_name\" option is only valid for read-only external catalog tables")));
+						 errmsg("\"catalog_table_name\" option is only valid for read-only rest and object_store catalog tables")));
 
 		}
 	}

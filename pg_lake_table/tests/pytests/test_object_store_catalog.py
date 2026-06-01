@@ -153,7 +153,7 @@ def test_object_store_read_only_alter_drop_required_options(
         raise_error=False,
     )
     assert (
-        '"catalog_name" option is required for read-only external catalog tables'
+        '"catalog_name" option is required for read-only rest and object_store catalog tables'
         in str(error)
     )
     pg_conn.rollback()
@@ -165,7 +165,7 @@ def test_object_store_read_only_alter_drop_required_options(
         raise_error=False,
     )
     assert (
-        '"catalog_table_name" option is required for read-only external catalog tables'
+        '"catalog_table_name" option is required for read-only rest and object_store catalog tables'
         in str(error)
     )
     pg_conn.rollback()

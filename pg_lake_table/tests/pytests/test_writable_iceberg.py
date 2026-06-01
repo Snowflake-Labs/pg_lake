@@ -149,7 +149,7 @@ def test_iceberg_catalog_option_validation_errors(pg_conn, extension):
     )
     pg_conn.rollback()
 
-    # catalog_name is only valid for read-only external catalog tables
+    # catalog_name is only valid for read-only rest and object_store catalog tables
     error = run_command(
         f"""CREATE FOREIGN TABLE {schema}.ft (id int) SERVER pg_lake_iceberg
             OPTIONS (location 's3://bucket/path', catalog_name 'cat')""",
@@ -157,12 +157,12 @@ def test_iceberg_catalog_option_validation_errors(pg_conn, extension):
         raise_error=False,
     )
     assert (
-        '"catalog_name" option is only valid for read-only external catalog tables'
+        '"catalog_name" option is only valid for read-only rest and object_store catalog tables'
         in str(error)
     )
     pg_conn.rollback()
 
-    # catalog_namespace is only valid for read-only external catalog tables
+    # catalog_namespace is only valid for read-only rest and object_store catalog tables
     error = run_command(
         f"""CREATE FOREIGN TABLE {schema}.ft (id int) SERVER pg_lake_iceberg
             OPTIONS (location 's3://bucket/path', catalog_namespace 'ns')""",
@@ -170,12 +170,12 @@ def test_iceberg_catalog_option_validation_errors(pg_conn, extension):
         raise_error=False,
     )
     assert (
-        '"catalog_namespace" option is only valid for read-only external catalog tables'
+        '"catalog_namespace" option is only valid for read-only rest and object_store catalog tables'
         in str(error)
     )
     pg_conn.rollback()
 
-    # catalog_table_name is only valid for read-only external catalog tables
+    # catalog_table_name is only valid for read-only rest and object_store catalog tables
     error = run_command(
         f"""CREATE FOREIGN TABLE {schema}.ft (id int) SERVER pg_lake_iceberg
             OPTIONS (location 's3://bucket/path', catalog_table_name 'tbl')""",
@@ -183,7 +183,7 @@ def test_iceberg_catalog_option_validation_errors(pg_conn, extension):
         raise_error=False,
     )
     assert (
-        '"catalog_table_name" option is only valid for read-only external catalog tables'
+        '"catalog_table_name" option is only valid for read-only rest and object_store catalog tables'
         in str(error)
     )
     pg_conn.rollback()
