@@ -27,6 +27,9 @@
 #include "nodes/parsenodes.h"
 #include "nodes/plannodes.h"
 #include "tcop/utility.h"
+#include "catalog/pg_authid.h"
+#include "utils/acl.h"
+#include "utils/guc.h"
 
 
 static void ExtensionDependencyInstallerHook(PlannedStmt *plannedStmt,
@@ -42,6 +45,7 @@ static void HandleCreateExtensionStmt(CreateExtensionStmt *createExtension);
 static void EnsureExtensionExists(char *extensionName);
 static void EnsureExtensionIsUpdated(char *extensionName);
 static bool HasOption(List *options, char *optionName);
+static bool ShouldEscalateForDependency(void);
 
 
 /* whether to auto-install new dependencies */
@@ -49,6 +53,16 @@ bool		EnableExtensionDependencyCreate = true;
 
 /* whether to auto-update existing dependencies */
 bool		EnableExtensionDependencyUpdate = true;
+
+/*
+ * Optional role name; if the current user is a member of this role, the
+ * synthesized CREATE/ALTER EXTENSION calls used to install or update
+ * dependencies will run as the bootstrap superuser. This lets pg_extension_base
+ * escalate dependency work even when the surrounding session is not running
+ * under a privileged escalator (e.g. snowflake_user). Empty disables the
+ * behavior.
+ */
+char	   *DependencyEscalationRoleName = "";
 
 /* previous hooks */
 static ProcessUtility_hook_type PrevProcessUtility = NULL;
@@ -198,8 +212,29 @@ EnsureExtensionExists(char *extensionName)
 	createExtensionStmt->extname = extensionName;
 	createExtensionStmt->if_not_exists = true;
 	createExtensionStmt->options = list_make1(cascadeOption);
-	CreateExtension(NULL, createExtensionStmt);
-	CommandCounterIncrement();
+
+	Oid			savedUserId = InvalidOid;
+	int			savedSecContext = 0;
+	bool		escalated = ShouldEscalateForDependency();
+
+	if (escalated)
+	{
+		GetUserIdAndSecContext(&savedUserId, &savedSecContext);
+		SetUserIdAndSecContext(BOOTSTRAP_SUPERUSERID,
+							   savedSecContext | SECURITY_LOCAL_USERID_CHANGE);
+	}
+
+	PG_TRY();
+	{
+		CreateExtension(NULL, createExtensionStmt);
+		CommandCounterIncrement();
+	}
+	PG_FINALLY();
+	{
+		if (escalated)
+			SetUserIdAndSecContext(savedUserId, savedSecContext);
+	}
+	PG_END_TRY();
 }
 
 
@@ -236,10 +271,58 @@ EnsureExtensionIsUpdated(char *extensionName)
 	check_stack_depth();
 	HandleAlterExtensionStmt(alterExtensionStmt);
 
-	ExecAlterExtensionStmt(NULL, alterExtensionStmt);
-	CommandCounterIncrement();
+	Oid			savedUserId = InvalidOid;
+	int			savedSecContext = 0;
+	bool		escalated = ShouldEscalateForDependency();
+
+	if (escalated)
+	{
+		GetUserIdAndSecContext(&savedUserId, &savedSecContext);
+		SetUserIdAndSecContext(BOOTSTRAP_SUPERUSERID,
+							   savedSecContext | SECURITY_LOCAL_USERID_CHANGE);
+	}
+
+	PG_TRY();
+	{
+		ExecAlterExtensionStmt(NULL, alterExtensionStmt);
+		CommandCounterIncrement();
+	}
+	PG_FINALLY();
+	{
+		if (escalated)
+			SetUserIdAndSecContext(savedUserId, savedSecContext);
+	}
+	PG_END_TRY();
 
 	AtEOXact_GUC(true, gucNestLevel);
+}
+
+
+/*
+ * ShouldEscalateForDependency returns true when the configured escalation role
+ * is non-empty and the current user is a member of it. The role is resolved
+ * each call so that SET ROLE / RESET ROLE inside the session is honored. If the
+ * configured role does not exist we silently treat it as "no escalation"; an
+ * unresolvable role is a configuration issue and we don't want to break
+ * unrelated DDL on the chance it happens to escalate dependencies.
+ */
+static bool
+ShouldEscalateForDependency(void)
+{
+	if (DependencyEscalationRoleName == NULL ||
+		DependencyEscalationRoleName[0] == '\0')
+		return false;
+
+	/* already running with full privileges; nothing to do */
+	if (superuser())
+		return false;
+
+	Oid			roleOid = get_role_oid(DependencyEscalationRoleName, true);
+
+	if (!OidIsValid(roleOid))
+		return false;
+
+	return is_member_of_role(GetUserId(), roleOid);
 }
 
 

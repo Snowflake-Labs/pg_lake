@@ -96,6 +96,19 @@ _PG_init(void)
 							 GUC_STANDARD,
 							 NULL, NULL, NULL);
 
+	DefineCustomStringVariable(
+							   "pg_extension_base.dependency_escalation_role",
+							   gettext_noop("If non-empty, automatic CREATE/ALTER EXTENSION calls "
+											"that install or update dependencies run as the "
+											"bootstrap superuser when the current user is a member "
+											"of this role"),
+							   NULL,
+							   &DependencyEscalationRoleName,
+							   "",
+							   PGC_SIGHUP,
+							   GUC_SUPERUSER_ONLY,
+							   NULL, NULL, NULL);
+
 	DefineCustomBoolVariable(
 							 "pg_extension_base.enable_base_worker_launcher",
 							 gettext_noop("Enables the bae worker launcher, which simplifies "

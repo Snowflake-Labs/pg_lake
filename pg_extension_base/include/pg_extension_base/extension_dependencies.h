@@ -19,5 +19,6 @@
 
 extern bool EnableExtensionDependencyCreate;
 extern bool EnableExtensionDependencyUpdate;
+extern char *DependencyEscalationRoleName;
 
 void		InitializeExtensionDependencyInstaller(void);
