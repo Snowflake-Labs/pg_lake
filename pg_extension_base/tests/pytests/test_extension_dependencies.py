@@ -91,11 +91,36 @@ def test_extension_dependency_role_escalation(superuser_conn):
     role_name = "ext_dep_escalator"
     user_name = "ext_dep_user"
 
+    def set_escalation_role(value):
+        # ALTER SYSTEM cannot run inside a transaction block; flip the
+        # connection into autocommit for the duration of the GUC update.
+        superuser_conn.commit()
+        superuser_conn.autocommit = True
+        try:
+            run_command(
+                f"alter system set pg_extension_base.dependency_escalation_role to '{value}';",
+                superuser_conn,
+            )
+            run_command("select pg_reload_conf();", superuser_conn)
+        finally:
+            superuser_conn.autocommit = False
+
+    def reset_escalation_role():
+        superuser_conn.commit()
+        superuser_conn.autocommit = True
+        try:
+            run_command(
+                "alter system reset pg_extension_base.dependency_escalation_role;",
+                superuser_conn,
+            )
+            run_command("select pg_reload_conf();", superuser_conn)
+        finally:
+            superuser_conn.autocommit = False
+
     # Set up: install old versions as superuser; create the role and a member
-    # user; reassign ownership of ext3 (and its schema) to the test user so
-    # they can run ALTER EXTENSION on it; configure the GUC to recognize the
-    # role. PG has no ALTER EXTENSION ... OWNER TO syntax, so we update the
-    # catalog directly.
+    # user; reassign ownership of ext3 to the test user so they can run
+    # ALTER EXTENSION on it. PG has no ALTER EXTENSION ... OWNER TO syntax,
+    # so we update the catalog directly.
     run_command(
         f"""
         drop extension if exists pg_extension_base cascade;
@@ -107,23 +132,15 @@ def test_extension_dependency_role_escalation(superuser_conn):
         create user {user_name} in role {role_name};
         update pg_extension set extowner = (select oid from pg_roles where rolname = '{user_name}')
             where extname = 'pg_extension_base_test_ext3';
-        alter system set pg_extension_base.dependency_escalation_role to '{role_name}';
-        select pg_reload_conf();
         """,
         superuser_conn,
     )
     superuser_conn.commit()
 
     try:
-        # Verify the precondition: without escalation, a non-superuser
-        # owner of ext3 can't update its dependency ext2 (which they don't
-        # own). We check this by temporarily blanking the role GUC.
-        run_command(
-            "alter system set pg_extension_base.dependency_escalation_role to '';"
-            "select pg_reload_conf();",
-            superuser_conn,
-        )
-        superuser_conn.commit()
+        # Precondition: without escalation, the non-superuser owner of ext3
+        # cannot cascade-update its dependency ext2 (which they don't own).
+        set_escalation_role("")
 
         user_conn = open_pg_conn(user=user_name)
         error = run_command(
@@ -137,14 +154,9 @@ def test_extension_dependency_role_escalation(superuser_conn):
         user_conn.rollback()
         user_conn.close()
 
-        # Now restore the escalation role; the same ALTER should succeed
-        # and cascade the dependency update under the bootstrap superuser.
-        run_command(
-            f"alter system set pg_extension_base.dependency_escalation_role to '{role_name}';"
-            "select pg_reload_conf();",
-            superuser_conn,
-        )
-        superuser_conn.commit()
+        # With the escalation role set, the same ALTER should succeed and
+        # cascade the dependency update under the bootstrap superuser.
+        set_escalation_role(role_name)
 
         user_conn = open_pg_conn(user=user_name)
         run_command(
@@ -160,10 +172,9 @@ def test_extension_dependency_role_escalation(superuser_conn):
         )
         assert result[0]["extversion"] == "1.1"
     finally:
+        reset_escalation_role()
         run_command(
             f"""
-            alter system reset pg_extension_base.dependency_escalation_role;
-            select pg_reload_conf();
             update pg_extension set extowner = (select oid from pg_roles where rolname = current_user)
                 where extname = 'pg_extension_base_test_ext3';
             drop owned by {user_name};
