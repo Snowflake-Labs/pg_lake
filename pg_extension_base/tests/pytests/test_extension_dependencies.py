@@ -92,7 +92,10 @@ def test_extension_dependency_role_escalation(superuser_conn):
     user_name = "ext_dep_user"
 
     # Set up: install old versions as superuser; create the role and a member
-    # user; configure the GUC to recognize the role.
+    # user; reassign ownership of ext3 (and its schema) to the test user so
+    # they can run ALTER EXTENSION on it; configure the GUC to recognize the
+    # role. PG has no ALTER EXTENSION ... OWNER TO syntax, so we update the
+    # catalog directly.
     run_command(
         f"""
         drop extension if exists pg_extension_base cascade;
@@ -102,7 +105,8 @@ def test_extension_dependency_role_escalation(superuser_conn):
         drop role if exists {role_name};
         create role {role_name};
         create user {user_name} in role {role_name};
-        alter extension pg_extension_base_test_ext3 owner to {user_name};
+        update pg_extension set extowner = (select oid from pg_roles where rolname = '{user_name}')
+            where extname = 'pg_extension_base_test_ext3';
         alter system set pg_extension_base.dependency_escalation_role to '{role_name}';
         select pg_reload_conf();
         """,
@@ -160,7 +164,8 @@ def test_extension_dependency_role_escalation(superuser_conn):
             f"""
             alter system reset pg_extension_base.dependency_escalation_role;
             select pg_reload_conf();
-            alter extension pg_extension_base_test_ext3 owner to current_user;
+            update pg_extension set extowner = (select oid from pg_roles where rolname = current_user)
+                where extname = 'pg_extension_base_test_ext3';
             drop owned by {user_name};
             drop user if exists {user_name};
             drop role if exists {role_name};
