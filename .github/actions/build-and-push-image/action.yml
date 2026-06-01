@@ -29,7 +29,7 @@ runs:
       shell: bash
       working-directory: ./docker
       run: |
-        GHCR_TOKEN=$(echo ${{ inputs.github_token }} | base64)
+        GHCR_TOKEN=$(echo -n "${{ inputs.github_token }}" | base64 -w 0)
         
         TAG=${{ hashFiles('docker/Dockerfile') }}-${{ inputs.base_image_name }}
         HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${GHCR_TOKEN}" https://ghcr.io/v2/${{ inputs.org_name }}/${{ inputs.final_image_name }}/manifests/$TAG)
