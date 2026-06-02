@@ -1,0 +1,58 @@
+Convert PostGIS geometry columns to canonical WKB on the server side.
+
+PostGIS emits EWKB (with the SRID flag bit and an embedded SRID prefix when
+set), but DuckDB spatial expects standard WKB. Without conversion, scans of
+PostGIS geometry columns fail with "invalid WKB format" errors.
+
+We tag PostGIS geometry columns with a new POSTGIS_GEOMETRY annotation at
+type-resolution time, and rewrite the projection in the COPY query to wrap
+those columns in ST_AsBinary(...), which returns canonical ISO WKB as bytea.
+The existing BLOB reader path then transports the bytes unchanged.
+
+Note: ST_AsBinary drops the SRID. If SRID preservation is needed, a separate
+column or in-reader EWKB stripping would be required.
+
+diff --git a/src/include/postgres_utils.hpp b/src/include/postgres_utils.hpp
+--- a/src/include/postgres_utils.hpp
++++ b/src/include/postgres_utils.hpp
+@@ -35,7 +35,8 @@ enum class PostgresTypeAnnotation {
+ 	GEOM_BOX,
+ 	GEOM_PATH,
+ 	GEOM_POLYGON,
+-	GEOM_CIRCLE
++	GEOM_CIRCLE,
++	POSTGIS_GEOMETRY
+ };
+
+ struct PostgresType {
+diff --git a/src/postgres_utils.cpp b/src/postgres_utils.cpp
+--- a/src/postgres_utils.cpp
++++ b/src/postgres_utils.cpp
+@@ -157,6 +157,7 @@ LogicalType PostgresUtils::TypeToLogicalType(optional_ptr<PostgresTransaction> t
+ 		postgres_type.info = PostgresTypeAnnotation::JSONB;
+ 		return LogicalType::VARCHAR;
+ 	} else if (pgtypename == "geometry") {
++		postgres_type.info = PostgresTypeAnnotation::POSTGIS_GEOMETRY;
+ 		return GetGeometryType();
+ 	} else if (pgtypename == "date") {
+ 		return LogicalType::DATE;
+diff --git a/src/postgres_scanner.cpp b/src/postgres_scanner.cpp
+--- a/src/postgres_scanner.cpp
++++ b/src/postgres_scanner.cpp
+@@ -242,7 +242,15 @@ static void PostgresInitInternal(ClientContext &context, const PostgresBindData
+ 				col_names += "ctid";
+ 			}
+ 		} else {
+-			col_names += KeywordHelper::WriteQuoted(bind_data->names[column_id], '"');
++			auto quoted_name = KeywordHelper::WriteQuoted(bind_data->names[column_id], '"');
++			if (bind_data->postgres_types[column_id].info == PostgresTypeAnnotation::POSTGIS_GEOMETRY) {
++				// PostGIS emits EWKB by default (with SRID prefix when set), but DuckDB
++				// spatial expects standard WKB. Use ST_AsBinary() server-side to get
++				// canonical WKB and avoid "invalid WKB format" downstream.
++				col_names += "ST_AsBinary(" + quoted_name + ")";
++				continue;
++			}
++			col_names += quoted_name;
+ 			if (bind_data->postgres_types[column_id].info == PostgresTypeAnnotation::CAST_TO_VARCHAR) {
+ 				col_names += "::VARCHAR";
+ 			} else if (bind_data->types[column_id].id() == LogicalTypeId::LIST) {
