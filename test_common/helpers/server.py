@@ -6,6 +6,7 @@ import grp
 import os
 import platform
 import queue
+import shlex
 import shutil
 import signal
 import socket
@@ -553,6 +554,13 @@ def initdb(initdb_bindir, db_path, db_user):
         # Linux
         locale_setting = "C.UTF-8"
 
+    # Caller-supplied extra args (e.g. additional --set GUC=VALUE pairs)
+    # are appended after the harness defaults, so a duplicate key wins —
+    # this lets a downstream test suite override SPL or any GUC without
+    # patching the harness.  shlex.split lets the caller pass a single
+    # space-separated string with quoted values where needed.
+    extra_args = shlex.split(os.environ.get("PGLAKE_EXTRA_INITDB_ARGS", ""))
+
     subprocess.run(
         [
             f"{initdb_bindir}/initdb",
@@ -598,6 +606,7 @@ def initdb(initdb_bindir, db_path, db_user):
             f"pg_lake_engine.host=host={server_params.PGDUCK_UNIX_DOMAIN_PATH} port={server_params.PGDUCK_PORT}",
             "--set",
             "pg_lake_engine.enable_heavy_asserts=on",
+            *extra_args,
             db_path,
         ]
     )
