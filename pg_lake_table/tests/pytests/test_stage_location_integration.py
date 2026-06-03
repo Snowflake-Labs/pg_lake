@@ -259,7 +259,7 @@ def test_stage_without_leading_slash(superuser_conn, setup_stage_location, exten
         raise_error=False,
     )
     # Should fail with URL validation error, not @STAGE/ resolution error
-    assert "only s3://, gs://" in error or "is not supported" in error
+    assert "unsupported URL" in error or "is not supported" in error
     superuser_conn.rollback()
 
 

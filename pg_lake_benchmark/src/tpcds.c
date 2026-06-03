@@ -73,8 +73,7 @@ pg_lake_tpcds_gen(PG_FUNCTION_ARGS)
 
 	if (!IsSupportedURL(location))
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg("only s3://, gs://, az://, azure://, abfss://, hf://, and r2:// URLs are "
-							   "currently supported")));
+						errmsg("unsupported URL: \"%s\"", location)));
 
 	Oid			tableTypeId = (BenchmarkTableType) PG_GETARG_OID(1);
 	BenchmarkTableType tableType = GetBenchTableType(tableTypeId);

@@ -205,9 +205,8 @@ pg_lake_table_validator(PG_FUNCTION_ARGS)
 
 			if (!IsSupportedURL(path))
 				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								errmsg("pg_lake_table: only s3://, gs://, az://, azure://, abfss://, hf://, and r2:// "
-									   "URLs are currently supported for the \"path\" "
-									   "option.")));
+								errmsg("pg_lake_table: unsupported URL: \"%s\" for the \"path\" option",
+									   path)));
 
 			foundServerPath = true;
 		}
@@ -217,9 +216,8 @@ pg_lake_table_validator(PG_FUNCTION_ARGS)
 
 			if (!IsSupportedURL(value))
 				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								errmsg("pg_lake_table: only s3://, gs://, az://, azure://, abfss://, hf://, and r2:// "
-									   "URLs are currently supported for the \"location\" "
-									   "option.")));
+								errmsg("pg_lake_table: unsupported URL: \"%s\" for the \"location\" option",
+									   value)));
 
 			foundLocation = true;
 		}
@@ -727,9 +725,8 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 
 			if (!IsSupportedURL(location))
 				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								errmsg("pg_lake_iceberg: only s3://, gs://, az://, azure://, abfss://, hf://, and r2:// "
-									   "URLs are currently supported for the \"location\" "
-									   "option.")));
+								errmsg("pg_lake_iceberg: unsupported URL: \"%s\" for the \"location\" option",
+									   location)));
 
 			char	   *charPointer = strchr(location, '?');
 

@@ -62,7 +62,7 @@ pg_lake_file_size(PG_FUNCTION_ARGS)
 
 	/* sanity-check URL */
 	if (!IsSupportedURL(path))
-		ereport(ERROR, (errmsg("file_size: only s3://, gs://, az://, azure://, abfss://, hf://, and r2:// urls are supported"),
+		ereport(ERROR, (errmsg("file_size: unsupported URL: \"%s\"", path),
 						errcode(ERRCODE_INVALID_PARAMETER_VALUE)));
 
 	CheckURLReadAccess();
@@ -94,7 +94,7 @@ pg_lake_list_files(PG_FUNCTION_ARGS)
 
 	/* sanity-check URL */
 	if (!IsSupportedURL(globURL) || !IsFileListSupportedUrl(globURL))
-		ereport(ERROR, (errmsg("list_files: only s3://, gs://, az://, azure://, abfss://, hf://, and r2:// urls are supported"),
+		ereport(ERROR, (errmsg("list_files: unsupported URL: \"%s\"", globURL),
 						errcode(ERRCODE_INVALID_PARAMETER_VALUE)));
 
 	CheckURLReadAccess();
@@ -161,7 +161,7 @@ pg_lake_file_exists(PG_FUNCTION_ARGS)
 
 	/* sanity-check URL */
 	if (!IsSupportedURL(path))
-		ereport(ERROR, (errmsg("file_exists: only s3://, gs://, az://, azure://, abfss://, hf://, and r2:// urls are supported"),
+		ereport(ERROR, (errmsg("file_exists: unsupported URL: \"%s\"", path),
 						errcode(ERRCODE_INVALID_PARAMETER_VALUE)));
 
 	CheckURLReadAccess();
@@ -219,7 +219,7 @@ pg_lake_file_preview(PG_FUNCTION_ARGS)
 
 	/* sanity-check URL */
 	if (!IsSupportedURL(url))
-		ereport(ERROR, (errmsg("file_preview: only s3://, gs://, az://, azure://, abfss://, hf://, and r2:// urls are supported"),
+		ereport(ERROR, (errmsg("file_preview: unsupported URL: \"%s\"", url),
 						errcode(ERRCODE_INVALID_PARAMETER_VALUE)));
 
 	CheckURLReadAccess();
@@ -270,7 +270,7 @@ pg_lake_delete_file(PG_FUNCTION_ARGS)
 
 	/* sanity-check URL */
 	if (!IsSupportedURL(path))
-		ereport(ERROR, (errmsg("delete_file: only s3://, gs://, az://, azure://, abfss://, hf://, and r2:// urls are supported"),
+		ereport(ERROR, (errmsg("delete_file: unsupported URL: \"%s\"", path),
 						errcode(ERRCODE_INVALID_PARAMETER_VALUE)));
 
 	CheckURLWriteAccess();

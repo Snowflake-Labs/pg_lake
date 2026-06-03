@@ -455,15 +455,13 @@ ErrorIfUnsupportedLakeTable(CreateForeignTableStmt *createStmt)
 	if (!isWritable && !IsSupportedURL(path))
 	{
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg("pg_lake_table: only s3://, gs://, az://, azure://, abfss://, hf://, and r2:// URLs are "
-							   "currently supported")));
+						errmsg("pg_lake_table: unsupported URL: \"%s\"", path)));
 	}
 	else if (isWritable && !IsSupportedURL(location))
 	{
 
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg("pg_lake_table: only s3://, gs://, az://, azure://, abfss://, hf://, and r2:// URLs are "
-							   "currently supported")));
+						errmsg("pg_lake_table: unsupported URL: \"%s\"", location)));
 	}
 
 	if (isWritable)

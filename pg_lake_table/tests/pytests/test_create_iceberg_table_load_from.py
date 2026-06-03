@@ -273,9 +273,7 @@ def test_create_table_load_from_invalid_url(
         pg_conn,
         raise_error=False,
     )
-    assert error.startswith(
-        "ERROR:  pg_lake_copy: only s3://, gs://, az://, azure://, abfss://, hf://, and r2:// URLs are currently supported"
-    )
+    assert error.startswith("ERROR:  pg_lake_copy: unsupported URL")
 
     pg_conn.rollback()
 
@@ -286,9 +284,7 @@ def test_create_table_load_from_invalid_url(
         pg_conn,
         raise_error=False,
     )
-    assert error.startswith(
-        "ERROR:  pg_lake_copy: only s3://, gs://, az://, azure://, abfss://, hf://, and r2:// URLs are currently supported"
-    )
+    assert error.startswith("ERROR:  pg_lake_copy: unsupported URL")
 
     pg_conn.rollback()
 
