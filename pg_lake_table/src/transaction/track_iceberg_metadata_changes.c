@@ -623,12 +623,13 @@ InitRestCatalogRequestsHashIfNeeded(void)
  *     locked-in one: raises ERRCODE_FEATURE_NOT_SUPPORTED *before* any
  *     Parquet data is written to S3.
  *
- * Called at the top of every DML entry point that can mutate REST-backed
- * iceberg tables: postgresBeginForeignModify() for row-by-row DML, and
+ * Called at the top of every entry point that can mutate REST-backed
+ * iceberg tables: postgresBeginForeignModify() for row-by-row DML,
  * AddQueryResultToTable() for the INSERT...SELECT and COPY..FROM pushdown
- * paths.  DDL paths (CREATE TABLE / DROP TABLE) reach the same protection
- * indirectly via RecordRestCatalogRequestInTx(), which is invoked
- * synchronously at statement time from the utility hook.
+ * paths, and postgresExecForeignTruncate() for TRUNCATE.  DDL paths
+ * (CREATE TABLE / DROP TABLE) reach the same protection indirectly via
+ * RecordRestCatalogRequestInTx(), which is invoked synchronously at
+ * statement time from the utility hook.
  */
 void
 BindRelationToXactRestCatalog(Oid relationId)

@@ -181,7 +181,8 @@ def test_reject_invalid_vended_creds(superuser_conn, extension):
 
 
 def test_reject_options_on_non_server(superuser_conn, extension):
-    """Options on the FDW itself should be rejected."""
+    """ALTER FOREIGN DATA WRAPPER iceberg_catalog is blocked entirely,
+    so passing OPTIONS on the FDW never reaches the validator."""
     err = run_command(
         """
         ALTER FOREIGN DATA WRAPPER iceberg_catalog OPTIONS (ADD rest_endpoint 'http://x')
@@ -189,7 +190,7 @@ def test_reject_options_on_non_server(superuser_conn, extension):
         superuser_conn,
         raise_error=False,
     )
-    assert "only valid for SERVER" in str(err)
+    assert 'cannot alter the "iceberg_catalog" foreign data wrapper' in str(err)
     superuser_conn.rollback()
 
 
@@ -998,6 +999,59 @@ def test_reject_rename_builtin_server(superuser_conn, extension):
 
 
 @pytest.mark.parametrize("long_name,_short_name", BUILTIN_CATALOG_SERVERS)
+def test_alter_extension_drop_builtin_server_blocked(
+    long_name, _short_name, superuser_conn, extension
+):
+    """ALTER EXTENSION pg_lake_iceberg DROP SERVER <built-in> would remove
+    the DEPENDENCY_EXTENSION edge, allowing a subsequent DROP SERVER to
+    succeed and break every table using that catalog.  Both operations
+    require superuser, but this is defense-in-depth against accidental
+    or ill-advised detachment."""
+    err = run_command(
+        f"ALTER EXTENSION pg_lake_iceberg DROP SERVER {long_name}",
+        superuser_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert "cannot remove the built-in catalog server" in str(err)
+    superuser_conn.rollback()
+
+
+def test_alter_extension_drop_iceberg_catalog_fdw_blocked(superuser_conn, extension):
+    """ALTER EXTENSION pg_lake_iceberg DROP FOREIGN DATA WRAPPER
+    iceberg_catalog would detach the FDW from the extension, allowing
+    DROP FOREIGN DATA WRAPPER iceberg_catalog to succeed and cascade
+    to every server.  Requires superuser; blocked as defense-in-depth."""
+    err = run_command(
+        "ALTER EXTENSION pg_lake_iceberg DROP FOREIGN DATA WRAPPER iceberg_catalog",
+        superuser_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    assert 'cannot remove the "iceberg_catalog" foreign data wrapper' in str(err)
+    superuser_conn.rollback()
+
+
+def test_alter_fdw_iceberg_catalog_blocked(superuser_conn, extension):
+    """ALTER FOREIGN DATA WRAPPER iceberg_catalog is blocked entirely.
+    Replacing the validator would silently disable option checking;
+    adding a handler would change execution semantics.  Both require
+    superuser, but this guards against silent breakage of all downstream
+    servers and tables."""
+    for variant in [
+        "ALTER FOREIGN DATA WRAPPER iceberg_catalog NO VALIDATOR",
+        "ALTER FOREIGN DATA WRAPPER iceberg_catalog VALIDATOR pg_catalog.postgresql_fdw_validator",
+        "ALTER FOREIGN DATA WRAPPER iceberg_catalog OPTIONS (ADD debug 'true')",
+    ]:
+        err = run_command(variant, superuser_conn, raise_error=False)
+        assert err is not None, f"expected {variant!r} to be blocked"
+        assert 'cannot alter the "iceberg_catalog" foreign data wrapper' in str(
+            err
+        ), f"wrong error for {variant!r}: {err}"
+        superuser_conn.rollback()
+
+
+@pytest.mark.parametrize("long_name,_short_name", BUILTIN_CATALOG_SERVERS)
 def test_reject_catalog_option_with_builtin_long_name(
     long_name, _short_name, pg_conn, extension
 ):
@@ -1019,11 +1073,7 @@ def test_postgres_fdw_named_postgres_does_not_conflict(superuser_conn, extension
     does not collide with pg_lake's built-in postgres catalog.  The user-facing
     short name 'postgres' maps internally to 'pg_lake_postgres_catalog', so the
     two coexist without interaction."""
-    err = run_command(
-        "CREATE EXTENSION IF NOT EXISTS postgres_fdw", superuser_conn, raise_error=False
-    )
-    if err is not None:
-        pytest.skip(f"postgres_fdw not available: {err}")
+    run_command("CREATE EXTENSION IF NOT EXISTS postgres_fdw", superuser_conn)
 
     run_command(
         """

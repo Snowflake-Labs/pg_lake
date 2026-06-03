@@ -4518,6 +4518,8 @@ postgresExecForeignTruncate(List *relations,
 		if (PgLakeModifyValidityCheckHook)
 			PgLakeModifyValidityCheckHook(relationId);
 
+		BindRelationToXactRestCatalog(relationId);
+
 		RemoveAllDataFilesFromTable(relationId);
 	}
 }

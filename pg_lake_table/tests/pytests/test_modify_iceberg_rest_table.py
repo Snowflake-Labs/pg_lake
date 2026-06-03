@@ -749,9 +749,16 @@ def test_reject_modify_different_rest_catalogs_in_single_transaction(
     """
     Modifying tables from two different REST catalog servers in the same
     transaction must be rejected at statement time -- before any Parquet is
-    written to S3 for the offending statement.  The first DML binds the
-    transaction to its REST catalog; the second DML to a different catalog
-    must raise immediately rather than waiting for XACT_EVENT_PRE_COMMIT.
+    written to S3 for the offending statement.  The first mutation binds the
+    transaction to its REST catalog; the second mutation to a different
+    catalog must raise immediately rather than waiting for
+    XACT_EVENT_PRE_COMMIT.
+
+    Covers both DML (INSERT) and DDL-like (TRUNCATE) paths through
+    BindRelationToXactRestCatalog.  The "the current statement targets"
+    detail wording is emitted only by BindRelationToXactRestCatalog(); the
+    XACT_EVENT_PRE_COMMIT fallback uses "table %u belongs to" instead, so
+    this match pins down which code path fired.
     """
     if installcheck:
         return
@@ -788,17 +795,13 @@ def test_reject_modify_different_rest_catalogs_in_single_transaction(
         )
         pg_conn.commit()
 
-    # First INSERT succeeds and binds the transaction to rest_catalog_a.
+    # ── INSERT path ──────────────────────────────────────────────────────
+
     run_command(
         f"INSERT INTO {TABLE_NAMESPACE}.table_a SELECT i FROM generate_series(1, 10) i",
         pg_conn,
     )
 
-    # Second INSERT must raise at statement time, not at COMMIT.  The
-    # "the current statement targets" detail wording is emitted only by
-    # BindRelationToXactRestCatalog(); the XACT_EVENT_PRE_COMMIT fallback
-    # uses "table %u belongs to" instead, so this match also pins down
-    # which code path fired.
     with pytest.raises(
         psycopg2.errors.FeatureNotSupported,
         match=r"the current statement targets",
@@ -809,6 +812,26 @@ def test_reject_modify_different_rest_catalogs_in_single_transaction(
         )
 
     pg_conn.rollback()
+
+    # ── TRUNCATE path ────────────────────────────────────────────────────
+
+    run_command(
+        f"TRUNCATE {TABLE_NAMESPACE}.table_a",
+        pg_conn,
+    )
+
+    with pytest.raises(
+        psycopg2.errors.FeatureNotSupported,
+        match=r"the current statement targets",
+    ):
+        run_command(
+            f"TRUNCATE {TABLE_NAMESPACE}.table_b",
+            pg_conn,
+        )
+
+    pg_conn.rollback()
+
+    # ── cleanup ──────────────────────────────────────────────────────────
 
     for name, catalog in [("table_a", "rest_catalog_a"), ("table_b", "rest_catalog_b")]:
         run_command(

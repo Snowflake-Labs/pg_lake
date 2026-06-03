@@ -440,7 +440,9 @@ RejectIfModifyingBuiltinCatalogServer(const char *name, const char *operation)
 
 
 /*
- * ValidateIcebergCatalogServerDDL validates DDL on iceberg_catalog servers.
+ * ValidateIcebergCatalogServerDDL validates DDL on iceberg_catalog
+ * servers and the iceberg_catalog FDW itself, and
+ * extension-membership changes that affect any of these objects.
  *
  * Two layers of protection:
  *
@@ -461,6 +463,16 @@ RejectIfModifyingBuiltinCatalogServer(const char *name, const char *operation)
  *    record the server name as a string option in ftoptions).
  *  - For user-created REST servers, ALTER SERVER OPTIONS may not change
  *    rest_endpoint while dependent iceberg tables exist.
+ *  - ALTER EXTENSION ... DROP SERVER/FOREIGN DATA WRAPPER is rejected
+ *    for iceberg_catalog objects, preventing detachment of the
+ *    DEPENDENCY_EXTENSION edge that shields them from standalone DROP.
+ *  - ALTER FOREIGN DATA WRAPPER iceberg_catalog is rejected, preventing
+ *    replacement of the validator or addition of a handler.
+ *
+ * The last two are defense-in-depth against superuser misuse: both
+ * require superuser privilege, but a superuser detaching the
+ * extension edge or swapping the validator would silently weaken the
+ * protection model.
  */
 bool
 ValidateIcebergCatalogServerDDL(ProcessUtilityParams * processUtilityParams,
@@ -599,6 +611,75 @@ ValidateIcebergCatalogServerDDL(ProcessUtilityParams * processUtilityParams,
 								 "new server with the desired endpoint.")));
 			}
 		}
+	}
+	else if (IsA(parsetree, AlterExtensionContentsStmt))
+	{
+		AlterExtensionContentsStmt *stmt =
+			(AlterExtensionContentsStmt *) parsetree;
+
+		/*
+		 * Block ALTER EXTENSION pg_lake_iceberg DROP SERVER / DROP FOREIGN
+		 * DATA WRAPPER for iceberg_catalog objects.  Without this, a
+		 * superuser could detach the DEPENDENCY_EXTENSION edge and then DROP
+		 * the object freely, breaking every table that depends on it.
+		 *
+		 * Only the DROP direction (action < 0) is dangerous; ADD is benign
+		 * (it re-attaches membership, which is the state we want).
+		 */
+		if (stmt->action < 0)
+		{
+			if (stmt->objtype == OBJECT_FOREIGN_SERVER)
+			{
+				const char *serverName = strVal(stmt->object);
+
+				if (IsBuiltinCatalogServerName(serverName))
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("cannot remove the built-in catalog "
+									"server \"%s\" from its extension",
+									serverName),
+							 errhint("The built-in catalog servers are "
+									 "structural anchors; detaching them "
+									 "from the extension would allow DROP "
+									 "and break every dependent table.")));
+			}
+			else if (stmt->objtype == OBJECT_FDW)
+			{
+				const char *fdwName = strVal(stmt->object);
+
+				if (strcmp(fdwName, ICEBERG_CATALOG_FDW_NAME) == 0)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("cannot remove the \"%s\" foreign data "
+									"wrapper from its extension",
+									ICEBERG_CATALOG_FDW_NAME),
+							 errhint("The iceberg_catalog FDW is required by "
+									 "all catalog servers; detaching it would "
+									 "allow DROP and break the entire catalog "
+									 "infrastructure.")));
+			}
+		}
+	}
+	else if (IsA(parsetree, AlterFdwStmt))
+	{
+		AlterFdwStmt *stmt = (AlterFdwStmt *) parsetree;
+
+		/*
+		 * Block ALTER FOREIGN DATA WRAPPER iceberg_catalog entirely.
+		 * Replacing the validator would silently disable option checking on
+		 * all future CREATE/ALTER SERVER and USER MAPPING statements; adding
+		 * a handler would change the FDW semantics.  Both require superuser,
+		 * but the downstream damage is hard to notice and impossible to undo
+		 * without recreating every dependent server.
+		 */
+		if (strcmp(stmt->fdwname, ICEBERG_CATALOG_FDW_NAME) == 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot alter the \"%s\" foreign data wrapper",
+							ICEBERG_CATALOG_FDW_NAME),
+					 errhint("The iceberg_catalog FDW is managed by the "
+							 "pg_lake_iceberg extension and must not be "
+							 "modified directly.")));
 	}
 
 	return false;
@@ -747,8 +828,8 @@ CopyRestCatalogOptions(MemoryContext dst, const RestCatalogOptions * src)
 	RestCatalogOptions *copy = palloc0(sizeof(RestCatalogOptions));
 
 	copy->serverOid = src->serverOid;
-	copy->catalog = pstrdup(src->catalog);
-	copy->host = pstrdup(src->host);
+	copy->catalog = src->catalog ? pstrdup(src->catalog) : NULL;
+	copy->host = src->host ? pstrdup(src->host) : NULL;
 	copy->oauthHostPath = src->oauthHostPath ? pstrdup(src->oauthHostPath) : NULL;
 	copy->clientId = src->clientId ? pstrdup(src->clientId) : NULL;
 	copy->clientSecret = src->clientSecret ? pstrdup(src->clientSecret) : NULL;

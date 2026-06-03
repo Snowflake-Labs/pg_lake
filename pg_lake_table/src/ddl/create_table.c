@@ -942,6 +942,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 
 			Oid			readOnlyRelId = RangeVarGetRelid(createStmt->base.relation, NoLock, false);
 
+			/* Keep in sync with the writable-table call below. */
 			RecordIcebergCatalogServerDependency(readOnlyRelId, createStmt->options);
 
 			return true;
@@ -1049,6 +1050,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 	/* the table is now created, get its OID */
 	Oid			relationId = RangeVarGetRelid(createStmt->base.relation, NoLock, false);
 
+	/* Keep in sync with the read-only-table call above. */
 	RecordIcebergCatalogServerDependency(relationId, createStmt->options);
 
 	char	   *location;
