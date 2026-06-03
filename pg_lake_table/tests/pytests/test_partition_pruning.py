@@ -822,17 +822,19 @@ def test_timestamptz_partition_pruning(
     assert results[0][0] == 3
 
 
-# Iceberg does not define the hour transform for time columns.
-def test_hour_partition_on_time_rejected(
+# Iceberg does not define the hour transform for time, timetz, or date columns.
+@pytest.mark.parametrize("col_type", ["time", "timetz", "date"])
+def test_hour_partition_on_invalid_types_rejected(
     s3,
     pg_conn,
     extension,
     with_default_location,
+    col_type,
 ):
     error = run_command(
-        """
-                CREATE SCHEMA hour_on_time;
-                CREATE TABLE hour_on_time.tbl (col time) USING iceberg WITH (partition_by = 'hour(col)', autovacuum_enabled='False');
+        f"""
+                CREATE SCHEMA hour_on_{col_type};
+                CREATE TABLE hour_on_{col_type}.tbl (col {col_type}) USING iceberg WITH (partition_by = 'hour(col)', autovacuum_enabled='False');
         """,
         pg_conn,
         raise_error=False,
