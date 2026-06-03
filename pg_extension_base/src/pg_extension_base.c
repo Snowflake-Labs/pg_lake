@@ -121,13 +121,33 @@ _PG_init(void)
 							NULL,
 							NULL);
 
+	/*
+	 * Install our ProcessUtility hook for ALTER EXTENSION ... UPDATE
+	 * dependency walking BEFORE preloading other extensions.  Postgres
+	 * ProcessUtility hooks chain LIFO, so when a preloaded extension installs
+	 * its own ProcessUtility hook later in PgExtensionBasePreloadLibraries
+	 * below, that extension's hook ends up at the head of the chain and runs
+	 * first.  That lets a preloaded extension intervene on CREATE / ALTER
+	 * EXTENSION (e.g. enforce a permission check or rewrite the statement)
+	 * before our hook dispatches to nested CreateExtension /
+	 * ExecAlterExtensionStmt calls that would otherwise bypass ProcessUtility
+	 * entirely.
+	 *
+	 * Skipped during pg_upgrade -- the dump-restore script issues the right
+	 * ALTER EXTENSION statements itself, and auto-walking dependencies in
+	 * that mode would fight with what pg_upgrade is doing.
+	 */
+	if (!IsBinaryUpgrade)
+		InitializeExtensionDependencyInstaller();
 
-
-	if (EnableBaseWorkerLauncher)
-	{
-		InitializeBaseWorkerLauncher();
-	}
-
+	/*
+	 * Library preloading runs even during pg_upgrade: pg_upgrade's "checking
+	 * for presence of required libraries" phase issues LOAD on every shared
+	 * library referenced by the catalog.  Several pg_lake libraries import
+	 * symbols from each other (e.g. pg_lake_table from pg_lake_engine), so
+	 * the chain-preload has to put pg_lake_engine in memory first or
+	 * pg_lake_table's LOAD fails on unresolved symbols.
+	 */
 	if (EnablePreloadLibraries)
 		PgExtensionBasePreloadLibraries();
 
@@ -135,5 +155,8 @@ _PG_init(void)
 	if (IsBinaryUpgrade)
 		return;
 
-	InitializeExtensionDependencyInstaller();
+	if (EnableBaseWorkerLauncher)
+	{
+		InitializeBaseWorkerLauncher();
+	}
 }
