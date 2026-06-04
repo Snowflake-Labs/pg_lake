@@ -25,6 +25,8 @@
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
+#include "utils/hsearch.h"
+#include "catalog/pg_type_d.h"
 #include "funcapi.h"
 
 #include <limits.h>

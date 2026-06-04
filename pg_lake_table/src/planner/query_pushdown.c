@@ -16,6 +16,8 @@
  */
 
 #include "postgres.h"
+#include "utils/hsearch.h"
+#include "catalog/pg_type_d.h"
 #include "funcapi.h"
 #include "miscadmin.h"
 
@@ -95,7 +97,11 @@ typedef struct IsShippableContext
 
 
 static PlannedStmt *LakeTablePlanner(Query *parse, const char *queryString,
-									 int cursorOptions, ParamListInfo boundParams);
+									 int cursorOptions, ParamListInfo boundParams
+#if PG_VERSION_NUM >= 190000
+									 ,ExplainState *es
+#endif
+);
 static bool AdjustParseTreeForPgLake(Node *node, void *context);
 static bool ProcessNotShippableExpressionWalker(Node *node, IsShippableContext * context);
 static bool AddMissingRTEAliasaes(Node *node, void *context);
@@ -253,7 +259,11 @@ AppendPermInfos(PlannedStmt *pushdownPlan, PlannedStmt *localPlan)
  */
 static PlannedStmt *
 LakeTablePlanner(Query *parse, const char *queryString,
-				 int cursorOptions, ParamListInfo boundParams)
+				 int cursorOptions, ParamListInfo boundParams
+#if PG_VERSION_NUM >= 190000
+				 ,ExplainState *es
+#endif
+)
 {
 	Query	   *originalQuery = NULL;
 	bool		hasLakeTable = false;
@@ -293,7 +303,11 @@ LakeTablePlanner(Query *parse, const char *queryString,
 
 	PG_TRY();
 	{
-		plan = PreviousPlannerHook(parse, queryString, cursorOptions, boundParams);
+		plan = PreviousPlannerHook(parse, queryString, cursorOptions, boundParams
+#if PG_VERSION_NUM >= 190000
+								   ,es
+#endif
+			);
 		if (EnableFullQueryPushdown &&
 			hasLakeTable &&
 			(cursorOptions & CURSOR_OPT_SCROLL) == 0)

@@ -18,6 +18,7 @@
 #include <inttypes.h>
 
 #include "postgres.h"
+#include "pg_extension_base/pg_compat.h"
 #include "miscadmin.h"
 
 #include "common/base64.h"

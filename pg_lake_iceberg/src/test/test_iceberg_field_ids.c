@@ -24,6 +24,7 @@
 #include "pg_lake/parquet/leaf_field.h"
 
 #include "utils/builtins.h"
+#include "utils/tuplestore.h"
 
 
 PG_FUNCTION_INFO_V1(pg_lake_get_leaf_field_ids);

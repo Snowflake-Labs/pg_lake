@@ -24,6 +24,7 @@
 *       that Postgres planner knows about.
 */
 #include "postgres.h"
+#include "utils/hsearch.h"
 #include "funcapi.h"
 #include "miscadmin.h"
 

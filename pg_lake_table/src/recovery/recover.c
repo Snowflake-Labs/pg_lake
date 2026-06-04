@@ -16,6 +16,7 @@
  */
 
 #include "postgres.h"
+#include "access/htup_details.h"
 #include "miscadmin.h"
 #include "fmgr.h"
 
