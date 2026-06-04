@@ -33,6 +33,7 @@
 #include "catalog/pg_foreign_table.h"
 #include "commands/defrem.h"
 #include "commands/extension.h"
+#include "foreign/foreign.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/partitioning/partition_by_parser.h"
 #include "pg_lake/permissions/roles.h"
@@ -764,12 +765,7 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 		{
 			char	   *icebergCatalogName = defGetString(def);
 
-			/*
-			 * We only accept "rest", "object_store" and "postgres". If not
-			 * provided, the postgres catalog is assumed by default (see
-			 * ProcessCreateIcebergTableFromForeignTableStmt).
-			 */
-			if (pg_strncasecmp(icebergCatalogName, REST_CATALOG_NAME, strlen(icebergCatalogName)) == 0)
+			if (IsRestCatalog(icebergCatalogName))
 			{
 				/*
 				 * at this point, we cannot tell whether it's read only or
@@ -778,9 +774,8 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 				 */
 				icebergCatalogType = REST_CATALOG_READ_ONLY;
 			}
-			else if (pg_strncasecmp(icebergCatalogName, OBJECT_STORE_CATALOG_NAME, strlen(icebergCatalogName)) == 0)
+			else if (pg_strcasecmp(icebergCatalogName, OBJECT_STORE_CATALOG_NAME) == 0)
 			{
-
 				/*
 				 * at this point, we cannot tell whether it's read only or
 				 * read write. We'll determine that later based on the
@@ -788,14 +783,14 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 				 */
 				icebergCatalogType = OBJECT_STORE_READ_ONLY;
 			}
-			else if (pg_strncasecmp(icebergCatalogName, POSTGRES_CATALOG_NAME, strlen(icebergCatalogName)) == 0)
+			else if (pg_strcasecmp(icebergCatalogName, POSTGRES_CATALOG_NAME) == 0)
 				icebergCatalogType = POSTGRES_CATALOG;
 			else
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 						 errmsg("invalid catalog option: %s", icebergCatalogName),
-						 errdetail("Only " REST_CATALOG_NAME ", " OBJECT_STORE_CATALOG_NAME " and " POSTGRES_CATALOG_NAME
-								   " are supported for now.")));
+						 errdetail("Use \"rest\", \"object_store\", \"postgres\", "
+								   "or the name of an iceberg_catalog server.")));
 		}
 		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "read_only") == 0)
 		{

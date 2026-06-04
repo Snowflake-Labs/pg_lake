@@ -133,7 +133,7 @@ def test_iceberg_catalog_option_validation_errors(pg_conn, extension):
         raise_error=False,
     )
     assert "invalid catalog option: bogus" in str(error)
-    assert "Only rest, object_store and postgres are supported" in str(error)
+    assert "or the name of an iceberg_catalog server" in str(error)
     pg_conn.rollback()
 
     # read_only is only valid for catalog="rest" or catalog="object_store"

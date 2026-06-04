@@ -117,13 +117,22 @@ static int	GetEffectiveMaxSnapshotAgeInSecs(Oid relationId);
 static HTAB *TrackedIcebergMetadataOperationsHash = NULL;
 
 /*
-* Hash table to track rest catalog requests per relation within a transaction.
-*/
-static HTAB *RestCatalogRequestsHash = NULL;
+ * Per-transaction context for REST catalog requests.  Groups the request
+ * hash, pre-resolved catalog options, and the pre-allocated memory context
+ * used at XACT_EVENT_COMMIT time (where syscache lookups and large pallocs
+ * are forbidden).  Allocated in TopTransactionContext and automatically
+ * freed at transaction end.  Only one REST catalog server is allowed per
+ * transaction.
+ */
+typedef struct PgLakeXactRestCatalogContext
+{
+	HTAB	   *requestsHash;
+	MemoryContext commitContext;
+	RestCatalogOptions *catalogOpts;
+}			PgLakeXactRestCatalogContext;
 
+static PgLakeXactRestCatalogContext * PgLakeXactRestCatalog = NULL;
 
-/* some pre-allocated memory so we don't palloc() ever in XACT_COMMIT  */
-static MemoryContext PgLakeXactCommitContext = NULL;
 
 /*
  * TrackIcebergMetadataChangesInTx tracks metadata changes for a given relation
@@ -214,8 +223,7 @@ ResetTrackedIcebergMetadataOperation(void)
 void
 ResetRestCatalogRequests(void)
 {
-	RestCatalogRequestsHash = NULL;
-	PgLakeXactCommitContext = NULL;
+	PgLakeXactRestCatalog = NULL;
 }
 
 
@@ -227,22 +235,24 @@ ResetRestCatalogRequests(void)
 void
 PostAllRestCatalogRequests(void)
 {
-	if (RestCatalogRequestsHash == NULL)
+	if (PgLakeXactRestCatalog == NULL)
 	{
 		return;
 	}
 
 	/*
-	 * Switch to PgLakeXactCommitContext to avoid palloc() in XACT_COMMIT, as
-	 * PgLakeXactCommitContext is pre-allocated before.
+	 * Switch to commitContext to avoid palloc() in XACT_COMMIT, as
+	 * commitContext is pre-allocated before.
 	 */
-	MemoryContext oldContext = MemoryContextSwitchTo(PgLakeXactCommitContext);
+	MemoryContext oldContext = MemoryContextSwitchTo(PgLakeXactRestCatalog->commitContext);
+
+	Assert(PgLakeXactRestCatalog->catalogOpts != NULL);
 
 	/*
-	 * We need to iterate over the RestCatalogRequestsHash twice: 1. First, we
-	 * need to post the create table requests to create the iceberg tables in
-	 * the rest catalog. 2. Then, we need to post all the other modifications
-	 * (like adding snapshots, partition specs, etc.)
+	 * We need to iterate over the requests hash twice: 1. First, we need to
+	 * post the create table requests to create the iceberg tables in the rest
+	 * catalog. 2. Then, we need to post all the other modifications (like
+	 * adding snapshots, partition specs, etc.)
 	 *
 	 * This is because the create table requests need to be completed before
 	 * we can add snapshots to the tables. And, REST API does not support
@@ -250,7 +260,7 @@ PostAllRestCatalogRequests(void)
 	 */
 	HASH_SEQ_STATUS status;
 
-	hash_seq_init(&status, RestCatalogRequestsHash);
+	hash_seq_init(&status, PgLakeXactRestCatalog->requestsHash);
 	RestCatalogRequestPerTable *requestPerTable = NULL;
 
 	while ((requestPerTable = hash_seq_search(&status)) != NULL)
@@ -282,8 +292,9 @@ PostAllRestCatalogRequests(void)
 			if (createTableRequest != NULL)
 			{
 				HttpResult	httpResult =
-					SendRequestToRestCatalog(HTTP_POST, requestPerTable->tableRestUrl,
-											 createTableRequest->body, PostHeadersWithAuth());
+					SendRequestToRestCatalog(PgLakeXactRestCatalog->catalogOpts, HTTP_POST,
+											 requestPerTable->tableRestUrl, createTableRequest->body,
+											 PostHeadersWithAuth(PgLakeXactRestCatalog->catalogOpts));
 
 				if (httpResult.status != 200)
 				{
@@ -298,8 +309,9 @@ PostAllRestCatalogRequests(void)
 			else if (dropTableRequest != NULL)
 			{
 				HttpResult	httpResult =
-					SendRequestToRestCatalog(HTTP_DELETE, requestPerTable->tableRestUrl,
-											 NULL, DeleteHeadersWithAuth());
+					SendRequestToRestCatalog(PgLakeXactRestCatalog->catalogOpts, HTTP_DELETE,
+											 requestPerTable->tableRestUrl, NULL,
+											 DeleteHeadersWithAuth(PgLakeXactRestCatalog->catalogOpts));
 
 				if (httpResult.status != 204)
 				{
@@ -331,7 +343,7 @@ PostAllRestCatalogRequests(void)
 	appendJsonKey(batchRequestBody, "table-changes");
 	appendStringInfo(batchRequestBody, "[");	/* start array of changes */
 
-	hash_seq_init(&status, RestCatalogRequestsHash);
+	hash_seq_init(&status, PgLakeXactRestCatalog->requestsHash);
 
 	while ((requestPerTable = hash_seq_search(&status)) != NULL)
 	{
@@ -346,8 +358,16 @@ PostAllRestCatalogRequests(void)
 			continue;
 		}
 
-		/* TODO: can we ever have multiple catalogs? */
-		catalogName = requestPerTable->catalogName;
+		/*
+		 * EnsureXactBoundToRestCatalog() already guarantees every entry
+		 * belongs to the same REST catalog server.  Capture the catalog name
+		 * from the first valid entry and Assert the invariant holds for all
+		 * subsequent ones.
+		 */
+		if (catalogName == NULL)
+			catalogName = requestPerTable->catalogName;
+		else
+			Assert(strcmp(catalogName, requestPerTable->catalogName) == 0);
 
 		if (requestPerTable->createTableRequest != NULL &&
 			requestPerTable->dropTableRequest != NULL)
@@ -417,8 +437,11 @@ PostAllRestCatalogRequests(void)
 		appendStringInfoChar(batchRequestBody, ']');	/* close table-changes */
 		appendStringInfoChar(batchRequestBody, '}');	/* close json body */
 
-		char	   *url = psprintf(REST_CATALOG_TRANSACTION_COMMIT, RestCatalogHost, catalogName);
-		HttpResult	httpResult = SendRequestToRestCatalog(HTTP_POST, url, batchRequestBody->data, PostHeadersWithAuth());
+		char	   *url = psprintf(REST_CATALOG_TRANSACTION_COMMIT,
+								   PgLakeXactRestCatalog->catalogOpts->host, catalogName);
+		HttpResult	httpResult = SendRequestToRestCatalog(PgLakeXactRestCatalog->catalogOpts, HTTP_POST,
+														  url, batchRequestBody->data,
+														  PostHeadersWithAuth(PgLakeXactRestCatalog->catalogOpts));
 
 		if (httpResult.status != 204)
 		{
@@ -427,7 +450,7 @@ PostAllRestCatalogRequests(void)
 	}
 
 	/*
-	 * Switch back to old context from PgLakeXactCommitContext.
+	 * Switch back to old context from commitContext.
 	 */
 	MemoryContextSwitchTo(oldContext);
 }
@@ -541,61 +564,136 @@ InitTableMetadataTrackerHashIfNeeded(void)
 }
 
 /*
- * InitTableMetadataTrackerHashIfNeeded is a helper function to manage the initialization
- * of the hash. We allocate the hash and entries in TopTransactionContext.
+ * InitRestCatalogRequestsHashIfNeeded allocates the per-transaction
+ * PgLakeXactRestCatalog context on first use.  Everything is placed in
+ * TopTransactionContext so it survives until XACT_EVENT_COMMIT and is
+ * cleaned up automatically at transaction end.
  */
 static void
 InitRestCatalogRequestsHashIfNeeded(void)
 {
-	if (RestCatalogRequestsHash == NULL)
-	{
-		/*
-		 * They always updated together.
-		 */
-		Assert(PgLakeXactCommitContext == NULL);
+	if (PgLakeXactRestCatalog != NULL)
+		return;
 
-		/*
-		 * First allocate 1MB memory context to avoid palloc() in XACT_COMMIT
-		 * as much as possible. Only with very large REST catalog requests we
-		 * might need to palloc() in XACT_COMMIT, which is still better than
-		 * always palloc()ing in XACT_COMMIT, reducing the risk of OOM
-		 * significantly. These very large requests might happen when there
-		 * are many tables modified in a single transaction, likely > 100
-		 * tables. We allocate in TopTransactionContext to preserve the
-		 * context until the end of the transaction, and let it be cleaned up
-		 * automatically at transaction end.
-		 */
-		PgLakeXactCommitContext =
-			AllocSetContextCreateInternal(TopTransactionContext,
-										  "PgLakeXactCommitContext",
-										  ONE_MB, ONE_MB, ONE_MB);
-		Assert(MemoryContextMemAllocated(PgLakeXactCommitContext, true) == ONE_MB);
+	MemoryContext oldctx = MemoryContextSwitchTo(TopTransactionContext);
 
-		HASHCTL		ctl;
+	PgLakeXactRestCatalog = palloc0(sizeof(PgLakeXactRestCatalogContext));
 
-		MemSet(&ctl, 0, sizeof(ctl));
-		ctl.keysize = sizeof(Oid);
-		ctl.entrysize = sizeof(RestCatalogRequestPerTable);
-		ctl.hash = oid_hash;
+	/*
+	 * Pre-allocate 1MB memory context to avoid palloc() in XACT_COMMIT as
+	 * much as possible. Only with very large REST catalog requests we might
+	 * need to palloc() in XACT_COMMIT, which is still better than always
+	 * palloc()ing in XACT_COMMIT, reducing the risk of OOM significantly.
+	 * These very large requests might happen when there are many tables
+	 * modified in a single transaction, likely > 100 tables.
+	 */
+	PgLakeXactRestCatalog->commitContext =
+		AllocSetContextCreateInternal(TopTransactionContext,
+									  "PgLakeXactCommitContext",
+									  ONE_MB, ONE_MB, ONE_MB);
+	Assert(MemoryContextMemAllocated(PgLakeXactRestCatalog->commitContext, true) == ONE_MB);
 
-		/*
-		 * We prefer to allocate everything in TopTransactionContext, not in
-		 * PgLakeXactCommitContext, because we preserve
-		 * PgLakeXactCommitContext mostly for REST API request bodies to avoid
-		 * palloc() in XACT_COMMIT.
-		 */
-		ctl.hcxt = TopTransactionContext;
+	HASHCTL		ctl;
 
-		RestCatalogRequestsHash = hash_create("Rest Catalog Requests",
-											  32, &ctl,
-											  HASH_ELEM | HASH_FUNCTION | HASH_CONTEXT);
-	}
+	MemSet(&ctl, 0, sizeof(ctl));
+	ctl.keysize = sizeof(Oid);
+	ctl.entrysize = sizeof(RestCatalogRequestPerTable);
+	ctl.hash = oid_hash;
+
+	/*
+	 * We prefer to allocate the hash in TopTransactionContext, not in
+	 * commitContext, because we reserve commitContext mostly for REST API
+	 * request bodies to avoid palloc() in XACT_COMMIT.
+	 */
+	ctl.hcxt = TopTransactionContext;
+
+	PgLakeXactRestCatalog->requestsHash =
+		hash_create("Rest Catalog Requests",
+					32, &ctl,
+					HASH_ELEM | HASH_FUNCTION | HASH_CONTEXT);
+
+	MemoryContextSwitchTo(oldctx);
 }
 
 
 /*
-* RecordRestCatalogRequestInTx records a REST catalog request to be sent at post-commit.
-*/
+ * Ensure this transaction is bound to the REST catalog that owns
+ * relationId.  On the first mutation in the transaction, resolves
+ * the relation's catalog options and stores a copy in
+ * TopTransactionContext so that XACT_EVENT_PRE_COMMIT can reuse
+ * them without syscache lookups.  On subsequent mutations, verifies
+ * the server OID matches the already-bound catalog and raises
+ * ERRCODE_FEATURE_NOT_SUPPORTED if it does not.
+ *
+ * Identity is the iceberg_catalog server OID, not the user-typed name.
+ * Two requests for the same physical server -- whether the user spelled
+ * the catalog as 'rest', 'REST', or as the underlying built-in server
+ * name on different statements -- collapse to the same OID and are
+ * treated as one catalog.
+ */
+static void
+EnsureXactBoundToRestCatalog(Oid relationId)
+{
+	RestCatalogOptions *resolvedOpts =
+		GetRestCatalogOptionsForRelation(relationId);
+
+	if (PgLakeXactRestCatalog->catalogOpts == NULL)
+	{
+		PgLakeXactRestCatalog->catalogOpts =
+			CopyRestCatalogOptions(TopTransactionContext, resolvedOpts);
+		return;
+	}
+
+	if (PgLakeXactRestCatalog->catalogOpts->serverOid != resolvedOpts->serverOid)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot modify tables from different REST catalogs "
+						"in the same transaction"),
+				 errdetail("This transaction already targets catalog \"%s\", "
+						   "but the current statement targets \"%s\".",
+						   PgLakeXactRestCatalog->catalogOpts->catalog,
+						   resolvedOpts->catalog)));
+}
+
+
+/*
+ * BindRelationToXactRestCatalog binds the current transaction to the REST
+ * catalog associated with `relationId`, failing fast if a *different* REST
+ * catalog was already locked in for this transaction.
+ *
+ * Semantics:
+ *   - For relations that are not REST-backed writable iceberg tables: no-op.
+ *   - For the first REST-backed write of the transaction: pre-resolves the
+ *     full catalog options and stashes them in TopTransactionContext, so
+ *     subsequent calls within the same transaction can be checked without
+ *     touching pg_foreign_server again at XACT_EVENT_COMMIT.
+ *   - For any subsequent REST-backed write whose catalog differs from the
+ *     locked-in one: raises ERRCODE_FEATURE_NOT_SUPPORTED *before* any
+ *     Parquet data is written to S3.
+ *
+ * Called at the top of every entry point that can mutate REST-backed
+ * iceberg tables: postgresBeginForeignModify() for row-by-row DML,
+ * AddQueryResultToTable() for the INSERT...SELECT and COPY..FROM pushdown
+ * paths, and postgresExecForeignTruncate() for TRUNCATE.  DDL paths
+ * (CREATE TABLE / DROP TABLE) reach the same protection indirectly via
+ * RecordRestCatalogRequestInTx(), which is invoked synchronously at
+ * statement time from the utility hook.
+ */
+void
+BindRelationToXactRestCatalog(Oid relationId)
+{
+	if (!IsPgLakeIcebergForeignTableById(relationId) ||
+		GetIcebergCatalogType(relationId) != REST_CATALOG_READ_WRITE)
+		return;
+
+	InitRestCatalogRequestsHashIfNeeded();
+	EnsureXactBoundToRestCatalog(relationId);
+}
+
+
+/*
+ * RecordRestCatalogRequestInTx records a REST catalog request to be sent at post-commit.
+ */
 void
 RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationType,
 							 const char *body)
@@ -604,13 +702,15 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 
 	bool		isFound = false;
 	RestCatalogRequestPerTable *requestPerTable =
-		hash_search(RestCatalogRequestsHash,
+		hash_search(PgLakeXactRestCatalog->requestsHash,
 					&relationId, HASH_ENTER, &isFound);
 
 	if (!isFound || !requestPerTable->isValid)
 	{
 		memset(requestPerTable, 0, sizeof(RestCatalogRequestPerTable));
 		requestPerTable->relationId = relationId;
+
+		EnsureXactBoundToRestCatalog(relationId);
 
 		requestPerTable->catalogName =
 			MemoryContextStrdup(TopTransactionContext, GetRestCatalogName(relationId));
@@ -628,7 +728,7 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 
 		requestPerTable->tableRestUrl =
 			MemoryContextStrdup(TopTransactionContext, psprintf(REST_CATALOG_TABLE,
-																RestCatalogHost,
+																PgLakeXactRestCatalog->catalogOpts->host,
 																requestPerTable->urlEncodedCatalogName,
 																requestPerTable->urlEncodedCatalogNamespace,
 																requestPerTable->urlEncodedCatalogTableName));

@@ -27,6 +27,7 @@
 #include "pg_lake/avro/avro_reader.h"
 #include "pg_lake/avro/avro_writer.h"
 #include "pg_lake/copy/copy_format.h"
+#include "pg_lake/ddl/utility_hook.h"
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/iceberg/catalog.h"
@@ -35,6 +36,8 @@
 #include "pg_lake/iceberg/operations/vacuum.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
+#include "pg_lake/util/catalog_type.h"
+#include "access/xact.h"
 
 #define GUC_STANDARD 0
 
@@ -59,7 +62,8 @@ void		_PG_init(void);
 
 /* pg_lake_iceberg.rest_catalog_auth_type */
 static const struct config_enum_entry RestCatalogAuthTypeOptions[] = {
-	{"default", REST_CATALOG_AUTH_TYPE_DEFAULT, false},
+	{"oauth2", REST_CATALOG_AUTH_TYPE_OAUTH2, false},
+	{"default", REST_CATALOG_AUTH_TYPE_OAUTH2, false},
 	{"horizon", REST_CATALOG_AUTH_TYPE_HORIZON, false},
 	{NULL, 0, false},
 };
@@ -256,7 +260,7 @@ _PG_init(void)
 							 gettext_noop("Determines the format for the initial OAuth token requests."),
 							 NULL,
 							 &RestCatalogAuthType,
-							 REST_CATALOG_AUTH_TYPE_DEFAULT,
+							 REST_CATALOG_AUTH_TYPE_OAUTH2,
 							 RestCatalogAuthTypeOptions,
 							 PGC_SUSET,
 							 GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
@@ -329,6 +333,8 @@ _PG_init(void)
 							 NULL, NULL, NULL);
 
 	AvroInit();
+
+	RegisterUtilityStatementHandler(ValidateIcebergCatalogServerDDL, NULL);
 }
 
 
@@ -366,13 +372,27 @@ IcebergDefaultCatalogCheckHook(char **newvalue, void **extra, GucSource source)
 {
 	char	   *newCatalog = *newvalue;
 
-	if (pg_strncasecmp(newCatalog, POSTGRES_CATALOG_NAME, strlen(newCatalog)) == 0 ||
-		pg_strncasecmp(newCatalog, REST_CATALOG_NAME, strlen(newCatalog)) == 0 ||
-		pg_strncasecmp(newCatalog, OBJECT_STORE_CATALOG_NAME, strlen(newCatalog)) == 0)
+	if (pg_strcasecmp(newCatalog, POSTGRES_CATALOG_NAME) == 0 ||
+		pg_strcasecmp(newCatalog, REST_CATALOG_NAME) == 0 ||
+		pg_strcasecmp(newCatalog, OBJECT_STORE_CATALOG_NAME) == 0)
+		return true;
+
+	/*
+	 * Outside a transaction we cannot do catalog lookups to verify that the
+	 * name refers to a valid iceberg_catalog server.  Accept the value on
+	 * faith; an invalid name will error at first use.  This mirrors how
+	 * PostgreSQL handles check_default_tablespace (see
+	 * src/backend/commands/tablespace.c).
+	 */
+	if (!IsTransactionState())
+		return true;
+
+	if (IsRestCatalog(newCatalog))
 		return true;
 
 	GUC_check_errdetail("pg_lake_iceberg: allowed iceberg catalog options are '" POSTGRES_CATALOG_NAME "', "
-						" '" REST_CATALOG_NAME "' and '" OBJECT_STORE_CATALOG_NAME "'");
+						"'" REST_CATALOG_NAME "', '" OBJECT_STORE_CATALOG_NAME
+						"', or the name of a user-created iceberg_catalog server with TYPE 'rest'");
 
 	return false;
 }

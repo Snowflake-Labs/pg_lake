@@ -20,14 +20,26 @@
 #include "postgres.h"
 #include "miscadmin.h"
 
+#include "access/genam.h"
+#include "access/reloptions.h"
+#include "access/table.h"
+#include "catalog/pg_class.h"
+#include "catalog/pg_depend.h"
+#include "catalog/pg_foreign_server.h"
 #include "common/base64.h"
 #include "commands/dbcommands.h"
+#include "commands/defrem.h"
+#include "commands/extension.h"
 #include "foreign/foreign.h"
+#include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
+#include "utils/inval.h"
 #include "utils/jsonb.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/syscache.h"
 #include "utils/timestamp.h"
 
 #include "pg_extension_base/base_workers.h"
@@ -40,8 +52,10 @@
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
+#include "pg_lake/util/catalog_type.h"
 #include "pg_lake/util/url_encode.h"
 #include "pg_lake/util/rel_utils.h"
+#include "pg_lake/util/string_utils.h"
 
 
 /* determined by GUC */
@@ -50,21 +64,31 @@ char	   *RestCatalogOauthHostPath = "";
 char	   *RestCatalogClientId = NULL;
 char	   *RestCatalogClientSecret = NULL;
 char	   *RestCatalogScope = "PRINCIPAL_ROLE:ALL";
-int			RestCatalogAuthType = REST_CATALOG_AUTH_TYPE_DEFAULT;
+int			RestCatalogAuthType = REST_CATALOG_AUTH_TYPE_OAUTH2;
 bool		RestCatalogEnableVendedCredentials = true;
 
 /*
-* Should always be accessed via GetRestCatalogAccessToken()
-*/
-static char *RestCatalogAccessToken = NULL;
-static TimestampTz RestCatalogAccessTokenExpiry = 0;
+ * Per-rest-catalog token cache, keyed by the iceberg_catalog server OID.
+ * Should always be accessed via GetRestCatalogAccessToken().
+ */
+typedef struct RestCatalogTokenCacheEntry
+{
+	Oid			serverOid;		/* hash key */
+	char	   *accessToken;
+	TimestampTz accessTokenExpiry;
+}			RestCatalogTokenCacheEntry;
 
-static char *GetRestCatalogAccessToken(bool forceRefreshToken);
-static void FetchRestCatalogAccessToken(char **accessToken, int *expiresIn);
-static void CreateNamespaceOnRestCatalog(const char *catalogName, const char *namespaceName);
+static HTAB *RestCatalogTokenCache = NULL;
+static MemoryContext RestTokenCacheCtx = NULL;
+
+/* end of per-catalog token cache variables */
+
+static char *GetRestCatalogAccessToken(RestCatalogOptions * opts, bool forceRefreshToken);
+static void FetchRestCatalogAccessToken(RestCatalogOptions * opts, char **accessToken, int *expiresIn);
+static void CreateNamespaceOnRestCatalog(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName);
 static char *EncodeBasicAuth(const char *clientId, const char *clientSecret);
 static char *JsonbGetStringByPath(const char *jsonb_text, int nkeys,...);
-static List *GetHeadersWithAuth(void);
+static List *GetHeadersWithAuth(RestCatalogOptions * opts);
 static char *AppendIcebergPartitionSpecForRestCatalog(List *partitionSpecs);
 static void UpdateAuthorizationHeader(List *headers, const char *token);
 
@@ -78,6 +102,732 @@ typedef enum RestCatalogRequestRetryAction
 	REST_CATALOG_RETRY_BACKOFF_LONG,	/* 503 Service Unavailable */
 	REST_CATALOG_RETRY_REFRESH_AUTH /* 419 Token Expired */
 }			RestCatalogRequestRetryAction;
+
+PG_FUNCTION_INFO_V1(iceberg_catalog_validator);
+
+
+/*
+ * Descriptor for a single iceberg_catalog server option.  This is the
+ * single source of truth: validation, the user-facing hint, and the
+ * option-to-struct applier all derive from this table.
+ */
+typedef enum IcebergCatalogOptionType
+{
+	CATALOG_OPT_STRING,
+	CATALOG_OPT_BOOL,
+	CATALOG_OPT_AUTH_TYPE,
+	CATALOG_OPT_LOCATION_PREFIX
+}			IcebergCatalogOptionType;
+
+/* Validation flags checked at CREATE/ALTER SERVER time. */
+#define CATALOG_OPT_NONEMPTY    0x01	/* reject empty string */
+#define CATALOG_OPT_HAS_SCHEME  0x02	/* must contain "://" */
+
+typedef struct IcebergCatalogOptionDesc
+{
+	const char *name;
+	IcebergCatalogOptionType type;
+	size_t		offset;			/* offsetof into RestCatalogOptions */
+	int			flags;			/* CATALOG_OPT_NONEMPTY |
+								 * CATALOG_OPT_HAS_SCHEME */
+}			IcebergCatalogOptionDesc;
+
+static const IcebergCatalogOptionDesc iceberg_catalog_option_descs[] = {
+	{"rest_endpoint", CATALOG_OPT_STRING, offsetof(RestCatalogOptions, host),
+	CATALOG_OPT_NONEMPTY | CATALOG_OPT_HAS_SCHEME},
+	{"rest_auth_type", CATALOG_OPT_AUTH_TYPE, offsetof(RestCatalogOptions, authType), 0},
+	{"oauth_endpoint", CATALOG_OPT_STRING, offsetof(RestCatalogOptions, oauthHostPath),
+	CATALOG_OPT_NONEMPTY | CATALOG_OPT_HAS_SCHEME},
+	{"scope", CATALOG_OPT_STRING, offsetof(RestCatalogOptions, scope),
+	CATALOG_OPT_NONEMPTY},
+	{"enable_vended_credentials", CATALOG_OPT_BOOL, offsetof(RestCatalogOptions, enableVendedCredentials), 0},
+	{"location_prefix", CATALOG_OPT_LOCATION_PREFIX, offsetof(RestCatalogOptions, locationPrefix),
+	CATALOG_OPT_NONEMPTY | CATALOG_OPT_HAS_SCHEME},
+	{"catalog_name", CATALOG_OPT_STRING, offsetof(RestCatalogOptions, catalogName),
+	CATALOG_OPT_NONEMPTY},
+	{"client_id", CATALOG_OPT_STRING, offsetof(RestCatalogOptions, clientId),
+	CATALOG_OPT_NONEMPTY},
+	{"client_secret", CATALOG_OPT_STRING, offsetof(RestCatalogOptions, clientSecret),
+	CATALOG_OPT_NONEMPTY},
+};
+
+#define NUM_CATALOG_OPTIONS lengthof(iceberg_catalog_option_descs)
+
+
+/*
+ * Look up a descriptor by option name, or return NULL if not found.
+ */
+static const IcebergCatalogOptionDesc *
+FindCatalogOptionDesc(const char *name)
+{
+	for (int i = 0; i < NUM_CATALOG_OPTIONS; i++)
+	{
+		if (pg_strcasecmp(name, iceberg_catalog_option_descs[i].name) == 0)
+			return &iceberg_catalog_option_descs[i];
+	}
+	return NULL;
+}
+
+
+/*
+ * Build the "Valid options are: ?" hint string.
+ */
+static const char *
+GetValidCatalogOptionsHint(void)
+{
+	StringInfoData buf;
+
+	initStringInfo(&buf);
+	appendStringInfoString(&buf, "Valid options are: ");
+	for (int i = 0; i < NUM_CATALOG_OPTIONS; i++)
+	{
+		if (i > 0)
+			appendStringInfoString(&buf, ", ");
+		appendStringInfoString(&buf, iceberg_catalog_option_descs[i].name);
+	}
+	appendStringInfoChar(&buf, '.');
+
+	return buf.data;
+}
+
+
+/*
+ * Validate a single option value.  Called from iceberg_catalog_validator
+ * after the name has already been accepted.  Type-specific checks run
+ * first, then flag-based checks (non-empty, scheme present).
+ */
+static void
+ValidateCatalogOptionValue(const IcebergCatalogOptionDesc * desc, DefElem *def)
+{
+	switch (desc->type)
+	{
+		case CATALOG_OPT_AUTH_TYPE:
+			{
+				char	   *authType = defGetString(def);
+
+				if (pg_strcasecmp(authType, "default") != 0 &&
+					pg_strcasecmp(authType, "oauth2") != 0 &&
+					pg_strcasecmp(authType, "horizon") != 0)
+					ereport(ERROR,
+							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+							 errmsg("invalid rest_auth_type option: \"%s\"", authType),
+							 errhint("Valid values are \"default\", \"oauth2\", and \"horizon\".")));
+				return;
+			}
+		case CATALOG_OPT_BOOL:
+			(void) defGetBoolean(def);
+			return;
+		default:
+			break;
+	}
+
+	if (desc->flags == 0)
+		return;
+
+	char	   *value = defGetString(def);
+
+	if ((desc->flags & CATALOG_OPT_NONEMPTY) && value[0] == '\0')
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid value for \"%s\": must not be empty",
+						desc->name)));
+
+	if ((desc->flags & CATALOG_OPT_HAS_SCHEME) && strstr(value, "://") == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("invalid value for \"%s\": \"%s\"",
+						desc->name, value),
+				 errhint("Include a URI scheme (e.g. \"https://...\").")));
+}
+
+
+/*
+ * Apply a single server option onto the RestCatalogOptions struct.
+ * Called from ApplyServerOptionOverrides for each DefElem on the server.
+ */
+static void
+ApplyCatalogOptionValue(RestCatalogOptions * opts,
+						const IcebergCatalogOptionDesc * desc, DefElem *def)
+{
+	switch (desc->type)
+	{
+		case CATALOG_OPT_STRING:
+			*(char **) ((char *) opts + desc->offset) = pstrdup(defGetString(def));
+			break;
+		case CATALOG_OPT_BOOL:
+			*(bool *) ((char *) opts + desc->offset) = defGetBoolean(def);
+			break;
+		case CATALOG_OPT_AUTH_TYPE:
+			{
+				char	   *authType = defGetString(def);
+
+				*(int *) ((char *) opts + desc->offset) =
+					(pg_strcasecmp(authType, "horizon") == 0)
+					? REST_CATALOG_AUTH_TYPE_HORIZON
+					: REST_CATALOG_AUTH_TYPE_OAUTH2;
+				break;
+			}
+		case CATALOG_OPT_LOCATION_PREFIX:
+			{
+				bool		inPlace = false;
+
+				*(char **) ((char *) opts + desc->offset) =
+					pstrdup(StripTrailingSlash(defGetString(def), inPlace));
+				break;
+			}
+	}
+}
+
+
+/*
+ * iceberg_catalog_validator validates options for the iceberg_catalog FDW.
+ * Only server-level options are supported.
+ */
+Datum
+iceberg_catalog_validator(PG_FUNCTION_ARGS)
+{
+	List	   *options_list = untransformRelOptions(PG_GETARG_DATUM(0));
+	Oid			catalogRelId = PG_GETARG_OID(1);
+	ListCell   *cell;
+
+	/*
+	 * PostgreSQL calls the validator for CREATE FOREIGN DATA WRAPPER itself
+	 * (with ForeignDataWrapperRelationId), not just for CREATE SERVER.  Allow
+	 * empty option lists for non-server contexts so extension creation
+	 * succeeds, but still reject if someone passes options where they don't
+	 * belong.
+	 */
+	if (catalogRelId != ForeignServerRelationId)
+	{
+		if (list_length(options_list) > 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
+					 errmsg("iceberg_catalog options are only valid for SERVER objects")));
+		PG_RETURN_VOID();
+	}
+
+	foreach(cell, options_list)
+	{
+		DefElem    *def = (DefElem *) lfirst(cell);
+		const		IcebergCatalogOptionDesc *desc = FindCatalogOptionDesc(def->defname);
+
+		if (desc == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
+					 errmsg("invalid option \"%s\" for iceberg_catalog server",
+							def->defname),
+					 errhint("%s", GetValidCatalogOptionsHint())));
+
+		ValidateCatalogOptionValue(desc, def);
+	}
+
+	PG_RETURN_VOID();
+}
+
+
+/*
+ * ServerHasDependentRestIcebergTable returns true if the given server
+ * has at least one dependent REST-backed iceberg table (read-only or
+ * writable) recorded in pg_depend.  Used to block ALTER SERVER changes
+ * that would silently break existing tables, since both writable and
+ * read-only REST tables make REST API calls at runtime against the
+ * server's rest_endpoint.
+ */
+static bool
+ServerHasDependentRestIcebergTable(Oid serverOid)
+{
+	Relation	depRel;
+	ScanKeyData key[2];
+	SysScanDesc scan;
+	HeapTuple	tup;
+	bool		found = false;
+
+	depRel = table_open(DependRelationId, AccessShareLock);
+
+	ScanKeyInit(&key[0],
+				Anum_pg_depend_refclassid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(ForeignServerRelationId));
+	ScanKeyInit(&key[1],
+				Anum_pg_depend_refobjid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(serverOid));
+
+	scan = systable_beginscan(depRel, DependReferenceIndexId, true,
+							  NULL, 2, key);
+
+	while (HeapTupleIsValid(tup = systable_getnext(scan)))
+	{
+		Form_pg_depend depForm = (Form_pg_depend) GETSTRUCT(tup);
+
+		if (depForm->classid != RelationRelationId)
+			continue;
+
+		IcebergCatalogType type = GetIcebergCatalogType(depForm->objid);
+
+		if (type == REST_CATALOG_READ_WRITE || type == REST_CATALOG_READ_ONLY)
+		{
+			found = true;
+			break;
+		}
+	}
+
+	systable_endscan(scan);
+	table_close(depRel, AccessShareLock);
+
+	return found;
+}
+
+
+/*
+ * RejectIfBuiltinCatalogServerName errors out if `name` is one of the
+ * three internal pg_lake_iceberg catalog server names.  Shared by the
+ * CREATE SERVER and ALTER SERVER ... RENAME TO branches, where the
+ * concern is "users must not be able to create or end up with a server
+ * carrying one of these reserved names".
+ */
+static void
+RejectIfBuiltinCatalogServerName(const char *name)
+{
+	if (!IsBuiltinCatalogServerName(name))
+		return;
+
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("server name \"%s\" is reserved for an internal "
+					"pg_lake_iceberg catalog server", name),
+			 errhint("Choose a different server name.")));
+}
+
+
+/*
+ * RejectIfModifyingBuiltinCatalogServer errors out if `name` refers to
+ * one of the three built-in pg_lake_iceberg catalog servers.  The
+ * `operation` verb fills in the user-facing error ("cannot %s the
+ * built-in...") and should read naturally in that template (e.g.
+ * "alter", "change owner of").  Shared by the ALTER SERVER OPTIONS
+ * and ALTER SERVER ... OWNER TO branches.
+ */
+static void
+RejectIfModifyingBuiltinCatalogServer(const char *name, const char *operation)
+{
+	if (!IsBuiltinCatalogServerName(name))
+		return;
+
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("cannot %s the built-in pg_lake_iceberg "
+					"catalog server \"%s\"", operation, name),
+			 errhint("Configure built-in catalogs via "
+					 "pg_lake_iceberg GUCs, or create a "
+					 "user-defined iceberg_catalog server.")));
+}
+
+
+/*
+ * ValidateIcebergCatalogServerDDL validates DDL on iceberg_catalog
+ * servers and the iceberg_catalog FDW itself, and
+ * extension-membership changes that affect any of these objects.
+ *
+ * Two layers of protection:
+ *
+ * 1. Short reserved names ('postgres', 'object_store', 'rest') -- these
+ *    are the user-facing catalog= values.  We block CREATE SERVER and
+ *    RENAME TO these names so users can't shadow the built-in catalogs.
+ *
+ * 2. Built-in long server names ('pg_lake_postgres_catalog', etc.) --
+ *    these are the pre-created anchors.  Outside of CREATE/ALTER
+ *    EXTENSION we block CREATE/ALTER/RENAME/OWNER on them entirely so
+ *    they remain pure structural anchors with all configuration in
+ *    GUCs.  DROP is blocked by core via extension membership.
+ *
+ * Additionally:
+ *  - CREATE SERVER must specify TYPE 'rest'; TYPE 'postgres' and
+ *    'object_store' are reserved for the built-in servers.
+ *  - Renaming any iceberg_catalog server is blocked (dependent tables
+ *    record the server name as a string option in ftoptions).
+ *  - For user-created REST servers, ALTER SERVER OPTIONS may not change
+ *    rest_endpoint while dependent iceberg tables exist.
+ *  - ALTER EXTENSION ... DROP SERVER/FOREIGN DATA WRAPPER is rejected
+ *    for iceberg_catalog objects, preventing detachment of the
+ *    DEPENDENCY_EXTENSION edge that shields them from standalone DROP.
+ *  - ALTER FOREIGN DATA WRAPPER iceberg_catalog is rejected, preventing
+ *    replacement of the validator or addition of a handler.
+ *
+ * The last two are defense-in-depth against superuser misuse: both
+ * require superuser privilege, but a superuser detaching the
+ * extension edge or swapping the validator would silently weaken the
+ * protection model.
+ */
+bool
+ValidateIcebergCatalogServerDDL(ProcessUtilityParams * processUtilityParams,
+								void *arg)
+{
+	Node	   *parsetree = processUtilityParams->plannedStmt->utilityStmt;
+
+	if (creating_extension)
+		return false;
+
+	if (IsA(parsetree, CreateForeignServerStmt))
+	{
+		CreateForeignServerStmt *stmt = (CreateForeignServerStmt *) parsetree;
+
+		if (stmt->fdwname == NULL ||
+			strcmp(stmt->fdwname, ICEBERG_CATALOG_FDW_NAME) != 0)
+			return false;
+
+		if (IsCatalogOwnedByExtension(stmt->servername))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("server name \"%s\" is reserved for the extension-owned catalog",
+							stmt->servername),
+					 errhint("Choose a different server name.")));
+
+		RejectIfBuiltinCatalogServerName(stmt->servername);
+
+		if (stmt->servertype != NULL &&
+			(pg_strcasecmp(stmt->servertype, POSTGRES_CATALOG_NAME) == 0 ||
+			 pg_strcasecmp(stmt->servertype, OBJECT_STORE_CATALOG_NAME) == 0))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot create iceberg_catalog server with TYPE '%s'",
+							stmt->servertype),
+					 errhint("Use the built-in \"%s\" or \"%s\" catalogs, "
+							 "or create a server of type 'rest'.",
+							 POSTGRES_CATALOG_NAME, OBJECT_STORE_CATALOG_NAME)));
+
+		if (stmt->servertype == NULL ||
+			pg_strcasecmp(stmt->servertype, REST_CATALOG_NAME) != 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("iceberg_catalog server requires TYPE 'rest'")));
+	}
+	else if (IsA(parsetree, RenameStmt))
+	{
+		RenameStmt *stmt = (RenameStmt *) parsetree;
+
+		if (stmt->renameType != OBJECT_FOREIGN_SERVER)
+			return false;
+
+		if (IsCatalogOwnedByExtension(stmt->newname))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("server name \"%s\" is reserved for the extension-owned catalog",
+							stmt->newname),
+					 errhint("Choose a different server name.")));
+
+		RejectIfBuiltinCatalogServerName(stmt->newname);
+
+		/*
+		 * Renaming an iceberg_catalog server is blocked because dependent
+		 * iceberg tables store the server name as a string option
+		 * (catalog='<name>') in pg_foreign_table.ftoptions.  A rename would
+		 * silently break those references.
+		 */
+		ForeignServer *server = GetForeignServerByName(strVal(stmt->object),
+													   true);
+
+		if (server != NULL)
+		{
+			ForeignDataWrapper *fdw = GetForeignDataWrapper(server->fdwid);
+
+			if (strcmp(fdw->fdwname, ICEBERG_CATALOG_FDW_NAME) == 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("cannot rename iceberg_catalog server \"%s\"",
+								strVal(stmt->object)),
+						 errhint("Drop and recreate the server with the new name.")));
+		}
+	}
+	else if (IsA(parsetree, AlterOwnerStmt))
+	{
+		AlterOwnerStmt *stmt = (AlterOwnerStmt *) parsetree;
+
+		if (stmt->objectType != OBJECT_FOREIGN_SERVER)
+			return false;
+
+		const char *serverName = strVal(stmt->object);
+
+		RejectIfModifyingBuiltinCatalogServer(serverName, "change owner of");
+	}
+	else if (IsA(parsetree, AlterForeignServerStmt))
+	{
+		AlterForeignServerStmt *stmt = (AlterForeignServerStmt *) parsetree;
+
+		ForeignServer *server = GetForeignServerByName(stmt->servername, true);
+
+		if (server == NULL)
+			return false;
+
+		ForeignDataWrapper *fdw = GetForeignDataWrapper(server->fdwid);
+
+		if (strcmp(fdw->fdwname, ICEBERG_CATALOG_FDW_NAME) != 0)
+			return false;
+
+		/*
+		 * The three built-in servers are immutable structural anchors.
+		 * Configuration for the built-in catalogs lives in GUCs; reject any
+		 * option, version, or other ALTER change so we never end up with
+		 * hidden server-side state that pg_dump cannot round-trip cleanly for
+		 * an extension-owned object.
+		 */
+		RejectIfModifyingBuiltinCatalogServer(stmt->servername, "alter");
+
+		/*
+		 * Changing rest_endpoint on a user-created server with dependent
+		 * iceberg tables (writable or read-only) would silently point them at
+		 * a different REST catalog, breaking the metadata chain.
+		 */
+		ListCell   *lc;
+
+		foreach(lc, stmt->options)
+		{
+			DefElem    *def = (DefElem *) lfirst(lc);
+
+			if (pg_strcasecmp(def->defname, "rest_endpoint") == 0 &&
+				ServerHasDependentRestIcebergTable(server->serverid))
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("cannot change \"rest_endpoint\" on server \"%s\" "
+								"because it has dependent iceberg tables",
+								stmt->servername),
+						 errhint("Drop the dependent tables first, or create a "
+								 "new server with the desired endpoint.")));
+			}
+		}
+	}
+	else if (IsA(parsetree, AlterExtensionContentsStmt))
+	{
+		AlterExtensionContentsStmt *stmt =
+			(AlterExtensionContentsStmt *) parsetree;
+
+		/*
+		 * Block ALTER EXTENSION pg_lake_iceberg DROP SERVER / DROP FOREIGN
+		 * DATA WRAPPER for iceberg_catalog objects.  Without this, a
+		 * superuser could detach the DEPENDENCY_EXTENSION edge and then DROP
+		 * the object freely, breaking every table that depends on it.
+		 *
+		 * Only the DROP direction (action < 0) is dangerous; ADD is benign
+		 * (it re-attaches membership, which is the state we want).
+		 */
+		if (stmt->action < 0)
+		{
+			if (stmt->objtype == OBJECT_FOREIGN_SERVER)
+			{
+				const char *serverName = strVal(stmt->object);
+
+				if (IsBuiltinCatalogServerName(serverName))
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("cannot remove the built-in catalog "
+									"server \"%s\" from its extension",
+									serverName),
+							 errhint("The built-in catalog servers are "
+									 "structural anchors; detaching them "
+									 "from the extension would allow DROP "
+									 "and break every dependent table.")));
+			}
+			else if (stmt->objtype == OBJECT_FDW)
+			{
+				const char *fdwName = strVal(stmt->object);
+
+				if (strcmp(fdwName, ICEBERG_CATALOG_FDW_NAME) == 0)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("cannot remove the \"%s\" foreign data "
+									"wrapper from its extension",
+									ICEBERG_CATALOG_FDW_NAME),
+							 errhint("The iceberg_catalog FDW is required by "
+									 "all catalog servers; detaching it would "
+									 "allow DROP and break the entire catalog "
+									 "infrastructure.")));
+			}
+		}
+	}
+	else if (IsA(parsetree, AlterFdwStmt))
+	{
+		AlterFdwStmt *stmt = (AlterFdwStmt *) parsetree;
+
+		/*
+		 * Block ALTER FOREIGN DATA WRAPPER iceberg_catalog entirely.
+		 * Replacing the validator would silently disable option checking on
+		 * all future CREATE/ALTER SERVER and USER MAPPING statements; adding
+		 * a handler would change the FDW semantics.  Both require superuser,
+		 * but the downstream damage is hard to notice and impossible to undo
+		 * without recreating every dependent server.
+		 */
+		if (strcmp(stmt->fdwname, ICEBERG_CATALOG_FDW_NAME) == 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot alter the \"%s\" foreign data wrapper",
+							ICEBERG_CATALOG_FDW_NAME),
+					 errhint("The iceberg_catalog FDW is managed by the "
+							 "pg_lake_iceberg extension and must not be "
+							 "modified directly.")));
+	}
+
+	return false;
+}
+
+
+
+/*
+ * ApplyGUCDefaults populates opts with the current GUC values.
+ * All string fields are pstrdup'd so the struct is self-contained.
+ */
+static void
+ApplyGUCDefaults(RestCatalogOptions * opts)
+{
+	char	   *defaultLocationPrefix = GetIcebergDefaultLocationPrefix();
+
+	opts->host = RestCatalogHost ? pstrdup(RestCatalogHost) : NULL;
+	opts->oauthHostPath = RestCatalogOauthHostPath ? pstrdup(RestCatalogOauthHostPath) : NULL;
+	opts->clientId = RestCatalogClientId ? pstrdup(RestCatalogClientId) : NULL;
+	opts->clientSecret = RestCatalogClientSecret ? pstrdup(RestCatalogClientSecret) : NULL;
+	opts->scope = RestCatalogScope ? pstrdup(RestCatalogScope) : NULL;
+	opts->authType = RestCatalogAuthType;
+	opts->enableVendedCredentials = RestCatalogEnableVendedCredentials;
+	opts->locationPrefix = defaultLocationPrefix ? pstrdup(defaultLocationPrefix) : NULL;
+}
+
+
+/*
+ * ApplyServerOptionOverrides overrides the GUC-derived defaults in opts
+ * with any options explicitly set on the foreign server.
+ */
+static void
+ApplyServerOptionOverrides(RestCatalogOptions * opts, ForeignServer *server)
+{
+	ListCell   *lc;
+
+	foreach(lc, server->options)
+	{
+		DefElem    *def = (DefElem *) lfirst(lc);
+		const		IcebergCatalogOptionDesc *desc = FindCatalogOptionDesc(def->defname);
+
+		if (desc != NULL)
+			ApplyCatalogOptionValue(opts, desc, def);
+	}
+}
+
+
+/*
+ * ValidateRestCatalogOptions checks that the resolved options have
+ * the minimum required fields (e.g. rest_endpoint).
+ */
+static void
+ValidateRestCatalogOptions(const RestCatalogOptions * opts, const char *catalog)
+{
+	if (opts->host == NULL || opts->host[0] == '\0')
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
+				 errmsg("\"rest_endpoint\" is not configured for REST catalog \"%s\"",
+						catalog),
+				 errhint("Set the pg_lake_iceberg.rest_catalog_host GUC or "
+						 "the \"rest_endpoint\" option on the server.")));
+}
+
+
+/*
+ * Build RestCatalogOptions for an iceberg_catalog server.
+ *
+ * The built-in pg_lake_rest_catalog server and any user-created
+ * iceberg_catalog REST server go through the same path: GUC defaults
+ * first, then server-level options applied on top.  ALTER SERVER OPTIONS
+ * is blocked on the built-in server, so in practice its option set is
+ * always empty and the GUC defaults survive untouched -- which is
+ * exactly the historical "GUCs-only built-in REST" behavior, now
+ * reached through a single code path.
+ *
+ * `userVisibleCatalog` is the short identifier the user typed
+ * (e.g. "rest" or a user server name); it is what we store in
+ * opts->catalog so that error messages, the cross-catalog DML check,
+ * and the token cache key all stay in user-facing terms.  The long
+ * built-in server name never leaks past this function.
+ */
+static RestCatalogOptions *
+BuildRestCatalogOptionsFromServer(const char *serverName,
+								  const char *userVisibleCatalog)
+{
+	ForeignServer *server = GetForeignServerByName(serverName, false);
+	ForeignDataWrapper *fdw = GetForeignDataWrapper(server->fdwid);
+
+	Assert(strcmp(fdw->fdwname, ICEBERG_CATALOG_FDW_NAME) == 0);
+
+	RestCatalogOptions *opts = palloc0(sizeof(RestCatalogOptions));
+
+	opts->serverOid = server->serverid;
+	opts->catalog = pstrdup(userVisibleCatalog);
+	ApplyGUCDefaults(opts);
+	ApplyServerOptionOverrides(opts, server);
+	ValidateRestCatalogOptions(opts, userVisibleCatalog);
+	return opts;
+}
+
+
+/*
+ * ResolveRestCatalogOptions builds RestCatalogOptions for the catalog
+ * identifier the user typed.  The short reserved names ('postgres',
+ * 'object_store', 'rest') are mapped to their pre-created built-in
+ * server names; all other inputs are looked up verbatim.
+ */
+RestCatalogOptions *
+ResolveRestCatalogOptions(const char *catalog)
+{
+	const char *serverName = ResolveCatalogServerName(catalog);
+
+	return BuildRestCatalogOptionsFromServer(serverName, catalog);
+}
+
+
+/*
+ * GetRestCatalogOptionsForRelation returns the REST catalog options for
+ * the given relation.  The catalog option value is used as the server
+ * name (or built-in 'rest' literal).
+ */
+RestCatalogOptions *
+GetRestCatalogOptionsForRelation(Oid relationId)
+{
+	ForeignTable *foreignTable = GetForeignTable(relationId);
+	char	   *catalog = GetStringOption(foreignTable->options, "catalog", false);
+
+	if (catalog == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("catalog option is not set for relation %u", relationId)));
+
+	return ResolveRestCatalogOptions(catalog);
+}
+
+
+/*
+ * CopyRestCatalogOptions deep-copies a RestCatalogOptions into the given
+ * memory context.  All string fields are duplicated so the result is
+ * self-contained and independent of the source's lifetime.
+ */
+RestCatalogOptions *
+CopyRestCatalogOptions(MemoryContext dst, const RestCatalogOptions * src)
+{
+	MemoryContext oldctx = MemoryContextSwitchTo(dst);
+	RestCatalogOptions *copy = palloc0(sizeof(RestCatalogOptions));
+
+	copy->serverOid = src->serverOid;
+	copy->catalog = src->catalog ? pstrdup(src->catalog) : NULL;
+	copy->host = src->host ? pstrdup(src->host) : NULL;
+	copy->oauthHostPath = src->oauthHostPath ? pstrdup(src->oauthHostPath) : NULL;
+	copy->clientId = src->clientId ? pstrdup(src->clientId) : NULL;
+	copy->clientSecret = src->clientSecret ? pstrdup(src->clientSecret) : NULL;
+	copy->scope = src->scope ? pstrdup(src->scope) : NULL;
+	copy->locationPrefix = src->locationPrefix ? pstrdup(src->locationPrefix) : NULL;
+	copy->catalogName = src->catalogName ? pstrdup(src->catalogName) : NULL;
+	copy->authType = src->authType;
+	copy->enableVendedCredentials = src->enableVendedCredentials;
+
+	MemoryContextSwitchTo(oldctx);
+	return copy;
+}
+
 
 /*
 * StartStageRestCatalogIcebergTableCreate stages the creation of an iceberg table
@@ -120,19 +870,22 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId)
 	const char *catalogName = GetRestCatalogName(relationId);
 	const char *namespaceName = GetRestCatalogNamespace(relationId);
 
-	char	   *postUrl =
-		psprintf(REST_CATALOG_TABLES, RestCatalogHost,
-				 URLEncodePath(catalogName), URLEncodePath(namespaceName));
-	List	   *headers = PostHeadersWithAuth();
+	RestCatalogOptions *opts = GetRestCatalogOptionsForRelation(relationId);
 
-	if (RestCatalogEnableVendedCredentials)
+	char	   *postUrl =
+		psprintf(REST_CATALOG_TABLES, opts->host,
+				 URLEncodePath(catalogName), URLEncodePath(namespaceName));
+	List	   *headers = PostHeadersWithAuth(opts);
+
+	if (opts->enableVendedCredentials)
 	{
 		char	   *vendedCreds = pstrdup("X-Iceberg-Access-Delegation: vended-credentials");
 
 		headers = lappend(headers, vendedCreds);
 	}
 
-	HttpResult	httpResult = SendRequestToRestCatalog(HTTP_POST, postUrl, body->data, headers);
+	HttpResult	httpResult = SendRequestToRestCatalog(opts, HTTP_POST, postUrl, body->data,
+													  headers);
 
 	if (httpResult.status != 200)
 	{
@@ -209,8 +962,9 @@ FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSche
 	const char *catalogName = GetRestCatalogName(relationId);
 	const char *namespaceName = GetRestCatalogNamespace(relationId);
 	const char *relationName = GetRestCatalogTableName(relationId);
+	RestCatalogOptions *opts = GetRestCatalogOptionsForRelation(relationId);
 
-	appendStringInfo(location, "%s/%s/%s/%s/%d", IcebergDefaultLocationPrefix, catalogName, namespaceName, relationName, relationId);
+	appendStringInfo(location, "%s/%s/%s/%s/%d", opts->locationPrefix, catalogName, namespaceName, relationName, relationId);
 	appendJsonString(body, "location", location->data);
 	appendStringInfoChar(body, '}');	/* end set-location */
 
@@ -256,7 +1010,7 @@ FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSche
 * allowed locations as part of the namespace.
 */
 void
-RegisterNamespaceToRestCatalog(const char *catalogName, const char *namespaceName)
+RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName)
 {
 	/*
 	 * First, we need to check if the namespace already exists in Rest Catalog
@@ -264,9 +1018,10 @@ RegisterNamespaceToRestCatalog(const char *catalogName, const char *namespaceNam
 	 */
 	char	   *getUrl =
 		psprintf(REST_CATALOG_NAMESPACE_NAME,
-				 RestCatalogHost, URLEncodePath(catalogName),
+				 opts->host, URLEncodePath(catalogName),
 				 URLEncodePath(namespaceName));
-	HttpResult	httpResult = SendRequestToRestCatalog(HTTP_GET, getUrl, NULL, GetHeadersWithAuth());
+	HttpResult	httpResult = SendRequestToRestCatalog(opts, HTTP_GET, getUrl, NULL,
+													  GetHeadersWithAuth(opts));
 
 	switch (httpResult.status)
 	{
@@ -281,7 +1036,7 @@ RegisterNamespaceToRestCatalog(const char *catalogName, const char *namespaceNam
 				/*
 				 * Does not exists, we'll create it.
 				 */
-				CreateNamespaceOnRestCatalog(catalogName, namespaceName);
+				CreateNamespaceOnRestCatalog(opts, catalogName, namespaceName);
 				break;
 			}
 
@@ -300,7 +1055,7 @@ RegisterNamespaceToRestCatalog(const char *catalogName, const char *namespaceNam
 				if (serverAllowedLocation)
 				{
 					const char *defaultAllowedLocation =
-						psprintf("%s/%s/%s", IcebergDefaultLocationPrefix, catalogName, namespaceName);
+						psprintf("%s/%s/%s", opts->locationPrefix, catalogName, namespaceName);
 
 
 					/*
@@ -346,7 +1101,7 @@ RegisterNamespaceToRestCatalog(const char *catalogName, const char *namespaceNam
 * namespace exists when creating a table in the given namespace.
 */
 void
-ErrorIfRestNamespaceDoesNotExist(const char *catalogName, const char *namespaceName)
+ErrorIfRestNamespaceDoesNotExist(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName)
 {
 	/*
 	 * First, we need to check if the namespace already exists in Rest Catalog
@@ -354,10 +1109,10 @@ ErrorIfRestNamespaceDoesNotExist(const char *catalogName, const char *namespaceN
 	 */
 	char	   *getUrl =
 		psprintf(REST_CATALOG_NAMESPACE_NAME,
-				 RestCatalogHost, URLEncodePath(catalogName),
+				 opts->host, URLEncodePath(catalogName),
 				 URLEncodePath(namespaceName));
-	HttpResult	httpResult = SendRequestToRestCatalog(HTTP_GET, getUrl, NULL, GetHeadersWithAuth());
-
+	HttpResult	httpResult = SendRequestToRestCatalog(opts, HTTP_GET, getUrl, NULL,
+													  GetHeadersWithAuth(opts));
 
 	/* namespace not found */
 	if (httpResult.status == 404)
@@ -389,7 +1144,9 @@ GetMetadataLocationForRestCatalogForIcebergTable(Oid relationId)
 	const char *relationName = GetRestCatalogTableName(relationId);
 	const char *namespaceName = GetRestCatalogNamespace(relationId);
 
-	return GetMetadataLocationFromRestCatalog(restCatalogName, namespaceName, relationName);
+	RestCatalogOptions *opts = GetRestCatalogOptionsForRelation(relationId);
+
+	return GetMetadataLocationFromRestCatalog(opts, restCatalogName, namespaceName, relationName);
 }
 
 
@@ -397,14 +1154,14 @@ GetMetadataLocationForRestCatalogForIcebergTable(Oid relationId)
 * Gets the metadata location for a relation from the external catalog.
 */
 char *
-GetMetadataLocationFromRestCatalog(const char *restCatalogName, const char *namespaceName, const char *relationName)
+GetMetadataLocationFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogName, const char *namespaceName, const char *relationName)
 {
 	char	   *getUrl =
 		psprintf(REST_CATALOG_TABLE,
-				 RestCatalogHost, URLEncodePath(restCatalogName), URLEncodePath(namespaceName), URLEncodePath(relationName));
+				 opts->host, URLEncodePath(restCatalogName), URLEncodePath(namespaceName), URLEncodePath(relationName));
 
-	List	   *headers = GetHeadersWithAuth();
-	HttpResult	hr = SendRequestToRestCatalog(HTTP_GET, getUrl, NULL, headers);
+	List	   *headers = GetHeadersWithAuth(opts);
+	HttpResult	hr = SendRequestToRestCatalog(opts, HTTP_GET, getUrl, NULL, headers);
 
 	if (hr.status != 200)
 	{
@@ -425,7 +1182,7 @@ GetMetadataLocationFromRestCatalog(const char *restCatalogName, const char *name
 * an error is raised.
 */
 static void
-CreateNamespaceOnRestCatalog(const char *catalogName, const char *namespaceName)
+CreateNamespaceOnRestCatalog(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName)
 {
 	/* POST create */
 	StringInfoData body;
@@ -449,10 +1206,11 @@ CreateNamespaceOnRestCatalog(const char *catalogName, const char *namespaceName)
 	appendStringInfoChar(&body, '}');	/* close body */
 
 	char	   *postUrl =
-		psprintf(REST_CATALOG_NAMESPACE, RestCatalogHost,
+		psprintf(REST_CATALOG_NAMESPACE, opts->host,
 				 URLEncodePath(catalogName));
 
-	HttpResult	httpResult = SendRequestToRestCatalog(HTTP_POST, postUrl, body.data, PostHeadersWithAuth());
+	HttpResult	httpResult = SendRequestToRestCatalog(opts, HTTP_POST, postUrl, body.data,
+													  PostHeadersWithAuth(opts));
 
 	if (httpResult.status != 200)
 	{
@@ -464,11 +1222,11 @@ CreateNamespaceOnRestCatalog(const char *catalogName, const char *namespaceName)
 * Creates the headers for a POST request with authentication.
 */
 List *
-PostHeadersWithAuth(void)
+PostHeadersWithAuth(RestCatalogOptions * opts)
 {
 	bool		forceRefreshToken = false;
 
-	return list_make3(psprintf("Authorization: Bearer %s", GetRestCatalogAccessToken(forceRefreshToken)),
+	return list_make3(psprintf("Authorization: Bearer %s", GetRestCatalogAccessToken(opts, forceRefreshToken)),
 					  pstrdup("Accept: application/json"),
 					  pstrdup("Content-Type: application/json"));
 }
@@ -479,11 +1237,11 @@ PostHeadersWithAuth(void)
 * Creates the headers for a DELETE request with authentication.
 */
 List *
-DeleteHeadersWithAuth(void)
+DeleteHeadersWithAuth(RestCatalogOptions * opts)
 {
 	bool		forceRefreshToken = false;
 
-	return list_make1(psprintf("Authorization: Bearer %s", GetRestCatalogAccessToken(forceRefreshToken)));
+	return list_make1(psprintf("Authorization: Bearer %s", GetRestCatalogAccessToken(opts, forceRefreshToken)));
 }
 
 
@@ -492,11 +1250,11 @@ DeleteHeadersWithAuth(void)
 * Creates the headers for a GET request with authentication.
 */
 static List *
-GetHeadersWithAuth(void)
+GetHeadersWithAuth(RestCatalogOptions * opts)
 {
 	bool		forceRefreshToken = false;
 
-	return list_make2(psprintf("Authorization: Bearer %s", GetRestCatalogAccessToken(forceRefreshToken)),
+	return list_make2(psprintf("Authorization: Bearer %s", GetRestCatalogAccessToken(opts, forceRefreshToken)),
 					  pstrdup("Accept: application/json"));
 }
 
@@ -538,12 +1296,102 @@ ReportHTTPError(HttpResult httpResult, int level)
 
 
 /*
-* Gets an access token from rest catalog using client credentials that are
-* configured via GUC variables. Caches the token until it is about to expire.
-*/
-static char *
-GetRestCatalogAccessToken(bool forceRefreshToken)
+ * Syscache invalidation callback for pg_foreign_server changes.
+ * Any ALTER/DROP SERVER blows away the entire token cache so stale
+ * credentials are never reused.  The cache is rebuilt lazily on the
+ * next token lookup.
+ *
+ * We ignore hashvalue and reset the whole cache rather than selectively
+ * invalidating a single server's entry.  With a handful of servers and
+ * infrequent ALTER SERVER, the cost of a few extra OAuth round-trips is
+ * negligible compared to the complexity of tracking per-entry hash
+ * values for targeted invalidation.
+ */
+static void
+InvalidateRestTokenCache(Datum arg, int cacheid, uint32 hashvalue)
 {
+	if (RestCatalogTokenCache == NULL)
+		return;
+
+	MemoryContextReset(RestTokenCacheCtx);
+	RestCatalogTokenCache = NULL;
+}
+
+
+/*
+ * Initialize the per-catalog token cache hash table if needed.
+ *
+ * TokenCacheCallbackRegistered is separate from RestCatalogTokenCache because
+ * the callback must be registered exactly once per backend lifetime
+ * (CacheRegisterSyscacheCallback appends to a fixed-size array), while
+ * RestCatalogTokenCache is reset to NULL on every invalidation.
+ */
+static bool TokenCacheCallbackRegistered = false;
+
+static void
+InitTokenCacheIfNeeded(void)
+{
+	if (!TokenCacheCallbackRegistered)
+	{
+		CacheRegisterSyscacheCallback(FOREIGNSERVEROID,
+									  InvalidateRestTokenCache,
+									  (Datum) 0);
+		TokenCacheCallbackRegistered = true;
+	}
+
+	if (RestCatalogTokenCache != NULL)
+		return;
+
+	if (RestTokenCacheCtx == NULL)
+		RestTokenCacheCtx = AllocSetContextCreate(CacheMemoryContext,
+												  "RestTokenCacheCtx",
+												  ALLOCSET_DEFAULT_SIZES);
+
+	HASHCTL		ctl;
+
+	memset(&ctl, 0, sizeof(ctl));
+	ctl.keysize = sizeof(Oid);
+	ctl.entrysize = sizeof(RestCatalogTokenCacheEntry);
+	ctl.hcxt = RestTokenCacheCtx;
+
+	RestCatalogTokenCache = hash_create("REST Catalog Token Cache",
+										8, &ctl,
+										HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+}
+
+
+/*
+ * Gets an access token from rest catalog. Caches the token per catalog
+ * (keyed by iceberg_catalog server OID) until it is about to expire.
+ */
+static char *
+GetRestCatalogAccessToken(RestCatalogOptions * opts, bool forceRefreshToken)
+{
+	if (opts == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("REST catalog options must not be NULL when fetching access token")));
+
+	/*
+	 * Every resolved RestCatalogOptions originates from
+	 * BuildRestCatalogOptionsFromServer, which always sets serverOid. A
+	 * missing OID would silently funnel every catalog into the same cache
+	 * slot, so trap it loudly here.
+	 */
+	Assert(OidIsValid(opts->serverOid));
+
+	InitTokenCacheIfNeeded();
+
+	bool		found = false;
+	RestCatalogTokenCacheEntry *entry =
+		hash_search(RestCatalogTokenCache, &opts->serverOid, HASH_ENTER, &found);
+
+	if (!found)
+	{
+		entry->accessToken = NULL;
+		entry->accessTokenExpiry = 0;
+	}
+
 	/*
 	 * Calling initial time or token will expire in 1 minute, fetch a new
 	 * token.
@@ -551,74 +1399,78 @@ GetRestCatalogAccessToken(bool forceRefreshToken)
 	TimestampTz now = GetCurrentTimestamp();
 	const int	MINUTE_IN_MSECS = 60 * 1000;
 
-	if (forceRefreshToken || RestCatalogAccessTokenExpiry == 0 ||
-		!TimestampDifferenceExceeds(now, RestCatalogAccessTokenExpiry, MINUTE_IN_MSECS))
+	if (forceRefreshToken || entry->accessTokenExpiry == 0 ||
+		!TimestampDifferenceExceeds(now, entry->accessTokenExpiry, MINUTE_IN_MSECS))
 	{
-		if (RestCatalogAccessToken)
+		if (entry->accessToken)
 		{
-			pfree(RestCatalogAccessToken);
-			RestCatalogAccessToken = NULL;
+			pfree(entry->accessToken);
+			entry->accessToken = NULL;
+			entry->accessTokenExpiry = 0;
 		}
 
 		char	   *accessToken = NULL;
 		int			expiresIn = 0;
 
-		FetchRestCatalogAccessToken(&accessToken, &expiresIn);
+		FetchRestCatalogAccessToken(opts, &accessToken, &expiresIn);
 
-		RestCatalogAccessToken = MemoryContextStrdup(TopMemoryContext, accessToken);
-		RestCatalogAccessTokenExpiry = now + (int64_t) expiresIn * 1000000; /* expiresIn is in
-																			 * seconds */
+		entry->accessToken = MemoryContextStrdup(RestTokenCacheCtx, accessToken);
+		entry->accessTokenExpiry = now + (int64_t) expiresIn * 1000000; /* expiresIn is in
+																		 * seconds */
 	}
 
-	Assert(RestCatalogAccessToken != NULL);
+	Assert(entry->accessToken != NULL);
 
-	return RestCatalogAccessToken;
+	return entry->accessToken;
 }
 
 
 /*
-* Fetches an access token from rest catalog using client credentials that are
-* configured via GUC variables.
+* Fetches an access token from rest catalog using the given options.
 */
 static void
-FetchRestCatalogAccessToken(char **accessToken, int *expiresIn)
+FetchRestCatalogAccessToken(RestCatalogOptions * opts, char **accessToken, int *expiresIn)
 {
-	if (!RestCatalogHost || !*RestCatalogHost)
-		ereport(ERROR, (errmsg("pg_lake_iceberg.rest_catalog_host should be set")));
-	if (!RestCatalogClientSecret || !*RestCatalogClientSecret)
-		ereport(ERROR, (errmsg("pg_lake_iceberg.rest_catalog_client_secret should be set")));
+	Assert(opts->host != NULL && opts->host[0] != '\0');
+	if (!opts->clientSecret || !*opts->clientSecret)
+		ereport(ERROR,
+				(errmsg("REST catalog client_secret is not configured"),
+				 errhint("Set the \"client_secret\" option on the server "
+						 "or the pg_lake_iceberg.rest_catalog_client_secret GUC.")));
 
-	char	   *accessTokenUrl = RestCatalogOauthHostPath;
+	char	   *accessTokenUrl = opts->oauthHostPath;
 
 	/*
-	 * if pg_lake_iceberg.rest_catalog_oauth_host_path is not set, use
-	 * Polaris' default oauth token endpoint
+	 * if oauthHostPath is not set, use Polaris' default oauth token endpoint
 	 */
-	if (*accessTokenUrl == '\0')
-		accessTokenUrl = psprintf(REST_CATALOG_AUTH_TOKEN_PATH, RestCatalogHost);
+	if (!accessTokenUrl || *accessTokenUrl == '\0')
+		accessTokenUrl = psprintf(REST_CATALOG_AUTH_TOKEN_PATH, opts->host);
 
 	/* Form-encoded body */
 	StringInfoData body;
 
 	initStringInfo(&body);
 	appendStringInfo(&body, "grant_type=client_credentials&scope=%s",
-					 URLEncodePath(RestCatalogScope));
+					 URLEncodePath(opts->scope));
 
 	/* Headers */
 	List	   *headers = NIL;
 
-	if (RestCatalogAuthType == REST_CATALOG_AUTH_TYPE_HORIZON)
+	if (opts->authType == REST_CATALOG_AUTH_TYPE_HORIZON)
 	{
 		/* Put secret in body (ignore client ID) */
-		appendStringInfo(&body, "&client_secret=%s", URLEncodePath(RestCatalogClientSecret));
+		appendStringInfo(&body, "&client_secret=%s", URLEncodePath(opts->clientSecret));
 	}
 	else
 	{
-		if (!RestCatalogClientId || !*RestCatalogClientId)
-			ereport(ERROR, (errmsg("pg_lake_iceberg.rest_catalog_client_id should be set")));
+		if (!opts->clientId || !*opts->clientId)
+			ereport(ERROR,
+					(errmsg("REST catalog client_id is not configured"),
+					 errhint("Set the \"client_id\" option on the server "
+							 "or the pg_lake_iceberg.rest_catalog_client_id GUC.")));
 
 		/* Build Authorization: Basic <base64(clientId:clientSecret)> */
-		char	   *encodedAuth = EncodeBasicAuth(RestCatalogClientId, RestCatalogClientSecret);
+		char	   *encodedAuth = EncodeBasicAuth(opts->clientId, opts->clientSecret);
 		char	   *authHeader = psprintf("Authorization: Basic %s", encodedAuth);
 
 		headers = lappend(headers, authHeader);
@@ -626,8 +1478,14 @@ FetchRestCatalogAccessToken(char **accessToken, int *expiresIn)
 
 	headers = lappend(headers, "Content-Type: application/x-www-form-urlencoded");
 
-	/* POST */
-	HttpResult	httpResponse = SendRequestToRestCatalog(HTTP_POST, accessTokenUrl, body.data, headers);
+	/*
+	 * Pass NULL opts so SendRequestToRestCatalog skips the 419 token-refresh
+	 * retry branch.  Otherwise a 419 here would call
+	 * GetRestCatalogAccessToken -> FetchRestCatalogAccessToken ->
+	 * SendRequestToRestCatalog in an infinite loop.
+	 */
+	HttpResult	httpResponse = SendRequestToRestCatalog(NULL, HTTP_POST, accessTokenUrl,
+														body.data, headers);
 
 	if (httpResponse.status != 200)
 		ereport(ERROR,
@@ -835,10 +1693,16 @@ GetRestCatalogNamespace(Oid relationId)
 
 
 /*
-* Readable rest catalog tables always use the catalog_name option
-* as the catalog name in the external catalog. Writable rest catalog tables
-* use the current database name as the catalog name.
-*/
+ * Returns the catalog name to use for REST API calls.
+ *
+ * Writable tables always use the current database name so that a
+ * subsequent ALTER SERVER ? ADD/SET catalog_name cannot silently
+ * re-route an existing table to a different REST namespace.
+ *
+ * Read-only tables always have catalog_name baked into their table
+ * options at CREATE TABLE time (inherited from the server option or
+ * defaulted to the database name).
+ */
 char *
 GetRestCatalogName(Oid relationId)
 {
@@ -847,27 +1711,16 @@ GetRestCatalogName(Oid relationId)
 	Assert(catalogType == REST_CATALOG_READ_ONLY ||
 		   catalogType == REST_CATALOG_READ_WRITE);
 
-	if (catalogType == REST_CATALOG_READ_ONLY)
-	{
+	if (catalogType == REST_CATALOG_READ_WRITE)
+		return get_database_name(MyDatabaseId);
 
-		Assert(GetIcebergCatalogType(relationId) == REST_CATALOG_READ_ONLY ||
-			   GetIcebergCatalogType(relationId) == REST_CATALOG_READ_WRITE);
+	ForeignTable *foreignTable = GetForeignTable(relationId);
+	char	   *catalogName = GetStringOption(foreignTable->options, "catalog_name", false);
 
-		ForeignTable *foreignTable = GetForeignTable(relationId);
-		List	   *options = foreignTable->options;
-
-		char	   *catalogName = GetStringOption(options, "catalog_name", false);
-
-		/* user provided the custom catalog name */
-		if (!catalogName)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("catalog_name option is required for rest catalog iceberg tables")));
-
+	if (catalogName != NULL)
 		return catalogName;
-	}
 
-	return get_database_name(MyDatabaseId);
+	elog(ERROR, "catalog_name missing on read-only REST catalog table %u", relationId);
 }
 
 
@@ -1139,9 +1992,14 @@ ClassifyRestCatalogRequestRetry(long status, int maxRetry, int retryNo)
  * cancel backend). This function can be called at post-commit hook,
  * so normally we wouldn't want any errors to happen, but then
  * Postgres already prevents post-commit backends to receive signals.
+ *
+ * When opts is non-NULL the retry callback can force-refresh the
+ * access token and patch the Authorization header on a 419 response.
+ * Pass opts = NULL for the token-fetch request itself to avoid recursion.
  */
 HttpResult
-SendRequestToRestCatalog(HttpMethod method, const char *url, const char *body, List *headers)
+SendRequestToRestCatalog(RestCatalogOptions * opts, HttpMethod method, const char *url,
+						 const char *body, List *headers)
 {
 	const int	MAX_HTTP_RETRY_FOR_REST_CATALOG = 3;
 
@@ -1169,7 +2027,7 @@ SendRequestToRestCatalog(HttpMethod method, const char *url, const char *body, L
 					 * new token.
 					 */
 					bool		forceRefreshToken = true;
-					char	   *freshToken = GetRestCatalogAccessToken(forceRefreshToken);
+					char	   *freshToken = GetRestCatalogAccessToken(opts, forceRefreshToken);
 
 					UpdateAuthorizationHeader(headers, freshToken);
 					continue;
