@@ -9,13 +9,15 @@ ARG BASE_IMAGE_TAG
 
 # Set environment variables for non-interactive installations and PostgreSQL/PostGIS versions
 ENV PG_LAKE_REF=main
-ARG PG16_VERSION=16.11
-ARG PG17_VERSION=17.7
-ARG PG18_VERSION=18.1
-ARG POSTGIS_VERSION=3.6.0
+ARG PG16_VERSION=16.14
+ARG PG17_VERSION=17.10
+ARG PG18_VERSION=18.4
+ARG PG19_VERSION=19beta1
+ARG POSTGIS_VERSION=3.6.3
 ARG PGAUDIT16_VERSION=REL_16_STABLE
 ARG PGAUDIT17_VERSION=REL_17_STABLE
 ARG PGAUDIT18_VERSION=REL_18_STABLE
+ARG PGAUDIT19_VERSION=main
 
 # Install build dependencies
 RUN if [ "$BASE_IMAGE_OS" = "almalinux" ]; then \
@@ -28,6 +30,7 @@ RUN if [ "$BASE_IMAGE_OS" = "almalinux" ]; then \
             ninja-build \
             wget \
             git \
+            bzip2 \
             readline-devel \
             zlib-devel \
             flex \
@@ -73,6 +76,7 @@ RUN if [ "$BASE_IMAGE_OS" = "debian" ]; then \
         apt-get update \
         && apt-get install -y \
             build-essential \
+            bzip2 \
             cmake \
             ninja-build \
             libreadline-dev \
@@ -128,7 +132,8 @@ RUN if [ "$BASE_IMAGE_OS" = "debian" ]; then \
         wget https://download.oracle.com/java/21/latest/jdk-21_linux-${ARCH}_bin.tar.gz && \
         mkdir -p /usr/lib/jvm && \
         tar -xzf jdk-21_linux-${ARCH}_bin.tar.gz -C /usr/lib/jvm/ && \
-        mv /usr/lib/jvm/jdk-21.0.10 /usr/lib/jvm/java-21-openjdk && \
+        JDK_DIR=$(tar -tzf jdk-21_linux-${ARCH}_bin.tar.gz | head -1 | cut -d/ -f1) && \
+        mv "/usr/lib/jvm/${JDK_DIR}" /usr/lib/jvm/java-21-openjdk && \
         rm jdk-21_linux-${ARCH}_bin.tar.gz; \
     fi
 
@@ -157,26 +162,31 @@ RUN echo "postgres ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers.d/postgres
 USER 1001:1001
 WORKDIR /home/postgres
 
-# Download PostgreSQL 16, 17, 18, PostGIS
+# Download PostgreSQL 16, 17, 18, 19, PostGIS
 RUN wget https://ftp.postgresql.org/pub/source/v$PG16_VERSION/postgresql-$PG16_VERSION.tar.gz && \
     wget https://ftp.postgresql.org/pub/source/v$PG17_VERSION/postgresql-$PG17_VERSION.tar.gz && \
     wget https://ftp.postgresql.org/pub/source/v$PG18_VERSION/postgresql-$PG18_VERSION.tar.gz && \
+    wget https://ftp.postgresql.org/pub/source/v$PG19_VERSION/postgresql-$PG19_VERSION.tar.bz2 && \
     wget https://download.osgeo.org/postgis/source/postgis-$POSTGIS_VERSION.tar.gz && \
     wget https://github.com/pgaudit/pgaudit/archive/refs/heads/$PGAUDIT16_VERSION.tar.gz && \
     wget https://github.com/pgaudit/pgaudit/archive/refs/heads/$PGAUDIT17_VERSION.tar.gz && \
     wget https://github.com/pgaudit/pgaudit/archive/refs/heads/$PGAUDIT18_VERSION.tar.gz && \
+    wget https://github.com/pgaudit/pgaudit/archive/refs/heads/$PGAUDIT19_VERSION.tar.gz && \
     tar -xzf postgresql-$PG16_VERSION.tar.gz && rm postgresql-$PG16_VERSION.tar.gz && \
     tar -xzf postgresql-$PG17_VERSION.tar.gz && rm postgresql-$PG17_VERSION.tar.gz && \
     tar -xzf postgresql-$PG18_VERSION.tar.gz && rm postgresql-$PG18_VERSION.tar.gz && \
+    tar -xjf postgresql-$PG19_VERSION.tar.bz2 && rm postgresql-$PG19_VERSION.tar.bz2 && \
     tar -xzf $PGAUDIT16_VERSION.tar.gz && rm $PGAUDIT16_VERSION.tar.gz && \
     tar -xzf $PGAUDIT17_VERSION.tar.gz && rm $PGAUDIT17_VERSION.tar.gz && \
     tar -xzf $PGAUDIT18_VERSION.tar.gz && rm $PGAUDIT18_VERSION.tar.gz && \
+    tar -xzf $PGAUDIT19_VERSION.tar.gz && rm $PGAUDIT19_VERSION.tar.gz && \
     tar -xzf postgis-$POSTGIS_VERSION.tar.gz && rm postgis-$POSTGIS_VERSION.tar.gz
 
 ARG PG_COMPILE_FLAGS_16="--enable-debug --enable-cassert --enable-depend --with-openssl --with-libxml --with-libxslt --with-icu --with-uuid=ossp --with-lz4 --with-pam"
 # PG17 has asserts disabled
 ARG PG_COMPILE_FLAGS_17="--enable-debug --enable-depend --with-openssl --with-libxml --with-libxslt --with-icu --with-uuid=ossp --with-lz4 --enable-injection-points --with-pam"
 ARG PG_COMPILE_FLAGS_18="--enable-debug --enable-cassert --enable-depend --with-openssl --with-libxml --with-libxslt --with-icu --with-uuid=ossp --with-lz4 --enable-injection-points --with-pam"
+ARG PG_COMPILE_FLAGS_19="--enable-debug --enable-cassert --enable-depend --with-openssl --with-libxml --with-libxslt --with-icu --with-uuid=ossp --with-lz4 --enable-injection-points --with-pam"
 ENV PGBASEDIR=/home/postgres
 
 # Compile and install PostgreSQL 16 with pgindent
@@ -217,6 +227,19 @@ RUN cd postgresql-$PG18_VERSION && \
     (cd contrib && make -j `nproc` install) && \
     cd .. && rm -rf postgresql-$PG18_VERSION*
 
+# Compile and install PostgreSQL 19 with pgindent
+RUN cd postgresql-$PG19_VERSION && \
+    ./configure --prefix=$PGBASEDIR/pgsql-19 $PG_COMPILE_FLAGS_19 && \
+    make -j `nproc` && make install && \
+    make -C src/test/isolation install && \
+    make -C src/test/modules/injection_points install && \
+    make -j `nproc` -C src/tools/pg_bsd_indent install && \
+    cp src/tools/pgindent/pgindent $PGBASEDIR/pgsql-19/bin/ && \
+    cp src/tools/pgindent/typedefs.list $PGBASEDIR/pgsql-19/share/ && \
+    mkdir -pv $PGBASEDIR/pgsql-19/regress && cp -r src/test/regress/* $PGBASEDIR/pgsql-19/regress && \
+    (cd contrib && make -j `nproc` install) && \
+    cd .. && rm -rf postgresql-$PG19_VERSION*
+
 # Compile and install PG AUDIT 16
 RUN cd pgaudit-$PGAUDIT16_VERSION && \
     make -j `nproc` install USE_PGXS=1 PG_CONFIG=$PGBASEDIR/pgsql-16/bin/pg_config
@@ -229,19 +252,28 @@ RUN cd pgaudit-$PGAUDIT17_VERSION && \
 RUN cd pgaudit-$PGAUDIT18_VERSION && \
     make -j `nproc` install USE_PGXS=1 PG_CONFIG=$PGBASEDIR/pgsql-18/bin/pg_config
 
+# Compile and install PG AUDIT 19
+RUN cd pgaudit-$PGAUDIT19_VERSION && \
+    make -j `nproc` install USE_PGXS=1 PG_CONFIG=$PGBASEDIR/pgsql-19/bin/pg_config
+
 # Compile and install PostGIS
 RUN cd postgis-$POSTGIS_VERSION && \
     ./configure --prefix=$PGBASEDIR/pgsql-16/ --with-pgconfig=$PGBASEDIR/pgsql-16/bin/pg_config && make -j `nproc` && make install && make clean && \
     ./configure --prefix=$PGBASEDIR/pgsql-17/ --with-pgconfig=$PGBASEDIR/pgsql-17/bin/pg_config && make -j `nproc` && make install && make clean && \
     ./configure --prefix=$PGBASEDIR/pgsql-18/ --with-pgconfig=$PGBASEDIR/pgsql-18/bin/pg_config && make -j `nproc` && make install && make clean && \
+    ./configure --prefix=$PGBASEDIR/pgsql-19/ --with-pgconfig=$PGBASEDIR/pgsql-19/bin/pg_config && make -j `nproc` && make install && make clean && \
     cd .. && rm -rf postgis-$POSTGIS_VERSION*
 
 # Compile and install pg_cron
-RUN git clone https://github.com/citusdata/pg_cron.git && \
+# Use CyberDem0n's postgresql-19 branch (PR citusdata/pg_cron#430) until the
+# PG19 support patch is merged upstream. The patch is backward compatible
+# with PG 16/17/18, so we can build all four from the same source.
+RUN git clone -b postgresql-19 https://github.com/CyberDem0n/pg_cron.git && \
     cd pg_cron && \
     make install PG_CONFIG=$PGBASEDIR/pgsql-16/bin/pg_config && make clean PG_CONFIG=$PGBASEDIR/pgsql-16/bin/pg_config && \
     make install PG_CONFIG=$PGBASEDIR/pgsql-17/bin/pg_config && make clean PG_CONFIG=$PGBASEDIR/pgsql-17/bin/pg_config && \
     make install PG_CONFIG=$PGBASEDIR/pgsql-18/bin/pg_config && make clean PG_CONFIG=$PGBASEDIR/pgsql-18/bin/pg_config && \
+    make install PG_CONFIG=$PGBASEDIR/pgsql-19/bin/pg_config && make clean PG_CONFIG=$PGBASEDIR/pgsql-19/bin/pg_config && \
     cd .. && rm -rf pg_cron
 
 # Compile and install pg_incremental
@@ -250,6 +282,7 @@ RUN git clone https://github.com/CrunchyData/pg_incremental.git && \
     make install PG_CONFIG=$PGBASEDIR/pgsql-16/bin/pg_config && make clean PG_CONFIG=$PGBASEDIR/pgsql-16/bin/pg_config && \
     make install PG_CONFIG=$PGBASEDIR/pgsql-17/bin/pg_config && make clean PG_CONFIG=$PGBASEDIR/pgsql-17/bin/pg_config && \
     make install PG_CONFIG=$PGBASEDIR/pgsql-18/bin/pg_config && make clean PG_CONFIG=$PGBASEDIR/pgsql-18/bin/pg_config && \
+    make install PG_CONFIG=$PGBASEDIR/pgsql-19/bin/pg_config && make clean PG_CONFIG=$PGBASEDIR/pgsql-19/bin/pg_config && \
     cd .. && rm -rf pg_incremental
 
 # Install vcpkg as postgres user

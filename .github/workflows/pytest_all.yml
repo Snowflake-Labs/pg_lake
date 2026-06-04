@@ -83,6 +83,7 @@ jobs:
   build-and-install-almalinux:
     needs: build-image-almalinux
     runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.pg_version == 19 }}
 
     container:
       image: ghcr.io/snowflake-labs/pg-lake-ci-pg-almalinux:${{ needs.build-image-almalinux.outputs.tag }}
@@ -92,8 +93,9 @@ jobs:
         password: ${{ secrets.github_token }}
 
     strategy:
+      fail-fast: false
       matrix:
-        pg_version: [16, 17, 18]
+        pg_version: [16, 17, 18, 19]
 
     steps:
       - uses: actions/checkout@v4
@@ -108,6 +110,7 @@ jobs:
   build-and-install-debian:
     needs: build-image-debian
     runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.pg_version == 19 }}
 
     container:
       image: ghcr.io/snowflake-labs/pg-lake-ci-pg-debian:${{ needs.build-image-debian.outputs.tag }}
@@ -117,8 +120,9 @@ jobs:
         password: ${{ secrets.github_token }}
 
     strategy:
+      fail-fast: false
       matrix:
-        pg_version: [16, 17, 18]
+        pg_version: [16, 17, 18, 19]
 
     steps:
       - uses: actions/checkout@v4
@@ -141,6 +145,7 @@ jobs:
   test-check:
     needs: [build-image-almalinux, build-and-install-almalinux]
     runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.pg_version == 19 }}
     container:
       image: ghcr.io/snowflake-labs/pg-lake-ci-pg-almalinux:${{ needs.build-image-almalinux.outputs.tag }}
       options: --user 1001 --shm-size=128MB
@@ -151,7 +156,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg_version: [17, 18]
+        pg_version: [17, 18, 19]
         test_make_target:
           - 'check-duckdb_pglake'
           - 'check-avro'
@@ -179,6 +184,7 @@ jobs:
   test-check-pg-lake-table:
     needs: [build-image-almalinux, build-and-install-almalinux]
     runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.pg_version == 19 }}
     container:
       image: ghcr.io/snowflake-labs/pg-lake-ci-pg-almalinux:${{ needs.build-image-almalinux.outputs.tag }}
       options: --user 1001 --shm-size=128MB
@@ -189,7 +195,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg_version: [17, 18]
+        pg_version: [17, 18, 19]
         test_make_target:
           - 'check-pg_lake_table'
         # helps splitting tests into 5 parallel jobs
@@ -247,6 +253,7 @@ jobs:
   test-installcheck-postgres:
     needs: [build-image-debian, build-and-install-debian]
     runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.pg_version == 19 }}
     container:
       image: ghcr.io/snowflake-labs/pg-lake-ci-pg-debian:${{ needs.build-image-debian.outputs.tag }}
       options: --user 1001 --shm-size=128MB
@@ -257,7 +264,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg_version: [16, 17, 18]
+        pg_version: [16, 17, 18, 19]
         test_make_target:
           - 'installcheck-postgres'
           - 'installcheck-postgres-with_extensions_created'
@@ -319,6 +326,7 @@ jobs:
   test-isolation:
     needs: [build-image-almalinux, build-and-install-almalinux]
     runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.pg_version == 19 }}
     container:
       image: ghcr.io/snowflake-labs/pg-lake-ci-pg-almalinux:${{ needs.build-image-almalinux.outputs.tag }}
       options: --user 1001 --shm-size=128MB
@@ -329,7 +337,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg_version: [17, 18]
+        pg_version: [17, 18, 19]
         test_make_target:
           - 'check-isolation_pg_lake_table'
 
@@ -348,6 +356,7 @@ jobs:
   test-upgrade:
     needs: [build-image-almalinux, build-and-install-almalinux]
     runs-on: ubuntu-latest
+    continue-on-error: ${{ contains(matrix.pg_version_pairs, '19') }}
     container:
       image: ghcr.io/snowflake-labs/pg-lake-ci-pg-almalinux:${{ needs.build-image-almalinux.outputs.tag }}
       options: --user 1001 --shm-size=128MB
@@ -358,7 +367,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg_version_pairs: ["16-17", "17-18", "16-18"]
+        pg_version_pairs: ["16-17", "17-18", "16-18", "17-19", "18-19", "16-19"]
         test_make_target:
           - 'check-pg_lake_table-upgrade'
 
