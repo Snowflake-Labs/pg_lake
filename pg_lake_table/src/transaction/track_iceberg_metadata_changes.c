@@ -358,8 +358,16 @@ PostAllRestCatalogRequests(void)
 			continue;
 		}
 
-		/* TODO: can we ever have multiple catalogs? */
-		catalogName = requestPerTable->catalogName;
+		/*
+		 * EnsureXactBoundToRestCatalog() already guarantees every entry
+		 * belongs to the same REST catalog server.  Capture the catalog name
+		 * from the first valid entry and Assert the invariant holds for all
+		 * subsequent ones.
+		 */
+		if (catalogName == NULL)
+			catalogName = requestPerTable->catalogName;
+		else
+			Assert(strcmp(catalogName, requestPerTable->catalogName) == 0);
 
 		if (requestPerTable->createTableRequest != NULL &&
 			requestPerTable->dropTableRequest != NULL)
@@ -609,6 +617,46 @@ InitRestCatalogRequestsHashIfNeeded(void)
 
 
 /*
+ * Ensure this transaction is bound to the REST catalog that owns
+ * relationId.  On the first mutation in the transaction, resolves
+ * the relation's catalog options and stores a copy in
+ * TopTransactionContext so that XACT_EVENT_PRE_COMMIT can reuse
+ * them without syscache lookups.  On subsequent mutations, verifies
+ * the server OID matches the already-bound catalog and raises
+ * ERRCODE_FEATURE_NOT_SUPPORTED if it does not.
+ *
+ * Identity is the iceberg_catalog server OID, not the user-typed name.
+ * Two requests for the same physical server -- whether the user spelled
+ * the catalog as 'rest', 'REST', or as the underlying built-in server
+ * name on different statements -- collapse to the same OID and are
+ * treated as one catalog.
+ */
+static void
+EnsureXactBoundToRestCatalog(Oid relationId)
+{
+	RestCatalogOptions *resolvedOpts =
+		GetRestCatalogOptionsForRelation(relationId);
+
+	if (PgLakeXactRestCatalog->catalogOpts == NULL)
+	{
+		PgLakeXactRestCatalog->catalogOpts =
+			CopyRestCatalogOptions(TopTransactionContext, resolvedOpts);
+		return;
+	}
+
+	if (PgLakeXactRestCatalog->catalogOpts->serverOid != resolvedOpts->serverOid)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot modify tables from different REST catalogs "
+						"in the same transaction"),
+				 errdetail("This transaction already targets catalog \"%s\", "
+						   "but the current statement targets \"%s\".",
+						   PgLakeXactRestCatalog->catalogOpts->catalog,
+						   resolvedOpts->catalog)));
+}
+
+
+/*
  * BindRelationToXactRestCatalog binds the current transaction to the REST
  * catalog associated with `relationId`, failing fast if a *different* REST
  * catalog was already locked in for this transaction.
@@ -638,41 +686,8 @@ BindRelationToXactRestCatalog(Oid relationId)
 		GetIcebergCatalogType(relationId) != REST_CATALOG_READ_WRITE)
 		return;
 
-	/*
-	 * Resolve the relation's catalog options up front.  We need the full
-	 * resolved struct (host, credentials, ...), not just the user-facing
-	 * identifier, because XACT_EVENT_PRE_COMMIT reuses these fields when
-	 * issuing the REST API requests and is not allowed to do syscache lookups
-	 * by then.
-	 */
-	RestCatalogOptions *resolvedOpts = GetRestCatalogOptionsForRelation(relationId);
-
 	InitRestCatalogRequestsHashIfNeeded();
-
-	if (PgLakeXactRestCatalog->catalogOpts == NULL)
-	{
-		PgLakeXactRestCatalog->catalogOpts =
-			CopyRestCatalogOptions(TopTransactionContext, resolvedOpts);
-		return;
-	}
-
-	/*
-	 * Identity is the iceberg_catalog server OID, not the user-typed name.
-	 * Two requests for the same physical server -- whether the user spelled
-	 * the catalog as 'rest', 'REST', or as the underlying built-in server
-	 * name on different statements -- collapse to the same OID and are
-	 * treated as one catalog.  The user-facing names are still reported in
-	 * the error message.
-	 */
-	if (PgLakeXactRestCatalog->catalogOpts->serverOid != resolvedOpts->serverOid)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("cannot modify tables from different REST catalogs "
-						"in the same transaction"),
-				 errdetail("This transaction already targets catalog \"%s\", "
-						   "but the current statement targets \"%s\".",
-						   PgLakeXactRestCatalog->catalogOpts->catalog,
-						   resolvedOpts->catalog)));
+	EnsureXactBoundToRestCatalog(relationId);
 }
 
 
@@ -695,41 +710,7 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 		memset(requestPerTable, 0, sizeof(RestCatalogRequestPerTable));
 		requestPerTable->relationId = relationId;
 
-		/* Resolve the options for this relation's REST catalog */
-		RestCatalogOptions *resolvedOpts = GetRestCatalogOptionsForRelation(relationId);
-
-		/*
-		 * DDL paths (CREATE TABLE / DROP TABLE) call us directly from the
-		 * utility hook and may be the very first thing to touch a REST
-		 * catalog in this transaction, so this branch is still genuinely
-		 * reached.  DML paths reach us only from XACT_EVENT_PRE_COMMIT, by
-		 * which time BindRelationToXactRestCatalog() has already populated
-		 * catalogOpts.
-		 */
-		if (PgLakeXactRestCatalog->catalogOpts == NULL)
-		{
-			PgLakeXactRestCatalog->catalogOpts =
-				CopyRestCatalogOptions(TopTransactionContext, resolvedOpts);
-		}
-
-		/*
-		 * Belt-and-suspenders check.  All DML and DDL entry points either
-		 * bind through BindRelationToXactRestCatalog() at statement time or
-		 * populate catalogOpts via the branch above, so in practice we never
-		 * reach here with a mismatched catalog.  Kept as a last line of
-		 * defense for any future code path that forgets to do so.  See the
-		 * companion comment in BindRelationToXactRestCatalog for why identity
-		 * is the server OID, not the user-typed name.
-		 */
-		else if (PgLakeXactRestCatalog->catalogOpts->serverOid != resolvedOpts->serverOid)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("cannot modify tables from different REST catalogs "
-							"in the same transaction"),
-					 errdetail("This transaction already targets catalog server "
-							   "\"%s\", but table %u belongs to \"%s\".",
-							   PgLakeXactRestCatalog->catalogOpts->catalog, relationId,
-							   resolvedOpts->catalog)));
+		EnsureXactBoundToRestCatalog(relationId);
 
 		requestPerTable->catalogName =
 			MemoryContextStrdup(TopTransactionContext, GetRestCatalogName(relationId));
@@ -747,7 +728,7 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 
 		requestPerTable->tableRestUrl =
 			MemoryContextStrdup(TopTransactionContext, psprintf(REST_CATALOG_TABLE,
-																resolvedOpts->host,
+																PgLakeXactRestCatalog->catalogOpts->host,
 																requestPerTable->urlEncodedCatalogName,
 																requestPerTable->urlEncodedCatalogNamespace,
 																requestPerTable->urlEncodedCatalogTableName));

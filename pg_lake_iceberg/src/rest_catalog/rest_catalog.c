@@ -170,39 +170,24 @@ FindCatalogOptionDesc(const char *name)
 
 
 /*
- * Build the "Valid options are: ?" hint string.  Cached after first call.
- *
- * The cache must outlive any individual transaction: this helper is only
- * called on validator error paths, and ereport(ERROR) immediately aborts
- * the current transaction, freeing whatever short-lived context the
- * validator was running under.  Allocate the buffer in TopMemoryContext
- * so the static pointer remains valid for the lifetime of the backend.
+ * Build the "Valid options are: ?" hint string.
  */
 static const char *
 GetValidCatalogOptionsHint(void)
 {
-	static char *hint = NULL;
+	StringInfoData buf;
 
-	if (hint == NULL)
+	initStringInfo(&buf);
+	appendStringInfoString(&buf, "Valid options are: ");
+	for (int i = 0; i < NUM_CATALOG_OPTIONS; i++)
 	{
-		MemoryContext oldcxt;
-		StringInfoData buf;
-
-		oldcxt = MemoryContextSwitchTo(TopMemoryContext);
-		initStringInfo(&buf);
-		appendStringInfoString(&buf, "Valid options are: ");
-		for (int i = 0; i < NUM_CATALOG_OPTIONS; i++)
-		{
-			if (i > 0)
-				appendStringInfoString(&buf, ", ");
-			appendStringInfoString(&buf, iceberg_catalog_option_descs[i].name);
-		}
-		appendStringInfoChar(&buf, '.');
-		hint = buf.data;
-		MemoryContextSwitchTo(oldcxt);
+		if (i > 0)
+			appendStringInfoString(&buf, ", ");
+		appendStringInfoString(&buf, iceberg_catalog_option_descs[i].name);
 	}
+	appendStringInfoChar(&buf, '.');
 
-	return hint;
+	return buf.data;
 }
 
 
@@ -220,13 +205,13 @@ ValidateCatalogOptionValue(const IcebergCatalogOptionDesc * desc, DefElem *def)
 			{
 				char	   *authType = defGetString(def);
 
-				if (pg_strcasecmp(authType, "oauth2") != 0 &&
-					pg_strcasecmp(authType, "default") != 0 &&
+				if (pg_strcasecmp(authType, "default") != 0 &&
+					pg_strcasecmp(authType, "oauth2") != 0 &&
 					pg_strcasecmp(authType, "horizon") != 0)
 					ereport(ERROR,
 							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 							 errmsg("invalid rest_auth_type option: \"%s\"", authType),
-							 errhint("Valid values are \"oauth2\" and \"horizon\".")));
+							 errhint("Valid values are \"default\", \"oauth2\", and \"horizon\".")));
 				return;
 			}
 		case CATALOG_OPT_BOOL:
