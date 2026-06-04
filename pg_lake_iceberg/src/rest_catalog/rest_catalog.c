@@ -210,7 +210,7 @@ FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSche
 	const char *namespaceName = GetRestCatalogNamespace(relationId);
 	const char *relationName = GetRestCatalogTableName(relationId);
 
-	appendStringInfo(location, "%s/%s/%s/%s/%d", IcebergDefaultLocationPrefix, catalogName, namespaceName, relationName, relationId);
+	appendStringInfo(location, "%s/%s/%s/%s/%u", IcebergDefaultLocationPrefix, catalogName, namespaceName, relationName, relationId);
 	appendJsonString(body, "location", location->data);
 	appendStringInfoChar(body, '}');	/* end set-location */
 
