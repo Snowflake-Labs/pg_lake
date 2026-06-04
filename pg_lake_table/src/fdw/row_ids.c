@@ -89,7 +89,7 @@ EnableRowIdsOnTable(Oid relationId)
 RangeVar *
 RowIdSequenceGetRangeVar(Oid relationId)
 {
-	char	   *sequenceName = psprintf("rowid_%d_seq", relationId);
+	char	   *sequenceName = psprintf("rowid_%u_seq", relationId);
 
 	return makeRangeVar(REPLICATION_WRITES_SCHEMA, sequenceName, -1);
 }
@@ -113,7 +113,7 @@ CreateRelationRowIdSequence(Oid relationId)
 
 	if (OidIsValid(sequenceId))
 		ereport(ERROR, (errmsg("rowid sequence already exists "
-							   "for relation %d", relationId),
+							   "for relation %u", relationId),
 						errcode(ERRCODE_DUPLICATE_TABLE)));
 
 	/* generate our create sequence statement */

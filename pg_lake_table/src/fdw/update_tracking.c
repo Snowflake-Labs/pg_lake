@@ -142,7 +142,7 @@ static RangeVar *
 GetUpdateTableRangeVar(Oid relationId)
 {
 	char	   *schemaName = NULL;
-	char	   *tableName = psprintf("lake_update_%d", relationId);
+	char	   *tableName = psprintf("lake_update_%u", relationId);
 	RangeVar   *relation = makeRangeVar(schemaName, tableName, -1);
 
 	relation->relpersistence = RELPERSISTENCE_TEMP;
