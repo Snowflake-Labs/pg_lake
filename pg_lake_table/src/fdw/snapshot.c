@@ -259,7 +259,8 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 		IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
 
 		if (catalogType == REST_CATALOG_READ_ONLY ||
-			catalogType == OBJECT_STORE_READ_ONLY)
+			catalogType == OBJECT_STORE_READ_ONLY ||
+			catalogType == NONE_CATALOG)
 			ErrorIfSchemasDoNotMatch(relationId, metadata);
 
 		CreateTableScanForIcebergMetadata(relationId, metadata, baseRestrictInfoList, &fileScans, &positionDeleteScans);
