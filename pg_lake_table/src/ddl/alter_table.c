@@ -626,6 +626,7 @@ RequiresNewIcebergSchema(AlterTableStmt *alterStmt)
 			case AT_AlterColumnType:
 			case AT_ColumnDefault:
 			case AT_CookedColumnDefault:
+			case AT_DropColumn:
 			case AT_DropNotNull:
 			case AT_SetNotNull:
 #if PG_VERSION_NUM >= 170000
