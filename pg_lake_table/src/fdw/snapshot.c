@@ -378,6 +378,18 @@ ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata)
 	List	   *postgresColumnMappings =
 		CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(relationId);
 
+	/*
+	 * NONE_CATALOG external foreign tables (CREATE FOREIGN TABLE x() SERVER
+	 * pg_lake OPTIONS (path '...')) have their column list synthesized from
+	 * the iceberg metadata at CREATE time and do not carry write/initial
+	 * defaults onto pg_attribute. Skip the defaults-only comparison there to
+	 * avoid spurious mismatches; for catalog-backed read-only tables
+	 * (REST_CATALOG_READ_ONLY, OBJECT_STORE_READ_ONLY) the user picks the
+	 * Postgres-side schema explicitly, so the defaults check still applies.
+	 */
+	bool		skipDefaultsCheck =
+		GetIcebergCatalogType(relationId) == NONE_CATALOG;
+
 	/* if field counts do not match, a DDL happened */
 	if (icebergTableSchema->fields_length != list_length(postgresColumnMappings))
 	{
@@ -401,20 +413,19 @@ ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata)
 		DataFileSchemaField *postgresField = columnMapping->field;
 		PGType		postgresType = columnMapping->pgType;
 		PGType		icebergType = IcebergFieldToPostgresType(icebergField->type);
+		bool		hasIcebergDefault =
+			(icebergField->writeDefault != NULL) ||
+			(icebergField->initialDefault != NULL);
 
 		/*
 		 * Compare the id fields.
-		 *
-		 * We deliberately don't compare attHasDef against the iceberg field's
-		 * write/initial defaults: external tables auto-imported from metadata
-		 * (NONE_CATALOG, OBJECT_STORE_READ_ONLY) don't carry iceberg defaults
-		 * onto pg_attribute, and read-only tables don't accept INSERTs
-		 * anyway, so a defaults-only mismatch isn't user-visible.
 		 */
 		if (icebergField->id != postgresField->id ||
 			NullSafeStrcmp(icebergField->name, postgresField->name) != 0 ||
 			!TypesAreCompatible(postgresType, icebergType) ||
-			columnMapping->attNotNull != icebergField->required)
+			columnMapping->attNotNull != icebergField->required ||
+			(!skipDefaultsCheck &&
+			 columnMapping->attHasDef != hasIcebergDefault))
 		{
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
