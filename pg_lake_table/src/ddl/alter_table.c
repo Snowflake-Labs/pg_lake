@@ -300,7 +300,21 @@ ProcessAlterTable(ProcessUtilityParams * processUtilityParams, void *arg)
 
 	}
 
-	ErrorIfReadOnlyIcebergTable(relationId);
+	/*
+	 * NONE_CATALOG external Iceberg foreign tables (CREATE FOREIGN TABLE ...
+	 * SERVER pg_lake OPTIONS (path '...')) have no iceberg catalog entry, so
+	 * IsReadOnlyIcebergTable() reports them as read-only and rejects every
+	 * ALTER -- including OWNER TO and other Postgres-level metadata changes
+	 * that don't touch the underlying data. Only enforce the read-only gate
+	 * for ALTERs that would update Iceberg metadata.
+	 */
+	bool		skipReadOnlyCheck =
+		GetIcebergCatalogType(relationId) == NONE_CATALOG &&
+		IsExternalIcebergTable(relationId) &&
+		!RequiresNewIcebergSchema(alterStmt);
+
+	if (!skipReadOnlyCheck)
+		ErrorIfReadOnlyIcebergTable(relationId);
 
 	MaybeConvertUnsupportedNumericColumnsToDoubleInAlterStmt(alterStmt);
 	ErrorIfUnsupportedTypeAddedForIcebergTables(alterStmt);
