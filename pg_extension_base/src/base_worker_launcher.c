@@ -58,6 +58,9 @@
  * should still exist, or whether to clean up their shared memory records.
  */
 #include "postgres.h"
+#include "utils/hsearch.h"
+#include "access/htup_details.h"
+#include "catalog/pg_type_d.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "miscadmin.h"
@@ -94,6 +97,10 @@
 #include "utils/memutils.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
+#include "utils/tuplestore.h"
+#if PG_VERSION_NUM >= 190000
+#include "utils/wait_event.h"
+#endif
 #include "tcop/utility.h"
 
 #include "pg_extension_base/base_workers.h"
@@ -508,11 +515,20 @@ BaseWorkerSharedMemoryInit(void)
 
 	if (!alreadyInitialized)
 	{
-		BaseWorkerControl->trancheId = LWLockNewTrancheId();
 		BaseWorkerControl->lockTrancheName = "pg_extension_base server starter locks";
+#if PG_VERSION_NUM >= 190000
 
+		/*
+		 * PG19 folded the name into LWLockNewTrancheId and removed
+		 * LWLockRegisterTranche entirely.
+		 */
+		BaseWorkerControl->trancheId =
+			LWLockNewTrancheId(BaseWorkerControl->lockTrancheName);
+#else
+		BaseWorkerControl->trancheId = LWLockNewTrancheId();
 		LWLockRegisterTranche(BaseWorkerControl->trancheId,
 							  BaseWorkerControl->lockTrancheName);
+#endif
 
 		LWLockInitialize(&BaseWorkerControl->lock,
 						 BaseWorkerControl->trancheId);
@@ -527,7 +543,11 @@ BaseWorkerSharedMemoryInit(void)
 	int			hashFlags = (HASH_ELEM | HASH_FUNCTION);
 
 	DatabaseStarterHash = ShmemInitHash("pg_extension_base database starter hash",
+#if PG_VERSION_NUM >= 190000
+										2 * max_worker_processes,
+#else
 										max_worker_processes, 2 * max_worker_processes,
+#endif
 										&hashInfo, hashFlags);
 
 	memset(&hashInfo, 0, sizeof(hashInfo));
@@ -537,7 +557,11 @@ BaseWorkerSharedMemoryInit(void)
 	hashFlags = (HASH_ELEM | HASH_FUNCTION);
 
 	BaseWorkerHash = ShmemInitHash("pg_extension_base base worker hash",
+#if PG_VERSION_NUM >= 190000
+								   2 * max_worker_processes,
+#else
 								   max_worker_processes, 2 * max_worker_processes,
+#endif
 								   &hashInfo, hashFlags);
 
 	LWLockRelease(AddinShmemInitLock);
@@ -650,7 +674,11 @@ PgExtensionServerStarterMain(Datum arg)
 	/* set up signal handlers */
 	pqsignal(SIGHUP, HandleSighup);
 	pqsignal(SIGTERM, HandleSigterm);
+#if PG_VERSION_NUM >= 190000
+	pqsignal(SIGINT, PG_SIG_IGN);
+#else
 	pqsignal(SIGINT, SIG_IGN);
+#endif
 
 	before_shmem_exit(PgBaseExtensionServerStarterSharedMemoryExit, 0);
 
@@ -1012,7 +1040,11 @@ PgExtensionBaseDatabaseStarterMain(Datum databaseIdDatum)
 
 	/* Establish signal handlers before unblocking signals. */
 	pqsignal(SIGHUP, HandleSighup);
+#if PG_VERSION_NUM >= 190000
+	pqsignal(SIGINT, PG_SIG_IGN);
+#else
 	pqsignal(SIGINT, SIG_IGN);
+#endif
 	pqsignal(SIGTERM, HandleSigterm);
 
 	/* Set our exit handler before any calls to proc_exit */

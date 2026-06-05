@@ -16,6 +16,7 @@
  */
 
 #include "postgres.h"
+#include "catalog/pg_type_d.h"
 #include "fmgr.h"
 #include "funcapi.h"
 
@@ -28,6 +29,7 @@
 
 #include "utils/builtins.h"
 #include "utils/json.h"
+#include "utils/tuplestore.h"
 
 
 static ColumnBound * FindColumnBoundByColumnId(ColumnBound * bounds, int numBounds, int columnId);

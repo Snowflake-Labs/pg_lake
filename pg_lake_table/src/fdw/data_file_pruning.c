@@ -21,6 +21,9 @@
 *   execution and statistics of the data files.
 */
 #include "postgres.h"
+#include "utils/hsearch.h"
+#include "access/htup_details.h"
+#include "catalog/pg_type_d.h"
 
 #include "catalog/pg_am_d.h"
 #include "catalog/pg_index.h"

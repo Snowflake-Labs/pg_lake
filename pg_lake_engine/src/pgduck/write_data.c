@@ -19,6 +19,7 @@
  * Functions for generating query for writing data via pgduck server.
  */
 #include "postgres.h"
+#include "catalog/pg_type_d.h"
 
 #include "access/tupdesc.h"
 #include "commands/defrem.h"

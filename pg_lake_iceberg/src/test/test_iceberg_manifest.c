@@ -16,6 +16,7 @@
  */
 
 #include "postgres.h"
+#include "catalog/pg_type_d.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "libpq-fe.h"
@@ -28,6 +29,7 @@
 #include "pg_lake/iceberg/partitioning/partition.h"
 
 #include "utils/builtins.h"
+#include "utils/tuplestore.h"
 
 static const char *FetchCurrentSnapshotManifestListPathFromTableMetadataUri(const char *tableMetadataPath);
 static List *FetchDataFilePathsFromTableMetadataUri(const char *tableMetadataPath, bool isDelete);

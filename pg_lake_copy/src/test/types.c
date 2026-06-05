@@ -20,12 +20,14 @@
  */
 
 #include "postgres.h"
+#include "catalog/pg_type_d.h"
 #include "fmgr.h"
 #include "funcapi.h"
 
 #include "pg_lake/pgduck/type.h"
 #include "pg_lake/pgduck/parse_struct.h"
 #include "utils/builtins.h"
+#include "utils/tuplestore.h"
 
 
 PG_FUNCTION_INFO_V1(duckdb_type_by_name);

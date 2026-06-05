@@ -53,6 +53,7 @@
 #include "utils/regproc.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
+#include "utils/tuplestore.h"
 
 
 /* Check PgSQL version */

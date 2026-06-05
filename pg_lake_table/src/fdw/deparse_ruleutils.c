@@ -25,6 +25,7 @@
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
+#include "catalog/pg_type_d.h"
 
 #include "parser/parse_func.h"
 #include "parser/parsetree.h"
