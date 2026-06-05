@@ -26,13 +26,19 @@
 #include "postgres.h"
 
 #include "catalog/pg_type.h"
+#include "pg_lake/parsetree/const.h"
+#include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/shippable_builtin_operators.h"
 #include "nodes/nodeFuncs.h"
+#include "utils/array.h"
+#include "utils/lsyscache.h"
 
 #define SHIPPABLE_OPERATORS_BY_TYPE(typename, oprs) \
 	{typename, ARRAY_SIZE(oprs), oprs}
 
 static bool IsTextConcatAnyNonArrayShippable(Node *node);
+static bool IsArrayContainsShippable(Node *node);
+static bool IsArrayContainedShippable(Node *node);
 
 /* Bytea operators */
 static const PGDuckShippableOperator PGDuckShippableByteaOperators[] = {
@@ -469,7 +475,16 @@ static const PGDuckShippableOperator PGDuckShippableArrayOperators[] = {
 	{">", "pg_catalog", "array_gt", 2, {"anyarray", "anyarray"}, NULL},
 	{">=", "pg_catalog", "array_ge", 2, {"anyarray", "anyarray"}, NULL},
 	{"&&", "pg_catalog", "arrayoverlap", 2, {"anyarray", "anyarray"}, NULL},
-	/* @> and <@ behave differently for NULL */
+
+	/*
+	 * @> and <@ disagree with DuckDB on NULL semantics: DuckDB's list_has_all
+	 * ignores NULL elements in the contained (sub-list) operand and returns
+	 * true, while PostgreSQL uses strict equality and returns false. We
+	 * therefore only ship these when the sub-list operand is a NULL-free
+	 * constant array (see IsShippableContainmentConstArray).
+	 */
+	{"@>", "pg_catalog", "arraycontains", 2, {"anyarray", "anyarray"}, IsArrayContainsShippable},
+	{"<@", "pg_catalog", "arraycontained", 2, {"anyarray", "anyarray"}, IsArrayContainedShippable},
 	{"||", "pg_catalog", "array_append", 2, {"anycompatiblearray", "anycompatible"}, NULL},
 	{"||", "pg_catalog", "array_cat", 2, {"anycompatiblearray", "anycompatiblearray"}, NULL},
 };
@@ -566,4 +581,85 @@ IsTextConcatAnyNonArrayShippable(Node *node)
 	}
 
 	return true;
+}
+
+
+/*
+ * IsShippableContainmentConstArray determines whether the given argument (the
+ * "contained" / sub-list operand of an array containment operator) is a
+ * constant array that DuckDB will evaluate identically to PostgreSQL.
+ *
+ * DuckDB's list_has_all (used for @> and <@) ignores NULL elements in the
+ * sub-list and returns true, whereas PostgreSQL uses strict equality and
+ * returns false. To stay safe we only ship when the sub-list is a constant
+ * array with no NULL elements. We additionally restrict to one-dimensional,
+ * scalar-element arrays (see the inline comments).
+ */
+static bool
+IsShippableContainmentConstArray(Node *arg)
+{
+	Const	   *constArg = ResolveConstChain(arg);
+
+	/* must const-fold to a non-null array literal */
+	if (constArg == NULL || constArg->constisnull)
+		return false;
+
+	Oid			elementType = get_element_type(constArg->consttype);
+
+	if (!OidIsValid(elementType))
+		return false;
+
+	/*
+	 * Only scalar element types for now. Arrays of composite/record or map
+	 * types pass the column type gate (type.c maps any non-jsonb array to
+	 * LIST without recursing into the element type), but we have not tested
+	 * whether DuckDB's struct/map list equality matches PostgreSQL. These may
+	 * well be pushdownable; we just don't know yet, so exclude them until
+	 * proven.
+	 */
+	if (get_typtype(elementType) == TYPTYPE_COMPOSITE || IsMapTypeOid(elementType))
+		return false;
+
+	ArrayType  *arr = DatumGetArrayTypeP(constArg->constvalue);
+
+	/*
+	 * PostgreSQL flattens multidimensional arrays for containment, but
+	 * pg_lake clamps multidimensional array values to NULL on lake storage
+	 * and a multidim array shares the same type OID as its 1-D counterpart,
+	 * so it slips past the column type gate. Reject multidim consts here.
+	 */
+	if (ARR_NDIM(arr) > 1)
+		return false;
+
+	/* the core NULL-semantics guard */
+	return !array_contains_nulls(arr);
+}
+
+
+/*
+ * IsArrayContainsShippable determines whether the array "contains" operator
+ * (a @> b) is shippable. The contained sub-list is the right-hand operand.
+ */
+static bool
+IsArrayContainsShippable(Node *node)
+{
+	if (!IsA(node, OpExpr))
+		return false;
+
+	return IsShippableContainmentConstArray(lsecond(((OpExpr *) node)->args));
+}
+
+
+/*
+ * IsArrayContainedShippable determines whether the array "contained by"
+ * operator (a <@ b) is shippable. The contained sub-list is the left-hand
+ * operand.
+ */
+static bool
+IsArrayContainedShippable(Node *node)
+{
+	if (!IsA(node, OpExpr))
+		return false;
+
+	return IsShippableContainmentConstArray(linitial(((OpExpr *) node)->args));
 }
