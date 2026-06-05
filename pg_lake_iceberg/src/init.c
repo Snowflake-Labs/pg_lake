@@ -114,6 +114,16 @@ _PG_init(void)
 							 0,
 							 NULL, NULL, NULL);
 
+	DefineCustomIntVariable("pg_lake_iceberg.object_store_catalog_max_age",
+							gettext_noop("Maximum age in seconds before the object store catalog "
+										 "file is rewritten even when no tables changed."),
+							gettext_noop("Periodically rewriting the catalog signals that "
+										 "Postgres is up and able to talk to object storage."),
+							&ObjectStoreCatalogMaxAge,
+							60, 1, INT_MAX / 1000,
+							PGC_SIGHUP, GUC_UNIT_S,
+							NULL, NULL, NULL);
+
 	DefineCustomStringVariable("pg_lake_iceberg.external_object_store_catalog_prefix",
 							   gettext_noop("Specifies the prefix used for the object store catalog files for external tables."),
 							   NULL,

@@ -7,6 +7,7 @@
 #include "utils/inval.h"
 #include "utils/snapmgr.h"
 #include "utils/lsyscache.h"
+#include "utils/timestamp.h"
 
 #include "pg_lake/json/json_utils.h"
 #include "pg_lake/iceberg/catalog.h"
@@ -34,9 +35,19 @@ PG_FUNCTION_INFO_V1(force_push_object_store_catalog);
 /* pg_lake_iceberg.enable_object_store_catalog setting */
 bool		EnableObjectStoreCatalog = true;
 
+/* pg_lake_iceberg.object_store_catalog_max_age setting, in seconds */
+int			ObjectStoreCatalogMaxAge = 60;
+
 
 /* whether to export the catalog to object storage, always do so on start-up */
 static List *InvalidatedRelationIds = NULL;
+
+/*
+ * Time of the last successful catalog push. Initialized to 0 so the first
+ * call to CatalogNeedsExport() always returns true, ensuring we write the
+ * catalog file at least once after start-up.
+ */
+static TimestampTz LastCatalogPushTime = 0;
 
 static bool CatalogNeedsExport(void);
 static void PushMetadataLocationToObjectStoreCatalog(void);
@@ -186,12 +197,13 @@ TrackInvalidateCatalogExport(Datum argument, Oid relationId)
 }
 
 /*
- * ExportIcebergCatalogIfChanged efficiently determines whether
- * tables_internal might have changed via invalidations, and if
- * so it re-exports the catalog.
+ * ExportIcebergCatalogIfNeeded re-exports the catalog when tables_internal
+ * may have changed via invalidations, or when more than
+ * ObjectStoreCatalogMaxAge seconds have passed since the last successful
+ * push.
  */
 void
-ExportIcebergCatalogIfChanged(void)
+ExportIcebergCatalogIfNeeded(void)
 {
 	AcceptInvalidationMessages();
 
@@ -208,6 +220,11 @@ ExportIcebergCatalogIfChanged(void)
 /*
 * CatalogNeedsExport checks if the iceberg catalog needs to be exported
 * to object storage.
+*
+* In addition to invalidations from changes to tables_internal, we also
+* re-export the catalog when more than ObjectStoreCatalogMaxAge seconds
+* have passed since the last push. The periodic rewrite signals that
+* Postgres is up and able to talk to object storage.
 */
 static bool
 CatalogNeedsExport(void)
@@ -233,6 +250,13 @@ CatalogNeedsExport(void)
 	{
 		list_free(InvalidatedRelationIds);
 		InvalidatedRelationIds = NIL;
+	}
+
+	if (!catalogNeedsExport &&
+		TimestampDifferenceExceeds(LastCatalogPushTime, GetCurrentTimestamp(),
+								   ObjectStoreCatalogMaxAge * 1000))
+	{
+		catalogNeedsExport = true;
 	}
 
 	return catalogNeedsExport;
@@ -382,6 +406,8 @@ PushMetadataLocationToObjectStoreCatalog(void)
 
 	CopyLocalFileToS3(localFilePath,
 					  GetInternalObjectStoreCatalogFilePath(get_database_name(MyDatabaseId)));
+
+	LastCatalogPushTime = GetCurrentTimestamp();
 }
 
 

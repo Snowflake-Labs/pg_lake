@@ -7,12 +7,15 @@
 /* crunchy_iceberg.enable_object_store_catalog setting */
 extern PGDLLEXPORT bool EnableObjectStoreCatalog;
 
+/* pg_lake_iceberg.object_store_catalog_max_age setting, in seconds */
+extern PGDLLEXPORT int ObjectStoreCatalogMaxAge;
+
 extern PGDLLEXPORT char *ObjectStoreCatalogLocationPrefix;
 extern PGDLLEXPORT char *ExternalObjectStorePrefix;
 extern PGDLLEXPORT char *InternalObjectStorePrefix;
 
 extern PGDLLEXPORT void InitObjectStoreCatalog(void);
-extern PGDLLEXPORT void ExportIcebergCatalogIfChanged(void);
+extern PGDLLEXPORT void ExportIcebergCatalogIfNeeded(void);
 extern PGDLLEXPORT const char *GetObjectStoreDefaultLocationPrefix(void);
 extern PGDLLEXPORT char *GetMetadataLocationFromExternalObjectStoreCatalogForTable(Oid relationId);
 extern PGDLLEXPORT void ErrorIfExternalObjectStoreCatalogDoesNotExist(const char *catalogName);
