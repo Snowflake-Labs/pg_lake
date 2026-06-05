@@ -401,18 +401,17 @@ ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata)
 		DataFileSchemaField *postgresField = columnMapping->field;
 		PGType		postgresType = columnMapping->pgType;
 		PGType		icebergType = IcebergFieldToPostgresType(icebergField->type);
-		bool		hasIcebergDefault =
-			(icebergField->writeDefault != NULL) ||
-			(icebergField->initialDefault != NULL);
 
 		/*
-		 * Compare the id fields.
+		 * Compare the id fields. We deliberately don't compare defaults:
+		 * read-only external Iceberg tables don't carry iceberg
+		 * writeDefault/initialDefault onto pg_attribute, and defaults don't
+		 * affect read behavior anyway.
 		 */
 		if (icebergField->id != postgresField->id ||
 			NullSafeStrcmp(icebergField->name, postgresField->name) != 0 ||
 			!TypesAreCompatible(postgresType, icebergType) ||
-			columnMapping->attNotNull != icebergField->required ||
-			columnMapping->attHasDef != hasIcebergDefault)
+			columnMapping->attNotNull != icebergField->required)
 		{
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
