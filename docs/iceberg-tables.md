@@ -304,12 +304,12 @@ FDW options: (partition_by 'day(event_time), bucket(32, user_id)', location 's3:
 ### Supported partition transforms
 | **Transform** | **Description** | **Supported types** |
 | --- | --- | --- |
-| **`col`** | Identity partitioning, stores the column’s value as-is. Useful for low-cardinality columns like **`region`** or **`status`**. | **`date`**, **`timestamp(tz)`**, **`time`**, **`int2`**, **`int4`**, **`int8`**, **`bool`**, **`float4`**, **`float8`**, **`numeric`**, **`text`**, **`varchar`**, **`bpchar`**, **`bytea`**, **`uuid`** |
+| **`col`** | Identity partitioning, stores the column’s value as-is. Useful for low-cardinality columns like **`region`** or **`status`**. | **`date`**, **`timestamp(tz)`**, **`time(tz)`**, **`int2`**, **`int4`**, **`int8`**, **`bool`**, **`float4`**, **`float8`**, **`numeric`**, **`text`**, **`varchar`**, **`bpchar`**, **`bytea`**, **`uuid`** |
 | **`year(col)`** | Extracts the year part of a date or timestamp. Good for coarse time partitioning. | **`date`**, **`timestamp(tz)`** |
 | **`month(col)`** | Extracts the year and month. Typically used for monthly aggregates or logs. | **`date`**, **`timestamp(tz)`** |
 | **`day(col)`** | Extracts the full date (year-month-day). Ideal for time-series or log data. | **`date`**, **`timestamp(tz)`** |
-| **`hour(col)`** | Extracts the hour of day. Useful for high-volume hourly events. | **`time`**, **`timestamp(tz)`** |
-| **`bucket(N, col)`** | Hashes the column and assigns it to one of **`N`** evenly distributed buckets. | **`int2`**, **`int4`**, **`int8`**, **`numeric`**, **`text`**, **`varchar`**, **`char(C)`**, **`bytea`**, **`uuid`**, **`date`**, **`timestamp(tz)`**, **`time`** |
+| **`hour(col)`** | Extracts the hour of day. Useful for high-volume hourly events. | **`timestamp(tz)`** |
+| **`bucket(N, col)`** | Hashes the column and assigns it to one of **`N`** evenly distributed buckets. | **`int2`**, **`int4`**, **`int8`**, **`numeric`**, **`text`**, **`varchar`**, **`char(C)`**, **`bytea`**, **`uuid`**, **`date`**, **`timestamp(tz)`**, **`time(tz)`** |
 | **`truncate(N, col)`** | Truncates the value to a multiple of **`N`** (for integers) or to a prefix of length **`N`** (for string and binary). | **`int2`**, **`int4`**, **`int8`**, **`text`**, **`varchar`**, **`char(C)`**, **`bytea`** |
 
 ### Iceberg hidden partitioning best practices

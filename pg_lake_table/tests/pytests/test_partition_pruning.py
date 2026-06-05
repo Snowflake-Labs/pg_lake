@@ -246,8 +246,8 @@ def test_simple_data_pruning_for_data_types(
         if column_type not in ("date", "timestamp", "timestamptz"):
             return
 
-    if partition_type in ("hour"):
-        if column_type not in ("time", "timetz", "timestamp", "timestamptz"):
+    if partition_type == "hour":
+        if column_type not in ("timestamp", "timestamptz"):
             return
 
     if "bucket" in partition_type:
@@ -822,65 +822,26 @@ def test_timestamptz_partition_pruning(
     assert results[0][0] == 3
 
 
-# it is hard to extend more generic functions
-# to have time column, so we have a separate test
-def test_pruning_hour_partition_on_time(
+# Iceberg does not define the hour transform for time, timetz, or date columns.
+@pytest.mark.parametrize("col_type", ["time", "timetz", "date"])
+def test_hour_partition_on_invalid_types_rejected(
     s3,
-    disable_data_file_pruning,
     pg_conn,
     extension,
     with_default_location,
-    grant_access_to_data_file_partition,
+    col_type,
 ):
-    explain_prefix = "EXPLAIN (analyze, verbose, format json) "
-
-    run_command(
-        """
-                CREATE SCHEMA hour_on_time;
-                CREATE TABLE hour_on_time.tbl (col time) USING iceberg WITH (partition_by = 'hour(col)', autovacuum_enabled='False');
-
-                -- fill in all hours
-                INSERT INTO hour_on_time.tbl SELECT generate_series('2000-01-01 00:00:00'::timestamp, '2000-01-31 23:00:00'::timestamp, '1 hour')::time;
-
+    error = run_command(
+        f"""
+                CREATE SCHEMA hour_on_{col_type};
+                CREATE TABLE hour_on_{col_type}.tbl (col {col_type}) USING iceberg WITH (partition_by = 'hour(col)', autovacuum_enabled='False');
         """,
         pg_conn,
+        raise_error=False,
     )
 
-    plan = run_query(
-        f"""{explain_prefix} SELECT * FROM hour_on_time.tbl
-            WHERE col >= '00:00:00'
-            AND col < '01:00:00'""",
-        pg_conn,
-    )
-    assert fetch_data_files_used(plan) == "1"
-
-    plan = run_query(
-        f"""{explain_prefix} SELECT * FROM hour_on_time.tbl
-            WHERE col >= '00:00:00'""",
-        pg_conn,
-    )
-    assert fetch_data_files_used(plan) == "24"
-
-    plan = run_query(
-        f"""{explain_prefix} SELECT * FROM hour_on_time.tbl
-            WHERE col >= '20:00:00'""",
-        pg_conn,
-    )
-    assert fetch_data_files_used(plan) == "4"
-
-    plan = run_query(
-        f"""{explain_prefix} SELECT * FROM hour_on_time.tbl
-            WHERE col IN ('20:00:00', '20:15:00') """,
-        pg_conn,
-    )
-    assert fetch_data_files_used(plan) == "1"
-
-    plan = run_query(
-        f"""{explain_prefix} SELECT * FROM hour_on_time.tbl
-            WHERE col IN ('20:00:00', '22:15:00') """,
-        pg_conn,
-    )
-    assert fetch_data_files_used(plan) == "2"
+    assert "hour transform requires a timestamp(tz) column" in error
+    pg_conn.rollback()
 
 
 # TODO: truncate fails due to overflow

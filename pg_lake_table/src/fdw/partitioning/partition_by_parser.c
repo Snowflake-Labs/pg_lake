@@ -923,10 +923,10 @@ EnsureValidTypeForDayTransform(Oid typeOid)
 static void
 EnsureValidTypeForHourTransform(Oid typeOid)
 {
-	if (!IsTimeOrTimestampType(typeOid))
+	if (typeOid != TIMESTAMPOID && typeOid != TIMESTAMPTZOID)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATATYPE_MISMATCH),
-				 errmsg("hour transform requires a time(tz) or timestamp(tz) column, but type is %s",
+				 errmsg("hour transform requires a timestamp(tz) column, but type is %s",
 						format_type_be(typeOid))));
 }
 
@@ -960,7 +960,7 @@ EnsureValidTypeForBucketTransform(Oid typeOid)
 		typeOid != BPCHAROID && typeOid != BYTEAOID && typeOid != UUIDOID)
 		ereport(ERROR,
 				(errcode(ERRCODE_DATATYPE_MISMATCH),
-				 errmsg("bucket transform requires a int2, int4, int8, numeric, text, varchar, bytea or"
-						"uuid column, but type is %s",
+				 errmsg("bucket transform requires a int2, int4, int8, numeric, text, varchar, bytea, uuid, "
+						"date, time(tz) or timestamp(tz) column, but type is %s",
 						format_type_be(typeOid))));
 }

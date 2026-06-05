@@ -488,7 +488,7 @@ def test_partition_transform_time(
     with_default_location,
 ):
     run_command(
-        "create table test_partition_transform_time(a time) using iceberg with (partition_by = 'a, bucket(100, a), hour(a)');",
+        "create table test_partition_transform_time(a time) using iceberg with (partition_by = 'a, bucket(100, a)');",
         pg_conn,
     )
     pg_conn.commit()
@@ -500,11 +500,11 @@ def test_partition_transform_time(
     pg_conn.commit()
 
     result = run_query(
-        "select transformed.* from test_partition_transform_time t, lateral lake_table.partition_tuple(t.*) as transformed(a time, a_bucket_100 int4, a_year int4) order by a, a_bucket_100, a_year;",
+        "select transformed.* from test_partition_transform_time t, lateral lake_table.partition_tuple(t.*) as transformed(a time, a_bucket_100 int4) order by a, a_bucket_100;",
         pg_conn,
     )
 
-    assert result == [[datetime.time(0, 0), 76, 0], [datetime.time(23, 59, 59), 78, 23]]
+    assert result == [[datetime.time(0, 0), 76], [datetime.time(23, 59, 59), 78]]
 
     run_command("DROP TABLE test_partition_transform_time", pg_conn)
     pg_conn.commit()
