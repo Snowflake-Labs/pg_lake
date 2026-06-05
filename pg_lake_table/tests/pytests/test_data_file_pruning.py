@@ -1351,26 +1351,6 @@ def test_pruning_for_coercions(
         run_command(insert_stmt, pg_conn)
         pg_conn.commit()
 
-    # drop the postgres-side defaults so the auto-imported external
-    # table (which doesn't carry iceberg defaults onto pg_attribute)
-    # passes the strict schema check.
-    drop_defaults_sql = """
-        ALTER TABLE cast_test ALTER COLUMN small_int_col DROP DEFAULT;
-        ALTER TABLE cast_test ALTER COLUMN int_col DROP DEFAULT;
-        ALTER TABLE cast_test ALTER COLUMN big_int_col DROP DEFAULT;
-        ALTER TABLE cast_test ALTER COLUMN real_col DROP DEFAULT;
-        ALTER TABLE cast_test ALTER COLUMN double_col DROP DEFAULT;
-        ALTER TABLE cast_test ALTER COLUMN numeric_col DROP DEFAULT;
-        ALTER TABLE cast_test ALTER COLUMN text_col DROP DEFAULT;
-        ALTER TABLE cast_test ALTER COLUMN varchar_col DROP DEFAULT;
-        ALTER TABLE cast_test ALTER COLUMN char_col DROP DEFAULT;
-        ALTER TABLE cast_test ALTER COLUMN date_col DROP DEFAULT;
-        ALTER TABLE cast_test ALTER COLUMN timestamp_col DROP DEFAULT;
-        ALTER TABLE cast_test ALTER COLUMN uuid_col DROP DEFAULT;
-    """
-    run_command(drop_defaults_sql, pg_conn)
-    pg_conn.commit()
-
     # now, create the same iceberg table using pg_lake
     # we'd like to make sure pruning works in the same way for
     # pg_lake tables as well
