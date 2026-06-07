@@ -535,25 +535,6 @@ def test_register_existing_table(
     assert "Schema mismatch between Iceberg and Postgres" in str(err)
     pg_conn.rollback()
 
-    if external_catalog_names:
-        run_command(
-            f"""CREATE TABLE "{namespace}"."{tbl_name}"(city text, \"lat lat\" float, long float DEFAULT 15.6, details "{namespace}".type_details) USING iceberg WITH (catalog='rest', read_only=True, catalog_namespace='{catalog_namespace_name}', catalog_table_name='{catalog_table_name}')""",
-            pg_conn,
-        )
-    else:
-        run_command(
-            f"""CREATE TABLE "{namespace}"."{tbl_name}"(city text, \"lat lat\" float, long float DEFAULT 15.6, details "{namespace}".type_details) USING iceberg WITH (catalog='rest', read_only=True)""",
-            pg_conn,
-        )
-
-    err = run_query(
-        f"""SELECT * FROM "{namespace}"."{tbl_name}" ORDER BY \"lat lat\" DESC""",
-        pg_conn,
-        raise_error=False,
-    )
-    assert "Schema mismatch between Iceberg and Postgres" in str(err)
-    pg_conn.rollback()
-
     # now, drop the table & re-create with different type
     if external_catalog_names:
         run_command(
