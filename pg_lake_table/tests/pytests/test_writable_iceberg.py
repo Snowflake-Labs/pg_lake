@@ -38,6 +38,45 @@ def test_writable_iceberg_create_table(pg_conn, s3, extension):
     pg_conn.commit()
 
 
+def test_writable_iceberg_r2_insert_select_delete(pg_conn, r2, extension):
+    schema = "test_writable_iceberg_r2"
+    run_command(f"CREATE SCHEMA {schema}", pg_conn)
+    pg_conn.commit()
+
+    location = f"r2://{TEST_BUCKET_R2}/{schema}"
+    run_command(
+        f"""CREATE FOREIGN TABLE {schema}.ft1 (
+                    id int,
+                    value text
+                ) SERVER pg_lake_iceberg OPTIONS (location '{location}');
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"INSERT INTO {schema}.ft1 SELECT i, 'r2-'||i FROM generate_series(1,10) i",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    results = run_query(f"SELECT count(*) FROM {schema}.ft1", pg_conn)
+    assert results[0][0] == 10
+
+    results = run_query(f"SELECT id, value FROM {schema}.ft1 ORDER BY id", pg_conn)
+    assert results[0]["id"] == 1
+    assert results[0]["value"] == "r2-1"
+
+    run_command(f"DELETE FROM {schema}.ft1 WHERE id <= 5", pg_conn)
+    pg_conn.commit()
+
+    results = run_query(f"SELECT count(*) FROM {schema}.ft1", pg_conn)
+    assert results[0][0] == 5
+
+    run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 def test_writable_iceberg_create_table_no_cols(pg_conn, s3, extension):
     run_command(
         """

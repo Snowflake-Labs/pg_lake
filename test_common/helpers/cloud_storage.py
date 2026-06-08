@@ -37,6 +37,10 @@ MOTO_PORT_GCS = 5998
 TEST_BUCKET_GCS = "testbucketgcs"
 TEST_GCS_REGION = "europe-west4"
 
+MOTO_PORT_R2 = 5997
+TEST_BUCKET_R2 = "testbucketr2"
+TEST_R2_REGION = "eu-west-1"
+
 AZURITE_CONNECTION_STRING = "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;QueueEndpoint=http://127.0.0.1:10001/devstoreaccount1;TableEndpoint=http://127.0.0.1:10002/devstoreaccount1"
 
 
@@ -62,6 +66,15 @@ def create_duckdb_conn():
             TYPE GCS, KEY_ID 'testing', SECRET 'testing',
             ENDPOINT 'localhost:5998',
             SCOPE 'gs://testbucketgcs', URL_STYLE 'path', USE_SSL false
+        );
+    """
+    )
+    conn.execute(
+        """
+        CREATE SECRET r2test (
+            TYPE R2, KEY_ID 'testing', SECRET 'testing',
+            ENDPOINT 'localhost:5997',
+            SCOPE 'r2://testbucketr2', URL_STYLE 'path', USE_SSL false
         );
     """
     )
@@ -256,6 +269,28 @@ def create_mock_gcs():
     return client, server
 
 
+# Start a background server that pretends to be Cloudflare R2.
+#
+# R2 is S3-compatible and DuckDB's TYPE R2 secret accepts an ENDPOINT override,
+# so we mock it with Moto on a separate port — same shape as create_mock_gcs().
+def create_mock_r2():
+    server = ThreadedMotoServer(port=MOTO_PORT_R2)
+    server.start()
+
+    client = boto3.client(
+        "s3",
+        endpoint_url=f"http://localhost:{MOTO_PORT_R2}",
+        region_name=TEST_R2_REGION,
+        aws_access_key_id=TEST_AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=TEST_AWS_SECRET_ACCESS_KEY,
+    )
+    client.create_bucket(
+        Bucket=TEST_BUCKET_R2,
+        CreateBucketConfiguration={"LocationConstraint": TEST_R2_REGION},
+    )
+    return client, server
+
+
 def create_kms_client():
     return boto3.client(
         "kms",
@@ -330,6 +365,7 @@ def stop_moto_server(server, timeout=5):
 # ---------------------------------------------------------------------------
 _mock_s3_cache = None
 _gcs_cache = None
+_r2_cache = None
 _azure_cache = None
 
 
@@ -369,6 +405,19 @@ def gcs():
         return
     client, server = create_mock_gcs()
     _gcs_cache = client
+    atexit.register(stop_moto_server, server)
+    yield client
+    stop_moto_server(server)
+
+
+@pytest.fixture(scope="session")
+def r2():
+    global _r2_cache
+    if _r2_cache is not None:
+        yield _r2_cache
+        return
+    client, server = create_mock_r2()
+    _r2_cache = client
     atexit.register(stop_moto_server, server)
     yield client
     stop_moto_server(server)

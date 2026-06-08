@@ -26,10 +26,12 @@ from .cloud_storage import (
     MANAGED_STORAGE_BUCKET,
     MOTO_PORT,
     MOTO_PORT_GCS,
+    MOTO_PORT_R2,
     TEST_AWS_ACCESS_KEY_ID,
     TEST_AWS_SECRET_ACCESS_KEY,
     TEST_BUCKET,
     TEST_BUCKET_GCS,
+    TEST_BUCKET_R2,
 )
 from .db import (
     capture_output,
@@ -110,6 +112,16 @@ def setup_pgduck_server():
             SECRET '{TEST_AWS_SECRET_ACCESS_KEY}',
             ENDPOINT 'localhost:{MOTO_PORT_GCS}',
             SCOPE 'gs://{TEST_BUCKET_GCS}',
+            URL_STYLE 'path', USE_SSL false
+          );
+
+          -- Add a secret for testbucketr2
+          CREATE SECRET r2test (
+            TYPE R2,
+            KEY_ID '{TEST_AWS_ACCESS_KEY_ID}',
+            SECRET '{TEST_AWS_SECRET_ACCESS_KEY}',
+            ENDPOINT 'localhost:{MOTO_PORT_R2}',
+            SCOPE 'r2://{TEST_BUCKET_R2}',
             URL_STYLE 'path', USE_SSL false
           );
 
