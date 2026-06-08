@@ -303,27 +303,26 @@ ProcessAlterTable(ProcessUtilityParams * processUtilityParams, void *arg)
 
 	/*
 	 * External Iceberg foreign tables are reported as read-only by
-	 * IsReadOnlyIcebergTable, which rejects every ALTER -- including
-	 * Postgres-side metadata changes that don't touch the underlying data.
+	 * IsReadOnlyIcebergTable. Two cases stay disallowed here, and everything
+	 * else falls through as Postgres-side metadata.
 	 *
-	 * Skip the read-only check for ALTER OWNER on any external Iceberg (pure
-	 * Postgres-side metadata), and for any non-schema-changing ALTER on a
-	 * NONE_CATALOG external table (the SET (path '...') redirect case handled
-	 * above).
+	 * Schema-changing ALTERs (RequiresNewIcebergSchema) are disallowed on any
+	 * external Iceberg.
 	 *
-	 * OBJECT_STORE_READ_ONLY and REST_CATALOG_READ_ONLY still hit the
-	 * read-only error for everything other than ALTER OWNER -- e.g. SET
-	 * (catalog_table_name='x') falls through and is pinned to that message by
-	 * test_unsupported_modifications_for_read_only.
+	 * Any non-OWNER ALTER on OBJECT_STORE_READ_ONLY or REST_CATALOG_READ_ONLY
+	 * is also disallowed, since the catalog is the source of truth.
+	 *
+	 * SET (path/catalog_*) on external Iceberg is handled in the
+	 * HasOnlyCatalogAlterTableOptions block above and returns before this
+	 * check.
 	 */
-	bool		skipReadOnlyCheck =
-		IsExternalIcebergTable(relationId) &&
-		(IsOwnerOnlyAlter(alterStmt) ||
-		 (GetIcebergCatalogType(relationId) == NONE_CATALOG &&
-		  !RequiresNewIcebergSchema(alterStmt)));
-
-	if (!skipReadOnlyCheck)
+	if (!IsExternalIcebergTable(relationId) ||
+		RequiresNewIcebergSchema(alterStmt) ||
+		(GetIcebergCatalogType(relationId) != NONE_CATALOG &&
+		 !IsOwnerOnlyAlter(alterStmt)))
+	{
 		ErrorIfReadOnlyIcebergTable(relationId);
+	}
 
 	MaybeConvertUnsupportedNumericColumnsToDoubleInAlterStmt(alterStmt);
 	ErrorIfUnsupportedTypeAddedForIcebergTables(alterStmt);
