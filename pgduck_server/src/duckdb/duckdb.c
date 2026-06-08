@@ -666,10 +666,12 @@ duckdb_vector_to_pg_wire(duckdb_vector vector, duckdb_type duckType,
 						 StringInfo output)
 {
 	/*
-	 * GEOMETRY has no duckdb_type enum value; fall back to BLOB which handles
-	 * it via blob_to_text + the geometry-specific check.
+	 * GEOMETRY has no entry in our type map; route it through BLOB which
+	 * handles it via blob_to_text + the geometry-specific check. DuckDB 1.5.1
+	 * exposed GEOMETRY as DUCKDB_TYPE_INVALID (no enum value); 1.5.3 added
+	 * DUCKDB_TYPE_GEOMETRY (= 40) as a first-class enum.
 	 */
-	if (duckType == DUCKDB_TYPE_INVALID &&
+	if ((duckType == DUCKDB_TYPE_INVALID || duckType == DUCKDB_TYPE_GEOMETRY) &&
 		duckdb_pglake_is_geometry_type(logicalType))
 		duckType = DUCKDB_TYPE_BLOB;
 
@@ -1130,12 +1132,12 @@ duckdb_query_result_send_column_metadata(DuckDBQueryResult * duckdb_query_result
 		DuckDBResultColumn *resultColumn = &resultColumns[columnIndex];
 
 		/*
-		 * DuckDB 1.5.1 promoted GEOMETRY to a first-class LogicalTypeId with
-		 * no corresponding duckdb_type enum value, so duckdb_column_type()
-		 * returns DUCKDB_TYPE_INVALID. Map it to BLOB so our existing
-		 * blob_to_text handler can convert it to hex WKB.
+		 * GEOMETRY needs to be routed to our BLOB handler so we can emit hex
+		 * WKB. DuckDB 1.5.1 returned DUCKDB_TYPE_INVALID for GEOMETRY columns
+		 * (no enum value yet); 1.5.3 added DUCKDB_TYPE_GEOMETRY (= 40) as a
+		 * first-class enum. Handle both.
 		 */
-		if (duckType == DUCKDB_TYPE_INVALID)
+		if (duckType == DUCKDB_TYPE_INVALID || duckType == DUCKDB_TYPE_GEOMETRY)
 		{
 			duckdb_logical_type colLogicalType =
 				duckdb_column_logical_type(duckResult, columnIndex);
