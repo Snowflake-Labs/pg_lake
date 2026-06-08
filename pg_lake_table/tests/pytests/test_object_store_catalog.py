@@ -662,6 +662,55 @@ def test_unsupported_modifications_for_read_only(
     pg_conn.commit()
 
 
+def test_alter_owner_read_only_object_store(
+    pg_conn,
+    superuser_conn,
+    s3,
+    extension,
+    with_default_location,
+    adjust_object_store_settings,
+):
+    run_command(
+        f"""
+        CREATE SCHEMA object_store_owner_sc1;
+        CREATE TABLE object_store_owner_sc1.tbl_1(a int) USING iceberg WITH (catalog='object_store');
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+    wait_until_object_store_writable_table_pushed(
+        pg_conn, "object_store_owner_sc1", "tbl_1"
+    )
+
+    run_command(
+        f"""
+        CREATE SCHEMA object_store_owner_sc2;
+        CREATE TABLE object_store_owner_sc2.tbl_1 () USING iceberg WITH (catalog='object_store', read_only=True, catalog_namespace='object_store_owner_sc1', catalog_table_name='tbl_1');
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        """
+        DROP ROLE IF EXISTS object_store_owner_role;
+        CREATE ROLE object_store_owner_role;
+        ALTER TABLE object_store_owner_sc2.tbl_1 OWNER TO object_store_owner_role;
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    run_command(
+        f"""
+        DROP SCHEMA object_store_owner_sc1, object_store_owner_sc2 CASCADE;
+        DROP ROLE object_store_owner_role;
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+
 def test_if_not_exists_object_store(
     pg_conn, s3, extension, with_default_location, adjust_object_store_settings
 ):
