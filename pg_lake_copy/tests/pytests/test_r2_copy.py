@@ -79,6 +79,7 @@ def test_r2_copy_from_parquet_invalid(pg_conn, r2):
     assert (
         error.startswith("ERROR:  HTTP Error: HTTP GET error")
         or "Unable to connect to URL" in error
+        or "Could not establish connection" in error
     )
 
     pg_conn.rollback()
