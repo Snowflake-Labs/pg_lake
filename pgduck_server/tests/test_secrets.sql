@@ -18,6 +18,16 @@ CREATE SECRET gcstest (
     URL_STYLE 'path', USE_SSL false
 );
 
+-- Add a secret for testbucketr2
+CREATE SECRET r2test (
+    TYPE R2,
+    KEY_ID 'testing',
+    SECRET 'testing',
+    ENDPOINT 'localhost:5997',
+    SCOPE 'r2://testbucketr2',
+    URL_STYLE 'path', USE_SSL false
+);
+
 -- Add a secret for testcontainer
 CREATE SECRET aztest (
     TYPE AZURE,
