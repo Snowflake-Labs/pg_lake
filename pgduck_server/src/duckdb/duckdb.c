@@ -642,8 +642,18 @@ duckdb_session_init(DuckDBSession * duckSession, PGSession * clientSession)
 		return DUCKDB_SESSION_INITIALIZATION_ERROR;
 	}
 
+	/*
+	 * Use the cancellation proc id (a 32-bit random generated when the
+	 * session reserved its threadpool slot) as the DuckDB-side connection
+	 * identifier.  This is the same value pgduck_server sends in the
+	 * BackendKeyData message and that the client therefore observes via
+	 * libpq's PQbackendPID, so pg_lake_stat_activity, pg_lake_connection_id,
+	 * and pg_lake_query_progress all key on a value the client already has
+	 * without an extra round trip.  Using the random cancellation id also
+	 * avoids the rapid recycling that the raw client socket fd is subject to.
+	 */
 	duckdb_pglake_init_connection(duckSession->connection,
-								  clientSession->pgClient->clientSocket);
+								  clientSession->pgClient->cancellationProcId);
 
 	duckSession->clientSession = clientSession;
 
