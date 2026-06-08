@@ -1310,6 +1310,17 @@ AllowedAlterColumnTypeForIceberg(Node *arg, Oid relationId)
 		int			newPrecision = -1;
 		int			newScale = -1;
 
+		/*
+		 * A numeric whose precision/scale exceeds the Iceberg decimal limits
+		 * (or that is unbounded) is not stored as an Iceberg decimal; it maps
+		 * to double/string instead. Promoting to such a type is therefore not
+		 * a decimal -> decimal promotion and cannot be done as a
+		 * metadata-only schema change, so reject it before any new metadata
+		 * is generated.
+		 */
+		if (IsUnsupportedNumericForIceberg(newTypeOid, newTypMod))
+			return false;
+
 		GetDuckdbAdjustedPrecisionAndScaleFromNumericTypeMod(currentTypMod,
 															 &currentPrecision,
 															 &currentScale);
@@ -1319,11 +1330,7 @@ AllowedAlterColumnTypeForIceberg(Node *arg, Oid relationId)
 
 		/* new precision must be wider and scale must stay the same */
 		if (newPrecision > currentPrecision && newScale == currentScale)
-		{
-			/* also validate the new type is supported for Iceberg tables */
-			ErrorIfTypeUnsupportedNumericForIcebergTables(newTypMod, columnName);
 			return true;
-		}
 
 		return false;
 	}

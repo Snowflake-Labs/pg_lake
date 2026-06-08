@@ -2077,7 +2077,8 @@ def test_alter_column_type_disallowed_promotions(pg_conn, s3, with_default_locat
             c double precision,
             d numeric(10,2),
             e text,
-            f real
+            f real,
+            g numeric(32,8)
         ) USING iceberg;""",
         pg_conn,
     )
@@ -2100,6 +2101,10 @@ def test_alter_column_type_disallowed_promotions(pg_conn, s3, with_default_locat
         ("a", "real", "int to real"),
         # float -> int (not an allowed promotion)
         ("f", "int", "float to int"),
+        # decimal: widening beyond the Iceberg decimal precision limit (38)
+        # is not a decimal -> decimal promotion (it maps to double/string),
+        # so it must be rejected rather than silently corrupting metadata
+        ("g", "numeric(39,8)", "decimal precision beyond Iceberg limit"),
     ]
 
     for col, new_type, description in disallowed_cases:
