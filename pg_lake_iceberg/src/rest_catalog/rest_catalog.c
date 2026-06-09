@@ -72,14 +72,6 @@ int			RestCatalogAuthType = REST_CATALOG_AUTH_TYPE_OAUTH2;
 bool		RestCatalogEnableVendedCredentials = true;
 
 /*
- * Path to the optional credentials file consulted between server
- * options and pg_user_mapping during REST catalog resolution.  Defined
- * via the pg_lake_iceberg.catalogs_conf_path GUC in init.c.  Relative
- * paths are resolved against DataDir.
- */
-char	   *CatalogsConfPath = NULL;
-
-/*
  * Per-rest-catalog token cache.  Keyed by (serverOid, userMappingOid):
  *   - serverOid identifies which iceberg_catalog server the token
  *     belongs to, so an ALTER SERVER on one server never reuses
@@ -89,7 +81,7 @@ char	   *CatalogsConfPath = NULL;
  *     credentials of their own user mapping (or PUBLIC).
  *     userMappingOid is InvalidOid when no user mapping is involved
  *     (built-in pg_lake_rest_catalog, or a user-created server falling
- *     back to catalogs.conf / GUCs).
+ *     back to GUCs).
  *
  * Should always be accessed via GetRestCatalogAccessToken().
  */
@@ -357,8 +349,7 @@ ApplyCatalogOptionValue(RestCatalogOptions * opts,
  *     optionally scope (overrides whatever is set on the server).
  *
  * client_id and client_secret are credentials and therefore belong on
- * a user mapping; they may also be supplied by $PGDATA/catalogs.conf
- * or GUCs.  Each option's descriptor carries a CATALOG_OPT_CTX_*
+ * a user mapping; they may also be supplied via GUCs.  Each option's descriptor carries a CATALOG_OPT_CTX_*
  * bitmask saying where it is legal.
  *
  * PostgreSQL also calls the validator for CREATE FOREIGN DATA WRAPPER
@@ -538,8 +529,8 @@ RejectIfModifyingBuiltinCatalogServer(const char *name, const char *operation)
  *    rest_endpoint while dependent iceberg tables exist.
  *  - CREATE/ALTER USER MAPPING is rejected against the three built-in
  *    catalog servers.  The built-in pg_lake_rest_catalog reads
- *    credentials from GUCs only (and ignores both pg_user_mapping and
- *    $PGDATA/catalogs.conf), while the postgres / object_store built-ins
+ *    credentials from GUCs only (ignores pg_user_mapping), while the
+ *    postgres / object_store built-ins
  *    have no notion of OAuth credentials at all.  User mappings on
  *    user-created REST servers are unaffected.
  *  - ALTER EXTENSION ... DROP SERVER/FOREIGN DATA WRAPPER is rejected
@@ -1029,7 +1020,7 @@ RedactRestCatalogUserMappingSecrets(ProcessUtilityParams * processUtilityParams,
  *
  * Unlike GetUserMapping, this never raises on a miss -- the caller is
  * expected to fall through to lower-priority credential sources
- * (catalogs.conf, GUCs).  The matched mapping's OID is returned via
+ * (GUCs).  The matched mapping's OID is returned via
  * *umidOut for use as part of the token cache key; *umidOut is left
  * InvalidOid when nothing matched.
  */
@@ -1067,144 +1058,10 @@ LookupUserMappingOptions(Oid serverOid, Oid *umidOut)
 
 
 /*
- * ReadCatalogsConfCredentials reads $PGDATA/catalogs.conf (or whatever
- * path the pg_lake_iceberg.catalogs_conf_path GUC points at) and
- * extracts credentials for the given server name.
- *
- * The file uses PostgreSQL's standard "key = value" config grammar
- * (ParseConfigFp), with dotted keys scoping each setting to a server:
- *
- *   horizon.client_id     = 'platform_id'
- *   horizon.client_secret = 'platform_secret'
- *   horizon.scope         = 'PRINCIPAL_ROLE:ALL'
- *
- * The file is re-read on every call -- catalog operations are
- * infrequent, and the simpler "no caching" path avoids needing
- * per-file mtime tracking or SIGHUP wiring.  *clientId, *clientSecret,
- * *scope are written only when a matching key is found; existing
- * values are left untouched.
- *
- * A missing file is treated as "no credentials, no error".  A
- * permission or I/O error is logged at WARNING and treated likewise so
- * one bad config file does not break the whole catalog path.
- *
- * Returns true iff at least one credential was extracted.
- */
-static bool
-ReadCatalogsConfCredentials(const char *serverName,
-							char **clientId, char **clientSecret,
-							char **scope)
-{
-	char		path[MAXPGPATH];
-	FILE	   *fp;
-	ConfigVariable *head = NULL;
-	ConfigVariable *tail = NULL;
-	ConfigVariable *item;
-	bool		found = false;
-	size_t		serverNameLen;
-
-	if (CatalogsConfPath == NULL || CatalogsConfPath[0] == '\0')
-		return false;
-
-	if (is_absolute_path(CatalogsConfPath))
-		strlcpy(path, CatalogsConfPath, MAXPGPATH);
-	else if (DataDir != NULL)
-		snprintf(path, MAXPGPATH, "%s/%s", DataDir, CatalogsConfPath);
-	else
-		strlcpy(path, CatalogsConfPath, MAXPGPATH);
-
-	fp = AllocateFile(path, "r");
-	if (fp == NULL)
-	{
-		if (errno == ENOENT)
-			return false;
-		ereport(WARNING,
-				(errcode_for_file_access(),
-				 errmsg("could not open catalog config file \"%s\": %m",
-						path)));
-		return false;
-	}
-
-	(void) ParseConfigFp(fp, path, CONF_FILE_START_DEPTH, WARNING,
-						 &head, &tail);
-	FreeFile(fp);
-
-	serverNameLen = strlen(serverName);
-
-	for (item = head; item != NULL; item = item->next)
-	{
-		const char *key;
-
-		if (item->errmsg != NULL)
-			continue;
-
-		/*
-		 * Match entries of the form "<servername>.<key> = <value>".  The dot
-		 * separates the server scope from the property name; require at least
-		 * one character after the dot.
-		 */
-		if (strncmp(item->name, serverName, serverNameLen) != 0 ||
-			item->name[serverNameLen] != '.' ||
-			item->name[serverNameLen + 1] == '\0')
-			continue;
-
-		key = item->name + serverNameLen + 1;
-
-		if (strcmp(key, "client_id") == 0)
-		{
-			*clientId = pstrdup(item->value);
-			found = true;
-		}
-		else if (strcmp(key, "client_secret") == 0)
-		{
-			*clientSecret = pstrdup(item->value);
-			found = true;
-		}
-		else if (strcmp(key, "scope") == 0)
-		{
-			*scope = pstrdup(item->value);
-			found = true;
-		}
-		/* unknown keys are silently ignored -- room to grow */
-	}
-
-	FreeConfigVariables(head);
-	return found;
-}
-
-
-/*
- * ApplyCatalogsConfOverrides overlays credentials read from
- * catalogs.conf onto opts.  Only the credentials actually present in
- * the file overwrite the existing fields; unset entries leave whatever
- * lower-priority layer (server options for `scope`, GUCs for
- * client_id/client_secret/scope) populated.
- */
-static void
-ApplyCatalogsConfOverrides(RestCatalogOptions * opts, const char *serverName)
-{
-	char	   *clientId = NULL;
-	char	   *clientSecret = NULL;
-	char	   *scope = NULL;
-
-	if (!ReadCatalogsConfCredentials(serverName,
-									 &clientId, &clientSecret, &scope))
-		return;
-
-	if (clientId != NULL)
-		opts->clientId = clientId;
-	if (clientSecret != NULL)
-		opts->clientSecret = clientSecret;
-	if (scope != NULL)
-		opts->scope = scope;
-}
-
-
-/*
  * ApplyUserMappingOverrides overlays credentials from pg_user_mapping
  * onto opts and records the matched mapping's OID in opts->userMappingOid.  Has
  * no effect if no user mapping applies; the caller may then fall back
- * to catalogs.conf-derived or GUC-derived values.
+ * to GUC-derived values.
  *
  * Only options carrying CATALOG_OPT_CTX_USER_MAPPING are applied here.
  * The validator already rejects anything else at DDL time, so the
@@ -1281,8 +1138,8 @@ ApplyServerOptionOverrides(RestCatalogOptions * opts, ForeignServer *server)
  * ValidateRestCatalogOptions checks that the resolved options carry
  * the minimum fields needed to talk to a REST catalog: the endpoint
  * and the credentials required by the configured auth flow.  Running
- * this at resolution time -- after GUCs, catalogs.conf, and the user
- * mapping have all been folded in -- means an incompletely-configured
+ * this at resolution time -- after GUCs and the user mapping have all
+ * been folded in -- means an incompletely-configured
  * catalog fails up front on first DML, instead of silently issuing an
  * unauthenticated request to the OAuth endpoint.
  *
@@ -1320,7 +1177,7 @@ ValidateRestCatalogOptions(const RestCatalogOptions * opts, const char *catalog)
 				 errmsg("no credentials found for REST catalog \"%s\"",
 						catalog),
 				 errhint("Provide client_id and client_secret via a "
-						 "USER MAPPING, $PGDATA/catalogs.conf, or the "
+						 "USER MAPPING or the "
 						 "pg_lake_iceberg.rest_catalog_client_id / "
 						 "pg_lake_iceberg.rest_catalog_client_secret GUCs.")));
 }
@@ -1334,13 +1191,12 @@ ValidateRestCatalogOptions(const RestCatalogOptions * opts, const char *catalog)
  *   1. GUC defaults                       (always)
  *   2. Server options                     (always; no-op for built-ins
  *                                          since ALTER SERVER is blocked)
- *   3. $PGDATA/catalogs.conf credentials  (user-created servers only)
- *   4. pg_user_mapping options            (user-created servers only)
+ *   3. pg_user_mapping options            (user-created servers only)
  *
  * The built-in pg_lake_rest_catalog deliberately stops after step 2.
  * Its credentials live exclusively in pg_lake_iceberg.rest_catalog_*
  * GUCs so the built-in catalog stays a single, global, instance-wide
- * configuration with no hidden per-user view.  postgres / object_store
+ * configuration.  postgres / object_store
  * never reach this function; their resolution stays in their own
  * modules.
  *
@@ -1368,10 +1224,7 @@ BuildRestCatalogOptionsFromServer(const char *serverName,
 	ApplyServerOptionOverrides(opts, server);
 
 	if (!IsBuiltinCatalogServerName(serverName))
-	{
-		ApplyCatalogsConfOverrides(opts, serverName);
 		ApplyUserMappingOverrides(opts, server);
-	}
 
 	ValidateRestCatalogOptions(opts, userVisibleCatalog);
 	return opts;
@@ -2072,8 +1925,7 @@ FetchRestCatalogAccessToken(RestCatalogOptions * opts, char **accessToken, int *
 		ereport(ERROR,
 				(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
 				 errmsg("REST catalog client_secret is not configured"),
-				 errhint("Set client_secret via a USER MAPPING, "
-						 "$PGDATA/catalogs.conf, or the "
+				 errhint("Set client_secret via a USER MAPPING or the "
 						 "pg_lake_iceberg.rest_catalog_client_secret GUC.")));
 
 	char	   *accessTokenUrl = opts->oauthHostPath;
@@ -2105,8 +1957,7 @@ FetchRestCatalogAccessToken(RestCatalogOptions * opts, char **accessToken, int *
 			ereport(ERROR,
 					(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
 					 errmsg("REST catalog client_id is not configured"),
-					 errhint("Set client_id via a USER MAPPING, "
-							 "$PGDATA/catalogs.conf, or the "
+					 errhint("Set client_id via a USER MAPPING or the "
 							 "pg_lake_iceberg.rest_catalog_client_id GUC.")));
 
 		/* Build Authorization: Basic <base64(clientId:clientSecret)> */

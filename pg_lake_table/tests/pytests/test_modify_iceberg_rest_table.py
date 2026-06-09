@@ -753,9 +753,8 @@ def test_user_mapping_credential_overrides_guc(
     """
     Credentials on a USER MAPPING win over the corresponding GUC: we
     poison the GUC, place the correct value on the mapping, and prove
-    DML still works.  This is the resolution-order test for steps 1
-    (user mapping, highest) and 3 (GUC, lowest); catalogs.conf is
-    intentionally left out of the picture (no file present).
+    DML still works.  This is the resolution-order test for the user
+    mapping (highest priority) vs GUC (lowest priority) layers.
     """
     if installcheck:
         return
