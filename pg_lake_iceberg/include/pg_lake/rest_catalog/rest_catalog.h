@@ -34,7 +34,7 @@ extern char *RestCatalogClientSecret;
 extern char *RestCatalogScope;
 extern int	RestCatalogAuthType;
 extern bool RestCatalogEnableVendedCredentials;
-extern char *CatalogsConfPath;
+extern char *CatalogsConfCredentialsPath;
 
 /*
  * Resolved REST catalog connection options.  All REST catalogs --

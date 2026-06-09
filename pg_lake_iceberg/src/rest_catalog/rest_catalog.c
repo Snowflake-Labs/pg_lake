@@ -74,10 +74,10 @@ bool		RestCatalogEnableVendedCredentials = true;
 /*
  * Path to the optional credentials file consulted between server
  * options and pg_user_mapping during REST catalog resolution.  Defined
- * via the pg_lake_iceberg.catalogs_conf_path GUC in init.c.  Relative
+ * via the pg_lake_iceberg.catalogs_conf_credentials_path GUC in init.c.  Relative
  * paths are resolved against DataDir.
  */
-char	   *CatalogsConfPath = NULL;
+char	   *CatalogsConfCredentialsPath = NULL;
 
 /*
  * Per-rest-catalog token cache.  Keyed by (serverOid, userMappingOid):
@@ -1068,7 +1068,7 @@ LookupUserMappingOptions(Oid serverOid, Oid *umidOut)
 
 /*
  * ReadCatalogsConfCredentials reads $PGDATA/catalogs.conf (or whatever
- * path the pg_lake_iceberg.catalogs_conf_path GUC points at) and
+ * path the pg_lake_iceberg.catalogs_conf_credentials_path GUC points at) and
  * extracts credentials for the given server name.
  *
  * The file uses PostgreSQL's standard "key = value" config grammar
@@ -1076,13 +1076,12 @@ LookupUserMappingOptions(Oid serverOid, Oid *umidOut)
  *
  *   horizon.client_id     = 'platform_id'
  *   horizon.client_secret = 'platform_secret'
- *   horizon.scope         = 'PRINCIPAL_ROLE:ALL'
  *
  * The file is re-read on every call -- catalog operations are
  * infrequent, and the simpler "no caching" path avoids needing
- * per-file mtime tracking or SIGHUP wiring.  *clientId, *clientSecret,
- * *scope are written only when a matching key is found; existing
- * values are left untouched.
+ * per-file mtime tracking or SIGHUP wiring.  *clientId, *clientSecret
+ * are written only when a matching key is found; existing values are
+ * left untouched.
  *
  * A missing file is treated as "no credentials, no error".  A
  * permission or I/O error is logged at WARNING and treated likewise so
@@ -1092,8 +1091,7 @@ LookupUserMappingOptions(Oid serverOid, Oid *umidOut)
  */
 static bool
 ReadCatalogsConfCredentials(const char *serverName,
-							char **clientId, char **clientSecret,
-							char **scope)
+							char **clientId, char **clientSecret)
 {
 	char		path[MAXPGPATH];
 	FILE	   *fp;
@@ -1103,15 +1101,15 @@ ReadCatalogsConfCredentials(const char *serverName,
 	bool		found = false;
 	size_t		serverNameLen;
 
-	if (CatalogsConfPath == NULL || CatalogsConfPath[0] == '\0')
+	if (CatalogsConfCredentialsPath == NULL || CatalogsConfCredentialsPath[0] == '\0')
 		return false;
 
-	if (is_absolute_path(CatalogsConfPath))
-		strlcpy(path, CatalogsConfPath, MAXPGPATH);
+	if (is_absolute_path(CatalogsConfCredentialsPath))
+		strlcpy(path, CatalogsConfCredentialsPath, MAXPGPATH);
 	else if (DataDir != NULL)
-		snprintf(path, MAXPGPATH, "%s/%s", DataDir, CatalogsConfPath);
+		snprintf(path, MAXPGPATH, "%s/%s", DataDir, CatalogsConfCredentialsPath);
 	else
-		strlcpy(path, CatalogsConfPath, MAXPGPATH);
+		strlcpy(path, CatalogsConfCredentialsPath, MAXPGPATH);
 
 	fp = AllocateFile(path, "r");
 	if (fp == NULL)
@@ -1160,12 +1158,7 @@ ReadCatalogsConfCredentials(const char *serverName,
 			*clientSecret = pstrdup(item->value);
 			found = true;
 		}
-		else if (strcmp(key, "scope") == 0)
-		{
-			*scope = pstrdup(item->value);
-			found = true;
-		}
-		/* unknown keys are silently ignored -- room to grow */
+		/* unknown keys are silently ignored */
 	}
 
 	FreeConfigVariables(head);
@@ -1174,29 +1167,25 @@ ReadCatalogsConfCredentials(const char *serverName,
 
 
 /*
- * ApplyCatalogsConfOverrides overlays credentials read from
+ * ApplyCatalogsConfCredentials applies credentials read from
  * catalogs.conf onto opts.  Only the credentials actually present in
- * the file overwrite the existing fields; unset entries leave whatever
- * lower-priority layer (server options for `scope`, GUCs for
- * client_id/client_secret/scope) populated.
+ * the file are set; unset entries leave whatever lower-priority layer
+ * (GUCs for client_id/client_secret) populated.
  */
 static void
-ApplyCatalogsConfOverrides(RestCatalogOptions * opts, const char *serverName)
+ApplyCatalogsConfCredentials(RestCatalogOptions * opts, const char *serverName)
 {
 	char	   *clientId = NULL;
 	char	   *clientSecret = NULL;
-	char	   *scope = NULL;
 
 	if (!ReadCatalogsConfCredentials(serverName,
-									 &clientId, &clientSecret, &scope))
+									 &clientId, &clientSecret))
 		return;
 
 	if (clientId != NULL)
 		opts->clientId = clientId;
 	if (clientSecret != NULL)
 		opts->clientSecret = clientSecret;
-	if (scope != NULL)
-		opts->scope = scope;
 }
 
 
@@ -1369,7 +1358,7 @@ BuildRestCatalogOptionsFromServer(const char *serverName,
 
 	if (!IsBuiltinCatalogServerName(serverName))
 	{
-		ApplyCatalogsConfOverrides(opts, serverName);
+		ApplyCatalogsConfCredentials(opts, serverName);
 		ApplyUserMappingOverrides(opts, server);
 	}
 

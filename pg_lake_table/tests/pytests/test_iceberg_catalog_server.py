@@ -1977,7 +1977,7 @@ def test_redact_preserves_stored_credentials(superuser_conn, extension):
 @pytest.fixture
 def pg_data_dir(superuser_conn):
     """Return $PGDATA via SHOW data_directory.  catalogs.conf lives
-    here when the catalogs_conf_path GUC keeps its default ('catalogs.conf',
+    here when the catalogs_conf_credentials_path GUC keeps its default ('catalogs.conf',
     a relative path resolved against DataDir)."""
     rows = run_query("SHOW data_directory", superuser_conn)
     return rows[0]["data_directory"]
@@ -1986,7 +1986,7 @@ def pg_data_dir(superuser_conn):
 @pytest.fixture
 def catalogs_conf(pg_data_dir):
     """Write a controlled $PGDATA/catalogs.conf and restore the
-    original on teardown.  Because catalogs_conf_path defaults to
+    original on teardown.  Because catalogs_conf_credentials_path defaults to
     'catalogs.conf' (relative), no SIGHUP is needed -- the resolver
     re-opens the file on every credential lookup."""
     conf_path = os.path.join(pg_data_dir, "catalogs.conf")
@@ -2240,68 +2240,13 @@ def test_no_credentials_anywhere_raises_user_server(
         _restore_credential_gucs_globally()
 
 
-def test_scope_from_catalogs_conf_user_server(
-    installcheck,
-    pg_conn,
-    superuser_conn,
-    s3,
-    extension,
-    with_default_location,
-    catalogs_conf,
-):
-    """catalogs.conf can also carry `scope` alongside client_id and
-    client_secret.  ReadCatalogsConfCredentials recognises the
-    "<server>.scope = ..." key explicitly, so this test pins that
-    contract -- if the parser ever silently drops scope keys, future
-    deployments that lean on per-server scopes break in production."""
-    if installcheck:
-        return
-
-    _clear_credential_gucs_globally()
-    try:
-        catalogs_conf(
-            "test_scope_conf_srv.client_id = 'conf-id'\n"
-            "test_scope_conf_srv.client_secret = 'conf-secret'\n"
-            "test_scope_conf_srv.scope = 'PRINCIPAL_ROLE:CONF_SCOPE'\n"
-        )
-        run_command(
-            """
-            CREATE SERVER test_scope_conf_srv TYPE 'rest'
-                FOREIGN DATA WRAPPER iceberg_catalog
-                OPTIONS (rest_endpoint 'http://localhost:8181')
-            """,
-            superuser_conn,
-        )
-        run_command(
-            "GRANT USAGE ON FOREIGN SERVER test_scope_conf_srv TO PUBLIC",
-            superuser_conn,
-        )
-        superuser_conn.commit()
-
-        try:
-            err = _attempt_read_only_dml(
-                pg_conn, "test_scope_conf_srv", "test_scope_conf_tbl"
-            )
-            assert err is not None
-            assert "no credentials found" not in str(err)
-            pg_conn.rollback()
-        finally:
-            run_command(
-                "DROP SERVER IF EXISTS test_scope_conf_srv CASCADE",
-                superuser_conn,
-            )
-            superuser_conn.commit()
-    finally:
-        _restore_credential_gucs_globally()
-
-
-def test_catalogs_conf_path_outside_pgdata(
+def test_catalogs_conf_credentials_path_outside_pgdata(
     installcheck,
     s3,
     extension,
     with_default_location,
 ):
-    """The pg_lake_iceberg.catalogs_conf_path GUC accepts an absolute
+    """The pg_lake_iceberg.catalogs_conf_credentials_path GUC accepts an absolute
     path: ReadCatalogsConfCredentials short-circuits via
     is_absolute_path() so the file is taken verbatim instead of
     being resolved against DataDir.
@@ -2324,12 +2269,12 @@ def test_catalogs_conf_path_outside_pgdata(
             [
                 "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_id TO ''",
                 "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_secret TO ''",
-                f"ALTER SYSTEM SET pg_lake_iceberg.catalogs_conf_path TO '{tmp_path}'",
+                f"ALTER SYSTEM SET pg_lake_iceberg.catalogs_conf_credentials_path TO '{tmp_path}'",
                 "SELECT pg_reload_conf()",
             ]
         )
 
-        # Fresh backends read catalogs_conf_path at startup, which is
+        # Fresh backends read catalogs_conf_credentials_path at startup, which is
         # race-free vs the just-delivered SIGHUP.  Reusing pg_conn /
         # superuser_conn would otherwise risk seeing the old value.
         super_fresh = open_pg_conn()
@@ -2355,7 +2300,7 @@ def test_catalogs_conf_path_outside_pgdata(
             assert err is not None
             assert "no credentials found" not in str(
                 err
-            ), f"absolute catalogs_conf_path was not read: {err}"
+            ), f"absolute catalogs_conf_credentials_path was not read: {err}"
             app_fresh.rollback()
         finally:
             run_command(
@@ -2368,7 +2313,7 @@ def test_catalogs_conf_path_outside_pgdata(
     finally:
         run_command_outside_tx(
             [
-                "ALTER SYSTEM RESET pg_lake_iceberg.catalogs_conf_path",
+                "ALTER SYSTEM RESET pg_lake_iceberg.catalogs_conf_credentials_path",
                 "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_id",
                 "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_secret",
                 "SELECT pg_reload_conf()",
@@ -2389,7 +2334,7 @@ def test_catalogs_conf_ignored_for_builtin_rest(
 ):
     """The built-in 'rest' catalog (pg_lake_rest_catalog) is fed only
     by pg_lake_iceberg.rest_catalog_* GUCs:
-    BuildRestCatalogOptionsFromServer guards ApplyCatalogsConfOverrides
+    BuildRestCatalogOptionsFromServer guards ApplyCatalogsConfCredentials
     with `!IsBuiltinCatalogServerName(serverName)`, keeping the
     built-in's configuration globally consistent with no hidden
     per-user view.
