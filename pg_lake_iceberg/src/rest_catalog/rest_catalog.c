@@ -80,22 +80,23 @@ bool		RestCatalogEnableVendedCredentials = true;
 char	   *CatalogsConfPath = NULL;
 
 /*
- * Per-rest-catalog token cache.  Keyed by the pair (serverOid, umid):
+ * Per-rest-catalog token cache.  Keyed by (serverOid, userMappingOid):
  *   - serverOid identifies which iceberg_catalog server the token
  *     belongs to, so an ALTER SERVER on one server never reuses
  *     another's credentials.
- *   - umid scopes tokens to the contributing pg_user_mapping row, so
- *     different SET ROLEs in the same backend each get the credentials
- *     of their own user mapping (or PUBLIC).  umid is InvalidOid when
- *     no user mapping is involved (built-in pg_lake_rest_catalog, or a
- *     user-created server falling back to catalogs.conf / GUCs).
+ *   - userMappingOid scopes tokens to the contributing pg_user_mapping
+ *     row, so different SET ROLEs in the same backend each get the
+ *     credentials of their own user mapping (or PUBLIC).
+ *     userMappingOid is InvalidOid when no user mapping is involved
+ *     (built-in pg_lake_rest_catalog, or a user-created server falling
+ *     back to catalogs.conf / GUCs).
  *
  * Should always be accessed via GetRestCatalogAccessToken().
  */
 typedef struct RestCatalogTokenCacheKey
 {
 	Oid			serverOid;
-	Oid			umid;
+	Oid			userMappingOid;
 }			RestCatalogTokenCacheKey;
 
 typedef struct RestCatalogTokenCacheEntry
@@ -222,9 +223,6 @@ FindCatalogOptionDesc(const char *name)
 /*
  * Build the "Valid options are: ?" hint string for the given context
  * (either CATALOG_OPT_CTX_SERVER or CATALOG_OPT_CTX_USER_MAPPING).
- *
- * Only called on validator error paths, so ereport(ERROR) copies the
- * string into ErrorContext before aborting.  CurrentMemoryContext is fine.
  */
 static const char *
 GetValidCatalogOptionsHint(int contextBit)
@@ -237,15 +235,19 @@ GetValidCatalogOptionsHint(int contextBit)
 
 	initStringInfo(&buf);
 	appendStringInfoString(&buf, "Valid options are: ");
+
 	for (int i = 0; i < NUM_CATALOG_OPTIONS; i++)
 	{
 		if (!(iceberg_catalog_option_descs[i].contexts & contextBit))
 			continue;
+
 		if (!first)
 			appendStringInfoString(&buf, ", ");
+
 		appendStringInfoString(&buf, iceberg_catalog_option_descs[i].name);
 		first = false;
 	}
+
 	appendStringInfoChar(&buf, '.');
 
 	return buf.data;
@@ -874,90 +876,93 @@ static void
 RedactUserMappingSecrets(const char *queryString, List *options)
 {
 	ListCell   *lc;
-	size_t		querylen;
+	char	   *queryEnd;
 
 	if (queryString == NULL || options == NIL)
 		return;
 
-	querylen = strlen(queryString);
+	queryEnd = (char *) queryString + strlen(queryString);
 
 	foreach(lc, options)
 	{
 		DefElem    *def = (DefElem *) lfirst(lc);
-		char	   *p;
-		char	   *qend;
-		bool		escapeStrings = false;
+		char	   *cursor;
+		bool		hasBackslashEscapes = false;
+		bool		hasValidLocation;
+		bool		isEscapePrefix;
+		bool		isUnicodePrefix;
 
-		/* DROP options have no value to scrub. */
 		if (def->arg == NULL)
-			continue;
+			continue;			/* DROP options have no value to scrub */
 
 		if (!IsRedactableUserMappingSecret(def->defname))
 			continue;
 
-		/*
-		 * Synthetic DefElems built outside the parser carry no location and
-		 * cannot be placed back into queryString.
-		 */
-		if (def->location < 0 || (size_t) def->location >= querylen)
+		hasValidLocation = (def->location >= 0 &&
+							(size_t) def->location < (size_t) (queryEnd - queryString));
+		if (!hasValidLocation)
 			continue;
 
-		p = (char *) queryString + def->location;
-		qend = (char *) queryString + querylen;
+		cursor = (char *) queryString + def->location;
 
 		/*
-		 * Scan from the option name to the opening quote of the value,
-		 * detecting an optional E / U& prefix that enables backslash escapes
-		 * inside the literal.  Whitespace, comments and the option name
-		 * itself are skipped.
+		 * Scan past the option name to the opening quote of its Sconst value.
+		 * Along the way, detect an E'' or U&'' prefix that enables backslash
+		 * escapes inside the literal.
 		 */
-		while (p < qend && *p != '\'')
+		while (cursor < queryEnd && *cursor != '\'')
 		{
-			if ((*p == 'E' || *p == 'e') &&
-				p + 1 < qend && p[1] == '\'')
+			isEscapePrefix = ((*cursor == 'E' || *cursor == 'e') &&
+							  cursor + 1 < queryEnd && cursor[1] == '\'');
+			isUnicodePrefix = ((*cursor == 'U' || *cursor == 'u') &&
+							   cursor + 2 < queryEnd &&
+							   cursor[1] == '&' && cursor[2] == '\'');
+
+			if (isEscapePrefix)
 			{
-				escapeStrings = true;
-				p++;
+				hasBackslashEscapes = true;
+				cursor++;		/* advance past 'E', loop exits on '\'' */
 				break;
 			}
-			if ((*p == 'U' || *p == 'u') &&
-				p + 2 < qend && p[1] == '&' && p[2] == '\'')
+			if (isUnicodePrefix)
 			{
-				escapeStrings = true;
-				p += 2;
+				hasBackslashEscapes = true;
+				cursor += 2;	/* advance past 'U&', loop exits on '\'' */
 				break;
 			}
-			p++;
+			cursor++;
 		}
 
-		if (p >= qend || *p != '\'')
-			continue;			/* no opening quote located */
+		if (cursor >= queryEnd || *cursor != '\'')
+			continue;			/* no opening quote found */
 
-		p++;					/* skip opening quote */
+		cursor++;				/* skip the opening quote itself */
 
-		while (p < qend)
+		/*
+		 * Overwrite every byte of the literal body with '*', respecting the
+		 * quoting rules so we correctly find the real closing quote.
+		 */
+		while (cursor < queryEnd)
 		{
-			if (*p == '\'')
-			{
-				if (p + 1 < qend && p[1] == '\'')
-				{
-					/* '' inside the value: doubled-quote escape. */
-					*p++ = '*';
-					*p++ = '*';
-					continue;
-				}
-				break;			/* closing quote: stop, leave it intact */
-			}
+			bool		isDoubledQuote = (*cursor == '\'' &&
+										  cursor + 1 < queryEnd &&
+										  cursor[1] == '\'');
+			bool		isClosingQuote = (*cursor == '\'' && !isDoubledQuote);
+			bool		isBackslashEscape = (hasBackslashEscapes &&
+											 *cursor == '\\' &&
+											 cursor + 1 < queryEnd);
 
-			if (escapeStrings && *p == '\\' && p + 1 < qend)
+			if (isClosingQuote)
+				break;
+
+			if (isDoubledQuote || isBackslashEscape)
 			{
-				/* \X inside an E'' or U&'' literal: two-byte escape. */
-				*p++ = '*';
-				*p++ = '*';
+				*cursor++ = '*';
+				*cursor++ = '*';
 				continue;
 			}
 
-			*p++ = '*';
+			*cursor++ = '*';
 		}
 	}
 }
@@ -1197,7 +1202,7 @@ ApplyCatalogsConfOverrides(RestCatalogOptions * opts, const char *serverName)
 
 /*
  * ApplyUserMappingOverrides overlays credentials from pg_user_mapping
- * onto opts and records the matched mapping's OID in opts->umid.  Has
+ * onto opts and records the matched mapping's OID in opts->userMappingOid.  Has
  * no effect if no user mapping applies; the caller may then fall back
  * to catalogs.conf-derived or GUC-derived values.
  *
@@ -1211,13 +1216,13 @@ ApplyUserMappingOverrides(RestCatalogOptions * opts, ForeignServer *server)
 {
 	List	   *options;
 	ListCell   *lc;
-	Oid			umid;
+	Oid			userMappingOid;
 
-	options = LookupUserMappingOptions(server->serverid, &umid);
+	options = LookupUserMappingOptions(server->serverid, &userMappingOid);
 	if (options == NIL)
 		return;
 
-	opts->umid = umid;
+	opts->userMappingOid = userMappingOid;
 
 	foreach(lc, options)
 	{
@@ -1357,7 +1362,7 @@ BuildRestCatalogOptionsFromServer(const char *serverName,
 	RestCatalogOptions *opts = palloc0(sizeof(RestCatalogOptions));
 
 	opts->serverOid = server->serverid;
-	opts->umid = InvalidOid;
+	opts->userMappingOid = InvalidOid;
 	opts->catalog = pstrdup(userVisibleCatalog);
 	ApplyGUCDefaults(opts);
 	ApplyServerOptionOverrides(opts, server);
@@ -1420,7 +1425,7 @@ CopyRestCatalogOptions(MemoryContext dst, const RestCatalogOptions * src)
 	RestCatalogOptions *copy = palloc0(sizeof(RestCatalogOptions));
 
 	copy->serverOid = src->serverOid;
-	copy->umid = src->umid;
+	copy->userMappingOid = src->userMappingOid;
 	copy->catalog = src->catalog ? pstrdup(src->catalog) : NULL;
 	copy->host = src->host ? pstrdup(src->host) : NULL;
 	copy->oauthHostPath = src->oauthHostPath ? pstrdup(src->oauthHostPath) : NULL;
@@ -1994,8 +1999,9 @@ GetRestCatalogAccessToken(RestCatalogOptions * opts, bool forceRefreshToken)
 	 * Every resolved RestCatalogOptions originates from
 	 * BuildRestCatalogOptionsFromServer, which always sets serverOid. A
 	 * missing OID would silently funnel every catalog into the same cache
-	 * slot, so trap it loudly here.  umid is allowed to be InvalidOid: that
-	 * simply means "no user mapping contributed credentials".
+	 * slot, so trap it loudly here.  userMappingOid is allowed to be
+	 * InvalidOid: that simply means "no user mapping contributed
+	 * credentials".
 	 */
 	Assert(OidIsValid(opts->serverOid));
 
@@ -2004,7 +2010,7 @@ GetRestCatalogAccessToken(RestCatalogOptions * opts, bool forceRefreshToken)
 	memset(&key, 0, sizeof(key));	/* zero out any compiler padding so
 									 * HASH_BLOBS keys compare cleanly */
 	key.serverOid = opts->serverOid;
-	key.umid = opts->umid;
+	key.userMappingOid = opts->userMappingOid;
 
 	entry = hash_search(RestCatalogTokenCache, &key, HASH_ENTER, &found);
 

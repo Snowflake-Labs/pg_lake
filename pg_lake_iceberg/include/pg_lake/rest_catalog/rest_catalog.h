@@ -48,9 +48,9 @@ extern char *CatalogsConfPath;
  *   3. $PGDATA/catalogs.conf credentials    (user-created servers only)
  *   4. pg_user_mapping options              (user-created servers only)
  *
- * In-memory identity is the pair (`serverOid`, `umid`):
+ * In-memory identity is the pair (`serverOid`, `userMappingOid`):
  *   - serverOid is the iceberg_catalog server's OID.
- *   - umid is the OID of the pg_user_mapping row that contributed the
+ *   - userMappingOid is the OID of the pg_user_mapping row that contributed the
  *     credentials, or InvalidOid when no user mapping was used (built-in
  *     pg_lake_rest_catalog, or a user-created server whose credentials
  *     came entirely from catalogs.conf / GUCs).
@@ -63,7 +63,7 @@ typedef struct RestCatalogOptions
 	Oid			serverOid;		/* iceberg_catalog server OID; canonical
 								 * identity, never InvalidOid for resolved
 								 * opts */
-	Oid			umid;			/* pg_user_mapping row OID that supplied
+	Oid			userMappingOid; /* pg_user_mapping row OID that supplied
 								 * credentials, or InvalidOid if none */
 	char	   *catalog;		/* short user-facing name; used in error
 								 * messages, never for equality */
