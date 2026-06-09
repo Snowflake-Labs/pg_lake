@@ -321,6 +321,16 @@ _PG_init(void)
 							 GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 
+	DefineCustomStringVariable("pg_lake_iceberg.catalogs_conf_credentials_path",
+							   gettext_noop("Path to the catalog credentials file. "
+											"Defaults to $PGDATA/catalogs.conf."),
+							   NULL,
+							   &CatalogsConfCredentialsPath,
+							   "catalogs.conf",
+							   PGC_SIGHUP,
+							   GUC_SUPERUSER_ONLY,
+							   NULL, NULL, NULL);
+
 	DefineCustomBoolVariable("pg_lake_iceberg.unsupported_numeric_as_double",
 							 gettext_noop("When enabled, numeric columns that cannot be represented "
 										  "as Iceberg decimals (unbounded or precision > 38) are "

@@ -34,6 +34,7 @@ extern char *RestCatalogClientSecret;
 extern char *RestCatalogScope;
 extern int	RestCatalogAuthType;
 extern bool RestCatalogEnableVendedCredentials;
+extern char *CatalogsConfCredentialsPath;
 
 /*
  * Resolved REST catalog connection options.  All REST catalogs --
@@ -44,14 +45,15 @@ extern bool RestCatalogEnableVendedCredentials;
  * Resolution order, lowest to highest priority:
  *   1. GUC defaults                         (ApplyGUCDefaults)
  *   2. Server options                       (ApplyServerOptionOverrides)
- *   3. pg_user_mapping options              (user-created servers only)
+ *   3. $PGDATA/catalogs.conf credentials    (user-created servers only)
+ *   4. pg_user_mapping options              (user-created servers only)
  *
  * In-memory identity is the pair (`serverOid`, `userMappingOid`):
  *   - serverOid is the iceberg_catalog server's OID.
  *   - userMappingOid is the OID of the pg_user_mapping row that contributed the
  *     credentials, or InvalidOid when no user mapping was used (built-in
  *     pg_lake_rest_catalog, or a user-created server whose credentials
- *     came entirely from GUCs).
+ *     came entirely from catalogs.conf / GUCs).
  *
  * `catalog` is the user-visible short name (e.g. 'rest', 'my_polaris')
  * kept purely for error messages.

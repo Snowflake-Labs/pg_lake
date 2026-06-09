@@ -14,7 +14,8 @@
  *
  * Credential resolution order:
  *   1. CREATE USER MAPPING for the current user
- *   2. GUC variables (backward compatibility)
+ *   2. $PGDATA/catalogs.conf (platform-provided)
+ *   3. GUC variables (backward compatibility)
  *
  * User-defined catalog example:
  *   CREATE SERVER my_polaris TYPE 'rest'
@@ -25,6 +26,15 @@
  *     OPTIONS (client_id '...', client_secret '...');
  *
  *   CREATE TABLE t (a int) USING iceberg WITH (catalog = 'my_polaris');
+ *
+ * Platform-provided catalog example:
+ *   CREATE SERVER horizon TYPE 'rest'
+ *     FOREIGN DATA WRAPPER iceberg_catalog
+ *     OPTIONS (rest_endpoint 'https://horizon.example.com');
+ *
+ *   -- Credentials in $PGDATA/catalogs.conf:
+ *   --   horizon.client_id = 'platform_id'
+ *   --   horizon.client_secret = 'platform_secret'
  */
 CREATE FUNCTION lake_iceberg.iceberg_catalog_validator(text[], oid)
 RETURNS void
