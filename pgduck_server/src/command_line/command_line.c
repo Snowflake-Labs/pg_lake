@@ -47,6 +47,17 @@
 #define DEFAULT_MAX_CLIENTS 10000
 #define DEFAULT_CACHE_ON_WRITE_MAX_SIZE 1024 * 1024 * 1024 // 1GB
 
+/*
+ * DuckDB defaults max_temp_directory_size to ~90% of the free space on the
+ * volume holding temp_directory. When spill is pointed at a disk shared with
+ * PostgreSQL (the intended deployment), that default is dangerous: DuckDB
+ * could consume almost the entire disk and starve PostgreSQL. We therefore
+ * always apply an explicit, bounded cap instead of inheriting DuckDB's
+ * disk-relative default. This is only a fallback guardrail; operators should
+ * size it for their disk via --max_temp_directory_size or the init file.
+ */
+#define DEFAULT_MAX_TEMP_DIRECTORY_SIZE "10GiB"
+
 bool		IsOutputVerbose = false;
 
 static void
@@ -65,6 +76,8 @@ print_usage()
 	printf(" --duckdb_database_file_path <path>	Specify the database file path for DuckDB, default is %s\n", DEFAULT_DUCKDB_DATABASE_FILE_PATH);
 	printf(" --check_cli_params_only       		Only check the cli arguments, do not run the server\n");
 	printf(" --init_file_path <path>			Execute all statements in this file on start-up\n");
+	printf(" --temp_directory <path>			Directory DuckDB uses to spill intermediate results to disk, default is \"<duckdb_database_file_path>.tmp\"\n");
+	printf(" --max_temp_directory_size <size>	Upper bound on total spill-to-disk usage (e.g. 50GiB), default is %s\n", DEFAULT_MAX_TEMP_DIRECTORY_SIZE);
 	printf(" --cache_dir                    	Specify the directory to use to cache remote files (from S3)\n");
 	printf(" --extensions_dir <path>			Install and load extensions in the specified directory\n");
 	printf(" --pidfile <path>					Write the pid of this program to the given path\n");
@@ -97,6 +110,8 @@ parse_arguments(int argc, char *argv[])
 		.extensions_dir = NULL,
 		.no_extension_install = false,
 		.debug = false,
+		.temp_directory = NULL,
+		.max_temp_directory_size = DEFAULT_MAX_TEMP_DIRECTORY_SIZE,
 	};
 	int			opt;
 	int			option_index = 0;
@@ -120,10 +135,12 @@ parse_arguments(int argc, char *argv[])
 		{"init_file_path", required_argument, NULL, 'i'},
 		{"pidfile", required_argument, NULL, 'p'},
 		{"debug", no_argument, NULL, 'd'},
+		{"temp_directory", required_argument, NULL, 'T'},
+		{"max_temp_directory_size", required_argument, NULL, 'z'},
 		{0, 0, 0, 0}
 	};
 
-	while ((opt = getopt_long(argc, argv, "cvhU:P:M:D:l:L:p:d", long_options, &option_index)) != -1)
+	while ((opt = getopt_long(argc, argv, "cvhU:P:M:D:l:L:p:dT:z:", long_options, &option_index)) != -1)
 	{
 		switch (opt)
 		{
@@ -252,6 +269,12 @@ parse_arguments(int argc, char *argv[])
 			case 'p':
 				options.pidfile_path = strdup(optarg);
 				break;
+			case 'T':
+				options.temp_directory = strdup(optarg);
+				break;
+			case 'z':
+				options.max_temp_directory_size = strdup(optarg);
+				break;
 			case '?':
 				print_usage();
 				exit(EXIT_FAILURE);
@@ -284,6 +307,17 @@ parse_arguments(int argc, char *argv[])
 	}
 
 	PGDUCK_SERVER_LOG("Cache on write max size is set to: %" PRIu64, options.cache_on_write_max_size);
+
+	if (options.temp_directory)
+	{
+		PGDUCK_SERVER_LOG("DuckDB spill (temp) directory is set to: %s", options.temp_directory);
+	}
+	else
+	{
+		PGDUCK_SERVER_LOG("DuckDB spill (temp) directory defaults to \"<duckdb_database_file_path>.tmp\"");
+	}
+
+	PGDUCK_SERVER_LOG("DuckDB max_temp_directory_size (spill cap) is set to: %s", options.max_temp_directory_size);
 
 	if (options.verbose)
 	{
