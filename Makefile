@@ -1,5 +1,5 @@
 # when adding a new extension, add to this list to get the standard targets supported
-EXTENSION_TARGETS = pg_extension_base pg_map pg_extension_updater pg_lake_engine pg_lake_copy pg_lake_table pg_lake_iceberg pg_lake_spatial pg_lake pg_lake_benchmark
+EXTENSION_TARGETS = pg_extension_base pg_map pg_extension_updater pg_lake_engine pg_lake_copy pg_lake_table pg_lake_iceberg pg_lake_spatial pg_lake pg_lake_benchmark pg_lake_polaris
 DUCK_TARGETS = pgduck_server duckdb_pglake
 ALL_TARGETS = $(DUCK_TARGETS) avro $(EXTENSION_TARGETS)
 
@@ -149,6 +149,12 @@ pg_lake_benchmark: pg_lake
 
 install-pg_lake_benchmark: install-pg_lake pg_lake_benchmark
 	$(MAKE) -C pg_lake_benchmark install
+
+pg_lake_polaris: pg_lake
+	$(MAKE) -C pg_lake_polaris
+
+install-pg_lake_polaris: install-pg_lake pg_lake_polaris
+	$(MAKE) -C pg_lake_polaris install
 
 duckdb_pglake:
 	@if [ $(DUCKDB_BUILD_USE_CACHE) -eq 1 ] && [ -f $(PG_LIBDIR)/$(LIB_NAME) ] && [ -f $(PG_INCLUDEDIR)/duckdb.h ]; then \
