@@ -77,6 +77,24 @@
 	 (error) == DUCKDB_ERROR_INTERNAL || \
 	 (oom_is_fatal && (error) == DUCKDB_ERROR_OUT_OF_MEMORY))
 
+/*
+ * Substring DuckDB puts in the error message when a query exceeds the
+ * configured max_temp_directory_size while spilling to disk.
+ *
+ * DuckDB reports both genuine RAM exhaustion and this self-imposed temp-spill
+ * cap as DUCKDB_ERROR_OUT_OF_MEMORY, and the C API exposes no other way to tell
+ * them apart, so we match on the message text. See the throw sites in
+ * duckdb_pglake/duckdb/src/storage/temporary_file_manager.cpp.
+ *
+ * WARNING: this is a load-bearing string. If DuckDB changes the wording, a
+ * temp-spill overflow would once again be treated as fatal and crash the whole
+ * server. The regression test
+ * test_server_start.py::test_temp_directory_limit_does_not_crash_server asserts
+ * this token shows up in the client error, and is the tripwire that catches a
+ * wording change -- keep the two in lockstep.
+ */
+#define DUCKDB_MAX_TEMP_DIR_SIZE_ERROR_TOKEN "max_temp_directory_size"
+
 typedef struct DuckDBResultColumn
 {
 	duckdb_type duckType;
@@ -100,6 +118,8 @@ duckdb_database DuckDB;
 static bool IsDuckDBInitialized = false;
 
 
+static bool duckdb_error_is_fatal(duckdb_error_type errorType,
+								  const char *errorMessage);
 static DuckDBStatus print_duckdb_version(void);
 static DuckDBStatus ensure_jsonb_cast_created(void);
 static duckdb_state run_command_on_duckdb(const char *command);
@@ -157,7 +177,9 @@ duckdb_global_init(char *databaseFilePath,
 				   bool allowExtensionInstall,
 				   char *memoryLimit,
 				   int64_t cacheOnWriteMaxSize,
-				   char *initFilePath)
+				   char *initFilePath,
+				   char *tempDirectory,
+				   char *maxTempDirectorySize)
 {
 	if (IsDuckDBInitialized)
 	{
@@ -396,6 +418,41 @@ duckdb_global_init(char *databaseFilePath,
 			return DUCKDB_INITIALIZATION_ERROR;
 	}
 
+	/*
+	 * Point DuckDB's spill (temp) directory at operator-chosen storage when
+	 * provided; otherwise DuckDB defaults it to "<database file>.tmp".
+	 */
+	if (tempDirectory != NULL)
+	{
+		if (snprintf(setCommand, 1024, "SET GLOBAL temp_directory TO '%s'", tempDirectory) < 0)
+		{
+			PGDUCK_SERVER_ERROR("temp_directory value is too long");
+			return DUCKDB_INITIALIZATION_ERROR;
+		}
+
+		if (run_command_on_duckdb(setCommand) == DuckDBError)
+			return DUCKDB_INITIALIZATION_ERROR;
+	}
+
+	/*
+	 * Always bound spill-to-disk usage. The CLI layer supplies a default, so
+	 * maxTempDirectorySize is normally non-NULL and we never inherit DuckDB's
+	 * 90%-of-disk default, which is unsafe when spill shares PostgreSQL's
+	 * disk. Hitting this cap surfaces as a graceful query error (see
+	 * duckdb_error_is_fatal), not a server crash.
+	 */
+	if (maxTempDirectorySize != NULL)
+	{
+		if (snprintf(setCommand, 1024, "SET GLOBAL max_temp_directory_size TO '%s'", maxTempDirectorySize) < 0)
+		{
+			PGDUCK_SERVER_ERROR("max_temp_directory_size value is too long");
+			return DUCKDB_INITIALIZATION_ERROR;
+		}
+
+		if (run_command_on_duckdb(setCommand) == DuckDBError)
+			return DUCKDB_INITIALIZATION_ERROR;
+	}
+
 	if (initFilePath != NULL)
 	{
 		FILE	   *initFile = fopen(initFilePath, "r");
@@ -493,6 +550,24 @@ ensure_jsonb_cast_created(void)
 		return DUCKDB_INITIALIZATION_ERROR;
 
 	return DUCKDB_SUCCESS;
+}
+
+
+/*
+ * Hitting max_temp_directory_size is a recoverable, query-scoped condition:
+ * DuckDB rolls the query back and releases the spilled blocks, so it must not
+ * bring the server down even though it is surfaced as an out-of-memory error.
+ * Genuine OOM (and FATAL/INTERNAL) errors keep their existing fatal handling.
+ */
+static bool
+duckdb_error_is_fatal(duckdb_error_type errorType, const char *errorMessage)
+{
+	if (errorType == DUCKDB_ERROR_OUT_OF_MEMORY &&
+		errorMessage != NULL &&
+		strstr(errorMessage, DUCKDB_MAX_TEMP_DIR_SIZE_ERROR_TOKEN) != NULL)
+		return false;
+
+	return IS_FATAL_DUCKDB_ERROR(errorType);
 }
 
 
@@ -745,7 +820,7 @@ duckdb_session_run_command(DuckDBSession * duckSession, const char *queryString,
 			return status;
 		}
 
-		if (IS_FATAL_DUCKDB_ERROR(duckdbErrorType))
+		if (duckdb_error_is_fatal(duckdbErrorType, duckdbError))
 		{
 			/*
 			 * Shutdown the server -- will be restarted by systemd.  If we
@@ -917,7 +992,7 @@ duckdb_session_execute_prepared(DuckDBSession * duckSession,
 		duckdb_error_type duckdbErrorType = duckdb_result_error_type(&duckResult);
 		const char *duckdbError = duckdb_result_error(&duckResult);
 
-		if (IS_FATAL_DUCKDB_ERROR(duckdbErrorType))
+		if (duckdb_error_is_fatal(duckdbErrorType, duckdbError))
 		{
 			/*
 			 * Shutdown the server -- will be restarted by systemd.  If we
@@ -1203,7 +1278,7 @@ process_and_send_data_chunks(DuckDBQueryResult * duckdb_query_result,
 
 			if (duckdbError != NULL)
 			{
-				if (IS_FATAL_DUCKDB_ERROR(duckdbErrorType))
+				if (duckdb_error_is_fatal(duckdbErrorType, duckdbError))
 				{
 					/*
 					 * Shutdown the server -- will be restarted by systemd. If

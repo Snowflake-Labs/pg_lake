@@ -297,3 +297,65 @@ def test_long_short_port_combination():
     returncode, stdout, stderr = run_cli_command(["--port", "8080", "-P", "9090"])
     assert returncode == 0
     assert_common_output(stderr, port=9090)
+
+
+# --temp_directory / --max_temp_directory_size parsing.
+#
+# Must track DEFAULT_MAX_TEMP_DIRECTORY_SIZE in pgduck_server's command_line.c:
+# asserting the default in the startup log guards against silently regressing to
+# DuckDB's ~90%-of-disk default.
+DEFAULT_MAX_TEMP_DIRECTORY_SIZE = "10GiB"
+
+
+def test_default_temp_directory_and_cap():
+    # With no flags, spill stays at DuckDB's default location but the cap is
+    # always our bounded default, never DuckDB's disk-relative one.
+    returncode, stdout, stderr = run_cli_command([])
+    assert returncode == 0
+    assert (
+        'DuckDB spill (temp) directory defaults to "<duckdb_database_file_path>.tmp"'
+        in stderr
+    )
+    assert (
+        f"DuckDB max_temp_directory_size (spill cap) is set to: {DEFAULT_MAX_TEMP_DIRECTORY_SIZE}"
+        in stderr
+    )
+
+
+def test_temp_directory():
+    returncode, stdout, stderr = run_cli_command(["--temp_directory", "/tmp/spilldir"])
+    assert returncode == 0
+    assert "DuckDB spill (temp) directory is set to: /tmp/spilldir" in stderr
+
+
+def test_max_temp_directory_size():
+    returncode, stdout, stderr = run_cli_command(["--max_temp_directory_size", "20GiB"])
+    assert returncode == 0
+    assert "DuckDB max_temp_directory_size (spill cap) is set to: 20GiB" in stderr
+
+
+def test_short_temp_directory():
+    returncode, stdout, stderr = run_cli_command(["-T", "/tmp/spilldir"])
+    assert returncode == 0
+    assert "DuckDB spill (temp) directory is set to: /tmp/spilldir" in stderr
+
+
+def test_short_max_temp_directory_size():
+    returncode, stdout, stderr = run_cli_command(["-z", "20GiB"])
+    assert returncode == 0
+    assert "DuckDB max_temp_directory_size (spill cap) is set to: 20GiB" in stderr
+
+
+def test_multiple_max_temp_directory_size_last_one_picked():
+    returncode, stdout, stderr = run_cli_command(
+        ["--max_temp_directory_size", "20GiB", "--max_temp_directory_size", "30GiB"]
+    )
+    assert returncode == 0
+    assert "DuckDB max_temp_directory_size (spill cap) is set to: 30GiB" in stderr
+
+
+def test_temp_directory_requires_argument():
+    returncode, stdout, stderr = run_cli_command(["--temp_directory"])
+    assert returncode == 1
+    assert "requires an argument" in stderr
+    assert "--temp_directory" in stderr
