@@ -581,6 +581,86 @@ def test_temp_directory_limit_reclaims_space():
 
 
 # ---------------------------------------------------------------------------
+# Genuine (fatal) OOM over the extended protocol
+#
+# Exceeding the temp-cap is recoverable (above). A *genuine* RAM out-of-memory
+# is NOT: DuckDB cannot guarantee a clean state, so pgduck_server must terminate
+# and let systemd restart it. That already worked for the simple-query protocol,
+# but the extended (Parse/Bind/Execute) protocol -- the one pg_lake uses --
+# reported the error and kept running, leaving a wedged DuckDB that answered
+# every subsequent query with a bare "Unknown Error". This guards that fix.
+# ---------------------------------------------------------------------------
+
+# Small enough that even a single-threaded hash aggregate cannot keep its working
+# set pinned -> a genuine "could not allocate/pin block" OOM, not the temp-cap
+# overflow. Single-threaded is the *hardest* case to OOM (smallest working set),
+# so forcing threads=1 keeps this deterministic on multi-core CI as well.
+GENUINE_OOM_MEMORY_LIMIT = "16MB"
+
+# Same spilling aggregate as SPILL_QUERY, but with a bind parameter so psycopg2
+# uses the extended protocol (PQexecParams) -- the prepared-statement path that
+# previously failed to terminate on a fatal error.
+GENUINE_OOM_QUERY = (
+    "SELECT count(*) FROM (SELECT i FROM range(100000000) t(i) GROUP BY i) g "
+    "WHERE %s IS NOT NULL"
+)
+
+
+def _wait_for_exit(server, timeout):
+    """Poll until the server process exits, up to *timeout* seconds."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if server.process.poll() is not None:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def test_genuine_oom_over_extended_protocol_terminates_server():
+    """A genuine RAM OOM delivered over the extended protocol must terminate the
+    server (so it restarts clean), not leave it wedged answering "Unknown Error".
+
+    Regression guard for the pgsession.c fix: the Parse/Bind/Execute handlers
+    reported a fatal DuckDB error but, unlike the simple-query path, never
+    exit()ed -- so a single oversized query could permanently wedge the process
+    shared by every client.
+    """
+    server = PgDuckServer(
+        port=PGDUCK_PORT,
+        need_output=True,
+        extra_args=["--memory_limit", GENUINE_OOM_MEMORY_LIMIT],
+    )
+    assert is_server_listening(server.socket_path)
+
+    conn = _spill_connection()
+    cur = conn.cursor()
+    # threads=1 keeps the genuine-OOM trigger deterministic (see comment above);
+    # a large cap means spilling is allowed, so this is NOT the temp-cap path.
+    cur.execute("SET GLOBAL threads='1'")
+    cur.execute("SET GLOBAL max_temp_directory_size='10GiB'")
+
+    # Passing a parameter forces psycopg2 onto the extended protocol.
+    with pytest.raises(psycopg2.Error):
+        cur.execute(GENUINE_OOM_QUERY, ("x",))
+
+    assert _wait_for_exit(server, timeout=15), (
+        "pgduck_server did not terminate on a genuine OOM over the extended "
+        "protocol; it would stay wedged and answer 'Unknown Error' forever"
+    )
+
+    # The temp-cap overflow is recoverable and never terminates, so a fatal
+    # 'terminating' path proves this was a genuine RAM OOM -- whose real DuckDB
+    # message we now forward to the client instead of a bare "Unknown Error".
+    server_output = get_server_output(server.output_queue)
+    assert (
+        "terminating" in server_output
+    ), f"expected a fatal 'terminating' path, got: {server_output}"
+    assert (
+        "Out of Memory Error" in server_output
+    ), f"expected the genuine OOM message to be surfaced, got: {server_output}"
+
+
+# ---------------------------------------------------------------------------
 # --temp_directory / --max_temp_directory_size command-line flag tests
 #
 # The cap and spill location are first-class CLI flags so operators can point

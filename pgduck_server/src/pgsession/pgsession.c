@@ -569,6 +569,13 @@ process_parse_message(PGSession * pgSession, StringInfo inputMessage)
 		/* free error message allocated by duckdb_session_prepare */
 		pfree(errorMessage);
 
+		/*
+		 * Reported above, but a fatal error must still terminate (like the
+		 * simple-query path) so a wedged DuckDB gets restarted clean.
+		 */
+		if (IS_FATAL_DUCKDB_STATUS(status))
+			exit(EXIT_FAILURE);
+
 		return sentErrorMsg;
 	}
 	else if (status != DUCKDB_SUCCESS)
@@ -713,6 +720,13 @@ process_bind_message(PGSession * pgSession, StringInfo inputMessage)
 			/* free error message allocated by duckdb_session_bind_varchar */
 			pfree(errorMessage);
 
+			/*
+			 * Reported above, but a fatal error must still terminate (like
+			 * the simple-query path) so a wedged DuckDB gets restarted clean.
+			 */
+			if (IS_FATAL_DUCKDB_STATUS(bindResult))
+				exit(EXIT_FAILURE);
+
 			return sentResult;
 		}
 	}
@@ -829,6 +843,13 @@ process_execute_message(PGSession * pgSession, StringInfo inputMessage)
 		/* free error message allocated by duckdb_session_execute_prepared */
 		pfree(errorMessage);
 
+		/*
+		 * Reported above, but a fatal error must still terminate (like the
+		 * simple-query path) so a wedged DuckDB gets restarted clean.
+		 */
+		if (IS_FATAL_DUCKDB_STATUS(status))
+			exit(EXIT_FAILURE);
+
 		return sentErrorMsg;
 	}
 	else
@@ -857,6 +878,18 @@ handle_pgsession_error_message(DuckDBStatus status, PGSession * pgSession, char 
 	{
 		case DUCKDB_QUERY_ERROR:
 			errorRes = pgsession_send_postgres_error(pgSession, ERROR, errorMessage);
+			break;
+		case DUCKDB_FATAL_ERROR:
+
+			/*
+			 * The caller terminates the server right after reporting a fatal
+			 * error, so surface the underlying DuckDB message (e.g. a genuine
+			 * out-of-memory "failed to pin block ...") instead of a generic
+			 * "Unknown Error" -- otherwise the client has no clue why the
+			 * connection went away.
+			 */
+			errorRes = pgsession_send_postgres_error(pgSession, ERROR,
+													 errorMessage != NULL ? errorMessage : "Fatal Error");
 			break;
 		case DUCKDB_INITIALIZATION_ERROR:
 			errorRes = pgsession_send_postgres_error(pgSession, ERROR, "Initialization Error");
