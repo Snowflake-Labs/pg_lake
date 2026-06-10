@@ -387,6 +387,7 @@ def test_alter_external_iceberg_path_rejects_extra_options(
     )
     stored = result[0][0]
     assert not any(opt.startswith("format=") for opt in stored)
+    assert any(opt == f"path={initial_meta}" for opt in stored)
 
     run_command("DROP SCHEMA test_alter_ext_path_extra CASCADE;", pg_conn)
     pg_conn.commit()
