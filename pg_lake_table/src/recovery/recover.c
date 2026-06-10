@@ -25,12 +25,15 @@
 #include "pg_lake/extensions/pg_lake_iceberg.h"
 #include "pg_lake/extensions/pg_lake_table.h"
 #include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/recovery/recover.h"
 #include "pg_extension_base/spi_helpers.h"
 #include "utils/builtins.h"
 
 
 PG_FUNCTION_INFO_V1(pg_lake_finish_postgres_recovery);
 PG_FUNCTION_INFO_V1(pg_lake_finish_postgres_recovery_in_db);
+
+PgLakeFinishPostgresRecoveryHookType PgLakeFinishPostgresRecoveryHook = NULL;
 
 static void RunAttachedCommand(char *command, char *databaseName);
 static List *GetDatabaseNameList(void);
@@ -63,6 +66,9 @@ pg_lake_finish_postgres_recovery(PG_FUNCTION_ARGS)
 						 quote_literal_cstr("finish_postgres_recovery_in_db"));
 		RunAttachedCommand(command->data, databaseName);
 	}
+
+	if (PgLakeFinishPostgresRecoveryHook != NULL)
+		PgLakeFinishPostgresRecoveryHook();
 
 	PG_RETURN_VOID();
 }
