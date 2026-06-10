@@ -353,6 +353,7 @@ def test_alter_external_iceberg_path_rejects_extra_options(
     )
     pg_conn.commit()
 
+    # path first, format second: format must not slip through after path matches.
     error = run_command(
         f"""
         ALTER FOREIGN TABLE test_alter_ext_path_extra.external
@@ -363,6 +364,29 @@ def test_alter_external_iceberg_path_rejects_extra_options(
     )
     assert "table options can be changed" in str(error)
     pg_conn.rollback()
+
+    # reverse order: format first, path second. still rejected.
+    error = run_command(
+        f"""
+        ALTER FOREIGN TABLE test_alter_ext_path_extra.external
+            OPTIONS (ADD format 'parquet', SET path '{initial_meta}');
+        """,
+        pg_conn,
+        raise_error=False,
+    )
+    assert "table options can be changed" in str(error)
+    pg_conn.rollback()
+
+    # the failed ALTERs above must not have stored format on the foreign table
+    result = run_query(
+        "SELECT ftoptions FROM pg_foreign_table ft "
+        "JOIN pg_class c ON c.oid = ft.ftrelid "
+        "WHERE c.relname = 'external' "
+        "AND c.relnamespace = 'test_alter_ext_path_extra'::regnamespace",
+        pg_conn,
+    )
+    stored = result[0][0]
+    assert not any(opt.startswith("format=") for opt in stored)
 
     run_command("DROP SCHEMA test_alter_ext_path_extra CASCADE;", pg_conn)
     pg_conn.commit()
