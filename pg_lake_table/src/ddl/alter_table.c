@@ -1511,7 +1511,6 @@ HasOnlyCatalogAlterTableOptions(AlterTableStmt *alterStmt)
 static void
 ErrorIfUnsupportedTableOptionChange(AlterTableStmt *alterStmt, List *allowedOptions)
 {
-	StringInfo	allowedOptionsStr = makeStringInfo();
 	ListCell   *subcommandCell = NULL;
 
 	foreach(subcommandCell, alterStmt->cmds)
@@ -1522,12 +1521,12 @@ ErrorIfUnsupportedTableOptionChange(AlterTableStmt *alterStmt, List *allowedOpti
 
 		List	   *newOptions = (List *) subcommand->def;
 		ListCell   *optionCell = NULL;
-		bool		allowedOptionFound = false;
 
 		foreach(optionCell, newOptions)
 		{
 			DefElem    *newOption = lfirst(optionCell);
 			ListCell   *allowedOptionCell = NULL;
+			bool		isAllowed = false;
 
 			foreach(allowedOptionCell, allowedOptions)
 			{
@@ -1535,21 +1534,30 @@ ErrorIfUnsupportedTableOptionChange(AlterTableStmt *alterStmt, List *allowedOpti
 
 				if (strcmp(newOption->defname, allowedOption) == 0)
 				{
-					allowedOptionFound = true;
+					isAllowed = true;
 					break;
 				}
-				appendStringInfo(allowedOptionsStr, "%s%s",
-								 allowedOptionsStr->len > 0 ? ", " : "",
-								 allowedOption);
 			}
-		}
 
-		if (!allowedOptionFound)
-		{
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("The following table options can be changed: %s",
-							allowedOptionsStr->data)));
+			if (!isAllowed)
+			{
+				StringInfo	allowedOptionsStr = makeStringInfo();
+				ListCell   *cell = NULL;
+
+				foreach(cell, allowedOptions)
+				{
+					char	   *allowedOption = (char *) lfirst(cell);
+
+					appendStringInfo(allowedOptionsStr, "%s%s",
+									 allowedOptionsStr->len > 0 ? ", " : "",
+									 allowedOption);
+				}
+
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("The following table options can be changed: %s",
+								allowedOptionsStr->data)));
+			}
 		}
 	}
 }

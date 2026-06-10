@@ -256,3 +256,113 @@ def test_alter_external_iceberg_path_dependent_objects(
 
     run_command("DROP SCHEMA test_alter_ext_path_deps CASCADE;", pg_conn)
     pg_conn.commit()
+
+
+def test_alter_external_iceberg_path_not_null_column(
+    pg_conn, s3, extension, with_default_location
+):
+    """ALTER PATH on external Iceberg works for tables with NOT NULL columns.
+
+    The schema check in ErrorIfSchemasDoNotMatch compares
+    columnMapping->attNotNull against icebergField->required, so NOT NULL
+    needs round-trip coverage for the auto-import + alter path flow.
+    """
+    run_command(
+        """
+        DROP SCHEMA IF EXISTS test_alter_ext_path_nn CASCADE;
+        CREATE SCHEMA test_alter_ext_path_nn;
+        CREATE TABLE test_alter_ext_path_nn.internal (a int NOT NULL) USING iceberg;
+        INSERT INTO test_alter_ext_path_nn.internal VALUES (1), (2);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    initial_meta = get_metadata_location(pg_conn, "test_alter_ext_path_nn", "internal")
+
+    run_command(
+        f"""
+        CREATE FOREIGN TABLE test_alter_ext_path_nn.external ()
+        SERVER pg_lake OPTIONS (path '{initial_meta}');
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        "SELECT attnotnull FROM pg_attribute "
+        "WHERE attrelid = 'test_alter_ext_path_nn.external'::regclass "
+        "AND attname = 'a'",
+        pg_conn,
+    )
+    assert result[0][0] is True
+
+    run_command(
+        "INSERT INTO test_alter_ext_path_nn.internal VALUES (3);",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    new_meta = get_metadata_location(pg_conn, "test_alter_ext_path_nn", "internal")
+
+    run_command(
+        f"""
+        ALTER FOREIGN TABLE test_alter_ext_path_nn.external
+            OPTIONS (SET path '{new_meta}');
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query("SELECT count(*) FROM test_alter_ext_path_nn.external", pg_conn)
+    assert result[0][0] == 3
+
+    run_command("DROP SCHEMA test_alter_ext_path_nn CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_alter_external_iceberg_path_rejects_extra_options(
+    pg_conn, s3, extension, with_default_location
+):
+    """Only path may be changed on an external Iceberg foreign table.
+
+    A single ALTER cmd that sets path AND adds another option must reject
+    the other option, not silently allow it because path matched first.
+    """
+    run_command(
+        """
+        DROP SCHEMA IF EXISTS test_alter_ext_path_extra CASCADE;
+        CREATE SCHEMA test_alter_ext_path_extra;
+        CREATE TABLE test_alter_ext_path_extra.internal (a int) USING iceberg;
+        INSERT INTO test_alter_ext_path_extra.internal VALUES (1);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    initial_meta = get_metadata_location(
+        pg_conn, "test_alter_ext_path_extra", "internal"
+    )
+
+    run_command(
+        f"""
+        CREATE FOREIGN TABLE test_alter_ext_path_extra.external ()
+        SERVER pg_lake OPTIONS (path '{initial_meta}');
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    error = run_command(
+        f"""
+        ALTER FOREIGN TABLE test_alter_ext_path_extra.external
+            OPTIONS (SET path '{initial_meta}', ADD format 'parquet');
+        """,
+        pg_conn,
+        raise_error=False,
+    )
+    assert "table options can be changed" in str(error)
+    pg_conn.rollback()
+
+    run_command("DROP SCHEMA test_alter_ext_path_extra CASCADE;", pg_conn)
+    pg_conn.commit()
