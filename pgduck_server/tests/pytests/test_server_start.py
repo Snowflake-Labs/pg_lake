@@ -5,6 +5,7 @@ import signal
 import time
 import tempfile
 import threading
+from contextlib import contextmanager
 from utils_pytest import *
 import platform
 
@@ -474,23 +475,45 @@ def _assert_server_alive(server):
     assert server.process.poll() is None, "pgduck_server process exited"
 
 
-def _apply_spill_limits(cur, max_temp_directory_size):
-    # Callers pass max_temp_directory_size='0KiB' to make the temp-cap overflow
-    # deterministic: the first block DuckDB tries to offload fails immediately
-    # with the temp-size error, before any data piles up in memory. A
-    # small-but-nonzero cap is NOT reliable -- DuckDB spills up to the cap, then
-    # keeps the rest in memory and dies on a genuine (and correctly fatal) memory
-    # OOM instead. memory_limit stays well above the 256KiB block size and
-    # threads=1 so we never trip a genuine memory OOM or a thread race.
-    cur.execute(f"SET GLOBAL memory_limit='{SPILL_MEMORY_LIMIT}'")
-    cur.execute("SET GLOBAL threads='1'")
-    cur.execute(f"SET GLOBAL max_temp_directory_size='{max_temp_directory_size}'")
-    # pgduck_server silently swallows failed SET commands; if memory_limit had
-    # not actually shrunk, the query below would never spill and the test would
-    # pass for the wrong reason. Sanity-check it took effect.
-    cur.execute("SELECT current_setting('memory_limit')")
-    applied = cur.fetchone()[0]
-    assert applied not in (None, ""), "memory_limit SET was ignored"
+def _write_init_file(directory, *statements):
+    init_file = os.path.join(directory, "init.sql")
+    with open(init_file, "w") as f:
+        f.write("".join(f"{stmt};\n" for stmt in statements))
+    return init_file
+
+
+@contextmanager
+def _server_from_init_file(*statements, need_output=False):
+    """Start a pgduck_server configured purely through the init file.
+
+    --init_file_path is the supported way to set the spill knobs (temp_directory,
+    max_temp_directory_size, memory_limit) now that the bespoke CLI flags are
+    gone, so the tests exercise that exact startup path -- the one production
+    deployments use -- rather than client-side SET GLOBAL.
+    """
+    with tempfile.TemporaryDirectory(dir="/tmp") as cfg_dir:
+        init_file = _write_init_file(cfg_dir, *statements)
+        yield PgDuckServer(
+            port=PGDUCK_PORT,
+            need_output=need_output,
+            extra_args=["--init_file_path", init_file],
+        )
+
+
+def _spill_server(max_temp_directory_size, need_output=False):
+    # max_temp_directory_size='0KiB' makes the temp-cap overflow deterministic:
+    # the first block DuckDB tries to offload fails immediately, before any data
+    # piles up in memory. A small-but-nonzero cap is NOT reliable -- DuckDB
+    # spills up to the cap, then keeps the rest in memory and dies on a genuine
+    # (and correctly fatal) memory OOM instead. memory_limit stays well above the
+    # 256KiB block size and threads=1 so we never trip a genuine memory OOM or a
+    # thread race.
+    return _server_from_init_file(
+        f"SET GLOBAL memory_limit='{SPILL_MEMORY_LIMIT}'",
+        "SET GLOBAL threads='1'",
+        f"SET GLOBAL max_temp_directory_size='{max_temp_directory_size}'",
+        need_output=need_output,
+    )
 
 
 def test_temp_directory_limit_does_not_crash_server():
@@ -503,44 +526,47 @@ def test_temp_directory_limit_does_not_crash_server():
     reclassify the error as fatal, the server would exit(), and the
     poll()/reuse assertions below would fail.
     """
-    server = PgDuckServer(port=PGDUCK_PORT, need_output=True)
-    assert is_server_listening(server.socket_path)
+    with _spill_server("0KiB", need_output=True) as server:
+        assert is_server_listening(server.socket_path)
 
-    # A connection opened BEFORE the failing query. A server crash/restart would
-    # drop it, so its survival proves the failure stayed query-scoped.
-    bystander = _spill_connection()
-    bystander_cur = bystander.cursor()
-    bystander_cur.execute("SELECT 1")
-    assert bystander_cur.fetchone()[0] == 1
+        # A connection opened BEFORE the failing query. A server crash/restart
+        # would drop it, so its survival proves the failure stayed query-scoped.
+        bystander = _spill_connection()
+        bystander_cur = bystander.cursor()
+        bystander_cur.execute("SELECT 1")
+        assert bystander_cur.fetchone()[0] == 1
 
-    conn = _spill_connection()
-    cur = conn.cursor()
-    _apply_spill_limits(cur, "0KiB")
+        conn = _spill_connection()
+        cur = conn.cursor()
 
-    with pytest.raises(psycopg2.Error) as exc_info:
-        cur.execute(SPILL_QUERY)
+        # The init file -- not a client SET -- put the cap in place at startup.
+        cur.execute("SELECT current_setting('max_temp_directory_size')")
+        assert cur.fetchone()[0] == "0 bytes", "init file did not apply the cap"
 
-    assert TEMP_DIR_SIZE_TOKEN in str(exc_info.value), (
-        f"DuckDB error no longer mentions '{TEMP_DIR_SIZE_TOKEN}'; duckdb.c can "
-        f"no longer classify it as non-fatal. Got: {exc_info.value}"
-    )
+        with pytest.raises(psycopg2.Error) as exc_info:
+            cur.execute(SPILL_QUERY)
 
-    # The server must still be up and serving (not exited on the overflow).
-    _assert_server_alive(server)
+        assert TEMP_DIR_SIZE_TOKEN in str(exc_info.value), (
+            f"DuckDB error no longer mentions '{TEMP_DIR_SIZE_TOKEN}'; duckdb.c "
+            f"can no longer classify it as non-fatal. Got: {exc_info.value}"
+        )
 
-    # The offending connection is still usable after the graceful error.
-    cur.execute("SELECT 42")
-    assert cur.fetchone()[0] == 42
+        # The server must still be up and serving (not exited on the overflow).
+        _assert_server_alive(server)
 
-    # The bystander connection was never disturbed.
-    bystander_cur.execute("SELECT 7")
-    assert bystander_cur.fetchone()[0] == 7
+        # The offending connection is still usable after the graceful error.
+        cur.execute("SELECT 42")
+        assert cur.fetchone()[0] == 42
 
-    # The server must not have taken its fatal "terminating" path.
-    server_output = get_server_output(server.output_queue)
-    assert (
-        "terminating" not in server_output
-    ), f"pgduck_server logged a fatal/terminating path: {server_output}"
+        # The bystander connection was never disturbed.
+        bystander_cur.execute("SELECT 7")
+        assert bystander_cur.fetchone()[0] == 7
+
+        # The server must not have taken its fatal "terminating" path.
+        server_output = get_server_output(server.output_queue)
+        assert (
+            "terminating" not in server_output
+        ), f"pgduck_server logged a fatal/terminating path: {server_output}"
 
 
 def test_temp_directory_limit_reclaims_space():
@@ -553,28 +579,27 @@ def test_temp_directory_limit_reclaims_space():
     without degrading, and a subsequent query still succeeds on the same
     connection.
     """
-    server = PgDuckServer(port=PGDUCK_PORT)
-    assert is_server_listening(server.socket_path)
+    with _spill_server("0KiB") as server:
+        assert is_server_listening(server.socket_path)
 
-    conn = _spill_connection()
-    cur = conn.cursor()
-    _apply_spill_limits(cur, "0KiB")
+        conn = _spill_connection()
+        cur = conn.cursor()
 
-    # Hit the limit several times in a row, as the reported COPY loop did.
-    for _ in range(3):
-        with pytest.raises(psycopg2.Error) as exc_info:
-            cur.execute(SPILL_QUERY)
-        assert TEMP_DIR_SIZE_TOKEN in str(exc_info.value)
+        # Hit the limit several times in a row, as the reported COPY loop did.
+        for _ in range(3):
+            with pytest.raises(psycopg2.Error) as exc_info:
+                cur.execute(SPILL_QUERY)
+            assert TEMP_DIR_SIZE_TOKEN in str(exc_info.value)
 
-        # No spilled blocks must be left behind after the failure unwinds.
-        cur.execute('SELECT COALESCE(SUM("size"), 0) FROM duckdb_temporary_files()')
-        assert cur.fetchone()[0] == 0, "temp space was not reclaimed after failure"
+            # No spilled blocks must be left behind after the failure unwinds.
+            cur.execute('SELECT COALESCE(SUM("size"), 0) FROM duckdb_temporary_files()')
+            assert cur.fetchone()[0] == 0, "temp space was not reclaimed after failure"
 
-    # The server still does real work afterwards: an ungrouped aggregate streams
-    # with constant memory (no spill), so it succeeds on the same connection
-    # even with the cap still at 0.
-    cur.execute("SELECT count(*) FROM range(1000000)")
-    assert cur.fetchone()[0] == 1000000
+        # The server still does real work afterwards: an ungrouped aggregate
+        # streams with constant memory (no spill), so it succeeds on the same
+        # connection even with the cap still at 0.
+        cur.execute("SELECT count(*) FROM range(1000000)")
+        assert cur.fetchone()[0] == 1000000
 
 
 # ---------------------------------------------------------------------------
@@ -622,112 +647,61 @@ def test_genuine_oom_over_extended_protocol_terminates_server():
     exit()ed -- so a single oversized query could permanently wedge the process
     shared by every client.
     """
-    server = PgDuckServer(
-        port=PGDUCK_PORT,
-        need_output=True,
-        extra_args=["--memory_limit", GENUINE_OOM_MEMORY_LIMIT],
-    )
-    assert is_server_listening(server.socket_path)
-
-    conn = _spill_connection()
-    cur = conn.cursor()
     # threads=1 keeps the genuine-OOM trigger deterministic (see comment above);
     # a large cap means spilling is allowed, so this is NOT the temp-cap path.
-    cur.execute("SET GLOBAL threads='1'")
-    cur.execute("SET GLOBAL max_temp_directory_size='10GiB'")
-
-    # Passing a parameter forces psycopg2 onto the extended protocol.
-    with pytest.raises(psycopg2.Error):
-        cur.execute(GENUINE_OOM_QUERY, ("x",))
-
-    assert _wait_for_exit(server, timeout=15), (
-        "pgduck_server did not terminate on a genuine OOM over the extended "
-        "protocol; it would stay wedged and answer 'Unknown Error' forever"
-    )
-
-    # The temp-cap overflow is recoverable and never terminates, so a fatal
-    # 'terminating' path proves this was a genuine RAM OOM -- whose real DuckDB
-    # message we now forward to the client instead of a bare "Unknown Error".
-    server_output = get_server_output(server.output_queue)
-    assert (
-        "terminating" in server_output
-    ), f"expected a fatal 'terminating' path, got: {server_output}"
-    assert (
-        "Out of Memory Error" in server_output
-    ), f"expected the genuine OOM message to be surfaced, got: {server_output}"
-
-
-# ---------------------------------------------------------------------------
-# Spill configuration via the init file
-#
-# pgduck_server exposes no dedicated flags for the spill location or cap;
-# operators configure them through the init file (--init_file_path) with the
-# same SET GLOBAL statements DuckDB understands. These tests exercise that
-# startup path end to end (no client SET), which is what production deployments
-# use to point spill at a chosen disk and bound it.
-# ---------------------------------------------------------------------------
-
-
-def _write_init_file(directory, *statements):
-    init_file = os.path.join(directory, "init.sql")
-    with open(init_file, "w") as f:
-        f.write("".join(f"{stmt};\n" for stmt in statements))
-    return init_file
-
-
-def test_max_temp_directory_size_via_init_file_enforced_gracefully():
-    """A spill cap set in the init file is applied at startup and, when
-    exceeded, fails the query gracefully without crashing the server.
-
-    A 0KiB cap makes the first spilled block fail immediately and
-    deterministically (see _apply_spill_limits).
-    """
-    with tempfile.TemporaryDirectory(dir="/tmp") as cfg_dir:
-        init_file = _write_init_file(
-            cfg_dir,
-            f"SET GLOBAL memory_limit='{SPILL_MEMORY_LIMIT}'",
-            "SET GLOBAL threads='1'",
-            "SET GLOBAL max_temp_directory_size='0KiB'",
-        )
-        server = PgDuckServer(
-            port=PGDUCK_PORT,
-            need_output=True,
-            extra_args=["--init_file_path", init_file],
-        )
+    with _server_from_init_file(
+        f"SET GLOBAL memory_limit='{GENUINE_OOM_MEMORY_LIMIT}'",
+        "SET GLOBAL threads='1'",
+        "SET GLOBAL max_temp_directory_size='10GiB'",
+        need_output=True,
+    ) as server:
         assert is_server_listening(server.socket_path)
 
         conn = _spill_connection()
         cur = conn.cursor()
 
-        # The init file -- not a client SET -- put the cap in place.
-        cur.execute("SELECT current_setting('max_temp_directory_size')")
-        assert cur.fetchone()[0] == "0 bytes"
+        # Passing a parameter forces psycopg2 onto the extended protocol.
+        with pytest.raises(psycopg2.Error):
+            cur.execute(GENUINE_OOM_QUERY, ("x",))
 
-        with pytest.raises(psycopg2.Error) as exc_info:
-            cur.execute(SPILL_QUERY)
-        assert TEMP_DIR_SIZE_TOKEN in str(exc_info.value)
+        assert _wait_for_exit(server, timeout=15), (
+            "pgduck_server did not terminate on a genuine OOM over the extended "
+            "protocol; it would stay wedged and answer 'Unknown Error' forever"
+        )
 
-        # Server survived the cap overflow and still serves.
-        _assert_server_alive(server)
+        # The temp-cap overflow is recoverable and never terminates, so a fatal
+        # 'terminating' path proves this was a genuine RAM OOM -- whose real
+        # DuckDB message we now forward to the client instead of "Unknown Error".
+        server_output = get_server_output(server.output_queue)
+        assert (
+            "terminating" in server_output
+        ), f"expected a fatal 'terminating' path, got: {server_output}"
+        assert (
+            "Out of Memory Error" in server_output
+        ), f"expected the genuine OOM message to be surfaced, got: {server_output}"
 
-        cur.execute("SELECT 42")
-        assert cur.fetchone()[0] == 42
+
+# ---------------------------------------------------------------------------
+# Spill location via the init file
+#
+# pgduck_server exposes no dedicated flags for the spill location or cap;
+# operators configure them through the init file (--init_file_path) with the
+# same SET GLOBAL statements DuckDB understands. The temp-cap path is covered by
+# the graceful-failure tests above (which also start from the init file); this
+# guards that temp_directory likewise points spill at operator-chosen storage.
+# ---------------------------------------------------------------------------
 
 
 def test_temp_directory_via_init_file_sets_spill_location():
     """temp_directory set in the init file points DuckDB's spill directory at
     operator-chosen storage (e.g. a folder on the PostgreSQL disk)."""
     with tempfile.TemporaryDirectory(dir="/tmp") as spill_dir:
-        init_file = _write_init_file(
-            spill_dir, f"SET GLOBAL temp_directory='{spill_dir}'"
-        )
-        server = PgDuckServer(
-            port=PGDUCK_PORT,
-            extra_args=["--init_file_path", init_file],
-        )
-        assert is_server_listening(server.socket_path)
+        with _server_from_init_file(
+            f"SET GLOBAL temp_directory='{spill_dir}'"
+        ) as server:
+            assert is_server_listening(server.socket_path)
 
-        conn = _spill_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT current_setting('temp_directory')")
-        assert cur.fetchone()[0] == spill_dir
+            conn = _spill_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT current_setting('temp_directory')")
+            assert cur.fetchone()[0] == spill_dir

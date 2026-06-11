@@ -3,6 +3,7 @@ import pytest
 from pathlib import Path
 from utils_pytest import *
 
+
 PGDUCK_UNIX_DOMAIN_PATH = "/tmp"
 PGDUCK_PORT = 5332
 DUCKDB_DATABASE_FILE_PATH = "/tmp/duckdb.db"
