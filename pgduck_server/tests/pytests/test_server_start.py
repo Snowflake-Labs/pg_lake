@@ -436,14 +436,6 @@ def test_graceful_shutdown_with_active_clients(send_signal, num_clients):
 # crashing the whole server would let a single oversized COPY repeatedly take
 # down a process shared by every client. duckdb.c special-cases this by matching
 # the DuckDB error text 'max_temp_directory_size'.
-#
-# To make this deterministic we use a cap of 0KiB: the very first block the
-# operator tries to offload fails immediately with the temp-size error, before
-# any data piles up in memory. (A small-but-nonzero cap is NOT a reliable
-# trigger: DuckDB spills up to the cap, then keeps the rest in memory and dies
-# on a genuine -- and correctly fatal -- memory OOM instead.) memory_limit is
-# kept well above the 256KiB block size and threads=1 so we never hit a genuine
-# memory OOM or a thread race.
 # ---------------------------------------------------------------------------
 
 SPILL_MEMORY_LIMIT = "32MB"
@@ -455,9 +447,9 @@ SPILL_MEMORY_LIMIT = "32MB"
 # database file, not the temp/spill directory.)
 SPILL_QUERY = "SELECT count(*) FROM (SELECT i FROM range(10000000) t(i) GROUP BY i) g"
 
-# Load-bearing token: duckdb.c keeps a temp-cap overflow non-fatal by matching
-# this substring in the DuckDB error message. If DuckDB changes the wording,
-# these assertions fail (the server would start crashing again) -- update the
+# duckdb.c keeps a temp-cap overflow non-fatal by matching this substring in the
+# DuckDB error message. If DuckDB changes the wording, these assertions fail (the
+# server would start crashing again) -- update the
 # DUCKDB_MAX_TEMP_DIR_SIZE_ERROR_TOKEN constant in pgduck_server's duckdb.c too.
 TEMP_DIR_SIZE_TOKEN = "max_temp_directory_size"
 
@@ -483,9 +475,14 @@ def _assert_server_alive(server):
 
 
 def _apply_spill_limits(cur, max_temp_directory_size):
+    # Callers pass max_temp_directory_size='0KiB' to make the temp-cap overflow
+    # deterministic: the first block DuckDB tries to offload fails immediately
+    # with the temp-size error, before any data piles up in memory. A
+    # small-but-nonzero cap is NOT reliable -- DuckDB spills up to the cap, then
+    # keeps the rest in memory and dies on a genuine (and correctly fatal) memory
+    # OOM instead. memory_limit stays well above the 256KiB block size and
+    # threads=1 so we never trip a genuine memory OOM or a thread race.
     cur.execute(f"SET GLOBAL memory_limit='{SPILL_MEMORY_LIMIT}'")
-    # Single-threaded so the failure is deterministically the temp-size cap
-    # (no race between a spilling thread and a thread that fails to pin).
     cur.execute("SET GLOBAL threads='1'")
     cur.execute(f"SET GLOBAL max_temp_directory_size='{max_temp_directory_size}'")
     # pgduck_server silently swallows failed SET commands; if memory_limit had
@@ -695,7 +692,7 @@ def test_max_temp_directory_size_flag_enforced_gracefully():
     is plumbed through and that operators need no init file / SET GLOBAL.
 
     A 0KiB cap makes the first spilled block fail immediately and
-    deterministically (see the SPILL_QUERY notes above).
+    deterministically (see _apply_spill_limits).
     """
     server = PgDuckServer(
         port=PGDUCK_PORT,

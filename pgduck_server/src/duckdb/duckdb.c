@@ -82,8 +82,8 @@
  * configured max_temp_directory_size while spilling to disk. DuckDB reports
  * both genuine RAM exhaustion and this temp-spill cap as
  * DUCKDB_ERROR_OUT_OF_MEMORY with no other way to tell them apart, so we match
- * on the message text. Load-bearing string: the regression test
- * test_temp_directory_limit_does_not_crash_server guards the wording.
+ * on the message text. If DuckDB changes this wording the overflow becomes
+ * fatal again; test_temp_directory_limit_does_not_crash_server guards it.
  */
 #define DUCKDB_MAX_TEMP_DIR_SIZE_ERROR_TOKEN "max_temp_directory_size"
 
