@@ -27,7 +27,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <getopt.h>
-#include <sys/statvfs.h>
 
 #include "command_line/command_line.h"
 #include "utils/pg_log_utils.h"
@@ -48,20 +47,6 @@
 #define DEFAULT_MAX_CLIENTS 10000
 #define DEFAULT_CACHE_ON_WRITE_MAX_SIZE 1024 * 1024 * 1024 // 1GB
 
-/*
- * DuckDB's own default (~90% of free disk) can starve PostgreSQL when spill
- * shares its disk, so we default to a small fraction of the spill volume
- * instead. Operators can override via --max_temp_directory_size.
- */
-#define DEFAULT_MAX_TEMP_DIRECTORY_FRACTION 0.10
-
-/*
- * Used only when the spill volume cannot be sized. Deliberately small so the
- * sizing failure surfaces quickly (queries fail loudly) rather than allowing a
- * large spill onto a disk we could not measure.
- */
-#define FALLBACK_MAX_TEMP_DIRECTORY_SIZE "1GiB"
-
 bool		IsOutputVerbose = false;
 
 static void
@@ -80,8 +65,6 @@ print_usage()
 	printf(" --duckdb_database_file_path <path>	Specify the database file path for DuckDB, default is %s\n", DEFAULT_DUCKDB_DATABASE_FILE_PATH);
 	printf(" --check_cli_params_only       		Only check the cli arguments, do not run the server\n");
 	printf(" --init_file_path <path>			Execute all statements in this file on start-up\n");
-	printf(" --temp_directory <path>			Directory DuckDB uses to spill intermediate results to disk, default is \"<duckdb_database_file_path>.tmp\"\n");
-	printf(" --max_temp_directory_size <size>	Upper bound on total spill-to-disk usage (e.g. 50GiB), default is 10%% of the spill volume\n");
 	printf(" --cache_dir                    	Specify the directory to use to cache remote files (from S3)\n");
 	printf(" --extensions_dir <path>			Install and load extensions in the specified directory\n");
 	printf(" --pidfile <path>					Write the pid of this program to the given path\n");
@@ -89,58 +72,6 @@ print_usage()
 	printf(" --debug                            Include debug-level log messages (including full queries) in server output\n");
 	printf(" --verbose                     		Run in verbose mode\n");
 	printf(" --help                        		Display this help and exit\n");
-}
-
-/*
- * Compute the default spill cap as a fraction of the volume holding DuckDB's
- * spill files (--temp_directory, else the database file's volume, where spill
- * defaults to "<duckdb_database_file_path>.tmp"). The sizing DuckDB does
- * internally is not exposed via the C API or SQL, so we stat the volume
- * ourselves. Returns a malloc'd MiB string the caller owns, or NULL if the
- * volume cannot be sized (caller then uses the fixed guardrail).
- */
-static char *
-default_max_temp_directory_size(const CommandLineOptions * options)
-{
-	const char *probe = options->temp_directory != NULL
-		? options->temp_directory
-		: options->duckdb_database_file_path;
-	struct statvfs vfs;
-
-	/* never NULL in practice, but statvfs()/strlcpy() below would deref it */
-	if (probe == NULL)
-		return NULL;
-
-	/*
-	 * statvfs needs an existing path, but we run at startup before the spill
-	 * target is created, so fall back to its parent directory (same volume).
-	 */
-	if (statvfs(probe, &vfs) != 0)
-	{
-		char		parent[MAXPGPATH];
-
-		strlcpy(parent, probe, sizeof(parent));
-		get_parent_directory(parent);
-
-		if (parent[0] == '\0' || statvfs(parent, &vfs) != 0)
-			return NULL;
-	}
-
-	/*
-	 * Size against total disk (f_blocks), not free space like DuckDB, for a
-	 * stable cap that does not shrink as PostgreSQL fills the shared volume.
-	 */
-	uint64		total_bytes = (uint64) vfs.f_blocks * (uint64) vfs.f_frsize;
-	uint64		cap_mib =
-		(uint64) ((double) total_bytes * DEFAULT_MAX_TEMP_DIRECTORY_FRACTION) / (1024 * 1024);
-
-	if (cap_mib == 0)
-		return NULL;
-
-	char		buf[64];
-
-	snprintf(buf, sizeof(buf), UINT64_FORMAT "MiB", cap_mib);
-	return strdup(buf);
 }
 
 CommandLineOptions
@@ -166,8 +97,6 @@ parse_arguments(int argc, char *argv[])
 		.extensions_dir = NULL,
 		.no_extension_install = false,
 		.debug = false,
-		.temp_directory = NULL,
-		.max_temp_directory_size = NULL,
 	};
 	int			opt;
 	int			option_index = 0;
@@ -191,12 +120,10 @@ parse_arguments(int argc, char *argv[])
 		{"init_file_path", required_argument, NULL, 'i'},
 		{"pidfile", required_argument, NULL, 'p'},
 		{"debug", no_argument, NULL, 'd'},
-		{"temp_directory", required_argument, NULL, 'T'},
-		{"max_temp_directory_size", required_argument, NULL, 'z'},
 		{0, 0, 0, 0}
 	};
 
-	while ((opt = getopt_long(argc, argv, "cvhU:P:M:D:l:L:p:dT:z:", long_options, &option_index)) != -1)
+	while ((opt = getopt_long(argc, argv, "cvhU:P:M:D:l:L:p:d", long_options, &option_index)) != -1)
 	{
 		switch (opt)
 		{
@@ -325,50 +252,12 @@ parse_arguments(int argc, char *argv[])
 			case 'p':
 				options.pidfile_path = strdup(optarg);
 				break;
-			case 'T':
-				options.temp_directory = strdup(optarg);
-				break;
-			case 'z':
-				options.max_temp_directory_size = strdup(optarg);
-				break;
 			case '?':
 				print_usage();
 				exit(EXIT_FAILURE);
 			default:
 				print_usage();
 				exit(EXIT_FAILURE);
-		}
-	}
-
-	/*
-	 * A pinned cap with no explicit spill location is almost always a
-	 * mistake: spill then lands next to the DuckDB database file
-	 * ("<duckdb_database_file_path>.tmp"), which in the intended deployment
-	 * is a small dedicated volume rather than the larger PostgreSQL disk. The
-	 * cap is still honored, just measured against the wrong volume, so warn
-	 * rather than fail (DuckDB itself does not couple the two settings).
-	 */
-	if (options.max_temp_directory_size != NULL && options.temp_directory == NULL)
-		PGDUCK_SERVER_WARN("--max_temp_directory_size is set but --temp_directory is not; "
-						   "spill will go to \"<duckdb_database_file_path>.tmp\". "
-						   "Pass --temp_directory to place spill on the intended volume.");
-
-	/*
-	 * If the operator did not pin a cap, size it to a fraction of the spill
-	 * volume (never DuckDB's ~90%-of-disk default, which could starve the
-	 * PostgreSQL disk). Computed here, after parsing, so temp_directory and
-	 * duckdb_database_file_path are final.
-	 */
-	if (options.max_temp_directory_size == NULL)
-	{
-		options.max_temp_directory_size = default_max_temp_directory_size(&options);
-
-		if (options.max_temp_directory_size == NULL)
-		{
-			options.max_temp_directory_size = FALLBACK_MAX_TEMP_DIRECTORY_SIZE;
-			PGDUCK_SERVER_WARN("could not determine the spill volume size; falling back to a spill cap of %s. "
-							   "Set --max_temp_directory_size explicitly to size it for your deployment.",
-							   options.max_temp_directory_size);
 		}
 	}
 
@@ -395,17 +284,6 @@ parse_arguments(int argc, char *argv[])
 	}
 
 	PGDUCK_SERVER_LOG("Cache on write max size is set to: %" PRIu64, options.cache_on_write_max_size);
-
-	if (options.temp_directory)
-	{
-		PGDUCK_SERVER_LOG("DuckDB spill (temp) directory is set to: %s", options.temp_directory);
-	}
-	else
-	{
-		PGDUCK_SERVER_LOG("DuckDB spill (temp) directory defaults to \"<duckdb_database_file_path>.tmp\"");
-	}
-
-	PGDUCK_SERVER_LOG("DuckDB max_temp_directory_size (spill cap) is set to: %s", options.max_temp_directory_size);
 
 	if (options.verbose)
 	{

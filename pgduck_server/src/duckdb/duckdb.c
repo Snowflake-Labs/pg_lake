@@ -169,9 +169,7 @@ duckdb_global_init(char *databaseFilePath,
 				   bool allowExtensionInstall,
 				   char *memoryLimit,
 				   int64_t cacheOnWriteMaxSize,
-				   char *initFilePath,
-				   char *tempDirectory,
-				   char *maxTempDirectorySize)
+				   char *initFilePath)
 {
 	if (IsDuckDBInitialized)
 	{
@@ -403,41 +401,6 @@ duckdb_global_init(char *databaseFilePath,
 		if (snprintf(setCommand, 1024, "SET GLOBAL memory_limit TO '%s'", memoryLimit) < 0)
 		{
 			PGDUCK_SERVER_ERROR("memory_limit value is too long");
-			return DUCKDB_INITIALIZATION_ERROR;
-		}
-
-		if (run_command_on_duckdb(setCommand) == DuckDBError)
-			return DUCKDB_INITIALIZATION_ERROR;
-	}
-
-	/*
-	 * Point DuckDB's spill (temp) directory at operator-chosen storage when
-	 * provided; otherwise DuckDB defaults it to "<database file>.tmp".
-	 */
-	if (tempDirectory != NULL)
-	{
-		if (snprintf(setCommand, 1024, "SET GLOBAL temp_directory TO '%s'", tempDirectory) < 0)
-		{
-			PGDUCK_SERVER_ERROR("temp_directory value is too long");
-			return DUCKDB_INITIALIZATION_ERROR;
-		}
-
-		if (run_command_on_duckdb(setCommand) == DuckDBError)
-			return DUCKDB_INITIALIZATION_ERROR;
-	}
-
-	/*
-	 * Always bound spill-to-disk usage. The CLI layer supplies a default, so
-	 * maxTempDirectorySize is normally non-NULL and we never inherit DuckDB's
-	 * 90%-of-disk default, which is unsafe when spill shares PostgreSQL's
-	 * disk. Hitting this cap surfaces as a graceful query error (see
-	 * duckdb_error_is_fatal), not a server crash.
-	 */
-	if (maxTempDirectorySize != NULL)
-	{
-		if (snprintf(setCommand, 1024, "SET GLOBAL max_temp_directory_size TO '%s'", maxTempDirectorySize) < 0)
-		{
-			PGDUCK_SERVER_ERROR("max_temp_directory_size value is too long");
 			return DUCKDB_INITIALIZATION_ERROR;
 		}
 

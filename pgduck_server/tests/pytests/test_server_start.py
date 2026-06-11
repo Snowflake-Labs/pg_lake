@@ -658,106 +658,72 @@ def test_genuine_oom_over_extended_protocol_terminates_server():
 
 
 # ---------------------------------------------------------------------------
-# --temp_directory / --max_temp_directory_size command-line flag tests
+# Spill configuration via the init file
 #
-# The cap and spill location are first-class CLI flags so operators can point
-# DuckDB's spill at a chosen disk and bound it without an init file. Crucially
-# pgduck_server always applies a bounded default cap (never DuckDB's
-# 90%-of-disk default), so spill can never silently consume the whole disk
-# shared with PostgreSQL. The flag values are applied via SET GLOBAL during
-# startup, before any --init_file_path, so the init file can still override
-# them. These tests exercise the flag path end to end (no SET GLOBAL by the
-# client), which is what production deployments actually use.
+# pgduck_server exposes no dedicated flags for the spill location or cap;
+# operators configure them through the init file (--init_file_path) with the
+# same SET GLOBAL statements DuckDB understands. These tests exercise that
+# startup path end to end (no client SET), which is what production deployments
+# use to point spill at a chosen disk and bound it.
 # ---------------------------------------------------------------------------
 
 
-def _parse_duckdb_size(text):
-    """Parse a DuckDB size string (e.g. "14.4 GiB") into bytes."""
-    units = {
-        "B": 1,
-        "Bytes": 1,
-        "KiB": 1024,
-        "MiB": 1024**2,
-        "GiB": 1024**3,
-        "TiB": 1024**4,
-        "PiB": 1024**5,
-    }
-    value, unit = text.split()
-    return float(value) * units[unit]
+def _write_init_file(directory, *statements):
+    init_file = os.path.join(directory, "init.sql")
+    with open(init_file, "w") as f:
+        f.write("".join(f"{stmt};\n" for stmt in statements))
+    return init_file
 
 
-def test_max_temp_directory_size_flag_enforced_gracefully():
-    """--max_temp_directory_size is applied at startup and, when exceeded,
-    fails the query gracefully without crashing the server -- proving the flag
-    is plumbed through and that operators need no init file / SET GLOBAL.
+def test_max_temp_directory_size_via_init_file_enforced_gracefully():
+    """A spill cap set in the init file is applied at startup and, when
+    exceeded, fails the query gracefully without crashing the server.
 
     A 0KiB cap makes the first spilled block fail immediately and
     deterministically (see _apply_spill_limits).
     """
-    server = PgDuckServer(
-        port=PGDUCK_PORT,
-        need_output=True,
-        extra_args=[
-            "--memory_limit",
-            SPILL_MEMORY_LIMIT,
-            "--max_temp_directory_size",
-            "0KiB",
-        ],
-    )
-    assert is_server_listening(server.socket_path)
-
-    conn = _spill_connection()
-    cur = conn.cursor()
-
-    # The flag -- not a client SET -- put the cap in place.
-    cur.execute("SELECT current_setting('max_temp_directory_size')")
-    assert cur.fetchone()[0] == "0 bytes"
-
-    with pytest.raises(psycopg2.Error) as exc_info:
-        cur.execute(SPILL_QUERY)
-    assert TEMP_DIR_SIZE_TOKEN in str(exc_info.value)
-
-    # Server survived the cap overflow and still serves.
-    _assert_server_alive(server)
-
-    cur.execute("SELECT 42")
-    assert cur.fetchone()[0] == 42
-
-
-def test_default_max_temp_directory_size_is_bounded():
-    """Without the flag, pgduck_server must still apply its own bounded cap
-    rather than inheriting DuckDB's ~90%-of-disk default. This is the guard
-    that keeps spill from silently filling a disk shared with PostgreSQL.
-
-    The exact value is disk-dependent, so rather than hardcode it we assert the
-    cap is a real, positive size well below DuckDB's own default (~90% of free
-    space on the spill volume), reconstructed here with the same statvfs.
-    """
-    server = PgDuckServer(port=PGDUCK_PORT)
-    assert is_server_listening(server.socket_path)
-
-    conn = _spill_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT current_setting('max_temp_directory_size')")
-    our_bytes = _parse_duckdb_size(cur.fetchone()[0])
-
-    probe = (
-        DUCKDB_DATABASE_FILE_PATH
-        if os.path.exists(DUCKDB_DATABASE_FILE_PATH)
-        else PGDUCK_UNIX_DOMAIN_PATH
-    )
-    vfs = os.statvfs(probe)
-    duckdb_default_bytes = 0.9 * vfs.f_frsize * vfs.f_bfree
-    assert 0 < our_bytes < duckdb_default_bytes, (our_bytes, duckdb_default_bytes)
-
-
-def test_temp_directory_flag_sets_spill_location():
-    """--temp_directory points DuckDB's spill directory at operator-chosen
-    storage (e.g. a folder on the PostgreSQL disk)."""
-    with tempfile.TemporaryDirectory(dir="/tmp") as spill_dir:
+    with tempfile.TemporaryDirectory(dir="/tmp") as cfg_dir:
+        init_file = _write_init_file(
+            cfg_dir,
+            f"SET GLOBAL memory_limit='{SPILL_MEMORY_LIMIT}'",
+            "SET GLOBAL threads='1'",
+            "SET GLOBAL max_temp_directory_size='0KiB'",
+        )
         server = PgDuckServer(
             port=PGDUCK_PORT,
-            extra_args=["--temp_directory", spill_dir],
+            need_output=True,
+            extra_args=["--init_file_path", init_file],
+        )
+        assert is_server_listening(server.socket_path)
+
+        conn = _spill_connection()
+        cur = conn.cursor()
+
+        # The init file -- not a client SET -- put the cap in place.
+        cur.execute("SELECT current_setting('max_temp_directory_size')")
+        assert cur.fetchone()[0] == "0 bytes"
+
+        with pytest.raises(psycopg2.Error) as exc_info:
+            cur.execute(SPILL_QUERY)
+        assert TEMP_DIR_SIZE_TOKEN in str(exc_info.value)
+
+        # Server survived the cap overflow and still serves.
+        _assert_server_alive(server)
+
+        cur.execute("SELECT 42")
+        assert cur.fetchone()[0] == 42
+
+
+def test_temp_directory_via_init_file_sets_spill_location():
+    """temp_directory set in the init file points DuckDB's spill directory at
+    operator-chosen storage (e.g. a folder on the PostgreSQL disk)."""
+    with tempfile.TemporaryDirectory(dir="/tmp") as spill_dir:
+        init_file = _write_init_file(
+            spill_dir, f"SET GLOBAL temp_directory='{spill_dir}'"
+        )
+        server = PgDuckServer(
+            port=PGDUCK_PORT,
+            extra_args=["--init_file_path", init_file],
         )
         assert is_server_listening(server.socket_path)
 

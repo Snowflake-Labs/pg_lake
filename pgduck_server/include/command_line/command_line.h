@@ -46,8 +46,6 @@ typedef struct
 	bool		debug;
 	char	   *init_file_path;
 	char	   *pidfile_path;
-	char	   *temp_directory;
-	char	   *max_temp_directory_size;
 }			CommandLineOptions;
 
 CommandLineOptions parse_arguments(int argc, char *argv[]);
