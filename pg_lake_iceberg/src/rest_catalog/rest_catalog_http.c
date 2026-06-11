@@ -281,3 +281,70 @@ JsonbGetStringByPath(const char *jsonb_text, int nkeys,...)
 	va_end(variableArgList);
 	ereport(ERROR, (errmsg("unexpected json path handling error")));
 }
+
+
+/*
+ * JsonbGetOptionalStringByPath works like JsonbGetStringByPath, but
+ * returns NULL instead of raising an ERROR when a key is missing or
+ * a mid-level value is not an object.
+ */
+char *
+JsonbGetOptionalStringByPath(const char *jsonb_text, int nkeys,...)
+{
+	if (nkeys <= 0 || jsonb_text == NULL || *jsonb_text == '\0')
+		return NULL;
+
+	Datum		jsonbDatum = DirectFunctionCall1(jsonb_in, CStringGetDatum(jsonb_text));
+	Jsonb	   *jb = DatumGetJsonbP(jsonbDatum);
+	JsonbContainer *container = &jb->root;
+
+	va_list		ap;
+
+	va_start(ap, nkeys);
+
+	for (int i = 0; i < nkeys; i++)
+	{
+		const char *key = va_arg(ap, const char *);
+		JsonbValue	keyVal;
+		JsonbValue *val;
+
+		if (!JsonContainerIsObject(container))
+		{
+			va_end(ap);
+			return NULL;
+		}
+
+		keyVal.type = jbvString;
+		keyVal.val.string.val = (char *) key;
+		keyVal.val.string.len = strlen(key);
+
+		val = findJsonbValueFromContainer(container, JB_FOBJECT, &keyVal);
+		if (val == NULL)
+		{
+			va_end(ap);
+			return NULL;
+		}
+
+		if (i < nkeys - 1)
+		{
+			if (val->type != jbvBinary ||
+				!JsonContainerIsObject(val->val.binary.data))
+			{
+				va_end(ap);
+				return NULL;
+			}
+			container = val->val.binary.data;
+		}
+		else
+		{
+			va_end(ap);
+
+			if (val->type == jbvString)
+				return pnstrdup(val->val.string.val, val->val.string.len);
+			return NULL;
+		}
+	}
+
+	va_end(ap);
+	return NULL;
+}

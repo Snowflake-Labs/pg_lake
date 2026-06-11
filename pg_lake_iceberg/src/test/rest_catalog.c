@@ -26,6 +26,7 @@
 #include "pg_lake/rest_catalog/rest_catalog.h"
 
 PG_FUNCTION_INFO_V1(register_namespace_to_rest_catalog);
+PG_FUNCTION_INFO_V1(get_rest_metadata_location);
 
 /*
 * register_namespace_to_rest_catalog is a test function that registers
@@ -41,4 +42,27 @@ register_namespace_to_rest_catalog(PG_FUNCTION_ARGS)
 
 	RegisterNamespaceToRestCatalog(opts, catalogName, namespaceName);
 	PG_RETURN_VOID();
+}
+
+
+/*
+ * get_rest_metadata_location is a test function that calls
+ * GetMetadataLocationFromRestCatalog and returns the metadata location.
+ * This exercises the full LoadTableFromRestCatalog path including
+ * vended credential extraction and caching.
+ */
+Datum
+get_rest_metadata_location(PG_FUNCTION_ARGS)
+{
+	char	   *catalogName = text_to_cstring(PG_GETARG_TEXT_P(0));
+	char	   *namespaceName = text_to_cstring(PG_GETARG_TEXT_P(1));
+	char	   *tableName = text_to_cstring(PG_GETARG_TEXT_P(2));
+
+	RestCatalogOptions *opts = ResolveRestCatalogOptions(REST_CATALOG_NAME);
+
+	char	   *metadataLocation =
+		GetMetadataLocationFromRestCatalog(opts, catalogName, namespaceName,
+										   tableName);
+
+	PG_RETURN_TEXT_P(cstring_to_text(metadataLocation));
 }
