@@ -673,10 +673,20 @@ def test_genuine_oom_over_extended_protocol_terminates_server():
 # client), which is what production deployments actually use.
 # ---------------------------------------------------------------------------
 
-# Must track DEFAULT_MAX_TEMP_DIRECTORY_SIZE in pgduck_server's command_line.c.
-# Asserting the exact value guards against silently regressing to DuckDB's
-# disk-relative default (which scales to ~90% of the disk).
-DEFAULT_MAX_TEMP_DIRECTORY_SIZE_FORMATTED = "10.0 GiB"
+
+def _parse_duckdb_size(text):
+    """Parse a DuckDB size string (e.g. "14.4 GiB") into bytes."""
+    units = {
+        "B": 1,
+        "Bytes": 1,
+        "KiB": 1024,
+        "MiB": 1024**2,
+        "GiB": 1024**3,
+        "TiB": 1024**4,
+        "PiB": 1024**5,
+    }
+    value, unit = text.split()
+    return float(value) * units[unit]
 
 
 def test_max_temp_directory_size_flag_enforced_gracefully():
@@ -721,6 +731,10 @@ def test_default_max_temp_directory_size_is_bounded():
     """Without the flag, pgduck_server must still apply its own bounded cap
     rather than inheriting DuckDB's ~90%-of-disk default. This is the guard
     that keeps spill from silently filling a disk shared with PostgreSQL.
+
+    The exact value is disk-dependent, so rather than hardcode it we assert the
+    cap is a real, positive size well below DuckDB's own default (~90% of free
+    space on the spill volume), reconstructed here with the same statvfs.
     """
     server = PgDuckServer(port=PGDUCK_PORT)
     assert is_server_listening(server.socket_path)
@@ -728,7 +742,16 @@ def test_default_max_temp_directory_size_is_bounded():
     conn = _spill_connection()
     cur = conn.cursor()
     cur.execute("SELECT current_setting('max_temp_directory_size')")
-    assert cur.fetchone()[0] == DEFAULT_MAX_TEMP_DIRECTORY_SIZE_FORMATTED
+    our_bytes = _parse_duckdb_size(cur.fetchone()[0])
+
+    probe = (
+        DUCKDB_DATABASE_FILE_PATH
+        if os.path.exists(DUCKDB_DATABASE_FILE_PATH)
+        else PGDUCK_UNIX_DOMAIN_PATH
+    )
+    vfs = os.statvfs(probe)
+    duckdb_default_bytes = 0.9 * vfs.f_frsize * vfs.f_bfree
+    assert 0 < our_bytes < duckdb_default_bytes, (our_bytes, duckdb_default_bytes)
 
 
 def test_temp_directory_flag_sets_spill_location():

@@ -49,23 +49,16 @@
 #define DEFAULT_CACHE_ON_WRITE_MAX_SIZE 1024 * 1024 * 1024 // 1GB
 
 /*
- * DuckDB defaults max_temp_directory_size to ~90% of the free space on the
- * volume holding temp_directory. When spill is pointed at a disk shared with
- * PostgreSQL (the intended deployment), that default is dangerous: DuckDB
- * could consume almost the entire disk and starve PostgreSQL. We therefore
- * derive a bounded default from the spill volume's size -- a small fraction
- * that leaves the disk overwhelmingly to PostgreSQL -- and only fall back to a
- * fixed guardrail when the volume cannot be sized. Operators can always
- * override via --max_temp_directory_size or the init file.
+ * DuckDB's own default (~90% of free disk) can starve PostgreSQL when spill
+ * shares its disk, so we default to a small fraction of the spill volume
+ * instead. Operators can override via --max_temp_directory_size.
  */
 #define DEFAULT_MAX_TEMP_DIRECTORY_FRACTION 0.10
 
 /*
- * Fallback used only when the spill volume cannot be sized. Kept deliberately
- * small: reaching this path means our sizing failed, and a tight cap surfaces
- * that quickly (queries hit it and fail loudly) instead of silently allowing a
- * large, unbounded spill onto a disk we could not measure. Operators who hit it
- * are expected to set --max_temp_directory_size explicitly.
+ * Used only when the spill volume cannot be sized. Deliberately small so the
+ * sizing failure surfaces quickly (queries fail loudly) rather than allowing a
+ * large spill onto a disk we could not measure.
  */
 #define FALLBACK_MAX_TEMP_DIRECTORY_SIZE "1GiB"
 
@@ -99,16 +92,12 @@ print_usage()
 }
 
 /*
- * Derive the default spill cap from the size of the volume that will hold
- * DuckDB's temp/spill files: --temp_directory when set, otherwise the volume of
- * the DuckDB database file (spill defaults to "<duckdb_database_file_path>.tmp",
- * which lives there).
- *
- * DuckDB sizes its own default with FileSystem::GetAvailableDiskSpace() (statvfs
- * under the hood), but that is a C++ internal and is exposed neither through the
- * DuckDB C API nor via SQL, so we stat the volume ourselves with the same
- * syscall. Returns the cap as a malloc'd MiB string the caller owns, or NULL if
- * the volume cannot be sized (the caller then falls back to a fixed guardrail).
+ * Compute the default spill cap as a fraction of the volume holding DuckDB's
+ * spill files (--temp_directory, else the database file's volume, where spill
+ * defaults to "<duckdb_database_file_path>.tmp"). The sizing DuckDB does
+ * internally is not exposed via the C API or SQL, so we stat the volume
+ * ourselves. Returns a malloc'd MiB string the caller owns, or NULL if the
+ * volume cannot be sized (caller then uses the fixed guardrail).
  */
 static char *
 default_max_temp_directory_size(const CommandLineOptions * options)
@@ -118,20 +107,13 @@ default_max_temp_directory_size(const CommandLineOptions * options)
 		: options->duckdb_database_file_path;
 	struct statvfs vfs;
 
-	/*
-	 * probe should never be NULL (duckdb_database_file_path always has a
-	 * non-NULL default), but guard anyway: statvfs() and the strlcpy() below
-	 * would both dereference it. Returning NULL lets the caller fall back to
-	 * the fixed guardrail.
-	 */
+	/* never NULL in practice, but statvfs()/strlcpy() below would deref it */
 	if (probe == NULL)
 		return NULL;
 
 	/*
-	 * statvfs needs an existing path. Unlike DuckDB -- which sizes its
-	 * default lazily, after the temp directory exists -- we run at startup
-	 * before anything is created, so on first start the target file/dir may
-	 * not exist yet. Fall back to its parent directory (same volume).
+	 * statvfs needs an existing path, but we run at startup before the spill
+	 * target is created, so fall back to its parent directory (same volume).
 	 */
 	if (statvfs(probe, &vfs) != 0)
 	{
@@ -145,9 +127,8 @@ default_max_temp_directory_size(const CommandLineOptions * options)
 	}
 
 	/*
-	 * Size against total disk (f_blocks), not free space like DuckDB's
-	 * f_bfree: we want a stable, predictable cap that does not shrink as
-	 * PostgreSQL fills the shared volume.
+	 * Size against total disk (f_blocks), not free space like DuckDB, for a
+	 * stable cap that does not shrink as PostgreSQL fills the shared volume.
 	 */
 	uint64		total_bytes = (uint64) vfs.f_blocks * (uint64) vfs.f_frsize;
 	uint64		cap_mib =
