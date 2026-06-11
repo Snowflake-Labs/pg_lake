@@ -79,19 +79,11 @@
 
 /*
  * Substring DuckDB puts in the error message when a query exceeds the
- * configured max_temp_directory_size while spilling to disk.
- *
- * DuckDB reports both genuine RAM exhaustion and this self-imposed temp-spill
- * cap as DUCKDB_ERROR_OUT_OF_MEMORY, and the C API exposes no other way to tell
- * them apart, so we match on the message text. See the throw sites in
- * duckdb_pglake/duckdb/src/storage/temporary_file_manager.cpp.
- *
- * WARNING: this is a load-bearing string. If DuckDB changes the wording, a
- * temp-spill overflow would once again be treated as fatal and crash the whole
- * server. The regression test
- * test_server_start.py::test_temp_directory_limit_does_not_crash_server asserts
- * this token shows up in the client error, and is the tripwire that catches a
- * wording change -- keep the two in lockstep.
+ * configured max_temp_directory_size while spilling to disk. DuckDB reports
+ * both genuine RAM exhaustion and this temp-spill cap as
+ * DUCKDB_ERROR_OUT_OF_MEMORY with no other way to tell them apart, so we match
+ * on the message text. Load-bearing string: the regression test
+ * test_temp_directory_limit_does_not_crash_server guards the wording.
  */
 #define DUCKDB_MAX_TEMP_DIR_SIZE_ERROR_TOKEN "max_temp_directory_size"
 
