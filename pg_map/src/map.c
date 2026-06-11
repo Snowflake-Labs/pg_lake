@@ -565,6 +565,14 @@ map_create_type(char *typeName, Oid keyElementType, Oid valElementType)
 	mapTypeAddr = DefineDomain(newDomain);
 #endif
 
+	/*
+	 * Make the new domain visible to syscache before we use its OID as a
+	 * function argument type below. PG19's ProcedureCreate() walks each
+	 * dependency through get_object_namespace() (find_temp_object); without
+	 * this CCI the pg_type row is invisible and the lookup ERRORs out.
+	 */
+	CommandCounterIncrement();
+
 	/* map pair depend on map to make sure they are always dropped together */
 	recordDependencyOn(&keyValPairTypeAddr, &mapTypeAddr, DEPENDENCY_NORMAL);
 
