@@ -1,8 +1,9 @@
 import subprocess
+import os
+import re
 import pytest
 from pathlib import Path
 from utils_pytest import *
-
 
 PGDUCK_UNIX_DOMAIN_PATH = "/tmp"
 PGDUCK_PORT = 5332
@@ -300,26 +301,36 @@ def test_long_short_port_combination():
 
 
 # --temp_directory / --max_temp_directory_size parsing.
-#
-# Must track DEFAULT_MAX_TEMP_DIRECTORY_SIZE in pgduck_server's command_line.c:
-# asserting the default in the startup log guards against silently regressing to
-# DuckDB's ~90%-of-disk default.
-DEFAULT_MAX_TEMP_DIRECTORY_SIZE = "10GiB"
 
 
 def test_default_temp_directory_and_cap():
-    # With no flags, spill stays at DuckDB's default location but the cap is
-    # always our bounded default, never DuckDB's disk-relative one.
+    # With no flags, spill stays at DuckDB's default location and the cap is
+    # derived from the spill volume's size (a concrete MiB value) -- or the
+    # fixed fallback if the volume cannot be sized -- but never DuckDB's
+    # ~90%-of-disk default.
     returncode, stdout, stderr = run_cli_command([])
     assert returncode == 0
     assert (
         'DuckDB spill (temp) directory defaults to "<duckdb_database_file_path>.tmp"'
         in stderr
     )
-    assert (
-        f"DuckDB max_temp_directory_size (spill cap) is set to: {DEFAULT_MAX_TEMP_DIRECTORY_SIZE}"
-        in stderr
+    # The whole point of the default is to be well under DuckDB's own default
+    # (~90% of free disk), which is what would endanger the PostgreSQL disk.
+    # DuckDB only reports that default as the string "90% of available disk
+    # space", so we reconstruct it here with the same statvfs DuckDB uses and
+    # assert our cap is a real, bounded value below it.
+    match = re.search(r"\(spill cap\) is set to: (\d+)MiB", stderr)
+    assert match, stderr
+    our_bytes = int(match.group(1)) * 1024 * 1024
+
+    probe = (
+        DUCKDB_DATABASE_FILE_PATH
+        if os.path.exists(DUCKDB_DATABASE_FILE_PATH)
+        else PGDUCK_UNIX_DOMAIN_PATH
     )
+    vfs = os.statvfs(probe)
+    duckdb_default_bytes = int(0.9 * vfs.f_frsize * vfs.f_bfree)
+    assert 0 < our_bytes < duckdb_default_bytes, (our_bytes, duckdb_default_bytes)
 
 
 def test_temp_directory():
@@ -332,6 +343,23 @@ def test_max_temp_directory_size():
     returncode, stdout, stderr = run_cli_command(["--max_temp_directory_size", "20GiB"])
     assert returncode == 0
     assert "DuckDB max_temp_directory_size (spill cap) is set to: 20GiB" in stderr
+
+
+def test_max_temp_directory_size_without_temp_directory_warns():
+    # A pinned cap with no explicit spill location is a footgun: spill lands on
+    # the database-file volume rather than the intended (PostgreSQL) disk, so we
+    # warn but still honor the cap.
+    returncode, stdout, stderr = run_cli_command(["--max_temp_directory_size", "20GiB"])
+    assert returncode == 0
+    assert "--max_temp_directory_size is set but --temp_directory is not" in stderr
+
+
+def test_max_temp_directory_size_with_temp_directory_does_not_warn():
+    returncode, stdout, stderr = run_cli_command(
+        ["--max_temp_directory_size", "20GiB", "--temp_directory", "/tmp/spilldir"]
+    )
+    assert returncode == 0
+    assert "--max_temp_directory_size is set but --temp_directory is not" not in stderr
 
 
 def test_short_temp_directory():
