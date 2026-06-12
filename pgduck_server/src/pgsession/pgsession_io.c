@@ -295,19 +295,19 @@ pgsession_read_startup_packet(PGSession * pgSession)
 		 * support NegotiateProtocolVersion). Reply with a 'v'
 		 * (NegotiateProtocolVersion) message advertising 3.0 plus the names
 		 * of any "_pq_.*" protocol options we did not recognize, mirroring
-		 * what core PostgreSQL does in backend_startup.c. libpq verifies
-		 * that every _pq_.* option it sent is echoed back; otherwise it
-		 * aborts with "server did not report the unsupported ... parameter
-		 * in its protocol negotiation message".
+		 * what core PostgreSQL does in backend_startup.c. libpq verifies that
+		 * every _pq_.* option it sent is echoed back; otherwise it aborts
+		 * with "server did not report the unsupported ... parameter in its
+		 * protocol negotiation message".
 		 */
 		StringInfoData buf;
 		int32		offset = sizeof(ProtocolVersion);
 		int32		numUnrecognized = 0;
 
 		/*
-		 * First pass: count "_pq_.*" options. The startup body is a series
-		 * of NUL-terminated name/value pairs followed by a final empty name.
-		 * We rely on the trailing NUL appended in the malloc above so that
+		 * First pass: count "_pq_.*" options. The startup body is a series of
+		 * NUL-terminated name/value pairs followed by a final empty name. We
+		 * rely on the trailing NUL appended in the malloc above so that
 		 * unterminated strings can't run past the buffer.
 		 */
 		while (offset < startupPacketLen)
