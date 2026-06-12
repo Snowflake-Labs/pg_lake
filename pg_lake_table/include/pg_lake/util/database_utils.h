@@ -19,11 +19,9 @@
 
 #include "postgres.h"
 
+#include "nodes/pg_list.h"
+
 /*
- * Hook invoked at the end of pg_lake_finish_postgres_recovery, after the
- * per-database lake_table recovery has run and committed. Other extensions
- * (such as pg_lake_replication) can set this to perform their own recovery
- * steps.
+ * Returns a list of names of all databases that allow connections.
  */
-typedef void (*PgLakeFinishPostgresRecoveryHookType) (void);
-extern PGDLLEXPORT PgLakeFinishPostgresRecoveryHookType PgLakeFinishPostgresRecoveryHook;
+extern PGDLLEXPORT List *GetDatabaseNameList(void);

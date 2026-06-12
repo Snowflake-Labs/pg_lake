@@ -19,13 +19,12 @@
 #include "miscadmin.h"
 #include "fmgr.h"
 
-#include "access/heapam.h"
-#include "catalog/pg_database.h"
 #include "catalog/namespace.h"
 #include "pg_lake/extensions/pg_lake_iceberg.h"
 #include "pg_lake/extensions/pg_lake_table.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/recovery/recover.h"
+#include "pg_lake/util/database_utils.h"
 #include "pg_extension_base/spi_helpers.h"
 #include "utils/builtins.h"
 
@@ -112,37 +111,4 @@ pg_lake_finish_postgres_recovery_in_db(PG_FUNCTION_ARGS)
 	UpdateAllInternalIcebergTablesToReadOnly();
 
 	PG_RETURN_VOID();
-}
-
-
-/*
- * GetDatabaseNameList returns a list of names of all databases that allow
- * connections.
- */
-List *
-GetDatabaseNameList(void)
-{
-	List	   *databaseList = NIL;
-	HeapTuple	databaseTuple;
-
-	Relation	pgDatabaseRelation = table_open(DatabaseRelationId, AccessShareLock);
-	TableScanDesc scan = table_beginscan_catalog(pgDatabaseRelation, 0, NULL);
-
-	while (HeapTupleIsValid(databaseTuple = heap_getnext(scan, ForwardScanDirection)))
-	{
-		Form_pg_database databaseRecord = (Form_pg_database) GETSTRUCT(databaseTuple);
-
-		/* if connection not possible, skip */
-		if (databaseRecord->datistemplate || !databaseRecord->datallowconn)
-			continue;
-
-		char	   *dbName = pstrdup(NameStr(databaseRecord->datname));
-
-		databaseList = lappend(databaseList, dbName);
-	}
-
-	table_endscan(scan);
-	table_close(pgDatabaseRelation, AccessShareLock);
-
-	return databaseList;
 }
