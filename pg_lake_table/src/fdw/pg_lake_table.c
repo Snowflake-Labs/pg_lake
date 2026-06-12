@@ -2103,6 +2103,15 @@ AddDeleteReturningTargetTableVars(PlannerInfo *root,
 		if (returningVar->varno != root->parse->resultRelation)
 			continue;
 
+		/*
+		 * Skip whole-row references (handled above) and system columns; the
+		 * latter have negative varattno and would index out of bounds in
+		 * TupleDescAttr() below — PG19 added an Assert that fires on
+		 * negative indexes where earlier majors silently returned garbage.
+		 */
+		if (returningVar->varattno <= 0)
+			continue;
+
 #if PG_VERSION_NUM >= 180000
 		if (returningVar->varreturningtype == VAR_RETURNING_NEW ||
 			returningVar->varreturningtype == VAR_RETURNING_OLD)
