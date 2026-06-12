@@ -323,10 +323,11 @@ void
 InsertDeletionQueueRecordExtended(char *path, Oid relationId, TimestampTz orphanedAt,
 								  bool isPrefix)
 {
-	char	   *query =
-		"insert into " DELETION_QUEUE_TABLE " "
-		"(path, table_name, orphaned_at, is_prefix) "
-		"values ($1,$2,$3,$4)";
+  char     *query =
+    "insert into " DELETION_QUEUE_TABLE " "
+    "(path, table_name, orphaned_at, is_prefix) "
+    "values ($1,$2,$3,$4) "
+    "on conflict (path) do nothing";
 
 	DECLARE_SPI_ARGS(4);
 	SPI_ARG_VALUE(1, TEXTOID, path, false);
