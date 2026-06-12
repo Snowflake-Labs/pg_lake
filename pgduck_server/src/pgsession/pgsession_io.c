@@ -292,17 +292,60 @@ pgsession_read_startup_packet(PGSession * pgSession)
 		/*
 		 * Client asked for a 3.x version higher than 3.0 (e.g. PG19's libpq
 		 * defaults to PG_PROTOCOL_GREASE = 3.9999 to probe servers that
-		 * support NegotiateProtocolVersion). Tell the client we only
-		 * implement 3.0 by sending a 'v' (NegotiateProtocolVersion) message
-		 * with our supported version and a zero count of unrecognized
-		 * protocol options; libpq will then either accept the downgrade or
-		 * disconnect on its own. After this, treat the connection as 3.0.
+		 * support NegotiateProtocolVersion). Reply with a 'v'
+		 * (NegotiateProtocolVersion) message advertising 3.0 plus the names
+		 * of any "_pq_.*" protocol options we did not recognize, mirroring
+		 * what core PostgreSQL does in backend_startup.c. libpq verifies
+		 * that every _pq_.* option it sent is echoed back; otherwise it
+		 * aborts with "server did not report the unsupported ... parameter
+		 * in its protocol negotiation message".
 		 */
 		StringInfoData buf;
+		int32		offset = sizeof(ProtocolVersion);
+		int32		numUnrecognized = 0;
+
+		/*
+		 * First pass: count "_pq_.*" options. The startup body is a series
+		 * of NUL-terminated name/value pairs followed by a final empty name.
+		 * We rely on the trailing NUL appended in the malloc above so that
+		 * unterminated strings can't run past the buffer.
+		 */
+		while (offset < startupPacketLen)
+		{
+			const char *name = startupPacketBuf + offset;
+			int32		valOffset;
+
+			if (*name == '\0')
+				break;
+			valOffset = offset + (int32) strlen(name) + 1;
+			if (valOffset >= startupPacketLen)
+				break;
+			if (strncmp(name, "_pq_.", 5) == 0)
+				numUnrecognized++;
+			offset = valOffset + (int32) strlen(startupPacketBuf + valOffset) + 1;
+		}
 
 		pq_beginmessage(&buf, 'v');
 		pq_sendint32(&buf, PG_PROTOCOL(3, 0));
-		pq_sendint32(&buf, 0);	/* no unrecognized options */
+		pq_sendint32(&buf, numUnrecognized);
+
+		/* Second pass: emit the names. */
+		offset = sizeof(ProtocolVersion);
+		while (offset < startupPacketLen)
+		{
+			const char *name = startupPacketBuf + offset;
+			int32		valOffset;
+
+			if (*name == '\0')
+				break;
+			valOffset = offset + (int32) strlen(name) + 1;
+			if (valOffset >= startupPacketLen)
+				break;
+			if (strncmp(name, "_pq_.", 5) == 0)
+				pq_sendstring(&buf, name);
+			offset = valOffset + (int32) strlen(startupPacketBuf + valOffset) + 1;
+		}
+
 		if (!IsOK(pq_endmessage(pgSession, &buf)))
 		{
 			pg_free(startupPacketBuf);
