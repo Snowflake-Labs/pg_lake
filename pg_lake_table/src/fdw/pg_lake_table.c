@@ -3925,7 +3925,14 @@ semijoin_target_ok(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 
 	Assert(joinrel->reltarget);
 
-	vars = pull_var_clause((Node *) joinrel->reltarget->exprs, PVC_INCLUDE_PLACEHOLDERS);
+	/*
+	 * Recurse into Aggref/PlaceHolderVar so we still see the underlying Vars
+	 * and don't elog on the new PG19 join paths that can place an Aggref
+	 * inside the target exprs of a SEMI join (e.g. TPC-H Q21).
+	 */
+	vars = pull_var_clause((Node *) joinrel->reltarget->exprs,
+						   PVC_INCLUDE_PLACEHOLDERS |
+						   PVC_RECURSE_AGGREGATES);
 
 	foreach(lc, vars)
 	{
@@ -4314,10 +4321,15 @@ add_paths_with_pathkeys_for_rel(PlannerInfo *root, RelOptInfo *rel,
 		PgLakeRelationInfo *fpinfo = (PgLakeRelationInfo *) rel->fdw_private;
 		PathTarget *target = copy_pathtarget(epq_path->pathtarget);
 
-		/* Include columns required for evaluating PHVs in the tlist. */
+		/*
+		 * Include columns required for evaluating PHVs and (PG19) any Aggrefs
+		 * left in the tlist; without PVC_RECURSE_AGGREGATES, pull_var_clause
+		 * elog()s on TPC-H Q21 / TPC-DS Q10 EPQ paths.
+		 */
 		add_new_columns_to_pathtarget(target,
 									  pull_var_clause((Node *) target->exprs,
-													  PVC_RECURSE_PLACEHOLDERS));
+													  PVC_RECURSE_PLACEHOLDERS |
+													  PVC_RECURSE_AGGREGATES));
 
 		/* Include columns required for evaluating the local conditions. */
 		foreach(lc, fpinfo->local_conds)
@@ -4326,7 +4338,8 @@ add_paths_with_pathkeys_for_rel(PlannerInfo *root, RelOptInfo *rel,
 
 			add_new_columns_to_pathtarget(target,
 										  pull_var_clause((Node *) rinfo->clause,
-														  PVC_RECURSE_PLACEHOLDERS));
+														  PVC_RECURSE_PLACEHOLDERS |
+														  PVC_RECURSE_AGGREGATES));
 		}
 
 		/*

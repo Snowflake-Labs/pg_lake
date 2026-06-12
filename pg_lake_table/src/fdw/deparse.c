@@ -1262,14 +1262,16 @@ build_tlist_to_deparse(RelOptInfo *foreignrel)
 	 */
 	tlist = add_to_flat_tlist(tlist,
 							  pull_var_clause((Node *) foreignrel->reltarget->exprs,
-											  PVC_RECURSE_PLACEHOLDERS));
+											  PVC_RECURSE_PLACEHOLDERS |
+											  PVC_RECURSE_AGGREGATES));
 	foreach(lc, fpinfo->local_conds)
 	{
 		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
 
 		tlist = add_to_flat_tlist(tlist,
 								  pull_var_clause((Node *) rinfo->clause,
-												  PVC_RECURSE_PLACEHOLDERS));
+												  PVC_RECURSE_PLACEHOLDERS |
+												  PVC_RECURSE_AGGREGATES));
 	}
 
 	return tlist;

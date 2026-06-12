@@ -265,26 +265,38 @@ CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(Oid relationId)
 		columnMapping->field = field;
 
 		columnMapping->attrNum = get_attnum(relationId, field->name);
-
-		/*
-		 * If no Postgres column exists for this Iceberg field, skip the
-		 * mapping. The downstream caller (ErrorIfSchemasDoNotMatch) compares
-		 * the resulting list length against the Iceberg schema and reports
-		 * the mismatch with a clearer error than indexing into TupleDesc with
-		 * an InvalidAttrNumber - 1 = -1, which on PG19 trips the new Assert(i
-		 * >= 0 && i < natts) inside TupleDescAttr().
-		 */
-		if (columnMapping->attrNum == InvalidAttrNumber)
+		if (icebergCatalogType == REST_CATALOG_READ_ONLY && columnMapping->attrNum == InvalidAttrNumber)
 		{
+			/*
+			 * If no such column exists, skip.
+			 */
 			continue;
 		}
 
 		columnMapping->attname = pstrdup(field->name);
-		Form_pg_attribute attr = TupleDescAttr(tupDesc, columnMapping->attrNum - 1);
+		columnMapping->attrNum = get_attnum(relationId, field->name);
 
-		columnMapping->pgType = MakePGType(attr->atttypid, attr->atttypmod);
-		columnMapping->attNotNull = attr->attnotnull;
-		columnMapping->attHasDef = attr->atthasdef;
+		if (columnMapping->attrNum != InvalidAttrNumber)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupDesc, columnMapping->attrNum - 1);
+
+			columnMapping->pgType = MakePGType(attr->atttypid, attr->atttypmod);
+			columnMapping->attNotNull = attr->attnotnull;
+			columnMapping->attHasDef = attr->atthasdef;
+		}
+		else
+		{
+			/*
+			 * No Postgres column matches this Iceberg field name (e.g. an
+			 * Iceberg-side ALTER added a column that the read-only Postgres
+			 * mirror has not yet picked up). Leave the type/null/default
+			 * fields zero-initialised so the downstream per-field mismatch
+			 * check in ErrorIfSchemasDoNotMatch() fires with the precise
+			 * "field ids X vs Y" diagnostic, instead of indexing TupleDesc
+			 * with InvalidAttrNumber - 1 = -1, which on PG19 trips the new
+			 * Assert(i >= 0 && i < natts) inside TupleDescAttr().
+			 */
+		}
 
 		pgColumnMappingList = lappend(pgColumnMappingList, columnMapping);
 	}
