@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Snowflake Inc.
+ * Copyright 2026 Snowflake Inc.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,8 +21,9 @@
 
 /*
  * Hook invoked at the end of pg_lake_finish_postgres_recovery, after the
- * per-database lake_table recovery has run. Other extensions (such as
- * pg_lake_replication) can set this to perform their own recovery steps.
+ * per-database lake_table recovery has run and committed. Other extensions
+ * (such as pg_lake_replication) can set this to perform their own recovery
+ * steps.
  */
 typedef void (*PgLakeFinishPostgresRecoveryHookType) (void);
 extern PGDLLEXPORT PgLakeFinishPostgresRecoveryHookType PgLakeFinishPostgresRecoveryHook;
