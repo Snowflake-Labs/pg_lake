@@ -281,11 +281,33 @@ pgsession_read_startup_packet(PGSession * pgSession)
 		pg_free(startupPacketBuf);
 		return EOF;
 	}
-	else if (proto != PG_PROTOCOL(3, 0))
+	else if (PG_PROTOCOL_MAJOR(proto) != 3)
 	{
 		PGDUCK_SERVER_ERROR("unexpected protocol message: %u", proto);
 		pg_free(startupPacketBuf);
 		return EOF;
+	}
+	else if (proto != PG_PROTOCOL(3, 0))
+	{
+		/*
+		 * Client asked for a 3.x version higher than 3.0 (e.g. PG19's libpq
+		 * defaults to PG_PROTOCOL_GREASE = 3.9999 to probe servers that
+		 * support NegotiateProtocolVersion). Tell the client we only
+		 * implement 3.0 by sending a 'v' (NegotiateProtocolVersion) message
+		 * with our supported version and a zero count of unrecognized
+		 * protocol options; libpq will then either accept the downgrade or
+		 * disconnect on its own. After this, treat the connection as 3.0.
+		 */
+		StringInfoData buf;
+
+		pq_beginmessage(&buf, 'v');
+		pq_sendint32(&buf, PG_PROTOCOL(3, 0));
+		pq_sendint32(&buf, 0);	/* no unrecognized options */
+		if (!IsOK(pq_endmessage(pgSession, &buf)))
+		{
+			pg_free(startupPacketBuf);
+			return EOF;
+		}
 	}
 
 	pg_free(startupPacketBuf);
