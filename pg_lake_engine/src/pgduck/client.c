@@ -135,21 +135,26 @@ GetPGDuckConnection(void)
 {
 	InitializePGDuckClient();
 
-	PGconn	   *connection = PQconnectdb(PgduckServerConninfo);
+  /*
+   * PGHOSTADDR, if present in the server environment, overrides the host in
+   * our conninfo and silently redirects the connection away from the
+   * pgduck_server unix socket.  Unset it before connecting so that our
+   * explicit "host=/tmp port=5332" conninfo is always honoured.
+   */
+  unsetenv("PGHOSTADDR");
 
-	if (PQstatus(connection) != CONNECTION_OK)
-	{
-		char		PG_USED_FOR_ASSERTS_ONLY *errorMessage = pstrdup(PQerrorMessage(connection));
+  PGconn     *connection = PQconnectdb(PgduckServerConninfo);
 
-		PQfinish(connection);
+  if (PQstatus(connection) != CONNECTION_OK)
+  {
+    char     *errorMessage = pstrdup(PQerrorMessage(connection));
 
-#ifdef USE_ASSERT_CHECKING
-		ereport(ERROR, (errmsg("could not start query engine: %s", errorMessage)));
-#else
-		/* hide internals from users */
-		ereport(ERROR, (errmsg("could not start query engine")));
-#endif
-	}
+    PQfinish(connection);
+
+    ereport(ERROR,
+        (errmsg("could not start query engine"),
+         errdetail("%s", errorMessage)));
+  }
 
 	int			connectionId = ConnectionId++;
 	bool		found = false;
