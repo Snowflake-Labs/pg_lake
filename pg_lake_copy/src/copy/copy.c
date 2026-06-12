@@ -248,22 +248,6 @@ IsPgLakeCopy(CopyStmt *copyStmt)
 		return false;
 	}
 
-#if PG_VERSION_NUM >= 180000
-
-	/*
-	 * PostgreSQL 18 added native support for COPY ... TO STDOUT (FORMAT
-	 * json), along with format-specific options like force_array, on_error,
-	 * and reject_limit. Let core handle plain STDIN/STDOUT JSON COPY so we
-	 * don't intercept upstream tests with our own option-validation errors.
-	 * We still claim the JSON path when the destination is a URL or @STAGE.
-	 */
-	if (format == DATA_FORMAT_JSON &&
-		(IsCopyFromStdin(copyStmt) || IsCopyToStdout(copyStmt)))
-	{
-		return false;
-	}
-#endif
-
 	return true;
 }
 

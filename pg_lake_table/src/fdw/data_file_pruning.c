@@ -1568,7 +1568,15 @@ ColumnsUsedInRestrictions(Oid relationId, List *baseRestrictInfoList)
 		RestrictInfo *restrictInfo = lfirst(restrictCell);
 		Node	   *qual = (Node *) restrictInfo->clause;
 
-		List	   *varForQual = pull_var_clause(qual, PVC_INCLUDE_PLACEHOLDERS);
+		/*
+		 * Recurse into Aggref/PlaceHolderVar so we still see the underlying
+		 * Vars used in any pushed-up aggregate or PHV; PG19 can leave such
+		 * nodes inside baserestrictinfo clauses where earlier majors did not,
+		 * and pull_var_clause without a recurse flag elog()s on them.
+		 */
+		List	   *varForQual = pull_var_clause(qual,
+												 PVC_RECURSE_AGGREGATES |
+												 PVC_RECURSE_PLACEHOLDERS);
 
 		ListCell   *varCell = NULL;
 

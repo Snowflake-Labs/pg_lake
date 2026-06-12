@@ -265,16 +265,21 @@ CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(Oid relationId)
 		columnMapping->field = field;
 
 		columnMapping->attrNum = get_attnum(relationId, field->name);
-		if (icebergCatalogType == REST_CATALOG_READ_ONLY && columnMapping->attrNum == InvalidAttrNumber)
+
+		/*
+		 * If no Postgres column exists for this Iceberg field, skip the
+		 * mapping. The downstream caller (ErrorIfSchemasDoNotMatch) compares
+		 * the resulting list length against the Iceberg schema and reports
+		 * the mismatch with a clearer error than indexing into TupleDesc with
+		 * an InvalidAttrNumber - 1 = -1, which on PG19 trips the new Assert(i
+		 * >= 0 && i < natts) inside TupleDescAttr().
+		 */
+		if (columnMapping->attrNum == InvalidAttrNumber)
 		{
-			/*
-			 * If no such column exists, skip.
-			 */
 			continue;
 		}
 
 		columnMapping->attname = pstrdup(field->name);
-		columnMapping->attrNum = get_attnum(relationId, field->name);
 		Form_pg_attribute attr = TupleDescAttr(tupDesc, columnMapping->attrNum - 1);
 
 		columnMapping->pgType = MakePGType(attr->atttypid, attr->atttypmod);
