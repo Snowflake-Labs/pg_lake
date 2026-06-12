@@ -18,10 +18,25 @@
 #pragma once
 #include "postgres.h"
 
+#include "access/tupdesc.h"
 #include "catalog/pg_type_d.h"
 #include "commands/copy.h"
 #include "nodes/miscnodes.h"
 #include "utils/numeric.h"
+
+/*
+ * PG19 added a firstNonCachedOffsetAttr cache to TupleDesc that must be
+ * populated via TupleDescFinalize() before BlessTupleDesc() or
+ * heap_form_tuple() are called on a manually-constructed descriptor; PG19's
+ * BlessTupleDesc Asserts on a missing finalize. Older releases don't expose
+ * the function, so define a no-op shim there and let callers always finalize.
+ */
+#if PG_VERSION_NUM < 190000
+static inline void
+TupleDescFinalize(TupleDesc tupdesc)
+{
+}
+#endif
 
 #if PG_VERSION_NUM >= 190000
 
@@ -41,8 +56,12 @@
 static inline int32
 numeric_int4_opt_error(Numeric num, bool *have_error)
 {
-	ErrorSaveContext escontext = {T_ErrorSaveContext};
-	int32		result = numeric_int4_safe(num, (Node *) &escontext);
+	ErrorSaveContext escontext;
+	int32		result;
+
+	memset(&escontext, 0, sizeof(escontext));
+	escontext.type = T_ErrorSaveContext;
+	result = numeric_int4_safe(num, (Node *) &escontext);
 
 	*have_error = escontext.error_occurred;
 	return result;

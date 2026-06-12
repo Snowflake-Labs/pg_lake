@@ -25,6 +25,8 @@
 #include "miscadmin.h"
 #include "libpq-fe.h"
 
+#include "pg_extension_base/pg_compat.h"
+
 #include "access/table.h"
 #include "access/tupdesc.h"
 #include "access/xact.h"
@@ -1362,6 +1364,8 @@ BuildTupleDescriptorForRelation(Relation relation, List *attributeList)
 		attributeNumber++;
 	}
 
+	TupleDescFinalize(attributeDescriptor);
+
 	return attributeDescriptor;
 }
 
@@ -1406,6 +1410,8 @@ RemoveDroppedColumnsFromTupleDesc(TupleDesc tableDescriptor)
 
 		attributeNumber++;
 	}
+
+	TupleDescFinalize(cleanTupleDesc);
 
 	return cleanTupleDesc;
 }

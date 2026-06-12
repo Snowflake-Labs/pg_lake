@@ -517,6 +517,8 @@ ProcessProtocolMessages(shm_mq_handle *queue, bool nowait,
 											   typeMod, 0);
 						}
 
+						TupleDescFinalize(tupleDesc);
+
 						*resultDesc = tupleDesc;
 					}
 					break;

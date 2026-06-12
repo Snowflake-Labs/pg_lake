@@ -2770,6 +2770,8 @@ CreateRowIdTupleDesc(void)
 	TupleDescInitEntry(tupleDescriptor, (AttrNumber) 2, "file_row_number",
 					   INT8OID, -1, 0);
 
+	TupleDescFinalize(tupleDescriptor);
+
 	return tupleDescriptor;
 }
 

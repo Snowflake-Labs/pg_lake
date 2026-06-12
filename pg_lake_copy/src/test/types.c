@@ -24,6 +24,7 @@
 #include "fmgr.h"
 #include "funcapi.h"
 
+#include "pg_extension_base/pg_compat.h"
 #include "pg_lake/pgduck/type.h"
 #include "pg_lake/pgduck/parse_struct.h"
 #include "utils/builtins.h"
@@ -82,6 +83,7 @@ duckdb_parse_struct(PG_FUNCTION_ARGS)
 	TupleDescInitEntry(tupdesc, (AttrNumber) 4, "isarray", BOOLOID, -1, 0);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 5, "level", INT4OID, -1, 0);
 
+	TupleDescFinalize(tupdesc);
 	tupdesc = BlessTupleDesc(tupdesc);
 
 	CompositeType *parsedType = ParseStructString(structString);
