@@ -36,7 +36,6 @@ PG_FUNCTION_INFO_V1(pg_lake_finish_postgres_recovery_in_db);
 PgLakeFinishPostgresRecoveryHookType PgLakeFinishPostgresRecoveryHook = NULL;
 
 static void RunAttachedCommand(char *command, char *databaseName);
-static List *GetDatabaseNameList(void);
 
 /*
  * pg_lake_finish_postgres_recovery is a function that runs
@@ -117,9 +116,10 @@ pg_lake_finish_postgres_recovery_in_db(PG_FUNCTION_ARGS)
 
 
 /*
- * GetDatabaseList returns a list of all databases.
+ * GetDatabaseNameList returns a list of names of all databases that allow
+ * connections.
  */
-static List *
+List *
 GetDatabaseNameList(void)
 {
 	List	   *databaseList = NIL;
