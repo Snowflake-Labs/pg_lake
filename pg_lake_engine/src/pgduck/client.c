@@ -131,10 +131,11 @@ SetupPgDuckConnectionHash(void)
 /*
  * ResolvePgduckConninfo returns a palloc'd connection string showing the
  * options libpq would actually use to reach pgduck_server, including values
- * supplied via environment variables (e.g. PGHOSTADDR, PGPORT) and libpq's
+ * supplied via environment variables (e.g. PGPORT, PGUSER) and libpq's
  * compiled-in defaults.  This is what an administrator needs to debug a
  * misconfigured server -- PgduckServerConninfo alone hides any env-supplied
- * overrides.
+ * overrides.  Note: PGHOSTADDR is cleared before connecting (see caller),
+ * so it will not appear in the resolved output.
  *
  * We resolve options without opening a socket: PQconndefaults() returns the
  * options with environment variables and compiled-in defaults applied, and
@@ -205,9 +206,18 @@ ResolvePgduckConninfo(void)
 PGDuckConnection *
 GetPGDuckConnection(void)
 {
-	InitializePGDuckClient();
+  InitializePGDuckClient();
 
-	PGconn	   *connection = PQconnectdb(PgduckServerConninfo);
+  /*
+   * PGHOSTADDR, if set in the server environment, overrides host= in the
+   * conninfo — including unix-socket paths — and silently redirects libpq
+   * to connect via TCP to a numeric IP instead.  Clear it before connecting
+   * so PgduckServerConninfo is always honoured.  Unlike PGHOST/PGPORT, which
+   * lose to explicit conninfo values, PGHOSTADDR unconditionally wins.
+   */
+  unsetenv("PGHOSTADDR");
+
+  PGconn     *connection = PQconnectdb(PgduckServerConninfo);
 
 	if (PQstatus(connection) != CONNECTION_OK)
 	{
