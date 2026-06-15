@@ -1040,11 +1040,14 @@ def test_iceberg_struct_text_value_with_quote_and_backslash(pg_conn, s3, extensi
         """,
         pg_conn,
     )
+    run_command(
+        f"CREATE TABLE {schema}.val_struct_heap (id int, s {schema}.val_field_t)",
+        pg_conn,
+    )
     pg_conn.commit()
 
-    run_command(
-        f"""
-        INSERT INTO {schema}.val_struct VALUES
+    insert_values = f"""
+        VALUES
             (3,  ROW(30, 'has " quote')::{schema}.val_field_t),
             (11, ROW(11, '"only"')::{schema}.val_field_t),
             (12, ROW(12, '""')::{schema}.val_field_t),
@@ -1053,29 +1056,29 @@ def test_iceberg_struct_text_value_with_quote_and_backslash(pg_conn, s3, extensi
             (15, ROW(15, '"' || CHR(10) || '"')::{schema}.val_field_t),
             (16, ROW(16, 'back\\slash')::{schema}.val_field_t),
             (17, ROW(17, 'trailing\\')::{schema}.val_field_t)
-        """,
+    """
+
+    run_command(
+        f"INSERT INTO {schema}.val_struct {insert_values}",
+        pg_conn,
+    )
+    run_command(
+        f"INSERT INTO {schema}.val_struct_heap {insert_values}",
         pg_conn,
     )
     pg_conn.commit()
 
-    result = run_query(
-        f"""
+    query = f"""
         SELECT id, length((s).txt), (s).txt
           FROM {schema}.val_struct
          ORDER BY id
-        """,
+    """
+    assert_query_results_on_tables(
+        query,
         pg_conn,
+        [f"{schema}.val_struct"],
+        [f"{schema}.val_struct_heap"],
     )
-    assert result == [
-        [3, 11, 'has " quote'],
-        [11, 6, '"only"'],
-        [12, 2, '""'],
-        [13, 17, 'multi " " " quote'],
-        [14, 4, '"\\"\''],
-        [15, 3, '"\n"'],
-        [16, 10, "back\\slash"],
-        [17, 9, "trailing\\"],
-    ]
 
     run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
     pg_conn.commit()
