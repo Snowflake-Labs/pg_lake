@@ -52,9 +52,13 @@
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/date.h"
+#include "utils/hsearch.h"
+#include "utils/inval.h"
 #include "utils/jsonb.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/numeric.h"
+#include "utils/syscache.h"
 #include "utils/timestamp.h"
 #include "utils/typcache.h"
 
@@ -98,9 +102,32 @@ static int64 ContainerByteSizeViaOutputFunc(Datum value, Oid typeOid);
  * value).  Used to decide whether the container aggregate-size check
  * needs the JSON-text measurement (slow but correct) instead of the
  * varlena binary size (fast but under-counts jsonb).
+ *
+ * Memoized in a process-local hashtable keyed by typeOid; results stay
+ * stable for the life of a type and are flushed on TYPEOID/RELOID
+ * syscache invalidation, so DDL on a composite type re-walks its
+ * fields on the next call.
  */
+typedef struct
+{
+	Oid			typeOid;
+	bool		containsJsonbLeaf;
+}			TypeContainsJsonbLeafEntry;
+
+static HTAB *TypeContainsJsonbLeafCache = NULL;
+
+static void
+TypeContainsJsonbLeafCacheInval(Datum arg, int cacheid, uint32 hashvalue)
+{
+	if (TypeContainsJsonbLeafCache != NULL)
+	{
+		hash_destroy(TypeContainsJsonbLeafCache);
+		TypeContainsJsonbLeafCache = NULL;
+	}
+}
+
 static bool
-TypeContainsJsonbLeaf(Oid typeOid)
+TypeContainsJsonbLeafUncached(Oid typeOid)
 {
 	if (typeOid == JSONBOID || typeOid == JSONOID)
 		return true;
@@ -146,6 +173,42 @@ TypeContainsJsonbLeaf(Oid typeOid)
 	}
 
 	return false;
+}
+
+static bool
+TypeContainsJsonbLeaf(Oid typeOid)
+{
+	bool		found;
+	TypeContainsJsonbLeafEntry *entry;
+
+	if (TypeContainsJsonbLeafCache == NULL)
+	{
+		HASHCTL		ctl;
+
+		memset(&ctl, 0, sizeof(ctl));
+		ctl.keysize = sizeof(Oid);
+		ctl.entrysize = sizeof(TypeContainsJsonbLeafEntry);
+		ctl.hcxt = CacheMemoryContext;
+
+		TypeContainsJsonbLeafCache =
+			hash_create("Iceberg TypeContainsJsonbLeaf cache", 64, &ctl,
+						HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+		CacheRegisterSyscacheCallback(TYPEOID,
+									  TypeContainsJsonbLeafCacheInval,
+									  (Datum) 0);
+		CacheRegisterSyscacheCallback(RELOID,
+									  TypeContainsJsonbLeafCacheInval,
+									  (Datum) 0);
+	}
+
+	entry = hash_search(TypeContainsJsonbLeafCache, &typeOid,
+						HASH_ENTER, &found);
+
+	if (!found)
+		entry->containsJsonbLeaf = TypeContainsJsonbLeafUncached(typeOid);
+
+	return entry->containsJsonbLeaf;
 }
 
 
@@ -705,15 +768,14 @@ IcebergErrorOrClampDatum(Datum value, Oid typeOid, int32 typmod,
  * exceed the limit are NULLed via *isNull, since truncation would corrupt
  * the structure.
  *
- * Fast paths that avoid allocations for under-the-limit values:
- *  - text/varchar/bpchar/json: PG_DETOAST_DATUM_PACKED is a no-op for
- *    non-toasted (the common case); VARSIZE_ANY_EXHDR + branch returns the
- *    value unchanged, no copy.
- *  - jsonb: jsonb_out is unavoidable when we need an exact text length, but
- *    skip it when the binary varlena size is small enough that the text
- *    form is bounded under the limit (binSize <= maxBytes / 2 — text
- *    rendering of typical jsonb data adds overhead in only a small constant
- *    factor over the binary representation, and our worst case lives at 2x).
+ * Fast path for text/varchar/bpchar/json: PG_DETOAST_DATUM_PACKED is a
+ * no-op for non-toasted (the common case); VARSIZE_ANY_EXHDR + branch
+ * returns the value unchanged, no copy.
+ *
+ * jsonb has no comparable fast path: the binary varlena size does not
+ * upper-bound the text form (numerics encode compactly in binary but
+ * expand when rendered, and a single control byte renders to a 6-char
+ * \uXXXX escape), so we always pay jsonb_out when maxBytes > 0.
  */
 static Datum
 IcebergSizeClampStringScalar(Datum value, Oid typeOid,
@@ -728,18 +790,6 @@ IcebergSizeClampStringScalar(Datum value, Oid typeOid,
 
 	if (typeOid == JSONBOID)
 	{
-		/*
-		 * Cheap binary-size pre-check: if the on-disk binary form is
-		 * comfortably under the per-leaf cap, the text form is also under (we
-		 * use 2x as a generous bound).  Avoids the jsonb_out cstring
-		 * allocation for the common case of small jsonb values.
-		 */
-		struct varlena *jb = (struct varlena *) PG_DETOAST_DATUM_PACKED(value);
-		int32		binSize = VARSIZE_ANY_EXHDR(jb);
-
-		if ((int64) binSize * 2 <= (int64) maxBytes)
-			return value;
-
 		char	   *cstr = DatumGetCString(DirectFunctionCall1(jsonb_out, value));
 		int32		textLen = strlen(cstr);
 

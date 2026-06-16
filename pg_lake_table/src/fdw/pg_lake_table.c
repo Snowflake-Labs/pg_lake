@@ -253,6 +253,13 @@ typedef struct PgLakeModifyState
 	 */
 	bool		needsSizeClamping;
 
+	/*
+	 * Per-attribute cache of TypeNeedsIcebergSizeClamping(atttypid), built
+	 * once at BeginForeignModify and read per row.  Only allocated when
+	 * needsSizeClamping is true.
+	 */
+	bool	   *sizeClampingPerAttr;
+
 	/* slot used for position deletes */
 	TupleTableSlot *deleteSlot;
 
@@ -2678,10 +2685,15 @@ IcebergErrorOrClampSlotInPlace(TupleTableSlot *slot, TupleDesc tupleDesc,
  *   - ICEBERG_OOR_CLAMP: truncates / NULLs the value in place.
  *   - ICEBERG_OOR_NONE: no-op.
  *
+ * `sizeClampingPerAttr` is the cached per-column result of
+ * TypeNeedsIcebergSizeClamping; columns whose entry is false are
+ * skipped without re-checking the type at runtime.
+ *
  * Handles nested types via IcebergSizeClampDatum's recursive walker.
  */
 static void
 IcebergSizeCheckOrClampSlotInPlace(TupleTableSlot *slot, TupleDesc tupleDesc,
+								   const bool *sizeClampingPerAttr,
 								   IcebergOutOfRangePolicy policy)
 {
 	int			natts = tupleDesc->natts;
@@ -2698,7 +2710,7 @@ IcebergSizeCheckOrClampSlotInPlace(TupleTableSlot *slot, TupleDesc tupleDesc,
 		if (attr->attisdropped || slot->tts_isnull[i])
 			continue;
 
-		if (!TypeNeedsIcebergSizeClamping(attr->atttypid))
+		if (!sizeClampingPerAttr[i])
 			continue;
 
 		bool		isNull = false;
@@ -2739,6 +2751,7 @@ ClampAndCheckConstraints(PgLakeModifyState * fmstate,
 		(IcebergMaxStringBytes > 0 || IcebergMaxBinaryBytes > 0 ||
 		 IcebergMaxNestedTypeBytes > 0))
 		IcebergSizeCheckOrClampSlotInPlace(slot, fmstate->tupleDesc,
+										   fmstate->sizeClampingPerAttr,
 										   fmstate->outOfRangePolicy);
 
 	Relation	rel = resultRelInfo->ri_RelationDesc;
@@ -3588,6 +3601,22 @@ create_foreign_modify(Relation rel,
 			GetIcebergOutOfRangePolicyForTable(relationId);
 		fmstate->needsOutOfRangeValidation = TupleDescNeedsIcebergValidation(fmstate->tupleDesc);
 		fmstate->needsSizeClamping = TupleDescNeedsIcebergSizeClamping(fmstate->tupleDesc);
+
+		if (fmstate->needsSizeClamping)
+		{
+			int			natts = fmstate->tupleDesc->natts;
+
+			fmstate->sizeClampingPerAttr = (bool *) palloc(natts * sizeof(bool));
+
+			for (int i = 0; i < natts; i++)
+			{
+				Form_pg_attribute attr = TupleDescAttr(fmstate->tupleDesc, i);
+
+				fmstate->sizeClampingPerAttr[i] =
+					!attr->attisdropped &&
+					TypeNeedsIcebergSizeClamping(attr->atttypid);
+			}
+		}
 	}
 
 	if (operation == CMD_UPDATE || operation == CMD_DELETE)

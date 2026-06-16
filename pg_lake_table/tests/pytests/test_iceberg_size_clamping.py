@@ -672,6 +672,52 @@ def test_size_check_error_default_insert_select(
         pg_conn.commit()
 
 
+def test_size_check_error_default_insert_select_jsonb(
+    s3, pg_conn, extension, with_default_location
+):
+    """Without out_of_range_values, oversize jsonb on the SQL pushdown
+    (INSERT..SELECT) path raises via the CASE/error(printf(...)) wrapper
+    around strlen(expr::VARCHAR), which sizes by the JSON-text form."""
+    schema = "test_size_check_pushdown_jsonb"
+
+    run_command(
+        f"""
+        CREATE SCHEMA {schema};
+        CREATE TABLE {schema}.t (id int, jb jsonb) USING iceberg;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    try:
+        run_command("SET pg_lake_engine.iceberg_max_string_bytes = 10", pg_conn)
+
+        with pytest.raises(
+            Exception, match=r'column "jb".*jsonb.*iceberg_max_string_bytes \(10\)'
+        ):
+            run_command(
+                f"INSERT INTO {schema}.t "
+                f"SELECT 1, ('{{\"k\":\"' || repeat('z', 100) || '\"}}')::jsonb",
+                pg_conn,
+            )
+        pg_conn.rollback()
+
+        run_command(
+            f"INSERT INTO {schema}.t SELECT 2, '{{\"a\":1}}'::jsonb",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        rows = run_query(f"SELECT id, jb FROM {schema}.t", pg_conn)
+        assert len(rows) == 1
+        assert rows[0]["id"] == 2
+    finally:
+        pg_conn.rollback()
+        run_command("RESET pg_lake_engine.iceberg_max_string_bytes", pg_conn)
+        run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
+        pg_conn.commit()
+
+
 def test_size_check_error_column_name_special_chars(
     s3, pg_conn, extension, with_default_location
 ):
