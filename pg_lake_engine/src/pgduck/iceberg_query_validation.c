@@ -487,10 +487,12 @@ IcebergWrapQueryWithErrorOrClampChecks(char *query, TupleDesc tupleDesc,
  * embedded DuckDB printf format string does not consume the column
  * name as a format specifier).
  *
- * Identifiers can contain `'`, `%`, `\` and other characters when
- * stored quoted (CREATE TABLE t ("o'reilly" text)); without escaping,
- * such names break the wrapper's CASE expression at SQL parse time or
- * surface as a malformed runtime error.
+ * Identifiers can contain `'`, `%`, and other characters when stored
+ * quoted (CREATE TABLE t ("o'reilly" text)); without escaping, such
+ * names break the wrapper's CASE expression at SQL parse time or
+ * surface as a malformed runtime error.  Backslash needs no special
+ * handling because DuckDB SQL string literals don't process backslash
+ * escapes by default and printf format strings only react to '%'.
  */
 static char *
 EscapeColumnNameForErrorMessage(const char *name, bool forPrintfFormat)
