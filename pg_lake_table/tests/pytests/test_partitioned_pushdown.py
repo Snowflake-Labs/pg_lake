@@ -15,6 +15,13 @@ SCHEMA = "test_partitioned_pushdown"
 N_ROWS = 50
 
 
+@pytest.fixture(autouse=True)
+def _enable_partitioned_write_pushdown(pg_conn):
+    run_command("SET pg_lake_table.enable_partitioned_write_pushdown TO true;", pg_conn)
+    yield
+    run_command("RESET pg_lake_table.enable_partitioned_write_pushdown;", pg_conn)
+
+
 def _table(name: str) -> str:
     return f"{SCHEMA}.{name}"
 

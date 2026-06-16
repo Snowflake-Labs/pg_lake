@@ -45,7 +45,7 @@ static bool TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod, CopyData
 bool		EnableInsertSelectPushdown = true;
 
 /* pg_lake_table.enable_partitioned_write_pushdown setting */
-bool		EnablePartitionedWritePushdown = true;
+bool		EnablePartitionedWritePushdown = false;
 
 /*
  * IsPushdownableInsertSelectQuery checks whether the given query is an INSERT..SELECT

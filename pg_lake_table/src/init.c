@@ -137,7 +137,7 @@ _PG_init(void)
 							 "file_size_bytes splitting.",
 							 NULL,
 							 &EnablePartitionedWritePushdown,
-							 true,
+							 false,
 							 PGC_USERSET,
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							 NULL,

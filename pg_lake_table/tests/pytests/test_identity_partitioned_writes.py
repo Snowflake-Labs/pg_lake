@@ -205,6 +205,10 @@ def test_identity_partition_write(
         run_command(
             "SET pg_lake_table.enable_insert_select_pushdown TO false;", pg_conn
         )
+    else:
+        run_command(
+            "SET pg_lake_table.enable_partitioned_write_pushdown TO true;", pg_conn
+        )
 
     run_command(
         f"""
@@ -329,6 +333,8 @@ def test_identity_partition_write(
 
     if not run_pushdown:
         run_command("RESET pg_lake_table.enable_insert_select_pushdown;", pg_conn)
+    else:
+        run_command("RESET pg_lake_table.enable_partitioned_write_pushdown;", pg_conn)
     pg_conn.rollback()
 
 
