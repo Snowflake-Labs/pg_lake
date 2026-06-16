@@ -1029,7 +1029,11 @@ def test_iceberg_struct_text_value_with_quote_and_backslash(pg_conn, s3, extensi
     run_command(f"CREATE SCHEMA {schema}", pg_conn)
     pg_conn.commit()
 
-    run_command(f"CREATE TYPE {schema}.val_field_t AS (k int, txt text)", pg_conn)
+    run_command(f"CREATE TYPE {schema}.inner_t AS (m int, label text)", pg_conn)
+    run_command(
+        f"CREATE TYPE {schema}.val_field_t AS (k int, txt text, child {schema}.inner_t)",
+        pg_conn,
+    )
     pg_conn.commit()
 
     run_command(
@@ -1046,16 +1050,20 @@ def test_iceberg_struct_text_value_with_quote_and_backslash(pg_conn, s3, extensi
     )
     pg_conn.commit()
 
+    # The child field exercises the recursive path: a nested struct's text
+    # is emitted by a recursive StructOutForPGDuck call and then placed bare
+    # (no extra quoting) inside the outer struct, so the inner-level escapes
+    # must survive the outer CSV pass unchanged.
     insert_values = f"""
         VALUES
-            (3,  ROW(30, 'has " quote')::{schema}.val_field_t),
-            (11, ROW(11, '"only"')::{schema}.val_field_t),
-            (12, ROW(12, '""')::{schema}.val_field_t),
-            (13, ROW(13, 'multi " " " quote')::{schema}.val_field_t),
-            (14, ROW(14, '"\\"''')::{schema}.val_field_t),
-            (15, ROW(15, '"' || CHR(10) || '"')::{schema}.val_field_t),
-            (16, ROW(16, 'back\\slash')::{schema}.val_field_t),
-            (17, ROW(17, 'trailing\\')::{schema}.val_field_t)
+            (3,  ROW(30, 'has " quote', NULL)::{schema}.val_field_t),
+            (11, ROW(11, '"only"', ROW(110, 'inner " quote')::{schema}.inner_t)::{schema}.val_field_t),
+            (12, ROW(12, '""', ROW(120, 'inner \\\\ slash')::{schema}.inner_t)::{schema}.val_field_t),
+            (13, ROW(13, 'multi " " " quote', NULL)::{schema}.val_field_t),
+            (14, ROW(14, '"\\"''', ROW(140, '"\\\\"')::{schema}.inner_t)::{schema}.val_field_t),
+            (15, ROW(15, '"' || CHR(10) || '"', NULL)::{schema}.val_field_t),
+            (16, ROW(16, 'back\\slash', ROW(160, 'inner trailing\\\\')::{schema}.inner_t)::{schema}.val_field_t),
+            (17, ROW(17, 'trailing\\', ROW(170, NULL)::{schema}.inner_t)::{schema}.val_field_t)
     """
 
     run_command(
@@ -1069,7 +1077,8 @@ def test_iceberg_struct_text_value_with_quote_and_backslash(pg_conn, s3, extensi
     pg_conn.commit()
 
     query = f"""
-        SELECT id, length((s).txt), (s).txt
+        SELECT id, length((s).txt), (s).txt,
+               ((s).child).m, length(((s).child).label), ((s).child).label
           FROM {schema}.val_struct
          ORDER BY id
     """
