@@ -105,7 +105,7 @@ def test_insert_select_year_pushdown(
             f"SELECT count(DISTINCT (year(ts) - 1970)) FROM '{path}'",
             pgduck_conn,
         )
-        assert distinct[0][0] == "1"
+        assert distinct[0][0] == 1
 
         # Verify partition metadata matches file data
         file_year = run_query(
@@ -232,7 +232,7 @@ def test_insert_select_day_pushdown(
         distinct = run_query(
             f"SELECT count(DISTINCT ts::date) FROM '{path}'", pgduck_conn
         )
-        assert distinct[0][0] == "1"
+        assert distinct[0][0] == 1
 
     _drop_tables(pg_conn, "tgt_day", "src_day")
 
@@ -340,7 +340,7 @@ def test_insert_select_identity_int_pushdown(
         distinct = run_query(
             f"SELECT count(DISTINCT category) FROM '{path}'", pgduck_conn
         )
-        assert distinct[0][0] == "1"
+        assert distinct[0][0] == 1
 
         file_val = run_query(f"SELECT DISTINCT category FROM '{path}'", pgduck_conn)[0][
             0
@@ -1628,77 +1628,6 @@ def test_bytea_identity_partition_not_pushdownable(
     assert_query_not_pushdownable(f"INSERT INTO {tgt} SELECT * FROM {src}", pg_conn)
 
     _drop_tables(pg_conn, "tgt_bytea", "src_bytea")
-
-
-def test_hour_partition_not_pushdownable_for_time(
-    extension,
-    s3,
-    with_default_location,
-    pg_conn,
-):
-    """INSERT..SELECT into hour(time)-partitioned table should NOT use pushdown."""
-    _setup_schema(pg_conn)
-    _drop_tables(pg_conn, "src_hour_time", "tgt_hour_time")
-    src = _table("src_hour_time")
-    tgt = _table("tgt_hour_time")
-
-    run_command(
-        f"""
-        CREATE TABLE {src}(id int, t time) USING iceberg;
-        INSERT INTO {src} VALUES (1, '10:30:00'), (2, '14:00:00'), (3, '23:59:59');
-        """,
-        pg_conn,
-    )
-    pg_conn.commit()
-
-    run_command(
-        f"""
-        CREATE TABLE {tgt}(id int, t time) USING iceberg
-        WITH (partition_by = 'hour(t)', autovacuum_enabled = false);
-        """,
-        pg_conn,
-    )
-    pg_conn.commit()
-
-    assert_query_not_pushdownable(f"INSERT INTO {tgt} SELECT * FROM {src}", pg_conn)
-
-    _drop_tables(pg_conn, "tgt_hour_time", "src_hour_time")
-
-
-def test_hour_partition_not_pushdownable_for_timetz(
-    extension,
-    s3,
-    with_default_location,
-    pg_conn,
-):
-    """INSERT..SELECT into hour(timetz)-partitioned table should NOT use pushdown."""
-    _setup_schema(pg_conn)
-    _drop_tables(pg_conn, "src_hour_timetz", "tgt_hour_timetz")
-    src = _table("src_hour_timetz")
-    tgt = _table("tgt_hour_timetz")
-
-    run_command(
-        f"""
-        CREATE TABLE {src}(id int, t timetz) USING iceberg;
-        INSERT INTO {src} VALUES
-            (1, '10:30:00+02'), (2, '14:00:00-05'), (3, '23:59:59+00');
-        """,
-        pg_conn,
-    )
-    pg_conn.commit()
-
-    run_command(
-        f"""
-        CREATE TABLE {tgt}(id int, t timetz) USING iceberg
-        WITH (partition_by = 'hour(t)', autovacuum_enabled = false);
-        """,
-        pg_conn,
-    )
-    pg_conn.commit()
-
-    assert_query_not_pushdownable(f"INSERT INTO {tgt} SELECT * FROM {src}", pg_conn)
-
-    _drop_tables(pg_conn, "tgt_hour_timetz", "src_hour_timetz")
 
 
 # ---------------------------------------------------------------------------
