@@ -1,5 +1,8 @@
 from utils_pytest import *
+import datetime
 import itertools
+import json
+import re
 import time
 
 
@@ -1074,6 +1077,26 @@ def test_object_store_catalog_periodic_rewrite(
         key = f"{prefix}/catalog/{dbname}/catalog.json"
 
         first_modified = s3.head_object(Bucket=TEST_BUCKET, Key=key)["LastModified"]
+        first_body = json.loads(
+            s3.get_object(Bucket=TEST_BUCKET, Key=key)["Body"].read()
+        )
+        # catalog-snapshot-time is an ISO 8601 UTC timestamp recorded when
+        # this snapshot of the catalog was taken.
+        snapshot_re = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+        assert snapshot_re.match(first_body["catalog-snapshot-time"]), (
+            f"unexpected catalog-snapshot-time format: "
+            f"{first_body['catalog-snapshot-time']!r}"
+        )
+        first_snapshot_time = datetime.datetime.strptime(
+            first_body["catalog-snapshot-time"], "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=datetime.timezone.utc)
+        # the timestamp should be roughly now, leave 5 minutes of slack for
+        # clock skew between Postgres and the test runner.
+        now = datetime.datetime.now(datetime.timezone.utc)
+        assert abs((now - first_snapshot_time).total_seconds()) < 300, (
+            f"catalog-snapshot-time {first_snapshot_time} too far from "
+            f"current time {now}"
+        )
 
         # bg worker ticks every second; with max_age=2s we expect another
         # rewrite within ~3 seconds, leave 8 seconds of slack.
@@ -1090,6 +1113,18 @@ def test_object_store_catalog_periodic_rewrite(
         assert current_modified > first_modified, (
             f"catalog object {key} last-modified did not advance "
             f"({first_modified} == {current_modified}) within the rewrite window"
+        )
+
+        # the snapshot time inside the file should also have advanced
+        second_body = json.loads(
+            s3.get_object(Bucket=TEST_BUCKET, Key=key)["Body"].read()
+        )
+        second_snapshot_time = datetime.datetime.strptime(
+            second_body["catalog-snapshot-time"], "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=datetime.timezone.utc)
+        assert second_snapshot_time > first_snapshot_time, (
+            f"catalog-snapshot-time did not advance "
+            f"({first_snapshot_time} == {second_snapshot_time})"
         )
 
         run_command("DROP SCHEMA test_periodic_rewrite CASCADE", pg_conn)

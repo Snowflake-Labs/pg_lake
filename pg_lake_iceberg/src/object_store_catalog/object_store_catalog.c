@@ -1,6 +1,7 @@
 #include "postgres.h"
 #include "funcapi.h"
 #include "miscadmin.h"
+#include "pgtime.h"
 
 #include "commands/dbcommands.h"
 #include "foreign/foreign.h"
@@ -56,6 +57,7 @@ static char *GetExternalObjectStoreCatalogFilePath(const char *catalogName);
 static char *GetInternalObjectStoreCatalogFilePath(const char *catalogName);
 static bool CheckIfExternalObjectStoreCatalogExists(const char *catalogName);
 static void GetObjectStoreCatalogInfoFromCatalog(Oid relationId, char **catalogName, char **catalogNamespace, char **catalogTableName);
+static void FormatCurrentTimestampUTC(char *buf, size_t bufsize);
 
 /*
 * Lists all tables registered in the given object store catalog.
@@ -340,6 +342,18 @@ PushMetadataLocationToObjectStoreCatalog(void)
 
 	/* Start JSON object */
 	appendStringInfoString(objectStoreCatalogFileContent, "{");
+
+	/*
+	 * catalog-snapshot-time records when this snapshot of the catalog was
+	 * taken, so operators can tell whether the file is fresh. Format is ISO
+	 * 8601 UTC, e.g. "2026-06-16T09:30:00Z".
+	 */
+	char		snapshotTime[24];
+
+	FormatCurrentTimestampUTC(snapshotTime, sizeof(snapshotTime));
+	appendJsonString(objectStoreCatalogFileContent, "catalog-snapshot-time", snapshotTime);
+	appendStringInfoString(objectStoreCatalogFileContent, ",");
+
 	appendJsonKey(objectStoreCatalogFileContent, "tables");
 	appendStringInfoString(objectStoreCatalogFileContent, "[");
 
@@ -581,6 +595,26 @@ TriggerCatalogExportIfObjectStoreTable(Oid relationId)
 
 	if (icebergCatalogType == OBJECT_STORE_READ_WRITE)
 		CacheInvalidateRelcacheByRelid(IcebergTablesInternalTableId());
+}
+
+
+/*
+ * FormatCurrentTimestampUTC writes the current time into buf as an ISO 8601
+ * UTC string with second precision, e.g. "2026-06-16T09:30:00Z". The buffer
+ * must be at least 21 bytes.
+ */
+static void
+FormatCurrentTimestampUTC(char *buf, size_t bufsize)
+{
+	pg_time_t	epoch = timestamptz_to_time_t(GetCurrentTimestamp());
+	struct pg_tm *tm = pg_gmtime(&epoch);
+
+	if (tm == NULL)
+		elog(ERROR, "could not convert current timestamp to UTC");
+
+	snprintf(buf, bufsize, "%04d-%02d-%02dT%02d:%02d:%02dZ",
+			 tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
+			 tm->tm_hour, tm->tm_min, tm->tm_sec);
 }
 
 
