@@ -212,7 +212,15 @@ StructOutForPGDuck(Datum myStruct, CopyDataFormat format)
 		/* Detect whether we need double quotes for this value */
 		bool		needQuotes = !IsContainerType(column_type);
 
-		/* And emit the string */
+		/*
+		 * Emit the value.  Scalar values are wrapped in "..." with backslash
+		 * escaping for embedded " and \, matching the convention used by
+		 * QuoteDuckDBStructKey for field names and ArrayOutForPGDuck for
+		 * array elements.  The struct literal travels through CSV on the wire
+		 * to pgduck_server, so DuckDB's struct parser sees the literal after
+		 * the outer CSV layer has un-doubled "".  CSV-style "" doubling here
+		 * would be stripped twice and lose the special characters.
+		 */
 		if (needQuotes)
 			appendStringInfoCharMacro(&buf, '"');
 		for (tmp = value; *tmp; tmp++)
@@ -220,7 +228,7 @@ StructOutForPGDuck(Datum myStruct, CopyDataFormat format)
 			char		ch = *tmp;
 
 			if (needQuotes && (ch == '"' || ch == '\\'))
-				appendStringInfoCharMacro(&buf, ch);
+				appendStringInfoCharMacro(&buf, '\\');
 			appendStringInfoCharMacro(&buf, ch);
 		}
 		if (needQuotes)

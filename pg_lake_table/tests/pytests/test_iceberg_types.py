@@ -1009,6 +1009,90 @@ def test_iceberg_types_composite(pg_conn, create_helper_functions, s3, extension
     assert len(results) == 0
 
 
+def test_iceberg_struct_text_value_with_quote_and_backslash(pg_conn, s3, extension):
+    """
+    STRUCT text fields containing the characters " or \\ must round-trip
+    through Iceberg with the special characters preserved.
+
+    The struct literal travels from pg_lake to pgduck_server inside an outer
+    CSV field, so each scalar value inside the struct must use backslash
+    escaping (\\" / \\\\) — the CSV layer un-doubles "" once on the receive
+    side, leaving DuckDB's struct parser to consume the backslash form.
+    Emitting CSV-style "" doubling at the inner layer would be stripped twice
+    and silently drop the special characters.
+
+    Reproduces: https://github.com/Snowflake-Labs/pg_lake/issues/347
+    """
+    schema = "test_iceberg_struct_text_value"
+    location = f"s3://{TEST_BUCKET}/{schema}/"
+
+    run_command(f"CREATE SCHEMA {schema}", pg_conn)
+    pg_conn.commit()
+
+    run_command(f"CREATE TYPE {schema}.inner_t AS (m int, label text)", pg_conn)
+    run_command(
+        f"CREATE TYPE {schema}.val_field_t AS (k int, txt text, child {schema}.inner_t)",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        CREATE TABLE {schema}.val_struct (id int, s {schema}.val_field_t)
+        USING iceberg
+        WITH (location = '{location}')
+        """,
+        pg_conn,
+    )
+    run_command(
+        f"CREATE TABLE {schema}.val_struct_heap (id int, s {schema}.val_field_t)",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # The child field exercises the recursive path: a nested struct's text
+    # is emitted by a recursive StructOutForPGDuck call and then placed bare
+    # (no extra quoting) inside the outer struct, so the inner-level escapes
+    # must survive the outer CSV pass unchanged.
+    insert_values = f"""
+        VALUES
+            (3,  ROW(30, 'has " quote', NULL)::{schema}.val_field_t),
+            (11, ROW(11, '"only"', ROW(110, 'inner " quote')::{schema}.inner_t)::{schema}.val_field_t),
+            (12, ROW(12, '""', ROW(120, 'inner \\\\ slash')::{schema}.inner_t)::{schema}.val_field_t),
+            (13, ROW(13, 'multi " " " quote', NULL)::{schema}.val_field_t),
+            (14, ROW(14, '"\\"''', ROW(140, '"\\\\"')::{schema}.inner_t)::{schema}.val_field_t),
+            (15, ROW(15, '"' || CHR(10) || '"', NULL)::{schema}.val_field_t),
+            (16, ROW(16, 'back\\slash', ROW(160, 'inner trailing\\\\')::{schema}.inner_t)::{schema}.val_field_t),
+            (17, ROW(17, 'trailing\\', ROW(170, NULL)::{schema}.inner_t)::{schema}.val_field_t)
+    """
+
+    run_command(
+        f"INSERT INTO {schema}.val_struct {insert_values}",
+        pg_conn,
+    )
+    run_command(
+        f"INSERT INTO {schema}.val_struct_heap {insert_values}",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    query = f"""
+        SELECT id, length((s).txt), (s).txt,
+               ((s).child).m, length(((s).child).label), ((s).child).label
+          FROM {schema}.val_struct
+         ORDER BY id
+    """
+    assert_query_results_on_tables(
+        query,
+        pg_conn,
+        [f"{schema}.val_struct"],
+        [f"{schema}.val_struct_heap"],
+    )
+
+    run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 def test_iceberg_types_converted_to_string(
     pg_conn, create_helper_functions, s3, extension
 ):
