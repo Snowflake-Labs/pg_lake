@@ -54,6 +54,7 @@
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/util/catalog_type.h"
 #include "pg_lake/util/url_encode.h"
+#include "common/hashfn.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_lake/util/string_utils.h"
 
@@ -82,6 +83,47 @@ static HTAB *RestCatalogTokenCache = NULL;
 static MemoryContext RestTokenCacheCtx = NULL;
 
 /* end of per-catalog token cache variables */
+
+
+/*
+ * Per-table vended credentials cache.
+ *
+ * Keyed by (serverOid, prefixHash) so each Iceberg table backed by a
+ * REST catalog gets its own cache slot.  Entries expire based on the
+ * REST catalog's credential TTL.  The cache is invalidated on
+ * ALTER/DROP SERVER alongside the token cache.
+ */
+typedef struct VendedCredentialsCacheKey
+{
+	Oid			serverOid;
+	uint32		prefixHash;
+}			VendedCredentialsCacheKey;
+
+typedef struct VendedCredentialsCacheEntry
+{
+	VendedCredentialsCacheKey key;	/* hash key */
+	VendedCredentials *credentials;
+	TimestampTz expiryTime;
+}			VendedCredentialsCacheEntry;
+
+static HTAB *VendedCredsCache = NULL;
+static MemoryContext VendedCredsCacheCtx = NULL;
+
+/*
+ * Conservative TTL for vended credentials when the REST catalog does
+ * not provide an explicit expiry.  AWS STS temporary credentials
+ * typically last 1 hour; we default to 55 minutes to refresh early.
+ */
+#define VENDED_CREDS_DEFAULT_TTL_SECS 3300
+
+static char *JsonbGetOptionalStringByPath(const char *jsonb_text, int nkeys,...);
+static VendedCredentials * ExtractVendedCredentials(const char *responseBody,
+													RestCatalogOptions * opts);
+static void InitVendedCredsCacheIfNeeded(void);
+static void StoreVendedCredentialsInCache(VendedCredentials * creds,
+										  const char *restCatalogName,
+										  const char *namespaceName,
+										  const char *relationName);
 
 static char *GetRestCatalogAccessToken(RestCatalogOptions * opts, bool forceRefreshToken);
 static void FetchRestCatalogAccessToken(RestCatalogOptions * opts, char **accessToken, int *expiresIn);
@@ -891,6 +933,18 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId)
 	{
 		ReportHTTPError(httpResult, ERROR);
 	}
+
+	/*
+	 * If the stage-create response includes vended credentials, cache them
+	 * for subsequent writes to this table's S3 prefix.
+	 */
+	if (opts->enableVendedCredentials && httpResult.body != NULL)
+	{
+		VendedCredentials *creds = ExtractVendedCredentials(httpResult.body, opts);
+
+		StoreVendedCredentialsInCache(creds, catalogName, namespaceName,
+									  relationName);
+	}
 }
 
 
@@ -1151,29 +1205,358 @@ GetMetadataLocationForRestCatalogForIcebergTable(Oid relationId)
 
 
 /*
-* Gets the metadata location for a relation from the external catalog.
-*/
-char *
-GetMetadataLocationFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogName, const char *namespaceName, const char *relationName)
+ * StoreVendedCredentialsInCache caches freshly-extracted vended
+ * credentials so subsequent GetVendedCredentialsForRelation calls
+ * can return them without a redundant REST round-trip.
+ */
+static void
+StoreVendedCredentialsInCache(VendedCredentials * creds,
+							  const char *restCatalogName,
+							  const char *namespaceName,
+							  const char *relationName)
+{
+	if (creds == NULL)
+		return;
+
+	char	   *tablePrefix = psprintf("%s/%s/%s",
+									   restCatalogName, namespaceName,
+									   relationName);
+
+	VendedCredentialsCacheKey cacheKey;
+
+	memset(&cacheKey, 0, sizeof(cacheKey));
+	cacheKey.serverOid = creds->serverOid;
+	cacheKey.prefixHash = hash_bytes((const unsigned char *) tablePrefix,
+									 strlen(tablePrefix));
+
+	InitVendedCredsCacheIfNeeded();
+
+	bool		found = false;
+	VendedCredentialsCacheEntry *entry =
+		hash_search(VendedCredsCache, &cacheKey, HASH_ENTER, &found);
+
+	MemoryContext oldCtx = MemoryContextSwitchTo(VendedCredsCacheCtx);
+	VendedCredentials *cached = palloc0(sizeof(VendedCredentials));
+
+	cached->accessKeyId = pstrdup(creds->accessKeyId);
+	cached->secretAccessKey = pstrdup(creds->secretAccessKey);
+	cached->sessionToken = creds->sessionToken ?
+		pstrdup(creds->sessionToken) : NULL;
+	cached->region = creds->region ?
+		pstrdup(creds->region) : NULL;
+	cached->scope = creds->scope ?
+		pstrdup(creds->scope) : NULL;
+	cached->serverOid = creds->serverOid;
+	cached->fetchedAt = creds->fetchedAt;
+
+	MemoryContextSwitchTo(oldCtx);
+
+	entry->credentials = cached;
+	entry->expiryTime = GetCurrentTimestamp() +
+		(int64) VENDED_CREDS_DEFAULT_TTL_SECS * 1000000;
+
+	pfree(tablePrefix);
+}
+
+
+/*
+ * LoadTableFromRestCatalog issues a GET loadTable request to the REST
+ * catalog, requesting vended credentials if enabled.  Returns a result
+ * struct containing the metadata location and optional vended storage
+ * credentials extracted from the response's "config" map.
+ *
+ * If vended credentials are obtained, they are also stored in the
+ * vended credentials cache so that GetVendedCredentialsForRelation
+ * can return them without a second REST round-trip.
+ */
+RestCatalogLoadTableResult
+LoadTableFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogName,
+						 const char *namespaceName, const char *relationName)
 {
 	char	   *getUrl =
 		psprintf(REST_CATALOG_TABLE,
-				 opts->host, URLEncodePath(restCatalogName), URLEncodePath(namespaceName), URLEncodePath(relationName));
+				 opts->host, URLEncodePath(restCatalogName),
+				 URLEncodePath(namespaceName),
+				 URLEncodePath(relationName));
 
 	List	   *headers = GetHeadersWithAuth(opts);
+
+	if (opts->enableVendedCredentials)
+		headers = lappend(headers,
+						  pstrdup("X-Iceberg-Access-Delegation: vended-credentials"));
+
 	HttpResult	hr = SendRequestToRestCatalog(opts, HTTP_GET, getUrl, NULL, headers);
 
 	if (hr.status != 200)
-	{
 		ReportHTTPError(hr, ERROR);
+
+	RestCatalogLoadTableResult result = {0};
+
+	result.metadataLocation = JsonbGetStringByPath(hr.body, 1, "metadata-location");
+	if (result.metadataLocation == NULL)
+		ereport(ERROR,
+				(errmsg("key \"metadata-location\" missing in json response")));
+
+	if (opts->enableVendedCredentials)
+	{
+		result.vendedCredentials = ExtractVendedCredentials(hr.body, opts);
+
+		StoreVendedCredentialsInCache(result.vendedCredentials,
+									  restCatalogName, namespaceName,
+									  relationName);
 	}
 
-	char	   *metadataLocation = JsonbGetStringByPath(hr.body, 1, "metadata-location");
+	return result;
+}
 
-	if (metadataLocation == NULL)
-		ereport(ERROR, (errmsg("key \"metadata-location\" missing in json response")));
 
-	return metadataLocation;
+/*
+ * GetMetadataLocationFromRestCatalog is the legacy API that returns only
+ * the metadata location string.  Callers that also need vended
+ * credentials should use LoadTableFromRestCatalog instead.
+ */
+char *
+GetMetadataLocationFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogName, const char *namespaceName, const char *relationName)
+{
+	RestCatalogLoadTableResult result =
+		LoadTableFromRestCatalog(opts, restCatalogName, namespaceName,
+								 relationName);
+
+	return result.metadataLocation;
+}
+
+
+/*
+ * JsonbGetOptionalStringByPath works like JsonbGetStringByPath, but
+ * returns NULL instead of raising an ERROR when a key is missing or
+ * a mid-level value is not an object.
+ */
+static char *
+JsonbGetOptionalStringByPath(const char *jsonb_text, int nkeys,...)
+{
+	if (nkeys <= 0 || jsonb_text == NULL || *jsonb_text == '\0')
+		return NULL;
+
+	Datum		jsonbDatum = DirectFunctionCall1(jsonb_in, CStringGetDatum(jsonb_text));
+	Jsonb	   *jb = DatumGetJsonbP(jsonbDatum);
+	JsonbContainer *container = &jb->root;
+
+	va_list		ap;
+
+	va_start(ap, nkeys);
+
+	for (int i = 0; i < nkeys; i++)
+	{
+		const char *key = va_arg(ap, const char *);
+		JsonbValue	keyVal;
+		JsonbValue *val;
+
+		if (!JsonContainerIsObject(container))
+		{
+			va_end(ap);
+			return NULL;
+		}
+
+		keyVal.type = jbvString;
+		keyVal.val.string.val = (char *) key;
+		keyVal.val.string.len = strlen(key);
+
+		val = findJsonbValueFromContainer(container, JB_FOBJECT, &keyVal);
+		if (val == NULL)
+		{
+			va_end(ap);
+			return NULL;
+		}
+
+		if (i < nkeys - 1)
+		{
+			if (val->type != jbvBinary ||
+				!JsonContainerIsObject(val->val.binary.data))
+			{
+				va_end(ap);
+				return NULL;
+			}
+			container = val->val.binary.data;
+		}
+		else
+		{
+			va_end(ap);
+
+			if (val->type == jbvString)
+				return pnstrdup(val->val.string.val, val->val.string.len);
+			return NULL;
+		}
+	}
+
+	va_end(ap);
+	return NULL;
+}
+
+
+/*
+ * ExtractVendedCredentials parses S3 vended credentials from the
+ * REST catalog loadTable response body's "config" map.
+ *
+ * Returns a palloc'd VendedCredentials if at minimum the access key
+ * and secret are present; NULL otherwise.
+ */
+static VendedCredentials *
+ExtractVendedCredentials(const char *responseBody, RestCatalogOptions * opts)
+{
+	if (responseBody == NULL || *responseBody == '\0')
+		return NULL;
+
+	char	   *accessKeyId =
+		JsonbGetOptionalStringByPath(responseBody, 2, "config", "s3.access-key-id");
+	char	   *secretAccessKey =
+		JsonbGetOptionalStringByPath(responseBody, 2, "config", "s3.secret-access-key");
+
+	if (accessKeyId == NULL || secretAccessKey == NULL)
+	{
+		elog(DEBUG2, "REST catalog loadTable response did not contain "
+			 "vended S3 credentials in config map");
+		return NULL;
+	}
+
+	VendedCredentials *creds = palloc0(sizeof(VendedCredentials));
+
+	creds->accessKeyId = accessKeyId;
+	creds->secretAccessKey = secretAccessKey;
+	creds->sessionToken =
+		JsonbGetOptionalStringByPath(responseBody, 2, "config", "s3.session-token");
+	creds->region =
+		JsonbGetOptionalStringByPath(responseBody, 2, "config", "client.region");
+	creds->serverOid = opts->serverOid;
+	creds->fetchedAt = GetCurrentTimestamp();
+
+	return creds;
+}
+
+
+/*
+ * Initialize the vended credentials cache hash table if needed.
+ * Shares the invalidation callback registration with the token cache.
+ */
+static void
+InitVendedCredsCacheIfNeeded(void)
+{
+	if (VendedCredsCache != NULL)
+		return;
+
+	if (VendedCredsCacheCtx == NULL)
+		VendedCredsCacheCtx = AllocSetContextCreate(CacheMemoryContext,
+													"VendedCredsCacheCtx",
+													ALLOCSET_DEFAULT_SIZES);
+
+	HASHCTL		ctl;
+
+	memset(&ctl, 0, sizeof(ctl));
+	ctl.keysize = sizeof(VendedCredentialsCacheKey);
+	ctl.entrysize = sizeof(VendedCredentialsCacheEntry);
+	ctl.hcxt = VendedCredsCacheCtx;
+
+	VendedCredsCache = hash_create("Vended Credentials Cache",
+								   16, &ctl,
+								   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+}
+
+
+/*
+ * InvalidateVendedCredentialsCache drops the entire cache.  Called from
+ * the syscache invalidation callback alongside the token cache, and also
+ * available for explicit invalidation on table drop.
+ */
+void
+InvalidateVendedCredentialsCache(void)
+{
+	if (VendedCredsCache == NULL)
+		return;
+
+	MemoryContextReset(VendedCredsCacheCtx);
+	VendedCredsCache = NULL;
+}
+
+
+/*
+ * LookupVendedCredentialsInCache checks the cache for valid vended
+ * credentials for the given table path under the given server.
+ * Returns the cached credentials or NULL if not found/expired.
+ */
+static VendedCredentials *
+LookupVendedCredentialsInCache(Oid serverOid,
+							   const char *restCatalogName,
+							   const char *namespaceName,
+							   const char *tableName)
+{
+	char	   *tablePrefix = psprintf("%s/%s/%s",
+									   restCatalogName, namespaceName,
+									   tableName);
+
+	VendedCredentialsCacheKey cacheKey;
+
+	memset(&cacheKey, 0, sizeof(cacheKey));
+	cacheKey.serverOid = serverOid;
+	cacheKey.prefixHash = hash_bytes((const unsigned char *) tablePrefix,
+									 strlen(tablePrefix));
+
+	pfree(tablePrefix);
+
+	InitVendedCredsCacheIfNeeded();
+
+	bool		found = false;
+	VendedCredentialsCacheEntry *entry =
+		hash_search(VendedCredsCache, &cacheKey, HASH_FIND, &found);
+
+	if (!found || entry->credentials == NULL)
+		return NULL;
+
+	TimestampTz now = GetCurrentTimestamp();
+	const int64 FIVE_MINUTES_USEC = (int64) 5 * 60 * 1000000;
+
+	if (entry->expiryTime <= now + FIVE_MINUTES_USEC)
+		return NULL;
+
+	return entry->credentials;
+}
+
+
+/*
+ * GetVendedCredentialsForRelation returns cached vended credentials
+ * for the given REST catalog Iceberg table, or NULL if none are
+ * available.
+ *
+ * Returns NULL if:
+ *  - the table is not backed by a REST catalog
+ *  - vended credentials are disabled
+ *  - no credentials are cached (cache-only lookup, no REST call)
+ *
+ * The cache is populated as a side effect of LoadTableFromRestCatalog
+ * during snapshot creation (the normal read path).  We intentionally
+ * do not trigger a REST round-trip here: the caller may be on the
+ * modify path (INSERT/UPDATE/DELETE) where an OAuth failure during
+ * the loadTable call would abort the statement prematurely.  Falling
+ * back to the pre-existing S3 secret is safe in all cases.
+ */
+VendedCredentials *
+GetVendedCredentialsForRelation(Oid relationId)
+{
+	IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
+
+	if (catalogType != REST_CATALOG_READ_ONLY &&
+		catalogType != REST_CATALOG_READ_WRITE)
+		return NULL;
+
+	RestCatalogOptions *opts = GetRestCatalogOptionsForRelation(relationId);
+
+	if (!opts->enableVendedCredentials)
+		return NULL;
+
+	const char *restCatalogName = GetRestCatalogName(relationId);
+	const char *namespaceName = GetRestCatalogNamespace(relationId);
+	const char *tableName = GetRestCatalogTableName(relationId);
+
+	return LookupVendedCredentialsInCache(opts->serverOid, restCatalogName,
+										  namespaceName, tableName);
 }
 
 
@@ -1310,11 +1693,13 @@ ReportHTTPError(HttpResult httpResult, int level)
 static void
 InvalidateRestTokenCache(Datum arg, int cacheid, uint32 hashvalue)
 {
-	if (RestCatalogTokenCache == NULL)
-		return;
+	if (RestCatalogTokenCache != NULL)
+	{
+		MemoryContextReset(RestTokenCacheCtx);
+		RestCatalogTokenCache = NULL;
+	}
 
-	MemoryContextReset(RestTokenCacheCtx);
-	RestCatalogTokenCache = NULL;
+	InvalidateVendedCredentialsCache();
 }
 
 

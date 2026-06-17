@@ -44,6 +44,7 @@
 #include "pg_lake/planner/query_pushdown.h"
 #include "pg_lake/planner/restriction_collector.h"
 #include "pg_extension_base/pg_compat.h"
+#include "pg_lake/fdw/vended_credentials.h"
 #include "pg_lake/pgduck/array_conversion.h"
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/pgduck/explain.h"
@@ -1425,6 +1426,13 @@ QueryPushdownBeginScan(CustomScanState *node, EState *estate, int eflags)
 	PgLakeScanSnapshot *snapshot =
 		CreatePgLakeScanSnapshot(rteList, relationRestrictionsList, paramListInfo,
 								 includeChildren, InvalidOid);
+
+	/*
+	 * Push vended credentials for all REST catalog tables after the snapshot
+	 * is built, so the metadata-read uses the pre-existing S3 secret and the
+	 * scoped vended secret only takes effect for the data scan query.
+	 */
+	PushVendedCredentialsForRelations(rteList);
 
 	/*
 	 * Deparse the query and replace read_table('table_name') with the

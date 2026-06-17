@@ -90,6 +90,7 @@
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/permissions/roles.h"
 #include "pg_extension_base/pg_compat.h"
+#include "pg_lake/fdw/vended_credentials.h"
 #include "pg_lake/pgduck/array_conversion.h"
 #include "pg_lake/pgduck/iceberg_datum_validation.h"
 #include "pg_lake/pgduck/client.h"
@@ -1711,6 +1712,15 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 								 includeChildren, fsstate->resultRelationId);
 
 	/*
+	 * Push vended credentials for all REST catalog tables before issuing any
+	 * data queries to pgduck_server.  This must happen after
+	 * CreatePgLakeScanSnapshot so the metadata-read uses the pre-existing S3
+	 * secret (whose ENDPOINT/SSL settings match the environment) and the
+	 * scoped vended secret only takes effect for the data scan.
+	 */
+	PushVendedCredentialsForRelations(rteList);
+
+	/*
 	 * We do some extra bookkeeping for scans that are part of an
 	 * update/delete to interpret the row identifier (filename,
 	 * file_row_number) records.
@@ -2206,7 +2216,15 @@ postgresBeginForeignModify(ModifyTableState *mtstate,
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
 		return;
 
-	BindRelationToXactRestCatalog(RelationGetRelid(resultRelInfo->ri_RelationDesc));
+	Oid			modifyRelId = RelationGetRelid(resultRelInfo->ri_RelationDesc);
+
+	BindRelationToXactRestCatalog(modifyRelId);
+
+	/*
+	 * Push vended credentials for the target table before any writes go to
+	 * pgduck_server.
+	 */
+	PushVendedCredentialsForRelation(modifyRelId);
 
 	/* Construct an execution state. */
 	fmstate = create_foreign_modify(resultRelInfo->ri_RelationDesc,
