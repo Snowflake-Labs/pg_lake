@@ -16,6 +16,9 @@
  */
 
 #include "postgres.h"
+#include "access/htup_details.h"
+#include "catalog/pg_type_d.h"
+#include "utils/hsearch.h"
 
 #include <float.h>
 #include <math.h>

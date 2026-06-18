@@ -16,6 +16,8 @@
  */
 
 #include "postgres.h"
+#include "utils/hsearch.h"
+#include "catalog/pg_type_d.h"
 #include "funcapi.h"
 #include "miscadmin.h"
 
@@ -95,7 +97,11 @@ typedef struct IsShippableContext
 
 
 static PlannedStmt *LakeTablePlanner(Query *parse, const char *queryString,
-									 int cursorOptions, ParamListInfo boundParams);
+									 int cursorOptions, ParamListInfo boundParams
+#if PG_VERSION_NUM >= 190000
+									 ,ExplainState *es
+#endif
+);
 static bool AdjustParseTreeForPgLake(Node *node, void *context);
 static bool ProcessNotShippableExpressionWalker(Node *node, IsShippableContext * context);
 static bool AddMissingRTEAliasaes(Node *node, void *context);
@@ -253,7 +259,11 @@ AppendPermInfos(PlannedStmt *pushdownPlan, PlannedStmt *localPlan)
  */
 static PlannedStmt *
 LakeTablePlanner(Query *parse, const char *queryString,
-				 int cursorOptions, ParamListInfo boundParams)
+				 int cursorOptions, ParamListInfo boundParams
+#if PG_VERSION_NUM >= 190000
+				 ,ExplainState *es
+#endif
+)
 {
 	Query	   *originalQuery = NULL;
 	bool		hasLakeTable = false;
@@ -293,7 +303,11 @@ LakeTablePlanner(Query *parse, const char *queryString,
 
 	PG_TRY();
 	{
-		plan = PreviousPlannerHook(parse, queryString, cursorOptions, boundParams);
+		plan = PreviousPlannerHook(parse, queryString, cursorOptions, boundParams
+#if PG_VERSION_NUM >= 190000
+								   ,es
+#endif
+			);
 		if (EnableFullQueryPushdown &&
 			hasLakeTable &&
 			(cursorOptions & CURSOR_OPT_SCROLL) == 0)
@@ -655,6 +669,26 @@ ProcessNotShippableExpressionWalker(Node *node, IsShippableContext * context)
 			RecordNotShippableObject(context, InvalidOid, InvalidOid, NOT_SHIPPABLE_SQL_EMPTY_TARGET_LIST);
 		}
 
+#if PG_VERSION_NUM >= 190000
+
+		/*
+		 * Both PostgreSQL (PG19+) and DuckDB accept GROUP BY ALL, but they
+		 * infer the grouping columns from the target list independently and
+		 * the two algorithms diverge (e.g. DuckDB rejects "SELECT b, count(*)
+		 * ... GROUP BY ALL" that PostgreSQL accepts). Deparsing preserves the
+		 * literal GROUP BY ALL, so pushing it down would let DuckDB silently
+		 * re-infer a different grouping. Run such queries locally instead;
+		 * PostgreSQL has already resolved the grouping at parse time.
+		 */
+		if (query->groupByAll)
+		{
+			if (context->stopAtFirstNotShippable)
+				return true;
+
+			RecordNotShippableObject(context, InvalidOid, InvalidOid, NOT_SHIPPABLE_SQL_GROUP_BY_ALL);
+		}
+#endif
+
 		if (query_tree_walker(query, ProcessNotShippableExpressionWalker, context, QTW_EXAMINE_RTES_BEFORE))
 			return true;
 
@@ -944,6 +978,23 @@ ExpressionHasNonShippableObject(Node *node, bool srfAllowed, IsShippableContext 
 			TryRecordNotShippableObject(context, expr->winfnoid, ProcedureRelationId, NOT_SHIPPABLE_FUNCTION);
 			return true;
 		}
+
+#if PG_VERSION_NUM >= 190000
+
+		/*
+		 * PG19 added IGNORE NULLS / RESPECT NULLS null treatment to window
+		 * functions. pg_get_querydef emits the clause after the argument list
+		 * ("lag(v) IGNORE NULLS OVER ..."), which DuckDB's parser rejects, so
+		 * any window function carrying an explicit null treatment must run
+		 * locally. RESPECT NULLS is the default and collapses to
+		 * NO_NULLTREATMENT during parse analysis, so it is unaffected.
+		 */
+		if (expr->ignore_nulls != NO_NULLTREATMENT)
+		{
+			TryRecordNotShippableObject(context, expr->winfnoid, ProcedureRelationId, NOT_SHIPPABLE_FUNCTION);
+			return true;
+		}
+#endif
 	}
 	else if (IsA(node, CoerceViaIO))
 	{

@@ -19,6 +19,7 @@
 #include "fmgr.h"
 #include "funcapi.h"
 #include "utils/builtins.h"
+#include "utils/tuplestore.h"
 
 #include "pg_lake/benchmark.h"
 #include "pg_lake/copy/copy_format.h"

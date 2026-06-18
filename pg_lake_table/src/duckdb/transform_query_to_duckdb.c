@@ -28,6 +28,7 @@
 #include "access/relation.h"
 #include "access/xact.h"
 #include "utils/builtins.h"
+#include "utils/timestamp.h"
 #include "catalog/pg_class_d.h"
 #include "catalog/pg_type_d.h"
 #include "pg_lake/iceberg/api/table_schema.h"

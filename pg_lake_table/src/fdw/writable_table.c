@@ -16,6 +16,9 @@
  */
 
 #include "postgres.h"
+#include "storage/lock.h"
+#include "utils/hsearch.h"
+#include "catalog/pg_type_d.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "miscadmin.h"
@@ -26,6 +29,7 @@
 #include "catalog/pg_namespace.h"
 #include "commands/defrem.h"
 #include "common/hashfn.h"
+#include "pg_extension_base/pg_compat.h"
 #include "pg_lake/cleanup/in_progress_files.h"
 #include "pg_lake/data_file/data_files.h"
 #include "pg_lake/data_file/data_file_stats.h"
@@ -1646,6 +1650,8 @@ CreatePositionDeleteTupleDesc(void)
 					   INT8OID, -1, 0);
 	TupleDescInitEntry(tupleDescriptor, (AttrNumber) 3, "row",
 					   RECORDOID, -1, 0);
+
+	TupleDescFinalize(tupleDescriptor);
 
 	return tupleDescriptor;
 }

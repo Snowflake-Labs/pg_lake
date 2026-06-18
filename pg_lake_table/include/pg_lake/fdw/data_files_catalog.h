@@ -22,7 +22,9 @@
 #include "pg_lake/util/s3_reader_utils.h"
 
 #include "nodes/pg_list.h"
+#if PG_VERSION_NUM < 190000
 #include "utils/dynahash.h"
+#endif
 
 #define DATA_FILES_TABLE_QUALIFIED \
 	PG_LAKE_TABLE_SCHEMA "." PG_LAKE_TABLE_FILES_TABLE_NAME

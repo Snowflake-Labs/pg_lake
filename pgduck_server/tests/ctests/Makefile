@@ -12,8 +12,10 @@ PG_INCLUDEDIR = $(shell $(PG_CONFIG) --includedir)
 # PGXS: Locates PostgreSQL extension building infrastructure using 'pg_config'.
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 
-# compile with C11 option to use modern C
-PG_CPPFLAGS = -std=c11 -I$(PG_INCLUDEDIR) -g
+# compile with C11 option to use modern C; use GNU dialect so that
+# typeof / static_assert resolve when including PG19's c.h, which
+# uses both unconditionally
+PG_CPPFLAGS = -std=gnu11 -I$(PG_INCLUDEDIR) -g
 
 PG_LDFLAGS  = -L$(PG_LIBDIR) -lpq -lpgcommon -lduckdb -Wl,-rpath,$(PG_LIBDIR)
 

@@ -20,12 +20,15 @@
  */
 
 #include "postgres.h"
+#include "catalog/pg_type_d.h"
 #include "fmgr.h"
 #include "funcapi.h"
 
+#include "pg_extension_base/pg_compat.h"
 #include "pg_lake/pgduck/type.h"
 #include "pg_lake/pgduck/parse_struct.h"
 #include "utils/builtins.h"
+#include "utils/tuplestore.h"
 
 
 PG_FUNCTION_INFO_V1(duckdb_type_by_name);
@@ -80,6 +83,7 @@ duckdb_parse_struct(PG_FUNCTION_ARGS)
 	TupleDescInitEntry(tupdesc, (AttrNumber) 4, "isarray", BOOLOID, -1, 0);
 	TupleDescInitEntry(tupdesc, (AttrNumber) 5, "level", INT4OID, -1, 0);
 
+	TupleDescFinalize(tupdesc);
 	tupdesc = BlessTupleDesc(tupdesc);
 
 	CompositeType *parsedType = ParseStructString(structString);

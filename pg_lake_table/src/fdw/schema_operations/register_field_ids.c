@@ -275,11 +275,24 @@ CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(Oid relationId)
 
 		columnMapping->attname = pstrdup(field->name);
 		columnMapping->attrNum = get_attnum(relationId, field->name);
-		Form_pg_attribute attr = TupleDescAttr(tupDesc, columnMapping->attrNum - 1);
 
-		columnMapping->pgType = MakePGType(attr->atttypid, attr->atttypmod);
-		columnMapping->attNotNull = attr->attnotnull;
-		columnMapping->attHasDef = attr->atthasdef;
+		if (columnMapping->attrNum != InvalidAttrNumber)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupDesc, columnMapping->attrNum - 1);
+
+			columnMapping->pgType = MakePGType(attr->atttypid, attr->atttypmod);
+			columnMapping->attNotNull = attr->attnotnull;
+			columnMapping->attHasDef = attr->atthasdef;
+		}
+		else
+		{
+			/*
+			 * No matching Postgres column. Leave the type/null/default fields
+			 * zero so ErrorIfSchemasDoNotMatch() reports the mismatch, and
+			 * avoid TupleDescAttr(InvalidAttrNumber - 1), which trips PG19's
+			 * new bounds Assert in TupleDescAttr().
+			 */
+		}
 
 		pgColumnMappingList = lappend(pgColumnMappingList, columnMapping);
 	}

@@ -16,6 +16,8 @@
  */
 
 #include "postgres.h"
+#include "access/htup_details.h"
+#include "catalog/pg_type_d.h"
 #include "miscadmin.h"
 #include "libpq-fe.h"
 

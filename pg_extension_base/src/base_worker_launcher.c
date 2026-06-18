@@ -58,6 +58,9 @@
  * should still exist, or whether to clean up their shared memory records.
  */
 #include "postgres.h"
+#include "utils/hsearch.h"
+#include "access/htup_details.h"
+#include "catalog/pg_type_d.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "miscadmin.h"
@@ -94,6 +97,10 @@
 #include "utils/memutils.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
+#include "utils/tuplestore.h"
+#if PG_VERSION_NUM >= 190000
+#include "utils/wait_event.h"
+#endif
 #include "tcop/utility.h"
 
 #include "pg_extension_base/base_workers.h"
@@ -292,8 +299,10 @@ typedef enum StartBaseWorkerResult
 
 
 /* set up and utility functions */
+#if PG_VERSION_NUM < 190000
 static void BaseWorkerSharedMemoryRequest(void);
 static void BaseWorkerSharedMemoryStartup(void);
+#endif
 static void StartServerStarter(void);
 static void HandleSigterm(SIGNAL_ARGS);
 static void HandleSighup(SIGNAL_ARGS);
@@ -381,9 +390,73 @@ static BaseWorkerControlData * BaseWorkerControl = NULL;
 static HTAB *DatabaseStarterHash = NULL;
 static HTAB *BaseWorkerHash = NULL;
 
+#if PG_VERSION_NUM >= 190000
+
+/*
+ * PG19 replaced the shmem_request_hook/shmem_startup_hook pair with a
+ * registered callback struct that drives the request and init phases. The
+ * struct is retained by pointer, so it must have static storage duration.
+ */
+static void BaseWorkerShmemRequest(void *arg);
+static void BaseWorkerShmemInit(void *arg);
+
+static const ShmemCallbacks BaseWorkerShmemCallbacks = {
+	.request_fn = BaseWorkerShmemRequest,
+	.init_fn = BaseWorkerShmemInit,
+};
+
+static void
+BaseWorkerShmemRequest(void *arg)
+{
+	HASHCTL		info;
+
+	/* the opts are deep-copied, but .name is kept by pointer, so use literals */
+	ShmemRequestStruct(.name = "pg_extension_base server starter",
+					   .size = sizeof(BaseWorkerControlData),
+					   .ptr = (void **) &BaseWorkerControl);
+
+	memset(&info, 0, sizeof(info));
+	info.keysize = sizeof(Oid);
+	info.entrysize = sizeof(DatabaseStarterEntry);
+	info.hash = oid_hash;
+	ShmemRequestHash(.name = "pg_extension_base database starter hash",
+					 .nelems = 2 * max_worker_processes,
+					 .hash_info = info,
+					 .hash_flags = HASH_ELEM | HASH_FUNCTION,
+					 .ptr = &DatabaseStarterHash);
+
+	memset(&info, 0, sizeof(info));
+	info.keysize = sizeof(BaseWorkerKey);
+	info.entrysize = sizeof(BaseWorkerEntry);
+	info.hash = tag_hash;
+	ShmemRequestHash(.name = "pg_extension_base base worker hash",
+					 .nelems = 2 * max_worker_processes,
+					 .hash_info = info,
+					 .hash_flags = HASH_ELEM | HASH_FUNCTION,
+					 .ptr = &BaseWorkerHash);
+}
+
+static void
+BaseWorkerShmemInit(void *arg)
+{
+	/*
+	 * The areas are allocated, zeroed, and *ptr is set before init_fn runs,
+	 * which happens single-threaded, so we need neither AddinShmemInitLock
+	 * nor a found check. LWLockNewTrancheId records the tranche name in
+	 * shared memory, so forked backends report wait events without an
+	 * attach_fn.
+	 */
+	BaseWorkerControl->lockTrancheName = "pg_extension_base server starter locks";
+	BaseWorkerControl->trancheId =
+		LWLockNewTrancheId(BaseWorkerControl->lockTrancheName);
+	LWLockInitialize(&BaseWorkerControl->lock, BaseWorkerControl->trancheId);
+}
+#else
+
 /* shared memory hooks */
 static shmem_startup_hook_type PreviousSharedMemoryStartupHook = NULL;
 static shmem_request_hook_type PreviousSharedMemoryRequestHook = NULL;
+#endif
 
 /* DDL hooks */
 static ProcessUtility_hook_type PreviousProcessUtility = NULL;
@@ -420,13 +493,15 @@ InitializeBaseWorkerLauncher(void)
 		ProcessUtility_hook != NULL ? ProcessUtility_hook : standard_ProcessUtility;
 	ProcessUtility_hook = BaseWorkerProcessUtility;
 
-	/* set up shared memory hooks */
-
+	/* set up shared memory */
+#if PG_VERSION_NUM >= 190000
+	RegisterShmemCallbacks(&BaseWorkerShmemCallbacks);
+#else
 	PreviousSharedMemoryStartupHook = shmem_startup_hook;
 	shmem_startup_hook = BaseWorkerSharedMemoryStartup;
-
 	PreviousSharedMemoryRequestHook = shmem_request_hook;
 	shmem_request_hook = BaseWorkerSharedMemoryRequest;
+#endif
 
 	PreviousObjectAccessHook = object_access_hook;
 	object_access_hook = BaseWorkerObjectAccessHook;
@@ -436,6 +511,8 @@ InitializeBaseWorkerLauncher(void)
 	StartServerStarter();
 }
 
+
+#if PG_VERSION_NUM < 190000
 
 /*
  * BaseWorkerSharedMemorySize computes how much shared memory is required.
@@ -493,6 +570,10 @@ BaseWorkerSharedMemoryStartup(void)
 /*
  * BaseWorkerSharedMemoryInit initializes the requested shared memory for the
  * worker hash and starts the server starter.
+ *
+ * PG19 replaced this hook-driven path with the RegisterShmemCallbacks
+ * mechanism (see BaseWorkerShmemRequest/BaseWorkerShmemInit above), so this
+ * function is PG18-and-earlier only.
  */
 void
 BaseWorkerSharedMemoryInit(void)
@@ -508,9 +589,8 @@ BaseWorkerSharedMemoryInit(void)
 
 	if (!alreadyInitialized)
 	{
-		BaseWorkerControl->trancheId = LWLockNewTrancheId();
 		BaseWorkerControl->lockTrancheName = "pg_extension_base server starter locks";
-
+		BaseWorkerControl->trancheId = LWLockNewTrancheId();
 		LWLockRegisterTranche(BaseWorkerControl->trancheId,
 							  BaseWorkerControl->lockTrancheName);
 
@@ -542,6 +622,7 @@ BaseWorkerSharedMemoryInit(void)
 
 	LWLockRelease(AddinShmemInitLock);
 }
+#endif
 
 
 /*
@@ -650,7 +731,11 @@ PgExtensionServerStarterMain(Datum arg)
 	/* set up signal handlers */
 	pqsignal(SIGHUP, HandleSighup);
 	pqsignal(SIGTERM, HandleSigterm);
+#if PG_VERSION_NUM >= 190000
+	pqsignal(SIGINT, PG_SIG_IGN);
+#else
 	pqsignal(SIGINT, SIG_IGN);
+#endif
 
 	before_shmem_exit(PgBaseExtensionServerStarterSharedMemoryExit, 0);
 
@@ -1012,7 +1097,11 @@ PgExtensionBaseDatabaseStarterMain(Datum databaseIdDatum)
 
 	/* Establish signal handlers before unblocking signals. */
 	pqsignal(SIGHUP, HandleSighup);
+#if PG_VERSION_NUM >= 190000
+	pqsignal(SIGINT, PG_SIG_IGN);
+#else
 	pqsignal(SIGINT, SIG_IGN);
+#endif
 	pqsignal(SIGTERM, HandleSigterm);
 
 	/* Set our exit handler before any calls to proc_exit */
