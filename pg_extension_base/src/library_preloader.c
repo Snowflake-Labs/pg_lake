@@ -36,6 +36,7 @@
 #include "utils/builtins.h"
 #include "utils/conffiles.h"
 #include "utils/guc.h"
+#include "utils/tuplestore.h"
 
 /* PreloadLibrary represents a library to preload */
 typedef struct PreloadLibrary

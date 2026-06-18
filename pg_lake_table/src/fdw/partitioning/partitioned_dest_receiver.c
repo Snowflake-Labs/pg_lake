@@ -16,6 +16,7 @@
  */
 
 #include "postgres.h"
+#include "utils/hsearch.h"
 
 #include "access/tupdesc.h"
 #include "commands/copy.h"

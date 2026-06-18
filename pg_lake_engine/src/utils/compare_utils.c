@@ -16,6 +16,7 @@
  */
 
 #include "postgres.h"
+#include "catalog/pg_type_d.h"
 #include "catalog/pg_collation.h"
 #include "fmgr.h"
 #include "utils/builtins.h"

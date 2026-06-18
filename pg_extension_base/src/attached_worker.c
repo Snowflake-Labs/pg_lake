@@ -29,6 +29,7 @@
 #include "miscadmin.h"
 #include "pgstat.h"
 
+#include "access/htup_details.h"
 #include "access/xact.h"
 #include "catalog/pg_authid.h"
 #include "commands/dbcommands.h"
@@ -63,6 +64,7 @@
 #include "utils/syscache.h"
 #include "utils/timeout.h"
 #include "utils/typcache.h"
+#include "utils/tuplestore.h"
 
 #define QUEUE_SIZE ((Size) 65536)
 #define ATTACHED_WORKER_MAGIC			0x52004040
@@ -567,6 +569,8 @@ ProcessProtocolMessages(AttachedWorker * worker, bool nowait,
 											   typeOid,
 											   typeMod, 0);
 						}
+
+						TupleDescFinalize(tupleDesc);
 
 						*resultDesc = tupleDesc;
 					}

@@ -22,13 +22,17 @@ step s1-update-key-1:
     UPDATE test_iceberg_ser SET value = value - 50 WHERE key = 1;
 
 step s2-update-key-2: 
-    UPDATE test_iceberg_ser SET value = value - 50 WHERE key = 2;
+    DO $$ BEGIN
+        UPDATE test_iceberg_ser SET value = value - 50 WHERE key = 2;
+    EXCEPTION WHEN serialization_failure THEN
+        RAISE EXCEPTION 'could not serialize access' USING ERRCODE = 'serialization_failure';
+    END $$;
  <waiting ...>
 step s1-commit: 
     COMMIT;
 
 step s2-update-key-2: <... completed>
-ERROR:  could not serialize access due to concurrent update
+ERROR:  could not serialize access
 step s2-rollback: 
     ROLLBACK;
 
@@ -38,13 +42,17 @@ step s1-update-key-1:
     UPDATE test_iceberg_ser SET value = value - 50 WHERE key = 1;
 
 step s2-update-key-1: 
-    UPDATE test_iceberg_ser SET value = value + 10 WHERE key = 1;
+    DO $$ BEGIN
+        UPDATE test_iceberg_ser SET value = value + 10 WHERE key = 1;
+    EXCEPTION WHEN serialization_failure THEN
+        RAISE EXCEPTION 'could not serialize access' USING ERRCODE = 'serialization_failure';
+    END $$;
  <waiting ...>
 step s1-commit: 
     COMMIT;
 
 step s2-update-key-1: <... completed>
-ERROR:  could not serialize access due to concurrent update
+ERROR:  could not serialize access
 step s2-rollback: 
     ROLLBACK;
 
@@ -72,13 +80,17 @@ step s1-insert:
     INSERT INTO test_iceberg_ser VALUES (3, 30);
 
 step s2-insert: 
-    INSERT INTO test_iceberg_ser VALUES (4, 40);
+    DO $$ BEGIN
+        INSERT INTO test_iceberg_ser VALUES (4, 40);
+    EXCEPTION WHEN serialization_failure THEN
+        RAISE EXCEPTION 'could not serialize access' USING ERRCODE = 'serialization_failure';
+    END $$;
  <waiting ...>
 step s1-commit: 
     COMMIT;
 
 step s2-insert: <... completed>
-ERROR:  could not serialize access due to concurrent update
+ERROR:  could not serialize access
 step s2-rollback: 
     ROLLBACK;
 

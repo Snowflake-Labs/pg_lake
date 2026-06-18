@@ -18,6 +18,7 @@
 #ifndef SPI_UTILITIES_H
 #define SPI_UTILITIES_H
 
+#include "catalog/pg_type_d.h"
 #include "miscadmin.h"
 
 #include "executor/spi.h"
@@ -25,6 +26,7 @@
 #include "utils/guc.h"
 #include "utils/jsonb.h"
 #include "utils/pg_lsn.h"
+#include "utils/timestamp.h"
 
 /* SPI macros for setting parameters */
 #define DATUMIZE_TEXTOID(Value) CStringGetTextDatum(Value)

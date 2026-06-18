@@ -80,7 +80,7 @@ You can customize builds using these variables (can be set as environment variab
 
 | Variable | Default | Description | Example |
 |----------|---------|-------------|---------|
-| `PG_MAJOR` | `18` | PostgreSQL major version (16, 17, or 18) | `PG_MAJOR=17` |
+| `PG_MAJOR` | `18` | PostgreSQL major version (16, 17, 18, or 19) | `PG_MAJOR=17` |
 | `BASE_IMAGE_OS` | `almalinux` | Base OS (almalinux or debian) | `BASE_IMAGE_OS=debian` |
 | `BASE_IMAGE_TAG` | `9` | Base OS version tag | `BASE_IMAGE_TAG=12` |
 | `VERSION` | `latest` | Image version tag (for registry) | `VERSION=v1.0.0` |
@@ -311,7 +311,7 @@ task compose:up PG_MAJOR=16
 Create a `.env` file in the `docker` directory:
 
 ```env
-# PostgreSQL Version (16, 17, or 18)
+# PostgreSQL Version (16, 17, 18, or 19)
 PG_MAJOR=18
 
 # AWS Profile for LocalStack (optional)
@@ -559,6 +559,7 @@ Each PostgreSQL version uses its own buildx builder:
 - PG 16: `pg_lake_builder_pg16`
 - PG 17: `pg_lake_builder_pg17`
 - PG 18: `pg_lake_builder_pg18`
+- PG 19: `pg_lake_builder_pg19`
 
 This prevents cache conflicts when switching between versions.
 
@@ -590,6 +591,7 @@ This prevents cache conflicts when switching between versions.
   - PG 16: `pg_lake_builder_pg16`
   - PG 17: `pg_lake_builder_pg17`
   - PG 18: `pg_lake_builder_pg18`
+  - PG 19: `pg_lake_builder_pg19`
 
 ---
 

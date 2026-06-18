@@ -124,8 +124,11 @@ extern int	WorkerRestartHealthyMs;
 #define MIN_WORKER_STARTUP_TIMEOUT_MS (1000)
 extern int	WorkerStartupTimeoutMs;
 
+#if PG_VERSION_NUM < 190000
+/* legacy shmem hook path; PG19+ uses RegisterShmemCallbacks instead */
 void		BaseWorkerSharedMemoryInit(void);
 size_t		BaseWorkerSharedMemorySize(void);
+#endif
 
 extern PGDLLEXPORT int32 RegisterBaseWorker(char *workerName, Oid entryPointFunctionId,
 											Oid extensionId);

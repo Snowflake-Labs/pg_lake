@@ -24,6 +24,7 @@
 #include "pg_lake/parsetree/const.h"
 #include "pg_lake/parsetree/expression.h"
 #include "datatype/timestamp.h"
+#include "utils/timestamp.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/parsenodes.h"

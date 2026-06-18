@@ -16,6 +16,7 @@
  */
 
 #include "postgres.h"
+#include "catalog/pg_type_d.h"
 #include "libpq-fe.h"
 
 #include "commands/defrem.h"

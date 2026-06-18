@@ -22,6 +22,7 @@
 * from/to catalog lake_table.field_id_mappings.
 */
 #include "postgres.h"
+#include "catalog/pg_type_d.h"
 #include "miscadmin.h"
 
 #include "access/relation.h"

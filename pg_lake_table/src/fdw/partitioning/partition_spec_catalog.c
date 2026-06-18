@@ -16,6 +16,8 @@
  */
 
 #include "postgres.h"
+#include "utils/hsearch.h"
+#include "catalog/pg_type_d.h"
 #include "fmgr.h"
 
 #include "pg_lake/extensions/pg_lake_table.h"

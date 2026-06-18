@@ -2,8 +2,333 @@ import pytest
 import psycopg2
 import time
 import duckdb
+import json
 import math
 from utils_pytest import *
+
+
+# This module is pg_lake's own JSON read/write suite. Under the production
+# 'auto' default a plain local COPY TO json is served by Postgres (it gets
+# precedence whenever it natively supports the case), which would silently move
+# most of these assertions onto Postgres's writer. The internal tests here pin
+# pg_lake-specific behaviour (DuckDB type inference, pg_lake error strings,
+# option handling), so we default the whole module to 'pglake'. The committed
+# SET is the per-connection baseline that each test's own rollback reverts to.
+#
+# The round-trip tests below override this per case via the `writer` parameter:
+# they write the file with each writer in turn and always read it back through
+# pg_lake (Postgres has no COPY FROM json), proving both producers emit JSON
+# pg_lake can reconstruct losslessly.
+JSON_WRITERS = ["postgres", "pglake"]
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _default_pglake_json(pg_conn, superuser_conn, app_user):
+    for conn in (pg_conn, superuser_conn):
+        run_command("SET pg_lake_copy.json_copy_mode TO 'pglake'", conn)
+        conn.commit()
+    # The writer-parametrized round-trips below also run with
+    # json_copy_mode=postgres, which routes COPY <table> TO <local file> through
+    # PostgreSQL's own COPY -- that requires the pg_write_server_files role.
+    # Grant it to the (otherwise unprivileged) app_user so the same round-trip
+    # works for both producers. The role is module-scoped and dropped on
+    # teardown, so the grant never leaks.
+    run_command(f"GRANT pg_write_server_files TO {app_user}", superuser_conn)
+    superuser_conn.commit()
+    yield
+
+
+def _set_json_writer(conn, writer):
+    """Select who writes the local JSON file for a round-trip test. Reverts to
+    the committed module default ('pglake') on the test's rollback."""
+    run_command(f"SET pg_lake_copy.json_copy_mode TO '{writer}'", conn)
+
+
+def _read_back_via_pglake(conn):
+    """The reader is always pg_lake; Postgres cannot COPY FROM json."""
+    run_command("SET pg_lake_copy.json_copy_mode TO 'pglake'", conn)
+
+
+def _skip_pre_pg19(conn):
+    if get_pg_version_num(conn) < 190000:
+        pytest.skip("COPY ... (format json, force_array) requires PG19+")
+
+
+# Multi-column, multi-row, ordered source covering a representative type spread
+# (int, text with quotes + unicode, numeric, float, bool, NULL, date,
+# timestamp) so a force_array round-trip exercises the whole JSON path.
+_FA_SRC_DDL = """
+CREATE TABLE fa_src (
+    id int,
+    name text,
+    score numeric(8,2),
+    ratio float8,
+    flag bool,
+    note text,
+    d date,
+    ts timestamp
+);
+INSERT INTO fa_src VALUES
+    (1, 'alice "the ace"', 1.50, 0.25, true, E'\\u0100\\U0001F642', '2024-01-01', '2024-01-01 15:00:00'),
+    (2, 'bob', 2.00, 1.5, false, NULL, '2023-06-15', '2023-06-15 08:30:00'),
+    (3, 'çelik', 3.25, NULL, NULL, 'plain', '2022-12-31', '2022-12-31 23:59:59');
+"""
+
+_FA_ROW_COUNT = 3
+
+
+def _fa_setup(conn):
+    run_command(_FA_SRC_DDL, conn)
+    run_command("CREATE TABLE fa_dst (LIKE fa_src)", conn)
+
+
+def _fa_rows(conn, table):
+    return [dict(r) for r in run_query(f"SELECT * FROM {table} ORDER BY id", conn)]
+
+
+@pytest.mark.parametrize("writer", JSON_WRITERS)
+def test_force_array_roundtrip_local_file(pg_conn, tmp_path, writer):
+    """force_array writes a single JSON array to a local file and reads back.
+
+    Parametrized over the producer: both Postgres and pg_lake must emit a JSON
+    array that pg_lake's COPY FROM reconstructs row-for-row. (app_user is
+    granted pg_write_server_files in the module fixture so the postgres writer's
+    COPY TO <file> works.)
+    """
+    _skip_pre_pg19(pg_conn)
+
+    json_path = tmp_path / "fa_local.json"
+
+    _fa_setup(pg_conn)
+    before = _fa_rows(pg_conn, "fa_src")
+
+    _set_json_writer(pg_conn, writer)
+    run_command(
+        f"COPY fa_src TO '{json_path}' WITH (format json, force_array true)", pg_conn
+    )
+
+    content = json_path.read_bytes().strip()
+    assert content.startswith(b"["), f"expected JSON array, got: {content[:40]!r}"
+    assert content.endswith(b"]"), f"expected JSON array, got: {content[-40:]!r}"
+    parsed = json.loads(content)
+    assert isinstance(parsed, list)
+    assert len(parsed) == _FA_ROW_COUNT
+
+    _read_back_via_pglake(pg_conn)
+    run_command(f"COPY fa_dst FROM '{json_path}' WITH (format json)", pg_conn)
+    after = _fa_rows(pg_conn, "fa_dst")
+    assert before == after
+
+    pg_conn.rollback()
+
+
+def test_force_array_roundtrip_s3(pg_conn, s3, tmp_path):
+    """force_array writes a single JSON array to an s3 lake target and reads back."""
+    _skip_pre_pg19(pg_conn)
+
+    url = f"s3://{TEST_BUCKET}/test_force_array_roundtrip/fa_s3.json"
+
+    _fa_setup(pg_conn)
+    before = _fa_rows(pg_conn, "fa_src")
+
+    run_command(f"COPY fa_src TO '{url}' WITH (format json, force_array true)", pg_conn)
+
+    content = read_s3_operations(s3, url, is_text=False).strip()
+    assert content.startswith(b"["), f"expected JSON array, got: {content[:40]!r}"
+    assert content.endswith(b"]"), f"expected JSON array, got: {content[-40:]!r}"
+    parsed = json.loads(content)
+    assert isinstance(parsed, list)
+    assert len(parsed) == _FA_ROW_COUNT
+
+    run_command(f"COPY fa_dst FROM '{url}' WITH (format json)", pg_conn)
+    after = _fa_rows(pg_conn, "fa_dst")
+    assert before == after
+
+    pg_conn.rollback()
+
+
+@pytest.mark.parametrize("writer", JSON_WRITERS)
+def test_no_force_array_ndjson_roundtrip(pg_conn, tmp_path, writer):
+    """Without force_array the same source stays NDJSON and still round-trips.
+
+    Parametrized over the producer: both Postgres and pg_lake emit NDJSON (one
+    JSON object per line) that pg_lake reads back row-for-row.
+    """
+    _skip_pre_pg19(pg_conn)
+
+    json_path = tmp_path / "fa_ndjson.json"
+
+    _fa_setup(pg_conn)
+    before = _fa_rows(pg_conn, "fa_src")
+
+    _set_json_writer(pg_conn, writer)
+    run_command(f"COPY fa_src TO '{json_path}' WITH (format json)", pg_conn)
+
+    content = json_path.read_bytes()
+    assert not content.lstrip().startswith(b"["), "expected NDJSON, got a JSON array"
+    lines = [ln for ln in content.splitlines() if ln.strip()]
+    assert len(lines) == _FA_ROW_COUNT
+    for ln in lines:
+        assert isinstance(json.loads(ln), dict)
+
+    _read_back_via_pglake(pg_conn)
+    run_command(f"COPY fa_dst FROM '{json_path}' WITH (format json)", pg_conn)
+    after = _fa_rows(pg_conn, "fa_dst")
+    assert before == after
+
+    pg_conn.rollback()
+
+
+# ---------------------------------------------------------------------------
+# PG19: COPY <partitioned_table> TO with JSON (plain + force_array).
+# ---------------------------------------------------------------------------
+
+_PART_SRC_DDL = """
+DROP TABLE IF EXISTS pj_parent CASCADE;
+DROP TABLE IF EXISTS pj_dst;
+CREATE TABLE pj_parent (id int, name text, d date) PARTITION BY RANGE (id);
+CREATE TABLE pj_parent_1 PARTITION OF pj_parent FOR VALUES FROM (0) TO (50);
+CREATE TABLE pj_parent_2 PARTITION OF pj_parent FOR VALUES FROM (50) TO (100);
+INSERT INTO pj_parent
+    SELECT g, 'name "' || g || '"', date '2024-01-01' + g
+    FROM generate_series(0, 99) g;
+"""
+
+_PART_ROW_COUNT = 100
+
+
+def _pj_setup(conn):
+    run_command(_PART_SRC_DDL, conn)
+    run_command("CREATE TABLE pj_dst (LIKE pj_parent)", conn)
+
+
+def _pj_rows(conn, table):
+    return [dict(r) for r in run_query(f"SELECT * FROM {table} ORDER BY id", conn)]
+
+
+@pytest.mark.parametrize("writer", JSON_WRITERS)
+def test_pg19_partitioned_json_roundtrip_local(pg_conn, tmp_path, writer):
+    """PG19: COPY <partitioned parent> TO (format json) to a local file then
+    COPY dst FROM round-trips every partition's rows.
+
+    Parametrized over the producer: both Postgres (native COPY TO on the
+    partitioned parent) and pg_lake must emit NDJSON pg_lake reads back.
+    """
+    _skip_pre_pg19(pg_conn)
+
+    json_path = tmp_path / "pj_local.json"
+    _pj_setup(pg_conn)
+    before = _pj_rows(pg_conn, "pj_parent")
+
+    _set_json_writer(pg_conn, writer)
+    run_command(f"COPY pj_parent TO '{json_path}' WITH (format json)", pg_conn)
+
+    content = json_path.read_bytes()
+    assert not content.lstrip().startswith(b"["), "expected NDJSON, got a JSON array"
+    lines = [ln for ln in content.splitlines() if ln.strip()]
+    assert len(lines) == _PART_ROW_COUNT
+
+    _read_back_via_pglake(pg_conn)
+    run_command(f"COPY pj_dst FROM '{json_path}' WITH (format json)", pg_conn)
+    after = _pj_rows(pg_conn, "pj_dst")
+    assert before == after
+    assert len(after) == _PART_ROW_COUNT
+
+    pg_conn.rollback()
+
+
+def test_pg19_partitioned_json_roundtrip_s3(pg_conn, s3, tmp_path):
+    """PG19: same as the local JSON round-trip but to an s3 lake target."""
+    _skip_pre_pg19(pg_conn)
+
+    url = f"s3://{TEST_BUCKET}/test_pg19_partitioned_json/pj_s3.json"
+    _pj_setup(pg_conn)
+    before = _pj_rows(pg_conn, "pj_parent")
+
+    run_command(f"COPY pj_parent TO '{url}' WITH (format json)", pg_conn)
+
+    content = read_s3_operations(s3, url, is_text=False)
+    lines = [ln for ln in content.splitlines() if ln.strip()]
+    assert len(lines) == _PART_ROW_COUNT
+
+    run_command(f"COPY pj_dst FROM '{url}' WITH (format json)", pg_conn)
+    after = _pj_rows(pg_conn, "pj_dst")
+    assert before == after
+    assert len(after) == _PART_ROW_COUNT
+
+    pg_conn.rollback()
+
+
+def _assert_single_json_array(content_bytes, expected_count):
+    """force_array output is a single JSON array. The exact framing differs by
+    producer (DuckDB uses tab indentation and `},\n\t{` separators, Postgres
+    uses spaces), so parse and count rather than byte-compare."""
+    stripped = content_bytes.strip()
+    assert stripped.startswith(b"["), f"expected JSON array, got: {stripped[:40]!r}"
+    assert stripped.endswith(b"]"), f"expected JSON array, got: {stripped[-40:]!r}"
+    parsed = json.loads(stripped)
+    assert isinstance(parsed, list)
+    assert len(parsed) == expected_count
+    return parsed
+
+
+@pytest.mark.parametrize("writer", JSON_WRITERS)
+def test_pg19_partitioned_json_force_array_local(pg_conn, tmp_path, writer):
+    """PG19 nice story: COPY <partitioned parent> TO (format json, force_array
+    true) to a local file emits one JSON array spanning all partitions, then
+    COPY dst FROM reads it row-for-row.
+
+    Parametrized over the producer: both Postgres and pg_lake must frame the
+    output as a single JSON array pg_lake reads back row-for-row.
+    """
+    _skip_pre_pg19(pg_conn)
+
+    json_path = tmp_path / "pj_fa_local.json"
+    _pj_setup(pg_conn)
+    before = _pj_rows(pg_conn, "pj_parent")
+
+    _set_json_writer(pg_conn, writer)
+    run_command(
+        f"COPY pj_parent TO '{json_path}' WITH (format json, force_array true)",
+        pg_conn,
+    )
+
+    _assert_single_json_array(json_path.read_bytes(), _PART_ROW_COUNT)
+
+    _read_back_via_pglake(pg_conn)
+    run_command(f"COPY pj_dst FROM '{json_path}' WITH (format json)", pg_conn)
+    after = _pj_rows(pg_conn, "pj_dst")
+    assert before == after
+    assert len(after) == _PART_ROW_COUNT
+
+    pg_conn.rollback()
+
+
+def test_pg19_partitioned_json_force_array_s3(pg_conn, s3, tmp_path):
+    """PG19 nice story (s3 variant): COPY <partitioned parent> TO an s3 lake
+    target with force_array emits a single JSON array, then COPY dst FROM reads
+    it back row-for-row."""
+    _skip_pre_pg19(pg_conn)
+
+    url = f"s3://{TEST_BUCKET}/test_pg19_partitioned_json/pj_fa_s3.json"
+    _pj_setup(pg_conn)
+    before = _pj_rows(pg_conn, "pj_parent")
+
+    run_command(
+        f"COPY pj_parent TO '{url}' WITH (format json, force_array true)",
+        pg_conn,
+    )
+
+    _assert_single_json_array(
+        read_s3_operations(s3, url, is_text=False), _PART_ROW_COUNT
+    )
+
+    run_command(f"COPY pj_dst FROM '{url}' WITH (format json)", pg_conn)
+    after = _pj_rows(pg_conn, "pj_dst")
+    assert before == after
+    assert len(after) == _PART_ROW_COUNT
+
+    pg_conn.rollback()
 
 
 def test_types(pg_conn, duckdb_conn, tmp_path):

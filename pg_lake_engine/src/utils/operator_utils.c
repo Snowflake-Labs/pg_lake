@@ -16,6 +16,7 @@
  */
 
 #include "postgres.h"
+#include "access/htup_details.h"
 
 #include "catalog/pg_operator.h"
 #include "pg_lake/util/operator_utils.h"

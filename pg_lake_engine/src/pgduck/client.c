@@ -16,6 +16,7 @@
  */
 
 #include "postgres.h"
+#include "utils/hsearch.h"
 #include "miscadmin.h"
 #include "libpq-fe.h"
 

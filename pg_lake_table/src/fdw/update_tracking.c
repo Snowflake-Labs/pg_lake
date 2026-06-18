@@ -219,7 +219,11 @@ CreateUpdateTrackingTable(RangeVar *updateTableName)
 	indexColumn->name = "rowid";
 	createPrimaryKey->indexParams = list_make1(indexColumn);
 
-	DefineIndex(updateTableAddress.objectId,
+	DefineIndex(
+#if PG_VERSION_NUM >= 190000
+				 /* pstate */ NULL,
+#endif
+				updateTableAddress.objectId,
 				createPrimaryKey,
 				 /* indexRelationId */ InvalidOid,
 				 /* parentIndexId */ InvalidOid,

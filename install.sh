@@ -63,7 +63,7 @@ PostgreSQL installation. Use --build-postgres for full development setup.
 
 OPTIONS:
     --build-postgres            Build PostgreSQL from source and initialize database
-    --pg-version VERSION        PostgreSQL version to build (16, 17, or 18) [default: 18]
+    --pg-version VERSION        PostgreSQL version to build (16, 17, 18, or 19) [default: 18]
     --prefix DIR                PostgreSQL installation prefix [default: auto-detect or \$HOME/pgsql]
     --deps-dir DIR              Directory for dependencies [default: \$HOME/pg_lake-deps]
     --jobs N                    Number of parallel build jobs [default: nproc]
@@ -148,8 +148,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Validate PostgreSQL version
-if [[ ! "$PG_VERSION" =~ ^(16|17|18)$ ]]; then
-    print_error "Invalid PostgreSQL version: $PG_VERSION. Must be 16, 17, or 18."
+if [[ ! "$PG_VERSION" =~ ^(16|17|18|19)$ ]]; then
+    print_error "Invalid PostgreSQL version: $PG_VERSION. Must be 16, 17, 18, or 19."
     exit 1
 fi
 
@@ -158,6 +158,10 @@ case $PG_VERSION in
     16) PG_BRANCH="REL_16_STABLE" ;;
     17) PG_BRANCH="REL_17_STABLE" ;;
     18) PG_BRANCH="REL_18_STABLE" ;;
+    # PG19 has no stable branch yet; pin the beta tag so local builds match
+    # CI (which builds from the 19beta1 release tarball) instead of tracking
+    # the moving master branch.
+    19) PG_BRANCH="REL_19_BETA1" ;;
 esac
 
 # Determine PostgreSQL installation paths

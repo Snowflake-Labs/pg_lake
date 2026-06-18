@@ -16,6 +16,8 @@
  */
 
 #include "postgres.h"
+#include "utils/hsearch.h"
+#include "catalog/pg_type_d.h"
 #include "utils/builtins.h"
 #include "utils/date.h"
 #include "utils/lsyscache.h"
