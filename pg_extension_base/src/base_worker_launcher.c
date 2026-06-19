@@ -828,11 +828,7 @@ PgExtensionServerStarterMain(Datum arg)
 	/* set up signal handlers */
 	pqsignal(SIGHUP, HandleSighup);
 	pqsignal(SIGTERM, HandleSigterm);
-#if PG_VERSION_NUM >= 190000
 	pqsignal(SIGINT, PG_SIG_IGN);
-#else
-	pqsignal(SIGINT, SIG_IGN);
-#endif
 
 	before_shmem_exit(PgBaseExtensionServerStarterSharedMemoryExit, 0);
 
@@ -1376,11 +1372,7 @@ PgExtensionBaseDatabaseStarterMain(Datum databaseIdDatum)
 
 	/* Establish signal handlers before unblocking signals. */
 	pqsignal(SIGHUP, HandleSighup);
-#if PG_VERSION_NUM >= 190000
 	pqsignal(SIGINT, PG_SIG_IGN);
-#else
-	pqsignal(SIGINT, SIG_IGN);
-#endif
 
 	/*
 	 * Until we reach the main loop we cannot react to a SIGTERM flag, because

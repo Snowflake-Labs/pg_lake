@@ -38,6 +38,15 @@ TupleDescFinalize(TupleDesc tupdesc)
 }
 #endif
 
+/*
+ * PG19 added PG_SIG_IGN (a cast of SIG_IGN to pqsigfunc) for use with
+ * pqsignal(); older releases pass SIG_IGN directly. Define the name on
+ * <=18 so callers can use PG_SIG_IGN unconditionally.
+ */
+#if PG_VERSION_NUM < 190000
+#define PG_SIG_IGN SIG_IGN
+#endif
+
 #if PG_VERSION_NUM >= 190000
 
 /*
