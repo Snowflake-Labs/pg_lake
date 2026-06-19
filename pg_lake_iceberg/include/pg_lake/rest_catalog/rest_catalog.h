@@ -40,20 +40,30 @@ extern bool RestCatalogEnableVendedCredentials;
  * Resolved REST catalog connection options.  All REST catalogs --
  * built-in ('rest') and user-created (CREATE SERVER ... FOREIGN DATA
  * WRAPPER iceberg_catalog) -- are backed by a real pg_foreign_server
- * row; ApplyGUCDefaults populates the defaults, ApplyServerOptionOverrides
- * layers on any per-server options.
+ * row.
  *
- * The canonical identity of a catalog is `serverOid` (the OID of the
- * iceberg_catalog server row).  Use it for in-memory equality, token
- * cache keys, and syscache-driven invalidation.  `catalog` stores the
- * user-visible short name (e.g. 'rest', 'my_polaris') purely for error
- * messages.
+ * Resolution order, lowest to highest priority:
+ *   1. GUC defaults                         (ApplyGUCDefaults)
+ *   2. Server options                       (ApplyServerOptionOverrides)
+ *   3. pg_user_mapping options              (user-created servers only)
+ *
+ * In-memory identity is the pair (`serverOid`, `userMappingOid`):
+ *   - serverOid is the iceberg_catalog server's OID.
+ *   - userMappingOid is the OID of the pg_user_mapping row that contributed the
+ *     credentials, or InvalidOid when no user mapping was used (built-in
+ *     pg_lake_rest_catalog, or a user-created server whose credentials
+ *     came entirely from GUCs).
+ *
+ * `catalog` is the user-visible short name (e.g. 'rest', 'my_polaris')
+ * kept purely for error messages.
  */
 typedef struct RestCatalogOptions
 {
 	Oid			serverOid;		/* iceberg_catalog server OID; canonical
 								 * identity, never InvalidOid for resolved
 								 * opts */
+	Oid			userMappingOid; /* pg_user_mapping row OID that supplied
+								 * credentials, or InvalidOid if none */
 	char	   *catalog;		/* short user-facing name; used in error
 								 * messages, never for equality */
 	char	   *host;
@@ -123,6 +133,7 @@ extern PGDLLEXPORT RestCatalogOptions * CopyRestCatalogOptions(MemoryContext dst
  * so external callers should not depend on these.
  */
 void		ApplyServerOptionOverrides(RestCatalogOptions * opts, ForeignServer *server);
+void		ApplyUserMappingOverrides(RestCatalogOptions * opts, ForeignServer *server);
 char	   *GetRestCatalogAccessToken(RestCatalogOptions * opts, bool forceRefreshToken);
 List	   *GetHeadersWithAuth(RestCatalogOptions * opts);
 char	   *JsonbGetStringByPath(const char *jsonb_text, int nkeys,...);
@@ -151,3 +162,14 @@ extern PGDLLEXPORT RestCatalogRequest * GetRemoveSnapshotCatalogRequest(List *re
 
 /* ProcessUtility handler for iceberg_catalog server DDL validation */
 extern PGDLLEXPORT bool ValidateIcebergCatalogServerDDL(ProcessUtilityParams * processUtilityParams, void *arg);
+
+/* OAT_DROP guard for user mappings on iceberg_catalog servers. */
+extern PGDLLEXPORT void EnsureUserMappingDropAllowed(Oid umOid);
+
+/*
+ * ProcessUtility handler that scrubs client_id / client_secret out of
+ * queryString in CREATE/ALTER USER MAPPING for iceberg_catalog
+ * servers, in place.  Register after ValidateIcebergCatalogServerDDL
+ * so it runs first (the handler list is a prepend-LIFO).
+ */
+extern PGDLLEXPORT bool RedactRestCatalogUserMappingSecrets(ProcessUtilityParams * processUtilityParams, void *arg);

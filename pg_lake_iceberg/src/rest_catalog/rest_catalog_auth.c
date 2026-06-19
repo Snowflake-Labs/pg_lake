@@ -21,10 +21,10 @@
  * by HTTP transport (rest_catalog_http.c) and the REST API ops
  * (rest_catalog_ops.c).
  *
- * The token cache is keyed by the iceberg_catalog server OID and
- * invalidated wholesale on any pg_foreign_server change via a
- * FOREIGNSERVEROID syscache callback, so stale credentials are
- * never reused across ALTER SERVER.
+ * The token cache is keyed by (serverOid, userMappingOid) and
+ * invalidated wholesale on any pg_foreign_server or pg_user_mapping
+ * change, so stale credentials are never reused across
+ * ALTER SERVER, ALTER USER MAPPING, or DROP USER MAPPING.
  */
 
 #include "postgres.h"
@@ -44,12 +44,28 @@
 
 
 /*
- * Per-rest-catalog token cache, keyed by the iceberg_catalog server OID.
+ * Per-rest-catalog token cache.  Keyed by (serverOid, userMappingOid):
+ *   - serverOid identifies which iceberg_catalog server the token
+ *     belongs to, so an ALTER SERVER on one server never reuses
+ *     another's credentials.
+ *   - userMappingOid scopes tokens to the contributing pg_user_mapping
+ *     row, so different SET ROLEs in the same backend each get the
+ *     credentials of their own user mapping (or PUBLIC).
+ *     userMappingOid is InvalidOid when no user mapping is involved
+ *     (built-in pg_lake_rest_catalog, or a user-created server falling
+ *     back to GUCs).
+ *
  * Should always be accessed via GetRestCatalogAccessToken().
  */
+typedef struct RestCatalogTokenCacheKey
+{
+	Oid			serverOid;
+	Oid			userMappingOid;
+}			RestCatalogTokenCacheKey;
+
 typedef struct RestCatalogTokenCacheEntry
 {
-	Oid			serverOid;		/* hash key */
+	RestCatalogTokenCacheKey key;	/* hash key */
 	char	   *accessToken;
 	TimestampTz accessTokenExpiry;
 }			RestCatalogTokenCacheEntry;
@@ -71,16 +87,16 @@ static char *EncodeBasicAuth(const char *clientId, const char *clientSecret);
 
 
 /*
- * Syscache invalidation callback for pg_foreign_server changes.
- * Any ALTER/DROP SERVER blows away the entire token cache so stale
- * credentials are never reused.  The cache is rebuilt lazily on the
- * next token lookup.
+ * Syscache invalidation callback for pg_foreign_server and
+ * pg_user_mapping changes.  Any ALTER/DROP on either object blows away
+ * the entire token cache so stale credentials are never reused.  The
+ * cache is rebuilt lazily on the next token lookup.
  *
  * We ignore hashvalue and reset the whole cache rather than selectively
- * invalidating a single server's entry.  With a handful of servers and
- * infrequent ALTER SERVER, the cost of a few extra OAuth round-trips is
- * negligible compared to the complexity of tracking per-entry hash
- * values for targeted invalidation.
+ * invalidating a single server / user-mapping entry.  With a handful of
+ * servers and infrequent ALTER, the cost of a few extra OAuth round
+ * trips is negligible compared to the complexity of tracking per-entry
+ * hash values for targeted invalidation.
  */
 static void
 InvalidateRestTokenCache(Datum arg, int cacheid, uint32 hashvalue)
@@ -104,6 +120,9 @@ InitTokenCacheIfNeeded(void)
 		CacheRegisterSyscacheCallback(FOREIGNSERVEROID,
 									  InvalidateRestTokenCache,
 									  (Datum) 0);
+		CacheRegisterSyscacheCallback(USERMAPPINGOID,
+									  InvalidateRestTokenCache,
+									  (Datum) 0);
 		TokenCacheCallbackRegistered = true;
 	}
 
@@ -118,7 +137,7 @@ InitTokenCacheIfNeeded(void)
 	HASHCTL		ctl;
 
 	memset(&ctl, 0, sizeof(ctl));
-	ctl.keysize = sizeof(Oid);
+	ctl.keysize = sizeof(RestCatalogTokenCacheKey);
 	ctl.entrysize = sizeof(RestCatalogTokenCacheEntry);
 	ctl.hcxt = RestTokenCacheCtx;
 
@@ -129,12 +148,19 @@ InitTokenCacheIfNeeded(void)
 
 
 /*
- * Gets an access token from rest catalog. Caches the token per catalog
- * (keyed by iceberg_catalog server OID) until it is about to expire.
+ * Gets an access token from rest catalog.  Caches the token per
+ * (server, user-mapping) pair so that different SET ROLEs in the same
+ * backend each see the credentials of their own user mapping (or
+ * PUBLIC), while still letting the built-in pg_lake_rest_catalog share
+ * a single (server, InvalidOid) slot across all sessions and roles.
  */
 char *
 GetRestCatalogAccessToken(RestCatalogOptions * opts, bool forceRefreshToken)
 {
+	RestCatalogTokenCacheKey key;
+	RestCatalogTokenCacheEntry *entry;
+	bool		found = false;
+
 	if (opts == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
@@ -144,15 +170,20 @@ GetRestCatalogAccessToken(RestCatalogOptions * opts, bool forceRefreshToken)
 	 * Every resolved RestCatalogOptions originates from
 	 * BuildRestCatalogOptionsFromServer, which always sets serverOid. A
 	 * missing OID would silently funnel every catalog into the same cache
-	 * slot, so trap it loudly here.
+	 * slot, so trap it loudly here.  userMappingOid is allowed to be
+	 * InvalidOid: that simply means "no user mapping contributed
+	 * credentials".
 	 */
 	Assert(OidIsValid(opts->serverOid));
 
 	InitTokenCacheIfNeeded();
 
-	bool		found = false;
-	RestCatalogTokenCacheEntry *entry =
-		hash_search(RestCatalogTokenCache, &opts->serverOid, HASH_ENTER, &found);
+	memset(&key, 0, sizeof(key));	/* zero out any compiler padding so
+									 * HASH_BLOBS keys compare cleanly */
+	key.serverOid = opts->serverOid;
+	key.userMappingOid = opts->userMappingOid;
+
+	entry = hash_search(RestCatalogTokenCache, &key, HASH_ENTER, &found);
 
 	if (!found)
 	{
@@ -200,11 +231,20 @@ static void
 FetchRestCatalogAccessToken(RestCatalogOptions * opts, char **accessToken, int *expiresIn)
 {
 	Assert(opts->host != NULL && opts->host[0] != '\0');
+
+	/*
+	 * Defense in depth: ValidateRestCatalogOptions already rejected resolved
+	 * options without credentials at resolution time.  These checks are kept
+	 * so that any future code path that builds RestCatalogOptions outside
+	 * ResolveRestCatalogOptions still gets an actionable error before we POST
+	 * empty credentials to the OAuth endpoint.
+	 */
 	if (!opts->clientSecret || !*opts->clientSecret)
 		ereport(ERROR,
-				(errmsg("REST catalog client_secret is not configured"),
-				 errhint("Set the \"client_secret\" option on the server "
-						 "or the pg_lake_iceberg.rest_catalog_client_secret GUC.")));
+				(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
+				 errmsg("REST catalog client_secret is not configured"),
+				 errhint("Set client_secret via a USER MAPPING or the "
+						 "pg_lake_iceberg.rest_catalog_client_secret GUC.")));
 
 	char	   *accessTokenUrl = opts->oauthHostPath;
 
@@ -233,9 +273,10 @@ FetchRestCatalogAccessToken(RestCatalogOptions * opts, char **accessToken, int *
 	{
 		if (!opts->clientId || !*opts->clientId)
 			ereport(ERROR,
-					(errmsg("REST catalog client_id is not configured"),
-					 errhint("Set the \"client_id\" option on the server "
-							 "or the pg_lake_iceberg.rest_catalog_client_id GUC.")));
+					(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
+					 errmsg("REST catalog client_id is not configured"),
+					 errhint("Set client_id via a USER MAPPING or the "
+							 "pg_lake_iceberg.rest_catalog_client_id GUC.")));
 
 		/* Build Authorization: Basic <base64(clientId:clientSecret)> */
 		char	   *encodedAuth = EncodeBasicAuth(opts->clientId, opts->clientSecret);

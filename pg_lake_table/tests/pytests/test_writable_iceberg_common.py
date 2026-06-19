@@ -296,19 +296,28 @@ def create_iceberg_user_server_rest_table(
     client_secret = creds["credentials"]["clientSecret"]
     endpoint = f"http://{server_params.POLARIS_HOSTNAME}:{server_params.POLARIS_PORT}"
 
+    # Credentials live on a PUBLIC user mapping so the fixture is
+    # usable by the unprivileged test role; client_id and client_secret
+    # are user-mapping options, not server options.
     run_command(
         f"""
         CREATE SERVER {USER_SERVER_NAME} TYPE 'rest'
             FOREIGN DATA WRAPPER iceberg_catalog
             OPTIONS (rest_endpoint '{endpoint}',
-                     client_id '{client_id}',
-                     client_secret '{client_secret}',
                      location_prefix 's3://{TEST_BUCKET}')
         """,
         superuser_conn,
     )
     run_command(
         f"GRANT USAGE ON FOREIGN SERVER {USER_SERVER_NAME} TO PUBLIC",
+        superuser_conn,
+    )
+    run_command(
+        f"""
+        CREATE USER MAPPING FOR PUBLIC SERVER {USER_SERVER_NAME}
+            OPTIONS (client_id '{client_id}',
+                     client_secret '{client_secret}')
+        """,
         superuser_conn,
     )
     superuser_conn.commit()
@@ -345,7 +354,8 @@ def create_iceberg_user_server_rest_table(
     pg_conn.rollback()
     run_command(f"DROP SCHEMA {TABLE_NAMESPACE} CASCADE", pg_conn)
     pg_conn.commit()
-    run_command(f"DROP SERVER IF EXISTS {USER_SERVER_NAME}", superuser_conn)
+    # CASCADE so we sweep up the PUBLIC user mapping created above.
+    run_command(f"DROP SERVER IF EXISTS {USER_SERVER_NAME} CASCADE", superuser_conn)
     superuser_conn.commit()
 
 

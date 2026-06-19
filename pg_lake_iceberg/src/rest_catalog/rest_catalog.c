@@ -19,10 +19,11 @@
  * REST catalog option resolution.
  *
  * Turns a user-visible catalog identifier into a fully-populated
- * RestCatalogOptions by layering GUC defaults under the foreign
- * server's options.  Every REST catalog operation in the module --
- * auth, HTTP transport, table/namespace ops -- starts from the
- * RestCatalogOptions produced here.
+ * RestCatalogOptions by layering GUC defaults, the foreign server's
+ * options, and (for user-created servers) the current user's
+ * pg_user_mapping options.  Every REST catalog operation in the
+ * module -- auth, HTTP transport, table/namespace ops -- starts from
+ * the RestCatalogOptions produced here.
  */
 
 #include "postgres.h"
@@ -67,11 +68,33 @@ ApplyGUCDefaults(RestCatalogOptions * opts)
 
 
 /*
- * ValidateRestCatalogOptions checks that the resolved options have
- * the minimum required fields (e.g. rest_endpoint).
+ * ValidateRestCatalogOptions checks that the resolved options carry
+ * the minimum fields needed to talk to a REST catalog: the endpoint
+ * and the credentials required by the configured auth flow.  Running
+ * this at resolution time -- after GUCs and (for user servers) the
+ * user mapping have been folded in -- means an incompletely-configured
+ * catalog fails up front on first DML, instead of silently issuing an
+ * unauthenticated request to the OAuth endpoint.
+ *
+ * Credential requirements are auth-type specific:
+ *   OAuth2:  client_id AND client_secret (Basic auth header).
+ *   Horizon: client_secret only (carried in the form body;
+ *            client_id is intentionally ignored).
+ *
+ * The hint differs by server kind because the credential surfaces
+ * differ: GUCs feed only the built-in catalog, user mappings feed
+ * only user-created servers.  See BuildRestCatalogOptionsFromServer
+ * for the resolution rules.
+ *
+ * FetchRestCatalogAccessToken still re-checks the fields it actually
+ * dereferences.  Those late checks are defense in depth in case any
+ * future code path constructs RestCatalogOptions without going
+ * through this resolver.
  */
 static void
-ValidateRestCatalogOptions(const RestCatalogOptions * opts, const char *catalog)
+ValidateRestCatalogOptions(const RestCatalogOptions * opts,
+						   const char *catalog,
+						   bool isBuiltin)
 {
 	if (opts->host == NULL || opts->host[0] == '\0')
 		ereport(ERROR,
@@ -80,25 +103,64 @@ ValidateRestCatalogOptions(const RestCatalogOptions * opts, const char *catalog)
 						catalog),
 				 errhint("Set the pg_lake_iceberg.rest_catalog_host GUC or "
 						 "the \"rest_endpoint\" option on the server.")));
+
+	bool		missingSecret = (opts->clientSecret == NULL || opts->clientSecret[0] == '\0');
+	bool		missingId = (opts->authType != REST_CATALOG_AUTH_TYPE_HORIZON) &&
+		(opts->clientId == NULL || opts->clientId[0] == '\0');
+
+	if (missingSecret || missingId)
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
+				 errmsg("no credentials found for REST catalog \"%s\"",
+						catalog),
+				 errhint("%s", isBuiltin
+						 ? "Set the pg_lake_iceberg.rest_catalog_client_id and "
+						 "pg_lake_iceberg.rest_catalog_client_secret GUCs."
+						 : "Create a USER MAPPING on this server with "
+						 "client_id and client_secret options.  "
+						 "GUC credentials are restricted to the built-in "
+						 "\"rest\" catalog and do not apply to "
+						 "user-created servers.")));
 }
 
 
 /*
  * Build RestCatalogOptions for an iceberg_catalog server.
  *
- * The built-in pg_lake_rest_catalog server and any user-created
- * iceberg_catalog REST server go through the same path: GUC defaults
- * first, then server-level options applied on top.  ALTER SERVER OPTIONS
- * is blocked on the built-in server, so in practice its option set is
- * always empty and the GUC defaults survive untouched -- which is
- * exactly the historical "GUCs-only built-in REST" behavior, now
- * reached through a single code path.
+ * Resolution differs by server kind because the credential trust
+ * boundary differs.
+ *
+ * Built-in pg_lake_rest_catalog
+ *   1. GUC defaults                       (all fields, including creds)
+ *   2. Server options                     (no-op; ALTER SERVER is blocked)
+ *
+ * User-created server
+ *   1. GUC defaults                       (non-credential fields only;
+ *                                          rest_catalog_client_id /
+ *                                          rest_catalog_client_secret
+ *                                          are NOT inherited -- see below)
+ *   2. Server options                     (anything CATALOG_OPT_CTX_SERVER)
+ *   3. pg_user_mapping options            (credentials + per-user scope)
+ *
+ * Why credentials are gated to the built-in catalog: any role with
+ * USAGE on the iceberg_catalog FDW (lake_write, via the 3.4 grant)
+ * can CREATE SERVER and choose rest_endpoint / oauth_endpoint.  If we
+ * let those user servers inherit the system-wide credential GUCs, the
+ * next CREATE TABLE ... USING iceberg WITH (catalog='evil') would
+ * POST the production client_id/secret to whatever endpoint the
+ * server's owner picked -- a non-superuser credential exfiltration
+ * path.  So GUC credentials are intentionally restricted to the
+ * single, extension-owned built-in server, and user-created servers
+ * must provide their own credentials through pg_user_mapping.
+ *
+ * postgres / object_store catalogs never reach this function; their
+ * resolution stays in their own modules.
  *
  * `userVisibleCatalog` is the short identifier the user typed
  * (e.g. "rest" or a user server name); it is what we store in
- * opts->catalog so that error messages, the cross-catalog DML check,
- * and the token cache key all stay in user-facing terms.  The long
- * built-in server name never leaks past this function.
+ * opts->catalog so that error messages and the cross-catalog DML check
+ * stay in user-facing terms.  The long built-in server name never
+ * leaks past this function.
  */
 static RestCatalogOptions *
 BuildRestCatalogOptionsFromServer(const char *serverName,
@@ -106,16 +168,38 @@ BuildRestCatalogOptionsFromServer(const char *serverName,
 {
 	ForeignServer *server = GetForeignServerByName(serverName, false);
 	ForeignDataWrapper *fdw = GetForeignDataWrapper(server->fdwid);
+	bool		isBuiltin = IsBuiltinCatalogServerName(serverName);
 
 	Assert(strcmp(fdw->fdwname, ICEBERG_CATALOG_FDW_NAME) == 0);
 
 	RestCatalogOptions *opts = palloc0(sizeof(RestCatalogOptions));
 
 	opts->serverOid = server->serverid;
+	opts->userMappingOid = InvalidOid;
 	opts->catalog = pstrdup(userVisibleCatalog);
 	ApplyGUCDefaults(opts);
+
+	if (!isBuiltin)
+	{
+		/*
+		 * Drop the credentials seeded by ApplyGUCDefaults before any
+		 * server-/user-mapping options run.  Server options cannot set
+		 * client_id / client_secret (descriptor restricts them to user
+		 * mapping context), so by the time ApplyUserMappingOverrides runs
+		 * these fields are guaranteed to be unset unless the user mapping
+		 * explicitly provides them.  See the comment above for the security
+		 * rationale.
+		 */
+		opts->clientId = NULL;
+		opts->clientSecret = NULL;
+	}
+
 	ApplyServerOptionOverrides(opts, server);
-	ValidateRestCatalogOptions(opts, userVisibleCatalog);
+
+	if (!isBuiltin)
+		ApplyUserMappingOverrides(opts, server);
+
+	ValidateRestCatalogOptions(opts, userVisibleCatalog, isBuiltin);
 	return opts;
 }
 
@@ -167,6 +251,7 @@ CopyRestCatalogOptions(MemoryContext dst, const RestCatalogOptions * src)
 	RestCatalogOptions *copy = palloc0(sizeof(RestCatalogOptions));
 
 	copy->serverOid = src->serverOid;
+	copy->userMappingOid = src->userMappingOid;
 	copy->catalog = src->catalog ? pstrdup(src->catalog) : NULL;
 	copy->host = src->host ? pstrdup(src->host) : NULL;
 	copy->oauthHostPath = src->oauthHostPath ? pstrdup(src->oauthHostPath) : NULL;

@@ -29,6 +29,7 @@
 #include "catalog/namespace.h"
 #include "catalog/objectaccess.h"
 #include "catalog/pg_class.h"
+#include "catalog/pg_user_mapping.h"
 #include "commands/dbcommands.h"
 #include "commands/defrem.h"
 #include "commands/extension.h"
@@ -214,6 +215,13 @@ DropTableAccessHook(ObjectAccessType access, Oid classId, Oid objectId,
 
 	if (access != OAT_DROP)
 		return;
+
+	if (classId == UserMappingRelationId)
+	{
+		if (IsExtensionCreated(PgLakeIceberg))
+			EnsureUserMappingDropAllowed(objectId);
+		return;
+	}
 
 	if (classId != RelationRelationId)
 		return;

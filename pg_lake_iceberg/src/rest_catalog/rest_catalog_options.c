@@ -19,24 +19,30 @@
  * iceberg_catalog FDW option schema and validator.
  *
  * Single source of truth for the option set that CREATE/ALTER SERVER
- * accepts on iceberg_catalog servers: validation, the user-facing
- * "Valid options are: ..." hint, and the option-to-struct applier
- * all derive from iceberg_catalog_option_descs[].
+ * and CREATE/ALTER USER MAPPING accept on iceberg_catalog servers:
+ * validation, the user-facing "Valid options are: ..." hint, and the
+ * option-to-struct applier all derive from iceberg_catalog_option_descs[].
  *
- * The resolver in rest_catalog.c walks the same descriptor table via
- * ApplyServerOptionOverrides to layer server options on top of the
- * GUC defaults during RestCatalogOptions construction.
+ * Each descriptor carries a CATALOG_OPT_CTX_* bitmask saying which
+ * catalog object the option is legal on (SERVER, USER MAPPING, or
+ * both).  The resolver in rest_catalog.c walks the same table via
+ * ApplyServerOptionOverrides and ApplyUserMappingOverrides to layer
+ * server options and user-mapping options on top of the GUC defaults
+ * during RestCatalogOptions construction.
  */
 
 #include "postgres.h"
 
 #include "access/reloptions.h"
 #include "catalog/pg_foreign_server.h"
+#include "catalog/pg_user_mapping.h"
 #include "commands/defrem.h"
 #include "fmgr.h"
 #include "foreign/foreign.h"
 #include "lib/stringinfo.h"
+#include "miscadmin.h"
 #include "nodes/parsenodes.h"
+#include "utils/syscache.h"
 
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/util/string_utils.h"
@@ -46,9 +52,10 @@ PG_FUNCTION_INFO_V1(iceberg_catalog_validator);
 
 
 /*
- * Descriptor for a single iceberg_catalog server option.  This is the
- * single source of truth: validation, the user-facing hint, and the
- * option-to-struct applier all derive from this table.
+ * Descriptor for a single iceberg_catalog option.  This is the single
+ * source of truth: validation, the user-facing hint, and the
+ * option-to-struct applier all derive from this table.  An option may
+ * be valid on a SERVER, on a USER MAPPING, or both (see contexts).
  */
 typedef enum IcebergCatalogOptionType
 {
@@ -58,9 +65,18 @@ typedef enum IcebergCatalogOptionType
 	CATALOG_OPT_LOCATION_PREFIX
 }			IcebergCatalogOptionType;
 
-/* Validation flags checked at CREATE/ALTER SERVER time. */
+/* Validation flags checked at CREATE/ALTER time. */
 #define CATALOG_OPT_NONEMPTY    0x01	/* reject empty string */
 #define CATALOG_OPT_HAS_SCHEME  0x02	/* must contain "://" */
+
+/*
+ * Where an option may legally appear.  An option can carry any bitwise
+ * combination -- `scope`, for instance, is accepted in both contexts
+ * with USER MAPPING winning by virtue of being applied last during
+ * resolution.
+ */
+#define CATALOG_OPT_CTX_SERVER       0x01
+#define CATALOG_OPT_CTX_USER_MAPPING 0x02
 
 typedef struct IcebergCatalogOptionDesc
 {
@@ -69,25 +85,38 @@ typedef struct IcebergCatalogOptionDesc
 	size_t		offset;			/* offsetof into RestCatalogOptions */
 	int			flags;			/* CATALOG_OPT_NONEMPTY |
 								 * CATALOG_OPT_HAS_SCHEME */
+	int			contexts;		/* CATALOG_OPT_CTX_SERVER |
+								 * CATALOG_OPT_CTX_USER_MAPPING */
 }			IcebergCatalogOptionDesc;
 
 static const IcebergCatalogOptionDesc iceberg_catalog_option_descs[] = {
 	{"rest_endpoint", CATALOG_OPT_STRING, offsetof(RestCatalogOptions, host),
-	CATALOG_OPT_NONEMPTY | CATALOG_OPT_HAS_SCHEME},
-	{"rest_auth_type", CATALOG_OPT_AUTH_TYPE, offsetof(RestCatalogOptions, authType), 0},
+		CATALOG_OPT_NONEMPTY | CATALOG_OPT_HAS_SCHEME,
+	CATALOG_OPT_CTX_SERVER},
+	{"rest_auth_type", CATALOG_OPT_AUTH_TYPE, offsetof(RestCatalogOptions, authType),
+		0,
+	CATALOG_OPT_CTX_SERVER},
 	{"oauth_endpoint", CATALOG_OPT_STRING, offsetof(RestCatalogOptions, oauthHostPath),
-	CATALOG_OPT_NONEMPTY | CATALOG_OPT_HAS_SCHEME},
+		CATALOG_OPT_NONEMPTY | CATALOG_OPT_HAS_SCHEME,
+	CATALOG_OPT_CTX_SERVER},
 	{"scope", CATALOG_OPT_STRING, offsetof(RestCatalogOptions, scope),
-	CATALOG_OPT_NONEMPTY},
-	{"enable_vended_credentials", CATALOG_OPT_BOOL, offsetof(RestCatalogOptions, enableVendedCredentials), 0},
+		CATALOG_OPT_NONEMPTY,
+	CATALOG_OPT_CTX_SERVER | CATALOG_OPT_CTX_USER_MAPPING},
+	{"enable_vended_credentials", CATALOG_OPT_BOOL, offsetof(RestCatalogOptions, enableVendedCredentials),
+		0,
+	CATALOG_OPT_CTX_SERVER},
 	{"location_prefix", CATALOG_OPT_LOCATION_PREFIX, offsetof(RestCatalogOptions, locationPrefix),
-	CATALOG_OPT_NONEMPTY | CATALOG_OPT_HAS_SCHEME},
+		CATALOG_OPT_NONEMPTY | CATALOG_OPT_HAS_SCHEME,
+	CATALOG_OPT_CTX_SERVER},
 	{"catalog_name", CATALOG_OPT_STRING, offsetof(RestCatalogOptions, catalogName),
-	CATALOG_OPT_NONEMPTY},
+		CATALOG_OPT_NONEMPTY,
+	CATALOG_OPT_CTX_SERVER},
 	{"client_id", CATALOG_OPT_STRING, offsetof(RestCatalogOptions, clientId),
-	CATALOG_OPT_NONEMPTY},
+		CATALOG_OPT_NONEMPTY,
+	CATALOG_OPT_CTX_USER_MAPPING},
 	{"client_secret", CATALOG_OPT_STRING, offsetof(RestCatalogOptions, clientSecret),
-	CATALOG_OPT_NONEMPTY},
+		CATALOG_OPT_NONEMPTY,
+	CATALOG_OPT_CTX_USER_MAPPING},
 };
 
 #define NUM_CATALOG_OPTIONS lengthof(iceberg_catalog_option_descs)
@@ -109,21 +138,33 @@ FindCatalogOptionDesc(const char *name)
 
 
 /*
- * Build the "Valid options are: ?" hint string.
+ * Build the "Valid options are: ?" hint string for the given context
+ * (either CATALOG_OPT_CTX_SERVER or CATALOG_OPT_CTX_USER_MAPPING).
  */
 static const char *
-GetValidCatalogOptionsHint(void)
+GetValidCatalogOptionsHint(int contextBit)
 {
 	StringInfoData buf;
+	bool		first = true;
+
+	Assert(contextBit == CATALOG_OPT_CTX_SERVER ||
+		   contextBit == CATALOG_OPT_CTX_USER_MAPPING);
 
 	initStringInfo(&buf);
 	appendStringInfoString(&buf, "Valid options are: ");
+
 	for (int i = 0; i < NUM_CATALOG_OPTIONS; i++)
 	{
-		if (i > 0)
+		if (!(iceberg_catalog_option_descs[i].contexts & contextBit))
+			continue;
+
+		if (!first)
 			appendStringInfoString(&buf, ", ");
+
 		appendStringInfoString(&buf, iceberg_catalog_option_descs[i].name);
+		first = false;
 	}
+
 	appendStringInfoChar(&buf, '.');
 
 	return buf.data;
@@ -220,7 +261,26 @@ ApplyCatalogOptionValue(RestCatalogOptions * opts,
 
 /*
  * iceberg_catalog_validator validates options for the iceberg_catalog FDW.
- * Only server-level options are supported.
+ *
+ * Options are accepted on two catalog objects:
+ *
+ *   - ForeignServerRelationId:  CREATE SERVER / ALTER SERVER OPTIONS.
+ *     Anything non-credential: rest_endpoint, rest_auth_type,
+ *     oauth_endpoint, scope, enable_vended_credentials, location_prefix,
+ *     catalog_name.
+ *
+ *   - UserMappingRelationId:    CREATE USER MAPPING / ALTER USER MAPPING
+ *     OPTIONS.  Per-user credentials: client_id, client_secret, and
+ *     optionally scope (overrides whatever is set on the server).
+ *
+ * client_id and client_secret are credentials and therefore belong on
+ * a user mapping; they may also be supplied via GUCs.  Each option's
+ * descriptor carries a CATALOG_OPT_CTX_* bitmask saying where it is
+ * legal.
+ *
+ * PostgreSQL also calls the validator for CREATE FOREIGN DATA WRAPPER
+ * itself (with ForeignDataWrapperRelationId); allow empty option lists
+ * there so extension creation succeeds.
  */
 Datum
 iceberg_catalog_validator(PG_FUNCTION_ARGS)
@@ -228,20 +288,26 @@ iceberg_catalog_validator(PG_FUNCTION_ARGS)
 	List	   *options_list = untransformRelOptions(PG_GETARG_DATUM(0));
 	Oid			catalogRelId = PG_GETARG_OID(1);
 	ListCell   *cell;
+	int			contextBit;
+	const char *contextLabel;
 
-	/*
-	 * PostgreSQL calls the validator for CREATE FOREIGN DATA WRAPPER itself
-	 * (with ForeignDataWrapperRelationId), not just for CREATE SERVER.  Allow
-	 * empty option lists for non-server contexts so extension creation
-	 * succeeds, but still reject if someone passes options where they don't
-	 * belong.
-	 */
-	if (catalogRelId != ForeignServerRelationId)
+	if (catalogRelId == ForeignServerRelationId)
+	{
+		contextBit = CATALOG_OPT_CTX_SERVER;
+		contextLabel = "server";
+	}
+	else if (catalogRelId == UserMappingRelationId)
+	{
+		contextBit = CATALOG_OPT_CTX_USER_MAPPING;
+		contextLabel = "user mapping";
+	}
+	else
 	{
 		if (list_length(options_list) > 0)
 			ereport(ERROR,
 					(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
-					 errmsg("iceberg_catalog options are only valid for SERVER objects")));
+					 errmsg("iceberg_catalog options are only valid for "
+							"SERVER and USER MAPPING objects")));
 		PG_RETURN_VOID();
 	}
 
@@ -250,12 +316,12 @@ iceberg_catalog_validator(PG_FUNCTION_ARGS)
 		DefElem    *def = (DefElem *) lfirst(cell);
 		const		IcebergCatalogOptionDesc *desc = FindCatalogOptionDesc(def->defname);
 
-		if (desc == NULL)
+		if (desc == NULL || !(desc->contexts & contextBit))
 			ereport(ERROR,
 					(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
-					 errmsg("invalid option \"%s\" for iceberg_catalog server",
-							def->defname),
-					 errhint("%s", GetValidCatalogOptionsHint())));
+					 errmsg("invalid option \"%s\" for iceberg_catalog %s",
+							def->defname, contextLabel),
+					 errhint("%s", GetValidCatalogOptionsHint(contextBit))));
 
 		ValidateCatalogOptionValue(desc, def);
 	}
@@ -266,7 +332,9 @@ iceberg_catalog_validator(PG_FUNCTION_ARGS)
 
 /*
  * ApplyServerOptionOverrides overrides the GUC-derived defaults in opts
- * with any options explicitly set on the foreign server.
+ * with any options explicitly set on the foreign server.  Only options
+ * carrying CATALOG_OPT_CTX_SERVER are applied here; the validator
+ * already rejects anything else at DDL time.
  */
 void
 ApplyServerOptionOverrides(RestCatalogOptions * opts, ForeignServer *server)
@@ -278,7 +346,92 @@ ApplyServerOptionOverrides(RestCatalogOptions * opts, ForeignServer *server)
 		DefElem    *def = (DefElem *) lfirst(lc);
 		const		IcebergCatalogOptionDesc *desc = FindCatalogOptionDesc(def->defname);
 
-		if (desc != NULL)
-			ApplyCatalogOptionValue(opts, desc, def);
+		if (desc == NULL || !(desc->contexts & CATALOG_OPT_CTX_SERVER))
+			continue;
+
+		ApplyCatalogOptionValue(opts, desc, def);
+	}
+}
+
+
+/*
+ * LookupUserMappingOptions returns the option list for the user mapping
+ * that applies to the current user on the given server, or NIL if none
+ * exists.  Resolution mirrors core's GetUserMapping: a mapping for the
+ * current user wins, otherwise PUBLIC (umuser = InvalidOid) is the
+ * fallback.
+ *
+ * Unlike GetUserMapping, this never raises on a miss -- the caller is
+ * expected to fall through to lower-priority credential sources
+ * (GUCs).  The matched mapping's OID is returned via *umidOut for use
+ * as part of the token cache key; *umidOut is left InvalidOid when
+ * nothing matched.
+ */
+static List *
+LookupUserMappingOptions(Oid serverOid, Oid *umidOut)
+{
+	HeapTuple	tp;
+	Datum		datum;
+	bool		isnull;
+	List	   *options = NIL;
+
+	*umidOut = InvalidOid;
+
+	tp = SearchSysCache2(USERMAPPINGUSERSERVER,
+						 ObjectIdGetDatum(GetUserId()),
+						 ObjectIdGetDatum(serverOid));
+	if (!HeapTupleIsValid(tp))
+		tp = SearchSysCache2(USERMAPPINGUSERSERVER,
+							 ObjectIdGetDatum(InvalidOid),
+							 ObjectIdGetDatum(serverOid));
+
+	if (!HeapTupleIsValid(tp))
+		return NIL;
+
+	*umidOut = ((Form_pg_user_mapping) GETSTRUCT(tp))->oid;
+
+	datum = SysCacheGetAttr(USERMAPPINGUSERSERVER, tp,
+							Anum_pg_user_mapping_umoptions, &isnull);
+	if (!isnull)
+		options = untransformRelOptions(datum);
+
+	ReleaseSysCache(tp);
+	return options;
+}
+
+
+/*
+ * ApplyUserMappingOverrides overlays credentials from pg_user_mapping
+ * onto opts and records the matched mapping's OID in
+ * opts->userMappingOid.  Has no effect if no user mapping applies; the
+ * caller may then fall back to GUC-derived values.
+ *
+ * Only options carrying CATALOG_OPT_CTX_USER_MAPPING are applied here.
+ * The validator already rejects anything else at DDL time, so the
+ * defensive contexts check is just belt-and-suspenders against options
+ * that might have slipped in before this code path existed.
+ */
+void
+ApplyUserMappingOverrides(RestCatalogOptions * opts, ForeignServer *server)
+{
+	List	   *options;
+	ListCell   *lc;
+	Oid			userMappingOid;
+
+	options = LookupUserMappingOptions(server->serverid, &userMappingOid);
+	if (options == NIL)
+		return;
+
+	opts->userMappingOid = userMappingOid;
+
+	foreach(lc, options)
+	{
+		DefElem    *def = (DefElem *) lfirst(lc);
+		const		IcebergCatalogOptionDesc *desc = FindCatalogOptionDesc(def->defname);
+
+		if (desc == NULL || !(desc->contexts & CATALOG_OPT_CTX_USER_MAPPING))
+			continue;
+
+		ApplyCatalogOptionValue(opts, desc, def);
 	}
 }
