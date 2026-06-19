@@ -13,6 +13,7 @@ Gated to PG19+ because the statements do not parse on older servers.
 import pytest
 from utils_pytest import *
 
+
 def _skip_if_not_pg19(conn):
     if get_pg_version_num(conn) < 190000:
         pytest.skip("PG19-only commands require PostgreSQL 19+")
@@ -35,14 +36,26 @@ def _make_parquet_foreign_table(conn, name, select_sql, columns_sql):
     return url
 
 
+def _snapshot_contents(conn, relation):
+    """Return the full table contents as a deterministically-ordered list of
+    row literals, so two snapshots can be compared for exact equality."""
+    rows = run_query(f"SELECT t::text AS row FROM {relation} t ORDER BY 1", conn)
+    conn.commit()
+    return [r["row"] for r in rows]
+
+
 def _assert_rejected_or_harmless(conn, relation, repack_sql, expected_count):
     """REPACK must either raise a meaningful error or leave the data intact.
 
     pg_lake tables are foreign tables under the hood, so PostgreSQL core is
-    expected to reject REPACK on them.  We accept a clean error *or* a no-op
-    that preserves the row count; we reject silent data loss/corruption and
-    crashes.
+    expected to reject REPACK on them.  We accept a clean error *or* a no-op,
+    but in either case the full table contents (not just the row count) must be
+    byte-for-byte unchanged afterwards; we reject silent data loss/corruption
+    and crashes.
     """
+    before = _snapshot_contents(conn, relation)
+    assert len(before) == expected_count
+
     error = run_command(repack_sql, conn, raise_error=False)
     conn.rollback()
 
@@ -59,18 +72,13 @@ def _assert_rejected_or_harmless(conn, relation, repack_sql, expected_count):
                 "is not",
             )
         ), f"REPACK on {relation} raised an unclear error: {error!r}"
-    else:
-        # If it "succeeded", the table must still be readable and intact.
-        rows = run_query(f"SELECT count(*) AS n FROM {relation}", conn)
-        conn.commit()
-        assert (
-            int(rows[0]["n"]) == expected_count
-        ), f"REPACK on {relation} changed the row count unexpectedly"
 
-    # The server must still be alive and the table still queryable.
-    rows = run_query(f"SELECT count(*) AS n FROM {relation}", conn)
-    conn.commit()
-    assert int(rows[0]["n"]) == expected_count
+    # Whether REPACK errored or silently no-op'd, the server must still be
+    # alive and the table contents identical to the pre-REPACK snapshot.
+    after = _snapshot_contents(conn, relation)
+    assert (
+        after == before
+    ), f"REPACK on {relation} changed the table contents unexpectedly"
 
 
 def test_repack_managed_iceberg_table(pg_conn, s3, extension, with_default_location):
