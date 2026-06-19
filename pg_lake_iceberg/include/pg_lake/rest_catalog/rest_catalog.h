@@ -18,6 +18,7 @@
 #pragma once
 
 #include "postgres.h"
+#include "foreign/foreign.h"
 #include "pg_lake/ddl/utility_hook.h"
 #include "pg_lake/http/http_client.h"
 #include "pg_lake/util/rel_utils.h"
@@ -113,6 +114,18 @@ typedef struct RestCatalogRequest
 extern PGDLLEXPORT RestCatalogOptions * ResolveRestCatalogOptions(const char *catalog);
 extern PGDLLEXPORT RestCatalogOptions * GetRestCatalogOptionsForRelation(Oid relationId);
 extern PGDLLEXPORT RestCatalogOptions * CopyRestCatalogOptions(MemoryContext dst, const RestCatalogOptions * src);
+
+/*
+ * Module-internal helpers shared across the rest_catalog_*.c files.
+ *
+ * Declared here (rather than in a private header) only so the split
+ * files can call each other; not part of the cross-dylib API surface,
+ * so external callers should not depend on these.
+ */
+void		ApplyServerOptionOverrides(RestCatalogOptions * opts, ForeignServer *server);
+char	   *GetRestCatalogAccessToken(RestCatalogOptions * opts, bool forceRefreshToken);
+List	   *GetHeadersWithAuth(RestCatalogOptions * opts);
+char	   *JsonbGetStringByPath(const char *jsonb_text, int nkeys,...);
 
 extern PGDLLEXPORT void RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName);
 extern PGDLLEXPORT void StartStageRestCatalogIcebergTableCreate(Oid relationId);
