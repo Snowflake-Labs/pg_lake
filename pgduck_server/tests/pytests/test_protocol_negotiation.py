@@ -1,10 +1,12 @@
 """Wire-protocol coverage for pgduck_server's NegotiateProtocolVersion handling.
 
-PostgreSQL 18 introduced wire protocol 3.2 together with the
-NegotiateProtocolVersion ('v') backend message, and PG18+ libpq probes servers
-by requesting a higher minor version than it strictly needs
-(PG_PROTOCOL_GREASE = 3.9999) and/or by sending forward-compatible "_pq_.*"
-protocol options. A server that only speaks 3.0 -- like pgduck_server -- must:
+The NegotiateProtocolVersion ('v') backend message itself predates these
+releases, but two newer changes made pgduck_server actually have to handle it.
+PostgreSQL 18 bumped the latest wire protocol to 3.2, and PostgreSQL 19's libpq
+now probes servers on connect by requesting a deliberately-too-high minor
+version (PG_PROTOCOL_GREASE = 3.9999) and/or by sending forward-compatible
+"_pq_.*" protocol options. A server that only speaks 3.0 -- like pgduck_server
+-- must:
 
   * accept the connection,
   * reply with a 'v' message advertising the version it actually speaks (3.0),
