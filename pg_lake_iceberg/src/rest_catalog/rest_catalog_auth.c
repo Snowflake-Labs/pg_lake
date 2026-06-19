@@ -157,10 +157,6 @@ InitTokenCacheIfNeeded(void)
 char *
 GetRestCatalogAccessToken(RestCatalogOptions * opts, bool forceRefreshToken)
 {
-	RestCatalogTokenCacheKey key;
-	RestCatalogTokenCacheEntry *entry;
-	bool		found = false;
-
 	if (opts == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
@@ -178,12 +174,16 @@ GetRestCatalogAccessToken(RestCatalogOptions * opts, bool forceRefreshToken)
 
 	InitTokenCacheIfNeeded();
 
+	RestCatalogTokenCacheKey key;
+
 	memset(&key, 0, sizeof(key));	/* zero out any compiler padding so
 									 * HASH_BLOBS keys compare cleanly */
 	key.serverOid = opts->serverOid;
 	key.userMappingOid = opts->userMappingOid;
 
-	entry = hash_search(RestCatalogTokenCache, &key, HASH_ENTER, &found);
+	bool		found = false;
+	RestCatalogTokenCacheEntry *entry =
+		hash_search(RestCatalogTokenCache, &key, HASH_ENTER, &found);
 
 	if (!found)
 	{

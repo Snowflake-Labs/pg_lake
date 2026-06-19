@@ -2227,6 +2227,52 @@ def test_redact_runs_before_builtin_rejection(
         )
 
 
+def test_redact_runs_for_unknown_server_name(installcheck, superuser_conn, extension):
+    """CREATE USER MAPPING against a server that doesn't exist (typo,
+    raced DROP SERVER, ...) must still be redacted.  Core will reject
+    the statement, but the redactor runs first via ProcessUtility chain
+    order, so any captured queryString -- pg_stat_statements row,
+    ereport context, log_min_duration_statement entry -- carries the
+    redaction marker, never the literal secret.
+
+    This pins the security contract of IsKnownNonIcebergCatalogServer:
+    skip redaction only when we can *prove* the target belongs to a
+    different FDW; when GetForeignServerByName returns NULL we must
+    scrub anyway.  Without this branch a fat-finger on an
+    iceberg_catalog server name would survive verbatim into observers
+    via core's failing lookup."""
+    if installcheck:
+        return
+
+    _reset_pg_stat_statements(superuser_conn)
+
+    err = run_command(
+        f"""
+        CREATE USER MAPPING FOR PUBLIC SERVER no_such_server_typo
+            OPTIONS (client_id 'cid', client_secret '{SECRET_VALUE}')
+        """,
+        superuser_conn,
+        raise_error=False,
+    )
+    assert err is not None
+    superuser_conn.rollback()
+
+    # Core rejected because the server doesn't exist.
+    assert "no_such_server_typo" in str(err)
+    # But the redactor ran first, so neither the error nor any
+    # observer carries the secret.
+    assert SECRET_VALUE not in str(err)
+
+    # Same scan-everything strategy as test_redact_runs_before_builtin_rejection:
+    # the redacted row no longer contains the original LIKE anchor.
+    rows = run_query("SELECT query FROM pg_stat_statements", superuser_conn)
+    for r in rows:
+        assert SECRET_VALUE not in r["query"], (
+            f"failed CREATE USER MAPPING against unknown server leaked "
+            f"secret to pg_stat_statements: {r['query']}"
+        )
+
+
 def test_redact_preserves_stored_credentials(superuser_conn, extension):
     """Redaction scrubs queryString *in place* so observers
     (pg_stat_statements, ereport context, log_min_duration_statement)

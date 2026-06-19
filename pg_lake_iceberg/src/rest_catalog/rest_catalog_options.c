@@ -370,16 +370,12 @@ ApplyServerOptionOverrides(RestCatalogOptions * opts, ForeignServer *server)
 static List *
 LookupUserMappingOptions(Oid serverOid, Oid *umidOut)
 {
-	HeapTuple	tp;
-	Datum		datum;
-	bool		isnull;
-	List	   *options = NIL;
-
 	*umidOut = InvalidOid;
 
-	tp = SearchSysCache2(USERMAPPINGUSERSERVER,
-						 ObjectIdGetDatum(GetUserId()),
-						 ObjectIdGetDatum(serverOid));
+	HeapTuple	tp = SearchSysCache2(USERMAPPINGUSERSERVER,
+									 ObjectIdGetDatum(GetUserId()),
+									 ObjectIdGetDatum(serverOid));
+
 	if (!HeapTupleIsValid(tp))
 		tp = SearchSysCache2(USERMAPPINGUSERSERVER,
 							 ObjectIdGetDatum(InvalidOid),
@@ -390,8 +386,11 @@ LookupUserMappingOptions(Oid serverOid, Oid *umidOut)
 
 	*umidOut = ((Form_pg_user_mapping) GETSTRUCT(tp))->oid;
 
-	datum = SysCacheGetAttr(USERMAPPINGUSERSERVER, tp,
-							Anum_pg_user_mapping_umoptions, &isnull);
+	bool		isnull;
+	Datum		datum = SysCacheGetAttr(USERMAPPINGUSERSERVER, tp,
+										Anum_pg_user_mapping_umoptions, &isnull);
+	List	   *options = NIL;
+
 	if (!isnull)
 		options = untransformRelOptions(datum);
 
@@ -414,15 +413,16 @@ LookupUserMappingOptions(Oid serverOid, Oid *umidOut)
 void
 ApplyUserMappingOverrides(RestCatalogOptions * opts, ForeignServer *server)
 {
-	List	   *options;
-	ListCell   *lc;
 	Oid			userMappingOid;
+	List	   *options = LookupUserMappingOptions(server->serverid,
+												   &userMappingOid);
 
-	options = LookupUserMappingOptions(server->serverid, &userMappingOid);
 	if (options == NIL)
 		return;
 
 	opts->userMappingOid = userMappingOid;
+
+	ListCell   *lc;
 
 	foreach(lc, options)
 	{

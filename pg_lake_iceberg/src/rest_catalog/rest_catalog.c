@@ -50,16 +50,28 @@ bool		RestCatalogEnableVendedCredentials = true;
 /*
  * ApplyGUCDefaults populates opts with the current GUC values.
  * All string fields are pstrdup'd so the struct is self-contained.
+ *
+ * isBuiltin gates the credential GUCs (rest_catalog_client_id /
+ * rest_catalog_client_secret): they seed opts only when the resolver
+ * is building options for the built-in pg_lake_rest_catalog.
+ * User-created servers receive every other GUC default but must supply
+ * credentials through pg_user_mapping -- see
+ * BuildRestCatalogOptionsFromServer for the security rationale.
  */
 static void
-ApplyGUCDefaults(RestCatalogOptions * opts)
+ApplyGUCDefaults(RestCatalogOptions * opts, bool isBuiltin)
 {
 	char	   *defaultLocationPrefix = GetIcebergDefaultLocationPrefix();
 
 	opts->host = RestCatalogHost ? pstrdup(RestCatalogHost) : NULL;
 	opts->oauthHostPath = RestCatalogOauthHostPath ? pstrdup(RestCatalogOauthHostPath) : NULL;
-	opts->clientId = RestCatalogClientId ? pstrdup(RestCatalogClientId) : NULL;
-	opts->clientSecret = RestCatalogClientSecret ? pstrdup(RestCatalogClientSecret) : NULL;
+
+	if (isBuiltin)
+	{
+		opts->clientId = RestCatalogClientId ? pstrdup(RestCatalogClientId) : NULL;
+		opts->clientSecret = RestCatalogClientSecret ? pstrdup(RestCatalogClientSecret) : NULL;
+	}
+
 	opts->scope = RestCatalogScope ? pstrdup(RestCatalogScope) : NULL;
 	opts->authType = RestCatalogAuthType;
 	opts->enableVendedCredentials = RestCatalogEnableVendedCredentials;
@@ -177,23 +189,7 @@ BuildRestCatalogOptionsFromServer(const char *serverName,
 	opts->serverOid = server->serverid;
 	opts->userMappingOid = InvalidOid;
 	opts->catalog = pstrdup(userVisibleCatalog);
-	ApplyGUCDefaults(opts);
-
-	if (!isBuiltin)
-	{
-		/*
-		 * Drop the credentials seeded by ApplyGUCDefaults before any
-		 * server-/user-mapping options run.  Server options cannot set
-		 * client_id / client_secret (descriptor restricts them to user
-		 * mapping context), so by the time ApplyUserMappingOverrides runs
-		 * these fields are guaranteed to be unset unless the user mapping
-		 * explicitly provides them.  See the comment above for the security
-		 * rationale.
-		 */
-		opts->clientId = NULL;
-		opts->clientSecret = NULL;
-	}
-
+	ApplyGUCDefaults(opts, isBuiltin);
 	ApplyServerOptionOverrides(opts, server);
 
 	if (!isBuiltin)

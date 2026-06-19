@@ -353,6 +353,8 @@ _PG_init(void)
 	 * client_secret in its error context.
 	 */
 	RegisterUtilityStatementHandler(RedactRestCatalogUserMappingSecrets, NULL);
+
+	InitializeIcebergCatalogObjectAccessHook();
 }
 
 

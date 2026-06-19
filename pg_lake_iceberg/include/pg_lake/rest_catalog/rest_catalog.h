@@ -163,8 +163,13 @@ extern PGDLLEXPORT RestCatalogRequest * GetRemoveSnapshotCatalogRequest(List *re
 /* ProcessUtility handler for iceberg_catalog server DDL validation */
 extern PGDLLEXPORT bool ValidateIcebergCatalogServerDDL(ProcessUtilityParams * processUtilityParams, void *arg);
 
-/* OAT_DROP guard for user mappings on iceberg_catalog servers. */
-extern PGDLLEXPORT void EnsureUserMappingDropAllowed(Oid umOid);
+/*
+ * Chains an OAT_DROP guard onto Postgres' object_access_hook to
+ * protect dependent iceberg tables from credential removal (direct
+ * DROP USER MAPPING or DROP SERVER ... CASCADE).  Called once from
+ * _PG_init.
+ */
+extern PGDLLEXPORT void InitializeIcebergCatalogObjectAccessHook(void);
 
 /*
  * ProcessUtility handler that scrubs client_id / client_secret out of

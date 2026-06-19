@@ -27,6 +27,7 @@
 
 #include "access/genam.h"
 #include "access/table.h"
+#include "catalog/objectaccess.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_depend.h"
 #include "catalog/pg_foreign_server.h"
@@ -38,8 +39,101 @@
 #include "utils/fmgroids.h"
 #include "utils/syscache.h"
 
+#include "pg_extension_base/extension_ids.h"
+#include "pg_lake/extensions/pg_lake_iceberg.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/util/catalog_type.h"
+
+
+static void IcebergCatalogObjectAccessHook(ObjectAccessType access, Oid classId,
+										   Oid objectId, int subId, void *arg);
+static void EnsureUserMappingDropAllowed(Oid umOid);
+static bool ServerHasDependentRestIcebergTable(Oid serverOid);
+
+static object_access_hook_type PreviousObjectAccessHook = NULL;
+
+
+/*
+ * InitializeIcebergCatalogObjectAccessHook chains
+ * IcebergCatalogObjectAccessHook into Postgres' object_access_hook.
+ * Called once from _PG_init.
+ */
+void
+InitializeIcebergCatalogObjectAccessHook(void)
+{
+	PreviousObjectAccessHook = object_access_hook;
+	object_access_hook = IcebergCatalogObjectAccessHook;
+}
+
+
+/*
+ * IcebergCatalogObjectAccessHook gates DROP USER MAPPING and
+ * DROP SERVER ... CASCADE for user-created iceberg_catalog servers
+ * with dependent iceberg tables.
+ */
+static void
+IcebergCatalogObjectAccessHook(ObjectAccessType access, Oid classId,
+							   Oid objectId, int subId, void *arg)
+{
+	if (PreviousObjectAccessHook)
+		PreviousObjectAccessHook(access, classId, objectId, subId, arg);
+
+	if (access != OAT_DROP)
+		return;
+
+	if (classId != UserMappingRelationId)
+		return;
+
+	if (!IsExtensionCreated(PgLakeIceberg))
+		return;
+
+	EnsureUserMappingDropAllowed(objectId);
+}
+
+
+/*
+ * EnsureUserMappingDropAllowed errors out if the user mapping's
+ * server is a user-created iceberg_catalog server with dependent
+ * iceberg tables.  Called from the OAT_DROP hook on UserMappingRelationId,
+ * which fires for both direct DROP USER MAPPING and cascade-driven
+ * removal during DROP SERVER ... CASCADE.
+ */
+static void
+EnsureUserMappingDropAllowed(Oid umOid)
+{
+	HeapTuple	tup = SearchSysCache1(USERMAPPINGOID, ObjectIdGetDatum(umOid));
+
+	if (!HeapTupleIsValid(tup))
+		return;
+
+	Oid			serverOid = ((Form_pg_user_mapping) GETSTRUCT(tup))->umserver;
+
+	ReleaseSysCache(tup);
+
+	ForeignServer *server = GetForeignServerExtended(serverOid, FSV_MISSING_OK);
+
+	if (server == NULL)
+		return;
+
+	ForeignDataWrapper *fdw = GetForeignDataWrapper(server->fdwid);
+
+	if (strcmp(fdw->fdwname, ICEBERG_CATALOG_FDW_NAME) != 0)
+		return;
+
+	/* Built-in catalog servers reject CREATE USER MAPPING upfront. */
+	if (IsBuiltinCatalogServerName(server->servername))
+		return;
+
+	if (!ServerHasDependentRestIcebergTable(serverOid))
+		return;
+
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("cannot drop the credentials for server \"%s\" "
+					"because it has dependent iceberg tables",
+					server->servername),
+			 errhint("Drop the dependent iceberg tables first.")));
+}
 
 
 /*
@@ -129,54 +223,6 @@ ServerHasDependentRestIcebergTable(Oid serverOid)
 	table_close(depRel, AccessShareLock);
 
 	return found;
-}
-
-
-/*
- * EnsureUserMappingDropAllowed errors out if the user mapping's
- * server is a user-created iceberg_catalog server with dependent
- * iceberg tables.  Called from the OAT_DROP hook on UserMappingRelationId,
- * which fires for both direct DROP USER MAPPING and cascade-driven
- * removal during DROP SERVER ... CASCADE.
- */
-void
-EnsureUserMappingDropAllowed(Oid umOid)
-{
-	HeapTuple	tup;
-	Form_pg_user_mapping form;
-	Oid			serverOid;
-	ForeignServer *server;
-	ForeignDataWrapper *fdw;
-
-	tup = SearchSysCache1(USERMAPPINGOID, ObjectIdGetDatum(umOid));
-	if (!HeapTupleIsValid(tup))
-		return;
-
-	form = (Form_pg_user_mapping) GETSTRUCT(tup);
-	serverOid = form->umserver;
-	ReleaseSysCache(tup);
-
-	server = GetForeignServerExtended(serverOid, FSV_MISSING_OK);
-	if (server == NULL)
-		return;
-
-	fdw = GetForeignDataWrapper(server->fdwid);
-	if (strcmp(fdw->fdwname, ICEBERG_CATALOG_FDW_NAME) != 0)
-		return;
-
-	/* Built-in catalog servers reject CREATE USER MAPPING upfront. */
-	if (IsBuiltinCatalogServerName(server->servername))
-		return;
-
-	if (!ServerHasDependentRestIcebergTable(serverOid))
-		return;
-
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("cannot drop the credentials for server \"%s\" "
-					"because it has dependent iceberg tables",
-					server->servername),
-			 errhint("Drop the dependent iceberg tables first.")));
 }
 
 
@@ -587,41 +633,48 @@ IsRedactableUserMappingSecret(const char *name)
 
 
 /*
- * IsIcebergCatalogServerByName returns true when `serverName` refers
- * to an iceberg_catalog server.  Both shapes count:
+ * IsKnownNonIcebergCatalogServer returns true ONLY when `serverName` refers
+ * to a real foreign server whose FDW is something other than
+ * iceberg_catalog.  Every other input -- a built-in iceberg long name,
+ * a real iceberg_catalog server, a typo / not-yet-existent server, or
+ * a NULL name -- returns false.
  *
- *   1. Any of the three built-in long names
- *      (pg_lake_postgres_catalog, ...).  These are reserved and only
- *      ever back the extension's catalog servers, so we can recognise
- *      them by name alone without a syscache lookup -- and we must,
- *      so that we still redact the queryString for the failing
- *      CREATE/ALTER USER MAPPING that ValidateIcebergCatalogServerDDL
- *      is about to reject.
- *   2. A user-created server whose FDW is iceberg_catalog.
+ * Built-in long names (pg_lake_postgres_catalog, ...) are recognised
+ * by name without a syscache lookup; they are reserved and only ever
+ * back the extension's catalog servers.  This matters because the
+ * ValidateIcebergCatalogServerDDL handler is about to ereport on those
+ * names, and the redaction stack must already have scrubbed the
+ * queryString by then.
  *
- * Never raises: a missing server returns false.  In that case the
- * surrounding CREATE/ALTER USER MAPPING will itself fail in core, and
- * we cannot know whether the user intended an iceberg_catalog target,
- * so we leave the queryString untouched.
+ * The asymmetry on missing servers is the security contract: when we
+ * cannot prove the target belongs to a different FDW, we treat it as
+ * "could be iceberg" so the caller scrubs the queryString anyway.
+ * That closes the typo-leak: a fat-finger on the server name in a
+ * CREATE USER MAPPING ... OPTIONS (client_id, client_secret) would
+ * otherwise survive into pg_stat_statements / log_min_duration_statement
+ * / ereport contexts on the failing core lookup.  A real, non-iceberg
+ * FDW user mapping is still left alone -- we don't volunteer ourselves
+ * as the redactor-of-record for somebody else's option vocabulary.
+ *
+ * Never raises.
  */
 static bool
-IsIcebergCatalogServerByName(const char *serverName)
+IsKnownNonIcebergCatalogServer(const char *serverName)
 {
-	ForeignServer *server;
-	ForeignDataWrapper *fdw;
-
 	if (serverName == NULL)
 		return false;
 
 	if (IsBuiltinCatalogServerName(serverName))
-		return true;
+		return false;
 
-	server = GetForeignServerByName(serverName, /* missing_ok */ true);
+	ForeignServer *server = GetForeignServerByName(serverName, /* missing_ok */ true);
+
 	if (server == NULL)
 		return false;
 
-	fdw = GetForeignDataWrapper(server->fdwid);
-	return strcmp(fdw->fdwname, ICEBERG_CATALOG_FDW_NAME) == 0;
+	ForeignDataWrapper *fdw = GetForeignDataWrapper(server->fdwid);
+
+	return strcmp(fdw->fdwname, ICEBERG_CATALOG_FDW_NAME) != 0;
 }
 
 
@@ -676,22 +729,20 @@ static void
 RedactWholeStatement(char *queryString, const PlannedStmt *pstmt)
 {
 	static const char marker[] = "<redacted: USER MAPPING with credentials>";
-	int			start;
-	int			len;
-	int			mlen;
 
 	if (queryString == NULL)
 		return;
 
-	start = pstmt->stmt_location > 0 ? pstmt->stmt_location : 0;
-	len = pstmt->stmt_len > 0
+	int			start = pstmt->stmt_location > 0 ? pstmt->stmt_location : 0;
+	int			len = pstmt->stmt_len > 0
 		? pstmt->stmt_len
 		: (int) strlen(queryString) - start;
 
 	if (len <= 0)
 		return;
 
-	mlen = (int) sizeof(marker) - 1;
+	int			mlen = (int) sizeof(marker) - 1;
+
 	if (mlen > len)
 		mlen = len;				/* truncate marker to fit short statements */
 
@@ -702,12 +753,20 @@ RedactWholeStatement(char *queryString, const PlannedStmt *pstmt)
 
 /*
  * RedactRestCatalogUserMappingSecrets is a ProcessUtility handler
- * that detects CREATE/ALTER USER MAPPING targeting an iceberg_catalog
- * server and blanks the whole statement text out of the queryString
- * in place when it carries a credential option (client_id /
- * client_secret).  Returns false so that downstream handlers (notably
- * ValidateIcebergCatalogServerDDL) and the rest of ProcessUtility
- * continue to run unaffected.
+ * that scrubs CREATE/ALTER USER MAPPING when it carries an iceberg
+ * credential option (client_id / client_secret) by blanking the whole
+ * statement text out of the queryString in place.  Returns false so
+ * that downstream handlers (notably ValidateIcebergCatalogServerDDL)
+ * and the rest of ProcessUtility continue to run unaffected.
+ *
+ * The server-name gate is conservative: we redact whenever we cannot
+ * affirmatively prove the target is a real foreign server backed by a
+ * different FDW.  A typo, a not-yet-existent server, or a built-in
+ * iceberg long name all fall into the "could be iceberg" bucket and
+ * are scrubbed defensively, since the alternative -- letting the
+ * credentials reach pg_stat_statements / log_min_duration_statement /
+ * ereport contexts via queryString just because the user fat-fingered
+ * the server name -- is exactly the leak we exist to prevent.
  *
  * The "any credential option present" gate means a non-secret
  * ALTER USER MAPPING (e.g. SET scope '...') is left visible in
@@ -750,13 +809,13 @@ RedactRestCatalogUserMappingSecrets(ProcessUtilityParams * processUtilityParams,
 	else
 		return false;
 
-	if (serverName == NULL || options == NIL)
-		return false;
-
-	if (!IsIcebergCatalogServerByName(serverName))
+	if (options == NIL)
 		return false;
 
 	if (!HasRedactableUserMappingSecret(options))
+		return false;
+
+	if (IsKnownNonIcebergCatalogServer(serverName))
 		return false;
 
 	/*
