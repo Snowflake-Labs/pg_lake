@@ -13,11 +13,8 @@ Gated to PG19+ because the statements do not parse on older servers.
 import pytest
 from utils_pytest import *
 
-PG19 = 190000
-
-
 def _skip_if_not_pg19(conn):
-    if get_pg_version_num(conn) < PG19:
+    if get_pg_version_num(conn) < 190000:
         pytest.skip("PG19-only commands require PostgreSQL 19+")
 
 

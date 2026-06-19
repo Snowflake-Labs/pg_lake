@@ -11,11 +11,9 @@ cleanly rejected (a documented gap), never silently applied incorrectly.
 import pytest
 from utils_pytest import *
 
-PG19 = 190000
-
 
 def _skip_pre_pg19(conn):
-    if get_pg_version_num(conn) < PG19:
+    if get_pg_version_num(conn) < 190000:
         pytest.skip("PG19 COPY option behavior")
 
 
