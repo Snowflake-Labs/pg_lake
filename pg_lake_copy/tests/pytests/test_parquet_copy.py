@@ -5,11 +5,8 @@ import duckdb
 import math
 from utils_pytest import *
 
-PG19 = 190000
-
-
 def _skip_pre_pg19(conn):
-    if get_pg_version_num(conn) < PG19:
+    if get_pg_version_num(conn) < 190000:
         pytest.skip("COPY <partitioned_table> TO requires PG19+")
 
 
