@@ -111,7 +111,7 @@ runs:
           PG_MAJOR="${{ inputs.pg_version }}"
           PRELOAD_LIBS="pg_extension_base,pg_cron,pg_lake_table,pg_lake_copy,pg_lake,pgaudit,pg_stat_statements"
           PGAUDIT_ENABLED=true
-          if [[ "$PG_MAJOR" =~ ^[0-9]+$ ]] && [ "$PG_MAJOR" -ge 19 ]; then
+          if [ "$PG_MAJOR" = "19" ]; then
             PRELOAD_LIBS="pg_extension_base,pg_cron,pg_lake_table,pg_lake_copy,pg_lake,pg_stat_statements"
             PGAUDIT_ENABLED=false
           fi
