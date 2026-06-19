@@ -439,73 +439,112 @@ FindOrCreateCompositeTypeFromColumnDefs(List *coldeflist)
 
 
 /*
- * MaybeConvertType recursively converts a type that contains unsupported
- * numerics.  Returns a PGType with the replacement OID, or with InvalidOid
- * when no conversion is needed.
+ * ConvertTypeTree recursively rewrites a (typeOid, typeMod) by applying a
+ * caller-supplied leaf rule to every scalar leaf, while handling the container
+ * structure (array / map / domain / composite) itself.  Returns true and fills
+ * *outTypeOid / *outTypeMod when anything was rewritten; false (outputs
+ * untouched) otherwise.
  *
- *   numeric (unsupported)       -> FLOAT8OID
- *   array of X                  -> array of MaybeConvertType(X)
- *   map (domain over array)     -> new map via GetOrCreatePGMapType
- *   domain (non-map)            -> unwrap and recurse into base type
- *   composite containing any    -> new composite via GetOrCreatePGStructType
+ * The caller supplies the leaf rule via a TypeLeafConverter callback, which is
+ * invoked on every node and must return false for container types (arrays,
+ * maps, domains, composites) -- those are handled structurally here; returning
+ * true and filling *outOid / *outMod requests a rewrite of that scalar leaf.
+ * `level` is 0 for a top-level table column and increments by one for every
+ * array element, map key/value, or composite field descended into; `context`
+ * is passed through untouched.
+ *
+ * This is the single place that knows how pg_lake types nest, so independent
+ * passes (unsupported numeric -> double, snowflake compatibility, ...) share
+ * one structural traversal and cannot drift out of coverage.  The container
+ * rules are:
+ *
+ *   array of X                  -> array of ConvertTypeTree(X) at level + 1
+ *   map (domain over array)     -> new map via GetOrCreatePGMapType, key/value
+ *                                  converted at level + 1
+ *   domain (non-map)            -> unwrap and recurse into base at same level
+ *   composite containing any    -> new composite via
+ *                                  FindOrCreateCompositeTypeFromColumnDefs,
+ *                                  fields converted at level + 1, dropped
+ *                                  attributes skipped
+ *
+ * User-defined composite/map types are never mutated: a fresh type is created
+ * whenever a nested field changes.
  */
-PGType
-MaybeConvertType(PGType type, char *columnName)
+bool
+ConvertTypeTree(Oid typeOid, int32 typeMod, int level,
+				TypeLeafConverter leafConv, void *context,
+				Oid *outTypeOid, int32 *outTypeMod)
 {
-	Oid			typeOid = type.postgresTypeOid;
-	int32		typmod = type.postgresTypeMod;
+	/* leaf rule first; the callback returns false for container types */
+	if (leafConv(typeOid, typeMod, level, context, outTypeOid, outTypeMod))
+		return true;
 
-	/* unsupported numeric -> float8 */
-	if (IsUnsupportedNumericForIceberg(typeOid, typmod))
-		return MakePGTypeOid(FLOAT8OID);
-
-	/* array: recurse into element type */
+	/* array: recurse into the element type one level deeper */
 	Oid			elemType = get_element_type(typeOid);
 
 	if (OidIsValid(elemType))
 	{
-		PGType		converted = MaybeConvertType(MakePGType(elemType, typmod),
-												 columnName);
+		Oid			rewrittenElementOid;
+		int32		rewrittenElementMod;
 
-		if (OidIsValid(converted.postgresTypeOid))
-			return MakePGTypeOid(get_array_type(converted.postgresTypeOid));
-		return MakePGTypeOid(InvalidOid);
+		if (ConvertTypeTree(elemType, typeMod, level + 1, leafConv, context,
+							&rewrittenElementOid, &rewrittenElementMod))
+		{
+			*outTypeOid = get_array_type(rewrittenElementOid);
+			*outTypeMod = -1;
+			return true;
+		}
+
+		return false;
 	}
 
 	/* map check must precede the generic domain unwrap (maps are domains) */
 	if (IsMapTypeOid(typeOid))
 	{
-		PGType		keyType = GetMapKeyType(typeOid);
-		PGType		valType = GetMapValueType(typeOid);
-		PGType		newKey = MaybeConvertType(keyType, columnName);
-		PGType		newVal = MaybeConvertType(valType, columnName);
+		PGType		origKeyType = GetMapKeyType(typeOid);
+		PGType		origValueType = GetMapValueType(typeOid);
+		Oid			rewrittenKeyOid;
+		int32		rewrittenKeyMod;
+		Oid			rewrittenValueOid;
+		int32		rewrittenValueMod;
 
-		if (!OidIsValid(newKey.postgresTypeOid) &&
-			!OidIsValid(newVal.postgresTypeOid))
-			return MakePGTypeOid(InvalidOid);
+		bool		keyRewritten = ConvertTypeTree(origKeyType.postgresTypeOid,
+												   origKeyType.postgresTypeMod,
+												   level + 1, leafConv, context,
+												   &rewrittenKeyOid, &rewrittenKeyMod);
+		bool		valueRewritten = ConvertTypeTree(origValueType.postgresTypeOid,
+													 origValueType.postgresTypeMod,
+													 level + 1, leafConv, context,
+													 &rewrittenValueOid, &rewrittenValueMod);
 
-		Oid			finalKeyOid = OidIsValid(newKey.postgresTypeOid) ? newKey.postgresTypeOid : keyType.postgresTypeOid;
-		Oid			finalValOid = OidIsValid(newVal.postgresTypeOid) ? newVal.postgresTypeOid : valType.postgresTypeOid;
+		if (!keyRewritten && !valueRewritten)
+			return false;
+
+		/* keep the original type for whichever side the leaf rule left alone */
+		Oid			newMapKeyOid = keyRewritten ? rewrittenKeyOid : origKeyType.postgresTypeOid;
+		Oid			newMapValueOid = valueRewritten ? rewrittenValueOid : origValueType.postgresTypeOid;
 		const char *mapTypeName = psprintf("MAP(%s,%s)",
-										   GetFullDuckDBTypeNameForPGType(MakePGTypeOid(finalKeyOid), DATA_FORMAT_ICEBERG),
-										   GetFullDuckDBTypeNameForPGType(MakePGTypeOid(finalValOid), DATA_FORMAT_ICEBERG));
+										   GetFullDuckDBTypeNameForPGType(MakePGTypeOid(newMapKeyOid), DATA_FORMAT_ICEBERG),
+										   GetFullDuckDBTypeNameForPGType(MakePGTypeOid(newMapValueOid), DATA_FORMAT_ICEBERG));
 
-		Oid			mapOid = GetOrCreatePGMapType(mapTypeName);
-
-		return MakePGTypeOid(mapOid);
+		*outTypeOid = GetOrCreatePGMapType(mapTypeName);
+		*outTypeMod = -1;
+		return true;
 	}
 
 	char		typeType = get_typtype(typeOid);
 
-	/* domain (non-map): unwrap and recurse */
+	/* domain (non-map): unwrap and recurse at the same level */
 	if (typeType == TYPTYPE_DOMAIN)
 	{
-		Oid			baseType = getBaseTypeAndTypmod(typeOid, &typmod);
+		int32		baseMod = typeMod;
+		Oid			baseType = getBaseTypeAndTypmod(typeOid, &baseMod);
 
-		return MaybeConvertType(MakePGType(baseType, typmod), columnName);
+		return ConvertTypeTree(baseType, baseMod, level, leafConv, context,
+							   outTypeOid, outTypeMod);
 	}
 
-	/* composite: check each attribute */
+	/* composite: rebuild with rewritten fields if any field changes */
 	if (typeType == TYPTYPE_COMPOSITE)
 	{
 		TupleDesc	tupdesc = lookup_rowtype_tupdesc(typeOid, -1);
@@ -516,25 +555,27 @@ MaybeConvertType(PGType type, char *columnName)
 		{
 			Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
 
+			/* dropped columns must be ignored, never converted or re-added */
 			if (attr->attisdropped)
 				continue;
 
-			Oid			targetType = attr->atttypid;
-			int32		targetTypmod = attr->atttypmod;
-			PGType		converted = MaybeConvertType(
-													 MakePGType(targetType, targetTypmod), columnName);
+			Oid			fieldType = attr->atttypid;
+			int32		fieldMod = attr->atttypmod;
+			Oid			rewrittenFieldOid;
+			int32		rewrittenFieldMod;
 
-			if (OidIsValid(converted.postgresTypeOid))
+			if (ConvertTypeTree(fieldType, fieldMod, level + 1, leafConv, context,
+								&rewrittenFieldOid, &rewrittenFieldMod))
 			{
-				targetType = converted.postgresTypeOid;
-				targetTypmod = converted.postgresTypeMod;
+				fieldType = rewrittenFieldOid;
+				fieldMod = rewrittenFieldMod;
 				needsConversion = true;
 			}
 
 			ColumnDef  *colDef = makeNode(ColumnDef);
 
 			colDef->colname = pstrdup(NameStr(attr->attname));
-			colDef->typeName = makeTypeNameFromOid(targetType, targetTypmod);
+			colDef->typeName = makeTypeNameFromOid(fieldType, fieldMod);
 			colDef->is_local = true;
 			coldeflist = lappend(coldeflist, colDef);
 		}
@@ -542,12 +583,52 @@ MaybeConvertType(PGType type, char *columnName)
 		ReleaseTupleDesc(tupdesc);
 
 		if (!needsConversion)
-			return MakePGTypeOid(InvalidOid);
+			return false;
 
-		Oid			compositeOid = FindOrCreateCompositeTypeFromColumnDefs(coldeflist);
-
-		return MakePGTypeOid(compositeOid);
+		*outTypeOid = FindOrCreateCompositeTypeFromColumnDefs(coldeflist);
+		*outTypeMod = -1;
+		return true;
 	}
+
+	return false;
+}
+
+
+/*
+ * NumericLeafToDouble is the ConvertTypeTree leaf rule for the unsupported
+ * numeric -> float8 pass.  Numeric is never a container, so it applies at any
+ * nesting level; level and context are unused.
+ */
+static bool
+NumericLeafToDouble(Oid typeOid, int32 typeMod, int level, void *context,
+					Oid *outOid, int32 *outMod)
+{
+	if (IsUnsupportedNumericForIceberg(typeOid, typeMod))
+	{
+		*outOid = FLOAT8OID;
+		*outMod = -1;
+		return true;
+	}
+
+	return false;
+}
+
+
+/*
+ * MaybeConvertType recursively converts a type that contains unsupported
+ * numerics.  Returns a PGType with the replacement OID, or with InvalidOid
+ * when no conversion is needed.  Thin wrapper over ConvertTypeTree with the
+ * numeric leaf rule; columnName is retained for call-site readability.
+ */
+PGType
+MaybeConvertType(PGType type, char *columnName)
+{
+	Oid			convOid;
+	int32		convMod;
+
+	if (ConvertTypeTree(type.postgresTypeOid, type.postgresTypeMod, 0,
+						NumericLeafToDouble, NULL, &convOid, &convMod))
+		return MakePGType(convOid, convMod);
 
 	return MakePGTypeOid(InvalidOid);
 }
