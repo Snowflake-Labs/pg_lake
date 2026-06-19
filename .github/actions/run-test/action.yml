@@ -102,7 +102,21 @@ runs:
         if [ ${{ inputs.installcheck }} == 'true' ]; then
           pgduck_server --init_file_path pgduck_server/tests/test_secrets.sql --extensions_dir /tmp/extensions --cache_dir /tmp/cache > /tmp/pgduck_installcheck_logs 2>&1 &
           
+          # pgaudit has no PostgreSQL 19 support yet -- not in a release, and not
+          # even in the maintainer's in-progress PG19 branch (dwsteele/pgaudit#317,
+          # dev-pg19), which compiles but still segfaults the backend while
+          # auditing PG19's SQL/PGQ graph_table statements in PostgreSQL's own
+          # privileges regression test, cascading through the parallel group.
+          # Drop pgaudit from the preload list on PG19 only (it stays on <=18).
+          # pgaudit only emits server-log entries, so this never changes
+          # regression output.
+          PG_MAJOR="${{ inputs.pg_version }}"
           PRELOAD_LIBS="pg_extension_base,pg_cron,pg_lake_table,pg_lake_copy,pg_lake,pgaudit,pg_stat_statements"
+          PGAUDIT_ENABLED=true
+          if [ "$PG_MAJOR" = "19" ]; then
+            PRELOAD_LIBS="pg_extension_base,pg_cron,pg_lake_table,pg_lake_copy,pg_lake,pg_stat_statements"
+            PGAUDIT_ENABLED=false
+          fi
 
           initdb -D /tmp/pg_installcheck_tests -U postgres --set "shared_preload_libraries=$PRELOAD_LIBS" --locale=C.UTF-8 --data-checksums
           
@@ -113,7 +127,9 @@ runs:
           echo "pg_lake_iceberg.autovacuum_naptime=5" >> /tmp/pg_installcheck_tests/postgresql.conf
           echo "unix_socket_directories = '/tmp/pg_installcheck_tests'" >> /tmp/pg_installcheck_tests/postgresql.conf
           echo "max_prepared_transactions = 100" >> /tmp/pg_installcheck_tests/postgresql.conf
-          echo "pgaudit.log='all'" >> /tmp/pg_installcheck_tests/postgresql.conf
+          if [ "$PGAUDIT_ENABLED" == "true" ]; then
+            echo "pgaudit.log='all'" >> /tmp/pg_installcheck_tests/postgresql.conf
+          fi
 
           if [ ${{ inputs.installcheck_postgres }} == 'true' ]; then
             echo "compute_query_id='regress'" >> /tmp/pg_installcheck_tests/postgresql.conf
