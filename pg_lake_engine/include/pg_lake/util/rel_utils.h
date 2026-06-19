@@ -46,6 +46,15 @@ extern PGDLLEXPORT void ErrorIfTypeUnsupportedForIcebergTables(Oid typeOid, int3
 extern PGDLLEXPORT void ErrorIfTypeUnsupportedNumericForIcebergTables(int32 typmod, char *columnName);
 extern PGDLLEXPORT void MaybeConvertUnsupportedNumericColumnsToDouble(List *columnDefList);
 extern PGDLLEXPORT PGType MaybeConvertType(PGType type, char *columnName);
+
+/* leaf rule for ConvertTypeTree; see rel_utils.c */
+typedef bool (*TypeLeafConverter) (Oid typeOid, int32 typeMod, int level,
+								   void *context,
+								   Oid *outOid, int32 *outMod);
+
+extern PGDLLEXPORT bool ConvertTypeTree(Oid typeOid, int32 typeMod, int level,
+										TypeLeafConverter leafConv, void *context,
+										Oid *outTypeOid, int32 *outTypeMod);
 extern PGDLLEXPORT PgLakeTableProperties GetPgLakeTableProperties(Oid relationId);
 
 /* range var help */
