@@ -235,7 +235,7 @@ _PG_init(void)
 
 	DefineCustomIntVariable("pg_lake_table.target_row_group_size_mb",
 							"Determines the target size of row groups in writable tables, in MB. "
-							"The default is 512; set to 0 to disable. ",
+							"The default is 128; set to 0 to disable. ",
 							NULL,
 							&TargetRowGroupSizeMB,
 							DEFAULT_TARGET_ROW_GROUP_SIZE_MB,

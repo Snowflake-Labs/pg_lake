@@ -32,7 +32,7 @@
 #define PARTITION_COLUMN_PREFIX "__pglake_part_"
 
 /* pg_lake_table.target_row_group_size_mb */
-#define DEFAULT_TARGET_ROW_GROUP_SIZE_MB 512
+#define DEFAULT_TARGET_ROW_GROUP_SIZE_MB 128
 extern PGDLLEXPORT int TargetRowGroupSizeMB;
 
 typedef enum ParquetVersion
