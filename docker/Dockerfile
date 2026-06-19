@@ -244,21 +244,12 @@ RUN cd postgresql-$PG19_VERSION && \
     (cd contrib && make -j `nproc` install) && \
     cd .. && rm -rf postgresql-$PG19_VERSION*
 
-# Compile and install PG AUDIT 16
-RUN cd pgaudit-$PGAUDIT16_VERSION && \
-    make -j `nproc` install USE_PGXS=1 PG_CONFIG=$PGBASEDIR/pgsql-16/bin/pg_config
-
-# Compile and install PG AUDIT 17
-RUN cd pgaudit-$PGAUDIT17_VERSION && \
-    make -j `nproc` install USE_PGXS=1 PG_CONFIG=$PGBASEDIR/pgsql-17/bin/pg_config
-
-# Compile and install PG AUDIT 18
-RUN cd pgaudit-$PGAUDIT18_VERSION && \
-    make -j `nproc` install USE_PGXS=1 PG_CONFIG=$PGBASEDIR/pgsql-18/bin/pg_config
-
-# Compile and install PG AUDIT 19
-RUN cd pgaudit-$PGAUDIT19_VERSION && \
-    make -j `nproc` install USE_PGXS=1 PG_CONFIG=$PGBASEDIR/pgsql-19/bin/pg_config
+# Compile and install pgaudit for every PostgreSQL version, then drop the sources
+RUN (cd pgaudit-$PGAUDIT16_VERSION && make -j `nproc` install USE_PGXS=1 PG_CONFIG=$PGBASEDIR/pgsql-16/bin/pg_config) && \
+    (cd pgaudit-$PGAUDIT17_VERSION && make -j `nproc` install USE_PGXS=1 PG_CONFIG=$PGBASEDIR/pgsql-17/bin/pg_config) && \
+    (cd pgaudit-$PGAUDIT18_VERSION && make -j `nproc` install USE_PGXS=1 PG_CONFIG=$PGBASEDIR/pgsql-18/bin/pg_config) && \
+    (cd pgaudit-$PGAUDIT19_VERSION && make -j `nproc` install USE_PGXS=1 PG_CONFIG=$PGBASEDIR/pgsql-19/bin/pg_config) && \
+    rm -rf pgaudit-$PGAUDIT16_VERSION pgaudit-$PGAUDIT17_VERSION pgaudit-$PGAUDIT18_VERSION pgaudit-$PGAUDIT19_VERSION
 
 # Compile and install PostGIS
 RUN cd postgis-$POSTGIS_VERSION && \
