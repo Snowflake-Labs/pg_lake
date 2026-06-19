@@ -63,6 +63,7 @@
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/iceberg/compatibility_mode.h"
 #include "pg_lake/util/numeric.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_lake/util/url_encode.h"
@@ -934,6 +935,8 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		else
 		{
 			MaybeConvertUnsupportedNumericColumnsToDouble(createStmt->base.tableElts);
+			ApplyIcebergTableCompatibilityModeForSchema(createStmt->base.tableElts,
+														IcebergCompatibilityModeFromCreateOptions(createStmt->options));
 			EnsureSupportedIcebergTableColumnDefinitions(createStmt->base.tableElts);
 
 			PgLakeCommonParentProcessUtility(params);
@@ -948,6 +951,8 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 	}
 
 	MaybeConvertUnsupportedNumericColumnsToDouble(createStmt->base.tableElts);
+	ApplyIcebergTableCompatibilityModeForSchema(createStmt->base.tableElts,
+												IcebergCompatibilityModeFromCreateOptions(createStmt->options));
 	EnsureSupportedIcebergTableColumnDefinitions(createStmt->base.tableElts);
 
 	Oid			namespaceId =

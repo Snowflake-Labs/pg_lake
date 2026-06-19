@@ -72,6 +72,7 @@ Iceberg tables support the following options when creating the table:
 | location             | URL prefix for the Iceberg table (e.g. `s3://mybucket/measurements`) |
 | max_snapshot_age     | Maximum age (in seconds) of snapshots to retain. When set to `0`, old snapshots are automatically expired during writes. Overrides the `pg_lake_iceberg.max_snapshot_age` GUC for this table. |
 | out_of_range_values  | How to handle values that fall outside the Iceberg-representable range. Valid values: `error` (default), `clamp`. See [Out-of-range value handling](#out-of-range-value-handling). |
+| compatibility_mode   | Rewrite column types so the Iceberg table is consumable by a downstream engine with narrower type limitations. Valid values: `auto` (default), `snowflake`. See [Compatibility mode](#compatibility-mode). |
 
 Additionally, when creating the Iceberg table from a file, the following options are supported along with the format-specific options listed in the [data lake formats](../docs/file-formats-reference) section:
 
@@ -183,6 +184,51 @@ The default `error` mode ensures data integrity by catching unexpected values ea
 - Your pipeline produces sentinel values like `infinity` that you want silently mapped to the Iceberg boundary
 - You are migrating data from PostgreSQL heap tables that might contain `infinity` or extreme dates and want to complete the migration without errors
 - You prefer silent adjustments over strict error handling
+
+
+## Compatibility mode
+
+Iceberg supports the full range of column types that pg_lake maps, but some
+engines that read pg_lake's Iceberg tables have narrower limitations. The
+`compatibility_mode` table option opts a table into a set of type rewrites that
+keep its Iceberg schema consumable by such an engine.
+
+The supported modes are:
+
+| Mode        | Effect |
+| ----------- | ------ |
+| `auto`      | Default (also used when the option is unset). pg_lake decides what the table's downstream needs; today this means no rewrites are applied. |
+| `snowflake` | A `uuid` that appears **nested** inside an array, map, or composite type is stored as `text`. A **top-level** `uuid` column is left as a native Iceberg `uuid` (Snowflake's native UUID handles that case). |
+
+This addresses [Snowflake's UUID limitation](https://docs.snowflake.com/en/sql-reference/data-types-uuid#limitations-for-the-uuid-data-type): UUID values cannot be stored inside semi-structured or structured data types.
+
+The rewrite is applied recursively at every nesting level (arrays, maps,
+composites, arrays of composites, composites containing arrays, maps with a
+`uuid` key or value, and so on). Composite and map types that contain a nested
+`uuid` are rebuilt as fresh types; your own `CREATE TYPE` definitions are never
+modified. Containers with no nested `uuid` are left untouched.
+
+```sql
+CREATE TYPE event_meta AS (event_id uuid, source text);
+
+CREATE TABLE events (
+  id      uuid,         -- top-level: stays uuid
+  tags    uuid[],       -- nested: stored as text[]
+  meta    event_meta    -- nested: event_id stored as text, source stays text
+)
+USING iceberg WITH (compatibility_mode = 'snowflake');
+```
+
+The rewrite also applies to columns added later with `ALTER TABLE ... ADD COLUMN`:
+
+```sql
+ALTER TABLE events ADD COLUMN related_ids uuid[];  -- stored as text[]
+```
+
+`compatibility_mode` composes with the numeric-to-`double` conversion and with
+`out_of_range_values` handling: a single column can have nested `uuid` fields
+rewritten to `text`, unsupported `numeric` fields rewritten to `double
+precision`, and temporal/`NaN` values clamped at write time, all at once.
 
 
 ## Loading data into an Iceberg table

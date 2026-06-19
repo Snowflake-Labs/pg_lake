@@ -52,6 +52,7 @@
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/iceberg/compatibility_mode.h"
 #include "pg_lake/iceberg/metadata_operations.h"
 #include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/parsetree/options.h"
@@ -219,6 +220,7 @@ static bool HasOnlyCatalogAlterTableOptions(AlterTableStmt *alterStmt);
 static void ErrorIfUnsupportedTableOptionChange(AlterTableStmt *alterStmt, List *allowedOptions);
 static void ErrorIfAnyRestCatalogTablesInSchema(const char *schemaName);
 static void MaybeConvertUnsupportedNumericColumnsToDoubleInAlterStmt(AlterTableStmt *alterStmt);
+static void ApplyIcebergCompatibilityModeInAlterStmt(AlterTableStmt *alterStmt, Oid relationId);
 
 /*
  * ProcessAlterTable is used in cases where we want to preempt the error
@@ -325,6 +327,7 @@ ProcessAlterTable(ProcessUtilityParams * processUtilityParams, void *arg)
 	}
 
 	MaybeConvertUnsupportedNumericColumnsToDoubleInAlterStmt(alterStmt);
+	ApplyIcebergCompatibilityModeInAlterStmt(alterStmt, relationId);
 	ErrorIfUnsupportedTypeAddedForIcebergTables(alterStmt);
 
 	/* check whether we are accepting writes for this table */
@@ -481,6 +484,37 @@ MaybeConvertUnsupportedNumericColumnsToDoubleInAlterStmt(AlterTableStmt *alterSt
 	}
 
 	MaybeConvertUnsupportedNumericColumnsToDouble(addColumnDefs);
+}
+
+
+/*
+ * ApplyIcebergCompatibilityModeInAlterStmt rewrites the types of any columns
+ * added by an ALTER TABLE ... ADD COLUMN according to the table's
+ * compatibility_mode option (e.g. nested uuid -> text for 'snowflake').
+ *
+ * Unlike the numeric->double conversion, which is gated by a global GUC, the
+ * compatibility mode is a per-table option read from the existing relation.
+ * Runs as a separate pass from the numeric one; the two compose.
+ */
+static void
+ApplyIcebergCompatibilityModeInAlterStmt(AlterTableStmt *alterStmt, Oid relationId)
+{
+	IcebergCompatibilityMode mode = IcebergCompatibilityModeFromRelation(relationId);
+	List	   *addColumnDefs = NIL;
+	ListCell   *cell;
+
+	if (mode != ICEBERG_COMPAT_SNOWFLAKE)
+		return;
+
+	foreach(cell, alterStmt->cmds)
+	{
+		AlterTableCmd *cmd = (AlterTableCmd *) lfirst(cell);
+
+		if (cmd->subtype == AT_AddColumn)
+			addColumnDefs = lappend(addColumnDefs, cmd->def);
+	}
+
+	ApplyIcebergTableCompatibilityModeForSchema(addColumnDefs, mode);
 }
 
 
