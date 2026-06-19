@@ -5,7 +5,8 @@ import duckdb
 import math
 from utils_pytest import *
 
-def _skip_pre_pg19(conn):
+
+def _skip_if_partitioned_copy_unsupported(conn):
     if get_pg_version_num(conn) < 190000:
         pytest.skip("COPY <partitioned_table> TO requires PG19+")
 
@@ -747,10 +748,10 @@ def test_partitioned(pg_conn, duckdb_conn, tmp_path):
     pg_conn.rollback()
 
 
-def test_pg19_copy_to_all_heap_partitioned(pg_conn, tmp_path):
+def test_copy_to_all_heap_partitioned(pg_conn, tmp_path):
     """PG19: COPY <partitioned parent> TO with all-heap partitions streams
     every partition's rows out, and round-trips into a plain table."""
-    _skip_pre_pg19(pg_conn)
+    _skip_if_partitioned_copy_unsupported(pg_conn)
 
     out_path = tmp_path / "all_heap.parquet"
     run_command(
@@ -787,15 +788,15 @@ def test_pg19_copy_to_all_heap_partitioned(pg_conn, tmp_path):
     pg_conn.rollback()
 
 
-def test_pg19_copy_to_mixed_partition_tree(pg_conn, s3, extension, tmp_path):
+def test_copy_to_mixed_partition_tree(pg_conn, s3, extension, tmp_path):
     """PG19 HEADLINE: COPY <partitioned parent> TO where leaves are a mix of a
     heap partition and a pg_lake foreign-table partition (parquet on s3). The
     inh=true descent must read the foreign child through the FDW so ALL rows
     appear in the output."""
-    _skip_pre_pg19(pg_conn)
+    _skip_if_partitioned_copy_unsupported(pg_conn)
 
-    ft_url = f"s3://{TEST_BUCKET}/test_pg19_copy_mixed/ft_child.parquet"
-    out_url = f"s3://{TEST_BUCKET}/test_pg19_copy_mixed/parent_out.parquet"
+    ft_url = f"s3://{TEST_BUCKET}/test_copy_mixed/ft_child.parquet"
+    out_url = f"s3://{TEST_BUCKET}/test_copy_mixed/parent_out.parquet"
 
     # Write the parquet backing the foreign-table partition (ids 100..199).
     run_command(
@@ -854,15 +855,15 @@ def test_pg19_copy_to_mixed_partition_tree(pg_conn, s3, extension, tmp_path):
     pg_conn.commit()
 
 
-def test_pg19_copy_to_mixed_tree_with_iceberg_child(
+def test_copy_to_mixed_tree_with_iceberg_child(
     pg_conn, s3, with_default_location, tmp_path
 ):
     """PG19: like the mixed-tree test but one leaf is an iceberg child created
     via PARTITION OF ... USING iceberg. Proves the descent reads iceberg
     partitions through the FDW too."""
-    _skip_pre_pg19(pg_conn)
+    _skip_if_partitioned_copy_unsupported(pg_conn)
 
-    out_url = f"s3://{TEST_BUCKET}/test_pg19_copy_iceberg/parent_out.parquet"
+    out_url = f"s3://{TEST_BUCKET}/test_copy_iceberg/parent_out.parquet"
 
     run_command(
         """
@@ -912,10 +913,10 @@ def test_pg19_copy_to_mixed_tree_with_iceberg_child(
     pg_conn.commit()
 
 
-def test_pg19_copy_to_column_subset(pg_conn, tmp_path):
+def test_copy_to_column_subset(pg_conn, tmp_path):
     """PG19: COPY parent (col_a, col_b) TO ... must descend into partitions and
     project only the requested columns."""
-    _skip_pre_pg19(pg_conn)
+    _skip_if_partitioned_copy_unsupported(pg_conn)
 
     out_path = tmp_path / "subset.parquet"
     run_command(
@@ -953,11 +954,11 @@ def test_pg19_copy_to_column_subset(pg_conn, tmp_path):
     pg_conn.rollback()
 
 
-def test_pg19_copy_only_parent_yields_zero_rows(pg_conn, tmp_path):
+def test_copy_only_parent_yields_zero_rows(pg_conn, tmp_path):
     """PG19: COPY ONLY <partitioned parent> TO ... honors ONLY semantics -- the
     parent itself holds no rows, so the output is empty even though the
     partitions are populated."""
-    _skip_pre_pg19(pg_conn)
+    _skip_if_partitioned_copy_unsupported(pg_conn)
 
     out_path = tmp_path / "only_parent.parquet"
     run_command(
