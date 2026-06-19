@@ -685,8 +685,9 @@ BaseWorkerSharedMemoryInit(void)
 
 	if (!alreadyInitialized)
 	{
-		BaseWorkerControl->lockTrancheName = "pg_extension_base server starter locks";
 		BaseWorkerControl->trancheId = LWLockNewTrancheId();
+		BaseWorkerControl->lockTrancheName = "pg_extension_base server starter locks";
+
 		LWLockRegisterTranche(BaseWorkerControl->trancheId,
 							  BaseWorkerControl->lockTrancheName);
 
