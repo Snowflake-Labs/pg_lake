@@ -1651,15 +1651,28 @@ AppendReadCSVClause(StringInfo buf, const char *filePath,
 		appendStringInfoString(buf, ", parallel=false");
 	}
 
-	if (columnsMap != NULL)
-	{
-		appendStringInfo(buf, ", columns=%s", columnsMap);
-	}
-	else
-	{
-		/* infer columns and their types automatically */
-		appendStringInfoString(buf, ", auto_detect=true");
-	}
+  if (columnsMap != NULL)
+  {
+    appendStringInfo(buf, ", columns=%s", columnsMap);
+
+    /*
+     * Disable DuckDB's CSV sniffer when column types are fully specified.
+     * With auto_detect on (the default), DuckDB activates a
+     * string-to-LIST cast path that can segfault when a
+     * multidimensional-array value is followed by NULL rows
+     * (uninitialized offset/length in nullify_parent). The types are
+     * already explicit in columnsMap, so the sniffer adds no value and
+     * must not run.  header= is always explicit via the caller's
+     * csvOptions, so header detection is unaffected. See:
+     * https://github.com/duckdb/duckdb/issues/23373
+     */
+    appendStringInfoString(buf, ", auto_detect=false");
+  }
+  else
+  {
+    /* infer columns and their types automatically */
+    appendStringInfoString(buf, ", auto_detect=true");
+  }
 
 	appendStringInfoString(buf, CopyOptionsToReadCSVParams(csvOptions));
 
