@@ -884,6 +884,55 @@ def test_md_array(pg_conn, duckdb_conn, tmp_path):
     assert result[0]["val"] == 2
 
 
+def test_copy_to_array_with_nulls(pg_conn, duckdb_conn, tmp_path):
+    """
+    Regression test for https://github.com/Snowflake-Labs/pg_lake/issues/408.
+
+    DuckDB's CSV string-to-LIST cast can segfault (SIGSEGV) when a row with an
+    array value is followed by NULL rows and auto_detect is left enabled.
+    AppendReadCSVTail now passes auto_detect=false when a typed columns= map
+    is present, which causes DuckDB to return a clean conversion error instead
+    of crashing.  This test exercises the internal temp-CSV read-back path
+    (COPY TO parquet via ConvertCSVFileTo) with a 1-D integer array column and
+    several trailing NULL rows.
+    """
+    parquet_path = tmp_path / "test_array_nulls.parquet"
+
+    run_command(
+        f"""
+        CREATE TABLE test_array_nulls (id bigint, arr int[]);
+        INSERT INTO test_array_nulls VALUES
+            (1, ARRAY[1, 2, 3]),
+            (2, NULL),
+            (3, NULL),
+            (4, NULL),
+            (5, ARRAY[4, 5]),
+            (6, NULL),
+            (7, NULL),
+            (8, NULL),
+            (9, NULL),
+            (10, NULL);
+        COPY test_array_nulls TO '{parquet_path}' WITH (format 'parquet');
+    """,
+        pg_conn,
+    )
+
+    # Verify the parquet file contains the correct rows (not a partial/corrupt
+    # write from a crashed engine process)
+    duckdb_conn.execute(
+        f"SELECT id, arr FROM read_parquet($1) ORDER BY id", [str(parquet_path)]
+    )
+    rows = duckdb_conn.fetchall()
+
+    assert len(rows) == 10
+    assert rows[0] == (1, [1, 2, 3])
+    assert rows[1] == (2, None)
+    assert rows[4] == (5, [4, 5])
+    assert rows[9] == (10, None)
+
+    pg_conn.rollback()
+
+
 def test_copy_virtual_column(pg_conn, tmp_path):
     # virtual columns were introduced in PostgreSQL 18
     if get_pg_version_num(pg_conn) < 180000:
