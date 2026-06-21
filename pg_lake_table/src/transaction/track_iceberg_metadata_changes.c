@@ -235,7 +235,14 @@ ResetRestCatalogRequests(void)
 void
 PostAllRestCatalogRequests(void)
 {
-	if (PgLakeXactRestCatalog == NULL)
+	/*
+	 * catalogOpts == NULL is reachable when the OAT_DROP capture allocated
+	 * PgLakeXactRestCatalog but BuildRestCatalogOptionsFromUserMapping
+	 * returned NULL (UM gone from the syscache, server gone) -- nothing to
+	 * authenticate against, nothing to post, return cleanly.
+	 */
+	if (PgLakeXactRestCatalog == NULL ||
+		PgLakeXactRestCatalog->catalogOpts == NULL)
 	{
 		return;
 	}
@@ -245,8 +252,6 @@ PostAllRestCatalogRequests(void)
 	 * commitContext is pre-allocated before.
 	 */
 	MemoryContext oldContext = MemoryContextSwitchTo(PgLakeXactRestCatalog->commitContext);
-
-	Assert(PgLakeXactRestCatalog->catalogOpts != NULL);
 
 	/*
 	 * We need to iterate over the requests hash twice: 1. First, we need to
@@ -619,32 +624,40 @@ InitRestCatalogRequestsHashIfNeeded(void)
 /*
  * Ensure this transaction is bound to the REST catalog that owns
  * relationId.  On the first mutation in the transaction, resolves
- * the relation's catalog options and stores a copy in
- * TopTransactionContext so that XACT_EVENT_PRE_COMMIT can reuse
- * them without syscache lookups.  On subsequent mutations, verifies
- * the server OID matches the already-bound catalog and raises
- * ERRCODE_FEATURE_NOT_SUPPORTED if it does not.
+ * the relation's catalog options in full (including credentials)
+ * and stores a copy in TopTransactionContext for
+ * XACT_EVENT_PRE_COMMIT to reuse without syscache lookups.
  *
- * Identity is the iceberg_catalog server OID, not the user-typed name.
- * Two requests for the same physical server -- whether the user spelled
- * the catalog as 'rest', 'REST', or as the underlying built-in server
- * name on different statements -- collapse to the same OID and are
- * treated as one catalog.
+ * On subsequent mutations, only the server OID is re-resolved -- no
+ * pg_user_mapping lookup, no credential validation -- so the same-
+ * server check stays correct even when the user mapping has already
+ * been dropped earlier in the transaction (same-txn DROP USER MAPPING
+ * then DROP TABLE, or cascade-driven UM removal).
+ *
+ * Identity is the iceberg_catalog server OID, so two requests for
+ * the same physical server collapse to the same catalog regardless
+ * of how the user spelled it.
  */
 static void
 EnsureXactBoundToRestCatalog(Oid relationId)
 {
-	RestCatalogOptions *resolvedOpts =
-		GetRestCatalogOptionsForRelation(relationId);
-
 	if (PgLakeXactRestCatalog->catalogOpts == NULL)
 	{
+		RestCatalogOptions *resolvedOpts =
+			GetRestCatalogOptionsForRelation(relationId);
+
 		PgLakeXactRestCatalog->catalogOpts =
 			CopyRestCatalogOptions(TopTransactionContext, resolvedOpts);
 		return;
 	}
 
-	if (PgLakeXactRestCatalog->catalogOpts->serverOid != resolvedOpts->serverOid)
+	Oid			relationServerOid = GetRestCatalogServerIdForRelation(relationId);
+
+	if (PgLakeXactRestCatalog->catalogOpts->serverOid != relationServerOid)
+	{
+		ForeignTable *foreignTable = GetForeignTable(relationId);
+		char	   *catalog = GetStringOption(foreignTable->options, "catalog", false);
+
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot modify tables from different REST catalogs "
@@ -652,7 +665,55 @@ EnsureXactBoundToRestCatalog(Oid relationId)
 				 errdetail("This transaction already targets catalog \"%s\", "
 						   "but the current statement targets \"%s\".",
 						   PgLakeXactRestCatalog->catalogOpts->catalog,
-						   resolvedOpts->catalog)));
+						   catalog)));
+	}
+}
+
+
+/*
+ * CaptureRestCatalogCredsForUserMappingDrop is the txn-local
+ * credential capture invoked by pg_lake_iceberg's OAT_DROP hook
+ * via PgLake_RestCatalogXactCaptureCallback (set at _PG_init time).
+ *
+ * pg_lake_iceberg has already verified that the dropped user mapping
+ * belongs to a user-created iceberg_catalog server with dependent
+ * iceberg tables; we just bind the transaction's catalogOpts to the
+ * about-to-vanish mapping's credentials.  Any same-transaction
+ * DROP TABLE -- direct or cascade-driven -- can then authenticate
+ * its post-commit REST DELETE.
+ *
+ * No-op when the transaction is already bound: the first capture
+ * (or first table mutation) wins, so the post-commit request always
+ * uses a single credential identity.
+ */
+static void
+CaptureRestCatalogCredsForUserMappingDrop(Oid umOid)
+{
+	InitRestCatalogRequestsHashIfNeeded();
+
+	if (PgLakeXactRestCatalog->catalogOpts != NULL)
+		return;
+
+	RestCatalogOptions *opts = BuildRestCatalogOptionsFromUserMapping(umOid);
+
+	if (opts == NULL)
+		return;
+
+	PgLakeXactRestCatalog->catalogOpts =
+		CopyRestCatalogOptions(TopTransactionContext, opts);
+}
+
+
+/*
+ * RegisterRestCatalogXactCaptureCallback wires
+ * CaptureRestCatalogCredsForUserMappingDrop into pg_lake_iceberg's
+ * OAT_DROP dispatch.  Called once from _PG_init.
+ */
+void
+RegisterRestCatalogXactCaptureCallback(void)
+{
+	PgLake_RestCatalogXactCaptureCallback =
+		CaptureRestCatalogCredsForUserMappingDrop;
 }
 
 

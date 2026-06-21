@@ -1839,7 +1839,7 @@ def test_alter_server_rest_endpoint_blocked_with_dependent_tables(
 # ── DROP USER MAPPING / ALTER USER MAPPING credential-removal guard ──────
 
 
-def test_drop_user_mapping_blocked_with_dependent_tables(
+def test_drop_user_mapping_in_isolation_succeeds(
     installcheck,
     superuser_conn,
     s3,
@@ -1848,14 +1848,18 @@ def test_drop_user_mapping_blocked_with_dependent_tables(
     polaris_session,
     create_http_helper_functions,
 ):
-    """DROP USER MAPPING must be rejected while the server has dependent
-    iceberg tables."""
+    """DROP USER MAPPING by itself succeeds even when the server has
+    dependent iceberg tables: the OAT_DROP hook captures the
+    about-to-vanish credentials into the txn, but with no concurrent
+    DROP TABLE the capture goes unused and the mapping is simply
+    removed.  The cross-transaction failure mode is covered by
+    test_drop_user_mapping_then_drop_table_in_separate_txn_fails_clearly."""
     if installcheck:
         return
 
-    SERVER_NAME = "wedge_drop_um"
+    SERVER_NAME = "wedge_um_iso"
     SCHEMA_NAME = TABLE_NAMESPACE
-    TABLE_NAME = "wedge_drop_um_tbl"
+    TABLE_NAME = "wedge_um_iso_tbl"
 
     creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
     client_id = creds["credentials"]["clientId"]
@@ -1890,29 +1894,193 @@ def test_drop_user_mapping_blocked_with_dependent_tables(
     )
     superuser_conn.commit()
 
+    run_command(f"DROP USER MAPPING FOR PUBLIC SERVER {SERVER_NAME}", superuser_conn)
+    superuser_conn.commit()
+
+    rows = run_query(
+        f"SELECT 1 FROM pg_user_mappings WHERE srvname = '{SERVER_NAME}'",
+        superuser_conn,
+    )
+    assert rows == [], rows
+
+    # Cleanup: recreate the mapping so DROP SCHEMA / DROP SERVER can
+    # tear the dependent table down through the normal credentialed
+    # path.
+    run_command(
+        f"""
+        CREATE USER MAPPING FOR PUBLIC SERVER {SERVER_NAME}
+            OPTIONS (client_id '{client_id}', client_secret '{client_secret}')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+    run_command(f"DROP SCHEMA {SCHEMA_NAME} CASCADE", superuser_conn)
+    superuser_conn.commit()
+    run_command(f"DROP SERVER {SERVER_NAME} CASCADE", superuser_conn)
+    superuser_conn.commit()
+
+
+def test_drop_user_mapping_then_drop_table_in_same_txn_succeeds(
+    installcheck,
+    superuser_conn,
+    s3,
+    extension,
+    with_default_location,
+    polaris_session,
+    create_http_helper_functions,
+):
+    """A same-transaction DROP USER MAPPING followed by DROP TABLE
+    completes cleanly: the OAT_DROP user-mapping capture binds the
+    about-to-vanish credentials to the transaction so the table-drop
+    fired afterwards can authenticate its post-commit REST DELETE
+    against the captured snapshot."""
+    if installcheck:
+        return
+
+    SERVER_NAME = "wedge_sametxn"
+    SCHEMA_NAME = TABLE_NAMESPACE
+    TABLE_NAME = "wedge_sametxn_tbl"
+
+    creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
+    client_id = creds["credentials"]["clientId"]
+    client_secret = creds["credentials"]["clientSecret"]
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}"
+
+    run_command(
+        f"""
+        CREATE SERVER {SERVER_NAME} TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint '{endpoint}',
+                     location_prefix 's3://{TEST_BUCKET}')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        f"""
+        CREATE USER MAPPING FOR PUBLIC SERVER {SERVER_NAME}
+            OPTIONS (client_id '{client_id}', client_secret '{client_secret}')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    run_command(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA_NAME}", superuser_conn)
+    superuser_conn.commit()
+
+    run_command(
+        f"CREATE TABLE {SCHEMA_NAME}.{TABLE_NAME} (id bigint) "
+        f"USING iceberg WITH (catalog='{SERVER_NAME}')",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    # Single transaction: drop the mapping first, then the table.
+    run_command(f"DROP USER MAPPING FOR PUBLIC SERVER {SERVER_NAME}", superuser_conn)
+    run_command(f"DROP TABLE {SCHEMA_NAME}.{TABLE_NAME}", superuser_conn)
+    superuser_conn.commit()
+
+    rows = run_query(
+        f"SELECT 1 FROM pg_user_mappings WHERE srvname = '{SERVER_NAME}'",
+        superuser_conn,
+    )
+    assert rows == [], rows
+    rows = run_query(
+        f"SELECT 1 FROM pg_class WHERE relname = '{TABLE_NAME}'",
+        superuser_conn,
+    )
+    assert rows == [], rows
+
+    run_command(f"DROP SERVER {SERVER_NAME} CASCADE", superuser_conn)
+    superuser_conn.commit()
+
+
+def test_drop_user_mapping_then_drop_table_in_separate_txn_fails_clearly(
+    installcheck,
+    superuser_conn,
+    s3,
+    extension,
+    with_default_location,
+    polaris_session,
+    create_http_helper_functions,
+):
+    """If DROP USER MAPPING commits in one transaction and a later
+    transaction tries to DROP a dependent iceberg table, the table
+    drop fails cleanly with the standard "no credentials found"
+    error.  The OAT_DROP capture is txn-local, so it doesn't survive
+    the commit.  Recovery: recreate the mapping (or do both drops in
+    one transaction, see
+    test_drop_user_mapping_then_drop_table_in_same_txn_succeeds)."""
+    if installcheck:
+        return
+
+    SERVER_NAME = "wedge_xtxn"
+    SCHEMA_NAME = TABLE_NAMESPACE
+    TABLE_NAME = "wedge_xtxn_tbl"
+
+    creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
+    client_id = creds["credentials"]["clientId"]
+    client_secret = creds["credentials"]["clientSecret"]
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}"
+
+    run_command(
+        f"""
+        CREATE SERVER {SERVER_NAME} TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint '{endpoint}',
+                     location_prefix 's3://{TEST_BUCKET}')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        f"""
+        CREATE USER MAPPING FOR PUBLIC SERVER {SERVER_NAME}
+            OPTIONS (client_id '{client_id}', client_secret '{client_secret}')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    run_command(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA_NAME}", superuser_conn)
+    superuser_conn.commit()
+
+    run_command(
+        f"CREATE TABLE {SCHEMA_NAME}.{TABLE_NAME} (id bigint) "
+        f"USING iceberg WITH (catalog='{SERVER_NAME}')",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    run_command(f"DROP USER MAPPING FOR PUBLIC SERVER {SERVER_NAME}", superuser_conn)
+    superuser_conn.commit()
+
     err = run_command(
-        f"DROP USER MAPPING FOR PUBLIC SERVER {SERVER_NAME}",
+        f"DROP TABLE {SCHEMA_NAME}.{TABLE_NAME}",
         superuser_conn,
         raise_error=False,
     )
     superuser_conn.rollback()
     assert err is not None
     msg = str(err)
-    assert "dependent iceberg tables" in msg, msg
+    assert "no credentials found" in msg, msg
     assert SERVER_NAME in msg, msg
     assert client_secret not in msg, msg
 
-    # Once the table is gone, DROP USER MAPPING is allowed again.
+    # Recovery path: recreate the mapping, then the cleanup succeeds.
+    run_command(
+        f"""
+        CREATE USER MAPPING FOR PUBLIC SERVER {SERVER_NAME}
+            OPTIONS (client_id '{client_id}', client_secret '{client_secret}')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
     run_command(f"DROP SCHEMA {SCHEMA_NAME} CASCADE", superuser_conn)
     superuser_conn.commit()
-
-    run_command(f"DROP USER MAPPING FOR PUBLIC SERVER {SERVER_NAME}", superuser_conn)
-    superuser_conn.commit()
-
     run_command(f"DROP SERVER {SERVER_NAME} CASCADE", superuser_conn)
     superuser_conn.commit()
 
 
+@pytest.mark.parametrize("creation_order", ["um_before_table", "table_before_um"])
 def test_drop_server_cascade_does_not_wedge(
     installcheck,
     superuser_conn,
@@ -1921,17 +2089,26 @@ def test_drop_server_cascade_does_not_wedge(
     with_default_location,
     polaris_session,
     create_http_helper_functions,
+    creation_order,
 ):
-    """DROP SERVER ... CASCADE must never surface the credential wedge.
-    Cascade visits siblings in descending-OID order, so in normal flows
-    the table is dropped first (clean success); if the user mapping is
-    visited first, our OAT_DROP guard errors out cleanly."""
+    """DROP SERVER ... CASCADE must succeed regardless of which
+    dependent Postgres visits first.  Cascade siblings are visited
+    in descending-OID order:
+
+      um_before_table  -- table has the higher OID, dropped first;
+                          capture happens but isn't strictly needed.
+      table_before_um  -- user mapping has the higher OID, dropped
+                          first; its OAT_DROP capture binds the
+                          credentials so the table-drop later in
+                          the same cascade can authenticate its
+                          post-commit REST DELETE.
+    """
     if installcheck:
         return
 
-    SERVER_NAME = "wedge_cascade_srv"
+    SERVER_NAME = f"wedge_cascade_{creation_order}"
     SCHEMA_NAME = TABLE_NAMESPACE
-    TABLE_NAME = "wedge_cascade_tbl"
+    TABLE_NAME = f"wedge_cascade_{creation_order}_tbl"
 
     creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
     client_id = creds["credentials"]["clientId"]
@@ -1966,26 +2143,37 @@ def test_drop_server_cascade_does_not_wedge(
     )
     superuser_conn.commit()
 
-    err = run_command(
-        f"DROP SERVER {SERVER_NAME} CASCADE",
+    if creation_order == "table_before_um":
+        # Reorder: drop and recreate the user mapping after the table
+        # exists so the new UM has a higher OID than the table.
+        # Cascade will then visit the UM first.
+        run_command(
+            f"DROP USER MAPPING FOR PUBLIC SERVER {SERVER_NAME}",
+            superuser_conn,
+        )
+        run_command(
+            f"""
+            CREATE USER MAPPING FOR PUBLIC SERVER {SERVER_NAME}
+                OPTIONS (client_id '{client_id}',
+                         client_secret '{client_secret}')
+            """,
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+    run_command(f"DROP SERVER {SERVER_NAME} CASCADE", superuser_conn)
+    superuser_conn.commit()
+
+    rows = run_query(
+        f"SELECT 1 FROM pg_foreign_server WHERE srvname = '{SERVER_NAME}'",
         superuser_conn,
-        raise_error=False,
     )
-
-    if err is None:
-        superuser_conn.commit()
-    else:
-        superuser_conn.rollback()
-        msg = str(err)
-        assert "no credentials found" not in msg, msg
-        assert "dependent iceberg tables" in msg, msg
-        assert SERVER_NAME in msg, msg
-        assert client_secret not in msg, msg
-
-        run_command(f"DROP SCHEMA {SCHEMA_NAME} CASCADE", superuser_conn)
-        superuser_conn.commit()
-        run_command(f"DROP SERVER {SERVER_NAME} CASCADE", superuser_conn)
-        superuser_conn.commit()
+    assert rows == [], rows
+    rows = run_query(
+        f"SELECT 1 FROM pg_class WHERE relname = '{TABLE_NAME}'",
+        superuser_conn,
+    )
+    assert rows == [], rows
 
 
 @pytest.mark.parametrize("dropped_option", ["client_id", "client_secret"])

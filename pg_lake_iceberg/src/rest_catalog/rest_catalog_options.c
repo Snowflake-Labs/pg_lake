@@ -400,27 +400,55 @@ LookupUserMappingOptions(Oid serverOid, Oid *umidOut)
 
 
 /*
- * ApplyUserMappingOverrides overlays credentials from pg_user_mapping
- * onto opts and records the matched mapping's OID in
- * opts->userMappingOid.  Has no effect if no user mapping applies; the
- * caller may then fall back to GUC-derived values.
+ * LookupUserMappingOptionsByOid returns the option list for the user
+ * mapping with the given OID and reports its server in *serverOidOut.
+ * Returns NIL with *serverOidOut = InvalidOid if the user mapping
+ * cannot be found.  When the mapping exists, *serverOidOut is its
+ * server's OID and the return is its option list (NIL if empty).
  *
- * Only options carrying CATALOG_OPT_CTX_USER_MAPPING are applied here.
- * The validator already rejects anything else at DDL time, so the
- * defensive contexts check is just belt-and-suspenders against options
- * that might have slipped in before this code path existed.
+ * By-OID counterpart to LookupUserMappingOptions (which resolves via
+ * GetUserId() with a PUBLIC fallback), used by the OAT_DROP capture
+ * path that targets a known mapping directly.
+ */
+List *
+LookupUserMappingOptionsByOid(Oid umOid, Oid *serverOidOut)
+{
+	*serverOidOut = InvalidOid;
+
+	HeapTuple	tp = SearchSysCache1(USERMAPPINGOID, ObjectIdGetDatum(umOid));
+
+	if (!HeapTupleIsValid(tp))
+		return NIL;
+
+	*serverOidOut = ((Form_pg_user_mapping) GETSTRUCT(tp))->umserver;
+
+	bool		isnull;
+	Datum		datum = SysCacheGetAttr(USERMAPPINGOID, tp,
+										Anum_pg_user_mapping_umoptions, &isnull);
+	List	   *options = NIL;
+
+	if (!isnull)
+		options = untransformRelOptions(datum);
+
+	ReleaseSysCache(tp);
+	return options;
+}
+
+
+/*
+ * ApplyUserMappingOptionsList overlays an already-fetched user-mapping
+ * option list onto opts and records umOid in opts->userMappingOid.
+ * Shared by ApplyUserMappingOverrides (per-current-user) and the
+ * by-OID path used by BuildRestCatalogOptionsFromUserMapping.
+ *
+ * Only options carrying CATALOG_OPT_CTX_USER_MAPPING are applied; the
+ * contexts check is defensive (the validator already rejects other
+ * options at DDL time).
  */
 void
-ApplyUserMappingOverrides(RestCatalogOptions * opts, ForeignServer *server)
+ApplyUserMappingOptionsList(RestCatalogOptions * opts, List *options, Oid umOid)
 {
-	Oid			userMappingOid;
-	List	   *options = LookupUserMappingOptions(server->serverid,
-												   &userMappingOid);
-
-	if (options == NIL)
-		return;
-
-	opts->userMappingOid = userMappingOid;
+	opts->userMappingOid = umOid;
 
 	ListCell   *lc;
 
@@ -434,4 +462,24 @@ ApplyUserMappingOverrides(RestCatalogOptions * opts, ForeignServer *server)
 
 		ApplyCatalogOptionValue(opts, desc, def);
 	}
+}
+
+
+/*
+ * ApplyUserMappingOverrides overlays credentials from pg_user_mapping
+ * onto opts and records the matched mapping's OID in
+ * opts->userMappingOid.  Has no effect if no user mapping applies; the
+ * caller may then fall back to GUC-derived values.
+ */
+void
+ApplyUserMappingOverrides(RestCatalogOptions * opts, ForeignServer *server)
+{
+	Oid			userMappingOid;
+	List	   *options = LookupUserMappingOptions(server->serverid,
+												   &userMappingOid);
+
+	if (options == NIL)
+		return;
+
+	ApplyUserMappingOptionsList(opts, options, userMappingOid);
 }

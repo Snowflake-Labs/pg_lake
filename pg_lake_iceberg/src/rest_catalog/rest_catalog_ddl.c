@@ -47,10 +47,18 @@
 
 static void IcebergCatalogObjectAccessHook(ObjectAccessType access, Oid classId,
 										   Oid objectId, int subId, void *arg);
-static void EnsureUserMappingDropAllowed(Oid umOid);
+static void HandleIcebergCatalogServerUserMappingDrop(Oid umOid);
 static bool ServerHasDependentRestIcebergTable(Oid serverOid);
 
 static object_access_hook_type PreviousObjectAccessHook = NULL;
+
+/*
+ * Callback set by pg_lake_table at _PG_init time so a transaction-
+ * local credential capture can fire from this OAT_DROP hook.  Stays
+ * NULL when only pg_lake_iceberg is loaded; the dispatch site
+ * tolerates NULL by skipping capture.  See header for the contract.
+ */
+RestCatalogXactCaptureCallback PgLake_RestCatalogXactCaptureCallback = NULL;
 
 
 /*
@@ -67,9 +75,9 @@ InitializeIcebergCatalogObjectAccessHook(void)
 
 
 /*
- * IcebergCatalogObjectAccessHook gates DROP USER MAPPING and
- * DROP SERVER ... CASCADE for user-created iceberg_catalog servers
- * with dependent iceberg tables.
+ * IcebergCatalogObjectAccessHook is the chained OAT_DROP entry
+ * point.  Filters to user-mapping drops and forwards to
+ * HandleIcebergCatalogServerUserMappingDrop.
  */
 static void
 IcebergCatalogObjectAccessHook(ObjectAccessType access, Oid classId,
@@ -87,19 +95,28 @@ IcebergCatalogObjectAccessHook(ObjectAccessType access, Oid classId,
 	if (!IsExtensionCreated(PgLakeIceberg))
 		return;
 
-	EnsureUserMappingDropAllowed(objectId);
+	HandleIcebergCatalogServerUserMappingDrop(objectId);
 }
 
 
 /*
- * EnsureUserMappingDropAllowed errors out if the user mapping's
- * server is a user-created iceberg_catalog server with dependent
- * iceberg tables.  Called from the OAT_DROP hook on UserMappingRelationId,
- * which fires for both direct DROP USER MAPPING and cascade-driven
- * removal during DROP SERVER ... CASCADE.
+ * HandleIcebergCatalogServerUserMappingDrop is the OAT_DROP handler
+ * for user mappings on iceberg_catalog servers.  When the mapping
+ * belongs to a user-created iceberg_catalog server with at least
+ * one dependent iceberg table, dispatches to
+ * PgLake_RestCatalogXactCaptureCallback so the about-to-vanish
+ * credentials are snapshotted into the transaction; any same-
+ * transaction DROP TABLE -- direct or cascade-driven under
+ * DROP SERVER / DROP EXTENSION ... CASCADE -- can then authenticate
+ * its post-commit REST DELETE.
+ *
+ * No-ops when any of those gates fail or when the callback is unset
+ * (pg_lake_table not loaded).  A DROP USER MAPPING in one txn
+ * followed by DROP TABLE in another surfaces the standard "no
+ * credentials found" error at the second drop.
  */
 static void
-EnsureUserMappingDropAllowed(Oid umOid)
+HandleIcebergCatalogServerUserMappingDrop(Oid umOid)
 {
 	HeapTuple	tup = SearchSysCache1(USERMAPPINGOID, ObjectIdGetDatum(umOid));
 
@@ -124,15 +141,14 @@ EnsureUserMappingDropAllowed(Oid umOid)
 	if (IsBuiltinCatalogServerName(server->servername))
 		return;
 
+	/* Cheap NULL-check before the pg_depend scan. */
+	if (PgLake_RestCatalogXactCaptureCallback == NULL)
+		return;
+
 	if (!ServerHasDependentRestIcebergTable(serverOid))
 		return;
 
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("cannot drop the credentials for server \"%s\" "
-					"because it has dependent iceberg tables",
-					server->servername),
-			 errhint("Drop the dependent iceberg tables first.")));
+	PgLake_RestCatalogXactCaptureCallback(umOid);
 }
 
 

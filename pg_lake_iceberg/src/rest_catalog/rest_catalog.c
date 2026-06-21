@@ -216,6 +216,61 @@ ResolveRestCatalogOptions(const char *catalog)
 
 
 /*
+ * BuildRestCatalogOptionsFromUserMapping resolves a fully-validated
+ * RestCatalogOptions from a *specific* user mapping OID instead of
+ * resolving via the current user as BuildRestCatalogOptionsFromServer
+ * does.  Returns NULL when the user mapping is no longer in the
+ * syscache.  Validation is identical to the per-server resolver, so
+ * missing client_id / client_secret raise the standard "no
+ * credentials found for REST catalog ..." error.
+ */
+RestCatalogOptions *
+BuildRestCatalogOptionsFromUserMapping(Oid umOid)
+{
+	Oid			serverOid;
+	List	   *umOptions = LookupUserMappingOptionsByOid(umOid, &serverOid);
+
+	if (!OidIsValid(serverOid))
+		return NULL;
+
+	ForeignServer *server = GetForeignServerExtended(serverOid, FSV_MISSING_OK);
+
+	if (server == NULL)
+		return NULL;
+
+	RestCatalogOptions *opts = palloc0(sizeof(RestCatalogOptions));
+
+	opts->serverOid = server->serverid;
+	opts->catalog = pstrdup(server->servername);
+	ApplyGUCDefaults(opts, /* isBuiltin */ false);
+	ApplyServerOptionOverrides(opts, server);
+	ApplyUserMappingOptionsList(opts, umOptions, umOid);
+
+	ValidateRestCatalogOptions(opts, opts->catalog, /* isBuiltin */ false);
+	return opts;
+}
+
+
+/*
+ * ResolveRestCatalogServerId returns the iceberg_catalog server OID
+ * that backs the given user-facing catalog identifier, without the
+ * pg_user_mapping lookup or credential validation that
+ * ResolveRestCatalogOptions does.  Used by the same-server check in
+ * EnsureXactBoundToRestCatalog so subsequent statements can confirm
+ * catalog identity even after the UM has been dropped earlier in the
+ * transaction.
+ */
+Oid
+ResolveRestCatalogServerId(const char *catalog)
+{
+	const char *serverName = ResolveCatalogServerName(catalog);
+	ForeignServer *server = GetForeignServerByName(serverName, false);
+
+	return server->serverid;
+}
+
+
+/*
  * GetRestCatalogOptionsForRelation returns the REST catalog options for
  * the given relation.  The catalog option value is used as the server
  * name (or built-in 'rest' literal).
@@ -232,6 +287,26 @@ GetRestCatalogOptionsForRelation(Oid relationId)
 				 errmsg("catalog option is not set for relation %u", relationId)));
 
 	return ResolveRestCatalogOptions(catalog);
+}
+
+
+/*
+ * GetRestCatalogServerIdForRelation is the relation-keyed companion to
+ * ResolveRestCatalogServerId: reads the catalog option from the
+ * foreign table and returns just the iceberg_catalog server OID.
+ */
+Oid
+GetRestCatalogServerIdForRelation(Oid relationId)
+{
+	ForeignTable *foreignTable = GetForeignTable(relationId);
+	char	   *catalog = GetStringOption(foreignTable->options, "catalog", false);
+
+	if (catalog == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("catalog option is not set for relation %u", relationId)));
+
+	return ResolveRestCatalogServerId(catalog);
 }
 
 

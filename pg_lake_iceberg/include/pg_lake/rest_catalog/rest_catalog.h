@@ -126,6 +126,23 @@ extern PGDLLEXPORT RestCatalogOptions * GetRestCatalogOptionsForRelation(Oid rel
 extern PGDLLEXPORT RestCatalogOptions * CopyRestCatalogOptions(MemoryContext dst, const RestCatalogOptions * src);
 
 /*
+ * Build options directly from a specific user mapping OID, bypassing
+ * the per-current-user resolution path.  Used by the OAT_DROP capture
+ * in pg_lake_table to snapshot credentials out of an about-to-vanish
+ * mapping into the transaction-local catalogOpts.
+ */
+extern PGDLLEXPORT RestCatalogOptions * BuildRestCatalogOptionsFromUserMapping(Oid umOid);
+
+/*
+ * Server-id-only variants of the resolvers above.  Skip pg_user_mapping
+ * lookup and credential validation, so the same-server identity check
+ * stays correct in a transaction whose user mapping has already been
+ * dropped (e.g. cascade-driven UM removal under DROP SERVER ... CASCADE).
+ */
+extern PGDLLEXPORT Oid ResolveRestCatalogServerId(const char *catalog);
+extern PGDLLEXPORT Oid GetRestCatalogServerIdForRelation(Oid relationId);
+
+/*
  * Module-internal helpers shared across the rest_catalog_*.c files.
  *
  * Declared here (rather than in a private header) only so the split
@@ -134,6 +151,8 @@ extern PGDLLEXPORT RestCatalogOptions * CopyRestCatalogOptions(MemoryContext dst
  */
 void		ApplyServerOptionOverrides(RestCatalogOptions * opts, ForeignServer *server);
 void		ApplyUserMappingOverrides(RestCatalogOptions * opts, ForeignServer *server);
+void		ApplyUserMappingOptionsList(RestCatalogOptions * opts, List *options, Oid umOid);
+List	   *LookupUserMappingOptionsByOid(Oid umOid, Oid *serverOidOut);
 char	   *GetRestCatalogAccessToken(RestCatalogOptions * opts, bool forceRefreshToken);
 List	   *GetHeadersWithAuth(RestCatalogOptions * opts);
 char	   *JsonbGetStringByPath(const char *jsonb_text, int nkeys,...);
@@ -164,12 +183,24 @@ extern PGDLLEXPORT RestCatalogRequest * GetRemoveSnapshotCatalogRequest(List *re
 extern PGDLLEXPORT bool ValidateIcebergCatalogServerDDL(ProcessUtilityParams * processUtilityParams, void *arg);
 
 /*
- * Chains an OAT_DROP guard onto Postgres' object_access_hook to
- * protect dependent iceberg tables from credential removal (direct
- * DROP USER MAPPING or DROP SERVER ... CASCADE).  Called once from
- * _PG_init.
+ * Chains an OAT_DROP hook onto Postgres' object_access_hook for
+ * pg_lake_iceberg to react to user-mapping drops on iceberg_catalog
+ * servers.  Called once from _PG_init.
  */
 extern PGDLLEXPORT void InitializeIcebergCatalogObjectAccessHook(void);
+
+/*
+ * Callback invoked by pg_lake_iceberg's OAT_DROP hook when a user
+ * mapping on a user-created iceberg_catalog server with dependent
+ * iceberg tables is about to be dropped.  Set by pg_lake_table at
+ * _PG_init time; the txn-local catalogOpts the callback writes
+ * into lives there.  Stays NULL when pg_lake_table is not loaded
+ * (the dispatch site skips capture).  May ereport on a malformed
+ * user mapping (missing client_id / client_secret); that aborts
+ * the cascade transaction, which is the safe outcome.
+ */
+typedef void (*RestCatalogXactCaptureCallback) (Oid umOid);
+extern PGDLLEXPORT RestCatalogXactCaptureCallback PgLake_RestCatalogXactCaptureCallback;
 
 /*
  * ProcessUtility handler that scrubs client_id / client_secret out of
