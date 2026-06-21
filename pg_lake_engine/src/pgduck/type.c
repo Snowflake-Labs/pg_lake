@@ -397,14 +397,7 @@ GetDuckDBTypeForPGType(PGType postgresType)
 	char		typtype = get_typtype(pgTypeId);
 
 	if (OidIsValid(elementType))
-	{
-		/*
-		 * DuckDB doesn't have JSONB type, so we map it to JSON type. However,
-		 * in case of JSONB[], we have not done the mapping yet, so we prevent
-		 * pushdown of JSONB[].
-		 */
-		return elementType == JSONBOID ? DUCKDB_TYPE_INVALID : DUCKDB_TYPE_LIST;
-	}
+		return DUCKDB_TYPE_LIST;
 
 	if (IsMapTypeOid(pgTypeId))
 		return DUCKDB_TYPE_MAP;
