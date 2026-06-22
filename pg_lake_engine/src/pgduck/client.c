@@ -206,18 +206,19 @@ ResolvePgduckConninfo(void)
 PGDuckConnection *
 GetPGDuckConnection(void)
 {
-  InitializePGDuckClient();
+	InitializePGDuckClient();
 
-  /*
-   * PGHOSTADDR, if set in the server environment, overrides host= in the
-   * conninfo — including unix-socket paths — and silently redirects libpq
-   * to connect via TCP to a numeric IP instead.  Clear it before connecting
-   * so PgduckServerConninfo is always honoured.  Unlike PGHOST/PGPORT, which
-   * lose to explicit conninfo values, PGHOSTADDR unconditionally wins.
-   */
-  unsetenv("PGHOSTADDR");
+	/*
+	 * PGHOSTADDR, if set in the server environment, overrides host= in the
+	 * conninfo — including unix-socket paths — and silently redirects
+	 * libpq to connect via TCP to a numeric IP instead.  Clear it before
+	 * connecting so PgduckServerConninfo is always honoured.  Unlike
+	 * PGHOST/PGPORT, which lose to explicit conninfo values, PGHOSTADDR
+	 * unconditionally wins.
+	 */
+	unsetenv("PGHOSTADDR");
 
-  PGconn     *connection = PQconnectdb(PgduckServerConninfo);
+	PGconn	   *connection = PQconnectdb(PgduckServerConninfo);
 
 	if (PQstatus(connection) != CONNECTION_OK)
 	{
