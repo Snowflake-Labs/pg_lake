@@ -31,8 +31,17 @@
 
 #include "c.h"
 
+#include <ctype.h>
+#include <errno.h>
+#include <netdb.h>
+#include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <unistd.h>
 
 #include "access/attnum.h"
 #include "mb/pg_wchar.h"
@@ -71,6 +80,12 @@
 #define TRANSMIT_ESCAPE_CHAR '"'
 #define TRANSMIT_QUOTE_CHAR '"'
 #define TRANSMIT_END_OF_LINE_CHAR '\n'
+#define GCS_METADATA_HOST "metadata.google.internal"
+#define GCS_METADATA_TOKEN_PATH "/computeMetadata/v1/instance/service-accounts/default/token"
+#define GCS_TOKEN_REFRESH_SKEW_SECONDS 60
+#define GCS_TOKEN_DEFAULT_REFRESH_SECONDS 300
+#define GCS_TOKEN_HTTP_TIMEOUT_SECONDS 2
+#define GCS_TOKEN_RESPONSE_BUFFER_SIZE 16384
 
 #define IS_FATAL_DUCKDB_ERROR(error) \
 	((error) == DUCKDB_ERROR_FATAL || \
@@ -115,9 +130,19 @@ static bool duckdb_error_is_fatal(duckdb_error_type errorType,
 static DuckDBStatus print_duckdb_version(void);
 static DuckDBStatus ensure_jsonb_cast_created(void);
 static duckdb_state run_command_on_duckdb(const char *command);
+static duckdb_state run_sensitive_command_on_duckdb(const char *description,
+													const char *command);
 static duckdb_state run_command_on_duckdb_with_callback(const char *command,
 														QueryResultCallback callback,
 														void *callbackArg);
+static DuckDBStatus configure_gcs_metadata_secret(bool startRefreshThread);
+static void *gcs_metadata_secret_refresh_main(void *arg);
+static bool install_gcs_metadata_secret(const char *token);
+static bool fetch_gcs_metadata_token(char **token, int64_t *expiresIn);
+static bool send_all(int socketFd, const char *request, size_t requestLength);
+static bool parse_json_string_field(const char *json, const char *key, char **value);
+static bool parse_json_int64_field(const char *json, const char *key, int64_t *value);
+static char *escape_sql_literal(const char *value);
 static DuckDBStatus return_query_result_to_pgsession(DuckDBSession * duckSession,
 													 duckdb_result duckResult,
 													 ResponseFormat * responseFormat,
@@ -341,6 +366,9 @@ duckdb_global_init(char *databaseFilePath,
 	if (run_command_on_duckdb(createGCSSecret) == DuckDBError)
 		return DUCKDB_INITIALIZATION_ERROR;
 
+	if (configure_gcs_metadata_secret(true) != DUCKDB_SUCCESS)
+		return DUCKDB_INITIALIZATION_ERROR;
+
 	char		setCommand[1024];
 
 	if (cacheDir != NULL)
@@ -457,6 +485,361 @@ duckdb_global_init(char *databaseFilePath,
 
 
 /*
+ * configure_gcs_metadata_secret installs a DuckDB GCS secret that uses the
+ * pod's Google OAuth token from the metadata service. DuckDB's GCS
+ * credential_chain support is HMAC/AWS-style, so it does not discover GKE
+ * Workload Identity tokens by itself.
+ */
+static DuckDBStatus
+configure_gcs_metadata_secret(bool startRefreshThread)
+{
+	char	   *token = NULL;
+	int64_t		expiresIn = 0;
+	bool		initialFetchOk = false;
+
+	if (!fetch_gcs_metadata_token(&token, &expiresIn))
+	{
+		PGDUCK_SERVER_LOG("GCS metadata token is unavailable on first attempt; "
+						  "will keep retrying in background");
+	}
+	else
+	{
+		if (!install_gcs_metadata_secret(token))
+		{
+			pg_free(token);
+			return DUCKDB_INITIALIZATION_ERROR;
+		}
+
+		pg_free(token);
+		initialFetchOk = true;
+	}
+
+	if (startRefreshThread)
+	{
+		pthread_t	threadId;
+		pthread_attr_t threadAttr;
+		sigset_t	blockMask;
+		sigset_t	prevMask;
+
+		/*
+		 * Block SIGINT/SIGTERM before pthread_create so the new thread
+		 * inherits the blocked mask and never receives shutdown signals.
+		 * This ensures signals are delivered to the main thread where
+		 * accept() can be interrupted for clean shutdown.
+		 */
+		sigemptyset(&blockMask);
+		sigaddset(&blockMask, SIGINT);
+		sigaddset(&blockMask, SIGTERM);
+
+		if (pthread_sigmask(SIG_BLOCK, &blockMask, &prevMask) != 0)
+		{
+			PGDUCK_SERVER_WARN("could not block signals before creating "
+							   "GCS refresh thread: %s", strerror(errno));
+			return DUCKDB_SUCCESS;
+		}
+
+		pthread_attr_init(&threadAttr);
+		pthread_attr_setdetachstate(&threadAttr, PTHREAD_CREATE_DETACHED);
+
+		int			createErr = pthread_create(&threadId, &threadAttr,
+											   gcs_metadata_secret_refresh_main, NULL);
+
+		pthread_attr_destroy(&threadAttr);
+
+		/* Restore the original signal mask in the calling thread */
+		pthread_sigmask(SIG_SETMASK, &prevMask, NULL);
+
+		if (createErr != 0)
+		{
+			PGDUCK_SERVER_WARN("could not start GCS metadata token refresh thread");
+			return DUCKDB_SUCCESS;
+		}
+
+		if (initialFetchOk)
+			PGDUCK_SERVER_LOG("configured GCS metadata bearer-token secret with background refresh");
+		else
+			PGDUCK_SERVER_LOG("started GCS metadata token refresh thread (initial fetch pending)");
+	}
+
+	return DUCKDB_SUCCESS;
+}
+
+
+static void *
+gcs_metadata_secret_refresh_main(void *arg)
+{
+	(void) arg;
+
+	while (true)
+	{
+		char	   *token = NULL;
+		int64_t		expiresIn = 0;
+		int64_t		sleepSeconds = GCS_TOKEN_DEFAULT_REFRESH_SECONDS;
+
+		if (fetch_gcs_metadata_token(&token, &expiresIn))
+		{
+			if (!install_gcs_metadata_secret(token))
+				PGDUCK_SERVER_WARN("could not refresh GCS metadata bearer-token secret");
+
+			pg_free(token);
+
+			sleepSeconds = expiresIn - GCS_TOKEN_REFRESH_SKEW_SECONDS;
+			if (sleepSeconds < 1)
+				sleepSeconds = 1;
+		}
+		else
+		{
+			PGDUCK_SERVER_WARN("could not fetch GCS metadata token; retrying later");
+		}
+
+		sleep((unsigned int) sleepSeconds);
+	}
+
+	return NULL;
+}
+
+
+static bool
+install_gcs_metadata_secret(const char *token)
+{
+	char	   *escapedToken = escape_sql_literal(token);
+	char	   *command = psprintf("CREATE OR REPLACE SECRET gcsdefault "
+								  "(TYPE GCS, PROVIDER CONFIG, "
+								  "ENDPOINT 'storage.googleapis.com', "
+								  "BEARER_TOKEN '%s')",
+								  escapedToken);
+	duckdb_state duckState =
+		run_sensitive_command_on_duckdb("refresh GCS metadata bearer-token secret", command);
+
+	pg_free(command);
+	pg_free(escapedToken);
+
+	return duckState == DuckDBSuccess;
+}
+
+
+static bool
+fetch_gcs_metadata_token(char **token, int64_t *expiresIn)
+{
+	struct addrinfo hints;
+	struct addrinfo *result = NULL;
+	struct addrinfo *rp = NULL;
+	int			socketFd = -1;
+	bool		success = false;
+	char		response[GCS_TOKEN_RESPONSE_BUFFER_SIZE];
+	size_t		responseLength = 0;
+	const char *body = NULL;
+	const char *request =
+		"GET " GCS_METADATA_TOKEN_PATH " HTTP/1.1\r\n"
+		"Host: " GCS_METADATA_HOST "\r\n"
+		"Metadata-Flavor: Google\r\n"
+		"Connection: close\r\n"
+		"\r\n";
+
+	*token = NULL;
+	*expiresIn = 0;
+
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+
+	if (getaddrinfo(GCS_METADATA_HOST, "80", &hints, &result) != 0)
+		return false;
+
+	for (rp = result; rp != NULL; rp = rp->ai_next)
+	{
+		struct timeval timeout = {
+			.tv_sec = GCS_TOKEN_HTTP_TIMEOUT_SECONDS,
+			.tv_usec = 0
+		};
+
+		socketFd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+		if (socketFd == -1)
+			continue;
+
+		setsockopt(socketFd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+		setsockopt(socketFd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+
+		if (connect(socketFd, rp->ai_addr, rp->ai_addrlen) == 0)
+			break;
+
+		close(socketFd);
+		socketFd = -1;
+	}
+
+	freeaddrinfo(result);
+
+	if (socketFd == -1)
+		return false;
+
+	if (!send_all(socketFd, request, strlen(request)))
+		goto cleanup;
+
+	while (responseLength < sizeof(response) - 1)
+	{
+		ssize_t		bytesRead = recv(socketFd,
+									 response + responseLength,
+									 sizeof(response) - responseLength - 1,
+									 0);
+
+		if (bytesRead < 0)
+		{
+			if (errno == EINTR)
+				continue;
+
+			goto cleanup;
+		}
+
+		if (bytesRead == 0)
+			break;
+
+		responseLength += (size_t) bytesRead;
+	}
+
+	response[responseLength] = '\0';
+
+	if (strncmp(response, "HTTP/1.1 200", strlen("HTTP/1.1 200")) != 0 &&
+		strncmp(response, "HTTP/1.0 200", strlen("HTTP/1.0 200")) != 0)
+		goto cleanup;
+
+	body = strstr(response, "\r\n\r\n");
+	if (body == NULL)
+		goto cleanup;
+
+	body += 4;
+
+	if (!parse_json_string_field(body, "access_token", token) ||
+		!parse_json_int64_field(body, "expires_in", expiresIn) ||
+		*token == NULL ||
+		**token == '\0')
+	{
+		if (*token != NULL)
+		{
+			pg_free(*token);
+			*token = NULL;
+		}
+		goto cleanup;
+	}
+
+	success = true;
+
+cleanup:
+	close(socketFd);
+	return success;
+}
+
+
+static bool
+send_all(int socketFd, const char *request, size_t requestLength)
+{
+	size_t		bytesSent = 0;
+
+	while (bytesSent < requestLength)
+	{
+		ssize_t		bytesWritten = send(socketFd,
+										request + bytesSent,
+										requestLength - bytesSent,
+										0);
+
+		if (bytesWritten < 0)
+		{
+			if (errno == EINTR)
+				continue;
+
+			return false;
+		}
+
+		if (bytesWritten == 0)
+			return false;
+
+		bytesSent += (size_t) bytesWritten;
+	}
+
+	return true;
+}
+
+
+static bool
+parse_json_string_field(const char *json, const char *key, char **value)
+{
+	char	   *pattern = psprintf("\"%s\"", key);
+	const char *field = strstr(json, pattern);
+	const char *cursor = NULL;
+	const char *end = NULL;
+
+	pg_free(pattern);
+
+	if (field == NULL)
+		return false;
+
+	cursor = strchr(field, ':');
+	if (cursor == NULL)
+		return false;
+
+	cursor++;
+	while (*cursor != '\0' && isspace((unsigned char) *cursor))
+		cursor++;
+
+	if (*cursor != '"')
+		return false;
+
+	cursor++;
+	end = strchr(cursor, '"');
+
+	if (end == NULL)
+		return false;
+
+	*value = pnstrdup(cursor, end - cursor);
+	return true;
+}
+
+
+static bool
+parse_json_int64_field(const char *json, const char *key, int64_t *value)
+{
+	char	   *pattern = psprintf("\"%s\"", key);
+	const char *field = strstr(json, pattern);
+	const char *cursor = NULL;
+	char	   *end = NULL;
+
+	pg_free(pattern);
+
+	if (field == NULL)
+		return false;
+
+	cursor = strchr(field, ':');
+	if (cursor == NULL)
+		return false;
+
+	cursor++;
+	while (*cursor != '\0' && isspace((unsigned char) *cursor))
+		cursor++;
+
+	*value = strtoll(cursor, &end, 10);
+	return end != cursor;
+}
+
+
+static char *
+escape_sql_literal(const char *value)
+{
+	StringInfoData escaped;
+
+	initStringInfo(&escaped);
+
+	for (const char *cursor = value; *cursor != '\0'; cursor++)
+	{
+		if (*cursor == '\'')
+			appendStringInfoChar(&escaped, '\'');
+
+		appendStringInfoChar(&escaped, *cursor);
+	}
+
+	return escaped.data;
+}
+
+
+/*
  * print_duckdb_version gets the version of DuckDB via SQL API to be
  * able to print it, and simultaneously do a sanity check of DuckDB.
  */
@@ -537,6 +920,40 @@ static duckdb_state
 run_command_on_duckdb(const char *command)
 {
 	return run_command_on_duckdb_with_callback(command, NULL, NULL);
+}
+
+
+static duckdb_state
+run_sensitive_command_on_duckdb(const char *description, const char *command)
+{
+	PGDUCK_SERVER_DEBUG("executing sensitive command on DuckDB: %s", description);
+
+	duckdb_connection connection;
+
+	if (duckdb_connect(DuckDB, &connection) == DuckDBError)
+	{
+		PGDUCK_SERVER_ERROR("could not connect to DuckDB while running "
+							"command %s", description);
+		return DuckDBError;
+	}
+
+	duckdb_result duckResult;
+	duckdb_state duckState =
+		duckdb_query(connection, command, &duckResult);
+
+	if (duckState == DuckDBError)
+	{
+		PGDUCK_SERVER_ERROR("sensitive command failed while running %s",
+							description);
+		duckdb_destroy_result(&duckResult);
+		duckdb_disconnect(&connection);
+		return DuckDBError;
+	}
+
+	duckdb_destroy_result(&duckResult);
+	duckdb_disconnect(&connection);
+
+	return DuckDBSuccess;
 }
 
 
