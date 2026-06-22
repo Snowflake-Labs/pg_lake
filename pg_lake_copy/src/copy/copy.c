@@ -101,6 +101,10 @@ PgLakeCopyValidityCheckHookType PgLakeCopyValidityCheckHook = NULL;
 static bool IsPgLakeCopy(CopyStmt *copyStmt);
 #if PG_VERSION_NUM >= 190000
 static bool PostgresSupportsJsonCopy(CopyStmt *copyStmt);
+#else
+
+/* pre-19 Postgres has no native JSON COPY, so it never claims the case */
+#define PostgresSupportsJsonCopy(copyStmt) false
 #endif
 static bool IsCopyFromStdin(CopyStmt *copyStmt);
 static bool IsCopyToStdout(CopyStmt *copyStmt);
@@ -267,15 +271,14 @@ IsPgLakeCopy(CopyStmt *copyStmt)
 		return false;
 	}
 
-#if PG_VERSION_NUM >= 190000
-
 	/*
-	 * On PG19+ Postgres has a native JSON COPY for STDIN/STDOUT/local files
-	 * (a supported URL/@stage already returned true above, so by here the
-	 * target is local). Mirror the CSV rule: give Postgres precedence
-	 * whenever it supports the case, and let pg_lake cover the rest. The
-	 * hidden, test-only json_copy_mode GUC overrides this for the regression
-	 * and pg_lake test suites.
+	 * PG19+ has a native JSON COPY for STDIN/STDOUT/local files (a supported
+	 * URL/@stage already returned true above, so by here the target is
+	 * local). Mirror the CSV rule: give Postgres precedence whenever it
+	 * supports the case, and let pg_lake cover the rest. On <=18
+	 * PostgresSupportsJsonCopy() is a constant false, so pg_lake always
+	 * handles JSON there. The hidden, test-only json_copy_mode GUC overrides
+	 * this for the regression and pg_lake test suites.
 	 */
 	if (format == DATA_FORMAT_JSON)
 	{
@@ -299,7 +302,6 @@ IsPgLakeCopy(CopyStmt *copyStmt)
 				return true;
 		}
 	}
-#endif
 
 	return true;
 }
