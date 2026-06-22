@@ -120,7 +120,17 @@ PGLakeCachingFileSystem::OpenFile(const string &fullUrl,
 	else
 	{
 		/* create a handle for the remote file */
-		wrappedHandle = remoteFs->OpenFile(url, openFlags, opener);
+		try
+		{
+			wrappedHandle = remoteFs->OpenFile(url, openFlags, opener);
+		}
+		catch (Exception &ex)
+		{
+			ErrorData error(ex);
+			if (error.Type() == ExceptionType::HTTP)
+				PGDUCK_SERVER_WARN("%.500s", error.Message().c_str());
+			throw;
+		}
 
 		if (requestCache)
 		{

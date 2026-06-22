@@ -39,6 +39,24 @@
 #define DEFAULT_MIN_INPUT_FILES (5)
 
 /*
+ * CompactionStats aggregates file/byte/row totals across a single VACUUM
+ * compaction run on one table.
+ */
+typedef struct CompactionStats
+{
+	int64		filesRemoved;
+	int64		bytesRemoved;
+	int64		rowsRemoved;
+
+	int64		filesAdded;
+	int64		bytesAdded;
+	int64		rowsAdded;
+
+	/* position-deleted rows materialized away by this compaction */
+	int64		positionDeletedRowsResolved;
+}			CompactionStats;
+
+/*
  * DataFileModificationType reflects a type of modification.
  */
 typedef enum DataFileModificationType
@@ -105,7 +123,8 @@ extern PGDLLEXPORT void ApplyDataFileModifications(Relation rel, List *modificat
 extern PGDLLEXPORT void RemoveAllDataFilesFromTable(Oid relationId);
 extern PGDLLEXPORT void RemoveAllDataFilesFromPgLakeCatalogFromTable(Oid relationId);
 extern PGDLLEXPORT bool CompactDataFiles(Oid relaitonId, TimestampTz compactionStartTime,
-										 bool forceMerge, bool isVerbose);
+										 bool forceMerge, bool isVerbose,
+										 CompactionStats * runStats);
 extern PGDLLEXPORT void CompactMetadata(Oid relationId, bool isVerbose);
 extern PGDLLEXPORT List *GetPositionDeleteFilesForDataFiles(Oid relationId, List *dataFiles,
 															Snapshot snapshot, uint64 *rowCount);

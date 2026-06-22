@@ -172,7 +172,17 @@ public:
 		if (pg_lakeHandle.context->interrupted)
 			throw InterruptException();
 
-		wrappedHandle.file_system.Write(wrappedHandle, buffer, byteCount, location);
+		try
+		{
+			wrappedHandle.file_system.Write(wrappedHandle, buffer, byteCount, location);
+		}
+		catch (Exception &ex)
+		{
+			ErrorData error(ex);
+			if (error.Type() == ExceptionType::HTTP)
+				PGDUCK_SERVER_WARN("%.500s", error.Message().c_str());
+			throw;
+		}
     }
 
 	int64_t Write(FileHandle &handle, void *buffer, int64_t byteCount) override {
@@ -220,7 +230,17 @@ public:
 			CleanUpCacheOnWriteFile(pg_lakeHandle);
 		}
 
-		return pg_lakeHandle.wrappedHandle->Write(buffer, byteCount);
+		try
+		{
+			return pg_lakeHandle.wrappedHandle->Write(buffer, byteCount);
+		}
+		catch (Exception &ex)
+		{
+			ErrorData error(ex);
+			if (error.Type() == ExceptionType::HTTP)
+				PGDUCK_SERVER_WARN("%.500s", error.Message().c_str());
+			throw;
+		}
     }
 
 	bool CanHandleFile(const string &fpath) override {

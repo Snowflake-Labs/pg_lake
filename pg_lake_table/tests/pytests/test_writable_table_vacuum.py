@@ -479,6 +479,137 @@ def test_vacuum_verbose(s3, pg_conn, extension):
     pg_conn.autocommit = False
 
 
+def test_vacuum_compaction_summary_log(s3, pg_conn, extension):
+    """VACUUM should emit a single compacted-table summary line at LOG level
+    listing files/bytes/rows in and out, and the post-compaction table size."""
+    location = f"s3://{TEST_BUCKET}/test_vacuum_compaction_summary_log/"
+
+    pg_conn.autocommit = True
+
+    run_command(
+        f"""
+        CREATE TABLE test_vacuum_compaction_summary_log (
+            id int,
+            value text
+        )
+        USING pg_lake_iceberg
+        WITH (location = '{location}');
+        INSERT INTO test_vacuum_compaction_summary_log VALUES (1, 'hello');
+        INSERT INTO test_vacuum_compaction_summary_log VALUES (2, 'world');
+        SET pg_lake_iceberg.max_snapshot_age TO 0;
+        SET pg_lake_table.vacuum_compact_min_input_files TO 1;
+        SET client_min_messages TO LOG;
+    """,
+        pg_conn,
+    )
+
+    pg_conn.notices.clear()
+
+    run_command("VACUUM test_vacuum_compaction_summary_log;", pg_conn)
+
+    summary_lines = [
+        line
+        for line in pg_conn.notices
+        if "compacted iceberg table" in line
+        and "test_vacuum_compaction_summary_log" in line
+    ]
+    assert (
+        len(summary_lines) == 1
+    ), f"expected exactly one compaction summary log line, got: {summary_lines}"
+    summary = summary_lines[0]
+    assert "rewrote 2 files" in summary
+    assert "into 1 files" in summary
+    assert "table is now" in summary
+
+    run_command(
+        f"""
+        RESET client_min_messages;
+        RESET pg_lake_iceberg.max_snapshot_age;
+        RESET pg_lake_table.vacuum_compact_min_input_files;
+        DROP TABLE test_vacuum_compaction_summary_log;
+    """,
+        pg_conn,
+    )
+
+    pg_conn.autocommit = False
+
+
+def test_vacuum_compaction_summary_resolved_rows(s3, pg_conn, extension):
+    """VACUUM summary should account for position-deleted rows: rows_in minus
+    resolved should equal rows_out, with a non-zero resolved count."""
+    location = f"s3://{TEST_BUCKET}/test_vacuum_compaction_summary_resolved_rows/"
+
+    pg_conn.autocommit = True
+
+    run_command(
+        f"""
+        CREATE TABLE test_vacuum_compaction_summary_resolved_rows (
+            id int,
+            value text
+        )
+        USING pg_lake_iceberg
+        WITH (location = '{location}');
+        INSERT INTO test_vacuum_compaction_summary_resolved_rows
+            SELECT g, 'v' || g FROM generate_series(1, 100) g;
+        INSERT INTO test_vacuum_compaction_summary_resolved_rows
+            SELECT g, 'v' || g FROM generate_series(101, 200) g;
+        -- create position deletes so compaction has rows to resolve away
+        SET pg_lake_table.copy_on_write_threshold TO 100;
+        DELETE FROM test_vacuum_compaction_summary_resolved_rows WHERE id <= 20;
+        SET pg_lake_iceberg.max_snapshot_age TO 0;
+        SET pg_lake_table.vacuum_compact_min_input_files TO 1;
+        SET client_min_messages TO LOG;
+    """,
+        pg_conn,
+    )
+
+    pg_conn.notices.clear()
+
+    run_command("VACUUM test_vacuum_compaction_summary_resolved_rows;", pg_conn)
+
+    summary_lines = [
+        line
+        for line in pg_conn.notices
+        if "compacted iceberg table" in line
+        and "test_vacuum_compaction_summary_resolved_rows" in line
+    ]
+    assert (
+        len(summary_lines) == 1
+    ), f"expected exactly one compaction summary log line, got: {summary_lines}"
+    summary = summary_lines[0]
+
+    # we deleted 20 of 200 rows, so the summary must mention them
+    assert "resolved 20 position-deleted rows" in summary
+
+    # parse "rewrote N files (B bytes, X rows) into M files (B bytes, Y rows)"
+    m = re.search(
+        r"rewrote \d+ files \(\d+ bytes, (\d+) rows\) "
+        r"into \d+ files \(\d+ bytes, (\d+) rows\)",
+        summary,
+    )
+    assert m is not None, f"could not parse row counts from summary: {summary}"
+    rows_in, rows_out = int(m.group(1)), int(m.group(2))
+
+    # the whole point: rows_in - resolved should equal rows_out
+    assert rows_in - 20 == rows_out, (
+        f"expected rows_in - resolved == rows_out, "
+        f"got rows_in={rows_in}, rows_out={rows_out}"
+    )
+
+    run_command(
+        f"""
+        RESET client_min_messages;
+        RESET pg_lake_iceberg.max_snapshot_age;
+        RESET pg_lake_table.vacuum_compact_min_input_files;
+        RESET pg_lake_table.copy_on_write_threshold;
+        DROP TABLE test_vacuum_compaction_summary_resolved_rows;
+    """,
+        pg_conn,
+    )
+
+    pg_conn.autocommit = False
+
+
 def test_vacuum_multiple_metadata_ops(s3, pg_conn, extension, with_default_location):
     pg_conn.autocommit = True
 

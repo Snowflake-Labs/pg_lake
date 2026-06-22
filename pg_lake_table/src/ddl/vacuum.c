@@ -34,6 +34,7 @@
 #include "storage/lmgr.h"
 #include "pg_lake/cleanup/deletion_queue.h"
 #include "pg_lake/cleanup/in_progress_files.h"
+#include "pg_lake/fdw/data_files_catalog.h"
 #include "pg_lake/ddl/utility_hook.h"
 #include "pg_lake/ddl/vacuum.h"
 #include "pg_lake/extensions/pg_lake_iceberg.h"
@@ -670,6 +671,7 @@ VacuumCompactDataFiles(Oid relationId, bool isFull, bool isVerbose)
 {
 	volatile bool continueCompaction = false;
 	int			compactionCount = 0;
+	CompactionStats runStats = {0};
 
 	/*
 	 * Compact files that are created before VACUUM starts. We do this because
@@ -710,7 +712,8 @@ VacuumCompactDataFiles(Oid relationId, bool isFull, bool isVerbose)
 			INJECTION_POINT_COMPAT("compact-files-before-compact");
 
 			/* do compaction */
-			continueCompaction = CompactDataFiles(relationId, compactionStartTime, isFull, isVerbose);
+			continueCompaction = CompactDataFiles(relationId, compactionStartTime,
+												  isFull, isVerbose, &runStats);
 
 			VacuumConsumeTrackedIcebergMetadataChanges(isVerbose);
 
@@ -749,6 +752,26 @@ VacuumCompactDataFiles(Oid relationId, bool isFull, bool isVerbose)
 		compactionCount++;
 	}
 	while (continueCompaction && compactionCount < MaxCompactionsPerVacuum);
+
+	if (runStats.filesRemoved > 0 || runStats.filesAdded > 0)
+	{
+		char	   *positionDeleteSuffix = runStats.positionDeletedRowsResolved > 0
+			? psprintf(", resolved " INT64_FORMAT " position-deleted rows",
+					   runStats.positionDeletedRowsResolved)
+			: "";
+		int64		tableSize = GetTableSizeFromCatalog(relationId);
+
+		ereport(LOG,
+				(errmsg("pg_lake: compacted iceberg table %s: "
+						"rewrote " INT64_FORMAT " files (" INT64_FORMAT " bytes, " INT64_FORMAT " rows) "
+						"into " INT64_FORMAT " files (" INT64_FORMAT " bytes, " INT64_FORMAT " rows)%s; "
+						"table is now " INT64_FORMAT " bytes",
+						GetQualifiedRelationName(relationId),
+						runStats.filesRemoved, runStats.bytesRemoved, runStats.rowsRemoved,
+						runStats.filesAdded, runStats.bytesAdded, runStats.rowsAdded,
+						positionDeleteSuffix,
+						tableSize)));
+	}
 }
 
 
@@ -909,6 +932,18 @@ VacuumRemoveDeletionQueueRecords(Oid relationId, bool isFull, bool isVerbose)
 	while (!isFull				/* when isFull, we'll remove all files */
 		   && totalFilesRemoved < MaxFileRemovalsPerVacuum	/* per-vacuum limit */
 		   && hasRemainingFiles /* no more files to remove */ );
+
+	if (totalFilesRemoved > 0)
+	{
+		if (relationId != InvalidOid)
+			ereport(LOG,
+					(errmsg("pg_lake: expired %d files from iceberg table %s",
+							totalFilesRemoved, GetQualifiedRelationName(relationId))));
+		else
+			ereport(LOG,
+					(errmsg("pg_lake: expired %d files from dropped iceberg tables",
+							totalFilesRemoved)));
+	}
 }
 
 /*
@@ -987,6 +1022,18 @@ VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose)
 	while (!isFull				/* when isFull, we'll remove all files */
 		   && totalFilesRemoved < MaxFileRemovalsPerVacuum	/* per-vacuum limit */
 		   && hasRemainingFiles /* no more files to remove */ );
+
+	if (totalFilesRemoved > 0)
+	{
+		if (relationId != InvalidOid)
+			ereport(LOG,
+					(errmsg("pg_lake: cleaned up %d orphaned files from iceberg table %s",
+							totalFilesRemoved, GetQualifiedRelationName(relationId))));
+		else
+			ereport(LOG,
+					(errmsg("pg_lake: cleaned up %d orphaned files from dropped iceberg tables",
+							totalFilesRemoved)));
+	}
 }
 
 

@@ -377,7 +377,7 @@ _PG_init(void)
 							 "additions/removals.",
 							 NULL,
 							 &WriteLogLevel,
-							 LOG,
+							 DEBUG1,
 							 LogLevelOptions,
 							 PGC_SUSET,
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,

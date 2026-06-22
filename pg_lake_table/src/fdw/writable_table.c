@@ -114,6 +114,7 @@ static HTAB *GroupDataFilesByPartition(List *dataFiles, TimestampTz compactionSt
 static List *FilterCompactionCandidates(List *dataFiles, TimestampTz compactionStartTime, bool forceMerge,
 										bool forceCompactDeletions);
 static List *TryCompactDataFiles(Oid relationId, TupleDesc tupleDescriptor, List *candidates,
+								 CompactionStats * runStats,
 								 PgLakeTableType tableType, List *options, bool forceMerge, bool isVerbose);
 #ifdef USE_ASSERT_CHECKING
 static void AssertAllFilesHaveSamePartition(List *dataFiles);
@@ -132,6 +133,9 @@ static List *PrepareToAddQueryResultToTable(Oid relationId,
 static List *GetPossiblePositionDeleteFiles(Oid relationId, List *sourcePathList,
 											Snapshot snapshot);
 static void ApplyMetadataChanges(Oid relationId, List *metadataOperations);
+static void RecordRemovedFile(CompactionStats * runStats, int64 fileSize,
+							  int64 rowCount, int64 positionDeletedRowCount);
+static void RecordAddedFile(CompactionStats * runStats, int64 fileSize, int64 rowCount);
 
 
 /* pg_lake_table.copy_on_write_threshold */
@@ -151,7 +155,7 @@ int			TargetFileSizeMB = DEFAULT_TARGET_FILE_SIZE_MB;
 int			VacuumCompactMinInputFiles = DEFAULT_MIN_INPUT_FILES;
 
 /* pg_lake_table.write_log_level */
-int			WriteLogLevel = LOG;
+int			WriteLogLevel = DEBUG1;
 
 
 /*
@@ -712,7 +716,7 @@ RemoveAllDataFilesFromPgLakeCatalogFromTable(Oid relationId)
  */
 bool
 CompactDataFiles(Oid relationId, TimestampTz compactionStartTime,
-				 bool forceMerge, bool isVerbose)
+				 bool forceMerge, bool isVerbose, CompactionStats * runStats)
 {
 	/* prevent concurrent update/delete which might rewrite files too */
 	LockTableForUpdate(relationId);
@@ -767,7 +771,7 @@ CompactDataFiles(Oid relationId, TimestampTz compactionStartTime,
 	}
 
 	List	   *newFileOps = TryCompactDataFiles(relationId, tupleDescriptor, entry->dataFiles,
-												 tableType, options, forceMerge, isVerbose);
+												 runStats, tableType, options, forceMerge, isVerbose);
 
 	table_close(rel, NoLock);
 	PopActiveSnapshot();
@@ -813,6 +817,7 @@ AssertAllFilesHaveSamePartition(List *dataFiles)
  */
 static List *
 TryCompactDataFiles(Oid relationId, TupleDesc tupleDescriptor, List *candidates,
+					CompactionStats * runStats,
 					PgLakeTableType tableType, List *options, bool forceMerge, bool isVerbose)
 {
 #ifdef USE_ASSERT_CHECKING
@@ -868,6 +873,10 @@ TryCompactDataFiles(Oid relationId, TupleDesc tupleDescriptor, List *candidates,
 		stats.sourceRowCount += (uint64) dataFile->stats.rowCount - dataFile->stats.deletedRowCount;
 
 		fileSizeSum += dataFile->stats.fileSize;
+
+		RecordRemovedFile(runStats, dataFile->stats.fileSize,
+						  dataFile->stats.rowCount,
+						  dataFile->stats.deletedRowCount);
 
 		filePathsToCompact = lappend(filePathsToCompact, dataFile->path);
 	}
@@ -955,6 +964,18 @@ TryCompactDataFiles(Oid relationId, TupleDesc tupleDescriptor, List *candidates,
 									   NIL /* partitionByExprs */ );
 
 	metadataOperations = list_concat(metadataOperations, newFileOps);
+
+	{
+		ListCell   *newFileCell = NULL;
+
+		foreach(newFileCell, newFileOps)
+		{
+			TableMetadataOperation *addOp = lfirst(newFileCell);
+
+			RecordAddedFile(runStats, addOp->dataFileStats.fileSize,
+							addOp->dataFileStats.rowCount);
+		}
+	}
 
 	if (hasRowIds)
 	{
@@ -1409,6 +1430,40 @@ ApplyMetadataChanges(Oid relationId, List *metadataOperations)
 								   "table type %d",
 								   tableType)));
 	}
+}
+
+
+/*
+ * RecordRemovedFile bumps the removed-file counters in runStats for a single
+ * compaction input. No-op when runStats is NULL.
+ */
+static void
+RecordRemovedFile(CompactionStats * runStats, int64 fileSize,
+				  int64 rowCount, int64 positionDeletedRowCount)
+{
+	if (runStats == NULL)
+		return;
+
+	runStats->filesRemoved++;
+	runStats->bytesRemoved += fileSize;
+	runStats->rowsRemoved += rowCount;
+	runStats->positionDeletedRowsResolved += positionDeletedRowCount;
+}
+
+
+/*
+ * RecordAddedFile bumps the added-file counters in runStats for a single
+ * compaction output. No-op when runStats is NULL.
+ */
+static void
+RecordAddedFile(CompactionStats * runStats, int64 fileSize, int64 rowCount)
+{
+	if (runStats == NULL)
+		return;
+
+	runStats->filesAdded++;
+	runStats->bytesAdded += fileSize;
+	runStats->rowsAdded += rowCount;
 }
 
 

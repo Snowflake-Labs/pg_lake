@@ -789,7 +789,8 @@ duckdb_session_run_command(DuckDBSession * duckSession, const char *queryString,
 		}
 		else
 		{
-			PGDUCK_SERVER_WARN("query on duckdb failed: %s", duckdbError);
+			PGDUCK_SERVER_WARN("query on duckdb failed: %s; query: %.500s",
+							   duckdbError, queryString);
 			status = DUCKDB_QUERY_ERROR;
 		}
 
@@ -961,7 +962,9 @@ duckdb_session_execute_prepared(DuckDBSession * duckSession,
 		}
 		else
 		{
-			PGDUCK_SERVER_WARN("could not execute prepared statement: %s", duckdbError);
+			PGDUCK_SERVER_WARN("could not execute prepared statement: %s; query: %.500s",
+							   duckdbError,
+							   duckSession->clientSession->pgSessionPreparedStmt.queryString);
 			status = DUCKDB_QUERY_ERROR;
 		}
 
@@ -1247,7 +1250,9 @@ process_and_send_data_chunks(DuckDBQueryResult * duckdb_query_result,
 				}
 				else
 				{
-					PGDUCK_SERVER_WARN("query on duckdb failed during execution: %s", duckdbError);
+					PGDUCK_SERVER_WARN("query on duckdb failed during execution: %s; query: %.500s",
+									   duckdbError,
+									   clientSession->pgSessionPreparedStmt.queryString);
 					status = DUCKDB_QUERY_ERROR;
 				}
 

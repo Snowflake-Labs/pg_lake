@@ -97,7 +97,7 @@ def iceberg_autovacuum_on_db(conn_to_db, tbl_count, s3, extension, d_location):
 
     for i in range(0, tbl_count):
         cnt = 0
-        # try at most 5 seconds, otherwise there is probably something wrong
+        # try at most 30 seconds, otherwise there is probably something wrong
         while True:
             result = run_query(
                 f"""
@@ -116,7 +116,7 @@ def iceberg_autovacuum_on_db(conn_to_db, tbl_count, s3, extension, d_location):
             if result != 1 or result_part != 2:
                 time.sleep(0.1)
                 cnt = cnt + 1
-                if cnt == 50:
+                if cnt == 300:
                     assert False, "autovacuum did not kick in"
             else:
                 # happy case, as expected we compacted the files

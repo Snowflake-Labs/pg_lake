@@ -325,7 +325,7 @@ FileCacheManager::CacheFileInternal(ClientContext &context, string url, bool for
 		return 0;
 	}
 
-	PGDUCK_SERVER_LOG("adding %s to cache", finalCacheFilePath.c_str());
+	PGDUCK_SERVER_DEBUG("adding %s to cache", finalCacheFilePath.c_str());
 
 	/* create the directory if it does not exist */
 	string cacheFileDir = FileUtils::ExtractDirName(finalCacheFilePath);
@@ -467,7 +467,7 @@ FileCacheManager::RemoveCacheFileInternal(FileSystem &file_system, string finalC
 		fileExists = file_system.FileExists(filePath);
 		if (fileExists)
 		{
-			PGDUCK_SERVER_LOG("removing %s from cache", filePath.c_str());
+			PGDUCK_SERVER_DEBUG("removing %s from cache", filePath.c_str());
 			file_system.RemoveFile(filePath);
 		}
 	}
@@ -624,8 +624,8 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize)
 
 		if (!cacheFile.isCandidate)
 		{
-			PGDUCK_SERVER_LOG("removing %s from cache (%" PRIu64 \
-							  " bytes)", cacheFile.cacheFilePath.c_str(), cacheFile.fileSize);
+			PGDUCK_SERVER_DEBUG("removing %s from cache (%" PRIu64 \
+							    " bytes)", cacheFile.cacheFilePath.c_str(), cacheFile.fileSize);
 
 			/* for background tasks, we skip if lock cannot be acquired */
 			bool waitForLock = false;
@@ -703,6 +703,43 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize)
 				.action = ADD_FAILED
 			});
 		}
+	}
+
+	int64_t added = 0, addedBytes = 0;
+	int64_t removed = 0, removedBytes = 0;
+	int64_t skippedTooLarge = 0, skippedTooOld = 0;
+	int64_t skippedConcurrent = 0, addFailed = 0;
+
+	for (const CacheAction &a : actions)
+	{
+		switch (a.action)
+		{
+			case ADDED:             added++; addedBytes += a.fileSize; break;
+			case REMOVED:           removed++; removedBytes += a.fileSize; break;
+			case SKIPPED_TOO_LARGE: skippedTooLarge++; break;
+			case SKIPPED_TOO_OLD:   skippedTooOld++; break;
+			case SKIPPED_CONCURRENT_MODIFY: skippedConcurrent++; break;
+			case ADD_FAILED:        addFailed++; break;
+			default:                break;
+		}
+	}
+
+	if (added > 0 || removed > 0 || skippedTooOld > 0 ||
+		skippedTooLarge > 0 || addFailed > 0)
+	{
+		PGDUCK_SERVER_LOG("cache pressure: added %" PRIu64 " files (%" PRIu64
+						  " bytes), evicted %" PRIu64 " files (%" PRIu64 " bytes), "
+						  "skipped %" PRIu64 " (too old), %" PRIu64 " (too large), "
+						  "%" PRIu64 " (concurrent), %" PRIu64 " (add failed); "
+						  "cache now %" PRIu64 "/%" PRIu64 " bytes",
+						  (uint64_t) added, (uint64_t) addedBytes,
+						  (uint64_t) removed, (uint64_t) removedBytes,
+						  (uint64_t) skippedTooOld,
+						  (uint64_t) skippedTooLarge,
+						  (uint64_t) skippedConcurrent,
+						  (uint64_t) addFailed,
+						  (uint64_t) totalCacheSize,
+						  (uint64_t) maxCacheSize);
 	}
 
 	return actions;
