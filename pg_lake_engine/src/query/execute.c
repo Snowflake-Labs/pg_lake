@@ -75,14 +75,13 @@ uint64
 ExecuteQueryToDestReceiver(Query *query, const char *queryString,
 						   ParamListInfo params, DestReceiver *dest)
 {
-	PlannedStmt *plan = pg_plan_query(query,
-									  queryString,
-									  CURSOR_OPT_PARALLEL_OK,
-									  params
 #if PG_VERSION_NUM >= 190000
-									  ,NULL
+	PlannedStmt *plan = pg_plan_query(query, queryString, CURSOR_OPT_PARALLEL_OK,
+									  params, NULL);
+#else
+	PlannedStmt *plan = pg_plan_query(query, queryString, CURSOR_OPT_PARALLEL_OK,
+									  params);
 #endif
-		);
 
 	return ExecutePlanToDestReceiver(plan, queryString, params, dest);
 }
