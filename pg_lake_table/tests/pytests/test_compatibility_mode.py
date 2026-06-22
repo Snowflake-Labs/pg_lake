@@ -97,6 +97,29 @@ def _assert_no_nested_uuid(s3, pg_conn, table):
         ), f"field {f['name']} has a nested uuid (depths {depths}) in {table}"
 
 
+def _struct_field(itype, name):
+    """Return the named subfield "type" of an iceberg struct type node."""
+    assert itype["type"] == "struct", itype
+    return next(f["type"] for f in itype["fields"] if f["name"] == name)
+
+
+def _collect_kinds(itype, kinds=None):
+    """Collect every structural "type" tag (list/map/struct) in an iceberg type."""
+    kinds = kinds if kinds is not None else []
+    if isinstance(itype, str):
+        return kinds
+    kinds.append(itype["type"])
+    if itype["type"] == "list":
+        _collect_kinds(itype["element"], kinds)
+    elif itype["type"] == "map":
+        _collect_kinds(itype["key"], kinds)
+        _collect_kinds(itype["value"], kinds)
+    elif itype["type"] == "struct":
+        for f in itype["fields"]:
+            _collect_kinds(f["type"], kinds)
+    return kinds
+
+
 # ---------------------------------------------------------------------------
 # option validation
 # ---------------------------------------------------------------------------
@@ -374,6 +397,150 @@ def test_multiple_converting_columns(s3, pg_conn, extension, with_default_locati
         _assert_no_nested_uuid(s3, pg_conn, "compat_multi")
     finally:
         run_command("DROP TABLE compat_multi", pg_conn)
+        pg_conn.commit()
+
+
+def test_wide_deep_composite_with_maps_all_converted(
+    s3, pg_conn, extension, with_default_location
+):
+    """
+    A wide + deep composite carrying many uuids across arrays, maps, nested
+    composites and arrays-of-composites: every nested uuid must be rewritten,
+    while the structure (maps stay maps, lists stay lists) is preserved and
+    uuid-free maps/fields are left intact.
+    """
+    m_val = create_map_type("text", "uuid")  # uuid in the value
+    m_key = create_map_type("uuid", "text")  # uuid in the key
+    m_clean = create_map_type("int", "text")  # no uuid -> must survive as-is
+    run_command(
+        f"""
+        CREATE TYPE wd_leaf AS (
+            l1     uuid,
+            l2     uuid,
+            lids   uuid[],
+            lmv    {m_val},
+            llabel text
+        );
+        CREATE TYPE wd_top AS (
+            t1     uuid,
+            t2     uuid,
+            t3     uuid,
+            tids1  uuid[],
+            tids2  uuid[],
+            leaf   wd_leaf,
+            leaves wd_leaf[],
+            mv     {m_val},
+            mk     {m_key},
+            mc     {m_clean},
+            keep_i int,
+            keep_t text
+        );
+        CREATE TABLE compat_widedeep (id int, w wd_top, ws wd_top[]) USING iceberg
+            WITH (compatibility_mode = 'snowflake');
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    try:
+        # decisive invariant on the real iceberg schema: no uuid nested anywhere
+        _assert_no_nested_uuid(s3, pg_conn, "compat_widedeep")
+
+        # the rebuilt top composite keeps its width, with uuids -> text and the
+        # non-uuid scalar fields untouched
+        attrs = dict(_composite_attrs_of_column(pg_conn, "compat_widedeep", "w"))
+        for f in ("t1", "t2", "t3"):
+            assert attrs[f] == "text", attrs
+        assert attrs["tids1"] == "text[]"
+        assert attrs["tids2"] == "text[]"
+        assert attrs["keep_i"] == "integer"
+        assert attrs["keep_t"] == "text"
+
+        # structure survives: the w struct still has maps for mv/mk/mc, and the
+        # converted maps have string leaves while the clean map is untouched.
+        fields = _iceberg_fields(s3, pg_conn, "compat_widedeep")
+        w = next(f["type"] for f in fields if f["name"] == "w")
+        mv = _struct_field(w, "mv")
+        mk = _struct_field(w, "mk")
+        mc = _struct_field(w, "mc")
+        assert mv["type"] == "map" and mv["value"] == "string"
+        assert mk["type"] == "map" and mk["key"] == "string"
+        assert mc["type"] == "map"  # uuid-free map preserved
+
+        # the nested leaf composite (and the array-of-composites) also converted
+        leaf = _struct_field(w, "leaf")
+        assert _struct_field(leaf, "l1") == "string"
+        assert "uuid" not in _collect_kinds(_struct_field(w, "leaves"))
+        ws = next(f["type"] for f in fields if f["name"] == "ws")
+        assert "uuid" not in str(ws)
+    finally:
+        run_command(
+            "DROP TABLE compat_widedeep; " "DROP TYPE wd_top; DROP TYPE wd_leaf;",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# CREATE TABLE ... LIKE ... USING iceberg
+# ---------------------------------------------------------------------------
+
+
+def test_create_table_like_converts(s3, pg_conn, extension, with_default_location):
+    """
+    CREATE TABLE (LIKE src) USING iceberg expands the LIKE into real columns
+    before the option hook runs, so nested uuids from the source are converted
+    just like an explicit column list.  Source here is a plain heap table.
+    """
+    run_command(
+        """
+        CREATE TYPE like_comp AS (cid uuid, tags uuid[], note text);
+        CREATE TABLE like_src (
+            id     int,
+            top_id uuid,
+            us     uuid[],
+            c      like_comp
+        );
+        CREATE TABLE like_ice (LIKE like_src) USING iceberg
+            WITH (compatibility_mode = 'snowflake');
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    try:
+        assert _col_format_type(pg_conn, "like_ice", "top_id") == "uuid"
+        assert _col_format_type(pg_conn, "like_ice", "us") == "text[]"
+        assert _composite_attrs_of_column(pg_conn, "like_ice", "c") == [
+            ["cid", "text"],
+            ["tags", "text[]"],
+            ["note", "text"],
+        ]
+        _assert_no_nested_uuid(s3, pg_conn, "like_ice")
+    finally:
+        run_command(
+            "DROP TABLE like_ice; DROP TABLE like_src; DROP TYPE like_comp;",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+
+def test_create_table_like_without_option_keeps_uuid(
+    s3, pg_conn, extension, with_default_location
+):
+    """LIKE without the option must not convert (the option is per-new-table)."""
+    run_command(
+        """
+        CREATE TABLE like_src_noopt (id int, us uuid[]);
+        CREATE TABLE like_ice_noopt (LIKE like_src_noopt) USING iceberg;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+    try:
+        assert _col_format_type(pg_conn, "like_ice_noopt", "us") == "uuid[]"
+    finally:
+        run_command("DROP TABLE like_ice_noopt; DROP TABLE like_src_noopt;", pg_conn)
         pg_conn.commit()
 
 

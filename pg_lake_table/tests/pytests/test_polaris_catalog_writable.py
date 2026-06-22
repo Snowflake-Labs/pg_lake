@@ -4633,3 +4633,126 @@ def set_auto_vacuum_params(superuser_conn):
         ],
         superuser_conn,
     )
+
+
+def _rest_schema_fields(s3, schema, table, pg_conn):
+    """Top-level iceberg schema fields of a writable REST-catalog table."""
+    metadata = get_rest_table_metadata(schema, table, pg_conn)
+    data = read_s3_operations(s3, metadata["metadata-location"])
+    return json.loads(data)["schemas"][0]["fields"]
+
+
+def test_writable_rest_compatibility_mode(
+    pg_conn,
+    installcheck,
+    s3,
+    extension,
+    with_default_location,
+    polaris_session,
+    set_polaris_gucs,
+    create_http_helper_functions,
+):
+    """compatibility_mode='snowflake' must apply on the writable REST catalog
+    creation path: nested uuids become text both in the local catalog and in
+    the iceberg schema registered in the REST catalog, with data round-trip."""
+    if installcheck:
+        return
+
+    run_command("CREATE SCHEMA test_rest_compat;", pg_conn)
+    pg_conn.commit()
+    run_command(
+        """
+        CREATE TYPE test_rest_compat.c1 AS (cid uuid, tags uuid[], note text);
+        CREATE TABLE test_rest_compat.t (
+            id     int,
+            top_id uuid,
+            us     uuid[],
+            c      test_rest_compat.c1
+        ) USING iceberg WITH (catalog='rest', compatibility_mode='snowflake');
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    def coltype(col):
+        return run_query(
+            "SELECT format_type(atttypid, atttypmod) FROM pg_attribute "
+            f"WHERE attrelid='test_rest_compat.t'::regclass AND attname='{col}'",
+            pg_conn,
+        )[0][0]
+
+    # local postgres column types reflect the conversion
+    assert coltype("top_id") == "uuid"
+    assert coltype("us") == "text[]"
+
+    # iceberg schema registered in the REST catalog has no nested uuid
+    fields = _rest_schema_fields(s3, "test_rest_compat", "t", pg_conn)
+    top = next(f for f in fields if f["name"] == "top_id")
+    us = next(f for f in fields if f["name"] == "us")
+    c = next(f for f in fields if f["name"] == "c")
+    assert top["type"] == "uuid"
+    assert us["type"]["type"] == "list" and us["type"]["element"] == "string"
+    assert c["type"]["type"] == "struct"
+    cid = next(x for x in c["type"]["fields"] if x["name"] == "cid")
+    tags = next(x for x in c["type"]["fields"] if x["name"] == "tags")
+    assert cid["type"] == "string"
+    assert tags["type"]["type"] == "list" and tags["type"]["element"] == "string"
+
+    # data round-trips through the rewritten text columns
+    u = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+    run_command(
+        f"INSERT INTO test_rest_compat.t VALUES "
+        f"(1, '{u}', ARRAY['{u}']::uuid[], ROW('{u}', ARRAY['{u}']::uuid[], 'n'));",
+        pg_conn,
+    )
+    pg_conn.commit()
+    row = run_query(
+        "SELECT top_id, us, (c).cid, (c).tags FROM test_rest_compat.t", pg_conn
+    )[0]
+    assert str(row[0]) == u
+    assert row[1] == [u]
+    assert row[2] == u
+    assert row[3] == [u]
+
+
+def test_writable_rest_create_table_like_compatibility_mode(
+    pg_conn,
+    installcheck,
+    s3,
+    extension,
+    with_default_location,
+    polaris_session,
+    set_polaris_gucs,
+    create_http_helper_functions,
+):
+    """CREATE TABLE (LIKE src) USING iceberg WITH (catalog='rest', ...) must
+    expand the LIKE and still apply compatibility_mode on the REST path."""
+    if installcheck:
+        return
+
+    run_command("CREATE SCHEMA test_rest_compat_like;", pg_conn)
+    pg_conn.commit()
+    run_command(
+        """
+        CREATE TABLE test_rest_compat_like.src (id int, top_id uuid, us uuid[]);
+        CREATE TABLE test_rest_compat_like.t
+            (LIKE test_rest_compat_like.src)
+            USING iceberg WITH (catalog='rest', compatibility_mode='snowflake');
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    def coltype(col):
+        return run_query(
+            "SELECT format_type(atttypid, atttypmod) FROM pg_attribute "
+            f"WHERE attrelid='test_rest_compat_like.t'::regclass AND attname='{col}'",
+            pg_conn,
+        )[0][0]
+
+    assert coltype("top_id") == "uuid"
+    assert coltype("us") == "text[]"
+
+    fields = _rest_schema_fields(s3, "test_rest_compat_like", "t", pg_conn)
+    us = next(f for f in fields if f["name"] == "us")
+    assert us["type"]["type"] == "list" and us["type"]["element"] == "string"
