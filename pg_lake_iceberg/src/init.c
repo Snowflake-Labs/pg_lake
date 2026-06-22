@@ -345,6 +345,16 @@ _PG_init(void)
 	AvroInit();
 
 	RegisterUtilityStatementHandler(ValidateIcebergCatalogServerDDL, NULL);
+
+	/*
+	 * Register last so it runs first: RegisterUtilityStatementHandler
+	 * prepends to a linked list.  Redaction must precede the validator above
+	 * so that the failing built-in-server path never leaks client_id /
+	 * client_secret in its error context.
+	 */
+	RegisterUtilityStatementHandler(RedactRestCatalogUserMappingSecrets, NULL);
+
+	InitializeIcebergCatalogObjectAccessHook();
 }
 
 

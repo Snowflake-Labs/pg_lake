@@ -421,6 +421,12 @@ _PG_init(void)
 	RegisterPgLakeCustomNodes();
 
 	IcebergRegisterCallbacks();
+
+	/*
+	 * Wire pg_lake_iceberg's OAT_DROP user-mapping hook to the txn-local
+	 * credential capture in track_iceberg_metadata_changes.c.
+	 */
+	RegisterRestCatalogXactCaptureCallback();
 }
 
 

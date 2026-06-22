@@ -5,13 +5,30 @@
  * configurations via CREATE SERVER so that users are not limited to a
  * single global REST catalog configured through GUC settings.
  *
- * Example:
+ * Server options (non-secret): rest_endpoint, rest_auth_type,
+ *   oauth_endpoint, scope, enable_vended_credentials, location_prefix,
+ *   catalog_name.
+ * User mapping options (credentials): client_id, client_secret, scope.
+ *
+ * scope is accepted in both server and user mapping; user mapping wins.
+ *
+ * Credential resolution depends on the catalog kind:
+ *
+ *   - The built-in 'rest' catalog reads credentials from the
+ *     pg_lake_iceberg.rest_catalog_client_id /
+ *     pg_lake_iceberg.rest_catalog_client_secret GUCs.
+ *   - User-created catalog servers require credentials on a USER
+ *     MAPPING.  They do NOT fall back to the GUCs above, so that a
+ *     role with USAGE on the FDW cannot create a server pointing at
+ *     a third-party endpoint and harvest the system-wide credentials.
+ *
+ * User-defined catalog example:
  *   CREATE SERVER my_polaris TYPE 'rest'
  *     FOREIGN DATA WRAPPER iceberg_catalog
- *     OPTIONS (rest_endpoint 'http://polaris:8181',
- *              rest_auth_type 'default',
- *              client_id '...',
- *              client_secret '...');
+ *     OPTIONS (rest_endpoint 'https://polaris.example.com');
+ *
+ *   CREATE USER MAPPING FOR user1 SERVER my_polaris
+ *     OPTIONS (client_id '...', client_secret '...');
  *
  *   CREATE TABLE t (a int) USING iceberg WITH (catalog = 'my_polaris');
  */
