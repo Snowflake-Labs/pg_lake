@@ -98,9 +98,7 @@
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 #include "utils/tuplestore.h"
-#if PG_VERSION_NUM >= 190000
 #include "utils/wait_event.h"
-#endif
 #include "tcop/utility.h"
 
 #include "pg_extension_base/base_workers.h"
