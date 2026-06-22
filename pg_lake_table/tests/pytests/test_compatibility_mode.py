@@ -120,6 +120,75 @@ def _collect_kinds(itype, kinds=None):
     return kinds
 
 
+def _data_file_paths(conn, table):
+    """The committed DATA files (parquet) backing an iceberg table."""
+    metadata_path = run_query(
+        f"SELECT metadata_location FROM iceberg_tables WHERE table_name = '{table}'",
+        conn,
+    )[0][0]
+    rows = run_query(
+        f"SELECT file_path FROM lake_iceberg.files('{metadata_path}') "
+        "WHERE content = 'DATA'",
+        conn,
+    )
+    return [r[0] for r in rows]
+
+
+def _parquet_schema(duck, file_path):
+    """(name, physical_type, logical_type) per parquet column, types as text."""
+    return duck.execute(
+        "SELECT name, type::varchar, logical_type::varchar "
+        f"FROM parquet_schema('{file_path}')"
+    ).fetchall()
+
+
+def _parquet_uuid_leaves(duck, file_path):
+    """
+    Parquet leaves serialized as a uuid.  A nested uuid that was rewritten to
+    text MUST be a BYTE_ARRAY (string); if it shows up here as a UUID logical
+    type / FIXED_LEN_BYTE_ARRAY the data file diverges from the iceberg schema.
+    """
+    return [
+        (name, ptype, ltype)
+        for (name, ptype, ltype) in _parquet_schema(duck, file_path)
+        if (ltype and "UUID" in ltype.upper()) or ptype == "FIXED_LEN_BYTE_ARRAY"
+    ]
+
+
+def _assert_data_files_uuid_free(conn, table):
+    """
+    The decisive companion to _assert_no_nested_uuid: not just the iceberg
+    metadata schema but the actual Parquet data files must carry string, never
+    uuid, for every rewritten leaf.
+    """
+    paths = _data_file_paths(conn, table)
+    assert paths, f"no data files written for {table}"
+    duck = create_duckdb_conn()
+    try:
+        for path in paths:
+            offenders = _parquet_uuid_leaves(duck, path)
+            assert (
+                not offenders
+            ), f"{table} data file {path} serialized uuid leaves: {offenders}"
+    finally:
+        duck.close()
+
+
+def _parquet_leaf_types(conn, table):
+    """Union of (name, physical_type) leaf tuples across all data files."""
+    paths = _data_file_paths(conn, table)
+    assert paths, f"no data files written for {table}"
+    duck = create_duckdb_conn()
+    out = set()
+    try:
+        for path in paths:
+            for name, ptype, _ in _parquet_schema(duck, path):
+                out.add((name, ptype))
+    finally:
+        duck.close()
+    return out
+
+
 # ---------------------------------------------------------------------------
 # option validation
 # ---------------------------------------------------------------------------
@@ -937,4 +1006,174 @@ def test_combined_all_conversions(s3, pg_conn, extension, with_default_location)
         assert row[4] == [uid]
     finally:
         run_command("DROP TABLE compat_kitchen", pg_conn)
+        pg_conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# data-file physical types: the committed parquet must serialize string, not uuid
+#
+# Every assertion above checks the iceberg *metadata schema*.  These tests
+# check the decisive companion invariant on the actual Parquet *data files*: a
+# schema-faithful reader (Snowflake / Spark / PyIceberg / pyarrow) trusts the
+# file's physical type, so a rewritten nested uuid must be written as a string
+# (BYTE_ARRAY) and never as a UUID logical type (FIXED_LEN_BYTE_ARRAY).
+# pg_lake's SQL write paths (INSERT ... VALUES/SELECT, COPY ... FROM) cast to
+# the target column type, so they must always produce string leaves here.
+# ---------------------------------------------------------------------------
+
+
+def test_data_file_uuid_array_written_as_string(
+    s3, pg_conn, superuser_conn, extension, with_default_location
+):
+    u1 = "11111111-1111-1111-1111-111111111111"
+    u2 = "22222222-2222-2222-2222-222222222222"
+    run_command(
+        "CREATE TABLE compat_df_arr (id int, us uuid[]) USING iceberg "
+        "WITH (compatibility_mode = 'snowflake');",
+        pg_conn,
+    )
+    run_command(
+        f"INSERT INTO compat_df_arr VALUES (1, ARRAY['{u1}','{u2}']::uuid[]);",
+        pg_conn,
+    )
+    pg_conn.commit()
+    try:
+        _assert_data_files_uuid_free(superuser_conn, "compat_df_arr")
+        # positively: the list element leaf is a string (BYTE_ARRAY)
+        assert ("element", "BYTE_ARRAY") in _parquet_leaf_types(
+            superuser_conn, "compat_df_arr"
+        )
+    finally:
+        run_command("DROP TABLE compat_df_arr", pg_conn)
+        pg_conn.commit()
+
+
+def test_data_file_composite_and_map_written_as_string(
+    s3, pg_conn, superuser_conn, extension, with_default_location
+):
+    u = "a0974028-d682-4796-b142-b96580b1c103"
+    map_type = create_map_type("text", "uuid")
+    run_command(
+        f"""
+        CREATE TYPE df_comp AS (cid uuid, cids uuid[], note text);
+        CREATE TABLE compat_df_comp (id int, c df_comp, m {map_type}) USING iceberg
+            WITH (compatibility_mode = 'snowflake');
+        """,
+        pg_conn,
+    )
+    converted_map = _col_format_type(pg_conn, "compat_df_comp", "m")
+    run_command(
+        f"""
+        INSERT INTO compat_df_comp VALUES
+            (1, ROW('{u}', ARRAY['{u}']::uuid[], 'hi'),
+             ARRAY[('k', '{u}')]::{converted_map});
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+    try:
+        _assert_data_files_uuid_free(superuser_conn, "compat_df_comp")
+    finally:
+        run_command("DROP TABLE compat_df_comp", pg_conn)
+        pg_conn.commit()
+
+
+def test_data_file_deeply_nested_written_as_string(
+    s3, pg_conn, superuser_conn, extension, with_default_location
+):
+    u = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+    run_command(
+        """
+        CREATE TYPE df_leaf AS (k uuid, ks uuid[], label text);
+        CREATE TYPE df_mid  AS (one df_leaf, many df_leaf[], mid_id uuid);
+        CREATE TABLE compat_df_deep (
+            pk       bigint,
+            top_id   uuid,
+            flat_ids uuid[],
+            m        df_mid,
+            ms       df_mid[]
+        ) USING iceberg WITH (compatibility_mode = 'snowflake');
+        """,
+        pg_conn,
+    )
+    # bare string literals / ROW() / ARRAY[] (no ::uuid casts) so each value
+    # coerces straight into the rewritten text columns.  PG can coerce a nested
+    # ROW() into a composite field, but not an anonymous record[] into a
+    # composite[]; so the array-of-composite fields (many / ms) stay NULL here.
+    # The deep struct path (m.one.{k,ks,mid_id}) still lands rewritten leaves in
+    # the data file; test_deeply_nested_uuid_all_converted covers the full
+    # array-of-composite structure at the schema level.
+    leaf = f"ROW('{u}', ARRAY['{u}'], 'l')"
+    mid = f"ROW({leaf}, NULL, '{u}')"
+    run_command(
+        f"""
+        INSERT INTO compat_df_deep VALUES (
+            1, '{u}', ARRAY['{u}'],
+            {mid},
+            NULL
+        );
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+    try:
+        # top-level uuid stays uuid; every nested uuid is a string in the file
+        offenders_outside_top = []
+        paths = _data_file_paths(superuser_conn, "compat_df_deep")
+        duck = create_duckdb_conn()
+        try:
+            for path in paths:
+                for name, ptype, ltype in _parquet_uuid_leaves(duck, path):
+                    if name != "top_id":
+                        offenders_outside_top.append((name, ptype, ltype))
+        finally:
+            duck.close()
+        assert (
+            not offenders_outside_top
+        ), f"nested uuid serialized in deep file: {offenders_outside_top}"
+    finally:
+        run_command("DROP TABLE compat_df_deep", pg_conn)
+        pg_conn.commit()
+
+
+def test_data_file_copy_from_uuid_parquet_written_as_string(
+    s3, pg_conn, superuser_conn, extension, with_default_location
+):
+    """
+    COPY FROM a source parquet whose element is a real uuid: pg_lake casts to
+    the rewritten text[] column, so the committed data file is a string.
+    """
+    u1 = "11111111-1111-1111-1111-111111111111"
+    u2 = "22222222-2222-2222-2222-222222222222"
+
+    # a source parquet whose element is a genuine UUID logical type
+    src = f"s3://{TEST_BUCKET}/compat_df_src/u.parquet"
+    duck = create_duckdb_conn()
+    try:
+        duck.execute(
+            f"""
+            COPY (SELECT 1 AS id,
+                         ['{u1}'::uuid, '{u2}'::uuid] AS us)
+            TO '{src}' (FORMAT parquet);
+            """
+        )
+        # sanity: the source really is a uuid leaf (proves the test can detect it)
+        assert _parquet_uuid_leaves(duck, src), "source parquet should be uuid"
+    finally:
+        duck.close()
+
+    run_command(
+        "CREATE TABLE compat_df_copy (id int, us uuid[]) USING iceberg "
+        "WITH (compatibility_mode = 'snowflake');",
+        pg_conn,
+    )
+    run_command(f"COPY compat_df_copy FROM '{src}';", pg_conn)
+    pg_conn.commit()
+    try:
+        _assert_data_files_uuid_free(superuser_conn, "compat_df_copy")
+        assert ("element", "BYTE_ARRAY") in _parquet_leaf_types(
+            superuser_conn, "compat_df_copy"
+        )
+    finally:
+        run_command("DROP TABLE compat_df_copy", pg_conn)
         pg_conn.commit()
