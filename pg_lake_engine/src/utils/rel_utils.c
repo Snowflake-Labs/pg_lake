@@ -31,6 +31,7 @@
 #include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/relcache.h"
 #include "utils/syscache.h"
@@ -595,6 +596,31 @@ ConvertTypeTree(Oid typeOid, int32 typeMod, int level,
 
 
 /*
+ * SetColumnDefTypeNameFromOid replaces columnDef->typeName with a TypeName for
+ * (typeOid, typmod), allocating the new node in the same memory context as the
+ * ColumnDef itself rather than in CurrentMemoryContext.
+ *
+ * The type-rewrite passes run from a utility hook and mutate ColumnDefs that
+ * belong to the incoming parse tree.  That parse tree can outlive
+ * CurrentMemoryContext (e.g. a cached/prepared utility statement, or DDL run
+ * via SPI), so a typeName allocated in the transient context would dangle once
+ * that context is reset, leaving the longer-lived ColumnDef pointing at freed
+ * memory.  Anchoring the allocation to the ColumnDef's own context keeps their
+ * lifetimes in sync.
+ */
+void
+SetColumnDefTypeNameFromOid(ColumnDef *columnDef, Oid typeOid, int32 typmod)
+{
+	MemoryContext nodeContext = GetMemoryChunkContext(columnDef);
+	MemoryContext oldContext = MemoryContextSwitchTo(nodeContext);
+
+	columnDef->typeName = makeTypeNameFromOid(typeOid, typmod);
+
+	MemoryContextSwitchTo(oldContext);
+}
+
+
+/*
  * NumericLeafToDouble is the ConvertTypeTree leaf rule for the unsupported
  * numeric -> float8 pass.  Numeric is never a container, so it applies at any
  * nesting level; level and context are unused.
@@ -693,6 +719,7 @@ MaybeConvertUnsupportedNumericColumnsToDouble(List *columnDefList)
 						 "exact decimal semantics.",
 						 DUCKDB_MAX_NUMERIC_PRECISION)));
 
-		columnDef->typeName = makeTypeNameFromOid(converted.postgresTypeOid, converted.postgresTypeMod);
+		SetColumnDefTypeNameFromOid(columnDef, converted.postgresTypeOid,
+									converted.postgresTypeMod);
 	}
 }

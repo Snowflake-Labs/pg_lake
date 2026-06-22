@@ -277,7 +277,7 @@ ApplyIcebergTableCompatibilityModeForSchema(List *columnDefList,
 							&convertedOid, &convertedMod))
 		{
 			ErrorIfColumnRewriteUnsafe(columnDef);
-			columnDef->typeName = makeTypeNameFromOid(convertedOid, convertedMod);
+			SetColumnDefTypeNameFromOid(columnDef, convertedOid, convertedMod);
 		}
 	}
 }
