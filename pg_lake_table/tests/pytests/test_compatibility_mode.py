@@ -580,6 +580,115 @@ def test_alter_add_without_option_keeps_uuid(
 
 
 # ---------------------------------------------------------------------------
+# type-bound clauses on a rewritten column are refused
+#
+# Rewriting a column swaps only its type; there is no implicit uuid->text cast,
+# so a DEFAULT/GENERATED expression bound to the original (uuid) type cannot be
+# silently re-coerced.  We fail fast instead of producing a broken column.
+# This is reachable only from user-authored DDL (programmatic Iceberg table
+# creation builds columns from type/typmod/collation alone, never these
+# clauses).  A clause on a column we DON'T rewrite (top-level uuid, or a
+# uuid-free column) is fine.
+# ---------------------------------------------------------------------------
+
+
+def test_default_on_rewritten_column_rejected(
+    s3, pg_conn, extension, with_default_location
+):
+    error = run_command(
+        "CREATE TABLE compat_def (id int, us uuid[] DEFAULT '{}'::uuid[]) "
+        "USING iceberg WITH (compatibility_mode = 'snowflake');",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "cannot rewrite column" in error
+    assert "us" in error
+    pg_conn.rollback()
+
+
+def test_generated_on_rewritten_column_rejected(
+    s3, pg_conn, extension, with_default_location
+):
+    error = run_command(
+        "CREATE TABLE compat_gen "
+        "(u uuid, g uuid[] GENERATED ALWAYS AS (ARRAY[u]) STORED) "
+        "USING iceberg WITH (compatibility_mode = 'snowflake');",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "cannot rewrite column" in error
+    assert "g" in error
+    pg_conn.rollback()
+
+
+def test_default_on_nested_composite_column_rejected(
+    s3, pg_conn, extension, with_default_location
+):
+    """The clause is refused even when the uuid is buried inside a composite."""
+    error = run_command(
+        """
+        CREATE TYPE def_comp AS (cid uuid, note text);
+        CREATE TABLE compat_def_comp
+            (id int, c def_comp DEFAULT ROW(NULL, 'x')::def_comp)
+            USING iceberg WITH (compatibility_mode = 'snowflake');
+        """,
+        pg_conn,
+        raise_error=False,
+    )
+    assert "cannot rewrite column" in error
+    pg_conn.rollback()
+
+
+def test_alter_add_default_on_rewritten_column_rejected(
+    s3, pg_conn, extension, with_default_location
+):
+    run_command(
+        "CREATE TABLE compat_alter_def (id int) USING iceberg "
+        "WITH (compatibility_mode = 'snowflake');",
+        pg_conn,
+    )
+    pg_conn.commit()
+    try:
+        error = run_command(
+            "ALTER TABLE compat_alter_def ADD COLUMN us uuid[] DEFAULT '{}'::uuid[];",
+            pg_conn,
+            raise_error=False,
+        )
+        assert "cannot rewrite column" in error
+        assert "us" in error
+        pg_conn.rollback()
+    finally:
+        run_command("DROP TABLE compat_alter_def", pg_conn)
+        pg_conn.commit()
+
+
+def test_default_on_top_level_uuid_allowed(
+    s3, pg_conn, extension, with_default_location
+):
+    """A top-level uuid is never rewritten, so a DEFAULT on it is fine."""
+    run_command(
+        "CREATE TABLE compat_top_def (id int, u uuid DEFAULT gen_random_uuid()) "
+        "USING iceberg WITH (compatibility_mode = 'snowflake');",
+        pg_conn,
+    )
+    assert _col_format_type(pg_conn, "compat_top_def", "u") == "uuid"
+    pg_conn.rollback()
+
+
+def test_default_on_uuid_free_column_allowed(
+    s3, pg_conn, extension, with_default_location
+):
+    """A DEFAULT on a column we don't rewrite is untouched by the guard."""
+    run_command(
+        "CREATE TABLE compat_clean_def (id int DEFAULT 7, note text DEFAULT 'x') "
+        "USING iceberg WITH (compatibility_mode = 'snowflake');",
+        pg_conn,
+    )
+    assert _col_format_type(pg_conn, "compat_clean_def", "id") == "integer"
+    pg_conn.rollback()
+
+
+# ---------------------------------------------------------------------------
 # dropped-column lifecycle (data written on both sides of the drop)
 # ---------------------------------------------------------------------------
 

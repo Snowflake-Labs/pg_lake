@@ -35,6 +35,16 @@
  * supplies the per-mode leaf rule.  Out-of-range value handling, timetz
  * normalization, and numeric->double live elsewhere and compose on top of
  * this pass (each leaves the fields it does not touch alone).
+ *
+ * Rewriting a column means swapping only its typeName, which is sound only if
+ * nothing else on the column is bound to the original type.  Any column we
+ * actually rewrite is therefore screened by ErrorIfColumnRewriteUnsafe, which
+ * refuses columns carrying a DEFAULT / GENERATED / IDENTITY expression (there
+ * is no implicit uuid->text cast for core to re-coerce them through).  This is
+ * reachable only from user-authored DDL: callers that build Iceberg tables
+ * programmatically construct each column from type/typmod/collation alone and
+ * never attach these clauses, so the check there is a defensive invariant, not
+ * an error path users of those callers can hit.
  */
 
 #include "postgres.h"
@@ -137,6 +147,71 @@ NestedUuidToText(Oid typeOid, int32 typeMod, int level, void *context,
 
 
 /*
+ * ErrorIfColumnRewriteUnsafe refuses to rewrite a column whose declared type
+ * carries a clause whose meaning is bound to that type.
+ *
+ * Changing a column's type underneath a DEFAULT or GENERATED expression is only
+ * safe if the expression's result can be coerced to the new type the way the
+ * core CREATE/ALTER path expects.  numeric->double gets away with it because
+ * numeric->float8 is an implicit cast; but there is NO implicit or assignment
+ * cast from uuid to text, so a uuid-typed DEFAULT/GENERATED on a column we
+ * rewrite to text would either change the stored semantics or (more often) fail
+ * later with a confusing "default expression is of type uuid[]" error from
+ * core.  We fail fast with an actionable message instead.
+ *
+ * Identity is impossible here (it requires an integer type, never a column that
+ * contains a uuid) but is covered defensively so future leaf rules stay safe.
+ *
+ * Only user-authored DDL can reach this: callers that generate Iceberg tables
+ * programmatically build columns from type/typmod/collation alone and never
+ * attach a DEFAULT / GENERATED / IDENTITY, so for them this is unreachable.
+ *
+ * At this pre-transform stage these clauses live as Constraint nodes in
+ * columnDef->constraints; transformColumnDefinition() only fills the cooked
+ * raw_default/generated/identity fields later, but we check those too in case
+ * the pass is ever fed an already-transformed ColumnDef.
+ */
+static void
+ErrorIfColumnRewriteUnsafe(ColumnDef *columnDef)
+{
+	const char *clause = NULL;
+	ListCell   *lc;
+
+	if (columnDef->raw_default != NULL || columnDef->cooked_default != NULL)
+		clause = "a DEFAULT";
+	else if (columnDef->generated != '\0')
+		clause = "a GENERATED";
+	else if (columnDef->identity != '\0')
+		clause = "an IDENTITY";
+
+	foreach(lc, columnDef->constraints)
+	{
+		Constraint *con = lfirst_node(Constraint, lc);
+
+		if (con->contype == CONSTR_DEFAULT)
+			clause = "a DEFAULT";
+		else if (con->contype == CONSTR_GENERATED)
+			clause = "a GENERATED";
+		else if (con->contype == CONSTR_IDENTITY)
+			clause = "an IDENTITY";
+	}
+
+	if (clause == NULL)
+		return;
+
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("compatibility_mode cannot rewrite column \"%s\"",
+					columnDef->colname),
+			 errdetail("The column has %s expression bound to its original type, "
+					   "which would no longer match once a nested uuid is "
+					   "rewritten to text.", clause),
+			 errhint("Drop the expression, or keep the uuid at the top level "
+					 "of the column (top-level uuid columns are left unchanged).")));
+}
+
+
+/*
  * ApplyIcebergTableCompatibilityModeForSchema rewrites the column TYPES of a
  * ColumnDef list in place according to the compatibility mode.  Top-level
  * columns are processed at level 0; nested types are rewritten as needed.
@@ -146,6 +221,10 @@ NestedUuidToText(Oid typeOid, int32 typeMod, int level, void *context,
  * ConvertTypeTree; this pass only supplies the per-mode leaf rule.  The two run
  * as independent passes on the same list and compose (each leaves untouched the
  * fields the other rewrote).
+ *
+ * Swapping only typeName is sound only for columns that carry nothing else
+ * bound to the original type, so any column we actually rewrite is first run
+ * through ErrorIfColumnRewriteUnsafe.
  */
 void
 ApplyIcebergTableCompatibilityModeForSchema(List *columnDefList,
@@ -196,6 +275,9 @@ ApplyIcebergTableCompatibilityModeForSchema(List *columnDefList,
 
 		if (ConvertTypeTree(typeOid, typmod, 0, leafConv, NULL,
 							&convertedOid, &convertedMod))
+		{
+			ErrorIfColumnRewriteUnsafe(columnDef);
 			columnDef->typeName = makeTypeNameFromOid(convertedOid, convertedMod);
+		}
 	}
 }
