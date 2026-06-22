@@ -2080,6 +2080,160 @@ def test_drop_user_mapping_then_drop_table_in_separate_txn_fails_clearly(
     superuser_conn.commit()
 
 
+def test_server_owner_dropping_another_users_mapping_does_not_capture_credentials(
+    installcheck,
+    superuser_conn,
+    s3,
+    extension,
+    with_default_location,
+    polaris_session,
+    create_http_helper_functions,
+):
+    """A server owner is allowed by Postgres to DROP another role's
+    USER MAPPING on the server.  The OAT_DROP capture hook must
+    skip such mappings: snapshotting a foreign role's credentials
+    would let the dropping session silently authenticate later
+    same-transaction REST requests as that role (confused-deputy).
+
+    Setup: PUBLIC mapping has valid creds, the victim's mapping has
+    deliberately-invalid creds.  As the server owner, drop the
+    victim's mapping and INSERT into a writable iceberg table in
+    the same transaction.  Capture is skipped so the live resolver
+    picks up the dropping session's own (PUBLIC) credentials and
+    the post-commit ADD_SNAPSHOT POST succeeds."""
+    if installcheck:
+        return
+
+    ATTACKER = "test_um_capture_attacker"
+    VICTIM = "test_um_capture_victim"
+    SERVER_NAME = "um_capture_srv"
+    SCHEMA_NAME = "um_capture_ns"
+    TABLE_NAME = "um_capture_attacker_tbl"
+
+    creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
+    client_id = creds["credentials"]["clientId"]
+    client_secret = creds["credentials"]["clientSecret"]
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}"
+
+    run_command(f"DROP ROLE IF EXISTS {ATTACKER}", superuser_conn, raise_error=False)
+    run_command(f"DROP ROLE IF EXISTS {VICTIM}", superuser_conn, raise_error=False)
+    superuser_conn.commit()
+
+    run_command(f"CREATE ROLE {ATTACKER} LOGIN", superuser_conn)
+    run_command(f"CREATE ROLE {VICTIM} LOGIN", superuser_conn)
+    run_command(
+        f"GRANT USAGE ON FOREIGN DATA WRAPPER iceberg_catalog "
+        f"TO {ATTACKER}, {VICTIM}",
+        superuser_conn,
+    )
+    run_command(
+        f"GRANT USAGE ON FOREIGN SERVER pg_lake_iceberg TO {ATTACKER}, {VICTIM}",
+        superuser_conn,
+    )
+    run_command(f"GRANT lake_write TO {ATTACKER}, {VICTIM}", superuser_conn)
+    superuser_conn.commit()
+
+    try:
+        run_command(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA_NAME}", superuser_conn)
+        run_command(
+            f"GRANT ALL ON SCHEMA {SCHEMA_NAME} TO {ATTACKER}, {VICTIM}",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        run_command(f"SET ROLE {ATTACKER}", superuser_conn)
+        run_command(
+            f"""
+            CREATE SERVER {SERVER_NAME} TYPE 'rest'
+                FOREIGN DATA WRAPPER iceberg_catalog
+                OPTIONS (rest_endpoint '{endpoint}',
+                         location_prefix 's3://{TEST_BUCKET}')
+            """,
+            superuser_conn,
+        )
+        run_command(
+            f"GRANT USAGE ON FOREIGN SERVER {SERVER_NAME} TO {VICTIM}",
+            superuser_conn,
+        )
+        run_command(
+            f"""
+            CREATE USER MAPPING FOR PUBLIC SERVER {SERVER_NAME}
+                OPTIONS (client_id '{client_id}',
+                         client_secret '{client_secret}')
+            """,
+            superuser_conn,
+        )
+        run_command(
+            f"""
+            CREATE USER MAPPING FOR {VICTIM} SERVER {SERVER_NAME}
+                OPTIONS (client_id 'um-capture-bogus-id',
+                         client_secret 'um-capture-bogus-secret')
+            """,
+            superuser_conn,
+        )
+        run_command(
+            f"CREATE TABLE {SCHEMA_NAME}.{TABLE_NAME} (id bigint) "
+            f"USING iceberg WITH (catalog='{SERVER_NAME}')",
+            superuser_conn,
+        )
+        run_command("RESET ROLE", superuser_conn)
+        superuser_conn.commit()
+
+        # As the server owner: drop the victim's mapping and INSERT
+        # in the same transaction.  Capture must skip the foreign
+        # mapping; the post-commit ADD_SNAPSHOT POST then runs under
+        # PUBLIC, not under the victim's bogus credentials.
+        run_command(f"SET ROLE {ATTACKER}", superuser_conn)
+        err = run_command(
+            f"""
+            BEGIN;
+            DROP USER MAPPING FOR {VICTIM} SERVER {SERVER_NAME};
+            INSERT INTO {SCHEMA_NAME}.{TABLE_NAME} VALUES (1);
+            COMMIT;
+            """,
+            superuser_conn,
+            raise_error=False,
+        )
+        assert err is None, (
+            f"attack txn errored; foreign mapping capture may have "
+            f"bound the victim's bogus credentials. err={err!r}"
+        )
+        run_command("RESET ROLE", superuser_conn)
+        superuser_conn.commit()
+
+        rows = run_query(
+            f"SELECT count(*) FROM {SCHEMA_NAME}.{TABLE_NAME}",
+            superuser_conn,
+        )
+        assert rows[0][0] == 1, rows
+
+        # And the victim mapping is actually gone.
+        rows = run_query(
+            f"SELECT 1 FROM pg_user_mappings WHERE srvname = '{SERVER_NAME}' "
+            f"AND usename = '{VICTIM}'",
+            superuser_conn,
+        )
+        assert rows == [], rows
+    finally:
+        run_command("RESET ROLE", superuser_conn, raise_error=False)
+        superuser_conn.rollback()
+        run_command(
+            f"DROP SERVER IF EXISTS {SERVER_NAME} CASCADE",
+            superuser_conn,
+            raise_error=False,
+        )
+        run_command(
+            f"DROP SCHEMA IF EXISTS {SCHEMA_NAME} CASCADE",
+            superuser_conn,
+            raise_error=False,
+        )
+        run_command(
+            f"DROP ROLE IF EXISTS {ATTACKER}", superuser_conn, raise_error=False
+        )
+        run_command(f"DROP ROLE IF EXISTS {VICTIM}", superuser_conn, raise_error=False)
+        superuser_conn.commit()
+
+
 @pytest.mark.parametrize("creation_order", ["um_before_table", "table_before_um"])
 def test_drop_server_cascade_does_not_wedge(
     installcheck,

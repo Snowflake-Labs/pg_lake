@@ -494,8 +494,30 @@ MarkAllReferencedFilesForDeletion(Oid relationId)
 		if (edata->sqlerrcode != ERRCODE_QUERY_CANCELED)
 			edata->elevel = WARNING;
 
-		/* report as warning */
-		ThrowErrorData(edata);
+		/*
+		 * Special-case the "USER MAPPING was dropped earlier in the same
+		 * transaction" path: the post-commit REST DELETE still authenticates
+		 * via the captured snapshot, but this synchronous metadata read
+		 * cannot.  Replace the raw resolver error -- whose hint suggests
+		 * creating a USER MAPPING, which is misleading mid-drop -- with a
+		 * concise notice.
+		 */
+		if (edata->sqlerrcode == ERRCODE_FDW_OPTION_NAME_NOT_FOUND &&
+			edata->message != NULL &&
+			strncmp(edata->message, "no credentials found",
+					strlen("no credentials found")) == 0)
+		{
+			ereport(WARNING,
+					(errmsg("could not read REST catalog metadata for %s "
+							"to list files (credentials no longer "
+							"available in this transaction)",
+							GetQualifiedRelationName(relationId))));
+		}
+		else
+		{
+			/* report as warning (or re-throw cancellation) */
+			ThrowErrorData(edata);
+		}
 		success = false;
 	}
 	PG_END_TRY();

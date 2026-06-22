@@ -35,6 +35,7 @@
 #include "commands/defrem.h"
 #include "commands/extension.h"
 #include "foreign/foreign.h"
+#include "miscadmin.h"
 #include "nodes/parsenodes.h"
 #include "utils/fmgroids.h"
 #include "utils/syscache.h"
@@ -110,6 +111,12 @@ IcebergCatalogObjectAccessHook(ObjectAccessType access, Oid classId,
  * DROP SERVER / DROP EXTENSION ... CASCADE -- can then authenticate
  * its post-commit REST DELETE.
  *
+ * Capture is restricted to the current session's own mapping or a
+ * PUBLIC one.  Postgres allows a server owner to drop any role's
+ * mapping on the server; snapshotting that mapping's credentials
+ * would let the dropping session authenticate this transaction's
+ * later REST requests as the mapping's owner.
+ *
  * No-ops when any of those gates fail or when the callback is unset
  * (pg_lake_table not loaded).  A DROP USER MAPPING in one txn
  * followed by DROP TABLE in another surfaces the standard "no
@@ -123,7 +130,9 @@ HandleIcebergCatalogServerUserMappingDrop(Oid umOid)
 	if (!HeapTupleIsValid(tup))
 		return;
 
-	Oid			serverOid = ((Form_pg_user_mapping) GETSTRUCT(tup))->umserver;
+	Form_pg_user_mapping umForm = (Form_pg_user_mapping) GETSTRUCT(tup);
+	Oid			serverOid = umForm->umserver;
+	Oid			umUser = umForm->umuser;	/* InvalidOid == PUBLIC */
 
 	ReleaseSysCache(tup);
 
@@ -143,6 +152,10 @@ HandleIcebergCatalogServerUserMappingDrop(Oid umOid)
 
 	/* Cheap NULL-check before the pg_depend scan. */
 	if (PgLake_RestCatalogXactCaptureCallback == NULL)
+		return;
+
+	/* Only snapshot the current session's own mapping or PUBLIC. */
+	if (OidIsValid(umUser) && umUser != GetUserId())
 		return;
 
 	if (!ServerHasDependentRestIcebergTable(serverOid))
