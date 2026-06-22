@@ -134,7 +134,7 @@ static List *GetPossiblePositionDeleteFiles(Oid relationId, List *sourcePathList
 											Snapshot snapshot);
 static void ApplyMetadataChanges(Oid relationId, List *metadataOperations);
 static void RecordRemovedFile(CompactionStats * runStats, int64 fileSize,
-							  int64 liveRowCount, int64 positionDeletedRowCount);
+							  int64 rowCount, int64 positionDeletedRowCount);
 static void RecordAddedFile(CompactionStats * runStats, int64 fileSize, int64 rowCount);
 
 
@@ -875,7 +875,7 @@ TryCompactDataFiles(Oid relationId, TupleDesc tupleDescriptor, List *candidates,
 		fileSizeSum += dataFile->stats.fileSize;
 
 		RecordRemovedFile(runStats, dataFile->stats.fileSize,
-						  dataFile->stats.rowCount - dataFile->stats.deletedRowCount,
+						  dataFile->stats.rowCount,
 						  dataFile->stats.deletedRowCount);
 
 		filePathsToCompact = lappend(filePathsToCompact, dataFile->path);
@@ -1439,14 +1439,14 @@ ApplyMetadataChanges(Oid relationId, List *metadataOperations)
  */
 static void
 RecordRemovedFile(CompactionStats * runStats, int64 fileSize,
-				  int64 liveRowCount, int64 positionDeletedRowCount)
+				  int64 rowCount, int64 positionDeletedRowCount)
 {
 	if (runStats == NULL)
 		return;
 
 	runStats->filesRemoved++;
 	runStats->bytesRemoved += fileSize;
-	runStats->rowsRemoved += liveRowCount;
+	runStats->rowsRemoved += rowCount;
 	runStats->positionDeletedRowsResolved += positionDeletedRowCount;
 }
 
