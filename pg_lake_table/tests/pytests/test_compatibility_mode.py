@@ -1032,8 +1032,16 @@ def test_data_file_uuid_array_written_as_string(
         "WITH (compatibility_mode = 'snowflake');",
         pg_conn,
     )
+    # a populated row, a whole-array NULL, a NULL element, and an empty array:
+    # none may introduce a uuid leaf, and the NULLs must survive the round trip.
     run_command(
-        f"INSERT INTO compat_df_arr VALUES (1, ARRAY['{u1}','{u2}']::uuid[]);",
+        f"""
+        INSERT INTO compat_df_arr VALUES
+            (1, ARRAY['{u1}','{u2}']::uuid[]),
+            (2, NULL),
+            (3, ARRAY['{u1}', NULL]::uuid[]),
+            (4, ARRAY[]::uuid[]);
+        """,
         pg_conn,
     )
     pg_conn.commit()
@@ -1043,6 +1051,14 @@ def test_data_file_uuid_array_written_as_string(
         assert ("element", "BYTE_ARRAY") in _parquet_leaf_types(
             superuser_conn, "compat_df_arr"
         )
+        # the NULLs round-trip: whole-array NULL stays NULL, the NULL element is
+        # preserved inside the (now text) array, and uuids read back as text.
+        # Read on pg_conn (the owner) so the scan's lock doesn't block the DROP.
+        rows = run_query("SELECT id, us FROM compat_df_arr ORDER BY id", pg_conn)
+        assert rows[0][1] == [u1, u2]
+        assert rows[1][1] is None
+        assert rows[2][1] == [u1, None]
+        assert rows[3][1] == []
     finally:
         run_command("DROP TABLE compat_df_arr", pg_conn)
         pg_conn.commit()
@@ -1062,17 +1078,32 @@ def test_data_file_composite_and_map_written_as_string(
         pg_conn,
     )
     converted_map = _col_format_type(pg_conn, "compat_df_comp", "m")
+    # populated; whole composite + map NULL; composite with NULL uuid fields +
+    # empty map; composite with a NULL array element + NULL map value.
     run_command(
         f"""
         INSERT INTO compat_df_comp VALUES
             (1, ROW('{u}', ARRAY['{u}']::uuid[], 'hi'),
-             ARRAY[('k', '{u}')]::{converted_map});
+             ARRAY[('k', '{u}')]::{converted_map}),
+            (2, NULL, NULL),
+            (3, ROW(NULL, NULL, 'no-ids'), ARRAY[]::{converted_map}),
+            (4, ROW('{u}', ARRAY['{u}', NULL]::uuid[], NULL),
+             ARRAY[('k', NULL)]::{converted_map});
         """,
         pg_conn,
     )
     pg_conn.commit()
     try:
         _assert_data_files_uuid_free(superuser_conn, "compat_df_comp")
+        # NULLs survive: whole composite/map NULL, NULL fields, and the NULL
+        # array element inside the (now text) composite all round-trip.
+        rows = run_query(
+            "SELECT id, (c).cid, (c).cids, m FROM compat_df_comp ORDER BY id",
+            pg_conn,
+        )
+        assert rows[1][1] is None and rows[1][2] is None and rows[1][3] is None
+        assert rows[2][1] is None and rows[2][2] is None
+        assert rows[3][2] == [u, None]
     finally:
         run_command("DROP TABLE compat_df_comp", pg_conn)
         pg_conn.commit()
@@ -1105,13 +1136,15 @@ def test_data_file_deeply_nested_written_as_string(
     # array-of-composite structure at the schema level.
     leaf = f"ROW('{u}', ARRAY['{u}'], 'l')"
     mid = f"ROW({leaf}, NULL, '{u}')"
+    # a populated deep row; an all-NULL row; and a row with NULLs at every
+    # intermediate level (NULL leaf, NULL array element, NULL mid_id).
+    mid_nulls = f"ROW(NULL, NULL, NULL)"
     run_command(
         f"""
-        INSERT INTO compat_df_deep VALUES (
-            1, '{u}', ARRAY['{u}'],
-            {mid},
-            NULL
-        );
+        INSERT INTO compat_df_deep VALUES
+            (1, '{u}', ARRAY['{u}'], {mid}, NULL),
+            (2, NULL, NULL, NULL, NULL),
+            (3, '{u}', ARRAY['{u}', NULL], {mid_nulls}, NULL);
         """,
         pg_conn,
     )
@@ -1150,11 +1183,15 @@ def test_data_file_copy_from_uuid_parquet_written_as_string(
     src = f"s3://{TEST_BUCKET}/compat_df_src/u.parquet"
     duck = create_duckdb_conn()
     try:
+        # source rows: populated, whole-array NULL, NULL element, empty array
         duck.execute(
             f"""
-            COPY (SELECT 1 AS id,
-                         ['{u1}'::uuid, '{u2}'::uuid] AS us)
-            TO '{src}' (FORMAT parquet);
+            COPY (
+                          SELECT 1 AS id, ['{u1}'::uuid, '{u2}'::uuid] AS us
+                UNION ALL SELECT 2, NULL
+                UNION ALL SELECT 3, ['{u1}'::uuid, NULL]
+                UNION ALL SELECT 4, []::uuid[]
+            ) TO '{src}' (FORMAT parquet);
             """
         )
         # sanity: the source really is a uuid leaf (proves the test can detect it)
@@ -1174,6 +1211,69 @@ def test_data_file_copy_from_uuid_parquet_written_as_string(
         assert ("element", "BYTE_ARRAY") in _parquet_leaf_types(
             superuser_conn, "compat_df_copy"
         )
+        # NULLs from the source parquet round-trip through the cast
+        rows = run_query("SELECT id, us FROM compat_df_copy ORDER BY id", pg_conn)
+        assert rows[0][1] == [u1, u2]
+        assert rows[1][1] is None
+        assert rows[2][1] == [u1, None]
+        assert rows[3][1] == []
     finally:
         run_command("DROP TABLE compat_df_copy", pg_conn)
+        pg_conn.commit()
+
+
+def test_data_file_all_null_nested_column_still_string(
+    s3, pg_conn, superuser_conn, extension, with_default_location
+):
+    """
+    The hardest case for a column-oriented writer: when EVERY row's nested value
+    is NULL the writer never observes a concrete uuid, so nothing but the column
+    type can force the leaf to string.  The data file must still serialize the
+    rewritten leaves as BYTE_ARRAY (never uuid), and the top-level uuid stays
+    uuid even when it too is all-NULL.
+    """
+    run_command(
+        """
+        CREATE TYPE df_null_comp AS (cid uuid, cids uuid[], note text);
+        CREATE TABLE compat_df_allnull (
+            id      int,
+            top_id  uuid,        -- top-level: stays uuid
+            us      uuid[],      -- nested: -> text[]
+            c       df_null_comp -- nested: cid / cids -> text
+        ) USING iceberg WITH (compatibility_mode = 'snowflake');
+        """,
+        pg_conn,
+    )
+    run_command(
+        """
+        INSERT INTO compat_df_allnull VALUES
+            (1, NULL, NULL, NULL),
+            (2, NULL, NULL, NULL);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+    try:
+        # no rewritten leaf may be a uuid, even with no concrete value to infer
+        paths = _data_file_paths(superuser_conn, "compat_df_allnull")
+        duck = create_duckdb_conn()
+        try:
+            for path in paths:
+                offenders = [
+                    (n, p, l)
+                    for (n, p, l) in _parquet_uuid_leaves(duck, path)
+                    if n != "top_id"  # the top-level uuid legitimately stays uuid
+                ]
+                assert (
+                    not offenders
+                ), f"all-NULL file serialized uuid leaves: {offenders}"
+        finally:
+            duck.close()
+        # positively: the rewritten array element is a string leaf
+        assert ("element", "BYTE_ARRAY") in _parquet_leaf_types(
+            superuser_conn, "compat_df_allnull"
+        )
+    finally:
+        run_command("DROP TABLE compat_df_allnull", pg_conn)
+        run_command("DROP TYPE df_null_comp", pg_conn)
         pg_conn.commit()
