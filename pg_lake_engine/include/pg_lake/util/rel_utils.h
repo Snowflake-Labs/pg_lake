@@ -47,14 +47,14 @@ extern PGDLLEXPORT void ErrorIfTypeUnsupportedNumericForIcebergTables(int32 typm
 extern PGDLLEXPORT void MaybeConvertUnsupportedNumericColumnsToDouble(List *columnDefList);
 extern PGDLLEXPORT PGType MaybeConvertType(PGType type, char *columnName);
 
-/* leaf rule for ConvertTypeTree; see rel_utils.c */
+/* leaf rule for GenerateIcebergStorageType; see rel_utils.c */
 typedef bool (*TypeLeafConverter) (Oid typeOid, int32 typeMod, int level,
 								   void *context,
 								   Oid *outOid, int32 *outMod);
 
-extern PGDLLEXPORT bool ConvertTypeTree(Oid typeOid, int32 typeMod, int level,
-										TypeLeafConverter leafConv, void *context,
-										Oid *outTypeOid, int32 *outTypeMod);
+extern PGDLLEXPORT bool GenerateIcebergStorageType(Oid typeOid, int32 typeMod, int level,
+												   TypeLeafConverter leafConv, void *context,
+												   Oid *outTypeOid, int32 *outTypeMod);
 extern PGDLLEXPORT void SetColumnDefTypeNameFromOid(ColumnDef *columnDef,
 													Oid typeOid, int32 typmod);
 extern PGDLLEXPORT PgLakeTableProperties GetPgLakeTableProperties(Oid relationId);

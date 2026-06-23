@@ -440,7 +440,7 @@ FindOrCreateCompositeTypeFromColumnDefs(List *coldeflist)
 
 
 /*
- * ConvertTypeTree recursively rewrites a (typeOid, typeMod) by applying a
+ * GenerateIcebergStorageType recursively rewrites a (typeOid, typeMod) by applying a
  * caller-supplied leaf rule to every scalar leaf, while handling the container
  * structure (array / map / domain / composite) itself.  Returns true and fills
  * *outTypeOid / *outTypeMod when anything was rewritten; false (outputs
@@ -459,7 +459,7 @@ FindOrCreateCompositeTypeFromColumnDefs(List *coldeflist)
  * one structural traversal and cannot drift out of coverage.  The container
  * rules are:
  *
- *   array of X                  -> array of ConvertTypeTree(X) at level + 1
+ *   array of X                  -> array of GenerateIcebergStorageType(X) at level + 1
  *   map (domain over array)     -> new map via GetOrCreatePGMapType, key/value
  *                                  converted at level + 1
  *   domain (non-map)            -> unwrap and recurse into base at same level
@@ -472,9 +472,9 @@ FindOrCreateCompositeTypeFromColumnDefs(List *coldeflist)
  * whenever a nested field changes.
  */
 bool
-ConvertTypeTree(Oid typeOid, int32 typeMod, int level,
-				TypeLeafConverter leafConv, void *context,
-				Oid *outTypeOid, int32 *outTypeMod)
+GenerateIcebergStorageType(Oid typeOid, int32 typeMod, int level,
+						   TypeLeafConverter leafConv, void *context,
+						   Oid *outTypeOid, int32 *outTypeMod)
 {
 	/* leaf rule first; the callback returns false for container types */
 	if (leafConv(typeOid, typeMod, level, context, outTypeOid, outTypeMod))
@@ -488,8 +488,8 @@ ConvertTypeTree(Oid typeOid, int32 typeMod, int level,
 		Oid			rewrittenElementOid;
 		int32		rewrittenElementMod;
 
-		if (ConvertTypeTree(elemType, typeMod, level + 1, leafConv, context,
-							&rewrittenElementOid, &rewrittenElementMod))
+		if (GenerateIcebergStorageType(elemType, typeMod, level + 1, leafConv, context,
+									   &rewrittenElementOid, &rewrittenElementMod))
 		{
 			*outTypeOid = get_array_type(rewrittenElementOid);
 			*outTypeMod = -1;
@@ -509,14 +509,14 @@ ConvertTypeTree(Oid typeOid, int32 typeMod, int level,
 		Oid			rewrittenValueOid;
 		int32		rewrittenValueMod;
 
-		bool		keyRewritten = ConvertTypeTree(origKeyType.postgresTypeOid,
-												   origKeyType.postgresTypeMod,
-												   level + 1, leafConv, context,
-												   &rewrittenKeyOid, &rewrittenKeyMod);
-		bool		valueRewritten = ConvertTypeTree(origValueType.postgresTypeOid,
-													 origValueType.postgresTypeMod,
-													 level + 1, leafConv, context,
-													 &rewrittenValueOid, &rewrittenValueMod);
+		bool		keyRewritten = GenerateIcebergStorageType(origKeyType.postgresTypeOid,
+															  origKeyType.postgresTypeMod,
+															  level + 1, leafConv, context,
+															  &rewrittenKeyOid, &rewrittenKeyMod);
+		bool		valueRewritten = GenerateIcebergStorageType(origValueType.postgresTypeOid,
+																origValueType.postgresTypeMod,
+																level + 1, leafConv, context,
+																&rewrittenValueOid, &rewrittenValueMod);
 
 		if (!keyRewritten && !valueRewritten)
 			return false;
@@ -541,8 +541,8 @@ ConvertTypeTree(Oid typeOid, int32 typeMod, int level,
 		int32		baseMod = typeMod;
 		Oid			baseType = getBaseTypeAndTypmod(typeOid, &baseMod);
 
-		return ConvertTypeTree(baseType, baseMod, level, leafConv, context,
-							   outTypeOid, outTypeMod);
+		return GenerateIcebergStorageType(baseType, baseMod, level, leafConv, context,
+										  outTypeOid, outTypeMod);
 	}
 
 	/* composite: rebuild with rewritten fields if any field changes */
@@ -565,8 +565,8 @@ ConvertTypeTree(Oid typeOid, int32 typeMod, int level,
 			Oid			rewrittenFieldOid;
 			int32		rewrittenFieldMod;
 
-			if (ConvertTypeTree(fieldType, fieldMod, level + 1, leafConv, context,
-								&rewrittenFieldOid, &rewrittenFieldMod))
+			if (GenerateIcebergStorageType(fieldType, fieldMod, level + 1, leafConv, context,
+										   &rewrittenFieldOid, &rewrittenFieldMod))
 			{
 				fieldType = rewrittenFieldOid;
 				fieldMod = rewrittenFieldMod;
@@ -621,7 +621,7 @@ SetColumnDefTypeNameFromOid(ColumnDef *columnDef, Oid typeOid, int32 typmod)
 
 
 /*
- * NumericLeafToDouble is the ConvertTypeTree leaf rule for the unsupported
+ * NumericLeafToDouble is the GenerateIcebergStorageType leaf rule for the unsupported
  * numeric -> float8 pass.  Numeric is never a container, so it applies at any
  * nesting level; level and context are unused.
  */
@@ -643,7 +643,7 @@ NumericLeafToDouble(Oid typeOid, int32 typeMod, int level, void *context,
 /*
  * MaybeConvertType recursively converts a type that contains unsupported
  * numerics.  Returns a PGType with the replacement OID, or with InvalidOid
- * when no conversion is needed.  Thin wrapper over ConvertTypeTree with the
+ * when no conversion is needed.  Thin wrapper over GenerateIcebergStorageType with the
  * numeric leaf rule; columnName is retained for call-site readability.
  */
 PGType
@@ -652,8 +652,8 @@ MaybeConvertType(PGType type, char *columnName)
 	Oid			convOid;
 	int32		convMod;
 
-	if (ConvertTypeTree(type.postgresTypeOid, type.postgresTypeMod, 0,
-						NumericLeafToDouble, NULL, &convOid, &convMod))
+	if (GenerateIcebergStorageType(type.postgresTypeOid, type.postgresTypeMod, 0,
+								   NumericLeafToDouble, NULL, &convOid, &convMod))
 		return MakePGType(convOid, convMod);
 
 	return MakePGTypeOid(InvalidOid);

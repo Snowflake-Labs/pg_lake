@@ -31,7 +31,7 @@
  * column is left untouched (Snowflake's native UUID handles that fine).
  *
  * The structural recursion (array / map / domain / composite) lives in
- * ConvertTypeTree, shared with the numeric->double pass; this module only
+ * GenerateIcebergStorageType, shared with the numeric->double pass; this module only
  * supplies the per-mode leaf rule.  Out-of-range value handling, timetz
  * normalization, and numeric->double live elsewhere and compose on top of
  * this pass (each leaves the fields it does not touch alone).
@@ -125,12 +125,12 @@ IcebergCompatibilityModeFromRelation(Oid relationId)
 
 
 /*
- * NestedUuidToText is the snowflake compatibility leaf rule for ConvertTypeTree.
+ * NestedUuidToText is the snowflake compatibility leaf rule for GenerateIcebergStorageType.
  * A uuid is rewritten to text only when nested (level > 0): Snowflake forbids a
  * UUID inside a semi-structured or structured type, but a top-level uuid column
  * maps to Snowflake's native UUID and is left untouched.  All container
  * traversal (arrays, maps, domains, composites, dropped-attribute handling) is
- * done by ConvertTypeTree, so this rule only classifies scalar leaves.
+ * done by GenerateIcebergStorageType, so this rule only classifies scalar leaves.
  */
 static bool
 NestedUuidToText(Oid typeOid, int32 typeMod, int level, void *context,
@@ -219,7 +219,7 @@ ErrorIfColumnRewriteUnsafe(ColumnDef *columnDef)
  * AUTO currently resolves to no rewrites, so only 'snowflake' does any work.
  *
  * The structural recursion is shared with the numeric->double pass via
- * ConvertTypeTree; this pass only supplies the per-mode leaf rule.  The two run
+ * GenerateIcebergStorageType; this pass only supplies the per-mode leaf rule.  The two run
  * as independent passes on the same list and compose (each leaves untouched the
  * fields the other rewrote).
  *
@@ -267,8 +267,8 @@ ApplyIcebergTableTypeConversions(List *columnDefList,
 		Oid			convertedOid;
 		int32		convertedMod;
 
-		if (ConvertTypeTree(typeOid, typmod, 0, leafConv, NULL,
-							&convertedOid, &convertedMod))
+		if (GenerateIcebergStorageType(typeOid, typmod, 0, leafConv, NULL,
+									   &convertedOid, &convertedMod))
 		{
 			ErrorIfColumnRewriteUnsafe(columnDef);
 
