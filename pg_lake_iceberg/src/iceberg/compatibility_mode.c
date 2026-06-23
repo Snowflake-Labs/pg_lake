@@ -55,6 +55,7 @@
 #include "nodes/makefuncs.h"
 #include "nodes/parsenodes.h"
 #include "parser/parse_type.h"
+#include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
@@ -270,6 +271,17 @@ ApplyIcebergTableTypeConversions(List *columnDefList,
 							&convertedOid, &convertedMod))
 		{
 			ErrorIfColumnRewriteUnsafe(columnDef);
+
+			ereport(NOTICE,
+					(errmsg("column \"%s\" type %s rewritten to %s for "
+							"compatibility_mode 'snowflake'",
+							columnDef->colname,
+							format_type_be(typeOid),
+							format_type_be(convertedOid)),
+					 errdetail("Snowflake cannot store a uuid inside an array, map, "
+							   "or composite; a top-level uuid column is left "
+							   "unchanged.")));
+
 			SetColumnDefTypeNameFromOid(columnDef, convertedOid, convertedMod);
 		}
 	}
