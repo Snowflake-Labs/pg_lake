@@ -49,7 +49,13 @@
 #include "pg_lake/pgduck/serialize.h"
 #include "pg_lake/util/array_utils.h"
 #include "pg_lake/util/rel_utils.h"
+#include "pg_lake/util/table_type.h"
+#include "pg_lake/ducklake/catalog.h"
+#include "pg_lake/ducklake/data_file_schema.h"
+#include "pg_lake/extensions/pg_lake_ducklake.h"
 #include "pg_extension_base/spi_helpers.h"
+#include "executor/spi.h"
+#include "utils/snapmgr.h"
 
 static DataFileSchemaField * CreateRegisteredFieldForAttribute(Oid relationId, int spiIndex);
 static void InsertFieldMapping(Oid relationId, int attrIcebergFieldId,
@@ -222,6 +228,24 @@ CreateRegisteredFieldForAttribute(Oid relationId, int spiIndex)
 DataFileSchemaField *
 GetRegisteredFieldForAttribute(Oid relationId, AttrNumber attrNo)
 {
+	if (IsDucklakeTable(relationId))
+	{
+		DataFileSchema *schema = DucklakeBuildDataFileSchema(relationId);
+
+		for (int i = 0; i < schema->nfields; i++)
+		{
+			DataFileSchemaField *field = &schema->fields[i];
+			AttrNumber	candidate = get_attnum(relationId, field->name);
+
+			if (candidate == attrNo)
+				return field;
+		}
+
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("missing field for column")));
+	}
+
 	List	   *fields = GetRegisteredFieldForAttributes(relationId, list_make1_int(attrNo));
 
 	if (list_length(fields) != 1)
@@ -535,6 +559,156 @@ GetLeafFieldsForInternalIcebergTable(Oid relationId)
 	}
 
 	SPI_END();
+
+	return leafFields;
+}
+
+
+/*
+ * GetLeafFieldsForDucklakeTable gets the leaf fields for a DuckLake table
+ * by joining pg_attribute against lake_ducklake.column to look up the
+ * catalog column_id and using it as the fieldId. We use column_id (not
+ * attnum) because that is what DuckDB's ducklake extension stamps in
+ * the parquet file_id metadata, and we want a single field-id space
+ * across writers.
+ */
+List *
+GetLeafFieldsForDucklakeTable(Oid relationId)
+{
+	List	   *leafFields = NIL;
+	Relation	rel;
+	TupleDesc	tupdesc;
+
+	rel = relation_open(relationId, AccessShareLock);
+	tupdesc = RelationGetDescr(rel);
+
+	/*
+	 * Build a per-attnum lookup of column_id from lake_ducklake.column for
+	 * the live (end_snapshot IS NULL) rows of this table, so the
+	 * per-attribute loop below can resolve fieldId without an SPI call per
+	 * column.
+	 */
+	int			maxAttnum = 0;
+
+	for (int i = 0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+		if (!attr->attisdropped && attr->attnum > maxAttnum)
+			maxAttnum = attr->attnum;
+	}
+
+	int64	   *columnIdsByAttnum = NULL;
+
+	/*
+	 * SPI requires an active snapshot, but this function is reachable from
+	 * query-planning paths (e.g. data file pruning) where the planner has not
+	 * yet pushed a snapshot. Push one if missing and pop it on the way out.
+	 */
+	bool		pushedSnapshot = false;
+
+	if (!ActiveSnapshotSet())
+	{
+		PushActiveSnapshot(GetTransactionSnapshot());
+		pushedSnapshot = true;
+	}
+
+	if (maxAttnum > 0)
+	{
+		DucklakeTableMetadata *metadata = DucklakeGetTableMetadata(relationId);
+
+		if (metadata != NULL)
+		{
+			columnIdsByAttnum = palloc0(sizeof(int64) * (maxAttnum + 1));
+
+			StringInfoData q;
+
+			initStringInfo(&q);
+			appendStringInfo(&q,
+							 "SELECT column_order, column_id "
+							 "FROM lake_ducklake.column "
+							 "WHERE table_id OPERATOR(pg_catalog.=) %ld "
+							 "AND end_snapshot IS NULL",
+							 metadata->tableId);
+
+			SPI_START_EXTENSION_OWNER(PgLakeDucklake);
+			int			ret = SPI_exec(q.data, 0);
+
+			if (ret == SPI_OK_SELECT)
+			{
+				for (uint64 row = 0; row < SPI_processed; row++)
+				{
+					bool		isnull;
+					int64		colOrder = DatumGetInt64(SPI_getbinval(
+																	   SPI_tuptable->vals[row],
+																	   SPI_tuptable->tupdesc, 1, &isnull));
+
+					if (isnull || colOrder <= 0 || colOrder > maxAttnum)
+						continue;
+
+					int64		colId = DatumGetInt64(SPI_getbinval(
+																	SPI_tuptable->vals[row],
+																	SPI_tuptable->tupdesc, 2, &isnull));
+
+					if (!isnull)
+						columnIdsByAttnum[colOrder] = colId;
+				}
+			}
+
+			SPI_END();
+
+			if (metadata->tableName)
+				pfree(metadata->tableName);
+			if (metadata->schemaName)
+				pfree(metadata->schemaName);
+			if (metadata->path)
+				pfree(metadata->path);
+			pfree(metadata);
+		}
+	}
+
+	if (pushedSnapshot)
+		PopActiveSnapshot();
+
+	for (int i = 0; i < tupdesc->natts; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+		/* Skip dropped columns and system columns */
+		if (attr->attisdropped || attr->attnum <= 0)
+			continue;
+
+		PGType		pgType = MakePGType(attr->atttypid, attr->atttypmod);
+
+		/*
+		 * Use column_id from lake_ducklake.column when known; fall back to
+		 * attnum to keep the read path working when the catalog row isn't yet
+		 * visible.
+		 */
+		int64		columnId = (columnIdsByAttnum != NULL && attr->attnum <= maxAttnum)
+			? columnIdsByAttnum[attr->attnum]
+			: 0;
+		int			fieldId = (columnId > 0) ? (int) columnId : attr->attnum;
+
+		bool		forAddColumn = false;
+		int			subFieldIndex = fieldId;
+		Field	   *field = PostgresTypeToIcebergField(pgType, forAddColumn, &subFieldIndex);
+
+		if (field == NULL || field->type != FIELD_TYPE_SCALAR)
+			continue;
+
+		LeafField  *leafField = palloc0(sizeof(LeafField));
+
+		leafField->fieldId = fieldId;
+		leafField->field = field;
+		leafField->pgType = pgType;
+		leafField->duckTypeName = IcebergTypeNameToDuckdbTypeName(field->field.scalar.typeName);
+		leafField->level = 1;	/* top-level columns */
+
+		leafFields = lappend(leafFields, leafField);
+	}
+
+	relation_close(rel, AccessShareLock);
 
 	return leafFields;
 }

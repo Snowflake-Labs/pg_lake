@@ -412,6 +412,7 @@ _PG_init(void)
 	RegisterUtilityStatementHandler(ErrorUnsupportedCreatePgLakeTableHandler, NULL);
 
 	RegisterPostUtilityStatementHandler(CreatePgLakeTableCheckUnsupportedFeaturesPostProcess, NULL);
+	RegisterPostUtilityStatementHandler(CreateDucklakeTablePostProcess, NULL);
 	RegisterPostUtilityStatementHandler(PostProcessRenameWritablePgLakeTable, NULL);
 	RegisterPostUtilityStatementHandler(PostProcessAlterWritablePgLakeTableSchema, NULL);
 

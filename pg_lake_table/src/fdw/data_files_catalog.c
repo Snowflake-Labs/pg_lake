@@ -27,6 +27,8 @@
 #include "pg_lake/csv/csv_options.h"
 #include "pg_lake/data_file/data_files.h"
 #include "pg_lake/data_file/data_file_stats.h"
+#include "pg_lake/ducklake/catalog.h"
+#include "pg_lake/extensions/pg_lake_ducklake.h"
 #include "pg_lake/extensions/pg_lake_table.h"
 #include "pg_extension_base/extension_ids.h"
 #include "pg_lake/extensions/pg_lake_engine.h"
@@ -45,6 +47,7 @@
 #include "pg_lake/iceberg/iceberg_type_binary_serde.h"
 #include "pg_lake/iceberg/partitioning/partition.h"
 #include "pg_lake/iceberg/partitioning/spec_generation.h"
+#include "pg_lake/util/injection_points.h"
 #include "pg_lake/iceberg/utils.h"
 #include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/parsetree/options.h"
@@ -55,6 +58,7 @@
 #include "pg_lake/util/array_utils.h"
 #include "pg_lake/util/plan_cache.h"
 #include "pg_lake/util/s3_reader_utils.h"
+#include "pg_lake/util/table_type.h"
 #include "pg_extension_base/spi_helpers.h"
 #include "pg_lake/util/string_utils.h"
 #include "executor/spi.h"
@@ -83,6 +87,12 @@ static int64 GetFileIdForPath(Oid relatoinId, const char *path);
 static void UpdateDeletedRowCount(Oid relationId, const char *path, int64 deletedRowCount);
 static void RemoveDataFileFromTable(Oid relationId, const char *path);
 static void RemoveAllDataFilesFromCatalog(Oid relationId);
+static HTAB *GetDucklakeDataFilesHash(Oid relationId, bool dataOnly,
+									  int64 snapshotId);
+static void DucklakeRemoveDataFileByPath(Oid relationId, const char *path);
+static void DucklakeUpdateDeleteFileDataFileId(Oid relationId,
+											   const char *deleteFilePath,
+											   const char *sourceDataFilePath);
 static HTAB *CreateDataFilesHash(void);
 static HTAB *CreateDataFilesByPathHash(void);
 static List *TableDataFileHashToList(HTAB *dataFiles);
@@ -138,6 +148,11 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
 								 bool forUpdate, char *orderBy, Snapshot snapshot,
 								 List *partitionTransforms, bool skipColumnStats)
 {
+	/* Route to DuckLake metadata for DuckLake tables */
+	if (IsDucklakeTable(relationId))
+		return GetDucklakeDataFilesHash(relationId, dataOnly,
+										-1 /* current snapshot */ );
+
 	MemoryContext callerContext = CurrentMemoryContext;
 
 	HTAB	   *dataFilesHash = CreateDataFilesHash();
@@ -833,6 +848,35 @@ GetTableSizeFromCatalog(Oid relationId)
 {
 	int64		tableSize = 0;
 
+	/* Route to DuckLake metadata for DuckLake tables */
+	if (IsDucklakeTable(relationId))
+	{
+		DucklakeTableMetadata *metadata = DucklakeGetTableMetadata(relationId);
+
+		if (metadata)
+		{
+			List	   *dataFiles = DucklakeGetDataFiles(metadata->tableId, -1);
+			ListCell   *fileCell;
+
+			foreach(fileCell, dataFiles)
+			{
+				DucklakeDataFile *ducklakeFile = (DucklakeDataFile *) lfirst(fileCell);
+
+				tableSize += ducklakeFile->fileSizeBytes;
+			}
+
+			if (metadata->tableName)
+				pfree(metadata->tableName);
+			if (metadata->schemaName)
+				pfree(metadata->schemaName);
+			if (metadata->path)
+				pfree(metadata->path);
+			pfree(metadata);
+		}
+
+		return tableSize;
+	}
+
 	/* cast sum result to bigint to avoid returning numeric */
 	char	   *metadataQuery =
 		"select "
@@ -1250,6 +1294,35 @@ void
 ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 {
 	/*
+	 * For DuckLake tables, every batch of file changes must land in a new
+	 * snapshot so DuckDB readers can time-travel and so the per-file
+	 * begin_snapshot is recorded correctly. Create that snapshot once up
+	 * front; the DucklakeAdd / DucklakeRemove helpers below pick it up via
+	 * lake_ducklake.snapshot ORDER BY snapshot_id DESC LIMIT 1.
+	 */
+	if (IsDucklakeTable(relationId))
+	{
+		bool		needsSnapshot = false;
+		ListCell   *probeCell;
+
+		foreach(probeCell, metadataOperations)
+		{
+			TableMetadataOperation *op = lfirst(probeCell);
+
+			if (op->type == DATA_FILE_ADD || op->type == DATA_FILE_REMOVE ||
+				op->type == DATA_FILE_REMOVE_ALL)
+			{
+				needsSnapshot = true;
+				break;
+			}
+		}
+
+		if (needsSnapshot)
+			(void) DucklakeCreateSnapshot("INSERT/UPDATE/DELETE operation",
+										  NULL, NULL);
+	}
+
+	/*
 	 * Walk ops in their original order. We must never coalesce across a
 	 * non-ADD op: an ADD followed by a REMOVE/UPDATE/ADD_DELETE_MAPPING on
 	 * the same path needs the ADD already visible in lake_table.files, and
@@ -1282,6 +1355,15 @@ ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations)
 			opCell = lnext(metadataOperations, opCell);
 		}
 	}
+
+	/*
+	 * Test hook (DuckLake only): every PG-side INSERT/UPDATE/DELETE on a
+	 * ducklake table reaches here after the data_file / delete_file rows are
+	 * written via SPI but before the user's xact commits. An injection here
+	 * lets a test confirm rows from a late-aborting writer fully roll back.
+	 */
+	if (IsDucklakeTable(relationId))
+		INJECTION_POINT_COMPAT("ducklake-after-apply-catalog-changes");
 }
 
 
@@ -1317,9 +1399,26 @@ ApplySingleOp(Oid relationId, TableMetadataOperation * operation)
 	switch (operation->type)
 	{
 		case DATA_FILE_ADD_DELETE_MAPPING:
-			AddDeletionFileMapping(relationId,
-								   operation->path,
-								   operation->deletedFrom);
+			if (IsDucklakeTable(relationId))
+			{
+				/*
+				 * DuckLake stores delete-file -> data-file linkage in
+				 * lake_ducklake.delete_file.data_file_id, not in
+				 * lake_table.deletion_file_map. The lake_table mapping has an
+				 * FK on lake_table.files, which DuckLake tables intentionally
+				 * don't populate, so calling AddDeletionFileMapping() would
+				 * FK-violate.
+				 */
+				DucklakeUpdateDeleteFileDataFileId(relationId,
+												   operation->path,
+												   operation->deletedFrom);
+			}
+			else
+			{
+				AddDeletionFileMapping(relationId,
+									   operation->path,
+									   operation->deletedFrom);
+			}
 			break;
 
 		case DATA_FILE_ADD_ROW_ID_MAPPING:
@@ -1329,11 +1428,34 @@ ApplySingleOp(Oid relationId, TableMetadataOperation * operation)
 			break;
 
 		case DATA_FILE_REMOVE:
-			RemoveDataFileFromTable(relationId, operation->path);
+			if (IsDucklakeTable(relationId))
+				DucklakeRemoveDataFileByPath(relationId, operation->path);
+			else
+				RemoveDataFileFromTable(relationId, operation->path);
 			break;
 		case DATA_FILE_REMOVE_ALL:
 		case DATA_FILE_DROP_TABLE:
-			RemoveAllDataFilesFromCatalog(relationId);
+			if (IsDucklakeTable(relationId))
+			{
+				DucklakeTableMetadata *metadata = DucklakeGetTableMetadata(relationId);
+
+				if (metadata)
+				{
+					DucklakeRemoveAllDataFiles(metadata->tableId);
+
+					if (metadata->tableName)
+						pfree(metadata->tableName);
+					if (metadata->schemaName)
+						pfree(metadata->schemaName);
+					if (metadata->path)
+						pfree(metadata->path);
+					pfree(metadata);
+				}
+			}
+			else
+			{
+				RemoveAllDataFilesFromCatalog(relationId);
+			}
 			break;
 		case DATA_FILE_UPDATE_DELETED_ROW_COUNT:
 			UpdateDeletedRowCount(relationId,
@@ -1393,4 +1515,294 @@ CreateDataFileColumnStats(int fieldId, PGType pgType, char *lowerBoundText, char
 	columnStats->leafField.duckTypeName = duckTypeName;
 
 	return columnStats;
+}
+
+
+/*
+ * GetDucklakeDataFilesHash returns a hash of file_id => TableDataFile for
+ * a DuckLake table by querying lake_ducklake.data_file (and delete_file).
+ * Mirrors GetTableDataFilesHashFromCatalog's contract for the DuckLake
+ * code path so callers don't need to know which catalog backs the table.
+ */
+static HTAB *
+GetDucklakeDataFilesHash(Oid relationId, bool dataOnly, int64 snapshotId)
+{
+	MemoryContext callerContext = CurrentMemoryContext;
+	HTAB	   *dataFilesHash = CreateDataFilesHash();
+	DucklakeTableMetadata *metadata = DucklakeGetTableMetadata(relationId);
+
+	if (!metadata)
+		return dataFilesHash;
+
+	List	   *dataFiles = DucklakeGetDataFiles(metadata->tableId, snapshotId);
+	ListCell   *fileCell;
+
+	foreach(fileCell, dataFiles)
+	{
+		DucklakeDataFile *ducklakeFile = (DucklakeDataFile *) lfirst(fileCell);
+		bool		found;
+		TableDataFile *tableFile = hash_search(dataFilesHash,
+											   &ducklakeFile->dataFileId,
+											   HASH_ENTER,
+											   &found);
+
+		if (!found)
+		{
+			MemoryContext oldContext = MemoryContextSwitchTo(callerContext);
+			char	   *resolvedPath;
+
+			if (ducklakeFile->pathIsRelative && metadata->path)
+			{
+				resolvedPath = DucklakeResolvePath(metadata->path,
+												   ducklakeFile->path,
+												   true);
+			}
+			else
+			{
+				resolvedPath = pstrdup(ducklakeFile->path);
+			}
+
+			tableFile->path = resolvedPath;
+			tableFile->fileId = ducklakeFile->dataFileId;
+			tableFile->content = CONTENT_DATA;
+			tableFile->stats.rowCount = ducklakeFile->recordCount;
+			tableFile->stats.fileSize = ducklakeFile->fileSizeBytes;
+			tableFile->stats.deletedRowCount = 0;
+			tableFile->stats.rowIdStart = ducklakeFile->rowIdStart;
+			tableFile->stats.columnStats = NIL;
+			tableFile->partition = NULL;
+
+			MemoryContextSwitchTo(oldContext);
+		}
+	}
+
+	/*
+	 * Pull delete files in so the FDW can either (a) apply position deletes
+	 * when scanning, or (b) account for them in row-count estimates. When
+	 * dataOnly is true the caller is just enumerating data files (e.g. for
+	 * compaction planning); we still update each data file's deletedRowCount
+	 * so estimates aren't inflated, but we do not add separate
+	 * CONTENT_POSITION_DELETES entries.
+	 */
+	List	   *deleteFiles = DucklakeGetDeleteFiles(metadata->tableId, snapshotId);
+	ListCell   *delCell;
+
+	foreach(delCell, deleteFiles)
+	{
+		DucklakeDeleteFile *del = (DucklakeDeleteFile *) lfirst(delCell);
+
+		if (del->dataFileId > 0)
+		{
+			bool		found;
+			TableDataFile *tableFile = hash_search(dataFilesHash,
+												   &del->dataFileId,
+												   HASH_FIND,
+												   &found);
+
+			if (found)
+				tableFile->stats.deletedRowCount += del->deleteCount;
+		}
+
+		if (dataOnly)
+			continue;
+
+		MemoryContext oldContext = MemoryContextSwitchTo(callerContext);
+		bool		found;
+		TableDataFile *deleteEntry = hash_search(dataFilesHash,
+												 &del->deleteFileId,
+												 HASH_ENTER,
+												 &found);
+
+		if (!found)
+		{
+			char	   *resolvedPath;
+
+			if (del->pathIsRelative && metadata->path)
+			{
+				resolvedPath = DucklakeResolvePath(metadata->path,
+												   del->path,
+												   true);
+			}
+			else
+			{
+				resolvedPath = pstrdup(del->path);
+			}
+
+			deleteEntry->path = resolvedPath;
+			deleteEntry->fileId = del->deleteFileId;
+			deleteEntry->content = CONTENT_POSITION_DELETES;
+			deleteEntry->stats.rowCount = del->deleteCount;
+			deleteEntry->stats.fileSize = del->fileSizeBytes;
+			deleteEntry->stats.deletedRowCount = 0;
+			deleteEntry->stats.rowIdStart = 0;
+			deleteEntry->stats.columnStats = NIL;
+			deleteEntry->partition = NULL;
+		}
+
+		MemoryContextSwitchTo(oldContext);
+	}
+
+	if (metadata->tableName)
+		pfree(metadata->tableName);
+	if (metadata->schemaName)
+		pfree(metadata->schemaName);
+	if (metadata->path)
+		pfree(metadata->path);
+	pfree(metadata);
+
+	return dataFilesHash;
+}
+
+
+/*
+ * DucklakeRemoveDataFileByPath looks up the lake_ducklake.data_file row for
+ * the given path and marks it as removed in the current DuckLake snapshot.
+ *
+ * The pg_lake operation stream identifies files by absolute path; DuckLake
+ * stores them as (path, path_is_relative) pairs, so we resolve via
+ * lake_ducklake.resolve_path() before matching.
+ */
+static void
+DucklakeRemoveDataFileByPath(Oid relationId, const char *path)
+{
+	DucklakeTableMetadata *metadata = DucklakeGetTableMetadata(relationId);
+
+	if (!metadata)
+		return;
+
+	int			ret;
+	bool		isnull;
+	int64		dataFileId = -1;
+	StringInfoData query;
+
+	initStringInfo(&query);
+	appendStringInfo(&query,
+					 "SELECT df.data_file_id "
+					 "  FROM lake_ducklake.data_file df "
+					 " WHERE df.table_id OPERATOR(pg_catalog.=) %ld "
+					 "   AND df.end_snapshot IS NULL "
+					 "   AND lake_ducklake.resolve_path("
+					 "         df.path, df.path_is_relative, "
+					 "         lake_ducklake.absolute_table_path(df.table_id)"
+					 "       ) OPERATOR(pg_catalog.=) %s",
+					 metadata->tableId,
+					 quote_literal_cstr(path));
+
+	SPI_START_EXTENSION_OWNER(PgLakeDucklake);
+
+	/*
+	 * read_only=false: this lookup runs at end-of-statement and must see
+	 * commits from concurrent UPDATE/DELETE on the same table that already
+	 * released the class-101 update lock. With read_only=true SPI reuses the
+	 * statement's snapshot taken before we acquired the lock, which would
+	 * miss rows the other transaction wrote and silently skip the
+	 * end-snapshot UPDATE on a file we already rewrote -- producing stale
+	 * parquet files in the catalog.
+	 */
+	ret = SPI_execute(query.data, false, 1);
+
+	if (ret == SPI_OK_SELECT && SPI_processed > 0)
+	{
+		dataFileId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+												 SPI_tuptable->tupdesc,
+												 1, &isnull));
+		if (isnull)
+			dataFileId = -1;
+	}
+
+	SPI_END();
+
+	if (dataFileId >= 0)
+		DucklakeRemoveDataFile(dataFileId);
+
+	if (metadata->tableName)
+		pfree(metadata->tableName);
+	if (metadata->schemaName)
+		pfree(metadata->schemaName);
+	if (metadata->path)
+		pfree(metadata->path);
+	pfree(metadata);
+}
+
+
+/*
+ * DucklakeUpdateDeleteFileDataFileId resolves the source data file's
+ * data_file_id by absolute path and updates the current snapshot's
+ * lake_ducklake.delete_file row for deleteFilePath to point at it.
+ *
+ * Called for DATA_FILE_ADD_DELETE_MAPPING ops, which arrive after the
+ * DATA_FILE_ADD that registered the delete file with data_file_id NULL.
+ */
+static void
+DucklakeUpdateDeleteFileDataFileId(Oid relationId,
+								   const char *deleteFilePath,
+								   const char *sourceDataFilePath)
+{
+	DucklakeTableMetadata *metadata = DucklakeGetTableMetadata(relationId);
+
+	if (!metadata)
+		return;
+
+	int			ret;
+	bool		isnull;
+	StringInfoData query;
+
+	initStringInfo(&query);
+	appendStringInfo(&query,
+					 "SELECT df.data_file_id "
+					 "  FROM lake_ducklake.data_file df "
+					 " WHERE df.table_id OPERATOR(pg_catalog.=) %ld "
+					 "   AND df.end_snapshot IS NULL "
+					 "   AND lake_ducklake.resolve_path("
+					 "         df.path, df.path_is_relative, "
+					 "         lake_ducklake.absolute_table_path(df.table_id)"
+					 "       ) OPERATOR(pg_catalog.=) %s",
+					 metadata->tableId,
+					 quote_literal_cstr(sourceDataFilePath));
+
+	SPI_START_EXTENSION_OWNER(PgLakeDucklake);
+
+	/*
+	 * read_only=false to see concurrent committers; see comment in
+	 * DucklakeRemoveDataFileByPath.
+	 */
+	ret = SPI_execute(query.data, false, 1);
+
+	if (ret == SPI_OK_SELECT && SPI_processed > 0)
+	{
+		int64		dataFileId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+															 SPI_tuptable->tupdesc,
+															 1, &isnull));
+
+		if (!isnull)
+		{
+			StringInfoData updateQuery;
+
+			initStringInfo(&updateQuery);
+			appendStringInfo(&updateQuery,
+							 "UPDATE lake_ducklake.delete_file df "
+							 "   SET data_file_id = %ld "
+							 " WHERE df.table_id OPERATOR(pg_catalog.=) %ld "
+							 "   AND df.end_snapshot IS NULL "
+							 "   AND lake_ducklake.resolve_path("
+							 "         df.path, df.path_is_relative, "
+							 "         lake_ducklake.absolute_table_path(df.table_id)"
+							 "       ) OPERATOR(pg_catalog.=) %s",
+							 dataFileId,
+							 metadata->tableId,
+							 quote_literal_cstr(deleteFilePath));
+
+			(void) SPI_execute(updateQuery.data, false, 0);
+		}
+	}
+
+	SPI_END();
+
+	if (metadata->tableName)
+		pfree(metadata->tableName);
+	if (metadata->schemaName)
+		pfree(metadata->schemaName);
+	if (metadata->path)
+		pfree(metadata->path);
+	pfree(metadata);
 }

@@ -1,0 +1,195 @@
+/*
+ * Copyright 2025 Snowflake Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef PG_LAKE_DUCKLAKE_CATALOG_H
+#define PG_LAKE_DUCKLAKE_CATALOG_H
+
+#include "postgres.h"
+#include "utils/uuid.h"
+
+/* GUC variables */
+extern PGDLLEXPORT char *DucklakeDefaultLocationPrefix;
+extern bool DucklakeAutovacuumEnabled;
+extern int	DucklakeAutovacuumNaptime;
+extern int	DucklakeMaxSnapshotAge;
+extern int	DucklakeLogAutovacuumMinDuration;
+
+/*
+ * Process-local flag set while the snapshot_changes-based DDL replay
+ * trigger is applying CREATE / DROP / ALTER FOREIGN TABLE on the PG
+ * side after a DuckDB-driven catalog change. pg_lake_table reads it
+ * directly to short-circuit its DDL hooks.
+ */
+extern PGDLLEXPORT bool DucklakeInDDLReplay;
+
+/* Schema and table name constants */
+#define DUCKLAKE_SCHEMA_NAME "lake_ducklake"
+#define DUCKLAKE_METADATA_TABLE "metadata"
+#define DUCKLAKE_SNAPSHOT_TABLE "snapshot"
+#define DUCKLAKE_SNAPSHOT_CHANGES_TABLE "snapshot_changes"
+#define DUCKLAKE_SCHEMA_TABLE "schema"
+#define DUCKLAKE_TABLE_TABLE "table"
+#define DUCKLAKE_COLUMN_TABLE "column"
+#define DUCKLAKE_VIEW_TABLE "view"
+#define DUCKLAKE_DATA_FILE_TABLE "data_file"
+#define DUCKLAKE_DELETE_FILE_TABLE "delete_file"
+#define DUCKLAKE_TABLE_STATS_TABLE "table_stats"
+
+/*
+ * DucklakeTableMetadata - represents a DuckLake table's metadata
+ */
+typedef struct DucklakeTableMetadata
+{
+	int64		tableId;
+	pg_uuid_t	tableUuid;
+	int64		schemaId;
+	char	   *tableName;
+	char	   *schemaName;
+	char	   *path;
+	bool		pathIsRelative;
+	int64		beginSnapshot;
+	int64		endSnapshot;
+}			DucklakeTableMetadata;
+
+/*
+ * DucklakeSnapshot - represents a snapshot
+ */
+typedef struct DucklakeSnapshot
+{
+	int64		snapshotId;
+	TimestampTz snapshotTime;
+	int64		schemaVersion;
+	int64		nextCatalogId;
+	int64		nextFileId;
+}			DucklakeSnapshot;
+
+/*
+ * DucklakeDataFile - represents a data file entry
+ */
+typedef struct DucklakeDataFile
+{
+	int64		dataFileId;
+	int64		tableId;
+	int64		beginSnapshot;
+	int64		endSnapshot;
+	char	   *path;
+	bool		pathIsRelative;
+	char	   *fileFormat;
+	int64		recordCount;
+	int64		fileSizeBytes;
+	int64		rowIdStart;
+	int64		partitionId;
+}			DucklakeDataFile;
+
+/*
+ * DucklakeDeleteFile - represents a delete file entry
+ */
+typedef struct DucklakeDeleteFile
+{
+	int64		deleteFileId;
+	int64		tableId;
+	int64		beginSnapshot;
+	int64		endSnapshot;
+	int64		dataFileId;
+	char	   *path;
+	bool		pathIsRelative;
+	int64		deleteCount;
+	int64		fileSizeBytes;
+}			DucklakeDeleteFile;
+
+/* Catalog operations */
+extern PGDLLEXPORT DucklakeSnapshot * DucklakeGetCurrentSnapshot(void);
+
+/*
+ * DucklakeResolvePath joins basePath and relPath when isRelative is
+ * true, normalizing trailing slashes on basePath and leading slashes
+ * on relPath so the join produces exactly one separator '/'. When
+ * isRelative is false, returns a pstrdup of relPath. Result is
+ * palloc'd in CurrentMemoryContext.
+ */
+extern PGDLLEXPORT char *DucklakeResolvePath(const char *basePath,
+											 const char *relPath,
+											 bool isRelative);
+
+extern PGDLLEXPORT DucklakeSnapshot * DucklakeCreateSnapshot(const char *changesMade,
+															 const char *author,
+															 const char *commitMessage);
+extern PGDLLEXPORT int64 DucklakeGetNextCatalogId(void);
+extern PGDLLEXPORT int64 DucklakeGetNextFileId(void);
+
+/* Table operations */
+extern PGDLLEXPORT DucklakeTableMetadata * DucklakeGetTableMetadata(Oid tableOid);
+extern PGDLLEXPORT DucklakeTableMetadata * DucklakeGetTableMetadataById(int64 tableId);
+extern PGDLLEXPORT int64 DucklakeRegisterTable(const char *schemaName,
+											   const char *tableName,
+											   const char *path,
+											   Oid tableOid);
+extern PGDLLEXPORT void DucklakeRegisterTableColumns(Oid tableOid, int64 tableId);
+extern PGDLLEXPORT void DucklakeDropTable(int64 tableId);
+
+/* Data file operations */
+extern PGDLLEXPORT List *DucklakeGetDataFiles(int64 tableId, int64 snapshotId);
+extern PGDLLEXPORT int64 DucklakeAddDataFile(int64 tableId,
+											 const char *path,
+											 int64 recordCount,
+											 int64 fileSizeBytes,
+											 int64 rowIdStart,
+											 int64 partitionId);
+extern PGDLLEXPORT void DucklakeRemoveDataFile(int64 dataFileId);
+extern PGDLLEXPORT void DucklakeRemoveAllDataFiles(int64 tableId);
+
+/*
+ * Atomically reserve a contiguous row_id range for a table. Reads the
+ * current lake_ducklake.table_stats.next_row_id (or 0 if no row yet),
+ * advances it by rowCount, and returns the previous value as the start.
+ *
+ * The caller must hold the snapshot advisory lock (class 102) -- typically
+ * by being inside a DucklakeCreateSnapshot-bracketed window. That lock is
+ * what serialises the read/modify/write across concurrent writers.
+ */
+extern PGDLLEXPORT int64 DucklakeAllocateRowIds(int64 tableId, int64 rowCount);
+
+/* Delete file operations */
+extern PGDLLEXPORT List *DucklakeGetDeleteFiles(int64 tableId, int64 snapshotId);
+extern PGDLLEXPORT int64 DucklakeAddDeleteFile(int64 tableId,
+											   int64 dataFileId,
+											   const char *path,
+											   int64 deleteCount,
+											   int64 fileSizeBytes);
+
+/* File column stats operations */
+extern PGDLLEXPORT void DucklakeAddFileColumnStats(int64 dataFileId,
+												   int64 tableId,
+												   int64 columnId,
+												   const char *minValue,
+												   const char *maxValue,
+												   int64 columnSizeBytes,
+												   int64 valueCount,
+												   int64 nullCount,
+												   int8 containsNan);
+
+/* Column operations for ALTER TABLE support */
+extern PGDLLEXPORT void DucklakeAddColumn(Oid tableOid, const char *columnName,
+										  const char *columnType, bool nullsAllowed);
+extern PGDLLEXPORT void DucklakeDropColumn(Oid tableOid, const char *columnName);
+extern PGDLLEXPORT void DucklakeRenameColumn(Oid tableOid, const char *oldName,
+											 const char *newName);
+extern PGDLLEXPORT void DucklakeRenameTable(const char *schemaName,
+											const char *oldName,
+											const char *newName);
+extern PGDLLEXPORT void DucklakeRenameSchema(const char *oldName,
+											 const char *newName);
+extern PGDLLEXPORT void DucklakeDropSchemaByOid(Oid namespaceOid);
+extern PGDLLEXPORT void DucklakeReviveSchemaByOid(Oid namespaceOid);
+extern PGDLLEXPORT void InitializeDucklakeDropSchemaHandler(void);
+
+/* Partitioning support */
+extern PGDLLEXPORT void DucklakeInsertPartitionSpec(int64 tableId, List *transforms);
+extern PGDLLEXPORT void DucklakeAddFilePartitionValue(int64 dataFileId,
+													  int64 tableId,
+													  int64 partitionKeyIndex,
+													  const char *value);
+
+#endif							/* PG_LAKE_DUCKLAKE_CATALOG_H */

@@ -30,6 +30,7 @@
 #include "pg_extension_base/spi_helpers.h"
 #include "pg_lake/data_file/data_files.h"
 #include "pg_lake/data_file/data_file_stats.h"
+#include "pg_lake/ducklake/catalog.h"
 #include "pg_lake/extensions/pg_lake_table.h"
 #include "pg_lake/fdw/data_files_catalog.h"
 #include "pg_lake/fdw/data_files_catalog_internal.h"
@@ -39,6 +40,7 @@
 #include "pg_lake/iceberg/partitioning/spec_generation.h"
 #include "pg_lake/partitioning/partition_spec_catalog.h"
 #include "pg_lake/util/array_utils.h"
+#include "pg_lake/util/table_type.h"
 
 #include "executor/spi.h"
 #include "utils/builtins.h"
@@ -53,6 +55,7 @@ typedef struct FileIdHashEntry
 
 /* caller-above-callee forward decls for the statics below */
 static void FlushDataFileAddBatch(Oid relationId, List *addOps);
+static void FlushDucklakeDataFileAddBatch(Oid relationId, List *addOps);
 static HTAB *BulkInsertDataFiles(Oid relationId, List *addOps);
 static HTAB *ExecInsertDataFiles(Oid relationId, int fileCount,
 								 ArrayType *pathArray, ArrayType *rowCountArray,
@@ -144,6 +147,18 @@ FlushDataFileAddBatch(Oid relationId, List *addOps)
 #ifdef USE_ASSERT_CHECKING
 	AssertAllOpsAreType(addOps, DATA_FILE_ADD);
 #endif
+
+	/*
+	 * DuckLake tables don't write to lake_table.files; their data file
+	 * inventory lives in lake_ducklake.data_file. Route the whole batch
+	 * through the DuckLake-specific helper, which loops the ops one at a time
+	 * (no bulk SQL today, but the call sites stay simple).
+	 */
+	if (IsDucklakeTable(relationId))
+	{
+		FlushDucklakeDataFileAddBatch(relationId, addOps);
+		return;
+	}
 
 	/*
 	 * BulkInsertDataFiles runs first; RETURNING captures the
@@ -686,3 +701,146 @@ AssertAllOpsAreType(List *ops, TableMetadataOperationType type)
 	}
 }
 #endif
+
+
+/*
+ * Apply a run of DATA_FILE_ADD ops for a DuckLake table. Today this is a
+ * straight per-row loop because DucklakeAddDataFile / DucklakeAddDeleteFile
+ * already serialize through their own SPI sessions; the bulk-INSERT savings
+ * we get for lake_table aren't easily portable to lake_ducklake without
+ * teaching those helpers about array inputs. Wiring it through the batch
+ * dispatcher lets us share the outer ApplyDataFileBatch contract and slot
+ * a real bulk path in later without touching the orchestrator.
+ */
+static void
+FlushDucklakeDataFileAddBatch(Oid relationId, List *addOps)
+{
+	DucklakeTableMetadata *metadata = DucklakeGetTableMetadata(relationId);
+
+	if (!metadata)
+		return;
+
+	/*
+	 * Hoist the partition-transform lookup once per batch. Unpartitioned
+	 * tables get an empty list back; we only walk it for ops that actually
+	 * carry partition values.
+	 */
+	List	   *transforms = AllPartitionTransformList(relationId);
+	ListCell   *opCell = NULL;
+
+	foreach(opCell, addOps)
+	{
+		TableMetadataOperation *operation = lfirst(opCell);
+
+		if (operation->content == CONTENT_DATA)
+		{
+			/*
+			 * partitionSpecId on the operation is set by
+			 * AssignPartitionForModificationList when the writer routed
+			 * through PartitionedDestReceiver. For DuckLake, the spec id IS
+			 * the partition_info.partition_id (we make GetCurrentSpecId
+			 * return it). DEFAULT_SPEC_ID (0) means unpartitioned.
+			 */
+			int64		ducklakePartitionId =
+				(operation->partitionSpecId == DEFAULT_SPEC_ID)
+				? -1
+				: (int64) operation->partitionSpecId;
+
+			int64		ducklakeFileId =
+				DucklakeAddDataFile(metadata->tableId,
+									operation->path,
+									operation->dataFileStats.rowCount,
+									operation->dataFileStats.fileSize,
+									operation->dataFileStats.rowIdStart,
+									ducklakePartitionId);
+
+			/*
+			 * Per-file partition values, keyed by partition_key_index (the
+			 * field's position in the spec) instead of the Iceberg field_id,
+			 * with the already-text-serialized value DuckLake expects.
+			 */
+			if (operation->partition != NULL &&
+				operation->partition->fields_length > 0 &&
+				ducklakePartitionId >= 0)
+			{
+				for (size_t fieldIndex = 0;
+					 fieldIndex < operation->partition->fields_length;
+					 fieldIndex++)
+				{
+					PartitionField *partitionField =
+						&operation->partition->fields[fieldIndex];
+					IcebergPartitionTransform *transform =
+						FindPartitionTransformById(transforms,
+												   partitionField->field_id,
+												   true);
+					const char *valueText =
+						SerializePartitionValueToPGText(partitionField->value,
+														partitionField->value_length,
+														transform);
+
+					DucklakeAddFilePartitionValue(ducklakeFileId,
+												  metadata->tableId,
+												  (int64) fieldIndex,
+												  valueText);
+				}
+			}
+
+			/* Add column stats for this data file */
+			ListCell   *statCell;
+
+			foreach(statCell, operation->dataFileStats.columnStats)
+			{
+				DataFileColumnStats *stat = lfirst(statCell);
+
+				if (stat->lowerBoundText == NULL && stat->upperBoundText == NULL)
+					continue;
+
+				/*
+				 * RETURN_STATS gives us null_count but not the non-null
+				 * value_count DuckLake stores. When we know the file's row
+				 * count and the column's null_count, derive value_count;
+				 * otherwise pass -1 (unknown).
+				 */
+				int64		fileRowCount = operation->dataFileStats.rowCount;
+				int64		valueCount = -1;
+
+				if (stat->nullCount >= 0 && fileRowCount >= 0)
+					valueCount = fileRowCount - stat->nullCount;
+
+				DucklakeAddFileColumnStats(ducklakeFileId,
+										   metadata->tableId,
+										   stat->leafField.fieldId,
+										   stat->lowerBoundText,
+										   stat->upperBoundText,
+										   stat->columnSizeBytes,
+										   valueCount,
+										   stat->nullCount,
+										   stat->containsNan);
+			}
+		}
+		else if (operation->content == CONTENT_POSITION_DELETES)
+		{
+			/*
+			 * Position-delete file. We do not yet know the source data file's
+			 * data_file_id at this stage of the operation stream -- pass -1
+			 * so DucklakeAddDeleteFile leaves data_file_id NULL (FK to
+			 * lake_ducklake.data_file). The follow-up
+			 * DATA_FILE_ADD_DELETE_MAPPING op resolves the source path to a
+			 * data_file_id and UPDATEs this row.
+			 */
+			DucklakeAddDeleteFile(metadata->tableId,
+								  -1,
+								  operation->path,
+								  operation->dataFileStats.rowCount,
+								  operation->dataFileStats.fileSize);
+		}
+	}
+
+	if (metadata->tableName)
+		pfree(metadata->tableName);
+	if (metadata->schemaName)
+		pfree(metadata->schemaName);
+	if (metadata->path)
+		pfree(metadata->path);
+	pfree(metadata);
+}

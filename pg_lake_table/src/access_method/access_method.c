@@ -59,6 +59,10 @@ GetPgLakeTableTypeViaAccessMethod(const char *accessMethod)
 	{
 		tableType = PG_LAKE_ICEBERG_TABLE_TYPE;
 	}
+	else if (IsPgLakeDucklakeAccessMethod(currentAccessMethod))
+	{
+		tableType = PG_LAKE_DUCKLAKE_TABLE_TYPE;
+	}
 	else
 	{
 		tableType = PG_LAKE_INVALID_TABLE_TYPE;

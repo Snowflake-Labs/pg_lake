@@ -29,9 +29,11 @@ make_ands_implicit = "make_ands_implicit"
 make_ands_explicit = "make_ands_explicit"
 ANDed = "ANDed"
 UPDATEs = "UPDATEs"
+UPDATEd = "UPDATEd"
 INSERTs = "INSERTs"
 DELETEs = "DELETEs"
 WARNINGs = "WARNINGs"
+ERRORs = "ERRORs"
 
 [default.extend-words]
 inh = "inh"

@@ -4,6 +4,7 @@ Welcome to the documentation hub. This section provides everything you need — 
 
 - [**Building from Source**](./building-from-source.md)  
 - [**Iceberg Tables**](./iceberg-tables.md)  
+- [**DuckLake Tables**](./ducklake.md)  
 - [**Query Data Lake Files**](./query-data-lake-files.md)  
 - [**Data Lake Import & Export**](./data-lake-import-export.md)  
 - [**File Formats Reference**](./file-formats-reference.md) 

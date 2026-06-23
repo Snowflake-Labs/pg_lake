@@ -23,6 +23,7 @@ bool		ProcessCreatePgLakeTable(ProcessUtilityParams * params, void *arg);
 bool		ProcessCreateAsSelectPgLakeTable(ProcessUtilityParams * params, void *arg);
 bool		ErrorUnsupportedCreatePgLakeTableHandler(ProcessUtilityParams * params, void *arg);
 void		CreatePgLakeTableCheckUnsupportedFeaturesPostProcess(ProcessUtilityParams * params, void *arg);
+void		CreateDucklakeTablePostProcess(ProcessUtilityParams * params, void *arg);
 bool		ColumnDefIsPseudoSerial(ColumnDef *column);
 List	   *GetRestrictedColumnDefList(List *columnDefList);
 

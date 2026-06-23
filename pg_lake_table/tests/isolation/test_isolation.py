@@ -48,6 +48,7 @@ def generate_isolation_conf_file():
     lines = f"""
     shared_preload_libraries='pg_extension_base'
     pg_lake_iceberg.default_location_prefix = 's3://{TEST_BUCKET}/isolation'
+    pg_lake_ducklake.default_location_prefix = 's3://{TEST_BUCKET}/isolation/ducklake'
     pg_lake_engine.host = 'host=/tmp port={server_params.PGDUCK_PORT}'
     listen_addresses = 'localhost'
     unix_socket_directories = '/tmp'

@@ -44,6 +44,8 @@ PG_ISOLATION_EXTENSION_LIST = [
     "pg_lake_iceberg",
     "pg_lake_table",
     "pg_lake_copy",
+    "pg_lake",
+    "pg_lake_ducklake",
 ]
 
 MANAGED_STORAGE_CMK_ID = ""

@@ -1,0 +1,196 @@
+Parsed test spec with 2 sessions
+
+starting permutation: s1-begin s1-insert s2-truncate s1-commit
+step s1-begin: 
+    BEGIN;
+
+step s1-insert: 
+    INSERT INTO test_ducklake_ddl VALUES(1);
+
+step s2-truncate: 
+    TRUNCATE test_ducklake_ddl;
+ <waiting ...>
+step s1-commit: 
+    COMMIT;
+
+step s2-truncate: <... completed>
+
+starting permutation: s1-begin s1-update s2-truncate s1-commit
+step s1-begin: 
+    BEGIN;
+
+step s1-update: 
+    UPDATE test_ducklake_ddl SET key = 15 WHERE key = 1;
+
+step s2-truncate: 
+    TRUNCATE test_ducklake_ddl;
+ <waiting ...>
+step s1-commit: 
+    COMMIT;
+
+step s2-truncate: <... completed>
+
+starting permutation: s1-begin s1-delete s2-truncate s1-commit
+step s1-begin: 
+    BEGIN;
+
+step s1-delete: 
+    DELETE FROM test_ducklake_ddl WHERE key = 1;
+
+step s2-truncate: 
+    TRUNCATE test_ducklake_ddl;
+ <waiting ...>
+step s1-commit: 
+    COMMIT;
+
+step s2-truncate: <... completed>
+
+starting permutation: s1-begin s1-insert s2-ddl s1-commit
+step s1-begin: 
+    BEGIN;
+
+step s1-insert: 
+    INSERT INTO test_ducklake_ddl VALUES(1);
+
+step s2-ddl: 
+    ALTER TABLE test_ducklake_ddl ADD CONSTRAINT check_a_positive CHECK (key > 0);
+ <waiting ...>
+step s1-commit: 
+    COMMIT;
+
+step s2-ddl: <... completed>
+
+starting permutation: s1-begin s1-update s2-ddl s1-commit
+step s1-begin: 
+    BEGIN;
+
+step s1-update: 
+    UPDATE test_ducklake_ddl SET key = 15 WHERE key = 1;
+
+step s2-ddl: 
+    ALTER TABLE test_ducklake_ddl ADD CONSTRAINT check_a_positive CHECK (key > 0);
+ <waiting ...>
+step s1-commit: 
+    COMMIT;
+
+step s2-ddl: <... completed>
+
+starting permutation: s1-begin s1-delete s2-ddl s1-commit
+step s1-begin: 
+    BEGIN;
+
+step s1-delete: 
+    DELETE FROM test_ducklake_ddl WHERE key = 1;
+
+step s2-ddl: 
+    ALTER TABLE test_ducklake_ddl ADD CONSTRAINT check_a_positive CHECK (key > 0);
+ <waiting ...>
+step s1-commit: 
+    COMMIT;
+
+step s2-ddl: <... completed>
+
+starting permutation: s1-begin s1-truncate s2-truncate s1-commit
+step s1-begin: 
+    BEGIN;
+
+step s1-truncate: 
+    TRUNCATE test_ducklake_ddl;
+
+step s2-truncate: 
+    TRUNCATE test_ducklake_ddl;
+ <waiting ...>
+step s1-commit: 
+    COMMIT;
+
+step s2-truncate: <... completed>
+
+starting permutation: s1-begin s1-ddl s2-truncate s1-commit
+step s1-begin: 
+    BEGIN;
+
+step s1-ddl: 
+    ALTER TABLE test_ducklake_ddl ADD CONSTRAINT check_a_positive_2 CHECK (key > 0);
+
+step s2-truncate: 
+    TRUNCATE test_ducklake_ddl;
+ <waiting ...>
+step s1-commit: 
+    COMMIT;
+
+step s2-truncate: <... completed>
+
+starting permutation: s1-begin s1-truncate s2-ddl s1-commit
+step s1-begin: 
+    BEGIN;
+
+step s1-truncate: 
+    TRUNCATE test_ducklake_ddl;
+
+step s2-ddl: 
+    ALTER TABLE test_ducklake_ddl ADD CONSTRAINT check_a_positive CHECK (key > 0);
+ <waiting ...>
+step s1-commit: 
+    COMMIT;
+
+step s2-ddl: <... completed>
+
+starting permutation: s1-begin s1-ddl s2-ddl s1-commit
+step s1-begin: 
+    BEGIN;
+
+step s1-ddl: 
+    ALTER TABLE test_ducklake_ddl ADD CONSTRAINT check_a_positive_2 CHECK (key > 0);
+
+step s2-ddl: 
+    ALTER TABLE test_ducklake_ddl ADD CONSTRAINT check_a_positive CHECK (key > 0);
+ <waiting ...>
+step s1-commit: 
+    COMMIT;
+
+step s2-ddl: <... completed>
+
+starting permutation: s1-begin s1-add-column s2-select s1-commit
+step s1-begin: 
+    BEGIN;
+
+step s1-add-column: 
+    ALTER TABLE test_ducklake_ddl ADD COLUMN new_col INT;
+
+step s2-select: 
+    SELECT * FROM test_ducklake_ddl;
+ <waiting ...>
+step s1-commit: 
+    COMMIT;
+
+step s2-select: <... completed>
+key|value|new_col
+---+-----+-------
+(0 rows)
+
+
+starting permutation: s2-begin s2-select s1-add-column s2-commit s2-select
+step s2-begin: 
+    BEGIN;
+
+step s2-select: 
+    SELECT * FROM test_ducklake_ddl;
+
+key|value
+---+-----
+(0 rows)
+
+step s1-add-column: 
+    ALTER TABLE test_ducklake_ddl ADD COLUMN new_col INT;
+ <waiting ...>
+step s2-commit: 
+    COMMIT;
+
+step s1-add-column: <... completed>
+step s2-select: 
+    SELECT * FROM test_ducklake_ddl;
+
+key|value|new_col
+---+-----+-------
+(0 rows)
+

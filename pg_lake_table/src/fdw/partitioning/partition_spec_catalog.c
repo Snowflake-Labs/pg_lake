@@ -18,7 +18,12 @@
 #include "postgres.h"
 #include "fmgr.h"
 
+#include "executor/spi.h"
+
+#include "pg_lake/ducklake/catalog.h"
+#include "pg_lake/extensions/pg_lake_ducklake.h"
 #include "pg_lake/extensions/pg_lake_table.h"
+#include "pg_lake/util/table_type.h"
 #include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/fdw/data_files_catalog.h"
 #include "pg_lake/iceberg/api/partitioning.h"
@@ -86,6 +91,54 @@ int
 GetCurrentSpecId(Oid relationId)
 {
 	int			currentSpecId = DEFAULT_SPEC_ID;
+
+	/*
+	 * DuckLake stores the live partition spec in lake_ducklake.partition_info
+	 * (versioned by begin_snapshot/end_snapshot). The spec_id concept maps
+	 * onto partition_id, so we return that directly.
+	 * lake_iceberg.tables_internal isn't populated for DuckLake tables, so
+	 * the Iceberg branch below would always return DEFAULT_SPEC_ID.
+	 */
+	if (IsDucklakeTable(relationId))
+	{
+		DucklakeTableMetadata *metadata = DucklakeGetTableMetadata(relationId);
+
+		if (metadata == NULL)
+			return DEFAULT_SPEC_ID;
+
+		StringInfoData q;
+
+		initStringInfo(&q);
+		appendStringInfo(&q,
+						 "SELECT partition_id FROM lake_ducklake.partition_info "
+						 "WHERE table_id OPERATOR(pg_catalog.=) %ld "
+						 "AND end_snapshot IS NULL "
+						 "ORDER BY begin_snapshot DESC LIMIT 1",
+						 metadata->tableId);
+
+		SPI_START_EXTENSION_OWNER(PgLakeDucklake);
+		int			ret = SPI_exec(q.data, 1);
+
+		if (ret == SPI_OK_SELECT && SPI_processed > 0)
+		{
+			bool		isnull;
+
+			currentSpecId = (int) DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
+															  SPI_tuptable->tupdesc,
+															  1, &isnull));
+		}
+		SPI_END();
+
+		if (metadata->tableName)
+			pfree(metadata->tableName);
+		if (metadata->schemaName)
+			pfree(metadata->schemaName);
+		if (metadata->path)
+			pfree(metadata->path);
+		pfree(metadata);
+
+		return currentSpecId;
+	}
 
 	DECLARE_SPI_ARGS(1);
 
@@ -704,4 +757,139 @@ CreatePartitionSpecHash(void)
 												 HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 
 	return partitionSpecsHash;
+}
+
+
+typedef struct DucklakeFilePartitionEntry
+{
+	int64		dataFileId;		/* hash key */
+	Partition  *partition;
+}			DucklakeFilePartitionEntry;
+
+
+/*
+ * AttachDucklakePartitionsToDataFiles populates dataFile->partition for
+ * every DuckLake data file in `dataFiles` (a list of TableDataFile *)
+ * by reading lake_ducklake.file_partition_value in a single SPI batch
+ * and deserialising the per-column-id text values via the supplied
+ * partition transforms.
+ *
+ * fileId on each TableDataFile must already be set to the DuckLake
+ * data_file_id; otherwise that file is left unpartitioned.
+ */
+void
+AttachDucklakePartitionsToDataFiles(int64 tableId, List *partitionTransforms,
+									List *dataFiles)
+{
+	if (partitionTransforms == NIL || dataFiles == NIL)
+		return;
+
+	HASHCTL		hashCtl = {0};
+
+	hashCtl.keysize = sizeof(int64);
+	hashCtl.entrysize = sizeof(DucklakeFilePartitionEntry);
+	hashCtl.hcxt = CurrentMemoryContext;
+
+	HTAB	   *byFileId = hash_create("DucklakeFilePartitions",
+									   list_length(dataFiles), &hashCtl,
+									   HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+	StringInfoData q;
+
+	initStringInfo(&q);
+	appendStringInfo(&q,
+					 "SELECT fpv.data_file_id, pc.column_id, fpv.partition_value "
+					 "  FROM lake_ducklake.file_partition_value fpv "
+					 "  JOIN lake_ducklake.partition_column pc "
+					 "    ON pc.partition_key_index OPERATOR(pg_catalog.=) fpv.partition_key_index "
+					 "   AND pc.table_id OPERATOR(pg_catalog.=) fpv.table_id "
+					 " WHERE fpv.table_id OPERATOR(pg_catalog.=) %ld",
+					 tableId);
+
+	MemoryContext callerContext = CurrentMemoryContext;
+
+	SPI_START_EXTENSION_OWNER(PgLakeDucklake);
+
+	int			ret = SPI_exec(q.data, 0);
+
+	if (ret == SPI_OK_SELECT)
+	{
+		for (uint64 row = 0; row < SPI_processed; row++)
+		{
+			HeapTuple	tup = SPI_tuptable->vals[row];
+			TupleDesc	desc = SPI_tuptable->tupdesc;
+			bool		isnull;
+
+			int64		dataFileId = DatumGetInt64(SPI_getbinval(tup, desc, 1, &isnull));
+
+			if (isnull)
+				continue;
+
+			int64		columnId = DatumGetInt64(SPI_getbinval(tup, desc, 2, &isnull));
+
+			if (isnull)
+				continue;
+
+			Datum		valueDatum = SPI_getbinval(tup, desc, 3, &isnull);
+			char	   *valueText = NULL;
+
+			MemoryContext oldcxt = MemoryContextSwitchTo(callerContext);
+
+			if (!isnull)
+				valueText = TextDatumGetCString(valueDatum);
+
+			IcebergPartitionTransform *transform =
+				FindPartitionTransformById(partitionTransforms, (int) columnId, false);
+
+			if (transform == NULL)
+			{
+				MemoryContextSwitchTo(oldcxt);
+				continue;
+			}
+
+			PartitionField *field = palloc0(sizeof(PartitionField));
+
+			field->field_id = (int32) columnId;
+			field->field_name = pstrdup(transform->partitionFieldName
+										? transform->partitionFieldName
+										: transform->columnName);
+			field->value_type = GetTransformResultAvroType(transform);
+			field->value = DeserializePartitionValueFromPGText(transform, valueText,
+															   &field->value_length);
+
+			bool		found = false;
+			DucklakeFilePartitionEntry *entry =
+				hash_search(byFileId, &dataFileId, HASH_ENTER, &found);
+
+			if (!found)
+			{
+				entry->partition = palloc0(sizeof(Partition));
+				entry->partition->fields = NULL;
+				entry->partition->fields_length = 0;
+			}
+
+			AppendPartitionField(entry->partition, field);
+
+			MemoryContextSwitchTo(oldcxt);
+		}
+	}
+
+	SPI_END();
+
+	ListCell   *cell;
+
+	foreach(cell, dataFiles)
+	{
+		TableDataFile *file = lfirst(cell);
+
+		if (file->fileId == 0)
+			continue;
+
+		bool		found = false;
+		DucklakeFilePartitionEntry *entry =
+			hash_search(byFileId, &file->fileId, HASH_FIND, &found);
+
+		if (found)
+			file->partition = entry->partition;
+	}
 }
