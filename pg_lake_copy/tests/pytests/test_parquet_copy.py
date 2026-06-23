@@ -866,3 +866,63 @@ def test_copy_virtual_column(pg_conn, tmp_path):
     ]
 
     pg_conn.rollback()
+
+
+def test_copy_to_generated_columns(pg_conn, tmp_path):
+    on_path = tmp_path / "gencol_on.parquet"
+    off_path = tmp_path / "gencol_off.parquet"
+    attlist_path = tmp_path / "gencol_attlist.parquet"
+
+    # Emit a table with a generated column under each GUC setting and as a subset
+    run_command(
+        f"""
+        CREATE TABLE test_gencol (a int, b int, c int GENERATED ALWAYS AS (a + b) STORED);
+        INSERT INTO test_gencol VALUES (1, 2), (3, 4);
+        COPY test_gencol TO '{on_path}' WITH (format 'parquet');
+        COPY test_gencol (a, b) TO '{attlist_path}' WITH (format 'parquet');
+        SET pg_lake_copy.include_generated_columns = off;
+        COPY test_gencol TO '{off_path}' WITH (format 'parquet');
+    """,
+        pg_conn,
+    )
+
+    # By default the generated column c is included
+    run_command(
+        f"""
+        CREATE TABLE test_gencol_on (a int, b int, c int);
+        COPY test_gencol_on FROM '{on_path}' WITH (format 'parquet');
+    """,
+        pg_conn,
+    )
+    assert run_query("SELECT a, b, c FROM test_gencol_on ORDER BY a", pg_conn) == [
+        [1, 2, 3],
+        [3, 4, 7],
+    ]
+
+    # With the GUC off the generated column is excluded
+    run_command(
+        f"""
+        CREATE TABLE test_gencol_off (a int, b int);
+        COPY test_gencol_off FROM '{off_path}' WITH (format 'parquet');
+    """,
+        pg_conn,
+    )
+    assert run_query("SELECT a, b FROM test_gencol_off ORDER BY a", pg_conn) == [
+        [1, 2],
+        [3, 4],
+    ]
+
+    # An explicit column list is unaffected by the GUC
+    run_command(
+        f"""
+        CREATE TABLE test_gencol_attlist (a int, b int);
+        COPY test_gencol_attlist FROM '{attlist_path}' WITH (format 'parquet');
+    """,
+        pg_conn,
+    )
+    assert run_query("SELECT a, b FROM test_gencol_attlist ORDER BY a", pg_conn) == [
+        [1, 2],
+        [3, 4],
+    ]
+
+    pg_conn.rollback()
