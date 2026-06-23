@@ -49,5 +49,5 @@ typedef enum IcebergCompatibilityMode
 extern PGDLLEXPORT IcebergCompatibilityMode ParseIcebergCompatibilityMode(const char *optionValue);
 extern PGDLLEXPORT IcebergCompatibilityMode IcebergCompatibilityModeFromCreateOptions(List *options);
 extern PGDLLEXPORT IcebergCompatibilityMode IcebergCompatibilityModeFromRelation(Oid relationId);
-extern PGDLLEXPORT void ApplyIcebergTableCompatibilityModeForSchema(List *columnDefList,
-																	IcebergCompatibilityMode mode);
+extern PGDLLEXPORT void ApplyIcebergTableTypeConversions(List *columnDefList,
+														 IcebergCompatibilityMode mode);

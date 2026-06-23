@@ -212,7 +212,7 @@ ErrorIfColumnRewriteUnsafe(ColumnDef *columnDef)
 
 
 /*
- * ApplyIcebergTableCompatibilityModeForSchema rewrites the column TYPES of a
+ * ApplyIcebergTableTypeConversions rewrites the column TYPES of a
  * ColumnDef list in place according to the compatibility mode.  Top-level
  * columns are processed at level 0; nested types are rewritten as needed.
  * AUTO currently resolves to no rewrites, so only 'snowflake' does any work.
@@ -227,23 +227,16 @@ ErrorIfColumnRewriteUnsafe(ColumnDef *columnDef)
  * through ErrorIfColumnRewriteUnsafe.
  */
 void
-ApplyIcebergTableCompatibilityModeForSchema(List *columnDefList,
-											IcebergCompatibilityMode mode)
+ApplyIcebergTableTypeConversions(List *columnDefList,
+								 IcebergCompatibilityMode mode)
 {
 	ListCell   *cell;
-	TypeLeafConverter leafConv;
 
-	switch (mode)
-	{
-		case ICEBERG_COMPAT_SNOWFLAKE:
-			leafConv = NestedUuidToText;
-			break;
+	/* AUTO currently resolves to no rewrites; only snowflake does any work */
+	if (mode != ICEBERG_COMPAT_SNOWFLAKE)
+		return;
 
-		case ICEBERG_COMPAT_AUTO:
-		default:
-			/* AUTO currently resolves to no rewrites */
-			return;
-	}
+	TypeLeafConverter leafConv = NestedUuidToText;
 
 	foreach(cell, columnDefList)
 	{

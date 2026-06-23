@@ -514,7 +514,7 @@ ApplyIcebergCompatibilityModeInAlterStmt(AlterTableStmt *alterStmt, Oid relation
 			addColumnDefs = lappend(addColumnDefs, cmd->def);
 	}
 
-	ApplyIcebergTableCompatibilityModeForSchema(addColumnDefs, mode);
+	ApplyIcebergTableTypeConversions(addColumnDefs, mode);
 }
 
 

@@ -935,8 +935,8 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		else
 		{
 			MaybeConvertUnsupportedNumericColumnsToDouble(createStmt->base.tableElts);
-			ApplyIcebergTableCompatibilityModeForSchema(createStmt->base.tableElts,
-														IcebergCompatibilityModeFromCreateOptions(createStmt->options));
+			ApplyIcebergTableTypeConversions(createStmt->base.tableElts,
+											 IcebergCompatibilityModeFromCreateOptions(createStmt->options));
 			EnsureSupportedIcebergTableColumnDefinitions(createStmt->base.tableElts);
 
 			PgLakeCommonParentProcessUtility(params);
@@ -951,8 +951,8 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 	}
 
 	MaybeConvertUnsupportedNumericColumnsToDouble(createStmt->base.tableElts);
-	ApplyIcebergTableCompatibilityModeForSchema(createStmt->base.tableElts,
-												IcebergCompatibilityModeFromCreateOptions(createStmt->options));
+	ApplyIcebergTableTypeConversions(createStmt->base.tableElts,
+									 IcebergCompatibilityModeFromCreateOptions(createStmt->options));
 	EnsureSupportedIcebergTableColumnDefinitions(createStmt->base.tableElts);
 
 	Oid			namespaceId =
