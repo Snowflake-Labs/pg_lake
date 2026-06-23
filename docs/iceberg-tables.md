@@ -208,6 +208,14 @@ composites, arrays of composites, composites containing arrays, maps with a
 `uuid` are rebuilt as fresh types; your own `CREATE TYPE` definitions are never
 modified. Containers with no nested `uuid` are left untouched.
 
+When a column is rewritten, pg_lake emits a `NOTICE` naming the old and new
+type, so the change is never silent. For a rebuilt composite or map the column's
+declared type becomes a generated type (shown as `lake_struct.*` / `map_type.*`
+in `\d`), not your original named type: you can still read individual fields
+(e.g. `(meta).event_id`), but you cannot cast the whole value back to the named
+type. This matches how the existing numeric-to-`double` conversion already treats
+composite columns.
+
 ```sql
 CREATE TYPE event_meta AS (event_id uuid, source text);
 
