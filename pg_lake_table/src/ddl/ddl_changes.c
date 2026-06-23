@@ -255,6 +255,14 @@ ApplyDDLCatalogChanges(Oid relationId, List *ddlOperations,
 			/* update lake_iceberg.internal_tables specId */
 			UpdateDefaultPartitionSpecId(relationId, DEFAULT_SPEC_ID);
 		}
+		else if (ddlOperation->type == DDL_COLUMN_ALTER_TYPE)
+		{
+			/* update field type in catalog */
+			AttrNumber	attrNumber = ddlOperation->attrNumber;
+			PGType		newPgType = ddlOperation->newPgType;
+
+			UpdateRegisteredFieldTypeForAttribute(relationId, attrNumber, newPgType);
+		}
 		else if (ddlOperation->type == DDL_TABLE_RENAME ||
 				 ddlOperation->type == DDL_COLUMN_DROP_NOT_NULL)
 		{
@@ -283,7 +291,8 @@ DDLsRequireIcebergSchemaChange(List *ddlOperations)
 			ddlOperation->type == DDL_COLUMN_DROP ||
 			ddlOperation->type == DDL_COLUMN_SET_DEFAULT ||
 			ddlOperation->type == DDL_COLUMN_DROP_DEFAULT ||
-			ddlOperation->type == DDL_COLUMN_DROP_NOT_NULL)
+			ddlOperation->type == DDL_COLUMN_DROP_NOT_NULL ||
+			ddlOperation->type == DDL_COLUMN_ALTER_TYPE)
 		{
 			return true;
 		}

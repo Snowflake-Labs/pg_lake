@@ -922,6 +922,166 @@ def test_partitioned_manifest_merge_with_updates(
     pg_conn.rollback()
 
 
+def test_manifest_merge_after_float4_to_float8_type_promotion(
+    s3,
+    pg_conn,
+    extension,
+    create_test_helper_functions,
+    reset_manifest_merge_settings,
+    with_default_location,
+):
+    """
+    Verify that manifest merge preserves correct min-max statistics after
+    a float4 -> float8 (real -> double precision) type promotion.
+
+    After promotion, older data files carry 4-byte float column bounds while
+    newer files carry 8-byte double bounds.  A manifest merge must handle
+    both widths correctly so that:
+      - all data remains readable,
+      - data-file pruning still works (no rows silently dropped),
+      - values with precision differences between float4 and float8 are
+        handled without rounding errors.
+    """
+    table_name = "test_merge_float_promo"
+    explain_prefix = "EXPLAIN (analyze, verbose, format json) "
+
+    run_command(
+        f"""
+        CREATE TABLE {table_name} (a real, b int)
+        USING pg_lake_iceberg;
+        ALTER FOREIGN TABLE {table_name} OPTIONS (ADD autovacuum_enabled 'false');
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # disable manifest merge so we accumulate multiple manifests
+    run_command("SET pg_lake_iceberg.enable_manifest_merge_on_write = off", pg_conn)
+
+    # Use values with precision that differs between float4 and float8:
+    #   float4(1.1)  ≈ 1.10000002  (in float8 terms)
+    #   float8(1.1)  = 1.1000000000000001
+    # These are the kinds of values most likely to expose rounding issues.
+    run_command(f"INSERT INTO {table_name} VALUES (1.1, 1)", pg_conn)
+    pg_conn.commit()
+
+    run_command(f"INSERT INTO {table_name} VALUES (2.2, 2)", pg_conn)
+    pg_conn.commit()
+
+    run_command(f"INSERT INTO {table_name} VALUES (3.3, 3)", pg_conn)
+    pg_conn.commit()
+
+    # verify data before type change
+    results = run_query(f"SELECT a, b FROM {table_name} ORDER BY b", pg_conn)
+    assert len(results) == 3
+
+    # promote float4 -> float8
+    run_command(
+        f"ALTER TABLE {table_name} ALTER COLUMN a TYPE double precision;", pg_conn
+    )
+    pg_conn.commit()
+
+    # insert data with full float8 precision (values that cannot be
+    # represented exactly in float4)
+    run_command(f"INSERT INTO {table_name} VALUES (1.23456789012345, 4)", pg_conn)
+    pg_conn.commit()
+
+    run_command(f"INSERT INTO {table_name} VALUES (4.56789012345678, 5)", pg_conn)
+    pg_conn.commit()
+
+    # now enable manifest merge and trigger it
+    run_command("RESET pg_lake_iceberg.enable_manifest_merge_on_write", pg_conn)
+    run_command("SET pg_lake_iceberg.manifest_min_count_to_merge = 2", pg_conn)
+
+    # this insert triggers the merge (6th manifest, well above min_count=2)
+    run_command(f"INSERT INTO {table_name} VALUES (5.5, 6)", pg_conn)
+    pg_conn.commit()
+
+    # after merge we should have a single manifest (all merged)
+    metadata_location = run_query(
+        f"SELECT metadata_location FROM lake_iceberg.tables WHERE table_name = '{table_name}'",
+        pg_conn,
+    )[0][0]
+
+    manifests = run_query(
+        f"""SELECT added_files_count + existing_files_count
+            FROM lake_iceberg.current_manifests('{metadata_location}')""",
+        pg_conn,
+    )
+    total_files = sum(row[0] for row in manifests)
+    assert total_files == 6, f"Expected 6 data files after merge, got {total_files}"
+
+    # ── Verify all data is still readable and correct ──
+    results = run_query(f"SELECT a, b FROM {table_name} ORDER BY b", pg_conn)
+    assert len(results) == 6
+
+    # float4 values are read back as float8 after promotion
+    # verify the pre-promotion values survived the merge
+    assert results[0][1] == 1  # b=1
+    assert results[1][1] == 2  # b=2
+    assert results[2][1] == 3  # b=3
+
+    # post-promotion values with full float8 precision
+    assert results[3] == [1.23456789012345, 4]
+    assert results[4] == [4.56789012345678, 5]
+    assert results[5][1] == 6  # b=6
+
+    # ── Verify data file pruning works correctly after merge ──
+
+    # query with an int filter that isolates a pre-promotion data file
+    results = run_query(
+        f"{explain_prefix} SELECT * FROM {table_name} WHERE b = 1", pg_conn
+    )
+    assert fetch_data_files_used(results) == "1"
+
+    # query for post-promotion float8 data file
+    results = run_query(
+        f"{explain_prefix} SELECT * FROM {table_name} WHERE b = 4", pg_conn
+    )
+    assert fetch_data_files_used(results) == "1"
+
+    # ── Pruning on the promoted float column ──
+    # This is the critical test: min-max bounds on column "a" must survive
+    # the float4→float8 widening during manifest merge.
+    #
+    # Data files (each with 1 row):
+    #   File 1: a ≈ 1.1000000238 (float4 widened), b=1
+    #   File 2: a ≈ 2.2000000477 (float4 widened), b=2
+    #   File 3: a ≈ 3.2999999523 (float4 widened), b=3
+    #   File 4: a = 1.23456789012345 (native float8), b=4
+    #   File 5: a = 4.56789012345678 (native float8), b=5
+    #   File 6: a = 5.5 (native float8), b=6
+
+    # WHERE a < 1.15 should scan only File 1
+    #   (float4(1.1) widens to ≈1.1000000238 which is < 1.15)
+    results = run_query(
+        f"{explain_prefix} SELECT * FROM {table_name} WHERE a < 1.15", pg_conn
+    )
+    assert fetch_data_files_used(results) == "1"
+
+    # WHERE a > 4.0 should scan Files 5 and 6 only
+    results = run_query(
+        f"{explain_prefix} SELECT * FROM {table_name} WHERE a > 4.0", pg_conn
+    )
+    assert fetch_data_files_used(results) == "2"
+
+    # verify no rows are lost with a range query that spans pre- and
+    # post-promotion data files
+    results = run_query(
+        f"SELECT count(*) FROM {table_name} WHERE a >= 1.0 AND a <= 6.0", pg_conn
+    )
+    assert results[0][0] == 6
+
+    # additional sanity: sum should match
+    results = run_query(f"SELECT sum(b) FROM {table_name}", pg_conn)
+    assert results[0][0] == 21  # 1+2+3+4+5+6
+
+    # cleanup
+    pg_conn.rollback()
+    run_command(f"DROP FOREIGN TABLE {table_name}", pg_conn)
+    pg_conn.commit()
+
+
 # a stress testing for partition changes and manifest compaction
 # randomly insert and update rows, then in between change the partition
 # spec so that we ensure multiple specs, positional deletes, copy-on-write

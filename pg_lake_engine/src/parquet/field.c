@@ -25,6 +25,7 @@
 #include "pg_lake/util/string_utils.h"
 
 static FieldStructElement * DeepCopyFieldStructElement(FieldStructElement * structElementField);
+static bool FieldTypesEqual(const Field * fieldA, const Field * fieldB);
 
 /*
  * DeepCopyField deep copies a Field.
@@ -150,10 +151,48 @@ pg_cmp_s32(int32 a, int32 b)
 
 
 /*
+ * FieldTypesEqual recursively compares two Field structs for type equality.
+ */
+static bool
+FieldTypesEqual(const Field * fieldA, const Field * fieldB)
+{
+	if (fieldA->type != fieldB->type)
+		return false;
+
+	switch (fieldA->type)
+	{
+		case FIELD_TYPE_SCALAR:
+			return strcmp(fieldA->field.scalar.typeName,
+						  fieldB->field.scalar.typeName) == 0;
+		case FIELD_TYPE_LIST:
+			return FieldTypesEqual(fieldA->field.list.element,
+								   fieldB->field.list.element);
+		case FIELD_TYPE_MAP:
+			return FieldTypesEqual(fieldA->field.map.key,
+								   fieldB->field.map.key) &&
+				FieldTypesEqual(fieldA->field.map.value,
+								fieldB->field.map.value);
+		case FIELD_TYPE_STRUCT:
+			{
+				if (fieldA->field.structType.nfields != fieldB->field.structType.nfields)
+					return false;
+				for (size_t i = 0; i < fieldA->field.structType.nfields; i++)
+				{
+					if (!FieldTypesEqual(fieldA->field.structType.fields[i].type,
+										 fieldB->field.structType.fields[i].type))
+						return false;
+				}
+				return true;
+			}
+		default:
+			return false;
+	}
+}
+
+
+/*
 * SchemaFieldsEquivalent compares two DataFileSchemaField structs for equivalence.
 * It returns true if they are equivalent, false otherwise.
-* Note that we do not compare the field->type here, as we do not allow changing
-* the type of any field in the schema, including nested types.
 */
 bool
 SchemaFieldsEquivalent(DataFileSchemaField * fieldA, DataFileSchemaField * fieldB)
@@ -176,11 +215,9 @@ SchemaFieldsEquivalent(DataFileSchemaField * fieldA, DataFileSchemaField * field
 	if (!PgStrcasecmpNullable(fieldA->initialDefault, fieldB->initialDefault))
 		return false;
 
-	/*
-	 * We don't allow changing any of the types of the fields in the schema,
-	 * including the fields of nested types. So we don't need to compare
-	 * anything about the field->type here.
-	 */
+	if (!FieldTypesEqual(fieldA->type, fieldB->type))
+		return false;
+
 	return true;
 }
 
