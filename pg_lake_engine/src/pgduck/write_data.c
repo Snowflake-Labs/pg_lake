@@ -69,7 +69,8 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 				 CopyDataCompression destinationCompression,
 				 List *formatOptions,
 				 DataFileSchema * schema,
-				 List *leafFields)
+				 List *leafFields,
+				 bool convertNestedUuid)
 {
 	StringInfoData command;
 
@@ -107,6 +108,7 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 							  leafFields,
 							  ICEBERG_OOR_NONE,
 							  false /* wrapNativeTypes */ ,
+							  convertNestedUuid,
 							  NIL /* partitionByExprs */ );
 }
 
@@ -128,6 +130,7 @@ WriteQueryResultTo(char *query,
 				   List *leafFields,
 				   IcebergOutOfRangePolicy outOfRangePolicy,
 				   bool wrapNativeTypes,
+				   bool convertNestedUuid,
 				   List *partitionByExprs)
 {
 	if (outOfRangePolicy != ICEBERG_OOR_NONE)
@@ -137,10 +140,21 @@ WriteQueryResultTo(char *query,
 													   queryHasRowId);
 	}
 
-	if (wrapNativeTypes && destinationFormat == DATA_FORMAT_ICEBERG)
+	/*
+	 * Apply the native-type wrap when temporal types need rewriting
+	 * (wrapNativeTypes, e.g. INSERT..SELECT / COPY FROM) or when nested uuid
+	 * must be stored as string under compatibility_mode='snowflake'. The CSV
+	 * ingest path passes wrapNativeTypes=false (temporal already normalized
+	 * during Postgres-side serialization) but still needs the uuid pass, so
+	 * convertTemporal tracks wrapNativeTypes while convertNestedUuid is
+	 * applied in both cases.
+	 */
+	if ((wrapNativeTypes || convertNestedUuid) && destinationFormat == DATA_FORMAT_ICEBERG)
 	{
 		query = IcebergWrapQueryWithNativeTypeConversion(query, queryTupleDesc,
-														 queryHasRowId);
+														 queryHasRowId,
+														 wrapNativeTypes,
+														 convertNestedUuid);
 	}
 
 	/*

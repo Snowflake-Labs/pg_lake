@@ -40,6 +40,7 @@
 #include "pg_lake/planner/pushdown_utils.h"
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/pgduck/iceberg_query_validation.h"
+#include "pg_lake/pgduck/compatibility_mode.h"
 #include "pg_lake/planner/insert_select.h"
 #include "pg_lake/planner/query_pushdown.h"
 #include "pg_lake/planner/restriction_collector.h"
@@ -1741,7 +1742,9 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 				queryString =
 					IcebergWrapQueryWithNativeTypeConversion(queryString,
 															 scanState->insertTargetTupleDesc,
-															 false);
+															 false,
+															 true /* convertTemporal */ ,
+															 GetIcebergCompatibilityModeForTable(scanState->insertIntoRelid) == ICEBERG_COMPAT_SNOWFLAKE);
 		}
 
 		ExplainPropertyText("Vectorized SQL", queryString, es);

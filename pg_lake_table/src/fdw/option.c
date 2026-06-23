@@ -577,6 +577,13 @@ InitPgLakeIcebergOptions(void)
 		 */
 		{"out_of_range_values", ForeignTableRelationId},
 
+		/*
+		 * compatibility-mode storage shaping: 'auto' (default) or 'snowflake'
+		 * (store nested uuid physically as string). Never changes the
+		 * Postgres column type.
+		 */
+		{"compatibility_mode", ForeignTableRelationId},
+
 		{NULL, InvalidOid}
 	};
 
@@ -878,6 +885,20 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 						 errmsg("invalid out_of_range_values option: \"%s\"",
 								outOfRangeValues),
 						 errhint("Valid values are \"error\" and \"clamp\".")));
+			}
+		}
+		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "compatibility_mode") == 0)
+		{
+			const char *compatibilityMode = defGetString(def);
+
+			if (strcmp(compatibilityMode, "auto") != 0 &&
+				strcmp(compatibilityMode, "snowflake") != 0)
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("invalid compatibility_mode option: \"%s\"",
+								compatibilityMode),
+						 errhint("Valid values are \"auto\" and \"snowflake\".")));
 			}
 		}
 	}

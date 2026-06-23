@@ -71,13 +71,15 @@ static bool AppendIcebergValidationExpression(StringInfo buf, const char *expr,
 											  IcebergOutOfRangePolicy policy,
 											  int depth);
 
-static bool TypeNeedsNativeConversion(Oid typeOid);
-static bool TupleDescHasNativeConversionColumn(TupleDesc tupleDesc);
+static bool TypeNeedsNativeConversion(Oid typeOid, bool convertTemporal, bool convertNestedUuid);
+static bool TupleDescHasNativeConversionColumn(TupleDesc tupleDesc, bool convertTemporal, bool convertNestedUuid);
 static void AppendIntervalStructPack(StringInfo buf, const char *expr);
 static void AppendTimeTzUtcCast(StringInfo buf, const char *expr);
 static bool AppendNativeConversionExpression(StringInfo buf, const char *expr,
 											 Oid typeOid, int32 typmod,
-											 int depth);
+											 int depth, bool nested,
+											 bool convertTemporal,
+											 bool convertNestedUuid);
 
 
 /* ================================================================
@@ -481,29 +483,38 @@ IcebergWrapQueryWithErrorOrClampChecks(char *query, TupleDesc tupleDesc,
  * through arrays, composites, maps, and domains.
  */
 static bool
-TypeNeedsNativeConversion(Oid typeOid)
+TypeNeedsNativeConversion(Oid typeOid, bool convertTemporal, bool convertNestedUuid)
 {
-	if (typeOid == INTERVALOID || typeOid == TIMETZOID)
+	if (convertTemporal && (typeOid == INTERVALOID || typeOid == TIMETZOID))
+		return true;
+
+	/*
+	 * Under compatibility_mode='snowflake' a uuid is stored as string. We
+	 * treat uuid as "needs conversion" so containers descend into it; the
+	 * actual cast is gated on `nested` in AppendNativeConversionExpression so
+	 * a bare top-level uuid is left as native uuid.
+	 */
+	if (convertNestedUuid && typeOid == UUIDOID)
 		return true;
 
 	Oid			elemType = get_element_type(typeOid);
 
 	if (OidIsValid(elemType))
-		return TypeNeedsNativeConversion(elemType);
+		return TypeNeedsNativeConversion(elemType, convertTemporal, convertNestedUuid);
 
 	if (IsMapTypeOid(typeOid))
 	{
 		PGType		keyType = GetMapKeyType(typeOid);
 		PGType		valType = GetMapValueType(typeOid);
 
-		return TypeNeedsNativeConversion(keyType.postgresTypeOid) ||
-			TypeNeedsNativeConversion(valType.postgresTypeOid);
+		return TypeNeedsNativeConversion(keyType.postgresTypeOid, convertTemporal, convertNestedUuid) ||
+			TypeNeedsNativeConversion(valType.postgresTypeOid, convertTemporal, convertNestedUuid);
 	}
 
 	char		typtype = get_typtype(typeOid);
 
 	if (typtype == TYPTYPE_DOMAIN)
-		return TypeNeedsNativeConversion(getBaseType(typeOid));
+		return TypeNeedsNativeConversion(getBaseType(typeOid), convertTemporal, convertNestedUuid);
 
 	if (typtype == TYPTYPE_COMPOSITE)
 	{
@@ -517,7 +528,7 @@ TypeNeedsNativeConversion(Oid typeOid)
 			if (attr->attisdropped)
 				continue;
 
-			if (TypeNeedsNativeConversion(attr->atttypid))
+			if (TypeNeedsNativeConversion(attr->atttypid, convertTemporal, convertNestedUuid))
 			{
 				found = true;
 				break;
@@ -533,7 +544,7 @@ TypeNeedsNativeConversion(Oid typeOid)
 
 
 static bool
-TupleDescHasNativeConversionColumn(TupleDesc tupleDesc)
+TupleDescHasNativeConversionColumn(TupleDesc tupleDesc, bool convertTemporal, bool convertNestedUuid)
 {
 	for (int i = 0; i < tupleDesc->natts; i++)
 	{
@@ -542,7 +553,7 @@ TupleDescHasNativeConversionColumn(TupleDesc tupleDesc)
 		if (attr->attisdropped)
 			continue;
 
-		if (TypeNeedsNativeConversion(attr->atttypid))
+		if (TypeNeedsNativeConversion(attr->atttypid, convertTemporal, convertNestedUuid))
 			return true;
 	}
 
@@ -615,17 +626,29 @@ AppendTimeTzUtcCast(StringInfo buf, const char *expr)
 static bool
 AppendNativeConversionExpression(StringInfo buf, const char *expr,
 								 Oid typeOid, int32 typmod,
-								 int depth)
+								 int depth, bool nested,
+								 bool convertTemporal, bool convertNestedUuid)
 {
-	if (typeOid == INTERVALOID)
+	if (convertTemporal && typeOid == INTERVALOID)
 	{
 		AppendIntervalStructPack(buf, expr);
 		return true;
 	}
 
-	if (typeOid == TIMETZOID)
+	if (convertTemporal && typeOid == TIMETZOID)
 	{
 		AppendTimeTzUtcCast(buf, expr);
+		return true;
+	}
+
+	/*
+	 * compatibility_mode='snowflake': a uuid nested inside a container is
+	 * stored as string, so cast it to varchar on write. `nested` is false
+	 * only for a bare top-level uuid column, which stays native uuid.
+	 */
+	if (convertNestedUuid && nested && typeOid == UUIDOID)
+	{
+		appendStringInfo(buf, "CAST(%s AS VARCHAR)", expr);
 		return true;
 	}
 
@@ -634,14 +657,14 @@ AppendNativeConversionExpression(StringInfo buf, const char *expr,
 
 	if (OidIsValid(elemType))
 	{
-		if (!TypeNeedsNativeConversion(elemType))
+		if (!TypeNeedsNativeConversion(elemType, convertTemporal, convertNestedUuid))
 			return false;
 
 		char	   *lambdaVar = psprintf("_x%d", depth);
 
 		appendStringInfo(buf, "list_transform(%s, %s -> ", expr, lambdaVar);
 		AppendNativeConversionExpression(buf, lambdaVar, elemType, -1,
-										 depth + 1);
+										 depth + 1, true, convertTemporal, convertNestedUuid);
 		appendStringInfoChar(buf, ')');
 		return true;
 	}
@@ -651,8 +674,8 @@ AppendNativeConversionExpression(StringInfo buf, const char *expr,
 	{
 		PGType		keyType = GetMapKeyType(typeOid);
 		PGType		valType = GetMapValueType(typeOid);
-		bool		keyNeedsConversion = TypeNeedsNativeConversion(keyType.postgresTypeOid);
-		bool		valNeedsConversion = TypeNeedsNativeConversion(valType.postgresTypeOid);
+		bool		keyNeedsConversion = TypeNeedsNativeConversion(keyType.postgresTypeOid, convertTemporal, convertNestedUuid);
+		bool		valNeedsConversion = TypeNeedsNativeConversion(valType.postgresTypeOid, convertTemporal, convertNestedUuid);
 
 		if (!keyNeedsConversion && !valNeedsConversion)
 			return false;
@@ -669,7 +692,7 @@ AppendNativeConversionExpression(StringInfo buf, const char *expr,
 			AppendNativeConversionExpression(buf, keyExpr,
 											 keyType.postgresTypeOid,
 											 keyType.postgresTypeMod,
-											 depth + 1);
+											 depth + 1, true, convertTemporal, convertNestedUuid);
 		else
 			appendStringInfoString(buf, keyExpr);
 
@@ -681,7 +704,7 @@ AppendNativeConversionExpression(StringInfo buf, const char *expr,
 			AppendNativeConversionExpression(buf, valExpr,
 											 valType.postgresTypeOid,
 											 valType.postgresTypeMod,
-											 depth + 1);
+											 depth + 1, true, convertTemporal, convertNestedUuid);
 		else
 			appendStringInfoString(buf, valExpr);
 
@@ -697,7 +720,7 @@ AppendNativeConversionExpression(StringInfo buf, const char *expr,
 		Oid			baseType = getBaseTypeAndTypmod(typeOid, &typmod);
 
 		return AppendNativeConversionExpression(buf, expr, baseType, typmod,
-												depth);
+												depth, nested, convertTemporal, convertNestedUuid);
 	}
 
 	/* composite types: transform fields via struct_pack */
@@ -713,7 +736,7 @@ AppendNativeConversionExpression(StringInfo buf, const char *expr,
 			if (attr->attisdropped)
 				continue;
 
-			if (TypeNeedsNativeConversion(attr->atttypid))
+			if (TypeNeedsNativeConversion(attr->atttypid, convertTemporal, convertNestedUuid))
 			{
 				anyFieldNeedsTransform = true;
 				break;
@@ -749,7 +772,7 @@ AppendNativeConversionExpression(StringInfo buf, const char *expr,
 			if (!AppendNativeConversionExpression(buf, fieldExpr,
 												  attr->atttypid,
 												  attr->atttypmod,
-												  depth))
+												  depth, true, convertTemporal, convertNestedUuid))
 				appendStringInfoString(buf, fieldExpr);
 
 			firstField = false;
@@ -786,9 +809,11 @@ AppendNativeConversionExpression(StringInfo buf, const char *expr,
  */
 char *
 IcebergWrapQueryWithNativeTypeConversion(char *query, TupleDesc tupleDesc,
-										 bool queryHasRowId)
+										 bool queryHasRowId, bool convertTemporal,
+										 bool convertNestedUuid)
 {
-	if (tupleDesc == NULL || !TupleDescHasNativeConversionColumn(tupleDesc))
+	if (tupleDesc == NULL ||
+		!TupleDescHasNativeConversionColumn(tupleDesc, convertTemporal, convertNestedUuid))
 		return query;
 
 	StringInfoData wrapped;
@@ -817,7 +842,8 @@ IcebergWrapQueryWithNativeTypeConversion(char *query, TupleDesc tupleDesc,
 
 		if (AppendNativeConversionExpression(&exprBuf, quotedName,
 											 attr->atttypid,
-											 attr->atttypmod, 0))
+											 attr->atttypmod, 0, false,
+											 convertTemporal, convertNestedUuid))
 		{
 			appendStringInfo(&wrapped, "%s AS %s", exprBuf.data, quotedName);
 		}

@@ -46,6 +46,7 @@
 #include "pg_lake/iceberg/iceberg_type_json_serde.h"
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
+#include "pg_lake/pgduck/compatibility_mode.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/pgduck/remote_storage.h"
 #include "pg_lake/pgduck/serialize.h"
@@ -150,6 +151,14 @@ CreatePostgresColumnMappingsForColumnDefs(Oid relationId, List *columnDefList, b
 
 	TupleDesc	tupleDesc = RelationGetDescr(rel);
 
+	/*
+	 * Under compatibility_mode='snowflake' a nested uuid is stored physically
+	 * as Iceberg string; rewrite the built field tree's nested uuid leaves so
+	 * the written metadata advertises string. The Postgres column type is
+	 * left untouched.
+	 */
+	IcebergCompatibilityMode compatMode = GetIcebergCompatibilityModeForTable(relationId);
+
 	foreach(columnDefCell, columnDefList)
 	{
 		ColumnDef  *columnDef = (ColumnDef *) lfirst(columnDefCell);
@@ -181,6 +190,8 @@ CreatePostgresColumnMappingsForColumnDefs(Oid relationId, List *columnDefList, b
 
 		field->type =
 			PostgresTypeToIcebergField(pgType, forAddColumn, &subFieldIndex);
+
+		RewriteNestedUuidFieldsToString(field->type, compatMode);
 
 		field->required = columnDef->is_not_null;
 

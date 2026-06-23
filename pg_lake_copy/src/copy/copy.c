@@ -938,7 +938,8 @@ ProcessPgLakeCopyTo(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 	 */
 	ConvertCSVFileTo(tempCSVPath, tupleDesc, maximumLineLength,
 					 destinationPath, destinationFormat, destinationCompression,
-					 copyStmt->options, schema, NIL);
+					 copyStmt->options, schema, NIL,
+					 false /* convertNestedUuid: regular COPY TO export */ );
 
 	if (IsCopyToStdout(copyStmt))
 	{

@@ -53,6 +53,7 @@
 #include "pg_lake/pgduck/read_data.h"
 #include "pg_lake/pgduck/remote_storage.h"
 #include "pg_lake/pgduck/write_data.h"
+#include "pg_lake/pgduck/compatibility_mode.h"
 #include "pg_lake/pgduck/iceberg_validation.h"
 #include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/util/rel_utils.h"
@@ -273,6 +274,8 @@ PrepareCSVInsertion(Oid relationId, char *insertCSV, int64 rowCount,
 	InsertInProgressFileRecordExtended(dataFilePrefix, isPrefix, autoDeleteRecord);
 
 	List	   *leafFields = GetLeafFieldsForTable(relationId);
+	bool		convertNestedUuid =
+		(GetIcebergCompatibilityModeForTable(relationId) == ICEBERG_COMPAT_SNOWFLAKE);
 
 	/* convert insert file to a new file in table format */
 	StatsCollector *statsCollector =
@@ -284,7 +287,8 @@ PrepareCSVInsertion(Oid relationId, char *insertCSV, int64 rowCount,
 						 compression,
 						 options,
 						 schema,
-						 leafFields);
+						 leafFields,
+						 convertNestedUuid);
 
 	ApplyColumnStatsModeForAllFileStats(relationId, statsCollector->dataFileStats);
 
@@ -602,7 +606,9 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 			/* write the deletion file (no temporal validation needed) */
 			StatsCollector *statsCollector =
 				ConvertCSVFileTo(deleteFile, deleteTupleDesc, -1, deletionFilePath,
-								 DATA_FORMAT_PARQUET, compression, copyOptions, schema, leafFields);
+								 DATA_FORMAT_PARQUET, compression, copyOptions, schema, leafFields,
+								 false	/* convertNestedUuid: deletion files
+								   * have no uuid */ );
 
 			ereport(WriteLogLevel, (errmsg("adding deletion file %s with " INT64_FORMAT " rows ",
 										   deletionFilePath, deletedRowCount)));
@@ -1072,6 +1078,8 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 
 	/* perform compaction */
 	List	   *leafFields = GetLeafFieldsForTable(relationId);
+	bool		convertNestedUuid =
+		(GetIcebergCompatibilityModeForTable(relationId) == ICEBERG_COMPAT_SNOWFLAKE);
 	StatsCollector *statsCollector =
 		WriteQueryResultTo(readQuery,
 						   newDataFilePath,
@@ -1084,6 +1092,7 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 						   leafFields,
 						   outOfRangePolicy,
 						   wrapNativeTypes,
+						   convertNestedUuid,
 						   partitionByExprs);
 
 	if (statsCollector->totalRowCount == 0)

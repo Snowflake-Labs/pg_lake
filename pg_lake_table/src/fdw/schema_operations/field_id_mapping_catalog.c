@@ -45,6 +45,7 @@
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/parquet/leaf_field.h"
+#include "pg_lake/pgduck/compatibility_mode.h"
 #include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/serialize.h"
 #include "pg_lake/util/array_utils.h"
@@ -204,6 +205,16 @@ CreateRegisteredFieldForAttribute(Oid relationId, int spiIndex)
 	PGType		pgType = MakePGType(fieldType, fieldTypeMod);
 
 	field->type = PostgresTypeToIcebergField(pgType, forAddColumn, &subFieldIndex);
+
+	/*
+	 * The stored field_pg_type is the (unchanged) Postgres type, e.g. uuid.
+	 * Under compatibility_mode='snowflake' the physical Iceberg/Parquet
+	 * storage is string for nested uuid, so rewrite the rebuilt field tree to
+	 * match what read_parquet will be handed. This is the read-side mirror of
+	 * the rewrite applied when the schema was written.
+	 */
+	RewriteNestedUuidFieldsToString(field->type,
+									GetIcebergCompatibilityModeForTable(relationId));
 
 	field->duckSerializedInitialDefault =
 		!initialDefaultValueIsNull ?
@@ -435,6 +446,14 @@ GetLeafFieldsForInternalIcebergTable(Oid relationId)
 {
 	List	   *leafFields = NIL;
 
+	/*
+	 * Under compatibility_mode='snowflake' a nested uuid leaf is stored as
+	 * string. The stored field_pg_type is still uuid, so rewrite the rebuilt
+	 * leaf to keep these leaf fields consistent with the physical data files
+	 * (and with the schema reported to read_parquet).
+	 */
+	IcebergCompatibilityMode compatMode = GetIcebergCompatibilityModeForTable(relationId);
+
 	MemoryContext currentContext = CurrentMemoryContext;
 
 	StringInfo	query = makeStringInfo();
@@ -520,6 +539,15 @@ GetLeafFieldsForInternalIcebergTable(Oid relationId)
 		Field	   *field = PostgresTypeToIcebergField(pgType, forAddColumn, &subFieldIndex);
 
 		Assert(field != NULL && field->type == FIELD_TYPE_SCALAR);
+
+		/*
+		 * level is 1-based here (top-level column == 1), so a uuid at level >
+		 * 1 is nested and is stored physically as string under compat mode.
+		 */
+		if (compatMode == ICEBERG_COMPAT_SNOWFLAKE && level > 1 &&
+			field->field.scalar.typeName != NULL &&
+			strcmp(field->field.scalar.typeName, "uuid") == 0)
+			field->field.scalar.typeName = pstrdup("string");
 
 		LeafField  *leafField = palloc0(sizeof(LeafField));
 

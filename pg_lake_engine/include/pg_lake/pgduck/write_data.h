@@ -52,7 +52,8 @@ extern PGDLLEXPORT StatsCollector * ConvertCSVFileTo(char *csvFilePath,
 													 CopyDataCompression destinationCompression,
 													 List *formatOptions,
 													 DataFileSchema * schema,
-													 List *leafFields);
+													 List *leafFields,
+													 bool convertNestedUuid);
 extern PGDLLEXPORT StatsCollector * WriteQueryResultTo(char *query,
 													   char *destinationPath,
 													   CopyDataFormat destinationFormat,
@@ -64,6 +65,7 @@ extern PGDLLEXPORT StatsCollector * WriteQueryResultTo(char *query,
 													   List *leafFields,
 													   IcebergOutOfRangePolicy outOfRangePolicy,
 													   bool wrapNativeTypes,
+													   bool convertNestedUuid,
 													   List *partitionByExprs);
 extern PGDLLEXPORT void AppendFields(StringInfo map, DataFileSchema * schema);
 extern PGDLLEXPORT char *TupleDescToColumnMapForWrite(TupleDesc tupleDesc, CopyDataFormat destinationFormat);

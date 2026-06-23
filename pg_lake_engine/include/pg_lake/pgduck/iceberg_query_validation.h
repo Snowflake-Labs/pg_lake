@@ -44,4 +44,6 @@ extern PGDLLEXPORT char *IcebergWrapQueryWithErrorOrClampChecks(char *query,
  */
 extern PGDLLEXPORT char *IcebergWrapQueryWithNativeTypeConversion(char *query,
 																  TupleDesc tupleDesc,
-																  bool queryHasRowId);
+																  bool queryHasRowId,
+																  bool convertTemporal,
+																  bool convertNestedUuid);
