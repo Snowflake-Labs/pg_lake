@@ -731,6 +731,30 @@ def test_alter_add_default_on_rewritten_column_rejected(
         pg_conn.commit()
 
 
+def test_alter_add_generated_on_rewritten_column_rejected(
+    s3, pg_conn, extension, with_default_location
+):
+    run_command(
+        "CREATE TABLE compat_alter_gen (u uuid) USING iceberg "
+        "WITH (compatibility_mode = 'snowflake');",
+        pg_conn,
+    )
+    pg_conn.commit()
+    try:
+        error = run_command(
+            "ALTER TABLE compat_alter_gen "
+            "ADD COLUMN g uuid[] GENERATED ALWAYS AS (ARRAY[u]) STORED;",
+            pg_conn,
+            raise_error=False,
+        )
+        assert "cannot rewrite column" in error
+        assert "g" in error
+        pg_conn.rollback()
+    finally:
+        run_command("DROP TABLE compat_alter_gen", pg_conn)
+        pg_conn.commit()
+
+
 def test_default_on_top_level_uuid_allowed(
     s3, pg_conn, extension, with_default_location
 ):
