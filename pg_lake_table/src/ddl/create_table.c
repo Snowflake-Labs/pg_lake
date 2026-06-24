@@ -63,6 +63,7 @@
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/iceberg/compatibility_mode.h"
 #include "pg_lake/util/numeric.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_lake/util/url_encode.h"
@@ -753,6 +754,27 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 							 REST_CATALOG_NAME,
 							 POSTGRES_CATALOG_NAME,
 							 OBJECT_STORE_CATALOG_NAME)));
+	}
+
+	/*
+	 * Seed compatibility_mode from pg_lake_iceberg.default_compatibility_mode
+	 * when the table does not specify it explicitly. We persist only a
+	 * non-default ('snowflake') value: 'auto' is the natural default, so an
+	 * absent option already means auto. Persisting the resolved value makes
+	 * the table self-describing -- its storage layout is fixed at creation
+	 * and is unaffected by later changes to the GUC (the option itself is
+	 * immutable).
+	 */
+	if (GetOption(createStmt->options, ICEBERG_COMPATIBILITY_MODE_OPTION) == NULL &&
+		IcebergDefaultCompatibilityMode != ICEBERG_COMPAT_AUTO)
+	{
+		const char *modeName =
+			IcebergCompatibilityModeName(IcebergDefaultCompatibilityMode);
+
+		createStmt->options =
+			lappend(createStmt->options,
+					makeDefElem(ICEBERG_COMPATIBILITY_MODE_OPTION,
+								(Node *) makeString(pstrdup(modeName)), -1));
 	}
 
 	bool		hasRestCatalogOption = HasRestCatalogTableOption(createStmt->options);

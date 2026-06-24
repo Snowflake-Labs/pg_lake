@@ -118,6 +118,10 @@ ApplyDDLCatalogChanges(Oid relationId, List *ddlOperations,
 			*metadataLocation = catalogType == REST_CATALOG_READ_WRITE ? NULL : GenerateInitialIcebergTableMetadataPath(relationId);
 			InsertInternalIcebergCatalogTable(relationId, *metadataLocation, ddlOperation->hasCustomLocation);
 
+			/* reject column types the table's compatibility mode cannot store */
+			ErrorIfColumnsUnsupportedForCompatibilityMode(relationId,
+														  ddlOperation->columnDefs);
+
 			/* register mappings for new columns */
 			bool		forAddColumn = false;
 			List	   *columnMappings = CreatePostgresColumnMappingsForColumnDefs(relationId,
@@ -188,6 +192,10 @@ ApplyDDLCatalogChanges(Oid relationId, List *ddlOperations,
 		}
 		else if (ddlOperation->type == DDL_COLUMN_ADD)
 		{
+			/* reject column types the table's compatibility mode cannot store */
+			ErrorIfColumnsUnsupportedForCompatibilityMode(relationId,
+														  ddlOperation->columnDefs);
+
 			/* register mapping for new column */
 			bool		forAddColumn = true;
 			List	   *columnMappings = CreatePostgresColumnMappingsForColumnDefs(relationId,

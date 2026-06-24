@@ -32,6 +32,7 @@
 #include "commands/defrem.h"
 #include "commands/comment.h"
 #include "foreign/foreign.h"
+#include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "parser/parse_type.h"
@@ -42,6 +43,7 @@
 #include "pg_lake/iceberg/api/table_metadata.h"
 #include "pg_lake/iceberg/api/table_schema.h"
 #include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/iceberg/compatibility_mode.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/iceberg/iceberg_type_json_serde.h"
 #include "pg_lake/parsetree/options.h"
@@ -132,6 +134,44 @@ GetDataFileSchemaForTableWithExclusion(Oid relationId, List *excludedColumns)
 	table_close(rel, NoLock);
 
 	return schema;
+}
+
+
+/*
+ * ErrorIfColumnsUnsupportedForCompatibilityMode rejects, at the DDL layer,
+ * column types a table's compatibility_mode cannot represent. Today: a map
+ * (pg_map) under 'snowflake', which Snowflake cannot store (this also keeps a
+ * uuid from ever living inside a map under snowflake compat, so the read/write
+ * codecs never need map-key/value conversion). Called from the CREATE / ALTER
+ * ADD COLUMN paths before any field mapping is built; the registration code
+ * then only asserts the invariant.
+ */
+void
+ErrorIfColumnsUnsupportedForCompatibilityMode(Oid relationId, List *columnDefList)
+{
+	IcebergCompatibilityMode compatMode = IcebergCompatibilityModeFromRelation(relationId);
+
+	if (compatMode != ICEBERG_COMPAT_SNOWFLAKE)
+		return;
+
+	ListCell   *columnDefCell = NULL;
+
+	foreach(columnDefCell, columnDefList)
+	{
+		ColumnDef  *columnDef = (ColumnDef *) lfirst(columnDefCell);
+		int32		typmod = 0;
+		Oid			typeOid = InvalidOid;
+
+		typenameTypeIdAndMod(NULL, columnDef->typeName, &typeOid, &typmod);
+
+		if (TypeContainsMap(typeOid))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("column \"%s\" of type %s is not supported with "
+							"compatibility_mode 'snowflake'",
+							columnDef->colname, format_type_be(typeOid)),
+					 errdetail("Snowflake cannot represent map types.")));
+	}
 }
 
 

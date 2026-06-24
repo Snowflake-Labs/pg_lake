@@ -52,6 +52,7 @@
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/iceberg/compatibility_mode.h"
 #include "pg_lake/iceberg/metadata_operations.h"
 #include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/parsetree/options.h"
@@ -1407,6 +1408,22 @@ HandleIcebergOptionsChanges(Oid relationId, AlterTableStmt *alterStmt)
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						 errmsg("Changing option \"%s\" is not supported",
 								newOption->defname)));
+
+			/*
+			 * compatibility_mode decides the per-leaf storage mapping once,
+			 * at registration. Changing it on an existing table would desync
+			 * the persisted mapping (field_storage_pg_type) from the data
+			 * files and Iceberg metadata already written, so forbid it
+			 * outright.
+			 */
+			if (strcmp(newOption->defname, ICEBERG_COMPATIBILITY_MODE_OPTION) == 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("Changing option \"%s\" is not supported",
+								newOption->defname),
+						 errdetail("The storage layout was fixed when the table "
+								   "was created; altering it would not match the "
+								   "existing data files.")));
 
 			/* we currently only care about row_ids */
 			if (strcmp(newOption->defname, "row_ids") != 0)

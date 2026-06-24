@@ -41,6 +41,7 @@ typedef struct PostgresColumnMapping
 }			PostgresColumnMapping;
 
 extern PGDLLEXPORT void RegisterPostgresColumnMappings(List *pgColumnMappingList);
+extern PGDLLEXPORT void ErrorIfColumnsUnsupportedForCompatibilityMode(Oid relationId, List *columnDefList);
 extern PGDLLEXPORT List *CreatePostgresColumnMappingsForColumnDefs(Oid relationId, List *columnDefList, bool forAddColumn);
 extern PGDLLEXPORT List *CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(Oid relationId);
 extern PGDLLEXPORT DataFileSchema * GetDataFileSchemaForTable(Oid relationId);

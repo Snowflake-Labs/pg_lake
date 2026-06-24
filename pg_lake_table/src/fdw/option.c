@@ -35,6 +35,7 @@
 #include "commands/extension.h"
 #include "foreign/foreign.h"
 #include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/iceberg/compatibility_mode.h"
 #include "pg_lake/partitioning/partition_by_parser.h"
 #include "pg_lake/permissions/roles.h"
 #include "pg_lake/copy/copy_format.h"
@@ -577,6 +578,12 @@ InitPgLakeIcebergOptions(void)
 		 */
 		{"out_of_range_values", ForeignTableRelationId},
 
+		/*
+		 * downstream-engine storage compatibility: 'auto' (default) or
+		 * 'snowflake' (store nested uuid physically as string)
+		 */
+		{ICEBERG_COMPATIBILITY_MODE_OPTION, ForeignTableRelationId},
+
 		{NULL, InvalidOid}
 	};
 
@@ -879,6 +886,12 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 								outOfRangeValues),
 						 errhint("Valid values are \"error\" and \"clamp\".")));
 			}
+		}
+		else if (catalog == ForeignTableRelationId &&
+				 strcmp(def->defname, ICEBERG_COMPATIBILITY_MODE_OPTION) == 0)
+		{
+			/* errors on an unrecognized value; single source of truth */
+			(void) ParseIcebergCompatibilityMode(defGetString(def));
 		}
 	}
 

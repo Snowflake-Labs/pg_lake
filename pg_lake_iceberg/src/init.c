@@ -31,6 +31,7 @@
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/iceberg/compatibility_mode.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/iceberg/operations/manifest_merge.h"
 #include "pg_lake/iceberg/operations/vacuum.h"
@@ -65,6 +66,13 @@ static const struct config_enum_entry RestCatalogAuthTypeOptions[] = {
 	{"oauth2", REST_CATALOG_AUTH_TYPE_OAUTH2, false},
 	{"default", REST_CATALOG_AUTH_TYPE_OAUTH2, false},
 	{"horizon", REST_CATALOG_AUTH_TYPE_HORIZON, false},
+	{NULL, 0, false},
+};
+
+/* pg_lake_iceberg.default_compatibility_mode */
+static const struct config_enum_entry CompatibilityModeOptions[] = {
+	{"auto", ICEBERG_COMPAT_AUTO, false},
+	{"snowflake", ICEBERG_COMPAT_SNOWFLAKE, false},
 	{NULL, 0, false},
 };
 
@@ -274,6 +282,21 @@ _PG_init(void)
 							 RestCatalogAuthTypeOptions,
 							 PGC_SUSET,
 							 GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
+	DefineCustomEnumVariable("pg_lake_iceberg.default_compatibility_mode",
+							 gettext_noop("Downstream-engine storage compatibility mode that new "
+										  "iceberg tables adopt when CREATE does not specify "
+										  "compatibility_mode."),
+							 gettext_noop("'auto' (the default) applies no storage divergence. "
+										  "'snowflake' shapes nested storage for Snowflake. The "
+										  "value is fixed into each table at creation, so changing "
+										  "this GUC only affects tables created afterwards."),
+							 &IcebergDefaultCompatibilityMode,
+							 ICEBERG_COMPAT_AUTO,
+							 CompatibilityModeOptions,
+							 PGC_USERSET,
+							 0,
 							 NULL, NULL, NULL);
 
 	DefineCustomStringVariable("pg_lake_iceberg.rest_catalog_host",
