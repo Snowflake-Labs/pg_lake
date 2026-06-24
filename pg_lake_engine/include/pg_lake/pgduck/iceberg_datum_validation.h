@@ -44,14 +44,20 @@ extern PGDLLEXPORT Datum IcebergErrorOrClampDatum(Datum value, Oid typeOid,
 
 /*
  * IcebergSizeClampDatum truncates, NULLs, or errors on a Datum so that
- * string, binary, and nested-type values fit the byte limits expressed by
- * pg_lake_engine.iceberg_max_string_bytes,
- * pg_lake_engine.iceberg_max_binary_bytes, and
- * pg_lake_engine.iceberg_max_nested_type_bytes (0 = no limit).
+ * string, binary, and nested-type values fit Snowflake's per-column byte
+ * caps (16 MiB STRING, 8 MiB BINARY, 128 MiB OBJECT/ARRAY/VARIANT).  Only
+ * Iceberg tables declared with compatibility_mode='snowflake' route their
+ * writes through this function; callers gate on the table's compatibility
+ * mode before calling.
+ *
+ * The effective limits are read off the IcebergMaxStringBytes,
+ * IcebergMaxBinaryBytes, and IcebergMaxNestedTypeBytes globals (default to
+ * the Snowflake constants; overridable via hidden test GUCs).  A zero
+ * value in any of those globals disables that single dimension's check.
  *
  * The behavior on an oversize value is selected by `policy`:
  *   - ICEBERG_OOR_ERROR (default for Iceberg tables): raise an error
- *     identifying the column and exceeded GUC.
+ *     identifying the column and exceeded cap.
  *   - ICEBERG_OOR_CLAMP: silently fix up the value as below.
  *   - ICEBERG_OOR_NONE: pass through unchanged.
  *
@@ -74,8 +80,8 @@ extern PGDLLEXPORT Datum IcebergErrorOrClampDatum(Datum value, Oid typeOid,
  * `columnName` is included in the error message under ERROR mode; pass
  * NULL or empty when the column context is unknown.
  *
- * If all three GUCs are 0, the value is returned unchanged regardless of
- * policy or type.
+ * If all three limit globals are 0, the value is returned unchanged
+ * regardless of policy or type.
  */
 extern PGDLLEXPORT Datum IcebergSizeClampDatum(Datum value, Oid typeOid,
 											   int32 typmod,

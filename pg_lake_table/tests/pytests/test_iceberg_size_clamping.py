@@ -2,11 +2,20 @@ import pytest
 from utils_pytest import *
 
 
+# Size-clamp paths fire only on Iceberg tables declared with
+# compatibility_mode='snowflake'; the hidden GUCs
+# pg_lake_engine.iceberg_max_{string,binary,nested_type}_bytes default to
+# Snowflake's per-column ceilings (16 MiB / 8 MiB / 128 MiB) and exist
+# solely as test overrides so cases below can drive the paths with tiny
+# values.  Every CREATE TABLE in this module therefore opts the table
+# into compatibility_mode='snowflake'.
+
+
 def test_size_clamp_text_bytea_jsonb(s3, pg_conn, extension, with_default_location):
     """text/varchar truncate, bytea byte-truncates, jsonb/json -> NULL.
 
-    pg_lake_engine.iceberg_max_string_bytes governs text/varchar/bpchar/jsonb/json
-    pg_lake_engine.iceberg_max_binary_bytes governs bytea.
+    iceberg_max_string_bytes scales the cap for text/varchar/bpchar/jsonb/json.
+    iceberg_max_binary_bytes scales the cap for bytea.
 
     UTF-8 boundary: 'é' is 2 bytes; 8 'é' = 16 bytes truncates to 10 bytes
     (5 'é') under a 10-byte limit, since pg_mbcharcliplen never crosses a
@@ -24,7 +33,7 @@ def test_size_clamp_text_bytea_jsonb(s3, pg_conn, extension, with_default_locati
             blob bytea,
             jb   jsonb,
             js   json
-        ) USING iceberg WITH (out_of_range_values = 'clamp');
+        ) USING iceberg WITH (out_of_range_values = 'clamp', compatibility_mode = 'snowflake');
         """,
         pg_conn,
     )
@@ -92,8 +101,16 @@ def test_size_clamp_text_bytea_jsonb(s3, pg_conn, extension, with_default_locati
         pg_conn.commit()
 
 
-def test_size_clamp_disabled_by_default(s3, pg_conn, extension, with_default_location):
-    """With both GUCs at the default (0), large values pass through unchanged."""
+def test_size_clamp_skipped_without_snowflake_compat(
+    s3, pg_conn, extension, with_default_location
+):
+    """A table without compatibility_mode='snowflake' skips the size-clamp
+    paths entirely, even with the byte-cap GUCs set to small values.
+
+    The clamp path is keyed on the per-table compatibility_mode, not on
+    the GUC values: AUTO mode (the default) writes large strings/bytea/jsonb
+    through unchanged.
+    """
     schema = "test_size_clamp_off"
 
     run_command(
@@ -107,13 +124,11 @@ def test_size_clamp_disabled_by_default(s3, pg_conn, extension, with_default_loc
     pg_conn.commit()
 
     try:
-        # Sanity: GUCs are 0 by default.
-        rows = run_query("SHOW pg_lake_engine.iceberg_max_string_bytes", pg_conn)
-        assert rows[0][0] == "0"
-        rows = run_query("SHOW pg_lake_engine.iceberg_max_binary_bytes", pg_conn)
-        assert rows[0][0] == "0"
-        rows = run_query("SHOW pg_lake_engine.iceberg_max_nested_type_bytes", pg_conn)
-        assert rows[0][0] == "0"
+        # Aggressive limits would normally truncate, but AUTO-mode tables
+        # bypass the clamp paths regardless.
+        run_command("SET pg_lake_engine.iceberg_max_string_bytes = 5", pg_conn)
+        run_command("SET pg_lake_engine.iceberg_max_binary_bytes = 5", pg_conn)
+        run_command("SET pg_lake_engine.iceberg_max_nested_type_bytes = 50", pg_conn)
 
         run_command(
             f"""INSERT INTO {schema}.t VALUES
@@ -133,6 +148,9 @@ def test_size_clamp_disabled_by_default(s3, pg_conn, extension, with_default_loc
         assert rows[0][2] is True
     finally:
         pg_conn.rollback()
+        run_command("RESET pg_lake_engine.iceberg_max_string_bytes", pg_conn)
+        run_command("RESET pg_lake_engine.iceberg_max_binary_bytes", pg_conn)
+        run_command("RESET pg_lake_engine.iceberg_max_nested_type_bytes", pg_conn)
         run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
         pg_conn.commit()
 
@@ -144,7 +162,7 @@ def test_size_clamp_only_one_guc(s3, pg_conn, extension, with_default_location):
     run_command(
         f"""
         CREATE SCHEMA {schema};
-        CREATE TABLE {schema}.t (id int, t text, blob bytea) USING iceberg WITH (out_of_range_values = 'clamp');
+        CREATE TABLE {schema}.t (id int, t text, blob bytea) USING iceberg WITH (out_of_range_values = 'clamp', compatibility_mode = 'snowflake');
         """,
         pg_conn,
     )
@@ -197,7 +215,7 @@ def test_size_clamp_not_null_jsonb(s3, pg_conn, extension, with_default_location
     run_command(
         f"""
         CREATE SCHEMA {schema};
-        CREATE TABLE {schema}.t (id int, jb jsonb NOT NULL) USING iceberg WITH (out_of_range_values = 'clamp');
+        CREATE TABLE {schema}.t (id int, jb jsonb NOT NULL) USING iceberg WITH (out_of_range_values = 'clamp', compatibility_mode = 'snowflake');
         """,
         pg_conn,
     )
@@ -242,7 +260,7 @@ def test_size_clamp_aggregate_array(s3, pg_conn, extension, with_default_locatio
     run_command(
         f"""
         CREATE SCHEMA {schema};
-        CREATE TABLE {schema}.t (id int, arr text[]) USING iceberg WITH (out_of_range_values = 'clamp');
+        CREATE TABLE {schema}.t (id int, arr text[]) USING iceberg WITH (out_of_range_values = 'clamp', compatibility_mode = 'snowflake');
         """,
         pg_conn,
     )
@@ -284,7 +302,7 @@ def test_size_clamp_aggregate_composite(s3, pg_conn, extension, with_default_loc
         f"""
         CREATE SCHEMA {schema};
         CREATE TYPE {schema}.kv AS (a text, b text, c text);
-        CREATE TABLE {schema}.t (id int, rec {schema}.kv) USING iceberg WITH (out_of_range_values = 'clamp');
+        CREATE TABLE {schema}.t (id int, rec {schema}.kv) USING iceberg WITH (out_of_range_values = 'clamp', compatibility_mode = 'snowflake');
         """,
         pg_conn,
     )
@@ -335,7 +353,7 @@ def test_size_clamp_aggregate_int_array(s3, pg_conn, extension, with_default_loc
     run_command(
         f"""
         CREATE SCHEMA {schema};
-        CREATE TABLE {schema}.t (id int, arr int[]) USING iceberg WITH (out_of_range_values = 'clamp');
+        CREATE TABLE {schema}.t (id int, arr int[]) USING iceberg WITH (out_of_range_values = 'clamp', compatibility_mode = 'snowflake');
         """,
         pg_conn,
     )
@@ -384,7 +402,7 @@ def test_size_clamp_insert_select(s3, pg_conn, extension, with_default_location)
         f"""
         CREATE SCHEMA {schema};
         CREATE TABLE {schema}.t (id int, txt text, blob bytea, jb jsonb)
-          USING iceberg WITH (out_of_range_values = 'clamp');
+          USING iceberg WITH (out_of_range_values = 'clamp', compatibility_mode = 'snowflake');
         """,
         pg_conn,
     )
@@ -432,7 +450,7 @@ def test_size_clamp_insert_select_array_aggregate(
     run_command(
         f"""
         CREATE SCHEMA {schema};
-        CREATE TABLE {schema}.t (id int, arr int[]) USING iceberg WITH (out_of_range_values = 'clamp');
+        CREATE TABLE {schema}.t (id int, arr int[]) USING iceberg WITH (out_of_range_values = 'clamp', compatibility_mode = 'snowflake');
         """,
         pg_conn,
     )
@@ -475,7 +493,7 @@ def test_size_clamp_aggregate_int_composite(
         f"""
         CREATE SCHEMA {schema};
         CREATE TYPE {schema}.tup AS (a bigint, b bigint, c bigint);
-        CREATE TABLE {schema}.t (id int, rec {schema}.tup) USING iceberg WITH (out_of_range_values = 'clamp');
+        CREATE TABLE {schema}.t (id int, rec {schema}.tup) USING iceberg WITH (out_of_range_values = 'clamp', compatibility_mode = 'snowflake');
         """,
         pg_conn,
     )
@@ -525,7 +543,7 @@ def test_size_check_error_default_per_tuple(
     run_command(
         f"""
         CREATE SCHEMA {schema};
-        CREATE TABLE {schema}.t (id int, t text, b bytea, j jsonb) USING iceberg;
+        CREATE TABLE {schema}.t (id int, t text, b bytea, j jsonb) USING iceberg WITH (compatibility_mode = 'snowflake');
         """,
         pg_conn,
     )
@@ -593,7 +611,7 @@ def test_size_check_error_default_aggregate_nested(
     run_command(
         f"""
         CREATE SCHEMA {schema};
-        CREATE TABLE {schema}.t (id int, arr text[]) USING iceberg;
+        CREATE TABLE {schema}.t (id int, arr text[]) USING iceberg WITH (compatibility_mode = 'snowflake');
         """,
         pg_conn,
     )
@@ -640,7 +658,7 @@ def test_size_check_error_default_insert_select(
     run_command(
         f"""
         CREATE SCHEMA {schema};
-        CREATE TABLE {schema}.t (id int, txt text) USING iceberg;
+        CREATE TABLE {schema}.t (id int, txt text) USING iceberg WITH (compatibility_mode = 'snowflake');
         """,
         pg_conn,
     )
@@ -683,7 +701,7 @@ def test_size_check_error_default_insert_select_jsonb(
     run_command(
         f"""
         CREATE SCHEMA {schema};
-        CREATE TABLE {schema}.t (id int, jb jsonb) USING iceberg;
+        CREATE TABLE {schema}.t (id int, jb jsonb) USING iceberg WITH (compatibility_mode = 'snowflake');
         """,
         pg_conn,
     )
@@ -740,7 +758,7 @@ def test_size_check_error_column_name_special_chars(
             id int,
             "o'reilly"  text,
             "100% bonus" text
-        ) USING iceberg;
+        ) USING iceberg WITH (compatibility_mode = 'snowflake');
         """,
         pg_conn,
     )
@@ -809,7 +827,7 @@ def test_size_check_jsonb_inside_container_uses_text_size(
     run_command(
         f"""
         CREATE SCHEMA {schema};
-        CREATE TABLE {schema}.t (id int, arr jsonb[]) USING iceberg;
+        CREATE TABLE {schema}.t (id int, arr jsonb[]) USING iceberg WITH (compatibility_mode = 'snowflake');
         """,
         pg_conn,
     )
@@ -865,7 +883,7 @@ def test_size_clamp_domain_type(s3, pg_conn, extension, with_default_location):
         CREATE SCHEMA {schema};
         CREATE DOMAIN {schema}.short_text AS text;
         CREATE TABLE {schema}.t (id int, t {schema}.short_text)
-          USING iceberg WITH (out_of_range_values = 'clamp');
+          USING iceberg WITH (out_of_range_values = 'clamp', compatibility_mode = 'snowflake');
         """,
         pg_conn,
     )
@@ -902,7 +920,7 @@ def test_size_clamp_bpchar_pushdown(s3, pg_conn, extension, with_default_locatio
         f"""
         CREATE SCHEMA {schema};
         CREATE TABLE {schema}.t (id int, c char(50))
-          USING iceberg WITH (out_of_range_values = 'clamp');
+          USING iceberg WITH (out_of_range_values = 'clamp', compatibility_mode = 'snowflake');
         """,
         pg_conn,
     )
@@ -949,7 +967,7 @@ def test_size_clamp_pushdown_utf8_boundary(
         f"""
         CREATE SCHEMA {schema};
         CREATE TABLE {schema}.t (id int, t text)
-          USING iceberg WITH (out_of_range_values = 'clamp');
+          USING iceberg WITH (out_of_range_values = 'clamp', compatibility_mode = 'snowflake');
         """,
         pg_conn,
     )

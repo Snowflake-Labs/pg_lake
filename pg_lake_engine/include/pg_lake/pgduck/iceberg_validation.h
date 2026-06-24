@@ -74,12 +74,29 @@ extern PGDLLEXPORT bool TypeNeedsIcebergValidation(Oid typeOid, int32 typmod,
 #define TEMPORAL_MAX_YEAR			9999
 
 /*
- * Downstream byte limits for values written to Iceberg tables, set via the
- * pg_lake_engine.iceberg_max_string_bytes and
- * pg_lake_engine.iceberg_max_binary_bytes GUCs.  0 means no limit.  These
- * caps are imposed by some downstream consumers (e.g. Snowflake VARCHAR
- * 16 MiB / BINARY 8 MiB) and applied via IcebergSizeClampDatum.
+ * Snowflake's per-column byte ceilings, applied when an Iceberg table is
+ * declared with compatibility_mode='snowflake'.  Values writing to such a
+ * table run through IcebergSizeClampDatum / IcebergWrapQueryWithSizeClampChecks
+ * and are clamped or rejected (per out_of_range_values) once they exceed the
+ * matching cap.
+ *
+ * The cap matches Snowflake's narrowest default column ceiling for that
+ * category:
+ *   STRING        : 16 MiB (default VARCHAR/STRING width)
+ *   BINARY        :  8 MiB (default BINARY width)
+ *   OBJECT/ARRAY/
+ *   VARIANT       : 128 MiB (semi-structured column ceiling)
+ *
+ * The variables themselves are backed by hidden GUCs so regression tests can
+ * scale them down to fit small-data fixtures; the GUCs are not part of the
+ * user-facing surface.  Tables in any other compatibility_mode pass through
+ * unchanged regardless of the GUC values, because the call sites only enter
+ * the clamp paths when compatibility_mode='snowflake'.
  */
+#define ICEBERG_SNOWFLAKE_MAX_STRING_BYTES		(16 * 1024 * 1024)
+#define ICEBERG_SNOWFLAKE_MAX_BINARY_BYTES		(8 * 1024 * 1024)
+#define ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES	(128 * 1024 * 1024)
+
 extern PGDLLEXPORT int IcebergMaxStringBytes;
 extern PGDLLEXPORT int IcebergMaxBinaryBytes;
 extern PGDLLEXPORT int IcebergMaxNestedTypeBytes;

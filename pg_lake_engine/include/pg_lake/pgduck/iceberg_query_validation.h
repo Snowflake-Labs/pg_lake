@@ -40,19 +40,20 @@ extern PGDLLEXPORT char *IcebergWrapQueryWithErrorOrClampChecks(char *query,
 
 /*
  * IcebergWrapQueryWithSizeClampChecks wraps a query so that values
- * exceeding the per-column byte caps (pg_lake_engine.iceberg_max_string_bytes,
- * iceberg_max_binary_bytes, iceberg_max_nested_type_bytes) are either
- * clamped or rejected, per `policy`:
+ * exceeding Snowflake's per-column byte caps are either clamped or
+ * rejected, per `policy`:
  *
  *   - ICEBERG_OOR_ERROR (default): raise error identifying the column.
  *   - ICEBERG_OOR_CLAMP: text/varchar/bpchar truncated at a UTF-8
  *     character boundary; bytea byte-truncated; jsonb/json NULLed when
- *     the serialized form exceeds the limit; arrays/structs/maps NULLed
- *     when their measured byte size exceeds the nested-type cap.
+ *     the serialized form exceeds the string limit; arrays/structs/maps
+ *     NULLed when their measured byte size exceeds the nested-type cap.
  *   - ICEBERG_OOR_NONE: no-op.
  *
- * Returns the original query unchanged when all GUCs are zero or no
- * column carries a clampable type.
+ * Callers gate on compatibility_mode='snowflake' before reaching here;
+ * the wrapper itself is unconditional otherwise (returning the original
+ * query only when no column carries a clampable type or when all three
+ * effective limits are zero — a test-only configuration).
  */
 extern PGDLLEXPORT char *IcebergWrapQueryWithSizeClampChecks(char *query,
 															 TupleDesc tupleDesc,

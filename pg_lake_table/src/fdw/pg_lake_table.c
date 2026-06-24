@@ -83,6 +83,7 @@
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/fdw/multi_data_file_dest.h"
 #include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/iceberg/compatibility_mode.h"
 #include "pg_lake/iceberg/operations/manifest_merge.h"
 #include "pg_lake/partitioning/partition_by_parser.h"
 #include "pg_lake/partitioning/partitioned_dest_receiver.h"
@@ -245,11 +246,19 @@ typedef struct PgLakeModifyState
 	bool		needsOutOfRangeValidation;
 
 	/*
+	 * applyIcebergSizeChecks is true when the table is declared with
+	 * compatibility_mode='snowflake', which is the only setting under which
+	 * the size-clamp paths fire.  AUTO-mode tables skip them entirely even if
+	 * needsSizeClamping below is true.
+	 */
+	bool		applyIcebergSizeChecks;
+
+	/*
 	 * needsSizeClamping is true if any column type contains a leaf type
 	 * (text/varchar/bpchar/bytea/jsonb/json) that could potentially be
-	 * size-clamped by IcebergSizeClampDatum at write time, when either
-	 * pg_lake_engine.iceberg_max_string_bytes or
-	 * pg_lake_engine.iceberg_max_binary_bytes is set.
+	 * size-clamped by IcebergSizeClampDatum at write time.  It is a static
+	 * type-shape signal; whether to actually enter the clamp path is gated by
+	 * applyIcebergSizeChecks.
 	 */
 	bool		needsSizeClamping;
 
@@ -2677,9 +2686,9 @@ IcebergErrorOrClampSlotInPlace(TupleTableSlot *slot, TupleDesc tupleDesc,
 
 
 /*
- * IcebergSizeCheckOrClampSlotInPlace enforces the size-clamping GUCs on
- * string/binary/nested values in `slot`.  Behavior is selected per-table
- * via `out_of_range_values`:
+ * IcebergSizeCheckOrClampSlotInPlace enforces the Snowflake per-column byte
+ * caps on string/binary/nested values in `slot`.  Behavior is selected
+ * per-table via `out_of_range_values`:
  *   - ICEBERG_OOR_ERROR (default): raises on the first oversize value,
  *     identifying the column.
  *   - ICEBERG_OOR_CLAMP: truncates / NULLs the value in place.
@@ -2747,9 +2756,7 @@ ClampAndCheckConstraints(PgLakeModifyState * fmstate,
 		IcebergErrorOrClampSlotInPlace(slot, fmstate->tupleDesc,
 									   fmstate->outOfRangePolicy);
 
-	if (fmstate->needsSizeClamping &&
-		(IcebergMaxStringBytes > 0 || IcebergMaxBinaryBytes > 0 ||
-		 IcebergMaxNestedTypeBytes > 0))
+	if (fmstate->needsSizeClamping && fmstate->applyIcebergSizeChecks)
 		IcebergSizeCheckOrClampSlotInPlace(slot, fmstate->tupleDesc,
 										   fmstate->sizeClampingPerAttr,
 										   fmstate->outOfRangePolicy);
@@ -3600,6 +3607,8 @@ create_foreign_modify(Relation rel,
 		fmstate->outOfRangePolicy =
 			GetIcebergOutOfRangePolicyForTable(relationId);
 		fmstate->needsOutOfRangeValidation = TupleDescNeedsIcebergValidation(fmstate->tupleDesc);
+		fmstate->applyIcebergSizeChecks =
+			IcebergCompatibilityModeFromRelation(relationId) == ICEBERG_COMPAT_SNOWFLAKE;
 		fmstate->needsSizeClamping = TupleDescNeedsIcebergSizeClamping(fmstate->tupleDesc);
 
 		if (fmstate->needsSizeClamping)

@@ -673,17 +673,20 @@ AppendIcebergSizeClampExpression(StringInfo buf, const char *expr,
 
 /*
  * IcebergWrapQueryWithSizeClampChecks wraps a query with an outer SELECT
- * that enforces the per-column size limits on each clampable column.
+ * that enforces Snowflake's per-column size limits on each clampable
+ * column.  Callers gate on compatibility_mode='snowflake' before reaching
+ * this function; tables in any other mode bypass the wrapper entirely.
+ *
  * Behavior on oversize values is selected by `policy`:
  *
  *   - ICEBERG_OOR_ERROR: raise an error identifying the column / type /
- *     exceeded GUC (default for Iceberg tables).
+ *     exceeded cap (default for Iceberg tables).
  *   - ICEBERG_OOR_CLAMP: silently truncate / NULL.
  *   - ICEBERG_OOR_NONE: no-op, original query returned.
  *
- * When all GUCs are 0 or no column carries a clampable type, the original
- * query is returned unchanged so the wrapper is free for non-clamping
- * callers.
+ * When all three limit globals are 0 (a test-only configuration) or no
+ * column carries a clampable type, the original query is returned
+ * unchanged.
  *
  * Both the INSERT..SELECT pushdown path (via WriteQueryResultTo) and the
  * snowflake_cdc snapshot path (via AddQueryResultToTable) flow through
