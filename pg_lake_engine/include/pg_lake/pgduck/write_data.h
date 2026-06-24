@@ -63,6 +63,7 @@ extern PGDLLEXPORT StatsCollector * WriteQueryResultTo(char *query,
 													   TupleDesc queryTupleDesc,
 													   List *leafFields,
 													   IcebergOutOfRangePolicy outOfRangePolicy,
+													   bool applyIcebergSizeChecks,
 													   bool wrapNativeTypes,
 													   List *partitionByExprs);
 extern PGDLLEXPORT void AppendFields(StringInfo map, DataFileSchema * schema);

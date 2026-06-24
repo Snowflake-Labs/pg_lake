@@ -40,13 +40,17 @@ static IcebergOutOfRangePolicy GetIcebergOutOfRangePolicyFromOptions(List *optio
 
 
 /*
- * Backing variables for pg_lake_engine.iceberg_max_string_bytes and
- * pg_lake_engine.iceberg_max_binary_bytes.  Registered in pg_lake_engine
- * _PG_init().  0 means no limit.
+ * Backing variables for pg_lake_engine.iceberg_max_string_bytes,
+ * iceberg_max_binary_bytes, and iceberg_max_nested_type_bytes.  Registered
+ * in pg_lake_engine _PG_init().  Defaults are Snowflake's per-column
+ * ceilings (16 MiB string, 8 MiB binary, 128 MiB nested-type); the hidden
+ * GUCs let tests scale them down to fit small-data fixtures.  They only
+ * take effect for tables declared with compatibility_mode='snowflake';
+ * AUTO-mode tables skip the size-clamp paths entirely.
  */
-int			IcebergMaxStringBytes = 0;
-int			IcebergMaxBinaryBytes = 0;
-int			IcebergMaxNestedTypeBytes = 0;
+int			IcebergMaxStringBytes = ICEBERG_SNOWFLAKE_MAX_STRING_BYTES;
+int			IcebergMaxBinaryBytes = ICEBERG_SNOWFLAKE_MAX_BINARY_BYTES;
+int			IcebergMaxNestedTypeBytes = ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES;
 
 
 /*
@@ -191,9 +195,10 @@ TypeNeedsIcebergValidation(Oid typeOid, int32 typmod, bool isPushdown)
  * element/field types (e.g. an int[] of millions of values).  Recurses
  * through domains.
  *
- * Independent of the current pg_lake_engine.iceberg_max_string_bytes and
- * pg_lake_engine.iceberg_max_binary_bytes values: this is a static
- * type-shape check used to gate the per-row clamp call cheaply.
+ * Independent of compatibility_mode and of the current size-limit GUC
+ * values: this is a static type-shape check used to gate the per-row clamp
+ * call cheaply; the caller decides whether to enter the clamp path at all
+ * based on compatibility_mode.
  */
 bool
 TypeNeedsIcebergSizeClamping(Oid typeOid)

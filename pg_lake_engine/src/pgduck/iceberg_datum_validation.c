@@ -1021,13 +1021,13 @@ IcebergSizeClampNestedDatum(Datum value, Oid typeOid, int32 typmod,
 
 
 /*
- * IcebergSizeClampDatum truncates or NULLs a Datum so that string and binary
- * values fit the byte limits expressed by
- * pg_lake_engine.iceberg_max_string_bytes and
- * pg_lake_engine.iceberg_max_binary_bytes.
+ * IcebergSizeClampDatum truncates or NULLs a Datum so that string, binary,
+ * and nested-type values fit Snowflake's per-column byte caps.  Callers
+ * gate on the table's compatibility_mode before calling; this function
+ * applies the limits unconditionally otherwise.
  *
- * See header comment for full semantics.  When both GUCs are 0 the value
- * passes through unchanged.
+ * See header comment for full semantics.  When all three limit globals
+ * are 0 the value passes through unchanged.
  */
 Datum
 IcebergSizeClampDatum(Datum value, Oid typeOid, int32 typmod,

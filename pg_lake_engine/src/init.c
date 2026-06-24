@@ -188,47 +188,46 @@ _PG_init(void)
 							NULL, NULL, NULL);
 
 	DefineCustomIntVariable("pg_lake_engine.iceberg_max_string_bytes",
-							gettext_noop("Maximum bytes for string values written to "
-										 "Iceberg tables. Values of text/varchar/bpchar "
-										 "exceeding this size are truncated at a UTF-8 "
-										 "character boundary; values of jsonb/json are "
-										 "replaced with NULL since truncation would "
-										 "corrupt the structure. 0 disables the limit. "
-										 "Intended for downstream consumers (e.g. "
-										 "Snowflake) that impose per-column byte caps."),
+							gettext_noop("Per-column byte cap applied to string values "
+										 "(text/varchar/bpchar/jsonb/json) written to "
+										 "Iceberg tables with compatibility_mode = "
+										 "'snowflake'. Defaults to Snowflake's 16 MiB "
+										 "STRING ceiling. Hidden override intended for "
+										 "regression tests that exercise the clamp path "
+										 "without producing multi-MiB fixtures; tables "
+										 "in any other compatibility_mode are unaffected."),
 							NULL,
 							&IcebergMaxStringBytes,
-							0, 0, INT_MAX,
+							ICEBERG_SNOWFLAKE_MAX_STRING_BYTES, 0, INT_MAX,
 							PGC_USERSET,
-							GUC_UNIT_BYTE,
+							GUC_UNIT_BYTE | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
 
 	DefineCustomIntVariable("pg_lake_engine.iceberg_max_binary_bytes",
-							gettext_noop("Maximum bytes for bytea values written to "
-										 "Iceberg tables. Values exceeding this size are "
-										 "byte-truncated. 0 disables the limit."),
+							gettext_noop("Per-column byte cap applied to bytea values "
+										 "written to Iceberg tables with "
+										 "compatibility_mode = 'snowflake'. Defaults to "
+										 "Snowflake's 8 MiB BINARY ceiling. Hidden "
+										 "regression-test override."),
 							NULL,
 							&IcebergMaxBinaryBytes,
-							0, 0, INT_MAX,
+							ICEBERG_SNOWFLAKE_MAX_BINARY_BYTES, 0, INT_MAX,
 							PGC_USERSET,
-							GUC_UNIT_BYTE,
+							GUC_UNIT_BYTE | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
 
 	DefineCustomIntVariable("pg_lake_engine.iceberg_max_nested_type_bytes",
-							gettext_noop("Maximum bytes for the JSON-serialized form of "
-										 "array, composite, and map values written to "
-										 "Iceberg tables. The whole container is replaced "
-										 "with NULL when the sum of its leaf byte sizes "
-										 "exceeds this size. 0 disables the limit. Distinct "
-										 "from iceberg_max_string_bytes because downstream "
-										 "consumers' OBJECT/ARRAY/VARIANT columns typically "
-										 "have a much larger ceiling than STRING/VARCHAR "
-										 "(e.g. on Snowflake: 128 MiB vs. 16 MiB)."),
+							gettext_noop("Per-column byte cap applied to array, "
+										 "composite, and map values written to Iceberg "
+										 "tables with compatibility_mode = 'snowflake'. "
+										 "Defaults to Snowflake's 128 MiB "
+										 "OBJECT/ARRAY/VARIANT ceiling. Hidden "
+										 "regression-test override."),
 							NULL,
 							&IcebergMaxNestedTypeBytes,
-							0, 0, INT_MAX,
+							ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES, 0, INT_MAX,
 							PGC_USERSET,
-							GUC_UNIT_BYTE,
+							GUC_UNIT_BYTE | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
 
 	DefineCustomStringVariable(

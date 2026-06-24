@@ -41,6 +41,7 @@
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/iceberg/compatibility_mode.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/iceberg/metadata_operations.h"
 #include "pg_lake/iceberg/partitioning/partition.h"
@@ -128,6 +129,7 @@ static List *PrepareToAddQueryResultToTable(Oid relationId,
 											bool allowSplit,
 											bool isVerbose,
 											IcebergOutOfRangePolicy outOfRangePolicy,
+											bool applyIcebergSizeChecks,
 											bool wrapNativeTypes,
 											List *partitionByExprs);
 static List *GetPossiblePositionDeleteFiles(Oid relationId, List *sourcePathList,
@@ -960,6 +962,7 @@ TryCompactDataFiles(Oid relationId, TupleDesc tupleDescriptor, List *candidates,
 									   partitionSpecId, partition,
 									   hasRowIds, allowSplit, isVerbose,
 									   ICEBERG_OOR_NONE,
+									   false /* applyIcebergSizeChecks */ ,
 									   false /* wrapNativeTypes */ ,
 									   NIL /* partitionByExprs */ );
 
@@ -1018,6 +1021,7 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 							   int32 partitionSpecId, Partition * partition,
 							   bool queryHasRowId, bool allowSplit, bool isVerbose,
 							   IcebergOutOfRangePolicy outOfRangePolicy,
+							   bool applyIcebergSizeChecks,
 							   bool wrapNativeTypes,
 							   List *partitionByExprs)
 {
@@ -1083,6 +1087,7 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 						   queryTupleDesc,
 						   leafFields,
 						   outOfRangePolicy,
+						   applyIcebergSizeChecks,
 						   wrapNativeTypes,
 						   partitionByExprs);
 
@@ -1166,6 +1171,8 @@ AddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc,
 
 	IcebergOutOfRangePolicy outOfRangePolicy =
 		GetIcebergOutOfRangePolicyForTable(relationId);
+	bool		applyIcebergSizeChecks =
+		IcebergCompatibilityModeFromRelation(relationId) == ICEBERG_COMPAT_SNOWFLAKE;
 
 	List	   *newFileOps =
 		PrepareToAddQueryResultToTable(relationId, readQuery,
@@ -1173,7 +1180,9 @@ AddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc,
 									   partitionSpecId,
 									   NULL /* partition */ ,
 									   queryHasRowId, allowSplit, isVerbose,
-									   outOfRangePolicy, wrapNativeTypes,
+									   outOfRangePolicy,
+									   applyIcebergSizeChecks,
+									   wrapNativeTypes,
 									   partitionByExprs);
 
 	/*
