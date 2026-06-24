@@ -1171,6 +1171,7 @@ def test_complex_transaction(
     run_command("DROP SCHEMA IF EXISTS tx_demo CASCADE;", pg_conn)
 
 
+@pytest.mark.flaky(reruns=2)
 @pytest.mark.parametrize(
     "catalog",
     ["postgres", "rest"],

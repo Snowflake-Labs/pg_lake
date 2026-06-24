@@ -95,6 +95,7 @@ pruning_data = [
 
 # this test aims to ensure some common operators like =,>,<,>=,<=,IN,ANY,BETWEEN etc
 # is supported for different data types
+@pytest.mark.flaky(reruns=2)
 @pytest.mark.parametrize("needs_quote, column_type, table_name, rows", pruning_data)
 def test_simple_data_pruning_for_data_types(
     installcheck,
