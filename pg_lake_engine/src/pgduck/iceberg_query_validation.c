@@ -18,17 +18,21 @@
 /*
  * Query-level Iceberg value clamp/error and type transformations.
  *
- * Two SELECT-wrapping entry points live here, both applied to the write
+ * Two SELECT-wrapping entry points live here, applied to the write
  * query sent to pgduck_server.  See the function-level comments for the
  * exact set of rewrites and why each is required:
  *
  *   - IcebergWrapQueryWithErrorOrClampChecks: clamp/error checks for
  *     out-of-range temporal values and nested-list flattening.
- *   - IcebergWrapQueryWithNativeTypeConversion: rewrites DuckDB columns
- *     whose native representation differs from the Iceberg target
- *     (INTERVAL, TIMETZ).
+ *   - IcebergWrapQueryWithRewrites: applies a bitmask of per-leaf rewrites
+ *     in a single traversal.  Today that is ICEBERG_REWRITE_NATIVE_ENCODE
+ *     (INTERVAL/TIMETZ -> Iceberg shape, type-intrinsic) and
+ *     ICEBERG_REWRITE_STORAGE_CAST (surface -> persisted storage type for
+ *     compatibility divergences such as a nested uuid stored as iceberg
+ *     string, driven by the storage schema).  A future rewrite is just
+ *     another flag handled in the same pass.
  *
- * Both recurse through arrays, composites, maps, and domains.
+ * All recurse through arrays, composites, maps, and domains.
  *
  * Common validation helpers (policy resolution, IsTemporalType, temporal
  * boundary constants) live in iceberg_validation.c.  Datum-level
@@ -45,6 +49,7 @@
 #include "pg_lake/pgduck/iceberg_query_validation.h"
 #include "pg_lake/pgduck/keywords.h"
 #include "pg_lake/pgduck/map.h"
+#include "pg_lake/pgduck/type.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/typcache.h"
@@ -72,12 +77,13 @@ static bool AppendIcebergValidationExpression(StringInfo buf, const char *expr,
 											  int depth);
 
 static bool TypeNeedsNativeConversion(Oid typeOid);
-static bool TupleDescHasNativeConversionColumn(TupleDesc tupleDesc);
+static bool LeafSubtreeNeedsRewrite(Oid typeOid, int32 typmod, int rewriteKinds,
+									Field * storageField);
 static void AppendIntervalStructPack(StringInfo buf, const char *expr);
 static void AppendTimeTzUtcCast(StringInfo buf, const char *expr);
-static bool AppendNativeConversionExpression(StringInfo buf, const char *expr,
-											 Oid typeOid, int32 typmod,
-											 int depth);
+static bool AppendRewriteExpression(StringInfo buf, const char *expr,
+									Oid typeOid, int32 typmod, int depth,
+									int rewriteKinds, Field * storageField);
 
 
 /* ================================================================
@@ -475,10 +481,11 @@ IcebergWrapQueryWithErrorOrClampChecks(char *query, TupleDesc tupleDesc,
  * ================================================================ */
 
 /*
- * TypeNeedsNativeConversion recursively checks whether a type is, or
- * contains, one of the native DuckDB types that needs rewriting before
- * being written to Iceberg (currently INTERVAL and TIMETZ).  Recurses
- * through arrays, composites, maps, and domains.
+ * TypeNeedsNativeConversion recursively checks whether a type is, or contains,
+ * a native DuckDB type (INTERVAL, TIMETZ) whose representation differs from
+ * Iceberg's and so must be rewritten on write. This depends only on the type,
+ * never on a per-table storage mapping. Recurses through arrays, composites,
+ * maps, and domains.
  */
 static bool
 TypeNeedsNativeConversion(Oid typeOid)
@@ -532,24 +539,6 @@ TypeNeedsNativeConversion(Oid typeOid)
 }
 
 
-static bool
-TupleDescHasNativeConversionColumn(TupleDesc tupleDesc)
-{
-	for (int i = 0; i < tupleDesc->natts; i++)
-	{
-		Form_pg_attribute attr = TupleDescAttr(tupleDesc, i);
-
-		if (attr->attisdropped)
-			continue;
-
-		if (TypeNeedsNativeConversion(attr->atttypid))
-			return true;
-	}
-
-	return false;
-}
-
-
 /*
  * AppendIntervalStructPack appends a DuckDB struct_pack expression that
  * decomposes a DuckDB INTERVAL into {months, days, microseconds}.
@@ -575,8 +564,8 @@ AppendIntervalStructPack(StringInfo buf, const char *expr)
 
 /*
  * AppendTimeTzUtcCast emits the DuckDB expression that produces the
- * Iceberg-storable TIME for a TIMETZ leaf.  See
- * IcebergWrapQueryWithNativeTypeConversion for the why.
+ * Iceberg-storable TIME for a TIMETZ leaf.  See AppendRewriteExpression
+ * (ICEBERG_REWRITE_NATIVE_ENCODE) for the why.
  *
  * The inner "CAST(... AS TIMETZ)" is deliberately retained because the
  * leaf expression can arrive at this helper in either of two shapes:
@@ -602,53 +591,134 @@ AppendTimeTzUtcCast(StringInfo buf, const char *expr)
 
 
 /*
- * AppendNativeConversionExpression recursively generates DuckDB SQL
- * that converts native-only types to their Iceberg-compatible shape:
- *   - INTERVAL -> STRUCT(months, days, microseconds)
- *   - TIMETZ   -> CAST(CAST(<expr> AS TIMETZ) AT TIME ZONE 'UTC' AS TIME)
+ * LeafSubtreeNeedsRewrite returns true when the type subtree rooted at
+ * (typeOid, typmod) contains at least one leaf that one of the enabled
+ * rewriteKinds must touch.  It is the OR of the per-kind predicates and gates
+ * container rebuilds: a struct/array is only repacked when something inside it
+ * actually changes, otherwise the whole branch passes through by reference.
+ */
+static bool
+LeafSubtreeNeedsRewrite(Oid typeOid, int32 typmod, int rewriteKinds,
+						Field * storageField)
+{
+	if ((rewriteKinds & ICEBERG_REWRITE_NATIVE_ENCODE) &&
+		TypeNeedsNativeConversion(typeOid))
+		return true;
+
+	if ((rewriteKinds & ICEBERG_REWRITE_STORAGE_CAST) &&
+		TypeHasStorageDivergentLeaf(typeOid, typmod, storageField))
+		return true;
+
+	return false;
+}
+
+
+/*
+ * AppendRewriteExpression recursively generates the DuckDB expression that
+ * applies every enabled rewrite in rewriteKinds to one (sub)value, returning
+ * true when it wrote a rewritten expression (false means "emit the value
+ * unchanged").  The two rewrite families touch disjoint leaves:
  *
- * Handles scalars, arrays (list_transform), composites (struct_pack),
- * maps (map_from_entries + list_transform), and domains.
+ *   - ICEBERG_REWRITE_NATIVE_ENCODE encodes INTERVAL/TIMETZ leaves into their
+ *     Iceberg shape (INTERVAL -> struct(months,days,microseconds), TIMETZ ->
+ *     UTC-normalized TIME).  Type-intrinsic, storageSchema unused.
+ *   - ICEBERG_REWRITE_STORAGE_CAST casts a surface leaf to the storage type
+ *     persisted for it (storageField), e.g. a nested uuid -> string under a
+ *     compatibility mode.
+ *
+ * Containers (array/struct/map/domain) are walked once and rebuilt structurally
+ * only where LeafSubtreeNeedsRewrite reports a changing descendant, so every
+ * untouched branch is reused by reference.  One traversal handles both
+ * families, so a struct mixing an encoded sibling and a storage-cast sibling is
+ * rebuilt by a single struct_pack, never two stacked ones.
  *
  * Returns true if a transformed expression was written to buf.
  */
 static bool
-AppendNativeConversionExpression(StringInfo buf, const char *expr,
-								 Oid typeOid, int32 typmod,
-								 int depth)
+AppendRewriteExpression(StringInfo buf, const char *expr,
+						Oid typeOid, int32 typmod, int depth,
+						int rewriteKinds, Field * storageField)
 {
-	if (typeOid == INTERVALOID)
+	/*
+	 * A single scalar leaf is claimed by at most one rewrite family.  The
+	 * native leaves (INTERVAL/TIMETZ) are bespoke shapes Iceberg has no type
+	 * for, so they are never recorded with a storage divergence in
+	 * field_id_mappings, and a storage cast never lands on them.  Handling a
+	 * leaf that needs both at once would force us to order the two casts,
+	 * which we deliberately do not support today; assert the invariant here
+	 * instead of silently applying only one of them.  (On container nodes the
+	 * first condition is false, so this is a no-op until we reach an actual
+	 * leaf.)
+	 */
+	Assert(!((typeOid == INTERVALOID || typeOid == TIMETZOID) &&
+			 ScalarLeafStorageDiverges(storageField, typeOid, typmod)));
+
+	/* scalar leaf: native encode (INTERVAL/TIMETZ) */
+	if (rewriteKinds & ICEBERG_REWRITE_NATIVE_ENCODE)
 	{
-		AppendIntervalStructPack(buf, expr);
+		if (typeOid == INTERVALOID)
+		{
+			AppendIntervalStructPack(buf, expr);
+			return true;
+		}
+
+		if (typeOid == TIMETZOID)
+		{
+			AppendTimeTzUtcCast(buf, expr);
+			return true;
+		}
+	}
+
+	/* scalar leaf: surface -> storage cast */
+	if ((rewriteKinds & ICEBERG_REWRITE_STORAGE_CAST) &&
+		ScalarLeafStorageDiverges(storageField, typeOid, typmod))
+	{
+		DuckDBType	storageDuck =
+			GetDuckDBTypeByName(storageField->field.scalar.typeName);
+
+		appendStringInfo(buf, "CAST(%s AS %s)", expr,
+						 GetDuckDBTypeName(storageDuck));
 		return true;
 	}
 
-	if (typeOid == TIMETZOID)
-	{
-		AppendTimeTzUtcCast(buf, expr);
-		return true;
-	}
-
-	/* array types: wrap elements via list_transform */
+	/* array types: rewrite elements via list_transform */
 	Oid			elemType = get_element_type(typeOid);
 
 	if (OidIsValid(elemType))
 	{
-		if (!TypeNeedsNativeConversion(elemType))
+		Field	   *elemStorage =
+			(storageField != NULL && storageField->type == FIELD_TYPE_LIST) ?
+			storageField->field.list.element : NULL;
+
+		/* an array's typmod applies to its element type */
+		if (!LeafSubtreeNeedsRewrite(elemType, typmod, rewriteKinds, elemStorage))
 			return false;
 
 		char	   *lambdaVar = psprintf("_x%d", depth);
 
 		appendStringInfo(buf, "list_transform(%s, %s -> ", expr, lambdaVar);
-		AppendNativeConversionExpression(buf, lambdaVar, elemType, -1,
-										 depth + 1);
+		AppendRewriteExpression(buf, lambdaVar, elemType, typmod, depth + 1,
+								rewriteKinds, elemStorage);
 		appendStringInfoChar(buf, ')');
 		return true;
 	}
 
-	/* map check must precede the generic domain unwrap (maps are domains) */
+	/*
+	 * Map check must precede the generic domain unwrap (maps are domains). A
+	 * map only ever carries native encodes: the registration-time DDL rules
+	 * forbid the storage-diverging leaves (uuid and friends) inside a map, so
+	 * ICEBERG_REWRITE_STORAGE_CAST has nothing to do here.  Gate the whole
+	 * branch on the native flag exactly like the scalar native branch above
+	 * -- this is the flag check, not a type check: a storage-only pass (the
+	 * change-log CSV path, which hands us values already in Iceberg shape)
+	 * must leave the map untouched rather than encode an already-encoded
+	 * value.
+	 */
 	if (IsMapTypeOid(typeOid))
 	{
+		if (!(rewriteKinds & ICEBERG_REWRITE_NATIVE_ENCODE))
+			return false;
+
 		PGType		keyType = GetMapKeyType(typeOid);
 		PGType		valType = GetMapValueType(typeOid);
 		bool		keyNeedsConversion = TypeNeedsNativeConversion(keyType.postgresTypeOid);
@@ -666,10 +736,9 @@ AppendNativeConversionExpression(StringInfo buf, const char *expr,
 		char	   *keyExpr = psprintf("%s.key", lambdaVar);
 
 		if (keyNeedsConversion)
-			AppendNativeConversionExpression(buf, keyExpr,
-											 keyType.postgresTypeOid,
-											 keyType.postgresTypeMod,
-											 depth + 1);
+			AppendRewriteExpression(buf, keyExpr, keyType.postgresTypeOid,
+									keyType.postgresTypeMod, depth + 1,
+									ICEBERG_REWRITE_NATIVE_ENCODE, NULL);
 		else
 			appendStringInfoString(buf, keyExpr);
 
@@ -678,10 +747,9 @@ AppendNativeConversionExpression(StringInfo buf, const char *expr,
 		char	   *valExpr = psprintf("%s.value", lambdaVar);
 
 		if (valNeedsConversion)
-			AppendNativeConversionExpression(buf, valExpr,
-											 valType.postgresTypeOid,
-											 valType.postgresTypeMod,
-											 depth + 1);
+			AppendRewriteExpression(buf, valExpr, valType.postgresTypeOid,
+									valType.postgresTypeMod, depth + 1,
+									ICEBERG_REWRITE_NATIVE_ENCODE, NULL);
 		else
 			appendStringInfoString(buf, valExpr);
 
@@ -696,35 +764,39 @@ AppendNativeConversionExpression(StringInfo buf, const char *expr,
 	{
 		Oid			baseType = getBaseTypeAndTypmod(typeOid, &typmod);
 
-		return AppendNativeConversionExpression(buf, expr, baseType, typmod,
-												depth);
+		return AppendRewriteExpression(buf, expr, baseType, typmod, depth,
+									   rewriteKinds, storageField);
 	}
 
-	/* composite types: transform fields via struct_pack */
+	/*
+	 * Composite types: rebuild the struct with struct_pack rather than a
+	 * direct whole-struct CAST.  struct_pack(field := ...) lets us rewrite
+	 * only the fields that change (an encoded INTERVAL/TIMETZ leaf and/or a
+	 * storage-cast uuid leaf) while reusing every other field by name and
+	 * recursing into nested lists/structs.  Because one traversal handles
+	 * both rewrite families, a struct whose fields mix an encoded sibling and
+	 * a storage-cast sibling is rebuilt by a single struct_pack here, never
+	 * two stacked ones.
+	 *
+	 * This is a genuine rebuild, not an in-place edit: DuckDB cannot mutate a
+	 * struct, so struct_pack produces a brand-new struct (new validity mask +
+	 * field set).  Three consequences we rely on: 1. We only reach the
+	 * rebuild when the struct actually contains a changing leaf (gated by
+	 * LeafSubtreeNeedsRewrite), so unchanged structs are emitted by plain
+	 * reference and never repacked.  2. The new struct's validity is reset,
+	 * so the surrounding "CASE WHEN <expr> IS NOT NULL THEN struct_pack(...)
+	 * ELSE NULL END" restores the parent's NULL-ness (DuckDB's struct IS NOT
+	 * NULL is value-level, not the SQL per-field row rule).  3. On write,
+	 * Iceberg field ids are reattached to the rebuilt struct's fields by NAME
+	 * (see AppendFields in write_data.c), so the new vectors carry the
+	 * correct ids regardless of identity or field order.
+	 */
 	if (typtype == TYPTYPE_COMPOSITE)
 	{
-		TupleDesc	tupdesc = lookup_rowtype_tupdesc(typeOid, -1);
-		bool		anyFieldNeedsTransform = false;
-
-		for (int i = 0; i < tupdesc->natts; i++)
-		{
-			Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
-
-			if (attr->attisdropped)
-				continue;
-
-			if (TypeNeedsNativeConversion(attr->atttypid))
-			{
-				anyFieldNeedsTransform = true;
-				break;
-			}
-		}
-
-		if (!anyFieldNeedsTransform)
-		{
-			ReleaseTupleDesc(tupdesc);
+		if (!LeafSubtreeNeedsRewrite(typeOid, typmod, rewriteKinds, storageField))
 			return false;
-		}
+
+		TupleDesc	tupdesc = lookup_rowtype_tupdesc(typeOid, -1);
 
 		appendStringInfo(buf, "CASE WHEN %s IS NOT NULL THEN struct_pack(", expr);
 
@@ -743,13 +815,14 @@ AppendNativeConversionExpression(StringInfo buf, const char *expr,
 			const char *fieldName = NameStr(attr->attname);
 			const char *quotedField = duckdb_quote_identifier(fieldName);
 			char	   *fieldExpr = psprintf("%s.%s", expr, quotedField);
+			Field	   *childStorage =
+				StorageStructFieldByName(storageField, fieldName);
 
 			appendStringInfo(buf, "%s := ", quotedField);
 
-			if (!AppendNativeConversionExpression(buf, fieldExpr,
-												  attr->atttypid,
-												  attr->atttypmod,
-												  depth))
+			if (!AppendRewriteExpression(buf, fieldExpr, attr->atttypid,
+										 attr->atttypmod, depth, rewriteKinds,
+										 childStorage))
 				appendStringInfoString(buf, fieldExpr);
 
 			firstField = false;
@@ -765,30 +838,23 @@ AppendNativeConversionExpression(StringInfo buf, const char *expr,
 
 
 /*
- * IcebergWrapQueryWithNativeTypeConversion wraps a query string with an
- * outer SELECT that rewrites columns whose native DuckDB shape does not
- * match Iceberg's:
+ * IcebergWrapQueryWithRewrites wraps query in an outer SELECT that applies every
+ * rewrite in rewriteKinds to each column in a single pass, aliasing every
+ * rewritten column back to its original name and passing untouched columns
+ * straight through.  AppendRewriteExpression returns whether it actually
+ * rewrote a column, which doubles as the "is there any work to do?" check: if no
+ * column changes we return the original query untouched (no redundant SELECT
+ * nesting).
  *
- *   - INTERVAL columns are decomposed into
- *     STRUCT(months BIGINT, days BIGINT, microseconds BIGINT).
- *   - TIMETZ columns are UTC-normalized and cast to TIME
- *     (CAST(CAST(<expr> AS TIMETZ) AT TIME ZONE 'UTC' AS TIME)),
- *     because Iceberg has no time-with-timezone type and DuckDB's
- *     direct CAST(TIMETZ AS TIME) drops the offset without shifting
- *     the time digits.  The inner cast to TIMETZ keeps the outer
- *     AT TIME ZONE 'UTC' well-typed when the source is already plain
- *     TIME (e.g. a TIMETZ field read back from an Iceberg composite
- *     column, where the Parquet-level type is TIME).
- *
- * Rewrites recurse through arrays, composites, maps, and domains.
- *
- * Returns the original query unchanged if no column needs conversion.
+ * storageSchema is the target table's persisted Iceberg storage schema (or
+ * NULL) and is only consulted for the ICEBERG_REWRITE_STORAGE_CAST kind.
  */
 char *
-IcebergWrapQueryWithNativeTypeConversion(char *query, TupleDesc tupleDesc,
-										 bool queryHasRowId)
+IcebergWrapQueryWithRewrites(char *query, TupleDesc tupleDesc,
+							 bool queryHasRowId, int rewriteKinds,
+							 DataFileSchema * storageSchema)
 {
-	if (tupleDesc == NULL || !TupleDescHasNativeConversionColumn(tupleDesc))
+	if (tupleDesc == NULL || rewriteKinds == 0)
 		return query;
 
 	StringInfoData wrapped;
@@ -798,6 +864,7 @@ IcebergWrapQueryWithNativeTypeConversion(char *query, TupleDesc tupleDesc,
 	appendStringInfoString(&wrapped, "SELECT ");
 
 	bool		firstColumn = true;
+	bool		anyRewritten = false;
 
 	for (int i = 0; i < tupleDesc->natts; i++)
 	{
@@ -810,16 +877,24 @@ IcebergWrapQueryWithNativeTypeConversion(char *query, TupleDesc tupleDesc,
 			appendStringInfoString(&wrapped, ", ");
 
 		const char *quotedName = duckdb_quote_identifier(NameStr(attr->attname));
+		Field	   *colStorage =
+			(rewriteKinds & ICEBERG_REWRITE_STORAGE_CAST) ?
+			StorageFieldForColumn(storageSchema, NameStr(attr->attname)) : NULL;
 
 		StringInfoData exprBuf;
 
 		initStringInfo(&exprBuf);
 
-		if (AppendNativeConversionExpression(&exprBuf, quotedName,
-											 attr->atttypid,
-											 attr->atttypmod, 0))
+		bool		rewritten = AppendRewriteExpression(&exprBuf, quotedName,
+														attr->atttypid,
+														attr->atttypmod, 0,
+														rewriteKinds,
+														colStorage);
+
+		if (rewritten)
 		{
 			appendStringInfo(&wrapped, "%s AS %s", exprBuf.data, quotedName);
+			anyRewritten = true;
 		}
 		else
 		{
@@ -831,6 +906,13 @@ IcebergWrapQueryWithNativeTypeConversion(char *query, TupleDesc tupleDesc,
 		firstColumn = false;
 	}
 
+	/* no column needed rewriting: leave the query (and any nesting) untouched */
+	if (!anyRewritten)
+	{
+		pfree(wrapped.data);
+		return query;
+	}
+
 	if (queryHasRowId)
 	{
 		if (!firstColumn)
@@ -838,7 +920,7 @@ IcebergWrapQueryWithNativeTypeConversion(char *query, TupleDesc tupleDesc,
 		appendStringInfoString(&wrapped, "_row_id");
 	}
 
-	appendStringInfo(&wrapped, " FROM (%s) AS __iceberg_native_conv", query);
+	appendStringInfo(&wrapped, " FROM (%s) AS __iceberg_rewrite", query);
 
 	return wrapped.data;
 }

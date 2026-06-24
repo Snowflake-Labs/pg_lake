@@ -27,6 +27,19 @@
 
 #define INVALID_FIELD_ID 0
 
+/*
+ * StorageOverride records a per-leaf storage type that diverges from the
+ * surface type, keyed by the leaf's iceberg field_id. The compatibility-mode
+ * policy decides these at registration time; reads and writes recover them
+ * from the persisted mapping. An empty list means storage equals surface
+ * everywhere (the common case).
+ */
+typedef struct StorageOverride
+{
+	int			fieldId;
+	PGType		storagePgType;
+}			StorageOverride;
+
 extern PGDLLEXPORT DataFileSchema * GetDataFileSchemaForInternalIcebergTable(Oid relationId);
 extern PGDLLEXPORT List *GetLeafFieldsForInternalIcebergTable(Oid relationId);
 extern PGDLLEXPORT List *GetRegisteredFieldForAttributes(Oid relationId, List *attrNos);
@@ -34,6 +47,19 @@ extern PGDLLEXPORT DataFileSchemaField * GetRegisteredFieldForAttribute(Oid rela
 extern PGDLLEXPORT AttrNumber GetAttributeForFieldId(Oid relationId, int fieldId);
 extern PGDLLEXPORT void UpdateRegisteredFieldWriteDefaultForAttribute(Oid relationId, AttrNumber attNum, const char *writeDefault);
 extern PGDLLEXPORT int GetLargestRegisteredFieldId(Oid relationId);
+
+/*
+ * CollectStorageDivergences walks a surface iceberg field tree and the matching
+ * storage tree (same shape, differing only in scalar type names) in parallel
+ * and returns the list of per-leaf StorageOverrides where the two diverge (NIL
+ * when identical). fieldId is the iceberg id of the root node of both trees.
+ * This is where the surface->storage decision is turned into persistable rows;
+ * RegisterIcebergColumnMapping merely records the result.
+ */
+extern PGDLLEXPORT List *CollectStorageDivergences(Field * surfaceField,
+												   Field * storageField, int fieldId);
+
 extern PGDLLEXPORT void RegisterIcebergColumnMapping(Oid relationId, Field * field,
 													 AttrNumber attNo, int parentFieldId, PGType pgType,
-													 int fieldId, const char *writeDefault, const char *initialDefault);
+													 int fieldId, const char *writeDefault, const char *initialDefault,
+													 List *storageOverrides);

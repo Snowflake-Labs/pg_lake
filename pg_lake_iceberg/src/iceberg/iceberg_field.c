@@ -154,7 +154,6 @@ static IcebergToDuckDBType IcebergToDuckDBTypes[] =
 };
 
 static DuckDBType GetDuckDBTypeFromIcebergType(IcebergType icebergType);
-static char *PostgresBaseTypeIdToIcebergTypeName(PGType pgType);
 static IcebergTypeInfo * GetIcebergTypeInfoFromTypeName(const char *typeName);
 static const char *GetIcebergJsonSerializedConstDefaultIfExists(const char *attrName, Field * field, Node *defaultExpr);
 
@@ -591,92 +590,6 @@ GetIcebergTypeInfoFromTypeName(const char *typeName)
 	}
 
 	return icebergTypeInfo;
-}
-
-
-/*
- * PostgresTypeIdToIcebergTypeName converts a PostgreSQL type ID and typemod
- * to an Iceberg type name.
- *
- * Based on https://iceberg.apache.org/spec/#schemas
- */
-static char *
-PostgresBaseTypeIdToIcebergTypeName(PGType pgType)
-{
-	switch (pgType.postgresTypeOid)
-	{
-		case BOOLOID:
-			return "boolean";
-		case INT4OID:
-		case INT2OID:
-			return "int";
-		case INT8OID:
-			return "long";
-		case FLOAT4OID:
-			return "float";
-		case FLOAT8OID:
-			return "double";
-		case DATEOID:
-			return "date";
-		case TIMEOID:
-			return "time";
-		case TIMETZOID:
-			return "time";
-		case TIMESTAMPOID:
-			return "timestamp";
-		case TIMESTAMPTZOID:
-			return "timestamptz";
-		case TEXTOID:
-		case BPCHAROID:
-		case VARCHAROID:
-			return "string";
-		case UUIDOID:
-			return "uuid";
-		case BYTEAOID:
-			return "binary";
-		case NUMERICOID:
-			{
-				/*
-				 * Follow similar logic as in ChooseCompatibleDuckDBType
-				 */
-				int			precision = -1;
-				int			scale = -1;
-
-				GetDuckdbAdjustedPrecisionAndScaleFromNumericTypeMod(pgType.postgresTypeMod,
-																	 &precision, &scale);
-
-				if (CanPushdownNumericToDuckdb(precision, scale))
-				{
-					/*
-					 * happy case: we can map to DECIMAL(precision, scale)
-					 */
-					return psprintf("decimal(%d,%d)", precision, scale);
-				}
-				else
-				{
-					/* explicit precision which is too big for us */
-					return "string";
-				}
-			}
-		default:
-
-			/*
-			 * We need to handle the case where the type is a PostGIS type.
-			 */
-			if (IsGeometryTypeId(pgType.postgresTypeOid))
-			{
-				ErrorIfPgLakeSpatialNotEnabled();
-				return "binary";
-			}
-
-			/*
-			 * By default, we fallback to string type for any unknown type. In
-			 * majority of the cases, given the type is not known, we pull the
-			 * data as string from pgduck_server. Then, the fdw converts it to
-			 * the appropriate type.
-			 */
-			return "string";
-	}
 }
 
 

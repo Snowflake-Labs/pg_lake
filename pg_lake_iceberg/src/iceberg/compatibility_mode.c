@@ -17,26 +17,32 @@
 
 /*
  * compatibility_mode.c
- *  Per-table Iceberg "compatibility mode" option recognition and DDL guards.
+ *  Per-table Iceberg "compatibility mode" STORAGE shaping.
  *
  * Some engines that read pg_lake's Iceberg tables have narrower type support
  * than Iceberg itself. The `compatibility_mode` table option opts a table into
  * a storage shape consumable by such an engine WITHOUT changing the PostgreSQL
  * column type the user declared.
  *
- * This module is the option layer: it parses/validates the option value
- * ('auto' or 'snowflake'), exposes accessors that read the mode off a CREATE
- * statement or an existing relation, and provides TypeContainsMap so the DDL
- * paths can reject types a restrictive mode cannot represent (a pg_map under
- * 'snowflake'). On its own this layer is a pure storage no-op: choosing
- * 'snowflake' is accepted and validated, but no surface->storage divergence is
- * yet recorded or applied.
+ * The only mode today is 'snowflake'. Snowflake cannot store a UUID inside a
+ * semi-structured/structured type, so a uuid nested inside an array or
+ * composite is stored physically as Iceberg `string`; a top-level uuid column
+ * stays native `uuid`. The PostgreSQL column type is left as uuid in every
+ * case -- conversion happens at the I/O boundary (uuid->varchar on write,
+ * varchar->uuid on read) driven by the persisted storage mapping in
+ * lake_table.field_id_mappings, so `\d` and DEFAULT/GENERATED clauses are
+ * unaffected.
  *
- * The actual storage shaping (e.g. storing a nested uuid as Iceberg `string`)
- * and its persistence in lake_table.field_id_mappings are layered on top of
- * this option by the surface/storage type-mapping change; the read/write
- * codecs then recover the conversion from the persisted mapping, never from
- * this option directly.
+ * This module supplies the option accessors and the registration-time Iceberg
+ * Field-tree walker (ApplyCompatibilityStorageMapping). It deliberately does
+ * NOT rewrite the PostgreSQL column type: the read/write codecs recover the
+ * conversion from the persisted storage mapping, never from this option.
+ *
+ * The walker is type-agnostic: it applies a per-leaf POLICY
+ * (CompatStorageScalarType) to every nested scalar field. All knowledge of
+ * which surface types diverge from their storage type for a given mode lives
+ * in that one small policy function, so a new rule (or a new mode) is a single
+ * edit there rather than a new walker.
  */
 
 #include "postgres.h"
@@ -61,6 +67,10 @@
 int			IcebergDefaultCompatibilityMode = ICEBERG_COMPAT_AUTO;
 
 
+static const char *CompatStorageScalarType(const char *surfaceTypeName,
+										   IcebergCompatibilityMode mode);
+static void ApplyCompatibilityStorageMappingInternal(Field * field, int level,
+													 IcebergCompatibilityMode mode);
 static bool AnyCompositeFieldContainsMap(Oid typeOid);
 static Oid	DomainBaseTypeOneLevel(Oid domainOid);
 
@@ -141,6 +151,104 @@ IcebergCompatibilityModeFromRelation(Oid relationId)
 
 	return ParseIcebergCompatibilityMode(
 										 GetStringOption(foreignTable->options, ICEBERG_COMPATIBILITY_MODE_OPTION, false));
+}
+
+
+/*
+ * CompatStorageScalarType is the ONE place that knows which surface scalar
+ * types diverge from their storage type under a compatibility mode. Given the
+ * iceberg type name of a nested scalar leaf, it returns the iceberg type name
+ * it must be STORED as, or NULL when the leaf is stored as-is (the common
+ * case). Adding a rule (or a mode) is an edit here, not a new walker.
+ *
+ * snowflake: Snowflake cannot hold a uuid inside a structured type, so a
+ * nested uuid is stored as `string`.
+ */
+static const char *
+CompatStorageScalarType(const char *surfaceTypeName, IcebergCompatibilityMode mode)
+{
+	if (surfaceTypeName == NULL)
+		return NULL;
+
+	switch (mode)
+	{
+		case ICEBERG_COMPAT_SNOWFLAKE:
+			if (strcmp(surfaceTypeName, "uuid") == 0)
+				return "string";
+			break;
+
+		case ICEBERG_COMPAT_AUTO:
+			break;
+	}
+
+	return NULL;
+}
+
+
+/*
+ * ApplyCompatibilityStorageMappingInternal rewrites, in place, the storage type
+ * of every nested (level > 0) scalar leaf for which the mode's policy returns a
+ * divergent storage type. level 0 is the column itself, so a top-level leaf is
+ * left as-is. Maps are not descended: a column containing a map is rejected at
+ * DDL time under a restrictive mode, so a divergent leaf can never reach here
+ * through a map, and not descending keeps the read/write codecs free of
+ * map-key/value conversion handling.
+ */
+static void
+ApplyCompatibilityStorageMappingInternal(Field * field, int level,
+										 IcebergCompatibilityMode mode)
+{
+	if (field == NULL)
+		return;
+
+	switch (field->type)
+	{
+		case FIELD_TYPE_SCALAR:
+			{
+				const char *storageTypeName = (level > 0)
+					? CompatStorageScalarType(field->field.scalar.typeName, mode)
+					: NULL;
+
+				if (storageTypeName != NULL)
+					field->field.scalar.typeName = pstrdup(storageTypeName);
+				break;
+			}
+
+		case FIELD_TYPE_LIST:
+			ApplyCompatibilityStorageMappingInternal(field->field.list.element,
+													 level + 1, mode);
+			break;
+
+		case FIELD_TYPE_STRUCT:
+			for (size_t i = 0; i < field->field.structType.nfields; i++)
+				ApplyCompatibilityStorageMappingInternal(field->field.structType.fields[i].type,
+														 level + 1, mode);
+			break;
+
+		case FIELD_TYPE_MAP:
+
+			/*
+			 * Unreachable: this walker only runs for non-auto modes (see
+			 * ApplyCompatibilityStorageMapping), and every such mode rejects
+			 * map columns at DDL time
+			 * (ErrorIfColumnsUnsupportedForCompatibilityMode), so a divergent
+			 * leaf can never reach here through a map. The Assert documents
+			 * and enforces that invariant; the break keeps production builds
+			 * safe if a future mode ever relaxes the DDL rejection.
+			 */
+			Assert(false);
+			break;
+	}
+}
+
+
+void
+ApplyCompatibilityStorageMapping(Field * field, IcebergCompatibilityMode mode)
+{
+	if (mode == ICEBERG_COMPAT_AUTO)
+		return;
+
+	ApplyCompatibilityStorageMappingInternal(field, 0, mode);
 }
 
 

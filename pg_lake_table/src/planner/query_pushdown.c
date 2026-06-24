@@ -34,6 +34,7 @@
 #include "pg_lake/fdw/pg_lake_table.h"
 #include "pg_lake/fdw/deparse_ruleutils.h"
 #include "pg_lake/fdw/shippable.h"
+#include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/planner/dbt.h"
 #include "pg_lake/planner/explain.h"
@@ -1738,10 +1739,15 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 														   false);
 
 			if (IsWritableIcebergTable(scanState->insertIntoRelid))
+			{
 				queryString =
-					IcebergWrapQueryWithNativeTypeConversion(queryString,
-															 scanState->insertTargetTupleDesc,
-															 false);
+					IcebergWrapQueryWithRewrites(queryString,
+												 scanState->insertTargetTupleDesc,
+												 false,
+												 ICEBERG_REWRITE_NATIVE_ENCODE |
+												 ICEBERG_REWRITE_STORAGE_CAST,
+												 GetDataFileSchemaForTable(scanState->insertIntoRelid));
+			}
 		}
 
 		ExplainPropertyText("Vectorized SQL", queryString, es);

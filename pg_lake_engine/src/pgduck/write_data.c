@@ -137,10 +137,24 @@ WriteQueryResultTo(char *query,
 													   queryHasRowId);
 	}
 
-	if (wrapNativeTypes && destinationFormat == DATA_FORMAT_ICEBERG)
+	if (destinationFormat == DATA_FORMAT_ICEBERG)
 	{
-		query = IcebergWrapQueryWithNativeTypeConversion(query, queryTupleDesc,
-														 queryHasRowId);
+		/*
+		 * Storage->surface divergence casts are always applied: they reflect
+		 * the destination's persisted storage types and are a no-op unless
+		 * the schema actually diverges for some leaf.  Native temporal encode
+		 * (INTERVAL/TIMETZ) is additionally gated by wrapNativeTypes: some
+		 * callers (the change-log CSV path) hand us a query whose temporal
+		 * columns were already normalized to their Iceberg struct shape
+		 * upstream.  Both kinds run in a single traversal.
+		 */
+		int			rewriteKinds = ICEBERG_REWRITE_STORAGE_CAST;
+
+		if (wrapNativeTypes)
+			rewriteKinds |= ICEBERG_REWRITE_NATIVE_ENCODE;
+
+		query = IcebergWrapQueryWithRewrites(query, queryTupleDesc,
+											 queryHasRowId, rewriteKinds, schema);
 	}
 
 	/*

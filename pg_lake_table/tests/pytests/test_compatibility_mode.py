@@ -322,7 +322,7 @@ def test_map_rejected_under_snowflake_compat_on_add_column(
 
 
 # ---------------------------------------------------------------------------
-# Storage no-op: this layer alone does NOT shape storage
+# Top-level uuid stays native under snowflake
 # ---------------------------------------------------------------------------
 
 
@@ -352,55 +352,6 @@ def test_top_level_uuid_stays_native_under_snowflake(
     pg_conn.commit()
 
 
-def test_nested_uuid_is_storage_noop_under_snowflake(
-    pg_conn, s3, with_default_location
-):
-    """
-    Option layer only: a nested uuid under 'snowflake' is STILL stored as
-    Iceberg uuid (no surface->storage divergence yet) and the surface type is
-    unchanged. The storage-mapping layer changes this to 'string'; this test
-    pins down that the option alone is a storage no-op.
-    """
-    run_command(
-        """
-        CREATE SCHEMA test_compat_nested;
-        SET search_path TO test_compat_nested;
-        CREATE TYPE acct AS (name text, uid uuid);
-        CREATE TABLE t (id int, a acct, us uuid[]) USING iceberg
-            WITH (compatibility_mode = 'snowflake');
-        """,
-        pg_conn,
-    )
-    pg_conn.commit()
-
-    fields = _metadata_fields(s3, pg_conn, "test_compat_nested", "t")
-    # The composite's uuid field (uid) stays Iceberg uuid; the text field
-    # (name) is naturally Iceberg string, so we only assert the uuid leaf is
-    # still uuid here (the storage-mapping layer would turn it into string).
-    comp_leaves = _collect_leaf_types(_field_by_name(fields, "a")["type"])
-    arr_leaves = _collect_leaf_types(_field_by_name(fields, "us")["type"])
-    assert "uuid" in comp_leaves, comp_leaves
-    # uuid[] is the clean discriminator: no-op keeps it list<uuid> (the
-    # storage-mapping layer would make it list<string>).
-    assert arr_leaves == ["uuid"], arr_leaves
-
-    run_command(
-        f"""
-        INSERT INTO test_compat_nested.t VALUES
-            (1, ROW('alice', '{U1}')::acct, ARRAY['{U1}','{U2}']::uuid[]),
-            (2, ROW('bob', NULL)::acct, NULL);
-        """,
-        pg_conn,
-    )
-    pg_conn.commit()
-    result = run_query(
-        "SELECT id, (a).name, (a).uid, us FROM test_compat_nested.t ORDER BY id",
-        pg_conn,
-    )
-    assert [[r[0], r[1], _u(r[2]), _ulist(r[3])] for r in result] == [
-        [1, "alice", U1, [U1, U2]],
-        [2, "bob", None, None],
-    ]
-
-    run_command("DROP SCHEMA test_compat_nested CASCADE;", pg_conn)
-    pg_conn.commit()
+# Nested surface->storage divergence (nested uuid stored as Iceberg string under
+# 'snowflake') is exercised in test_iceberg_uuid_compat.py, which owns the
+# storage-mapping behavior. This file stays focused on the option/GUC/DDL layer.

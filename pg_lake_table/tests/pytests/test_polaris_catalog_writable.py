@@ -2669,6 +2669,199 @@ def test_rest_iceberg_types_converted_to_string(
     pg_conn.commit()
 
 
+def _rest_collect_leaf_types(field_type):
+    """Collect every scalar Iceberg leaf type reachable from a metadata.json
+    field ``type`` node (string, or struct/list/map dict)."""
+    if isinstance(field_type, str):
+        return [field_type]
+    kind = field_type.get("type")
+    if kind == "struct":
+        leaves = []
+        for f in field_type["fields"]:
+            leaves.extend(_rest_collect_leaf_types(f["type"]))
+        return leaves
+    if kind == "list":
+        return _rest_collect_leaf_types(field_type["element"])
+    if kind == "map":
+        return _rest_collect_leaf_types(field_type["key"]) + _rest_collect_leaf_types(
+            field_type["value"]
+        )
+    return []
+
+
+def test_rest_iceberg_nested_uuid_snowflake_compat(
+    pg_conn,
+    pgduck_conn,
+    installcheck,
+    s3,
+    extension,
+    create_types_helper_functions,
+    with_default_location,
+    polaris_session,
+    set_polaris_gucs,
+    create_http_helper_functions,
+):
+    """
+    Writable REST (Polaris) table with compatibility_mode='snowflake': a nested
+    uuid (inside a composite and inside an array) is persisted as Iceberg string
+    in the REST catalog metadata, round-trips as uuid through pg_lake, and is
+    read back cross-engine via DuckDB's iceberg_scan as a plain string -- with
+    NULLs (null field, null struct, null array) preserved everywhere.
+    """
+    if installcheck:
+        return
+
+    U1 = "11111111-1111-1111-1111-111111111111"
+    U2 = "22222222-2222-2222-2222-222222222222"
+    U3 = "33333333-3333-3333-3333-333333333333"
+
+    run_command("CREATE SCHEMA test_rest_uuid;", pg_conn)
+    run_command(
+        """
+        CREATE TYPE test_rest_uuid.acct AS (name text, uid uuid);
+        CREATE TABLE test_rest_uuid.t (
+            id int,
+            a test_rest_uuid.acct,
+            us uuid[],
+            top_u uuid
+        ) USING iceberg WITH (catalog='rest', compatibility_mode='snowflake');
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    metadata = get_rest_table_metadata("test_rest_uuid", "t", pg_conn)
+    metadata_path = metadata["metadata-location"]
+
+    parsed = json.loads(read_s3_operations(s3, metadata_path))
+    fields = parsed["schemas"][0]["fields"]
+    by_name = {f["name"]: f for f in fields}
+
+    # Nested uuid leaves diverge to string; top-level uuid stays native uuid.
+    assert "uuid" not in _rest_collect_leaf_types(by_name["a"]["type"]), fields
+    assert "string" in _rest_collect_leaf_types(by_name["a"]["type"]), fields
+    assert _rest_collect_leaf_types(by_name["us"]["type"]) == ["string"], fields
+    assert by_name["top_u"]["type"] == "uuid", fields
+
+    run_command(
+        f"""
+        INSERT INTO test_rest_uuid.t VALUES
+            (1, ROW('alice', '{U1}')::test_rest_uuid.acct,
+                ARRAY['{U2}','{U3}']::uuid[], '{U1}'),
+            (2, ROW('bob', NULL)::test_rest_uuid.acct, NULL, NULL),
+            (3, NULL, NULL, NULL);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # pg_lake reads the surface uuid back.  Use array element access (not
+    # us::text) so the assertion is independent of array text rendering, which
+    # differs between the PG ({...}) and pushed-down DuckDB ([...]) paths.
+    result = run_query(
+        "SELECT id, (a).name, (a).uid::text, us[1]::text, us[2]::text, top_u::text "
+        "FROM test_rest_uuid.t ORDER BY id",
+        pg_conn,
+    )
+    assert result == [
+        [1, "alice", U1, U2, U3, U1],
+        [2, "bob", None, None, None, None],
+        [3, None, None, None, None, None],
+    ], result
+
+    # Cross-engine: DuckDB's Iceberg reader sees the nested uuid as string.
+    refreshed = get_rest_table_metadata("test_rest_uuid", "t", pg_conn)
+    described = {
+        row[0]: row[1]
+        for row in run_query(
+            f"DESCRIBE SELECT * FROM iceberg_scan('{refreshed['metadata-location']}')",
+            pgduck_conn,
+        )
+    }
+    assert "UUID" not in described["a"] and "VARCHAR" in described["a"], described
+    assert described["us"] == "VARCHAR[]", described
+    assert described["top_u"] == "UUID", described
+
+    # Use list element access (DuckDB 1-based) rather than selecting the whole
+    # array, so the assertion doesn't depend on how the VARCHAR[] is rendered
+    # back over the wire (it comes through as a raw '{...}' string, not a list).
+    duck_rows = run_query(
+        "SELECT id, a.uid, us[1], us[2], top_u::text "
+        f"FROM iceberg_scan('{refreshed['metadata-location']}') ORDER BY id",
+        pgduck_conn,
+    )
+    assert [[r[0], r[1], r[2], r[3], r[4]] for r in duck_rows] == [
+        [1, U1, U2, U3, U1],
+        [2, None, None, None, None],
+        [3, None, None, None, None],
+    ], duck_rows
+
+    # Read the same table back through a *separate* read-only REST handle.  That
+    # handle has no field_id_mappings of its own, so it derives the surface
+    # types purely from the Iceberg metadata, which records the diverged leaves
+    # as string.  An external/read-only consumer therefore sees the nested uuid
+    # and the uuid array element as text/text[]; only the non-diverging
+    # top-level uuid stays uuid.
+    run_command(
+        """
+        CREATE TABLE test_rest_uuid.readback ()
+        USING iceberg
+        WITH (catalog='rest', read_only=True, catalog_table_name='t');
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    top_level = {
+        row[0]: row[1]
+        for row in run_query(
+            "SELECT attname, format_type(atttypid, atttypmod) "
+            "FROM pg_attribute "
+            "WHERE attrelid = 'test_rest_uuid.readback'::regclass "
+            "  AND attnum > 0 AND NOT attisdropped",
+            pg_conn,
+        )
+    }
+    assert top_level["us"] == "text[]", top_level
+    assert top_level["top_u"] == "uuid", top_level
+
+    composite_leaves = {
+        row[0]: row[1]
+        for row in run_query(
+            """
+            SELECT atts.attname, format_type(atts.atttypid, atts.atttypmod)
+            FROM pg_attribute col
+            JOIN pg_type t ON t.oid = col.atttypid
+            JOIN pg_class c ON c.oid = t.typrelid
+            JOIN pg_attribute atts
+              ON atts.attrelid = c.oid AND atts.attnum > 0
+                 AND NOT atts.attisdropped
+            WHERE col.attrelid = 'test_rest_uuid.readback'::regclass
+              AND col.attname = 'a'
+            ORDER BY atts.attnum
+            """,
+            pg_conn,
+        )
+    }
+    assert composite_leaves["uid"] == "text", composite_leaves
+
+    # The values still read back correctly through the read-only handle, now as
+    # the surface text type rather than uuid.
+    readback_rows = run_query(
+        "SELECT id, (a).uid, us[1], top_u::text "
+        "FROM test_rest_uuid.readback ORDER BY id",
+        pg_conn,
+    )
+    assert readback_rows == [
+        [1, U1, U2, U1],
+        [2, None, None, None],
+        [3, None, None, None],
+    ], readback_rows
+
+    run_command("DROP SCHEMA test_rest_uuid CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 def test_rest_iceberg_map_type(
     pg_conn,
     installcheck,
