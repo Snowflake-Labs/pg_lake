@@ -181,10 +181,9 @@ TypeNeedsIcebergValidation(Oid typeOid, int32 typmod, bool isPushdown)
  * element/field types (e.g. an int[] of millions of values).  Recurses
  * through domains.
  *
- * Independent of compatibility_mode and of the current size-limit GUC
- * values: this is a static type-shape check used to gate the per-row clamp
- * call cheaply; the caller decides whether to enter the clamp path at all
- * based on compatibility_mode.
+ * Independent of compatibility_mode: this is a static type-shape check used
+ * to gate the per-row clamp call cheaply; the caller decides whether to enter
+ * the clamp path at all based on compatibility_mode.
  */
 bool
 TypeNeedsIcebergSizeClamping(Oid typeOid)
