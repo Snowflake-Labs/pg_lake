@@ -50,11 +50,6 @@ extern PGDLLEXPORT Datum IcebergErrorOrClampDatum(Datum value, Oid typeOid,
  * writes through this function; callers gate on the table's compatibility
  * mode before calling.
  *
- * The effective limits are read off the IcebergMaxStringBytes,
- * IcebergMaxBinaryBytes, and IcebergMaxNestedTypeBytes globals (default to
- * the Snowflake constants; overridable via hidden test GUCs).  A zero
- * value in any of those globals disables that single dimension's check.
- *
  * The behavior on an oversize value is selected by `policy`:
  *   - ICEBERG_OOR_ERROR (default for Iceberg tables): raise an error
  *     identifying the column and exceeded cap.
@@ -63,25 +58,23 @@ extern PGDLLEXPORT Datum IcebergErrorOrClampDatum(Datum value, Oid typeOid,
  *
  * Under CLAMP, lossless types are truncated:
  *   - text/varchar/bpchar  -> trimmed at a UTF-8 character boundary to
- *                             iceberg_max_string_bytes.
- *   - bytea                -> byte-truncated to iceberg_max_binary_bytes.
+ *                             ICEBERG_SNOWFLAKE_MAX_STRING_BYTES.
+ *   - bytea                -> byte-truncated to
+ *                             ICEBERG_SNOWFLAKE_MAX_BINARY_BYTES.
  *
  * Structured-string types are replaced with NULL via *isNull = true,
  * since truncation would corrupt them:
  *   - jsonb/json
  *
  * Container types (array / composite / map / domain over either) are
- * NULLed when their measured size exceeds iceberg_max_nested_type_bytes.
- * The size is the type's output-function text length when the container
- * has any jsonb/json leaf (so jsonb leaves contribute their JSON-text
- * size, which is what the consumer ultimately sees), and the cheaper
- * varlena content size otherwise.
+ * NULLed when their measured size exceeds
+ * ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES.  The size is the type's output-
+ * function text length when the container has any jsonb/json leaf (so
+ * jsonb leaves contribute their JSON-text size, which is what the consumer
+ * ultimately sees), and the cheaper varlena content size otherwise.
  *
  * `columnName` is included in the error message under ERROR mode; pass
  * NULL or empty when the column context is unknown.
- *
- * If all three limit globals are 0, the value is returned unchanged
- * regardless of policy or type.
  */
 extern PGDLLEXPORT Datum IcebergSizeClampDatum(Datum value, Oid typeOid,
 											   int32 typmod,

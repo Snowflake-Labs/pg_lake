@@ -187,49 +187,6 @@ _PG_init(void)
 							0,
 							NULL, NULL, NULL);
 
-	DefineCustomIntVariable("pg_lake_engine.iceberg_max_string_bytes",
-							gettext_noop("Per-column byte cap applied to string values "
-										 "(text/varchar/bpchar/jsonb/json) written to "
-										 "Iceberg tables with compatibility_mode = "
-										 "'snowflake'. Defaults to Snowflake's 16 MiB "
-										 "STRING ceiling. Hidden override intended for "
-										 "regression tests that exercise the clamp path "
-										 "without producing multi-MiB fixtures; tables "
-										 "in any other compatibility_mode are unaffected."),
-							NULL,
-							&IcebergMaxStringBytes,
-							ICEBERG_SNOWFLAKE_MAX_STRING_BYTES, 0, INT_MAX,
-							PGC_USERSET,
-							GUC_UNIT_BYTE | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
-							NULL, NULL, NULL);
-
-	DefineCustomIntVariable("pg_lake_engine.iceberg_max_binary_bytes",
-							gettext_noop("Per-column byte cap applied to bytea values "
-										 "written to Iceberg tables with "
-										 "compatibility_mode = 'snowflake'. Defaults to "
-										 "Snowflake's 8 MiB BINARY ceiling. Hidden "
-										 "regression-test override."),
-							NULL,
-							&IcebergMaxBinaryBytes,
-							ICEBERG_SNOWFLAKE_MAX_BINARY_BYTES, 0, INT_MAX,
-							PGC_USERSET,
-							GUC_UNIT_BYTE | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
-							NULL, NULL, NULL);
-
-	DefineCustomIntVariable("pg_lake_engine.iceberg_max_nested_type_bytes",
-							gettext_noop("Per-column byte cap applied to array, "
-										 "composite, and map values written to Iceberg "
-										 "tables with compatibility_mode = 'snowflake'. "
-										 "Defaults to Snowflake's 128 MiB "
-										 "OBJECT/ARRAY/VARIANT ceiling. Hidden "
-										 "regression-test override."),
-							NULL,
-							&IcebergMaxNestedTypeBytes,
-							ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES, 0, INT_MAX,
-							PGC_USERSET,
-							GUC_UNIT_BYTE | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
-							NULL, NULL, NULL);
-
 	DefineCustomStringVariable(
 							   "pg_lake.stage_location",
 							   gettext_noop("Base URL for @STAGE/ resolution in paths"),

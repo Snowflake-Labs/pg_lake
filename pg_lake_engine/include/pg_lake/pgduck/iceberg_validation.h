@@ -87,25 +87,17 @@ extern PGDLLEXPORT bool TypeNeedsIcebergValidation(Oid typeOid, int32 typmod,
  *   OBJECT/ARRAY/
  *   VARIANT       : 128 MiB (semi-structured column ceiling)
  *
- * The variables themselves are backed by hidden GUCs so regression tests can
- * scale them down to fit small-data fixtures; the GUCs are not part of the
- * user-facing surface.  Tables in any other compatibility_mode pass through
- * unchanged regardless of the GUC values, because the call sites only enter
- * the clamp paths when compatibility_mode='snowflake'.
+ * Tables in any other compatibility_mode pass through unchanged: the call
+ * sites only enter the clamp paths when compatibility_mode='snowflake'.
  */
 #define ICEBERG_SNOWFLAKE_MAX_STRING_BYTES		(16 * 1024 * 1024)
 #define ICEBERG_SNOWFLAKE_MAX_BINARY_BYTES		(8 * 1024 * 1024)
 #define ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES	(128 * 1024 * 1024)
 
-extern PGDLLEXPORT int IcebergMaxStringBytes;
-extern PGDLLEXPORT int IcebergMaxBinaryBytes;
-extern PGDLLEXPORT int IcebergMaxNestedTypeBytes;
-
 /*
  * TypeNeedsIcebergSizeClamping returns true if a Datum of typeOid (or any
  * lossless string / structured-string / bytea component nested within it)
  * could potentially be size-clamped by IcebergSizeClampDatum.  Recurses
- * through arrays, composites, maps, and domains.  Independent of the
- * current GUC values.
+ * through arrays, composites, maps, and domains.
  */
 extern PGDLLEXPORT bool TypeNeedsIcebergSizeClamping(Oid typeOid);

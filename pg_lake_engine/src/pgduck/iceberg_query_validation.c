@@ -520,8 +520,8 @@ EscapeColumnNameForErrorMessage(const char *name, bool forPrintfFormat)
  *                             string limit, since truncating the serialized
  *                             form would yield invalid JSON.
  *     - array / composite /
- *       map                 : NULL when iceberg_byte_size(expr) exceeds
- *                             iceberg_max_nested_type_bytes.
+ *       map                 : NULL when iceberg_byte_size(expr) exceeds the
+ *                             Snowflake OBJECT/ARRAY/VARIANT column limit.
  *
  *   ICEBERG_OOR_ERROR — raise on oversize, including the column name in
  *   the message.  Uses iceberg_size_check_text / _blob for the leaf cases
@@ -553,12 +553,12 @@ AppendIcebergSizeClampExpression(StringInfo buf, const char *expr,
 
 			appendStringInfo(buf,
 							 "iceberg_size_check_text(%s, %d, '%s')",
-							 expr, IcebergMaxStringBytes, escapedName);
+							 expr, ICEBERG_SNOWFLAKE_MAX_STRING_BYTES, escapedName);
 			pfree(escapedName);
 		}
 		else
 			appendStringInfo(buf, "iceberg_size_clamp_text(%s, %d)",
-							 expr, IcebergMaxStringBytes);
+							 expr, ICEBERG_SNOWFLAKE_MAX_STRING_BYTES);
 		return true;
 	}
 
@@ -570,12 +570,12 @@ AppendIcebergSizeClampExpression(StringInfo buf, const char *expr,
 
 			appendStringInfo(buf,
 							 "iceberg_size_check_blob(%s, %d, '%s')",
-							 expr, IcebergMaxBinaryBytes, escapedName);
+							 expr, ICEBERG_SNOWFLAKE_MAX_BINARY_BYTES, escapedName);
 			pfree(escapedName);
 		}
 		else
 			appendStringInfo(buf, "iceberg_size_clamp_blob(%s, %d)",
-							 expr, IcebergMaxBinaryBytes);
+							 expr, ICEBERG_SNOWFLAKE_MAX_BINARY_BYTES);
 		return true;
 	}
 
@@ -591,14 +591,14 @@ AppendIcebergSizeClampExpression(StringInfo buf, const char *expr,
 							 "(CASE WHEN strlen(%s::VARCHAR) > %d "
 							 "THEN error(printf("
 							 "'value of column \"%s\" (%s, %%d bytes) "
-							 "exceeds iceberg_max_string_bytes (%d). "
+							 "exceeds Snowflake STRING column limit (%d). "
 							 "Set out_of_range_values = ''clamp'' on the "
 							 "table to truncate oversize values instead "
 							 "of erroring.', strlen(%s::VARCHAR))) "
 							 "ELSE %s END)",
-							 expr, IcebergMaxStringBytes,
+							 expr, ICEBERG_SNOWFLAKE_MAX_STRING_BYTES,
 							 escapedName, typeLabel,
-							 IcebergMaxStringBytes,
+							 ICEBERG_SNOWFLAKE_MAX_STRING_BYTES,
 							 expr, expr);
 			pfree(escapedName);
 		}
@@ -606,17 +606,13 @@ AppendIcebergSizeClampExpression(StringInfo buf, const char *expr,
 			appendStringInfo(buf,
 							 "(CASE WHEN strlen(%s::VARCHAR) > %d "
 							 "THEN NULL ELSE %s END)",
-							 expr, IcebergMaxStringBytes, expr);
+							 expr, ICEBERG_SNOWFLAKE_MAX_STRING_BYTES, expr);
 		return true;
 	}
 
 	/*
-	 * Containers (array / composite / map): aggregate-only check.  Skip
-	 * entirely when the aggregate GUC is disabled.
+	 * Containers (array / composite / map): aggregate-only check.
 	 */
-	if (IcebergMaxNestedTypeBytes <= 0)
-		return false;
-
 	if (OidIsValid(get_element_type(typeOid)) ||
 		IsMapTypeOid(typeOid) ||
 		get_typtype(typeOid) == TYPTYPE_COMPOSITE)
@@ -633,14 +629,14 @@ AppendIcebergSizeClampExpression(StringInfo buf, const char *expr,
 							 "(CASE WHEN iceberg_byte_size(%s) > %d "
 							 "THEN error(printf("
 							 "'value of column \"%s\" (%s, %%d bytes) "
-							 "exceeds iceberg_max_nested_type_bytes (%d). "
+							 "exceeds Snowflake OBJECT/ARRAY/VARIANT column limit (%d). "
 							 "Set out_of_range_values = ''clamp'' on the "
 							 "table to truncate oversize values instead "
 							 "of erroring.', iceberg_byte_size(%s))) "
 							 "ELSE %s END)",
-							 expr, IcebergMaxNestedTypeBytes,
+							 expr, ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES,
 							 escapedName, typeLabel,
-							 IcebergMaxNestedTypeBytes,
+							 ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES,
 							 expr, expr);
 			pfree(escapedName);
 		}
@@ -648,7 +644,7 @@ AppendIcebergSizeClampExpression(StringInfo buf, const char *expr,
 			appendStringInfo(buf,
 							 "(CASE WHEN iceberg_byte_size(%s) > %d "
 							 "THEN NULL ELSE %s END)",
-							 expr, IcebergMaxNestedTypeBytes, expr);
+							 expr, ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES, expr);
 		return true;
 	}
 
@@ -678,8 +674,7 @@ AppendIcebergSizeClampExpression(StringInfo buf, const char *expr,
  *   - ICEBERG_OOR_CLAMP: silently truncate / NULL.
  *   - ICEBERG_OOR_NONE: no-op, original query returned.
  *
- * When all three limit globals are 0 (a test-only configuration) or no
- * column carries a clampable type, the original query is returned
+ * When no column carries a clampable type the original query is returned
  * unchanged.
  *
  * Both the INSERT..SELECT pushdown path (via WriteQueryResultTo) and the
@@ -693,10 +688,6 @@ IcebergWrapQueryWithSizeClampChecks(char *query, TupleDesc tupleDesc,
 									bool queryHasRowId)
 {
 	if (tupleDesc == NULL || policy == ICEBERG_OOR_NONE)
-		return query;
-
-	if (IcebergMaxStringBytes == 0 && IcebergMaxBinaryBytes == 0 &&
-		IcebergMaxNestedTypeBytes == 0)
 		return query;
 
 	bool		needsAnyClamp = false;

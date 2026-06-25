@@ -90,7 +90,7 @@ static Datum IcebergSizeClampNestedDatum(Datum value, Oid typeOid,
 										 const char *columnName,
 										 bool *isNull, bool *modified);
 static void RaiseSizeOverflow(const char *columnName, const char *typeLabel,
-							  int64 size, int64 limit, const char *gucName);
+							  int64 size, int64 limit, const char *limitLabel);
 static bool TypeContainsJsonbLeaf(Oid typeOid);
 static int64 ContainerByteSizeViaOutputFunc(Datum value, Oid typeOid);
 
@@ -247,21 +247,21 @@ ContainerByteSizeViaOutputFunc(Datum value, Oid typeOid)
  */
 static void
 RaiseSizeOverflow(const char *columnName, const char *typeLabel,
-				  int64 size, int64 limit, const char *gucName)
+				  int64 size, int64 limit, const char *limitLabel)
 {
 	if (columnName != NULL && columnName[0] != '\0')
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 				 errmsg("value of column \"%s\" (%s, %lld bytes) exceeds %s (%lld)",
 						columnName, typeLabel, (long long) size,
-						gucName, (long long) limit),
+						limitLabel, (long long) limit),
 				 errhint("Set out_of_range_values = 'clamp' on the table to "
 						 "truncate oversize values instead of erroring.")));
 	else
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 				 errmsg("%s value of %lld bytes exceeds %s (%lld)",
-						typeLabel, (long long) size, gucName,
+						typeLabel, (long long) size, limitLabel,
 						(long long) limit),
 				 errhint("Set out_of_range_values = 'clamp' on the table to "
 						 "truncate oversize values instead of erroring.")));
@@ -295,16 +295,14 @@ SizeClampVarlenaFastPath(Datum value, Oid typeOid)
 		return false;
 
 	int64		totalSize = (int64) toast_raw_datum_size(value) - VARHDRSZ;
-	int64		safeBound = INT64_MAX;
+	int64		safeBound = ICEBERG_SNOWFLAKE_MAX_STRING_BYTES;
 
-	if (IcebergMaxStringBytes > 0 && IcebergMaxStringBytes < safeBound)
-		safeBound = IcebergMaxStringBytes;
-	if (IcebergMaxBinaryBytes > 0 && IcebergMaxBinaryBytes < safeBound)
-		safeBound = IcebergMaxBinaryBytes;
-	if (IcebergMaxNestedTypeBytes > 0 && IcebergMaxNestedTypeBytes < safeBound)
-		safeBound = IcebergMaxNestedTypeBytes;
+	if (ICEBERG_SNOWFLAKE_MAX_BINARY_BYTES < safeBound)
+		safeBound = ICEBERG_SNOWFLAKE_MAX_BINARY_BYTES;
+	if (ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES < safeBound)
+		safeBound = ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES;
 
-	if (safeBound == INT64_MAX || totalSize * 2 > safeBound)
+	if (totalSize * 2 > safeBound)
 		return false;
 
 	return true;
@@ -764,9 +762,9 @@ IcebergErrorOrClampDatum(Datum value, Oid typeOid, int32 typmod,
 /*
  * IcebergSizeClampStringScalar handles a single text/varchar/bpchar/jsonb/json
  * Datum.  Text-y values are truncated at a UTF-8 character boundary so that
- * the result fits within IcebergMaxStringBytes.  jsonb/json values that
- * exceed the limit are NULLed via *isNull, since truncation would corrupt
- * the structure.
+ * the result fits within ICEBERG_SNOWFLAKE_MAX_STRING_BYTES.  jsonb/json
+ * values that exceed the limit are NULLed via *isNull, since truncation would
+ * corrupt the structure.
  *
  * Fast path for text/varchar/bpchar/json: PG_DETOAST_DATUM_PACKED is a
  * no-op for non-toasted (the common case); VARSIZE_ANY_EXHDR + branch
@@ -775,7 +773,7 @@ IcebergErrorOrClampDatum(Datum value, Oid typeOid, int32 typmod,
  * jsonb has no comparable fast path: the binary varlena size does not
  * upper-bound the text form (numerics encode compactly in binary but
  * expand when rendered, and a single control byte renders to a 6-char
- * \uXXXX escape), so we always pay jsonb_out when maxBytes > 0.
+ * \uXXXX escape), so we always pay jsonb_out.
  */
 static Datum
 IcebergSizeClampStringScalar(Datum value, Oid typeOid,
@@ -783,10 +781,7 @@ IcebergSizeClampStringScalar(Datum value, Oid typeOid,
 							 const char *columnName,
 							 bool *isNull)
 {
-	int32		maxBytes = IcebergMaxStringBytes;
-
-	if (maxBytes == 0)
-		return value;
+	const int32	maxBytes = ICEBERG_SNOWFLAKE_MAX_STRING_BYTES;
 
 	if (typeOid == JSONBOID)
 	{
@@ -800,7 +795,7 @@ IcebergSizeClampStringScalar(Datum value, Oid typeOid,
 
 		if (policy == ICEBERG_OOR_ERROR)
 			RaiseSizeOverflow(columnName, "jsonb", textLen, maxBytes,
-							  "iceberg_max_string_bytes");
+							  "Snowflake STRING column limit");
 
 		*isNull = true;
 		return (Datum) 0;
@@ -816,7 +811,7 @@ IcebergSizeClampStringScalar(Datum value, Oid typeOid,
 	{
 		if (policy == ICEBERG_OOR_ERROR)
 			RaiseSizeOverflow(columnName, "json", srcLen, maxBytes,
-							  "iceberg_max_string_bytes");
+							  "Snowflake STRING column limit");
 
 		*isNull = true;
 		return (Datum) 0;
@@ -831,7 +826,7 @@ IcebergSizeClampStringScalar(Datum value, Oid typeOid,
 			(typeOid == VARCHAROID) ? "varchar" : "bpchar";
 
 		RaiseSizeOverflow(columnName, typeLabel, srcLen, maxBytes,
-						  "iceberg_max_string_bytes");
+						  "Snowflake STRING column limit");
 	}
 
 	const char *src = VARDATA_ANY(v);
@@ -848,18 +843,15 @@ IcebergSizeClampStringScalar(Datum value, Oid typeOid,
 
 /*
  * IcebergSizeClampBinaryScalar byte-truncates a bytea Datum to
- * IcebergMaxBinaryBytes when needed.  Returns the original Datum unchanged
- * when no truncation is required.
+ * ICEBERG_SNOWFLAKE_MAX_BINARY_BYTES when needed.  Returns the original
+ * Datum unchanged when no truncation is required.
  */
 static Datum
 IcebergSizeClampBinaryScalar(Datum value,
 							 IcebergOutOfRangePolicy policy,
 							 const char *columnName)
 {
-	int32		maxBytes = IcebergMaxBinaryBytes;
-
-	if (maxBytes == 0)
-		return value;
+	const int32	maxBytes = ICEBERG_SNOWFLAKE_MAX_BINARY_BYTES;
 
 	struct varlena *v = (struct varlena *) PG_DETOAST_DATUM_PACKED(value);
 	int32		srcLen = VARSIZE_ANY_EXHDR(v);
@@ -869,7 +861,7 @@ IcebergSizeClampBinaryScalar(Datum value,
 
 	if (policy == ICEBERG_OOR_ERROR)
 		RaiseSizeOverflow(columnName, "bytea", srcLen, maxBytes,
-						  "iceberg_max_binary_bytes");
+						  "Snowflake BINARY column limit");
 
 	struct varlena *result = (struct varlena *) palloc(VARHDRSZ + maxBytes);
 
@@ -888,12 +880,12 @@ IcebergSizeClampBinaryScalar(Datum value,
  *
  * In addition to per-leaf clamping, an aggregate-size check NULLs the entire
  * array or composite when its varlena content size exceeds
- * IcebergMaxNestedTypeBytes (the limit on the serialized form that downstream
- * consumers receive when an array/struct lands in an OBJECT/ARRAY/VARIANT
- * column; distinct from the per-leaf STRING limit since downstream caps
- * usually differ).  The varlena size is a cheap proxy for the JSON
- * serialization length the consumer ultimately sees and avoids paying for
- * an extra serialization pass.
+ * ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES (the limit on the serialized form
+ * that downstream consumers receive when an array/struct lands in an
+ * OBJECT/ARRAY/VARIANT column; distinct from the per-leaf STRING limit since
+ * downstream caps usually differ).  The varlena size is a cheap proxy for the
+ * JSON serialization length the consumer ultimately sees and avoids paying
+ * for an extra serialization pass.
  *
  * *isNull is set to true when the value is replaced by NULL: a leaf
  * jsonb/json over the limit, or a container whose aggregate exceeds the
@@ -934,15 +926,15 @@ IcebergSizeClampNestedDatum(Datum value, Oid typeOid, int32 typmod,
 
 	/*
 	 * Container types (array / composite / map / domain over either): apply a
-	 * single aggregate-size check against IcebergMaxNestedTypeBytes.
+	 * single aggregate-size check against ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES.
 	 *
 	 * We deliberately do NOT recurse into elements/fields to per-leaf-clamp
 	 * inner strings or bytea.  Inside an array/object on the consumer side
 	 * the leaves don't have their own column cap — they're just JSON inside
-	 * the parent OBJECT/ARRAY/VARIANT, which has the aggregate cap.  And if
-	 * iceberg_max_string_bytes <= iceberg_max_nested_type_bytes, no inner
-	 * leaf can exceed the per-leaf limit while staying inside an under-cap
-	 * container.
+	 * the parent OBJECT/ARRAY/VARIANT, which has the aggregate cap.  And
+	 * since ICEBERG_SNOWFLAKE_MAX_STRING_BYTES <=
+	 * ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES, no inner leaf can exceed the
+	 * per-leaf limit while staying inside an under-cap container.
 	 *
 	 * So a container is either small enough to pass through verbatim, or big
 	 * enough to NULL (CLAMP) / error (ERROR).  No deconstruct/deform, no
@@ -965,12 +957,12 @@ IcebergSizeClampNestedDatum(Datum value, Oid typeOid, int32 typmod,
 		else
 			aggregateSize = (int64) toast_raw_datum_size(value) - VARHDRSZ;
 
-		if (IcebergMaxNestedTypeBytes > 0 && aggregateSize > IcebergMaxNestedTypeBytes)
+		if (aggregateSize > ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES)
 		{
 			if (policy == ICEBERG_OOR_ERROR)
 				RaiseSizeOverflow(columnName, "array", aggregateSize,
-								  IcebergMaxNestedTypeBytes,
-								  "iceberg_max_nested_type_bytes");
+								  ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES,
+								  "Snowflake OBJECT/ARRAY/VARIANT column limit");
 
 			*isNull = true;
 			*modified = true;
@@ -1001,12 +993,12 @@ IcebergSizeClampNestedDatum(Datum value, Oid typeOid, int32 typmod,
 		else
 			aggregateSize = (int64) toast_raw_datum_size(value) - VARHDRSZ;
 
-		if (IcebergMaxNestedTypeBytes > 0 && aggregateSize > IcebergMaxNestedTypeBytes)
+		if (aggregateSize > ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES)
 		{
 			if (policy == ICEBERG_OOR_ERROR)
 				RaiseSizeOverflow(columnName, "composite", aggregateSize,
-								  IcebergMaxNestedTypeBytes,
-								  "iceberg_max_nested_type_bytes");
+								  ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES,
+								  "Snowflake OBJECT/ARRAY/VARIANT column limit");
 
 			*isNull = true;
 			*modified = true;
@@ -1026,8 +1018,7 @@ IcebergSizeClampNestedDatum(Datum value, Oid typeOid, int32 typmod,
  * gate on the table's compatibility_mode before calling; this function
  * applies the limits unconditionally otherwise.
  *
- * See header comment for full semantics.  When all three limit globals
- * are 0 the value passes through unchanged.
+ * See header comment for full semantics.
  */
 Datum
 IcebergSizeClampDatum(Datum value, Oid typeOid, int32 typmod,
@@ -1036,9 +1027,7 @@ IcebergSizeClampDatum(Datum value, Oid typeOid, int32 typmod,
 {
 	*isNull = false;
 
-	if (policy == ICEBERG_OOR_NONE ||
-		(IcebergMaxStringBytes == 0 && IcebergMaxBinaryBytes == 0 &&
-		 IcebergMaxNestedTypeBytes == 0))
+	if (policy == ICEBERG_OOR_NONE)
 		return value;
 
 	bool		modified = false;
