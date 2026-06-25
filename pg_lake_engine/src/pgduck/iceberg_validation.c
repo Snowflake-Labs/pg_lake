@@ -40,20 +40,6 @@ static IcebergOutOfRangePolicy GetIcebergOutOfRangePolicyFromOptions(List *optio
 
 
 /*
- * Backing variables for pg_lake_engine.iceberg_max_string_bytes,
- * iceberg_max_binary_bytes, and iceberg_max_nested_type_bytes.  Registered
- * in pg_lake_engine _PG_init().  Defaults are Snowflake's per-column
- * ceilings (16 MiB string, 8 MiB binary, 128 MiB nested-type); the hidden
- * GUCs let tests scale them down to fit small-data fixtures.  They only
- * take effect for tables declared with compatibility_mode='snowflake';
- * AUTO-mode tables skip the size-clamp paths entirely.
- */
-int			IcebergMaxStringBytes = ICEBERG_SNOWFLAKE_MAX_STRING_BYTES;
-int			IcebergMaxBinaryBytes = ICEBERG_SNOWFLAKE_MAX_BINARY_BYTES;
-int			IcebergMaxNestedTypeBytes = ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES;
-
-
-/*
  * GetIcebergOutOfRangePolicyFromOptions reads the "out_of_range_values" option
  * from a list of DefElem options (table options).
  *

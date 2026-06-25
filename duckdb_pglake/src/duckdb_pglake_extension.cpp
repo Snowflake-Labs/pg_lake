@@ -402,9 +402,7 @@ PgErrorNestedListFun(DataChunk &args, ExpressionState &state, Vector &result)
  *   - For numeric leaves (int / bigint / double), the JSON-serialized
  *     form is 2-3x larger than the in-memory size (an int4 is 4 bytes
  *     in memory but ~5-12 chars in JSON), so this UDF can pass values
- *     that would actually exceed the consumer's cap.  Operators tuning
- *     iceberg_max_nested_type_bytes against a hard ceiling should size
- *     down accordingly.
+ *     that would actually exceed the consumer's cap.
  *
  *   - For text-heavy containers, JSON quoting / escaping / commas add
  *     overhead this UDF doesn't count.  Same direction of error: this
@@ -415,8 +413,7 @@ PgErrorNestedListFun(DataChunk &args, ExpressionState &state, Vector &result)
  * children, which over-counts by varlena framing overhead.  The two
  * paths therefore disagree by O(container framing) on the same input
  * — borderline rows can flip outcome between INSERT VALUES and
- * INSERT..SELECT.  Both proxies are deliberately approximate; the GUC
- * is meant to be tuned to whichever path the operator's workload uses.
+ * INSERT..SELECT.  Both proxies are deliberately approximate.
  *
  * STRUCT field byte sums are computed by recursing into each field's
  * vector at the same row index; LIST/MAP recurse over `entry.length`
@@ -590,7 +587,7 @@ IcebergSizeCheckTextFun(DataChunk &args, ExpressionState &state, Vector &result)
 			if (limit > 0 && size > (int64_t) limit)
 				throw InvalidInputException(
 					"value of column \"%s\" (text, %lld bytes) exceeds "
-					"iceberg_max_string_bytes (%d). "
+					"Snowflake STRING column limit (%d). "
 					"Set out_of_range_values = 'clamp' on the table to "
 					"truncate oversize values instead of erroring.",
 					column_name.GetString().c_str(), (long long) size, limit);
@@ -617,7 +614,7 @@ IcebergSizeCheckBlobFun(DataChunk &args, ExpressionState &state, Vector &result)
 			if (limit > 0 && size > (int64_t) limit)
 				throw InvalidInputException(
 					"value of column \"%s\" (bytea, %lld bytes) exceeds "
-					"iceberg_max_binary_bytes (%d). "
+					"Snowflake BINARY column limit (%d). "
 					"Set out_of_range_values = 'clamp' on the table to "
 					"truncate oversize values instead of erroring.",
 					column_name.GetString().c_str(), (long long) size, limit);
