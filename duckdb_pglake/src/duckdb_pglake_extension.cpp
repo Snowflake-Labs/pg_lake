@@ -390,34 +390,20 @@ PgErrorNestedListFun(DataChunk &args, ExpressionState &state, Vector &result)
 
 
 /*
- * IcebergByteSize returns the in-memory byte footprint of any Datum, used
- * as a cheap proxy for "size that lands in the consumer's OBJECT / ARRAY /
- * VARIANT column".  Walks the value at the vector level (no text
- * serialization), summing VARCHAR/BLOB string_t sizes, recursing through
- * LIST/MAP children, and adding fixed-width sizes for scalar types.
- *
- * The proxy is intentionally rough — it sidesteps a per-row JSON
- * serialization, but trades off in two known directions:
- *
- *   - For numeric leaves (int / bigint / double), the JSON-serialized
- *     form is 2-3x larger than the in-memory size (an int4 is 4 bytes
- *     in memory but ~5-12 chars in JSON), so this UDF can pass values
- *     that would actually exceed the consumer's cap.
- *
- *   - For text-heavy containers, JSON quoting / escaping / commas add
- *     overhead this UDF doesn't count.  Same direction of error: this
- *     UDF under-counts vs. JSON.
- *
- * The per-tuple FDW path (IcebergSizeClampNestedDatum) uses
- * toast_raw_datum_size on the PG-side varlena instead of walking
- * children, which over-counts by varlena framing overhead.  The two
- * paths therefore disagree by O(container framing) on the same input
- * — borderline rows can flip outcome between INSERT VALUES and
- * INSERT..SELECT.  Both proxies are deliberately approximate.
+ * IcebergComputeByteSize returns the in-memory byte footprint of a Datum,
+ * used as a cheap proxy for the column-cap measurement on
+ * ARRAY/STRUCT/MAP values.  Walks the vector and sums VARCHAR/BLOB
+ * string_t sizes, recursing through LIST/MAP/STRUCT children and adding
+ * fixed-width sizes for scalar leaves.
  *
  * STRUCT field byte sums are computed by recursing into each field's
  * vector at the same row index; LIST/MAP recurse over `entry.length`
  * children starting at `entry.offset` in the child vector.
+ *
+ * The per-tuple FDW path (IcebergSizeClampNestedDatum) measures the
+ * PG-side varlena instead.  The two proxies disagree by O(container
+ * framing) on the same input; borderline rows can flip outcome between
+ * INSERT VALUES and INSERT..SELECT.  Both are deliberately approximate.
  */
 static int64_t
 IcebergComputeByteSize(Vector &v, idx_t row, idx_t row_count)

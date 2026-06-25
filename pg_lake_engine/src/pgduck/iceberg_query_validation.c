@@ -669,9 +669,9 @@ AppendIcebergSizeClampExpression(StringInfo buf, const char *expr,
 
 /*
  * IcebergWrapQueryWithSizeClampChecks wraps a query with an outer SELECT
- * that enforces Snowflake's per-column size limits on each clampable
- * column.  Callers gate on compatibility_mode='snowflake' before reaching
- * this function; tables in any other mode bypass the wrapper entirely.
+ * that enforces the per-column size limits imposed by `compatibilityMode`
+ * on each clampable column.  Only ICEBERG_COMPAT_SNOWFLAKE drives a clamp
+ * today; AUTO returns the original query unchanged.
  *
  * Behavior on oversize values is selected by `policy`:
  *
@@ -690,10 +690,12 @@ AppendIcebergSizeClampExpression(StringInfo buf, const char *expr,
  */
 char *
 IcebergWrapQueryWithSizeClampChecks(char *query, TupleDesc tupleDesc,
+									IcebergCompatibilityMode compatibilityMode,
 									IcebergOutOfRangePolicy policy,
 									bool queryHasRowId)
 {
-	if (tupleDesc == NULL || policy == ICEBERG_OOR_NONE)
+	if (tupleDesc == NULL || policy == ICEBERG_OOR_NONE ||
+		compatibilityMode != ICEBERG_COMPAT_SNOWFLAKE)
 		return query;
 
 	bool		needsAnyClamp = false;
