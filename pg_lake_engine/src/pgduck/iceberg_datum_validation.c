@@ -781,7 +781,7 @@ IcebergSizeClampStringScalar(Datum value, Oid typeOid,
 							 const char *columnName,
 							 bool *isNull)
 {
-	const int32	maxBytes = ICEBERG_SNOWFLAKE_MAX_STRING_BYTES;
+	const int32 maxBytes = ICEBERG_SNOWFLAKE_MAX_STRING_BYTES;
 
 	if (typeOid == JSONBOID)
 	{
@@ -851,7 +851,7 @@ IcebergSizeClampBinaryScalar(Datum value,
 							 IcebergOutOfRangePolicy policy,
 							 const char *columnName)
 {
-	const int32	maxBytes = ICEBERG_SNOWFLAKE_MAX_BINARY_BYTES;
+	const int32 maxBytes = ICEBERG_SNOWFLAKE_MAX_BINARY_BYTES;
 
 	struct varlena *v = (struct varlena *) PG_DETOAST_DATUM_PACKED(value);
 	int32		srcLen = VARSIZE_ANY_EXHDR(v);
@@ -926,7 +926,8 @@ IcebergSizeClampNestedDatum(Datum value, Oid typeOid, int32 typmod,
 
 	/*
 	 * Container types (array / composite / map / domain over either): apply a
-	 * single aggregate-size check against ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES.
+	 * single aggregate-size check against
+	 * ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES.
 	 *
 	 * We deliberately do NOT recurse into elements/fields to per-leaf-clamp
 	 * inner strings or bytea.  Inside an array/object on the consumer side
