@@ -84,7 +84,8 @@ RegisterPostgresColumnMappings(List *pgColumnMappingList)
 									 attrNo, parentFieldId, pgColumnMapping->pgType,
 									 field->id,
 									 field->writeDefault,
-									 field->initialDefault);
+									 field->initialDefault,
+									 pgColumnMapping->storageOverrides);
 	}
 }
 
@@ -190,6 +191,14 @@ CreatePostgresColumnMappingsForColumnDefs(Oid relationId, List *columnDefList, b
 
 	TupleDesc	tupleDesc = RelationGetDescr(rel);
 
+	/*
+	 * compatibility_mode is consulted ONLY here, at registration. It decides
+	 * the per-leaf storage mapping once; reads and writes recover the
+	 * surface->storage divergence from the persisted mapping, never from this
+	 * option again.
+	 */
+	IcebergCompatibilityMode compatMode = IcebergCompatibilityModeFromRelation(relationId);
+
 	foreach(columnDefCell, columnDefList)
 	{
 		ColumnDef  *columnDef = (ColumnDef *) lfirst(columnDefCell);
@@ -219,8 +228,30 @@ CreatePostgresColumnMappingsForColumnDefs(Oid relationId, List *columnDefList, b
 
 		PGType		pgType = MakePGType(typeOid, typmod);
 
-		field->type =
+		/*
+		 * Columns unsupported under the table's compatibility mode (e.g. a
+		 * map under 'snowflake') are rejected at the DDL layer
+		 * (ErrorIfColumnsUnsupportedForCompatibilityMode), so by the time we
+		 * shape the storage tree they can only be supported types.
+		 */
+		Assert(!(compatMode == ICEBERG_COMPAT_SNOWFLAKE && TypeContainsMap(typeOid)));
+
+		/*
+		 * Build the surface field tree, then a storage tree that the
+		 * compatibility policy may remap (e.g. snowflake stores a nested uuid
+		 * as string). field->type carries the storage shape (used for
+		 * metadata and writes); the per-leaf surface->storage divergence is
+		 * collected here and persisted by RegisterPostgresColumnMappings. The
+		 * PostgreSQL column type is never touched.
+		 */
+		Field	   *surfaceFieldTree =
 			PostgresTypeToIcebergField(pgType, forAddColumn, &subFieldIndex);
+
+		field->type = DeepCopyField(surfaceFieldTree);
+		ApplyCompatibilityStorageMapping(field->type, compatMode);
+
+		List	   *storageOverrides =
+			CollectStorageDivergences(surfaceFieldTree, field->type, fieldId);
 
 		field->required = columnDef->is_not_null;
 
@@ -253,6 +284,7 @@ CreatePostgresColumnMappingsForColumnDefs(Oid relationId, List *columnDefList, b
 		columnMapping->attname = pstrdup(columnName);
 		columnMapping->pgType = MakePGType(typeOid, typmod);
 		columnMapping->attrNum = attrNo;
+		columnMapping->storageOverrides = storageOverrides;
 
 		pgColumnMappingList = lappend(pgColumnMappingList, columnMapping);
 
@@ -320,6 +352,19 @@ CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(Oid relationId)
 		columnMapping->pgType = MakePGType(attr->atttypid, attr->atttypmod);
 		columnMapping->attNotNull = attr->attnotnull;
 		columnMapping->attHasDef = attr->atthasdef;
+
+		/*
+		 * The external metadata is the storage shape; the PostgreSQL
+		 * attribute is the surface. Persist any per-leaf divergence between
+		 * them (e.g. a nested uuid column stored as string) so a
+		 * re-registered table keeps its storage mapping.
+		 */
+		int			subFieldIndex = field->id;
+		Field	   *surfaceFieldTree =
+			PostgresTypeToIcebergField(columnMapping->pgType, false, &subFieldIndex);
+
+		columnMapping->storageOverrides =
+			CollectStorageDivergences(surfaceFieldTree, field->type, field->id);
 
 		pgColumnMappingList = lappend(pgColumnMappingList, columnMapping);
 	}

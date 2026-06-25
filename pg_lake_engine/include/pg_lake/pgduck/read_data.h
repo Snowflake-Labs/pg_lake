@@ -76,7 +76,8 @@ extern PGDLLEXPORT char *TupleDescToProjectionList(TupleDesc tupleDesc,
 												   List *formatOptions,
 												   ReadRowLocationMode readRowLocationMode,
 												   bool emitRowId,
-												   bool addCast);
+												   bool addCast,
+												   DataFileSchema * storageSchema);
 
 extern PGDLLEXPORT char *TupleDescToDuckDBColumnsMap(TupleDesc tupleDesc,
 													 CopyDataFormat sourceFormat,

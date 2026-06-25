@@ -157,3 +157,13 @@ typedef FieldStructElement DataFileSchemaField;
 extern PGDLLEXPORT DataFileSchema * DeepCopyDataFileSchema(const DataFileSchema * schema);
 extern PGDLLEXPORT Field * DeepCopyField(const Field * field);
 extern PGDLLEXPORT bool PGTypeRequiresConversionToIcebergString(Field * field, PGType pgType);
+extern PGDLLEXPORT char *PostgresBaseTypeIdToIcebergTypeName(PGType pgType);
+
+extern PGDLLEXPORT Field * StorageFieldForColumn(DataFileSchema * storageSchema,
+												 const char *name);
+extern PGDLLEXPORT Field * StorageStructFieldByName(Field * storageStruct,
+													const char *name);
+extern PGDLLEXPORT bool ScalarLeafStorageDiverges(Field * storageField,
+												  Oid surfaceOid, int32 surfaceTypmod);
+extern PGDLLEXPORT bool TypeHasStorageDivergentLeaf(Oid typeOid, int32 typmod,
+													Field * storageField);

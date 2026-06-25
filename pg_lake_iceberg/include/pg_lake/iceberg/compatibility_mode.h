@@ -21,6 +21,8 @@
 
 #include "nodes/pg_list.h"
 
+#include "pg_lake/parquet/field.h"
+
 /*
  * Name of the per-table iceberg option that selects a compatibility mode.
  * Defined here so option validation (pg_lake_table) and the conversion logic
@@ -33,24 +35,18 @@
  * the table is consumable by a downstream engine with narrower type support.
  *
  * Unlike a type-rewrite, these modes never change the PostgreSQL column type:
- * the column stays exactly as declared (uuid stays uuid). The intent is that
- * only the physical Iceberg/Parquet storage type and the I/O-boundary
- * conversions differ, with that surface->storage divergence persisted per-leaf
- * in lake_table.field_id_mappings (decided once, at registration).
- *
- * This option layer recognizes and validates the mode and enforces the DDL
- * guards; on its own it records no divergence (a storage no-op). The actual
- * per-leaf storage shaping is layered on top by the surface/storage mapping
- * change.
+ * the column stays exactly as declared (uuid stays uuid). Only the physical
+ * Iceberg/Parquet storage type and the I/O-boundary conversions differ, and
+ * that surface->storage divergence is persisted per-leaf in
+ * lake_table.field_id_mappings (decided once, at registration).
  *
  *   ICEBERG_COMPAT_AUTO       default (option unset or 'auto'): no storage
  *                             divergence. This is the hook where future
  *                             auto-detection would live.
- *   ICEBERG_COMPAT_SNOWFLAKE  selects the Snowflake-compatible storage shape
- *                             (a uuid nested inside an array/composite is
- *                             stored as Iceberg `string`, since Snowflake
- *                             cannot hold a UUID inside a structured type; a
- *                             top-level uuid column stays native `uuid`).
+ *   ICEBERG_COMPAT_SNOWFLAKE  a uuid nested inside an array/composite is
+ *                             stored as Iceberg `string` (Snowflake cannot
+ *                             hold a UUID inside a structured type). A
+ *                             top-level uuid column stays native `uuid`.
  */
 typedef enum IcebergCompatibilityMode
 {
@@ -77,6 +73,16 @@ extern PGDLLEXPORT IcebergCompatibilityMode IcebergCompatibilityModeFromCreateOp
 
 /* Reads the option from an existing relation; AUTO for non-iceberg/unset. */
 extern PGDLLEXPORT IcebergCompatibilityMode IcebergCompatibilityModeFromRelation(Oid relationId);
+
+/*
+ * Rewrites, in place, the storage type of every nested (level > 0) scalar
+ * Iceberg field for which the mode's per-leaf policy diverges from the surface
+ * type (e.g. snowflake stores a nested "uuid" as "string"), leaving top-level
+ * fields untouched. No-op for ICEBERG_COMPAT_AUTO. Maps are NOT descended: a
+ * column containing a map is rejected at DDL time under a restrictive mode.
+ */
+extern PGDLLEXPORT void ApplyCompatibilityStorageMapping(Field * field,
+														 IcebergCompatibilityMode mode);
 
 /*
  * True iff typeOid is, or contains at any depth, a pg_map type. Used to reject

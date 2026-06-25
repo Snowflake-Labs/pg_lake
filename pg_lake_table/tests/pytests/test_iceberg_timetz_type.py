@@ -878,8 +878,8 @@ def test_insert_select_timetz_with_oor_clamp_and_aggregate_pushdown(
 
     IcebergWrapQueryWithErrorOrClampChecks (driven by
     ``out_of_range_values = 'clamp'`` on the target) wraps the timestamp
-    column.  IcebergWrapQueryWithNativeTypeConversion (this PR) wraps the
-    timetz column.  Both must coexist on the same query without aliasing
+    column.  IcebergWrapQueryWithRewrites (this PR) wraps the timetz
+    column.  Both must coexist on the same query without aliasing
     collision, and both must still rewrite the column expression when it
     is the output of an aggregate rather than a bare column reference.
 
@@ -887,7 +887,7 @@ def test_insert_select_timetz_with_oor_clamp_and_aggregate_pushdown(
     file, this pins:
 
       * Both subquery aliases (``__iceberg_oor`` and
-        ``__iceberg_native_conv``) appear in the Vectorized SQL.
+        ``__iceberg_rewrite``) appear in the Vectorized SQL.
       * The TIMETZ UTC-normalizing cast still fires when the column
         expression is ``max(at_time)``.
       * The aggregated end-to-end result matches what PostgreSQL would
@@ -948,12 +948,12 @@ def test_insert_select_timetz_with_oor_clamp_and_aggregate_pushdown(
         # Both wrappers must have fired on the same query.  The subquery
         # aliases are the canonical signature of each wrap: __iceberg_oor
         # for the clamp/error wrap on the timestamp column, and
-        # __iceberg_native_conv for the TIMETZ rewrite.
+        # __iceberg_rewrite for the TIMETZ rewrite.
         assert "__iceberg_oor" in explain, (
             "Expected OOR clamp wrapper to fire on the timestamp column:\n" + explain
         )
-        assert "__iceberg_native_conv" in explain, (
-            "Expected native-type-conversion wrapper to fire on timetz:\n" + explain
+        assert "__iceberg_rewrite" in explain, (
+            "Expected the rewrite wrapper to fire on timetz:\n" + explain
         )
         assert "AT TIME ZONE 'UTC' AS TIME" in explain, (
             "Expected TIMETZ UTC-normalizing cast in the wrapped SQL:\n" + explain

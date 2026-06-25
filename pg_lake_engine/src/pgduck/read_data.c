@@ -73,6 +73,10 @@ static char *BuildColumnProjection(char *expression,
 								   List *formatOptions,
 								   bool addAlias);
 static char *BuildMapWithIntervalProjection(char *columnName, Oid mapTypeId);
+static char *BuildStorageToSurfaceProjection(const char *columnName,
+											 Oid columnTypeId, int32 columnTypeMod,
+											 DuckDBTypeInfo duckdbType,
+											 DataFileSchema * storageSchema);
 static char *GetLogFormatRegex(List *options);
 static char *GetLogTimestampFormat(List *options);
 
@@ -150,7 +154,8 @@ ReadDataSourceQuery(List *sourcePaths,
 														   formatOptions,
 														   readRowLocationMode,
 														   emitRowId,
-														   addCast);
+														   addCast,
+														   schema);
 
 		appendStringInfo(&command, "%s ", projection);
 	}
@@ -1023,17 +1028,89 @@ BuildStructWithIntervalProjection(char *columnName, Oid compositeTypeId)
 
 
 /*
+ * BuildStorageToSurfaceProjection is the read-side inverse of the write-side
+ * IcebergWrapQueryWithRewrites: where the write path casts a surface leaf down
+ * to its persisted storage type (e.g. a nested uuid -> iceberg string under
+ * compatibility_mode), this brings the leaf back up to the surface type on
+ * read.  The read schema makes DuckDB return the leaf in its storage form, but
+ * PostgreSQL expects the surface type, so a recursive CAST to the surface duck
+ * type lifts every diverging leaf back.
+ *
+ * Returns the full "CAST(...) AS column" projection for a storage-diverging
+ * column, or NULL when the column has no divergence (the caller then emits the
+ * column through its normal projection).
+ */
+static char *
+BuildStorageToSurfaceProjection(const char *columnName, Oid columnTypeId,
+								int32 columnTypeMod, DuckDBTypeInfo duckdbType,
+								DataFileSchema * storageSchema)
+{
+	Field	   *storageField = StorageFieldForColumn(storageSchema, columnName);
+
+	if (!TypeHasStorageDivergentLeaf(columnTypeId, columnTypeMod, storageField))
+		return NULL;
+
+	const char *reconstruction = NULL;
+	const char *castTargetType = duckdbType.typeName;
+
+	/*
+	 * Interval fields living alongside a diverging leaf inside a composite
+	 * are first reconstructed into a DuckDB INTERVAL (which then casts to
+	 * itself as a no-op), since a struct cannot be cast directly to INTERVAL.
+	 */
+	if (duckdbType.typeId == DUCKDB_TYPE_STRUCT)
+		reconstruction = BuildStructWithIntervalProjection((char *) columnName,
+														   columnTypeId);
+
+	if (reconstruction == NULL)
+		reconstruction = duckdb_quote_identifier((char *) columnName);
+	else
+	{
+		/*
+		 * BuildStructWithIntervalProjection already rebuilt the interval
+		 * leaves into DuckDB INTERVAL values, so the surface cast must
+		 * describe those leaves as INTERVAL too. duckdbType.typeName is built
+		 * with DATA_FORMAT_ICEBERG, which renders interval as
+		 * STRUCT(months,days,microseconds) (its on-disk shape) -- casting
+		 * against that would attempt INTERVAL -> STRUCT and fail. Re-deriving
+		 * the type name with a non-Iceberg format flips only the interval
+		 * rendering to INTERVAL; every other leaf (including the
+		 * storage-diverging uuid->string) is format-independent, so the cast
+		 * stays "interval -> interval" (a no-op) for the reconstructed fields
+		 * while still bringing the diverging leaves back to their surface
+		 * type.
+		 */
+		castTargetType =
+			GetFullDuckDBTypeNameForPGType(MakePGType(columnTypeId,
+													  columnTypeMod),
+										   DATA_FORMAT_PARQUET);
+	}
+
+	return psprintf("CAST(%s AS %s) AS %s",
+					reconstruction,
+					castTargetType,
+					duckdb_quote_identifier((char *) columnName));
+}
+
+
+/*
  * TupleDescToProjectionList converts a PostgreSQL tuple descriptor to
  * projection list in string form.
  *
  * We add explicit casts for types that do not have an equivalent in
  * the source format.
+ *
+ * storageSchema is the table's persisted Iceberg storage schema (or NULL). It
+ * is used to detect columns whose physical storage diverges from the surface
+ * type (e.g. a nested uuid stored as string under compatibility_mode), which
+ * require an unconditional cast back to the surface type.
  */
 char *
 TupleDescToProjectionList(TupleDesc tupleDesc, CopyDataFormat sourceFormat,
 						  List *formatOptions,
 						  ReadRowLocationMode readRowLocationMode,
-						  bool emitRowId, bool addCast)
+						  bool emitRowId, bool addCast,
+						  DataFileSchema * storageSchema)
 {
 	StringInfoData projection;
 
@@ -1058,6 +1135,32 @@ TupleDescToProjectionList(TupleDesc tupleDesc, CopyDataFormat sourceFormat,
 															   columnTypeMod,
 															   sourceFormat,
 															   preferVarchar);
+
+		/*
+		 * Columns whose physical storage diverges from the surface type (e.g.
+		 * a nested uuid stored as iceberg string under compatibility_mode)
+		 * are cast back to the surface type by
+		 * BuildStorageToSurfaceProjection, the read-side inverse of the write
+		 * path's IcebergWrapQueryWithRewrites.
+		 */
+		if (sourceFormat == DATA_FORMAT_ICEBERG)
+		{
+			char	   *divergentProjection =
+				BuildStorageToSurfaceProjection(columnName, columnTypeId,
+												columnTypeMod, duckdbType,
+												storageSchema);
+
+			if (divergentProjection != NULL)
+			{
+				if (hasColumns)
+					appendStringInfoString(&projection, ", ");
+
+				appendStringInfoString(&projection, divergentProjection);
+
+				hasColumns = true;
+				continue;
+			}
+		}
 
 		/*
 		 * For composite types containing interval fields, we need to

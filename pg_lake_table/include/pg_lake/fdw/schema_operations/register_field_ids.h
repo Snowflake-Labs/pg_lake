@@ -36,8 +36,17 @@ typedef struct PostgresColumnMapping
 	bool		attHasDef;
 	PGType		pgType;
 
-	/* field that is mapped to postgres column */
+	/* field that is mapped to postgres column (storage-shaped) */
 	DataFileSchemaField *field;
+
+	/*
+	 * Per-leaf surface->storage divergences for this column (a list of
+	 * StorageOverride), decided when the column mapping was created. NIL when
+	 * storage equals surface (the common case).
+	 * RegisterPostgresColumnMappings hands these to the catalog so they are
+	 * persisted alongside the field.
+	 */
+	List	   *storageOverrides;
 }			PostgresColumnMapping;
 
 extern PGDLLEXPORT void RegisterPostgresColumnMappings(List *pgColumnMappingList);

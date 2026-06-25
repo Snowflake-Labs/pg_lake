@@ -18,6 +18,7 @@
 #pragma once
 
 #include "access/tupdesc.h"
+#include "pg_lake/parquet/field.h"
 #include "pg_lake/pgduck/iceberg_validation.h"
 
 /*
@@ -38,10 +39,43 @@ extern PGDLLEXPORT char *IcebergWrapQueryWithErrorOrClampChecks(char *query,
 																bool queryHasRowId);
 
 /*
- * IcebergWrapQueryWithNativeTypeConversion wraps a query to rewrite
- * columns whose native DuckDB shape does not match Iceberg's.  See the
- * implementation for the set of rewrites and why each is required.
+ * IcebergRewriteKind is a bitmask of independent per-leaf rewrites the write
+ * query may need before the data matches Iceberg's on-disk shape.  They are
+ * applied in a single traversal (see IcebergWrapQueryWithRewrites); combine
+ * them with bitwise OR.  Each leaf needs at most one kind (the sets are
+ * disjoint), and a future rewrite is just another flag.
  */
-extern PGDLLEXPORT char *IcebergWrapQueryWithNativeTypeConversion(char *query,
-																  TupleDesc tupleDesc,
-																  bool queryHasRowId);
+typedef enum
+{
+	/*
+	 * Encode INTERVAL/TIMETZ into their Iceberg on-disk shape (interval ->
+	 * struct(months,days,microseconds), timetz -> UTC-normalized time).
+	 * Type-intrinsic: depends only on the DuckDB type, never on a per-table
+	 * storage mapping.  storageSchema unused.
+	 */
+	ICEBERG_REWRITE_NATIVE_ENCODE = 1 << 0,
+
+	/*
+	 * Surface -> persisted storage type wherever the two diverge (e.g. a
+	 * nested uuid stored as iceberg string under compatibility_mode).  Driven
+	 * entirely by storageSchema; type-agnostic.
+	 */
+	ICEBERG_REWRITE_STORAGE_CAST = 1 << 1,
+}			IcebergRewriteKind;
+
+/*
+ * IcebergWrapQueryWithRewrites wraps a query with an outer SELECT that applies
+ * every rewrite in rewriteKinds to each column in a single pass, aliasing
+ * rewritten columns back to their original names and passing untouched columns
+ * through.  storageSchema is the target table's persisted Iceberg storage
+ * schema (or NULL); it is only consulted when ICEBERG_REWRITE_STORAGE_CAST is
+ * set.
+ *
+ * Returns the original query unchanged if no column needs any of the requested
+ * rewrites.
+ */
+extern PGDLLEXPORT char *IcebergWrapQueryWithRewrites(char *query,
+													  TupleDesc tupleDesc,
+													  bool queryHasRowId,
+													  int rewriteKinds,
+													  DataFileSchema * storageSchema);
