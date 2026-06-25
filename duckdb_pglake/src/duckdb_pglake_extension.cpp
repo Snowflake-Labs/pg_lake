@@ -389,6 +389,227 @@ PgErrorNestedListFun(DataChunk &args, ExpressionState &state, Vector &result)
 }
 
 
+/*
+ * IcebergComputeByteSize returns the in-memory byte footprint of a Datum,
+ * used as a cheap proxy for the column-cap measurement on
+ * ARRAY/STRUCT/MAP values.  Walks the vector and sums VARCHAR/BLOB
+ * string_t sizes, recursing through LIST/MAP/STRUCT children and adding
+ * fixed-width sizes for scalar leaves.
+ *
+ * STRUCT field byte sums are computed by recursing into each field's
+ * vector at the same row index; LIST/MAP recurse over `entry.length`
+ * children starting at `entry.offset` in the child vector.
+ *
+ * The per-tuple FDW path (IcebergSizeClampNestedDatum) measures the
+ * PG-side varlena instead.  The two proxies disagree by O(container
+ * framing) on the same input; borderline rows can flip outcome between
+ * INSERT VALUES and INSERT..SELECT.  Both are deliberately approximate.
+ */
+static int64_t
+IcebergComputeByteSize(Vector &v, idx_t row, idx_t row_count)
+{
+	if (v.GetVectorType() != VectorType::FLAT_VECTOR)
+		v.Flatten(row_count);
+
+	if (FlatVector::IsNull(v, row))
+		return 0;
+
+	auto &type = v.GetType();
+
+	switch (type.id())
+	{
+		case LogicalTypeId::VARCHAR:
+		case LogicalTypeId::BLOB:
+		{
+			auto data = FlatVector::GetData<string_t>(v);
+			return (int64_t) data[row].GetSize();
+		}
+
+		case LogicalTypeId::LIST:
+		case LogicalTypeId::MAP:
+		{
+			auto list_data = FlatVector::GetData<list_entry_t>(v);
+			auto entry = list_data[row];
+			auto &child = ListVector::GetEntry(v);
+			idx_t child_size = ListVector::GetListSize(v);
+
+			int64_t total = 0;
+
+			for (idx_t i = 0; i < entry.length; i++)
+				total += IcebergComputeByteSize(child, entry.offset + i,
+												child_size);
+
+			return total;
+		}
+
+		case LogicalTypeId::STRUCT:
+		{
+			auto &children = StructVector::GetEntries(v);
+			int64_t total = 0;
+
+			for (auto &child : children)
+				total += IcebergComputeByteSize(*child, row, row_count);
+
+			return total;
+		}
+
+		default:
+			return (int64_t) GetTypeIdSize(type.InternalType());
+	}
+}
+
+
+static void
+IcebergByteSizeFun(DataChunk &args, ExpressionState &state, Vector &result)
+{
+	auto &input = args.data[0];
+	idx_t count = args.size();
+
+	if (input.GetVectorType() != VectorType::FLAT_VECTOR)
+		input.Flatten(count);
+
+	auto out = FlatVector::GetData<int64_t>(result);
+	auto &out_validity = FlatVector::Validity(result);
+
+	for (idx_t i = 0; i < count; i++)
+	{
+		if (FlatVector::IsNull(input, i))
+		{
+			out_validity.SetInvalid(i);
+			continue;
+		}
+		out[i] = IcebergComputeByteSize(input, i, count);
+	}
+}
+
+
+static unique_ptr<FunctionData>
+IcebergByteSizeBind(ClientContext &context, ScalarFunction &bound_function,
+					vector<unique_ptr<Expression>> &arguments)
+{
+	bound_function.return_type = LogicalType::BIGINT;
+	return nullptr;
+}
+
+
+/*
+ * IcebergSizeClampTextFun truncates a VARCHAR value at a UTF-8 character
+ * boundary so its byte length does not exceed the second argument.  If the
+ * limit is <= 0 the value is returned unchanged so callers can encode
+ * "disabled" as 0.  Used to enforce Snowflake STRING/VARCHAR per-column
+ * caps on the pushdown write path.
+ *
+ * Algorithm: if the input fits, return it.  Otherwise, walk back from
+ * `limit` to the nearest UTF-8 leading byte (continuation bytes have
+ * the bit pattern 10xxxxxx).  Worst case backs up at most 3 bytes,
+ * since UTF-8 codepoints are at most 4 bytes long.
+ */
+static void
+IcebergSizeClampTextFun(DataChunk &args, ExpressionState &state, Vector &result)
+{
+	BinaryExecutor::Execute<string_t, int32_t, string_t>(
+		args.data[0], args.data[1], result, args.size(),
+		[&](string_t input, int32_t limit) {
+			auto data = input.GetData();
+			auto size = (int64_t) input.GetSize();
+
+			if (limit <= 0 || size <= (int64_t) limit)
+				return StringVector::AddString(result, data, size);
+
+			int64_t lim = (int64_t) limit;
+			int64_t trim = lim;
+			while (trim > 0 &&
+				   (((unsigned char) data[trim]) & 0xC0) == 0x80)
+			{
+				trim--;
+			}
+
+			return StringVector::AddString(result, data, trim);
+		});
+}
+
+
+/*
+ * IcebergSizeClampBlobFun byte-truncates a BLOB value to the second
+ * argument.  If the limit is <= 0 the value is returned unchanged.
+ * Used to enforce Snowflake BINARY per-column caps on the pushdown
+ * write path.
+ */
+static void
+IcebergSizeClampBlobFun(DataChunk &args, ExpressionState &state, Vector &result)
+{
+	BinaryExecutor::Execute<string_t, int32_t, string_t>(
+		args.data[0], args.data[1], result, args.size(),
+		[&](string_t input, int32_t limit) {
+			auto data = input.GetData();
+			auto size = (int64_t) input.GetSize();
+
+			if (limit <= 0 || size <= (int64_t) limit)
+				return StringVector::AddStringOrBlob(result, data, size);
+
+			return StringVector::AddStringOrBlob(result, data, (idx_t) limit);
+		});
+}
+
+
+/*
+ * IcebergSizeCheckTextFun raises if a VARCHAR value's UTF-8 byte length
+ * exceeds the second argument; otherwise passes through unchanged.  The
+ * third argument is the source column name, included in the error message
+ * for actionable diagnostics.  A non-positive limit disables the check.
+ *
+ * Counterpart to IcebergSizeClampTextFun, used on the pushdown write path
+ * when the table's out_of_range_values policy is the default 'error'.
+ */
+static void
+IcebergSizeCheckTextFun(DataChunk &args, ExpressionState &state, Vector &result)
+{
+	TernaryExecutor::Execute<string_t, int32_t, string_t, string_t>(
+		args.data[0], args.data[1], args.data[2], result, args.size(),
+		[&](string_t input, int32_t limit, string_t column_name) {
+			auto data = input.GetData();
+			auto size = (int64_t) input.GetSize();
+
+			if (limit > 0 && size > (int64_t) limit)
+				throw InvalidInputException(
+					"value of column \"%s\" (text, %lld bytes) exceeds "
+					"Snowflake STRING column limit (%d). "
+					"Set out_of_range_values = 'clamp' on the table to "
+					"truncate oversize values instead of erroring.",
+					column_name.GetString().c_str(), (long long) size, limit);
+
+			return StringVector::AddString(result, data, size);
+		});
+}
+
+
+/*
+ * IcebergSizeCheckBlobFun raises if a BLOB value exceeds the second
+ * argument; otherwise passes through unchanged.  Counterpart to
+ * IcebergSizeClampBlobFun.
+ */
+static void
+IcebergSizeCheckBlobFun(DataChunk &args, ExpressionState &state, Vector &result)
+{
+	TernaryExecutor::Execute<string_t, int32_t, string_t, string_t>(
+		args.data[0], args.data[1], args.data[2], result, args.size(),
+		[&](string_t input, int32_t limit, string_t column_name) {
+			auto data = input.GetData();
+			auto size = (int64_t) input.GetSize();
+
+			if (limit > 0 && size > (int64_t) limit)
+				throw InvalidInputException(
+					"value of column \"%s\" (bytea, %lld bytes) exceeds "
+					"Snowflake BINARY column limit (%d). "
+					"Set out_of_range_values = 'clamp' on the table to "
+					"truncate oversize values instead of erroring.",
+					column_name.GetString().c_str(), (long long) size, limit);
+
+			return StringVector::AddStringOrBlob(result, data, size);
+		});
+}
+
+
 
 static void LoadInternal(ExtensionLoader &loader) {
 
@@ -436,6 +657,44 @@ static void LoadInternal(ExtensionLoader &loader) {
 									   PgErrorNestedListFun,
 									   NestedListBind);
 		loader.RegisterFunction(pg_error_nested);
+	}
+
+	{
+		ScalarFunction iceberg_size_clamp_text(
+			"iceberg_size_clamp_text",
+			{LogicalType::VARCHAR, LogicalType::INTEGER},
+			LogicalType::VARCHAR,
+			IcebergSizeClampTextFun);
+		loader.RegisterFunction(iceberg_size_clamp_text);
+
+		ScalarFunction iceberg_size_clamp_blob(
+			"iceberg_size_clamp_blob",
+			{LogicalType::BLOB, LogicalType::INTEGER},
+			LogicalType::BLOB,
+			IcebergSizeClampBlobFun);
+		loader.RegisterFunction(iceberg_size_clamp_blob);
+
+		ScalarFunction iceberg_size_check_text(
+			"iceberg_size_check_text",
+			{LogicalType::VARCHAR, LogicalType::INTEGER, LogicalType::VARCHAR},
+			LogicalType::VARCHAR,
+			IcebergSizeCheckTextFun);
+		loader.RegisterFunction(iceberg_size_check_text);
+
+		ScalarFunction iceberg_size_check_blob(
+			"iceberg_size_check_blob",
+			{LogicalType::BLOB, LogicalType::INTEGER, LogicalType::VARCHAR},
+			LogicalType::BLOB,
+			IcebergSizeCheckBlobFun);
+		loader.RegisterFunction(iceberg_size_check_blob);
+
+		ScalarFunction iceberg_byte_size(
+			"iceberg_byte_size",
+			{LogicalType::ANY},
+			LogicalType::BIGINT,
+			IcebergByteSizeFun,
+			IcebergByteSizeBind);
+		loader.RegisterFunction(iceberg_byte_size);
 	}
 
 	PgLakeUtilityFunctions::RegisterFunctions(loader);

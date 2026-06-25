@@ -170,3 +170,45 @@ TypeNeedsIcebergValidation(Oid typeOid, int32 typmod, bool isPushdown)
 
 	return false;
 }
+
+
+/*
+ * TypeNeedsIcebergSizeClamping returns true if a Datum of typeOid contains
+ * any leaf type that could be size-clamped: text/varchar/bpchar/bytea (which
+ * truncate) or jsonb/json (which become NULL).  It also returns true for
+ * any array, composite, or map type, since their aggregate JSON-serialized
+ * size can exceed the downstream consumer's column cap regardless of
+ * element/field types (e.g. an int[] of millions of values).  Recurses
+ * through domains.
+ *
+ * Independent of compatibility_mode: this is a static type-shape check used
+ * to gate the per-row clamp call cheaply; the caller decides whether to enter
+ * the clamp path at all based on compatibility_mode.
+ */
+bool
+TypeNeedsIcebergSizeClamping(Oid typeOid)
+{
+	if (typeOid == TEXTOID || typeOid == VARCHAROID ||
+		typeOid == BPCHAROID || typeOid == BYTEAOID ||
+		typeOid == JSONBOID || typeOid == JSONOID)
+		return true;
+
+	/* Any array type: aggregate size matters even for non-clampable elements. */
+	if (OidIsValid(get_element_type(typeOid)))
+		return true;
+
+	/* map check must precede the generic domain unwrap (maps are domains) */
+	if (IsMapTypeOid(typeOid))
+		return true;
+
+	char		typtype = get_typtype(typeOid);
+
+	if (typtype == TYPTYPE_DOMAIN)
+		return TypeNeedsIcebergSizeClamping(getBaseType(typeOid));
+
+	/* Any composite type: aggregate size of fields matters. */
+	if (typtype == TYPTYPE_COMPOSITE)
+		return true;
+
+	return false;
+}

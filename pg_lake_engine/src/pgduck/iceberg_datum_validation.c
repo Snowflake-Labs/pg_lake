@@ -40,17 +40,25 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
+#include "access/detoast.h"
 #include "catalog/pg_type.h"
 #include "funcapi.h"
 #include "datatype/timestamp.h"
+#include "mb/pg_wchar.h"
 #include "pg_lake/pgduck/iceberg_datum_validation.h"
 #include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/util/temporal_utils.h"
 #include "utils/array.h"
+#include "utils/builtins.h"
 #include "utils/date.h"
+#include "utils/hsearch.h"
+#include "utils/inval.h"
+#include "utils/jsonb.h"
 #include "utils/lsyscache.h"
+#include "utils/memutils.h"
 #include "utils/numeric.h"
+#include "utils/syscache.h"
 #include "utils/timestamp.h"
 #include "utils/typcache.h"
 
@@ -69,6 +77,245 @@ static Datum IcebergErrorOrClampNestedDatum(Datum value, Oid typeOid,
 											int32 typmod,
 											IcebergOutOfRangePolicy policy,
 											bool *isNull, bool *modified);
+static Datum IcebergSizeClampStringScalar(Datum value, Oid typeOid,
+										  IcebergOutOfRangePolicy policy,
+										  const char *columnName,
+										  bool *isNull);
+static Datum IcebergSizeClampBinaryScalar(Datum value,
+										  IcebergOutOfRangePolicy policy,
+										  const char *columnName);
+static Datum IcebergSizeClampNestedDatum(Datum value, Oid typeOid,
+										 int32 typmod,
+										 IcebergOutOfRangePolicy policy,
+										 const char *columnName,
+										 bool *isNull, bool *modified);
+static void RaiseSizeOverflow(const char *columnName, const char *typeLabel,
+							  int64 size, int64 limit, const char *limitLabel);
+static bool TypeContainsJsonbLeaf(Oid typeOid);
+static int64 ContainerByteSizeViaOutputFunc(Datum value, Oid typeOid);
+
+
+/*
+ * TypeContainsJsonbLeaf returns true if `typeOid` contains a jsonb or
+ * json leaf at any nesting depth (top-level, inside an array element,
+ * inside a composite field, inside a domain over either, inside a map
+ * value).  Used to decide whether the container aggregate-size check
+ * needs the JSON-text measurement (slow but correct) instead of the
+ * varlena binary size (fast but under-counts jsonb).
+ *
+ * Memoized in a process-local hashtable keyed by typeOid; results stay
+ * stable for the life of a type and are flushed on TYPEOID/RELOID
+ * syscache invalidation, so DDL on a composite type re-walks its
+ * fields on the next call.
+ */
+typedef struct
+{
+	Oid			typeOid;
+	bool		containsJsonbLeaf;
+}			TypeContainsJsonbLeafEntry;
+
+static HTAB *TypeContainsJsonbLeafCache = NULL;
+
+static void
+TypeContainsJsonbLeafCacheInval(Datum arg, int cacheid, uint32 hashvalue)
+{
+	if (TypeContainsJsonbLeafCache != NULL)
+	{
+		hash_destroy(TypeContainsJsonbLeafCache);
+		TypeContainsJsonbLeafCache = NULL;
+	}
+}
+
+static bool
+TypeContainsJsonbLeafUncached(Oid typeOid)
+{
+	if (typeOid == JSONBOID || typeOid == JSONOID)
+		return true;
+
+	Oid			elemType = get_element_type(typeOid);
+
+	if (OidIsValid(elemType))
+		return TypeContainsJsonbLeaf(elemType);
+
+	if (IsMapTypeOid(typeOid))
+	{
+		/*
+		 * Map is a domain over array of (key, value) composite.  The base
+		 * type is the array; recursing into its element walks key+value.
+		 */
+		Oid			baseType = getBaseType(typeOid);
+
+		return TypeContainsJsonbLeaf(baseType);
+	}
+
+	char		typtype = get_typtype(typeOid);
+
+	if (typtype == TYPTYPE_DOMAIN)
+		return TypeContainsJsonbLeaf(getBaseType(typeOid));
+
+	if (typtype == TYPTYPE_COMPOSITE)
+	{
+		TupleDesc	tupdesc = lookup_rowtype_tupdesc(typeOid, -1);
+
+		for (int i = 0; i < tupdesc->natts; i++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+			if (attr->attisdropped)
+				continue;
+			if (TypeContainsJsonbLeaf(attr->atttypid))
+			{
+				ReleaseTupleDesc(tupdesc);
+				return true;
+			}
+		}
+		ReleaseTupleDesc(tupdesc);
+	}
+
+	return false;
+}
+
+static bool
+TypeContainsJsonbLeaf(Oid typeOid)
+{
+	bool		found;
+	TypeContainsJsonbLeafEntry *entry;
+
+	if (TypeContainsJsonbLeafCache == NULL)
+	{
+		HASHCTL		ctl;
+
+		memset(&ctl, 0, sizeof(ctl));
+		ctl.keysize = sizeof(Oid);
+		ctl.entrysize = sizeof(TypeContainsJsonbLeafEntry);
+		ctl.hcxt = CacheMemoryContext;
+
+		TypeContainsJsonbLeafCache =
+			hash_create("Iceberg TypeContainsJsonbLeaf cache", 64, &ctl,
+						HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+		CacheRegisterSyscacheCallback(TYPEOID,
+									  TypeContainsJsonbLeafCacheInval,
+									  (Datum) 0);
+		CacheRegisterSyscacheCallback(RELOID,
+									  TypeContainsJsonbLeafCacheInval,
+									  (Datum) 0);
+	}
+
+	entry = hash_search(TypeContainsJsonbLeafCache, &typeOid,
+						HASH_ENTER, &found);
+
+	if (!found)
+		entry->containsJsonbLeaf = TypeContainsJsonbLeafUncached(typeOid);
+
+	return entry->containsJsonbLeaf;
+}
+
+
+/*
+ * ContainerByteSizeViaOutputFunc invokes the type's output function and
+ * returns the resulting text length.  For containers with jsonb leaves
+ * this renders the jsonb leaves through jsonb_out (their canonical JSON
+ * text form), which is what the downstream consumer ultimately sees in
+ * an OBJECT/ARRAY/VARIANT column — and which the binary varlena size
+ * can under-count by 1.5-2x for jsonb-heavy values.
+ *
+ * This is the slower path; callers should reserve it for types whose
+ * leaves include jsonb/json (TypeContainsJsonbLeaf), and stick with
+ * toast_raw_datum_size otherwise.
+ */
+static int64
+ContainerByteSizeViaOutputFunc(Datum value, Oid typeOid)
+{
+	Oid			typoutput;
+	bool		typIsVarlena;
+
+	getTypeOutputInfo(typeOid, &typoutput, &typIsVarlena);
+
+	char	   *txt = OidOutputFunctionCall(typoutput, value);
+	int64		len = (int64) strlen(txt);
+
+	pfree(txt);
+	return len;
+}
+
+
+/*
+ * RaiseSizeOverflow ereports a uniform "value too long" error for size-clamp
+ * violations under ICEBERG_OOR_ERROR.  columnName may be NULL/empty when the
+ * caller doesn't have column context; the message degrades gracefully.
+ */
+static void
+RaiseSizeOverflow(const char *columnName, const char *typeLabel,
+				  int64 size, int64 limit, const char *limitLabel)
+{
+	if (columnName != NULL && columnName[0] != '\0')
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("value of column \"%s\" (%s, %lld bytes) exceeds %s (%lld)",
+						columnName, typeLabel, (long long) size,
+						limitLabel, (long long) limit),
+				 errhint("Set out_of_range_values = 'clamp' on the table to "
+						 "truncate oversize values instead of erroring.")));
+	else
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("%s value of %lld bytes exceeds %s (%lld)",
+						typeLabel, (long long) size, limitLabel,
+						(long long) limit),
+				 errhint("Set out_of_range_values = 'clamp' on the table to "
+						 "truncate oversize values instead of erroring.")));
+}
+
+
+/*
+ * SizeClampVarlenaFastPath returns true if `value`'s on-disk varlena size is
+ * already at or below the cap that applies to `typeOid`, in which case no
+ * leaf clamp and no aggregate clamp can fire and the recursion can be
+ * skipped.  The cap is picked per type, in the type's own measurement
+ * currency:
+ *
+ *   text/varchar/bpchar/json:  varlena content bytes equals the
+ *                              consumer-visible byte length, so the STRING
+ *                              cap is a hard bound.
+ *   bytea:                     same, against the BINARY cap.
+ *   array/composite/map:       the slow path also measures non-jsonb
+ *                              containers via toast_raw_datum_size, so a
+ *                              varlena that fits the NESTED cap passes
+ *                              both checks identically.
+ *
+ * Excludes any type that contains a jsonb/json leaf -- top-level jsonb has
+ * its own type-aware fast path in IcebergSizeClampStringScalar, and jsonb
+ * inside a container needs the slow path's text-form aggregate measurement
+ * to catch JSON-form overflow that the binary varlena size would
+ * under-count.
+ *
+ * Domains are unwrapped to the base type so a domain over text is bounded
+ * by the STRING cap, not the (larger) NESTED cap.
+ *
+ * Caller must ensure typeOid is a varlena type (typlen == -1) before
+ * dereferencing the Datum as a varlena pointer.
+ */
+static bool
+SizeClampVarlenaFastPath(Datum value, Oid typeOid)
+{
+	if (TypeContainsJsonbLeaf(typeOid))
+		return false;
+	if (get_typlen(typeOid) != -1)
+		return false;
+
+	Oid			baseType = getBaseType(typeOid);
+	int64		totalSize = (int64) toast_raw_datum_size(value) - VARHDRSZ;
+
+	if (baseType == TEXTOID || baseType == VARCHAROID ||
+		baseType == BPCHAROID || baseType == JSONOID)
+		return totalSize <= ICEBERG_SNOWFLAKE_MAX_STRING_BYTES;
+
+	if (baseType == BYTEAOID)
+		return totalSize <= ICEBERG_SNOWFLAKE_MAX_BINARY_BYTES;
+
+	return totalSize <= ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES;
+}
 
 
 /*
@@ -518,4 +765,303 @@ IcebergErrorOrClampDatum(Datum value, Oid typeOid, int32 typmod,
 
 	return IcebergErrorOrClampNestedDatum(value, typeOid, typmod, policy,
 										  isNull, &modified);
+}
+
+
+/*
+ * IcebergSizeClampStringScalar handles a single text/varchar/bpchar/jsonb/json
+ * Datum.  Text-y values are truncated at a UTF-8 character boundary so that
+ * the result fits within ICEBERG_SNOWFLAKE_MAX_STRING_BYTES.  jsonb/json
+ * values that exceed the limit are NULLed via *isNull, since truncation would
+ * corrupt the structure.
+ *
+ * Fast path for text/varchar/bpchar/json: PG_DETOAST_DATUM_PACKED is a
+ * no-op for non-toasted (the common case); VARSIZE_ANY_EXHDR + branch
+ * returns the value unchanged, no copy.
+ *
+ * Fast path for jsonb: jsonb_out's worst-case expansion is roughly 6x (a
+ * single control byte renders as the 6-character \uXXXX escape), so any
+ * jsonb whose binary varlena size is at most maxBytes/6 cannot exceed
+ * maxBytes when serialized.  This catches the typical small-jsonb case and
+ * skips the jsonb_out walk.  Anything larger pays the full serialization
+ * because the binary size does not upper-bound the text form (numerics
+ * encode compactly in binary but expand when rendered).
+ */
+static Datum
+IcebergSizeClampStringScalar(Datum value, Oid typeOid,
+							 IcebergOutOfRangePolicy policy,
+							 const char *columnName,
+							 bool *isNull)
+{
+	const int32 maxBytes = ICEBERG_SNOWFLAKE_MAX_STRING_BYTES;
+
+	if (typeOid == JSONBOID)
+	{
+		struct varlena *jv = (struct varlena *) PG_DETOAST_DATUM_PACKED(value);
+
+		if ((int64) VARSIZE_ANY_EXHDR(jv) * 6 <= (int64) maxBytes)
+			return value;
+
+		char	   *cstr = DatumGetCString(DirectFunctionCall1(jsonb_out, value));
+		int32		textLen = strlen(cstr);
+
+		pfree(cstr);
+
+		if (textLen <= maxBytes)
+			return value;
+
+		if (policy == ICEBERG_OOR_ERROR)
+			RaiseSizeOverflow(columnName, "jsonb", textLen, maxBytes,
+							  "Snowflake STRING column limit");
+
+		*isNull = true;
+		return (Datum) 0;
+	}
+
+	struct varlena *v = (struct varlena *) PG_DETOAST_DATUM_PACKED(value);
+	int32		srcLen = VARSIZE_ANY_EXHDR(v);
+
+	if (srcLen <= maxBytes)
+		return value;
+
+	if (typeOid == JSONOID)
+	{
+		if (policy == ICEBERG_OOR_ERROR)
+			RaiseSizeOverflow(columnName, "json", srcLen, maxBytes,
+							  "Snowflake STRING column limit");
+
+		*isNull = true;
+		return (Datum) 0;
+	}
+
+	Assert(typeOid == TEXTOID || typeOid == VARCHAROID ||
+		   typeOid == BPCHAROID);
+
+	if (policy == ICEBERG_OOR_ERROR)
+	{
+		const char *typeLabel = (typeOid == TEXTOID) ? "text" :
+			(typeOid == VARCHAROID) ? "varchar" : "bpchar";
+
+		RaiseSizeOverflow(columnName, typeLabel, srcLen, maxBytes,
+						  "Snowflake STRING column limit");
+	}
+
+	const char *src = VARDATA_ANY(v);
+	int32		trimmedLen = pg_mbcliplen(src, srcLen, maxBytes);
+
+	struct varlena *result = (struct varlena *) palloc(VARHDRSZ + trimmedLen);
+
+	SET_VARSIZE(result, VARHDRSZ + trimmedLen);
+	memcpy(VARDATA(result), src, trimmedLen);
+
+	return PointerGetDatum(result);
+}
+
+
+/*
+ * IcebergSizeClampBinaryScalar byte-truncates a bytea Datum to
+ * ICEBERG_SNOWFLAKE_MAX_BINARY_BYTES when needed.  Returns the original
+ * Datum unchanged when no truncation is required.
+ */
+static Datum
+IcebergSizeClampBinaryScalar(Datum value,
+							 IcebergOutOfRangePolicy policy,
+							 const char *columnName)
+{
+	const int32 maxBytes = ICEBERG_SNOWFLAKE_MAX_BINARY_BYTES;
+
+	struct varlena *v = (struct varlena *) PG_DETOAST_DATUM_PACKED(value);
+	int32		srcLen = VARSIZE_ANY_EXHDR(v);
+
+	if (srcLen <= maxBytes)
+		return value;
+
+	if (policy == ICEBERG_OOR_ERROR)
+		RaiseSizeOverflow(columnName, "bytea", srcLen, maxBytes,
+						  "Snowflake BINARY column limit");
+
+	struct varlena *result = (struct varlena *) palloc(VARHDRSZ + maxBytes);
+
+	SET_VARSIZE(result, VARHDRSZ + maxBytes);
+	memcpy(VARDATA(result), VARDATA_ANY(v), maxBytes);
+
+	return PointerGetDatum(result);
+}
+
+
+/*
+ * IcebergSizeClampNestedDatum recursively size-clamps a Datum, deconstructing
+ * and reconstructing arrays, composites, maps (domain over array of
+ * composites), and domains.  The recursion shape mirrors
+ * IcebergErrorOrClampNestedDatum.
+ *
+ * In addition to per-leaf clamping, an aggregate-size check NULLs the entire
+ * array or composite when its varlena content size exceeds
+ * ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES (the limit on the serialized form
+ * that downstream consumers receive when an array/struct lands in an
+ * OBJECT/ARRAY/VARIANT column; distinct from the per-leaf STRING limit since
+ * downstream caps usually differ).  The varlena size is a cheap proxy for the
+ * JSON serialization length the consumer ultimately sees and avoids paying
+ * for an extra serialization pass.
+ *
+ * *isNull is set to true when the value is replaced by NULL: a leaf
+ * jsonb/json over the limit, or a container whose aggregate exceeds the
+ * limit.  Inside containers, NULLed children are absorbed as NULL within
+ * the reconstructed container.
+ *
+ * *modified is set to true when the returned Datum differs from the input,
+ * allowing callers to skip reconstruction when nothing changed.
+ */
+static Datum
+IcebergSizeClampNestedDatum(Datum value, Oid typeOid, int32 typmod,
+							IcebergOutOfRangePolicy policy,
+							const char *columnName,
+							bool *isNull, bool *modified)
+{
+	*modified = false;
+
+	if (typeOid == TEXTOID || typeOid == VARCHAROID ||
+		typeOid == BPCHAROID || typeOid == JSONBOID ||
+		typeOid == JSONOID)
+	{
+		Datum		result = IcebergSizeClampStringScalar(value, typeOid,
+														  policy, columnName,
+														  isNull);
+
+		*modified = (result != value) || *isNull;
+		return result;
+	}
+
+	if (typeOid == BYTEAOID)
+	{
+		Datum		result = IcebergSizeClampBinaryScalar(value, policy,
+														  columnName);
+
+		*modified = (result != value);
+		return result;
+	}
+
+	/*
+	 * Container types (array / composite / map / domain over either): apply a
+	 * single aggregate-size check against
+	 * ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES.
+	 *
+	 * We deliberately do NOT recurse into elements/fields to per-leaf-clamp
+	 * inner strings or bytea.  Inside an array/object on the consumer side
+	 * the leaves don't have their own column cap — they're just JSON inside
+	 * the parent OBJECT/ARRAY/VARIANT, which has the aggregate cap.  And
+	 * since ICEBERG_SNOWFLAKE_MAX_STRING_BYTES <=
+	 * ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES, no inner leaf can exceed the
+	 * per-leaf limit while staying inside an under-cap container.
+	 *
+	 * So a container is either small enough to pass through verbatim, or big
+	 * enough to NULL (CLAMP) / error (ERROR).  No deconstruct/deform, no
+	 * per-element walk.
+	 */
+	Oid			elemType = get_element_type(typeOid);
+
+	if (OidIsValid(elemType))
+	{
+		/*
+		 * Default to the cheap varlena measurement.  When the container has
+		 * jsonb/json leaves, switch to the type's output function so jsonb
+		 * leaves are sized by their JSON-text form (jsonb_out) rather than
+		 * their compact binary varlena form, which the consumer never sees.
+		 */
+		int64		aggregateSize;
+
+		if (TypeContainsJsonbLeaf(typeOid))
+			aggregateSize = ContainerByteSizeViaOutputFunc(value, typeOid);
+		else
+			aggregateSize = (int64) toast_raw_datum_size(value) - VARHDRSZ;
+
+		if (aggregateSize > ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES)
+		{
+			if (policy == ICEBERG_OOR_ERROR)
+				RaiseSizeOverflow(columnName, "array", aggregateSize,
+								  ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES,
+								  "Snowflake OBJECT/ARRAY/VARIANT column limit");
+
+			*isNull = true;
+			*modified = true;
+			return (Datum) 0;
+		}
+
+		return value;
+	}
+
+	char		typtype = get_typtype(typeOid);
+
+	if (typtype == TYPTYPE_DOMAIN)
+	{
+		int32		baseTypmod = typmod;
+		Oid			baseType = getBaseTypeAndTypmod(typeOid, &baseTypmod);
+
+		return IcebergSizeClampNestedDatum(value, baseType, baseTypmod,
+										   policy, columnName,
+										   isNull, modified);
+	}
+
+	if (typtype == TYPTYPE_COMPOSITE)
+	{
+		int64		aggregateSize;
+
+		if (TypeContainsJsonbLeaf(typeOid))
+			aggregateSize = ContainerByteSizeViaOutputFunc(value, typeOid);
+		else
+			aggregateSize = (int64) toast_raw_datum_size(value) - VARHDRSZ;
+
+		if (aggregateSize > ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES)
+		{
+			if (policy == ICEBERG_OOR_ERROR)
+				RaiseSizeOverflow(columnName, "composite", aggregateSize,
+								  ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES,
+								  "Snowflake OBJECT/ARRAY/VARIANT column limit");
+
+			*isNull = true;
+			*modified = true;
+			return (Datum) 0;
+		}
+
+		return value;
+	}
+
+	return value;
+}
+
+
+/*
+ * IcebergSizeClampDatum truncates or NULLs a Datum so that string, binary,
+ * and nested-type values fit Snowflake's per-column byte caps.  Callers
+ * gate on the table's compatibility_mode before calling; this function
+ * applies the limits unconditionally otherwise.
+ *
+ * See header comment for full semantics.
+ */
+Datum
+IcebergSizeClampDatum(Datum value, Oid typeOid, int32 typmod,
+					  IcebergOutOfRangePolicy policy,
+					  const char *columnName, bool *isNull)
+{
+	*isNull = false;
+
+	if (policy == ICEBERG_OOR_NONE)
+		return value;
+
+	bool		modified = false;
+
+	/*
+	 * Fast path for varlena values (text/varchar/bpchar/bytea/json/array/
+	 * struct/map): if the entire on-disk varlena fits comfortably under every
+	 * active limit, no leaf clamp and no aggregate clamp can fire. Skips the
+	 * recursive deconstruct/deform that the slow path would do — the
+	 * typical case where a column's type is clampable but the row's value
+	 * happens to be small.  Sound under both CLAMP and ERROR because no limit
+	 * can be exceeded when the entire varlena fits comfortably.
+	 */
+	if (SizeClampVarlenaFastPath(value, typeOid))
+		return value;
+
+	return IcebergSizeClampNestedDatum(value, typeOid, typmod, policy,
+									   columnName, isNull, &modified);
 }

@@ -44,6 +44,7 @@
 #include "pg_extension_base/pg_extension_base_ids.h"
 #include "pg_lake/pgduck/cache_worker.h"
 #include "pg_lake/pgduck/client.h"
+#include "pg_lake/pgduck/iceberg_validation.h"
 #include "pg_lake/util/s3_writer_utils.h"
 #include "utils/guc.h"
 
