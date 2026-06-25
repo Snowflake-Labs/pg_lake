@@ -246,19 +246,19 @@ typedef struct PgLakeModifyState
 	bool		needsOutOfRangeValidation;
 
 	/*
-	 * applyIcebergSizeChecks is true when the table is declared with
-	 * compatibility_mode='snowflake', which is the only setting under which
-	 * the size-clamp paths fire.  AUTO-mode tables skip them entirely even if
-	 * needsSizeClamping below is true.
+	 * compatibilityMode is the table's declared compatibility_mode.  Today
+	 * only ICEBERG_COMPAT_SNOWFLAKE drives size-clamp behavior; AUTO-mode
+	 * tables skip the clamp paths regardless of needsSizeClamping below.
+	 * Future modes will reuse the same gate with their own caps.
 	 */
-	bool		applyIcebergSizeChecks;
+	IcebergCompatibilityMode compatibilityMode;
 
 	/*
 	 * needsSizeClamping is true if any column type contains a leaf type
 	 * (text/varchar/bpchar/bytea/jsonb/json) that could potentially be
 	 * size-clamped by IcebergSizeClampDatum at write time.  It is a static
 	 * type-shape signal; whether to actually enter the clamp path is gated by
-	 * applyIcebergSizeChecks.
+	 * compatibilityMode.
 	 */
 	bool		needsSizeClamping;
 
@@ -2756,7 +2756,8 @@ ClampAndCheckConstraints(PgLakeModifyState * fmstate,
 		IcebergErrorOrClampSlotInPlace(slot, fmstate->tupleDesc,
 									   fmstate->outOfRangePolicy);
 
-	if (fmstate->needsSizeClamping && fmstate->applyIcebergSizeChecks)
+	if (fmstate->needsSizeClamping &&
+		fmstate->compatibilityMode == ICEBERG_COMPAT_SNOWFLAKE)
 		IcebergSizeCheckOrClampSlotInPlace(slot, fmstate->tupleDesc,
 										   fmstate->sizeClampingPerAttr,
 										   fmstate->outOfRangePolicy);
@@ -3607,8 +3608,8 @@ create_foreign_modify(Relation rel,
 		fmstate->outOfRangePolicy =
 			GetIcebergOutOfRangePolicyForTable(relationId);
 		fmstate->needsOutOfRangeValidation = TupleDescNeedsIcebergValidation(fmstate->tupleDesc);
-		fmstate->applyIcebergSizeChecks =
-			IcebergCompatibilityModeFromRelation(relationId) == ICEBERG_COMPAT_SNOWFLAKE;
+		fmstate->compatibilityMode =
+			IcebergCompatibilityModeFromRelation(relationId);
 		fmstate->needsSizeClamping = TupleDescNeedsIcebergSizeClamping(fmstate->tupleDesc);
 
 		if (fmstate->needsSizeClamping)

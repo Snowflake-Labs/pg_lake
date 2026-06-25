@@ -129,7 +129,7 @@ static List *PrepareToAddQueryResultToTable(Oid relationId,
 											bool allowSplit,
 											bool isVerbose,
 											IcebergOutOfRangePolicy outOfRangePolicy,
-											bool applyIcebergSizeChecks,
+											IcebergCompatibilityMode compatibilityMode,
 											bool wrapNativeTypes,
 											List *partitionByExprs);
 static List *GetPossiblePositionDeleteFiles(Oid relationId, List *sourcePathList,
@@ -962,7 +962,7 @@ TryCompactDataFiles(Oid relationId, TupleDesc tupleDescriptor, List *candidates,
 									   partitionSpecId, partition,
 									   hasRowIds, allowSplit, isVerbose,
 									   ICEBERG_OOR_NONE,
-									   false /* applyIcebergSizeChecks */ ,
+									   ICEBERG_COMPAT_AUTO /* compatibilityMode */ ,
 									   false /* wrapNativeTypes */ ,
 									   NIL /* partitionByExprs */ );
 
@@ -1021,7 +1021,7 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 							   int32 partitionSpecId, Partition * partition,
 							   bool queryHasRowId, bool allowSplit, bool isVerbose,
 							   IcebergOutOfRangePolicy outOfRangePolicy,
-							   bool applyIcebergSizeChecks,
+							   IcebergCompatibilityMode compatibilityMode,
 							   bool wrapNativeTypes,
 							   List *partitionByExprs)
 {
@@ -1087,7 +1087,7 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 						   queryTupleDesc,
 						   leafFields,
 						   outOfRangePolicy,
-						   applyIcebergSizeChecks,
+						   compatibilityMode,
 						   wrapNativeTypes,
 						   partitionByExprs);
 
@@ -1171,8 +1171,8 @@ AddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc,
 
 	IcebergOutOfRangePolicy outOfRangePolicy =
 		GetIcebergOutOfRangePolicyForTable(relationId);
-	bool		applyIcebergSizeChecks =
-		IcebergCompatibilityModeFromRelation(relationId) == ICEBERG_COMPAT_SNOWFLAKE;
+	IcebergCompatibilityMode compatibilityMode =
+		IcebergCompatibilityModeFromRelation(relationId);
 
 	List	   *newFileOps =
 		PrepareToAddQueryResultToTable(relationId, readQuery,
@@ -1181,7 +1181,7 @@ AddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc,
 									   NULL /* partition */ ,
 									   queryHasRowId, allowSplit, isVerbose,
 									   outOfRangePolicy,
-									   applyIcebergSizeChecks,
+									   compatibilityMode,
 									   wrapNativeTypes,
 									   partitionByExprs);
 

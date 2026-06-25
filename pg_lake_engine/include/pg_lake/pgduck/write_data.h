@@ -20,6 +20,7 @@
 #include "access/tupdesc.h"
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/data_file/data_file_stats.h"
+#include "pg_lake/iceberg/compatibility_mode.h"
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/pgduck/iceberg_validation.h"
 #include "nodes/pg_list.h"
@@ -63,7 +64,7 @@ extern PGDLLEXPORT StatsCollector * WriteQueryResultTo(char *query,
 													   TupleDesc queryTupleDesc,
 													   List *leafFields,
 													   IcebergOutOfRangePolicy outOfRangePolicy,
-													   bool applyIcebergSizeChecks,
+													   IcebergCompatibilityMode compatibilityMode,
 													   bool wrapNativeTypes,
 													   List *partitionByExprs);
 extern PGDLLEXPORT void AppendFields(StringInfo map, DataFileSchema * schema);

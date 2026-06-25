@@ -9,7 +9,7 @@ SHLIB_LINK_INTERNAL = $(libpq)
 
 PG_LAKE_DELTA_SUPPORT ?= 0
 
-PG_CPPFLAGS = -I$(libpq_srcdir) -Iinclude -I../pg_extension_base/include -std=gnu99 -g -DPG_LAKE_DELTA_SUPPORT=$(PG_LAKE_DELTA_SUPPORT)
+PG_CPPFLAGS = -I$(libpq_srcdir) -Iinclude -I../pg_extension_base/include -I../pg_lake_iceberg/include -std=gnu99 -g -DPG_LAKE_DELTA_SUPPORT=$(PG_LAKE_DELTA_SUPPORT)
 
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
