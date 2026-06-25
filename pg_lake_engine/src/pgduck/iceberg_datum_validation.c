@@ -269,19 +269,29 @@ RaiseSizeOverflow(const char *columnName, const char *typeLabel,
 
 
 /*
- * SizeClampVarlenaFastPath returns true if `value`'s entire on-disk varlena
- * fits comfortably under every active size-clamp limit, in which case no
+ * SizeClampVarlenaFastPath returns true if `value`'s on-disk varlena size is
+ * already at or below the cap that applies to `typeOid`, in which case no
  * leaf clamp and no aggregate clamp can fire and the recursion can be
- * skipped.
+ * skipped.  The cap is picked per type, in the type's own measurement
+ * currency:
  *
- * The 2x bound covers jsonb's binary-vs-text serialization gap (and applies
- * uniformly even when the value has no jsonb leaves; the slight
- * conservatism is cheap to swallow).  Excludes any type that contains a
- * jsonb/json leaf — top-level jsonb has its own type-aware fast path in
- * IcebergSizeClampStringScalar that checks the binary form against half
- * the per-leaf string limit, and jsonb inside a container needs the slow
- * path's text-form aggregate measurement to catch JSON-form overflow that
- * the binary varlena size would under-count.
+ *   text/varchar/bpchar/json:  varlena content bytes equals the
+ *                              consumer-visible byte length, so the STRING
+ *                              cap is a hard bound.
+ *   bytea:                     same, against the BINARY cap.
+ *   array/composite/map:       the slow path also measures non-jsonb
+ *                              containers via toast_raw_datum_size, so a
+ *                              varlena that fits the NESTED cap passes
+ *                              both checks identically.
+ *
+ * Excludes any type that contains a jsonb/json leaf -- top-level jsonb has
+ * its own type-aware fast path in IcebergSizeClampStringScalar, and jsonb
+ * inside a container needs the slow path's text-form aggregate measurement
+ * to catch JSON-form overflow that the binary varlena size would
+ * under-count.
+ *
+ * Domains are unwrapped to the base type so a domain over text is bounded
+ * by the STRING cap, not the (larger) NESTED cap.
  *
  * Caller must ensure typeOid is a varlena type (typlen == -1) before
  * dereferencing the Datum as a varlena pointer.
@@ -294,18 +304,17 @@ SizeClampVarlenaFastPath(Datum value, Oid typeOid)
 	if (get_typlen(typeOid) != -1)
 		return false;
 
+	Oid			baseType = getBaseType(typeOid);
 	int64		totalSize = (int64) toast_raw_datum_size(value) - VARHDRSZ;
-	int64		safeBound = ICEBERG_SNOWFLAKE_MAX_STRING_BYTES;
 
-	if (ICEBERG_SNOWFLAKE_MAX_BINARY_BYTES < safeBound)
-		safeBound = ICEBERG_SNOWFLAKE_MAX_BINARY_BYTES;
-	if (ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES < safeBound)
-		safeBound = ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES;
+	if (baseType == TEXTOID || baseType == VARCHAROID ||
+		baseType == BPCHAROID || baseType == JSONOID)
+		return totalSize <= ICEBERG_SNOWFLAKE_MAX_STRING_BYTES;
 
-	if (totalSize * 2 > safeBound)
-		return false;
+	if (baseType == BYTEAOID)
+		return totalSize <= ICEBERG_SNOWFLAKE_MAX_BINARY_BYTES;
 
-	return true;
+	return totalSize <= ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES;
 }
 
 
@@ -770,10 +779,13 @@ IcebergErrorOrClampDatum(Datum value, Oid typeOid, int32 typmod,
  * no-op for non-toasted (the common case); VARSIZE_ANY_EXHDR + branch
  * returns the value unchanged, no copy.
  *
- * jsonb has no comparable fast path: the binary varlena size does not
- * upper-bound the text form (numerics encode compactly in binary but
- * expand when rendered, and a single control byte renders to a 6-char
- * \uXXXX escape), so we always pay jsonb_out.
+ * Fast path for jsonb: jsonb_out's worst-case expansion is roughly 6x (a
+ * single control byte renders as the 6-character \uXXXX escape), so any
+ * jsonb whose binary varlena size is at most maxBytes/6 cannot exceed
+ * maxBytes when serialized.  This catches the typical small-jsonb case and
+ * skips the jsonb_out walk.  Anything larger pays the full serialization
+ * because the binary size does not upper-bound the text form (numerics
+ * encode compactly in binary but expand when rendered).
  */
 static Datum
 IcebergSizeClampStringScalar(Datum value, Oid typeOid,
@@ -785,6 +797,11 @@ IcebergSizeClampStringScalar(Datum value, Oid typeOid,
 
 	if (typeOid == JSONBOID)
 	{
+		struct varlena *jv = (struct varlena *) PG_DETOAST_DATUM_PACKED(value);
+
+		if ((int64) VARSIZE_ANY_EXHDR(jv) * 6 <= (int64) maxBytes)
+			return value;
+
 		char	   *cstr = DatumGetCString(DirectFunctionCall1(jsonb_out, value));
 		int32		textLen = strlen(cstr);
 
