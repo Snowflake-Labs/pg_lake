@@ -1,0 +1,263 @@
+{
+  "item_name": "Pg_lake IUD Flow and Fast MOR",
+  "executive_summary": "Pg_lake implements row-level INSERT, UPDATE, DELETE, and TRUNCATE through PostgreSQL FDW hooks while storing table state in Iceberg metadata. INSERT writes new data files and commits metadata additions. UPDATE is modeled as DELETE plus INSERT. DELETE records row locations using a synthetic PostgreSQL ctid that encodes the source data file and row position. For partial row removal, Pg_lake chooses merge-on-read by writing Iceberg position delete files until per-file or table-wide thresholds require copy-on-write. Reads remain fast because DuckDB scans the data files with row-location columns only when needed and applies position deletes as a file/position anti-join, avoiding data-file rewrites for small changes. VACUUM and threshold-triggered COW compact away accumulated position deletes.",
+  "repo_evidence": [
+    {
+      "topic": "FDW hooks for DML and TRUNCATE",
+      "evidence": [
+        "pg_lake_table/src/fdw/pg_lake_table.c:549-559 registers AddForeignUpdateTargets, PlanForeignModify, BeginForeignModify, ExecForeignInsert, ExecForeignUpdate, ExecForeignDelete, and EndForeignModify for writable foreign tables.",
+        "pg_lake_table/src/fdw/pg_lake_table.c:575-576 registers ExecForeignTruncate, so TRUNCATE has a dedicated FDW path."
+      ]
+    },
+    {
+      "topic": "Synthetic ctid row identity",
+      "evidence": [
+        "pg_lake_table/src/fdw/pg_lake_table.c:1937-1969 adds a resjunk ctid target for UPDATE and DELETE and documents that Pg_lake overloads ctid with file name and row number.",
+        "pg_lake_table/src/duckdb/transform_query_to_duckdb.c:187-245 requests row-location emission for update/delete scans and wraps DuckDB output so ctid is a record containing _pg_lake_filename and file_row_number.",
+        "pg_lake_table/src/fdw/pg_lake_table.c:2778-2851 parses the record string, maps the file name to a result-file index, and packs file index plus row number into the PostgreSQL ItemPointer bits."
+      ]
+    },
+    {
+      "topic": "INSERT path",
+      "evidence": [
+        "pg_lake_table/src/fdw/pg_lake_table.c:2224-2235 performs constraint checks in postgresExecForeignInsert and delegates the row to WriteInsertRecord.",
+        "pg_lake_table/src/fdw/pg_lake_table.c:2671-2685 starts the insert destination on first use, forwards the slot, and increments the inserted-row count.",
+        "pg_lake_table/src/fdw/pg_lake_table.c:3475-3507 chooses a partitioned or multi-data-file destination for INSERT and UPDATE based on the table partitioning.",
+        "pg_lake_table/src/fdw/pg_lake_table.c:2889-2906 shuts down the insert destination at end of modify and applies generated data-file metadata changes.",
+        "pg_lake_table/src/fdw/writable_table.c:1321-1332 applies ADD_DATA_FILE modifications through ApplyInsertFile."
+      ]
+    },
+    {
+      "topic": "UPDATE path",
+      "evidence": [
+        "pg_lake_table/src/fdw/pg_lake_table.c:2243-2295 implements UPDATE as DELETE plus INSERT: fetch ctid from the junk slot, convert it to an ItemPointer, deduplicate repeated tuple updates, check constraints and partition constraints, then call DeleteSingleRow and WriteInsertRecord.",
+        "pg_lake_table/src/fdw/pg_lake_table.c:2262-2269 tracks updated row identity so a row is not updated twice by the same statement.",
+        "pg_lake_table/src/fdw/pg_lake_table.c:2274-2284 rejects an UPDATE that would move a row across partitions.",
+        "pg_lake_table/tests/pytests/test_writable_table_update.py:408-455 verifies the MOR case: from one 100-row file, DELETE 5 and UPDATE 5 leave the original data file, add a five-row data file for updated values, and create delete files.",
+        "pg_lake_table/tests/pytests/test_writable_table_update.py:457-518 verifies threshold behavior: a 20 percent update triggers COW, threshold 0 forces COW, and threshold 100 forces MOR."
+      ]
+    },
+    {
+      "topic": "DELETE path",
+      "evidence": [
+        "pg_lake_table/src/fdw/pg_lake_table.c:2304-2331 implements ExecForeignDelete by reading the junk ctid, calling DeleteSingleRow, and copying RETURNING columns from the plan slot.",
+        "pg_lake_table/src/fdw/pg_lake_table.c:2339-2365 maps the packed ctid back to a source file and row number and skips writing a delete file when the source file is already scheduled for full deletion.",
+        "pg_lake_table/src/fdw/pg_lake_table.c:2693-2739 prepares position-delete tuples as file path plus row number and sends them to the delete destination.",
+        "pg_lake_table/src/fdw/pg_lake_table.c:2741-2754 tears down the temporary delete destination if every live row in a file was deleted, because a metadata file removal is enough.",
+        "pg_lake_table/src/fdw/pg_lake_table.c:2864-2886 emits ADD_DELETION_FILE_FROM_CSV metadata modifications for partially deleted files.",
+        "pg_lake_table/tests/pytests/test_writable_table_delete.py:365-452 verifies MOR below the 20 percent threshold, COW at the threshold, threshold 0 as always COW, and threshold 100 as always MOR."
+      ]
+    },
+    {
+      "topic": "Position delete file production",
+      "evidence": [
+        "pg_lake_table/src/fdw/position_delete_dest.c:109-137 creates a PositionDeleteDestReceiver over current data files.",
+        "pg_lake_table/src/fdw/position_delete_dest.c:165-200 creates one temporary CSV receiver per target data file.",
+        "pg_lake_table/src/fdw/position_delete_dest.c:221-244 extracts file id and row number from incoming delete tuples, maps the file id to a path, and forwards the delete record to the per-file CSV.",
+        "pg_lake_table/src/fdw/position_delete_dest.c:248-277 stores the position-delete payload as file path, row number, and a null deleted-row struct."
+      ]
+    },
+    {
+      "topic": "MOR versus COW thresholds",
+      "evidence": [
+        "pg_lake_table/include/pg_lake/fdw/writable_table.h:24-31 defines DEFAULT_COPY_ON_WRITE_THRESHOLD as 20 percent, DEFAULT_COPY_ON_WRITE_MAX_DELETE_ROWS as 10000000, and DEFAULT_TARGET_FILE_SIZE_MB as 512.",
+        "pg_lake_table/src/init.c:172-183 exposes pg_lake_table.copy_on_write_threshold; 0 means always COW and 100 means always MOR.",
+        "pg_lake_table/src/init.c:189-199 exposes pg_lake_table.copy_on_write_max_delete_rows; the default is 10000000 and -1 disables the table-wide limit.",
+        "pg_lake_table/src/fdw/writable_table.c:656-663 chooses COW when total deleted rows in the source file reach or exceed the configured percentage threshold.",
+        "pg_lake_table/src/fdw/writable_table.c:466-492 chooses COW when the percentage threshold or table-wide max deleted-row limit is reached; it notes that COW with row IDs is not yet supported.",
+        "pg_lake_table/src/fdw/writable_table.c:493-568 implements the COW branch by removing the old data file, reading remaining rows with current and existing deletes applied, and adding a replacement data file.",
+        "pg_lake_table/src/fdw/writable_table.c:570-643 implements the MOR branch by converting the temp delete CSV to a position-delete Parquet file and updating deleted-row accounting.",
+        "pg_lake_table/tests/pytests/test_copy_on_write_max_delete_rows.py:33-120 verifies the table-wide deleted-row limit, accumulated delete counts across operations, and the -1 disable setting."
+      ]
+    },
+    {
+      "topic": "Fast MOR read path",
+      "evidence": [
+        "pg_lake_engine/include/pg_lake/pgduck/read_data.h:24-61 defines READ_DATA_READ_ROW_LOCATION and READ_DATA_EMIT_ROW_LOCATION and explains that row locations are read for joins with position deletes or emitted for update/delete.",
+        "pg_lake_table/src/duckdb/transform_query_to_duckdb.c:187-199 passes data-file paths, position-delete paths, and row counts from the table scan snapshot into ReadDataSourceQuery.",
+        "pg_lake_engine/src/pgduck/read_data.c:91-132 automatically enables row-location reading when position-delete paths are present.",
+        "pg_lake_engine/src/pgduck/read_data.c:159-171 excludes the internal row-location columns from query output when they are used only for filtering.",
+        "pg_lake_engine/src/pgduck/read_data.c:194-217 filters deleted rows with a DuckDB anti-join on (_pg_lake_filename, file_row_number) against delete-file (file_path, pos), and passes explicit delete-file cardinality.",
+        "pg_lake_engine/src/pgduck/read_data.c:269-274 asks DuckDB read_parquet to produce filename and file_row_number columns when row location is needed.",
+        "pg_lake_engine/src/pgduck/delete_data.c:113-139 reuses the same row-location read path for COW rewrites, adding a row-position NOT IN filter over the current operation's temporary delete CSV."
+      ]
+    },
+    {
+      "topic": "Compaction and VACUUM",
+      "evidence": [
+        "pg_lake_table/src/ddl/vacuum.c:630-646 shows VACUUM compacting data files, expiring snapshots, merging manifests, removing unreferenced files, and backfilling field IDs where needed.",
+        "pg_lake_table/src/ddl/vacuum.c:666-751 runs compaction in bounded subtransactions and avoids compacting files created during the compaction run.",
+        "pg_lake_table/src/fdw/writable_table.c:711-773 locks the table, reads the latest snapshot, skips unsupported cases, and forces deletion compaction when table-wide position-deleted rows exceed half of the configured max-delete-row limit.",
+        "pg_lake_table/src/fdw/writable_table.c:873-925 constructs a compaction read query over candidate data files plus position-delete files and writes replacement data files; when row IDs exist, it materializes and sorts by _row_id.",
+        "pg_lake_table/src/fdw/writable_table.c:1431-1525 filters compaction candidates based on target file size, forced merge/deletion, and deletion percentage.",
+        "pg_lake_table/tests/pytests/test_copy_on_write_max_delete_rows.py:127-184 verifies that VACUUM compacts files with deletions when table-wide deleted rows exceed half of the configured limit."
+      ]
+    },
+    {
+      "topic": "TRUNCATE path",
+      "evidence": [
+        "pg_lake_table/src/fdw/pg_lake_table.c:4503-4524 checks read-only and validity state, binds the table to the REST catalog, and calls RemoveAllDataFilesFromTable for each truncated relation.",
+        "pg_lake_table/src/fdw/writable_table.c:667-677 implements RemoveAllDataFilesFromTable by applying a DATA_FILE_REMOVE_ALL metadata operation.",
+        "pg_lake_table/tests/pytests/test_writable_tables.py:1484-1521 verifies TRUNCATE over lake foreign tables and a heap table in the same statement.",
+        "pg_lake_table/tests/pytests/test_writable_iceberg.py:389-436 verifies that TRUNCATE and DELETE FROM produce Iceberg metadata with removed data files and row counts."
+      ]
+    },
+    {
+      "topic": "Documentation and declared limitations",
+      "evidence": [
+        "engineering-notes/writes.md documents INSERT as batching rows into temporary CSV and converting to Parquet, UPDATE as ctid-driven delete plus insert, and DELETE as ctid-driven file rewrite or delete-file generation.",
+        "docs/iceberg-tables.md documents single-row insert batching, hidden-partition deletion fast paths, VACUUM/autovacuum compaction, and unsupported or limited features such as SELECT FOR UPDATE, MERGE, INSERT ON CONFLICT, and direct use of system columns such as ctid."
+      ]
+    }
+  ],
+  "official_spec_evidence": [
+    {
+      "url": "https://iceberg.apache.org/spec/",
+      "evidence": "The Iceberg spec reserves metadata field IDs for row location and delete files, including _file, _pos, file_path, pos, row, and _row_id. These match Pg_lake's use of file path plus row position for delete identity."
+    },
+    {
+      "url": "https://iceberg.apache.org/spec/",
+      "evidence": "The spec says row-level deletes are added in v2, deletion vectors are added in v3, and position delete files identify deleted rows by data-file location and row position. It also says a row is deleted when a position-delete entry matches the row's file and zero-based position."
+    },
+    {
+      "url": "https://iceberg.apache.org/spec/",
+      "evidence": "The spec requires position-delete records to include file_path and pos, may omit the deleted-row struct, and recommends sorting delete rows by file_path then pos to optimize filtering."
+    },
+    {
+      "url": "https://iceberg.apache.org/spec/",
+      "evidence": "The spec states that in v3, position delete files are deprecated and new or updated position deletes should be represented with deletion vectors. This is relevant to Pg_lake because the current implementation writes v2 position delete Parquet files."
+    },
+    {
+      "url": "https://iceberg.apache.org/spec/",
+      "evidence": "The v3 row-lineage section defines _row_id and _last_updated_sequence_number. Pg_lake has separate row-id support and explicitly notes that COW with row IDs is not yet supported in the delete rewrite path."
+    },
+    {
+      "url": "https://iceberg.apache.org/docs/latest/configuration/",
+      "evidence": "The Iceberg configuration reference defines write.delete.mode, write.update.mode, and write.merge.mode as copy-on-write or merge-on-read for v2 and above, and lists a 512 MB default target data-file size and 64 MB delete-file target size."
+    }
+  ],
+  "end_to_end_mechanics": [
+    {
+      "step": "1. Query planning exposes row identity for mutable scans.",
+      "details": "For UPDATE and DELETE, Pg_lake's AddForeignUpdateTargets injects a junk ctid column. The DuckDB query generator requests emitted row-location columns and converts _pg_lake_filename plus file_row_number into a record-shaped ctid value. PostgreSQL carries that junk ctid through the modify plan."
+    },
+    {
+      "step": "2. INSERT writes new data files.",
+      "details": "ExecForeignInsert checks constraints, lazily starts the insert destination, and writes each tuple to either a partitioned receiver or multi-data-file receiver. EndForeignModify shuts the receiver down, gathers ADD_DATA_FILE modifications, and applies Iceberg metadata changes transactionally."
+    },
+    {
+      "step": "3. UPDATE is delete plus insert.",
+      "details": "ExecForeignUpdate fetches the junk ctid from the old plan slot, converts it to a packed ItemPointer, prevents repeated updates to the same source row in one statement, validates the new tuple, rejects partition movement, then calls DeleteSingleRow on the old row and WriteInsertRecord for the replacement row."
+    },
+    {
+      "step": "4. DELETE converts ctid into per-file position records.",
+      "details": "ExecForeignDelete fetches the junk ctid and calls DeleteSingleRow. The ctid bits identify the source file's index in the scan result and the row number in that file. Pg_lake prepares a position-delete tuple containing the physical data-file path and row position, then writes it to a temporary per-file delete CSV."
+    },
+    {
+      "step": "5. EndForeignModify chooses metadata removal, MOR, or COW per touched file.",
+      "details": "If all live rows in a file are deleted, Pg_lake removes the data file from metadata and does not write a delete file. If only some rows are deleted and the percentage and global deleted-row limits are below the thresholds, it creates an Iceberg position-delete Parquet file and records delete mapping metadata. If thresholds are reached, it rewrites the data file by reading surviving rows and adding a replacement data file."
+    },
+    {
+      "step": "6. Reads apply MOR deletes in DuckDB.",
+      "details": "When a scan snapshot includes position-delete files, ReadDataSourceQuery requests filename and file_row_number from DuckDB's Parquet reader. It then adds a filter that anti-joins data row locations against the delete-file file_path and pos pairs. The internal row-location columns are hidden from normal query output unless needed as ctid for UPDATE or DELETE."
+    },
+    {
+      "step": "7. TRUNCATE is metadata-only at table scope.",
+      "details": "ExecForeignTruncate binds each relation to its Iceberg REST catalog entry and applies DATA_FILE_REMOVE_ALL. This removes all current data files from table metadata rather than scanning rows and producing per-row position deletes."
+    },
+    {
+      "step": "8. VACUUM and compaction restore read efficiency.",
+      "details": "VACUUM compacts candidate files, applies existing position deletes while reading, writes replacement data files, removes obsolete references, expires snapshots, and removes unreferenced files. Pg_lake also forces deletion compaction when table-wide position-deleted rows exceed half of the configured max-delete-row threshold."
+    }
+  ],
+  "design_tradeoffs": [
+    {
+      "choice": "Synthetic ctid instead of exposing a persistent user-visible row key",
+      "tradeoff": "This fits PostgreSQL's FDW update/delete contract and avoids adding a logical key requirement, but it is valid only inside the executing statement because the encoded identity depends on the scan's file list and row positions."
+    },
+    {
+      "choice": "UPDATE as DELETE plus INSERT",
+      "tradeoff": "This is simple and aligns with immutable data-file storage, while also letting UPDATE reuse the DELETE and INSERT machinery. It can create both delete files and new data files for small updates, and it forbids partition movement in the current implementation."
+    },
+    {
+      "choice": "MOR for low delete percentages",
+      "tradeoff": "Small DELETE and UPDATE operations avoid rewriting large Parquet files, lowering write latency and I/O. The cost shifts to reads, which must load row-location columns and apply delete-file filters."
+    },
+    {
+      "choice": "COW at 20 percent deleted rows by default",
+      "tradeoff": "Rewriting becomes preferable when many rows in a file are deleted because read-time filtering overhead and accumulated delete files become more expensive than producing a clean replacement file. The GUC allows deployments to tune this based on storage and workload."
+    },
+    {
+      "choice": "Global max position-deleted-row threshold",
+      "tradeoff": "The table-wide pg_lake_table.copy_on_write_max_delete_rows setting prevents unbounded MOR accumulation even if each individual file stays below the percentage threshold. The test suite confirms both per-operation and cross-operation accumulation behavior."
+    },
+    {
+      "choice": "DuckDB anti-join for fast MOR filtering",
+      "tradeoff": "The implementation delegates vectorized Parquet scanning and row-location filtering to DuckDB. This keeps Pg_lake's scan logic compact and fast for the common case, but read performance still depends on delete-file count, delete-file locality, and DuckDB's execution plan."
+    },
+    {
+      "choice": "VACUUM-based cleanup",
+      "tradeoff": "Compaction amortizes cleanup and avoids rewriting on every small delete. The tradeoff is that tables with frequent MOR writes need regular VACUUM/autovacuum to prevent delete-file buildup."
+    }
+  ],
+  "limitations_and_risks": [
+    "The current implementation writes Iceberg position delete files for MOR. Iceberg v3 deprecates new position delete files in favor of deletion vectors, so future v3 compatibility requires a migration path or writer changes. The exact Pg_lake roadmap for deletion-vector support is [uncertain].",
+    "COW with row IDs is explicitly not implemented in the delete rewrite path. Tables using row-lineage features need extra validation because compaction has row-id materialization logic, but the COW delete path has a TODO-level limitation.",
+    "The synthetic ctid depends on the scan result's ordered file list and file-row positions. It should not be treated as a durable row identity or exposed as a general application key.",
+    "UPDATE rejects partition movement, so workloads that expect updating partition columns to relocate rows need either application-side delete/insert handling or implementation work.",
+    "MOR read speed is mechanism-backed but not quantified by a benchmark in the files reviewed. Claims about absolute performance improvement are [uncertain] without workload-specific measurement.",
+    "Position-delete accumulation can increase read overhead, metadata pressure, and compaction work. The table-wide threshold and VACUUM behavior mitigate this but require correct operational tuning.",
+    "The docs list unsupported or limited mutable-table behavior such as SELECT FOR UPDATE, MERGE, INSERT ON CONFLICT, and direct user queries involving system columns such as ctid.",
+    "Full-file delete and TRUNCATE are metadata efficient, but snapshot retention and garbage collection still control when old physical files are actually removable."
+  ],
+  "implications_for_gaussdb": [
+    "A GaussDB integration should preserve the executor contract that UPDATE and DELETE receive a stable per-statement row identity from the scan. If GaussDB differs from PostgreSQL in junk-column or ctid handling, this is a primary adaptation point.",
+    "Product owners should decide default COW/MOR thresholds from GaussDB workload evidence rather than copying the 20 percent and 10000000-row defaults blindly.",
+    "The fast-MOR claim should be validated with GaussDB representative scans: small deletes, clustered deletes, scattered deletes, many delete files, partitioned tables, and concurrent write/read workloads.",
+    "GaussDB engineers should evaluate whether Iceberg v3 deletion vectors are required for the target compatibility level. If yes, the position-delete writer, read filter path, compaction, and metadata accounting need a deletion-vector design.",
+    "Operational documentation should pair MOR with VACUUM/autovacuum expectations, snapshot expiration, and object-store cleanup, because write efficiency can otherwise create deferred read and storage costs.",
+    "If GaussDB needs row lineage or stable CDC semantics, Pg_lake's separate _row_id support and the current COW-with-row-ids limitation need explicit design review."
+  ],
+  "answer_to_original_questions": {
+    "insert": "INSERT is a pure append path: ExecForeignInsert writes rows through Pg_lake data-file receivers and commits ADD_DATA_FILE metadata changes.",
+    "update": "UPDATE is implemented as DELETE plus INSERT. The old row is found through a synthetic ctid derived from the data file and row number; the new row is written through the same insert destination used by INSERT.",
+    "delete": "DELETE uses the synthetic ctid to identify a source data file and zero-based row position. For partial deletes below thresholds, Pg_lake writes Iceberg position delete files. For full-file deletes, it removes the file from metadata. For high delete ratios or table-wide delete accumulation, it rewrites surviving rows with COW.",
+    "truncate": "TRUNCATE is relevant and is metadata-oriented: Pg_lake calls RemoveAllDataFilesFromTable, applying a DATA_FILE_REMOVE_ALL metadata operation instead of scanning rows.",
+    "copy_on_write_vs_merge_on_read": "MOR is the default for small row-level changes because it writes compact delete files and avoids rewriting data files. COW is selected when the deleted-row percentage for a source file reaches the threshold, when the global position-deleted-row limit is reached, or when a full file can be removed from metadata.",
+    "synthetic_ctid_row_identity": "Pg_lake injects a ctid junk column for mutable scans. DuckDB emits filename and file_row_number; Pg_lake converts that pair into PostgreSQL ItemPointer bits and later decodes it during UPDATE or DELETE.",
+    "position_delete_files": "Position delete files contain the target data-file path and row position, matching Iceberg v2 position-delete semantics. Pg_lake first accumulates deletes in temporary per-file CSVs, then converts them to Parquet position delete files and records delete mappings in metadata.",
+    "thresholds": "The default copy_on_write_threshold is 20 percent of rows in a file. Setting it to 0 forces COW and 100 forces MOR. The default copy_on_write_max_delete_rows is 10000000 across the table, and -1 disables that limit.",
+    "compaction": "VACUUM compacts files by reading candidate data files with existing delete files applied, writing replacement data files, expiring snapshots, merging manifests, and removing unreferenced files. It can force deletion compaction once table-wide deleted rows exceed half the max-delete-row limit.",
+    "how_pg_lake_makes_mor_fast": "Pg_lake makes MOR fast by keeping writes cheap and pushing read-time delete application into DuckDB's vectorized Parquet scan. It reads filename and row-number metadata only when deletes or ctid emission require it, hides those columns from normal output, and filters deleted rows with an anti-join against position delete files."
+  },
+  "source_links": {
+    "local_paths": [
+      "D:/pg_lake/engineering-notes/writes.md",
+      "D:/pg_lake/docs/iceberg-tables.md",
+      "D:/pg_lake/pg_lake_table/include/pg_lake/fdw/writable_table.h",
+      "D:/pg_lake/pg_lake_table/src/init.c",
+      "D:/pg_lake/pg_lake_table/src/fdw/pg_lake_table.c",
+      "D:/pg_lake/pg_lake_table/src/fdw/writable_table.c",
+      "D:/pg_lake/pg_lake_table/src/fdw/position_delete_dest.c",
+      "D:/pg_lake/pg_lake_table/src/duckdb/transform_query_to_duckdb.c",
+      "D:/pg_lake/pg_lake_table/src/ddl/vacuum.c",
+      "D:/pg_lake/pg_lake_table/src/fdw/row_ids.c",
+      "D:/pg_lake/pg_lake_engine/include/pg_lake/pgduck/read_data.h",
+      "D:/pg_lake/pg_lake_engine/src/pgduck/read_data.c",
+      "D:/pg_lake/pg_lake_engine/src/pgduck/delete_data.c",
+      "D:/pg_lake/pg_lake_engine/src/pgduck/write_data.c",
+      "D:/pg_lake/pg_lake_table/tests/pytests/test_writable_table_update.py",
+      "D:/pg_lake/pg_lake_table/tests/pytests/test_writable_table_delete.py",
+      "D:/pg_lake/pg_lake_table/tests/pytests/test_copy_on_write_max_delete_rows.py",
+      "D:/pg_lake/pg_lake_table/tests/pytests/test_writable_tables.py",
+      "D:/pg_lake/pg_lake_table/tests/pytests/test_writable_iceberg.py"
+    ],
+    "official_urls": [
+      "https://iceberg.apache.org/spec/",
+      "https://iceberg.apache.org/docs/latest/configuration/"
+    ]
+  },
+  "uncertain": [
+    "limitations_and_risks"
+  ]
+}

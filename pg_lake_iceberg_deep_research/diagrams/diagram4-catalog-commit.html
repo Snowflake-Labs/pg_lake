@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+  <title>Catalog 与提交流程图</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{font-family:'JetBrains Mono',monospace;background:#020617;min-height:100vh;padding:1.5rem;color:white}
+    .container{max-width:1100px;margin:0 auto}
+    .header{margin-bottom:1.5rem}
+    .header-row{display:flex;align-items:center;gap:1rem;margin-bottom:.5rem}
+    .pulse-dot{width:12px;height:12px;background:#22d3ee;border-radius:50%;animation:pulse 2s infinite}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+    h1{font-size:1.3rem;font-weight:700}
+    .subtitle{color:#94a3b8;font-size:.8rem;margin-left:1.75rem}
+    .diagram-container{background:rgba(15,23,42,.5);border-radius:1rem;border:1px solid #1e293b;padding:1.5rem;overflow-x:auto}
+    svg{width:100%;min-width:900px;display:block}
+    .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;margin-top:1.5rem}
+    .card{background:rgba(15,23,42,.5);border-radius:.75rem;border:1px solid #1e293b;padding:1rem}
+    .card-header{display:flex;align-items:center;gap:.5rem;margin-bottom:.5rem}
+    .card-dot{width:8px;height:8px;border-radius:50%}
+    .card-dot.cyan{background:#22d3ee}.card-dot.amber{background:#fbbf24}.card-dot.rose{background:#fb7185}
+    .card h3{font-size:.8rem;font-weight:600}
+    .card ul{list-style:none;color:#94a3b8;font-size:.7rem}
+    .card li{margin-bottom:.3rem}
+  </style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <div class="header-row"><div class="pulse-dot"></div><h1>Catalog 角色与提交流程</h1></div>
+    <p class="subtitle">Iceberg catalog 是权威的名→表状态服务；pg_lake 实现 5 类 catalog 能力，提交通过事务钩子协调</p>
+  </div>
+  <div class="diagram-container">
+    <svg viewBox="0 0 1060 720">
+      <defs>
+        <marker id="ah" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#64748b"/></marker>
+        <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0L0 0 0 40" fill="none" stroke="#1e293b" stroke-width=".5"/></pattern>
+      </defs>
+      <rect width="100%" height="100%" fill="url(#grid)"/>
+
+      <!-- === TOP: What is a catalog === -->
+      <rect x="40" y="20" width="980" height="140" rx="8" fill="rgba(251,146,60,.04)" stroke="#fb923c" stroke-width="1" stroke-dasharray="6,3"/>
+      <text x="60" y="42" fill="#fb923c" font-size="10" font-weight="700">什么是 Iceberg Catalog</text>
+
+      <!-- Three core responsibilities -->
+      <rect x="60" y="55" width="280" height="85" rx="8" fill="rgba(251,146,60,.15)" stroke="#fb923c" stroke-width="1.5"/>
+      <text x="200" y="77" text-anchor="middle" fill="white" font-size="11" font-weight="700">名 → 表状态映射</text>
+      <text x="200" y="97" text-anchor="middle" fill="#94a3b8" font-size="8">catalog.namespace.table</text>
+      <text x="200" y="112" text-anchor="middle" fill="#94a3b8" font-size="8">  → 当前 metadata-location</text>
+      <text x="200" y="127" text-anchor="middle" fill="#fb923c" font-size="8">读者需要知道哪个 JSON 是当前的</text>
+
+      <rect x="380" y="55" width="280" height="85" rx="8" fill="rgba(251,146,60,.15)" stroke="#fb923c" stroke-width="1.5"/>
+      <text x="520" y="77" text-anchor="middle" fill="white" font-size="11" font-weight="700">原子提交点</text>
+      <text x="520" y="97" text-anchor="middle" fill="#94a3b8" font-size="8">compare-and-swap</text>
+      <text x="520" y="112" text-anchor="middle" fill="#94a3b8" font-size="8">  更新当前表版本</text>
+      <text x="520" y="127" text-anchor="middle" fill="#fb923c" font-size="8">防止并发写丢失</text>
+
+      <rect x="700" y="55" width="300" height="85" rx="8" fill="rgba(251,146,60,.15)" stroke="#fb923c" stroke-width="1.5"/>
+      <text x="850" y="77" text-anchor="middle" fill="white" font-size="11" font-weight="700">标准发现点</text>
+      <text x="850" y="97" text-anchor="middle" fill="#94a3b8" font-size="8">Spark / PyIceberg / Trino</text>
+      <text x="850" y="112" text-anchor="middle" fill="#94a3b8" font-size="8">  通过 catalog 发现表</text>
+      <text x="850" y="127" text-anchor="middle" fill="#fb923c" font-size="8">跨引擎互操作的关键</text>
+
+      <!-- === MIDDLE: 5 catalog capabilities === -->
+      <rect x="40" y="180" width="980" height="200" rx="8" fill="rgba(59,130,246,.04)" stroke="#3b82f6" stroke-width="1" stroke-dasharray="6,3"/>
+      <text x="60" y="202" fill="#3b82f6" font-size="10" font-weight="700">pg_lake 的 5 类 Catalog 能力</text>
+
+      <!-- 1. Internal PG Catalog -->
+      <rect x="60" y="215" width="170" height="140" rx="8" fill="rgba(59,130,246,.12)" stroke="#3b82f6" stroke-width="1.5"/>
+      <text x="145" y="237" text-anchor="middle" fill="white" font-size="10" font-weight="700">1. 内部 PG</text>
+      <text x="145" y="253" text-anchor="middle" fill="white" font-size="10" font-weight="700">Catalog</text>
+      <text x="145" y="275" text-anchor="middle" fill="#94a3b8" font-size="7">tables_internal</text>
+      <text x="145" y="289" text-anchor="middle" fill="#94a3b8" font-size="7">tables_external</text>
+      <text x="145" y="303" text-anchor="middle" fill="#94a3b8" font-size="7">iceberg_tables 视图</text>
+      <text x="145" y="323" text-anchor="middle" fill="#93c5fd" font-size="7">PG 事务即 CAS</text>
+      <text x="145" y="337" text-anchor="middle" fill="#93c5fd" font-size="7">JDBC 兼容</text>
+
+      <!-- 2. REST Catalog -->
+      <rect x="250" y="215" width="170" height="140" rx="8" fill="rgba(139,92,246,.12)" stroke="#8b5cf6" stroke-width="1.5"/>
+      <text x="335" y="237" text-anchor="middle" fill="white" font-size="10" font-weight="700">2. REST</text>
+      <text x="335" y="253" text-anchor="middle" fill="white" font-size="10" font-weight="700">Catalog 桥接</text>
+      <text x="335" y="275" text-anchor="middle" fill="#94a3b8" font-size="7">iceberg_catalog FDW</text>
+      <text x="335" y="289" text-anchor="middle" fill="#94a3b8" font-size="7">REST endpoint/凭证</text>
+      <text x="335" y="303" text-anchor="middle" fill="#94a3b8" font-size="7">只读: 加载 location</text>
+      <text x="335" y="323" text-anchor="middle" fill="#c4b5fd" font-size="7">可写: create/drop/</text>
+      <text x="335" y="337" text-anchor="middle" fill="#c4b5fd" font-size="7">update/commit</text>
+
+      <!-- 3. Object-Store Catalog -->
+      <rect x="440" y="215" width="170" height="140" rx="8" fill="rgba(16,185,129,.12)" stroke="#10b981" stroke-width="1.5"/>
+      <text x="525" y="237" text-anchor="middle" fill="white" font-size="10" font-weight="700">3. Object-Store</text>
+      <text x="525" y="253" text-anchor="middle" fill="white" font-size="10" font-weight="700">Catalog</text>
+      <text x="525" y="275" text-anchor="middle" fill="#94a3b8" font-size="7">导出 catalog.json</text>
+      <text x="525" y="289" text-anchor="middle" fill="#94a3b8" font-size="7">读取外部 catalog.json</text>
+      <text x="525" y="303" text-anchor="middle" fill="#94a3b8" font-size="7">轻量发现</text>
+      <text x="525" y="323" text-anchor="middle" fill="#6ee7b7" font-size="7">无需 REST 服务</text>
+      <text x="525" y="337" text-anchor="middle" fill="#fb7185" font-size="7">无冲突处理!</text>
+
+      <!-- 4. Metadata functions -->
+      <rect x="630" y="215" width="170" height="140" rx="8" fill="rgba(6,78,59,.15)" stroke="#34d399" stroke-width="1.5"/>
+      <text x="715" y="237" text-anchor="middle" fill="white" font-size="10" font-weight="700">4. 元数据</text>
+      <text x="715" y="253" text-anchor="middle" fill="white" font-size="10" font-weight="700">检查函数</text>
+      <text x="715" y="275" text-anchor="middle" fill="#94a3b8" font-size="7">metadata()</text>
+      <text x="715" y="289" text-anchor="middle" fill="#94a3b8" font-size="7">files()</text>
+      <text x="715" y="303" text-anchor="middle" fill="#94a3b8" font-size="7">snapshots()</text>
+      <text x="715" y="323" text-anchor="middle" fill="#94a3b8" font-size="7">data_file_stats()</text>
+      <text x="715" y="337" text-anchor="middle" fill="#6ee7b7" font-size="7">SQL 内调试</text>
+
+      <!-- 5. Transaction hooks -->
+      <rect x="820" y="215" width="180" height="140" rx="8" fill="rgba(136,19,55,.2)" stroke="#fb7185" stroke-width="1.5"/>
+      <text x="910" y="237" text-anchor="middle" fill="white" font-size="10" font-weight="700">5. 事务钩子</text>
+      <text x="910" y="262" text-anchor="middle" fill="#94a3b8" font-size="7">PRE_COMMIT: 应用</text>
+      <text x="910" y="278" text-anchor="middle" fill="#94a3b8" font-size="7">ABORT: 清理</text>
+      <text x="910" y="294" text-anchor="middle" fill="#fca5a5" font-size="7">PREPARE: 拒绝!</text>
+      <text x="910" y="310" text-anchor="middle" fill="#94a3b8" font-size="7">COMMIT: REST</text>
+      <text x="910" y="326" text-anchor="middle" fill="#fb7185" font-size="7">post-commit 风险!</text>
+      <text x="910" y="345" text-anchor="middle" fill="#94a3b8" font-size="7">失败=warning 非回滚</text>
+
+      <!-- === BOTTOM: Commit timeline === -->
+      <rect x="40" y="400" width="980" height="300" rx="8" fill="rgba(16,185,129,.04)" stroke="#10b981" stroke-width="1" stroke-dasharray="6,3"/>
+      <text x="60" y="422" fill="#10b981" font-size="10" font-weight="700">提交流程时间线</text>
+
+      <!-- Timeline bar -->
+      <rect x="60" y="440" width="940" height="4" rx="2" fill="#334155"/>
+
+      <!-- Phase 1: DML -->
+      <circle cx="130" cy="442" r="14" fill="#3b82f6"/>
+      <text x="130" y="446" text-anchor="middle" fill="white" font-size="10" font-weight="700">1</text>
+      <text x="130" y="472" text-anchor="middle" fill="#93c5fd" font-size="9" font-weight="600">DML 执行</text>
+      <text x="130" y="488" text-anchor="middle" fill="#94a3b8" font-size="7">TrackIcebergMetadata</text>
+      <text x="130" y="500" text-anchor="middle" fill="#94a3b8" font-size="7">ChangesInTx</text>
+
+      <!-- Phase 2: PRE_COMMIT -->
+      <circle cx="370" cy="442" r="14" fill="#f59e0b"/>
+      <text x="370" y="446" text-anchor="middle" fill="black" font-size="10" font-weight="700">2</text>
+      <text x="370" y="472" text-anchor="middle" fill="#fcd34d" font-size="9" font-weight="600">PRE_COMMIT</text>
+
+      <!-- PRE_COMMIT detail box -->
+      <rect x="260" y="510" width="220" height="160" rx="8" fill="rgba(30,41,59,.7)" stroke="#f59e0b" stroke-width="1"/>
+      <text x="370" y="530" text-anchor="middle" fill="#fcd34d" font-size="9" font-weight="600">ApplyIcebergMetadataChanges</text>
+      <line x1="370" y1="500" x2="370" y2="508" stroke="#f59e0b" stroke-width="1"/>
+
+      <text x="275" y="550" fill="#94a3b8" font-size="8">a. 读当前元数据</text>
+      <text x="275" y="568" fill="#94a3b8" font-size="8">b. 构建 new snapshot</text>
+      <text x="275" y="586" fill="#94a3b8" font-size="8">c. 构建 manifest list</text>
+      <text x="275" y="604" fill="#94a3b8" font-size="8">d. 上传 metadata JSON</text>
+      <text x="275" y="622" fill="#94a3b8" font-size="8">e. 更新 tables_internal</text>
+      <text x="275" y="640" fill="#94a3b8" font-size="8">f. 队列旧文件清理</text>
+      <text x="275" y="658" fill="#94a3b8" font-size="8">g. 触发 catalog 导出</text>
+
+      <!-- Phase 3: COMMIT -->
+      <circle cx="620" cy="442" r="14" fill="#10b981"/>
+      <text x="620" y="446" text-anchor="middle" fill="white" font-size="10" font-weight="700">3</text>
+      <text x="620" y="472" text-anchor="middle" fill="#6ee7b7" font-size="9" font-weight="600">COMMIT</text>
+      <text x="620" y="488" text-anchor="middle" fill="#94a3b8" font-size="7">PostAllRestCatalog</text>
+      <text x="620" y="500" text-anchor="middle" fill="#94a3b8" font-size="7">Requests</text>
+
+      <!-- REST commit detail -->
+      <rect x="530" y="510" width="180" height="80" rx="8" fill="rgba(30,41,59,.7)" stroke="#10b981" stroke-width="1"/>
+      <text x="620" y="530" text-anchor="middle" fill="#6ee7b7" font-size="8">create/drop: 逐个发送</text>
+      <text x="620" y="548" text-anchor="middle" fill="#6ee7b7" font-size="8">modify: 批量事务提交</text>
+      <text x="620" y="566" text-anchor="middle" fill="#fb7185" font-size="8">失败 → warning 非回滚!</text>
+      <text x="620" y="582" text-anchor="middle" fill="#94a3b8" font-size="7">(post-commit 窗口)</text>
+
+      <!-- Phase 4: ABORT -->
+      <circle cx="820" cy="442" r="14" fill="#ef4444"/>
+      <text x="820" y="446" text-anchor="middle" fill="white" font-size="10" font-weight="700">4</text>
+      <text x="820" y="472" text-anchor="middle" fill="#fca5a5" font-size="9" font-weight="600">ABORT</text>
+      <text x="820" y="488" text-anchor="middle" fill="#94a3b8" font-size="7">重置跟踪状态</text>
+      <text x="820" y="500" text-anchor="middle" fill="#94a3b8" font-size="7">本地变更自动回滚</text>
+
+      <!-- PREPARE rejection -->
+      <rect x="890" y="430" width="120" height="70" rx="8" fill="rgba(136,19,55,.3)" stroke="#fb7185" stroke-width="1.5"/>
+      <text x="950" y="452" text-anchor="middle" fill="#fb7185" font-size="9" font-weight="700">PREPARE</text>
+      <text x="950" y="470" text-anchor="middle" fill="#fca5a5" font-size="8">含 Iceberg 元数据</text>
+      <text x="950" y="486" text-anchor="middle" fill="#fca5a5" font-size="8">变更 → 拒绝!</text>
+
+      <!-- Timeline segments -->
+      <rect x="144" y="440" width="212" height="4" rx="2" fill="#3b82f6"/>
+      <rect x="384" y="440" width="222" height="4" rx="2" fill="#f59e0b"/>
+      <rect x="634" y="440" width="172" height="4" rx="2" fill="#10b981"/>
+
+      <!-- Labels under segments -->
+      <text x="250" y="430" text-anchor="middle" fill="#94a3b8" font-size="8">PG 事务内</text>
+      <text x="495" y="430" text-anchor="middle" fill="#94a3b8" font-size="8">PG 事务内</text>
+      <text x="720" y="430" text-anchor="middle" fill="#94a3b8" font-size="8">PG 事务后</text>
+
+      <!-- Risk callout -->
+      <rect x="530" y="600" width="470" height="80" rx="8" fill="rgba(136,19,55,.1)" stroke="#fb7185" stroke-width="1" stroke-dasharray="4,3"/>
+      <text x="545" y="622" fill="#fb7185" font-size="9" font-weight="700">关键风险：post-commit REST 失败</text>
+      <text x="545" y="642" fill="#94a3b8" font-size="8">• PG 已提交本地事务，REST 请求在 COMMIT 后发送</text>
+      <text x="545" y="660" fill="#94a3b8" font-size="8">• REST 失败无法像普通 SQL 错误回滚</text>
+      <text x="545" y="678" fill="#94a3b8" font-size="8">• 当前以 WARNING 报告，需要运维对账程序</text>
+    </svg>
+  </div>
+  <div class="cards">
+    <div class="card">
+      <div class="card-header"><div class="card-dot cyan"></div><h3>内部 Catalog</h3></div>
+      <ul>
+        <li>• PG 目录表 = Iceberg catalog</li>
+        <li>• PG 行锁 = CAS 语义</li>
+        <li>• iceberg_tables 视图 JDBC 兼容</li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-dot amber"></div><h3>REST Catalog</h3></div>
+      <ul>
+        <li>• 可读写外部 catalog (Polaris)</li>
+        <li>• COMMIT 后发送 REST 请求</li>
+        <li>• 单事务限单一 REST catalog</li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-dot rose"></div><h3>关键限制</h3></div>
+      <ul>
+        <li>• Prepared tx 含 Iceberg 变更 → 拒绝</li>
+        <li>• REST post-commit 失败 → warning</li>
+        <li>• catalog.json 无冲突处理</li>
+      </ul>
+    </div>
+  </div>
+</div>
+</body>
+</html>

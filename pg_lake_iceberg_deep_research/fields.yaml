@@ -1,0 +1,45 @@
+fields:
+  - name: item_name
+    category: Basic
+    description: Research item name.
+    detail_level: brief
+  - name: executive_summary
+    category: Basic
+    description: Concise conclusion for this research item.
+    detail_level: moderate
+  - name: repo_evidence
+    category: Evidence
+    description: Local repository evidence including files, functions, SQL objects, tests, or comments.
+    detail_level: detailed
+  - name: official_spec_evidence
+    category: Evidence
+    description: Official documentation or specification evidence, with URLs.
+    detail_level: detailed
+  - name: end_to_end_mechanics
+    category: Mechanics
+    description: Step-by-step mechanics, data flow, control flow, and metadata flow.
+    detail_level: detailed
+  - name: design_tradeoffs
+    category: Analysis
+    description: Key design choices, performance tradeoffs, and correctness tradeoffs.
+    detail_level: detailed
+  - name: limitations_and_risks
+    category: Analysis
+    description: Implementation limitations, risks, edge cases, and future compatibility concerns.
+    detail_level: detailed
+  - name: implications_for_gaussdb
+    category: Analysis
+    description: What a GaussDB engineer or PL should evaluate based on this item.
+    detail_level: moderate
+  - name: answer_to_original_questions
+    category: Synthesis
+    description: Direct answer to the user's original questions covered by this item.
+    detail_level: moderate
+  - name: source_links
+    category: Sources
+    description: Source URLs and local file paths used in the research.
+    detail_level: detailed
+  - name: uncertain
+    category: Meta
+    description: Field names whose values are uncertain.
+    detail_level: brief

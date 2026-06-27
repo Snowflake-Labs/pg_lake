@@ -1,0 +1,357 @@
+{
+  "item_name": "Pg_lake SELECT Retrieval Flow",
+  "executive_summary": {
+    "summary": "Pg_lake retrieves SELECT results through PostgreSQL planning and execution callbacks that replace pg_lake table references with DuckDB-readable file scans at executor start. When a whole query is shippable and contains only pg_lake relations, `LakeTablePlanner` replaces PostgreSQL's plan with a `CustomScan` named Query Pushdown. Otherwise the FDW path builds `ForeignScan` plans and ships the supported scan, join, aggregate, sort, or limit fragments. Both paths delay concrete `read_parquet`, `read_csv`, or `read_json` construction until execution, when Pg_lake creates a transaction-consistent `PgLakeScanSnapshot`, discovers files, prunes files from Iceberg metadata and partition values, attaches position delete files, emits DuckDB SQL, sends it to `pgduck_server`, and streams text results back into PostgreSQL tuple slots.",
+    "key_findings": [
+      "The concrete file list is intentionally not fixed in the planner; planned SQL contains `__lake_read_table(...)` placeholders that are replaced during `BeginCustomScan` or `BeginForeignScan`.",
+      "Internal writable Pg_lake/Iceberg tables discover data files through Pg_lake catalog tables under the current PostgreSQL transaction snapshot; external Iceberg tables read the Iceberg metadata JSON, current snapshot, manifest list, and manifests.",
+      "File pruning is conservative and Iceberg-only: Pg_lake derives PostgreSQL predicate constraints from column statistics and partition values and keeps any file whose bounds are not refuted.",
+      "Position delete files are applied in DuckDB by reading data files with filename and file row number columns, then anti-joining against `read_parquet(delete_files)` rows containing `(file_path, pos)`.",
+      "Result delivery uses libpq single-row mode over the pgduck_server PostgreSQL wire protocol; PostgreSQL converts returned text fields into heap tuples."
+    ]
+  },
+  "repo_evidence": {
+    "planning_and_pushdown": [
+      {
+        "path": "D:/pg_lake/pg_lake_table/src/planner/query_pushdown.c",
+        "lines": "251-329",
+        "evidence": "`LakeTablePlanner` runs the previous planner, checks `EnableFullQueryPushdown`, lake-table presence, non-scroll cursors, and `FullQueryIsPushdownable`, then replaces the plan with `GeneratePushdownPlan` for SELECT or insert-select pushdown."
+      },
+      {
+        "path": "D:/pg_lake/pg_lake_table/src/planner/query_pushdown.c",
+        "lines": "485-505",
+        "evidence": "`FullQueryIsPushdownable` accepts only SELECT commands without modifying CTEs or FOR UPDATE and rejects queries containing non-shippable expressions."
+      },
+      {
+        "path": "D:/pg_lake/pg_lake_table/src/planner/query_pushdown.c",
+        "lines": "1264-1328",
+        "evidence": "`GeneratePushdownPlan` creates a `CustomScan`, rewrites the query for PGDuck, stores the rewritten query and collected relation restrictions in `custom_private`, and returns a `PlannedStmt` over an RTE_RESULT named `pushdown_query`."
+      },
+      {
+        "path": "D:/pg_lake/pg_lake_table/src/fdw/pg_lake_table.c",
+        "lines": "603-649, 1040-1079, 1263-1510",
+        "evidence": "The FDW path classifies remote/local conditions, creates `ForeignPath` nodes, deparses shippable SQL, rewrites it for PGDuck, replaces table RTEs with `read_table` placeholders, and stores SQL, retrieved attributes, RTE list, and restriction list in `fdw_private`."
+      },
+      {
+        "path": "D:/pg_lake/pg_lake_table/src/init.c",
+        "lines": "93-154",
+        "evidence": "GUC defaults enable strict pushdown, full-query pushdown, insert-select pushdown, data-file pruning, and partition pruning."
+      }
+    ],
+    "restriction_collection_and_deparse": [
+      {
+        "path": "D:/pg_lake/pg_lake_table/src/planner/restriction_collector.c",
+        "lines": "18-24, 154-226, 252-319, 339-349",
+        "evidence": "Pg_lake assigns unique relation identifiers, records `baserestrictinfo` from PostgreSQL planner state, deduplicates restrictions by `rinfo_serial`, exposes them to execution, and substitutes external parameters before pruning."
+      },
+      {
+        "path": "D:/pg_lake/pg_lake_table/src/fdw/deparse_ruleutils.c",
+        "lines": "80-112, 137-227, 238-363",
+        "evidence": "`ReplacePgLakeTableWithReadTableFunc` mutates pg_lake relation RTEs into set-returning function RTEs carrying table name and unique relation id, fixes `ctid` references when needed, and uses PostgreSQL ruleutils to produce a query template."
+      },
+      {
+        "path": "D:/pg_lake/pg_lake_table/src/duckdb/transform_query_to_duckdb.c",
+        "lines": "69-148",
+        "evidence": "`ReplaceReadTableFunctionCalls` scans the executor snapshot and replaces each textual `read_table` call with a generated `read_parquet`, `read_csv`, or `read_json` fragment; it also replaces `now()` with the PostgreSQL transaction-start timestamp."
+      }
+    ],
+    "snapshot_and_file_discovery": [
+      {
+        "path": "D:/pg_lake/pg_lake_table/src/fdw/snapshot.c",
+        "lines": "73-142",
+        "evidence": "`CreatePgLakeScanSnapshot` takes `GetTransactionSnapshot`, copies and parameter-substitutes relation restrictions, then creates a per-relation `PgLakeTableScan` list."
+      },
+      {
+        "path": "D:/pg_lake/pg_lake_table/src/fdw/snapshot.c",
+        "lines": "187-349",
+        "evidence": "Internal Pg_lake/Iceberg tables read data files from the catalog, prune them, find related position delete files, and create `PgLakeFileScan` entries; external Iceberg tables read the metadata location and convert current-snapshot data/delete files; plain lake files use the path option and optional `_filename` pruning."
+      },
+      {
+        "path": "D:/pg_lake/pg_lake_table/src/fdw/data_files_catalog.c",
+        "lines": "99-360",
+        "evidence": "`GetTableDataFilesFromCatalog` and `GetTableDataFilesHashFromCatalog` read file id, path, content, row count, file size, deleted-row count, column stats, and partition values. When a snapshot is provided, the catalog query is executed with `SPI_execute_snapshot`."
+      },
+      {
+        "path": "D:/pg_lake/pg_lake_iceberg/src/iceberg/api/datafile.c",
+        "lines": "54-120, 155-190",
+        "evidence": "External Iceberg discovery gets the current snapshot, filters manifests by content data versus deletes, filters manifest entries by scannable status, and returns `DataFile` objects or file paths."
+      },
+      {
+        "path": "D:/pg_lake/pg_lake_iceberg/src/iceberg/api/manifest.c",
+        "lines": "43-88",
+        "evidence": "Manifest filtering distinguishes data manifests from delete manifests and reads manifests from the snapshot's manifest list."
+      }
+    ],
+    "pruning": [
+      {
+        "path": "D:/pg_lake/pg_lake_table/src/fdw/data_file_pruning.c",
+        "lines": "178-301",
+        "evidence": "`PruneDataFiles` exits unless pruning is enabled and the relation is Iceberg, maps filter columns to Iceberg field ids, builds column/partition constraints, and retains files when constraints are not refuted for partial-match pruning."
+      },
+      {
+        "path": "D:/pg_lake/pg_lake_table/src/fdw/data_file_pruning.c",
+        "lines": "360-485, 520-675",
+        "evidence": "The pruning implementation skips unsupported array, map, composite, geometry, and collated cases, then builds min/max and partition-bound constraints from Iceberg statistics."
+      },
+      {
+        "path": "D:/pg_lake/pg_lake_table/src/fdw/data_file_pruning.c",
+        "lines": "1600-1756",
+        "evidence": "`PruneByFilename` handles `_filename` filters for wildcard paths and optimizes `_filename = ANY(...)` with a hash table."
+      },
+      {
+        "path": "D:/pg_lake/docs/iceberg-tables.md",
+        "lines": "335-383",
+        "evidence": "The user documentation describes partition pruning and instructs users to verify it through `EXPLAIN (VERBOSE)` fields such as `Data Files Scanned` and `Data Files Skipped`."
+      }
+    ],
+    "delete_file_application": [
+      {
+        "path": "D:/pg_lake/pg_lake_table/src/fdw/snapshot.c",
+        "lines": "508-560",
+        "evidence": "After data-file pruning, internal snapshots call `GetPositionDeleteFilesForDataFiles`; external snapshots fetch current-snapshot delete files and convert them into `positionDeleteScans`."
+      },
+      {
+        "path": "D:/pg_lake/pg_lake_table/src/fdw/writable_table.c",
+        "lines": "1529-1568",
+        "evidence": "`GetPositionDeleteFilesForDataFiles` gathers retained data-file paths, sums deleted-row counts for cardinality, and retrieves possible position delete files once."
+      },
+      {
+        "path": "D:/pg_lake/pg_lake_table/src/fdw/data_files_catalog.c",
+        "lines": "739-820",
+        "evidence": "`GetPossiblePositionDeleteFilesFromCatalog` reads mapped position delete file paths from the deletion-file map for the retained source paths under the optional snapshot."
+      },
+      {
+        "path": "D:/pg_lake/pg_lake_engine/src/pgduck/read_data.c",
+        "lines": "86-220",
+        "evidence": "`ReadDataSourceQuery` forces row-location reads when position deletes exist and appends a `WHERE (filename, file_row_number) NOT IN (SELECT (file_path, pos) FROM read_parquet(delete_paths))` filter."
+      },
+      {
+        "path": "D:/pg_lake/pg_lake_table/tests/pytests/test_explain.py",
+        "lines": "248-299",
+        "evidence": "A test verifies that, after a delete, the DuckDB plan contains a hash join with one `READ_PARQUET` for source data and another `READ_PARQUET` for the position delete file."
+      }
+    ],
+    "duckdb_execution_and_result_streaming": [
+      {
+        "path": "D:/pg_lake/pg_lake_table/src/duckdb/transform_query_to_duckdb.c",
+        "lines": "150-273",
+        "evidence": "`BuildReadDataSourceQueryForTableScan` builds the read function for file scans, includes child scans with `UNION ALL`, requests row locations for update/delete scans, and injects synthetic `ctid` from filename and file row number."
+      },
+      {
+        "path": "D:/pg_lake/pg_lake_engine/src/pgduck/read_data.c",
+        "lines": "224-280, 560-615",
+        "evidence": "`ReadDataSourceFunction` emits `read_parquet(path_list, schema=..., explicit_cardinality=..., filename=..., file_row_number=true)` for Parquet/Iceberg. `BuildParquetSchema` uses DuckDB's schema map for Iceberg schema evolution."
+      },
+      {
+        "path": "D:/pg_lake/pg_lake_engine/src/pgduck/client.c",
+        "lines": "131-181, 385-431, 945-973",
+        "evidence": "Pg_lake connects to pgduck_server with libpq, sends queries via `PQsendQueryParams`, immediately enables single-row mode, and waits on the socket while honoring PostgreSQL interrupts."
+      },
+      {
+        "path": "D:/pg_lake/pg_lake_table/src/planner/query_pushdown.c",
+        "lines": "1372-1496, 1554-1668",
+        "evidence": "Full-query `BeginCustomScan` creates the snapshot, replaces read-table placeholders, serializes parameters, sends the query, and `ExecCustomScan` consumes `PGRES_SINGLE_TUPLE`, converts text values through `BuildTupleFromCStrings`, and stores heap tuples."
+      },
+      {
+        "path": "D:/pg_lake/pg_lake_table/src/fdw/pg_lake_table.c",
+        "lines": "1637-1840, 1843-1929, 3330-3425",
+        "evidence": "The FDW executor creates the same scan snapshot, sends the prepared DuckDB SQL on first iteration, fetches `PGRES_SINGLE_TUPLE` results into batch memory, converts result rows to heap tuples, and stores them in the scan slot."
+      },
+      {
+        "path": "D:/pg_lake/docs/iceberg-tables.md",
+        "lines": "393-465",
+        "evidence": "Documentation shows `Custom Scan (Query Pushdown)`, `Engine: DuckDB`, `Vectorized SQL`, and a DuckDB `READ_PARQUET` plan in `EXPLAIN (VERBOSE)`."
+      }
+    ]
+  },
+  "official_spec_evidence": {
+    "apache_iceberg": [
+      {
+        "url": "https://iceberg.apache.org/spec/",
+        "evidence": "The Iceberg spec defines snapshots as table state, manifest lists as one-per-snapshot files listing manifests, manifests as immutable Avro files listing data or delete files, and data/delete files as the storage units scanned by readers."
+      },
+      {
+        "url": "https://iceberg.apache.org/spec/#scan-planning",
+        "evidence": "The spec states that scans are planned by reading manifest files for the current snapshot, ignoring entries marked deleted, using partition predicates and column bounds to select relevant data and delete files, and applying matching delete files at read time."
+      },
+      {
+        "url": "https://iceberg.apache.org/spec/#row-level-deletes",
+        "evidence": "The spec defines position deletes as file path plus row position, equality deletes as matching rows by column values, and notes that position delete files are deprecated in v3 in favor of deletion vectors."
+      }
+    ],
+    "duckdb": [
+      {
+        "url": "https://duckdb.org/docs/current/data/parquet/overview",
+        "evidence": "DuckDB documents `read_parquet(path_or_list_of_paths)`, list/glob multi-file reads, `filename`, `file_row_number`, `schema`, filter pushdown, and projection pushdown for Parquet scans."
+      },
+      {
+        "url": "https://duckdb.org/docs/current/guides/file_formats/query_parquet",
+        "evidence": "DuckDB documents direct Parquet querying through `read_parquet` and automatic pushdown of filters and required columns into the Parquet scan."
+      }
+    ],
+    "postgresql": [
+      {
+        "url": "https://www.postgresql.org/docs/current/fdw-callbacks.html",
+        "evidence": "PostgreSQL documents FDW planning and execution callbacks such as `GetForeignRelSize`, `GetForeignPaths`, `GetForeignPlan`, and scan callbacks used by Pg_lake's FDW path."
+      },
+      {
+        "url": "https://www.postgresql.org/docs/current/custom-scan.html",
+        "evidence": "PostgreSQL documents custom scan providers as extensions that add alternative scan methods through planning, plan conversion, and execution phases."
+      },
+      {
+        "url": "https://www.postgresql.org/docs/current/custom-scan-plan.html",
+        "evidence": "PostgreSQL documents `CustomScan` fields including `custom_private` and `custom_scan_tlist`, matching Pg_lake's use of a CustomScan to carry the rewritten query and relation restriction metadata."
+      }
+    ]
+  },
+  "end_to_end_mechanics": {
+    "full_query_pushdown_flow": [
+      "PostgreSQL invokes Pg_lake's planner hook. `LakeTablePlanner` first adjusts the parse tree, records per-relation restrictions in a pushed restriction context, and lets the normal PostgreSQL planner produce a local plan.",
+      "If full-query pushdown is enabled, the query contains lake RTEs, the cursor is not scrollable, the command is SELECT, and all expressions/tables are shippable, Pg_lake creates a Query Pushdown `CustomScan` instead of using the normal plan tree.",
+      "The pushed-down query is rewritten for PGDuck compatibility and stores the rewritten `Query`, relation restriction list, and insert-target marker in `custom_private`.",
+      "At `QueryPushdownBeginScan`, Pg_lake copies executor parameters, replaces pg_lake relations with `read_table(table_name, unique_relation_id)` function RTEs, builds a transaction-consistent scan snapshot, deparses a PGDuck SQL template, and replaces `read_table` calls with concrete DuckDB scan fragments.",
+      "Pg_lake serializes parameters to text, opens a pgduck_server connection, sends the query with `PQsendQueryParams`, and enables libpq single-row mode.",
+      "At each `QueryPushdownIterateScan`, Pg_lake waits for one result, verifies single-tuple status, converts each text field through PostgreSQL input functions, stores a heap tuple in the scan slot, and clears the libpq result."
+    ],
+    "fdw_flow": [
+      "For non-full-pushdown plans, the Pg_lake FDW callbacks classify conditions as remote or local, compute retrieved attributes, create `ForeignPath` options, and optionally create remote join/upper paths.",
+      "`postgresGetForeignPlan` deparses a SELECT for the shippable portion, parses it back into a query tree, restores unique relation ids, rewrites unsupported constructs for PGDuck, replaces pg_lake table RTEs with `read_table` placeholders, and stores the SQL template plus metadata in `fdw_private`.",
+      "At `postgresBeginForeignScan`, Pg_lake opens a pgduck_server connection, detects whether the scan is part of UPDATE/DELETE, creates a `PgLakeScanSnapshot` with include-children disabled because PostgreSQL append nodes handle children, and prepares tuple conversion state.",
+      "At first iteration, `send_prepared_statement` replaces `read_table` placeholders with concrete file reads from the snapshot, evaluates parameters, and sends the SQL to pgduck_server.",
+      "`fetch_more_data` waits for single-tuple results, converts rows through `make_tuple_from_result_row`, stores them in batch memory, and `postgresIterateForeignScan` returns them one by one to PostgreSQL."
+    ],
+    "snapshot_creation": [
+      "The executor calls `CreatePgLakeScanSnapshot` with the RTE list extracted from placeholder replacement, the recorded relation restrictions, executor parameters, the include-children flag, and optional result relation id.",
+      "The snapshot uses `GetTransactionSnapshot` so multiple lake tables and catalog reads are consistent and so the current transaction's metadata changes are visible.",
+      "For each RTE, Pg_lake maps the unique relation id to recorded base restrictions, deep-copies the restrictions, substitutes external parameter values, and calls `CreateTableScanForRelation`.",
+      "`PgLakeScanSnapshot` contains one `PgLakeTableScan` per relation; each table scan has data `fileScans`, `positionDeleteScans`, optional child scans, the relation id, and the unique relation identifier."
+    ],
+    "data_file_discovery_and_pruning": [
+      "For internal writable Pg_lake and internal Iceberg tables, Pg_lake reads `TableDataFile` objects from its catalog with path, content, row count, deleted-row count, column statistics, partition values, and row id metadata.",
+      "For external Iceberg tables, Pg_lake reads the metadata location, loads Iceberg table metadata JSON, validates external schemas for read-only catalog modes, obtains the current snapshot, reads its manifest list, reads data and delete manifests, and extracts scannable data/delete files.",
+      "For ordinary non-Iceberg lake files, Pg_lake uses the foreign table `path` option. If the path contains a wildcard and `_filename` filtering is present, it enumerates remote filenames and prunes them with predicate proof; otherwise it scans the path as provided.",
+      "Iceberg data-file pruning maps filter columns to Iceberg field ids, obtains column stats and partition values, creates min/max and partition constraints, and uses PostgreSQL predicate implication/refutation to retain files that may satisfy the WHERE clause. FULL_MATCH pruning is used on result relations to identify files that can be skipped during delete/update work."
+    ],
+    "delete_file_application": [
+      "After pruning internal data files, Pg_lake retrieves position delete files that may apply to the retained source file paths using the same snapshot.",
+      "Delete file paths are carried as `positionDeleteScans` alongside data file scans. The row count from delete files is used as explicit cardinality when known.",
+      "When position delete paths are present, `ReadDataSourceQuery` asks DuckDB `read_parquet` to emit an internal filename column and `file_row_number`, then appends a NOT IN anti-join against `(file_path, pos)` rows from the delete-file `read_parquet` call.",
+      "For update/delete scans, Pg_lake also emits a synthetic PostgreSQL `ctid` struct based on filename and file row number so later modification callbacks can identify source rows."
+    ],
+    "duckdb_read_parquet_execution": [
+      "`BuildReadDataSourceQueryForTableScan` converts snapshot file scans into a path list and calls `ReadDataSourceQuery` with format, compression, tuple descriptor, Iceberg schema, statistics, and row-location flags.",
+      "For Parquet and Iceberg formats, `ReadDataSourceFunction` emits `read_parquet(path_list)` and may add `schema=map {...}` for Iceberg schema evolution, `explicit_cardinality` for known row counts, `filename` for row-origin tracking, and `file_row_number=true` for delete filtering or update/delete row identity.",
+      "DuckDB performs the actual vectorized scan, projection, filter, join, aggregation, order, and limit work represented by the generated SQL. DuckDB's own Parquet reader can push filters and projections into Parquet scans."
+    ],
+    "result_streaming": [
+      "Pg_lake talks to pgduck_server with libpq. `SendQueryWithParams` sends the query asynchronously and switches to single-row mode.",
+      "Full-query pushdown consumes one `PGRES_SINGLE_TUPLE` per executor call, while the FDW path refills a per-scan batch from the same single-row protocol and then returns stored heap tuples.",
+      "All returned fields are text-format values; Pg_lake rejects binary results, runs PostgreSQL input conversion, and stores heap tuples in PostgreSQL executor slots.",
+      "EXPLAIN uses the same snapshot replacement to show `Engine: DuckDB`, data/delete file counts, `Vectorized SQL`, and the underlying DuckDB plan."
+    ]
+  },
+  "design_tradeoffs": {
+    "late_file_binding": {
+      "benefit": "Prepared statements and concurrent metadata changes see the correct file set because the file list is resolved under the executor's transaction snapshot rather than at planning time.",
+      "cost": "The system needs a placeholder/deparse/replace pipeline and must preserve unique relation identifiers across PostgreSQL planning and ruleutils deparsing."
+    },
+    "postgres_planner_plus_duckdb_execution": {
+      "benefit": "Pg_lake reuses PostgreSQL parsing, planning hooks, permissions, FDW integration, and tuple conversion while delegating vectorizable analytics work to DuckDB.",
+      "cost": "Shippability analysis must be conservative; unsupported functions, types, collations, system columns, named tuplestores, or DuckDB semantic differences force partial pushdown or local execution."
+    },
+    "metadata_pruning_before_duckdb": {
+      "benefit": "Iceberg partition and file-level min/max metadata can remove whole files before DuckDB opens them, which is especially important on object storage.",
+      "cost": "Pruning depends on available stats, field-id mapping, supported data types, and PostgreSQL predicate proof. Missing stats or unsupported complex/collated fields keep files in the scan."
+    },
+    "position_delete_anti_join": {
+      "benefit": "Merge-on-read deletes avoid rewriting large Parquet data files and are simple to express in DuckDB SQL using filename and file row number.",
+      "cost": "Accumulated delete files add read amplification and a hash anti-join. The approach depends on stable file paths and row positions and must normalize paths when matching returned filenames."
+    },
+    "single_row_protocol": {
+      "benefit": "The PostgreSQL executor can receive streamed rows without materializing the whole DuckDB result inside PostgreSQL.",
+      "cost": "Text serialization/deserialization and per-row PostgreSQL tuple construction remain overheads compared with a binary or vector-batch interface."
+    },
+    "duckdb_schema_map_for_iceberg": {
+      "benefit": "Pg_lake can read Parquet files with evolved Iceberg schemas by passing a field-id based schema map to DuckDB.",
+      "cost": "The Pg_lake code comments describe this as depending on a DuckDB schema parameter that was previously undocumented locally, so version compatibility should be tested carefully."
+    }
+  },
+  "limitations_and_risks": {
+    "pushdown_coverage": [
+      "Full-query pushdown only applies to SELECT queries without modifying CTEs or FOR UPDATE and only when all referenced relations are lake tables and expressions are shippable.",
+      "Partial pushdown can still leave filters, functions, or aggregates in PostgreSQL, which may require extra columns to be fetched and may reduce performance.",
+      "DuckDB semantic differences require rewrites or fallback; the code explicitly guards cases such as LIMIT WITH TIES, empty target lists, certain SRF/unnest placements, unsupported relation kinds, and unsupported system-column access."
+    ],
+    "pruning_accuracy_and_cost": [
+      "Pruning is intentionally inclusive. Missing column stats, unsupported types, external field mapping failures, unsupported collations, or complex predicates can prevent pruning but should not drop correct rows.",
+      "External Iceberg pruning may need remote Parquet stats reads for each candidate file, which can become expensive when metadata stats are not already available locally.",
+      "Filename pruning for wildcard non-Iceberg paths requires remote file enumeration, which can be expensive for very large object-store prefixes."
+    ],
+    "delete_file_support": [
+      "The observed read path applies position delete files by anti-joining against `(file_path, pos)`; equality delete handling is not implemented in the verified internal path, and external equality-delete behavior in this SELECT path is [uncertain].",
+      "Position delete files are deprecated in Iceberg v3 in favor of deletion vectors, while Pg_lake's current SELECT path is built around position delete files.",
+      "Delete-file accumulation can degrade SELECT latency because every affected read must also read and join delete files until compaction or vacuum rewrites data files."
+    ],
+    "consistency_and_path_matching": [
+      "The code uses PostgreSQL transaction snapshots for catalog consistency, but object-store visibility, expired metadata, and stale external Iceberg metadata can still be operational concerns outside PostgreSQL's MVCC boundary.",
+      "Update/delete row identity depends on filename and file-row-number matching. The code strips URL query arguments when building result-file indexes because the filesystem layer can append query parameters."
+    ],
+    "streaming_overhead": [
+      "Results are streamed through libpq single-row mode in text format and converted back through PostgreSQL input functions, which protects type semantics but adds CPU overhead.",
+      "The FDW path maintains batch memory for converted tuples even though pgduck_server is returning single-row-mode results."
+    ]
+  },
+  "implications_for_gaussdb": {
+    "planner_integration": "A GaussDB implementation should decide whether to mirror PostgreSQL FDW and CustomScan extension points or provide equivalent planner/executor hooks for full-query and partial pushdown. The key requirement is preserving relation identity and restriction metadata from planning into executor-time file discovery.",
+    "transaction_model": "The scan snapshot should be bound at executor start under a transaction-consistent metadata snapshot. If GaussDB uses a different MVCC or distributed metadata model, the catalog snapshot contract must be specified before implementing prepared statements and concurrent writes.",
+    "metadata_catalog": "Internal table support needs a catalog that stores data files, position delete files, column statistics, partition values, row counts, deleted-row counts, schema field IDs, and deletion-file mappings. External Iceberg support needs a spec-compliant reader for metadata JSON, manifest lists, manifests, sequence numbers, partition specs, and delete files.",
+    "execution_engine_boundary": "The Pg_lake design assumes DuckDB can be reached through a PostgreSQL-compatible wire protocol and can execute generated SQL with `read_parquet`. GaussDB should quantify the serialization cost and consider whether a vector-batch protocol or in-process execution path is needed.",
+    "delete_strategy": "Because the current SELECT path relies on position delete files, GaussDB should evaluate Iceberg v3 deletion vector support, equality delete requirements, and compaction thresholds before adopting the same read-time anti-join strategy.",
+    "operability": "EXPLAIN visibility is important. Pg_lake exposes `Engine: DuckDB`, `Vectorized SQL`, `Data Files Scanned`, `Deletion Files Scanned`, and DuckDB plans; equivalent observability should be designed early for debugging pushdown correctness and pruning effectiveness.",
+    "risk_area": "The equality-delete and Iceberg v3 deletion-vector roadmap is [uncertain] for direct reuse of this flow in GaussDB without additional implementation work."
+  },
+  "answer_to_original_questions": {
+    "planning": "SELECT planning starts in `LakeTablePlanner` and the Pg_lake FDW callbacks. If the whole query is shippable, a `CustomScan` Query Pushdown plan replaces the normal plan. Otherwise `ForeignScan` paths carry the shippable scan/join/upper fragments.",
+    "query_pushdown": "Pushdown is decided by command type, lake-table-only relation checks, shippability of expressions/types/operators/functions, and GUCs. Full-query pushdown produces one DuckDB SQL statement; partial pushdown produces DuckDB SQL for the remote fragment while PostgreSQL handles unsupported parts.",
+    "scan_snapshot_creation": "Both execution paths call `CreatePgLakeScanSnapshot` at executor start, using `GetTransactionSnapshot`, relation restrictions, executor parameters, include-children policy, and optional result-relation information.",
+    "data_file_discovery_and_pruning": "Internal tables read Pg_lake catalog file metadata; external Iceberg tables read current snapshot manifests; ordinary lake files use the path option. Iceberg files are pruned using partition values, column min/max stats, field-id mappings, `_filename` filters where applicable, and PostgreSQL predicate proof.",
+    "delete_file_application": "The verified SELECT path applies position delete files by requesting filename and `file_row_number` from data-file `read_parquet` and filtering rows with a NOT IN anti-join against `(file_path, pos)` from delete-file `read_parquet`.",
+    "duckdb_read_parquet_execution": "Pg_lake emits DuckDB SQL centered on `read_parquet(path_list, schema=..., explicit_cardinality=..., filename=..., file_row_number=true)` for Parquet/Iceberg files, with child scans unioned and projection/filter/aggregate/join work represented in DuckDB SQL.",
+    "result_streaming": "Pg_lake sends the generated SQL to pgduck_server via libpq, enables single-row mode, waits for results, converts text fields to PostgreSQL datums/heap tuples, and returns executor slots to PostgreSQL."
+  },
+  "source_links": {
+    "local_repository_files": [
+      "D:/pg_lake/pg_lake_table/src/planner/query_pushdown.c",
+      "D:/pg_lake/pg_lake_table/src/planner/restriction_collector.c",
+      "D:/pg_lake/pg_lake_table/src/fdw/pg_lake_table.c",
+      "D:/pg_lake/pg_lake_table/src/fdw/deparse_ruleutils.c",
+      "D:/pg_lake/pg_lake_table/src/fdw/snapshot.c",
+      "D:/pg_lake/pg_lake_table/src/fdw/data_files_catalog.c",
+      "D:/pg_lake/pg_lake_table/src/fdw/data_file_pruning.c",
+      "D:/pg_lake/pg_lake_table/src/fdw/writable_table.c",
+      "D:/pg_lake/pg_lake_table/src/duckdb/transform_query_to_duckdb.c",
+      "D:/pg_lake/pg_lake_engine/src/pgduck/read_data.c",
+      "D:/pg_lake/pg_lake_engine/src/pgduck/client.c",
+      "D:/pg_lake/pg_lake_iceberg/src/iceberg/api/datafile.c",
+      "D:/pg_lake/pg_lake_iceberg/src/iceberg/api/manifest.c",
+      "D:/pg_lake/pg_lake_iceberg/include/pg_lake/iceberg/manifest_spec.h",
+      "D:/pg_lake/pg_lake_table/tests/pytests/test_explain.py",
+      "D:/pg_lake/docs/iceberg-tables.md",
+      "D:/pg_lake/docs/use-case-log-management.md"
+    ],
+    "official_urls": [
+      "https://iceberg.apache.org/spec/",
+      "https://iceberg.apache.org/spec/#scan-planning",
+      "https://iceberg.apache.org/spec/#row-level-deletes",
+      "https://duckdb.org/docs/current/data/parquet/overview",
+      "https://duckdb.org/docs/current/guides/file_formats/query_parquet",
+      "https://www.postgresql.org/docs/current/fdw-callbacks.html",
+      "https://www.postgresql.org/docs/current/custom-scan.html",
+      "https://www.postgresql.org/docs/current/custom-scan-plan.html"
+    ]
+  },
+  "uncertain": [
+    "limitations_and_risks",
+    "implications_for_gaussdb"
+  ]
+}

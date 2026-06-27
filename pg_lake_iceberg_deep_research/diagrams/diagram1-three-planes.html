@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>pg_lake 三平面架构图</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{font-family:'JetBrains Mono',monospace;background:#020617;min-height:100vh;padding:1.5rem;color:white}
+    .container{max-width:1100px;margin:0 auto}
+    .header{margin-bottom:1.5rem}
+    .header-row{display:flex;align-items:center;gap:1rem;margin-bottom:.5rem}
+    .pulse-dot{width:12px;height:12px;background:#22d3ee;border-radius:50%;animation:pulse 2s infinite}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+    h1{font-size:1.3rem;font-weight:700;letter-spacing:-.025em}
+    .subtitle{color:#94a3b8;font-size:.8rem;margin-left:1.75rem}
+    .diagram-container{background:rgba(15,23,42,.5);border-radius:1rem;border:1px solid #1e293b;padding:1.5rem;overflow-x:auto}
+    svg{width:100%;min-width:900px;display:block}
+    .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;margin-top:1.5rem}
+    .card{background:rgba(15,23,42,.5);border-radius:.75rem;border:1px solid #1e293b;padding:1rem}
+    .card-header{display:flex;align-items:center;gap:.5rem;margin-bottom:.5rem}
+    .card-dot{width:8px;height:8px;border-radius:50%}
+    .card-dot.cyan{background:#22d3ee}.card-dot.emerald{background:#34d399}.card-dot.amber{background:#fbbf24}
+    .card h3{font-size:.8rem;font-weight:600}
+    .card ul{list-style:none;color:#94a3b8;font-size:.7rem}
+    .card li{margin-bottom:.3rem}
+  </style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <div class="header-row">
+      <div class="pulse-dot"></div>
+      <h1>pg_lake 三平面架构</h1>
+    </div>
+    <p class="subtitle">用户只连 PostgreSQL，pg_lake 透明委托给 pgduck_server (DuckDB) 和 Iceberg/对象存储</p>
+  </div>
+  <div class="diagram-container">
+    <svg viewBox="0 0 1060 620">
+      <defs>
+        <marker id="ah" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#64748b"/></marker>
+        <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0L0 0 0 40" fill="none" stroke="#1e293b" stroke-width=".5"/></pattern>
+      </defs>
+      <rect width="100%" height="100%" fill="url(#grid)"/>
+
+      <!-- === PLANE 1: SQL & Transaction (Blue) === -->
+      <rect x="20" y="30" width="330" height="560" rx="12" fill="rgba(59,130,246,.06)" stroke="#3b82f6" stroke-width="1.5" stroke-dasharray="8,4"/>
+      <text x="185" y="56" text-anchor="middle" fill="#3b82f6" font-size="12" font-weight="700">SQL 与事务平面</text>
+
+      <!-- User -->
+      <rect x="50" y="70" width="120" height="40" rx="6" fill="rgba(30,41,59,.5)" stroke="#94a3b8" stroke-width="1.5"/>
+      <text x="110" y="90" text-anchor="middle" fill="white" font-size="11" font-weight="600">Users / psql</text>
+      <text x="110" y="102" text-anchor="middle" fill="#94a3b8" font-size="8">SQL 客户端</text>
+
+      <!-- PostgreSQL -->
+      <rect x="50" y="130" width="270" height="80" rx="8" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+      <text x="185" y="155" text-anchor="middle" fill="white" font-size="12" font-weight="700">PostgreSQL</text>
+      <text x="185" y="172" text-anchor="middle" fill="#94a3b8" font-size="9">查询规划 · 事务协调 · 权限</text>
+      <text x="185" y="187" text-anchor="middle" fill="#94a3b8" font-size="9">MVCC · 系统目录 · 触发器</text>
+
+      <!-- pg_lake_table -->
+      <rect x="50" y="230" width="270" height="55" rx="6" fill="rgba(59,130,246,.15)" stroke="#3b82f6" stroke-width="1.5"/>
+      <text x="185" y="252" text-anchor="middle" fill="white" font-size="11" font-weight="600">pg_lake_table</text>
+      <text x="185" y="270" text-anchor="middle" fill="#94a3b8" font-size="8">FDW · Planner Hook · Write · TxHooks</text>
+
+      <!-- pg_lake_iceberg -->
+      <rect x="50" y="300" width="270" height="55" rx="6" fill="rgba(59,130,246,.15)" stroke="#3b82f6" stroke-width="1.5"/>
+      <text x="185" y="322" text-anchor="middle" fill="white" font-size="11" font-weight="600">pg_lake_iceberg</text>
+      <text x="185" y="340" text-anchor="middle" fill="#94a3b8" font-size="8">Catalog · Metadata · REST/ObjStore</text>
+
+      <!-- pg_lake_engine -->
+      <rect x="50" y="370" width="270" height="45" rx="6" fill="rgba(59,130,246,.1)" stroke="#3b82f6" stroke-width="1"/>
+      <text x="185" y="397" text-anchor="middle" fill="#93c5fd" font-size="10" font-weight="600">pg_lake_engine (pgduck client, Avro)</text>
+
+      <!-- Local catalog tables -->
+      <rect x="50" y="430" width="270" height="60" rx="6" fill="rgba(76,29,149,.3)" stroke="#a78bfa" stroke-width="1.5"/>
+      <text x="185" y="452" text-anchor="middle" fill="white" font-size="10" font-weight="600">本地目录表</text>
+      <text x="185" y="468" text-anchor="middle" fill="#94a3b8" font-size="8">tables_internal · tables_external</text>
+      <text x="185" y="482" text-anchor="middle" fill="#94a3b8" font-size="8">数据文件 · 统计 · 分区值 · 删除映射</text>
+
+      <!-- Arrows within plane 1 -->
+      <line x1="110" y1="110" x2="110" y2="128" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#ah)"/>
+      <line x1="185" y1="210" x2="185" y2="228" stroke="#3b82f6" stroke-width="1.5" marker-end="url(#ah)"/>
+      <line x1="185" y1="285" x2="185" y2="298" stroke="#3b82f6" stroke-width="1.5" marker-end="url(#ah)"/>
+      <line x1="185" y1="355" x2="185" y2="368" stroke="#3b82f6" stroke-width="1" marker-end="url(#ah)"/>
+      <line x1="185" y1="415" x2="185" y2="428" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#ah)"/>
+
+      <!-- === PLANE 2: Vectorized Execution (Green) === -->
+      <rect x="370" y="30" width="300" height="560" rx="12" fill="rgba(16,185,129,.06)" stroke="#10b981" stroke-width="1.5" stroke-dasharray="8,4"/>
+      <text x="520" y="56" text-anchor="middle" fill="#10b981" font-size="12" font-weight="700">向量化执行平面</text>
+
+      <!-- pgduck_server -->
+      <rect x="395" y="130" width="250" height="70" rx="8" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1.5"/>
+      <text x="520" y="155" text-anchor="middle" fill="white" font-size="12" font-weight="700">pgduck_server</text>
+      <text x="520" y="172" text-anchor="middle" fill="#94a3b8" font-size="9">PG wire protocol (port 5332)</text>
+      <text x="520" y="187" text-anchor="middle" fill="#94a3b8" font-size="9">独立进程，不嵌入 PG 后端</text>
+
+      <!-- DuckDB -->
+      <rect x="395" y="220" width="250" height="55" rx="6" fill="rgba(6,78,59,.3)" stroke="#34d399" stroke-width="1.5"/>
+      <text x="520" y="242" text-anchor="middle" fill="white" font-size="11" font-weight="600">DuckDB</text>
+      <text x="520" y="260" text-anchor="middle" fill="#94a3b8" font-size="8">列式向量化 · read_parquet · 聚合 · JOIN</text>
+
+      <!-- duckdb_pglake -->
+      <rect x="395" y="295" width="250" height="45" rx="6" fill="rgba(6,78,59,.2)" stroke="#34d399" stroke-width="1"/>
+      <text x="520" y="322" text-anchor="middle" fill="#6ee7b7" font-size="10" font-weight="600">duckdb_pglake (PG 兼容函数)</text>
+
+      <!-- HTTPFS / Object Store -->
+      <rect x="395" y="360" width="250" height="55" rx="6" fill="rgba(120,53,15,.3)" stroke="#fbbf24" stroke-width="1.5"/>
+      <text x="520" y="382" text-anchor="middle" fill="white" font-size="11" font-weight="600">HTTPFS / S3 / GCS / Azure</text>
+      <text x="520" y="400" text-anchor="middle" fill="#94a3b8" font-size="8">凭证 · 缓存 · Secret 管理</text>
+
+      <!-- Parquet read/write -->
+      <rect x="395" y="435" width="250" height="45" rx="6" fill="rgba(76,29,149,.3)" stroke="#a78bfa" stroke-width="1.5"/>
+      <text x="520" y="462" text-anchor="middle" fill="white" font-size="10" font-weight="600">Parquet / CSV / JSON 读写</text>
+
+      <!-- Arrows within plane 2 -->
+      <line x1="520" y1="200" x2="520" y2="218" stroke="#34d399" stroke-width="1.5" marker-end="url(#ah)"/>
+      <line x1="520" y1="275" x2="520" y2="293" stroke="#34d399" stroke-width="1" marker-end="url(#ah)"/>
+      <line x1="520" y1="340" x2="520" y2="358" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#ah)"/>
+      <line x1="520" y1="415" x2="520" y2="433" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#ah)"/>
+
+      <!-- === PLANE 3: Table Format & Metadata (Amber) === -->
+      <rect x="690" y="30" width="350" height="560" rx="12" fill="rgba(245,158,11,.06)" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="8,4"/>
+      <text x="865" y="56" text-anchor="middle" fill="#f59e0b" font-size="12" font-weight="700">表格式与元数据平面</text>
+
+      <!-- Iceberg metadata JSON -->
+      <rect x="710" y="130" width="310" height="55" rx="6" fill="rgba(120,53,15,.3)" stroke="#fbbf24" stroke-width="1.5"/>
+      <text x="865" y="152" text-anchor="middle" fill="white" font-size="11" font-weight="600">metadata.json</text>
+      <text x="865" y="170" text-anchor="middle" fill="#94a3b8" font-size="8">schema · field-id · partition-spec · snapshot</text>
+
+      <!-- Manifest list / manifest -->
+      <rect x="710" y="205" width="310" height="55" rx="6" fill="rgba(120,53,15,.25)" stroke="#fbbf24" stroke-width="1.5"/>
+      <text x="865" y="227" text-anchor="middle" fill="white" font-size="11" font-weight="600">manifest-list / manifest</text>
+      <text x="865" y="245" text-anchor="middle" fill="#94a3b8" font-size="8">data-file 元数据 · delete-file 元数据 · 统计</text>
+
+      <!-- Data files -->
+      <rect x="710" y="280" width="150" height="55" rx="6" fill="rgba(76,29,149,.3)" stroke="#a78bfa" stroke-width="1.5"/>
+      <text x="785" y="302" text-anchor="middle" fill="white" font-size="11" font-weight="600">Data Files</text>
+      <text x="785" y="320" text-anchor="middle" fill="#94a3b8" font-size="8">Parquet (不可变)</text>
+
+      <!-- Position delete files -->
+      <rect x="870" y="280" width="150" height="55" rx="6" fill="rgba(136,19,55,.4)" stroke="#fb7185" stroke-width="1.5"/>
+      <text x="945" y="302" text-anchor="middle" fill="white" font-size="11" font-weight="600">Delete Files</text>
+      <text x="945" y="320" text-anchor="middle" fill="#94a3b8" font-size="8">Position Delete (v2)</text>
+
+      <!-- Catalog pointer -->
+      <rect x="710" y="360" width="310" height="55" rx="6" fill="rgba(251,146,60,.2)" stroke="#fb923c" stroke-width="1.5"/>
+      <text x="865" y="382" text-anchor="middle" fill="white" font-size="11" font-weight="600">Catalog 指针</text>
+      <text x="865" y="400" text-anchor="middle" fill="#94a3b8" font-size="8">逻辑名 → metadata-location · 原子提交</text>
+
+      <!-- Object storage -->
+      <rect x="710" y="435" width="310" height="55" rx="6" fill="rgba(120,53,15,.2)" stroke="#fbbf24" stroke-width="1"/>
+      <text x="865" y="457" text-anchor="middle" fill="white" font-size="11" font-weight="600">对象存储 (S3 / GCS / Azure)</text>
+      <text x="865" y="475" text-anchor="middle" fill="#94a3b8" font-size="8">所有文件和元数据的持久存储</text>
+
+      <!-- External engines -->
+      <rect x="710" y="510" width="310" height="45" rx="6" fill="rgba(236,72,153,.2)" stroke="#ec4899" stroke-width="1.5"/>
+      <text x="865" y="537" text-anchor="middle" fill="white" font-size="10" font-weight="600">Spark / PyIceberg / Trino (跨引擎读取)</text>
+
+      <!-- Arrows within plane 3 -->
+      <line x1="865" y1="185" x2="865" y2="203" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#ah)"/>
+      <line x1="865" y1="260" x2="785" y2="278" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#ah)"/>
+      <line x1="865" y1="260" x2="945" y2="278" stroke="#fb7185" stroke-width="1.5" marker-end="url(#ah)"/>
+      <line x1="865" y1="335" x2="865" y2="358" stroke="#fb923c" stroke-width="1.5" marker-end="url(#ah)"/>
+      <line x1="865" y1="415" x2="865" y2="433" stroke="#fbbf24" stroke-width="1" marker-end="url(#ah)"/>
+      <line x1="865" y1="490" x2="865" y2="508" stroke="#ec4899" stroke-width="1.5" marker-end="url(#ah)"/>
+
+      <!-- === CROSS-PLANE ARROWS === -->
+      <!-- PG → pgduck_server (libpq) -->
+      <line x1="320" y1="170" x2="393" y2="170" stroke="#34d399" stroke-width="2" marker-end="url(#ah)"/>
+      <text x="357" y="162" text-anchor="middle" fill="#6ee7b7" font-size="9" font-weight="600">libpq</text>
+      <text x="357" y="182" text-anchor="middle" fill="#94a3b8" font-size="7">重写SQL + text-row</text>
+
+      <!-- pgduck → object store -->
+      <line x1="645" y1="387" x2="708" y2="462" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#ah)"/>
+      <text x="690" y="418" text-anchor="middle" fill="#94a3b8" font-size="8">S3 I/O</text>
+
+      <!-- PG catalog → Iceberg metadata -->
+      <path d="M320 460 Q520 520 708 460" fill="none" stroke="#a78bfa" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#ah)"/>
+      <text x="500" y="500" text-anchor="middle" fill="#94a3b8" font-size="8">catalog / metadata 提交</text>
+
+      <!-- Legend -->
+      <text x="50" y="530" fill="white" font-size="10" font-weight="600">图例</text>
+      <rect x="50" y="542" width="14" height="9" rx="2" fill="rgba(6,78,59,.4)" stroke="#34d399" stroke-width="1"/><text x="70" y="550" fill="#94a3b8" font-size="8">执行引擎</text>
+      <rect x="130" y="542" width="14" height="9" rx="2" fill="rgba(59,130,246,.15)" stroke="#3b82f6" stroke-width="1"/><text x="150" y="550" fill="#94a3b8" font-size="8">PG 扩展</text>
+      <rect x="210" y="542" width="14" height="9" rx="2" fill="rgba(120,53,15,.3)" stroke="#fbbf24" stroke-width="1"/><text x="230" y="550" fill="#94a3b8" font-size="8">Iceberg/云</text>
+      <rect x="300" y="542" width="14" height="9" rx="2" fill="rgba(76,29,149,.3)" stroke="#a78bfa" stroke-width="1"/><text x="320" y="550" fill="#94a3b8" font-size="8">数据/目录</text>
+      <rect x="390" y="542" width="14" height="9" rx="2" fill="rgba(136,19,55,.4)" stroke="#fb7185" stroke-width="1"/><text x="410" y="550" fill="#94a3b8" font-size="8">删除</text>
+      <line x1="470" y1="547" x2="484" y2="547" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="4,3"/><text x="490" y="550" fill="#94a3b8" font-size="8">跨平面连接</text>
+    </svg>
+  </div>
+  <div class="cards">
+    <div class="card">
+      <div class="card-header"><div class="card-dot cyan"></div><h3>SQL 与事务平面</h3></div>
+      <ul>
+        <li>• 用户只连接 PostgreSQL，无需感知后端</li>
+        <li>• pg_lake 扩展注册 FDW/planner hook</li>
+        <li>• 本地目录表加速规划和写入</li>
+        <li>• 事务钩子保证元数据一致性</li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-dot emerald"></div><h3>向量化执行平面</h3></div>
+      <ul>
+        <li>• pgduck_server 独立进程，保护 PG 稳定</li>
+        <li>• DuckDB 列式扫描，比 PG 行式快 10-100x</li>
+        <li>• 对象存储 I/O + 凭证统一管理</li>
+        <li>• 结果通过 libpq single-row 流式返回</li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-dot amber"></div><h3>表格式与元数据平面</h3></div>
+      <ul>
+        <li>• Iceberg 提供跨引擎互操作契约</li>
+        <li>• 不可变文件 + snapshot = 时间旅行</li>
+        <li>• Catalog 指针是原子提交的关键</li>
+        <li>• Spark/PyIceberg 可直接读取 pg_lake 表</li>
+      </ul>
+    </div>
+  </div>
+</div>
+</body>
+</html>

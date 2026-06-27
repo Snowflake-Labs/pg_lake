@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pg_lake + Iceberg 小白入门 Wiki</title>
+<style>
+:root {
+  --bg:#f6f7f9;
+  --panel:#ffffff;
+  --ink:#17202a;
+  --muted:#5f6b7a;
+  --line:#d9dee7;
+  --blue:#2563eb;
+  --teal:#0f766e;
+  --green:#16803c;
+  --amber:#b45309;
+  --red:#b42318;
+  --violet:#6d28d9;
+  --code:#111827;
+}
+* { box-sizing:border-box; }
+html { scroll-behavior:smooth; }
+body {
+  margin:0;
+  font-family:"Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  color:var(--ink);
+  background:var(--bg);
+  line-height:1.65;
+  overflow-x:hidden;
+}
+a { color:var(--blue); text-decoration:none; }
+a:hover { text-decoration:underline; }
+.layout { display:grid; grid-template-columns:260px minmax(0,1fr); min-height:100vh; max-width:100vw; overflow-x:hidden; }
+aside {
+  position:sticky;
+  top:0;
+  height:100vh;
+  min-width:0;
+  padding:22px 18px;
+  border-right:1px solid var(--line);
+  background:#fff;
+  overflow:auto;
+}
+.brand { font-size:18px; font-weight:750; line-height:1.25; margin-bottom:8px; }
+.version { color:var(--muted); font-size:12px; margin-bottom:20px; }
+nav a {
+  display:block;
+  padding:8px 10px;
+  border-radius:6px;
+  color:#334155;
+  font-size:14px;
+}
+nav a:hover { background:#eef2ff; text-decoration:none; }
+main { width:100%; min-width:0; max-width:1120px; padding:34px 34px 80px; }
+section { margin:0 0 44px; scroll-margin-top:20px; }
+.hero {
+  min-height:64vh;
+  display:grid;
+  align-content:center;
+  border-bottom:1px solid var(--line);
+  margin-bottom:36px;
+  padding-bottom:28px;
+}
+h1 {
+  max-width:1020px;
+  font-size:clamp(32px,4.2vw,50px);
+  line-height:1.08;
+  margin:0 0 18px;
+  letter-spacing:0;
+  overflow-wrap:anywhere;
+}
+h2 { font-size:26px; margin:0 0 16px; letter-spacing:0; }
+h3 { font-size:18px; margin:22px 0 8px; letter-spacing:0; }
+.lead { max-width:820px; color:#334155; font-size:18px; margin:0 0 26px; }
+.pillrow { display:flex; flex-wrap:wrap; gap:10px; }
+.pill {
+  display:inline-flex;
+  align-items:center;
+  border:1px solid var(--line);
+  border-radius:999px;
+  padding:6px 10px;
+  background:#fff;
+  font-size:13px;
+  color:#334155;
+}
+.grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:14px; }
+.two { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+.card {
+  background:var(--panel);
+  border:1px solid var(--line);
+  border-radius:8px;
+  padding:16px;
+}
+.card h3 { margin-top:0; }
+.muted { color:var(--muted); }
+.diagram {
+  background:#fff;
+  border:1px solid var(--line);
+  border-radius:8px;
+  padding:18px;
+  overflow:auto;
+}
+.flow {
+  display:grid;
+  grid-template-columns:repeat(6,minmax(120px,1fr));
+  gap:10px;
+}
+.node {
+  min-height:92px;
+  border:1px solid var(--line);
+  border-radius:8px;
+  background:#fff;
+  padding:12px;
+  position:relative;
+}
+.node strong { display:block; margin-bottom:6px; }
+.node:not(:last-child)::after {
+  content:"";
+  position:absolute;
+  right:-10px;
+  top:45px;
+  width:10px;
+  height:2px;
+  background:#94a3b8;
+}
+.blue { border-top:4px solid var(--blue); }
+.teal { border-top:4px solid var(--teal); }
+.green { border-top:4px solid var(--green); }
+.amber { border-top:4px solid var(--amber); }
+.red { border-top:4px solid var(--red); }
+.violet { border-top:4px solid var(--violet); }
+table { width:100%; border-collapse:collapse; background:#fff; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+th,td { border:1px solid var(--line); padding:10px 12px; vertical-align:top; }
+th { background:#f1f5f9; text-align:left; }
+code, pre {
+  font-family:"Cascadia Code", Consolas, monospace;
+}
+pre {
+  background:var(--code);
+  color:#eef2ff;
+  border-radius:8px;
+  padding:14px;
+  overflow:auto;
+  font-size:13px;
+}
+.callout {
+  border-left:4px solid var(--blue);
+  background:#eff6ff;
+  padding:12px 14px;
+  border-radius:0 8px 8px 0;
+  margin:14px 0;
+}
+.tabs {
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  margin:12px 0;
+}
+button.tab {
+  border:1px solid var(--line);
+  border-radius:6px;
+  background:#fff;
+  color:#334155;
+  padding:8px 12px;
+  cursor:pointer;
+  font:inherit;
+}
+button.tab.active {
+  border-color:var(--blue);
+  color:#fff;
+  background:var(--blue);
+}
+.tabpane { display:none; }
+.tabpane.active { display:block; }
+.checklist li { margin:8px 0; }
+.path-list {
+  columns:2;
+  column-gap:26px;
+  font-size:13px;
+}
+.path-list li { break-inside:avoid; margin-bottom:6px; }
+footer {
+  margin-top:60px;
+  padding-top:18px;
+  border-top:1px solid var(--line);
+  color:var(--muted);
+  font-size:13px;
+}
+@media (max-width: 920px) {
+  .layout { grid-template-columns:1fr; }
+  aside { position:relative; height:auto; border-right:0; border-bottom:1px solid var(--line); }
+  main { width:100%; max-width:100%; padding:24px 16px 60px; }
+  section, .hero { width:calc(100vw - 32px); max-width:calc(100vw - 32px); }
+  h1 { width:calc(100vw - 32px); max-width:calc(100vw - 32px); font-size:30px; line-height:1.12; word-break:break-all; }
+  .lead { width:calc(100vw - 32px); max-width:calc(100vw - 32px); font-size:16px; overflow-wrap:anywhere; }
+  .grid,.two,.flow { grid-template-columns:1fr; }
+  .node:not(:last-child)::after { display:none; }
+  .path-list { columns:1; }
+}
+</style>
+</head>
+<body>
+<div class="layout">
+<aside>
+  <div class="brand">pg_lake + Iceberg<br>小白入门 Wiki</div>
+  <div class="version">从数据库零基础到源码阅读路径</div>
+  <nav>
+    <a href="#goal">我们要干什么</a>
+    <a href="#concepts">基础概念</a>
+    <a href="#architecture">三层架构</a>
+    <a href="#select">SELECT 流程</a>
+    <a href="#write">写入与删除</a>
+    <a href="#catalog">Catalog</a>
+    <a href="#compare">对比理解</a>
+    <a href="#gaussdb">GaussDB 评估</a>
+    <a href="#roadmap">学习路线</a>
+    <a href="#sources">来源索引</a>
+  </nav>
+</aside>
+<main>
+  <section class="hero" id="goal">
+    <h1>把数据湖文件变成可查、可写、可互操作的表</h1>
+    <p class="lead">pg_lake 的核心目标不是“再造一个数据库”，而是让 PostgreSQL 继续做 SQL、事务和权限入口，让 DuckDB 快速读写对象存储文件，让 Iceberg 保存标准湖表元数据。</p>
+    <div class="pillrow">
+      <span class="pill">PostgreSQL：入口和事务</span>
+      <span class="pill">pg_lake：桥接层</span>
+      <span class="pill">DuckDB：文件执行引擎</span>
+      <span class="pill">Iceberg：表格式</span>
+      <span class="pill">对象存储：数据落地</span>
+    </div>
+  </section>
+
+  <section id="concepts">
+    <h2>1. 基础概念先分清</h2>
+    <div class="grid">
+      <div class="card blue"><h3>文件格式</h3><p>Parquet/CSV/JSON 解决“一个文件怎么存”。Parquet 是列式格式，适合分析扫描。</p></div>
+      <div class="card teal"><h3>表格式</h3><p>Iceberg 解决“很多文件怎么组成一张表”。它管理 snapshot、manifest、schema 演进和删除语义。</p></div>
+      <div class="card green"><h3>执行引擎</h3><p>DuckDB 负责快速读写文件，尤其适合列式扫描、filter pushdown 和批量计算。</p></div>
+      <div class="card amber"><h3>数据库入口</h3><p>PostgreSQL 接收 SQL，负责事务、权限、规划和不能下推时的本地执行。</p></div>
+      <div class="card red"><h3>Catalog</h3><p>Catalog 把表名映射到当前 metadata 文件，并提供原子提交点。</p></div>
+      <div class="card violet"><h3>Pushdown</h3><p>把适合 DuckDB 的扫描和计算推下去，减少 PostgreSQL 一行行处理的成本。</p></div>
+    </div>
+    <div class="callout">最容易混淆的一点：Parquet 不是 Iceberg。Parquet 是“书页怎么印”，Iceberg 是“目录、版本和哪些书页属于这张表”。</div>
+  </section>
+
+  <section id="architecture">
+    <h2>2. 三层架构</h2>
+    <div class="diagram">
+      <div class="flow">
+        <div class="node blue"><strong>用户 SQL</strong><span>SELECT / INSERT / UPDATE / DELETE</span></div>
+        <div class="node amber"><strong>PostgreSQL</strong><span>解析、规划、权限、事务</span></div>
+        <div class="node teal"><strong>pg_lake 扩展</strong><span>FDW、planner hook、metadata bridge</span></div>
+        <div class="node green"><strong>pgduck_server</strong><span>隔离 DuckDB 执行进程</span></div>
+        <div class="node green"><strong>DuckDB</strong><span>read_parquet / COPY / 对象存储 I/O</span></div>
+        <div class="node violet"><strong>Iceberg + 存储</strong><span>metadata、manifest、data/delete files</span></div>
+      </div>
+    </div>
+    <table>
+      <tr><th>层</th><th>组件</th><th>职责</th></tr>
+      <tr><td>SQL 与事务层</td><td>PostgreSQL、pg_lake_table、pg_lake_iceberg</td><td>接收 SQL、规划查询、协调事务、提交 Iceberg 元数据</td></tr>
+      <tr><td>执行层</td><td>pgduck_server、DuckDB、duckdb_pglake</td><td>高速文件扫描、写 Parquet、对象存储访问、缓存和类型兼容</td></tr>
+      <tr><td>表格式与存储层</td><td>Iceberg metadata、manifest、对象存储</td><td>保存标准湖表状态和真实数据文件</td></tr>
+    </table>
+  </section>
+
+  <section id="select">
+    <h2>3. SELECT 查询怎么跑</h2>
+    <div class="tabs" data-tabs="select-tabs">
+      <button class="tab active" data-tab="s1">1 规划</button>
+      <button class="tab" data-tab="s2">2 快照</button>
+      <button class="tab" data-tab="s3">3 裁剪</button>
+      <button class="tab" data-tab="s4">4 DuckDB</button>
+      <button class="tab" data-tab="s5">5 返回</button>
+    </div>
+    <div id="s1" class="tabpane active card"><h3>规划阶段</h3><p>pg_lake 用 FDW callback 和 planner hook 判断哪些 SQL 可以下推。如果全查询可下推，走 CustomScan；否则走 ForeignScan 加 PostgreSQL 本地处理。</p></div>
+    <div id="s2" class="tabpane card"><h3>创建扫描快照</h3><p>执行开始时根据 PostgreSQL 事务快照确定当前可见的表版本，避免查询看到不一致的文件列表。</p></div>
+    <div id="s3" class="tabpane card"><h3>文件发现和裁剪</h3><p>从本地 catalog 或 Iceberg metadata 找到当前 data/delete files，再用分区值、min/max 统计和谓词推理跳过不可能命中的文件。</p></div>
+    <div id="s4" class="tabpane card"><h3>改写成 DuckDB SQL</h3><p>lake 表会被改写成 <code>read_parquet(...)</code> 等 DuckDB 函数。如果有 position delete，还会生成基于文件名和行号的 anti-join。</p></div>
+    <div id="s5" class="tabpane card"><h3>流式返回 PostgreSQL</h3><p>pgduck_server 执行 DuckDB 查询，通过 PostgreSQL wire 协议把文本行返回，pg_lake 再转换成 PostgreSQL tuple。</p></div>
+    <pre>SELECT * FROM lake_table WHERE dt = DATE '2026-06-26'
+  -> file pruning
+  -> read_parquet(candidate_files)
+  -> apply position deletes if needed
+  -> stream rows back to PostgreSQL</pre>
+  </section>
+
+  <section id="write">
+    <h2>4. 写入、更新、删除</h2>
+    <div class="two">
+      <div class="card green">
+        <h3>INSERT</h3>
+        <p>接收行数据，暂存，再由 DuckDB COPY 成新的 Parquet data files。提交时把新增文件写入 Iceberg metadata。</p>
+      </div>
+      <div class="card red">
+        <h3>DELETE / UPDATE</h3>
+        <p>DELETE 记录源文件和文件内行号。UPDATE 可以理解成“删除旧行 + 插入新行”。</p>
+      </div>
+    </div>
+    <table>
+      <tr><th>情况</th><th>策略</th><th>解释</th></tr>
+      <tr><td>整个文件都删除</td><td>移除 data file 引用</td><td>只改目录，不重写文件</td></tr>
+      <tr><td>删除少量行</td><td>MOR / position delete</td><td>写小删除文件，读时过滤</td></tr>
+      <tr><td>删除大量行</td><td>COW / 重写文件</td><td>重写干净文件，降低后续读放大</td></tr>
+    </table>
+    <div class="callout">MOR 写得快，但 delete file 多了会拖慢读；所以 VACUUM/compaction 是湖表系统的核心能力。</div>
+  </section>
+
+  <section id="catalog">
+    <h2>5. Catalog 是“当前版本指针”</h2>
+    <div class="diagram">
+      <div class="flow">
+        <div class="node blue"><strong>表名</strong><span>catalog.namespace.table</span></div>
+        <div class="node amber"><strong>metadata-location</strong><span>当前元数据文件路径</span></div>
+        <div class="node violet"><strong>metadata JSON</strong><span>schema、snapshot log</span></div>
+        <div class="node teal"><strong>snapshot</strong><span>某一刻的表状态</span></div>
+        <div class="node green"><strong>manifest</strong><span>文件清单和统计</span></div>
+        <div class="node red"><strong>data/delete files</strong><span>真实数据和删除记录</span></div>
+      </div>
+    </div>
+    <p>pg_lake 在 PostgreSQL 本地 catalog、REST Catalog、object-store catalog 之间做桥接。最难的是提交协调：本地状态、对象存储文件、Iceberg 元数据和外部 catalog 必须尽量保持一致。</p>
+  </section>
+
+  <section id="compare">
+    <h2>6. 对比理解</h2>
+    <div class="two">
+      <div>
+        <h3>pg_lake/Iceberg vs OLTP</h3>
+        <table>
+          <tr><th>维度</th><th>pg_lake/Iceberg</th><th>OLTP</th></tr>
+          <tr><td>目标</td><td>分析、湖表、互操作</td><td>高频小事务</td></tr>
+          <tr><td>存储</td><td>不可变文件 + 元数据</td><td>行存储、索引、WAL</td></tr>
+          <tr><td>更新</td><td>delete file 或重写文件</td><td>行级更新/MVCC</td></tr>
+        </table>
+      </div>
+      <div>
+        <h3>Iceberg vs Lance</h3>
+        <table>
+          <tr><th>维度</th><th>Iceberg</th><th>Lance</th></tr>
+          <tr><td>定位</td><td>通用 lakehouse 表格式</td><td>AI/向量/多模态数据</td></tr>
+          <tr><td>生态</td><td>Spark、Trino、Flink、PyIceberg</td><td>LanceDB 和 AI 数据栈</td></tr>
+          <tr><td>适用</td><td>通用分析湖表</td><td>向量检索和特征数据</td></tr>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section id="gaussdb">
+    <h2>7. GaussDB 评估清单</h2>
+    <ul class="checklist">
+      <li>是否有等价 FDW、planner hook、executor hook 或 table access method 接入点？</li>
+      <li>DuckDB 作为外部进程、内嵌库，还是替换成其他向量化引擎？</li>
+      <li>本地 catalog 与 Iceberg metadata 如何保持一致？</li>
+      <li>COMMIT、ABORT、crash recovery、REST catalog 失败如何恢复？</li>
+      <li>写并发走表级串行化，还是实现 Iceberg 乐观并发重试？</li>
+      <li>对象存储凭证、执行服务访问权限、审计和观测怎么设计？</li>
+      <li>类型语义、时间、decimal、JSON、geometry、collation 如何兼容？</li>
+      <li>compaction、snapshot expire、manifest merge 是否作为一等能力建设？</li>
+    </ul>
+  </section>
+
+  <section id="roadmap">
+    <h2>8. 从 0 到源码的 5 天路线</h2>
+    <div class="grid">
+      <div class="card blue"><h3>第 1 天</h3><p>理解数据库、SQL、表、事务、文件格式、表格式。</p></div>
+      <div class="card teal"><h3>第 2 天</h3><p>理解 SELECT：planner、FDW、CustomScan、文件裁剪、read_parquet。</p></div>
+      <div class="card green"><h3>第 3 天</h3><p>理解 INSERT/UPDATE/DELETE、MOR、COW、VACUUM。</p></div>
+      <div class="card amber"><h3>第 4 天</h3><p>理解 Iceberg metadata、Catalog、PRE_COMMIT、COMMIT、ABORT。</p></div>
+      <div class="card violet"><h3>第 5 天</h3><p>按源码导航读关键模块，不从零散函数开始。</p></div>
+      <div class="card red"><h3>验收</h3><p>能讲清 Parquet/Iceberg/pg_lake/DuckDB/Catalog 各自边界。</p></div>
+    </div>
+  </section>
+
+  <section id="sources">
+    <h2>9. 来源索引</h2>
+    <h3>本地源码与文档</h3>
+    <ul class="path-list"><li><code>D:/pg_lake/pg_lake_iceberg/pg_lake_iceberg--3.0.sql</code></li>
+<li><code>D:/pg_lake/pg_lake_iceberg/pg_lake_iceberg--3.3--3.4.sql</code></li>
+<li><code>D:/pg_lake/pg_lake_iceberg/src/iceberg/catalog.c</code></li>
+<li><code>D:/pg_lake/pg_lake_iceberg/src/iceberg/metadata_operations.c</code></li>
+<li><code>D:/pg_lake/pg_lake_iceberg/src/rest_catalog/rest_catalog.c</code></li>
+<li><code>D:/pg_lake/pg_lake_iceberg/src/object_store_catalog/object_store_catalog.c</code></li>
+<li><code>D:/pg_lake/pg_lake_iceberg/src/iceberg/external_metadata_modification.c</code></li>
+<li><code>D:/pg_lake/pg_lake_iceberg/src/init.c</code></li>
+<li><code>D:/pg_lake/pg_lake_engine/include/pg_lake/util/catalog_type.h</code></li>
+<li><code>D:/pg_lake/pg_lake_engine/src/utils/catalog_type.c</code></li>
+<li><code>D:/pg_lake/pg_lake_table/src/transaction/transaction_hooks.c</code></li>
+<li><code>D:/pg_lake/pg_lake_table/src/transaction/track_iceberg_metadata_changes.c</code></li>
+<li><code>D:/pg_lake/docs/iceberg-tables.md</code></li>
+<li><code>D:/pg_lake/pg_lake_iceberg/tests/pytests/test_iceberg_functions.py</code></li>
+<li><code>D:/pg_lake/pg_lake_table/tests/pytests/test_object_store_catalog.py</code></li>
+<li><code>D:/pg_lake/pg_lake_table/tests/pytests/test_polaris_catalog.py</code></li>
+<li><code>D:/pg_lake/pg_lake_table/tests/pytests/test_polaris_catalog_writable.py</code></li>
+<li><code>D:/pg_lake/pg_lake_table/tests/pytests/test_modify_iceberg_rest_table.py</code></li>
+<li><code>D:/pg_lake/pg_lake_table/tests/pytests/test_iceberg_catalog_server.py</code></li>
+<li><code>D:/pg_lake/README.md</code></li>
+<li><code>D:/pg_lake/pg_lake_table/pg_lake_table--3.0.sql</code></li>
+<li><code>D:/pg_lake/pg_lake_table/src/fdw/writable_table.c</code></li>
+<li><code>D:/pg_lake/pg_lake_engine/src/pgduck/read_data.c</code></li>
+<li><code>D:/pg_lake/pg_lake_engine/src/pgduck/write_data.c</code></li>
+<li><code>D:/pg_lake/pg_lake_iceberg/include/pg_lake/iceberg/api/datafile.h</code></li>
+<li><code>D:/pg_lake/docs/file-formats-reference.md</code></li>
+<li><code>D:/pg_lake/docs/dbt.md</code></li>
+<li><code>D:/pg_lake/pg_lake_iceberg/pg_lake_iceberg--3.0--3.1.sql</code></li>
+<li><code>D:/pg_lake/pg_lake_iceberg/src/iceberg/read_table_metadata.c</code></li>
+<li><code>D:/pg_lake/pg_lake_iceberg/src/iceberg/read_manifest.c</code></li>
+<li><code>D:/pg_lake/pg_lake_iceberg/src/iceberg/api/table_metadata.c</code></li>
+<li><code>D:/pg_lake/pg_lake_table/src/fdw/snapshot.c</code></li>
+<li><code>D:/pg_lake/pg_lake_table/src/fdw/data_file_pruning.c</code></li>
+<li><code>D:/pg_lake/pg_lake_table/src/fdw/position_delete_dest.c</code></li>
+<li><code>D:/pg_lake/pg_lake_table/src/ddl/ddl_changes.c</code></li>
+<li><code>D:/pg_lake/pg_lake_iceberg/tests/pytests/test_iceberg_metadata_via_spark.py</code></li>
+<li><code>D:/pg_lake/pg_lake_iceberg/tests/pytests/test_iceberg_metadata_via_pyiceberg.py</code></li>
+<li><code>D:/pg_lake/pg_lake_table/tests/pytests/test_update_delete_iceberg.py</code></li>
+<li><code>D:/pg_lake/pg_lake_table/tests/pytests/test_iceberg_validation.py</code></li>
+<li><code>D:/pg_lake/pg_lake/src/init.c</code></li>
+<li><code>D:/pg_lake/pg_lake_engine/src/init.c</code></li>
+<li><code>D:/pg_lake/pg_lake_engine/src/ddl/utility_hook.c</code></li>
+<li><code>D:/pg_lake/pg_lake_engine/src/pgduck/client.c</code></li>
+<li><code>D:/pg_lake/pg_lake_engine/src/pgduck/delete_data.c</code></li>
+<li><code>D:/pg_lake/pg_lake_engine/src/pgduck/remote_storage.c</code></li>
+<li><code>D:/pg_lake/pg_lake_table/src/init.c</code></li>
+<li><code>D:/pg_lake/pg_lake_table/src/fdw/pg_lake_table.c</code></li>
+<li><code>D:/pg_lake/pg_lake_table/src/fdw/multi_data_file_dest.c</code></li></ul>
+    <h3>官方文档</h3>
+    <ul><li><a href="https://iceberg.apache.org/spec/">https://iceberg.apache.org/spec/</a></li>
+<li><a href="https://iceberg.apache.org/spec/#optimistic-concurrency">https://iceberg.apache.org/spec/#optimistic-concurrency</a></li>
+<li><a href="https://iceberg.apache.org/spec/#table-metadata">https://iceberg.apache.org/spec/#table-metadata</a></li>
+<li><a href="https://iceberg.apache.org/spec/#metastore-tables">https://iceberg.apache.org/spec/#metastore-tables</a></li>
+<li><a href="https://iceberg.apache.org/rest-catalog-spec/">https://iceberg.apache.org/rest-catalog-spec/</a></li>
+<li><a href="https://raw.githubusercontent.com/apache/iceberg/main/open-api/rest-catalog-open-api.yaml">https://raw.githubusercontent.com/apache/iceberg/main/open-api/rest-catalog-open-api.yaml</a></li>
+<li><a href="https://parquet.apache.org/docs/file-format/">https://parquet.apache.org/docs/file-format/</a></li>
+<li><a href="https://www.postgresql.org/docs/current/transaction-iso.html">https://www.postgresql.org/docs/current/transaction-iso.html</a></li>
+<li><a href="https://www.postgresql.org/docs/current/mvcc.html">https://www.postgresql.org/docs/current/mvcc.html</a></li>
+<li><a href="https://lance.org/format/">https://lance.org/format/</a></li>
+<li><a href="https://lance.org/format/file/">https://lance.org/format/file/</a></li>
+<li><a href="https://lance.org/format/table/">https://lance.org/format/table/</a></li>
+<li><a href="https://iceberg.apache.org/docs/latest/">https://iceberg.apache.org/docs/latest/</a></li>
+<li><a href="https://iceberg.apache.org/docs/latest/evolution/">https://iceberg.apache.org/docs/latest/evolution/</a></li>
+<li><a href="https://www.postgresql.org/docs/current/fdw-callbacks.html">https://www.postgresql.org/docs/current/fdw-callbacks.html</a></li>
+<li><a href="https://www.postgresql.org/docs/current/custom-scan.html">https://www.postgresql.org/docs/current/custom-scan.html</a></li>
+<li><a href="https://github.com/apache/iceberg/blob/main/open-api/rest-catalog-open-api.yaml">https://github.com/apache/iceberg/blob/main/open-api/rest-catalog-open-api.yaml</a></li>
+<li><a href="https://duckdb.org/docs/current/data/parquet/overview">https://duckdb.org/docs/current/data/parquet/overview</a></li>
+<li><a href="https://duckdb.org/docs/current/core_extensions/httpfs/s3api">https://duckdb.org/docs/current/core_extensions/httpfs/s3api</a></li>
+<li><a href="https://duckdb.org/docs/current/configuration/secrets_manager">https://duckdb.org/docs/current/configuration/secrets_manager</a></li></ul>
+  </section>
+
+  <footer>本页面由 `generate_beginner_wiki.py` 根据 `results/*.json` 的深度调研产物重生成。</footer>
+</main>
+</div>
+<script>
+document.querySelectorAll("[data-tabs]").forEach(group => {
+  group.addEventListener("click", event => {
+    const button = event.target.closest("button[data-tab]");
+    if (!button) return;
+    const id = button.dataset.tab;
+    group.querySelectorAll(".tab").forEach(tab => tab.classList.remove("active"));
+    button.classList.add("active");
+    document.querySelectorAll(".tabpane").forEach(pane => pane.classList.remove("active"));
+    document.getElementById(id).classList.add("active");
+  });
+});
+</script>
+</body>
+</html>

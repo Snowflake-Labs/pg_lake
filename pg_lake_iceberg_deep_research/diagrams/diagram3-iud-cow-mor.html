@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+  <title>COW/MOR 选择与 IUD 流程</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{font-family:'JetBrains Mono',monospace;background:#020617;min-height:100vh;padding:1.5rem;color:white}
+    .container{max-width:1100px;margin:0 auto}
+    .header{margin-bottom:1.5rem}
+    .header-row{display:flex;align-items:center;gap:1rem;margin-bottom:.5rem}
+    .pulse-dot{width:12px;height:12px;background:#22d3ee;border-radius:50%;animation:pulse 2s infinite}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+    h1{font-size:1.3rem;font-weight:700}
+    .subtitle{color:#94a3b8;font-size:.8rem;margin-left:1.75rem}
+    .diagram-container{background:rgba(15,23,42,.5);border-radius:1rem;border:1px solid #1e293b;padding:1.5rem;overflow-x:auto}
+    svg{width:100%;min-width:900px;display:block}
+    .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;margin-top:1.5rem}
+    .card{background:rgba(15,23,42,.5);border-radius:.75rem;border:1px solid #1e293b;padding:1rem}
+    .card-header{display:flex;align-items:center;gap:.5rem;margin-bottom:.5rem}
+    .card-dot{width:8px;height:8px;border-radius:50%}
+    .card-dot.rose{background:#fb7185}.card-dot.emerald{background:#34d399}.card-dot.amber{background:#fbbf24}
+    .card h3{font-size:.8rem;font-weight:600}
+    .card ul{list-style:none;color:#94a3b8;font-size:.7rem}
+    .card li{margin-bottom:.3rem}
+  </style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <div class="header-row"><div class="pulse-dot"></div><h1>IUD 流程与 COW/MOR 选择</h1></div>
+    <p class="subtitle">不可变文件上的行级修改：合成 ctid → DELETE+INSERT → COW/MOR 分支 → VACUUM 排水</p>
+  </div>
+  <div class="diagram-container">
+    <svg viewBox="0 0 1060 750">
+      <defs>
+        <marker id="ah" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#64748b"/></marker>
+        <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0L0 0 0 40" fill="none" stroke="#1e293b" stroke-width=".5"/></pattern>
+      </defs>
+      <rect width="100%" height="100%" fill="url(#grid)"/>
+
+      <!-- === TOP: ctid synthesis === -->
+      <rect x="40" y="20" width="980" height="100" rx="8" fill="rgba(139,92,246,.04)" stroke="#8b5cf6" stroke-width="1" stroke-dasharray="6,3"/>
+      <text x="60" y="42" fill="#8b5cf6" font-size="10" font-weight="700">行身份：合成 ctid</text>
+
+      <!-- Parquet file with rows -->
+      <rect x="60" y="55" width="180" height="50" rx="6" fill="rgba(76,29,149,.3)" stroke="#a78bfa" stroke-width="1.5"/>
+      <text x="150" y="77" text-anchor="middle" fill="white" font-size="10" font-weight="600">data.parquet</text>
+      <text x="150" y="93" text-anchor="middle" fill="#94a3b8" font-size="8">row0 row1 row2 row3 ...</text>
+
+      <!-- DuckDB emits -->
+      <rect x="290" y="55" width="200" height="50" rx="6" fill="rgba(6,78,59,.3)" stroke="#34d399" stroke-width="1.5"/>
+      <text x="390" y="77" text-anchor="middle" fill="white" font-size="10" font-weight="600">DuckDB 发射</text>
+      <text x="390" y="93" text-anchor="middle" fill="#94a3b8" font-size="8">filename + file_row_number</text>
+
+      <!-- ctid -->
+      <rect x="530" y="55" width="200" height="50" rx="6" fill="rgba(139,92,246,.2)" stroke="#8b5cf6" stroke-width="1.5"/>
+      <text x="630" y="77" text-anchor="middle" fill="white" font-size="10" font-weight="600">ctid = (file, pos)</text>
+      <text x="630" y="93" text-anchor="middle" fill="#c4b5fd" font-size="8">junk column, 仅语句内有效</text>
+
+      <!-- Warning -->
+      <rect x="770" y="60" width="230" height="40" rx="6" fill="rgba(136,19,55,.3)" stroke="#fb7185" stroke-width="1.5"/>
+      <text x="885" y="78" text-anchor="middle" fill="#fb7185" font-size="9" font-weight="600">不可作为持久行标识!</text>
+      <text x="885" y="92" text-anchor="middle" fill="#94a3b8" font-size="7">scan 的 file list 变化则 ctid 失效</text>
+
+      <line x1="240" y1="80" x2="288" y2="80" stroke="#34d399" stroke-width="1.5" marker-end="url(#ah)"/>
+      <line x1="490" y1="80" x2="528" y2="80" stroke="#8b5cf6" stroke-width="1.5" marker-end="url(#ah)"/>
+      <line x1="730" y1="80" x2="768" y2="80" stroke="#fb7185" stroke-width="1" marker-end="url(#ah)"/>
+
+      <!-- === MIDDLE: IUD operations === -->
+      <rect x="40" y="140" width="980" height="180" rx="8" fill="rgba(16,185,129,.04)" stroke="#10b981" stroke-width="1" stroke-dasharray="6,3"/>
+      <text x="60" y="162" fill="#10b981" font-size="10" font-weight="700">IUD 操作</text>
+
+      <!-- INSERT -->
+      <rect x="60" y="175" width="270" height="120" rx="8" fill="rgba(16,185,129,.15)" stroke="#10b981" stroke-width="1.5"/>
+      <text x="195" y="197" text-anchor="middle" fill="white" font-size="12" font-weight="700">INSERT</text>
+      <text x="195" y="217" text-anchor="middle" fill="#94a3b8" font-size="8">1. ExecForeignInsert</text>
+      <text x="195" y="233" text-anchor="middle" fill="#94a3b8" font-size="8">2. 约束检查</text>
+      <text x="195" y="249" text-anchor="middle" fill="#94a3b8" font-size="8">3. 分区/多文件接收器写入</text>
+      <text x="195" y="265" text-anchor="middle" fill="#94a3b8" font-size="8">4. EndForeignModify</text>
+      <text x="195" y="281" text-anchor="middle" fill="#6ee7b7" font-size="8">→ ADD_DATA_FILE 元数据变更</text>
+
+      <!-- UPDATE = DELETE + INSERT -->
+      <rect x="370" y="175" width="270" height="120" rx="8" fill="rgba(245,158,11,.1)" stroke="#f59e0b" stroke-width="1.5"/>
+      <text x="505" y="197" text-anchor="middle" fill="white" font-size="12" font-weight="700">UPDATE = DELETE + INSERT</text>
+      <text x="505" y="217" text-anchor="middle" fill="#94a3b8" font-size="8">1. 取旧 ctid → ItemPointer</text>
+      <text x="505" y="233" text-anchor="middle" fill="#94a3b8" font-size="8">2. 防止同语句重复更新</text>
+      <text x="505" y="249" text-anchor="middle" fill="#94a3b8" font-size="8">3. 验证新元组, 拒绝分区移动</text>
+      <text x="505" y="265" text-anchor="middle" fill="#94a3b8" font-size="8">4. DeleteSingleRow(旧)</text>
+      <text x="505" y="281" text-anchor="middle" fill="#fcd34d" font-size="8">5. WriteInsertRecord(新)</text>
+
+      <!-- DELETE -->
+      <rect x="680" y="175" width="320" height="120" rx="8" fill="rgba(239,68,68,.1)" stroke="#ef4444" stroke-width="1.5"/>
+      <text x="840" y="197" text-anchor="middle" fill="white" font-size="12" font-weight="700">DELETE</text>
+      <text x="840" y="217" text-anchor="middle" fill="#94a3b8" font-size="8">1. 取 ctid → 源文件 + 行位置</text>
+      <text x="840" y="233" text-anchor="middle" fill="#94a3b8" font-size="8">2. 构造 position-delete 元组</text>
+      <text x="840" y="249" text-anchor="middle" fill="#94a3b8" font-size="8">3. 临时 CSV → Parquet delete 文件</text>
+      <text x="840" y="265" text-anchor="middle" fill="#94a3b8" font-size="8">4. 记录删除映射到元数据</text>
+      <text x="840" y="281" text-anchor="middle" fill="#fca5a5" font-size="8">→ 进入 COW/MOR 决策</text>
+
+      <!-- === COW/MOR Decision === -->
+      <rect x="40" y="340" width="980" height="240" rx="8" fill="rgba(245,158,11,.04)" stroke="#f59e0b" stroke-width="1" stroke-dasharray="6,3"/>
+      <text x="60" y="362" fill="#f59e0b" font-size="10" font-weight="700">COW / MOR 决策</text>
+
+      <!-- Decision: all deleted? -->
+      <polygon points="280,370 380,410 280,450 180,410" fill="rgba(245,158,11,.1)" stroke="#f59e0b" stroke-width="1.5"/>
+      <text x="280" y="405" text-anchor="middle" fill="white" font-size="9" font-weight="600">文件中</text>
+      <text x="280" y="418" text-anchor="middle" fill="white" font-size="9" font-weight="600">全部删除?</text>
+
+      <!-- Metadata remove -->
+      <rect x="60" y="470" width="200" height="70" rx="8" fill="rgba(59,130,246,.15)" stroke="#3b82f6" stroke-width="1.5"/>
+      <text x="160" y="495" text-anchor="middle" fill="white" font-size="11" font-weight="700">元数据移除</text>
+      <text x="160" y="515" text-anchor="middle" fill="#94a3b8" font-size="8">从元数据删除文件引用</text>
+      <text x="160" y="530" text-anchor="middle" fill="#94a3b8" font-size="8">不写 delete 文件，最干净</text>
+
+      <!-- Decision: partial - below threshold? -->
+      <polygon points="540,370 660,410 540,450 420,410" fill="rgba(245,158,11,.1)" stroke="#f59e0b" stroke-width="1.5"/>
+      <text x="540" y="402" text-anchor="middle" fill="white" font-size="9" font-weight="600">删除%</text>
+      <text x="540" y="415" text-anchor="middle" fill="white" font-size="9" font-weight="600">&lt; 阈值?</text>
+      <text x="540" y="428" text-anchor="middle" fill="#94a3b8" font-size="7">且 全表 &lt; 上限</text>
+
+      <!-- MOR -->
+      <rect x="370" y="470" width="220" height="70" rx="8" fill="rgba(16,185,129,.2)" stroke="#10b981" stroke-width="2"/>
+      <text x="480" y="495" text-anchor="middle" fill="white" font-size="12" font-weight="700">MOR</text>
+      <text x="480" y="515" text-anchor="middle" fill="#6ee7b7" font-size="9">Merge-on-Read</text>
+      <text x="480" y="530" text-anchor="middle" fill="#94a3b8" font-size="8">写 position delete 文件</text>
+
+      <!-- COW -->
+      <rect x="640" y="470" width="220" height="70" rx="8" fill="rgba(239,68,68,.15)" stroke="#ef4444" stroke-width="2"/>
+      <text x="750" y="495" text-anchor="middle" fill="white" font-size="12" font-weight="700">COW</text>
+      <text x="750" y="515" text-anchor="middle" fill="#fca5a5" font-size="9">Copy-on-Write</text>
+      <text x="750" y="530" text-anchor="middle" fill="#94a3b8" font-size="8">重写存活行为新数据文件</text>
+
+      <!-- Threshold info -->
+      <rect x="880" y="380" width="130" height="80" rx="6" fill="rgba(30,41,59,.5)" stroke="#475569" stroke-width="1"/>
+      <text x="945" y="400" text-anchor="middle" fill="#94a3b8" font-size="8" font-weight="600">默认阈值</text>
+      <text x="945" y="418" text-anchor="middle" fill="#fbbf24" font-size="8">COW: 20%</text>
+      <text x="945" y="434" text-anchor="middle" fill="#fbbf24" font-size="8">上限: 10M 行</text>
+      <text x="945" y="450" fill="#94a3b8" font-size="7" text-anchor="middle">0=强制COW</text>
+
+      <!-- Decision arrows -->
+      <line x1="280" y1="370" x2="280" y2="340" stroke="#94a3b8" stroke-width="1" stroke-dasharray="3,3"/>
+      <line x1="180" y1="450" x2="160" y2="468" stroke="#3b82f6" stroke-width="1.5" marker-end="url(#ah)"/>
+      <text x="150" y="460" fill="#93c5fd" font-size="8">是</text>
+      <line x1="380" y1="410" x2="418" y2="410" stroke="#f59e0b" stroke-width="1.5" marker-end="url(#ah)"/>
+      <text x="400" y="402" fill="#fcd34d" font-size="8">否</text>
+      <line x1="420" y1="450" x2="370" y2="468" stroke="#10b981" stroke-width="1.5" marker-end="url(#ah)"/>
+      <text x="380" y="462" fill="#6ee7b7" font-size="8">是</text>
+      <line x1="660" y1="410" x2="640" y2="468" stroke="#ef4444" stroke-width="1.5" marker-end="url(#ah)"/>
+      <text x="665" y="445" fill="#fca5a5" font-size="8">否</text>
+
+      <!-- === BOTTOM: VACUUM === -->
+      <rect x="40" y="600" width="980" height="120" rx="8" fill="rgba(139,92,246,.04)" stroke="#8b5cf6" stroke-width="1" stroke-dasharray="6,3"/>
+      <text x="60" y="622" fill="#8b5cf6" font-size="10" font-weight="700">VACUUM / Compaction (排水)</text>
+
+      <!-- VACUUM steps -->
+      <rect x="60" y="635" width="170" height="50" rx="6" fill="rgba(76,29,149,.2)" stroke="#a78bfa" stroke-width="1.5"/>
+      <text x="145" y="657" text-anchor="middle" fill="white" font-size="9" font-weight="600">读候选文件</text>
+      <text x="145" y="673" text-anchor="middle" fill="#94a3b8" font-size="7">+ 应用现有 delete</text>
+
+      <rect x="260" y="635" width="170" height="50" rx="6" fill="rgba(16,185,129,.2)" stroke="#10b981" stroke-width="1.5"/>
+      <text x="345" y="657" text-anchor="middle" fill="white" font-size="9" font-weight="600">写替换数据文件</text>
+      <text x="345" y="673" text-anchor="middle" fill="#94a3b8" font-size="7">COW 合并存活行</text>
+
+      <rect x="460" y="635" width="170" height="50" rx="6" fill="rgba(245,158,11,.15)" stroke="#f59e0b" stroke-width="1.5"/>
+      <text x="545" y="657" text-anchor="middle" fill="white" font-size="9" font-weight="600">过期 snapshot</text>
+      <text x="545" y="673" text-anchor="middle" fill="#94a3b8" font-size="7">+ 合并 manifest</text>
+
+      <rect x="660" y="635" width="170" height="50" rx="6" fill="rgba(239,68,68,.15)" stroke="#ef4444" stroke-width="1.5"/>
+      <text x="745" y="657" text-anchor="middle" fill="white" font-size="9" font-weight="600">移除未引用文件</text>
+      <text x="745" y="673" text-anchor="middle" fill="#94a3b8" font-size="7">对象存储清理</text>
+
+      <rect x="860" y="635" width="140" height="50" rx="6" fill="rgba(30,41,59,.5)" stroke="#475569" stroke-width="1"/>
+      <text x="930" y="657" text-anchor="middle" fill="#94a3b8" font-size="9">触发条件</text>
+      <text x="930" y="673" text-anchor="middle" fill="#94a3b8" font-size="7">deleted &gt; max/2</text>
+
+      <!-- VACUUM arrows -->
+      <line x1="230" y1="660" x2="258" y2="660" stroke="#94a3b8" stroke-width="1" marker-end="url(#ah)"/>
+      <line x1="430" y1="660" x2="458" y2="660" stroke="#94a3b8" stroke-width="1" marker-end="url(#ah)"/>
+      <line x1="630" y1="660" x2="658" y2="660" stroke="#94a3b8" stroke-width="1" marker-end="url(#ah)"/>
+      <line x1="830" y1="660" x2="858" y2="660" stroke="#94a3b8" stroke-width="1" marker-end="url(#ah)"/>
+    </svg>
+  </div>
+  <div class="cards">
+    <div class="card">
+      <div class="card-header"><div class="card-dot emerald"></div><h3>MOR 为何快</h3></div>
+      <ul>
+        <li>• 写端：只写 KB 级 delete 文件</li>
+        <li>• 读端：DuckDB 向量化 anti-join</li>
+        <li>• 延迟 COW：阈值触发才重写</li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-dot amber"></div><h3>COW 何时触发</h3></div>
+      <ul>
+        <li>• 单文件删除 ≥ 20% (默认)</li>
+        <li>• 全表删除 ≥ 10M 行 (默认)</li>
+        <li>• 设 0 强制 COW，100 强制 MOR</li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-header"><div class="card-dot rose"></div><h3>VACUUM 排水</h3></div>
+      <ul>
+        <li>• 合并 delete 到数据文件</li>
+        <li>• 过期旧 snapshot</li>
+        <li>• 清理对象存储孤儿文件</li>
+      </ul>
+    </div>
+  </div>
+</div>
+</body>
+</html>

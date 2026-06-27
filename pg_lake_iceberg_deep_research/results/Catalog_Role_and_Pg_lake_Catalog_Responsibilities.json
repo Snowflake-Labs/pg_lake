@@ -1,0 +1,328 @@
+{
+  "item_name": "Catalog Role and Pg_lake Catalog Responsibilities",
+  "executive_summary": {
+    "conclusion": "An Iceberg catalog is the authoritative name-to-table-state service for Iceberg tables. It maps a logical table identifier to the current metadata location, supplies table/catalog configuration, and provides the atomic commit point that changes the current table version. Pg_lake implements this role for PostgreSQL-owned Iceberg tables with internal PostgreSQL catalog tables, exposes those pointers through an Iceberg-compatible iceberg_tables view, bridges REST catalogs for read-only and writable tables, exports and reads a lightweight object-store catalog.json, exposes metadata inspection functions, and ties metadata commits to PostgreSQL transaction hooks.",
+    "why_it_matters": "Without a catalog, readers and writers cannot reliably agree which metadata.json is current, external engines cannot discover Pg_lake tables by name, and commits cannot perform the compare-and-swap style pointer update required to avoid lost concurrent writes."
+  },
+  "repo_evidence": [
+    {
+      "area": "Internal PostgreSQL catalog schema",
+      "evidence": "pg_lake_iceberg--3.0.sql creates lake_iceberg.tables_internal with table_name, metadata_location, previous_metadata_location, read_only, has_custom_location, and default_spec_id, and creates lake_iceberg.tables_external keyed by catalog_name, table_namespace, and table_name. It then exposes pg_catalog.iceberg_tables as a union of internal and external entries.",
+      "paths": [
+        "D:/pg_lake/pg_lake_iceberg/pg_lake_iceberg--3.0.sql:18",
+        "D:/pg_lake/pg_lake_iceberg/pg_lake_iceberg--3.0.sql:24",
+        "D:/pg_lake/pg_lake_iceberg/pg_lake_iceberg--3.0.sql:34",
+        "D:/pg_lake/pg_lake_iceberg/pg_lake_iceberg--3.0.sql:51",
+        "D:/pg_lake/pg_lake_iceberg/pg_lake_iceberg--3.0.sql:69"
+      ]
+    },
+    {
+      "area": "Iceberg-compatible SQL/JDBC catalog surface",
+      "evidence": "docs/iceberg-tables.md states that Pg_lake tables appear in iceberg_tables and that the view shape matches Iceberg JDBC, PyIceberg SQL catalog, and iceberg-rust SQL catalog expectations, allowing Spark and other Iceberg tools to discover the latest Pg_lake-created table version through PostgreSQL.",
+      "paths": [
+        "D:/pg_lake/docs/iceberg-tables.md:511",
+        "D:/pg_lake/docs/iceberg-tables.md:525",
+        "D:/pg_lake/docs/iceberg-tables.md:759"
+      ]
+    },
+    {
+      "area": "Catalog type resolution",
+      "evidence": "pg_lake_engine defines catalog types POSTGRES_CATALOG, REST_CATALOG_READ_ONLY, REST_CATALOG_READ_WRITE, OBJECT_STORE_READ_ONLY, and OBJECT_STORE_READ_WRITE. GetIcebergCatalogType chooses them from foreign table options: catalog='rest' or a named iceberg_catalog server, catalog='object_store', and read_only=true.",
+      "paths": [
+        "D:/pg_lake/pg_lake_engine/include/pg_lake/util/catalog_type.h:45",
+        "D:/pg_lake/pg_lake_engine/src/utils/catalog_type.c:37",
+        "D:/pg_lake/pg_lake_engine/src/utils/catalog_type.c:71",
+        "D:/pg_lake/pg_lake_engine/src/utils/catalog_type.c:86",
+        "D:/pg_lake/pg_lake_engine/src/utils/catalog_type.c:99"
+      ]
+    },
+    {
+      "area": "Named REST catalog bridge",
+      "evidence": "pg_lake_iceberg--3.3--3.4.sql creates the iceberg_catalog foreign data wrapper and built-in servers pg_lake_postgres_catalog, pg_lake_object_store_catalog, and pg_lake_rest_catalog. REST server options include rest_endpoint, rest_auth_type, oauth_endpoint, scope, enable_vended_credentials, location_prefix, catalog_name, client_id, and client_secret.",
+      "paths": [
+        "D:/pg_lake/pg_lake_iceberg/pg_lake_iceberg--3.3--3.4.sql:3",
+        "D:/pg_lake/pg_lake_iceberg/pg_lake_iceberg--3.3--3.4.sql:23",
+        "D:/pg_lake/pg_lake_iceberg/pg_lake_iceberg--3.3--3.4.sql:68",
+        "D:/pg_lake/pg_lake_iceberg/src/rest_catalog/rest_catalog.c:135",
+        "D:/pg_lake/pg_lake_iceberg/src/rest_catalog/rest_catalog.c:283"
+      ]
+    },
+    {
+      "area": "Metadata location lookup",
+      "evidence": "GetIcebergMetadataLocation reads metadata_location from Pg_lake internal catalog rows for PostgreSQL-owned tables, rejects updates to external read-only tables, fetches REST-backed metadata_location from the REST catalog for REST tables, and reads object-store catalog metadata for read-only object-store tables.",
+      "paths": [
+        "D:/pg_lake/pg_lake_iceberg/src/iceberg/catalog.c:296",
+        "D:/pg_lake/pg_lake_iceberg/src/iceberg/catalog.c:310",
+        "D:/pg_lake/pg_lake_iceberg/src/iceberg/catalog.c:323",
+        "D:/pg_lake/pg_lake_iceberg/src/iceberg/catalog.c:398",
+        "D:/pg_lake/pg_lake_iceberg/src/rest_catalog/rest_catalog.c:1138",
+        "D:/pg_lake/pg_lake_iceberg/src/object_store_catalog/object_store_catalog.c:284"
+      ]
+    },
+    {
+      "area": "Internal commit pointer update",
+      "evidence": "ApplyIcebergMetadataChanges reads current metadata, builds a new snapshot and manifest list, uploads the new metadata JSON, then updates lake_iceberg.tables_internal with the new metadata_location and previous_metadata_location. It queues older metadata files for cleanup and triggers object-store catalog export when needed.",
+      "paths": [
+        "D:/pg_lake/pg_lake_iceberg/src/iceberg/metadata_operations.c:155",
+        "D:/pg_lake/pg_lake_iceberg/src/iceberg/metadata_operations.c:177",
+        "D:/pg_lake/pg_lake_iceberg/src/iceberg/metadata_operations.c:300",
+        "D:/pg_lake/pg_lake_iceberg/src/iceberg/metadata_operations.c:388",
+        "D:/pg_lake/pg_lake_iceberg/src/iceberg/metadata_operations.c:403"
+      ]
+    },
+    {
+      "area": "REST catalog commit path",
+      "evidence": "For writable REST catalog tables, ApplyIcebergMetadataChanges returns REST update requests instead of mutating local metadata as authoritative table metadata. The transaction tracker records REST create/drop/update requests and sends create/drop requests individually, then batches table modifications in one REST transaction commit request containing table-changes with requirements and updates.",
+      "paths": [
+        "D:/pg_lake/pg_lake_iceberg/src/iceberg/metadata_operations.c:172",
+        "D:/pg_lake/pg_lake_iceberg/src/iceberg/metadata_operations.c:351",
+        "D:/pg_lake/pg_lake_table/src/transaction/track_iceberg_metadata_changes.c:231",
+        "D:/pg_lake/pg_lake_table/src/transaction/track_iceberg_metadata_changes.c:333",
+        "D:/pg_lake/pg_lake_table/src/transaction/track_iceberg_metadata_changes.c:440"
+      ]
+    },
+    {
+      "area": "Transaction hooks",
+      "evidence": "IcebergRegisterCallbacks installs a PostgreSQL transaction callback. On PRE_COMMIT, Pg_lake consumes tracked Iceberg metadata changes. On ABORT it resets tracked state. On PREPARE it rejects prepared transactions with Iceberg metadata changes. On COMMIT it posts REST catalog requests and resets the REST request state.",
+      "paths": [
+        "D:/pg_lake/pg_lake_table/src/transaction/transaction_hooks.c:31",
+        "D:/pg_lake/pg_lake_table/src/transaction/transaction_hooks.c:42",
+        "D:/pg_lake/pg_lake_table/src/transaction/transaction_hooks.c:63",
+        "D:/pg_lake/pg_lake_table/src/transaction/transaction_hooks.c:70",
+        "D:/pg_lake/pg_lake_table/src/transaction/transaction_hooks.c:80"
+      ]
+    },
+    {
+      "area": "Object-store catalog bridge",
+      "evidence": "object_store_catalog.c can export internal table metadata locations into an object-store catalog.json with metadata-location, table-name, and namespace fields, and can read an external catalog.json to resolve metadata-location for read-only object-store catalog tables.",
+      "paths": [
+        "D:/pg_lake/pg_lake_iceberg/src/object_store_catalog/object_store_catalog.c:305",
+        "D:/pg_lake/pg_lake_iceberg/src/object_store_catalog/object_store_catalog.c:364",
+        "D:/pg_lake/pg_lake_iceberg/src/object_store_catalog/object_store_catalog.c:383",
+        "D:/pg_lake/pg_lake_iceberg/src/object_store_catalog/object_store_catalog.c:389",
+        "D:/pg_lake/pg_lake_iceberg/src/object_store_catalog/object_store_catalog.c:488",
+        "D:/pg_lake/pg_lake_iceberg/src/object_store_catalog/object_store_catalog.c:542"
+      ]
+    },
+    {
+      "area": "Metadata inspection functions",
+      "evidence": "The extension exposes lake_iceberg.metadata(metadata_uri), lake_iceberg.files(metadata_uri), lake_iceberg.snapshots(metadata_uri), and data_file_stats(metadata_location). Tests also create helper functions current_manifests and current_manifest_entries for validating manifest-level behavior.",
+      "paths": [
+        "D:/pg_lake/pg_lake_iceberg/pg_lake_iceberg--3.0.sql:75",
+        "D:/pg_lake/pg_lake_iceberg/pg_lake_iceberg--3.0.sql:82",
+        "D:/pg_lake/pg_lake_iceberg/pg_lake_iceberg--3.0.sql:97",
+        "D:/pg_lake/pg_lake_iceberg/pg_lake_iceberg--3.0.sql:138",
+        "D:/pg_lake/pg_lake_iceberg/tests/pytests/test_iceberg_functions.py:9",
+        "D:/pg_lake/pg_lake_iceberg/tests/pytests/test_iceberg_functions.py:39"
+      ]
+    }
+  ],
+  "official_spec_evidence": [
+    {
+      "topic": "Why a catalog is needed",
+      "evidence": "Apache Iceberg table metadata is stored as JSON, every metadata change creates a new metadata file, and a commit must atomically replace the metadata version on which it was based. The table metadata location is therefore the state pointer that readers and writers must coordinate through a catalog or equivalent atomic store.",
+      "sources": [
+        "https://iceberg.apache.org/spec/#table-metadata",
+        "https://iceberg.apache.org/spec/#optimistic-concurrency"
+      ]
+    },
+    {
+      "topic": "Metadata pointer and optimistic commits",
+      "evidence": "Iceberg optimistic concurrency is based on atomically swapping one metadata file pointer for another. Readers keep using the snapshot that was current when they loaded metadata, while writers must retry if their base version is no longer current.",
+      "sources": [
+        "https://iceberg.apache.org/spec/#optimistic-concurrency",
+        "https://iceberg.apache.org/spec/#commit-conflict-resolution-and-retry"
+      ]
+    },
+    {
+      "topic": "Metastore/database commit model",
+      "evidence": "The Iceberg spec describes a database or metastore catalog as storing the metadata pointer and updating it with a check-and-put operation that validates the old pointer before making the new metadata file current.",
+      "sources": [
+        "https://iceberg.apache.org/spec/#metastore-tables"
+      ]
+    },
+    {
+      "topic": "REST catalog table load and commit",
+      "evidence": "The REST OpenAPI specification includes table load, table create, table drop, register, unregister, and transaction commit endpoints. A table load response includes table metadata and configuration, and a commit carries requirements plus updates; failed requirements produce conflicts that clients may retry.",
+      "sources": [
+        "https://iceberg.apache.org/rest-catalog-spec/",
+        "https://raw.githubusercontent.com/apache/iceberg/main/open-api/rest-catalog-open-api.yaml"
+      ]
+    },
+    {
+      "topic": "Manifest and snapshot tree",
+      "evidence": "Iceberg defines snapshots as table states, manifest lists as per-snapshot lists of manifests, and manifests as lists of data or delete files. Metadata fields include current-snapshot-id, snapshots, snapshot-log, and metadata-log.",
+      "sources": [
+        "https://iceberg.apache.org/spec/#terms",
+        "https://iceberg.apache.org/spec/#manifest-lists",
+        "https://iceberg.apache.org/spec/#table-metadata-fields"
+      ]
+    }
+  ],
+  "end_to_end_mechanics": [
+    {
+      "phase": "Logical table registration",
+      "steps": [
+        "A Pg_lake-created Iceberg table is registered in PostgreSQL as a foreign table and in lake_iceberg.tables_internal with a regclass table_name and its current metadata_location.",
+        "External SQL catalog entries that do not correspond to a PostgreSQL table are stored in lake_iceberg.tables_external keyed by catalog_name, table_namespace, and table_name.",
+        "The public discovery interface is pg_catalog.iceberg_tables, a view over both tables that exposes catalog_name, table_namespace, table_name, metadata_location, and previous_metadata_location."
+      ]
+    },
+    {
+      "phase": "Read path catalog lookup",
+      "steps": [
+        "For a normal Pg_lake-owned table, Pg_lake reads metadata_location from lake_iceberg.tables_internal.",
+        "For a read-only REST table, Pg_lake calls the REST catalog table load endpoint and extracts metadata-location from the response.",
+        "For a read-only object-store table, Pg_lake reads catalog.json from the configured object-store catalog path and finds the matching namespace/table entry.",
+        "After resolving metadata_location, Pg_lake reads the Iceberg metadata JSON, discovers the current snapshot, follows the manifest list and manifests, and obtains data/delete file information for planning and execution."
+      ]
+    },
+    {
+      "phase": "Internal PostgreSQL catalog commit",
+      "steps": [
+        "During DML or DDL, Pg_lake tracks metadata operations per relation inside the current PostgreSQL transaction.",
+        "At PRE_COMMIT, the transaction hook pushes an active transaction snapshot and consumes the tracked Iceberg changes.",
+        "ApplyIcebergMetadataChanges reads the base metadata, computes data-file, delete-file, schema, partition, manifest-merge, or snapshot-expiration operations, writes new manifest files and a new manifest list if needed, updates snapshot metadata, and writes a new metadata JSON.",
+        "Pg_lake then updates lake_iceberg.tables_internal to point metadata_location to the new metadata JSON and records the old pointer in previous_metadata_location.",
+        "Because the catalog row is updated inside the PostgreSQL transaction and can be selected FOR UPDATE, PostgreSQL provides the atomicity and serialization point for Pg_lake-owned catalog commits."
+      ]
+    },
+    {
+      "phase": "Writable REST catalog commit",
+      "steps": [
+        "A writable REST table keeps Pg_lake's internal file/stat/schema catalogs for local execution, but treats the REST catalog as authoritative for the current metadata location.",
+        "On create, Pg_lake stages REST create-table updates, including schema, sort order, location, and partition spec operations.",
+        "On subsequent writes, Pg_lake creates Iceberg manifest artifacts locally/object-store-side and returns REST table update bodies such as add-snapshot, set-snapshot-ref, add-schema, set-current-schema, add-spec, set-default-spec, and remove-snapshots.",
+        "At PostgreSQL COMMIT, PostAllRestCatalogRequests posts create/drop table calls as needed, then sends remaining table changes through the REST transaction commit endpoint.",
+        "The implementation binds each PostgreSQL transaction to one REST catalog server OID, rejecting writes to different REST catalogs in the same transaction."
+      ]
+    },
+    {
+      "phase": "Object-store catalog export and import",
+      "steps": [
+        "For writable object_store catalog tables, Pg_lake uses its internal PostgreSQL catalog as the write authority and exports the current internal metadata pointers into a catalog.json file in object storage.",
+        "For read-only object_store catalog tables, Pg_lake reads an external catalog.json and resolves metadata-location by catalog_name, catalog_namespace, and catalog_table_name.",
+        "This object-store catalog acts as a lightweight discovery bridge, not as a full REST catalog with requirement/update validation."
+      ]
+    },
+    {
+      "phase": "Metadata observability",
+      "steps": [
+        "Users can query iceberg_tables to inspect current metadata locations.",
+        "Users can call lake_iceberg.metadata to inspect raw table metadata JSON, lake_iceberg.files to list active files, lake_iceberg.snapshots to list snapshots, and data_file_stats to inspect stored file statistics.",
+        "Tests use current_manifests/current_manifest_entries helper functions to validate manifest-level commit outcomes."
+      ]
+    }
+  ],
+  "design_tradeoffs": [
+    {
+      "tradeoff": "PostgreSQL catalog as the internal Iceberg catalog",
+      "benefit": "The existing PostgreSQL transaction system, row locks, privileges, and views become the catalog control plane for Pg_lake-owned Iceberg tables.",
+      "cost": "The authoritative pointer for Pg_lake-owned tables is tied to one PostgreSQL database identity; external engines can discover through the SQL/JDBC-style view but cannot generally write Pg_lake-owned tables through that view."
+    },
+    {
+      "tradeoff": "REST writable tables use REST as metadata authority but Pg_lake internal catalogs for execution",
+      "benefit": "Pg_lake can interoperate with REST catalog services such as Polaris while keeping local execution metadata needed for planning, stats, and data-file tracking.",
+      "cost": "The implementation must synchronize local internal file catalogs, object storage artifacts, and REST catalog commits across a PostgreSQL transaction boundary."
+    },
+    {
+      "tradeoff": "REST requests are posted at PostgreSQL COMMIT after internal PRE_COMMIT processing",
+      "benefit": "Pg_lake avoids publishing REST catalog changes before the PostgreSQL transaction has reached commit, preserving the intended transaction boundary from the SQL user's perspective.",
+      "cost": "The code comments explicitly note that errors at post-commit are not acceptable; current handling reports non-successful REST create/drop/transaction responses as warnings, which creates an operational risk if a remote commit fails after the local transaction commits."
+    },
+    {
+      "tradeoff": "Single REST catalog per transaction",
+      "benefit": "Batching table modifications into one REST transaction commit can preserve atomicity across multiple tables in one REST catalog.",
+      "cost": "A transaction cannot modify writable REST tables from different REST catalogs."
+    },
+    {
+      "tradeoff": "Object-store catalog.json bridge",
+      "benefit": "A simple object-store file can publish Pg_lake metadata pointers for discovery without running a REST catalog service.",
+      "cost": "It does not provide the same server-side validation, requirement checking, or conflict handling as a REST catalog."
+    },
+    {
+      "tradeoff": "Metadata inspection functions",
+      "benefit": "SQL users can debug current Iceberg metadata, snapshots, data files, and statistics from PostgreSQL.",
+      "cost": "These functions are metadata readers; they do not replace the catalog's commit and concurrency-control responsibilities."
+    }
+  ],
+  "limitations_and_risks": [
+    {
+      "risk": "Prepared transactions are unsupported for Iceberg metadata changes.",
+      "evidence": "The transaction hook raises an error if a transaction with tracked Iceberg metadata changes reaches PREPARE."
+    },
+    {
+      "risk": "REST post-commit failure handling is weaker than internal PostgreSQL catalog commits.",
+      "evidence": "PostAllRestCatalogRequests is called at XACT_EVENT_COMMIT; comments state errors there would be problematic, and non-success HTTP statuses are reported as warnings."
+    },
+    {
+      "risk": "Read-only external catalogs cannot be updated through Pg_lake.",
+      "evidence": "GetIcebergMetadataLocation rejects forUpdate on external non-writable tables, and read-only REST/object-store tables resolve pointers from external catalog state."
+    },
+    {
+      "risk": "External tools cannot yet write Pg_lake-created internal Iceberg tables through the iceberg_tables SQL catalog view.",
+      "evidence": "docs/iceberg-tables.md states that external drivers cannot yet write tables created through Pg_lake."
+    },
+    {
+      "risk": "Object-store catalog consistency depends on catalog.json export and object-store visibility.",
+      "evidence": "The object-store catalog implementation exports catalog.json from internal rows and reads catalog.json for read-only lookup; it is not a full atomic commit service."
+    },
+    {
+      "risk": "REST commit requests currently emit empty requirements arrays for batched modifications.",
+      "evidence": "PostAllRestCatalogRequests builds each table change with \"requirements\":[] and updates. This relies on the REST catalog's update semantics and may provide weaker client-side conflict assertions than commits that include explicit snapshot or schema requirements."
+    },
+    {
+      "risk": "Catalog name and database name coupling matters for Pg_lake-owned internal tables.",
+      "evidence": "The internal iceberg_tables view uses current_database() as catalog_name for internal tables; documentation notes catalog_name changes if the database is renamed."
+    }
+  ],
+  "implications_for_gaussdb": [
+    "A GaussDB implementation must decide whether GaussDB itself is the authoritative Iceberg catalog, a REST catalog client, an object-store catalog publisher, or a combination of those roles.",
+    "If GaussDB owns the catalog, it needs durable metadata pointer storage, transactional compare-and-swap semantics, and a compatibility surface similar to iceberg_tables for Spark, PyIceberg, and other engines.",
+    "If GaussDB bridges REST catalogs, it must define exactly how local SQL transactions map to REST create/drop/update/transaction-commit calls and how post-commit failures are surfaced, retried, or reconciled.",
+    "Object-store catalog.json is useful for lightweight discovery, but it should not be treated as equivalent to a REST catalog for write concurrency or multi-writer correctness.",
+    "Engineering review should focus on transaction boundaries, catalog ownership, conflict validation requirements, external-engine write policy, metadata cleanup, object-store consistency, and observability for catalog pointer drift.",
+    "For product planning, Pg_lake demonstrates a practical split: PostgreSQL/GaussDB can own SQL semantics and internal catalogs while Iceberg provides portable table metadata and REST/JDBC catalogs provide ecosystem interoperability."
+  ],
+  "answer_to_original_questions": {
+    "what_is_an_iceberg_catalog": "An Iceberg catalog is the control-plane service or storage layer that maps a logical identifier such as catalog.namespace.table to the table's current Iceberg metadata, location/configuration, and commit state. It is separate from the data files and usually stores or serves the current metadata pointer.",
+    "why_is_it_needed": "It is needed because every Iceberg metadata update creates a new metadata JSON file. Readers need to know which file is current, writers need an atomic way to replace the old pointer with the new one, and external engines need a standard discovery point for the same table.",
+    "how_metadata_pointers_work": "The current metadata pointer identifies the current metadata JSON. That JSON contains the current snapshot id, schema, partition specs, metadata log, snapshot log, snapshots, and references to manifest lists. A new commit writes new immutable metadata artifacts first, then atomically changes the catalog pointer from the old metadata location to the new metadata location.",
+    "how_commits_work": "In the Iceberg model, commits are optimistic. A writer builds changes from a base metadata version, writes new metadata files, and commits by atomically swapping the metadata pointer. If another writer has already advanced the pointer or required conditions fail, the writer must retry or fail. In Pg_lake's internal catalog this maps to updating PostgreSQL catalog rows in the PostgreSQL transaction; in writable REST catalog mode Pg_lake sends REST update requests at commit time.",
+    "which_catalog_capabilities_pg_lake_implements_or_bridges": [
+      "Internal PostgreSQL catalog: lake_iceberg.tables_internal, lake_iceberg.tables_external, and pg_catalog.iceberg_tables store and expose metadata pointers.",
+      "REST catalog bridge: iceberg_catalog FDW/server definitions configure REST endpoints and credentials; read-only REST tables load metadata-location from the REST service; writable REST tables send create/drop/update/transaction commit requests.",
+      "Object-store catalog bridge: object_store catalog mode exports internal table pointers to catalog.json and reads external catalog.json files for read-only tables.",
+      "Metadata functions: lake_iceberg.metadata, files, snapshots, data_file_stats, and test-only manifest helpers expose table metadata for inspection and validation.",
+      "Transaction hooks: Pg_lake tracks metadata operations during PostgreSQL transactions, applies Iceberg metadata changes at PRE_COMMIT, rejects prepared transactions with Iceberg changes, cleans state on abort, and posts REST catalog requests on COMMIT."
+    ]
+  },
+  "source_links": [
+    "https://iceberg.apache.org/spec/",
+    "https://iceberg.apache.org/spec/#optimistic-concurrency",
+    "https://iceberg.apache.org/spec/#table-metadata",
+    "https://iceberg.apache.org/spec/#metastore-tables",
+    "https://iceberg.apache.org/rest-catalog-spec/",
+    "https://raw.githubusercontent.com/apache/iceberg/main/open-api/rest-catalog-open-api.yaml",
+    "D:/pg_lake/pg_lake_iceberg/pg_lake_iceberg--3.0.sql",
+    "D:/pg_lake/pg_lake_iceberg/pg_lake_iceberg--3.3--3.4.sql",
+    "D:/pg_lake/pg_lake_iceberg/src/iceberg/catalog.c",
+    "D:/pg_lake/pg_lake_iceberg/src/iceberg/metadata_operations.c",
+    "D:/pg_lake/pg_lake_iceberg/src/rest_catalog/rest_catalog.c",
+    "D:/pg_lake/pg_lake_iceberg/src/object_store_catalog/object_store_catalog.c",
+    "D:/pg_lake/pg_lake_iceberg/src/iceberg/external_metadata_modification.c",
+    "D:/pg_lake/pg_lake_iceberg/src/init.c",
+    "D:/pg_lake/pg_lake_engine/include/pg_lake/util/catalog_type.h",
+    "D:/pg_lake/pg_lake_engine/src/utils/catalog_type.c",
+    "D:/pg_lake/pg_lake_table/src/transaction/transaction_hooks.c",
+    "D:/pg_lake/pg_lake_table/src/transaction/track_iceberg_metadata_changes.c",
+    "D:/pg_lake/docs/iceberg-tables.md",
+    "D:/pg_lake/pg_lake_iceberg/tests/pytests/test_iceberg_functions.py",
+    "D:/pg_lake/pg_lake_table/tests/pytests/test_object_store_catalog.py",
+    "D:/pg_lake/pg_lake_table/tests/pytests/test_polaris_catalog.py",
+    "D:/pg_lake/pg_lake_table/tests/pytests/test_polaris_catalog_writable.py",
+    "D:/pg_lake/pg_lake_table/tests/pytests/test_modify_iceberg_rest_table.py",
+    "D:/pg_lake/pg_lake_table/tests/pytests/test_iceberg_catalog_server.py"
+  ],
+  "uncertain": []
+}

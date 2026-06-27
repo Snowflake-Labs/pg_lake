@@ -1,0 +1,49 @@
+topic: pg_lake_iceberg_deep_research
+items:
+  - name: Pg_lake Overall Architecture
+    category: Architecture
+    repository: D:/pg_lake
+    description: >
+      Research the end-to-end architecture of Pg_lake in the local repository:
+      PostgreSQL extension layers, FDW and planner hooks, pgduck_server, DuckDB,
+      object storage, Iceberg metadata, and the division of responsibilities.
+  - name: Pg_lake SELECT Retrieval Flow
+    category: Execution Flow
+    repository: D:/pg_lake
+    description: >
+      Research the SELECT/query path in Pg_lake: planning, query pushdown,
+      scan snapshot creation, data file discovery and pruning, delete file
+      application, DuckDB read_parquet execution, and result streaming.
+  - name: Pg_lake IUD Flow and Fast MOR
+    category: Execution Flow
+    repository: D:/pg_lake
+    description: >
+      Research INSERT, UPDATE, DELETE, TRUNCATE if relevant, copy-on-write versus
+      merge-on-read, synthetic ctid row identity, position delete files, thresholds,
+      compaction, and how Pg_lake makes MOR fast.
+  - name: Iceberg Capability Scope and Pg_lake Usage
+    category: Iceberg
+    repository: D:/pg_lake
+    description: >
+      Research which Apache Iceberg capabilities Pg_lake uses, what Iceberg does
+      and does not provide, what would be lost without Iceberg, and where Pg_lake
+      implements behavior above Iceberg.
+  - name: Catalog Role and Pg_lake Catalog Responsibilities
+    category: Catalog
+    repository: D:/pg_lake
+    description: >
+      Research what an Iceberg catalog is, why it is needed, how metadata pointers
+      and commits work, and which catalog capabilities Pg_lake implements or
+      bridges, including internal PostgreSQL catalog, REST catalog, object-store
+      catalog, metadata functions, and transaction hooks.
+  - name: Comparative Analysis OLTP Lance File Format Table Format
+    category: Comparison
+    repository: D:/pg_lake
+    description: >
+      Research the conceptual differences between Pg_lake/Iceberg and OLTP
+      databases, Pg_lake/Iceberg and Lance, and the distinction between file
+      format and table format, with implications for GaussDB evaluation.
+execution:
+  batch_size: 6
+  items_per_agent: 1
+  output_dir: D:/pg_lake/pg_lake_iceberg_deep_research/results
