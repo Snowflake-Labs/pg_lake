@@ -605,7 +605,7 @@ install_test_deps() {
     else
         print_info "Building pgAudit..."
         if [[ ! -d "pgaudit" ]]; then
-            git clone --branch "${PG_VERSION}.0" https://github.com/pgaudit/pgaudit.git
+            git clone --branch "18.0" https://github.com/pgaudit/pgaudit.git
         fi
         cd pgaudit
         make USE_PGXS=1 install
