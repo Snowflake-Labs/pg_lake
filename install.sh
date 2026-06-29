@@ -305,7 +305,8 @@ install_system_deps() {
                 gcc-c++ \
                 git \
                 pkgconfig \
-                python3-devel
+                python3-devel \
+                gmp-devel
             ;;
         macos)
             # Check for Xcode command line tools
@@ -604,7 +605,7 @@ install_test_deps() {
     else
         print_info "Building pgAudit..."
         if [[ ! -d "pgaudit" ]]; then
-            git clone https://github.com/pgaudit/pgaudit.git
+            git clone --branch "${PG_VERSION}.0" https://github.com/pgaudit/pgaudit.git
         fi
         cd pgaudit
         make USE_PGXS=1 install
