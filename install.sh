@@ -769,7 +769,11 @@ install_test_deps() {
     if command -v pipenv &>/dev/null; then
         print_info "Installing Python test dependencies via pipenv..."
         cd "$PG_LAKE_REPO_DIR"
-        pipenv install --dev --python "$(python3 -c 'import sys; print(sys.executable)')"
+        # Pin pipenv to the Python version the Pipfile requires rather than
+        # whatever `python3` resolves to (which may be 3.9 or 3.12 and silently
+        # build the venv with an interpreter the dev deps don't support).
+        required_python=$(sed -n 's/.*python_version *= *"\([^"]*\)".*/\1/p' Pipfile)
+        pipenv install --dev --python "${required_python:-3.11}"
     else
         print_warning "pipenv not found in PATH. You may need to run 'pipenv install --dev' manually."
         print_warning "Check that ~/.local/bin is in your PATH if pipenv was installed with --user."
