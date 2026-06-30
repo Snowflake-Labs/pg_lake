@@ -22,6 +22,7 @@
 extern bool SkipDropAccessHook;
 
 extern void InitializeDropTableHandler(void);
-extern bool CheckIfTypeIsUsedInIcebergTable(Oid typeId);
+extern PGDLLEXPORT bool CheckIfTypeIsUsedInTables(Oid typeId, const char *tableSetSubquery);
+extern bool CheckIfTypeIsUsedInInternalIcebergTable(Oid typeId);
 extern bool ProcessDropPgLakeTable(ProcessUtilityParams * params, void *arg);
 extern void TryMarkAllReferencedFilesForDeletion(Oid relationId);
