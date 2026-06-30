@@ -1,0 +1,8 @@
+comment = 'Stream Kafka topics into pg_lake / Postgres tables'
+default_version = '0.1.0'
+module_pathname = '$libdir/pg_lake_sink'
+requires = 'pg_extension_base'
+relocatable = false
+superuser = true
+schema = pg_catalog
+#!shared_preload_libraries
