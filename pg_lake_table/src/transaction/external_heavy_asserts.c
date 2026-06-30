@@ -556,6 +556,19 @@ NormalizePartitionFieldValue(IcebergScalarAvroType internalType,
 {
 	PGType		pgType;
 
+	/*
+	 * A NULL or empty external value carries no bytes to widen, e.g. a NULL
+	 * partition value (NaN numerics are stored as NULL) or an empty string.
+	 * There is nothing to normalize, so pass it through unchanged. This also
+	 * avoids the non-NULL Assert in PGIcebergBinaryDeserialize.
+	 */
+	if (externalValue == NULL || externalLen == 0)
+	{
+		*normalizedValue = externalValue;
+		*normalizedLen = externalLen;
+		return;
+	}
+
 	/* Map the Avro physical+logical type to the PGType of the current schema */
 	switch (internalType.physical_type)
 	{
@@ -631,6 +644,14 @@ NormalizeColumnBound(Field * field, unsigned char *externalValue,
 					 size_t externalLen, unsigned char **normalizedValue,
 					 size_t *normalizedLen)
 {
+	/* See the matching note in NormalizePartitionFieldValue. */
+	if (externalValue == NULL || externalLen == 0)
+	{
+		*normalizedValue = externalValue;
+		*normalizedLen = externalLen;
+		return;
+	}
+
 	PGType		pgType = IcebergFieldToPostgresType(field);
 	Datum		datum = PGIcebergBinaryDeserialize(externalValue, externalLen,
 												   field, pgType);
