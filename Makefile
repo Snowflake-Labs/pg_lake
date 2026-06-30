@@ -150,6 +150,25 @@ pg_lake_benchmark: pg_lake
 install-pg_lake_benchmark: install-pg_lake pg_lake_benchmark
 	$(MAKE) -C pg_lake_benchmark install
 
+# pg_lake_sink is a Rust/pgrx extension built via cargo (see pg_lake_sink/Makefile). It is
+# intentionally opt-in: it is NOT part of EXTENSION_TARGETS / the default `all`/`install`, so the
+# all-C build, CI and pgindent are unaffected. Build it explicitly with `make pg_lake_sink` /
+# `make install-pg_lake_sink` (requires a Rust toolchain + cargo-pgrx).
+.PHONY: pg_lake_sink install-pg_lake_sink clean-pg_lake_sink check-pg_lake_sink
+pg_lake_sink:
+	$(MAKE) -C pg_lake_sink
+
+install-pg_lake_sink: install-pg_extension_base pg_lake_sink
+	$(MAKE) -C pg_lake_sink install
+
+clean-pg_lake_sink:
+	$(MAKE) -C pg_lake_sink clean
+
+# Opt-in: not wired into `check-local`. Its pytest suite skips when the extension
+# or a Kafka broker is unavailable, so it is safe to run on demand.
+check-pg_lake_sink:
+	$(MAKE) -C pg_lake_sink check
+
 duckdb_pglake:
 	@if [ $(DUCKDB_BUILD_USE_CACHE) -eq 1 ] && [ -f $(PG_LIBDIR)/$(LIB_NAME) ] && [ -f $(PG_INCLUDEDIR)/duckdb.h ]; then \
 		echo "Using cached DuckDB library at $(PG_LIBDIR)/$(LIB_NAME)"; \

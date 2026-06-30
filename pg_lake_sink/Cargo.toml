@@ -1,0 +1,29 @@
+[package]
+name = "pg_lake_sink"
+version = "3.4.0"
+edition = "2021"
+description = "PostgreSQL extension (Rust/pgrx) that consumes Kafka messages into a table"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+default = ["pg18"]
+pg18 = ["pgrx/pg18"]
+
+[dependencies]
+pgrx = "=0.18.1"
+# Vendor + build librdkafka via cmake. Local Redpanda is plaintext, so we
+# deliberately leave ssl/sasl/gssapi off (libsasl2 headers are absent on this box).
+rdkafka = { version = "0.36", default-features = false, features = ["cmake-build", "libz"] }
+serde_json = "1"
+
+[profile.dev]
+panic = "unwind"
+
+[profile.release]
+panic = "unwind"
+opt-level = 3
+lto = "thin"
+codegen-units = 1

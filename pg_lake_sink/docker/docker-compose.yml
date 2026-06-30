@@ -1,0 +1,26 @@
+name: pg_lake_sink_kafka
+
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.7
+    container_name: pg_lake_sink_redpanda
+    command:
+      - redpanda start
+      - --overprovisioned
+      - --smp 1
+      - --memory 512M
+      - --reserve-memory 0M
+      - --node-id 0
+      - --check=false
+      # Advertise the external listener on localhost so the extension (running on
+      # the host) can reach it at localhost:19092, matching pg_lake_sink.brokers default.
+      - --kafka-addr   INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:19092
+      - --advertise-kafka-addr INTERNAL://redpanda:9092,EXTERNAL://localhost:19092
+    ports:
+      - "19092:19092"
+      - "9644:9644"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
