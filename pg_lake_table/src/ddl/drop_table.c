@@ -63,6 +63,11 @@
 /* controlled via GUC */
 bool		SkipDropAccessHook = false;
 
+#define INTERNAL_ICEBERG_TABLES_SUBQUERY \
+	"SELECT c.oid AS relid " \
+	"FROM lake_iceberg.tables_internal tbl " \
+	"JOIN pg_class c ON c.oid = tbl.table_name"
+
 static bool IsDropPgLakeTable(DropStmt *dropStmt);
 static void PgLakeTableObjectsInDropStmt(DropStmt *dropStmt,
 										 List **pgLakeTableObjects,
@@ -316,7 +321,7 @@ DropTableAccessHook(ObjectAccessType access, Oid classId, Oid objectId,
 		 */
 		Oid			typeId = get_rel_type_id(objectId);
 
-		if (CheckIfTypeIsUsedInIcebergTable(typeId))
+		if (CheckIfTypeIsUsedInInternalIcebergTable(typeId))
 			ereport(ERROR,
 					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 					 errmsg("cannot alter type \"%s\" because it is used in an iceberg table",
@@ -338,20 +343,30 @@ PreventCitusTableVisibility(void)
 }
 
 /*
-* CheckIfTypeIsUsedInIcebergTable checks if the given type is used in any
-* iceberg table.
-*
-* It recursively walks the type dependency graph upward: composites that
-* contain the type as an attribute, array types whose element is the type,
-* and domain types (including maps) whose base type is the type.
-*/
+ * CheckIfTypeIsUsedInTables checks if the given type is used as an attribute
+ * type of any relation in the table set defined by tableSetSubquery.
+ *
+ * It recursively walks the type dependency graph upward: composites that
+ * contain the type as an attribute, array types whose element is the type,
+ * and domain types (including maps) whose base type is the type.  Any of
+ * the resulting types appearing as a non-dropped attribute on a relation
+ * returned by tableSetSubquery makes the function return true.
+ *
+ * tableSetSubquery must be a SELECT statement that returns a single
+ * column of pg_class OIDs aliased as "relid", e.g.:
+ *
+ *     "SELECT c.oid AS relid
+ *        FROM lake_iceberg.tables_internal tbl
+ *        JOIN pg_class c ON c.oid = tbl.table_name"
+ *
+ * The subquery is embedded verbatim, so callers are responsible for any
+ * required quoting or filtering.  Callers must ensure their schema(s) are
+ * accessible to the pg_lake_iceberg extension owner, which is the role
+ * under which the SPI query runs.
+ */
 bool
-CheckIfTypeIsUsedInIcebergTable(Oid typeId)
+CheckIfTypeIsUsedInTables(Oid typeId, const char *tableSetSubquery)
 {
-
-	if (!IsExtensionCreated(PgLakeTable))
-		return false;
-
 	StringInfo	query = makeStringInfo();
 
 	appendStringInfo(query,
@@ -370,11 +385,11 @@ CheckIfTypeIsUsedInIcebergTable(Oid typeId)
 					 ") "
 					 "SELECT EXISTS ( "
 					 "    SELECT 1 "
-					 "    FROM lake_iceberg.tables_internal tbl "
-					 "    JOIN pg_class c ON c.oid = tbl.table_name "
-					 "    JOIN pg_attribute attr ON attr.attrelid = c.oid "
+					 "    FROM (%s) _ts "
+					 "    JOIN pg_attribute attr ON attr.attrelid = _ts.relid "
 					 "    WHERE NOT attr.attisdropped "
-					 "      AND attr.atttypid IN (SELECT type_oid FROM dependent_types));");
+					 "      AND attr.atttypid IN (SELECT type_oid FROM dependent_types));",
+					 tableSetSubquery);
 
 
 	/* set the user context */
@@ -404,6 +419,21 @@ CheckIfTypeIsUsedInIcebergTable(Oid typeId)
 	SPI_END();
 
 	return exists;
+}
+
+
+/*
+ * CheckIfTypeIsUsedInInternalIcebergTable checks if the given type is used in
+ * any iceberg table.  Thin wrapper around CheckIfTypeIsUsedInTables that
+ * supplies the iceberg-specific table set.
+ */
+bool
+CheckIfTypeIsUsedInInternalIcebergTable(Oid typeId)
+{
+	if (!IsExtensionCreated(PgLakeTable))
+		return false;
+
+	return CheckIfTypeIsUsedInTables(typeId, INTERNAL_ICEBERG_TABLES_SUBQUERY);
 }
 
 

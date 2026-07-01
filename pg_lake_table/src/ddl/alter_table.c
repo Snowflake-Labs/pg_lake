@@ -546,7 +546,7 @@ ProcessAlterType(ProcessUtilityParams * processUtilityParams, void *arg)
 		TypeName   *typename = makeTypeNameFromNameList(nameList);
 		Oid			typeOid = typenameTypeId(NULL, typename);
 
-		if (CheckIfTypeIsUsedInIcebergTable(typeOid))
+		if (CheckIfTypeIsUsedInInternalIcebergTable(typeOid))
 		{
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -574,7 +574,7 @@ ProcessEnumStatement(ProcessUtilityParams * processUtilityParams, void *arg)
 	TypeName   *typename = makeTypeNameFromNameList(stmt->typeName);
 	Oid			typeOid = typenameTypeId(NULL, typename);
 
-	if (CheckIfTypeIsUsedInIcebergTable(typeOid))
+	if (CheckIfTypeIsUsedInInternalIcebergTable(typeOid))
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -610,7 +610,7 @@ ProcessAlterTypeAttributeRename(ProcessUtilityParams * processUtilityParams, voi
 	TypeName   *typename = makeTypeNameFromNameList(nameList);
 	Oid			typeOid = typenameTypeId(NULL, typename);
 
-	if (CheckIfTypeIsUsedInIcebergTable(typeOid))
+	if (CheckIfTypeIsUsedInInternalIcebergTable(typeOid))
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
