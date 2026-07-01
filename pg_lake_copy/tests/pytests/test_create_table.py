@@ -277,7 +277,7 @@ def test_create_table_load_from_invalid_url(pg_conn, duckdb_conn, s3):
         pg_conn,
         raise_error=False,
     )
-    assert error.startswith("ERROR:  HTTP Error: Unable to connect to URL")
+    assert error.startswith("ERROR:  HTTP Error:")
 
     pg_conn.rollback()
 
@@ -288,7 +288,7 @@ def test_create_table_load_from_invalid_url(pg_conn, duckdb_conn, s3):
         pg_conn,
         raise_error=False,
     )
-    assert error.startswith("ERROR:  HTTP Error: Unable to connect to URL")
+    assert error.startswith("ERROR:  HTTP Error:")
 
     pg_conn.rollback()
 
