@@ -817,6 +817,14 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		 */
 		bool		hasExternalCatalogReadOnlyOption = HasReadOnlyOption(createStmt->options);
 
+		if (hasExternalCatalogReadOnlyOption &&
+			GetOption(createStmt->options, "partition_by") != NULL)
+			ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+							errmsg("read-only external catalog iceberg tables do not "
+								   "allow the partition_by option"),
+							errdetail("Partitioning of a read-only table is derived "
+									  "from the source table in the external catalog.")));
+
 		char	   *metadataLocation = NULL;
 		char	   *catalogNamespace = NULL;
 		char	   *catalogTableName = NULL;

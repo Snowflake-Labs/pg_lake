@@ -131,6 +131,47 @@ def test_read_only_object_store_with_non_existing_options(
     pg_conn.commit()
 
 
+def test_read_only_object_store_partition_by_rejected(
+    pg_conn, s3, extension, with_default_location, adjust_object_store_settings
+):
+    run_command("CREATE SCHEMA test_read_only_partition_by", pg_conn)
+
+    run_command(
+        f"""CREATE TABLE test_read_only_partition_by.wrt_tbl(a INT, b INT) USING iceberg WITH (catalog='object_store')""",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    wait_until_object_store_writable_table_pushed(
+        pg_conn, "test_read_only_partition_by", "wrt_tbl"
+    )
+
+    res = run_command(
+        f"""CREATE TABLE test_read_only_partition_by.read_tbl(a INT, b INT) USING iceberg WITH (catalog='object_store', read_only=True, catalog_table_name='wrt_tbl', partition_by='b')""",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "do not allow the partition_by option" in str(res)
+    pg_conn.rollback()
+
+    res = run_command(
+        f"""CREATE TABLE test_read_only_partition_by.read_tbl(a INT, b INT) USING iceberg WITH (catalog='object_store', read_only=True, catalog_table_name='wrt_tbl', partition_by='d')""",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "do not allow the partition_by option" in str(res)
+    pg_conn.rollback()
+
+    run_command(
+        f"""CREATE TABLE test_read_only_partition_by.read_tbl(a INT, b INT) USING iceberg WITH (catalog='object_store', read_only=True, catalog_table_name='wrt_tbl')""",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command("DROP SCHEMA test_read_only_partition_by CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 def test_object_store_read_only_alter_drop_required_options(
     pg_conn, s3, extension, with_default_location, adjust_object_store_settings
 ):
