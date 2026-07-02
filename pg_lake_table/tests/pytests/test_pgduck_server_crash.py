@@ -156,18 +156,32 @@ def test_pgduck_crash_mid_query_no_sigsegv(
         # socket; the next PQconsumeInput() call will return false.
         _kill_pgduck_server()
 
-        # Wake the backend.  PQconsumeInput() will detect the broken
-        # connection and throw an ERROR.  Without the fix this causes a
-        # double-free SIGSEGV that crashes the whole PostgreSQL cluster.
+        # Detach the injection point *before* waking the backend.
+        #
+        # The injection point fires on every iteration of the WaitForResult
+        # poll loop (while (PQisBusy(conn))), not just once.  When the backend
+        # is woken it re-enters that loop: WaitLatchOrSocket() may return
+        # because MyLatch was set (by the wakeup/interrupt) before the killed
+        # socket's EOF is reported as readable, so PQconsumeInput() is not yet
+        # called and the loop iterates again.  If the injection point were
+        # still armed at that moment the backend would pause on it a second
+        # time and the single wakeup below would already have been consumed,
+        # leaving the backend asleep forever (a detach does not wake an
+        # already-sleeping waiter).  Detaching first guarantees the re-entered
+        # loop finds no injection point and proceeds to observe the broken
+        # connection.  This race is timing-dependent and surfaces on PG19.
         run_command(
-            f"SELECT injection_points_wakeup('{INJECTION_POINT}')",
+            f"SELECT injection_points_detach('{INJECTION_POINT}')",
             superuser_conn,
         )
         superuser_conn.commit()
 
-        # Detach so subsequent queries are not blocked.
+        # Wake the backend.  It re-enters the (now injection-point-free) poll
+        # loop and PQconsumeInput() detects the broken connection and throws an
+        # ERROR.  Without the WaitForResult fix this causes a double-free
+        # SIGSEGV that crashes the whole PostgreSQL cluster.
         run_command(
-            f"SELECT injection_points_detach('{INJECTION_POINT}')",
+            f"SELECT injection_points_wakeup('{INJECTION_POINT}')",
             superuser_conn,
         )
         superuser_conn.commit()

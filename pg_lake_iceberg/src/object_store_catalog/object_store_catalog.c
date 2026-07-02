@@ -1,4 +1,5 @@
 #include "postgres.h"
+#include "catalog/pg_type_d.h"
 #include "funcapi.h"
 #include "miscadmin.h"
 #include "pgtime.h"
@@ -9,6 +10,7 @@
 #include "utils/snapmgr.h"
 #include "utils/lsyscache.h"
 #include "utils/timestamp.h"
+#include "utils/tuplestore.h"
 
 #include "pg_lake/json/json_utils.h"
 #include "pg_lake/iceberg/catalog.h"

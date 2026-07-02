@@ -104,8 +104,11 @@ extern bool EnableBaseWorkerLauncher;
 #define DEFAULT_WORKER_STARTER_SLEEP_TIME (10)
 extern int	WorkerStarterSleepTimeSec;
 
+#if PG_VERSION_NUM < 190000
+/* legacy shmem hook path; PG19+ uses RegisterShmemCallbacks instead */
 void		BaseWorkerSharedMemoryInit(void);
 size_t		BaseWorkerSharedMemorySize(void);
+#endif
 
 extern PGDLLEXPORT int32 RegisterBaseWorker(char *workerName, Oid entryPointFunctionId,
 											Oid extensionId);

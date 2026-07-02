@@ -25,6 +25,8 @@
 #include "miscadmin.h"
 #include "libpq-fe.h"
 
+#include "pg_extension_base/pg_compat.h"
+
 #include "access/table.h"
 #include "access/tupdesc.h"
 #include "access/xact.h"
@@ -80,6 +82,7 @@
 #include "tcop/utility.h"
 #include "utils/acl.h"
 #include "utils/builtins.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/portal.h"
@@ -96,6 +99,13 @@ PgLakeCopyValidityCheckHookType PgLakeCopyValidityCheckHook = NULL;
 
 
 static bool IsPgLakeCopy(CopyStmt *copyStmt);
+#if PG_VERSION_NUM >= 190000
+static bool PostgresSupportsJsonCopy(CopyStmt *copyStmt);
+#else
+
+/* pre-19 Postgres has no native JSON COPY, so it never claims the case */
+#define PostgresSupportsJsonCopy(copyStmt) false
+#endif
 static bool IsCopyFromStdin(CopyStmt *copyStmt);
 static bool IsCopyToStdout(CopyStmt *copyStmt);
 static void ProcessPgLakeCopyFrom(CopyStmt *copyStmt, ParseState *pstate,
@@ -139,6 +149,15 @@ PG_FUNCTION_INFO_V1(pg_lake_last_copy_pushed_down_test);
 /* settings */
 bool		EnablePgLakeCopy = true;
 bool		EnablePgLakeCopyJson = true;
+int			JsonCopyMode = JSON_COPY_MODE_AUTO;
+
+/* allowed values for the pg_lake_copy.json_copy_mode enum GUC */
+const struct config_enum_entry json_copy_mode_options[] = {
+	{"auto", JSON_COPY_MODE_AUTO, false},
+	{"postgres", JSON_COPY_MODE_POSTGRES, false},
+	{"pglake", JSON_COPY_MODE_PGLAKE, false},
+	{NULL, 0, false}
+};
 
 /*
  * For COPY .. FROM, we convert incoming tuples into CSV format via a callback.
@@ -239,7 +258,11 @@ IsPgLakeCopy(CopyStmt *copyStmt)
 	{
 		/*
 		 * Currently we only handle Parquet and JSON via STDIN/STDOUT, since
-		 * PostgreSQL can already handle CSV.
+		 * PostgreSQL can already handle CSV. This is the same principle
+		 * applied to JSON below: give Postgres precedence whenever it
+		 * natively supports the case, and only step in for what it cannot do
+		 * (for CSV that is remote/lake targets, which already returned true
+		 * above).
 		 *
 		 * We could probably add some useful features like CSV compression via
 		 * STDIN/STDIN, but the user experience of using different CSV parsers
@@ -248,8 +271,87 @@ IsPgLakeCopy(CopyStmt *copyStmt)
 		return false;
 	}
 
+	/*
+	 * PG19+ has a native JSON COPY for STDIN/STDOUT/local files (a supported
+	 * URL/@stage already returned true above, so by here the target is
+	 * local). Mirror the CSV rule: give Postgres precedence whenever it
+	 * supports the case, and let pg_lake cover the rest. On <=18
+	 * PostgresSupportsJsonCopy() is a constant false, so pg_lake always
+	 * handles JSON there. The hidden, test-only json_copy_mode GUC overrides
+	 * this for the regression and pg_lake test suites.
+	 */
+	if (format == DATA_FORMAT_JSON)
+	{
+		switch (JsonCopyMode)
+		{
+			case JSON_COPY_MODE_PGLAKE:
+				/* always handle in pg_lake (exercise the DuckDB path) */
+				return true;
+			case JSON_COPY_MODE_POSTGRES:
+				/* always defer to Postgres (upstream regression suite) */
+				return false;
+			case JSON_COPY_MODE_AUTO:
+			default:
+
+				/*
+				 * Surgical default: defer to Postgres only for what it can do
+				 * natively; pg_lake handles COPY FROM json and compression.
+				 */
+				if (PostgresSupportsJsonCopy(copyStmt))
+					return false;
+				return true;
+		}
+	}
+
 	return true;
 }
+
+
+#if PG_VERSION_NUM >= 190000
+
+/*
+ * PostgresSupportsJsonCopy returns whether core PostgreSQL (PG19+) can natively
+ * handle this JSON COPY. Remote/lake targets are already claimed by pg_lake
+ * before this is reached, so the target here is always local/STDIN/STDOUT.
+ *
+ * Postgres supports only uncompressed COPY TO ... (FORMAT json): it rejects
+ * COPY FROM with the JSON format and has no compression option. We therefore
+ * keep COPY FROM json and compressed json on pg_lake, matching the CSV rule of
+ * giving Postgres precedence only where it actually supports the case.
+ */
+static bool
+PostgresSupportsJsonCopy(CopyStmt *copyStmt)
+{
+	CopyDataCompression compression;
+
+	/*
+	 * IsPgLakeCopy claims every remote/lake target (s3://, gs://, az://,
+	 * https://, @stage/...) for pg_lake before reaching here, so the target
+	 * is always local/STDIN/STDOUT by now. Assert it so a future caller can't
+	 * slip a URL past us and have us hand a remote path to core PostgreSQL.
+	 */
+	Assert(copyStmt->filename == NULL ||
+		   !IsSupportedURL(ResolveStageURL(copyStmt->filename)));
+
+	if (copyStmt->is_from)
+	{
+		/* Postgres rejects COPY FROM ... (FORMAT json) */
+		return false;
+	}
+
+	/* compression from an explicit option, else inferred from the filename */
+	compression = OptionsToCopyDataCompression(copyStmt->options);
+	if (compression == DATA_COMPRESSION_INVALID && copyStmt->filename != NULL)
+	{
+		compression = URLToCopyDataCompression(ResolveStageURL(copyStmt->filename));
+	}
+
+	/* Postgres has no compression; only plain output stays with Postgres */
+	return compression == DATA_COMPRESSION_NONE ||
+		compression == DATA_COMPRESSION_INVALID;
+}
+
+#endif
 
 
 /*
@@ -1039,6 +1141,17 @@ FindCopyToReadOptions(CopyDataFormat format, List *options)
 			}
 		}
 
+		else if (format == DATA_FORMAT_JSON)
+		{
+			/*
+			 * FORCE_ARRAY is applied by the JSON writer (DuckDB ARRAY), not
+			 * the intermediate CSV; accept it so it survives to
+			 * ConvertCSVFileTo.
+			 */
+			if (strcmp(option->defname, "force_array") == 0)
+				continue;
+		}
+
 		/*
 		 * We currently do not propagate any other options.
 		 */
@@ -1176,13 +1289,22 @@ CheckCopyTableKind(CopyStmt *copyStmt, ParseState *pstate, Relation relation)
 					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 					 errmsg("cannot copy from sequence \"%s\"",
 							RelationGetRelationName(relation))));
+
+		/*
+		 * PG19 allows COPY <partitioned_table> TO directly, so on PG19+ we
+		 * let a partitioned table fall through here (it is turned into a
+		 * SELECT that descends into the partitions). On earlier versions we
+		 * keep rejecting it to match core's per-version capability.
+		 */
+#if PG_VERSION_NUM < 190000
 		else if (relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
 			ereport(ERROR,
 					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 					 errmsg("cannot copy from partitioned table \"%s\"",
 							RelationGetRelationName(relation)),
 					 errhint("Try the COPY (SELECT ...) TO variant.")));
-		else
+#endif
+		else if (relation->rd_rel->relkind != RELKIND_PARTITIONED_TABLE)
 			ereport(ERROR,
 					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 					 errmsg("cannot copy from non-table relation \"%s\"",
@@ -1288,14 +1410,16 @@ CreateQueryForCopyToCommand(PlannedStmt *plannedStmt, Relation relation)
 
 	/*
 	 * Build RangeVar for from clause, fully qualified based on the relation
-	 * which we have opened and locked.  Use "ONLY" so that COPY retrieves
-	 * rows from only the target table not any inheritance children, the same
-	 * as when RLS doesn't apply.
+	 * which we have opened and locked.  For ordinary tables (and foreign /
+	 * iceberg tables) use "ONLY" so that COPY retrieves rows from just the
+	 * target table and not any legacy INHERITS children, the same as when RLS
+	 * doesn't apply.  A partitioned parent holds no rows itself, so for
+	 * PG19's COPY <partitioned_table> TO we must descend into its partitions.
 	 */
 	from = makeRangeVar(get_namespace_name(RelationGetNamespace(relation)),
 						pstrdup(RelationGetRelationName(relation)),
 						-1);
-	from->inh = false;			/* apply ONLY */
+	from->inh = (relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE);
 
 	/* Build query */
 	select = makeNode(SelectStmt);
@@ -1372,6 +1496,8 @@ BuildTupleDescriptorForRelation(Relation relation, List *attributeList)
 		attributeNumber++;
 	}
 
+	TupleDescFinalize(attributeDescriptor);
+
 	return attributeDescriptor;
 }
 
@@ -1416,6 +1542,8 @@ RemoveDroppedColumnsFromTupleDesc(TupleDesc tableDescriptor)
 
 		attributeNumber++;
 	}
+
+	TupleDescFinalize(cleanTupleDesc);
 
 	return cleanTupleDesc;
 }

@@ -19,6 +19,7 @@
  * Functions for generating query for writing data via pgduck server.
  */
 #include "postgres.h"
+#include "catalog/pg_type_d.h"
 
 #include "access/tupdesc.h"
 #include "commands/defrem.h"
@@ -29,6 +30,7 @@
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/parquet/geoparquet.h"
+#include "pg_lake/parsetree/options.h"
 #include "pg_lake/pgduck/keywords.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/pgduck/read_data.h"
@@ -305,6 +307,11 @@ WriteQueryResultTo(char *query,
 
 				appendStringInfo(&command, ", compression %s",
 								 quote_literal_cstr(compressionName));
+
+				/* FORCE_ARRAY maps to DuckDB's ARRAY (single JSON array). */
+				if (GetBoolOption(formatOptions, "force_array", false))
+					appendStringInfoString(&command, ", array true");
+
 				break;
 			}
 

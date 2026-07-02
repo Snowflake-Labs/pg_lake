@@ -20,6 +20,7 @@
  */
 
 #include "postgres.h"
+#include "catalog/pg_type_d.h"
 
 #include "nodes/nodeFuncs.h"
 #include "optimizer/optimizer.h"

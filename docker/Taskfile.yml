@@ -139,7 +139,7 @@ tasks:
                   }
 
     build:all-pg-versions:
-        desc: Build all images for PostgreSQL 16, 17, and 18
+        desc: Build all images for PostgreSQL 16, 17, 18, and 19
         silent: true
         cmds:
             - task: build:all
@@ -148,9 +148,11 @@ tasks:
               vars: { PG_MAJOR: "17", VERSION: "{{.VERSION}}", PUSH: "{{.PUSH}}" }
             - task: build:all
               vars: { PG_MAJOR: "18", VERSION: "{{.VERSION}}", PUSH: "{{.PUSH}}" }
+            - task: build:all
+              vars: { PG_MAJOR: "19", VERSION: "{{.VERSION}}", PUSH: "{{.PUSH}}" }
 
     push:all-pg-versions:
-        desc: Build and push all images for PostgreSQL 16, 17, and 18
+        desc: Build and push all images for PostgreSQL 16, 17, 18, and 19
         silent: true
         cmds:
             - task: build:all-pg-versions
@@ -170,6 +172,7 @@ tasks:
             - docker buildx rm pg_lake_builder_pg16 || true
             - docker buildx rm pg_lake_builder_pg17 || true
             - docker buildx rm pg_lake_builder_pg18 || true
+            - docker buildx rm pg_lake_builder_pg19 || true
             - docker buildx rm pg_lake_builder || true
             - echo "✅ All buildx builders removed"
         ignore_error: true

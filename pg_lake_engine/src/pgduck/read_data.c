@@ -19,6 +19,7 @@
  * Functions for generating query for reading data from pgduck server.
  */
 #include "postgres.h"
+#include "catalog/pg_type_d.h"
 
 #include <inttypes.h>
 

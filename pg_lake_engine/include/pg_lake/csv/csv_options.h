@@ -20,6 +20,15 @@
 #include "commands/copy.h"
 #include "nodes/pg_list.h"
 
+#if PG_VERSION_NUM >= 190000
+/*
+ * PG19 dropped the CopyHeaderChoice enum and stores the header choice as a
+ * plain int holding COPY_HEADER_FALSE / COPY_HEADER_TRUE / COPY_HEADER_MATCH.
+ * Reintroduce the typedef here so we keep a stable signature.
+ */
+typedef int CopyHeaderChoice;
+#endif
+
 extern PGDLLEXPORT List *InternalCSVOptions(bool includeHeader);
 extern PGDLLEXPORT List *NormalizedExternalCSVOptions(List *inputOptions);
 extern PGDLLEXPORT CopyHeaderChoice GetCopyHeaderChoice(DefElem *def, bool is_from);
