@@ -136,6 +136,26 @@ COPY (SELECT * FROM table_to_export JOIN other_table USING (id)) TO 's3://your_b
 You can also pass options to the COPY command based on the format of the file
 you want to write.
 
+### Generated columns
+
+By default, `COPY ... TO` includes generated columns in the exported file. This
+differs from core PostgreSQL, which excludes generated columns so that the
+output can be reloaded with `COPY ... FROM`.
+
+To get the core PostgreSQL behavior and exclude generated columns from the
+output, turn off the `pg_lake_copy.include_generated_columns` setting:
+
+```sql
+-- exclude generated columns from COPY TO output (default: on)
+SET pg_lake_copy.include_generated_columns TO off;
+
+COPY table_to_export TO 's3://your_bucket_name/your_file_name.parquet';
+```
+
+The setting only affects `COPY ... TO` when no explicit column list is given;
+an explicit column list (for example `COPY t (a, b) TO ...`) is exported as
+specified regardless of this setting.
+
 ### psql copy
 
 pg_lake also lets you import and export with the copy formats
