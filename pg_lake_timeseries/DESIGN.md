@@ -104,6 +104,14 @@ essentially a Postgres-fronted LSM layer over an Iceberg table.
   snapshot-pinned DuckDB `postgres_scan` — **into DuckDB**, so one columnar plan
   reconciles and aggregates (§5.3–§5.4).
 
+> **Two storage families.** §4–§11 detail the **delta/overlay** family described
+> above (Iceberg base + small Postgres delta, reads merge). §12 describes the
+> **hot-authoritative tiering** family the design later converged toward
+> (Postgres owns the full deduplicated indexed last N days; Iceberg is a
+> tier/mirror; reads route by tier with no merge), including **Mirror mode (C)**,
+> the CDC-fed Iceberg mirror. Pick per the workload; they can coexist as per-table
+> modes.
+
 ---
 
 ## 4. Data model
@@ -119,7 +127,7 @@ insert time. `seq` is used for two things:
    *safe* high-water mark `hwm` (§7.2).
 
 `seq` is **not** a read-side watermark; read dedup is by key, not by a global
-cut. (That distinguishes model A from model B; see §12.)
+cut. (That distinguishes model A from model B; see §13.)
 
 ### 4.2 Logical key
 
@@ -386,7 +394,7 @@ This is the reason the delta is chunked rather than a single heap.
   append-only or last-writer-wins semantics this is fine; strict cross-tier
   uniqueness is out of scope.
 - **Keyless append-only** workloads can't dedup by key. They must either use
-  model B (a version-seq watermark split; see §12) or accept snapshot pinning.
+  model B (a version-seq watermark split; see §13) or accept snapshot pinning.
   Model A assumes a key.
 
 ---
@@ -570,7 +578,7 @@ Future: per-table overrides for flush cadence, target file size, retention.
    create old-dated delta partitions. Mitigation: route out-of-window late rows
    straight to the base at flush (don't keep a partition), or hold a single
    "late" partition. Needs a policy.
-7. **Keyless append-only** — not supported by model A; would use model B (§12).
+7. **Keyless append-only** — not supported by model A; would use model B (§13).
 8. **`MERGE`/joined-DELETE support in the FDW** — the flush uses a semi-join
    DELETE against the Iceberg base; confirm the FDW supports it, else use the
    `= ANY` / per-partition fallback (§7.1).
@@ -578,10 +586,141 @@ Future: per-table overrides for flush cadence, target file size, retention.
    trickle single rows into the base (the FDW has no batch insert and single-row
    inserts are expensive). Ingest goes to the heap delta; only the flusher
    writes the base, in batches.
+10. **Equality-delete write support** — pg_lake writes only *position* deletes;
+    equality deletes (content=2) are recognized on read but have no write path.
+    Efficient high-frequency Mirror mode (C) apply-by-key would want
+    equality-delete writes (§12.3). Gating capability for that path; scope
+    separately in pg_lake_iceberg.
+11. **Equality deletes vs. overwrite-from-Postgres** — undecided whether Mirror
+    mode should use pure Iceberg equality deletes (read-amplifying, needs new
+    write support) or lean on overwrite-from-Postgres resets (§12.3), which the
+    authoritative hot store uniquely enables.
 
 ---
 
-## 12. Alternative considered: model B (watermark split)
+## 12. Hot-authoritative tiering & sync modes (incl. Mirror mode C)
+
+§4–§11 describe the **delta/overlay** family (Iceberg is the base, Postgres a
+small change-delta, reads *merge*). This section describes the second family the
+design has converged toward: **hot-authoritative tiering**, where Postgres owns
+the full recent window and Iceberg is a tier/mirror rather than a base to
+overlay.
+
+### 12.1 The model
+
+- **Postgres owns the full, deduplicated, indexed last N days** and is the
+  source of truth for that window. Ingest is an **upsert** on the key into the
+  hot partitions (unique index → dedup + fast lookups + secondary indexes).
+- **Iceberg holds data older than N days** and — depending on sync mode — a copy
+  of the recent data too.
+- **Reads route by tier; they do not merge**: recent → Postgres (indexed,
+  deduped, fresh); old → Iceberg (columnar); spanning → `UNION ALL` on the time
+  boundary. The tiers are **disjoint by time**, so there is no cross-tier dedup.
+- **Mutation contract:** all inserts/updates/deletes happen within the N-day
+  window in Postgres; once a partition is sealed to Iceberg it is immutable.
+  Late data older than N days is rejected/buffered or applied as a rare Iceberg
+  correction.
+
+This eliminates the read-side merge machinery of §5 (no anti-join, no DISTINCT
+ON, no `postgres_scan` overlay) for the primary path — that machinery reappears
+only as an *optional* fresh-tail overlay in Mirror mode (§12.4).
+
+### 12.2 Sync modes
+
+How recent data reaches Iceberg, in increasing complexity. **"Delta tables"
+exist only in mode C, and even there as a *write-side* change stream, not a read
+overlay.**
+
+- **(A) Sync-at-seal — no delta tables.** Postgres owns the entire mutable
+  window. When a partition ages out, bulk-write its current (deduped) contents to
+  Iceberg once, then `DROP` it from Postgres. Iceberg lags by the active window
+  (fine — recent reads hit Postgres). Simplest; no delete files, no merge.
+- **(B) Partition-overwrite — no delta tables.** Periodically overwrite the
+  *changed* hot partitions' files in Iceberg from Postgres's current state. Keeps
+  Iceberg fresh with no delete files; cost is write amplification confined to
+  actively-changing partitions.
+- **(C) Mirror mode — a CDC change stream feeds Iceberg.** Detailed below.
+
+### 12.3 Mirror mode (C)
+
+A **dual-store CDC mirror**: Postgres is the authoritative indexed hot window; a
+change stream from the hot tables is **continuously applied into Iceberg**, so
+Iceberg is a near-fresh columnar mirror of recent data plus the historical
+archive. Reads still route by tier — the change stream is a **write-side sync**,
+not a read overlay.
+
+**Change capture.**
+
+- **Logical decoding (preferred).** Tail the hot tables via a replication slot,
+  translate INSERT/UPDATE/DELETE to Iceberg operations, track an applied-LSN
+  watermark. No physical delta table, low write overhead, LSN-ordered. This is
+  the same shape as pg_lake's Postgres mirroring (change batches + APPLY + LSN
+  tracking) and should reuse that experience.
+- **Change-log table (simpler prototype).** An AFTER-trigger or the upsert site
+  writes `(key, op, values, seq)` into a table; apply reads it in batches.
+  Transactional and simple, but per-write amplification; worse at high rate.
+
+**Applying to Iceberg.** INSERT → data-file append; DELETE → delete of the key;
+UPDATE → delete + insert. The delete mechanism is the open decision (pg_lake
+writes *position* deletes today; equality deletes are read-recognized but have no
+write path):
+
+1. **Position deletes (works today).** An apply batch issues
+   `DELETE FROM <iceberg> WHERE key IN (<changed/deleted keys>)`; pg_lake locates
+   the rows (a scan) and writes position deletes, then inserts new versions.
+   Correct now; each apply pays a locate-scan proportional to touched data. Fine
+   at moderate rates.
+2. **Overwrite-from-Postgres reset (preferred for update-heavy partitions).**
+   Because Postgres holds the clean deduped state, rematerialize a whole hot
+   partition from Postgres (mode B) instead of accumulating deletes — a "reset
+   button" that stateless CDC sinks (Flink/Debezium) lack. Blends B and C:
+   CDC-append for freshness on insert-dominated partitions; overwrite-from-PG to
+   collapse delete accumulation on update-heavy ones. **Seal = one final
+   overwrite → a pristine, delete-file-free cold partition, then drop from PG.**
+3. **Equality deletes (under consideration, not decided).** Write key-only delete
+   files (content=2) and defer the locate to read/compaction — the classic
+   streaming-upsert-to-Iceberg pattern. Cheapest apply, but adds read
+   amplification (every scan anti-joins data against delete files until
+   compaction) and requires new equality-delete write support (§11#10). Whether
+   pure Iceberg equality deletes are the right tool — versus leaning on
+   overwrite-from-PG (#2), which the authoritative hot store uniquely enables — is
+   open (§11#11).
+
+Each apply batch is one Iceberg commit; batch size trades freshness against
+snapshot/file churn. Apply is idempotent via the applied-LSN watermark. pg_lake
+already flips a data file to copy-on-write past a delete threshold, which bounds
+read amplification automatically.
+
+### 12.4 Reads & consistency in Mirror mode
+
+- Fresh point lookups / dedup / read-your-writes → **Postgres** (authoritative).
+- Columnar recent analytics + external Iceberg engines (Spark/Trino/Snowflake) →
+  **Iceberg**, lagging by the apply interval; each Iceberg snapshot is internally
+  consistent as of an applied LSN. Applying at transaction boundaries plus an
+  LSN→snapshot map gives external readers transactionally consistent points.
+- Old data → Iceberg.
+- *Optional* strict-fresh columnar path = the Iceberg mirror **plus** a
+  `postgres_scan` overlay of only the *un-applied tail* since the last apply
+  (§5.3–§5.4) — the read overlay reappears, but for a tiny tail, and only when
+  columnar *and* fully-fresh recent analytics are both required.
+- Route recent from exactly one store (the time boundary) to avoid
+  double-counting data that physically exists in both.
+
+### 12.5 Costs & when Mirror mode earns its keep
+
+Costs: two physical copies of recent data; delete-amplification + compaction
+load; a real CDC pipeline (slot lifecycle, apply lag, backpressure, crash
+recovery); Iceberg snapshot churn from frequent commits (→ expiry + compaction);
+schema evolution fanned out to both stores.
+
+Worth it when external engines need fresh recent Iceberg data, or recent
+analytics needs columnar speed at scale, or the recent window must be durable in
+the lake — *and* the change rate makes mode B's whole-partition overwrite too
+amplifying to be the only sync. Otherwise A or B is simpler.
+
+---
+
+## 13. Alternative considered: model B (watermark split)
 
 Instead of key-based merge-on-read, split *both* branches by an MVCC-read
 version watermark `W` on `seq`:
@@ -598,17 +737,17 @@ SELECT * FROM <delta> WHERE seq >  W AND <range>
   in both `seq <= W` base and `seq > W` delta → double count) or deletes without
   extra machinery; needs the same safe-`W` care as §7.2.
 
-Model A subsumes updates/deletes and is the chosen default. Model B is noted as
-the right tool for strictly append-only, keyless streams and could be offered as
-a per-table mode later.
+Model A subsumes updates/deletes and is the chosen default for the overlay
+family. Model B is noted as the right tool for strictly append-only, keyless
+streams and could be offered as a per-table mode later.
 
 ---
 
-## 13. Phased implementation plan
+## 14. Phased implementation plan
 
 1. **Semantics first (SQL only).** `create_table` builds delta + base + view +
    INSTEAD OF routing. Implement `flush`/`safe_hwm`/`maintain` as PL/pgSQL.
-   Validate reconciliation with the concurrency test harness (§14). No C yet.
+   Validate reconciliation with the concurrency test harness (§15). No C yet.
 2. **Background worker (C).** `RegisterBackgroundWorker` in `_PG_init`; loop
    calling `timeseries.maintain()` per table via SPI.
 3. **Frontier hardening.** Pre-create/drain edge cases, DEFAULT management,
@@ -624,12 +763,20 @@ a per-table mode later.
 5. **Snapshot pinning (optional).** Only if strict RR/SERIALIZABLE is required
    for the PostgreSQL-side fallback (§8.3); the DuckDB-side merge is already
    snapshot-consistent.
+6. **Hot-authoritative tiering (§12) — alternative track.** Upsert-deduped hot
+   partitions + sync-at-seal (A) or partition-overwrite (B); reads route by tier
+   with no merge. Simpler than the overlay family (phases 1, 3–5) and can ship
+   independently.
+7. **Mirror mode (C) — optional (§12.3).** Logical-decoding capture of the hot
+   tables; apply to Iceberg via position deletes or overwrite-from-PG reset
+   (equality-delete writes only if pursued, §11#10); applied-LSN watermark +
+   idempotent apply; compaction/seal. Reuses pg_lake mirroring patterns.
 
 Each phase is independently shippable and testable.
 
 ---
 
-## 14. Testing strategy
+## 15. Testing strategy
 
 pytest suites under `tests/pytests/` (skeleton has a placeholder). Priorities:
 
@@ -650,7 +797,7 @@ pytest suites under `tests/pytests/` (skeleton has a placeholder). Priorities:
 
 ---
 
-## 15. Naming & placement
+## 16. Naming & placement
 
 - Extension name: `pg_lake_timeseries` (descriptive, matches
   `pg_lake_iceberg`/`pg_lake_table`/`pg_lake_copy`). `pg_lake_live` was
