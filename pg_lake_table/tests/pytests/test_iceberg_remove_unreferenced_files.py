@@ -889,7 +889,10 @@ def test_remove_unreferenced_files_13(
     # we should have 1 file in the deletion queue
     # that's the file with zero rows. Normally it should be fine
     # but Snowflake complains about zero row parquet files, so we
-    # do not add that to the table
+    # do not add that to the table. Note the queued path is the concrete
+    # data file DuckDB wrote (e.g. data_0.parquet), not the directory
+    # prefix, since DropAndQueueEmptyDataFiles queues the exact zero-row
+    # file it drops from the write.
     file_paths_q = run_query(
         f"SELECT path FROM lake_engine.deletion_queue WHERE path ilike '%{TEST_TABLE_NAMESPACE}/{table_name}%'",
         superuser_conn,
@@ -898,7 +901,7 @@ def test_remove_unreferenced_files_13(
 
     # ensure zero rows
     res = run_query(
-        f"SELECT count(*) FROM read_parquet('{file_paths_q[0][0]}/*')", pgduck_conn
+        f"SELECT count(*) FROM read_parquet('{file_paths_q[0][0]}')", pgduck_conn
     )
     assert res[0][0] == 0
 
@@ -910,6 +913,130 @@ def test_remove_unreferenced_files_13(
     assert len(file_paths) == 0
 
     run_command("RESET pg_lake_table.enable_insert_select_pushdown", pg_conn)
+
+
+# DuckDB writes at most this many rows per Parquet row group by default
+# (row_group_size). When target_file_size_mb is smaller than the compressed
+# size of a single such row group, DuckDB rotates to a new file after every
+# row group. If the number of rows written is an exact multiple of the row
+# group size, the final rotation opens one more file that never receives a
+# row, leaving a trailing zero-row Parquet file (valid footer, no row groups).
+# Snowflake's Iceberg reader rejects such files ("Invalid parquet file with no
+# data (zero rowgroups)"), so DropAndQueueEmptyDataFiles must keep them out of
+# the manifest while still queuing them for deletion. These tests reproduce the
+# split boundary deterministically for both write paths.
+DUCKDB_DEFAULT_ROW_GROUP_SIZE = 122880
+
+
+def _assert_empty_split_file_dropped_and_queued(
+    conn, pgduck_conn, table_fqn, expected_rows
+):
+    """Assert a split write left a trailing zero-row file that was kept out of
+    lake_table.files but queued for deletion, without losing any rows."""
+
+    # Only non-empty files are registered, and together they hold every row.
+    files = run_query(
+        f"""SELECT path, row_count FROM lake_table.files
+            WHERE table_name = '{table_fqn}'::regclass ORDER BY path""",
+        conn,
+    )
+    assert len(files) >= 1
+    assert all(row["row_count"] > 0 for row in files)
+    assert sum(row["row_count"] for row in files) == expected_rows
+
+    # The trailing zero-row file must be queued for deletion instead of being
+    # registered. It is queued as the concrete data file path, not a prefix.
+    queued = run_query(
+        f"""SELECT path FROM lake_engine.deletion_queue
+            WHERE table_name = '{table_fqn}'::regclass AND path LIKE '%.parquet'
+            ORDER BY path""",
+        conn,
+    )
+    assert len(queued) >= 1
+
+    registered_paths = {row["path"] for row in files}
+    for row in queued:
+        # a queued file must not be registered ...
+        assert row["path"] not in registered_paths
+        # ... and must really contain zero rows.
+        empty = run_query(
+            f"SELECT count(*) FROM read_parquet('{row['path']}')", pgduck_conn
+        )
+        assert empty[0][0] == 0
+
+    # The table still reads back exactly the rows we inserted.
+    total = run_query(f"SELECT count(*) FROM {table_fqn}", conn)
+    assert total[0][0] == expected_rows
+
+
+# The trailing empty split file can be produced on either write path:
+#  - pushdown=True:  INSERT .. SELECT is pushed to pgduck, exercising
+#    PrepareToAddQueryResultToTable. We use an Iceberg table, the real
+#    Snowflake CDC scenario that triggered this bug.
+#  - pushdown=False: with insert-select pushdown disabled the write goes
+#    row-at-a-time through MultiDataFileUploadDestReceiver ->
+#    PrepareCSVInsertion. Splitting there requires reservedRowIdStart == 0, so
+#    we use a plain (non-Iceberg) pg_lake table, which does not reserve row ids.
+@pytest.mark.parametrize("pushdown", [True, False], ids=["pushdown", "non_pushdown"])
+def test_remove_unreferenced_files_14_empty_split_file(
+    s3, superuser_conn, extension, with_default_location, pgduck_conn, pushdown
+):
+    run_command("DROP SCHEMA IF EXISTS test_empty_split_nsp CASCADE", superuser_conn)
+    run_command("CREATE SCHEMA test_empty_split_nsp", superuser_conn)
+    superuser_conn.commit()
+
+    try:
+        if pushdown:
+            run_command(
+                "CREATE TABLE test_empty_split_nsp.t (v text) USING pg_lake_iceberg",
+                superuser_conn,
+            )
+        else:
+            location = f"s3://{TEST_BUCKET}/test_empty_split_non_pushdown/"
+            run_command(
+                f"""CREATE FOREIGN TABLE test_empty_split_nsp.t (v text)
+                    SERVER pg_lake
+                    OPTIONS (writable 'true', format 'parquet', location '{location}')""",
+                superuser_conn,
+            )
+            run_command(
+                "SET pg_lake_table.enable_insert_select_pushdown TO off",
+                superuser_conn,
+            )
+
+        # A target below one row group's compressed size forces DuckDB to
+        # rotate files after every row group; requires superuser to go under
+        # the 16MB floor.
+        run_command("SET pg_lake_table.target_file_size_mb TO '3MB'", superuser_conn)
+
+        insert = (
+            "INSERT INTO test_empty_split_nsp.t "
+            f"SELECT md5(i::text) FROM generate_series(1,{DUCKDB_DEFAULT_ROW_GROUP_SIZE}) i"
+        )
+
+        # Confirm we are actually exercising the intended write path.
+        explain = run_query(f"EXPLAIN (VERBOSE) {insert}", superuser_conn)
+        if pushdown:
+            assert "Custom Scan (Query Pushdown)" in str(explain)
+        else:
+            assert "Custom Scan (Query Pushdown)" not in str(explain)
+
+        run_command(insert, superuser_conn)
+        superuser_conn.commit()
+
+        _assert_empty_split_file_dropped_and_queued(
+            superuser_conn,
+            pgduck_conn,
+            "test_empty_split_nsp.t",
+            DUCKDB_DEFAULT_ROW_GROUP_SIZE,
+        )
+    finally:
+        run_command("RESET pg_lake_table.target_file_size_mb", superuser_conn)
+        run_command("RESET pg_lake_table.enable_insert_select_pushdown", superuser_conn)
+        run_command(
+            "DROP SCHEMA IF EXISTS test_empty_split_nsp CASCADE", superuser_conn
+        )
+        superuser_conn.commit()
 
 
 # Sequence number to generate unique table names

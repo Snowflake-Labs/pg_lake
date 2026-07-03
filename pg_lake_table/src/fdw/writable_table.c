@@ -103,6 +103,7 @@ static List *ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCoun
 							 int64 liveRowCount, char *deleteFile, int64 deletedRowCount,
 							 int64 *totalPositionDeletedRows);
 static List *GetDataFilePathsFromStatsList(List *dataFileStats);
+static void DropAndQueueEmptyDataFiles(Oid relationId, StatsCollector * statsCollector);
 static List *GetNewFileOpsFromFileStats(Oid relationId, List *dataFileStats,
 										int32 partitionSpecId, Partition * partition, int64 rowCount,
 										bool isVerbose, List **newFiles);
@@ -298,11 +299,18 @@ PrepareCSVInsertion(Oid relationId, char *insertCSV, int64 rowCount,
 	}
 
 	/*
+	 * Drop (and queue for deletion) any zero-row files that DuckDB emitted,
+	 * so nothing below has to know about empty split files. See
+	 * DropAndQueueEmptyDataFiles for why these must never enter the manifest.
+	 */
+	DropAndQueueEmptyDataFiles(relationId, statsCollector);
+
+	/*
 	 * when we defer deletion of in-progress files, we need to replace the
 	 * prefix paths with full paths. At precommit hook, we delete persisted
 	 * files from in-progress
 	 */
-	if (isPrefix && isIcebergTable)
+	if (isPrefix && isIcebergTable && statsCollector->dataFileStats != NIL)
 		ReplaceInProgressPrefixPathWithFullPaths(dataFilePrefix, GetDataFilePathsFromStatsList(statsCollector->dataFileStats));
 
 	/* build a DataFileModification for each new data file */
@@ -348,6 +356,54 @@ GetDataFilePathsFromStatsList(List *dataFileStats)
 	}
 
 	return dataFiles;
+}
+
+
+/*
+ * DropAndQueueEmptyDataFiles removes every zero-row file from the given
+ * StatsCollector and queues each one for deletion. After the call,
+ * statsCollector->dataFileStats contains only files that actually hold rows
+ * and totalRowCount is their summed row count, so a caller can simply treat
+ * totalRowCount == 0 as "nothing to add".
+ *
+ * When DuckDB splits output by file_size_bytes (target_file_size_mb), it
+ * writes sequentially-numbered files (data_0.parquet, data_1.parquet, ...).
+ * If the data volume lands on a split boundary, DuckDB can emit a trailing
+ * empty file: a valid Parquet footer and schema but zero row groups.
+ * Snowflake's Iceberg reader rejects such a file ("Invalid parquet file with
+ * no data (zero rowgroups)"), which would make the whole table unreadable.
+ *
+ * Doing this right after the write means no downstream code (manifest
+ * building, row-id assignment, in-progress bookkeeping) ever has to reason
+ * about zero-row files. Queuing each dropped file for deletion keeps it from
+ * being orphaned on object storage, and is the same deletion-queue path used
+ * when a write produces no rows at all.
+ */
+static void
+DropAndQueueEmptyDataFiles(Oid relationId, StatsCollector * statsCollector)
+{
+	List	   *keptStats = NIL;
+	int64		totalRowCount = 0;
+	ListCell   *cell = NULL;
+	TimestampTz orphanedAt = GetCurrentTransactionStartTimestamp();
+
+	foreach(cell, statsCollector->dataFileStats)
+	{
+		DataFileStats *stats = lfirst(cell);
+
+		if (stats->rowCount == 0)
+		{
+			InsertDeletionQueueRecordExtended(stats->dataFilePath, relationId,
+											  orphanedAt, false);
+			continue;
+		}
+
+		keptStats = lappend(keptStats, stats);
+		totalRowCount += stats->rowCount;
+	}
+
+	statsCollector->dataFileStats = keptStats;
+	statsCollector->totalRowCount = totalRowCount;
 }
 
 
@@ -1086,16 +1142,17 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 						   wrapNativeTypes,
 						   partitionByExprs);
 
+	/*
+	 * Drop (and queue for deletion) any zero-row files DuckDB produced, so
+	 * that nothing below has to reason about empty split files. This also
+	 * collapses the "write produced no rows at all" case into a plain
+	 * totalRowCount == 0 check: all files (if any) have been queued for
+	 * cleanup, so we can just return without adding anything.
+	 */
+	DropAndQueueEmptyDataFiles(relationId, statsCollector);
+
 	if (statsCollector->totalRowCount == 0)
-	{
-		TimestampTz orphanedAt = GetCurrentTransactionStartTimestamp();
-
-		/* as a convention, we don't add relationIds for prefixes */
-		InsertDeletionQueueRecordExtended(newDataFilePath, isPrefix ? InvalidOid : relationId,
-										  orphanedAt, isPrefix);
-
 		return NIL;
-	}
 
 	ApplyColumnStatsModeForAllFileStats(relationId, statsCollector->dataFileStats);
 
