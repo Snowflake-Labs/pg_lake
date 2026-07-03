@@ -4,6 +4,22 @@ import itertools
 import json
 import re
 import time
+import pytest
+
+
+# Several tests in this module create the same schemas (object_store_sc1,
+# object_store_sc2). When one test fails midway through and skips its DROP
+# SCHEMA cleanup, the next test fails immediately with "schema already exists",
+# which masks the original failure and produces a noisy cascade. Drop them
+# defensively before each test so a single failure does not poison the rest.
+@pytest.fixture(autouse=True)
+def drop_object_store_schemas(pg_conn):
+    run_command(
+        "DROP SCHEMA IF EXISTS object_store_sc1, object_store_sc2 CASCADE",
+        pg_conn,
+    )
+    pg_conn.commit()
+    yield
 
 
 # don't accept 'catalog_name', 'catalog_namespace', 'catalog_table_name'
