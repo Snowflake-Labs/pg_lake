@@ -834,6 +834,76 @@ def test_md_array(pg_conn, duckdb_conn, tmp_path):
     assert result[0]["val"] == 2
 
 
+def test_copy_to_multidim_array_errors(pg_conn, tmp_path):
+    """
+    Regression test for https://github.com/Snowflake-Labs/pg_lake/issues/407.
+
+    COPY <table> TO <lake-file> must raise a clear pg_lake error when a column
+    contains a multidimensional array value.  Previously the value was
+    serialised into the intermediate temp CSV and handed to DuckDB, which
+    either returned a cryptic Conversion Error or crashed the shared
+    pgduck_server process (issue #408).
+
+    The check lives in CopyOneRowTo (csv_writer.c) and fires before the CSV
+    is written, so the engine is never involved.
+    """
+    parquet_path = tmp_path / "test_multidim_err.parquet"
+
+    run_command(
+        """
+        CREATE TABLE test_multidim_err (id bigint, v int[]);
+        INSERT INTO test_multidim_err VALUES (1, ARRAY[[1,2],[3,4]]);
+    """,
+        pg_conn,
+    )
+
+    error = run_command(
+        f"COPY test_multidim_err TO '{parquet_path}' WITH (format 'parquet')",
+        pg_conn,
+        raise_error=False,
+    )
+
+    assert error is not None, "Expected an error for multidimensional array in COPY TO"
+    assert (
+        "multidimensional arrays are not supported" in error.lower()
+    ), f"Unexpected error message: {error}"
+
+    pg_conn.rollback()
+
+
+def test_copy_to_1d_array_succeeds(pg_conn, duckdb_conn, tmp_path):
+    """
+    Regression guard: 1-D array columns must still round-trip correctly through
+    COPY TO after the multidim check is added.  A 1-D value has ARR_NDIM == 1
+    and must not be rejected.
+    """
+    parquet_path = tmp_path / "test_1d_array.parquet"
+
+    run_command(
+        f"""
+        CREATE TABLE test_1d_array (id bigint, tags text[]);
+        INSERT INTO test_1d_array VALUES
+            (1, ARRAY['a', 'b', 'c']),
+            (2, NULL),
+            (3, ARRAY['x']);
+        COPY test_1d_array TO '{parquet_path}' WITH (format 'parquet');
+    """,
+        pg_conn,
+    )
+
+    duckdb_conn.execute(
+        "SELECT id, tags FROM read_parquet($1) ORDER BY id", [str(parquet_path)]
+    )
+    rows = duckdb_conn.fetchall()
+
+    assert len(rows) == 3
+    assert rows[0] == (1, ["a", "b", "c"])
+    assert rows[1] == (2, None)
+    assert rows[2] == (3, ["x"])
+
+    pg_conn.rollback()
+
+
 def test_copy_virtual_column(pg_conn, tmp_path):
     # virtual columns were introduced in PostgreSQL 18
     if get_pg_version_num(pg_conn) < 180000:
