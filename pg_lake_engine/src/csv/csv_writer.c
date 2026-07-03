@@ -929,6 +929,36 @@ CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot)
 				 */
 				Form_pg_attribute attr = TupleDescAttr(slot->tts_tupleDescriptor, attnum - 1);
 
+				/*
+				 * Reject multidimensional arrays before serialization.
+				 * PostgreSQL cannot distinguish int[] from int[][] at the
+				 * type level, so a value with ndim > 1 would be serialised as
+				 * "[[1,2],[3,4]]" and DuckDB cannot cast that string back to
+				 * a flat LIST(T).  For Iceberg tables this is handled
+				 * upstream by IcebergErrorOrClampDatum; for plain COPY TO
+				 * there is no such guard, so we raise here.  Check before
+				 * serialisation so we do not pay the cost of PGDuckSerialize
+				 * on a value we will reject.
+				 */
+				if (get_element_type(attr->atttypid) != InvalidOid &&
+					cstate->targetFormat != DATA_FORMAT_ICEBERG)
+				{
+					ArrayType  *arr = DatumGetArrayTypeP(value);
+
+					if (ARR_NDIM(arr) > 1)
+						ereport(ERROR,
+								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								 errmsg("multidimensional arrays are not supported"
+										" in COPY TO"),
+								 errdetail("Column \"%s\" contains a"
+										   " %d-dimensional array value.",
+										   NameStr(attr->attname),
+										   ARR_NDIM(arr)),
+								 errhint("Flatten the array to one dimension before"
+										 " exporting, or write to an Iceberg table"
+										 " with out_of_range_values = 'clamp'.")));
+				}
+
 				if (ShouldUseDuckSerialization(cstate->targetFormat, MakePGType(attr->atttypid, attr->atttypmod)))
 				{
 					/*
