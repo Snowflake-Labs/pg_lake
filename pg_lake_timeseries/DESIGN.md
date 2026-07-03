@@ -100,6 +100,9 @@ essentially a Postgres-fronted LSM layer over an Iceberg table.
   reconciliation and aggregate pushdown).
 - The **delta** is small because the flusher keeps draining it into the base.
 - The **base** is where analytical scans and aggregation get pushed.
+- Preferred read execution pushes the *whole* merge — delta included, via a
+  snapshot-pinned DuckDB `postgres_scan` — **into DuckDB**, so one columnar plan
+  reconciles and aggregates (§5.3–§5.4).
 
 ---
 
@@ -222,41 +225,113 @@ newest version would let a stale older version surface. Verify with `EXPLAIN`
 that `value` predicates stay above the dedup while `ts`/`series_id` predicates
 sink into both branches.
 
-### 5.3 CustomScan: per-partition aggregate decision
+### 5.3 Where the merge runs
 
-The view always reconciles the whole scanned range, so it cannot push
-aggregation to DuckDB. The CustomScan makes reconciliation *pay-per-dirty-
-partition*. At plan time it reads `timeseries.delta_partitions` and splits the
+Reconciling in PostgreSQL (the §5.1 view) means the base is scanned as a foreign
+scan, base rows are shipped up to PostgreSQL, and the anti-join/aggregation run
+in PostgreSQL. That is correct but forfeits DuckDB aggregation for any range the
+delta touches. The **preferred** execution instead pushes the *entire* merge —
+including the delta read — **into DuckDB**, using DuckDB's `postgres_scanner`
+(`postgres_scan`), which is already bundled and loaded in `duckdb_pglake`. Then
+one columnar plan reconciles and aggregates, returning only final results.
+
+The CustomScan reads `timeseries.delta_partitions` at plan time and splits the
 time-pruned partition set:
 
-- **Clean partitions** (no unflushed delta) — data is entirely current in the
-  base. Push the scan *and* any `GROUP BY`/aggregate straight to the Iceberg
-  foreign scan. This is the common case for anything older than the flush lag.
-- **Dirty partitions** (delta overlaps) — reconcile (anti-join base + delta),
-  then aggregate in PostgreSQL. Optimization: synthesize the delta's key set as
-  a `NOT IN` filter pushed into the Iceberg scan so DuckDB drops superseded base
-  rows itself.
+- **Clean partitions** (no unflushed delta) — emit plain Iceberg DuckDB SQL, no
+  `postgres_scan`, no reverse connection. This is the common case for anything
+  older than the flush lag.
+- **Dirty partitions** (delta overlaps) — emit a single DuckDB query that reads
+  the base via `read_parquet(...)` **and** the delta via a snapshot-pinned
+  `postgres_scan(...)` (§5.4), does the anti-join + max-`seq` dedup + tombstone
+  filter, and aggregates — all in DuckDB.
 
-Resulting plan for `SELECT time_bucket, avg(value) ... GROUP BY 1`:
+Emitted DuckDB SQL for `SELECT time_bucket, avg(value) ... GROUP BY 1` over a
+dirty range:
 
+```sql
+SELECT time_bucket, avg(value)                 -- aggregation runs in DuckDB
+FROM (
+    SELECT base.*
+    FROM   read_parquet([...iceberg files...]) base
+    WHERE  NOT EXISTS (SELECT 1 FROM delta d
+                       WHERE d.series_id = base.series_id AND d.ts = base.ts)
+    UNION ALL
+    SELECT * EXCLUDE (deleted, seq)
+    FROM  (SELECT DISTINCT ON (series_id, ts) *
+           FROM postgres_scan('<loopback dsn>', 'public', 'metrics_delta',
+                              snapshot => '<exported id>')
+           ORDER BY series_id, ts, seq DESC) d
+    WHERE NOT d.deleted
+) merged
+GROUP BY 1;
 ```
-Finalize Aggregate
-  Append
-    Foreign Aggregate          -- clean partitions: GROUP BY pushed to DuckDB
-    GroupAggregate             -- dirty partitions (few, recent)
-      Merge (anti-join base ⟕ delta)
-```
 
-A partition flips back to *clean* the instant a flush empties its delta, so the
-set that loses pushdown is bounded by the flush lag, not by N.
+`postgres_scan` supports filter/projection pushdown
+(`PostgresScanFunctionFilterPushdown`), so the query's `ts`/key predicates push
+to the PostgreSQL side and only the tiny indexed delta slice is read; DuckDB
+supports `DISTINCT ON` and anti-joins natively. A partition flips back to
+*clean* the instant a flush empties its delta, so the set that pays the reverse
+connection is bounded by the flush lag, not by N.
 
-**Dependency / open question:** whether pg_lake pushes *partial* (2-stage)
-aggregates or only full grouping (the code survey found `add_foreign_grouping_
-paths`, i.e. grouping pushdown; the partial split is unconfirmed). If full-only,
-combine by full-aggregating each branch and re-aggregating on top — valid for
-decomposable aggregates (`sum`, `count`, `min`, `max`, `avg` = `sum`/`count`)
-and needs explicit handling for holistic ones (`count(distinct)`, percentiles).
-See §11.
+This collapses the earlier "clean → push aggregate / dirty → aggregate-in-PG"
+split into "clean → plain Iceberg SQL / dirty → Iceberg + `postgres_scan`,
+merged and aggregated in DuckDB", and largely **removes the dependency on
+partial-aggregate pushdown** (§11#1): DuckDB performs the whole aggregation over
+the merged result, so there is no cross-engine partial/finalize split to rely on.
+
+**Fallback:** the §5.1 PostgreSQL-side reconciliation remains valid where a
+reverse connection is undesirable (e.g. no suitable role, or `postgres_scan`
+overhead not justified for a given query); the CustomScan can choose it per
+query.
+
+### 5.4 Snapshot-consistent `postgres_scan` (reading the delta inside DuckDB)
+
+Reading the delta inside DuckDB is only correct if the delta read uses the
+**same snapshot** as the base file resolution. pg_lake resolves the base file
+set at the transaction snapshot `S` (`CreatePgLakeScanSnapshot` →
+`GetTransactionSnapshot()`), but pgduck_server executes *after* that, so a naive
+`postgres_scan` at "latest" would read the delta at a later instant `S'`. A
+flush committing between the base pin and `S'` moves a row out of the delta that
+the base snapshot did not yet contain → the row is in **neither** → **lost row**.
+
+The fix is already present: `duckdb_pglake` carries a patch
+(`patches/duckdb-postgres/snapshot.patch`) adding a `snapshot => '<id>'` named
+parameter to `postgres_scan`/`postgres_query`. When set, the scanner's
+back-connection adopts that snapshot (`PostgresScanConnect(con, snapshot)` →
+`SET TRANSACTION SNAPSHOT`) instead of reading latest.
+
+Flow per query touching a dirty range:
+
+1. The driving backend calls `pg_export_snapshot()` inside the query's
+   transaction and threads the id into the emitted DuckDB SQL.
+2. The backend stays blocked awaiting pgduck_server, so the exporting
+   transaction remains open and the snapshot importable.
+3. `postgres_scan(..., snapshot => id)` opens the reverse connection and
+   `SET TRANSACTION SNAPSHOT '<id>'`, reading the delta at exactly `S`.
+
+Result: base **and** delta are both read at `S`. Dedup is by key, so the merge
+is exactly-once *and* fully snapshot-consistent — it does not even exhibit the
+REPEATABLE READ "see-slightly-newer" anomaly of the PostgreSQL-side path (§8.3).
+The `snapshot` parameter is therefore **mandatory**, not an optimization.
+
+**Reverse-connection topology & auth.** Today pgduck_server only *receives*
+connections (PostgreSQL → pgduck_server over `/tmp:5332`); here pgduck_server's
+`postgres_scanner` connects *back* to PostgreSQL. This is a new surface:
+
+- The `postgres_scan` DSN must authenticate as a role that can read the delta.
+  Preferred: a dedicated, read-only role over the local unix socket using peer
+  authentication — **no password in the DSN**. Avoid embedding credentials in
+  generated SQL.
+- The delta is a physical heap; a `SELECT`-only grant to that role on the delta
+  tables is sufficient (the reverse connection never touches the base).
+- **Connection reuse**: `postgres_attach` / a persistent ATTACH to pool the
+  reverse connection if query rates are high. Only dirty-range queries open it.
+
+**Caveat:** correctness depends on the exported snapshot staying importable,
+which holds because the driving query *synchronously* blocks on pgduck_server.
+If the pgduck_server call is ever made asynchronous, this invariant must be
+re-established (e.g. hold the exporting transaction explicitly).
 
 ---
 
@@ -407,17 +482,24 @@ next read.
 
 - **READ COMMITTED** — fully correct. Each statement sees a fresh snapshot;
   "latest Iceberg" ≈ current, consistent with RC semantics.
-- **REPEATABLE READ / SERIALIZABLE** — one anomaly: because the base is read at
-  latest, a key inserted *and* flushed entirely after the reader's snapshot can
-  surface from the base (the reader's delta view never had it). This yields
-  "see slightly-newer-than-snapshot" reads on cold data. It **never** causes
-  duplicates or lost rows. If strict RR/SERIALIZABLE over the base is required,
+- **REPEATABLE READ / SERIALIZABLE** — for the **PostgreSQL-side** reconciliation
+  (§5.1) there is one anomaly: because the base is read at latest, a key inserted
+  *and* flushed entirely after the reader's snapshot can surface from the base
+  (the reader's delta view never had it). This yields "see
+  slightly-newer-than-snapshot" reads on cold data. It **never** causes
+  duplicates or lost rows.
+- **The preferred DuckDB-side merge (§5.3–§5.4) does not have this anomaly**:
+  the base file set is resolved at the transaction snapshot `S`, and the delta is
+  read at the same `S` via the exported-snapshot `postgres_scan`, so both stores
+  are consistent at `S`. This is *stronger* isolation than the PostgreSQL-side
+  path, achieved without any Iceberg time-travel.
+- If strict RR/SERIALIZABLE is required for the **PostgreSQL-side fallback** too,
   add Iceberg **snapshot pinning**: store, per flush, the resulting
   `iceberg_snapshot_id` in a Postgres row; a reader reads the max id visible at
   its snapshot and scans the base `AS OF` that id. pg_lake already has
   `GetIcebergSnapshotViaId`; the missing piece is threading a chosen snapshot id
-  through the FDW/pgduck_server scan. This is a deliberate later enhancement, not
-  required for model-A correctness.
+  through the FDW scan. Deliberate later enhancement, not required for model-A
+  correctness.
 
 ---
 
@@ -465,22 +547,34 @@ Future: per-table overrides for flush cadence, target file size, retention.
 
 ## 11. Open questions & risks
 
-1. **Partial-aggregate pushdown** — does pg_lake push 2-stage partial aggregates
-   or only full grouping? Determines whether §5.3's `Finalize/Partial` plan is
-   native or whether we re-aggregate on top (fine for decomposable aggregates,
-   special-cased for holistic ones). *Gating for the aggregate path.*
-2. **Snapshot pinning** — needed only for strict RR/SERIALIZABLE over the base
-   (§8.3). Threading a snapshot id through the scan is the main new pg_lake
+1. **Partial-aggregate pushdown** — largely **moot** under the preferred
+   DuckDB-side merge (§5.3): DuckDB aggregates the merged result, so there is no
+   cross-engine partial/finalize split. It only matters for the PostgreSQL-side
+   fallback (§5.1), where dirty ranges would re-aggregate on top (fine for
+   decomposable aggregates, special-cased for holistic ones).
+2. **Reverse-connection auth** — the DuckDB-side merge has pgduck_server connect
+   *back* to PostgreSQL via `postgres_scan`. Needs a read-only role reachable
+   over the local unix socket (peer auth, no password in the DSN) with `SELECT`
+   on the delta tables. New surface; see §5.4.
+3. **Reverse-connection overhead / pooling** — only dirty-range queries open the
+   reverse connection; use `postgres_attach` / persistent ATTACH to pool it under
+   high query rates. Clean-range queries never open it.
+4. **Async pgduck calls** — DuckDB-side correctness relies on the driving query
+   blocking synchronously so the exported snapshot stays importable (§5.4). Any
+   move to async pgduck execution must re-establish this.
+5. **Snapshot pinning (base)** — needed only for strict RR/SERIALIZABLE on the
+   PostgreSQL-side fallback (§8.3); the DuckDB-side merge is already
+   snapshot-consistent. Threading a snapshot id through the FDW scan is the new
    capability it would require.
-3. **Late-data partition sprawl** — updates scattered across old data times
+6. **Late-data partition sprawl** — updates scattered across old data times
    create old-dated delta partitions. Mitigation: route out-of-window late rows
    straight to the base at flush (don't keep a partition), or hold a single
    "late" partition. Needs a policy.
-4. **Keyless append-only** — not supported by model A; would use model B (§12).
-5. **`MERGE`/joined-DELETE support in the FDW** — the flush uses a semi-join
+7. **Keyless append-only** — not supported by model A; would use model B (§12).
+8. **`MERGE`/joined-DELETE support in the FDW** — the flush uses a semi-join
    DELETE against the Iceberg base; confirm the FDW supports it, else use the
    `= ANY` / per-partition fallback (§7.1).
-6. **Single-row insert cost into Iceberg** — the flush must be **bulk**; never
+9. **Single-row insert cost into Iceberg** — the flush must be **bulk**; never
    trickle single rows into the base (the FDW has no batch insert and single-row
    inserts are expensive). Ingest goes to the heap delta; only the flusher
    writes the base, in batches.
@@ -519,11 +613,17 @@ a per-table mode later.
    calling `timeseries.maintain()` per table via SPI.
 3. **Frontier hardening.** Pre-create/drain edge cases, DEFAULT management,
    late-data policy.
-4. **CustomScan.** Replace the view with a CustomScan that does per-partition
-   dirty/clean splitting, delta-key pushdown into the base scan, and the
-   aggregate decision (§5.3). Resolve open question #1 first.
-5. **Snapshot pinning (optional).** Only if strict RR/SERIALIZABLE over the base
-   is required (§8.3).
+4. **CustomScan + DuckDB-side merge.** Replace the view with a CustomScan that
+   does clean/dirty splitting (§5.3): clean ranges emit plain Iceberg SQL; dirty
+   ranges emit one DuckDB query merging `read_parquet` with a snapshot-pinned
+   `postgres_scan` of the delta (§5.4). Requires: exporting `pg_export_snapshot()`
+   from the driving backend and threading the id into the emitted SQL; a
+   read-only reverse-connection role (peer auth); and choosing the PostgreSQL-side
+   fallback (§5.1) when a reverse connection isn't available. The DuckDB-side
+   merge removes the partial-aggregate-pushdown dependency (§11#1).
+5. **Snapshot pinning (optional).** Only if strict RR/SERIALIZABLE is required
+   for the PostgreSQL-side fallback (§8.3); the DuckDB-side merge is already
+   snapshot-consistent.
 
 Each phase is independently shippable and testable.
 
