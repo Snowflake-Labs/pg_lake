@@ -97,3 +97,14 @@ CREATE SERVER pg_lake_rest_catalog
 GRANT USAGE ON FOREIGN SERVER pg_lake_postgres_catalog TO lake_write;
 GRANT USAGE ON FOREIGN SERVER pg_lake_object_store_catalog TO lake_write;
 GRANT USAGE ON FOREIGN SERVER pg_lake_rest_catalog TO lake_write;
+
+-- lake_iceberg.find_all_referenced_files(metadata_path) returns every file
+-- (data/delete files, manifests, manifest lists and the metadata.json itself)
+-- referenced by an Iceberg metadata.json. VACUUM calls this by name via SPI to
+-- resolve a deferred-drop deletion_queue row (resolve_metadata) into the exact
+-- set of files to delete, so the pg_lake_engine layer needs no link-time
+-- dependency on the iceberg layer that implements the walk.
+CREATE FUNCTION lake_iceberg.find_all_referenced_files(metadata_path text, OUT path text)
+	RETURNS SETOF text
+	LANGUAGE C STRICT
+	AS 'MODULE_PATHNAME', 'find_all_referenced_files';

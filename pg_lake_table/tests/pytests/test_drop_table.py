@@ -984,27 +984,6 @@ def test_custom_location_never_deferred(
 
 @pytest.fixture(scope="module")
 def create_test_helper_functions(superuser_conn, s3, extension):
-    run_command(
-        f"""
-     CREATE OR REPLACE FUNCTION lake_iceberg.find_all_referenced_files(metadata_path text, OUT path text)
-         RETURNS SETOF text
-         LANGUAGE C
-         STRICT
-        AS 'pg_lake_iceberg', $function$find_all_referenced_files$function$;
-        GRANT EXECUTE ON FUNCTION lake_iceberg.find_all_referenced_files(metadata_path text, OUT path text) TO public;
-
-""",
-        superuser_conn,
-    )
-    superuser_conn.commit()
-
+    # lake_iceberg.find_all_referenced_files is installed by pg_lake_iceberg
+    # (and callable by public), so there is nothing to create or drop here.
     yield
-
-    # Teardown: Drop the functions after the test(s) are done
-    run_command(
-        f"""
-        DROP FUNCTION lake_iceberg.find_all_referenced_files;
-""",
-        superuser_conn,
-    )
-    superuser_conn.commit()

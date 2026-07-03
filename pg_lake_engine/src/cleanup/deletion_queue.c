@@ -22,6 +22,8 @@
 #include "funcapi.h"
 #include "miscadmin.h"
 
+#include "access/xact.h"
+
 #include "pg_lake/cleanup/deletion_queue.h"
 #include "pg_lake/extensions/pg_lake_table.h"
 #include "pg_lake/pgduck/remote_storage.h"
@@ -52,13 +54,6 @@ typedef struct DeletionQueueEntry
 	bool		isPrefix;
 	bool		resolveMetadata;
 }			DeletionQueueEntry;
-
-/*
- * Registered by the pg_lake_iceberg layer (see deletion_queue.h). NULL until
- * that layer is loaded, in which case resolve_metadata rows are simply left in
- * the queue to be retried once the hook is available.
- */
-MetadataResolveHookType MetadataResolveHook = NULL;
 
 static void RemoveDeletionQueuePathsFromCatalog(List *filePaths);
 static void IncrementDeletionQueueRetryCount(List *failedRemovalPaths);
@@ -146,8 +141,8 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose)
 			else
 			{
 				/*
-				 * Could not resolve (e.g. object store unreachable or the
-				 * iceberg layer not loaded); leave the row and retry later.
+				 * Could not resolve (e.g. object store unreachable); leave
+				 * the row and retry later.
 				 */
 				failedFilePathList = lappend(failedFilePathList, entry->path);
 			}
@@ -206,34 +201,78 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose)
  * (queued by a deferred DROP) and turns it into concrete per-file deletion
  * rows:
  *
- *   1. resolve the metadata.json into the list of files it references
- *      (data files, delete files, manifests, manifest lists and the
- *      metadata.json itself) via the iceberg-layer hook,
- *   2. enqueue every referenced file (except the metadata.json) as a normal,
- *      immediately-eligible deletion row, ignoring rows that already exist,
- *   3. convert the resolve_metadata row itself into a normal file row so the
+ *   1. resolve the metadata.json into the list of files it references (data
+ *      files, delete files, manifests, manifest lists and the metadata.json
+ *      itself) and enqueue them as normal, immediately-eligible deletion rows,
+ *   2. convert the resolve_metadata row itself into a normal file row so the
  *      metadata.json is deleted like any other file.
  *
+ * The resolution is done by lake_iceberg.find_all_referenced_files(), which
+ * lives in the (higher) iceberg layer.  We call it by name via SPI so this
+ * lower engine layer needs no link-time dependency on it; a single INSERT ..
+ * SELECT does both the walk and the enqueue.  ON CONFLICT DO NOTHING keeps it
+ * robust to files (including the metadata.json) already queued by metadata
+ * rotation, an earlier partial expansion, or a retry.
+ *
  * The referenced files then get deleted by the regular per-file path, which
- * already tolerates files that were removed in the meantime. Returns false if
- * the metadata could not be resolved, so the caller can retry later.
+ * already tolerates files that were removed in the meantime.  The whole
+ * expansion runs in its own subtransaction: if the metadata cannot be resolved
+ * (e.g. the object store is unreachable), we roll it back and return false so
+ * the caller retries this row later without aborting the rest of the drain.
  */
 static bool
 ExpandMetadataResolveRecord(char *metadataPath)
 {
-	if (MetadataResolveHook == NULL)
-	{
-		/* iceberg layer not loaded; cannot expand yet, retry later */
-		return false;
-	}
-
 	MemoryContext savedContext = CurrentMemoryContext;
-	List	   *referencedFiles = NIL;
 	volatile bool resolved = true;
+
+	BeginInternalSubTransaction(NULL);
 
 	PG_TRY();
 	{
-		referencedFiles = MetadataResolveHook(metadataPath);
+		bool		readOnly = false;
+
+		SPI_START_EXTENSION_OWNER(PgLakeTable);
+
+		/*
+		 * orphaned_at is NULL so the files are eligible for deletion right
+		 * away: the retention window was already served while this metadata
+		 * row waited in the queue.
+		 */
+		{
+			char	   *insertQuery =
+				"INSERT INTO " DELETION_QUEUE_TABLE " "
+				"(path, table_name, orphaned_at, is_prefix, resolve_metadata) "
+				"SELECT f.path, NULL, NULL, false, false "
+				"FROM lake_iceberg.find_all_referenced_files($1) f "
+				"ON CONFLICT (path) DO NOTHING";
+
+			DECLARE_SPI_ARGS(1);
+			SPI_ARG_VALUE(1, TEXTOID, metadataPath, false);
+
+			SPI_EXECUTE(insertQuery, readOnly);
+		}
+
+		/*
+		 * find_all_referenced_files also returns the metadata.json itself, so
+		 * the ON CONFLICT above left our resolve_metadata row untouched.
+		 * Convert it in place into a normal, eligible file row.
+		 */
+		{
+			char	   *convertQuery =
+				"UPDATE " DELETION_QUEUE_TABLE " "
+				"SET resolve_metadata = false, orphaned_at = NULL "
+				"WHERE path OPERATOR(pg_catalog.=) $1";
+
+			DECLARE_SPI_ARGS(1);
+			SPI_ARG_VALUE(1, TEXTOID, metadataPath, false);
+
+			SPI_EXECUTE(convertQuery, readOnly);
+		}
+
+		SPI_END();
+
+		ReleaseCurrentSubTransaction();
 	}
 	PG_CATCH();
 	{
@@ -241,6 +280,8 @@ ExpandMetadataResolveRecord(char *metadataPath)
 		ErrorData  *edata = CopyErrorData();
 
 		FlushErrorState();
+
+		RollbackAndReleaseCurrentSubTransaction();
 
 		/* a cancellation must propagate */
 		if (edata->sqlerrcode == ERRCODE_QUERY_CANCELED)
@@ -250,66 +291,7 @@ ExpandMetadataResolveRecord(char *metadataPath)
 	}
 	PG_END_TRY();
 
-	if (!resolved)
-		return false;
-
-	/*
-	 * Enqueue all referenced files except the metadata.json (that one is the
-	 * resolve row we convert below). ON CONFLICT DO NOTHING keeps this robust
-	 * to files that are already queued.
-	 */
-	List	   *filePaths = NIL;
-	ListCell   *fileCell = NULL;
-
-	foreach(fileCell, referencedFiles)
-	{
-		char	   *filePath = lfirst(fileCell);
-
-		if (strcmp(filePath, metadataPath) == 0)
-			continue;
-
-		filePaths = lappend(filePaths, filePath);
-	}
-
-	SPI_START_EXTENSION_OWNER(PgLakeTable);
-
-	bool		readOnly = false;
-
-	if (list_length(filePaths) > 0)
-	{
-		ArrayType  *filePathsArray = StringListToArray(filePaths);
-
-		/*
-		 * orphaned_at is NULL so these files are eligible for deletion right
-		 * away: the retention window was already served while this metadata
-		 * row waited in the queue.
-		 */
-		char	   *insertQuery =
-			"INSERT INTO " DELETION_QUEUE_TABLE " "
-			"(path, table_name, orphaned_at, is_prefix, resolve_metadata) "
-			"SELECT pg_catalog.unnest($1), NULL, NULL, false, false "
-			"ON CONFLICT (path) DO NOTHING";
-
-		DECLARE_SPI_ARGS(1);
-		SPI_ARG_VALUE(1, TEXTARRAYOID, filePathsArray, false);
-
-		SPI_EXECUTE(insertQuery, readOnly);
-	}
-
-	/* convert the metadata.json resolve row into a normal, eligible file row */
-	char	   *convertQuery =
-		"UPDATE " DELETION_QUEUE_TABLE " "
-		"SET resolve_metadata = false, orphaned_at = NULL "
-		"WHERE path OPERATOR(pg_catalog.=) $1";
-
-	DECLARE_SPI_ARGS(1);
-	SPI_ARG_VALUE(1, TEXTOID, metadataPath, false);
-
-	SPI_EXECUTE(convertQuery, readOnly);
-
-	SPI_END();
-
-	return true;
+	return resolved;
 }
 
 

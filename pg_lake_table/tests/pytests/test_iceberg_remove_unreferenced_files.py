@@ -1107,10 +1107,11 @@ def create_helper_functions(superuser_conn):
 
     yield
 
-    # Teardown: Drop the function after the test(s) are done
+    # Teardown: Drop the function after the test(s) are done.
+    # find_all_referenced_files is installed by pg_lake_iceberg, so it must
+    # not be dropped here (it belongs to the extension).
     run_command(
         f"""
-        DROP FUNCTION lake_iceberg.find_all_referenced_files;
         DROP FUNCTION lake_iceberg.find_unreferenced_files;
 
 """,

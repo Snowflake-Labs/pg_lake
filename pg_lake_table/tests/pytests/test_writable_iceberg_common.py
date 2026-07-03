@@ -155,7 +155,6 @@ def create_test_helper_functions(superuser_conn, app_user, s3, extension):
         DROP FUNCTION lake_iceberg.current_manifests;
         DROP FUNCTION lake_iceberg.current_manifest_entries;
         DROP FUNCTION lake_iceberg.reserialize_iceberg_table_metadata;
-        DROP FUNCTION lake_iceberg.find_all_referenced_files;
 """,
         superuser_conn,
     )
