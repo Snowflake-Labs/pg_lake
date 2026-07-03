@@ -36,6 +36,7 @@
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
+#include "pg_lake/util/rel_utils.h"
 
 #include "utils/timestamp.h"
 #include "utils/inval.h"
@@ -155,29 +156,53 @@ ApplyDDLCatalogChanges(Oid relationId, List *ddlOperations,
 			if (IsWritableIcebergTable(relationId))
 			{
 				/*
-				 * metadata is not pushed yet if table is created in current
-				 * tx. Do not try to delete it. Files created in this
-				 * transaction are in in_progress files, so they'll be cleaned
-				 * up separately.
+				 * A prefix deletion record for this table's location may
+				 * already have been enqueued (e.g. by snowflake_cdc before a
+				 * bulk DROP PUBLICATION). If so, VACUUM will remove the whole
+				 * table directory -- data files, metadata, and the
+				 * previous_metadata file -- so we skip the expensive
+				 * object-store file enumeration and the previous_metadata
+				 * single-file enqueue below. This is only safe for
+				 * default-location tables, whose prefix is unique per table
+				 * and fully managed by pg_lake.
 				 */
-				if (!IsIcebergTableCreatedInCurrentTransaction(relationId))
-					TryMarkAllReferencedFilesForDeletion(relationId);
+				bool		deferViaPrefix = false;
 
-				/*
-				 * previous_metadata location is a special file that is not
-				 * referenced by the iceberg metadata, but may not have been
-				 * deleted when the table was dropped. Normally, when a new
-				 * metadata file is written, the previous metadata file is
-				 * added to the deletion queue. However, here are not going to
-				 * create another metadata file, the table is dropped. So,
-				 * this could be the only chance to delete the previous
-				 * metadata file.
-				 */
-				char	   *previousMetadataPath =
-					GetIcebergCatalogPreviousMetadataLocation(relationId, false);
+				if (!HasCustomLocation(relationId))
+				{
+					char	   *queryArguments = "";
+					char	   *location = GetWritableTableLocation(relationId, &queryArguments);
 
-				if (previousMetadataPath)
-					InsertDeletionQueueRecord(previousMetadataPath, InvalidOid, GetCurrentTimestamp());
+					deferViaPrefix = PrefixDeletionRecordExists(location);
+				}
+
+				if (!deferViaPrefix)
+				{
+					/*
+					 * metadata is not pushed yet if table is created in
+					 * current tx. Do not try to delete it. Files created in
+					 * this transaction are in in_progress files, so they'll
+					 * be cleaned up separately.
+					 */
+					if (!IsIcebergTableCreatedInCurrentTransaction(relationId))
+						TryMarkAllReferencedFilesForDeletion(relationId);
+
+					/*
+					 * previous_metadata location is a special file that is
+					 * not referenced by the iceberg metadata, but may not
+					 * have been deleted when the table was dropped. Normally,
+					 * when a new metadata file is written, the previous
+					 * metadata file is added to the deletion queue. However,
+					 * here are not going to create another metadata file, the
+					 * table is dropped. So, this could be the only chance to
+					 * delete the previous metadata file.
+					 */
+					char	   *previousMetadataPath =
+						GetIcebergCatalogPreviousMetadataLocation(relationId, false);
+
+					if (previousMetadataPath)
+						InsertDeletionQueueRecord(previousMetadataPath, InvalidOid, GetCurrentTimestamp());
+				}
 			}
 
 			RemoveAllDataFilesFromPgLakeCatalogFromTable(relationId);

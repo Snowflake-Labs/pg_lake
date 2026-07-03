@@ -464,31 +464,53 @@ TryMarkAllReferencedFilesForDeletion(Oid relationId)
 	 * these files.
 	 */
 	if (!deleted)
+		MarkWritableTableLocationPrefixForDeletion(relationId);
+}
+
+
+/*
+ * MarkWritableTableLocationPrefixForDeletion enqueues the whole storage
+ * location prefix of a writable, default-location Iceberg table into the
+ * deletion queue, so VACUUM later removes the entire table directory.
+ *
+ * This is the coarse-grained cleanup path: instead of enumerating every
+ * referenced file from object storage, the entire table directory is queued
+ * as a single prefix.  It is only safe for default-location tables, whose
+ * prefix is unique per table (it embeds the relation id) and is fully
+ * managed by pg_lake.  For custom-location tables we do not manage the
+ * storage and cannot assume the prefix is exclusive, so we only warn and
+ * leave the files in place.
+ *
+ * Used both as the fallback in TryMarkAllReferencedFilesForDeletion when the
+ * blob store is unreachable, and proactively by callers (e.g. snowflake_cdc)
+ * that want to defer the expensive enumeration during a bulk drop.
+ */
+void
+MarkWritableTableLocationPrefixForDeletion(Oid relationId)
+{
+	char	   *queryArguments = "";
+	char	   *tableLocation = GetWritableTableLocation(relationId, &queryArguments);
+
+	if (HasCustomLocation(relationId))
 	{
-		char	   *queryArguments = "";
-		char	   *tableLocation = GetWritableTableLocation(relationId, &queryArguments);
+		/*
+		 * The table has a custom location prefix, so we don't manage its
+		 * storage. The user might have used the same prefix for multiple
+		 * tables, and we wouldn't dare to delete files that might be used in
+		 * other tables.
+		 */
+		ereport(WARNING,
+				(errmsg("blob storage location %s for table %s will not be marked for deletion",
+						tableLocation, GetQualifiedRelationName(relationId)),
+				 errdetail("Files under a custom location prefix are not managed by "
+						   "pg_lake, and may have to be removed manually.")));
 
-		if (HasCustomLocation(relationId))
-		{
-			/*
-			 * If the table has a custom location prefix, so we don't manage
-			 * its storage. It means that the user might have used the same
-			 * prefix for multiple tables, and we wouldn't dare to delete
-			 * files that might be used in other tables.
-			 */
-			ereport(WARNING,
-					(errmsg("failed to access blob storage location %s for table %s",
-							tableLocation, GetQualifiedRelationName(relationId)),
-					 errdetail("Files will not be marked for deletion, and may have "
-							   "to be removed manually.")));
-
-			return;
-		}
-
-		TimestampTz orphanedAt = GetCurrentTransactionStartTimestamp();
-
-		InsertPrefixDeletionRecord(tableLocation, orphanedAt);
+		return;
 	}
+
+	TimestampTz orphanedAt = GetCurrentTransactionStartTimestamp();
+
+	InsertPrefixDeletionRecord(tableLocation, orphanedAt);
 }
 
 

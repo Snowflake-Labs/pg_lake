@@ -554,6 +554,400 @@ def test_drop_without_s3_access_not_cached(
     assert len(results) == 0
 
 
+FIND_REFERENCED_FILES_INJECTION_POINT = "iceberg-find-referenced-files"
+
+
+def _writable_location(conn, qualified_table):
+    """
+    Return the exact location string GetWritableTableLocation() computes for a
+    writable pg_lake foreign table: the 'location' foreign-table option with
+    query arguments stripped and a single trailing slash removed. This is the
+    value the deferred-drop path (PrefixDeletionRecordExists) matches against,
+    so tests must pre-seed the identical string.
+    """
+    rows = run_query(
+        f"""
+        SELECT option_value
+        FROM (
+          SELECT (pg_catalog.pg_options_to_table(ftoptions)).*
+          FROM pg_catalog.pg_foreign_table
+          WHERE ftrelid = '{qualified_table}'::regclass
+        ) o
+        WHERE option_name = 'location'
+        """,
+        conn,
+    )
+
+    location = rows[0][0]
+
+    # replicate GetWritableTableLocation: strip '?...' query args, then one '/'
+    location = location.split("?", 1)[0]
+    if location.endswith("/"):
+        location = location[:-1]
+
+    return location
+
+
+def _seed_prefix_record(superuser_conn, location):
+    """Simulate a caller (e.g. snowflake_cdc) enqueuing a table's storage
+    prefix into the deletion queue before dropping the table."""
+    run_command(
+        f"""
+        INSERT INTO lake_engine.deletion_queue (path, orphaned_at, is_prefix)
+        VALUES ('{location}', pg_catalog.now(), true)
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+
+def _count_prefix_records(superuser_conn, location):
+    return run_query(
+        f"SELECT count(*) FROM lake_engine.deletion_queue "
+        f"WHERE path = '{location}' AND is_prefix",
+        superuser_conn,
+    )[0][0]
+
+
+def _count_file_records(superuser_conn, location):
+    return run_query(
+        f"SELECT count(*) FROM lake_engine.deletion_queue "
+        f"WHERE is_prefix = false AND path LIKE '{location}%'",
+        superuser_conn,
+    )[0][0]
+
+
+def _cleanup_queue(superuser_conn, location):
+    run_command(
+        f"DELETE FROM lake_engine.deletion_queue WHERE path LIKE '{location}%'",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+
+def _attach_find_referenced_files_error(superuser_conn):
+    run_command(
+        f"SELECT injection_points_attach('{FIND_REFERENCED_FILES_INJECTION_POINT}', 'error')",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+
+def _detach_find_referenced_files(superuser_conn):
+    run_command(
+        f"SELECT injection_points_detach('{FIND_REFERENCED_FILES_INJECTION_POINT}')",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+
+def test_deferred_drop_skips_enumeration(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    create_injection_extension,
+):
+    """When a prefix deletion record already exists for a default-location
+    table, DROP must skip the object-store file enumeration entirely and rely
+    on the queued prefix (which VACUUM later drains)."""
+    run_command("CREATE SCHEMA IF NOT EXISTS defer_drop_skip", pg_conn)
+    run_command(
+        """
+        CREATE TABLE defer_drop_skip.t USING iceberg
+        WITH (autovacuum_enabled='false')
+        AS SELECT i AS id, 'pg_lake' AS name FROM generate_series(1, 10) i
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # second commit -> a second data file / snapshot, so enumeration would be
+    # real work if it were reached
+    run_command(
+        "INSERT INTO defer_drop_skip.t SELECT i, 'pg_lake' FROM generate_series(11, 20) i",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    location = _writable_location(pg_conn, "defer_drop_skip.t")
+    table_oid = run_query("SELECT 'defer_drop_skip.t'::regclass::oid", pg_conn)[0][0]
+
+    # snapshot the referenced files up-front so we can prove they still exist
+    # right after the (deferred) drop and only disappear after VACUUM
+    files_before = run_query(
+        f"SELECT count(*) FROM lake_file.list('{location}/**')", pg_conn
+    )[0][0]
+    assert files_before > 0
+
+    _seed_prefix_record(superuser_conn, location)
+
+    # If enumeration were (wrongly) reached, the injected error is caught and
+    # the drop falls back to InsertPrefixDeletionRecord for the SAME location,
+    # which violates the primary key and fails the DROP. So a clean DROP here
+    # is a hard guarantee the enumeration path was not entered.
+    _attach_find_referenced_files_error(superuser_conn)
+    try:
+        run_command("DROP TABLE defer_drop_skip.t", pg_conn)
+    finally:
+        _detach_find_referenced_files(superuser_conn)
+    pg_conn.commit()
+
+    # table is gone
+    assert (
+        run_query(
+            "SELECT count(*) FROM pg_class "
+            "WHERE relname = 't' AND relnamespace = 'defer_drop_skip'::regnamespace",
+            superuser_conn,
+        )[0][0]
+        == 0
+    )
+
+    # exactly the pre-seeded prefix row, and no per-file rows were added
+    assert _count_prefix_records(superuser_conn, location) == 1
+    assert _count_file_records(superuser_conn, location) == 0
+
+    # local pg_lake catalog state is still cleaned up
+    assert (
+        run_query(
+            f"SELECT count(*) FROM lake_table.files WHERE table_name = {table_oid}",
+            superuser_conn,
+        )[0][0]
+        == 0
+    )
+
+    # files were NOT deleted by the drop itself (deferred)
+    assert (
+        run_query(f"SELECT count(*) FROM lake_file.list('{location}/**')", pg_conn)[0][
+            0
+        ]
+        > 0
+    )
+
+    # VACUUM drains the prefix and removes the whole table directory, even
+    # though the table (and any CDC worker) is long gone
+    run_command_outside_tx(
+        [
+            "SET pg_lake_engine.orphaned_file_retention_period = 0",
+            "SET pg_lake_iceberg.max_snapshot_age TO 0",
+            "VACUUM (ICEBERG)",
+        ]
+    )
+
+    assert _count_prefix_records(superuser_conn, location) == 0
+    assert (
+        run_query(f"SELECT count(*) FROM lake_file.list('{location}/**')", pg_conn)[0][
+            0
+        ]
+        == 0
+    )
+
+    run_command("DROP SCHEMA IF EXISTS defer_drop_skip CASCADE", pg_conn)
+    pg_conn.commit()
+    _cleanup_queue(superuser_conn, location)
+
+
+def test_normal_drop_enumerates_control(
+    s3, pg_conn, superuser_conn, extension, with_default_location
+):
+    """Control: without a pre-seeded prefix, DROP enumerates referenced files
+    and enqueues per-file (is_prefix=false) records, not a prefix."""
+    run_command("CREATE SCHEMA IF NOT EXISTS defer_drop_control", pg_conn)
+    run_command(
+        """
+        CREATE TABLE defer_drop_control.t USING iceberg
+        WITH (autovacuum_enabled='false')
+        AS SELECT i AS id, 'pg_lake' AS name FROM generate_series(1, 10) i
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    location = _writable_location(pg_conn, "defer_drop_control.t")
+
+    run_command("DROP TABLE defer_drop_control.t", pg_conn)
+    pg_conn.commit()
+
+    # enumeration ran: per-file records were created, no prefix record
+    assert _count_file_records(superuser_conn, location) > 0
+    assert _count_prefix_records(superuser_conn, location) == 0
+
+    run_command("DROP SCHEMA IF EXISTS defer_drop_control CASCADE", pg_conn)
+    pg_conn.commit()
+    _cleanup_queue(superuser_conn, location)
+
+
+def test_injection_point_on_enumeration_path(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    create_injection_extension,
+):
+    """Guards that the injection point actually sits on the enumeration path:
+    with it attached (and NO pre-seeded prefix) the drop must take the
+    blob-store-failure fallback and enqueue a single prefix record instead of
+    per-file records."""
+    run_command("CREATE SCHEMA IF NOT EXISTS defer_drop_inj", pg_conn)
+    run_command(
+        """
+        CREATE TABLE defer_drop_inj.t USING iceberg
+        WITH (autovacuum_enabled='false')
+        AS SELECT i AS id, 'pg_lake' AS name FROM generate_series(1, 10) i
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    location = _writable_location(pg_conn, "defer_drop_inj.t")
+
+    _attach_find_referenced_files_error(superuser_conn)
+    try:
+        run_command("DROP TABLE defer_drop_inj.t", pg_conn)
+    finally:
+        _detach_find_referenced_files(superuser_conn)
+    pg_conn.commit()
+
+    # enumeration was reached (injection fired), caught, and fell back to a
+    # single prefix record -- proving the injection point is on that path
+    assert _count_prefix_records(superuser_conn, location) == 1
+    assert _count_file_records(superuser_conn, location) == 0
+
+    run_command("DROP SCHEMA IF EXISTS defer_drop_inj CASCADE", pg_conn)
+    pg_conn.commit()
+    _cleanup_queue(superuser_conn, location)
+
+
+def test_deferred_drop_rollback_is_clean(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    create_injection_extension,
+):
+    """Rolling back a deferred DROP must leave the table intact and add no new
+    deletion-queue rows (deferral is fully transactional)."""
+    run_command("CREATE SCHEMA IF NOT EXISTS defer_drop_rollback", pg_conn)
+    run_command(
+        """
+        CREATE TABLE defer_drop_rollback.t USING iceberg
+        WITH (autovacuum_enabled='false')
+        AS SELECT i AS id, 'pg_lake' AS name FROM generate_series(1, 10) i
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    location = _writable_location(pg_conn, "defer_drop_rollback.t")
+    _seed_prefix_record(superuser_conn, location)
+
+    # attach error injection: if the deferred drop wrongly enumerated, the
+    # drop would error before we even reach the rollback
+    _attach_find_referenced_files_error(superuser_conn)
+    try:
+        run_command("DROP TABLE defer_drop_rollback.t", pg_conn)
+        # explicitly roll back the drop
+        pg_conn.rollback()
+    finally:
+        _detach_find_referenced_files(superuser_conn)
+
+    # table survived the rollback and is still queryable
+    assert run_query("SELECT count(*) FROM defer_drop_rollback.t", pg_conn)[0][0] == 10
+
+    # only the pre-seeded prefix row exists; no per-file rows were committed
+    assert _count_prefix_records(superuser_conn, location) == 1
+    assert _count_file_records(superuser_conn, location) == 0
+
+    _cleanup_queue(superuser_conn, location)
+    run_command("DROP SCHEMA IF EXISTS defer_drop_rollback CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_deferred_drop_under_drop_schema_cascade(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    create_injection_extension,
+):
+    """DROP SCHEMA ... CASCADE must also take the deferred path for a
+    pre-seeded default-location table."""
+    run_command("CREATE SCHEMA IF NOT EXISTS defer_drop_cascade", pg_conn)
+    run_command(
+        """
+        CREATE TABLE defer_drop_cascade.t USING iceberg
+        WITH (autovacuum_enabled='false')
+        AS SELECT i AS id, 'pg_lake' AS name FROM generate_series(1, 10) i
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    location = _writable_location(pg_conn, "defer_drop_cascade.t")
+    _seed_prefix_record(superuser_conn, location)
+
+    _attach_find_referenced_files_error(superuser_conn)
+    try:
+        run_command("DROP SCHEMA defer_drop_cascade CASCADE", pg_conn)
+    finally:
+        _detach_find_referenced_files(superuser_conn)
+    pg_conn.commit()
+
+    # schema and table are gone
+    assert (
+        run_query(
+            "SELECT count(*) FROM pg_namespace WHERE nspname = 'defer_drop_cascade'",
+            superuser_conn,
+        )[0][0]
+        == 0
+    )
+
+    # deferred path taken: prefix intact, no per-file rows
+    assert _count_prefix_records(superuser_conn, location) == 1
+    assert _count_file_records(superuser_conn, location) == 0
+
+    _cleanup_queue(superuser_conn, location)
+
+
+def test_custom_location_never_deferred(
+    s3, pg_conn, superuser_conn, extension, with_default_location
+):
+    """A custom-location table must NEVER be deferred via a prefix record: its
+    prefix may be shared, so enumeration must always run (per-file records)."""
+    custom_location = f"s3://{TEST_BUCKET}/defer_custom_location/mytable"
+
+    run_command("CREATE SCHEMA IF NOT EXISTS defer_drop_custom", pg_conn)
+    run_command(
+        f"""
+        CREATE TABLE defer_drop_custom.t USING iceberg
+        WITH (autovacuum_enabled='false', location='{custom_location}')
+        AS SELECT i AS id, 'pg_lake' AS name FROM generate_series(1, 10) i
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    location = _writable_location(pg_conn, "defer_drop_custom.t")
+
+    # even with a matching prefix seeded, the custom-location guard must force
+    # the normal enumeration path
+    _seed_prefix_record(superuser_conn, location)
+
+    run_command("DROP TABLE defer_drop_custom.t", pg_conn)
+    pg_conn.commit()
+
+    # enumeration ran despite the pre-seeded prefix: per-file records created
+    assert _count_file_records(superuser_conn, location) > 0
+
+    _cleanup_queue(superuser_conn, location)
+    run_command("DROP SCHEMA IF EXISTS defer_drop_custom CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 @pytest.fixture(scope="module")
 def create_test_helper_functions(superuser_conn, s3, extension):
     run_command(

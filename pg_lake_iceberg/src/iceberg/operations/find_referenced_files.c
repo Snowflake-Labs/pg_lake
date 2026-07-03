@@ -37,6 +37,7 @@
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/operations/find_referenced_files.h"
 #include "pg_lake/util/array_utils.h"
+#include "pg_lake/util/injection_points.h"
 #include "pg_lake/util/s3_reader_utils.h"
 
 typedef struct FileHashEntry
@@ -366,6 +367,12 @@ FindUnreferencedFilesAmongHTABs(HTAB *prevReferencedFileHash, HTAB *currentRefer
 List *
 IcebergFindAllReferencedFiles(char *metadataPath)
 {
+	/*
+	 * Test hook: lets tests assert whether the (object-store heavy) file
+	 * enumeration was reached, e.g. to prove that a deferred DROP skipped it.
+	 */
+	INJECTION_POINT_COMPAT("iceberg-find-referenced-files");
+
 	HTAB	   *fileHash = CreateFilesHash();
 
 	IcebergMetadataAddAllReferencedFiles(metadataPath, fileHash);
