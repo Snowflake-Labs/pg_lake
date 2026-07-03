@@ -38,6 +38,7 @@
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "pg_lake/util/rel_utils.h"
 
+#include "access/xact.h"
 #include "utils/timestamp.h"
 #include "utils/inval.h"
 
@@ -166,51 +167,56 @@ ApplyDDLCatalogChanges(Oid relationId, List *ddlOperations,
 
 				/*
 				 * When the caller opted into deferred cleanup (via the
-				 * pg_lake_table.defer_drop_file_cleanup GUC), queue the
-				 * table's whole storage prefix instead of walking object
-				 * storage to enumerate every referenced file. VACUUM later
-				 * removes the entire directory -- data files, metadata, and
-				 * the previous_metadata file -- so both the enumeration and
-				 * the previous_metadata single-file enqueue below are
-				 * redundant and skipped.
+				 * pg_lake_table.defer_drop_file_cleanup GUC), we don't walk
+				 * object storage now. Instead we queue the table's
+				 * metadata.json as a single "resolve_metadata" row; VACUUM
+				 * later resolves it into the exact set of referenced files
+				 * and deletes them with the normal retention. This moves the
+				 * expensive enumeration out of the DROP path while keeping
+				 * the file-accurate deletion semantics (we never blindly
+				 * remove a whole storage prefix).
 				 *
-				 * This is only safe for default-location tables, whose prefix
-				 * is unique per table and fully managed by pg_lake. Custom
-				 * locations may be shared, so they always take the normal
-				 * enumeration path. A table created in the current
-				 * transaction has no persisted prefix to queue, so it also
-				 * takes the normal (in-progress cleanup) path.
+				 * Deferral only applies to default-location tables; the
+				 * metadata read is a cheap catalog lookup, so custom-location
+				 * tables are handled the same way, just eagerly. A table
+				 * created in the current transaction has no persisted
+				 * metadata to resolve, so it takes the normal (in-progress
+				 * cleanup) path.
 				 */
-				bool		deferViaPrefix =
+				bool		deferMetadataResolution =
 					DeferDropFileCleanup &&
 					!createdInCurrentTx &&
 					!HasCustomLocation(relationId);
 
-				if (deferViaPrefix)
+				if (deferMetadataResolution)
 				{
-					MarkWritableTableLocationPrefixForDeletion(relationId);
+					char	   *metadataLocation =
+						GetIcebergMetadataLocation(relationId, true);
+
+					InsertMetadataResolveRecord(metadataLocation, InvalidOid,
+												GetCurrentTransactionStartTimestamp());
 				}
-				else
+				else if (!createdInCurrentTx)
 				{
-					if (!createdInCurrentTx)
-						TryMarkAllReferencedFilesForDeletion(relationId);
-
-					/*
-					 * previous_metadata location is a special file that is
-					 * not referenced by the iceberg metadata, but may not
-					 * have been deleted when the table was dropped. Normally,
-					 * when a new metadata file is written, the previous
-					 * metadata file is added to the deletion queue. However,
-					 * here are not going to create another metadata file, the
-					 * table is dropped. So, this could be the only chance to
-					 * delete the previous metadata file.
-					 */
-					char	   *previousMetadataPath =
-						GetIcebergCatalogPreviousMetadataLocation(relationId, false);
-
-					if (previousMetadataPath)
-						InsertDeletionQueueRecord(previousMetadataPath, InvalidOid, GetCurrentTimestamp());
+					TryMarkAllReferencedFilesForDeletion(relationId);
 				}
+
+				/*
+				 * previous_metadata location is a special file that is not
+				 * referenced by the iceberg metadata, but may not have been
+				 * deleted when the table was dropped. Normally, when a new
+				 * metadata file is written, the previous metadata file is
+				 * added to the deletion queue. However, here we are not going
+				 * to create another metadata file, the table is dropped. So,
+				 * this could be the only chance to delete the previous
+				 * metadata file. It is not covered by metadata resolution
+				 * either, so enqueue it directly on both paths.
+				 */
+				char	   *previousMetadataPath =
+					GetIcebergCatalogPreviousMetadataLocation(relationId, false);
+
+				if (previousMetadataPath)
+					InsertDeletionQueueRecord(previousMetadataPath, InvalidOid, GetCurrentTimestamp());
 			}
 
 			RemoveAllDataFilesFromPgLakeCatalogFromTable(relationId);

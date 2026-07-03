@@ -66,11 +66,12 @@ bool		SkipDropAccessHook = false;
 /*
  * controlled via the pg_lake_table.defer_drop_file_cleanup GUC.
  *
- * When set, dropping a writable, default-location Iceberg table enqueues the
- * table's whole storage prefix for deletion instead of walking object storage
- * to enumerate every referenced file. VACUUM later removes the entire
- * directory. Callers turn this on around a bulk DROP to avoid the per-file
- * enumeration exceeding the request timeout.
+ * When set, dropping a writable, default-location Iceberg table does not walk
+ * object storage to enumerate referenced files. Instead it queues the table's
+ * metadata.json as a single row, and VACUUM later resolves that metadata into
+ * the exact referenced files and deletes them. Callers turn this on around a
+ * bulk DROP to avoid the per-file enumeration exceeding the request timeout,
+ * without giving up the file-accurate deletion semantics.
  */
 bool		DeferDropFileCleanup = false;
 
@@ -492,10 +493,11 @@ TryMarkAllReferencedFilesForDeletion(Oid relationId)
  * storage and cannot assume the prefix is exclusive, so we only warn and
  * leave the files in place.
  *
- * Used both as the fallback in TryMarkAllReferencedFilesForDeletion when the
- * blob store is unreachable, and on the deferred-drop path (when the
- * pg_lake_table.defer_drop_file_cleanup GUC is set) to skip the expensive
- * enumeration during a bulk drop.
+ * This is used as a last-resort fallback in
+ * TryMarkAllReferencedFilesForDeletion when the blob store is unreachable and
+ * we cannot read the metadata to enumerate the referenced files.  The regular
+ * (and the deferred, GUC-driven) drop paths always resolve the metadata to
+ * exact files, so they never queue a whole prefix.
  */
 void
 MarkWritableTableLocationPrefixForDeletion(Oid relationId)

@@ -26,6 +26,7 @@
 #include "pg_lake/avro/avro_init.h"
 #include "pg_lake/avro/avro_reader.h"
 #include "pg_lake/avro/avro_writer.h"
+#include "pg_lake/cleanup/deletion_queue.h"
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/ddl/utility_hook.h"
 #include "pg_lake/iceberg/api.h"
@@ -33,6 +34,7 @@
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/compatibility_mode.h"
 #include "pg_lake/iceberg/iceberg_field.h"
+#include "pg_lake/iceberg/operations/find_referenced_files.h"
 #include "pg_lake/iceberg/operations/manifest_merge.h"
 #include "pg_lake/iceberg/operations/vacuum.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
@@ -378,6 +380,14 @@ _PG_init(void)
 	RegisterUtilityStatementHandler(RedactRestCatalogUserMappingSecrets, NULL);
 
 	InitializeIcebergCatalogObjectAccessHook();
+
+	/*
+	 * Let the pg_lake_engine deletion queue resolve a dropped table's
+	 * metadata.json into its referenced files during VACUUM. The engine is
+	 * the lower layer and only holds the function pointer; the resolution
+	 * logic lives here in the iceberg layer.
+	 */
+	MetadataResolveHook = IcebergFindAllReferencedFiles;
 }
 
 

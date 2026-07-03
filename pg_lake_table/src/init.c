@@ -350,11 +350,11 @@ _PG_init(void)
 
 	DefineCustomBoolVariable("pg_lake_table.defer_drop_file_cleanup",
 							 "When dropping a writable, default-location Iceberg "
-							 "table, queue its whole storage prefix for deletion "
-							 "by VACUUM instead of enumerating every referenced "
-							 "file from object storage. Lets callers avoid the "
-							 "per-file walk exceeding the request timeout during "
-							 "a bulk drop.",
+							 "table, queue its metadata.json for VACUUM to resolve "
+							 "and delete later, instead of enumerating every "
+							 "referenced file from object storage during the drop. "
+							 "Lets callers avoid the per-file walk exceeding the "
+							 "request timeout during a bulk drop.",
 							 NULL,
 							 &DeferDropFileCleanup,
 							 false,

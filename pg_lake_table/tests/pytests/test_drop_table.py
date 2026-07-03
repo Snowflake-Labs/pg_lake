@@ -610,10 +610,33 @@ def _count_prefix_records(superuser_conn, location):
     )[0][0]
 
 
+def _count_resolve_records(superuser_conn, location):
+    """Rows queued by a deferred drop: a single metadata.json flagged for
+    resolution (is_prefix = false, resolve_metadata = true)."""
+    return run_query(
+        f"SELECT count(*) FROM lake_engine.deletion_queue "
+        f"WHERE resolve_metadata AND path LIKE '{location}%'",
+        superuser_conn,
+    )[0][0]
+
+
+def _count_data_file_records(superuser_conn, location):
+    """Per-file rows for actual data files (under <location>/data/). These only
+    appear once the referenced files have been enumerated -- eagerly by a
+    normal drop, or by VACUUM after it resolves a deferred drop's metadata."""
+    return run_query(
+        f"SELECT count(*) FROM lake_engine.deletion_queue "
+        f"WHERE is_prefix = false AND resolve_metadata = false "
+        f"AND path LIKE '{location}/data/%'",
+        superuser_conn,
+    )[0][0]
+
+
 def _count_file_records(superuser_conn, location):
     return run_query(
         f"SELECT count(*) FROM lake_engine.deletion_queue "
-        f"WHERE is_prefix = false AND path LIKE '{location}%'",
+        f"WHERE is_prefix = false AND resolve_metadata = false "
+        f"AND path LIKE '{location}%'",
         superuser_conn,
     )[0][0]
 
@@ -631,10 +654,12 @@ def _vacuum_iceberg_now():
 
 
 def _assert_vacuum_drains(superuser_conn, location):
-    """Run VACUUM and assert it actually removed both the queue rows and the
-    underlying object-store files for the given location."""
+    """Run VACUUM and assert it actually removed all queue rows (prefix,
+    per-file, and any deferred resolve_metadata row) and the underlying
+    object-store files for the given location."""
     _vacuum_iceberg_now()
     assert _count_prefix_records(superuser_conn, location) == 0
+    assert _count_resolve_records(superuser_conn, location) == 0
     assert _count_file_records(superuser_conn, location) == 0
     assert (
         run_query(
@@ -670,11 +695,13 @@ def test_deferred_drop_skips_enumeration(
 ):
     """With deferred cleanup enabled for a default-location table, DROP must
     skip the object-store file enumeration entirely and instead queue the
-    table's storage prefix (which VACUUM later drains).
+    table's metadata.json as a single resolve_metadata row (which VACUUM later
+    resolves into per-file deletions and drains).
 
-    The signal is that the drop leaves exactly one is_prefix row and zero
-    per-file rows: a normal (non-deferred) drop would enumerate and enqueue
-    per-file rows instead (see test_normal_drop_enumerates_control)."""
+    The signal is that the drop leaves exactly one resolve_metadata row and no
+    data-file rows: a normal (non-deferred) drop would enumerate and enqueue
+    per-file rows up front instead (see test_normal_drop_enumerates_control).
+    No storage prefix is ever queued -- deletion stays file-accurate."""
     run_command("CREATE SCHEMA IF NOT EXISTS defer_drop_skip", pg_conn)
     run_command(
         """
@@ -716,9 +743,11 @@ def test_deferred_drop_skips_enumeration(
         == 0
     )
 
-    # the deferred drop queued exactly one prefix row, and no per-file rows
-    assert _count_prefix_records(superuser_conn, location) == 1
-    assert _count_file_records(superuser_conn, location) == 0
+    # the deferred drop queued exactly one metadata.json for resolution, no
+    # data-file rows (enumeration skipped) and no rm -rf prefix row
+    assert _count_resolve_records(superuser_conn, location) == 1
+    assert _count_data_file_records(superuser_conn, location) == 0
+    assert _count_prefix_records(superuser_conn, location) == 0
 
     # local pg_lake catalog state is still cleaned up
     assert (
@@ -737,7 +766,8 @@ def test_deferred_drop_skips_enumeration(
         > 0
     )
 
-    # VACUUM drains the queued prefix and removes the whole table directory
+    # VACUUM resolves the metadata, deletes the referenced files, and drains
+    # every queue row for this table
     _assert_vacuum_drains(superuser_conn, location)
 
     run_command("DROP SCHEMA IF EXISTS defer_drop_skip CASCADE", pg_conn)
@@ -748,7 +778,8 @@ def test_normal_drop_enumerates_control(
     s3, pg_conn, superuser_conn, extension, with_default_location
 ):
     """Control: with deferral off (the default), DROP enumerates referenced
-    files and enqueues per-file (is_prefix=false) records, not a prefix."""
+    files up front and enqueues per-file (is_prefix=false) records -- no
+    resolve_metadata row and no prefix."""
     run_command("CREATE SCHEMA IF NOT EXISTS defer_drop_control", pg_conn)
     run_command(
         """
@@ -765,8 +796,10 @@ def test_normal_drop_enumerates_control(
     run_command("DROP TABLE defer_drop_control.t", pg_conn)
     pg_conn.commit()
 
-    # enumeration ran: per-file records were created, no prefix record
-    assert _count_file_records(superuser_conn, location) > 0
+    # enumeration ran up front: data-file records were created, no deferred
+    # resolve_metadata row and no prefix record
+    assert _count_data_file_records(superuser_conn, location) > 0
+    assert _count_resolve_records(superuser_conn, location) == 0
     assert _count_prefix_records(superuser_conn, location) == 0
 
     # VACUUM actually drains the per-file records and deletes the files
@@ -785,7 +818,7 @@ def test_injection_point_on_enumeration_path(
     create_injection_extension,
 ):
     """Guards that the injection point actually sits on the enumeration path:
-    with it attached (and NO pre-seeded prefix) the drop must take the
+    with it attached, a normal (non-deferred) drop must take the
     blob-store-failure fallback and enqueue a single prefix record instead of
     per-file records."""
     # injection points only supported with 17+
@@ -813,8 +846,11 @@ def test_injection_point_on_enumeration_path(
     pg_conn.commit()
 
     # enumeration was reached (injection fired), caught, and fell back to a
-    # single prefix record -- proving the injection point is on that path
+    # single prefix record -- proving the injection point is on that path.
+    # This is the last-resort unreachable-blob-store fallback, not the deferred
+    # path, so no resolve_metadata row is queued.
     assert _count_prefix_records(superuser_conn, location) == 1
+    assert _count_resolve_records(superuser_conn, location) == 0
     assert _count_file_records(superuser_conn, location) == 0
 
     # VACUUM actually drains the queued prefix and deletes the files
@@ -846,15 +882,17 @@ def test_deferred_drop_rollback_is_clean(
 
     location = _writable_location(pg_conn, "defer_drop_rollback.t")
 
-    # SET LOCAL + prefix enqueue + DROP all happen in one transaction that we
-    # then roll back, so nothing may persist.
+    # SET LOCAL + resolve_metadata enqueue + DROP all happen in one transaction
+    # that we then roll back, so nothing may persist.
     _drop_deferred(pg_conn, "DROP TABLE defer_drop_rollback.t", commit=False)
     pg_conn.rollback()
 
     # table survived the rollback and is still queryable
     assert run_query("SELECT count(*) FROM defer_drop_rollback.t", pg_conn)[0][0] == 10
 
-    # the queued prefix was rolled back with the aborted transaction; no rows
+    # the queued resolve_metadata row was rolled back with the aborted
+    # transaction; no rows of any kind persist
+    assert _count_resolve_records(superuser_conn, location) == 0
     assert _count_prefix_records(superuser_conn, location) == 0
     assert _count_file_records(superuser_conn, location) == 0
 
@@ -895,11 +933,14 @@ def test_deferred_drop_under_drop_schema_cascade(
         == 0
     )
 
-    # deferred path taken: exactly one queued prefix, no per-file rows
-    assert _count_prefix_records(superuser_conn, location) == 1
-    assert _count_file_records(superuser_conn, location) == 0
+    # deferred path taken: exactly one queued metadata.json for resolution,
+    # no data-file rows and no prefix row
+    assert _count_resolve_records(superuser_conn, location) == 1
+    assert _count_data_file_records(superuser_conn, location) == 0
+    assert _count_prefix_records(superuser_conn, location) == 0
 
-    # VACUUM actually drains the queued prefix and deletes the files
+    # VACUUM resolves the metadata, deletes the referenced files, and drains
+    # every queue row for this table
     _assert_vacuum_drains(superuser_conn, location)
 
 
@@ -928,8 +969,10 @@ def test_custom_location_never_deferred(
     # normal enumeration path
     _drop_deferred(pg_conn, "DROP TABLE defer_drop_custom.t")
 
-    # enumeration ran despite deferral being on: per-file records, no prefix
-    assert _count_file_records(superuser_conn, location) > 0
+    # enumeration ran up front despite deferral being on: data-file records,
+    # no deferred resolve_metadata row and no prefix
+    assert _count_data_file_records(superuser_conn, location) > 0
+    assert _count_resolve_records(superuser_conn, location) == 0
     assert _count_prefix_records(superuser_conn, location) == 0
 
     # VACUUM actually drains the per-file records and deletes the files

@@ -27,9 +27,21 @@
 extern int	OrphanedFileRetentionPeriod;
 extern int	VacuumFileRemoveMaxRetries;
 
+/*
+ * MetadataResolveHook resolves an Iceberg metadata.json path into the list of
+ * files it references. It is registered by the pg_lake_iceberg layer (which
+ * owns IcebergFindAllReferencedFiles); pg_lake_engine, being the lower layer,
+ * only knows the function pointer. VACUUM uses it to expand a deferred-drop
+ * "resolve_metadata" deletion-queue row into per-file deletion rows.
+ */
+typedef List *(*MetadataResolveHookType) (char *metadataPath);
+extern PGDLLEXPORT MetadataResolveHookType MetadataResolveHook;
+
 extern PGDLLEXPORT List *GetDeletionQueueRecords(Oid relationId, bool isFull);
 extern PGDLLEXPORT bool RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose);
 extern PGDLLEXPORT void InsertDeletionQueueRecord(char *path, Oid relationId, TimestampTz deleteAfterTime);
 extern PGDLLEXPORT void InsertPrefixDeletionRecord(char *path, TimestampTz orphanedAt);
+extern PGDLLEXPORT void InsertMetadataResolveRecord(char *metadataPath, Oid relationId,
+													TimestampTz orphanedAt);
 extern PGDLLEXPORT void InsertDeletionQueueRecordExtended(char *path, Oid relationId, TimestampTz orphanedAt,
 														  bool isPrefix);
