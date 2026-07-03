@@ -627,7 +627,7 @@ def _cleanup_queue(superuser_conn, location):
 
 def _attach_find_referenced_files_error(superuser_conn):
     run_command(
-        f"SELECT injection_points_attach('{FIND_REFERENCED_FILES_INJECTION_POINT}', 'error')",
+        f"SELECT public.injection_points_attach('{FIND_REFERENCED_FILES_INJECTION_POINT}', 'error')",
         superuser_conn,
     )
     superuser_conn.commit()
@@ -635,7 +635,7 @@ def _attach_find_referenced_files_error(superuser_conn):
 
 def _detach_find_referenced_files(superuser_conn):
     run_command(
-        f"SELECT injection_points_detach('{FIND_REFERENCED_FILES_INJECTION_POINT}')",
+        f"SELECT public.injection_points_detach('{FIND_REFERENCED_FILES_INJECTION_POINT}')",
         superuser_conn,
     )
     superuser_conn.commit()
@@ -652,6 +652,10 @@ def test_deferred_drop_skips_enumeration(
     """When a prefix deletion record already exists for a default-location
     table, DROP must skip the object-store file enumeration entirely and rely
     on the queued prefix (which VACUUM later drains)."""
+    # injection points only supported with 17+
+    if get_pg_version_num(pg_conn) < 170000:
+        return
+
     run_command("CREATE SCHEMA IF NOT EXISTS defer_drop_skip", pg_conn)
     run_command(
         """
@@ -790,6 +794,10 @@ def test_injection_point_on_enumeration_path(
     with it attached (and NO pre-seeded prefix) the drop must take the
     blob-store-failure fallback and enqueue a single prefix record instead of
     per-file records."""
+    # injection points only supported with 17+
+    if get_pg_version_num(pg_conn) < 170000:
+        return
+
     run_command("CREATE SCHEMA IF NOT EXISTS defer_drop_inj", pg_conn)
     run_command(
         """
@@ -830,6 +838,10 @@ def test_deferred_drop_rollback_is_clean(
 ):
     """Rolling back a deferred DROP must leave the table intact and add no new
     deletion-queue rows (deferral is fully transactional)."""
+    # injection points only supported with 17+
+    if get_pg_version_num(pg_conn) < 170000:
+        return
+
     run_command("CREATE SCHEMA IF NOT EXISTS defer_drop_rollback", pg_conn)
     run_command(
         """
@@ -876,6 +888,10 @@ def test_deferred_drop_under_drop_schema_cascade(
 ):
     """DROP SCHEMA ... CASCADE must also take the deferred path for a
     pre-seeded default-location table."""
+    # injection points only supported with 17+
+    if get_pg_version_num(pg_conn) < 170000:
+        return
+
     run_command("CREATE SCHEMA IF NOT EXISTS defer_drop_cascade", pg_conn)
     run_command(
         """
