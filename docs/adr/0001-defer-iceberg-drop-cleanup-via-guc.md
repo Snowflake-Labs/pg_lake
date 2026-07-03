@@ -9,9 +9,8 @@ accepted
 Dropping a writable, default-location Iceberg table normally walks object
 storage (`IcebergFindAllReferencedFiles`) to enqueue every referenced file for
 later removal by `VACUUM`. For a caller dropping many long-lived tables in one
-statement — notably `snowflake_cdc` tearing down a mirror's internal
-changelog/metalog tables on `DROP PUBLICATION` — that per-file walk can exceed
-the request timeout and roll the whole drop back.
+statement, that per-file walk can exceed the request timeout and roll the whole
+drop back.
 
 We let such callers **defer** the cleanup: instead of enumerating files, the
 entire table storage prefix is queued once (an `is_prefix` record in

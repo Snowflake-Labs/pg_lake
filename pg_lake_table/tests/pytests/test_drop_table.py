@@ -593,8 +593,8 @@ DEFER_GUC = "pg_lake_table.defer_drop_file_cleanup"
 
 def _drop_deferred(conn, drop_sql, commit=True):
     """Run drop_sql with deferred file cleanup enabled. SET LOCAL keeps the
-    GUC scoped to this single transaction (matching how snowflake_cdc turns it
-    on only around its bulk drop), so it never leaks to later tests and rolls
+    GUC scoped to this single transaction (matching how a caller turns it on
+    only around its bulk drop), so it never leaks to later tests and rolls
     back cleanly."""
     run_command(f"SET LOCAL {DEFER_GUC} = on", conn)
     run_command(drop_sql, conn)
@@ -618,10 +618,29 @@ def _count_file_records(superuser_conn, location):
     )[0][0]
 
 
-def _cleanup_queue(superuser_conn, location):
-    run_command(
-        f"DELETE FROM lake_engine.deletion_queue WHERE path LIKE '{location}%'",
-        superuser_conn,
+def _vacuum_iceberg_now():
+    """Force VACUUM to immediately drain the deletion queue and delete the
+    referenced object-store files (retention + snapshot age set to 0)."""
+    run_command_outside_tx(
+        [
+            "SET pg_lake_engine.orphaned_file_retention_period = 0",
+            "SET pg_lake_iceberg.max_snapshot_age TO 0",
+            "VACUUM (ICEBERG)",
+        ]
+    )
+
+
+def _assert_vacuum_drains(superuser_conn, location):
+    """Run VACUUM and assert it actually removed both the queue rows and the
+    underlying object-store files for the given location."""
+    _vacuum_iceberg_now()
+    assert _count_prefix_records(superuser_conn, location) == 0
+    assert _count_file_records(superuser_conn, location) == 0
+    assert (
+        run_query(
+            f"SELECT count(*) FROM lake_file.list('{location}/**')", superuser_conn
+        )[0][0]
+        == 0
     )
     superuser_conn.commit()
 
@@ -718,27 +737,11 @@ def test_deferred_drop_skips_enumeration(
         > 0
     )
 
-    # VACUUM drains the prefix and removes the whole table directory, even
-    # though the table (and any CDC worker) is long gone
-    run_command_outside_tx(
-        [
-            "SET pg_lake_engine.orphaned_file_retention_period = 0",
-            "SET pg_lake_iceberg.max_snapshot_age TO 0",
-            "VACUUM (ICEBERG)",
-        ]
-    )
-
-    assert _count_prefix_records(superuser_conn, location) == 0
-    assert (
-        run_query(f"SELECT count(*) FROM lake_file.list('{location}/**')", pg_conn)[0][
-            0
-        ]
-        == 0
-    )
+    # VACUUM drains the queued prefix and removes the whole table directory
+    _assert_vacuum_drains(superuser_conn, location)
 
     run_command("DROP SCHEMA IF EXISTS defer_drop_skip CASCADE", pg_conn)
     pg_conn.commit()
-    _cleanup_queue(superuser_conn, location)
 
 
 def test_normal_drop_enumerates_control(
@@ -766,9 +769,11 @@ def test_normal_drop_enumerates_control(
     assert _count_file_records(superuser_conn, location) > 0
     assert _count_prefix_records(superuser_conn, location) == 0
 
+    # VACUUM actually drains the per-file records and deletes the files
+    _assert_vacuum_drains(superuser_conn, location)
+
     run_command("DROP SCHEMA IF EXISTS defer_drop_control CASCADE", pg_conn)
     pg_conn.commit()
-    _cleanup_queue(superuser_conn, location)
 
 
 def test_injection_point_on_enumeration_path(
@@ -812,9 +817,11 @@ def test_injection_point_on_enumeration_path(
     assert _count_prefix_records(superuser_conn, location) == 1
     assert _count_file_records(superuser_conn, location) == 0
 
+    # VACUUM actually drains the queued prefix and deletes the files
+    _assert_vacuum_drains(superuser_conn, location)
+
     run_command("DROP SCHEMA IF EXISTS defer_drop_inj CASCADE", pg_conn)
     pg_conn.commit()
-    _cleanup_queue(superuser_conn, location)
 
 
 def test_deferred_drop_rollback_is_clean(
@@ -851,7 +858,6 @@ def test_deferred_drop_rollback_is_clean(
     assert _count_prefix_records(superuser_conn, location) == 0
     assert _count_file_records(superuser_conn, location) == 0
 
-    _cleanup_queue(superuser_conn, location)
     run_command("DROP SCHEMA IF EXISTS defer_drop_rollback CASCADE", pg_conn)
     pg_conn.commit()
 
@@ -893,7 +899,8 @@ def test_deferred_drop_under_drop_schema_cascade(
     assert _count_prefix_records(superuser_conn, location) == 1
     assert _count_file_records(superuser_conn, location) == 0
 
-    _cleanup_queue(superuser_conn, location)
+    # VACUUM actually drains the queued prefix and deletes the files
+    _assert_vacuum_drains(superuser_conn, location)
 
 
 def test_custom_location_never_deferred(
@@ -925,7 +932,9 @@ def test_custom_location_never_deferred(
     assert _count_file_records(superuser_conn, location) > 0
     assert _count_prefix_records(superuser_conn, location) == 0
 
-    _cleanup_queue(superuser_conn, location)
+    # VACUUM actually drains the per-file records and deletes the files
+    _assert_vacuum_drains(superuser_conn, location)
+
     run_command("DROP SCHEMA IF EXISTS defer_drop_custom CASCADE", pg_conn)
     pg_conn.commit()
 

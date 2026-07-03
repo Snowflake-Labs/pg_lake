@@ -69,8 +69,8 @@ bool		SkipDropAccessHook = false;
  * When set, dropping a writable, default-location Iceberg table enqueues the
  * table's whole storage prefix for deletion instead of walking object storage
  * to enumerate every referenced file. VACUUM later removes the entire
- * directory. Callers (e.g. snowflake_cdc) turn this on around a bulk DROP to
- * avoid the per-file enumeration exceeding the request timeout.
+ * directory. Callers turn this on around a bulk DROP to avoid the per-file
+ * enumeration exceeding the request timeout.
  */
 bool		DeferDropFileCleanup = false;
 
