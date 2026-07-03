@@ -421,3 +421,104 @@ def test_hstore_over_string_cap_nulls_via_pushdown(
     run_command("RESET search_path;", pg_conn)
     run_command("DROP SCHEMA test_size_hstore_pushdown CASCADE;", pg_conn)
     pg_conn.commit()
+
+
+def test_hstore_over_string_cap_errors_via_pushdown(
+    pg_conn, extension, s3, with_default_location
+):
+    """The SQL pushdown wrapper raises on an oversize hstore under 'error'."""
+    run_command("CREATE EXTENSION IF NOT EXISTS hstore;", pg_conn)
+    run_command(
+        "CREATE SCHEMA test_size_hstore_pushdown_err;"
+        "SET search_path TO test_size_hstore_pushdown_err, public;"
+        "CREATE TABLE src (id int, v hstore) USING iceberg;"
+        "CREATE TABLE dst (id int, v hstore) USING iceberg "
+        "WITH (compatibility_mode = 'snowflake', out_of_range_values = 'error');",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO src VALUES (1, %s::hstore);", (_oversize_hstore_literal(),)
+        )
+    pg_conn.commit()
+
+    with pytest.raises(Exception) as exc:
+        run_command("INSERT INTO dst SELECT * FROM src;", pg_conn)
+    pg_conn.rollback()
+    msg = str(exc.value).lower()
+    assert '"v"' in msg
+    assert "snowflake string column limit" in msg
+
+    run_command("RESET search_path;", pg_conn)
+    run_command("DROP SCHEMA test_size_hstore_pushdown_err CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# The clamp runs before partition routing and before ExecConstraints, so it
+# composes with both.  The reviewer asked for coverage on partitioned tables
+# and on constrained columns; these pin that the clamp lands first and the
+# rest of the write path sees the clamped value.
+# ---------------------------------------------------------------------------
+
+
+def test_hstore_clamp_on_partitioned_table_nulls_value(
+    pg_conn, extension, s3, with_default_location
+):
+    """On a partitioned table, an oversize hstore in a value column is NULLed
+    under 'clamp' while the row still routes by its partition key."""
+    run_command("CREATE EXTENSION IF NOT EXISTS hstore;", pg_conn)
+    run_command(
+        "CREATE SCHEMA test_size_hstore_part;"
+        "SET search_path TO test_size_hstore_part, public;"
+        "CREATE TABLE t (id int, v hstore) USING iceberg "
+        "WITH (compatibility_mode = 'snowflake', out_of_range_values = 'clamp', "
+        "partition_by = 'id');",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO t VALUES (7, %s::hstore);", (_oversize_hstore_literal(),)
+        )
+    pg_conn.commit()
+
+    result = run_query("SELECT id, v IS NULL FROM t;", pg_conn)
+    assert [[r[0], r[1]] for r in result] == [[7, True]]
+
+    run_command("RESET search_path;", pg_conn)
+    run_command("DROP SCHEMA test_size_hstore_part CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_clamp_then_not_null_constraint_raises(
+    pg_conn, extension, s3, with_default_location
+):
+    """Under 'clamp' a NULLed value is seen by ExecConstraints, so an oversize
+    hstore written to a NOT NULL column raises a not-null violation rather than
+    silently dropping the row's content.  (text/bytea truncate instead of
+    NULLing, so they don't exercise this; hstore is one of the leaves we NULL.)"""
+    run_command("CREATE EXTENSION IF NOT EXISTS hstore;", pg_conn)
+    run_command(
+        "CREATE SCHEMA test_size_notnull;"
+        "SET search_path TO test_size_notnull, public;"
+        "CREATE TABLE t (id int, v hstore NOT NULL) USING iceberg "
+        "WITH (compatibility_mode = 'snowflake', out_of_range_values = 'clamp');",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    with pytest.raises(Exception) as exc:
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO t VALUES (1, %s::hstore);", (_oversize_hstore_literal(),)
+            )
+    pg_conn.rollback()
+    assert "violates not-null constraint" in str(exc.value).lower()
+
+    run_command("RESET search_path;", pg_conn)
+    run_command("DROP SCHEMA test_size_notnull CASCADE;", pg_conn)
+    pg_conn.commit()
