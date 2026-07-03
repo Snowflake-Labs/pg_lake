@@ -562,8 +562,8 @@ def _writable_location(conn, qualified_table):
     Return the exact location string GetWritableTableLocation() computes for a
     writable pg_lake foreign table: the 'location' foreign-table option with
     query arguments stripped and a single trailing slash removed. This is the
-    value the deferred-drop path (PrefixDeletionRecordExists) matches against,
-    so tests must pre-seed the identical string.
+    prefix the deferred-drop path enqueues into the deletion queue, so tests
+    assert against the identical string.
     """
     rows = run_query(
         f"""
@@ -588,17 +588,18 @@ def _writable_location(conn, qualified_table):
     return location
 
 
-def _seed_prefix_record(superuser_conn, location):
-    """Simulate a caller (e.g. snowflake_cdc) enqueuing a table's storage
-    prefix into the deletion queue before dropping the table."""
-    run_command(
-        f"""
-        INSERT INTO lake_engine.deletion_queue (path, orphaned_at, is_prefix)
-        VALUES ('{location}', pg_catalog.now(), true)
-        """,
-        superuser_conn,
-    )
-    superuser_conn.commit()
+DEFER_GUC = "pg_lake_table.defer_drop_file_cleanup"
+
+
+def _drop_deferred(conn, drop_sql, commit=True):
+    """Run drop_sql with deferred file cleanup enabled. SET LOCAL keeps the
+    GUC scoped to this single transaction (matching how snowflake_cdc turns it
+    on only around its bulk drop), so it never leaks to later tests and rolls
+    back cleanly."""
+    run_command(f"SET LOCAL {DEFER_GUC} = on", conn)
+    run_command(drop_sql, conn)
+    if commit:
+        conn.commit()
 
 
 def _count_prefix_records(superuser_conn, location):
@@ -647,15 +648,14 @@ def test_deferred_drop_skips_enumeration(
     superuser_conn,
     extension,
     with_default_location,
-    create_injection_extension,
 ):
-    """When a prefix deletion record already exists for a default-location
-    table, DROP must skip the object-store file enumeration entirely and rely
-    on the queued prefix (which VACUUM later drains)."""
-    # injection points only supported with 17+
-    if get_pg_version_num(pg_conn) < 170000:
-        return
+    """With deferred cleanup enabled for a default-location table, DROP must
+    skip the object-store file enumeration entirely and instead queue the
+    table's storage prefix (which VACUUM later drains).
 
+    The signal is that the drop leaves exactly one is_prefix row and zero
+    per-file rows: a normal (non-deferred) drop would enumerate and enqueue
+    per-file rows instead (see test_normal_drop_enumerates_control)."""
     run_command("CREATE SCHEMA IF NOT EXISTS defer_drop_skip", pg_conn)
     run_command(
         """
@@ -685,18 +685,7 @@ def test_deferred_drop_skips_enumeration(
     )[0][0]
     assert files_before > 0
 
-    _seed_prefix_record(superuser_conn, location)
-
-    # If enumeration were (wrongly) reached, the injected error is caught and
-    # the drop falls back to InsertPrefixDeletionRecord for the SAME location,
-    # which violates the primary key and fails the DROP. So a clean DROP here
-    # is a hard guarantee the enumeration path was not entered.
-    _attach_find_referenced_files_error(superuser_conn)
-    try:
-        run_command("DROP TABLE defer_drop_skip.t", pg_conn)
-    finally:
-        _detach_find_referenced_files(superuser_conn)
-    pg_conn.commit()
+    _drop_deferred(pg_conn, "DROP TABLE defer_drop_skip.t")
 
     # table is gone
     assert (
@@ -708,7 +697,7 @@ def test_deferred_drop_skips_enumeration(
         == 0
     )
 
-    # exactly the pre-seeded prefix row, and no per-file rows were added
+    # the deferred drop queued exactly one prefix row, and no per-file rows
     assert _count_prefix_records(superuser_conn, location) == 1
     assert _count_file_records(superuser_conn, location) == 0
 
@@ -755,8 +744,8 @@ def test_deferred_drop_skips_enumeration(
 def test_normal_drop_enumerates_control(
     s3, pg_conn, superuser_conn, extension, with_default_location
 ):
-    """Control: without a pre-seeded prefix, DROP enumerates referenced files
-    and enqueues per-file (is_prefix=false) records, not a prefix."""
+    """Control: with deferral off (the default), DROP enumerates referenced
+    files and enqueues per-file (is_prefix=false) records, not a prefix."""
     run_command("CREATE SCHEMA IF NOT EXISTS defer_drop_control", pg_conn)
     run_command(
         """
@@ -834,14 +823,9 @@ def test_deferred_drop_rollback_is_clean(
     superuser_conn,
     extension,
     with_default_location,
-    create_injection_extension,
 ):
     """Rolling back a deferred DROP must leave the table intact and add no new
     deletion-queue rows (deferral is fully transactional)."""
-    # injection points only supported with 17+
-    if get_pg_version_num(pg_conn) < 170000:
-        return
-
     run_command("CREATE SCHEMA IF NOT EXISTS defer_drop_rollback", pg_conn)
     run_command(
         """
@@ -854,23 +838,17 @@ def test_deferred_drop_rollback_is_clean(
     pg_conn.commit()
 
     location = _writable_location(pg_conn, "defer_drop_rollback.t")
-    _seed_prefix_record(superuser_conn, location)
 
-    # attach error injection: if the deferred drop wrongly enumerated, the
-    # drop would error before we even reach the rollback
-    _attach_find_referenced_files_error(superuser_conn)
-    try:
-        run_command("DROP TABLE defer_drop_rollback.t", pg_conn)
-        # explicitly roll back the drop
-        pg_conn.rollback()
-    finally:
-        _detach_find_referenced_files(superuser_conn)
+    # SET LOCAL + prefix enqueue + DROP all happen in one transaction that we
+    # then roll back, so nothing may persist.
+    _drop_deferred(pg_conn, "DROP TABLE defer_drop_rollback.t", commit=False)
+    pg_conn.rollback()
 
     # table survived the rollback and is still queryable
     assert run_query("SELECT count(*) FROM defer_drop_rollback.t", pg_conn)[0][0] == 10
 
-    # only the pre-seeded prefix row exists; no per-file rows were committed
-    assert _count_prefix_records(superuser_conn, location) == 1
+    # the queued prefix was rolled back with the aborted transaction; no rows
+    assert _count_prefix_records(superuser_conn, location) == 0
     assert _count_file_records(superuser_conn, location) == 0
 
     _cleanup_queue(superuser_conn, location)
@@ -884,14 +862,9 @@ def test_deferred_drop_under_drop_schema_cascade(
     superuser_conn,
     extension,
     with_default_location,
-    create_injection_extension,
 ):
     """DROP SCHEMA ... CASCADE must also take the deferred path for a
-    pre-seeded default-location table."""
-    # injection points only supported with 17+
-    if get_pg_version_num(pg_conn) < 170000:
-        return
-
+    default-location table when deferral is enabled."""
     run_command("CREATE SCHEMA IF NOT EXISTS defer_drop_cascade", pg_conn)
     run_command(
         """
@@ -904,14 +877,8 @@ def test_deferred_drop_under_drop_schema_cascade(
     pg_conn.commit()
 
     location = _writable_location(pg_conn, "defer_drop_cascade.t")
-    _seed_prefix_record(superuser_conn, location)
 
-    _attach_find_referenced_files_error(superuser_conn)
-    try:
-        run_command("DROP SCHEMA defer_drop_cascade CASCADE", pg_conn)
-    finally:
-        _detach_find_referenced_files(superuser_conn)
-    pg_conn.commit()
+    _drop_deferred(pg_conn, "DROP SCHEMA defer_drop_cascade CASCADE")
 
     # schema and table are gone
     assert (
@@ -922,7 +889,7 @@ def test_deferred_drop_under_drop_schema_cascade(
         == 0
     )
 
-    # deferred path taken: prefix intact, no per-file rows
+    # deferred path taken: exactly one queued prefix, no per-file rows
     assert _count_prefix_records(superuser_conn, location) == 1
     assert _count_file_records(superuser_conn, location) == 0
 
@@ -932,8 +899,9 @@ def test_deferred_drop_under_drop_schema_cascade(
 def test_custom_location_never_deferred(
     s3, pg_conn, superuser_conn, extension, with_default_location
 ):
-    """A custom-location table must NEVER be deferred via a prefix record: its
-    prefix may be shared, so enumeration must always run (per-file records)."""
+    """A custom-location table must NEVER be deferred: its prefix may be
+    shared with other tables, so enumeration must always run (per-file
+    records), even when deferral is explicitly enabled."""
     custom_location = f"s3://{TEST_BUCKET}/defer_custom_location/mytable"
 
     run_command("CREATE SCHEMA IF NOT EXISTS defer_drop_custom", pg_conn)
@@ -949,15 +917,13 @@ def test_custom_location_never_deferred(
 
     location = _writable_location(pg_conn, "defer_drop_custom.t")
 
-    # even with a matching prefix seeded, the custom-location guard must force
-    # the normal enumeration path
-    _seed_prefix_record(superuser_conn, location)
+    # even with deferral requested, the custom-location guard forces the
+    # normal enumeration path
+    _drop_deferred(pg_conn, "DROP TABLE defer_drop_custom.t")
 
-    run_command("DROP TABLE defer_drop_custom.t", pg_conn)
-    pg_conn.commit()
-
-    # enumeration ran despite the pre-seeded prefix: per-file records created
+    # enumeration ran despite deferral being on: per-file records, no prefix
     assert _count_file_records(superuser_conn, location) > 0
+    assert _count_prefix_records(superuser_conn, location) == 0
 
     _cleanup_queue(superuser_conn, location)
     run_command("DROP SCHEMA IF EXISTS defer_drop_custom CASCADE", pg_conn)

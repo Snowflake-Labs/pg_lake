@@ -306,46 +306,6 @@ InsertPrefixDeletionRecord(char *path, TimestampTz orphanedAt)
 
 
 /*
- * PrefixDeletionRecordExists returns whether an is_prefix deletion record
- * already exists for the given path.
- *
- * This is a single primary-key probe on lake_engine.deletion_queue.path,
- * used by the DROP TABLE hook to decide whether the expensive object-store
- * file enumeration can be skipped: when a prefix record for the table's
- * location already exists (e.g. enqueued by snowflake_cdc before dropping
- * its internal Iceberg tables), the whole table directory will be removed
- * by VACUUM, so enumerating individual files is redundant.
- *
- * readOnly = false so SPI takes a fresh snapshot and sees prefix rows
- * inserted earlier in the same transaction (callers that enqueue then drop
- * in one transaction issue a CommandCounterIncrement in between).
- */
-bool
-PrefixDeletionRecordExists(const char *path)
-{
-	char	   *query =
-		"SELECT 1 FROM " DELETION_QUEUE_TABLE " "
-		"WHERE path OPERATOR(pg_catalog.=) $1 AND is_prefix";
-
-	DECLARE_SPI_ARGS(1);
-	SPI_ARG_VALUE(1, TEXTOID, path, false);
-
-	/* switch to schema owner, we assume callers checked permissions */
-	SPI_START_EXTENSION_OWNER(PgLakeTable);
-
-	bool		readOnly = false;
-
-	SPI_EXECUTE(query, readOnly);
-
-	bool		exists = SPI_processed > 0;
-
-	SPI_END();
-
-	return exists;
-}
-
-
-/*
  * InsertDeletionQueueRecord adds a path into the deletion queue for
  * later removal.
  */

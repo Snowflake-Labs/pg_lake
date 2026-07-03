@@ -20,10 +20,11 @@
 #include "pg_lake/ddl/utility_hook.h"
 
 extern bool SkipDropAccessHook;
+extern bool DeferDropFileCleanup;
 
 extern void InitializeDropTableHandler(void);
 extern PGDLLEXPORT bool CheckIfTypeIsUsedInTables(Oid typeId, const char *tableSetSubquery);
 extern bool CheckIfTypeIsUsedInInternalIcebergTable(Oid typeId);
 extern bool ProcessDropPgLakeTable(ProcessUtilityParams * params, void *arg);
 extern void TryMarkAllReferencedFilesForDeletion(Oid relationId);
-extern PGDLLEXPORT void MarkWritableTableLocationPrefixForDeletion(Oid relationId);
+extern void MarkWritableTableLocationPrefixForDeletion(Oid relationId);

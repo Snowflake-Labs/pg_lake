@@ -156,35 +156,43 @@ ApplyDDLCatalogChanges(Oid relationId, List *ddlOperations,
 			if (IsWritableIcebergTable(relationId))
 			{
 				/*
-				 * A prefix deletion record for this table's location may
-				 * already have been enqueued (e.g. by snowflake_cdc before a
-				 * bulk DROP PUBLICATION). If so, VACUUM will remove the whole
-				 * table directory -- data files, metadata, and the
-				 * previous_metadata file -- so we skip the expensive
-				 * object-store file enumeration and the previous_metadata
-				 * single-file enqueue below. This is only safe for
-				 * default-location tables, whose prefix is unique per table
-				 * and fully managed by pg_lake.
+				 * metadata is not pushed yet if table is created in current
+				 * tx. Do not try to delete it. Files created in this
+				 * transaction are in in_progress files, so they'll be cleaned
+				 * up separately.
 				 */
-				bool		deferViaPrefix = false;
+				bool		createdInCurrentTx =
+					IsIcebergTableCreatedInCurrentTransaction(relationId);
 
-				if (!HasCustomLocation(relationId))
+				/*
+				 * When the caller opted into deferred cleanup (via the
+				 * pg_lake_table.defer_drop_file_cleanup GUC), queue the
+				 * table's whole storage prefix instead of walking object
+				 * storage to enumerate every referenced file. VACUUM later
+				 * removes the entire directory -- data files, metadata, and
+				 * the previous_metadata file -- so both the enumeration and
+				 * the previous_metadata single-file enqueue below are
+				 * redundant and skipped.
+				 *
+				 * This is only safe for default-location tables, whose prefix
+				 * is unique per table and fully managed by pg_lake. Custom
+				 * locations may be shared, so they always take the normal
+				 * enumeration path. A table created in the current
+				 * transaction has no persisted prefix to queue, so it also
+				 * takes the normal (in-progress cleanup) path.
+				 */
+				bool		deferViaPrefix =
+					DeferDropFileCleanup &&
+					!createdInCurrentTx &&
+					!HasCustomLocation(relationId);
+
+				if (deferViaPrefix)
 				{
-					char	   *queryArguments = "";
-					char	   *location = GetWritableTableLocation(relationId, &queryArguments);
-
-					deferViaPrefix = PrefixDeletionRecordExists(location);
+					MarkWritableTableLocationPrefixForDeletion(relationId);
 				}
-
-				if (!deferViaPrefix)
+				else
 				{
-					/*
-					 * metadata is not pushed yet if table is created in
-					 * current tx. Do not try to delete it. Files created in
-					 * this transaction are in in_progress files, so they'll
-					 * be cleaned up separately.
-					 */
-					if (!IsIcebergTableCreatedInCurrentTransaction(relationId))
+					if (!createdInCurrentTx)
 						TryMarkAllReferencedFilesForDeletion(relationId);
 
 					/*

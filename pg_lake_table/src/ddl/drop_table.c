@@ -63,6 +63,17 @@
 /* controlled via GUC */
 bool		SkipDropAccessHook = false;
 
+/*
+ * controlled via the pg_lake_table.defer_drop_file_cleanup GUC.
+ *
+ * When set, dropping a writable, default-location Iceberg table enqueues the
+ * table's whole storage prefix for deletion instead of walking object storage
+ * to enumerate every referenced file. VACUUM later removes the entire
+ * directory. Callers (e.g. snowflake_cdc) turn this on around a bulk DROP to
+ * avoid the per-file enumeration exceeding the request timeout.
+ */
+bool		DeferDropFileCleanup = false;
+
 #define INTERNAL_ICEBERG_TABLES_SUBQUERY \
 	"SELECT c.oid AS relid " \
 	"FROM lake_iceberg.tables_internal tbl " \
@@ -482,8 +493,9 @@ TryMarkAllReferencedFilesForDeletion(Oid relationId)
  * leave the files in place.
  *
  * Used both as the fallback in TryMarkAllReferencedFilesForDeletion when the
- * blob store is unreachable, and proactively by callers (e.g. snowflake_cdc)
- * that want to defer the expensive enumeration during a bulk drop.
+ * blob store is unreachable, and on the deferred-drop path (when the
+ * pg_lake_table.defer_drop_file_cleanup GUC is set) to skip the expensive
+ * enumeration during a bulk drop.
  */
 void
 MarkWritableTableLocationPrefixForDeletion(Oid relationId)
