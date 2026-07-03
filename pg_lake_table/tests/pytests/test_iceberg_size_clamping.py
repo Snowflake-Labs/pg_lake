@@ -320,3 +320,104 @@ def test_text_over_string_cap_errors_via_pushdown(
     run_command("RESET search_path;", pg_conn)
     run_command("DROP SCHEMA test_size_pushdown_err CASCADE;", pg_conn)
     pg_conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Other types Iceberg stores as string/binary (hstore, geometry, ...) have no
+# safe truncation, so an oversize value is NULLed under 'clamp' and raises
+# under 'error'.  hstore stands in for the whole "falls back to iceberg string"
+# family here; it is the type the review called out.
+# ---------------------------------------------------------------------------
+
+
+def _oversize_hstore_literal():
+    """An hstore text literal a little over the STRING cap."""
+    return "a=>" + "x" * _just_over(STRING_CAP)
+
+
+def test_hstore_over_string_cap_nulls_per_tuple(
+    pg_conn, extension, s3, with_default_location
+):
+    """hstore over the STRING cap is NULLed under 'clamp' on INSERT ... VALUES."""
+    run_command("CREATE EXTENSION IF NOT EXISTS hstore;", pg_conn)
+    run_command(
+        "CREATE SCHEMA test_size_hstore_clamp;"
+        "SET search_path TO test_size_hstore_clamp, public;"
+        "CREATE TABLE t (id int, v hstore) USING iceberg "
+        "WITH (compatibility_mode = 'snowflake', out_of_range_values = 'clamp');",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO t VALUES (1, %s::hstore);", (_oversize_hstore_literal(),)
+        )
+    pg_conn.commit()
+
+    result = run_query("SELECT id, v IS NULL FROM t;", pg_conn)
+    assert [[r[0], r[1]] for r in result] == [[1, True]]
+
+    run_command("RESET search_path;", pg_conn)
+    run_command("DROP SCHEMA test_size_hstore_clamp CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_hstore_over_string_cap_errors_per_tuple(
+    pg_conn, extension, s3, with_default_location
+):
+    """hstore over the STRING cap raises under 'error' on INSERT ... VALUES."""
+    run_command("CREATE EXTENSION IF NOT EXISTS hstore;", pg_conn)
+    run_command(
+        "CREATE SCHEMA test_size_hstore_err;"
+        "SET search_path TO test_size_hstore_err, public;"
+        "CREATE TABLE t (id int, v hstore) USING iceberg "
+        "WITH (compatibility_mode = 'snowflake', out_of_range_values = 'error');",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    with pytest.raises(Exception) as exc:
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO t VALUES (1, %s::hstore);", (_oversize_hstore_literal(),)
+            )
+    pg_conn.rollback()
+    assert "snowflake string column limit" in str(exc.value).lower()
+
+    run_command("RESET search_path;", pg_conn)
+    run_command("DROP SCHEMA test_size_hstore_err CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_hstore_over_string_cap_nulls_via_pushdown(
+    pg_conn, extension, s3, with_default_location
+):
+    """The SQL pushdown wrapper NULLs an oversize hstore on INSERT ... SELECT."""
+    run_command("CREATE EXTENSION IF NOT EXISTS hstore;", pg_conn)
+    run_command(
+        "CREATE SCHEMA test_size_hstore_pushdown;"
+        "SET search_path TO test_size_hstore_pushdown, public;"
+        # A non-snowflake source so the oversize value lands on disk first.
+        "CREATE TABLE src (id int, v hstore) USING iceberg;"
+        "CREATE TABLE dst (id int, v hstore) USING iceberg "
+        "WITH (compatibility_mode = 'snowflake', out_of_range_values = 'clamp');",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO src VALUES (1, %s::hstore);", (_oversize_hstore_literal(),)
+        )
+    pg_conn.commit()
+
+    run_command("INSERT INTO dst SELECT * FROM src;", pg_conn)
+    pg_conn.commit()
+
+    result = run_query("SELECT id, v IS NULL FROM dst;", pg_conn)
+    assert [[r[0], r[1]] for r in result] == [[1, True]]
+
+    run_command("RESET search_path;", pg_conn)
+    run_command("DROP SCHEMA test_size_hstore_pushdown CASCADE;", pg_conn)
+    pg_conn.commit()

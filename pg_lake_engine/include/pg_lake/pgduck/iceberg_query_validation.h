@@ -18,7 +18,7 @@
 #pragma once
 
 #include "access/tupdesc.h"
-#include "pg_lake/iceberg/compatibility_mode.h"
+#include "pg_lake/pgduck/compatibility_mode.h"
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/pgduck/iceberg_validation.h"
 

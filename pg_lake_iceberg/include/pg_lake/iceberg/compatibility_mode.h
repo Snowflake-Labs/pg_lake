@@ -22,6 +22,7 @@
 #include "nodes/pg_list.h"
 
 #include "pg_lake/parquet/field.h"
+#include "pg_lake/pgduck/compatibility_mode.h"
 
 /*
  * Name of the per-table iceberg option that selects a compatibility mode.
@@ -31,28 +32,12 @@
 #define ICEBERG_COMPATIBILITY_MODE_OPTION "compatibility_mode"
 
 /*
- * IcebergCompatibilityMode selects how a table's Iceberg STORAGE is shaped so
- * the table is consumable by a downstream engine with narrower type support.
- *
- * Unlike a type-rewrite, these modes never change the PostgreSQL column type:
- * the column stays exactly as declared (uuid stays uuid). Only the physical
- * Iceberg/Parquet storage type and the I/O-boundary conversions differ, and
- * that surface->storage divergence is persisted per-leaf in
- * lake_table.field_id_mappings (decided once, at registration).
- *
- *   ICEBERG_COMPAT_AUTO       default (option unset or 'auto'): no storage
- *                             divergence. This is the hook where future
- *                             auto-detection would live.
- *   ICEBERG_COMPAT_SNOWFLAKE  a uuid nested inside an array/composite is
- *                             stored as Iceberg `string` (Snowflake cannot
- *                             hold a UUID inside a structured type). A
- *                             top-level uuid column stays native `uuid`.
+ * IcebergCompatibilityMode itself is defined in pg_lake_engine
+ * (pg_lake/pgduck/compatibility_mode.h) so the write path can key size
+ * clamping off it without pg_lake_engine depending on this module.  The
+ * helpers below add the iceberg-side parsing and per-field storage mapping on
+ * top of that enum.
  */
-typedef enum IcebergCompatibilityMode
-{
-	ICEBERG_COMPAT_AUTO = 0,
-	ICEBERG_COMPAT_SNOWFLAKE,
-}			IcebergCompatibilityMode;
 
 /*
  * GUC pg_lake_iceberg.default_compatibility_mode: the compatibility_mode a new

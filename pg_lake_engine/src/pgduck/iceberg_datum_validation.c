@@ -314,6 +314,19 @@ SizeClampVarlenaFastPath(Datum value, Oid typeOid)
 	if (baseType == BYTEAOID)
 		return totalSize <= ICEBERG_SNOWFLAKE_MAX_BINARY_BYTES;
 
+	/*
+	 * Other scalar leaves Iceberg stores as string/binary (hstore, citext,
+	 * geometry, ...) are bounded by the per-leaf STRING/BINARY cap, not the
+	 * looser NESTED cap the container fallback below uses.
+	 */
+	{
+		bool		isBinary = false;
+
+		if (IcebergScalarStorageIsStringOrBinary(baseType, &isBinary))
+			return totalSize <= (isBinary ? ICEBERG_SNOWFLAKE_MAX_BINARY_BYTES :
+								 ICEBERG_SNOWFLAKE_MAX_STRING_BYTES);
+	}
+
 	return totalSize <= ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES;
 }
 
@@ -1024,6 +1037,38 @@ IcebergSizeClampNestedDatum(Datum value, Oid typeOid, int32 typmod,
 		}
 
 		return value;
+	}
+
+	/*
+	 * Any other scalar leaf Iceberg stores as string/binary (hstore, citext,
+	 * geometry, ...).  We can't safely truncate the serialized form, so NULL
+	 * it (CLAMP) or raise (ERROR) when its varlena content exceeds the
+	 * applicable per-leaf cap.  Fixed-length types can never reach the cap,
+	 * so only varlena values are measured.
+	 */
+	{
+		bool		isBinary = false;
+
+		if (get_typlen(typeOid) == -1 &&
+			IcebergScalarStorageIsStringOrBinary(typeOid, &isBinary))
+		{
+			int64		size = (int64) toast_raw_datum_size(value) - VARHDRSZ;
+			int64		cap = isBinary ? ICEBERG_SNOWFLAKE_MAX_BINARY_BYTES :
+				ICEBERG_SNOWFLAKE_MAX_STRING_BYTES;
+
+			if (size > cap)
+			{
+				if (policy == ICEBERG_OOR_ERROR)
+					RaiseSizeOverflow(columnName, isBinary ? "binary" : "string",
+									  size, cap,
+									  isBinary ? "Snowflake BINARY column limit" :
+									  "Snowflake STRING column limit");
+
+				*isNull = true;
+				*modified = true;
+				return (Datum) 0;
+			}
+		}
 	}
 
 	return value;

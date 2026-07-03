@@ -101,3 +101,14 @@ extern PGDLLEXPORT bool TypeNeedsIcebergValidation(Oid typeOid, int32 typmod,
  * through arrays, composites, maps, and domains.
  */
 extern PGDLLEXPORT bool TypeNeedsIcebergSizeClamping(Oid typeOid);
+
+/*
+ * IcebergScalarStorageIsStringOrBinary returns true when typeOid is a scalar
+ * leaf that Iceberg stores as string or binary but that has no type-specific
+ * truncation (i.e. not text/varchar/bpchar/bytea/jsonb/json) -- hstore,
+ * citext, PostGIS geometry, and other types that fall back to string/binary
+ * serialization.  Such values are NULLed when oversize.  *isBinary, when
+ * non-NULL, is set true for the binary storage class and false for string.
+ */
+extern PGDLLEXPORT bool IcebergScalarStorageIsStringOrBinary(Oid typeOid,
+															 bool *isBinary);

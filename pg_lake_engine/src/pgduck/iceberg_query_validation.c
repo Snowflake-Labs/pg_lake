@@ -528,6 +528,11 @@ EscapeColumnNameForErrorMessage(const char *name, bool forPrintfFormat)
  *     - array / composite /
  *       map                 : NULL when iceberg_byte_size(expr) exceeds the
  *                             Snowflake OBJECT/ARRAY/VARIANT column limit.
+ *     - other string/binary
+ *       leaves (hstore,
+ *       geometry, ...)      : NULL when iceberg_byte_size(expr) exceeds the
+ *                             string/binary limit; their serialized form
+ *                             can't be safely truncated.
  *
  *   ICEBERG_OOR_ERROR — raise on oversize, including the column name in
  *   the message.  Uses iceberg_size_check_text / _blob for the leaf cases
@@ -661,6 +666,49 @@ AppendIcebergSizeClampExpression(StringInfo buf, const char *expr,
 
 		return AppendIcebergSizeClampExpression(buf, expr, columnName, policy,
 												baseType, typmod);
+	}
+
+	/*
+	 * Any other scalar leaf Iceberg stores as string/binary (hstore, citext,
+	 * PostGIS geometry, ...).  We can't safely truncate the serialized form,
+	 * so NULL it when the value the writer emits exceeds the applicable cap.
+	 * iceberg_byte_size measures the DuckDB VARCHAR/BLOB byte length.
+	 */
+	{
+		bool		isBinary = false;
+
+		if (IcebergScalarStorageIsStringOrBinary(typeOid, &isBinary))
+		{
+			int			cap = isBinary ? ICEBERG_SNOWFLAKE_MAX_BINARY_BYTES :
+				ICEBERG_SNOWFLAKE_MAX_STRING_BYTES;
+			const char *limitLabel = isBinary ?
+				"Snowflake BINARY column limit" :
+				"Snowflake STRING column limit";
+
+			if (policy == ICEBERG_OOR_ERROR)
+			{
+				char	   *escapedName = EscapeColumnNameForErrorMessage(columnName, true);
+
+				appendStringInfo(buf,
+								 "(CASE WHEN iceberg_byte_size(%s) > %d "
+								 "THEN error(printf("
+								 "'value of column \"%s\" (%%d bytes) "
+								 "exceeds %s (%d). "
+								 "Set out_of_range_values = ''clamp'' on the "
+								 "table to drop oversize values instead "
+								 "of erroring.', iceberg_byte_size(%s))) "
+								 "ELSE %s END)",
+								 expr, cap, escapedName, limitLabel, cap,
+								 expr, expr);
+				pfree(escapedName);
+			}
+			else
+				appendStringInfo(buf,
+								 "(CASE WHEN iceberg_byte_size(%s) > %d "
+								 "THEN NULL ELSE %s END)",
+								 expr, cap, expr);
+			return true;
+		}
 	}
 
 	return false;
