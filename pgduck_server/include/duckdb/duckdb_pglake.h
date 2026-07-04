@@ -42,6 +42,8 @@ const char *duckdb_pglake_time_to_string(duckdb_time input);
 const char *duckdb_pglake_time_tz_to_string(duckdb_time_tz input);
 const char *duckdb_pglake_date_to_string(duckdb_date input);
 const char *duckdb_pglake_geometry_to_string(duckdb_database database, duckdb_string_t input);
+bool		duckdb_pglake_is_geometry_type(duckdb_logical_type type);
+int			duckdb_pglake_geometry_get_srid(duckdb_logical_type type);
 
 /*
  * Other utility functions in duckdb_pglake.

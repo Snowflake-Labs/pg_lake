@@ -28,14 +28,16 @@ diff --git a/src/include/postgres_utils.hpp b/src/include/postgres_utils.hpp
 diff --git a/src/postgres_utils.cpp b/src/postgres_utils.cpp
 --- a/src/postgres_utils.cpp
 +++ b/src/postgres_utils.cpp
-@@ -157,6 +157,7 @@ LogicalType PostgresUtils::TypeToLogicalType(optional_ptr<PostgresTransaction> t
+@@ -155,7 +155,8 @@ LogicalType PostgresUtils::TypeToLogicalType(optional_ptr<PostgresTransaction> t
  		postgres_type.info = PostgresTypeAnnotation::JSONB;
  		return LogicalType::VARCHAR;
  	} else if (pgtypename == "geometry") {
+-		return LogicalType::GEOMETRY();
 +		postgres_type.info = PostgresTypeAnnotation::POSTGIS_GEOMETRY;
- 		return GetGeometryType();
++		return LogicalType::GEOMETRY();
  	} else if (pgtypename == "date") {
  		return LogicalType::DATE;
+ 	} else if (pgtypename == "bytea") {
 diff --git a/src/postgres_scanner.cpp b/src/postgres_scanner.cpp
 --- a/src/postgres_scanner.cpp
 +++ b/src/postgres_scanner.cpp

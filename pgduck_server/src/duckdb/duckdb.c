@@ -367,16 +367,6 @@ duckdb_global_init(char *databaseFilePath,
 	}
 
 	{
-		if (snprintf(setCommand, 1024, "SET GLOBAL enable_geoparquet_conversion TO 'false'") < 0)
-		{
-			return DUCKDB_INITIALIZATION_ERROR;
-		}
-
-		if (run_command_on_duckdb(setCommand) == DuckDBError)
-			return DUCKDB_INITIALIZATION_ERROR;
-	}
-
-	{
 		if (snprintf(setCommand, 1024, "SET GLOBAL enable_object_cache TO true") < 0)
 		{
 			return DUCKDB_INITIALIZATION_ERROR;
@@ -705,6 +695,16 @@ duckdb_vector_to_pg_wire(duckdb_vector vector, duckdb_type duckType,
 						 ResponseFormat * responseFormat,
 						 StringInfo output)
 {
+	/*
+	 * GEOMETRY has no entry in our type map; route it through BLOB which
+	 * handles it via blob_to_text + the geometry-specific check. DuckDB 1.5.1
+	 * exposed GEOMETRY as DUCKDB_TYPE_INVALID (no enum value); 1.5.3 added
+	 * DUCKDB_TYPE_GEOMETRY (= 40) as a first-class enum.
+	 */
+	if ((duckType == DUCKDB_TYPE_INVALID || duckType == DUCKDB_TYPE_GEOMETRY) &&
+		duckdb_pglake_is_geometry_type(logicalType))
+		duckType = DUCKDB_TYPE_BLOB;
+
 	DuckDBTypeInfo *typeMap = find_duck_type_info(duckType);
 
 	if (typeMap == NULL || typeMap->to_text == NULL)
@@ -1163,6 +1163,24 @@ duckdb_query_result_send_column_metadata(DuckDBQueryResult * duckdb_query_result
 		const char *columnName = duckdb_column_name(duckResult, columnIndex);
 		duckdb_type duckType = duckdb_column_type(duckResult, columnIndex);
 		DuckDBResultColumn *resultColumn = &resultColumns[columnIndex];
+
+		/*
+		 * GEOMETRY needs to be routed to our BLOB handler so we can emit hex
+		 * WKB. DuckDB 1.5.1 returned DUCKDB_TYPE_INVALID for GEOMETRY columns
+		 * (no enum value yet); 1.5.3 added DUCKDB_TYPE_GEOMETRY (= 40) as a
+		 * first-class enum. Handle both.
+		 */
+		if (duckType == DUCKDB_TYPE_INVALID || duckType == DUCKDB_TYPE_GEOMETRY)
+		{
+			duckdb_logical_type colLogicalType =
+				duckdb_column_logical_type(duckResult, columnIndex);
+
+			if (colLogicalType != NULL &&
+				duckdb_pglake_is_geometry_type(colLogicalType))
+				duckType = DUCKDB_TYPE_BLOB;
+
+			duckdb_destroy_logical_type(&colLogicalType);
+		}
 
 		Oid			originalTableId = 0;
 		AttrNumber	originalColumnNumber = 0;
