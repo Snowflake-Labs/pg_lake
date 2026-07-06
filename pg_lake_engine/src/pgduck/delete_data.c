@@ -132,7 +132,6 @@ DeleteFromParquetQuery(char *sourceDataFilePath, List *positionDeleteFiles,
 					 "  SELECT pos "
 					 "  FROM read_csv(%s"
 					 ", header=true, delim=',', quote='\"', escape='\"', nullstr='\\N'"
-					 ", allow_quoted_nulls=false"
 					 ", columns={'file_path':'varchar', 'pos':'bigint', 'row':'varchar'}))",
 					 readFileQuery,
 	/* position delete files adds a WHERE clause, so then we should use AND */

@@ -89,12 +89,14 @@ extern PGDLLEXPORT void AppendReadCSVClause(StringInfo buf,
 											const char *filePath,
 											int maxLineSize,
 											const char *columnsMap,
-											List *csvOptions);
+											List *csvOptions,
+											bool disallowQuotedNulls);
 extern PGDLLEXPORT void AppendReadCSVListClause(StringInfo buf,
 												List *filePaths,
 												int maxLineSize,
 												const char *columnsMap,
-												List *csvOptions);
+												List *csvOptions,
+												bool disallowQuotedNulls);
 extern PGDLLEXPORT char *PathListToString(List *paths);
 
 #endif

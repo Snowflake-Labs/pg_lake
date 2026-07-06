@@ -1729,7 +1729,7 @@ CopyOptionsToReadCSVParams(List *copyOptions)
  */
 static void
 AppendReadCSVTail(StringInfo buf, int maxLineSize, const char *columnsMap,
-				  List *csvOptions)
+				  List *csvOptions, bool disallowQuotedNulls)
 {
 	if (maxLineSize > 0)
 	{
@@ -1758,14 +1758,16 @@ AppendReadCSVTail(StringInfo buf, int maxLineSize, const char *columnsMap,
 	}
 
 	/*
-	 * The internal CSV writer force-quotes any value that matches the null
-	 * sentinel (\N), so the source-side distinction between a SQL NULL and the
-	 * literal string "\N" is carried by whether the field is quoted.  DuckDB's
-	 * read_csv() defaults allow_quoted_nulls to true, which collapses a quoted
-	 * "\N" back to NULL and erases that distinction.  Disable it so quoted
+	 * DuckDB's read_csv() defaults allow_quoted_nulls to true, which is
+	 * lenient behaviour aimed at exotic external CSVs.  For our own internal
+	 * exchange format it is wrong: the CSV writer force-quotes any value that
+	 * matches the null sentinel (\N), so the distinction between a SQL NULL
+	 * and the literal string "\N" is carried by whether the field is quoted.
+	 * Callers reading back that format pass disallowQuotedNulls so quoted
 	 * values are always read as their literal text.
 	 */
-	appendStringInfoString(buf, ", allow_quoted_nulls=false");
+	if (disallowQuotedNulls)
+		appendStringInfoString(buf, ", allow_quoted_nulls=false");
 
 	appendStringInfoString(buf, CopyOptionsToReadCSVParams(csvOptions));
 
@@ -1780,18 +1782,21 @@ AppendReadCSVTail(StringInfo buf, int maxLineSize, const char *columnsMap,
  * that was previously written with InternalCSVOptions.  This centralises
  * the max_line_size / parallel-disable / columns-map / CSV-options logic.
  *
- * filePath    - unquoted path; will be quoted internally
- * maxLineSize - observed max line size from writing; pass -1 to omit
- * columnsMap  - pre-built DuckDB {col:type,...} string; NULL → auto_detect
- * csvOptions  - COPY options list (e.g. from InternalCSVOptions)
+ * filePath            - unquoted path; will be quoted internally
+ * maxLineSize         - observed max line size from writing; pass -1 to omit
+ * columnsMap          - pre-built DuckDB {col:type,...} string; NULL → auto_detect
+ * csvOptions          - COPY options list (e.g. from InternalCSVOptions)
+ * disallowQuotedNulls - pass true when reading back the internal exchange
+ *                       format to preserve values equal to the null sentinel
  */
 void
 AppendReadCSVClause(StringInfo buf, const char *filePath,
 					int maxLineSize, const char *columnsMap,
-					List *csvOptions)
+					List *csvOptions, bool disallowQuotedNulls)
 {
 	appendStringInfo(buf, "read_csv(%s", quote_literal_cstr(filePath));
-	AppendReadCSVTail(buf, maxLineSize, columnsMap, csvOptions);
+	AppendReadCSVTail(buf, maxLineSize, columnsMap, csvOptions,
+					  disallowQuotedNulls);
 }
 
 
@@ -1806,12 +1811,13 @@ AppendReadCSVClause(StringInfo buf, const char *filePath,
 void
 AppendReadCSVListClause(StringInfo buf, List *filePaths,
 						int maxLineSize, const char *columnsMap,
-						List *csvOptions)
+						List *csvOptions, bool disallowQuotedNulls)
 {
 	Assert(filePaths != NIL);
 
 	appendStringInfo(buf, "read_csv(%s", PathListToString(filePaths));
-	AppendReadCSVTail(buf, maxLineSize, columnsMap, csvOptions);
+	AppendReadCSVTail(buf, maxLineSize, columnsMap, csvOptions,
+					  disallowQuotedNulls);
 }
 
 
