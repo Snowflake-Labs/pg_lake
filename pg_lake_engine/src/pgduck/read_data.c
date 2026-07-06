@@ -1757,6 +1757,16 @@ AppendReadCSVTail(StringInfo buf, int maxLineSize, const char *columnsMap,
 		appendStringInfoString(buf, ", auto_detect=true");
 	}
 
+	/*
+	 * The internal CSV writer force-quotes any value that matches the null
+	 * sentinel (\N), so the source-side distinction between a SQL NULL and the
+	 * literal string "\N" is carried by whether the field is quoted.  DuckDB's
+	 * read_csv() defaults allow_quoted_nulls to true, which collapses a quoted
+	 * "\N" back to NULL and erases that distinction.  Disable it so quoted
+	 * values are always read as their literal text.
+	 */
+	appendStringInfoString(buf, ", allow_quoted_nulls=false");
+
 	appendStringInfoString(buf, CopyOptionsToReadCSVParams(csvOptions));
 
 	appendStringInfoChar(buf, ')');
