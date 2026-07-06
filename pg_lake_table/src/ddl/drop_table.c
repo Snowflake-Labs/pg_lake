@@ -87,6 +87,7 @@ static void PgLakeTableObjectsInDropStmt(DropStmt *dropStmt,
 static void DropTableAccessHook(ObjectAccessType access, Oid classId, Oid objectId,
 								int subId, void *arg);
 static bool MarkAllReferencedFilesForDeletion(Oid relationId);
+static void MarkWritableTableLocationPrefixForDeletion(Oid relationId);
 
 
 static object_access_hook_type PreviousObjectAccessHook = NULL;
@@ -499,7 +500,7 @@ TryMarkAllReferencedFilesForDeletion(Oid relationId)
  * (and the deferred, GUC-driven) drop paths always resolve the metadata to
  * exact files, so they never queue a whole prefix.
  */
-void
+static void
 MarkWritableTableLocationPrefixForDeletion(Oid relationId)
 {
 	char	   *queryArguments = "";

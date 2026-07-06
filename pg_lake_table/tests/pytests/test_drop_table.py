@@ -1078,6 +1078,101 @@ def test_custom_location_is_also_deferred(
     pg_conn.commit()
 
 
+def test_flush_deletion_queue_drains_dropped_table_files(
+    s3, pg_conn, superuser_conn, extension, with_default_location
+):
+    """flush_deletion_queue drains a dropped Iceberg table's files end to end.
+
+    A deferred DROP queues only the table's metadata.json (a resolve_metadata
+    row); the object-store files still exist right after the drop. Draining the
+    queue with lake_engine.flush_deletion_queue then resolves that metadata into
+    the exact referenced files, deletes them, and removes the metadata.json row
+    itself, so both the queue and the underlying S3 prefix end up empty. This is
+    the same drain VACUUM performs, exercised directly through the immediate
+    flush primitive.
+
+    flush_deletion_queue runs a single RemoveDeletionQueueRecords pass, and a
+    resolve_metadata row needs two: the first expands it into per-file rows, the
+    second deletes them. So we loop until the queue is empty, exactly like the
+    VACUUM drain loop does."""
+    run_command("CREATE SCHEMA IF NOT EXISTS defer_drop_flush", pg_conn)
+    run_command(
+        """
+        CREATE TABLE defer_drop_flush.t USING iceberg
+        WITH (autovacuum_enabled='false')
+        AS SELECT i AS id, 'pg_lake' AS name FROM generate_series(1, 10) i
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # a second commit -> a second data file / snapshot, so resolution has real
+    # per-file work to do
+    run_command(
+        "INSERT INTO defer_drop_flush.t SELECT i, 'pg_lake' FROM generate_series(11, 20) i",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    location = _writable_location(pg_conn, "defer_drop_flush.t")
+
+    # the files exist in object storage before the drop
+    files_before = run_query(
+        f"SELECT count(*) FROM lake_file.list('{location}/**')", pg_conn
+    )[0][0]
+    assert files_before > 0
+
+    _drop_deferred(pg_conn, "DROP TABLE defer_drop_flush.t")
+
+    # deferred drop queued exactly one metadata.json, nothing deleted yet: the
+    # files must all still be present in object storage
+    assert _count_resolve_records(superuser_conn, location) == 1
+    assert _count_data_file_records(superuser_conn, location) == 0
+    assert _count_prefix_records(superuser_conn, location) == 0
+    assert (
+        run_query(
+            f"SELECT count(*) FROM lake_file.list('{location}/**')", superuser_conn
+        )[0][0]
+        == files_before
+    )
+    superuser_conn.commit()
+
+    # drain the queue with flush_deletion_queue (retention 0 so nothing is held
+    # back). flush_deletion_queue(0) flushes every table's rows; we loop because
+    # a resolve_metadata row takes one pass to expand and a second to delete the
+    # files it expands into.
+    for _ in range(5):
+        run_command_outside_tx(
+            [
+                "SET pg_lake_engine.orphaned_file_retention_period = 0",
+                "SELECT lake_engine.flush_deletion_queue(0)",
+            ]
+        )
+        remaining = run_query(
+            "SELECT count(*) FROM lake_engine.deletion_queue", superuser_conn
+        )[0][0]
+        superuser_conn.commit()
+        if remaining == 0:
+            break
+
+    # flush_deletion_queue removed every queue row for the dropped table ...
+    assert _count_resolve_records(superuser_conn, location) == 0
+    assert _count_data_file_records(superuser_conn, location) == 0
+    assert _count_prefix_records(superuser_conn, location) == 0
+
+    # ... and the underlying object-store files are gone from S3
+    assert (
+        run_query(
+            f"SELECT count(*) FROM lake_file.list('{location}/**')", superuser_conn
+        )[0][0]
+        == 0
+    )
+    superuser_conn.commit()
+
+    run_command("DROP SCHEMA IF EXISTS defer_drop_flush CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 @pytest.fixture(scope="module")
 def create_test_helper_functions(superuser_conn, s3, extension):
     # lake_iceberg.find_all_referenced_files is installed by pg_lake_iceberg,

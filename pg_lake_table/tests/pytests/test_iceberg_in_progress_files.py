@@ -678,7 +678,13 @@ def create_iceberg_table(pg_conn, s3, with_default_location, generate_table_name
 
 @pytest.fixture(scope="module")
 def create_helper_functions(superuser_conn):
-    # This suite does not call lake_iceberg.find_all_referenced_files (which is
-    # installed by pg_lake_iceberg and REVOKEd from public), so there is
-    # nothing to create, grant, or drop here.
+    # These tests reach find_all_referenced_files through the shared
+    # iceberg_get_referenced_files helper on a non-superuser connection.
+    # find_all_referenced_files is owned by pg_lake_iceberg and REVOKEd from
+    # public by the migration; just grant EXECUTE back for tests.
+    run_command(
+        "GRANT EXECUTE ON FUNCTION lake_iceberg.find_all_referenced_files(text) TO public;",
+        superuser_conn,
+    )
+    superuser_conn.commit()
     yield

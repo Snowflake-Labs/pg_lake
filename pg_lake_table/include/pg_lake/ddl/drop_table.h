@@ -27,4 +27,3 @@ extern PGDLLEXPORT bool CheckIfTypeIsUsedInTables(Oid typeId, const char *tableS
 extern bool CheckIfTypeIsUsedInInternalIcebergTable(Oid typeId);
 extern bool ProcessDropPgLakeTable(ProcessUtilityParams * params, void *arg);
 extern void TryMarkAllReferencedFilesForDeletion(Oid relationId);
-extern void MarkWritableTableLocationPrefixForDeletion(Oid relationId);
