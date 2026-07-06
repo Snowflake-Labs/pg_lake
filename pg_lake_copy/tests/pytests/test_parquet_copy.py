@@ -114,6 +114,53 @@ def test_null_nan(pg_conn, duckdb_conn, tmp_path):
     pg_conn.rollback()
 
 
+@pytest.mark.parametrize("copy_format", ["parquet", "json"])
+def test_literal_backslash_n(pg_conn, duckdb_conn, tmp_path, copy_format):
+    out_path = tmp_path / f"test.{copy_format}"
+
+    # The internal CSV exchange uses \N as the null sentinel, so a text value
+    # that happens to equal the 2-char string "\N" must not be collapsed to
+    # SQL NULL on the way back out.  The bug lived in ConvertCSVFileTo(), the
+    # shared tail every pg_lake COPY destination flows through, upstream of the
+    # destination serialization, so exercise more than one format.  (Only the
+    # formats pg_lake handles for a local file are covered: local CSV COPY is
+    # left to PostgreSQL and never reaches ConvertCSVFileTo.)  The bytea sibling
+    # carries the same bytes and the 4-char control "\N\N" round-trips
+    # regardless; the plain "\N" is the value that regressed.
+    run_command(
+        f"""
+        CREATE TABLE test_backslash_n (id int, t text, b bytea);
+        INSERT INTO test_backslash_n VALUES
+            (1, NULL,                               NULL),
+            (2, chr(92)||chr(78),                   '\\x5C4E'::bytea),
+            (3, '',                                 ''::bytea),
+            (4, chr(92)||chr(78)||chr(92)||chr(78), '\\x5C4E5C4E'::bytea);
+        COPY test_backslash_n TO '{out_path}' WITH (format '{copy_format}');
+
+        CREATE TABLE test_backslash_n_after (like test_backslash_n);
+        COPY test_backslash_n_after FROM '{out_path}' WITH (format '{copy_format}');
+    """,
+        pg_conn,
+    )
+
+    result = run_query(
+        "SELECT id, t, b FROM test_backslash_n_after ORDER BY id", pg_conn
+    )
+
+    # id 1: genuine SQL NULL stays NULL
+    assert result[0]["t"] is None
+    assert result[0]["b"] is None
+    # id 2: literal "\N" survives as a 2-char string, not NULL
+    assert result[1]["t"] == "\\N"
+    assert result[1]["b"].tobytes() == b"\x5c\x4e"
+    # id 3: empty string stays a non-null empty string
+    assert result[2]["t"] == ""
+    # id 4: control value round-trips
+    assert result[3]["t"] == "\\N\\N"
+
+    pg_conn.rollback()
+
+
 def test_too_many_columns(pg_conn, duckdb_conn, tmp_path):
     # Generate a file with 3 columns
     parquet_path = tmp_path / "test.parquet"

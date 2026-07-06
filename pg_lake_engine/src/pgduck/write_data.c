@@ -88,7 +88,7 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 	bool		includeHeader = true;
 
 	AppendReadCSVClause(&command, csvFilePath, maxLineSize, columnsMap,
-						InternalCSVOptions(includeHeader));
+						InternalCSVReadOptions(includeHeader));
 
 	bool		queryHasRowIds = false;
 

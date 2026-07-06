@@ -1713,6 +1713,24 @@ CopyOptionsToReadCSVParams(List *copyOptions)
 			appendStringInfo(&command, ", null_padding=%s",
 							 null_padding ? "true" : "false");
 		}
+		else if (strcmp(option->defname, "allow_quoted_nulls") == 0)
+		{
+			/*
+			 * Synthetic option (not a real COPY option) carried by the
+			 * internal-read options.  DuckDB's read_csv() defaults
+			 * allow_quoted_nulls to true, which is lenient behaviour aimed at
+			 * exotic external CSVs.  For our own exchange format it is wrong:
+			 * the CSV writer force-quotes any value that matches the null
+			 * sentinel (\N), so the distinction between a SQL NULL and the
+			 * literal string "\N" is carried by whether the field is quoted.
+			 * Setting it to false makes quoted values read as their literal
+			 * text.
+			 */
+			bool		allow_quoted_nulls = defGetBoolean(option);
+
+			appendStringInfo(&command, ", allow_quoted_nulls=%s",
+							 allow_quoted_nulls ? "true" : "false");
+		}
 	}
 
 	return command.data;
@@ -1773,7 +1791,7 @@ AppendReadCSVTail(StringInfo buf, int maxLineSize, const char *columnsMap,
  * filePath    - unquoted path; will be quoted internally
  * maxLineSize - observed max line size from writing; pass -1 to omit
  * columnsMap  - pre-built DuckDB {col:type,...} string; NULL → auto_detect
- * csvOptions  - COPY options list (e.g. from InternalCSVOptions)
+ * csvOptions  - COPY options list (e.g. from InternalCSVReadOptions)
  */
 void
 AppendReadCSVClause(StringInfo buf, const char *filePath,

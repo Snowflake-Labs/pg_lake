@@ -129,3 +129,44 @@ def test_writable_iceberg_table_insert(
         pg_conn,
     )
     pg_conn.commit()
+
+
+def test_literal_backslash_n_insert(pg_conn, s3, extension, with_default_location):
+    # Inserting into a writable pg_lake table flows through the same internal
+    # CSV exchange as COPY: PrepareCSVInsertion() writes the rows to a temporary
+    # CSV and reads them back through ConvertCSVFileTo() to build the Iceberg
+    # data file.  The exchange uses \N as its null sentinel, so a text value
+    # that happens to equal the 2-char string "\N" must survive the round-trip
+    # instead of collapsing to SQL NULL.  This is the primary production user
+    # of the fixed path, so lock it down alongside the COPY coverage.
+    run_command("CREATE SCHEMA backslash_n_iceberg", pg_conn)
+    run_command(
+        """
+        CREATE TABLE backslash_n_iceberg.t (id int, t text, b bytea) USING iceberg;
+        INSERT INTO backslash_n_iceberg.t VALUES
+            (1, NULL,                               NULL),
+            (2, chr(92)||chr(78),                   '\\x5C4E'::bytea),
+            (3, '',                                 ''::bytea),
+            (4, chr(92)||chr(78)||chr(92)||chr(78), '\\x5C4E5C4E'::bytea);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        "SELECT id, t, b FROM backslash_n_iceberg.t ORDER BY id", pg_conn
+    )
+
+    # id 1: genuine SQL NULL stays NULL
+    assert result[0]["t"] is None
+    assert result[0]["b"] is None
+    # id 2: literal "\N" survives as a 2-char string, not NULL
+    assert result[1]["t"] == "\\N"
+    assert result[1]["b"].tobytes() == b"\x5c\x4e"
+    # id 3: empty string stays a non-null empty string
+    assert result[2]["t"] == ""
+    # id 4: control value round-trips
+    assert result[3]["t"] == "\\N\\N"
+
+    run_command("DROP SCHEMA backslash_n_iceberg CASCADE", pg_conn)
+    pg_conn.commit()
