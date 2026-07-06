@@ -364,3 +364,123 @@ def test_nested_array_of_composite_clamps_both_paths(
     run_command("RESET search_path;", pg_conn)
     run_command("DROP SCHEMA test_size_nested CASCADE;", pg_conn)
     pg_conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# jsonb leaf inside a container: a structured-string leaf can't be truncated,
+# so an oversize leaf is raised (error) or NULLed (clamp) in place, while the
+# container and its other leaves survive.  Mirrors the top-level jsonb rule.
+#
+# Note: clamp mode is covered for a jsonb *field of a composite* but not for a
+# jsonb *array element*.  NULLing an oversize element would leave a NULL inside
+# a jsonb[], and pg_lake cannot write a NULL element in a jsonb[] at all (a
+# pre-existing limitation, independent of size clamping -- the CSV staging path
+# fails to convert it back to JSON[]).  So for jsonb arrays only the error path,
+# which raises before producing that value, is exercised here.
+# ---------------------------------------------------------------------------
+
+
+def test_jsonb_array_element_over_cap_errors_per_tuple(
+    pg_conn, extension, s3, with_default_location
+):
+    """An oversize jsonb[] element raises under 'error', naming the column."""
+    run_command(
+        "CREATE SCHEMA test_size_jsonb_arr_err;"
+        "SET search_path TO test_size_jsonb_arr_err;"
+        "CREATE TABLE t (id int, v jsonb[]) USING iceberg "
+        "WITH (compatibility_mode = 'snowflake', out_of_range_values = 'error');",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    big = json.dumps("x" * _just_over(STRING_CAP))
+    with pytest.raises(Exception) as exc:
+        with pg_conn.cursor() as cur:
+            cur.execute("INSERT INTO t VALUES (1, ARRAY[%s]::jsonb[]);", (big,))
+    pg_conn.rollback()
+    msg = str(exc.value).lower()
+    assert '"v"' in msg
+    assert "snowflake string column limit" in msg
+
+    run_command("RESET search_path;", pg_conn)
+    run_command("DROP SCHEMA test_size_jsonb_arr_err CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_jsonb_composite_field_over_cap_nulls_per_tuple(
+    pg_conn, extension, s3, with_default_location
+):
+    """An oversize jsonb field inside a composite is NULLed under 'clamp'; the
+    struct is rebuilt and the sibling field survives."""
+    run_command(
+        "CREATE SCHEMA test_size_jsonb_comp_pt;"
+        "SET search_path TO test_size_jsonb_comp_pt;"
+        "CREATE TYPE jrec AS (a int, b jsonb);"
+        "CREATE TABLE t (id int, r jrec) USING iceberg "
+        "WITH (compatibility_mode = 'snowflake', out_of_range_values = 'clamp');",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    big = json.dumps("x" * _just_over(STRING_CAP))
+    with pg_conn.cursor() as cur:
+        cur.execute("INSERT INTO t VALUES (1, ROW(7, %s)::jrec);", (big,))
+    pg_conn.commit()
+
+    result = run_query("SELECT id, (r).a, (r).b IS NULL FROM t;", pg_conn)
+    assert [[r[0], r[1], r[2]] for r in result] == [[1, 7, True]]
+
+    run_command("RESET search_path;", pg_conn)
+    run_command("DROP SCHEMA test_size_jsonb_comp_pt CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Pass-through fidelity: under compatibility_mode='snowflake' every container
+# column with a clampable leaf is rebuilt on write (per-tuple deform/reform,
+# pushdown list_transform/struct_pack) even when nothing is oversize.  A
+# round-trip of only-small values must come back byte-identical -- this guards
+# the rebuild against dropping/reordering elements or fields.
+# ---------------------------------------------------------------------------
+
+
+def test_small_container_roundtrips_unchanged_under_snowflake(
+    pg_conn, extension, s3, with_default_location
+):
+    """Small-valued array and composite columns survive the snowflake-mode
+    rebuild unchanged on both the per-tuple and pushdown write paths."""
+    run_command(
+        "CREATE SCHEMA test_size_passthrough;"
+        "SET search_path TO test_size_passthrough;"
+        "CREATE TYPE rec AS (a int, b text);"
+        "CREATE TABLE src (id int, v text[], r rec) USING iceberg;"
+        "CREATE TABLE dst (id int, v text[], r rec) USING iceberg "
+        "WITH (compatibility_mode = 'snowflake', out_of_range_values = 'clamp');",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # id=1 via the per-tuple path (INSERT VALUES straight into dst).
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO dst VALUES (1, ARRAY['a', 'bb', 'ccc'], ROW(7, 'hello')::rec);"
+        )
+    pg_conn.commit()
+    # id=2 via the pushdown path (INSERT .. SELECT from a lake source).
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO src VALUES (2, ARRAY['d', 'ee'], ROW(9, 'world')::rec);"
+        )
+    pg_conn.commit()
+    run_command("INSERT INTO dst SELECT * FROM src;", pg_conn)
+    pg_conn.commit()
+
+    result = run_query("SELECT id, v, (r).a, (r).b FROM dst ORDER BY id;", pg_conn)
+    assert [[r[0], r[1], r[2], r[3]] for r in result] == [
+        [1, ["a", "bb", "ccc"], 7, "hello"],
+        [2, ["d", "ee"], 9, "world"],
+    ]
+
+    run_command("RESET search_path;", pg_conn)
+    run_command("DROP SCHEMA test_size_passthrough CASCADE;", pg_conn)
+    pg_conn.commit()
