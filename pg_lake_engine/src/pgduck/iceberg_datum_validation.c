@@ -788,17 +788,20 @@ IcebergErrorOrClampDatum(Datum value, Oid typeOid, int32 typmod,
  * values that exceed the limit are NULLed via *isNull, since truncation would
  * corrupt the structure.
  *
- * Fast path for text/varchar/bpchar/json: PG_DETOAST_DATUM_PACKED is a
- * no-op for non-toasted (the common case); VARSIZE_ANY_EXHDR + branch
- * returns the value unchanged, no copy.
+ * Size is measured with toast_raw_datum_size, which reads the logical
+ * (uncompressed, de-inlined) length straight from the varlena / TOAST
+ * pointer header without fetching or decompressing out-of-line data.  A
+ * value is detoasted only when its bytes are actually needed -- i.e. when
+ * clamp mode has to clip an oversize text/bytea value.  Under 'error' mode,
+ * and for any value that already fits, nothing is detoasted or copied.
  *
  * Fast path for jsonb: jsonb_out's worst-case expansion is roughly 6x (a
  * single control byte renders as the 6-character \uXXXX escape), so any
- * jsonb whose binary varlena size is at most maxBytes/6 cannot exceed
- * maxBytes when serialized.  This catches the typical small-jsonb case and
- * skips the jsonb_out walk.  Anything larger pays the full serialization
- * because the binary size does not upper-bound the text form (numerics
- * encode compactly in binary but expand when rendered).
+ * jsonb whose binary size is at most maxBytes/6 cannot exceed maxBytes when
+ * serialized.  This catches the typical small-jsonb case and skips the
+ * jsonb_out walk.  Anything larger pays the full serialization because the
+ * binary size does not upper-bound the text form (numerics encode compactly
+ * in binary but expand when rendered).
  */
 static Datum
 IcebergSizeClampStringScalar(Datum value, Oid typeOid,
@@ -810,9 +813,9 @@ IcebergSizeClampStringScalar(Datum value, Oid typeOid,
 
 	if (typeOid == JSONBOID)
 	{
-		struct varlena *jv = (struct varlena *) PG_DETOAST_DATUM_PACKED(value);
+		int64		binSize = (int64) toast_raw_datum_size(value) - VARHDRSZ;
 
-		if ((int64) VARSIZE_ANY_EXHDR(jv) * 6 <= (int64) maxBytes)
+		if (binSize * 6 <= (int64) maxBytes)
 			return value;
 
 		char	   *cstr = DatumGetCString(DirectFunctionCall1(jsonb_out, value));
@@ -831,8 +834,7 @@ IcebergSizeClampStringScalar(Datum value, Oid typeOid,
 		return (Datum) 0;
 	}
 
-	struct varlena *v = (struct varlena *) PG_DETOAST_DATUM_PACKED(value);
-	int32		srcLen = VARSIZE_ANY_EXHDR(v);
+	int32		srcLen = (int32) ((int64) toast_raw_datum_size(value) - VARHDRSZ);
 
 	if (srcLen <= maxBytes)
 		return value;
@@ -859,13 +861,18 @@ IcebergSizeClampStringScalar(Datum value, Oid typeOid,
 						  "Snowflake STRING column limit");
 	}
 
+	/* Clamp mode: fetch the bytes to clip at a UTF-8 character boundary. */
+	struct varlena *v = (struct varlena *) PG_DETOAST_DATUM_PACKED(value);
 	const char *src = VARDATA_ANY(v);
-	int32		trimmedLen = pg_mbcliplen(src, srcLen, maxBytes);
+	int32		trimmedLen = pg_mbcliplen(src, VARSIZE_ANY_EXHDR(v), maxBytes);
 
 	struct varlena *result = (struct varlena *) palloc(VARHDRSZ + trimmedLen);
 
 	SET_VARSIZE(result, VARHDRSZ + trimmedLen);
 	memcpy(VARDATA(result), src, trimmedLen);
+
+	if (v != (struct varlena *) DatumGetPointer(value))
+		pfree(v);
 
 	return PointerGetDatum(result);
 }
@@ -883,8 +890,7 @@ IcebergSizeClampBinaryScalar(Datum value,
 {
 	const int32 maxBytes = ICEBERG_SNOWFLAKE_MAX_BINARY_BYTES;
 
-	struct varlena *v = (struct varlena *) PG_DETOAST_DATUM_PACKED(value);
-	int32		srcLen = VARSIZE_ANY_EXHDR(v);
+	int32		srcLen = (int32) ((int64) toast_raw_datum_size(value) - VARHDRSZ);
 
 	if (srcLen <= maxBytes)
 		return value;
@@ -893,10 +899,15 @@ IcebergSizeClampBinaryScalar(Datum value,
 		RaiseSizeOverflow(columnName, "bytea", srcLen, maxBytes,
 						  "Snowflake BINARY column limit");
 
+	/* Clamp mode: fetch the bytes to copy the leading maxBytes. */
+	struct varlena *v = (struct varlena *) PG_DETOAST_DATUM_PACKED(value);
 	struct varlena *result = (struct varlena *) palloc(VARHDRSZ + maxBytes);
 
 	SET_VARSIZE(result, VARHDRSZ + maxBytes);
 	memcpy(VARDATA(result), VARDATA_ANY(v), maxBytes);
+
+	if (v != (struct varlena *) DatumGetPointer(value))
+		pfree(v);
 
 	return PointerGetDatum(result);
 }
