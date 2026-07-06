@@ -114,14 +114,19 @@ def test_null_nan(pg_conn, duckdb_conn, tmp_path):
     pg_conn.rollback()
 
 
-def test_literal_backslash_n(pg_conn, duckdb_conn, tmp_path):
-    parquet_path = tmp_path / "test.parquet"
+@pytest.mark.parametrize("copy_format", ["parquet", "json"])
+def test_literal_backslash_n(pg_conn, duckdb_conn, tmp_path, copy_format):
+    out_path = tmp_path / f"test.{copy_format}"
 
     # The internal CSV exchange uses \N as the null sentinel, so a text value
     # that happens to equal the 2-char string "\N" must not be collapsed to
-    # SQL NULL on the way back out.  The bytea sibling carrying the same bytes
-    # and the 4-char control "\N\N" round-trip regardless; the plain "\N" is
-    # the value that regressed.
+    # SQL NULL on the way back out.  The bug lived in ConvertCSVFileTo(), the
+    # shared tail every pg_lake COPY destination flows through, upstream of the
+    # destination serialization, so exercise more than one format.  (Only the
+    # formats pg_lake handles for a local file are covered: local CSV COPY is
+    # left to PostgreSQL and never reaches ConvertCSVFileTo.)  The bytea sibling
+    # carries the same bytes and the 4-char control "\N\N" round-trips
+    # regardless; the plain "\N" is the value that regressed.
     run_command(
         f"""
         CREATE TABLE test_backslash_n (id int, t text, b bytea);
@@ -130,10 +135,10 @@ def test_literal_backslash_n(pg_conn, duckdb_conn, tmp_path):
             (2, chr(92)||chr(78),                   '\\x5C4E'::bytea),
             (3, '',                                 ''::bytea),
             (4, chr(92)||chr(78)||chr(92)||chr(78), '\\x5C4E5C4E'::bytea);
-        COPY test_backslash_n TO '{parquet_path}' WITH (format 'parquet');
+        COPY test_backslash_n TO '{out_path}' WITH (format '{copy_format}');
 
         CREATE TABLE test_backslash_n_after (like test_backslash_n);
-        COPY test_backslash_n_after FROM '{parquet_path}' WITH (format 'parquet');
+        COPY test_backslash_n_after FROM '{out_path}' WITH (format '{copy_format}');
     """,
         pg_conn,
     )
