@@ -109,8 +109,9 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose)
 	List	   *failedFilePathList = NIL;
 
 	/*
-	 * Set when we expanded a resolve_metadata row into new per-file rows: that
-	 * pass may delete nothing itself but produced work, so keep draining.
+	 * Set when we expanded a resolve_metadata row into new per-file rows:
+	 * that pass may delete nothing itself but produced work, so keep
+	 * draining.
 	 */
 	bool		producedNewDeletionRows = false;
 

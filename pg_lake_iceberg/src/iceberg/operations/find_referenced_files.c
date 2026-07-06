@@ -376,10 +376,10 @@ List *
 IcebergFindAllReferencedFiles(char *metadataPath)
 {
 	/*
-	 * Test hook: the eager, drop-time enumeration. A distinct name lets a test
-	 * force it to fail (so the drop falls back to queuing the storage prefix,
-	 * see test_injection_point_on_enumeration_path) independently of the
-	 * deferred resolution path.
+	 * Test hook: the eager, drop-time enumeration. A distinct name lets a
+	 * test force it to fail (so the drop falls back to queuing the storage
+	 * prefix, see test_injection_point_on_enumeration_path) independently of
+	 * the deferred resolution path.
 	 */
 	INJECTION_POINT_COMPAT("iceberg-find-referenced-files");
 
