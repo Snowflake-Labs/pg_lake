@@ -565,11 +565,9 @@ RESOLVE_REFERENCED_FILES_INJECTION_POINT = "iceberg-find-referenced-files-udf"
 
 def _writable_location(conn, qualified_table):
     """
-    Return the exact location string GetWritableTableLocation() computes for a
-    writable pg_lake foreign table: the 'location' foreign-table option with
-    query arguments stripped and a single trailing slash removed. This is the
-    prefix the deferred-drop path enqueues into the deletion queue, so tests
-    assert against the identical string.
+    Return the location GetWritableTableLocation() computes for a writable
+    pg_lake foreign table: the 'location' option with query args and a single
+    trailing slash stripped. Tests assert against this identical string.
     """
     rows = run_query(
         f"""
@@ -699,15 +697,10 @@ def test_deferred_drop_skips_enumeration(
     extension,
     with_default_location,
 ):
-    """With deferred cleanup enabled for a default-location table, DROP must
-    skip the object-store file enumeration entirely and instead queue the
-    table's metadata.json as a single resolve_metadata row (which VACUUM later
-    resolves into per-file deletions and drains).
-
-    The signal is that the drop leaves exactly one resolve_metadata row and no
-    data-file rows: a normal (non-deferred) drop would enumerate and enqueue
-    per-file rows up front instead (see test_normal_drop_enumerates_control).
-    No storage prefix is ever queued -- deletion stays file-accurate."""
+    """With deferral enabled, DROP skips the object-store enumeration and
+    queues the table's metadata.json as a single resolve_metadata row (no
+    data-file rows, no prefix). VACUUM later resolves and drains it. Contrast
+    with test_normal_drop_enumerates_control."""
     run_command("CREATE SCHEMA IF NOT EXISTS defer_drop_skip", pg_conn)
     run_command(
         """
@@ -755,10 +748,9 @@ def test_deferred_drop_skips_enumeration(
     assert _count_data_file_records(superuser_conn, location) == 0
     assert _count_prefix_records(superuser_conn, location) == 0
 
-    # that single queued row is the table's metadata.json, present exactly
-    # once. find_all_referenced_files returns the metadata.json itself, so
-    # resolution must not duplicate it: the INSERT ... ON CONFLICT DO NOTHING
-    # plus in-place UPDATE in ExpandMetadataResolveRecord keeps it one row.
+    # the single queued row is the metadata.json, present exactly once
+    # (find_all_referenced_files returns it too, so resolution must not
+    # duplicate it -- see ExpandMetadataResolveRecord).
     metadata_rows = run_query(
         f"SELECT path FROM lake_engine.deletion_queue "
         f"WHERE resolve_metadata AND path LIKE '{location}%'",
@@ -886,15 +878,12 @@ def test_deferred_drop_resolution_failure_retries(
     with_default_location,
     create_injection_extension,
 ):
-    """If VACUUM cannot resolve a deferred-drop metadata.json (e.g. the object
-    store is unreachable), the resolve_metadata row must survive for a later
-    retry -- it must not be lost, nor expanded into partial per-file rows.
-
-    We force the failure with the injection point on the SQL
-    find_all_referenced_files UDF (the SPI entrypoint the deferred resolution
-    calls), assert the row survives with a bumped retry_count and the files are
-    untouched, then detach and prove the next VACUUM resolves and fully drains.
-    This exercises the ExpandMetadataResolveRecord subtransaction rollback."""
+    """If VACUUM cannot resolve a deferred metadata.json (object store
+    unreachable), the resolve_metadata row must survive for retry -- not lost,
+    not expanded into partial rows. We force the failure via the injection
+    point on the find_all_referenced_files UDF, assert the row survives with a
+    bumped retry_count and untouched files, then detach and prove the next
+    VACUUM drains. Exercises the ExpandMetadataResolveRecord rollback."""
     # injection points only supported with 17+
     if get_pg_version_num(pg_conn) < 170000:
         return
@@ -1087,20 +1076,13 @@ def test_custom_location_is_also_deferred(
 def test_flush_deletion_queue_drains_dropped_table_files(
     s3, pg_conn, superuser_conn, extension, with_default_location
 ):
-    """flush_deletion_queue drains a dropped Iceberg table's files end to end.
+    """flush_deletion_queue drains a dropped table's files end to end. A
+    deferred DROP queues only the metadata.json; flushing then resolves it into
+    the referenced files, deletes them and the metadata.json row, leaving both
+    queue and S3 prefix empty (the same drain VACUUM performs).
 
-    A deferred DROP queues only the table's metadata.json (a resolve_metadata
-    row); the object-store files still exist right after the drop. Draining the
-    queue with lake_engine.flush_deletion_queue then resolves that metadata into
-    the exact referenced files, deletes them, and removes the metadata.json row
-    itself, so both the queue and the underlying S3 prefix end up empty. This is
-    the same drain VACUUM performs, exercised directly through the immediate
-    flush primitive.
-
-    flush_deletion_queue runs a single RemoveDeletionQueueRecords pass, and a
-    resolve_metadata row needs two: the first expands it into per-file rows, the
-    second deletes them. So we loop until the queue is empty, exactly like the
-    VACUUM drain loop does."""
+    Each flush runs one RemoveDeletionQueueRecords pass; a resolve_metadata row
+    needs two (expand, then delete), so we loop until the queue is empty."""
     run_command("CREATE SCHEMA IF NOT EXISTS defer_drop_flush", pg_conn)
     run_command(
         """

@@ -98,20 +98,16 @@ GRANT USAGE ON FOREIGN SERVER pg_lake_postgres_catalog TO lake_write;
 GRANT USAGE ON FOREIGN SERVER pg_lake_object_store_catalog TO lake_write;
 GRANT USAGE ON FOREIGN SERVER pg_lake_rest_catalog TO lake_write;
 
--- lake_iceberg.find_all_referenced_files(metadata_path) returns every file
--- (data/delete files, manifests, manifest lists and the metadata.json itself)
--- referenced by an Iceberg metadata.json. VACUUM calls this by name via SPI to
--- resolve a deferred-drop deletion_queue row (resolve_metadata) into the exact
--- set of files to delete, so the pg_lake_engine layer needs no link-time
--- dependency on the iceberg layer that implements the walk.
+-- lake_iceberg.find_all_referenced_files(metadata_path) returns every file an
+-- Iceberg metadata.json references. VACUUM calls it by name over SPI to
+-- resolve a deferred-drop (resolve_metadata) queue row, so pg_lake_engine
+-- needs no link-time dependency on the iceberg layer.
 CREATE FUNCTION lake_iceberg.find_all_referenced_files(metadata_path text, OUT path text)
 	RETURNS SETOF text
 	LANGUAGE C STRICT
 	AS 'MODULE_PATHNAME', 'find_all_referenced_files';
 
--- The function walks an arbitrary object-store path with the server's
--- credentials, so it must not be world-callable (same reasoning as
--- lake_iceberg.data_file_stats above). The deferred-drop VACUUM path invokes
--- it via SPI as the extension owner, so revoking from PUBLIC does not affect
--- internal cleanup.
+-- It walks an arbitrary object-store path with the server's credentials, so it
+-- must not be world-callable (like lake_iceberg.data_file_stats). The VACUUM
+-- path calls it as the extension owner, so this does not affect cleanup.
 REVOKE ALL ON FUNCTION lake_iceberg.find_all_referenced_files(text) FROM public;

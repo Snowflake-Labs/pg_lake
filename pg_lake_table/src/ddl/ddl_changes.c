@@ -166,22 +166,14 @@ ApplyDDLCatalogChanges(Oid relationId, List *ddlOperations,
 					IsIcebergTableCreatedInCurrentTransaction(relationId);
 
 				/*
-				 * When the caller opted into deferred cleanup (via the
-				 * pg_lake_table.defer_drop_file_cleanup GUC), we don't walk
-				 * object storage now. Instead we queue the table's
-				 * metadata.json as a single "resolve_metadata" row; VACUUM
-				 * later resolves it into the exact set of referenced files
-				 * and deletes them with the normal retention. This moves the
-				 * expensive enumeration out of the DROP path while keeping
-				 * the file-accurate deletion semantics (we never blindly
-				 * remove a whole storage prefix).
-				 *
-				 * This is safe regardless of custom vs. default location:
-				 * resolution deletes exactly the files the metadata.json
-				 * references, never a whole prefix, so a shared custom
-				 * location is never over-deleted. A table created in the
-				 * current transaction has no persisted metadata to resolve,
-				 * so it takes the normal (in-progress cleanup) path.
+				 * When the caller enabled deferred cleanup (the
+				 * pg_lake_table.defer_drop_file_cleanup GUC), don't walk
+				 * object storage now: queue the table's metadata.json as a
+				 * single resolve_metadata row and let VACUUM resolve it into
+				 * the exact referenced files later. This stays file-accurate
+				 * (never a whole prefix), so it is safe for custom locations
+				 * too. A table created in this transaction has no persisted
+				 * metadata to resolve, so it takes the normal path.
 				 */
 				bool		deferMetadataResolution =
 					DeferDropFileCleanup &&

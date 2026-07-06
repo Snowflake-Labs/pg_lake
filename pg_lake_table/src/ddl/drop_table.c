@@ -64,14 +64,11 @@
 bool		SkipDropAccessHook = false;
 
 /*
- * controlled via the pg_lake_table.defer_drop_file_cleanup GUC.
- *
- * When set, dropping a writable, default-location Iceberg table does not walk
- * object storage to enumerate referenced files. Instead it queues the table's
- * metadata.json as a single row, and VACUUM later resolves that metadata into
- * the exact referenced files and deletes them. Callers turn this on around a
- * bulk DROP to avoid the per-file enumeration exceeding the request timeout,
- * without giving up the file-accurate deletion semantics.
+ * pg_lake_table.defer_drop_file_cleanup GUC. When set, dropping a writable
+ * Iceberg table queues its metadata.json for VACUUM to resolve and delete
+ * later instead of enumerating referenced files during the drop -- callers
+ * turn it on around a bulk DROP to avoid the per-file walk exceeding the
+ * request timeout, without losing file-accurate deletion.
  */
 bool		DeferDropFileCleanup = false;
 

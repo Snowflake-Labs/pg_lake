@@ -67,13 +67,10 @@ find_all_referenced_files(PG_FUNCTION_ARGS)
 	char	   *metadataPath = text_to_cstring(PG_GETARG_TEXT_PP(0));
 
 	/*
-	 * Test hook: this SQL entrypoint is what the deferred-drop VACUUM path
-	 * invokes over SPI to resolve a queued metadata.json into its referenced
-	 * files. Firing here lets tests force that resolution to fail and assert
-	 * the resolve_metadata queue row survives for a later retry. It has its
-	 * own name, distinct from the eager IcebergFindAllReferencedFiles path
-	 * below, so a test can arm deferred VACUUM resolution without also arming
-	 * the drop-time enumeration (and vice versa).
+	 * Test hook: the deferred-drop VACUUM path invokes this SQL entrypoint
+	 * over SPI to resolve a queued metadata.json. A distinct name lets a test
+	 * force resolution to fail (and assert the row is retried) without also
+	 * arming the eager enumeration below.
 	 */
 	INJECTION_POINT_COMPAT("iceberg-find-referenced-files-udf");
 
@@ -379,11 +376,10 @@ List *
 IcebergFindAllReferencedFiles(char *metadataPath)
 {
 	/*
-	 * Test hook: this is the eager, drop-time file enumeration. Firing here
-	 * lets tests force it to fail so the drop falls back to queuing the whole
-	 * storage prefix (see test_injection_point_on_enumeration_path). It has a
-	 * name distinct from the deferred SQL resolution path so the two can be
-	 * armed independently.
+	 * Test hook: the eager, drop-time enumeration. A distinct name lets a test
+	 * force it to fail (so the drop falls back to queuing the storage prefix,
+	 * see test_injection_point_on_enumeration_path) independently of the
+	 * deferred resolution path.
 	 */
 	INJECTION_POINT_COMPAT("iceberg-find-referenced-files");
 

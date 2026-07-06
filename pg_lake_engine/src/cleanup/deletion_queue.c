@@ -109,35 +109,25 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose)
 	List	   *failedFilePathList = NIL;
 
 	/*
-	 * Set when we turned a deferred-drop resolve_metadata row into new
-	 * per-file deletion rows. That iteration may delete nothing itself, but
-	 * it produced work for a follow-up pass, so the caller must keep
-	 * draining.
+	 * Set when we expanded a resolve_metadata row into new per-file rows: that
+	 * pass may delete nothing itself but produced work, so keep draining.
 	 */
 	bool		producedNewDeletionRows = false;
 
 	ListCell   *cleanupRecordCell = NULL;
 
 	/*
-	 * The queue holds two kinds of rows, handled differently below.
+	 * The queue holds two kinds of rows. A direct row names an object to
+	 * delete now (a file, or the whole tree under a prefix when is_prefix is
+	 * set). A deferred-drop row (resolve_metadata) instead names a dropped
+	 * table's metadata.json: we resolve it into its referenced files, enqueue
+	 * those as direct rows, and convert the metadata.json row into a direct
+	 * row -- a following drain pass then deletes them all.
 	 *
-	 * A direct row names an object to delete now: a single file, or the whole
-	 * tree under a prefix when is_prefix is set.
-	 *
-	 * A deferred-drop row (resolve_metadata) instead names a dropped table's
-	 * metadata.json. We do NOT delete it inline; we resolve it into the exact
-	 * set of referenced files, enqueue those as ordinary direct rows, and
-	 * convert the metadata.json row itself into a direct row. A following
-	 * drain pass then deletes them all through the direct-row branch.
-	 *
-	 * Persisting the resolved files (rather than resolving-and-deleting in
-	 * one shot) is deliberate: the metadata walk is the expensive step we
-	 * deferred off DROP, so we want to pay it exactly once. Deleting inline
-	 * would make a transient failure on any single file force a full re-walk
-	 * on the next VACUUM. Going through the queue instead gives every
-	 * resolved file the normal per-file retry_count budget and
-	 * PER_LOOP_FILE_CLEANUP_LIMIT batching, and lets an interrupted VACUUM
-	 * resume from committed rows.
+	 * We persist the resolved files rather than resolving-and-deleting inline
+	 * so the expensive metadata walk is paid once: each file then gets the
+	 * normal retry_count budget and batching, and an interrupted VACUUM
+	 * resumes from committed rows.
 	 */
 	foreach(cleanupRecordCell, deletionQueueRecords)
 	{
@@ -208,62 +198,27 @@ DeleteQueuedObject(char *path, bool isPrefix, bool isVerbose)
 
 
 /*
- * ExpandMetadataResolveRecord takes the metadata.json path of a dropped table
- * (queued by a deferred DROP) and turns it into concrete per-file deletion
- * rows:
+ * ExpandMetadataResolveRecord turns a deferred-drop resolve_metadata row into
+ * concrete deletion rows: it resolves the metadata.json into the files it
+ * references and enqueues them as normal, immediately-eligible rows, then
+ * converts the resolve_metadata row itself into a normal file row (the walk
+ * returns the metadata.json too). It only enqueues; a later drain pass does
+ * the deletes (see RemoveDeletionQueueRecords for why we persist rather than
+ * delete inline).
  *
- *   1. resolve the metadata.json into the list of files it references (data
- *      files, delete files, manifests, manifest lists and the metadata.json
- *      itself) and enqueue them as normal, immediately-eligible deletion rows,
- *   2. convert the resolve_metadata row itself into a normal file row so the
- *      metadata.json is deleted like any other file.
+ * Resolution calls lake_iceberg.find_all_referenced_files() by name over SPI,
+ * so this engine layer needs no link-time dependency on the iceberg layer. It
+ * runs in its own subtransaction: on failure (e.g. object store unreachable)
+ * we roll back and return false so the caller retries this row later without
+ * aborting the rest of the drain.
  *
- * It only enqueues rows; the actual deletes happen on a later drain pass. See
- * RemoveDeletionQueueRecords for why we persist the resolved files instead of
- * resolving-and-deleting them inline.
- *
- * The resolution is done by lake_iceberg.find_all_referenced_files(), which
- * lives in the (higher) iceberg layer.  We call it by name via SPI so this
- * lower engine layer needs no link-time dependency on it; a single INSERT ..
- * SELECT does both the walk and the enqueue.
- *
- * The referenced files then get deleted by the regular per-file path, which
- * already tolerates files that were removed in the meantime.  The whole
- * expansion runs in its own subtransaction: if the metadata cannot be resolved
- * (e.g. the object store is unreachable), we roll it back and return false so
- * the caller retries this row later without aborting the rest of the drain.
- *
- * Why ON CONFLICT DO NOTHING even though this runs in a subtransaction: the
- * subtransaction only makes THIS resolution atomic. The INSERT can still
- * collide with rows already committed in the queue -- guaranteed for the
- * metadata.json's own row (we are resolving it), and possible for the table's
- * previous_metadata.json entries, rotation leftovers, or a file that another
- * dropped table also referenced. A plain INSERT would raise unique_violation
- * (path is the primary key) and abort the subtransaction, so the row could
- * never resolve. DO NOTHING lets the walk enqueue only the not-yet-present
- * files and leave the rest untouched.
- *
- * Why two statements (INSERT then a targeted UPDATE) instead of one:
- *
- * DELETE-then-INSERT is wrong: find_all_referenced_files returns the
- * metadata.json itself, so deleting our resolve_metadata row first and then
- * relying on the INSERT to re-add it fails -- the INSERT's ON CONFLICT would
- * see no conflict on a fresh key, but if any concurrent/prior row for that
- * path existed the DO NOTHING would skip it, and the metadata.json could end
- * up never queued for deletion (a storage leak).
- *
- * A single data-modifying CTE that DELETEs the resolve_metadata row and
- * INSERTs the same path is undefined in Postgres: sibling sub-statements share
- * one snapshot, do not see each other's effects, and their ordering on the
- * same key is unspecified -- it does not give these semantics.
- *
- * A single INSERT ... ON CONFLICT (path) DO UPDATE upsert is too broad: the
- * DO UPDATE fires for EVERY conflicting row, so it would also flip
- * resolve_metadata=false / orphaned_at=NULL on unrelated pre-queued rows
- * (previous_metadata, rotation leftovers), making them immediately eligible
- * and defeating their retention. The INSERT ... DO NOTHING plus a WHERE
- * path = $1 UPDATE is deliberately surgical: DO NOTHING preserves the timing
- * of existing rows, and the UPDATE converts only the metadata.json row.
+ * The INSERT uses ON CONFLICT (path) DO NOTHING because the queue may already
+ * hold some of these paths (the metadata.json's own row for sure, plus any
+ * previous_metadata/rotation leftovers or files shared with another dropped
+ * table); a plain INSERT would hit the primary key and abort. A separate
+ * WHERE path = $1 UPDATE then converts only the metadata.json row -- a single
+ * DO UPDATE upsert would instead re-arm every pre-existing row and defeat its
+ * retention.
  */
 static bool
 ExpandMetadataResolveRecord(char *metadataPath)
@@ -329,21 +284,11 @@ ExpandMetadataResolveRecord(char *metadataPath)
 		RollbackAndReleaseCurrentSubTransaction();
 
 		/*
-		 * Match the drop-time enumeration (MarkAllReferencedFilesForDeletion)
-		 * and the enclosing VACUUM loop (VacuumRemoveDeletionQueueRecords):
-		 * surface the failure as a WARNING so an unresolvable metadata.json
-		 * is visible in the logs, then swallow it (resolved = false) so the
-		 * caller retries this row later and keeps draining the rest of the
-		 * queue. A cancellation keeps its ERROR level and propagates out.
-		 *
-		 * Unlike the VACUUM catch, we do NOT call
-		 * ResetTrackedIcebergMetadataOperation() / ResetRestCatalogRequests()
-		 * here: those live in the higher pg_lake_table layer and are not
-		 * linkable from this engine module (the very reason resolution goes
-		 * through find_all_referenced_files over SPI). It is also unnecessary
-		 * -- that function is a read-only object-store walk over a
-		 * metadata.json path and touches neither the tracked-metadata nor the
-		 * REST-catalog request state.
+		 * Surface the failure as a WARNING (a cancellation keeps ERROR and
+		 * propagates), then swallow it as resolved = false so the caller
+		 * retries this row later and keeps draining the rest of the queue.
+		 * The read-only metadata walk touches no tracked-metadata or
+		 * REST-catalog state, so there is nothing to reset here.
 		 */
 		if (edata->sqlerrcode != ERRCODE_QUERY_CANCELED)
 			edata->elevel = WARNING;
@@ -521,11 +466,9 @@ InsertDeletionQueueRecord(char *path, Oid relationId, TimestampTz orphanedAt)
 
 
 /*
- * InsertMetadataResolveRecord queues a table's metadata.json for deferred
- * resolution: instead of walking the object store at DROP time, we record the
- * metadata.json path as a single row. VACUUM later resolves it into the exact
- * set of referenced files (see ExpandMetadataResolveRecord) and deletes those,
- * honouring the normal orphaned_at retention.
+ * InsertMetadataResolveRecord queues a dropped table's metadata.json for
+ * deferred resolution: VACUUM later resolves it into the exact referenced
+ * files and deletes them (see ExpandMetadataResolveRecord).
  */
 void
 InsertMetadataResolveRecord(char *metadataPath, Oid relationId, TimestampTz orphanedAt)
