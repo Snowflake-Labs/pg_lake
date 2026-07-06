@@ -58,6 +58,7 @@ typedef struct DeletionQueueEntry
 static void RemoveDeletionQueuePathsFromCatalog(List *filePaths);
 static void IncrementDeletionQueueRetryCount(List *failedRemovalPaths);
 static bool ExpandMetadataResolveRecord(char *metadataPath);
+static bool DeleteQueuedObject(char *path, bool isPrefix, bool isVerbose);
 
 
 PG_FUNCTION_INFO_V1(flush_deletion_queue);
@@ -108,36 +109,48 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose)
 	List	   *failedFilePathList = NIL;
 
 	/*
-	 * Whether we made forward progress by expanding a deferred-drop
-	 * resolve_metadata row into per-file rows. Even if that iteration deletes
-	 * nothing itself, it produced new work, so the caller should keep
+	 * Set when we turned a deferred-drop resolve_metadata row into new
+	 * per-file deletion rows. That iteration may delete nothing itself, but
+	 * it produced work for a follow-up pass, so the caller must keep
 	 * draining.
 	 */
-	bool		expandedMetadata = false;
+	bool		producedNewDeletionRows = false;
 
 	ListCell   *cleanupRecordCell = NULL;
 
+	/*
+	 * The queue holds two kinds of rows, handled differently below.
+	 *
+	 * A direct row names an object to delete now: a single file, or the whole
+	 * tree under a prefix when is_prefix is set.
+	 *
+	 * A deferred-drop row (resolve_metadata) instead names a dropped table's
+	 * metadata.json. We do NOT delete it inline; we resolve it into the exact
+	 * set of referenced files, enqueue those as ordinary direct rows, and
+	 * convert the metadata.json row itself into a direct row. A following
+	 * drain pass then deletes them all through the direct-row branch.
+	 *
+	 * Persisting the resolved files (rather than resolving-and-deleting in
+	 * one shot) is deliberate: the metadata walk is the expensive step we
+	 * deferred off DROP, so we want to pay it exactly once. Deleting inline
+	 * would make a transient failure on any single file force a full re-walk
+	 * on the next VACUUM. Going through the queue instead gives every
+	 * resolved file the normal per-file retry_count budget and
+	 * PER_LOOP_FILE_CLEANUP_LIMIT batching, and lets an interrupted VACUUM
+	 * resume from committed rows.
+	 */
 	foreach(cleanupRecordCell, deletionQueueRecords)
 	{
 		DeletionQueueEntry *entry = lfirst(cleanupRecordCell);
 
 		if (entry->resolveMetadata)
 		{
-			/*
-			 * Deferred-drop row: "path" is a metadata.json, not a file to
-			 * delete directly. Resolve it now to the exact set of referenced
-			 * files and enqueue those as normal per-file rows, then let the
-			 * regular deletion machinery remove them (which is naturally
-			 * robust to files that were already deleted). This moves the
-			 * expensive object-store walk off the DROP path without changing
-			 * the file-accurate deletion semantics.
-			 */
 			ereport(isVerbose ? INFO : LOG,
 					(errmsg("resolving referenced files of dropped table metadata %s",
 							entry->path)));
 
 			if (ExpandMetadataResolveRecord(entry->path))
-				expandedMetadata = true;
+				producedNewDeletionRows = true;
 			else
 			{
 				/*
@@ -150,35 +163,10 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose)
 			continue;
 		}
 
-		ereport(isVerbose ? INFO : LOG,
-				(errmsg("deleting expired %s %s",
-						entry->isPrefix ? "prefix" : "file",
-						entry->path)));
-
-		bool		success = false;
-
-		if (entry->isPrefix)
-		{
-			/* ok, let's try to fetch and delete all of its tree */
-			success = DeleteRemotePrefix(entry->path);
-		}
-		else
-		{
-			/* remove the file */
-			success = DeleteRemoteFile(entry->path);
-		}
-
-		if (success)
-		{
-			/* remove the record */
+		if (DeleteQueuedObject(entry->path, entry->isPrefix, isVerbose))
 			deletedFilePathList = lappend(deletedFilePathList, entry->path);
-		}
 		else
-		{
-			/* add to failed list */
 			failedFilePathList = lappend(failedFilePathList, entry->path);
-		}
-
 	}
 
 	if (list_length(deletedFilePathList) > 0)
@@ -191,8 +179,31 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose)
 		IncrementDeletionQueueRetryCount(failedFilePathList);
 	}
 
-	/* keep draining if we removed a file or produced new per-file rows */
-	return list_length(deletedFilePathList) > 0 || expandedMetadata;
+	/*
+	 * Keep draining if we deleted something, or if we produced new per-file
+	 * rows that the next pass still has to delete.
+	 */
+	return list_length(deletedFilePathList) > 0 || producedNewDeletionRows;
+}
+
+
+/*
+ * DeleteQueuedObject removes the object(s) named by a direct deletion-queue
+ * row -- a single file, or the whole tree under a prefix when isPrefix is set
+ * -- and reports whether the removal succeeded.
+ */
+static bool
+DeleteQueuedObject(char *path, bool isPrefix, bool isVerbose)
+{
+	ereport(isVerbose ? INFO : LOG,
+			(errmsg("deleting expired %s %s",
+					isPrefix ? "prefix" : "file",
+					path)));
+
+	if (isPrefix)
+		return DeleteRemotePrefix(path);
+
+	return DeleteRemoteFile(path);
 }
 
 
@@ -207,18 +218,52 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose)
  *   2. convert the resolve_metadata row itself into a normal file row so the
  *      metadata.json is deleted like any other file.
  *
+ * It only enqueues rows; the actual deletes happen on a later drain pass. See
+ * RemoveDeletionQueueRecords for why we persist the resolved files instead of
+ * resolving-and-deleting them inline.
+ *
  * The resolution is done by lake_iceberg.find_all_referenced_files(), which
  * lives in the (higher) iceberg layer.  We call it by name via SPI so this
  * lower engine layer needs no link-time dependency on it; a single INSERT ..
- * SELECT does both the walk and the enqueue.  ON CONFLICT DO NOTHING keeps it
- * robust to files (including the metadata.json) already queued by metadata
- * rotation, an earlier partial expansion, or a retry.
+ * SELECT does both the walk and the enqueue.
  *
  * The referenced files then get deleted by the regular per-file path, which
  * already tolerates files that were removed in the meantime.  The whole
  * expansion runs in its own subtransaction: if the metadata cannot be resolved
  * (e.g. the object store is unreachable), we roll it back and return false so
  * the caller retries this row later without aborting the rest of the drain.
+ *
+ * Why ON CONFLICT DO NOTHING even though this runs in a subtransaction: the
+ * subtransaction only makes THIS resolution atomic. The INSERT can still
+ * collide with rows already committed in the queue -- guaranteed for the
+ * metadata.json's own row (we are resolving it), and possible for the table's
+ * previous_metadata.json entries, rotation leftovers, or a file that another
+ * dropped table also referenced. A plain INSERT would raise unique_violation
+ * (path is the primary key) and abort the subtransaction, so the row could
+ * never resolve. DO NOTHING lets the walk enqueue only the not-yet-present
+ * files and leave the rest untouched.
+ *
+ * Why two statements (INSERT then a targeted UPDATE) instead of one:
+ *
+ * DELETE-then-INSERT is wrong: find_all_referenced_files returns the
+ * metadata.json itself, so deleting our resolve_metadata row first and then
+ * relying on the INSERT to re-add it fails -- the INSERT's ON CONFLICT would
+ * see no conflict on a fresh key, but if any concurrent/prior row for that
+ * path existed the DO NOTHING would skip it, and the metadata.json could end
+ * up never queued for deletion (a storage leak).
+ *
+ * A single data-modifying CTE that DELETEs the resolve_metadata row and
+ * INSERTs the same path is undefined in Postgres: sibling sub-statements share
+ * one snapshot, do not see each other's effects, and their ordering on the
+ * same key is unspecified -- it does not give these semantics.
+ *
+ * A single INSERT ... ON CONFLICT (path) DO UPDATE upsert is too broad: the
+ * DO UPDATE fires for EVERY conflicting row, so it would also flip
+ * resolve_metadata=false / orphaned_at=NULL on unrelated pre-queued rows
+ * (previous_metadata, rotation leftovers), making them immediately eligible
+ * and defeating their retention. The INSERT ... DO NOTHING plus a WHERE
+ * path = $1 UPDATE is deliberately surgical: DO NOTHING preserves the timing
+ * of existing rows, and the UPDATE converts only the metadata.json row.
  */
 static bool
 ExpandMetadataResolveRecord(char *metadataPath)
@@ -283,9 +328,27 @@ ExpandMetadataResolveRecord(char *metadataPath)
 
 		RollbackAndReleaseCurrentSubTransaction();
 
-		/* a cancellation must propagate */
-		if (edata->sqlerrcode == ERRCODE_QUERY_CANCELED)
-			ThrowErrorData(edata);
+		/*
+		 * Match the drop-time enumeration (MarkAllReferencedFilesForDeletion)
+		 * and the enclosing VACUUM loop (VacuumRemoveDeletionQueueRecords):
+		 * surface the failure as a WARNING so an unresolvable metadata.json
+		 * is visible in the logs, then swallow it (resolved = false) so the
+		 * caller retries this row later and keeps draining the rest of the
+		 * queue. A cancellation keeps its ERROR level and propagates out.
+		 *
+		 * Unlike the VACUUM catch, we do NOT call
+		 * ResetTrackedIcebergMetadataOperation() / ResetRestCatalogRequests()
+		 * here: those live in the higher pg_lake_table layer and are not
+		 * linkable from this engine module (the very reason resolution goes
+		 * through find_all_referenced_files over SPI). It is also unnecessary
+		 * -- that function is a read-only object-store walk over a
+		 * metadata.json path and touches neither the tracked-metadata nor the
+		 * REST-catalog request state.
+		 */
+		if (edata->sqlerrcode != ERRCODE_QUERY_CANCELED)
+			edata->elevel = WARNING;
+
+		ThrowErrorData(edata);
 
 		resolved = false;
 	}
@@ -442,7 +505,7 @@ GetDeletionQueueRecords(Oid relationId, bool isFull)
 void
 InsertPrefixDeletionRecord(char *path, TimestampTz orphanedAt)
 {
-	InsertDeletionQueueRecordExtended(path, InvalidOid, orphanedAt, true);
+	InsertDeletionQueueRecordExtended(path, InvalidOid, orphanedAt, true, false);
 }
 
 
@@ -453,7 +516,7 @@ InsertPrefixDeletionRecord(char *path, TimestampTz orphanedAt)
 void
 InsertDeletionQueueRecord(char *path, Oid relationId, TimestampTz orphanedAt)
 {
-	InsertDeletionQueueRecordExtended(path, relationId, orphanedAt, false);
+	InsertDeletionQueueRecordExtended(path, relationId, orphanedAt, false, false);
 }
 
 
@@ -467,44 +530,34 @@ InsertDeletionQueueRecord(char *path, Oid relationId, TimestampTz orphanedAt)
 void
 InsertMetadataResolveRecord(char *metadataPath, Oid relationId, TimestampTz orphanedAt)
 {
-	char	   *query =
-		"insert into " DELETION_QUEUE_TABLE " "
-		"(path, table_name, orphaned_at, is_prefix, resolve_metadata) "
-		"values ($1,$2,$3,false,true)";
+	bool		isPrefix = false;
+	bool		resolveMetadata = true;
 
-	DECLARE_SPI_ARGS(3);
-	SPI_ARG_VALUE(1, TEXTOID, metadataPath, false);
-	SPI_ARG_VALUE(2, OIDOID, relationId, false);
-	SPI_ARG_VALUE(3, TIMESTAMPTZOID, orphanedAt, orphanedAt == 0);
-
-	/* switch to schema owner, we assume callers checked permissions */
-	SPI_START_EXTENSION_OWNER(PgLakeTable);
-
-	bool		readOnly = false;
-
-	SPI_EXECUTE(query, readOnly);
-
-	SPI_END();
+	InsertDeletionQueueRecordExtended(metadataPath, relationId, orphanedAt,
+									  isPrefix, resolveMetadata);
 }
 
 /*
 * InsertDeletionQueueRecordExtended is the internal function to insert
-* a record into the deletion queue.
+* a record into the deletion queue. is_prefix marks a whole-prefix delete and
+* resolve_metadata marks a metadata.json to be resolved into referenced files
+* by VACUUM; the two are mutually exclusive.
 */
 void
 InsertDeletionQueueRecordExtended(char *path, Oid relationId, TimestampTz orphanedAt,
-								  bool isPrefix)
+								  bool isPrefix, bool resolveMetadata)
 {
 	char	   *query =
 		"insert into " DELETION_QUEUE_TABLE " "
-		"(path, table_name, orphaned_at, is_prefix) "
-		"values ($1,$2,$3,$4)";
+		"(path, table_name, orphaned_at, is_prefix, resolve_metadata) "
+		"values ($1,$2,$3,$4,$5)";
 
-	DECLARE_SPI_ARGS(4);
+	DECLARE_SPI_ARGS(5);
 	SPI_ARG_VALUE(1, TEXTOID, path, false);
 	SPI_ARG_VALUE(2, OIDOID, relationId, false);
 	SPI_ARG_VALUE(3, TIMESTAMPTZOID, orphanedAt, orphanedAt == 0);
 	SPI_ARG_VALUE(4, BOOLOID, isPrefix, false);
+	SPI_ARG_VALUE(5, BOOLOID, resolveMetadata, false);
 
 	/* switch to schema owner, we assume callers checked permissions */
 	SPI_START_EXTENSION_OWNER(PgLakeTable);

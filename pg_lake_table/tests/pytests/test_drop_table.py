@@ -749,6 +749,18 @@ def test_deferred_drop_skips_enumeration(
     assert _count_data_file_records(superuser_conn, location) == 0
     assert _count_prefix_records(superuser_conn, location) == 0
 
+    # that single queued row is the table's metadata.json, present exactly
+    # once. find_all_referenced_files returns the metadata.json itself, so
+    # resolution must not duplicate it: the INSERT ... ON CONFLICT DO NOTHING
+    # plus in-place UPDATE in ExpandMetadataResolveRecord keeps it one row.
+    metadata_rows = run_query(
+        f"SELECT path FROM lake_engine.deletion_queue "
+        f"WHERE resolve_metadata AND path LIKE '{location}%'",
+        superuser_conn,
+    )
+    assert len(metadata_rows) == 1
+    assert metadata_rows[0][0].endswith(".metadata.json")
+
     # local pg_lake catalog state is still cleaned up
     assert (
         run_query(
@@ -860,6 +872,90 @@ def test_injection_point_on_enumeration_path(
     pg_conn.commit()
 
 
+def test_deferred_drop_resolution_failure_retries(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    create_injection_extension,
+):
+    """If VACUUM cannot resolve a deferred-drop metadata.json (e.g. the object
+    store is unreachable), the resolve_metadata row must survive for a later
+    retry -- it must not be lost, nor expanded into partial per-file rows.
+
+    We force the failure with the injection point that now also sits on the SQL
+    find_all_referenced_files (the SPI entrypoint the deferred resolution
+    calls), assert the row survives with a bumped retry_count and the files are
+    untouched, then detach and prove the next VACUUM resolves and fully drains.
+    This exercises the ExpandMetadataResolveRecord subtransaction rollback."""
+    # injection points only supported with 17+
+    if get_pg_version_num(pg_conn) < 170000:
+        return
+
+    run_command("CREATE SCHEMA IF NOT EXISTS defer_drop_fail", pg_conn)
+    run_command(
+        """
+        CREATE TABLE defer_drop_fail.t USING iceberg
+        WITH (autovacuum_enabled='false')
+        AS SELECT i AS id, 'pg_lake' AS name FROM generate_series(1, 10) i
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    location = _writable_location(pg_conn, "defer_drop_fail.t")
+
+    _drop_deferred(pg_conn, "DROP TABLE defer_drop_fail.t")
+
+    # deferred drop queued exactly one metadata.json for resolution
+    assert _count_resolve_records(superuser_conn, location) == 1
+    files_before = run_query(
+        f"SELECT count(*) FROM lake_file.list('{location}/**')", superuser_conn
+    )[0][0]
+    assert files_before > 0
+    superuser_conn.commit()
+
+    # force resolution to fail: VACUUM resolves the row by calling
+    # find_all_referenced_files over SPI, which now errors under the injection
+    _attach_find_referenced_files_error(superuser_conn)
+    try:
+        _vacuum_iceberg_now()
+    finally:
+        _detach_find_referenced_files(superuser_conn)
+
+    # resolution failed inside its own subtransaction and was swallowed as a
+    # WARNING: the resolve_metadata row still stands, no per-file rows were
+    # produced, no prefix was queued, and the files are all still there
+    assert _count_resolve_records(superuser_conn, location) == 1
+    assert _count_data_file_records(superuser_conn, location) == 0
+    assert _count_prefix_records(superuser_conn, location) == 0
+    assert (
+        run_query(
+            f"SELECT count(*) FROM lake_file.list('{location}/**')", superuser_conn
+        )[0][0]
+        == files_before
+    )
+
+    # the failed attempt bumped retry_count on the surviving row (so it is
+    # retried later, and eventually gives up after VacuumFileRemoveMaxRetries)
+    assert (
+        run_query(
+            f"SELECT max(retry_count) FROM lake_engine.deletion_queue "
+            f"WHERE resolve_metadata AND path LIKE '{location}%'",
+            superuser_conn,
+        )[0][0]
+        > 0
+    )
+    superuser_conn.commit()
+
+    # with the injection detached, the next VACUUM resolves and fully drains
+    _assert_vacuum_drains(superuser_conn, location)
+
+    run_command("DROP SCHEMA IF EXISTS defer_drop_fail CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 def test_deferred_drop_rollback_is_clean(
     s3,
     pg_conn,
@@ -944,12 +1040,13 @@ def test_deferred_drop_under_drop_schema_cascade(
     _assert_vacuum_drains(superuser_conn, location)
 
 
-def test_custom_location_never_deferred(
+def test_custom_location_is_also_deferred(
     s3, pg_conn, superuser_conn, extension, with_default_location
 ):
-    """A custom-location table must NEVER be deferred: its prefix may be
-    shared with other tables, so enumeration must always run (per-file
-    records), even when deferral is explicitly enabled."""
+    """Deferral works for a custom-location table too. Resolution deletes
+    exactly the files the metadata.json references (never a whole prefix), so
+    a location that might be shared with other tables is never over-deleted --
+    hence there is no custom-location guard on the deferred path."""
     custom_location = f"s3://{TEST_BUCKET}/defer_custom_location/mytable"
 
     run_command("CREATE SCHEMA IF NOT EXISTS defer_drop_custom", pg_conn)
@@ -965,17 +1062,16 @@ def test_custom_location_never_deferred(
 
     location = _writable_location(pg_conn, "defer_drop_custom.t")
 
-    # even with deferral requested, the custom-location guard forces the
-    # normal enumeration path
     _drop_deferred(pg_conn, "DROP TABLE defer_drop_custom.t")
 
-    # enumeration ran up front despite deferral being on: data-file records,
-    # no deferred resolve_metadata row and no prefix
-    assert _count_data_file_records(superuser_conn, location) > 0
-    assert _count_resolve_records(superuser_conn, location) == 0
+    # deferred path taken exactly like a default-location table: a single
+    # queued metadata.json for resolution, no eager per-file rows, no prefix
+    assert _count_resolve_records(superuser_conn, location) == 1
+    assert _count_data_file_records(superuser_conn, location) == 0
     assert _count_prefix_records(superuser_conn, location) == 0
 
-    # VACUUM actually drains the per-file records and deletes the files
+    # VACUUM resolves the metadata, deletes the referenced files, and drains
+    # every queue row for this table
     _assert_vacuum_drains(superuser_conn, location)
 
     run_command("DROP SCHEMA IF EXISTS defer_drop_custom CASCADE", pg_conn)
@@ -984,6 +1080,13 @@ def test_custom_location_never_deferred(
 
 @pytest.fixture(scope="module")
 def create_test_helper_functions(superuser_conn, s3, extension):
-    # lake_iceberg.find_all_referenced_files is installed by pg_lake_iceberg
-    # (and callable by public), so there is nothing to create or drop here.
+    # lake_iceberg.find_all_referenced_files is installed by pg_lake_iceberg,
+    # but the migration REVOKEs it from public (it walks arbitrary object-store
+    # paths with the server's credentials). Tests below call it directly as the
+    # non-superuser pg_conn, so grant EXECUTE back to public for the test run.
+    run_command(
+        "GRANT EXECUTE ON FUNCTION lake_iceberg.find_all_referenced_files(text) TO public",
+        superuser_conn,
+    )
+    superuser_conn.commit()
     yield

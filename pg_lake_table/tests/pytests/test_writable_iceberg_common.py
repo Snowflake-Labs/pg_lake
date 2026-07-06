@@ -134,12 +134,9 @@ def create_test_helper_functions(superuser_conn, app_user, s3, extension):
          IMMUTABLE STRICT
         AS 'pg_lake_iceberg', $function$reserialize_iceberg_table_metadata$function$;
 
-     CREATE OR REPLACE FUNCTION lake_iceberg.find_all_referenced_files(metadata_path text, OUT path text)
-         RETURNS SETOF text
-         LANGUAGE C
-         STRICT
-        AS 'pg_lake_iceberg', $function$find_all_referenced_files$function$;
-        GRANT EXECUTE ON FUNCTION lake_iceberg.find_all_referenced_files(metadata_path text, OUT path text) TO public;
+     -- find_all_referenced_files is now owned by pg_lake_iceberg; the
+     -- migration REVOKEs it from public, so just grant EXECUTE back for tests.
+        GRANT EXECUTE ON FUNCTION lake_iceberg.find_all_referenced_files(text) TO public;
 
      GRANT SELECT ON lake_iceberg.tables TO {app_user};
 """,

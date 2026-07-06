@@ -66,6 +66,16 @@ find_all_referenced_files(PG_FUNCTION_ARGS)
 {
 	char	   *metadataPath = text_to_cstring(PG_GETARG_TEXT_PP(0));
 
+	/*
+	 * Test hook: this SQL entrypoint is what the deferred-drop VACUUM path
+	 * invokes over SPI to resolve a queued metadata.json into its referenced
+	 * files. Firing here lets tests force that resolution to fail and assert
+	 * the resolve_metadata queue row survives for a later retry. Uses the
+	 * same injection name as IcebergFindAllReferencedFiles (the eager C path)
+	 * so a single attach/detach drives both entrypoints.
+	 */
+	INJECTION_POINT_COMPAT("iceberg-find-referenced-files");
+
 	HTAB	   *fileHash = CreateFilesHash();
 
 	IcebergMetadataAddAllReferencedFiles(metadataPath, fileHash);

@@ -108,3 +108,10 @@ CREATE FUNCTION lake_iceberg.find_all_referenced_files(metadata_path text, OUT p
 	RETURNS SETOF text
 	LANGUAGE C STRICT
 	AS 'MODULE_PATHNAME', 'find_all_referenced_files';
+
+-- The function walks an arbitrary object-store path with the server's
+-- credentials, so it must not be world-callable (same reasoning as
+-- lake_iceberg.data_file_stats above). The deferred-drop VACUUM path invokes
+-- it via SPI as the extension owner, so revoking from PUBLIC does not affect
+-- internal cleanup.
+REVOKE ALL ON FUNCTION lake_iceberg.find_all_referenced_files(text) FROM public;

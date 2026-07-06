@@ -929,16 +929,9 @@ VacuumRemoveDeletionQueueRecords(Oid relationId, bool isFull, bool isVerbose)
 		CommitTransactionCommand();
 		StartTransactionCommand();
 	}
-
-	/*
-	 * Keep going while we make progress. When isFull we drain everything (no
-	 * per-vacuum cap); this also lets us pick up the per-file rows produced
-	 * when a deferred-drop resolve_metadata row is expanded mid-drain.
-	 * RemoveDeletionQueueRecords reports false once an iteration neither
-	 * deletes nor expands anything, which terminates the loop.
-	 */
-	while (hasRemainingFiles &&
-		   (isFull || totalFilesRemoved < MaxFileRemovalsPerVacuum));
+	while (!isFull				/* when isFull, we'll remove all files */
+		   && totalFilesRemoved < MaxFileRemovalsPerVacuum	/* per-vacuum limit */
+		   && hasRemainingFiles /* no more files to remove */ );
 
 	if (totalFilesRemoved > 0)
 	{

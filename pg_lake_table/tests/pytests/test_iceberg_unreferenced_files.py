@@ -708,12 +708,9 @@ def create_helper_functions(superuser_conn):
     run_command(
         f"""
 
-        CREATE OR REPLACE FUNCTION lake_iceberg.find_all_referenced_files(metadata_path text, OUT path text)
-         RETURNS SETOF text
-         LANGUAGE C
-         STRICT
-        AS 'pg_lake_iceberg', $function$find_all_referenced_files$function$;
-        GRANT EXECUTE ON FUNCTION lake_iceberg.find_all_referenced_files(metadata_path text, OUT path text) TO public;
+        -- find_all_referenced_files is owned by pg_lake_iceberg and REVOKEd
+        -- from public by the migration; just grant EXECUTE back for tests.
+        GRANT EXECUTE ON FUNCTION lake_iceberg.find_all_referenced_files(text) TO public;
 
         CREATE OR REPLACE FUNCTION lake_iceberg.find_unreferenced_files(previous_paths text[], current_path text, OUT path text)
          RETURNS SETOF text

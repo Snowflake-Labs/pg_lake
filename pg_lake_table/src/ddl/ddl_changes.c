@@ -176,17 +176,16 @@ ApplyDDLCatalogChanges(Oid relationId, List *ddlOperations,
 				 * the file-accurate deletion semantics (we never blindly
 				 * remove a whole storage prefix).
 				 *
-				 * Deferral only applies to default-location tables; the
-				 * metadata read is a cheap catalog lookup, so custom-location
-				 * tables are handled the same way, just eagerly. A table
-				 * created in the current transaction has no persisted
-				 * metadata to resolve, so it takes the normal (in-progress
-				 * cleanup) path.
+				 * This is safe regardless of custom vs. default location:
+				 * resolution deletes exactly the files the metadata.json
+				 * references, never a whole prefix, so a shared custom
+				 * location is never over-deleted. A table created in the
+				 * current transaction has no persisted metadata to resolve,
+				 * so it takes the normal (in-progress cleanup) path.
 				 */
 				bool		deferMetadataResolution =
 					DeferDropFileCleanup &&
-					!createdInCurrentTx &&
-					!HasCustomLocation(relationId);
+					!createdInCurrentTx;
 
 				if (deferMetadataResolution)
 				{

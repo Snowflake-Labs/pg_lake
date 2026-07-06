@@ -678,6 +678,7 @@ def create_iceberg_table(pg_conn, s3, with_default_location, generate_table_name
 
 @pytest.fixture(scope="module")
 def create_helper_functions(superuser_conn):
-    # lake_iceberg.find_all_referenced_files is installed by pg_lake_iceberg
-    # (and callable by public), so there is nothing to create or drop here.
+    # This suite does not call lake_iceberg.find_all_referenced_files (which is
+    # installed by pg_lake_iceberg and REVOKEd from public), so there is
+    # nothing to create, grant, or drop here.
     yield
