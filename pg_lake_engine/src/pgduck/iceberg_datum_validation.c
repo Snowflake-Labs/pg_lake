@@ -279,10 +279,16 @@ RaiseSizeOverflow(const char *columnName, const char *typeLabel,
  *                              consumer-visible byte length, so the STRING
  *                              cap is a hard bound.
  *   bytea:                     same, against the BINARY cap.
- *   array/composite/map:       the slow path also measures non-jsonb
- *                              containers via toast_raw_datum_size, so a
- *                              varlena that fits the NESTED cap passes
- *                              both checks identically.
+ *   array/composite/map:       bounded by the BINARY cap (the smallest
+ *                              per-leaf cap).  A container under the
+ *                              aggregate NESTED cap can still hold a single
+ *                              string/binary leaf over its own per-leaf cap
+ *                              (the slow path recurses to clamp it), so the
+ *                              container only fast-paths out when its whole
+ *                              varlena is small enough that no leaf can
+ *                              exceed any cap -- i.e. at or below the
+ *                              smallest per-leaf cap, since a leaf never
+ *                              exceeds the container that holds it.
  *
  * Excludes any type that contains a jsonb/json leaf -- top-level jsonb has
  * its own type-aware fast path in IcebergSizeClampStringScalar, and jsonb
@@ -327,7 +333,14 @@ SizeClampVarlenaFastPath(Datum value, Oid typeOid)
 								 ICEBERG_SNOWFLAKE_MAX_STRING_BYTES);
 	}
 
-	return totalSize <= ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES;
+	/*
+	 * Container (array/composite/map): a value at or below the smallest
+	 * per-leaf cap (BINARY) cannot contain any leaf that exceeds its own cap,
+	 * and is trivially under the aggregate NESTED cap, so it fast-paths out.
+	 * Larger containers take the slow path, which applies the aggregate check
+	 * and recurses to per-leaf-clamp inner strings/bytea.
+	 */
+	return totalSize <= ICEBERG_SNOWFLAKE_MAX_BINARY_BYTES;
 }
 
 
@@ -966,21 +979,24 @@ IcebergSizeClampNestedDatum(Datum value, Oid typeOid, int32 typmod,
 	}
 
 	/*
-	 * Container types (array / composite / map / domain over either): apply a
-	 * single aggregate-size check against
-	 * ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES.
+	 * Container types (array / composite / map / domain over either) enforce
+	 * two independent Snowflake limits:
 	 *
-	 * We deliberately do NOT recurse into elements/fields to per-leaf-clamp
-	 * inner strings or bytea.  Inside an array/object on the consumer side
-	 * the leaves don't have their own column cap — they're just JSON inside
-	 * the parent OBJECT/ARRAY/VARIANT, which has the aggregate cap.  And
-	 * since ICEBERG_SNOWFLAKE_MAX_STRING_BYTES <=
-	 * ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES, no inner leaf can exceed the
-	 * per-leaf limit while staying inside an under-cap container.
+	 * 1. an aggregate cap on the whole serialized container against
+	 * ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES (the OBJECT/ARRAY/VARIANT
+	 * column ceiling), and 2. the per-leaf STRING / BINARY cap on every
+	 * string/binary leaf inside it.  Snowflake maps a pg array/composite to a
+	 * *typed* ARRAY(VARCHAR) / OBJECT(... VARCHAR ...), and each VARCHAR leaf
+	 * carries the same 16 MiB physical value limit a top-level string does --
+	 * a single oversize leaf breaks materialization into a native table even
+	 * when the container as a whole is far under the aggregate cap.
 	 *
-	 * So a container is either small enough to pass through verbatim, or big
-	 * enough to NULL (CLAMP) / error (ERROR).  No deconstruct/deform, no
-	 * per-element walk.
+	 * So we check the aggregate first (NULL/error the whole container when it
+	 * exceeds the nested cap), then recurse into the elements/fields to clamp
+	 * each leaf, mirroring IcebergErrorOrClampNestedDatum.  Because a leaf
+	 * can never be larger than the container that holds it, a container that
+	 * passed the aggregate cap can only shrink under per-leaf clamping, so
+	 * the two checks compose without re-measuring.
 	 */
 	Oid			elemType = get_element_type(typeOid);
 
@@ -1011,7 +1027,61 @@ IcebergSizeClampNestedDatum(Datum value, Oid typeOid, int32 typmod,
 			return (Datum) 0;
 		}
 
-		return value;
+		/* No clampable leaf type: nothing to recurse into. */
+		if (!TypeNeedsIcebergSizeClamping(elemType))
+			return value;
+
+		ArrayType  *array = DatumGetArrayTypeP(value);
+		int16		elmlen;
+		bool		elmbyval;
+		char		elmalign;
+
+		get_typlenbyvalalign(elemType, &elmlen, &elmbyval, &elmalign);
+
+		Datum	   *elems;
+		bool	   *nulls;
+		int			nelems;
+
+		deconstruct_array(array, elemType, elmlen, elmbyval, elmalign,
+						  &elems, &nulls, &nelems);
+
+		bool		anyModified = false;
+
+		for (int i = 0; i < nelems; i++)
+		{
+			if (nulls[i])
+				continue;
+
+			bool		elemIsNull = false;
+			bool		elemModified = false;
+
+			/* an array's typmod applies to its element type */
+			Datum		clamped = IcebergSizeClampNestedDatum(elems[i], elemType,
+															  typmod, policy,
+															  columnName,
+															  &elemIsNull,
+															  &elemModified);
+
+			if (elemModified || elemIsNull)
+			{
+				elems[i] = clamped;
+				nulls[i] = elemIsNull;
+				anyModified = true;
+			}
+		}
+
+		if (!anyModified)
+			return value;
+
+		ArrayType  *result = construct_md_array(elems, nulls,
+												ARR_NDIM(array),
+												ARR_DIMS(array),
+												ARR_LBOUND(array),
+												elemType, elmlen,
+												elmbyval, elmalign);
+
+		*modified = true;
+		return PointerGetDatum(result);
 	}
 
 	char		typtype = get_typtype(typeOid);
@@ -1047,7 +1117,69 @@ IcebergSizeClampNestedDatum(Datum value, Oid typeOid, int32 typmod,
 			return (Datum) 0;
 		}
 
-		return value;
+		HeapTupleHeader tup = DatumGetHeapTupleHeader(value);
+		Oid			tupType = HeapTupleHeaderGetTypeId(tup);
+		int32		tupTypmod = HeapTupleHeaderGetTypMod(tup);
+		TupleDesc	tupdesc = lookup_rowtype_tupdesc(tupType, tupTypmod);
+		int			natts = tupdesc->natts;
+
+		HeapTupleData tmptup;
+
+		tmptup.t_len = HeapTupleHeaderGetDatumLength(tup);
+		ItemPointerSetInvalid(&(tmptup.t_self));
+		tmptup.t_tableOid = InvalidOid;
+		tmptup.t_data = tup;
+
+		Datum	   *values = (Datum *) palloc(natts * sizeof(Datum));
+		bool	   *attrNulls = (bool *) palloc(natts * sizeof(bool));
+
+		heap_deform_tuple(&tmptup, tupdesc, values, attrNulls);
+
+		bool		anyModified = false;
+
+		for (int i = 0; i < natts; i++)
+		{
+			Form_pg_attribute fattr = TupleDescAttr(tupdesc, i);
+
+			if (fattr->attisdropped || attrNulls[i])
+				continue;
+
+			if (!TypeNeedsIcebergSizeClamping(fattr->atttypid))
+				continue;
+
+			bool		attrIsNull = false;
+			bool		attrModified = false;
+			Datum		clamped = IcebergSizeClampNestedDatum(values[i],
+															  fattr->atttypid,
+															  fattr->atttypmod,
+															  policy,
+															  columnName,
+															  &attrIsNull,
+															  &attrModified);
+
+			if (attrModified || attrIsNull)
+			{
+				values[i] = clamped;
+				attrNulls[i] = attrIsNull;
+				anyModified = true;
+			}
+		}
+
+		if (!anyModified)
+		{
+			pfree(values);
+			pfree(attrNulls);
+			ReleaseTupleDesc(tupdesc);
+			return value;
+		}
+
+		HeapTuple	newTuple = heap_form_tuple(tupdesc, values, attrNulls);
+
+		pfree(values);
+		pfree(attrNulls);
+		ReleaseTupleDesc(tupdesc);
+		*modified = true;
+		return HeapTupleGetDatum(newTuple);
 	}
 
 	/*

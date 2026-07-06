@@ -66,12 +66,17 @@ extern PGDLLEXPORT Datum IcebergErrorOrClampDatum(Datum value, Oid typeOid,
  * since truncation would corrupt them:
  *   - jsonb/json
  *
- * Container types (array / composite / map / domain over either) are
- * NULLed when their measured size exceeds
- * ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES.  The size is the type's output-
- * function text length when the container has any jsonb/json leaf (so
- * jsonb leaves contribute their JSON-text size, which is what the consumer
- * ultimately sees), and the cheaper varlena content size otherwise.
+ * Container types (array / composite / map / domain over either) enforce
+ * two limits.  First, the whole container is NULLed (CLAMP) / raised (ERROR)
+ * when its measured size exceeds ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES; the
+ * size is the type's output-function text length when the container has any
+ * jsonb/json leaf (so jsonb leaves contribute their JSON-text size, which is
+ * what the consumer ultimately sees), and the cheaper varlena content size
+ * otherwise.  Second, the walk recurses into elements/fields and applies the
+ * per-leaf STRING/BINARY caps above to each string/binary leaf, since a typed
+ * ARRAY(VARCHAR) / OBJECT(... VARCHAR ...) leaf carries the same physical
+ * value limit as a top-level string even when the container is under the
+ * aggregate cap.
  *
  * `columnName` is included in the error message under ERROR mode; pass
  * NULL or empty when the column context is unknown.
