@@ -213,13 +213,15 @@ DeleteQueuedObject(char *path, bool isPrefix, bool isVerbose)
  * we roll back and return false so the caller retries this row later without
  * aborting the rest of the drain.
  *
- * The INSERT uses ON CONFLICT (path) DO NOTHING because the queue may already
- * hold some of these paths (the metadata.json's own row for sure, plus any
- * previous_metadata/rotation leftovers or files shared with another dropped
- * table); a plain INSERT would hit the primary key and abort. A separate
- * WHERE path = $1 UPDATE then converts only the metadata.json row -- a single
- * DO UPDATE upsert would instead re-arm every pre-existing row and defeat its
- * retention.
+ * The queue may already hold some of these paths (the metadata.json's own row
+ * for sure, plus any previous_metadata/rotation leftovers or files shared with
+ * another dropped table), so a plain INSERT would hit the primary key and
+ * abort. ON CONFLICT (path) DO UPDATE ... WHERE path = $1 handles that in one
+ * statement: it converts only the metadata.json row into a normal file row and
+ * no-ops every other conflict, leaving those rows' retention untouched. (A
+ * DELETE-then-reinsert CTE cannot do this -- WITH sub-statements share one
+ * snapshot, so the insert's ON CONFLICT would not see the sibling delete and
+ * would drop the metadata.json.)
  */
 static bool
 ExpandMetadataResolveRecord(char *metadataPath)
@@ -239,6 +241,14 @@ ExpandMetadataResolveRecord(char *metadataPath)
 		 * orphaned_at is NULL so the files are eligible for deletion right
 		 * away: the retention window was already served while this metadata
 		 * row waited in the queue.
+		 *
+		 * find_all_referenced_files returns the metadata.json itself, which
+		 * is already queued as our resolve_metadata row, so that row needs
+		 * converting to a normal file row too. The DO UPDATE ... WHERE does
+		 * this in the same statement: it fires only for the metadata.json's
+		 * own row and no-ops every other conflict (a previous_metadata/
+		 * rotation leftover, or a file shared with another dropped table),
+		 * leaving their retention untouched.
 		 */
 		{
 			char	   *insertQuery =
@@ -246,29 +256,14 @@ ExpandMetadataResolveRecord(char *metadataPath)
 				"(path, table_name, orphaned_at, is_prefix, resolve_metadata) "
 				"SELECT f.path, NULL, NULL, false, false "
 				"FROM lake_iceberg.find_all_referenced_files($1) f "
-				"ON CONFLICT (path) DO NOTHING";
+				"ON CONFLICT (path) DO UPDATE "
+				"SET resolve_metadata = false, orphaned_at = NULL "
+				"WHERE deletion_queue.path OPERATOR(pg_catalog.=) $1";
 
 			DECLARE_SPI_ARGS(1);
 			SPI_ARG_VALUE(1, TEXTOID, metadataPath, false);
 
 			SPI_EXECUTE(insertQuery, readOnly);
-		}
-
-		/*
-		 * find_all_referenced_files also returns the metadata.json itself, so
-		 * the ON CONFLICT above left our resolve_metadata row untouched.
-		 * Convert it in place into a normal, eligible file row.
-		 */
-		{
-			char	   *convertQuery =
-				"UPDATE " DELETION_QUEUE_TABLE " "
-				"SET resolve_metadata = false, orphaned_at = NULL "
-				"WHERE path OPERATOR(pg_catalog.=) $1";
-
-			DECLARE_SPI_ARGS(1);
-			SPI_ARG_VALUE(1, TEXTOID, metadataPath, false);
-
-			SPI_EXECUTE(convertQuery, readOnly);
 		}
 
 		SPI_END();
