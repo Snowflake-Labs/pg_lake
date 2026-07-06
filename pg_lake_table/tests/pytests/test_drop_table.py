@@ -554,7 +554,13 @@ def test_drop_without_s3_access_not_cached(
     assert len(results) == 0
 
 
-FIND_REFERENCED_FILES_INJECTION_POINT = "iceberg-find-referenced-files"
+# Two distinct injection points, one per referenced-files entrypoint, so a test
+# can arm exactly the path it exercises:
+#   - the eager, drop-time C enumeration (IcebergFindAllReferencedFiles)
+#   - the SQL find_all_referenced_files UDF the deferred VACUUM resolution
+#     invokes over SPI
+ENUMERATE_REFERENCED_FILES_INJECTION_POINT = "iceberg-find-referenced-files"
+RESOLVE_REFERENCED_FILES_INJECTION_POINT = "iceberg-find-referenced-files-udf"
 
 
 def _writable_location(conn, qualified_table):
@@ -670,17 +676,17 @@ def _assert_vacuum_drains(superuser_conn, location):
     superuser_conn.commit()
 
 
-def _attach_find_referenced_files_error(superuser_conn):
+def _attach_injection_error(superuser_conn, point):
     run_command(
-        f"SELECT public.injection_points_attach('{FIND_REFERENCED_FILES_INJECTION_POINT}', 'error')",
+        f"SELECT public.injection_points_attach('{point}', 'error')",
         superuser_conn,
     )
     superuser_conn.commit()
 
 
-def _detach_find_referenced_files(superuser_conn):
+def _detach_injection(superuser_conn, point):
     run_command(
-        f"SELECT public.injection_points_detach('{FIND_REFERENCED_FILES_INJECTION_POINT}')",
+        f"SELECT public.injection_points_detach('{point}')",
         superuser_conn,
     )
     superuser_conn.commit()
@@ -850,11 +856,11 @@ def test_injection_point_on_enumeration_path(
 
     location = _writable_location(pg_conn, "defer_drop_inj.t")
 
-    _attach_find_referenced_files_error(superuser_conn)
+    _attach_injection_error(superuser_conn, ENUMERATE_REFERENCED_FILES_INJECTION_POINT)
     try:
         run_command("DROP TABLE defer_drop_inj.t", pg_conn)
     finally:
-        _detach_find_referenced_files(superuser_conn)
+        _detach_injection(superuser_conn, ENUMERATE_REFERENCED_FILES_INJECTION_POINT)
     pg_conn.commit()
 
     # enumeration was reached (injection fired), caught, and fell back to a
@@ -884,8 +890,8 @@ def test_deferred_drop_resolution_failure_retries(
     store is unreachable), the resolve_metadata row must survive for a later
     retry -- it must not be lost, nor expanded into partial per-file rows.
 
-    We force the failure with the injection point that now also sits on the SQL
-    find_all_referenced_files (the SPI entrypoint the deferred resolution
+    We force the failure with the injection point on the SQL
+    find_all_referenced_files UDF (the SPI entrypoint the deferred resolution
     calls), assert the row survives with a bumped retry_count and the files are
     untouched, then detach and prove the next VACUUM resolves and fully drains.
     This exercises the ExpandMetadataResolveRecord subtransaction rollback."""
@@ -918,11 +924,11 @@ def test_deferred_drop_resolution_failure_retries(
 
     # force resolution to fail: VACUUM resolves the row by calling
     # find_all_referenced_files over SPI, which now errors under the injection
-    _attach_find_referenced_files_error(superuser_conn)
+    _attach_injection_error(superuser_conn, RESOLVE_REFERENCED_FILES_INJECTION_POINT)
     try:
         _vacuum_iceberg_now()
     finally:
-        _detach_find_referenced_files(superuser_conn)
+        _detach_injection(superuser_conn, RESOLVE_REFERENCED_FILES_INJECTION_POINT)
 
     # resolution failed inside its own subtransaction and was swallowed as a
     # WARNING: the resolve_metadata row still stands, no per-file rows were
