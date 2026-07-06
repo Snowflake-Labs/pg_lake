@@ -54,6 +54,31 @@ InternalCSVOptions(bool includeHeader)
 
 
 /*
+ * InternalCSVReadOptions returns the options to use when reading an
+ * internal/temporary CSV back through DuckDB's read_csv().
+ *
+ * It is InternalCSVOptions() plus a synthetic allow_quoted_nulls=false
+ * option.  That option is not a real COPY option (ProcessCopyOptions would
+ * reject it on the write side), so it lives only on the read path, where
+ * CopyOptionsToReadCSVParams translates it into the read_csv() argument.
+ * We need it because the CSV writer force-quotes any value that matches the
+ * null sentinel (\N); disabling allow_quoted_nulls keeps a quoted "\N" from
+ * being collapsed back to SQL NULL.
+ */
+List *
+InternalCSVReadOptions(bool includeHeader)
+{
+	List	   *options = InternalCSVOptions(includeHeader);
+
+	options = lappend(options,
+					  makeDefElem("allow_quoted_nulls",
+								  (Node *) makeBoolean(false), -1));
+
+	return options;
+}
+
+
+/*
  * NormalizedExternalCSVOptions normalizes a list of CSV options.
  *
  * We normalize the list of options to include default values

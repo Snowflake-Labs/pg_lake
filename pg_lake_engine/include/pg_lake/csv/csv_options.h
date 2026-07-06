@@ -21,6 +21,7 @@
 #include "nodes/pg_list.h"
 
 extern PGDLLEXPORT List *InternalCSVOptions(bool includeHeader);
+extern PGDLLEXPORT List *InternalCSVReadOptions(bool includeHeader);
 extern PGDLLEXPORT List *NormalizedExternalCSVOptions(List *inputOptions);
 extern PGDLLEXPORT CopyHeaderChoice GetCopyHeaderChoice(DefElem *def, bool is_from);
 extern PGDLLEXPORT bool HasAutoDetect(List *options);
