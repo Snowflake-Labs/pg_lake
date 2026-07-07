@@ -1699,8 +1699,10 @@ def test_pg_lake_iceberg_decimal38_multi_row_group_bounds(
     assert footer[0][0] >= 2, "test needs a multi-row-group file"
     assert footer[0][1] == 126619
 
-    # pg_lake prunes data files from these manifest bounds before scanning, so a
-    # wrong upper bound silently drops matching rows (returns 0 instead of 40000).
+    # These manifest bounds also drive pg_lake's own data-file pruning. Before the
+    # fix the swapped bounds (lower=126619, upper=19308) pruned this file for
+    # `c = 126619`, so the query returned 0 rows instead of 40000; asserting the
+    # full 40000 (and the range predicate below) guards against that regression.
     assert run_query("SELECT count(*) FROM dec38_bounds", pg_conn)[0][0] == 80000
     matched = run_query(
         "SELECT count(*) FROM dec38_bounds WHERE c = 126619", pg_conn
