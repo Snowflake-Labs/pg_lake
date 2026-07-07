@@ -41,3 +41,48 @@ extern PGDLLEXPORT Datum IcebergErrorOrClampDatum(Datum value, Oid typeOid,
 												  int32 typmod,
 												  IcebergOutOfRangePolicy policy,
 												  bool *isNull);
+
+/*
+ * IcebergSizeClampDatum truncates, NULLs, or errors on a Datum so that
+ * string, binary, and nested-type values fit Snowflake's per-column byte
+ * caps (16 MiB STRING, 8 MiB BINARY, 128 MiB OBJECT/ARRAY/VARIANT).  Only
+ * Iceberg tables declared with compatibility_mode='snowflake' route their
+ * writes through this function; callers gate on the table's compatibility
+ * mode before calling.
+ *
+ * The behavior on an oversize value is selected by `policy`:
+ *   - ICEBERG_OOR_ERROR (default for Iceberg tables): raise an error
+ *     identifying the column and exceeded cap.
+ *   - ICEBERG_OOR_CLAMP: silently fix up the value as below.
+ *   - ICEBERG_OOR_NONE: pass through unchanged.
+ *
+ * Under CLAMP, lossless types are truncated:
+ *   - text/varchar/bpchar  -> trimmed at a UTF-8 character boundary to
+ *                             ICEBERG_SNOWFLAKE_MAX_STRING_BYTES.
+ *   - bytea                -> byte-truncated to
+ *                             ICEBERG_SNOWFLAKE_MAX_BINARY_BYTES.
+ *
+ * Structured-string types are replaced with NULL via *isNull = true,
+ * since truncation would corrupt them:
+ *   - jsonb/json
+ *
+ * Container types (array / composite / map / domain over either) enforce
+ * two limits.  First, the whole container is NULLed (CLAMP) / raised (ERROR)
+ * when its measured size exceeds ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES; the
+ * size is the type's output-function text length when the container has any
+ * jsonb/json leaf (so jsonb leaves contribute their JSON-text size, which is
+ * what the consumer ultimately sees), and the cheaper varlena content size
+ * otherwise.  Second, the walk recurses into elements/fields and applies the
+ * per-leaf STRING/BINARY caps above to each string/binary leaf, since a typed
+ * ARRAY(VARCHAR) / OBJECT(... VARCHAR ...) leaf carries the same physical
+ * value limit as a top-level string even when the container is under the
+ * aggregate cap.
+ *
+ * `columnName` is included in the error message under ERROR mode; pass
+ * NULL or empty when the column context is unknown.
+ */
+extern PGDLLEXPORT Datum IcebergSizeClampDatum(Datum value, Oid typeOid,
+											   int32 typmod,
+											   IcebergOutOfRangePolicy policy,
+											   const char *columnName,
+											   bool *isNull);

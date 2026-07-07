@@ -83,6 +83,7 @@
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/fdw/multi_data_file_dest.h"
 #include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/iceberg/compatibility_mode.h"
 #include "pg_lake/iceberg/operations/manifest_merge.h"
 #include "pg_lake/partitioning/partition_by_parser.h"
 #include "pg_lake/partitioning/partitioned_dest_receiver.h"
@@ -243,6 +244,30 @@ typedef struct PgLakeModifyState
 	/* out-of-range policy for the table */
 	IcebergOutOfRangePolicy outOfRangePolicy;
 	bool		needsOutOfRangeValidation;
+
+	/*
+	 * compatibilityMode is the table's declared compatibility_mode.  Today
+	 * only ICEBERG_COMPAT_SNOWFLAKE drives size-clamp behavior; AUTO-mode
+	 * tables skip the clamp paths regardless of needsSizeClamping below.
+	 * Future modes will reuse the same gate with their own caps.
+	 */
+	IcebergCompatibilityMode compatibilityMode;
+
+	/*
+	 * needsSizeClamping is true if any column type contains a leaf type
+	 * (text/varchar/bpchar/bytea/jsonb/json) that could potentially be
+	 * size-clamped by IcebergSizeClampDatum at write time.  It is a static
+	 * type-shape signal; whether to actually enter the clamp path is gated by
+	 * compatibilityMode.
+	 */
+	bool		needsSizeClamping;
+
+	/*
+	 * Per-attribute cache of TypeNeedsIcebergSizeClamping(atttypid), built
+	 * once at BeginForeignModify and read per row.  Only allocated when
+	 * needsSizeClamping is true.
+	 */
+	bool	   *sizeClampingPerAttr;
 
 	/* slot used for position deletes */
 	TupleTableSlot *deleteSlot;
@@ -2595,6 +2620,28 @@ TupleDescNeedsIcebergValidation(TupleDesc tupleDesc)
 
 
 /*
+ * TupleDescNeedsIcebergSizeClamping returns true if any non-dropped column
+ * could potentially be size-clamped at write time.
+ */
+static bool
+TupleDescNeedsIcebergSizeClamping(TupleDesc tupleDesc)
+{
+	for (int i = 0; i < tupleDesc->natts; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupleDesc, i);
+
+		if (attr->attisdropped)
+			continue;
+
+		if (TypeNeedsIcebergSizeClamping(attr->atttypid))
+			return true;
+	}
+
+	return false;
+}
+
+
+/*
  * IcebergErrorOrClampSlotInPlace clamps or rejects out-of-range temporal and numeric
  * values in the slot, modifying it in-place.  Handles nested types (arrays,
  * composites, maps, domains) via IcebergErrorOrClampDatum's recursive validation.
@@ -2639,6 +2686,57 @@ IcebergErrorOrClampSlotInPlace(TupleTableSlot *slot, TupleDesc tupleDesc,
 
 
 /*
+ * IcebergSizeCheckOrClampSlotInPlace enforces the Snowflake per-column byte
+ * caps on string/binary/nested values in `slot`.  Behavior is selected
+ * per-table via `out_of_range_values`:
+ *   - ICEBERG_OOR_ERROR (default): raises on the first oversize value,
+ *     identifying the column.
+ *   - ICEBERG_OOR_CLAMP: truncates / NULLs the value in place.
+ *   - ICEBERG_OOR_NONE: no-op.
+ *
+ * `sizeClampingPerAttr` is the cached per-column result of
+ * TypeNeedsIcebergSizeClamping; columns whose entry is false are
+ * skipped without re-checking the type at runtime.
+ *
+ * Handles nested types via IcebergSizeClampDatum's recursive walker.
+ */
+static void
+IcebergSizeCheckOrClampSlotInPlace(TupleTableSlot *slot, TupleDesc tupleDesc,
+								   const bool *sizeClampingPerAttr,
+								   IcebergOutOfRangePolicy policy)
+{
+	int			natts = tupleDesc->natts;
+
+	if (policy == ICEBERG_OOR_NONE)
+		return;
+
+	slot_getallattrs(slot);
+
+	for (int i = 0; i < natts; i++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupleDesc, i);
+
+		if (attr->attisdropped || slot->tts_isnull[i])
+			continue;
+
+		if (!sizeClampingPerAttr[i])
+			continue;
+
+		bool		isNull = false;
+		Datum		clamped = IcebergSizeClampDatum(slot->tts_values[i],
+													attr->atttypid,
+													attr->atttypmod,
+													policy,
+													NameStr(attr->attname),
+													&isNull);
+
+		slot->tts_values[i] = clamped;
+		slot->tts_isnull[i] = isNull;
+	}
+}
+
+
+/*
  * ClampAndCheckConstraints normalizes the slot for Iceberg write and then
  * runs PostgreSQL constraint checks (NOT NULL, CHECK, etc.).
  *
@@ -2657,6 +2755,12 @@ ClampAndCheckConstraints(PgLakeModifyState * fmstate,
 		fmstate->needsOutOfRangeValidation)
 		IcebergErrorOrClampSlotInPlace(slot, fmstate->tupleDesc,
 									   fmstate->outOfRangePolicy);
+
+	if (fmstate->needsSizeClamping &&
+		fmstate->compatibilityMode == ICEBERG_COMPAT_SNOWFLAKE)
+		IcebergSizeCheckOrClampSlotInPlace(slot, fmstate->tupleDesc,
+										   fmstate->sizeClampingPerAttr,
+										   fmstate->outOfRangePolicy);
 
 	Relation	rel = resultRelInfo->ri_RelationDesc;
 
@@ -3504,6 +3608,25 @@ create_foreign_modify(Relation rel,
 		fmstate->outOfRangePolicy =
 			GetIcebergOutOfRangePolicyForTable(relationId);
 		fmstate->needsOutOfRangeValidation = TupleDescNeedsIcebergValidation(fmstate->tupleDesc);
+		fmstate->compatibilityMode =
+			IcebergCompatibilityModeFromRelation(relationId);
+		fmstate->needsSizeClamping = TupleDescNeedsIcebergSizeClamping(fmstate->tupleDesc);
+
+		if (fmstate->needsSizeClamping)
+		{
+			int			natts = fmstate->tupleDesc->natts;
+
+			fmstate->sizeClampingPerAttr = (bool *) palloc(natts * sizeof(bool));
+
+			for (int i = 0; i < natts; i++)
+			{
+				Form_pg_attribute attr = TupleDescAttr(fmstate->tupleDesc, i);
+
+				fmstate->sizeClampingPerAttr[i] =
+					!attr->attisdropped &&
+					TypeNeedsIcebergSizeClamping(attr->atttypid);
+			}
+		}
 	}
 
 	if (operation == CMD_UPDATE || operation == CMD_DELETE)

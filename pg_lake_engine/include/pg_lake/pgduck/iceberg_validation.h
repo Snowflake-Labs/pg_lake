@@ -72,3 +72,43 @@ extern PGDLLEXPORT bool TypeNeedsIcebergValidation(Oid typeOid, int32 typmod,
 #define TEMPORAL_DATE_MIN_YEAR		(-4712)
 #define TEMPORAL_TIMESTAMP_MIN_YEAR	1
 #define TEMPORAL_MAX_YEAR			9999
+
+/*
+ * Snowflake's per-column byte ceilings, applied when an Iceberg table is
+ * declared with compatibility_mode='snowflake'.  Values writing to such a
+ * table run through IcebergSizeClampDatum / IcebergWrapQueryWithSizeClampChecks
+ * and are clamped or rejected (per out_of_range_values) once they exceed the
+ * matching cap.
+ *
+ * The cap matches Snowflake's narrowest default column ceiling for that
+ * category:
+ *   STRING        : 16 MiB (default VARCHAR/STRING width)
+ *   BINARY        :  8 MiB (default BINARY width)
+ *   OBJECT/ARRAY/
+ *   VARIANT       : 128 MiB (semi-structured column ceiling)
+ *
+ * Tables in any other compatibility_mode pass through unchanged: the call
+ * sites only enter the clamp paths when compatibility_mode='snowflake'.
+ */
+#define ICEBERG_SNOWFLAKE_MAX_STRING_BYTES		(16 * 1024 * 1024)
+#define ICEBERG_SNOWFLAKE_MAX_BINARY_BYTES		(8 * 1024 * 1024)
+#define ICEBERG_SNOWFLAKE_MAX_NESTED_TYPE_BYTES	(128 * 1024 * 1024)
+
+/*
+ * TypeNeedsIcebergSizeClamping returns true if a Datum of typeOid (or any
+ * lossless string / structured-string / bytea component nested within it)
+ * could potentially be size-clamped by IcebergSizeClampDatum.  Recurses
+ * through arrays, composites, maps, and domains.
+ */
+extern PGDLLEXPORT bool TypeNeedsIcebergSizeClamping(Oid typeOid);
+
+/*
+ * IcebergScalarStorageIsStringOrBinary returns true when typeOid is a scalar
+ * leaf that Iceberg stores as string or binary but that has no type-specific
+ * truncation (i.e. not text/varchar/bpchar/bytea/jsonb/json) -- hstore,
+ * citext, PostGIS geometry, and other types that fall back to string/binary
+ * serialization.  Such values are NULLed when oversize.  *isBinary, when
+ * non-NULL, is set true for the binary storage class and false for string.
+ */
+extern PGDLLEXPORT bool IcebergScalarStorageIsStringOrBinary(Oid typeOid,
+															 bool *isBinary);

@@ -28,9 +28,11 @@
 #include "catalog/pg_type.h"
 #include "foreign/foreign.h"
 #include "pg_lake/parsetree/options.h"
+#include "pg_lake/parquet/field.h"
 #include "pg_lake/pgduck/iceberg_validation.h"
 #include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/numeric.h"
+#include "pg_lake/pgduck/type.h"
 #include "pg_lake/util/table_type.h"
 #include "utils/lsyscache.h"
 #include "utils/typcache.h"
@@ -167,6 +169,105 @@ TypeNeedsIcebergValidation(Oid typeOid, int32 typmod, bool isPushdown)
 		ReleaseTupleDesc(tupdesc);
 		return found;
 	}
+
+	return false;
+}
+
+
+/*
+ * IcebergScalarStorageIsStringOrBinary returns true when typeOid is a scalar
+ * leaf that Iceberg stores as a variable-width "string" or "binary" but that
+ * the size-clamp code does not already handle with a type-specific truncation
+ * (text/varchar/bpchar, bytea, jsonb/json).  These are the types that fall
+ * back to string/binary serialization -- hstore, citext, PostGIS geometry,
+ * and any other type without a native Iceberg mapping.  Their serialized form
+ * can still exceed the downstream byte cap and cannot be safely truncated the
+ * way text/bytea can, so callers NULL them when oversize.  *isBinary, when
+ * non-NULL, is set to true for the "binary" storage class (geometry) and false
+ * for "string".
+ *
+ * Keyed off PostgresBaseTypeIdToIcebergTypeName so the classification stays in
+ * lockstep with the actual write mapping.  Containers and numerics return
+ * false: containers carry their own aggregate cap, and a numeric is either a
+ * fixed-width decimal or an unbounded value outside the per-leaf caps' scope.
+ */
+bool
+IcebergScalarStorageIsStringOrBinary(Oid typeOid, bool *isBinary)
+{
+	Oid			baseOid = getBaseType(typeOid);
+
+	if (OidIsValid(get_element_type(baseOid)) ||
+		IsMapTypeOid(baseOid) ||
+		get_typtype(baseOid) == TYPTYPE_COMPOSITE ||
+		baseOid == NUMERICOID)
+		return false;
+
+	const char *icebergType =
+		PostgresBaseTypeIdToIcebergTypeName(MakePGType(baseOid, -1));
+
+	if (strcmp(icebergType, "string") == 0)
+	{
+		if (isBinary != NULL)
+			*isBinary = false;
+		return true;
+	}
+
+	if (strcmp(icebergType, "binary") == 0)
+	{
+		if (isBinary != NULL)
+			*isBinary = true;
+		return true;
+	}
+
+	return false;
+}
+
+
+/*
+ * TypeNeedsIcebergSizeClamping returns true if a Datum of typeOid contains
+ * any leaf type that could be size-clamped: text/varchar/bpchar/bytea (which
+ * truncate) or jsonb/json (which become NULL).  It also returns true for
+ * any array, composite, or map type, since their aggregate JSON-serialized
+ * size can exceed the downstream consumer's column cap regardless of
+ * element/field types (e.g. an int[] of millions of values).  Recurses
+ * through domains.
+ *
+ * Independent of compatibility_mode: this is a static type-shape check used
+ * to gate the per-row clamp call cheaply; the caller decides whether to enter
+ * the clamp path at all based on compatibility_mode.
+ */
+bool
+TypeNeedsIcebergSizeClamping(Oid typeOid)
+{
+	if (typeOid == TEXTOID || typeOid == VARCHAROID ||
+		typeOid == BPCHAROID || typeOid == BYTEAOID ||
+		typeOid == JSONBOID || typeOid == JSONOID)
+		return true;
+
+	/* Any array type: aggregate size matters even for non-clampable elements. */
+	if (OidIsValid(get_element_type(typeOid)))
+		return true;
+
+	/* map check must precede the generic domain unwrap (maps are domains) */
+	if (IsMapTypeOid(typeOid))
+		return true;
+
+	char		typtype = get_typtype(typeOid);
+
+	if (typtype == TYPTYPE_DOMAIN)
+		return TypeNeedsIcebergSizeClamping(getBaseType(typeOid));
+
+	/* Any composite type: aggregate size of fields matters. */
+	if (typtype == TYPTYPE_COMPOSITE)
+		return true;
+
+	/*
+	 * Any remaining scalar leaf that Iceberg stores as string or binary
+	 * (hstore, citext, PostGIS geometry, ...): unlike text/bytea we can't
+	 * safely truncate the serialized form, so it is NULLed when oversize.
+	 */
+	if (IcebergScalarStorageIsStringOrBinary(typeOid, NULL))
+		return true;
 
 	return false;
 }
