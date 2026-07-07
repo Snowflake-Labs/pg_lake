@@ -160,15 +160,33 @@ test_agg_cases = [
         True,
     ),
     (
+        "sinh",
+        "WHERE abs(sinh(col_double) - 0.5781516) < 0.001",
+        '"sinh"(',
+        True,
+    ),
+    (
         "asinh",
         "WHERE col_double > 1 and abs(asinh(col_double) - 0.9503469) < 0.001",
         '"asinh"(',
         True,
     ),
     (
+        "cosh",
+        "WHERE abs(cosh(col_double) - 1.1551014) < 0.001",
+        '"cosh"(',
+        True,
+    ),
+    (
         "acosh",
         "WHERE col_double > 1 and abs(acosh(col_double) - 0.4435682) < 0.001",
         '"acosh_pg"(',
+        True,
+    ),
+    (
+        "tanh",
+        "WHERE abs(tanh(col_double) - 0.5005202) < 0.001",
+        '"tanh"(',
         True,
     ),
     (
@@ -277,3 +295,59 @@ def create_math_pushdown_table(pg_conn, s3, extension):
 
     run_command("DROP SCHEMA math_f_pushdown CASCADE", pg_conn)
     pg_conn.commit()
+
+
+@pytest.fixture(scope="module")
+def create_hyperbolic_values_table(pg_conn, s3, extension):
+    url = f"s3://{TEST_BUCKET}/hyperbolic_values_test/data.parquet"
+    run_command(
+        f"""
+        COPY (
+            SELECT NULL::double precision AS col_val
+            UNION ALL SELECT 0.0::double precision
+            UNION ALL SELECT -1.0::double precision
+            UNION ALL SELECT 1.0::double precision
+        ) TO '{url}' WITH (FORMAT 'parquet');
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        CREATE SCHEMA hyperbolic_vals;
+        CREATE FOREIGN TABLE hyperbolic_vals.fdw_tbl (col_val double precision)
+        SERVER pg_lake OPTIONS (format 'parquet', path '{url}');
+        CREATE TABLE hyperbolic_vals.heap_tbl (col_val double precision);
+        COPY hyperbolic_vals.heap_tbl FROM '{url}';
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    yield
+
+    run_command("DROP SCHEMA hyperbolic_vals CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+@pytest.mark.parametrize(
+    "func, expected_expression",
+    [
+        ("sinh", '"sinh"('),
+        ("cosh", '"cosh"('),
+        ("tanh", '"tanh"('),
+    ],
+)
+def test_hyperbolic_functions_specific_values(
+    create_hyperbolic_values_table, pg_conn, func, expected_expression
+):
+    """Verify sinh/cosh/tanh pushdown returns same results as Postgres for 0, -1, 1, NULL."""
+    query = f"SELECT {func}(col_val) FROM hyperbolic_vals.fdw_tbl"
+    assert_remote_query_contains_expression(query, expected_expression, pg_conn)
+    assert_query_results_on_tables(
+        query,
+        pg_conn,
+        ["hyperbolic_vals.fdw_tbl"],
+        ["hyperbolic_vals.heap_tbl"],
+    )
