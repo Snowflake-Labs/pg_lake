@@ -1,5 +1,5 @@
 diff --git a/extension/parquet/parquet_writer.cpp b/extension/parquet/parquet_writer.cpp
-index 3c6d11d9ad..d1a7b54ad5 100644
+index 3c6d11d9ad..9e16d1b768 100644
 --- a/extension/parquet/parquet_writer.cpp
 +++ b/extension/parquet/parquet_writer.cpp
 @@ -3,6 +3,7 @@
@@ -10,7 +10,7 @@ index 3c6d11d9ad..d1a7b54ad5 100644
  #include "parquet_timestamp.hpp"
  #include "resizable_buffer.hpp"
  #include "duckdb/common/file_system.hpp"
-@@ -656,8 +657,20 @@ struct DecimalStatsUnifier : public NumericStatsUnifier<T> {
+@@ -656,8 +657,50 @@ struct DecimalStatsUnifier : public NumericStatsUnifier<T> {
  		if (stats.empty()) {
  			return string();
  		}
@@ -30,10 +30,40 @@ index 3c6d11d9ad..d1a7b54ad5 100644
 +			auto numeric_val = Load<T>(stats_data);
 +			return Value::DECIMAL(numeric_val, width, scale).ToString();
 +		}
++	}
++
++	void UnifyMinMax(const string &new_min, const string &new_max) override {
++		if (sizeof(T) != sizeof(hugeint_t))
++		{
++			// INT16/32/64-backed decimals are little-endian; the base comparison is correct.
++			BaseNumericStatsUnifier<T>::UnifyMinMax(new_min, new_max);
++			return;
++		}
++
++		// 128-bit decimals are stored big-endian two's complement, so decode before comparing.
++		auto decode = [](const string &stats) {
++			auto _schema = ParquetColumnSchema();
++			return ParquetDecimalUtils::ReadDecimalValue<hugeint_t>(const_data_ptr_cast(stats.data()), stats.size(),
++			                                                        _schema);
++		};
++
++		if (!this->min_is_set) {
++			this->global_min = new_min;
++			this->min_is_set = true;
++		} else if (LessThan::Operation(decode(new_min), decode(this->global_min))) {
++			this->global_min = new_min;
++		}
++
++		if (!this->max_is_set) {
++			this->global_max = new_max;
++			this->max_is_set = true;
++		} else if (GreaterThan::Operation(decode(new_max), decode(this->global_max))) {
++			this->global_max = new_max;
++		}
  	}
  };
  
-@@ -781,7 +794,7 @@ struct NullStatsUnifier : public ColumnStatsUnifier {
+@@ -781,7 +824,7 @@ struct NullStatsUnifier : public ColumnStatsUnifier {
  static unique_ptr<ColumnStatsUnifier> GetBaseStatsUnifier(const LogicalType &type) {
  	switch (type.id()) {
  	case LogicalTypeId::BOOLEAN:
@@ -42,7 +72,7 @@ index 3c6d11d9ad..d1a7b54ad5 100644
  	case LogicalTypeId::TINYINT:
  	case LogicalTypeId::SMALLINT:
  	case LogicalTypeId::INTEGER:
-@@ -826,6 +839,8 @@ static unique_ptr<ColumnStatsUnifier> GetBaseStatsUnifier(const LogicalType &typ
+@@ -826,6 +869,8 @@ static unique_ptr<ColumnStatsUnifier> GetBaseStatsUnifier(const LogicalType &typ
  			return make_uniq<DecimalStatsUnifier<int32_t>>(width, scale);
  		case PhysicalType::INT64:
  			return make_uniq<DecimalStatsUnifier<int64_t>>(width, scale);

@@ -1643,3 +1643,63 @@ def create_helper_functions(superuser_conn, s3, iceberg_extension):
     )
 
     superuser_conn.commit()
+
+
+def test_pg_lake_iceberg_decimal38_multi_row_group_bounds(
+    pg_conn,
+    pgduck_conn,
+    iceberg_extension,
+    s3,
+    with_default_location,
+):
+    """Manifest upper bound for a DECIMAL(38,0) column must match the data.
+
+    When such a column spans more than one row group, DuckDB's RETURN_STATS
+    used to swap min/max (big-endian decimal stats compared as little-endian),
+    so pg_lake wrote an upper bound below the real maximum (SNOW-3701832).
+    """
+    # target_row_group_size_mb caps a row group by uncompressed bytes; 1MB makes
+    # a ~16-byte NUMERIC(38,0) column flush after ~65k rows, so 80k rows produce
+    # >1 row group with distinct per-group maxima (126619 then 19308).
+    run_command("SET pg_lake_table.target_row_group_size_mb TO 1;", pg_conn)
+    run_command(
+        "CREATE TABLE dec38_bounds(c numeric(38,0)) USING iceberg;",
+        pg_conn,
+    )
+    run_command(
+        """
+        INSERT INTO dec38_bounds
+        SELECT CASE WHEN i < 40000 THEN 126619 ELSE 19308 END::numeric(38,0)
+        FROM generate_series(0, 79999) i;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    stats = run_query(
+        """
+        SELECT path, upper_bounds
+        FROM lake_iceberg.data_file_stats(
+            (SELECT metadata_location FROM iceberg_tables WHERE table_name = 'dec38_bounds')
+        );
+        """,
+        pg_conn,
+    )
+    assert len(stats) == 1, "expected a single data file"
+    path, upper_bounds = stats[0]["path"], stats[0]["upper_bounds"]
+
+    # Guard: the bug only manifests across row groups.
+    footer = run_query(
+        f"""
+        SELECT count(*), max(stats_max::DECIMAL(38,0))
+        FROM parquet_metadata('{path}') WHERE path_in_schema = 'c'
+        """,
+        pgduck_conn,
+    )
+    assert footer[0][0] >= 2, "test needs a multi-row-group file"
+    assert footer[0][1] == 126619
+
+    assert int(str(upper_bounds["1"])) == 126619
+
+    run_command("DROP TABLE dec38_bounds", pg_conn)
+    pg_conn.commit()
