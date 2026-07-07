@@ -116,6 +116,16 @@ typedef struct
 
 static HTAB *TypeContainsJsonbLeafCache = NULL;
 
+/*
+ * Syscache callbacks can never be unregistered and are appended to a
+ * fixed-size array (MAX_SYSCACHE_CALLBACKS).  Track registration separately
+ * from the cache lifetime so a cache rebuild after invalidation does not
+ * re-register them: the invalidation callback nulls TypeContainsJsonbLeafCache,
+ * and without this guard every TYPEOID/RELOID invalidation would leak two more
+ * slots, exhausting the array under DDL churn.
+ */
+static bool TypeContainsJsonbLeafCallbackRegistered = false;
+
 static void
 TypeContainsJsonbLeafCacheInval(Datum arg, int cacheid, uint32 hashvalue)
 {
@@ -194,12 +204,16 @@ TypeContainsJsonbLeaf(Oid typeOid)
 			hash_create("Iceberg TypeContainsJsonbLeaf cache", 64, &ctl,
 						HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
 
-		CacheRegisterSyscacheCallback(TYPEOID,
-									  TypeContainsJsonbLeafCacheInval,
-									  (Datum) 0);
-		CacheRegisterSyscacheCallback(RELOID,
-									  TypeContainsJsonbLeafCacheInval,
-									  (Datum) 0);
+		if (!TypeContainsJsonbLeafCallbackRegistered)
+		{
+			CacheRegisterSyscacheCallback(TYPEOID,
+										  TypeContainsJsonbLeafCacheInval,
+										  (Datum) 0);
+			CacheRegisterSyscacheCallback(RELOID,
+										  TypeContainsJsonbLeafCacheInval,
+										  (Datum) 0);
+			TypeContainsJsonbLeafCallbackRegistered = true;
+		}
 	}
 
 	entry = hash_search(TypeContainsJsonbLeafCache, &typeOid,
