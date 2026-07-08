@@ -20,16 +20,20 @@ def test_return_stats_decimal38_multi_row_group(pgduck_conn, tmp_path):
     """
     path = str(tmp_path / "dec38.parquet")
 
+    # Two row groups with distinct maxima; the endianness bug swaps them.
+    rg0_high = 126619  # row group 0 (the true file maximum)
+    rg1_low = 19308  # row group 1 (the true file minimum)
+
     copy = f"""
         COPY (
-            SELECT CASE WHEN i < 2048 THEN 126619 ELSE 19308 END::DECIMAL(38,0) AS c
+            SELECT CASE WHEN i < 2048 THEN {rg0_high} ELSE {rg1_low} END::DECIMAL(38,0) AS c
             FROM range(4096) t(i)
         ) TO '{path}' (FORMAT PARQUET, ROW_GROUP_SIZE 2048, RETURN_STATS)
     """
 
     stats = run_query(copy, pgduck_conn)
     stat_min, stat_max = _extract_min_max(stats[0]["column_statistics"])
-    assert (stat_min, stat_max) == ("19308", "126619")
+    assert (stat_min, stat_max) == (str(rg1_low), str(rg0_high))
 
     # Ground truth from the Parquet footer, which is always correct.
     footer = run_query(
@@ -40,6 +44,6 @@ def test_return_stats_decimal38_multi_row_group(pgduck_conn, tmp_path):
         """,
         pgduck_conn,
     )
-    assert footer[0][0] == 19308
-    assert footer[0][1] == 126619
+    assert footer[0][0] == rg1_low
+    assert footer[0][1] == rg0_high
     assert footer[0][2] >= 2
