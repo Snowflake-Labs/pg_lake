@@ -3,6 +3,14 @@ import pytest
 from utils_pytest import *
 
 
+@pytest.fixture(scope="module", autouse=True)
+def setup_file_access_perms(superuser_conn, app_user):
+    run_command(f"GRANT pg_read_server_files TO {app_user};", superuser_conn)
+    run_command(f"GRANT pg_write_server_files TO {app_user};", superuser_conn)
+    superuser_conn.commit()
+    yield
+
+
 @pytest.fixture(scope="module")
 def read_replica(superuser_conn, s3, installcheck, app_user):
     # We currently do not perform read replica checks under installcheck

@@ -409,7 +409,9 @@ def test_create_table_with_wrong_location(s3, pg_conn, extension):
         raise_error=False,
     )
 
-    assert "s3 configuration parameters are not allowed in the" in error
+    # Bare 'region' is not on the cloud-storage URL allowlist
+    # (only s3_region and s3_requester_pays are accepted).
+    assert "is not permitted in cloud storage URLs" in error
 
     pg_conn.rollback()
 

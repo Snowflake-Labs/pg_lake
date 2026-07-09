@@ -315,7 +315,7 @@ FileCacheManager::CacheFileInternal(ClientContext &context, string url, bool for
 	if (!TryGetCacheFilePath(cacheDir, url, finalCacheFilePath))
 		throw InvalidInputException("URL cannot be cached: " + url);
 
-	if (!force && file_system.FileExists(finalCacheFilePath))
+	if (!force && FileUtils::IsOwnedByCurrentUser(finalCacheFilePath))
 	{
 		/* count explicit cache operation as an access */
 		UpdateAccessTime(finalCacheFilePath);

@@ -224,8 +224,8 @@ ProcessCreateFromFile(CreateStmt *createStmt,
 		Assert(false);
 	}
 
-	/* permission checks */
-	CheckURLReadAccess();
+	/* permission checks: role + scheme + ?-rejection on the user-supplied URL */
+	CheckURLReadAccess(definitionFromURL != NULL ? definitionFromURL : loadFromURL);
 
 	/*
 	 * Extract the options we need for DescribeColumnsForURL and COPY.

@@ -11,12 +11,14 @@ import platform
 
 PGDUCK_UNIX_DOMAIN_PATH = "/tmp"
 PGDUCK_PORT = 8254  # lets a less common port
-DUCKDB_DATABASE_FILE_PATH = "/tmp/duckdb.db"
+DUCKDB_DATABASE_FILE_PATH = "/tmp/pgduck_server_test_start.db"
 PGDUCK_CACHE_DIR = f"/tmp/cache.{PGDUCK_PORT}"
 
 
 def test_server_start():
-    server = PgDuckServer(port=PGDUCK_PORT)
+    server = PgDuckServer(
+        port=PGDUCK_PORT, duckdb_database_file_path=DUCKDB_DATABASE_FILE_PATH
+    )
     assert is_server_listening(server.socket_path)
     assert has_duckdb_created_file(DUCKDB_DATABASE_FILE_PATH)
 
@@ -26,7 +28,9 @@ def test_server_start():
 )
 def test_server_start_abstract_socket():
     server = PgDuckServer(
-        unix_socket_directory="@" + PGDUCK_UNIX_DOMAIN_PATH, port=PGDUCK_PORT
+        unix_socket_directory="@" + PGDUCK_UNIX_DOMAIN_PATH,
+        port=PGDUCK_PORT,
+        duckdb_database_file_path=DUCKDB_DATABASE_FILE_PATH,
     )
     assert is_server_listening(server.socket_path)
     assert has_duckdb_created_file(DUCKDB_DATABASE_FILE_PATH)
@@ -182,7 +186,12 @@ def test_long_unix_socket_path():
 
 @pytest.mark.parametrize("use_debug", [False, True])
 def test_server_debug_messages(use_debug):
-    server = PgDuckServer(port=PGDUCK_PORT, debug=use_debug, need_output=True)
+    server = PgDuckServer(
+        port=PGDUCK_PORT,
+        debug=use_debug,
+        need_output=True,
+        duckdb_database_file_path=DUCKDB_DATABASE_FILE_PATH,
+    )
 
     assert is_server_listening(server.socket_path)
     assert has_duckdb_created_file(DUCKDB_DATABASE_FILE_PATH)

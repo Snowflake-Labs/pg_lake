@@ -107,8 +107,18 @@ PgDuckCopyBenchTablesToRemoteParquet(const char *tableNames[], int length, char 
 	{
 		const char *tableName = tableNames[i];
 
-		char	   *query = psprintf("COPY %s TO '%s/%s.parquet' (FORMAT 'parquet')",
-									 tableName, location, tableName);
+		/*
+		 * quote_literal_cstr wraps the path in single quotes and escapes any
+		 * embedded single quotes, preventing the attacker-controlled
+		 * `location` from breaking out of the string literal and injecting
+		 * additional DuckDB statements.  The previously used format 'COPY %s
+		 * TO \'%s/%s.parquet\'' embedded `location` raw, allowing
+		 * stacked-query injection into the shared DuckDB engine that owns the
+		 * deployment's cloud credentials.
+		 */
+		char	   *path = psprintf("%s/%s.parquet", location, tableName);
+		char	   *query = psprintf("COPY %s TO %s (FORMAT 'parquet')",
+									 tableName, quote_literal_cstr(path));
 
 		ExecuteCommandInPGDuck(query);
 	}
@@ -185,7 +195,7 @@ PgLakeDropBenchTables(const char *tableNames[], int length, char *location)
 
 		char	   *path = psprintf("%s/%s.parquet", location, tableName);
 
-		appendStringInfo(query, "SELECT  lake_file_cache.remove('%s');", path);
+		appendStringInfo(query, "SELECT lake_file_cache.remove(%s);", quote_literal_cstr(path));
 	}
 
 	SPI_START();
@@ -218,21 +228,21 @@ PgLakeCreateBenchTables(const char *tableNames[], char **partitionBys, int lengt
 		if (tableType == BENCHMARK_ICEBERG_TABLE)
 		{
 			appendStringInfo(query,
-							 "CREATE TABLE %s() USING iceberg WITH (load_from = '%s' %s);",
-							 tableName, path,
-							 partitionBy ? psprintf(", partition_by='%s'", partitionBy) : "");
+							 "CREATE TABLE %s() USING iceberg WITH (load_from = %s %s);",
+							 tableName, quote_literal_cstr(path),
+							 partitionBy ? psprintf(", partition_by=%s", quote_literal_cstr(partitionBy)) : "");
 		}
 		else if (tableType == BENCHMARK_LAKE_TABLE)
 		{
 			appendStringInfo(query,
 							 "CREATE FOREIGN TABLE %s() SERVER pg_lake "
-							 "OPTIONS (path '%s', format 'parquet');",
-							 tableName, path);
+							 "OPTIONS (path %s, format 'parquet');",
+							 tableName, quote_literal_cstr(path));
 		}
 		else if (tableType == BENCHMARK_HEAP_TABLE)
 		{
 			appendStringInfo(query,
-							 "CREATE TABLE %s() WITH (load_from = '%s');", tableName, path);
+							 "CREATE TABLE %s() WITH (load_from = %s);", tableName, quote_literal_cstr(path));
 		}
 		else
 		{

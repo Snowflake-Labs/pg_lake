@@ -176,7 +176,7 @@ pg_lake_iceberg_vacuum(PG_FUNCTION_ARGS)
 
 			START_TRANSACTION();
 			{
-				ExportIcebergCatalogIfChanged();
+				ExportIcebergCatalogIfNeeded();
 			}
 			END_TRANSACTION_NO_THROW(WARNING);
 		}

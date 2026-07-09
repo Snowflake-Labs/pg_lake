@@ -6,7 +6,7 @@ from utils_pytest import *
 
 PGDUCK_UNIX_DOMAIN_PATH = "/tmp"
 PGDUCK_PORT = 5332
-DUCKDB_DATABASE_FILE_PATH = "/tmp/duckdb.db"
+DUCKDB_DATABASE_FILE_PATH = str(Path.home() / ".pglake" / "pgduck_server.db")
 PGDUCK_CACHE_DIR = f"/tmp/cache.{PGDUCK_PORT}"
 DEFAULT_MAX_CLIENTS = 10000
 DEFAULT_MEMORY_LIMIT = "80 percent of the system memory"

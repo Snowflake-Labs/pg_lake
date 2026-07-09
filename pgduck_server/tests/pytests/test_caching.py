@@ -6,6 +6,89 @@ from utils_pytest import *
 CACHE_FILE_PREFIX = "pgl-cache."
 
 
+def test_cache_file_owner_only_perms(s3, pgduck_conn):
+    """Cache files and directories must be owner-only (0600 / 0700).
+
+    pgduck_server sets umask(0077) at startup so DuckDB's mkdir(0755) and
+    open(0666) end up masked to 0700 / 0600. Without that, any local user
+    could read cached cloud-storage data without credentials.
+    """
+    key = "test_cache_file_owner_only_perms/data.csv"
+    url = f"s3://{TEST_BUCKET}/{key}"
+    cached_path = Path(
+        f"{server_params.PGDUCK_CACHE_DIR}/s3/{TEST_BUCKET}"
+        f"/test_cache_file_owner_only_perms/{CACHE_FILE_PREFIX}data.csv"
+    )
+
+    run_command(
+        f"COPY (SELECT * FROM generate_series(1,10)) TO '{url}' WITH (header false);",
+        pgduck_conn,
+    )
+
+    run_command(f"CALL pg_lake_cache_file('{url}');", pgduck_conn)
+    assert cached_path.exists()
+
+    file_mode = cached_path.stat().st_mode & 0o777
+    assert file_mode == 0o600, f"cache file mode is {oct(file_mode)}, expected 0o600"
+
+    parent_mode = cached_path.parent.stat().st_mode & 0o777
+    assert (
+        parent_mode == 0o700
+    ), f"cache leaf dir mode is {oct(parent_mode)}, expected 0o700"
+
+    cache_root_mode = Path(server_params.PGDUCK_CACHE_DIR).stat().st_mode & 0o777
+    assert (
+        cache_root_mode == 0o700
+    ), f"cache root mode is {oct(cache_root_mode)}, expected 0o700"
+
+    run_query(f"CALL pg_lake_uncache_file('{url}');", pgduck_conn)
+    pgduck_conn.rollback()
+
+
+def test_cache_rejects_non_regular_file(s3, pgduck_conn, tmp_path):
+    """A non-regular file (e.g. a symlink) at the cache path must be replaced.
+
+    FileUtils::IsOwnedByCurrentUser uses lstat() and rejects anything that is
+    not a regular file owned by the effective UID. Replacing the cached file
+    with a symlink simulates a pre-planted entry; the next pg_lake_cache_file
+    should re-download and overwrite the symlink with a real file.
+    """
+    key = "test_cache_rejects_non_regular_file/data.csv"
+    url = f"s3://{TEST_BUCKET}/{key}"
+    cached_path = Path(
+        f"{server_params.PGDUCK_CACHE_DIR}/s3/{TEST_BUCKET}"
+        f"/test_cache_rejects_non_regular_file/{CACHE_FILE_PREFIX}data.csv"
+    )
+
+    run_command(
+        f"COPY (SELECT * FROM generate_series(1,10)) TO '{url}' WITH (header false);",
+        pgduck_conn,
+    )
+
+    run_command(f"CALL pg_lake_cache_file('{url}');", pgduck_conn)
+    assert cached_path.exists() and not cached_path.is_symlink()
+    real_size = cached_path.stat().st_size
+
+    # Replace the cached file with a symlink to a different file. The
+    # IsOwnedByCurrentUser check uses lstat, so the symlink fails S_ISREG
+    # and the cache treats the entry as missing.
+    poisoned = tmp_path / "poisoned.csv"
+    poisoned.write_text("attacker,content\n")
+    cached_path.unlink()
+    cached_path.symlink_to(poisoned)
+
+    # Without force, the no-force path should still re-download because the
+    # ownership check fails on the symlink.
+    run_command(f"CALL pg_lake_cache_file('{url}');", pgduck_conn)
+
+    assert cached_path.is_file() and not cached_path.is_symlink()
+    assert cached_path.stat().st_size == real_size
+    assert (cached_path.stat().st_mode & 0o777) == 0o600
+
+    run_query(f"CALL pg_lake_uncache_file('{url}');", pgduck_conn)
+    pgduck_conn.rollback()
+
+
 def test_pg_lake_cache_file(s3, gcs, azure, pgduck_conn):
     run_pg_lake_cache_file_test_for_protocol("s3", TEST_BUCKET, pgduck_conn, s3)
     run_pg_lake_cache_file_test_for_protocol("gs", TEST_BUCKET_GCS, pgduck_conn, gcs)

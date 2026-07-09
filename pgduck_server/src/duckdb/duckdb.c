@@ -33,6 +33,8 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "access/attnum.h"
 #include "mb/pg_wchar.h"
@@ -147,6 +149,63 @@ static const char *command_tag(duckdb_statement_type statementType);
 
 
 /*
+ * verify_database_file_safe checks that an existing on-disk DuckDB database
+ * is owned by the current effective UID and is not a symbolic link.  This
+ * prevents /tmp squatting and TOCTOU symlink attacks: a local unprivileged
+ * user who pre-creates /tmp/duckdb.db (the former insecure default) and
+ * seeds it with attacker-defined macros could have read_parquet/read_csv/
+ * read_text execute their macro body inside pgduck_server's process.
+ *
+ * We use lstat() not stat() so a symlink is detected as a symlink rather
+ * than followed to its target.  Returns true when the path is safe to open
+ * (or does not yet exist, in which case duckdb_open_ext() creates it
+ * safely).  Returns false and emits PGDUCK_SERVER_ERROR otherwise.  For
+ * ":memory:" we always return true since there is no on-disk file.
+ */
+static bool
+verify_database_file_safe(const char *databaseFilePath)
+{
+	struct stat st;
+
+	if (strcmp(databaseFilePath, DUCKDB_MEMORY_DB_PATH) == 0)
+		return true;
+
+	if (lstat(databaseFilePath, &st) != 0)
+	{
+		/*
+		 * If lstat returns ENOENT the file does not exist yet and will be
+		 * created safely by duckdb_open_ext().  Other errors are ignored here
+		 * and will surface as a more descriptive error from duckdb_open_ext.
+		 */
+		return true;
+	}
+
+	if (S_ISLNK(st.st_mode))
+	{
+		PGDUCK_SERVER_ERROR(
+							"refusing to open DuckDB database \"%s\": "
+							"path is a symbolic link; "
+							"remove the symlink or choose a different path",
+							databaseFilePath);
+		return false;
+	}
+
+	if (st.st_uid != geteuid())
+	{
+		PGDUCK_SERVER_ERROR(
+							"refusing to open DuckDB database \"%s\": "
+							"file is owned by uid %d but pgduck_server is running as uid %d; "
+							"possible /tmp squatting attack -- "
+							"delete the file, move it, or use --duckdb_database_file_path "
+							"to point to a path you own",
+							databaseFilePath, (int) st.st_uid, (int) geteuid());
+		return false;
+	}
+
+	return true;
+}
+
+/*
  * duckdb_global_init initializes the DuckDB database, which can be used
  * by different threads simulteously.
  */
@@ -215,6 +274,11 @@ duckdb_global_init(char *databaseFilePath,
 	/* disable the file cache; we have our own */
 	duckdb_set_config(duckConfig, "enable_external_file_cache", "false");
 
+	if (!verify_database_file_safe(databaseFilePath))
+	{
+		duckdb_destroy_config(&duckConfig);
+		return DUCKDB_INITIALIZATION_ERROR;
+	}
 
 	if (duckdb_open_ext(databaseFilePath, &DuckDB, duckConfig, &duckError) == DuckDBError)
 	{

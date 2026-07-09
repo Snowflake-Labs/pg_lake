@@ -22,13 +22,16 @@
  */
 #include "postgres_fe.h"
 
+#include <errno.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <getopt.h>
 
 #include "command_line/command_line.h"
+#include "duckdb/duckdb.h"
 #include "utils/pg_log_utils.h"
 #include "utils/pgduck_log_utils.h"
 #include "utils/string_utils.h"
@@ -43,9 +46,56 @@
 #define DEFAULT_UNIX_DOMAIN_GROUP ""
 #define DEFAULT_UNIX_DOMAIN_PERMISSIONS 0770
 #define DEFAULT_PORT 5332
-#define DEFAULT_DUCKDB_DATABASE_FILE_PATH "/tmp/duckdb.db"
 #define DEFAULT_MAX_CLIENTS 10000
 #define DEFAULT_CACHE_ON_WRITE_MAX_SIZE 1024 * 1024 * 1024 // 1GB
+
+/*
+ * ensure_pglake_user_dir returns $HOME/.pglake, creating it (mode 0700) if
+ * it does not yet exist.  Returns NULL when $HOME is unset or the directory
+ * cannot be created.
+ */
+static const char *
+ensure_pglake_user_dir(void)
+{
+	static char dirPath[MAXPGPATH];
+	const char *home;
+
+	home = getenv("HOME");
+	if (home == NULL)
+		return NULL;
+
+	if (snprintf(dirPath, sizeof(dirPath), "%s/.pglake", home) >= (int) sizeof(dirPath))
+		return NULL;
+
+	if (mkdir(dirPath, 0700) != 0 && errno != EEXIST)
+		return NULL;
+
+	return dirPath;
+}
+
+/*
+ * get_or_create_duckdb_database_file returns ~/.pglake/pgduck_server.db,
+ * creating ~/.pglake/ if necessary.  Using the user's home directory (not
+ * world-writable) avoids /tmp squatting attacks
+ * while still allowing DuckDB to spill large queries to disk.  The lstat()
+ * ownership check in duckdb_global_init() provides an additional guard.
+ * Falls back to ":memory:" when $HOME is unset or the directory cannot be
+ * created.
+ */
+static char *
+get_or_create_duckdb_database_file(void)
+{
+	static char pathBuf[MAXPGPATH];
+	const char *dir = ensure_pglake_user_dir();
+
+	if (dir == NULL)
+		return DUCKDB_MEMORY_DB_PATH;
+
+	if (snprintf(pathBuf, sizeof(pathBuf), "%s/pgduck_server.db", dir) >= (int) sizeof(pathBuf))
+		return DUCKDB_MEMORY_DB_PATH;
+
+	return pathBuf;
+}
 
 bool		IsOutputVerbose = false;
 
@@ -62,7 +112,7 @@ print_usage()
 	printf(" --memory_limit=<memory_limit>		Optionally specify the maximum memory of pgduck_server similar to DuckDB's memory_limit, the default is 80 percent of the system memory\n");
 	printf(" --continue_on_oom                  If out of memory error occurs, continue operating\n");
 	printf(" --cache_on_write_max_size=<size>   Optionally specify the maximum allowed cache size on write\n");
-	printf(" --duckdb_database_file_path <path>	Specify the database file path for DuckDB, default is %s\n", DEFAULT_DUCKDB_DATABASE_FILE_PATH);
+	printf(" --duckdb_database_file_path <path>	Specify the database file path for DuckDB, default is ~/.pglake/pgduck_server.db\n");
 	printf(" --check_cli_params_only       		Only check the cli arguments, do not run the server\n");
 	printf(" --init_file_path <path>			Execute all statements in this file on start-up\n");
 	printf(" --cache_dir                    	Specify the directory to use to cache remote files (from S3)\n");
@@ -90,7 +140,7 @@ parse_arguments(int argc, char *argv[])
 		.memory_limit = NULL,
 		.continue_on_oom = false,
 		.cache_on_write_max_size = DEFAULT_CACHE_ON_WRITE_MAX_SIZE,
-		.duckdb_database_file_path = DEFAULT_DUCKDB_DATABASE_FILE_PATH,
+		.duckdb_database_file_path = get_or_create_duckdb_database_file(),
 		.init_file_path = NULL,
 		.pidfile_path = NULL,
 		.cache_dir = NULL,

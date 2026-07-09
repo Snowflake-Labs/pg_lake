@@ -37,6 +37,7 @@
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/pgduck/serialize.h"
 #include "pg_lake/util/numeric.h"
+#include "pg_lake/util/injection_points.h"
 #include "executor/executor.h"
 #include "mb/pg_wchar.h"
 #include "nodes/execnodes.h"
@@ -371,7 +372,18 @@ StartCopyTo(CopyToState cstate, TupleDesc tupDesc)
 	MemoryContext oldcontext = MemoryContextSwitchTo(cstate->copycontext);
 
 	/* create the file */
-	mode_t		oumask = umask(S_IWGRP | S_IWOTH);
+
+	/*
+	 * Use a umask that produces 0640 (owner rw, group r, other none). 0666 &
+	 * ~(S_IWGRP|S_IXGRP|S_IROTH|S_IWOTH|S_IXOTH) = 0640.
+	 *
+	 * Group-read is intentional: pgduck_server may run as a different OS user
+	 * in the same postgres group and must be able to open these temp files
+	 * via read_csv() inside AppendChangeLogBatchToIceberg.  World-read is
+	 * removed to prevent unprivileged local users on 0750 PGDATA hosts from
+	 * reading raw row images that bypass SQL ACL and Row-Level Security.
+	 */
+	mode_t		oumask = umask(S_IWGRP | S_IXGRP | S_IROTH | S_IWOTH | S_IXOTH);
 
 	PG_TRY();
 	{
@@ -412,6 +424,9 @@ StartCopyTo(CopyToState cstate, TupleDesc tupDesc)
 		ereport(ERROR,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is a directory", cstate->filename)));
+
+	/* Allow tests to stat the temp file while it is still on disk. */
+	INJECTION_POINT_COMPAT("csv-writer-file-opened");
 
 
 	/* get the attribute names from the tuple descriptor */

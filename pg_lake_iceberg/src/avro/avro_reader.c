@@ -391,8 +391,6 @@ AvroGetInt32ArrayField(avro_value_t * record, char *fieldName, AvroFieldRequired
 		{
 			ereport(ERROR, (errmsg("%s is not of expected type", fieldName)));
 		}
-
-		entries++;
 	}
 }
 

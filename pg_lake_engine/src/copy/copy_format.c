@@ -528,6 +528,8 @@ FindDataFormatAndCompression(PgLakeTableType tableType,
 
 	/* override the format/compression if explicitly specified */
 	ListCell   *optionCell = NULL;
+	bool		formatSeen = false;
+	bool		compressionSeen = false;
 
 	foreach(optionCell, copyOptions)
 	{
@@ -535,6 +537,21 @@ FindDataFormatAndCompression(PgLakeTableType tableType,
 
 		if (strcmp(option->defname, "format") == 0)
 		{
+			if (formatSeen)
+			{
+				/*
+				 * Duplicate 'format' options were silently accepted before
+				 * this fix.  OptionsToCopyDataFormat() took the first value
+				 * while FindDataFormatAndCompression() took the last,
+				 * creating an inconsistency exploitable as a permission-check
+				 * bypass: an attacker could pass WITH (format 'json', format
+				 * 'csv') so that the json/parquet gate passed but DuckDB
+				 * executed read_csv().
+				 */
+				ereport(ERROR, (errcode(ERRCODE_SYNTAX_ERROR),
+								errmsg("pg_lake_copy: duplicate \"format\" option")));
+			}
+			formatSeen = true;
 			char	   *formatName = defGetString(option);
 
 			*format = NameToCopyDataFormat(formatName);
@@ -547,6 +564,12 @@ FindDataFormatAndCompression(PgLakeTableType tableType,
 		}
 		else if (strcmp(option->defname, "compression") == 0)
 		{
+			if (compressionSeen)
+			{
+				ereport(ERROR, (errcode(ERRCODE_SYNTAX_ERROR),
+								errmsg("pg_lake_copy: duplicate \"compression\" option")));
+			}
+			compressionSeen = true;
 			char	   *compressionName = defGetString(option);
 
 			*compression = NameToCopyDataCompression(compressionName);

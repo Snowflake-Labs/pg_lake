@@ -65,7 +65,7 @@ pg_lake_file_size(PG_FUNCTION_ARGS)
 		ereport(ERROR, (errmsg("file_size: only s3://, gs://, az://, azure://, and abfss:// urls are supported"),
 						errcode(ERRCODE_INVALID_PARAMETER_VALUE)));
 
-	CheckURLReadAccess();
+	CheckURLReadAccess(path);
 
 	int64		fileSize = GetRemoteFileSize(path);
 
@@ -97,7 +97,7 @@ pg_lake_list_files(PG_FUNCTION_ARGS)
 		ereport(ERROR, (errmsg("list_files: only s3://, gs://, az://, azure://, abfss://, and hf:// urls are supported"),
 						errcode(ERRCODE_INVALID_PARAMETER_VALUE)));
 
-	CheckURLReadAccess();
+	CheckURLReadAccess(globURL);
 
 	List	   *files = ListRemoteFileDescriptions(globURL);
 	ListCell   *fileCell = NULL;
@@ -163,7 +163,7 @@ pg_lake_file_exists(PG_FUNCTION_ARGS)
 		ereport(ERROR, (errmsg("file_exists: only s3://, gs://, az://, azure://, and abfss:// urls are supported"),
 						errcode(ERRCODE_INVALID_PARAMETER_VALUE)));
 
-	CheckURLReadAccess();
+	CheckURLReadAccess(path);
 
 	bool		fileExists = RemoteFileExists(path);
 
@@ -221,7 +221,7 @@ pg_lake_file_preview(PG_FUNCTION_ARGS)
 		ereport(ERROR, (errmsg("file_preview: only s3://, gs://, az://, azure://, and abfss:// urls are supported"),
 						errcode(ERRCODE_INVALID_PARAMETER_VALUE)));
 
-	CheckURLReadAccess();
+	CheckURLReadAccess(url);
 
 	InitMaterializedSRF(fcinfo, 0);
 
@@ -272,7 +272,7 @@ pg_lake_delete_file(PG_FUNCTION_ARGS)
 		ereport(ERROR, (errmsg("delete_file: only s3://, gs://, az://, azure://, and abfss:// urls are supported"),
 						errcode(ERRCODE_INVALID_PARAMETER_VALUE)));
 
-	CheckURLWriteAccess();
+	CheckURLWriteAccess(path);
 
 	if (!EnableDeleteFileFunction)
 		ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),

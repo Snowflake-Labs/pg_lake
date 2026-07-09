@@ -22,6 +22,7 @@
 
 #include "pg_lake/benchmark.h"
 #include "pg_lake/copy/copy_format.h"
+#include "pg_lake/permissions/roles.h"
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/util/string_utils.h"
 
@@ -73,6 +74,9 @@ pg_lake_tpch_gen(PG_FUNCTION_ARGS)
 						errmsg("only s3://, gs://, az://, azure://, and abfss:// URLs are "
 							   "currently supported")));
 
+	/* Require lake_write: benchmark gen writes to object storage. */
+	CheckURLWriteAccess(location);
+
 	Oid			tableTypeId = (BenchmarkTableType) PG_GETARG_OID(1);
 	BenchmarkTableType tableType = GetBenchTableType(tableTypeId);
 
@@ -106,6 +110,9 @@ pg_lake_tpch_gen_partitioned(PG_FUNCTION_ARGS)
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						errmsg("only s3://, gs://, az://, azure://, and abfss:// URLs are "
 							   "currently supported")));
+
+	/* Require lake_write: benchmark gen writes to object storage. */
+	CheckURLWriteAccess(location);
 
 	Oid			tableTypeId = (BenchmarkTableType) PG_GETARG_OID(1);
 	BenchmarkTableType tableType = GetBenchTableType(tableTypeId);

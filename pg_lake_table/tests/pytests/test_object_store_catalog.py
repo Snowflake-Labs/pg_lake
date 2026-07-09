@@ -1,5 +1,9 @@
 from utils_pytest import *
+import datetime
 import itertools
+import json
+import re
+import time
 
 
 # don't accept 'catalog_name', 'catalog_namespace', 'catalog_table_name'
@@ -937,6 +941,105 @@ def test_re_create_tables(
         pg_conn,
     )
     pg_conn.commit()
+
+
+# the catalog file is rewritten at least once per
+# pg_lake_iceberg.object_store_catalog_max_age, even when no tables changed
+def test_object_store_catalog_periodic_rewrite(
+    pg_conn,
+    superuser_conn,
+    s3,
+    extension,
+    with_default_location,
+    adjust_object_store_settings,
+):
+    superuser_conn.autocommit = True
+    run_command(
+        "ALTER SYSTEM SET pg_lake_iceberg.object_store_catalog_max_age = '2s'",
+        superuser_conn,
+    )
+    run_command("SELECT pg_reload_conf()", superuser_conn)
+    # bg workers need a moment to pick up the SIGHUP-driven GUC reload
+    run_command("SELECT pg_sleep(0.2)", superuser_conn)
+
+    try:
+        run_command("CREATE SCHEMA test_periodic_rewrite", pg_conn)
+        run_command(
+            "CREATE TABLE test_periodic_rewrite.tbl(a int) USING iceberg WITH (catalog='object_store')",
+            pg_conn,
+        )
+        pg_conn.commit()
+        wait_until_object_store_writable_table_pushed(
+            pg_conn, "test_periodic_rewrite", "tbl"
+        )
+
+        dbname = run_query("SELECT current_database()", pg_conn)[0][0]
+        prefix = run_query(
+            "SHOW pg_lake_iceberg.internal_object_store_catalog_prefix",
+            superuser_conn,
+        )[0][0]
+        key = f"{prefix}/catalog/{dbname}/catalog.json"
+
+        first_modified = s3.head_object(Bucket=TEST_BUCKET, Key=key)["LastModified"]
+        first_body = json.loads(
+            s3.get_object(Bucket=TEST_BUCKET, Key=key)["Body"].read()
+        )
+        # catalog-snapshot-time is an ISO 8601 UTC timestamp recorded when
+        # this snapshot of the catalog was taken.
+        snapshot_re = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+        assert snapshot_re.match(first_body["catalog-snapshot-time"]), (
+            f"unexpected catalog-snapshot-time format: "
+            f"{first_body['catalog-snapshot-time']!r}"
+        )
+        first_snapshot_time = datetime.datetime.strptime(
+            first_body["catalog-snapshot-time"], "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=datetime.timezone.utc)
+        # the timestamp should be roughly now, leave 5 minutes of slack for
+        # clock skew between Postgres and the test runner.
+        now = datetime.datetime.now(datetime.timezone.utc)
+        assert abs((now - first_snapshot_time).total_seconds()) < 300, (
+            f"catalog-snapshot-time {first_snapshot_time} too far from "
+            f"current time {now}"
+        )
+
+        # bg worker ticks every second; with max_age=2s we expect another
+        # rewrite within ~3 seconds, leave 8 seconds of slack.
+        deadline = time.monotonic() + 8
+        current_modified = first_modified
+        while time.monotonic() < deadline:
+            time.sleep(0.5)
+            current_modified = s3.head_object(Bucket=TEST_BUCKET, Key=key)[
+                "LastModified"
+            ]
+            if current_modified > first_modified:
+                break
+
+        assert current_modified > first_modified, (
+            f"catalog object {key} last-modified did not advance "
+            f"({first_modified} == {current_modified}) within the rewrite window"
+        )
+
+        # the snapshot time inside the file should also have advanced
+        second_body = json.loads(
+            s3.get_object(Bucket=TEST_BUCKET, Key=key)["Body"].read()
+        )
+        second_snapshot_time = datetime.datetime.strptime(
+            second_body["catalog-snapshot-time"], "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=datetime.timezone.utc)
+        assert second_snapshot_time > first_snapshot_time, (
+            f"catalog-snapshot-time did not advance "
+            f"({first_snapshot_time} == {second_snapshot_time})"
+        )
+
+        run_command("DROP SCHEMA test_periodic_rewrite CASCADE", pg_conn)
+        pg_conn.commit()
+    finally:
+        run_command(
+            "ALTER SYSTEM RESET pg_lake_iceberg.object_store_catalog_max_age",
+            superuser_conn,
+        )
+        run_command("SELECT pg_reload_conf()", superuser_conn)
+        superuser_conn.autocommit = False
 
 
 def assert_tables_are_the_same(pg_conn, tbl_1, tbl_2):

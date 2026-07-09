@@ -11,6 +11,8 @@ def setup_readwrite_perms(superuser_conn, app_user):
         f"CREATE EXTENSION IF NOT EXISTS pg_lake_engine CASCADE;", superuser_conn
     )
     run_command(f"GRANT lake_read_write TO {app_user};", superuser_conn)
+    run_command(f"GRANT pg_read_server_files TO {app_user};", superuser_conn)
+    run_command(f"GRANT pg_write_server_files TO {app_user};", superuser_conn)
     superuser_conn.commit()
 
     yield

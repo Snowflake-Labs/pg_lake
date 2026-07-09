@@ -522,6 +522,7 @@ def test_copy_to_rls(superuser_conn, duckdb_conn, tmp_path):
         ALTER TABLE test_rls ENABLE ROW LEVEL SECURITY;
         CREATE ROLE test_rls;
         GRANT SELECT ON test_rls TO test_rls;
+        GRANT pg_write_server_files TO test_rls;
         INSERT INTO test_rls SELECT s, s FROM generate_series(1,100) s;
         CREATE POLICY test_rls_policy ON test_rls FOR ALL TO test_rls USING (x % 2 = 0);
         COPY test_rls TO '{parquet_path}' WITH (format 'parquet');
@@ -582,6 +583,8 @@ def test_copy_from_rls(superuser_conn, tmp_path):
         ALTER TABLE test_rls ENABLE ROW LEVEL SECURITY;
         CREATE ROLE test_rls;
         GRANT SELECT, INSERT ON test_rls TO test_rls;
+        GRANT pg_read_server_files TO test_rls;
+        GRANT pg_write_server_files TO test_rls;
         INSERT INTO test_rls SELECT s, s FROM generate_series(1,100) s;
         CREATE POLICY test_rls_policy ON test_rls FOR ALL TO test_rls USING (x % 2 = 0);
         COPY test_rls TO '{parquet_path}' WITH (format 'parquet');

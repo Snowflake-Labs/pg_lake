@@ -22,6 +22,9 @@
 
 #include "lib/stringinfo.h"
 
+/* DuckDB's special path for an in-memory database (no on-disk file). */
+#define DUCKDB_MEMORY_DB_PATH ":memory:"
+
 struct PGSession;
 struct ResponseFormat;
 

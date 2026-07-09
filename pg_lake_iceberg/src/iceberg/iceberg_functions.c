@@ -52,7 +52,7 @@ iceberg_metadata(PG_FUNCTION_ARGS)
 						errmsg("pg_lake_iceberg: only s3://, gs://, az://, azure://, and abfss:// are supported")));
 	}
 
-	CheckURLReadAccess();
+	CheckURLReadAccess(metadataUri);
 
 	char	   *tableMetadataText = GetTextFromURI(metadataUri);
 	Datum		jsonbDatum = DirectFunctionCall1(jsonb_in, PointerGetDatum(tableMetadataText));
@@ -74,7 +74,7 @@ iceberg_files(PG_FUNCTION_ARGS)
 						errmsg("pg_lake_iceberg: only s3://, gs://, az://, azure://, and abfss:// are supported")));
 	}
 
-	CheckURLReadAccess();
+	CheckURLReadAccess(metadataUri);
 
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 
@@ -147,7 +147,7 @@ iceberg_snapshots(PG_FUNCTION_ARGS)
 						errmsg("pg_lake_iceberg: only s3://, gs://, az://, azure://, and abfss:// are supported")));
 	}
 
-	CheckURLReadAccess();
+	CheckURLReadAccess(metadataUri);
 
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 
