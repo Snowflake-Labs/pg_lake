@@ -508,6 +508,79 @@ Several important pg_dump options are shown in the above command:
 With these options, you can replicate from any heap table on any PostgreSQL server to Iceberg managed by pg_lake in a single step.
 
 
+## Iceberg catalogs
+
+Every Iceberg table is backed by a *catalog*, which tracks the current metadata location of each table. `pg_lake` ships with three built-in catalogs, and you can register your own REST catalogs (for example, [Snowflake Open Catalog](https://www.snowflake.com/en/product/features/open-catalog/) / [Apache Polaris](https://polaris.apache.org/)) as named servers.
+
+You pick the catalog for a table with the `catalog` option:
+
+```sql
+create table measurements (station_name text, measurement double precision)
+using iceberg with (catalog = 'postgres');
+```
+
+When `catalog` is omitted, the value of `pg_lake_iceberg.default_catalog` is used (`postgres` by default).
+
+### Built-in catalogs
+
+| `catalog` value | Description |
+| --- | --- |
+| `postgres` | `pg_lake` acts as its own catalog, tracking each table's metadata location in the local database (exposed through the `iceberg_tables` view). This is the default. |
+| `object_store` | The catalog is written to object storage alongside the data, so tables can be discovered without the PostgreSQL database. |
+| `rest` | An external Iceberg REST catalog, configured through the `pg_lake_iceberg.rest_catalog_*` settings (`rest_catalog_host`, `rest_catalog_client_id`, `rest_catalog_client_secret`, `rest_catalog_scope`, and so on). |
+
+The built-in catalogs are configured through settings only. They cannot be altered, renamed, or dropped, and they do not accept user mappings.
+
+### Named REST catalogs
+
+A single, globally configured `rest` catalog is not always enough: you may need to connect different tables to different REST endpoints, or give each user their own credentials. You can register named catalog servers with the `iceberg_catalog` foreign data wrapper and point tables at them with `catalog = '<server name>'`.
+
+Create a server with `type 'rest'` (the only type available for user-defined catalogs; `postgres` and `object_store` are reserved for the built-ins):
+
+```sql
+create server my_polaris type 'rest'
+  foreign data wrapper iceberg_catalog
+  options (rest_endpoint 'https://polaris.example.com');
+```
+
+Server options:
+
+| Option | Description |
+| --- | --- |
+| `rest_endpoint` | REST catalog base URL. Required, and must include a scheme such as `https://`. |
+| `rest_auth_type` | Authentication type: `default`, `oauth2`, or `horizon`. |
+| `oauth_endpoint` | OAuth token endpoint (must include a scheme). |
+| `scope` | OAuth scope. May also be set on the user mapping, which takes precedence. |
+| `enable_vended_credentials` | Whether to use storage credentials vended by the catalog (`true` / `false`). |
+| `location_prefix` | Location prefix for tables created through this catalog (must include a scheme). |
+| `catalog_name` | Catalog name sent in REST requests. |
+
+Credentials go on a **user mapping**, not in the server options, so they are not stored in the shared server definition:
+
+```sql
+create user mapping for current_user server my_polaris
+  options (client_id '...', client_secret '...');
+```
+
+User mapping options are `client_id`, `client_secret`, and `scope` (a `scope` on the user mapping overrides one set on the server).
+
+A user-created REST catalog reads its credentials only from the user mapping. Unlike the built-in `rest` catalog, it does **not** fall back to the `pg_lake_iceberg.rest_catalog_*` settings, so a role that can use the foreign data wrapper cannot point a server at an arbitrary endpoint to harvest the system-wide credentials.
+
+Once the server exists, create tables against it with `catalog = '<server name>'`:
+
+```sql
+create table events (id bigint, payload jsonb)
+using iceberg with (catalog = 'my_polaris');
+```
+
+Two restrictions keep the catalog binding stable for tables that already depend on it:
+
+- `iceberg_catalog` servers cannot be renamed, because dependent tables record the server name.
+- `rest_endpoint` cannot be changed while tables created through the server still exist.
+
+Using a named catalog requires `USAGE` on the `iceberg_catalog` foreign data wrapper, which is granted to the `lake_write` role.
+
+
 ## Viewing the Iceberg catalog
 After creating a table, the Iceberg table appears in the `iceberg_tables` view:
 
