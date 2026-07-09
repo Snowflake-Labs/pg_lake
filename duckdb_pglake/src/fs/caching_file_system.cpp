@@ -89,7 +89,7 @@ PGLakeCachingFileSystem::OpenFile(const string &fullUrl,
 
 	/* the file is already in cache, read from the cache */
 	if (requestCache && openFlags.OpenForReading() != 0 &&
-		localfs.FileExists(cacheFilePath))
+		FileUtils::IsOwnedByCurrentUser(cacheFilePath))
 	{
 		/* we track access times in the file system */
 		FileCacheManager::UpdateAccessTime(cacheFilePath);
@@ -175,9 +175,9 @@ PGLakeCachingFileSystem::OpenFile(const string &fullUrl,
 					{
 						cacheOnWriteHandle =
 							localfs.OpenFile(cacheFilePath + cacheManager->STAGING_SUFFIX,
-											FileOpenFlags::FILE_FLAGS_WRITE | FileOpenFlags::FILE_FLAGS_FILE_CREATE);
-						cacheOnWritePath = cacheFilePath;
+											 FileOpenFlags::FILE_FLAGS_WRITE | FileOpenFlags::FILE_FLAGS_FILE_CREATE);
 
+						cacheOnWritePath = cacheFilePath;
 					}
 					catch (Exception &ex)
 					{

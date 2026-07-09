@@ -22,6 +22,7 @@
  */
 #include <stdio.h>
 #include <signal.h>
+#include <sys/stat.h>
 
 #include "c.h"
 #include "postgres_fe.h"
@@ -45,6 +46,18 @@ main(int argc, char *argv[])
 	/* user (or tests) are only interested in parsing the parameters */
 	if (options.check_cli_params_only)
 		return STATUS_OK;
+
+	/*
+	 * Restrict file mode creation mask to owner-only for everything we (or
+	 * DuckDB on our behalf) create.  Cache objects, the pidfile, and the
+	 * DuckDB database file would otherwise inherit the launcher's umask
+	 * (typically 0022) and end up world-readable, exposing cached cloud
+	 * objects to any local user.  Setting umask is atomic with the create, so
+	 * there is no chmod-after-create race window.  The unix socket sets its
+	 * own mode via chmod after bind, so it is not affected.  Equivalent to
+	 * Postgres' PG_MODE_MASK_OWNER.
+	 */
+	umask(S_IRWXG | S_IRWXO);
 
 	if (options.debug)
 		pgduck_log_min_messages = DEBUG1;

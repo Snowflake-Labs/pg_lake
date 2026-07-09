@@ -20,6 +20,7 @@
 #include "libpq-fe.h"
 #include "miscadmin.h"
 
+#include "pg_lake/copy/copy_format.h"
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/util/s3_reader_utils.h"
 #include "pg_lake/util/s3_writer_utils.h"
@@ -31,11 +32,19 @@ static char *ReadTextFileCommand(const char *textFileUri);
 static char *ReadBlobFileCommand(const char *blobFileUri);
 
 /*
-* GetTextFromURI reads the content of a text file.
-*/
+ * GetTextFromURI reads the content of a text file at a supported cloud URL.
+ * Rejects local filesystem paths and other unsupported schemes.
+ */
 char *
 GetTextFromURI(const char *textFileUri)
 {
+	if (!IsSupportedURL(textFileUri))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("pg_lake: unsupported URL: \"%s\"", textFileUri),
+				 errhint("Paths must use a supported cloud storage scheme "
+						 "(s3://, azure://, gcs://, etc.).")));
+
 	const char *localPath = GetPendingUploadLocalPath(textFileUri);
 	const char *readPath = localPath != NULL ? localPath : textFileUri;
 
@@ -43,13 +52,21 @@ GetTextFromURI(const char *textFileUri)
 }
 
 /*
- * GetBlobFromURI reads the content of a blob file.
+ * GetBlobFromURI reads the content of a blob file at a supported cloud URL.
+ * Rejects local filesystem paths and other unsupported schemes.
  *
  * !!NOTE!!: Caller is responsible for freeing the returned content.
  */
 char *
 GetBlobFromURI(const char *blobFileUri, size_t *contentLength)
 {
+	if (!IsSupportedURL(blobFileUri))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("pg_lake: unsupported URL: \"%s\"", blobFileUri),
+				 errhint("Paths must use a supported cloud storage scheme "
+						 "(s3://, azure://, gcs://, etc.).")));
+
 	const char *localPath = GetPendingUploadLocalPath(blobFileUri);
 	const char *readPath = localPath != NULL ? localPath : blobFileUri;
 

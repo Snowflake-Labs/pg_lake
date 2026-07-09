@@ -442,19 +442,20 @@ GetTableMetadataLocationFromExternalObjectStoreCatalog(const char *catalogName, 
 	StringInfo	metadataLocationStrInfo = makeStringInfo();
 	StringInfo	getMetadataLocation = makeStringInfo();
 
-	appendStringInfo(getMetadataLocation,
-					 "WITH doc AS ( "
-					 "  SELECT $$%s$$::jsonb AS j "
-					 ") "
-					 "SELECT t->>'metadata-location' AS metadata_location "
-					 "FROM doc, jsonb_array_elements(j->'tables') AS t "
-					 "WHERE t->>'namespace' = $1 AND t->>'table-name' = $2", catalogContent);
+	appendStringInfoString(getMetadataLocation,
+						   "WITH doc AS ( "
+						   "  SELECT $3::jsonb AS j "
+						   ") "
+						   "SELECT t->>'metadata-location' AS metadata_location "
+						   "FROM doc, jsonb_array_elements(j->'tables') AS t "
+						   "WHERE t->>'namespace' = $1 AND t->>'table-name' = $2");
 
 
-	DECLARE_SPI_ARGS(2);
+	DECLARE_SPI_ARGS(3);
 
 	SPI_ARG_VALUE(1, TEXTOID, catalogNamespace, false);
 	SPI_ARG_VALUE(2, TEXTOID, catalogTableName, false);
+	SPI_ARG_VALUE(3, TEXTOID, catalogContent, false);
 
 	SPI_START_EXTENSION_OWNER(PgLakeIceberg);
 

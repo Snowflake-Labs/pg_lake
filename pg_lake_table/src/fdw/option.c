@@ -92,7 +92,7 @@ pg_lake_table_validator(PG_FUNCTION_ARGS)
 	 * Check that the user has the necessary permissions. All pg_lake tables
 	 * are readable. Below, we also check for write permissions.
 	 */
-	CheckURLReadAccess();
+	CheckURLReadAccess(NULL);
 
 	List	   *options_list = untransformRelOptions(PG_GETARG_DATUM(0));
 	Oid			catalog = PG_GETARG_OID(1);
@@ -197,7 +197,7 @@ pg_lake_table_validator(PG_FUNCTION_ARGS)
 			isWritable = defGetBoolean(def);
 			if (isWritable)
 			{
-				CheckURLWriteAccess();
+				CheckURLWriteAccess(NULL);
 			}
 		}
 		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "path") == 0)
@@ -209,6 +209,8 @@ pg_lake_table_validator(PG_FUNCTION_ARGS)
 								errmsg("pg_lake_table: unsupported URL: \"%s\" for the \"path\" option",
 									   path)));
 
+			CheckURLReadAccess(path);
+
 			foundServerPath = true;
 		}
 		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "location") == 0)
@@ -219,6 +221,8 @@ pg_lake_table_validator(PG_FUNCTION_ARGS)
 				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 								errmsg("pg_lake_table: unsupported URL: \"%s\" for the \"location\" option",
 									   value)));
+
+			CheckURLWriteAccess(value);
 
 			foundLocation = true;
 		}
@@ -659,7 +663,7 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 	 * Check that the user has the necessary permissions. All iceberg tables
 	 * are writable.
 	 */
-	CheckURLWriteAccess();
+	CheckURLWriteAccess(NULL);
 
 	List	   *options_list = untransformRelOptions(PG_GETARG_DATUM(0));
 	Oid			catalog = PG_GETARG_OID(1);
@@ -735,9 +739,16 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 								errmsg("pg_lake_iceberg: unsupported URL: \"%s\" for the \"location\" option",
 									   location)));
 
-			char	   *charPointer = strchr(location, '?');
+			CheckURLWriteAccess(location);
 
-			if (charPointer != NULL)
+			/*
+			 * The location is a base directory that pg_lake appends
+			 * /metadata.json and data-file paths onto.  A '?' anywhere in the
+			 * base would land mid-path on the constructed URLs, so disallow
+			 * it regardless of whether CheckURLWriteAccess already rejected
+			 * it.
+			 */
+			if (strchr(location, '?') != NULL)
 				ereport(ERROR,
 						(errcode(ERRCODE_SYNTAX_ERROR),
 						 errmsg("s3 configuration parameters are not allowed in the \"location\" "

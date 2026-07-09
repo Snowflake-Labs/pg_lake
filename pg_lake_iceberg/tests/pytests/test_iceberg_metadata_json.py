@@ -40,10 +40,14 @@ ids = [file_names[0] for file_names in FILE_DATA]
 
 
 @pytest.mark.parametrize("filename,filepath", FILE_DATA, ids=ids)
-def test_metadata_json(create_helper_functions, filename, filepath, superuser_conn):
+def test_metadata_json(create_helper_functions, filename, filepath, superuser_conn, s3):
+
+    s3_key = f"test_metadata_json/{filename}"
+    s3.upload_file(filepath, TEST_BUCKET, s3_key)
+    s3_url = f"s3://{TEST_BUCKET}/{s3_key}"
 
     command = (
-        f"SELECT lake_iceberg.reserialize_iceberg_table_metadata('{filepath}')::json"
+        f"SELECT lake_iceberg.reserialize_iceberg_table_metadata('{s3_url}')::json"
     )
 
     result = run_query(command, superuser_conn)

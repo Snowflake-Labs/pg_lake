@@ -316,7 +316,9 @@ class PgDuckServer:
         self.port = port
 
         # -- Compute artifact paths ------------------------------------------
-        db = duckdb_database_file_path or "/tmp/duckdb.db"
+        db = duckdb_database_file_path or tempfile.mktemp(
+            suffix=".db", prefix="pgduck_server_test_", dir="/tmp"
+        )
         self._artifact_paths = [db, f"{db}.wal"]
         self._artifact_dirs = []
 
@@ -338,6 +340,8 @@ class PgDuckServer:
         ]
         if duckdb_database_file_path is not None:
             args += ["--duckdb_database_file_path", duckdb_database_file_path]
+        else:
+            args += ["--duckdb_database_file_path", db]
         if pidfile is not None:
             args += ["--pidfile", pidfile]
         if cache_dir is not None:

@@ -59,6 +59,7 @@ static bool JsonExtractField(JsonbContainer *topLevelJsonContainer,
 
 /*
  * ReadIcebergTableMetadata reads the Iceberg table metadata from the given URI.
+ * The URI is validated by GetTextFromURI.
  */
 IcebergTableMetadata *
 ReadIcebergTableMetadata(const char *tableMetadataPath)

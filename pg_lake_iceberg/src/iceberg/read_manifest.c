@@ -27,6 +27,7 @@
 
 #include "pg_lake/iceberg/manifest_spec.h"
 #include "pg_lake/avro/avro_reader.h"
+#include "pg_lake/copy/copy_format.h"
 #include "pg_lake/util/s3_reader_utils.h"
 #include "pg_lake/util/s3_writer_utils.h"
 #include "pg_lake/util/plan_cache.h"
@@ -244,6 +245,21 @@ ReadDataFileFromAvro(avro_value_t * record, DataFile * dataFile, ManifestReaderC
 	memset(dataFile, '\0', sizeof(DataFile));
 	AvroGetInt32Field(record, "content", AVRO_FIELD_REQUIRED, (int32_t *) &dataFile->content);
 	AvroGetStringField(record, "file_path", AVRO_FIELD_REQUIRED, &dataFile->file_path, &dataFile->file_path_length);
+
+	/*
+	 * Validate file_path against the supported-scheme allowlist.  The value
+	 * comes from attacker-controlled Avro data; without this check a manifest
+	 * with file_path="/etc/passwd" would be forwarded to DuckDB's
+	 * LocalFileSystem, bypassing the pg_read_server_files boundary.
+	 */
+	if (!IsSupportedURL(dataFile->file_path))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("pg_lake_iceberg: unsupported data-file URL: \"%s\"",
+						dataFile->file_path),
+				 errhint("Iceberg data-file paths must use a supported cloud "
+						 "storage scheme (s3://, azure://, etc.).")));
+
 	AvroGetStringField(record, "file_format", AVRO_FIELD_REQUIRED, &dataFile->file_format, &dataFile->file_format_length);
 	AvroGetRecordField(record, "partition", AVRO_FIELD_REQUIRED, (AvroParseFunction) ReadPartitionFromAvro, &dataFile->partition, context);
 	AvroGetInt64Field(record, "record_count", AVRO_FIELD_REQUIRED, &dataFile->record_count);

@@ -19,6 +19,9 @@
 #include "s3fs.hpp"
 #include "duckdb/common/local_file_system.hpp"
 
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include "pg_lake/fs/caching_file_system.hpp"
 #include "pg_lake/fs/file_utils.hpp"
 #include "pg_lake/fs/httpfs_extended.hpp"
@@ -204,5 +207,33 @@ FileUtils::CopyFile(ClientContext &context,
 
 	return totalBytesWritten;
 }
+
+
+/*
+ * IsOwnedByCurrentUser returns true iff the path exists as a regular file
+ * owned by the effective UID of this process.
+ *
+ * Cache paths are fully deterministic
+ * (<cache_dir>/<proto>/<bucket>/.../pgl-cache.<file>), so a local user who
+ * pre-creates a file at that path before pgduck_server downloads the real
+ * object would otherwise serve arbitrary content for every pg_lake query
+ * that hits the cache.  Checking ownership before trusting a cached file
+ * closes this window: a file owned by another user fails the check and
+ * pgduck_server re-downloads and replaces it.
+ */
+bool
+FileUtils::IsOwnedByCurrentUser(const string &path)
+{
+	struct stat st;
+
+	if (lstat(path.c_str(), &st) != 0)
+		return false;   /* does not exist or cannot stat */
+
+	if (!S_ISREG(st.st_mode))
+		return false;   /* symlink, directory, device, etc. */
+
+	return st.st_uid == geteuid();
+}
+
 
 } // namespace duckdb

@@ -21,8 +21,8 @@
 
 extern PGDLLEXPORT Oid PgLakeReadRoleId(void);
 extern PGDLLEXPORT Oid PgLakeWriteRoleId(void);
-extern PGDLLEXPORT void CheckURLReadAccess(void);
-extern PGDLLEXPORT void CheckURLWriteAccess(void);
+extern PGDLLEXPORT void CheckURLReadAccess(const char *url);
+extern PGDLLEXPORT void CheckURLWriteAccess(const char *url);
 
 
 #endif

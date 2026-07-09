@@ -65,7 +65,7 @@ pg_lake_file_size(PG_FUNCTION_ARGS)
 		ereport(ERROR, (errmsg("file_size: unsupported URL: \"%s\"", path),
 						errcode(ERRCODE_INVALID_PARAMETER_VALUE)));
 
-	CheckURLReadAccess();
+	CheckURLReadAccess(path);
 
 	int64		fileSize = GetRemoteFileSize(path);
 
@@ -97,7 +97,7 @@ pg_lake_list_files(PG_FUNCTION_ARGS)
 		ereport(ERROR, (errmsg("list_files: unsupported URL: \"%s\"", globURL),
 						errcode(ERRCODE_INVALID_PARAMETER_VALUE)));
 
-	CheckURLReadAccess();
+	CheckURLReadAccess(globURL);
 
 	List	   *files = ListRemoteFileDescriptions(globURL);
 	ListCell   *fileCell = NULL;
@@ -164,7 +164,7 @@ pg_lake_file_exists(PG_FUNCTION_ARGS)
 		ereport(ERROR, (errmsg("file_exists: unsupported URL: \"%s\"", path),
 						errcode(ERRCODE_INVALID_PARAMETER_VALUE)));
 
-	CheckURLReadAccess();
+	CheckURLReadAccess(path);
 
 	bool		fileExists = RemoteFileExists(path);
 
@@ -222,7 +222,7 @@ pg_lake_file_preview(PG_FUNCTION_ARGS)
 		ereport(ERROR, (errmsg("file_preview: unsupported URL: \"%s\"", url),
 						errcode(ERRCODE_INVALID_PARAMETER_VALUE)));
 
-	CheckURLReadAccess();
+	CheckURLReadAccess(url);
 
 	InitMaterializedSRF(fcinfo, 0);
 
@@ -273,7 +273,7 @@ pg_lake_delete_file(PG_FUNCTION_ARGS)
 		ereport(ERROR, (errmsg("delete_file: unsupported URL: \"%s\"", path),
 						errcode(ERRCODE_INVALID_PARAMETER_VALUE)));
 
-	CheckURLWriteAccess();
+	CheckURLWriteAccess(path);
 
 	if (!EnableDeleteFileFunction)
 		ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),

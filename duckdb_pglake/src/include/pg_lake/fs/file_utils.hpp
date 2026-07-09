@@ -35,6 +35,15 @@ public:
 	static int64_t CopyFile(ClientContext &context, string &source_path, string &destination_path);
 	static string GetMD5Base64(const char *buffer, idx_t bufferLength);
 
+	/*
+	 * IsOwnedByCurrentUser returns true iff path exists as a regular file
+	 * and is owned by the effective UID of the current process.  Used to
+	 * guard cache-hit branches: a file pre-created at the deterministic
+	 * cache path by another local user is not trusted and gets replaced
+	 * by the real download.
+	 */
+	static bool IsOwnedByCurrentUser(const string &path);
+
 };
 
 } // namespace duckdb

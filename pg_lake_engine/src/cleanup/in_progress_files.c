@@ -504,19 +504,15 @@ InsertInProgressFileRecordExtended(char *path, bool isPrefix, bool autoDeleteRec
 					 quote_literal_cstr(path), operationId,
 					 isPrefix ? "true" : "false");
 
-	StringInfo	runAttachedQuery = makeStringInfo();
-
-	appendStringInfo(runAttachedQuery,
-					 "select * from extension_base.run_attached($$%s$$)",
-					 query->data);
-
-
 	/* switch to schema owner, we assume callers checked permissions */
 	SPI_START_EXTENSION_OWNER(PgLakeEngine);
 
+	DECLARE_SPI_ARGS(1);
+	SPI_ARG_VALUE(1, TEXTOID, query->data, false);
+
 	bool		readOnly = false;
 
-	SPI_execute(runAttachedQuery->data, readOnly, 0);
+	SPI_EXECUTE("select * from extension_base.run_attached($1)", readOnly);
 
 	if (SPI_processed != 1)
 	{

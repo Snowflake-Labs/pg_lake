@@ -22,6 +22,7 @@
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/iceberg/iceberg_type_binary_serde.h"
+#include "pg_lake/copy/copy_format.h"
 #include "pg_lake/parquet/leaf_field.h"
 #include "pg_lake/pgduck/type.h"
 #include "pg_lake/util/numeric.h"

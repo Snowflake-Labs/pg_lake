@@ -28,6 +28,7 @@
 #include "access/table.h"
 #include "access/tupdesc.h"
 #include "access/xact.h"
+#include "catalog/pg_authid.h"
 #include "catalog/pg_type.h"
 #include "commands/copy.h"
 #include "commands/defrem.h"
@@ -413,7 +414,24 @@ ProcessPgLakeCopyFrom(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 
 	if (IsSupportedURL(sourcePath))
 	{
-		CheckURLReadAccess();
+		CheckURLReadAccess(sourcePath);
+	}
+	else
+	{
+		/*
+		 * Local file paths bypass PostgreSQL's standard DoCopy() because
+		 * pg_lake routes them through its ProcessUtility hook before the core
+		 * pg_read_server_files check fires.  Replicate that check here so a
+		 * non-privileged user cannot read arbitrary server files via DuckDB's
+		 * unrestricted LocalFileSystem.
+		 */
+		if (!has_privs_of_role(GetUserId(), ROLE_PG_READ_SERVER_FILES))
+			ereport(ERROR,
+					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+					 errmsg("permission denied to COPY from a file"),
+					 errdetail("Only roles with privileges of the \"pg_read_server_files\" role may COPY from a file."),
+					 errhint("Anyone can COPY to stdout or from stdin. "
+							 "psql's \\copy command also works for anyone.")));
 	}
 
 	/*
@@ -802,7 +820,24 @@ ProcessPgLakeCopyTo(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 
 	if (IsSupportedURL(copyStmt->filename))
 	{
-		CheckURLWriteAccess();
+		CheckURLWriteAccess(copyStmt->filename);
+	}
+	else if (copyStmt->filename != NULL)
+	{
+		/*
+		 * Local file paths bypass PostgreSQL's standard DoCopy() because
+		 * pg_lake routes them through its ProcessUtility hook before the core
+		 * pg_write_server_files check fires.  Replicate that check here so a
+		 * non-privileged user cannot overwrite arbitrary server files via
+		 * DuckDB's unrestricted LocalFileSystem.
+		 */
+		if (!has_privs_of_role(GetUserId(), ROLE_PG_WRITE_SERVER_FILES))
+			ereport(ERROR,
+					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+					 errmsg("permission denied to COPY to a file"),
+					 errdetail("Only roles with privileges of the \"pg_write_server_files\" role may COPY to a file."),
+					 errhint("Anyone can COPY to stdout or from stdin. "
+							 "psql's \\copy command also works for anyone.")));
 	}
 
 	/*
