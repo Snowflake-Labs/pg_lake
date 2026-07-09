@@ -1,0 +1,23 @@
+diff --git a/extension/parquet/parquet_writer.cpp b/extension/parquet/parquet_writer.cpp
+index 3c6d11d9ad..41e412dab5 100644
+--- a/extension/parquet/parquet_writer.cpp
++++ b/extension/parquet/parquet_writer.cpp
+@@ -565,6 +565,18 @@ void ParquetWriter::FlushRowGroup(PreparedRowGroup &prepared) {
+ 	// let's make sure all offsets are ay-okay
+ 	ValidateColumnOffsets(file_name, writer->GetTotalWritten(), row_group);
+ 
++	// ColumnChunk.file_offset is a required field but is otherwise left at its
++	// default of 0. It is meant to point at the start of the column chunk, and
++	// some readers rely on it to locate each chunk; a zero value makes them
++	// misread files that contain more than one row group. Set it to the start
++	// of the column chunk (the dictionary page if present, else the first data
++	// page) so the value is consistent with the per-column page offsets.
++	for (auto &col_chunk : row_group.columns) {
++		col_chunk.file_offset = col_chunk.meta_data.__isset.dictionary_page_offset
++		                            ? col_chunk.meta_data.dictionary_page_offset
++		                            : col_chunk.meta_data.data_page_offset;
++	}
++
+ 	row_group.total_compressed_size = NumericCast<int64_t>(writer->GetTotalWritten()) - row_group.file_offset;
+ 	row_group.__isset.total_compressed_size = true;
+ 
