@@ -78,16 +78,16 @@ negative_cases = [
     ids=[case[0] for case in positive_cases],
 )
 def test_string_agg_pushdown(
-    create_string_agg_pushdown_table, pg_conn, test_id, query_template
+    create_sagg_pushdown_table, pg_conn, test_id, query_template
 ):
-    query = query_template.format("string_agg_pushdown.tbl")
+    query = query_template.format("sagg_pushdown.tbl")
 
     assert_remote_query_contains_expression(query, "string_agg", pg_conn)
     assert_query_results_on_tables(
         query,
         pg_conn,
-        ["string_agg_pushdown.tbl"],
-        ["string_agg_pushdown.heap_tbl"],
+        ["sagg_pushdown.tbl"],
+        ["sagg_pushdown.heap_tbl"],
     )
 
 
@@ -97,23 +97,23 @@ def test_string_agg_pushdown(
     ids=[case[0] for case in negative_cases],
 )
 def test_string_agg_not_pushdown(
-    create_string_agg_pushdown_table, pg_conn, test_id, query_template
+    create_sagg_pushdown_table, pg_conn, test_id, query_template
 ):
-    query = query_template.format("string_agg_pushdown.tbl")
+    query = query_template.format("sagg_pushdown.tbl")
 
     assert_remote_query_not_contains_expression(query, "string_agg", pg_conn)
     assert_query_results_on_tables(
         query,
         pg_conn,
-        ["string_agg_pushdown.tbl"],
-        ["string_agg_pushdown.heap_tbl"],
+        ["sagg_pushdown.tbl"],
+        ["sagg_pushdown.heap_tbl"],
     )
 
 
 @pytest.fixture(scope="module")
-def create_string_agg_pushdown_table(pg_conn, s3, extension):
+def create_sagg_pushdown_table(pg_conn, s3, extension):
 
-    url = f"s3://{TEST_BUCKET}/string_agg_pushdown/data.parquet"
+    url = f"s3://{TEST_BUCKET}/sagg_pushdown/data.parquet"
     run_command(
         f"""
             COPY (
@@ -140,8 +140,8 @@ def create_string_agg_pushdown_table(pg_conn, s3, extension):
 
     run_command(
         """
-            CREATE SCHEMA string_agg_pushdown;
-            CREATE FOREIGN TABLE string_agg_pushdown.tbl
+            CREATE SCHEMA sagg_pushdown;
+            CREATE FOREIGN TABLE sagg_pushdown.tbl
             (
                 id int,
                 g int,
@@ -158,8 +158,8 @@ def create_string_agg_pushdown_table(pg_conn, s3, extension):
 
     run_command(
         """
-            CREATE TABLE string_agg_pushdown.heap_tbl
-            AS SELECT * FROM string_agg_pushdown.tbl;
+            CREATE TABLE sagg_pushdown.heap_tbl
+            AS SELECT * FROM sagg_pushdown.tbl;
             """,
         pg_conn,
     )
@@ -167,5 +167,5 @@ def create_string_agg_pushdown_table(pg_conn, s3, extension):
 
     yield
 
-    run_command("DROP SCHEMA string_agg_pushdown CASCADE", pg_conn)
+    run_command("DROP SCHEMA sagg_pushdown CASCADE", pg_conn)
     pg_conn.commit()
