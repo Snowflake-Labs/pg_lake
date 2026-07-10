@@ -466,7 +466,7 @@ GetDuckDBTypeForPGType(PGType postgresType)
 			return DUCKDB_TYPE_DECIMAL;
 
 		case OIDOID:
-			return DUCKDB_TYPE_UINTEGER;
+			return DUCKDB_TYPE_BIGINT;
 
 		case TIMESTAMPOID:
 			return DUCKDB_TYPE_TIMESTAMP;

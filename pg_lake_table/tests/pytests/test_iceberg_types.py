@@ -2988,3 +2988,65 @@ def create_helper_functions(superuser_conn, app_user):
         superuser_conn,
     )
     superuser_conn.commit()
+
+
+def test_oid_iceberg_field_type(
+    extension, pg_conn, superuser_conn, pgduck_conn, s3, with_default_location
+):
+    """oid column must produce 'long' in Iceberg metadata and BIGINT in Parquet, not string."""
+    run_command(
+        """
+        create schema test_oid_field_type;
+        create table test_oid_field_type.oid_types (
+            id  oid,
+            txt text
+        ) using iceberg;
+        insert into test_oid_field_type.oid_types values (16385, 'hello');
+        insert into test_oid_field_type.oid_types values (2147483648, 'big');
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    results = run_query(
+        "SELECT metadata_location FROM lake_iceberg.tables"
+        " WHERE table_name = 'oid_types' AND table_namespace = 'test_oid_field_type'",
+        superuser_conn,
+    )
+    assert len(results) == 1
+    metadata_path = results[0][0]
+
+    data = read_s3_operations(s3, metadata_path)
+    parsed = json.loads(data)
+    fields = {f["name"]: f["type"] for f in parsed["schemas"][0]["fields"]}
+
+    assert (
+        fields["id"] == "long"
+    ), f"oid should be 'long' in Iceberg metadata, got {fields['id']!r}"
+    assert fields["txt"] == "string"
+
+    files = run_query(
+        "SELECT path FROM lake_table.files WHERE table_name = 'test_oid_field_type.oid_types'::regclass",
+        superuser_conn,
+    )
+    assert len(files) > 0
+    for file in files:
+        columns = run_query(
+            f"DESCRIBE SELECT * FROM read_parquet('{file[0]}')", pgduck_conn
+        )
+        col_types = {row[0]: row[1] for row in columns}
+        assert (
+            col_types["id"] == "BIGINT"
+        ), f"oid should be BIGINT in Parquet, got {col_types['id']!r}"
+
+    result = run_query(
+        "SELECT id, txt FROM test_oid_field_type.oid_types ORDER BY id", pg_conn
+    )
+    assert result[0]["id"] == 16385
+    assert result[1]["id"] == 2147483648
+    assert result[0]["txt"] == "hello"
+    assert result[1]["txt"] == "big"
+
+    pg_conn.rollback()
+    run_command("drop schema if exists test_oid_field_type cascade;", pg_conn)
+    pg_conn.commit()
