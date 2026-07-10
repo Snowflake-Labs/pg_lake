@@ -305,8 +305,20 @@ def create_hyperbolic_values_table(pg_conn, s3, extension):
         COPY (
             SELECT NULL::double precision AS col_val
             UNION ALL SELECT 0.0::double precision
-            UNION ALL SELECT -1.0::double precision
+            UNION ALL SELECT '-0.0'::double precision
+            UNION ALL SELECT 0.01::double precision
+            UNION ALL SELECT -0.01::double precision
+            UNION ALL SELECT 0.5::double precision
+            UNION ALL SELECT -0.5::double precision
             UNION ALL SELECT 1.0::double precision
+            UNION ALL SELECT -1.0::double precision
+            UNION ALL SELECT 1.25::double precision
+            UNION ALL SELECT -1.25::double precision
+            UNION ALL SELECT 2.5::double precision
+            UNION ALL SELECT -2.5::double precision
+            UNION ALL SELECT 'infinity'::double precision
+            UNION ALL SELECT '-infinity'::double precision
+            UNION ALL SELECT 'nan'::double precision
         ) TO '{url}' WITH (FORMAT 'parquet');
         """,
         pg_conn,
@@ -342,12 +354,17 @@ def create_hyperbolic_values_table(pg_conn, s3, extension):
 def test_hyperbolic_functions_specific_values(
     create_hyperbolic_values_table, pg_conn, func, expected_expression
 ):
-    """Verify sinh/cosh/tanh pushdown returns same results as Postgres for 0, -1, 1, NULL."""
+    """Verify sinh/cosh/tanh pushdown returns same results as Postgres for
+    -2.5, -1.25, -1, -0.5, -0.01, -0.0, 0, 0.01, 0.5, 1, 1.25, 2.5, inf, -inf, nan, NULL.
+
+    Uses assert_table_contents_match (EXCEPT ALL) rather than the tolerance-based
+    helper so that inf/nan rows compare correctly (inf-inf and nan-nan are nan, which
+    the tolerance check misreads as a mismatch).
+    """
     query = f"SELECT {func}(col_val) FROM hyperbolic_vals.fdw_tbl"
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)
-    assert_query_results_on_tables(
-        query,
+    assert_table_contents_match(
         pg_conn,
-        ["hyperbolic_vals.fdw_tbl"],
-        ["hyperbolic_vals.heap_tbl"],
+        f"(SELECT {func}(col_val) FROM hyperbolic_vals.fdw_tbl) fdw",
+        f"(SELECT {func}(col_val) FROM hyperbolic_vals.heap_tbl) heap",
     )
