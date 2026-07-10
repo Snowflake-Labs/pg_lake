@@ -41,6 +41,7 @@ static bool IsConcatShippable(Node *node);
 static bool IsEncodeShippable(Node *node);
 static bool IsDecodeShippable(Node *node);
 static bool IsArrayLengthShippable(Node *node);
+static bool IsStringAggShippable(Node *node);
 static bool IsCast(Node *node);
 static bool IsConvertibleToChar(Node *node);
 
@@ -377,6 +378,9 @@ static const PGDuckShippableFunction ShippableBuiltinProcs[] =
 	{"array_agg", 'a', 1, {"anyarray"}, NULL},
 	{"array_agg", 'a', 1, {"anynonarray"}, NULL},
 
+	/* string aggregate (only with a non-NULL constant delimiter, see below) */
+	{"string_agg", 'a', 2, {"text", "text"}, IsStringAggShippable},
+
 	/* window function aggregates */
 	{"rank", 'w', 0, {}, NULL},
 	{"row_number", 'w', 0, {}, NULL},
@@ -600,6 +604,46 @@ IsArrayLengthShippable(Node *node)
 		return false;
 
 	return true;
+}
+
+
+/*
+ * IsStringAggShippable returns whether a string_agg(text, text) call can be
+ * shipped to pgduck_server.
+ *
+ * string_agg diverges from PostgreSQL in DuckDB only through its delimiter:
+ *   - a NULL delimiter makes DuckDB return NULL, whereas PostgreSQL treats it
+ *     as "no separator" and concatenates the values;
+ *   - a non-constant (per-row) delimiter is rejected by DuckDB outright
+ *     ("Separator argument to StringAgg must be a constant"), whereas
+ *     PostgreSQL evaluates it per row.
+ *
+ * We therefore only ship calls whose delimiter is a non-NULL constant.  With
+ * that guarantee, every other behavior (NULL/empty values, ORDER BY, DISTINCT,
+ * FILTER) is identical between the two engines.
+ *
+ * Note that aggregates reach this callback as an Aggref (not a FuncExpr), so we
+ * cannot reuse GetConstArg().  The arguments are TargetEntry nodes and the
+ * delimiter is always the second one: sort-only junk entries introduced by an
+ * ORDER BY on other columns are appended after the real arguments.
+ */
+static bool
+IsStringAggShippable(Node *node)
+{
+	Aggref	   *aggref = castNode(Aggref, node);
+
+	/* string_agg(text, text) always has the value and the delimiter */
+	if (list_length(aggref->args) < 2)
+		return false;
+
+	TargetEntry *delimEntry = (TargetEntry *) list_nth(aggref->args, 1);
+	Node	   *delimNode = eval_const_expressions(NULL, (Node *) delimEntry->expr);
+
+	if (!IsA(delimNode, Const))
+		return false;
+
+	/* a NULL delimiter yields NULL in DuckDB but concatenation in PostgreSQL */
+	return !((Const *) delimNode)->constisnull;
 }
 
 
