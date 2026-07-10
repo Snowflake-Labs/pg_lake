@@ -132,6 +132,10 @@ def create_sagg_pushdown_table(pg_conn, s3, extension):
                     SELECT 7, 3, 'skip', 1,    ','
                         UNION ALL
                     SELECT 8, 3, 'keep', 2,    ','
+                        UNION ALL
+                    SELECT 9, 4, '😀',   1,    ','
+                        UNION ALL
+                    SELECT 10, 4, '👍🏽', 2,    ','
                 ) TO '{url}' WITH (FORMAT 'parquet');
         """,
         pg_conn,
