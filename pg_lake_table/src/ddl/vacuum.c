@@ -759,18 +759,41 @@ VacuumCompactDataFiles(Oid relationId, bool isFull, bool isVerbose)
 			? psprintf(", resolved " INT64_FORMAT " position-deleted rows",
 					   runStats.positionDeletedRowsResolved)
 			: "";
-		int64		tableSize = GetTableSizeFromCatalog(relationId);
+
+		/*
+		 * The compaction loop leaves the transaction without an active
+		 * snapshot, so push one for the read-only catalog query below.  A
+		 * regular backend running manual VACUUM is carried by its portal
+		 * snapshot, but the autovacuum worker has neither portal nor active
+		 * snapshot and would otherwise error out of the whole vacuum cycle.
+		 */
+		bool		pushedSnapshot = false;
+
+		if (!ActiveSnapshotSet())
+		{
+			PushActiveSnapshot(GetTransactionSnapshot());
+			pushedSnapshot = true;
+		}
+
+		int64		tableSize = 0;
+		int64		fileCount = 0;
+		int64		liveRowCount = 0;
+
+		GetTableFileStatsFromCatalog(relationId, &tableSize, &fileCount, &liveRowCount);
+
+		if (pushedSnapshot)
+			PopActiveSnapshot();
 
 		ereport(LOG,
 				(errmsg("pg_lake: compacted iceberg table %s: "
 						"rewrote " INT64_FORMAT " files (" INT64_FORMAT " bytes, " INT64_FORMAT " rows) "
 						"into " INT64_FORMAT " files (" INT64_FORMAT " bytes, " INT64_FORMAT " rows)%s; "
-						"table is now " INT64_FORMAT " bytes",
+						"table is now " INT64_FORMAT " bytes across " INT64_FORMAT " files (" INT64_FORMAT " rows)",
 						GetQualifiedRelationName(relationId),
 						runStats.filesRemoved, runStats.bytesRemoved, runStats.rowsRemoved,
 						runStats.filesAdded, runStats.bytesAdded, runStats.rowsAdded,
 						positionDeleteSuffix,
-						tableSize)));
+						tableSize, fileCount, liveRowCount)));
 	}
 }
 

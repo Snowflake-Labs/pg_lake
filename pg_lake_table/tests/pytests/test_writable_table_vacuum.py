@@ -1,6 +1,7 @@
 import os
 import pytest
 import re
+import time
 from collections import namedtuple
 from utils_pytest import *
 import warnings
@@ -519,7 +520,14 @@ def test_vacuum_compaction_summary_log(s3, pg_conn, extension):
     summary = summary_lines[0]
     assert "rewrote 2 files" in summary
     assert "into 1 files" in summary
-    assert "table is now" in summary
+
+    # the summary must report the totals left in the table: after merging the
+    # two single-row files there is one file holding both rows
+    m = re.search(r"table is now \d+ bytes across (\d+) files \((\d+) rows\)", summary)
+    assert m is not None, f"could not parse remaining totals from summary: {summary}"
+    files_left, rows_left = int(m.group(1)), int(m.group(2))
+    assert files_left == 1, f"expected 1 file left, got {files_left}"
+    assert rows_left == 2, f"expected 2 rows left, got {rows_left}"
 
     run_command(
         f"""
@@ -608,6 +616,85 @@ def test_vacuum_compaction_summary_resolved_rows(s3, pg_conn, extension):
     )
 
     pg_conn.autocommit = False
+
+
+def test_autovacuum_compaction_summary_log(s3, pg_conn, extension, installcheck):
+    """The compaction summary must also be emitted on the autovacuum worker
+    path.  The worker has no portal or active snapshot, so the summary's
+    catalog read used to error out and abort the whole vacuum cycle; the log
+    line never reached the server log."""
+    if installcheck:
+        return
+
+    logfile = f"{server_params.PG_DIR}/logfile"
+    table = "test_autovacuum_compaction_summary_log"
+    location = f"s3://{TEST_BUCKET}/{table}/"
+
+    run_command_outside_tx(
+        [
+            "ALTER SYSTEM SET pg_lake_iceberg.log_autovacuum_min_duration TO 0;",
+            "ALTER SYSTEM SET pg_lake_iceberg.autovacuum_naptime TO '1s';",
+            "ALTER SYSTEM SET pg_lake_table.vacuum_compact_min_input_files TO 1;",
+            "SELECT pg_reload_conf();",
+        ]
+    )
+
+    pg_conn.autocommit = True
+
+    try:
+        offset = os.path.getsize(logfile)
+
+        run_command(
+            f"""
+            CREATE TABLE {table} (id int, value text)
+            USING pg_lake_iceberg WITH (location = '{location}');
+            INSERT INTO {table} VALUES (1, 'a');
+            INSERT INTO {table} VALUES (2, 'b');
+            INSERT INTO {table} VALUES (3, 'c');
+            """,
+            pg_conn,
+        )
+
+        summary = None
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            with open(logfile) as f:
+                f.seek(offset)
+                delta = f.read()
+            for line in delta.splitlines():
+                if "compacted iceberg table" in line and table in line:
+                    summary = line
+            if summary is not None:
+                break
+            time.sleep(2)
+
+        assert (
+            summary is not None
+        ), f"autovacuum did not emit a compaction summary for {table}"
+        assert "without an outer snapshot or portal" not in delta, (
+            "autovacuum hit the snapshot error while logging the summary: " + delta
+        )
+
+        m = re.search(
+            r"table is now \d+ bytes across (\d+) files \((\d+) rows\)", summary
+        )
+        assert (
+            m is not None
+        ), f"could not parse remaining totals from summary: {summary}"
+        assert int(m.group(1)) == 1, f"expected 1 file left, got {m.group(1)}"
+        assert int(m.group(2)) == 3, f"expected 3 rows left, got {m.group(2)}"
+
+        run_command(f"DROP TABLE {table};", pg_conn)
+    finally:
+        pg_conn.autocommit = False
+        run_command_outside_tx(
+            [
+                "ALTER SYSTEM RESET pg_lake_iceberg.log_autovacuum_min_duration;",
+                "ALTER SYSTEM RESET pg_lake_iceberg.autovacuum_naptime;",
+                "ALTER SYSTEM RESET pg_lake_table.vacuum_compact_min_input_files;",
+                "SELECT pg_reload_conf();",
+            ]
+        )
 
 
 def test_vacuum_multiple_metadata_ops(s3, pg_conn, extension, with_default_location):
