@@ -1,5 +1,6 @@
 import os
 import pytest
+import threading
 import time
 from decimal import Decimal
 from utils_pytest import *
@@ -844,6 +845,104 @@ def test_cache_on_write_disabled_after_some_writes(s3, pgduck_conn):
     """,
         pgduck_conn,
     )
+
+
+def test_cache_on_write_success_leaves_no_stage_file(s3, pgduck_conn):
+    """A successful write-through cache leaves the finalized pgl-cache.* file
+    and no leftover .pgl-stage file.
+
+    Parquet is finalized via FileSync() and CSV via Close(); both rename the
+    staging file to its final name. This guards against the destructor
+    over-deleting a file that was actually cached.
+    """
+    test_dir = Path(
+        f"{server_params.PGDUCK_CACHE_DIR}/s3/{TEST_BUCKET}"
+        f"/test_cache_on_write_success_leaves_no_stage_file"
+    )
+
+    for ext in ("parquet", "csv"):
+        url = (
+            f"s3://{TEST_BUCKET}"
+            f"/test_cache_on_write_success_leaves_no_stage_file/data.{ext}"
+        )
+        cached_path = test_dir / f"{CACHE_FILE_PREFIX}data.{ext}"
+
+        run_command(
+            f"COPY (SELECT s AS s, s * 2 AS d FROM generate_series(1, 1000) g(s)) "
+            f"TO '{url}' (format '{ext}');",
+            pgduck_conn,
+        )
+
+        assert cached_path.exists(), f"{ext}: write-through cache file is missing"
+
+    # No staging files should be left anywhere under this test's cache subtree.
+    stage_files = list(test_dir.rglob("*.pgl-stage")) if test_dir.exists() else []
+    assert stage_files == [], f"leftover staging files: {stage_files}"
+
+
+def test_cache_on_write_abort_removes_stage_file(s3, pgduck_conn):
+    """A write-through-cached COPY that aborts mid-stream must not leave an
+    orphaned .pgl-stage file behind.
+
+    The COPY runs in a background thread; the main thread observes the
+    .pgl-stage file appear while rows stream (proving the write reached the
+    cache, so the cleanup check isn't vacuous). The SELECT calls error() on a
+    specific row (row-dependent, lazily evaluated in CASE so earlier rows stage
+    first) to force a runtime abort before finalization -- DuckDB's '/' is float
+    division (1/0 -> Infinity), so error() is used instead. Once the COPY
+    returns, the destructor must have removed the stage file (and no final file
+    exists). Covers both the Parquet (FileSync) and CSV (Close) paths.
+    """
+    test_dir = Path(
+        f"{server_params.PGDUCK_CACHE_DIR}/s3/{TEST_BUCKET}"
+        f"/test_cache_on_write_abort_removes_stage_file"
+    )
+
+    # A small limit left over from another test would disable write-through
+    # caching, so pin it back to the 1GB default.
+    run_command(
+        "SET GLOBAL pg_lake_cache_on_write_max_size TO '1073741824';", pgduck_conn
+    )
+
+    for ext, extra in (("parquet", ", row_group_size 5000"), ("csv", "")):
+        url = (
+            f"s3://{TEST_BUCKET}"
+            f"/test_cache_on_write_abort_removes_stage_file/data.{ext}"
+        )
+        cached_path = test_dir / f"{CACHE_FILE_PREFIX}data.{ext}"
+        stage_path = test_dir / f"{CACHE_FILE_PREFIX}data.{ext}.pgl-stage"
+
+        # Rows 1..199999 stream (and stage) fine; error() fires at g = 200000.
+        result = {}
+
+        def run_failing_copy():
+            result["error"] = run_query(
+                f"COPY (SELECT CASE WHEN g < 200000 THEN g "
+                f"ELSE error('forced write-through abort for test') END AS x "
+                f"FROM generate_series(1, 1000000) AS s(g)) "
+                f"TO '{url}' (format '{ext}'{extra});",
+                pgduck_conn,
+                raise_error=False,
+            )
+
+        worker = threading.Thread(target=run_failing_copy)
+        worker.start()
+
+        # Catch the staging file while the COPY is still streaming. It lives for
+        # the whole write, so polling reliably observes it.
+        staged_during_write = check_file_exist(str(stage_path), timeout_seconds=30)
+
+        worker.join()
+        pgduck_conn.rollback()
+
+        assert result["error"] is not None, f"{ext}: expected the COPY to fail"
+        assert (
+            staged_during_write
+        ), f"{ext}: staging file never appeared -- write did not stream to cache"
+
+        # After the abort neither the finalized file nor the staging file remain.
+        assert not cached_path.exists(), f"{ext}: unexpected finalized cache file"
+        assert not stage_path.exists(), f"{ext}: orphaned staging file not cleaned up"
 
 
 # we cannot cache the same file concurrently
