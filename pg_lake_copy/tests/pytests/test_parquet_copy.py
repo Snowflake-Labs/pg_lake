@@ -47,7 +47,7 @@ def test_types(pg_conn, duckdb_conn, superuser_conn, tmp_path, app_user):
         "c_numeric": "DECIMAL(38,9)",
         "c_numeric_large": "VARCHAR",
         "c_numeric_mod": "DECIMAL(4,2)",
-        "c_oid": "UINTEGER",
+        "c_oid": "BIGINT",
         "c_text": "VARCHAR",
         "c_tid": "VARCHAR",
         "c_time": "TIME",
