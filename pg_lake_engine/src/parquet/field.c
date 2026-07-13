@@ -247,6 +247,7 @@ PostgresBaseTypeIdToIcebergTypeName(PGType pgType)
 		case INT2OID:
 			return "int";
 		case INT8OID:
+		case OIDOID:
 			return "long";
 		case FLOAT4OID:
 			return "float";
