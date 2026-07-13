@@ -53,6 +53,8 @@ extern PGDLLEXPORT void LoadColumnStatsForFiles(Oid relationId, HTAB *filesByPat
 extern PGDLLEXPORT List *GetPossiblePositionDeleteFilesFromCatalog(Oid relationId, List *sourcePathList,
 																   Snapshot snapshot);
 extern PGDLLEXPORT int64 GetTableSizeFromCatalog(Oid relationId);
+extern PGDLLEXPORT void GetTableFileStatsFromCatalog(Oid relationId, int64 *tableSize,
+													 int64 *fileCount, int64 *liveRowCount);
 extern PGDLLEXPORT int64 GetTotalDeletedRowCountFromCatalog(Oid relationId);
 bool		DataFilesCatalogExists(void);
 bool		DataFilesPartitionValuesCatalogExists(void);
