@@ -348,8 +348,11 @@ static const PGDuckShippableFunction ShippableBuiltinProcs[] =
 	{"tand", 'f', 1, {"float8"}, NULL},
 
 	/* Hyperbolic functions */
+	{"sinh", 'f', 1, {"float8"}, NULL},
 	{"asinh", 'f', 1, {"float8"}, NULL},
+	{"cosh", 'f', 1, {"float8"}, NULL},
 	{"acosh", 'f', 1, {"float8"}, NULL},
+	{"tanh", 'f', 1, {"float8"}, NULL},
 	{"atanh", 'f', 1, {"float8"}, NULL},
 
 	/* array functions */
