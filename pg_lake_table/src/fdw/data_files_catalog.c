@@ -872,9 +872,14 @@ GetTableSizeFromCatalog(Oid relationId)
 /*
  * GetTableFileStatsFromCatalog reports, in a single pass over the data files
  * catalog, the total size in bytes, the number of files, and the number of
- * live rows currently in the table.  Live rows are counted over data files
- * only (content = CONTENT_DATA) and exclude rows covered by position deletes;
- * size and file count cover all files, matching GetTableSizeFromCatalog.
+ * live rows currently in the table.
+ *
+ * All three values are computed over data files only (content = CONTENT_DATA)
+ * so that the numbers describe one coherent population: merge-on-read delete
+ * files would otherwise inflate the file count and byte total while the live
+ * row count (which subtracts position-deleted rows) excluded them.  This means
+ * the byte total can be slightly smaller than GetTableSizeFromCatalog, which
+ * intentionally sums every file including delete files.
  *
  * Empty tables report zero for every field.  Callers must confirm the
  * relation ID belongs to an actual writable table.
@@ -892,10 +897,10 @@ GetTableFileStatsFromCatalog(Oid relationId, int64 *tableSize,
 		psprintf("select "
 				  /* 1 */ "sum(file_size)::bigint, "
 				  /* 2 */ "count(*)::bigint, "
-				  /* 3 */ "(sum(row_count - deleted_row_count) "
-				 "filter (where content OPERATOR(pg_catalog.=) %d))::bigint "
+				  /* 3 */ "sum(row_count - deleted_row_count)::bigint "
 				 "from " DATA_FILES_TABLE_QUALIFIED " "
-				 "where table_name OPERATOR(pg_catalog.=) $1",
+				 "where table_name OPERATOR(pg_catalog.=) $1 "
+				 "and content OPERATOR(pg_catalog.=) %d",
 				 (int) CONTENT_DATA);
 
 	DECLARE_SPI_ARGS(1);
