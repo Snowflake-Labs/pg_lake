@@ -23,6 +23,7 @@
 * referenced in the latest metadata.json file.
 */
 #include "postgres.h"
+#include "utils/hsearch.h"
 #include "miscadmin.h"
 #include "fmgr.h"
 #include "funcapi.h"

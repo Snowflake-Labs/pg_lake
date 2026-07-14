@@ -19,6 +19,7 @@
  * Functions for cleaning up orphaned files.
  */
 #include "postgres.h"
+#include "catalog/pg_type_d.h"
 #include "funcapi.h"
 #include "miscadmin.h"
 
@@ -32,6 +33,7 @@
 #include "pg_lake/util/string_utils.h"
 #include "datatype/timestamp.h"
 #include "storage/procarray.h"
+#include "utils/tuplestore.h"
 
 #define DELETION_QUEUE_TABLE "lake_engine.deletion_queue"
 

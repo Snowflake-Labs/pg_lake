@@ -98,13 +98,17 @@ step s1-update:
     UPDATE test_iceberg_rr SET value = 99 WHERE key = 1;
 
 step s2-update: 
-    UPDATE test_iceberg_rr SET value = 88 WHERE key = 1;
+    DO $$ BEGIN
+        UPDATE test_iceberg_rr SET value = 88 WHERE key = 1;
+    EXCEPTION WHEN serialization_failure THEN
+        RAISE EXCEPTION 'could not serialize access' USING ERRCODE = 'serialization_failure';
+    END $$;
  <waiting ...>
 step s1-commit: 
     COMMIT;
 
 step s2-update: <... completed>
-ERROR:  could not serialize access due to concurrent update
+ERROR:  could not serialize access
 step s2-rollback: 
     ROLLBACK;
 
@@ -114,13 +118,17 @@ step s1-delete:
     DELETE FROM test_iceberg_rr WHERE key = 2;
 
 step s2-delete: 
-    DELETE FROM test_iceberg_rr WHERE key = 2;
+    DO $$ BEGIN
+        DELETE FROM test_iceberg_rr WHERE key = 2;
+    EXCEPTION WHEN serialization_failure THEN
+        RAISE EXCEPTION 'could not serialize access' USING ERRCODE = 'serialization_failure';
+    END $$;
  <waiting ...>
 step s1-commit: 
     COMMIT;
 
 step s2-delete: <... completed>
-ERROR:  could not serialize access due to concurrent update
+ERROR:  could not serialize access
 step s2-rollback: 
     ROLLBACK;
 
@@ -130,13 +138,17 @@ step s1-insert:
     INSERT INTO test_iceberg_rr VALUES (4, 40);
 
 step s2-insert: 
-    INSERT INTO test_iceberg_rr VALUES (5, 50);
+    DO $$ BEGIN
+        INSERT INTO test_iceberg_rr VALUES (5, 50);
+    EXCEPTION WHEN serialization_failure THEN
+        RAISE EXCEPTION 'could not serialize access' USING ERRCODE = 'serialization_failure';
+    END $$;
  <waiting ...>
 step s1-commit: 
     COMMIT;
 
 step s2-insert: <... completed>
-ERROR:  could not serialize access due to concurrent update
+ERROR:  could not serialize access
 step s2-rollback: 
     ROLLBACK;
 
@@ -146,13 +158,17 @@ step s1-insert:
     INSERT INTO test_iceberg_rr VALUES (4, 40);
 
 step s2-delete: 
-    DELETE FROM test_iceberg_rr WHERE key = 2;
+    DO $$ BEGIN
+        DELETE FROM test_iceberg_rr WHERE key = 2;
+    EXCEPTION WHEN serialization_failure THEN
+        RAISE EXCEPTION 'could not serialize access' USING ERRCODE = 'serialization_failure';
+    END $$;
  <waiting ...>
 step s1-commit: 
     COMMIT;
 
 step s2-delete: <... completed>
-ERROR:  could not serialize access due to concurrent update
+ERROR:  could not serialize access
 step s2-rollback: 
     ROLLBACK;
 
@@ -162,13 +178,17 @@ step s1-insert:
     INSERT INTO test_iceberg_rr VALUES (4, 40);
 
 step s2-update: 
-    UPDATE test_iceberg_rr SET value = 88 WHERE key = 1;
+    DO $$ BEGIN
+        UPDATE test_iceberg_rr SET value = 88 WHERE key = 1;
+    EXCEPTION WHEN serialization_failure THEN
+        RAISE EXCEPTION 'could not serialize access' USING ERRCODE = 'serialization_failure';
+    END $$;
  <waiting ...>
 step s1-commit: 
     COMMIT;
 
 step s2-update: <... completed>
-ERROR:  could not serialize access due to concurrent update
+ERROR:  could not serialize access
 step s2-rollback: 
     ROLLBACK;
 
@@ -178,13 +198,17 @@ step s1-update:
     UPDATE test_iceberg_rr SET value = 99 WHERE key = 1;
 
 step s2-delete-key-1: 
-    DELETE FROM test_iceberg_rr WHERE key = 1;
+    DO $$ BEGIN
+        DELETE FROM test_iceberg_rr WHERE key = 1;
+    EXCEPTION WHEN serialization_failure THEN
+        RAISE EXCEPTION 'could not serialize access' USING ERRCODE = 'serialization_failure';
+    END $$;
  <waiting ...>
 step s1-commit: 
     COMMIT;
 
 step s2-delete-key-1: <... completed>
-ERROR:  could not serialize access due to concurrent update
+ERROR:  could not serialize access
 step s2-rollback: 
     ROLLBACK;
 

@@ -139,6 +139,7 @@ NotShippableObjectToString(const NotShippableObject * notShippableObject)
 		case NOT_SHIPPABLE_SQL_WITH_ORDINALITY:
 		case NOT_SHIPPABLE_SQL_JOIN_MERGED_COLUMNS_ALIAS:
 		case NOT_SHIPPABLE_SQL_UNNEST_GROUP_BY_OR_WINDOW:
+		case NOT_SHIPPABLE_SQL_GROUP_BY_ALL:
 			appendStringInfo(message, "\tSQL Syntax\n");
 			break;
 		case NOT_SHIPPABLE_SYSTEM_COLUMN:

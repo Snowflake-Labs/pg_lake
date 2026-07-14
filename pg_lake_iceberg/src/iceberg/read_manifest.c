@@ -16,11 +16,14 @@
  */
 
 #include "postgres.h"
+#include "utils/hsearch.h"
+#include "catalog/pg_type_d.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "libpq-fe.h"
 #include "miscadmin.h"
 
+#include "storage/fd.h"
 #include "utils/builtins.h"
 #include "utils/snapmgr.h"
 #include "utils/wait_event.h"

@@ -347,11 +347,24 @@ CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(Oid relationId)
 
 		columnMapping->attname = pstrdup(field->name);
 		columnMapping->attrNum = get_attnum(relationId, field->name);
-		Form_pg_attribute attr = TupleDescAttr(tupDesc, columnMapping->attrNum - 1);
 
-		columnMapping->pgType = MakePGType(attr->atttypid, attr->atttypmod);
-		columnMapping->attNotNull = attr->attnotnull;
-		columnMapping->attHasDef = attr->atthasdef;
+		/*
+		 * A managed (non-REST) Iceberg table can carry a field that has no
+		 * matching Postgres column (the REST read-only case already skipped
+		 * those above). Only look up the attribute when it exists: the
+		 * type/null/default fields stay zero (from palloc0) so
+		 * ErrorIfSchemasDoNotMatch() reports the mismatch, and we avoid
+		 * TupleDescAttr(InvalidAttrNumber - 1), which trips PG19's new bounds
+		 * Assert in TupleDescAttr().
+		 */
+		if (columnMapping->attrNum != InvalidAttrNumber)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupDesc, columnMapping->attrNum - 1);
+
+			columnMapping->pgType = MakePGType(attr->atttypid, attr->atttypmod);
+			columnMapping->attNotNull = attr->attnotnull;
+			columnMapping->attHasDef = attr->atthasdef;
+		}
 
 		/*
 		 * The external metadata is the storage shape; the PostgreSQL

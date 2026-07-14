@@ -25,6 +25,8 @@
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
+#include "utils/hsearch.h"
+#include "catalog/pg_type_d.h"
 #include "funcapi.h"
 
 #include <limits.h>
@@ -2127,6 +2129,15 @@ AddDeleteReturningTargetTableVars(PlannerInfo *root,
 		if (returningVar->varno != root->parse->resultRelation)
 			continue;
 
+		/*
+		 * Skip whole-row references (handled above) and system columns; the
+		 * latter have negative varattno and would index out of bounds in
+		 * TupleDescAttr() below — PG19 added an Assert that fires on
+		 * negative indexes where earlier majors silently returned garbage.
+		 */
+		if (returningVar->varattno <= 0)
+			continue;
+
 #if PG_VERSION_NUM >= 180000
 		if (returningVar->varreturningtype == VAR_RETURNING_NEW ||
 			returningVar->varreturningtype == VAR_RETURNING_OLD)
@@ -2874,6 +2885,8 @@ CreateRowIdTupleDesc(void)
 					   TEXTOID, -1, 0);
 	TupleDescInitEntry(tupleDescriptor, (AttrNumber) 2, "file_row_number",
 					   INT8OID, -1, 0);
+
+	TupleDescFinalize(tupleDescriptor);
 
 	return tupleDescriptor;
 }
@@ -4038,7 +4051,16 @@ semijoin_target_ok(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 
 	Assert(joinrel->reltarget);
 
-	vars = pull_var_clause((Node *) joinrel->reltarget->exprs, PVC_INCLUDE_PLACEHOLDERS);
+	/*
+	 * Diverges from upstream postgres_fdw (which uses
+	 * PVC_INCLUDE_PLACEHOLDERS only, unchanged in PG18/PG19): pg_lake can
+	 * leave an Aggref in a SEMI join's target exprs (e.g. TPC-H Q21). Recurse
+	 * into it so we still see the underlying Vars and reject inner-rel
+	 * references instead of elog-ing.
+	 */
+	vars = pull_var_clause((Node *) joinrel->reltarget->exprs,
+						   PVC_INCLUDE_PLACEHOLDERS |
+						   PVC_RECURSE_AGGREGATES);
 
 	foreach(lc, vars)
 	{
@@ -4427,10 +4449,17 @@ add_paths_with_pathkeys_for_rel(PlannerInfo *root, RelOptInfo *rel,
 		PgLakeRelationInfo *fpinfo = (PgLakeRelationInfo *) rel->fdw_private;
 		PathTarget *target = copy_pathtarget(epq_path->pathtarget);
 
-		/* Include columns required for evaluating PHVs in the tlist. */
+		/*
+		 * Include columns required for evaluating PHVs, plus the underlying
+		 * Vars of any Aggref in the tlist. Diverges from upstream
+		 * postgres_fdw (PVC_RECURSE_PLACEHOLDERS only): pg_lake's EPQ path
+		 * targets can hold an Aggref (e.g. TPC-H Q21 / TPC-DS Q10), where
+		 * pull_var_clause would otherwise elog().
+		 */
 		add_new_columns_to_pathtarget(target,
 									  pull_var_clause((Node *) target->exprs,
-													  PVC_RECURSE_PLACEHOLDERS));
+													  PVC_RECURSE_PLACEHOLDERS |
+													  PVC_RECURSE_AGGREGATES));
 
 		/* Include columns required for evaluating the local conditions. */
 		foreach(lc, fpinfo->local_conds)
@@ -4439,7 +4468,8 @@ add_paths_with_pathkeys_for_rel(PlannerInfo *root, RelOptInfo *rel,
 
 			add_new_columns_to_pathtarget(target,
 										  pull_var_clause((Node *) rinfo->clause,
-														  PVC_RECURSE_PLACEHOLDERS));
+														  PVC_RECURSE_PLACEHOLDERS |
+														  PVC_RECURSE_AGGREGATES));
 		}
 
 		/*

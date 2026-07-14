@@ -25,6 +25,8 @@
  */
 
 #include "postgres.h"
+#include "utils/hsearch.h"
+#include "catalog/pg_type_d.h"
 
 #include "pg_extension_base/extension_ids.h"
 #include "pg_extension_base/spi_helpers.h"
@@ -42,7 +44,9 @@
 
 #include "executor/spi.h"
 #include "utils/builtins.h"
+#if PG_VERSION_NUM < 190000
 #include "utils/dynahash.h"
+#endif
 
 /* path -> int64 file id, built from RETURNING output of ExecInsertDataFiles */
 typedef struct FileIdHashEntry

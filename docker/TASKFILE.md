@@ -29,6 +29,7 @@ This Taskfile uses **per-version buildx builders** to prevent cache conflicts:
 - **PG 16**: Uses `pg_lake_builder_pg16`
 - **PG 17**: Uses `pg_lake_builder_pg17`
 - **PG 18**: Uses `pg_lake_builder_pg18`
+- **PG 19**: Uses `pg_lake_builder_pg19`
 
 Each builder maintains its own isolated cache, allowing you to build and switch between PostgreSQL versions without cache conflicts. Builders are created automatically on first use.
 
@@ -186,7 +187,7 @@ task compose:restart
 
 ### Cache Management
 
-Each PostgreSQL version (16, 17, 18) uses its own isolated buildx builder to prevent cache conflicts:
+Each PostgreSQL version (16, 17, 18, 19) uses its own isolated buildx builder to prevent cache conflicts:
 
 ```bash
 # Clear cache for specific PostgreSQL version
@@ -239,7 +240,7 @@ You can customize builds using these variables:
 | `REGISTRY` | `docker.io` | Container registry (docker.io, ghcr.io, etc.) |
 | `IMAGE_OWNER` | `${DOCKER_HUB_USERNAME}` | Registry username/org |
 | `VERSION` | `latest` | Image version tag |
-| `PG_MAJOR` | `18` | PostgreSQL major version (16, 17, or 18) |
+| `PG_MAJOR` | `18` | PostgreSQL major version (16, 17, 18, or 19) |
 | `PLATFORMS` | `linux/amd64,linux/arm64` | Target platforms for registry builds |
 | `BASE_IMAGE_OS` | `almalinux` | Base OS (almalinux or debian) |
 | `BASE_IMAGE_TAG` | `9` | Base OS version |
@@ -510,7 +511,7 @@ task push:all-pg-versions VERSION=v3.1.0
 - `build:pg-lake-postgres` - Build pg_lake_postgres for registry (multi-platform, cache only unless PUSH=true)
 - `build:pgduck-server` - Build pgduck_server for registry (multi-platform, cache only unless PUSH=true)
 - `build:all` - Build all images (multi-platform, cache only unless PUSH=true)
-- `build:all-pg-versions` - Build for PostgreSQL 16, 17, and 18
+- `build:all-pg-versions` - Build for PostgreSQL 16, 17, 18, and 19
 
 ### Push Tasks
 

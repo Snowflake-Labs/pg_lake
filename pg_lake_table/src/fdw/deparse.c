@@ -1222,7 +1222,11 @@ is_foreign_pathkey(PlannerInfo *root,
 static char *
 deparse_type_name(Oid type_oid, int32 typemod)
 {
+#if PG_VERSION_NUM >= 190000
+	uint16		flags = FORMAT_TYPE_TYPEMOD_GIVEN;
+#else
 	bits16		flags = FORMAT_TYPE_TYPEMOD_GIVEN;
+#endif
 
 	if (!is_builtin(type_oid))
 		flags |= FORMAT_TYPE_FORCE_QUALIFY;
@@ -1258,14 +1262,16 @@ build_tlist_to_deparse(RelOptInfo *foreignrel)
 	 */
 	tlist = add_to_flat_tlist(tlist,
 							  pull_var_clause((Node *) foreignrel->reltarget->exprs,
-											  PVC_RECURSE_PLACEHOLDERS));
+											  PVC_RECURSE_PLACEHOLDERS |
+											  PVC_RECURSE_AGGREGATES));
 	foreach(lc, fpinfo->local_conds)
 	{
 		RestrictInfo *rinfo = lfirst_node(RestrictInfo, lc);
 
 		tlist = add_to_flat_tlist(tlist,
 								  pull_var_clause((Node *) rinfo->clause,
-												  PVC_RECURSE_PLACEHOLDERS));
+												  PVC_RECURSE_PLACEHOLDERS |
+												  PVC_RECURSE_AGGREGATES));
 	}
 
 	return tlist;
