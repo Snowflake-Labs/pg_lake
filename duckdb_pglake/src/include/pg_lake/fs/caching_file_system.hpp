@@ -78,7 +78,42 @@ public:
 		 */
 		if (cacheOnWriteHandle != nullptr)
 		{
+			/*
+			 * A still-set cacheOnWriteHandle means the write was aborted before
+			 * finalization (FileSync()/Close() null it out on success), so the
+			 * staged file is incomplete. Remove it now instead of leaving it for
+			 * the cache worker: it shares the volume with DuckDB's own
+			 * database/WAL, so a lingering orphan can keep a full disk full.
+			 */
 			shared_ptr<FileCacheManager> cacheManager = FileCacheManager::Get(*context);
+
+			/*
+			 * Close then remove as independent best-effort steps (a destructor
+			 * must not throw). LocalFileSystem's Close() ignores close(fd) so it
+			 * won't throw; unlink() needs no free space and ~UnixFileHandle()
+			 * closes the fd anyway, so this works even on a full volume. Only
+			 * covers caught aborts that unwind here -- a hard crash/kill skips
+			 * the destructor, leaving those to the cache worker.
+			 */
+			try
+			{
+				cacheOnWriteHandle->Close();
+			}
+			catch (...)
+			{
+				/* fd is closed by ~UnixFileHandle() regardless */
+			}
+
+			try
+			{
+				LocalFileSystem localfs;
+				localfs.RemoveFile(cacheOnWritePath + cacheManager->STAGING_SUFFIX);
+			}
+			catch (...)
+			{
+				/* leave the orphan for the cache worker to reclaim */
+			}
+
 			cacheManager->RemoveCacheFileActivityFromMapIfNeeded(cacheOnWritePath);
 		}
 	}
