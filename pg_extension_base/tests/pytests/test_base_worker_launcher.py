@@ -524,3 +524,157 @@ def test_hibernate_worker_restart_delay(superuser_conn):
     superuser_conn.commit()
 
     assert count_pg_extension_base_workers(superuser_conn) == 0
+
+
+def hibernate_worker_failure_count(conn):
+    """
+    Return the restart-backoff failure count for the hibernate test worker, or
+    None if it is not currently registered.
+    """
+    rows = run_query(
+        """
+        SELECT w.failure_count
+        FROM extension_base.list_base_workers() w
+        JOIN pg_extension e ON e.oid = w.extension_id
+        WHERE e.extname = 'pg_extension_base_test_hibernate'
+        """,
+        conn,
+    )
+    return rows[0]["failure_count"] if rows else None
+
+
+def set_backoff_gucs(conn, initial_ms, max_ms, healthy_ms, fail_after_ms):
+    """
+    Configure the restart-backoff GUCs and the hibernate worker's fault
+    injection, then reload so freshly (re)started workers pick them up.
+
+    fail_after lives in the hibernate test library, so LOAD it into this
+    backend first to make the placeholder known to ALTER SYSTEM.
+    """
+    conn.autocommit = True
+    try:
+        run_command("LOAD 'pg_extension_base_test_hibernate'", conn)
+        run_command(
+            f"ALTER SYSTEM SET pg_extension_base.worker_restart_backoff_initial = '{initial_ms}ms'",
+            conn,
+        )
+        run_command(
+            f"ALTER SYSTEM SET pg_extension_base.worker_restart_backoff_max = '{max_ms}ms'",
+            conn,
+        )
+        run_command(
+            f"ALTER SYSTEM SET pg_extension_base.worker_restart_healthy_time = '{healthy_ms}ms'",
+            conn,
+        )
+        run_command(
+            f"ALTER SYSTEM SET pg_extension_base_test_hibernate.fail_after = '{fail_after_ms}ms'",
+            conn,
+        )
+        run_command("SELECT pg_reload_conf()", conn)
+    finally:
+        conn.autocommit = False
+
+
+def reset_backoff_gucs(conn):
+    conn.autocommit = True
+    try:
+        run_command(
+            "ALTER SYSTEM RESET pg_extension_base.worker_restart_backoff_initial", conn
+        )
+        run_command(
+            "ALTER SYSTEM RESET pg_extension_base.worker_restart_backoff_max", conn
+        )
+        run_command(
+            "ALTER SYSTEM RESET pg_extension_base.worker_restart_healthy_time", conn
+        )
+        run_command(
+            "ALTER SYSTEM RESET pg_extension_base_test_hibernate.fail_after", conn
+        )
+        run_command("SELECT pg_reload_conf()", conn)
+    finally:
+        conn.autocommit = False
+
+
+def test_worker_restart_backoff_escalates(superuser_conn):
+    """
+    A worker that keeps failing at startup should have its failure count climb
+    while the exponential backoff throttles the restart rate.
+
+    fail_after=0 makes the worker error out immediately (so it never stays up
+    long enough to be considered healthy), and healthy_time is large so the
+    failure counter is never reset.
+    """
+    set_backoff_gucs(
+        superuser_conn, initial_ms=100, max_ms=400, healthy_ms=30000, fail_after_ms=0
+    )
+
+    run_command(
+        "CREATE EXTENSION pg_extension_base_test_hibernate CASCADE", superuser_conn
+    )
+    superuser_conn.commit()
+
+    try:
+        # Poll for up to ~5s until the failure count escalates.
+        counts = []
+        for _ in range(20):
+            time.sleep(0.25)
+            fc = hibernate_worker_failure_count(superuser_conn)
+            if fc is not None:
+                counts.append(fc)
+            if counts and counts[-1] >= 3:
+                break
+
+        assert counts, "hibernate worker was never registered"
+
+        # The counter escalated, proving repeated failures are being tracked.
+        assert max(counts) >= 3, f"failure count did not escalate: {counts}"
+
+        # With a >=100ms backoff that doubles up to 400ms, the worker restarts a
+        # handful of times per second at most. Without any delay it would crash
+        # loop hundreds of times in the same window, so a modest ceiling proves
+        # the restart is actually being throttled.
+        assert max(counts) < 100, f"restarts were not throttled: {counts}"
+    finally:
+        run_command(
+            "DROP EXTENSION pg_extension_base_test_hibernate CASCADE", superuser_conn
+        )
+        superuser_conn.commit()
+        reset_backoff_gucs(superuser_conn)
+
+
+def test_worker_restart_backoff_resets_after_healthy_uptime(superuser_conn):
+    """
+    A worker that stays up longer than the healthy threshold before failing
+    should not accumulate backoff: each failure is treated as fresh, so the
+    failure count never climbs past 1.
+    """
+    # fail_after (600ms) > healthy_time (300ms): every run is "healthy".
+    set_backoff_gucs(
+        superuser_conn, initial_ms=100, max_ms=400, healthy_ms=300, fail_after_ms=600
+    )
+
+    run_command(
+        "CREATE EXTENSION pg_extension_base_test_hibernate CASCADE", superuser_conn
+    )
+    superuser_conn.commit()
+
+    try:
+        counts = []
+        for _ in range(12):  # ~4.8s, several fail/restart cycles
+            time.sleep(0.4)
+            fc = hibernate_worker_failure_count(superuser_conn)
+            if fc is not None:
+                counts.append(fc)
+
+        assert counts, "hibernate worker was never registered"
+
+        # We should have observed at least one failure (count reaching 1) but it
+        # must never escalate, because the healthy-uptime reset fires each time.
+        assert max(counts) <= 1, f"backoff did not reset after healthy uptime: {counts}"
+        assert 1 in counts, f"worker never failed as expected: {counts}"
+    finally:
+        run_command(
+            "DROP EXTENSION pg_extension_base_test_hibernate CASCADE", superuser_conn
+        )
+        superuser_conn.commit()
+        reset_backoff_gucs(superuser_conn)

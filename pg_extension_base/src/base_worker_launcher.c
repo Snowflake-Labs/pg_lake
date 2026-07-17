@@ -105,11 +105,17 @@
 #define MAX_WORKER_NAME_LENGTH (255)
 
 /*
- * When a base worker fails with an error, we avoid a crash loop by waiting at
- * least 5 seconds. We do not currently wake up the server and database starters,
- * so the total wait can be up to 15 seconds.
+ * When a base worker fails with an error we delay its restart to avoid a tight
+ * crash loop.  The delay grows exponentially with the number of consecutive
+ * failures: WorkerRestartBackoffInitialMs on the first failure, doubling on
+ * each subsequent failure, capped at WorkerRestartBackoffMaxMs.  The failure
+ * counter resets once a worker has stayed up for at least WorkerRestartHealthyMs,
+ * so a worker that runs fine and later hits a transient error backs off from the
+ * initial delay again instead of inheriting a stale, long delay.
+ *
+ * We do not currently wake up the server and database starters, so the total
+ * wait can be up to WorkerStarterSleepTimeSec longer than the computed delay.
  */
-#define NAP_TIME_AFTER_FAILURE (5000)
 
 #define PG_EXTENSION_BASE_EXTENSION_NAME "pg_extension_base"
 #define PG_EXTENSION_BASE_SCHEMA_NAME "extension_base"
@@ -225,6 +231,12 @@ typedef struct BaseWorkerEntry
 
 	/* when to restart the base worker (delayed after failure) */
 	TimestampTz restartAfter;
+
+	/* number of consecutive failures, used to compute the restart backoff */
+	int			failureCount;
+
+	/* when the worker last started running (for the healthy-uptime reset) */
+	TimestampTz startTime;
 }			BaseWorkerEntry;
 
 
@@ -357,6 +369,7 @@ static void BaseWorkerObjectAccessHook(ObjectAccessType access, Oid classId,
 static Oid	PgExtensionBaseExtensionId(void);
 static bool ExtensionExists(char *extensionName);
 static TimestampTz GetDelayedTimestamp(int64 millis);
+static int64 ComputeRestartBackoffMs(int failureCount);
 static void SignalDatabaseStarterLocked(Oid databaseId);
 static void DatabaseStarterNeedsRestart(Oid databaseId);
 static void PrepareForDrop(Oid databaseId, Oid extensionId);
@@ -399,6 +412,11 @@ static bool SignalServerStarter = false;
 /* pg_extension_base.worker_starter_sleep_time */
 int			WorkerStarterSleepTimeSec = DEFAULT_WORKER_STARTER_SLEEP_TIME;
 int32		MyBaseWorkerId = InvalidOid;
+
+/* pg_extension_base.worker_restart_backoff_* */
+int			WorkerRestartBackoffInitialMs = DEFAULT_WORKER_RESTART_BACKOFF_INITIAL_MS;
+int			WorkerRestartBackoffMaxMs = DEFAULT_WORKER_RESTART_BACKOFF_MAX_MS;
+int			WorkerRestartHealthyMs = DEFAULT_WORKER_RESTART_HEALTHY_MS;
 
 /*
  * InitializeBaseWorkerLauncher sets up hooks used by the base worker launcher.
@@ -1893,6 +1911,7 @@ PgExtensionBaseWorkerMain(Datum arg)
 
 	workerEntry->state = WORKER_RUNNING;
 	workerEntry->workerPid = MyProcPid;
+	workerEntry->startTime = GetCurrentTimestamp();
 
 	Oid			entryPointFunctionId = workerEntry->entryPointFunctionId;
 	Oid			extensionId = workerEntry->extensionId;
@@ -2032,6 +2051,9 @@ PgExtensionBaseWorkerSharedMemoryExit(int code, Datum arg)
 
 		if (code == 0)
 		{
+			/* a clean exit is not part of a crash loop, so reset the backoff */
+			workerEntry->failureCount = 0;
+
 			/*
 			 * Clean exit - if needsRestart is already set, the worker
 			 * requested restart via its return value. Otherwise, no restart.
@@ -2069,11 +2091,35 @@ PgExtensionBaseWorkerSharedMemoryExit(int code, Datum arg)
 			}
 
 			/*
+			 * If the worker had been running for a while before it failed,
+			 * treat this as a fresh failure rather than a continuation of a
+			 * crash loop and reset the backoff.  startTime is 0 when the
+			 * worker never reached WORKER_RUNNING (i.e. it failed during
+			 * startup), in which case we keep escalating the delay.
+			 */
+			TimestampTz now = GetCurrentTimestamp();
+
+			if (workerEntry->startTime != 0 &&
+				TimestampDifferenceExceeds(workerEntry->startTime, now,
+										   WorkerRestartHealthyMs))
+				workerEntry->failureCount = 0;
+
+			workerEntry->failureCount++;
+
+			int64		backoffMs = ComputeRestartBackoffMs(workerEntry->failureCount);
+
+			/*
 			 * Also tell the database starter that we want to restart
 			 */
 			workerEntry->needsRestart = true;
 			workerEntry->state = WORKER_RESTARTING;
-			workerEntry->restartAfter = GetDelayedTimestamp(NAP_TIME_AFTER_FAILURE);
+			workerEntry->restartAfter = GetDelayedTimestamp(backoffMs);
+
+			ereport(LOG,
+					(errmsg("base worker %d in database %u failed %d time(s) in "
+							"a row; delaying restart by %ld ms",
+							workerId, databaseId, workerEntry->failureCount,
+							(long) backoffMs)));
 		}
 	}
 	else
@@ -2864,6 +2910,29 @@ GetDelayedTimestamp(int64 millis)
 
 
 /*
+ * ComputeRestartBackoffMs returns the delay in milliseconds before a base
+ * worker that has failed failureCount times in a row should be restarted.
+ *
+ * The delay starts at WorkerRestartBackoffInitialMs on the first failure and
+ * doubles on each subsequent consecutive failure, capped at
+ * WorkerRestartBackoffMaxMs.
+ */
+static int64
+ComputeRestartBackoffMs(int failureCount)
+{
+	int64		backoffMs = WorkerRestartBackoffInitialMs;
+
+	for (int i = 1; i < failureCount && backoffMs < WorkerRestartBackoffMaxMs; i++)
+		backoffMs *= 2;
+
+	if (backoffMs > WorkerRestartBackoffMaxMs)
+		backoffMs = WorkerRestartBackoffMaxMs;
+
+	return backoffMs;
+}
+
+
+/*
  * SignalDatabaseStarterLocked signals the database starter for the given
  * database to wake up, or falls back to signaling the server starter.
  *
@@ -2983,13 +3052,14 @@ pg_extension_base_list_base_workers(PG_FUNCTION_ARGS)
 
 	while ((baseWorkerEntry = (BaseWorkerEntry *) hash_seq_search(&status)) != 0)
 	{
-		bool		nulls[] = {false, false, false, false, false};
+		bool		nulls[] = {false, false, false, false, false, false};
 		Datum		values[] = {
 			ObjectIdGetDatum(baseWorkerEntry->key.databaseId),
 			Int32GetDatum(baseWorkerEntry->key.workerId),
 			ObjectIdGetDatum(baseWorkerEntry->extensionId),
 			Int32GetDatum(baseWorkerEntry->workerPid),
 			BoolGetDatum(baseWorkerEntry->needsRestart),
+			Int32GetDatum(baseWorkerEntry->failureCount),
 		};
 
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
