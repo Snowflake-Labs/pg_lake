@@ -1083,6 +1083,38 @@ def test_copy_to_1d_array_succeeds(pg_conn, duckdb_conn, tmp_path):
     pg_conn.rollback()
 
 
+def test_copy_to_multidim_array_json_errors(pg_conn, tmp_path):
+    """
+    Companion to the CSV case: JSON serialises arrays through DuckDB as a
+    typed LIST(T) (ShouldUseDuckSerialization is true), so a multidimensional
+    value must still be rejected by the guard in CopyOneRowTo.
+    """
+    json_path = tmp_path / "test_multidim.json"
+
+    run_command(
+        """
+        CREATE TABLE test_multidim_json (id bigint, v int[]);
+        INSERT INTO test_multidim_json VALUES (1, ARRAY[[1,2],[3,4]]);
+        """,
+        pg_conn,
+    )
+
+    error = run_command(
+        f"COPY test_multidim_json TO '{json_path}' WITH (format 'json')",
+        pg_conn,
+        raise_error=False,
+    )
+
+    assert (
+        error is not None
+    ), "Expected an error for multidimensional array in COPY TO json"
+    assert (
+        "multidimensional arrays are not supported" in error.lower()
+    ), f"Unexpected error message: {error}"
+
+    pg_conn.rollback()
+
+
 def test_copy_virtual_column(pg_conn, tmp_path):
     # virtual columns were introduced in PostgreSQL 18
     if get_pg_version_num(pg_conn) < 180000:
