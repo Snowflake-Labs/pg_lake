@@ -934,14 +934,19 @@ CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot)
 				 * PostgreSQL cannot distinguish int[] from int[][] at the
 				 * type level, so a value with ndim > 1 would be serialised as
 				 * "[[1,2],[3,4]]" and DuckDB cannot cast that string back to
-				 * a flat LIST(T).  For Iceberg tables this is handled
-				 * upstream by IcebergErrorOrClampDatum; for plain COPY TO
-				 * there is no such guard, so we raise here.  Check before
-				 * serialisation so we do not pay the cost of PGDuckSerialize
-				 * on a value we will reject.
+				 * a flat LIST(T).  Check before serialisation so we do not
+				 * pay the cost of PGDuckSerialize on a value we will reject.
+				 *
+				 * This runs for every target format as a backstop.  For the
+				 * Iceberg write path (INSERT into an Iceberg table) a
+				 * multidimensional value is already rejected (error policy)
+				 * or set to NULL (clamp policy) upstream by
+				 * IcebergErrorOrClampDatum, so it never reaches here with
+				 * ndim > 1.  COPY TO in Iceberg format is rejected earlier in
+				 * EnsureFormatSupported.  In practice this only fires on
+				 * plain COPY TO to a file.
 				 */
-				if (get_element_type(attr->atttypid) != InvalidOid &&
-					cstate->targetFormat != DATA_FORMAT_ICEBERG)
+				if (get_element_type(attr->atttypid) != InvalidOid)
 				{
 					ArrayType  *arr = DatumGetArrayTypeP(value);
 
