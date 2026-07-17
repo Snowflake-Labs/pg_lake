@@ -154,7 +154,6 @@ static List *TupleDescColumnNameList(TupleDesc tupleDescriptor);
 static List *CopyGetAttnumsFixed(TupleDesc tupDesc, List *attnamelist);
 static bool ShouldUseDuckSerialization(CopyDataFormat targetFormat, PGType postgresType);
 static void ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits(const char *numericStr);
-static void ErrorIfSpecialNumeric(const char *input_str);
 static bool TypeContainsNumeric(Oid typeOid);
 static void ErrorIfCopyToExceedsNumericLimitsInDatum(Datum value, Oid typeOid,
 													 int32 typmod);
@@ -706,34 +705,6 @@ ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits(const char *numericStr)
 
 
 /*
-* ErrorIfSpecialNumeric ensures that the input string does not contain
-* special numeric values like NaN, Inf, -Inf.
-*/
-static void
-ErrorIfSpecialNumeric(const char *input_str)
-{
-
-	char	   *num = (char *) input_str;
-
-	/* skip leading whitespace */
-	while (*num != '\0' && isspace((unsigned char) *num))
-		num++;
-
-	if (pg_strncasecmp(num, "NaN", 3) == 0 ||
-		pg_strncasecmp(num, "Infinity", 8) == 0 ||
-		pg_strncasecmp(num, "+Infinity", 9) == 0 ||
-		pg_strncasecmp(num, "-Infinity", 9) == 0 ||
-		pg_strncasecmp(num, "inf", 3) == 0 ||
-		pg_strncasecmp(num, "+inf", 4) == 0 ||
-		pg_strncasecmp(num, "-inf", 4) == 0)
-	{
-		ereport(ERROR, errmsg("Special numeric values like NaN, Inf, -Inf are not allowed for numeric type"),
-				errhint("Use float type instead."));
-	}
-}
-
-
-/*
  * TypeContainsNumeric returns true if `typeOid` reaches a numeric leaf at any
  * nesting depth: as the type itself, an array element, a composite field, a
  * map key/value, or through a domain over any of these.
@@ -813,14 +784,33 @@ ErrorIfCopyToExceedsNumericLimitsInDatum(Datum value, Oid typeOid, int32 typmod)
 {
 	if (typeOid == NUMERICOID)
 	{
-		char	   *numericStr =
-			DatumGetCString(DirectFunctionCall1(numeric_out, value));
+		Numeric		num = DatumGetNumeric(value);
 
+		/*
+		 * The NaN/Infinity check only needs the numeric header flags, so read
+		 * them directly instead of formatting the value to text.  This keeps
+		 * the common (finite) case free of the numeric_out allocation and
+		 * string scan.
+		 */
+		if (numeric_is_nan(num) || numeric_is_inf(num))
+			ereport(ERROR,
+					errmsg("Special numeric values like NaN, Inf, -Inf are not allowed for numeric type"),
+					errhint("Use float type instead."));
+
+		/*
+		 * Only unbounded numerics are subject to the integral-digit cap, and
+		 * that is the only remaining check that needs the decimal text, so
+		 * defer the expensive numeric_out to this branch.
+		 */
 		if (IsUnboundedNumeric(NUMERICOID, typmod))
-			ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits(numericStr);
+		{
+			char	   *numericStr =
+				DatumGetCString(DirectFunctionCall1(numeric_out, NumericGetDatum(num)));
 
-		/* do not allow NaN, Inf etc. */
-		ErrorIfSpecialNumeric(numericStr);
+			ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits(numericStr);
+			pfree(numericStr);
+		}
+
 		return;
 	}
 
