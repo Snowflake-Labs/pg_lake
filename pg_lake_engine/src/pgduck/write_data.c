@@ -96,8 +96,12 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 	 * When reached from the Iceberg FDW INSERT path, the CSV data has already
 	 * been clamped by WriteInsertRecord (via ClampAndCheckConstraints →
 	 * IcebergErrorOrClampSlotInPlace).  When reached from the plain COPY TO
-	 * path (ProcessPgLakeCopyTo), multidimensional array values are rejected
-	 * earlier in CopyOneRowTo, so they never appear in the CSV.
+	 * path (ProcessPgLakeCopyTo) with a DuckDB-serialised destination
+	 * (Parquet/JSON), multidimensional array values are rejected earlier in
+	 * CopyOneRowTo, so they never appear in the CSV.  For a CSV destination
+	 * such values may appear, but every column is read back as VARCHAR (see
+	 * ChooseDuckDBEngineTypeForWrite), so the PostgreSQL array text is copied
+	 * through verbatim rather than cast to a LIST(T).
 	 */
 	return WriteQueryResultTo(command.data,
 							  destinationPath,
