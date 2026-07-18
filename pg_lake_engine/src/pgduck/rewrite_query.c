@@ -165,6 +165,7 @@ static Node *RewriteFuncExprPostgisBytea(Node *node, void *context);
 static Node *RewriteFuncExprTrigonometry(Node *node, void *context);
 static Node *RewriteFuncExprInverseTrigonometry(Node *node, void *context);
 static Node *RewriteFuncExprHyperbolic(Node *node, void *context);
+static Node *RewriteFuncExprUuid(Node *node, void *context);
 static Node *RewriteFuncExprInitcap(Node *node, void *context);
 static Node *RewriteFuncExprJsonbArrayLength(Node *node, void *context);
 static Node *RewriteFuncExprEncode(Node *node, void *context);
@@ -292,6 +293,14 @@ static FunctionCallRewriteRuleByName BuiltinFunctionCallRewriteRulesByName[] =
 	},
 	{
 		"pg_catalog", "atanh", RewriteFuncExprHyperbolic, 0
+	},
+
+	/* uuid functions (Postgres 18+) */
+	{
+		"pg_catalog", "uuid_extract_timestamp", RewriteFuncExprUuid, 0
+	},
+	{
+		"pg_catalog", "uuid_extract_version", RewriteFuncExprUuid, 0
 	},
 
 	/* text functions */
@@ -2277,6 +2286,54 @@ RewriteFuncExprHyperbolic(Node *node, void *context)
 	funcExpr->funcid = LookupFuncName(funcName, argCount, argTypes, false);
 
 	return (Node *) funcExpr;
+}
+
+
+/*
+ * RewriteFuncExprUuid rewrites uuid_extract_timestamp(..) and
+ * uuid_extract_version(..) function calls into uuid_extract_timestamp_pg(..)
+ * and uuid_extract_version_pg(..) function calls.
+ *
+ * The wrappers are needed because DuckDB's uuid_extract_timestamp errors for
+ * any version other than 7 (Postgres returns a timestamp for version 1 and
+ * NULL for other versions), and DuckDB's uuid_extract_version skips the
+ * RFC 9562 variant check that makes Postgres return NULL.
+ *
+ * The functions only exist in Postgres 18+, so the rewrite never fires on
+ * older versions.
+ */
+static Node *
+RewriteFuncExprUuid(Node *node, void *context)
+{
+#if PG_VERSION_NUM >= 180000
+	FuncExpr   *funcExpr = castNode(FuncExpr, node);
+	List	   *funcName;
+
+	switch (funcExpr->funcid)
+	{
+		case F_UUID_EXTRACT_TIMESTAMP:
+			funcName = list_make2(makeString(PG_LAKE_INTERNAL_NSP),
+								  makeString("uuid_extract_timestamp_pg"));
+			break;
+
+		case F_UUID_EXTRACT_VERSION:
+			funcName = list_make2(makeString(PG_LAKE_INTERNAL_NSP),
+								  makeString("uuid_extract_version_pg"));
+			break;
+
+		default:
+			elog(ERROR, "unexpected function ID in rewrite %d", funcExpr->funcid);
+	}
+
+	Oid			argTypes[] = {UUIDOID};
+	int			argCount = 1;
+
+	funcExpr->funcid = LookupFuncName(funcName, argCount, argTypes, false);
+
+	return (Node *) funcExpr;
+#else
+	return node;
+#endif
 }
 
 
