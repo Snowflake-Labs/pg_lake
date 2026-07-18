@@ -329,6 +329,20 @@ static const PGDuckShippableFunction ShippableBuiltinProcs[] =
 	/* Random functions */
 	{"random", 'f', 0, {}, NULL},
 
+	/*
+	 * UUID functions, which only exist in Postgres 18+; listing them on older
+	 * versions would make the eager catalog lookup in
+	 * LoadShippablePgduckFunctions error out.  Only the zero-arg uuidv7() is
+	 * shippable: DuckDB has no equivalent of uuidv7(interval).  The extract
+	 * functions diverge from Postgres semantics in DuckDB, so they are
+	 * rewritten to _pg wrappers at deparse time (see rewrite_query.c).
+	 */
+#if PG_VERSION_NUM >= 180000
+	{"uuidv7", 'f', 0, {}, NULL},
+	{"uuid_extract_timestamp", 'f', 1, {"uuid"}, NULL},
+	{"uuid_extract_version", 'f', 1, {"uuid"}, NULL},
+#endif
+
 	/* Trigonometric functions */
 	{"acos", 'f', 1, {"float8"}, NULL},
 	{"acosd", 'f', 1, {"float8"}, NULL},
