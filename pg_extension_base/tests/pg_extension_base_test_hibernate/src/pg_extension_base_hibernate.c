@@ -31,8 +31,6 @@
 #include "pg_extension_base/base_workers.h"
 #include "utils/guc.h"
 
-#define GUC_STANDARD 0
-
 PG_MODULE_MAGIC;
 
 /* function declarations */
@@ -67,7 +65,7 @@ _PG_init(void)
 							-1,
 							INT32_MAX,
 							PGC_SIGHUP,
-							GUC_UNIT_MS | GUC_STANDARD,
+							GUC_UNIT_MS,
 							NULL, NULL, NULL);
 }
 
