@@ -6,6 +6,6 @@ legal_exception: false
 release_branches:
   - main
   - release.*
-code_owners_file_present: false
+code_owners_file_present: true
 jira_project_issue_type: Bug
 jira_area: Bug

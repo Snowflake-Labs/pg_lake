@@ -1,0 +1,14 @@
+# Code owners for pg_lake
+#
+# Order matters: the last matching pattern for a changed file wins.
+# Listed owners are automatically requested for review on any PR that
+# touches a matching path. See:
+# https://docs.github.com/articles/about-code-owners
+#
+# The pg_lake extensions and pgduck_server are maintained by one team
+# that works across all components, so a single default owner covers the
+# whole tree. Add more specific patterns below only if a subtree grows a
+# distinct set of maintainers.
+
+# Default owners for everything in the repo.
+*       @sfc-gh-mslot @sfc-gh-okalaci @sfc-gh-abozkurt @sfc-gh-npuka @sfc-gh-dachristensen @sfc-gh-amzheng
