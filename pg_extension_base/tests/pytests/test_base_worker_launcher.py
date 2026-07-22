@@ -551,6 +551,9 @@ def set_backoff_gucs(conn, initial_ms, max_ms, healthy_ms, fail_after_ms):
     fail_after lives in the hibernate test library, so LOAD it into this
     backend first to make the placeholder known to ALTER SYSTEM.
     """
+    # End any transaction a prior test left open; autocommit can't be toggled
+    # while one is in progress.
+    conn.rollback()
     conn.autocommit = True
     try:
         run_command("LOAD 'pg_extension_base_test_hibernate'", conn)
@@ -576,6 +579,7 @@ def set_backoff_gucs(conn, initial_ms, max_ms, healthy_ms, fail_after_ms):
 
 
 def reset_backoff_gucs(conn):
+    conn.rollback()
     conn.autocommit = True
     try:
         run_command(
