@@ -18,6 +18,8 @@
 #pragma once
 #include "postgres.h"
 
+#include "utils/numeric.h"
+
 /*
  * Maximum precision and scale for numeric types in DuckDB.
  */
@@ -49,3 +51,4 @@ extern PGDLLEXPORT void GetDuckdbAdjustedPrecisionAndScaleFromNumericTypeMod(int
 																			 int *scale);
 extern PGDLLEXPORT bool CanPushdownNumericToDuckdb(int precision, int scale);
 extern PGDLLEXPORT bool IsUnsupportedNumericForIceberg(Oid typeOid, int typmod);
+extern PGDLLEXPORT int NumericIntegralDigitCount(Numeric num);

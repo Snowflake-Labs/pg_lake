@@ -29,6 +29,7 @@
 #include "fmgr.h"
 #include "miscadmin.h"
 
+#include "access/htup_details.h"
 #include "catalog/pg_type_d.h"
 #include "commands/copy.h"
 #include "commands/defrem.h"
@@ -43,11 +44,13 @@
 #include "nodes/execnodes.h"
 #include "nodes/makefuncs.h"
 #include "port/pg_bswap.h"
+#include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/numeric.h"
 #include "utils/rel.h"
+#include "utils/typcache.h"
 
 
 /*
@@ -102,6 +105,13 @@ typedef struct CopyToStateData
 	MemoryContext copycontext;	/* per-copy execution context */
 
 	FmgrInfo   *out_functions;	/* lookup info for output functions */
+
+	/*
+	 * Per-column flag: the column's type reaches a numeric leaf (directly, or
+	 * nested inside an array/composite/map/domain).  Precomputed once so the
+	 * per-row numeric-limit validation only walks columns that can trip it.
+	 */
+	bool	   *needsNumericLeafCheck;
 	MemoryContext rowcontext;	/* per-row evaluation context */
 	uint64		bytes_processed;	/* number of bytes processed so far */
 
@@ -143,8 +153,10 @@ static void CopySendInt16(CopyToState cstate, int16 val);
 static List *TupleDescColumnNameList(TupleDesc tupleDescriptor);
 static List *CopyGetAttnumsFixed(TupleDesc tupDesc, List *attnamelist);
 static bool ShouldUseDuckSerialization(CopyDataFormat targetFormat, PGType postgresType);
-static void ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits(const char *numericStr);
-static void ErrorIfSpecialNumeric(const char *input_str);
+static void ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits(Numeric num);
+static bool TypeContainsNumeric(Oid typeOid);
+static void ErrorIfCopyToExceedsNumericLimitsInDatum(Datum value, Oid typeOid,
+													 int32 typmod);
 
 
 /*----------
@@ -454,6 +466,7 @@ StartCopyTo(CopyToState cstate, TupleDesc tupDesc)
 
 	/* Get info about the columns we need to process. */
 	cstate->out_functions = (FmgrInfo *) palloc(num_phys_attrs * sizeof(FmgrInfo));
+	cstate->needsNumericLeafCheck = (bool *) palloc0(num_phys_attrs * sizeof(bool));
 	foreach(cur, cstate->attnumlist)
 	{
 		int			attnum = lfirst_int(cur);
@@ -470,6 +483,9 @@ StartCopyTo(CopyToState cstate, TupleDesc tupDesc)
 							  &out_func_oid,
 							  &isvarlena);
 		fmgr_info(out_func_oid, &cstate->out_functions[attnum - 1]);
+
+		cstate->needsNumericLeafCheck[attnum - 1] =
+			TypeContainsNumeric(attr->atttypid);
 	}
 
 	/*
@@ -649,69 +665,212 @@ CopyGetAttnumsFixed(TupleDesc tupDesc, List *attnamelist)
 
 /*
  * ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits ensures the integral
- * digits of the numeric string do not exceed the max allowed digits during
- * COPY TO.
+ * digits of an unbounded numeric do not exceed the max allowed digits during
+ * COPY TO.  The count is read from the value's weight, so this is O(1) with no
+ * allocation.
  *
  * Excess fractional (decimal) digits are intentionally allowed here because
  * DuckDB's DECIMAL(P,S) will round them during the CSV-to-Parquet conversion.
  */
 static void
-ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits(const char *numericStr)
+ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits(Numeric num)
 {
-	int			totalIntegralDigits = 0;
-	bool		foundDotSeparator = false;
+	int			maxAllowedDigits =
+		UnboundedNumericDefaultPrecision - UnboundedNumericDefaultScale;
 
-	for (int i = 0; numericStr[i] != '\0'; i++)
-	{
-		if (numericStr[i] == '.')
-		{
-			foundDotSeparator = true;
-			continue;
-		}
-
-		if (!isdigit(numericStr[i]))
-			continue;
-
-		if (!foundDotSeparator)
-			totalIntegralDigits++;
-
-		if (totalIntegralDigits > (UnboundedNumericDefaultPrecision - UnboundedNumericDefaultScale))
-		{
-			ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
-							errmsg("unbounded numeric type exceeds max allowed digits %d "
-								   "before decimal point",
-								   UnboundedNumericDefaultPrecision - UnboundedNumericDefaultScale),
-							errhint("Consider specifying precision and scale for numeric types, "
-									"i.e. \"numeric(P,S)\" instead of \"numeric\".")));
-		}
-	}
+	if (NumericIntegralDigitCount(num) > maxAllowedDigits)
+		ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+						errmsg("unbounded numeric type exceeds max allowed digits %d "
+							   "before decimal point",
+							   maxAllowedDigits),
+						errhint("Consider specifying precision and scale for numeric types, "
+								"i.e. \"numeric(P,S)\" instead of \"numeric\".")));
 }
 
 
 /*
-* ErrorIfSpecialNumeric ensures that the input string does not contain
-* special numeric values like NaN, Inf, -Inf.
-*/
-static void
-ErrorIfSpecialNumeric(const char *input_str)
+ * TypeContainsNumeric returns true if `typeOid` reaches a numeric leaf at any
+ * nesting depth: as the type itself, an array element, a composite field, a
+ * map key/value, or through a domain over any of these.
+ *
+ * Only structural catalog lookups are done here, so it is meant to be called
+ * once per column at COPY setup (see needsNumericLeafCheck) rather than per
+ * row.  Composite types cannot contain themselves, so the recursion always
+ * terminates.
+ */
+static bool
+TypeContainsNumeric(Oid typeOid)
 {
+	if (typeOid == NUMERICOID)
+		return true;
 
-	char	   *num = (char *) input_str;
+	Oid			elemType = get_element_type(typeOid);
 
-	/* skip leading whitespace */
-	while (*num != '\0' && isspace((unsigned char) *num))
-		num++;
+	if (OidIsValid(elemType))
+		return TypeContainsNumeric(elemType);
 
-	if (pg_strncasecmp(num, "NaN", 3) == 0 ||
-		pg_strncasecmp(num, "Infinity", 8) == 0 ||
-		pg_strncasecmp(num, "+Infinity", 9) == 0 ||
-		pg_strncasecmp(num, "-Infinity", 9) == 0 ||
-		pg_strncasecmp(num, "inf", 3) == 0 ||
-		pg_strncasecmp(num, "+inf", 4) == 0 ||
-		pg_strncasecmp(num, "-inf", 4) == 0)
+	char		typtype = get_typtype(typeOid);
+
+	/*
+	 * Domains (including pg_map, which is a domain over an array of key/value
+	 * composites) unwrap to their base type, which feeds back into the array
+	 * and composite recursion above.
+	 */
+	if (typtype == TYPTYPE_DOMAIN)
+		return TypeContainsNumeric(getBaseType(typeOid));
+
+	if (typtype == TYPTYPE_COMPOSITE)
 	{
-		ereport(ERROR, errmsg("Special numeric values like NaN, Inf, -Inf are not allowed for numeric type"),
-				errhint("Use float type instead."));
+		TupleDesc	tupdesc = lookup_rowtype_tupdesc(typeOid, -1);
+		bool		found = false;
+
+		for (int i = 0; i < tupdesc->natts; i++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+			if (attr->attisdropped)
+				continue;
+
+			if (TypeContainsNumeric(attr->atttypid))
+			{
+				found = true;
+				break;
+			}
+		}
+
+		ReleaseTupleDesc(tupdesc);
+		return found;
+	}
+
+	return false;
+}
+
+
+/*
+ * ErrorIfCopyToExceedsNumericLimitsInDatum applies the COPY TO numeric limits
+ * to every numeric leaf reachable from `value`, recursing through arrays,
+ * composites, maps, and domains.  Each numeric leaf is subject to the same
+ * checks a top-level numeric column receives: an unbounded numeric may not
+ * exceed the integral-digit cap
+ * (ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits), and no numeric may
+ * be NaN/Infinity (ErrorIfSpecialNumeric).  Non-numeric leaves are ignored.
+ *
+ * Callers gate on the column type actually containing a numeric leaf (see
+ * needsNumericLeafCheck), so this is only entered for values that can trip a
+ * limit; the inner TypeContainsNumeric guards prune subtrees with no numeric
+ * so we never deconstruct an array or deform a tuple needlessly.
+ *
+ * An array's typmod applies to its element type, so it is forwarded to the
+ * element recursion (matching how numeric(P,S)[] carries the element typmod).
+ */
+static void
+ErrorIfCopyToExceedsNumericLimitsInDatum(Datum value, Oid typeOid, int32 typmod)
+{
+	if (typeOid == NUMERICOID)
+	{
+		Numeric		num = DatumGetNumeric(value);
+
+		/*
+		 * The NaN/Infinity check only needs the numeric header flags, so read
+		 * them directly instead of formatting the value to text.  This keeps
+		 * the common (finite) case free of the numeric_out allocation and
+		 * string scan.
+		 */
+		if (numeric_is_nan(num) || numeric_is_inf(num))
+			ereport(ERROR,
+					errmsg("Special numeric values like NaN, Inf, -Inf are not allowed for numeric type"),
+					errhint("Use float type instead."));
+
+		/* only unbounded numerics are subject to the integral-digit cap */
+		if (IsUnboundedNumeric(NUMERICOID, typmod))
+			ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits(num);
+
+		return;
+	}
+
+	Oid			elemType = get_element_type(typeOid);
+
+	if (OidIsValid(elemType))
+	{
+		if (!TypeContainsNumeric(elemType))
+			return;
+
+		int16		elmlen;
+		bool		elmbyval;
+		char		elmalign;
+		Datum	   *elems;
+		bool	   *nulls;
+		int			nelems;
+		ArrayType  *array = DatumGetArrayTypeP(value);
+
+		get_typlenbyvalalign(elemType, &elmlen, &elmbyval, &elmalign);
+		deconstruct_array(array, elemType, elmlen, elmbyval, elmalign,
+						  &elems, &nulls, &nelems);
+
+		for (int i = 0; i < nelems; i++)
+		{
+			if (nulls[i])
+				continue;
+
+			ErrorIfCopyToExceedsNumericLimitsInDatum(elems[i], elemType, typmod);
+		}
+
+		return;
+	}
+
+	char		typtype = get_typtype(typeOid);
+
+	/*
+	 * Domains (including maps): unwrap to the base type and recurse.  Maps
+	 * are domains over arrays of composites, so unwrapping leads to the array
+	 * -> composite recursion above.
+	 */
+	if (typtype == TYPTYPE_DOMAIN)
+	{
+		int32		baseTypmod = typmod;
+		Oid			baseType = getBaseTypeAndTypmod(typeOid, &baseTypmod);
+
+		ErrorIfCopyToExceedsNumericLimitsInDatum(value, baseType, baseTypmod);
+		return;
+	}
+
+	/* composite: deform the tuple and recurse into each field */
+	if (typtype == TYPTYPE_COMPOSITE)
+	{
+		HeapTupleHeader tup = DatumGetHeapTupleHeader(value);
+		Oid			tupType = HeapTupleHeaderGetTypeId(tup);
+		int32		tupTypmod = HeapTupleHeaderGetTypMod(tup);
+		TupleDesc	tupdesc = lookup_rowtype_tupdesc(tupType, tupTypmod);
+		int			natts = tupdesc->natts;
+		HeapTupleData tmptup;
+		Datum	   *values = (Datum *) palloc(natts * sizeof(Datum));
+		bool	   *attrNulls = (bool *) palloc(natts * sizeof(bool));
+
+		tmptup.t_len = HeapTupleHeaderGetDatumLength(tup);
+		ItemPointerSetInvalid(&(tmptup.t_self));
+		tmptup.t_tableOid = InvalidOid;
+		tmptup.t_data = tup;
+
+		heap_deform_tuple(&tmptup, tupdesc, values, attrNulls);
+
+		for (int i = 0; i < natts; i++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+			if (attr->attisdropped || attrNulls[i])
+				continue;
+
+			if (!TypeContainsNumeric(attr->atttypid))
+				continue;
+
+			ErrorIfCopyToExceedsNumericLimitsInDatum(values[i], attr->atttypid,
+													 attr->atttypmod);
+		}
+
+		pfree(values);
+		pfree(attrNulls);
+		ReleaseTupleDesc(tupdesc);
+		return;
 	}
 }
 
@@ -789,17 +948,19 @@ CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot)
 
 				/*
 				 * iceberg validation is handled separately for numeric types
-				 * (see IcebergErrorOrClampDatum)
+				 * (see IcebergErrorOrClampDatum).
+				 *
+				 * For every other target format, validate each numeric leaf
+				 * of the column -- including those nested inside arrays,
+				 * composites, maps, and domains -- against the numeric limits
+				 * DuckDB enforces when it converts the intermediate CSV to
+				 * the target type.
 				 */
-				if (attr->atttypid == NUMERICOID &&
-					cstate->targetFormat != DATA_FORMAT_ICEBERG)
-				{
-					if (IsUnboundedNumeric(NUMERICOID, attr->atttypmod))
-						ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits(string);
-
-					/* do not allow Nan, Inf etc. */
-					ErrorIfSpecialNumeric(string);
-				}
+				if (cstate->targetFormat != DATA_FORMAT_ICEBERG &&
+					cstate->needsNumericLeafCheck[attnum - 1])
+					ErrorIfCopyToExceedsNumericLimitsInDatum(value,
+															 attr->atttypid,
+															 attr->atttypmod);
 
 
 				if (cstate->opts.csv_mode)
