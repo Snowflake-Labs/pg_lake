@@ -19,6 +19,7 @@
 
 #include "postgres.h"
 #include "access/hash.h"
+#include "datatype/timestamp.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 
 typedef struct TableMetadataOperationTracker
@@ -63,3 +64,5 @@ extern PGDLLEXPORT bool HasAnyTrackedIcebergMetadataChanges(void);
 extern PGDLLEXPORT bool IsIcebergTableCreatedInCurrentTransaction(Oid relation);
 extern PGDLLEXPORT void BindRelationToXactRestCatalog(Oid relationId);
 extern PGDLLEXPORT void RegisterRestCatalogXactCaptureCallback(void);
+extern PGDLLEXPORT void AddRestCatalogMetadataForDeferredDeletion(char *path, Oid relationId, TimestampTz orphanedAt);
+extern PGDLLEXPORT void DrainConfirmedRestCatalogDeletions(void);
