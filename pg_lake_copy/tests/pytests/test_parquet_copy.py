@@ -884,6 +884,135 @@ def test_md_array(pg_conn, duckdb_conn, tmp_path):
     assert result[0]["val"] == 2
 
 
+# An unbounded numeric column maps to DuckDB DECIMAL(38,9) when the CSV is
+# converted to Parquet, which allows only 38 - 9 = 29 integral digits. COPY TO
+# validates this on the PostgreSQL side (before the value reaches the CSV), and
+# the validation must reach numeric leaves nested inside arrays, composites,
+# maps, and domains -- not just top-level numeric columns. Special values
+# (NaN/Infinity/-Infinity), valid PG input for an unbounded numeric but not
+# representable as a DuckDB DECIMAL, must be rejected at those leaves too.
+#
+# A 30-digit integer trips the cap; a 29-digit one is exactly at the limit and
+# must still succeed.
+NUMERIC_OVER_LIMIT = 10**29  # 30 integral digits -> rejected
+NUMERIC_AT_LIMIT = 10**28  # 29 integral digits -> allowed
+EXCEEDS_DIGITS_ERROR = "exceeds max allowed digits"
+SPECIAL_NUMERIC_ERROR = "Special numeric values"
+
+# The nested container shapes that carry a numeric leaf. Every one must be
+# walked by the COPY TO numeric validation.  "array_of_composite" is the
+# deeply-nested case: the numeric leaf sits two container levels down
+# (array -> composite -> numeric).
+NESTED_NUMERIC_KINDS = [
+    "array",
+    "composite",
+    "map",
+    "domain_scalar",
+    "domain_array",
+    "array_of_composite",
+]
+
+
+def _create_nested_numeric_types(pg_conn):
+    # Tolerate the map type already existing from a previous run; the composite
+    # and domains live in the caller's (uncommitted) transaction.
+    create_map_type("int", "numeric", raise_error=False)
+    run_command(
+        """
+        CREATE SCHEMA IF NOT EXISTS lake_struct;
+        CREATE TYPE lake_struct.cost_pair AS (label text, amount numeric);
+        CREATE DOMAIN cost_scalar AS numeric;
+        CREATE DOMAIN cost_array AS numeric[];
+        """,
+        pg_conn,
+    )
+
+
+def _nested_numeric_select(kind, expr, token):
+    """Build a SELECT that places a numeric leaf inside the given container.
+
+    `expr` is a SQL numeric expression used by the array/composite/domain
+    shapes; `token` is the bare value spliced into the map's composite text
+    literal (where an `'x'::numeric` cast is not valid).  The map's braces come
+    from a plain Python string so they are inserted verbatim, not parsed as
+    f-string replacement fields.
+    """
+    map_literal = '{"(1,500.00)","(2,%s)"}' % token
+    return {
+        "array": f"SELECT ARRAY[500.00, {expr}]::numeric[] AS v",
+        "composite": f"SELECT ('airfare', {expr})::lake_struct.cost_pair AS v",
+        "map": f"SELECT '{map_literal}'::map_type.key_int_val_numeric AS v",
+        "domain_scalar": f"SELECT {expr}::cost_scalar AS v",
+        "domain_array": f"SELECT ARRAY[500.00, {expr}]::cost_array AS v",
+        "array_of_composite": (
+            f"SELECT ARRAY[('base', 500.00)::lake_struct.cost_pair, "
+            f"('leaf', {expr})::lake_struct.cost_pair]::lake_struct.cost_pair[] AS v"
+        ),
+    }[kind]
+
+
+@pytest.mark.parametrize("kind", NESTED_NUMERIC_KINDS)
+def test_nested_unbounded_numeric(pg_conn, tmp_path, kind):
+    parquet_path = tmp_path / "test.parquet"
+
+    _create_nested_numeric_types(pg_conn)
+
+    over = str(NUMERIC_OVER_LIMIT)
+
+    # An oversized numeric leaf (30 integral digits) is rejected wherever it
+    # sits in the nested structure. (The within-cap acceptance path is covered
+    # by test_nested_numeric_roundtrip; a nested numeric Parquet write is a
+    # separate concern from the digit-limit validation exercised here.)
+    error = run_command(
+        f"COPY ({_nested_numeric_select(kind, over, over)}) "
+        f"TO '{parquet_path}' WITH (format 'parquet')",
+        pg_conn,
+        raise_error=False,
+    )
+    assert EXCEEDS_DIGITS_ERROR in error, f"{kind}: {error}"
+
+    pg_conn.rollback()
+
+
+@pytest.mark.parametrize("special", ["NaN", "Infinity", "-Infinity"])
+@pytest.mark.parametrize("kind", NESTED_NUMERIC_KINDS)
+def test_nested_special_numeric(pg_conn, tmp_path, kind, special):
+    parquet_path = tmp_path / "test.parquet"
+
+    _create_nested_numeric_types(pg_conn)
+
+    expr = f"'{special}'::numeric"
+    error = run_command(
+        f"COPY ({_nested_numeric_select(kind, expr, special)}) "
+        f"TO '{parquet_path}' WITH (format 'parquet')",
+        pg_conn,
+        raise_error=False,
+    )
+    assert SPECIAL_NUMERIC_ERROR in error, f"{kind} / {special}: {error}"
+
+    pg_conn.rollback()
+
+
+def test_nested_numeric_roundtrip(pg_conn, tmp_path):
+    # A within-cap numeric[] survives the COPY TO Parquet / COPY FROM round-trip
+    # with its values intact (guards against the validation over-rejecting).
+    parquet_path = tmp_path / "test.parquet"
+
+    run_command(
+        f"""
+        CREATE TABLE test_num_array (a numeric[]);
+        COPY (SELECT ARRAY[500.00, {NUMERIC_AT_LIMIT}]::numeric[] AS a)
+        TO '{parquet_path}' WITH (format 'parquet');
+        COPY test_num_array FROM '{parquet_path}' WITH (format 'parquet');
+        """,
+        pg_conn,
+    )
+    result = run_query("SELECT a FROM test_num_array", pg_conn)
+    assert result[0]["a"] == [Decimal("500.00"), Decimal(NUMERIC_AT_LIMIT)]
+
+    pg_conn.rollback()
+
+
 def test_copy_virtual_column(pg_conn, tmp_path):
     # virtual columns were introduced in PostgreSQL 18
     if get_pg_version_num(pg_conn) < 180000:
