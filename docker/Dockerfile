@@ -54,6 +54,7 @@ RUN if [ "$BASE_IMAGE_OS" = "almalinux" ]; then \
             jansson-devel \
             jq \
             diffutils \
+            gettext-devel \
             libcurl-devel \
             pam-devel \
             patch \
