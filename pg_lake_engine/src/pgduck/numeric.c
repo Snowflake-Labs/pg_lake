@@ -17,6 +17,8 @@
 
 #include "postgres.h"
 
+#include "varatt.h"
+
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/util/numeric.h"
 #include "catalog/pg_type.h"
@@ -102,6 +104,113 @@ IsUnsupportedNumericForIceberg(Oid typeOid, int typmod)
 
 	return precision > DUCKDB_MAX_NUMERIC_PRECISION ||
 		scale > DUCKDB_MAX_NUMERIC_SCALE;
+}
+
+/*
+ * A numeric's weight (the base-10000 exponent of its most significant digit)
+ * is stored directly in the value's on-disk header, so the number of integral
+ * digits can be derived arithmetically instead of formatting the whole value
+ * to text with numeric_out.
+ *
+ * The public numeric.h keeps struct NumericData opaque, so we mirror just the
+ * fields we read.  This layout, and the weight/digit macros below, have been
+ * stable in PostgreSQL since the base-10000 representation was introduced in
+ * 8.3.  DatumGetNumeric() always returns a fully detoasted value with a 4-byte
+ * varlena header, so overlaying this struct is safe.  Keep in sync with
+ * src/backend/utils/adt/numeric.c.
+ */
+typedef int16 PgLakeNumericDigit;
+
+#define PG_LAKE_NUMERIC_DEC_DIGITS 4	/* decimal digits per base-10000 digit */
+
+typedef struct PgLakeNumericLong
+{
+	uint16		n_sign_dscale;
+	int16		n_weight;
+	PgLakeNumericDigit n_data[FLEXIBLE_ARRAY_MEMBER];
+}			PgLakeNumericLong;
+
+typedef struct PgLakeNumericShort
+{
+	uint16		n_header;
+	PgLakeNumericDigit n_data[FLEXIBLE_ARRAY_MEMBER];
+}			PgLakeNumericShort;
+
+typedef union PgLakeNumericChoice
+{
+	uint16		n_header;
+	PgLakeNumericLong n_long;
+	PgLakeNumericShort n_short;
+}			PgLakeNumericChoice;
+
+typedef struct PgLakeNumericData
+{
+	int32		vl_len_;
+	PgLakeNumericChoice choice;
+}			PgLakeNumericData;
+
+#define PG_LAKE_NUMERIC_HEADER_IS_SHORT(n) (((n)->choice.n_header & 0x8000) != 0)
+#define PG_LAKE_NUMERIC_HEADER_SIZE(n) \
+	(VARHDRSZ + sizeof(uint16) + \
+	 (PG_LAKE_NUMERIC_HEADER_IS_SHORT(n) ? 0 : sizeof(int16)))
+#define PG_LAKE_NUMERIC_SHORT_WEIGHT_SIGN_MASK 0x0040
+#define PG_LAKE_NUMERIC_SHORT_WEIGHT_MASK 0x003F
+#define PG_LAKE_NUMERIC_WEIGHT(n) (PG_LAKE_NUMERIC_HEADER_IS_SHORT(n) ? \
+	(((n)->choice.n_short.n_header & PG_LAKE_NUMERIC_SHORT_WEIGHT_SIGN_MASK ? \
+	  ~PG_LAKE_NUMERIC_SHORT_WEIGHT_MASK : 0) \
+	 | ((n)->choice.n_short.n_header & PG_LAKE_NUMERIC_SHORT_WEIGHT_MASK)) \
+	: ((n)->choice.n_long.n_weight))
+#define PG_LAKE_NUMERIC_DIGITS(n) (PG_LAKE_NUMERIC_HEADER_IS_SHORT(n) ? \
+	(n)->choice.n_short.n_data : (n)->choice.n_long.n_data)
+#define PG_LAKE_NUMERIC_NDIGITS(n) \
+	((VARSIZE(n) - PG_LAKE_NUMERIC_HEADER_SIZE(n)) / sizeof(PgLakeNumericDigit))
+
+/*
+ * NumericIntegralDigitCount returns the number of digits numeric_out would
+ * emit before the decimal point of `num`, derived from the value's weight
+ * rather than by formatting it.  `num` must be a finite value already
+ * detoasted via DatumGetNumeric().
+ *
+ * numeric_out always emits at least one integral digit (a leading "0" for zero
+ * and for |value| < 1), which this mirrors so callers match textual output.
+ */
+int
+NumericIntegralDigitCount(Numeric num)
+{
+	PgLakeNumericData *n = (PgLakeNumericData *) num;
+	int			ndigits = PG_LAKE_NUMERIC_NDIGITS(n);
+	int			weight;
+	PgLakeNumericDigit firstDigit;
+	int			firstDigitLen;
+
+	/* zero is stored with no digits and rendered as a single "0" */
+	if (ndigits <= 0)
+		return 1;
+
+	weight = PG_LAKE_NUMERIC_WEIGHT(n);
+
+	/* |value| < 1 still renders a single leading "0" before the point */
+	if (weight < 0)
+		return 1;
+
+	/*
+	 * Leading zero base-10000 digits are stripped in storage, so the first
+	 * digit is in [1, 9999]; its decimal length plus the four decimal digits
+	 * contributed by each remaining full weight step gives the integral
+	 * count.
+	 */
+	firstDigit = PG_LAKE_NUMERIC_DIGITS(n)[0];
+
+	if (firstDigit >= 1000)
+		firstDigitLen = 4;
+	else if (firstDigit >= 100)
+		firstDigitLen = 3;
+	else if (firstDigit >= 10)
+		firstDigitLen = 2;
+	else
+		firstDigitLen = 1;
+
+	return weight * PG_LAKE_NUMERIC_DEC_DIGITS + firstDigitLen;
 }
 
 /*
