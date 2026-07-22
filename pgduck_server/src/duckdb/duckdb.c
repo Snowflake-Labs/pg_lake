@@ -218,6 +218,114 @@ verify_database_file_safe(const char *databaseFilePath)
 }
 
 /*
+ * GetEffectiveMemoryLimitBytes reads DuckDB's current memory_limit back and
+ * returns it in bytes.  DuckDB reports the limit as a formatted string
+ * (e.g. "2.0 GiB", "512.0 MiB"); we parse the value and its binary unit.
+ * Reading it back (rather than parsing the CLI argument) captures the
+ * effective limit including DuckDB's default of 80% of RAM when none was
+ * given.  Returns 0 if the setting could not be read or parsed, so callers
+ * can fall back to another estimate.
+ */
+static uint64
+GetEffectiveMemoryLimitBytes(void)
+{
+	char		buffer[STACK_ALLOCATED_OUTPUT_BUFFER_SIZE];
+	TextOutputBuffer out = {
+		.buffer = buffer,
+		.needsFree = false
+	};
+	double		value = 0;
+	char		unit[16] = {0};
+	uint64		multiplier = 1;
+	uint64		bytes = 0;
+
+	if (run_command_on_duckdb_with_callback("SELECT current_setting('memory_limit')",
+											process_single_result_as_text,
+											&out) == DuckDBError ||
+		out.buffer == NULL)
+		return 0;
+
+	/* e.g. "2.0 GiB"; a missing unit means the value is already in bytes */
+	if (sscanf(out.buffer, "%lf %15s", &value, unit) >= 1 && value > 0)
+	{
+		if (pg_strcasecmp(unit, "TiB") == 0 || pg_strcasecmp(unit, "TB") == 0)
+			multiplier = UINT64CONST(1) << 40;
+		else if (pg_strcasecmp(unit, "GiB") == 0 || pg_strcasecmp(unit, "GB") == 0)
+			multiplier = UINT64CONST(1) << 30;
+		else if (pg_strcasecmp(unit, "MiB") == 0 || pg_strcasecmp(unit, "MB") == 0)
+			multiplier = UINT64CONST(1) << 20;
+		else if (pg_strcasecmp(unit, "KiB") == 0 || pg_strcasecmp(unit, "KB") == 0)
+			multiplier = UINT64CONST(1) << 10;
+
+		bytes = (uint64) (value * (double) multiplier);
+	}
+
+	if (out.needsFree)
+		pg_free(out.buffer);
+
+	return bytes;
+}
+
+
+/*
+ * DefaultS3UploaderThreadLimit computes a memory-proportional cap on the
+ * number of concurrent S3 multipart-upload part buffers DuckDB keeps in
+ * flight per open file.
+ *
+ * Each in-flight part is a ~part_size buffer (default ~80MB, derived from
+ * s3_uploader_max_filesize / s3_uploader_max_parts_per_file) allocated
+ * against DuckDB's memory_limit (MemoryTag::EXTENSION).  With the upstream
+ * httpfs default of 50, a single file being written can pin up to ~4GB,
+ * which is enough to exhaust the memory_limit on small hosts and crash the
+ * server with an out-of-memory error while a large snapshot writes to S3.
+ *
+ * Since the part buffers are charged against memory_limit, we size the cap
+ * against that budget rather than physical RAM -- the two can differ, e.g. a
+ * 2GB memory_limit on a 4GB host.  The rule is ~2 upload threads per GiB of
+ * memory_limit, rounded to the nearest GiB, clamped to [2, 50] (50 is the
+ * upstream default; we never raise above it).  So a 2GB limit -> 4, a 4GB
+ * limit -> 8.  If the limit cannot be read we fall back to physical RAM, and
+ * then to the floor of 2.  Uploads are network-bound and run on detached
+ * threads independent of DuckDB's `threads` setting, so CPU count is not the
+ * constraint.
+ *
+ * This runs after memory_limit is configured and before the init file is
+ * applied, so it reflects the effective limit and an operator can still
+ * override s3_uploader_thread_limit explicitly in the init file.
+ */
+static uint64
+DefaultS3UploaderThreadLimit(void)
+{
+	uint64		gib = UINT64CONST(1024) * 1024 * 1024;
+	uint64		memBytes = GetEffectiveMemoryLimitBytes();
+	uint64		roundedGib;
+	uint64		threads;
+
+	if (memBytes == 0)
+	{
+		/* fall back to physical RAM if the limit could not be read */
+		long		pages = sysconf(_SC_PHYS_PAGES);
+		long		pageSize = sysconf(_SC_PAGE_SIZE);
+
+		if (pages < 1 || pageSize < 1)	/* sysconf failed too */
+			return 2;
+
+		memBytes = (uint64) pages * (uint64) pageSize;
+	}
+
+	roundedGib = (memBytes + gib / 2) / gib;	/* nearest whole GiB */
+	threads = 2 * roundedGib;
+
+	if (threads < 2)
+		threads = 2;
+	if (threads > 50)
+		threads = 50;
+
+	return threads;
+}
+
+
+/*
  * duckdb_global_init initializes the DuckDB database, which can be used
  * by different threads simulteously.
  */
@@ -470,6 +578,24 @@ duckdb_global_init(char *databaseFilePath,
 
 		if (run_command_on_duckdb(setCommand) == DuckDBError)
 			return DUCKDB_INITIALIZATION_ERROR;
+	}
+
+	{
+		uint64		s3UploaderThreadLimit = DefaultS3UploaderThreadLimit();
+
+		if (snprintf(setCommand, 1024,
+					 "SET GLOBAL s3_uploader_thread_limit TO %" PRIu64,
+					 s3UploaderThreadLimit) < 0)
+		{
+			PGDUCK_SERVER_ERROR("s3_uploader_thread_limit value is too long");
+			return DUCKDB_INITIALIZATION_ERROR;
+		}
+
+		if (run_command_on_duckdb(setCommand) == DuckDBError)
+			return DUCKDB_INITIALIZATION_ERROR;
+
+		PGDUCK_SERVER_LOG("s3_uploader_thread_limit is set to: %" PRIu64,
+						  s3UploaderThreadLimit);
 	}
 
 	if (initFilePath != NULL)
