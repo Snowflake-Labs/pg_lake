@@ -18,7 +18,6 @@ jobs:
     runs-on:
       labels:
         ubuntu-latest
-    environment: CDWRegionTest
     permissions:
       contents: read
       packages: write
@@ -32,8 +31,6 @@ jobs:
       BASE_IMAGE_NAME: almalinux
       BASE_IMAGE_TAG: 9
       FINAL_IMAGE_NAME: pg-lake-ci-pg-almalinux
-      CDWREGIONTEST_ACCESS_KEY_ID: ${{ secrets.cdwregiontest_access_key_id }}
-      CDWREGIONTEST_SECRET_ACCESS_KEY: ${{ secrets.cdwregiontest_secret_access_key }}
 
     steps:
       - name: Checkout repository
@@ -53,7 +50,6 @@ jobs:
     runs-on:
       labels:
         ubuntu-latest
-    environment: CDWRegionTest
     permissions:
       contents: read
       packages: write
@@ -67,8 +63,6 @@ jobs:
       BASE_IMAGE_NAME: debian
       BASE_IMAGE_TAG: bookworm-slim
       FINAL_IMAGE_NAME: pg-lake-ci-pg-debian
-      CDWREGIONTEST_ACCESS_KEY_ID: ${{ secrets.cdwregiontest_access_key_id }}
-      CDWREGIONTEST_SECRET_ACCESS_KEY: ${{ secrets.cdwregiontest_secret_access_key }}
 
     steps:
       - name: Checkout repository
@@ -87,7 +81,6 @@ jobs:
   build-and-install-almalinux:
     needs: build-image-almalinux
     runs-on: ubuntu-latest
-    environment: CDWRegionTest
 
     container:
       image: ghcr.io/snowflake-labs/pg-lake-ci-pg-almalinux:${{ needs.build-image-almalinux.outputs.tag }}
@@ -95,10 +88,6 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.github_token }}
-
-    env:
-      CDWREGIONTEST_ACCESS_KEY_ID: ${{ secrets.cdwregiontest_access_key_id }}
-      CDWREGIONTEST_SECRET_ACCESS_KEY: ${{ secrets.cdwregiontest_secret_access_key }}
 
     strategy:
       matrix:
@@ -117,7 +106,6 @@ jobs:
   build-and-install-debian:
     needs: build-image-debian
     runs-on: ubuntu-latest
-    environment: CDWRegionTest
 
     container:
       image: ghcr.io/snowflake-labs/pg-lake-ci-pg-debian:${{ needs.build-image-debian.outputs.tag }}
@@ -125,10 +113,6 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.github_token }}
-
-    env:
-      CDWREGIONTEST_ACCESS_KEY_ID: ${{ secrets.cdwregiontest_access_key_id }}
-      CDWREGIONTEST_SECRET_ACCESS_KEY: ${{ secrets.cdwregiontest_secret_access_key }}
 
     strategy:
       matrix:
@@ -155,17 +139,12 @@ jobs:
   test-check:
     needs: [build-image-almalinux, build-and-install-almalinux]
     runs-on: ubuntu-latest
-    environment: CDWRegionTest
     container:
       image: ghcr.io/snowflake-labs/pg-lake-ci-pg-almalinux:${{ needs.build-image-almalinux.outputs.tag }}
       options: --user 1001 --shm-size=128MB
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.github_token }}
-
-    env:
-      CDWREGIONTEST_ACCESS_KEY_ID: ${{ secrets.cdwregiontest_access_key_id }}
-      CDWREGIONTEST_SECRET_ACCESS_KEY: ${{ secrets.cdwregiontest_secret_access_key }}
 
     strategy:
       fail-fast: false
@@ -198,17 +177,12 @@ jobs:
   test-check-pg-lake-table:
     needs: [build-image-almalinux, build-and-install-almalinux]
     runs-on: ubuntu-latest
-    environment: CDWRegionTest
     container:
       image: ghcr.io/snowflake-labs/pg-lake-ci-pg-almalinux:${{ needs.build-image-almalinux.outputs.tag }}
       options: --user 1001 --shm-size=128MB
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.github_token }}
-
-    env:
-      CDWREGIONTEST_ACCESS_KEY_ID: ${{ secrets.cdwregiontest_access_key_id }}
-      CDWREGIONTEST_SECRET_ACCESS_KEY: ${{ secrets.cdwregiontest_secret_access_key }}
 
     strategy:
       fail-fast: false
@@ -235,17 +209,12 @@ jobs:
   test-installcheck:
     needs: [build-image-debian, build-and-install-debian]
     runs-on: ubuntu-latest
-    environment: CDWRegionTest
     container:
       image: ghcr.io/snowflake-labs/pg-lake-ci-pg-debian:${{ needs.build-image-debian.outputs.tag }}
       options: --user 1001 --shm-size=128MB
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.github_token }}
-
-    env:
-      CDWREGIONTEST_ACCESS_KEY_ID: ${{ secrets.cdwregiontest_access_key_id }}
-      CDWREGIONTEST_SECRET_ACCESS_KEY: ${{ secrets.cdwregiontest_secret_access_key }}
 
     strategy:
       fail-fast: false
@@ -276,17 +245,12 @@ jobs:
   test-installcheck-postgres:
     needs: [build-image-debian, build-and-install-debian]
     runs-on: ubuntu-latest
-    environment: CDWRegionTest
     container:
       image: ghcr.io/snowflake-labs/pg-lake-ci-pg-debian:${{ needs.build-image-debian.outputs.tag }}
       options: --user 1001 --shm-size=128MB
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.github_token }}
-
-    env:
-      CDWREGIONTEST_ACCESS_KEY_ID: ${{ secrets.cdwregiontest_access_key_id }}
-      CDWREGIONTEST_SECRET_ACCESS_KEY: ${{ secrets.cdwregiontest_secret_access_key }}
 
     strategy:
       fail-fast: false
@@ -320,17 +284,12 @@ jobs:
   test-installcheck-pg-lake-table:
     needs: [build-image-debian, build-and-install-debian]
     runs-on: ubuntu-latest
-    environment: CDWRegionTest
     container:
       image: ghcr.io/snowflake-labs/pg-lake-ci-pg-debian:${{ needs.build-image-debian.outputs.tag }}
       options: --user 1001 --shm-size=128MB
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.github_token }}
-
-    env:
-      CDWREGIONTEST_ACCESS_KEY_ID: ${{ secrets.cdwregiontest_access_key_id }}
-      CDWREGIONTEST_SECRET_ACCESS_KEY: ${{ secrets.cdwregiontest_secret_access_key }}
 
     strategy:
       fail-fast: false
@@ -358,17 +317,12 @@ jobs:
   test-isolation:
     needs: [build-image-almalinux, build-and-install-almalinux]
     runs-on: ubuntu-latest
-    environment: CDWRegionTest
     container:
       image: ghcr.io/snowflake-labs/pg-lake-ci-pg-almalinux:${{ needs.build-image-almalinux.outputs.tag }}
       options: --user 1001 --shm-size=128MB
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.github_token }}
-
-    env:
-      CDWREGIONTEST_ACCESS_KEY_ID: ${{ secrets.cdwregiontest_access_key_id }}
-      CDWREGIONTEST_SECRET_ACCESS_KEY: ${{ secrets.cdwregiontest_secret_access_key }}
 
     strategy:
       fail-fast: false
@@ -392,17 +346,12 @@ jobs:
   test-upgrade:
     needs: [build-image-almalinux, build-and-install-almalinux]
     runs-on: ubuntu-latest
-    environment: CDWRegionTest
     container:
       image: ghcr.io/snowflake-labs/pg-lake-ci-pg-almalinux:${{ needs.build-image-almalinux.outputs.tag }}
       options: --user 1001 --shm-size=128MB
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.github_token }}
-
-    env:
-      CDWREGIONTEST_ACCESS_KEY_ID: ${{ secrets.cdwregiontest_access_key_id }}
-      CDWREGIONTEST_SECRET_ACCESS_KEY: ${{ secrets.cdwregiontest_secret_access_key }}
 
     strategy:
       fail-fast: false
