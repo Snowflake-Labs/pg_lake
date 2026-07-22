@@ -3,6 +3,17 @@ import pytest
 from utils_pytest import *
 
 
+# These tests need real AWS credentials pointed at a cross-region bucket. The
+# credentials are supplied via CDWREGIONTEST_ACCESS_KEY_ID /
+# CDWREGIONTEST_SECRET_ACCESS_KEY. When those are not set (e.g. in GHA CI, which
+# no longer defines them) there is nothing meaningful to exercise, so skip.
+requires_cdwregiontest = pytest.mark.skipif(
+    not os.getenv("CDWREGIONTEST_ACCESS_KEY_ID"),
+    reason="CDWREGIONTEST_ACCESS_KEY_ID / CDWREGIONTEST_SECRET_ACCESS_KEY not set",
+)
+
+
+@requires_cdwregiontest
 def test_region_switch(s3, pg_conn, pgduck_conn, extension):
     # The following URLs point to real files in a real bucket which reside
     # in us-east-2
@@ -15,36 +26,19 @@ def test_region_switch(s3, pg_conn, pgduck_conn, extension):
 
     # Set up credentials from environment variables (with the wrong region)
     # Otherwise, we sign requests with our nonsense credentials, which S3 rejects
-    if access_key_id:
-        run_command(
-            f"""
-            CREATE OR REPLACE SECRET s3pglregiontest (
-                TYPE S3,
-                KEY_ID '{access_key_id}',
-                SECRET '{secret_access_key}',
-                SCOPE 's3://aws-public-blockchain',
-                REGION 'us-east-1',
-                ENDPOINT 's3.amazonaws.com'
-            );
-        """,
-            pgduck_conn,
-        )
-
-    # Locally, use ~/.aws/credentials
-    else:
-        run_command(
-            f"""
-            CREATE OR REPLACE SECRET s3pglregiontest (
-                TYPE S3,
-                SCOPE 's3://aws-public-blockchain',
-                PROVIDER CREDENTIAL_CHAIN,
-                REGION 'us-east-1',
-                ENDPOINT 's3.amazonaws.com',
-                CHAIN 'config'
-            );
-        """,
-            pgduck_conn,
-        )
+    run_command(
+        f"""
+        CREATE OR REPLACE SECRET s3pglregiontest (
+            TYPE S3,
+            KEY_ID '{access_key_id}',
+            SECRET '{secret_access_key}',
+            SCOPE 's3://aws-public-blockchain',
+            REGION 'us-east-1',
+            ENDPOINT 's3.amazonaws.com'
+        );
+    """,
+        pgduck_conn,
+    )
 
     pgduck_conn.commit()
 
@@ -116,6 +110,7 @@ def test_region_switch(s3, pg_conn, pgduck_conn, extension):
     pg_conn.rollback()
 
 
+@requires_cdwregiontest
 def test_file_exists_cross_region(s3, pg_conn, pgduck_conn, extension):
     # Exercises the region-aware FileExists path. Without the fix,
     # pg_lake_file_exists() returned false on cross-region buckets because it
@@ -127,34 +122,19 @@ def test_file_exists_cross_region(s3, pg_conn, pgduck_conn, extension):
     secret_access_key = os.getenv("CDWREGIONTEST_SECRET_ACCESS_KEY")
 
     # Set up credentials with the wrong region (bucket is us-east-2)
-    if access_key_id:
-        run_command(
-            f"""
-            CREATE OR REPLACE SECRET s3pglregiontest_exists (
-                TYPE S3,
-                KEY_ID '{access_key_id}',
-                SECRET '{secret_access_key}',
-                SCOPE 's3://aws-public-blockchain',
-                REGION 'us-east-1',
-                ENDPOINT 's3.amazonaws.com'
-            );
-        """,
-            pgduck_conn,
-        )
-    else:
-        run_command(
-            f"""
-            CREATE OR REPLACE SECRET s3pglregiontest_exists (
-                TYPE S3,
-                SCOPE 's3://aws-public-blockchain',
-                PROVIDER CREDENTIAL_CHAIN,
-                REGION 'us-east-1',
-                ENDPOINT 's3.amazonaws.com',
-                CHAIN 'config'
-            );
-        """,
-            pgduck_conn,
-        )
+    run_command(
+        f"""
+        CREATE OR REPLACE SECRET s3pglregiontest_exists (
+            TYPE S3,
+            KEY_ID '{access_key_id}',
+            SECRET '{secret_access_key}',
+            SCOPE 's3://aws-public-blockchain',
+            REGION 'us-east-1',
+            ENDPOINT 's3.amazonaws.com'
+        );
+    """,
+        pgduck_conn,
+    )
 
     pgduck_conn.commit()
 
