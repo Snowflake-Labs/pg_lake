@@ -153,7 +153,7 @@ static void CopySendInt16(CopyToState cstate, int16 val);
 static List *TupleDescColumnNameList(TupleDesc tupleDescriptor);
 static List *CopyGetAttnumsFixed(TupleDesc tupDesc, List *attnamelist);
 static bool ShouldUseDuckSerialization(CopyDataFormat targetFormat, PGType postgresType);
-static void ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits(const char *numericStr);
+static void ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits(Numeric num);
 static bool TypeContainsNumeric(Oid typeOid);
 static void ErrorIfCopyToExceedsNumericLimitsInDatum(Datum value, Oid typeOid,
 													 int32 typmod);
@@ -665,42 +665,26 @@ CopyGetAttnumsFixed(TupleDesc tupDesc, List *attnamelist)
 
 /*
  * ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits ensures the integral
- * digits of the numeric string do not exceed the max allowed digits during
- * COPY TO.
+ * digits of an unbounded numeric do not exceed the max allowed digits during
+ * COPY TO.  The count is read from the value's weight, so this is O(1) with no
+ * allocation.
  *
  * Excess fractional (decimal) digits are intentionally allowed here because
  * DuckDB's DECIMAL(P,S) will round them during the CSV-to-Parquet conversion.
  */
 static void
-ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits(const char *numericStr)
+ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits(Numeric num)
 {
-	int			totalIntegralDigits = 0;
-	bool		foundDotSeparator = false;
+	int			maxAllowedDigits =
+		UnboundedNumericDefaultPrecision - UnboundedNumericDefaultScale;
 
-	for (int i = 0; numericStr[i] != '\0'; i++)
-	{
-		if (numericStr[i] == '.')
-		{
-			foundDotSeparator = true;
-			continue;
-		}
-
-		if (!isdigit(numericStr[i]))
-			continue;
-
-		if (!foundDotSeparator)
-			totalIntegralDigits++;
-
-		if (totalIntegralDigits > (UnboundedNumericDefaultPrecision - UnboundedNumericDefaultScale))
-		{
-			ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
-							errmsg("unbounded numeric type exceeds max allowed digits %d "
-								   "before decimal point",
-								   UnboundedNumericDefaultPrecision - UnboundedNumericDefaultScale),
-							errhint("Consider specifying precision and scale for numeric types, "
-									"i.e. \"numeric(P,S)\" instead of \"numeric\".")));
-		}
-	}
+	if (NumericIntegralDigitCount(num) > maxAllowedDigits)
+		ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
+						errmsg("unbounded numeric type exceeds max allowed digits %d "
+							   "before decimal point",
+							   maxAllowedDigits),
+						errhint("Consider specifying precision and scale for numeric types, "
+								"i.e. \"numeric(P,S)\" instead of \"numeric\".")));
 }
 
 
@@ -797,19 +781,9 @@ ErrorIfCopyToExceedsNumericLimitsInDatum(Datum value, Oid typeOid, int32 typmod)
 					errmsg("Special numeric values like NaN, Inf, -Inf are not allowed for numeric type"),
 					errhint("Use float type instead."));
 
-		/*
-		 * Only unbounded numerics are subject to the integral-digit cap, and
-		 * that is the only remaining check that needs the decimal text, so
-		 * defer the expensive numeric_out to this branch.
-		 */
+		/* only unbounded numerics are subject to the integral-digit cap */
 		if (IsUnboundedNumeric(NUMERICOID, typmod))
-		{
-			char	   *numericStr =
-				DatumGetCString(DirectFunctionCall1(numeric_out, NumericGetDatum(num)));
-
-			ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits(numericStr);
-			pfree(numericStr);
-		}
+			ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits(num);
 
 		return;
 	}
