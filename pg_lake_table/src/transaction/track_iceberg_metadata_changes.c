@@ -1325,8 +1325,11 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 	 *
 	 * The tracker flags intentionally survive subtransaction rollback, so
 	 * only use this shortcut when the transaction's final catalog is actually
-	 * empty. A rolled-back TRUNCATE, or TRUNCATE followed by INSERT, falls
-	 * through to the normal diff below.
+	 * empty. In particular, TRUNCATE followed by INSERT leaves currentFilesMap
+	 * non-empty and must fall through to the normal diff below; otherwise the
+	 * remove-all shortcut would also remove the newly inserted files. A
+	 * rolled-back TRUNCATE likewise falls through because the catalog contains
+	 * the restored files.
 	 */
 	if (opTracker->relationDataFilesRemoveAllSeen &&
 		hash_get_num_entries(currentFilesMap) == 0)
