@@ -1768,6 +1768,20 @@ AppendReadCSVTail(StringInfo buf, int maxLineSize, const char *columnsMap,
 	if (columnsMap != NULL)
 	{
 		appendStringInfo(buf, ", columns=%s", columnsMap);
+
+		/*
+		 * A columns map is only supplied when reading a CSV we wrote
+		 * ourselves, so the schema and dialect are already fully specified
+		 * above.  Turn the sniffer off: with only a columns map (no explicit
+		 * dateformat) DuckDB still auto-detects the date/timestamp format
+		 * from a sample, and a text column holding a non-ISO, date-looking
+		 * string (e.g. "12/25/2020") can make it pick %m/%d/%Y and then fail
+		 * to parse a real ISO date column ("2021-03-10").  Disabling
+		 * auto_detect keeps DuckDB's default ISO casting, which also handles
+		 * BC / out-of-range / infinity dates that a fixed dateformat string
+		 * would reject.
+		 */
+		appendStringInfoString(buf, ", auto_detect=false");
 	}
 	else
 	{
