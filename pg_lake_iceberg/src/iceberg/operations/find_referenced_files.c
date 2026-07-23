@@ -482,7 +482,7 @@ IcebergSnapshotAddAllReferencedFiles(IcebergSnapshot * snapshot, HTAB *fileHash)
 		{
 			DataFile   *dataFile = lfirst(dataFileCell);
 
-			AppendFileToHash(MemoryContextStrdup(oldContext, dataFile->file_path), fileHash);
+			AppendFileToHash(dataFile->file_path, fileHash);
 		}
 
 		MemoryContextSwitchTo(oldContext);

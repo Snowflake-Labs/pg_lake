@@ -96,6 +96,8 @@ ReadIcebergManifests(const char *manifestListPath)
 
 	int			writtenLength = FileWrite(manifestListLocalFile, manifestListBlob, contentLength, 0, WAIT_EVENT_COPY_FILE_WRITE);
 
+	pfree(manifestListBlob);
+
 	if (writtenLength != contentLength)
 	{
 		ereport(ERROR,
@@ -141,6 +143,8 @@ ReadManifestEntries(const char *manifestPath)
 	const char *manifestLocalPath = FilePathName(manifestLocalFile);
 
 	int			writtenLength = FileWrite(manifestLocalFile, manifestBlob, contentLength, 0, WAIT_EVENT_COPY_FILE_WRITE);
+
+	pfree(manifestBlob);
 
 	if (writtenLength != contentLength)
 	{
