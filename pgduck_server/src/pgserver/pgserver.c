@@ -496,10 +496,19 @@ pgserver_run(PGServer * pgServer)
 		{
 			PGDUCK_SERVER_ERROR("Thread creation failed for client %d", client->clientSocket);
 
+			/*
+			 * Free the slot first: it clears the pool's copy of the token
+			 * pointer under the lock, so a concurrent cancel request can no
+			 * longer read the token we are about to free.
+			 */
+			pgclient_threadpool_free_slot(threadIndex);
+
 			close(client->clientSocket);
+#if PG_VERSION_NUM >= 180000
+			pfree(client->cancellationToken);
+#endif
 			pg_free(client);
 			pg_free(initState);
-			pgclient_threadpool_free_slot(threadIndex);
 		}
 
 		if (enable_shutdown_signals() != STATUS_OK)
@@ -636,6 +645,10 @@ pgclient_thread_cleanup(void *arg)
 	/* end of the thread, free the pre-thread resources */
 	pgclient_threadpool_free_slot(initState->threadIndex);
 	closesocket(initState->pgClient->clientSocket);
+#if PG_VERSION_NUM >= 180000
+	/* the thread pool slot only kept a pointer copy; the client owns it */
+	pfree(initState->pgClient->cancellationToken);
+#endif
 	pg_free(initState->pgClient);
 	pg_free(initState);
 }
