@@ -121,6 +121,50 @@ _PG_init(void)
 							NULL,
 							NULL);
 
+	DefineCustomIntVariable("pg_extension_base.worker_restart_backoff_initial",
+							"Sets the delay before restarting a base worker after its "
+							"first failure. The delay doubles on each subsequent "
+							"consecutive failure.",
+							NULL,
+							&WorkerRestartBackoffInitialMs,
+							DEFAULT_WORKER_RESTART_BACKOFF_INITIAL_MS,
+							0,
+							INT32_MAX,
+							PGC_SIGHUP,
+							GUC_UNIT_MS | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							NULL,
+							NULL,
+							NULL);
+
+	DefineCustomIntVariable("pg_extension_base.worker_restart_backoff_max",
+							"Sets the maximum delay before restarting a base worker "
+							"that keeps failing.",
+							NULL,
+							&WorkerRestartBackoffMaxMs,
+							DEFAULT_WORKER_RESTART_BACKOFF_MAX_MS,
+							0,
+							INT32_MAX,
+							PGC_SIGHUP,
+							GUC_UNIT_MS | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							NULL,
+							NULL,
+							NULL);
+
+	DefineCustomIntVariable("pg_extension_base.worker_restart_healthy_time",
+							"Sets how long a base worker must stay up before a later "
+							"failure is treated as fresh, resetting the restart "
+							"backoff to its initial delay.",
+							NULL,
+							&WorkerRestartHealthyMs,
+							DEFAULT_WORKER_RESTART_HEALTHY_MS,
+							0,
+							INT32_MAX,
+							PGC_SIGHUP,
+							GUC_UNIT_MS | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							NULL,
+							NULL,
+							NULL);
+
 	/*
 	 * Install our ProcessUtility hook for ALTER EXTENSION ... UPDATE
 	 * dependency walking BEFORE preloading other extensions.  Postgres
