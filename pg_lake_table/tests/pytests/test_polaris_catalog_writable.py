@@ -1190,8 +1190,16 @@ def test_sequences_serial_and_generated_columns(
     if installcheck:
         return
     # ---------- Setup ----------
+    # This test is marked flaky(reruns=2) and uses a module-scoped connection.
+    # A previous (failed) attempt commits these tables into the REST catalog,
+    # and REST-catalog drops only take effect on commit. Roll back any leftover
+    # transaction state and commit the schema drop before recreating the tables,
+    # otherwise the stale REST-catalog entry is still present when CREATE TABLE
+    # runs and the catalog rejects it with HTTP 409 AlreadyExists on every rerun.
+    pg_conn.rollback()
     run_command("DROP SCHEMA IF EXISTS seq_demo CASCADE;", pg_conn)
     run_command("CREATE SCHEMA seq_demo;", pg_conn)
+    pg_conn.commit()
 
     # A standalone sequence for manual use
     run_command(
