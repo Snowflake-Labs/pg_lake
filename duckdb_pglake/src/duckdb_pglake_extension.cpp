@@ -200,17 +200,24 @@ inline void UuidExtractVersionPG(DataChunk &args, ExpressionState &state, Vector
  * DuckDB's built-in uuid_extract_timestamp errors for any version other
  * than 7, where Postgres returns the embedded timestamp for version 1 and
  * NULL for the rest.
+ *
+ * The second argument is PG_VERSION_NUM of the Postgres that planned the
+ * query.  Version 7 UUIDs only yield a timestamp on Postgres 18+; on
+ * Postgres 17 uuid_extract_timestamp returns NULL for them, so the branch is
+ * gated on the caller's version to keep pushdown results identical to local
+ * evaluation on either release.
  */
 inline void UuidExtractTimestampPG(DataChunk &args, ExpressionState &state, Vector &result)
 {
 	auto &input_vector = args.data[0];
+	auto &pg_version_vector = args.data[1];
 
 	/* microseconds between the Gregorian epoch (1582-10-15) and 1970-01-01 */
 	constexpr int64_t GREGORIAN_TO_UNIX_EPOCH_US = 12219292800000000LL;
 
-	UnaryExecutor::ExecuteWithNulls<hugeint_t, timestamp_tz_t>(
-		input_vector, result, args.size(),
-		[&](hugeint_t value, ValidityMask &mask, idx_t idx) -> timestamp_tz_t {
+	BinaryExecutor::ExecuteWithNulls<hugeint_t, int32_t, timestamp_tz_t>(
+		input_vector, pg_version_vector, result, args.size(),
+		[&](hugeint_t value, int32_t pg_version, ValidityMask &mask, idx_t idx) -> timestamp_tz_t {
 			if (!IsRfc9562Variant(value)) {
 				mask.SetInvalid(idx);
 				return timestamp_tz_t(0);
@@ -230,7 +237,7 @@ inline void UuidExtractTimestampPG(DataChunk &args, ExpressionState &state, Vect
 									  GREGORIAN_TO_UNIX_EPOCH_US);
 			}
 
-			if (version == 7) {
+			if (version == 7 && pg_version >= 180000) {
 				/* 48-bit count of milliseconds since the Unix epoch */
 				uint64_t tms = upper >> 16;
 
@@ -723,7 +730,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	auto initcap_function = ScalarFunction("initcap_pg", {LogicalType::VARCHAR}, LogicalType::VARCHAR, InitcapPG);
 	loader.RegisterFunction(initcap_function);
 
-	auto uuid_extract_timestamp_function = ScalarFunction("uuid_extract_timestamp_pg", {LogicalType::UUID}, LogicalType::TIMESTAMP_TZ, UuidExtractTimestampPG);
+	auto uuid_extract_timestamp_function = ScalarFunction("uuid_extract_timestamp_pg", {LogicalType::UUID, LogicalType::INTEGER}, LogicalType::TIMESTAMP_TZ, UuidExtractTimestampPG);
 	loader.RegisterFunction(uuid_extract_timestamp_function);
 
 	auto uuid_extract_version_function = ScalarFunction("uuid_extract_version_pg", {LogicalType::UUID}, LogicalType::SMALLINT, UuidExtractVersionPG);
