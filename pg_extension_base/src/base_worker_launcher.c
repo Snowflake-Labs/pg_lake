@@ -1601,6 +1601,16 @@ StartBaseWorker(int workerId, Oid extensionId, Oid entryPointFunctionId)
 	workerEntry->state = WORKER_STARTING;
 	workerEntry->restartAfter = 0;
 
+	/*
+	 * Clear the last-run start time until the worker actually reaches
+	 * WORKER_RUNNING again.  This keeps the invariant that startTime is 0
+	 * whenever the current launch never reached WORKER_RUNNING, which the
+	 * healthy-uptime reset in PgExtensionBaseWorkerSharedMemoryExit relies on
+	 * to keep escalating the backoff through a startup crash loop rather than
+	 * reading a stale timestamp from an earlier healthy run.
+	 */
+	workerEntry->startTime = 0;
+
 	LWLockRelease(&BaseWorkerControl->lock);
 
 	/*
