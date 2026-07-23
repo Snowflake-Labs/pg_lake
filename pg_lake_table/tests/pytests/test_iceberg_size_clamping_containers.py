@@ -484,3 +484,162 @@ def test_small_container_roundtrips_unchanged_under_snowflake(
     run_command("RESET search_path;", pg_conn)
     run_command("DROP SCHEMA test_size_passthrough CASCADE;", pg_conn)
     pg_conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Multi-dimensional string/binary arrays under compatibility_mode='snowflake'.
+#
+# A multi-dimensional array (text[][], varchar[][], bpchar[][], bytea[][])
+# shares its Postgres OID with the 1-D counterpart, so the size-clamp rewrite
+# derives a single array level and emits one list_transform wrapping the
+# per-leaf clamp/check function:
+#
+#     list_transform(v, _x0 -> iceberg_size_clamp_text(_x0, <cap>))
+#
+# DuckDB, however, materializes the value as a genuine nested list
+# (VARCHAR[][] / BLOB[][]), so the lambda variable _x0 binds as a LIST, not a
+# scalar.  Without the LIST-typed pass-through overload registered in
+# duckdb_pglake (iceberg_size_clamp_text/_blob, iceberg_size_check_text/_blob)
+# the write query fails to bind ("No function matches
+# iceberg_size_clamp_text(VARCHAR[], INTEGER)") and every INSERT..SELECT into
+# the snowflake-mode table errors out.  The pass-through is correct rather than
+# merely a bind fix: the pg_nullify_nested_list / pg_error_nested_list wrapper
+# runs first (inner SELECT) and has already reduced any depth>1 value to NULL
+# (clamp) or raised (error), so a value that reaches the size clamp is NULL --
+# exactly how a multi-dimensional int[][] already behaves.
+#
+# These cases drive the *pushdown* path (a genuinely-nested parquet source,
+# read back as VARCHAR[][]/BLOB[][]) with compatibility_mode='snowflake', which
+# is what enables the size-clamp wrapper.  The plain-iceberg multidim coverage
+# in test_iceberg_validation.py does not set snowflake mode, so it never
+# exercises this wrapper and did not catch the bind failure.
+#
+# int[] is a control: a fixed-width leaf is never wrapped by a per-leaf clamp,
+# so it binds regardless and must still clamp the multidim value to NULL.
+# json / jsonb are intentionally not covered here: they route through a
+# strlen(::VARCHAR) expression that already binds on a list, so they were never
+# affected by this bug.
+# ---------------------------------------------------------------------------
+
+MULTIDIM_SNOWFLAKE_STRING_BINARY_PARAMS = [
+    pytest.param("text[]", "[['a','b'],['c','d']]", id="text"),
+    pytest.param("varchar[]", "[['a','b'],['c','d']]", id="varchar"),
+    pytest.param("bpchar[]", "[['a','b'],['c','d']]", id="bpchar"),
+    pytest.param(
+        "bytea[]",
+        "[['a'::blob,'b'::blob],['c'::blob,'d'::blob]]",
+        id="bytea",
+    ),
+]
+
+
+def _write_nested_parquet(pgduck_conn, parquet_url, duckdb_nested_expr):
+    """Write a single-row parquet whose ``col`` is a genuinely nested list, via
+    DuckDB directly, so the pg_lake foreign scan reads it back as VARCHAR[][] /
+    BLOB[][] -- the shape that triggers the single-level list_transform bind."""
+    run_command(
+        f"COPY (SELECT 1 AS id, {duckdb_nested_expr} AS col) "
+        f"TO '{parquet_url}' (FORMAT PARQUET);",
+        pgduck_conn,
+    )
+    pgduck_conn.commit()
+
+
+@pytest.mark.parametrize(
+    "col_type,duckdb_nested_expr",
+    MULTIDIM_SNOWFLAKE_STRING_BINARY_PARAMS
+    + [pytest.param("int[]", "[[1,2],[3,4]]", id="int_control")],
+)
+def test_multidim_array_clamps_to_null_under_snowflake_pushdown(
+    pg_conn,
+    pgduck_conn,
+    extension,
+    s3,
+    with_default_location,
+    col_type,
+    duckdb_nested_expr,
+):
+    """A multi-dimensional array binds and clamps to NULL on the snowflake
+    size-clamp pushdown path.  Regression for the missing LIST-typed overload of
+    iceberg_size_clamp_text / iceberg_size_clamp_blob: before the fix this
+    INSERT..SELECT failed to bind for the string/binary element types."""
+    schema = "test_md_sf_clamp_" + col_type.strip("[]")
+    parquet_url = f"s3://{TEST_BUCKET}/{schema}/data.parquet"
+
+    _write_nested_parquet(pgduck_conn, parquet_url, duckdb_nested_expr)
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+    try:
+        run_command(
+            f"CREATE FOREIGN TABLE source (id int, col {col_type}) "
+            f"SERVER pg_lake OPTIONS (path '{parquet_url}');",
+            pg_conn,
+        )
+        run_command(
+            f"CREATE TABLE dst (id int, col {col_type}) USING iceberg "
+            "WITH (compatibility_mode = 'snowflake', out_of_range_values = 'clamp');",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        run_command("INSERT INTO dst SELECT * FROM source;", pg_conn)
+        pg_conn.commit()
+
+        # The multidimensional value is not representable in Iceberg, so it is
+        # clamped to NULL (the 1-D leaves are never reached).
+        result = run_query("SELECT id, col IS NULL AS is_null FROM dst;", pg_conn)
+        assert [[r[0], r[1]] for r in result] == [[1, True]]
+    finally:
+        pg_conn.rollback()
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+@pytest.mark.parametrize(
+    "col_type,duckdb_nested_expr", MULTIDIM_SNOWFLAKE_STRING_BINARY_PARAMS
+)
+def test_multidim_array_errors_under_snowflake_pushdown(
+    pg_conn,
+    pgduck_conn,
+    extension,
+    s3,
+    with_default_location,
+    col_type,
+    duckdb_nested_expr,
+):
+    """Under out_of_range_values='error', a multi-dimensional string/binary
+    array on the snowflake pushdown path binds and raises the
+    multidimensional-arrays error (from pg_error_nested_list, which runs before
+    the size check).  Exercises the LIST overload of iceberg_size_check_text /
+    iceberg_size_check_blob, which must still bind even though the row errors."""
+    schema = "test_md_sf_err_" + col_type.strip("[]")
+    parquet_url = f"s3://{TEST_BUCKET}/{schema}/data.parquet"
+
+    _write_nested_parquet(pgduck_conn, parquet_url, duckdb_nested_expr)
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+    try:
+        run_command(
+            f"CREATE FOREIGN TABLE source (id int, col {col_type}) "
+            f"SERVER pg_lake OPTIONS (path '{parquet_url}');",
+            pg_conn,
+        )
+        run_command(
+            f"CREATE TABLE dst (id int, col {col_type}) USING iceberg "
+            "WITH (compatibility_mode = 'snowflake', out_of_range_values = 'error');",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        with pytest.raises(Exception) as exc:
+            run_command("INSERT INTO dst SELECT * FROM source;", pg_conn)
+        pg_conn.rollback()
+        assert "multidimensional arrays are not supported" in str(exc.value).lower()
+    finally:
+        pg_conn.rollback()
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
