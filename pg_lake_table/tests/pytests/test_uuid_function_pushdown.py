@@ -18,8 +18,10 @@ UUID_SAMPLES = [
 
 @pytest.fixture(scope="module")
 def create_uuid_pushdown_tables(pg_conn, s3, extension):
-    if get_pg_version_num(pg_conn) < 180000:
-        pytest.skip("uuidv7 and uuid_extract_* require PostgreSQL 18+")
+    # uuid_extract_timestamp / uuid_extract_version exist in PostgreSQL 17+;
+    # uuidv7 only in 18+ (those tests skip themselves below).
+    if get_pg_version_num(pg_conn) < 170000:
+        pytest.skip("uuid_extract_* require PostgreSQL 17+")
 
     location = f"s3://{TEST_BUCKET}/uuid_f_pushdown/"
 
@@ -87,6 +89,9 @@ def test_uuid_extract_pushdown(
 
 
 def test_uuidv7_pushdown(create_uuid_pushdown_tables, pg_conn):
+    if get_pg_version_num(pg_conn) < 180000:
+        pytest.skip("uuidv7 requires PostgreSQL 18+")
+
     query = "SELECT uuidv7() FROM uuid_f_pushdowntbl"
 
     assert_remote_query_contains_expression(query, '"uuidv7"()', pg_conn)
@@ -109,6 +114,9 @@ def test_uuidv7_pushdown(create_uuid_pushdown_tables, pg_conn):
 
 
 def test_uuidv7_interval_not_pushed_down(create_uuid_pushdown_tables, pg_conn):
+    if get_pg_version_num(pg_conn) < 180000:
+        pytest.skip("uuidv7 requires PostgreSQL 18+")
+
     # uuidv7(interval) has no DuckDB equivalent and must stay unshipped;
     # the query still works with Postgres evaluating the function locally
     query = "SELECT uuidv7(interval '1 hour') FROM uuid_f_pushdowntbl"
