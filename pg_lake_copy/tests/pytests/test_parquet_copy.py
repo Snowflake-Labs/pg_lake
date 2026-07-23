@@ -1165,6 +1165,39 @@ def test_nested_1d_array_succeeds(pg_conn, tmp_path, kind):
     pg_conn.rollback()
 
 
+def test_nested_multidim_bigint_array_errors(pg_conn, tmp_path):
+    """
+    A multidimensional bigint[] nested inside a composite field is rejected by
+    the recursive guard.  bigint (a fixed-width element) is called out
+    separately because it is one of the element types whose unguarded nested
+    multidim value crashed the shared pgduck_server in issue #408; the walk
+    must reach it wherever it is nested, not only when it is the column type.
+    """
+    parquet_path = tmp_path / "test.parquet"
+
+    run_command(
+        """
+        CREATE TYPE lake_arr_bc AS (id int, vals bigint[]);
+        CREATE TABLE test_multidim_bigint (id bigint, c lake_arr_bc);
+        INSERT INTO test_multidim_bigint
+            VALUES (1, ROW(1, ARRAY[[1, 2], [3, 4]]::bigint[])::lake_arr_bc);
+        """,
+        pg_conn,
+    )
+
+    error = run_command(
+        f"COPY test_multidim_bigint TO '{parquet_path}' WITH (format 'parquet')",
+        pg_conn,
+        raise_error=False,
+    )
+    assert error is not None, "expected a multidimensional-array error"
+    assert (
+        "multidimensional arrays are not supported" in error.lower()
+    ), f"Unexpected error message: {error}"
+
+    pg_conn.rollback()
+
+
 def test_copy_to_multidim_array_json_errors(pg_conn, tmp_path):
     """
     Companion to the CSV case: JSON serialises arrays through DuckDB as a
