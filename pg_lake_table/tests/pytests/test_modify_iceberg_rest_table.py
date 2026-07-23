@@ -1632,7 +1632,14 @@ def test_reject_writable_table_on_server_with_catalog_name(
     )
     superuser_conn.commit()
 
-    run_command(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA_NAME}", pg_conn)
+    # Own the schema with pg_conn so the CREATE TABLE below reaches the
+    # catalog_name rejection rather than tripping a permission check. Drop any
+    # leftover first (as superuser, so it works regardless of who leaked it):
+    # this test shares TABLE_NAMESPACE with the other writable-REST tests, and
+    # they may land in the same pytest-split group in any order.
+    run_command(f"DROP SCHEMA IF EXISTS {SCHEMA_NAME} CASCADE", superuser_conn)
+    superuser_conn.commit()
+    run_command(f"CREATE SCHEMA {SCHEMA_NAME}", pg_conn)
     pg_conn.commit()
 
     err = run_command(
@@ -1647,6 +1654,10 @@ def test_reject_writable_table_on_server_with_catalog_name(
         in str(err)
     )
     pg_conn.rollback()
+
+    # Clean up so we do not leak the schema to a later test in the same group.
+    run_command(f"DROP SCHEMA IF EXISTS {SCHEMA_NAME} CASCADE", pg_conn)
+    pg_conn.commit()
 
     superuser_conn.rollback()
     run_command(f"DROP SERVER {SERVER_NAME} CASCADE", superuser_conn)
