@@ -104,6 +104,14 @@ extern bool EnableBaseWorkerLauncher;
 #define DEFAULT_WORKER_STARTER_SLEEP_TIME (10)
 extern int	WorkerStarterSleepTimeSec;
 
+/* pg_extension_base.worker_restart_backoff_* settings */
+#define DEFAULT_WORKER_RESTART_BACKOFF_INITIAL_MS (5000)
+#define DEFAULT_WORKER_RESTART_BACKOFF_MAX_MS (60000)
+#define DEFAULT_WORKER_RESTART_HEALTHY_MS (60000)
+extern int	WorkerRestartBackoffInitialMs;
+extern int	WorkerRestartBackoffMaxMs;
+extern int	WorkerRestartHealthyMs;
+
 void		BaseWorkerSharedMemoryInit(void);
 size_t		BaseWorkerSharedMemorySize(void);
 

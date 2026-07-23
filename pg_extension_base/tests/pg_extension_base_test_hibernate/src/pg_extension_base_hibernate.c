@@ -29,6 +29,7 @@
 #include "miscadmin.h"
 
 #include "pg_extension_base/base_workers.h"
+#include "utils/guc.h"
 
 PG_MODULE_MAGIC;
 
@@ -38,6 +39,14 @@ void		_PG_init(void);
 /* UDF implementations */
 PG_FUNCTION_INFO_V1(pg_extension_base_test_hibernate_main_worker);
 
+/*
+ * Fault-injection knob for exercising the base-worker restart backoff.  When
+ * >= 0 the worker runs for this many milliseconds and then errors out, so a
+ * test can drive a crash loop deterministically.  -1 (the default) disables the
+ * fault and the worker hibernates normally.
+ */
+static int	FailAfterMs = -1;
+
 
 /*
  * _PG_init is the entry-point for pg_extension_base_test_hibernate.
@@ -45,7 +54,19 @@ PG_FUNCTION_INFO_V1(pg_extension_base_test_hibernate_main_worker);
 void
 _PG_init(void)
 {
-	/* No GUCs needed for now */
+	DefineCustomIntVariable(
+							"pg_extension_base_test_hibernate.fail_after",
+							gettext_noop("Milliseconds the worker runs before erroring "
+										 "out, or -1 to disable (for testing the "
+										 "restart backoff)."),
+							NULL,
+							&FailAfterMs,
+							-1,
+							-1,
+							INT32_MAX,
+							PGC_SIGHUP,
+							GUC_UNIT_MS,
+							NULL, NULL, NULL);
 }
 
 
@@ -59,6 +80,21 @@ pg_extension_base_test_hibernate_main_worker(PG_FUNCTION_ARGS)
 	int32		workerId = PG_GETARG_INT32(0);
 
 	elog(LOG, "pg_extension_base_test_hibernate worker %d started", workerId);
+
+	/*
+	 * Fault injection for the restart-backoff tests: optionally run for a
+	 * fixed time and then error out so the worker exits non-cleanly and the
+	 * base-worker framework applies its exponential restart backoff.
+	 */
+	if (FailAfterMs >= 0)
+	{
+		if (FailAfterMs > 0)
+			pg_usleep(FailAfterMs * 1000L);
+
+		elog(ERROR, "pg_extension_base_test_hibernate worker %d failing on "
+			 "purpose (fail_after)", workerId);
+	}
+
 	elog(LOG, "pg_extension_base_test_hibernate worker %d sleeping for 5 seconds", workerId);
 
 	pg_usleep(5000000);
