@@ -151,6 +151,11 @@ pgclient_threadpool_reserve_slot(PGClient * client)
 	if (ActiveClientThreadCount >= MaxAllowedClients)
 	{
 		pthread_rwlock_unlock(&rwlock);
+
+#if PG_VERSION_NUM >= 180000
+		pfree(cancellationToken);
+#endif
+
 		return InvalidThreadIndex;
 	}
 
@@ -181,6 +186,16 @@ pgclient_threadpool_reserve_slot(PGClient * client)
 
 	/* store the thread index, to assign the DuckDB connection later */
 	client->threadIndex = usedThreadIndex;
+
+	if (usedThreadIndex == InvalidThreadIndex)
+	{
+		/* no slot assigned, so nothing will ever use or free the token */
+#if PG_VERSION_NUM >= 180000
+		pfree(cancellationToken);
+#endif
+
+		return InvalidThreadIndex;
+	}
 
 	/* store the cancellation token, to be transmitted to the client later */
 	client->cancellationProcId = cancellationProcId;
