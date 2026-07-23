@@ -1323,10 +1323,13 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 	 * existing file loses the linear remove-all path in the manifest writer
 	 * and makes it compare every manifest entry with every removed file.
 	 *
-	 * The tracker flags intentionally survive subtransaction rollback, so
-	 * only use this shortcut when the transaction's final catalog is actually
-	 * empty. A rolled-back TRUNCATE, or TRUNCATE followed by INSERT, falls
-	 * through to the normal diff below.
+	 * Two conditions must hold. relationDataFilesRemoveAllSeen records that a
+	 * TRUNCATE happened somewhere in the transaction; the flag intentionally
+	 * survives subtransaction rollback. The hash_get_num_entries() == 0 check
+	 * confirms the transaction's final catalog is actually empty, which is
+	 * what separates a net TRUNCATE from a truncate+DML transaction: a
+	 * rolled-back TRUNCATE, or a TRUNCATE followed by INSERT, leaves rows
+	 * behind and must fall through to the normal per-file diff below.
 	 */
 	if (opTracker->relationDataFilesRemoveAllSeen &&
 		hash_get_num_entries(currentFilesMap) == 0)
