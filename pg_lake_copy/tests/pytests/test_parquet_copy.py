@@ -1083,6 +1083,88 @@ def test_copy_to_1d_array_succeeds(pg_conn, duckdb_conn, tmp_path):
     pg_conn.rollback()
 
 
+# The multidimensional-array rejection must reach an array leaf no matter how
+# deeply it is nested -- inside a composite field, an array of composites, or a
+# domain over an array -- not just a top-level array column (review feedback on
+# PR #430).  This mirrors the recursive numeric-leaf validation above; the walk
+# lives in ErrorIfCopyToContainsMultidimArray (csv_writer.c).
+MULTIDIM_ARRAY_ERROR = "multidimensional arrays are not supported"
+
+NESTED_ARRAY_KINDS = ["composite", "array_of_composite", "domain_array"]
+
+
+def _create_nested_array_types(pg_conn):
+    run_command(
+        """
+        CREATE SCHEMA IF NOT EXISTS lake_arr;
+        CREATE TYPE lake_arr.tagged AS (label text, vals int[]);
+        CREATE DOMAIN int_matrix AS int[];
+        """,
+        pg_conn,
+    )
+
+
+def _nested_array_select(kind, arr_expr):
+    """Build a SELECT that places the int[] expression `arr_expr` inside the
+    given container shape.  "array_of_composite" is the deepest case: the array
+    leaf sits two container levels down (array -> composite -> int[])."""
+    return {
+        "composite": f"SELECT ('m', {arr_expr})::lake_arr.tagged AS v",
+        "array_of_composite": (
+            f"SELECT ARRAY[('base', ARRAY[1, 2])::lake_arr.tagged, "
+            f"('leaf', {arr_expr})::lake_arr.tagged]::lake_arr.tagged[] AS v"
+        ),
+        "domain_array": f"SELECT {arr_expr}::int_matrix AS v",
+    }[kind]
+
+
+@pytest.mark.parametrize("kind", NESTED_ARRAY_KINDS)
+def test_nested_multidim_array_errors(pg_conn, tmp_path, kind):
+    parquet_path = tmp_path / "test.parquet"
+
+    _create_nested_array_types(pg_conn)
+
+    # A multidimensional (2-D) array leaf is rejected wherever it sits in the
+    # nested structure, with the same clear error the top-level column gets.
+    error = run_command(
+        f"COPY ({_nested_array_select(kind, 'ARRAY[[1, 2], [3, 4]]')}) "
+        f"TO '{parquet_path}' WITH (format 'parquet')",
+        pg_conn,
+        raise_error=False,
+    )
+    assert error is not None, f"{kind}: expected a multidimensional-array error"
+    assert MULTIDIM_ARRAY_ERROR in error.lower(), f"{kind}: {error}"
+
+    pg_conn.rollback()
+
+
+# domain_array is intentionally omitted here: a domain over an array does not
+# round-trip through COPY TO parquet even for a 1-D value (its DuckDB engine
+# type is inferred as a bare, untyped LIST), which is a separate pre-existing
+# limitation unrelated to the multidimensional-array guard.  The 2-D domain
+# case is still covered above -- the guard rejects it before that path is hit.
+NESTED_ARRAY_ROUNDTRIP_KINDS = ["composite", "array_of_composite"]
+
+
+@pytest.mark.parametrize("kind", NESTED_ARRAY_ROUNDTRIP_KINDS)
+def test_nested_1d_array_succeeds(pg_conn, tmp_path, kind):
+    # A 1-D array leaf nested in the same container shapes must NOT be rejected;
+    # guards against the recursive walk over-rejecting well-formed values.
+    parquet_path = tmp_path / "test.parquet"
+
+    _create_nested_array_types(pg_conn)
+
+    error = run_command(
+        f"COPY ({_nested_array_select(kind, 'ARRAY[1, 2, 3]')}) "
+        f"TO '{parquet_path}' WITH (format 'parquet')",
+        pg_conn,
+        raise_error=False,
+    )
+    assert error is None, f"{kind}: unexpected error {error}"
+
+    pg_conn.rollback()
+
+
 def test_copy_to_multidim_array_json_errors(pg_conn, tmp_path):
     """
     Companion to the CSV case: JSON serialises arrays through DuckDB as a

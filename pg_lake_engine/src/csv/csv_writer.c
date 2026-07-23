@@ -112,6 +112,14 @@ typedef struct CopyToStateData
 	 * per-row numeric-limit validation only walks columns that can trip it.
 	 */
 	bool	   *needsNumericLeafCheck;
+
+	/*
+	 * Per-column flag: the column's type reaches an array (directly, or
+	 * nested inside a composite/map/domain).  Precomputed once so the per-row
+	 * multidimensional-array validation only walks columns that can carry
+	 * one.
+	 */
+	bool	   *needsMultidimArrayCheck;
 	MemoryContext rowcontext;	/* per-row evaluation context */
 	uint64		bytes_processed;	/* number of bytes processed so far */
 
@@ -157,6 +165,9 @@ static void ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits(Numeric num);
 static bool TypeContainsNumeric(Oid typeOid);
 static void ErrorIfCopyToExceedsNumericLimitsInDatum(Datum value, Oid typeOid,
 													 int32 typmod);
+static bool TypeContainsArray(Oid typeOid);
+static void ErrorIfCopyToContainsMultidimArray(Datum value, Oid typeOid,
+											   const char *colname);
 
 
 /*----------
@@ -467,6 +478,7 @@ StartCopyTo(CopyToState cstate, TupleDesc tupDesc)
 	/* Get info about the columns we need to process. */
 	cstate->out_functions = (FmgrInfo *) palloc(num_phys_attrs * sizeof(FmgrInfo));
 	cstate->needsNumericLeafCheck = (bool *) palloc0(num_phys_attrs * sizeof(bool));
+	cstate->needsMultidimArrayCheck = (bool *) palloc0(num_phys_attrs * sizeof(bool));
 	foreach(cur, cstate->attnumlist)
 	{
 		int			attnum = lfirst_int(cur);
@@ -486,6 +498,8 @@ StartCopyTo(CopyToState cstate, TupleDesc tupDesc)
 
 		cstate->needsNumericLeafCheck[attnum - 1] =
 			TypeContainsNumeric(attr->atttypid);
+		cstate->needsMultidimArrayCheck[attnum - 1] =
+			TypeContainsArray(attr->atttypid);
 	}
 
 	/*
@@ -747,6 +761,55 @@ TypeContainsNumeric(Oid typeOid)
 
 
 /*
+ * TypeContainsArray returns true if `typeOid` reaches an array at any nesting
+ * depth: as the type itself, a composite field, or through a domain over
+ * either.  Mirror of TypeContainsNumeric; called once per column at COPY
+ * setup (see needsMultidimArrayCheck) so the per-row multidimensional-array
+ * walk only visits columns that can actually carry an array.
+ */
+static bool
+TypeContainsArray(Oid typeOid)
+{
+	if (OidIsValid(get_element_type(typeOid)))
+		return true;
+
+	char		typtype = get_typtype(typeOid);
+
+	/*
+	 * Domains (including pg_map) unwrap to their base type, which feeds back
+	 * into the array and composite checks above.
+	 */
+	if (typtype == TYPTYPE_DOMAIN)
+		return TypeContainsArray(getBaseType(typeOid));
+
+	if (typtype == TYPTYPE_COMPOSITE)
+	{
+		TupleDesc	tupdesc = lookup_rowtype_tupdesc(typeOid, -1);
+		bool		found = false;
+
+		for (int i = 0; i < tupdesc->natts; i++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+			if (attr->attisdropped)
+				continue;
+
+			if (TypeContainsArray(attr->atttypid))
+			{
+				found = true;
+				break;
+			}
+		}
+
+		ReleaseTupleDesc(tupdesc);
+		return found;
+	}
+
+	return false;
+}
+
+
+/*
  * ErrorIfCopyToExceedsNumericLimitsInDatum applies the COPY TO numeric limits
  * to every numeric leaf reachable from `value`, recursing through arrays,
  * composites, maps, and domains.  Each numeric leaf is subject to the same
@@ -876,6 +939,127 @@ ErrorIfCopyToExceedsNumericLimitsInDatum(Datum value, Oid typeOid, int32 typmod)
 
 
 /*
+ * ErrorIfCopyToContainsMultidimArray raises if any array reachable from
+ * `value` -- the value itself, an array element, a composite field, or one
+ * reached through a domain -- has more than one dimension.
+ *
+ * PostgreSQL does not encode dimensionality in the type system (int[] and
+ * int[][] share one OID), so a multidimensional value would be serialised as
+ * "{{1,2},{3,4}}" and DuckDB cannot cast that back to a flat LIST(T) (see the
+ * top-level rationale in CopyOneRowTo).  The reviewer on #430 asked that the
+ * top-level column check also reach arrays nested inside composites, maps, and
+ * domains; this recurses like ErrorIfCopyToExceedsNumericLimitsInDatum does
+ * for numeric leaves.
+ *
+ * Callers gate on the column type actually containing an array (see
+ * needsMultidimArrayCheck), and the inner TypeContainsArray guard prunes
+ * subtrees with no array so we never deconstruct or deform needlessly.
+ * `colname` is the top-level column name, carried through the recursion only
+ * so the error can point back at it.
+ */
+static void
+ErrorIfCopyToContainsMultidimArray(Datum value, Oid typeOid, const char *colname)
+{
+	Oid			elemType = get_element_type(typeOid);
+
+	if (OidIsValid(elemType))
+	{
+		ArrayType  *array = DatumGetArrayTypeP(value);
+
+		if (ARR_NDIM(array) > 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("multidimensional arrays are not supported"
+							" in COPY TO"),
+					 errdetail("Column \"%s\" contains a"
+							   " %d-dimensional array value.",
+							   colname,
+							   ARR_NDIM(array)),
+					 errhint("Flatten the array to one dimension before"
+							 " exporting, write to CSV format, or write"
+							 " to an Iceberg table with"
+							 " out_of_range_values = 'clamp'.")));
+
+		/*
+		 * A 1-D array can still carry arrays deeper down (e.g. an array of a
+		 * composite that has an array field), so recurse into the elements
+		 * when the element type can reach one.
+		 */
+		if (!TypeContainsArray(elemType))
+			return;
+
+		int16		elmlen;
+		bool		elmbyval;
+		char		elmalign;
+		Datum	   *elems;
+		bool	   *nulls;
+		int			nelems;
+
+		get_typlenbyvalalign(elemType, &elmlen, &elmbyval, &elmalign);
+		deconstruct_array(array, elemType, elmlen, elmbyval, elmalign,
+						  &elems, &nulls, &nelems);
+
+		for (int i = 0; i < nelems; i++)
+		{
+			if (nulls[i])
+				continue;
+
+			ErrorIfCopyToContainsMultidimArray(elems[i], elemType, colname);
+		}
+
+		return;
+	}
+
+	char		typtype = get_typtype(typeOid);
+
+	/* domains (including maps): unwrap to the base type and recurse */
+	if (typtype == TYPTYPE_DOMAIN)
+	{
+		ErrorIfCopyToContainsMultidimArray(value, getBaseType(typeOid), colname);
+		return;
+	}
+
+	/* composite: deform the tuple and recurse into each field */
+	if (typtype == TYPTYPE_COMPOSITE)
+	{
+		HeapTupleHeader tup = DatumGetHeapTupleHeader(value);
+		Oid			tupType = HeapTupleHeaderGetTypeId(tup);
+		int32		tupTypmod = HeapTupleHeaderGetTypMod(tup);
+		TupleDesc	tupdesc = lookup_rowtype_tupdesc(tupType, tupTypmod);
+		int			natts = tupdesc->natts;
+		HeapTupleData tmptup;
+		Datum	   *values = (Datum *) palloc(natts * sizeof(Datum));
+		bool	   *attrNulls = (bool *) palloc(natts * sizeof(bool));
+
+		tmptup.t_len = HeapTupleHeaderGetDatumLength(tup);
+		ItemPointerSetInvalid(&(tmptup.t_self));
+		tmptup.t_tableOid = InvalidOid;
+		tmptup.t_data = tup;
+
+		heap_deform_tuple(&tmptup, tupdesc, values, attrNulls);
+
+		for (int i = 0; i < natts; i++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+			if (attr->attisdropped || attrNulls[i])
+				continue;
+
+			if (!TypeContainsArray(attr->atttypid))
+				continue;
+
+			ErrorIfCopyToContainsMultidimArray(values[i], attr->atttypid, colname);
+		}
+
+		pfree(values);
+		pfree(attrNulls);
+		ReleaseTupleDesc(tupdesc);
+		return;
+	}
+}
+
+
+/*
  * Emit one row
  */
 static void
@@ -937,9 +1121,11 @@ CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot)
 				 * Reject multidimensional arrays before DuckDB serialization.
 				 * PostgreSQL cannot distinguish int[] from int[][] at the
 				 * type level, so a value with ndim > 1 would be serialised as
-				 * "[[1,2],[3,4]]" and DuckDB cannot cast that string back to
+				 * "{{1,2},{3,4}}" and DuckDB cannot cast that string back to
 				 * a flat LIST(T).  Check before serialisation so we do not
 				 * pay the cost of PGDuckSerialize on a value we will reject.
+				 * The walk reaches arrays nested inside composites, maps, and
+				 * domains, not just a top-level array column.
 				 *
 				 * This only fires for formats that hand the value to DuckDB
 				 * as a typed LIST(T) (Parquet/Iceberg/JSON), i.e. exactly the
@@ -958,24 +1144,9 @@ CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot)
 				 * plain COPY TO to a Parquet or JSON file.
 				 */
 				if (useDuckSerialization &&
-					get_element_type(attr->atttypid) != InvalidOid)
-				{
-					ArrayType  *arr = DatumGetArrayTypeP(value);
-
-					if (ARR_NDIM(arr) > 1)
-						ereport(ERROR,
-								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								 errmsg("multidimensional arrays are not supported"
-										" in COPY TO"),
-								 errdetail("Column \"%s\" contains a"
-										   " %d-dimensional array value.",
-										   NameStr(attr->attname),
-										   ARR_NDIM(arr)),
-								 errhint("Flatten the array to one dimension before"
-										 " exporting, write to CSV format, or write"
-										 " to an Iceberg table with"
-										 " out_of_range_values = 'clamp'.")));
-				}
+					cstate->needsMultidimArrayCheck[attnum - 1])
+					ErrorIfCopyToContainsMultidimArray(value, attr->atttypid,
+													   NameStr(attr->attname));
 
 				if (useDuckSerialization)
 				{
