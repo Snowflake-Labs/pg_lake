@@ -1013,6 +1013,190 @@ def test_nested_numeric_roundtrip(pg_conn, tmp_path):
     pg_conn.rollback()
 
 
+def test_copy_to_multidim_array_errors(pg_conn, tmp_path):
+    """
+    Regression test for https://github.com/Snowflake-Labs/pg_lake/issues/407.
+
+    COPY <table> TO <lake-file> must raise a clear pg_lake error when a column
+    contains a multidimensional array value.  Previously the value was
+    serialised into the intermediate temp CSV and handed to DuckDB, which
+    either returned a cryptic Conversion Error or crashed the shared
+    pgduck_server process (issue #408).
+
+    The check lives in CopyOneRowTo (csv_writer.c) and fires before the CSV
+    is written, so the engine is never involved.
+    """
+    parquet_path = tmp_path / "test_multidim_err.parquet"
+
+    run_command(
+        """
+        CREATE TABLE test_multidim_err (id bigint, v int[]);
+        INSERT INTO test_multidim_err VALUES (1, ARRAY[[1,2],[3,4]]);
+    """,
+        pg_conn,
+    )
+
+    error = run_command(
+        f"COPY test_multidim_err TO '{parquet_path}' WITH (format 'parquet')",
+        pg_conn,
+        raise_error=False,
+    )
+
+    assert error is not None, "Expected an error for multidimensional array in COPY TO"
+    assert (
+        "multidimensional arrays are not supported" in error.lower()
+    ), f"Unexpected error message: {error}"
+
+    pg_conn.rollback()
+
+
+def test_copy_to_1d_array_succeeds(pg_conn, duckdb_conn, tmp_path):
+    """
+    Regression guard: 1-D array columns must still round-trip correctly through
+    COPY TO after the multidim check is added.  A 1-D value has ARR_NDIM == 1
+    and must not be rejected.
+    """
+    parquet_path = tmp_path / "test_1d_array.parquet"
+
+    run_command(
+        f"""
+        CREATE TABLE test_1d_array (id bigint, tags text[]);
+        INSERT INTO test_1d_array VALUES
+            (1, ARRAY['a', 'b', 'c']),
+            (2, NULL),
+            (3, ARRAY['x']);
+        COPY test_1d_array TO '{parquet_path}' WITH (format 'parquet');
+    """,
+        pg_conn,
+    )
+
+    duckdb_conn.execute(
+        "SELECT id, tags FROM read_parquet($1) ORDER BY id", [str(parquet_path)]
+    )
+    rows = duckdb_conn.fetchall()
+
+    assert len(rows) == 3
+    assert rows[0] == (1, ["a", "b", "c"])
+    assert rows[1] == (2, None)
+    assert rows[2] == (3, ["x"])
+
+    pg_conn.rollback()
+
+
+# The multidimensional-array rejection must reach an array leaf no matter how
+# deeply it is nested -- inside a composite field, an array of composites, or a
+# domain over an array -- not just a top-level array column (review feedback on
+# PR #430).  This mirrors the recursive numeric-leaf validation above; the walk
+# lives in ErrorIfCopyToContainsMultidimArray (csv_writer.c).
+MULTIDIM_ARRAY_ERROR = "multidimensional arrays are not supported"
+
+NESTED_ARRAY_KINDS = ["composite", "array_of_composite", "domain_array"]
+
+
+def _create_nested_array_types(pg_conn):
+    run_command(
+        """
+        CREATE SCHEMA IF NOT EXISTS lake_arr;
+        CREATE TYPE lake_arr.tagged AS (label text, vals int[]);
+        CREATE DOMAIN int_matrix AS int[];
+        """,
+        pg_conn,
+    )
+
+
+def _nested_array_select(kind, arr_expr):
+    """Build a SELECT that places the int[] expression `arr_expr` inside the
+    given container shape.  "array_of_composite" is the deepest case: the array
+    leaf sits two container levels down (array -> composite -> int[])."""
+    return {
+        "composite": f"SELECT ('m', {arr_expr})::lake_arr.tagged AS v",
+        "array_of_composite": (
+            f"SELECT ARRAY[('base', ARRAY[1, 2])::lake_arr.tagged, "
+            f"('leaf', {arr_expr})::lake_arr.tagged]::lake_arr.tagged[] AS v"
+        ),
+        "domain_array": f"SELECT {arr_expr}::int_matrix AS v",
+    }[kind]
+
+
+@pytest.mark.parametrize("kind", NESTED_ARRAY_KINDS)
+def test_nested_multidim_array_errors(pg_conn, tmp_path, kind):
+    parquet_path = tmp_path / "test.parquet"
+
+    _create_nested_array_types(pg_conn)
+
+    # A multidimensional (2-D) array leaf is rejected wherever it sits in the
+    # nested structure, with the same clear error the top-level column gets.
+    error = run_command(
+        f"COPY ({_nested_array_select(kind, 'ARRAY[[1, 2], [3, 4]]')}) "
+        f"TO '{parquet_path}' WITH (format 'parquet')",
+        pg_conn,
+        raise_error=False,
+    )
+    assert error is not None, f"{kind}: expected a multidimensional-array error"
+    assert MULTIDIM_ARRAY_ERROR in error.lower(), f"{kind}: {error}"
+
+    pg_conn.rollback()
+
+
+# domain_array is intentionally omitted here: a domain over an array does not
+# round-trip through COPY TO parquet even for a 1-D value (its DuckDB engine
+# type is inferred as a bare, untyped LIST), which is a separate pre-existing
+# limitation unrelated to the multidimensional-array guard.  The 2-D domain
+# case is still covered above -- the guard rejects it before that path is hit.
+NESTED_ARRAY_ROUNDTRIP_KINDS = ["composite", "array_of_composite"]
+
+
+@pytest.mark.parametrize("kind", NESTED_ARRAY_ROUNDTRIP_KINDS)
+def test_nested_1d_array_succeeds(pg_conn, tmp_path, kind):
+    # A 1-D array leaf nested in the same container shapes must NOT be rejected;
+    # guards against the recursive walk over-rejecting well-formed values.
+    parquet_path = tmp_path / "test.parquet"
+
+    _create_nested_array_types(pg_conn)
+
+    error = run_command(
+        f"COPY ({_nested_array_select(kind, 'ARRAY[1, 2, 3]')}) "
+        f"TO '{parquet_path}' WITH (format 'parquet')",
+        pg_conn,
+        raise_error=False,
+    )
+    assert error is None, f"{kind}: unexpected error {error}"
+
+    pg_conn.rollback()
+
+
+def test_copy_to_multidim_array_json_errors(pg_conn, tmp_path):
+    """
+    Companion to the CSV case: JSON serialises arrays through DuckDB as a
+    typed LIST(T) (ShouldUseDuckSerialization is true), so a multidimensional
+    value must still be rejected by the guard in CopyOneRowTo.
+    """
+    json_path = tmp_path / "test_multidim.json"
+
+    run_command(
+        """
+        CREATE TABLE test_multidim_json (id bigint, v int[]);
+        INSERT INTO test_multidim_json VALUES (1, ARRAY[[1,2],[3,4]]);
+        """,
+        pg_conn,
+    )
+
+    error = run_command(
+        f"COPY test_multidim_json TO '{json_path}' WITH (format 'json')",
+        pg_conn,
+        raise_error=False,
+    )
+
+    assert (
+        error is not None
+    ), "Expected an error for multidimensional array in COPY TO json"
+    assert (
+        "multidimensional arrays are not supported" in error.lower()
+    ), f"Unexpected error message: {error}"
+
+    pg_conn.rollback()
+
+
 def test_copy_virtual_column(pg_conn, tmp_path):
     # virtual columns were introduced in PostgreSQL 18
     if get_pg_version_num(pg_conn) < 180000:
