@@ -238,13 +238,28 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 
 	int			dataFileCount = list_length(dataFiles);
 
+	/*
+	 * Resolve the table type once: IsInternalIcebergTable and
+	 * IsExternalIcebergTable parse the foreign table options on every call.
+	 * For external tables, also fetch the leaf fields once; they come from
+	 * the metadata file, so looking them up per data file would re-read and
+	 * re-parse the metadata every iteration.
+	 */
+	bool		isInternalIcebergTable = IsInternalIcebergTable(relationId);
+	bool		isExternalIcebergTable = !isInternalIcebergTable &&
+		IsExternalIcebergTable(relationId);
+	List	   *externalLeafFields = NIL;
+
+	if (isExternalIcebergTable && dataFileCount > 0)
+		externalLeafFields = GetLeafFieldsForTable(relationId);
+
 	for (int dataFileIndex = 0; dataFileIndex < dataFileCount; ++dataFileIndex)
 	{
 		List	   *columnBoundConstraints = NIL;
 		List	   *columnStats = NIL;
 		Partition  *partition = NULL;
 
-		if (IsInternalIcebergTable(relationId))
+		if (isInternalIcebergTable)
 		{
 			TableDataFile *tableDataFile = (TableDataFile *) list_nth(dataFiles, dataFileIndex);
 
@@ -252,14 +267,13 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 			columnStats = tableDataFile->stats.columnStats;
 			partition = tableDataFile->partition;
 		}
-		else if (IsExternalIcebergTable(relationId))
+		else if (isExternalIcebergTable)
 		{
 			DataFile   *dataFile = (DataFile *) list_nth(dataFiles, dataFileIndex);
 
-			List	   *leafFields = GetLeafFieldsForTable(relationId);
 			char	   *dataFilePath = (char *) ((DataFile *) dataFile)->file_path;
 
-			columnStats = GetRemoteParquetColumnStats(dataFilePath, leafFields);
+			columnStats = GetRemoteParquetColumnStats(dataFilePath, externalLeafFields);
 			partition = &(dataFile->partition);
 		}
 		else
