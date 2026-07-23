@@ -1123,6 +1123,8 @@ return_query_result_to_pgsession(DuckDBSession * duckSession, duckdb_result duck
 		/* send CopyDone response */
 		if (!IsOK(pgsession_putemptymessage(duckSession->clientSession, 'c')))
 		{
+			duckdb_query_result_destroy(&duckdb_query_result);
+
 			PGDUCK_SERVER_ERROR("could not send CopyDone");
 
 			return DUCKDB_PG_COMMUNICATION_ERROR;
