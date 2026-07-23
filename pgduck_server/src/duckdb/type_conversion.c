@@ -1005,6 +1005,7 @@ array_to_text(duckdb_vector vector, duckdb_logical_type arrayLogicalType, int ro
 			if (status != DUCKDB_SUCCESS)
 			{
 				CleanupOutputBuffer(&elementOutputBuffer);
+				pg_free(topLevelBuffer.data);
 				goto cleanup;
 			}
 		}
@@ -1162,6 +1163,7 @@ list_to_text(duckdb_vector vector, duckdb_logical_type listLogicalType, int row,
 			if (status != DUCKDB_SUCCESS)
 			{
 				CleanupOutputBuffer(&elementOutputBuffer);
+				pg_free(topLevelBuffer.data);
 				goto cleanup;
 			}
 		}
@@ -1269,6 +1271,7 @@ struct_to_text(duckdb_vector vector, duckdb_logical_type structLogicalType, int 
 		{
 			PGDUCK_SERVER_ERROR("could not find type mapping for DuckDB type: %d", structElemTypeId);
 			status = DUCKDB_TYPE_CONVERSION_ERROR;
+			pg_free(topLevelBuffer.data);
 			goto cleanup;
 		}
 
@@ -1303,6 +1306,7 @@ struct_to_text(duckdb_vector vector, duckdb_logical_type structLogicalType, int 
 			if (status != DUCKDB_SUCCESS)
 			{
 				CleanupOutputBuffer(&elementOutputBuffer);
+				pg_free(topLevelBuffer.data);
 				goto cleanup;
 			}
 		}
