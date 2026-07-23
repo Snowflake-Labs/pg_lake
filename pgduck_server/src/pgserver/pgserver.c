@@ -306,7 +306,7 @@ set_unix_socket_permissions(char *unixSocketPath, char *groupName, int permissio
 		}
 		if (chown(unixSocketPath, -1, gid) == -1)
 		{
-			PGDUCK_SERVER_ERROR("could not set grou of socket file \"%s\": %m\n",
+			PGDUCK_SERVER_ERROR("could not set group of socket file \"%s\": %m",
 								unixSocketPath);
 			return STATUS_ERROR;
 		}
@@ -314,7 +314,7 @@ set_unix_socket_permissions(char *unixSocketPath, char *groupName, int permissio
 
 	if (chmod(unixSocketPath, permissionsMask) == -1)
 	{
-		PGDUCK_SERVER_ERROR("could not set Unix-socket address \"%s\" permissions: %m\n",
+		PGDUCK_SERVER_ERROR("could not set Unix-socket address \"%s\" permissions: %m",
 							unixSocketPath);
 
 		return STATUS_ERROR;
