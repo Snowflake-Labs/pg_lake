@@ -1,7 +1,6 @@
 from utils_pytest import *
 import datetime
 import itertools
-import itertools
 import json
 import re
 import time
@@ -21,9 +20,6 @@ def drop_object_store_schemas(pg_conn):
     )
     pg_conn.commit()
     yield
-
-
-import pytest
 
 
 # don't accept 'catalog_name', 'catalog_namespace', 'catalog_table_name'

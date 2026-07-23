@@ -462,16 +462,11 @@ CreateDDLOperationsForAlterTable(AlterTableStmt *alterStmt)
 			/*
 			 * At this point, PgLakeCommonParentProcessUtility has already
 			 * been called so the column type in pg_attribute is updated. We
-			 * read the new type from the relation.
+			 * read the new type from the relation. Collation is irrelevant to
+			 * Iceberg types, so we only look at the type OID and typmod.
 			 */
-			Oid			newTypeOid = InvalidOid;
-			int32		newTypMod = -1;
-			Oid			newCollId = InvalidOid;
-
-			get_atttypetypmodcoll(relationId, attrNo,
-								  &newTypeOid, &newTypMod, &newCollId);
-
-			PGType		newPgType = MakePGType(newTypeOid, newTypMod);
+			Form_pg_attribute attr = TupleDescAttr(tupleDesc, attrNo - 1);
+			PGType		newPgType = MakePGType(attr->atttypid, attr->atttypmod);
 
 			/*
 			 * Check whether the Iceberg type actually changes. The registered
@@ -1018,13 +1013,11 @@ ErrorIfUnsupportedAlterWritablePgLakeTableStmt(AlterTableStmt *alterStmt,
 									   "(wider precision, same scale).")));
 				}
 			}
-			else
-			{
-				ereport(ERROR,
-						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("ALTER TABLE %s command not supported for "
-								"%s tables", cmdTypeStr, tableTypeStr)));
-			}
+
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("ALTER TABLE %s command not supported for "
+							"%s tables", cmdTypeStr, tableTypeStr)));
 		}
 	}
 
