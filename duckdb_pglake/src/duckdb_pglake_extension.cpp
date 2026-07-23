@@ -553,6 +553,42 @@ IcebergSizeClampBlobFun(DataChunk &args, ExpressionState &state, Vector &result)
 
 
 /*
+ * IcebergSizeClampContainerPassthroughFun is the LIST-typed overload of the
+ * size clamp/check functions.  It returns its first argument unchanged.
+ *
+ * Why this exists: the Iceberg size-clamp rewrite in pg_lake_engine derives
+ * array nesting depth from the Postgres type OID.  A multi-dimensional array
+ * (text[][], bytea[][], varchar[][]) shares the same OID as its 1-D
+ * counterpart (Postgres does not encode dimensionality in the type system),
+ * so the rewrite emits a single level of list_transform:
+ *
+ *   list_transform(col, _x0 -> iceberg_size_clamp_text(_x0, $cap))
+ *
+ * DuckDB, however, stores the value as a genuine nested list (VARCHAR[][]),
+ * so _x0 binds as VARCHAR[] rather than a scalar VARCHAR.  Without a
+ * LIST-typed overload the call fails to bind ("No function matches ...
+ * iceberg_size_clamp_text(VARCHAR[], INTEGER)") and every write query for
+ * such a column errors forever.
+ *
+ * Passing the list through unchanged is correct, not merely a bind fix:
+ * multi-dimensional arrays cannot be represented in Iceberg at all, so the
+ * pg_nullify_nested_list / pg_error_nested_list wrapper that runs *before*
+ * the size-clamp wrapper has already reduced any depth>1 value to NULL
+ * (clamp policy) or raised (error policy).  A value that still reaches this
+ * overload is therefore NULL, and its scalar leaves never needed clamping
+ * because the whole value is on its way to being stored as NULL -- exactly
+ * how a multi-dimensional int[][] already behaves.  The scalar overload
+ * continues to clamp genuine 1-D array leaves.
+ */
+static void
+IcebergSizeClampContainerPassthroughFun(DataChunk &args, ExpressionState &state,
+										Vector &result)
+{
+	result.Reference(args.data[0]);
+}
+
+
+/*
  * IcebergSizeCheckTextFun raises if a VARCHAR value's UTF-8 byte length
  * exceeds the second argument; otherwise passes through unchanged.  The
  * third argument is the source column name, included in the error message
@@ -660,32 +696,60 @@ static void LoadInternal(ExtensionLoader &loader) {
 	}
 
 	{
-		ScalarFunction iceberg_size_clamp_text(
-			"iceberg_size_clamp_text",
+		/*
+		 * Each size clamp/check function is registered as a set: the scalar
+		 * overload that does the actual work, plus a LIST-typed overload that
+		 * passes the value through.  The LIST overload lets the single-level
+		 * list_transform the rewrite emits for a multi-dimensional array bind
+		 * (its lambda variable is itself a list); see
+		 * IcebergSizeClampContainerPassthroughFun for the full rationale.  The
+		 * pass-through overloads reuse NestedListBind to resolve their return
+		 * type to the (LIST) input type.
+		 */
+		ScalarFunctionSet iceberg_size_clamp_text("iceberg_size_clamp_text");
+		iceberg_size_clamp_text.AddFunction(ScalarFunction(
 			{LogicalType::VARCHAR, LogicalType::INTEGER},
 			LogicalType::VARCHAR,
-			IcebergSizeClampTextFun);
+			IcebergSizeClampTextFun));
+		iceberg_size_clamp_text.AddFunction(ScalarFunction(
+			{LogicalType::LIST(LogicalType::ANY), LogicalType::INTEGER},
+			LogicalType::LIST(LogicalType::ANY),
+			IcebergSizeClampContainerPassthroughFun, NestedListBind));
 		loader.RegisterFunction(iceberg_size_clamp_text);
 
-		ScalarFunction iceberg_size_clamp_blob(
-			"iceberg_size_clamp_blob",
+		ScalarFunctionSet iceberg_size_clamp_blob("iceberg_size_clamp_blob");
+		iceberg_size_clamp_blob.AddFunction(ScalarFunction(
 			{LogicalType::BLOB, LogicalType::INTEGER},
 			LogicalType::BLOB,
-			IcebergSizeClampBlobFun);
+			IcebergSizeClampBlobFun));
+		iceberg_size_clamp_blob.AddFunction(ScalarFunction(
+			{LogicalType::LIST(LogicalType::ANY), LogicalType::INTEGER},
+			LogicalType::LIST(LogicalType::ANY),
+			IcebergSizeClampContainerPassthroughFun, NestedListBind));
 		loader.RegisterFunction(iceberg_size_clamp_blob);
 
-		ScalarFunction iceberg_size_check_text(
-			"iceberg_size_check_text",
+		ScalarFunctionSet iceberg_size_check_text("iceberg_size_check_text");
+		iceberg_size_check_text.AddFunction(ScalarFunction(
 			{LogicalType::VARCHAR, LogicalType::INTEGER, LogicalType::VARCHAR},
 			LogicalType::VARCHAR,
-			IcebergSizeCheckTextFun);
+			IcebergSizeCheckTextFun));
+		iceberg_size_check_text.AddFunction(ScalarFunction(
+			{LogicalType::LIST(LogicalType::ANY), LogicalType::INTEGER,
+			 LogicalType::VARCHAR},
+			LogicalType::LIST(LogicalType::ANY),
+			IcebergSizeClampContainerPassthroughFun, NestedListBind));
 		loader.RegisterFunction(iceberg_size_check_text);
 
-		ScalarFunction iceberg_size_check_blob(
-			"iceberg_size_check_blob",
+		ScalarFunctionSet iceberg_size_check_blob("iceberg_size_check_blob");
+		iceberg_size_check_blob.AddFunction(ScalarFunction(
 			{LogicalType::BLOB, LogicalType::INTEGER, LogicalType::VARCHAR},
 			LogicalType::BLOB,
-			IcebergSizeCheckBlobFun);
+			IcebergSizeCheckBlobFun));
+		iceberg_size_check_blob.AddFunction(ScalarFunction(
+			{LogicalType::LIST(LogicalType::ANY), LogicalType::INTEGER,
+			 LogicalType::VARCHAR},
+			LogicalType::LIST(LogicalType::ANY),
+			IcebergSizeClampContainerPassthroughFun, NestedListBind));
 		loader.RegisterFunction(iceberg_size_check_blob);
 
 		ScalarFunction iceberg_byte_size(
