@@ -537,18 +537,24 @@ blob_to_text(duckdb_vector vector, duckdb_logical_type blobType, int row, TextOu
 
 	if (typeAlias != NULL)
 	{
-		if (strcmp(typeAlias, "GEOMETRY") == 0)
+		bool		isGeometry = strcmp(typeAlias, "GEOMETRY") == 0;
+
+		if (strcmp(typeAlias, "WKB_BLOB") == 0)
+		{
+			/* output WKB_BLOB as pure hex to be parseable as geometry */
+			emitEscapeSequence = false;
+		}
+
+		/* the alias string is allocated by DuckDB and owned by us */
+		duckdb_free(typeAlias);
+
+		if (isGeometry)
 		{
 			/* output geometry via st_ashexwkb */
 			toTextBuffer->buffer = (char *) duckdb_pglake_geometry_to_string(DuckDB, val);
 			toTextBuffer->needsFree = true;
 
 			return CHECK_OOM(toTextBuffer->buffer);
-		}
-		else if (strcmp(typeAlias, "WKB_BLOB") == 0)
-		{
-			/* output WKB_BLOB as pure hex to be parseable as geometry */
-			emitEscapeSequence = false;
 		}
 	}
 
