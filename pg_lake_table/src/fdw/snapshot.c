@@ -224,6 +224,14 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 		if (isResultRelation)
 			fullMatches = PruneDataFiles(relationId, prunedDataFiles, baseRestrictInfoList, FULL_MATCH);
 
+		/*
+		 * fullMatches is produced by filtering prunedDataFiles in order, so
+		 * it is an ordered sublist and a tandem cursor suffices to mark the
+		 * fully matched files, instead of an O(files * matches)
+		 * list_member_ptr scan.
+		 */
+		ListCell   *fullMatchCell = list_head(fullMatches);
+
 		foreach_ptr(TableDataFile, dataFile, prunedDataFiles)
 		{
 			PgLakeFileScan *fileScan = palloc0(sizeof(PgLakeFileScan));
@@ -231,7 +239,12 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 			fileScan->path = dataFile->path;
 			fileScan->rowCount = dataFile->stats.rowCount;
 			fileScan->deletedRowCount = dataFile->stats.deletedRowCount;
-			fileScan->allRowsMatch = list_member_ptr(fullMatches, dataFile);
+
+			if (fullMatchCell != NULL && lfirst(fullMatchCell) == dataFile)
+			{
+				fileScan->allRowsMatch = true;
+				fullMatchCell = lnext(fullMatches, fullMatchCell);
+			}
 
 			fileScans = lappend(fileScans, fileScan);
 		}
