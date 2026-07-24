@@ -112,6 +112,13 @@ typedef struct CopyToStateData
 	 * per-row numeric-limit validation only walks columns that can trip it.
 	 */
 	bool	   *needsNumericLeafCheck;
+
+	/*
+	 * Per-column flag: whether the column uses DuckDB serialization for the
+	 * target format.  Precomputed once since the answer is column-invariant
+	 * and looking it up per value costs several syscache probes.
+	 */
+	bool	   *useDuckSerialization;
 	MemoryContext rowcontext;	/* per-row evaluation context */
 	uint64		bytes_processed;	/* number of bytes processed so far */
 
@@ -467,6 +474,7 @@ StartCopyTo(CopyToState cstate, TupleDesc tupDesc)
 	/* Get info about the columns we need to process. */
 	cstate->out_functions = (FmgrInfo *) palloc(num_phys_attrs * sizeof(FmgrInfo));
 	cstate->needsNumericLeafCheck = (bool *) palloc0(num_phys_attrs * sizeof(bool));
+	cstate->useDuckSerialization = (bool *) palloc0(num_phys_attrs * sizeof(bool));
 	foreach(cur, cstate->attnumlist)
 	{
 		int			attnum = lfirst_int(cur);
@@ -486,6 +494,11 @@ StartCopyTo(CopyToState cstate, TupleDesc tupDesc)
 
 		cstate->needsNumericLeafCheck[attnum - 1] =
 			TypeContainsNumeric(attr->atttypid);
+
+		cstate->useDuckSerialization[attnum - 1] =
+			ShouldUseDuckSerialization(cstate->targetFormat,
+									   MakePGType(attr->atttypid,
+												  attr->atttypmod));
 	}
 
 	/*
@@ -929,7 +942,7 @@ CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot)
 				 */
 				Form_pg_attribute attr = TupleDescAttr(slot->tts_tupleDescriptor, attnum - 1);
 
-				if (ShouldUseDuckSerialization(cstate->targetFormat, MakePGType(attr->atttypid, attr->atttypmod)))
+				if (cstate->useDuckSerialization[attnum - 1])
 				{
 					/*
 					 * Since we are at the top-level when emitting an
