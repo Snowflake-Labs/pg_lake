@@ -99,6 +99,9 @@ ArrayOutForPGDuck(ArrayType *array, CopyDataFormat format)
 	Datum		itemvalue;
 	bool		isnull;
 
+	/* whether elements need quotes only depends on the element type */
+	bool		elementIsContainer = IsSerializedAsContainer(element_type, format);
+
 	for (i = 0; i < nitems && array_iterate(iter, &itemvalue, &isnull); i++)
 	{
 		bool		needquote;
@@ -116,7 +119,7 @@ ArrayOutForPGDuck(ArrayType *array, CopyDataFormat format)
 										format);
 
 			/* count data plus backslashes; detect chars needing quotes */
-			needquote = !IsSerializedAsContainer(element_type, format);
+			needquote = !elementIsContainer;
 
 			for (tmp = values[i]; *tmp != '\0'; tmp++)
 			{
