@@ -44,6 +44,8 @@ def pg_timestamp_range_table(postgres):
         "INSERT INTO scanner_timestamp_range_tbl VALUES "
         "(1, '294276-12-31 23:59:59', '294276-12-31 23:59:59+00')"
     )
+    # This vendored scanner applies the outer filter after decoding the source
+    # batch, so keep valid controls separate from the deliberately invalid row.
     cur.execute(
         "CREATE TABLE scanner_timestamp_control_tbl ("
         "  id integer PRIMARY KEY,"
