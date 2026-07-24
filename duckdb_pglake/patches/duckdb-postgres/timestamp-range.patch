@@ -1,0 +1,84 @@
+Reject PostgreSQL timestamps that cannot be represented safely.
+
+This ports duckdb/duckdb-postgres#530 to pg_lake's older vendored revision.
+PostgreSQL has a slightly wider timestamp range than DuckDB, so unchecked
+epoch conversion can overflow in either direction. Use checked arithmetic and
+the exact PostgreSQL bounds instead of silently wrapping.
+
+diff --git a/src/include/postgres_binary_reader.hpp b/src/include/postgres_binary_reader.hpp
+index 79ab24e..2cf0b43 100644
+--- a/src/include/postgres_binary_reader.hpp
++++ b/src/include/postgres_binary_reader.hpp
+@@ -8,6 +8,8 @@
+ 
+ #pragma once
+ 
++#include "duckdb/common/exception/conversion_exception.hpp"
++#include "duckdb/common/operator/add.hpp"
+ #include "postgres_result_reader.hpp"
+ #include "postgres_connection.hpp"
+ 
+@@ -105,7 +107,16 @@ protected:
+ 		if (usec == POSTGRES_NINFINITY) {
+ 			return timestamp_t::ninfinity();
+ 		}
+-		return timestamp_t(usec + (POSTGRES_EPOCH_TS - DUCKDB_EPOCH_TS));
++		int64_t timestamp_usec;
++		if (!TryAddOperator::Operation(static_cast<int64_t>(usec),
++		                               static_cast<int64_t>(POSTGRES_EPOCH_TS - DUCKDB_EPOCH_TS), timestamp_usec)) {
++			throw ConversionException("timestamp out of range");
++		}
++		auto timestamp = timestamp_t(timestamp_usec);
++		if (!Timestamp::IsFinite(timestamp)) {
++			throw ConversionException("timestamp out of range");
++		}
++		return timestamp;
+ 	}
+ 
+ 	inline interval_t ReadInterval() {
+diff --git a/src/include/postgres_binary_writer.hpp b/src/include/postgres_binary_writer.hpp
+index eff48d1..b9b9534 100644
+--- a/src/include/postgres_binary_writer.hpp
++++ b/src/include/postgres_binary_writer.hpp
+@@ -9,6 +9,7 @@
+ #pragma once
+ 
+ #include "duckdb.hpp"
++#include "duckdb/common/operator/subtract.hpp"
+ #include "duckdb/common/types/interval.hpp"
+ #include "duckdb/common/serializer/memory_stream.hpp"
+ #include "postgres_conversion.hpp"
+@@ -118,7 +119,14 @@ public:
+ 		if (value == timestamp_t::ninfinity()) {
+ 			return POSTGRES_NINFINITY;
+ 		}
+-		return uint64_t(value.value - (POSTGRES_EPOCH_TS - DUCKDB_EPOCH_TS));
++		int64_t postgres_usec;
++		if (!TrySubtractOperator::Operation(value.value, static_cast<int64_t>(POSTGRES_EPOCH_TS - DUCKDB_EPOCH_TS),
++		                                    postgres_usec) ||
++		    postgres_usec < POSTGRES_MIN_TIMESTAMP || postgres_usec >= POSTGRES_END_TIMESTAMP) {
++			throw InvalidInputException("TIMESTAMP \"%s\" is out of range for Postgres' TIMESTAMP field",
++			                            Timestamp::ToString(value));
++		}
++		return static_cast<uint64_t>(postgres_usec);
+ 	}
+ 
+ 	void WriteTimestamp(timestamp_t value) {
+diff --git a/src/include/postgres_conversion.hpp b/src/include/postgres_conversion.hpp
+index f9049eb..0f7c111 100644
+--- a/src/include/postgres_conversion.hpp
++++ b/src/include/postgres_conversion.hpp
+@@ -29,8 +29,11 @@
+ #define POSTGRES_DATE_NINF   2147483648U
+ #define POSTGRES_EPOCH_TS    211813488000000000ULL
+ #define DUCKDB_EPOCH_TS      210866803200000000ULL
+-#define POSTGRES_INFINITY    9223372036854775807ULL
+-#define POSTGRES_NINFINITY   9223372036854775808ULL
++/* Values from PostgreSQL's datatype/timestamp.h. The end is exclusive. */
++#define POSTGRES_MIN_TIMESTAMP (-211813488000000000LL)
++#define POSTGRES_END_TIMESTAMP 9223371331200000000LL
++#define POSTGRES_INFINITY      9223372036854775807ULL
++#define POSTGRES_NINFINITY     9223372036854775808ULL
+ 
+ #define NBASE      10000
+ #define DEC_DIGITS 4 /* decimal digits per NBASE digit */
