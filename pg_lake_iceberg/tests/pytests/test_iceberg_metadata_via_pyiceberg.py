@@ -346,6 +346,68 @@ def test_iceberg_catalog(
     assert pg_lake_result == pyiceberg_result
 
 
+def test_partition_field_name_length_limit(
+    create_reserialize_helper_functions, iceberg_catalog, superuser_conn
+):
+    schema = Schema(
+        NestedField(1, "source", StringType(), required=False),
+    )
+    arrow_data = pa.Table.from_pylist(
+        [{"source": "value"}],
+        schema=pa.schema([("source", pa.string())]),
+    )
+
+    def create_partitioned_table(table_name, partition_field_name):
+        partition_spec = PartitionSpec(
+            PartitionField(
+                source_id=1,
+                field_id=1000,
+                transform=IdentityTransform(),
+                name=partition_field_name,
+            )
+        )
+        table = iceberg_catalog.create_table(
+            identifier=f"public.{table_name}",
+            schema=schema,
+            location=f"s3://{TEST_BUCKET}/iceberg/public/{table_name}",
+            partition_spec=partition_spec,
+        )
+        table.append(arrow_data)
+        return table
+
+    maximum_length_name = "p" * 99
+    valid_table = create_partitioned_table(
+        "valid_partition_field_name_length", maximum_length_name
+    )
+    valid_fields = run_query(
+        f"""
+        SELECT partition_field_name
+        FROM lake_iceberg.current_partition_fields('{valid_table.metadata_location}');
+        """,
+        superuser_conn,
+    )
+    assert valid_fields == [[maximum_length_name]]
+
+    too_long_name = "p" * 100
+    invalid_table = create_partitioned_table(
+        "invalid_partition_field_name_length", too_long_name
+    )
+    with pytest.raises(
+        psycopg2.InternalError,
+        match="Partition field name length must be between 1 and 99, got 100",
+    ):
+        run_query(
+            f"""
+            SELECT *
+            FROM lake_iceberg.current_partition_fields(
+                '{invalid_table.metadata_location}'
+            );
+            """,
+            superuser_conn,
+        )
+    superuser_conn.rollback()
+
+
 def test_iceberg_datafiles(
     create_reserialize_helper_functions,
     spark_generated_iceberg_test,

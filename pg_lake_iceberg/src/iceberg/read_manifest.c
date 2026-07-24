@@ -611,6 +611,23 @@ CreateManifestPartitionFieldMap(AvroReader * manifestReader)
 			logicalTypeName = TextDatumGetCString(logicalTypeNameDatum);
 		}
 
+		/*
+		 * The field name is the hash key, so it must fit into the entry's
+		 * fieldName buffer including the terminating NUL. Check before
+		 * entering it into the hash, which would truncate the key.
+		 */
+		size_t		fieldNameLength = strlen(fieldName);
+
+		if (fieldNameLength == 0 ||
+			fieldNameLength >= PARTITION_FIELD_NAME_MAX_LENGTH)
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("Partition field name length must be between 1 and %d, got %zu",
+							PARTITION_FIELD_NAME_MAX_LENGTH - 1,
+							fieldNameLength)));
+		}
+
 		bool		fieldFound = false;
 
 		PartitionFieldIdMapEntry *entry = hash_search(partitionFieldMap, fieldName, HASH_ENTER, &fieldFound);
@@ -619,16 +636,6 @@ CreateManifestPartitionFieldMap(AvroReader * manifestReader)
 
 		entry->fieldId = atoi(fieldId);
 		entry->fieldType = IcebergAvroTypeFromString(physicalTypeName, logicalTypeName);
-
-		if (strlen(fieldName) > PARTITION_FIELD_NAME_MAX_LENGTH)
-		{
-			ereport(ERROR,
-					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("Partition field name %s is too long with length %d",
-							fieldName, PARTITION_FIELD_NAME_MAX_LENGTH)));
-		}
-
-		strcpy(entry->fieldName, fieldName);
 
 		MemoryContextSwitchTo(spiContext);
 	}
