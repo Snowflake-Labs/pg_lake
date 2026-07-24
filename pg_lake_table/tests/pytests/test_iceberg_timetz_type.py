@@ -1136,6 +1136,196 @@ def test_timetz_nested_read_is_session_timezone_independent(
         pg_conn.commit()
 
 
+def test_nested_timetz_writes_and_updates_are_session_timezone_independent(
+    pg_conn, pgduck_conn, s3, with_default_location
+):
+    """
+    Writes and read-modify-write updates must store the same TIMETZ instants
+    regardless of the PostgreSQL session timezone.
+
+    Iceberg stores TIMETZ leaves as UTC-normalized TIME digits. Read both the
+    initial and updated snapshots through DuckDB's independent Iceberg reader
+    so the assertions observe the physical Iceberg types without pg_lake's
+    read-side conversion.
+
+    Before the recursive read conversion, PostgreSQL attached the session
+    timezone to nested TIME digits. A read-modify-write UPDATE could then
+    normalize that misinterpreted value back to UTC and persist shifted digits.
+    """
+    utc = timezone.utc
+    map_typename = create_map_type("text", "timetz")
+
+    def metadata_location():
+        return run_query(
+            "SELECT metadata_location FROM lake_iceberg.tables "
+            "WHERE table_name = 'test' "
+            "AND table_namespace = 'test_timetz_update_drift'",
+            pg_conn,
+        )[0][0]
+
+    def raw_snapshot(metadata_path):
+        return run_query(
+            f"""
+            SELECT id,
+                   note,
+                   slot.at_time,
+                   slot.extras[1],
+                   slots[1].at_time,
+                   map_extract_value(by_name, 'open')
+            FROM iceberg_scan('{metadata_path}')
+            ORDER BY id
+            """,
+            pgduck_conn,
+        )
+
+    def insert_row(row_id, session_timezone):
+        run_command(
+            f"""
+            SET TIME ZONE '{session_timezone}';
+            INSERT INTO test VALUES
+                ({row_id},
+                 'written {session_timezone}',
+                 ROW(
+                     'single',
+                     '12:30:00+04'::timetz,
+                     ARRAY['23:30:00-02'::timetz]
+                 )::event_slot,
+                 ARRAY[
+                     ROW(
+                         'array element',
+                         '08:00:00+04'::timetz,
+                         NULL
+                     )::event_slot
+                 ],
+                 ARRAY[
+                     ROW('open', '09:00:00+04'::timetz)
+                 ]::{map_typename});
+            """,
+            pg_conn,
+        )
+        pg_conn.commit()
+
+    try:
+        run_command(
+            f"""
+            CREATE SCHEMA test_timetz_update_drift;
+            SET search_path TO test_timetz_update_drift;
+
+            CREATE TYPE event_slot AS (
+                label       text,
+                at_time     timetz,
+                extras      timetz[]
+            );
+
+            CREATE TABLE test (
+                id          int,
+                note        text,
+                slot        event_slot,
+                slots       event_slot[],
+                by_name     {map_typename}
+            ) USING iceberg;
+            """,
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        insert_row(1, "UTC")
+        insert_row(2, "America/New_York")
+
+        metadata_before = metadata_location()
+        raw_before = raw_snapshot(metadata_before)
+
+        # Both sessions must persist the same offsetless UTC digits.
+        assert raw_before == [
+            [
+                1,
+                "written UTC",
+                time(8, 30),
+                time(1, 30),
+                time(4, 0),
+                time(5, 0),
+            ],
+            [
+                2,
+                "written America/New_York",
+                time(8, 30),
+                time(1, 30),
+                time(4, 0),
+                time(5, 0),
+            ],
+        ]
+
+        run_command("SET TIME ZONE 'UTC';", pg_conn)
+        run_command("UPDATE test SET note = 'updated UTC' WHERE id = 1;", pg_conn)
+        pg_conn.commit()
+
+        run_command("SET TIME ZONE 'America/New_York';", pg_conn)
+        run_command(
+            "UPDATE test SET note = 'updated America/New_York' WHERE id = 2;",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        metadata_after = metadata_location()
+        assert metadata_after != metadata_before
+
+        raw_after = raw_snapshot(metadata_after)
+        assert raw_after == [
+            [
+                1,
+                "updated UTC",
+                time(8, 30),
+                time(1, 30),
+                time(4, 0),
+                time(5, 0),
+            ],
+            [
+                2,
+                "updated America/New_York",
+                time(8, 30),
+                time(1, 30),
+                time(4, 0),
+                time(5, 0),
+            ],
+        ]
+        assert [row[2:] for row in raw_after] == [row[2:] for row in raw_before]
+
+        # pg_lake's surface values represent the same UTC instants too.
+        assert (
+            run_query(
+                """
+            SELECT (slot).at_time,
+                   ((slot).extras)[1],
+                   ((slots)[1]).at_time,
+                   map_type.extract(by_name, 'open')
+            FROM test
+            ORDER BY id
+            """,
+                pg_conn,
+            )
+            == [
+                [
+                    time(8, 30, tzinfo=utc),
+                    time(1, 30, tzinfo=utc),
+                    time(4, 0, tzinfo=utc),
+                    time(5, 0, tzinfo=utc),
+                ],
+                [
+                    time(8, 30, tzinfo=utc),
+                    time(1, 30, tzinfo=utc),
+                    time(4, 0, tzinfo=utc),
+                    time(5, 0, tzinfo=utc),
+                ],
+            ]
+        )
+    finally:
+        pg_conn.rollback()
+        run_command("RESET search_path;", pg_conn)
+        run_command("RESET TIME ZONE;", pg_conn)
+        run_command("DROP SCHEMA IF EXISTS test_timetz_update_drift CASCADE", pg_conn)
+        pg_conn.commit()
+
+
 @pytest.fixture(scope="module")
 def create_helper_functions(superuser_conn, app_user):
     run_command(
