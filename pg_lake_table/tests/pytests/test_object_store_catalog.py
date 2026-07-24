@@ -1195,6 +1195,190 @@ def test_object_store_catalog_periodic_rewrite(
         superuser_conn.autocommit = False
 
 
+CACHE_FILE_PREFIX = "pgl-cache."
+
+
+# An out-of-band overwrite of catalog.json on object storage (e.g. another
+# cluster writing it) must be picked up by a read-only object_store table, not
+# served stale from pg_lake's local file cache: catalog.json lives at a fixed
+# path, unlike UUID-named (immutable) data files.
+#
+# read_catalog(key) -> dict and write_catalog(key, dict) do the out-of-band
+# read/overwrite directly against object storage, bypassing pg_lake.
+def _assert_out_of_band_catalog_update_is_seen(
+    pg_conn, base_url, catalog_prefix, read_catalog, write_catalog
+):
+    schema = "test_catalog_json_oob"
+    run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", pg_conn)
+    run_command(f"CREATE SCHEMA {schema}", pg_conn)
+
+    # writable table with data set A
+    run_command(
+        f"CREATE TABLE {schema}.wrt_tbl(a INT) USING iceberg WITH (catalog='object_store')",
+        pg_conn,
+    )
+    run_command(f"INSERT INTO {schema}.wrt_tbl VALUES (1),(2),(3)", pg_conn)
+    pg_conn.commit()
+    wait_until_object_store_writable_table_pushed(pg_conn, schema, "wrt_tbl")
+
+    # second writable table with data set B; we graft its metadata-location
+    # onto wrt_tbl's catalog entry out of band.
+    run_command(
+        f"CREATE TABLE {schema}.wrt_tbl_b(a INT) USING iceberg WITH (catalog='object_store')",
+        pg_conn,
+    )
+    run_command(f"INSERT INTO {schema}.wrt_tbl_b VALUES (100),(200),(300)", pg_conn)
+    pg_conn.commit()
+    wait_until_object_store_writable_table_pushed(pg_conn, schema, "wrt_tbl_b")
+
+    # read-only table pointing at wrt_tbl; initially resolves to data set A
+    run_command(
+        f"CREATE TABLE {schema}.read_tbl(a INT) USING iceberg "
+        f"WITH (catalog='object_store', read_only=True, catalog_table_name='wrt_tbl')",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    rows = run_query(f"SELECT a FROM {schema}.read_tbl ORDER BY a", pg_conn)
+    assert [r[0] for r in rows] == [1, 2, 3]
+
+    dbname = run_query("SELECT current_database()", pg_conn)[0][0]
+    key = f"{catalog_prefix}/catalog/{dbname}/catalog.json"
+    catalog_url = f"{base_url}/{key}"
+
+    # Force the current catalog.json into the pgduck cache, so the staleness
+    # below is real and deterministic (independent of cache-on-write).
+    run_query(f"SELECT lake_file_cache.add('{catalog_url}')", pg_conn)
+    pg_conn.commit()
+
+    # Out-of-band overwrite: point wrt_tbl at wrt_tbl_b's metadata-location,
+    # writing directly to storage so the cached copy is never refreshed.
+    body = read_catalog(key)
+    a_location = next(
+        t["metadata-location"] for t in body["tables"] if t["table-name"] == "wrt_tbl"
+    )
+    b_location = next(
+        t["metadata-location"] for t in body["tables"] if t["table-name"] == "wrt_tbl_b"
+    )
+    for t in body["tables"]:
+        if t["table-name"] == "wrt_tbl":
+            t["metadata-location"] = b_location
+    write_catalog(key, body)
+
+    # Confirm the premise: the on-disk cache still holds the old copy, which
+    # now differs from object storage. Otherwise the read below is vacuous.
+    protocol = base_url.split("://", 1)[0]
+    cache_path = Path(
+        f"{server_params.PGDUCK_CACHE_DIR}/{protocol}/{TEST_BUCKET}/"
+        f"{catalog_prefix}/catalog/{dbname}/{CACHE_FILE_PREFIX}catalog.json"
+    )
+    assert cache_path.exists(), f"expected a cached catalog at {cache_path}"
+    cached_body = json.loads(cache_path.read_text())
+    cached_wrt = next(
+        t["metadata-location"]
+        for t in cached_body["tables"]
+        if t["table-name"] == "wrt_tbl"
+    )
+    assert cached_wrt == a_location, "cache should still hold the stale copy"
+    assert cached_wrt != b_location, "cache and object storage should now differ"
+
+    # Read from a fresh backend (no PG-side caching; mirrors another cluster).
+    # The pgduck file cache is process-global and still holds the stale copy,
+    # so this exercises the cache-bypass fix.
+    fresh_conn = open_pg_conn_to_db(dbname)
+    try:
+        rows = run_query(f"SELECT a FROM {schema}.read_tbl ORDER BY a", fresh_conn)
+    finally:
+        fresh_conn.close()
+
+    assert [r[0] for r in rows] == [100, 200, 300], (
+        "read-only object_store table served a stale catalog.json from the "
+        "local cache instead of the out-of-band update (expected data set B)"
+    )
+
+    run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_catalog_json_out_of_band_update(
+    pg_conn, s3, extension, with_default_location, adjust_object_store_settings
+):
+    def read_catalog(key):
+        return json.loads(s3.get_object(Bucket=TEST_BUCKET, Key=key)["Body"].read())
+
+    def write_catalog(key, body):
+        s3.put_object(
+            Bucket=TEST_BUCKET, Key=key, Body=json.dumps(body).encode("utf-8")
+        )
+
+    _assert_out_of_band_catalog_update_is_seen(
+        pg_conn, f"s3://{TEST_BUCKET}", "tmp", read_catalog, write_catalog
+    )
+
+
+# Same scenario on Azure: azure://, az:// and abfss:// go through the same
+# pgduck caching file system as s3://, so catalog.json has the identical
+# staleness bug and the nocache fix must apply there too.
+def test_catalog_json_out_of_band_update_azure(
+    pg_conn, superuser_conn, azure, s3, extension
+):
+    location = f"azure://{TEST_BUCKET}"
+    catalog_prefix = "tmp_az"
+
+    superuser_conn.autocommit = True
+    run_command(
+        f"ALTER SYSTEM SET pg_lake_iceberg.object_store_catalog_location_prefix = '{location}'",
+        superuser_conn,
+    )
+    run_command(
+        f"ALTER SYSTEM SET pg_lake_iceberg.internal_object_store_catalog_prefix = '{catalog_prefix}'",
+        superuser_conn,
+    )
+    run_command(
+        f"ALTER SYSTEM SET pg_lake_iceberg.external_object_store_catalog_prefix = '{catalog_prefix}'",
+        superuser_conn,
+    )
+    run_command("SELECT pg_reload_conf()", superuser_conn)
+    run_command("SELECT pg_sleep(0.2)", superuser_conn)
+    superuser_conn.autocommit = False
+
+    run_command(f"SET pg_lake_iceberg.default_location_prefix TO '{location}'", pg_conn)
+    pg_conn.commit()
+
+    def read_catalog(key):
+        return json.loads(azure.download_blob(key).readall())
+
+    def write_catalog(key, body):
+        azure.upload_blob(
+            name=key, data=json.dumps(body).encode("utf-8"), overwrite=True
+        )
+
+    try:
+        _assert_out_of_band_catalog_update_is_seen(
+            pg_conn, location, catalog_prefix, read_catalog, write_catalog
+        )
+    finally:
+        run_command("RESET pg_lake_iceberg.default_location_prefix", pg_conn)
+        pg_conn.commit()
+
+        superuser_conn.autocommit = True
+        run_command(
+            "ALTER SYSTEM RESET pg_lake_iceberg.object_store_catalog_location_prefix",
+            superuser_conn,
+        )
+        run_command(
+            "ALTER SYSTEM RESET pg_lake_iceberg.internal_object_store_catalog_prefix",
+            superuser_conn,
+        )
+        run_command(
+            "ALTER SYSTEM RESET pg_lake_iceberg.external_object_store_catalog_prefix",
+            superuser_conn,
+        )
+        run_command("SELECT pg_reload_conf()", superuser_conn)
+        run_command("SELECT pg_sleep(0.2)", superuser_conn)
+        superuser_conn.autocommit = False
+
+
 def assert_tables_are_the_same(pg_conn, tbl_1, tbl_2):
     res = run_query(
         f"""
