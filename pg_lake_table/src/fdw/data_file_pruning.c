@@ -127,6 +127,8 @@ static OpExpr *MakeOpExpression(Var *variable, int16 strategyNumber);
 static NullTest *MakeIsNullExpression(Var *variable);
 static Oid	GetOperatorByType(Oid typeId, Oid accessMethodId, int16 strategyNumber);
 static HTAB *TryCreateBatchFilterHash(List *baseRestrictInfoList, Var *filenameCol);
+static List *GetDataFileStatsAndPartition(bool isInternalIcebergTable, void *dataFile,
+										  List *externalLeafFields, Partition * *partition);
 
 /* partition pruning functions */
 static Expr *PartitionFieldBoundConstraint(PartitionField * partitionField,
@@ -238,37 +240,38 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 
 	int			dataFileCount = list_length(dataFiles);
 
+	/*
+	 * Resolve the table type once: IsInternalIcebergTable and
+	 * IsExternalIcebergTable parse the foreign table options on every call.
+	 * For external tables, also fetch the leaf fields once; they come from
+	 * the metadata file, so looking them up per data file would re-read and
+	 * re-parse the metadata every iteration.
+	 */
+	bool		isInternalIcebergTable = IsInternalIcebergTable(relationId);
+	bool		isExternalIcebergTable = !isInternalIcebergTable &&
+		IsExternalIcebergTable(relationId);
+	List	   *externalLeafFields = NIL;
+
+	/*
+	 * Unreachable after the IsIcebergTable check, but error rather than
+	 * assert.
+	 */
+	if (!isInternalIcebergTable && !isExternalIcebergTable)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("Unsupported table type for data file pruning")));
+
+	if (isExternalIcebergTable && dataFileCount > 0)
+		externalLeafFields = GetLeafFieldsForTable(relationId);
+
 	for (int dataFileIndex = 0; dataFileIndex < dataFileCount; ++dataFileIndex)
 	{
 		List	   *columnBoundConstraints = NIL;
-		List	   *columnStats = NIL;
 		Partition  *partition = NULL;
-
-		if (IsInternalIcebergTable(relationId))
-		{
-			TableDataFile *tableDataFile = (TableDataFile *) list_nth(dataFiles, dataFileIndex);
-
-			Assert(tableDataFile->content == CONTENT_DATA);
-			columnStats = tableDataFile->stats.columnStats;
-			partition = tableDataFile->partition;
-		}
-		else if (IsExternalIcebergTable(relationId))
-		{
-			DataFile   *dataFile = (DataFile *) list_nth(dataFiles, dataFileIndex);
-
-			List	   *leafFields = GetLeafFieldsForTable(relationId);
-			char	   *dataFilePath = (char *) ((DataFile *) dataFile)->file_path;
-
-			columnStats = GetRemoteParquetColumnStats(dataFilePath, leafFields);
-			partition = &(dataFile->partition);
-		}
-		else
-		{
-			/* never expect to get here, still better than assert */
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("Unsupported table type for data file pruning")));
-		}
+		List	   *columnStats =
+			GetDataFileStatsAndPartition(isInternalIcebergTable,
+										 list_nth(dataFiles, dataFileIndex),
+										 externalLeafFields, &partition);
 
 		/* calculate bound constraints */
 		columnBoundConstraints =
@@ -301,6 +304,27 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 	return retainedDataFiles;
 }
 
+static List *
+GetDataFileStatsAndPartition(bool isInternalIcebergTable, void *dataFile,
+							 List *externalLeafFields, Partition * *partition)
+{
+	if (isInternalIcebergTable)
+	{
+		TableDataFile *tableDataFile = (TableDataFile *) dataFile;
+
+		Assert(tableDataFile->content == CONTENT_DATA);
+		*partition = tableDataFile->partition;
+		return tableDataFile->stats.columnStats;
+	}
+	else
+	{
+		DataFile   *externalDataFile = (DataFile *) dataFile;
+
+		*partition = &(externalDataFile->partition);
+		return GetRemoteParquetColumnStats((char *) externalDataFile->file_path,
+										   externalLeafFields);
+	}
+}
 
 /*
  * GetPartitionSpecFieldsUsedInQuery gets the partition spec fields that are
