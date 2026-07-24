@@ -45,4 +45,11 @@ extern void PushVendedCredentialsForRelationOnConnection(PGDuckConnection * conn
  */
 extern void PushVendedCredentialsForRelations(List *rteList);
 
+/*
+ * DropVendedCredentialsForRelation removes the vended secret previously
+ * pushed for the given relation from pgduck_server.  No-op for non-REST
+ * tables; call it when a REST-backed Iceberg table is dropped.
+ */
+extern void DropVendedCredentialsForRelation(Oid relationId);
+
 #endif

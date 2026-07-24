@@ -52,9 +52,12 @@ typedef struct VendedCredentials
 	char	   *sessionToken;	/* s3.session-token (may be NULL for non-STS
 								 * creds) */
 	char	   *region;			/* client.region (may be NULL) */
-	char	   *scope;			/* S3 prefix these creds are scoped to */
+	char	   *scope;			/* S3 prefix these creds are scoped to (the
+								 * table's storage location; may be NULL) */
 	Oid			serverOid;		/* the iceberg_catalog server these came from */
 	TimestampTz fetchedAt;		/* when credentials were obtained */
+	TimestampTz expiresAt;		/* catalog-provided expiry, or 0 when the
+								 * response carried no explicit expiry */
 }			VendedCredentials;
 
 
@@ -192,6 +195,9 @@ char	   *GetRestCatalogAccessToken(RestCatalogOptions * opts, bool forceRefreshT
 List	   *GetHeadersWithAuth(RestCatalogOptions * opts);
 char	   *JsonbGetStringByPath(const char *jsonb_text, int nkeys,...);
 char	   *JsonbGetOptionalStringByPath(const char *jsonb_text, int nkeys,...);
+char	   *JsonbGetFirstArrayElementObject(const char *jsonb_text, const char *arrayKey,
+											const char *objectKey, char **elementStringKeyOut,
+											const char *elementStringKey);
 
 extern PGDLLEXPORT void RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName);
 extern PGDLLEXPORT void StartStageRestCatalogIcebergTableCreate(Oid relationId);
@@ -207,6 +213,7 @@ extern PGDLLEXPORT RestCatalogLoadTableResult LoadTableFromRestCatalog(RestCatal
 																	   const char *namespaceName, const char *relationName);
 extern PGDLLEXPORT char *GetMetadataLocationForRestCatalogForIcebergTable(Oid relationId);
 extern PGDLLEXPORT VendedCredentials * GetVendedCredentialsForRelation(Oid relationId);
+extern PGDLLEXPORT VendedCredentials * GetVendedCredentialsForRelationLoadOnMiss(Oid relationId);
 extern PGDLLEXPORT void InvalidateVendedCredentialsCache(void);
 extern PGDLLEXPORT void ReportHTTPError(HttpResult httpResult, int level);
 extern PGDLLEXPORT List *PostHeadersWithAuth(RestCatalogOptions * opts);

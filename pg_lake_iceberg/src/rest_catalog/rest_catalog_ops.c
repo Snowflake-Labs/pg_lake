@@ -483,12 +483,22 @@ StoreVendedCredentialsInCache(VendedCredentials * creds,
 		pstrdup(creds->scope) : NULL;
 	cached->serverOid = creds->serverOid;
 	cached->fetchedAt = creds->fetchedAt;
+	cached->expiresAt = creds->expiresAt;
 
 	MemoryContextSwitchTo(oldCtx);
 
 	entry->credentials = cached;
-	entry->expiryTime = GetCurrentTimestamp() +
-		(int64) VENDED_CREDS_DEFAULT_TTL_SECS * 1000000;
+
+	/*
+	 * Honor the catalog-provided expiry when present; otherwise fall back to
+	 * a conservative default TTL.  The lookup applies an additional
+	 * early-refresh margin on top of this.
+	 */
+	if (creds->expiresAt > 0)
+		entry->expiryTime = creds->expiresAt;
+	else
+		entry->expiryTime = GetCurrentTimestamp() +
+			(int64) VENDED_CREDS_DEFAULT_TTL_SECS * 1000000;
 
 	pfree(tablePrefix);
 }
@@ -562,11 +572,98 @@ GetMetadataLocationFromRestCatalog(RestCatalogOptions * opts, const char *restCa
 
 
 /*
- * ExtractVendedCredentials parses S3 vended credentials from the
- * REST catalog loadTable response body's "config" map.
+ * NormalizeS3Prefix returns a copy of prefix guaranteed to end with a
+ * trailing slash.  DuckDB selects a secret by longest-matching SCOPE
+ * prefix, so without the trailing slash a scope of ".../t" would also
+ * match a sibling table ".../t2".
+ */
+static char *
+NormalizeS3Prefix(const char *prefix)
+{
+	size_t		len = strlen(prefix);
+
+	if (len > 0 && prefix[len - 1] == '/')
+		return pstrdup(prefix);
+
+	return psprintf("%s/", prefix);
+}
+
+
+/*
+ * GetVendedConfigString reads a string value from an Iceberg config
+ * map.  When mapKey is NULL, body is the config map itself (leaf is a
+ * direct child); otherwise the leaf lives under body->mapKey.
+ */
+static char *
+GetVendedConfigString(const char *body, const char *mapKey, const char *leafKey)
+{
+	if (mapKey == NULL)
+		return JsonbGetOptionalStringByPath(body, 1, leafKey);
+
+	return JsonbGetOptionalStringByPath(body, 2, mapKey, leafKey);
+}
+
+
+/*
+ * ParseVendedCredsFromConfig builds a VendedCredentials from an Iceberg
+ * config map (see GetVendedConfigString for the mapKey convention).
  *
- * Returns a palloc'd VendedCredentials if at minimum the access key
- * and secret are present; NULL otherwise.
+ * Returns NULL unless at least the access key and secret are present.
+ * The scope field is left unset here; the caller assigns it from the
+ * storage-credential prefix or the table location.  The expiry is
+ * parsed from "s3.session-token-expires-at-ms" (unix epoch millis) when
+ * the catalog provides it, so short-lived STS credentials are not
+ * cached past their real lifetime.
+ */
+static VendedCredentials *
+ParseVendedCredsFromConfig(const char *body, const char *mapKey, Oid serverOid)
+{
+	char	   *accessKeyId = GetVendedConfigString(body, mapKey, "s3.access-key-id");
+	char	   *secretAccessKey = GetVendedConfigString(body, mapKey, "s3.secret-access-key");
+
+	if (accessKeyId == NULL || secretAccessKey == NULL)
+		return NULL;
+
+	VendedCredentials *creds = palloc0(sizeof(VendedCredentials));
+
+	creds->accessKeyId = accessKeyId;
+	creds->secretAccessKey = secretAccessKey;
+	creds->sessionToken = GetVendedConfigString(body, mapKey, "s3.session-token");
+	creds->region = GetVendedConfigString(body, mapKey, "client.region");
+	creds->serverOid = serverOid;
+	creds->fetchedAt = GetCurrentTimestamp();
+
+	char	   *expiresMsStr = GetVendedConfigString(body, mapKey,
+													 "s3.session-token-expires-at-ms");
+
+	if (expiresMsStr != NULL)
+	{
+		char	   *endptr = NULL;
+		long long	expiresMs = strtoll(expiresMsStr, &endptr, 10);
+
+		if (endptr != expiresMsStr && *endptr == '\0' && expiresMs > 0)
+			creds->expiresAt =
+				(TimestampTz) IcebergTimestampMsToPostgresTimestamp((Timestamp) expiresMs);
+	}
+
+	return creds;
+}
+
+
+/*
+ * ExtractVendedCredentials parses S3 vended credentials from a REST
+ * catalog loadTable response body.
+ *
+ * Two response shapes are supported: the newer "storage-credentials"
+ * array (each element carrying its own "prefix" and "config"), and the
+ * legacy top-level "config" map.  The credential scope is taken from
+ * the storage-credential prefix when present, otherwise from the
+ * table's storage location ("metadata"."location") in the response, so
+ * the pushed DuckDB secret covers wherever the table's data actually
+ * lives -- not an assumed path under the configured location prefix.
+ *
+ * Returns a palloc'd VendedCredentials if at minimum the access key and
+ * secret are present; NULL otherwise.
  */
 static VendedCredentials *
 ExtractVendedCredentials(const char *responseBody, RestCatalogOptions * opts)
@@ -574,28 +671,41 @@ ExtractVendedCredentials(const char *responseBody, RestCatalogOptions * opts)
 	if (responseBody == NULL || *responseBody == '\0')
 		return NULL;
 
-	char	   *accessKeyId =
-		JsonbGetOptionalStringByPath(responseBody, 2, "config", "s3.access-key-id");
-	char	   *secretAccessKey =
-		JsonbGetOptionalStringByPath(responseBody, 2, "config", "s3.secret-access-key");
+	VendedCredentials *creds = NULL;
+	char	   *scopePrefix = NULL;
 
-	if (accessKeyId == NULL || secretAccessKey == NULL)
+	/* Prefer the per-prefix "storage-credentials" array when present. */
+	char	   *storageCredConfig =
+		JsonbGetFirstArrayElementObject(responseBody, "storage-credentials",
+										"config", &scopePrefix, "prefix");
+
+	if (storageCredConfig != NULL)
+		creds = ParseVendedCredsFromConfig(storageCredConfig, NULL, opts->serverOid);
+
+	/* Fall back to the legacy top-level "config" map. */
+	if (creds == NULL)
+	{
+		scopePrefix = NULL;
+		creds = ParseVendedCredsFromConfig(responseBody, "config", opts->serverOid);
+	}
+
+	if (creds == NULL)
 	{
 		elog(DEBUG2, "REST catalog loadTable response did not contain "
-			 "vended S3 credentials in config map");
+			 "vended S3 credentials");
 		return NULL;
 	}
 
-	VendedCredentials *creds = palloc0(sizeof(VendedCredentials));
+	/*
+	 * Resolve the scope: the storage-credential's own prefix wins; otherwise
+	 * use the table's storage location from the response.
+	 */
+	if (scopePrefix == NULL)
+		scopePrefix = JsonbGetOptionalStringByPath(responseBody, 2,
+												   "metadata", "location");
 
-	creds->accessKeyId = accessKeyId;
-	creds->secretAccessKey = secretAccessKey;
-	creds->sessionToken =
-		JsonbGetOptionalStringByPath(responseBody, 2, "config", "s3.session-token");
-	creds->region =
-		JsonbGetOptionalStringByPath(responseBody, 2, "config", "client.region");
-	creds->serverOid = opts->serverOid;
-	creds->fetchedAt = GetCurrentTimestamp();
+	if (scopePrefix != NULL && scopePrefix[0] != '\0')
+		creds->scope = NormalizeS3Prefix(scopePrefix);
 
 	return creds;
 }
@@ -682,7 +792,14 @@ LookupVendedCredentialsInCache(Oid serverOid,
 	const int64 FIVE_MINUTES_USEC = (int64) 5 * 60 * 1000000;
 
 	if (entry->expiryTime <= now + FIVE_MINUTES_USEC)
+	{
+		/*
+		 * Evict the stale entry so a fresh loadTable can repopulate it and
+		 * the cache does not grow with dead entries in long-lived backends.
+		 */
+		hash_search(VendedCredsCache, &cacheKey, HASH_REMOVE, NULL);
 		return NULL;
+	}
 
 	return entry->credentials;
 }
@@ -722,6 +839,51 @@ GetVendedCredentialsForRelation(Oid relationId)
 	const char *restCatalogName = GetRestCatalogName(relationId);
 	const char *namespaceName = GetRestCatalogNamespace(relationId);
 	const char *tableName = GetRestCatalogTableName(relationId);
+
+	return LookupVendedCredentialsInCache(opts->serverOid, restCatalogName,
+										  namespaceName, tableName);
+}
+
+
+/*
+ * GetVendedCredentialsForRelationLoadOnMiss is like
+ * GetVendedCredentialsForRelation but, on a cache miss, issues a
+ * loadTable round-trip to populate the cache and returns the result.
+ *
+ * This is used on the modify path (INSERT/UPDATE/DELETE), where a
+ * backend may write to a REST-backed table it has never read in this
+ * session (so the read-path cache warming never happened).  Without a
+ * load-on-miss the write would silently fall back to the pre-existing
+ * static S3 secret, which may not exist in vended-only deployments.
+ * Contacting the catalog here is acceptable because the modify path
+ * resolves the metadata location from the same catalog anyway.
+ */
+VendedCredentials *
+GetVendedCredentialsForRelationLoadOnMiss(Oid relationId)
+{
+	VendedCredentials *creds = GetVendedCredentialsForRelation(relationId);
+
+	if (creds != NULL)
+		return creds;
+
+	IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
+
+	if (catalogType != REST_CATALOG_READ_ONLY &&
+		catalogType != REST_CATALOG_READ_WRITE)
+		return NULL;
+
+	RestCatalogOptions *opts = GetRestCatalogOptionsForRelation(relationId);
+
+	if (!opts->enableVendedCredentials)
+		return NULL;
+
+	const char *restCatalogName = GetRestCatalogName(relationId);
+	const char *namespaceName = GetRestCatalogNamespace(relationId);
+	const char *tableName = GetRestCatalogTableName(relationId);
+
+	/* Populate the cache via a loadTable round-trip, then look up again. */
+	(void) LoadTableFromRestCatalog(opts, restCatalogName, namespaceName,
+									tableName);
 
 	return LookupVendedCredentialsInCache(opts->serverOid, restCatalogName,
 										  namespaceName, tableName);

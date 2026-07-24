@@ -356,7 +356,15 @@ ExecuteQueryOnPGDuckConnection(PGDuckConnection * pgDuckConnection,
 {
 	PGconn	   *conn = pgDuckConnection->conn;
 #ifdef USE_ASSERT_CHECKING
-	elog(DEBUG2, "PGDuck: %s", query);
+
+	/*
+	 * Never echo secret DDL: CREATE SECRET carries plaintext credentials, so
+	 * even in assert-only debug builds we must not log them verbatim.
+	 */
+	if (strstr(query, "SECRET") != NULL)
+		elog(DEBUG2, "PGDuck: <secret statement redacted>");
+	else
+		elog(DEBUG2, "PGDuck: %s", query);
 #endif
 
 	int			sentQuery = PQsendQuery(conn, query);
