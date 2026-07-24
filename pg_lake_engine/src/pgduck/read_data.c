@@ -72,7 +72,11 @@ static char *BuildColumnProjection(char *expression,
 								   CopyDataFormat sourceFormat,
 								   List *formatOptions,
 								   bool addAlias);
-static char *BuildMapWithIntervalProjection(char *columnName, Oid mapTypeId);
+static bool TypeNeedsIcebergReadConversion(Oid typeOid);
+static bool AppendIcebergReadConversion(StringInfo buf, const char *expression,
+										Oid typeOid, int32 typmod, int depth);
+static char *BuildIcebergReadConversion(const char *expression, Oid typeOid,
+										int32 typmod);
 static char *BuildStorageToSurfaceProjection(const char *columnName,
 											 Oid columnTypeId, int32 columnTypeMod,
 											 DuckDBTypeInfo duckdbType,
@@ -894,136 +898,286 @@ TupleDescToAliasList(TupleDesc tupleDesc)
 
 
 /*
- * BuildMapWithIntervalProjection generates a DuckDB expression that
- * reconstructs interval values inside a MAP type from their
- * struct(months, days, microseconds) Iceberg representation.
- *
- * Returns NULL if the map value type is not INTERVAL.
+ * TypeNeedsIcebergReadConversion recursively checks whether a PostgreSQL type
+ * contains a value whose Iceberg representation must be converted before it
+ * is sent back to PostgreSQL. Iceberg stores INTERVAL as a struct and TIMETZ
+ * as a UTC-normalized TIME, so both need an explicit read-side conversion.
  */
-static char *
-BuildMapWithIntervalProjection(char *columnName, Oid mapTypeId)
+static bool
+TypeNeedsIcebergReadConversion(Oid typeOid)
 {
-	PGType		valType = GetMapValueType(mapTypeId);
+	if (typeOid == INTERVALOID || typeOid == TIMETZOID)
+		return true;
 
-	if (valType.postgresTypeOid != INTERVALOID)
-		return NULL;
+	Oid			elementType = get_element_type(typeOid);
 
-	const char *col = duckdb_quote_identifier(columnName);
+	if (OidIsValid(elementType))
+		return TypeNeedsIcebergReadConversion(elementType);
 
-	return psprintf(
-					"map_from_entries("
-					"list_transform(map_entries(%s), _x -> "
-					"struct_pack(key := _x.key, value := "
-					"(to_months(_x.value.months) + "
-					"to_days(_x.value.days) + "
-					"to_microseconds(_x.value.microseconds))"
-					")))",
-					col);
+	/*
+	 * Maps are domains over arrays. The get_element_type() check above does
+	 * not swallow them (it only recognizes true arrays and returns InvalidOid
+	 * for domains over arrays), but the generic domain unwrap below would, so
+	 * maps must be recognized here first.
+	 */
+	if (IsMapTypeOid(typeOid))
+	{
+		PGType		keyType = GetMapKeyType(typeOid);
+		PGType		valueType = GetMapValueType(typeOid);
+
+		return TypeNeedsIcebergReadConversion(keyType.postgresTypeOid) ||
+			TypeNeedsIcebergReadConversion(valueType.postgresTypeOid);
+	}
+
+	char		typeKind = get_typtype(typeOid);
+
+	if (typeKind == TYPTYPE_DOMAIN)
+		return TypeNeedsIcebergReadConversion(getBaseType(typeOid));
+
+	if (typeKind == TYPTYPE_COMPOSITE)
+	{
+		TupleDesc	tupleDesc = lookup_rowtype_tupdesc(typeOid, -1);
+		bool		needsConversion = false;
+
+		for (int attributeIndex = 0;
+			 attributeIndex < tupleDesc->natts;
+			 attributeIndex++)
+		{
+			Form_pg_attribute attribute =
+				TupleDescAttr(tupleDesc, attributeIndex);
+
+			if (attribute->attisdropped)
+				continue;
+
+			if (TypeNeedsIcebergReadConversion(attribute->atttypid))
+			{
+				needsConversion = true;
+				break;
+			}
+		}
+
+		ReleaseTupleDesc(tupleDesc);
+		return needsConversion;
+	}
+
+	return false;
 }
 
 
 /*
- * BuildStructWithIntervalProjection generates a DuckDB expression that
- * reconstructs interval fields inside a composite type from their
- * struct(months, days, microseconds) Parquet representation.
+ * AppendIcebergReadConversion emits the read-side inverse of the native-type
+ * Iceberg write conversion for one expression. It recursively rebuilds only
+ * containers with an INTERVAL or TIMETZ descendant and returns false when the
+ * expression can pass through unchanged.
  *
- * Returns NULL if the composite type has no interval fields.
+ * The traversal deliberately mirrors AppendRewriteExpression's
+ * ICEBERG_REWRITE_NATIVE_ENCODE family in iceberg_query_validation.c (branch
+ * order, lambda variable naming, NULL handling), with
+ * TypeNeedsIcebergReadConversion twinning TypeNeedsNativeConversion as the
+ * gate. A new native type must be added to all four.
  */
-static char *
-BuildStructWithIntervalProjection(char *columnName, Oid compositeTypeId)
+static bool
+AppendIcebergReadConversion(StringInfo buf, const char *expression,
+							Oid typeOid, int32 typmod, int depth)
 {
-	Oid			baseTypeId = get_element_type(compositeTypeId);
-
-	if (!OidIsValid(baseTypeId))
-		baseTypeId = compositeTypeId;
-
-	if (get_typtype(baseTypeId) != TYPTYPE_COMPOSITE)
-		return NULL;
-
-	TupleDesc	tupdesc = lookup_rowtype_tupdesc(baseTypeId, -1);
-	bool		hasInterval = false;
-
-	for (int i = 0; i < tupdesc->natts; i++)
+	if (typeOid == INTERVALOID)
 	{
-		Form_pg_attribute att = TupleDescAttr(tupdesc, i);
-
-		if (att->attisdropped)
-			continue;
-
-		Oid			fieldBaseType = get_element_type(att->atttypid);
-
-		if (!OidIsValid(fieldBaseType))
-			fieldBaseType = att->atttypid;
-
-		if (fieldBaseType == INTERVALOID)
-		{
-			hasInterval = true;
-			break;
-		}
+		appendStringInfo(buf,
+						 "(to_months((%s).months) + "
+						 "to_days((%s).days) + "
+						 "to_microseconds((%s).microseconds))",
+						 expression, expression, expression);
+		return true;
 	}
 
-	if (!hasInterval)
+	if (typeOid == TIMETZOID)
 	{
-		ReleaseTupleDesc(tupdesc);
-		return NULL;
+		/*
+		 * Iceberg has no time-with-time-zone type. The stored TIME digits are
+		 * already UTC-normalized; casting in DuckDB attaches +00 before the
+		 * value reaches PostgreSQL, avoiding session-timezone
+		 * reinterpretation by timetz_in.
+		 */
+		appendStringInfo(buf, "CAST((%s) AS TIMETZ)", expression);
+		return true;
 	}
 
-	StringInfoData buf;
-	const char *col = duckdb_quote_identifier(columnName);
+	Oid			elementType = get_element_type(typeOid);
 
-	initStringInfo(&buf);
-	appendStringInfoChar(&buf, '{');
-
-	bool		first = true;
-
-	for (int i = 0; i < tupdesc->natts; i++)
+	if (OidIsValid(elementType))
 	{
-		Form_pg_attribute att = TupleDescAttr(tupdesc, i);
+		if (!TypeNeedsIcebergReadConversion(elementType))
+			return false;
 
-		if (att->attisdropped)
-			continue;
+		char	   *lambdaVariable = psprintf("_x%d", depth);
+		bool		converted = false;
 
-		if (!first)
-			appendStringInfoString(&buf, ", ");
-		first = false;
+		appendStringInfo(buf, "list_transform(%s, %s -> ",
+						 expression, lambdaVariable);
 
-		char	   *fieldName = NameStr(att->attname);
+		/*
+		 * An array's typmod applies to its element type. The recursion must
+		 * produce an expression here: TypeNeedsIcebergReadConversion approved
+		 * the element type above, and the two functions walk types
+		 * identically.
+		 */
+		converted = AppendIcebergReadConversion(buf, lambdaVariable,
+												elementType, typmod,
+												depth + 1);
+		Assert(converted);
+		(void) converted;
+		appendStringInfoChar(buf, ')');
+		return true;
+	}
 
-		appendStringInfo(&buf, "%s: ", QuoteDuckDBStructKeySQL(fieldName));
+	/*
+	 * pg_map represents a map as a domain over an array of key/value
+	 * composites. The array branch above does not capture it
+	 * (get_element_type only recognizes true arrays, not domains over
+	 * arrays), but the generic domain unwrap below would, and rebuilding the
+	 * base array with list_transform would lose DuckDB's MAP shape.
+	 */
+	if (IsMapTypeOid(typeOid))
+	{
+		PGType		keyType = GetMapKeyType(typeOid);
+		PGType		valueType = GetMapValueType(typeOid);
+		bool		convertKey =
+			TypeNeedsIcebergReadConversion(keyType.postgresTypeOid);
+		bool		convertValue =
+			TypeNeedsIcebergReadConversion(valueType.postgresTypeOid);
 
-		Oid			fieldElementType = get_element_type(att->atttypid);
-		bool		isIntervalArray = OidIsValid(fieldElementType) &&
-			fieldElementType == INTERVALOID;
+		if (!convertKey && !convertValue)
+			return false;
 
-		if (att->atttypid == INTERVALOID)
+		char	   *lambdaVariable = psprintf("_x%d", depth);
+		char	   *keyExpression = psprintf("%s.key", lambdaVariable);
+		char	   *valueExpression = psprintf("%s.value", lambdaVariable);
+		bool		converted = false;
+
+		appendStringInfo(buf,
+						 "map_from_entries(list_transform(map_entries(%s), "
+						 "%s -> struct_pack(key := ",
+						 expression, lambdaVariable);
+
+		/*
+		 * Same invariant as the array branch: TypeNeedsIcebergReadConversion
+		 * approved whichever side we recurse into, so the recursion must
+		 * produce an expression.
+		 */
+		if (convertKey)
 		{
-			appendStringInfo(&buf,
-							 "(to_months(%s.%s.months) + to_days(%s.%s.days) + "
-							 "to_microseconds(%s.%s.microseconds))",
-							 col, duckdb_quote_identifier(fieldName),
-							 col, duckdb_quote_identifier(fieldName),
-							 col, duckdb_quote_identifier(fieldName));
-		}
-		else if (isIntervalArray)
-		{
-			appendStringInfo(&buf,
-							 "list_transform(%s.%s, _x -> "
-							 "(to_months(_x.months) + to_days(_x.days) + "
-							 "to_microseconds(_x.microseconds)))",
-							 col, duckdb_quote_identifier(fieldName));
+			converted = AppendIcebergReadConversion(buf, keyExpression,
+													keyType.postgresTypeOid,
+													keyType.postgresTypeMod,
+													depth + 1);
+			Assert(converted);
+			(void) converted;
 		}
 		else
+			appendStringInfoString(buf, keyExpression);
+
+		appendStringInfoString(buf, ", value := ");
+
+		if (convertValue)
 		{
-			appendStringInfo(&buf, "%s.%s",
-							 col, duckdb_quote_identifier(fieldName));
+			converted = AppendIcebergReadConversion(buf, valueExpression,
+													valueType.postgresTypeOid,
+													valueType.postgresTypeMod,
+													depth + 1);
+			Assert(converted);
+			(void) converted;
 		}
+		else
+			appendStringInfoString(buf, valueExpression);
+
+		appendStringInfoString(buf, ")))");
+		return true;
 	}
 
-	appendStringInfoChar(&buf, '}');
+	char		typeKind = get_typtype(typeOid);
 
-	ReleaseTupleDesc(tupdesc);
+	if (typeKind == TYPTYPE_DOMAIN)
+	{
+		Oid			baseType = getBaseTypeAndTypmod(typeOid, &typmod);
 
-	return buf.data;
+		return AppendIcebergReadConversion(buf, expression, baseType, typmod,
+										   depth);
+	}
+
+	if (typeKind == TYPTYPE_COMPOSITE)
+	{
+		if (!TypeNeedsIcebergReadConversion(typeOid))
+			return false;
+
+		TupleDesc	tupleDesc = lookup_rowtype_tupdesc(typeOid, -1);
+		bool		firstField = true;
+
+		/*
+		 * struct_pack builds a fresh struct with reset validity, so without
+		 * the CASE guard a NULL composite would come back as a non-NULL
+		 * struct of NULL fields (DuckDB's IS NOT NULL on structs is
+		 * value-level, not the SQL per-field row rule). See the matching
+		 * rebuild in AppendRewriteExpression for the full story.
+		 */
+		appendStringInfo(buf, "CASE WHEN %s IS NOT NULL THEN struct_pack(",
+						 expression);
+
+		for (int attributeIndex = 0;
+			 attributeIndex < tupleDesc->natts;
+			 attributeIndex++)
+		{
+			Form_pg_attribute attribute =
+				TupleDescAttr(tupleDesc, attributeIndex);
+
+			if (attribute->attisdropped)
+				continue;
+
+			if (!firstField)
+				appendStringInfoString(buf, ", ");
+
+			const char *fieldName = NameStr(attribute->attname);
+			const char *quotedFieldName =
+				duckdb_quote_identifier((char *) fieldName);
+			char	   *fieldExpression =
+				psprintf("%s.%s", expression, quotedFieldName);
+
+			appendStringInfo(buf, "%s := ", quotedFieldName);
+
+			if (!AppendIcebergReadConversion(buf, fieldExpression,
+											 attribute->atttypid,
+											 attribute->atttypmod,
+											 depth))
+				appendStringInfoString(buf, fieldExpression);
+
+			firstField = false;
+		}
+
+		appendStringInfoString(buf, ") ELSE NULL END");
+		ReleaseTupleDesc(tupleDesc);
+		return true;
+	}
+
+	return false;
+}
+
+
+/*
+ * BuildIcebergReadConversion returns a DuckDB expression that converts all
+ * native-type leaves in expression from their Iceberg representation to their
+ * PostgreSQL/DuckDB surface type, or NULL when no conversion is required.
+ */
+static char *
+BuildIcebergReadConversion(const char *expression, Oid typeOid, int32 typmod)
+{
+	StringInfoData conversion;
+
+	initStringInfo(&conversion);
+
+	if (!AppendIcebergReadConversion(&conversion, expression, typeOid, typmod,
+									 0))
+		return NULL;
+
+	return conversion.data;
 }
 
 
@@ -1054,31 +1208,26 @@ BuildStorageToSurfaceProjection(const char *columnName, Oid columnTypeId,
 	const char *castTargetType = duckdbType.typeName;
 
 	/*
-	 * Interval fields living alongside a diverging leaf inside a composite
-	 * are first reconstructed into a DuckDB INTERVAL (which then casts to
-	 * itself as a no-op), since a struct cannot be cast directly to INTERVAL.
+	 * Native-type fields living alongside a diverging leaf are reconstructed
+	 * before the whole value is cast back to its surface type. A struct
+	 * cannot cast an Iceberg interval struct directly to INTERVAL, and
+	 * casting its UTC-normalized TIME fields straight to the PostgreSQL
+	 * composite would leave nested TIMETZ values vulnerable to
+	 * session-timezone parsing.
 	 */
-	if (duckdbType.typeId == DUCKDB_TYPE_STRUCT)
-		reconstruction = BuildStructWithIntervalProjection((char *) columnName,
-														   columnTypeId);
+	reconstruction =
+		BuildIcebergReadConversion(duckdb_quote_identifier((char *) columnName),
+								   columnTypeId, columnTypeMod);
 
 	if (reconstruction == NULL)
 		reconstruction = duckdb_quote_identifier((char *) columnName);
 	else
 	{
 		/*
-		 * BuildStructWithIntervalProjection already rebuilt the interval
-		 * leaves into DuckDB INTERVAL values, so the surface cast must
-		 * describe those leaves as INTERVAL too. duckdbType.typeName is built
-		 * with DATA_FORMAT_ICEBERG, which renders interval as
-		 * STRUCT(months,days,microseconds) (its on-disk shape) -- casting
-		 * against that would attempt INTERVAL -> STRUCT and fail. Re-deriving
-		 * the type name with a non-Iceberg format flips only the interval
-		 * rendering to INTERVAL; every other leaf (including the
-		 * storage-diverging uuid->string) is format-independent, so the cast
-		 * stays "interval -> interval" (a no-op) for the reconstructed fields
-		 * while still bringing the diverging leaves back to their surface
-		 * type.
+		 * The reconstructed expression contains native INTERVAL/TIMETZ
+		 * leaves, so the cast target must use their surface representation
+		 * rather than the Iceberg storage shape. Every other leaf (including
+		 * the storage-diverging uuid->string) is format-independent.
 		 */
 		castTargetType =
 			GetFullDuckDBTypeNameForPGType(MakePGType(columnTypeId,
@@ -1163,17 +1312,18 @@ TupleDescToProjectionList(TupleDesc tupleDesc, CopyDataFormat sourceFormat,
 		}
 
 		/*
-		 * For composite types containing interval fields, we need to
-		 * reconstruct the intervals from struct(months, days, microseconds)
-		 * on the read path.
+		 * Convert every INTERVAL/TIMETZ leaf from its Iceberg storage
+		 * representation to the DuckDB surface type before transmission to
+		 * PostgreSQL. The conversion recursively handles arrays, composites,
+		 * maps, and domains.
 		 */
-		if (duckdbType.typeId == DUCKDB_TYPE_STRUCT &&
-			sourceFormat == DATA_FORMAT_ICEBERG)
+		if (sourceFormat == DATA_FORMAT_ICEBERG)
 		{
-			char	   *structProjection =
-				BuildStructWithIntervalProjection(columnName, columnTypeId);
+			char	   *nativeProjection =
+				BuildIcebergReadConversion(duckdb_quote_identifier(columnName),
+										   columnTypeId, columnTypeMod);
 
-			if (structProjection != NULL)
+			if (nativeProjection != NULL)
 			{
 				char	   *columnAliasString =
 					!addCast ? psprintf(" AS %s", duckdb_quote_identifier(columnName)) : "";
@@ -1182,33 +1332,7 @@ TupleDescToProjectionList(TupleDesc tupleDesc, CopyDataFormat sourceFormat,
 					appendStringInfoString(&projection, ", ");
 
 				appendStringInfo(&projection, "%s%s",
-								 structProjection, columnAliasString);
-
-				hasColumns = true;
-				continue;
-			}
-		}
-
-		/*
-		 * For MAP types with interval values, reconstruct intervals from
-		 * struct(months, days, microseconds) on the read path.
-		 */
-		if (duckdbType.typeId == DUCKDB_TYPE_MAP &&
-			sourceFormat == DATA_FORMAT_ICEBERG)
-		{
-			char	   *mapProjection =
-				BuildMapWithIntervalProjection(columnName, columnTypeId);
-
-			if (mapProjection != NULL)
-			{
-				char	   *columnAliasString =
-					!addCast ? psprintf(" AS %s", duckdb_quote_identifier(columnName)) : "";
-
-				if (hasColumns)
-					appendStringInfoString(&projection, ", ");
-
-				appendStringInfo(&projection, "%s%s",
-								 mapProjection, columnAliasString);
+								 nativeProjection, columnAliasString);
 
 				hasColumns = true;
 				continue;
@@ -1490,33 +1614,6 @@ BuildColumnProjection(char *columnName,
 {
 	char	   *columnAliasString = !addCast ? psprintf(" AS %s", duckdb_quote_identifier(columnName)) : "";
 
-	if (engineType.typeId == DUCKDB_TYPE_INTERVAL)
-	{
-		if (sourceFormat == DATA_FORMAT_ICEBERG)
-		{
-			/*
-			 * Iceberg stores intervals as struct(months, days, microseconds).
-			 * We reconstruct the interval using DuckDB interval constructors.
-			 * Plain Parquet files use DuckDB's native INTERVAL type.
-			 */
-			const char *col = duckdb_quote_identifier(columnName);
-
-			if (engineType.isArrayType)
-				return psprintf(
-								"list_transform(%s, _x -> "
-								"(to_months(_x.months) + "
-								"to_days(_x.days) + "
-								"to_microseconds(_x.microseconds)))%s",
-								col, columnAliasString);
-			else
-				return psprintf(
-								"(to_months(%s.months) + "
-								"to_days(%s.days) + "
-								"to_microseconds(%s.microseconds))%s",
-								col, col, col, columnAliasString);
-		}
-	}
-
 	if (engineType.typeId == DUCKDB_TYPE_GEOMETRY && !engineType.isArrayType)
 	{
 		/*
@@ -1537,27 +1634,6 @@ BuildColumnProjection(char *columnName,
 			/* assume geometry in JSON is stored as GeoJSON */
 			return psprintf("ST_GeomFromGeoJSON(%s)%s", duckdb_quote_identifier(columnName),
 							columnAliasString);
-	}
-
-	if (engineType.typeId == DUCKDB_TYPE_TIME_TZ)
-	{
-		if (sourceFormat == DATA_FORMAT_ICEBERG)
-		{
-			/*
-			 * TimeTZ is stored as TIME (UTC-normalized) in Iceberg. Cast to
-			 * TIMETZ so the UTC offset (+00) is preserved rather than having
-			 * the session timezone applied during text parsing.
-			 */
-			const char *col = duckdb_quote_identifier(columnName);
-
-			if (engineType.isArrayType)
-				return psprintf(
-								"list_transform(%s, _x -> _x::TIMETZ)%s",
-								col, columnAliasString);
-			else
-				return psprintf("%s::TIMETZ%s",
-								col, columnAliasString);
-		}
 	}
 
 	if (sourceFormat == DATA_FORMAT_LOG)
