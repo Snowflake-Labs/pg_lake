@@ -419,8 +419,9 @@ PushMetadataLocationToObjectStoreCatalog(void)
 
 	WriteStringToFilePath(objectStoreCatalogFileContent->data, localFilePath);
 
-	CopyLocalFileToS3(localFilePath,
-					  GetInternalObjectStoreCatalogFilePath(get_database_name(MyDatabaseId)));
+	/* Skip cache-on-write; catalog.json is always read fresh (nocache). */
+	CopyLocalFileToS3NoCache(localFilePath,
+							 GetInternalObjectStoreCatalogFilePath(get_database_name(MyDatabaseId)));
 
 	LastCatalogPushTime = GetCurrentTimestamp();
 }
