@@ -616,12 +616,16 @@ CreateManifestPartitionFieldMap(AvroReader * manifestReader)
 		 * fieldName buffer including the terminating NUL. Check before
 		 * entering it into the hash, which would truncate the key.
 		 */
-		if (strlen(fieldName) >= PARTITION_FIELD_NAME_MAX_LENGTH)
+		size_t		fieldNameLength = strlen(fieldName);
+
+		if (fieldNameLength == 0 ||
+			fieldNameLength >= PARTITION_FIELD_NAME_MAX_LENGTH)
 		{
 			ereport(ERROR,
 					(errcode(ERRCODE_INTERNAL_ERROR),
-					 errmsg("Partition field name %s is too long with length %zu",
-							fieldName, strlen(fieldName))));
+					 errmsg("Partition field name length must be between 1 and %d, got %zu",
+							PARTITION_FIELD_NAME_MAX_LENGTH - 1,
+							fieldNameLength)));
 		}
 
 		bool		fieldFound = false;
