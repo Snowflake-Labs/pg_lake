@@ -31,6 +31,7 @@ typedef struct TableMetadataOperationTracker
 	bool		relationDataFileChanged;
 	bool		relationManifestMergeRequested;
 	bool		relationSnapshotExpirationRequested;
+	bool		relationDataFilesRemoveAllSeen;
 
 	/*
 	 * Number of single-file data-file operations recorded for this relation
