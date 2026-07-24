@@ -88,7 +88,8 @@ list_object_store_tables(PG_FUNCTION_ARGS)
 		GetInternalObjectStoreCatalogFilePath(catalogName) :
 		GetExternalObjectStoreCatalogFilePath(catalogName);
 
-	char	   *catalogContent = GetTextFromURI(catalogPath);
+	/* catalog.json is a fixed path that may change out of band; read fresh. */
+	char	   *catalogContent = GetJsonFromURINoCache(catalogPath);
 
 	StringInfo	getObjectStoreTables = makeStringInfo();
 
@@ -437,7 +438,9 @@ GetTableMetadataLocationFromExternalObjectStoreCatalog(const char *catalogName, 
 {
 	const char *catalogPath =
 		GetExternalObjectStoreCatalogFilePath(catalogName);
-	char	   *catalogContent = GetTextFromURI(catalogPath);
+
+	/* catalog.json is a fixed path that may change out of band; read fresh. */
+	char	   *catalogContent = GetJsonFromURINoCache(catalogPath);
 
 	StringInfo	metadataLocationStrInfo = makeStringInfo();
 	StringInfo	getMetadataLocation = makeStringInfo();
