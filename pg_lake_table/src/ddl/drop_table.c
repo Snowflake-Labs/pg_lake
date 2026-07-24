@@ -41,6 +41,7 @@
 #include "pg_lake/cleanup/deletion_queue.h"
 #include "pg_lake/fdw/data_files_catalog.h"
 #include "pg_lake/fdw/data_file_stats_catalog.h"
+#include "pg_lake/fdw/vended_credentials.h"
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/fdw/row_ids.h"
 #include "pg_lake/fdw/schema_operations/field_id_mapping_catalog.h"
@@ -319,7 +320,17 @@ DropTableAccessHook(ObjectAccessType access, Oid classId, Oid objectId,
 			IcebergCatalogType catalogType = GetIcebergCatalogType(objectId);
 
 			if (catalogType == REST_CATALOG_READ_WRITE)
+			{
 				RecordRestCatalogRequestInTx(objectId, REST_CATALOG_DROP_TABLE, NULL);
+
+				/*
+				 * Best-effort removal of the vended secret we may have pushed
+				 * for this table, so it does not linger on the shared
+				 * pgduck_server after the table is gone.  Safe on rollback:
+				 * the next scan re-pushes it via CREATE OR REPLACE.
+				 */
+				DropVendedCredentialsForRelation(objectId);
+			}
 		}
 	}
 	else if (get_rel_type_id(objectId) != InvalidOid && subId != 0)

@@ -28,6 +28,7 @@
 
 #include "common/hashfn.h"
 #include "lib/stringinfo.h"
+#include "utils/builtins.h"
 
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/pgduck/vended_secrets.h"
@@ -35,18 +36,19 @@
 
 /*
  * GenerateVendedSecretName produces a deterministic name for a vended
- * secret: pglake_vended_<serverOid>_<hash(prefix)>.
+ * secret: pglake_vended_<serverOid>_<hash(secretKey)>.
  *
- * The name is stable across calls for the same (serverOid, prefix),
- * so CREATE OR REPLACE SECRET is idempotent.
+ * secretKey is a stable per-table identity (e.g. "catalog/ns/table"),
+ * so the name stays constant as the underlying credentials and their
+ * S3 scope rotate, keeping CREATE OR REPLACE SECRET idempotent.
  */
 char *
-GenerateVendedSecretName(Oid serverOid, const char *s3Prefix)
+GenerateVendedSecretName(Oid serverOid, const char *secretKey)
 {
-	uint32		prefixHash = hash_bytes((const unsigned char *) s3Prefix,
-										strlen(s3Prefix));
+	uint32		keyHash = hash_bytes((const unsigned char *) secretKey,
+									 strlen(secretKey));
 
-	return psprintf("pglake_vended_%u_%08x", serverOid, prefixHash);
+	return psprintf("pglake_vended_%u_%08x", serverOid, keyHash);
 }
 
 
@@ -281,8 +283,15 @@ BuildCreateSecretSQL(const char *secretName,
 
 	if (inherited != NULL && inherited->useSsl != NULL)
 	{
-		appendStringInfo(&sql, ", USE_SSL %s",
-						 strcmp(inherited->useSsl, "true") == 0 ? "true" : "false");
+		/*
+		 * duckdb_secrets() may render the boolean as "true"/"false" or as
+		 * "1"/"0" depending on version; parse_bool handles both so we don't
+		 * silently coerce SSL off (which would break real-AWS access).
+		 */
+		bool		useSsl = true;
+
+		(void) parse_bool(inherited->useSsl, &useSsl);
+		appendStringInfo(&sql, ", USE_SSL %s", useSsl ? "true" : "false");
 	}
 
 	char	   *escapedScope = EscapeSingleQuotes(s3Prefix);
@@ -331,13 +340,14 @@ PushVendedSecretOnConnection(PGDuckConnection * conn,
 
 void
 EnsureVendedSecretInPGDuck(Oid serverOid,
-						   const char *s3Prefix,
+						   const char *secretKey,
+						   const char *s3Scope,
 						   const char *accessKeyId,
 						   const char *secretAccessKey,
 						   const char *sessionToken,
 						   const char *region)
 {
-	char	   *secretName = GenerateVendedSecretName(serverOid, s3Prefix);
+	char	   *secretName = GenerateVendedSecretName(serverOid, secretKey);
 
 	elog(DEBUG2, "pushing vended secret \"%s\" to pgduck_server", secretName);
 
@@ -345,7 +355,7 @@ EnsureVendedSecretInPGDuck(Oid serverOid,
 
 	PG_TRY();
 	{
-		PushVendedSecretOnConnection(conn, secretName, s3Prefix,
+		PushVendedSecretOnConnection(conn, secretName, s3Scope,
 									 accessKeyId, secretAccessKey,
 									 sessionToken, region);
 	}
@@ -362,18 +372,19 @@ EnsureVendedSecretInPGDuck(Oid serverOid,
 void
 EnsureVendedSecretOnConnection(PGDuckConnection * conn,
 							   Oid serverOid,
-							   const char *s3Prefix,
+							   const char *secretKey,
+							   const char *s3Scope,
 							   const char *accessKeyId,
 							   const char *secretAccessKey,
 							   const char *sessionToken,
 							   const char *region)
 {
-	char	   *secretName = GenerateVendedSecretName(serverOid, s3Prefix);
+	char	   *secretName = GenerateVendedSecretName(serverOid, secretKey);
 
 	elog(DEBUG2, "pushing vended secret \"%s\" on existing connection",
 		 secretName);
 
-	PushVendedSecretOnConnection(conn, secretName, s3Prefix,
+	PushVendedSecretOnConnection(conn, secretName, s3Scope,
 								 accessKeyId, secretAccessKey,
 								 sessionToken, region);
 
@@ -382,9 +393,9 @@ EnsureVendedSecretOnConnection(PGDuckConnection * conn,
 
 
 void
-DropVendedSecretFromPGDuck(Oid serverOid, const char *s3Prefix)
+DropVendedSecretFromPGDuck(Oid serverOid, const char *secretKey)
 {
-	char	   *secretName = GenerateVendedSecretName(serverOid, s3Prefix);
+	char	   *secretName = GenerateVendedSecretName(serverOid, secretKey);
 	char	   *sql = psprintf("DROP SECRET IF EXISTS \"%s\"", secretName);
 
 	elog(DEBUG2, "dropping vended secret \"%s\" from pgduck_server",

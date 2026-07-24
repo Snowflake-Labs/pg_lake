@@ -852,3 +852,258 @@ def test_vended_credentials_multiple_tables_independent_creds(
             superuser_conn,
         )
         superuser_conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Credential extraction details: scope, storage-credentials, expiry
+#
+# These use the get_rest_vended_credentials test shim, which loads a table
+# and returns the extracted credential fields as a pipe-delimited summary:
+#     "<access-key-id>|<scope>|<yes|no session token>|<expiry|noexpiry>"
+# ---------------------------------------------------------------------------
+
+_VENDED_CREDS_FN = """
+    CREATE OR REPLACE FUNCTION get_rest_vended_credentials(TEXT, TEXT, TEXT)
+    RETURNS text
+    LANGUAGE C VOLATILE STRICT
+    AS 'pg_lake_iceberg', 'get_rest_vended_credentials';
+    """
+
+
+def _serve(handler_class):
+    """Start a mock catalog on a free port and point the GUCs at it."""
+    port = _find_free_port()
+    httpd = HTTPServer(("127.0.0.1", port), handler_class)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+
+    run_command_outside_tx(
+        [
+            f"ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_host TO 'http://127.0.0.1:{port}'",
+            "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_id TO 'test_id'",
+            "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_secret TO 'test_secret'",
+            "SELECT pg_reload_conf()",
+        ]
+    )
+    return httpd, thread
+
+
+def _stop(httpd, thread):
+    httpd.shutdown()
+    thread.join(timeout=5)
+    run_command_outside_tx(
+        [
+            "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_host",
+            "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_id",
+            "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_secret",
+            "SELECT pg_reload_conf()",
+        ]
+    )
+
+
+def _oauth_or_none(handler):
+    """Handle the OAuth token endpoint; return True if handled."""
+    if "/oauth/tokens" in handler.path:
+        resp = json.dumps(
+            {
+                "access_token": uuid.uuid4().hex,
+                "token_type": "bearer",
+                "expires_in": 3600,
+            }
+        )
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/json")
+        handler.end_headers()
+        handler.wfile.write(resp.encode())
+        return True
+    return False
+
+
+def _reply(handler, payload):
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/json")
+    handler.end_headers()
+    handler.wfile.write(json.dumps(payload).encode())
+
+
+def _run_vended_creds(superuser_conn, catalog, ns, table):
+    run_command(_VENDED_CREDS_FN, superuser_conn)
+    superuser_conn.commit()
+    result = run_query(
+        f"SELECT get_rest_vended_credentials('{catalog}', '{ns}', '{table}')",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+    return result[0][0]
+
+
+def test_vended_credentials_scope_from_metadata_location(
+    superuser_conn, iceberg_extension, installcheck, configure_mock_catalog
+):
+    """
+    When the response carries a legacy top-level config map, the scope is
+    taken from the table storage location ("metadata"."location") and
+    normalized with a trailing slash -- not synthesized from the
+    configured location prefix.
+    """
+    if installcheck:
+        return
+
+    try:
+        summary = _run_vended_creds(superuser_conn, "postgres", "test_ns", "test_table")
+
+        access_key, scope, has_token, expiry = summary.split("|")
+        assert access_key == "VENDED_ACCESS_KEY_123"
+        # mock returns metadata.location = s3://test-bucket/test-ns/test-table
+        assert scope == "s3://test-bucket/test-ns/test-table/"
+        assert has_token == "yes"
+        # the base mock provides no expiry
+        assert expiry == "noexpiry"
+
+    finally:
+        run_command(
+            "DROP FUNCTION IF EXISTS get_rest_vended_credentials(TEXT, TEXT, TEXT)",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+
+def test_vended_credentials_storage_credentials_array(
+    superuser_conn, iceberg_extension, installcheck
+):
+    """
+    Newer catalogs return per-prefix credentials in a "storage-credentials"
+    array; the element's own "prefix" is used as the scope and its "config"
+    map supplies the credentials and expiry.
+    """
+    if installcheck:
+        return
+
+    def _make_handler():
+        class _Handler(BaseHTTPRequestHandler):
+            def _handle(self):
+                length = int(self.headers.get("Content-Length", 0))
+                if length > 0:
+                    self.rfile.read(length)
+                if _oauth_or_none(self):
+                    return
+                if "/tables/" in self.path and self.command == "GET":
+                    _reply(
+                        self,
+                        {
+                            "metadata-location": "s3://sc-bucket/ns/tbl/metadata/v1.metadata.json",
+                            "metadata": {
+                                "format-version": 2,
+                                "table-uuid": str(uuid.uuid4()),
+                                "location": "s3://sc-bucket/ns/tbl",
+                            },
+                            "storage-credentials": [
+                                {
+                                    "prefix": "s3://sc-bucket/ns/tbl/",
+                                    "config": {
+                                        "s3.access-key-id": "SC_ACCESS_KEY",
+                                        "s3.secret-access-key": "SC_SECRET_KEY",
+                                        "s3.session-token": "SC_TOKEN",
+                                        "s3.session-token-expires-at-ms": "9999999999000",
+                                        "client.region": "eu-central-1",
+                                    },
+                                }
+                            ],
+                        },
+                    )
+                    return
+                self.send_response(404)
+                self.end_headers()
+
+            do_GET = _handle
+            do_POST = _handle
+
+            def log_message(self, fmt, *args):
+                pass
+
+        return _Handler
+
+    httpd, thread = _serve(_make_handler())
+    try:
+        summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
+
+        access_key, scope, has_token, expiry = summary.split("|")
+        assert access_key == "SC_ACCESS_KEY"
+        # scope comes from the storage-credential prefix (already ends in /)
+        assert scope == "s3://sc-bucket/ns/tbl/"
+        assert has_token == "yes"
+        assert expiry == "expiry"
+
+    finally:
+        run_command(
+            "DROP FUNCTION IF EXISTS get_rest_vended_credentials(TEXT, TEXT, TEXT)",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+        _stop(httpd, thread)
+
+
+def test_vended_credentials_expiry_from_config(
+    superuser_conn, iceberg_extension, installcheck
+):
+    """
+    A catalog-provided expiry ("s3.session-token-expires-at-ms") in the
+    legacy config map is parsed and reflected in the extracted credentials.
+    """
+    if installcheck:
+        return
+
+    def _make_handler():
+        class _Handler(BaseHTTPRequestHandler):
+            def _handle(self):
+                length = int(self.headers.get("Content-Length", 0))
+                if length > 0:
+                    self.rfile.read(length)
+                if _oauth_or_none(self):
+                    return
+                if "/tables/" in self.path and self.command == "GET":
+                    _reply(
+                        self,
+                        {
+                            "metadata-location": "s3://exp-bucket/ns/tbl/metadata/v1.metadata.json",
+                            "metadata": {
+                                "format-version": 2,
+                                "table-uuid": str(uuid.uuid4()),
+                                "location": "s3://exp-bucket/ns/tbl",
+                            },
+                            "config": {
+                                "s3.access-key-id": "EXP_KEY",
+                                "s3.secret-access-key": "EXP_SECRET",
+                                "s3.session-token": "EXP_TOKEN",
+                                "s3.session-token-expires-at-ms": "9999999999000",
+                            },
+                        },
+                    )
+                    return
+                self.send_response(404)
+                self.end_headers()
+
+            do_GET = _handle
+            do_POST = _handle
+
+            def log_message(self, fmt, *args):
+                pass
+
+        return _Handler
+
+    httpd, thread = _serve(_make_handler())
+    try:
+        summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
+
+        access_key, scope, has_token, expiry = summary.split("|")
+        assert access_key == "EXP_KEY"
+        assert scope == "s3://exp-bucket/ns/tbl/"
+        assert expiry == "expiry"
+
+    finally:
+        run_command(
+            "DROP FUNCTION IF EXISTS get_rest_vended_credentials(TEXT, TEXT, TEXT)",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+        _stop(httpd, thread)

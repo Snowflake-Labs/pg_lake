@@ -25,14 +25,19 @@
  * EnsureVendedSecretInPGDuck creates or replaces a DuckDB scoped secret
  * for vended S3 credentials on the shared pgduck_server instance.
  *
- * The secret name is deterministic (pglake_vended_{serverOid}_{prefixHash})
- * so CREATE OR REPLACE is idempotent and does not leak entries.
+ * The secret name is deterministic (pglake_vended_{serverOid}_{keyHash},
+ * where keyHash derives from secretKey -- a stable per-table identity
+ * such as "catalog/namespace/table").  Keeping the name independent of
+ * the S3 scope makes CREATE OR REPLACE idempotent as credentials rotate
+ * and lets DropVendedSecretFromPGDuck reconstruct the name without the
+ * credentials.
  *
- * The secret's SCOPE is set to the S3 prefix so DuckDB's secret
- * manager automatically selects it for matching URLs.
+ * The secret's SCOPE is set to s3Scope (the table's storage location)
+ * so DuckDB's secret manager automatically selects it for matching URLs.
  */
 extern PGDLLEXPORT void EnsureVendedSecretInPGDuck(Oid serverOid,
-												   const char *s3Prefix,
+												   const char *secretKey,
+												   const char *s3Scope,
 												   const char *accessKeyId,
 												   const char *secretAccessKey,
 												   const char *sessionToken,
@@ -46,7 +51,8 @@ extern PGDLLEXPORT void EnsureVendedSecretInPGDuck(Oid serverOid,
  */
 extern PGDLLEXPORT void EnsureVendedSecretOnConnection(PGDuckConnection * conn,
 													   Oid serverOid,
-													   const char *s3Prefix,
+													   const char *secretKey,
+													   const char *s3Scope,
 													   const char *accessKeyId,
 													   const char *secretAccessKey,
 													   const char *sessionToken,
@@ -57,13 +63,13 @@ extern PGDLLEXPORT void EnsureVendedSecretOnConnection(PGDuckConnection * conn,
  * from DuckDB.  Safe to call even if the secret does not exist.
  */
 extern PGDLLEXPORT void DropVendedSecretFromPGDuck(Oid serverOid,
-												   const char *s3Prefix);
+												   const char *secretKey);
 
 /*
  * GenerateVendedSecretName produces the deterministic secret name
- * for the given server OID and S3 prefix.
+ * for the given server OID and stable per-table secret key.
  */
 extern PGDLLEXPORT char *GenerateVendedSecretName(Oid serverOid,
-												  const char *s3Prefix);
+												  const char *secretKey);
 
 #endif
