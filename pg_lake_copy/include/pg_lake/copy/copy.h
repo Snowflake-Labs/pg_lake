@@ -27,6 +27,7 @@
 /* settings */
 extern bool EnablePgLakeCopy;
 extern bool EnablePgLakeCopyJson;
+extern bool PgLakeCopyIncludeGeneratedColumns;
 
 bool		PgLakeCopyHandler(ProcessUtilityParams * params, void *arg);
 void		ProcessPgLakeCopy(ParseState *pstate, PlannedStmt *plannedStmt,
