@@ -19,6 +19,7 @@
 
 #include "postgres.h"
 #include "foreign/foreign.h"
+#include "utils/timestamp.h"
 #include "pg_lake/ddl/utility_hook.h"
 #include "pg_lake/http/http_client.h"
 #include "pg_lake/util/rel_utils.h"
@@ -35,6 +36,43 @@ extern char *RestCatalogClientSecret;
 extern char *RestCatalogScope;
 extern int	RestCatalogAuthType;
 extern bool RestCatalogEnableVendedCredentials;
+
+
+/*
+ * Temporary storage credentials received from an Iceberg REST catalog
+ * via the X-Iceberg-Access-Delegation: vended-credentials mechanism.
+ *
+ * These credentials are scoped to a specific S3 prefix (typically a
+ * table's data directory) and have a limited lifetime.
+ */
+typedef struct VendedCredentials
+{
+	char	   *accessKeyId;	/* s3.access-key-id */
+	char	   *secretAccessKey;	/* s3.secret-access-key */
+	char	   *sessionToken;	/* s3.session-token (may be NULL for non-STS
+								 * creds) */
+	char	   *region;			/* client.region (may be NULL) */
+	char	   *scope;			/* S3 prefix these creds are scoped to (the
+								 * table's storage location; may be NULL) */
+	Oid			serverOid;		/* the iceberg_catalog server these came from */
+	TimestampTz fetchedAt;		/* when credentials were obtained */
+	TimestampTz expiresAt;		/* catalog-provided expiry, or 0 when the
+								 * response carried no explicit expiry */
+}			VendedCredentials;
+
+
+/*
+ * Result of loading a table from a REST catalog.  Contains both the
+ * metadata location and optional vended credentials from the response's
+ * "config" map.
+ */
+typedef struct RestCatalogLoadTableResult
+{
+	char	   *metadataLocation;
+	VendedCredentials *vendedCredentials;	/* NULL when not vended or not
+											 * requested */
+}			RestCatalogLoadTableResult;
+
 
 /*
  * Resolved REST catalog connection options.  All REST catalogs --
@@ -156,6 +194,10 @@ List	   *LookupUserMappingOptionsByOid(Oid umOid, Oid *serverOidOut);
 char	   *GetRestCatalogAccessToken(RestCatalogOptions * opts, bool forceRefreshToken);
 List	   *GetHeadersWithAuth(RestCatalogOptions * opts);
 char	   *JsonbGetStringByPath(const char *jsonb_text, int nkeys,...);
+char	   *JsonbGetOptionalStringByPath(const char *jsonb_text, int nkeys,...);
+char	   *JsonbGetFirstArrayElementObject(const char *jsonb_text, const char *arrayKey,
+											const char *objectKey, char **elementStringKeyOut,
+											const char *elementStringKey);
 
 extern PGDLLEXPORT void RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName);
 extern PGDLLEXPORT void StartStageRestCatalogIcebergTableCreate(Oid relationId);
@@ -167,7 +209,12 @@ extern PGDLLEXPORT char *GetRestCatalogTableName(Oid relationId);
 extern PGDLLEXPORT bool IsReadOnlyRestCatalogIcebergTable(Oid relationId);
 extern PGDLLEXPORT char *GetMetadataLocationFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogName, const char *namespaceName,
 															const char *relationName);
+extern PGDLLEXPORT RestCatalogLoadTableResult LoadTableFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogName,
+																	   const char *namespaceName, const char *relationName);
 extern PGDLLEXPORT char *GetMetadataLocationForRestCatalogForIcebergTable(Oid relationId);
+extern PGDLLEXPORT VendedCredentials * GetVendedCredentialsForRelation(Oid relationId);
+extern PGDLLEXPORT VendedCredentials * GetVendedCredentialsForRelationLoadOnMiss(Oid relationId);
+extern PGDLLEXPORT void InvalidateVendedCredentialsCache(void);
 extern PGDLLEXPORT void ReportHTTPError(HttpResult httpResult, int level);
 extern PGDLLEXPORT List *PostHeadersWithAuth(RestCatalogOptions * opts);
 extern PGDLLEXPORT List *DeleteHeadersWithAuth(RestCatalogOptions * opts);
