@@ -530,6 +530,7 @@ RecordIcebergMetadataOperation(Oid relationId, TableMetadataOperationType operat
 			break;
 		case DATA_FILE_REMOVE_ALL:
 			opTracker->relationDataFileChanged = true;
+			opTracker->relationDataFilesRemoveAllSeen = true;
 			opTracker->forceCommitTimeAnalyze = true;
 			break;
 		case DATA_FILE_MERGE_MANIFESTS:
@@ -1313,6 +1314,32 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 	HTAB	   *currentFilesMap = GetTableDataFilesByPathHashFromCatalog(opTracker->relationId, dataOnly, newFilesOnly,
 																		 forUpdate, orderBy, snapshot, allTransforms,
 																		 true /* skipColumnStats */ );
+
+	/*
+	 * Preserve the remove-all operation for a real TRUNCATE. The generic
+	 * transaction tracker normally records only that data files changed and
+	 * reconstructs individual operations by diffing the catalog against the
+	 * last Iceberg snapshot. Turning a TRUNCATE into one DATA_FILE_REMOVE per
+	 * existing file loses the linear remove-all path in the manifest writer
+	 * and makes it compare every manifest entry with every removed file.
+	 *
+	 * The tracker flags intentionally survive subtransaction rollback, so
+	 * hash_get_num_entries(currentFilesMap) == 0 checks whether the
+	 * transaction-visible file catalog is empty. This restricts the shortcut
+	 * to a TRUNCATE that leaves no files: TRUNCATE followed by INSERT has a
+	 * non-empty map and must use the normal diff below to preserve the newly
+	 * inserted files. A rolled-back TRUNCATE likewise has restored files in
+	 * the map and must use the normal diff.
+	 */
+	if (opTracker->relationDataFilesRemoveAllSeen &&
+		hash_get_num_entries(currentFilesMap) == 0)
+	{
+		TableMetadataOperation *removeAllOp = palloc0(sizeof(TableMetadataOperation));
+
+		removeAllOp->type = DATA_FILE_REMOVE_ALL;
+
+		return list_make1(removeAllOp);
+	}
 
 	/* get last pushed metadata */
 	IcebergTableMetadata *lastMetadata = GetLastPushedIcebergMetadata(opTracker);
