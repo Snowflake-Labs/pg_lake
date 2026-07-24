@@ -857,6 +857,9 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 				strncpy(columnStatsTruncateLenStr, truncateLenStrStart + 1, truncateLenStrEnd - truncateLenStrStart - 1);
 
 				char	   *parseEnd = NULL;
+
+				errno = 0;
+
 				int64_t		columnStatsTruncateLen = strtoi64(columnStatsTruncateLenStr, &parseEnd, 10);
 
 				if (errno == EINVAL || *parseEnd != '\0')
