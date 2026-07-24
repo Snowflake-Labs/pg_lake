@@ -1,14 +1,55 @@
 # Code owners for pg_lake
 #
-# Order matters: the last matching pattern for a changed file wins.
+# Order matters: the last matching pattern for a changed file wins, so the
+# broad default sits at the top and the per-area rules below override it.
 # Listed owners are automatically requested for review on any PR that
 # touches a matching path. See:
 # https://docs.github.com/articles/about-code-owners
 #
-# The pg_lake extensions and pgduck_server are maintained by one team
-# that works across all components, so a single default owner covers the
-# whole tree. Add more specific patterns below only if a subtree grows a
-# distinct set of maintainers.
+# We keep two owners per area instead of the whole team on every PR: enough
+# for one to be available without pinging everyone on every change. Owners
+# are the people with the most history in each area (see `git log <path>`),
+# balanced so the review load is spread across the team.
+#
+# Handles: @sfc-gh-mslot Marco, @sfc-gh-okalaci Onder, @sfc-gh-abozkurt Aykut,
+# @sfc-gh-npuka Naisila, @sfc-gh-dachristensen David, @sfc-gh-amzheng Amy.
 
-# Default owners for everything in the repo.
-*       @sfc-gh-mslot @sfc-gh-okalaci @sfc-gh-abozkurt @sfc-gh-npuka @sfc-gh-dachristensen @sfc-gh-amzheng
+# Default for anything not matched below (root build/config, LICENSE, etc.).
+*                       @sfc-gh-mslot @sfc-gh-okalaci
+
+# CI, linting, and the code-owners map itself.
+/.github/               @sfc-gh-dachristensen @sfc-gh-abozkurt
+
+# Query & execution engine (C internals, DuckDB bridge, pushdown, types).
+/pg_lake_engine/        @sfc-gh-abozkurt @sfc-gh-amzheng
+/duckdb_pglake/         @sfc-gh-mslot @sfc-gh-abozkurt
+/pgduck_server/         @sfc-gh-mslot @sfc-gh-abozkurt
+
+# Iceberg & Postgres table format.
+/pg_lake_iceberg/       @sfc-gh-mslot @sfc-gh-npuka
+/pg_lake_table/         @sfc-gh-mslot @sfc-gh-okalaci
+
+# Data ingestion: COPY and file formats.
+/pg_lake_copy/          @sfc-gh-abozkurt @sfc-gh-amzheng
+/avro/                  @sfc-gh-dachristensen @sfc-gh-amzheng
+
+# Extension framework, updater, meta-extension, and mapping.
+/pg_extension_base/     @sfc-gh-dachristensen @sfc-gh-mslot
+/pg_extension_updater/  @sfc-gh-okalaci @sfc-gh-npuka
+/pg_lake/               @sfc-gh-okalaci @sfc-gh-dachristensen
+/pg_map/                @sfc-gh-okalaci @sfc-gh-npuka
+
+# Spatial.
+/pg_lake_spatial/       @sfc-gh-abozkurt @sfc-gh-okalaci
+
+# Benchmarks.
+/pg_lake_benchmark/     @sfc-gh-mslot @sfc-gh-okalaci
+
+# Testing, tooling, and container images.
+/test_common/           @sfc-gh-dachristensen @sfc-gh-abozkurt
+/tools/                 @sfc-gh-dachristensen @sfc-gh-okalaci
+/docker/                @sfc-gh-abozkurt @sfc-gh-npuka
+
+# Docs and engineering notes.
+/docs/                  @sfc-gh-mslot @sfc-gh-npuka
+/engineering-notes/     @sfc-gh-okalaci @sfc-gh-npuka
