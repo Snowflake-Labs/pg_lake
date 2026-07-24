@@ -5,3 +5,21 @@
 -- delete, moving the object-store walk off the DROP path.
 ALTER TABLE lake_engine.deletion_queue
     ADD COLUMN resolve_metadata bool NOT NULL DEFAULT false;
+
+-- Postgres-semantics wrappers for uuid_extract_timestamp / uuid_extract_version
+-- pushdown; queries are rewritten to these and evaluated by the duckdb_pglake
+-- implementations, so the local definitions are dummies.  The second argument
+-- of uuid_extract_timestamp_pg carries PG_VERSION_NUM: version 7 UUIDs only
+-- yield a timestamp on Postgres 18+, so the duckdb_pglake implementation
+-- needs the planning server's version to match Postgres semantics.
+CREATE FUNCTION __lake__internal__nsp__.uuid_extract_timestamp_pg(uuid, integer)
+ RETURNS timestamp with time zone
+ LANGUAGE C
+ IMMUTABLE PARALLEL SAFE STRICT
+AS 'MODULE_PATHNAME', $function$pg_lake_internal_dummy_function$function$;
+
+CREATE FUNCTION __lake__internal__nsp__.uuid_extract_version_pg(uuid)
+ RETURNS smallint
+ LANGUAGE C
+ IMMUTABLE PARALLEL SAFE STRICT
+AS 'MODULE_PATHNAME', $function$pg_lake_internal_dummy_function$function$;
