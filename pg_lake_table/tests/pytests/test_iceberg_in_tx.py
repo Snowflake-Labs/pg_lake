@@ -817,6 +817,64 @@ def test_in_tx_with_truncate(
     pg_conn.commit()
 
 
+def test_truncate_remove_all_transaction_guards(
+    pg_conn,
+    extension,
+    with_default_location,
+):
+    table_namespace = "test_truncate_remove_all_transaction_guards"
+    table_name = "tbl"
+    table = f"{table_namespace}.{table_name}"
+
+    run_command(
+        f"""
+        CREATE SCHEMA {table_namespace};
+        CREATE TABLE {table} (a int) USING iceberg
+            WITH (autovacuum_enabled='False');
+        INSERT INTO {table} VALUES (1), (2);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # The remove-all tracker flag survives subtransaction rollback. The
+    # catalog is not empty after rollback, so commit must use the normal diff
+    # and retain the original files.
+    run_command(
+        f"""
+        SAVEPOINT before_truncate;
+        TRUNCATE {table};
+        ROLLBACK TO SAVEPOINT before_truncate;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    assert run_query(f"SELECT a FROM {table} ORDER BY a", pg_conn) == [[1], [2]]
+
+    # A truncate followed by an insert also leaves a non-empty catalog. It
+    # must fall back to the per-file diff so the newly added file survives.
+    run_command(
+        f"""
+        TRUNCATE {table};
+        INSERT INTO {table} VALUES (3);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    assert run_query(f"SELECT a FROM {table} ORDER BY a", pg_conn) == [[3]]
+
+    # A final empty catalog is the real remove-all case.
+    run_command(f"TRUNCATE {table}", pg_conn)
+    pg_conn.commit()
+
+    assert run_query(f"SELECT a FROM {table}", pg_conn) == []
+
+    run_command(f"DROP SCHEMA {table_namespace} CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 def test_in_subtx_fail_with_truncate(
     installcheck,
     s3,
