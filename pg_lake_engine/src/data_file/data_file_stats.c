@@ -87,13 +87,19 @@ ExecuteCopyToCommandOnPGDuckConnection(char *copyCommand,
 									   CopyDataFormat destinationFormat)
 {
 	PGDuckConnection *pgDuckConn = GetPGDuckConnection();
-	PGresult   *result;
+	PGresult   *volatile result = NULL;
 	StatsCollector *statsCollector = NULL;
 
 	PG_TRY();
 	{
 		result = ExecuteQueryOnPGDuckConnection(pgDuckConn, copyCommand);
-		CheckPGDuckResult(pgDuckConn, result);
+
+		/*
+		 * Use the non-clearing check: the PG_FINALLY below owns the result
+		 * and CheckPGDuckResult would already PQclear it before throwing,
+		 * leading to a double free.
+		 */
+		ThrowIfPGDuckResultHasError(pgDuckConn, result);
 
 		if (destinationFormat == DATA_FORMAT_PARQUET ||
 			destinationFormat == DATA_FORMAT_ICEBERG)
@@ -133,11 +139,11 @@ ExecuteCopyToCommandOnPGDuckConnection(char *copyCommand,
 				statsCollector->dataFileStats = list_make1(fileStats);
 			}
 		}
-
-		PQclear(result);
 	}
 	PG_FINALLY();
 	{
+		/* PQclear is a no-op on NULL, so this is safe on early errors */
+		PQclear(result);
 		ReleasePGDuckConnection(pgDuckConn);
 	}
 	PG_END_TRY();
