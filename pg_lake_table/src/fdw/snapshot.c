@@ -229,6 +229,12 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 		 * it is an ordered sublist and a tandem cursor suffices to mark the
 		 * fully matched files, instead of an O(files * matches)
 		 * list_member_ptr scan.
+		 *
+		 * The cursor only ever dereferences cells of fullMatches, so it
+		 * cannot mark a file that PruneDataFiles did not return. If that
+		 * ordering assumption were ever broken the cursor would desync and
+		 * leave files unmarked, which costs us the optimization but never
+		 * skips a file that still has rows to keep.
 		 */
 		ListCell   *fullMatchCell = list_head(fullMatches);
 
@@ -248,6 +254,9 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 
 			fileScans = lappend(fileScans, fileScan);
 		}
+
+		/* every full match is in prunedDataFiles, so all cells were consumed */
+		Assert(fullMatchCell == NULL);
 
 		foreach_ptr(TableDataFile, deletionFile, positionDeleteFiles)
 		{

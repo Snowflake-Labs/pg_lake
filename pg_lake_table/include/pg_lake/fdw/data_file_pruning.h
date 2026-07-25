@@ -26,6 +26,11 @@
  * PruneDataFiles can prune in two ways:
  * - find files that might match the filters
  * - find files that are fully implied by the filters
+ *
+ * The returned list preserves the relative order and the element identity of
+ * dataFiles. Callers rely on this to merge the result against the input in a
+ * single pass, so a new return path must keep filtering dataFiles in order
+ * rather than rebuilding or reordering it.
  */
 typedef enum PruneType
 {
