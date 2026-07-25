@@ -67,6 +67,7 @@ static DuckDBTypeInfo ChooseCompatibleDuckDBType(Oid postgresTypeId, int postgre
 												 bool preferVarchar);
 static DuckDBTypeInfo GuessStorageType(DuckDBTypeInfo engineType,
 									   CopyDataFormat sourceFormat);
+static char *GetEmptyIcebergInputTypeName(Oid typeOid, int32 typmod);
 static char *BuildColumnProjection(char *expression,
 								   DuckDBTypeInfo engineType,
 								   CopyDataFormat sourceFormat,
@@ -697,6 +698,109 @@ GetSchemaType(Field * field)
 }
 
 
+/*
+ * GetEmptyIcebergInputTypeName returns the DuckDB type that an empty Iceberg
+ * input must expose to the target-derived read projection.
+ *
+ * Start with the same compatible-type and storage-type inference used by the
+ * existing empty-source path. This preserves its DuckDB capability clamps and
+ * fallbacks, as well as unrelated storage rewrites such as geometry -> BLOB.
+ * Only recurse into a type subtree when the Iceberg read conversion needs its
+ * structure in order to reach an INTERVAL or TIMETZ leaf.
+ *
+ * The type must be derived from the target descriptor, not the source schema:
+ * external Iceberg COPY aliases source columns to target names positionally,
+ * so the source field names and shapes need not describe the projection.
+ */
+static char *
+GetEmptyIcebergInputTypeName(Oid typeOid, int32 typmod)
+{
+	DuckDBTypeInfo duckdbType = ChooseCompatibleDuckDBType(typeOid, typmod,
+														   DATA_FORMAT_ICEBERG,
+														   false);
+	DuckDBTypeInfo storageType = GuessStorageType(duckdbType,
+												  DATA_FORMAT_ICEBERG);
+
+	if (!TypeNeedsIcebergReadConversion(typeOid))
+		return storageType.typeName;
+
+	if (typeOid == INTERVALOID || typeOid == TIMETZOID)
+		return storageType.typeName;
+
+	Oid			elementType = get_element_type(typeOid);
+
+	if (OidIsValid(elementType))
+		return psprintf("%s[]",
+						GetEmptyIcebergInputTypeName(elementType, typmod));
+
+	/*
+	 * Maps are domains over arrays, so recognize them before the generic
+	 * domain branch to preserve their DuckDB MAP shape.
+	 */
+	if (IsMapTypeOid(typeOid))
+	{
+		PGType		keyType = GetMapKeyType(typeOid);
+		PGType		valueType = GetMapValueType(typeOid);
+
+		return psprintf("MAP(%s,%s)",
+						GetEmptyIcebergInputTypeName(keyType.postgresTypeOid,
+													 keyType.postgresTypeMod),
+						GetEmptyIcebergInputTypeName(valueType.postgresTypeOid,
+													 valueType.postgresTypeMod));
+	}
+
+	char		typeKind = get_typtype(typeOid);
+
+	if (typeKind == TYPTYPE_DOMAIN)
+	{
+		Oid			baseType = getBaseTypeAndTypmod(typeOid, &typmod);
+
+		return GetEmptyIcebergInputTypeName(baseType, typmod);
+	}
+
+	if (typeKind == TYPTYPE_COMPOSITE)
+	{
+		TupleDesc	tupleDesc = lookup_rowtype_tupdesc(typeOid, -1);
+		StringInfoData typeName;
+		bool		firstField = true;
+
+		initStringInfo(&typeName);
+		appendStringInfoString(&typeName, "STRUCT(");
+
+		for (int attributeIndex = 0;
+			 attributeIndex < tupleDesc->natts;
+			 attributeIndex++)
+		{
+			Form_pg_attribute attribute =
+				TupleDescAttr(tupleDesc, attributeIndex);
+
+			if (attribute->attisdropped)
+				continue;
+
+			if (!firstField)
+				appendStringInfoString(&typeName, ", ");
+
+			appendStringInfo(&typeName, "%s %s",
+							 duckdb_quote_identifier(NameStr(attribute->attname)),
+							 GetEmptyIcebergInputTypeName(attribute->atttypid,
+														  attribute->atttypmod));
+			firstField = false;
+		}
+
+		appendStringInfoChar(&typeName, ')');
+		ReleaseTupleDesc(tupleDesc);
+		return typeName.data;
+	}
+
+	/*
+	 * TypeNeedsIcebergReadConversion and this renderer walk the same type
+	 * families, so a conversion-requiring type must have returned above.
+	 */
+	Assert(false);
+	return storageType.typeName;
+}
+
+
 
 /*
  * ReadEmptyDataSource generates a query that returns 0 results, but with
@@ -726,15 +830,32 @@ ReadEmptyDataSource(TupleDesc tupleDesc, CopyDataFormat sourceFormat, bool prefe
 		Oid			columnTypeId = column->atttypid;
 		int			columnTypeMod = column->atttypmod;
 
-		DuckDBTypeInfo duckdbTypeInfo = ChooseCompatibleDuckDBType(columnTypeId,
-																   columnTypeMod,
-																   sourceFormat,
-																   preferVarchar);
-		DuckDBTypeInfo storageType = GuessStorageType(duckdbTypeInfo, sourceFormat);
+		char	   *inputTypeName;
+
+		if (sourceFormat == DATA_FORMAT_ICEBERG)
+		{
+			/*
+			 * Iceberg's read projection always performs native leaf
+			 * conversions, so its empty input must expose the structure those
+			 * conversions expect even when the caller prefers VARCHAR.
+			 */
+			inputTypeName =
+				GetEmptyIcebergInputTypeName(columnTypeId, columnTypeMod);
+		}
+		else
+		{
+			DuckDBTypeInfo duckdbTypeInfo =
+				ChooseCompatibleDuckDBType(columnTypeId, columnTypeMod,
+										   sourceFormat, preferVarchar);
+			DuckDBTypeInfo storageType =
+				GuessStorageType(duckdbTypeInfo, sourceFormat);
+
+			inputTypeName = storageType.typeName;
+		}
 
 		appendStringInfo(&query, "%s NULL::%s AS %s",
 						 addComma ? "," : "",
-						 storageType.typeName,
+						 inputTypeName,
 						 duckdb_quote_identifier(columnName));
 
 		addComma = true;
