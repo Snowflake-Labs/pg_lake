@@ -1136,6 +1136,179 @@ def test_timetz_nested_read_is_session_timezone_independent(
         pg_conn.commit()
 
 
+def test_empty_iceberg_domain_over_composite_with_timetz(
+    pg_conn, s3, with_default_location
+):
+    """
+    Empty Iceberg inputs must retain the structure that the recursive TIMETZ
+    read conversion expects, even when the PostgreSQL column is a domain.
+    """
+    try:
+        run_command(
+            """
+            CREATE SCHEMA test_empty_timetz_domain;
+            SET search_path TO test_empty_timetz_domain;
+
+            CREATE TYPE event_slot AS (
+                label       text,
+                at_time     timetz
+            );
+            CREATE DOMAIN event_slot_domain AS event_slot;
+
+            CREATE TABLE test (
+                id          int,
+                slot        event_slot_domain
+            ) USING iceberg;
+            """,
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        assert (
+            run_query(
+                "SELECT id, (slot).label, (slot).at_time FROM test",
+                pg_conn,
+            )
+            == []
+        )
+    finally:
+        pg_conn.rollback()
+        run_command("RESET search_path;", pg_conn)
+        run_command("DROP SCHEMA IF EXISTS test_empty_timetz_domain CASCADE", pg_conn)
+        pg_conn.commit()
+
+
+def test_empty_iceberg_composite_with_timetz_matches_nonempty_shape(
+    pg_conn, s3, with_default_location
+):
+    """
+    The synthesized empty input and a physical Iceberg input must satisfy the
+    same target-derived recursive projection.
+    """
+    utc = timezone.utc
+
+    try:
+        run_command(
+            """
+            CREATE SCHEMA test_empty_timetz_composite;
+            SET search_path TO test_empty_timetz_composite;
+
+            CREATE TYPE event_slot AS (
+                label       text,
+                "At Time"   timetz
+            );
+
+            CREATE TABLE test (
+                id          int,
+                slot        event_slot
+            ) USING iceberg;
+            """,
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        assert (
+            run_query(
+                'SELECT id, (slot).label, (slot)."At Time" FROM test',
+                pg_conn,
+            )
+            == []
+        )
+
+        run_command(
+            """
+            INSERT INTO test VALUES
+                (1, ROW('open', '09:00:00+04'::timetz)::event_slot);
+            """,
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        assert run_query(
+            'SELECT id, (slot).label, (slot)."At Time" FROM test',
+            pg_conn,
+        ) == [[1, "open", time(5, 0, tzinfo=utc)]]
+    finally:
+        pg_conn.rollback()
+        run_command("RESET search_path;", pg_conn)
+        run_command(
+            "DROP SCHEMA IF EXISTS test_empty_timetz_composite CASCADE", pg_conn
+        )
+        pg_conn.commit()
+
+
+@pytest.mark.parametrize(
+    "case_name, source_column, source_type",
+    [
+        ("renamed", "source_slot", "event_slot_domain"),
+        ("type_mismatch", "target_slot", "integer"),
+    ],
+)
+def test_empty_external_iceberg_copy_uses_target_projection_shape(
+    pg_conn,
+    s3,
+    with_default_location,
+    case_name,
+    source_column,
+    source_type,
+):
+    """
+    Empty external Iceberg COPY aliases source columns to target names
+    positionally. Its synthesized input must therefore follow the target
+    descriptor even when the source field name or type disagrees.
+    """
+    schema_name = f"test_empty_timetz_copy_{case_name}"
+    source_table = f"source_{case_name}"
+    target_table = f"target_{case_name}"
+
+    try:
+        run_command(
+            f"""
+            CREATE SCHEMA {schema_name};
+            SET search_path TO {schema_name};
+
+            CREATE TYPE event_slot AS (
+                label       text,
+                at_time     timetz
+            );
+            CREATE DOMAIN event_slot_domain AS event_slot;
+
+            CREATE TABLE {source_table} (
+                {source_column} {source_type}
+            ) USING iceberg;
+
+            CREATE TABLE {target_table} (
+                target_slot event_slot_domain
+            );
+            """,
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        metadata_location = run_query(
+            "SELECT metadata_location FROM lake_iceberg.tables "
+            f"WHERE table_namespace = '{schema_name}' "
+            f"AND table_name = '{source_table}'",
+            pg_conn,
+        )[0][0]
+
+        run_command(
+            f"""
+            COPY {target_table} (target_slot)
+            FROM '{metadata_location}'
+            WITH (FORMAT 'iceberg');
+            """,
+            pg_conn,
+        )
+
+        assert run_query(f"SELECT count(*) FROM {target_table}", pg_conn) == [[0]]
+    finally:
+        pg_conn.rollback()
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema_name} CASCADE", pg_conn)
+        pg_conn.commit()
+
+
 def test_nested_timetz_writes_and_updates_are_session_timezone_independent(
     pg_conn, pgduck_conn, s3, with_default_location
 ):
