@@ -2,6 +2,29 @@ import pytest
 from utils_pytest import *
 
 
+def test_data_file_cascade_indexes(extension, superuser_conn):
+    result = run_query(
+        """
+        SELECT indexname
+        FROM pg_indexes
+        WHERE schemaname = 'lake_table'
+          AND indexname IN (
+              'deletion_file_map_table_name_path_idx',
+              'data_file_column_stats_table_path_idx',
+              'data_file_partition_values_id_idx'
+          )
+        ORDER BY indexname
+        """,
+        superuser_conn,
+    )
+
+    assert result == [
+        ["data_file_column_stats_table_path_idx"],
+        ["data_file_partition_values_id_idx"],
+        ["deletion_file_map_table_name_path_idx"],
+    ]
+
+
 def test_create_drop_query_engine(superuser_conn, s3, app_user):
     other_conn = open_pg_conn()
 

@@ -8,6 +8,33 @@ from utils_pytest import *
     os.getenv("TEST_PG_UPGRADE_FROM_BINDIR") == None,
     reason="set TEST_PG_UPGRADE_FROM_BINDIR to the old PG version to run",
 )
+def test_data_file_cascade_indexes(superuser_conn, extension):
+    result = run_query(
+        """
+        SELECT indexname
+        FROM pg_indexes
+        WHERE schemaname = 'lake_table'
+          AND indexname IN (
+              'deletion_file_map_table_name_path_idx',
+              'data_file_column_stats_table_path_idx',
+              'data_file_partition_values_id_idx'
+          )
+        ORDER BY indexname
+        """,
+        superuser_conn,
+    )
+
+    assert result == [
+        ["data_file_column_stats_table_path_idx"],
+        ["data_file_partition_values_id_idx"],
+        ["deletion_file_map_table_name_path_idx"],
+    ]
+
+
+@pytest.mark.skipif(
+    os.getenv("TEST_PG_UPGRADE_FROM_BINDIR") == None,
+    reason="set TEST_PG_UPGRADE_FROM_BINDIR to the old PG version to run",
+)
 def test_iceberg_query(superuser_conn, s3, extension):
     # Check whether we can update post-upgrade
     run_command("UPDATE pre_upgrade.iceberg SET id = id + 1", superuser_conn)
