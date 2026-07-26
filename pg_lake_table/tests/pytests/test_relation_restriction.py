@@ -15,15 +15,31 @@ def test_debug_print_plan_with_lake_table(
         """
         CREATE SCHEMA test_debug_print_plan;
         CREATE TABLE test_debug_print_plan.test(i int) USING iceberg;
-        SET LOCAL client_min_messages TO DEBUG5;
         SET LOCAL debug_print_plan TO ON;
         """,
         pg_conn,
     )
 
-    assert run_query("SELECT count(*) FROM test_debug_print_plan.test", pg_conn) == [
-        [0]
+    queries = [
+        "SELECT count(*) FROM test_debug_print_plan.test",
+        "SELECT count(*) FROM test_debug_print_plan.test WHERE i = 1",
     ]
+
+    expected_plan_nodes = {
+        "on": "Custom Scan (Query Pushdown)",
+        "off": "Foreign Scan",
+    }
+
+    for full_pushdown, expected_plan_node in expected_plan_nodes.items():
+        run_command(
+            f"SET LOCAL pg_lake_table.enable_full_query_pushdown TO {full_pushdown}",
+            pg_conn,
+        )
+
+        for query in queries:
+            explain = run_query(f"EXPLAIN {query}", pg_conn)
+            assert expected_plan_node in str(explain)
+            assert run_query(query, pg_conn) == [[0]]
 
     pg_conn.rollback()
 
