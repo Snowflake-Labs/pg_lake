@@ -29,12 +29,12 @@
 
 /* forward declarations */
 static void ReadUnsupportedPgLakeNode(READFUNC_ARGS);
-static void OutPlannerRelationRestriction(OUTFUNC_ARGS);
 static bool EqualUnsupportedPgLakeNode(const struct ExtensibleNode *a,
 									   const struct ExtensibleNode *b);
 
-/* supported copy functions */
+/* supported node functions */
 static void CopyNodePlannerRelationRestriction(COPYFUNC_ARGS);
+static void OutPlannerRelationRestriction(OUTFUNC_ARGS);
 
 
 #define DEFINE_NODE_METHODS(type) \
@@ -85,8 +85,7 @@ const char **PgLakeNodeTagNames = PgLakeNodeTagNamesArray;
 
 
 /*
-* We currently do not support reading or writing of custom nodes.
-* Could be useful for debugging purposes.
+* We currently do not support reading custom nodes.
 */
 static void
 ReadUnsupportedPgLakeNode(READFUNC_ARGS)
@@ -95,17 +94,15 @@ ReadUnsupportedPgLakeNode(READFUNC_ARGS)
 }
 
 /*
- * PlannerRelationRestriction is transient planner bookkeeping and is never
- * reconstructed from its text representation. PostgreSQL still calls nodeOut
- * when debug_print_plan is enabled, though, so the mandatory callback must not
- * fail. Core already emits the node type and extensible-node name; no private
- * fields need to be serialized.
+ * PlannerRelationRestriction is transient planner bookkeeping. pg_lake does
+ * not support reconstructing it from text, but PostgreSQL still calls nodeOut
+ * when debug_print_plan is enabled. Core already emits the node type and
+ * extensible-node name, so an empty callback is sufficient for diagnostic
+ * output without defining a serialization format for the private fields.
  */
 static void
 OutPlannerRelationRestriction(OUTFUNC_ARGS)
 {
-	(void) str;
-	(void) raw_node;
 }
 
 
