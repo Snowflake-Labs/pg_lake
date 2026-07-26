@@ -8,6 +8,26 @@ import pytest
 from utils_pytest import *
 
 
+def test_debug_print_plan_with_lake_table(
+    pg_conn, s3, extension, with_default_location
+):
+    run_command(
+        """
+        CREATE SCHEMA test_debug_print_plan;
+        CREATE TABLE test_debug_print_plan.test(i int) USING iceberg;
+        SET LOCAL client_min_messages TO DEBUG5;
+        SET LOCAL debug_print_plan TO ON;
+        """,
+        pg_conn,
+    )
+
+    assert run_query("SELECT count(*) FROM test_debug_print_plan.test", pg_conn) == [
+        [0]
+    ]
+
+    pg_conn.rollback()
+
+
 def test_restrictions_on_table(pg_conn, s3, extension, with_default_location):
 
     run_command("CREATE SCHEMA test_restrictions;", pg_conn)

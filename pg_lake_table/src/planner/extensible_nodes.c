@@ -29,7 +29,7 @@
 
 /* forward declarations */
 static void ReadUnsupportedPgLakeNode(READFUNC_ARGS);
-static void OutUnsupportedPgLakeNode(OUTFUNC_ARGS);
+static void OutPlannerRelationRestriction(OUTFUNC_ARGS);
 static bool EqualUnsupportedPgLakeNode(const struct ExtensibleNode *a,
 									   const struct ExtensibleNode *b);
 
@@ -43,7 +43,7 @@ static void CopyNodePlannerRelationRestriction(COPYFUNC_ARGS);
 		sizeof(type), \
 		CopyNode##type, \
 		EqualUnsupportedPgLakeNode, \
-		OutUnsupportedPgLakeNode, \
+		Out##type, \
 		ReadUnsupportedPgLakeNode \
 	}
 
@@ -95,13 +95,17 @@ ReadUnsupportedPgLakeNode(READFUNC_ARGS)
 }
 
 /*
-* We currently do not support reading or writing of custom nodes.
-* Could be useful for debugging purposes.
-*/
+ * PlannerRelationRestriction is transient planner bookkeeping and is never
+ * reconstructed from its text representation. PostgreSQL still calls nodeOut
+ * when debug_print_plan is enabled, though, so the mandatory callback must not
+ * fail. Core already emits the node type and extensible-node name; no private
+ * fields need to be serialized.
+ */
 static void
-OutUnsupportedPgLakeNode(OUTFUNC_ARGS)
+OutPlannerRelationRestriction(OUTFUNC_ARGS)
 {
-	ereport(ERROR, (errmsg("out not implemented")));
+	(void) str;
+	(void) raw_node;
 }
 
 
