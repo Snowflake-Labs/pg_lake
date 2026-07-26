@@ -1160,16 +1160,25 @@ AppendIntervalStructPack(StringInfo buf, const char *expr)
  * Iceberg-storable TIME for a TIMETZ leaf.  See AppendRewriteExpression
  * (ICEBERG_REWRITE_NATIVE_ENCODE) for the why.
  *
- * The read projection converts every TIMETZ leaf from its Iceberg TIME
- * representation back to DuckDB TIMETZ, including leaves inside nested
- * containers. Native write sources such as postgres_scan also expose TIMETZ,
- * so the expression is always well-typed for AT TIME ZONE here.
+ * The inner "CAST(... AS TIMETZ)" is deliberately retained because the
+ * leaf expression can arrive at this helper in either of two shapes:
+ *
+ *   - Top-level TIMETZ columns from read_iceberg / postgres_scan are
+ *     already TIME WITH TIME ZONE; the inner cast is a no-op.
+ *   - TIMETZ fields living *inside* an Iceberg composite arrive as plain
+ *     TIME (Parquet has no time-with-tz type and DuckDB does not recast
+ *     struct fields back to TIMETZ on read), and DuckDB has no
+ *     timezone(VARCHAR, TIME) overload, so a bare "AT TIME ZONE 'UTC'"
+ *     would produce a binder error.  Casting to TIMETZ first lifts the
+ *     value to +00 (semantically a no-op under the pg_lake invariant
+ *     that those digits are already UTC) and keeps the outer expression
+ *     well-typed.
  */
 static void
 AppendTimeTzUtcCast(StringInfo buf, const char *expr)
 {
 	appendStringInfo(buf,
-					 "CAST((%s) AT TIME ZONE 'UTC' AS TIME)",
+					 "CAST(CAST((%s) AS TIMETZ) AT TIME ZONE 'UTC' AS TIME)",
 					 expr);
 }
 
