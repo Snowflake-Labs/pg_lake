@@ -43,6 +43,8 @@ extern PGDLLEXPORT List *ExecuteCommandsInPGDuck(List *commands);
 extern PGDLLEXPORT bool ExecuteOptionalCommandInPGDuck(char *command);
 extern PGDLLEXPORT PGresult *ExecuteQueryOnPGDuckConnection(PGDuckConnection * pgDuckConnection,
 															const char *query);
+extern PGDLLEXPORT PGresult *ExecuteNonIdempotentQueryOnPGDuckConnection(PGDuckConnection * pgDuckConnection,
+																		 const char *query);
 extern PGDLLEXPORT PGresult *WaitForResult(PGDuckConnection * conn);
 extern PGDLLEXPORT PGresult *WaitForLastResult(PGDuckConnection * conn);
 extern PGDLLEXPORT void SendQueryToPGDuck(PGDuckConnection * conn, char *query);

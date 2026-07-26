@@ -92,7 +92,15 @@ ExecuteCopyToCommandOnPGDuckConnection(char *copyCommand,
 
 	PG_TRY();
 	{
-		result = ExecuteQueryOnPGDuckConnection(pgDuckConn, copyCommand);
+		/*
+		 * A COPY ... TO writes a data file to object storage, so it must
+		 * never be sent to the query engine more than once: a re-send could
+		 * write the same object key twice and, because the parquet writer is
+		 * non-deterministic, silently overwrite a committed data file with
+		 * different bytes. Use the non-idempotent variant, which does not
+		 * retry on send failure.
+		 */
+		result = ExecuteNonIdempotentQueryOnPGDuckConnection(pgDuckConn, copyCommand);
 
 		/*
 		 * Use the non-clearing check: the PG_FINALLY below owns the result
