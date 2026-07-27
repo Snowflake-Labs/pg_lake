@@ -347,85 +347,29 @@ ExecuteOptionalCommandInPGDuck(char *command)
 
 
 /*
- * ExecuteQueryOnPGDuckConnectionInternal executes a query in PGDuck. On a
- * PQsendQuery failure, retryOnSendFailure controls whether we reconnect
- * and send it again.
+ * ExecuteQueryOnPGDuckConnection executes the given query in PGDuck on the
+ * given connection.
  *
- * That retry is safe only for idempotent queries: PQsendQuery can fail
- * *after* the query already reached the server, so re-sending a write
- * (e.g. a COPY ... TO that creates a data file) can execute it twice and
- * overwrite the object with different bytes. Callers issuing writes must
- * pass retryOnSendFailure = false.
+ * On a send failure we error instead of reconnecting and re-sending:
+ * PQsendQuery can report failure after the query already reached the server,
+ * so re-sending a write (e.g. a COPY ... TO that creates a data file) could
+ * execute it twice. Every caller gets a fresh connection right before this,
+ * so there is nothing to rescue by resending; the transaction just aborts and
+ * retries.
  */
-static PGresult *
-ExecuteQueryOnPGDuckConnectionInternal(PGDuckConnection * pgDuckConnection,
-									   const char *query,
-									   bool retryOnSendFailure)
+PGresult *
+ExecuteQueryOnPGDuckConnection(PGDuckConnection * pgDuckConnection,
+							   const char *query)
 {
 	PGconn	   *conn = pgDuckConnection->conn;
 #ifdef USE_ASSERT_CHECKING
 	elog(DEBUG2, "PGDuck: %s", query);
 #endif
 
-	int			sentQuery = PQsendQuery(conn, query);
+	if (PQsendQuery(conn, query) == 0)
+		ereport(ERROR, (errmsg("lost connection to query engine")));
 
-	if (sentQuery == 0)
-	{
-		if (!retryOnSendFailure)
-		{
-			/*
-			 * The query may already have reached the server, so re-sending it
-			 * is unsafe (see the function comment). Surface the error and let
-			 * the caller's transaction abort; a replay targets a fresh
-			 * object.
-			 */
-			ereport(ERROR, (errmsg("lost connection to query engine")));
-		}
-
-		ReleasePGDuckConnection(pgDuckConnection);
-
-		/* may have lost connection, retry once */
-		pgDuckConnection = GetPGDuckConnection();
-		conn = pgDuckConnection->conn;
-		sentQuery = PQsendQuery(conn, query);
-		if (sentQuery == 0)
-		{
-			ereport(ERROR, (errmsg("lost connection to query engine")));
-		}
-	}
-
-	PGresult   *result = WaitForLastResult(pgDuckConnection);
-
-	return result;
-}
-
-
-/*
- * ExecuteQueryOnPGDuckConnection executes the given idempotent query in PGDuck
- * on the given connection, transparently reconnecting and re-sending once if the
- * query could not be sent. Do NOT use this for statements with side effects on
- * object storage (see ExecuteNonIdempotentQueryOnPGDuckConnection).
- */
-PGresult *
-ExecuteQueryOnPGDuckConnection(PGDuckConnection * pgDuckConnection,
-							   const char *query)
-{
-	return ExecuteQueryOnPGDuckConnectionInternal(pgDuckConnection, query, true);
-}
-
-
-/*
- * ExecuteNonIdempotentQueryOnPGDuckConnection executes a query that has external
- * side effects (e.g. a COPY ... TO that writes a data file to object storage)
- * and therefore must never be sent more than once. Unlike
- * ExecuteQueryOnPGDuckConnection, it does not reconnect and re-send on a send
- * failure.
- */
-PGresult *
-ExecuteNonIdempotentQueryOnPGDuckConnection(PGDuckConnection * pgDuckConnection,
-											const char *query)
-{
-	return ExecuteQueryOnPGDuckConnectionInternal(pgDuckConnection, query, false);
+	return WaitForLastResult(pgDuckConnection);
 }
 
 
@@ -465,20 +409,14 @@ WaitForResult(PGDuckConnection * pgDuckConnection)
 			if (!PQconsumeInput(conn))
 			{
 				/*
-				 * Do not release the connection here — WaitForResult does
-				 * not own it.  Connection lifetime is the caller's
+				 * Do not release the connection here: WaitForResult does not
+				 * own it.  Connection lifetime is the caller's
 				 * responsibility: either an enclosing PG_TRY/PG_FINALLY
 				 * releases it, or the transaction/subtransaction abort
 				 * callback (PGDuckClientTransactionCallback /
 				 * ...SubtransactionCallback) sweeps it on XACT_EVENT_ABORT.
-				 *
-				 * Releasing here is actively harmful:
-				 * ExecuteQueryOnPGDuckConnection's retry path may have
-				 * already swapped the hash slot out from under the caller's
-				 * pointer, so the caller's subsequent release either
-				 * double-frees the *new* connection (if dynahash reused the
-				 * slab) or PQfinish()'s an already-freed PGconn (if it
-				 * didn't).
+				 * Releasing here would risk a double-free or PQfinish() of a
+				 * connection the caller still holds a pointer to.
 				 */
 				ereport(ERROR, (errmsg("lost connection to query engine")));
 			}
