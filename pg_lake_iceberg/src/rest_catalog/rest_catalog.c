@@ -35,6 +35,7 @@
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/util/catalog_type.h"
+#include "pg_lake/util/string_utils.h"
 
 
 /* determined by GUC */
@@ -45,6 +46,61 @@ char	   *RestCatalogClientSecret = NULL;
 char	   *RestCatalogScope = "PRINCIPAL_ROLE:ALL";
 int			RestCatalogAuthType = REST_CATALOG_AUTH_TYPE_OAUTH2;
 bool		RestCatalogEnableVendedCredentials = true;
+
+
+/*
+ * ResolveRestCatalogBaseUri normalizes a configured REST endpoint into the
+ * base URI used as the leading "%s" in the REST_CATALOG_* URL templates.
+ *
+ * It checks whether the endpoint carries a path after its authority
+ * (host[:port]).  If it does -- e.g. "https://host/catalog" (Lakekeeper),
+ * "https://host/iceberg" (Nessie), or even just "https://host/" (root mount)
+ * -- any trailing slash is stripped and the value is used verbatim.  If no
+ * path is present -- a bare "https://host" or the historical scheme-less
+ * "host:port" -- the legacy Polaris mount path "/api/catalog" is appended,
+ * so existing bare-host configurations keep resolving to exactly the URLs
+ * they did before.
+ *
+ * A lone trailing slash ("https://host/") signals a root-mounted catalog
+ * (spec at /v1/...) rather than a bare Polaris host.
+ *
+ * NULL input is returned as NULL and an empty string as an empty string;
+ * ValidateRestCatalogOptions raises the "rest_endpoint not configured"
+ * error for those.
+ */
+char *
+ResolveRestCatalogBaseUri(const char *endpoint)
+{
+	if (endpoint == NULL)
+		return NULL;
+
+	/*
+	 * Check for an explicit mount path BEFORE stripping the trailing slash so
+	 * that a lone trailing slash ("https://host/") signals a root-mounted
+	 * catalog rather than a bare host.  After the check we strip so that
+	 * "https://host/catalog/" returns "https://host/catalog" and not
+	 * "https://host/catalog/".
+	 *
+	 * Note: "https://host//" has a '/' after the authority so it is treated
+	 * as an explicit (if empty) mount path; after one strip it becomes
+	 * "https://host/" which further reduces to "https://host".  Double
+	 * trailing slashes are not valid endpoint inputs; the resulting URL would
+	 * produce server-side 404s rather than a silent wrong result, so we
+	 * tolerate the edge case rather than loop-stripping.
+	 */
+	const char *schemeSep = strstr(endpoint, "://");
+	const char *authority = schemeSep ? schemeSep + 3 : endpoint;
+	bool		hasPath = (strchr(authority, '/') != NULL);
+	char	   *baseUri = StripTrailingSlash(pstrdup(endpoint), true);
+
+	if (baseUri[0] == '\0')
+		return baseUri;
+
+	if (!hasPath)
+		baseUri = psprintf("%s/api/catalog", baseUri);
+
+	return baseUri;
+}
 
 
 /*
@@ -63,7 +119,7 @@ ApplyGUCDefaults(RestCatalogOptions * opts, bool isBuiltin)
 {
 	char	   *defaultLocationPrefix = GetIcebergDefaultLocationPrefix();
 
-	opts->host = RestCatalogHost ? pstrdup(RestCatalogHost) : NULL;
+	opts->baseUri = RestCatalogHost ? pstrdup(RestCatalogHost) : NULL;
 	opts->oauthHostPath = RestCatalogOauthHostPath ? pstrdup(RestCatalogOauthHostPath) : NULL;
 
 	if (isBuiltin)
@@ -108,7 +164,7 @@ ValidateRestCatalogOptions(const RestCatalogOptions * opts,
 						   const char *catalog,
 						   bool isBuiltin)
 {
-	if (opts->host == NULL || opts->host[0] == '\0')
+	if (opts->baseUri == NULL || opts->baseUri[0] == '\0')
 		ereport(ERROR,
 				(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
 				 errmsg("\"rest_endpoint\" is not configured for REST catalog \"%s\"",
@@ -195,6 +251,8 @@ BuildRestCatalogOptionsFromServer(const char *serverName,
 	if (!isBuiltin)
 		ApplyUserMappingOverrides(opts, server);
 
+	opts->baseUri = ResolveRestCatalogBaseUri(opts->baseUri);
+
 	ValidateRestCatalogOptions(opts, userVisibleCatalog, isBuiltin);
 	return opts;
 }
@@ -245,6 +303,8 @@ BuildRestCatalogOptionsFromUserMapping(Oid umOid)
 	ApplyGUCDefaults(opts, /* isBuiltin */ false);
 	ApplyServerOptionOverrides(opts, server);
 	ApplyUserMappingOptionsList(opts, umOptions, umOid);
+
+	opts->baseUri = ResolveRestCatalogBaseUri(opts->baseUri);
 
 	ValidateRestCatalogOptions(opts, opts->catalog, /* isBuiltin */ false);
 	return opts;
@@ -324,7 +384,7 @@ CopyRestCatalogOptions(MemoryContext dst, const RestCatalogOptions * src)
 	copy->serverOid = src->serverOid;
 	copy->userMappingOid = src->userMappingOid;
 	copy->catalog = src->catalog ? pstrdup(src->catalog) : NULL;
-	copy->host = src->host ? pstrdup(src->host) : NULL;
+	copy->baseUri = src->baseUri ? pstrdup(src->baseUri) : NULL;
 	copy->oauthHostPath = src->oauthHostPath ? pstrdup(src->oauthHostPath) : NULL;
 	copy->clientId = src->clientId ? pstrdup(src->clientId) : NULL;
 	copy->clientSecret = src->clientSecret ? pstrdup(src->clientSecret) : NULL;

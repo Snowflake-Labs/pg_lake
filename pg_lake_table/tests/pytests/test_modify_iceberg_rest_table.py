@@ -732,6 +732,96 @@ def test_server_option_overrides_guc(
         superuser_conn.commit()
 
 
+# Endpoint styles that must both resolve to the same working Polaris URL:
+#   - "bare":     rest_endpoint has no path -> ResolveRestCatalogBaseUri
+#                 appends the legacy "/api/catalog" (backward compatibility).
+#   - "explicit": rest_endpoint already carries the "/api/catalog" mount
+#                 path -> used verbatim (the configurable-prefix behavior
+#                 that unblocks Lakekeeper/Nessie/Unity-style endpoints).
+@pytest.mark.parametrize("endpoint_style", ["bare", "explicit"])
+def test_rest_endpoint_path_is_honored(
+    installcheck,
+    superuser_conn,
+    pg_conn,
+    s3,
+    extension,
+    polaris_session,
+    create_http_helper_functions,
+    endpoint_style,
+):
+    """A rest_endpoint that already includes the catalog mount path must be
+    used verbatim, while a bare host still falls back to the historical
+    "/api/catalog" prefix.  Both must produce a working REST catalog against
+    the same Polaris server, proving the base-URI normalization is correct
+    and backward compatible."""
+    if installcheck:
+        return
+
+    creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
+    client_id = creds["credentials"]["clientId"]
+    client_secret = creds["credentials"]["clientSecret"]
+
+    host = f"http://localhost:{server_params.POLARIS_PORT}"
+    endpoint = f"{host}/api/catalog" if endpoint_style == "explicit" else host
+
+    SERVER_NAME = f"rest_endpoint_path_{endpoint_style}"
+    SCHEMA_NAME = f"rest_endpoint_path_{endpoint_style}"
+    TABLE_NAME = "t"
+    VALID_PREFIX = f"s3://{TEST_BUCKET}/"
+
+    run_command(
+        f"""
+        CREATE SERVER {SERVER_NAME} TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint '{endpoint}', location_prefix '{VALID_PREFIX}')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        f"""
+        CREATE USER MAPPING FOR PUBLIC SERVER {SERVER_NAME}
+            OPTIONS (client_id '{client_id}', client_secret '{client_secret}')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        f"GRANT USAGE ON FOREIGN SERVER {SERVER_NAME} TO PUBLIC",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    run_command(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA_NAME}", pg_conn)
+    pg_conn.commit()
+
+    try:
+        run_command(
+            f"CREATE TABLE {SCHEMA_NAME}.{TABLE_NAME} (id bigint, value text) "
+            f"USING iceberg WITH (catalog='{SERVER_NAME}')",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        run_command(
+            f"INSERT INTO {SCHEMA_NAME}.{TABLE_NAME} "
+            f"SELECT i, i::text FROM generate_series(1, 10) i",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        # Read back: exercises the REST GET-table path
+        # (GetMetadataLocationFromRestCatalog) plus the commit-time
+        # transaction path, both of which build URLs from the base URI.
+        results = run_query(f"SELECT count(*) FROM {SCHEMA_NAME}.{TABLE_NAME}", pg_conn)
+        assert results[0][0] == 10
+    finally:
+        pg_conn.rollback()
+        run_command(f"DROP SCHEMA IF EXISTS {SCHEMA_NAME} CASCADE", pg_conn)
+        pg_conn.commit()
+        superuser_conn.rollback()
+        run_command(f"DROP SERVER IF EXISTS {SERVER_NAME} CASCADE", superuser_conn)
+        superuser_conn.commit()
+
+
 @pytest.mark.parametrize(
     "option_name, guc_name",
     [
