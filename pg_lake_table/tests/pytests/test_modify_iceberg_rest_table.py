@@ -609,7 +609,7 @@ def test_server_option_overrides_guc(
     creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
     client_id = creds["credentials"]["clientId"]
     client_secret = creds["credentials"]["clientSecret"]
-    endpoint = f"http://localhost:{server_params.POLARIS_PORT}"
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}/api/catalog"
     VALID_PREFIX = f"s3://{TEST_BUCKET}/"
 
     SERVER_NAME = f"rest_opt_override_{option_name}"
@@ -714,6 +714,84 @@ def test_server_option_overrides_guc(
         superuser_conn.commit()
 
 
+def test_rest_endpoint_path_is_honored(
+    installcheck,
+    superuser_conn,
+    pg_conn,
+    s3,
+    extension,
+    polaris_session,
+    create_http_helper_functions,
+):
+    """rest_endpoint must include the full catalog mount path and is used
+    verbatim, producing a working REST catalog against Polaris."""
+    if installcheck:
+        return
+
+    creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
+    client_id = creds["credentials"]["clientId"]
+    client_secret = creds["credentials"]["clientSecret"]
+
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}/api/catalog"
+
+    SERVER_NAME = "rest_endpoint_path_explicit"
+    SCHEMA_NAME = "rest_endpoint_path_explicit"
+    TABLE_NAME = "t"
+    VALID_PREFIX = f"s3://{TEST_BUCKET}/"
+
+    run_command(
+        f"""
+        CREATE SERVER {SERVER_NAME} TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint '{endpoint}', location_prefix '{VALID_PREFIX}')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        f"""
+        CREATE USER MAPPING FOR PUBLIC SERVER {SERVER_NAME}
+            OPTIONS (client_id '{client_id}', client_secret '{client_secret}')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        f"GRANT USAGE ON FOREIGN SERVER {SERVER_NAME} TO PUBLIC",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    run_command(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA_NAME}", pg_conn)
+    pg_conn.commit()
+
+    try:
+        run_command(
+            f"CREATE TABLE {SCHEMA_NAME}.{TABLE_NAME} (id bigint, value text) "
+            f"USING iceberg WITH (catalog='{SERVER_NAME}')",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        run_command(
+            f"INSERT INTO {SCHEMA_NAME}.{TABLE_NAME} "
+            f"SELECT i, i::text FROM generate_series(1, 10) i",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        # Read back: exercises the REST GET-table path
+        # (GetMetadataLocationFromRestCatalog) plus the commit-time
+        # transaction path, both of which build URLs from the base URI.
+        results = run_query(f"SELECT count(*) FROM {SCHEMA_NAME}.{TABLE_NAME}", pg_conn)
+        assert results[0][0] == 10
+    finally:
+        pg_conn.rollback()
+        run_command(f"DROP SCHEMA IF EXISTS {SCHEMA_NAME} CASCADE", pg_conn)
+        pg_conn.commit()
+        superuser_conn.rollback()
+        run_command(f"DROP SERVER IF EXISTS {SERVER_NAME} CASCADE", superuser_conn)
+        superuser_conn.commit()
+
+
 @pytest.mark.parametrize(
     "option_name, guc_name",
     [
@@ -744,7 +822,7 @@ def test_user_mapping_credential_overrides_guc(
     creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
     client_id = creds["credentials"]["clientId"]
     client_secret = creds["credentials"]["clientSecret"]
-    endpoint = f"http://localhost:{server_params.POLARIS_PORT}"
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}/api/catalog"
     VALID_PREFIX = f"s3://{TEST_BUCKET}/"
 
     SERVER_NAME = f"rest_um_override_{option_name}"
@@ -841,7 +919,7 @@ def test_reject_modify_different_rest_catalogs_in_single_transaction(
     creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
     client_id = creds["credentials"]["clientId"]
     client_secret = creds["credentials"]["clientSecret"]
-    endpoint = f"http://localhost:{server_params.POLARIS_PORT}"
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}/api/catalog"
 
     for name in ["rest_catalog_a", "rest_catalog_b"]:
         run_command(
@@ -952,7 +1030,7 @@ def test_multi_table_single_transaction_on_same_server(
     creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
     client_id = creds["credentials"]["clientId"]
     client_secret = creds["credentials"]["clientSecret"]
-    endpoint = f"http://localhost:{server_params.POLARIS_PORT}"
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}/api/catalog"
 
     run_command(
         f"""
@@ -1123,7 +1201,7 @@ def test_alter_user_mapping_credentials_invalidates_token_cache(
     creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
     client_id = creds["credentials"]["clientId"]
     client_secret = creds["credentials"]["clientSecret"]
-    endpoint = f"http://localhost:{server_params.POLARIS_PORT}"
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}/api/catalog"
 
     run_command(
         f"""
@@ -1209,14 +1287,10 @@ def test_alter_user_mapping_credentials_invalidates_token_cache(
         "Expected COMMIT to fail after ALTER USER MAPPING set bogus client_id "
         "(cache should have been invalidated, forcing re-auth with bad creds)"
     )
-    # After the cache is invalidated, the commit-time loadTable re-auths with
-    # the bogus creds and fails, aborting the commit -- exactly one forced
-    # re-fetch.  Vended credentials are opt-in (disabled by default in this
-    # suite), so the write path does no extra loadTable probe here.
     assert post_alter_fetches == 1, (
-        f"Expected 1 token re-fetch after ALTER USER MAPPING (commit re-auth), "
-        f"got {post_alter_fetches}. "
-        f"Notices ({len(post_alter_notices)}):\n" + "\n".join(post_alter_notices)
+        f"Expected exactly 1 token re-fetch after ALTER USER MAPPING "
+        f"(cache invalidated), got {post_alter_fetches}. Notices "
+        f"({len(post_alter_notices)}):\n" + "\n".join(post_alter_notices)
     )
 
     run_command(
@@ -1285,7 +1359,7 @@ def test_drop_server_with_dependent_iceberg_table(
     creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
     client_id = creds["credentials"]["clientId"]
     client_secret = creds["credentials"]["clientSecret"]
-    endpoint = f"http://localhost:{server_params.POLARIS_PORT}"
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}/api/catalog"
 
     run_command(
         f"""
@@ -1364,7 +1438,7 @@ def test_drop_owned_by_with_dependent_iceberg_table(
     creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
     client_id = creds["credentials"]["clientId"]
     client_secret = creds["credentials"]["clientSecret"]
-    endpoint = f"http://localhost:{server_params.POLARIS_PORT}"
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}/api/catalog"
 
     run_command(f"DROP ROLE IF EXISTS {ROLE_NAME}", superuser_conn, raise_error=False)
     superuser_conn.commit()
@@ -1478,7 +1552,7 @@ def test_drop_server_blocks_on_active_query(
     creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
     client_id = creds["credentials"]["clientId"]
     client_secret = creds["credentials"]["clientSecret"]
-    endpoint = f"http://localhost:{server_params.POLARIS_PORT}"
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}/api/catalog"
 
     run_command(
         f"""
@@ -1593,7 +1667,7 @@ def test_reject_writable_table_on_server_with_catalog_name(
     creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
     client_id = creds["credentials"]["clientId"]
     client_secret = creds["credentials"]["clientSecret"]
-    endpoint = f"http://localhost:{server_params.POLARIS_PORT}"
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}/api/catalog"
 
     run_command(
         f"""
@@ -1674,7 +1748,7 @@ def test_alter_server_add_catalog_name_does_not_reroute_writable_table(
     creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
     client_id = creds["credentials"]["clientId"]
     client_secret = creds["credentials"]["clientSecret"]
-    endpoint = f"http://localhost:{server_params.POLARIS_PORT}"
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}/api/catalog"
 
     run_command(
         f"""
@@ -1759,7 +1833,7 @@ def test_alter_server_rest_endpoint_blocked_with_dependent_tables(
     creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
     client_id = creds["credentials"]["clientId"]
     client_secret = creds["credentials"]["clientSecret"]
-    endpoint = f"http://localhost:{server_params.POLARIS_PORT}"
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}/api/catalog"
 
     run_command(
         f"""
@@ -1861,7 +1935,7 @@ def test_drop_user_mapping_in_isolation_succeeds(
     creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
     client_id = creds["credentials"]["clientId"]
     client_secret = creds["credentials"]["clientSecret"]
-    endpoint = f"http://localhost:{server_params.POLARIS_PORT}"
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}/api/catalog"
 
     run_command(
         f"""
@@ -1941,7 +2015,7 @@ def test_drop_user_mapping_then_drop_table_in_same_txn_succeeds(
     creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
     client_id = creds["credentials"]["clientId"]
     client_secret = creds["credentials"]["clientSecret"]
-    endpoint = f"http://localhost:{server_params.POLARIS_PORT}"
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}/api/catalog"
 
     run_command(
         f"""
@@ -2017,7 +2091,7 @@ def test_drop_user_mapping_then_drop_table_in_separate_txn_fails_clearly(
     creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
     client_id = creds["credentials"]["clientId"]
     client_secret = creds["credentials"]["clientSecret"]
-    endpoint = f"http://localhost:{server_params.POLARIS_PORT}"
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}/api/catalog"
 
     run_command(
         f"""
@@ -2110,7 +2184,7 @@ def test_server_owner_dropping_another_users_mapping_does_not_capture_credential
     creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
     client_id = creds["credentials"]["clientId"]
     client_secret = creds["credentials"]["clientSecret"]
-    endpoint = f"http://localhost:{server_params.POLARIS_PORT}"
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}/api/catalog"
 
     run_command(f"DROP ROLE IF EXISTS {ATTACKER}", superuser_conn, raise_error=False)
     run_command(f"DROP ROLE IF EXISTS {VICTIM}", superuser_conn, raise_error=False)
@@ -2264,7 +2338,7 @@ def test_drop_server_cascade_does_not_wedge(
     creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
     client_id = creds["credentials"]["clientId"]
     client_secret = creds["credentials"]["clientSecret"]
-    endpoint = f"http://localhost:{server_params.POLARIS_PORT}"
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}/api/catalog"
 
     run_command(
         f"""
@@ -2350,7 +2424,7 @@ def test_alter_user_mapping_drop_credential_blocked_with_dependent_tables(
     creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
     client_id = creds["credentials"]["clientId"]
     client_secret = creds["credentials"]["clientSecret"]
-    endpoint = f"http://localhost:{server_params.POLARIS_PORT}"
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}/api/catalog"
 
     run_command(
         f"""
@@ -2421,7 +2495,7 @@ def test_alter_user_mapping_set_credential_allowed_with_dependent_tables(
     creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
     client_id = creds["credentials"]["clientId"]
     client_secret = creds["credentials"]["clientSecret"]
-    endpoint = f"http://localhost:{server_params.POLARIS_PORT}"
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}/api/catalog"
 
     run_command(
         f"""
@@ -2484,7 +2558,7 @@ def test_drop_user_mapping_allowed_without_dependent_tables(
     creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
     client_id = creds["credentials"]["clientId"]
     client_secret = creds["credentials"]["clientSecret"]
-    endpoint = f"http://localhost:{server_params.POLARIS_PORT}"
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}/api/catalog"
 
     run_command(
         f"""
@@ -2540,7 +2614,7 @@ def test_table_catalog_name_overrides_server(
     creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
     client_id = creds["credentials"]["clientId"]
     client_secret = creds["credentials"]["clientSecret"]
-    endpoint = f"http://localhost:{server_params.POLARIS_PORT}"
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}/api/catalog"
 
     run_command(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA_NAME}", pg_conn)
     pg_conn.commit()

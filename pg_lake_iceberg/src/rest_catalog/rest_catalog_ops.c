@@ -171,7 +171,7 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId)
 	RestCatalogOptions *opts = GetRestCatalogOptionsForRelation(relationId);
 
 	char	   *postUrl =
-		psprintf(REST_CATALOG_TABLES, opts->host,
+		psprintf(REST_CATALOG_TABLES, opts->baseUri,
 				 URLEncodePath(catalogName), URLEncodePath(namespaceName));
 	List	   *headers = PostHeadersWithAuth(opts);
 
@@ -333,7 +333,7 @@ RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogNam
 	 */
 	char	   *getUrl =
 		psprintf(REST_CATALOG_NAMESPACE_NAME,
-				 opts->host, URLEncodePath(catalogName),
+				 opts->baseUri, URLEncodePath(catalogName),
 				 URLEncodePath(namespaceName));
 	HttpResult	httpResult = SendRequestToRestCatalog(opts, HTTP_GET, getUrl, NULL,
 													  GetHeadersWithAuth(opts));
@@ -424,7 +424,7 @@ ErrorIfRestNamespaceDoesNotExist(RestCatalogOptions * opts, const char *catalogN
 	 */
 	char	   *getUrl =
 		psprintf(REST_CATALOG_NAMESPACE_NAME,
-				 opts->host, URLEncodePath(catalogName),
+				 opts->baseUri, URLEncodePath(catalogName),
 				 URLEncodePath(namespaceName));
 	HttpResult	httpResult = SendRequestToRestCatalog(opts, HTTP_GET, getUrl, NULL,
 													  GetHeadersWithAuth(opts));
@@ -685,9 +685,7 @@ LoadTableFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogName,
 {
 	char	   *getUrl =
 		psprintf(REST_CATALOG_TABLE,
-				 opts->host, URLEncodePath(restCatalogName),
-				 URLEncodePath(namespaceName),
-				 URLEncodePath(relationName));
+				 opts->baseUri, URLEncodePath(restCatalogName), URLEncodePath(namespaceName), URLEncodePath(relationName));
 
 	List	   *headers = GetHeadersWithAuth(opts);
 
@@ -1347,7 +1345,7 @@ CreateNamespaceOnRestCatalog(RestCatalogOptions * opts, const char *catalogName,
 	appendStringInfoChar(&body, '}');	/* close body */
 
 	char	   *postUrl =
-		psprintf(REST_CATALOG_NAMESPACE, opts->host,
+		psprintf(REST_CATALOG_NAMESPACE, opts->baseUri,
 				 URLEncodePath(catalogName));
 
 	HttpResult	httpResult = SendRequestToRestCatalog(opts, HTTP_POST, postUrl, body.data,

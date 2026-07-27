@@ -221,7 +221,7 @@ def apply_polaris_gucs(conns, app_user, credentials_file):
     creds = json.loads(Path(credentials_file).read_text())
     client_id = creds["credentials"]["clientId"]
     client_secret = creds["credentials"]["clientSecret"]
-    host = f"{server_params.POLARIS_HOSTNAME}:{server_params.POLARIS_PORT}"
+    host = f"{server_params.POLARIS_HOSTNAME}:{server_params.POLARIS_PORT}/api/catalog"
 
     run_command_outside_tx(
         [
