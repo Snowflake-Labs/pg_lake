@@ -44,11 +44,10 @@ def test_debug_print_plan_with_lake_table(
             pg_conn.notices.clear()
             assert run_query(query, pg_conn) == [[0]]
 
-            if full_pushdown == "on":
-                debug_plan = "\n".join(pg_conn.notices)
-                assert "PlannerRelationRestriction" in debug_plan
-                assert ":rte" in debug_plan
-                assert ":baseRestrictionList" in debug_plan
+            debug_plan = "\n".join(pg_conn.notices)
+            assert "PlannerRelationRestriction" in debug_plan
+            assert ":rte" in debug_plan
+            assert ":baseRestrictionList" in debug_plan
 
     pg_conn.rollback()
 
