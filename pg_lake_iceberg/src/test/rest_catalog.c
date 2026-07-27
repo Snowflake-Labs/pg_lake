@@ -29,6 +29,7 @@
 PG_FUNCTION_INFO_V1(register_namespace_to_rest_catalog);
 PG_FUNCTION_INFO_V1(get_rest_metadata_location);
 PG_FUNCTION_INFO_V1(get_rest_vended_credentials);
+PG_FUNCTION_INFO_V1(resolve_rest_catalog_base_uri);
 
 /*
 * register_namespace_to_rest_catalog is a test function that registers
@@ -123,4 +124,19 @@ get_rest_vended_credentials(PG_FUNCTION_ARGS)
 	}
 
 	PG_RETURN_TEXT_P(cstring_to_text(buf.data));
+}
+
+
+/*
+ * resolve_rest_catalog_base_uri is a test function that exposes
+ * ResolveRestCatalogBaseUri so its endpoint-normalization edge cases
+ * (trailing slash, explicit mount path) can be asserted from pytest
+ * without a live catalog server.
+ */
+Datum
+resolve_rest_catalog_base_uri(PG_FUNCTION_ARGS)
+{
+	char	   *endpoint = text_to_cstring(PG_GETARG_TEXT_P(0));
+
+	PG_RETURN_TEXT_P(cstring_to_text(ResolveRestCatalogBaseUri(endpoint)));
 }

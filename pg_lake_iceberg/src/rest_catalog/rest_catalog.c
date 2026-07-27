@@ -36,16 +36,37 @@
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/util/catalog_type.h"
+#include "pg_lake/util/string_utils.h"
 
 
 /* determined by GUC */
-char	   *RestCatalogHost = "http://localhost:8181";
+char	   *RestCatalogHost = "http://localhost:8181/api/catalog";
 char	   *RestCatalogOauthHostPath = "";
 char	   *RestCatalogClientId = NULL;
 char	   *RestCatalogClientSecret = NULL;
 char	   *RestCatalogScope = "PRINCIPAL_ROLE:ALL";
 int			RestCatalogAuthType = REST_CATALOG_AUTH_TYPE_OAUTH2;
 bool		RestCatalogEnableVendedCredentials = false;
+
+
+/*
+ * ResolveRestCatalogBaseUri normalizes a configured REST endpoint into the
+ * base URI used as the leading "%s" in the REST_CATALOG_* URL templates.
+ *
+ * Strips one trailing slash from the endpoint and returns the result
+ * verbatim.  The caller is responsible for configuring the full mount path
+ * in rest_endpoint (e.g. "https://host/api/catalog" for Polaris,
+ * "https://host/catalog" for Lakekeeper).
+ *
+ * NULL input is returned as NULL.
+ */
+char *
+ResolveRestCatalogBaseUri(const char *endpoint)
+{
+	if (endpoint == NULL)
+		return NULL;
+	return StripTrailingSlash(pstrdup(endpoint), true);
+}
 
 
 /*
@@ -64,7 +85,7 @@ ApplyGUCDefaults(RestCatalogOptions * opts, bool isBuiltin)
 {
 	char	   *defaultLocationPrefix = GetIcebergDefaultLocationPrefix();
 
-	opts->host = RestCatalogHost ? pstrdup(RestCatalogHost) : NULL;
+	opts->baseUri = RestCatalogHost ? pstrdup(RestCatalogHost) : NULL;
 	opts->oauthHostPath = RestCatalogOauthHostPath ? pstrdup(RestCatalogOauthHostPath) : NULL;
 
 	if (isBuiltin)
@@ -109,12 +130,13 @@ ValidateRestCatalogOptions(const RestCatalogOptions * opts,
 						   const char *catalog,
 						   bool isBuiltin)
 {
-	if (opts->host == NULL || opts->host[0] == '\0')
+	if (opts->baseUri == NULL || opts->baseUri[0] == '\0')
 		ereport(ERROR,
 				(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
 				 errmsg("\"rest_endpoint\" is not configured for REST catalog \"%s\"",
 						catalog),
-				 errhint("Set the pg_lake_iceberg.rest_catalog_host GUC or "
+				 errhint("Set the pg_lake_iceberg.rest_catalog_host GUC (e.g. "
+						 "\"http://localhost:8181/api/catalog\" for Polaris) or "
 						 "the \"rest_endpoint\" option on the server.")));
 
 	bool		missingSecret = (opts->clientSecret == NULL || opts->clientSecret[0] == '\0');
@@ -196,6 +218,8 @@ BuildRestCatalogOptionsFromServer(const char *serverName,
 	if (!isBuiltin)
 		ApplyUserMappingOverrides(opts, server);
 
+	opts->baseUri = ResolveRestCatalogBaseUri(opts->baseUri);
+
 	ValidateRestCatalogOptions(opts, userVisibleCatalog, isBuiltin);
 	return opts;
 }
@@ -246,6 +270,8 @@ BuildRestCatalogOptionsFromUserMapping(Oid umOid)
 	ApplyGUCDefaults(opts, /* isBuiltin */ false);
 	ApplyServerOptionOverrides(opts, server);
 	ApplyUserMappingOptionsList(opts, umOptions, umOid);
+
+	opts->baseUri = ResolveRestCatalogBaseUri(opts->baseUri);
 
 	ValidateRestCatalogOptions(opts, opts->catalog, /* isBuiltin */ false);
 	return opts;
@@ -360,7 +386,7 @@ CopyRestCatalogOptions(MemoryContext dst, const RestCatalogOptions * src)
 	copy->serverOid = src->serverOid;
 	copy->userMappingOid = src->userMappingOid;
 	copy->catalog = src->catalog ? pstrdup(src->catalog) : NULL;
-	copy->host = src->host ? pstrdup(src->host) : NULL;
+	copy->baseUri = src->baseUri ? pstrdup(src->baseUri) : NULL;
 	copy->oauthHostPath = src->oauthHostPath ? pstrdup(src->oauthHostPath) : NULL;
 	copy->clientId = src->clientId ? pstrdup(src->clientId) : NULL;
 	copy->clientSecret = src->clientSecret ? pstrdup(src->clientSecret) : NULL;
