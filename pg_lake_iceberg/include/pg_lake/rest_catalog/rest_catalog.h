@@ -66,7 +66,7 @@ typedef struct RestCatalogOptions
 								 * credentials, or InvalidOid if none */
 	char	   *catalog;		/* short user-facing name; used in error
 								 * messages, never for equality */
-	char	   *host;
+	char	   *host;	/* normalized base URI; see ResolveRestCatalogBaseUri */
 	char	   *oauthHostPath;
 	char	   *clientId;
 	char	   *clientSecret;
@@ -77,17 +77,22 @@ typedef struct RestCatalogOptions
 	bool		enableVendedCredentials;
 }			RestCatalogOptions;
 
-#define REST_CATALOG_AUTH_TOKEN_PATH "%s/api/catalog/v1/oauth/tokens"
+/*
+ * REST catalog URL templates.  The leading "%s" is the resolved base URI
+ * (opts->host), which already carries any deployment-specific mount path
+ * (e.g. "/api/catalog" for Polaris, "/catalog" for Lakekeeper).  Everything
+ * from "/v1/" onward is the Iceberg REST catalog spec.  See
+ * ResolveRestCatalogBaseUri for how the base URI is normalized.
+ */
+#define REST_CATALOG_AUTH_TOKEN_PATH "%s/v1/oauth/tokens"
 
-#define REST_CATALOG_NAMESPACE_NAME "%s/api/catalog/v1/%s/namespaces/%s"
-#define REST_CATALOG_NAMESPACE "%s/api/catalog/v1/%s/namespaces"
+#define REST_CATALOG_NAMESPACE_NAME "%s/v1/%s/namespaces/%s"
+#define REST_CATALOG_NAMESPACE "%s/v1/%s/namespaces"
 
-#define REST_CATALOG_TABLE "%s/api/catalog/v1/%s/namespaces/%s/tables/%s"
-#define REST_CATALOG_TABLES "%s/api/catalog/v1/%s/namespaces/%s/tables"
+#define REST_CATALOG_TABLE "%s/v1/%s/namespaces/%s/tables/%s"
+#define REST_CATALOG_TABLES "%s/v1/%s/namespaces/%s/tables"
 
-#define REST_CATALOG_AUTH_TOKEN_PATH "%s/api/catalog/v1/oauth/tokens"
-
-#define REST_CATALOG_TRANSACTION_COMMIT "%s/api/catalog/v1/%s/transactions/commit"
+#define REST_CATALOG_TRANSACTION_COMMIT "%s/v1/%s/transactions/commit"
 
 typedef enum RestCatalogOperationType
 {
@@ -117,13 +122,19 @@ typedef struct RestCatalogRequest
 }			RestCatalogRequest;
 
 
-#define REST_CATALOG_AUTH_TOKEN_PATH "%s/api/catalog/v1/oauth/tokens"
-#define GET_REST_CATALOG_METADATA_LOCATION "%s/api/catalog/v1/%s/namespaces/%s/tables/%s"
-
 /* Catalog options resolution */
 extern PGDLLEXPORT RestCatalogOptions * ResolveRestCatalogOptions(const char *catalog);
 extern PGDLLEXPORT RestCatalogOptions * GetRestCatalogOptionsForRelation(Oid relationId);
 extern PGDLLEXPORT RestCatalogOptions * CopyRestCatalogOptions(MemoryContext dst, const RestCatalogOptions * src);
+
+/*
+ * Normalize a configured REST endpoint into a base URI usable as the
+ * "%s" in the URL templates above.  Strips a trailing slash; if the
+ * endpoint has no path after the authority, appends the legacy Polaris
+ * mount prefix ("/api/catalog") for backward compatibility with
+ * bare-host configurations.  Returns NULL/empty inputs unchanged.
+ */
+extern PGDLLEXPORT char *ResolveRestCatalogBaseUri(const char *endpoint);
 
 /*
  * Build options directly from a specific user mapping OID, bypassing

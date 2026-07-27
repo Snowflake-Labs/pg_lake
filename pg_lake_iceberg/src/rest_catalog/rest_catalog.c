@@ -35,6 +35,7 @@
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/util/catalog_type.h"
+#include "pg_lake/util/string_utils.h"
 
 
 /* determined by GUC */
@@ -45,6 +46,54 @@ char	   *RestCatalogClientSecret = NULL;
 char	   *RestCatalogScope = "PRINCIPAL_ROLE:ALL";
 int			RestCatalogAuthType = REST_CATALOG_AUTH_TYPE_OAUTH2;
 bool		RestCatalogEnableVendedCredentials = true;
+
+
+/*
+ * ResolveRestCatalogBaseUri normalizes a configured REST endpoint into the
+ * base URI used as the leading "%s" in the REST_CATALOG_* URL templates.
+ *
+ * It strips a single trailing slash, then checks whether the endpoint
+ * already carries a path after its authority (host[:port]).  If it does --
+ * e.g. "https://host/catalog" (Lakekeeper) or "https://host/iceberg"
+ * (Nessie) -- the value is used verbatim.  If it does not -- a bare
+ * "https://host" or the historical scheme-less "host:port" -- the legacy
+ * Polaris mount path "/api/catalog" is appended, so existing bare-host
+ * configurations keep resolving to exactly the URLs they did before.
+ *
+ * NULL input is returned as NULL and an empty string as an empty string;
+ * ValidateRestCatalogOptions raises the "rest_endpoint not configured"
+ * error for those.
+ */
+char *
+ResolveRestCatalogBaseUri(const char *endpoint)
+{
+	if (endpoint == NULL)
+		return NULL;
+
+	/*
+	 * mutable copy; strip exactly one trailing slash in place.
+	 * Note: "https://host//" is reduced to "https://host/" by one strip,
+	 * leaving the slash visible to strchr() below so it is treated as an
+	 * explicit (if empty) mount path rather than a bare host.  Double
+	 * trailing slashes are not valid endpoint inputs; the resulting URL
+	 * would produce server-side 404s rather than a silent wrong result, so
+	 * we tolerate the edge case rather than loop-stripping.
+	 */
+	char	   *baseUri = StripTrailingSlash(pstrdup(endpoint), true);
+
+	if (baseUri[0] == '\0')
+		return baseUri;
+
+	/* find the authority, skipping an optional "scheme://" prefix */
+	const char *schemeSep = strstr(baseUri, "://");
+	const char *authority = schemeSep ? schemeSep + 3 : baseUri;
+
+	/* no '/' after the authority means no mount path was supplied */
+	if (strchr(authority, '/') == NULL)
+		baseUri = psprintf("%s/api/catalog", baseUri);
+
+	return baseUri;
+}
 
 
 /*
@@ -195,6 +244,8 @@ BuildRestCatalogOptionsFromServer(const char *serverName,
 	if (!isBuiltin)
 		ApplyUserMappingOverrides(opts, server);
 
+	opts->host = ResolveRestCatalogBaseUri(opts->host);
+
 	ValidateRestCatalogOptions(opts, userVisibleCatalog, isBuiltin);
 	return opts;
 }
@@ -245,6 +296,8 @@ BuildRestCatalogOptionsFromUserMapping(Oid umOid)
 	ApplyGUCDefaults(opts, /* isBuiltin */ false);
 	ApplyServerOptionOverrides(opts, server);
 	ApplyUserMappingOptionsList(opts, umOptions, umOid);
+
+	opts->host = ResolveRestCatalogBaseUri(opts->host);
 
 	ValidateRestCatalogOptions(opts, opts->catalog, /* isBuiltin */ false);
 	return opts;
