@@ -90,7 +90,7 @@ typedef struct IcebergCatalogOptionDesc
 }			IcebergCatalogOptionDesc;
 
 static const IcebergCatalogOptionDesc iceberg_catalog_option_descs[] = {
-	{"rest_endpoint", CATALOG_OPT_STRING, offsetof(RestCatalogOptions, host),
+	{"rest_endpoint", CATALOG_OPT_STRING, offsetof(RestCatalogOptions, baseUri),
 		CATALOG_OPT_NONEMPTY | CATALOG_OPT_HAS_SCHEME,
 	CATALOG_OPT_CTX_SERVER},
 	{"rest_auth_type", CATALOG_OPT_AUTH_TYPE, offsetof(RestCatalogOptions, authType),

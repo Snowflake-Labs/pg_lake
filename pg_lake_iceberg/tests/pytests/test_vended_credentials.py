@@ -206,7 +206,7 @@ def configure_mock_catalog(
 
     run_command_outside_tx(
         [
-            f"ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_host TO 'http://127.0.0.1:{port}'",
+            f"ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_host TO 'http://127.0.0.1:{port}/api/catalog'",
             "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_id TO 'test_id'",
             "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_secret TO 'test_secret'",
             # Vended credentials are opt-in (disabled by default); these tests
@@ -524,7 +524,7 @@ def test_vended_credentials_no_config_in_response(
 
     run_command_outside_tx(
         [
-            f"ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_host TO 'http://127.0.0.1:{port}'",
+            f"ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_host TO 'http://127.0.0.1:{port}/api/catalog'",
             "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_id TO 'test_id'",
             "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_secret TO 'test_secret'",
             "SELECT pg_reload_conf()",
@@ -642,7 +642,7 @@ def test_vended_credentials_empty_config_in_response(
 
     run_command_outside_tx(
         [
-            f"ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_host TO 'http://127.0.0.1:{port}'",
+            f"ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_host TO 'http://127.0.0.1:{port}/api/catalog'",
             "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_id TO 'test_id'",
             "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_secret TO 'test_secret'",
             "SELECT pg_reload_conf()",
@@ -759,7 +759,7 @@ def test_vended_credentials_partial_config(
 
     run_command_outside_tx(
         [
-            f"ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_host TO 'http://127.0.0.1:{port}'",
+            f"ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_host TO 'http://127.0.0.1:{port}/api/catalog'",
             "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_id TO 'test_id'",
             "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_secret TO 'test_secret'",
             "SELECT pg_reload_conf()",
@@ -882,7 +882,7 @@ def _serve(handler_class):
 
     run_command_outside_tx(
         [
-            f"ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_host TO 'http://127.0.0.1:{port}'",
+            f"ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_host TO 'http://127.0.0.1:{port}/api/catalog'",
             "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_id TO 'test_id'",
             "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_secret TO 'test_secret'",
             # Vended credentials are opt-in (disabled by default); these tests
