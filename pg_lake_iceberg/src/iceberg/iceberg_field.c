@@ -825,3 +825,108 @@ EnsureIcebergField(Field * field)
 
 #endif
 }
+
+
+/*
+ * SameIcebergFieldType - Recursively compare two Iceberg Fields for type
+ * equality, ignoring field ids and default values (which are assigned per
+ * derivation and are irrelevant to the stored representation).
+ */
+static bool
+SameIcebergFieldType(Field * a, Field * b)
+{
+	if (a->type != b->type)
+		return false;
+
+	switch (a->type)
+	{
+		case FIELD_TYPE_SCALAR:
+			return strcmp(a->field.scalar.typeName, b->field.scalar.typeName) == 0;
+
+		case FIELD_TYPE_LIST:
+			return a->field.list.elementRequired == b->field.list.elementRequired &&
+				SameIcebergFieldType(a->field.list.element, b->field.list.element);
+
+		case FIELD_TYPE_MAP:
+			return a->field.map.valueRequired == b->field.map.valueRequired &&
+				SameIcebergFieldType(a->field.map.key, b->field.map.key) &&
+				SameIcebergFieldType(a->field.map.value, b->field.map.value);
+
+		case FIELD_TYPE_STRUCT:
+			{
+				if (a->field.structType.nfields != b->field.structType.nfields)
+					return false;
+
+				for (size_t i = 0; i < a->field.structType.nfields; i++)
+				{
+					FieldStructElement *ea = &a->field.structType.fields[i];
+					FieldStructElement *eb = &b->field.structType.fields[i];
+
+					if (ea->required != eb->required ||
+						strcmp(ea->name, eb->name) != 0 ||
+						!SameIcebergFieldType(ea->type, eb->type))
+						return false;
+				}
+				return true;
+			}
+	}
+
+	return false;
+}
+
+
+/*
+ * NormalizeTypeForIcebergSchema - Apply the top-level unsupported-numeric to
+ * double conversion that the Iceberg-table create path performs before deriving
+ * the schema.  An unbounded numeric or a numeric with precision > 38 cannot be
+ * an Iceberg decimal; the create path stores it as double, but only when
+ * pg_lake_iceberg.unsupported_numeric_as_double is enabled (see
+ * MaybeConvertUnsupportedNumericColumnsToDouble).  When it is disabled the
+ * numeric is left alone and maps to the "string" fallback.  Mirror both cases
+ * so this comparison matches the schema that would actually be built, rather
+ * than mistaking a large numeric for a genuine text type.
+ *
+ * This normalizes the top-level type only.  A nested unsupported numeric
+ * (inside an array or composite) is left alone here and maps to "string",
+ * whereas the create path converts it recursively.  Deriving the recursive
+ * form would mean rebuilding container types via ConvertTypeTree, which
+ * creates catalog types (GetOrCreatePGMapType and friends) as a side effect --
+ * inappropriate for a pure comparison.  The mismatch can only make two types
+ * that the create path would treat as equal compare unequal here; it never
+ * produces a false match.
+ */
+static void
+NormalizeTypeForIcebergSchema(Oid *typeOid, int32 *typeMod)
+{
+	if (UnsupportedNumericAsDouble &&
+		IsUnsupportedNumericForIceberg(*typeOid, *typeMod))
+	{
+		*typeOid = FLOAT8OID;
+		*typeMod = -1;
+	}
+}
+
+
+/*
+ * SameIcebergRepresentation - see the header comment in iceberg_field.h.
+ *
+ * Derives the Iceberg field for each type via PostgresTypeToIcebergField and
+ * compares the resulting field trees for type equality.
+ */
+bool
+SameIcebergRepresentation(Oid oldTypeOid, int32 oldTypeMod,
+						  Oid newTypeOid, int32 newTypeMod)
+{
+	int			oldSubFieldIndex = 0;
+	int			newSubFieldIndex = 0;
+
+	NormalizeTypeForIcebergSchema(&oldTypeOid, &oldTypeMod);
+	NormalizeTypeForIcebergSchema(&newTypeOid, &newTypeMod);
+
+	Field	   *oldField = PostgresTypeToIcebergField(MakePGType(oldTypeOid, oldTypeMod),
+													  false, &oldSubFieldIndex);
+	Field	   *newField = PostgresTypeToIcebergField(MakePGType(newTypeOid, newTypeMod),
+													  false, &newSubFieldIndex);
+
+	return SameIcebergFieldType(oldField, newField);
+}

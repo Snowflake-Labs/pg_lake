@@ -27,6 +27,29 @@ extern PGDLLEXPORT PGType IcebergFieldToPostgresType(Field * field);
 extern PGDLLEXPORT Field * PostgresTypeToIcebergField(PGType pgType,
 													  bool forAddColumn,
 													  int *subFieldIndex);
+
+/*
+ * SameIcebergRepresentation - Return true when two Postgres column types map to
+ * the same Iceberg representation, i.e. PostgresTypeToIcebergField derives an
+ * identical Iceberg type for both (ignoring field ids and default values).
+ *
+ * This is true for pairs that differ only in a way Iceberg does not model:
+ * varchar length changes and text/varchar/char (all Iceberg `string`),
+ * smallint vs integer (both `int`), time vs timetz (both `time`), bytea vs
+ * geometry (both `binary`), and so on.  A top-level unsupported numeric is
+ * normalized the way the create path stores it (double when
+ * pg_lake_iceberg.unsupported_numeric_as_double is on, otherwise the "string"
+ * fallback), so a large numeric is not mistaken for text.
+ *
+ * A caller can use this to decide whether an ALTER COLUMN ... TYPE leaves the
+ * stored Iceberg schema unchanged.  It does not decide whether such a change is
+ * otherwise permitted (casts, USING clauses, engine policy) -- that is the
+ * caller's concern.
+ */
+extern PGDLLEXPORT bool SameIcebergRepresentation(Oid oldTypeOid,
+												  int32 oldTypeMod,
+												  Oid newTypeOid,
+												  int32 newTypeMod);
 extern PGDLLEXPORT void EnsureIcebergField(Field * field);
 extern PGDLLEXPORT const char *IcebergTypeNameToDuckdbTypeName(const char *icebergTypeName);
 extern PGDLLEXPORT DataFileSchema * CreatePositionDeleteDataFileSchema(void);
