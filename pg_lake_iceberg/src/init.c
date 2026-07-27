@@ -303,7 +303,7 @@ _PG_init(void)
 							   NULL,
 							   NULL,
 							   &RestCatalogHost,
-							   "http://localhost:8181",
+							   "http://localhost:8181/api/catalog",
 							   PGC_SUSET,
 							   GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							   NULL, NULL, NULL);
