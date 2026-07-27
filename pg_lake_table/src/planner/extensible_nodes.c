@@ -96,13 +96,19 @@ ReadUnsupportedPgLakeNode(READFUNC_ARGS)
 /*
  * PlannerRelationRestriction is transient planner bookkeeping. pg_lake does
  * not support reconstructing it from text, but PostgreSQL still calls nodeOut
- * when debug_print_plan is enabled. Core already emits the node type and
- * extensible-node name, so an empty callback is sufficient for diagnostic
- * output without defining a serialization format for the private fields.
+ * when debug_print_plan is enabled or a node is printed in the debugger. Emit
+ * the private fields to make that diagnostic output useful.
  */
 static void
 OutPlannerRelationRestriction(OUTFUNC_ARGS)
 {
+	const		PlannerRelationRestriction *node =
+		(const PlannerRelationRestriction *) raw_node;
+
+	appendStringInfoString(str, " :rte ");
+	outNode(str, node->rte);
+	appendStringInfoString(str, " :baseRestrictionList ");
+	outNode(str, node->baseRestrictionList);
 }
 
 

@@ -15,6 +15,7 @@ def test_debug_print_plan_with_lake_table(
         """
         CREATE SCHEMA test_debug_print_plan;
         CREATE TABLE test_debug_print_plan.test(i int) USING iceberg;
+        SET LOCAL client_min_messages TO LOG;
         SET LOCAL debug_print_plan TO ON;
         """,
         pg_conn,
@@ -39,7 +40,15 @@ def test_debug_print_plan_with_lake_table(
         for query in queries:
             explain = run_query(f"EXPLAIN {query}", pg_conn)
             assert expected_plan_node in str(explain)
+
+            pg_conn.notices.clear()
             assert run_query(query, pg_conn) == [[0]]
+
+            if full_pushdown == "on":
+                debug_plan = "\n".join(pg_conn.notices)
+                assert "PlannerRelationRestriction" in debug_plan
+                assert ":rte" in debug_plan
+                assert ":baseRestrictionList" in debug_plan
 
     pg_conn.rollback()
 
