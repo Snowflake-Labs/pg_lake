@@ -354,13 +354,13 @@ SET pg_lake_table.max_open_files_for_partitioned_write = 250;
 
 or raise `max_files_per_process` to more than `15000`. Changing `max_files_per_process` requires a PostgreSQL restart. Lowering `pg_lake_table.max_open_files_for_partitioned_write` causes partitions to be flushed sooner, which can produce smaller files.
 
-For eligible `INSERT ... SELECT` and `COPY FROM` statements, partitioned writes can instead be delegated to DuckDB:
+Partitioned write pushdown is disabled by default. For eligible `INSERT ... SELECT` and `COPY FROM` statements, enable it for the current session to delegate partitioned writes to DuckDB:
 
 ```sql
 SET pg_lake_table.enable_partitioned_write_pushdown = on;
 ```
 
-Partitioned write pushdown supports identity, `year`, `month`, `day`, and `hour` partition transforms. Statements using `bucket` or `truncate`, as well as statements that otherwise cannot be pushed down, use the staging-file path described above. DuckDB does not support target file size splitting together with partitioned write pushdown.
+This avoids PostgreSQL's staging-file path and its transient file descriptor limit. Partitioned write pushdown supports identity, `year`, `month`, `day`, and `hour` partition transforms. Statements using `bucket` or `truncate`, as well as statements that otherwise cannot be pushed down, use the staging-file path described above. DuckDB does not support target file size splitting together with partitioned write pushdown.
 
 ### Partition pruning
 Partition pruning is how Iceberg avoids scanning unnecessary data files. When you filter by a partition column (or one of its transforms), only the matching partition files are read — the rest are skipped entirely. The pruning happens at the file level, using Iceberg’s metadata.
