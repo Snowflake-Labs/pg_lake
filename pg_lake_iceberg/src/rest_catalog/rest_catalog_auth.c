@@ -246,11 +246,19 @@ FetchRestCatalogAccessToken(RestCatalogOptions * opts, char **accessToken, int *
 				 errhint("Set client_secret via a USER MAPPING or the "
 						 "pg_lake_iceberg.rest_catalog_client_secret GUC.")));
 
+	/*
+	 * opts->oauthHostPath (set via the oauth_endpoint server option) is
+	 * treated as a fully-qualified URL and used verbatim -- it is NOT
+	 * passed through ResolveRestCatalogBaseUri.  This is intentional: the
+	 * OAuth token endpoint is often on a different host from the catalog
+	 * (e.g. a separate IdP), so the mount-path normalization that applies
+	 * to rest_endpoint is not appropriate here.
+	 *
+	 * When oauthHostPath is absent the token URL is derived from the
+	 * already-normalized opts->host via REST_CATALOG_AUTH_TOKEN_PATH.
+	 */
 	char	   *accessTokenUrl = opts->oauthHostPath;
 
-	/*
-	 * if oauthHostPath is not set, use Polaris' default oauth token endpoint
-	 */
 	if (!accessTokenUrl || *accessTokenUrl == '\0')
 		accessTokenUrl = psprintf(REST_CATALOG_AUTH_TOKEN_PATH, opts->host);
 
