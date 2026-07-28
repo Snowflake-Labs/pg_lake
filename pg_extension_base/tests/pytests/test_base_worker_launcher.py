@@ -5,6 +5,18 @@ import time
 from utils_pytest import *
 
 
+def wait_until_equal(fn, expected, timeout=5.0, interval=0.05):
+    """Poll fn() until it equals `expected` or `timeout` seconds elapse; return
+    the last observed value.  Background workers act asynchronously, so a single
+    fixed sleep before asserting their effect is racy under CI load."""
+    value = fn()
+    deadline = time.monotonic() + timeout
+    while value != expected and time.monotonic() < deadline:
+        time.sleep(interval)
+        value = fn()
+    return value
+
+
 def test_server_start(superuser_conn):
     result = get_pg_extension_workers(superuser_conn)
     assert result[0]["datname"] == None
@@ -397,13 +409,17 @@ def test_oneshot_worker_catalog_row_removed(superuser_conn):
         "CREATE EXTENSION pg_extension_base_test_oneshot CASCADE", superuser_conn
     )
     superuser_conn.commit()
-    time.sleep(0.1)
 
-    # After completion the catalog row is gone -- no workers registered
-    worker_count = run_query(
-        "SELECT count(*) FROM extension_base.workers WHERE worker_name = 'pg_extension_base_test_oneshot_main_worker'",
-        superuser_conn,
-    )[0][0]
+    # The oneshot worker starts asynchronously, runs to completion, and removes
+    # its own catalog row.  Poll for the row to disappear rather than asserting
+    # after a single fixed sleep, which is racy under CI load.
+    def catalog_row_count():
+        return run_query(
+            "SELECT count(*) FROM extension_base.workers WHERE worker_name = 'pg_extension_base_test_oneshot_main_worker'",
+            superuser_conn,
+        )[0][0]
+
+    worker_count = wait_until_equal(catalog_row_count, 0)
     assert worker_count == 0
 
     run_command("DROP EXTENSION pg_extension_base_test_oneshot CASCADE", superuser_conn)
@@ -411,6 +427,11 @@ def test_oneshot_worker_catalog_row_removed(superuser_conn):
 
 
 def test_oneshot_worker_drop_database(superuser_conn):
+    # A predecessor that failed mid-transaction can leave this shared connection
+    # with an open transaction, which would make the autocommit switch below
+    # raise "set_session cannot be used inside a transaction".  Roll back first
+    # so the switch is always valid.
+    superuser_conn.rollback()
     superuser_conn.autocommit = True
 
     run_command("CREATE DATABASE other_oneshot", superuser_conn)
@@ -426,7 +447,12 @@ def test_oneshot_worker_drop_database(superuser_conn):
 
     run_command("DROP DATABASE other_oneshot", superuser_conn)
 
-    assert count_pg_extension_base_workers(superuser_conn) == 0
+    # DROP DATABASE terminates the worker asynchronously; poll for the count to
+    # settle rather than asserting after a single fixed sleep.
+    worker_count = wait_until_equal(
+        lambda: count_pg_extension_base_workers(superuser_conn), 0
+    )
+    assert worker_count == 0
 
     superuser_conn.autocommit = False
 
