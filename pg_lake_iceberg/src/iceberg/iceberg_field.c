@@ -159,10 +159,14 @@ static const char *GetIcebergJsonSerializedConstDefaultIfExists(const char *attr
 
 
 /*
- * PostgresTypeToIcebergField converts a PostgreSQL type ID and typemod
- * to an Iceberg Field.
+ * PostgresTypeToIcebergFieldInternal converts a PostgreSQL type ID and typemod
+ * to an Iceberg Field, recursing through arrays, composites and maps.  It backs
+ * both the plain PostgresTypeToIcebergField (convert == NULL) and the
+ * conversion-aware PostgresTypeToIcebergFieldConverted, which applies `convert`
+ * at every scalar leaf (passing its IcebergTypePosition) so a caller can mirror
+ * create-path / storage transforms.
  *
- * 2 use cases:
+ * 2 use cases for the plain form:
  * 1. When registering new fields from Postgres columns when CREATE TABLE
  *    or ALTER TABLE ADD COLUMN,
  * 2. When reading fields from internal catalog tables, we need to create
@@ -170,8 +174,10 @@ static const char *GetIcebergJsonSerializedConstDefaultIfExists(const char *attr
  *
  * Based on https://iceberg.apache.org/spec/#schemas
  */
-Field *
-PostgresTypeToIcebergField(PGType pgType, bool forAddColumn, int *subFieldIndex)
+static Field *
+PostgresTypeToIcebergFieldInternal(PGType pgType, bool forAddColumn, int *subFieldIndex,
+								   IcebergLeafConversionFn convert, void *convContext,
+								   IcebergTypePosition pos)
 {
 	Oid			typeId = pgType.postgresTypeOid;
 	int32		typeMod = pgType.postgresTypeMod;
@@ -202,8 +208,13 @@ PostgresTypeToIcebergField(PGType pgType, bool forAddColumn, int *subFieldIndex)
 
 		*subFieldIndex = field->field.list.elementId;
 		PGType		elementPGType = MakePGType(get_element_type(typeId), typeMod);
+		IcebergTypePosition elementPos = {pos.depth + 1, ICEBERG_POS_ARRAY_ELEMENT};
 
-		field->field.list.element = PostgresTypeToIcebergField(elementPGType, forAddColumn, subFieldIndex);
+		field->field.list.element = PostgresTypeToIcebergFieldInternal(elementPGType, forAddColumn, subFieldIndex,
+																	   convert, convContext, elementPos);
+
+		if (field->field.list.element == NULL)
+			return NULL;
 	}
 	else if (get_typtype(typeId) == TYPTYPE_COMPOSITE)
 	{
@@ -228,8 +239,16 @@ PostgresTypeToIcebergField(PGType pgType, bool forAddColumn, int *subFieldIndex)
 			structElementField->required = attr->attnotnull;
 
 			PGType		subFieldPGType = MakePGType(attr->atttypid, attr->atttypmod);
+			IcebergTypePosition subFieldPos = {pos.depth + 1, ICEBERG_POS_STRUCT_FIELD};
 
-			structElementField->type = PostgresTypeToIcebergField(subFieldPGType, forAddColumn, subFieldIndex);
+			structElementField->type = PostgresTypeToIcebergFieldInternal(subFieldPGType, forAddColumn, subFieldIndex,
+																		  convert, convContext, subFieldPos);
+
+			if (structElementField->type == NULL)
+			{
+				ReleaseTupleDesc(tupleDesc);
+				return NULL;
+			}
 
 			structElementField->writeDefault = GetIcebergJsonSerializedDefaultExpr(tupleDesc, attr->attnum, structElementField);
 
@@ -284,17 +303,48 @@ PostgresTypeToIcebergField(PGType pgType, bool forAddColumn, int *subFieldIndex)
 		field->field.map.keyId = *subFieldIndex + 1;
 		*subFieldIndex = field->field.map.keyId;
 
-		field->field.map.key = PostgresTypeToIcebergField(keyPgType, forAddColumn, subFieldIndex);
+		IcebergTypePosition keyPos = {pos.depth + 1, ICEBERG_POS_MAP_KEY};
+
+		field->field.map.key = PostgresTypeToIcebergFieldInternal(keyPgType, forAddColumn, subFieldIndex,
+																  convert, convContext, keyPos);
+
+		if (field->field.map.key == NULL)
+			return NULL;
 
 		PGType		valuePgType = GetMapValueType(typeId);
 
 		field->field.map.valueId = *subFieldIndex + 1;
 		*subFieldIndex = field->field.map.valueId;
-		field->field.map.value = PostgresTypeToIcebergField(valuePgType, forAddColumn, subFieldIndex);
+
+		IcebergTypePosition valuePos = {pos.depth + 1, ICEBERG_POS_MAP_VALUE};
+
+		field->field.map.value = PostgresTypeToIcebergFieldInternal(valuePgType, forAddColumn, subFieldIndex,
+																	convert, convContext, valuePos);
+
+		if (field->field.map.value == NULL)
+			return NULL;
+
 		field->field.map.valueRequired = false;
 	}
 	else
 	{
+		/*
+		 * Scalar leaf.  Give the caller's conversion the chance to substitute
+		 * the type that is actually stored here (e.g. an unsupported numeric
+		 * that the create path stores as double), position included so it can
+		 * apply depth-dependent rules.  An invalid Oid back means there is no
+		 * faithful stored representation for this leaf.
+		 */
+		if (convert != NULL)
+		{
+			PGType		converted = convert(MakePGType(typeId, typeMod), pos, convContext);
+
+			if (!OidIsValid(converted.postgresTypeOid))
+				return NULL;
+
+			pgType = converted;
+		}
+
 		char	   *icebergTypeName = PostgresBaseTypeIdToIcebergTypeName(pgType);
 
 		field->type = FIELD_TYPE_SCALAR;
@@ -304,6 +354,32 @@ PostgresTypeToIcebergField(PGType pgType, bool forAddColumn, int *subFieldIndex)
 	EnsureIcebergField(field);
 
 	return field;
+}
+
+
+/*
+ * PostgresTypeToIcebergField - derive the Iceberg field for a Postgres type,
+ * applying no leaf conversion.  See PostgresTypeToIcebergFieldConverted for the
+ * variant that mirrors create-path / storage transforms.
+ */
+Field *
+PostgresTypeToIcebergField(PGType pgType, bool forAddColumn, int *subFieldIndex)
+{
+	IcebergTypePosition top = {0, ICEBERG_POS_TOP};
+
+	return PostgresTypeToIcebergFieldInternal(pgType, forAddColumn, subFieldIndex,
+											  NULL, NULL, top);
+}
+
+
+Field *
+PostgresTypeToIcebergFieldConverted(PGType pgType, bool forAddColumn, int *subFieldIndex,
+									IcebergLeafConversionFn convert, void *context)
+{
+	IcebergTypePosition top = {0, ICEBERG_POS_TOP};
+
+	return PostgresTypeToIcebergFieldInternal(pgType, forAddColumn, subFieldIndex,
+											  convert, context, top);
 }
 
 
@@ -824,109 +900,4 @@ EnsureIcebergField(Field * field)
 	}
 
 #endif
-}
-
-
-/*
- * SameIcebergFieldType - Recursively compare two Iceberg Fields for type
- * equality, ignoring field ids and default values (which are assigned per
- * derivation and are irrelevant to the stored representation).
- */
-static bool
-SameIcebergFieldType(Field * a, Field * b)
-{
-	if (a->type != b->type)
-		return false;
-
-	switch (a->type)
-	{
-		case FIELD_TYPE_SCALAR:
-			return strcmp(a->field.scalar.typeName, b->field.scalar.typeName) == 0;
-
-		case FIELD_TYPE_LIST:
-			return a->field.list.elementRequired == b->field.list.elementRequired &&
-				SameIcebergFieldType(a->field.list.element, b->field.list.element);
-
-		case FIELD_TYPE_MAP:
-			return a->field.map.valueRequired == b->field.map.valueRequired &&
-				SameIcebergFieldType(a->field.map.key, b->field.map.key) &&
-				SameIcebergFieldType(a->field.map.value, b->field.map.value);
-
-		case FIELD_TYPE_STRUCT:
-			{
-				if (a->field.structType.nfields != b->field.structType.nfields)
-					return false;
-
-				for (size_t i = 0; i < a->field.structType.nfields; i++)
-				{
-					FieldStructElement *ea = &a->field.structType.fields[i];
-					FieldStructElement *eb = &b->field.structType.fields[i];
-
-					if (ea->required != eb->required ||
-						strcmp(ea->name, eb->name) != 0 ||
-						!SameIcebergFieldType(ea->type, eb->type))
-						return false;
-				}
-				return true;
-			}
-	}
-
-	return false;
-}
-
-
-/*
- * NormalizeTypeForIcebergSchema - Apply the top-level unsupported-numeric to
- * double conversion that the Iceberg-table create path performs before deriving
- * the schema.  An unbounded numeric or a numeric with precision > 38 cannot be
- * an Iceberg decimal; the create path stores it as double, but only when
- * pg_lake_iceberg.unsupported_numeric_as_double is enabled (see
- * MaybeConvertUnsupportedNumericColumnsToDouble).  When it is disabled the
- * numeric is left alone and maps to the "string" fallback.  Mirror both cases
- * so this comparison matches the schema that would actually be built, rather
- * than mistaking a large numeric for a genuine text type.
- *
- * This normalizes the top-level type only.  A nested unsupported numeric
- * (inside an array or composite) is left alone here and maps to "string",
- * whereas the create path converts it recursively.  Deriving the recursive
- * form would mean rebuilding container types via ConvertTypeTree, which
- * creates catalog types (GetOrCreatePGMapType and friends) as a side effect --
- * inappropriate for a pure comparison.  The mismatch can only make two types
- * that the create path would treat as equal compare unequal here; it never
- * produces a false match.
- */
-static void
-NormalizeTypeForIcebergSchema(Oid *typeOid, int32 *typeMod)
-{
-	if (UnsupportedNumericAsDouble &&
-		IsUnsupportedNumericForIceberg(*typeOid, *typeMod))
-	{
-		*typeOid = FLOAT8OID;
-		*typeMod = -1;
-	}
-}
-
-
-/*
- * SameIcebergRepresentation - see the header comment in iceberg_field.h.
- *
- * Derives the Iceberg field for each type via PostgresTypeToIcebergField and
- * compares the resulting field trees for type equality.
- */
-bool
-SameIcebergRepresentation(Oid oldTypeOid, int32 oldTypeMod,
-						  Oid newTypeOid, int32 newTypeMod)
-{
-	int			oldSubFieldIndex = 0;
-	int			newSubFieldIndex = 0;
-
-	NormalizeTypeForIcebergSchema(&oldTypeOid, &oldTypeMod);
-	NormalizeTypeForIcebergSchema(&newTypeOid, &newTypeMod);
-
-	Field	   *oldField = PostgresTypeToIcebergField(MakePGType(oldTypeOid, oldTypeMod),
-													  false, &oldSubFieldIndex);
-	Field	   *newField = PostgresTypeToIcebergField(MakePGType(newTypeOid, newTypeMod),
-													  false, &newSubFieldIndex);
-
-	return SameIcebergFieldType(oldField, newField);
 }
