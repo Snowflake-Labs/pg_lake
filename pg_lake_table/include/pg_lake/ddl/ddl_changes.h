@@ -21,6 +21,8 @@
 #include "nodes/pg_list.h"
 #include "nodes/parsenodes.h"
 
+#include "pg_lake/pgduck/type.h"
+
 /*
  * DDLOperationType describes a type of ddl operation, which
  * cause catalog modification and possibly iceberg metadata modification.
@@ -37,6 +39,7 @@ typedef enum DDLOperationType
 	DDL_COLUMN_DROP_NOT_NULL = 8,
 	DDL_TABLE_SET_PARTITION_BY = 9,
 	DDL_TABLE_DROP_PARTITION_BY = 10,
+	DDL_COLUMN_ALTER_TYPE = 11,
 }			DDLOperationType;
 
 /*
@@ -54,6 +57,9 @@ typedef struct IcebergDDLOperation
 
 	/* applicable for set/drop default */
 	const char *writeDefault;
+
+	/* applicable for alter column type */
+	PGType		newPgType;
 
 	/* applicable for create iceberg table */
 	bool		hasCustomLocation;
