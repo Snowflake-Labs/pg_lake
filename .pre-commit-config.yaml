@@ -4,7 +4,6 @@ repos:
   - id: pgindent
     name: pgindent
     entry: pgindent
-    stages: [pre-commit]
     pass_filenames: true
     language: system
     files: \.c|\.h
