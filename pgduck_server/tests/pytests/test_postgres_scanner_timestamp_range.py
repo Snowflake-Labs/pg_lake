@@ -44,8 +44,9 @@ def pg_timestamp_range_table(postgres):
         "INSERT INTO scanner_timestamp_range_tbl VALUES "
         "(1, '294276-12-31 23:59:59', '294276-12-31 23:59:59+00')"
     )
-    # This vendored scanner applies the outer filter after decoding the source
-    # batch, so keep valid controls separate from the deliberately invalid row.
+    # Unlike the newer upstream scanner regression, this vendored scanner
+    # applies the outer filter after decoding the source batch. Keep valid
+    # controls separate from the deliberately invalid row.
     cur.execute(
         "CREATE TABLE scanner_timestamp_control_tbl ("
         "  id integer PRIMARY KEY,"
@@ -75,6 +76,8 @@ def pg_timestamp_range_table(postgres):
 
 @pytest.fixture
 def timestamp_scanner_conn(pgduck_server):
+    # Expected errors would leave the shared pgduck_conn transaction aborted.
+    # Use a dedicated autocommit connection so each assertion is isolated.
     conn = psycopg2.connect(
         host=server_params.PGDUCK_UNIX_DOMAIN_PATH,
         port=server_params.PGDUCK_PORT,
@@ -116,6 +119,8 @@ def test_postgres_scan_rejects_out_of_range_timestamp(
 def test_postgres_scan_copy_rejects_out_of_range_timestamp(
     pg_timestamp_range_table, timestamp_scanner_conn, tmp_path
 ):
+    # A raw DuckDB COPY has no target Iceberg table whose
+    # out_of_range_values policy could authorize clamping.
     output_path = str(tmp_path / "timestamp_range.parquet").replace("'", "''")
     with pytest.raises(psycopg2.Error, match="timestamp out of range"):
         run_command(
@@ -130,15 +135,23 @@ def test_postgres_scan_copy_rejects_out_of_range_timestamp(
         )
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "290309-12-22 (BC)",
+        "5000-01-01 (BC)",
+    ],
+    ids=["arithmetic-underflow", "postgres-lower-bound"],
+)
 def test_postgres_binary_writer_rejects_out_of_range_timestamp(
-    timestamp_scanner_conn, tmp_path
+    timestamp_scanner_conn, tmp_path, value
 ):
     output_path = str(tmp_path / "timestamp_range.bin").replace("'", "''")
     with pytest.raises(psycopg2.Error, match="out of range for Postgres"):
         run_command(
             f"""
             COPY (
-                SELECT TIMESTAMP '290309-12-22 (BC)'
+                SELECT TIMESTAMP '{value}'
             ) TO '{output_path}' (FORMAT postgres_binary)
             """,
             timestamp_scanner_conn,

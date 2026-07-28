@@ -3,7 +3,8 @@ Reject PostgreSQL timestamps that cannot be represented safely.
 This ports duckdb/duckdb-postgres#530 to pg_lake's older vendored revision.
 PostgreSQL has a slightly wider timestamp range than DuckDB, so unchecked
 epoch conversion can overflow in either direction. Use checked arithmetic and
-the exact PostgreSQL bounds instead of silently wrapping.
+the exact PostgreSQL bounds instead of silently wrapping. Keep the vendored
+all-types round-trip within PostgreSQL's timestamp range.
 
 diff --git a/src/include/postgres_binary_reader.hpp b/src/include/postgres_binary_reader.hpp
 index 79ab24e..2cf0b43 100644
@@ -82,3 +83,31 @@ index f9049eb..0f7c111 100644
  
  #define NBASE      10000
  #define DEC_DIGITS 4 /* decimal digits per NBASE digit */
+diff --git a/test/sql/misc/postgres_binary.test b/test/sql/misc/postgres_binary.test
+--- a/test/sql/misc/postgres_binary.test
++++ b/test/sql/misc/postgres_binary.test
+@@ -14,3 +14,9 @@ ATTACH 'dbname=postgresscanner' AS s (TYPE POSTGRES)
++# DuckDB supports timestamps below PostgreSQL's minimum.
++statement error
++COPY (SELECT TIMESTAMP '290309-12-22 (BC)') TO '__TEST_DIR__/pg_binary.bin' (FORMAT postgres_binary);
++----
++out of range for Postgres
++
+ # straightforward integer copy
+ statement ok
+ COPY (SELECT i::INT AS i FROM range(100) t(i)) TO '__TEST_DIR__/pg_binary.bin' (FORMAT postgres_binary);
+@@ -32,8 +38,9 @@ statement ok
+ CREATE TABLE all_types_tbl AS
+ SELECT bool, smallint, int, bigint, float, double, dec_4_1, dec_9_4, dec_18_6, dec38_10,
+-	case when date < '1992-01-01' then '4712-01-01 (BC)' else '5874896-01-01' end as date, -- postgres has more constrained date ranges
+-	time,
+-	timestamp, interval, uuid, blob,
++	case when date < '1992-01-01' then '4712-01-01 (BC)' else '5874896-01-01' end as date, -- postgres has more constrained date ranges
++	time,
++	case when timestamp < TIMESTAMP '4713-01-01 (BC)' then TIMESTAMP '4713-01-01 (BC)' else timestamp end as timestamp, -- postgres has a more constrained lower timestamp bound
++	interval, uuid, blob,
+-	replace(varchar, chr(0), '') as varchar, -- postgres does not support null bytes in varchar columns
+-	blob, int_array, varchar_array
++	replace(varchar, chr(0), '') as varchar, -- postgres does not support null bytes in varchar columns
++	blob, int_array, varchar_array
+ FROM test_all_types()
