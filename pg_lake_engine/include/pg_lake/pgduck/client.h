@@ -46,6 +46,7 @@ extern PGDLLEXPORT PGresult *ExecuteQueryOnPGDuckConnection(PGDuckConnection * p
 extern PGDLLEXPORT PGresult *WaitForResult(PGDuckConnection * conn);
 extern PGDLLEXPORT PGresult *WaitForLastResult(PGDuckConnection * conn);
 extern PGDLLEXPORT void SendQueryToPGDuck(PGDuckConnection * conn, char *query);
+extern PGDLLEXPORT bool PGDuckResultHasError(PGresult *result);
 extern PGDLLEXPORT void CheckPGDuckResult(PGDuckConnection * conn, PGresult *result);
 extern PGDLLEXPORT void ThrowIfPGDuckResultHasError(PGDuckConnection * conn, PGresult *result);
 extern PGDLLEXPORT char *GetSingleValueFromPGDuck(char *query);

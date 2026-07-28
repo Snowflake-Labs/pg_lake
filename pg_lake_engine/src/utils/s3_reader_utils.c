@@ -20,6 +20,7 @@
 #include "libpq-fe.h"
 #include "miscadmin.h"
 
+#include "pg_extension_base/base_workers.h"
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/util/s3_reader_utils.h"
@@ -55,11 +56,14 @@ GetTextFromURI(const char *textFileUri)
  * cluster), so a fresh read may race the writer: DuckDB aborts a read whose S3
  * ETag changes mid-read (an error result), and an append-blob overwrite can be
  * read torn (incomplete, so the json_valid filter drops it to zero rows). Both
- * are transient, so we inspect the result and retry a bounded number of times
- * on a fresh connection. We deliberately do NOT catch an ereport to retry: that
- * would resume mid-query with unwound executor/snapshot state and crash the
- * backend. The last attempt reads without validation so a genuinely invalid
- * document surfaces its real error downstream instead of looping.
+ * are transient, so we inspect the result and retry a bounded number of times.
+ * Neither case breaks the pgduck connection (the error comes back as a result,
+ * not a lost connection), so we keep the same one across attempts; with the
+ * nocache prefix each attempt re-fetches from object storage. We deliberately
+ * do NOT catch an ereport to retry: that would resume mid-query with unwound
+ * executor/snapshot state and crash the backend. The last attempt reads without
+ * validation so a genuinely invalid document surfaces its real error downstream
+ * instead of looping.
  */
 char *
 GetJsonFromURINoCache(const char *jsonFileUri)
@@ -68,37 +72,39 @@ GetJsonFromURINoCache(const char *jsonFileUri)
 	char	   *validatingCommand = ReadValidJsonFileCommand(readPath);
 	char	   *plainCommand = ReadTextFileCommand(readPath);
 
-	for (int attempt = 1;; attempt++)
+	PGDuckConnection *pgDuckConn = GetPGDuckConnection();
+	PGresult   *volatile result = NULL;
+	char	   *content = NULL;
+
+	/* the connection outlives the retries; PQclear the result on every exit */
+	PG_TRY();
 	{
-		bool		lastAttempt = attempt >= NO_CACHE_JSON_READ_MAX_ATTEMPTS;
-		const char *command = lastAttempt ? plainCommand : validatingCommand;
-
-		PGDuckConnection *pgDuckConn = GetPGDuckConnection();
-		PGresult   *result = ExecuteQueryOnPGDuckConnection(pgDuckConn, command);
-
-		/*
-		 * a racing writer shows up as an error result or (torn read) zero
-		 * rows
-		 */
-		if (!lastAttempt &&
-			(PQresultStatus(result) != PGRES_TUPLES_OK || PQntuples(result) != 1))
+		for (int attempt = 1;; attempt++)
 		{
-			PQclear(result);
-			ReleasePGDuckConnection(pgDuckConn);
+			bool		lastAttempt = attempt >= NO_CACHE_JSON_READ_MAX_ATTEMPTS;
+			const char *command = lastAttempt ? plainCommand : validatingCommand;
 
-			/* brief, increasing backoff to let the concurrent writer finish */
-			pg_usleep(attempt * 25L * 1000L);
-			continue;
-		}
+			result = ExecuteQueryOnPGDuckConnection(pgDuckConn, command);
 
-		char	   *content;
+			/*
+			 * a racing writer shows up as an error result or (torn read) zero
+			 * rows
+			 */
+			if (!lastAttempt &&
+				(PGDuckResultHasError(result) || PQntuples(result) != 1))
+			{
+				PQclear(result);
+				result = NULL;
 
-		/*
-		 * make sure we PQclear the result (throws on a real error / bad row
-		 * count)
-		 */
-		PG_TRY();
-		{
+				/*
+				 * brief, increasing backoff to let the concurrent writer
+				 * finish
+				 */
+				LightSleep(attempt * 25L);
+				continue;
+			}
+
+			/* throws on a real error */
 			ThrowIfPGDuckResultHasError(pgDuckConn, result);
 
 			int			rowCount = PQntuples(result);
@@ -108,16 +114,17 @@ GetJsonFromURINoCache(const char *jsonFileUri)
 					 rowCount);
 
 			content = pstrdup(PQgetvalue(result, 0, 0));
+			break;
 		}
-		PG_FINALLY();
-		{
-			PQclear(result);
-			ReleasePGDuckConnection(pgDuckConn);
-		}
-		PG_END_TRY();
-
-		return content;
 	}
+	PG_FINALLY();
+	{
+		PQclear(result);
+		ReleasePGDuckConnection(pgDuckConn);
+	}
+	PG_END_TRY();
+
+	return content;
 }
 
 /*
