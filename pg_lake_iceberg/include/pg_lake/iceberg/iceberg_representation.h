@@ -55,11 +55,36 @@ extern PGDLLEXPORT void InitIcebergCreatePathContext(IcebergCreatePathContext * 
 extern PGDLLEXPORT void InitIcebergCreatePathContextFromGUC(IcebergCreatePathContext * context);
 
 /*
+ * DeriveIcebergStoredField - the Iceberg field the create path stores for
+ * `type` under `context`: the unsupported-numeric leaf conversion applied
+ * during derivation, then the compatibility storage mapping over the derived
+ * tree.  Returns NULL when the type has no faithful stored form (an unsupported
+ * numeric with the GUC off), so a comparison can never over-allow.
+ *
+ * This is the single-side primitive.  A caller that already holds the
+ * actually-stored field for a column -- e.g. from field_id_mappings of an
+ * existing Iceberg table -- should derive only the candidate type here and
+ * compare it against that persisted field with IcebergFieldsEquivalent.  That
+ * is immune to the GUC/derivation drift a two-sided re-derivation has, because
+ * only the new side is recomputed.
+ */
+extern PGDLLEXPORT Field * DeriveIcebergStoredField(PGType type,
+													const IcebergCreatePathContext * context);
+
+/*
+ * IcebergFieldsEquivalent - true when two derived Iceberg field trees are the
+ * same stored representation, ignoring field ids and defaults (which are
+ * per-derivation).  varchar length / text-family members collapse to `string`,
+ * smallint and integer to `int`, and so on.
+ */
+extern PGDLLEXPORT bool IcebergFieldsEquivalent(Field * a, Field * b);
+
+/*
  * SameIcebergStoredRepresentation - true when oldType and newType are stored
- * identically by the Iceberg create path under `context`.  It reproduces the
- * full stored schema: the unsupported-numeric leaf conversion during
- * derivation, then the compatibility storage mapping over the derived field
- * tree.
+ * identically by the Iceberg create path under `context`.  A convenience over
+ * DeriveIcebergStoredField + IcebergFieldsEquivalent that re-derives both
+ * sides; prefer comparing against a persisted field (see
+ * DeriveIcebergStoredField) when one is available.
  */
 extern PGDLLEXPORT bool SameIcebergStoredRepresentation(PGType oldType, PGType newType,
 														const IcebergCreatePathContext * context);

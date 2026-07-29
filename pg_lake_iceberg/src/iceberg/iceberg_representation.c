@@ -26,17 +26,18 @@
 #include "pg_lake/pgduck/type.h"
 
 
-static bool SameIcebergFieldType(Field * a, Field * b);
 static PGType IcebergCreatePathLeafConversion(PGType leafType, void *context);
 
 
 /*
- * SameIcebergFieldType - Recursively compare two Iceberg Fields for type
- * equality, ignoring field ids and default values (which are assigned per
- * derivation and are irrelevant to the stored representation).
+ * IcebergFieldsEquivalent - see iceberg_representation.h.
+ *
+ * Recursively compare two Iceberg Fields for type equality, ignoring field ids
+ * and default values (which are assigned per derivation and are irrelevant to
+ * the stored representation).
  */
-static bool
-SameIcebergFieldType(Field * a, Field * b)
+bool
+IcebergFieldsEquivalent(Field * a, Field * b)
 {
 	if (a->type != b->type)
 		return false;
@@ -48,12 +49,12 @@ SameIcebergFieldType(Field * a, Field * b)
 
 		case FIELD_TYPE_LIST:
 			return a->field.list.elementRequired == b->field.list.elementRequired &&
-				SameIcebergFieldType(a->field.list.element, b->field.list.element);
+				IcebergFieldsEquivalent(a->field.list.element, b->field.list.element);
 
 		case FIELD_TYPE_MAP:
 			return a->field.map.valueRequired == b->field.map.valueRequired &&
-				SameIcebergFieldType(a->field.map.key, b->field.map.key) &&
-				SameIcebergFieldType(a->field.map.value, b->field.map.value);
+				IcebergFieldsEquivalent(a->field.map.key, b->field.map.key) &&
+				IcebergFieldsEquivalent(a->field.map.value, b->field.map.value);
 
 		case FIELD_TYPE_STRUCT:
 			{
@@ -67,7 +68,7 @@ SameIcebergFieldType(Field * a, Field * b)
 
 					if (ea->required != eb->required ||
 						strcmp(ea->name, eb->name) != 0 ||
-						!SameIcebergFieldType(ea->type, eb->type))
+						!IcebergFieldsEquivalent(ea->type, eb->type))
 						return false;
 				}
 				return true;
@@ -97,40 +98,58 @@ InitIcebergCreatePathContextFromGUC(IcebergCreatePathContext * context)
 
 
 /*
+ * DeriveIcebergStoredField - see iceberg_representation.h.
+ *
+ * Reproduces the full create-path stored field for a single type: derive the
+ * Iceberg field applying the unsupported-numeric leaf conversion, then apply
+ * the compatibility storage mapping over the derived tree (nested uuid ->
+ * string, etc.).  Returns NULL when the numeric conversion reports an
+ * unrepresentable leaf (an unsupported numeric with the GUC off), so a caller
+ * comparing against a persisted field can never treat that as a match.
+ */
+Field *
+DeriveIcebergStoredField(PGType type, const IcebergCreatePathContext * context)
+{
+	int			subFieldIndex = 0;
+
+	/* the leaf conversion callback takes a non-const void *context */
+	IcebergCreatePathContext leafContext = *context;
+
+	Field	   *field = PostgresTypeToIcebergFieldConverted(type, false,
+															&subFieldIndex,
+															IcebergCreatePathLeafConversion,
+															&leafContext);
+
+	if (field == NULL)
+		return NULL;
+
+	ApplyCompatibilityStorageMapping(field, context->compatibilityMode);
+
+	return field;
+}
+
+
+/*
  * SameIcebergStoredRepresentation - see iceberg_representation.h.
  *
- * Reproduces the full create-path stored schema: derive each type applying the
- * unsupported-numeric leaf conversion, then apply the compatibility storage
- * mapping over the derived field tree (nested uuid -> string, etc.), then
- * compare.  A NULL field means the numeric conversion reported an
- * unrepresentable leaf, so the types are not equal.
+ * Derives the stored field for each type (see DeriveIcebergStoredField) and
+ * compares the two.  A NULL field means the numeric conversion reported an
+ * unrepresentable leaf, so the types are not equal.  Callers that hold the
+ * actually-stored field (e.g. from field_id_mappings) should instead derive
+ * only the new type and compare it against that persisted field, which is
+ * immune to GUC/derivation drift on the old side.
  */
 bool
 SameIcebergStoredRepresentation(PGType oldType, PGType newType,
 								const IcebergCreatePathContext * context)
 {
-	int			oldSubFieldIndex = 0;
-	int			newSubFieldIndex = 0;
-
-	/* the leaf conversion callback takes a non-const void *context */
-	IcebergCreatePathContext leafContext = *context;
-
-	Field	   *oldField = PostgresTypeToIcebergFieldConverted(oldType, false,
-															   &oldSubFieldIndex,
-															   IcebergCreatePathLeafConversion,
-															   &leafContext);
-	Field	   *newField = PostgresTypeToIcebergFieldConverted(newType, false,
-															   &newSubFieldIndex,
-															   IcebergCreatePathLeafConversion,
-															   &leafContext);
+	Field	   *oldField = DeriveIcebergStoredField(oldType, context);
+	Field	   *newField = DeriveIcebergStoredField(newType, context);
 
 	if (oldField == NULL || newField == NULL)
 		return false;
 
-	ApplyCompatibilityStorageMapping(oldField, context->compatibilityMode);
-	ApplyCompatibilityStorageMapping(newField, context->compatibilityMode);
-
-	return SameIcebergFieldType(oldField, newField);
+	return IcebergFieldsEquivalent(oldField, newField);
 }
 
 
@@ -139,7 +158,7 @@ SameIcebergStoredRepresentation(PGType oldType, PGType newType,
  * path's unsupported-numeric handling, applied at every scalar leaf while
  * deriving the stored field tree.  The unsupported-numeric rule is uniform
  * across nesting levels; the depth-dependent compatibility mapping is applied
- * separately, as a Field-tree pass, by SameIcebergStoredRepresentation (see
+ * separately, as a Field-tree pass, by DeriveIcebergStoredField (see
  * ApplyCompatibilityStorageMapping).
  */
 static PGType
