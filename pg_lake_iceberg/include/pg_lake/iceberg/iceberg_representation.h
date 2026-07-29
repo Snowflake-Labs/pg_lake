@@ -24,28 +24,6 @@
 #include "pg_lake/pgduck/compatibility_mode.h"
 
 /*
- * SameIcebergRepresentation - true when oldType and newType are stored with an
- * identical Iceberg representation, after applying `convert` at every scalar
- * leaf of each type.  It is true for pairs that differ only in ways Iceberg
- * does not model (text length, which text-family member, field ids, defaults):
- * varchar length changes and text/varchar/char (all `string`), smallint vs
- * integer (both `int`), time vs timetz (both `time`), and so on.
- *
- * This is the low-level primitive: it applies only the given leaf conversion.
- * `convert` may be NULL to compare the raw derivations.  When it reports that
- * either type has no faithful stored representation (see
- * IcebergLeafConversionFn), the two are treated as different so a caller can
- * never over-allow.  Most callers want SameIcebergStoredRepresentation, which
- * layers in the create path's compatibility storage mapping as well.
- *
- * It answers only the representation question; it does not decide whether a
- * type change is otherwise permitted (casts, USING clauses, engine policy).
- */
-extern PGDLLEXPORT bool SameIcebergRepresentation(PGType oldType, PGType newType,
-												  IcebergLeafConversionFn convert,
-												  void *context);
-
-/*
  * IcebergCreatePathContext captures the two settings that shape how the Iceberg
  * create path physically stores a column, so a comparison can reproduce the
  * stored schema faithfully:
@@ -75,18 +53,6 @@ extern PGDLLEXPORT void InitIcebergCreatePathContext(IcebergCreatePathContext * 
 													 bool unsupportedNumericAsDouble,
 													 IcebergCompatibilityMode compatibilityMode);
 extern PGDLLEXPORT void InitIcebergCreatePathContextFromGUC(IcebergCreatePathContext * context);
-
-/*
- * Stock leaf conversion mirroring the create path's unsupported-numeric
- * handling.  Depth-independent (an unsupported numeric is stored as double, or
- * unrepresentable, at every level); the IcebergTypePosition is part of the
- * callback contract for callers whose leaf rules do vary by nesting.  The
- * compatibility storage mapping is applied separately, as a Field-tree pass, by
- * SameIcebergStoredRepresentation -- see ApplyCompatibilityStorageMapping.
- */
-extern PGDLLEXPORT PGType IcebergCreatePathLeafConversion(PGType leafType,
-														  IcebergTypePosition pos,
-														  void *context);
 
 /*
  * SameIcebergStoredRepresentation - true when oldType and newType are stored

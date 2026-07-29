@@ -4,8 +4,8 @@ from utils_pytest import *
 
 @pytest.fixture(scope="module")
 def same_iceberg_representation_fn(superuser_conn, iceberg_extension):
-    """Register a SQL wrapper over the exported SameIcebergRepresentation C
-    function so the tests can exercise it with plain type strings."""
+    """Register a SQL wrapper over the exported SameIcebergStoredRepresentation
+    C function so the tests can exercise it with plain type strings."""
     run_command(
         """
         CREATE OR REPLACE FUNCTION lake_iceberg.same_iceberg_representation(

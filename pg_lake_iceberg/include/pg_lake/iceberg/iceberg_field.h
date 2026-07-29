@@ -29,45 +29,21 @@ extern PGDLLEXPORT Field * PostgresTypeToIcebergField(PGType pgType,
 													  int *subFieldIndex);
 
 /*
- * A leaf conversion callback lets a caller mirror storage transforms that the
- * Iceberg-table create path applies (e.g. unsupported-numeric to double), and
- * that a layer above pg_lake such as snowflake_cdc adds on top (e.g.
- * compatibility-mode shaping), without pg_lake having to model any of those
- * policies.  It is invoked at every scalar leaf while deriving the in-memory
- * Iceberg field tree.
+ * A leaf conversion lets iceberg_representation.c reproduce the storage
+ * transforms the Iceberg-table create path applies (e.g. an unsupported numeric
+ * stored as double) while it derives the in-memory Iceberg field tree, without
+ * baking that create-path policy into the structural derivation here.  It is
+ * invoked at every scalar leaf.
  *
- * IcebergTypePosition tells the callback where the leaf sits: depth 0 is the
- * top-level column type, and parent names the immediately enclosing container.
- * Storage rules that vary by nesting (a nested uuid stored as string under a
- * compatibility mode, say) need this to decide correctly.
+ * Given a scalar Postgres type, it returns the Postgres type whose Iceberg
+ * representation is actually stored there: the input unchanged to leave it
+ * alone, or a PGType with an invalid Oid to signal that the create path has no
+ * faithful stored representation for this leaf -- derivation then yields a NULL
+ * field so a comparison can never over-allow.  It must be free of catalog side
+ * effects (it runs while building in-memory Field structs, not real Postgres
+ * types).
  */
-typedef enum IcebergParentKind
-{
-	ICEBERG_POS_TOP,
-	ICEBERG_POS_ARRAY_ELEMENT,
-	ICEBERG_POS_MAP_KEY,
-	ICEBERG_POS_MAP_VALUE,
-	ICEBERG_POS_STRUCT_FIELD
-}			IcebergParentKind;
-
-typedef struct IcebergTypePosition
-{
-	int			depth;			/* 0 == top-level column type */
-	IcebergParentKind parent;	/* immediately enclosing container */
-}			IcebergTypePosition;
-
-/*
- * Given a scalar Postgres type at a position, return the Postgres type whose
- * Iceberg representation is actually stored there.  Return the input unchanged
- * to leave it alone, or a PGType with an invalid Oid to signal that the create
- * path has no faithful stored representation for this leaf -- derivation then
- * yields a NULL field so a comparison can never over-allow.  Must be free of
- * catalog side effects (it runs while building in-memory Field structs, not
- * real Postgres types).
- */
-typedef PGType(*IcebergLeafConversionFn) (PGType leafType,
-										  IcebergTypePosition pos,
-										  void *context);
+typedef PGType(*IcebergLeafConversionFn) (PGType leafType, void *context);
 
 /*
  * Like PostgresTypeToIcebergField, but applies `convert` (with `context`) at

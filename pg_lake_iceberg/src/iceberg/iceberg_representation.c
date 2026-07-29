@@ -27,34 +27,7 @@
 
 
 static bool SameIcebergFieldType(Field * a, Field * b);
-
-
-/*
- * SameIcebergRepresentation - see iceberg_representation.h.
- *
- * Derives the Iceberg field tree for each type (applying `convert` at every
- * scalar leaf) and compares the trees for type equality.  A NULL field means
- * `convert` reported an unrepresentable leaf, so the types are not equal.
- */
-bool
-SameIcebergRepresentation(PGType oldType, PGType newType,
-						  IcebergLeafConversionFn convert, void *context)
-{
-	int			oldSubFieldIndex = 0;
-	int			newSubFieldIndex = 0;
-
-	Field	   *oldField = PostgresTypeToIcebergFieldConverted(oldType, false,
-															   &oldSubFieldIndex,
-															   convert, context);
-	Field	   *newField = PostgresTypeToIcebergFieldConverted(newType, false,
-															   &newSubFieldIndex,
-															   convert, context);
-
-	if (oldField == NULL || newField == NULL)
-		return false;
-
-	return SameIcebergFieldType(oldField, newField);
-}
+static PGType IcebergCreatePathLeafConversion(PGType leafType, void *context);
 
 
 /*
@@ -162,16 +135,17 @@ SameIcebergStoredRepresentation(PGType oldType, PGType newType,
 
 
 /*
- * IcebergCreatePathLeafConversion - stock leaf conversion mirroring the Iceberg
- * create path's unsupported-numeric handling.  See iceberg_representation.h.
+ * IcebergCreatePathLeafConversion - leaf conversion mirroring the Iceberg create
+ * path's unsupported-numeric handling, applied at every scalar leaf while
+ * deriving the stored field tree.  The unsupported-numeric rule is uniform
+ * across nesting levels; the depth-dependent compatibility mapping is applied
+ * separately, as a Field-tree pass, by SameIcebergStoredRepresentation (see
+ * ApplyCompatibilityStorageMapping).
  */
-PGType
-IcebergCreatePathLeafConversion(PGType leafType, IcebergTypePosition pos, void *context)
+static PGType
+IcebergCreatePathLeafConversion(PGType leafType, void *context)
 {
 	IcebergCreatePathContext *createContext = (IcebergCreatePathContext *) context;
-
-	/* numeric handling is uniform across nesting levels; position is unused */
-	(void) pos;
 
 	if (!IsUnsupportedNumericForIceberg(leafType.postgresTypeOid,
 										leafType.postgresTypeMod))

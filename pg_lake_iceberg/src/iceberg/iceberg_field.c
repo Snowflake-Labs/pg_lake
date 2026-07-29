@@ -163,8 +163,8 @@ static const char *GetIcebergJsonSerializedConstDefaultIfExists(const char *attr
  * to an Iceberg Field, recursing through arrays, composites and maps.  It backs
  * both the plain PostgresTypeToIcebergField (convert == NULL) and the
  * conversion-aware PostgresTypeToIcebergFieldConverted, which applies `convert`
- * at every scalar leaf (passing its IcebergTypePosition) so a caller can mirror
- * create-path / storage transforms.
+ * at every scalar leaf so iceberg_representation.c can mirror create-path
+ * storage transforms.
  *
  * 2 use cases for the plain form:
  * 1. When registering new fields from Postgres columns when CREATE TABLE
@@ -176,8 +176,7 @@ static const char *GetIcebergJsonSerializedConstDefaultIfExists(const char *attr
  */
 static Field *
 PostgresTypeToIcebergFieldInternal(PGType pgType, bool forAddColumn, int *subFieldIndex,
-								   IcebergLeafConversionFn convert, void *convContext,
-								   IcebergTypePosition pos)
+								   IcebergLeafConversionFn convert, void *convContext)
 {
 	Oid			typeId = pgType.postgresTypeOid;
 	int32		typeMod = pgType.postgresTypeMod;
@@ -208,10 +207,9 @@ PostgresTypeToIcebergFieldInternal(PGType pgType, bool forAddColumn, int *subFie
 
 		*subFieldIndex = field->field.list.elementId;
 		PGType		elementPGType = MakePGType(get_element_type(typeId), typeMod);
-		IcebergTypePosition elementPos = {pos.depth + 1, ICEBERG_POS_ARRAY_ELEMENT};
 
 		field->field.list.element = PostgresTypeToIcebergFieldInternal(elementPGType, forAddColumn, subFieldIndex,
-																	   convert, convContext, elementPos);
+																	   convert, convContext);
 
 		if (field->field.list.element == NULL)
 			return NULL;
@@ -239,10 +237,9 @@ PostgresTypeToIcebergFieldInternal(PGType pgType, bool forAddColumn, int *subFie
 			structElementField->required = attr->attnotnull;
 
 			PGType		subFieldPGType = MakePGType(attr->atttypid, attr->atttypmod);
-			IcebergTypePosition subFieldPos = {pos.depth + 1, ICEBERG_POS_STRUCT_FIELD};
 
 			structElementField->type = PostgresTypeToIcebergFieldInternal(subFieldPGType, forAddColumn, subFieldIndex,
-																		  convert, convContext, subFieldPos);
+																		  convert, convContext);
 
 			if (structElementField->type == NULL)
 			{
@@ -303,10 +300,8 @@ PostgresTypeToIcebergFieldInternal(PGType pgType, bool forAddColumn, int *subFie
 		field->field.map.keyId = *subFieldIndex + 1;
 		*subFieldIndex = field->field.map.keyId;
 
-		IcebergTypePosition keyPos = {pos.depth + 1, ICEBERG_POS_MAP_KEY};
-
 		field->field.map.key = PostgresTypeToIcebergFieldInternal(keyPgType, forAddColumn, subFieldIndex,
-																  convert, convContext, keyPos);
+																  convert, convContext);
 
 		if (field->field.map.key == NULL)
 			return NULL;
@@ -316,10 +311,8 @@ PostgresTypeToIcebergFieldInternal(PGType pgType, bool forAddColumn, int *subFie
 		field->field.map.valueId = *subFieldIndex + 1;
 		*subFieldIndex = field->field.map.valueId;
 
-		IcebergTypePosition valuePos = {pos.depth + 1, ICEBERG_POS_MAP_VALUE};
-
 		field->field.map.value = PostgresTypeToIcebergFieldInternal(valuePgType, forAddColumn, subFieldIndex,
-																	convert, convContext, valuePos);
+																	convert, convContext);
 
 		if (field->field.map.value == NULL)
 			return NULL;
@@ -329,15 +322,14 @@ PostgresTypeToIcebergFieldInternal(PGType pgType, bool forAddColumn, int *subFie
 	else
 	{
 		/*
-		 * Scalar leaf.  Give the caller's conversion the chance to substitute
-		 * the type that is actually stored here (e.g. an unsupported numeric
-		 * that the create path stores as double), position included so it can
-		 * apply depth-dependent rules.  An invalid Oid back means there is no
-		 * faithful stored representation for this leaf.
+		 * Scalar leaf.  Give the conversion the chance to substitute the type
+		 * that is actually stored here (e.g. an unsupported numeric that the
+		 * create path stores as double).  An invalid Oid back means there is
+		 * no faithful stored representation for this leaf.
 		 */
 		if (convert != NULL)
 		{
-			PGType		converted = convert(MakePGType(typeId, typeMod), pos, convContext);
+			PGType		converted = convert(MakePGType(typeId, typeMod), convContext);
 
 			if (!OidIsValid(converted.postgresTypeOid))
 				return NULL;
@@ -365,10 +357,8 @@ PostgresTypeToIcebergFieldInternal(PGType pgType, bool forAddColumn, int *subFie
 Field *
 PostgresTypeToIcebergField(PGType pgType, bool forAddColumn, int *subFieldIndex)
 {
-	IcebergTypePosition top = {0, ICEBERG_POS_TOP};
-
 	return PostgresTypeToIcebergFieldInternal(pgType, forAddColumn, subFieldIndex,
-											  NULL, NULL, top);
+											  NULL, NULL);
 }
 
 
@@ -376,10 +366,8 @@ Field *
 PostgresTypeToIcebergFieldConverted(PGType pgType, bool forAddColumn, int *subFieldIndex,
 									IcebergLeafConversionFn convert, void *context)
 {
-	IcebergTypePosition top = {0, ICEBERG_POS_TOP};
-
 	return PostgresTypeToIcebergFieldInternal(pgType, forAddColumn, subFieldIndex,
-											  convert, context, top);
+											  convert, context);
 }
 
 
