@@ -48,6 +48,15 @@ typedef struct TableMetadataOperationTracker
 	 * commit-time ANALYZE regardless of dataFileChangeCount.
 	 */
 	bool		forceCommitTimeAnalyze;
+
+	/*
+	 * Extra key/value properties (a List of Property *) to merge into the
+	 * summary of the Iceberg snapshot created for this relation at commit
+	 * time, populated via AddIcebergSnapshotSummaryProperties(). Allocated in
+	 * the same memory context as the tracker hash so it survives until the
+	 * commit-time flush. NIL when nothing extra was requested.
+	 */
+	List	   *extraSummaryProperties;
 }			TableMetadataOperationTracker;
 
 extern PGDLLEXPORT int CommitTimeCatalogAnalyzeThreshold;
@@ -55,6 +64,7 @@ extern PGDLLEXPORT int CommitTimeCatalogAnalyzeThreshold;
 extern PGDLLEXPORT void ConsumeTrackedIcebergMetadataChanges(bool isVerbose);
 extern PGDLLEXPORT void PostAllRestCatalogRequests(void);
 extern PGDLLEXPORT void TrackIcebergMetadataChangesInTx(Oid relationId, List *metadataOperationTypes);
+extern PGDLLEXPORT void AddIcebergSnapshotSummaryProperties(Oid relationId, List *properties);
 extern PGDLLEXPORT void RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationType,
 													 const char *body);
 extern PGDLLEXPORT void ResetTrackedIcebergMetadataOperation(void);

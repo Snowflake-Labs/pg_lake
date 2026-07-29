@@ -547,6 +547,73 @@ RecordIcebergMetadataOperation(Oid relationId, TableMetadataOperationType operat
 
 
 /*
+ * AddIcebergSnapshotSummaryProperties records extra key/value properties to
+ * merge into the summary of the Iceberg snapshot that will be created for the
+ * given relation at commit time. Each element of properties is a Property *.
+ *
+ * Properties are copied into TopTransactionContext (the same context as the
+ * tracker hash), so the caller may build them in any (even transient) context.
+ * The reserved "operation" key is controlled by pg_lake and is dropped here so
+ * it can never override the snapshot operation. Properties with a NULL key or
+ * value are ignored.
+ *
+ * The properties surface verbatim in the Iceberg snapshot summary map in
+ * metadata.json, which downstream readers (e.g. Snowflake's
+ * SYSTEM$AUTO_REFRESH_STATUS() currentSnapshotSummary) expose as-is.
+ */
+void
+AddIcebergSnapshotSummaryProperties(Oid relationId, List *properties)
+{
+	if (properties == NIL)
+		return;
+
+	InitTableMetadataTrackerHashIfNeeded();
+
+	bool		isFound = false;
+	TableMetadataOperationTracker *opTracker =
+		hash_search(TrackedIcebergMetadataOperationsHash,
+					&relationId, HASH_ENTER, &isFound);
+
+	if (!isFound)
+	{
+		memset(opTracker, 0, sizeof(TableMetadataOperationTracker));
+		opTracker->relationId = relationId;
+	}
+
+	/*
+	 * The tracker hash lives in TopTransactionContext and is read by the
+	 * commit-time flush, so the copied properties must live there too.
+	 */
+	MemoryContext oldContext = MemoryContextSwitchTo(TopTransactionContext);
+	ListCell   *propertyCell = NULL;
+
+	foreach(propertyCell, properties)
+	{
+		Property   *source = (Property *) lfirst(propertyCell);
+
+		if (source->key == NULL || source->value == NULL)
+			continue;
+
+		/* "operation" is reserved for pg_lake and cannot be overridden */
+		if (strcmp(source->key, "operation") == 0)
+			continue;
+
+		Property   *copy = palloc0(sizeof(Property));
+
+		copy->key = pstrdup(source->key);
+		copy->key_length = strlen(source->key);
+		copy->value = pstrdup(source->value);
+		copy->value_length = strlen(source->value);
+
+		opTracker->extraSummaryProperties =
+			lappend(opTracker->extraSummaryProperties, copy);
+	}
+
+	MemoryContextSwitchTo(oldContext);
+}
+
+
+/*
  * InitTableMetadataTrackerHashIfNeeded is a helper function to manage the initialization
  * of the hash. We allocate the hash and entries in TopTransactionContext.
  */
@@ -988,7 +1055,7 @@ ApplyTrackedIcebergMetadataChanges(bool isVerbose)
 		if (metadataOperations != NIL)
 		{
 			int			maxSnapshotAgeInSecs = GetEffectiveMaxSnapshotAgeInSecs(relationId);
-			List	   *restRequests = ApplyIcebergMetadataChanges(relationId, metadataOperations, allTransforms, maxSnapshotAgeInSecs, isVerbose);
+			List	   *restRequests = ApplyIcebergMetadataChangesExt(relationId, metadataOperations, allTransforms, maxSnapshotAgeInSecs, isVerbose, opTracker->extraSummaryProperties);
 			ListCell   *requestCell = NULL;
 
 			foreach(requestCell, restRequests)

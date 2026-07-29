@@ -103,6 +103,12 @@ typedef struct IcebergSnapshotBuilder
 
 	/* snapshot operation */
 	SnapshotOperation operation;
+
+	/*
+	 * extra properties (List of Property *) to merge into the new snapshot's
+	 * summary, in addition to the mandatory "operation" key.
+	 */
+	List	   *extraSummaryProperties;
 }			IcebergSnapshotBuilder;
 
 
@@ -116,8 +122,10 @@ typedef struct PartitionSpecManifestsEntries
 	List	   *manifestEntries;
 }			PartitionSpecManifestsEntries;
 
-static IcebergSnapshotBuilder * CreateIcebergSnapshotBuilder(IcebergTableMetadata * metadata, List *metadataOperations);
-static void SetSnapshotOperation(IcebergSnapshot * snapshot, SnapshotOperation operation);
+static IcebergSnapshotBuilder * CreateIcebergSnapshotBuilder(IcebergTableMetadata * metadata, List *metadataOperations,
+															 List *extraSummaryProperties);
+static void SetSnapshotSummary(IcebergSnapshot * snapshot, SnapshotOperation operation,
+							   List *extraProperties);
 static SnapshotOperation SnapshotOperationSummary(List *metadataOperations);
 static void ProcessIcebergMetadataOperations(Oid relationId, List *metadataOperations,
 											 IcebergSnapshotBuilder * builder);
@@ -154,10 +162,34 @@ static void DeleteInProgressManifests(Oid relationId, List *manifests);
 /*
  * ApplyIcebergMetadataChanges applies the given metadata operations to the
  * iceberg metadata for the given relation.
+ *
+ * This is a thin wrapper around ApplyIcebergMetadataChangesExt that adds no
+ * extra snapshot summary properties. It is kept as-is so existing callers do
+ * not have to change.
  */
 List *
 ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allTransforms,
 							int maxSnapshotAgeInSecs, bool isVerbose)
+{
+	return ApplyIcebergMetadataChangesExt(relationId, metadataOperations, allTransforms,
+										  maxSnapshotAgeInSecs, isVerbose, NIL);
+}
+
+
+/*
+ * ApplyIcebergMetadataChangesExt is like ApplyIcebergMetadataChanges but also
+ * merges the given extra properties (a List of Property *) into the summary of
+ * the snapshot created by this operation. The reserved "operation" key is
+ * always controlled by pg_lake and cannot be overridden by extraSummaryProperties.
+ *
+ * The extra properties surface verbatim in the Iceberg snapshot summary map in
+ * metadata.json, which downstream readers (e.g. Snowflake's
+ * SYSTEM$AUTO_REFRESH_STATUS() currentSnapshotSummary) expose as-is.
+ */
+List *
+ApplyIcebergMetadataChangesExt(Oid relationId, List *metadataOperations, List *allTransforms,
+							   int maxSnapshotAgeInSecs, bool isVerbose,
+							   List *extraSummaryProperties)
 {
 	List	   *restCatalogRequests = NIL;
 
@@ -226,7 +258,8 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 		}
 	}
 
-	IcebergSnapshotBuilder *builder = CreateIcebergSnapshotBuilder(metadata, metadataOperations);
+	IcebergSnapshotBuilder *builder = CreateIcebergSnapshotBuilder(metadata, metadataOperations,
+																   extraSummaryProperties);
 
 	ProcessIcebergMetadataOperations(relationId, metadataOperations, builder);
 
@@ -416,7 +449,8 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
  * of all the changes to the current snapshot.
  */
 static IcebergSnapshotBuilder *
-CreateIcebergSnapshotBuilder(IcebergTableMetadata * metadata, List *metadataOperations)
+CreateIcebergSnapshotBuilder(IcebergTableMetadata * metadata, List *metadataOperations,
+							 List *extraSummaryProperties)
 {
 	IcebergSnapshotBuilder *builder = palloc0(sizeof(IcebergSnapshotBuilder));
 
@@ -432,6 +466,7 @@ CreateIcebergSnapshotBuilder(IcebergTableMetadata * metadata, List *metadataOper
 	builder->positionalDeleteEntries = MakePartitionManifestEntryHash();
 
 	builder->operation = SnapshotOperationSummary(metadataOperations);
+	builder->extraSummaryProperties = extraSummaryProperties;
 
 	return builder;
 }
@@ -478,35 +513,68 @@ AddManifestEntryToHash(HTAB *hash, int32 partitionSpecId, IcebergManifestEntry *
 
 
 /*
-* SetSnapshotOperation sets the operation of the snapshot.
+* SetSnapshotSummary sets the summary of the snapshot.
+*
+* The mandatory "operation" key is always set by pg_lake. Any extraProperties
+* (a List of Property *) are appended after it, letting callers stamp custom
+* key/value pairs (e.g. a source LSN or data version) into the snapshot summary.
+* The reserved "operation" key cannot be overridden by extraProperties.
 */
 static void
-SetSnapshotOperation(IcebergSnapshot * snapshot, SnapshotOperation operation)
+SetSnapshotSummary(IcebergSnapshot * snapshot, SnapshotOperation operation,
+				   List *extraProperties)
 {
-	Property   *summary = palloc0(sizeof(Property));
+	int			nExtra = list_length(extraProperties);
+	Property   *summary = palloc0(sizeof(Property) * (1 + nExtra));
 
-	summary->key = "operation";
+	summary[0].key = "operation";
 
 	switch (operation)
 	{
 		case SNAPSHOT_OPERATION_APPEND:
-			summary->value = "append";
+			summary[0].value = "append";
 			break;
 		case SNAPSHOT_OPERATION_REPLACE:
-			summary->value = "replace";
+			summary[0].value = "replace";
 			break;
 		case SNAPSHOT_OPERATION_OVERWRITE:
-			summary->value = "overwrite";
+			summary[0].value = "overwrite";
 			break;
 		case SNAPSHOT_OPERATION_DELETE:
-			summary->value = "delete";
+			summary[0].value = "delete";
 			break;
 		default:
 			ereport(ERROR, (errmsg("Unsupported snapshot operation: %d", operation)));
 	}
 
+	int			summaryLength = 1;
+	ListCell   *propertyCell = NULL;
+
+	foreach(propertyCell, extraProperties)
+	{
+		Property   *property = (Property *) lfirst(propertyCell);
+
+		/*
+		 * Skip incomplete properties: summary values are always serialized as
+		 * strings and copied unconditionally (see CopyPropertiesArray), so a
+		 * NULL key or value is not representable.
+		 */
+		if (property->key == NULL || property->value == NULL)
+			continue;
+
+		/* "operation" is reserved for pg_lake and cannot be overridden */
+		if (strcmp(property->key, "operation") == 0)
+			continue;
+
+		summary[summaryLength].key = pstrdup(property->key);
+		summary[summaryLength].key_length = strlen(property->key);
+		summary[summaryLength].value = pstrdup(property->value);
+		summary[summaryLength].value_length = strlen(property->value);
+		summaryLength++;
+	}
+
 	snapshot->summary = summary;
-	snapshot->summary_length = 1;
+	snapshot->summary_length = summaryLength;
 }
 
 /*
@@ -1025,7 +1093,7 @@ FinalizeNewSnapshot(IcebergSnapshotBuilder * builder, Oid relationId, const char
 
 	DeleteInProgressManifests(relationId, newPersistedManifestList);
 
-	SetSnapshotOperation(newSnapshot, builder->operation);
+	SetSnapshotSummary(newSnapshot, builder->operation, builder->extraSummaryProperties);
 
 	/*
 	 * Write the manifest list file that contains the list of manifest files.
