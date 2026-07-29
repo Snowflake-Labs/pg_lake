@@ -224,6 +224,20 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 		if (isResultRelation)
 			fullMatches = PruneDataFiles(relationId, prunedDataFiles, baseRestrictInfoList, FULL_MATCH);
 
+		/*
+		 * fullMatches is produced by filtering prunedDataFiles in order, so
+		 * it is an ordered sublist and a tandem cursor suffices to mark the
+		 * fully matched files, instead of an O(files * matches)
+		 * list_member_ptr scan.
+		 *
+		 * The cursor only ever dereferences cells of fullMatches, so it
+		 * cannot mark a file that PruneDataFiles did not return. If that
+		 * ordering assumption were ever broken the cursor would desync and
+		 * leave files unmarked, which costs us the optimization but never
+		 * skips a file that still has rows to keep.
+		 */
+		ListCell   *fullMatchCell = list_head(fullMatches);
+
 		foreach_ptr(TableDataFile, dataFile, prunedDataFiles)
 		{
 			PgLakeFileScan *fileScan = palloc0(sizeof(PgLakeFileScan));
@@ -231,10 +245,18 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 			fileScan->path = dataFile->path;
 			fileScan->rowCount = dataFile->stats.rowCount;
 			fileScan->deletedRowCount = dataFile->stats.deletedRowCount;
-			fileScan->allRowsMatch = list_member_ptr(fullMatches, dataFile);
+
+			if (fullMatchCell != NULL && lfirst(fullMatchCell) == dataFile)
+			{
+				fileScan->allRowsMatch = true;
+				fullMatchCell = lnext(fullMatches, fullMatchCell);
+			}
 
 			fileScans = lappend(fileScans, fileScan);
 		}
+
+		/* every full match is in prunedDataFiles, so all cells were consumed */
+		Assert(fullMatchCell == NULL);
 
 		foreach_ptr(TableDataFile, deletionFile, positionDeleteFiles)
 		{
