@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Snowflake Inc.
+ * Copyright 2026 Snowflake Inc.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -59,9 +59,7 @@ extern PGDLLEXPORT void InitIcebergCreatePathContextFromGUC(IcebergCreatePathCon
  * identically by the Iceberg create path under `context`.  It reproduces the
  * full stored schema: the unsupported-numeric leaf conversion during
  * derivation, then the compatibility storage mapping over the derived field
- * tree.  This is what an ALTER-time caller (e.g. pg_lake_replication deciding
- * whether an ALTER COLUMN TYPE leaves the changelog schema unchanged) should
- * use.
+ * tree.
  */
 extern PGDLLEXPORT bool SameIcebergStoredRepresentation(PGType oldType, PGType newType,
 														const IcebergCreatePathContext * context);

@@ -145,10 +145,14 @@ def test_unsupported_numeric_double_when_enabled(
 ):
     """With unsupported_numeric_as_double on, an unsupported numeric is stored
     as double at every nesting level, so it matches another unsupported numeric
-    but not text."""
+    -- and an actual double, the type the create path converts it to -- but not
+    text."""
     assert _same(superuser_conn, "numeric(50,2)[]", "text[]", True) is False
     assert _same(superuser_conn, "numeric(50,2)[]", "numeric(60,3)[]", True) is True
     assert _same(superuser_conn, "numeric(50,2)", "numeric(60,3)", True) is True
+    # the converted leaf really is `double`, so it matches a genuine float8
+    assert _same(superuser_conn, "numeric(50,2)[]", "double precision[]", True) is True
+    assert _same(superuser_conn, "numeric[]", "double precision[]", True) is True
 
 
 def test_unsupported_numeric_not_representable_when_disabled(
@@ -191,3 +195,25 @@ def test_compatibility_auto_keeps_uuid_native(
     nested uuid and a nested text differ."""
     assert _same(superuser_conn, "uuid[]", "text[]") is False
     assert _same(superuser_conn, "uuid[]", "uuid[]") is True
+
+
+def test_composite_unsupported_numeric_matches_float8_composite(
+    superuser_conn, same_iceberg_representation_fn
+):
+    """The recursion also descends into composites: a composite whose field is an
+    unsupported numeric is stored as the same struct<double, ...> the create path
+    produces for a float8 field, so it matches a float8 composite but not a text
+    one."""
+    run_command("DROP TYPE IF EXISTS rep_num, rep_dbl, rep_txt;", superuser_conn)
+    run_command("CREATE TYPE rep_num AS (a numeric(50,2), b int);", superuser_conn)
+    run_command("CREATE TYPE rep_dbl AS (a double precision, b int);", superuser_conn)
+    run_command("CREATE TYPE rep_txt AS (a text, b int);", superuser_conn)
+    superuser_conn.commit()
+    try:
+        # numeric field -> double, matches a genuine float8 composite
+        assert _same(superuser_conn, "rep_num", "rep_dbl", True) is True
+        # but not a composite whose field is text (`string`)
+        assert _same(superuser_conn, "rep_num", "rep_txt", True) is False
+    finally:
+        run_command("DROP TYPE IF EXISTS rep_num, rep_dbl, rep_txt;", superuser_conn)
+        superuser_conn.commit()
