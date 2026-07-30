@@ -21,6 +21,9 @@
 #include "postgres.h"
 #include "miscadmin.h"
 
+#include <sys/stat.h>
+
+#include "commands/extension.h"
 #include "pg_extension_base/extension_control_file.h"
 #include "storage/fd.h"
 #include "utils/conffiles.h"
@@ -42,45 +45,109 @@ IsExtensionControlFilename(const char *filename)
 
 
 /*
- * GetExtensionControlDirectory returns the directory containing
- * .control files for extensions.
+ * GetExtensionControlDirectories returns the list of directories that can
+ * contain .control files for extensions, in the order in which PostgreSQL
+ * searches them.
+ *
+ * On PostgreSQL 18 and above, the directories come from the
+ * extension_control_path setting, which we interpret the same way as
+ * get_extension_control_directories() in the PostgreSQL source: the special
+ * value $system refers to the extension directory in the installation's
+ * share directory, while every other entry gets /extension appended.
+ *
+ * Before PostgreSQL 18 there is no such setting and control files can only
+ * live in the share directory.
  */
-char *
-GetExtensionControlDirectory(void)
+List *
+GetExtensionControlDirectories(void)
 {
 	char		sharepath[MAXPGPATH];
-	char	   *result;
 
 	get_share_path(my_exec_path, sharepath);
-	result = (char *) palloc(MAXPGPATH);
-	snprintf(result, MAXPGPATH, "%s/extension", sharepath);
 
-	return result;
+	char	   *systemDirectory = psprintf("%s/extension", sharepath);
+
+#if PG_VERSION_NUM >= 180000
+	if (Extension_control_path == NULL || Extension_control_path[0] == '\0')
+	{
+		return list_make1(systemDirectory);
+	}
+
+	List	   *directories = NIL;
+	char	   *remainder = Extension_control_path;
+
+	for (;;)
+	{
+		char	   *separator = first_path_var_separator(remainder);
+		int			entryLength = separator != NULL ?
+			(int) (separator - remainder) : (int) strlen(remainder);
+		char	   *entry = pnstrdup(remainder, entryLength);
+		char	   *directory = NULL;
+
+		if (strcmp(entry, "$system") == 0)
+		{
+			directory = systemDirectory;
+		}
+		else
+		{
+			directory = psprintf("%s/extension", entry);
+		}
+
+		pfree(entry);
+
+		canonicalize_path(directory);
+		directories = lappend(directories, directory);
+
+		if (remainder[entryLength] == '\0')
+		{
+			break;
+		}
+
+		/* skip past the separator and continue with the next entry */
+		remainder += entryLength + 1;
+	}
+
+	return directories;
+#else
+	return list_make1(systemDirectory);
+#endif
 }
 
 
 /*
- * GetExtensionControlFilename returns the .control file path
- * for a given extension.
+ * GetExtensionControlFilename returns the .control file path for a given
+ * extension, or NULL if the extension does not have a control file in any
+ * of the directories that PostgreSQL searches.
  */
 char *
 GetExtensionControlFilename(const char *extname)
 {
-	char		sharepath[MAXPGPATH];
-	char	   *result;
+	ListCell   *directoryCell = NULL;
 
-	get_share_path(my_exec_path, sharepath);
-	result = (char *) palloc(MAXPGPATH);
-	snprintf(result, MAXPGPATH, "%s/extension/%s.control",
-			 sharepath, extname);
+	foreach(directoryCell, GetExtensionControlDirectories())
+	{
+		char	   *directory = lfirst(directoryCell);
+		char	   *filename = psprintf("%s/%s.control", directory, extname);
+		struct stat statBuffer;
 
-	return result;
+		if (stat(filename, &statBuffer) == 0)
+		{
+			return filename;
+		}
+
+		pfree(filename);
+	}
+
+	return NULL;
 }
 
 
 /*
  * GetExtensionDependencyList returns a list of extension names from
  * the requires line of the extension control file.
+ *
+ * Returns an empty list if the extension is not installed, in which case
+ * we leave it to PostgreSQL to report the error.
  */
 List *
 GetExtensionDependencyList(char *extensionName)
@@ -89,19 +156,19 @@ GetExtensionDependencyList(char *extensionName)
 
 	char	   *filename = GetExtensionControlFilename(extensionName);
 
+	if (filename == NULL)
+	{
+		return NIL;
+	}
+
 	FILE	   *file;
 
 	if ((file = AllocateFile(filename, "r")) == NULL)
 	{
 		if (errno == ENOENT)
 		{
-			/* missing control file indicates extension is not installed */
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("extension \"%s\" is not available", extensionName),
-					 errdetail("Could not open extension control file \"%s\": %m.",
-							   filename),
-					 errhint("The extension must first be installed on the system where PostgreSQL is running.")));
+			/* control file disappeared after we found it */
+			return NIL;
 		}
 		ereport(ERROR,
 				(errcode_for_file_access(),

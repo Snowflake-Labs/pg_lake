@@ -47,9 +47,21 @@ typedef struct PreloadLibrary
 	char	   *libraryName;
 }			PreloadLibrary;
 
+/* ExtensionControlFileEntry represents the control file of one extension */
+typedef struct ExtensionControlFileEntry
+{
+	/* name of the extension */
+	char	   *extensionName;
+
+	/* path of the .control file of the extension */
+	char	   *filename;
+}			ExtensionControlFileEntry;
+
 /* internal functions */
 static List *FindAllPreloadLibraries(void);
-static List *FindExtensionPreloadLibraryNames(char *extensionName);
+static List *FindAllExtensionControlFiles(void);
+static bool HasExtensionControlFile(List *controlFiles, const char *extensionName);
+static List *FindExtensionPreloadLibraryNames(ExtensionControlFileEntry * controlFile);
 static List *AddPreloadLibrary(List *libraries, PreloadLibrary * preloadLibrary);
 
 /* SQL-callable functions */
@@ -86,39 +98,13 @@ static List *
 FindAllPreloadLibraries(void)
 {
 	List	   *libraries = NIL;
+	ListCell   *controlFileCell = NULL;
 
-	char	   *location = GetExtensionControlDirectory();
-	DIR		   *extensionDirectory = AllocateDir(location);
-	struct dirent *dirEntry;
-
-	if (extensionDirectory == NULL && errno == ENOENT)
+	foreach(controlFileCell, FindAllExtensionControlFiles())
 	{
-		/* extension directory does not exists (but we are in an extension?) */
-		return NIL;
-	}
+		ExtensionControlFileEntry *controlFile = lfirst(controlFileCell);
 
-	while ((dirEntry = ReadDir(extensionDirectory, location)) != NULL)
-	{
-		if (!IsExtensionControlFilename(dirEntry->d_name))
-		{
-			continue;
-		}
-
-		/* extract extension name from 'name.control' filename */
-		char	   *extensionName = pstrdup(dirEntry->d_name);
-
-		/* strip the file suffix */
-		char	   *dotPosition = strrchr(extensionName, '.');
-
-		*dotPosition = '\0';
-
-		if (strcmp(extensionName, "pg_extension_base") == 0)
-		{
-			/* we can skip ourselves, we're already being loaded */
-			continue;
-		}
-
-		List	   *libraryNames = FindExtensionPreloadLibraryNames(extensionName);
+		List	   *libraryNames = FindExtensionPreloadLibraryNames(controlFile);
 
 		if (libraryNames == NIL)
 		{
@@ -134,16 +120,106 @@ FindAllPreloadLibraries(void)
 
 			PreloadLibrary *preloadLibrary = palloc0(sizeof(PreloadLibrary));
 
-			preloadLibrary->extensionName = extensionName;
+			preloadLibrary->extensionName = controlFile->extensionName;
 			preloadLibrary->libraryName = libraryName;
 
 			libraries = AddPreloadLibrary(libraries, preloadLibrary);
 		}
 	}
 
-	FreeDir(extensionDirectory);
-
 	return libraries;
+}
+
+
+/*
+ * FindAllExtensionControlFiles returns the control file of every extension
+ * that is installed, except for pg_extension_base itself.
+ *
+ * Extensions can be installed in any of the directories that PostgreSQL
+ * searches for control files, and the same extension may appear in several
+ * of them. We only return the control file that PostgreSQL would use, which
+ * is the one in the first directory that has it.
+ */
+static List *
+FindAllExtensionControlFiles(void)
+{
+	List	   *controlFiles = NIL;
+	ListCell   *directoryCell = NULL;
+
+	foreach(directoryCell, GetExtensionControlDirectories())
+	{
+		char	   *location = lfirst(directoryCell);
+		DIR		   *extensionDirectory = AllocateDir(location);
+		struct dirent *dirEntry;
+
+		if (extensionDirectory == NULL && errno == ENOENT)
+		{
+			/* directory does not exist, so it has no extensions */
+			continue;
+		}
+
+		while ((dirEntry = ReadDir(extensionDirectory, location)) != NULL)
+		{
+			if (!IsExtensionControlFilename(dirEntry->d_name))
+			{
+				continue;
+			}
+
+			/* extract extension name from 'name.control' filename */
+			char	   *extensionName = pstrdup(dirEntry->d_name);
+
+			/* strip the file suffix */
+			char	   *dotPosition = strrchr(extensionName, '.');
+
+			*dotPosition = '\0';
+
+			if (strcmp(extensionName, "pg_extension_base") == 0)
+			{
+				/* we can skip ourselves, we're already being loaded */
+				continue;
+			}
+
+			if (HasExtensionControlFile(controlFiles, extensionName))
+			{
+				/* an earlier directory has this extension, which wins */
+				continue;
+			}
+
+			ExtensionControlFileEntry *controlFile = palloc0(sizeof(ExtensionControlFileEntry));
+
+			controlFile->extensionName = extensionName;
+			controlFile->filename = psprintf("%s/%s", location, dirEntry->d_name);
+
+			controlFiles = lappend(controlFiles, controlFile);
+		}
+
+		FreeDir(extensionDirectory);
+	}
+
+	return controlFiles;
+}
+
+
+/*
+ * HasExtensionControlFile returns whether the given list already contains a
+ * control file for the given extension.
+ */
+static bool
+HasExtensionControlFile(List *controlFiles, const char *extensionName)
+{
+	ListCell   *controlFileCell = NULL;
+
+	foreach(controlFileCell, controlFiles)
+	{
+		ExtensionControlFileEntry *controlFile = lfirst(controlFileCell);
+
+		if (strcmp(controlFile->extensionName, extensionName) == 0)
+		{
+			return true;
+		}
+	}
+
+	return false;
 }
 
 
@@ -163,9 +239,10 @@ FindAllPreloadLibraries(void)
  * module.
  */
 static List *
-FindExtensionPreloadLibraryNames(char *extensionName)
+FindExtensionPreloadLibraryNames(ExtensionControlFileEntry * controlFile)
 {
-	char	   *filename = GetExtensionControlFilename(extensionName);
+	char	   *extensionName = controlFile->extensionName;
+	char	   *filename = controlFile->filename;
 
 	FILE	   *file;
 
@@ -173,13 +250,8 @@ FindExtensionPreloadLibraryNames(char *extensionName)
 	{
 		if (errno == ENOENT)
 		{
-			/* missing control file indicates extension is not installed */
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("extension \"%s\" is not available", extensionName),
-					 errdetail("Could not open extension control file \"%s\": %m.",
-							   filename),
-					 errhint("The extension must first be installed on the system where PostgreSQL is running.")));
+			/* control file disappeared after we listed the directory */
+			return NIL;
 		}
 		ereport(ERROR,
 				(errcode_for_file_access(),
