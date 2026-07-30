@@ -694,22 +694,29 @@ ChooseDuckDBEngineTypeForWrite(PGType postgresType,
 		return VARCHAR_TYPE;
 
 	int32		postgresTypeMod = postgresType.postgresTypeMod;
-	Oid			elementTypeId = get_element_type(postgresType.postgresTypeOid);
-	bool		isArrayType = OidIsValid(elementTypeId);
 	char	   *typeModifier = "";
-
-	/*
-	 * We can handle an array by treating the element type like the type that
-	 * was passed in from here on out an add [] to the type name in the end.
-	 */
-	if (isArrayType)
-		postgresType.postgresTypeOid = elementTypeId;
 
 	/*
 	 * Unwrap domain types so that e.g. a domain over bytea is written as BLOB
 	 * rather than falling through to VARCHAR.
+	 *
+	 * This happens before we look for an array type, because a domain over an
+	 * array type (e.g. CREATE DOMAIN ints AS int[]) is an array itself, which
+	 * get_element_type would not see. Map types are domains too, but carry
+	 * special semantics and are left alone by ResolveDomainBaseType.
 	 */
 	postgresType.postgresTypeOid = ResolveDomainBaseType(postgresType.postgresTypeOid);
+
+	Oid			elementTypeId = get_element_type(postgresType.postgresTypeOid);
+	bool		isArrayType = OidIsValid(elementTypeId);
+
+	/*
+	 * We can handle an array by treating the element type like the type that
+	 * was passed in from here on out an add [] to the type name in the end.
+	 * The element type can be a domain as well (e.g. a bytea domain).
+	 */
+	if (isArrayType)
+		postgresType.postgresTypeOid = ResolveDomainBaseType(elementTypeId);
 
 	DuckDBType	duckTypeId = GetDuckDBTypeForPGType(postgresType);
 
