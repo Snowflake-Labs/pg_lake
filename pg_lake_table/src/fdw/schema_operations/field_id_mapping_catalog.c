@@ -1031,6 +1031,16 @@ RegisterIcebergColumnMapping(Oid relationId, Field * field,
 				TupleDesc	tupDesc = isComposite ?
 					lookup_rowtype_tupdesc(pgType.postgresTypeOid, pgType.postgresTypeMod) : NULL;
 
+				/*
+				 * Dropped attributes are left out of the Iceberg struct (see
+				 * PostgresTypeToIcebergField), so structType.fields only
+				 * holds the live attributes. Walk the tuple descriptor's live
+				 * attributes in lockstep rather than indexing it by the live
+				 * field position, which would pair each field with the wrong
+				 * attribute once a dropped attribute precedes it.
+				 */
+				int			attributeIndex = 0;
+
 				for (size_t fieldIndex = 0; fieldIndex < nfields; fieldIndex++)
 				{
 					FieldStructElement *structElementField = &field->field.structType.fields[fieldIndex];
@@ -1039,7 +1049,13 @@ RegisterIcebergColumnMapping(Oid relationId, Field * field,
 
 					if (isComposite)
 					{
-						Form_pg_attribute attr = TupleDescAttr(tupDesc, fieldIndex);
+						while (attributeIndex < tupDesc->natts &&
+							   TupleDescAttr(tupDesc, attributeIndex)->attisdropped)
+							attributeIndex++;
+
+						Form_pg_attribute attr = TupleDescAttr(tupDesc, attributeIndex);
+
+						attributeIndex++;
 
 						subFieldPGType = MakePGType(attr->atttypid, attr->atttypmod);
 					}
