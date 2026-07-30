@@ -33,8 +33,8 @@ struct StatActivityFunctionData : public TableFunctionData
 {
 	/* Function state */
 	vector<shared_ptr<ClientContext>> connections;
-	int offset;
-	bool finished = false;
+	idx_t		offset = 0;
+	bool		finished = false;
 };
 
 
@@ -63,6 +63,26 @@ static unique_ptr<FunctionData> StatActivityBind(ClientContext &context,
 
 /*
  * StatActivityExecute implements the execution for pg_lake_stat_activity.
+ *
+ * We are iterating connections from a thread that is not the one running
+ * any of the inspected sessions.  Two pieces of inspected state need
+ * care:
+ *
+ * 1. The PgLakeQueryListener's query string and start timestamp are
+ *    mutated on every QueryBegin / QueryEnd on the session's own thread.
+ *    GetActiveQuery reads them under the listener's mutex and returns
+ *    false when no query is active, so sessions that start or end a
+ *    query mid-iteration are simply skipped.
+ *
+ * 2. ClientContext::ExecutionIsFinished is not safe to call from another
+ *    thread: it reads the ClientContext's active_query unique_ptr, which
+ *    the owning session resets in QueryEnd.  We previously used it as a
+ *    cheap "is a query running" probe; the listener's GetActiveQuery
+ *    already answers that question safely, so the ExecutionIsFinished
+ *    call is removed.
+ *
+ * connectionId is set once at session initialization and never modified
+ * afterwards, so it is safe to read directly.
  */
 static void StatActivityExec(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &functionData = (StatActivityFunctionData &)*data_p.bind_data;
@@ -81,16 +101,19 @@ static void StatActivityExec(ClientContext &context, TableFunctionInput &data_p,
 	while (functionData.offset< functionData.connections.size() && rowsInChunk < STANDARD_VECTOR_SIZE) {
 		shared_ptr<ClientContext> connection = functionData.connections[functionData.offset];
 
-		if (connection && !connection->ExecutionIsFinished())
+		if (connection)
 		{
 			shared_ptr<PgLakeQueryListener> queryListener =
 				connection->registered_state->Get<PgLakeQueryListener>("pg_lake_query_listener");
 
-			if (queryListener && queryListener->isQueryActive)
+			string activeQuery;
+			timestamp_t activeStart;
+
+			if (queryListener && queryListener->GetActiveQuery(activeQuery, activeStart))
 			{
 				output.SetValue(0, rowsInChunk, Value::BIGINT(queryListener->connectionId));
-				output.SetValue(1, rowsInChunk, Value(queryListener->queryString));
-				output.SetValue(2, rowsInChunk, Value::TIMESTAMP(queryListener->queryStart));
+				output.SetValue(1, rowsInChunk, Value(activeQuery));
+				output.SetValue(2, rowsInChunk, Value::TIMESTAMP(activeStart));
 
 				rowsInChunk++;
 			}
