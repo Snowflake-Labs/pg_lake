@@ -8,8 +8,9 @@ from utils_pytest import *
 def test_connection_id_matches_stat_activity(s3, pgduck_conn):
     """
     pg_lake_connection_id returns the current session's connection
-    identifier. The same identifier shows up in the connection_id column of
-    pg_lake_stat_activity when the session has an active query.
+    identifier. That is the same value libpq reports as PQbackendPID, and the
+    same value that shows up in the connection_id column of
+    pg_lake_stat_activity while the session has an active query.
     """
     sleep_conn = psycopg2.connect(
         host=server_params.PGDUCK_UNIX_DOMAIN_PATH,
@@ -18,9 +19,19 @@ def test_connection_id_matches_stat_activity(s3, pgduck_conn):
     )
     wait_for_connection(sleep_conn)
 
-    sleep_query = "SELECT pg_lake_connection_id() AS my_id, pg_lake_sleep(10) AS slept"
+    # Read the id from the session itself first, so we have something to
+    # compare the stat_activity row against. The sleep query below never
+    # returns, so we cannot read it from there.
     sleep_cur = sleep_conn.cursor()
-    sleep_cur.execute(sleep_query)
+    sleep_cur.execute("SELECT pg_lake_connection_id()")
+    wait_for_connection(sleep_conn)
+    my_id = sleep_cur.fetchone()[0]
+
+    # pgduck seeds the DuckDB-side connection id from the cancellation proc
+    # id it sends in BackendKeyData, which is what libpq exposes here.
+    assert my_id == sleep_conn.get_backend_pid()
+
+    sleep_cur.execute("SELECT pg_lake_sleep(10)")
 
     try:
         observed_id = None
@@ -43,14 +54,14 @@ def test_connection_id_matches_stat_activity(s3, pgduck_conn):
 
             time.sleep(0.05)
 
-        sleep_conn.cancel()
+        cancel_and_wait(sleep_conn, pgduck_conn)
     finally:
         try:
             sleep_conn.close()
         finally:
             pgduck_conn.rollback()
 
-    assert observed_id is not None
+    assert observed_id == my_id
 
 
 def test_query_progress_returns_active_query(s3, pgduck_conn):
@@ -100,7 +111,7 @@ def test_query_progress_returns_active_query(s3, pgduck_conn):
 
             time.sleep(0.05)
 
-        sleep_conn.cancel()
+        cancel_and_wait(sleep_conn, pgduck_conn)
     finally:
         try:
             sleep_conn.close()
@@ -117,15 +128,55 @@ def test_query_progress_returns_active_query(s3, pgduck_conn):
 def test_query_progress_unknown_id_returns_no_rows(s3, pgduck_conn):
     """
     pg_lake_query_progress(connection_id) returns no rows when no session
-    matches the requested id. Connection ids are positive socket fds, so
-    -1 is guaranteed never to match any active session.
+    matches the requested id. Connection ids come from the random int32 the
+    server generates for the cancellation key, so rather than assuming a
+    particular value is unused we pick one that is not currently reported by
+    pg_lake_stat_activity. Both functions only consider sessions with an
+    active query, so an id missing there cannot match here either.
     """
+    active_ids = {
+        row[0]
+        for row in run_query(
+            "SELECT connection_id FROM pg_lake_stat_activity()", pgduck_conn
+        )
+    }
+
+    unused_id = -1
+    while unused_id in active_ids:
+        unused_id -= 1
+
     result = run_query(
         "SELECT percentage, rows_processed, total_rows_to_process "
-        "FROM pg_lake_query_progress(-1)",
+        f"FROM pg_lake_query_progress({unused_id})",
         pgduck_conn,
     )
     assert result == []
+
+
+def cancel_and_wait(sleep_conn, pgduck_conn):
+    """
+    Cancel the sleeping session and wait until the server stops reporting it.
+
+    Closing the connection right after cancel() is not enough: the session can
+    still be running its sleep when the next test starts, and a test that
+    expects a single row in pg_lake_stat_activity then sees two. pg_lake_sleep
+    checks for interrupts every 10ms, so the wait is short.
+    """
+    sleep_conn.cancel()
+
+    for _ in range(600):
+        remaining = run_query(
+            "SELECT 1 FROM pg_lake_stat_activity() "
+            "WHERE query LIKE '%pg_lake_sleep%' "
+            "  AND query NOT LIKE '%stat_activity%'",
+            pgduck_conn,
+        )
+        if not remaining:
+            return
+
+        time.sleep(0.05)
+
+    pytest.fail("cancelled sleep session is still reported by pg_lake_stat_activity")
 
 
 def wait_for_connection(conn):

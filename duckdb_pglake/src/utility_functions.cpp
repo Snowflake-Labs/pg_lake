@@ -343,7 +343,7 @@ PgLakeUtilityFunctions::RegisterFunctions(ExtensionLoader &loader)
 
 	/* pg_lake_connection_id function definition */
 	{
-		ScalarFunction pg_lake_connection_id=
+		ScalarFunction pg_lake_connection_id =
 			ScalarFunction("pg_lake_connection_id",
 						   {},
 						   LogicalType::BIGINT,
