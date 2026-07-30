@@ -45,6 +45,7 @@
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/compatibility_mode.h"
 #include "pg_lake/iceberg/iceberg_field.h"
+#include "pg_lake/iceberg/iceberg_representation.h"
 #include "pg_lake/iceberg/iceberg_type_json_serde.h"
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
@@ -243,12 +244,16 @@ CreatePostgresColumnMappingsForColumnDefs(Oid relationId, List *columnDefList, b
 		 * metadata and writes); the per-leaf surface->storage divergence is
 		 * collected here and persisted by RegisterPostgresColumnMappings. The
 		 * PostgreSQL column type is never touched.
+		 *
+		 * The shaping itself lives in IcebergStorageFieldForColumnType so
+		 * that a consumer asking "would this type still be stored the same
+		 * way" (see iceberg_representation.h) runs the code that produced the
+		 * persisted field, rather than a second copy of it.
 		 */
-		Field	   *surfaceFieldTree =
-			PostgresTypeToIcebergField(pgType, forAddColumn, &subFieldIndex);
+		Field	   *surfaceFieldTree = NULL;
 
-		field->type = DeepCopyField(surfaceFieldTree);
-		ApplyCompatibilityStorageMapping(field->type, compatMode);
+		field->type = IcebergStorageFieldForColumnType(pgType, compatMode, forAddColumn,
+													   &subFieldIndex, &surfaceFieldTree);
 
 		List	   *storageOverrides =
 			CollectStorageDivergences(surfaceFieldTree, field->type, fieldId);
