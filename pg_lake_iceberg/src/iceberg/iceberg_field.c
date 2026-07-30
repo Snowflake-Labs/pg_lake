@@ -208,17 +208,34 @@ PostgresTypeToIcebergField(PGType pgType, bool forAddColumn, int *subFieldIndex)
 	else if (get_typtype(typeId) == TYPTYPE_COMPOSITE)
 	{
 		TupleDesc	tupleDesc = lookup_rowtype_tupdesc(typeId, typeMod);
-		int			fieldCount = tupleDesc->natts;
+		int			attributeCount = tupleDesc->natts;
+		int			fieldCount = 0;
+
+		/*
+		 * Dropped attributes are still part of the tuple descriptor, but they
+		 * have no name or type we can map to Iceberg, and the values we write
+		 * do not contain them, so we leave them out of the struct.
+		 */
+		for (int attributeIndex = 0; attributeIndex < attributeCount; ++attributeIndex)
+		{
+			if (!TupleDescAttr(tupleDesc, attributeIndex)->attisdropped)
+				fieldCount++;
+		}
 
 		field->type = FIELD_TYPE_STRUCT;
 		field->field.structType.nfields = fieldCount;
 		field->field.structType.fields = palloc0(sizeof(FieldStructElement) * fieldCount);
 
-		for (int fieldIndex = 0; fieldIndex < fieldCount; ++fieldIndex)
-		{
-			Form_pg_attribute attr = TupleDescAttr(tupleDesc, fieldIndex);
+		int			fieldIndex = 0;
 
-			FieldStructElement *structElementField = &field->field.structType.fields[fieldIndex];
+		for (int attributeIndex = 0; attributeIndex < attributeCount; ++attributeIndex)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupleDesc, attributeIndex);
+
+			if (attr->attisdropped)
+				continue;
+
+			FieldStructElement *structElementField = &field->field.structType.fields[fieldIndex++];
 
 			structElementField->id = *subFieldIndex + 1;
 			*subFieldIndex = structElementField->id;

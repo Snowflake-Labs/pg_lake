@@ -1,3 +1,4 @@
+import json
 import pytest
 import psycopg2
 import time
@@ -274,3 +275,42 @@ def test_map_escaping(pg_conn, superuser_conn, extension, s3, with_default_locat
     assert res[0][0] == ["[", "'", "]"]
 
     pg_conn.rollback()
+
+
+def test_struct_with_dropped_attribute(pg_conn, extension, s3, with_default_location):
+    """Attributes dropped from a composite type are not part of the Iceberg struct."""
+    run_command(
+        """
+        CREATE SCHEMA dropped_attribute;
+        SET search_path TO dropped_attribute;
+        CREATE TYPE slot AS (junk int, label text, n int);
+        ALTER TYPE slot DROP ATTRIBUTE junk;
+        CREATE TABLE slots (id int, s slot, l slot[]) USING iceberg;
+        INSERT INTO slots VALUES (1, ROW('open', 3)::slot, ARRAY[ROW('closed', 4)::slot]);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    res = run_query(
+        "SELECT (s).label, (s).n, (l[1]).label, (l[1]).n FROM slots WHERE id = 1",
+        pg_conn,
+    )
+    assert res[0][0] == "open"
+    assert res[0][1] == 3
+    assert res[0][2] == "closed"
+    assert res[0][3] == 4
+
+    results = run_query(
+        "SELECT metadata_location FROM lake_iceberg.tables"
+        " WHERE table_name = 'slots' AND table_namespace = 'dropped_attribute'",
+        pg_conn,
+    )
+    parsed = json.loads(read_s3_operations(s3, results[0][0]))
+    fields = {f["name"]: f["type"] for f in parsed["schemas"][0]["fields"]}
+    assert [f["name"] for f in fields["s"]["fields"]] == ["label", "n"]
+    assert [f["name"] for f in fields["l"]["element"]["fields"]] == ["label", "n"]
+
+    pg_conn.rollback()
+    run_command("DROP SCHEMA IF EXISTS dropped_attribute CASCADE;", pg_conn)
+    pg_conn.commit()
