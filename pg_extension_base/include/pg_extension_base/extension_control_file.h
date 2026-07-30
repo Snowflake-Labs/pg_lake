@@ -20,6 +20,6 @@
 #include "nodes/pg_list.h"
 
 extern PGDLLEXPORT bool IsExtensionControlFilename(const char *filename);
-extern PGDLLEXPORT char *GetExtensionControlDirectory(void);
+extern PGDLLEXPORT List *GetExtensionControlDirectories(void);
 extern PGDLLEXPORT char *GetExtensionControlFilename(const char *extname);
 extern PGDLLEXPORT List *GetExtensionDependencyList(char *extensionName);
