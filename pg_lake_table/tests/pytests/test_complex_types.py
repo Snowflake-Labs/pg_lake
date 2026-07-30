@@ -314,3 +314,133 @@ def test_struct_with_dropped_attribute(pg_conn, extension, s3, with_default_loca
     pg_conn.rollback()
     run_command("DROP SCHEMA IF EXISTS dropped_attribute CASCADE;", pg_conn)
     pg_conn.commit()
+
+
+def test_struct_default_with_dropped_attribute(
+    pg_conn, extension, s3, with_default_location
+):
+    """A composite-typed default whose type has a dropped attribute round-trips
+    through Iceberg initial-default serialization and deserialization.
+
+    Serializing the default runs PGStructIcebergJsonSerialize and reading it
+    back for a pre-existing row runs PGStructIcebergJsonDeserialize.  Both walk
+    the type's tuple descriptor, which still contains the dropped attribute even
+    though the Iceberg struct only has the live fields.
+    """
+    run_command(
+        """
+        CREATE SCHEMA dropped_attribute_default;
+        SET search_path TO dropped_attribute_default;
+        CREATE TYPE slot AS (junk int, label text, n int);
+        ALTER TYPE slot DROP ATTRIBUTE junk;
+        CREATE TABLE slots (id int) USING iceberg;
+        INSERT INTO slots VALUES (1);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # Adding the columns serializes the composite (and array-of-composite)
+    # defaults into the Iceberg initial-default.
+    run_command(
+        """
+        ALTER TABLE slots
+            ADD COLUMN s slot DEFAULT ROW('open', 3)::slot,
+            ADD COLUMN l slot[] DEFAULT ARRAY[ROW('closed', 4)::slot];
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # The pre-existing row (id = 1) has no stored value, so it is filled from
+    # the initial-default, exercising deserialization.
+    res = run_query(
+        "SELECT (s).label, (s).n, (l[1]).label, (l[1]).n FROM slots WHERE id = 1",
+        pg_conn,
+    )
+    assert res[0][0] == "open"
+    assert res[0][1] == 3
+    assert res[0][2] == "closed"
+    assert res[0][3] == 4
+
+    # A row inserted after the columns exist must round-trip identically.
+    run_command("INSERT INTO slots (id) VALUES (2);", pg_conn)
+    pg_conn.commit()
+    res = run_query(
+        "SELECT (s).label, (s).n, (l[1]).label, (l[1]).n FROM slots WHERE id = 2",
+        pg_conn,
+    )
+    assert res[0][0] == "open"
+    assert res[0][1] == 3
+    assert res[0][2] == "closed"
+    assert res[0][3] == 4
+
+    # The serialized initial-default must contain only the live sub-fields.
+    results = run_query(
+        "SELECT metadata_location FROM lake_iceberg.tables"
+        " WHERE table_name = 'slots' AND table_namespace = 'dropped_attribute_default'",
+        pg_conn,
+    )
+    parsed = json.loads(read_s3_operations(s3, results[0][0]))
+    schema = next(
+        s for s in parsed["schemas"] if s["schema-id"] == parsed["current-schema-id"]
+    )
+    fields = {f["name"]: f for f in schema["fields"]}
+    assert [sf["name"] for sf in fields["s"]["type"]["fields"]] == ["label", "n"]
+    assert sorted(fields["s"]["initial-default"].values(), key=str) == sorted(
+        ["open", 3], key=str
+    )
+
+    pg_conn.rollback()
+    run_command("DROP SCHEMA IF EXISTS dropped_attribute_default CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_add_column_composite_with_dropped_attribute(
+    pg_conn, extension, s3, with_default_location
+):
+    """ALTER TABLE ADD COLUMN of a composite (and array-of-composite) column whose
+    type has a dropped attribute must register field ids that stay consistent with
+    the Iceberg metadata.
+
+    RegisterIcebergColumnMapping reads each struct sub-field's PostgreSQL type from
+    the tuple descriptor; pairing the live fields with the wrong attributes (because
+    of a preceding dropped attribute) made the internal field-id catalog disagree
+    with the written metadata, which trips the internal/external consistency assert
+    with "internalLeafField and externalLeafField have different types".  No default
+    is involved here, unlike test_struct_default_with_dropped_attribute.
+    """
+    run_command(
+        """
+        CREATE SCHEMA dropped_attribute_add;
+        SET search_path TO dropped_attribute_add;
+        CREATE TYPE slot AS (junk int, label text, n int);
+        ALTER TYPE slot DROP ATTRIBUTE junk;
+        CREATE TABLE slots (id int) USING iceberg;
+        INSERT INTO slots VALUES (1);
+        ALTER TABLE slots ADD COLUMN s slot;
+        ALTER TABLE slots ADD COLUMN l slot[];
+        INSERT INTO slots
+            VALUES (2, ROW('open', 3)::slot, ARRAY[ROW('closed', 4)::slot]);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    res = run_query(
+        "SELECT (s).label, (s).n, (l[1]).label, (l[1]).n FROM slots WHERE id = 2",
+        pg_conn,
+    )
+    assert res[0][0] == "open"
+    assert res[0][1] == 3
+    assert res[0][2] == "closed"
+    assert res[0][3] == 4
+
+    # The row inserted before the columns existed reads back as null.
+    res = run_query("SELECT s, l FROM slots WHERE id = 1", pg_conn)
+    assert res[0][0] is None
+    assert res[0][1] is None
+
+    pg_conn.rollback()
+    run_command("DROP SCHEMA IF EXISTS dropped_attribute_add CASCADE;", pg_conn)
+    pg_conn.commit()

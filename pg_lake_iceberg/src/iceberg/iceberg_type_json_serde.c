@@ -241,31 +241,42 @@ PGStructIcebergJsonSerialize(Datum structDatum, Field * field, PGType pgType)
 
 	HeapTupleHeader tuple = DatumGetHeapTupleHeader(structDatum);
 
-	int			tupleFieldCount = tupleDesc->natts;
+	int			attributeCount = tupleDesc->natts;
 
 	/* build json string for struct by iterating each field */
 	StringInfo	jsonString = makeStringInfo();
 
 	appendStringInfoChar(jsonString, '{');
 
-	for (int fieldIndex = 0; fieldIndex < tupleFieldCount; fieldIndex++)
-	{
-		Form_pg_attribute attr = TupleDescAttr(tupleDesc, fieldIndex);
+	/*
+	 * Dropped attributes are still part of the tuple descriptor but are left
+	 * out of the Iceberg struct (see PostgresTypeToIcebergField), so skip
+	 * them here too and index field->field.structType.fields with a separate
+	 * live field counter.
+	 */
+	int			fieldIndex = 0;
 
-		FieldStructElement *structElementField = &field->field.structType.fields[fieldIndex];
+	for (int attributeIndex = 0; attributeIndex < attributeCount; attributeIndex++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupleDesc, attributeIndex);
+
+		if (attr->attisdropped)
+			continue;
+
+		FieldStructElement *structElementField = &field->field.structType.fields[fieldIndex++];
 
 		PGType		attrPGType = MakePGType(attr->atttypid, attr->atttypmod);
 
 		bool		isNull = false;
-		Datum		attrDatum = GetAttributeByNum(tuple, fieldIndex + 1, &isNull);
+		Datum		attrDatum = GetAttributeByNum(tuple, attr->attnum, &isNull);
 		const char *attrJsonString = PGIcebergJsonSerialize(attrDatum, structElementField->type, attrPGType, &isNull);
 
-		appendStringInfo(jsonString, "\"%d\": %s", structElementField->id, attrJsonString);
-
-		if (fieldIndex < tupleFieldCount - 1)
+		if (fieldIndex > 1)
 		{
 			appendStringInfo(jsonString, ", ");
 		}
+
+		appendStringInfo(jsonString, "\"%d\": %s", structElementField->id, attrJsonString);
 	}
 
 	appendStringInfoChar(jsonString, '}');
@@ -576,11 +587,34 @@ PGStructIcebergJsonDeserialize(const char *structJson, Field * field, PGType pgT
 
 	MemoryContext spiContext = MemoryContextSwitchTo(callerContext);
 
-	Datum	   *attrDatums = palloc0(sizeof(Datum) * fieldsLen);
-	bool	   *attrNulls = palloc0(sizeof(bool) * fieldsLen);
+	/*
+	 * heap_form_tuple indexes these arrays by physical attribute number, so
+	 * they must cover every attribute in the descriptor, including dropped
+	 * ones. Dropped attributes are not present in the serialized struct (see
+	 * PostgresTypeToIcebergField / PGStructIcebergJsonSerialize), so default
+	 * everything to null and only fill in the live attributes.
+	 */
+	int			attributeCount = tupleDesc->natts;
+	Datum	   *attrDatums = palloc0(sizeof(Datum) * attributeCount);
+	bool	   *attrNulls = palloc0(sizeof(bool) * attributeCount);
 
-	for (size_t fieldIdx = 0; fieldIdx < fieldsLen; fieldIdx++)
+	for (int attributeIndex = 0; attributeIndex < attributeCount; attributeIndex++)
+		attrNulls[attributeIndex] = true;
+
+	/*
+	 * The serialized fields appear in the same order as the live attributes
+	 * (and as field->field.structType.fields), so walk the descriptor's live
+	 * attributes in lockstep with the json_each rows.
+	 */
+	size_t		fieldIdx = 0;
+
+	for (int attributeIndex = 0; attributeIndex < attributeCount && fieldIdx < fieldsLen; attributeIndex++)
 	{
+		Form_pg_attribute attr = TupleDescAttr(tupleDesc, attributeIndex);
+
+		if (attr->attisdropped)
+			continue;
+
 		bool		isNull = false;
 
 		FieldStructElement *structElementField = &field->field.structType.fields[fieldIdx];
@@ -588,20 +622,19 @@ PGStructIcebergJsonDeserialize(const char *structJson, Field * field, PGType pgT
 		/* we need only the value (key is unused) to build tuple */
 		const char *attrJsonString = GET_SPI_VALUE(JSONOID, fieldIdx, 2, &isNull);
 
+		fieldIdx++;
+
 		if (isNull)
 		{
-			attrNulls[fieldIdx] = true;
+			attrNulls[attributeIndex] = true;
 
 			continue;
 		}
 
-		/* find the attribute from tuple's descriptor */
-		Form_pg_attribute attr = TupleDescAttr(tupleDesc, fieldIdx);
-
 		PGType		attrPGType = MakePGType(attr->atttypid, attr->atttypmod);
 
-		attrDatums[fieldIdx] = PGIcebergJsonDeserialize(attrJsonString, structElementField->type, attrPGType, &isNull);
-		attrNulls[fieldIdx] = isNull;
+		attrDatums[attributeIndex] = PGIcebergJsonDeserialize(attrJsonString, structElementField->type, attrPGType, &isNull);
+		attrNulls[attributeIndex] = isNull;
 	}
 
 	MemoryContextSwitchTo(spiContext);

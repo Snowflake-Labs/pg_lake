@@ -485,24 +485,45 @@ TypesAreCompatible(PGType pgType, PGType icebergType)
 		TupleDesc	pgTupleDesc = lookup_rowtype_tupdesc(pgType.postgresTypeOid, pgType.postgresTypeMod);
 		TupleDesc	icebergTupleDesc = lookup_rowtype_tupdesc(icebergType.postgresTypeOid, icebergType.postgresTypeMod);
 		bool		compatible = true;
+		int			pgIndex = 0;
+		int			icebergIndex = 0;
 
-		if (pgTupleDesc->natts != icebergTupleDesc->natts)
-			compatible = false;
-		else
+		/*
+		 * Dropped attributes are part of the tuple descriptor but are not
+		 * represented in the Iceberg schema, so compare only the live
+		 * attributes on each side, in order.
+		 */
+		while (compatible)
 		{
-			for (int i = 0; i < pgTupleDesc->natts; i++)
-			{
-				Form_pg_attribute pgAttr = TupleDescAttr(pgTupleDesc, i);
-				Form_pg_attribute icebergAttr = TupleDescAttr(icebergTupleDesc, i);
-				PGType		pgAttrType = MakePGType(pgAttr->atttypid, pgAttr->atttypmod);
-				PGType		icebergAttrType = MakePGType(icebergAttr->atttypid, icebergAttr->atttypmod);
+			while (pgIndex < pgTupleDesc->natts &&
+				   TupleDescAttr(pgTupleDesc, pgIndex)->attisdropped)
+				pgIndex++;
 
-				if (!TypesAreCompatible(pgAttrType, icebergAttrType))
-				{
+			while (icebergIndex < icebergTupleDesc->natts &&
+				   TupleDescAttr(icebergTupleDesc, icebergIndex)->attisdropped)
+				icebergIndex++;
+
+			bool		pgDone = pgIndex >= pgTupleDesc->natts;
+			bool		icebergDone = icebergIndex >= icebergTupleDesc->natts;
+
+			if (pgDone || icebergDone)
+			{
+				/* compatible only if both sides ran out of live attributes */
+				if (pgDone != icebergDone)
 					compatible = false;
-					break;
-				}
+				break;
 			}
+
+			Form_pg_attribute pgAttr = TupleDescAttr(pgTupleDesc, pgIndex);
+			Form_pg_attribute icebergAttr = TupleDescAttr(icebergTupleDesc, icebergIndex);
+			PGType		pgAttrType = MakePGType(pgAttr->atttypid, pgAttr->atttypmod);
+			PGType		icebergAttrType = MakePGType(icebergAttr->atttypid, icebergAttr->atttypmod);
+
+			if (!TypesAreCompatible(pgAttrType, icebergAttrType))
+				compatible = false;
+
+			pgIndex++;
+			icebergIndex++;
 		}
 
 		ReleaseTupleDesc(pgTupleDesc);
