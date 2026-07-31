@@ -42,12 +42,15 @@ extern PGDLLEXPORT PgLakeAddDataFileHookType PgLakeAddDataFileHook;
 /* functions to read from files catalog */
 extern PGDLLEXPORT List *GetTableDataFilesFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
 													  bool forUpdate, char *orderBy, Snapshot snapshot);
+List	   *GetTableDataFilePathsFromCatalog(Oid relationId, bool dataOnly, Snapshot snapshot);
 HTAB	   *GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
 											 bool forUpdate, char *orderBy, Snapshot snapshot,
-											 List *partitionTransforms, bool skipColumnStats);
+											 List *partitionTransforms, bool skipColumnStats,
+											 List *pathFilter);
 HTAB	   *GetTableDataFilesByPathHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
 												   bool forUpdate, char *orderBy, Snapshot snapshot,
-												   List *partitionTransforms, bool skipColumnStats);
+												   List *partitionTransforms, bool skipColumnStats,
+												   List *pathFilter);
 extern PGDLLEXPORT void LoadColumnStatsForFiles(Oid relationId, HTAB *filesByPath,
 												List *dataFiles);
 extern PGDLLEXPORT List *GetPossiblePositionDeleteFilesFromCatalog(Oid relationId, List *sourcePathList,

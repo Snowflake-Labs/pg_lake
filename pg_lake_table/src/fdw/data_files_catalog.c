@@ -111,11 +111,96 @@ GetTableDataFilesFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
 																 newFilesOnly, forUpdate,
 																 orderBy, snapshot,
 																 partitionTransforms,
-																 false /* skipColumnStats */ );
+																 false /* skipColumnStats */ ,
+																 NIL /* pathFilter */ );
 
 	List	   *dataFiles = TableDataFileHashToList(dataFilesHash);
 
 	return dataFiles;
+}
+
+
+/*
+ * GetTableDataFilePathsFromCatalog returns the paths of the files of the given
+ * table, ordered by file id.
+ *
+ * This is the cheap counterpart of GetTableDataFilesHashFromCatalog for callers
+ * that only need to know which files the catalog holds: no joins against the
+ * partition-value and column-stats catalogs, and one string per file instead of
+ * a TableDataFile, a Partition and a hash entry with an inline
+ * MAX_S3_PATH_LENGTH key.
+ *
+ * Ordering by id hands files to the caller in the order they were written,
+ * which keeps the file ordering of append-only tables meaningful and makes the
+ * result independent of hash iteration order.
+ */
+List *
+GetTableDataFilePathsFromCatalog(Oid relationId, bool dataOnly, Snapshot snapshot)
+{
+	MemoryContext callerContext = CurrentMemoryContext;
+
+	StringInfoData pathQuery;
+
+	initStringInfo(&pathQuery);
+	appendStringInfoString(&pathQuery,
+						   "select path from " DATA_FILES_TABLE_QUALIFIED " "
+						   "where table_name OPERATOR(pg_catalog.=) $1");
+
+	if (dataOnly)
+		appendStringInfo(&pathQuery, " and content OPERATOR(pg_catalog.=) %d",
+						 (int) CONTENT_DATA);
+
+	appendStringInfoString(&pathQuery, " order by id");
+
+	/* not read-only, for the reason given in GetTableDataFilesHashFromCatalog */
+	bool		readOnly = false;
+
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
+
+	DECLARE_SPI_ARGS(1);
+	SPI_ARG_VALUE(1, OIDOID, relationId, false);
+
+	if (!snapshot)
+	{
+		SPI_EXECUTE(pathQuery.data, readOnly);
+	}
+	else
+	{
+		SPIPlanPtr	qplan = GetCachedQueryPlan(pathQuery.data, spiArgCount, spiArgTypes);
+
+		if (qplan == NULL)
+			elog(ERROR, "SPI_prepare returned %s while fetching data file paths",
+				 SPI_result_code_string(SPI_result));
+
+		bool		fireTriggers = true;
+		int			spiResult =
+			SPI_execute_snapshot(qplan, spiArgValues, spiArgNulls,
+								 snapshot, InvalidSnapshot,
+								 readOnly, fireTriggers, 0);
+
+		if (spiResult != SPI_OK_SELECT)
+			elog(ERROR, "SPI_execute_snapshot returned %s",
+				 SPI_result_code_string(spiResult));
+	}
+
+	List	   *filePaths = NIL;
+
+	for (int rowIndex = 0; rowIndex < SPI_processed; rowIndex++)
+	{
+		MemoryContext spiContext = MemoryContextSwitchTo(callerContext);
+
+		/* path is NOT NULL in the catalog */
+		bool		isPathNull = false;
+
+		filePaths = lappend(filePaths,
+							GET_SPI_VALUE(TEXTOID, rowIndex, 1, &isPathNull));
+
+		MemoryContextSwitchTo(spiContext);
+	}
+
+	SPI_END();
+
+	return filePaths;
 }
 
 
@@ -132,11 +217,15 @@ GetTableDataFilesFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
  * Callers that only need file-level info (path, id, row count, partition) can
  * pass true to avoid the expensive join against data_file_column_stats; stats
  * can be loaded on demand for a subset of files via LoadColumnStatsForFiles().
+ * If pathFilter is not NIL, only files with those paths are returned, so a
+ * caller that already knows which files it cares about does not have to
+ * materialize the whole table.
  */
 HTAB *
 GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
 								 bool forUpdate, char *orderBy, Snapshot snapshot,
-								 List *partitionTransforms, bool skipColumnStats)
+								 List *partitionTransforms, bool skipColumnStats,
+								 List *pathFilter)
 {
 	MemoryContext callerContext = CurrentMemoryContext;
 
@@ -179,6 +268,10 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
 	appendStringInfoString(&metadataQuery,
 						   "select * from " DATA_FILES_TABLE_QUALIFIED " "
 						   "where table_name OPERATOR(pg_catalog.=) $1");
+
+	if (pathFilter != NIL)
+		appendStringInfoString(&metadataQuery,
+							   " and path OPERATOR(pg_catalog.=) ANY($2)");
 
 	if (dataOnly)
 		appendStringInfo(&metadataQuery, " and content OPERATOR(pg_catalog.=) %d", (int) CONTENT_DATA);
@@ -231,8 +324,18 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
 
 	SPI_START_EXTENSION_OWNER(PgLakeTable);
 
-	DECLARE_SPI_ARGS(1);
+	/*
+	 * $2 is only referenced when pathFilter is set. A prepared statement may
+	 * leave a parameter unused, so declare both and bind NULL when
+	 * unfiltered.
+	 */
+	DECLARE_SPI_ARGS(2);
 	SPI_ARG_VALUE(1, OIDOID, relationId, false);
+
+	ArrayType  *pathFilterArray =
+		pathFilter != NIL ? StringListToArray(pathFilter) : NULL;
+
+	SPI_ARG_VALUE(2, TEXTARRAYOID, pathFilterArray, pathFilter == NIL);
 
 	if (!snapshot)
 	{
@@ -369,16 +472,19 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
  * GetTableDataFilesByPathHashFromCatalog retrieves the data files for a given table
  * and returns a hash table indexed by file path.
  *
- * See GetTableDataFilesHashFromCatalog for the meaning of skipColumnStats.
+ * See GetTableDataFilesHashFromCatalog for the meaning of skipColumnStats and
+ * pathFilter.
  */
 HTAB *
 GetTableDataFilesByPathHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
 									   bool forUpdate, char *orderBy, Snapshot snapshot,
-									   List *partitionTransforms, bool skipColumnStats)
+									   List *partitionTransforms, bool skipColumnStats,
+									   List *pathFilter)
 {
 	HTAB	   *filesById = GetTableDataFilesHashFromCatalog(relationId, dataOnly, newFilesOnly,
 															 forUpdate, orderBy, snapshot,
-															 partitionTransforms, skipColumnStats);
+															 partitionTransforms, skipColumnStats,
+															 pathFilter);
 
 	HTAB	   *filesByPath = CreateDataFilesByPathHash();
 

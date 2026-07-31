@@ -83,6 +83,20 @@ typedef struct RestCatalogRequestPerTable
 	List	   *tableModifyRequests;
 }			RestCatalogRequestPerTable;
 
+/*
+ * DataFileDiff is how the files catalog differs from the last Iceberg snapshot
+ * we pushed. Both sides are compared by path; the per-file payload is read
+ * afterwards, for the added files only.
+ */
+typedef struct DataFileDiff
+{
+	/* catalog paths the snapshot does not have, in catalog id order */
+	List	   *addedFilePaths;
+
+	/* snapshot paths the catalog no longer has */
+	List	   *removedFilePaths;
+}			DataFileDiff;
+
 /* GUC: see pg_lake_table.commit_time_analyze_threshold in init.c. */
 int			CommitTimeCatalogAnalyzeThreshold = 1000;
 
@@ -93,15 +107,18 @@ static void InitRestCatalogRequestsHashIfNeeded(void);
 static bool ShouldRunCommitTimeAnalyze(HTAB *trackedRelations);
 static void EnsureFreshStatsForCommitTimeDiff(void);
 static HTAB *CreateDataFilesHashForMetadata(IcebergTableMetadata * metadata);
-static void FindChangedFilesSinceMetadata(HTAB *currentFilesMap, IcebergTableMetadata * metadata,
-										  List **addedFiles, List **removedFilePaths);
+static DataFileDiff DiffCatalogFilesAgainstSnapshot(List *catalogFilePaths,
+													IcebergTableMetadata * metadata);
+static List *LoadAddedDataFiles(Oid relationId, List *addedFilePaths, int catalogFileCount,
+								List *allTransforms, Snapshot snapshot);
+static List *LookupDataFilesByPath(HTAB *filesByPath, List *paths);
+static List *MakeDataFileOperations(List *addedFiles, List *removedFilePaths);
 static HTAB *CreatePartitionSpecsHashForMetadata(IcebergTableMetadata * metadata);
 static List *FindNewPartitionSpecsSinceMetadata(HTAB *currentSpecs, IcebergTableMetadata * metadata);
 static IcebergTableMetadata * GetLastPushedIcebergMetadata(const TableMetadataOperationTracker * opTracker);
 static List *GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 										   List *allTransforms);
 static List *GetDDLMetadataOperations(const TableMetadataOperationTracker * opTracker);
-static void DeleteInProgressAddedFiles(Oid relationId, List *addedFiles);
 static bool AreSchemasEqual(IcebergTableSchema * existingSchema, DataFileSchema * newSchema);
 static int32_t GetSchemaIdForIcebergTableIfExists(const TableMetadataOperationTracker * opTracker, DataFileSchema * schema);
 static int	ComparePartitionSpecsById(const ListCell *a, const ListCell *b);
@@ -1130,78 +1147,143 @@ CreateDataFilesHashForMetadata(IcebergTableMetadata * metadata)
 
 
 /*
- * FindChangedFilesSinceMetadata identifies added and removed files by comparing
- * the current state of data files with the state recorded in the provided metadata.
- * It populates the addedFiles and removedFilePaths lists with the respective files.
+ * DiffCatalogFilesAgainstSnapshot compares the paths the files catalog holds
+ * against the data files of the last pushed snapshot.
  *
- * addedFiles: file info, wrapped in `TableDataFile` struct, for the files that are added since the metadata
- * removedFilePaths: file paths, which are added before the current tx, that are removed since the metadata
+ * catalogFilePaths is expected in catalog id order, which the added paths
+ * inherit, so the operations we build from them follow write order.
  */
-static void
-FindChangedFilesSinceMetadata(HTAB *currentFilesMap, IcebergTableMetadata * metadata,
-							  List **addedFiles, List **removedFilePaths)
+static DataFileDiff
+DiffCatalogFilesAgainstSnapshot(List *catalogFilePaths, IcebergTableMetadata * metadata)
 {
-	/* create metadata's data files */
-	HTAB	   *metadataDataFilesMap = CreateDataFilesHashForMetadata(metadata);
+	DataFileDiff diff = {NIL, NIL};
 
-	/* find added files */
-	HASH_SEQ_STATUS currentFilesStatus;
+	/* metadata is NULL when the table is created in this transaction */
+	HTAB	   *snapshotPaths = CreateDataFilesHashForMetadata(metadata);
+	HTAB	   *catalogPaths = CreateFilesHash();
 
-	hash_seq_init(&currentFilesStatus, currentFilesMap);
+	ListCell   *pathCell = NULL;
 
-	TableDataFileHashEntry *currentDataFile = NULL;
-
-	while ((currentDataFile = hash_seq_search(&currentFilesStatus)) != NULL)
+	foreach(pathCell, catalogFilePaths)
 	{
-		if (!hash_search(metadataDataFilesMap, currentDataFile->filePath, HASH_FIND, NULL))
-			*addedFiles = lappend(*addedFiles, &currentDataFile->dataFile);
+		char	   *path = lfirst(pathCell);
+
+		if (AppendFileToHash(path, catalogPaths))
+			elog(ERROR, "duplicate data file path found in catalog: %s", path);
+
+		if (!hash_search(snapshotPaths, path, HASH_FIND, NULL))
+			diff.addedFilePaths = lappend(diff.addedFilePaths, path);
 	}
 
-	/* find removed files */
-	HASH_SEQ_STATUS metadataFilesStatus;
+	HASH_SEQ_STATUS snapshotStatus;
 
-	hash_seq_init(&metadataFilesStatus, metadataDataFilesMap);
+	hash_seq_init(&snapshotStatus, snapshotPaths);
 
-	char	   *metadataDataFilePath = NULL;
+	char	   *snapshotPath = NULL;
 
-	while ((metadataDataFilePath = hash_seq_search(&metadataFilesStatus)) != NULL)
+	while ((snapshotPath = hash_seq_search(&snapshotStatus)) != NULL)
 	{
-		if (!hash_search(currentFilesMap, metadataDataFilePath, HASH_FIND, NULL))
-			*removedFilePaths = lappend(*removedFilePaths, metadataDataFilePath);
+		if (!hash_search(catalogPaths, snapshotPath, HASH_FIND, NULL))
+			diff.removedFilePaths = lappend(diff.removedFilePaths, snapshotPath);
 	}
+
+	hash_destroy(catalogPaths);
+
+	/* removedFilePaths alias snapshotPaths entries, so that one has to stay */
+	return diff;
 }
 
 
 /*
- * DeleteInProgressAddedFiles deletes the in-progress data file records
- * for the given list of data files in a single batch DELETE.
+ * LoadAddedDataFiles reads the payload -- partition values and per-column
+ * stats -- for the given paths, and returns one TableDataFile per path.
  *
- * Pre-commit emits one row per file added in the transaction (tens of
- * thousands per large partitioned iceberg write); doing one DELETE per file
- * was the simplest version but cost a snapshot, a SPI execute, and a
- * CommandCounterIncrement each. We collect the paths and let
- * DeleteInProgressFileRecords (pg_lake_engine) issue a single
- * WHERE path = ANY(...) DELETE instead.
+ * catalogFileCount is what the diff compared against: when every file in the
+ * catalog is new, a freshly created table or a bulk load into an empty one,
+ * restricting the read by path would only add work.
  */
-static void
-DeleteInProgressAddedFiles(Oid relationId, List *addedFiles)
+static List *
+LoadAddedDataFiles(Oid relationId, List *addedFilePaths, int catalogFileCount,
+				   List *allTransforms, Snapshot snapshot)
 {
-	if (addedFiles == NIL)
-		return;
+	if (addedFilePaths == NIL)
+		return NIL;
 
-	List	   *addedFilePaths = NIL;
-	ListCell   *fileCell = NULL;
+	List	   *pathFilter =
+		list_length(addedFilePaths) == catalogFileCount ? NIL : addedFilePaths;
 
-	foreach(fileCell, addedFiles)
+	HTAB	   *addedFilesMap =
+		GetTableDataFilesByPathHashFromCatalog(relationId,
+											   false /* dataOnly */ ,
+											   false /* newFilesOnly */ ,
+											   false /* forUpdate */ ,
+											   NULL /* orderBy */ ,
+											   snapshot, allTransforms,
+											   true /* skipColumnStats */ ,
+											   pathFilter);
+
+	List	   *addedFiles = LookupDataFilesByPath(addedFilesMap, addedFilePaths);
+
+	LoadColumnStatsForFiles(relationId, addedFilesMap, addedFiles);
+
+	return addedFiles;
+}
+
+
+/*
+ * LookupDataFilesByPath resolves each path to its TableDataFile in filesByPath,
+ * preserving the order of paths.
+ */
+static List *
+LookupDataFilesByPath(HTAB *filesByPath, List *paths)
+{
+	List	   *dataFiles = NIL;
+	ListCell   *pathCell = NULL;
+
+	foreach(pathCell, paths)
 	{
-		TableDataFile *addedFile = lfirst(fileCell);
+		char	   *path = lfirst(pathCell);
+		TableDataFileHashEntry *entry =
+			(TableDataFileHashEntry *) hash_search(filesByPath, path, HASH_FIND, NULL);
 
-		addedFilePaths = lappend(addedFilePaths, addedFile->path);
+		if (entry == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("internal error: data file \"%s\" is missing from the files catalog",
+							path)));
+
+		dataFiles = lappend(dataFiles, &entry->dataFile);
 	}
 
-	DeleteInProgressFileRecords(addedFilePaths);
+	return dataFiles;
+}
 
-	list_free(addedFilePaths);
+
+/*
+ * MakeDataFileOperations turns a diff into the metadata operations that
+ * ApplyIcebergMetadataChanges consumes. Removed files only need their path:
+ * the manifest DELETE entry carries nothing else.
+ */
+static List *
+MakeDataFileOperations(List *addedFiles, List *removedFilePaths)
+{
+	List	   *operations = NIL;
+	ListCell   *cell = NULL;
+
+	foreach(cell, addedFiles)
+	{
+		TableDataFile *addedFile = lfirst(cell);
+
+		operations = lappend(operations,
+							 AddDataFileOperation(addedFile->path, addedFile->content,
+												  &addedFile->stats, addedFile->partition,
+												  addedFile->partitionSpecId));
+	}
+
+	foreach(cell, removedFilePaths)
+		operations = lappend(operations, RemoveDataFileOperation(lfirst(cell)));
+
+	return operations;
 }
 
 
@@ -1291,52 +1373,38 @@ GetLastPushedIcebergMetadata(const TableMetadataOperationTracker * opTracker)
 
 
 /*
- * GetDataFileMetadataOperations retrieves the metadata operations for data files
- * in the specified relation.
+ * GetDataFileMetadataOperations works out how the relation's data files changed
+ * since the last metadata push, and returns the operations that describe it.
  */
 static List *
 GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 							  List *allTransforms)
 {
-	/*
-	 * get current state of data files, which are not applied to metadata yet,
-	 * from catalog
-	 *
-	 * We skip per-column min/max stats on this read. The diff against the
-	 * last-pushed metadata below (FindChangedFilesSinceMetadata) only looks
-	 * at paths, and stats are only needed for the small subset of newly added
-	 * files — loaded in a targeted follow-up call below. On large
-	 * changelogs this avoids materializing one SPI row per (file × stats
-	 * column) just to diff paths.
-	 */
-	bool		dataOnly = false;
-	bool		newFilesOnly = false;
-	bool		forUpdate = false;
-	char	   *orderBy = NULL;
+	Oid			relationId = opTracker->relationId;
 	Snapshot	snapshot = GetTransactionSnapshot();
-
-	HTAB	   *currentFilesMap = GetTableDataFilesByPathHashFromCatalog(opTracker->relationId, dataOnly, newFilesOnly,
-																		 forUpdate, orderBy, snapshot, allTransforms,
-																		 true /* skipColumnStats */ );
+	bool		dataOnly = false;
 
 	/*
-	 * Preserve the remove-all operation for a real TRUNCATE. The generic
-	 * transaction tracker normally records only that data files changed and
-	 * reconstructs individual operations by diffing the catalog against the
-	 * last Iceberg snapshot. Turning a TRUNCATE into one DATA_FILE_REMOVE per
-	 * existing file loses the linear remove-all path in the manifest writer
-	 * and makes it compare every manifest entry with every removed file.
-	 *
-	 * The tracker flags intentionally survive subtransaction rollback, so
-	 * hash_get_num_entries(currentFilesMap) == 0 checks whether the
-	 * transaction-visible file catalog is empty. This restricts the shortcut
-	 * to a TRUNCATE that leaves no files: TRUNCATE followed by INSERT has a
-	 * non-empty map and must use the normal diff below to preserve the newly
-	 * inserted files. A rolled-back TRUNCATE likewise has restored files in
-	 * the map and must use the normal diff.
+	 * Only the paths are read here. The diff below looks at nothing else, and
+	 * the payload is read afterwards for the changed files alone, so this
+	 * stays proportional to what the transaction wrote rather than to how
+	 * many files the table has accumulated.
 	 */
-	if (opTracker->relationDataFilesRemoveAllSeen &&
-		hash_get_num_entries(currentFilesMap) == 0)
+	List	   *catalogFilePaths =
+		GetTableDataFilePathsFromCatalog(relationId, dataOnly, snapshot);
+
+	/*
+	 * Preserve the remove-all operation for a real TRUNCATE. Turning it into
+	 * one DATA_FILE_REMOVE per existing file loses the linear remove-all path
+	 * in the manifest writer and makes it compare every manifest entry with
+	 * every removed file.
+	 *
+	 * The tracker flags intentionally survive subtransaction rollback, so the
+	 * empty catalog check is what restricts this to a TRUNCATE that left no
+	 * files: TRUNCATE followed by INSERT, or a rolled back TRUNCATE, both
+	 * have files here and must go through the normal diff.
+	 */
+	if (opTracker->relationDataFilesRemoveAllSeen && catalogFilePaths == NIL)
 	{
 		TableMetadataOperation *removeAllOp = palloc0(sizeof(TableMetadataOperation));
 
@@ -1345,62 +1413,23 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 		return list_make1(removeAllOp);
 	}
 
-	/* get last pushed metadata */
-	IcebergTableMetadata *lastMetadata = GetLastPushedIcebergMetadata(opTracker);
+	DataFileDiff diff =
+		DiffCatalogFilesAgainstSnapshot(catalogFilePaths,
+										GetLastPushedIcebergMetadata(opTracker));
 
-	/* find added and removed files since metadata */
-	List	   *addedFiles = NIL;
-	List	   *removedFilePaths = NIL;
-
-	FindChangedFilesSinceMetadata(currentFilesMap, lastMetadata, &addedFiles, &removedFilePaths);
-
-	/*
-	 * Now that we know which files are newly added, load per-column stats
-	 * targeted to just those paths. Removed files don't need stats — the
-	 * manifest DELETE entry carries only the path — so this is bounded by
-	 * the actual write size rather than by total files in the changelog.
-	 */
-	LoadColumnStatsForFiles(opTracker->relationId, currentFilesMap, addedFiles);
+	List	   *addedFiles = LoadAddedDataFiles(relationId, diff.addedFilePaths,
+												list_length(catalogFilePaths),
+												allTransforms, snapshot);
 
 	/*
-	 * We have found the new files that are added since the last metadata
-	 * push. We can delete them from in-progress files now.
-	 *
-	 * Transient files, that are added and removed in the same transaction
-	 * would still be in-progress queue to be removed later. Files that are
-	 * added in rollbacked subtransactions would also be in-progress queue.
+	 * The added files are no longer in progress. Files that were added and
+	 * removed within this transaction, or added in a rolled back
+	 * subtransaction, stay queued to be cleaned up later.
 	 */
-	DeleteInProgressAddedFiles(opTracker->relationId, addedFiles);
+	if (diff.addedFilePaths != NIL)
+		DeleteInProgressFileRecords(diff.addedFilePaths);
 
-	List	   *metadataOperations = NIL;
-
-	/* create operations for added files */
-	ListCell   *addedFileCell = NULL;
-
-	foreach(addedFileCell, addedFiles)
-	{
-		TableDataFile *addedFile = lfirst(addedFileCell);
-
-		TableMetadataOperation *addFileOp =
-			AddDataFileOperation(addedFile->path, addedFile->content, &addedFile->stats,
-								 addedFile->partition, addedFile->partitionSpecId);
-
-		metadataOperations = lappend(metadataOperations, addFileOp);
-	}
-
-	/* create operations for removed files */
-	ListCell   *removedFileCell = NULL;
-
-	foreach(removedFileCell, removedFilePaths)
-	{
-		char	   *removedFilePath = lfirst(removedFileCell);
-
-		TableMetadataOperation *removedFileOp = RemoveDataFileOperation(removedFilePath);
-
-		metadataOperations = lappend(metadataOperations, removedFileOp);
-	}
-
-	return metadataOperations;
+	return MakeDataFileOperations(addedFiles, diff.removedFilePaths);
 }
 
 
