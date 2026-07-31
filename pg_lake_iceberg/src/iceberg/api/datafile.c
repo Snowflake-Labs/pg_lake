@@ -24,6 +24,7 @@
 #include "pg_lake/extensions/pg_lake_iceberg.h"
 #include "pg_lake/iceberg/api/datafile.h"
 #include "pg_lake/iceberg/api/snapshot.h"
+#include "utils/memutils.h"
 
 
 /*
@@ -98,6 +99,57 @@ FetchDataFilePathsFromSnapshot(IcebergSnapshot * snapshot, ManifestPredicateFn m
 	}
 
 	return dataFiles;
+}
+
+/*
+ * VisitDataFilePathsInSnapshot calls visitorFn once per data file path in the
+ * snapshot.
+ *
+ * Unlike FetchDataFilePathsFromSnapshot, entries are decoded one manifest at a
+ * time and released before the next manifest is read, so peak memory is one
+ * manifest rather than the whole snapshot. A manifest entry carries the full
+ * DataFile struct -- per-column bounds, value counts, partition values -- so
+ * for a table with many files that difference is large.
+ */
+void
+VisitDataFilePathsInSnapshot(IcebergSnapshot * snapshot,
+							 ManifestEntryPredicateFn manifestEntryPredicateFn,
+							 DataFilePathVisitorFn visitorFn, void *state)
+{
+	/* returns NIL for a NULL snapshot */
+	List	   *manifests = FetchManifestsFromSnapshot(snapshot, NULL);
+
+	if (manifests == NIL)
+		return;
+
+	MemoryContext manifestContext =
+		AllocSetContextCreate(CurrentMemoryContext,
+							  "VisitDataFilePathsInSnapshot manifest entries",
+							  ALLOCSET_DEFAULT_SIZES);
+
+	ListCell   *manifestCell = NULL;
+
+	foreach(manifestCell, manifests)
+	{
+		IcebergManifest *manifest = lfirst(manifestCell);
+
+		MemoryContext oldContext = MemoryContextSwitchTo(manifestContext);
+
+		List	   *filePaths =
+			FetchDataFilesFromManifest(manifest, true /* pathOnly */ ,
+									   manifestEntryPredicateFn, NULL);
+
+		MemoryContextSwitchTo(oldContext);
+
+		ListCell   *pathCell = NULL;
+
+		foreach(pathCell, filePaths)
+			visitorFn((const char *) lfirst(pathCell), state);
+
+		MemoryContextReset(manifestContext);
+	}
+
+	MemoryContextDelete(manifestContext);
 }
 
 /*

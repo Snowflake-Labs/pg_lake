@@ -38,6 +38,17 @@ typedef bool (*DataFilePredicateFn) (DataFile * dataFile);
 extern PGDLLEXPORT List *FetchDataFilesFromManifestEntry(IcebergManifestEntry * manifestEntry, DataFilePredicateFn dataFilePredicateFn);
 extern PGDLLEXPORT List *FetchDataFilesFromSnapshot(IcebergSnapshot * snapshot, ManifestPredicateFn manifestPredicateFn, ManifestEntryPredicateFn manifestEntryPredicateFn, DataFilePredicateFn dataFilePredicateFn);
 extern PGDLLEXPORT List *FetchDataFilePathsFromSnapshot(IcebergSnapshot * snapshot, ManifestPredicateFn manifestPredicateFn, ManifestEntryPredicateFn manifestEntryPredicateFn, DataFilePredicateFn dataFilePredicateFn);
+
+/*
+ * Visitor invoked once per data file path in a snapshot. The path is only
+ * valid for the duration of the call; copy it to keep it.
+ */
+typedef void (*DataFilePathVisitorFn) (const char *path, void *state);
+
+extern PGDLLEXPORT void VisitDataFilePathsInSnapshot(IcebergSnapshot * snapshot,
+													 ManifestEntryPredicateFn manifestEntryPredicateFn,
+													 DataFilePathVisitorFn visitorFn,
+													 void *state);
 extern PGDLLEXPORT void FetchAllDataAndDeleteFilesFromCurrentSnapshot(IcebergTableMetadata * metadata, List **dataFiles, List **deleteFiles);
 extern PGDLLEXPORT void FetchAllDataAndDeleteFilePathsFromCurrentSnapshot(IcebergTableMetadata * metadata, List **dataFilePaths, List **deleteFilePaths);
 extern PGDLLEXPORT List *FetchDataFilesFromManifest(IcebergManifest * manifest, bool pathOnly, ManifestEntryPredicateFn manifestEntryPredicateFn, DataFilePredicateFn dataFilePredicateFn);

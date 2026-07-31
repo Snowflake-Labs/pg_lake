@@ -1098,6 +1098,18 @@ EnsureFreshStatsForCommitTimeDiff(void)
 
 
 /*
+ * AddPathToFilesHash is the DataFilePathVisitorFn used to collect a snapshot's
+ * data file paths. AppendFileToHash copies the path into the hash, so it does
+ * not outlive the visit.
+ */
+static void
+AddPathToFilesHash(const char *path, void *state)
+{
+	AppendFileToHash(path, (HTAB *) state);
+}
+
+
+/*
  * CreateDataFilesHashForMetadata creates and populates a hash table of data files
  * from the given Iceberg table metadata.
  */
@@ -1109,17 +1121,9 @@ CreateDataFilesHashForMetadata(IcebergTableMetadata * metadata)
 	if (metadata == NULL)
 		return dataFilesMap;
 
-	IcebergSnapshot *iceSnapshot = GetCurrentSnapshot(metadata, true);
-	List	   *dataFiles = FetchDataFilesFromSnapshot(iceSnapshot, NULL, IsManifestEntryStatusScannable, NULL);
-
-	ListCell   *fileCell = NULL;
-
-	foreach(fileCell, dataFiles)
-	{
-		TableDataFile *dataFile = lfirst(fileCell);
-
-		AppendFileToHash(dataFile->path, dataFilesMap);
-	}
+	VisitDataFilePathsInSnapshot(GetCurrentSnapshot(metadata, true),
+								 IsManifestEntryStatusScannable,
+								 AddPathToFilesHash, dataFilesMap);
 
 	return dataFilesMap;
 }
