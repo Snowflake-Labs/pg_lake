@@ -34,6 +34,7 @@
 #include "pg_lake/iceberg/partitioning/spec_generation.h"
 #include "pg_lake/partitioning/partition_spec_catalog.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
+#include "pg_lake/transaction/data_file_path_set.h"
 #include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/transaction/transaction_hooks.h"
 #include "pg_lake/util/injection_points.h"
@@ -106,7 +107,7 @@ static void InitTableMetadataTrackerHashIfNeeded(void);
 static void InitRestCatalogRequestsHashIfNeeded(void);
 static bool ShouldRunCommitTimeAnalyze(HTAB *trackedRelations);
 static void EnsureFreshStatsForCommitTimeDiff(void);
-static HTAB *CreateDataFilesHashForMetadata(IcebergTableMetadata * metadata);
+static void MarkPathPresentInSnapshot(const char *path, void *state);
 static DataFileDiff DiffCatalogFilesAgainstSnapshot(List *catalogFilePaths,
 													IcebergTableMetadata * metadata);
 static List *LoadAddedDataFiles(Oid relationId, List *addedFilePaths, int catalogFileCount,
@@ -1115,34 +1116,48 @@ EnsureFreshStatsForCommitTimeDiff(void)
 
 
 /*
- * AddPathToFilesHash is the DataFilePathVisitorFn used to collect a snapshot's
- * data file paths. AppendFileToHash copies the path into the hash, so it does
- * not outlive the visit.
+ * SnapshotWalkState is threaded through MarkPathPresentInSnapshot while walking
+ * the last pushed snapshot.
  */
-static void
-AddPathToFilesHash(const char *path, void *state)
+typedef struct SnapshotWalkState
 {
-	AppendFileToHash(path, (HTAB *) state);
-}
+	/* every catalog path, flag set once the snapshot is found to have it */
+	DataFilePathSet *catalogPaths;
+
+	/* snapshot paths the catalog does not have, and their dedup set */
+	DataFilePathSet *removedPaths;
+	List	   *removedFilePaths;
+}			SnapshotWalkState;
 
 
 /*
- * CreateDataFilesHashForMetadata creates and populates a hash table of data files
- * from the given Iceberg table metadata.
+ * MarkPathPresentInSnapshot is the DataFilePathVisitorFn that drives the diff.
+ *
+ * Instead of collecting the snapshot's paths and comparing sets afterwards --
+ * which costs a second index over every file in the table -- it marks the
+ * catalog entry it matches, and records the ones it cannot match as removed.
  */
-static HTAB *
-CreateDataFilesHashForMetadata(IcebergTableMetadata * metadata)
+static void
+MarkPathPresentInSnapshot(const char *path, void *state)
 {
-	HTAB	   *dataFilesMap = CreateFilesHash();
+	SnapshotWalkState *walk = (SnapshotWalkState *) state;
+	bool	   *presentInSnapshot = DataFilePathSetFlag(walk->catalogPaths, path);
 
-	if (metadata == NULL)
-		return dataFilesMap;
+	if (presentInSnapshot != NULL)
+	{
+		*presentInSnapshot = true;
+		return;
+	}
 
-	VisitDataFilePathsInSnapshot(GetCurrentSnapshot(metadata, true),
-								 IsManifestEntryStatusScannable,
-								 AddPathToFilesHash, dataFilesMap);
+	/*
+	 * The snapshot has this file and the catalog does not, so it was removed.
+	 * path belongs to the manifest currently being decoded, so copy it. A
+	 * path can appear in more than one manifest, hence the dedup set.
+	 */
+	char	   *removedPath = pstrdup(path);
 
-	return dataFilesMap;
+	if (DataFilePathSetAdd(walk->removedPaths, removedPath))
+		walk->removedFilePaths = lappend(walk->removedFilePaths, removedPath);
 }
 
 
@@ -1156,11 +1171,11 @@ CreateDataFilesHashForMetadata(IcebergTableMetadata * metadata)
 static DataFileDiff
 DiffCatalogFilesAgainstSnapshot(List *catalogFilePaths, IcebergTableMetadata * metadata)
 {
-	DataFileDiff diff = {NIL, NIL};
+	SnapshotWalkState walk = {0};
 
-	/* metadata is NULL when the table is created in this transaction */
-	HTAB	   *snapshotPaths = CreateDataFilesHashForMetadata(metadata);
-	HTAB	   *catalogPaths = CreateFilesHash();
+	walk.catalogPaths = CreateDataFilePathSet("commit-time catalog data file paths",
+											  list_length(catalogFilePaths));
+	walk.removedPaths = CreateDataFilePathSet("commit-time removed data file paths", 32);
 
 	ListCell   *pathCell = NULL;
 
@@ -1168,28 +1183,29 @@ DiffCatalogFilesAgainstSnapshot(List *catalogFilePaths, IcebergTableMetadata * m
 	{
 		char	   *path = lfirst(pathCell);
 
-		if (AppendFileToHash(path, catalogPaths))
+		if (!DataFilePathSetAdd(walk.catalogPaths, path))
 			elog(ERROR, "duplicate data file path found in catalog: %s", path);
+	}
 
-		if (!hash_search(snapshotPaths, path, HASH_FIND, NULL))
+	/* metadata is NULL when the table is created in this transaction */
+	if (metadata != NULL)
+		VisitDataFilePathsInSnapshot(GetCurrentSnapshot(metadata, true),
+									 IsManifestEntryStatusScannable,
+									 MarkPathPresentInSnapshot, &walk);
+
+	DataFileDiff diff = {NIL, walk.removedFilePaths};
+
+	foreach(pathCell, catalogFilePaths)
+	{
+		char	   *path = lfirst(pathCell);
+
+		if (!*DataFilePathSetFlag(walk.catalogPaths, path))
 			diff.addedFilePaths = lappend(diff.addedFilePaths, path);
 	}
 
-	HASH_SEQ_STATUS snapshotStatus;
+	DestroyDataFilePathSet(walk.catalogPaths);
+	DestroyDataFilePathSet(walk.removedPaths);
 
-	hash_seq_init(&snapshotStatus, snapshotPaths);
-
-	char	   *snapshotPath = NULL;
-
-	while ((snapshotPath = hash_seq_search(&snapshotStatus)) != NULL)
-	{
-		if (!hash_search(catalogPaths, snapshotPath, HASH_FIND, NULL))
-			diff.removedFilePaths = lappend(diff.removedFilePaths, snapshotPath);
-	}
-
-	hash_destroy(catalogPaths);
-
-	/* removedFilePaths alias snapshotPaths entries, so that one has to stay */
 	return diff;
 }
 
