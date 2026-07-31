@@ -21,9 +21,9 @@
 /.github/               @sfc-gh-dachristensen @sfc-gh-abozkurt
 
 # Query & execution engine (C internals, DuckDB bridge, pushdown, types).
-/pg_lake_engine/        @sfc-gh-abozkurt @sfc-gh-amzheng
-/duckdb_pglake/         @sfc-gh-mslot @sfc-gh-abozkurt
-/pgduck_server/         @sfc-gh-mslot @sfc-gh-abozkurt
+/pg_lake_engine/        @sfc-gh-abozkurt @sfc-gh-amzheng @sfc-gh-mslot
+/duckdb_pglake/         @sfc-gh-mslot @sfc-gh-abozkurt @sfc-gh-dachristensen
+/pgduck_server/         @sfc-gh-mslot @sfc-gh-abozkurt @sfc-gh-dachristensen
 
 # Iceberg & Postgres table format.
 /pg_lake_iceberg/       @sfc-gh-okalaci @sfc-gh-abozkurt
@@ -31,19 +31,19 @@
 
 # Data ingestion: COPY and file formats.
 /pg_lake_copy/          @sfc-gh-abozkurt @sfc-gh-amzheng
-/avro/                  @sfc-gh-dachristensen @sfc-gh-amzheng
+/avro/                  @sfc-gh-okalaci @sfc-gh-amzheng
 
 # Extension framework, updater, meta-extension, and mapping.
 /pg_extension_base/     @sfc-gh-dachristensen @sfc-gh-mslot
 /pg_extension_updater/  @sfc-gh-okalaci @sfc-gh-npuka
 /pg_lake/               @sfc-gh-okalaci @sfc-gh-dachristensen
-/pg_map/                @sfc-gh-okalaci @sfc-gh-npuka
+/pg_map/                @sfc-gh-dachristensen @sfc-gh-npuka
 
 # Spatial.
-/pg_lake_spatial/       @sfc-gh-abozkurt @sfc-gh-okalaci
+/pg_lake_spatial/       @sfc-gh-dachristensen @sfc-gh-okalaci
 
 # Benchmarks.
-/pg_lake_benchmark/     @sfc-gh-mslot @sfc-gh-okalaci
+/pg_lake_benchmark/     @sfc-gh-abozkurt @sfc-gh-okalaci
 
 # Testing, tooling, and container images.
 /test_common/           @sfc-gh-dachristensen @sfc-gh-abozkurt
