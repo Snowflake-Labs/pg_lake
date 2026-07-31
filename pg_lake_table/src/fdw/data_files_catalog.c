@@ -399,6 +399,14 @@ GetTableDataFilesByPathHashFromCatalog(Oid relationId, bool dataOnly, bool newFi
 		dataFileEntry->dataFile = *dataFile;
 	}
 
+	/*
+	 * The by-id hash was only a staging area. Each TableDataFile has been
+	 * copied by value into its by-path entry, and everything those structs
+	 * point at was allocated in the caller's context, not in the hash's own
+	 * context, so dropping it invalidates nothing the caller can reach.
+	 */
+	hash_destroy(filesById);
+
 	return filesByPath;
 }
 
