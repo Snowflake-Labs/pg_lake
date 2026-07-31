@@ -207,8 +207,8 @@ extern PGDLLEXPORT char *GetRestCatalogName(Oid relationId);
 extern PGDLLEXPORT char *GetRestCatalogNamespace(Oid relationId);
 extern PGDLLEXPORT char *GetRestCatalogTableName(Oid relationId);
 extern PGDLLEXPORT bool IsReadOnlyRestCatalogIcebergTable(Oid relationId);
-extern PGDLLEXPORT char *GetMetadataLocationFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogName, const char *namespaceName,
-															const char *relationName);
+extern PGDLLEXPORT char *LoadRestCatalogMetadataLocation(RestCatalogOptions * opts, const char *restCatalogName, const char *namespaceName,
+														 const char *relationName);
 extern PGDLLEXPORT RestCatalogLoadTableResult LoadTableFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogName,
 																	   const char *namespaceName, const char *relationName);
 extern PGDLLEXPORT char *GetMetadataLocationForRestCatalogForIcebergTable(Oid relationId);

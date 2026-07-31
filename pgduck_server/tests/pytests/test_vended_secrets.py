@@ -2,7 +2,7 @@
 Tests for vended credential secrets in pgduck_server.
 
 Validates that DuckDB scoped secrets can be created, replaced, and dropped
-via the same SQL patterns used by pg_lake's EnsureVendedSecretInPGDuck.
+via the same SQL patterns used by pg_lake's PushVendedSecretToPGDuck.
 """
 
 from utils_pytest import *

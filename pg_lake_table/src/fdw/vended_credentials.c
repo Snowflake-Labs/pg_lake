@@ -107,19 +107,19 @@ PushVendedCredsInternal(PGDuckConnection * conn, Oid relationId)
 	char	   *s3Scope = VendedSecretScope(relationId, creds);
 
 	if (conn != NULL)
-		EnsureVendedSecretOnConnection(conn, opts->serverOid,
-									   secretKey, s3Scope,
-									   creds->accessKeyId,
-									   creds->secretAccessKey,
-									   creds->sessionToken,
-									   creds->region);
+		PushVendedSecretToPGDuckOnConnection(conn, opts->serverOid,
+											 secretKey, s3Scope,
+											 creds->accessKeyId,
+											 creds->secretAccessKey,
+											 creds->sessionToken,
+											 creds->region);
 	else
-		EnsureVendedSecretInPGDuck(opts->serverOid,
-								   secretKey, s3Scope,
-								   creds->accessKeyId,
-								   creds->secretAccessKey,
-								   creds->sessionToken,
-								   creds->region);
+		PushVendedSecretToPGDuck(opts->serverOid,
+								 secretKey, s3Scope,
+								 creds->accessKeyId,
+								 creds->secretAccessKey,
+								 creds->sessionToken,
+								 creds->region);
 }
 
 

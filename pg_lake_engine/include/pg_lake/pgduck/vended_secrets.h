@@ -22,8 +22,10 @@
 #include "pg_lake/pgduck/client.h"
 
 /*
- * EnsureVendedSecretInPGDuck creates or replaces a DuckDB scoped secret
- * for vended S3 credentials on the shared pgduck_server instance.
+ * PushVendedSecretToPGDuck creates or replaces a DuckDB scoped secret
+ * for vended S3 credentials on the shared pgduck_server instance.  The
+ * name is mutating on purpose: each call issues CREATE OR REPLACE
+ * SECRET, so callers should treat this as a write, not a getter.
  *
  * The secret name is deterministic (pglake_vended_{serverOid}_{keyHash},
  * where keyHash derives from secretKey -- a stable per-table identity
@@ -35,28 +37,28 @@
  * The secret's SCOPE is set to s3Scope (the table's storage location)
  * so DuckDB's secret manager automatically selects it for matching URLs.
  */
-extern PGDLLEXPORT void EnsureVendedSecretInPGDuck(Oid serverOid,
-												   const char *secretKey,
-												   const char *s3Scope,
-												   const char *accessKeyId,
-												   const char *secretAccessKey,
-												   const char *sessionToken,
-												   const char *region);
+extern PGDLLEXPORT void PushVendedSecretToPGDuck(Oid serverOid,
+												 const char *secretKey,
+												 const char *s3Scope,
+												 const char *accessKeyId,
+												 const char *secretAccessKey,
+												 const char *sessionToken,
+												 const char *region);
 
 /*
- * EnsureVendedSecretOnConnection is like EnsureVendedSecretInPGDuck but
- * sends the CREATE SECRET on an already-open pgduck connection rather
- * than acquiring a fresh one.  Use this when the caller already holds
- * a connection that will be used for the subsequent data query.
+ * PushVendedSecretToPGDuckOnConnection is like PushVendedSecretToPGDuck
+ * but sends the CREATE SECRET on an already-open pgduck connection
+ * rather than acquiring a fresh one.  Use this when the caller already
+ * holds a connection that will be used for the subsequent data query.
  */
-extern PGDLLEXPORT void EnsureVendedSecretOnConnection(PGDuckConnection * conn,
-													   Oid serverOid,
-													   const char *secretKey,
-													   const char *s3Scope,
-													   const char *accessKeyId,
-													   const char *secretAccessKey,
-													   const char *sessionToken,
-													   const char *region);
+extern PGDLLEXPORT void PushVendedSecretToPGDuckOnConnection(PGDuckConnection * conn,
+															 Oid serverOid,
+															 const char *secretKey,
+															 const char *s3Scope,
+															 const char *accessKeyId,
+															 const char *secretAccessKey,
+															 const char *sessionToken,
+															 const char *region);
 
 /*
  * DropVendedSecretFromPGDuck removes a previously-created vended secret

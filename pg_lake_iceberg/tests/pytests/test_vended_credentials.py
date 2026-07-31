@@ -243,7 +243,7 @@ def test_vended_credentials_header_sent_on_load_table(
 
     port, handler_class = configure_mock_catalog
 
-    # GetMetadataLocationFromRestCatalog is called internally.
+    # LoadRestCatalogMetadataLocation is called internally.
     # We expose it via a SQL-callable C function for testing.
     run_command(
         """

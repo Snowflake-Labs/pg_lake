@@ -338,14 +338,25 @@ PushVendedSecretOnConnection(PGDuckConnection * conn,
 }
 
 
+/*
+ * We deliberately issue CREATE OR REPLACE SECRET on every push instead
+ * of skipping when a still-valid secret was already sent.  A vended
+ * secret lives only for the lifetime of the pgduck_server connection it
+ * was created on; that connection can be recycled or replaced between
+ * statements, after which the secret is gone.  A "skip if recently
+ * pushed" guard keyed on table/expiry would therefore risk running a
+ * scan against a connection that has no secret.  The credential cache
+ * already elides the expensive REST round-trip, so all this saves is a
+ * single idempotent statement that is cheap next to the data scan.
+ */
 void
-EnsureVendedSecretInPGDuck(Oid serverOid,
-						   const char *secretKey,
-						   const char *s3Scope,
-						   const char *accessKeyId,
-						   const char *secretAccessKey,
-						   const char *sessionToken,
-						   const char *region)
+PushVendedSecretToPGDuck(Oid serverOid,
+						 const char *secretKey,
+						 const char *s3Scope,
+						 const char *accessKeyId,
+						 const char *secretAccessKey,
+						 const char *sessionToken,
+						 const char *region)
 {
 	char	   *secretName = GenerateVendedSecretName(serverOid, secretKey);
 
@@ -370,14 +381,14 @@ EnsureVendedSecretInPGDuck(Oid serverOid,
 
 
 void
-EnsureVendedSecretOnConnection(PGDuckConnection * conn,
-							   Oid serverOid,
-							   const char *secretKey,
-							   const char *s3Scope,
-							   const char *accessKeyId,
-							   const char *secretAccessKey,
-							   const char *sessionToken,
-							   const char *region)
+PushVendedSecretToPGDuckOnConnection(PGDuckConnection * conn,
+									 Oid serverOid,
+									 const char *secretKey,
+									 const char *s3Scope,
+									 const char *accessKeyId,
+									 const char *secretAccessKey,
+									 const char *sessionToken,
+									 const char *region)
 {
 	char	   *secretName = GenerateVendedSecretName(serverOid, secretKey);
 

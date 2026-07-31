@@ -49,7 +49,7 @@ register_namespace_to_rest_catalog(PG_FUNCTION_ARGS)
 
 /*
  * get_rest_metadata_location is a test function that calls
- * GetMetadataLocationFromRestCatalog and returns the metadata location.
+ * LoadRestCatalogMetadataLocation and returns the metadata location.
  * This exercises the full LoadTableFromRestCatalog path including
  * vended credential extraction and caching.
  */
@@ -63,8 +63,8 @@ get_rest_metadata_location(PG_FUNCTION_ARGS)
 	RestCatalogOptions *opts = ResolveRestCatalogOptions(REST_CATALOG_NAME);
 
 	char	   *metadataLocation =
-		GetMetadataLocationFromRestCatalog(opts, catalogName, namespaceName,
-										   tableName);
+		LoadRestCatalogMetadataLocation(opts, catalogName, namespaceName,
+										tableName);
 
 	PG_RETURN_TEXT_P(cstring_to_text(metadataLocation));
 }

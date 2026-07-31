@@ -435,7 +435,7 @@ GetMetadataLocationForRestCatalogForIcebergTable(Oid relationId)
 
 	RestCatalogOptions *opts = GetRestCatalogOptionsForRelation(relationId);
 
-	return GetMetadataLocationFromRestCatalog(opts, restCatalogName, namespaceName, relationName);
+	return LoadRestCatalogMetadataLocation(opts, restCatalogName, namespaceName, relationName);
 }
 
 
@@ -556,12 +556,15 @@ LoadTableFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogName,
 
 
 /*
- * GetMetadataLocationFromRestCatalog is the legacy API that returns only
- * the metadata location string.  Callers that also need vended
- * credentials should use LoadTableFromRestCatalog instead.
+ * LoadRestCatalogMetadataLocation performs a REST loadTable request and
+ * returns only the metadata location string.  Despite the historical
+ * "get" phrasing this is not a cheap accessor: it issues a network call
+ * (and, on the vended-credentials path, populates the credential cache
+ * via LoadTableFromRestCatalog).  Callers that also need the vended
+ * credentials should call LoadTableFromRestCatalog directly.
  */
 char *
-GetMetadataLocationFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogName, const char *namespaceName, const char *relationName)
+LoadRestCatalogMetadataLocation(RestCatalogOptions * opts, const char *restCatalogName, const char *namespaceName, const char *relationName)
 {
 	RestCatalogLoadTableResult result =
 		LoadTableFromRestCatalog(opts, restCatalogName, namespaceName,
