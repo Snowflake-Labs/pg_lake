@@ -113,6 +113,7 @@ static DataFileDiff DiffCatalogFilesAgainstSnapshot(List *catalogFilePaths,
 static List *LoadAddedDataFiles(Oid relationId, List *addedFilePaths, int catalogFileCount,
 								List *allTransforms, Snapshot snapshot);
 static List *LookupDataFilesByPath(HTAB *filesByPath, List *paths);
+static List *CopyPathList(List *paths);
 static List *MakeDataFileOperations(List *addedFiles, List *removedFilePaths);
 static HTAB *CreatePartitionSpecsHashForMetadata(IcebergTableMetadata * metadata);
 static List *FindNewPartitionSpecsSinceMetadata(HTAB *currentSpecs, IcebergTableMetadata * metadata);
@@ -1247,6 +1248,22 @@ LoadAddedDataFiles(Oid relationId, List *addedFilePaths, int catalogFileCount,
 
 
 /*
+ * CopyPathList copies a list of paths into the current memory context.
+ */
+static List *
+CopyPathList(List *paths)
+{
+	List	   *copy = NIL;
+	ListCell   *pathCell = NULL;
+
+	foreach(pathCell, paths)
+		copy = lappend(copy, pstrdup((char *) lfirst(pathCell)));
+
+	return copy;
+}
+
+
+/*
  * LookupDataFilesByPath resolves each path to its TableDataFile in filesByPath,
  * preserving the order of paths.
  */
@@ -1399,6 +1416,26 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 	Oid			relationId = opTracker->relationId;
 	Snapshot	snapshot = GetTransactionSnapshot();
 	bool		dataOnly = false;
+	MemoryContext callerContext = CurrentMemoryContext;
+
+	/*
+	 * The diff is O(all files in the table) while its result is O(files this
+	 * transaction touched), so it gets a context of its own that we drop as
+	 * soon as the result has been copied out.
+	 *
+	 * ApplyTrackedIcebergMetadataChanges walks every relation in the
+	 * transaction without freeing in between, so whatever the diff leaves in
+	 * TopTransactionContext is held until commit and the peak becomes the sum
+	 * over all relations instead of the largest one. Freeing inside that loop
+	 * instead is not an option: the Iceberg metadata temp file is unlinked by
+	 * a reset callback on whatever context was current when it was created,
+	 * and it has to survive until FinishAllUploads().
+	 */
+	MemoryContext diffContext = AllocSetContextCreate(callerContext,
+													  "commit-time data file diff",
+													  ALLOCSET_DEFAULT_SIZES);
+
+	MemoryContextSwitchTo(diffContext);
 
 	/*
 	 * Only the paths are read here. The diff below looks at nothing else, and
@@ -1422,6 +1459,9 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 	 */
 	if (opTracker->relationDataFilesRemoveAllSeen && catalogFilePaths == NIL)
 	{
+		MemoryContextSwitchTo(callerContext);
+		MemoryContextDelete(diffContext);
+
 		TableMetadataOperation *removeAllOp = palloc0(sizeof(TableMetadataOperation));
 
 		removeAllOp->type = DATA_FILE_REMOVE_ALL;
@@ -1429,12 +1469,25 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 		return list_make1(removeAllOp);
 	}
 
+	int			catalogFileCount = list_length(catalogFilePaths);
 	DataFileDiff diff =
 		DiffCatalogFilesAgainstSnapshot(catalogFilePaths,
 										GetLastPushedIcebergMetadata(opTracker));
 
-	List	   *addedFiles = LoadAddedDataFiles(relationId, diff.addedFilePaths,
-												list_length(catalogFilePaths),
+	/*
+	 * Copy the result out and drop the diff, releasing the catalog path list,
+	 * the last pushed metadata and the path set, none of which is needed to
+	 * apply the changes.
+	 */
+	MemoryContextSwitchTo(callerContext);
+
+	List	   *addedFilePaths = CopyPathList(diff.addedFilePaths);
+	List	   *removedFilePaths = CopyPathList(diff.removedFilePaths);
+
+	MemoryContextDelete(diffContext);
+
+	List	   *addedFiles = LoadAddedDataFiles(relationId, addedFilePaths,
+												catalogFileCount,
 												allTransforms, snapshot);
 
 	/*
@@ -1442,10 +1495,10 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 	 * removed within this transaction, or added in a rolled back
 	 * subtransaction, stay queued to be cleaned up later.
 	 */
-	if (diff.addedFilePaths != NIL)
-		DeleteInProgressFileRecords(diff.addedFilePaths);
+	if (addedFilePaths != NIL)
+		DeleteInProgressFileRecords(addedFilePaths);
 
-	return MakeDataFileOperations(addedFiles, diff.removedFilePaths);
+	return MakeDataFileOperations(addedFiles, removedFilePaths);
 }
 
 
