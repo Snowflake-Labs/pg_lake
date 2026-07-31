@@ -15,7 +15,7 @@
 # @sfc-gh-npuka Naisila, @sfc-gh-dachristensen David, @sfc-gh-amzheng Amy.
 
 # Default for anything not matched below (root build/config, LICENSE, etc.).
-*                       @sfc-gh-mslot @sfc-gh-okalaci
+*                       @sfc-gh-mslot @sfc-gh-okalaci @sfc-gh-dachristensen
 
 # CI, linting, and the code-owners map itself.
 /.github/               @sfc-gh-dachristensen @sfc-gh-abozkurt
@@ -26,7 +26,7 @@
 /pgduck_server/         @sfc-gh-mslot @sfc-gh-abozkurt
 
 # Iceberg & Postgres table format.
-/pg_lake_iceberg/       @sfc-gh-mslot @sfc-gh-npuka
+/pg_lake_iceberg/       @sfc-gh-okalaci @sfc-gh-abozkurt
 /pg_lake_table/         @sfc-gh-mslot @sfc-gh-okalaci
 
 # Data ingestion: COPY and file formats.
