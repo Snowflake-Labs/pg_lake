@@ -1446,14 +1446,17 @@ TupleDescToProjectionList(TupleDesc tupleDesc, CopyDataFormat sourceFormat,
 
 			if (nativeProjection != NULL)
 			{
-				char	   *columnAliasString =
-					!addCast ? psprintf(" AS %s", duckdb_quote_identifier(columnName)) : "";
+				const char *castTargetType =
+					GetFullDuckDBTypeNameForPGType(MakePGType(columnTypeId,
+															  columnTypeMod),
+												   DATA_FORMAT_PARQUET);
 
 				if (hasColumns)
 					appendStringInfoString(&projection, ", ");
 
-				appendStringInfo(&projection, "%s%s",
-								 nativeProjection, columnAliasString);
+				appendStringInfo(&projection, "CAST(%s AS %s) AS %s",
+								 nativeProjection, castTargetType,
+								 duckdb_quote_identifier(columnName));
 
 				hasColumns = true;
 				continue;

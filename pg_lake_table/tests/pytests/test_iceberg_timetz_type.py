@@ -1,7 +1,7 @@
 from utils_pytest import *
 import json
 import pytest
-from datetime import time, timezone
+from datetime import time, timedelta, timezone
 
 
 def test_iceberg_timetz_as_utc_time(
@@ -1305,6 +1305,106 @@ def test_empty_external_iceberg_copy_uses_target_projection_shape(
     finally:
         pg_conn.rollback()
         run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema_name} CASCADE", pg_conn)
+        pg_conn.commit()
+
+
+def test_external_iceberg_copy_preserves_nested_native_projection_aliases(
+    pg_conn,
+    extension,
+    s3,
+    with_default_location,
+    create_helper_functions,
+):
+    """
+    COPY FROM an Iceberg metadata location must retain names for reconstructed
+    composite columns so the outer write-side rewrite can bind them.
+
+    Exercise both TIMETZ and INTERVAL because they share the recursive native
+    read conversion; the old interval-only projection had the same alias bug.
+    """
+    schema_name = "test_nested_native_external_copy"
+
+    try:
+        run_command(
+            f"""
+            CREATE SCHEMA {schema_name};
+            SET search_path TO {schema_name};
+            SET TIME ZONE 'America/New_York';
+
+            CREATE TYPE time_slot AS (
+                label   text,
+                at_time timetz
+            );
+            CREATE TYPE duration_slot AS (
+                label    text,
+                duration interval
+            );
+
+            CREATE TABLE source (
+                id             integer,
+                time_value     time_slot,
+                interval_value duration_slot
+            ) USING iceberg;
+            CREATE TABLE target (
+                id             integer,
+                time_value     time_slot,
+                interval_value duration_slot
+            ) USING iceberg;
+
+            INSERT INTO source VALUES
+                (1,
+                 ROW('open', '09:00:00+04'::timetz)::time_slot,
+                 ROW('elapsed', '2 days 3 hours'::interval)::duration_slot),
+                (2, NULL, NULL);
+            """,
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        metadata_location = run_query(
+            "SELECT metadata_location FROM lake_iceberg.tables "
+            f"WHERE table_namespace = '{schema_name}' AND table_name = 'source'",
+            pg_conn,
+        )[0][0]
+
+        run_command(
+            f"COPY target FROM '{metadata_location}' WITH (FORMAT 'iceberg');",
+            pg_conn,
+        )
+
+        assert (
+            run_query(
+                """
+            SELECT id,
+                   (time_value).label,
+                   (time_value).at_time,
+                   (interval_value).label,
+                   (interval_value).duration
+            FROM target
+            ORDER BY id
+            """,
+                pg_conn,
+            )
+            == [
+                [
+                    1,
+                    "open",
+                    time(5, 0, tzinfo=timezone.utc),
+                    "elapsed",
+                    timedelta(days=2, hours=3),
+                ],
+                [2, None, None, None, None],
+            ]
+        )
+        assert run_query(
+            "SELECT public.pg_lake_last_copy_pushed_down_test() pushed_down",
+            pg_conn,
+        )[0]["pushed_down"]
+    finally:
+        pg_conn.rollback()
+        run_command("RESET search_path;", pg_conn)
+        run_command("RESET TIME ZONE;", pg_conn)
         run_command(f"DROP SCHEMA IF EXISTS {schema_name} CASCADE", pg_conn)
         pg_conn.commit()
 
