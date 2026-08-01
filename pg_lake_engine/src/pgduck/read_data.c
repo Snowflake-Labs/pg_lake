@@ -74,7 +74,7 @@ static char *BuildColumnProjection(char *expression,
 								   List *formatOptions,
 								   bool addAlias);
 static bool TypeNeedsIcebergReadConversion(Oid typeOid);
-static bool AppendIcebergReadConversion(StringInfo buf, const char *expression,
+static void AppendIcebergReadConversion(StringInfo buf, const char *expression,
 										Oid typeOid, int32 typmod, int depth);
 static char *BuildIcebergReadConversion(const char *expression, Oid typeOid,
 										int32 typmod);
@@ -715,17 +715,18 @@ GetSchemaType(Field * field)
 static char *
 GetEmptyIcebergInputTypeName(Oid typeOid, int32 typmod)
 {
-	DuckDBTypeInfo duckdbType = ChooseCompatibleDuckDBType(typeOid, typmod,
-														   DATA_FORMAT_ICEBERG,
-														   false);
-	DuckDBTypeInfo storageType = GuessStorageType(duckdbType,
-												  DATA_FORMAT_ICEBERG);
+	bool		needsConversion = TypeNeedsIcebergReadConversion(typeOid);
 
-	if (!TypeNeedsIcebergReadConversion(typeOid))
-		return storageType.typeName;
+	if (!needsConversion || typeOid == INTERVALOID || typeOid == TIMETZOID)
+	{
+		DuckDBTypeInfo duckdbType = ChooseCompatibleDuckDBType(typeOid, typmod,
+															   DATA_FORMAT_ICEBERG,
+															   false);
+		DuckDBTypeInfo storageType = GuessStorageType(duckdbType,
+													  DATA_FORMAT_ICEBERG);
 
-	if (typeOid == INTERVALOID || typeOid == TIMETZOID)
 		return storageType.typeName;
+	}
 
 	Oid			elementType = get_element_type(typeOid);
 
@@ -796,8 +797,7 @@ GetEmptyIcebergInputTypeName(Oid typeOid, int32 typmod)
 	 * TypeNeedsIcebergReadConversion and this renderer walk the same type
 	 * families, so a conversion-requiring type must have returned above.
 	 */
-	Assert(false);
-	return storageType.typeName;
+	elog(ERROR, "unexpected type for empty Iceberg input: %u", typeOid);
 }
 
 
@@ -837,7 +837,7 @@ ReadEmptyDataSource(TupleDesc tupleDesc, CopyDataFormat sourceFormat, bool prefe
 			/*
 			 * Iceberg's read projection always performs native leaf
 			 * conversions, so its empty input must expose the structure those
-			 * conversions expect even when the caller prefers VARCHAR.
+			 * conversions expect.
 			 */
 			inputTypeName =
 				GetEmptyIcebergInputTypeName(columnTypeId, columnTypeMod);
@@ -1088,8 +1088,9 @@ TypeNeedsIcebergReadConversion(Oid typeOid)
 /*
  * AppendIcebergReadConversion emits the read-side inverse of the native-type
  * Iceberg write conversion for one expression. It recursively rebuilds only
- * containers with an INTERVAL or TIMETZ descendant and returns false when the
- * expression can pass through unchanged.
+ * containers with an INTERVAL or TIMETZ descendant. The caller must first
+ * establish that typeOid needs conversion with
+ * TypeNeedsIcebergReadConversion.
  *
  * The traversal deliberately mirrors AppendRewriteExpression's
  * ICEBERG_REWRITE_NATIVE_ENCODE family in iceberg_query_validation.c (branch
@@ -1097,7 +1098,7 @@ TypeNeedsIcebergReadConversion(Oid typeOid)
  * TypeNeedsIcebergReadConversion twinning TypeNeedsNativeConversion as the
  * gate. A new native type must be added to all four.
  */
-static bool
+static void
 AppendIcebergReadConversion(StringInfo buf, const char *expression,
 							Oid typeOid, int32 typmod, int depth)
 {
@@ -1108,7 +1109,7 @@ AppendIcebergReadConversion(StringInfo buf, const char *expression,
 						 "to_days((%s).days) + "
 						 "to_microseconds((%s).microseconds))",
 						 expression, expression, expression);
-		return true;
+		return;
 	}
 
 	if (typeOid == TIMETZOID)
@@ -1120,18 +1121,14 @@ AppendIcebergReadConversion(StringInfo buf, const char *expression,
 		 * reinterpretation by timetz_in.
 		 */
 		appendStringInfo(buf, "CAST((%s) AS TIMETZ)", expression);
-		return true;
+		return;
 	}
 
 	Oid			elementType = get_element_type(typeOid);
 
 	if (OidIsValid(elementType))
 	{
-		if (!TypeNeedsIcebergReadConversion(elementType))
-			return false;
-
 		char	   *lambdaVariable = psprintf("_x%d", depth);
-		bool		converted = false;
 
 		appendStringInfo(buf, "list_transform(%s, %s -> ",
 						 expression, lambdaVariable);
@@ -1142,13 +1139,10 @@ AppendIcebergReadConversion(StringInfo buf, const char *expression,
 		 * the element type above, and the two functions walk types
 		 * identically.
 		 */
-		converted = AppendIcebergReadConversion(buf, lambdaVariable,
-												elementType, typmod,
-												depth + 1);
-		Assert(converted);
-		(void) converted;
+		AppendIcebergReadConversion(buf, lambdaVariable, elementType, typmod,
+									depth + 1);
 		appendStringInfoChar(buf, ')');
-		return true;
+		return;
 	}
 
 	/*
@@ -1167,13 +1161,9 @@ AppendIcebergReadConversion(StringInfo buf, const char *expression,
 		bool		convertValue =
 			TypeNeedsIcebergReadConversion(valueType.postgresTypeOid);
 
-		if (!convertKey && !convertValue)
-			return false;
-
 		char	   *lambdaVariable = psprintf("_x%d", depth);
 		char	   *keyExpression = psprintf("%s.key", lambdaVariable);
 		char	   *valueExpression = psprintf("%s.value", lambdaVariable);
-		bool		converted = false;
 
 		appendStringInfo(buf,
 						 "map_from_entries(list_transform(map_entries(%s), "
@@ -1187,12 +1177,10 @@ AppendIcebergReadConversion(StringInfo buf, const char *expression,
 		 */
 		if (convertKey)
 		{
-			converted = AppendIcebergReadConversion(buf, keyExpression,
-													keyType.postgresTypeOid,
-													keyType.postgresTypeMod,
-													depth + 1);
-			Assert(converted);
-			(void) converted;
+			AppendIcebergReadConversion(buf, keyExpression,
+										keyType.postgresTypeOid,
+										keyType.postgresTypeMod,
+										depth + 1);
 		}
 		else
 			appendStringInfoString(buf, keyExpression);
@@ -1201,18 +1189,16 @@ AppendIcebergReadConversion(StringInfo buf, const char *expression,
 
 		if (convertValue)
 		{
-			converted = AppendIcebergReadConversion(buf, valueExpression,
-													valueType.postgresTypeOid,
-													valueType.postgresTypeMod,
-													depth + 1);
-			Assert(converted);
-			(void) converted;
+			AppendIcebergReadConversion(buf, valueExpression,
+										valueType.postgresTypeOid,
+										valueType.postgresTypeMod,
+										depth + 1);
 		}
 		else
 			appendStringInfoString(buf, valueExpression);
 
 		appendStringInfoString(buf, ")))");
-		return true;
+		return;
 	}
 
 	char		typeKind = get_typtype(typeOid);
@@ -1221,15 +1207,12 @@ AppendIcebergReadConversion(StringInfo buf, const char *expression,
 	{
 		Oid			baseType = getBaseTypeAndTypmod(typeOid, &typmod);
 
-		return AppendIcebergReadConversion(buf, expression, baseType, typmod,
-										   depth);
+		AppendIcebergReadConversion(buf, expression, baseType, typmod, depth);
+		return;
 	}
 
 	if (typeKind == TYPTYPE_COMPOSITE)
 	{
-		if (!TypeNeedsIcebergReadConversion(typeOid))
-			return false;
-
 		TupleDesc	tupleDesc = lookup_rowtype_tupdesc(typeOid, -1);
 		bool		firstField = true;
 
@@ -1258,16 +1241,18 @@ AppendIcebergReadConversion(StringInfo buf, const char *expression,
 
 			const char *fieldName = NameStr(attribute->attname);
 			const char *quotedFieldName =
-				duckdb_quote_identifier((char *) fieldName);
+				duckdb_quote_identifier(fieldName);
 			char	   *fieldExpression =
 				psprintf("%s.%s", expression, quotedFieldName);
 
 			appendStringInfo(buf, "%s := ", quotedFieldName);
 
-			if (!AppendIcebergReadConversion(buf, fieldExpression,
-											 attribute->atttypid,
-											 attribute->atttypmod,
-											 depth))
+			if (TypeNeedsIcebergReadConversion(attribute->atttypid))
+				AppendIcebergReadConversion(buf, fieldExpression,
+											attribute->atttypid,
+											attribute->atttypmod,
+											depth);
+			else
 				appendStringInfoString(buf, fieldExpression);
 
 			firstField = false;
@@ -1275,10 +1260,10 @@ AppendIcebergReadConversion(StringInfo buf, const char *expression,
 
 		appendStringInfoString(buf, ") ELSE NULL END");
 		ReleaseTupleDesc(tupleDesc);
-		return true;
+		return;
 	}
 
-	return false;
+	elog(ERROR, "unexpected type for Iceberg read conversion: %u", typeOid);
 }
 
 
@@ -1292,12 +1277,11 @@ BuildIcebergReadConversion(const char *expression, Oid typeOid, int32 typmod)
 {
 	StringInfoData conversion;
 
-	initStringInfo(&conversion);
-
-	if (!AppendIcebergReadConversion(&conversion, expression, typeOid, typmod,
-									 0))
+	if (!TypeNeedsIcebergReadConversion(typeOid))
 		return NULL;
 
+	initStringInfo(&conversion);
+	AppendIcebergReadConversion(&conversion, expression, typeOid, typmod, 0);
 	return conversion.data;
 }
 
@@ -1337,11 +1321,11 @@ BuildStorageToSurfaceProjection(const char *columnName, Oid columnTypeId,
 	 * session-timezone parsing.
 	 */
 	reconstruction =
-		BuildIcebergReadConversion(duckdb_quote_identifier((char *) columnName),
+		BuildIcebergReadConversion(duckdb_quote_identifier(columnName),
 								   columnTypeId, columnTypeMod);
 
 	if (reconstruction == NULL)
-		reconstruction = duckdb_quote_identifier((char *) columnName);
+		reconstruction = duckdb_quote_identifier(columnName);
 	else
 	{
 		/*
@@ -1359,7 +1343,7 @@ BuildStorageToSurfaceProjection(const char *columnName, Oid columnTypeId,
 	return psprintf("CAST(%s AS %s) AS %s",
 					reconstruction,
 					castTargetType,
-					duckdb_quote_identifier((char *) columnName));
+					duckdb_quote_identifier(columnName));
 }
 
 
