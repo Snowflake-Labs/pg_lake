@@ -216,16 +216,16 @@ def _assert_timetz_utc_cast_in_explain(query, pg_conn):
     IcebergWrapQueryWithNativeTypeConversion emits for TIMETZ columns.
 
     The wrapper emits
-    ``CAST((<expr>) AT TIME ZONE 'UTC' AS TIME)`` for every TIMETZ leaf
-    reachable from the target tuple descriptor. The substring is enough
-    to detect that the wrapper fired -- without it, DuckDB's implicit
-    ``CAST(TIMETZ AS TIME)`` silently drops the offset.
+    ``CAST(CAST((<expr>) AS TIMETZ) AT TIME ZONE 'UTC' AS TIME)`` for every
+    TIMETZ leaf reachable from the target tuple descriptor. Without the inner
+    cast, DuckDB can resolve a nested value as TIME and reinterpret its digits
+    in the session timezone before UTC normalization.
     """
     explain = _get_explain_text(query, pg_conn)
     assert "Custom Scan (Query Pushdown)" in explain, (
         "Expected Query Pushdown for: " + query + "\n" + explain
     )
-    assert "AT TIME ZONE 'UTC' AS TIME" in explain, (
+    assert "AS TIMETZ) AT TIME ZONE 'UTC' AS TIME" in explain, (
         "Expected TIMETZ UTC-normalizing cast in EXPLAIN output:\n" + explain
     )
 
