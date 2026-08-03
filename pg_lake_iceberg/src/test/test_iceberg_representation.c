@@ -31,6 +31,7 @@
 PG_FUNCTION_INFO_V1(pg_lake_iceberg_storage_type);
 PG_FUNCTION_INFO_V1(pg_lake_same_iceberg_representation);
 
+static bool IcebergFieldsEquivalent(Field * a, Field * b);
 static Field * StorageFieldForTypeString(const char *typeString,
 										 IcebergCompatibilityMode mode);
 static IcebergCompatibilityMode CompatibilityModeArg(FunctionCallInfo fcinfo, int argIndex);
@@ -101,14 +102,69 @@ pg_lake_same_iceberg_representation(PG_FUNCTION_ARGS)
 	 * unsupported numeric.)
 	 */
 	if (!UnsupportedNumericAsDouble &&
-		(TypeHasUnsupportedNumericLeaf(MakePGType(oldTypeOid, oldTypeMod), false) ||
-		 TypeHasUnsupportedNumericLeaf(MakePGType(newTypeOid, newTypeMod), false)))
+		(TypeHasUnrepresentableLeaf(MakePGType(oldTypeOid, oldTypeMod), false) ||
+		 TypeHasUnrepresentableLeaf(MakePGType(newTypeOid, newTypeMod), false)))
 		PG_RETURN_BOOL(false);
 
 	Field	   *oldField = StorageFieldForTypeString(oldTypeString, mode);
 	Field	   *newField = StorageFieldForTypeString(newTypeString, mode);
 
 	PG_RETURN_BOOL(IcebergFieldsEquivalent(oldField, newField));
+}
+
+
+/*
+ * IcebergFieldsEquivalent - true when two field trees represent the same stored
+ * type, ignoring field ids and defaults.
+ *
+ * The required flags are compared even though derivation currently produces
+ * false for every list element and map value: any future divergence here is a
+ * real semantic difference, and this predicate exists to catch exactly that.
+ */
+static bool
+IcebergFieldsEquivalent(Field * a, Field * b)
+{
+	if (a == NULL || b == NULL)
+		return a == b;
+
+	if (a->type != b->type)
+		return false;
+
+	switch (a->type)
+	{
+		case FIELD_TYPE_SCALAR:
+			return strcmp(a->field.scalar.typeName, b->field.scalar.typeName) == 0;
+
+		case FIELD_TYPE_LIST:
+			return a->field.list.elementRequired == b->field.list.elementRequired &&
+				IcebergFieldsEquivalent(a->field.list.element, b->field.list.element);
+
+		case FIELD_TYPE_MAP:
+			return a->field.map.valueRequired == b->field.map.valueRequired &&
+				IcebergFieldsEquivalent(a->field.map.key, b->field.map.key) &&
+				IcebergFieldsEquivalent(a->field.map.value, b->field.map.value);
+
+		case FIELD_TYPE_STRUCT:
+			{
+				if (a->field.structType.nfields != b->field.structType.nfields)
+					return false;
+
+				for (size_t i = 0; i < a->field.structType.nfields; i++)
+				{
+					FieldStructElement *elementA = &a->field.structType.fields[i];
+					FieldStructElement *elementB = &b->field.structType.fields[i];
+
+					if (elementA->required != elementB->required ||
+						strcmp(elementA->name, elementB->name) != 0 ||
+						!IcebergFieldsEquivalent(elementA->type, elementB->type))
+						return false;
+				}
+
+				return true;
+			}
+	}
+
+	return false;
 }
 
 

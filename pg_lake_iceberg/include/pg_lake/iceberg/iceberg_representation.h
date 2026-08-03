@@ -55,7 +55,7 @@
  * Rewriting a nested leaf means rebuilding the enclosing composite or map, which
  * materializes a type in lake_struct / the map schema -- the create path's own
  * behaviour.  A caller that must not create catalog types should first reject
- * the input with TypeHasUnsupportedNumericLeaf(type, true).
+ * the input with TypeHasUnrepresentableLeaf(type, true).
  */
 extern PGDLLEXPORT PGType IcebergStoredPostgresType(PGType type);
 
@@ -80,24 +80,13 @@ extern PGDLLEXPORT Field * IcebergStorageFieldForColumnType(PGType declaredType,
 															Field * *surfaceFieldOut);
 
 /*
- * IcebergFieldsEquivalent - true when two Iceberg field trees are the same
- * stored representation, ignoring field ids and defaults (assigned per
- * derivation, irrelevant to storage).  So varchar length / text-family members
- * collapse to `string`, smallint and integer to `int`, and so on.
- *
- * Tolerates NULL on either side (NULL equals only NULL), so a caller can pass a
- * persisted field it could not resolve without a separate check.
- */
-extern PGDLLEXPORT bool IcebergFieldsEquivalent(Field * a, Field * b);
-
-/*
- * TypeHasUnsupportedNumericLeaf - true when the type tree has a numeric leaf
- * Iceberg cannot hold as a decimal (unbounded, or precision/scale beyond
- * DUCKDB_MAX_NUMERIC_PRECISION).  `nestedOnly` restricts the answer to leaves
- * below the top level, i.e. those whose rewrite would require materializing a
- * new composite or map type.
+ * TypeHasUnrepresentableLeaf - true when the type tree has a leaf Iceberg
+ * cannot hold natively (currently: a numeric that is unbounded or whose
+ * precision/scale exceeds DUCKDB_MAX_NUMERIC_PRECISION).  `nestedOnly`
+ * restricts the answer to leaves below the top level, i.e. those whose rewrite
+ * would require materializing a new composite or map type.
  *
  * Shares ConvertTypeTree's traversal, so it cannot drift out of coverage from
  * the rewrite it predicts, and creates no catalog types (see the leaf rule).
  */
-extern PGDLLEXPORT bool TypeHasUnsupportedNumericLeaf(PGType type, bool nestedOnly);
+extern PGDLLEXPORT bool TypeHasUnrepresentableLeaf(PGType type, bool nestedOnly);
