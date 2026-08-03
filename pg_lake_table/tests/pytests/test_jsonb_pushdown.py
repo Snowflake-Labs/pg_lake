@@ -296,7 +296,7 @@ def test_jsonb_pushdown(s3, pg_conn, extension, with_default_location):
     assert err is not None
     pg_conn.rollback()
 
-    # we currently do not support pusing down jsonb array
+    # col::jsonb[] is a cast from text[] to jsonb[] which is not pushdownable
     res = run_query(
         'explain (verbose) SELECT * FROM text_array_table WHERE col::jsonb[] =ARRAY[\'{"name": "Alice", "age": 30}\'::jsonb]::jsonb[];',
         pg_conn,
@@ -304,4 +304,104 @@ def test_jsonb_pushdown(s3, pg_conn, extension, with_default_location):
     assert "Custom Scan (Query Pushdown)" not in str(res)
 
     run_command("DROP SCHEMA test_jsonb_pushdown CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_jsonb_array_pushdown(s3, pg_conn, extension, with_default_location):
+    """Test that jsonb[] columns can be pushed down and produce correct results."""
+    location = "s3://" + TEST_BUCKET + "/test_jsonb_array_pushdown"
+
+    run_command(
+        """
+            CREATE SCHEMA test_jsonb_array_pushdown;
+            SET search_path TO test_jsonb_array_pushdown;
+
+            CREATE TABLE jsonb_array_table(id int, col jsonb[]) USING iceberg;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # insert jsonb[] data with various value types
+    run_command(
+        """
+            INSERT INTO jsonb_array_table VALUES
+                (1, ARRAY['{"name": "Alice", "age": 30}'::jsonb, '{"name": "Bob", "age": 25}'::jsonb]),
+                (2, ARRAY['[1,2,3]'::jsonb, '"hello"'::jsonb, '42'::jsonb]),
+                (3, ARRAY['null'::jsonb, 'true'::jsonb, 'false'::jsonb]),
+                (4, NULL),
+                (5, ARRAY[]::jsonb[]);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # also store the same data in a heap table for comparison
+    run_command(
+        """
+            CREATE TABLE heap_jsonb_array_table AS
+                SELECT * FROM jsonb_array_table;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # basic SELECT pushdown: verify data roundtrips correctly
+    res_iceberg = run_query(
+        "SELECT id, col FROM jsonb_array_table ORDER BY id", pg_conn
+    )
+    res_heap = run_query(
+        "SELECT id, col FROM heap_jsonb_array_table ORDER BY id", pg_conn
+    )
+    assert len(res_iceberg) == len(res_heap)
+    for r_ice, r_heap in zip(res_iceberg, res_heap):
+        assert str(r_ice) == str(r_heap), f"Mismatch: {r_ice} vs {r_heap}"
+
+    # verify pushdown happens for SELECT
+    res = run_query("EXPLAIN (VERBOSE) SELECT * FROM jsonb_array_table", pg_conn)
+    assert "Custom Scan (Query Pushdown)" in str(res)
+
+    # verify WHERE with jsonb[] equality
+    res = run_query(
+        """SELECT id FROM jsonb_array_table
+           WHERE col = ARRAY['{"name": "Alice", "age": 30}'::jsonb, '{"name": "Bob", "age": 25}'::jsonb]
+           ORDER BY id""",
+        pg_conn,
+    )
+    assert len(res) == 1
+    assert res[0]["id"] == 1
+
+    # verify NULL handling
+    res = run_query(
+        "SELECT id FROM jsonb_array_table WHERE col IS NULL ORDER BY id", pg_conn
+    )
+    assert len(res) == 1
+    assert res[0]["id"] == 4
+
+    # verify empty array
+    res = run_query(
+        "SELECT id FROM jsonb_array_table WHERE col = ARRAY[]::jsonb[] ORDER BY id",
+        pg_conn,
+    )
+    assert len(res) == 1
+    assert res[0]["id"] == 5
+
+    # INSERT .. SELECT with jsonb[] pushdown
+    run_command(
+        """
+            CREATE TABLE jsonb_array_table_copy(id int, col jsonb[]) USING iceberg;
+            INSERT INTO jsonb_array_table_copy SELECT * FROM jsonb_array_table;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    res_copy = run_query(
+        "SELECT id, col FROM jsonb_array_table_copy ORDER BY id", pg_conn
+    )
+    assert len(res_copy) == len(res_iceberg)
+    for r_copy, r_orig in zip(res_copy, res_iceberg):
+        assert str(r_copy) == str(r_orig), f"Copy mismatch: {r_copy} vs {r_orig}"
+
+    run_command("DROP SCHEMA test_jsonb_array_pushdown CASCADE", pg_conn)
     pg_conn.commit()
