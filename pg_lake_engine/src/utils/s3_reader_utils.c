@@ -20,6 +20,7 @@
 #include "libpq-fe.h"
 #include "miscadmin.h"
 
+#include "pg_extension_base/base_workers.h"
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/util/s3_reader_utils.h"
@@ -29,7 +30,12 @@
 static char *ReadTextContent(const char *command);
 static char *ReadBlobContent(const char *command, size_t *contentLength);
 static char *ReadTextFileCommand(const char *textFileUri);
+static char *ReadValidJsonFileCommand(const char *jsonFileUri);
 static char *ReadBlobFileCommand(const char *blobFileUri);
+static const char *ResolveReadPath(const char *fileUri, bool bypassCache);
+
+/* bounded retries for a racy fresh read of a fixed-path JSON file */
+#define NO_CACHE_JSON_READ_MAX_ATTEMPTS 10
 
 /*
  * GetTextFromURI reads the content of a text file at a supported cloud URL.
@@ -38,17 +44,114 @@ static char *ReadBlobFileCommand(const char *blobFileUri);
 char *
 GetTextFromURI(const char *textFileUri)
 {
-	if (!IsSupportedURL(textFileUri))
+	return ReadTextContent(ReadTextFileCommand(ResolveReadPath(textFileUri, false)));
+}
+
+/*
+ * GetJsonFromURINoCache reads a fixed-path JSON file (e.g. an object store
+ * catalog.json) fresh from object storage, bypassing the file cache, and
+ * returns its content.
+ *
+ * A fixed-path file can be rewritten concurrently (our own writer or another
+ * cluster), so a fresh read may race the writer: DuckDB aborts a read whose S3
+ * ETag changes mid-read (an error result), and an append-blob overwrite can be
+ * read torn (incomplete, so the json_valid filter drops it to zero rows). Both
+ * are transient, so we inspect the result and retry a bounded number of times.
+ * Neither case breaks the pgduck connection (the error comes back as a result,
+ * not a lost connection), so we keep the same one across attempts; with the
+ * nocache prefix each attempt re-fetches from object storage. We deliberately
+ * do NOT catch an ereport to retry: that would resume mid-query with unwound
+ * executor/snapshot state and crash the backend. The last attempt reads without
+ * validation so a genuinely invalid document surfaces its real error downstream
+ * instead of looping.
+ */
+char *
+GetJsonFromURINoCache(const char *jsonFileUri)
+{
+	const char *readPath = ResolveReadPath(jsonFileUri, true);
+	char	   *validatingCommand = ReadValidJsonFileCommand(readPath);
+	char	   *plainCommand = ReadTextFileCommand(readPath);
+
+	PGDuckConnection *pgDuckConn = GetPGDuckConnection();
+	PGresult   *volatile result = NULL;
+	char	   *content = NULL;
+
+	/* the connection outlives the retries; PQclear the result on every exit */
+	PG_TRY();
+	{
+		for (int attempt = 1;; attempt++)
+		{
+			bool		lastAttempt = attempt >= NO_CACHE_JSON_READ_MAX_ATTEMPTS;
+			const char *command = lastAttempt ? plainCommand : validatingCommand;
+
+			result = ExecuteQueryOnPGDuckConnection(pgDuckConn, command);
+
+			/*
+			 * a racing writer shows up as an error result or (torn read) zero
+			 * rows
+			 */
+			if (!lastAttempt &&
+				(PGDuckResultHasError(result) || PQntuples(result) != 1))
+			{
+				PQclear(result);
+				result = NULL;
+
+				/*
+				 * brief, increasing backoff to let the concurrent writer
+				 * finish
+				 */
+				LightSleep(attempt * 25L);
+				continue;
+			}
+
+			/* throws on a real error */
+			ThrowIfPGDuckResultHasError(pgDuckConn, result);
+
+			int			rowCount = PQntuples(result);
+
+			if (rowCount != 1)
+				elog(ERROR, "Expected 1 row while reading JSON file, got %d",
+					 rowCount);
+
+			content = pstrdup(PQgetvalue(result, 0, 0));
+			break;
+		}
+	}
+	PG_FINALLY();
+	{
+		PQclear(result);
+		ReleasePGDuckConnection(pgDuckConn);
+	}
+	PG_END_TRY();
+
+	return content;
+}
+
+/*
+ * ResolveReadPath returns the path ReadTextContent should read for a cloud URL:
+ * a pending upload's local file if any (authoritative), otherwise the URL,
+ * optionally "nocache"-prefixed to bypass the file cache. The prefix is applied
+ * here, after IsSupportedURL, which only accepts bare schemes.
+ */
+static const char *
+ResolveReadPath(const char *fileUri, bool bypassCache)
+{
+	if (!IsSupportedURL(fileUri))
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("pg_lake: unsupported URL: \"%s\"", textFileUri),
+				 errmsg("pg_lake: unsupported URL: \"%s\"", fileUri),
 				 errhint("Paths must use a supported cloud storage scheme "
 						 "(s3://, azure://, gcs://, etc.).")));
 
-	const char *localPath = GetPendingUploadLocalPath(textFileUri);
-	const char *readPath = localPath != NULL ? localPath : textFileUri;
+	const char *localPath = GetPendingUploadLocalPath(fileUri);
 
-	return ReadTextContent(ReadTextFileCommand(readPath));
+	if (localPath != NULL)
+		return localPath;
+
+	if (bypassCache)
+		return psprintf("%s%s", NO_CACHE_URL_PREFIX, fileUri);
+
+	return fileUri;
 }
 
 /*
@@ -173,6 +276,25 @@ ReadTextFileCommand(const char *textFileUri)
 	appendStringInfo(&command, "SELECT content FROM read_text(%s)",
 					 quote_literal_cstr(textFileUri));
 
+
+	return command.data;
+}
+
+/*
+ * ReadValidJsonFileCommand is like ReadTextFileCommand but returns no rows if
+ * the file is not valid JSON, so a torn read of a concurrently rewritten file
+ * fails instead of returning incomplete content.
+ */
+static char *
+ReadValidJsonFileCommand(const char *jsonFileUri)
+{
+	StringInfoData command;
+
+	initStringInfo(&command);
+
+	appendStringInfo(&command,
+					 "SELECT content FROM read_text(%s) WHERE json_valid(content)",
+					 quote_literal_cstr(jsonFileUri));
 
 	return command.data;
 }

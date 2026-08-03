@@ -32,5 +32,9 @@
     2 /* null terminator and one extra space */ \
 )
 
+/* Bypass the pgduck file cache; matches NO_CACHE_PREFIX on the DuckDB side. */
+#define NO_CACHE_URL_PREFIX "nocache"
+
 extern PGDLLEXPORT char *GetTextFromURI(const char *textFileUri);
+extern PGDLLEXPORT char *GetJsonFromURINoCache(const char *jsonFileUri);
 extern PGDLLEXPORT char *GetBlobFromURI(const char *blobFileUri, size_t *contentLength);

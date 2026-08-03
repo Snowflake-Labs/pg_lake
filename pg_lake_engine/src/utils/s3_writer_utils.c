@@ -81,6 +81,20 @@ CopyLocalFileToS3(char *localFilePath, char *s3Uri)
 
 
 /*
+ * CopyLocalFileToS3NoCache is like CopyLocalFileToS3 but bypasses cache-on-write
+ * (via the "nocache" destination prefix), so no cache entry is created for a
+ * fixed-path file that is always read back with GetTextFromURINoCache.
+ */
+void
+CopyLocalFileToS3NoCache(char *localFilePath, char *s3Uri)
+{
+	char	   *noCacheUri = psprintf("%s%s", NO_CACHE_URL_PREFIX, s3Uri);
+
+	ExecuteCommandInPGDuck(CopyLocalFileToS3Command(localFilePath, noCacheUri));
+}
+
+
+/*
 * CopyLocalFileToS3Command returns the SQL command to copy
 * the content of a local JSON file to an S3 bucket.
 */

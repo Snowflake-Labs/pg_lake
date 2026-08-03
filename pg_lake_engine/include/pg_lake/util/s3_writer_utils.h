@@ -25,5 +25,6 @@ extern int32 MaxParallelFileUploads;
 
 extern PGDLLEXPORT void ScheduleFileCopyToS3WithCleanup(char *localFilePath, char *s3Uri, bool autoDeleteRecord);
 extern PGDLLEXPORT void CopyLocalFileToS3(char *localFilePath, char *s3Uri);
+extern PGDLLEXPORT void CopyLocalFileToS3NoCache(char *localFilePath, char *s3Uri);
 extern PGDLLEXPORT void FinishAllUploads(void);
 extern PGDLLEXPORT char *GetPendingUploadLocalPath(const char *remoteUrl);

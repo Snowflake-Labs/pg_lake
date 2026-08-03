@@ -88,7 +88,8 @@ list_object_store_tables(PG_FUNCTION_ARGS)
 		GetInternalObjectStoreCatalogFilePath(catalogName) :
 		GetExternalObjectStoreCatalogFilePath(catalogName);
 
-	char	   *catalogContent = GetTextFromURI(catalogPath);
+	/* catalog.json is a fixed path that may change out of band; read fresh. */
+	char	   *catalogContent = GetJsonFromURINoCache(catalogPath);
 
 	StringInfo	getObjectStoreTables = makeStringInfo();
 
@@ -418,8 +419,9 @@ PushMetadataLocationToObjectStoreCatalog(void)
 
 	WriteStringToFilePath(objectStoreCatalogFileContent->data, localFilePath);
 
-	CopyLocalFileToS3(localFilePath,
-					  GetInternalObjectStoreCatalogFilePath(get_database_name(MyDatabaseId)));
+	/* Skip cache-on-write; catalog.json is always read fresh (nocache). */
+	CopyLocalFileToS3NoCache(localFilePath,
+							 GetInternalObjectStoreCatalogFilePath(get_database_name(MyDatabaseId)));
 
 	LastCatalogPushTime = GetCurrentTimestamp();
 }
@@ -437,7 +439,9 @@ GetTableMetadataLocationFromExternalObjectStoreCatalog(const char *catalogName, 
 {
 	const char *catalogPath =
 		GetExternalObjectStoreCatalogFilePath(catalogName);
-	char	   *catalogContent = GetTextFromURI(catalogPath);
+
+	/* catalog.json is a fixed path that may change out of band; read fresh. */
+	char	   *catalogContent = GetJsonFromURINoCache(catalogPath);
 
 	StringInfo	metadataLocationStrInfo = makeStringInfo();
 	StringInfo	getMetadataLocation = makeStringInfo();

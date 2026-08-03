@@ -492,18 +492,29 @@ CheckPGDuckResult(PGDuckConnection * pgDuckConnection, PGresult *result)
 
 
 /*
+ * PGDuckResultHasError returns true when the result carries an error status.
+ * Use this when you need a non-throwing check (e.g. deciding whether to retry
+ * before calling ThrowIfPGDuckResultHasError on the final attempt).
+ */
+bool
+PGDuckResultHasError(PGresult *result)
+{
+	ExecStatusType resultStatus = PQresultStatus(result);
+
+	return !(resultStatus == PGRES_TUPLES_OK ||
+			 resultStatus == PGRES_COMMAND_OK ||
+			 resultStatus == PGRES_SINGLE_TUPLE);
+}
+
+
+/*
  * ThrowIfPGDuckResultHasError throws the error received over a connection, if any.
  */
 void
 ThrowIfPGDuckResultHasError(PGDuckConnection * pgDuckConnection, PGresult *result)
 {
-	ExecStatusType resultStatus = PQresultStatus(result);
-
-	if (resultStatus == PGRES_TUPLES_OK || resultStatus == PGRES_COMMAND_OK ||
-		resultStatus == PGRES_SINGLE_TUPLE)
-	{
+	if (!PGDuckResultHasError(result))
 		return;
-	}
 
 	char	   *message = PQresultErrorField(result, PG_DIAG_MESSAGE_PRIMARY);
 	char	   *messageDetail = PQresultErrorField(result, PG_DIAG_MESSAGE_DETAIL);
