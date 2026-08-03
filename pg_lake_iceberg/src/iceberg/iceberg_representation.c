@@ -29,9 +29,9 @@
  */
 typedef struct UnsupportedNumericProbe
 {
-	bool nestedOnly;
-	bool found;
-} UnsupportedNumericProbe;
+	bool		nestedOnly;
+	bool		found;
+}			UnsupportedNumericProbe;
 
 static bool UnsupportedNumericLeafProbe(Oid typeOid, int32 typeMod, int level,
 										void *context, Oid *outOid,
@@ -48,7 +48,7 @@ IcebergStoredPostgresType(PGType type)
 	if (!UnsupportedNumericAsDouble)
 		return type;
 
-	PGType converted = MaybeConvertType(type, NULL);
+	PGType		converted = MaybeConvertType(type, NULL);
 
 	return OidIsValid(converted.postgresTypeOid) ? converted : type;
 }
@@ -57,11 +57,11 @@ Field *
 IcebergStorageFieldForColumnType(PGType declaredType,
 								 IcebergCompatibilityMode mode,
 								 bool forAddColumn, int *subFieldIndex,
-								 Field **surfaceFieldOut)
+								 Field * *surfaceFieldOut)
 {
-	Field *surfaceField =
+	Field	   *surfaceField =
 		PostgresTypeToIcebergField(declaredType, forAddColumn, subFieldIndex);
-	Field *storageField = DeepCopyField(surfaceField);
+	Field	   *storageField = DeepCopyField(surfaceField);
 
 	ApplyCompatibilityStorageMapping(storageField, mode);
 
@@ -78,7 +78,7 @@ IcebergStorageFieldForColumnType(PGType declaredType,
  * this predicate exists to gate changes that must not slip past.
  */
 bool
-IcebergFieldsEquivalent(Field *a, Field *b)
+IcebergFieldsEquivalent(Field * a, Field * b)
 {
 	if (a == NULL || b == NULL)
 		return a == b;
@@ -94,35 +94,35 @@ IcebergFieldsEquivalent(Field *a, Field *b)
 
 		case FIELD_TYPE_LIST:
 			return a->field.list.elementRequired ==
-					   b->field.list.elementRequired &&
-				   IcebergFieldsEquivalent(a->field.list.element,
-										   b->field.list.element);
+				b->field.list.elementRequired &&
+				IcebergFieldsEquivalent(a->field.list.element,
+										b->field.list.element);
 
 		case FIELD_TYPE_MAP:
 			return a->field.map.valueRequired == b->field.map.valueRequired &&
-				   IcebergFieldsEquivalent(a->field.map.key,
-										   b->field.map.key) &&
-				   IcebergFieldsEquivalent(a->field.map.value,
-										   b->field.map.value);
+				IcebergFieldsEquivalent(a->field.map.key,
+										b->field.map.key) &&
+				IcebergFieldsEquivalent(a->field.map.value,
+										b->field.map.value);
 
 		case FIELD_TYPE_STRUCT:
-		{
-			if (a->field.structType.nfields != b->field.structType.nfields)
-				return false;
-
-			for (size_t i = 0; i < a->field.structType.nfields; i++)
 			{
-				FieldStructElement *elementA = &a->field.structType.fields[i];
-				FieldStructElement *elementB = &b->field.structType.fields[i];
-
-				if (elementA->required != elementB->required ||
-					strcmp(elementA->name, elementB->name) != 0 ||
-					!IcebergFieldsEquivalent(elementA->type, elementB->type))
+				if (a->field.structType.nfields != b->field.structType.nfields)
 					return false;
-			}
 
-			return true;
-		}
+				for (size_t i = 0; i < a->field.structType.nfields; i++)
+				{
+					FieldStructElement *elementA = &a->field.structType.fields[i];
+					FieldStructElement *elementB = &b->field.structType.fields[i];
+
+					if (elementA->required != elementB->required ||
+						strcmp(elementA->name, elementB->name) != 0 ||
+						!IcebergFieldsEquivalent(elementA->type, elementB->type))
+						return false;
+				}
+
+				return true;
+			}
 	}
 
 	return false;
@@ -131,10 +131,10 @@ IcebergFieldsEquivalent(Field *a, Field *b)
 bool
 TypeHasUnrepresentableLeaf(PGType type, bool nestedOnly)
 {
-	UnsupportedNumericProbe probe = { .nestedOnly = nestedOnly,
-									  .found = false };
-	Oid rewrittenOid;
-	int32 rewrittenMod;
+	UnsupportedNumericProbe probe = {.nestedOnly = nestedOnly,
+	.found = false};
+	Oid			rewrittenOid;
+	int32		rewrittenMod;
 
 	ConvertTypeTree(type.postgresTypeOid, type.postgresTypeMod, 0,
 					UnsupportedNumericLeafProbe, &probe, &rewrittenOid,

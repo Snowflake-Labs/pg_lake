@@ -31,11 +31,11 @@
 PG_FUNCTION_INFO_V1(pg_lake_iceberg_storage_type);
 PG_FUNCTION_INFO_V1(pg_lake_same_iceberg_representation);
 
-static Field *StorageFieldForTypeString(const char *typeString,
-										IcebergCompatibilityMode mode);
+static Field * StorageFieldForTypeString(const char *typeString,
+										 IcebergCompatibilityMode mode);
 static IcebergCompatibilityMode CompatibilityModeArg(FunctionCallInfo fcinfo,
 													 int argIndex);
-static void AppendFieldTypeString(StringInfo buffer, Field *field);
+static void AppendFieldTypeString(StringInfo buffer, Field * field);
 
 /*
  * pg_lake_iceberg_storage_type(type text, compatibility_mode text) -> text
@@ -51,11 +51,11 @@ pg_lake_iceberg_storage_type(PG_FUNCTION_ARGS)
 	if (PG_ARGISNULL(0))
 		PG_RETURN_NULL();
 
-	Field *field =
+	Field	   *field =
 		StorageFieldForTypeString(text_to_cstring(PG_GETARG_TEXT_PP(0)),
 								  CompatibilityModeArg(fcinfo, 1));
 
-	StringInfo buffer = makeStringInfo();
+	StringInfo	buffer = makeStringInfo();
 
 	AppendFieldTypeString(buffer, field);
 
@@ -79,14 +79,14 @@ pg_lake_same_iceberg_representation(PG_FUNCTION_ARGS)
 	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
 		PG_RETURN_NULL();
 
-	char *oldTypeString = text_to_cstring(PG_GETARG_TEXT_PP(0));
-	char *newTypeString = text_to_cstring(PG_GETARG_TEXT_PP(1));
+	char	   *oldTypeString = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	char	   *newTypeString = text_to_cstring(PG_GETARG_TEXT_PP(1));
 	IcebergCompatibilityMode mode = CompatibilityModeArg(fcinfo, 2);
 
-	Oid oldTypeOid;
-	int32 oldTypeMod;
-	Oid newTypeOid;
-	int32 newTypeMod;
+	Oid			oldTypeOid;
+	int32		oldTypeMod;
+	Oid			newTypeOid;
+	int32		newTypeMod;
 
 	parseTypeString(oldTypeString, &oldTypeOid, &oldTypeMod, NULL);
 	parseTypeString(newTypeString, &newTypeOid, &newTypeMod, NULL);
@@ -107,8 +107,8 @@ pg_lake_same_iceberg_representation(PG_FUNCTION_ARGS)
 									false)))
 		PG_RETURN_BOOL(false);
 
-	Field *oldField = StorageFieldForTypeString(oldTypeString, mode);
-	Field *newField = StorageFieldForTypeString(newTypeString, mode);
+	Field	   *oldField = StorageFieldForTypeString(oldTypeString, mode);
+	Field	   *newField = StorageFieldForTypeString(newTypeString, mode);
 
 	PG_RETURN_BOOL(IcebergFieldsEquivalent(oldField, newField));
 }
@@ -122,13 +122,13 @@ static Field *
 StorageFieldForTypeString(const char *typeString,
 						  IcebergCompatibilityMode mode)
 {
-	Oid typeOid;
-	int32 typeMod;
-	int subFieldIndex = 0;
+	Oid			typeOid;
+	int32		typeMod;
+	int			subFieldIndex = 0;
 
 	parseTypeString(typeString, &typeOid, &typeMod, NULL);
 
-	PGType storedType =
+	PGType		storedType =
 		IcebergStoredPostgresType(MakePGType(typeOid, typeMod));
 
 	return IcebergStorageFieldForColumnType(storedType, mode, false,
@@ -146,7 +146,7 @@ CompatibilityModeArg(FunctionCallInfo fcinfo, int argIndex)
 		return ICEBERG_COMPAT_AUTO;
 
 	return ParseIcebergCompatibilityMode(
-		text_to_cstring(PG_GETARG_TEXT_PP(argIndex)));
+										 text_to_cstring(PG_GETARG_TEXT_PP(argIndex)));
 }
 
 /*
@@ -155,7 +155,7 @@ CompatibilityModeArg(FunctionCallInfo fcinfo, int argIndex)
  * them would make every expected value in a test depend on id allocation.
  */
 static void
-AppendFieldTypeString(StringInfo buffer, Field *field)
+AppendFieldTypeString(StringInfo buffer, Field * field)
 {
 	if (field == NULL)
 	{

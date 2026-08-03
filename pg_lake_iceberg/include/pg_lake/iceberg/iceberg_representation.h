@@ -72,9 +72,9 @@ extern PGDLLEXPORT PGType IcebergStoredPostgresType(PGType type);
  * receives the pre-mapping tree, which registration needs to record the
  * per-leaf surface->storage divergences.
  */
-extern PGDLLEXPORT Field *IcebergStorageFieldForColumnType(
-	PGType declaredType, IcebergCompatibilityMode mode, bool forAddColumn,
-	int *subFieldIndex, Field **surfaceFieldOut);
+extern PGDLLEXPORT Field * IcebergStorageFieldForColumnType(
+															PGType declaredType, IcebergCompatibilityMode mode, bool forAddColumn,
+															int *subFieldIndex, Field * *surfaceFieldOut);
 
 /*
  * IcebergFieldsEquivalent - true when two Iceberg field trees are the same
@@ -85,7 +85,7 @@ extern PGDLLEXPORT Field *IcebergStorageFieldForColumnType(
  * Tolerates NULL on either side (NULL equals only NULL), so a caller can pass a
  * persisted field it could not resolve without a separate check.
  */
-extern PGDLLEXPORT bool IcebergFieldsEquivalent(Field *a, Field *b);
+extern PGDLLEXPORT bool IcebergFieldsEquivalent(Field * a, Field * b);
 
 /*
  * TypeHasUnrepresentableLeaf - true when the type tree has a leaf Iceberg
