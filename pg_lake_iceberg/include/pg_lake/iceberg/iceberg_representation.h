@@ -77,6 +77,17 @@ extern PGDLLEXPORT Field *IcebergStorageFieldForColumnType(
 	int *subFieldIndex, Field **surfaceFieldOut);
 
 /*
+ * IcebergFieldsEquivalent - true when two Iceberg field trees are the same
+ * stored representation, ignoring field ids and defaults (assigned per
+ * derivation, irrelevant to storage).  So varchar length / text-family members
+ * collapse to `string`, smallint and integer to `int`, and so on.
+ *
+ * Tolerates NULL on either side (NULL equals only NULL), so a caller can pass a
+ * persisted field it could not resolve without a separate check.
+ */
+extern PGDLLEXPORT bool IcebergFieldsEquivalent(Field *a, Field *b);
+
+/*
  * TypeHasUnrepresentableLeaf - true when the type tree has a leaf Iceberg
  * cannot hold natively (currently: a numeric that is unbounded or whose
  * precision/scale exceeds DUCKDB_MAX_NUMERIC_PRECISION).  `nestedOnly`

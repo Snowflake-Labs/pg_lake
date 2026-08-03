@@ -31,12 +31,11 @@
 PG_FUNCTION_INFO_V1(pg_lake_iceberg_storage_type);
 PG_FUNCTION_INFO_V1(pg_lake_same_iceberg_representation);
 
-static bool IcebergFieldsEquivalent(Field * a, Field * b);
-static Field * StorageFieldForTypeString(const char *typeString,
-										 IcebergCompatibilityMode mode);
-static IcebergCompatibilityMode CompatibilityModeArg(FunctionCallInfo fcinfo, int argIndex);
-static void AppendFieldTypeString(StringInfo buffer, Field * field);
-
+static Field *StorageFieldForTypeString(const char *typeString,
+										IcebergCompatibilityMode mode);
+static IcebergCompatibilityMode CompatibilityModeArg(FunctionCallInfo fcinfo,
+													 int argIndex);
+static void AppendFieldTypeString(StringInfo buffer, Field *field);
 
 /*
  * pg_lake_iceberg_storage_type(type text, compatibility_mode text) -> text
@@ -52,16 +51,16 @@ pg_lake_iceberg_storage_type(PG_FUNCTION_ARGS)
 	if (PG_ARGISNULL(0))
 		PG_RETURN_NULL();
 
-	Field	   *field = StorageFieldForTypeString(text_to_cstring(PG_GETARG_TEXT_PP(0)),
-												  CompatibilityModeArg(fcinfo, 1));
+	Field *field =
+		StorageFieldForTypeString(text_to_cstring(PG_GETARG_TEXT_PP(0)),
+								  CompatibilityModeArg(fcinfo, 1));
 
-	StringInfo	buffer = makeStringInfo();
+	StringInfo buffer = makeStringInfo();
 
 	AppendFieldTypeString(buffer, field);
 
 	PG_RETURN_TEXT_P(cstring_to_text(buffer->data));
 }
-
 
 /*
  * pg_lake_same_iceberg_representation(old_type text, new_type text,
@@ -80,14 +79,14 @@ pg_lake_same_iceberg_representation(PG_FUNCTION_ARGS)
 	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
 		PG_RETURN_NULL();
 
-	char	   *oldTypeString = text_to_cstring(PG_GETARG_TEXT_PP(0));
-	char	   *newTypeString = text_to_cstring(PG_GETARG_TEXT_PP(1));
+	char *oldTypeString = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	char *newTypeString = text_to_cstring(PG_GETARG_TEXT_PP(1));
 	IcebergCompatibilityMode mode = CompatibilityModeArg(fcinfo, 2);
 
-	Oid			oldTypeOid;
-	int32		oldTypeMod;
-	Oid			newTypeOid;
-	int32		newTypeMod;
+	Oid oldTypeOid;
+	int32 oldTypeMod;
+	Oid newTypeOid;
+	int32 newTypeMod;
 
 	parseTypeString(oldTypeString, &oldTypeOid, &oldTypeMod, NULL);
 	parseTypeString(newTypeString, &newTypeOid, &newTypeMod, NULL);
@@ -102,71 +101,17 @@ pg_lake_same_iceberg_representation(PG_FUNCTION_ARGS)
 	 * unsupported numeric.)
 	 */
 	if (!UnsupportedNumericAsDouble &&
-		(TypeHasUnrepresentableLeaf(MakePGType(oldTypeOid, oldTypeMod), false) ||
-		 TypeHasUnrepresentableLeaf(MakePGType(newTypeOid, newTypeMod), false)))
+		(TypeHasUnrepresentableLeaf(MakePGType(oldTypeOid, oldTypeMod),
+									false) ||
+		 TypeHasUnrepresentableLeaf(MakePGType(newTypeOid, newTypeMod),
+									false)))
 		PG_RETURN_BOOL(false);
 
-	Field	   *oldField = StorageFieldForTypeString(oldTypeString, mode);
-	Field	   *newField = StorageFieldForTypeString(newTypeString, mode);
+	Field *oldField = StorageFieldForTypeString(oldTypeString, mode);
+	Field *newField = StorageFieldForTypeString(newTypeString, mode);
 
 	PG_RETURN_BOOL(IcebergFieldsEquivalent(oldField, newField));
 }
-
-
-/*
- * IcebergFieldsEquivalent - true when two field trees represent the same stored
- * type, ignoring field ids and defaults.
- *
- * The required flags are compared even though derivation currently produces
- * false for every list element and map value: any future divergence here is a
- * real semantic difference, and this predicate exists to catch exactly that.
- */
-static bool
-IcebergFieldsEquivalent(Field * a, Field * b)
-{
-	if (a == NULL || b == NULL)
-		return a == b;
-
-	if (a->type != b->type)
-		return false;
-
-	switch (a->type)
-	{
-		case FIELD_TYPE_SCALAR:
-			return strcmp(a->field.scalar.typeName, b->field.scalar.typeName) == 0;
-
-		case FIELD_TYPE_LIST:
-			return a->field.list.elementRequired == b->field.list.elementRequired &&
-				IcebergFieldsEquivalent(a->field.list.element, b->field.list.element);
-
-		case FIELD_TYPE_MAP:
-			return a->field.map.valueRequired == b->field.map.valueRequired &&
-				IcebergFieldsEquivalent(a->field.map.key, b->field.map.key) &&
-				IcebergFieldsEquivalent(a->field.map.value, b->field.map.value);
-
-		case FIELD_TYPE_STRUCT:
-			{
-				if (a->field.structType.nfields != b->field.structType.nfields)
-					return false;
-
-				for (size_t i = 0; i < a->field.structType.nfields; i++)
-				{
-					FieldStructElement *elementA = &a->field.structType.fields[i];
-					FieldStructElement *elementB = &b->field.structType.fields[i];
-
-					if (elementA->required != elementB->required ||
-						strcmp(elementA->name, elementB->name) != 0 ||
-						!IcebergFieldsEquivalent(elementA->type, elementB->type))
-						return false;
-				}
-
-				return true;
-			}
-	}
-
-	return false;
-}
-
 
 /*
  * StorageFieldForTypeString parses a Postgres type string (e.g. 'varchar(50)',
@@ -174,19 +119,21 @@ IcebergFieldsEquivalent(Field * a, Field * b)
  * it, applying the same two steps registration does.
  */
 static Field *
-StorageFieldForTypeString(const char *typeString, IcebergCompatibilityMode mode)
+StorageFieldForTypeString(const char *typeString,
+						  IcebergCompatibilityMode mode)
 {
-	Oid			typeOid;
-	int32		typeMod;
-	int			subFieldIndex = 0;
+	Oid typeOid;
+	int32 typeMod;
+	int subFieldIndex = 0;
 
 	parseTypeString(typeString, &typeOid, &typeMod, NULL);
 
-	PGType		storedType = IcebergStoredPostgresType(MakePGType(typeOid, typeMod));
+	PGType storedType =
+		IcebergStoredPostgresType(MakePGType(typeOid, typeMod));
 
-	return IcebergStorageFieldForColumnType(storedType, mode, false, &subFieldIndex, NULL);
+	return IcebergStorageFieldForColumnType(storedType, mode, false,
+											&subFieldIndex, NULL);
 }
-
 
 /*
  * CompatibilityModeArg reads an optional compatibility_mode text argument; a
@@ -198,9 +145,9 @@ CompatibilityModeArg(FunctionCallInfo fcinfo, int argIndex)
 	if (PG_ARGISNULL(argIndex))
 		return ICEBERG_COMPAT_AUTO;
 
-	return ParseIcebergCompatibilityMode(text_to_cstring(PG_GETARG_TEXT_PP(argIndex)));
+	return ParseIcebergCompatibilityMode(
+		text_to_cstring(PG_GETARG_TEXT_PP(argIndex)));
 }
-
 
 /*
  * AppendFieldTypeString renders a Field tree in a compact Iceberg-ish notation.
@@ -208,7 +155,7 @@ CompatibilityModeArg(FunctionCallInfo fcinfo, int argIndex)
  * them would make every expected value in a test depend on id allocation.
  */
 static void
-AppendFieldTypeString(StringInfo buffer, Field * field)
+AppendFieldTypeString(StringInfo buffer, Field *field)
 {
 	if (field == NULL)
 	{
@@ -241,7 +188,8 @@ AppendFieldTypeString(StringInfo buffer, Field * field)
 
 			for (size_t i = 0; i < field->field.structType.nfields; i++)
 			{
-				FieldStructElement *element = &field->field.structType.fields[i];
+				FieldStructElement *element =
+					&field->field.structType.fields[i];
 
 				if (i > 0)
 					appendStringInfoChar(buffer, ',');

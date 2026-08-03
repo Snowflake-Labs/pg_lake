@@ -71,6 +71,63 @@ IcebergStorageFieldForColumnType(PGType declaredType,
 	return storageField;
 }
 
+/*
+ * The required flags are compared even though the derivation currently produces
+ * false for every list element and map value: when one side is a persisted
+ * field, a difference we ignored here would be a difference we let through, and
+ * this predicate exists to gate changes that must not slip past.
+ */
+bool
+IcebergFieldsEquivalent(Field *a, Field *b)
+{
+	if (a == NULL || b == NULL)
+		return a == b;
+
+	if (a->type != b->type)
+		return false;
+
+	switch (a->type)
+	{
+		case FIELD_TYPE_SCALAR:
+			return strcmp(a->field.scalar.typeName,
+						  b->field.scalar.typeName) == 0;
+
+		case FIELD_TYPE_LIST:
+			return a->field.list.elementRequired ==
+					   b->field.list.elementRequired &&
+				   IcebergFieldsEquivalent(a->field.list.element,
+										   b->field.list.element);
+
+		case FIELD_TYPE_MAP:
+			return a->field.map.valueRequired == b->field.map.valueRequired &&
+				   IcebergFieldsEquivalent(a->field.map.key,
+										   b->field.map.key) &&
+				   IcebergFieldsEquivalent(a->field.map.value,
+										   b->field.map.value);
+
+		case FIELD_TYPE_STRUCT:
+		{
+			if (a->field.structType.nfields != b->field.structType.nfields)
+				return false;
+
+			for (size_t i = 0; i < a->field.structType.nfields; i++)
+			{
+				FieldStructElement *elementA = &a->field.structType.fields[i];
+				FieldStructElement *elementB = &b->field.structType.fields[i];
+
+				if (elementA->required != elementB->required ||
+					strcmp(elementA->name, elementB->name) != 0 ||
+					!IcebergFieldsEquivalent(elementA->type, elementB->type))
+					return false;
+			}
+
+			return true;
+		}
+	}
+
+	return false;
+}
+
 bool
 TypeHasUnrepresentableLeaf(PGType type, bool nestedOnly)
 {
