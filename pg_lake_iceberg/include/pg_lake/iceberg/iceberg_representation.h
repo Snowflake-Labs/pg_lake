@@ -31,9 +31,8 @@
  *
  * That matters because the transform set is not closed.  pg_lake shapes storage
  * with the unsupported-numeric rewrite and the compatibility mapping, but a
- * caller may add its own before the table is created (snowflake_cdc stores enums
- * and user-defined ranges as text, for one).  Only the persisted field reflects
- * all of them.
+ * caller may add its own before the table is created.  Only the persisted field
+ * reflects all of them.
  */
 
 #pragma once
@@ -73,11 +72,9 @@ extern PGDLLEXPORT PGType IcebergStoredPostgresType(PGType type);
  * receives the pre-mapping tree, which registration needs to record the
  * per-leaf surface->storage divergences.
  */
-extern PGDLLEXPORT Field * IcebergStorageFieldForColumnType(PGType declaredType,
-															IcebergCompatibilityMode mode,
-															bool forAddColumn,
-															int *subFieldIndex,
-															Field * *surfaceFieldOut);
+extern PGDLLEXPORT Field *IcebergStorageFieldForColumnType(
+	PGType declaredType, IcebergCompatibilityMode mode, bool forAddColumn,
+	int *subFieldIndex, Field **surfaceFieldOut);
 
 /*
  * TypeHasUnrepresentableLeaf - true when the type tree has a leaf Iceberg
@@ -89,4 +86,5 @@ extern PGDLLEXPORT Field * IcebergStorageFieldForColumnType(PGType declaredType,
  * Shares ConvertTypeTree's traversal, so it cannot drift out of coverage from
  * the rewrite it predicts, and creates no catalog types (see the leaf rule).
  */
-extern PGDLLEXPORT bool TypeHasUnrepresentableLeaf(PGType type, bool nestedOnly);
+extern PGDLLEXPORT bool TypeHasUnrepresentableLeaf(PGType type,
+												   bool nestedOnly);

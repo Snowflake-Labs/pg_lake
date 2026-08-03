@@ -23,24 +23,21 @@
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/util/rel_utils.h"
 
-
 /*
- * State for the TypeHasUnsupportedNumericLeaf probe: what to look for, and
+ * State for the TypeHasUnrepresentableLeaf probe: what to look for, and
  * whether it was seen.
  */
 typedef struct UnsupportedNumericProbe
 {
-	bool		nestedOnly;
-	bool		found;
-}			UnsupportedNumericProbe;
+	bool nestedOnly;
+	bool found;
+} UnsupportedNumericProbe;
 
 static bool UnsupportedNumericLeafProbe(Oid typeOid, int32 typeMod, int level,
-										void *context, Oid *outOid, int32 *outMod);
-
+										void *context, Oid *outOid,
+										int32 *outMod);
 
 /*
- * IcebergStoredPostgresType - see iceberg_representation.h.
- *
  * The GUC check mirrors MaybeConvertUnsupportedNumericColumnsToDouble: with the
  * GUC off no rewrite happens at any level, because CREATE rejects an unsupported
  * numeric outright instead of storing it in some other shape.
@@ -51,23 +48,20 @@ IcebergStoredPostgresType(PGType type)
 	if (!UnsupportedNumericAsDouble)
 		return type;
 
-	PGType		converted = MaybeConvertType(type, NULL);
+	PGType converted = MaybeConvertType(type, NULL);
 
 	return OidIsValid(converted.postgresTypeOid) ? converted : type;
 }
 
-
-/*
- * IcebergStorageFieldForColumnType - see iceberg_representation.h.
- */
 Field *
-IcebergStorageFieldForColumnType(PGType declaredType, IcebergCompatibilityMode mode,
+IcebergStorageFieldForColumnType(PGType declaredType,
+								 IcebergCompatibilityMode mode,
 								 bool forAddColumn, int *subFieldIndex,
-								 Field * *surfaceFieldOut)
+								 Field **surfaceFieldOut)
 {
-	Field	   *surfaceField = PostgresTypeToIcebergField(declaredType, forAddColumn,
-														  subFieldIndex);
-	Field	   *storageField = DeepCopyField(surfaceField);
+	Field *surfaceField =
+		PostgresTypeToIcebergField(declaredType, forAddColumn, subFieldIndex);
+	Field *storageField = DeepCopyField(surfaceField);
 
 	ApplyCompatibilityStorageMapping(storageField, mode);
 
@@ -77,36 +71,32 @@ IcebergStorageFieldForColumnType(PGType declaredType, IcebergCompatibilityMode m
 	return storageField;
 }
 
-
-/*
- * TypeHasUnrepresentableLeaf - see iceberg_representation.h.
- */
 bool
 TypeHasUnrepresentableLeaf(PGType type, bool nestedOnly)
 {
-	UnsupportedNumericProbe probe = {.nestedOnly = nestedOnly,.found = false};
-	Oid			rewrittenOid;
-	int32		rewrittenMod;
+	UnsupportedNumericProbe probe = { .nestedOnly = nestedOnly,
+									  .found = false };
+	Oid rewrittenOid;
+	int32 rewrittenMod;
 
 	ConvertTypeTree(type.postgresTypeOid, type.postgresTypeMod, 0,
-					UnsupportedNumericLeafProbe, &probe,
-					&rewrittenOid, &rewrittenMod);
+					UnsupportedNumericLeafProbe, &probe, &rewrittenOid,
+					&rewrittenMod);
 
 	return probe.found;
 }
 
-
 /*
  * UnsupportedNumericLeafProbe is the ConvertTypeTree leaf rule behind
- * TypeHasUnsupportedNumericLeaf.  It records what it sees and always returns
+ * TypeHasUnrepresentableLeaf.  It records what it sees and always returns
  * false, i.e. never requests a rewrite, which keeps ConvertTypeTree's composite
  * and map branches short of FindOrCreateCompositeTypeFromColumnDefs and
  * GetOrCreatePGMapType: the probe walks the same structure the real rewrite
  * would, and materializes nothing.
  */
 static bool
-UnsupportedNumericLeafProbe(Oid typeOid, int32 typeMod, int level, void *context,
-							Oid *outOid, int32 *outMod)
+UnsupportedNumericLeafProbe(Oid typeOid, int32 typeMod, int level,
+							void *context, Oid *outOid, int32 *outMod)
 {
 	UnsupportedNumericProbe *probe = (UnsupportedNumericProbe *) context;
 
