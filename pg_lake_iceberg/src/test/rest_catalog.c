@@ -75,11 +75,13 @@ get_rest_metadata_location(PG_FUNCTION_ARGS)
  * the REST catalog and returns the extracted vended credentials as a
  * pipe-delimited summary:
  *
- *     "<access-key-id>|<scope>|<yes|no session token>|<expiry|noexpiry>"
+ *     "<access-key-id>|<scope>|<yes|no session token>|<expiry|noexpiry>|
+ *      <region>|<endpoint>|<url-style>"
  *
  * Returns NULL when the loadTable response carried no vended
  * credentials.  This exercises ExtractVendedCredentials, including
- * storage-credentials parsing, scope resolution, and expiry parsing.
+ * storage-credentials parsing, scope resolution/clamping, expiry parsing,
+ * and the catalog-provided S3 connection settings.
  */
 Datum
 get_rest_vended_credentials(PG_FUNCTION_ARGS)
@@ -100,11 +102,14 @@ get_rest_vended_credentials(PG_FUNCTION_ARGS)
 	StringInfoData buf;
 
 	initStringInfo(&buf);
-	appendStringInfo(&buf, "%s|%s|%s|%s",
+	appendStringInfo(&buf, "%s|%s|%s|%s|%s|%s|%s",
 					 creds->accessKeyId ? creds->accessKeyId : "",
 					 creds->scope ? creds->scope : "",
 					 creds->sessionToken ? "yes" : "no",
-					 creds->expiresAt > 0 ? "expiry" : "noexpiry");
+					 creds->expiresAt > 0 ? "expiry" : "noexpiry",
+					 creds->region ? creds->region : "",
+					 creds->endpoint ? creds->endpoint : "",
+					 creds->urlStyle ? creds->urlStyle : "");
 
 	PG_RETURN_TEXT_P(cstring_to_text(buf.data));
 }

@@ -91,7 +91,7 @@
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/permissions/roles.h"
 #include "pg_extension_base/pg_compat.h"
-#include "pg_lake/fdw/vended_credentials.h"
+#include "pg_lake/storage/storage_credentials.h"
 #include "pg_lake/pgduck/array_conversion.h"
 #include "pg_lake/pgduck/iceberg_datum_validation.h"
 #include "pg_lake/pgduck/client.h"
@@ -1731,19 +1731,15 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 	 */
 	bool		includeChildren = false;
 
-	/* find the files to scan for each relation */
+	/*
+	 * find the files to scan for each relation.  PROTOTYPE (Onder's
+	 * redesign): storage credentials are (re)resolved per relation inside
+	 * CreatePgLakeScanSnapshot -> CreateTableScanForRelation, so there is no
+	 * separate credential push on this path.
+	 */
 	fsstate->scanSnapshot =
 		CreatePgLakeScanSnapshot(rteList, restrictionList, paramListInfo,
 								 includeChildren, fsstate->resultRelationId);
-
-	/*
-	 * Push vended credentials for all REST catalog tables before issuing any
-	 * data queries to pgduck_server.  This must happen after
-	 * CreatePgLakeScanSnapshot so the metadata-read uses the pre-existing S3
-	 * secret (whose ENDPOINT/SSL settings match the environment) and the
-	 * scoped vended secret only takes effect for the data scan.
-	 */
-	PushVendedCredentialsForRelations(rteList);
 
 	/*
 	 * We do some extra bookkeeping for scans that are part of an
@@ -2246,10 +2242,12 @@ postgresBeginForeignModify(ModifyTableState *mtstate,
 	BindRelationToXactRestCatalog(modifyRelId);
 
 	/*
-	 * Push vended credentials for the target table before any writes go to
-	 * pgduck_server.
+	 * PROTOTYPE (Onder's redesign): resolve storage credentials for the write
+	 * target before any data goes to pgduck_server.  Best-effort: if the
+	 * catalog cannot vend credentials right now this does not abort the
+	 * statement (the write / commit fails authoritatively on its own).
 	 */
-	PushVendedCredentialsForRelation(modifyRelId);
+	EnsureStorageCredentialsForRelation(modifyRelId);
 
 	/* Construct an execution state. */
 	fmstate = create_foreign_modify(resultRelInfo->ri_RelationDesc,
@@ -4660,6 +4658,9 @@ postgresExecForeignTruncate(List *relations,
 			PgLakeModifyValidityCheckHook(relationId);
 
 		BindRelationToXactRestCatalog(relationId);
+
+		/* PROTOTYPE (Onder's redesign): ensure creds before storage delete. */
+		EnsureStorageCredentialsForRelation(relationId);
 
 		RemoveAllDataFilesFromTable(relationId);
 	}

@@ -51,7 +51,10 @@ typedef struct VendedCredentials
 	char	   *secretAccessKey;	/* s3.secret-access-key */
 	char	   *sessionToken;	/* s3.session-token (may be NULL for non-STS
 								 * creds) */
-	char	   *region;			/* client.region (may be NULL) */
+	char	   *region;			/* client.region / s3.region (may be NULL) */
+	char	   *endpoint;		/* s3.endpoint (may be NULL) */
+	char	   *urlStyle;		/* "path"/"vhost" from s3.path-style-access
+								 * (may be NULL) */
 	char	   *scope;			/* S3 prefix these creds are scoped to (the
 								 * table's storage location; may be NULL) */
 	Oid			serverOid;		/* the iceberg_catalog server these came from */
@@ -213,6 +216,14 @@ extern PGDLLEXPORT RestCatalogLoadTableResult LoadTableFromRestCatalog(RestCatal
 																	   const char *namespaceName, const char *relationName);
 extern PGDLLEXPORT char *GetMetadataLocationForRestCatalogForIcebergTable(Oid relationId);
 extern PGDLLEXPORT VendedCredentials * GetVendedCredentialsForRelation(Oid relationId);
+
+/*
+ * Provider for the engine's storage-credential resolver hook
+ * (PgLakeStorageCredentialProviderHook).  Returns a
+ * List<StorageCredential *> for the relation's REST-catalog vended
+ * credentials, or NIL.  Installed at _PG_init.
+ */
+extern PGDLLEXPORT List *IcebergProvideStorageCredentials(Oid relationId);
 extern PGDLLEXPORT void InvalidateVendedCredentialsCache(void);
 extern PGDLLEXPORT void ReportHTTPError(HttpResult httpResult, int level);
 extern PGDLLEXPORT List *PostHeadersWithAuth(RestCatalogOptions * opts);

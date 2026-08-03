@@ -21,6 +21,15 @@ vended credential is genuinely *load-bearing* for a data scan:
         DuckDB never applies it to the target table's data path and the
         scan is denied -- proving the scope string must be correct.
 
+  * ``test_minio_vended_secret_dropped_when_revoked``
+        With vending on, a scan pushes the data-capable secret and
+        succeeds.  Vending is then turned off (the catalog stops
+        delegating); the next scan on the same backend resolves no
+        credentials, *drops* the secret it previously pushed, and the data
+        scan is denied.  This proves the resolver's headline behavior: a
+        stale credential cannot linger on the shared pgduck_server once the
+        catalog stops vending it.
+
 The whole module is skipped when MinIO (server binary + Python admin SDK)
 is not available, mirroring the skip-if-absent pattern of the e2e suites.
 
@@ -401,6 +410,113 @@ def test_minio_scan_denied_without_vended_credentials(
         assert _denied(err), f"expected an access-denied error, got: {err!r}"
 
     finally:
+        run_command(f"DROP TABLE IF EXISTS {schema}.{table}", superuser_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
+        superuser_conn.commit()
+        _stop_mock_catalog(httpd, thread)
+
+
+@requires_minio
+def test_minio_vended_secret_dropped_when_revoked(
+    superuser_conn, pgduck_conn, extension, installcheck, minio_server
+):
+    if installcheck or not _HAVE_PYICEBERG:
+        return
+
+    server = minio_server
+    schema = "mv_revoke"
+    table = "vc_revoke"
+
+    meta_loc, location, prefix = _materialize_iceberg_table(server, schema, table, 10)
+
+    # metadata-only static credential; data-capable vended credential.
+    server.create_scoped_user(
+        "mv_meta_rv",
+        "mv_meta_rv_secret",
+        [f"{prefix}/metadata"],
+        actions=("s3:GetObject", "s3:ListBucket"),
+    )
+    server.create_scoped_user("mv_data_rv", "mv_data_rv_secret", [prefix])
+
+    tables = {
+        table: {
+            "metadata_location": meta_loc,
+            "location": location,
+            "vended": {
+                "prefix": location + "/",
+                "config": {
+                    "s3.access-key-id": "mv_data_rv",
+                    "s3.secret-access-key": "mv_data_rv_secret",
+                    "client.region": server.region,
+                },
+            },
+        }
+    }
+
+    _create_static_minio_secret(pgduck_conn, server, "mv_meta_rv", "mv_meta_rv_secret")
+    httpd, thread = _serve_mock_catalog(tables, enable_vended=True)
+
+    try:
+        run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
+        superuser_conn.commit()
+        run_command(
+            f"""CREATE TABLE {schema}.{table} ()
+                USING iceberg
+                WITH (catalog='rest', read_only=True, catalog_table_name='{table}')""",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        # Step 1: vending on -> scan succeeds and the secret is pushed.
+        result = run_query(f"SELECT count(*) FROM {schema}.{table}", superuser_conn)
+        superuser_conn.commit()
+        assert result[0][0] == 10
+
+        def _vended_secrets_for_this_table():
+            rows = run_query(
+                "SELECT name, scope FROM duckdb_secrets() "
+                "WHERE name LIKE 'pglake_vended_%'",
+                pgduck_conn,
+            )
+            return [r for r in rows if r[1] and location in r[1]]
+
+        assert (
+            _vended_secrets_for_this_table()
+        ), "expected a vended secret to be pushed while vending is on"
+
+        # Step 2: revoke by turning vending off for this session.  A
+        # session-level SET (PGC_SUSET) takes effect on the very next query
+        # in this same backend -- deterministically, unlike an ALTER SYSTEM
+        # + pg_reload_conf whose SIGHUP is only processed at the *following*
+        # command boundary.  The next scan then resolves no credentials and
+        # must drop the secret it pushed above, leaving only the
+        # metadata-only static secret so MinIO denies the data scan.
+        run_command(
+            "SET pg_lake_iceberg.rest_catalog_enable_vended_credentials = false",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        # The scan that succeeded above is now DENIED.  This is the
+        # authoritative proof that the resolver dropped the secret it had
+        # pushed: if the drop had not taken effect, the still-present
+        # data-capable vended secret would have served this identical read.
+        # (We deliberately assert on the scan result rather than on a peer
+        # connection's duckdb_secrets() view, whose reflection of a drop
+        # made on another pgduck connection is not deterministic.)
+        err = run_query(
+            f"SELECT count(*) FROM {schema}.{table}",
+            superuser_conn,
+            raise_error=False,
+        )
+        superuser_conn.rollback()
+        assert _denied(err), f"expected access-denied after revocation, got: {err!r}"
+
+    finally:
+        run_command(
+            "RESET pg_lake_iceberg.rest_catalog_enable_vended_credentials",
+            superuser_conn,
+        )
         run_command(f"DROP TABLE IF EXISTS {schema}.{table}", superuser_conn)
         run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
         superuser_conn.commit()

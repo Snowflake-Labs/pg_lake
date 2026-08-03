@@ -1227,10 +1227,14 @@ def test_alter_user_mapping_credentials_invalidates_token_cache(
         "Expected COMMIT to fail after ALTER USER MAPPING set bogus client_id "
         "(cache should have been invalidated, forcing re-auth with bad creds)"
     )
+    # After the cache is invalidated, the commit-time loadTable re-auths with
+    # the bogus creds and fails, aborting the commit -- exactly one forced
+    # re-fetch.  Vended credentials are opt-in (disabled by default in this
+    # suite), so the write path does no extra loadTable probe here.
     assert post_alter_fetches == 1, (
-        f"Expected exactly 1 token re-fetch after ALTER USER MAPPING "
-        f"(cache invalidated), got {post_alter_fetches}. Notices "
-        f"({len(post_alter_notices)}):\n" + "\n".join(post_alter_notices)
+        f"Expected 1 token re-fetch after ALTER USER MAPPING (commit re-auth), "
+        f"got {post_alter_fetches}. "
+        f"Notices ({len(post_alter_notices)}):\n" + "\n".join(post_alter_notices)
     )
 
     run_command(

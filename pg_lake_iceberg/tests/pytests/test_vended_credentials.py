@@ -209,6 +209,9 @@ def configure_mock_catalog(
             f"ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_host TO 'http://127.0.0.1:{port}'",
             "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_id TO 'test_id'",
             "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_secret TO 'test_secret'",
+            # Vended credentials are opt-in (disabled by default); these tests
+            # exercise the vending path, so enable it explicitly.
+            "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_enable_vended_credentials TO 'true'",
             "SELECT pg_reload_conf()",
         ]
     )
@@ -859,7 +862,8 @@ def test_vended_credentials_multiple_tables_independent_creds(
 #
 # These use the get_rest_vended_credentials test shim, which loads a table
 # and returns the extracted credential fields as a pipe-delimited summary:
-#     "<access-key-id>|<scope>|<yes|no session token>|<expiry|noexpiry>"
+#     "<access-key-id>|<scope>|<yes|no session token>|<expiry|noexpiry>|
+#      <region>|<endpoint>|<url-style>"
 # ---------------------------------------------------------------------------
 
 _VENDED_CREDS_FN = """
@@ -882,6 +886,9 @@ def _serve(handler_class):
             f"ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_host TO 'http://127.0.0.1:{port}'",
             "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_id TO 'test_id'",
             "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_secret TO 'test_secret'",
+            # Vended credentials are opt-in (disabled by default); these tests
+            # exercise the vending path, so enable it explicitly.
+            "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_enable_vended_credentials TO 'true'",
             "SELECT pg_reload_conf()",
         ]
     )
@@ -896,6 +903,7 @@ def _stop(httpd, thread):
             "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_host",
             "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_id",
             "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_secret",
+            "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_enable_vended_credentials",
             "SELECT pg_reload_conf()",
         ]
     )
@@ -952,13 +960,19 @@ def test_vended_credentials_scope_from_metadata_location(
     try:
         summary = _run_vended_creds(superuser_conn, "postgres", "test_ns", "test_table")
 
-        access_key, scope, has_token, expiry = summary.split("|")
+        access_key, scope, has_token, expiry, region, endpoint, url_style = (
+            summary.split("|")
+        )
         assert access_key == "VENDED_ACCESS_KEY_123"
         # mock returns metadata.location = s3://test-bucket/test-ns/test-table
         assert scope == "s3://test-bucket/test-ns/test-table/"
         assert has_token == "yes"
         # the base mock provides no expiry
         assert expiry == "noexpiry"
+        # region comes from client.region; the base mock vends no S3 settings
+        assert region == "us-west-2"
+        assert endpoint == ""
+        assert url_style == ""
 
     finally:
         run_command(
@@ -1027,12 +1041,15 @@ def test_vended_credentials_storage_credentials_array(
     try:
         summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
 
-        access_key, scope, has_token, expiry = summary.split("|")
+        access_key, scope, has_token, expiry, region, endpoint, url_style = (
+            summary.split("|")
+        )
         assert access_key == "SC_ACCESS_KEY"
         # scope comes from the storage-credential prefix (already ends in /)
         assert scope == "s3://sc-bucket/ns/tbl/"
         assert has_token == "yes"
         assert expiry == "expiry"
+        assert region == "eu-central-1"
 
     finally:
         run_command(
@@ -1095,10 +1112,160 @@ def test_vended_credentials_expiry_from_config(
     try:
         summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
 
-        access_key, scope, has_token, expiry = summary.split("|")
+        access_key, scope, has_token, expiry, region, endpoint, url_style = (
+            summary.split("|")
+        )
         assert access_key == "EXP_KEY"
         assert scope == "s3://exp-bucket/ns/tbl/"
         assert expiry == "expiry"
+
+    finally:
+        run_command(
+            "DROP FUNCTION IF EXISTS get_rest_vended_credentials(TEXT, TEXT, TEXT)",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+        _stop(httpd, thread)
+
+
+def test_vended_credentials_s3_settings_from_config(
+    superuser_conn, iceberg_extension, installcheck
+):
+    """
+    The catalog's own S3 connection settings are parsed from the config
+    map: s3.endpoint -> endpoint, s3.path-style-access -> url-style, and
+    s3.region is used as the region fallback when client.region is absent.
+    """
+    if installcheck:
+        return
+
+    def _make_handler():
+        class _Handler(BaseHTTPRequestHandler):
+            def _handle(self):
+                length = int(self.headers.get("Content-Length", 0))
+                if length > 0:
+                    self.rfile.read(length)
+                if _oauth_or_none(self):
+                    return
+                if "/tables/" in self.path and self.command == "GET":
+                    _reply(
+                        self,
+                        {
+                            "metadata-location": "s3://cfg-bucket/ns/tbl/metadata/v1.metadata.json",
+                            "metadata": {
+                                "format-version": 2,
+                                "table-uuid": str(uuid.uuid4()),
+                                "location": "s3://cfg-bucket/ns/tbl",
+                            },
+                            "config": {
+                                "s3.access-key-id": "CFG_KEY",
+                                "s3.secret-access-key": "CFG_SECRET",
+                                "s3.endpoint": "minio.example.com:9000",
+                                "s3.path-style-access": "true",
+                                # only s3.region (no client.region) -> fallback
+                                "s3.region": "ap-south-1",
+                            },
+                        },
+                    )
+                    return
+                self.send_response(404)
+                self.end_headers()
+
+            do_GET = _handle
+            do_POST = _handle
+
+            def log_message(self, fmt, *args):
+                pass
+
+        return _Handler
+
+    httpd, thread = _serve(_make_handler())
+    try:
+        summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
+
+        access_key, scope, has_token, expiry, region, endpoint, url_style = (
+            summary.split("|")
+        )
+        assert access_key == "CFG_KEY"
+        assert scope == "s3://cfg-bucket/ns/tbl/"
+        assert has_token == "no"
+        assert region == "ap-south-1"
+        assert endpoint == "minio.example.com:9000"
+        assert url_style == "path"
+
+    finally:
+        run_command(
+            "DROP FUNCTION IF EXISTS get_rest_vended_credentials(TEXT, TEXT, TEXT)",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+        _stop(httpd, thread)
+
+
+def test_vended_credentials_scope_clamped_to_table_root(
+    superuser_conn, iceberg_extension, installcheck
+):
+    """
+    A storage-credential prefix that is broader than the table's own
+    directory (e.g. the warehouse root) is clamped down to the table root
+    derived from "metadata"."location", so the pushed secret cannot shadow
+    sibling tables on the shared pgduck_server.
+    """
+    if installcheck:
+        return
+
+    def _make_handler():
+        class _Handler(BaseHTTPRequestHandler):
+            def _handle(self):
+                length = int(self.headers.get("Content-Length", 0))
+                if length > 0:
+                    self.rfile.read(length)
+                if _oauth_or_none(self):
+                    return
+                if "/tables/" in self.path and self.command == "GET":
+                    _reply(
+                        self,
+                        {
+                            "metadata-location": "s3://wh-bucket/ns/tbl/metadata/v1.metadata.json",
+                            "metadata": {
+                                "format-version": 2,
+                                "table-uuid": str(uuid.uuid4()),
+                                "location": "s3://wh-bucket/ns/tbl",
+                            },
+                            "storage-credentials": [
+                                {
+                                    # broad prefix: the whole warehouse bucket
+                                    "prefix": "s3://wh-bucket/",
+                                    "config": {
+                                        "s3.access-key-id": "CLAMP_KEY",
+                                        "s3.secret-access-key": "CLAMP_SECRET",
+                                    },
+                                }
+                            ],
+                        },
+                    )
+                    return
+                self.send_response(404)
+                self.end_headers()
+
+            do_GET = _handle
+            do_POST = _handle
+
+            def log_message(self, fmt, *args):
+                pass
+
+        return _Handler
+
+    httpd, thread = _serve(_make_handler())
+    try:
+        summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
+
+        access_key, scope, has_token, expiry, region, endpoint, url_style = (
+            summary.split("|")
+        )
+        assert access_key == "CLAMP_KEY"
+        # clamped from the broad "s3://wh-bucket/" down to the table root
+        assert scope == "s3://wh-bucket/ns/tbl/"
 
     finally:
         run_command(

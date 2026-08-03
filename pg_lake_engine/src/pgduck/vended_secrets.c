@@ -28,6 +28,7 @@
 
 #include "common/hashfn.h"
 #include "lib/stringinfo.h"
+#include "miscadmin.h"
 #include "utils/builtins.h"
 
 #include "pg_lake/pgduck/client.h"
@@ -36,19 +37,24 @@
 
 /*
  * GenerateVendedSecretName produces a deterministic name for a vended
- * secret: pglake_vended_<serverOid>_<hash(secretKey)>.
+ * secret: pglake_vended_<dbOid>_<serverOid>_<hash(secretKey)>.
  *
- * secretKey is a stable per-table identity (e.g. "catalog/ns/table"),
- * so the name stays constant as the underlying credentials and their
- * S3 scope rotate, keeping CREATE OR REPLACE SECRET idempotent.
+ * secretKey is a stable, principal-scoped identity (e.g.
+ * "<userMappingOid>/catalog/ns/table"), so the name stays constant as
+ * the underlying credentials and their S3 scope rotate, keeping CREATE
+ * OR REPLACE SECRET idempotent.  The database OID is included because a
+ * single pgduck_server is shared by all databases in the cluster, and a
+ * 64-bit hash is used so distinct identities do not collide on the
+ * shared secret namespace.
  */
 char *
 GenerateVendedSecretName(Oid serverOid, const char *secretKey)
 {
-	uint32		keyHash = hash_bytes((const unsigned char *) secretKey,
-									 strlen(secretKey));
+	uint64		keyHash = hash_bytes_extended((const unsigned char *) secretKey,
+											  strlen(secretKey), 0);
 
-	return psprintf("pglake_vended_%u_%08x", serverOid, keyHash);
+	return psprintf("pglake_vended_%u_%u_%016llx",
+					MyDatabaseId, serverOid, (unsigned long long) keyHash);
 }
 
 
@@ -216,31 +222,45 @@ LookupInheritedS3Settings(PGDuckConnection * conn, const char *s3Prefix)
 
 
 /*
+ * AppendS3ConnectionSetting adds ", <keyword> '<value>'" to sql when
+ * value is non-empty, escaping the value for safe interpolation.
+ */
+static void
+AppendS3ConnectionSetting(StringInfo sql, const char *keyword,
+						  const char *value)
+{
+	if (value == NULL || value[0] == '\0')
+		return;
+
+	char	   *escaped = EscapeSingleQuotes(value);
+
+	appendStringInfo(sql, ", %s '%s'", keyword, escaped);
+	pfree(escaped);
+}
+
+
+/*
  * BuildCreateSecretSQL constructs the DuckDB SQL statement for
  * creating or replacing a vended S3 secret.
  *
- * All credential values are treated as untrusted input and properly
- * single-quote-escaped to prevent SQL injection.
- *
- * If inherited settings are provided, ENDPOINT / URL_STYLE / USE_SSL
- * are included so the vended secret connects to the same S3 endpoint
- * as the existing matching secret.
+ * All values are treated as untrusted input and single-quote-escaped to
+ * prevent SQL injection.  endpoint / urlStyle / useSsl are the already-
+ * resolved connection settings (catalog-provided value, or the inherited
+ * fallback); each is emitted only when present.
  */
 static char *
 BuildCreateSecretSQL(const char *secretName,
-					 const char *s3Prefix,
-					 const char *accessKeyId,
-					 const char *secretAccessKey,
-					 const char *sessionToken,
-					 const char *region,
-					 const S3InheritedSettings * inherited)
+					 const VendedS3Secret * secret,
+					 const char *endpoint,
+					 const char *urlStyle,
+					 const char *useSsl)
 {
 	StringInfoData sql;
 
 	initStringInfo(&sql);
 
-	char	   *escapedKeyId = EscapeSingleQuotes(accessKeyId);
-	char	   *escapedSecret = EscapeSingleQuotes(secretAccessKey);
+	char	   *escapedKeyId = EscapeSingleQuotes(secret->accessKeyId);
+	char	   *escapedSecret = EscapeSingleQuotes(secret->secretAccessKey);
 
 	appendStringInfo(&sql,
 					 "CREATE OR REPLACE SECRET \"%s\" ("
@@ -249,85 +269,70 @@ BuildCreateSecretSQL(const char *secretName,
 					 "SECRET '%s'",
 					 secretName, escapedKeyId, escapedSecret);
 
-	if (sessionToken != NULL && sessionToken[0] != '\0')
-	{
-		char	   *escapedToken = EscapeSingleQuotes(sessionToken);
+	AppendS3ConnectionSetting(&sql, "SESSION_TOKEN", secret->sessionToken);
+	AppendS3ConnectionSetting(&sql, "REGION", secret->region);
+	AppendS3ConnectionSetting(&sql, "ENDPOINT", endpoint);
+	AppendS3ConnectionSetting(&sql, "URL_STYLE", urlStyle);
 
-		appendStringInfo(&sql, ", SESSION_TOKEN '%s'", escapedToken);
-		pfree(escapedToken);
-	}
-
-	if (region != NULL && region[0] != '\0')
-	{
-		char	   *escapedRegion = EscapeSingleQuotes(region);
-
-		appendStringInfo(&sql, ", REGION '%s'", escapedRegion);
-		pfree(escapedRegion);
-	}
-
-	if (inherited != NULL && inherited->endpoint != NULL)
-	{
-		char	   *escapedEndpoint = EscapeSingleQuotes(inherited->endpoint);
-
-		appendStringInfo(&sql, ", ENDPOINT '%s'", escapedEndpoint);
-		pfree(escapedEndpoint);
-	}
-
-	if (inherited != NULL && inherited->urlStyle != NULL)
-	{
-		char	   *escapedUrlStyle = EscapeSingleQuotes(inherited->urlStyle);
-
-		appendStringInfo(&sql, ", URL_STYLE '%s'", escapedUrlStyle);
-		pfree(escapedUrlStyle);
-	}
-
-	if (inherited != NULL && inherited->useSsl != NULL)
+	if (useSsl != NULL && useSsl[0] != '\0')
 	{
 		/*
-		 * duckdb_secrets() may render the boolean as "true"/"false" or as
-		 * "1"/"0" depending on version; parse_bool handles both so we don't
-		 * silently coerce SSL off (which would break real-AWS access).
+		 * A vended value ("true"/"false") or an inherited one from
+		 * duckdb_secrets() (which may render "1"/"0" depending on version);
+		 * parse_bool handles both so we don't silently coerce SSL off (which
+		 * would break real-AWS access).
 		 */
-		bool		useSsl = true;
+		bool		ssl = true;
 
-		(void) parse_bool(inherited->useSsl, &useSsl);
-		appendStringInfo(&sql, ", USE_SSL %s", useSsl ? "true" : "false");
+		(void) parse_bool(useSsl, &ssl);
+		appendStringInfo(&sql, ", USE_SSL %s", ssl ? "true" : "false");
 	}
 
-	char	   *escapedScope = EscapeSingleQuotes(s3Prefix);
-
-	appendStringInfo(&sql, ", SCOPE '%s'", escapedScope);
+	AppendS3ConnectionSetting(&sql, "SCOPE", secret->scope);
 
 	appendStringInfoChar(&sql, ')');
 
 	pfree(escapedKeyId);
 	pfree(escapedSecret);
-	pfree(escapedScope);
 
 	return sql.data;
 }
 
 
 /*
- * PushVendedSecretOnConnection looks up inherited S3 settings from
- * the best-matching existing secret, then creates the vended secret.
+ * PushVendedSecretOnConnection resolves the S3 connection settings
+ * (preferring the catalog-provided values on the secret, falling back to
+ * the pre-existing bucket secret for any the catalog omitted) and then
+ * creates the vended secret on conn.
+ *
+ * The inheritance query only runs when at least one connection setting
+ * is missing, so a catalog that vends a full set of settings costs no
+ * extra round-trip.
  */
 static void
 PushVendedSecretOnConnection(PGDuckConnection * conn,
 							 const char *secretName,
-							 const char *s3Prefix,
-							 const char *accessKeyId,
-							 const char *secretAccessKey,
-							 const char *sessionToken,
-							 const char *region)
+							 const VendedS3Secret * secret)
 {
-	S3InheritedSettings inherited =
-		LookupInheritedS3Settings(conn, s3Prefix);
+	const char *endpoint = secret->endpoint;
+	const char *urlStyle = secret->urlStyle;
+	const char *useSsl = secret->useSsl;
 
-	char	   *sql = BuildCreateSecretSQL(secretName, s3Prefix,
-										   accessKeyId, secretAccessKey,
-										   sessionToken, region,
-										   &inherited);
+	if (endpoint == NULL || urlStyle == NULL || useSsl == NULL)
+	{
+		S3InheritedSettings inherited =
+			LookupInheritedS3Settings(conn, secret->scope);
+
+		if (endpoint == NULL)
+			endpoint = inherited.endpoint;
+		if (urlStyle == NULL)
+			urlStyle = inherited.urlStyle;
+		if (useSsl == NULL)
+			useSsl = inherited.useSsl;
+	}
+
+	char	   *sql = BuildCreateSecretSQL(secretName, secret,
+										   endpoint, urlStyle, useSsl);
 
 	PGresult   *result = ExecuteQueryOnPGDuckConnection(conn, sql);
 
@@ -339,69 +344,45 @@ PushVendedSecretOnConnection(PGDuckConnection * conn,
 
 
 /*
- * We deliberately issue CREATE OR REPLACE SECRET on every push rather
- * than skipping when a still-valid secret might already be registered.
- * The DuckDB secret in pgduck_server is a temporary (in-memory) secret,
- * which is process-wide and shared across connections but is lost when
- * pgduck_server restarts.  A backend only tracks its own copy of the
- * credentials in the per-backend credential cache; it does not track
- * what is currently registered in pgduck_server, and vended STS
- * credentials rotate over time.  Re-pushing with CREATE OR REPLACE keeps
- * the registered secret in sync with the freshest credentials and
- * self-heals across a pgduck_server restart, without an extra round-trip
- * to inspect pgduck's secret catalog.  The credential cache already
- * elides the expensive REST round-trip, so this costs only a single
- * idempotent statement that is cheap next to the data scan.
+ * The vended secret in pgduck_server is a temporary (in-memory) secret:
+ * process-wide, shared across connections, and lost only when
+ * pgduck_server restarts.  The storage-credential resolver tracks which
+ * secrets this backend has pushed and, using the catalog-provided
+ * expiry, re-pushes with CREATE OR REPLACE only when a secret is new or
+ * nearing expiry -- so a warm scan needs no secret round-trip at all,
+ * while rotating STS credentials are still refreshed before they lapse.
+ * (Trade-off: if pgduck_server restarts, a backend that believes its
+ * secret is still fresh will not re-push until the next reconcile that
+ * has other work to do; the resolver batches CREATE and DROP for a
+ * relation onto a single connection to keep that cost minimal.)
  */
 void
-PushVendedSecretToPGDuck(Oid serverOid,
-						 const char *secretKey,
-						 const char *s3Scope,
-						 const char *accessKeyId,
-						 const char *secretAccessKey,
-						 const char *sessionToken,
-						 const char *region)
+PushVendedSecretToPGDuck(const VendedS3Secret * secret)
 {
-	char	   *secretName = GenerateVendedSecretName(serverOid, secretKey);
-
-	elog(DEBUG2, "pushing vended secret \"%s\" to pgduck_server", secretName);
-
 	PGDuckConnection *conn = GetPGDuckConnection();
 
 	PG_TRY();
 	{
-		PushVendedSecretOnConnection(conn, secretName, s3Scope,
-									 accessKeyId, secretAccessKey,
-									 sessionToken, region);
+		PushVendedSecretToPGDuckOnConnection(conn, secret);
 	}
 	PG_FINALLY();
 	{
 		ReleasePGDuckConnection(conn);
 	}
 	PG_END_TRY();
-
-	pfree(secretName);
 }
 
 
 void
 PushVendedSecretToPGDuckOnConnection(PGDuckConnection * conn,
-									 Oid serverOid,
-									 const char *secretKey,
-									 const char *s3Scope,
-									 const char *accessKeyId,
-									 const char *secretAccessKey,
-									 const char *sessionToken,
-									 const char *region)
+									 const VendedS3Secret * secret)
 {
-	char	   *secretName = GenerateVendedSecretName(serverOid, secretKey);
+	char	   *secretName = GenerateVendedSecretName(secret->serverOid,
+													  secret->secretKey);
 
-	elog(DEBUG2, "pushing vended secret \"%s\" on existing connection",
-		 secretName);
+	elog(DEBUG2, "pushing vended secret \"%s\" to pgduck_server", secretName);
 
-	PushVendedSecretOnConnection(conn, secretName, s3Scope,
-								 accessKeyId, secretAccessKey,
-								 sessionToken, region);
+	PushVendedSecretOnConnection(conn, secretName, secret);
 
 	pfree(secretName);
 }
@@ -410,13 +391,34 @@ PushVendedSecretToPGDuckOnConnection(PGDuckConnection * conn,
 void
 DropVendedSecretFromPGDuck(Oid serverOid, const char *secretKey)
 {
+	PGDuckConnection *conn = GetPGDuckConnection();
+
+	PG_TRY();
+	{
+		DropVendedSecretFromPGDuckOnConnection(conn, serverOid, secretKey);
+	}
+	PG_FINALLY();
+	{
+		ReleasePGDuckConnection(conn);
+	}
+	PG_END_TRY();
+}
+
+
+void
+DropVendedSecretFromPGDuckOnConnection(PGDuckConnection * conn,
+									   Oid serverOid, const char *secretKey)
+{
 	char	   *secretName = GenerateVendedSecretName(serverOid, secretKey);
 	char	   *sql = psprintf("DROP SECRET IF EXISTS \"%s\"", secretName);
 
 	elog(DEBUG2, "dropping vended secret \"%s\" from pgduck_server",
 		 secretName);
 
-	ExecuteOptionalCommandInPGDuck(sql);
+	/* Best-effort: a failed drop must not abort the caller. */
+	PGresult   *result = ExecuteQueryOnPGDuckConnection(conn, sql);
+
+	PQclear(result);
 
 	pfree(sql);
 	pfree(secretName);

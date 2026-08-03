@@ -36,6 +36,7 @@
 #include "pg_lake/fdw/data_files_catalog.h"
 #include "pg_lake/fdw/row_ids.h"
 #include "pg_lake/fdw/writable_table.h"
+#include "pg_lake/storage/storage_credentials.h"
 #include "pg_lake/fdw/partition_pushdown.h"
 #include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
@@ -1197,6 +1198,13 @@ AddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc,
 	Assert(queryTupleDesc != NULL && queryTupleDesc->natts > 0);
 
 	BindRelationToXactRestCatalog(relationId);
+
+	/*
+	 * PROTOTYPE (Onder's redesign): resolve storage credentials before the
+	 * result is written out to object storage via pgduck_server.  Covers
+	 * INSERT..SELECT, COPY FROM and compaction, which all funnel here.
+	 */
+	EnsureStorageCredentialsForRelation(relationId);
 
 	int64		rowsProcessed = 0;
 	ForeignTable *foreignTable = GetForeignTable(relationId);

@@ -27,6 +27,7 @@
 #include "pg_lake/cleanup/deletion_queue.h"
 #include "pg_lake/extensions/pg_lake_table.h"
 #include "pg_lake/pgduck/remote_storage.h"
+#include "pg_lake/storage/storage_credentials.h"
 #include "pg_lake/util/array_utils.h"
 #include "pg_extension_base/spi_helpers.h"
 #include "pg_lake/util/string_utils.h"
@@ -75,6 +76,17 @@ flush_deletion_queue(PG_FUNCTION_ARGS)
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 
 	InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC);
+
+	/*
+	 * PROTOTYPE (Onder's redesign): when draining a specific table, push its
+	 * vended storage credentials so the object deletes below can reach a
+	 * REST-catalog table's bucket.  No-op for non-REST tables and skipped for
+	 * the "all tables" (InvalidOid) drain, whose dropped-table rows carry
+	 * only a metadata path and are backstopped by the catalog's own DROP
+	 * TABLE purge.
+	 */
+	if (OidIsValid(relationId))
+		EnsureStorageCredentialsForRelation(relationId);
 
 	/* remove all */
 	bool		isFull = true;
