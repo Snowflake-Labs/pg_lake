@@ -339,15 +339,19 @@ PushVendedSecretOnConnection(PGDuckConnection * conn,
 
 
 /*
- * We deliberately issue CREATE OR REPLACE SECRET on every push instead
- * of skipping when a still-valid secret was already sent.  A vended
- * secret lives only for the lifetime of the pgduck_server connection it
- * was created on; that connection can be recycled or replaced between
- * statements, after which the secret is gone.  A "skip if recently
- * pushed" guard keyed on table/expiry would therefore risk running a
- * scan against a connection that has no secret.  The credential cache
- * already elides the expensive REST round-trip, so all this saves is a
- * single idempotent statement that is cheap next to the data scan.
+ * We deliberately issue CREATE OR REPLACE SECRET on every push rather
+ * than skipping when a still-valid secret might already be registered.
+ * The DuckDB secret in pgduck_server is a temporary (in-memory) secret,
+ * which is process-wide and shared across connections but is lost when
+ * pgduck_server restarts.  A backend only tracks its own copy of the
+ * credentials in the per-backend credential cache; it does not track
+ * what is currently registered in pgduck_server, and vended STS
+ * credentials rotate over time.  Re-pushing with CREATE OR REPLACE keeps
+ * the registered secret in sync with the freshest credentials and
+ * self-heals across a pgduck_server restart, without an extra round-trip
+ * to inspect pgduck's secret catalog.  The credential cache already
+ * elides the expensive REST round-trip, so this costs only a single
+ * idempotent statement that is cheap next to the data scan.
  */
 void
 PushVendedSecretToPGDuck(Oid serverOid,
