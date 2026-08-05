@@ -36,16 +36,19 @@ def test_polaris_catalog_running(pg_conn, s3, polaris_session, installcheck):
     assert resp.ok, f"Polaris is not running: {resp.status_code} {resp.text}"
 
 
-# Apache Polaris 1.4+ rejects '/' in entity names with HTTP 400
-# ("Entity name must not contain '/'"). Until pg_lake maps Postgres
-# schema names that contain '/' to multi-level Iceberg namespaces
-# (or otherwise encodes them server-acceptably), we cannot include '/'
-# in test data that goes through the REST catalog.
+# Apache Polaris tightened entity-name validation over releases and now
+# rejects a fixed set of characters with HTTP 400 ("Entity name must not
+# contain '<c>'"). As of 1.7 the forbidden set (see EntityNameValidator)
+# is: / \ : * ? " < > | # + ` (plus control chars and leading/trailing
+# whitespace). Until pg_lake maps such Postgres schema names to
+# server-acceptable Iceberg names, test data going through the REST
+# catalog must avoid these characters while still exercising the other
+# special characters our name encoding must handle.
 namespaces = [
     "regular_name",
-    "regular..!!**(())..;;..??::@@&&==++$$,,#name",
-    "Special-Table!_With.Multiple_Uses_Of@Chars#-Here~And*Here!name",
-    "!~*().?:@&=+$,#",
+    "regular..!!(())..;;..@@&&==$$,,name",
+    "Special-Table!_With.Multiple_Uses_Of@Chars-Here~AndHere!name",
+    "!~().@&=$,",
 ]
 
 
@@ -204,11 +207,11 @@ def test_create_namespace_rollback(
 
 existing_namespaces = [
     "regular_nsp_name",
-    "nonregular_nsp!~*()name:$Uses_Of@",
+    "nonregular_nsp!~()name$Uses_Of@",
 ]
 existing_table_names = [
     "regular_tbl_name",
-    "nonregular_tbl!~*()name:$Uses_Of@",
+    "nonregular_tbl!~()name$Uses_Of@",
 ]
 
 
