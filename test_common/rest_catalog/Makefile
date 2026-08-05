@@ -8,7 +8,7 @@ PG_SHAREDIR := $(shell $(PG_CONFIG) --sharedir)
 USE_PGXS=1
 include $(PGXS)
 
-JAR_VERSION=1.5.0
+JAR_VERSION=1.7.0
 
 # Polaris build and install
 all:
