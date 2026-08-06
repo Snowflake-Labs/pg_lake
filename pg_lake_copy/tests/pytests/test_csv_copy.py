@@ -1074,3 +1074,49 @@ def test_auto_detect(pg_conn, azure):
     # assert result_before == result_after
 
     pg_conn.rollback()
+
+
+def test_copy_to_multidim_array_csv(pg_conn, s3):
+    """
+    Regression test for https://github.com/Snowflake-Labs/pg_lake/issues/407.
+
+    Unlike Parquet/JSON, COPY TO in CSV format must still ACCEPT
+    multidimensional arrays.  For CSV, ShouldUseDuckSerialization is false and
+    ChooseDuckDBEngineTypeForWrite treats every column as VARCHAR, so the value
+    is written using the PostgreSQL text representation ("{{1,2},{3,4}}") and
+    copied through verbatim rather than cast to a DuckDB LIST(T).  The multidim
+    guard in CopyOneRowTo must therefore NOT fire for CSV, otherwise a value
+    that writes fine today would start erroring.
+
+    (Local-file / STDOUT CSV is handled by PostgreSQL directly and never
+    reaches pg_lake, so we exercise the pg_lake CSV path via an object-store
+    URL.)
+    """
+    csv_key = "test_copy_to_multidim_array_csv/data.csv"
+    csv_path = f"s3://{TEST_BUCKET}/{csv_key}"
+
+    # Must not raise: the guard is scoped to DuckDB-serialised formats.
+    run_command(
+        f"""
+        CREATE TABLE test_multidim_csv (id bigint, v int[]);
+        INSERT INTO test_multidim_csv VALUES
+            (1, ARRAY[[1,2],[3,4]]),
+            (2, ARRAY[10,20,30]),
+            (3, NULL);
+        COPY test_multidim_csv TO '{csv_path}' WITH (format 'csv');
+        """,
+        pg_conn,
+    )
+
+    # The multidimensional value is preserved verbatim as PostgreSQL array
+    # text (the field is quoted because it contains commas, but the literal is
+    # intact), and the 1-D array is written alongside it.
+    content = s3.get_object(Bucket=TEST_BUCKET, Key=csv_key)["Body"].read().decode()
+    assert (
+        "{{1,2},{3,4}}" in content
+    ), f"multidimensional array text missing from CSV output: {content!r}"
+    assert (
+        "{10,20,30}" in content
+    ), f"1-D array text missing from CSV output: {content!r}"
+
+    pg_conn.rollback()
