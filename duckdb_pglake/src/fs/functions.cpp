@@ -539,6 +539,123 @@ static void ListFilesExec(ClientContext &context, TableFunctionInput &data_p, Da
 
 
 /*
+ * RemoveFilesFunctionData defines the custom state for pg_lake_remove_files.
+ */
+struct RemoveFilesFunctionData : public TableFunctionData
+{
+	/* Function argument */
+	string globPattern;
+
+	/* Function state */
+	vector<string> deletedFiles;
+	int fileOffset = 0;
+	bool started = false;
+	bool finished = false;
+};
+
+
+/*
+ * RemoveFilesBind implements the bind phase for pg_lake_remove_files.
+ */
+static unique_ptr<FunctionData> RemoveFilesBind(ClientContext &context,
+												TableFunctionBindInput &input,
+												vector<LogicalType> &return_types,
+												vector<string> &names) {
+
+	auto functionData = make_uniq<RemoveFilesFunctionData>();
+	functionData->globPattern = input.inputs[0].ToString();
+
+	return_types.emplace_back(LogicalType::VARCHAR);
+	names.emplace_back("url");
+
+	return std::move(functionData);
+}
+
+
+/*
+ * RemoveFilesExec implements the execution for pg_lake_remove_files. It expands
+ * the glob pattern, then deletes the matched files -- for S3 in batched
+ * DeleteObjects requests (up to 1000 keys each) rather than one request per
+ * file -- and streams back the deleted URLs.
+ *
+ * All the work happens on the first call so the deletes run to completion even
+ * when the caller only reads the cardinality (e.g. SELECT count(*)).
+ */
+static void RemoveFilesExec(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &functionData = (RemoveFilesFunctionData &)*data_p.bind_data;
+	if (functionData.finished)
+		return;
+
+	if (!functionData.started)
+	{
+		functionData.started = true;
+
+		FileOpener *opener = context.client_data->file_opener.get();
+		string &globPattern = functionData.globPattern;
+
+		DatabaseInstance &db = DatabaseInstance::GetDatabase(context);
+		BufferManager &bufferManager = BufferManager::GetBufferManager(db);
+
+		RegionAwareS3FileSystem s3fs(bufferManager);
+		AzureBlobStorageFileSystem abfs;
+		AzureDfsStorageFileSystem adfs;
+
+		if (s3fs.CanHandleFile(globPattern))
+		{
+			/* S3: glob, then delete in batched DeleteObjects requests */
+			vector<OpenFileInfo> files = s3fs.List(globPattern, true, opener);
+
+			vector<string> paths;
+			paths.reserve(files.size());
+			for (auto &file : files)
+				paths.push_back(file.path);
+
+			s3fs.RemoveFiles(paths, opener);
+
+			functionData.deletedFiles = std::move(paths);
+		}
+		else
+		{
+			/*
+			 * Azure and other back ends have no batch delete API here, so
+			 * remove one file at a time. This is still a single round trip from
+			 * pg_lake's perspective.
+			 */
+			FileSystem &fs = FileSystem::GetFileSystem(context);
+			vector<OpenFileInfo> files;
+
+			if (abfs.CanHandleFile(globPattern))
+				files = abfs.Glob(globPattern, opener);
+			else if (adfs.CanHandleFile(globPattern))
+				files = adfs.Glob(globPattern, opener);
+			else
+				files = fs.Glob(globPattern);
+
+			for (auto &file : files)
+			{
+				fs.RemoveFile(file.path);
+				functionData.deletedFiles.push_back(file.path);
+			}
+		}
+	}
+
+	/* Stream back the deleted URLs */
+	idx_t rowInChunk = 0;
+	while (functionData.fileOffset < functionData.deletedFiles.size() && rowInChunk < STANDARD_VECTOR_SIZE) {
+		output.SetValue(0, rowInChunk, Value(functionData.deletedFiles[functionData.fileOffset]));
+
+		rowInChunk++;
+		functionData.fileOffset++;
+	}
+
+	output.SetCardinality(rowInChunk);
+
+	if (functionData.fileOffset == functionData.deletedFiles.size())
+		functionData.finished = true;
+}
+
+
+/*
  * Implementation of the pg_lake_file_size scalar function.
  */
 static void
@@ -779,6 +896,18 @@ PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
 						  ListFilesExec, ListFilesBind));
 
 	    loader.RegisterFunction(pg_lake_list_files);
+	}
+
+	/* pg_lake_remove_files function definition */
+	{
+		TableFunctionSet pg_lake_remove_files("pg_lake_remove_files");
+
+		/* pg_lake_remove_files(pattern varchar) */
+		pg_lake_remove_files.AddFunction(
+			TableFunction({LogicalType::VARCHAR},
+						  RemoveFilesExec, RemoveFilesBind));
+
+	    loader.RegisterFunction(pg_lake_remove_files);
 	}
 
 
