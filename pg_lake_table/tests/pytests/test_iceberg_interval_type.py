@@ -823,6 +823,84 @@ def test_interval_array_in_composite(pg_conn, s3, with_default_location):
     pg_conn.commit()
 
 
+def test_interval_composite_in_array_and_map(pg_conn, s3, with_default_location):
+    """
+    Verify recursive read conversion when an interval-bearing composite is
+    itself nested in an array or used as a map value.
+    """
+    schema_name = "test_interval_comp_containers"
+
+    try:
+        run_command(
+            f"""
+            CREATE SCHEMA {schema_name};
+            CREATE TYPE {schema_name}.event_duration AS (
+                name     text,
+                duration interval
+            );
+            """,
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        map_type_name = create_map_type("text", f"{schema_name}.event_duration")
+
+        run_command(
+            f"""
+            CREATE TABLE {schema_name}.test (
+                id             integer,
+                events         {schema_name}.event_duration[],
+                events_by_name {map_type_name}
+            ) USING iceberg;
+
+            INSERT INTO {schema_name}.test VALUES
+                (1,
+                 ARRAY[
+                     ROW('meeting', '90 minutes'::interval)::{schema_name}.event_duration,
+                     ROW('sprint', '14 days'::interval)::{schema_name}.event_duration
+                 ],
+                 ARRAY[
+                     ROW('meeting', ROW('meeting', '90 minutes'::interval)::{schema_name}.event_duration),
+                     ROW('sprint', ROW('sprint', '14 days'::interval)::{schema_name}.event_duration)
+                 ]::{map_type_name}),
+                (2, NULL, NULL);
+            """,
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        assert (
+            run_query(
+                f"""
+            SELECT id,
+                   (events[1]).name,
+                   (events[1]).duration,
+                   (events[2]).duration,
+                   (map_type.extract(events_by_name, 'meeting')).duration,
+                   (map_type.extract(events_by_name, 'sprint')).duration
+            FROM {schema_name}.test
+            ORDER BY id
+            """,
+                pg_conn,
+            )
+            == [
+                [
+                    1,
+                    "meeting",
+                    datetime.timedelta(minutes=90),
+                    datetime.timedelta(days=14),
+                    datetime.timedelta(minutes=90),
+                    datetime.timedelta(days=14),
+                ],
+                [2, None, None, None, None, None],
+            ]
+        )
+    finally:
+        pg_conn.rollback()
+        run_command(f"DROP SCHEMA IF EXISTS {schema_name} CASCADE", pg_conn)
+        pg_conn.commit()
+
+
 def test_interval_array_update(pg_conn, s3, with_default_location):
     """
     Verify UPDATE and DELETE on interval[] columns.
