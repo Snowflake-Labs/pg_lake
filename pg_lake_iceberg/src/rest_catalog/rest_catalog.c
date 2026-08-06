@@ -44,7 +44,7 @@ char	   *RestCatalogClientId = NULL;
 char	   *RestCatalogClientSecret = NULL;
 char	   *RestCatalogScope = "PRINCIPAL_ROLE:ALL";
 int			RestCatalogAuthType = REST_CATALOG_AUTH_TYPE_OAUTH2;
-bool		RestCatalogEnableVendedCredentials = true;
+bool		RestCatalogEnableVendedCredentials = false;
 
 
 /*

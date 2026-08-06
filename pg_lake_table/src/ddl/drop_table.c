@@ -41,6 +41,7 @@
 #include "pg_lake/cleanup/deletion_queue.h"
 #include "pg_lake/fdw/data_files_catalog.h"
 #include "pg_lake/fdw/data_file_stats_catalog.h"
+#include "pg_lake/storage/storage_credentials.h"
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/fdw/row_ids.h"
 #include "pg_lake/fdw/schema_operations/field_id_mapping_catalog.h"
@@ -308,6 +309,20 @@ DropTableAccessHook(ObjectAccessType access, Oid classId, Oid objectId,
 			/* Cleanup rowid sequence, if we have it */
 			DropRowIdSequenceForRelation(objectId);
 
+			IcebergCatalogType catalogType = GetIcebergCatalogType(objectId);
+
+			/*
+			 * PROTOTYPE (Onder's redesign): push the vended storage
+			 * credentials before ApplyDDLChanges enumerates and enqueues the
+			 * table's files for deletion -- that enumeration reads the table
+			 * metadata / manifests from object storage via pgduck_server, so
+			 * it needs the credentials while the table (and its user mapping)
+			 * still exists.  Best-effort: a failure here does not abort the
+			 * drop.
+			 */
+			if (catalogType == REST_CATALOG_READ_WRITE)
+				EnsureStorageCredentialsForRelation(objectId);
+
 			IcebergDDLOperation *ddlOperation = palloc0(sizeof(IcebergDDLOperation));
 
 			ddlOperation->type = DDL_TABLE_DROP;
@@ -316,10 +331,20 @@ DropTableAccessHook(ObjectAccessType access, Oid classId, Oid objectId,
 
 			TriggerCatalogExportIfObjectStoreTable(objectId);
 
-			IcebergCatalogType catalogType = GetIcebergCatalogType(objectId);
-
 			if (catalogType == REST_CATALOG_READ_WRITE)
+			{
 				RecordRestCatalogRequestInTx(objectId, REST_CATALOG_DROP_TABLE, NULL);
+
+				/*
+				 * Forget (drop) any secrets this backend pushed for the
+				 * table, so they do not linger on the shared pgduck_server
+				 * after the table is gone.  This runs after ApplyDDLChanges
+				 * above has enumerated / enqueued the storage cleanup, which
+				 * still needs the credentials.  Safe on rollback: the next
+				 * scan re-resolves and re-pushes.
+				 */
+				ForgetStorageCredentials(objectId);
+			}
 		}
 	}
 	else if (get_rel_type_id(objectId) != InvalidOid && subId != 0)
