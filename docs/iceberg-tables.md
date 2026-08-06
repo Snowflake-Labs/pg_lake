@@ -844,6 +844,8 @@ drop table measurements;
 
 When you drop an Iceberg table, the files that make up the Iceberg table will be added to the “deletion queue”, but are not immediately deleted. This allows for restoring a backup if you need to revert to a previous point in time (see Point-in-time recoveries). When you run `VACUUM (iceberg);`, any files that have been in the deletion queue for more than 10 days will be deleted.
 
+By default the drop enumerates every file the table references (metadata, manifest lists, manifests and data files) so the deletion queue holds exact per-file entries. For a table stored under pg_lake's managed location prefix, each table occupies a unique prefix, so the whole prefix can be removed without reading any Iceberg metadata. Enabling `pg_lake_table.fast_drop_file_cleanup` makes the drop queue the table's location prefix instead of walking its metadata — a large speedup when dropping tables with many files. VACUUM then removes everything under that prefix in a single recursive pass. This applies only to managed-location tables; a table created with a custom `location` (which may be shared with other tables) always falls back to per-file enumeration so nothing outside the table is deleted.
+
 ## Backups
 
 When an Iceberg table is modified, the files that make up the previous version of the Iceberg table remain in object storage until they are explicitly deleted (by VACUUM). Our default policy is to keep files for at least 10 days to allow past versions to be restored.
