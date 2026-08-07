@@ -32,6 +32,9 @@ UPDATEs = "UPDATEs"
 INSERTs = "INSERTs"
 DELETEs = "DELETEs"
 WARNINGs = "WARNINGs"
+# QueryProgress::GetRowsProcesseed is misspelled in DuckDB itself
+# (duckdb/common/progress_bar/progress_bar.hpp); we cannot rename it here.
+GetRowsProcesseed = "GetRowsProcesseed"
 
 [default.extend-words]
 inh = "inh"
