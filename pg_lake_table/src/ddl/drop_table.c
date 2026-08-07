@@ -457,18 +457,18 @@ CheckIfTypeIsUsedInInternalIcebergTable(Oid typeId)
 
 
 /*
-* TryMarkTablePrefixForDeletion attempts the fast-drop path: queue the table's
-* whole location prefix for VACUUM to remove in a single recursive pass,
-* without reading any Iceberg metadata or enumerating individual files. This
-* skips the metadata.json -> manifest list -> manifest -> data file walk that
-* dominates the cost of dropping large tables.
-*
-* Returns true when the prefix was queued. Returns false (queuing nothing) for
-* custom-location tables, whose prefix may be shared with other tables and so
-* must not be deleted wholesale; the caller should fall back to per-file
-* cleanup. Managed (default-location) tables live under a unique per-table
-* prefix (.../<table>/<relationId>), which makes the prefix delete exact.
-*/
+ * TryMarkTablePrefixForDeletion attempts the fast-drop path: queue the table's
+ * whole location prefix for VACUUM to remove in a single recursive pass,
+ * without reading any Iceberg metadata or enumerating individual files. This
+ * skips the metadata.json -> manifest list -> manifest -> data file walk that
+ * dominates the cost of dropping large tables.
+ *
+ * Returns true when the prefix was queued. Returns false (queuing nothing) for
+ * custom-location tables, whose prefix may be shared with other tables and so
+ * must not be deleted wholesale; the caller should fall back to per-file
+ * cleanup. Managed (default-location) tables live under a unique per-table
+ * prefix (.../<table>/<relationId>), which makes the prefix delete exact.
+ */
 bool
 TryMarkTablePrefixForDeletion(Oid relationId)
 {
@@ -482,7 +482,6 @@ TryMarkTablePrefixForDeletion(Oid relationId)
 
 	return true;
 }
-
 
 /*
 * TryMarkAllReferencedFilesForDeletion tries to mark all files referenced by the
