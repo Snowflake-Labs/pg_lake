@@ -168,24 +168,26 @@ ApplyDDLCatalogChanges(Oid relationId, List *ddlOperations,
 				/*
 				 * Pick how to reclaim the dropped table's object storage:
 				 *
-				 * - fast drop (pg_lake_table.fast_drop_file_cleanup): queue the
-				 *   table's whole location prefix for VACUUM to remove in one
-				 *   recursive pass, without reading Iceberg metadata or listing
-				 *   individual files. Only safe for managed, default-location
-				 *   tables, so TryMarkTablePrefixForDeletion declines (returns
-				 *   false) for custom locations and we fall through.
+				 * - fast drop (pg_lake_table.fast_drop_file_cleanup): queue
+				 * the table's whole location prefix for VACUUM to remove in
+				 * one recursive pass, without reading Iceberg metadata or
+				 * listing individual files. Only safe for managed,
+				 * default-location tables, so TryMarkTablePrefixForDeletion
+				 * declines (returns false) for custom locations and we fall
+				 * through.
 				 *
 				 * - deferred cleanup (pg_lake_table.defer_drop_file_cleanup):
-				 *   queue the table's metadata.json as a single resolve_metadata
-				 *   row and let VACUUM resolve it into the exact referenced files
-				 *   later. Stays file-accurate (never a whole prefix), so it is
-				 *   safe for custom locations too.
+				 * queue the table's metadata.json as a single
+				 * resolve_metadata row and let VACUUM resolve it into the
+				 * exact referenced files later. Stays file-accurate (never a
+				 * whole prefix), so it is safe for custom locations too.
 				 *
 				 * - otherwise: walk object storage now and queue every
-				 *   referenced file.
+				 * referenced file.
 				 *
-				 * A table created in this transaction has no persisted metadata
-				 * to resolve; its in-progress files are cleaned up separately.
+				 * A table created in this transaction has no persisted
+				 * metadata to resolve; its in-progress files are cleaned up
+				 * separately.
 				 */
 				bool		fastDrop = false;
 
