@@ -29,12 +29,12 @@
 
 /* forward declarations */
 static void ReadUnsupportedPgLakeNode(READFUNC_ARGS);
-static void OutUnsupportedPgLakeNode(OUTFUNC_ARGS);
 static bool EqualUnsupportedPgLakeNode(const struct ExtensibleNode *a,
 									   const struct ExtensibleNode *b);
 
-/* supported copy functions */
+/* supported node functions */
 static void CopyNodePlannerRelationRestriction(COPYFUNC_ARGS);
+static void OutPlannerRelationRestriction(OUTFUNC_ARGS);
 
 
 #define DEFINE_NODE_METHODS(type) \
@@ -43,7 +43,7 @@ static void CopyNodePlannerRelationRestriction(COPYFUNC_ARGS);
 		sizeof(type), \
 		CopyNode##type, \
 		EqualUnsupportedPgLakeNode, \
-		OutUnsupportedPgLakeNode, \
+		Out##type, \
 		ReadUnsupportedPgLakeNode \
 	}
 
@@ -85,8 +85,7 @@ const char **PgLakeNodeTagNames = PgLakeNodeTagNamesArray;
 
 
 /*
-* We currently do not support reading or writing of custom nodes.
-* Could be useful for debugging purposes.
+* We currently do not support reading custom nodes.
 */
 static void
 ReadUnsupportedPgLakeNode(READFUNC_ARGS)
@@ -95,13 +94,21 @@ ReadUnsupportedPgLakeNode(READFUNC_ARGS)
 }
 
 /*
-* We currently do not support reading or writing of custom nodes.
-* Could be useful for debugging purposes.
-*/
+ * PlannerRelationRestriction is transient planner bookkeeping. pg_lake does
+ * not support reconstructing it from text, but PostgreSQL still calls nodeOut
+ * when debug_print_plan is enabled or a node is printed in the debugger. Emit
+ * the private fields to make that diagnostic output useful.
+ */
 static void
-OutUnsupportedPgLakeNode(OUTFUNC_ARGS)
+OutPlannerRelationRestriction(OUTFUNC_ARGS)
 {
-	ereport(ERROR, (errmsg("out not implemented")));
+	const		PlannerRelationRestriction *node =
+		(const PlannerRelationRestriction *) raw_node;
+
+	appendStringInfoString(str, " :rte ");
+	outNode(str, node->rte);
+	appendStringInfoString(str, " :baseRestrictionList ");
+	outNode(str, node->baseRestrictionList);
 }
 
 
