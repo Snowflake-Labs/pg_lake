@@ -203,6 +203,10 @@ def test_s3_get_region_invalid(pgduck_conn):
         or "server closed the connection" in error
     )
 
+    # The failed statement above aborts the transaction on this module-scoped
+    # connection; roll back so the following tests start clean.
+    pgduck_conn.rollback()
+
 
 def test_pg_lake_remove_files_recursive(s3, pgduck_conn):
     """pg_lake_remove_files expands a recursive glob and deletes every matched
