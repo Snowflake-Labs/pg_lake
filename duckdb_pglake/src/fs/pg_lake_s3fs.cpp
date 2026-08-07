@@ -41,6 +41,11 @@ namespace duckdb {
 static constexpr idx_t MD5_HASH_LENGTH_BASE64 = 24;
 
 /*
+ * S3 DeleteObjects accepts at most 1000 keys in a single request.
+ */
+static constexpr idx_t S3_DELETE_OBJECTS_MAX_KEYS = 1000;
+
+/*
  * Name of the setting that specifies the location of pg_lake managed storage bucket.
  */
 const string MANAGED_STORAGE_BUCKET_SETTING = "pg_lake_managed_storage_bucket";
@@ -126,8 +131,61 @@ PgLakeS3FileSystem::RemoveFile(const string &filename,
 
 
 /*
- * RemoveFileFromS3 deletes set of keys from a bucket using the batch
- * deletion API and returns the deleted path.
+ * PostDeleteObjects issues a single S3 DeleteObjects request for the keys in
+ * [begin, end). s3Handle must already be pointed at "<prefix><bucket>/" so the
+ * POST targets /?delete, and every key must live in that bucket. The caller is
+ * responsible for keeping the range within S3_DELETE_OBJECTS_MAX_KEYS.
+ *
+ * Throws on a malformed response or if S3 reports per-key <Error> entries.
+ * Deleting a key that does not exist is not an error in S3, so a well-formed
+ * DeleteResult that still carries an <Error> means a real failure (e.g. access
+ * denied) that we must surface rather than silently dropping keys.
+ */
+static void
+PostDeleteObjects(PgLakeS3FileSystem &fs, S3FileHandle *s3Handle,
+				  const vector<string> &keys, idx_t begin, idx_t end)
+{
+	/*
+	 * Following S3FileSystem::FinalizeMultipartUpload
+	 */
+	std::stringstream ss;
+	ss << "<Delete xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">";
+	for (idx_t i = begin; i < end; i++)
+		ss << "<Object><Key>" << keys[i] << "</Key></Object>";
+	ss << "</Delete>";
+	string body = ss.str();
+
+	/*
+	 * The DeleteResult echoes one <Deleted> element per key, so size the buffer
+	 * to the batch (it is resized if we underestimate).
+	 */
+	string responseBuffer((end - begin) * 256 + 1000, '\0');
+
+	/* Perform the batch deletion */
+	unique_ptr<HTTPResponse> postResponse =
+		fs.PostRequest(*s3Handle, s3Handle->path, {}, responseBuffer,
+					   (char *) body.c_str(), body.length(), "delete=");
+
+	/* Construct body of the POST response */
+	string result(responseBuffer);
+
+	if (result.find("<DeleteResult", 0) == string::npos)
+		throw HTTPException(*postResponse,
+							"Unexpected response during S3 DeleteObjects: %d\n\n%s",
+							postResponse->status,
+		                    result);
+
+	if (result.find("<Error>") != string::npos)
+		throw HTTPException(*postResponse,
+							"S3 DeleteObjects reported errors: %d\n\n%s",
+							postResponse->status,
+		                    result);
+}
+
+
+/*
+ * RemoveFileFromS3 deletes a single key from a bucket using the batch
+ * deletion API.
  */
 void
 PgLakeS3FileSystem::RemoveFileFromS3(string path, optional_ptr<FileOpener> opener)
@@ -142,19 +200,8 @@ PgLakeS3FileSystem::RemoveFileFromS3(string path, optional_ptr<FileOpener> opene
 
 	/* get the s3://<bucket name> */
 	string bucketUrl = parsedUrl.prefix + parsedUrl.bucket;
-	string key = parsedUrl.key;
 
-	/*
-	 * Following S3FileSystem::FinalizeMultipartUpload
-	 */
-	std::stringstream ss;
-	ss << "<Delete xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">";
-	ss << "<Object><Key>" << key << "</Key></Object>";
-	ss << "</Delete>";
-	string body = ss.str();
-
-	/* Initialize buffer at 1000 characters (will get resized if needed) */
-	string responseBuffer(1000, '\0');
+	vector<string> keys = {parsedUrl.key};
 
 	/*
 	 * Open the file via the regular (region-aware) file system.
@@ -181,19 +228,7 @@ PgLakeS3FileSystem::RemoveFileFromS3(string path, optional_ptr<FileOpener> opene
 	/* Change the file handle to / to POST to /?delete */
 	s3Handle->path = bucketUrl + "/";
 
-	/* Perform the "batch" deletion */
-	unique_ptr<HTTPResponse> postResponse =
-		PostRequest(*s3Handle, s3Handle->path, {}, responseBuffer,
-		            (char *) body.c_str(), body.length(), "delete=");
-
-	/* Construct body of the POST response */
-	string result(responseBuffer);
-
-	if (result.find("<DeleteResult", 0) == string::npos)
-		throw HTTPException(*postResponse,
-							"Unexpected response during S3 DeleteObjects: %d\n\n%s",
-							postResponse->status,
-		                    result);
+	PostDeleteObjects(*this, s3Handle, keys, 0, keys.size());
 
 	/*
 	 * Remove the file from HTTP metadata cache now that it has been deleted.
@@ -206,6 +241,118 @@ PgLakeS3FileSystem::RemoveFileFromS3(string path, optional_ptr<FileOpener> opene
 	 */
 	optional_ptr<HTTPMetadataCache> metadataCache = GetGlobalCache();
 	metadataCache->Erase(regionResolvedPath);
+}
+
+
+/*
+ * RemoveFilesFromS3 deletes many keys using the S3 DeleteObjects batch API,
+ * sending up to S3_DELETE_OBJECTS_MAX_KEYS keys per request instead of one key
+ * per request. It is the bulk counterpart of RemoveFileFromS3 and is meant for
+ * removing a whole prefix's worth of objects (e.g. a dropped Iceberg table).
+ *
+ * DeleteObjects targets a single bucket, so keys are grouped by bucket; in the
+ * common case every path shares one bucket and there is a single group. Region
+ * resolution is the caller's job: paths should already carry ?s3_region when a
+ * non-default region is required (RegionAwareS3FileSystem::RemoveFiles does
+ * this).
+ */
+void
+PgLakeS3FileSystem::RemoveFilesFromS3(const vector<string> &paths,
+									  optional_ptr<FileOpener> opener)
+{
+	if (paths.empty())
+		return;
+
+	optional_ptr<ClientContext> context = opener->TryGetClientContext();
+	FileSystem &fileSystem = FileSystem::GetFileSystem(*context);
+	optional_ptr<HTTPMetadataCache> metadataCache = GetGlobalCache();
+
+	/*
+	 * Group the keys by bucket, keeping first-seen order (a small, usually
+	 * single-element set, so a linear scan is fine).
+	 */
+	vector<string> bucketUrls;
+	vector<string> bucketSamples;
+	vector<vector<string>> bucketKeys;
+
+	for (const string &path : paths)
+	{
+		FileOpenerInfo s3UrlInfo = {path};
+		S3AuthParams authParams = S3AuthParams::ReadFrom(opener, s3UrlInfo);
+		ParsedS3Url parsedUrl = S3UrlParse(path, authParams);
+		string bucketUrl = parsedUrl.prefix + parsedUrl.bucket;
+
+		idx_t bucketIndex = bucketUrls.size();
+		for (idx_t i = 0; i < bucketUrls.size(); i++)
+		{
+			if (bucketUrls[i] == bucketUrl)
+			{
+				bucketIndex = i;
+				break;
+			}
+		}
+
+		if (bucketIndex == bucketUrls.size())
+		{
+			bucketUrls.push_back(bucketUrl);
+			bucketSamples.push_back(path);
+			bucketKeys.emplace_back();
+		}
+
+		bucketKeys[bucketIndex].push_back(parsedUrl.key);
+	}
+
+	for (idx_t b = 0; b < bucketUrls.size(); b++)
+	{
+		const string &bucketUrl = bucketUrls[b];
+		const string &samplePath = bucketSamples[b];
+		const vector<string> &keys = bucketKeys[b];
+
+		/*
+		 * Resolve the region-adjusted path via the region-aware file system,
+		 * then reuse one POST-capable handle for every batch in this bucket.
+		 */
+		unique_ptr<FileHandle> regionAwareFileHandle =
+			fileSystem.OpenFile(samplePath, FileFlags::FILE_FLAGS_READ);
+		string regionResolvedSample = regionAwareFileHandle->path;
+
+		unique_ptr<FileHandle> fileHandle =
+			OpenFile(samplePath, FileFlags::FILE_FLAGS_READ, opener);
+
+		S3FileHandle *s3Handle = (S3FileHandle *) fileHandle.get();
+
+		/* Change the file handle to / to POST to /?delete */
+		s3Handle->path = bucketUrl + "/";
+
+		for (idx_t begin = 0; begin < keys.size(); begin += S3_DELETE_OBJECTS_MAX_KEYS)
+		{
+			idx_t end = begin + S3_DELETE_OBJECTS_MAX_KEYS;
+			if (end > keys.size())
+				end = keys.size();
+
+			PostDeleteObjects(*this, s3Handle, keys, begin, end);
+		}
+
+		/*
+		 * Best-effort HTTP metadata cache hygiene, as in RemoveFileFromS3: drop
+		 * any cached entry for the deleted objects so a stale entry cannot make
+		 * a removed file look readable. Reads inject ?s3_region from cache, so
+		 * evict both the bare URL and the region-resolved form.
+		 */
+		string regionSuffix;
+		auto queryPos = regionResolvedSample.find('?');
+		if (queryPos != string::npos)
+			regionSuffix = regionResolvedSample.substr(queryPos);
+
+		for (const string &key : keys)
+		{
+			string fullUrl = bucketUrl + "/" + key;
+
+			metadataCache->Erase(fullUrl);
+			if (!regionSuffix.empty())
+				metadataCache->Erase(fullUrl + regionSuffix);
+		}
+	}
 }
 
 /*

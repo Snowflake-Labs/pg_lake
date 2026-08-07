@@ -175,6 +175,10 @@ RemoteFileExists(char *path)
 /*
 * DeleteRemotePrefix lists all the files in the given path and deletes them.
 * It recurses into subdirectories/prefixes.
+*
+* pg_lake_remove_files does the globbing itself and, for S3, deletes the
+* matched objects in batched DeleteObjects requests (up to 1000 keys each)
+* rather than one request per file.
 */
 bool
 DeleteRemotePrefix(char *path)
@@ -185,7 +189,7 @@ DeleteRemotePrefix(char *path)
 
 	StringInfo	query = makeStringInfo();
 
-	appendStringInfo(query, "SELECT pg_lake_remove_file(file) FROM glob(%s)",
+	appendStringInfo(query, "SELECT count(*) FROM pg_lake_remove_files(%s)",
 					 quote_literal_cstr(recursivePath->data));
 
 	return ExecuteOptionalCommandInPGDuck(query->data);

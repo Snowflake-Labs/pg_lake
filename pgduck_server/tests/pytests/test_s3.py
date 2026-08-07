@@ -202,3 +202,63 @@ def test_s3_get_region_invalid(pgduck_conn):
         "Could not establish connection error" in error
         or "server closed the connection" in error
     )
+
+    # The failed statement above aborts the transaction on this module-scoped
+    # connection; roll back so the following tests start clean.
+    pgduck_conn.rollback()
+
+
+def test_pg_lake_remove_files_recursive(s3, pgduck_conn):
+    """pg_lake_remove_files expands a recursive glob and deletes every matched
+    object, recursing into sub-prefixes, while leaving objects outside the
+    pattern untouched. It returns one row per deleted URL."""
+    prefix = "test_remove_files/tbl"
+
+    keys = [
+        f"{prefix}/metadata/v1.metadata.json",
+        f"{prefix}/metadata/snap.avro",
+        f"{prefix}/data/a.parquet",
+        f"{prefix}/data/nested/b.parquet",
+    ]
+    for key in keys:
+        s3.put_object(Bucket=TEST_BUCKET, Key=key, Body=b"x")
+
+    # a sibling object outside the pattern must survive
+    survivor = "test_remove_files/other/keep.parquet"
+    s3.put_object(Bucket=TEST_BUCKET, Key=survivor, Body=b"x")
+
+    results = perform_query_on_cursor(
+        f"SELECT count(*) FROM pg_lake_remove_files('s3://{TEST_BUCKET}/{prefix}/**')",
+        pgduck_conn,
+    )
+    assert results[0][0] == len(keys)
+
+    assert list_objects(s3, TEST_BUCKET, f"{prefix}/") == []
+    assert list_objects(s3, TEST_BUCKET, survivor) == [survivor]
+
+    # cleanup
+    s3.delete_object(Bucket=TEST_BUCKET, Key=survivor)
+    pgduck_conn.rollback()
+
+
+def test_pg_lake_remove_files_batches_over_1000(s3, pgduck_conn):
+    """More than 1000 matched objects must all be deleted: the DeleteObjects
+    request caps at 1000 keys, so this crosses the batch boundary and exercises
+    the multi-batch loop."""
+    prefix = "test_remove_files_batch"
+    count = 1001
+
+    for i in range(count):
+        s3.put_object(Bucket=TEST_BUCKET, Key=f"{prefix}/f{i}.parquet", Body=b"x")
+
+    results = perform_query_on_cursor(
+        f"SELECT count(*) FROM pg_lake_remove_files('s3://{TEST_BUCKET}/{prefix}/**')",
+        pgduck_conn,
+    )
+    assert results[0][0] == count
+
+    # nothing left under the prefix (list_objects_v2 caps a page at 1000, so a
+    # non-empty first page would already prove leftovers)
+    assert list_objects(s3, TEST_BUCKET, f"{prefix}/") == []
+
+    pgduck_conn.rollback()
