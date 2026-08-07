@@ -1073,6 +1073,121 @@ def test_custom_location_is_also_deferred(
     pg_conn.commit()
 
 
+FAST_GUC = "pg_lake_table.fast_drop_file_cleanup"
+
+
+def _drop_fast(conn, drop_sql, commit=True):
+    """Run drop_sql with fast file cleanup enabled. SET LOCAL keeps the GUC
+    scoped to this single transaction (matching how a caller turns it on only
+    around its bulk drop), so it never leaks to later tests."""
+    run_command(f"SET LOCAL {FAST_GUC} = on", conn)
+    run_command(drop_sql, conn)
+    if commit:
+        conn.commit()
+
+
+def test_fast_drop_queues_prefix(
+    s3, pg_conn, superuser_conn, extension, with_default_location
+):
+    """With fast drop enabled, DROP of a default-location table skips the
+    Iceberg metadata walk entirely and queues a single is_prefix row for the
+    table's whole location. No per-file rows, no resolve_metadata row. VACUUM
+    then removes the whole prefix in one recursive pass. Contrast with
+    test_normal_drop_enumerates_control and test_deferred_drop_skips_enumeration."""
+    run_command("CREATE SCHEMA IF NOT EXISTS fast_drop_prefix", pg_conn)
+    run_command(
+        """
+        CREATE TABLE fast_drop_prefix.t USING iceberg
+        WITH (autovacuum_enabled='false')
+        AS SELECT i AS id, 'pg_lake' AS name FROM generate_series(1, 10) i
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # second commit -> a second data file / snapshot, so a metadata walk would
+    # be real work if it were reached
+    run_command(
+        "INSERT INTO fast_drop_prefix.t SELECT i, 'pg_lake' FROM generate_series(11, 20) i",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    location = _writable_location(pg_conn, "fast_drop_prefix.t")
+
+    files_before = run_query(
+        f"SELECT count(*) FROM lake_file.list('{location}/**')", pg_conn
+    )[0][0]
+    assert files_before > 0
+
+    _drop_fast(pg_conn, "DROP TABLE fast_drop_prefix.t")
+
+    # table is gone
+    assert (
+        run_query(
+            "SELECT count(*) FROM pg_class "
+            "WHERE relname = 't' AND relnamespace = 'fast_drop_prefix'::regnamespace",
+            superuser_conn,
+        )[0][0]
+        == 0
+    )
+
+    # the fast drop queued exactly one prefix row for the table location, and
+    # neither enumerated per-file rows nor a deferred resolve_metadata row
+    assert _count_prefix_records(superuser_conn, location) == 1
+    assert _count_data_file_records(superuser_conn, location) == 0
+    assert _count_resolve_records(superuser_conn, location) == 0
+
+    # files were NOT deleted by the drop itself (VACUUM does the removal)
+    assert (
+        run_query(f"SELECT count(*) FROM lake_file.list('{location}/**')", pg_conn)[0][
+            0
+        ]
+        > 0
+    )
+
+    # VACUUM removes the whole prefix and drains every queue row for the table
+    _assert_vacuum_drains(superuser_conn, location)
+
+    run_command("DROP SCHEMA IF EXISTS fast_drop_prefix CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_fast_drop_custom_location_falls_back(
+    s3, pg_conn, superuser_conn, extension, with_default_location
+):
+    """A custom location may be shared with other tables, so the fast (whole
+    prefix) path is unsafe there. With fast drop enabled, dropping a
+    custom-location table declines the prefix path and falls back to enumerating
+    referenced files -- per-file rows, no prefix row, no resolve_metadata row."""
+    custom_location = f"s3://{TEST_BUCKET}/fast_custom_location/mytable"
+
+    run_command("CREATE SCHEMA IF NOT EXISTS fast_drop_custom", pg_conn)
+    run_command(
+        f"""
+        CREATE TABLE fast_drop_custom.t USING iceberg
+        WITH (autovacuum_enabled='false', location='{custom_location}')
+        AS SELECT i AS id, 'pg_lake' AS name FROM generate_series(1, 10) i
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    location = _writable_location(pg_conn, "fast_drop_custom.t")
+
+    _drop_fast(pg_conn, "DROP TABLE fast_drop_custom.t")
+
+    # fell back to eager enumeration: per-file rows present, no prefix delete
+    assert _count_prefix_records(superuser_conn, location) == 0
+    assert _count_data_file_records(superuser_conn, location) > 0
+    assert _count_resolve_records(superuser_conn, location) == 0
+
+    _assert_vacuum_drains(superuser_conn, location)
+
+    run_command("DROP SCHEMA IF EXISTS fast_drop_custom CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 def test_flush_deletion_queue_drains_dropped_table_files(
     s3, pg_conn, superuser_conn, extension, with_default_location
 ):

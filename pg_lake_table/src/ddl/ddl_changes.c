@@ -166,20 +166,41 @@ ApplyDDLCatalogChanges(Oid relationId, List *ddlOperations,
 					IsIcebergTableCreatedInCurrentTransaction(relationId);
 
 				/*
-				 * When the caller enabled deferred cleanup (the
-				 * pg_lake_table.defer_drop_file_cleanup GUC), don't walk
-				 * object storage now: queue the table's metadata.json as a
-				 * single resolve_metadata row and let VACUUM resolve it into
-				 * the exact referenced files later. This stays file-accurate
-				 * (never a whole prefix), so it is safe for custom locations
-				 * too. A table created in this transaction has no persisted
-				 * metadata to resolve, so it takes the normal path.
+				 * Pick how to reclaim the dropped table's object storage:
+				 *
+				 * - fast drop (pg_lake_table.fast_drop_file_cleanup): queue
+				 * the table's whole location prefix for VACUUM to remove in
+				 * one recursive pass, without reading Iceberg metadata or
+				 * listing individual files. Only safe for managed,
+				 * default-location tables, so TryMarkTablePrefixForDeletion
+				 * declines (returns false) for custom locations and we fall
+				 * through.
+				 *
+				 * - deferred cleanup (pg_lake_table.defer_drop_file_cleanup):
+				 * queue the table's metadata.json as a single
+				 * resolve_metadata row and let VACUUM resolve it into the
+				 * exact referenced files later. Stays file-accurate (never a
+				 * whole prefix), so it is safe for custom locations too.
+				 *
+				 * - otherwise: walk object storage now and queue every
+				 * referenced file.
+				 *
+				 * A table created in this transaction has no persisted
+				 * metadata to resolve; its in-progress files are cleaned up
+				 * separately.
 				 */
-				bool		deferMetadataResolution =
-					DeferDropFileCleanup &&
-					!createdInCurrentTx;
+				bool		fastDrop = false;
 
-				if (deferMetadataResolution)
+				if (createdInCurrentTx)
+				{
+					/* nothing persisted yet; handled elsewhere */
+				}
+				else if (FastDropFileCleanup &&
+						 TryMarkTablePrefixForDeletion(relationId))
+				{
+					fastDrop = true;
+				}
+				else if (DeferDropFileCleanup)
 				{
 					char	   *metadataLocation =
 						GetIcebergMetadataLocation(relationId, true);
@@ -187,7 +208,7 @@ ApplyDDLCatalogChanges(Oid relationId, List *ddlOperations,
 					InsertMetadataResolveRecord(metadataLocation, InvalidOid,
 												GetCurrentTransactionStartTimestamp());
 				}
-				else if (!createdInCurrentTx)
+				else
 				{
 					TryMarkAllReferencedFilesForDeletion(relationId);
 				}
@@ -201,13 +222,17 @@ ApplyDDLCatalogChanges(Oid relationId, List *ddlOperations,
 				 * to create another metadata file, the table is dropped. So,
 				 * this could be the only chance to delete the previous
 				 * metadata file. It is not covered by metadata resolution
-				 * either, so enqueue it directly on both paths.
+				 * either, so enqueue it directly -- except on the fast-drop
+				 * path, where the prefix delete already covers it.
 				 */
-				char	   *previousMetadataPath =
-					GetIcebergCatalogPreviousMetadataLocation(relationId, false);
+				if (!fastDrop)
+				{
+					char	   *previousMetadataPath =
+						GetIcebergCatalogPreviousMetadataLocation(relationId, false);
 
-				if (previousMetadataPath)
-					InsertDeletionQueueRecord(previousMetadataPath, InvalidOid, GetCurrentTimestamp());
+					if (previousMetadataPath)
+						InsertDeletionQueueRecord(previousMetadataPath, InvalidOid, GetCurrentTimestamp());
+				}
 			}
 
 			RemoveAllDataFilesFromPgLakeCatalogFromTable(relationId);
