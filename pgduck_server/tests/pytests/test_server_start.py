@@ -714,3 +714,50 @@ def test_temp_directory_via_init_file_sets_spill_location():
             cur = conn.cursor()
             cur.execute("SELECT current_setting('temp_directory')")
             assert cur.fetchone()[0] == spill_dir
+
+
+# ---------------------------------------------------------------------------
+# s3_uploader_thread_limit sizing (see DefaultS3UploaderThreadLimit in
+# duckdb_global_init)
+#
+# pgduck_server caps s3_uploader_thread_limit at ~2 per GiB of the effective
+# memory_limit, clamped to [2, 50], so a small host cannot pin gigabytes of
+# ~80MB S3 multipart-upload part buffers (each charged against memory_limit)
+# and OOM. The cap is computed from the --memory_limit CLI value, which is
+# applied before the init file; an operator SET in the init file runs
+# afterwards and still overrides it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "memory_limit,expected",
+    [
+        ("512MiB", 2),  # below 1 GiB rounds down to the floor of 2
+        ("2GiB", 4),  # ~2 threads per GiB
+        ("4GiB", 8),
+        ("64GiB", 50),  # above ~25 GiB is capped at the upstream default of 50
+    ],
+)
+def test_s3_uploader_thread_limit_scales_with_memory_limit(memory_limit, expected):
+    server = PgDuckServer(
+        port=PGDUCK_PORT,
+        extra_args=[f"--memory_limit={memory_limit}"],
+    )
+    assert is_server_listening(server.socket_path)
+
+    conn = _spill_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT current_setting('s3_uploader_thread_limit')")
+    assert int(cur.fetchone()[0]) == expected
+
+
+def test_s3_uploader_thread_limit_init_file_override():
+    """The computed default is applied before the init file, so an operator
+    SET GLOBAL s3_uploader_thread_limit in the init file overrides it."""
+    with _server_from_init_file("SET GLOBAL s3_uploader_thread_limit TO 7") as server:
+        assert is_server_listening(server.socket_path)
+
+        conn = _spill_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT current_setting('s3_uploader_thread_limit')")
+        assert int(cur.fetchone()[0]) == 7
