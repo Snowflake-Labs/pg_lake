@@ -56,6 +56,16 @@
 #include "utils/inval.h"
 
 /*
+ * Declared here (not via #include) to avoid a circular build dependency:
+ * pg_lake_iceberg is a compile-time dependency of pg_lake_table, so
+ * pg_lake_iceberg cannot include pg_lake_table headers.  The symbol
+ * resolves at runtime via PostgreSQL's shared-library loader
+ * (RTLD_GLOBAL on Linux, -undefined dynamic_lookup on macOS).
+ */
+extern void AddRestCatalogMetadataForDeferredDeletion(char *path, Oid relationId,
+                                   TimestampTz orphanedAt);
+
+/*
  * IcebergSnapshotBuilder is used to create a new snapshot from a base
  * snapshot via a series of metadata operations.
  */
@@ -348,17 +358,18 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 		return restCatalogRequests;
 	}
 
-	if (writableRestCatalogTable)
-	{
-		if (metadataPath)
-			InsertDeletionQueueRecord(metadataPath, relationId, GetCurrentTransactionStartTimestamp());
+  if (writableRestCatalogTable)
+  {
+    if (metadataPath)
+      AddRestCatalogMetadataForDeferredDeletion(metadataPath, relationId,
+                            GetCurrentTransactionStartTimestamp());
 
-		/*
-		 * We are done, writable rest catalog iceberg tables have their
-		 * metadata updated in the catalog itself.
-		 */
-		return restCatalogRequests;
-	}
+    /*
+     * We are done, writable rest catalog iceberg tables have their
+     * metadata updated in the catalog itself.
+     */
+    return restCatalogRequests;
+  }
 
 	/* add the new snapshot to the snapshot log */
 	GenerateSnapshotLogEntries(metadata);
