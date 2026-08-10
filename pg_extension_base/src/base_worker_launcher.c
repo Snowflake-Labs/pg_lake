@@ -2456,19 +2456,11 @@ WaitForBaseWorkerExit(int32 workerId, pid_t workerPid)
 	{
 		CHECK_FOR_INTERRUPTS();
 
-		bool		stillRunning;
-
-		LWLockAcquire(&BaseWorkerControl->lock, LW_SHARED);
-
-		bool		isFound = false;
-		BaseWorkerEntry *entry =
-			GetBaseWorkerEntry(MyDatabaseId, workerId, &isFound);
-
-		stillRunning = isFound && entry->workerPid == workerPid;
-
-		LWLockRelease(&BaseWorkerControl->lock);
-
-		if (!stillRunning)
+		/*
+		 * GetBaseWorkerPid returns 0 once the entry is gone, so an entry that
+		 * disappeared entirely also ends the wait.
+		 */
+		if (GetBaseWorkerPid(workerId) != workerPid)
 			return;
 
 		if (GetCurrentTimestamp() >= deadline)
