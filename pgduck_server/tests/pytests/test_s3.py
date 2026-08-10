@@ -125,6 +125,49 @@ def test_copy_to_parquet_azure_long_prefix(azure, pgduck_conn):
     pgduck_conn.rollback()
 
 
+def test_copy_to_azure_multiple_appends(azure, pgduck_conn, tmp_path):
+    """A file that does not fit in the write buffer is written as multiple appends,
+    and each append tells Azure the offset it expects to be written at, so check that
+    such a file still ends up with exactly the bytes we wrote."""
+    key = "test_copy_to_azure_multiple_appends/data.csv"
+    local_path = tmp_path / "data.csv"
+
+    perform_query(
+        f"""
+        CREATE TABLE bigtable AS
+        SELECT i, repeat('x', 100) padding FROM generate_series(1,20000) t(i);
+        COPY bigtable TO '{local_path}';
+        COPY bigtable TO 'az://{TEST_BUCKET}/{key}';
+    """,
+        pgduck_conn,
+    )
+
+    properties = azure.get_blob_client(key).get_blob_properties()
+
+    # more than one append went into this blob
+    assert properties.append_blob_committed_block_count > 1
+
+    # and the blob is exactly as long as the same data written locally
+    assert properties.size == os.path.getsize(local_path)
+
+    perform_query(
+        f"""
+        CREATE TABLE roundtrip (i int, padding text);
+        COPY roundtrip FROM 'az://{TEST_BUCKET}/{key}';
+    """,
+        pgduck_conn,
+    )
+
+    results = perform_query_on_cursor(
+        "SELECT count(*), sum(i) FROM roundtrip", pgduck_conn
+    )
+    assert len(results) == 1
+    assert results[0][0] == 20000
+    assert int(results[0][1]) == 200010000
+
+    pgduck_conn.rollback()
+
+
 def test_copy_from_non_existent(s3, pgduck_conn):
     perform_query("CREATE TABLE mytable (x int)", pgduck_conn)
 

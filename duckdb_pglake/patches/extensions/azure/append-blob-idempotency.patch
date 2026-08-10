@@ -1,0 +1,56 @@
+diff --git a/src/azure_blob_filesystem.cpp b/src/azure_blob_filesystem.cpp
+index 796d5a2..de3fc77 100644
+--- a/src/azure_blob_filesystem.cpp
++++ b/src/azure_blob_filesystem.cpp
+@@ -402,9 +402,48 @@ void AzureBlobStorageFileSystem::Write(FileHandle &handle, void *buffer, int64_t
+ 	// real. Only with AppendBlobClient is each append committed (sync'd).
+ 	auto append_client = afh.blob_client.AsAppendBlobClient();
+ 	auto body_stream = Azure::Core::IO::MemoryBodyStream(static_cast<uint8_t *>(buffer), nr_bytes);
+-	auto res = append_client.AppendBlock(body_stream);
+-	afh.last_modified = ToTimestamp(res.Value.LastModified);
+-	D_ASSERT(idx_t(res.Value.AppendOffset) == afh.file_offset);
++
++	// Appending a block is not idempotent by itself, while the SDK does retry transport errors and
++	// 408/5xx responses. An append that reached the service but whose response got lost would then
++	// be applied twice and still report success, silently duplicating a part of the file. Telling
++	// the service which offset we expect to append at makes such a retry fail with 412 instead.
++	Azure::Storage::Blobs::AppendBlockOptions options;
++	options.AccessConditions.IfAppendPositionEqual = static_cast<int64_t>(afh.file_offset);
++
++	int64_t append_offset;
++
++	try {
++		auto res = append_client.AppendBlock(body_stream, options);
++		afh.last_modified = ToTimestamp(res.Value.LastModified);
++		append_offset = res.Value.AppendOffset;
++	} catch (const Azure::Storage::StorageException &e) {
++		if (int(e.StatusCode) != 412) {
++			throw;
++		}
++
++		// The blob is not at the offset we expected. Either an earlier attempt at this very append
++		// did reach the service and we are looking at a retry after a lost response, or someone
++		// else is writing to the blob. Only in the former case is the blob exactly as long as this
++		// append was supposed to make it, in which case the write did happen and we are done.
++		auto res_props = afh.blob_client.GetProperties();
++		if (res_props.Value.BlobSize != static_cast<int64_t>(afh.file_offset) + nr_bytes) {
++			throw IOException("Failed to append %lld bytes at offset %lld of '%s': blob is %lld "
++			                  "bytes, it is most likely being written to concurrently",
++			                  nr_bytes, static_cast<int64_t>(afh.file_offset), afh.GetPath(),
++			                  static_cast<int64_t>(res_props.Value.BlobSize));
++		}
++
++		afh.last_modified = ToTimestamp(res_props.Value.LastModified);
++		append_offset = static_cast<int64_t>(afh.file_offset);
++	}
++
++	if (append_offset != static_cast<int64_t>(afh.file_offset)) {
++		// Should not happen, since we send the offset as a precondition, but if it ever does then
++		// the file is not what we think it is and reporting success would corrupt it.
++		throw IOException("Appended %lld bytes at offset %lld of '%s', but expected offset %lld", nr_bytes,
++		                  append_offset, afh.GetPath(), static_cast<int64_t>(afh.file_offset));
++	}
++
+ 	afh.file_offset += nr_bytes;
+ 	afh.length += nr_bytes;
+ 	DUCKDB_LOG_FILE_SYSTEM_WRITE(handle, nr_bytes, afh.file_offset);
