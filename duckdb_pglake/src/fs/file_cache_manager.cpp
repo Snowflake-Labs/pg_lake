@@ -20,6 +20,8 @@
 #include <sys/statvfs.h>
 #include <unistd.h>
 #include <inttypes.h>
+#include <errno.h>
+#include <string.h>
 
 #include "duckdb.hpp"
 #include "duckdb/common/local_file_system.hpp"
@@ -495,7 +497,8 @@ FileCacheManager::RemoveCacheFileInternal(FileSystem &file_system, string finalC
  * inodes, in which case totalInodes is set to 0 and there is no meaningful
  * limit to manage.
  *
- * Returns false if we cannot determine the numbers at all.
+ * Returns false if we cannot determine the numbers at all, which we do not
+ * expect to happen for an existing local directory, so we log it.
  */
 bool
 FileCacheManager::TryGetInodeStats(const string &path, int64_t &freeInodes,
@@ -504,7 +507,12 @@ FileCacheManager::TryGetInodeStats(const string &path, int64_t &freeInodes,
 	struct statvfs stats;
 
 	if (statvfs(path.c_str(), &stats) < 0)
+	{
+		PGDUCK_SERVER_WARN("could not determine the number of available inodes "
+						   "on the file system of %s, managing the cache by "
+						   "size only: %s", path.c_str(), strerror(errno));
 		return false;
+	}
 
 	/* f_favail is what is available to us, which excludes reserved inodes */
 	freeInodes = (int64_t) stats.f_favail;
@@ -531,7 +539,20 @@ PruneEmptyCacheDirectory(const string &cacheDir, string directory)
 {
 	int64_t removed = 0;
 
-	while (StringUtil::StartsWith(directory, cacheDir) && directory != cacheDir)
+	/*
+	 * We recognize the cache directory by comparing paths, so both of them need
+	 * to end in a slash. They do in practice, but the cost of being wrong here
+	 * is removing the cache directory itself, so we do not rely on it.
+	 */
+	string cacheDirWithSlash = cacheDir;
+	if (!StringUtil::EndsWith(cacheDirWithSlash, "/"))
+		cacheDirWithSlash += "/";
+
+	if (!StringUtil::EndsWith(directory, "/"))
+		directory += "/";
+
+	while (StringUtil::StartsWith(directory, cacheDirWithSlash) &&
+		   directory != cacheDirWithSlash)
 	{
 		/* rmdir does not want the trailing slash */
 		string dirWithoutSlash = directory;

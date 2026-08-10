@@ -401,6 +401,9 @@ def test_pg_lake_manage_cache_inode_pressure(s3, pgduck_conn):
     # Directories hold inodes too, so empty cache directories are reclaimed
     assert not cached_path.parent.exists()
 
+    # but pruning never goes past the cache directory itself
+    assert Path(server_params.PGDUCK_CACHE_DIR).is_dir()
+
     # Reading the file makes it a cache candidate again
     run_query(f"SELECT count(*) FROM '{url}'", pgduck_conn)
 
