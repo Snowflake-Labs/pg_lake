@@ -1752,7 +1752,38 @@ AppendReadCSVTail(StringInfo buf, int maxLineSize, const char *columnsMap,
 	if (maxLineSize > 0)
 	{
 		/* use maxLineSize + 1 to include end-of-line */
-		appendStringInfo(buf, ", max_line_size=%d", maxLineSize + 1);
+		int64		lineSizeLimit = (int64) maxLineSize + 1;
+
+		/*
+		 * Pin buffer_size as well as max_line_size.
+		 *
+		 * DuckDB reads a CSV in chunks and, given only max_line_size, sizes
+		 * each chunk to hold 16 lines of that length -- allocated in one
+		 * piece, regardless of how large the file really is.  A file holding
+		 * a few very wide rows therefore costs the same up-front allocation
+		 * as one holding thousands.  Since we serialize bytea as four bytes
+		 * per input byte, a single 10MB bytea makes a 40MB line and DuckDB
+		 * asks for 640MB to read a file that may only hold 76MB, which is
+		 * enough to OOM the query engine outright.
+		 *
+		 * Setting buffer_size suppresses that rule, since DuckDB only derives
+		 * it when buffer_size was left alone.  We ask for a few lines' worth
+		 * and never less than DuckDB's own default, so ordinary row widths
+		 * read exactly as before and only the wide-line case gets a smaller
+		 * request.  It has to be a multiple of the line size rather than the
+		 * line size itself: a value spanning a buffer boundary cannot be
+		 * referenced in place and is copied into the vector's string heap, so
+		 * a buffer only as large as one line makes every wide value pay for a
+		 * copy.
+		 */
+		int64		bufferSize = Max(DEFAULT_DUCKDB_CSV_BUFFER_SIZE,
+									 PGLAKE_CSV_BUFFER_LINE_MULTIPLE *
+									 lineSizeLimit);
+
+		appendStringInfo(buf,
+						 ", max_line_size=" INT64_FORMAT
+						 ", buffer_size=" INT64_FORMAT,
+						 lineSizeLimit, bufferSize);
 	}
 
 	/*
