@@ -2407,13 +2407,11 @@ DeregisterBaseWorker_internal(int32 workerId)
 	/*
 	 * Wait for a worker we just signalled to actually exit before returning.
 	 *
-	 * Callers deregister a worker precisely so they can drop the objects it
-	 * was using -- e.g. UnregisterCDCPublication drops the replication slot
-	 * and the publication's metalog/changelog Iceberg (foreign) tables right
-	 * after this returns.  If we returned while the worker were still alive,
-	 * those DROPs would block on -- or deadlock against -- locks the worker
-	 * still holds, which is exactly what stalls a PITR-fork recovery
-	 * finalize.
+	 * A caller typically deregisters a worker so it can then drop or alter
+	 * the resources the worker was using (a replication slot, a connection, a
+	 * table).  If we returned while the worker were still alive, that
+	 * follow-up work could block on -- or deadlock against -- locks the
+	 * worker still holds.
 	 *
 	 * SIGTERM is asynchronous, so signalling above does not guarantee the
 	 * worker is gone yet.  The worker clears its own workerPid under
