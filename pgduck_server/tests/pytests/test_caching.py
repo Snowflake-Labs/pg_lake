@@ -348,6 +348,86 @@ def test_pg_lake_manage_cache(s3, pgduck_conn):
     pgduck_conn.rollback()
 
 
+def test_pg_lake_manage_cache_inode_pressure(s3, pgduck_conn):
+    """Cache management must also evict when the cache file system is low on
+    inodes, not only when the cache exceeds its byte budget.
+
+    The cache mirrors the object store layout, so a workload with many small
+    files can use up all the inodes of a file system with a fixed inode table
+    (e.g. ext4) while using a tiny fraction of the byte budget, after which
+    every write to the cache fails.
+
+    The number of inodes to keep available is normally derived from the cache
+    file system, but pg_lake_manage_cache takes it as an optional argument so
+    that this test works regardless of the file system it runs on.
+    """
+    stats = os.statvfs(server_params.PGDUCK_CACHE_DIR)
+
+    url = f"s3://{TEST_BUCKET}/test_manage_cache_inodes/data.csv"
+    cached_path = Path(
+        f"{server_params.PGDUCK_CACHE_DIR}/s3/{TEST_BUCKET}/test_manage_cache_inodes/{CACHE_FILE_PREFIX}data.csv"
+    )
+
+    # A byte budget the cache never comes close to
+    cache_size = 20 * 1024 * 1024 * 1024
+
+    # More inodes than are available, so we are always under inode pressure.
+    # File systems that allocate inodes dynamically report 0 available inodes,
+    # in which case any explicitly requested floor means inode pressure.
+    unreachable_free_inodes = stats.f_favail + 1
+
+    run_command(
+        f"COPY (SELECT s FROM generate_series(1,100) as g(s)) TO '{url}';",
+        pgduck_conn,
+    )
+    assert cached_path.exists()
+
+    # Without inode pressure, the file stays in the cache
+    results = run_query(
+        f"FROM pg_lake_manage_cache({cache_size}, 0) WHERE url = '{url}'", pgduck_conn
+    )
+    assert len(results) == 0
+    assert cached_path.exists()
+
+    # Under inode pressure, the file is evicted even though it fits in the budget
+    results = run_query(
+        f"FROM pg_lake_manage_cache({cache_size}, {unreachable_free_inodes}) WHERE url = '{url}'",
+        pgduck_conn,
+    )
+    assert len(results) == 1
+    assert results[0][2] == "removed"
+    assert not cached_path.exists()
+
+    # Directories hold inodes too, so empty cache directories are reclaimed
+    assert not cached_path.parent.exists()
+
+    # Reading the file makes it a cache candidate again
+    run_query(f"SELECT count(*) FROM '{url}'", pgduck_conn)
+
+    # We do not add files to the cache while we are low on inodes
+    results = run_query(
+        f"FROM pg_lake_manage_cache({cache_size}, {unreachable_free_inodes}) WHERE url = '{url}'",
+        pgduck_conn,
+    )
+    assert len(results) == 1
+    assert results[0][2] == "skipped (cache file system is low on inodes)"
+    assert not cached_path.exists()
+
+    # Once there are enough inodes again, the file is cached
+    run_query(f"SELECT count(*) FROM '{url}'", pgduck_conn)
+    results = run_query(
+        f"FROM pg_lake_manage_cache({cache_size}, 0) WHERE url = '{url}'", pgduck_conn
+    )
+    assert len(results) == 1
+    assert results[0][2] == "added"
+    assert cached_path.exists()
+
+    # Wipe the cache
+    run_query("CALL pg_lake_manage_cache(0)", pgduck_conn)
+
+    pgduck_conn.rollback()
+
+
 def test_pg_lake_manage_cache_invalid_url(s3, pgduck_conn):
     # Invalid URL should not get cached
     key = "test_pg_lake_manage_cache_invalid_url/data.csv"

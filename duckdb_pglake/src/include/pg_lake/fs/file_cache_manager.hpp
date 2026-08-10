@@ -46,6 +46,20 @@ const int64_t LOCK_CANNOT_BE_ACQUIRED = -1;
 const int64_t DIRECTORY_CANNOT_CREATED = -2;
 
 /*
+ * Passed as minFreeInodes to ManageCache to derive the number of inodes to
+ * keep available on the cache file system from the file system itself.
+ */
+const int64_t MIN_FREE_INODES_AUTO = -1;
+
+/*
+ * By default, we keep 1/DEFAULT_FREE_INODE_FRACTION of the inodes on the cache
+ * file system available, but at least DEFAULT_MIN_FREE_INODES, and never more
+ * than half of the inodes on the file system.
+ */
+const int64_t DEFAULT_FREE_INODE_FRACTION = 100;
+const int64_t DEFAULT_MIN_FREE_INODES = 1000;
+
+/*
  * CacheItem represents a file in cache or the cache queue.
  */
 struct CacheItem
@@ -97,7 +111,8 @@ enum CacheActionType
 	SKIPPED_TOO_OLD,
 	SKIPPED_TOO_LARGE,
 	SKIPPED_CONCURRENT_MODIFY,
-	SKIPPED_DIRECTORY_DOES_NOT_EXIST
+	SKIPPED_DIRECTORY_DOES_NOT_EXIST,
+	SKIPPED_INODE_PRESSURE
 };
 
 /*
@@ -226,7 +241,8 @@ public:
 	int64_t CacheFile(ClientContext &context, string url, bool force, bool waitForLock);
 	CacheRemoveStatus RemoveCacheFile(ClientContext &context, string url, bool waitForLock);
 	CacheRemoveStatus RemoveCacheFileInternal(FileSystem& file_system, string filePath, string finalCacheFilePath, bool waitForLock);
-	vector<CacheAction> ManageCache(ClientContext &context, int64_t maxCacheSize);
+	vector<CacheAction> ManageCache(ClientContext &context, int64_t maxCacheSize,
+									int64_t minFreeInodes = MIN_FREE_INODES_AUTO);
 	vector<CacheItem> ListCache(ClientContext &context);
 	void ErrorIfPathHasGlob(ClientContext &context, string url);
 	string GetURLForCacheFilePath(string &cacheDir, const string &cacheFilePath);
@@ -234,6 +250,9 @@ public:
 	void RemoveCacheFileActivityFromMapIfNeeded(const string& cacheFilePath);
 
 	static void UpdateAccessTime(string &filePath);
+
+	static bool TryGetInodeStats(const string &path, int64_t &freeInodes,
+								 int64_t &totalInodes);
 
 	/* required ObjectCacheEntry functions */
 	static string ObjectType() {

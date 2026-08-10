@@ -17,6 +17,8 @@
 
 #include <utime.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
+#include <unistd.h>
 #include <inttypes.h>
 
 #include "duckdb.hpp"
@@ -486,12 +488,86 @@ FileCacheManager::RemoveCacheFileInternal(FileSystem &file_system, string finalC
 
 
 /*
+ * TryGetInodeStats reports the number of available and total inodes on the file
+ * system that contains the given path.
+ *
+ * File systems that allocate inodes dynamically (e.g. btrfs, ZFS) report 0
+ * inodes, in which case totalInodes is set to 0 and there is no meaningful
+ * limit to manage.
+ *
+ * Returns false if we cannot determine the numbers at all.
+ */
+bool
+FileCacheManager::TryGetInodeStats(const string &path, int64_t &freeInodes,
+								   int64_t &totalInodes)
+{
+	struct statvfs stats;
+
+	if (statvfs(path.c_str(), &stats) < 0)
+		return false;
+
+	/* f_favail is what is available to us, which excludes reserved inodes */
+	freeInodes = (int64_t) stats.f_favail;
+	totalInodes = (int64_t) stats.f_files;
+
+	return true;
+}
+
+
+/*
+ * PruneEmptyCacheDirectory removes the directory that contained an evicted
+ * cache file, and its now-empty parents, up to (but not including) the cache
+ * directory itself.
+ *
+ * Each directory occupies an inode, and the cache mirrors the object store
+ * layout, so a cache that saw many prefixes keeps holding inodes even after
+ * all its files were evicted.
+ *
+ * rmdir fails when the directory is not empty, which includes the case where a
+ * concurrent operation added a file to it, so we simply stop pruning then.
+ */
+static int64_t
+PruneEmptyCacheDirectory(const string &cacheDir, string directory)
+{
+	int64_t removed = 0;
+
+	while (StringUtil::StartsWith(directory, cacheDir) && directory != cacheDir)
+	{
+		/* rmdir does not want the trailing slash */
+		string dirWithoutSlash = directory;
+		if (StringUtil::EndsWith(dirWithoutSlash, "/"))
+			dirWithoutSlash.erase(dirWithoutSlash.length() - 1);
+
+		if (rmdir(dirWithoutSlash.c_str()) < 0)
+			/* not empty (anymore), or not ours to remove */
+			break;
+
+		PGDUCK_SERVER_DEBUG("removed empty cache directory %s",
+							dirWithoutSlash.c_str());
+		removed++;
+
+		directory = FileUtils::ExtractDirName(dirWithoutSlash);
+	}
+
+	return removed;
+}
+
+
+/*
  * ManageCache implements a simple cache management approach where we prune
  * the least recently used files, until there is enough space for all recently
  * accessed candidates, and then we download them one by one.
+ *
+ * Space is both bytes and inodes: the cache can hold a large number of small
+ * files, so on a file system with a fixed inode table (e.g. ext4) we can run
+ * out of inodes long before we reach maxCacheSize, at which point writes to
+ * the cache start failing. We therefore also evict when the number of
+ * available inodes drops below minFreeInodes, which is derived from the cache
+ * file system when set to MIN_FREE_INODES_AUTO.
  */
 vector<CacheAction>
-FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize)
+FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize,
+							  int64_t minFreeInodes)
 {
 	lock_guard<mutex> lock(manageCacheLock);
 
@@ -612,13 +688,87 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize)
 		totalCacheSize += cachedFile.fileSize;
 	}
 
+	/*
+	 * Determine how many inodes are available on the cache file system, and
+	 * how many we want to keep available.
+	 */
+	int64_t freeInodes = 0;
+	int64_t totalInodes = 0;
+	int64_t inodeFloor = 0;
+	bool trackInodes = TryGetInodeStats(cacheDir, freeInodes, totalInodes);
+
+	if (trackInodes)
+	{
+		if (minFreeInodes == MIN_FREE_INODES_AUTO)
+		{
+			/*
+			 * Nothing to derive on a file system that allocates inodes
+			 * dynamically, so we manage the cache based on bytes only.
+			 */
+			if (totalInodes == 0)
+			{
+				trackInodes = false;
+			}
+			else
+			{
+				inodeFloor = totalInodes / DEFAULT_FREE_INODE_FRACTION;
+
+				if (inodeFloor < DEFAULT_MIN_FREE_INODES)
+					inodeFloor = DEFAULT_MIN_FREE_INODES;
+
+				/*
+				 * Never reserve more than half of the inodes, such that we can
+				 * still use the cache on a file system with few inodes instead
+				 * of evicting everything on every round.
+				 */
+				if (inodeFloor > totalInodes / 2)
+					inodeFloor = totalInodes / 2;
+			}
+		}
+		else
+		{
+			/* an explicitly requested floor is always applied */
+			inodeFloor = minFreeInodes;
+		}
+	}
+
+	/*
+	 * Adding files to the cache consumes inodes, so when we are low on inodes
+	 * we only evict in this round. The next round can add files again.
+	 */
+	bool startedWithLowInodes = trackInodes && freeInodes < inodeFloor;
+
+	if (startedWithLowInodes)
+	{
+		for (CacheItem& cacheFile : cacheFiles)
+		{
+			if (!cacheFile.needsDownload)
+				continue;
+
+			cacheFile.needsDownload = false;
+
+			actions.push_back({
+				.url = cacheFile.url,
+				.fileSize = cacheFile.fileSize,
+				.action = SKIPPED_INODE_PRESSURE
+			});
+		}
+
+		queueSize = 0;
+	}
+
 	/* sort from oldest to newest access time */
 	std::sort(cacheFiles.begin(), cacheFiles.end());
+
+	int64_t prunedDirectories = 0;
 
 	/* remove items until we have enough space for all candidates */
 	for (CacheItem& cacheFile : cacheFiles)
 	{
-		if (totalCacheSize + queueSize < maxCacheSize)
+		bool needBytes = totalCacheSize + queueSize >= maxCacheSize;
+		bool needInodes = trackInodes && freeInodes < inodeFloor;
+
+		if (!needBytes && !needInodes)
 			/* we have enough space to fit our queue */
 			break;
 
@@ -641,6 +791,23 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize)
 			else
 			{
 				totalCacheSize -= cacheFile.fileSize;
+
+				/* removing the file freed up its inode */
+				freeInodes++;
+
+				/*
+				 * Directories also hold inodes, so reclaim the ones that no
+				 * longer have any cache files in them.
+				 */
+				if (needInodes)
+				{
+					int64_t pruned =
+						PruneEmptyCacheDirectory(cacheDir,
+												 FileUtils::ExtractDirName(cacheFile.cacheFilePath));
+
+					prunedDirectories += pruned;
+					freeInodes += pruned;
+				}
 			}
 
 			actions.push_back({
@@ -709,6 +876,7 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize)
 	int64_t removed = 0, removedBytes = 0;
 	int64_t skippedTooLarge = 0, skippedTooOld = 0;
 	int64_t skippedConcurrent = 0, addFailed = 0;
+	int64_t skippedInodePressure = 0;
 
 	for (const CacheAction &a : actions)
 	{
@@ -719,18 +887,20 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize)
 			case SKIPPED_TOO_LARGE: skippedTooLarge++; break;
 			case SKIPPED_TOO_OLD:   skippedTooOld++; break;
 			case SKIPPED_CONCURRENT_MODIFY: skippedConcurrent++; break;
+			case SKIPPED_INODE_PRESSURE: skippedInodePressure++; break;
 			case ADD_FAILED:        addFailed++; break;
 			default:                break;
 		}
 	}
 
 	if (added > 0 || removed > 0 || skippedTooOld > 0 ||
-		skippedTooLarge > 0 || addFailed > 0)
+		skippedTooLarge > 0 || addFailed > 0 || skippedInodePressure > 0)
 	{
 		PGDUCK_SERVER_LOG("cache pressure: added %" PRIu64 " files (%" PRIu64
 						  " bytes), evicted %" PRIu64 " files (%" PRIu64 " bytes), "
 						  "skipped %" PRIu64 " (too old), %" PRIu64 " (too large), "
-						  "%" PRIu64 " (concurrent), %" PRIu64 " (add failed); "
+						  "%" PRIu64 " (concurrent), %" PRIu64 " (add failed), "
+						  "%" PRIu64 " (low on inodes); "
 						  "cache now %" PRIu64 "/%" PRIu64 " bytes",
 						  (uint64_t) added, (uint64_t) addedBytes,
 						  (uint64_t) removed, (uint64_t) removedBytes,
@@ -738,8 +908,28 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize)
 						  (uint64_t) skippedTooLarge,
 						  (uint64_t) skippedConcurrent,
 						  (uint64_t) addFailed,
+						  (uint64_t) skippedInodePressure,
 						  (uint64_t) totalCacheSize,
 						  (uint64_t) maxCacheSize);
+	}
+
+	/*
+	 * Report inode pressure separately, since it is an unusual situation that
+	 * operators may need to act on (e.g. by giving the cache its own volume, or
+	 * a file system with dynamically allocated inodes).
+	 */
+	if (startedWithLowInodes)
+	{
+		PGDUCK_SERVER_LOG("cache directory %s was low on inodes: evicted %" PRIu64
+						  " files and %" PRIu64 " empty directories, %" PRIu64
+						  "/%" PRIu64 " inodes now available (keeping %" PRIu64
+						  " available)",
+						  cacheDir.c_str(),
+						  (uint64_t) removed,
+						  (uint64_t) prunedDirectories,
+						  (uint64_t) freeInodes,
+						  (uint64_t) totalInodes,
+						  (uint64_t) inodeFloor);
 	}
 
 	return actions;

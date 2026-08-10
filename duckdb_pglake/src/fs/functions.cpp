@@ -242,6 +242,7 @@ struct ManageCacheFunctionData : public TableFunctionData
 {
 	/* Function arguments */
 	int64_t max_cache_size;
+	int64_t min_free_inodes;
 
 	/* Function state */
 	vector<CacheAction> actions;
@@ -261,6 +262,14 @@ static unique_ptr<FunctionData> ManageCacheBind(ClientContext &context,
 	/* Get the arguments */
 	auto functionData = make_uniq<ManageCacheFunctionData>();
 	functionData->max_cache_size = input.inputs[0].GetValue<int64_t>();
+
+	/*
+	 * The number of inodes to keep available on the cache file system is
+	 * optional, and derived from the file system when not specified.
+	 */
+	functionData->min_free_inodes =
+		input.inputs.size() > 1 ? input.inputs[1].GetValue<int64_t>()
+								: MIN_FREE_INODES_AUTO;
 
 	/* Set the return type */
 	return_types.emplace_back(LogicalType::VARCHAR);
@@ -286,7 +295,8 @@ static void ManageCacheExec(ClientContext &context, TableFunctionInput &data_p, 
 	if (functionData.actionOffset == 0)
 	{
 		shared_ptr<FileCacheManager> cacheManager = FileCacheManager::Get(context);
-		functionData.actions = cacheManager->ManageCache(context, functionData.max_cache_size);
+		functionData.actions = cacheManager->ManageCache(context, functionData.max_cache_size,
+														functionData.min_free_inodes);
 	}
 
 	/* Set return values */
@@ -318,6 +328,9 @@ static void ManageCacheExec(ClientContext &context, TableFunctionInput &data_p, 
 				break;
 			case SKIPPED_DIRECTORY_DOES_NOT_EXIST:
 				output.SetValue(2, rowInChunk, Value("skipped (cannot create directory)"));
+				break;
+			case SKIPPED_INODE_PRESSURE:
+				output.SetValue(2, rowInChunk, Value("skipped (cache file system is low on inodes)"));
 				break;
 
 		}
@@ -768,6 +781,11 @@ PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
 		/* pg_lake_manage_cache(max_cache_size bigint) */
 		pg_lake_manage_cache.AddFunction(
 			TableFunction({LogicalTypeId::BIGINT},
+						  ManageCacheExec, ManageCacheBind));
+
+		/* pg_lake_manage_cache(max_cache_size bigint, min_free_inodes bigint) */
+		pg_lake_manage_cache.AddFunction(
+			TableFunction({LogicalTypeId::BIGINT, LogicalTypeId::BIGINT},
 						  ManageCacheExec, ManageCacheBind));
 
 	    loader.RegisterFunction(pg_lake_manage_cache);
