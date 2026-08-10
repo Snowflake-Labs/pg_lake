@@ -399,6 +399,14 @@ GetTableDataFilesByPathHashFromCatalog(Oid relationId, bool dataOnly, bool newFi
 		dataFileEntry->dataFile = *dataFile;
 	}
 
+	/*
+	 * The by-id hash was only a staging area for grouping the SPI rows of one
+	 * file together, and every entry has been copied into filesByPath by now.
+	 * The path, partition and column stats each entry points to were
+	 * allocated in our own context, not in the hash's, so they survive.
+	 */
+	hash_destroy(filesById);
+
 	return filesByPath;
 }
 

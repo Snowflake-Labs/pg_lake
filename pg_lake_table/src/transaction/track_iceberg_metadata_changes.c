@@ -93,7 +93,8 @@ static void InitRestCatalogRequestsHashIfNeeded(void);
 static bool ShouldRunCommitTimeAnalyze(HTAB *trackedRelations);
 static void EnsureFreshStatsForCommitTimeDiff(void);
 static HTAB *CreateDataFilesHashForMetadata(IcebergTableMetadata * metadata);
-static void FindChangedFilesSinceMetadata(HTAB *currentFilesMap, IcebergTableMetadata * metadata,
+static void FindChangedFilesSinceMetadata(const TableMetadataOperationTracker * opTracker,
+										  HTAB *currentFilesMap,
 										  List **addedFiles, List **removedFilePaths);
 static HTAB *CreatePartitionSpecsHashForMetadata(IcebergTableMetadata * metadata);
 static List *FindNewPartitionSpecsSinceMetadata(HTAB *currentSpecs, IcebergTableMetadata * metadata);
@@ -1098,8 +1099,17 @@ EnsureFreshStatsForCommitTimeDiff(void)
 
 
 /*
- * CreateDataFilesHashForMetadata creates and populates a hash table of data files
- * from the given Iceberg table metadata.
+ * CreateDataFilesHashForMetadata creates and populates a hash table of data file
+ * paths from the given Iceberg table metadata.
+ *
+ * Only the paths end up in the hash, so the decoded manifest entries behind
+ * them are scratch. They are not cheap scratch: an entry carries a DataFile
+ * with a per-column stat and bound array each, so a snapshot with tens of
+ * thousands of entries decodes to hundreds of megabytes. Read one manifest at
+ * a time into a context we reset after each, the way
+ * IcebergSnapshotAddAllReferencedFiles does, so peak is one manifest rather
+ * than the whole snapshot. The path itself is copied by dynahash into the hash
+ * entry, so it survives the reset.
  */
 static HTAB *
 CreateDataFilesHashForMetadata(IcebergTableMetadata * metadata)
@@ -1110,16 +1120,38 @@ CreateDataFilesHashForMetadata(IcebergTableMetadata * metadata)
 		return dataFilesMap;
 
 	IcebergSnapshot *iceSnapshot = GetCurrentSnapshot(metadata, true);
-	List	   *dataFiles = FetchDataFilesFromSnapshot(iceSnapshot, NULL, IsManifestEntryStatusScannable, NULL);
+	List	   *manifests = FetchManifestsFromSnapshot(iceSnapshot, NULL);
 
-	ListCell   *fileCell = NULL;
+	MemoryContext manifestContext =
+		AllocSetContextCreate(CurrentMemoryContext,
+							  "FetchDataFilesFromManifest for CreateDataFilesHashForMetadata",
+							  ALLOCSET_DEFAULT_SIZES);
 
-	foreach(fileCell, dataFiles)
+	ListCell   *manifestCell = NULL;
+
+	foreach(manifestCell, manifests)
 	{
-		TableDataFile *dataFile = lfirst(fileCell);
+		IcebergManifest *manifest = lfirst(manifestCell);
+		MemoryContext oldContext = MemoryContextSwitchTo(manifestContext);
 
-		AppendFileToHash(dataFile->path, dataFilesMap);
+		bool		pathOnly = true;
+		List	   *dataFilePaths = FetchDataFilesFromManifest(manifest, pathOnly,
+															   IsManifestEntryStatusScannable,
+															   NULL);
+		ListCell   *pathCell = NULL;
+
+		foreach(pathCell, dataFilePaths)
+		{
+			char	   *dataFilePath = lfirst(pathCell);
+
+			AppendFileToHash(dataFilePath, dataFilesMap);
+		}
+
+		MemoryContextSwitchTo(oldContext);
+		MemoryContextReset(manifestContext);
 	}
+
+	MemoryContextDelete(manifestContext);
 
 	return dataFilesMap;
 }
@@ -1127,18 +1159,42 @@ CreateDataFilesHashForMetadata(IcebergTableMetadata * metadata)
 
 /*
  * FindChangedFilesSinceMetadata identifies added and removed files by comparing
- * the current state of data files with the state recorded in the provided metadata.
- * It populates the addedFiles and removedFilePaths lists with the respective files.
+ * the current state of data files with the state recorded in the last pushed
+ * metadata for the relation. It populates the addedFiles and removedFilePaths
+ * lists with the respective files.
  *
  * addedFiles: file info, wrapped in `TableDataFile` struct, for the files that are added since the metadata
  * removedFilePaths: file paths, which are added before the current tx, that are removed since the metadata
+ *
+ * Reading the last pushed metadata means reading its whole file list: the
+ * metadata JSON, every manifest in the current snapshot, and every entry in
+ * those manifests. None of that is needed once we know which paths changed, so
+ * it is read into a scratch context that is deleted before returning. What
+ * survives is bounded by the number of files this transaction changed, not by
+ * the number of files the table has. That matters because pre-commit walks
+ * every relation in the transaction, and TopTransactionContext is not reset in
+ * between: without this the peak is the sum over all relations of their full
+ * file lists.
  */
 static void
-FindChangedFilesSinceMetadata(HTAB *currentFilesMap, IcebergTableMetadata * metadata,
+FindChangedFilesSinceMetadata(const TableMetadataOperationTracker * opTracker,
+							  HTAB *currentFilesMap,
 							  List **addedFiles, List **removedFilePaths)
 {
+	MemoryContext resultContext = CurrentMemoryContext;
+	MemoryContext metadataContext =
+		AllocSetContextCreate(CurrentMemoryContext,
+							  "pg_lake last pushed metadata file list",
+							  ALLOCSET_DEFAULT_SIZES);
+
+	MemoryContextSwitchTo(metadataContext);
+
 	/* create metadata's data files */
+	IcebergTableMetadata *metadata = GetLastPushedIcebergMetadata(opTracker);
 	HTAB	   *metadataDataFilesMap = CreateDataFilesHashForMetadata(metadata);
+
+	/* the result lists belong to the caller, not to the scratch context */
+	MemoryContextSwitchTo(resultContext);
 
 	/* find added files */
 	HASH_SEQ_STATUS currentFilesStatus;
@@ -1162,9 +1218,15 @@ FindChangedFilesSinceMetadata(HTAB *currentFilesMap, IcebergTableMetadata * meta
 
 	while ((metadataDataFilePath = hash_seq_search(&metadataFilesStatus)) != NULL)
 	{
+		/*
+		 * The path is a key inside metadataDataFilesMap, which goes away with
+		 * the scratch context below, so hand out a copy.
+		 */
 		if (!hash_search(currentFilesMap, metadataDataFilePath, HASH_FIND, NULL))
-			*removedFilePaths = lappend(*removedFilePaths, metadataDataFilePath);
+			*removedFilePaths = lappend(*removedFilePaths, pstrdup(metadataDataFilePath));
 	}
+
+	MemoryContextDelete(metadataContext);
 }
 
 
@@ -1341,14 +1403,11 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 		return list_make1(removeAllOp);
 	}
 
-	/* get last pushed metadata */
-	IcebergTableMetadata *lastMetadata = GetLastPushedIcebergMetadata(opTracker);
-
-	/* find added and removed files since metadata */
+	/* find added and removed files since the last pushed metadata */
 	List	   *addedFiles = NIL;
 	List	   *removedFilePaths = NIL;
 
-	FindChangedFilesSinceMetadata(currentFilesMap, lastMetadata, &addedFiles, &removedFilePaths);
+	FindChangedFilesSinceMetadata(opTracker, currentFilesMap, &addedFiles, &removedFilePaths);
 
 	/*
 	 * Now that we know which files are newly added, load per-column stats
@@ -1395,6 +1454,18 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 
 		metadataOperations = lappend(metadataOperations, removedFileOp);
 	}
+
+	/*
+	 * The path index over the catalog file list is only needed for the diff
+	 * above. Its entries are the widest thing we allocate per file, because
+	 * the key is a fixed MAX_S3_PATH_LENGTH array, so drop it now rather than
+	 * leaving one per relation behind until the transaction ends. The
+	 * operations we return do not point into it: the path, partition and
+	 * column stats of each added file were allocated separately and outlive
+	 * it, and the removed paths are copies. addedFiles does point into it, so
+	 * it must not be used after this.
+	 */
+	hash_destroy(currentFilesMap);
 
 	return metadataOperations;
 }
