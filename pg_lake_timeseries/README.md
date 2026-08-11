@@ -8,22 +8,36 @@
 `pg_lake_timeseries` makes a single PostgreSQL relation behave like a live,
 indexed, mutable time-series table whose bulk lives in Apache Iceberg.
 
-It does this with a **base + delta merge-on-read** design:
+The target shape is **two overlapping tiers with automatic routing**:
 
-- a **base** — one internally-partitioned pg_lake Iceberg table holding (nearly
-  all of) the data, scanned by DuckDB with file-level pruning;
-- a **delta** — a small, timed-index heap holding recent inserts/updates/deletes
-  that have not yet been folded into the base;
-- a **merge-on-read** parent that overlays the delta on the base by key (newest
-  version wins, tombstones suppress), so reads see a single consistent table.
+- the last **N** days (say 7) live in PostgreSQL, indexed and deduplicated, up to
+  `now()`;
+- the last **M** days (say 365) live in one internally-partitioned pg_lake
+  Iceberg table, up to the last materialisation;
+- reads are routed per partition by a stored **authority boundary**, so a query
+  that stays on one side of it runs as a plain single-tier query, and a query
+  that spans it is executed as **one vectorised DuckDB plan** rather than by
+  shipping Iceberg rows into PostgreSQL.
 
-A background worker keeps the base fresh (flushing the delta into Iceberg),
-manages the heap partition frontier without DDL on the insert path, and lets
-compaction/retention run on the cold tier.
+Updates and upserts are allowed in the PostgreSQL tier. Mutations that reach
+already-sealed Iceberg partitions land in a per-partition delta, are merged over
+Iceberg on read, and are folded back in by a background repair — so the merge
+cost is bounded by the set of recently-mutated cold partitions, not by the size
+of the table. See [`DESIGN.md`](DESIGN.md) §13.
 
-The goals, the correctness argument (exactly-once under concurrent flush without
-snapshot pinning), the read/write paths, and the phased implementation plan are
-all in [`DESIGN.md`](DESIGN.md).
+The underlying mechanisms are specified separately: §4–§11 the **base + delta
+merge-on-read** machinery (the merge itself, executed inside DuckDB over a
+snapshot-pinned reverse connection), §12 the **hot-authoritative tiering** family
+and its sync modes including a CDC-fed Iceberg mirror.
+
+A background worker seals aged partitions into Iceberg, manages the heap
+partition frontier without DDL on the insert path, repairs mutated cold
+partitions, and lets compaction/retention run on the cold tier.
+
+The goals, the correctness argument, the query-optimizer analysis (why a
+`UNION ALL` view or partitioned parent loses DuckDB aggregation today, and what
+change fixes it), and the phased implementation plan are all in
+[`DESIGN.md`](DESIGN.md).
 
 ## Why not existing options
 
@@ -31,9 +45,15 @@ all in [`DESIGN.md`](DESIGN.md).
 - **Native declarative partitioning** with older partitions as Iceberg foreign
   tables produces one foreign table per partition (poor plans), and partition
   management takes heavy locks.
+- **A `UNION ALL` view or a partitioned parent over a heap and an Iceberg table**
+  routes correctly by time, but any query spanning both tiers loses aggregate
+  pushdown: the FDW cannot push a *partial* aggregate, so every qualifying
+  Iceberg row is shipped into PostgreSQL and aggregated there. See
+  [`DESIGN.md`](DESIGN.md) §13.5.
 
-`pg_lake_timeseries` keeps *one* Iceberg table (internally partitioned) plus a
-small heap delta, unified by a single parent — avoiding both problems.
+`pg_lake_timeseries` keeps *one* Iceberg table (internally partitioned) alongside
+the indexed PostgreSQL tier, and pushes spanning queries into DuckDB as a single
+plan — avoiding all three problems.
 
 ## Dependencies
 
