@@ -18,15 +18,20 @@
 /*
  * pg_lake_timeseries extension entry-point.
  *
- * pg_lake_timeseries turns an Iceberg table into a live, indexed, mutable
- * time-series table by keeping a small heap "delta" of recent writes and
- * merging it over the Iceberg "base" at query time (merge-on-read, model A).
+ * pg_lake_timeseries makes a single relation behave like a live, indexed,
+ * mutable time-series table whose bulk lives in Apache Iceberg: the last
+ * hot_retention worth of time is authoritative in PostgreSQL, everything older
+ * is authoritative in Iceberg, and reads are routed per partition by a stored
+ * authority boundary. See DESIGN.md section 13.
  *
- * This file is a skeleton: it wires up the module and its GUCs. The background
- * worker that drives frontier maintenance / flushing, and the CustomScan that
- * performs efficient per-partition reconciliation, are specified in DESIGN.md
- * and land in follow-up work.
+ * This file wires up the module and its GUCs. The maintenance background
+ * worker is registered through pg_extension_base's base-worker framework from
+ * the install script (extension_base.register_worker), so that it runs once per
+ * database that has the extension; its entry point lives in
+ * src/maintenance_worker.c.
  */
+#include <limits.h>
+
 #include "postgres.h"
 
 #include "fmgr.h"
@@ -71,18 +76,13 @@ _PG_init(void)
 	DefineCustomIntVariable(
 							"pg_lake_timeseries.maintenance_naptime",
 							gettext_noop("Time between background maintenance passes, in milliseconds"),
-							gettext_noop("Each pass pre-creates the delta frontier, drains the "
-										 "DEFAULT partition, and flushes aged delta into Iceberg."),
+							gettext_noop("Each pass extends the hot partition frontier, refreshes the "
+										 "Iceberg copy of past hot partitions, seals partitions that "
+										 "aged out of the hot window, and repairs mutated cold "
+										 "partitions."),
 							&PgLakeTimeseriesNaptimeMs,
 							10000, 100, INT_MAX,
 							PGC_SIGHUP,
 							GUC_UNIT_MS,
 							NULL, NULL, NULL);
-
-	/*
-	 * TODO(pg_lake_timeseries): register the maintenance background worker here
-	 * (RegisterBackgroundWorker). The worker loops every maintenance_naptime,
-	 * iterating timeseries.tables and calling timeseries.maintain() per table
-	 * via SPI. See DESIGN.md, "Frontier & maintenance".
-	 */
 }

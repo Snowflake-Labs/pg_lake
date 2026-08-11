@@ -1098,3 +1098,198 @@ pytest suites under `tests/pytests/` (skeleton has a placeholder). Priorities:
 - Wired into the top-level `Makefile` (`EXTENSION_TARGETS` + module
   declarations) so the standard `*-pg_lake_timeseries` targets work, without
   altering the default `make install` (which builds the `pg_lake` meta only).
+
+---
+
+## 18. As built
+
+Phases 1–3 and 8 of §15 are implemented, together with the `COLD_DIRTY` overlay
+and repair of phase 10, in `pg_lake_timeseries--3.4.sql` (SQL API + routing view)
+and `src/maintenance_worker.c` (base worker). Phase 9 — heap relations inside the
+whole-query pushdown — is **not** implemented, so a cross-tier read still ships
+Iceberg rows into PostgreSQL and aggregates them there. Everything below records
+where the implementation differs from the specification above, and why.
+
+### 18.1 Objects created per table
+
+`timeseries.create_table('metrics', 'ts', ...)` turns an empty template table
+into:
+
+| object | kind | role |
+| --- | --- | --- |
+| `metrics` | view + `INSTEAD OF` trigger | the user-facing relation; routes reads and writes |
+| `metrics_hot` | heap, `PARTITION BY RANGE (ts)` | authoritative for `ts >= B` |
+| `metrics_cold` | pg_lake Iceberg table | authoritative for `ts < B`, plus a lagging copy above `B` |
+| `metrics_cold_scan` | partitioned table, one partition | pruning wrapper over `metrics_cold` (§18.3) |
+| `metrics_delta` | heap + `_ts_seq`, `_ts_deleted` | mutations that land below `B` |
+| `metrics_seq` | sequence | version order for delta rows |
+
+The template must be empty: conversion would otherwise have to decide which tier
+each existing row belongs to. History is loaded after conversion, either straight
+into `metrics_cold` or through the view (which routes it into the delta, from
+where `repair()` folds it into Iceberg).
+
+### 18.2 Restrictions
+
+- `partition_interval` must be a positive **fixed-length** interval. `month` and
+  `year` would need `date_trunc` rather than the epoch arithmetic in
+  `partition_start`, and are rejected.
+- `hot_retention >= partition_interval`.
+- `key_columns` must contain the time column: it is the partition key of the hot
+  tier, and PostgreSQL requires a unique index on a partitioned table to include
+  the partition key.
+- A keyless table is append-only — `UPDATE`/`DELETE` through the view raise —
+  because merge-on-read has nothing to match versions on. `upsert => true`
+  therefore also requires a key.
+- Column names starting with `_ts_` are reserved.
+- The initial boundary is `partition_start(now() - hot_retention)`, so a freshly
+  created table is entirely hot and the Iceberg tier is empty.
+
+### 18.3 Tier elimination is partition pruning, not constraint exclusion
+
+The design assumed a `UNION ALL` view with literal boundary predicates would let
+the planner drop the branch whose predicate the query contradicts. Measured on
+PostgreSQL 18, it does not:
+
+- with the default `constraint_exclusion = partition`, a self-contradictory
+  `UNION ALL` branch is **kept** — the scan stays in the plan and returns no rows;
+- union-leaf flattening (which would expose the branch's quals to the outer
+  query) happens only for `SELECT *`; any narrower projection or an aggregate
+  leaves a `Subquery Scan` wrapper in place, and even when flattening does happen
+  it does not by itself prune;
+- `constraint_exclusion = on` does prune it, but that is a session-wide setting
+  the extension has no business changing.
+
+Partition pruning, by contrast, is unconditional and shape-independent. The hot
+tier prunes through its own range partitions. The cold tier therefore gets the
+same mechanism: `metrics_cold_scan` is a range-partitioned table whose only
+partition is the Iceberg table, attached `FOR VALUES FROM (MINVALUE) TO (B)`, and
+the view reads the wrapper. A query with `ts >= B` prunes the Iceberg scan at plan
+time whatever its shape; `seal()` re-bounds the wrapper (detach + attach) when it
+advances `B`.
+
+The bound is a **pruning hint only**. PostgreSQL neither enforces nor applies
+partition constraints as filters for a foreign table, and the Iceberg table
+deliberately holds rows above `B` (the lagging copy), so the view keeps its own
+`ts < B` predicate to mask them. A single partitioned parent over both tiers is
+still rejected: it would double-count exactly those rows.
+
+### 18.4 The view cannot specialise on dirty partitions
+
+The view is a stand-in for the §5.3 CustomScan, and this is where the stand-in
+runs out: **a view cannot be replaced while a statement that references it is
+running.** The write path is an `INSTEAD OF` trigger on that very view, so a
+`CREATE OR REPLACE VIEW` from inside it fails with
+`cannot CREATE OR REPLACE VIEW ... because it is being used by active queries in
+this session`. A write below `B` is therefore in no position to add the delta
+branch that makes its own effect visible.
+
+The consequences, and the choice made:
+
+- The view's shape depends on the boundary and the key, and on nothing else. The
+  delta overlay is **permanent**: every cold-tier read carries
+  `NOT EXISTS (SELECT 1 FROM <delta> d WHERE <key match>)` plus a `DISTINCT ON`
+  branch over the delta.
+- `refresh_view()` is called only on a boundary advance, i.e. from `seal()` and
+  `create_table()` — never from inside a statement that reads the view.
+- Deferring the regeneration to commit (a deferred constraint trigger on the
+  delta) was rejected: it would leave the rest of the writing transaction reading
+  a view that does not know about its own write.
+- Per-partition `cold_dirty` state is still maintained, but it is now purely a
+  work list for `repair()` rather than an input to the plan.
+
+The cost of the permanent overlay is smaller than it looks, because the clean
+cold branch was never whole-query-pushdownable in the first place: under a
+`UNION ALL` the Iceberg branch is a `Foreign Scan` below an `Append`, so
+aggregation already happens in PostgreSQL (§13.5, option 1). What the anti-join
+adds is a hash probe per cold row against a table that is empty on a repaired
+table. What it costs is the *option* of pushing a single-tier cold query down as
+a whole query — and that is the concrete, measured argument for doing §5.3
+(CustomScan) and phase 9 rather than living with the view.
+
+### 18.5 Iceberg partition transform is aligned with the hot partitions
+
+`sync()` and `repair()` overwrite a whole partition range with `DELETE` +
+`INSERT`, and pg_lake turns a `DELETE` that matches whole Iceberg partitions into
+a metadata-only file removal instead of position deletes. The transform is
+therefore chosen to keep a hot partition inside one Iceberg partition:
+`hour(ts)` for `partition_interval <= 1 hour`, `day(ts)` otherwise. A sub-hour
+interval necessarily lands inside an hour partition and does pay for position
+deletes on re-sync.
+
+### 18.6 Freshness of the lagging copy
+
+`sync()` copies a hot partition into Iceberg once it is **complete**
+(`part_end <= now()`) and re-copies it only if it was written to since
+(`synced_at < part_end`). External Iceberg readers therefore see data up to the
+end of the last completed partition — "up to last night" for a daily interval —
+while PostgreSQL readers see everything. Nobody reads the copy through the view,
+so its staleness is not a correctness concern; `seal()` overwrites the range
+again before it becomes authoritative.
+
+### 18.7 Privileges: SECURITY INVOKER plus row-level security
+
+The API functions are `SECURITY INVOKER`, so `current_user` is the caller,
+`check_owner()` means something, and the hot/cold/delta objects a call creates are
+owned by the caller rather than by the extension owner. The extension catalogs are
+protected by RLS instead of by function privileges:
+
+- `timeseries.tables` / `timeseries.partitions` have RLS enabled and are granted
+  to `public`;
+- the `USING` clause restricts every row to a caller who owns the parent;
+- the `WITH CHECK` clause additionally requires ownership of **every relation the
+  row names**. This is what stops a user from registering a row that points the
+  superuser maintenance worker at someone else's table.
+
+`route_write()` is the one `SECURITY DEFINER` function: a grantee who has only
+`INSERT` on the view must still be able to write the heap, bump the sequence, and
+record a dirty partition. Everything it touches is derived from `TG_RELID`, which
+has to be a registered parent view. Making the whole API `SECURITY DEFINER` was
+tried and reverted: inside a definer function `current_user` is the definer, so
+`check_owner()` would succeed for anybody whenever the definer is a superuser, and
+there is no portable way to recover the invoker.
+
+### 18.8 Maintenance worker
+
+Registered through `pg_extension_base`'s base-worker framework
+(`extension_base.register_worker`), so there is one worker per database with the
+extension, started on `CREATE EXTENSION` and on server start. Each pass lists the
+enabled tables in one transaction and then runs `timeseries.maintain()` per table
+in its own transaction, downgrading errors to `WARNING` so one table cannot hold
+back the others. `maintain()` runs, in order: `add_partitions()` (extend the
+frontier), `repair()`, `sync()`, `seal()`, `apply_retention()` -- repair first, so
+that a partition is not copied into Iceberg and then immediately rematerialised.
+
+Two GUCs: `pg_lake_timeseries.enable` (default on) and
+`pg_lake_timeseries.maintenance_naptime`. The test suite pins `enable = off` and
+drives maintenance explicitly so that assertions about the boundary and the
+partition states are deterministic; one test re-enables it to prove the worker
+performs a pass.
+
+### 18.9 Tests
+
+`tests/pytests/test_timeseries.py`, 16 cases, run against a live pg_lake test
+cluster with the in-tree S3 mock. They assert the properties the design rests on
+rather than the implementation: the boundary decides which tier owns a row, the
+lagging Iceberg copy is never double-counted, tier elimination happens at plan
+time (`EXPLAIN` must not mention `Engine: DuckDB` for a hot-window query, nor a
+heap partition for a cold-window one), mutations below `B` are visible immediately
+and are folded back by `repair()` with identical results, a boundary advance is
+only ever the result of a completed seal, and a keyless table refuses mutations.
+
+Each test gets its own S3 prefix: `drop_table(drop_data => true)` leaves the
+Iceberg files behind, and `CREATE TABLE ... USING iceberg` refuses a non-empty
+location.
+
+### 18.10 Not implemented
+
+- **Phase 9 / §13.5 option 2** — heap RTEs in the whole-query pushdown. Without
+  it there is no vectorised cross-tier plan, `INSERT INTO <iceberg> SELECT ... FROM
+  <heap>` still falls back to the row-at-a-time FDW path (so `seal()` pays it),
+  and §18.4's permanent anti-join has no cheaper alternative.
+- **§5.3 CustomScan** — the view stand-in cannot specialise on dirty partitions
+  (§18.4) and cannot choose between `postgres_scan_pushdown` and `postgres_query`.
+- **§13.6 snapshot hunk** — not needed yet, because no reverse connection is
+  opened.
+- **Compaction** of the cold tier beyond `apply_retention()`, and the
+  `month`/`year` partition intervals of §18.2.
