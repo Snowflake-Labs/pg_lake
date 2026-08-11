@@ -328,6 +328,8 @@ static StartBaseWorkerResult StartBaseWorker(int workerId, Oid extensionId,
 static LockAcquireResult LockDatabaseStarter(Oid databaseId, LOCKMODE lockMode,
 											 bool waitForLock);
 
+static void WaitForBaseWorkerExit(int32 workerId, pid_t workerPid);
+
 /* functions called by base worker */
 static void PgExtensionBaseWorkerSharedMemoryExit(int code, Datum arg);
 
@@ -1832,7 +1834,19 @@ PgExtensionBaseWorkerMain(Datum arg)
 	 */
 	pqsignal(SIGTERM, die);
 
-	/* reset workerPid on exit */
+	/*
+	 * Reset workerPid on exit.
+	 *
+	 * This must stay registered before
+	 * BackgroundWorkerInitializeConnectionByOid below.  before_shmem_exit
+	 * callbacks fire in reverse registration order, so the connection's own
+	 * callbacks (ShutdownPostgres, ReplicationSlotShmemExit) run first and
+	 * clearing workerPid runs last.  That ordering is what lets
+	 * WaitForBaseWorkerExit treat a cleared workerPid as "locks released and
+	 * slot freed" rather than just "worker on its way out".  Moving this
+	 * below the connection setup, or switching it to on_shmem_exit, would
+	 * make that wait return too early.
+	 */
 	before_shmem_exit(PgExtensionBaseWorkerSharedMemoryExit, arg);
 
 	/*
@@ -2314,6 +2328,7 @@ DeregisterBaseWorker_internal(int32 workerId)
 	/* lock the shared hash, because we might change it */
 	LWLockAcquire(&BaseWorkerControl->lock, LW_EXCLUSIVE);
 
+	pid_t		signalledPid = 0;
 	bool		isFound = false;
 	BaseWorkerEntry *baseWorkerEntry = GetBaseWorkerEntry(MyDatabaseId, workerId, &isFound);
 
@@ -2336,13 +2351,91 @@ DeregisterBaseWorker_internal(int32 workerId)
 			 * PgExtensionBaseWorkerMain when it sees needsRestart is true.
 			 */
 			if (baseWorkerEntry->workerPid > 0)
+			{
+				signalledPid = baseWorkerEntry->workerPid;
 				kill(baseWorkerEntry->workerPid, SIGTERM);
+			}
 		}
 	}
 
 	LWLockRelease(&BaseWorkerControl->lock);
 
+	/*
+	 * Wait for a worker we just signalled to actually exit before returning.
+	 *
+	 * A caller typically deregisters a worker so it can then drop or alter
+	 * the resources the worker was using (a replication slot, a connection, a
+	 * table).  If we returned while the worker were still alive, that
+	 * follow-up work could block on -- or deadlock against -- locks the
+	 * worker still holds.
+	 *
+	 * SIGTERM is asynchronous, so signalling above does not guarantee the
+	 * worker is gone yet.  The worker clears its own workerPid under
+	 * BaseWorkerControl->lock in PgExtensionBaseWorkerSharedMemoryExit as it
+	 * exits, so waiting for that is race-free.  We do it after releasing the
+	 * lock so we do not block the worker's own shmem-exit cleanup.
+	 */
+	if (signalledPid > 0)
+		WaitForBaseWorkerExit(workerId, signalledPid);
+
 	PG_RETURN_VOID();
+}
+
+
+/*
+ * Bound on how long DeregisterBaseWorker_internal waits for a signalled
+ * worker to exit, and how often it re-checks.  The wait is best-effort: on
+ * timeout we log and proceed rather than error, matching the launcher's
+ * tolerant handling elsewhere.
+ */
+#define BASE_WORKER_EXIT_TIMEOUT_MS 30000
+#define BASE_WORKER_EXIT_POLL_MS 50
+
+/*
+ * WaitForBaseWorkerExit waits for the base worker (workerId, workerPid) to
+ * clear its workerPid in shared memory -- the signal, set under
+ * BaseWorkerControl->lock by PgExtensionBaseWorkerSharedMemoryExit, that the
+ * process has exited.  Comparing against the specific pid we signalled means
+ * a restart that reuses the entry with a fresh pid also ends the wait: our
+ * worker is gone either way.  Bounded by BASE_WORKER_EXIT_TIMEOUT_MS.
+ */
+static void
+WaitForBaseWorkerExit(int32 workerId, pid_t workerPid)
+{
+	TimestampTz deadline =
+		TimestampTzPlusMilliseconds(GetCurrentTimestamp(),
+									BASE_WORKER_EXIT_TIMEOUT_MS);
+
+	for (;;)
+	{
+		CHECK_FOR_INTERRUPTS();
+
+		/*
+		 * GetBaseWorkerPid returns 0 once the entry is gone, so an entry that
+		 * disappeared entirely also ends the wait.
+		 */
+		if (GetBaseWorkerPid(workerId) != workerPid)
+			return;
+
+		if (GetCurrentTimestamp() >= deadline)
+		{
+			ereport(WARNING,
+					(errmsg("base worker %d (pid %d) did not exit within %d ms "
+							"of SIGTERM; proceeding without waiting",
+							workerId, (int) workerPid,
+							BASE_WORKER_EXIT_TIMEOUT_MS)));
+			return;
+		}
+
+		int			waitResult =
+			WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
+					  BASE_WORKER_EXIT_POLL_MS, WAIT_EVENT_PG_SLEEP);
+
+		if (waitResult & WL_POSTMASTER_DEATH)
+			proc_exit(1);
+
+		ResetLatch(MyLatch);
+	}
 }
 
 
