@@ -116,19 +116,23 @@ def test_domain_over_array(extension, pg_conn, s3, with_default_location):
         -- domains can be stacked, both above and below the array type
         create domain nested_int_list as int_list;
         create domain still_positive as positive;
+        -- a domain over an array whose element type is itself a domain
+        create domain positive_list as positive[];
         create table domain_arrays (
             i int_list,
             t time_list,
             p positive[],
             n nested_int_list,
-            s still_positive[]
+            s still_positive[],
+            d positive_list
         ) using iceberg;
         insert into domain_arrays values (
             array[1, 2]::int_list,
             array['09:00:00+04'::timetz]::time_list,
             array[3, 4]::positive[],
             array[5, 6]::nested_int_list,
-            array[7, 8]::still_positive[]
+            array[7, 8]::still_positive[],
+            array[9, 10]::positive_list
         );
     """,
         pg_conn,
@@ -136,7 +140,8 @@ def test_domain_over_array(extension, pg_conn, s3, with_default_location):
     pg_conn.commit()
 
     result = run_query(
-        "SELECT i, t::text AS t, p::text AS p, n, s::text AS s FROM domain_arrays",
+        "SELECT i, t::text AS t, p::text AS p, n, s::text AS s, d::text AS d"
+        " FROM domain_arrays",
         pg_conn,
     )
     assert result[0]["i"] == [1, 2]
@@ -145,6 +150,7 @@ def test_domain_over_array(extension, pg_conn, s3, with_default_location):
     assert result[0]["t"] == "{05:00:00+00}"
     assert result[0]["n"] == [5, 6]
     assert result[0]["s"] == "{7,8}"
+    assert result[0]["d"] == "{9,10}"
 
     results = run_query(
         "SELECT metadata_location FROM lake_iceberg.tables"
@@ -159,6 +165,7 @@ def test_domain_over_array(extension, pg_conn, s3, with_default_location):
     assert fields["p"]["element"] == "int"
     assert fields["n"]["element"] == "int"
     assert fields["s"]["element"] == "int"
+    assert fields["d"]["element"] == "int"
 
     pg_conn.rollback()
     run_command("drop schema if exists test_domain_over_array cascade;", pg_conn)
