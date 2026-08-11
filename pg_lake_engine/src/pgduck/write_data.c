@@ -703,9 +703,13 @@ ChooseDuckDBEngineTypeForWrite(PGType postgresType,
 	 * This happens before we look for an array type, because a domain over an
 	 * array type (e.g. CREATE DOMAIN ints AS int[]) is an array itself, which
 	 * get_element_type would not see. Map types are domains too, but carry
-	 * special semantics and are left alone by ResolveDomainBaseType.
+	 * special semantics and are left alone by ResolveDomainBaseTypeAndTypmod.
+	 *
+	 * The type modifier comes along, because a domain column has atttypmod -1
+	 * and a domain over numeric(10,2) would otherwise look unbounded.
 	 */
-	postgresType.postgresTypeOid = ResolveDomainBaseType(postgresType.postgresTypeOid);
+	postgresType.postgresTypeOid = ResolveDomainBaseTypeAndTypmod(postgresType.postgresTypeOid,
+																  &postgresTypeMod);
 
 	Oid			elementTypeId = get_element_type(postgresType.postgresTypeOid);
 	bool		isArrayType = OidIsValid(elementTypeId);
@@ -716,7 +720,10 @@ ChooseDuckDBEngineTypeForWrite(PGType postgresType,
 	 * The element type can be a domain as well (e.g. a bytea domain).
 	 */
 	if (isArrayType)
-		postgresType.postgresTypeOid = ResolveDomainBaseType(elementTypeId);
+		postgresType.postgresTypeOid = ResolveDomainBaseTypeAndTypmod(elementTypeId,
+																	  &postgresTypeMod);
+
+	postgresType.postgresTypeMod = postgresTypeMod;
 
 	DuckDBType	duckTypeId = GetDuckDBTypeForPGType(postgresType);
 
