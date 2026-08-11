@@ -533,26 +533,16 @@ FileCacheManager::TryGetInodeStats(const string &path, int64_t &freeInodes,
  *
  * rmdir fails when the directory is not empty, which includes the case where a
  * concurrent operation added a file to it, so we simply stop pruning then.
+ *
+ * Both cacheDir and directory end in a slash, which is what makes comparing
+ * them enough to recognize the cache directory.
  */
 static int64_t
 PruneEmptyCacheDirectory(const string &cacheDir, string directory)
 {
 	int64_t removed = 0;
 
-	/*
-	 * We recognize the cache directory by comparing paths, so both of them need
-	 * to end in a slash. They do in practice, but the cost of being wrong here
-	 * is removing the cache directory itself, so we do not rely on it.
-	 */
-	string cacheDirWithSlash = cacheDir;
-	if (!StringUtil::EndsWith(cacheDirWithSlash, "/"))
-		cacheDirWithSlash += "/";
-
-	if (!StringUtil::EndsWith(directory, "/"))
-		directory += "/";
-
-	while (StringUtil::StartsWith(directory, cacheDirWithSlash) &&
-		   directory != cacheDirWithSlash)
+	while (StringUtil::StartsWith(directory, cacheDir) && directory != cacheDir)
 	{
 		/* rmdir does not want the trailing slash */
 		string dirWithoutSlash = directory;
