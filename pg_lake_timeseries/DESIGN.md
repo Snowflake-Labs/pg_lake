@@ -1293,3 +1293,38 @@ location.
   opened.
 - **Compaction** of the cold tier beyond `apply_retention()`, and the
   `month`/`year` partition intervals of §18.2.
+
+### 18.11 Phase 9 feasibility, measured
+
+Phase 9 is the highest-leverage remaining item, so its foundation was checked
+against the running `pgduck_server` (DuckDB v1.4.4) rather than left assumed. It
+holds:
+
+- The Postgres scanner is statically linked into `duckdb_pglake`
+  (`postgres_scanner_duckdb_cpp_init`, `duckdb_pglake_extension.cpp`), and the
+  in-tree `patches/duckdb-postgres/snapshot.patch` is live in the deployed
+  binary: `snapshot VARCHAR` is a named parameter of both `postgres_scan` and
+  `postgres_query`.
+- A heap table read through `postgres_scan(dsn, schema, table, snapshot => '<id>')`
+  observes exactly the exporting backend's snapshot. With three rows committed
+  before `pg_export_snapshot()` and a fourth committed after it, DuckDB returned
+  3 rows at the snapshot and 4 without it, and aggregated over the heap scan
+  inside DuckDB. This is the correctness property §5.4 depends on, confirmed
+  end to end.
+- `postgres_scan` takes a raw DSN, so no `ATTACH` is needed — which is fortunate,
+  because `ATTACH ... (TYPE postgres)` **fails** in this build: it lazily loads
+  the community `postgres_scanner` extension from `~/.duckdb/extensions`, which
+  collides with the statically linked copy (`function "postgres_scan" already
+  exists`). The DSN form is the only viable path.
+
+What remains is therefore planner and deparse work, not a missing engine
+capability:
+
+1. relax the `rte->rtekind == RTE_RELATION && !IsAnyLakeForeignTable(rte)`
+   rejection in `pg_lake_table/src/planner/query_pushdown.c` (behind a GUC),
+2. deparse an admitted heap RTE as `postgres_scan`/`postgres_query` in
+   `fdw/deparse.c`,
+3. export a snapshot in the driving backend and thread its id into the deparsed
+   call (§13.6),
+4. settle how the reverse connection authenticates, which §5.4 still lists as
+   open.
