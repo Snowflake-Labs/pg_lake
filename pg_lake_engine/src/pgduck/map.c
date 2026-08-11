@@ -237,6 +237,38 @@ ResolveDomainBaseType(Oid typeId)
 
 
 /*
+ * ResolveDomainBaseTypeAndTypmod is ResolveDomainBaseType, but it also reports
+ * the type modifier that belongs to the base type.
+ *
+ * A column whose type is a domain has atttypmod -1, because the modifier is
+ * part of the domain and not of the column, so callers that need e.g. the
+ * precision and scale of a numeric cannot get it from the attribute.  Without
+ * this, a domain over numeric(10,2) looks like an unbounded numeric.
+ *
+ * *typeMod is only overwritten when the caller does not have a modifier of its
+ * own, so an outer modifier keeps precedence over a nested one.  Note that
+ * getBaseTypeAndTypmod expects to start from -1 and asserts as much when it
+ * walks a stack of domains.
+ */
+Oid
+ResolveDomainBaseTypeAndTypmod(Oid typeId, int32 *typeMod)
+{
+	if (!IsMapTypeOid(typeId) && get_typtype(typeId) == TYPTYPE_DOMAIN)
+	{
+		int32		baseTypeMod = -1;
+		Oid			baseTypeId = getBaseTypeAndTypmod(typeId, &baseTypeMod);
+
+		if (*typeMod == -1)
+			*typeMod = baseTypeMod;
+
+		return baseTypeId;
+	}
+
+	return typeId;
+}
+
+
+/*
  * GetDuckDBMapDefinitionForPGType returns a type definition string for a DuckDB map type.
  */
 char *

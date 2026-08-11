@@ -182,15 +182,20 @@ PostgresTypeToIcebergField(PGType pgType, bool forAddColumn, int *subFieldIndex)
 	 * Unwrap domain types to their base type so that e.g. a domain over
 	 * integer maps to Iceberg "int" rather than falling through to the
 	 * default "string" case.  Map types are domains too but carry special
-	 * semantics; ResolveDomainBaseType leaves those unchanged.
+	 * semantics; ResolveDomainBaseTypeAndTypmod leaves those unchanged.
+	 *
+	 * The type modifier of the domain comes along, because a column whose
+	 * type is a domain has atttypmod -1, and a domain over numeric(10,2)
+	 * would otherwise be recorded as an unbounded decimal(38,9).
 	 */
 	{
-		Oid			baseTypeId = ResolveDomainBaseType(typeId);
+		Oid			baseTypeId = ResolveDomainBaseTypeAndTypmod(typeId, &typeMod);
 
 		if (baseTypeId != typeId)
 		{
 			typeId = baseTypeId;
 			pgType.postgresTypeOid = baseTypeId;
+			pgType.postgresTypeMod = typeMod;
 		}
 	}
 
