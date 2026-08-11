@@ -101,7 +101,11 @@ def test_domain_iceberg_field_type(extension, pg_conn, s3, with_default_location
 
 
 def test_domain_over_array(extension, pg_conn, s3, with_default_location):
-    """A domain over an array type is an array itself and must be written as a list."""
+    """A domain over an array type is an array itself and must be written as a list.
+
+    Domains can be stacked arbitrarily deep, and getBaseType() walks the whole
+    stack, so nesting resolves to the same list type.
+    """
     run_command(
         """
         create schema test_domain_over_array;
@@ -109,15 +113,22 @@ def test_domain_over_array(extension, pg_conn, s3, with_default_location):
         create domain int_list as int[];
         create domain time_list as timetz[];
         create domain positive as int check (value > 0);
+        -- domains can be stacked, both above and below the array type
+        create domain nested_int_list as int_list;
+        create domain still_positive as positive;
         create table domain_arrays (
             i int_list,
             t time_list,
-            p positive[]
+            p positive[],
+            n nested_int_list,
+            s still_positive[]
         ) using iceberg;
         insert into domain_arrays values (
             array[1, 2]::int_list,
             array['09:00:00+04'::timetz]::time_list,
-            array[3, 4]::positive[]
+            array[3, 4]::positive[],
+            array[5, 6]::nested_int_list,
+            array[7, 8]::still_positive[]
         );
     """,
         pg_conn,
@@ -125,12 +136,15 @@ def test_domain_over_array(extension, pg_conn, s3, with_default_location):
     pg_conn.commit()
 
     result = run_query(
-        "SELECT i, t::text AS t, p::text AS p FROM domain_arrays", pg_conn
+        "SELECT i, t::text AS t, p::text AS p, n, s::text AS s FROM domain_arrays",
+        pg_conn,
     )
     assert result[0]["i"] == [1, 2]
     assert result[0]["p"] == "{3,4}"
     # timetz is stored UTC-normalized because Iceberg has no timetz type
     assert result[0]["t"] == "{05:00:00+00}"
+    assert result[0]["n"] == [5, 6]
+    assert result[0]["s"] == "{7,8}"
 
     results = run_query(
         "SELECT metadata_location FROM lake_iceberg.tables"
@@ -143,6 +157,8 @@ def test_domain_over_array(extension, pg_conn, s3, with_default_location):
     assert fields["i"]["element"] == "int"
     assert fields["t"]["element"] == "time"
     assert fields["p"]["element"] == "int"
+    assert fields["n"]["element"] == "int"
+    assert fields["s"]["element"] == "int"
 
     pg_conn.rollback()
     run_command("drop schema if exists test_domain_over_array cascade;", pg_conn)
