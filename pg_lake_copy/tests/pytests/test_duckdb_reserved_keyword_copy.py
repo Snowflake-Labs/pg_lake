@@ -144,8 +144,6 @@ def test_copy_roundtrip_composite_with_embedded_quote(pg_conn, s3):
     COPY TO/FROM must handle composite types whose field names contain
     double-quote characters.  The STRUCT type definition sent to DuckDB must
     properly escape the embedded quotes.
-
-    Reproduces: https://github.com/snowflake-eng/sfpg-extension-pg_lake_replication/issues/361
     """
     url = f"s3://{TEST_BUCKET}/test_kw_copy_composite_quote/data.parquet"
 
@@ -208,8 +206,6 @@ def test_copy_roundtrip_csv_composite_with_embedded_quote(pg_conn, s3):
     """
     COPY TO/FROM CSV with composite types containing double-quote field names.
     This exercises the read_csv columns= type string path.
-
-    Reproduces: https://github.com/snowflake-eng/sfpg-extension-pg_lake_replication/issues/361
     """
     url = f"s3://{TEST_BUCKET}/test_kw_copy_csv_composite_quote/data.csv"
 
