@@ -726,8 +726,6 @@ def test_iceberg_composite_field_with_embedded_double_quote(pg_conn, s3, extensi
     DuckDB's type parser requires identifier quoting in STRUCT(...) type
     strings.  A field name like  has"quote  must be emitted as "has""quote"
     (standard SQL identifier escaping) rather than being passed through raw.
-
-    Reproduces: https://github.com/snowflake-eng/sfpg-extension-pg_lake_replication/issues/361
     """
     schema = "test_duckdb_kw_struct_quote"
     location = f"s3://{TEST_BUCKET}/{schema}/"
@@ -792,8 +790,6 @@ def test_iceberg_composite_field_with_special_characters(pg_conn, s3, extension)
 
     Exercises the STRUCT(...) type string path in read_data.c:GetSchemaType()
     and GetDuckDBStructDefinitionForCompositeType() in parse_struct.c.
-
-    Reproduces: https://github.com/snowflake-eng/sfpg-extension-pg_lake_replication/issues/361
     """
     schema = "test_duckdb_kw_struct_special"
     location = f"s3://{TEST_BUCKET}/{schema}/"

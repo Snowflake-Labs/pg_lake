@@ -72,6 +72,6 @@ extern PGDLLEXPORT void ApplyCompatibilityStorageMapping(Field * field,
 /*
  * True iff typeOid is, or contains at any depth, a pg_map type. Used to reject
  * map columns under compatibility_mode='snowflake' (Snowflake cannot represent
- * them, mirroring snowflake_cdc's restriction).
+ * them).
  */
 extern PGDLLEXPORT bool TypeContainsMap(Oid typeOid);
