@@ -1,11 +1,10 @@
 """
 Regression tests for ALLOW_TEMP_OBJECTS_BEGIN / ALLOW_TEMP_OBJECTS_END.
 
-PgLakeAddDataFileHook is an extension point used by sfpg-extension-pg_lake_replication
-(and any other module that needs to know which data file IDs were added in
-the current transaction). When the hook is set and returns true, pg_lake_table
-records each new data file ID in a per-transaction temp table created lazily
-inside SPI_START_EXTENSION_OWNER.
+PgLakeAddDataFileHook is an extension point used by modules that need to know
+which data file IDs were added in the current transaction. When the hook is set
+and returns true, pg_lake_table records each new data file ID in a
+per-transaction temp table created lazily inside SPI_START_EXTENSION_OWNER.
 
 Before ALLOW_TEMP_OBJECTS_BEGIN/END existed, the temp-table create ran under
 SECURITY_RESTRICTED_OPERATION, which PostgreSQL forbids: the temp namespace
@@ -103,8 +102,8 @@ def test_iceberg_dml_under_extension_owner(
 
     Downstream extensions that wrap their own SPI calls in
     SPI_START_EXTENSION_OWNER and then issue Iceberg DML hit this -- the
-    motivating example was sfpg-extension-pg_lake_replication's expiry path
-    running DELETE on the change-log Iceberg table.
+    motivating example was an extension's expiry path running DELETE on a
+    change-log Iceberg table.
     """
     # pg_conn is module-scoped, so each parametrization needs a distinct
     # table to avoid "relation already exists" on the second run.

@@ -1,4 +1,4 @@
--- Cleanup things that now belong to pg_lake_replication.
+-- Cleanup objects that now belong to the replication extension.
 --
 -- If we do not need a migration path forward, we can just drop these objects
 -- here and not care about existing tables in a replication set.

@@ -981,9 +981,9 @@ AppendIcebergSizeClampExpression(StringInfo buf, const char *expr,
  * unchanged.
  *
  * Both the INSERT..SELECT pushdown path (via WriteQueryResultTo) and the
- * snowflake_cdc snapshot path (via AddQueryResultToTable) flow through
- * this wrapper, so they share the same policy-driven behavior as the
- * per-tuple IcebergSizeCheckOrClampSlotInPlace path.
+ * bulk-load path (via AddQueryResultToTable) flow through this wrapper, so
+ * they share the same policy-driven behavior as the per-tuple
+ * IcebergSizeCheckOrClampSlotInPlace path.
  */
 char *
 IcebergWrapQueryWithSizeClampChecks(char *query, TupleDesc tupleDesc,
