@@ -222,23 +222,10 @@ GetMapCreateFunctionOid()
 
 
 /*
- * ResolveDomainBaseType returns the base type OID for a domain, or the OID
- * unchanged if it is not a domain.  Map types are domains with special
- * semantics and are left as-is.
- */
-Oid
-ResolveDomainBaseType(Oid typeId)
-{
-	if (!IsMapTypeOid(typeId) && get_typtype(typeId) == TYPTYPE_DOMAIN)
-		return getBaseType(typeId);
-
-	return typeId;
-}
-
-
-/*
- * ResolveDomainBaseTypeAndTypmod is ResolveDomainBaseType, but it also reports
- * the type modifier that belongs to the base type.
+ * ResolveDomainBaseTypeAndTypmod returns the base type OID for a domain, or the
+ * OID unchanged if it is not a domain, and also reports the type modifier that
+ * belongs to the base type.  Map types are domains with special semantics and
+ * are left as-is.
  *
  * A column whose type is a domain has atttypmod -1, because the modifier is
  * part of the domain and not of the column, so callers that need e.g. the
