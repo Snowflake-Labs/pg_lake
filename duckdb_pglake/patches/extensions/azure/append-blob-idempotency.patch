@@ -1,16 +1,8 @@
 diff --git a/src/azure_blob_filesystem.cpp b/src/azure_blob_filesystem.cpp
-index 796d5a2..6ff0274 100644
+index 796d5a2..beb5b4f 100644
 --- a/src/azure_blob_filesystem.cpp
 +++ b/src/azure_blob_filesystem.cpp
-@@ -19,6 +19,7 @@
- #include <azure/storage/blobs/blob_options.hpp>
- 
- #include <cstdlib>
-+#include <cstring>
- 
- namespace duckdb {
- 
-@@ -402,9 +403,67 @@ void AzureBlobStorageFileSystem::Write(FileHandle &handle, void *buffer, int64_t
+@@ -402,9 +402,31 @@ void AzureBlobStorageFileSystem::Write(FileHandle &handle, void *buffer, int64_t
  	// real. Only with AppendBlobClient is each append committed (sync'd).
  	auto append_client = afh.blob_client.AsAppendBlobClient();
  	auto body_stream = Azure::Core::IO::MemoryBodyStream(static_cast<uint8_t *>(buffer), nr_bytes);
@@ -25,57 +17,21 @@ index 796d5a2..6ff0274 100644
 +	Azure::Storage::Blobs::AppendBlockOptions options;
 +	options.AccessConditions.IfAppendPositionEqual = static_cast<int64_t>(afh.file_offset);
 +
-+	int64_t append_offset;
-+
 +	try {
 +		auto res = append_client.AppendBlock(body_stream, options);
 +		afh.last_modified = ToTimestamp(res.Value.LastModified);
-+		append_offset = res.Value.AppendOffset;
++		D_ASSERT(idx_t(res.Value.AppendOffset) == afh.file_offset);
 +	} catch (const Azure::Storage::StorageException &e) {
 +		if (int(e.StatusCode) != 412) {
 +			throw;
 +		}
 +
-+		// The blob does not end at the offset we expected. Either an earlier attempt at this very
-+		// append did reach the service and we are looking at a retry after a lost response, or
-+		// someone else is writing to the blob. To tell the two apart, the blob has to be exactly as
-+		// long as this append was supposed to make it, and it has to hold the bytes we are trying
-+		// to write at the offset we are trying to write them, so check both.
-+		auto res_props = afh.blob_client.GetProperties();
-+		if (res_props.Value.BlobSize != static_cast<int64_t>(afh.file_offset) + nr_bytes) {
-+			throw IOException("Failed to append %lld bytes at offset %lld of '%s': blob is %lld "
-+			                  "bytes, it is most likely being written to concurrently",
-+			                  nr_bytes, static_cast<int64_t>(afh.file_offset), afh.GetPath(),
-+			                  static_cast<int64_t>(res_props.Value.BlobSize));
-+		}
-+
-+		if (nr_bytes > 0) {
-+			Azure::Core::Http::HttpRange range;
-+			range.Offset = static_cast<int64_t>(afh.file_offset);
-+			range.Length = nr_bytes;
-+			Azure::Storage::Blobs::DownloadBlobToOptions download_options;
-+			download_options.Range = range;
-+
-+			auto written = make_unsafe_uniq_array<uint8_t>(static_cast<idx_t>(nr_bytes));
-+			afh.blob_client.DownloadTo(written.get(), nr_bytes, download_options);
-+
-+			if (memcmp(written.get(), buffer, nr_bytes) != 0) {
-+				throw IOException("Failed to append %lld bytes at offset %lld of '%s': the blob "
-+				                  "holds different bytes at that offset, it is most likely being "
-+				                  "written to concurrently",
-+				                  nr_bytes, static_cast<int64_t>(afh.file_offset), afh.GetPath());
-+			}
-+		}
-+
-+		afh.last_modified = ToTimestamp(res_props.Value.LastModified);
-+		append_offset = static_cast<int64_t>(afh.file_offset);
-+	}
-+
-+	if (append_offset != static_cast<int64_t>(afh.file_offset)) {
-+		// Should not happen, since we send the offset as a precondition, but if it ever does then
-+		// the file is not what we think it is and reporting success would corrupt it.
-+		throw IOException("Appended %lld bytes at offset %lld of '%s', but expected offset %lld", nr_bytes,
-+		                  append_offset, afh.GetPath(), static_cast<int64_t>(afh.file_offset));
++		// The blob does not end where we expect it to. Either this append is a retry of one that did
++		// reach the service, or someone else is writing to the blob. We cannot tell those apart
++		// here, and in both cases the file is not what we think it is, so fail the write.
++		throw IOException("Failed to append %lld bytes at offset %lld of '%s': the blob does not end "
++		                  "at that offset, it is most likely being written to concurrently",
++		                  nr_bytes, static_cast<int64_t>(afh.file_offset), afh.GetPath());
 +	}
 +
  	afh.file_offset += nr_bytes;
