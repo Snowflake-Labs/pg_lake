@@ -1862,7 +1862,19 @@ PgExtensionBaseWorkerMain(Datum arg)
 	 */
 	pqsignal(SIGTERM, die);
 
-	/* reset workerPid on exit */
+	/*
+	 * Reset workerPid on exit.
+	 *
+	 * This must stay registered before
+	 * BackgroundWorkerInitializeConnectionByOid below.  before_shmem_exit
+	 * callbacks fire in reverse registration order, so the connection's own
+	 * callbacks (ShutdownPostgres, ReplicationSlotShmemExit) run first and
+	 * clearing workerPid runs last.  That ordering is what lets
+	 * WaitForBaseWorkerExit treat a cleared workerPid as "locks released and
+	 * slot freed" rather than just "worker on its way out".  Moving this
+	 * below the connection setup, or switching it to on_shmem_exit, would
+	 * make that wait return too early.
+	 */
 	before_shmem_exit(PgExtensionBaseWorkerSharedMemoryExit, arg);
 
 	/*
