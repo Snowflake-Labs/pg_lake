@@ -1,8 +1,8 @@
 diff --git a/src/azure_blob_filesystem.cpp b/src/azure_blob_filesystem.cpp
-index 796d5a2..9838b66 100644
+index 796d5a2..beb5b4f 100644
 --- a/src/azure_blob_filesystem.cpp
 +++ b/src/azure_blob_filesystem.cpp
-@@ -402,9 +402,38 @@ void AzureBlobStorageFileSystem::Write(FileHandle &handle, void *buffer, int64_t
+@@ -402,9 +402,31 @@ void AzureBlobStorageFileSystem::Write(FileHandle &handle, void *buffer, int64_t
  	// real. Only with AppendBlobClient is each append committed (sync'd).
  	auto append_client = afh.blob_client.AsAppendBlobClient();
  	auto body_stream = Azure::Core::IO::MemoryBodyStream(static_cast<uint8_t *>(buffer), nr_bytes);
@@ -20,14 +20,7 @@ index 796d5a2..9838b66 100644
 +	try {
 +		auto res = append_client.AppendBlock(body_stream, options);
 +		afh.last_modified = ToTimestamp(res.Value.LastModified);
-+
-+		if (idx_t(res.Value.AppendOffset) != afh.file_offset) {
-+			// Cannot happen while the position condition holds, but if the service ever says it
-+			// appended somewhere else then the file is not what we think it is either.
-+			throw IOException("Appended %lld bytes at offset %lld of '%s', but expected offset %lld", nr_bytes,
-+			                  static_cast<int64_t>(res.Value.AppendOffset), afh.GetPath(),
-+			                  static_cast<int64_t>(afh.file_offset));
-+		}
++		D_ASSERT(idx_t(res.Value.AppendOffset) == afh.file_offset);
 +	} catch (const Azure::Storage::StorageException &e) {
 +		if (int(e.StatusCode) != 412) {
 +			throw;
