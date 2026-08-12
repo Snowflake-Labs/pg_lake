@@ -23,6 +23,7 @@
 #include "pg_lake/cleanup/in_progress_files.h"
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/pgduck/parallel_command.h"
+#include "pg_lake/storage/local_storage.h"
 #include "pg_lake/util/path_hash.h"
 #include "pg_lake/util/s3_reader_utils.h"
 #include "pg_lake/util/s3_writer_utils.h"
@@ -55,6 +56,35 @@ static HTAB *PendingUploads = NULL;
 
 /* pg_lake_engine.max_parallel_file_uploads setting */
 int			MaxParallelFileUploads = DEFAULT_MAX_PARALLEL_FILE_UPLOADS;
+
+
+/*
+ * GenerateTempFileNameForUpload returns the path of a temporary file that is
+ * going to be scheduled for upload with ScheduleFileCopyToS3WithCleanup.
+ *
+ * Callers could use GenerateTempFileName directly, but that ties the deletion
+ * of the local file to the caller's memory context, while the upload itself
+ * only happens when FinishAllUploads is called. That makes it unsafe for a
+ * caller to run in a context that is reset before then, which is easy to get
+ * wrong. Register the deletion on the upload scheduling context instead, so
+ * the local file lives exactly as long as the upload that needs it: it is
+ * deleted once the uploads are done, or when the transaction ends without
+ * them happening.
+ */
+char *
+GenerateTempFileNameForUpload(char *pattern)
+{
+	InitUploadScheduling();
+
+	MemoryContext oldContext = MemoryContextSwitchTo(UploadSchedulingContext);
+
+	bool		ensureCleanup = true;
+	char	   *localFilePath = GenerateTempFileName(pattern, ensureCleanup);
+
+	MemoryContextSwitchTo(oldContext);
+
+	return localFilePath;
+}
 
 
 /*

@@ -35,7 +35,7 @@
 int64_t
 UploadIcebergManifestListToURI(List *manifestList, char *manifestListURI)
 {
-	char	   *localManifestListPath = GenerateTempFileName(PG_LAKE_ICEBERG, true);
+	char	   *localManifestListPath = GenerateTempFileNameForUpload(PG_LAKE_ICEBERG);
 
 	WriteIcebergManifestList(localManifestListPath, manifestList);
 

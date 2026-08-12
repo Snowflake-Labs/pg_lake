@@ -405,7 +405,7 @@ WriteMetadataJsonToTemporaryFile(IcebergTableMetadata * metadata, FILE *file)
 void
 UploadTableMetadataToURI(IcebergTableMetadata * tableMetadata, char *metadataURI)
 {
-	char	   *localFilePath = GenerateTempFileName(PG_LAKE_ICEBERG, true);
+	char	   *localFilePath = GenerateTempFileNameForUpload(PG_LAKE_ICEBERG);
 
 	/* open the destination file for writing */
 	FILE	   *localFile = AllocateFile(localFilePath, PG_BINARY_W);
