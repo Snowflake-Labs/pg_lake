@@ -28,7 +28,9 @@ extern PGDLLEXPORT List *IcebergFindAllReferencedFiles(char *metadataPath);
 
 /*
  * A files hash is a path hash of PathHashEntry, so its entries are read as
- * PathHashEntry * rather than as the path itself.
+ * PathHashEntry * rather than as the path itself. AppendFileToHash copies the
+ * path into the caller's memory context, which therefore has to outlive the
+ * hash.
  */
 extern PGDLLEXPORT bool AppendFileToHash(const char *path, HTAB *referencedFilesHash);
 extern PGDLLEXPORT HTAB *CreateFilesHash(void);
