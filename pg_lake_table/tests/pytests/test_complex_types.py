@@ -444,3 +444,105 @@ def test_add_column_composite_with_dropped_attribute(
     pg_conn.rollback()
     run_command("DROP SCHEMA IF EXISTS dropped_attribute_add CASCADE;", pg_conn)
     pg_conn.commit()
+
+
+def _parquet_decimal_leaves(superuser_conn, pgduck_conn, qualified_table):
+    """
+    Return ``{leaf_name: (precision, scale)}`` for every DECIMAL leaf physically
+    present in the table's data files, read straight from the Parquet footer.
+    """
+    files = run_query(
+        f"SELECT path FROM lake_table.files "
+        f"WHERE table_name = '{qualified_table}'::regclass",
+        superuser_conn,
+    )
+    assert files, f"expected at least one data file for {qualified_table}"
+
+    leaves = {}
+    for (path,) in files:
+        rows = run_query(
+            "SELECT name, precision, scale FROM parquet_schema("
+            f"'{path}') WHERE converted_type = 'DECIMAL'",
+            pgduck_conn,
+        )
+        for name, precision, scale in rows:
+            leaves[name] = (precision, scale)
+
+    return leaves
+
+
+def test_numeric_typmod_inside_composite(
+    pg_conn, superuser_conn, pgduck_conn, extension, s3, with_default_location
+):
+    """
+    A numeric(p,s) field of a composite type must be written with its own
+    precision and scale, not DuckDB's default DECIMAL(18,3), which rounded the
+    value and disagreed with the decimal type declared in the Iceberg schema.
+    """
+    run_command(
+        """
+        CREATE SCHEMA numeric_typmod;
+        SET search_path TO numeric_typmod;
+        CREATE TYPE nested_slot AS (deep numeric(10,4));
+        CREATE TYPE slot AS (amount numeric(10,4),
+                             amounts numeric(10,4)[],
+                             sub nested_slot,
+                             label text);
+        CREATE TABLE slots (
+            id integer,
+            top numeric(10,4),
+            arr numeric(10,4)[],
+            nested slot,
+            nested_arr slot[]
+        ) USING iceberg;
+        INSERT INTO slots VALUES (
+            1,
+            1.2345,
+            ARRAY[1.2345::numeric(10,4)],
+            ROW(1.2345, ARRAY[1.2345::numeric(10,4)], ROW(1.2345)::nested_slot, 'x')::slot,
+            ARRAY[ROW(1.2345, ARRAY[1.2345::numeric(10,4)], ROW(1.2345)::nested_slot, 'y')::slot]
+        );
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # Every numeric must keep all four fractional digits, wherever it is nested.
+    res = run_query(
+        """
+        SELECT top, arr,
+               (nested).amount, (nested).amounts, ((nested).sub).deep,
+               (nested_arr[1]).amount, (nested_arr[1]).amounts,
+               ((nested_arr[1]).sub).deep
+        FROM slots WHERE id = 1
+        """,
+        pg_conn,
+    )
+    expected = Decimal("1.2345")
+    assert res[0] == [
+        expected,
+        [expected],
+        expected,
+        [expected],
+        expected,
+        expected,
+        [expected],
+        expected,
+    ]
+
+    # The Parquet footer must agree with the numeric(10,4) declared in Postgres
+    # (and hence with the decimal(10,4) in the Iceberg schema) for every leaf.
+    leaves = _parquet_decimal_leaves(
+        superuser_conn, pgduck_conn, "numeric_typmod.slots"
+    )
+    assert leaves == {
+        "top": (10, 4),
+        "element": (10, 4),
+        "amount": (10, 4),
+        "deep": (10, 4),
+    }, leaves
+
+    pg_conn.rollback()
+    run_command("DROP SCHEMA IF EXISTS numeric_typmod CASCADE;", pg_conn)
+    run_command("RESET search_path;", pg_conn)
+    pg_conn.commit()

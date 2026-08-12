@@ -296,10 +296,14 @@ ParseStructColumn(StructParserState * parse)
 	/*
 	 * If we are not a supported builting type, this should be InvalidOid,
 	 * which will later be assigned in the createUncreatedTypes() routine
+	 *
+	 * GetPGTypeForDuckDBTypeNameBuiltin only assigns typeMod for types that
+	 * carry one, so seed it with "no modifier" first.
 	 */
-	int			typeMod;
+	int			typeMod = -1;
 
 	myCol->colType = GetPGTypeForDuckDBTypeNameBuiltin(fieldType, &typeMod, isArray);
+	myCol->colTypeMod = typeMod;
 	myCol->colTypeName = fieldType;
 	myCol->isArray = isArray;
 	myCol->colName = fieldName;
@@ -1091,10 +1095,13 @@ GetDuckDBStructDefinitionForCompositeType(CompositeType * type,
 		{
 			/*
 			 * Now add our simple type string -- array handling added later,
-			 * so use underlying element type.
+			 * so use underlying element type.  The typmod has to travel with
+			 * the oid, otherwise a numeric(p,s) field would render as a bare
+			 * DECIMAL and DuckDB would resolve it to its own default.
 			 */
 
-			PGType		baseColumnType = MakePGTypeOid(GetRelatedTypeOid(col->colType, false));
+			PGType		baseColumnType = MakePGType(GetRelatedTypeOid(col->colType, false),
+													col->colTypeMod);
 			DuckDBType	duckDBType = GetDuckDBTypeForPGType(baseColumnType);
 
 			if (duckDBType)
@@ -1215,6 +1222,12 @@ GetCompositeTypeForPGType(Oid postgresType)
 
 		col->colType = GetRelatedTypeOid(rawTypid, false);
 		col->isArray = rawTypid != col->colType;
+
+		/*
+		 * atttypmod already refers to the element type for an array
+		 * attribute, so it pairs with the unwrapped colType either way.
+		 */
+		col->colTypeMod = attr->atttypmod;
 
 		/*
 		 * We need more info about this type than just the name, so already
