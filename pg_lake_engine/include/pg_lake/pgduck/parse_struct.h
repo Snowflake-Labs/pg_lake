@@ -42,6 +42,9 @@ typedef struct CompositeCol
 {
 	char	   *colName;		/* the column name */
 	Oid			colType;		/* our oid type, or 0 if not yet allocated  */
+	int32		colTypeMod;		/* typmod of colType, or -1 if none; for an
+								 * array field this is the element typmod, as
+								 * in pg_attribute.atttypmod */
 	char	   *colTypeName;	/* string version of the type */
 	CompositeType *subStruct;	/* for a non-composite type, NULL; for
 								 * composite, pointer to that type's struct */

@@ -22,6 +22,7 @@
 #include "pg_lake/pgduck/parse_struct.h"
 #include "pg_lake/pgduck/type.h"
 #include "pg_lake/pgduck/map.h"
+#include "pg_lake/pgduck/numeric.h"
 #include "pg_extension_base/extension_ids.h"
 #include "pg_lake/extensions/pg_map.h"
 #include "pg_lake/extensions/postgis.h"
@@ -532,7 +533,14 @@ GetFullDuckDBTypeNameForPGType(PGType postgresType, CopyDataFormat format)
 		/* get the element type and return [] after */
 		Oid			elementType = get_element_type(postgresType.postgresTypeOid);
 
-		return psprintf("%s[]", GetFullDuckDBTypeNameForPGType(MakePGTypeOid(elementType), format));
+		/*
+		 * A typmod on an array type always describes its element (that is how
+		 * pg_attribute.atttypmod stores it), so hand it to the element.
+		 */
+		return psprintf("%s[]",
+						GetFullDuckDBTypeNameForPGType(MakePGType(elementType,
+																  postgresType.postgresTypeMod),
+													   format));
 	}
 
 	if (myType == DUCKDB_TYPE_STRUCT)
@@ -547,15 +555,30 @@ GetFullDuckDBTypeNameForPGType(PGType postgresType, CopyDataFormat format)
 
 	const char *typeName = GetDuckDBTypeName(myType);
 
-	if (myType == DUCKDB_TYPE_DECIMAL && postgresType.postgresTypeMod != -1)
+	if (myType == DUCKDB_TYPE_DECIMAL)
 	{
-		StringInfo	typeNameWithMod = makeStringInfo();
+		/*
+		 * Decide the DECIMAL width exactly as the top-level column path does
+		 * (see ChooseDuckDBEngineTypeForWrite), so a numeric nested in a
+		 * struct, list or map is stored the same way as the same numeric in a
+		 * table column, and matches the decimal type the Iceberg schema
+		 * declares for it.  Notably, an unbounded numeric gets the configured
+		 * default precision/scale rather than DuckDB's own DECIMAL default,
+		 * which is narrower than what the CSV writer already lets through.
+		 */
+		int			precision = -1;
+		int			scale = -1;
 
-		appendStringInfo(typeNameWithMod, "%s(%d,%d)", typeName,
-						 numeric_typmod_precision(postgresType.postgresTypeMod),
-						 numeric_typmod_scale(postgresType.postgresTypeMod));
+		GetDuckdbAdjustedPrecisionAndScaleFromNumericTypeMod(postgresType.postgresTypeMod,
+															 &precision, &scale);
 
-		return typeNameWithMod->data;
+		if (!CanPushdownNumericToDuckdb(precision, scale))
+		{
+			/* too wide for DuckDB; fall back to text, as we do elsewhere */
+			return GetDuckDBTypeName(DUCKDB_TYPE_VARCHAR);
+		}
+
+		return psprintf("%s(%d,%d)", typeName, precision, scale);
 	}
 
 	return typeName;
