@@ -58,6 +58,162 @@ def test_write(superuser_conn, pg_extension_base):
     superuser_conn.rollback()
 
 
+def test_write_while_server_configured_read_only(superuser_conn, pg_extension_base):
+    """
+    An attached worker must inherit the caller's writability.
+
+    A background worker takes default_transaction_read_only from the
+    configuration files, so without inheriting the caller's state it would
+    refuse writes whenever the server is configured read-only -- even for a
+    caller that deliberately turned the setting off, which is how a background
+    worker keeps making progress while the server is held read-only (e.g. to
+    protect a nearly-full disk).
+
+    The opt-out has to happen outside a transaction to have any effect, since a
+    transaction takes its read-only state at start; that is also exactly what
+    such a worker does.
+    """
+    run_command("CREATE TABLE test_read_only_write (x int)", superuser_conn)
+    superuser_conn.commit()
+
+    try:
+        set_read_only(superuser_conn, "on")
+        set_session_read_only(superuser_conn, "off")
+
+        run_command(
+            "SELECT * FROM extension_base.run_attached("
+            "$$INSERT INTO test_read_only_write VALUES (1)$$)",
+            superuser_conn,
+        )
+
+        result = run_query("SELECT count(*) FROM test_read_only_write", superuser_conn)
+        assert result[0]["count"] == 1
+        superuser_conn.commit()
+    finally:
+        superuser_conn.rollback()
+        set_session_read_only(superuser_conn, None)
+        set_read_only(superuser_conn, None)
+
+    run_command("DROP TABLE test_read_only_write", superuser_conn)
+    superuser_conn.commit()
+
+
+def test_write_when_caller_set_transaction_read_write(
+    superuser_conn, pg_extension_base
+):
+    """
+    A caller can also make just its own transaction writable.
+
+    SET TRANSACTION READ WRITE (first statement of the transaction) leaves the
+    configured default read-only, so the worker has to look at the caller's
+    transaction state rather than at the configuration to get this right.
+    """
+    run_command("CREATE TABLE test_read_write_xact (x int)", superuser_conn)
+    superuser_conn.commit()
+
+    try:
+        set_read_only(superuser_conn, "on")
+        run_command("SET TRANSACTION READ WRITE", superuser_conn)
+
+        run_command(
+            "SELECT * FROM extension_base.run_attached("
+            "$$INSERT INTO test_read_write_xact VALUES (1)$$)",
+            superuser_conn,
+        )
+
+        result = run_query("SELECT count(*) FROM test_read_write_xact", superuser_conn)
+        assert result[0]["count"] == 1
+        superuser_conn.commit()
+    finally:
+        superuser_conn.rollback()
+        set_read_only(superuser_conn, None)
+
+    run_command("DROP TABLE test_read_write_xact", superuser_conn)
+    superuser_conn.commit()
+
+
+def test_no_write_when_the_caller_itself_is_read_only(
+    superuser_conn, pg_extension_base
+):
+    """
+    The worker must not outrun a caller that cannot write.
+
+    Clearing default_transaction_read_only inside a transaction does not lift
+    the restriction on that transaction, so the caller still cannot write and
+    neither may the worker -- inheriting writability must not turn
+    run_attached() into a way around the caller's own read-only state.
+    """
+    run_command("CREATE TABLE test_read_only_caller (x int)", superuser_conn)
+    superuser_conn.commit()
+
+    try:
+        set_read_only(superuser_conn, "on")
+        run_command("SET default_transaction_read_only = off", superuser_conn)
+
+        error = run_command(
+            "SELECT * FROM extension_base.run_attached("
+            "$$INSERT INTO test_read_only_caller VALUES (1)$$)",
+            superuser_conn,
+            raise_error=False,
+        )
+        assert error is not None
+        assert "read-only transaction" in error
+    finally:
+        superuser_conn.rollback()
+        set_read_only(superuser_conn, None)
+
+    run_command("DROP TABLE test_read_only_caller", superuser_conn)
+    superuser_conn.commit()
+
+
+def set_session_read_only(conn, value):
+    """
+    Set (or reset, value None) default_transaction_read_only for this session,
+    outside a transaction so that the transactions which follow pick it up.
+    """
+    conn.rollback()
+    conn.autocommit = True
+    try:
+        if value is None:
+            run_command("RESET default_transaction_read_only", conn)
+        else:
+            run_command(f"SET default_transaction_read_only = {value}", conn)
+    finally:
+        conn.autocommit = False
+
+
+def set_read_only(conn, value):
+    """
+    Configure default_transaction_read_only server-wide, or reset it (value
+    None), and wait until this backend has applied the change.  pg_reload_conf()
+    only signals the backends, so without the wait the next transaction may
+    still run with the previous setting.
+    """
+    conn.rollback()
+    conn.autocommit = True
+    try:
+        if value is None:
+            run_command("ALTER SYSTEM RESET default_transaction_read_only", conn)
+        else:
+            run_command(
+                f"ALTER SYSTEM SET default_transaction_read_only = {value}", conn
+            )
+        run_command("SELECT pg_reload_conf()", conn)
+
+        expected = "off" if value is None else value
+        deadline = time.time() + 10
+        while True:
+            applied = run_query("SHOW default_transaction_read_only", conn)[0][0]
+            if applied == expected:
+                break
+            assert (
+                time.time() < deadline
+            ), f"default_transaction_read_only stayed {applied} after reload"
+            time.sleep(0.1)
+    finally:
+        conn.autocommit = False
+
+
 def test_error_in_worker(superuser_conn, pg_extension_base):
     # Test error handling
     error = run_command(
