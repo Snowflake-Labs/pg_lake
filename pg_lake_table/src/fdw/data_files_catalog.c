@@ -278,6 +278,14 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
 		 */
 		if (!fileFound)
 		{
+			/*
+			 * dynahash only fills in the key of a new entry, so clear the
+			 * rest before we start filling it in. Callers are allowed to copy
+			 * a TableDataFile out of the hash, and the fields this function
+			 * does not set (such as stats.dataFilePath) are pointers.
+			 */
+			memset(dataFile, 0, sizeof(TableDataFile));
+
 			dataFile->fileId = fileId;
 
 			bool		isPathNull = false;

@@ -31,6 +31,7 @@
 #include "pg_lake/iceberg/metadata_operations.h"
 #include "pg_lake/iceberg/operations/find_referenced_files.h"
 #include "pg_lake/iceberg/operations/manifest_merge.h"
+#include "pg_lake/iceberg/partitioning/partition.h"
 #include "pg_lake/iceberg/partitioning/spec_generation.h"
 #include "pg_lake/partitioning/partition_spec_catalog.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
@@ -101,6 +102,7 @@ static List *FindNewPartitionSpecsSinceMetadata(HTAB *currentSpecs, IcebergTable
 static IcebergTableMetadata * GetLastPushedIcebergMetadata(const TableMetadataOperationTracker * opTracker);
 static List *GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 										   List *allTransforms);
+static TableMetadataOperation * CopyAddDataFileOperation(const TableDataFile * dataFile);
 static List *GetDDLMetadataOperations(const TableMetadataOperationTracker * opTracker);
 static void DeleteInProgressAddedFiles(Oid relationId, List *addedFiles);
 static bool AreSchemasEqual(IcebergTableSchema * existingSchema, DataFileSchema * newSchema);
@@ -911,6 +913,25 @@ ApplyTrackedIcebergMetadataChanges(bool isVerbose)
 	HASH_SEQ_STATUS status;
 	TableMetadataOperationTracker *opTracker;
 
+	/*
+	 * Everything we do per relation below — the data file diff, the
+	 * metadata operations, the new Iceberg metadata and manifests — is only
+	 * needed while that relation is being processed. A transaction that
+	 * writes to many lake tables would otherwise pay the sum of the
+	 * per-relation peaks instead of the largest one, so reset a scratch
+	 * context between relations.
+	 *
+	 * What has to outlive an iteration already lives elsewhere: the files
+	 * staged for upload, and the local temp files holding their contents, are
+	 * held by the upload scheduling context, and REST catalog request bodies
+	 * are copied into TopTransactionContext by RecordRestCatalogRequestInTx.
+	 */
+	MemoryContext outerContext = CurrentMemoryContext;
+	MemoryContext perRelationContext =
+		AllocSetContextCreate(CurrentMemoryContext,
+							  "pg_lake per-relation metadata changes",
+							  ALLOCSET_DEFAULT_SIZES);
+
 	hash_seq_init(&status, trackedRelations);
 	while ((opTracker = hash_seq_search(&status)) != NULL)
 	{
@@ -919,6 +940,8 @@ ApplyTrackedIcebergMetadataChanges(bool isVerbose)
 		/* relation is dropped */
 		if (!RelationExistsInTheIcebergCatalog(relationId))
 			continue;
+
+		MemoryContextSwitchTo(perRelationContext);
 
 		List	   *allTransforms = AllPartitionTransformList(relationId);
 
@@ -1001,7 +1024,12 @@ ApplyTrackedIcebergMetadataChanges(bool isVerbose)
 			}
 
 		}
+
+		MemoryContextSwitchTo(outerContext);
+		MemoryContextReset(perRelationContext);
 	}
+
+	MemoryContextDelete(perRelationContext);
 
 	/* now write all the metadata files to object storage in parallel */
 	FinishAllUploads();
@@ -1360,6 +1388,23 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 							  List *allTransforms)
 {
 	/*
+	 * The catalog read below is proportional to the number of files in the
+	 * table, while the operations we return are proportional to the number of
+	 * files this transaction changed. Read into a scratch context so the
+	 * difference does not survive until the end of the transaction: the path,
+	 * partition values and column stats of every file in the table are
+	 * allocated per file, and until now they were allocated in the caller's
+	 * context and stayed there long after the diff was done.
+	 */
+	MemoryContext resultContext = CurrentMemoryContext;
+	MemoryContext catalogContext =
+		AllocSetContextCreate(CurrentMemoryContext,
+							  "pg_lake pre-commit data file diff",
+							  ALLOCSET_DEFAULT_SIZES);
+
+	MemoryContextSwitchTo(catalogContext);
+
+	/*
 	 * get current state of data files, which are not applied to metadata yet,
 	 * from catalog
 	 *
@@ -1399,6 +1444,9 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 	if (opTracker->relationDataFilesRemoveAllSeen &&
 		hash_get_num_entries(currentFilesMap) == 0)
 	{
+		MemoryContextSwitchTo(resultContext);
+		MemoryContextDelete(catalogContext);
+
 		TableMetadataOperation *removeAllOp = palloc0(sizeof(TableMetadataOperation));
 
 		removeAllOp->type = DATA_FILE_REMOVE_ALL;
@@ -1430,6 +1478,14 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 	 */
 	DeleteInProgressAddedFiles(opTracker->relationId, addedFiles);
 
+	/*
+	 * Build the operations we return in the caller's context. Everything they
+	 * point to is copied out of the scratch context, so the memory we keep is
+	 * proportional to the files this transaction changed rather than to the
+	 * files in the table.
+	 */
+	MemoryContextSwitchTo(resultContext);
+
 	List	   *metadataOperations = NIL;
 
 	/* create operations for added files */
@@ -1439,11 +1495,8 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 	{
 		TableDataFile *addedFile = lfirst(addedFileCell);
 
-		TableMetadataOperation *addFileOp =
-			AddDataFileOperation(addedFile->path, addedFile->content, &addedFile->stats,
-								 addedFile->partition, addedFile->partitionSpecId);
-
-		metadataOperations = lappend(metadataOperations, addFileOp);
+		metadataOperations = lappend(metadataOperations,
+									 CopyAddDataFileOperation(addedFile));
 	}
 
 	/* create operations for removed files */
@@ -1453,22 +1506,49 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 	{
 		char	   *removedFilePath = lfirst(removedFileCell);
 
-		TableMetadataOperation *removedFileOp = RemoveDataFileOperation(removedFilePath);
+		TableMetadataOperation *removedFileOp = RemoveDataFileOperation(pstrdup(removedFilePath));
 
 		metadataOperations = lappend(metadataOperations, removedFileOp);
 	}
 
 	/*
-	 * The path index over the catalog file list is only needed for the diff
-	 * above, so drop it now rather than leaving one per relation behind until
-	 * the transaction ends. The operations we return do not point into it:
-	 * the path, partition and column stats of each added file were allocated
-	 * separately and outlive it, and the removed paths are copies. addedFiles
-	 * does point into it, so it must not be used after this.
+	 * The catalog file list, the path index over it and the paths of the last
+	 * pushed metadata were only needed to compute the operations above, and
+	 * are the widest thing we allocate per file. Drop them now rather than
+	 * leaving one set per relation behind until the transaction ends. Nothing
+	 * we return points into them: the operations carry their own copies, and
+	 * addedFiles / removedFilePaths must not be used after this.
 	 */
-	hash_destroy(currentFilesMap);
+	MemoryContextDelete(catalogContext);
 
 	return metadataOperations;
+}
+
+
+/*
+ * CopyAddDataFileOperation creates a DATA_FILE_ADD operation for the given data
+ * file in the current memory context, deep copying everything the operation
+ * points to.
+ *
+ * The data file itself lives in the scratch context that GetDataFileMetadataOperations
+ * reads the catalog into, and that context is gone by the time the operation is
+ * applied, so the operation cannot alias the path, stats or partition of it.
+ */
+static TableMetadataOperation *
+CopyAddDataFileOperation(const TableDataFile * dataFile)
+{
+	DataFileStats *copiedStats = DeepCopyDataFileStats(&dataFile->stats);
+
+	/*
+	 * The catalog read always gives a data file a Partition, empty for an
+	 * unpartitioned table, but do not rely on that here.
+	 */
+	Partition  *copiedPartition =
+		dataFile->partition != NULL ? CopyPartition(dataFile->partition) : NULL;
+
+	return AddDataFileOperation(pstrdup(dataFile->path), dataFile->content,
+								copiedStats, copiedPartition,
+								dataFile->partitionSpecId);
 }
 
 
