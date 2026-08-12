@@ -961,8 +961,8 @@ def test_nested_unbounded_numeric(pg_conn, tmp_path, kind):
 
     # An oversized numeric leaf (30 integral digits) is rejected wherever it
     # sits in the nested structure. (The within-cap acceptance path is covered
-    # by test_nested_numeric_roundtrip; a nested numeric Parquet write is a
-    # separate concern from the digit-limit validation exercised here.)
+    # by test_nested_numeric_roundtrip for a top-level array and by
+    # test_nested_unbounded_numeric_at_limit_roundtrip for every other shape.)
     error = run_command(
         f"COPY ({_nested_numeric_select(kind, over, over)}) "
         f"TO '{parquet_path}' WITH (format 'parquet')",
@@ -1009,6 +1009,157 @@ def test_nested_numeric_roundtrip(pg_conn, tmp_path):
     )
     result = run_query("SELECT a FROM test_num_array", pg_conn)
     assert result[0]["a"] == [Decimal("500.00"), Decimal(NUMERIC_AT_LIMIT)]
+
+    pg_conn.rollback()
+
+
+# Where the round-trip leaves the value, per nested shape: the column type that
+# can hold what _nested_numeric_select() produces, and the expression that digs
+# the numeric leaf back out of it. Comparing the leaf rather than the whole
+# container keeps the assertion on the value: a numeric that went through
+# DECIMAL(38,9) comes back with nine fractional digits, which compares equal as
+# a Decimal but not as the composite's text output.
+_NESTED_NUMERIC_ROUNDTRIP = {
+    "array": ("numeric[]", "v[2]"),
+    "composite": ("lake_struct.cost_pair", "(v).amount"),
+    "map": ("map_type.key_int_val_numeric", "(v[2]).val"),
+    "domain_scalar": ("cost_scalar", "v"),
+    "array_of_composite": ("lake_struct.cost_pair[]", "(v[2]).amount"),
+}
+
+# "domain_array" is left out: writing a domain over an array is rejected before
+# any value is looked at ('Value "LIST" can not be converted to a DuckDB Type'),
+# for any element type, so there is no round-trip to observe. It stays in
+# test_nested_unbounded_numeric above, where the numeric validation rejects the
+# value before the write is attempted.
+_NESTED_NUMERIC_ROUNDTRIP_KINDS = [
+    kind for kind in NESTED_NUMERIC_KINDS if kind in _NESTED_NUMERIC_ROUNDTRIP
+]
+
+
+@pytest.mark.parametrize("kind", _NESTED_NUMERIC_ROUNDTRIP_KINDS)
+def test_nested_unbounded_numeric_at_limit_roundtrip(pg_conn, tmp_path, kind):
+    """A numeric leaf exactly at the digit cap survives the round-trip.
+
+    The cap the COPY TO validation enforces (29 integral digits) is derived from
+    DECIMAL(38,9), so a leaf that passes validation must also be written as
+    DECIMAL(38,9). A nested leaf used to lose its type modifier on the way to
+    DuckDB and be written as a bare DECIMAL -- DECIMAL(18,3) -- which cannot
+    hold a value the validation had just accepted.
+    """
+    parquet_path = tmp_path / "test.parquet"
+
+    _create_nested_numeric_types(pg_conn)
+
+    at_limit = str(NUMERIC_AT_LIMIT)
+    column_type, leaf = _NESTED_NUMERIC_ROUNDTRIP[kind]
+
+    run_command(
+        f"""
+        CREATE TABLE test_nested_at_limit (v {column_type});
+        COPY ({_nested_numeric_select(kind, at_limit, at_limit)})
+        TO '{parquet_path}' WITH (format 'parquet');
+        COPY test_nested_at_limit FROM '{parquet_path}' WITH (format 'parquet');
+        """,
+        pg_conn,
+    )
+
+    result = run_query(f"SELECT {leaf} AS leaf FROM test_nested_at_limit", pg_conn)
+    assert result[0]["leaf"] == Decimal(NUMERIC_AT_LIMIT), kind
+
+    pg_conn.rollback()
+
+
+# One composite carrying every numeric flavor that maps to a different DuckDB
+# type, so a single Parquet footer shows what each nesting position did with it.
+# Field names avoid DuckDB keywords (UNBOUNDED is one) to keep the expected
+# STRUCT strings free of quoting unrelated to what is being tested.
+_NUM_FLAVORS_ROW = (
+    "ROW(1.5, 1.2345, 123456789012345678901234.99, "
+    "ARRAY[1.2345::numeric(10,4)], ARRAY[1.5::numeric])::lake_struct.num_flavors"
+)
+
+_NUM_FLAVORS_STRUCT = (
+    "STRUCT(plain DECIMAL(38,9), bounded DECIMAL(10,4), wide VARCHAR, "
+    "bounded_arr DECIMAL(10,4)[], plain_arr DECIMAL(38,9)[])"
+)
+
+# Every leaf of the table below, so the values can be compared before and after
+# the round-trip without going through a composite's text output.
+_NUM_FLAVORS_LEAVES = """
+    SELECT (flavors).plain, (flavors).bounded, (flavors).wide,
+           (flavors).bounded_arr, (flavors).plain_arr,
+           ((wrapped).leaf).plain, ((wrapped).leaf).wide,
+           (flavor_arr[1]).bounded, (flavor_arr[1]).wide,
+           (num_map[1]).val
+    FROM %s
+"""
+
+
+def test_nested_numeric_parquet_types(pg_conn, duckdb_conn, tmp_path):
+    """A numeric leaf gets the same DuckDB type wherever it is nested.
+
+    That is the mapping test_types asserts for top-level columns: an unbounded
+    numeric becomes DECIMAL(38,9) (the configured default precision and scale),
+    numeric(P,S) becomes DECIMAL(P,S), and a numeric too wide for DuckDB falls
+    back to VARCHAR. Nested leaves used to be written as a bare DuckDB DECIMAL,
+    which both rounded the value to three fractional digits and disagreed with
+    the type the same numeric gets at the top level.
+    """
+    parquet_path = tmp_path / "nested_numeric_types.parquet"
+
+    _create_nested_numeric_types(pg_conn)
+    run_command(
+        f"""
+        CREATE TYPE lake_struct.num_flavors AS (
+            plain numeric,
+            bounded numeric(10,4),
+            wide numeric(39,2),
+            bounded_arr numeric(10,4)[],
+            plain_arr numeric[]
+        );
+        CREATE TYPE lake_struct.num_wrapper AS (leaf lake_struct.num_flavors);
+        CREATE TABLE test_num_flavors (
+            flavors lake_struct.num_flavors,
+            wrapped lake_struct.num_wrapper,
+            flavor_arr lake_struct.num_flavors[],
+            num_map map_type.key_int_val_numeric
+        );
+        INSERT INTO test_num_flavors VALUES (
+            {_NUM_FLAVORS_ROW},
+            ROW({_NUM_FLAVORS_ROW})::lake_struct.num_wrapper,
+            ARRAY[{_NUM_FLAVORS_ROW}],
+            '{{"(1,1.5)","(2,{NUMERIC_AT_LIMIT})"}}'::map_type.key_int_val_numeric
+        );
+        COPY test_num_flavors TO '{parquet_path}' WITH (format 'parquet');
+        """,
+        pg_conn,
+    )
+
+    duckdb_conn.execute("DESCRIBE SELECT * FROM read_parquet($1)", [str(parquet_path)])
+    written_types = {name: type_name for name, type_name, *_ in duckdb_conn.fetchall()}
+
+    assert written_types == {
+        "flavors": _NUM_FLAVORS_STRUCT,
+        "wrapped": f"STRUCT(leaf {_NUM_FLAVORS_STRUCT})",
+        "flavor_arr": f"{_NUM_FLAVORS_STRUCT}[]",
+        "num_map": "MAP(INTEGER, DECIMAL(38,9))",
+    }
+
+    # And the values themselves come back unrounded, including through the
+    # VARCHAR fallback for the leaf DuckDB cannot store as a DECIMAL.
+    before = run_query(_NUM_FLAVORS_LEAVES % "test_num_flavors", pg_conn)
+
+    run_command(
+        f"""
+        CREATE TABLE test_num_flavors_after (LIKE test_num_flavors);
+        COPY test_num_flavors_after FROM '{parquet_path}' WITH (format 'parquet');
+        """,
+        pg_conn,
+    )
+
+    after = run_query(_NUM_FLAVORS_LEAVES % "test_num_flavors_after", pg_conn)
+    assert after == before
 
     pg_conn.rollback()
 
