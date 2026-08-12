@@ -95,7 +95,23 @@ def test_partitioning(s3, pg_conn, extension, with_default_location):
     )
     assert result[0]["count"] == 20
 
-    # So far we do not expect partitioned table queries to delegate
+    # A partitioned table whose partitions are all lake tables holds no data of
+    # its own, so it delegates as the UNION of its partitions, like an
+    # inheritance tree does
+    result = run_query(
+        f"""
+        explain (format 'json') select * from parent
+    """,
+        pg_conn,
+    )
+    full_plan = result[0][0][0]["Plan"]
+    duckdb_plan = full_plan["Plans"][0]
+    assert full_plan["Node Type"] == "Custom Scan"
+    assert duckdb_plan["Node Type"] == "UNION"
+
+    # ... unless whole-query pushdown is off, in which case Postgres scans the
+    # partitions one by one
+    run_command("SET LOCAL pg_lake_table.enable_full_query_pushdown TO false", pg_conn)
     result = run_query(
         f"""
         explain (format 'json') select * from parent

@@ -445,6 +445,89 @@ def test_cross_tier_aggregate(ts_table, pg_conn):
     assert plan.count(DUCKDB) == 1, plan
 
 
+def test_cross_tier_aggregate_in_one_vectorized_plan(ts_table, pg_conn):
+    """With heap pushdown on, a spanning query is a single DuckDB plan.
+
+    DESIGN.md section 13.5, option 2: pg_lake_table admits the hot tier and the
+    delta into whole-query pushdown, reading them back over a loopback
+    connection at the pinned snapshot of this transaction, so the aggregate runs
+    once in DuckDB instead of once per branch in PostgreSQL.
+    """
+    ts_table("metrics")
+
+    run_command(
+        """
+        INSERT INTO metrics
+        SELECT now() - interval '1 day' - interval '1 hour' * s, s % 3, s
+          FROM generate_series(1, 12) s
+        """,
+        pg_conn,
+    )
+    run_command(
+        "SELECT timeseries.seal('metrics', upto => date_trunc('day', now()))", pg_conn
+    )
+    run_command(
+        """
+        INSERT INTO metrics
+        SELECT now() - interval '1 hour' * s, s % 3, 100 + s
+          FROM generate_series(1, 6) s
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    query = "SELECT count(*), sum(value) FROM metrics"
+    expected = tuple(run_query(query, pg_conn)[0])
+    pg_conn.commit()
+    assert expected[0] == 18
+
+    # the hot tier and the delta are scanned by PostgreSQL, and only the cold
+    # branch is vectorized
+    plan = str(run_query("EXPLAIN " + query, pg_conn))
+    pg_conn.commit()
+    assert "Custom Scan (Query Pushdown)" not in plan, plan
+    assert "Heap Scan on metrics_hot" in plan, plan
+    assert "metrics_delta" in plan, plan
+
+    # a query restricted to the hot window prunes the cold tier at plan time
+    # (DESIGN.md section 18.3), so no cold file is opened for it
+    boundary = run_query("SELECT date_trunc('day', now())::text", pg_conn)[0][0]
+    hot_only = f"SELECT count(*) FROM metrics WHERE ts >= '{boundary}'::timestamptz"
+    hot_plan = str(run_query("EXPLAIN (ANALYZE, VERBOSE) " + hot_only, pg_conn))
+    pg_conn.commit()
+    assert "Data Files Scanned" not in hot_plan, hot_plan
+
+    run_command("SET pg_lake_table.enable_heap_query_pushdown TO on", pg_conn)
+    pg_conn.commit()
+    try:
+        # now the whole view, both tiers and the delta, is one DuckDB plan
+        plan = str(run_query("EXPLAIN " + query, pg_conn))
+        pg_conn.commit()
+        assert plan.count(DUCKDB) == 1, plan
+        assert plan.count("Custom Scan (Query Pushdown)") == 1, plan
+        assert "Heap Scan" not in plan, plan
+        assert "Append" not in plan, plan
+
+        assert tuple(run_query(query, pg_conn)[0]) == expected
+        pg_conn.commit()
+
+        # The hot-window query is pushed down as a whole too, and that costs the
+        # plan-time tier elimination above: DuckDB gets the cold branch with a
+        # contradictory ts range rather than the planner dropping it. The answer
+        # is the same and the row groups are skipped, but the two cold files are
+        # opened (DESIGN.md section 18.11).
+        assert run_query(hot_only, pg_conn)[0][0] == 6
+        pg_conn.commit()
+
+        hot_plan = str(run_query("EXPLAIN (ANALYZE, VERBOSE) " + hot_only, pg_conn))
+        pg_conn.commit()
+        assert hot_plan.count("Custom Scan (Query Pushdown)") == 1, hot_plan
+        assert "Data Files Scanned: 2" in hot_plan, hot_plan
+    finally:
+        run_command("RESET pg_lake_table.enable_heap_query_pushdown", pg_conn)
+        pg_conn.commit()
+
+
 def test_upsert_on_the_hot_tier(ts_table, pg_conn):
     ts_table("metrics", upsert="true")
 

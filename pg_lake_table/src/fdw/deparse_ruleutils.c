@@ -170,7 +170,7 @@ ReplacePgLakeTableWalker(Node *node, ReplacePgLakeTableContext * context)
 
 	RangeTblEntry *rte = (RangeTblEntry *) node;
 
-	if (IsAnyLakeForeignTable(rte))
+	if (IsAnyLakeRelation(rte))
 	{
 		char	   *qualifiedRelationName = GetQualifiedRelationName(rte->relid);
 

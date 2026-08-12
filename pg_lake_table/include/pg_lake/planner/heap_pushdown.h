@@ -15,22 +15,22 @@
  * limitations under the License.
  */
 
-/*-------------------------------------------------------------------------
- *
- * transform_query_to_duckdb.c
- *		  Apply any transformations to the query before sending it to duckdb.
- *-------------------------------------------------------------------------
- */
+#pragma once
+
 #include "postgres.h"
 
-#include "pg_lake/fdw/snapshot.h"
 #include "nodes/parsenodes.h"
+#include "nodes/pg_list.h"
 
-#define EXPLAIN_REQUESTED (1 << 0)
-#define SKIP_FULL_MATCH_FILES (1 << 1)
+/* pg_lake_table.enable_heap_query_pushdown setting */
+extern bool EnableHeapQueryPushdown;
 
-extern char *ReplaceReadTableFunctionCalls(char *query,
-										   PgLakeScanSnapshot * snapshot,
-										   int scanFlags);
-extern char *BuildReadTablePlaceholderCall(char *qualifiedRelationName,
-										   int uniqueRelationIdentifier);
+/* pg_lake_table.heap_pushdown_dsn setting */
+extern char *HeapPushdownDSN;
+
+extern bool HeapRteIsPushdownable(RangeTblEntry *rte);
+extern bool HeapRteIsRelationPushdownable(RangeTblEntry *rte);
+extern bool AllInheritorsArePushdownableHeap(Oid parentRelationId);
+extern List *ReplaceHeapTableWithReadTableFunc(Node *node);
+extern char *ReplaceHeapTableFunctionCalls(char *query, List *heapRteList,
+										   bool explainRequested);

@@ -38,6 +38,7 @@
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/planner/dbt.h"
 #include "pg_lake/planner/explain.h"
+#include "pg_lake/planner/heap_pushdown.h"
 #include "pg_lake/planner/pushdown_utils.h"
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/pgduck/iceberg_query_validation.h"
@@ -399,7 +400,7 @@ HasLakeRTE(Node *node, void *context)
 	{
 		RangeTblEntry *rte = (RangeTblEntry *) node;
 
-		if (IsAnyLakeForeignTable(rte))
+		if (IsAnyLakeRelation(rte))
 			return true;
 
 		/* query_tree_walker descends into RTEs */
@@ -708,8 +709,14 @@ ProcessNotShippableExpressionWalker(Node *node, IsShippableContext * context)
 			RecordNotShippableObject(context, InvalidOid, InvalidOid, NOT_SHIPPABLE_SQL_JOIN_MERGED_COLUMNS_ALIAS);
 		}
 
-		/* we only support pg_lake relations for the moment */
-		if (rte->rtekind == RTE_RELATION && !IsAnyLakeForeignTable(rte))
+		/*
+		 * We only support pg_lake relations, partitioned tables that hold
+		 * nothing but pg_lake relations, and plain PostgreSQL relations that
+		 * pgduck_server can read back over a loopback connection when
+		 * pg_lake_table.enable_heap_query_pushdown is on.
+		 */
+		if (rte->rtekind == RTE_RELATION && !IsAnyLakeRelation(rte) &&
+			!HeapRteIsPushdownable(rte))
 		{
 			if (context->stopAtFirstNotShippable)
 				return true;
@@ -718,7 +725,9 @@ ProcessNotShippableExpressionWalker(Node *node, IsShippableContext * context)
 		}
 
 		if (rte->rtekind == RTE_RELATION && has_subclass(rte->relid) &&
-			!AllInheritorsAreLakeTable(rte->relid))
+			!AllInheritorsAreLakeTable(rte->relid) &&
+			!IsLakePartitionedTable(rte) &&
+			!HeapRteIsPushdownable(rte))
 		{
 			if (context->stopAtFirstNotShippable)
 				return true;
@@ -1420,6 +1429,14 @@ QueryPushdownBeginScan(CustomScanState *node, EState *estate, int eflags)
 	List	   *rteList =
 		ReplacePgLakeTableWithReadTableFunc((Node *) scanQuery);
 
+	/*
+	 * Same for plain PostgreSQL relations, which pgduck_server reads back
+	 * over a loopback connection. Those are not part of the lake scan
+	 * snapshot, so they get their own list.
+	 */
+	List	   *heapRteList =
+		ReplaceHeapTableWithReadTableFunc((Node *) scanQuery);
+
 	/* if there are child tables, include them in the snapshot */
 	bool		includeChildren = true;
 
@@ -1437,6 +1454,9 @@ QueryPushdownBeginScan(CustomScanState *node, EState *estate, int eflags)
 	char	   *queryString = ReplaceReadTableFunctionCalls(pgDuckSQLTemplate,
 															snapshot,
 															explainRequested);
+
+	queryString = ReplaceHeapTableFunctionCalls(queryString, heapRteList,
+												explainRequested);
 
 	TupleDesc	tupleDesc = node->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
 
@@ -1693,6 +1713,10 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 	List	   *rteList =
 		ReplacePgLakeTableWithReadTableFunc((Node *) scanQuery);
 
+	/* same for plain PostgreSQL relations read back over a loopback */
+	List	   *heapRteList =
+		ReplaceHeapTableWithReadTableFunc((Node *) scanQuery);
+
 	/* if there are child tables, include them in the snapshot */
 	bool		includeChildren = true;
 
@@ -1710,6 +1734,9 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 	char	   *queryString = ReplaceReadTableFunctionCalls(pgDuckSQLTemplate,
 															snapshot,
 															explainRequested);
+
+	queryString = ReplaceHeapTableFunctionCalls(queryString, heapRteList,
+												explainRequested);
 
 	ExplainPropertyText("Engine", "DuckDB", es);
 
@@ -1754,6 +1781,8 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 	}
 	char	   *realQuery = ReplaceReadTableFunctionCalls(pgDuckSQLTemplate,
 														  snapshot, false);
+
+	realQuery = ReplaceHeapTableFunctionCalls(realQuery, heapRteList, false);
 
 	if (scanState->insertIntoRelid != InvalidOid)
 	{

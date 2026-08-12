@@ -1168,6 +1168,14 @@ the view reads the wrapper. A query with `ts >= B` prunes the Iceberg scan at pl
 time whatever its shape; `seal()` re-bounds the wrapper (detach + attach) when it
 advances `B`.
 
+Measured caveat: this needs a boundary the planner can fold to a constant.
+`WHERE ts >= '2026-08-12'::timestamptz` prunes the cold branch and opens no
+Parquet file; `WHERE ts >= date_trunc('day', now())` does not, because the
+wrapper has a single partition, so the `Append` that runtime pruning would act on
+is removed at plan time and only plan-time pruning is left. The cold `Foreign
+Scan` then runs and returns no rows. A hot-window query should therefore compare
+`ts` against a value, not against a stable expression.
+
 The bound is a **pruning hint only**. PostgreSQL neither enforces nor applies
 partition constraints as filters for a foreign table, and the Iceberg table
 deliberately holds rows above `B` (the lagging copy), so the view keeps its own
@@ -1268,7 +1276,7 @@ performs a pass.
 
 ### 18.9 Tests
 
-`tests/pytests/test_timeseries.py`, 16 cases, run against a live pg_lake test
+`tests/pytests/test_timeseries.py`, 17 cases, run against a live pg_lake test
 cluster with the in-tree S3 mock. They assert the properties the design rests on
 rather than the implementation: the boundary decides which tier owns a row, the
 lagging Iceberg copy is never double-counted, tier elimination happens at plan
@@ -1276,6 +1284,10 @@ time (`EXPLAIN` must not mention `Engine: DuckDB` for a hot-window query, nor a
 heap partition for a cold-window one), mutations below `B` are visible immediately
 and are folded back by `repair()` with identical results, a boundary advance is
 only ever the result of a completed seal, and a keyless table refuses mutations.
+The last case asserts the phase 9 property: with
+`pg_lake_table.enable_heap_query_pushdown` on, a spanning aggregate is one
+`Custom Scan (Query Pushdown)` with no `Append` and no heap scan, and returns the
+same answer as with the GUC off.
 
 Each test gets its own S3 prefix: `drop_table(drop_data => true)` leaves the
 Iceberg files behind, and `CREATE TABLE ... USING iceberg` refuses a non-empty
@@ -1283,22 +1295,27 @@ location.
 
 ### 18.10 Not implemented
 
-- **Phase 9 / §13.5 option 2** — heap RTEs in the whole-query pushdown. Without
-  it there is no vectorised cross-tier plan, `INSERT INTO <iceberg> SELECT ... FROM
-  <heap>` still falls back to the row-at-a-time FDW path (so `seal()` pays it),
-  and §18.4's permanent anti-join has no cheaper alternative.
 - **§5.3 CustomScan** — the view stand-in cannot specialise on dirty partitions
   (§18.4) and cannot choose between `postgres_scan_pushdown` and `postgres_query`.
-- **§13.6 snapshot hunk** — not needed yet, because no reverse connection is
-  opened.
 - **Compaction** of the cold tier beyond `apply_retention()`, and the
   `month`/`year` partition intervals of §18.2.
+- `INSERT INTO <iceberg> SELECT ... FROM <heap>` still uses the row-at-a-time FDW
+  path, so `seal()` pays it: phase 9 admits heap relations into the pushdown of
+  read-only queries only (`FullQueryIsPushdownable` rejects anything that is not a
+  plain `SELECT`).
+- §18.4's anti-join is still present on every cold read; it is now vectorised
+  along with the rest of the query, but not avoided.
 
-### 18.11 Phase 9 feasibility, measured
+### 18.11 Phase 9, as built
 
-Phase 9 is the highest-leverage remaining item, so its foundation was checked
-against the running `pgduck_server` (DuckDB v1.4.4) rather than left assumed. It
-holds:
+Phase 9 (§13.5 option 2) is implemented in `pg_lake_table`, gated on
+`pg_lake_table.enable_heap_query_pushdown` (bool, default off, `PGC_USERSET`),
+with `pg_lake_table.heap_pushdown_dsn` (string, default empty, `PGC_SUSET`) to
+override the loopback DSN. With it on, a query spanning the two tiers is one
+vectorised DuckDB plan.
+
+Its foundation was checked against the running `pgduck_server` (DuckDB v1.4.4)
+before any of it was written:
 
 - The Postgres scanner is statically linked into `duckdb_pglake`
   (`postgres_scanner_duckdb_cpp_init`, `duckdb_pglake_extension.cpp`), and the
@@ -1317,14 +1334,95 @@ holds:
   collides with the statically linked copy (`function "postgres_scan" already
   exists`). The DSN form is the only viable path.
 
-What remains is therefore planner and deparse work, not a missing engine
-capability:
+What was then built, in `pg_lake_table`:
 
-1. relax the `rte->rtekind == RTE_RELATION && !IsAnyLakeForeignTable(rte)`
-   rejection in `pg_lake_table/src/planner/query_pushdown.c` (behind a GUC),
-2. deparse an admitted heap RTE as `postgres_scan`/`postgres_query` in
-   `fdw/deparse.c`,
-3. export a snapshot in the driving backend and thread its id into the deparsed
-   call (§13.6),
-4. settle how the reverse connection authenticates, which §5.4 still lists as
-   open.
+1. **Admission.** `HasLakeRTE` and the two RTE rejections in
+   `src/planner/query_pushdown.c` accept a heap `RTE_RELATION` when
+   `HeapRteIsPushdownable` says so: an ordinary or partitioned table (all
+   partitions equally readable), not a catalog, temporary or row-level-security
+   relation, no `securityQuals`, no `TABLESAMPLE`, no dropped or virtual generated
+   column, and not a legacy inheritance parent with storage of its own. Each of
+   these is a way the loopback scan would return a different set of rows or
+   columns than a local scan; the dropped-column case is the subtlest, because the
+   scanner only returns live columns and would shift everything after the hole.
+2. **Rewrite and substitution.** An admitted heap RTE goes through the same
+   `__lake_read_table('<name>', <id>)` placeholder as a lake table
+   (`ReplaceHeapTableWithReadTableFunc`), and at execution
+   `ReplaceHeapTableFunctionCalls` substitutes
+   `postgres_scan_pushdown(dsn, schema, table, snapshot => '<id>')` — the
+   pushdown variant, so DuckDB pushes filters and projections into the reverse
+   scan. `EXPLAIN` without `ANALYZE` substitutes the relation name instead, which
+   is why the `Vectorized SQL` line stays readable.
+3. **Snapshot.** The driving backend calls `ExportSnapshot` once per pushed-down
+   query and threads the id into every deparsed call. It is never cached across
+   statements: under `READ COMMITTED` each statement gets a fresh snapshot, and
+   reusing an older one would silently read stale rows. Two states make an export
+   useless rather than merely unavailable, and both fall back to the local plan:
+   inside a subtransaction (an importer cannot tell that the subtransaction is
+   still running), and after the transaction has been assigned an XID (an exported
+   snapshot shows the exporter as in-progress, so the loopback connection would
+   not see the driving transaction's own writes).
+4. **Reverse connection.** The loopback DSN is built from the running cluster —
+   the first `unix_socket_directories` entry, or `localhost` if the list is empty,
+   plus port, database and current user — unless `heap_pushdown_dsn` overrides it.
+   `pgduck_server` runs on the same host as the backend, so the default is a local
+   socket connection authenticating as the querying role, which is also what makes
+   the permissions the same as a local scan's.
+
+`pg_lake_timeseries` needed one more piece, which is also in `pg_lake_table`:
+its routing view reads the cold tier through `<name>_cold_scan`, a **partitioned
+parent** (relkind `p`) whose only partition is the Iceberg table. That is
+deliberate — it is what lets a hot-window query prune the cold branch by partition
+pruning (§18.3) — but a partitioned parent was neither a lake foreign table nor a
+pushdownable heap relation, so it kept the whole view out of the pushdown. So a
+partitioned parent whose leaves are all lake tables is now pushdownable in its own
+right (`IsLakePartitionedTable`), deparsed as the `UNION ALL` of its partitions
+over the parent's tuple descriptor. Two details matter: a partition is only
+accepted if its column layout matches the parent exactly (`ATTACH PARTITION`
+matches columns by name, so a partition may reorder them or carry a dropped column,
+and reading the tree through the parent's descriptor would mix them up), and
+`FROM ONLY` is honoured rather than forced, which reads no rows — the same as
+PostgreSQL.
+
+Unlike the heap admission, this one is **not** behind a GUC: it is the treatment a
+lake inheritance tree already got (`test_inheritance.py::test_inherits` asserts a
+`Custom Scan` over a `UNION` for one), and the partitioned case was a gap, not a
+policy. It does mean whole-query pushdown now takes over queries on an all-lake
+partitioned parent that PostgreSQL used to plan per partition, so
+`enable_partitionwise_aggregate` and `enable_partitionwise_join` no longer decide
+anything for them; `pg_lake_table.enable_full_query_pushdown = off` gets the old
+plans back, which is how `test_partitioned.py` still tests the per-partition paths.
+
+Tests: `pg_lake_table/tests/pytests/test_heap_query_pushdown.py`, 11 cases —
+default-off, one vectorised plan for a spanning query, a cross-tier join, a
+heap-only query left untouched, the snapshot honoured under `REPEATABLE READ`,
+the writing-transaction fallback, a partitioned heap tier, and the four
+ineligibility paths (temp table, RLS, dropped column, inheritance parent with a
+non-lake child). And `test_lake_partitioned_parent.py`, 4 cases for the
+partitioned parent — the `UNION ALL` plan and its file count, `FROM ONLY`, a heap
+partition, and a partition with reordered columns. `test_inheritance.py` and
+`test_partitioned.py` were updated for the new plans.
+
+### 18.12 What phase 9 costs: tier elimination
+
+Admitting the whole view into the pushdown moves the tier decision from the
+PostgreSQL planner into DuckDB, and that is a real loss for a hot-window query.
+Measured on the `metrics` fixture, `WHERE ts >= '<today>'::timestamptz`:
+
+- with the pushdown off, §18.3's partition pruning drops the cold branch at plan
+  time and no Parquet file is opened;
+- with it on, the whole view is one pushed-down query, so the cold branch reaches
+  DuckDB with the contradictory range `ts >= B AND ts < B`. The answer is the
+  same and the row groups are skipped, but the two cold files are still opened
+  (`Data Files Scanned: 2`), and §18.4's anti-join against the delta is still
+  built.
+
+The window predicate does reach `read_parquet` as a filter, so what is missing is
+plan-time *file* pruning: `PruneDataFiles` prunes from the restrictions on the
+cold relation, and the outer window predicate is not among them. Closing that gap
+would make the two paths equivalent; until then the choice is per session, which
+is what the GUC is for — turn it on for spanning queries, off for hot-window ones.
+
+`test_cross_tier_aggregate_in_one_vectorized_plan` asserts both halves of this, so
+the day file pruning improves, the test will say so.
+

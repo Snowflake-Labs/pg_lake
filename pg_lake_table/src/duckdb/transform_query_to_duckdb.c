@@ -61,7 +61,28 @@
 static char *BuildReadDataSourceQueryForTableScan(PgLakeTableScan * tableScan,
 												  bool skipFullMatchFiles,
 												  TupleDesc projection);
+static char *BuildReadDataSourceQueryForPartitionedTableScan(PgLakeTableScan * tableScan,
+															 bool skipFullMatchFiles,
+															 TupleDesc projection);
 static void EnsureServerType(Oid relationId);
+
+
+/*
+ * BuildReadTablePlaceholderCall returns the deparsed form of the
+ * __lake_read_table(..) placeholder call for a relation, which is what the
+ * deparser emits in place of the relation itself. It is the string we search
+ * for when substituting the actual scan (e.g. read_parquet(..)) into the
+ * query text.
+ */
+char *
+BuildReadTablePlaceholderCall(char *qualifiedRelationName,
+							  int uniqueRelationIdentifier)
+{
+	return psprintf("\"%s\"(%s::\"text\", %d)",
+					PG_LAKE_READ_TABLE,
+					quote_literal_cstr(qualifiedRelationName),
+					uniqueRelationIdentifier);
+}
 
 
 /*
@@ -103,10 +124,9 @@ ReplaceReadTableFunctionCalls(char *query,
 
 		StringInfo	functionCallToReplace = makeStringInfo();
 
-		appendStringInfo(functionCallToReplace, "\"%s\"(%s::\"text\", %d)",
-						 PG_LAKE_READ_TABLE,
-						 quote_literal_cstr(qualifiedRelationName),
-						 uniqueRelationIdentifier);
+		appendStringInfoString(functionCallToReplace,
+							   BuildReadTablePlaceholderCall(qualifiedRelationName,
+															 uniqueRelationIdentifier));
 
 		/*
 		 * Finally, we replace the read_table() function call with the
@@ -158,6 +178,14 @@ static char *
 BuildReadDataSourceQueryForTableScan(PgLakeTableScan * tableScan, bool skipFullMatchFiles, TupleDesc projection)
 {
 	Oid			relationId = tableScan->relationId;
+
+	if (get_rel_relkind(relationId) == RELKIND_PARTITIONED_TABLE)
+	{
+		return BuildReadDataSourceQueryForPartitionedTableScan(tableScan,
+															   skipFullMatchFiles,
+															   projection);
+	}
+
 	ForeignTable *foreignTable = GetForeignTable(relationId);
 	List	   *options = foreignTable->options;
 	DefElem    *pathOption = GetOption(options, "path");
@@ -274,6 +302,88 @@ BuildReadDataSourceQueryForTableScan(PgLakeTableScan * tableScan, bool skipFullM
 }
 
 
+/*
+ * TableScanHasFiles returns whether the table scan, or any scan below it, has a
+ * file left to read.
+ */
+static bool
+TableScanHasFiles(PgLakeTableScan * tableScan)
+{
+	if (list_length(tableScan->fileScans) > 0)
+		return true;
+
+	foreach_ptr(PgLakeTableScan, childScan, tableScan->childScans)
+	{
+		if (TableScanHasFiles(childScan))
+			return true;
+	}
+
+	return false;
+}
+
+
+/*
+ * BuildReadDataSourceQueryForPartitionedTableScan returns a query fragment to
+ * read a partitioned table: the UNION ALL of its partitions, each of them
+ * projected onto the column layout of the parent.
+ *
+ * The parent holds no files of its own. If no partition has a file left to read
+ * -- because the table is empty, because pruning removed every file, or because
+ * the query only asked for the parent -- the fragment still has to have the
+ * right columns, so we read an empty data source with the parent's descriptor.
+ */
+static char *
+BuildReadDataSourceQueryForPartitionedTableScan(PgLakeTableScan * tableScan,
+												bool skipFullMatchFiles,
+												TupleDesc projection)
+{
+	Relation	rel = RelationIdGetRelation(tableScan->relationId);
+	TupleDesc	readTupleDesc = projection != NULL ? projection : RelationGetDescr(rel);
+
+	StringInfoData command;
+
+	initStringInfo(&command);
+	appendStringInfoString(&command, "(");
+
+	bool		isFirstPartition = true;
+
+	foreach_ptr(PgLakeTableScan, partitionScan, tableScan->childScans)
+	{
+		if (!TableScanHasFiles(partitionScan))
+			continue;
+
+		char	   *partitionQuery =
+			BuildReadDataSourceQueryForTableScan(partitionScan, skipFullMatchFiles,
+												 readTupleDesc);
+
+		appendStringInfo(&command, "%s%s",
+						 isFirstPartition ? "" : " UNION ALL ", partitionQuery);
+
+		isFirstPartition = false;
+	}
+
+	if (isFirstPartition)
+	{
+		/*
+		 * Nothing to read. The format only decides how the columns of an
+		 * empty source are typed, and Parquet is how we write every partition
+		 * we create ourselves.
+		 */
+		appendStringInfoString(&command,
+							   ReadDataSourceQuery(NIL, NIL, DATA_FORMAT_PARQUET,
+												   DATA_COMPRESSION_NONE,
+												   readTupleDesc, NIL, NULL,
+												   NO_STATISTICS, 0));
+	}
+
+	appendStringInfoString(&command, ")");
+
+	RelationClose(rel);
+
+	return command.data;
+}
+
+
 /**
  * EnsureServerType checks that the server type for a given relation is supported.
  *
@@ -283,6 +393,12 @@ BuildReadDataSourceQueryForTableScan(PgLakeTableScan * tableScan, bool skipFullM
 static void
 EnsureServerType(Oid relationId)
 {
+	if (get_rel_relkind(relationId) == RELKIND_PARTITIONED_TABLE)
+	{
+		/* the partitions carry the server, and we check them as we read them */
+		return;
+	}
+
 	if (!IsAnyLakeForeignTableById(relationId))
 		ereport(ERROR,
 				(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),

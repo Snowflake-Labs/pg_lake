@@ -20,6 +20,7 @@
 
 #include <inttypes.h>
 
+#include "catalog/pg_class.h"
 #include "catalog/pg_inherits.h"
 #include "catalog/pg_type.h"
 #include "commands/dbcommands.h"
@@ -190,7 +191,16 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 	List	   *fileScans = NIL;
 	List	   *positionDeleteScans = NIL;
 
-	if (IsWritablePgLakeTable(relationId) || IsInternalIcebergTable(relationId))
+	if (get_rel_relkind(relationId) == RELKIND_PARTITIONED_TABLE)
+	{
+		/*
+		 * A partitioned parent stores nothing itself: all of its files belong
+		 * to its partitions, which we pick up as child scans below. Note that
+		 * we deliberately honour includeChildren here, since a FROM ONLY on a
+		 * partitioned table reads no rows in PostgreSQL either.
+		 */
+	}
+	else if (IsWritablePgLakeTable(relationId) || IsInternalIcebergTable(relationId))
 	{
 		/*
 		 * Read only the data files, do not yet include the deletion files.
@@ -696,6 +706,29 @@ GetFileScanPathList(List *fileScans, uint64 *rowCount, bool skipFullScans)
 
 
 /*
+ * TableScanFilesScanned adds the number of data and delete file scans in a
+ * table scan, and in every scan below it, to the given counters.
+ */
+static void
+TableScanFilesScanned(PgLakeTableScan * tableScan, int *dataFileScans,
+					  int *deleteFileScans)
+{
+	*dataFileScans += list_length(tableScan->fileScans);
+	*deleteFileScans += list_length(tableScan->positionDeleteScans);
+
+	/*
+	 * A scan of an inheritance parent or a partitioned table reads the files
+	 * of its children, which are scans of their own, so we have to descend to
+	 * report the number of files the query actually reads.
+	 */
+	foreach_ptr(PgLakeTableScan, childScan, tableScan->childScans)
+	{
+		TableScanFilesScanned(childScan, dataFileScans, deleteFileScans);
+	}
+}
+
+
+/*
 * SnapshotFilesScanned is a utility function that sets the number of data
 * and delete file scans in the snapshot.
 */
@@ -712,10 +745,6 @@ SnapshotFilesScanned(PgLakeScanSnapshot * scanSnapshot, int *dataFileScans,
 	{
 		PgLakeTableScan *tableScan = (PgLakeTableScan *) lfirst(lc);
 
-		int			curDataFileScans = list_length(tableScan->fileScans);
-		int			curDeleteFileScans = list_length(tableScan->positionDeleteScans);
-
-		*dataFileScans += curDataFileScans;
-		*deleteFileScans += curDeleteFileScans;
+		TableScanFilesScanned(tableScan, dataFileScans, deleteFileScans);
 	}
 }

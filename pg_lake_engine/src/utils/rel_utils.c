@@ -20,6 +20,8 @@
 
 #include "access/htup_details.h"
 #include "catalog/pg_foreign_table.h"
+#include "catalog/pg_class.h"
+#include "catalog/pg_inherits.h"
 #include "access/xact.h"
 #include "commands/defrem.h"
 #include "commands/typecmds.h"
@@ -99,6 +101,128 @@ IsAnyLakeForeignTableById(Oid foreignTableId)
 {
 	return IsPgLakeForeignTableById(foreignTableId) ||
 		IsPgLakeIcebergForeignTableById(foreignTableId);
+}
+
+
+/*
+ * PartitionHasParentColumnLayout returns whether a partition has exactly the
+ * column layout of its parent: the same number of attributes, with the same
+ * name and type at every attribute number.
+ *
+ * ATTACH PARTITION only requires the columns to match by name, so a partition
+ * may hold them in a different order, or carry a dropped column the parent does
+ * not have. Readers that address a partition through its parent's tuple
+ * descriptor -- which is what reading the whole tree as one scan amounts to --
+ * would silently mix up the columns of such a partition.
+ */
+static bool
+PartitionHasParentColumnLayout(Oid parentRelationId, Oid partitionRelationId)
+{
+	Relation	parent = RelationIdGetRelation(parentRelationId);
+	Relation	partition = RelationIdGetRelation(partitionRelationId);
+
+	if (!RelationIsValid(parent) || !RelationIsValid(partition))
+	{
+		if (RelationIsValid(parent))
+			RelationClose(parent);
+
+		if (RelationIsValid(partition))
+			RelationClose(partition);
+
+		return false;
+	}
+
+	TupleDesc	parentDesc = RelationGetDescr(parent);
+	TupleDesc	partitionDesc = RelationGetDescr(partition);
+	bool		sameLayout = parentDesc->natts == partitionDesc->natts;
+
+	for (int attributeNumber = 1; sameLayout &&
+		 attributeNumber <= parentDesc->natts; attributeNumber++)
+	{
+		Form_pg_attribute parentColumn = TupleDescAttr(parentDesc, attributeNumber - 1);
+		Form_pg_attribute partitionColumn = TupleDescAttr(partitionDesc, attributeNumber - 1);
+
+		sameLayout = parentColumn->attisdropped == partitionColumn->attisdropped &&
+			parentColumn->atttypid == partitionColumn->atttypid &&
+			(parentColumn->attisdropped ||
+			 strcmp(NameStr(parentColumn->attname),
+					NameStr(partitionColumn->attname)) == 0);
+	}
+
+	RelationClose(partition);
+	RelationClose(parent);
+
+	return sameLayout;
+}
+
+
+/*
+ * IsLakePartitionedTableById returns whether the relation is a partitioned
+ * table that only holds lake tables, all laid out like the parent, and holds at
+ * least one.
+ *
+ * Such a parent can be read as a single scan of all of its partitions, which is
+ * what lets a query over it be pushed down as a whole. A parent with a plain
+ * PostgreSQL partition, or one whose partitions disagree with it about the
+ * column order, cannot.
+ */
+bool
+IsLakePartitionedTableById(Oid relationId)
+{
+	if (get_rel_relkind(relationId) != RELKIND_PARTITIONED_TABLE)
+		return false;
+
+	List	   *inheritors = find_all_inheritors(relationId, NoLock, NULL);
+	int			partitionCount = 0;
+
+	foreach_oid(inheritorId, inheritors)
+	{
+		if (inheritorId == relationId)
+			continue;
+
+		/* an intermediate parent holds no data of its own */
+		if (get_rel_relkind(inheritorId) == RELKIND_PARTITIONED_TABLE)
+			continue;
+
+		if (!IsAnyLakeForeignTableById(inheritorId))
+			return false;
+
+		if (!PartitionHasParentColumnLayout(relationId, inheritorId))
+			return false;
+
+		partitionCount++;
+	}
+
+	return partitionCount > 0;
+}
+
+
+/*
+ * IsLakePartitionedTable returns whether the range table entry refers to a
+ * partitioned table that only holds lake tables.
+ */
+bool
+IsLakePartitionedTable(RangeTblEntry *rte)
+{
+	if (rte->rtekind != RTE_RELATION ||
+		rte->relkind != RELKIND_PARTITIONED_TABLE)
+	{
+		return false;
+	}
+
+	return IsLakePartitionedTableById(rte->relid);
+}
+
+
+/*
+ * IsAnyLakeRelation returns whether the range table entry refers to something
+ * that pgduck_server can read on its own: a lake table, or a partitioned table
+ * that only holds lake tables.
+ */
+bool
+IsAnyLakeRelation(RangeTblEntry *rte)
+{
+	return IsAnyLakeForeignTable(rte) || IsLakePartitionedTable(rte);
 }
 
 /*

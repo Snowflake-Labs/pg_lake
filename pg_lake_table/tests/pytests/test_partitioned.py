@@ -109,8 +109,21 @@ def test_partitioned(create_partitioned_tables, pg_conn):
 
 def test_partition_wise_agg(create_partitioned_tables, pg_conn):
 
+    # by default the parent is read as the UNION ALL of its partitions inside a
+    # single pushed-down query, so the partitionwise GUCs do not come into play
+    assert_query_pushdownable(
+        "SELECT count(*) FROM test_partition.parent GROUP BY id", pg_conn
+    )
+    pg_conn.commit()
+
+    # the rest of this test is about the plans Postgres builds per partition, so
+    # whole-query pushdown is out of the way for it
+    run_command(
+        "BEGIN; SET pg_lake_table.enable_full_query_pushdown TO false;", pg_conn
+    )
+
     # when enable_partitionwise_aggregate=True, the count(*) is pushed down to the Vectorized SQL
-    run_command("BEGIN; SET enable_partitionwise_aggregate TO true;", pg_conn)
+    run_command("SET enable_partitionwise_aggregate TO true;", pg_conn)
     partition_wise_agg = "SELECT count(*) FROM test_partition.parent GROUP BY id"
     partition_wise_explain = "EXPLAIN (ANALYZE, VERBOSE) " + partition_wise_agg
     partition_wise_explain_result = perform_query_on_cursor(
@@ -124,7 +137,14 @@ def test_partition_wise_agg(create_partitioned_tables, pg_conn):
     run_command("COMMIT", pg_conn)
 
     # when enable_partitionwise_aggregate=false, the count(*) is NOT pushed down to the Vectorized SQL
-    run_command("BEGIN; SET enable_partitionwise_aggregate TO false;", pg_conn)
+    run_command(
+        """
+        BEGIN;
+        SET pg_lake_table.enable_full_query_pushdown TO false;
+        SET enable_partitionwise_aggregate TO false;
+        """,
+        pg_conn,
+    )
     non_partition_wise_agg = "SELECT count(*) FROM test_partition.parent GROUP BY id"
     non_partition_wise_explain = "EXPLAIN (ANALYZE, VERBOSE) " + non_partition_wise_agg
     non_partition_wise_explain_result = perform_query_on_cursor(
@@ -140,9 +160,19 @@ def test_partition_wise_agg(create_partitioned_tables, pg_conn):
 
 def test_partition_wise_partial_agg(create_partitioned_tables, pg_conn):
 
+    # this test is about the plans Postgres builds per partition, so whole-query
+    # pushdown, which would read the parent in one go, is out of the way for it
+
     # when enable_partitionwise_aggregate=True, we pull the data to Postgres
     # and apply partial aggs
-    run_command("BEGIN; SET enable_partitionwise_aggregate TO true;", pg_conn)
+    run_command(
+        """
+        BEGIN;
+        SET pg_lake_table.enable_full_query_pushdown TO false;
+        SET enable_partitionwise_aggregate TO true;
+        """,
+        pg_conn,
+    )
     partition_wise_agg = "SELECT count(*) FROM test_partition.parent GROUP BY letter"
     partition_wise_explain = "EXPLAIN (ANALYZE, VERBOSE) " + partition_wise_agg
     partition_wise_explain_result = perform_query_on_cursor(
@@ -160,7 +190,14 @@ def test_partition_wise_partial_agg(create_partitioned_tables, pg_conn):
 
     # when enable_partitionwise_aggregate=false, the count(*) is NOT pushed down to the Vectorized SQL
     # GROUP BY on non-partition key
-    run_command("BEGIN; SET enable_partitionwise_aggregate TO false;", pg_conn)
+    run_command(
+        """
+        BEGIN;
+        SET pg_lake_table.enable_full_query_pushdown TO false;
+        SET enable_partitionwise_aggregate TO false;
+        """,
+        pg_conn,
+    )
     non_partition_wise_agg = (
         "SELECT count(*) FROM test_partition.parent GROUP BY letter"
     )
@@ -179,8 +216,18 @@ def test_partition_wise_partial_agg(create_partitioned_tables, pg_conn):
 
 def test_partition_wise_join(create_partitioned_tables, pg_conn):
 
+    # this test is about the plans Postgres builds per partition, so whole-query
+    # pushdown, which would read both parents in one go, is out of the way for it
+
     # when enable_partitionwise_join=True, the JOIN is pushed down to the Vectorized SQL
-    run_command("BEGIN; SET LOCAL enable_partitionwise_join TO true;", pg_conn)
+    run_command(
+        """
+        BEGIN;
+        SET LOCAL pg_lake_table.enable_full_query_pushdown TO false;
+        SET LOCAL enable_partitionwise_join TO true;
+        """,
+        pg_conn,
+    )
     partition_wise_agg = "SELECT count(*) FROM test_partition.parent JOIN test_partition.parent_2 USING(id)"
     partition_wise_explain = "EXPLAIN (ANALYZE, VERBOSE) " + partition_wise_agg
     partition_wise_explain_result = perform_query_on_cursor(
@@ -198,7 +245,14 @@ def test_partition_wise_join(create_partitioned_tables, pg_conn):
     run_command("COMMIT", pg_conn)
 
     # when enable_partitionwise_join=False, the JOIN is NOT pushed down to the Vectorized SQL
-    run_command("BEGIN; SET LOCAL enable_partitionwise_join TO false;", pg_conn)
+    run_command(
+        """
+        BEGIN;
+        SET LOCAL pg_lake_table.enable_full_query_pushdown TO false;
+        SET LOCAL enable_partitionwise_join TO false;
+        """,
+        pg_conn,
+    )
     non_partition_wise_agg = "SELECT count(*) FROM test_partition.parent JOIN test_partition.parent_2 USING(id)"
     non_partition_wise_explain = "EXPLAIN (ANALYZE, VERBOSE) " + non_partition_wise_agg
     non_partition_wise_explain_result = perform_query_on_cursor(

@@ -39,6 +39,7 @@
 #include "pg_lake/partitioning/partitioned_dest_receiver.h"
 #include "pg_lake/pgduck/write_data.h"
 #include "pg_lake/planner/extensible_nodes.h"
+#include "pg_lake/planner/heap_pushdown.h"
 #include "pg_lake/planner/insert_select.h"
 #include "pg_lake/planner/query_pushdown.h"
 #include "pg_lake/util/s3_file_utils.h"
@@ -115,6 +116,37 @@ _PG_init(void)
 							 NULL,
 							 NULL,
 							 NULL);
+
+	DefineCustomBoolVariable("pg_lake_table.enable_heap_query_pushdown",
+							 "Enables pushdown of queries that also read plain "
+							 "PostgreSQL tables, which pgduck_server reads back "
+							 "over a loopback connection at the pinned snapshot "
+							 "of the driving transaction. Off by default because "
+							 "it requires that connection to be able to "
+							 "authenticate.",
+							 NULL,
+							 &EnableHeapQueryPushdown,
+							 false,
+							 PGC_USERSET,
+							 GUC_STANDARD,
+							 NULL,
+							 NULL,
+							 NULL);
+
+	DefineCustomStringVariable("pg_lake_table.heap_pushdown_dsn",
+							   "Connection string pgduck_server uses to read "
+							   "plain PostgreSQL tables back. Empty means derive "
+							   "it from the current session: the postmaster's "
+							   "Unix socket directory, port, database and the "
+							   "current user.",
+							   NULL,
+							   &HeapPushdownDSN,
+							   "",
+							   PGC_SUSET,
+							   GUC_STANDARD,
+							   NULL,
+							   NULL,
+							   NULL);
 
 	DefineCustomBoolVariable("pg_lake_table.enable_insert_select_pushdown",
 							 "Enables pg_lake_table extension to "
