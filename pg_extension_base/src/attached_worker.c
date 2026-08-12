@@ -53,6 +53,7 @@
 #include "utils/acl.h"
 #include "utils/backend_status.h"
 #include "utils/builtins.h"
+#include "utils/guc.h"
 #include "utils/memutils.h"
 #include "utils/portal.h"
 #include "utils/ps_status.h"
@@ -73,6 +74,7 @@
 #define ATTACHED_WORKER_NKEYS			6
 
 #define ATTACHED_WORKER_FLAG_RETURN_RESULTS	0x01
+#define ATTACHED_WORKER_FLAG_CALLER_WRITABLE	0x02
 
 /* SQL-callable functions */
 PG_FUNCTION_INFO_V1(pg_extension_base_run_attached_worker);
@@ -309,6 +311,31 @@ StartAttachedWorkerInternal(char *command, char *databaseName, char *userName,
 {
 	/* store the worker state */
 	AttachedWorker *attachedWorker = (AttachedWorker *) palloc0(sizeof(AttachedWorker));
+
+	/*
+	 * An attached worker acts on behalf of the calling session, so it should
+	 * not be held back by a read-only restriction the caller itself is not
+	 * subject to.  Because it is a background worker it takes
+	 * default_transaction_read_only from the configuration files, so it would
+	 * refuse writes whenever the server is configured read-only -- as
+	 * Snowflake Postgres does when the disk runs low -- even for a caller
+	 * that is writing happily.  Pass the caller's state along so the worker
+	 * can match it.
+	 *
+	 * Key this on XactReadOnly rather than DefaultXactReadOnly: what matters
+	 * is whether the caller can write *now*, which is what the worker is
+	 * acting on its behalf to do.  The two differ in both directions -- a
+	 * caller that cleared the GUC inside an already read-only transaction
+	 * still cannot write in it, and a caller that ran SET TRANSACTION READ
+	 * WRITE can write even though the configured default says otherwise.
+	 *
+	 * The worker is only ever made less restrictive than its configuration,
+	 * never more: a read-only caller leaves the flag unset and the worker
+	 * keeps whatever the configuration gives it, exactly as before this flag
+	 * existed.
+	 */
+	if (!XactReadOnly)
+		flags |= ATTACHED_WORKER_FLAG_CALLER_WRITABLE;
 
 	/* estimate size of the background worker input */
 	shm_toc_estimator sharedMemoryEstimator;
@@ -734,6 +761,8 @@ AttachedWorkerMain(Datum mainArg)
 	uint32	   *flagsPtr = shm_toc_lookup(toc, ATTACHED_WORKER_KEY_FLAGS, true);
 	bool		returnResults = (flagsPtr != NULL &&
 								 (*flagsPtr & ATTACHED_WORKER_FLAG_RETURN_RESULTS) != 0);
+	bool		callerWritable = (flagsPtr != NULL &&
+								  (*flagsPtr & ATTACHED_WORKER_FLAG_CALLER_WRITABLE) != 0);
 
 	/* Attach to the response queue (protocol messages: errors, command tags) */
 	shm_mq_set_sender(messageQueue, MyProc);
@@ -762,6 +791,15 @@ AttachedWorkerMain(Datum mainArg)
 	/* Report status as running */
 	SetCurrentStatementStartTimestamp();
 	pgstat_report_activity(STATE_RUNNING, command);
+
+	/*
+	 * Match the caller's read-only setting when the caller was writable (see
+	 * StartAttachedWorkerInternal).  Do this before starting the transaction,
+	 * which is where default_transaction_read_only takes effect.
+	 */
+	if (callerWritable)
+		SetConfigOption("default_transaction_read_only", "off",
+						PGC_USERSET, PGC_S_SESSION);
 
 	/* Start the transaction */
 	StartTransactionCommand();
