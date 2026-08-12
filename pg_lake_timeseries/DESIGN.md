@@ -1393,12 +1393,12 @@ partitioned parent that PostgreSQL used to plan per partition, so
 anything for them; `pg_lake_table.enable_full_query_pushdown = off` gets the old
 plans back, which is how `test_partitioned.py` still tests the per-partition paths.
 
-Tests: `pg_lake_table/tests/pytests/test_heap_query_pushdown.py`, 11 cases —
+Tests: `pg_lake_table/tests/pytests/test_heap_query_pushdown.py`, 12 cases —
 default-off, one vectorised plan for a spanning query, a cross-tier join, a
 heap-only query left untouched, the snapshot honoured under `REPEATABLE READ`,
-the writing-transaction fallback, a partitioned heap tier, and the four
-ineligibility paths (temp table, RLS, dropped column, inheritance parent with a
-non-lake child). And `test_lake_partitioned_parent.py`, 4 cases for the
+the writing-transaction fallback, a partitioned heap tier and a partitioned heap
+tier with no partitions, and the four ineligibility paths (temp table, RLS,
+dropped column, inheritance parent with a non-lake child). And `test_lake_partitioned_parent.py`, 4 cases for the
 partitioned parent — the `UNION ALL` plan and its file count, `FROM ONLY`, a heap
 partition, and a partition with reordered columns. `test_inheritance.py` and
 `test_partitioned.py` were updated for the new plans.
@@ -1426,3 +1426,184 @@ is what the GUC is for — turn it on for spanning queries, off for hot-window o
 `test_cross_tier_aggregate_in_one_vectorized_plan` asserts both halves of this, so
 the day file pruning improves, the test will say so.
 
+### 18.13 A partitioned heap tier has to be named partition by partition
+
+The first version of the heap substitution named the relation from the RTE, which
+for the hot tier is the partitioned parent. That does not merely read the wrong
+rows — it hangs.
+
+`postgres_scan_pushdown` splits a relation into parallel ctid range scans, and it
+sizes that split from `pg_class.relpages`:
+`duckdb-postgres/src/storage/postgres_table_set.cpp:174` assigns
+`result->GetInt64(0, 2)` into `approx_num_pages`, which is an `idx_t`. A
+partitioned table has no storage of its own, so once it has been analysed its
+`relpages` is `-1`, which as an unsigned page count is 2^64-1.
+`PostgresParallelStateNext` then hands out a task per iteration of
+`if (gstate.page_idx < bind_data->pages_approx)`, clamping each task's upper bound
+to `POSTGRES_TID_MAX` (2^32-1) — and since it assigns that clamp straight back
+into `gstate.page_idx`, the index stops advancing while the condition stays true.
+Tasks are handed out forever. The symptom is a query that never returns, and it
+only appears after `ANALYZE`, because a never-analysed parent still has
+`relpages = 0` and the scan trivially finds nothing.
+
+So `BuildHeapScanQuery` expands a `RELKIND_PARTITIONED_TABLE` into a parenthesised
+`UNION ALL` over the leaves of `find_all_inheritors`, skipping anything that is not
+`RELKIND_RELATION` (intermediate partitioned levels have no storage either), with
+each branch projecting the parent's column names explicitly so the positional
+column aliases the substitution appends still line up. This is the same shape
+`BuildReadDataSourceQueryForPartitionedTableScan` produces on the lake side. A
+parent with no partitions at all falls back to `ReadDataSourceQuery` over an empty
+source, which is the typed-empty trick the lake path already uses, so the branch
+keeps the parent's row type.
+
+`EXPLAIN` emits the same fragment with plain relation names instead of
+`postgres_scan_pushdown` calls, so the `Vectorized SQL` shows exactly which
+partitions will be read, and the tests assert on those names
+(`test_heap_query_pushdown.py::test_partitioned_hot_tier`, plus
+`test_partitioned_hot_tier_without_partitions` for the empty parent). The
+timeseries test now runs `ANALYZE metrics_hot` before asserting, so the hang would
+be caught rather than depending on the parent being unanalysed.
+
+### 18.14 Measured cost of the pushdown
+
+1 000 000 rows over 8 devices, 8 daily hot partitions (57 340 rows) and 7 Iceberg
+data files (942 660 rows), boundary at midnight, best of three:
+
+| query | off | on |
+| --- | --- | --- |
+| whole table, `GROUP BY device` | 2231 ms | 388 ms |
+| last 3 days (spans the boundary) | 878 ms | 386 ms |
+| cold only | 2074 ms | 376 ms |
+| hot window only | 18 ms | 381 ms |
+| point lookup, `device = 3`, last 2 hours | 15 ms | 359 ms |
+
+The wins come from not shipping the cold tier: with the pushdown off, the spanning
+aggregate sorts all 942 660 Iceberg rows for §18.4's anti-join and spills
+(`Sort Method: external sort  Disk: 35128kB`) after 1209 ms in the
+`Foreign Scan on metrics_cold`. With it on the whole thing is one
+`Custom Scan (Query Pushdown)` node at 228 ms.
+
+The losses are a floor, not a slope. Each hot partition is one loopback
+`postgres_scan_pushdown`, and on this machine each costs roughly 19 ms: a
+hand-built partitioned heap scanned with the pushdown on took 25 ms at one
+partition, 154 ms at eight and 608 ms at thirty-two, against a flat 5 ms with it
+off. That is what puts the floor at ~370 ms for the fixture above (8 hot
+partitions, the delta branches and the cold branch — about eleven loopback scans),
+and it is why a short `partition_interval` over a wide hot window is the worst
+case for phase 9. Below roughly 100 000 rows the pushdown does not pay for itself
+at all: at 100k the spanning aggregate goes from 233 ms off to 372 ms on.
+
+A third baseline puts both columns in perspective. The same aggregate run straight
+at `metrics_cold` needs none of this machinery, because an all-lake query is
+already pushed down whole by default. On a 1M-row table split 37 089 hot / 987 911
+cold over 9 hot partitions: 3975 ms through the view with the pushdown off, 269 ms
+with it on, and **21 ms** straight at the Iceberg tier. DuckDB aggregates the whole
+cold tier in 21 ms, so about 250 ms of the spanning query is the tiering machinery
+itself — the per-partition loopback scans and the delta branches. Phase 9's win is
+largely that it avoids a pathological baseline; 269 ms against a 21 ms floor is not
+a good absolute result.
+
+### 18.15 Proposed: the hot table is the table, and the planner adds the cold tier
+
+The routing view is the weakest part of the design as built. Every write goes
+through a plpgsql `INSTEAD OF` trigger doing `EXECUTE format(...)` per row, so
+`COPY` and bulk `INSERT` pay a per-row plpgsql cost; the parent cannot carry
+indexes, constraints or defaults of its own; and §18.14 shows the read path spends
+~250 ms on machinery over a query DuckDB answers in 21 ms.
+
+The proposed shape is that the **hot table is the user's table** — an ordinary
+range-partitioned heap, indexed, written to directly with native tuple routing and
+no trigger — and the Iceberg tier is a separate relation that a planner hook adds
+to a query when the query needs it.
+
+#### Why the Iceberg tier must not be a partition of it
+
+An earlier draft of this section proposed attaching the Iceberg tier as a partition
+of the parent, bounded below the boundary. That is wrong — but probing it against a
+live cluster (PG 18, a parent with one heap partition and one lake table attached
+below it) shows the reasons are not the obvious ones:
+
+- **Moving the boundary is multi-relation DDL, not one re-attach.** Widening the
+  cold partition's upper bound fails while a hot partition still covers that range:
+  `ATTACH PARTITION cold_a FOR VALUES FROM (MINVALUE) TO ('2026-08-13')` gives
+  `partition "cold_a" would overlap partition "par_a_hot"`. Every seal is therefore
+  a `DETACH` of the cold partition *and* of the hot partition being absorbed, then
+  two `ATTACH`es, all under `ACCESS EXCLUSIVE` on the parent — a heavier version of
+  the partition-management lock cost §1 already gives as a reason not to use native
+  partitioning.
+- **Plain indexes are fine; unique ones are not.** `CREATE INDEX` on the parent
+  succeeds in either order — before or after the lake table is attached. The lake
+  partition is skipped, the heap partitions get real indexes, heap partitions added
+  later inherit them, and a hot-only query still plans as a `Bitmap Index Scan`.
+  What fails is uniqueness: `ADD PRIMARY KEY` and `CREATE UNIQUE INDEX` both raise
+  `cannot create unique index on partitioned table "…"`, `DETAIL: Table "…"
+  contains partitions that are foreign tables` (`indexcmds.c:1399`); and in the
+  other order, a parent that already has a primary key refuses the lake table with
+  `column "ts" in child table "cold_c" must be marked NOT NULL`. So `key_columns`
+  could never be enforced by a constraint on the parent, only by convention —
+  which matters for `upsert => true`.
+- **The pushdown never fires, which is the whole feature.** This is the decisive
+  one. `HasLakeRTE` walks the *parse tree's* range table at `planner_hook` entry
+  (`query_pushdown.c:284`, `:385`), before inheritance expansion turns the parent
+  into its partitions. The parse tree holds one RTE — the heap partitioned parent —
+  so `IsAnyLakeRelation` is false, and `FullQueryIsPushdownable` is never reached.
+  Measured: a spanning `GROUP BY` over such a parent plans as `HashAggregate →
+  Append → (Foreign Scan on the lake partition, Seq Scan on the heap partition)`,
+  with the aggregate in PostgreSQL, *identically* with
+  `enable_heap_query_pushdown` on and off. Cold-only queries regress as well, from
+  today's default whole-query pushdown to an aggregate over a `Foreign Scan`.
+  Partitioning hides the lake table from the exact check that decides to
+  vectorise.
+
+The third point settles it. Hot-only queries are *not* degraded — they prune to the
+heap partition and keep their index scans — but a spanning query loses vectorisation
+entirely, with no GUC that brings it back: the design would ship §18.14's 3975 ms
+baseline and remove the 269 ms option. So the cold tier stays outside the table, and
+the union happens in the plan rather than in the catalog.
+
+#### Three plan shapes, chosen per query
+
+The planner hook inspects a query on a registered table and picks one of:
+
+1. **Hot only** — the query's time range is entirely at or above the boundary.
+   Leave the plan alone: an ordinary partitioned-heap plan, index scans and
+   partition pruning intact. This is the common OLTP case and it must cost nothing.
+2. **Spanning, aggregated in PostgreSQL** — add the Iceberg relation as a second
+   branch and let PostgreSQL plan the union. Correct everywhere, and the fallback
+   whenever mode 3 is unavailable.
+3. **Spanning, delegated to DuckDB** — push the whole query down (phase 9's
+   machinery), reading Iceberg directly for the partitions Iceberg is authoritative
+   for and `postgres_scan_pushdown` for the rest. Requires what §18.11 requires,
+   notably no uncommitted writes in the transaction.
+
+Mode 1 is what makes this better than the view: today the view is always the view,
+so a hot-only query still pays for the cold branch's planning and, with the
+pushdown on, for its execution too.
+
+#### Dropping the delta
+
+The delta and its merge-on-read go away. In their place, each partition records
+whether Iceberg is **in sync** with it or has been **invalidated** by a later
+write. A query then reads each partition from exactly one source — Iceberg where it
+is in sync, the heap where it is not — so there is no anti-join, no `DISTINCT ON`
+overlay, and no §18.4 problem where the merge is built even when the delta is
+empty. A write below the boundary marks its partition invalidated (which
+`mark_dirty` already does) and the heap partition becomes the authority for it
+again until the worker re-syncs it.
+
+This means a partition's rows must not be dropped from the heap at seal time until
+Iceberg is in sync for it, and an invalidated partition must keep (or regain) its
+heap rows — which is the one real cost, since it is what today's delta avoids by
+storing only the changed rows.
+
+#### What this changes
+
+`create_table` stops creating a view and a `cold_scan` wrapper and instead
+registers an existing partitioned table; `route_write` disappears for the hot path;
+`seal` stops moving the boundary by re-attaching partitions and instead flips
+per-partition sync state; `repair` becomes a re-sync of an invalidated partition;
+and the read path moves from the view definition into the planner hook. The
+catalogs keep `timeseries.partitions` but its state machine becomes
+in-sync/invalidated rather than the delta-oriented states of §18.4.
+
+Not implemented.
