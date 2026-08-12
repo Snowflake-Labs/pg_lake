@@ -1225,6 +1225,10 @@ LeafSubtreeNeedsRewrite(Oid typeOid, int32 typmod, int rewriteKinds,
  * families, so a struct mixing an encoded sibling and a storage-cast sibling is
  * rebuilt by a single struct_pack, never two stacked ones.
  *
+ * AppendIcebergReadConversion in read_data.c is the read-side inverse of the
+ * NATIVE_ENCODE family and mirrors this traversal; a new native type must be
+ * added there as well.
+ *
  * Returns true if a transformed expression was written to buf.
  */
 static bool
