@@ -1108,8 +1108,8 @@ EnsureFreshStatsForCommitTimeDiff(void)
  * thousands of entries decodes to hundreds of megabytes. Read one manifest at
  * a time into a context we reset after each, the way
  * IcebergSnapshotAddAllReferencedFiles does, so peak is one manifest rather
- * than the whole snapshot. The path itself is copied by dynahash into the hash
- * entry, so it survives the reset.
+ * than the whole snapshot. AppendFileToHash copies the path into the context
+ * that is current when we call it, which is our own, so it survives the reset.
  */
 static HTAB *
 CreateDataFilesHashForMetadata(IcebergTableMetadata * metadata)
@@ -1140,6 +1140,8 @@ CreateDataFilesHashForMetadata(IcebergTableMetadata * metadata)
 															   NULL);
 		ListCell   *pathCell = NULL;
 
+		MemoryContextSwitchTo(oldContext);
+
 		foreach(pathCell, dataFilePaths)
 		{
 			char	   *dataFilePath = lfirst(pathCell);
@@ -1147,7 +1149,6 @@ CreateDataFilesHashForMetadata(IcebergTableMetadata * metadata)
 			AppendFileToHash(dataFilePath, dataFilesMap);
 		}
 
-		MemoryContextSwitchTo(oldContext);
 		MemoryContextReset(manifestContext);
 	}
 
@@ -1205,7 +1206,8 @@ FindChangedFilesSinceMetadata(const TableMetadataOperationTracker * opTracker,
 
 	while ((currentDataFile = hash_seq_search(&currentFilesStatus)) != NULL)
 	{
-		if (!hash_search(metadataDataFilesMap, currentDataFile->filePath, HASH_FIND, NULL))
+		if (!PathHashSearch(metadataDataFilesMap, currentDataFile->filePath,
+							HASH_FIND, NULL))
 			*addedFiles = lappend(*addedFiles, &currentDataFile->dataFile);
 	}
 
@@ -1214,16 +1216,17 @@ FindChangedFilesSinceMetadata(const TableMetadataOperationTracker * opTracker,
 
 	hash_seq_init(&metadataFilesStatus, metadataDataFilesMap);
 
-	char	   *metadataDataFilePath = NULL;
+	PathHashEntry *metadataDataFile = NULL;
 
-	while ((metadataDataFilePath = hash_seq_search(&metadataFilesStatus)) != NULL)
+	while ((metadataDataFile = hash_seq_search(&metadataFilesStatus)) != NULL)
 	{
 		/*
 		 * The path is a key inside metadataDataFilesMap, which goes away with
 		 * the scratch context below, so hand out a copy.
 		 */
-		if (!hash_search(currentFilesMap, metadataDataFilePath, HASH_FIND, NULL))
-			*removedFilePaths = lappend(*removedFilePaths, pstrdup(metadataDataFilePath));
+		if (!PathHashSearch(currentFilesMap, metadataDataFile->path, HASH_FIND, NULL))
+			*removedFilePaths = lappend(*removedFilePaths,
+										pstrdup(metadataDataFile->path));
 	}
 
 	MemoryContextDelete(metadataContext);
@@ -1457,13 +1460,11 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 
 	/*
 	 * The path index over the catalog file list is only needed for the diff
-	 * above. Its entries are the widest thing we allocate per file, because
-	 * the key is a fixed MAX_S3_PATH_LENGTH array, so drop it now rather than
-	 * leaving one per relation behind until the transaction ends. The
-	 * operations we return do not point into it: the path, partition and
-	 * column stats of each added file were allocated separately and outlive
-	 * it, and the removed paths are copies. addedFiles does point into it, so
-	 * it must not be used after this.
+	 * above, so drop it now rather than leaving one per relation behind until
+	 * the transaction ends. The operations we return do not point into it:
+	 * the path, partition and column stats of each added file were allocated
+	 * separately and outlive it, and the removed paths are copies. addedFiles
+	 * does point into it, so it must not be used after this.
 	 */
 	hash_destroy(currentFilesMap);
 

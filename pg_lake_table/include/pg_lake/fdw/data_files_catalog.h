@@ -19,6 +19,7 @@
 
 #include "pg_lake/data_file/data_files.h"
 #include "pg_lake/iceberg/manifest_spec.h"
+#include "pg_lake/util/path_hash.h"
 #include "pg_lake/util/s3_reader_utils.h"
 
 #include "nodes/pg_list.h"
@@ -27,9 +28,10 @@
 #define DATA_FILES_TABLE_QUALIFIED \
 	PG_LAKE_TABLE_SCHEMA "." PG_LAKE_TABLE_FILES_TABLE_NAME
 
+/* filePath is the hash key; it points to the same string as dataFile.path */
 typedef struct TableDataFileHashEntry
 {
-	char		filePath[MAX_S3_PATH_LENGTH];
+	char	   *filePath;
 	TableDataFile dataFile;
 }			TableDataFileHashEntry;
 

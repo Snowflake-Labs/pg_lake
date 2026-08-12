@@ -66,6 +66,7 @@
 #include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/type.h"
 #include "pg_lake/util/rel_utils.h"
+#include "pg_lake/util/path_hash.h"
 #include "pg_lake/util/s3_reader_utils.h"
 
 bool		EnableDataFilePruning = true;
@@ -1691,7 +1692,7 @@ PruneByFilename(List *paths, Oid relationId, List *baseRestrictInfoList)
 			/* we have a _filename = any(...) condition */
 			bool		isFound = false;
 
-			hash_search(batchFilterHash, path, HASH_ENTER, &isFound);
+			PathHashSearch(batchFilterHash, path, HASH_FIND, &isFound);
 
 			if (!isFound)
 				/* not in any(..), so prune */
@@ -1755,16 +1756,14 @@ TryCreateBatchFilterHash(List *baseRestrictInfoList, Var *filenameCol)
 		deconstruct_array_builtin(filenameArray, TEXTOID,
 								  &filenames, &filenameIsNull, &filenameCount);
 
-		int			hashFlags = HASH_ELEM | HASH_STRINGS | HASH_CONTEXT;
-		HASHCTL		hashCtl;
-
-		memset(&hashCtl, 0, sizeof(hashCtl));
-		hashCtl.keysize = MAX_S3_PATH_LENGTH;
-		hashCtl.entrysize = MAX_S3_PATH_LENGTH;
-		hashCtl.hcxt = CurrentMemoryContext;
-
+		/*
+		 * The hash keys on the path pointer, and TextDatumGetCString below
+		 * allocates in the context we create the hash in, so the keys outlive
+		 * it.
+		 */
 		HTAB	   *batchFilterHash =
-			hash_create("batch filter hash", filenameCount, &hashCtl, hashFlags);
+			CreatePathHash("batch filter hash", sizeof(PathHashEntry),
+						   filenameCount, CurrentMemoryContext);
 
 		for (int filenameIndex = 0; filenameIndex < filenameCount; filenameIndex++)
 		{
@@ -1773,11 +1772,9 @@ TryCreateBatchFilterHash(List *baseRestrictInfoList, Var *filenameCol)
 				continue;
 
 			char	   *path = TextDatumGetCString(filenames[filenameIndex]);
-			bool		isFound = false;
 
-			hash_search(batchFilterHash, path, HASH_ENTER, &isFound);
+			PathHashSearch(batchFilterHash, path, HASH_ENTER, NULL);
 		}
-
 		return batchFilterHash;
 	}
 
