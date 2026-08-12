@@ -514,6 +514,9 @@ CreateFilesHash(void)
 /*
 * AppendFileToHash appends the file to the hash table, and
 * returns true if the file already exists in the hash table.
+*
+* The hash keeps a copy of the path, allocated in the caller's memory context,
+* so the caller has to append from a context that outlives the hash.
 */
 bool
 AppendFileToHash(const char *path, HTAB *referencedFilesHash)

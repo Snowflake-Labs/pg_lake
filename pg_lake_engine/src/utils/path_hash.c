@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Snowflake Inc.
+ * Copyright 2026 Snowflake Inc.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -75,11 +75,11 @@ PathHashSearch(HTAB *pathHash, const char *path, HASHACTION action, bool *foundP
  * fixed key size to truncate to.
  */
 static uint32
-PathHashKeyHash(const void *key, Size keysize)
+PathHashKeyHash(const void *key, Size keysize PG_USED_FOR_ASSERTS_ONLY)
 {
-	const char *path = *(const char *const *) key;
-
 	Assert(keysize == sizeof(char *));
+
+	const char *path = *(const char *const *) key;
 
 	return hash_bytes((const unsigned char *) path, strlen(path));
 }
@@ -89,12 +89,12 @@ PathHashKeyHash(const void *key, Size keysize)
  * PathHashKeyCompare compares the strings behind two pointer keys.
  */
 static int
-PathHashKeyCompare(const void *key1, const void *key2, Size keysize)
+PathHashKeyCompare(const void *key1, const void *key2, Size keysize PG_USED_FOR_ASSERTS_ONLY)
 {
+	Assert(keysize == sizeof(char *));
+
 	const char *path1 = *(const char *const *) key1;
 	const char *path2 = *(const char *const *) key2;
-
-	Assert(keysize == sizeof(char *));
 
 	return strcmp(path1, path2);
 }
