@@ -426,7 +426,7 @@ def test_cross_tier_aggregate(ts_table, pg_conn):
     run_command(
         """
         INSERT INTO metrics
-        SELECT now() - interval '1 hour' * s, s % 3, 100 + s
+        SELECT date_trunc('day', now()) + interval '1 minute' * s, s % 3, 100 + s
           FROM generate_series(1, 6) s
         """,
         pg_conn,
@@ -434,6 +434,8 @@ def test_cross_tier_aggregate(ts_table, pg_conn):
     pg_conn.commit()
 
     assert count_in(pg_conn, "metrics_cold") == 12
+    # anchored past the boundary the seal just set, so these route to the hot
+    # tier whatever time of day the test runs
     assert count_in(pg_conn, "metrics_hot") == 6
 
     total = run_query("SELECT count(*), sum(value) FROM metrics", pg_conn)[0]
@@ -455,11 +457,16 @@ def test_cross_tier_aggregate_in_one_vectorized_plan(ts_table, pg_conn):
     """
     ts_table("metrics")
 
+    # every timestamp is anchored to midnight rather than to now(), so which
+    # daily partition a row lands in — and with it the cold file count asserted
+    # at the end — does not depend on the time of day the test runs
     run_command(
         """
         INSERT INTO metrics
-        SELECT now() - interval '1 day' - interval '1 hour' * s, s % 3, s
-          FROM generate_series(1, 12) s
+        SELECT date_trunc('day', now()) - interval '1 day' * d
+                                       + interval '1 hour' * s,
+               s % 3, s
+          FROM generate_series(1, 2) d, generate_series(1, 6) s
         """,
         pg_conn,
     )
@@ -469,11 +476,16 @@ def test_cross_tier_aggregate_in_one_vectorized_plan(ts_table, pg_conn):
     run_command(
         """
         INSERT INTO metrics
-        SELECT now() - interval '1 hour' * s, s % 3, 100 + s
+        SELECT date_trunc('day', now()) + interval '1 minute' * s, s % 3, 100 + s
           FROM generate_series(1, 6) s
         """,
         pg_conn,
     )
+    pg_conn.commit()
+
+    # statistics on a partitioned hot tier leave relpages = -1 on the parent,
+    # which is why the pushed-down scan has to name the partitions themselves
+    run_command("ANALYZE metrics_hot", pg_conn)
     pg_conn.commit()
 
     query = "SELECT count(*), sum(value) FROM metrics"
@@ -486,7 +498,7 @@ def test_cross_tier_aggregate_in_one_vectorized_plan(ts_table, pg_conn):
     plan = str(run_query("EXPLAIN " + query, pg_conn))
     pg_conn.commit()
     assert "Custom Scan (Query Pushdown)" not in plan, plan
-    assert "Heap Scan on metrics_hot" in plan, plan
+    assert "Scan on metrics_hot_" in plan, plan
     assert "metrics_delta" in plan, plan
 
     # a query restricted to the hot window prunes the cold tier at plan time
