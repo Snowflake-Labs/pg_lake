@@ -33,7 +33,8 @@
  * back from PostgreSQL over a loopback connection, pinned to a snapshot
  * exported by the driving backend. The scanner pushes projections and filters
  * into that connection's SELECT, so only the qualifying columns and rows are
- * shipped.
+ * shipped. A partitioned relation becomes the UNION ALL of such calls, one per
+ * leaf partition, because only a relation with storage can be scanned this way.
  *
  * Two properties keep this from changing the meaning of a query:
  *
@@ -73,6 +74,7 @@
 #include "pg_lake/fdw/shippable.h"
 #include "pg_lake/planner/heap_pushdown.h"
 #include "pg_lake/planner/restriction_collector.h"
+#include "pg_lake/pgduck/read_data.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_lake/util/string_utils.h"
 
@@ -85,6 +87,13 @@ char	   *HeapPushdownDSN = "";
 static bool HeapPushdownSnapshotAvailable(void);
 static bool HeapRelationIsPushdownable(Oid relationId);
 static bool ReplaceHeapTableWalker(Node *node, List **heapRteList);
+static char *BuildHeapScanQuery(Oid relationId, char *connectionString,
+								char *snapshotName);
+static char *BuildPartitionedHeapScanQuery(Oid relationId, char *connectionString,
+										   char *snapshotName);
+static char *BuildPostgresScanPushdownCall(Oid relationId, char *connectionString,
+										   char *snapshotName);
+static char *HeapRelationProjectionList(TupleDesc tupleDesc);
 static char *HeapPushdownExportSnapshot(void);
 static char *HeapPushdownConnectionString(void);
 
@@ -181,8 +190,9 @@ HeapRteIsRelationPushdownable(RangeTblEntry *rte)
 	if (rte->relkind == RELKIND_PARTITIONED_TABLE)
 	{
 		/*
-		 * A partitioned table has no storage of its own, so the remote SELECT
-		 * reads the partitions. They all have to be readable the same way.
+		 * A partitioned table has no storage of its own, so we read its leaf
+		 * partitions instead (see BuildPartitionedHeapScanQuery). They all
+		 * have to be readable the same way.
 		 */
 		if (!AllInheritorsArePushdownableHeap(rte->relid))
 			return false;
@@ -404,8 +414,10 @@ ReplaceHeapTableWalker(Node *node, List **heapRteList)
  * of every heap relation in heapRteList with a postgres_scan_pushdown(..) call
  * that reads the relation back from PostgreSQL at our snapshot.
  *
- * For EXPLAIN we substitute the relation name instead, like the lake path
- * does, so the output stays readable.
+ * For EXPLAIN we substitute the relation names instead, like the lake path does,
+ * so the output stays readable. The shape of the fragment is the same either
+ * way, so a partitioned relation still shows up as the UNION ALL of the
+ * partitions that will be read.
  */
 char *
 ReplaceHeapTableFunctionCalls(char *query, List *heapRteList,
@@ -432,26 +444,161 @@ ReplaceHeapTableFunctionCalls(char *query, List *heapRteList,
 		char	   *placeholderCall =
 			BuildReadTablePlaceholderCall(qualifiedRelationName,
 										  GetUniqueRelationIdentifier(rte));
-		char	   *scanCall = NULL;
-
-		if (explainRequested)
-			scanCall = qualifiedRelationName;
-		else
-		{
-			char	   *schemaName = get_namespace_name(get_rel_namespace(rte->relid));
-			char	   *relationName = get_rel_name(rte->relid);
-
-			scanCall = psprintf("postgres_scan_pushdown(%s, %s, %s, snapshot => %s)",
-								EscapedStringLiteral(connectionString),
-								EscapedStringLiteral(schemaName),
-								EscapedStringLiteral(relationName),
-								EscapedStringLiteral(snapshotName));
-		}
+		char	   *scanCall = BuildHeapScanQuery(rte->relid, connectionString,
+												  snapshotName);
 
 		query = PgLakeReplaceText(query, placeholderCall, scanCall);
 	}
 
 	return query;
+}
+
+
+/*
+ * BuildHeapScanQuery returns the query fragment that reads a pushed-down heap
+ * relation back from PostgreSQL at our snapshot.
+ *
+ * A NULL connection string means we are only explaining the query, in which
+ * case the relations appear by name instead of behind a scan call.
+ */
+static char *
+BuildHeapScanQuery(Oid relationId, char *connectionString, char *snapshotName)
+{
+	if (get_rel_relkind(relationId) == RELKIND_PARTITIONED_TABLE)
+	{
+		return BuildPartitionedHeapScanQuery(relationId, connectionString,
+											 snapshotName);
+	}
+
+	return BuildPostgresScanPushdownCall(relationId, connectionString,
+										 snapshotName);
+}
+
+
+/*
+ * BuildPartitionedHeapScanQuery returns the query fragment that reads a
+ * partitioned heap relation: the UNION ALL of its leaf partitions, each
+ * projected onto the column order of the parent.
+ *
+ * Naming the parent in a single scan would be shorter, and PostgreSQL would
+ * answer such a query correctly, but the scanner splits a relation into
+ * parallel ctid range scans sized from pg_class.relpages. A partitioned table
+ * has no storage, so its relpages is -1, which the scanner reads as an unsigned
+ * page count of 2^64-1 and then hands out 1000-block tasks for, forever. So we
+ * only ever name relations that have storage of their own.
+ *
+ * A parent with no partitions has to keep the column layout the rest of the
+ * query expects, so we read an empty data source with its descriptor, the same
+ * way the lake side does for a partitioned table with no files left to read.
+ */
+static char *
+BuildPartitionedHeapScanQuery(Oid relationId, char *connectionString,
+							  char *snapshotName)
+{
+	Relation	relation = RelationIdGetRelation(relationId);
+	TupleDesc	tupleDesc = RelationGetDescr(relation);
+	char	   *projection = HeapRelationProjectionList(tupleDesc);
+
+	StringInfoData command;
+
+	initStringInfo(&command);
+	appendStringInfoChar(&command, '(');
+
+	/* the parent is already locked, and we only read the catalogs */
+	List	   *inheritorList = find_all_inheritors(relationId, NoLock, NULL);
+	ListCell   *inheritorCell = NULL;
+	bool		isFirstPartition = true;
+
+	foreach(inheritorCell, inheritorList)
+	{
+		Oid			inheritorId = lfirst_oid(inheritorCell);
+
+		/* intermediate partitioned tables have no storage either */
+		if (get_rel_relkind(inheritorId) != RELKIND_RELATION)
+			continue;
+
+		char	   *scanCall = BuildPostgresScanPushdownCall(inheritorId,
+															 connectionString,
+															 snapshotName);
+
+		appendStringInfo(&command, "%sSELECT %s FROM %s",
+						 isFirstPartition ? "" : " UNION ALL ",
+						 projection, scanCall);
+
+		isFirstPartition = false;
+	}
+
+	if (isFirstPartition)
+	{
+		/*
+		 * Nothing to read. The format only decides how the columns of an
+		 * empty source are typed, and Parquet is the one we use everywhere
+		 * else.
+		 */
+		appendStringInfoString(&command,
+							   ReadDataSourceQuery(NIL, NIL, DATA_FORMAT_PARQUET,
+												   DATA_COMPRESSION_NONE,
+												   tupleDesc, NIL, NULL,
+												   NO_STATISTICS, 0));
+	}
+
+	appendStringInfoChar(&command, ')');
+
+	RelationClose(relation);
+
+	return command.data;
+}
+
+
+/*
+ * BuildPostgresScanPushdownCall returns a postgres_scan_pushdown(..) call that
+ * reads a relation with storage back over the loopback connection, or just the
+ * name of that relation when we are explaining the query.
+ */
+static char *
+BuildPostgresScanPushdownCall(Oid relationId, char *connectionString,
+							  char *snapshotName)
+{
+	if (connectionString == NULL)
+		return GetQualifiedRelationName(relationId);
+
+	char	   *schemaName = get_namespace_name(get_rel_namespace(relationId));
+	char	   *relationName = get_rel_name(relationId);
+
+	return psprintf("postgres_scan_pushdown(%s, %s, %s, snapshot => %s)",
+					EscapedStringLiteral(connectionString),
+					EscapedStringLiteral(schemaName),
+					EscapedStringLiteral(relationName),
+					EscapedStringLiteral(snapshotName));
+}
+
+
+/*
+ * HeapRelationProjectionList returns the comma-separated list of column names
+ * of a relation, in attribute number order.
+ *
+ * A partition may store the columns it inherits in a different order than its
+ * parent, so every branch of the UNION ALL names them explicitly rather than
+ * relying on the order the scanner returns them in. Every column is live here,
+ * because a relation with a dropped column is not pushed down at all.
+ */
+static char *
+HeapRelationProjectionList(TupleDesc tupleDesc)
+{
+	StringInfoData projection;
+
+	initStringInfo(&projection);
+
+	for (int attributeIndex = 0; attributeIndex < tupleDesc->natts; attributeIndex++)
+	{
+		Form_pg_attribute attribute = TupleDescAttr(tupleDesc, attributeIndex);
+
+		appendStringInfo(&projection, "%s%s",
+						 attributeIndex > 0 ? ", " : "",
+						 quote_identifier(NameStr(attribute->attname)));
+	}
+
+	return projection.data;
 }
 
 

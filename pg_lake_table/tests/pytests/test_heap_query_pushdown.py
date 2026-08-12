@@ -251,6 +251,10 @@ def test_partitioned_hot_tier(tiered_tables, pg_conn):
         INSERT INTO hot_partitioned
         SELECT '2024-01-11'::date + (g % 4), g % 7, g
         FROM generate_series(1, 100) g;
+
+        -- relpages of the parent becomes -1, which is what makes the scan of
+        -- the parent itself unusable
+        ANALYZE hot_partitioned;
         """,
         pg_conn,
     )
@@ -272,10 +276,58 @@ def test_partitioned_hot_tier(tiered_tables, pg_conn):
         enable_heap_pushdown(pg_conn)
         assert_query_pushdownable(query, pg_conn)
         pg_conn.commit()
+
+        # the scanner sizes its parallel ctid range scans from pg_class.relpages,
+        # and a partitioned table has relpages = -1, which it reads as an
+        # unsigned page count of 2^64-1 and never finishes handing out tasks for.
+        # So the partitions have to be named individually, and this query has to
+        # answer rather than run until the timeout.
+        run_command("SET statement_timeout TO '60s'", pg_conn)
+        pg_conn.commit()
         assert single_row(query, pg_conn) == expected
+
+        # both partitions are read, exactly once each
+        assert_remote_query_contains_expression(query, "hot_partitioned_1", pg_conn)
+        assert_remote_query_contains_expression(query, "hot_partitioned_2", pg_conn)
+        pg_conn.commit()
     finally:
+        run_command("RESET statement_timeout", pg_conn)
         disable_heap_pushdown(pg_conn)
         run_command("DROP TABLE IF EXISTS hot_partitioned", pg_conn)
+        pg_conn.commit()
+
+
+def test_partitioned_hot_tier_without_partitions(tiered_tables, pg_conn):
+    # a parent with no partitions still has to produce the column layout the
+    # rest of the query expects
+    run_command(
+        """
+        DROP TABLE IF EXISTS hot_empty;
+
+        CREATE TABLE hot_empty (event_day date, device_id int, value int)
+            PARTITION BY RANGE (event_day);
+        ANALYZE hot_empty;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    query = """
+    SELECT count(*), sum(value)::bigint FROM (
+        SELECT event_day, value FROM cold_events
+        UNION ALL
+        SELECT event_day, value FROM hot_empty
+    ) all_events
+    """
+
+    enable_heap_pushdown(pg_conn)
+    try:
+        assert_query_pushdownable(query, pg_conn)
+        pg_conn.commit()
+        assert single_row(query, pg_conn) == (1000, 500500)
+    finally:
+        disable_heap_pushdown(pg_conn)
+        run_command("DROP TABLE IF EXISTS hot_empty", pg_conn)
         pg_conn.commit()
 
 
