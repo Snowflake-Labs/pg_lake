@@ -20,10 +20,16 @@
 #include "postgres.h"
 
 #include "pg_lake/iceberg/api/table_metadata.h"
+#include "pg_lake/util/path_hash.h"
 
 extern PGDLLEXPORT List *FindUnreferencedFilesForSnapshots(IcebergSnapshot * prevSnapshots, int prevSnapshotCount,
 														   IcebergSnapshot * currentSnapshots, int currentSnapshotCount);
 extern PGDLLEXPORT List *IcebergFindAllReferencedFiles(char *metadataPath);
+
+/*
+ * A files hash is a path hash of PathHashEntry, so its entries are read as
+ * PathHashEntry * rather than as the path itself.
+ */
 extern PGDLLEXPORT bool AppendFileToHash(const char *path, HTAB *referencedFilesHash);
 extern PGDLLEXPORT HTAB *CreateFilesHash(void);
 extern PGDLLEXPORT List *FindUnreferencedFilesAmongHTABs(HTAB *prevReferencedFileHash, HTAB *currentReferencedFileHash);
