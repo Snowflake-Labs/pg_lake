@@ -271,6 +271,16 @@ static unique_ptr<FunctionData> ManageCacheBind(ClientContext &context,
 		input.inputs.size() > 1 ? input.inputs[1].GetValue<int64_t>()
 								: MIN_FREE_INODES_AUTO;
 
+	/*
+	 * MIN_FREE_INODES_AUTO is itself negative, so reject the other negative
+	 * values instead of letting them silently turn inode management off.
+	 */
+	if (functionData->min_free_inodes < 0 &&
+		functionData->min_free_inodes != MIN_FREE_INODES_AUTO)
+		throw InvalidInputException("min_free_inodes must be >= 0, or " +
+									to_string(MIN_FREE_INODES_AUTO) +
+									" to derive it from the cache file system");
+
 	/* Set the return type */
 	return_types.emplace_back(LogicalType::VARCHAR);
 	return_types.emplace_back(LogicalType::BIGINT);

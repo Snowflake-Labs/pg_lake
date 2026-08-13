@@ -47,7 +47,8 @@ const int64_t DIRECTORY_CANNOT_CREATED = -2;
 
 /*
  * Passed as minFreeInodes to ManageCache to derive the number of inodes to
- * keep available on the cache file system from the file system itself.
+ * keep available on the cache file system from the file system itself. Any
+ * other negative value is rejected, and 0 turns inode management off.
  */
 const int64_t MIN_FREE_INODES_AUTO = -1;
 
@@ -250,9 +251,6 @@ public:
 	void RemoveCacheFileActivityFromMapIfNeeded(const string& cacheFilePath);
 
 	static void UpdateAccessTime(string &filePath);
-
-	static bool TryGetInodeStats(const string &path, int64_t &freeInodes,
-								 int64_t &totalInodes);
 
 	/* required ObjectCacheEntry functions */
 	static string ObjectType() {

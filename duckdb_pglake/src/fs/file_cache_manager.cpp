@@ -493,24 +493,37 @@ FileCacheManager::RemoveCacheFileInternal(FileSystem &file_system, string finalC
  * TryGetInodeStats reports the number of available and total inodes on the file
  * system that contains the given path.
  *
- * File systems that allocate inodes dynamically (e.g. btrfs, ZFS) report 0
- * inodes, in which case totalInodes is set to 0 and there is no meaningful
- * limit to manage.
- *
- * Returns false if we cannot determine the numbers at all, which we do not
- * expect to happen for an existing local directory, so we log it.
+ * Returns false if the file system does not give us numbers we can manage the
+ * cache with, in which case we manage it by size only. File systems that
+ * allocate inodes dynamically (e.g. btrfs, ZFS) report 0. The statvfs fields
+ * are unsigned and there is no portable value for "unknown", so a file system
+ * that reports (fsfilcnt_t) -1 shows up here as a negative number, which we
+ * also have to reject: an inode floor derived from it would put us under
+ * permanent inode pressure.
  */
-bool
-FileCacheManager::TryGetInodeStats(const string &path, int64_t &freeInodes,
-								   int64_t &totalInodes)
+static bool
+TryGetInodeStats(const string &path, int64_t &freeInodes, int64_t &totalInodes)
 {
 	struct statvfs stats;
 
 	if (statvfs(path.c_str(), &stats) < 0)
 	{
-		PGDUCK_SERVER_WARN("could not determine the number of available inodes "
-						   "on the file system of %s, managing the cache by "
-						   "size only: %s", path.c_str(), strerror(errno));
+		/*
+		 * The cache manager runs every few seconds, so a failure here would
+		 * otherwise repeat in the log forever. We do not expect it at all for
+		 * an existing local directory, so once is enough to notice.
+		 */
+		static bool loggedStatvfsFailure = false;
+
+		if (!loggedStatvfsFailure)
+		{
+			PGDUCK_SERVER_WARN("could not determine the number of available "
+							   "inodes on the file system of %s, managing the "
+							   "cache by size only: %s",
+							   path.c_str(), strerror(errno));
+			loggedStatvfsFailure = true;
+		}
+
 		return false;
 	}
 
@@ -518,7 +531,34 @@ FileCacheManager::TryGetInodeStats(const string &path, int64_t &freeInodes,
 	freeInodes = (int64_t) stats.f_favail;
 	totalInodes = (int64_t) stats.f_files;
 
-	return true;
+	return totalInodes > 0 && freeInodes >= 0;
+}
+
+
+/*
+ * DeriveInodeFloor returns the number of inodes to keep available on the cache
+ * file system when the caller did not ask for a specific number.
+ *
+ * We keep a fraction of the file system available, since a bigger file system
+ * usually means a bigger cache, with a lower bound to still leave room on a
+ * small one. The upper bound of half the file system is there so that a file
+ * system with very few inodes can hold a cache at all, instead of having
+ * everything evicted on every round.
+ *
+ * Expects totalInodes > 0, which TryGetInodeStats guarantees.
+ */
+static int64_t
+DeriveInodeFloor(int64_t totalInodes)
+{
+	int64_t inodeFloor = totalInodes / DEFAULT_FREE_INODE_FRACTION;
+
+	if (inodeFloor < DEFAULT_MIN_FREE_INODES)
+		inodeFloor = DEFAULT_MIN_FREE_INODES;
+
+	if (inodeFloor > totalInodes / 2)
+		inodeFloor = totalInodes / 2;
+
+	return inodeFloor;
 }
 
 
@@ -534,8 +574,11 @@ FileCacheManager::TryGetInodeStats(const string &path, int64_t &freeInodes,
  * rmdir fails when the directory is not empty, which includes the case where a
  * concurrent operation added a file to it, so we simply stop pruning then.
  *
- * Both cacheDir and directory end in a slash, which is what makes comparing
- * them enough to recognize the cache directory.
+ * The StartsWith check is what keeps us inside the cache directory. Erasing a
+ * single trailing slash is enough because the only paths we get here come from
+ * the directory walk in ManageCache, which does not produce empty path
+ * components, and IsCacheableURL requires a non-empty scheme, so a cache path
+ * cannot start with a double slash either.
  */
 static int64_t
 PruneEmptyCacheDirectory(const string &cacheDir, string directory)
@@ -574,7 +617,11 @@ PruneEmptyCacheDirectory(const string &cacheDir, string directory)
  * out of inodes long before we reach maxCacheSize, at which point writes to
  * the cache start failing. We therefore also evict when the number of
  * available inodes drops below minFreeInodes, which is derived from the cache
- * file system when set to MIN_FREE_INODES_AUTO.
+ * file system when set to MIN_FREE_INODES_AUTO, and switched off by 0.
+ *
+ * We only evict for inodes when the cache itself holds enough of them to get
+ * back above the floor, since the file system is usually shared and we cannot
+ * fix somebody else's inode use by emptying our cache.
  */
 vector<CacheAction>
 FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize,
@@ -709,47 +756,51 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize,
 	bool trackInodes = TryGetInodeStats(cacheDir, freeInodes, totalInodes);
 
 	if (trackInodes)
+		inodeFloor = minFreeInodes == MIN_FREE_INODES_AUTO ?
+			DeriveInodeFloor(totalInodes) : minFreeInodes;
+
+	/*
+	 * Each cache file holds an inode, so count what we could free and what we
+	 * are about to add.
+	 */
+	int64_t queuedFiles = 0;
+	int64_t evictableFiles = 0;
+
+	for (const CacheItem& cacheFile : cacheFiles)
 	{
-		if (minFreeInodes == MIN_FREE_INODES_AUTO)
-		{
-			/*
-			 * Nothing to derive on a file system that allocates inodes
-			 * dynamically, so we manage the cache based on bytes only.
-			 */
-			if (totalInodes == 0)
-			{
-				trackInodes = false;
-			}
-			else
-			{
-				inodeFloor = totalInodes / DEFAULT_FREE_INODE_FRACTION;
-
-				if (inodeFloor < DEFAULT_MIN_FREE_INODES)
-					inodeFloor = DEFAULT_MIN_FREE_INODES;
-
-				/*
-				 * Never reserve more than half of the inodes, such that we can
-				 * still use the cache on a file system with few inodes instead
-				 * of evicting everything on every round.
-				 */
-				if (inodeFloor > totalInodes / 2)
-					inodeFloor = totalInodes / 2;
-			}
-		}
-		else
-		{
-			/* an explicitly requested floor is always applied */
-			inodeFloor = minFreeInodes;
-		}
+		if (cacheFile.needsDownload)
+			queuedFiles++;
+		else if (!cacheFile.isCandidate)
+			evictableFiles++;
 	}
 
 	/*
-	 * Adding files to the cache consumes inodes, so when we are low on inodes
-	 * we only evict in this round. The next round can add files again.
+	 * Reserve an inode for every file we are about to download, the same way
+	 * queueSize reserves bytes for them. Without that we would evict to exactly
+	 * the floor, add files, and be back under it in the next round.
 	 */
-	bool startedWithLowInodes = trackInodes && freeInodes < inodeFloor;
+	int64_t inodesNeeded =
+		trackInodes ? inodeFloor + queuedFiles - freeInodes : 0;
+	bool inodePressure = inodesNeeded > 0;
 
-	if (startedWithLowInodes)
+	/*
+	 * The cache normally shares a file system with other things, so the inodes
+	 * can also run out for reasons that have nothing to do with us. Evicting
+	 * the whole cache does not help then: it throws away a cache we can still
+	 * read from and leaves us just as far below the floor. So we only evict for
+	 * inodes when our own cache files can close the gap, and otherwise leave
+	 * the cache alone and stop adding to it.
+	 */
+	bool canRelieveInodePressure = inodePressure && evictableFiles >= inodesNeeded;
+	int64_t inodeEvictionBudget = canRelieveInodePressure ? inodesNeeded : 0;
+
+	/*
+	 * Adding files to the cache consumes inodes, so when we cannot free enough
+	 * of them we only evict in this round. The next round can add files again.
+	 */
+	bool skipDownloads = inodePressure && !canRelieveInodePressure;
+
+	if (skipDownloads)
 	{
 		for (CacheItem& cacheFile : cacheFiles)
 		{
@@ -772,12 +823,13 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize,
 	std::sort(cacheFiles.begin(), cacheFiles.end());
 
 	int64_t prunedDirectories = 0;
+	int64_t inodesFreed = 0;
 
 	/* remove items until we have enough space for all candidates */
 	for (CacheItem& cacheFile : cacheFiles)
 	{
 		bool needBytes = totalCacheSize + queueSize >= maxCacheSize;
-		bool needInodes = trackInodes && freeInodes < inodeFloor;
+		bool needInodes = inodesFreed < inodeEvictionBudget;
 
 		if (!needBytes && !needInodes)
 			/* we have enough space to fit our queue */
@@ -803,22 +855,21 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize,
 			{
 				totalCacheSize -= cacheFile.fileSize;
 
-				/* removing the file freed up its inode */
-				freeInodes++;
-
 				/*
 				 * Directories also hold inodes, so reclaim the ones that no
-				 * longer have any cache files in them.
+				 * longer have any cache files in them. We do this regardless of
+				 * why we are evicting, since a cache that saw many prefixes
+				 * would otherwise keep holding those inodes until it does run
+				 * low on them.
 				 */
-				if (needInodes)
-				{
-					int64_t pruned =
-						PruneEmptyCacheDirectory(cacheDir,
-												 FileUtils::ExtractDirName(cacheFile.cacheFilePath));
+				int64_t pruned =
+					PruneEmptyCacheDirectory(cacheDir,
+											 FileUtils::ExtractDirName(cacheFile.cacheFilePath));
 
-					prunedDirectories += pruned;
-					freeInodes += pruned;
-				}
+				prunedDirectories += pruned;
+
+				/* removing the file freed up its inode, plus any directories */
+				inodesFreed += 1 + pruned;
 			}
 
 			actions.push_back({
@@ -929,18 +980,39 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize,
 	 * operators may need to act on (e.g. by giving the cache its own volume, or
 	 * a file system with dynamically allocated inodes).
 	 */
-	if (startedWithLowInodes)
+	if (inodePressure)
 	{
-		PGDUCK_SERVER_LOG("cache directory %s was low on inodes: evicted %" PRIu64
-						  " files and %" PRIu64 " empty directories, %" PRIu64
-						  "/%" PRIu64 " inodes now available (keeping %" PRIu64
-						  " available)",
+		/*
+		 * Ask the file system again rather than reporting our own bookkeeping,
+		 * which cannot see inodes that are still held by an open file
+		 * descriptor on a cache file we unlinked, or what other processes did
+		 * in the meantime. The counts are the point of this message, so we want
+		 * them measured. If the call fails we keep the numbers we started with.
+		 */
+		int64_t measuredFreeInodes = 0;
+		int64_t measuredTotalInodes = 0;
+
+		if (TryGetInodeStats(cacheDir, measuredFreeInodes, measuredTotalInodes))
+		{
+			freeInodes = measuredFreeInodes;
+			totalInodes = measuredTotalInodes;
+		}
+
+		PGDUCK_SERVER_LOG("cache directory %s is low on inodes: %" PRIu64
+						  "/%" PRIu64 " available, keeping %" PRIu64
+						  " available; freed %" PRIu64 " inodes this round by "
+						  "evicting %" PRIu64 " files and %" PRIu64 " empty "
+						  "directories%s",
 						  cacheDir.c_str(),
-						  (uint64_t) removed,
-						  (uint64_t) prunedDirectories,
 						  (uint64_t) freeInodes,
 						  (uint64_t) totalInodes,
-						  (uint64_t) inodeFloor);
+						  (uint64_t) inodeFloor,
+						  (uint64_t) inodesFreed,
+						  (uint64_t) removed,
+						  (uint64_t) prunedDirectories,
+						  skipDownloads ?
+						  ", cache files alone cannot free enough inodes so "
+						  "nothing was added" : "");
 	}
 
 	return actions;
