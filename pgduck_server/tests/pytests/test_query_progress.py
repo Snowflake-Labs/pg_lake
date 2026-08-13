@@ -171,7 +171,7 @@ def test_query_progress_null_id_returns_no_rows(s3, pgduck_conn):
     )
     assert result == []
 
-    assert run_query("SELECT 1", pgduck_conn) == [(1,)]
+    assert run_query("SELECT 1", pgduck_conn)[0][0] == 1
 
 
 def cancel_and_wait(sleep_conn, pgduck_conn):
