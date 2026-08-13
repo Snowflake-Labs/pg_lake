@@ -1,16 +1,16 @@
 # pg_lake_timeseries — Design & Specification
 
-Status: **draft / pre-implementation.** This document is the source of truth for
-the extension; the code in this directory is a skeleton (catalog surface +
-entry point + stub functions).
+Status: **implemented.** This document describes what the code in this directory
+does and why. §14 records the designs that were tried and dropped on the way here,
+because their measurements are the reason the current one looks like it does.
 
 ---
 
 ## 1. Motivation
 
-We want a good way to store large volumes of time-series data in PostgreSQL,
-with the bulk of the data living in Apache Iceberg (via pg_lake) so that
-analytical scans run on DuckDB's columnar engine and storage is cheap.
+We want a good way to store large volumes of time-series data in PostgreSQL, with
+the bulk of the data living in Apache Iceberg (via pg_lake) so that analytical
+scans run on DuckDB's columnar engine and storage is cheap.
 
 The obvious approaches don't fit:
 
@@ -20,29 +20,25 @@ The obvious approaches don't fit:
   plans (per-partition foreign scans, limited partition-wise optimization) and
   fragments what should be one Iceberg table. We want **one** Iceberg table,
   internally partitioned, so DuckDB prunes files with manifest statistics.
-- **Partition management in PostgreSQL takes heavy locks** and requires
-  ongoing operational effort (create/attach/detach/drop).
+- **Partition management in PostgreSQL takes heavy locks** and requires ongoing
+  operational effort (create/attach/detach/drop).
 
 ### The idea
 
-Present a **single relation** whose data is split across two physical stores:
+Two relations, and a boundary between them:
 
-- **Base** — one pg_lake **Iceberg** table, internally partitioned (e.g.
-  `days(ts)`), holding nearly all of the data. Scanned by DuckDB with
-  file-level pruning; the target for all heavy analytical work.
-- **Delta** — a small **heap** table (range-partitioned by time, with timed
-  secondary indexes) holding recent inserts, updates, and delete tombstones
-  that have **not yet** been folded into the base.
+- the **hot tier** is the user's own table — an ordinary heap, `PARTITION BY
+  RANGE` on a `timestamptz` column, with their indexes, constraints and native
+  tuple routing. It is authoritative for `time_column >= B`;
+- the **cold tier** is one pg_lake **Iceberg** table, internally partitioned,
+  authoritative for `time_column < B`;
+- `B` is a stored **authority boundary**. It is advanced only by `seal()`, which
+  copies a heap partition into Iceberg and drops it in the same transaction.
 
-Reads **merge** the delta over the base by logical key: the newest version of
-each key wins, and tombstones suppress the base row. A background worker
-periodically **flushes** the delta into the base (merge-on-read into Iceberg),
-keeping the base "reasonably up to date, including most of the last N days," so
-the delta stays small regardless of retention.
-
-This is a base+delta / merge-on-read design (we call it **model A** below, as
-distinct from a strict watermark-split tiering we call model B). It is
-essentially a Postgres-fronted LSM layer over an Iceberg table.
+Neither relation knows about the other. What makes them one table is a
+`planner_hook` that rewrites a query on the hot relation into the union of the two
+tiers, bounded at `B`. Every range of time is read from exactly one tier, so there
+is no merge, no anti-join and no deduplication anywhere in the read path.
 
 ---
 
@@ -50,1560 +46,832 @@ essentially a Postgres-fronted LSM layer over an Iceberg table.
 
 ### Goals
 
-1. A single logical relation combining fresh heap data and an Iceberg base.
-2. Fast, indexed access to recent data (point lookups, selective queries).
-3. Full columnar pushdown (predicates, projection, aggregation) to DuckDB for
-   the parts of a query that don't touch the delta.
+1. A single logical relation combining fresh heap data and an Iceberg tier.
+2. Fast, indexed access to recent data (point lookups, selective queries), at the
+   cost of an ordinary partitioned table — the hot tier *is* an ordinary
+   partitioned table.
+3. Full columnar pushdown (predicates, projection, aggregation) to DuckDB for the
+   part of a query Iceberg owns, and optionally for the whole query (§13).
 4. No DDL on the insert hot path; no per-partition foreign tables.
-5. Correct results (exactly-once, updates/deletes applied) even while a flush
-   runs concurrently with readers — **without** requiring Iceberg snapshot
-   pinning.
-6. Bounded delta size and bounded index working set regardless of total data or
-   retention window.
+5. The boundary never advances over data that is not in Iceberg, under crashes and
+   under concurrency.
+6. A query that only touches the hot window costs what it would cost without the
+   extension.
 
 ### Non-goals (initially)
 
-- Strict `REPEATABLE READ`/`SERIALIZABLE` isolation over the Iceberg base (see
-  §7.3 — pg_lake reads the latest Iceberg snapshot; time-travel pinning is a
-  later enhancement).
-- Continuous aggregates / automatic rollups (natural follow-on, not v1).
-- Cross-tier uniqueness enforcement (see §6.4).
-- Arbitrary schema; v1 targets append-mostly time-series with a logical key.
+- `REPEATABLE READ`/`SERIALIZABLE` over the Iceberg tier: pg_lake reads the latest
+  Iceberg snapshot, and time-travel pinning is a later enhancement.
+- Mutating sealed history. Below `B` there is no heap partition to hold a change,
+  so an `UPDATE`/`DELETE` there matches nothing and an `INSERT` fails with "no
+  partition of relation". Rewriting cold history is an Iceberg-side operation.
+- Continuous aggregates / automatic rollups.
+- Cross-tier uniqueness enforcement: a unique index covers the hot tier only.
+- `month`/`year` partition intervals (§5).
 
 ---
 
 ## 3. Architecture overview
 
 ```
-                    ┌──────────────────────────────────────────┐
-   INSERT/UPDATE/   │            parent relation                │   SELECT / aggregate
-   DELETE  ───────► │   (merge-on-read: delta overlays base)    │ ◄────────────────
-                    └───────────────┬───────────────┬───────────┘
-                                    │               │
-                         overlay (by key)      base (pruned)
-                                    │               │
-                        ┌───────────▼──────┐  ┌─────▼───────────────────────┐
-                        │  DELTA (heap)    │  │  BASE (Iceberg via pg_lake)  │
-                        │  recent writes   │  │  ~complete, internally       │
-                        │  timed indexes   │  │  partitioned days(ts),       │
-                        │  range part. ts  │  │  scanned by DuckDB           │
-                        └───────────▲──────┘  └─────▲───────────────────────┘
-                                    │               │
-                                    └──── flush ─────┘   (background worker:
-                                     merge-on-read into    move committed delta
-                                     Iceberg, atomically   rows into base, then
-                                     remove from delta)    delete from delta)
+     INSERT / UPDATE / DELETE                         SELECT
+     (native tuple routing,                    (planner_hook rewrites the
+      no trigger, no view)                      relation into both tiers)
+              │                                          │
+              ▼                                          ▼
+   ┌──────────────────────────┐              ┌──────────────────────────────┐
+   │  metrics                 │              │ metrics WHERE ts >= B        │
+   │  heap, PARTITION BY      │─────────────►│   UNION ALL                  │
+   │  RANGE (ts)              │              │ metrics_cold WHERE ts < B    │
+   │  authoritative: ts >= B  │              └──────────────────────────────┘
+   └──────────┬───────────────┘                             ▲
+              │  seal(): copy + DROP TABLE + advance B      │
+              │  sync(): copy only (B unchanged)            │
+              ▼                                             │
+   ┌──────────────────────────────────────────────┐          │
+   │  metrics_cold — pg_lake Iceberg table        │──────────┘
+   │  authoritative: ts < B, plus a lagging copy  │
+   │  of completed partitions above B             │
+   └──────────────────────────────────────────────┘
 ```
 
-- The **parent** is initially a SQL **view** (for semantics/validation) and
-  later a **CustomScan**-backed relation (for efficient per-partition
-  reconciliation and aggregate pushdown).
-- The **delta** is small because the flusher keeps draining it into the base.
-- The **base** is where analytical scans and aggregation get pushed.
-- Preferred read execution pushes the *whole* merge — delta included, via a
-  snapshot-pinned DuckDB `postgres_scan` — **into DuckDB**, so one columnar plan
-  reconciles and aggregates (§5.3–§5.4).
-
-> **Two storage families, and their combination.** §4–§11 detail the
-> **delta/overlay** family described above (Iceberg base + small Postgres delta,
-> reads merge). §12 describes the **hot-authoritative tiering** family the design
-> later converged toward (Postgres owns the full deduplicated indexed last N days;
-> Iceberg is a tier/mirror; reads route by tier with no merge), including **Mirror
-> mode (C)**, the CDC-fed Iceberg mirror. §13 describes the shape there is actual
-> demand for, which is neither family alone: **overlapping** tiers (Postgres to
-> `now()`, Iceberg to the last materialisation) with tier routing as the fast path
-> and a cross-tier merge for the cases routing cannot cover. §13 is the primary
-> target; §4–§11 supply its merge machinery and §12 its tiering machinery.
+The registration that ties the two together lives in `timeseries.tables`
+(§6). Maintenance (§9) moves data upward through `sync()` and `seal()` and expires
+it at the far end.
 
 ---
 
-## 4. Data model
+## 4. The authority boundary
 
-### 4.1 Versioning: `seq`
+`B` is one `timestamptz` per table, and it is the only thing that decides which
+tier owns a row:
 
-Every row carries a monotonic `seq bigint`, assigned from a global sequence at
-insert time. `seq` is used for two things:
+- **PostgreSQL owns `time_column >= B`.** Its partitions cover that range and
+  nothing below it, so a write below `B` has no partition and raises.
+- **Iceberg owns `time_column < B`.** It is also allowed to hold a *copy* of
+  ranges above `B` (§9.2), which the read path masks with its own `< B` predicate.
+- `B` starts at `-infinity`, so a new table is entirely hot and the cold branch of
+  every plan returns nothing. Nothing else ever writes `B` backwards, and there is
+  no way to start a table with a boundary already in the past: the Iceberg tier is
+  created empty along with the heap (§5).
+- `B` moves **only forward, only in `seal()`**, and only in the transaction that
+  has already copied the range into Iceberg and dropped the heap partition.
 
-1. **Read reconciliation** — for a given logical key, the row with the highest
-   `seq` is the current version.
-2. **Flush batch delineation** — a flush processes rows with `seq <= hwm` for a
-   *safe* high-water mark `hwm` (§7.2).
+That last point is the whole correctness argument, and it is why the boundary is a
+single scalar rather than per-partition state: a reader needs one value to split a
+query, and a maintenance pass needs one value to know where to continue.
 
-`seq` is **not** a read-side watermark; read dedup is by key, not by a global
-cut. (That distinguishes model A from model B; see §14.)
+---
 
-### 4.2 Logical key
+## 5. DDL
 
-A time-series row is identified by `key_columns`, e.g. `{series_id, ts}`. The
-key is what an update/delete targets and what read reconciliation dedups on.
-Model A **requires** a key (§6.4 discusses the keyless case).
-
-### 4.3 Base (Iceberg) schema
+A tiered table is made with one statement, and everything after that is ordinary
+DDL on the user's own relation:
 
 ```sql
-CREATE TABLE <base> (
-    <key columns...>,          -- e.g. series_id bigint, ts timestamptz
-    <value columns...>,
-    seq bigint NOT NULL        -- version of the row currently in the base
-) USING iceberg PARTITIONED BY (days(<time_column>));
+CREATE TABLE metrics (ts timestamptz NOT NULL, device int, value float8)
+USING timeseries WITH (partition_interval = '1 day',
+                       hot_retention = '7 days',
+                       location = 's3://bucket/metrics');
 ```
 
-The base carries no `deleted` column: the flusher applies deletes physically
-(removes the base row), so a base row is always a live, current-as-of-last-flush
-version.
+`USING timeseries` names a placeholder access method (`timeseries_am_handler()`
+exists only so that the name resolves, and raises if it is ever called). `src/ddl.c`
+intercepts the statement through pg_lake's utility handler framework
+(`RegisterUtilityStatementHandler()`, the same way the `iceberg` access method is
+implemented) and turns it into:
 
-### 4.4 Delta (heap) schema
+1. the partitioned heap the user asked for — `PARTITION BY RANGE (<time column>)`
+   is filled in if they did not write it, and the access method is set to the
+   default one rather than left blank, so that a `default_table_access_method` of
+   `iceberg` cannot turn the hot tier into a second lake table;
+2. `CREATE TABLE <name>_cold (<the heap's columns>) USING iceberg WITH (...)`, with
+   `partition_by` defaulted from `partition_interval` and every option this
+   extension does not consume passed through for pg_lake to validate;
+3. an internal dependency of the cold tier on the heap, so `DROP TABLE metrics`
+   drops it too (§11.1);
+4. the registration row in `timeseries.tables`;
+5. enough partitions to cover the hot window and `precreate_ahead`, so the table is
+   writable immediately.
 
-```sql
-CREATE TABLE <delta> (
-    <key columns...>,
-    <value columns...>,
-    seq     bigint  NOT NULL,
-    deleted boolean NOT NULL DEFAULT false   -- tombstone
-) PARTITION BY RANGE (<time_column>);
--- timed secondary indexes are partitioned indexes on the parent (§6.3)
-```
+The options this extension consumes are `time_column`, `partition_interval`
+(default `1 day`), `hot_retention` (`7 days`), `cold_retention` (unlimited) and
+`precreate_ahead` (`7` intervals). `time_column` may be left out when the table has
+exactly one `timestamptz` column.
 
-The delta holds inserts, new versions of updated rows, and tombstones for
-deletes, all tagged with `seq`.
+### 5.1 What is refused, and why
 
-### 4.5 Catalog
+The invariants the planner hook trusts (§7) are established here by construction
+rather than validated afterwards. There is deliberately **no** function that adopts
+an existing heap and an existing Iceberg table as a pair, and no
+`ALTER TABLE ... SET ACCESS METHOD timeseries`: a registration whose assumptions
+were checked once, on tables that were built elsewhere, is a registration that can
+be made to lie.
 
-Defined in `pg_lake_timeseries--3.4.sql`:
+What `CREATE TABLE` refuses:
 
-- `timeseries.tables` — one row per managed table (parent, time column, key
-  columns, partition interval, hot retention, precreate-ahead, base table,
-  cluster columns, version sequence, enabled flag).
-- `timeseries.delta_partitions` — the set of delta partitions that currently
-  hold unflushed rows ("dirty"). Drives the CustomScan's dirty/clean split
-  (§5.3). A partition is removed from this table when a flush empties it.
+- a temporary or unlogged table — the cold tier outlives the session, and skipping
+  WAL for a tier whose contents get copied into Iceberg is not crash-safe;
+- `USING timeseries` on a partition, or on `CREATE TABLE ... AS`;
+- `INHERITS` — the hook substitutes a subquery for the relation, which inheritance
+  expansion has no place for;
+- a partitioning that is not `RANGE` on the single time column, an ambiguous time
+  column (no `timestamptz` column, or more than one and no `time_column` option), a
+  time column that is `timestamp` rather than `timestamptz`, or one that is
+  nullable. `timestamp` is rejected because the boundary, the partition bounds and
+  every predicate the hook adds are `timestamptz`, and reading one as the other
+  shifts by the session time zone; a NULL time would belong to no partition, and so
+  to no tier;
+- a `partition_interval` that is not positive and **fixed-length**. `month`/`year`
+  would need `date_trunc` rather than the epoch arithmetic in `partition_start()`.
 
-Both are marked with `pg_extension_config_dump` so they are dumped/restored with
-the database, not treated as extension-owned static data.
+### 5.2 Keeping the tiers the same shape
 
----
+The two tiers only have to agree about the *shape* of the table: the hook
+substitutes one for the other by position, so their column names, types and order
+must match. `ALTER TABLE` on a tiered table therefore forwards exactly the
+subcommands that change that — `ADD COLUMN`, `DROP COLUMN`, `ALTER COLUMN TYPE`,
+`OWNER TO`, and `RENAME COLUMN` — to the Iceberg tier, and leaves everything else
+(indexes, constraints, storage parameters, statistics targets) as a hot-tier matter.
 
-## 5. Read path
+The ordering is forced by two things at once:
 
-### 5.1 Merge-on-read view (semantics reference)
+- what the tier has to be told is computed **before** the user's statement runs, so
+  that a `DROP COLUMN` is still looking at a column that exists;
+- the tier is altered **after** it, because the nested DDL has to reach pgaudit
+  after the top-level statement did. pgaudit raises "pgaudit stack is not empty" if
+  it sees a top-level utility statement while its stack holds a DDL item, which is
+  what running the tier's `ALTER TABLE` first would leave behind.
 
-The correct reconciliation, expressed as a view (this is the *specification* of
-the result; the CustomScan must produce the same rows):
+Both happen in one transaction, so pg_lake's Iceberg validation still decides the
+outcome for both tiers: a type change Iceberg cannot express aborts the heap's
+rewrite with it. The allowed changes are Iceberg's promotions — `int -> bigint`,
+`float -> double`, wider `decimal` at the same scale.
 
-```sql
-CREATE VIEW <parent> AS
--- base rows NOT overridden by any delta row for the same key
-SELECT <cols>
-FROM   <base> c
-WHERE  NOT EXISTS (SELECT 1 FROM <delta> d
-                   WHERE d.series_id = c.series_id AND d.ts = c.ts)
-UNION ALL
--- current (max-seq) non-tombstone delta version per key
-SELECT <cols>
-FROM  (SELECT DISTINCT ON (series_id, ts) <cols>, deleted
-       FROM   <delta>
-       ORDER  BY series_id, ts, seq DESC) d
-WHERE  NOT d.deleted;
-```
+Executing the user's statement is `ExecuteUserStatement()`, and it is not simply a
+call to `PgLakeCommonProcessUtility()`: that restarts the handler chain from the
+first handler, which would call this handler again on the same statement. The
+statement being executed is remembered in a file-static for exactly as long as that
+takes, and recognised on the way back in.
 
-Notes:
+Three further changes are refused outright rather than half-propagated:
 
-- The **anti-join form** scans the base once (with pushdown) and hashes the tiny
-  delta for the `NOT EXISTS` anti-semijoin — it does **not** sort the whole
-  base. The simpler `DISTINCT ON (key) ORDER BY key, seq DESC` over
-  `base UNION ALL delta` is also correct but sorts everything; acceptable only
-  as a correctness oracle in tests.
-- Tombstones: a delete lives in the delta as a `deleted = true` row. The
-  `NOT EXISTS` suppresses the base row; the outer `WHERE NOT deleted` drops the
-  tombstone itself, so the key correctly disappears.
+- anything to the **time column** — dropping it, changing its type, or renaming it.
+  It is the heap's partition key, the Iceberg tier's partition field and the type of
+  the boundary; pg_lake will not rename a field that a partition spec uses, so a
+  rename could only end with the tiers disagreeing about the name;
+- an `ALTER COLUMN TYPE` with a `USING` expression, which rewrites the values of a
+  column. Iceberg promotes the type of a field without touching its data files, so
+  the expression would only reach the rows PostgreSQL still owns;
+- `TRUNCATE`, which would empty the heap and leave Iceberg holding everything below
+  the boundary — the history the user was trying to remove. Truncating a single
+  partition is still allowed: that is a range of the hot tier, which is what a
+  `DELETE` over the same range would have done.
 
-### 5.2 Pruning & pushdown
+`ADD COLUMN ... DEFAULT` is propagated, but the default is not: Iceberg reads a
+field its data files lack as `NULL`, and `pg_attrdef` on the tier stays empty. The
+rows the heap fills in are the ones the default was written for.
 
-For a query with predicates on the parent:
+The settings in `timeseries.tables` are not relation options, so `ALTER TABLE ...
+SET (hot_retention = '3 days')` is absorbed by this extension and PostgreSQL never
+sees it. A partitioned table has no storage parameters of its own — PostgreSQL
+rejects every one of them with a hint about the leaf partitions — so `SET (...)` on
+a tiered table is entirely this extension's namespace, and a name it does not know
+is refused here. Settings cannot be changed in the same `ALTER TABLE` as anything
+else, because the two halves would have to be applied by different code.
 
-- **Base branch** — predicates on the time/key columns push into the Iceberg
-  foreign scan; DuckDB prunes partitions/files via manifest min/max.
-- **Delta branch** — predicates prune delta partitions (and use the timed
-  indexes).
-
-**Pushdown safety (important):** quals on **key columns** (`series_id`, `ts`)
-push *into* the `DISTINCT ON` subquery — PostgreSQL allows this because they are
-the DISTINCT ON columns. Quals on **non-key columns** (`value > 5`) do **not**
-push below the `DISTINCT ON` (`check_output_expressions` marks non-DISTINCT
-output columns unsafe). This is exactly what correctness requires: a non-key
-filter must apply *after* the current version is chosen, or a filtered-out
-newest version would let a stale older version surface. Verify with `EXPLAIN`
-that `value` predicates stay above the dedup while `ts`/`series_id` predicates
-sink into both branches.
-
-### 5.3 Where the merge runs
-
-Reconciling in PostgreSQL (the §5.1 view) means the base is scanned as a foreign
-scan, base rows are shipped up to PostgreSQL, and the anti-join/aggregation run
-in PostgreSQL. That is correct but forfeits DuckDB aggregation for any range the
-delta touches. The **preferred** execution instead pushes the *entire* merge —
-including the delta read — **into DuckDB**, using DuckDB's `postgres_scanner`
-(`postgres_scan`), which is already bundled and loaded in `duckdb_pglake`. Then
-one columnar plan reconciles and aggregates, returning only final results.
-
-The CustomScan reads `timeseries.delta_partitions` at plan time and splits the
-time-pruned partition set:
-
-- **Clean partitions** (no unflushed delta) — emit plain Iceberg DuckDB SQL, no
-  `postgres_scan`, no reverse connection. This is the common case for anything
-  older than the flush lag.
-- **Dirty partitions** (delta overlaps) — emit a single DuckDB query that reads
-  the base via `read_parquet(...)` **and** the delta via a snapshot-pinned
-  `postgres_scan(...)` (§5.4), does the anti-join + max-`seq` dedup + tombstone
-  filter, and aggregates — all in DuckDB.
-
-Emitted DuckDB SQL for `SELECT time_bucket, avg(value) ... GROUP BY 1` over a
-dirty range:
-
-```sql
-SELECT time_bucket, avg(value)                 -- aggregation runs in DuckDB
-FROM (
-    SELECT base.*
-    FROM   read_parquet([...iceberg files...]) base
-    WHERE  NOT EXISTS (SELECT 1 FROM delta d
-                       WHERE d.series_id = base.series_id AND d.ts = base.ts)
-    UNION ALL
-    SELECT * EXCLUDE (deleted, seq)
-    FROM  (SELECT DISTINCT ON (series_id, ts) *
-           FROM postgres_scan_pushdown('<loopback dsn>', 'public', 'metrics_delta',
-                                       snapshot => '<exported id>')
-           ORDER BY series_id, ts, seq DESC) d
-    WHERE NOT d.deleted
-) merged
-GROUP BY 1;
-```
-
-`postgres_scan` supports filter/projection pushdown
-(`PostgresScanFunctionFilterPushdown`), so the query's `ts`/key predicates push
-to the PostgreSQL side and only the tiny indexed delta slice is read; DuckDB
-supports `DISTINCT ON` and anti-joins natively. A partition flips back to
-*clean* the instant a flush empties its delta, so the set that pays the reverse
-connection is bounded by the flush lag, not by N.
-
-This collapses the earlier "clean → push aggregate / dirty → aggregate-in-PG"
-split into "clean → plain Iceberg SQL / dirty → Iceberg + `postgres_scan`,
-merged and aggregated in DuckDB", and largely **removes the dependency on
-partial-aggregate pushdown** (§11#1): DuckDB performs the whole aggregation over
-the merged result, so there is no cross-engine partial/finalize split to rely on.
-
-**Fallback:** the §5.1 PostgreSQL-side reconciliation remains valid where a
-reverse connection is undesirable (e.g. no suitable role, or `postgres_scan`
-overhead not justified for a given query); the CustomScan can choose it per
-query.
-
-### 5.4 Snapshot-consistent `postgres_scan` (reading the delta inside DuckDB)
-
-Reading the delta inside DuckDB is only correct if the delta read uses the
-**same snapshot** as the base file resolution. pg_lake resolves the base file
-set at the transaction snapshot `S` (`CreatePgLakeScanSnapshot` →
-`GetTransactionSnapshot()`), but pgduck_server executes *after* that, so a naive
-`postgres_scan` at "latest" would read the delta at a later instant `S'`. A
-flush committing between the base pin and `S'` moves a row out of the delta that
-the base snapshot did not yet contain → the row is in **neither** → **lost row**.
-
-The fix is already present: `duckdb_pglake` carries a patch
-(`patches/duckdb-postgres/snapshot.patch`) adding a `snapshot => '<id>'` named
-parameter to `postgres_scan`/`postgres_query`. When set, the scanner's
-back-connection adopts that snapshot (`PostgresScanConnect(con, snapshot)` →
-`SET TRANSACTION SNAPSHOT`) instead of reading latest.
-
-Flow per query touching a dirty range:
-
-1. The driving backend calls `pg_export_snapshot()` inside the query's
-   transaction and threads the id into the emitted DuckDB SQL.
-2. The backend stays blocked awaiting pgduck_server, so the exporting
-   transaction remains open and the snapshot importable.
-3. `postgres_scan(..., snapshot => id)` opens the reverse connection and
-   `SET TRANSACTION SNAPSHOT '<id>'`, reading the delta at exactly `S`.
-
-Result: base **and** delta are both read at `S`. Dedup is by key, so the merge
-is exactly-once *and* fully snapshot-consistent — it does not even exhibit the
-REPEATABLE READ "see-slightly-newer" anomaly of the PostgreSQL-side path (§8.3).
-The `snapshot` parameter is therefore **mandatory**, not an optimization.
-
-**Reverse-connection topology & auth.** Today pgduck_server only *receives*
-connections (PostgreSQL → pgduck_server over `/tmp:5332`); here pgduck_server's
-`postgres_scanner` connects *back* to PostgreSQL. This is a new surface:
-
-- The `postgres_scan` DSN must authenticate as a role that can read the delta.
-  Preferred: a dedicated, read-only role over the local unix socket using peer
-  authentication — **no password in the DSN**. Avoid embedding credentials in
-  generated SQL.
-- The delta is a physical heap; a `SELECT`-only grant to that role on the delta
-  tables is sufficient (the reverse connection never touches the base).
-- **Connection reuse**: `postgres_attach` / a persistent ATTACH to pool the
-  reverse connection if query rates are high. Only dirty-range queries open it.
-
-**Caveat:** correctness depends on the exported snapshot staying importable,
-which holds because the driving query *synchronously* blocks on pgduck_server.
-If the pgduck_server call is ever made asynchronous, this invariant must be
-re-established (e.g. hold the exporting transaction explicitly).
+Renaming the table itself is deliberately **not** propagated: the registration
+names relations by OID, so nothing depends on the cold tier still being called
+`<table>_cold`.
 
 ---
 
-## 6. Write path
+## 6. Metadata
 
-### 6.1 Ingest routing
+Two tables, both `pg_extension_config_dump`'d:
 
-Inserts/updates/deletes to the parent are routed to the **delta**:
-
-- INSERT → delta row, `seq` from the sequence, `deleted = false`.
-- UPDATE → new delta row for the key with a higher `seq` (the read path picks
-  the max-`seq` version; the base version is suppressed by the anti-join).
-- DELETE → delta tombstone row (`deleted = true`) with a higher `seq`.
-
-Routing is done by the parent relation's `ModifyTable` path (INSTEAD OF triggers
-on the view for the skeleton; the CustomScan/`ModifyTable` integration later).
-
-### 6.2 Frontier & maintenance (no DDL on the insert path)
-
-Native PostgreSQL does **not** auto-create partitions; a non-matching insert
-errors unless a `DEFAULT` partition exists. So the delta is managed as:
-
-1. **Pre-create ahead** — the background worker keeps `precreate_ahead`
-   partitions ready in front of `now()`. Almost every insert hits an existing
-   partition. Partition creation happens in the worker, never on the insert
-   path.
-2. **DEFAULT catch-all** — a `DEFAULT` partition absorbs any row that misses
-   (clock skew, worker lag, late data), so inserts never fail.
-3. **Drain DEFAULT** — the worker empties DEFAULT each pass: in-window rows are
-   moved into a freshly-created/attached partition (delete-from-default →
-   attach → the attach's default-scan then finds no conflict); out-of-window
-   (old late) rows are flushed straight into the base.
-
-Keeping DEFAULT small is essential: attaching a partition while DEFAULT holds
-rows forces a scan of DEFAULT under a strong lock. Drain before pre-create.
-
-### 6.3 Timed indexes
-
-Secondary indexes (e.g. on `(series_id, ts)`) are declared as **partitioned
-indexes** on the delta parent. They propagate to each partition and are dropped
-with the partition. Because the delta only spans the recent window, the index
-working set is bounded and cache-resident, insert-time maintenance is cheap, and
-retiring a partition reclaims its index instantly (no vacuum of index tuples).
-This is the reason the delta is chunked rather than a single heap.
-
-### 6.4 Keys, uniqueness, keyless case
-
-- A **logical key** is required for model A (reconciliation dedups by key).
-  `{series_id, ts}` is typical; a synthetic ingest id works too.
-- **Uniqueness is not enforced across tiers.** A per-partition unique index only
-  enforces uniqueness *within* a delta partition, never against the base. For
-  append-only or last-writer-wins semantics this is fine; strict cross-tier
-  uniqueness is out of scope.
-- **Keyless append-only** workloads can't dedup by key. They must either use
-  model B (a version-seq watermark split; see §14) or accept snapshot pinning.
-  Model A assumes a key.
-
----
-
-## 7. Flush (keeping the base fresh)
-
-### 7.1 The flush operation
-
-Runs as one transaction so the Iceberg commit and the delta cleanup are atomic
-(pg_lake ties the Iceberg metadata commit to the Postgres transaction commit):
-
-```sql
--- hwm = timeseries.safe_hwm(parent)  (see §7.2)
-CREATE TEMP TABLE batch ON COMMIT DROP AS
-  SELECT DISTINCT ON (series_id, ts) series_id, ts, value, seq, deleted
-  FROM   <delta> WHERE seq <= hwm
-  ORDER  BY series_id, ts, seq DESC;             -- current version per key
-
--- supersede base for every touched key (merge-on-read: Iceberg writes deletes)
-DELETE FROM <base>
-WHERE (series_id, ts) IN (SELECT series_id, ts FROM batch);
-
--- (re)insert current, non-deleted versions, clustered for tight file min/max
-INSERT INTO <base> (series_id, ts, value, seq)
-SELECT series_id, ts, value, seq FROM batch WHERE NOT deleted
-ORDER  BY <cluster_columns>;
-
--- remove exactly the flushed rows; rows with seq > hwm remain in the delta
-DELETE FROM <delta> WHERE seq <= hwm;
-
--- update the dirty-partition catalog for now-empty partitions
-```
-
-If the FDW cannot take a semi-join `DELETE ... WHERE (k) IN (subquery)`,
-materialize the key set into an array and use `= ANY`, or delete per touched
-partition.
-
-### 7.2 Safe high-water mark
-
-`seq` is assigned at insert time, but transactions commit out of order. If the
-flush naively used `max(seq)` it could delete a delta row whose lower-`seq`
-sibling for the same key was inserted by a still-in-flight transaction, or skip
-a lower `seq` that commits *after* the flush's snapshot — losing data.
-
-`timeseries.safe_hwm()` returns the largest `seq` such that **every** `seq` `<=`
-it is committed and visible — computed LSN-style as `(oldest in-flight seq − 1)`
-using a small tracking structure (or by inspecting the sequence vs. the oldest
-active snapshot). The flush only processes `seq <= safe_hwm`; anything newer or
-still in flight stays in the delta for the next pass.
-
-### 7.3 Compaction & retention
-
-- **Compaction** — frequent small flushes create many small Iceberg files.
-  Schedule pg_lake's existing `VACUUM`-based compaction
-  (`VacuumCompactDataFiles`) on the base.
-- **Retention** — dropping data past a retention horizon is a metadata-level
-  Iceberg partition delete on the base (cheap), plus snapshot expiry, which
-  pg_lake already supports.
-
----
-
-## 8. Correctness
-
-### 8.1 Exactly-once under concurrent flush (no snapshot pinning)
-
-pg_lake reads the **latest** Iceberg snapshot (it does not pin to the reader's
-Postgres snapshot). Model A is nonetheless exactly-once because reconciliation
-is **logical** (by key), not physical.
-
-Take key `k`: base version `seq_b`, delta update `seq_d > seq_b`; flush `F`
-commits at time `C`, moving `k` into the base and deleting it from the delta.
-
-| reader snapshot `S` | delta (at `S`) | base (latest) | base branch (`NOT EXISTS delta.k`) | delta branch | result |
-|---|---|---|---|---|---|
-| `S` before `C` | has `k`@`seq_d` | `seq_b` or (post-`C`) `seq_d` | **excluded** (delta has `k`) | `seq_d` | `k` once, `seq_d` |
-| `S` after `C`  | no `k`         | `seq_d`                      | **included**                      | —            | `k` once, `seq_d` |
-
-Invariant: **a base row is surfaced only when the delta lacks that key at the
-reader's snapshot**, and delta contents are MVCC-consistent with that snapshot.
-The transient "row physically in both stores" during a flush cannot
-double-count, because the anti-join drops the base copy whenever the delta still
-holds the key. Deletes are symmetric (the tombstone suppresses the base via
-`NOT EXISTS` until the flush removes both atomically).
-
-### 8.2 No lost writes
-
-Guaranteed by §7.2: the flush only removes `seq <= safe_hwm`, and `safe_hwm`
-never advances past an uncommitted/in-flight `seq`. A newer version (`seq >
-hwm`) for a key already partially flushed stays in the delta and wins on the
-next read.
-
-### 8.3 Isolation levels
-
-- **READ COMMITTED** — fully correct. Each statement sees a fresh snapshot;
-  "latest Iceberg" ≈ current, consistent with RC semantics.
-- **REPEATABLE READ / SERIALIZABLE** — for the **PostgreSQL-side** reconciliation
-  (§5.1) there is one anomaly: because the base is read at latest, a key inserted
-  *and* flushed entirely after the reader's snapshot can surface from the base
-  (the reader's delta view never had it). This yields "see
-  slightly-newer-than-snapshot" reads on cold data. It **never** causes
-  duplicates or lost rows.
-- **The preferred DuckDB-side merge (§5.3–§5.4) does not have this anomaly**:
-  the base file set is resolved at the transaction snapshot `S`, and the delta is
-  read at the same `S` via the exported-snapshot `postgres_scan`, so both stores
-  are consistent at `S`. This is *stronger* isolation than the PostgreSQL-side
-  path, achieved without any Iceberg time-travel.
-- If strict RR/SERIALIZABLE is required for the **PostgreSQL-side fallback** too,
-  add Iceberg **snapshot pinning**: store, per flush, the resulting
-  `iceberg_snapshot_id` in a Postgres row; a reader reads the max id visible at
-  its snapshot and scans the base `AS OF` that id. pg_lake already has
-  `GetIcebergSnapshotViaId`; the missing piece is threading a chosen snapshot id
-  through the FDW scan. Deliberate later enhancement, not required for model-A
-  correctness.
-
----
-
-## 9. Background worker
-
-Registered from `_PG_init` (skeleton has a TODO where `RegisterBackgroundWorker`
-goes). Every `pg_lake_timeseries.maintenance_naptime` ms it iterates
-`timeseries.tables` and, per enabled table, runs `timeseries.maintain()`:
-
-1. Pre-create the delta frontier (§6.2).
-2. Drain the DEFAULT partition (§6.2).
-3. Flush aged/committed delta into the base (§7).
-
-Each unit (per-partition create, per-flush) is its **own transaction** so
-Iceberg commits are independent and locks release between units — hence
-`maintain()`/`flush()` are `PROCEDURE`-shaped internally (they `COMMIT` between
-units) even though the SQL surface exposes function wrappers.
-
-Concurrency: a single worker per database avoids two maintainers racing the same
-table; if multiple workers are ever used, guard per-table with an advisory lock.
-
----
-
-## 10. Configuration & API
-
-### GUCs (defined in `src/init.c`)
-
-- `pg_lake_timeseries.enable` (bool, default on) — enable background maintenance.
-- `pg_lake_timeseries.maintenance_naptime` (ms, default 10000) — interval
-  between maintenance passes.
-
-Future: per-table overrides for flush cadence, target file size, retention.
-
-### SQL API (stubs in the skeleton)
-
-- `timeseries.create_table(parent, time_column, key_columns, partition_interval,
-  hot_retention, cold_table, precreate_ahead, cluster_columns)` — register a
-  table; create delta + timed indexes + base + sequence + parent relation.
-- `timeseries.flush(parent, hwm)` — flush committed delta into the base.
-- `timeseries.maintain(parent)` — one maintenance pass (frontier + drain +
-  flush).
-- `timeseries.safe_hwm(parent)` — largest fully-committed `seq` safe to flush.
-
----
-
-## 11. Open questions & risks
-
-1. **Partial-aggregate pushdown** — largely **moot** under the preferred
-   DuckDB-side merge (§5.3): DuckDB aggregates the merged result, so there is no
-   cross-engine partial/finalize split. It only matters for the PostgreSQL-side
-   fallback (§5.1), where dirty ranges would re-aggregate on top (fine for
-   decomposable aggregates, special-cased for holistic ones).
-2. **Reverse-connection auth** — the DuckDB-side merge has pgduck_server connect
-   *back* to PostgreSQL via `postgres_scan`. Needs a read-only role reachable
-   over the local unix socket (peer auth, no password in the DSN) with `SELECT`
-   on the delta tables. New surface; see §5.4.
-3. **Reverse-connection overhead / pooling** — only dirty-range queries open the
-   reverse connection; use `postgres_attach` / persistent ATTACH to pool it under
-   high query rates. Clean-range queries never open it.
-4. **Async pgduck calls** — DuckDB-side correctness relies on the driving query
-   blocking synchronously so the exported snapshot stays importable (§5.4). Any
-   move to async pgduck execution must re-establish this.
-5. **Snapshot pinning (base)** — needed only for strict RR/SERIALIZABLE on the
-   PostgreSQL-side fallback (§8.3); the DuckDB-side merge is already
-   snapshot-consistent. Threading a snapshot id through the FDW scan is the new
-   capability it would require.
-6. **Late-data partition sprawl** — updates scattered across old data times
-   create old-dated delta partitions. Mitigation: route out-of-window late rows
-   straight to the base at flush (don't keep a partition), or hold a single
-   "late" partition. Needs a policy.
-7. **Keyless append-only** — not supported by model A; would use model B (§14).
-8. **`MERGE`/joined-DELETE support in the FDW** — the flush uses a semi-join
-   DELETE against the Iceberg base; confirm the FDW supports it, else use the
-   `= ANY` / per-partition fallback (§7.1).
-9. **Single-row insert cost into Iceberg** — the flush must be **bulk**; never
-   trickle single rows into the base (the FDW has no batch insert and single-row
-   inserts are expensive). Ingest goes to the heap delta; only the flusher
-   writes the base, in batches.
-10. **Equality-delete write support** — pg_lake writes only *position* deletes;
-    equality deletes (content=2) are recognized on read but have no write path.
-    Efficient high-frequency Mirror mode (C) apply-by-key would want
-    equality-delete writes (§12.3). Gating capability for that path; scope
-    separately in pg_lake_iceberg.
-11. **Equality deletes vs. overwrite-from-Postgres** — undecided whether Mirror
-    mode should use pure Iceberg equality deletes (read-amplifying, needs new
-    write support) or lean on overwrite-from-Postgres resets (§12.3), which the
-    authoritative hot store uniquely enables.
-12. **Heap relations in the whole-query pushdown** — the overlapping-tier shape
-    (§13) needs `pg_lake_table`'s existing full-query CustomScan to admit heap
-    RTEs, deparsed as DuckDB `postgres_scan_pushdown`/`postgres_query` calls.
-    This is the single largest enabler in the design: it unlocks cross-tier
-    vectorised reads (§13.5), the fresh-tail overlay (§12.4) and a bulk
-    Postgres → Iceberg seal (§13.8). Its own open questions are in §13.9.
-13. **`snapshot` is ignored on the `postgres_query` path** — the in-tree
-    `snapshot.patch` accepts the parameter but only applies it to DSN-opened
-    connections, not to the attached-catalog connection `postgres_query` uses
-    (§13.6). A latent correctness bug today and a prerequisite for the
-    index-friendly hot-tier read.
-
----
-
-## 12. Hot-authoritative tiering & sync modes (incl. Mirror mode C)
-
-§4–§11 describe the **delta/overlay** family (Iceberg is the base, Postgres a
-small change-delta, reads *merge*). This section describes the second family the
-design has converged toward: **hot-authoritative tiering**, where Postgres owns
-the full recent window and Iceberg is a tier/mirror rather than a base to
-overlay.
-
-### 12.1 The model
-
-- **Postgres owns the full, deduplicated, indexed last N days** and is the
-  source of truth for that window. Ingest is an **upsert** on the key into the
-  hot partitions (unique index → dedup + fast lookups + secondary indexes).
-- **Iceberg holds data older than N days** and — depending on sync mode — a copy
-  of the recent data too.
-- **Reads route by tier; they do not merge**: recent → Postgres (indexed,
-  deduped, fresh); old → Iceberg (columnar); spanning → `UNION ALL` on the time
-  boundary. The tiers are **disjoint by time**, so there is no cross-tier dedup.
-- **Mutation contract:** all inserts/updates/deletes happen within the N-day
-  window in Postgres; once a partition is sealed to Iceberg it is immutable.
-  Late data older than N days is rejected/buffered or applied as a rare Iceberg
-  correction.
-
-This eliminates the read-side merge machinery of §5 (no anti-join, no DISTINCT
-ON, no `postgres_scan` overlay) for the primary path — that machinery reappears
-only as an *optional* fresh-tail overlay in Mirror mode (§12.4).
-
-### 12.2 Sync modes
-
-How recent data reaches Iceberg, in increasing complexity. **"Delta tables"
-exist only in mode C, and even there as a *write-side* change stream, not a read
-overlay.**
-
-- **(A) Sync-at-seal — no delta tables.** Postgres owns the entire mutable
-  window. When a partition ages out, bulk-write its current (deduped) contents to
-  Iceberg once, then `DROP` it from Postgres. Iceberg lags by the active window
-  (fine — recent reads hit Postgres). Simplest; no delete files, no merge.
-- **(B) Partition-overwrite — no delta tables.** Periodically overwrite the
-  *changed* hot partitions' files in Iceberg from Postgres's current state. Keeps
-  Iceberg fresh with no delete files; cost is write amplification confined to
-  actively-changing partitions.
-- **(C) Mirror mode — a CDC change stream feeds Iceberg.** Detailed below.
-
-### 12.3 Mirror mode (C)
-
-A **dual-store CDC mirror**: Postgres is the authoritative indexed hot window; a
-change stream from the hot tables is **continuously applied into Iceberg**, so
-Iceberg is a near-fresh columnar mirror of recent data plus the historical
-archive. Reads still route by tier — the change stream is a **write-side sync**,
-not a read overlay.
-
-**Change capture.**
-
-- **Logical decoding (preferred).** Tail the hot tables via a replication slot,
-  translate INSERT/UPDATE/DELETE to Iceberg operations, track an applied-LSN
-  watermark. No physical delta table, low write overhead, LSN-ordered. This is
-  the same shape as pg_lake's Postgres mirroring (change batches + APPLY + LSN
-  tracking) and should reuse that experience.
-- **Change-log table (simpler prototype).** An AFTER-trigger or the upsert site
-  writes `(key, op, values, seq)` into a table; apply reads it in batches.
-  Transactional and simple, but per-write amplification; worse at high rate.
-
-**Applying to Iceberg.** INSERT → data-file append; DELETE → delete of the key;
-UPDATE → delete + insert. The delete mechanism is the open decision (pg_lake
-writes *position* deletes today; equality deletes are read-recognized but have no
-write path):
-
-1. **Position deletes (works today).** An apply batch issues
-   `DELETE FROM <iceberg> WHERE key IN (<changed/deleted keys>)`; pg_lake locates
-   the rows (a scan) and writes position deletes, then inserts new versions.
-   Correct now; each apply pays a locate-scan proportional to touched data. Fine
-   at moderate rates.
-2. **Overwrite-from-Postgres reset (preferred for update-heavy partitions).**
-   Because Postgres holds the clean deduped state, rematerialize a whole hot
-   partition from Postgres (mode B) instead of accumulating deletes — a "reset
-   button" that stateless CDC sinks (Flink/Debezium) lack. Blends B and C:
-   CDC-append for freshness on insert-dominated partitions; overwrite-from-PG to
-   collapse delete accumulation on update-heavy ones. **Seal = one final
-   overwrite → a pristine, delete-file-free cold partition, then drop from PG.**
-3. **Equality deletes (under consideration, not decided).** Write key-only delete
-   files (content=2) and defer the locate to read/compaction — the classic
-   streaming-upsert-to-Iceberg pattern. Cheapest apply, but adds read
-   amplification (every scan anti-joins data against delete files until
-   compaction) and requires new equality-delete write support (§11#10). Whether
-   pure Iceberg equality deletes are the right tool — versus leaning on
-   overwrite-from-PG (#2), which the authoritative hot store uniquely enables — is
-   open (§11#11).
-
-Each apply batch is one Iceberg commit; batch size trades freshness against
-snapshot/file churn. Apply is idempotent via the applied-LSN watermark. pg_lake
-already flips a data file to copy-on-write past a delete threshold, which bounds
-read amplification automatically.
-
-### 12.4 Reads & consistency in Mirror mode
-
-- Fresh point lookups / dedup / read-your-writes → **Postgres** (authoritative).
-- Columnar recent analytics + external Iceberg engines (Spark/Trino/Snowflake) →
-  **Iceberg**, lagging by the apply interval; each Iceberg snapshot is internally
-  consistent as of an applied LSN. Applying at transaction boundaries plus an
-  LSN→snapshot map gives external readers transactionally consistent points.
-- Old data → Iceberg.
-- *Optional* strict-fresh columnar path = the Iceberg mirror **plus** a
-  `postgres_scan` overlay of only the *un-applied tail* since the last apply
-  (§5.3–§5.4) — the read overlay reappears, but for a tiny tail, and only when
-  columnar *and* fully-fresh recent analytics are both required.
-- Route recent from exactly one store (the time boundary) to avoid
-  double-counting data that physically exists in both.
-
-### 12.5 Costs & when Mirror mode earns its keep
-
-Costs: two physical copies of recent data; delete-amplification + compaction
-load; a real CDC pipeline (slot lifecycle, apply lag, backpressure, crash
-recovery); Iceberg snapshot churn from frequent commits (→ expiry + compaction);
-schema evolution fanned out to both stores.
-
-Worth it when external engines need fresh recent Iceberg data, or recent
-analytics needs columnar speed at scale, or the recent window must be durable in
-the lake — *and* the change rate makes mode B's whole-partition overwrite too
-amplifying to be the only sync. Otherwise A or B is simpler.
-
----
-
-## 13. Overlapping tiers with cross-tier merge (the demanded shape)
-
-§12 routes reads by tier on the assumption that the tiers are **disjoint by
-time**. The shape there is actual demand for is not disjoint:
-
-- Postgres holds the last **N** days (say 7) **up to `now()`** — indexed,
-  deduplicated, mutable.
-- Iceberg holds the last **M** days (say 365) **up to the last materialisation**
-  (say last night), so it also holds a lagging copy of most of the hot window.
-- The database picks the right store per query, and that choice has to keep
-  working when updates and upserts land in Postgres.
-
-The tiers therefore **overlap physically** while still owing a single logical
-answer. This section reconciles §5 (where a merge executes) with §12 (tiering):
-tiering is the fast path, and the §5 merge machinery services exactly the cases
-tiering cannot route around.
-
-### 13.1 Authority is a stored boundary, not `now() - N days`
-
-Define, per table, an **authority boundary** `B`: Postgres is authoritative for
-`ts >= B`, Iceberg is authoritative for `ts < B`. Both stores may physically hold
-rows on either side of `B`; readers never consult the non-authoritative copy.
-
-`B` is a stored value updated transactionally, **not** an expression over `now()`,
-because the two events that would otherwise define it — Iceberg gaining the data
-and Postgres dropping it — are separate and independently fallible. `B` advances
-only via a **seal** that has proven Iceberg completeness below the new value, and
-hot-tier retention only ever deletes rows below `B`.
-
-`B` should be **aligned to the partition granularity** of both stores. An
-unaligned `B` splits one physical partition across the boundary, which is the one
-easily-avoidable reason to merge.
-
-### 13.2 The lagging Iceberg copy of the hot window is not a correctness problem
-
-With `B` in place, nothing reads Iceberg's copy of the last N days. That removes
-the invalidation problem for the common case: an upsert into the hot window
-invalidates only data nobody reads, so **no per-partition delta and no
-invalidation bookkeeping is needed above `B`**. The stale copy is simply
-overwritten when the partition seals.
-
-Invalidation bookkeeping is needed only for mutations **below** `B` (§13.3), and
-separately if external Iceberg engines are promised freshness for the hot window,
-which is Mirror mode (§12.3), not this section.
-
-### 13.3 Where a cross-tier merge is genuinely required
-
-Four cases, in decreasing order of how easily they are designed away:
-
-1. **A partition straddling `B`** — removed by aligning `B` (§13.1).
-2. **Late data for `ts < B`** — the row belongs to a sealed partition. Either
-   reject it, or accept it into a delta for that partition and merge on read
-   until a repair folds it in.
-3. **Update or delete of a row with `ts < B`** — the same, and unavoidable if the
-   table is genuinely mutable across its whole retention. Rewriting an Iceberg
-   partition synchronously inside the user's transaction is not viable, so the
-   write lands in a delta and reads merge until repair.
-4. **Fresh columnar reads of the hot window** — an external-engine requirement,
-   answered by Mirror mode (§12.3), or internally by reading the hot tier from
-   DuckDB (§13.6) rather than by a merge.
-
-So the merge is confined to **cold partitions mutated since they sealed**. For
-time-series that set is normally small and shrinks as repair runs, which is what
-makes the expensive path affordable: the fast path (single tier, no reverse
-connection) covers everything else.
-
-### 13.4 Per-partition authority
-
-Track state per (table, partition) rather than one boundary per table; `B` is
-then derived, and the late-data and straddle cases have somewhere to live.
-
-| state | authoritative | read plan |
+| table | grain | contents |
 | --- | --- | --- |
-| `HOT` | Postgres | Postgres only, indexed |
-| `SEALING` | Postgres | Postgres only (Iceberg write in flight) |
-| `COLD_CLEAN` | Iceberg | Iceberg only, no reverse connection |
-| `COLD_DIRTY` | Iceberg + delta | merge (§13.5–§13.6), until repaired |
+| `timeseries.tables` | one row per tiered table | both tiers, time column, partition interval, **boundary**, retentions, `precreate_ahead` |
+| `timeseries.partitions` | one row per partition-aligned range | `synced_at` (when the Iceberg copy was refreshed), `sealed_at` (when Iceberg became authoritative) |
 
-Transitions: `HOT → SEALING → COLD_CLEAN` on seal, `COLD_CLEAN → COLD_DIRTY` when
-a mutation lands below `B`, `COLD_DIRTY → COLD_CLEAN` on repair (§13.8). Only
-`COLD_DIRTY` pays for a merge, and only for the partitions in that state — which
-is the point of tracking state per partition instead of per table.
+The planner reads **only** `timeseries.tables`, and from it only the cold relation
+and `B`. Per-range state is a maintenance concern, which is what lets the read
+path be cached per backend and invalidated rarely (§11).
 
-This subsumes `timeseries.delta_partitions` (§4.5): that catalog is this one, with
-`HOT` and `COLD_DIRTY` collapsed into a single "dirty" notion.
+There is no mirror of the heap's own shape: `timeseries.heap_ranges()` reads
+`relpartbound` directly, so the partitions the heap actually has are the truth,
+and a partition somebody created by hand needs no registration.
 
-### 13.5 The optimizer problem, and what the tree can do today
+### 6.1 Writes go through C, reads bypass ACLs
 
-The concern is exact: the obvious ways of presenting two stores as one relation
-pull Iceberg rows into Postgres and lose DuckDB's vectorised execution. Three
-options, assessed against the current code.
+Every write to these tables goes through a C function in `src/registry.c` that
+checks the caller owns the relation and then performs the write as the extension
+owner (`SPI_START_EXTENSION_OWNER`). The check has to be in C: inside a
+`SECURITY DEFINER` plpgsql function `current_user` is the definer, so plpgsql
+cannot see who called it and could not authorize this at all.
 
-**Option 1 — partitioned parent or `UNION ALL` view (works today, insufficient).**
-Range-partition a parent by time with heap children for the hot window and the
-pg_lake Iceberg table as the cold child. Partition pruning then does the tier
-routing for free, and a query confined to one tier plans well: with a single
-surviving foreign child, `postgresGetForeignUpperPaths` /
-`add_foreign_grouping_paths` (`pg_lake_table/src/fdw/pg_lake_table.c`) push
-grouping, ordering and `LIMIT` into DuckDB.
+`RegisterTieredTable()` additionally demands ownership of **both** tiers. That is
+what stops one user from aiming the superuser maintenance worker — which drops
+partitions and overwrites an Iceberg table on the strength of a catalog row — at
+another user's tables.
 
-Cross-tier queries lose that, for two independent reasons:
+The readers (`is_tiered`, `tiered_table`, `synced_ranges`, `heap_ranges`) use
+`systable_beginscan` and apply no ACL check, deliberately and in the same way the
+planner hook does: whether a relation is tiered, and where its boundary sits, is a
+property of the relation that every backend must agree about whoever is asking. It
+stays a privilege check rather than a visibility one — a user who may not read the
+Iceberg tier gets a permission error on it, not a silently different answer.
 
-- `add_foreign_grouping_paths` asserts
-  `extra->patype == PARTITIONWISE_AGGREGATE_NONE || PARTITIONWISE_AGGREGATE_FULL`,
-  inherited from `postgres_fdw`. There is no **partial**-aggregate pushdown, so a
-  mixed heap+foreign `Append` can never push aggregation to the Iceberg side:
-  every qualifying Iceberg row is shipped into Postgres and aggregated there.
-- Full partitionwise aggregation additionally requires the partition key to appear
-  in the `GROUP BY`. The dominant time-series shape, `GROUP BY time_bucket(...)`
-  over a `ts`-partitioned table, does not satisfy that, so even the supported
-  `FULL` path does not fire.
+### 6.2 Privileges: `pg_monitor` reads, nothing else
 
-**Option 2 — let the existing whole-query CustomScan admit heap relations
-(recommended).**
-pg_lake already pushes entire `SELECT`s to DuckDB:
-`pg_lake_table/src/planner/query_pushdown.c` installs a planner hook that deparses
-the query with each lake relation replaced by a `pg_lake.read_table(name, id)`
-placeholder, and `ReplaceReadTableFunctionCalls`
-(`pg_lake_table/src/duckdb/transform_query_to_duckdb.c`) substitutes the real
-`read_parquet([...])` call built from the plan-time pruned file list. Inheritance
-children are already emitted as `UNION ALL` branches of one DuckDB query.
+The catalogs grant nothing to `public` and carry **no row-level security**. RLS on
+an extension configuration table makes `pg_dump` fail outright: it refuses to dump
+a table whose policies could silently filter the rows it is copying, which is
+exactly the data that has to survive a dump. `pg_monitor` gets `SELECT` so
+monitoring can see the registrations and how far each boundary has moved.
 
-What blocks the hybrid is one shippability rule in
-`ProcessNotShippableExpressionWalker`: an `RTE_RELATION` that is not
-`IsAnyLakeForeignTable` is recorded as `NOT_SHIPPABLE_TABLE`, and a parent with
-`has_subclass` must pass `AllInheritorsAreLakeTable`. Relaxing exactly that —
-deparsing a heap RTE into a DuckDB `postgres_scan_pushdown(...)` /
-`postgres_query(...)` call the same way a lake RTE becomes `read_parquet(...)` —
-turns a cross-tier query into a single vectorised DuckDB plan: tier union,
-anti-join against the delta, dedup by version, aggregation, with only final groups
-returned to Postgres.
-
-This is the smallest change with the widest reach. It is the same capability §5.3
-already assumes for dirty-range reads, and it fixes the seal write path (§13.8),
-which is an independent reason to want it.
-
-**Option 3 — partial-aggregate pushdown in the FDW (complementary, larger).**
-Teach the FDW to accept `PARTITIONWISE_AGGREGATE_PARTIAL` and deparse decomposable
-aggregates as their components (`sum`/`count` for `avg`), finalising in Postgres.
-More general than option 2 — it survives arbitrary Postgres plans, joins against
-local tables, and non-shippable expressions — but it is a substantial change to a
-`postgres_fdw`-derived file, it does nothing for the non-aggregate parts of a merge
-(anti-join, dedup), and holistic aggregates stay local. Worth doing eventually as
-the graceful fallback for queries option 2 refuses; not the first move.
-
-### 13.6 Reading the hot tier from DuckDB: what works, and one trap
-
-Verified against the vendored scanner (`duckdb_pglake/duckdb-postgres`, statically
-linked into `duckdb_pglake`, so it is available inside pgduck_server):
-
-- **Filter pushdown exists, but only in the pushdown variant.** `postgres_scan`
-  registers without `filter_pushdown`; `postgres_scan_pushdown` (the
-  `PostgresScanFunctionFilterPushdown` registration) sets both `filter_pushdown`
-  and `projection_pushdown`. Filters are DuckDB `TableFilter`s rendered by
-  `PostgresFilterPushdown::TransformFilters` — comparisons, `IN`, conjunctions,
-  null tests; anything else stays in DuckDB.
-- **Pushed-down filters cut transfer, not Postgres-side work.**
-  `PostgresInitInternal` builds
-  `COPY (SELECT cols FROM schema.table WHERE ctid BETWEEN '(a,0)' AND '(b,0)' AND <filters>) TO STDOUT (FORMAT binary)`.
-  The Postgres-side access path is a **ctid range scan**, never an index scan.
-  That is the right shape for bulk reads of a hot range (parallelised over page
-  ranges, `pg_pages_per_task`) and the wrong shape for the selective indexed
-  lookups the hot tier exists to serve.
-- **`postgres_query` is the index-friendly path.** It runs our SQL verbatim, so
-  Postgres's planner sees the predicate and can use the timed indexes, and it lets
-  us dedup or pre-aggregate Postgres-side. It requires an `ATTACH`ed Postgres
-  database (which also gives connection pooling, §5.4) and is single-threaded
-  (`pages_approx == 0` → one task).
-- **Trap: `snapshot` is silently ignored on the `postgres_query` path.** The
-  in-tree `patches/duckdb-postgres/snapshot.patch` adds the `snapshot` named
-  parameter to `postgres_scan`, `postgres_scan_pushdown` and `postgres_query`, but
-  `PostgresInitGlobalState` only applies it in the **DSN** branch, via
-  `PostgresScanConnect(con, snapshot)` →
-  `BEGIN ... REPEATABLE READ READ ONLY; SET TRANSACTION SNAPSHOT`. On the
-  attached-catalog branch — which `postgres_query` always takes, since it resolves
-  its first argument through the database manager — the connection is the attached
-  transaction's and is left untouched, while any *additional* parallel connection
-  from `TryOpenNewConnection` does adopt the snapshot. So today
-  `postgres_scan[_pushdown]('<dsn>', ...)` is snapshot-correct, and
-  `postgres_query(..., snapshot => ...)` accepts the parameter and reads at the
-  wrong snapshot. Using the index-friendly path for consistent cross-tier reads
-  needs another hunk in that patch (apply the snapshot to the attached connection,
-  or open a dedicated one); the split behaviour is worth fixing regardless.
-
-The planner therefore has a real choice to cost per query: `postgres_scan_pushdown`
-for wide hot ranges, `postgres_query` for selective or pre-aggregatable ones,
-Postgres-side execution when no reverse connection is available.
-
-### 13.7 Consistency
-
-A cross-tier read pins one instant on both sides: pg_lake resolves the Iceberg
-file set at the transaction snapshot `S` (`CreatePgLakeScanSnapshot`), and the
-hot-tier read adopts `S` through the exported snapshot id (§5.4). Everything in
-§5.4 carries over unchanged, including the caveat that the driving backend must
-stay blocked on pgduck_server for the exported snapshot to remain importable.
-
-`COLD_CLEAN` partitions open no reverse connection at all, so an analytical query
-over a year of sealed data behaves exactly as it does today.
-
-### 13.8 Write path: seal and repair
-
-- **Seal** (`HOT → COLD_CLEAN`): write the partition's current deduplicated
-  contents to Iceberg, overwriting whatever lagging copy is there, then advance
-  `B` and drop the Postgres partition. Note that
-  `INSERT INTO <iceberg> SELECT ... FROM <heap>` is **not** pushed down today: the
-  target passes `IsPushdownableInsertSelectQuery`, but the heap source fails the
-  same shippability rule as in §13.5, so the insert falls back to the FDW's
-  row-at-a-time path (§11#9). Option 2 fixes this too — DuckDB reads the heap over
-  `postgres_scan` and writes Parquet directly — which is the second, independent
-  argument for it. Until then, seal via `COPY`/staged Parquet rather than
-  `INSERT ... SELECT`.
-- **Repair** (`COLD_DIRTY → COLD_CLEAN`): rematerialise the whole affected
-  partition from Iceberg plus its delta. There is no partition-overwrite primitive
-  today; partitioned *writes* exist (`GetPartitionByExpressionsForRelation`, DuckDB
-  `PARTITION_BY`, gated behind `pg_lake_table.enable_partitioned_write_pushdown`,
-  default off), so a repair is either a range `DELETE` (position deletes) plus a
-  partitioned insert, or a full rematerialisation. Rematerialisation is preferable:
-  it leaves no delete files behind.
-
-### 13.9 Open questions
-
-1. **Cost model for the read choice** — `postgres_scan_pushdown` vs
-   `postgres_query` vs Postgres-side, per query. Needs selectivity and row-count
-   estimates for the hot slice; the FDW's `estimate_path_cost_size` covers only
-   the Iceberg side.
-2. **Upsert key** — hot-tier dedup by unique index requires a key (§6.4). Keyless
-   append-only tables can tier (§12 mode A) but cannot upsert.
-3. **Boundary vs. retention** — `B` and the Iceberg horizon `M` are independent;
-   decide what reads for `ts < now() - M` do (error, empty, or a third archive
-   tier).
-4. **Late-data policy below `B`** — reject, or accept into a delta and merge until
-   repair (§11#6).
-5. **Snapshot on the `ATTACH` path** — §13.6; prerequisite for consistent
-   index-friendly hot-tier reads (§11#13).
-6. **Reverse-connection auth** — unchanged from §11#2: read-only role, unix
-   socket, peer auth, no password in generated SQL.
-7. **Fallback quality** — when option 2's shippability check refuses a query, the
-   plan silently reverts to option 1's row-shipping behaviour. Whether that is
-   acceptable or needs a warning/`EXPLAIN` signal is open.
+The trade is that a plain `pg_dump` by a user who is neither superuser nor a member
+of `pg_monitor`/`pg_read_all_data` fails on the two configuration tables. An
+earlier revision used owner policies instead; §14.4 records how that went.
 
 ---
 
-## 14. Alternative considered: model B (watermark split)
+## 7. Read path: the planner hook
 
-Instead of key-based merge-on-read, split *both* branches by an MVCC-read
-version watermark `W` on `seq`:
+`src/planner.c` installs a `planner_hook`. For every `RTE_RELATION` in the parse
+tree that names a registered relation, it substitutes a subquery:
 
 ```sql
-SELECT * FROM <base>  WHERE seq <= W AND <range>
+SELECT <cols> FROM metrics       WHERE ts >= '<B>'
 UNION ALL
-SELECT * FROM <delta> WHERE seq >  W AND <range>
+SELECT <cols> FROM metrics_cold  WHERE ts <  '<B>'
 ```
 
-- **Pros:** no anti-join, no key required (works for keyless append-only);
-  exactly-once without pinning (both branches filter on the same MVCC-read `W`).
-- **Cons:** does not handle in-place **updates** (a re-inserted key would appear
-  in both `seq <= W` base and `seq > W` delta → double count) or deletes without
-  extra machinery; needs the same safe-`W` care as §7.2.
+This is exactly what the rewriter does for a view (`ApplyRetrieveRule`), done at
+plan time instead. The walker is post-order and runs on every level of the query —
+subqueries, CTEs, sublinks, set-operation branches — and the parse tree is copied
+only when a registered relation is actually present, so a query that touches none
+pays a walk and nothing else.
 
-Model A subsumes updates/deletes and is the chosen default for the overlay
-family. Model B is noted as the right tool for strictly append-only, keyless
-streams and could be offered as a per-table mode later.
+An RTE is expanded only if it is a partitioned-table `RTE_RELATION` with `inh`
+set, no `TABLESAMPLE`, not the query's `resultRelation`, and carries no row mark.
+The last three are the cases where a second tier would be wrong rather than slow:
+`FOR UPDATE` cannot lock an Iceberg row, and a write must reach the heap alone.
 
----
+`pg_lake_timeseries.expand_tiered_tables` (default on, `PGC_USERSET`) turns the
+substitution off, which is how the heap can be read on its own.
 
-## 15. Phased implementation plan
+### 7.1 The RTE stays the relation's
 
-1. **Semantics first (SQL only).** `create_table` builds delta + base + view +
-   INSTEAD OF routing. Implement `flush`/`safe_hwm`/`maintain` as PL/pgSQL.
-   Validate reconciliation with the concurrency test harness (§16). No C yet.
-2. **Background worker (C).** `RegisterBackgroundWorker` in `_PG_init`; loop
-   calling `timeseries.maintain()` per table via SPI.
-3. **Frontier hardening.** Pre-create/drain edge cases, DEFAULT management,
-   late-data policy.
-4. **CustomScan + DuckDB-side merge.** Replace the view with a CustomScan that
-   does clean/dirty splitting (§5.3): clean ranges emit plain Iceberg SQL; dirty
-   ranges emit one DuckDB query merging `read_parquet` with a snapshot-pinned
-   `postgres_scan` of the delta (§5.4). Requires: exporting `pg_export_snapshot()`
-   from the driving backend and threading the id into the emitted SQL; a
-   read-only reverse-connection role (peer auth); and choosing the PostgreSQL-side
-   fallback (§5.1) when a reverse connection isn't available. The DuckDB-side
-   merge removes the partial-aggregate-pushdown dependency (§11#1).
-5. **Snapshot pinning (optional).** Only if strict RR/SERIALIZABLE is required
-   for the PostgreSQL-side fallback (§8.3); the DuckDB-side merge is already
-   snapshot-consistent.
-6. **Hot-authoritative tiering (§12) — alternative track.** Upsert-deduped hot
-   partitions + sync-at-seal (A) or partition-overwrite (B); reads route by tier
-   with no merge. Simpler than the overlay family (phases 1, 3–5) and can ship
-   independently.
-7. **Mirror mode (C) — optional (§12.3).** Logical-decoding capture of the hot
-   tables; apply to Iceberg via position deletes or overwrite-from-PG reset
-   (equality-delete writes only if pursued, §11#10); applied-LSN watermark +
-   idempotent apply; compaction/seal. Reuses pg_lake mirroring patterns.
-8. **Overlapping tiers: authority boundary + per-partition state (§13.1–§13.4).**
-   The per-partition authority catalog, seal, retention below `B`, and read
-   routing by partition state. Single-tier reads only — no merge yet — which
-   already answers "last N days in Postgres, last M in Iceberg, switch
-   automatically" for queries that stay on one side of `B`.
-9. **Heap relations in the whole-query pushdown (§13.5, option 2).** Relax the
-   shippability rule in `query_pushdown.c`, deparse heap RTEs as
-   `postgres_scan_pushdown`/`postgres_query`, thread the exported snapshot id.
-   Unlocks cross-tier vectorised reads, the §12.4 fresh-tail overlay, and a bulk
-   Postgres → Iceberg seal (§13.8). Prerequisite for a useful phase 10; the
-   highest-leverage item in the plan.
-10. **`COLD_DIRTY` merge and repair (§13.3, §13.8).** Accept mutations below `B`
-    into a per-partition delta, merge on read, and rematerialise the partition in
-    the background to return it to `COLD_CLEAN`. Needs the snapshot hunk from
-    §13.6 if the index-friendly read path is used.
-11. **Partial-aggregate pushdown (§13.5, option 3) — later.** The graceful
-    fallback for cross-tier queries phase 9 refuses.
+The converted RTE keeps `relid`, `rellockmode` and `perminfoindex`, so the
+relation is still locked before execution and the caller's privileges on it are
+still checked. Its `relkind` becomes `RELKIND_VIEW`, because that is the only
+relkind PostgreSQL accepts on a subquery RTE that carries permission info —
+`ExecCheckPermissions` asserts it (`execMain.c:604`), and without it the backend
+crashes on the first expanded query. `AcquireExecutorLocks`/`ScanQueryForLocks`
+use only `relid` and `rellockmode`, so claiming `RELKIND_VIEW` costs nothing.
 
-Phases 8–10 are the path to the shape in §13 and can lead, drawing on phases 1–5
-for merge machinery as needed; phases 6–7 remain the simpler tiering-only tracks.
+Both branch RTEs get a fresh `RTEPermissionInfo` with `requiredPerms =
+ACL_SELECT` and `checkAsUser` set to the **owner of the relation** — view
+semantics. `SELECT` on the table is therefore enough to read both tiers, and the
+Iceberg tier itself stays unreadable to a grantee who has no rights on it.
 
-Each phase is independently shippable and testable.
+### 7.2 Row-level security is refused
 
----
+If either tier has `relrowsecurity`, the hook raises
+`ERRCODE_FEATURE_NOT_SUPPORTED`. Policies are applied by the rewriter, which has
+already run: adding a second tier afterwards would return rows the policy would
+have filtered. Refusing the query is the only honest option, and
+`ALTER TABLE ... DISABLE ROW LEVEL SECURITY` restores the table.
 
-## 16. Testing strategy
+### 7.3 Plan-cache invalidation
 
-pytest suites under `tests/pytests/` (skeleton has a placeholder). Priorities:
+`B` is planted in the plan as a constant, and "is this relation tiered" is not a
+plan dependency at all, so neither would invalidate a cached plan by itself. Every
+write to `timeseries.tables` — the registration a `CREATE TABLE` makes, the
+settings an `ALTER TABLE` changes, the boundary a seal advances, the sweep after a
+`DROP TABLE` — therefore calls `CacheInvalidateRelcacheByRelid()` on the relation,
+so a prepared statement is replanned after a seal.
 
-1. **Reconciliation correctness** — seed base; apply inserts/updates/one delete
-   to the delta; assert the parent returns one row per key with the max-`seq`
-   value and tombstoned keys absent.
-2. **Concurrency vs. flush** — run a reader (RR txn) across a concurrent
-   `flush()`; assert stability within the txn, no duplicate keys, no lost rows.
-3. **Stress** — a writer loop (insert/update/delete into delta) + a flush loop +
-   a checker asserting `count(*) == count(distinct key)` and every key's value
-   matches its max-`seq` write. Catches double-count and the safe-`hwm`
-   batch-deletion hazard (a `seq > hwm` write must survive a flush).
-4. **Pruning/pushdown** — `EXPLAIN` assertions: `ts`/key predicates reach both
-   branches; non-key predicates stay above the dedup; clean partitions push
-   aggregation to DuckDB; dirty partitions reconcile then aggregate.
-5. **Frontier** — inserts never fail across a partition boundary; DEFAULT stays
-   small; late data lands correctly.
-6. **Tier routing (§13.1–§13.4)** — a query wholly above `B` touches only
-   Postgres and opens no reverse connection; a query wholly below `B` emits plain
-   Iceberg SQL; a spanning query returns each row exactly once. Assert on the
-   emitted DuckDB SQL, not just results, so a regression that silently ships rows
-   into Postgres is caught.
-7. **Cross-tier aggregation stays in DuckDB (§13.5)** — `EXPLAIN` a
-   `GROUP BY time_bucket(...)` spanning `B` and assert the aggregate is pushed
-   down, not computed above an `Append`. This is the specific regression option 1
-   exhibits today.
-8. **Seal and repair (§13.8)** — sealing a partition leaves results unchanged
-   across the transition; a mutation below `B` marks the partition `COLD_DIRTY`
-   and is visible immediately; repair returns it to `COLD_CLEAN` with identical
-   results and no delete files.
+### 7.4 Tier elimination: what prunes and what does not
+
+The heap side prunes properly: the branch predicate `ts >= B` plus the query's own
+predicate go through ordinary partition pruning, so a cold-window query reads no
+heap partition at all. With a constant cutoff the heap branch is gone from the plan;
+with a `now()`-based one it survives as an `Append` reporting `Subplans Removed: N`,
+since that pruning happens at execution start.
+
+The Iceberg side does not disappear from the plan. PostgreSQL only drops a
+self-contradictory qual under `constraint_exclusion = on`, which is a session-wide
+setting the extension has no business changing — so a hot-window query keeps its
+`Foreign Scan on metrics_cold`, with `ts >= <window> AND ts < B` on it. The scan runs
+and reads nothing: DuckDB folds the contradiction to `EMPTY_RESULT`. `Data Files
+Scanned` is 0 when the cutoff is a constant, and the tier's whole file count when it
+is `now()`-based, because that list is built at plan time from what pg_lake can
+evaluate then — it is a file *list*, not I/O. The cost is a node in the plan.
+
+### 7.5 Whole-query pushdown
+
+With `pg_lake_table.enable_heap_query_pushdown` on, the union the hook built is
+admitted into pg_lake's whole-query pushdown and both tiers are read inside
+DuckDB — one vectorised plan for a spanning aggregate (§13). This is why
+`pg_lake_timeseries` must come **after** `pg_lake_table` in
+`shared_preload_libraries`: its hook has to have inserted the cold branch by the
+time `HasLakeRTE` looks at the parse tree (`query_pushdown.c:284`, `:385`).
+
+### 7.6 The one path that is not the planner
+
+`COPY <relation> TO` reads a relation without planning a query — but PostgreSQL
+does not support `COPY` from a partitioned table, and a registered relation is
+always partitioned, so there is no way to read the table through it. `COPY (SELECT
+... ) TO` is planned and sees both tiers. Anything that reads the heap without
+planning, such as logical replication, sees the hot tier alone; that is the
+correct behaviour for replication, which should not replicate Iceberg's rows.
 
 ---
 
-## 17. Naming & placement
+## 8. Write path
 
-- Extension name: `pg_lake_timeseries` (descriptive, matches
-  `pg_lake_iceberg`/`pg_lake_table`/`pg_lake_copy`). `pg_lake_live` was
-  considered as a mechanism-oriented alternative.
-- Dependencies: `requires = pg_lake_engine, pg_lake_iceberg, pg_lake_table`.
-- Placement: an **optional add-on**, like `pg_lake_spatial`/`pg_lake_benchmark`.
-  It is **not** installed by `CREATE EXTENSION pg_lake CASCADE`; users opt in
-  with `CREATE EXTENSION pg_lake_timeseries CASCADE`.
-- Wired into the top-level `Makefile` (`EXTENSION_TARGETS` + module
-  declarations) so the standard `*-pg_lake_timeseries` targets work, without
-  altering the default `make install` (which builds the `pg_lake` meta only).
+There is no write path. The relation is the user's table, so `INSERT`, `UPDATE`,
+`DELETE`, `COPY ... FROM`, tuple routing, indexes, constraints, defaults,
+`TRUNCATE`, `ALTER TABLE` and `pg_dump` all behave as they would without the
+extension. `resultRelation` is excluded from the expansion, so a write never sees
+the cold tier.
+
+The consequences of the boundary follow from partitioning alone:
+
+- a write above the frontier fails with "no partition of relation" rather than
+  landing somewhere silently — a `DEFAULT` partition is deliberately not created,
+  since it would also block attaching the next range;
+- a write below `B` fails the same way, which is what makes sealed history
+  immutable through PostgreSQL;
+- an `UPDATE`/`DELETE` with a predicate below `B` matches nothing.
 
 ---
 
-## 18. As built
+## 9. Maintenance
 
-Phases 1–3 and 8 of §15 are implemented, together with the `COLD_DIRTY` overlay
-and repair of phase 10, in `pg_lake_timeseries--3.4.sql` (SQL API + routing view)
-and `src/maintenance_worker.c` (base worker). Phase 9 — heap relations inside the
-whole-query pushdown — is **not** implemented, so a cross-tier read still ships
-Iceberg rows into PostgreSQL and aggregates them there. Everything below records
-where the implementation differs from the specification above, and why.
+All four operations check ownership, take the relation's own locks and nothing
+more, and are driven either explicitly or by the worker.
 
-### 18.1 Objects created per table
+### 9.1 `add_partitions(relation, upto)`
 
-`timeseries.create_table('metrics', 'ts', ...)` turns an empty template table
-into:
+Extends the frontier to `now() + precreate_ahead * partition_interval`. It starts
+at the frontier the heap itself reports (`max(part_end)`), so hand-made partitions
+are respected; for a table with no partitions it starts at
+`partition_start(now() - hot_retention)`, or at the boundary when the cold tier was
+pre-loaded past it. Partitions are named
+`<relation>_<yyyymmdd>t<hhmm>` from the UTC rendering of `part_start`.
 
-| object | kind | role |
-| --- | --- | --- |
-| `metrics` | view + `INSTEAD OF` trigger | the user-facing relation; routes reads and writes |
-| `metrics_hot` | heap, `PARTITION BY RANGE (ts)` | authoritative for `ts >= B` |
-| `metrics_cold` | pg_lake Iceberg table | authoritative for `ts < B`, plus a lagging copy above `B` |
-| `metrics_cold_scan` | partitioned table, one partition | pruning wrapper over `metrics_cold` (§18.3) |
-| `metrics_delta` | heap + `_ts_seq`, `_ts_deleted` | mutations that land below `B` |
-| `metrics_seq` | sequence | version order for delta rows |
+### 9.2 `sync(relation, only_start)`
 
-The template must be empty: conversion would otherwise have to decide which tier
-each existing row belongs to. History is loaded after conversion, either straight
-into `metrics_cold` or through the view (which routes it into the delta, from
-where `repair()` folds it into Iceberg).
+Refreshes the Iceberg copy of partitions that are **entirely in the past**
+(`part_end <= now()`), and re-copies one only if it was written to since
+(`synced_at < part_end`). `B` does not move, so these rows stay authoritative in
+PostgreSQL and the copy is invisible to queries through the relation — which is
+what makes it repeatable. What it buys is that external Iceberg readers see data
+up to the end of the last completed partition instead of only sealed history.
 
-### 18.2 Restrictions
+Each range is overwritten (`DELETE` + `INSERT`) rather than appended to, and the
+rows are read **from the partition**, not from the relation: reading the relation
+would go through the hook's own expansion, i.e. read the table it is writing.
 
-- `partition_interval` must be a positive **fixed-length** interval. `month` and
-  `year` would need `date_trunc` rather than the epoch arithmetic in
-  `partition_start`, and are rejected.
-- `hot_retention >= partition_interval`.
-- `key_columns` must contain the time column: it is the partition key of the hot
-  tier, and PostgreSQL requires a unique index on a partitioned table to include
-  the partition key.
-- A keyless table is append-only — `UPDATE`/`DELETE` through the view raise —
-  because merge-on-read has nothing to match versions on. `upsert => true`
-  therefore also requires a key.
-- Column names starting with `_ts_` are reserved.
-- The initial boundary is `partition_start(now() - hot_retention)`, so a freshly
-  created table is entirely hot and the Iceberg tier is empty.
+### 9.3 `seal(relation, upto)`
 
-### 18.3 Tier elimination is partition pruning, not constraint exclusion
+The only operation that moves `B`. For each partition ending at or before
+`partition_start(coalesce(upto, now() - hot_retention))`, in order:
 
-The design assumed a `UNION ALL` view with literal boundary predicates would let
-the planner drop the branch whose predicate the query contradicts. Measured on
-PostgreSQL 18, it does not:
+1. overwrite the range in Iceberg;
+2. `DROP TABLE` the heap partition;
+3. advance `B` to `part_end` and record `sealed_at`.
 
-- with the default `constraint_exclusion = partition`, a self-contradictory
-  `UNION ALL` branch is **kept** — the scan stays in the plan and returns no rows;
-- union-leaf flattening (which would expose the branch's quals to the outer
-  query) happens only for `SELECT *`; any narrower projection or an aggregate
-  leaves a `Subquery Scan` wrapper in place, and even when flattening does happen
-  it does not by itself prune;
-- `constraint_exclusion = on` does prune it, but that is a session-wide setting
-  the extension has no business changing.
+All three are one transaction, so a crash or error anywhere rolls back all three:
+`B` never advances past data that is not in the cold tier. The copy is not read
+back to verify it, because it cannot be — the Iceberg snapshot this transaction
+wrote does not exist until it commits. Atomicity is the argument, not verification.
 
-Partition pruning, by contrast, is unconditional and shape-independent. The hot
-tier prunes through its own range partitions. The cold tier therefore gets the
-same mechanism: `metrics_cold_scan` is a range-partitioned table whose only
-partition is the Iceberg table, attached `FOR VALUES FROM (MINVALUE) TO (B)`, and
-the view reads the wrapper. A query with `ts >= B` prunes the Iceberg scan at plan
-time whatever its shape; `seal()` re-bounds the wrapper (detach + attach) when it
-advances `B`.
+Sealing walks contiguously upward from `B`. A gap — a partition dropped without
+being sealed — would mean claiming Iceberg authority for a range that was never
+copied, so a gap raises a `WARNING` and stops the pass instead of being skipped.
 
-Measured caveat: this needs a boundary the planner can fold to a constant.
-`WHERE ts >= '2026-08-12'::timestamptz` prunes the cold branch and opens no
-Parquet file; `WHERE ts >= date_trunc('day', now())` does not, because the
-wrapper has a single partition, so the `Append` that runtime pruning would act on
-is removed at plan time and only plan-time pruning is left. The cold `Foreign
-Scan` then runs and returns no rows. A hot-window query should therefore compare
-`ts` against a value, not against a stable expression.
+### 9.4 `apply_retention(relation)`
 
-The bound is a **pruning hint only**. PostgreSQL neither enforces nor applies
-partition constraints as filters for a foreign table, and the Iceberg table
-deliberately holds rows above `B` (the lagging copy), so the view keeps its own
-`ts < B` predicate to mask them. A single partitioned parent over both tiers is
-still rejected: it would double-count exactly those rows.
+Deletes cold data below `least(partition_start(now() - cold_retention), B)` and
+forgets its ranges. The `least()` is what makes a `cold_retention` shorter than
+`hot_retention` harmless: it can never delete a range PostgreSQL still owns, only
+a copy of one.
 
-### 18.4 The view cannot specialise on dirty partitions
+Deleting on partition boundaries is what keeps the removal metadata-only in
+Iceberg: pg_lake turns a `DELETE` that matches whole Iceberg partitions into a file
+removal rather than position deletes. Aligning the Iceberg transform with the
+heap's `partition_interval` (`hour(ts)` for sub-hourly, `day(ts)` otherwise) is
+therefore worth doing, though the cold table is the user's to define.
 
-The view is a stand-in for the §5.3 CustomScan, and this is where the stand-in
-runs out: **a view cannot be replaced while a statement that references it is
-running.** The write path is an `INSTEAD OF` trigger on that very view, so a
-`CREATE OR REPLACE VIEW` from inside it fails with
-`cannot CREATE OR REPLACE VIEW ... because it is being used by active queries in
-this session`. A write below `B` is therefore in no position to add the delta
-branch that makes its own effect visible.
+### 9.5 The worker
 
-The consequences, and the choice made:
+`src/maintenance_worker.c`, registered through `pg_extension_base`'s base-worker
+framework: one worker per database with the extension, started on
+`CREATE EXTENSION` and on server start. Each pass lists the registered tables in
+one transaction, then runs `timeseries.maintain()` per table in its own
+transaction, downgrading errors to `WARNING` so one table cannot hold back the
+others. `maintain()` runs `add_partitions()`, `sync()`, `seal()`,
+`apply_retention()` in that order — syncing before sealing means a partition that
+was already copied is copied once more before it is dropped, which is what makes
+the copy complete rather than merely recent.
 
-- The view's shape depends on the boundary and the key, and on nothing else. The
-  delta overlay is **permanent**: every cold-tier read carries
-  `NOT EXISTS (SELECT 1 FROM <delta> d WHERE <key match>)` plus a `DISTINCT ON`
-  branch over the delta.
-- `refresh_view()` is called only on a boundary advance, i.e. from `seal()` and
-  `create_table()` — never from inside a statement that reads the view.
-- Deferring the regeneration to commit (a deferred constraint trigger on the
-  delta) was rejected: it would leave the rest of the writing transaction reading
-  a view that does not know about its own write.
-- Per-partition `cold_dirty` state is still maintained, but it is now purely a
-  work list for `repair()` rather than an input to the plan.
+GUCs, all defined in `src/init.c`: `pg_lake_timeseries.enable` (default on),
+`pg_lake_timeseries.maintenance_naptime`, and
+`pg_lake_timeseries.expand_tiered_tables` (§7).
 
-The cost of the permanent overlay is smaller than it looks, because the clean
-cold branch was never whole-query-pushdownable in the first place: under a
-`UNION ALL` the Iceberg branch is a `Foreign Scan` below an `Append`, so
-aggregation already happens in PostgreSQL (§13.5, option 1). What the anti-join
-adds is a hash probe per cold row against a table that is empty on a repaired
-table. What it costs is the *option* of pushing a single-tier cold query down as
-a whole query — and that is the concrete, measured argument for doing §5.3
-(CustomScan) and phase 9 rather than living with the view.
+---
 
-### 18.5 Iceberg partition transform is aligned with the hot partitions
+## 10. Correctness
 
-`sync()` and `repair()` overwrite a whole partition range with `DELETE` +
-`INSERT`, and pg_lake turns a `DELETE` that matches whole Iceberg partitions into
-a metadata-only file removal instead of position deletes. The transform is
-therefore chosen to keep a hot partition inside one Iceberg partition:
-`hour(ts)` for `partition_interval <= 1 hour`, `day(ts)` otherwise. A sub-hour
-interval necessarily lands inside an hour partition and does pay for position
-deletes on re-sync.
+- **The boundary is never ahead of Iceberg.** Only `seal()` moves it, in the
+  transaction that copied the range and dropped the partition (§9.3).
+- **No row is returned twice.** The two branches carry complementary predicates
+  around the same `B` from the same catalog row, so the lagging copy above `B` is
+  masked. `sync()` deliberately creates rows that exist in both tiers, and
+  `test_the_iceberg_copy_of_a_hot_partition_is_not_returned_twice` asserts the
+  count is unchanged.
+- **No row is lost by a move.** `seal()` copies before dropping, atomically.
+- **A cached plan cannot outlive its boundary** (§7.3).
+- **Concurrency.** `seal()` holds `ACCESS EXCLUSIVE` on the partition it drops
+  (`DROP TABLE`) and updates the boundary row; a reader that planned with the old
+  `B` holds `ACCESS SHARE` on that partition, so the drop waits for it. The
+  invalidation is broadcast on commit, so plans built afterwards use the new `B`.
+- **Snapshot consistency under pushdown** is pg_lake's: the heap side is read back
+  over a loopback connection at an exported snapshot of the driving transaction
+  (§13), and pg_lake reads the latest Iceberg snapshot.
 
-### 18.6 Freshness of the lagging copy
+---
 
-`sync()` copies a hot partition into Iceberg once it is **complete**
-(`part_end <= now()`) and re-copies it only if it was written to since
-(`synced_at < part_end`). External Iceberg readers therefore see data up to the
-end of the last completed partition — "up to last night" for a daily interval —
-while PostgreSQL readers see everything. Nobody reads the copy through the view,
-so its staleness is not a correctness concern; `seal()` overwrites the range
-again before it becomes authoritative.
+## 11. The C lookup path is not SPI
 
-### 18.7 Privileges: SECURITY INVOKER plus row-level security
+Everything user-facing in this extension reads its catalogs through SPI from
+plpgsql, which a planner hook cannot do: SPI re-enters the planner.
+`src/metadata.c` reads `timeseries.tables` with `systable_beginscan` and caches
+registrations per backend in a hash in `CacheMemoryContext` — positive **and**
+negative answers, since it is the negative ones that keep a repeated query on an
+ordinary table off the catalog.
 
-The API functions are `SECURITY INVOKER`, so `current_user` is the caller,
-`check_owner()` means something, and the hot/cold/delta objects a call creates are
-owned by the caller rather than by the extension owner. The extension catalogs are
-protected by RLS instead of by function privileges:
+A query that touches no tiered table has to cost nothing, so `IsTieredTable()`
+short-circuits three times before it reaches a catalog: the extension is not
+created (`pg_extension_base`'s ID cache), the registry is empty (a cached tristate
+over one keyless scan), or the relation is not a partitioned table (a syscache
+hit). An untouched cluster pays one scan of an empty table per backend.
 
-- `timeseries.tables` / `timeseries.partitions` have RLS enabled and are granted
-  to `public`;
-- the `USING` clause restricts every row to a caller who owns the parent;
-- the `WITH CHECK` clause additionally requires ownership of **every relation the
-  row names**. This is what stops a user from registering a row that points the
-  superuser maintenance worker at someone else's table.
+**DML on an extension table invalidates nothing by itself.** A statement trigger
+on `timeseries.tables` calls into C, which calls
+`CacheInvalidateRelcacheByRelid()` on the catalog — the same device
+`pg_lake_iceberg`'s object-store catalog uses. Putting it in a trigger rather than
+in the `CREATE TABLE` path means a hand-written `INSERT` or a `pg_restore` is picked
+up too. It is a *trigger* function rather than a plain function called from plpgsql
+because `EXECUTE` on a trigger function is checked when the trigger is created, not
+when it fires, so the invalidation works for whoever writes the catalog — including
+a `pg_restore` running as someone with no rights to this schema. The relcache
+callback can run outside a transaction, so it compares against the OID already
+resolved in the ID cache rather than resolving one.
 
-`route_write()` is the one `SECURITY DEFINER` function: a grantee who has only
-`INSERT` on the view must still be able to write the heap, bump the sequence, and
-record a dirty partition. Everything it touches is derived from `TG_RELID`, which
-has to be a registered parent view. Making the whole API `SECURITY DEFINER` was
-tried and reverted: inside a definer function `current_user` is the definer, so
-`check_owner()` would succeed for anybody whenever the definer is a superuser, and
-there is no portable way to recover the invoker.
+### 11.1 Cleaning up after `DROP TABLE` takes an event trigger, and not the obvious one
 
-### 18.8 Maintenance worker
+A `regclass` column is a plain OID with no `pg_depend` entry behind it, so dropping
+either tier leaves a registration naming a relation that is gone — and OIDs are
+reused. `sql_drop` looks like the answer and is not: **a pg_lake table's `DROP`
+fires no `sql_drop` event at all.** `ProcessDropPgLakeTable`
+(`pg_lake_table/src/ddl/drop_table.c`) drops lake tables by calling
+`RemoveRelations()` directly and then strips them from the statement, so they never
+pass through the path that collects dropped objects and
+`pg_event_trigger_dropped_objects()` returns nothing for them. `ddl_command_end`
+does fire for both tiers, so the cleanup hangs off that and *sweeps* for
+registrations naming a missing relation rather than looking up what the command
+dropped. Such a row describes no table and nobody owns it, so `forget_dropped()`
+checks no ownership and needs none. The sweep collects before deleting, so a `DROP`
+with nothing to clean up does not fire the invalidation trigger and broadcast a
+pointless cache reset to every backend.
 
-Registered through `pg_extension_base`'s base-worker framework
-(`extension_base.register_worker`), so there is one worker per database with the
-extension, started on `CREATE EXTENSION` and on server start. Each pass lists the
-enabled tables in one transaction and then runs `timeseries.maintain()` per table
-in its own transaction, downgrading errors to `WARNING` so one table cannot hold
-back the others. `maintain()` runs, in order: `add_partitions()` (extend the
-frontier), `repair()`, `sync()`, `seal()`, `apply_retention()` -- repair first, so
-that a partition is not copied into Iceberg and then immediately rematerialised.
+---
 
-Two GUCs: `pg_lake_timeseries.enable` (default on) and
-`pg_lake_timeseries.maintenance_naptime`. The test suite pins `enable = off` and
-drives maintenance explicitly so that assertions about the boundary and the
-partition states are deterministic; one test re-enables it to prove the worker
-performs a pass.
+## 12. API
 
-### 18.9 Tests
+A tiered table is made, changed and unmade with DDL (§5); there is no function that
+registers one.
 
-`tests/pytests/test_timeseries.py`, 17 cases, run against a live pg_lake test
-cluster with the in-tree S3 mock. They assert the properties the design rests on
-rather than the implementation: the boundary decides which tier owns a row, the
-lagging Iceberg copy is never double-counted, tier elimination happens at plan
-time (`EXPLAIN` must not mention `Engine: DuckDB` for a hot-window query, nor a
-heap partition for a cold-window one), mutations below `B` are visible immediately
-and are folded back by `repair()` with identical results, a boundary advance is
-only ever the result of a completed seal, and a keyless table refuses mutations.
-The last case asserts the phase 9 property: with
-`pg_lake_table.enable_heap_query_pushdown` on, a spanning aggregate is one
-`Custom Scan (Query Pushdown)` with no `Append` and no heap scan, and returns the
-same answer as with the GUC off.
+| statement | what it does |
+| --- | --- |
+| `CREATE TABLE ... USING timeseries WITH (...)` | both tiers, the registration and the initial partitions (§5) |
+| `ALTER TABLE ... SET (hot_retention = ..., ...)` | change the settings in the registration (§5.2) |
+| `ALTER TABLE ...` (column added, dropped, retyped, renamed; `OWNER TO`) | applied to both tiers, under Iceberg's rules (§5.2) |
+| `DROP TABLE ...` | drops the Iceberg tier with it; an event trigger sweeps the registration (§11.1) |
 
-Each test gets its own S3 prefix: `drop_table(drop_data => true)` leaves the
-Iceberg files behind, and `CREATE TABLE ... USING iceberg` refuses a non-empty
-location.
+The functions are maintenance and introspection.
 
-### 18.10 Not implemented
+| function | what it does |
+| --- | --- |
+| `add_partitions(relation, upto)` | extend the frontier (§9.1) |
+| `sync(relation, only_start)` | refresh the lagging Iceberg copy (§9.2) |
+| `seal(relation, upto)` | hand ranges to Iceberg and advance `B` (§9.3) |
+| `apply_retention(relation)` | expire cold history (§9.4) |
+| `maintain(relation)` | one pass of all four (§9.5) |
+| `is_tiered(relation)`, `tiered_table(relation)`, `tiered_tables()` | what is registered |
+| `synced_ranges(relation)`, `heap_ranges(relation)` | what Iceberg has a copy of, and what the heap has |
+| `partition_start(ts, interval)` | floor a timestamp to a partition bound |
 
-- **§5.3 CustomScan** — the view stand-in cannot specialise on dirty partitions
-  (§18.4) and cannot choose between `postgres_scan_pushdown` and `postgres_query`.
-- **Compaction** of the cold tier beyond `apply_retention()`, and the
-  `month`/`year` partition intervals of §18.2.
-- `INSERT INTO <iceberg> SELECT ... FROM <heap>` still uses the row-at-a-time FDW
-  path, so `seal()` pays it: phase 9 admits heap relations into the pushdown of
-  read-only queries only (`FullQueryIsPushdownable` rejects anything that is not a
-  plain `SELECT`).
-- §18.4's anti-join is still present on every cold read; it is now vectorised
-  along with the rest of the query, but not avoided.
+---
 
-### 18.11 Phase 9, as built
+## 13. Heap relations in whole-query pushdown
 
-Phase 9 (§13.5 option 2) is implemented in `pg_lake_table`, gated on
-`pg_lake_table.enable_heap_query_pushdown` (bool, default off, `PGC_USERSET`),
-with `pg_lake_table.heap_pushdown_dsn` (string, default empty, `PGC_SUSET`) to
-override the loopback DSN. With it on, a query spanning the two tiers is one
-vectorised DuckDB plan.
+This is a `pg_lake_table` feature (`enable_heap_query_pushdown`, bool, default
+off, `PGC_USERSET`, plus `heap_pushdown_dsn`, string, `PGC_SUSET`) that this
+extension is the main consumer of: with it on, a query spanning both tiers is one
+vectorised DuckDB plan instead of an aggregate over an `Append`.
 
 Its foundation was checked against the running `pgduck_server` (DuckDB v1.4.4)
 before any of it was written:
 
-- The Postgres scanner is statically linked into `duckdb_pglake`
-  (`postgres_scanner_duckdb_cpp_init`, `duckdb_pglake_extension.cpp`), and the
-  in-tree `patches/duckdb-postgres/snapshot.patch` is live in the deployed
-  binary: `snapshot VARCHAR` is a named parameter of both `postgres_scan` and
-  `postgres_query`.
-- A heap table read through `postgres_scan(dsn, schema, table, snapshot => '<id>')`
+- the Postgres scanner is statically linked into `duckdb_pglake`
+  (`postgres_scanner_duckdb_cpp_init`), and the in-tree
+  `patches/duckdb-postgres/snapshot.patch` is live in the deployed binary:
+  `snapshot VARCHAR` is a named parameter of both `postgres_scan` and
+  `postgres_query`;
+- a heap table read through `postgres_scan(dsn, schema, table, snapshot => '<id>')`
   observes exactly the exporting backend's snapshot. With three rows committed
-  before `pg_export_snapshot()` and a fourth committed after it, DuckDB returned
-  3 rows at the snapshot and 4 without it, and aggregated over the heap scan
-  inside DuckDB. This is the correctness property §5.4 depends on, confirmed
-  end to end.
+  before `pg_export_snapshot()` and a fourth after it, DuckDB returned 3 rows at
+  the snapshot and 4 without it;
 - `postgres_scan` takes a raw DSN, so no `ATTACH` is needed — which is fortunate,
-  because `ATTACH ... (TYPE postgres)` **fails** in this build: it lazily loads
-  the community `postgres_scanner` extension from `~/.duckdb/extensions`, which
-  collides with the statically linked copy (`function "postgres_scan" already
-  exists`). The DSN form is the only viable path.
+  because `ATTACH ... (TYPE postgres)` **fails** in this build: it lazily loads the
+  community `postgres_scanner` from `~/.duckdb/extensions`, which collides with the
+  statically linked copy (`function "postgres_scan" already exists`).
 
 What was then built, in `pg_lake_table`:
 
 1. **Admission.** `HasLakeRTE` and the two RTE rejections in
    `src/planner/query_pushdown.c` accept a heap `RTE_RELATION` when
-   `HeapRteIsPushdownable` says so: an ordinary or partitioned table (all
-   partitions equally readable), not a catalog, temporary or row-level-security
-   relation, no `securityQuals`, no `TABLESAMPLE`, no dropped or virtual generated
-   column, and not a legacy inheritance parent with storage of its own. Each of
-   these is a way the loopback scan would return a different set of rows or
-   columns than a local scan; the dropped-column case is the subtlest, because the
-   scanner only returns live columns and would shift everything after the hole.
+   `HeapRteIsPushdownable` says so: an ordinary or partitioned table, not a
+   catalog, temporary or row-level-security relation, no `securityQuals`, no
+   `TABLESAMPLE`, no dropped or virtual generated column, and not a legacy
+   inheritance parent with storage of its own. Each is a way the loopback scan
+   would return different rows or columns than a local scan; the dropped-column
+   case is the subtlest, because the scanner returns only live columns and would
+   shift everything after the hole.
 2. **Rewrite and substitution.** An admitted heap RTE goes through the same
-   `__lake_read_table('<name>', <id>)` placeholder as a lake table
-   (`ReplaceHeapTableWithReadTableFunc`), and at execution
-   `ReplaceHeapTableFunctionCalls` substitutes
-   `postgres_scan_pushdown(dsn, schema, table, snapshot => '<id>')` — the
-   pushdown variant, so DuckDB pushes filters and projections into the reverse
-   scan. `EXPLAIN` without `ANALYZE` substitutes the relation name instead, which
-   is why the `Vectorized SQL` line stays readable.
+   `__lake_read_table('<name>', <id>)` placeholder as a lake table, and at
+   execution `ReplaceHeapTableFunctionCalls` substitutes
+   `postgres_scan_pushdown(dsn, schema, table, snapshot => '<id>')`, so DuckDB
+   pushes filters and projections into the reverse scan. `EXPLAIN` without
+   `ANALYZE` substitutes the relation name instead, which keeps `Vectorized SQL`
+   readable.
 3. **Snapshot.** The driving backend calls `ExportSnapshot` once per pushed-down
-   query and threads the id into every deparsed call. It is never cached across
+   query and threads the id into every deparsed call, never cached across
    statements: under `READ COMMITTED` each statement gets a fresh snapshot, and
-   reusing an older one would silently read stale rows. Two states make an export
-   useless rather than merely unavailable, and both fall back to the local plan:
-   inside a subtransaction (an importer cannot tell that the subtransaction is
-   still running), and after the transaction has been assigned an XID (an exported
-   snapshot shows the exporter as in-progress, so the loopback connection would
-   not see the driving transaction's own writes).
-4. **Reverse connection.** The loopback DSN is built from the running cluster —
-   the first `unix_socket_directories` entry, or `localhost` if the list is empty,
-   plus port, database and current user — unless `heap_pushdown_dsn` overrides it.
-   `pgduck_server` runs on the same host as the backend, so the default is a local
-   socket connection authenticating as the querying role, which is also what makes
+   reusing an older one would read stale rows. Two states make an export useless
+   rather than merely unavailable, and both fall back to the local plan — inside a
+   subtransaction (an importer cannot tell it is still running), and after the
+   transaction has been assigned an XID (an exported snapshot shows the exporter as
+   in-progress, so the loopback would not see the driving transaction's writes).
+4. **Reverse connection.** The loopback DSN is built from the running cluster — the
+   first `unix_socket_directories` entry, or `localhost` if empty, plus port,
+   database and current user — unless `heap_pushdown_dsn` overrides it. That makes
    the permissions the same as a local scan's.
 
-`pg_lake_timeseries` needed one more piece, which is also in `pg_lake_table`:
-its routing view reads the cold tier through `<name>_cold_scan`, a **partitioned
-parent** (relkind `p`) whose only partition is the Iceberg table. That is
-deliberate — it is what lets a hot-window query prune the cold branch by partition
-pruning (§18.3) — but a partitioned parent was neither a lake foreign table nor a
-pushdownable heap relation, so it kept the whole view out of the pushdown. So a
-partitioned parent whose leaves are all lake tables is now pushdownable in its own
-right (`IsLakePartitionedTable`), deparsed as the `UNION ALL` of its partitions
-over the parent's tuple descriptor. Two details matter: a partition is only
-accepted if its column layout matches the parent exactly (`ATTACH PARTITION`
-matches columns by name, so a partition may reorder them or carry a dropped column,
-and reading the tree through the parent's descriptor would mix them up), and
-`FROM ONLY` is honoured rather than forced, which reads no rows — the same as
-PostgreSQL.
+`IsLakePartitionedTable` additionally makes a partitioned parent whose leaves are
+all lake tables pushdownable in its own right, deparsed as the `UNION ALL` of its
+partitions over the parent's tuple descriptor. A partition is accepted only if its
+column layout matches the parent exactly (`ATTACH PARTITION` matches by name, so a
+partition may reorder columns or carry a dropped one), and `FROM ONLY` is honoured
+rather than forced. This one is not behind a GUC — it is the treatment a lake
+inheritance tree already got — but it does mean whole-query pushdown takes over
+queries on an all-lake partitioned parent that PostgreSQL used to plan per
+partition, so `enable_partitionwise_aggregate`/`_join` no longer decide anything for
+them; `pg_lake_table.enable_full_query_pushdown = off` gets the old plans back.
 
-Unlike the heap admission, this one is **not** behind a GUC: it is the treatment a
-lake inheritance tree already got (`test_inheritance.py::test_inherits` asserts a
-`Custom Scan` over a `UNION` for one), and the partitioned case was a gap, not a
-policy. It does mean whole-query pushdown now takes over queries on an all-lake
-partitioned parent that PostgreSQL used to plan per partition, so
-`enable_partitionwise_aggregate` and `enable_partitionwise_join` no longer decide
-anything for them; `pg_lake_table.enable_full_query_pushdown = off` gets the old
-plans back, which is how `test_partitioned.py` still tests the per-partition paths.
-
-Tests: `pg_lake_table/tests/pytests/test_heap_query_pushdown.py`, 12 cases —
-default-off, one vectorised plan for a spanning query, a cross-tier join, a
-heap-only query left untouched, the snapshot honoured under `REPEATABLE READ`,
-the writing-transaction fallback, a partitioned heap tier and a partitioned heap
-tier with no partitions, and the four ineligibility paths (temp table, RLS,
-dropped column, inheritance parent with a non-lake child). And `test_lake_partitioned_parent.py`, 4 cases for the
-partitioned parent — the `UNION ALL` plan and its file count, `FROM ONLY`, a heap
-partition, and a partition with reordered columns. `test_inheritance.py` and
-`test_partitioned.py` were updated for the new plans.
-
-### 18.12 What phase 9 costs: tier elimination
-
-Admitting the whole view into the pushdown moves the tier decision from the
-PostgreSQL planner into DuckDB, and that is a real loss for a hot-window query.
-Measured on the `metrics` fixture, `WHERE ts >= '<today>'::timestamptz`:
-
-- with the pushdown off, §18.3's partition pruning drops the cold branch at plan
-  time and no Parquet file is opened;
-- with it on, the whole view is one pushed-down query, so the cold branch reaches
-  DuckDB with the contradictory range `ts >= B AND ts < B`. The answer is the
-  same and the row groups are skipped, but the two cold files are still opened
-  (`Data Files Scanned: 2`), and §18.4's anti-join against the delta is still
-  built.
-
-The window predicate does reach `read_parquet` as a filter, so what is missing is
-plan-time *file* pruning: `PruneDataFiles` prunes from the restrictions on the
-cold relation, and the outer window predicate is not among them. Closing that gap
-would make the two paths equivalent; until then the choice is per session, which
-is what the GUC is for — turn it on for spanning queries, off for hot-window ones.
-
-`test_cross_tier_aggregate_in_one_vectorized_plan` asserts both halves of this, so
-the day file pruning improves, the test will say so.
-
-### 18.13 A partitioned heap tier has to be named partition by partition
+### 13.1 A partitioned heap has to be named partition by partition
 
 The first version of the heap substitution named the relation from the RTE, which
-for the hot tier is the partitioned parent. That does not merely read the wrong
-rows — it hangs.
+for a partitioned hot tier is the parent. That does not merely read the wrong rows
+— it hangs.
 
-`postgres_scan_pushdown` splits a relation into parallel ctid range scans, and it
-sizes that split from `pg_class.relpages`:
+`postgres_scan_pushdown` splits a relation into parallel ctid range scans and sizes
+the split from `pg_class.relpages`:
 `duckdb-postgres/src/storage/postgres_table_set.cpp:174` assigns
-`result->GetInt64(0, 2)` into `approx_num_pages`, which is an `idx_t`. A
-partitioned table has no storage of its own, so once it has been analysed its
-`relpages` is `-1`, which as an unsigned page count is 2^64-1.
-`PostgresParallelStateNext` then hands out a task per iteration of
+`result->GetInt64(0, 2)` into `approx_num_pages`, an `idx_t`. A partitioned table
+has no storage, so once analysed its `relpages` is `-1`, which as an unsigned page
+count is 2^64-1. `PostgresParallelStateNext` then hands out a task per iteration of
 `if (gstate.page_idx < bind_data->pages_approx)`, clamping each task's upper bound
-to `POSTGRES_TID_MAX` (2^32-1) — and since it assigns that clamp straight back
-into `gstate.page_idx`, the index stops advancing while the condition stays true.
-Tasks are handed out forever. The symptom is a query that never returns, and it
-only appears after `ANALYZE`, because a never-analysed parent still has
-`relpages = 0` and the scan trivially finds nothing.
+to `POSTGRES_TID_MAX` (2^32-1) — and since it assigns that clamp straight back into
+`gstate.page_idx`, the index stops advancing while the condition stays true. Tasks
+are handed out forever. The symptom is a query that never returns, and it appears
+only after `ANALYZE`, because a never-analysed parent still has `relpages = 0`.
 
 So `BuildHeapScanQuery` expands a `RELKIND_PARTITIONED_TABLE` into a parenthesised
 `UNION ALL` over the leaves of `find_all_inheritors`, skipping anything that is not
-`RELKIND_RELATION` (intermediate partitioned levels have no storage either), with
-each branch projecting the parent's column names explicitly so the positional
-column aliases the substitution appends still line up. This is the same shape
-`BuildReadDataSourceQueryForPartitionedTableScan` produces on the lake side. A
-parent with no partitions at all falls back to `ReadDataSourceQuery` over an empty
-source, which is the typed-empty trick the lake path already uses, so the branch
-keeps the parent's row type.
+`RELKIND_RELATION`, each branch projecting the parent's column names explicitly. A
+parent with no partitions falls back to a typed-empty source, keeping its row type.
+The timeseries test runs `ANALYZE metrics` before asserting, so the hang would be
+caught rather than depending on the parent being unanalysed.
 
-`EXPLAIN` emits the same fragment with plain relation names instead of
-`postgres_scan_pushdown` calls, so the `Vectorized SQL` shows exactly which
-partitions will be read, and the tests assert on those names
-(`test_heap_query_pushdown.py::test_partitioned_hot_tier`, plus
-`test_partitioned_hot_tier_without_partitions` for the empty parent). The
-timeseries test now runs `ANALYZE metrics_hot` before asserting, so the hang would
-be caught rather than depending on the parent being unanalysed.
+### 13.2 What the pushdown costs: tier elimination
 
-### 18.14 Measured cost of the pushdown
+Pushing the whole query down moves the tier decision from the PostgreSQL planner
+into DuckDB, which is a real loss for a hot-window query: the cold branch reaches
+DuckDB with a contradictory range instead of being pruned, so its files are opened
+(row groups are still skipped, and the answer is the same). The window predicate
+does reach `read_parquet` as a filter; what is missing is plan-time *file* pruning,
+because `PruneDataFiles` prunes from the restrictions on the cold relation and the
+outer window predicate is not among them. Until that gap closes the choice is per
+session, which is what the GUC is for: on for spanning queries, off for hot-window
+ones.
 
-1 000 000 rows over 8 devices, 8 daily hot partitions (57 340 rows) and 7 Iceberg
-data files (942 660 rows), boundary at midnight, best of three:
+### 13.3 Measured
+
+1 000 001 rows over 120 days and 8 devices, `partition_interval '1 day'`,
+`hot_retention '7 days'`, one `CREATE INDEX ON metrics (device, ts)`, sealed once and
+analysed. After the seal: 61 170 heap rows in 8 daily partitions with data (15 in the
+plan, 7 precreated ahead of `now()`) and 938 831 Iceberg rows in 113 Parquet data
+files, boundary `2026-08-06 00:00+00`. An arm64 dev box with pgduck_server and a
+MotoServer S3 mock on the same host — no object-store latency. Best of three. The
+setup and the plans are in [`README.md`](README.md#performance).
 
 | query | off | on |
 | --- | --- | --- |
-| whole table, `GROUP BY device` | 2231 ms | 388 ms |
-| last 3 days (spans the boundary) | 878 ms | 386 ms |
-| cold only | 2074 ms | 376 ms |
-| hot window only | 18 ms | 381 ms |
-| point lookup, `device = 3`, last 2 hours | 15 ms | 359 ms |
+| whole table, `GROUP BY device` | 979 ms | 327 ms |
+| last 30 days (spans the boundary, 188k Iceberg rows) | 256 ms | 325 ms |
+| cold only, `ts < now() - interval '30 days'` | 776 ms | 275 ms |
+| hot window only, `ts >= now() - interval '1 day'` | 32 ms | 303 ms |
+| point lookup, `device = 3`, last 2 hours | 29 ms | 320 ms |
+| the same aggregate straight at `metrics_cold` | 40 ms | 40 ms |
 
-The wins come from not shipping the cold tier: with the pushdown off, the spanning
-aggregate sorts all 942 660 Iceberg rows for §18.4's anti-join and spills
-(`Sort Method: external sort  Disk: 35128kB`) after 1209 ms in the
-`Foreign Scan on metrics_cold`. With it on the whole thing is one
-`Custom Scan (Query Pushdown)` node at 228 ms.
+Off, the cost is the FDW shipping qualifying Iceberg rows into PostgreSQL to be
+aggregated there — roughly 1 µs per row here, so it tracks how much of the cold tier
+the query needs. On, it is nearly flat, because it is a floor rather than a slope:
+each hot partition is one loopback `postgres_scan_pushdown`. Varying only
+`partition_interval` on 100 000 rows over 3 days with `hot_retention '1 day'`, the
+hot-window aggregate costs 184 ms at 2 partitions, 311 ms at 9 and 745 ms at 33, or
+about 18 ms per partition, against 24–31 ms with the pushdown off. So a short
+`partition_interval` over a wide hot window is the worst case, the crossover on the
+table above is around 300 000 Iceberg rows, and at 100 000 rows the pushdown does not
+pay for itself at all (66 ms off, 321 ms on for the spanning aggregate).
 
-The losses are a floor, not a slope. Each hot partition is one loopback
-`postgres_scan_pushdown`, and on this machine each costs roughly 19 ms: a
-hand-built partitioned heap scanned with the pushdown on took 25 ms at one
-partition, 154 ms at eight and 608 ms at thirty-two, against a flat 5 ms with it
-off. That is what puts the floor at ~370 ms for the fixture above (8 hot
-partitions, the delta branches and the cold branch — about eleven loopback scans),
-and it is why a short `partition_interval` over a wide hot window is the worst
-case for phase 9. Below roughly 100 000 rows the pushdown does not pay for itself
-at all: at 100k the spanning aggregate goes from 233 ms off to 372 ms on.
+The last row of the table is the one that bounds the remaining work: an all-lake
+query is already pushed down whole by default, and the same aggregate over 938 831
+rows costs 40 ms straight at the Iceberg tier against 275 ms through the tiered table
+with the pushdown on, even though the heap contributes nothing to that query. The
+difference is the 15 loopback scans the union keeps in the plan. Collapsing them into
+one scan spanning the partitions is the obvious next optimisation.
 
-A third baseline puts both columns in perspective. The same aggregate run straight
-at `metrics_cold` needs none of this machinery, because an all-lake query is
-already pushed down whole by default. On a 1M-row table split 37 089 hot / 987 911
-cold over 9 hot partitions: 3975 ms through the view with the pushdown off, 269 ms
-with it on, and **21 ms** straight at the Iceberg tier. DuckDB aggregates the whole
-cold tier in 21 ms, so about 250 ms of the spanning query is the tiering machinery
-itself — the per-partition loopback scans and the delta branches. Phase 9's win is
-largely that it avoids a pathological baseline; 269 ms against a 21 ms floor is not
-a good absolute result.
+For the record, the measurement that killed the routing view of §14.2, on a 1M-row
+table split 37 089 hot / 987 911 cold over 9 hot partitions: 3975 ms through the view
+with the pushdown off, 269 ms with it on, and 21 ms straight at Iceberg. About 250 ms
+of the spanning query was the tiering machinery — the per-partition loopback scans
+and the view's permanent delta branches. The current design removes the delta
+branches and the anti-join; the per-partition floor remains.
 
-### 18.15 Proposed: the hot table is the table, and the planner adds the cold tier
+---
 
-The routing view is the weakest part of the design as built. Every write goes
-through a plpgsql `INSTEAD OF` trigger doing `EXECUTE format(...)` per row, so
-`COPY` and bulk `INSERT` pay a per-row plpgsql cost; the parent cannot carry
-indexes, constraints or defaults of its own; and §18.14 shows the read path spends
-~250 ms on machinery over a query DuckDB answers in 21 ms.
+## 14. Designs considered and rejected
 
-The proposed shape is that the **hot table is the user's table** — an ordinary
-range-partitioned heap, indexed, written to directly with native tuple routing and
-no trigger — and the Iceberg tier is a separate relation that a planner hook adds
-to a query when the query needs it.
+### 14.1 The Iceberg tier as a partition of the hot table
 
-#### Why the Iceberg tier must not be a partition of it
-
-An earlier draft of this section proposed attaching the Iceberg tier as a partition
-of the parent, bounded below the boundary. That is wrong — but probing it against a
-live cluster (PG 18, a parent with one heap partition and one lake table attached
-below it) shows the reasons are not the obvious ones:
+The tidiest-looking design attaches the cold tier as a partition of the parent,
+bounded below `B`. Probed against a live cluster (PG 18, a parent with one heap
+partition and one lake table attached below it), the reasons it fails are not the
+obvious ones:
 
 - **Moving the boundary is multi-relation DDL, not one re-attach.** Widening the
-  cold partition's upper bound fails while a hot partition still covers that range:
-  `ATTACH PARTITION cold_a FOR VALUES FROM (MINVALUE) TO ('2026-08-13')` gives
-  `partition "cold_a" would overlap partition "par_a_hot"`. Every seal is therefore
-  a `DETACH` of the cold partition *and* of the hot partition being absorbed, then
-  two `ATTACH`es, all under `ACCESS EXCLUSIVE` on the parent — a heavier version of
-  the partition-management lock cost §1 already gives as a reason not to use native
-  partitioning.
+  cold partition's upper bound fails while a hot partition still covers that range
+  (`partition "cold_a" would overlap partition "par_a_hot"`), so every seal is a
+  `DETACH` of both partitions and two `ATTACH`es, all under `ACCESS EXCLUSIVE` on
+  the parent — a heavier version of the lock cost §1 gives as a reason not to use
+  native partitioning.
 - **Plain indexes are fine; unique ones are not.** `CREATE INDEX` on the parent
-  succeeds in either order — before or after the lake table is attached. The lake
-  partition is skipped, the heap partitions get real indexes, heap partitions added
-  later inherit them, and a hot-only query still plans as a `Bitmap Index Scan`.
-  What fails is uniqueness: `ADD PRIMARY KEY` and `CREATE UNIQUE INDEX` both raise
-  `cannot create unique index on partitioned table "…"`, `DETAIL: Table "…"
-  contains partitions that are foreign tables` (`indexcmds.c:1399`); and in the
-  other order, a parent that already has a primary key refuses the lake table with
-  `column "ts" in child table "cold_c" must be marked NOT NULL`. So `key_columns`
-  could never be enforced by a constraint on the parent, only by convention —
-  which matters for `upsert => true`.
-- **The pushdown never fires, which is the whole feature.** This is the decisive
-  one. `HasLakeRTE` walks the *parse tree's* range table at `planner_hook` entry
-  (`query_pushdown.c:284`, `:385`), before inheritance expansion turns the parent
-  into its partitions. The parse tree holds one RTE — the heap partitioned parent —
-  so `IsAnyLakeRelation` is false, and `FullQueryIsPushdownable` is never reached.
-  Measured: a spanning `GROUP BY` over such a parent plans as `HashAggregate →
-  Append → (Foreign Scan on the lake partition, Seq Scan on the heap partition)`,
-  with the aggregate in PostgreSQL, *identically* with
-  `enable_heap_query_pushdown` on and off. Cold-only queries regress as well, from
-  today's default whole-query pushdown to an aggregate over a `Foreign Scan`.
-  Partitioning hides the lake table from the exact check that decides to
-  vectorise.
+  works in either order and heap partitions get real indexes, but `ADD PRIMARY KEY`
+  and `CREATE UNIQUE INDEX` both raise `cannot create unique index on partitioned
+  table`, `DETAIL: Table "…" contains partitions that are foreign tables`
+  (`indexcmds.c:1399`); in the other order, a parent that already has a primary key
+  refuses the lake table with `column "ts" in child table "cold_c" must be marked
+  NOT NULL`.
+- **The pushdown never fires, which is the whole feature.** `HasLakeRTE` walks the
+  *parse tree's* range table at `planner_hook` entry, before inheritance expansion.
+  The parse tree holds one RTE — the heap parent — so `IsAnyLakeRelation` is false
+  and `FullQueryIsPushdownable` is never reached. Measured: a spanning `GROUP BY`
+  plans as `HashAggregate → Append → (Foreign Scan, Seq Scan)` identically with the
+  GUC on and off, and cold-only queries regress from today's default whole-query
+  pushdown.
 
-The third point settles it. Hot-only queries are *not* degraded — they prune to the
-heap partition and keep their index scans — but a spanning query loses vectorisation
-entirely, with no GUC that brings it back: the design would ship §18.14's 3975 ms
-baseline and remove the 269 ms option. So the cold tier stays outside the table, and
-the union happens in the plan rather than in the catalog.
+The third point settles it: partitioning hides the lake table from the exact check
+that decides to vectorise. So the cold tier stays outside the table and the union
+happens in the plan.
 
-#### Three plan shapes, chosen per query
+### 14.2 A routing view over a hot tier, a delta and merge-on-read
 
-The planner hook inspects a query on a registered table and picks one of:
+The design this replaced. `timeseries.create_table()` turned an empty template into
+six objects: a view with an `INSTEAD OF` trigger, a partitioned hot heap, the
+Iceberg tier, a single-partition `_cold_scan` wrapper for pruning, a `_delta` heap
+with `_ts_seq`/`_ts_deleted` columns, and a sequence. Reads merged the delta over
+the cold tier by logical key (newest version wins, tombstones suppress); a
+`repair()` folded the delta back into Iceberg. Writes below `B` were absorbed by
+the delta instead of failing.
 
-1. **Hot only** — the query's time range is entirely at or above the boundary.
-   Leave the plan alone: an ordinary partitioned-heap plan, index scans and
-   partition pruning intact. This is the common OLTP case and it must cost nothing.
-2. **Spanning, aggregated in PostgreSQL** — add the Iceberg relation as a second
-   branch and let PostgreSQL plan the union. Correct everywhere, and the fallback
-   whenever mode 3 is unavailable.
-3. **Spanning, delegated to DuckDB** — push the whole query down (phase 9's
-   machinery), reading Iceberg directly for the partitions Iceberg is authoritative
-   for and `postgres_scan_pushdown` for the rest. Requires what §18.11 requires,
-   notably no uncommitted writes in the transaction.
+It worked, and it was dropped for four measured reasons:
 
-Mode 1 is what makes this better than the view: today the view is always the view,
-so a hot-only query still pays for the cold branch's planning and, with the
-pushdown on, for its execution too.
+1. **Every write went through a plpgsql `INSTEAD OF` trigger** doing
+   `EXECUTE format(...)` per row, so `COPY` and bulk `INSERT` paid a per-row
+   plpgsql cost, and the parent could carry no indexes, constraints or defaults of
+   its own.
+2. **The view could not specialise on dirty partitions.** A view cannot be
+   replaced while a statement referencing it runs, and the write path was a trigger
+   on that very view: `CREATE OR REPLACE VIEW` from inside it fails with `cannot
+   CREATE OR REPLACE VIEW ... because it is being used by active queries in this
+   session`. So the delta overlay had to be **permanent** — every cold read carried
+   a `NOT EXISTS` anti-join and a `DISTINCT ON` branch, whether or not the delta
+   had a single row.
+3. **The machinery dominated the query.** §13.3's last baseline: 269 ms through the
+   view with the pushdown on against 21 ms straight at Iceberg.
+4. **Tier elimination needed a catalog trick.** A `UNION ALL` branch whose
+   predicate the query contradicts is *kept* under the default
+   `constraint_exclusion = partition`; union-leaf flattening happens only for
+   `SELECT *` and does not prune by itself; `constraint_exclusion = on` prunes but
+   is session-wide. Hence `_cold_scan`, a range-partitioned wrapper whose only
+   partition was the Iceberg table, re-bounded by `seal()` on every boundary
+   advance — which pruned only against a literal, not against `date_trunc('day',
+   now())`, because a single-partition `Append` is removed at plan time.
 
-#### Dropping the delta
+The current design keeps finding (4) — it is why §7.4 says what it says — and
+discards the rest with the delta. What was given up is mutating sealed history,
+which is now an error rather than an overlay (§2).
 
-The delta and its merge-on-read go away. In their place, each partition records
-whether Iceberg is **in sync** with it or has been **invalidated** by a later
-write. A query then reads each partition from exactly one source — Iceberg where it
-is in sync, the heap where it is not — so there is no anti-join, no `DISTINCT ON`
-overlay, and no §18.4 problem where the merge is built even when the delta is
-empty. A write below the boundary marks its partition invalidated (which
-`mark_dirty` already does) and the heap partition becomes the authority for it
-again until the worker re-syncs it.
+### 14.3 Base+delta as the primary model, and mirror mode
 
-This means a partition's rows must not be dropped from the heap at seal time until
-Iceberg is in sync for it, and an invalidated partition must keep (or regain) its
-heap rows — which is the one real cost, since it is what today's delta avoids by
-storing only the changed rows.
+Earlier revisions of this document specified a base+delta LSM (all writes to a
+small heap delta, a background flush folding them into Iceberg, reads merging by
+key), and a "mirror mode" where Iceberg is fed by CDC and PostgreSQL keeps the full
+deduplicated last N days. Both are strictly more machinery than a boundary split,
+and both need the merge-on-read whose cost §14.2 measures. The demand was for
+overlapping tiers with a fast routing path, which is what a boundary plus a lagging
+copy gives directly.
 
-#### What this changes
+### 14.4 Row-level security on the extension catalogs
 
-`create_table` stops creating a view and a `cold_scan` wrapper and instead
-registers an existing partitioned table; `route_write` disappears for the hot path;
-`seal` stops moving the boundary by re-attaching partitions and instead flips
-per-partition sync state; `repair` becomes a re-sync of an invalidated partition;
-and the read path moves from the view definition into the planner hook. The
-catalogs keep `timeseries.partitions` but its state machine becomes
-in-sync/invalidated rather than the delta-oriented states of §18.4.
+The catalogs were originally granted to `public` with owner policies (`USING
+(is_owner(relation))`, plus a `WITH CHECK` requiring ownership of every relation the
+row names) and the API was `SECURITY INVOKER`. Two things went wrong:
 
-Not implemented.
+- **`pg_dump` refuses a table with policies**, and these are
+  `pg_extension_config_dump` tables whose contents must survive a dump. That is
+  fatal, and it is why §6.2 uses a grant to `pg_monitor` and a C-level ownership
+  check instead.
+- **RLS hid the row from the very user who had to delete it.** `is_owner()` of an
+  already-dropped relation is NULL, not true, so a registration naming a dropped
+  table was invisible to its owner's `DELETE` — which is how the cleanup function
+  ended up `SECURITY DEFINER` in the first place.
+
+Making the whole API `SECURITY DEFINER` was also tried and reverted: inside a
+definer function `current_user` is the definer, so `check_owner()` would succeed for
+anybody whenever the definer is a superuser, and there is no portable way to
+recover the invoker. The ownership check therefore lives in C (§6.1).
+
+---
+
+## 15. Tests
+
+`tests/pytests/`, run against a live pg_lake test cluster with the in-tree S3 mock.
+The `tiered` fixture in `tests/conftest.py` runs one `CREATE TABLE ... USING
+timeseries`, which is all it takes to get both tiers and the registration; each test
+gets its own S3 prefix, because `DROP TABLE` leaves the Iceberg files behind and
+`CREATE TABLE ... USING iceberg` refuses a non-empty location. The worker is pinned
+off and maintenance is driven explicitly so that assertions about the boundary are
+deterministic; one test re-enables it.
+
+| file | cases | asserts |
+| --- | --- | --- |
+| `test_tiered_ddl.py` | 23 | what `CREATE TABLE ... USING timeseries` builds and refuses (§5.1), that `ALTER TABLE` reaches both tiers under Iceberg's rules, the `SET (...)` settings, the three refusals, and that `DROP TABLE` takes the cold tier and the registration with it |
+| `test_tiered_reads.py` | 12 | every row returned exactly once across the boundary, the lagging copy not double-counted, expansion at every query level, pruning on both sides (§7.4), writes unaffected, cached plans replanned, RLS refused, view-like privileges, `COPY`, and one whole-query-pushdown plan |
+| `test_timeseries_maintenance.py` | 12 | the frontier, `sync()` being repeatable and non-authoritative, `seal()` advancing `B` and stopping at a gap, retention bounded by `B`, one `maintain()` pass, the worker, and the ownership/registration refusals |
+
+The pushdown side is tested in `pg_lake_table`:
+`test_heap_query_pushdown.py` (12 cases — default-off, one vectorised plan for a
+spanning query, a cross-tier join, a heap-only query left untouched, the snapshot
+honoured under `REPEATABLE READ`, the writing-transaction fallback, a partitioned
+heap tier with and without partitions, and the four ineligibility paths) and
+`test_lake_partitioned_parent.py` (4 cases).
+
+---
+
+## 16. Not implemented
+
+- **`month`/`year` partition intervals** (§5).
+- **Converting an existing table.** There is no `SET ACCESS METHOD timeseries`, and
+  nothing adopts a heap and an Iceberg table as a pair; the invariants §7 relies on
+  are established by `CREATE TABLE` (§5.1). Converting would additionally have to
+  place the boundary somewhere other than `-infinity`, which nothing does today.
+- **Compaction** of the cold tier beyond `apply_retention()`.
+- **Plan-time file pruning** for a pushed-down hot-window query (§13.2).
+- **`seal()`'s copy is row-at-a-time.** `INSERT INTO <iceberg> SELECT ... FROM
+  <heap>` uses the FDW path; the heap pushdown admits read-only queries only
+  (`FullQueryIsPushdownable` rejects anything that is not a plain `SELECT`).
+- **Mutating sealed history** (§2), and cross-tier uniqueness.
+- **A `CustomScan`** that picks per partition between reading Iceberg and reading
+  the heap. The planner hook covers the two shapes that matter (heap-only by
+  pruning, and the union), and a `CustomScan` would only add the ability to
+  specialise per partition — which, without a delta, nothing needs yet.

@@ -23,13 +23,12 @@
  * worker per database that has the extension, started on CREATE EXTENSION and
  * on server start, and stopped on DROP EXTENSION / DROP DATABASE.
  *
- * Each pass calls timeseries.maintain() for every enabled table, in its own
+ * Each pass calls timeseries.maintain() for every registered table, in its own
  * transaction so that one failing table does not hold back the others. The
- * work performed per table is described in DESIGN.md section 13.8: extend the
- * hot partition frontier, refresh the Iceberg copy of past hot partitions,
- * seal partitions that aged out of the hot window (advancing the authority
- * boundary), repair partitions that were mutated below the boundary, and apply
- * cold retention.
+ * work performed per table is described in DESIGN.md section 9: extend the
+ * partition frontier, refresh the Iceberg copy of past partitions, seal
+ * partitions that aged out of the hot window (advancing the authority
+ * boundary), and apply cold retention.
  */
 #include "postgres.h"
 
@@ -55,7 +54,7 @@ extern int	PgLakeTimeseriesNaptimeMs;
 PG_FUNCTION_INFO_V1(pg_lake_timeseries_maintenance_worker);
 
 static void MaintainAllTables(MemoryContext resultContext);
-static List *ListEnabledTables(MemoryContext resultContext);
+static List *ListTieredTables(MemoryContext resultContext);
 static void MaintainTable(char *tableName);
 
 
@@ -111,7 +110,7 @@ pg_lake_timeseries_maintenance_worker(PG_FUNCTION_ARGS)
 
 
 /*
- * MaintainAllTables performs one maintenance pass over all enabled tables.
+ * MaintainAllTables performs one maintenance pass over all registered tables.
  *
  * The table list is read in its own transaction, and each table is then
  * maintained in a separate transaction: maintenance of one table can take a
@@ -126,7 +125,7 @@ MaintainAllTables(MemoryContext resultContext)
 
 	START_TRANSACTION();
 	{
-		tableNames = ListEnabledTables(resultContext);
+		tableNames = ListTieredTables(resultContext);
 	}
 	END_TRANSACTION();
 
@@ -147,8 +146,12 @@ MaintainAllTables(MemoryContext resultContext)
 
 
 /*
- * ListEnabledTables returns the names of the enabled time-series tables as
+ * ListTieredTables returns the names of the registered time-series tables as
  * quoted, schema-qualified strings, allocated in resultContext.
+ *
+ * It reads them through timeseries.tiered_tables() rather than from the catalog
+ * directly, which is how everything else reads the registry: the catalogs grant
+ * SELECT to nobody, and the function applies no ACL check.
  *
  * Names rather than OIDs, because the table can be dropped between listing and
  * maintaining it; regclass output would then fail to resolve. A name that no
@@ -156,14 +159,15 @@ MaintainAllTables(MemoryContext resultContext)
  * logged per table.
  */
 static List *
-ListEnabledTables(MemoryContext resultContext)
+ListTieredTables(MemoryContext resultContext)
 {
 	List	   *tableNames = NIL;
 
 	SPI_connect();
 
-	int			queryResult = SPI_execute("SELECT parent::text FROM timeseries.tables "
-										  "WHERE enabled ORDER BY parent", true, 0);
+	int			queryResult = SPI_execute("SELECT relation::text "
+										  "FROM timeseries.tiered_tables() "
+										  "ORDER BY 1", true, 0);
 
 	if (queryResult != SPI_OK_SELECT)
 		ereport(ERROR, (errmsg("could not list pg_lake_timeseries tables")));

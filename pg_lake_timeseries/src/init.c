@@ -21,8 +21,8 @@
  * pg_lake_timeseries makes a single relation behave like a live, indexed,
  * mutable time-series table whose bulk lives in Apache Iceberg: the last
  * hot_retention worth of time is authoritative in PostgreSQL, everything older
- * is authoritative in Iceberg, and reads are routed per partition by a stored
- * authority boundary. See DESIGN.md section 13.
+ * is authoritative in Iceberg, and a planner hook reads both sides of the stored
+ * authority boundary. See DESIGN.md.
  *
  * This file wires up the module and its GUCs. The maintenance background
  * worker is registered through pg_extension_base's base-worker framework from
@@ -38,12 +38,17 @@
 #include "miscadmin.h"
 #include "utils/guc.h"
 
+#include "pg_lake_timeseries/ddl.h"
+#include "pg_lake_timeseries/metadata.h"
+#include "pg_lake_timeseries/planner.h"
+
 #define GUC_STANDARD 0
 
 PG_MODULE_MAGIC;
 
 /* GUCs */
 bool		EnablePgLakeTimeseries = true;
+bool		ExpandTieredTables = true;
 int			PgLakeTimeseriesNaptimeMs = 10000;
 
 /* function declarations */
@@ -73,16 +78,32 @@ _PG_init(void)
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 
+	DefineCustomBoolVariable(
+							 "pg_lake_timeseries.expand_tiered_tables",
+							 gettext_noop("Reads a tiered table's Iceberg tier along with its heap"),
+							 gettext_noop("When off, a query over a tiered table reads only the "
+										  "PostgreSQL heap, which is everything at or above the "
+										  "authority boundary. Intended for inspecting the tiers "
+										  "separately; it does not change what maintenance does."),
+							 &ExpandTieredTables,
+							 true,
+							 PGC_USERSET,
+							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
 	DefineCustomIntVariable(
 							"pg_lake_timeseries.maintenance_naptime",
 							gettext_noop("Time between background maintenance passes, in milliseconds"),
 							gettext_noop("Each pass extends the hot partition frontier, refreshes the "
 										 "Iceberg copy of past hot partitions, seals partitions that "
-										 "aged out of the hot window, and repairs mutated cold "
-										 "partitions."),
+										 "aged out of the hot window, and applies cold retention."),
 							&PgLakeTimeseriesNaptimeMs,
 							10000, 100, INT_MAX,
 							PGC_SIGHUP,
 							GUC_UNIT_MS,
 							NULL, NULL, NULL);
+
+	InitializePgLakeTimeseriesMetadata();
+	InitializeTimeseriesDDL();
+	InitializeTimeseriesPlanner();
 }

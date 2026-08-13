@@ -1,28 +1,31 @@
 /*
  * pg_lake_timeseries--3.4.sql
  *
- * Two overlapping storage tiers behind one relation (DESIGN.md section 13):
+ * Your own range-partitioned table is the hot tier; a pg_lake Iceberg table is
+ * the cold one; a planner hook puts them back together (DESIGN.md section 7).
  *
- *   - the last `hot_retention` worth of time lives in a range-partitioned heap,
- *     indexed and mutable, up to now();
- *   - everything older lives in one internally-partitioned pg_lake Iceberg
- *     table, which also keeps a *lagging* copy of the hot window so external
- *     Iceberg readers see recent data;
- *   - reads are routed by a stored authority boundary B: PostgreSQL is
- *     authoritative for ts >= B, Iceberg for ts < B. Nobody reads the
- *     non-authoritative copy, so the lagging copy needs no invalidation.
+ *   - the relation stays exactly the table you created, with your indexes,
+ *     constraints and native tuple routing. Nothing is renamed, wrapped or
+ *     replaced, and writes go straight to it;
+ *   - a stored authority boundary B splits the two tiers: PostgreSQL owns
+ *     time_column >= B, Iceberg owns time_column < B. Both branches carry an
+ *     explicit bound, so every row is returned exactly once;
+ *   - B is advanced only by seal(), which has proven in the same transaction
+ *     that the range is in Iceberg before dropping the heap partition. The
+ *     Iceberg copy of the still-hot window is therefore allowed to lag: nobody
+ *     reads it through PostgreSQL, and external Iceberg readers get a
+ *     consistent, if slightly stale, view of it.
  *
- * Mutations that reach a sealed (ts < B) partition land in a per-partition
- * delta and are merged over Iceberg on read until a background repair folds
- * them in.
+ * There is no delta and no merge-on-read. A range is read from one tier or the
+ * other, never both, so a mutation of already-sealed data is a plain error
+ * rather than an overlay -- the ranges below B have no heap partition to hold it.
  *
- * The user-facing relation is a view whose definition is regenerated from the
- * catalog whenever the boundary moves, so the routing predicates are plan-time
- * constants and a single-tier query prunes the other tier away entirely. The
- * CustomScan in DESIGN.md section 5.3 replaces the view later and reads the same
- * catalog without needing DDL -- and, unlike a view, can also specialise the plan
- * on the set of dirty partitions, which a view cannot do because it cannot be
- * replaced while a statement that references it is running.
+ * The metadata below is written only through the C functions in src/registry.c,
+ * which check that the caller owns the relation and then switch to the extension
+ * owner. The tables themselves grant nothing to anybody, and carry no row-level
+ * security: RLS on an extension configuration table makes pg_dump fail (it
+ * refuses to dump a table whose policies could silently filter rows), which is
+ * exactly the data this extension needs dumped.
  */
 
 -- complain if script is sourced in psql, rather than via CREATE EXTENSION
@@ -40,79 +43,253 @@ GRANT USAGE ON SCHEMA timeseries TO public;
 -- ---------------------------------------------------------------------------
 
 /*
- * One row per managed time-series table. `parent` is the user-facing relation
- * (a routing view) that presents the hot heap and the Iceberg table as one
- * relation. See DESIGN.md sections 4.5 and 13.1.
+ * One row per tiered table. `relation` is the user's own table: an ordinary
+ * heap, RANGE-partitioned on time_column. That OID is the mark the planner hook
+ * looks for, which is why it is the primary key.
+ *
+ * Read from C without SPI (src/metadata.c): a planner hook cannot run SPI,
+ * because that would re-enter the planner.
  */
 CREATE TABLE timeseries.tables (
-	parent				regclass PRIMARY KEY,
-	-- hot tier: heap, RANGE-partitioned on time_column
-	hot_table			regclass	NOT NULL,
-	-- cold tier: pg_lake Iceberg table, partitioned by a time transform
+	relation			regclass PRIMARY KEY,
+	-- pg_lake Iceberg table with the same columns in the same order,
+	-- authoritative for time_column < boundary
 	cold_table			regclass	NOT NULL,
-	-- range-partitioned wrapper whose only partition is cold_table, bounded at
-	-- the authority boundary: what the routing view reads, so that a hot-window
-	-- query prunes the Iceberg scan away at plan time
-	cold_scan			regclass	NOT NULL,
-	-- overlay for mutations that land below the authority boundary
-	delta_table			regclass	NOT NULL,
-	-- time (partitioning) column, a timestamp/timestamptz that is NOT NULL
+	-- time (partitioning) column of relation, a NOT NULL timestamp
 	time_column			name		NOT NULL,
-	-- logical key identifying a row across versions, e.g. {series_id, ts};
-	-- empty for keyless append-only tables, which cannot be updated
-	key_columns			name[]		NOT NULL,
-	-- fixed-length partition granularity of the hot tier (hour/day/week)
+	-- fixed-length partition granularity of relation (hour/day/week)
 	partition_interval	interval	NOT NULL,
+	-- authority boundary B. Starts at -infinity (Iceberg owns nothing) unless
+	-- the cold tier was pre-loaded with history; advanced only by seal().
+	boundary			timestamptz	NOT NULL,
 	-- how much time stays authoritative in PostgreSQL before a partition seals
 	hot_retention		interval	NOT NULL,
 	-- how much history the Iceberg tier keeps, NULL for unlimited
 	cold_retention		interval,
-	-- how many partition intervals ahead of now() the frontier is pre-created
-	precreate_ahead		int			NOT NULL DEFAULT 7,
-	-- ORDER BY list applied when writing to cold, for tight file min/max
-	cluster_columns		name[]		NOT NULL DEFAULT '{}',
-	-- authority boundary B: PostgreSQL owns ts >= boundary, Iceberg owns ts <
-	-- boundary. Advanced only by seal(), which has proven Iceberg completeness.
-	boundary			timestamptz	NOT NULL,
-	-- whether plain INSERTs upsert on the key in the hot tier
-	upsert				boolean		NOT NULL DEFAULT false,
-	-- version sequence for delta rows (newest version of a key wins)
-	seq_sequence		regclass	NOT NULL,
-	enabled				boolean		NOT NULL DEFAULT true
+	-- how many partition intervals ahead of now() partitions are pre-created
+	precreate_ahead		int			NOT NULL DEFAULT 7
 );
 
 /*
- * Per-partition authority (DESIGN.md section 13.4). The boundary in
- * timeseries.tables is derived from this table: it is the smallest part_start
- * that is still 'hot' or 'sealing'.
+ * What Iceberg holds a copy of, one row per partition-aligned range.
  *
- * States:
- *   hot         - PostgreSQL authoritative, heap partition exists
- *   sealing     - PostgreSQL authoritative, Iceberg write in flight
- *   cold_clean  - Iceberg authoritative, no overlay, no reverse connection
- *   cold_dirty  - Iceberg authoritative but superseded by delta rows; reads
- *                 merge until repair() folds the delta in
+ * `synced_at` is when the copy was last refreshed and `sealed_at` is when
+ * Iceberg became authoritative for the range -- which is to say, when the heap
+ * partition was dropped and B moved past part_end.
+ *
+ * The planner never reads this table. It only needs B, and B is a single value
+ * on the row above; per-range state is a maintenance concern. That is the whole
+ * reason the read path can be cached per backend and invalidated rarely.
  */
 CREATE TABLE timeseries.partitions (
-	parent			regclass	NOT NULL REFERENCES timeseries.tables(parent) ON DELETE CASCADE,
-	part_start		timestamptz	NOT NULL,
-	part_end		timestamptz	NOT NULL,
-	state			text		NOT NULL
-		CHECK (state IN ('hot', 'sealing', 'cold_clean', 'cold_dirty')),
-	-- heap partition backing this range, NULL once the partition sealed
-	hot_partition	regclass,
-	-- when the lagging Iceberg copy of this range was last refreshed
-	synced_at		timestamptz,
-	-- when Iceberg became authoritative for this range
-	sealed_at		timestamptz,
-	PRIMARY KEY (parent, part_start),
+	relation	regclass	NOT NULL
+		REFERENCES timeseries.tables(relation) ON DELETE CASCADE,
+	part_start	timestamptz	NOT NULL,
+	part_end	timestamptz	NOT NULL,
+	synced_at	timestamptz	NOT NULL,
+	sealed_at	timestamptz,
+	PRIMARY KEY (relation, part_start),
 	CHECK (part_end > part_start)
 );
 
-CREATE INDEX partitions_state_idx ON timeseries.partitions (parent, state);
-
 SELECT pg_catalog.pg_extension_config_dump('timeseries.tables', '');
 SELECT pg_catalog.pg_extension_config_dump('timeseries.partitions', '');
+
+-- ---------------------------------------------------------------------------
+-- Cache invalidation
+-- ---------------------------------------------------------------------------
+
+/*
+ * Drop what every backend cached about the registry.
+ *
+ * DML on timeseries.tables raises no invalidation by itself, so this has to be
+ * explicit. It hangs off a statement trigger rather than off the C writers so
+ * that a row restored by pg_restore, or edited by a superuser, is picked up too.
+ *
+ * A trigger function rather than a plain function called from plpgsql, because
+ * EXECUTE on a trigger function is checked when the trigger is created and not
+ * when it fires: the invalidation therefore works for whoever writes the catalog,
+ * including a pg_restore running as someone with no rights to this schema at all.
+ */
+CREATE FUNCTION timeseries.invalidate_cache_trigger()
+RETURNS trigger
+AS 'MODULE_PATHNAME', 'timeseries_invalidate_cache_trigger'
+LANGUAGE C;
+
+CREATE TRIGGER invalidate_cache
+AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE ON timeseries.tables
+FOR EACH STATEMENT EXECUTE FUNCTION timeseries.invalidate_cache_trigger();
+
+-- ---------------------------------------------------------------------------
+-- Metadata reads
+-- ---------------------------------------------------------------------------
+
+/*
+ * These read the catalog with systable_beginscan, which applies no ACL check --
+ * deliberately, and the same way the planner hook does it. Whether a relation is
+ * tiered, and where its boundary sits, is a property of the relation that every
+ * backend has to agree about, whoever is running the query. It stays a privilege
+ * check rather than a visibility one: a user who may not read the Iceberg tier
+ * gets a permission error on it, not a silently different answer.
+ */
+
+/* Whether a relation is registered, answered from the cache the planner uses. */
+CREATE FUNCTION timeseries.is_tiered(relation regclass)
+RETURNS boolean
+AS 'MODULE_PATHNAME', 'timeseries_is_tiered'
+LANGUAGE C STRICT STABLE;
+COMMENT ON FUNCTION timeseries.is_tiered(regclass)
+	IS 'Whether a relation is registered as a tiered time-series table.';
+
+/* The registration of one tiered table, all-NULL if it is not registered. */
+CREATE FUNCTION timeseries.tiered_table(relation regclass,
+										OUT cold_table regclass,
+										OUT time_column name,
+										OUT partition_interval interval,
+										OUT boundary timestamptz,
+										OUT hot_retention interval,
+										OUT cold_retention interval,
+										OUT precreate_ahead int)
+RETURNS record
+AS 'MODULE_PATHNAME', 'timeseries_tiered_table'
+LANGUAGE C STRICT STABLE;
+COMMENT ON FUNCTION timeseries.tiered_table(regclass)
+	IS 'The registration of a tiered table: tiers, boundary and retention.';
+
+/* Every registered table. */
+CREATE FUNCTION timeseries.tiered_tables(OUT relation regclass,
+										 OUT cold_table regclass,
+										 OUT time_column name,
+										 OUT partition_interval interval,
+										 OUT boundary timestamptz,
+										 OUT hot_retention interval,
+										 OUT cold_retention interval,
+										 OUT precreate_ahead int)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'timeseries_tiered_tables'
+LANGUAGE C STRICT STABLE;
+COMMENT ON FUNCTION timeseries.tiered_tables()
+	IS 'All tiered time-series tables.';
+
+/* What Iceberg holds a copy of, and which of those ranges it owns. */
+CREATE FUNCTION timeseries.synced_ranges(relation regclass,
+										 OUT part_start timestamptz,
+										 OUT part_end timestamptz,
+										 OUT synced_at timestamptz,
+										 OUT sealed_at timestamptz)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'timeseries_synced_ranges'
+LANGUAGE C STRICT STABLE;
+COMMENT ON FUNCTION timeseries.synced_ranges(regclass)
+	IS 'Ranges of a tiered table that are present in its Iceberg tier.';
+
+/*
+ * The partitions of a range-partitioned table and the range each covers, read
+ * from relpartbound rather than parsed back out of pg_get_expr(). MINVALUE and
+ * MAXVALUE come back as NULL; a DEFAULT partition is not reported, because it
+ * covers no definite range.
+ *
+ * This is what lets the extension manage a table whose partitions somebody else
+ * created: the heap itself says which ranges exist, so nothing has to be
+ * mirrored into timeseries.partitions to be trusted.
+ */
+CREATE FUNCTION timeseries.heap_ranges(relation regclass,
+									   OUT partition regclass,
+									   OUT part_start timestamptz,
+									   OUT part_end timestamptz)
+RETURNS SETOF record
+AS 'MODULE_PATHNAME', 'timeseries_heap_ranges'
+LANGUAGE C STRICT STABLE;
+COMMENT ON FUNCTION timeseries.heap_ranges(regclass)
+	IS 'The partitions of a range-partitioned table and the range each covers.';
+
+-- ---------------------------------------------------------------------------
+-- Metadata writes
+-- ---------------------------------------------------------------------------
+
+/*
+ * Each of these checks that the calling user owns `relation` and then performs
+ * the write as the extension owner (SPI_START_EXTENSION_OWNER). The check has to
+ * happen in C: inside a SECURITY DEFINER plpgsql function current_user is the
+ * definer, and there is no way to see who called it, so plpgsql could not
+ * authorize this at all.
+ *
+ * Registering a table is not among them, because it is not something to call:
+ * CREATE TABLE ... USING timeseries registers, from C, the tables it has just
+ * created (src/ddl.c). What is left here is what maintenance records as it runs,
+ * and each of these verifies ownership of the relation whose metadata it changes.
+ * That is what keeps one user from aiming the superuser maintenance worker, which
+ * will happily drop partitions and overwrite an Iceberg table on the strength of
+ * a catalog row, at another user's tables.
+ */
+
+/* Record that Iceberg now holds a copy of a range. */
+CREATE FUNCTION timeseries.record_sync(relation regclass,
+									   part_start timestamptz,
+									   part_end timestamptz)
+RETURNS void
+AS 'MODULE_PATHNAME', 'timeseries_record_sync'
+LANGUAGE C STRICT;
+
+/*
+ * Record that Iceberg is now authoritative for a range, and move the boundary.
+ * One function because it is one fact: the boundary may only advance over a
+ * range that this same transaction sealed.
+ */
+CREATE FUNCTION timeseries.record_seal(relation regclass,
+									   part_start timestamptz,
+									   part_end timestamptz,
+									   new_boundary timestamptz)
+RETURNS void
+AS 'MODULE_PATHNAME', 'timeseries_record_seal'
+LANGUAGE C STRICT;
+
+/* Forget ranges that retention removed. Returns how many rows went. */
+CREATE FUNCTION timeseries.forget_ranges(relation regclass, cutoff timestamptz)
+RETURNS int
+AS 'MODULE_PATHNAME', 'timeseries_forget_ranges'
+LANGUAGE C STRICT;
+
+/*
+ * Unregister tables whose relations were dropped.
+ *
+ * A regclass column is a plain OID: it carries no dependency, so DROP TABLE
+ * would otherwise leave a registration naming a relation that no longer exists
+ * -- and OIDs are reused, so a later table could inherit someone else's mark.
+ *
+ * Unlike its neighbours this checks no ownership, and needs none: a row it can
+ * delete names a relation that is not in pg_class, so it describes no table and
+ * nobody owns it.
+ */
+CREATE FUNCTION timeseries.forget_dropped()
+RETURNS int
+AS 'MODULE_PATHNAME', 'timeseries_forget_dropped'
+LANGUAGE C;
+COMMENT ON FUNCTION timeseries.forget_dropped()
+	IS 'Unregister tiered tables whose relations no longer exist.';
+
+/*
+ * This is a sweep for registrations naming a relation that is gone, rather than
+ * a lookup of the objects the command dropped, because
+ * pg_event_trigger_dropped_objects() does not report the Iceberg tier: pg_lake
+ * drops its own tables by calling RemoveRelations() directly
+ * (pg_lake_table/src/ddl/drop_table.c), which is outside the path that collects
+ * dropped objects, so no sql_drop event fires for them at all. ddl_command_end
+ * does fire, for both tiers.
+ */
+CREATE FUNCTION timeseries.handle_drop()
+RETURNS event_trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+	/* every DDL statement in the database reaches this */
+	IF tg_tag LIKE 'DROP %' THEN
+		PERFORM timeseries.forget_dropped();
+	END IF;
+END;
+$$;
+
+CREATE EVENT TRIGGER timeseries_handle_drop ON ddl_command_end
+	EXECUTE FUNCTION timeseries.handle_drop();
 
 -- ---------------------------------------------------------------------------
 -- Helpers
@@ -121,7 +298,7 @@ SELECT pg_catalog.pg_extension_config_dump('timeseries.partitions', '');
 /*
  * Floor a timestamp to a partition boundary. Only fixed-length intervals are
  * supported: month/year granularities would need date_trunc and are rejected
- * by create_table.
+ * when the table is created.
  */
 CREATE FUNCTION timeseries.partition_start(ts timestamptz, part_interval interval)
 RETURNS timestamptz
@@ -132,40 +309,6 @@ $$;
 COMMENT ON FUNCTION timeseries.partition_start(timestamptz, interval)
 	IS 'Floor a timestamp to a fixed-length partition boundary.';
 
-/* The columns of a relation, in attribute order. */
-CREATE FUNCTION timeseries.column_names(rel regclass)
-RETURNS name[]
-LANGUAGE sql STABLE STRICT AS $$
-	SELECT array_agg(attname ORDER BY attnum)
-	  FROM pg_catalog.pg_attribute
-	 WHERE attrelid = rel AND attnum > 0 AND NOT attisdropped
-$$;
-
-/* "a, b, c" from {a,b,c}, each identifier quoted. */
-CREATE FUNCTION timeseries.quoted_list(cols name[])
-RETURNS text
-LANGUAGE sql IMMUTABLE STRICT AS $$
-	SELECT string_agg(quote_ident(col), ', ' ORDER BY ord)
-	  FROM unnest(cols) WITH ORDINALITY AS u(col, ord)
-$$;
-
-/* "<lhs>.a = <rhs>.a AND ..." for joining on the logical key. */
-CREATE FUNCTION timeseries.key_join_clause(key_columns name[], lhs text, rhs text)
-RETURNS text
-LANGUAGE sql IMMUTABLE STRICT AS $$
-	SELECT string_agg(format('%s.%I = %s.%I', lhs, col, rhs, col), ' AND ' ORDER BY ord)
-	  FROM unnest(key_columns) WITH ORDINALITY AS u(col, ord)
-$$;
-
-/* The authority boundary of a table. */
-CREATE FUNCTION timeseries.boundary(parent regclass)
-RETURNS timestamptz
-LANGUAGE sql STABLE STRICT AS $$
-	SELECT boundary FROM timeseries.tables t WHERE t.parent = $1
-$$;
-COMMENT ON FUNCTION timeseries.boundary(regclass)
-	IS 'Authority boundary B: PostgreSQL owns ts >= B, Iceberg owns ts < B.';
-
 /* Whether the current user owns (or is a member of the role owning) a relation. */
 CREATE FUNCTION timeseries.is_owner(rel regclass)
 RETURNS boolean
@@ -174,192 +317,126 @@ LANGUAGE sql STABLE STRICT AS $$
 	  FROM pg_catalog.pg_class c WHERE c.oid = rel
 $$;
 
-/* Raise unless the caller owns the table (all mutating API functions). */
+/*
+ * Raise unless the caller owns the table. The C writers check this too, and
+ * theirs is the one that counts; this one is here so that a function which
+ * touches user data before its first metadata write fails before it starts.
+ */
 CREATE FUNCTION timeseries.check_owner(rel regclass)
 RETURNS void
 LANGUAGE plpgsql STRICT AS $$
 BEGIN
 	IF NOT coalesce(timeseries.is_owner(rel), false) THEN
-		RAISE EXCEPTION 'permission denied for relation %', rel::text
+		RAISE EXCEPTION 'must be owner of relation %', rel::text
 			USING ERRCODE = 'insufficient_privilege';
 	END IF;
 END;
 $$;
 
 -- ---------------------------------------------------------------------------
--- Routing view generation
+-- The timeseries access method
 -- ---------------------------------------------------------------------------
 
 /*
- * Re-bound the cold-tier wrapper on the authority boundary.
+ * CREATE TABLE ... USING timeseries is how a tiered table is made, and this is
+ * the access method that names.
  *
- * The wrapper is a range-partitioned table whose only partition is the Iceberg
- * table, attached FROM (MINVALUE) TO (boundary). Its bound is what makes tier
- * elimination reliable: partition pruning removes the Iceberg scan from a
- * ts >= boundary query at plan time, whatever the shape of the query, whereas
- * refuting the branch's own WHERE clause needs both the UNION ALL to be
- * flattened (which the planner only does for SELECT *) and constraint_exclusion
- * to be raised above its default.
+ * Nothing ever routes through the handler. The utility hook in src/ddl.c
+ * intercepts the CREATE TABLE before PostgreSQL looks the access method up, and
+ * what it creates is an ordinary partitioned heap plus an Iceberg table -- there
+ * is no relation whose relam is this one. The access method exists so that the
+ * name resolves at parse analysis, so that USING timeseries is a syntax error
+ * when the extension is not installed rather than a table nobody manages, and so
+ * that pg_am lists it.
  *
- * The bound is not a filter -- PostgreSQL does not enforce partition bounds on
- * foreign tables, and the Iceberg table deliberately holds a lagging copy of
- * rows above the boundary -- so the view still carries its own ts < boundary
- * predicate. The bound only ever tells the planner what it may skip.
+ * The handler therefore only ever runs if the interception did not happen, which
+ * means the module is not in shared_preload_libraries. Raising is the right
+ * answer to that, and a far better one than a table that looks tiered and is not.
  */
-CREATE FUNCTION timeseries.rebound_cold(parent regclass, new_boundary timestamptz)
-RETURNS void
-LANGUAGE plpgsql AS $$
-DECLARE
-	t record;
-BEGIN
-	SELECT * INTO t FROM timeseries.tables WHERE tables.parent = rebound_cold.parent;
+CREATE FUNCTION timeseries.am_handler(internal)
+RETURNS table_am_handler
+AS 'MODULE_PATHNAME', 'timeseries_am_handler'
+LANGUAGE C;
+COMMENT ON FUNCTION timeseries.am_handler(internal)
+	IS 'Placeholder handler for the timeseries access method; CREATE TABLE ... USING timeseries is handled before it is reached.';
 
-	EXECUTE format('ALTER TABLE %s DETACH PARTITION %s',
-				   t.cold_scan::text, t.cold_table::text);
-	EXECUTE format('ALTER TABLE %s ATTACH PARTITION %s FOR VALUES FROM (MINVALUE) TO (%L)',
-				   t.cold_scan::text, t.cold_table::text, new_boundary);
-END;
-$$;
-
-/*
- * Regenerate the routing view from catalog state.
- *
- * The boundary is emitted as a literal so the planner can see it as a constant:
- * a query restricted to one side of it has the other branch pruned (the hot tier
- * by its own range partitioning, the cold tier by the bound of the cold-scan
- * wrapper) and never reaches it.
- *
- * The shape of the view depends on the boundary and on the key, and on nothing
- * else -- in particular not on which partitions are dirty. It has to: a view
- * cannot be replaced while a statement that references it is running, so the
- * write path (an INSTEAD OF trigger on this very view) is in no position to
- * change it. The delta overlay is therefore permanent, and the price of a write
- * below the boundary being visible immediately is that every cold-tier read
- * carries an anti-join against the delta. The delta is empty on a repaired
- * table, so that anti-join is a probe into an empty hash table; what it does
- * cost is the chance to push the cold branch down as a whole query.
- *
- * Called on a boundary advance, which only ever happens in seal() -- outside of
- * any statement that reads the view.
- */
-CREATE FUNCTION timeseries.refresh_view(parent regclass)
-RETURNS void
-LANGUAGE plpgsql AS $$
-DECLARE
-	t				record;
-	cols			text;
-	alias_cols		text;
-	ts_col			text;
-	view_sql		text;
-BEGIN
-	SELECT * INTO t FROM timeseries.tables WHERE tables.parent = refresh_view.parent;
-	IF NOT FOUND THEN
-		RAISE EXCEPTION '% is not a pg_lake_timeseries table', parent::text;
-	END IF;
-
-	cols := timeseries.quoted_list(timeseries.column_names(t.hot_table));
-	ts_col := quote_ident(t.time_column);
-
-	/* the hot tier owns everything at or above the boundary */
-	view_sql := format('SELECT %s FROM %s WHERE %s >= %L',
-					   cols, t.hot_table::text, ts_col, t.boundary);
-
-	IF cardinality(t.key_columns) = 0 THEN
-		/*
-		 * A keyless table rejects updates and deletes, so nothing in the delta
-		 * can supersede an Iceberg row: the two cold sources are disjoint and
-		 * are simply concatenated.
-		 */
-		view_sql := view_sql || format(
-			' UNION ALL '
-			'SELECT %s FROM %s WHERE %s < %L'
-			' UNION ALL '
-			'SELECT %s FROM %s WHERE %s < %L',
-			cols, t.cold_scan::text, ts_col, t.boundary,
-			cols, t.delta_table::text, ts_col, t.boundary);
-	ELSE
-		alias_cols := (SELECT string_agg('c.' || quote_ident(col), ', ' ORDER BY ord)
-						 FROM unnest(timeseries.column_names(t.hot_table))
-							  WITH ORDINALITY AS u(col, ord));
-
-		/*
-		 * Iceberg rows whose key was not superseded, then the newest live
-		 * version of each key in the delta. Tombstones drop out of the second
-		 * branch and mask their Iceberg row through the first.
-		 */
-		view_sql := view_sql || format(
-			' UNION ALL '
-			'SELECT %s FROM %s c WHERE c.%s < %L'
-			' AND NOT EXISTS (SELECT 1 FROM %s d WHERE %s)'
-			' UNION ALL '
-			'SELECT %s FROM (SELECT DISTINCT ON (%s) * FROM %s WHERE %s < %L'
-			' ORDER BY %s, _ts_seq DESC) l WHERE NOT l._ts_deleted',
-			alias_cols, t.cold_scan::text, ts_col, t.boundary,
-			t.delta_table::text, timeseries.key_join_clause(t.key_columns, 'd', 'c'),
-			cols, timeseries.quoted_list(t.key_columns), t.delta_table::text,
-			ts_col, t.boundary, timeseries.quoted_list(t.key_columns));
-	END IF;
-
-	EXECUTE format('CREATE OR REPLACE VIEW %s AS %s', parent::text, view_sql);
-END;
-$$;
-COMMENT ON FUNCTION timeseries.refresh_view(regclass)
-	IS 'Regenerate the tier-routing view from catalog state.';
+CREATE ACCESS METHOD timeseries TYPE TABLE HANDLER timeseries.am_handler;
+COMMENT ON ACCESS METHOD timeseries
+	IS 'Time-series table whose history is tiered to Apache Iceberg.';
 
 -- ---------------------------------------------------------------------------
--- Hot partition frontier
+-- Maintenance
 -- ---------------------------------------------------------------------------
 
 /*
- * Create hot partitions so that every timestamp up to `upto` has one, and
- * register them as authoritative for PostgreSQL.
+ * Extend the partition frontier so the insert path never has to run DDL.
  *
- * Partitions are created ahead of the writers (precreate_ahead intervals past
- * now() by default), so the insert path never has to run DDL. There is no
- * DEFAULT partition: a timestamp beyond the frontier is a bug in maintenance,
- * not something to silently absorb, and a DEFAULT partition would block
- * attaching the next range.
+ * Partitions are created ahead of now() (precreate_ahead intervals by default).
+ * There is no DEFAULT partition: a timestamp beyond the frontier is a bug in
+ * maintenance rather than something to absorb silently, and a DEFAULT partition
+ * would block attaching the next range. A timestamp *below* the frontier has no
+ * partition either, which is what makes a write below the boundary an error
+ * instead of a row Iceberg will never see.
  */
-CREATE FUNCTION timeseries.add_partitions(parent regclass, upto timestamptz DEFAULT NULL)
+CREATE FUNCTION timeseries.add_partitions(relation regclass,
+										  upto timestamptz DEFAULT NULL)
 RETURNS int
 LANGUAGE plpgsql AS $$
 DECLARE
 	t			record;
+	nsp			name;
+	rel			name;
 	part_start	timestamptz;
 	part_end	timestamptz;
 	part_name	text;
 	created		int := 0;
 BEGIN
-	PERFORM timeseries.check_owner(parent);
+	PERFORM timeseries.check_owner(relation);
 
-	SELECT * INTO t FROM timeseries.tables WHERE tables.parent = add_partitions.parent;
-	IF NOT FOUND THEN
-		RAISE EXCEPTION '% is not a pg_lake_timeseries table', parent::text;
+	SELECT * INTO t FROM timeseries.tiered_table(add_partitions.relation);
+	IF t.cold_table IS NULL THEN
+		RAISE EXCEPTION '% is not a tiered table', relation::text;
+	END IF;
+
+	/* an unbounded partition already covers everything there is to add */
+	IF EXISTS (SELECT 1 FROM timeseries.heap_ranges(add_partitions.relation) h
+				WHERE h.part_end IS NULL) THEN
+		RETURN 0;
 	END IF;
 
 	upto := coalesce(upto, now() + t.precreate_ahead * t.partition_interval);
 
-	/* start at the frontier, or at the boundary for a fresh table */
-	SELECT max(p.part_end) INTO part_start
-	  FROM timeseries.partitions p WHERE p.parent = add_partitions.parent;
+	/*
+	 * Start at the frontier the heap itself reports. For a table with no
+	 * partitions yet, start at the beginning of the hot window, or at the
+	 * boundary when the cold tier was pre-loaded past it -- GREATEST ignores the
+	 * NULL that an -infinity boundary produces.
+	 */
+	SELECT max(h.part_end) INTO part_start
+	  FROM timeseries.heap_ranges(add_partitions.relation) h;
 
-	part_start := coalesce(part_start, t.boundary);
+	part_start := coalesce(
+		part_start,
+		greatest(timeseries.partition_start(now() - t.hot_retention,
+											t.partition_interval),
+				 CASE WHEN t.boundary = '-infinity' THEN NULL
+					  ELSE timeseries.partition_start(t.boundary,
+													  t.partition_interval) END));
+
+	SELECT n.nspname, c.relname INTO nsp, rel
+	  FROM pg_catalog.pg_class c
+	  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+	 WHERE c.oid = add_partitions.relation;
 
 	WHILE part_start <= upto LOOP
 		part_end := part_start + t.partition_interval;
-
-		SELECT format('%I.%I', n.nspname,
-					  left(c.relname, 40) || '_' ||
-					  to_char(part_start AT TIME ZONE 'UTC', 'YYYYMMDD"t"HH24MI'))
-		  INTO part_name
-		  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-		 WHERE c.oid = t.hot_table;
+		part_name := format('%I.%I', nsp,
+							left(rel, 40) || '_' ||
+							to_char(part_start AT TIME ZONE 'UTC',
+									'YYYYMMDD"t"HH24MI'));
 
 		EXECUTE format('CREATE TABLE %s PARTITION OF %s FOR VALUES FROM (%L) TO (%L)',
-					   part_name, t.hot_table::text, part_start, part_end);
-
-		INSERT INTO timeseries.partitions (parent, part_start, part_end, state, hot_partition)
-		VALUES (add_partitions.parent, part_start, part_end, 'hot', part_name::regclass);
+					   part_name, relation::text, part_start, part_end);
 
 		part_start := part_end;
 		created := created + 1;
@@ -369,546 +446,63 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION timeseries.add_partitions(regclass, timestamptz)
-	IS 'Extend the hot partition frontier up to a point in time.';
-
--- ---------------------------------------------------------------------------
--- create_table / drop_table
--- ---------------------------------------------------------------------------
+	IS 'Extend the partition frontier of a tiered table up to a point in time.';
 
 /*
- * Convert an empty ordinary table into a two-tier time-series table.
+ * Refresh the Iceberg copy of partitions that are entirely in the past.
  *
- * The relation is used as the schema template and then replaced by the routing
- * view of the same name, so existing queries keep working. Alongside it we
- * create:
+ * These rows are still authoritative in PostgreSQL -- the boundary does not move
+ * here -- so the copy is invisible to queries through the relation and can be
+ * redone at any time. What it buys is that an external Iceberg reader sees
+ * everything up to the last completed partition instead of only sealed history.
  *
- *   <name>_hot    RANGE-partitioned heap, authoritative for ts >= boundary
- *   <name>_cold   Iceberg table, authoritative for ts < boundary
- *   <name>_delta  overlay for mutations that land below the boundary
- *   <name>_seq    version sequence for delta rows
- *
- * The boundary starts at the beginning of the hot window: PostgreSQL is
- * authoritative for the last hot_retention worth of time (partitions covering
- * it are created immediately, so writes anywhere in the window go to the heap),
- * and the initially empty Iceberg tier owns everything before it. Bulk history
- * is therefore loaded by writing to the cold table directly; rows written
- * through the view below the boundary are correct but take the slower
- * delta + repair path.
+ * A partition is copied once, after it stops receiving in-order writes. A later
+ * mutation of a still-hot partition is picked up by the re-copy in seal(); until
+ * then an external reader sees the older copy. Pass `only_start` to force one.
  */
-CREATE FUNCTION timeseries.create_table(
-	relation			regclass,
-	time_column			name,
-	key_columns			name[] DEFAULT NULL,
-	partition_interval	interval DEFAULT interval '1 day',
-	hot_retention		interval DEFAULT interval '7 days',
-	cold_retention		interval DEFAULT NULL,
-	upsert				boolean DEFAULT false,
-	cold_table			regclass DEFAULT NULL,
-	cold_location		text DEFAULT NULL,
-	precreate_ahead		int DEFAULT 7,
-	cluster_columns		name[] DEFAULT NULL)
-RETURNS void
-LANGUAGE plpgsql AS $$
-DECLARE
-	rel_schema		name;
-	rel_name		name;
-	hot_table		text;
-	delta_table		text;
-	cold_name		text;
-	cold_scan_name	text;
-	seq_name		text;
-	all_columns		name[];
-	col_defs		text;
-	time_type		text;
-	transform		text;
-	boundary		timestamptz;
-	key_cols		name[] := coalesce(key_columns, '{}'::name[]);
-	cluster_cols	name[] := coalesce(cluster_columns, '{}'::name[]);
-	with_options	text;
-	any_row			boolean;
-BEGIN
-	PERFORM timeseries.check_owner(relation);
-
-	SELECT n.nspname, c.relname INTO rel_schema, rel_name
-	  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-	 WHERE c.oid = relation AND c.relkind = 'r';
-
-	IF NOT FOUND THEN
-		RAISE EXCEPTION '% must be an ordinary table', relation::text
-			USING HINT = 'Create an empty table with the desired columns first.';
-	END IF;
-
-	EXECUTE format('SELECT EXISTS (SELECT 1 FROM %s)', relation::text) INTO any_row;
-	IF any_row THEN
-		RAISE EXCEPTION '% is not empty', relation::text
-			USING HINT = 'Load history into the Iceberg tier after conversion.';
-	END IF;
-
-	/* the time column must be a NOT NULL-able timestamp we can floor */
-	SELECT format_type(atttypid, atttypmod) INTO time_type
-	  FROM pg_attribute
-	 WHERE attrelid = relation AND attname = time_column AND attnum > 0 AND NOT attisdropped;
-
-	IF time_type IS NULL THEN
-		RAISE EXCEPTION 'column %s does not exist in %s', quote_ident(time_column), relation::text;
-	ELSIF time_type NOT IN ('timestamp with time zone', 'timestamp without time zone') THEN
-		RAISE EXCEPTION 'time column %s must be a timestamp, not %s',
-						quote_ident(time_column), time_type;
-	END IF;
-
-	IF extract(month FROM partition_interval) <> 0
-		OR extract(year FROM partition_interval) <> 0
-		OR extract(epoch FROM partition_interval) <= 0 THEN
-		RAISE EXCEPTION 'partition_interval must be a positive fixed-length interval'
-			USING HINT = 'Use hour/day/week granularities; month and year are not supported yet.';
-	END IF;
-
-	IF hot_retention < partition_interval THEN
-		RAISE EXCEPTION 'hot_retention must be at least one partition_interval';
-	END IF;
-
-	all_columns := timeseries.column_names(relation);
-
-	IF EXISTS (SELECT 1 FROM unnest(all_columns) col WHERE col LIKE '\_ts\_%') THEN
-		RAISE EXCEPTION 'column names starting with _ts_ are reserved by pg_lake_timeseries';
-	END IF;
-
-	IF cardinality(key_cols) > 0 THEN
-		IF NOT (key_cols <@ all_columns) THEN
-			RAISE EXCEPTION 'key_columns must be columns of %', relation::text;
-		END IF;
-
-		/*
-		 * The key must contain the time column: it is the partition key of the
-		 * hot tier, and PostgreSQL requires a unique index on a partitioned
-		 * table to include the partition key.
-		 */
-		IF NOT (time_column = ANY (key_cols)) THEN
-			RAISE EXCEPTION 'key_columns must include the time column %s',
-							quote_ident(time_column);
-		END IF;
-	ELSIF upsert THEN
-		RAISE EXCEPTION 'upsert requires key_columns';
-	END IF;
-
-	/*
-	 * cluster_columns is interpolated into the ORDER BY of the Iceberg write
-	 * performed by the maintenance worker, which runs as a superuser: it is kept
-	 * as an identifier array and validated here rather than accepted as free
-	 * text.
-	 */
-	IF NOT (cluster_cols <@ all_columns) THEN
-		RAISE EXCEPTION 'cluster_columns must be columns of %', relation::text;
-	END IF;
-
-	hot_table := format('%I.%I', rel_schema, rel_name || '_hot');
-	delta_table := format('%I.%I', rel_schema, rel_name || '_delta');
-	cold_name := format('%I.%I', rel_schema, rel_name || '_cold');
-	cold_scan_name := format('%I.%I', rel_schema, rel_name || '_cold_scan');
-	seq_name := format('%I.%I', rel_schema, rel_name || '_seq');
-
-	/* hot tier */
-	EXECUTE format('CREATE TABLE %s (LIKE %s INCLUDING DEFAULTS INCLUDING COMMENTS'
-				   ' INCLUDING STORAGE) PARTITION BY RANGE (%I)',
-				   hot_table, relation::text, time_column);
-	EXECUTE format('ALTER TABLE %s ALTER COLUMN %I SET NOT NULL', hot_table, time_column);
-
-	IF cardinality(key_cols) > 0 THEN
-		EXECUTE format('CREATE UNIQUE INDEX ON %s (%s)',
-					   hot_table, timeseries.quoted_list(key_cols));
-	END IF;
-
-	/* a BRIN-friendly access path for time ranges when ts does not lead the key */
-	IF cardinality(key_cols) = 0 OR key_cols[1] <> time_column THEN
-		EXECUTE format('CREATE INDEX ON %s (%I)', hot_table, time_column);
-	END IF;
-
-	/* delta overlay: the user columns plus version + tombstone */
-	EXECUTE format('CREATE TABLE %s (LIKE %s INCLUDING DEFAULTS,'
-				   ' _ts_seq bigint NOT NULL, _ts_deleted boolean NOT NULL DEFAULT false)',
-				   delta_table, relation::text);
-
-	IF cardinality(key_cols) > 0 THEN
-		EXECUTE format('CREATE INDEX ON %s (%s, _ts_seq DESC)',
-					   delta_table, timeseries.quoted_list(key_cols));
-	END IF;
-
-	EXECUTE format('CREATE INDEX ON %s (%I)', delta_table, time_column);
-
-	/* cold tier */
-	SELECT string_agg(format('%I %s', attname, format_type(atttypid, atttypmod)),
-					  ', ' ORDER BY attnum)
-	  INTO col_defs
-	  FROM pg_attribute
-	 WHERE attrelid = relation AND attnum > 0 AND NOT attisdropped;
-
-	boundary := timeseries.partition_start(now() - hot_retention, partition_interval);
-
-	IF cold_table IS NULL THEN
-		/*
-		 * The Iceberg partition transform is chosen so that a partition range
-		 * covers whole Iceberg partitions: sync() and repair() overwrite a range
-		 * with DELETE + INSERT, and pg_lake turns a DELETE that matches whole
-		 * partitions into a metadata-only file removal instead of writing
-		 * position deletes. day(ts) covers any whole-day interval; a sub-hour
-		 * partition_interval necessarily lands inside an hour partition and does
-		 * pay for position deletes on re-sync.
-		 */
-		transform := CASE
-						WHEN partition_interval <= interval '1 hour' THEN 'hour'
-						ELSE 'day'
-					 END;
-
-		with_options := format('partition_by = %L', format('%s(%I)', transform, time_column));
-
-		IF cold_location IS NOT NULL THEN
-			with_options := with_options || format(', location = %L', cold_location);
-		END IF;
-
-		EXECUTE format('CREATE TABLE %s (%s) USING iceberg WITH (%s)',
-					   cold_name, col_defs, with_options);
-	ELSE
-		cold_name := cold_table::text;
-	END IF;
-
-	/*
-	 * The routing view reads the cold tier through a range-partitioned wrapper
-	 * rather than directly. Its bound is what makes tier elimination reliable:
-	 * partition pruning removes the Iceberg scan from a ts >= boundary query at
-	 * plan time, whatever the shape of the query. Refuting the cold branch's own
-	 * ts < boundary predicate would need constraint_exclusion = on, which is not
-	 * the default and which we do not want to impose on the whole session.
-	 *
-	 * The bound is a pruning hint only: PostgreSQL neither enforces nor applies
-	 * partition constraints as filters for a foreign table, so the view keeps its
-	 * explicit ts < boundary predicate to mask the lagging Iceberg copy of the
-	 * hot window.
-	 */
-	EXECUTE format('CREATE TABLE %s (%s) PARTITION BY RANGE (%I)',
-				   cold_scan_name, col_defs, time_column);
-	EXECUTE format('ALTER TABLE %s ATTACH PARTITION %s FOR VALUES FROM (MINVALUE) TO (%L)',
-				   cold_scan_name, cold_name, boundary);
-
-	EXECUTE format('CREATE SEQUENCE %s', seq_name);
-
-	/*
-	 * Replace the template relation with the routing view. A placeholder
-	 * definition establishes the view (and its column types) so the catalog row
-	 * can reference it; refresh_view() then writes the real definition.
-	 */
-	EXECUTE format('DROP TABLE %s', relation::text);
-	EXECUTE format('CREATE VIEW %I.%I AS SELECT %s FROM %s WHERE false',
-				   rel_schema, rel_name, timeseries.quoted_list(all_columns), hot_table);
-
-	INSERT INTO timeseries.tables (
-		parent, hot_table, cold_table, cold_scan, delta_table, time_column, key_columns,
-		partition_interval, hot_retention, cold_retention, precreate_ahead,
-		cluster_columns, boundary, upsert, seq_sequence)
-	VALUES (
-		format('%I.%I', rel_schema, rel_name)::regclass, hot_table::regclass,
-		cold_name::regclass, cold_scan_name::regclass, delta_table::regclass,
-		time_column, key_cols,
-		partition_interval, hot_retention, cold_retention, precreate_ahead,
-		cluster_cols, boundary, upsert, seq_name::regclass);
-
-	PERFORM timeseries.refresh_view(format('%I.%I', rel_schema, rel_name)::regclass);
-
-	EXECUTE format('CREATE TRIGGER route_insert INSTEAD OF INSERT ON %I.%I'
-				   ' FOR EACH ROW EXECUTE FUNCTION timeseries.route_write()',
-				   rel_schema, rel_name);
-	EXECUTE format('CREATE TRIGGER route_update INSTEAD OF UPDATE ON %I.%I'
-				   ' FOR EACH ROW EXECUTE FUNCTION timeseries.route_write()',
-				   rel_schema, rel_name);
-	EXECUTE format('CREATE TRIGGER route_delete INSTEAD OF DELETE ON %I.%I'
-				   ' FOR EACH ROW EXECUTE FUNCTION timeseries.route_write()',
-				   rel_schema, rel_name);
-
-	PERFORM timeseries.add_partitions(format('%I.%I', rel_schema, rel_name)::regclass);
-END;
-$$;
-COMMENT ON FUNCTION timeseries.create_table(regclass, name, name[], interval, interval, interval,
-											boolean, regclass, text, int, name[])
-	IS 'Convert an empty table into a hot-heap-over-Iceberg time-series table.';
-
-/*
- * Unregister a time-series table. The view is dropped; the tier relations are
- * kept unless drop_data is set, so that the Iceberg data survives by default.
- */
-CREATE FUNCTION timeseries.drop_table(parent regclass, drop_data boolean DEFAULT false)
-RETURNS void
-LANGUAGE plpgsql AS $$
-DECLARE
-	t record;
-BEGIN
-	PERFORM timeseries.check_owner(parent);
-
-	SELECT * INTO t FROM timeseries.tables WHERE tables.parent = drop_table.parent;
-	IF NOT FOUND THEN
-		RAISE EXCEPTION '% is not a pg_lake_timeseries table', parent::text;
-	END IF;
-
-	DELETE FROM timeseries.tables WHERE tables.parent = drop_table.parent;
-
-	EXECUTE format('DROP VIEW %s', t.parent::text);
-
-	/*
-	 * The Iceberg table is detached before the wrapper goes away: dropping a
-	 * partitioned table takes its partitions with it, and the cold tier may be a
-	 * pre-existing table the caller owns and wants to keep.
-	 */
-	EXECUTE format('ALTER TABLE %s DETACH PARTITION %s',
-				   t.cold_scan::text, t.cold_table::text);
-	EXECUTE format('DROP TABLE %s', t.cold_scan::text);
-
-	IF drop_data THEN
-		EXECUTE format('DROP TABLE %s', t.hot_table::text);
-		EXECUTE format('DROP TABLE %s', t.delta_table::text);
-		EXECUTE format('DROP TABLE %s', t.cold_table::text);
-		EXECUTE format('DROP SEQUENCE %s', t.seq_sequence::text);
-	END IF;
-END;
-$$;
-COMMENT ON FUNCTION timeseries.drop_table(regclass, boolean)
-	IS 'Unregister a time-series table, optionally dropping its tiers.';
-
--- ---------------------------------------------------------------------------
--- Write routing
--- ---------------------------------------------------------------------------
-
-/*
- * Mark the partition containing `ts` as superseded by delta rows.
- *
- * A partition row is created on demand: writes can reach ranges that were never
- * hot in this installation (history loaded straight into Iceberg, or a table
- * converted long after the data was written).
- *
- * Only a clean -> dirty transition regenerates the view; further writes into an
- * already-dirty partition are pure DML.
- */
-CREATE FUNCTION timeseries.mark_dirty(parent regclass, ts timestamptz)
-RETURNS void
-LANGUAGE plpgsql AS $$
-DECLARE
-	t			record;
-	pstart		timestamptz;
-BEGIN
-	SELECT * INTO t FROM timeseries.tables WHERE tables.parent = mark_dirty.parent;
-
-	pstart := timeseries.partition_start(ts, t.partition_interval);
-
-	UPDATE timeseries.partitions p
-	   SET state = 'cold_dirty'
-	 WHERE p.parent = mark_dirty.parent AND p.part_start = pstart
-	   AND p.state = 'cold_clean';
-
-	IF NOT EXISTS (SELECT 1 FROM timeseries.partitions p
-					WHERE p.parent = mark_dirty.parent AND p.part_start = pstart) THEN
-		INSERT INTO timeseries.partitions (parent, part_start, part_end, state, sealed_at)
-		VALUES (mark_dirty.parent, pstart, pstart + t.partition_interval,
-				'cold_dirty', now())
-		ON CONFLICT DO NOTHING;
-	END IF;
-END;
-$$;
-
-/*
- * INSTEAD OF trigger on the routing view: send the row to the tier that is
- * authoritative for its timestamp.
- *
- * The boundary is read with FOR SHARE, which is what makes concurrent seals
- * safe: seal() takes FOR NO KEY UPDATE on the same catalog row before it copies
- * a partition into Iceberg, so a writer either commits before the copy starts
- * (and is copied along), or blocks and then re-reads the advanced boundary and
- * routes into the delta instead. There is no window in which a row lands in a
- * partition that is about to be dropped.
- *
- * SECURITY DEFINER because the tiers are implementation detail: a user who was
- * granted INSERT on the view alone still has to be able to write into the heap,
- * bump the version sequence, and -- when the write lands below the boundary --
- * record the partition as dirty in the extension catalog. The relations touched
- * are derived from TG_RELID, and TG_RELID has to be a registered parent view, so
- * the function cannot be aimed at anything the caller does not already reach
- * through that view.
- */
-CREATE FUNCTION timeseries.route_write()
-RETURNS trigger
-LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
-DECLARE
-	t				record;
-	old_ts			timestamptz;
-	new_ts			timestamptz;
-	set_clause		text;
-BEGIN
-	SELECT * INTO t FROM timeseries.tables
-	 WHERE tables.parent = TG_RELID::regclass FOR SHARE;
-
-	IF NOT FOUND THEN
-		RAISE EXCEPTION '% is not a pg_lake_timeseries table', TG_RELID::regclass::text;
-	END IF;
-
-	IF TG_OP IN ('UPDATE', 'DELETE') AND cardinality(t.key_columns) = 0 THEN
-		RAISE EXCEPTION 'cannot % rows of keyless time-series table %',
-						lower(TG_OP), t.parent::text
-			USING HINT = 'Recreate the table with key_columns to allow updates.';
-	END IF;
-
-	IF TG_OP <> 'INSERT' THEN
-		EXECUTE format('SELECT ($1).%I', t.time_column) INTO old_ts USING OLD;
-	END IF;
-
-	IF TG_OP <> 'DELETE' THEN
-		EXECUTE format('SELECT ($1).%I', t.time_column) INTO new_ts USING NEW;
-
-		IF new_ts IS NULL THEN
-			RAISE EXCEPTION 'time column %s cannot be NULL', quote_ident(t.time_column);
-		END IF;
-	END IF;
-
-	/*
-	 * Remove the old version first, so that an UPDATE that moves a row across
-	 * the boundary (or across partitions) does not leave the old version
-	 * behind.
-	 */
-	IF TG_OP IN ('UPDATE', 'DELETE') THEN
-		IF old_ts >= t.boundary THEN
-			EXECUTE format('DELETE FROM %s target WHERE %s',
-						   t.hot_table::text,
-						   timeseries.key_join_clause(t.key_columns, 'target', '($1)'))
-				USING OLD;
-		ELSE
-			/* tombstone the Iceberg version; repair() folds it in later */
-			EXECUTE format('INSERT INTO %s SELECT ($1).*, nextval(%L), true',
-						   t.delta_table::text, t.seq_sequence::text) USING OLD;
-
-			PERFORM timeseries.mark_dirty(t.parent, old_ts);
-		END IF;
-	END IF;
-
-	IF TG_OP IN ('INSERT', 'UPDATE') THEN
-		IF new_ts >= t.boundary THEN
-			IF t.upsert AND TG_OP = 'INSERT' THEN
-				SELECT string_agg(format('%I = EXCLUDED.%I', attname, attname), ', ')
-				  INTO set_clause
-				  FROM pg_attribute
-				 WHERE attrelid = t.hot_table AND attnum > 0 AND NOT attisdropped
-				   AND NOT (attname = ANY (t.key_columns));
-
-				IF set_clause IS NULL THEN
-					EXECUTE format('INSERT INTO %s SELECT ($1).* ON CONFLICT (%s) DO NOTHING',
-								   t.hot_table::text,
-								   timeseries.quoted_list(t.key_columns)) USING NEW;
-				ELSE
-					EXECUTE format('INSERT INTO %s SELECT ($1).* ON CONFLICT (%s) DO UPDATE SET %s',
-								   t.hot_table::text,
-								   timeseries.quoted_list(t.key_columns),
-								   set_clause) USING NEW;
-				END IF;
-			ELSE
-				EXECUTE format('INSERT INTO %s SELECT ($1).*', t.hot_table::text) USING NEW;
-			END IF;
-		ELSE
-			EXECUTE format('INSERT INTO %s SELECT ($1).*, nextval(%L), false',
-						   t.delta_table::text, t.seq_sequence::text) USING NEW;
-
-			PERFORM timeseries.mark_dirty(t.parent, new_ts);
-		END IF;
-	END IF;
-
-	IF TG_OP = 'DELETE' THEN
-		RETURN OLD;
-	END IF;
-
-	RETURN NEW;
-END;
-$$;
-COMMENT ON FUNCTION timeseries.route_write()
-	IS 'INSTEAD OF trigger routing writes to the authoritative tier.';
-
--- ---------------------------------------------------------------------------
--- Cold tier maintenance
--- ---------------------------------------------------------------------------
-
-/*
- * Overwrite one time range of the Iceberg tier with the contents of `source`.
- *
- * The DELETE matches whole Iceberg partitions (see the transform choice in
- * create_table), so it is a metadata-only removal of the data files rather than
- * a write of position deletes. That is what makes rematerialisation cheap enough
- * to be the only mechanism this extension uses to change cold data.
- */
-CREATE FUNCTION timeseries.copy_range(parent regclass, part_start timestamptz,
-									  part_end timestamptz, source regclass)
-RETURNS bigint
-LANGUAGE plpgsql AS $$
-DECLARE
-	t			record;
-	cols		text;
-	order_by	text := '';
-	copied		bigint;
-BEGIN
-	SELECT * INTO t FROM timeseries.tables WHERE tables.parent = copy_range.parent;
-
-	cols := timeseries.quoted_list(timeseries.column_names(t.hot_table));
-
-	IF cardinality(t.cluster_columns) > 0 THEN
-		order_by := ' ORDER BY ' || timeseries.quoted_list(t.cluster_columns);
-	END IF;
-
-	EXECUTE format('DELETE FROM %s WHERE %I >= %L AND %I < %L',
-				   t.cold_table::text, t.time_column, part_start,
-				   t.time_column, part_end);
-
-	EXECUTE format('INSERT INTO %s (%s) SELECT %s FROM %s%s',
-				   t.cold_table::text, cols, cols, source::text, order_by);
-
-	GET DIAGNOSTICS copied = ROW_COUNT;
-
-	RETURN copied;
-END;
-$$;
-
-/*
- * Refresh the Iceberg copy of hot partitions that are entirely in the past.
- *
- * This is what gives external Iceberg readers "everything up to last night"
- * without waiting for the partition to leave the hot window: the rows stay
- * authoritative in PostgreSQL (the boundary does not move), so the copy is
- * invisible to queries through the view and can be redone at any time.
- *
- * A partition is synced once, after it stops receiving in-order writes. Later
- * mutations of a still-hot partition are picked up by the re-sync in seal();
- * until then external readers see the older Iceberg copy. Readers that need
- * stricter freshness should query the table through PostgreSQL.
- */
-CREATE FUNCTION timeseries.sync(parent regclass, only_start timestamptz DEFAULT NULL)
+CREATE FUNCTION timeseries.sync(relation regclass,
+								only_start timestamptz DEFAULT NULL)
 RETURNS int
 LANGUAGE plpgsql AS $$
 DECLARE
-	t			record;
-	p			record;
-	synced		int := 0;
+	t		record;
+	r		record;
+	synced	int := 0;
 BEGIN
-	PERFORM timeseries.check_owner(parent);
+	PERFORM timeseries.check_owner(relation);
 
-	SELECT * INTO t FROM timeseries.tables WHERE tables.parent = sync.parent;
-	IF NOT FOUND THEN
-		RAISE EXCEPTION '% is not a pg_lake_timeseries table', parent::text;
+	SELECT * INTO t FROM timeseries.tiered_table(sync.relation);
+	IF t.cold_table IS NULL THEN
+		RAISE EXCEPTION '% is not a tiered table', relation::text;
 	END IF;
 
-	FOR p IN
-		SELECT * FROM timeseries.partitions part
-		 WHERE part.parent = sync.parent AND part.state = 'hot'
-		   AND part.part_end <= now()
-		   AND (only_start IS NULL OR part.part_start = only_start)
-		   AND (only_start IS NOT NULL OR part.synced_at IS NULL
-				OR part.synced_at < part.part_end)
-		 ORDER BY part.part_start
+	FOR r IN
+		SELECT h.partition, h.part_start, h.part_end
+		  FROM timeseries.heap_ranges(sync.relation) h
+		  LEFT JOIN timeseries.synced_ranges(sync.relation) s
+				 ON s.part_start = h.part_start
+		 WHERE h.part_start IS NOT NULL AND h.part_end IS NOT NULL
+		   AND h.part_end <= now()
+		   AND (only_start IS NULL OR h.part_start = only_start)
+		   AND (only_start IS NOT NULL
+				OR s.synced_at IS NULL OR s.synced_at < h.part_end)
+		 ORDER BY h.part_start
 	LOOP
-		PERFORM timeseries.copy_range(parent, p.part_start, p.part_end, p.hot_partition);
+		/*
+		 * Overwrite the range rather than append to it: the copy has to be
+		 * repeatable, and the predicate prunes the cold side to the one range.
+		 *
+		 * The rows are read from the partition and not from the relation, which
+		 * the planner would expand into both tiers -- reading the table being
+		 * written, to add rows that are by definition not in this range.
+		 */
+		EXECUTE format('DELETE FROM %s WHERE %I >= %L AND %I < %L',
+					   t.cold_table::text, t.time_column, r.part_start,
+					   t.time_column, r.part_end);
+		EXECUTE format('INSERT INTO %s SELECT * FROM %s',
+					   t.cold_table::text, r.partition::text);
 
-		UPDATE timeseries.partitions
-		   SET synced_at = now()
-		 WHERE partitions.parent = sync.parent AND partitions.part_start = p.part_start;
+		PERFORM timeseries.record_sync(sync.relation, r.part_start, r.part_end);
 
 		synced := synced + 1;
 	END LOOP;
@@ -917,39 +511,39 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION timeseries.sync(regclass, timestamptz)
-	IS 'Refresh the (non-authoritative) Iceberg copy of past hot partitions.';
+	IS 'Refresh the (non-authoritative) Iceberg copy of past partitions.';
 
 /*
- * Hand partitions that aged out of the hot window over to Iceberg and advance
- * the authority boundary.
+ * Hand partitions that aged out of the hot window over to Iceberg and advance the
+ * authority boundary.
  *
- * Sealing is the only operation that moves the boundary, and it does so only
- * after the range has been proven to be in Iceberg in the same transaction that
- * drops the heap partition. A crash or error at any point rolls the whole thing
- * back: the boundary never advances past data that is not in the cold tier.
+ * Sealing is the only operation that moves the boundary. Copy, DROP TABLE and the
+ * new boundary are one transaction, so a crash or error anywhere rolls back all
+ * three: the boundary never advances past data that is not in the cold tier.
  *
- * Concurrency: the catalog row is locked FOR NO KEY UPDATE before the copy, and
- * route_write() reads the boundary FOR SHARE. A writer therefore either commits
- * before the copy starts and is copied along, or waits and then re-reads the
- * advanced boundary and writes to the delta. No row can land in a heap partition
- * that this transaction is about to drop.
+ * The copy is not read back to verify it, because it cannot be -- the Iceberg
+ * snapshot this transaction wrote does not exist until it commits. Atomicity is
+ * the argument, not verification.
+ *
+ * Sealing proceeds contiguously upward from the boundary. A gap would mean
+ * claiming Iceberg authority for a range that was never sealed, so a gap stops
+ * the pass rather than being skipped over.
  */
-CREATE FUNCTION timeseries.seal(parent regclass, upto timestamptz DEFAULT NULL)
+CREATE FUNCTION timeseries.seal(relation regclass, upto timestamptz DEFAULT NULL)
 RETURNS int
 LANGUAGE plpgsql AS $$
 DECLARE
 	t				record;
-	p				record;
+	r				record;
 	seal_upto		timestamptz;
 	new_boundary	timestamptz;
 	sealed			int := 0;
 BEGIN
-	PERFORM timeseries.check_owner(parent);
+	PERFORM timeseries.check_owner(relation);
 
-	SELECT * INTO t FROM timeseries.tables WHERE tables.parent = seal.parent
-		FOR NO KEY UPDATE;
-	IF NOT FOUND THEN
-		RAISE EXCEPTION '% is not a pg_lake_timeseries table', parent::text;
+	SELECT * INTO t FROM timeseries.tiered_table(seal.relation);
+	IF t.cold_table IS NULL THEN
+		RAISE EXCEPTION '% is not a tiered table', relation::text;
 	END IF;
 
 	/*
@@ -961,48 +555,34 @@ BEGIN
 											t.partition_interval);
 	new_boundary := t.boundary;
 
-	FOR p IN
-		SELECT * FROM timeseries.partitions part
-		 WHERE part.parent = seal.parent AND part.state = 'hot'
-		   AND part.part_end <= seal_upto
-		 ORDER BY part.part_start
+	FOR r IN
+		SELECT h.partition, h.part_start, h.part_end
+		  FROM timeseries.heap_ranges(seal.relation) h
+		 WHERE h.part_start IS NOT NULL AND h.part_end IS NOT NULL
+		   AND h.part_end <= seal_upto
+		 ORDER BY h.part_start
 	LOOP
-		/*
-		 * Seal contiguously upward from the boundary. A gap would mean the
-		 * boundary could not be advanced past it without claiming authority
-		 * over a range that was never sealed, so stop and let the next pass
-		 * retry once the missing partition is dealt with.
-		 */
-		IF p.part_start <> new_boundary THEN
-			RAISE WARNING 'gap in the hot partitions of % at %, stopping seal',
-						  parent::text, new_boundary;
+		IF new_boundary <> '-infinity' AND r.part_start <> new_boundary THEN
+			RAISE WARNING 'gap in the partitions of % at %, stopping seal',
+						  relation::text, new_boundary;
 			EXIT;
 		END IF;
 
-		UPDATE timeseries.partitions
-		   SET state = 'sealing'
-		 WHERE partitions.parent = seal.parent AND partitions.part_start = p.part_start;
+		EXECUTE format('DELETE FROM %s WHERE %I >= %L AND %I < %L',
+					   t.cold_table::text, t.time_column, r.part_start,
+					   t.time_column, r.part_end);
+		EXECUTE format('INSERT INTO %s SELECT * FROM %s',
+					   t.cold_table::text, r.partition::text);
 
-		PERFORM timeseries.copy_range(parent, p.part_start, p.part_end, p.hot_partition);
+		EXECUTE format('DROP TABLE %s', r.partition::text);
 
-		EXECUTE format('DROP TABLE %s', p.hot_partition::text);
+		new_boundary := r.part_end;
 
-		UPDATE timeseries.partitions
-		   SET state = 'cold_clean', hot_partition = NULL,
-			   synced_at = now(), sealed_at = now()
-		 WHERE partitions.parent = seal.parent AND partitions.part_start = p.part_start;
+		PERFORM timeseries.record_seal(seal.relation, r.part_start, r.part_end,
+									   new_boundary);
 
-		new_boundary := p.part_end;
 		sealed := sealed + 1;
 	END LOOP;
-
-	IF sealed > 0 THEN
-		UPDATE timeseries.tables SET boundary = new_boundary
-		 WHERE tables.parent = seal.parent;
-
-		PERFORM timeseries.rebound_cold(parent, new_boundary);
-		PERFORM timeseries.refresh_view(parent);
-	END IF;
 
 	RETURN sealed;
 END;
@@ -1011,116 +591,22 @@ COMMENT ON FUNCTION timeseries.seal(regclass, timestamptz)
 	IS 'Move aged-out partitions to Iceberg and advance the authority boundary.';
 
 /*
- * Fold the delta back into Iceberg for partitions that were mutated below the
- * boundary, and return them to the cold_clean state.
- *
- * The partition is rematerialised rather than patched: the merged contents are
- * staged, the range is overwritten, and the delta rows for the range are
- * dropped. No Iceberg delete files are produced, and the view loses a branch.
- *
- * Concurrency is the mirror image of seal(): the catalog row is locked, so a
- * concurrent write below the boundary either lands in the delta before the merge
- * reads it, or waits and re-dirties the partition afterwards.
- */
-CREATE FUNCTION timeseries.repair(parent regclass, only_start timestamptz DEFAULT NULL)
-RETURNS int
-LANGUAGE plpgsql AS $$
-DECLARE
-	t			record;
-	p			record;
-	cols		text;
-	alias_cols	text;
-	key_clause	text;
-	repaired	int := 0;
-BEGIN
-	PERFORM timeseries.check_owner(parent);
-
-	SELECT * INTO t FROM timeseries.tables WHERE tables.parent = repair.parent
-		FOR NO KEY UPDATE;
-	IF NOT FOUND THEN
-		RAISE EXCEPTION '% is not a pg_lake_timeseries table', parent::text;
-	END IF;
-
-	IF cardinality(t.key_columns) = 0 THEN
-		/* nothing can be dirty without a key: writes below B are rejected */
-		RETURN 0;
-	END IF;
-
-	cols := timeseries.quoted_list(timeseries.column_names(t.hot_table));
-	key_clause := timeseries.key_join_clause(t.key_columns, 'c', 'd');
-
-	SELECT string_agg('c.' || quote_ident(col), ', ' ORDER BY ord)
-	  INTO alias_cols
-	  FROM unnest(timeseries.column_names(t.hot_table)) WITH ORDINALITY AS u(col, ord);
-
-	FOR p IN
-		SELECT * FROM timeseries.partitions part
-		 WHERE part.parent = repair.parent AND part.state = 'cold_dirty'
-		   AND (only_start IS NULL OR part.part_start = only_start)
-		 ORDER BY part.part_start
-	LOOP
-		/* stage the merged result: the range is overwritten in place below */
-		EXECUTE format(
-			'CREATE TEMP TABLE pg_temp._ts_repair AS'
-			' SELECT %s FROM %s c'
-			'  WHERE c.%I >= %L AND c.%I < %L'
-			'    AND NOT EXISTS (SELECT 1 FROM %s d'
-			'                     WHERE d.%I >= %L AND d.%I < %L AND %s)'
-			' UNION ALL '
-			' SELECT %s FROM ('
-			'   SELECT DISTINCT ON (%s) * FROM %s'
-			'    WHERE %I >= %L AND %I < %L'
-			'    ORDER BY %s, _ts_seq DESC) l'
-			'  WHERE NOT l._ts_deleted',
-			alias_cols, t.cold_table::text,
-			t.time_column, p.part_start, t.time_column, p.part_end,
-			t.delta_table::text,
-			t.time_column, p.part_start, t.time_column, p.part_end, key_clause,
-			cols,
-			timeseries.quoted_list(t.key_columns), t.delta_table::text,
-			t.time_column, p.part_start, t.time_column, p.part_end,
-			timeseries.quoted_list(t.key_columns));
-
-		PERFORM timeseries.copy_range(parent, p.part_start, p.part_end,
-									  'pg_temp._ts_repair'::regclass);
-
-		EXECUTE 'DROP TABLE pg_temp._ts_repair';
-
-		EXECUTE format('DELETE FROM %s WHERE %I >= %L AND %I < %L',
-					   t.delta_table::text, t.time_column, p.part_start,
-					   t.time_column, p.part_end);
-
-		UPDATE timeseries.partitions
-		   SET state = 'cold_clean', synced_at = now()
-		 WHERE partitions.parent = repair.parent AND partitions.part_start = p.part_start;
-
-		repaired := repaired + 1;
-	END LOOP;
-
-	RETURN repaired;
-END;
-$$;
-COMMENT ON FUNCTION timeseries.repair(regclass, timestamptz)
-	IS 'Rematerialise mutated cold partitions from Iceberg + delta.';
-
-/*
  * Drop cold data older than cold_retention, on partition boundaries so the
- * removal stays metadata-only. Never touches data at or above the boundary:
- * a cold_retention shorter than hot_retention simply has no effect.
+ * removal stays metadata-only in Iceberg. Never touches data at or above the
+ * boundary: a cold_retention shorter than hot_retention simply has no effect.
  */
-CREATE FUNCTION timeseries.apply_retention(parent regclass)
+CREATE FUNCTION timeseries.apply_retention(relation regclass)
 RETURNS int
 LANGUAGE plpgsql AS $$
 DECLARE
 	t		record;
 	cutoff	timestamptz;
-	dropped	int;
 BEGIN
-	PERFORM timeseries.check_owner(parent);
+	PERFORM timeseries.check_owner(relation);
 
-	SELECT * INTO t FROM timeseries.tables WHERE tables.parent = apply_retention.parent;
-	IF NOT FOUND THEN
-		RAISE EXCEPTION '% is not a pg_lake_timeseries table', parent::text;
+	SELECT * INTO t FROM timeseries.tiered_table(apply_retention.relation);
+	IF t.cold_table IS NULL THEN
+		RAISE EXCEPTION '% is not a tiered table', relation::text;
 	END IF;
 
 	IF t.cold_retention IS NULL THEN
@@ -1133,38 +619,31 @@ BEGIN
 
 	EXECUTE format('DELETE FROM %s WHERE %I < %L',
 				   t.cold_table::text, t.time_column, cutoff);
-	EXECUTE format('DELETE FROM %s WHERE %I < %L',
-				   t.delta_table::text, t.time_column, cutoff);
 
-	DELETE FROM timeseries.partitions p
-	 WHERE p.parent = apply_retention.parent AND p.part_end <= cutoff;
-
-	GET DIAGNOSTICS dropped = ROW_COUNT;
-
-	RETURN dropped;
+	RETURN timeseries.forget_ranges(apply_retention.relation, cutoff);
 END;
 $$;
 COMMENT ON FUNCTION timeseries.apply_retention(regclass)
-	IS 'Expire cold partitions beyond cold_retention.';
+	IS 'Expire cold data beyond cold_retention.';
 
 /*
- * One maintenance pass for one table, in the order the state machine requires:
- * repair before seal (so the boundary never advances over a dirty partition
- * whose delta rows would then sit above it), and retention last.
+ * One maintenance pass for one table: extend the frontier, refresh the lagging
+ * copy, seal what aged out, then expire. Sealing after syncing means a partition
+ * that was already copied is copied once more before it is dropped, which is what
+ * makes the copy complete rather than merely recent.
  */
-CREATE FUNCTION timeseries.maintain(parent regclass)
+CREATE FUNCTION timeseries.maintain(relation regclass)
 RETURNS void
 LANGUAGE plpgsql AS $$
 BEGIN
-	PERFORM timeseries.add_partitions(parent);
-	PERFORM timeseries.repair(parent);
-	PERFORM timeseries.sync(parent);
-	PERFORM timeseries.seal(parent);
-	PERFORM timeseries.apply_retention(parent);
+	PERFORM timeseries.add_partitions(relation);
+	PERFORM timeseries.sync(relation);
+	PERFORM timeseries.seal(relation);
+	PERFORM timeseries.apply_retention(relation);
 END;
 $$;
 COMMENT ON FUNCTION timeseries.maintain(regclass)
-	IS 'Run one maintenance pass: extend, repair, sync, seal, expire.';
+	IS 'Run one maintenance pass: extend, sync, seal, expire.';
 
 -- ---------------------------------------------------------------------------
 -- Maintenance worker
@@ -1185,45 +664,22 @@ SELECT extension_base.register_worker('pg_lake_timeseries maintenance worker',
 -- ---------------------------------------------------------------------------
 
 /*
- * The API functions run as the calling user: the tier relations they create are
- * then owned by that user, and PostgreSQL's own privilege checks decide what a
- * caller may convert, alter or drop. What that leaves is the extension catalogs,
- * which every table owner has to write. Rather than funnel those writes through
- * SECURITY DEFINER functions -- which cannot see who called them, and would have
- * to trust their arguments -- the catalogs are writable by all and constrained by
- * row-level security: a row belongs to the owner of its `parent` relation.
+ * The catalogs grant nothing: they are written only through the C functions
+ * above, which check ownership and then switch to the extension owner, and read
+ * only through the C readers, which bypass ACLs the same way the planner does.
  *
- * The WITH CHECK half is the part that matters. timeseries.maintain() is called
- * by a superuser background worker and does whatever the catalog row says,
- * including dropping heap partitions and overwriting the Iceberg table; requiring
- * that the inserting user owns every relation a row names is what stops one user
- * from aiming that worker at another user's tables.
+ * pg_monitor gets SELECT so that monitoring can see what is registered and how
+ * far each boundary has moved without being able to change any of it. Note that
+ * this makes a plain pg_dump by a user who is neither superuser nor a member of
+ * pg_monitor (or pg_read_all_data) fail on the two configuration tables. That is
+ * the trade for not using row-level security, which would make pg_dump fail
+ * outright -- it refuses to dump a table whose policies might silently filter the
+ * rows it is copying.
  */
-ALTER TABLE timeseries.tables ENABLE ROW LEVEL SECURITY;
-ALTER TABLE timeseries.partitions ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY table_owner ON timeseries.tables
-	USING (timeseries.is_owner(parent))
-	WITH CHECK (timeseries.is_owner(parent)
-				AND timeseries.is_owner(hot_table)
-				AND timeseries.is_owner(cold_table)
-				AND timeseries.is_owner(cold_scan)
-				AND timeseries.is_owner(delta_table)
-				AND timeseries.is_owner(seq_sequence));
-
-CREATE POLICY partition_owner ON timeseries.partitions
-	USING (timeseries.is_owner(parent))
-	WITH CHECK (timeseries.is_owner(parent)
-				AND (hot_partition IS NULL OR timeseries.is_owner(hot_partition)));
-
-GRANT SELECT, INSERT, UPDATE, DELETE ON timeseries.tables, timeseries.partitions TO public;
+GRANT SELECT ON timeseries.tables, timeseries.partitions TO pg_monitor;
 
 /* only the base-worker framework calls this */
 REVOKE ALL ON FUNCTION timeseries.maintenance_worker(internal) FROM public;
 
-/*
- * mark_dirty() writes the partition catalog on behalf of a writer who need not
- * own the table, so it is reached only through route_write(), which is SECURITY
- * DEFINER and passes it a parent it has already resolved from TG_RELID.
- */
-REVOKE ALL ON FUNCTION timeseries.mark_dirty(regclass, timestamptz) FROM public;
+/* only the statement trigger on timeseries.tables calls this */
+REVOKE ALL ON FUNCTION timeseries.invalidate_cache_trigger() FROM public;
