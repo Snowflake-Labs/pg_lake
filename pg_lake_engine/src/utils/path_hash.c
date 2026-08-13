@@ -60,10 +60,16 @@ CreatePathHash(const char *name, Size entrySize, long nelem, MemoryContext conte
  * means the pointer itself, so the key argument is the address of the pointer
  * rather than the pointer. Passing a path straight to hash_search would copy
  * the first 8 bytes of the string instead, which is why this wrapper exists.
+ *
+ * The hash and match functions dereference the key, so path cannot be NULL.
+ * Every caller either takes the path from a catalog or manifest column that is
+ * NOT NULL, or filters nulls out before getting here.
  */
 void *
 PathHashSearch(HTAB *pathHash, const char *path, HASHACTION action, bool *foundPtr)
 {
+	Assert(path != NULL);
+
 	return hash_search(pathHash, &path, action, foundPtr);
 }
 
@@ -80,6 +86,8 @@ PathHashKeyHash(const void *key, Size keysize PG_USED_FOR_ASSERTS_ONLY)
 	Assert(keysize == sizeof(char *));
 
 	const char *path = *(const char *const *) key;
+
+	Assert(path != NULL);
 
 	return hash_bytes((const unsigned char *) path, strlen(path));
 }
