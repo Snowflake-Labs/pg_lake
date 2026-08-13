@@ -87,6 +87,8 @@ PathHashKeyHash(const void *key, Size keysize PG_USED_FOR_ASSERTS_ONLY)
 
 	const char *path = *(const char *const *) key;
 
+	Assert(path != NULL);
+
 	return hash_bytes((const unsigned char *) path, strlen(path));
 }
 
