@@ -79,6 +79,8 @@ test_cases = [
            FROM composite_unnest.tbl t, unnest(t.accessorials) a""",
         True,
     ),
+    # The two cases below are controls: IsCompositeUnnestRte() rejects both, so
+    # they pass with and without the rewrite and only pin that it stays away.
     (
         "scalar_array_unnest",
         """SELECT t.pro_number, x
@@ -95,6 +97,17 @@ test_cases = [
         False,
     ),
 ]
+
+
+@pytest.fixture(autouse=True)
+def rollback_after_test(pg_conn):
+    """Keep a failing case from aborting the transaction the next one inherits.
+
+    ``pg_conn`` is module scoped, so without this a single failure cascades into
+    ``current transaction is aborted`` for every case after it.
+    """
+    yield
+    pg_conn.rollback()
 
 
 @pytest.mark.parametrize(
@@ -134,7 +147,22 @@ def test_composite_unnest_field_values(create_composite_unnest_tables, pg_conn):
         ["LIMIT", 50, False, True],
     ]
 
-    pg_conn.rollback()
+
+def test_composite_unnest_dropped_field(create_composite_unnest_tables, pg_conn):
+    """A composite with a dropped field is left alone, and so still fails.
+
+    The dropped field occupies a column of the RTE but has no name to put in the
+    column alias list, so IsCompositeUnnestRte() rejects it and DuckDB is left
+    with the alias list PostgreSQL emits, which is one name short.
+    """
+
+    query = """SELECT d.keep1, d.keep2
+               FROM composite_unnest.dropped_tbl t, unnest(t.vals) d"""
+
+    with pytest.raises(
+        psycopg2.DatabaseError, match="Binder Error.*does not have a column named"
+    ):
+        run_query(query, pg_conn)
 
 
 @pytest.fixture(scope="module")
@@ -155,9 +183,15 @@ def create_composite_unnest_tables(pg_conn, s3, request, extension):
             nested nested
         );
 
+        CREATE TYPE withdropped AS (keep1 int, goner text, keep2 int);
+        ALTER TYPE withdropped DROP ATTRIBUTE goner;
+
         CREATE FOREIGN TABLE tbl (pro_number bigint, accessorials accessorial[])
             SERVER pg_lake OPTIONS (location '{url}', writable 'true', format 'parquet');
         CREATE TABLE heap_tbl (pro_number bigint, accessorials accessorial[]);
+
+        CREATE FOREIGN TABLE dropped_tbl (id int, vals withdropped[])
+            SERVER pg_lake OPTIONS (location '{url}dropped/', writable 'true', format 'parquet');
         """,
         pg_conn,
     )
@@ -167,11 +201,15 @@ def create_composite_unnest_tables(pg_conn, s3, request, extension):
                     row('LIFTPU', 25.00, false, false, row(1, 'a'))::accessorial,
                     row('LIMIT', 50.00, false, true, row(2, 'b'))::accessorial]),
                (1, NULL),
-               (2, array[]::accessorial[])
+               (2, array[]::accessorial[]),
+               (3, array[row('DETENTION', 75.00, true, false, row(3, 'c'))::accessorial])
     """
 
     run_command(f"INSERT INTO tbl {rows};", pg_conn)
     run_command(f"INSERT INTO heap_tbl {rows};", pg_conn)
+    run_command(
+        "INSERT INTO dropped_tbl VALUES (1, array[row(1, 2)::withdropped]);", pg_conn
+    )
     pg_conn.commit()
 
     yield

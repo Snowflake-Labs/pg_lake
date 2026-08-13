@@ -364,7 +364,8 @@ ParseQuery(char *command, List *paramList)
 
 /*
  * IsCompositeUnnestRte returns whether the given RTE is an unnest(..) call over
- * an array of a composite type, and if so also returns the composite type.
+ * an array of a composite type that the rewrite below can handle, and if so also
+ * returns the composite type.
  */
 static bool
 IsCompositeUnnestRte(RangeTblEntry *rte, Oid *elementTypeId)
@@ -386,9 +387,42 @@ IsCompositeUnnestRte(RangeTblEntry *rte, Oid *elementTypeId)
 		((FuncExpr *) rtfunc->funcexpr)->funcid != F_UNNEST_ANYARRAY)
 		return false;
 
-	Oid			typeId = exprType(rtfunc->funcexpr);
+	/*
+	 * A domain over a composite type is expanded per field just the same, so
+	 * look through the domain. The field references we build below need the
+	 * composite type itself in any case, since that is what carries the
+	 * fields.
+	 */
+	Oid			typeId = getBaseType(exprType(rtfunc->funcexpr));
 
 	if (get_typtype(typeId) != TYPTYPE_COMPOSITE)
+		return false;
+
+	TupleDesc	tupleDesc = lookup_rowtype_tupdesc(typeId, -1);
+	bool		anyFieldDropped = false;
+
+	for (int fieldNumber = 0; fieldNumber < tupleDesc->natts; fieldNumber++)
+		anyFieldDropped |= TupleDescAttr(tupleDesc, fieldNumber)->attisdropped;
+
+	int			fieldCount = tupleDesc->natts;
+
+	ReleaseTupleDesc(tupleDesc);
+
+	/*
+	 * A dropped field still occupies a column of the RTE, but has no name we
+	 * could put in the alias list, so leave these RTEs alone and let the
+	 * query fail to bind in DuckDB as it does today.
+	 */
+	if (anyFieldDropped)
+		return false;
+
+	/*
+	 * The rewrite below leaves behind an inner unnest(..) RTE that names the
+	 * single struct column DuckDB returns rather than one column per field.
+	 * Recognizing it here keeps a second pass over the same tree from nesting
+	 * another subquery.
+	 */
+	if (list_length(rte->eref->colnames) != fieldCount)
 		return false;
 
 	*elementTypeId = typeId;
@@ -463,7 +497,13 @@ ExpandCompositeUnnestRte(RangeTblEntry *rte, Oid elementTypeId)
 
 	unnestRte->rtekind = RTE_FUNCTION;
 	unnestRte->functions = rte->functions;
-	unnestRte->lateral = rte->lateral;
+
+	/*
+	 * The inner RTE is the only thing in its own FROM clause, so it never
+	 * needs the LATERAL keyword; the outer RTE keeps the flag that covers the
+	 * correlation.
+	 */
+	unnestRte->lateral = false;
 	unnestRte->inFromCl = true;
 	unnestRte->eref = makeAlias(rte->eref->aliasname,
 								list_make1(makeString(rte->eref->aliasname)));
@@ -473,37 +513,24 @@ ExpandCompositeUnnestRte(RangeTblEntry *rte, Oid elementTypeId)
 	for (int fieldNumber = 1; fieldNumber <= tupleDesc->natts; fieldNumber++)
 	{
 		Form_pg_attribute attr = TupleDescAttr(tupleDesc, fieldNumber - 1);
-		Expr	   *fieldExpr = NULL;
+		FieldSelect *fieldSelect = makeNode(FieldSelect);
 
-		if (attr->attisdropped)
-		{
-			/* a dropped field cannot be referenced, but still has a column */
-			fieldExpr = (Expr *) makeNullConst(INT4OID, -1, InvalidOid);
-		}
-		else
-		{
-			FieldSelect *fieldSelect = makeNode(FieldSelect);
-
-			fieldSelect->arg = (Expr *) makeVar(1, 1, elementTypeId, -1,
-												InvalidOid, 0);
-			fieldSelect->fieldnum = fieldNumber;
-			fieldSelect->resulttype = attr->atttypid;
-			fieldSelect->resulttypmod = attr->atttypmod;
-			fieldSelect->resultcollid = attr->attcollation;
-
-			fieldExpr = (Expr *) fieldSelect;
-		}
+		fieldSelect->arg = (Expr *) makeVar(1, 1, elementTypeId, -1,
+											InvalidOid, 0);
+		fieldSelect->fieldnum = fieldNumber;
+		fieldSelect->resulttype = attr->atttypid;
+		fieldSelect->resulttypmod = attr->atttypmod;
+		fieldSelect->resultcollid = attr->attcollation;
 
 		/*
 		 * Name the column the way the RTE does, so that references to it keep
-		 * resolving once the subquery names its own columns.
+		 * resolving once the subquery names its own columns. The gate above
+		 * checked that there is a name for every field.
 		 */
-		char	   *colname = fieldNumber <= list_length(colnames) ?
-			strVal(list_nth(colnames, fieldNumber - 1)) :
-			NameStr(attr->attname);
+		char	   *colname = strVal(list_nth(colnames, fieldNumber - 1));
 
 		targetList = lappend(targetList,
-							 makeTargetEntry(fieldExpr, fieldNumber,
+							 makeTargetEntry((Expr *) fieldSelect, fieldNumber,
 											 pstrdup(colname), false));
 	}
 
@@ -568,6 +595,9 @@ ExpandCompositeUnnest(Query *query)
  * PreparePGDuckSQLTemplate - prepare the query template for duckdb pushdown.
  * We use the Postgres' ruleutils.c to deparse the query as it is a lot more
  * capable than the fdw's deparser.
+ *
+ * The query tree is rewritten in place, so callers must hand over a tree they
+ * own rather than a live one.
 */
 char *
 PreparePGDuckSQLTemplate(Query *query)
