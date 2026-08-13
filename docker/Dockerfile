@@ -9,9 +9,9 @@ ARG BASE_IMAGE_TAG
 
 # Set environment variables for non-interactive installations and PostgreSQL/PostGIS versions
 ENV PG_LAKE_REF=main
-ARG PG16_VERSION=16.11
-ARG PG17_VERSION=17.7
-ARG PG18_VERSION=18.1
+ARG PG16_VERSION=16.15
+ARG PG17_VERSION=17.11
+ARG PG18_VERSION=18.6
 ARG POSTGIS_VERSION=3.6.0
 ARG PGAUDIT16_VERSION=REL_16_STABLE
 ARG PGAUDIT17_VERSION=REL_17_STABLE
@@ -128,7 +128,7 @@ RUN if [ "$BASE_IMAGE_OS" = "debian" ]; then \
         wget https://download.oracle.com/java/21/latest/jdk-21_linux-${ARCH}_bin.tar.gz && \
         mkdir -p /usr/lib/jvm && \
         tar -xzf jdk-21_linux-${ARCH}_bin.tar.gz -C /usr/lib/jvm/ && \
-        mv /usr/lib/jvm/jdk-21.0.10 /usr/lib/jvm/java-21-openjdk && \
+        mv /usr/lib/jvm/jdk-21.* /usr/lib/jvm/java-21-openjdk && \
         rm jdk-21_linux-${ARCH}_bin.tar.gz; \
     fi
 
