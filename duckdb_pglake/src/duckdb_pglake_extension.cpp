@@ -927,12 +927,12 @@ DUCKDB_EXTENSION_API void duckdb_pglake_init_connection(duckdb_connection connec
 	 * progress aggregator only writes to ClientContext::query_progress
 	 * when the bar is on, so without this default pg_lake_query_progress
 	 * silently returns -1 / 0 / 0 even though everything else is wired
-	 * up.  Clients that do not want the bar can still issue
-	 * `SET enable_progress_bar = false` per session; the wait_time
-	 * setting (default 2000ms) keeps short queries from paying for an
-	 * aggregator they will never read from.  print_progress_bar stays
-	 * off because pgduck does not have a controlling terminal to render
-	 * to anyway.
+	 * up.  The cost is one walk over the executor's pipelines per task
+	 * iteration; wait_time does not avoid it, it only decides when a
+	 * bar would start printing.  Clients that would rather not pay it can
+	 * issue `SET enable_progress_bar = false` per session.
+	 * print_progress_bar stays off because pgduck does not have a
+	 * controlling terminal to render to anyway.
 	 */
 	duckdb::ClientConfig::GetConfig(*conn->context).enable_progress_bar = true;
 	duckdb::ClientConfig::GetConfig(*conn->context).print_progress_bar = false;

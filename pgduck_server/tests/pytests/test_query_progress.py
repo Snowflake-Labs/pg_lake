@@ -153,6 +153,27 @@ def test_query_progress_unknown_id_returns_no_rows(s3, pgduck_conn):
     assert result == []
 
 
+def test_query_progress_null_id_returns_no_rows(s3, pgduck_conn):
+    """
+    A NULL connection_id matches no session, so the function returns no rows.
+
+    This is a regression test for a server crash rather than a nicety: the
+    NULL constant reaches the bind phase, and reading it with GetValue throws
+    an InternalException, which pgduck_server classifies as unrecoverable and
+    answers by terminating the whole process. Any client could take the server
+    down with a single statement. The follow-up query is what actually proves
+    the server survived.
+    """
+    result = run_query(
+        "SELECT percentage, rows_processed, total_rows_to_process "
+        "FROM pg_lake_query_progress(NULL)",
+        pgduck_conn,
+    )
+    assert result == []
+
+    assert run_query("SELECT 1", pgduck_conn) == [(1,)]
+
+
 def cancel_and_wait(sleep_conn, pgduck_conn):
     """
     Cancel the sleeping session and wait until the server stops reporting it.

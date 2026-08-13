@@ -134,7 +134,8 @@ static void StatActivityExec(ClientContext &context, TableFunctionInput &data_p,
  */
 struct QueryProgressFunctionData : public TableFunctionData
 {
-	int64_t targetConnectionId;
+	int64_t targetConnectionId = 0;
+	bool haveTargetConnectionId = false;
 	bool finished = false;
 };
 
@@ -151,7 +152,7 @@ struct QueryProgressFunctionData : public TableFunctionData
  * What the percentage measures.  The aggregator walks the executor's
  * pipelines and reads progress from each scan operator that registered
  * a table_scan_progress callback (postgres_scan, parquet_scan, csv read,
- * range, and so on).  It does not look at sinks (COPY TO, parquet
+ * and so on).  It does not look at sinks (COPY TO, parquet
  * writer, S3 multipart upload finalize) or post-scan operators
  * (sort, join, aggregate beyond their input scans).  The number is
  * therefore "how much of the source has been read", not "how much of
@@ -160,23 +161,35 @@ struct QueryProgressFunctionData : public TableFunctionData
  * the destination side is still flushing.
  *
  * The fields are populated by the executor only for sessions where
- * enable_progress_bar is on.  pgduck enables it by default in
- * duckdb_pglake_init_connection, but the executor still waits
- * client_config.wait_time milliseconds (default 2000) before turning
- * the aggregator on, so very short queries return -1 / 0 / 0 even on
- * a session with the bar enabled.  If a session has disabled the bar
- * (`SET enable_progress_bar = false`) the row carries percentage = -1
- * with rows_processed and total_rows_to_process both 0.  We surface
- * those raw values without filtering.  If no session has the
- * requested connection_id, or the matching session has no active
- * query, the result is empty.
+ * enable_progress_bar is on, which pgduck turns on by default in
+ * duckdb_pglake_init_connection.  wait_time decides when the bar starts
+ * printing, not when the aggregator runs, so the numbers are live from
+ * the first executor task onwards.  A session that has disabled the bar
+ * (`SET enable_progress_bar = false`) reports percentage = -1 with
+ * rows_processed and total_rows_to_process both 0, and a plan whose
+ * sources register no progress callback (range is one) leaves the
+ * numbers frozen at the executor's first estimate.  We surface those raw
+ * values without filtering.  If the requested connection_id is NULL, or
+ * no session has it, or the matching session has no active query, the
+ * result is empty.
  */
 static unique_ptr<FunctionData> QueryProgressBind(ClientContext &context,
 												  TableFunctionBindInput &input,
 												  vector<LogicalType> &return_types,
 												  vector<string> &names) {
 	auto functionData = make_uniq<QueryProgressFunctionData>();
-	functionData->targetConnectionId = input.inputs[0].GetValue<int64_t>();
+
+	/*
+	 * A NULL argument reaches bind as a NULL constant, and GetValue on it
+	 * throws InternalException, which pgduck_server treats as unrecoverable
+	 * and answers by terminating the server.  Treat NULL the way SQL would:
+	 * it matches no session, so the function returns no rows.
+	 */
+	if (!input.inputs[0].IsNull())
+	{
+		functionData->targetConnectionId = input.inputs[0].GetValue<int64_t>();
+		functionData->haveTargetConnectionId = true;
+	}
 
 	return_types.emplace_back(LogicalType::DOUBLE);
 	return_types.emplace_back(LogicalType::BIGINT);
@@ -212,6 +225,12 @@ static void QueryProgressExec(ClientContext &context, TableFunctionInput &data_p
 	if (functionData.finished)
 		return;
 	functionData.finished = true;
+
+	if (!functionData.haveTargetConnectionId)
+	{
+		output.SetCardinality(0);
+		return;
+	}
 
 	ConnectionManager &connectionManager = context.db->GetConnectionManager();
 	vector<shared_ptr<ClientContext>> connections = connectionManager.GetConnectionList();
