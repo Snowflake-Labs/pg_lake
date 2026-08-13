@@ -1120,14 +1120,8 @@ CreateNewManifestsForDeletedEntries(List *allManifestEntries, List *deletedManif
  *     perManifestCtx, which is destroyed before returning.
  *
  *   - The WRITE phase (UploadIcebergManifestToURI, the new IcebergManifest
- *     headers) is run in callerCtx.  This is required, not just convenient:
- *     UploadIcebergManifestToURI -> GenerateTempFileName registers a
- *     callback on the current memory context that unlinks the local temp
- *     file when that context is reset.  The actual S3 upload is deferred
- *     until commit, so the callback must outlive this function.  Running
- *     the WRITE phase in callerCtx also means the resulting IcebergManifest
- *     headers are already in callerCtx and can be appended to the final
- *     lists directly.
+ *     headers) is run in callerCtx, so that the resulting IcebergManifest
+ *     headers can be appended to the final lists directly.
  *
  * Callers must not be in perManifestCtx when calling this function -- it
  * unconditionally restores CurrentMemoryContext to whatever it was on

@@ -120,7 +120,12 @@ DeepCopyDataFileStats(const DataFileStats * stats)
 {
 	DataFileStats *copiedStats = palloc0(sizeof(DataFileStats));
 
-	copiedStats->dataFilePath = pstrdup(stats->dataFilePath);
+	/*
+	 * Files read from the files catalog carry their path in TableDataFile
+	 * rather than in the stats, so both string fields can be unset.
+	 */
+	copiedStats->dataFilePath = stats->dataFilePath ? pstrdup(stats->dataFilePath) : NULL;
+	copiedStats->partitionKeysText = stats->partitionKeysText ? pstrdup(stats->partitionKeysText) : NULL;
 	copiedStats->fileSize = stats->fileSize;
 	copiedStats->rowCount = stats->rowCount;
 	copiedStats->deletedRowCount = stats->deletedRowCount;

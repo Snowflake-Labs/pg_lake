@@ -23,6 +23,7 @@
 /* pg_lake_engine.max_parallel_file_uploads */
 extern int32 MaxParallelFileUploads;
 
+extern PGDLLEXPORT char *GenerateTempFileNameForUpload(char *pattern);
 extern PGDLLEXPORT void ScheduleFileCopyToS3WithCleanup(char *localFilePath, char *s3Uri, bool autoDeleteRecord);
 extern PGDLLEXPORT void CopyLocalFileToS3(char *localFilePath, char *s3Uri);
 extern PGDLLEXPORT void FinishAllUploads(void);

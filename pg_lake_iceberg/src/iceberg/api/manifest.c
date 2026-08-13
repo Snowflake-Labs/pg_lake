@@ -97,7 +97,7 @@ FetchManifestsFromSnapshot(IcebergSnapshot * snapshot, ManifestPredicateFn manif
 int64_t
 UploadIcebergManifestToURI(List *manifestEntries, char *manifestURI)
 {
-	char	   *localManifestPath = GenerateTempFileName(PG_LAKE_ICEBERG, true);
+	char	   *localManifestPath = GenerateTempFileNameForUpload(PG_LAKE_ICEBERG);
 
 	WriteIcebergManifest(localManifestPath, manifestEntries);
 
