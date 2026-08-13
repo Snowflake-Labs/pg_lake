@@ -31,6 +31,7 @@
  * pstrdup'd out of SPI or Avro into a context at least as long-lived as the
  * hash. A caller whose path lives in a scratch context it resets (one
  * manifest at a time, say) has to copy the path itself before inserting it.
+ * Dereferencing the key also means a path can never be NULL.
  */
 
 #pragma once
