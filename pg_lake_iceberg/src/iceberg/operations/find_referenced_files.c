@@ -38,12 +38,8 @@
 #include "pg_lake/iceberg/operations/find_referenced_files.h"
 #include "pg_lake/util/array_utils.h"
 #include "pg_lake/util/injection_points.h"
+#include "pg_lake/util/path_hash.h"
 #include "pg_lake/util/s3_reader_utils.h"
-
-typedef struct FileHashEntry
-{
-	char		path[MAX_S3_PATH_LENGTH];
-}			FileHashEntry;
 
 PG_FUNCTION_INFO_V1(find_all_referenced_files);
 PG_FUNCTION_INFO_V1(find_unreferenced_files);
@@ -87,7 +83,7 @@ find_all_referenced_files(PG_FUNCTION_ARGS)
 
 	hash_seq_init(&status, fileHash);
 
-	FileHashEntry *entry = NULL;
+	PathHashEntry *entry = NULL;
 
 	while ((entry = hash_seq_search(&status)) != NULL)
 	{
@@ -140,7 +136,7 @@ find_all_referenced_files_via_snapshot_ids(PG_FUNCTION_ARGS)
 
 	hash_seq_init(&status, fileHash);
 
-	FileHashEntry *entry = NULL;
+	PathHashEntry *entry = NULL;
 
 	while ((entry = hash_seq_search(&status)) != NULL)
 	{
@@ -346,13 +342,13 @@ FindUnreferencedFilesAmongHTABs(HTAB *prevReferencedFileHash, HTAB *currentRefer
 	HASH_SEQ_STATUS status;
 
 	hash_seq_init(&status, prevReferencedFileHash);
-	FileHashEntry *entry = NULL;
+	PathHashEntry *entry = NULL;
 
 	while ((entry = hash_seq_search(&status)) != NULL)
 	{
 		bool		found = false;
 
-		hash_search(currentReferencedFileHash, entry->path, HASH_FIND, &found);
+		PathHashSearch(currentReferencedFileHash, entry->path, HASH_FIND, &found);
 
 		if (!found)
 		{
@@ -391,7 +387,7 @@ IcebergFindAllReferencedFiles(char *metadataPath)
 	HASH_SEQ_STATUS status;
 
 	hash_seq_init(&status, fileHash);
-	FileHashEntry *entry = NULL;
+	PathHashEntry *entry = NULL;
 
 	while ((entry = hash_seq_search(&status)) != NULL)
 	{
@@ -478,6 +474,13 @@ IcebergSnapshotAddAllReferencedFiles(IcebergSnapshot * snapshot, HTAB *fileHash)
 		List	   *manifestDataFiles = FetchDataFilesFromManifest(manifest, NULL, IsManifestEntryStatusScannable, NULL);
 		ListCell   *dataFileCell = NULL;
 
+		/*
+		 * Add the paths from our own context: AppendFileToHash copies each
+		 * path into the current context, and the context above is about to be
+		 * reset.
+		 */
+		MemoryContextSwitchTo(oldContext);
+
 		foreach(dataFileCell, manifestDataFiles)
 		{
 			DataFile   *dataFile = lfirst(dataFileCell);
@@ -485,7 +488,6 @@ IcebergSnapshotAddAllReferencedFiles(IcebergSnapshot * snapshot, HTAB *fileHash)
 			AppendFileToHash(dataFile->file_path, fileHash);
 		}
 
-		MemoryContextSwitchTo(oldContext);
 		MemoryContextReset(manifestDataFileFetchContext);
 	}
 
@@ -495,36 +497,43 @@ IcebergSnapshotAddAllReferencedFiles(IcebergSnapshot * snapshot, HTAB *fileHash)
 /*
 * CreateFilesHash creates a hash table that is suitable for storing
 * file paths.
+*
+* The hash keys on the path pointer, and AppendFileToHash copies the path into
+* the memory context that is current when it is called, so callers have to
+* append from a context that outlives the hash (not from a scratch context
+* they reset).
 */
 HTAB *
 CreateFilesHash(void)
 {
-	HASHCTL		hashCtl;
-
-	memset(&hashCtl, 0, sizeof(hashCtl));
-	hashCtl.keysize = MAX_S3_PATH_LENGTH;
-	hashCtl.entrysize = sizeof(FileHashEntry);
-	hashCtl.hcxt = CurrentMemoryContext;
-
-	HTAB	   *referencedFilesHash = hash_create("Referenced Files Hash",
-												  1024,
-												  &hashCtl,
-												  HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
-
-	return referencedFilesHash;
+	return CreatePathHash("Referenced Files Hash", sizeof(PathHashEntry),
+						  1024, CurrentMemoryContext);
 }
 
 
 /*
 * AppendFileToHash appends the file to the hash table, and
 * returns true if the file already exists in the hash table.
+*
+* The hash keeps a copy of the path, allocated in the caller's memory context,
+* so the caller has to append from a context that outlives the hash.
 */
 bool
 AppendFileToHash(const char *path, HTAB *referencedFilesHash)
 {
 	bool		found = false;
 
-	hash_search(referencedFilesHash, path, HASH_ENTER, &found);
+	PathHashSearch(referencedFilesHash, path, HASH_FIND, &found);
 
-	return found;
+	if (found)
+		return true;
+
+	/*
+	 * Only the pointer is stored, so the hash needs a copy of the path it can
+	 * keep. Callers hand us paths decoded from a manifest, which they discard
+	 * per manifest.
+	 */
+	PathHashSearch(referencedFilesHash, pstrdup(path), HASH_ENTER, NULL);
+
+	return false;
 }

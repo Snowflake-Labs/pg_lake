@@ -53,6 +53,7 @@
 #include "pg_lake/pgduck/remote_storage.h"
 #include "pg_lake/pgduck/write_data.h"
 #include "pg_lake/util/array_utils.h"
+#include "pg_lake/util/path_hash.h"
 #include "pg_lake/util/plan_cache.h"
 #include "pg_lake/util/s3_reader_utils.h"
 #include "pg_extension_base/spi_helpers.h"
@@ -391,7 +392,7 @@ GetTableDataFilesByPathHashFromCatalog(Oid relationId, bool dataOnly, bool newFi
 
 	while ((dataFile = hash_seq_search(&status)) != NULL)
 	{
-		TableDataFileHashEntry *dataFileEntry = hash_search(filesByPath, dataFile->path, HASH_ENTER, &found);
+		TableDataFileHashEntry *dataFileEntry = PathHashSearch(filesByPath, dataFile->path, HASH_ENTER, &found);
 
 		if (found)
 			elog(ERROR, "duplicate data file path found in catalog: %s", dataFile->path);
@@ -403,7 +404,8 @@ GetTableDataFilesByPathHashFromCatalog(Oid relationId, bool dataOnly, bool newFi
 	 * The by-id hash was only a staging area for grouping the SPI rows of one
 	 * file together, and every entry has been copied into filesByPath by now.
 	 * The path, partition and column stats each entry points to were
-	 * allocated in our own context, not in the hash's, so they survive.
+	 * allocated in our own context, not in the hash's, so they survive. That
+	 * includes the path each filesByPath entry keys on.
 	 */
 	hash_destroy(filesById);
 
@@ -488,8 +490,8 @@ LoadColumnStatsForFiles(Oid relationId, HTAB *filesByPath, List *dataFiles)
 		}
 
 		TableDataFileHashEntry *entry =
-			(TableDataFileHashEntry *) hash_search(filesByPath, path,
-												   HASH_FIND, NULL);
+			(TableDataFileHashEntry *) PathHashSearch(filesByPath, path,
+													  HASH_FIND, NULL);
 
 		if (entry == NULL)
 		{
@@ -701,23 +703,17 @@ CreateDataFilesHash(void)
 
 /*
  * CreateDataFilesByPathHash creates a hash table of path => TableDataFileHashEntry.
+ *
+ * The entries key on the path pointer, not on a copy of the path, so every
+ * path added to the hash has to outlive it. Callers add paths they read from
+ * the catalog into the current context, which is also the context of the hash.
  */
 static HTAB *
 CreateDataFilesByPathHash(void)
 {
-	HASHCTL		hashCtl;
-
-	memset(&hashCtl, 0, sizeof(hashCtl));
-	hashCtl.keysize = MAX_S3_PATH_LENGTH;
-	hashCtl.entrysize = sizeof(TableDataFileHashEntry);
-	hashCtl.hcxt = CurrentMemoryContext;
-
-	HTAB	   *dataFilesHash = hash_create("data files by path hash",
-											1024,
-											&hashCtl,
-											HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
-
-	return dataFilesHash;
+	return CreatePathHash("data files by path hash",
+						  sizeof(TableDataFileHashEntry),
+						  1024, CurrentMemoryContext);
 }
 
 
