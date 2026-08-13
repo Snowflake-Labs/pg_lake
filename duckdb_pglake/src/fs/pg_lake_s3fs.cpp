@@ -131,6 +131,42 @@ PgLakeS3FileSystem::RemoveFile(const string &filename,
 
 
 /*
+ * EscapeXmlText escapes a string for use as XML character data. S3 object keys
+ * may contain any UTF-8, including '&' and '<', so a key cannot be pasted into
+ * a request body verbatim: an unescaped '&' makes the whole DeleteObjects body
+ * malformed XML and S3 rejects the batch, and a key holding '<' could otherwise
+ * inject elements and change which objects the request targets.
+ */
+static string
+EscapeXmlText(const string &text)
+{
+	string escaped;
+	escaped.reserve(text.size());
+
+	for (char c : text)
+	{
+		switch (c)
+		{
+			case '&':
+				escaped += "&amp;";
+				break;
+			case '<':
+				escaped += "&lt;";
+				break;
+			case '>':
+				escaped += "&gt;";
+				break;
+			default:
+				escaped += c;
+				break;
+		}
+	}
+
+	return escaped;
+}
+
+
+/*
  * PostDeleteObjects issues a single S3 DeleteObjects request for the keys in
  * [begin, end). s3Handle must already be pointed at "<prefix><bucket>/" so the
  * POST targets /?delete, and every key must live in that bucket. The caller is
@@ -151,7 +187,7 @@ PostDeleteObjects(PgLakeS3FileSystem &fs, S3FileHandle *s3Handle,
 	std::stringstream ss;
 	ss << "<Delete xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">";
 	for (idx_t i = begin; i < end; i++)
-		ss << "<Object><Key>" << keys[i] << "</Key></Object>";
+		ss << "<Object><Key>" << EscapeXmlText(keys[i]) << "</Key></Object>";
 	ss << "</Delete>";
 	string body = ss.str();
 

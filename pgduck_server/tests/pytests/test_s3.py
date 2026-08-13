@@ -305,3 +305,29 @@ def test_pg_lake_remove_files_batches_over_1000(s3, pgduck_conn):
     assert list_objects(s3, TEST_BUCKET, f"{prefix}/") == []
 
     pgduck_conn.rollback()
+
+
+def test_pg_lake_remove_files_xml_special_chars(s3, pgduck_conn):
+    """S3 allows '&', '<' and '>' in object keys. Those have to be escaped in the
+    DeleteObjects XML body: unescaped, the body is malformed XML and S3 rejects
+    the whole batch, so a table whose location prefix contains one of them would
+    never be cleaned up."""
+    prefix = "test_remove_files_xml"
+
+    keys = [
+        f"{prefix}/a&b/data.parquet",
+        f"{prefix}/c<d>e/data.parquet",
+        f"{prefix}/plain/data.parquet",
+    ]
+    for key in keys:
+        s3.put_object(Bucket=TEST_BUCKET, Key=key, Body=b"x")
+
+    results = perform_query_on_cursor(
+        f"SELECT count(*) FROM pg_lake_remove_files('s3://{TEST_BUCKET}/{prefix}/**')",
+        pgduck_conn,
+    )
+    assert results[0][0] == len(keys)
+
+    assert list_objects(s3, TEST_BUCKET, f"{prefix}/") == []
+
+    pgduck_conn.rollback()
