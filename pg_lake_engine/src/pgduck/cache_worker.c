@@ -64,6 +64,9 @@ bool		EnableCacheManager = true;
 /* pg_lake_engine.max_cache_size_mb setting */
 int			MaxCacheSizeMB = MAX_CACHE_SIZE_MB_DEFAULT;
 
+/* pg_lake_engine.min_free_cache_inodes setting */
+int			MinFreeCacheInodes = MIN_FREE_CACHE_INODES_DEFAULT;
+
 /* pg_lake_engine.cache_manager_interval setting */
 int			CacheManagerIntervalMs = CACHE_MANAGER_INTERVAL_MS_DEFAULT;
 
@@ -197,8 +200,8 @@ ManageCache(void)
 	Assert(maxCacheSizeBytes >= 0);
 
 	appendStringInfo(&manageCacheCommand,
-					 "CALL pg_lake_manage_cache(" INT64_FORMAT ")",
-					 maxCacheSizeBytes);
+					 "CALL pg_lake_manage_cache(" INT64_FORMAT ", %d)",
+					 maxCacheSizeBytes, MinFreeCacheInodes);
 
 	volatile	ManageCacheResult manageCacheResult;
 
