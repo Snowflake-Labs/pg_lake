@@ -299,8 +299,6 @@ PgLakeS3FileSystem::RemoveFilesFromS3(const vector<string> &paths,
 	if (paths.empty())
 		return;
 
-	optional_ptr<ClientContext> context = opener->TryGetClientContext();
-	FileSystem &fileSystem = FileSystem::GetFileSystem(*context);
 	optional_ptr<HTTPMetadataCache> metadataCache = GetGlobalCache();
 
 	/*
@@ -345,15 +343,15 @@ PgLakeS3FileSystem::RemoveFilesFromS3(const vector<string> &paths,
 		const vector<string> &keys = bucketKeys[b];
 
 		/*
-		 * Resolve the region-adjusted path via the region-aware file system,
-		 * then reuse one POST-capable handle for every batch in this bucket.
+		 * Build one POST-capable handle and reuse it for every batch in this
+		 * bucket. CreateHandle rather than OpenFile: we only need the auth and
+		 * HTTP parameters, and OpenFile would additionally HEAD the sample
+		 * object, which costs a round trip per bucket and fails with 404 when
+		 * the sample happens to be gone already -- deleting an object that no
+		 * longer exists is not an error for DeleteObjects itself.
 		 */
-		unique_ptr<FileHandle> regionAwareFileHandle =
-			fileSystem.OpenFile(samplePath, FileFlags::FILE_FLAGS_READ);
-		string regionResolvedSample = regionAwareFileHandle->path;
-
-		unique_ptr<FileHandle> fileHandle =
-			OpenFile(samplePath, FileFlags::FILE_FLAGS_READ, opener);
+		unique_ptr<HTTPFileHandle> fileHandle =
+			CreateHandle(samplePath, FileFlags::FILE_FLAGS_READ, opener);
 
 		S3FileHandle *s3Handle = (S3FileHandle *) fileHandle.get();
 
@@ -373,12 +371,14 @@ PgLakeS3FileSystem::RemoveFilesFromS3(const vector<string> &paths,
 		 * Best-effort HTTP metadata cache hygiene, as in RemoveFileFromS3: drop
 		 * any cached entry for the deleted objects so a stale entry cannot make
 		 * a removed file look readable. Reads inject ?s3_region from cache, so
-		 * evict both the bare URL and the region-resolved form.
+		 * evict both the bare URL and the region-resolved form. The caller has
+		 * already region-resolved the paths, so the sample carries whatever
+		 * query string a read would use.
 		 */
 		string regionSuffix;
-		auto queryPos = regionResolvedSample.find('?');
+		auto queryPos = samplePath.find('?');
 		if (queryPos != string::npos)
-			regionSuffix = regionResolvedSample.substr(queryPos);
+			regionSuffix = samplePath.substr(queryPos);
 
 		for (const string &key : keys)
 		{

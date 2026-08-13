@@ -17,6 +17,7 @@
 
 #include "duckdb.hpp"
 
+#include "pg_lake/fs/caching_file_system.hpp"
 #include "pg_lake/fs/file_cache_manager.hpp"
 #include "pg_lake/fs/file_utils.hpp"
 #include "pg_lake/fs/functions.hpp"
@@ -600,43 +601,30 @@ static void RemoveFilesExec(ClientContext &context, TableFunctionInput &data_p, 
 		AzureBlobStorageFileSystem abfs;
 		AzureDfsStorageFileSystem adfs;
 
+		vector<OpenFileInfo> files;
+
+		/*
+		 * Expand the pattern on the file system that owns it. The Azure file
+		 * systems need to be addressed directly because the virtual file system
+		 * only knows about the caching wrappers around them.
+		 */
 		if (s3fs.CanHandleFile(globPattern))
-		{
-			/* S3: glob, then delete in batched DeleteObjects requests */
-			vector<OpenFileInfo> files = s3fs.List(globPattern, true, opener);
-
-			vector<string> paths;
-			paths.reserve(files.size());
-			for (auto &file : files)
-				paths.push_back(file.path);
-
-			s3fs.RemoveFiles(paths, opener);
-
-			functionData.deletedFiles = std::move(paths);
-		}
+			files = s3fs.List(globPattern, true, opener);
+		else if (abfs.CanHandleFile(globPattern))
+			files = abfs.Glob(globPattern, opener);
+		else if (adfs.CanHandleFile(globPattern))
+			files = adfs.Glob(globPattern, opener);
 		else
-		{
-			/*
-			 * Azure and other back ends have no batch delete API here, so
-			 * remove one file at a time. This is still a single round trip from
-			 * pg_lake's perspective.
-			 */
-			FileSystem &fs = FileSystem::GetFileSystem(context);
-			vector<OpenFileInfo> files;
+			files = FileSystem::GetFileSystem(context).Glob(globPattern);
 
-			if (abfs.CanHandleFile(globPattern))
-				files = abfs.Glob(globPattern, opener);
-			else if (adfs.CanHandleFile(globPattern))
-				files = adfs.Glob(globPattern, opener);
-			else
-				files = fs.Glob(globPattern);
+		vector<string> paths;
+		paths.reserve(files.size());
+		for (OpenFileInfo &file : files)
+			paths.push_back(file.path);
 
-			for (auto &file : files)
-			{
-				fs.RemoveFile(file.path);
-				functionData.deletedFiles.push_back(file.path);
-			}
-		}
+		PGLakeCachingFileSystem::RemoveFiles(context, paths);
+
+		functionData.deletedFiles = std::move(paths);
 	}
 
 	/* Stream back the deleted URLs */
@@ -674,16 +662,29 @@ FileSizeScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
 
 /*
  * Implementation of the pg_lake_remove_file scalar function.
+ *
+ * DuckDB hands us a whole vector at a time, so we collect the chunk's paths
+ * first and then remove them in one go. That way a query that deletes a list of
+ * unrelated files -- something a glob cannot express -- still gets the batched
+ * DeleteObjects requests, at up to STANDARD_VECTOR_SIZE files per request round
+ * instead of one request per file.
  */
 static void
 RemoveFileScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &fileNameVector = args.data[0];
+	vector<string> paths;
 
+	paths.reserve(args.size());
+
+	/*
+	 * Collect rather than remove in the lambda: UnaryExecutor gives us NULL
+	 * propagation and constant-vector handling for free, and it is also what
+	 * decides which rows are live.
+	 */
 	UnaryExecutor::Execute<string_t, bool>(
 		fileNameVector, result, args.size(),
 		[&](string_t fileName) {
-			FileSystem &fs = FileSystem::GetFileSystem(state.GetContext());
-			fs.RemoveFile(fileName.GetString());
+			paths.push_back(fileName.GetString());
 
 			/*
 			 * Ideally we would return whether the file existed before removal.
@@ -693,6 +694,8 @@ RemoveFileScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
 			return true;
 		}
 	);
+
+	PGLakeCachingFileSystem::RemoveFiles(state.GetContext(), paths);
 }
 
 
