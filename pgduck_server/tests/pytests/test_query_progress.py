@@ -174,6 +174,85 @@ def test_query_progress_null_id_returns_no_rows(s3, pgduck_conn):
     assert run_query("SELECT 1", pgduck_conn)[0][0] == 1
 
 
+def test_prepared_statement_can_be_executed_more_than_once(s3, pgduck_conn):
+    """
+    Prepared statements over pg_lake_query_progress and pg_lake_stat_activity
+    return rows on every execution, not only the first.
+
+    Both functions used to keep their scan state in bind data: the "already
+    produced my rows" flag, and stat_activity's snapshot of the connection
+    list. DuckDB binds once per plan and reuses that bind data for every
+    execution, so the second EXECUTE found the flag already set and returned
+    nothing. The state belongs in a GlobalTableFunctionState, which is created
+    per execution.
+    """
+    sleep_conn = psycopg2.connect(
+        host=server_params.PGDUCK_UNIX_DOMAIN_PATH,
+        port=server_params.PGDUCK_PORT,
+        async_=1,
+    )
+    wait_for_connection(sleep_conn)
+
+    sleep_cur = sleep_conn.cursor()
+    sleep_cur.execute("SELECT pg_lake_sleep(10)")
+
+    try:
+        sleep_connection_id = wait_for_sleep_session(sleep_conn, pgduck_conn)
+
+        cur = pgduck_conn.cursor()
+        cur.execute(
+            "PREPARE reused_progress AS "
+            "SELECT percentage, rows_processed, total_rows_to_process "
+            f"FROM pg_lake_query_progress({sleep_connection_id})"
+        )
+        cur.execute(
+            "PREPARE reused_activity AS "
+            "SELECT connection_id FROM pg_lake_stat_activity()"
+        )
+        cur.close()
+
+        for execution in range(1, 4):
+            progress = run_query("EXECUTE reused_progress", pgduck_conn)
+            assert (
+                len(progress) == 1
+            ), f"execution {execution} of reused_progress returned {len(progress)} rows"
+
+            activity = run_query("EXECUTE reused_activity", pgduck_conn)
+            assert sleep_connection_id in [
+                row[0] for row in activity
+            ], f"execution {execution} of reused_activity lost the sleeping session"
+
+        cancel_and_wait(sleep_conn, pgduck_conn)
+    finally:
+        try:
+            sleep_conn.close()
+        finally:
+            pgduck_conn.rollback()
+
+
+def wait_for_sleep_session(sleep_conn, pgduck_conn):
+    """
+    Wait until pg_lake_stat_activity reports the sleeping session and return
+    its connection id.
+    """
+    while True:
+        state = sleep_conn.poll()
+
+        stat = run_query(
+            "SELECT connection_id FROM pg_lake_stat_activity() "
+            "WHERE query LIKE '%pg_lake_sleep%' "
+            "  AND query NOT LIKE '%stat_activity%'",
+            pgduck_conn,
+        )
+        if len(stat) == 1:
+            return stat[0][0]
+
+        if state == psycopg2.extensions.POLL_OK:
+            pytest.fail("sleep query finished before stat_activity reported it")
+
+        time.sleep(0.05)
+
+
 def cancel_and_wait(sleep_conn, pgduck_conn):
     """
     Cancel the sleeping session and wait until the server stops reporting it.

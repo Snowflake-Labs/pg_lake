@@ -27,15 +27,34 @@
 namespace duckdb {
 
 /*
- * StatActivityFunctionData defines the custom state for pg_lake_stat_activity
+ * StatActivityFunctionData defines the bind data for pg_lake_stat_activity.
+ *
+ * Bind data is shared by every execution of a plan, so there is nothing to
+ * keep here; the scan's own state lives in StatActivityGlobalState.
  */
 struct StatActivityFunctionData : public TableFunctionData
 {
-	/* Function state */
+};
+
+
+/*
+ * StatActivityGlobalState holds the per-execution state: the snapshot of
+ * connections this scan is walking, how far it has got, and whether it is
+ * done.  DuckDB creates it once per execution, which is exactly the lifetime
+ * this state wants.
+ */
+struct StatActivityGlobalState : public GlobalTableFunctionState
+{
 	vector<shared_ptr<ClientContext>> connections;
 	idx_t		offset = 0;
 	bool		finished = false;
 };
+
+
+static unique_ptr<GlobalTableFunctionState> StatActivityInitGlobal(ClientContext &context,
+																   TableFunctionInitInput &input) {
+	return make_uniq<StatActivityGlobalState>();
+}
 
 
 /*
@@ -85,21 +104,21 @@ static unique_ptr<FunctionData> StatActivityBind(ClientContext &context,
  * afterwards, so it is safe to read directly.
  */
 static void StatActivityExec(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
-	auto &functionData = (StatActivityFunctionData &)*data_p.bind_data;
-	if (functionData.finished)
+	auto &globalState = data_p.global_state->Cast<StatActivityGlobalState>();
+	if (globalState.finished)
 		return;
 
 	/* Do the work */
-	if (functionData.offset == 0)
+	if (globalState.offset == 0)
 	{
 		ConnectionManager &connectionManager = context.db->GetConnectionManager();
-		functionData.connections = connectionManager.GetConnectionList();
+		globalState.connections = connectionManager.GetConnectionList();
 	}
 
 	/* Set return values */
 	idx_t rowsInChunk = 0;
-	while (functionData.offset< functionData.connections.size() && rowsInChunk < STANDARD_VECTOR_SIZE) {
-		shared_ptr<ClientContext> connection = functionData.connections[functionData.offset];
+	while (globalState.offset < globalState.connections.size() && rowsInChunk < STANDARD_VECTOR_SIZE) {
+		shared_ptr<ClientContext> connection = globalState.connections[globalState.offset];
 
 		if (connection)
 		{
@@ -119,25 +138,45 @@ static void StatActivityExec(ClientContext &context, TableFunctionInput &data_p,
 			}
 		}
 
-		functionData.offset++;
+		globalState.offset++;
 	}
 
 	output.SetCardinality(rowsInChunk);
 
-	if (functionData.offset == functionData.connections.size())
-		functionData.finished = true;
+	if (globalState.offset == globalState.connections.size())
+		globalState.finished = true;
 }
 
 
 /*
- * QueryProgressFunctionData defines the custom state for pg_lake_query_progress.
+ * QueryProgressFunctionData defines the bind data for pg_lake_query_progress.
+ *
+ * Bind data is shared by every execution of a plan -- a prepared statement
+ * binds once and executes many times -- so it only holds what the argument
+ * determined, and nothing the scan mutates.
  */
 struct QueryProgressFunctionData : public TableFunctionData
 {
 	int64_t targetConnectionId = 0;
 	bool haveTargetConnectionId = false;
+};
+
+
+/*
+ * QueryProgressGlobalState holds the per-execution state: whether this scan
+ * has already produced its single row.  This belongs in the global state
+ * rather than in bind data, because DuckDB creates it once per execution.
+ */
+struct QueryProgressGlobalState : public GlobalTableFunctionState
+{
 	bool finished = false;
 };
+
+
+static unique_ptr<GlobalTableFunctionState> QueryProgressInitGlobal(ClientContext &context,
+																	TableFunctionInitInput &input) {
+	return make_uniq<QueryProgressGlobalState>();
+}
 
 
 /*
@@ -221,10 +260,12 @@ static unique_ptr<FunctionData> QueryProgressBind(ClientContext &context,
  * duckdb_query_progress.
  */
 static void QueryProgressExec(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
-	auto &functionData = (QueryProgressFunctionData &)*data_p.bind_data;
-	if (functionData.finished)
+	auto &functionData = data_p.bind_data->Cast<QueryProgressFunctionData>();
+	auto &globalState = data_p.global_state->Cast<QueryProgressGlobalState>();
+
+	if (globalState.finished)
 		return;
-	functionData.finished = true;
+	globalState.finished = true;
 
 	if (!functionData.haveTargetConnectionId)
 	{
@@ -333,7 +374,7 @@ PgLakeUtilityFunctions::RegisterFunctions(ExtensionLoader &loader)
 		/* pg_lake_stat_activity() */
 		pg_lake_stat_activity.AddFunction(
 			TableFunction({},
-						  StatActivityExec, StatActivityBind));
+						  StatActivityExec, StatActivityBind, StatActivityInitGlobal));
 
 	    loader.RegisterFunction(pg_lake_stat_activity);
 	}
@@ -355,7 +396,7 @@ PgLakeUtilityFunctions::RegisterFunctions(ExtensionLoader &loader)
 
 		pg_lake_query_progress.AddFunction(
 			TableFunction({LogicalType::BIGINT},
-						  QueryProgressExec, QueryProgressBind));
+						  QueryProgressExec, QueryProgressBind, QueryProgressInitGlobal));
 
 		loader.RegisterFunction(pg_lake_query_progress);
 	}
