@@ -1544,7 +1544,6 @@ CopyAddDataFileOperation(const TableDataFile * dataFile)
 {
 	DataFileStats *copiedStats = DeepCopyDataFileStats(&dataFile->stats);
 
-	/* a NULL partition is valid, there is nothing to copy then */
 	Partition  *copiedPartition =
 		dataFile->partition != NULL ? CopyPartition(dataFile->partition) : NULL;
 
