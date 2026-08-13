@@ -925,6 +925,11 @@ ApplyTrackedIcebergMetadataChanges(bool isVerbose)
 	 * staged for upload, and the local temp files holding their contents, are
 	 * held by the upload scheduling context, and REST catalog request bodies
 	 * are copied into TopTransactionContext by RecordRestCatalogRequestInTx.
+	 *
+	 * An error in the loop needs no handling of its own. The scratch context
+	 * is a child of the caller's context, which is the transaction context at
+	 * pre-commit and the subtransaction context under VACUUM, so it is
+	 * deleted along with its parent when the (sub)transaction aborts.
 	 */
 	MemoryContext outerContext = CurrentMemoryContext;
 	MemoryContext perRelationContext =
@@ -1539,10 +1544,7 @@ CopyAddDataFileOperation(const TableDataFile * dataFile)
 {
 	DataFileStats *copiedStats = DeepCopyDataFileStats(&dataFile->stats);
 
-	/*
-	 * The catalog read always gives a data file a Partition, empty for an
-	 * unpartitioned table, but do not rely on that here.
-	 */
+	/* a NULL partition is valid, there is nothing to copy then */
 	Partition  *copiedPartition =
 		dataFile->partition != NULL ? CopyPartition(dataFile->partition) : NULL;
 
