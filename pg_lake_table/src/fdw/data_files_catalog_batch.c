@@ -39,6 +39,7 @@
 #include "pg_lake/iceberg/partitioning/spec_generation.h"
 #include "pg_lake/partitioning/partition_spec_catalog.h"
 #include "pg_lake/util/array_utils.h"
+#include "pg_lake/util/path_hash.h"
 
 #include "executor/spi.h"
 #include "utils/builtins.h"
@@ -47,14 +48,14 @@
 /* path -> int64 file id, built from RETURNING output of ExecInsertDataFiles */
 typedef struct FileIdHashEntry
 {
-	char		path[MAX_S3_PATH_LENGTH];
+	char	   *path;
 	int64		fileId;
 }			FileIdHashEntry;
 
 /* caller-above-callee forward decls for the statics below */
 static void FlushDataFileAddBatch(Oid relationId, List *addOps);
 static HTAB *BulkInsertDataFiles(Oid relationId, List *addOps);
-static HTAB *ExecInsertDataFiles(Oid relationId, int fileCount,
+static HTAB *ExecInsertDataFiles(Oid relationId, List *addOps,
 								 ArrayType *pathArray, ArrayType *rowCountArray,
 								 ArrayType *fileSizeArray, ArrayType *contentArray,
 								 ArrayType *firstRowIdArray);
@@ -204,23 +205,24 @@ BulkInsertDataFiles(Oid relationId, List *addOps)
 	ArrayType  *firstRowIdArray = MakeArrayFromDatums(firstRowIdDatums, firstRowIdNulls,
 													  fileCount, INT8OID);
 
-	return ExecInsertDataFiles(relationId, fileCount, pathArray, rowCountArray,
+	return ExecInsertDataFiles(relationId, addOps, pathArray, rowCountArray,
 							   fileSizeArray, contentArray, firstRowIdArray);
 }
 
 
 /*
  * INSERT into lake_table.files via unnest and return a path->id HTAB built
- * from the RETURNING clause. fileCount is the number of rows inserted.
+ * from the RETURNING clause. The hash has one entry per op in addOps.
  * Must be called outside any SPI session.
  * Caller must hash_destroy() the returned table when done.
  */
 static HTAB *
-ExecInsertDataFiles(Oid relationId, int fileCount, ArrayType *pathArray,
+ExecInsertDataFiles(Oid relationId, List *addOps, ArrayType *pathArray,
 					ArrayType *rowCountArray, ArrayType *fileSizeArray,
 					ArrayType *contentArray, ArrayType *firstRowIdArray)
 {
 	MemoryContext callerCxt = CurrentMemoryContext;
+	int			fileCount = list_length(addOps);
 
 	/*
 	 * RETURNING id, path captures sequence-assigned ids so downstream helpers
@@ -248,20 +250,34 @@ ExecInsertDataFiles(Oid relationId, int fileCount, ArrayType *pathArray,
 	SPI_ARG_VALUE(5, INT4ARRAYOID, contentArray, false);
 	SPI_ARG_VALUE(6, INT8ARRAYOID, firstRowIdArray, false);
 
+	/*
+	 * The hash keys on the path pointer, so key it on the paths of the ops
+	 * themselves, which outlive the hash. That also saves copying the paths
+	 * out of SPI: the RETURNING rows below only have to find their entry and
+	 * fill in the id.
+	 */
+	HTAB	   *pathToFileId = CreatePathHash("inserted file ids by path",
+											  sizeof(FileIdHashEntry),
+											  fileCount * 2, callerCxt);
+	ListCell   *operationCell = NULL;
+
+	foreach(operationCell, addOps)
+	{
+		TableMetadataOperation *operation = lfirst(operationCell);
+		bool		found = false;
+		FileIdHashEntry *entry = (FileIdHashEntry *)
+			PathHashSearch(pathToFileId, operation->path, HASH_ENTER, &found);
+
+		Assert(!found);			/* each path is unique in lake_table.files */
+
+		/* lake_table.files.id is a bigserial, so 0 means "not filled in yet" */
+		entry->fileId = 0;
+	}
+
 	SPI_START_EXTENSION_OWNER(PgLakeTable);
 	SPI_EXECUTE(query, /* readOnly = */ false);
 
-	HASHCTL		hashCtl;
-
-	memset(&hashCtl, 0, sizeof(hashCtl));
-	hashCtl.keysize = MAX_S3_PATH_LENGTH;
-	hashCtl.entrysize = sizeof(FileIdHashEntry);
-	hashCtl.hcxt = callerCxt;
-
-	HTAB	   *pathToFileId = hash_create("inserted file ids by path",
-										   fileCount * 2,
-										   &hashCtl,
-										   HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
+	Assert(SPI_processed == (uint64) fileCount);
 
 	for (int fileIndex = 0; fileIndex < fileCount; fileIndex++)
 	{
@@ -274,11 +290,11 @@ ExecInsertDataFiles(Oid relationId, int fileCount, ArrayType *pathArray,
 
 		Assert(!idIsNull && !pathIsNull);
 
-		bool		found;
 		FileIdHashEntry *entry = (FileIdHashEntry *)
-			hash_search(pathToFileId, path, HASH_ENTER, &found);
+			PathHashSearch(pathToFileId, path, HASH_FIND, NULL);
 
-		Assert(!found);			/* each path is unique in lake_table.files */
+		/* we inserted the paths of addOps, so RETURNING can only give those */
+		Assert(entry != NULL);
 		entry->fileId = fileId;
 	}
 
@@ -465,7 +481,7 @@ BulkInsertDataFilePartitionValues(Oid relationId, List *addOps, HTAB *pathToFile
 		Assert(operation->partitionSpecId != DEFAULT_SPEC_ID);
 
 		FileIdHashEntry *entry = (FileIdHashEntry *)
-			hash_search(pathToFileId, operation->path, HASH_FIND, NULL);
+			PathHashSearch(pathToFileId, operation->path, HASH_FIND, NULL);
 
 		Assert(entry != NULL);
 
@@ -615,7 +631,7 @@ BulkInsertTrackedFileIds(List *addOps, HTAB *pathToFileId)
 			fileIdDatums = palloc(sizeof(Datum) * fileCount);
 
 		FileIdHashEntry *entry = (FileIdHashEntry *)
-			hash_search(pathToFileId, operation->path, HASH_FIND, NULL);
+			PathHashSearch(pathToFileId, operation->path, HASH_FIND, NULL);
 
 		Assert(entry != NULL);
 		fileIdDatums[trackedFileCount++] = Int64GetDatum(entry->fileId);

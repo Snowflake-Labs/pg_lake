@@ -23,6 +23,7 @@
 #include "pg_lake/cleanup/in_progress_files.h"
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/pgduck/parallel_command.h"
+#include "pg_lake/util/path_hash.h"
 #include "pg_lake/util/s3_reader_utils.h"
 #include "pg_lake/util/s3_writer_utils.h"
 #include "pg_lake/util/rel_utils.h"
@@ -33,10 +34,13 @@
 
 /*
  * ScheduledUpload represents an upload to be performed by FinishAllUpload.
+ *
+ * remoteUrl is the hash key and points into UploadSchedulingContext, which
+ * outlives the hash.
  */
 typedef struct ScheduledUpload
 {
-	char		remoteUrl[MAX_S3_PATH_LENGTH];
+	char	   *remoteUrl;
 	char		localFile[MAXPGPATH];
 }			ScheduledUpload;
 
@@ -108,7 +112,14 @@ ScheduleFileUpload(char *localFile, char *remoteUrl)
 	InitUploadScheduling();
 
 	bool		found = false;
-	ScheduledUpload *upload = hash_search(PendingUploads, remoteUrl, HASH_ENTER, &found);
+
+	/*
+	 * The hash keys on the pointer, so keep the URL in the scheduling context
+	 * rather than relying on the caller's, which can be a per-tuple context.
+	 */
+	char	   *scheduledUrl = MemoryContextStrdup(UploadSchedulingContext, remoteUrl);
+	ScheduledUpload *upload = PathHashSearch(PendingUploads, scheduledUrl,
+											 HASH_ENTER, &found);
 
 	if (found)
 		elog(ERROR, "%s scheduled for upload twice", remoteUrl);
@@ -142,15 +153,8 @@ InitUploadScheduling(void)
 	MemoryContextRegisterResetCallback(UploadSchedulingContext, cb);
 
 	/* create a URL -> local file hash */
-	HASHCTL		hashCtl;
-
-	memset(&hashCtl, 0, sizeof(hashCtl));
-	hashCtl.keysize = MAX_S3_PATH_LENGTH;
-	hashCtl.entrysize = sizeof(ScheduledUpload);
-	hashCtl.hcxt = UploadSchedulingContext;
-
-	PendingUploads = hash_create("scheduled uploads", 32, &hashCtl,
-								 HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
+	PendingUploads = CreatePathHash("scheduled uploads", sizeof(ScheduledUpload),
+									32, UploadSchedulingContext);
 }
 
 
@@ -215,7 +219,7 @@ GetPendingUploadLocalPath(const char *remoteUrl)
 	bool		found = false;
 
 	ScheduledUpload *upload =
-		hash_search(PendingUploads, remoteUrl, HASH_FIND, &found);
+		PathHashSearch(PendingUploads, remoteUrl, HASH_FIND, &found);
 
 	if (found)
 		localFile = upload->localFile;
