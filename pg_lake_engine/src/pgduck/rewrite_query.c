@@ -125,21 +125,9 @@ typedef struct OperatorRewriteRuleByName
 }			OperatorRewriteRuleByName;
 
 
-/*
- * CompositeUnnestRte is an unnest(..) RTE over an array of a composite type,
- * together with the composite type that unnest(..) returns.
- */
-typedef struct CompositeUnnestRte
-{
-	RangeTblEntry *rte;
-	Oid			elementTypeId;
-}			CompositeUnnestRte;
-
-
 static void InitRewriteRules(void);
 static Node *RewriteQueryTreeForPGDuckMutator(Node *node, RewriteQueryTreeContext * context);
-static void ExpandCompositeUnnest(Query *query);
-static bool FindCompositeUnnestRteWalker(Node *node, List **unnestRteList);
+static void ExpandCompositeUnnestRtes(List *rtable);
 static bool IsCompositeUnnestRte(RangeTblEntry *rte, Oid *elementTypeId);
 static void ExpandCompositeUnnestRte(RangeTblEntry *rte, Oid elementTypeId);
 static Node *ReplaceJsonbWithPgLakeInternalJsonbFunction(Node *inputNode, void *context);
@@ -529,17 +517,7 @@ RewriteQueryTreeForPGDuck(Query *query)
 		.level = -1
 	};
 
-	Query	   *rewrittenQuery = (Query *)
-		RewriteQueryTreeForPGDuckMutator((Node *) query, &context);
-
-	/*
-	 * Rewrite range table entries that mean something else in DuckDB. The
-	 * mutator handed back a copy of the query tree, so this does not touch
-	 * the tree the caller gave us.
-	 */
-	ExpandCompositeUnnest(rewrittenQuery);
-
-	return rewrittenQuery;
+	return (Query *) RewriteQueryTreeForPGDuckMutator((Node *) query, &context);
 }
 
 
@@ -564,13 +542,21 @@ RewriteQueryTreeForPGDuckMutator(Node *node, RewriteQueryTreeContext * context)
 
 		context->level++;
 
-		node = (Node *) query_tree_mutator(query,
-										   RewriteQueryTreeForPGDuckMutator,
-										   context, 0);
+		Query	   *rewrittenQuery = query_tree_mutator(query,
+														RewriteQueryTreeForPGDuckMutator,
+														context, 0);
 
 		context->level--;
 
-		return node;
+		/*
+		 * Rewrite the range table entries that mean something else in DuckDB.
+		 * We do this after mutating the query, since the mutator hands back a
+		 * copy of the range table and we should not touch the range table of
+		 * the query we were given.
+		 */
+		ExpandCompositeUnnestRtes(rewrittenQuery->rtable);
+
+		return (Node *) rewrittenQuery;
 	}
 
 	/*
@@ -674,8 +660,9 @@ RewriteQueryTreeForPGDuckMutator(Node *node, RewriteQueryTreeContext * context)
 
 
 /*
- * ExpandCompositeUnnest rewrites unnest(..) calls over arrays of a composite
- * type into a form that means the same thing to DuckDB.
+ * ExpandCompositeUnnestRtes rewrites the unnest(..) calls over arrays of a
+ * composite type in the given range table into a form that means the same thing
+ * to DuckDB.
  *
  * PostgreSQL expands a function RTE that returns a composite type into one
  * column per field, and ruleutils always emits the full column alias list:
@@ -688,63 +675,18 @@ RewriteQueryTreeForPGDuckMutator(Node *node, RewriteQueryTreeContext * context)
  * therefore select the fields out of that struct ourselves.
  */
 static void
-ExpandCompositeUnnest(Query *query)
+ExpandCompositeUnnestRtes(List *rtable)
 {
-	List	   *unnestRteList = NIL;
-
-	FindCompositeUnnestRteWalker((Node *) query, &unnestRteList);
-
-	/*
-	 * Rewrite the RTEs after the walk, since the subqueries we build contain
-	 * the very unnest(..) calls we are looking for.
-	 */
 	ListCell   *lc;
 
-	foreach(lc, unnestRteList)
+	foreach(lc, rtable)
 	{
-		CompositeUnnestRte *unnestRte = (CompositeUnnestRte *) lfirst(lc);
-
-		ExpandCompositeUnnestRte(unnestRte->rte, unnestRte->elementTypeId);
-	}
-}
-
-
-/*
- * FindCompositeUnnestRteWalker collects every unnest(..) RTE over an array of a
- * composite type in the query tree.
- */
-static bool
-FindCompositeUnnestRteWalker(Node *node, List **unnestRteList)
-{
-	if (node == NULL)
-		return false;
-
-	/* want to look at all RTEs, even in subqueries, CTEs and such */
-	if (IsA(node, Query))
-		return query_tree_walker((Query *) node, FindCompositeUnnestRteWalker,
-								 unnestRteList, QTW_EXAMINE_RTES_BEFORE);
-
-	if (IsA(node, RangeTblEntry))
-	{
-		RangeTblEntry *rte = (RangeTblEntry *) node;
+		RangeTblEntry *rte = (RangeTblEntry *) lfirst(lc);
 		Oid			elementTypeId = InvalidOid;
 
 		if (IsCompositeUnnestRte(rte, &elementTypeId))
-		{
-			CompositeUnnestRte *unnestRte = palloc0(sizeof(CompositeUnnestRte));
-
-			unnestRte->rte = rte;
-			unnestRte->elementTypeId = elementTypeId;
-
-			*unnestRteList = lappend(*unnestRteList, unnestRte);
-		}
-
-		/* the walker descends into the RTE itself */
-		return false;
+			ExpandCompositeUnnestRte(rte, elementTypeId);
 	}
-
-	return expression_tree_walker(node, FindCompositeUnnestRteWalker,
-								  unnestRteList);
 }
 
 
