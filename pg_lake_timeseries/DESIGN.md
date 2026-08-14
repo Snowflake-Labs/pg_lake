@@ -870,7 +870,28 @@ heap tier with and without partitions, and the four ineligibility paths) and
 - **`seal()`'s copy is row-at-a-time.** `INSERT INTO <iceberg> SELECT ... FROM
   <heap>` uses the FDW path; the heap pushdown admits read-only queries only
   (`FullQueryIsPushdownable` rejects anything that is not a plain `SELECT`).
-- **Mutating sealed history** (§2), and cross-tier uniqueness.
+- **Freshness in Iceberg for external readers.** `sync()` (§9.2) copies only
+  partitions that are entirely in the past, and re-copies one only when the copy
+  predates the partition closing (`synced_at < part_end`), so two things are missing
+  for an engine reading the Iceberg tier directly: the open partition never appears
+  at all, which puts a floor of one `partition_interval` on freshness, and a
+  modification to an already-synced closed partition is not detected — it reaches
+  Iceberg at `seal()`, up to `hot_retention` later. Both are safe to fix, because
+  `B` does not move for a sync and the hook's `< B` predicate hides everything above
+  it from PostgreSQL readers; the invariant to keep is the existing one, that `B`
+  never advances over a range Iceberg lacks. What is missing is a change signal:
+  `pg_stat_all_tables` counters per leaf are free but not crash-safe, row triggers
+  on every leaf are crash-safe but tax the write path (§2 goal 4), and the third
+  option is no signal at all — the candidate set is closed-but-unsealed partitions,
+  `hot_retention / partition_interval` of them, so re-syncing all of them per pass
+  is correct at the cost of rewriting those ranges repeatedly. Refreshing the open
+  partition is a cadence and write-amplification question rather than a correctness
+  one: every refresh is a whole-range `DELETE` + `INSERT`, metadata-only on the
+  delete side but a new snapshot and new data files each time, so it wants the
+  compaction and snapshot expiry above. It also needs a stated guarantee for the
+  external reader — atomic per range, eventually consistent across ranges, and a
+  range may be behind what PostgreSQL holds — which is weaker than reading through
+  the relation.
 - **A `CustomScan`** that picks per partition between reading Iceberg and reading
   the heap. The planner hook covers the two shapes that matter (heap-only by
   pruning, and the union), and a `CustomScan` would only add the ability to
