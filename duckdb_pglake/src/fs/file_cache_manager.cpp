@@ -25,6 +25,7 @@
 
 #include "duckdb.hpp"
 #include "duckdb/common/local_file_system.hpp"
+#include "duckdb/common/unordered_set.hpp"
 
 #include "pg_lake/fs/file_cache_manager.hpp"
 #include "pg_lake/fs/file_utils.hpp"
@@ -608,6 +609,54 @@ PruneEmptyCacheDirectory(const string &cacheDir, string directory)
 
 
 /*
+ * CountMissingCacheDirectories counts the cache directories that do not exist
+ * yet, but that downloading the queued candidates will create.
+ *
+ * Each of those directories takes an inode, in the same way that pruning one in
+ * ManageCache gives an inode back, so the reservation we make for the download
+ * queue has to include them. Candidates that share a prefix also share its
+ * directories, so we count each directory once.
+ */
+static int64_t
+CountMissingCacheDirectories(FileSystem &fileSystem, const string &cacheDir,
+							 const vector<CacheItem> &cacheFiles)
+{
+	unordered_set<string> missingDirectories;
+
+	for (const CacheItem& cacheFile : cacheFiles)
+	{
+		if (!cacheFile.needsDownload)
+			continue;
+
+		string directory = FileUtils::ExtractDirName(cacheFile.cacheFilePath);
+
+		/*
+		 * Walk up towards the cache directory, which exists already. We can
+		 * stop at the first directory that exists or that another candidate
+		 * already accounted for, because everything above it is covered too.
+		 */
+		while (StringUtil::StartsWith(directory, cacheDir) && directory != cacheDir)
+		{
+			if (fileSystem.DirectoryExists(directory))
+				break;
+
+			if (!missingDirectories.insert(directory).second)
+				break;
+
+			/* ExtractDirName returns the path itself when it ends in a slash */
+			string dirWithoutSlash = directory;
+			if (StringUtil::EndsWith(dirWithoutSlash, "/"))
+				dirWithoutSlash.erase(dirWithoutSlash.length() - 1);
+
+			directory = FileUtils::ExtractDirName(dirWithoutSlash);
+		}
+	}
+
+	return (int64_t) missingDirectories.size();
+}
+
+
+/*
  * ManageCache implements a simple cache management approach where we prune
  * the least recently used files, until there is enough space for all recently
  * accessed candidates, and then we download them one by one.
@@ -778,9 +827,18 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize,
 	 * Reserve an inode for every file we are about to download, the same way
 	 * queueSize reserves bytes for them. Without that we would evict to exactly
 	 * the floor, add files, and be back under it in the next round.
+	 *
+	 * Downloading also creates the cache directories that lead to a new prefix,
+	 * so those have to be part of the reservation.
 	 */
+	int64_t queuedInodes = queuedFiles;
+
+	if (trackInodes)
+		queuedInodes +=
+			CountMissingCacheDirectories(file_system, cacheDir, cacheFiles);
+
 	int64_t inodesNeeded =
-		trackInodes ? inodeFloor + queuedFiles - freeInodes : 0;
+		trackInodes ? inodeFloor + queuedInodes - freeInodes : 0;
 	bool inodePressure = inodesNeeded > 0;
 
 	/*
@@ -792,7 +850,6 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize,
 	 * the cache alone and stop adding to it.
 	 */
 	bool canRelieveInodePressure = inodePressure && evictableFiles >= inodesNeeded;
-	int64_t inodeEvictionBudget = canRelieveInodePressure ? inodesNeeded : 0;
 
 	/*
 	 * Adding files to the cache consumes inodes, so when we cannot free enough
@@ -817,6 +874,7 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize,
 		}
 
 		queueSize = 0;
+		queuedInodes = 0;
 	}
 
 	/* sort from oldest to newest access time */
@@ -829,7 +887,13 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize,
 	for (CacheItem& cacheFile : cacheFiles)
 	{
 		bool needBytes = totalCacheSize + queueSize >= maxCacheSize;
-		bool needInodes = inodesFreed < inodeEvictionBudget;
+
+		/*
+		 * Derive this from the queue the way needBytes does, so that a
+		 * candidate we skip below also releases the inode it reserved.
+		 */
+		bool needInodes = canRelieveInodePressure &&
+			freeInodes + inodesFreed < inodeFloor + queuedInodes;
 
 		if (!needBytes && !needInodes)
 			/* we have enough space to fit our queue */
@@ -883,6 +947,14 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize,
 			/* a candidate is among the older files, don't download it */
 			cacheFile.needsDownload = false;
 			queueSize -= cacheFile.fileSize;
+
+			/*
+			 * Give back the inode we reserved for the file. We keep the ones
+			 * reserved for its directories, since another candidate may still
+			 * need them, and reserving too many only costs us an eviction.
+			 */
+			if (queuedInodes > 0)
+				queuedInodes--;
 
 			actions.push_back({
 				.url = cacheFile.url,
