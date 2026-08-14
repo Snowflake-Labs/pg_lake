@@ -49,6 +49,9 @@
 
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
 
+/* alias of the inner unnest(..) RTE that ExpandCompositeUnnestRte leaves behind */
+#define COMPOSITE_UNNEST_ALIAS "pg_lake_unnest"
+
 typedef Node *(*ExpressionRewriter) (Node *expression, void *context);
 
 /*
@@ -726,13 +729,27 @@ IsCompositeUnnestRte(RangeTblEntry *rte, Oid *elementTypeId)
 	if (get_typtype(typeId) != TYPTYPE_COMPOSITE)
 		return false;
 
+	/*
+	 * The rewrite below leaves behind an inner unnest(..) RTE whose single
+	 * column is the struct DuckDB returns, which is not something we can
+	 * expand again. It carries an alias of our own so that we recognize it
+	 * here, which keeps a second pass over the same tree from nesting another
+	 * subquery for a composite of any number of fields.
+	 */
+	if (strcmp(rte->eref->aliasname, COMPOSITE_UNNEST_ALIAS) == 0)
+		return false;
+
 	TupleDesc	tupleDesc = lookup_rowtype_tupdesc(typeId, -1);
 	bool		anyFieldDropped = false;
 
 	for (int fieldNumber = 0; fieldNumber < tupleDesc->natts; fieldNumber++)
-		anyFieldDropped |= TupleDescAttr(tupleDesc, fieldNumber)->attisdropped;
-
-	int			fieldCount = tupleDesc->natts;
+	{
+		if (TupleDescAttr(tupleDesc, fieldNumber)->attisdropped)
+		{
+			anyFieldDropped = true;
+			break;
+		}
+	}
 
 	ReleaseTupleDesc(tupleDesc);
 
@@ -742,15 +759,6 @@ IsCompositeUnnestRte(RangeTblEntry *rte, Oid *elementTypeId)
 	 * query fail to bind in DuckDB as it does today.
 	 */
 	if (anyFieldDropped)
-		return false;
-
-	/*
-	 * The rewrite below leaves behind an inner unnest(..) RTE that names the
-	 * single struct column DuckDB returns rather than one column per field.
-	 * Recognizing it here keeps a second pass over the same tree from nesting
-	 * another subquery.
-	 */
-	if (list_length(rte->eref->colnames) != fieldCount)
 		return false;
 
 	*elementTypeId = typeId;
@@ -766,8 +774,9 @@ IsCompositeUnnestRte(RangeTblEntry *rte, Oid *elementTypeId)
  *
  *     (SELECT (u.u).code, (u.u).charges FROM unnest(t.arr) u(u)) a
  *
- * The subquery has one column per field, in the same order, so the Vars that
- * reference the RTE, and the aliases of any join above it, stay valid.
+ * where u stands for COMPOSITE_UNNEST_ALIAS. The subquery has one column per
+ * field, in the same order, so the Vars that reference the RTE, and the aliases
+ * of any join above it, stay valid.
  */
 static void
 ExpandCompositeUnnestRte(RangeTblEntry *rte, Oid elementTypeId)
@@ -794,10 +803,20 @@ ExpandCompositeUnnestRte(RangeTblEntry *rte, Oid elementTypeId)
 	 */
 	unnestRte->lateral = false;
 	unnestRte->inFromCl = true;
-	unnestRte->eref = makeAlias(rte->eref->aliasname,
-								list_make1(makeString(rte->eref->aliasname)));
+
+	/*
+	 * Name it after ourselves rather than after the RTE we are replacing, so
+	 * that IsCompositeUnnestRte() recognizes it as already expanded. The name
+	 * is only visible to the field references we build below, since the inner
+	 * RTE is alone in the subquery.
+	 */
+	unnestRte->eref = makeAlias(COMPOSITE_UNNEST_ALIAS,
+								list_make1(makeString(COMPOSITE_UNNEST_ALIAS)));
 
 	List	   *targetList = NIL;
+
+	/* the parser names every column of a function RTE, dropped ones aside */
+	Assert(list_length(colnames) == tupleDesc->natts);
 
 	for (int fieldNumber = 1; fieldNumber <= tupleDesc->natts; fieldNumber++)
 	{
@@ -813,8 +832,7 @@ ExpandCompositeUnnestRte(RangeTblEntry *rte, Oid elementTypeId)
 
 		/*
 		 * Name the column the way the RTE does, so that references to it keep
-		 * resolving once the subquery names its own columns. The gate above
-		 * checked that there is a name for every field.
+		 * resolving once the subquery names its own columns.
 		 */
 		char	   *colname = strVal(list_nth(colnames, fieldNumber - 1));
 

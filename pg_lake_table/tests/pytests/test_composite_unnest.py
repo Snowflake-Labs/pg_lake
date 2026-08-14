@@ -148,6 +148,25 @@ def test_composite_unnest_field_values(create_composite_unnest_tables, pg_conn):
     ]
 
 
+def test_composite_unnest_single_field(create_composite_unnest_tables, pg_conn):
+    """A composite with a single field is expanded like any other.
+
+    Worth its own case because the rewritten RTE has as many columns as the
+    original one here, so it is only the alias that tells them apart.
+    """
+
+    query = """SELECT s.amount
+               FROM composite_unnest.single_tbl t, unnest(t.vals) s
+               ORDER BY 1"""
+
+    assert_query_pushdownable(query, pg_conn)
+
+    # the field is selected out of the single struct column DuckDB returns
+    assert_remote_query_contains_expression(query, '."amount"', pg_conn)
+
+    assert run_query(query, pg_conn) == [[10], [20]]
+
+
 def test_composite_unnest_dropped_field(create_composite_unnest_tables, pg_conn):
     """A composite with a dropped field is left alone, and so still fails.
 
@@ -186,12 +205,17 @@ def create_composite_unnest_tables(pg_conn, s3, request, extension):
         CREATE TYPE withdropped AS (keep1 int, goner text, keep2 int);
         ALTER TYPE withdropped DROP ATTRIBUTE goner;
 
+        CREATE TYPE single AS (amount int);
+
         CREATE FOREIGN TABLE tbl (pro_number bigint, accessorials accessorial[])
             SERVER pg_lake OPTIONS (location '{url}', writable 'true', format 'parquet');
         CREATE TABLE heap_tbl (pro_number bigint, accessorials accessorial[]);
 
         CREATE FOREIGN TABLE dropped_tbl (id int, vals withdropped[])
             SERVER pg_lake OPTIONS (location '{url}dropped/', writable 'true', format 'parquet');
+
+        CREATE FOREIGN TABLE single_tbl (id int, vals single[])
+            SERVER pg_lake OPTIONS (location '{url}single/', writable 'true', format 'parquet');
         """,
         pg_conn,
     )
@@ -209,6 +233,10 @@ def create_composite_unnest_tables(pg_conn, s3, request, extension):
     run_command(f"INSERT INTO heap_tbl {rows};", pg_conn)
     run_command(
         "INSERT INTO dropped_tbl VALUES (1, array[row(1, 2)::withdropped]);", pg_conn
+    )
+    run_command(
+        "INSERT INTO single_tbl VALUES (1, array[row(10)::single, row(20)::single]);",
+        pg_conn,
     )
     pg_conn.commit()
 
