@@ -286,11 +286,10 @@ PgLakeS3FileSystem::RemoveFileFromS3(string path, optional_ptr<FileOpener> opene
  * per request. It is the bulk counterpart of RemoveFileFromS3 and is meant for
  * removing a whole prefix's worth of objects (e.g. a dropped Iceberg table).
  *
- * DeleteObjects targets a single bucket, so keys are grouped by bucket; in the
- * common case every path shares one bucket and there is a single group. Region
- * resolution is the caller's job: paths should already carry ?s3_region when a
- * non-default region is required (RegionAwareS3FileSystem::RemoveFiles does
- * this).
+ * DeleteObjects targets a single bucket, so all paths must live in one bucket,
+ * and they must already carry the query arguments a request to that bucket
+ * needs: RegionAwareS3FileSystem::RemoveFiles groups by bucket and resolves the
+ * region.
  */
 void
 PgLakeS3FileSystem::RemoveFilesFromS3(const vector<string> &paths,
@@ -301,93 +300,70 @@ PgLakeS3FileSystem::RemoveFilesFromS3(const vector<string> &paths,
 
 	optional_ptr<HTTPMetadataCache> metadataCache = GetGlobalCache();
 
-	/*
-	 * Group the keys by bucket, keeping first-seen order (a small, usually
-	 * single-element set, so a linear scan is fine).
-	 */
-	vector<string> bucketUrls;
-	vector<string> bucketSamples;
-	vector<vector<string>> bucketKeys;
+	const string &samplePath = paths.front();
+	string bucketUrl;
+	vector<string> keys;
+
+	keys.reserve(paths.size());
 
 	for (const string &path : paths)
 	{
 		FileOpenerInfo s3UrlInfo = {path};
 		S3AuthParams authParams = S3AuthParams::ReadFrom(opener, s3UrlInfo);
 		ParsedS3Url parsedUrl = S3UrlParse(path, authParams);
-		string bucketUrl = parsedUrl.prefix + parsedUrl.bucket;
 
-		idx_t bucketIndex = bucketUrls.size();
-		for (idx_t i = 0; i < bucketUrls.size(); i++)
-		{
-			if (bucketUrls[i] == bucketUrl)
-			{
-				bucketIndex = i;
-				break;
-			}
-		}
+		if (bucketUrl.empty())
+			bucketUrl = parsedUrl.prefix + parsedUrl.bucket;
+		else if (bucketUrl != parsedUrl.prefix + parsedUrl.bucket)
+			throw InternalException("cannot delete %s and %s in one DeleteObjects request",
+									samplePath, path);
 
-		if (bucketIndex == bucketUrls.size())
-		{
-			bucketUrls.push_back(bucketUrl);
-			bucketSamples.push_back(path);
-			bucketKeys.emplace_back();
-		}
-
-		bucketKeys[bucketIndex].push_back(parsedUrl.key);
+		keys.push_back(parsedUrl.key);
 	}
 
-	for (idx_t b = 0; b < bucketUrls.size(); b++)
+	/*
+	 * Build one POST-capable handle and reuse it for every batch. CreateHandle
+	 * rather than OpenFile: we only need the auth and HTTP parameters, and
+	 * OpenFile would additionally HEAD the sample object, which costs a round
+	 * trip and fails with 404 when the sample happens to be gone already --
+	 * deleting an object that no longer exists is not an error for DeleteObjects
+	 * itself.
+	 */
+	unique_ptr<HTTPFileHandle> fileHandle =
+		CreateHandle(samplePath, FileFlags::FILE_FLAGS_READ, opener);
+
+	S3FileHandle *s3Handle = (S3FileHandle *) fileHandle.get();
+
+	/* Change the file handle to / to POST to /?delete */
+	s3Handle->path = bucketUrl + "/";
+
+	for (idx_t begin = 0; begin < keys.size(); begin += S3_DELETE_OBJECTS_MAX_KEYS)
 	{
-		const string &bucketUrl = bucketUrls[b];
-		const string &samplePath = bucketSamples[b];
-		const vector<string> &keys = bucketKeys[b];
+		idx_t end = MinValue(begin + S3_DELETE_OBJECTS_MAX_KEYS, keys.size());
 
-		/*
-		 * Build one POST-capable handle and reuse it for every batch in this
-		 * bucket. CreateHandle rather than OpenFile: we only need the auth and
-		 * HTTP parameters, and OpenFile would additionally HEAD the sample
-		 * object, which costs a round trip per bucket and fails with 404 when
-		 * the sample happens to be gone already -- deleting an object that no
-		 * longer exists is not an error for DeleteObjects itself.
-		 */
-		unique_ptr<HTTPFileHandle> fileHandle =
-			CreateHandle(samplePath, FileFlags::FILE_FLAGS_READ, opener);
+		PostDeleteObjects(*this, s3Handle, keys, begin, end);
+	}
 
-		S3FileHandle *s3Handle = (S3FileHandle *) fileHandle.get();
+	/*
+	 * Best-effort HTTP metadata cache hygiene, as in RemoveFileFromS3: drop any
+	 * cached entry for the deleted objects so a stale entry cannot make a
+	 * removed file look readable. Reads inject ?s3_region from cache, so evict
+	 * both the bare URL and the region-resolved form. The caller has already
+	 * region-resolved the paths, so the sample carries whatever query string a
+	 * read would use.
+	 */
+	string querySuffix;
+	auto queryPos = samplePath.find('?');
+	if (queryPos != string::npos)
+		querySuffix = samplePath.substr(queryPos);
 
-		/* Change the file handle to / to POST to /?delete */
-		s3Handle->path = bucketUrl + "/";
+	for (const string &key : keys)
+	{
+		string fullUrl = bucketUrl + "/" + key;
 
-		for (idx_t begin = 0; begin < keys.size(); begin += S3_DELETE_OBJECTS_MAX_KEYS)
-		{
-			idx_t end = begin + S3_DELETE_OBJECTS_MAX_KEYS;
-			if (end > keys.size())
-				end = keys.size();
-
-			PostDeleteObjects(*this, s3Handle, keys, begin, end);
-		}
-
-		/*
-		 * Best-effort HTTP metadata cache hygiene, as in RemoveFileFromS3: drop
-		 * any cached entry for the deleted objects so a stale entry cannot make
-		 * a removed file look readable. Reads inject ?s3_region from cache, so
-		 * evict both the bare URL and the region-resolved form. The caller has
-		 * already region-resolved the paths, so the sample carries whatever
-		 * query string a read would use.
-		 */
-		string regionSuffix;
-		auto queryPos = samplePath.find('?');
-		if (queryPos != string::npos)
-			regionSuffix = samplePath.substr(queryPos);
-
-		for (const string &key : keys)
-		{
-			string fullUrl = bucketUrl + "/" + key;
-
-			metadataCache->Erase(fullUrl);
-			if (!regionSuffix.empty())
-				metadataCache->Erase(fullUrl + regionSuffix);
-		}
+		metadataCache->Erase(fullUrl);
+		if (!querySuffix.empty())
+			metadataCache->Erase(fullUrl + querySuffix);
 	}
 }
 

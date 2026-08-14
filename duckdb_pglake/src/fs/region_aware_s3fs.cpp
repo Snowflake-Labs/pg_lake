@@ -602,172 +602,91 @@ RegionAwareS3FileSystem::GetBucketRegionFromS3(const string &url, optional_ptr<F
 
 
 /*
- * IsRegionMismatchError returns whether an HTTP error looks like the "wrong
- * region" signal that a region refresh + retry can fix. Same heuristic as
- * WithResolvedRegion, factored out so the batch delete path can share it.
+ * AppendQueryArgumentsToUrl appends a "name=value&..." query string to a URL,
+ * joining with ? or & depending on whether the URL already has one. A leading ?
+ * or & on the query string is ignored, so the tail of an already-decorated URL
+ * can be passed in as it is.
  */
-static bool
-IsRegionMismatchError(ErrorData &error)
+static string
+AppendQueryArgumentsToUrl(const string &url, const string &queryArguments)
 {
-	if (error.Type() != ExceptionType::HTTP)
-		return false;
+	string arguments = queryArguments;
 
-	return error.Message().find("HTTP 400") != std::string::npos ||
-		error.Message().find("400 (Bad Request)") != std::string::npos ||
-		error.Message().find("301") != std::string::npos;
+	if (!arguments.empty() && (arguments.front() == '?' || arguments.front() == '&'))
+		arguments.erase(0, 1);
+
+	if (arguments.empty())
+		return url;
+
+	return url + (url.find('?') == string::npos ? "?" : "&") + arguments;
 }
 
 
 /*
- * RemoveBucketFiles deletes the given paths, which must all live in bucketUrl,
- * via a single-bucket batched DeleteObjects. It resolves the region once (from
- * cache when possible) and, on a region-mismatch error, refreshes the region
- * and retries once -- the batch analogue of WithResolvedRegion.
- *
- * preResolved paths already carry everything the request needs (an S3 express
- * URL rewritten to its zonal endpoint), so they are sent as they are: there is
- * no region to look up and nothing a retry could fix.
+ * RemoveFiles deletes many files, using a batched DeleteObjects request per
+ * bucket instead of one request per file.
  */
-static void
-RemoveBucketFiles(RegionAwareS3FileSystem &fs, const string &bucketUrl,
-				  const vector<string> &bucketPaths, bool preResolved,
-				  optional_ptr<FileOpener> opener)
-{
-	if (preResolved)
-	{
-		fs.s3fs.RemoveFilesFromS3(bucketPaths, opener);
-		return;
-	}
-
-	const string &sample = bucketPaths.front();
-
-	string region = fs.GetBucketRegion(sample, opener);
-	auto runBatch = [&](const string &regionName) {
-		vector<string> resolvedPaths;
-		resolvedPaths.reserve(bucketPaths.size());
-
-		for (const string &path : bucketPaths)
-			resolvedPaths.push_back(regionName.empty()
-									? path
-									: AddQueryArgumentToUrl(path, "s3_region", regionName));
-
-		fs.s3fs.RemoveFilesFromS3(resolvedPaths, opener);
-	};
-
-	try
-	{
-		runBatch(region);
-	}
-	catch (Exception &ex)
-	{
-		ErrorData error(ex);
-
-		if (!IsRegionMismatchError(error))
-			throw;
-
-		PGDUCK_SERVER_DEBUG("S3 DeleteObjects failed (retrying with refreshed region): %s",
-							error.Message().c_str());
-
-		fs.ClearCachedRegion(bucketUrl, opener);
-
-		string actualRegion = fs.GetBucketRegionFromS3(sample, opener);
-
-		/* could not determine region, fall back to original error */
-		if (actualRegion.empty())
-			throw;
-
-		fs.PutCachedRegion(bucketUrl, actualRegion, opener);
-
-		runBatch(actualRegion);
-	}
-}
-
-
 void
 RegionAwareS3FileSystem::RemoveFiles(const vector<string> &paths,
 									 optional_ptr<FileOpener> opener)
 {
-	if (paths.empty())
-		return;
-
 	/*
-	 * Group the paths by bucket, keeping first-seen order (the set of buckets
-	 * is small -- usually one -- so a linear scan is fine).
+	 * DeleteObjects targets one bucket at a time, and the region is a property
+	 * of the bucket, so group the paths by bucket URL.
 	 *
-	 * Two kinds of path skip batching and go to per-file RemoveFile, which
-	 * resolves the region on its own: non-S3 paths, and paths that pin a region
-	 * themselves (WithResolvedRegion leaves those alone, so we do too, rather
-	 * than second-guess an explicit region in a batch). Without a client
-	 * context there is no region cache and no way to open a handle, so those
-	 * take the per-file path as well.
+	 * Paths that already pin a region go one at a time through RemoveFile, as
+	 * does anything that is not S3: WithResolvedRegion hands those through
+	 * untouched, so there is nothing for the group to share. A path that pins an
+	 * endpoint goes per-file too, so an express bucket cannot end up with a
+	 * second, conflicting endpoint appended to it.
 	 */
-	vector<string> bucketUrls;
-	vector<vector<string>> bucketPaths;
-	vector<bool> bucketPreResolved;
-
-	bool haveContext = opener && opener->TryGetClientContext();
+	map<string, vector<string>> pathsByBucket;
 
 	for (const string &path : paths)
 	{
-		bool batchable = haveContext &&
-			StringUtil::StartsWith(path, "s3://") &&
-			!UrlHasQueryArgument(path, "s3_region");
-
-		string bucketUrl = batchable ? GetBucketUrl(path, opener) : "";
-		string batchPath = path;
-		bool preResolved = false;
-
-		/*
-		 * Express buckets encode their region and zonal endpoint in the name,
-		 * and DeleteObjects has to go to that endpoint. Rewrite the path the
-		 * same way the per-file path does; every key in the bucket lands on the
-		 * same endpoint, so the batch still holds. A path that pins its own
-		 * endpoint, or a name we cannot decode (an unknown region shorthand),
-		 * falls back to per-file removal.
-		 */
-		if (batchable && StringUtil::EndsWith(bucketUrl, "--x-s3"))
-		{
-			string expressUrl;
-
-			if (!UrlHasQueryArgument(path, "s3_endpoint") &&
-				AddS3ExpressRegionEndpoint(path, expressUrl))
-			{
-				batchPath = expressUrl;
-				preResolved = true;
-			}
-			else
-				batchable = false;
-		}
-
-		if (!batchable)
+		if (!StringUtil::StartsWith(path, "s3://") ||
+			UrlHasQueryArgument(path, "s3_region") ||
+			UrlHasQueryArgument(path, "s3_endpoint"))
 		{
 			RemoveFile(path, opener);
 			continue;
 		}
 
-		idx_t bucketIndex = bucketUrls.size();
-		for (idx_t i = 0; i < bucketUrls.size(); i++)
-		{
-			if (bucketUrls[i] == bucketUrl)
-			{
-				bucketIndex = i;
-				break;
-			}
-		}
-
-		if (bucketIndex == bucketUrls.size())
-		{
-			bucketUrls.push_back(bucketUrl);
-			bucketPaths.emplace_back();
-			bucketPreResolved.push_back(preResolved);
-		}
-
-		bucketPaths[bucketIndex].push_back(batchPath);
+		pathsByBucket[GetBucketUrl(path, opener)].push_back(path);
 	}
 
-	for (idx_t b = 0; b < bucketUrls.size(); b++)
-		RemoveBucketFiles(*this, bucketUrls[b], bucketPaths[b],
-						  bucketPreResolved[b], opener);
+	for (auto &bucket : pathsByBucket)
+	{
+		const vector<string> &bucketPaths = bucket.second;
+		const string &samplePath = bucketPaths.front();
+
+		/*
+		 * Resolve the region the way every other entry point does, with the
+		 * first path standing in for the bucket: the batch gets the cached
+		 * region, and a region mismatch refreshes the region and retries the
+		 * whole batch.
+		 *
+		 * WithResolvedRegion answers by appending query arguments (s3_region,
+		 * plus s3_endpoint for an express bucket) to the URL it was handed, and
+		 * every key in the bucket needs the same ones, so copy the tail of the
+		 * resolved sample onto the remaining paths.
+		 */
+		WithResolvedRegion(samplePath, opener, [&](const string &resolvedPath) {
+			if (!StringUtil::StartsWith(resolvedPath, samplePath))
+				throw InternalException("region resolution rewrote %s into %s",
+										samplePath, resolvedPath);
+
+			string queryArguments = resolvedPath.substr(samplePath.size());
+
+			vector<string> resolvedPaths;
+			resolvedPaths.reserve(bucketPaths.size());
+
+			for (const string &path : bucketPaths)
+				resolvedPaths.push_back(AppendQueryArgumentsToUrl(path, queryArguments));
+
+			s3fs.RemoveFilesFromS3(resolvedPaths, opener);
+		});
+	}
 }
 
 } // namespace duckdb

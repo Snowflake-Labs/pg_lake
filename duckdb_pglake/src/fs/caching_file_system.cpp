@@ -371,7 +371,13 @@ PGLakeCachingFileSystem::RemoveFile(const string &filename,
 
 /*
  * RemoveFiles removes many files, batching the requests where the back end
- * supports it. See the header for why it is static.
+ * supports it.
+ *
+ * It is declared static in the class (C++ does not let the definition repeat
+ * that): a caller holding only a ClientContext cannot reach the
+ * PGLakeCachingFileSystem instance registered in the virtual file system, so
+ * this looks up what it needs from the context, as the file system functions in
+ * functions.cpp do.
  */
 void
 PGLakeCachingFileSystem::RemoveFiles(ClientContext &context, const vector<string> &paths)
