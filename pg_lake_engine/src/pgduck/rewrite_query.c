@@ -39,11 +39,13 @@
 #include "nodes/nodeFuncs.h"
 #include "parser/parse_func.h"
 #include "parser/parse_oper.h"
+#include "rewrite/rewriteManip.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/syscache.h"
+#include "utils/typcache.h"
 
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
 
@@ -123,8 +125,23 @@ typedef struct OperatorRewriteRuleByName
 }			OperatorRewriteRuleByName;
 
 
+/*
+ * CompositeUnnestRte is an unnest(..) RTE over an array of a composite type,
+ * together with the composite type that unnest(..) returns.
+ */
+typedef struct CompositeUnnestRte
+{
+	RangeTblEntry *rte;
+	Oid			elementTypeId;
+}			CompositeUnnestRte;
+
+
 static void InitRewriteRules(void);
 static Node *RewriteQueryTreeForPGDuckMutator(Node *node, RewriteQueryTreeContext * context);
+static void ExpandCompositeUnnest(Query *query);
+static bool FindCompositeUnnestRteWalker(Node *node, List **unnestRteList);
+static bool IsCompositeUnnestRte(RangeTblEntry *rte, Oid *elementTypeId);
+static void ExpandCompositeUnnestRte(RangeTblEntry *rte, Oid elementTypeId);
 static Node *ReplaceJsonbWithPgLakeInternalJsonbFunction(Node *inputNode, void *context);
 static bool IsJsonbCast(Node *node);
 static Node *WrapPgLakeInternalJsonbFunction(Node *data);
@@ -512,7 +529,17 @@ RewriteQueryTreeForPGDuck(Query *query)
 		.level = -1
 	};
 
-	return (Query *) RewriteQueryTreeForPGDuckMutator((Node *) query, &context);
+	Query	   *rewrittenQuery = (Query *)
+		RewriteQueryTreeForPGDuckMutator((Node *) query, &context);
+
+	/*
+	 * Rewrite range table entries that mean something else in DuckDB. The
+	 * mutator handed back a copy of the query tree, so this does not touch
+	 * the tree the caller gave us.
+	 */
+	ExpandCompositeUnnest(rewrittenQuery);
+
+	return rewrittenQuery;
 }
 
 
@@ -643,6 +670,235 @@ RewriteQueryTreeForPGDuckMutator(Node *node, RewriteQueryTreeContext * context)
 	}
 
 	return node;
+}
+
+
+/*
+ * ExpandCompositeUnnest rewrites unnest(..) calls over arrays of a composite
+ * type into a form that means the same thing to DuckDB.
+ *
+ * PostgreSQL expands a function RTE that returns a composite type into one
+ * column per field, and ruleutils always emits the full column alias list:
+ *
+ *     unnest(t.arr) a("code", "charges", "is_waived")
+ *
+ * DuckDB's unnest() of an array of structs produces a single struct column, so
+ * it binds only the first alias: a reference to any other field fails to bind,
+ * and a reference to the first field silently returns the whole struct. We
+ * therefore select the fields out of that struct ourselves.
+ */
+static void
+ExpandCompositeUnnest(Query *query)
+{
+	List	   *unnestRteList = NIL;
+
+	FindCompositeUnnestRteWalker((Node *) query, &unnestRteList);
+
+	/*
+	 * Rewrite the RTEs after the walk, since the subqueries we build contain
+	 * the very unnest(..) calls we are looking for.
+	 */
+	ListCell   *lc;
+
+	foreach(lc, unnestRteList)
+	{
+		CompositeUnnestRte *unnestRte = (CompositeUnnestRte *) lfirst(lc);
+
+		ExpandCompositeUnnestRte(unnestRte->rte, unnestRte->elementTypeId);
+	}
+}
+
+
+/*
+ * FindCompositeUnnestRteWalker collects every unnest(..) RTE over an array of a
+ * composite type in the query tree.
+ */
+static bool
+FindCompositeUnnestRteWalker(Node *node, List **unnestRteList)
+{
+	if (node == NULL)
+		return false;
+
+	/* want to look at all RTEs, even in subqueries, CTEs and such */
+	if (IsA(node, Query))
+		return query_tree_walker((Query *) node, FindCompositeUnnestRteWalker,
+								 unnestRteList, QTW_EXAMINE_RTES_BEFORE);
+
+	if (IsA(node, RangeTblEntry))
+	{
+		RangeTblEntry *rte = (RangeTblEntry *) node;
+		Oid			elementTypeId = InvalidOid;
+
+		if (IsCompositeUnnestRte(rte, &elementTypeId))
+		{
+			CompositeUnnestRte *unnestRte = palloc0(sizeof(CompositeUnnestRte));
+
+			unnestRte->rte = rte;
+			unnestRte->elementTypeId = elementTypeId;
+
+			*unnestRteList = lappend(*unnestRteList, unnestRte);
+		}
+
+		/* the walker descends into the RTE itself */
+		return false;
+	}
+
+	return expression_tree_walker(node, FindCompositeUnnestRteWalker,
+								  unnestRteList);
+}
+
+
+/*
+ * IsCompositeUnnestRte returns whether the given RTE is an unnest(..) call over
+ * an array of a composite type that the rewrite below can handle, and if so also
+ * returns the composite type.
+ */
+static bool
+IsCompositeUnnestRte(RangeTblEntry *rte, Oid *elementTypeId)
+{
+	if (rte->rtekind != RTE_FUNCTION || list_length(rte->functions) != 1)
+		return false;
+
+	/* WITH ORDINALITY adds a column that the rewrite below cannot produce */
+	if (rte->funcordinality)
+		return false;
+
+	RangeTblFunction *rtfunc = (RangeTblFunction *) linitial(rte->functions);
+
+	/* a column definition list is deparsed with its own syntax */
+	if (rtfunc->funccolnames != NIL)
+		return false;
+
+	if (!IsA(rtfunc->funcexpr, FuncExpr) ||
+		((FuncExpr *) rtfunc->funcexpr)->funcid != F_UNNEST_ANYARRAY)
+		return false;
+
+	/*
+	 * A domain over a composite type is expanded per field just the same, so
+	 * look through the domain. The field references we build below need the
+	 * composite type itself in any case, since that is what carries the
+	 * fields.
+	 */
+	Oid			typeId = getBaseType(exprType(rtfunc->funcexpr));
+
+	if (get_typtype(typeId) != TYPTYPE_COMPOSITE)
+		return false;
+
+	TupleDesc	tupleDesc = lookup_rowtype_tupdesc(typeId, -1);
+	bool		anyFieldDropped = false;
+
+	for (int fieldNumber = 0; fieldNumber < tupleDesc->natts; fieldNumber++)
+		anyFieldDropped |= TupleDescAttr(tupleDesc, fieldNumber)->attisdropped;
+
+	int			fieldCount = tupleDesc->natts;
+
+	ReleaseTupleDesc(tupleDesc);
+
+	/*
+	 * A dropped field still occupies a column of the RTE, but has no name we
+	 * could put in the alias list, so leave these RTEs alone and let the
+	 * query fail to bind in DuckDB as it does today.
+	 */
+	if (anyFieldDropped)
+		return false;
+
+	/*
+	 * The rewrite below leaves behind an inner unnest(..) RTE that names the
+	 * single struct column DuckDB returns rather than one column per field.
+	 * Recognizing it here keeps a second pass over the same tree from nesting
+	 * another subquery.
+	 */
+	if (list_length(rte->eref->colnames) != fieldCount)
+		return false;
+
+	*elementTypeId = typeId;
+
+	return true;
+}
+
+
+/*
+ * ExpandCompositeUnnestRte replaces an unnest(..) RTE over an array of a
+ * composite type with an equivalent lateral subquery that selects the fields of
+ * the composite one by one:
+ *
+ *     (SELECT (u.u).code, (u.u).charges FROM unnest(t.arr) u(u)) a
+ *
+ * The subquery has one column per field, in the same order, so the Vars that
+ * reference the RTE, and the aliases of any join above it, stay valid.
+ */
+static void
+ExpandCompositeUnnestRte(RangeTblEntry *rte, Oid elementTypeId)
+{
+	RangeTblFunction *rtfunc = (RangeTblFunction *) linitial(rte->functions);
+	TupleDesc	tupleDesc = lookup_rowtype_tupdesc(elementTypeId, -1);
+	List	   *colnames = rte->eref->colnames;
+
+	/* the unnest(..) call, and anything it references, moves a level down */
+	IncrementVarSublevelsUp(rtfunc->funcexpr, 1, 0);
+
+	/* to DuckDB, unnest(..) of an array of structs returns a single column */
+	rtfunc->funccolcount = 1;
+
+	RangeTblEntry *unnestRte = makeNode(RangeTblEntry);
+
+	unnestRte->rtekind = RTE_FUNCTION;
+	unnestRte->functions = rte->functions;
+
+	/*
+	 * The inner RTE is the only thing in its own FROM clause, so it never
+	 * needs the LATERAL keyword; the outer RTE keeps the flag that covers the
+	 * correlation.
+	 */
+	unnestRte->lateral = false;
+	unnestRte->inFromCl = true;
+	unnestRte->eref = makeAlias(rte->eref->aliasname,
+								list_make1(makeString(rte->eref->aliasname)));
+
+	List	   *targetList = NIL;
+
+	for (int fieldNumber = 1; fieldNumber <= tupleDesc->natts; fieldNumber++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupleDesc, fieldNumber - 1);
+		FieldSelect *fieldSelect = makeNode(FieldSelect);
+
+		fieldSelect->arg = (Expr *) makeVar(1, 1, elementTypeId, -1,
+											InvalidOid, 0);
+		fieldSelect->fieldnum = fieldNumber;
+		fieldSelect->resulttype = attr->atttypid;
+		fieldSelect->resulttypmod = attr->atttypmod;
+		fieldSelect->resultcollid = attr->attcollation;
+
+		/*
+		 * Name the column the way the RTE does, so that references to it keep
+		 * resolving once the subquery names its own columns. The gate above
+		 * checked that there is a name for every field.
+		 */
+		char	   *colname = strVal(list_nth(colnames, fieldNumber - 1));
+
+		targetList = lappend(targetList,
+							 makeTargetEntry((Expr *) fieldSelect, fieldNumber,
+											 pstrdup(colname), false));
+	}
+
+	ReleaseTupleDesc(tupleDesc);
+
+	RangeTblRef *rangeTableRef = makeNode(RangeTblRef);
+
+	rangeTableRef->rtindex = 1;
+
+	Query	   *subquery = makeNode(Query);
+
+	subquery->commandType = CMD_SELECT;
+	subquery->querySource = QSRC_ORIGINAL;
+	subquery->canSetTag = true;
+	subquery->rtable = list_make1(unnestRte);
+	subquery->jointree = makeFromExpr(list_make1(rangeTableRef), NULL);
+	subquery->targetList = targetList;
+
+	rte->rtekind = RTE_SUBQUERY;
+	rte->subquery = subquery;
+	rte->functions = NIL;
 }
 
 
