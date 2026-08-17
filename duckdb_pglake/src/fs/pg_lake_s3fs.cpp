@@ -46,6 +46,12 @@ static constexpr idx_t MD5_HASH_LENGTH_BASE64 = 24;
 static constexpr idx_t S3_DELETE_OBJECTS_MAX_KEYS = 1000;
 
 /*
+ * A DeleteObjects response can report an error per key, so up to 1000 of them.
+ * Name the first few in the error we throw and only count the rest.
+ */
+static constexpr idx_t S3_DELETE_OBJECTS_MAX_REPORTED_ERRORS = 3;
+
+/*
  * Name of the setting that specifies the location of pg_lake managed storage bucket.
  */
 const string MANAGED_STORAGE_BUCKET_SETTING = "pg_lake_managed_storage_bucket";
@@ -172,6 +178,36 @@ EscapeXmlText(const string &text)
 
 
 /*
+ * ExtractXmlElementText returns the character data of the first <tag>...</tag>
+ * in xml, or an empty string if there is none.
+ *
+ * This is not an XML parser: we only use it on the elements of a DeleteResult
+ * body, which S3 generates and which carry no attributes or CDATA sections. The
+ * text comes back as S3 escaped it.
+ */
+static string
+ExtractXmlElementText(const string &xml, const string &tag)
+{
+	string openTag = "<" + tag + ">";
+	string closeTag = "</" + tag + ">";
+
+	size_t textStart = xml.find(openTag);
+
+	if (textStart == string::npos)
+		return string();
+
+	textStart += openTag.size();
+
+	size_t textEnd = xml.find(closeTag, textStart);
+
+	if (textEnd == string::npos)
+		return string();
+
+	return xml.substr(textStart, textEnd - textStart);
+}
+
+
+/*
  * PostDeleteObjects issues a single S3 DeleteObjects request for the keys in
  * [begin, end). s3Handle must already be pointed at "<prefix><bucket>/" so the
  * POST targets /?delete, and every key must live in that bucket. The caller is
@@ -181,6 +217,10 @@ EscapeXmlText(const string &text)
  * Deleting a key that does not exist is not an error in S3, so a well-formed
  * DeleteResult that still carries an <Error> means a real failure (e.g. access
  * denied) that we must surface rather than silently dropping keys.
+ *
+ * The response also lists the keys that were deleted, but for a request without
+ * errors that is simply the keys we asked for, and when there are errors we
+ * throw. So we only read the <Error> entries.
  */
 static void
 PostDeleteObjects(PgLakeS3FileSystem &fs, S3FileHandle *s3Handle,
@@ -213,11 +253,46 @@ PostDeleteObjects(PgLakeS3FileSystem &fs, S3FileHandle *s3Handle,
 							postResponse->status,
 		                    result);
 
-	if (result.find("<Error>") != string::npos)
+	/*
+	 * Name the keys that failed and why, instead of handing the caller a body
+	 * that can hold a thousand entries.
+	 */
+	idx_t errorCount = 0;
+	string errorDetails;
+
+	for (size_t errorPos = result.find("<Error>");
+		 errorPos != string::npos;
+		 errorPos = result.find("<Error>", errorPos + 1))
+	{
+		errorCount++;
+
+		if (errorCount > S3_DELETE_OBJECTS_MAX_REPORTED_ERRORS)
+			continue;
+
+		/* limit the search to this entry, in case one of the elements is absent */
+		size_t errorEnd = result.find("</Error>", errorPos);
+		string errorEntry = result.substr(errorPos, errorEnd == string::npos
+												   ? string::npos : errorEnd - errorPos);
+
+		if (!errorDetails.empty())
+			errorDetails += ", ";
+
+		errorDetails += StringUtil::Format("%s: %s (%s)",
+										   ExtractXmlElementText(errorEntry, "Key"),
+										   ExtractXmlElementText(errorEntry, "Code"),
+										   ExtractXmlElementText(errorEntry, "Message"));
+	}
+
+	if (errorCount > 0)
+	{
+		if (errorCount > S3_DELETE_OBJECTS_MAX_REPORTED_ERRORS)
+			errorDetails += StringUtil::Format(", and %llu more",
+											   (uint64_t) (errorCount - S3_DELETE_OBJECTS_MAX_REPORTED_ERRORS));
+
 		throw HTTPException(*postResponse,
-							"S3 DeleteObjects reported errors: %d\n\n%s",
-							postResponse->status,
-		                    result);
+							"S3 DeleteObjects failed for %llu of %llu keys: %s",
+							(uint64_t) errorCount, (uint64_t) (end - begin), errorDetails);
+	}
 }
 
 
@@ -358,17 +433,7 @@ PgLakeS3FileSystem::RemoveFilesFromS3(const vector<string> &paths,
 	if (queryPos != string::npos)
 		querySuffix = samplePath.substr(queryPos);
 
-	for (idx_t begin = 0; begin < keys.size(); begin += S3_DELETE_OBJECTS_MAX_KEYS)
-	{
-		idx_t end = MinValue(begin + S3_DELETE_OBJECTS_MAX_KEYS, keys.size());
-
-		PostDeleteObjects(*this, s3Handle, keys, begin, end);
-
-		/*
-		 * Evict per batch rather than once at the end: PostDeleteObjects throws
-		 * when S3 reports a per-key error, and the batches before the failing
-		 * one are already deleted.
-		 */
+	auto evictBatch = [&](idx_t begin, idx_t end) {
 		for (idx_t i = begin; i < end; i++)
 		{
 			string fullUrl = bucketUrl + "/" + keys[i];
@@ -377,6 +442,26 @@ PgLakeS3FileSystem::RemoveFilesFromS3(const vector<string> &paths,
 			if (!querySuffix.empty())
 				metadataCache->Erase(fullUrl + querySuffix);
 		}
+	};
+
+	for (idx_t begin = 0; begin < keys.size(); begin += S3_DELETE_OBJECTS_MAX_KEYS)
+	{
+		idx_t end = MinValue(begin + S3_DELETE_OBJECTS_MAX_KEYS, keys.size());
+
+		/*
+		 * Evict per batch rather than once at the end, and both before and after
+		 * the request, for the same reasons the file cache does it in
+		 * PGLakeCachingFileSystem::RemoveFiles: PostDeleteObjects throws when S3
+		 * reports a per-key error, and the keys it did delete are gone whether or
+		 * not we get to the second eviction; a concurrent reader can also cache
+		 * an entry again in the window between the eviction and the delete.
+		 * Evicting an entry for a file that is still there only costs a HEAD.
+		 */
+		evictBatch(begin, end);
+
+		PostDeleteObjects(*this, s3Handle, keys, begin, end);
+
+		evictBatch(begin, end);
 	}
 }
 

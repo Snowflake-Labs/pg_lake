@@ -85,6 +85,14 @@ public:
 							std::function<void(const string &)> s3Operation);
 
 	/*
+	 * Same, for a set of URLs that all live in the same bucket, so that a
+	 * batched request (DeleteObjects) resolves the region once and retries the
+	 * whole batch on a mismatch. Every URL gets the same query arguments.
+	 */
+	void WithResolvedRegion(const vector<string> &urls, optional_ptr<FileOpener> opener,
+							std::function<void(const vector<string> &)> s3Operation);
+
+	/*
 	 * Download performs similar logic to GetRequest, except writing the output
 	 * to a destination file rather than an in-memory buffer.
 	 */

@@ -251,10 +251,13 @@ def test_s3_get_region_invalid(pgduck_conn):
     pgduck_conn.rollback()
 
 
-def test_pg_lake_remove_files_recursive(s3, pgduck_conn):
-    """pg_lake_remove_files expands a recursive glob and deletes every matched
-    object, recursing into sub-prefixes, while leaving objects outside the
-    pattern untouched. It returns one row per deleted URL."""
+def test_pg_lake_remove_file_glob_recursive(s3, pgduck_conn):
+    """The glob + pg_lake_remove_file form that DeleteRemotePrefix uses deletes
+    every object under a prefix, recursing into sub-prefixes, and leaves objects
+    outside the pattern untouched.
+
+    The call goes in WHERE rather than the select list because DuckDB prunes a
+    projection that nothing reads, and count(*) reads none of it."""
     prefix = "test_remove_files/tbl"
 
     keys = [
@@ -271,7 +274,8 @@ def test_pg_lake_remove_files_recursive(s3, pgduck_conn):
     s3.put_object(Bucket=TEST_BUCKET, Key=survivor, Body=b"x")
 
     results = perform_query_on_cursor(
-        f"SELECT count(*) FROM pg_lake_remove_files('s3://{TEST_BUCKET}/{prefix}/**')",
+        f"SELECT count(*) FROM glob('s3://{TEST_BUCKET}/{prefix}/**') "
+        "WHERE pg_lake_remove_file(file)",
         pgduck_conn,
     )
     assert results[0][0] == len(keys)
@@ -284,7 +288,7 @@ def test_pg_lake_remove_files_recursive(s3, pgduck_conn):
     pgduck_conn.rollback()
 
 
-def test_pg_lake_remove_files_batches_over_1000(s3, pgduck_conn):
+def test_pg_lake_remove_file_glob_batches_over_1000(s3, pgduck_conn):
     """More than 1000 matched objects must all be deleted: the DeleteObjects
     request caps at 1000 keys, so this crosses the batch boundary and exercises
     the multi-batch loop."""
@@ -295,7 +299,8 @@ def test_pg_lake_remove_files_batches_over_1000(s3, pgduck_conn):
         s3.put_object(Bucket=TEST_BUCKET, Key=f"{prefix}/f{i}.parquet", Body=b"x")
 
     results = perform_query_on_cursor(
-        f"SELECT count(*) FROM pg_lake_remove_files('s3://{TEST_BUCKET}/{prefix}/**')",
+        f"SELECT count(*) FROM glob('s3://{TEST_BUCKET}/{prefix}/**') "
+        "WHERE pg_lake_remove_file(file)",
         pgduck_conn,
     )
     assert results[0][0] == count
@@ -307,7 +312,7 @@ def test_pg_lake_remove_files_batches_over_1000(s3, pgduck_conn):
     pgduck_conn.rollback()
 
 
-def test_pg_lake_remove_files_xml_special_chars(s3, pgduck_conn):
+def test_pg_lake_remove_file_glob_xml_special_chars(s3, pgduck_conn):
     """S3 allows '&', '<' and '>' in object keys. Those have to be escaped in the
     DeleteObjects XML body: unescaped, the body is malformed XML and S3 rejects
     the whole batch, so a table whose location prefix contains one of them would
@@ -323,7 +328,8 @@ def test_pg_lake_remove_files_xml_special_chars(s3, pgduck_conn):
         s3.put_object(Bucket=TEST_BUCKET, Key=key, Body=b"x")
 
     results = perform_query_on_cursor(
-        f"SELECT count(*) FROM pg_lake_remove_files('s3://{TEST_BUCKET}/{prefix}/**')",
+        f"SELECT count(*) FROM glob('s3://{TEST_BUCKET}/{prefix}/**') "
+        "WHERE pg_lake_remove_file(file)",
         pgduck_conn,
     )
     assert results[0][0] == len(keys)
@@ -333,36 +339,15 @@ def test_pg_lake_remove_files_xml_special_chars(s3, pgduck_conn):
     pgduck_conn.rollback()
 
 
-def test_pg_lake_remove_files_prepared_more_than_once(s3, pgduck_conn):
-    """A prepared pg_lake_remove_files deletes on every execution, not only the
-    first.
-
-    DuckDB binds once per plan and reuses the bind data for every execution of
-    it, so scan state kept there -- the "already produced my rows" flag, the scan
-    offset, the list of deleted URLs -- survives into the next execution. For a
-    deleting function that is worse than a wrong answer: the second EXECUTE would
-    expand nothing, delete nothing and still report success to the caller, which
-    for DeleteRemotePrefix reads as a completed cleanup. The state belongs in a
-    GlobalTableFunctionState, which is created per execution."""
-    prefix = "test_remove_files_prepared"
-
-    cur = pgduck_conn.cursor()
-    cur.execute(
-        "PREPARE reused_remove AS "
-        f"SELECT count(*) FROM pg_lake_remove_files('s3://{TEST_BUCKET}/{prefix}/**')"
+def test_pg_lake_remove_file_glob_empty(s3, pgduck_conn):
+    """A prefix with nothing under it is not an error: dropping a table whose
+    files are already gone, or that never wrote any, still has to succeed."""
+    results = perform_query_on_cursor(
+        f"SELECT count(*) FROM glob('s3://{TEST_BUCKET}/test_remove_files_empty/**') "
+        "WHERE pg_lake_remove_file(file)",
+        pgduck_conn,
     )
-    cur.close()
-
-    for execution in range(1, 4):
-        key = f"{prefix}/round{execution}.parquet"
-        s3.put_object(Bucket=TEST_BUCKET, Key=key, Body=b"x")
-
-        results = perform_query_on_cursor("EXECUTE reused_remove", pgduck_conn)
-        assert (
-            results[0][0] == 1
-        ), f"execution {execution} of reused_remove deleted {results[0][0]} files"
-
-        assert list_objects(s3, TEST_BUCKET, f"{prefix}/") == []
+    assert results[0][0] == 0
 
     pgduck_conn.rollback()
 

@@ -224,39 +224,77 @@ RegionAwareS3FileSystem::OpenFile(const string &url,
 
 
 /*
- * WithResolvedRegion runs s3Operation against an S3 URL, picking the region
- * from cache when available and falling back to GetBucketRegionFromS3 on a
- * 400/301.
- *
- * Same shape as the old OpenFile: try once (with cached region or bare URL),
- * and if the error looks like a region mismatch, look up the actual region
- * and retry. All region-aware entry points (OpenFile, FileExists,
- * DirectoryExists, RemoveFile) go through here so the retry + cache logic
- * lives in one place.
+ * AddRegionToUrls returns the URLs with an ?s3_region=... argument added.
+ */
+static vector<string>
+AddRegionToUrls(const vector<string> &urls, const string &region)
+{
+	vector<string> urlsWithRegion;
+
+	urlsWithRegion.reserve(urls.size());
+
+	for (const string &url : urls)
+		urlsWithRegion.push_back(AddQueryArgumentToUrl(url, "s3_region", region));
+
+	return urlsWithRegion;
+}
+
+
+/*
+ * WithResolvedRegion runs s3Operation against a single S3 URL. See the
+ * multi-URL version below.
  */
 void
 RegionAwareS3FileSystem::WithResolvedRegion(const string &url,
 											optional_ptr<FileOpener> opener,
 											std::function<void(const string &)> s3Operation)
 {
+	WithResolvedRegion(vector<string>{url}, opener,
+					   [&](const vector<string> &resolvedUrls) {
+						   s3Operation(resolvedUrls.front());
+					   });
+}
+
+
+/*
+ * WithResolvedRegion runs s3Operation against a set of S3 URLs that all live in
+ * the same bucket, picking the region from cache when available and falling back
+ * to GetBucketRegionFromS3 on a 400/301.
+ *
+ * Same shape as the old OpenFile: try once (with cached region or bare URLs),
+ * and if the error looks like a region mismatch, look up the actual region and
+ * retry. All region-aware entry points (OpenFile, FileExists, DirectoryExists,
+ * RemoveFile, RemoveFiles) go through here so the retry + cache logic lives in
+ * one place.
+ *
+ * The region is a property of the bucket, so the checks below only need to look
+ * at the first URL, and every URL gets the same query arguments.
+ */
+void
+RegionAwareS3FileSystem::WithResolvedRegion(const vector<string> &urls,
+											optional_ptr<FileOpener> opener,
+											std::function<void(const vector<string> &)> s3Operation)
+{
+	const string &url = urls.front();
+
 	if (!opener || !opener->TryGetClientContext())
 	{
 		/* no client context, no cache; just pass through */
-		s3Operation(url);
+		s3Operation(urls);
 		return;
 	}
 
 	/* as far as we know, looking up bucket region only works for S3 */
 	if (!StringUtil::StartsWith(url, "s3://"))
 	{
-		s3Operation(url);
+		s3Operation(urls);
 		return;
 	}
 
 	/* user explicitly asked for a region, don't try to be smart */
 	if (UrlHasQueryArgument(url, "s3_region"))
 	{
-		s3Operation(url);
+		s3Operation(urls);
 		return;
 	}
 
@@ -267,10 +305,23 @@ RegionAwareS3FileSystem::WithResolvedRegion(const string &url,
 	if (StringUtil::EndsWith(bucketUrl, "--x-s3") &&
 		!UrlHasQueryArgument(url, "s3_endpoint"))
 	{
-		string expressUrl;
-		if (AddS3ExpressRegionEndpoint(url, expressUrl))
+		vector<string> expressUrls;
+
+		expressUrls.reserve(urls.size());
+
+		for (const string &urlToResolve : urls)
 		{
-			s3Operation(expressUrl);
+			string expressUrl;
+
+			if (!AddS3ExpressRegionEndpoint(urlToResolve, expressUrl))
+				break;
+
+			expressUrls.push_back(expressUrl);
+		}
+
+		if (expressUrls.size() == urls.size())
+		{
+			s3Operation(expressUrls);
 			return;
 		}
 	}
@@ -282,10 +333,10 @@ RegionAwareS3FileSystem::WithResolvedRegion(const string &url,
 	{
 		if (!cachedRegion.empty())
 			/* use the cached region, we may still fail and refresh the region */
-			s3Operation(AddQueryArgumentToUrl(url, "s3_region", cachedRegion));
+			s3Operation(AddRegionToUrls(urls, cachedRegion));
 		else
 			/* optimistically run the call, even if we don't know the region */
-			s3Operation(url);
+			s3Operation(urls);
 		return;
 	}
 	catch (Exception &ex)
@@ -318,7 +369,7 @@ RegionAwareS3FileSystem::WithResolvedRegion(const string &url,
 		PutCachedRegion(bucketUrl, actualRegion, opener);
 
 		/* retry with the actual region (and hope for the best) */
-		s3Operation(AddQueryArgumentToUrl(url, "s3_region", actualRegion));
+		s3Operation(AddRegionToUrls(urls, actualRegion));
 	}
 }
 
@@ -602,27 +653,6 @@ RegionAwareS3FileSystem::GetBucketRegionFromS3(const string &url, optional_ptr<F
 
 
 /*
- * AppendQueryArgumentsToUrl appends a "name=value&..." query string to a URL,
- * joining with ? or & depending on whether the URL already has one. A leading ?
- * or & on the query string is ignored, so the tail of an already-decorated URL
- * can be passed in as it is.
- */
-static string
-AppendQueryArgumentsToUrl(const string &url, const string &queryArguments)
-{
-	string arguments = queryArguments;
-
-	if (!arguments.empty() && (arguments.front() == '?' || arguments.front() == '&'))
-		arguments.erase(0, 1);
-
-	if (arguments.empty())
-		return url;
-
-	return url + (url.find('?') == string::npos ? "?" : "&") + arguments;
-}
-
-
-/*
  * RemoveFiles deletes many files, using a batched DeleteObjects request per
  * bucket instead of one request per file.
  */
@@ -653,38 +683,16 @@ RegionAwareS3FileSystem::RemoveFiles(const vector<string> &paths,
 		pathsByBucket[GetBucketUrl(path, opener)].push_back(path);
 	}
 
+	/*
+	 * Resolve the region the way every other entry point does: the batch gets
+	 * the cached region, and a region mismatch refreshes the region and retries
+	 * the whole batch.
+	 */
 	for (auto &bucket : pathsByBucket)
-	{
-		const vector<string> &bucketPaths = bucket.second;
-		const string &samplePath = bucketPaths.front();
-
-		/*
-		 * Resolve the region the way every other entry point does, with the
-		 * first path standing in for the bucket: the batch gets the cached
-		 * region, and a region mismatch refreshes the region and retries the
-		 * whole batch.
-		 *
-		 * WithResolvedRegion answers by appending query arguments (s3_region,
-		 * plus s3_endpoint for an express bucket) to the URL it was handed, and
-		 * every key in the bucket needs the same ones, so copy the tail of the
-		 * resolved sample onto the remaining paths.
-		 */
-		WithResolvedRegion(samplePath, opener, [&](const string &resolvedPath) {
-			if (!StringUtil::StartsWith(resolvedPath, samplePath))
-				throw InternalException("region resolution rewrote %s into %s",
-										samplePath, resolvedPath);
-
-			string queryArguments = resolvedPath.substr(samplePath.size());
-
-			vector<string> resolvedPaths;
-			resolvedPaths.reserve(bucketPaths.size());
-
-			for (const string &path : bucketPaths)
-				resolvedPaths.push_back(AppendQueryArgumentsToUrl(path, queryArguments));
-
-			s3fs.RemoveFilesFromS3(resolvedPaths, opener);
-		});
-	}
+		WithResolvedRegion(bucket.second, opener,
+						   [&](const vector<string> &resolvedPaths) {
+							   s3fs.RemoveFilesFromS3(resolvedPaths, opener);
+						   });
 }
 
 } // namespace duckdb
