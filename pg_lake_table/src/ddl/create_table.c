@@ -901,7 +901,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 			ErrorIfRestNamespaceDoesNotExist(opts, catalogName, catalogNamespace);
 
 			metadataLocation =
-				GetMetadataLocationFromRestCatalog(opts, catalogName, catalogNamespace, catalogTableName);
+				LoadRestCatalogMetadataLocation(opts, catalogName, catalogNamespace, catalogTableName);
 		}
 		else if (hasObjectStoreCatalogOption && hasExternalCatalogReadOnlyOption)
 		{

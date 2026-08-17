@@ -101,11 +101,13 @@ static char *EncodeBasicAuth(const char *clientId, const char *clientSecret);
 static void
 InvalidateRestTokenCache(Datum arg, int cacheid, uint32 hashvalue)
 {
-	if (RestCatalogTokenCache == NULL)
-		return;
+	if (RestCatalogTokenCache != NULL)
+	{
+		MemoryContextReset(RestTokenCacheCtx);
+		RestCatalogTokenCache = NULL;
+	}
 
-	MemoryContextReset(RestTokenCacheCtx);
-	RestCatalogTokenCache = NULL;
+	InvalidateVendedCredentialsCache();
 }
 
 
