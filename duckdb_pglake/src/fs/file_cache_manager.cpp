@@ -498,9 +498,9 @@ FileCacheManager::RemoveCacheFileInternal(FileSystem &file_system, string finalC
  * cache with, in which case we manage it by size only. File systems that
  * allocate inodes dynamically (e.g. btrfs, ZFS) report 0. The statvfs fields
  * are unsigned and there is no portable value for "unknown", so a file system
- * that reports (fsfilcnt_t) -1 shows up here as a negative number, which we
- * also have to reject: an inode floor derived from it would put us under
- * permanent inode pressure.
+ * is also free to report something like (fsfilcnt_t) -1, which we have to
+ * reject as well: an inode floor derived from it would put us under permanent
+ * inode pressure.
  */
 static bool
 TryGetInodeStats(const string &path, int64_t &freeInodes, int64_t &totalInodes)
@@ -529,10 +529,25 @@ TryGetInodeStats(const string &path, int64_t &freeInodes, int64_t &totalInodes)
 	}
 
 	/* f_favail is what is available to us, which excludes reserved inodes */
-	freeInodes = (int64_t) stats.f_favail;
-	totalInodes = (int64_t) stats.f_files;
+	uint64_t reportedFreeInodes = (uint64_t) stats.f_favail;
+	uint64_t reportedTotalInodes = (uint64_t) stats.f_files;
 
-	return totalInodes > 0 && freeInodes >= 0;
+	/*
+	 * Check the numbers while they are still unsigned, rather than converting
+	 * them first and looking at the sign of the result: what a conversion does
+	 * with a value that does not fit in an int64_t is up to the implementation,
+	 * and every value we could not represent is one we would have to reject
+	 * anyway.
+	 */
+	if (reportedTotalInodes == 0 ||
+		reportedTotalInodes > (uint64_t) INT64_MAX ||
+		reportedFreeInodes > (uint64_t) INT64_MAX)
+		return false;
+
+	freeInodes = (int64_t) reportedFreeInodes;
+	totalInodes = (int64_t) reportedTotalInodes;
+
+	return true;
 }
 
 
