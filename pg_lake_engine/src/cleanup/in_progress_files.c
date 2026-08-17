@@ -167,6 +167,14 @@ RemoveInProgressFiles(char *location, bool isFull, bool isVerbose, List **delete
 
 	ListCell   *fileCell = NULL;
 
+	/*
+	 * Plain paths are removed in batches of FILE_DELETION_BATCH_SIZE, one
+	 * object-store request per batch, so that draining a long in-progress
+	 * queue does not cost a request per file. Prefix entries expand into an
+	 * unbounded listing plus delete, so they stay a request of their own.
+	 */
+	List	   *deletionBatch = NIL;
+
 	foreach(fileCell, inProgressFileRecords)
 	{
 		InProgressFiles *entry = lfirst(fileCell);
@@ -198,22 +206,36 @@ RemoveInProgressFiles(char *location, bool isFull, bool isVerbose, List **delete
 		}
 		else
 		{
-			DeleteRemoteFile(entry->path);
+			deletionBatch = lappend(deletionBatch, entry->path);
+
+			if (list_length(deletionBatch) >= FILE_DELETION_BATCH_SIZE)
+			{
+				DeleteRemoteFileBatch(deletionBatch, NULL, NULL);
+				deletionBatch = NIL;
+
+				/*
+				 * A batch is a long-running request; give the caller a chance
+				 * to cancel the drain between batches.
+				 */
+				CHECK_FOR_INTERRUPTS();
+			}
 		}
 
 		*deletedPaths = lappend(*deletedPaths, entry->path);
 	}
+
+	/* whatever did not fill a batch */
+	DeleteRemoteFileBatch(deletionBatch, NULL, NULL);
 
 	/*
 	 * Drop the catalog rows for the paths we just unlinked from remote
 	 * storage in a single DELETE. Per-row DeleteInProgressFileRecord would
 	 * take a fresh plan-cache + snapshot per file, which on large backlogs (a
 	 * stuck VACUUM walk of a long in-progress queue) was a notable share of
-	 * the loop. Remote DeleteObject above is still the dominant cost, so this
-	 * is a tidy-up rather than a hot-path win; the per-iteration semantics
-	 * are preserved because the catalog DELETE is idempotent against missing
-	 * paths and DeleteRemoteFile is idempotent against missing remote
-	 * objects, so a mid-loop error still recovers via the next VACUUM cycle.
+	 * the loop. The per-iteration semantics are preserved because the catalog
+	 * DELETE is idempotent against missing paths and remote removal is
+	 * idempotent against missing remote objects, so a mid-loop error still
+	 * recovers via the next VACUUM cycle.
 	 */
 	DeleteInProgressFileRecords(*deletedPaths);
 

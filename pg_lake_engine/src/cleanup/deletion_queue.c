@@ -29,7 +29,6 @@
 #include "pg_lake/pgduck/remote_storage.h"
 #include "pg_lake/util/array_utils.h"
 #include "pg_extension_base/spi_helpers.h"
-#include "pg_lake/util/string_utils.h"
 #include "datatype/timestamp.h"
 #include "storage/procarray.h"
 
@@ -58,7 +57,7 @@ typedef struct DeletionQueueEntry
 static void RemoveDeletionQueuePathsFromCatalog(List *filePaths);
 static void IncrementDeletionQueueRetryCount(List *failedRemovalPaths);
 static bool ExpandMetadataResolveRecord(char *metadataPath);
-static bool DeleteQueuedObject(char *path, bool isPrefix, bool isVerbose);
+static bool DeleteQueuedPrefix(char *path, bool isVerbose);
 
 
 PG_FUNCTION_INFO_V1(flush_deletion_queue);
@@ -129,7 +128,15 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose)
 	 * so the expensive metadata walk is paid once: each file then gets the
 	 * normal retry_count budget and batching, and an interrupted VACUUM
 	 * resumes from committed rows.
+	 *
+	 * Plain file rows are not deleted one by one. They are collected into
+	 * batches of FILE_DELETION_BATCH_SIZE and removed with one object-store
+	 * request per batch, because a request per file made draining a large
+	 * queue take time proportional to the number of files -- with the whole
+	 * vacuum cycle, and therefore catalog publication, waiting behind it.
 	 */
+	List	   *deletionBatch = NIL;
+
 	foreach(cleanupRecordCell, deletionQueueRecords)
 	{
 		DeletionQueueEntry *entry = lfirst(cleanupRecordCell);
@@ -154,11 +161,41 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose)
 			continue;
 		}
 
-		if (DeleteQueuedObject(entry->path, entry->isPrefix, isVerbose))
-			deletedFilePathList = lappend(deletedFilePathList, entry->path);
-		else
-			failedFilePathList = lappend(failedFilePathList, entry->path);
+		if (entry->isPrefix)
+		{
+			/*
+			 * A prefix row expands into an unbounded listing plus delete, so
+			 * it stays a request of its own.
+			 */
+			if (DeleteQueuedPrefix(entry->path, isVerbose))
+				deletedFilePathList = lappend(deletedFilePathList, entry->path);
+			else
+				failedFilePathList = lappend(failedFilePathList, entry->path);
+
+			continue;
+		}
+
+		ereport(isVerbose ? INFO : LOG,
+				(errmsg("deleting expired file %s", entry->path)));
+
+		deletionBatch = lappend(deletionBatch, entry->path);
+
+		if (list_length(deletionBatch) >= FILE_DELETION_BATCH_SIZE)
+		{
+			DeleteRemoteFileBatch(deletionBatch, &deletedFilePathList,
+								  &failedFilePathList);
+			deletionBatch = NIL;
+
+			/*
+			 * A batch is a long-running request; give the caller a chance to
+			 * cancel the drain between batches.
+			 */
+			CHECK_FOR_INTERRUPTS();
+		}
 	}
+
+	/* whatever did not fill a batch */
+	DeleteRemoteFileBatch(deletionBatch, &deletedFilePathList, &failedFilePathList);
 
 	if (list_length(deletedFilePathList) > 0)
 	{
@@ -179,22 +216,17 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose)
 
 
 /*
- * DeleteQueuedObject removes the object(s) named by a direct deletion-queue
- * row -- a single file, or the whole tree under a prefix when isPrefix is set
- * -- and reports whether the removal succeeded.
+ * DeleteQueuedPrefix removes the whole tree under the prefix named by a
+ * deletion-queue row with is_prefix set, and reports whether the removal
+ * succeeded.
  */
 static bool
-DeleteQueuedObject(char *path, bool isPrefix, bool isVerbose)
+DeleteQueuedPrefix(char *path, bool isVerbose)
 {
 	ereport(isVerbose ? INFO : LOG,
-			(errmsg("deleting expired %s %s",
-					isPrefix ? "prefix" : "file",
-					path)));
+			(errmsg("deleting expired prefix %s", path)));
 
-	if (isPrefix)
-		return DeleteRemotePrefix(path);
-
-	return DeleteRemoteFile(path);
+	return DeleteRemotePrefix(path);
 }
 
 
@@ -400,7 +432,7 @@ GetDeletionQueueRecords(Oid relationId, bool isFull)
 	if (!isFull)
 	{
 		appendStringInfo(query,
-						 "    LIMIT " PG_LAKE_TOSTRING(PER_LOOP_FILE_CLEANUP_LIMIT));
+						 "    LIMIT %d", PER_LOOP_FILE_CLEANUP_LIMIT);
 	}
 
 	appendStringInfo(query,

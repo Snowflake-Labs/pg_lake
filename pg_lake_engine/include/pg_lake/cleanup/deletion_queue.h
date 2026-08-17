@@ -21,7 +21,19 @@
 #include "nodes/pg_list.h"
 #include "datatype/timestamp.h"
 
-#define PER_LOOP_FILE_CLEANUP_LIMIT 50
+#include "pg_lake/pgduck/remote_storage.h"
+
+/* deletion batches issued per drain pass, see PER_LOOP_FILE_CLEANUP_LIMIT */
+#define FILE_DELETION_BATCHES_PER_LOOP 5
+
+/*
+ * Queue rows claimed per drain pass. Each pass runs in its own transaction, so
+ * this bounds how long the deletion queue holds a transaction (and its xmin)
+ * open before the caller gets control back and can let the rest of the vacuum
+ * cycle -- including the object-store catalog export -- have a turn.
+ */
+#define PER_LOOP_FILE_CLEANUP_LIMIT \
+	(FILE_DELETION_BATCH_SIZE * FILE_DELETION_BATCHES_PER_LOOP)
 
 /* managed by a GUC */
 extern int	OrphanedFileRetentionPeriod;
