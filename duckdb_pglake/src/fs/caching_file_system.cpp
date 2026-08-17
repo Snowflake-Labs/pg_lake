@@ -400,11 +400,17 @@ PGLakeCachingFileSystem::RemoveFiles(ClientContext &context, const vector<string
 		 * trip each and evicts the cache on the way out. Paths that opt out of
 		 * caching land here too: s3fs does not recognize the prefix, and the
 		 * virtual file system strips it.
+		 *
+		 * No opener here, unlike the s3fs call below: what a ClientContext hands
+		 * out is a ClientContextFileSystem, an OpenerFileSystem, which pushes
+		 * its own opener into every call and rejects one from the caller with
+		 * "OpenerFileSystem cannot take an opener". That is an InternalException,
+		 * which takes the whole server down rather than failing the statement.
 		 */
 		if (s3fs.CanHandleFile(path))
 			s3Paths.push_back(path);
 		else
-			virtualFs.RemoveFile(path, opener);
+			virtualFs.RemoveFile(path);
 	}
 
 	if (s3Paths.empty())

@@ -452,3 +452,30 @@ def test_pg_lake_remove_file_already_gone(s3, pgduck_conn):
     )
 
     pgduck_conn.rollback()
+
+
+def test_pg_lake_remove_file_azure(azure, pgduck_conn):
+    """Only S3 has a batch delete API, so every other back end takes the fallback
+    that removes one file at a time through the file system the ClientContext hands
+    out. Nothing else covers that branch.
+
+    That file system is an OpenerFileSystem: it pushes its own opener into each
+    call and rejects one from the caller with "OpenerFileSystem cannot take an
+    opener". Since that is an InternalException, getting it wrong does not fail the
+    statement -- it terminates the server, and every later test with it."""
+    prefix = "test_remove_file_azure"
+
+    keys = [f"{prefix}/a.parquet", f"{prefix}/b.parquet"]
+    for key in keys:
+        azure.upload_blob(name=key, data=b"x")
+
+    values = ", ".join(f"('az://{TEST_BUCKET}/{key}')" for key in keys)
+    results = perform_query_on_cursor(
+        f"SELECT count(*) FROM (VALUES {values}) v(f) WHERE pg_lake_remove_file(f)",
+        pgduck_conn,
+    )
+    assert results[0][0] == len(keys)
+
+    assert list(azure.list_blobs(name_starts_with=f"{prefix}/")) == []
+
+    pgduck_conn.rollback()
