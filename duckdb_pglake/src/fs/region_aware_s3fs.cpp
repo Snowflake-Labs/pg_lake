@@ -634,11 +634,9 @@ RegionAwareS3FileSystem::RemoveFiles(const vector<string> &paths,
 	 * DeleteObjects targets one bucket at a time, and the region is a property
 	 * of the bucket, so group the paths by bucket URL.
 	 *
-	 * Paths that already pin a region go one at a time through RemoveFile, as
-	 * does anything that is not S3: WithResolvedRegion hands those through
-	 * untouched, so there is nothing for the group to share. A path that pins an
-	 * endpoint goes per-file too, so an express bucket cannot end up with a
-	 * second, conflicting endpoint appended to it.
+	 * WithResolvedRegion adds s3_region and s3_endpoint, so we skip it for URLs
+	 * that set either one explicitly, and for anything that is not S3, and use
+	 * the simpler single-file path.
 	 */
 	map<string, vector<string>> pathsByBucket;
 
