@@ -579,6 +579,25 @@ DeriveInodeFloor(int64_t totalInodes)
 
 
 /*
+ * WithoutTrailingSlash returns the path with a single trailing slash removed,
+ * which is what rmdir wants, and what ExtractDirName needs to go up a level.
+ *
+ * Erasing a single slash is enough because the only paths we use this on come
+ * from the directory walk in ManageCache, which does not produce empty path
+ * components, and IsCacheableURL requires a non-empty scheme, so a cache path
+ * cannot start with a double slash either.
+ */
+static string
+WithoutTrailingSlash(const string &path)
+{
+	if (StringUtil::EndsWith(path, "/"))
+		return path.substr(0, path.length() - 1);
+
+	return path;
+}
+
+
+/*
  * PruneEmptyCacheDirectory removes the directory that contained an evicted
  * cache file, and its now-empty parents, up to (but not including) the cache
  * directory itself.
@@ -590,11 +609,7 @@ DeriveInodeFloor(int64_t totalInodes)
  * rmdir fails when the directory is not empty, which includes the case where a
  * concurrent operation added a file to it, so we simply stop pruning then.
  *
- * The StartsWith check is what keeps us inside the cache directory. Erasing a
- * single trailing slash is enough because the only paths we get here come from
- * the directory walk in ManageCache, which does not produce empty path
- * components, and IsCacheableURL requires a non-empty scheme, so a cache path
- * cannot start with a double slash either.
+ * The StartsWith check is what keeps us inside the cache directory.
  */
 static int64_t
 PruneEmptyCacheDirectory(const string &cacheDir, string directory)
@@ -603,10 +618,7 @@ PruneEmptyCacheDirectory(const string &cacheDir, string directory)
 
 	while (StringUtil::StartsWith(directory, cacheDir) && directory != cacheDir)
 	{
-		/* rmdir does not want the trailing slash */
-		string dirWithoutSlash = directory;
-		if (StringUtil::EndsWith(dirWithoutSlash, "/"))
-			dirWithoutSlash.erase(dirWithoutSlash.length() - 1);
+		string dirWithoutSlash = WithoutTrailingSlash(directory);
 
 		if (rmdir(dirWithoutSlash.c_str()) < 0)
 			/* not empty (anymore), or not ours to remove */
@@ -659,11 +671,7 @@ CountMissingCacheDirectories(FileSystem &fileSystem, const string &cacheDir,
 				break;
 
 			/* ExtractDirName returns the path itself when it ends in a slash */
-			string dirWithoutSlash = directory;
-			if (StringUtil::EndsWith(dirWithoutSlash, "/"))
-				dirWithoutSlash.erase(dirWithoutSlash.length() - 1);
-
-			directory = FileUtils::ExtractDirName(dirWithoutSlash);
+			directory = FileUtils::ExtractDirName(WithoutTrailingSlash(directory));
 		}
 	}
 
@@ -842,15 +850,16 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize,
 	}
 
 	/*
-	 * Determine how many inodes are available on the cache file system, and
-	 * how many we want to keep available.
+	 * Determine how many inodes are available on the cache file system, and how
+	 * many we want to keep available. An inodeFloor of 0 means we manage the
+	 * cache by size only, either because the file system does not report inode
+	 * counts we can use, or because minFreeInodes turned it off.
 	 */
 	int64_t freeInodes = 0;
 	int64_t totalInodes = 0;
 	int64_t inodeFloor = 0;
-	bool trackInodes = TryGetInodeStats(cacheDir, freeInodes, totalInodes);
 
-	if (trackInodes)
+	if (TryGetInodeStats(cacheDir, freeInodes, totalInodes))
 		inodeFloor = minFreeInodes == MIN_FREE_INODES_AUTO ?
 			DeriveInodeFloor(totalInodes) : minFreeInodes;
 
@@ -877,14 +886,13 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize,
 	 * Downloading also creates the cache directories that lead to a new prefix,
 	 * so those have to be part of the reservation.
 	 */
-	int64_t queuedInodes = queuedFiles;
+	int64_t queuedInodes = 0;
 
-	if (trackInodes)
-		queuedInodes +=
+	if (inodeFloor > 0)
+		queuedInodes = queuedFiles +
 			CountMissingCacheDirectories(file_system, cacheDir, cacheFiles);
 
-	int64_t inodesNeeded =
-		trackInodes ? inodeFloor + queuedInodes - freeInodes : 0;
+	int64_t inodesNeeded = inodeFloor + queuedInodes - freeInodes;
 	bool inodePressure = inodesNeeded > 0;
 
 	/*
@@ -896,7 +904,6 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize,
 	 * the cache alone and stop adding to it.
 	 */
 	bool canRelieveInodePressure = inodePressure && evictableFiles >= inodesNeeded;
-
 	bool skipDownloads = inodePressure && !canRelieveInodePressure;
 
 	if (skipDownloads)
@@ -907,9 +914,6 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize,
 
 	int64_t prunedDirectories = 0;
 	int64_t inodesFreed = 0;
-
-	/* whether we are still evicting to get back above the inode floor */
-	bool evictForInodes = canRelieveInodePressure;
 
 	/*
 	 * Cache files we have not looked at yet, and could therefore still evict.
@@ -924,24 +928,21 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize,
 		bool needBytes = totalCacheSize + queueSize >= maxCacheSize;
 
 		/*
-		 * The check we did before the loop assumed that every eviction frees an
-		 * inode, and one that loses the race for the cache file lock frees
-		 * none. Redo it against what we have actually freed and what is left to
-		 * evict, so that a round which cannot reach the floor stops rather than
-		 * emptying the cache on its way there. Pruning directories can free
-		 * more than we count here, which only makes us stop a little early.
+		 * How many inodes we still have to free, derived from the queue the way
+		 * needBytes is, so that a candidate we skip below also releases the
+		 * inode it reserved.
+		 *
+		 * We also keep applying the check we did before the loop, now against
+		 * what we have actually freed and what is left to evict, because an
+		 * eviction that loses the race for the cache file lock frees no inode: a
+		 * round that can no longer reach the floor stops rather than emptying the
+		 * cache on its way there. Pruning directories can free more than we count
+		 * here, which only makes us stop a little early.
 		 */
-		if (evictForInodes &&
-			freeInodes + inodesFreed + remainingEvictableFiles <
-			inodeFloor + queuedInodes)
-			evictForInodes = false;
-
-		/*
-		 * Derive this from the queue the way needBytes does, so that a
-		 * candidate we skip below also releases the inode it reserved.
-		 */
-		bool needInodes = evictForInodes &&
-			freeInodes + inodesFreed < inodeFloor + queuedInodes;
+		int64_t inodesStillNeeded =
+			inodeFloor + queuedInodes - (freeInodes + inodesFreed);
+		bool needInodes = canRelieveInodePressure && inodesStillNeeded > 0 &&
+			remainingEvictableFiles >= inodesStillNeeded;
 
 		if (!needBytes && !needInodes)
 			/* we have enough space to fit our queue */
