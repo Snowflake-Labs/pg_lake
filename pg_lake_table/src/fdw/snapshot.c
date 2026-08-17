@@ -38,6 +38,7 @@
 #include "pg_extension_base/pg_compat.h"
 #include "pg_lake/pgduck/remote_storage.h"
 #include "pg_lake/planner/restriction_collector.h"
+#include "pg_lake/storage/storage_credentials.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/fdw/data_file_pruning.h"
@@ -189,6 +190,16 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 {
 	List	   *fileScans = NIL;
 	List	   *positionDeleteScans = NIL;
+
+	/*
+	 * Single choke point for storage credentials on the read path.  This runs
+	 * for every relation whose files we are about to scan -- both the plain
+	 * FDW scan path and the query-pushdown path funnel through
+	 * CreatePgLakeScanSnapshot -> here. The resolver no-ops for non-REST
+	 * tables and (re)pushes / drops vended secrets for REST-catalog Iceberg
+	 * tables before the data query runs.
+	 */
+	EnsureStorageCredentialsForRelation(relationId);
 
 	if (IsWritablePgLakeTable(relationId) || IsInternalIcebergTable(relationId))
 	{
