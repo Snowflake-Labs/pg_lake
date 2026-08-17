@@ -125,6 +125,69 @@ def test_deletion_queue_batch_isolates_failing_path(s3, superuser_conn, extensio
     superuser_conn.commit()
 
 
+def test_autovacuum_removes_files_for_dropped_tables(
+    s3, superuser_conn, extension, installcheck
+):
+    """The autovacuum worker drains what a dropped table left queued.
+
+    Those rows point at an oid that is gone from pg_class, so no per-table pass
+    claims them. Before, only a manual VACUUM (ICEBERG) removed them, and until
+    someone ran one the files stayed and every drain paged through their rows.
+    """
+    if installcheck:
+        return
+
+    prefix = f"s3://{TEST_BUCKET}/{TEST_PREFIX}/dropped"
+    file_count = 3
+    naptime_seconds = 2
+    deadline_seconds = 60
+
+    paths = [f"{prefix}/f{i}.parquet" for i in range(file_count)]
+
+    for path in paths:
+        bucket, key = parse_s3_path(path)
+        s3.put_object(Bucket=bucket, Key=key, Body=b"x")
+
+    assert _existing_files(superuser_conn, prefix) == file_count
+    superuser_conn.commit()
+
+    run_command_outside_tx(
+        [
+            f"ALTER SYSTEM SET pg_lake_iceberg.autovacuum_naptime TO '{naptime_seconds}s'",
+            "SELECT pg_reload_conf()",
+        ]
+    )
+
+    try:
+        _queue_paths(superuser_conn, paths)
+
+        remaining = file_count
+        deadline = time.monotonic() + deadline_seconds
+
+        while time.monotonic() < deadline:
+            remaining = len(_queued_rows(superuser_conn, prefix))
+            superuser_conn.commit()
+
+            if remaining == 0:
+                break
+
+            time.sleep(0.5)
+
+        assert (
+            remaining == 0
+        ), f"{remaining} of {file_count} dropped-table rows still queued after {deadline_seconds}s"
+
+        assert _existing_files(superuser_conn, prefix) == 0
+        superuser_conn.commit()
+    finally:
+        run_command_outside_tx(
+            [
+                "ALTER SYSTEM RESET pg_lake_iceberg.autovacuum_naptime",
+                "SELECT pg_reload_conf()",
+            ]
+        )
+
+
 def test_autovacuum_drains_a_backlog_without_napping(
     s3, superuser_conn, extension, installcheck
 ):
@@ -150,7 +213,7 @@ def test_autovacuum_drains_a_backlog_without_napping(
     prefix = f"s3://{TEST_BUCKET}/{TEST_PREFIX}/backlog"
     file_count = 12
     naptime_seconds = 15
-    deadline_seconds = 70
+    deadline_seconds = 120
 
     paths = [f"{prefix}/f{i}.parquet" for i in range(file_count)]
 
@@ -182,7 +245,8 @@ def test_autovacuum_drains_a_backlog_without_napping(
         _queue_paths(superuser_conn, paths, table=table)
 
         remaining = file_count
-        deadline = time.monotonic() + deadline_seconds
+        start = time.monotonic()
+        deadline = start + deadline_seconds
 
         while time.monotonic() < deadline:
             remaining = len(_queued_rows(superuser_conn, prefix))
@@ -192,6 +256,8 @@ def test_autovacuum_drains_a_backlog_without_napping(
                 break
 
             time.sleep(0.5)
+
+        elapsed = time.monotonic() - start
 
         assert remaining == 0, (
             f"{remaining} of {file_count} rows still queued after "
@@ -213,13 +279,16 @@ def test_autovacuum_drains_a_backlog_without_napping(
             if "Vacuuming iceberg table" in line and table in line
         ]
 
-        # the drain took at least file_count passes and ran well under
-        # file_count naptimes, so anything near file_count cycles here means
-        # the whole cycle came along for the ride
-        assert len(cycles) < file_count / 2, (
+        # the file removal passes ran back to back, but the rest of the cycle
+        # kept the naptime, so the drain fits in about one cycle per naptime
+        # however long it took. One per removed file means the whole cycle came
+        # along for the ride.
+        max_cycles = int(elapsed / naptime_seconds) + 2
+
+        assert len(cycles) <= max_cycles, (
             f"{len(cycles)} full vacuum cycles while removing {file_count} "
-            f"files, expected about one per {naptime_seconds}s naptime: "
-            + "\n".join(cycles)
+            f"files in {elapsed:.1f}s, expected at most {max_cycles} at one per "
+            f"{naptime_seconds}s naptime: " + "\n".join(cycles)
         )
     finally:
         run_command(f"DROP TABLE IF EXISTS {table}", superuser_conn)

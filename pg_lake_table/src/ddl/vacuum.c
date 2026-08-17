@@ -111,6 +111,7 @@ static void PgLakeIcebergVacuumForRelation(Oid relationId, bool firstLoop);
 static void VacuumTableInSeparateXacts(Oid relationId, bool isFull, bool isVerbose,
 									   bool isAutoVacuum);
 static void VacuumDroppedPgLakeIcebergTables(VacuumStmt *vacuumStmt);
+static void VacuumRemoveDroppedTableFiles(void);
 static char *GetMetadataLocationPrefixForRelationId(Oid relationId);
 static void VacuumConsumeTrackedIcebergMetadataChanges(bool isVerbose);
 
@@ -259,15 +260,17 @@ PgLakeIcebergVacuumForTables(MemoryContext outOfTransactionMemoryContext,
 		 */
 		CHECK_FOR_INTERRUPTS();
 	}
+
+	VacuumRemoveDroppedTableFiles();
 }
 
 
 /*
 * PgLakeIcebergRemoveFilesForTables runs the file removal stages of VACUUM, and
-* only those, for every table autovacuum covers. The autovacuum worker uses it
-* to work off a backlog that a previous pass left behind (see
-* VacuumStoppedWithFilesQueued) without pulling the other stages forward with
-* it.
+* only those, for every table autovacuum covers plus the tables that were
+* dropped. The autovacuum worker uses it to work off a backlog that a previous
+* pass left behind (see VacuumStoppedWithFilesQueued) without pulling the other
+* stages forward with it.
 */
 static void
 PgLakeIcebergRemoveFilesForTables(MemoryContext outOfTransactionMemoryContext)
@@ -289,7 +292,10 @@ PgLakeIcebergRemoveFilesForTables(MemoryContext outOfTransactionMemoryContext)
 
 		if (!SearchSysCacheExists1(RELOID, ObjectIdGetDatum(relationId)))
 		{
-			/* table dropped */
+			/*
+			 * Table dropped since we built the list. Whatever it left queued
+			 * is claimed by VacuumRemoveDroppedTableFiles below.
+			 */
 			continue;
 		}
 
@@ -311,6 +317,8 @@ PgLakeIcebergRemoveFilesForTables(MemoryContext outOfTransactionMemoryContext)
 		 */
 		CHECK_FOR_INTERRUPTS();
 	}
+
+	VacuumRemoveDroppedTableFiles();
 }
 
 
@@ -965,6 +973,30 @@ VacuumDroppedPgLakeIcebergTables(VacuumStmt *vacuumStmt)
 
 	VacuumRemoveDeletionQueueRecords(relationId, isFull, isVerbose);
 	VacuumRemoveInProgressFiles(relationId, isFull, isVerbose);
+}
+
+
+/*
+* VacuumRemoveDroppedTableFiles removes the queued files of tables that no
+* longer exist. The autovacuum worker calls it after the per-table passes,
+* which cannot reach those rows: a row for a dropped table points at an oid
+* that is gone from pg_class, so it is only claimed by the InvalidOid pass.
+* Without this, a dropped table would keep its files (and its share of the
+* queue, which every other drain has to page through) until someone ran
+* VACUUM (ICEBERG) by hand.
+*
+* Only the deletion queue is drained here. The in-progress file cleanup for
+* dropped tables works off an empty location prefix, so it covers every table
+* rather than the dropped ones, and it stays with the manual command.
+*/
+static void
+VacuumRemoveDroppedTableFiles(void)
+{
+	Oid			relationId = InvalidOid;
+	bool		isFull = false;
+	bool		isVerbose = false;
+
+	VacuumRemoveDeletionQueueRecords(relationId, isFull, isVerbose);
 }
 
 
