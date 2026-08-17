@@ -504,18 +504,14 @@ RemoveDeletedManifestEntriesInternal(IcebergManifest * *manifest, IcebergSnapsho
 	 *
 	 * Use two memory contexts:
 	 *
-	 * - callerCtx      : holds the new IcebergManifest header we hand back,
-	 * and the local temp file registered for upload at commit time.
+	 * - callerCtx      : holds the new IcebergManifest header we hand back.
 	 *
 	 * - perManifestCtx : holds the manifest entries we read and the filtered
 	 * list we build from them.  We free this before returning.
 	 *
 	 * The WRITE phase (GenerateRemoteManifestPath,
-	 * UploadIcebergManifestToURI, CreateNewIcebergManifest) must run in
-	 * callerCtx, because UploadIcebergManifestToURI -> GenerateTempFileName
-	 * registers a callback on the current memory context that unlinks the
-	 * local temp file when that context is reset.  The matching upload is
-	 * deferred until commit, so the callback has to outlive this function.
+	 * UploadIcebergManifestToURI, CreateNewIcebergManifest) runs in
+	 * callerCtx, so that the manifest header we return is already there.
 	 */
 	bool		modified = false;
 
