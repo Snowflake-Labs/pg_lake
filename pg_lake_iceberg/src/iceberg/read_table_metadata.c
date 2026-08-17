@@ -77,6 +77,96 @@ ReadIcebergTableMetadata(const char *tableMetadataPath)
 
 
 /*
+ * NameOfFieldWithInitialDefault returns the name of the first field at or
+ * below this one that declares an initial-default, or NULL when none does.
+ */
+static const char *
+NameOfFieldWithInitialDefault(Field * field)
+{
+	if (field == NULL)
+		return NULL;
+
+	switch (field->type)
+	{
+		case FIELD_TYPE_STRUCT:
+			{
+				FieldStruct *structType = &field->field.structType;
+
+				for (size_t i = 0; i < structType->nfields; i++)
+				{
+					FieldStructElement *element = &structType->fields[i];
+
+					if (element->initialDefault != NULL)
+						return element->name;
+
+					const char *nested =
+						NameOfFieldWithInitialDefault(element->type);
+
+					if (nested != NULL)
+						return nested;
+				}
+
+				return NULL;
+			}
+		case FIELD_TYPE_LIST:
+			return NameOfFieldWithInitialDefault(field->field.list.element);
+		case FIELD_TYPE_MAP:
+			{
+				const char *inKey =
+					NameOfFieldWithInitialDefault(field->field.map.key);
+
+				return inKey != NULL ? inKey :
+					NameOfFieldWithInitialDefault(field->field.map.value);
+			}
+		case FIELD_TYPE_SCALAR:
+			return NULL;
+	}
+
+	return NULL;
+}
+
+
+/*
+ * ErrorIfSchemaDeclaresInitialDefault refuses a v3 schema whose fields
+ * carry an initial-default.
+ *
+ * A column added with a default is not rewritten into the files that
+ * predate it; the default is what those rows are supposed to read back
+ * as.  Reading here takes the schema from the catalog's metadata, and
+ * nothing on that path applies the default, so those rows would come
+ * back NULL -- an answer that is wrong rather than merely incomplete.
+ * v2 never had this field, so this only ever fires for v3.
+ */
+static void
+ErrorIfSchemaDeclaresInitialDefault(IcebergTableMetadata * metadata)
+{
+	for (size_t i = 0; i < metadata->schemas_length; i++)
+	{
+		IcebergTableSchema *schema = &metadata->schemas[i];
+
+		if (schema->schema_id != metadata->current_schema_id)
+			continue;
+
+		for (size_t j = 0; j < schema->fields_length; j++)
+		{
+			DataFileSchemaField *field = &schema->fields[j];
+			const char *named = field->initialDefault != NULL ?
+				field->name : NameOfFieldWithInitialDefault(field->type);
+
+			if (named != NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("iceberg column default values are not supported"),
+						 errdetail("Column \"%s\" declares an initial-default, "
+								   "which rows written before the column was "
+								   "added would have to read back as.",
+								   named)));
+		}
+	}
+}
+
+
+/*
 * Read the Iceberg table metadata from the given JSON object.
 * This is the top-level function that Reads the entire Iceberg
 * table metadata.
@@ -87,7 +177,24 @@ ReadIcebergTableMetadataFromJson(JsonbContainer *json, IcebergTableMetadata * me
 	memset(metadata, '\0', sizeof(IcebergTableMetadata));
 
 	JsonExtractInt32Field(json, "format-version", FIELD_REQUIRED, &metadata->format_version);
-	if (metadata->format_version != 2)
+
+	/*
+	 * v3 is accepted for reading, not claimed as supported.  Its metadata is
+	 * a superset of v2's, so a v3 table that uses no v3-only feature reads
+	 * exactly like a v2 one, and refusing the version outright locks out
+	 * catalogs that have moved their default (Snowflake Horizon, for one).
+	 *
+	 * The v3-only features we cannot honor are rejected where they appear
+	 * rather than here: deletion vectors in ReadDataFileFromAvro, types we do
+	 * not map when the schema is read, and column defaults just below.
+	 *
+	 * Row lineage is the one left neither honored nor rejected: first-row-id
+	 * and next-row-id are ignored, which costs a reader nothing that it can
+	 * observe in the rows themselves.
+	 *
+	 * Writing still produces v2 (see CreateIcebergTableMetadata).
+	 */
+	if (metadata->format_version != 2 && metadata->format_version != 3)
 	{
 		ereport(ERROR, (errmsg("unsupported iceberg format version %d",
 							   metadata->format_version)));
@@ -102,6 +209,9 @@ ReadIcebergTableMetadataFromJson(JsonbContainer *json, IcebergTableMetadata * me
 	JsonExtractObjectArrayField(json, "schemas", FIELD_REQUIRED, (JsonParseFunction) ReadIcebergTableSchema,
 								sizeof(IcebergTableSchema),
 								(void **) &metadata->schemas, &metadata->schemas_length);
+
+	if (metadata->format_version >= 3)
+		ErrorIfSchemaDeclaresInitialDefault(metadata);
 
 	JsonExtractInt32Field(json, "default-spec-id", FIELD_REQUIRED, &metadata->default_spec_id);
 	JsonExtractObjectArrayField(json, "partition-specs", FIELD_REQUIRED, (JsonParseFunction) ReadIcebergPartitionSpec,
