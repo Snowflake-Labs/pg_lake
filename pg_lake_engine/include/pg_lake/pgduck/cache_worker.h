@@ -24,8 +24,7 @@
 #define CACHE_MANAGER_INTERVAL_MS_DEFAULT (10000)
 
 /* default to deriving the inode floor from the cache file system */
-#define MIN_FREE_CACHE_INODES_AUTO (-1)
-#define MIN_FREE_CACHE_INODES_DEFAULT MIN_FREE_CACHE_INODES_AUTO
+#define MIN_FREE_CACHE_INODES_DEFAULT (-1)
 
 /* pg_lake_engine.enable_cache_manager setting */
 extern bool EnableCacheManager;
