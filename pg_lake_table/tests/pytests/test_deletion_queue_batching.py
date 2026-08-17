@@ -1,3 +1,4 @@
+import os
 import time
 
 from utils_pytest import *
@@ -127,27 +128,29 @@ def test_deletion_queue_batch_isolates_failing_path(s3, superuser_conn, extensio
 def test_autovacuum_drains_a_backlog_without_napping(
     s3, superuser_conn, extension, installcheck
 ):
-    """A backlog larger than one vacuum's budget drains without a nap per cycle.
+    """A backlog larger than one vacuum's budget drains without a nap per file.
 
     A vacuum stops at pg_lake_table.max_file_removals_per_vacuum, so a longer
-    queue takes several cycles. If each of those cycles first waits
+    queue takes several passes. If each of those passes first waits
     pg_lake_iceberg.autovacuum_naptime (10 minutes by default), a queue that
-    grows faster than one naptime drains it never catches up, and the rest of
-    the cycle, including the catalog export, waits behind it. So a cycle that
-    stopped on its own limit with rows still queued starts the next one right
-    away.
+    grows faster than one naptime drains it never catches up. So a pass that
+    stopped on its own limit with files still queued keeps going.
 
-    The naptime below is set high enough that draining one file per cycle
-    cannot finish within the deadline if the cycles nap.
+    Only the file removal stages keep going. The rest of the vacuum cycle stays
+    on the naptime, so the log must show one cycle per naptime and not one per
+    removed file. The naptime below is set high enough that both halves of that
+    are measurable: draining one file per nap could not finish in time, and a
+    cycle per naptime is far fewer cycles than there are files.
     """
     if installcheck:
         return
 
+    logfile = f"{server_params.PG_DIR}/logfile"
     table = "test_deletion_queue_backlog"
     prefix = f"s3://{TEST_BUCKET}/{TEST_PREFIX}/backlog"
     file_count = 12
-    naptime_seconds = 8
-    deadline_seconds = 40
+    naptime_seconds = 15
+    deadline_seconds = 70
 
     paths = [f"{prefix}/f{i}.parquet" for i in range(file_count)]
 
@@ -159,6 +162,7 @@ def test_autovacuum_drains_a_backlog_without_napping(
         [
             "ALTER SYSTEM SET pg_lake_table.max_file_removals_per_vacuum TO 1",
             f"ALTER SYSTEM SET pg_lake_iceberg.autovacuum_naptime TO '{naptime_seconds}s'",
+            "ALTER SYSTEM SET pg_lake_iceberg.log_autovacuum_min_duration TO 0",
             "SELECT pg_reload_conf()",
         ]
     )
@@ -172,6 +176,8 @@ def test_autovacuum_drains_a_backlog_without_napping(
             superuser_conn,
         )
         superuser_conn.commit()
+
+        offset = os.path.getsize(logfile)
 
         _queue_paths(superuser_conn, paths, table=table)
 
@@ -190,12 +196,31 @@ def test_autovacuum_drains_a_backlog_without_napping(
         assert remaining == 0, (
             f"{remaining} of {file_count} rows still queued after "
             f"{deadline_seconds}s, which is only "
-            f"{deadline_seconds // naptime_seconds} cycles of one file each "
-            f"when every cycle naps first"
+            f"{deadline_seconds // naptime_seconds} files if every file waits "
+            f"a nap of its own"
         )
 
         assert _existing_files(superuser_conn, prefix) == 0
         superuser_conn.commit()
+
+        with open(logfile) as f:
+            f.seek(offset)
+            delta = f.read()
+
+        cycles = [
+            line
+            for line in delta.splitlines()
+            if "Vacuuming iceberg table" in line and table in line
+        ]
+
+        # the drain took at least file_count passes and ran well under
+        # file_count naptimes, so anything near file_count cycles here means
+        # the whole cycle came along for the ride
+        assert len(cycles) < file_count / 2, (
+            f"{len(cycles)} full vacuum cycles while removing {file_count} "
+            f"files, expected about one per {naptime_seconds}s naptime: "
+            + "\n".join(cycles)
+        )
     finally:
         run_command(f"DROP TABLE IF EXISTS {table}", superuser_conn)
         superuser_conn.commit()
@@ -204,6 +229,7 @@ def test_autovacuum_drains_a_backlog_without_napping(
             [
                 "ALTER SYSTEM RESET pg_lake_table.max_file_removals_per_vacuum",
                 "ALTER SYSTEM RESET pg_lake_iceberg.autovacuum_naptime",
+                "ALTER SYSTEM RESET pg_lake_iceberg.log_autovacuum_min_duration",
                 "SELECT pg_reload_conf()",
             ]
         )

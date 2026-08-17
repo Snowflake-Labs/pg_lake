@@ -80,10 +80,10 @@ int			MaxFileRemovalsPerVacuum = 100000;
 /*
  * Set when a file removal loop stopped at MaxFileRemovalsPerVacuum with files
  * still queued, meaning the backlog outlives this cycle. The autovacuum loop
- * reads it to start the next cycle right away instead of napping for
- * pg_lake_iceberg.autovacuum_naptime (10 minutes by default) with known work
- * pending. A VACUUM issued by a client sets it in its own backend, where
- * nothing reads it.
+ * reads it to keep removing files without napping for
+ * pg_lake_iceberg.autovacuum_naptime (10 minutes by default) while there is
+ * known work pending. A VACUUM issued by a client sets it in its own backend,
+ * where nothing reads it.
  */
 static bool VacuumStoppedWithFilesQueued = false;
 
@@ -94,6 +94,7 @@ PG_FUNCTION_INFO_V1(pg_lake_iceberg_vacuum);
 static void VacuumRegisterMissingFieldsForAllTables(MemoryContext outOfTransactionMemoryContext);
 static void PgLakeIcebergVacuumForTables(MemoryContext outOfTransactionMemoryContext,
 										 bool firstLoop);
+static void PgLakeIcebergRemoveFilesForTables(MemoryContext outOfTransactionMemoryContext);
 static bool IsVacuumLakeTable(VacuumStmt *vacuumStmt);
 static List *GetAutoVacuumEnabledTables(List *relationIdList);
 static bool IsAutoVacuumEnabled(Oid relationId);
@@ -163,16 +164,9 @@ pg_lake_iceberg_vacuum(PG_FUNCTION_ARGS)
 	{
 		TimestampTz currentTime = GetCurrentTimestamp();
 
-		/*
-		 * Skip the nap when the previous cycle stopped on its own per-vacuum
-		 * limit with files still queued: the backlog is known to be there,
-		 * and waiting a full naptime for it is how a queue that grows faster
-		 * than one naptime drains it never catches up.
-		 */
 		if (IcebergAutovacuumEnabled &&
-			(VacuumStoppedWithFilesQueued ||
-			 TimestampDifferenceExceeds(lastVacuumTime, currentTime,
-										IcebergAutovacuumNaptime * 1000)))
+			TimestampDifferenceExceeds(lastVacuumTime, currentTime,
+									   IcebergAutovacuumNaptime * 1000))
 		{
 			VacuumStoppedWithFilesQueued = false;
 
@@ -186,6 +180,28 @@ pg_lake_iceberg_vacuum(PG_FUNCTION_ARGS)
 
 			/* we wait for nap time _after_ vacuum completed */
 			lastVacuumTime = GetCurrentTimestamp();
+		}
+		else if (IcebergAutovacuumEnabled && VacuumStoppedWithFilesQueued)
+		{
+			/*
+			 * The last pass stopped on MaxFileRemovalsPerVacuum with files
+			 * still queued, so we keep removing files without waiting a
+			 * naptime first: a queue that grows faster than one naptime
+			 * drains it never catches up.
+			 *
+			 * Only the file removal stages run here. A long deletion queue
+			 * says nothing about how badly the data files need rewriting, and
+			 * running the whole cycle back to back would compact much more
+			 * often than the naptime asks for. lastVacuumTime is left alone
+			 * for the same reason, so the other stages keep their schedule.
+			 */
+			VacuumStoppedWithFilesQueued = false;
+
+			START_TRANSACTION();
+			{
+				PgLakeIcebergRemoveFilesForTables(outOfTransactionMemoryContext);
+			}
+			END_TRANSACTION_NO_THROW(WARNING);
 		}
 
 		if (EnableObjectStoreCatalog &&
@@ -236,6 +252,58 @@ PgLakeIcebergVacuumForTables(MemoryContext outOfTransactionMemoryContext,
 	{
 		/* vacuum the iceberg table */
 		PgLakeIcebergVacuumForRelation(relationId, firstLoop);
+
+		/*
+		 * This loop could take a long time, so we check for interrupts on
+		 * each iteration.
+		 */
+		CHECK_FOR_INTERRUPTS();
+	}
+}
+
+
+/*
+* PgLakeIcebergRemoveFilesForTables runs the file removal stages of VACUUM, and
+* only those, for every table autovacuum covers. The autovacuum worker uses it
+* to work off a backlog that a previous pass left behind (see
+* VacuumStoppedWithFilesQueued) without pulling the other stages forward with
+* it.
+*/
+static void
+PgLakeIcebergRemoveFilesForTables(MemoryContext outOfTransactionMemoryContext)
+{
+	MemoryContext oldctx = MemoryContextSwitchTo(outOfTransactionMemoryContext);
+	List	   *relationIdList = GetAllInternalIcebergRelationIds();
+
+	List	   *vacuumRelationIdList = GetAutoVacuumEnabledTables(relationIdList);
+
+	MemoryContextSwitchTo(oldctx);
+
+	bool		isFull = false;
+	bool		isVerbose = false;
+
+	foreach_oid(relationId, vacuumRelationIdList)
+	{
+		if (!ActiveSnapshotSet())
+			PushActiveSnapshot(GetTransactionSnapshot());
+
+		if (!SearchSysCacheExists1(RELOID, ObjectIdGetDatum(relationId)))
+		{
+			/* table dropped */
+			continue;
+		}
+
+		if (IsReadOnlyIcebergTable(relationId))
+		{
+			/*
+			 * Read-only tables are skipped by the regular cycle too, which
+			 * already warned about them.
+			 */
+			continue;
+		}
+
+		VacuumRemoveDeletionQueueRecords(relationId, isFull, isVerbose);
+		VacuumRemoveInProgressFiles(relationId, isFull, isVerbose);
 
 		/*
 		 * This loop could take a long time, so we check for interrupts on
