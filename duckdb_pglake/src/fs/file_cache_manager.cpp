@@ -672,6 +672,37 @@ CountMissingCacheDirectories(FileSystem &fileSystem, const string &cacheDir,
 
 
 /*
+ * SkipQueuedDownloads gives up on the candidates we were going to download
+ * because the cache file system is low on inodes, and releases the space we
+ * reserved for them.
+ *
+ * Adding a file to the cache takes an inode, so when we cannot get back above
+ * the floor we only evict in this round. The next round can add files again.
+ */
+static void
+SkipQueuedDownloads(vector<CacheItem> &cacheFiles, vector<CacheAction> &actions,
+					uint64_t &queueSize, int64_t &queuedInodes)
+{
+	for (CacheItem& cacheFile : cacheFiles)
+	{
+		if (!cacheFile.needsDownload)
+			continue;
+
+		cacheFile.needsDownload = false;
+
+		actions.push_back({
+			.url = cacheFile.url,
+			.fileSize = cacheFile.fileSize,
+			.action = SKIPPED_INODE_PRESSURE
+		});
+	}
+
+	queueSize = 0;
+	queuedInodes = 0;
+}
+
+
+/*
  * ManageCache implements a simple cache management approach where we prune
  * the least recently used files, until there is enough space for all recently
  * accessed candidates, and then we download them one by one.
@@ -866,31 +897,10 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize,
 	 */
 	bool canRelieveInodePressure = inodePressure && evictableFiles >= inodesNeeded;
 
-	/*
-	 * Adding files to the cache consumes inodes, so when we cannot free enough
-	 * of them we only evict in this round. The next round can add files again.
-	 */
 	bool skipDownloads = inodePressure && !canRelieveInodePressure;
 
 	if (skipDownloads)
-	{
-		for (CacheItem& cacheFile : cacheFiles)
-		{
-			if (!cacheFile.needsDownload)
-				continue;
-
-			cacheFile.needsDownload = false;
-
-			actions.push_back({
-				.url = cacheFile.url,
-				.fileSize = cacheFile.fileSize,
-				.action = SKIPPED_INODE_PRESSURE
-			});
-		}
-
-		queueSize = 0;
-		queuedInodes = 0;
-	}
+		SkipQueuedDownloads(cacheFiles, actions, queueSize, queuedInodes);
 
 	/* sort from oldest to newest access time */
 	std::sort(cacheFiles.begin(), cacheFiles.end());
@@ -898,16 +908,39 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize,
 	int64_t prunedDirectories = 0;
 	int64_t inodesFreed = 0;
 
+	/* whether we are still evicting to get back above the inode floor */
+	bool evictForInodes = canRelieveInodePressure;
+
+	/*
+	 * Cache files we have not looked at yet, and could therefore still evict.
+	 * We count down as we go, so that we can tell when the floor moved out of
+	 * reach.
+	 */
+	int64_t remainingEvictableFiles = evictableFiles;
+
 	/* remove items until we have enough space for all candidates */
 	for (CacheItem& cacheFile : cacheFiles)
 	{
 		bool needBytes = totalCacheSize + queueSize >= maxCacheSize;
 
 		/*
+		 * The check we did before the loop assumed that every eviction frees an
+		 * inode, and one that loses the race for the cache file lock frees
+		 * none. Redo it against what we have actually freed and what is left to
+		 * evict, so that a round which cannot reach the floor stops rather than
+		 * emptying the cache on its way there. Pruning directories can free
+		 * more than we count here, which only makes us stop a little early.
+		 */
+		if (evictForInodes &&
+			freeInodes + inodesFreed + remainingEvictableFiles <
+			inodeFloor + queuedInodes)
+			evictForInodes = false;
+
+		/*
 		 * Derive this from the queue the way needBytes does, so that a
 		 * candidate we skip below also releases the inode it reserved.
 		 */
-		bool needInodes = canRelieveInodePressure &&
+		bool needInodes = evictForInodes &&
 			freeInodes + inodesFreed < inodeFloor + queuedInodes;
 
 		if (!needBytes && !needInodes)
@@ -916,6 +949,8 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize,
 
 		if (!cacheFile.isCandidate)
 		{
+			remainingEvictableFiles--;
+
 			PGDUCK_SERVER_DEBUG("removing %s from cache (%" PRIu64 \
 							    " bytes)", cacheFile.cacheFilePath.c_str(), cacheFile.fileSize);
 
@@ -977,6 +1012,19 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize,
 				.action = SKIPPED_TOO_OLD
 			});
 		}
+	}
+
+	/*
+	 * The loop can also run out of inodes to free, since an eviction that loses
+	 * the race for the cache file lock frees none. Downloading files while we
+	 * are still below the floor would only push us further down, so hold off on
+	 * the candidates in that case too.
+	 */
+	if (inodePressure && !skipDownloads &&
+		freeInodes + inodesFreed < inodeFloor + queuedInodes)
+	{
+		SkipQueuedDownloads(cacheFiles, actions, queueSize, queuedInodes);
+		skipDownloads = true;
 	}
 
 	/* download all the remaining candidates */
