@@ -66,8 +66,8 @@ public:
 	/*
 	 * RemoveFiles deletes many files in as few requests as possible: for S3 it
 	 * batches keys into DeleteObjects requests (up to 1000 keys each), resolving
-	 * the region once per bucket via WithResolvedRegion. Paths that carry their
-	 * own region or endpoint, and non-S3 paths, fall back to per-file RemoveFile.
+	 * the region once per bucket. Paths that carry their own region or endpoint,
+	 * and non-S3 paths, fall back to per-file RemoveFile.
 	 */
 	void RemoveFiles(const vector<string> &paths, optional_ptr<FileOpener> opener);
 
@@ -83,14 +83,6 @@ public:
 	 */
 	void WithResolvedRegion(const string &url, optional_ptr<FileOpener> opener,
 							std::function<void(const string &)> s3Operation);
-
-	/*
-	 * Same, for a set of URLs that all live in the same bucket, so that a
-	 * batched request (DeleteObjects) resolves the region once and retries the
-	 * whole batch on a mismatch. Every URL gets the same query arguments.
-	 */
-	void WithResolvedRegion(const vector<string> &urls, optional_ptr<FileOpener> opener,
-							std::function<void(const vector<string> &)> s3Operation);
 
 	/*
 	 * Download performs similar logic to GetRequest, except writing the output

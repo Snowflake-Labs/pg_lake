@@ -40,7 +40,8 @@ public:
 
 	/* Custom functions */
 	void RemoveFileFromS3(string path, optional_ptr<FileOpener> opener);
-	void RemoveFilesFromS3(const vector<string> &paths, optional_ptr<FileOpener> opener);
+	void RemoveFilesFromS3(const string &bucketUrl, const vector<string> &paths,
+						   optional_ptr<FileOpener> opener);
 	int64_t Download(ClientContext &context, FileHandle &inputHandle, FileHandle &outputHandle);
 	vector<OpenFileInfo> List(const string &glob_pattern, bool is_glob, FileOpener *opener);
 

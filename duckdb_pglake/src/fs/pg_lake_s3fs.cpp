@@ -363,13 +363,15 @@ PgLakeS3FileSystem::RemoveFileFromS3(string path, optional_ptr<FileOpener> opene
  * per request. It is the bulk counterpart of RemoveFileFromS3 and is meant for
  * removing a whole prefix's worth of objects (e.g. a dropped Iceberg table).
  *
- * DeleteObjects targets a single bucket, so all paths must live in one bucket,
- * and they must already carry the query arguments a request to that bucket
- * needs: RegionAwareS3FileSystem::RemoveFiles groups by bucket and resolves the
- * region.
+ * The request goes to bucketUrl, which is the only URL involved: the keys
+ * travel in the request body. So bucketUrl is the one that has to carry the
+ * query arguments the request needs, region included, and the paths can be
+ * plain s3:// URLs. RegionAwareS3FileSystem::RemoveFiles groups them by bucket
+ * and resolves the region.
  */
 void
-PgLakeS3FileSystem::RemoveFilesFromS3(const vector<string> &paths,
+PgLakeS3FileSystem::RemoveFilesFromS3(const string &bucketUrl,
+									  const vector<string> &paths,
 									  optional_ptr<FileOpener> opener)
 {
 	if (paths.empty())
@@ -377,66 +379,69 @@ PgLakeS3FileSystem::RemoveFilesFromS3(const vector<string> &paths,
 
 	optional_ptr<HTTPMetadataCache> metadataCache = GetGlobalCache();
 
-	const string &samplePath = paths.front();
-	string bucketUrl;
-	vector<string> keys;
-
-	keys.reserve(paths.size());
-
 	/*
 	 * Read the auth parameters once instead of per path: ReadFrom does a dozen
 	 * secret manager and setting lookups, all paths are in the same bucket, and
 	 * the only field the bucket/key split reads is s3_url_compatibility_mode.
 	 */
-	FileOpenerInfo s3UrlInfo = {samplePath};
+	FileOpenerInfo s3UrlInfo = {bucketUrl};
 	S3AuthParams authParams = S3AuthParams::ReadFrom(opener, s3UrlInfo);
+
+	ParsedS3Url parsedBucketUrl = S3UrlParse(bucketUrl, authParams);
+	string bareBucketUrl = parsedBucketUrl.prefix + parsedBucketUrl.bucket;
+
+	vector<string> keys;
+
+	keys.reserve(paths.size());
 
 	for (const string &path : paths)
 	{
 		ParsedS3Url parsedUrl = S3UrlParse(path, authParams);
 
-		if (bucketUrl.empty())
-			bucketUrl = parsedUrl.prefix + parsedUrl.bucket;
-		else if (bucketUrl != parsedUrl.prefix + parsedUrl.bucket)
-			throw InternalException("cannot delete %s and %s in one DeleteObjects request",
-									samplePath, path);
+		if (parsedUrl.prefix + parsedUrl.bucket != bareBucketUrl)
+			throw InternalException("cannot delete %s in a DeleteObjects request for %s",
+									path, bareBucketUrl);
 
 		keys.push_back(parsedUrl.key);
 	}
 
 	/*
-	 * Build one POST-capable handle and reuse it for every batch. CreateHandle
-	 * rather than OpenFile: we only need the auth and HTTP parameters, and
-	 * OpenFile would additionally HEAD the sample object, which costs a round
-	 * trip and fails with 404 when the sample happens to be gone already --
-	 * deleting an object that no longer exists is not an error for DeleteObjects
-	 * itself.
+	 * Build one POST-capable handle and reuse it for every batch. It comes from
+	 * the bucket URL, which is where the request goes and which carries the
+	 * region the caller resolved.
+	 *
+	 * CreateHandle rather than OpenFile: we only need the auth and HTTP
+	 * parameters, and OpenFile would additionally HEAD the URL, which costs a
+	 * round trip and, on a bucket URL, has nothing to report anyway.
 	 */
 	unique_ptr<HTTPFileHandle> fileHandle =
-		CreateHandle(samplePath, FileFlags::FILE_FLAGS_READ, opener);
+		CreateHandle(bucketUrl, FileFlags::FILE_FLAGS_READ, opener);
 
 	S3FileHandle *s3Handle = (S3FileHandle *) fileHandle.get();
 
-	/* Change the file handle to / to POST to /?delete */
-	s3Handle->path = bucketUrl + "/";
+	/*
+	 * Point the handle at / to POST to /?delete. The query arguments can come
+	 * off here: PostRequest signs with the handle's auth parameters, which
+	 * CreateHandle already read them into.
+	 */
+	s3Handle->path = bareBucketUrl + "/";
 
 	/*
 	 * Best-effort HTTP metadata cache hygiene, as in RemoveFileFromS3: drop any
 	 * cached entry for the deleted objects so a stale entry cannot make a
 	 * removed file look readable. Reads inject ?s3_region from cache, so evict
-	 * both the bare URL and the region-resolved form. The caller has already
-	 * region-resolved the paths, so the sample carries whatever query string a
-	 * read would use.
+	 * both the bare URL and the region-resolved form, which is the bucket URL's
+	 * query string on the key.
 	 */
 	string querySuffix;
-	auto queryPos = samplePath.find('?');
+	auto queryPos = bucketUrl.find('?');
 	if (queryPos != string::npos)
-		querySuffix = samplePath.substr(queryPos);
+		querySuffix = bucketUrl.substr(queryPos);
 
 	auto evictBatch = [&](idx_t begin, idx_t end) {
 		for (idx_t i = begin; i < end; i++)
 		{
-			string fullUrl = bucketUrl + "/" + keys[i];
+			string fullUrl = bareBucketUrl + "/" + keys[i];
 
 			metadataCache->Erase(fullUrl);
 			if (!querySuffix.empty())
