@@ -115,17 +115,17 @@ ConvertISOYearToBCIfNeeded(const char *dateTimestampString)
 
 
 /*
- * Serialize a Datum in a PGDuck-compatible way; a central hook for
- * special-purpose conversion of PG datatypes in preparation for PGDuck.
+ * GetPGDuckSerializeKind determines how a value of the given type is
+ * serialized for PGDuck, based on the type, its output function and the target
+ * format.
  *
- * By default, we call the supplied OutputFunction as provided, however we want
- * the ability to override this serialization on a type-by-type basis, in
- * particular for arrays and records, which get special handling to convert to
- * DuckDB-compatible text format.
+ * The answer is the same for every value of a column, but deriving it costs
+ * several syscache lookups (domain resolution, and the map check on top of
+ * that for arrays), so callers that serialize many values of the same type
+ * should resolve the kind once and pass it to PGDuckSerializeWithKind.
  */
-char *
-PGDuckSerialize(FmgrInfo *flinfo, Oid columnType, Datum value,
-				CopyDataFormat format)
+PGDuckSerializeKind
+GetPGDuckSerializeKind(FmgrInfo *flinfo, Oid columnType, CopyDataFormat format)
 {
 	/*
 	 * Unwrap domain types so that e.g. a domain-over-bytea is serialized with
@@ -137,13 +137,13 @@ PGDuckSerialize(FmgrInfo *flinfo, Oid columnType, Datum value,
 	{
 		/* maps are a type of array */
 		if (IsMapTypeOid(columnType))
-			return MapOutForPGDuck(value, format);
+			return PGDUCK_SERIALIZE_MAP;
 
-		return ArrayOutForPGDuck(DatumGetArrayTypeP(value), format);
+		return PGDUCK_SERIALIZE_ARRAY;
 	}
 
 	if (flinfo->fn_oid == RECORD_OUT_OID)
-		return StructOutForPGDuck(value, format);
+		return PGDUCK_SERIALIZE_STRUCT;
 
 	/*
 	 * For Iceberg, intervals are serialized as struct(months, days,
@@ -151,44 +151,115 @@ PGDuckSerialize(FmgrInfo *flinfo, Oid columnType, Datum value,
 	 * interval formatting is different from postgres interval formatting.
 	 */
 	if (columnType == INTERVALOID && format == DATA_FORMAT_ICEBERG)
-		return IntervalOutForPGDuck(value);
+		return PGDUCK_SERIALIZE_INTERVAL;
 
 	if (columnType == BYTEAOID)
-		return ByteAOutForPGDuck(value);
+		return PGDUCK_SERIALIZE_BYTEA;
 
 	/*
 	 * TimeTZ is stored as TIME (UTC-normalized) in Iceberg. We convert to UTC
 	 * in PGDuckSerialize, so DuckDB should parse as TIME.
 	 */
 	if (columnType == TIMETZOID && format == DATA_FORMAT_ICEBERG)
-		return TimeTzOutForPGDuck(value);
+		return PGDUCK_SERIALIZE_TIMETZ;
 
 	if (IsGeometryOutFunctionId(flinfo->fn_oid))
-	{
-		/*
-		 * Postgis emits HEX WKB by default, which DuckDB does not accept.
-		 * Hence, we emit as WKT.
-		 */
-		Datum		geomAsText = OidFunctionCall1(ST_AsTextFunctionId(), value);
+		return PGDUCK_SERIALIZE_GEOMETRY;
 
-		return TextDatumGetCString(geomAsText);
-	}
-
-	/*
-	 * PostgreSQL outputs BC dates/timestamps with a " BC" suffix (e.g.
-	 * "4712-01-01 BC"), but DuckDB expects ISO 8601 negative-year format
-	 * (e.g. "-4711-01-01").  Without this conversion, DuckDB silently drops
-	 * the BC era indicator and treats the value as AD.
-	 */
 	if (columnType == DATEOID || columnType == TIMESTAMPOID ||
 		columnType == TIMESTAMPTZOID)
-	{
-		char	   *result = OutputFunctionCall(flinfo, value);
+		return PGDUCK_SERIALIZE_DATE_TIMESTAMP;
 
-		return (char *) ConvertBCToISOYearIfNeeded(result);
+	return PGDUCK_SERIALIZE_OUTPUT_FUNCTION;
+}
+
+
+/*
+ * PGDuckSerializeWithKind serializes a Datum in a PGDuck-compatible way using
+ * a serialization kind that the caller already resolved via
+ * GetPGDuckSerializeKind.
+ *
+ * The kind must have been resolved for the type of the value being passed in,
+ * with the same target format.
+ */
+char *
+PGDuckSerializeWithKind(FmgrInfo *flinfo, PGDuckSerializeKind serializeKind,
+						Datum value, CopyDataFormat format)
+{
+	switch (serializeKind)
+	{
+		case PGDUCK_SERIALIZE_MAP:
+			return MapOutForPGDuck(value, format);
+
+		case PGDUCK_SERIALIZE_ARRAY:
+			return ArrayOutForPGDuck(DatumGetArrayTypeP(value), format);
+
+		case PGDUCK_SERIALIZE_STRUCT:
+			return StructOutForPGDuck(value, format);
+
+		case PGDUCK_SERIALIZE_INTERVAL:
+			return IntervalOutForPGDuck(value);
+
+		case PGDUCK_SERIALIZE_BYTEA:
+			return ByteAOutForPGDuck(value);
+
+		case PGDUCK_SERIALIZE_TIMETZ:
+			return TimeTzOutForPGDuck(value);
+
+		case PGDUCK_SERIALIZE_GEOMETRY:
+			{
+				/*
+				 * Postgis emits HEX WKB by default, which DuckDB does not
+				 * accept. Hence, we emit as WKT.
+				 */
+				Datum		geomAsText = OidFunctionCall1(ST_AsTextFunctionId(), value);
+
+				return TextDatumGetCString(geomAsText);
+			}
+
+		case PGDUCK_SERIALIZE_DATE_TIMESTAMP:
+			{
+				/*
+				 * PostgreSQL outputs BC dates/timestamps with a " BC" suffix
+				 * (e.g. "4712-01-01 BC"), but DuckDB expects ISO 8601
+				 * negative-year format (e.g. "-4711-01-01").  Without this
+				 * conversion, DuckDB silently drops the BC era indicator and
+				 * treats the value as AD.
+				 */
+				char	   *result = OutputFunctionCall(flinfo, value);
+
+				return (char *) ConvertBCToISOYearIfNeeded(result);
+			}
+
+		case PGDUCK_SERIALIZE_OUTPUT_FUNCTION:
+			return OutputFunctionCall(flinfo, value);
 	}
 
+	/* keep the compiler happy; all kinds are handled above */
 	return OutputFunctionCall(flinfo, value);
+}
+
+
+/*
+ * Serialize a Datum in a PGDuck-compatible way; a central hook for
+ * special-purpose conversion of PG datatypes in preparation for PGDuck.
+ *
+ * By default, we call the supplied OutputFunction as provided, however we want
+ * the ability to override this serialization on a type-by-type basis, in
+ * particular for arrays and records, which get special handling to convert to
+ * DuckDB-compatible text format.
+ *
+ * Callers in a per-value loop should hoist the GetPGDuckSerializeKind call out
+ * of the loop and call PGDuckSerializeWithKind directly.
+ */
+char *
+PGDuckSerialize(FmgrInfo *flinfo, Oid columnType, Datum value,
+				CopyDataFormat format)
+{
+	PGDuckSerializeKind serializeKind =
+		GetPGDuckSerializeKind(flinfo, columnType, format);
+
+	return PGDuckSerializeWithKind(flinfo, serializeKind, value, format);
 }
 
 

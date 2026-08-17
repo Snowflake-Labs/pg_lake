@@ -119,6 +119,14 @@ typedef struct CopyToStateData
 	 * and looking it up per value costs several syscache probes.
 	 */
 	bool	   *useDuckSerialization;
+
+	/*
+	 * Per-column serialization kind for the columns that use DuckDB
+	 * serialization, precomputed for the same reason: PGDuckSerialize would
+	 * otherwise re-resolve the column's domain base type, and for arrays also
+	 * re-check whether it is a map type, for every value.
+	 */
+	PGDuckSerializeKind *duckSerializeKind;
 	MemoryContext rowcontext;	/* per-row evaluation context */
 	uint64		bytes_processed;	/* number of bytes processed so far */
 
@@ -475,6 +483,8 @@ StartCopyTo(CopyToState cstate, TupleDesc tupDesc)
 	cstate->out_functions = (FmgrInfo *) palloc(num_phys_attrs * sizeof(FmgrInfo));
 	cstate->needsNumericLeafCheck = (bool *) palloc0(num_phys_attrs * sizeof(bool));
 	cstate->useDuckSerialization = (bool *) palloc0(num_phys_attrs * sizeof(bool));
+	cstate->duckSerializeKind = (PGDuckSerializeKind *)
+		palloc0(num_phys_attrs * sizeof(PGDuckSerializeKind));
 	foreach(cur, cstate->attnumlist)
 	{
 		int			attnum = lfirst_int(cur);
@@ -499,6 +509,12 @@ StartCopyTo(CopyToState cstate, TupleDesc tupDesc)
 			ShouldUseDuckSerialization(cstate->targetFormat,
 									   MakePGType(attr->atttypid,
 												  attr->atttypmod));
+
+		if (cstate->useDuckSerialization[attnum - 1])
+			cstate->duckSerializeKind[attnum - 1] =
+				GetPGDuckSerializeKind(&cstate->out_functions[attnum - 1],
+									   attr->atttypid,
+									   cstate->targetFormat);
 	}
 
 	/*
@@ -936,24 +952,20 @@ CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot)
 		{
 			if (!cstate->opts.binary)
 			{
-				/*
-				 * Lookup the underlying tuple's attribute so we can pass in
-				 * the typid
-				 */
-				Form_pg_attribute attr = TupleDescAttr(slot->tts_tupleDescriptor, attnum - 1);
-
 				if (cstate->useDuckSerialization[attnum - 1])
 				{
 					/*
 					 * Since we are at the top-level when emitting an
 					 * attribute in CopyOneRowTo(), we are not inside a
 					 * composite type.
+					 *
+					 * The serialization kind was resolved from the column's
+					 * type in StartCopyTo().
 					 */
-
-					string = PGDuckSerialize(&out_functions[attnum - 1],
-											 attr->atttypid,
-											 value,
-											 cstate->targetFormat);
+					string = PGDuckSerializeWithKind(&out_functions[attnum - 1],
+													 cstate->duckSerializeKind[attnum - 1],
+													 value,
+													 cstate->targetFormat);
 				}
 				else
 					string = OutputFunctionCall(&out_functions[attnum - 1],
@@ -971,9 +983,14 @@ CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot)
 				 */
 				if (cstate->targetFormat != DATA_FORMAT_ICEBERG &&
 					cstate->needsNumericLeafCheck[attnum - 1])
+				{
+					Form_pg_attribute attr =
+						TupleDescAttr(slot->tts_tupleDescriptor, attnum - 1);
+
 					ErrorIfCopyToExceedsNumericLimitsInDatum(value,
 															 attr->atttypid,
 															 attr->atttypmod);
+				}
 
 
 				if (cstate->opts.csv_mode)

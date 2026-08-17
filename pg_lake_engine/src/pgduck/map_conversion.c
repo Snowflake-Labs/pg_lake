@@ -93,6 +93,12 @@ MapOutForPGDuck(Datum myMap, CopyDataFormat format)
 	bool		keyIsContainer = IsSerializedAsContainer(keysElementType, format);
 	bool		valIsContainer = IsSerializedAsContainer(valuesElementType, format);
 
+	/* all keys and all values have the same type, so resolve once */
+	PGDuckSerializeKind keySerializeKind =
+		GetPGDuckSerializeKind(&keysExtra->proc, keysElementType, format);
+	PGDuckSerializeKind valueSerializeKind =
+		GetPGDuckSerializeKind(&valuesExtra->proc, valuesElementType, format);
+
 	StringInfoData outputBuffer;
 
 	initStringInfo(&outputBuffer);
@@ -126,8 +132,8 @@ MapOutForPGDuck(Datum myMap, CopyDataFormat format)
 		if (nulls[0])
 			ereport(ERROR, (errmsg("cannot have NULL for map key entry")));;
 
-		serializedKey = PGDuckSerialize(&keysExtra->proc, keysElementType, pairValues[0],
-										format);
+		serializedKey = PGDuckSerializeWithKind(&keysExtra->proc, keySerializeKind,
+												pairValues[0], format);
 		if (!keyIsContainer)
 			serializedKey = (char *) quote_literal_cstr(serializedKey);
 
@@ -135,8 +141,9 @@ MapOutForPGDuck(Datum myMap, CopyDataFormat format)
 			serializedValue = "NULL";
 		else
 		{
-			serializedValue = PGDuckSerialize(&valuesExtra->proc, valuesElementType, pairValues[1],
-											  format);
+			serializedValue = PGDuckSerializeWithKind(&valuesExtra->proc,
+													  valueSerializeKind,
+													  pairValues[1], format);
 			if (!valIsContainer)
 				serializedValue = (char *) quote_literal_cstr(serializedValue);
 		}

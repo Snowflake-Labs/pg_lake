@@ -25,6 +25,36 @@
 
 #define BYTEA_OUT_OID 31
 
+/*
+ * PGDuckSerializeKind identifies which serialization path a value takes in
+ * PGDuckSerialize.  It is derived from the type OID, its output function and
+ * the target format, all of which are constant for a given column, so callers
+ * that serialize many values of the same type can resolve it once with
+ * GetPGDuckSerializeKind and then call PGDuckSerializeWithKind per value.
+ * Resolving it costs several syscache probes, which is significant next to the
+ * type's output function call.
+ */
+typedef enum PGDuckSerializeKind
+{
+	/* no override; call the type's own output function */
+	PGDUCK_SERIALIZE_OUTPUT_FUNCTION = 0,
+	PGDUCK_SERIALIZE_MAP,
+	PGDUCK_SERIALIZE_ARRAY,
+	PGDUCK_SERIALIZE_STRUCT,
+	PGDUCK_SERIALIZE_INTERVAL,
+	PGDUCK_SERIALIZE_BYTEA,
+	PGDUCK_SERIALIZE_TIMETZ,
+	PGDUCK_SERIALIZE_GEOMETRY,
+
+	/* output function call plus BC-era year conversion */
+	PGDUCK_SERIALIZE_DATE_TIMESTAMP
+}			PGDuckSerializeKind;
+
+extern PGDLLEXPORT PGDuckSerializeKind GetPGDuckSerializeKind(FmgrInfo *flinfo, Oid typeOid,
+															  CopyDataFormat format);
+extern PGDLLEXPORT char *PGDuckSerializeWithKind(FmgrInfo *flinfo,
+												 PGDuckSerializeKind serializeKind,
+												 Datum value, CopyDataFormat format);
 extern PGDLLEXPORT char *PGDuckSerialize(FmgrInfo *flinfo, Oid typeOid, Datum value,
 										 CopyDataFormat format);
 extern PGDLLEXPORT char *PGDuckOnlySerialize(Oid typeOid, Datum value);
