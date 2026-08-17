@@ -77,6 +77,16 @@ int			MaxCompactionsPerVacuum = 100;
 /* managed by a GUC, not exposed to the user, see note in VacuumRemoveInProgressFiles */
 int			MaxFileRemovalsPerVacuum = 100000;
 
+/*
+ * Set when a file removal loop stopped at MaxFileRemovalsPerVacuum with files
+ * still queued, meaning the backlog outlives this cycle. The autovacuum loop
+ * reads it to start the next cycle right away instead of napping for
+ * pg_lake_iceberg.autovacuum_naptime (10 minutes by default) with known work
+ * pending. A VACUUM issued by a client sets it in its own backend, where
+ * nothing reads it.
+ */
+static bool VacuumStoppedWithFilesQueued = false;
+
 
 PG_FUNCTION_INFO_V1(pg_lake_iceberg_vacuum);
 
@@ -153,10 +163,19 @@ pg_lake_iceberg_vacuum(PG_FUNCTION_ARGS)
 	{
 		TimestampTz currentTime = GetCurrentTimestamp();
 
+		/*
+		 * Skip the nap when the previous cycle stopped on its own per-vacuum
+		 * limit with files still queued: the backlog is known to be there,
+		 * and waiting a full naptime for it is how a queue that grows faster
+		 * than one naptime drains it never catches up.
+		 */
 		if (IcebergAutovacuumEnabled &&
-			TimestampDifferenceExceeds(lastVacuumTime, currentTime,
-									   IcebergAutovacuumNaptime * 1000))
+			(VacuumStoppedWithFilesQueued ||
+			 TimestampDifferenceExceeds(lastVacuumTime, currentTime,
+										IcebergAutovacuumNaptime * 1000)))
 		{
+			VacuumStoppedWithFilesQueued = false;
+
 			START_TRANSACTION();
 			{
 				PgLakeIcebergVacuumForTables(outOfTransactionMemoryContext, firstLoop);
@@ -912,8 +931,18 @@ VacuumRemoveDeletionQueueRecords(Oid relationId, bool isFull, bool isVerbose)
 		{
 			INJECTION_POINT_COMPAT("deletion-queue");
 
+			/*
+			 * Claim no more rows than this VACUUM has left in its budget. A
+			 * drain pass claims up to PER_LOOP_FILE_CLEANUP_LIMIT rows, which
+			 * is well above MaxFileRemovalsPerVacuum's smaller settings, and
+			 * the loop condition below can only be checked once a pass has
+			 * already deleted what it claimed.
+			 */
+			int			remainingBudget = MaxFileRemovalsPerVacuum - totalFilesRemoved;
+
 			/* do cleanup */
-			deletionQueueRecords = GetDeletionQueueRecords(relationId, isFull);
+			deletionQueueRecords = GetDeletionQueueRecords(relationId, isFull,
+														   remainingBudget);
 
 			hasRemainingFiles = RemoveDeletionQueueRecords(deletionQueueRecords, isVerbose);
 
@@ -955,6 +984,9 @@ VacuumRemoveDeletionQueueRecords(Oid relationId, bool isFull, bool isVerbose)
 	while (!isFull				/* when isFull, we'll remove all files */
 		   && totalFilesRemoved < MaxFileRemovalsPerVacuum	/* per-vacuum limit */
 		   && hasRemainingFiles /* no more files to remove */ );
+
+	if (hasRemainingFiles && totalFilesRemoved >= MaxFileRemovalsPerVacuum)
+		VacuumStoppedWithFilesQueued = true;
 
 	if (totalFilesRemoved > 0)
 	{
@@ -1045,6 +1077,9 @@ VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose)
 	while (!isFull				/* when isFull, we'll remove all files */
 		   && totalFilesRemoved < MaxFileRemovalsPerVacuum	/* per-vacuum limit */
 		   && hasRemainingFiles /* no more files to remove */ );
+
+	if (hasRemainingFiles && totalFilesRemoved >= MaxFileRemovalsPerVacuum)
+		VacuumStoppedWithFilesQueued = true;
 
 	if (totalFilesRemoved > 0)
 	{

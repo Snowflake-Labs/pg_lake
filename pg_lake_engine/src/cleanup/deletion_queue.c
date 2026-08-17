@@ -78,7 +78,8 @@ flush_deletion_queue(PG_FUNCTION_ARGS)
 	/* remove all */
 	bool		isFull = true;
 	bool		isVerbose = false;
-	List	   *deletionQueueRecords = GetDeletionQueueRecords(relationId, isFull);
+	List	   *deletionQueueRecords = GetDeletionQueueRecords(relationId, isFull,
+															   PER_LOOP_FILE_CLEANUP_LIMIT);
 
 	RemoveDeletionQueueRecords(deletionQueueRecords, isVerbose);
 
@@ -390,9 +391,15 @@ IncrementDeletionQueueRetryCount(List *failedRemovalPaths)
 /*
  * GetDeletionQueueRecords gets a list of paths that are eligible for
  * deletion, meaning delete_after condition is met on DELETION_QUEUE_TABLE.
+ *
+ * Unless isFull is set, at most maxRecords rows are claimed, capped at
+ * PER_LOOP_FILE_CLEANUP_LIMIT so that one pass cannot hold a transaction open
+ * for an unbounded amount of work no matter what the caller asks for. Callers
+ * that drain in a loop under a budget of their own pass what is left of that
+ * budget, so the budget is respected exactly rather than to the nearest pass.
  */
 List *
-GetDeletionQueueRecords(Oid relationId, bool isFull)
+GetDeletionQueueRecords(Oid relationId, bool isFull, int maxRecords)
 {
 	MemoryContext callerContext = CurrentMemoryContext;
 	List	   *result = NIL;
@@ -432,7 +439,8 @@ GetDeletionQueueRecords(Oid relationId, bool isFull)
 	if (!isFull)
 	{
 		appendStringInfo(query,
-						 "    LIMIT %d", PER_LOOP_FILE_CLEANUP_LIMIT);
+						 "    LIMIT %d",
+						 Min(maxRecords, PER_LOOP_FILE_CLEANUP_LIMIT));
 	}
 
 	appendStringInfo(query,

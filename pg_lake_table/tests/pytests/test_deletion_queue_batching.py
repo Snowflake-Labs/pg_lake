@@ -1,3 +1,5 @@
+import time
+
 from utils_pytest import *
 
 # Prefix under the shared test bucket that no table owns, so the rows we queue
@@ -5,11 +7,17 @@ from utils_pytest import *
 TEST_PREFIX = "deletion_queue_batching"
 
 
-def _queue_paths(superuser_conn, paths):
+def _queue_paths(superuser_conn, paths, table=None):
     """Queue the given object-store paths as plain, immediately eligible
-    deletion-queue rows for a table that does not exist, which is what a
-    dropped table leaves behind."""
-    values = ",".join(f"('{path}', 0, NULL, false, false)" for path in paths)
+    deletion-queue rows.
+
+    Without a table the rows belong to a table that does not exist, which is
+    what a dropped table leaves behind, and only the dropped-table path of
+    VACUUM drains them. With a table they are drained by that table's own
+    vacuum, which is the only path the autovacuum worker takes.
+    """
+    table_name = f"'{table}'::pg_catalog.regclass::pg_catalog.oid" if table else "0"
+    values = ",".join(f"('{path}', {table_name}, NULL, false, false)" for path in paths)
 
     run_command(
         f"INSERT INTO lake_engine.deletion_queue "
@@ -114,3 +122,88 @@ def test_deletion_queue_batch_isolates_failing_path(s3, superuser_conn, extensio
         superuser_conn,
     )
     superuser_conn.commit()
+
+
+def test_autovacuum_drains_a_backlog_without_napping(
+    s3, superuser_conn, extension, installcheck
+):
+    """A backlog larger than one vacuum's budget drains without a nap per cycle.
+
+    A vacuum stops at pg_lake_table.max_file_removals_per_vacuum, so a longer
+    queue takes several cycles. If each of those cycles first waits
+    pg_lake_iceberg.autovacuum_naptime (10 minutes by default), a queue that
+    grows faster than one naptime drains it never catches up, and the rest of
+    the cycle, including the catalog export, waits behind it. So a cycle that
+    stopped on its own limit with rows still queued starts the next one right
+    away.
+
+    The naptime below is set high enough that draining one file per cycle
+    cannot finish within the deadline if the cycles nap.
+    """
+    if installcheck:
+        return
+
+    table = "test_deletion_queue_backlog"
+    prefix = f"s3://{TEST_BUCKET}/{TEST_PREFIX}/backlog"
+    file_count = 12
+    naptime_seconds = 8
+    deadline_seconds = 40
+
+    paths = [f"{prefix}/f{i}.parquet" for i in range(file_count)]
+
+    for path in paths:
+        bucket, key = parse_s3_path(path)
+        s3.put_object(Bucket=bucket, Key=key, Body=b"x")
+
+    run_command_outside_tx(
+        [
+            "ALTER SYSTEM SET pg_lake_table.max_file_removals_per_vacuum TO 1",
+            f"ALTER SYSTEM SET pg_lake_iceberg.autovacuum_naptime TO '{naptime_seconds}s'",
+            "SELECT pg_reload_conf()",
+        ]
+    )
+
+    try:
+        # the autovacuum worker only walks tables that still exist, so the
+        # queued rows have to belong to one
+        run_command(
+            f"CREATE TABLE {table} (id int) USING pg_lake_iceberg "
+            f"WITH (location = 's3://{TEST_BUCKET}/{TEST_PREFIX}/{table}/')",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        _queue_paths(superuser_conn, paths, table=table)
+
+        remaining = file_count
+        deadline = time.monotonic() + deadline_seconds
+
+        while time.monotonic() < deadline:
+            remaining = len(_queued_rows(superuser_conn, prefix))
+            superuser_conn.commit()
+
+            if remaining == 0:
+                break
+
+            time.sleep(0.5)
+
+        assert remaining == 0, (
+            f"{remaining} of {file_count} rows still queued after "
+            f"{deadline_seconds}s, which is only "
+            f"{deadline_seconds // naptime_seconds} cycles of one file each "
+            f"when every cycle naps first"
+        )
+
+        assert _existing_files(superuser_conn, prefix) == 0
+        superuser_conn.commit()
+    finally:
+        run_command(f"DROP TABLE IF EXISTS {table}", superuser_conn)
+        superuser_conn.commit()
+
+        run_command_outside_tx(
+            [
+                "ALTER SYSTEM RESET pg_lake_table.max_file_removals_per_vacuum",
+                "ALTER SYSTEM RESET pg_lake_iceberg.autovacuum_naptime",
+                "SELECT pg_reload_conf()",
+            ]
+        )

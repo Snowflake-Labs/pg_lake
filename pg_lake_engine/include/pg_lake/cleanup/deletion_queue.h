@@ -27,10 +27,14 @@
 #define FILE_DELETION_BATCHES_PER_LOOP 5
 
 /*
- * Queue rows claimed per drain pass. Each pass runs in its own transaction, so
- * this bounds how long the deletion queue holds a transaction (and its xmin)
- * open before the caller gets control back and can let the rest of the vacuum
- * cycle -- including the object-store catalog export -- have a turn.
+ * Upper bound on the queue rows claimed per drain pass. Each pass runs in its
+ * own transaction, so this bounds how long the deletion queue holds a
+ * transaction (and its xmin) open before the caller gets control back and can
+ * let the rest of the vacuum cycle -- including the object-store catalog
+ * export -- have a turn.
+ *
+ * A caller that has its own budget for the whole cycle asks for fewer rows via
+ * the maxRecords argument of GetDeletionQueueRecords.
  */
 #define PER_LOOP_FILE_CLEANUP_LIMIT \
 	(FILE_DELETION_BATCH_SIZE * FILE_DELETION_BATCHES_PER_LOOP)
@@ -39,7 +43,7 @@
 extern int	OrphanedFileRetentionPeriod;
 extern int	VacuumFileRemoveMaxRetries;
 
-extern PGDLLEXPORT List *GetDeletionQueueRecords(Oid relationId, bool isFull);
+extern PGDLLEXPORT List *GetDeletionQueueRecords(Oid relationId, bool isFull, int maxRecords);
 extern PGDLLEXPORT bool RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose);
 extern PGDLLEXPORT void InsertDeletionQueueRecord(char *path, Oid relationId, TimestampTz deleteAfterTime);
 extern PGDLLEXPORT void InsertPrefixDeletionRecord(char *path, TimestampTz orphanedAt);
