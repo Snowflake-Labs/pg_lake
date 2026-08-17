@@ -136,6 +136,11 @@ PgLakeS3FileSystem::RemoveFile(const string &filename,
  * a request body verbatim: an unescaped '&' makes the whole DeleteObjects body
  * malformed XML and S3 rejects the batch, and a key holding '<' could otherwise
  * inject elements and change which objects the request targets.
+ *
+ * Not handled: S3 also allows bytes 0x00-0x1f in a key, and XML 1.0 cannot
+ * represent those at all, not even as a character reference. Such a key makes
+ * the body malformed and so takes its whole batch down with it, where the
+ * one-key-per-request version only failed its own delete.
  */
 static string
 EscapeXmlText(const string &text)
@@ -191,19 +196,16 @@ PostDeleteObjects(PgLakeS3FileSystem &fs, S3FileHandle *s3Handle,
 	ss << "</Delete>";
 	string body = ss.str();
 
-	/*
-	 * The DeleteResult echoes one <Deleted> element per key, so size the buffer
-	 * to the batch (it is resized if we underestimate).
-	 */
-	string responseBuffer((end - begin) * 256 + 1000, '\0');
+	/* PostRequest assigns the response body, so it needs no room up front */
+	string responseBuffer;
 
 	/* Perform the batch deletion */
 	unique_ptr<HTTPResponse> postResponse =
 		fs.PostRequest(*s3Handle, s3Handle->path, {}, responseBuffer,
 					   (char *) body.c_str(), body.length(), "delete=");
 
-	/* Construct body of the POST response */
-	string result(responseBuffer);
+	/* Body of the POST response */
+	const string &result = responseBuffer;
 
 	if (result.find("<DeleteResult", 0) == string::npos)
 		throw HTTPException(*postResponse,
@@ -306,10 +308,16 @@ PgLakeS3FileSystem::RemoveFilesFromS3(const vector<string> &paths,
 
 	keys.reserve(paths.size());
 
+	/*
+	 * Read the auth parameters once instead of per path: ReadFrom does a dozen
+	 * secret manager and setting lookups, all paths are in the same bucket, and
+	 * the only field the bucket/key split reads is s3_url_compatibility_mode.
+	 */
+	FileOpenerInfo s3UrlInfo = {samplePath};
+	S3AuthParams authParams = S3AuthParams::ReadFrom(opener, s3UrlInfo);
+
 	for (const string &path : paths)
 	{
-		FileOpenerInfo s3UrlInfo = {path};
-		S3AuthParams authParams = S3AuthParams::ReadFrom(opener, s3UrlInfo);
 		ParsedS3Url parsedUrl = S3UrlParse(path, authParams);
 
 		if (bucketUrl.empty())
@@ -337,13 +345,6 @@ PgLakeS3FileSystem::RemoveFilesFromS3(const vector<string> &paths,
 	/* Change the file handle to / to POST to /?delete */
 	s3Handle->path = bucketUrl + "/";
 
-	for (idx_t begin = 0; begin < keys.size(); begin += S3_DELETE_OBJECTS_MAX_KEYS)
-	{
-		idx_t end = MinValue(begin + S3_DELETE_OBJECTS_MAX_KEYS, keys.size());
-
-		PostDeleteObjects(*this, s3Handle, keys, begin, end);
-	}
-
 	/*
 	 * Best-effort HTTP metadata cache hygiene, as in RemoveFileFromS3: drop any
 	 * cached entry for the deleted objects so a stale entry cannot make a
@@ -357,13 +358,25 @@ PgLakeS3FileSystem::RemoveFilesFromS3(const vector<string> &paths,
 	if (queryPos != string::npos)
 		querySuffix = samplePath.substr(queryPos);
 
-	for (const string &key : keys)
+	for (idx_t begin = 0; begin < keys.size(); begin += S3_DELETE_OBJECTS_MAX_KEYS)
 	{
-		string fullUrl = bucketUrl + "/" + key;
+		idx_t end = MinValue(begin + S3_DELETE_OBJECTS_MAX_KEYS, keys.size());
 
-		metadataCache->Erase(fullUrl);
-		if (!querySuffix.empty())
-			metadataCache->Erase(fullUrl + querySuffix);
+		PostDeleteObjects(*this, s3Handle, keys, begin, end);
+
+		/*
+		 * Evict per batch rather than once at the end: PostDeleteObjects throws
+		 * when S3 reports a per-key error, and the batches before the failing
+		 * one are already deleted.
+		 */
+		for (idx_t i = begin; i < end; i++)
+		{
+			string fullUrl = bucketUrl + "/" + keys[i];
+
+			metadataCache->Erase(fullUrl);
+			if (!querySuffix.empty())
+				metadataCache->Erase(fullUrl + querySuffix);
+		}
 	}
 }
 

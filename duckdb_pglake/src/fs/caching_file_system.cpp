@@ -404,18 +404,31 @@ PGLakeCachingFileSystem::RemoveFiles(ClientContext &context, const vector<string
 		if (s3fs.CanHandleFile(path))
 			s3Paths.push_back(path);
 		else
-			virtualFs.RemoveFile(path);
+			virtualFs.RemoveFile(path, opener);
 	}
 
 	if (s3Paths.empty())
 		return;
 
-	s3fs.RemoveFiles(s3Paths, opener);
-
 	/*
 	 * The batch delete goes straight to S3 rather than through this wrapper, so
-	 * evict the cache entries here instead.
+	 * evict the cache entries here instead, both before and after.
+	 *
+	 * Before, because RemoveFiles sends the keys in batches and throws as soon as
+	 * one batch reports an error: evicting only afterwards would leave the
+	 * already-deleted batches holding a local copy, which is the stale cache this
+	 * is meant to prevent. Dropping the copy of a file whose delete then fails
+	 * only costs a re-download.
+	 *
+	 * After, because a concurrent reader can cache the file again in the window
+	 * between the eviction and the delete. Eviction of an uncached file is a
+	 * cheap no-op, so the second pass costs little.
 	 */
+	for (const string &path : s3Paths)
+		RemoveCachedCopy(context, path, opener);
+
+	s3fs.RemoveFiles(s3Paths, opener);
+
 	for (const string &path : s3Paths)
 		RemoveCachedCopy(context, path, opener);
 }

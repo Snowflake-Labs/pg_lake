@@ -540,19 +540,38 @@ static void ListFilesExec(ClientContext &context, TableFunctionInput &data_p, Da
 
 
 /*
- * RemoveFilesFunctionData defines the custom state for pg_lake_remove_files.
+ * RemoveFilesFunctionData defines the bind data for pg_lake_remove_files. It
+ * holds the arguments only: DuckDB binds a plan once and reuses the bind data
+ * for every execution of it, so anything per-scan belongs in the global state
+ * below.
  */
 struct RemoveFilesFunctionData : public TableFunctionData
 {
 	/* Function argument */
 	string globPattern;
+};
 
-	/* Function state */
+
+/*
+ * RemoveFilesGlobalState holds the per-execution state: the files this scan
+ * deleted, how far it has got streaming them back, and whether it is done.
+ * DuckDB creates it once per execution, so a second execution of the same
+ * prepared statement expands the pattern and deletes again rather than
+ * reporting an empty result as a successful cleanup.
+ */
+struct RemoveFilesGlobalState : public GlobalTableFunctionState
+{
 	vector<string> deletedFiles;
-	int fileOffset = 0;
+	idx_t fileOffset = 0;
 	bool started = false;
 	bool finished = false;
 };
+
+
+static unique_ptr<GlobalTableFunctionState> RemoveFilesInitGlobal(ClientContext &context,
+																  TableFunctionInitInput &input) {
+	return make_uniq<RemoveFilesGlobalState>();
+}
 
 
 /*
@@ -583,16 +602,17 @@ static unique_ptr<FunctionData> RemoveFilesBind(ClientContext &context,
  * when the caller only reads the cardinality (e.g. SELECT count(*)).
  */
 static void RemoveFilesExec(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
-	auto &functionData = (RemoveFilesFunctionData &)*data_p.bind_data;
-	if (functionData.finished)
+	auto &functionData = data_p.bind_data->Cast<RemoveFilesFunctionData>();
+	auto &globalState = data_p.global_state->Cast<RemoveFilesGlobalState>();
+	if (globalState.finished)
 		return;
 
-	if (!functionData.started)
+	if (!globalState.started)
 	{
-		functionData.started = true;
+		globalState.started = true;
 
 		FileOpener *opener = context.client_data->file_opener.get();
-		string &globPattern = functionData.globPattern;
+		const string &globPattern = functionData.globPattern;
 
 		DatabaseInstance &db = DatabaseInstance::GetDatabase(context);
 		BufferManager &bufferManager = BufferManager::GetBufferManager(db);
@@ -624,22 +644,22 @@ static void RemoveFilesExec(ClientContext &context, TableFunctionInput &data_p, 
 
 		PGLakeCachingFileSystem::RemoveFiles(context, paths);
 
-		functionData.deletedFiles = std::move(paths);
+		globalState.deletedFiles = std::move(paths);
 	}
 
 	/* Stream back the deleted URLs */
 	idx_t rowInChunk = 0;
-	while (functionData.fileOffset < functionData.deletedFiles.size() && rowInChunk < STANDARD_VECTOR_SIZE) {
-		output.SetValue(0, rowInChunk, Value(functionData.deletedFiles[functionData.fileOffset]));
+	while (globalState.fileOffset < globalState.deletedFiles.size() && rowInChunk < STANDARD_VECTOR_SIZE) {
+		output.SetValue(0, rowInChunk, Value(globalState.deletedFiles[globalState.fileOffset]));
 
 		rowInChunk++;
-		functionData.fileOffset++;
+		globalState.fileOffset++;
 	}
 
 	output.SetCardinality(rowInChunk);
 
-	if (functionData.fileOffset == functionData.deletedFiles.size())
-		functionData.finished = true;
+	if (globalState.fileOffset == globalState.deletedFiles.size())
+		globalState.finished = true;
 }
 
 
@@ -908,7 +928,7 @@ PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
 		/* pg_lake_remove_files(pattern varchar) */
 		pg_lake_remove_files.AddFunction(
 			TableFunction({LogicalType::VARCHAR},
-						  RemoveFilesExec, RemoveFilesBind));
+						  RemoveFilesExec, RemoveFilesBind, RemoveFilesInitGlobal));
 
 	    loader.RegisterFunction(pg_lake_remove_files);
 	}

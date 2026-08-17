@@ -333,6 +333,40 @@ def test_pg_lake_remove_files_xml_special_chars(s3, pgduck_conn):
     pgduck_conn.rollback()
 
 
+def test_pg_lake_remove_files_prepared_more_than_once(s3, pgduck_conn):
+    """A prepared pg_lake_remove_files deletes on every execution, not only the
+    first.
+
+    DuckDB binds once per plan and reuses the bind data for every execution of
+    it, so scan state kept there -- the "already produced my rows" flag, the scan
+    offset, the list of deleted URLs -- survives into the next execution. For a
+    deleting function that is worse than a wrong answer: the second EXECUTE would
+    expand nothing, delete nothing and still report success to the caller, which
+    for DeleteRemotePrefix reads as a completed cleanup. The state belongs in a
+    GlobalTableFunctionState, which is created per execution."""
+    prefix = "test_remove_files_prepared"
+
+    cur = pgduck_conn.cursor()
+    cur.execute(
+        "PREPARE reused_remove AS "
+        f"SELECT count(*) FROM pg_lake_remove_files('s3://{TEST_BUCKET}/{prefix}/**')"
+    )
+    cur.close()
+
+    for execution in range(1, 4):
+        key = f"{prefix}/round{execution}.parquet"
+        s3.put_object(Bucket=TEST_BUCKET, Key=key, Body=b"x")
+
+        results = perform_query_on_cursor("EXECUTE reused_remove", pgduck_conn)
+        assert (
+            results[0][0] == 1
+        ), f"execution {execution} of reused_remove deleted {results[0][0]} files"
+
+        assert list_objects(s3, TEST_BUCKET, f"{prefix}/") == []
+
+    pgduck_conn.rollback()
+
+
 def test_pg_lake_remove_file_multiple_rows(s3, pgduck_conn):
     """pg_lake_remove_file is a scalar function, but DuckDB calls it with a whole
     vector at a time, so a multi-row statement deletes a set of files that share
