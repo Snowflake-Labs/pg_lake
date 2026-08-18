@@ -102,6 +102,10 @@ ArrayOutForPGDuck(ArrayType *array, CopyDataFormat format)
 	/* whether elements need quotes only depends on the element type */
 	bool		elementIsContainer = IsSerializedAsContainer(element_type, format);
 
+	/* all elements have the same type, so they serialize the same way */
+	PGDuckSerializeKind elementSerializeKind =
+		GetPGDuckSerializeKind(&my_extra->proc, element_type, format);
+
 	for (i = 0; i < nitems && array_iterate(iter, &itemvalue, &isnull); i++)
 	{
 		bool		needquote;
@@ -115,8 +119,9 @@ ArrayOutForPGDuck(ArrayType *array, CopyDataFormat format)
 		}
 		else
 		{
-			values[i] = PGDuckSerialize(&my_extra->proc, element_type, itemvalue,
-										format);
+			values[i] = PGDuckSerializeWithKind(&my_extra->proc,
+												elementSerializeKind,
+												itemvalue, format);
 
 			/* count data plus backslashes; detect chars needing quotes */
 			needquote = !elementIsContainer;
