@@ -1121,18 +1121,27 @@ LookupVendedCredentialsInCache(Oid serverOid,
  *
  * Two properties are worth calling out:
  *
- *  - It fetches on a cache miss (issues a REST loadTable), so a writable
- *    REST table scanned in a fresh backend -- whose cache was never
- *    warmed -- still gets credentials.  The engine resolver wraps this in
- *    a PG_TRY, so a loadTable failure degrades gracefully instead of
- *    aborting the caller.
+ *  - It fetches on a cache miss (issues a REST loadTable), so a table
+ *    scanned in a fresh backend -- whose cache was never warmed -- still
+ *    gets credentials.  The resolver wraps this in a PG_TRY, so a
+ *    loadTable failure degrades gracefully instead of aborting the
+ *    caller.
  *
  *  - The secret key incorporates the user-mapping OID, so two principals
  *    vended different credentials for the same table get distinct secrets
  *    rather than clobbering one another.
  *
- * Returns NIL for non-REST tables, when vending is disabled, or when the
- * catalog vends no credentials.
+ * Only read-only REST tables are served.  pg_lake owns the files of a
+ * writable table, and owning files means deleting them: a DROP only
+ * queues its files, and the queue holds them for
+ * pg_lake_engine.orphaned_file_retention_period (10 days by default),
+ * long after any vended credential has expired and the table has left
+ * the catalog that could vend another.  Until that lifecycle has an
+ * answer, writable tables keep reaching storage the way they do without
+ * vending, and are no worse off than before.
+ *
+ * Returns NIL for non-REST tables, writable REST tables, when vending is
+ * disabled, or when the catalog vends no credentials.
  */
 List *
 IcebergProvideStorageCredentials(Oid relationId)
@@ -1147,8 +1156,7 @@ IcebergProvideStorageCredentials(Oid relationId)
 	ListCell   *credsCell = NULL;
 	StorageCredential *sc;
 
-	if (catalogType != REST_CATALOG_READ_ONLY &&
-		catalogType != REST_CATALOG_READ_WRITE)
+	if (catalogType != REST_CATALOG_READ_ONLY)
 		return NIL;
 
 	/*

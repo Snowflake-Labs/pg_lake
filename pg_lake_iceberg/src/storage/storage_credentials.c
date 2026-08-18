@@ -271,48 +271,6 @@ ReconcileSecretsOnConnection(Oid relationId, List *toPush, List *toDrop)
 
 
 /*
- * CollectExpiredOrphans appends the secrets left behind by dropped
- * tables, once their credentials have expired, to toDrop.
- *
- * An orphan is kept alive only for as long as it can still authorize the
- * dropped table's queued deletes.  Past its expiry it can no longer do
- * that, and it turns into a hazard: DuckDB picks a secret by longest
- * matching scope regardless of whether its credentials are any good, so
- * an expired secret would deny access to a table later created under the
- * same prefix.  Sweeping costs nothing on the common path -- there is
- * usually nothing to sweep, and when there is, the caller already has
- * pgduck work to do.
- *
- * The table is backend-local, so this only sweeps what this backend
- * orphaned: a backend that exits between the DROP and the expiry leaves
- * its orphan on pgduck_server until that server restarts.  Nothing can
- * read through it once its credentials lapse, but a table recreated
- * under the same prefix would be shadowed by it, and would have to be
- * read from another backend or after a restart.
- */
-static List *
-CollectExpiredOrphans(List *toDrop, TimestampTz now)
-{
-	HASH_SEQ_STATUS seq;
-	PushedSecretEntry *entry;
-
-	hash_seq_init(&seq, PushedSecrets);
-	while ((entry = hash_seq_search(&seq)) != NULL)
-	{
-		if (OidIsValid(entry->relationId))
-			continue;
-
-		if (entry->expiresAt == 0 || entry->expiresAt > now)
-			continue;
-
-		toDrop = lappend(toDrop, entry);
-	}
-
-	return toDrop;
-}
-
-
-/*
  * BestEffortReconcile wraps ReconcileSecretsOnConnection so a pgduck
  * failure (server down, transient error) never aborts the caller's
  * statement.  Skips acquiring a connection entirely when there is no
@@ -352,11 +310,6 @@ EnsureStorageCredentialsForRelation(Oid relationId)
 	HASH_SEQ_STATUS seq;
 	PushedSecretEntry *entry;
 
-	/*
-	 * InvalidOid is what an orphan records as its relation, so ensuring it
-	 * would treat every orphan as belonging to the caller and hand the same
-	 * entry to the sweep below twice.
-	 */
 	if (!OidIsValid(relationId))
 		return;
 
@@ -395,10 +348,10 @@ EnsureStorageCredentialsForRelation(Oid relationId)
 	}
 
 	/*
-	 * Drop any secret we previously pushed for this relation that the
-	 * provider no longer returns.  This is what prevents a stale, expired
-	 * secret from lingering on the shared pgduck_server and denying access to
-	 * a later scan (the instance-wide 403 failure mode).
+	 * Drop any secret we previously pushed for this relation that the catalog
+	 * no longer vends.  This is what prevents a stale, expired secret from
+	 * lingering on the shared pgduck_server and denying access to a later
+	 * scan (the instance-wide 403 failure mode).
 	 */
 	hash_seq_init(&seq, PushedSecrets);
 	while ((entry = hash_seq_search(&seq)) != NULL)
@@ -421,8 +374,6 @@ EnsureStorageCredentialsForRelation(Oid relationId)
 			toDrop = lappend(toDrop, entry);
 	}
 
-	toDrop = CollectExpiredOrphans(toDrop, now);
-
 	BestEffortReconcile(relationId, toPush, toDrop);
 }
 
@@ -434,15 +385,7 @@ ForgetStorageCredentials(Oid relationId)
 	PushedSecretEntry *entry;
 	List	   *toDrop = NIL;
 
-	if (PushedSecrets == NULL)
-		return;
-
-	/*
-	 * An orphan records InvalidOid as its relation, so forgetting InvalidOid
-	 * would match every orphan here and again in the sweep below, collecting
-	 * each of them twice.
-	 */
-	if (!OidIsValid(relationId))
+	if (PushedSecrets == NULL || !OidIsValid(relationId))
 		return;
 
 	hash_seq_init(&seq, PushedSecrets);
@@ -452,25 +395,5 @@ ForgetStorageCredentials(Oid relationId)
 			toDrop = lappend(toDrop, entry);
 	}
 
-	toDrop = CollectExpiredOrphans(toDrop, GetCurrentTimestamp());
-
 	BestEffortReconcile(relationId, NIL, toDrop);
-}
-
-
-void
-OrphanStorageCredentials(Oid relationId)
-{
-	HASH_SEQ_STATUS seq;
-	PushedSecretEntry *entry;
-
-	if (PushedSecrets == NULL)
-		return;
-
-	hash_seq_init(&seq, PushedSecrets);
-	while ((entry = hash_seq_search(&seq)) != NULL)
-	{
-		if (entry->relationId == relationId)
-			entry->relationId = InvalidOid;
-	}
 }

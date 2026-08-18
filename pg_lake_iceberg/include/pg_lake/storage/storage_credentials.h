@@ -31,10 +31,13 @@
  * is called where a storage path is about to be touched; it resolves the
  * credentials on demand -- issuing a REST loadTable on a cache miss --
  * and reconciles the secret set, (re)pushing fresh credentials and
- * dropping secrets the catalog no longer vends.
- * Pulling at the point of use is what lets table shapes whose read path
- * never loads catalog metadata (a writable REST table is flagged
- * internal, so it never issues loadTable) still get a credential.
+ * dropping secrets the catalog no longer vends.  Resolving at the point
+ * of use, rather than pushing from a cache that something has to
+ * remember to warm, is what makes each storage entry point covered by
+ * construction.
+ *
+ * Only read-only REST tables are served; see
+ * IcebergProvideStorageCredentials for why writable tables wait.
  *
  * Two limitations are inherent to a shared pgduck_server holding global,
  * in-memory secrets:
@@ -108,23 +111,11 @@ extern PGDLLEXPORT void EnsureStorageCredentialsForRelation(Oid relationId);
 /*
  * ForgetStorageCredentials drops any secrets this backend pushed for the
  * relation.  Call it once the relation's storage no longer needs to be
- * reached -- for a table whose files are deleted asynchronously, that is
- * not yet true at DROP time; see OrphanStorageCredentials.
+ * reached, which for a read-only table is the moment it is dropped: it
+ * owns none of the files it reads, so its drop queues no deletes.  Left
+ * behind, an expired secret would still win DuckDB's longest-scope match
+ * for everything under that prefix.
  */
 extern PGDLLEXPORT void ForgetStorageCredentials(Oid relationId);
-
-/*
- * OrphanStorageCredentials detaches this backend's secrets for the
- * relation from the relation itself, leaving them in place.
- *
- * Dropping a table only *queues* its files for deletion; the deletes
- * happen later, in another transaction, against a relation that no
- * longer exists and therefore can no longer be resolved for credentials.
- * On vended-only storage, dropping the secret at DROP time is what makes
- * those deletes fail and the data leak.  Orphaned secrets are dropped
- * once they expire, which is also when they would start denying access
- * to anything created under the same prefix.
- */
-extern PGDLLEXPORT void OrphanStorageCredentials(Oid relationId);
 
 #endif							/* PG_LAKE_STORAGE_CREDENTIALS_H */

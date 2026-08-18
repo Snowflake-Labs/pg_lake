@@ -311,17 +311,6 @@ DropTableAccessHook(ObjectAccessType access, Oid classId, Oid objectId,
 
 			IcebergCatalogType catalogType = GetIcebergCatalogType(objectId);
 
-			/*
-			 * Resolve the vended storage credentials before ApplyDDLChanges
-			 * enumerates and enqueues the table's files for deletion -- that
-			 * enumeration reads the table metadata / manifests from object
-			 * storage via pgduck_server, so it needs the credentials while
-			 * the table (and its user mapping) still exists.  Best-effort: a
-			 * failure here does not abort the drop.
-			 */
-			if (catalogType == REST_CATALOG_READ_WRITE)
-				EnsureStorageCredentialsForRelation(objectId);
-
 			IcebergDDLOperation *ddlOperation = palloc0(sizeof(IcebergDDLOperation));
 
 			ddlOperation->type = DDL_TABLE_DROP;
@@ -331,22 +320,7 @@ DropTableAccessHook(ObjectAccessType access, Oid classId, Oid objectId,
 			TriggerCatalogExportIfObjectStoreTable(objectId);
 
 			if (catalogType == REST_CATALOG_READ_WRITE)
-			{
 				RecordRestCatalogRequestInTx(objectId, REST_CATALOG_DROP_TABLE, NULL);
-
-				/*
-				 * ApplyDDLChanges above only *queued* this table's files for
-				 * deletion; the deletes themselves run later, in another
-				 * transaction, when there is no relation left to resolve
-				 * credentials from.  Dropping the secret here would strand
-				 * the data on vended-only storage, so detach the secrets from
-				 * the dying relation and leave them in place for the queue
-				 * drain.  They are dropped once they expire, which is the
-				 * point at which they stop being able to help and start being
-				 * able to deny.
-				 */
-				OrphanStorageCredentials(objectId);
-			}
 		}
 	}
 	else if (!isColumn && IsAnyLakeForeignTableById(objectId))

@@ -3,28 +3,25 @@
 These complement the MinIO suite rather than duplicating it.
 
 The MinIO suite proves a vended credential is genuinely *load-bearing* --
-a real policy engine denies the scan without it -- but it can only do so
-for read-only tables, because its catalog is a mock.  For a *writable*
-REST table the catalog itself materializes the new ``metadata.json`` from
-the update list pg_lake sends at commit, so a mock HTTP server cannot
-serve the next ``loadTable``.  Writable tables therefore need a real
-catalog, which is what these tests use.
+a real policy engine denies the scan without it -- against a catalog that
+is a mock.  These tests use a real catalog instead, where a table is
+registered by Polaris itself and attached read-only afterwards, which is
+the shape a production REST catalog actually serves.
 
 Storage here is moto, which accepts any credential and never denies a
 request.  So these tests assert the *resolver's* observable behavior --
 that the correctly scoped secret is pushed to pgduck_server when the
-catalog vends one, and dropped again when it should be -- rather than
-that access fails without it.  Between the two suites:
+catalog vends one, and that it is not pushed when it should not be --
+rather than that access fails without it.  Between the two suites:
 
-    MinIO   -> the credential is load-bearing (read-only tables)
-    Polaris -> the credential is resolved, pushed and dropped on every
-               table shape, including writable ones
+    MinIO   -> the credential is load-bearing
+    Polaris -> the credential is resolved against a real catalog, and
+               withheld from writable tables
 
-The writable case matters most: a writable REST table is flagged as an
-*internal* Iceberg table, so its read path never issues a ``loadTable``
-and nothing warms the credential cache for it.  Only resolving on demand
-at the scan choke point gets it a credential, which is what these tests
-pin down.
+Vending is restricted to read-only tables, so the writable case is
+covered here as a *negative*: pg_lake owns a writable table's files and
+must be able to delete them long after any vended credential has expired,
+which is a lifecycle this feature does not yet answer.
 """
 
 import json
@@ -73,29 +70,19 @@ def _vended_secrets_for(pgduck_conn, schema, table):
     return [r for r in rows if r[1] and needle in r[1]]
 
 
-def _scope_key_prefix(scope, bucket):
-    """The bucket-relative prefix a secret's scope points at.
-
-    duckdb_secrets() renders scope as a list, so strip the decoration
-    before taking the path apart.
-    """
-    first = scope.strip("[]{}").split(",")[0].strip(" '\"")
-    return first.split(f"{bucket}/", 1)[1]
-
-
 def _drop_vended_secrets_for(pgduck_conn, schema, table):
     """Remove this table's vended secrets from the shared pgduck_server.
 
-    Secrets are process-global, so a secret pushed by the *writing*
-    backend stays visible afterwards.  Clearing them lets a later
-    assertion attribute a secret to the read path alone.
+    Secrets are process-global, so one pushed by an earlier backend stays
+    visible afterwards.  Clearing them lets a later assertion attribute a
+    secret to the read path alone.
     """
     for name, _scope in _vended_secrets_for(pgduck_conn, schema, table):
         run_command(f'DROP SECRET IF EXISTS "{name}"', pgduck_conn)
     pgduck_conn.commit()
 
 
-def test_polaris_vended_credentials_writable_table(
+def test_polaris_read_only_table_is_vended_on_a_cold_cache(
     pg_conn,
     superuser_conn,
     pgduck_conn,
@@ -105,11 +92,94 @@ def test_polaris_vended_credentials_writable_table(
     with_default_location,
     installcheck,
 ):
-    """A writable REST table resolves and pushes a vended credential.
+    """A read-only REST table resolves and pushes a vended credential.
 
-    The read happens on a *different* backend than the one that created
-    the table, so the credential cannot have been warmed by CREATE TABLE.
-    A cold cache on a writable table is the case most easily missed.
+    The read happens on a *different* backend than the one that attached
+    the table, so the credential cannot have been warmed by the DDL.  A
+    cold cache is the case most easily missed.
+    """
+    if installcheck:
+        return
+
+    schema = "vc_polaris_ro"
+    table = "rest_tbl"
+    attached = "attached_ro"
+
+    _set_vending(superuser_conn, True)
+
+    reader = None
+    try:
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
+        run_command(f"CREATE SCHEMA {schema}", superuser_conn)
+        superuser_conn.commit()
+
+        # Register the table in Polaris and give it files.  Vending is on,
+        # but this is the writable side, which is not served.
+        run_command(
+            f"""CREATE TABLE {schema}.{table} USING iceberg
+                WITH (catalog='rest', autovacuum_enabled=False)
+                AS SELECT g AS id FROM generate_series(1, 10) g""",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        # Attach the same catalog table read-only: the shape a REST catalog
+        # serves to a reader that does not own the table.
+        run_command(
+            f"""CREATE TABLE {schema}.{attached}() USING iceberg
+                WITH (catalog='rest', read_only=True,
+                      catalog_namespace='{schema}',
+                      catalog_table_name='{table}')""",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        # Secrets outlive the backend that pushed them, so clear anything
+        # already present: a secret found after the scan below can then only
+        # have come from the read path.
+        _drop_vended_secrets_for(pgduck_conn, schema, table)
+        assert not _vended_secrets_for(pgduck_conn, schema, table)
+
+        # Fresh backend => cold credential cache.
+        reader = open_pg_conn()
+        _set_vending(reader, True)
+
+        rows = run_query(f"SELECT count(*) FROM {schema}.{attached}", reader)
+        reader.commit()
+        assert rows[0][0] == 10
+
+        secrets = _vended_secrets_for(pgduck_conn, schema, table)
+        assert secrets, (
+            "expected the read path to resolve and push a vended secret on a "
+            "cold cache, found none"
+        )
+
+    finally:
+        if reader is not None:
+            reader.close()
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
+        superuser_conn.commit()
+        _set_vending(superuser_conn, False)
+
+
+def test_polaris_writable_table_is_not_vended(
+    pg_conn,
+    superuser_conn,
+    pgduck_conn,
+    s3,
+    polaris_session,
+    set_polaris_gucs,
+    with_default_location,
+    installcheck,
+):
+    """A writable REST table gets no vended credential, even with vending on.
+
+    pg_lake owns a writable table's files, and owning them means deleting
+    them: a DROP only queues its files, and the queue holds them for
+    ``orphaned_file_retention_period`` (10 days by default) -- long after
+    any vended credential has expired and the table has left the catalog
+    that could vend another.  Until that has an answer, writable tables
+    reach storage exactly as they do without vending.
     """
     if installcheck:
         return
@@ -119,7 +189,6 @@ def test_polaris_vended_credentials_writable_table(
 
     _set_vending(superuser_conn, True)
 
-    reader = None
     try:
         run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
         run_command(f"CREATE SCHEMA {schema}", superuser_conn)
@@ -133,33 +202,24 @@ def test_polaris_vended_credentials_writable_table(
         )
         superuser_conn.commit()
 
-        # Exercises the write path (AddQueryResultToTable) with vending on.
+        # Every path a writable table has: write, read, and delete.
         run_command(f"INSERT INTO {schema}.{table} SELECT 11", superuser_conn)
         superuser_conn.commit()
 
-        # The writes above already pushed a secret, and secrets outlive the
-        # backend that pushed them.  Clear them so that anything found after
-        # the scan below can only have come from the read path.
-        _drop_vended_secrets_for(pgduck_conn, schema, table)
-        assert not _vended_secrets_for(pgduck_conn, schema, table)
-
-        # Fresh backend => cold credential cache.
-        reader = open_pg_conn()
-        _set_vending(reader, True)
-
-        rows = run_query(f"SELECT count(*) FROM {schema}.{table}", reader)
-        reader.commit()
+        rows = run_query(f"SELECT count(*) FROM {schema}.{table}", superuser_conn)
+        superuser_conn.commit()
         assert rows[0][0] == 11
 
+        run_command(f"TRUNCATE {schema}.{table}", superuser_conn)
+        superuser_conn.commit()
+
         secrets = _vended_secrets_for(pgduck_conn, schema, table)
-        assert secrets, (
-            "expected the read path to resolve and push a vended secret for "
-            "the writable table on a cold cache, found none"
+        assert not secrets, (
+            f"vending is restricted to read-only tables, but a writable one "
+            f"was pushed a secret: {secrets}"
         )
 
     finally:
-        if reader is not None:
-            reader.close()
         run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
         superuser_conn.commit()
         _set_vending(superuser_conn, False)
@@ -280,7 +340,17 @@ def test_polaris_server_option_enables_vending_with_guc_off(
         )
         superuser_conn.commit()
 
-        rows = run_query(f"SELECT count(*) FROM {schema}.{table}", superuser_conn)
+        # Vending serves read-only tables, so read through an attachment.
+        run_command(
+            f"""CREATE TABLE {schema}.attached_ro() USING iceberg
+                WITH (catalog='{server}', read_only=True,
+                      catalog_namespace='{schema}',
+                      catalog_table_name='{table}')""",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        rows = run_query(f"SELECT count(*) FROM {schema}.attached_ro", superuser_conn)
         superuser_conn.commit()
         assert rows[0][0] == 5
 
@@ -294,89 +364,3 @@ def test_polaris_server_option_enables_vending_with_guc_off(
         run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
         run_command(f"DROP SERVER IF EXISTS {server} CASCADE", superuser_conn)
         superuser_conn.commit()
-
-
-def test_polaris_dropped_table_keeps_its_secret_until_files_are_deleted(
-    pg_conn,
-    superuser_conn,
-    pgduck_conn,
-    s3,
-    polaris_session,
-    set_polaris_gucs,
-    with_default_location,
-    installcheck,
-):
-    """A dropped table's secret survives long enough to delete its files.
-
-    DROP TABLE only queues the table's files; the deletes run later, in
-    another transaction, against a relation that no longer exists and so
-    can no longer be resolved for credentials.  Dropping the secret at
-    DROP time is therefore what strands the data on vended-only storage.
-
-    moto accepts any credential, so this cannot show the delete failing
-    without the secret.  What it does pin is the ordering -- the secret
-    is still there when the drain runs -- and that the drain empties the
-    table's prefix rather than leaving it behind.
-    """
-    if installcheck:
-        return
-
-    schema = "vc_polaris_drop"
-    table = "writable_rest"
-
-    _set_vending(superuser_conn, True)
-
-    try:
-        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
-        run_command(f"CREATE SCHEMA {schema}", superuser_conn)
-        superuser_conn.commit()
-
-        run_command(
-            f"""CREATE TABLE {schema}.{table} USING iceberg
-                WITH (catalog='rest', autovacuum_enabled=False)
-                AS SELECT g AS id FROM generate_series(1, 5) g""",
-            superuser_conn,
-        )
-        superuser_conn.commit()
-
-        run_query(f"SELECT count(*) FROM {schema}.{table}", superuser_conn)
-        superuser_conn.commit()
-
-        secrets = _vended_secrets_for(pgduck_conn, schema, table)
-        assert secrets, "expected a vended secret to be pushed before the drop"
-
-        # The secret's scope is the table's storage prefix, which is also
-        # what the queued deletes have to reach.
-        key_prefix = _scope_key_prefix(secrets[0][1], TEST_BUCKET)
-        assert list_objects(
-            s3, TEST_BUCKET, key_prefix
-        ), f"expected the table to have files under {key_prefix}"
-
-        run_command(f"DROP TABLE {schema}.{table}", superuser_conn)
-        superuser_conn.commit()
-
-        assert _vended_secrets_for(pgduck_conn, schema, table), (
-            "the vended secret was dropped with the table, so the deletes "
-            "queued by the drop have no credentials left to run under"
-        )
-
-        # 0 drains every table, which is the only option here: the relation
-        # the rows belonged to is gone.
-        run_command("SELECT lake_engine.flush_deletion_queue(0)", superuser_conn)
-        superuser_conn.commit()
-
-        # Superseded metadata.json files are not reachable from the current
-        # metadata, so the drop's enumeration never sees them and the drain
-        # leaves them behind.  That gap is pre-existing and has nothing to do
-        # with credentials; the data and manifests are what this asserts on.
-        leftover = [
-            key
-            for key in list_objects(s3, TEST_BUCKET, key_prefix)
-            if not key.endswith(".metadata.json")
-        ]
-        assert not leftover, f"drop left files behind under {key_prefix}: {leftover}"
-
-    finally:
-        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
-        superuser_conn.commit()
-        _set_vending(superuser_conn, False)

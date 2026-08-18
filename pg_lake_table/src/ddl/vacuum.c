@@ -654,16 +654,6 @@ VacuumTableInSeparateXacts(Oid relationId, bool isFull, bool isVerbose,
 	bool		compactDataFiles =
 		!isAutoVacuum || IsAutoVacuumCompactDataFilesEnabled(relationId);
 
-	/*
-	 * Resolve storage credentials once for the whole vacuum.  Compaction,
-	 * metadata rewrite, deletion-queue drain and in-progress-file cleanup
-	 * below all read/write/delete this table's objects via pgduck_server, and
-	 * the pushed (temporary) secret is shared process-wide, so it stays
-	 * available across the separate sub-transactions these steps run in.
-	 * No-op for non-REST tables.
-	 */
-	EnsureStorageCredentialsForRelation(relationId);
-
 	if (compactDataFiles)
 		VacuumCompactDataFiles(relationId, isFull, isVerbose);
 
