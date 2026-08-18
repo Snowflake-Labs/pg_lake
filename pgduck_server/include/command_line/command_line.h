@@ -38,6 +38,7 @@ typedef struct
 	char	   *memory_limit;
 	bool		continue_on_oom;
 	int64_t		cache_on_write_max_size;
+	int			postgres_scan_max_chunk_size_mb;
 
 	char	   *duckdb_database_file_path;
 	char	   *cache_dir;

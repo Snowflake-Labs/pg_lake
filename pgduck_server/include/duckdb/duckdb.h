@@ -57,6 +57,7 @@ extern DuckDBStatus duckdb_global_init(char *databaseFilePath,
 									   bool allowExtensionInstall,
 									   char *memoryLimit,
 									   int64_t cacheOnWriteMaxSize,
+									   int postgresScanMaxChunkSizeMB,
 									   char *initFile);
 extern DuckDBStatus duckdb_session_init(DuckDBSession * duckSession,
 										struct PGSession *clientSession);

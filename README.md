@@ -78,6 +78,7 @@ There are some important settings that should be adjusted, especially on product
 - `--memory_limit`: Optionally specify the maximum memory of pgduck_server similar to DuckDB's memory_limit, the default is 80 percent of the system memory
 - `--init_file_path <path>`: Execute all statements in this file on start-up
 - `--cache_dir`: Specify the directory to use to cache remote files (from S3)
+- `--postgres_scan_max_chunk_size_mb`: Bound the payload `postgres_scan()` reads into one output chunk, in MB, which in turn bounds how far a row group can overshoot its target size. 0 keeps the scanner default of 128
 
 Note that if you want to make adjustments to duckdb settings, you can use the `--init_file_path` approach OR you can
 connect to the running pgduck_server and make changes. For example:

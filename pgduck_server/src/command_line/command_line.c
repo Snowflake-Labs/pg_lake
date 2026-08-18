@@ -50,6 +50,14 @@
 #define DEFAULT_CACHE_ON_WRITE_MAX_SIZE 1024 * 1024 * 1024 // 1GB
 
 /*
+ * 0 leaves pg_max_chunk_size_bytes at the scanner's own default (128MB).  An
+ * operator only needs this option to lower that bound; the upper limit keeps
+ * the conversion to bytes clear of overflow.
+ */
+#define DEFAULT_POSTGRES_SCAN_MAX_CHUNK_SIZE_MB 0
+#define MAX_POSTGRES_SCAN_MAX_CHUNK_SIZE_MB 1024 * 1024 // 1TB
+
+/*
  * ensure_pglake_user_dir returns $HOME/.pglake, creating it (mode 0700) if
  * it does not yet exist.  Returns NULL when $HOME is unset or the directory
  * cannot be created.
@@ -112,6 +120,7 @@ print_usage()
 	printf(" --memory_limit=<memory_limit>		Optionally specify the maximum memory of pgduck_server similar to DuckDB's memory_limit, the default is 80 percent of the system memory\n");
 	printf(" --continue_on_oom                  If out of memory error occurs, continue operating\n");
 	printf(" --cache_on_write_max_size=<size>   Optionally specify the maximum allowed cache size on write\n");
+	printf(" --postgres_scan_max_chunk_size_mb=<size>	Bound the payload postgres_scan() reads into one output chunk, in MB, which in turn bounds how far a row group can overshoot its target size. 0 keeps the scanner default of 128\n");
 	printf(" --duckdb_database_file_path <path>	Specify the database file path for DuckDB, default is ~/.pglake/pgduck_server.db\n");
 	printf(" --check_cli_params_only       		Only check the cli arguments, do not run the server\n");
 	printf(" --init_file_path <path>			Execute all statements in this file on start-up\n");
@@ -140,6 +149,7 @@ parse_arguments(int argc, char *argv[])
 		.memory_limit = NULL,
 		.continue_on_oom = false,
 		.cache_on_write_max_size = DEFAULT_CACHE_ON_WRITE_MAX_SIZE,
+		.postgres_scan_max_chunk_size_mb = DEFAULT_POSTGRES_SCAN_MAX_CHUNK_SIZE_MB,
 		.duckdb_database_file_path = get_or_create_duckdb_database_file(),
 		.init_file_path = NULL,
 		.pidfile_path = NULL,
@@ -163,6 +173,7 @@ parse_arguments(int argc, char *argv[])
 		{"memory_limit", required_argument, NULL, 'l'},
 		{"continue_on_oom", no_argument, NULL, 'O'},
 		{"cache_on_write_max_size", required_argument, NULL, 'L'},
+		{"postgres_scan_max_chunk_size_mb", required_argument, NULL, 'R'},
 		{"duckdb_database_file_path", required_argument, NULL, 'D'},
 		{"cache_dir", required_argument, NULL, 'C'},
 		{"extensions_dir", required_argument, NULL, 'E'},
@@ -293,6 +304,27 @@ parse_arguments(int argc, char *argv[])
 
 					break;
 				}
+			case 'R':
+				{
+					int			chunkSizeMB = 0;
+
+					if (!string_to_int(optarg, &chunkSizeMB))
+					{
+						fprintf(stderr, "Error: postgres_scan_max_chunk_size_mb should be an integer\n");
+						exit(EXIT_FAILURE);
+					}
+
+					if (!(chunkSizeMB >= 0 && chunkSizeMB <= MAX_POSTGRES_SCAN_MAX_CHUNK_SIZE_MB))
+					{
+						fprintf(stderr, "postgres_scan_max_chunk_size_mb should be in between [0, %d]\n",
+								MAX_POSTGRES_SCAN_MAX_CHUNK_SIZE_MB);
+						exit(EXIT_FAILURE);
+					}
+
+					options.postgres_scan_max_chunk_size_mb = chunkSizeMB;
+
+					break;
+				}
 			case 'i':
 				options.init_file_path = strdup(optarg);
 				break;
@@ -334,6 +366,12 @@ parse_arguments(int argc, char *argv[])
 	}
 
 	PGDUCK_SERVER_LOG("Cache on write max size is set to: %" PRIu64, options.cache_on_write_max_size);
+
+	if (options.postgres_scan_max_chunk_size_mb > 0)
+	{
+		PGDUCK_SERVER_LOG("postgres_scan max chunk size is set to: %dMB",
+						  options.postgres_scan_max_chunk_size_mb);
+	}
 
 	if (options.verbose)
 	{
