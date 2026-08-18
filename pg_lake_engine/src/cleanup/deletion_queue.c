@@ -27,7 +27,6 @@
 #include "pg_lake/cleanup/deletion_queue.h"
 #include "pg_lake/extensions/pg_lake_table.h"
 #include "pg_lake/pgduck/remote_storage.h"
-#include "pg_lake/storage/storage_credentials.h"
 #include "pg_lake/util/array_utils.h"
 #include "pg_extension_base/spi_helpers.h"
 #include "pg_lake/util/string_utils.h"
@@ -78,18 +77,18 @@ flush_deletion_queue(PG_FUNCTION_ARGS)
 	InitMaterializedSRF(fcinfo, MAT_SRF_USE_EXPECTED_DESC);
 
 	/*
-	 * When draining a specific table, resolve its vended storage credentials
-	 * so the object deletes below can reach a REST-catalog table's bucket.
-	 * No-op for non-REST tables.
+	 * The deletes below reach object storage under whatever secrets
+	 * pgduck_server already holds.  On a REST catalog's vended-only storage
+	 * that is the secret pushed by the operation that queued these files:
+	 * VACUUM resolves credentials before it drains, and a DROP leaves its
+	 * secret in place precisely so that its queued deletes still work (see
+	 * OrphanStorageCredentials in pg_lake_iceberg).
 	 *
-	 * The "all tables" (InvalidOid) drain cannot do this: its rows include
-	 * files whose table is already dropped, and a dropped relation can no
-	 * longer be resolved.  Those deletes run under the secrets the drop
-	 * deliberately left in place (see OrphanStorageCredentials), which is why
-	 * the drop does not drop them.
+	 * Resolving here instead is not possible without the engine knowing what
+	 * a catalog is, and would not help the case that matters anyway: an "all
+	 * tables" drain covers files whose table is already dropped, and a
+	 * dropped relation can no longer be resolved.
 	 */
-	if (OidIsValid(relationId))
-		EnsureStorageCredentialsForRelation(relationId);
 
 	/* remove all */
 	bool		isFull = true;

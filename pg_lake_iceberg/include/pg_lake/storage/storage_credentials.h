@@ -21,17 +21,17 @@
  * Resolves the credentials needed to reach a relation's storage and
  * reconciles them into pgduck_server as scoped DuckDB secrets.
  *
- * It lives at the bottom of the include stack (pg_lake_engine) and is
- * fed by a provider hook installed by pg_lake_iceberg, which inverts the
- * engine <- iceberg dependency: any storage-touching code in the engine
- * (deletion queue, remote storage) can resolve credentials without the
- * engine knowing what a REST catalog is.
+ * Credentials come from an Iceberg REST catalog, so this lives with the
+ * rest of the catalog code rather than in pg_lake_engine: the engine
+ * offers the mechanism for creating a scoped secret (see
+ * pg_lake/pgduck/vended_secrets.h) and knows nothing of catalogs, and
+ * every caller here sits at or above pg_lake_iceberg.
  *
  * Resolution is a pull, not a push.  EnsureStorageCredentialsForRelation
  * is called where a storage path is about to be touched; it resolves the
- * credentials on demand -- issuing a REST loadTable on a cache miss via
- * the provider -- and reconciles the secret set, (re)pushing fresh
- * credentials and dropping secrets the provider no longer returns.
+ * credentials on demand -- issuing a REST loadTable on a cache miss --
+ * and reconciles the secret set, (re)pushing fresh credentials and
+ * dropping secrets the catalog no longer vends.
  * Pulling at the point of use is what lets table shapes whose read path
  * never loads catalog metadata (a writable REST table is flagged
  * internal, so it never issues loadTable) still get a credential.
@@ -66,7 +66,7 @@
 /*
  * One credential and the storage prefix it authorizes.  A REST
  * "storage-credentials" array can yield several of these per table, so
- * the provider returns a List<StorageCredential *>.
+ * resolution returns a List<StorageCredential *>.
  *
  * secretKey is the stable identity used to name the pgduck_server
  * secret.  It MUST incorporate the user-mapping OID, so that two roles
@@ -74,9 +74,9 @@
  * single secret, and the scope, so that two credentials of the same
  * table do not overwrite each other.
  *
- * The provider must return freshly-allocated copies (not pointers into
- * any credential cache), because the caller may run syscache lookups
- * between resolving and using these values.
+ * IcebergProvideStorageCredentials returns freshly-allocated copies (not
+ * pointers into the credential cache), because the caller may run
+ * syscache lookups between resolving and using these values.
  */
 typedef struct StorageCredential
 {
@@ -95,19 +95,10 @@ typedef struct StorageCredential
 }			StorageCredential;
 
 /*
- * Provider hook, installed by pg_lake_iceberg at _PG_init to invert the
- * engine <- iceberg dependency.  MAY issue a REST loadTable on a cache
- * miss.  Returns NIL when the relation has no vended credentials
- * (non-REST tables, vending disabled, or the catalog vends none).
- */
-typedef List *(*PgLakeStorageCredentialProviderHookType) (Oid relationId);
-extern PGDLLEXPORT PgLakeStorageCredentialProviderHookType PgLakeStorageCredentialProviderHook;
-
-/*
  * EnsureStorageCredentialsForRelation reconciles the pgduck_server
- * secrets for the given relation against what the provider currently
- * resolves: it (re)pushes fresh credentials and drops secrets the
- * provider no longer returns.  Best-effort: a failure to resolve (e.g. a
+ * secrets for the given relation against what the catalog currently
+ * vends: it (re)pushes fresh credentials and drops secrets the catalog
+ * no longer returns.  Best-effort: a failure to resolve (e.g. a
  * transient OAuth error) never aborts the caller's statement -- the
  * storage operation itself will fail authoritatively if a credential was
  * truly required.

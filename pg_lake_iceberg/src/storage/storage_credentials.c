@@ -18,8 +18,8 @@
 /*
  * storage_credentials.c
  *
- * Storage-credential resolver driven by a provider hook.  See
- * storage_credentials.h for the design and its known limitations.
+ * Storage-credential resolver.  See storage_credentials.h for the design
+ * and its known limitations.
  */
 
 #include "postgres.h"
@@ -32,10 +32,8 @@
 
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/pgduck/vended_secrets.h"
+#include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/storage/storage_credentials.h"
-
-/* Installed by pg_lake_iceberg at _PG_init. */
-PgLakeStorageCredentialProviderHookType PgLakeStorageCredentialProviderHook = NULL;
 
 /* Deterministic vended-secret names fit comfortably below this. */
 #define SECRET_NAME_MAXLEN 128
@@ -144,9 +142,10 @@ SwallowBestEffortError(const char *what, Oid relationId)
 
 
 /*
- * ResolveStorageCredentials calls the provider hook, tolerating expected
- * errors (see SwallowBestEffortError).  Returns NIL when the relation has
- * no vended credentials or the resolution failed recoverably.
+ * ResolveStorageCredentials asks the catalog what it vends for this
+ * relation, tolerating expected errors (see SwallowBestEffortError).
+ * Returns NIL when the relation has no vended credentials or the
+ * resolution failed recoverably.
  */
 static List *
 ResolveStorageCredentials(Oid relationId)
@@ -154,12 +153,9 @@ ResolveStorageCredentials(Oid relationId)
 	List	   *creds = NIL;
 	MemoryContext callerContext = CurrentMemoryContext;
 
-	if (PgLakeStorageCredentialProviderHook == NULL)
-		return NIL;
-
 	PG_TRY();
 	{
-		creds = PgLakeStorageCredentialProviderHook(relationId);
+		creds = IcebergProvideStorageCredentials(relationId);
 	}
 	PG_CATCH();
 	{

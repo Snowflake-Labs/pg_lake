@@ -370,12 +370,6 @@ _PG_init(void)
 
 	AvroInit();
 
-	/*
-	 * Install the storage-credential provider so the engine's resolver can
-	 * pull vended credentials on demand.
-	 */
-	PgLakeStorageCredentialProviderHook = IcebergProvideStorageCredentials;
-
 	RegisterUtilityStatementHandler(ValidateIcebergCatalogServerDDL, NULL);
 
 	/*
