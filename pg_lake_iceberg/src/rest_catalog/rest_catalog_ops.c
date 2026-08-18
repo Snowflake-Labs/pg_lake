@@ -756,12 +756,12 @@ TableRootFromMetadataLocation(const char *metadataLocation)
  * direct child); otherwise the leaf lives under body->mapKey.
  */
 static char *
-GetVendedConfigString(const char *body, const char *mapKey, const char *leafKey)
+GetVendedConfigString(Jsonb *body, const char *mapKey, const char *leafKey)
 {
 	if (mapKey == NULL)
-		return JsonbGetOptionalStringByPath(body, 1, leafKey);
+		return JsonbGetOptionalString(body, 1, leafKey);
 
-	return JsonbGetOptionalStringByPath(body, 2, mapKey, leafKey);
+	return JsonbGetOptionalString(body, 2, mapKey, leafKey);
 }
 
 
@@ -777,7 +777,7 @@ GetVendedConfigString(const char *body, const char *mapKey, const char *leafKey)
  * cached past their real lifetime.
  */
 static VendedCredentials *
-ParseVendedCredsFromConfig(const char *body, const char *mapKey, Oid serverOid)
+ParseVendedCredsFromConfig(Jsonb *body, const char *mapKey, Oid serverOid)
 {
 	char	   *accessKeyId = GetVendedConfigString(body, mapKey, "s3.access-key-id");
 	char	   *secretAccessKey = GetVendedConfigString(body, mapKey, "s3.secret-access-key");
@@ -829,7 +829,10 @@ ParseVendedCredsFromConfig(const char *body, const char *mapKey, Oid serverOid)
 			creds->endpoint[--endpointLen] = '\0';
 
 		if (endpointLen == 0)
+		{
+			pfree(creds->endpoint);
 			creds->endpoint = NULL;
+		}
 
 		pfree(endpointUrl);
 	}
@@ -879,16 +882,16 @@ ParseVendedCredsFromConfig(const char *body, const char *mapKey, Oid serverOid)
  * available.
  */
 static char *
-TableRootFromLoadTableResponse(const char *responseBody)
+TableRootFromLoadTableResponse(Jsonb *response)
 {
 	char	   *tableLocation =
-		JsonbGetOptionalStringByPath(responseBody, 2, "metadata", "location");
+		JsonbGetOptionalString(response, 2, "metadata", "location");
 
 	if (tableLocation != NULL && tableLocation[0] != '\0')
 		return NormalizeS3Prefix(tableLocation);
 
 	char	   *metadataFile =
-		JsonbGetOptionalStringByPath(responseBody, 1, "metadata-location");
+		JsonbGetOptionalString(response, 1, "metadata-location");
 
 	return TableRootFromMetadataLocation(metadataFile);
 }
@@ -951,10 +954,19 @@ ExtractVendedCredentials(const char *responseBody, RestCatalogOptions * opts)
 	if (responseBody == NULL || *responseBody == '\0')
 		return NIL;
 
-	char	   *tableRoot = TableRootFromLoadTableResponse(responseBody);
+	/*
+	 * A loadTable response carries the table's whole metadata document, and a
+	 * credential is read out of it a dozen fields at a time, so it is parsed
+	 * once here and navigated from there.
+	 */
+	Datum		responseDatum = DirectFunctionCall1(jsonb_in,
+													CStringGetDatum(responseBody));
+	Jsonb	   *response = DatumGetJsonbP(responseDatum);
+
+	char	   *tableRoot = TableRootFromLoadTableResponse(response);
 	List	   *credentials = NIL;
 	List	   *elements =
-		JsonbGetArrayElementObjects(responseBody, "storage-credentials",
+		JsonbGetArrayElementObjects(response, "storage-credentials",
 									"config", "prefix");
 	ListCell   *elementCell = NULL;
 
@@ -962,7 +974,7 @@ ExtractVendedCredentials(const char *responseBody, RestCatalogOptions * opts)
 	{
 		JsonbArrayElement *element = lfirst(elementCell);
 		VendedCredentials *creds =
-			ParseVendedCredsFromConfig(element->objectJson, NULL, opts->serverOid);
+			ParseVendedCredsFromConfig(element->object, NULL, opts->serverOid);
 
 		if (creds == NULL)
 			continue;
@@ -993,7 +1005,7 @@ ExtractVendedCredentials(const char *responseBody, RestCatalogOptions * opts)
 
 	/* Fall back to the legacy top-level "config" map. */
 	VendedCredentials *legacyCreds =
-		ParseVendedCredsFromConfig(responseBody, "config", opts->serverOid);
+		ParseVendedCredsFromConfig(response, "config", opts->serverOid);
 
 	if (legacyCreds == NULL)
 	{

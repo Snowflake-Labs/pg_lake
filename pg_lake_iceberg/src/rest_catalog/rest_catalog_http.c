@@ -284,6 +284,47 @@ JsonbGetStringByPath(const char *jsonb_text, int nkeys,...)
 
 
 /*
+ * StringByPathFromContainer walks nkeys object keys from container and
+ * returns the string it arrives at, or NULL if any step is missing or
+ * is not of the expected shape.  The caller owns ap.
+ */
+static char *
+StringByPathFromContainer(JsonbContainer *container, int nkeys, va_list ap)
+{
+	for (int i = 0; i < nkeys; i++)
+	{
+		const char *key = va_arg(ap, const char *);
+		JsonbValue	keyVal;
+		JsonbValue *val;
+
+		if (!JsonContainerIsObject(container))
+			return NULL;
+
+		keyVal.type = jbvString;
+		keyVal.val.string.val = (char *) key;
+		keyVal.val.string.len = strlen(key);
+
+		val = findJsonbValueFromContainer(container, JB_FOBJECT, &keyVal);
+		if (val == NULL)
+			return NULL;
+
+		if (i < nkeys - 1)
+		{
+			if (val->type != jbvBinary ||
+				!JsonContainerIsObject(val->val.binary.data))
+				return NULL;
+
+			container = val->val.binary.data;
+		}
+		else if (val->type == jbvString)
+			return pnstrdup(val->val.string.val, val->val.string.len);
+	}
+
+	return NULL;
+}
+
+
+/*
  * JsonbGetOptionalStringByPath works like JsonbGetStringByPath, but
  * returns NULL instead of raising an ERROR when a key is missing or
  * a mid-level value is not an object.
@@ -294,59 +335,39 @@ JsonbGetOptionalStringByPath(const char *jsonb_text, int nkeys,...)
 	if (nkeys <= 0 || jsonb_text == NULL || *jsonb_text == '\0')
 		return NULL;
 
-	Datum		jsonbDatum = DirectFunctionCall1(jsonb_in, CStringGetDatum(jsonb_text));
+	Datum		jsonbDatum = DirectFunctionCall1(jsonb_in,
+												 CStringGetDatum(jsonb_text));
 	Jsonb	   *jb = DatumGetJsonbP(jsonbDatum);
-	JsonbContainer *container = &jb->root;
-
 	va_list		ap;
+	char	   *result;
 
 	va_start(ap, nkeys);
-
-	for (int i = 0; i < nkeys; i++)
-	{
-		const char *key = va_arg(ap, const char *);
-		JsonbValue	keyVal;
-		JsonbValue *val;
-
-		if (!JsonContainerIsObject(container))
-		{
-			va_end(ap);
-			return NULL;
-		}
-
-		keyVal.type = jbvString;
-		keyVal.val.string.val = (char *) key;
-		keyVal.val.string.len = strlen(key);
-
-		val = findJsonbValueFromContainer(container, JB_FOBJECT, &keyVal);
-		if (val == NULL)
-		{
-			va_end(ap);
-			return NULL;
-		}
-
-		if (i < nkeys - 1)
-		{
-			if (val->type != jbvBinary ||
-				!JsonContainerIsObject(val->val.binary.data))
-			{
-				va_end(ap);
-				return NULL;
-			}
-			container = val->val.binary.data;
-		}
-		else
-		{
-			va_end(ap);
-
-			if (val->type == jbvString)
-				return pnstrdup(val->val.string.val, val->val.string.len);
-			return NULL;
-		}
-	}
-
+	result = StringByPathFromContainer(&jb->root, nkeys, ap);
 	va_end(ap);
-	return NULL;
+
+	return result;
+}
+
+
+/*
+ * JsonbGetOptionalString is JsonbGetOptionalStringByPath over an
+ * already-parsed document, for callers that read several fields out of
+ * one response and should not pay to parse it again for each of them.
+ */
+char *
+JsonbGetOptionalString(Jsonb *jb, int nkeys,...)
+{
+	if (nkeys <= 0 || jb == NULL)
+		return NULL;
+
+	va_list		ap;
+	char	   *result;
+
+	va_start(ap, nkeys);
+	result = StringByPathFromContainer(&jb->root, nkeys, ap);
+	va_end(ap);
+
+	return result;
 }
 
 
@@ -354,11 +375,10 @@ JsonbGetOptionalStringByPath(const char *jsonb_text, int nkeys,...)
  * JsonbGetArrayElementObjects navigates a top-level object key
  * `arrayKey` that holds a JSON array and returns one JsonbArrayElement
  * per array element, in order.  Each element's `objectKey` nested
- * object is serialized back to JSON text (so the caller can re-parse it
- * with JsonbGetOptionalStringByPath), and its `elementStringKey` string
- * field is returned alongside.  Elements that are not objects, or that
- * carry no such nested object, are skipped.  Returns NIL when the array
- * is absent or yields nothing usable.
+ * object is returned as a document of its own, along with the
+ * element's `elementStringKey` string field.  Elements that are not
+ * objects, or that carry no such nested object, are skipped.  Returns
+ * NIL when the array is absent or yields nothing usable.
  *
  * This parses the Iceberg REST `storage-credentials` array, whose
  * elements look like { "prefix": "s3://...", "config": { ... } }.  A
@@ -366,16 +386,14 @@ JsonbGetOptionalStringByPath(const char *jsonb_text, int nkeys,...)
  * files and another for the metadata directory.
  */
 List *
-JsonbGetArrayElementObjects(const char *jsonb_text, const char *arrayKey,
+JsonbGetArrayElementObjects(Jsonb *jb, const char *arrayKey,
 							const char *objectKey, const char *elementStringKey)
 {
 	List	   *elements = NIL;
 
-	if (jsonb_text == NULL || *jsonb_text == '\0')
+	if (jb == NULL)
 		return NIL;
 
-	Datum		jsonbDatum = DirectFunctionCall1(jsonb_in, CStringGetDatum(jsonb_text));
-	Jsonb	   *jb = DatumGetJsonbP(jsonbDatum);
 	JsonbContainer *root = &jb->root;
 
 	if (!JsonContainerIsObject(root))
@@ -418,10 +436,8 @@ JsonbGetArrayElementObjects(const char *jsonb_text, const char *arrayKey,
 			continue;
 
 		JsonbArrayElement *element = palloc0(sizeof(JsonbArrayElement));
-		Jsonb	   *nestedObject = JsonbValueToJsonb(oVal);
 
-		element->objectJson = JsonbToCString(NULL, &nestedObject->root,
-											 VARSIZE(nestedObject));
+		element->object = JsonbValueToJsonb(oVal);
 
 		if (elementStringKey != NULL)
 		{

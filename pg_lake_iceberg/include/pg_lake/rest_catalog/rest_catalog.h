@@ -19,6 +19,7 @@
 
 #include "postgres.h"
 #include "foreign/foreign.h"
+#include "utils/jsonb.h"
 #include "utils/timestamp.h"
 #include "pg_lake/ddl/utility_hook.h"
 #include "pg_lake/http/http_client.h"
@@ -206,19 +207,20 @@ char	   *GetRestCatalogAccessToken(RestCatalogOptions * opts, bool forceRefreshT
 List	   *GetHeadersWithAuth(RestCatalogOptions * opts);
 char	   *JsonbGetStringByPath(const char *jsonb_text, int nkeys,...);
 char	   *JsonbGetOptionalStringByPath(const char *jsonb_text, int nkeys,...);
+char	   *JsonbGetOptionalString(Jsonb *jb, int nkeys,...);
 
 /*
  * One element of a JSON array of objects: the nested object the caller
- * asked for, as JSON text, plus one string field read off the element
- * itself (e.g. a storage-credential's "prefix").
+ * asked for, plus one string field read off the element itself (e.g. a
+ * storage-credential's "prefix").
  */
 typedef struct JsonbArrayElement
 {
 	char	   *stringValue;	/* may be NULL when the field is absent */
-	char	   *objectJson;
+	Jsonb	   *object;
 }			JsonbArrayElement;
 
-List	   *JsonbGetArrayElementObjects(const char *jsonb_text, const char *arrayKey,
+List	   *JsonbGetArrayElementObjects(Jsonb *jb, const char *arrayKey,
 										const char *objectKey,
 										const char *elementStringKey);
 
