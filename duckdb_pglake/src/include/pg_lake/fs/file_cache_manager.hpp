@@ -54,11 +54,13 @@ const int64_t MIN_FREE_INODES_AUTO = -1;
 
 /*
  * By default, we keep 1/DEFAULT_FREE_INODE_FRACTION of the inodes on the cache
- * file system available, but at least DEFAULT_MIN_FREE_INODES, and never more
- * than half of the inodes on the file system.
+ * file system available, bounded by DEFAULT_MIN_FREE_INODES and
+ * DEFAULT_MAX_FREE_INODES, and never more than half of the inodes on the file
+ * system.
  */
 const int64_t DEFAULT_FREE_INODE_FRACTION = 100;
 const int64_t DEFAULT_MIN_FREE_INODES = 1000;
+const int64_t DEFAULT_MAX_FREE_INODES = 100000;
 
 /*
  * CacheItem represents a file in cache or the cache queue.

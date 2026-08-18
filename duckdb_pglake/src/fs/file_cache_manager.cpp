@@ -561,6 +561,12 @@ TryGetInodeStats(const string &path, int64_t &freeInodes, int64_t &totalInodes)
  * system with very few inodes can hold a cache at all, instead of having
  * everything evicted on every round.
  *
+ * Running out of inodes is an absolute condition rather than a relative one, so
+ * the fraction also gets an absolute bound: on a file system with 100M inodes,
+ * 1% would mean declaring inode pressure while a million of them are still
+ * available, which is plenty for a cache that adds files in batches of at most
+ * a few thousand per round.
+ *
  * Expects totalInodes > 0, which TryGetInodeStats guarantees.
  */
 static int64_t
@@ -570,6 +576,9 @@ DeriveInodeFloor(int64_t totalInodes)
 
 	if (inodeFloor < DEFAULT_MIN_FREE_INODES)
 		inodeFloor = DEFAULT_MIN_FREE_INODES;
+
+	if (inodeFloor > DEFAULT_MAX_FREE_INODES)
+		inodeFloor = DEFAULT_MAX_FREE_INODES;
 
 	if (inodeFloor > totalInodes / 2)
 		inodeFloor = totalInodes / 2;
