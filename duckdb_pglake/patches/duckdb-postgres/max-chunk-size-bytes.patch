@@ -1,0 +1,182 @@
+diff --git a/src/include/postgres_result_reader.hpp b/src/include/postgres_result_reader.hpp
+index 2b452ec..3c2629b 100644
+--- a/src/include/postgres_result_reader.hpp
++++ b/src/include/postgres_result_reader.hpp
+@@ -34,10 +34,35 @@ public:
+ 	virtual void BeginCopy(const string &sql) = 0;
+ 	virtual PostgresReadResult Read(DataChunk &result) = 0;
+ 
++	//! Bound on the number of payload bytes we accumulate into a single output chunk.
++	//! Zero means unbounded, i.e. a chunk is only bounded by STANDARD_VECTOR_SIZE rows.
++	void SetMaxChunkSizeBytes(idx_t bytes) {
++		max_chunk_size_bytes = bytes;
++	}
++	//! Called by the scan whenever the executor hands us a fresh output chunk
++	void ResetChunkSize() {
++		chunk_size_bytes = 0;
++	}
++	//! Whether the current output chunk has reached the byte bound. Rows are only ever
++	//! added while this is false, so a chunk always holds at least one row - a single
++	//! row larger than the bound is emitted on its own rather than being rejected.
++	bool ChunkSizeLimitReached() const {
++		return max_chunk_size_bytes > 0 && chunk_size_bytes >= max_chunk_size_bytes;
++	}
++
++protected:
++	void AddChunkSizeBytes(idx_t bytes) {
++		chunk_size_bytes += bytes;
++	}
++
+ protected:
+ 	PostgresConnection &con;
+ 	const vector<column_t> &column_ids;
+ 	const PostgresBindData &bind_data;
++
++private:
++	idx_t max_chunk_size_bytes = 0;
++	idx_t chunk_size_bytes = 0;
+ };
+ 
+ } // namespace duckdb
+diff --git a/src/include/postgres_scanner.hpp b/src/include/postgres_scanner.hpp
+index 0f9cda7..65b0cc9 100644
+--- a/src/include/postgres_scanner.hpp
++++ b/src/include/postgres_scanner.hpp
+@@ -21,6 +21,13 @@ class PostgresTransaction;
+ 
+ struct PostgresBindData : public FunctionData {
+ 	static constexpr const idx_t DEFAULT_PAGES_PER_TASK = 1000;
++	//! Default bound on the payload bytes accumulated into one output chunk. A chunk is
++	//! the smallest unit the Parquet writer downstream can flush a row group at, so a
++	//! chunk of 2048 wide rows would otherwise overshoot the configured row group size
++	//! by an unbounded factor. Bounding it at 128MB bounds a row group at its configured
++	//! size plus one chunk, i.e. 2x the 128MB pg_lake asks for; it also stays far above
++	//! the row width of any ordinary table, which therefore still yields full chunks.
++	static constexpr const idx_t DEFAULT_MAX_CHUNK_SIZE_BYTES = 128ULL * 1024 * 1024;
+ 
+ public:
+ 	PostgresBindData(ClientContext &context);
+@@ -37,6 +43,7 @@ public:
+ 	vector<LogicalType> types;
+ 
+ 	idx_t pages_per_task = DEFAULT_PAGES_PER_TASK;
++	idx_t max_chunk_size_bytes = DEFAULT_MAX_CHUNK_SIZE_BYTES;
+ 	string dsn;
+ 	string attach_path;
+ 
+diff --git a/src/postgres_binary_reader.cpp b/src/postgres_binary_reader.cpp
+index 86ebe30..cfbb321 100644
+--- a/src/postgres_binary_reader.cpp
++++ b/src/postgres_binary_reader.cpp
+@@ -21,7 +21,7 @@ void PostgresBinaryReader::BeginCopy(const string &sql) {
+ }
+ 
+ PostgresReadResult PostgresBinaryReader::Read(DataChunk &output) {
+-	while (output.size() < STANDARD_VECTOR_SIZE) {
++	while (output.size() < STANDARD_VECTOR_SIZE && !ChunkSizeLimitReached()) {
+ 		while (!Ready()) {
+ 			if (!Next()) {
+ 				// finished this batch
+@@ -30,6 +30,7 @@ PostgresReadResult PostgresBinaryReader::Read(DataChunk &output) {
+ 		}
+ 
+ 		// read a row
++		auto row_start = buffer_ptr;
+ 		auto tuple_count = ReadInteger<int16_t>();
+ 		if (tuple_count <= 0) {
+ 			// tuple_count of -1 signifies the file trailer (i.e. footer) - reset and skip
+@@ -54,6 +55,10 @@ PostgresReadResult PostgresBinaryReader::Read(DataChunk &output) {
+ 				ReadValue(bind_data.types[col_idx], bind_data.postgres_types[col_idx], out_vec, output_offset);
+ 			}
+ 		}
++		// The bytes this row occupied on the wire are a close proxy for the bytes it
++		// occupies in the output chunk, which is what bounds the row group we end up
++		// writing downstream.
++		AddChunkSizeBytes(idx_t(buffer_ptr - row_start));
+ 		Reset();
+ 		output.SetCardinality(output_offset + 1);
+ 	}
+diff --git a/src/postgres_extension.cpp b/src/postgres_extension.cpp
+index 4246555..69599ef 100644
+--- a/src/postgres_extension.cpp
++++ b/src/postgres_extension.cpp
+@@ -183,6 +183,13 @@ static void LoadInternal(ExtensionLoader &loader) {
+ 	                          LogicalType::VARCHAR, Value(), SetPostgresNullByteReplacement);
+ 	config.AddExtensionOption("pg_debug_show_queries", "DEBUG SETTING: print all queries sent to Postgres to stdout",
+ 	                          LogicalType::BOOLEAN, Value::BOOLEAN(false), SetPostgresDebugQueryPrint);
++	config.AddExtensionOption("pg_max_chunk_size_bytes",
++	                          "Approximate upper bound on the payload bytes read into a single output chunk. "
++	                          "Chunks are still capped at 2048 rows; this additionally caps them by size so that "
++	                          "tables with large values do not produce chunks that overshoot the row group size "
++	                          "of whatever writes them. Zero disables the bound.",
++	                          LogicalType::UBIGINT,
++	                          Value::UBIGINT(PostgresBindData::DEFAULT_MAX_CHUNK_SIZE_BYTES));
+ 	config.AddExtensionOption("pg_use_text_protocol",
+ 	                          "Whether or not to use TEXT protocol to read data. This is slower, but provides better "
+ 	                          "compatibility with non-Postgres systems",
+diff --git a/src/postgres_scanner.cpp b/src/postgres_scanner.cpp
+index bb4136f..e10ff33 100644
+--- a/src/postgres_scanner.cpp
++++ b/src/postgres_scanner.cpp
+@@ -142,6 +142,10 @@ PostgresBindData::PostgresBindData(ClientContext &context) {
+ 			use_text_protocol = true;
+ 		}
+ 	}
++	Value chunk_size_bytes;
++	if (context.TryGetCurrentSetting("pg_max_chunk_size_bytes", chunk_size_bytes)) {
++		max_chunk_size_bytes = UBigIntValue::Get(chunk_size_bytes);
++	}
+ }
+ 
+ void PostgresBindData::SetTablePages(idx_t approx_num_pages) {
+@@ -452,7 +456,11 @@ void PostgresLocalState::ScanChunk(ClientContext &context, const PostgresBindDat
+ 		} else {
+ 			reader = make_uniq<PostgresBinaryReader>(connection, column_ids, bind_data);
+ 		}
++		reader->SetMaxChunkSizeBytes(bind_data.max_chunk_size_bytes);
+ 	}
++	// the executor hands us an empty chunk on every call, so the byte accounting that
++	// bounds the chunk size starts over here
++	reader->ResetChunkSize();
+ 	while (true) {
+ 		if (done && !PostgresParallelStateNext(context, &bind_data, *this, gstate)) {
+ 			return;
+@@ -466,7 +474,7 @@ void PostgresLocalState::ScanChunk(ClientContext &context, const PostgresBindDat
+ 			done = true;
+ 			continue;
+ 		}
+-		if (output.size() == STANDARD_VECTOR_SIZE) {
++		if (output.size() == STANDARD_VECTOR_SIZE || reader->ChunkSizeLimitReached()) {
+ 			return;
+ 		}
+ 	}
+diff --git a/src/postgres_text_reader.cpp b/src/postgres_text_reader.cpp
+index 066e072..b2e0d55 100644
+--- a/src/postgres_text_reader.cpp
++++ b/src/postgres_text_reader.cpp
+@@ -339,8 +339,10 @@ PostgresReadResult PostgresTextReader::Read(DataChunk &output) {
+ 		scan_chunk.Initialize(context, types);
+ 	}
+ 	scan_chunk.Reset();
+-	for (; scan_chunk.size() < STANDARD_VECTOR_SIZE && row_offset < result->Count(); row_offset++) {
++	for (; scan_chunk.size() < STANDARD_VECTOR_SIZE && row_offset < result->Count() && !ChunkSizeLimitReached();
++	     row_offset++) {
+ 		idx_t output_offset = scan_chunk.size();
++		idx_t row_size_bytes = 0;
+ 		for (idx_t output_idx = 0; output_idx < output.ColumnCount(); output_idx++) {
+ 			auto col_idx = column_ids[output_idx];
+ 			auto &out_vec = scan_chunk.data[output_idx];
+@@ -349,9 +351,11 @@ PostgresReadResult PostgresTextReader::Read(DataChunk &output) {
+ 				continue;
+ 			}
+ 			auto col_data = FlatVector::GetData<string_t>(out_vec);
+-			col_data[output_offset] =
+-			    StringVector::AddStringOrBlob(out_vec, result->GetStringRef(row_offset, output_idx));
++			auto str = result->GetStringRef(row_offset, output_idx);
++			row_size_bytes += str.GetSize();
++			col_data[output_offset] = StringVector::AddStringOrBlob(out_vec, str);
+ 		}
++		AddChunkSizeBytes(row_size_bytes);
+ 		scan_chunk.SetCardinality(scan_chunk.size() + 1);
+ 	}
+ 	for (idx_t c = 0; c < output.ColumnCount(); c++) {

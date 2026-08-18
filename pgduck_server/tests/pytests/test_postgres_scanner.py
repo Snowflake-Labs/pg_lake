@@ -9,6 +9,9 @@ Scenarios covered:
 - Special values (±Inf, NaN, NULL) across float4, float8, and numeric flavors
   (binary & text protocol)
 - Multidimensional array values in int[] column clamped to NULL
+- Wide rows do not blow past the Parquet row group size limit (binary & text
+  protocol), which requires bounding the scanner's output chunks by size
+- Mixed row widths, the worst case for that limit, stay within 2x of it
 """
 
 from decimal import Decimal
@@ -188,6 +191,81 @@ def pg_tables(postgres):
         "(ARRAY[10, 20])"
     )
 
+    # -- wide rows (large strings) ---------------------------------------
+    # 256 rows of ~64KB each.  The payload is md5 hex derived from the row and
+    # block index, so it is deterministic yet incompressible - the bytes on the
+    # wire, in the scanner's output chunk, and in the Parquet row group are all
+    # within a few percent of each other.
+    cur.execute("DROP TABLE IF EXISTS scanner_wide_rows_tbl")
+    cur.execute(
+        "CREATE TABLE scanner_wide_rows_tbl AS "
+        "SELECT i AS id, ("
+        "  SELECT string_agg(md5(i::text || ':' || j::text), '')"
+        "  FROM generate_series(1, 2048) j"
+        ") AS payload "
+        "FROM generate_series(1, 256) i"
+    )
+
+    # -- mixed row widths, which is where the overshoot is worst ----------
+    # 8192 rows of ~1KB followed by 256 rows of ~64KB.  The narrow rows fill
+    # whole 2048-row chunks that walk the writer's buffer up to just under the
+    # row group limit, and the first wide chunk then lands on top of it - so
+    # this is the shape that realizes the worst case of limit + one chunk.  A
+    # table of uniformly wide rows does not: its chunks divide evenly into the
+    # limit, so the buffer is always empty when one arrives.
+    cur.execute("DROP TABLE IF EXISTS scanner_mixed_rows_tbl")
+    cur.execute(
+        "CREATE TABLE scanner_mixed_rows_tbl AS "
+        "SELECT i AS id, ("
+        "  SELECT substr(string_agg(md5(i::text || ':' || j::text), ''), 1, 1000)"
+        "  FROM generate_series(1, 32) j"
+        ") AS payload "
+        "FROM generate_series(1, 8192) i"
+    )
+    cur.execute(
+        "INSERT INTO scanner_mixed_rows_tbl "
+        "SELECT 100000 + i, ("
+        "  SELECT string_agg(md5(i::text || ':' || j::text), '')"
+        "  FROM generate_series(1, 2048) j"
+        ") "
+        "FROM generate_series(1, 256) i"
+    )
+
+    # -- wide payload nested inside a composite ---------------------------
+    # 256 rows carrying ~16KB of bytea and ~32KB of text[] per row, all of it
+    # below the top level.  Byte accounting that only looked at a column's own
+    # inline bytes would score these rows near zero and hand the writer 2048-row
+    # chunks again, so this is the case that proves nested payload is counted.
+    cur.execute("DROP TABLE IF EXISTS scanner_wide_nested_tbl")
+    cur.execute("DROP TYPE IF EXISTS scanner_wide_comp_type CASCADE")
+    cur.execute(
+        "CREATE TYPE scanner_wide_comp_type AS (id int, blob bytea, tags text[])"
+    )
+    cur.execute(
+        "CREATE TABLE scanner_wide_nested_tbl AS "
+        "SELECT ROW("
+        "  i,"
+        "  decode(("
+        "    SELECT string_agg(md5(i::text || ':' || j::text), '')"
+        "    FROM generate_series(1, 1024) j"
+        "  ), 'hex'),"
+        "  ARRAY["
+        "    (SELECT string_agg(md5(i::text || ':a:' || j::text), '')"
+        "     FROM generate_series(1, 512) j),"
+        "    (SELECT string_agg(md5(i::text || ':b:' || j::text), '')"
+        "     FROM generate_series(1, 512) j)"
+        "  ]"
+        ")::scanner_wide_comp_type AS c "
+        "FROM generate_series(1, 256) i"
+    )
+
+    # -- narrow rows, for the no-regression leg of the chunk size test ----
+    cur.execute("DROP TABLE IF EXISTS scanner_narrow_rows_tbl")
+    cur.execute(
+        "CREATE TABLE scanner_narrow_rows_tbl AS "
+        "SELECT i AS id, i * 2 AS v FROM generate_series(1, 20000) i"
+    )
+
     cur.close()
     conn.close()
 
@@ -216,6 +294,11 @@ def pg_tables(postgres):
     cur.execute("DROP TABLE IF EXISTS scanner_unbounded_numeric_tbl")
     cur.execute("DROP TABLE IF EXISTS scanner_special_values_tbl")
     cur.execute("DROP TABLE IF EXISTS scanner_multidim_array_tbl")
+    cur.execute("DROP TABLE IF EXISTS scanner_wide_rows_tbl")
+    cur.execute("DROP TABLE IF EXISTS scanner_mixed_rows_tbl")
+    cur.execute("DROP TABLE IF EXISTS scanner_wide_nested_tbl")
+    cur.execute("DROP TYPE IF EXISTS scanner_wide_comp_type CASCADE")
+    cur.execute("DROP TABLE IF EXISTS scanner_narrow_rows_tbl")
     cur.close()
     conn.close()
 
@@ -476,3 +559,257 @@ def test_multidim_array_to_null(pg_tables, pgduck_conn):
         (None,),  # multidim→NULL
         (None,),  # original NULL
     ]
+
+
+# -------------------------------------------------------------------
+# Row group size limit with wide rows
+# -------------------------------------------------------------------
+
+# The Parquet writer can only close a row group on a chunk boundary, so the
+# scanner's chunk size is the granularity of the row group size limit.  These
+# numbers keep one uncapped chunk (256 rows x ~64KB = ~16MB) several times
+# larger than the row group limit, which is what makes the overshoot visible.
+_RG_LIMIT_BYTES = 4 * 1024 * 1024
+_CHUNK_CAP_BYTES = 1024 * 1024
+
+# The mixed-width table is written at a limit its ~1KB rows divide into unevenly,
+# which is what walks the writer's buffer close to the limit before the first
+# wide chunk arrives.  The cap is set equal to the limit here because that is how
+# production runs: pg_lake asks for 128MB row groups and the patch defaults the
+# cap to 128MB as well.
+_MIXED_RG_LIMIT_BYTES = 8 * 1024 * 1024
+# A chunk is closed once it has *reached* the cap, so it overruns by at most the
+# last row - the widest row in the mixed table is ~64KB.
+_MIXED_MAX_ROW_BYTES = 128 * 1024
+
+
+def _write_parquet(pgduck_conn, path, table, chunk_cap_bytes, rg_limit_bytes):
+    """Scan a table into Parquet, then report its row group sizes."""
+    run_command(f"SET pg_max_chunk_size_bytes = {chunk_cap_bytes}", pgduck_conn)
+    try:
+        run_command(
+            f"COPY (SELECT * FROM {_scan(table)}) "
+            f"TO '{path}' (FORMAT PARQUET, ROW_GROUP_SIZE_BYTES {rg_limit_bytes})",
+            pgduck_conn,
+        )
+    finally:
+        run_command("RESET pg_max_chunk_size_bytes", pgduck_conn)
+
+    rows = run_query(
+        f"SELECT count(DISTINCT row_group_id), max(row_group_bytes), "
+        f"       sum(row_group_num_rows) FILTER (WHERE path_in_schema = 'id') "
+        f"FROM parquet_metadata('{path}')",
+        pgduck_conn,
+    )
+    return rows[0][0], rows[0][1], rows[0][2]
+
+
+@pytest.mark.parametrize("use_text_protocol", [False, True], ids=["binary", "text"])
+def test_wide_rows_respect_row_group_size_limit(
+    pg_tables, pgduck_conn, tmp_path, use_text_protocol
+):
+    """Bounding scanner chunks by size keeps wide rows inside the row group limit.
+
+    postgres_scanner fills an output chunk up to STANDARD_VECTOR_SIZE (2048)
+    rows regardless of how wide those rows are, and the Parquet writer only
+    evaluates row_group_size_bytes between chunks.  A table with large strings
+    therefore produced a single row group many times the requested size - the
+    uncapped leg below demonstrates that.  pg_max_chunk_size_bytes caps the
+    chunk payload so the writer gets to flush on time.
+    """
+    if use_text_protocol:
+        perform_query_on_cursor("SET pg_use_text_protocol = true", pgduck_conn)
+    try:
+        # Uncapped (0 disables the bound): the old behavior.  All 256 rows land
+        # in one chunk, so the writer never gets a chance to flush and emits a
+        # single row group several times over the limit.
+        groups, largest, num_rows = _write_parquet(
+            pgduck_conn,
+            tmp_path / "uncapped.parquet",
+            "scanner_wide_rows_tbl",
+            0,
+            _RG_LIMIT_BYTES,
+        )
+        assert num_rows == 256
+        assert groups == 1
+        assert largest > 3 * _RG_LIMIT_BYTES
+        uncapped_largest = largest
+
+        # Capped: chunks are bounded at ~1MB, so the writer flushes once it has
+        # accumulated the 4MB limit and the overshoot is at most one chunk.
+        groups, largest, num_rows = _write_parquet(
+            pgduck_conn,
+            tmp_path / "capped.parquet",
+            "scanner_wide_rows_tbl",
+            _CHUNK_CAP_BYTES,
+            _RG_LIMIT_BYTES,
+        )
+        assert num_rows == 256
+        assert groups >= 3
+        assert largest <= _RG_LIMIT_BYTES + 2 * _CHUNK_CAP_BYTES
+        assert largest < uncapped_largest / 2
+    finally:
+        if use_text_protocol:
+            perform_query_on_cursor("SET pg_use_text_protocol = false", pgduck_conn)
+
+
+@pytest.mark.parametrize("use_text_protocol", [False, True], ids=["binary", "text"])
+def test_mixed_row_widths_stay_within_twice_the_row_group_limit(
+    pg_tables, pgduck_conn, tmp_path, use_text_protocol
+):
+    """Cap == row group limit bounds a row group at 2x the limit, not more.
+
+    This is the production configuration - pg_lake asks for 128MB row groups and
+    the cap defaults to 128MB - reproduced at 1/16 scale.  A cap equal to the
+    limit cannot do better than 2x, because the writer only tests its threshold
+    after appending a whole chunk: a buffer sitting just under the limit plus one
+    full chunk is the worst case.  Mixed row widths are what reach it.
+    """
+    if use_text_protocol:
+        perform_query_on_cursor("SET pg_use_text_protocol = true", pgduck_conn)
+    # This table has enough heap pages to split into two scan tasks, and each
+    # writer thread buffers its own row group - so the row group layout is only
+    # deterministic single-threaded.  The bound under test is per buffer and so
+    # does not depend on how many of them there are.
+    run_command("SET threads = 1", pgduck_conn)
+    try:
+        # Uncapped, for contrast: a single row group holding the whole table.
+        groups, uncapped_largest, num_rows = _write_parquet(
+            pgduck_conn,
+            tmp_path / "mixed_uncapped.parquet",
+            "scanner_mixed_rows_tbl",
+            0,
+            _MIXED_RG_LIMIT_BYTES,
+        )
+        assert num_rows == 8448
+        assert groups == 1
+        assert uncapped_largest > 2 * _MIXED_RG_LIMIT_BYTES
+
+        groups, largest, num_rows = _write_parquet(
+            pgduck_conn,
+            tmp_path / "mixed_capped.parquet",
+            "scanner_mixed_rows_tbl",
+            _MIXED_RG_LIMIT_BYTES,
+            _MIXED_RG_LIMIT_BYTES,
+        )
+        assert num_rows == 8448
+        assert groups >= 2
+        assert largest <= 2 * _MIXED_RG_LIMIT_BYTES + _MIXED_MAX_ROW_BYTES
+        assert largest < uncapped_largest
+        # Guard against the assertion above passing for the wrong reason: this
+        # table is meant to overshoot the limit, just boundedly.  If it stopped
+        # doing so, the 2x bound would no longer be under test here.
+        assert largest > _MIXED_RG_LIMIT_BYTES
+    finally:
+        run_command("RESET threads", pgduck_conn)
+        if use_text_protocol:
+            perform_query_on_cursor("SET pg_use_text_protocol = false", pgduck_conn)
+
+
+def _chunk_row_counts(pgduck_conn, path, table, chunk_cap_bytes):
+    """Report the row counts of the chunks the scanner produced for a table.
+
+    A 1-byte row group limit makes the writer close a row group after every
+    chunk, so the Parquet footer reads back the chunk sizes directly.
+    """
+    _write_parquet(pgduck_conn, path, table, chunk_cap_bytes, 1)
+    # The row count comes from the data rather than from row_group_num_rows,
+    # which is reported per leaf column and so would need a schema-specific
+    # filter for a struct column.
+    rows = run_query(
+        f"SELECT (SELECT count(DISTINCT row_group_id) FROM parquet_metadata('{path}')), "
+        f"       (SELECT max(row_group_num_rows) FROM parquet_metadata('{path}')), "
+        f"       (SELECT count(*) FROM read_parquet('{path}'))",
+        pgduck_conn,
+    )
+    return rows[0][0], rows[0][1], rows[0][2]
+
+
+@pytest.mark.parametrize("use_text_protocol", [False, True], ids=["binary", "text"])
+def test_chunk_cap_counts_payload_nested_in_composite(
+    pg_tables, pgduck_conn, tmp_path, use_text_protocol
+):
+    """Bytes inside a composite's bytea and text[] fields count toward the cap.
+
+    The rows here carry ~48KB each, none of it at the top level.  The binary
+    reader accounts for a whole row of wire bytes so nesting is covered by
+    construction, and the TEXT reader counts each column's full text form, which
+    contains the nested values.  Neither is obvious from the call site, hence
+    this test: if either stopped seeing nested payload, the capped leg would
+    produce 2048-row chunks like the uncapped one.
+    """
+    if use_text_protocol:
+        perform_query_on_cursor("SET pg_use_text_protocol = true", pgduck_conn)
+    try:
+        groups, max_rows, num_rows = _chunk_row_counts(
+            pgduck_conn,
+            tmp_path / "nested_uncapped.parquet",
+            "scanner_wide_nested_tbl",
+            0,
+        )
+        assert num_rows == 256
+        assert groups == 1
+        assert max_rows == 256  # one chunk, no size bound
+
+        # ~48KB per row against a 1MB cap is ~21 rows per chunk over the binary
+        # protocol and fewer over TEXT, where bytea arrives as \x hex at twice
+        # the size.  The bound is loose because the two protocols legitimately
+        # count different numbers of bytes for the same row.
+        groups, max_rows, num_rows = _chunk_row_counts(
+            pgduck_conn,
+            tmp_path / "nested_capped.parquet",
+            "scanner_wide_nested_tbl",
+            _CHUNK_CAP_BYTES,
+        )
+        assert num_rows == 256
+        assert groups >= 4
+        assert max_rows <= 64
+    finally:
+        if use_text_protocol:
+            perform_query_on_cursor("SET pg_use_text_protocol = false", pgduck_conn)
+
+
+@pytest.mark.parametrize("use_text_protocol", [False, True], ids=["binary", "text"])
+def test_default_chunk_cap_keeps_full_chunks_for_narrow_rows(
+    pg_tables, pgduck_conn, tmp_path, use_text_protocol
+):
+    """The default cap must not shrink chunks for ordinary row widths.
+
+    128MB over 2048 rows is 64KB per row, so anything narrower still fills a
+    whole chunk and the cap costs nothing.  Writing with a 1-byte row group
+    limit turns every chunk into its own row group, which is how the chunk
+    sizes the scanner produced are read back out of the Parquet footer.
+    """
+    path = tmp_path / "narrow.parquet"
+    if use_text_protocol:
+        perform_query_on_cursor("SET pg_use_text_protocol = true", pgduck_conn)
+    try:
+        run_command(
+            f"COPY (SELECT * FROM {_scan('scanner_narrow_rows_tbl')}) "
+            f"TO '{path}' (FORMAT PARQUET, ROW_GROUP_SIZE_BYTES 1)",
+            pgduck_conn,
+        )
+    finally:
+        if use_text_protocol:
+            perform_query_on_cursor("SET pg_use_text_protocol = false", pgduck_conn)
+
+    rows = run_query(
+        f"SELECT max(row_group_num_rows), "
+        f"       sum(row_group_num_rows) FILTER (WHERE path_in_schema = 'id') "
+        f"FROM parquet_metadata('{path}')",
+        pgduck_conn,
+    )
+    assert rows[0][0] == 2048  # STANDARD_VECTOR_SIZE, i.e. not size-limited
+    assert rows[0][1] == 20000
+
+
+def test_default_chunk_cap_value(pgduck_conn):
+    """pg_max_chunk_size_bytes defaults to the 128MB the patch installs.
+
+    That matches pg_lake's own default row group size, so a row group is bounded
+    at 2x the configured size rather than at an unbounded multiple of it.
+    """
+    rows = run_query(
+        "SELECT current_setting('pg_max_chunk_size_bytes')::BIGINT", pgduck_conn
+    )
+    assert rows[0][0] == 128 * 1024 * 1024
