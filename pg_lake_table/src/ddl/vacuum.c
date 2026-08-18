@@ -1009,7 +1009,15 @@ VacuumRemoveDroppedTableFiles(void)
 static void
 VacuumRemoveDeletionQueueRecords(Oid relationId, bool isFull, bool isVerbose)
 {
-	int			totalFilesRemoved = 0;
+	/*
+	 * Files this VACUUM removed, and what it has spent of its per-vacuum
+	 * budget. The two only differ for a pass that resolved dropped-table
+	 * metadata: such a pass removes nothing but converts rows that the next
+	 * pass deletes, so it is charged a unit of budget to keep this loop
+	 * finite without showing up in the count we report.
+	 */
+	volatile int totalFilesRemoved = 0;
+	volatile int budgetSpent = 0;
 
 	volatile bool hasRemainingFiles = true;
 	MemoryContext savedContext = CurrentMemoryContext;
@@ -1038,13 +1046,35 @@ VacuumRemoveDeletionQueueRecords(Oid relationId, bool isFull, bool isVerbose)
 			 * the loop condition below can only be checked once a pass has
 			 * already deleted what it claimed.
 			 */
-			int			remainingBudget = MaxFileRemovalsPerVacuum - totalFilesRemoved;
+			int			remainingBudget = MaxFileRemovalsPerVacuum - budgetSpent;
 
 			/* do cleanup */
 			deletionQueueRecords = GetDeletionQueueRecords(relationId, isFull,
 														   remainingBudget);
 
-			hasRemainingFiles = RemoveDeletionQueueRecords(deletionQueueRecords, isVerbose);
+			int			filesRemoved = 0;
+			bool		madeProgress = RemoveDeletionQueueRecords(deletionQueueRecords,
+																  isVerbose,
+																  &filesRemoved);
+
+			/*
+			 * Charge the budget for what came off the queue, not for what was
+			 * claimed: a path that can never be removed is claimed by every
+			 * pass, and charging those would let a block of them spend the
+			 * whole budget, take the loop to its limit, and leave the worker
+			 * thinking it stopped mid-progress. It would then come straight
+			 * back and charge them again, so the failing rows would reach
+			 * VacuumFileRemoveMaxRetries in minutes rather than the day that
+			 * limit is sized for.
+			 *
+			 * A pass that removed nothing but resolved dropped-table metadata
+			 * did make progress, so it is charged one to keep the loop
+			 * finite.
+			 */
+			totalFilesRemoved += filesRemoved;
+			budgetSpent += (filesRemoved > 0) ? filesRemoved : (madeProgress ? 1 : 0);
+
+			hasRemainingFiles = madeProgress;
 
 			VacuumConsumeTrackedIcebergMetadataChanges(isVerbose);
 
@@ -1073,7 +1103,6 @@ VacuumRemoveDeletionQueueRecords(Oid relationId, bool isFull, bool isVerbose)
 		}
 		PG_END_TRY();
 
-		totalFilesRemoved += list_length(deletionQueueRecords);
 		hasRemainingFiles = hasRemainingFiles ? list_length(deletionQueueRecords) > 0 : false;
 
 		/* rotate into a new transaction to release locks and save progress */
@@ -1082,10 +1111,10 @@ VacuumRemoveDeletionQueueRecords(Oid relationId, bool isFull, bool isVerbose)
 		StartTransactionCommand();
 	}
 	while (!isFull				/* when isFull, we'll remove all files */
-		   && totalFilesRemoved < MaxFileRemovalsPerVacuum	/* per-vacuum limit */
+		   && budgetSpent < MaxFileRemovalsPerVacuum	/* per-vacuum limit */
 		   && hasRemainingFiles /* no more files to remove */ );
 
-	if (hasRemainingFiles && totalFilesRemoved >= MaxFileRemovalsPerVacuum)
+	if (hasRemainingFiles && budgetSpent >= MaxFileRemovalsPerVacuum)
 		VacuumStoppedWithFilesQueued = true;
 
 	if (totalFilesRemoved > 0)

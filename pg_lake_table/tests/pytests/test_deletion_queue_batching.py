@@ -188,6 +188,119 @@ def test_autovacuum_removes_files_for_dropped_tables(
         )
 
 
+def test_autovacuum_does_not_spin_on_unremovable_paths(
+    s3, superuser_conn, extension, installcheck
+):
+    """A queue whose rows cannot be removed does not keep the worker busy.
+
+    The catch-up pass is meant for a queue the worker is making progress on, so
+    a pass has to charge its budget for files it removed rather than rows it
+    claimed. A permanently failing path is claimed by every pass, so charging
+    claims would take any pass with such a path to its limit, and the worker
+    would then run file removal every second. That is not just wasted work: each
+    of those passes increments retry_count, so the failing rows would pass
+    vacuum_file_remove_max_retries in minutes instead of the day that default is
+    sized for, and be abandoned.
+    """
+    if installcheck:
+        return
+
+    table = "test_deletion_queue_spin"
+    prefix = f"s3://{TEST_BUCKET}/{TEST_PREFIX}/spin"
+    bad_prefix = f"nosuchfs://{TEST_PREFIX}/spin"
+    good_count = 2
+    bad_count = 3
+    naptime_seconds = 30
+    quiet_seconds = 10
+    deadline_seconds = 90
+
+    good_paths = [f"{prefix}/f{i}.parquet" for i in range(good_count)]
+    bad_paths = [f"{bad_prefix}/f{i}.parquet" for i in range(bad_count)]
+
+    for path in good_paths:
+        bucket, key = parse_s3_path(path)
+        s3.put_object(Bucket=bucket, Key=key, Body=b"x")
+
+    run_command_outside_tx(
+        [
+            # low enough that one pass claims both kinds of row and reaches the
+            # limit if failures are charged for
+            f"ALTER SYSTEM SET pg_lake_table.max_file_removals_per_vacuum TO {good_count + bad_count - 1}",
+            f"ALTER SYSTEM SET pg_lake_iceberg.autovacuum_naptime TO '{naptime_seconds}s'",
+            "SELECT pg_reload_conf()",
+        ]
+    )
+
+    try:
+        run_command(
+            f"CREATE TABLE {table} (id int) USING pg_lake_iceberg "
+            f"WITH (location = 's3://{TEST_BUCKET}/{TEST_PREFIX}/{table}/')",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        _queue_paths(superuser_conn, good_paths + bad_paths, table=table)
+
+        # wait for the worker to run a cycle, which we see by the removable
+        # files going away
+        remaining = good_count
+        deadline = time.monotonic() + deadline_seconds
+
+        while time.monotonic() < deadline:
+            remaining = len(_queued_rows(superuser_conn, prefix))
+            superuser_conn.commit()
+
+            if remaining == 0:
+                break
+
+            time.sleep(0.5)
+
+        assert remaining == 0, (
+            f"{remaining} of {good_count} removable rows still queued after "
+            f"{deadline_seconds}s"
+        )
+
+        def max_retry_count():
+            rows = _queued_rows(superuser_conn, bad_prefix)
+            superuser_conn.commit()
+
+            assert len(rows) == bad_count, (
+                f"{len(rows)} of {bad_count} failing rows left in the queue, "
+                f"so retry_count no longer says how often they were tried"
+            )
+
+            return max(row[1] for row in rows)
+
+        before = max_retry_count()
+
+        # the next cycle is a naptime away, so a worker that is not spinning
+        # leaves the failing rows alone for the whole window
+        time.sleep(quiet_seconds)
+
+        after = max_retry_count()
+
+        assert after - before <= 2, (
+            f"retry_count on the failing rows went {before} -> {after} in "
+            f"{quiet_seconds}s with a {naptime_seconds}s naptime, so the worker "
+            f"kept re-running file removal on a queue it could not drain"
+        )
+    finally:
+        run_command(f"DROP TABLE IF EXISTS {table}", superuser_conn)
+        run_command(
+            f"DELETE FROM lake_engine.deletion_queue WHERE path LIKE '{bad_prefix}%'",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        run_command_outside_tx(
+            [
+                "ALTER SYSTEM RESET pg_lake_table.max_file_removals_per_vacuum",
+                "ALTER SYSTEM RESET pg_lake_iceberg.autovacuum_naptime",
+                "SELECT pg_reload_conf()",
+            ]
+        )
+
+
 def test_autovacuum_drains_a_backlog_without_napping(
     s3, superuser_conn, extension, installcheck
 ):

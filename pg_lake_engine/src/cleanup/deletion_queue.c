@@ -81,7 +81,10 @@ flush_deletion_queue(PG_FUNCTION_ARGS)
 	List	   *deletionQueueRecords = GetDeletionQueueRecords(relationId, isFull,
 															   PER_LOOP_FILE_CLEANUP_LIMIT);
 
-	RemoveDeletionQueueRecords(deletionQueueRecords, isVerbose);
+	/* removes everything it can, so there is no budget to report back on */
+	int		   *filesRemoved = NULL;
+
+	RemoveDeletionQueueRecords(deletionQueueRecords, isVerbose, filesRemoved);
 
 	ListCell   *fileCell = NULL;
 
@@ -101,9 +104,15 @@ flush_deletion_queue(PG_FUNCTION_ARGS)
 /*
  * RemoveDeletionQueueRecords removes all files that are no longer referenced .
  * Returns true if at least one file was successfully removed.
+ *
+ * When filesRemoved is given it reports how many of the records were actually
+ * removed, which is fewer than the number of records whenever a removal failed.
+ * Callers that spend a budget on this count what they removed, not what they
+ * claimed, so paths that can never be removed do not consume the budget over
+ * and over.
  */
 bool
-RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose)
+RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose, int *filesRemoved)
 {
 	List	   *deletedFilePathList = NIL;
 	List	   *failedFilePathList = NIL;
@@ -206,6 +215,11 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose)
 	if (list_length(failedFilePathList) > 0)
 	{
 		IncrementDeletionQueueRetryCount(failedFilePathList);
+	}
+
+	if (filesRemoved != NULL)
+	{
+		*filesRemoved = list_length(deletedFilePathList);
 	}
 
 	/*
@@ -438,9 +452,15 @@ GetDeletionQueueRecords(Oid relationId, bool isFull, int maxRecords)
 
 	if (!isFull)
 	{
+		/*
+		 * Clamp at 0 as well as at the per-pass limit. No caller asks for
+		 * fewer than 0 rows today, but a negative LIMIT is an error rather
+		 * than an empty result, and the callers that compute a remaining
+		 * budget do so in another module.
+		 */
 		appendStringInfo(query,
 						 "    LIMIT %d",
-						 Min(maxRecords, PER_LOOP_FILE_CLEANUP_LIMIT));
+						 Max(Min(maxRecords, PER_LOOP_FILE_CLEANUP_LIMIT), 0));
 	}
 
 	appendStringInfo(query,

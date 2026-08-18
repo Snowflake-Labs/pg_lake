@@ -179,10 +179,6 @@ RemoteFileExists(char *path)
 * pg_lake_remove_file gets a whole vector of file names at a time and, for S3,
 * deletes them in batched DeleteObjects requests (up to 1000 keys each) rather
 * than one request per file.
-*
-* The call goes in WHERE rather than the select list so that we get a single
-* count back instead of a row per file, without DuckDB pruning a projection
-* that nothing reads.
 */
 bool
 DeleteRemotePrefix(char *path)
@@ -194,7 +190,7 @@ DeleteRemotePrefix(char *path)
 	StringInfo	query = makeStringInfo();
 
 	appendStringInfo(query,
-					 "SELECT count(*) FROM glob(%s) WHERE pg_lake_remove_file(file)",
+					 "SELECT pg_lake_remove_file(file) FROM glob(%s)",
 					 quote_literal_cstr(recursivePath->data));
 
 	return ExecuteOptionalCommandInPGDuck(query->data);
@@ -220,7 +216,7 @@ DeleteRemoteFile(char *path)
  * Deleting an arbitrary set of files used to cost one request per file, which
  * made cleanup of a large backlog take as long as the backlog was long. One
  * statement over a VALUES list arrives as a single vector instead, so
- * pg_lake_remove_file can collapse it into one bulk delete against the object
+ * pg_lake_remove_file collapses it into one bulk delete against the object
  * store.
  *
  * Callers are expected to keep a batch within FILE_DELETION_BATCH_SIZE: the
@@ -272,6 +268,11 @@ DeleteRemoteFiles(List *paths)
  * the deletion queue) would eventually retire a whole batch of healthy ones.
  * Removing a file twice is a no-op, so replaying paths the failed batch had
  * already deleted is safe.
+ *
+ * A caller that tracks neither outcome has nothing to tell apart, so it skips
+ * the retry: paying up to FILE_DELETION_BATCH_SIZE individual requests to
+ * produce a verdict nobody reads is the per-file cost this batching exists to
+ * remove.
  */
 void
 DeleteRemoteFileBatch(List *paths, List **deletedPaths, List **failedPaths)
@@ -280,6 +281,12 @@ DeleteRemoteFileBatch(List *paths, List **deletedPaths, List **failedPaths)
 		return;
 
 	bool		batchSucceeded = DeleteRemoteFiles(paths);
+
+	if (deletedPaths == NULL && failedPaths == NULL)
+	{
+		/* no outcome to record, so no reason to find out which path failed */
+		return;
+	}
 
 	ListCell   *pathCell = NULL;
 
