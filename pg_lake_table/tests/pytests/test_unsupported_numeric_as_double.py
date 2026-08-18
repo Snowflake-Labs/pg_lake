@@ -244,10 +244,10 @@ def test_array_unsupported_numeric_converted_to_double(
     pg_conn.rollback()
 
 
-def test_composite_unsupported_numeric_converted_to_double(
+def test_composite_unsupported_numeric_keeps_declared_type(
     s3, pg_conn, extension, with_default_location
 ):
-    """Composite type with unsupported numeric gets a new type with float8 attribute."""
+    """Composite type with unsupported numeric keeps the type the user declared."""
     run_command(
         """
         CREATE TYPE test_conv_comp AS (a int, b numeric);
@@ -261,7 +261,7 @@ def test_composite_unsupported_numeric_converted_to_double(
         "WHERE attrelid = 'test_comp_conv'::regclass AND attname = 'val'",
         pg_conn,
     )
-    assert col_type[0][0] != "test_conv_comp"
+    assert col_type[0][0] == "test_conv_comp"
 
     attr_types = run_query(
         """
@@ -276,15 +276,15 @@ def test_composite_unsupported_numeric_converted_to_double(
     """,
         pg_conn,
     )
-    assert attr_types == [["a", "integer"], ["b", "double precision"]]
+    assert attr_types == [["a", "integer"], ["b", "numeric"]]
 
     pg_conn.rollback()
 
 
-def test_map_unsupported_numeric_converted_to_double(
+def test_map_unsupported_numeric_keeps_declared_type(
     s3, pg_conn, extension, with_default_location
 ):
-    """Map type with unsupported numeric value gets a new map with float8 value."""
+    """Map type with unsupported numeric value keeps the type the user declared."""
     map_type_name = create_map_type("int", "numeric")
     run_command(
         f"CREATE TABLE test_map_conv (id int, vals {map_type_name}) USING iceberg",
@@ -296,8 +296,7 @@ def test_map_unsupported_numeric_converted_to_double(
         "WHERE attrelid = 'test_map_conv'::regclass AND attname = 'vals'",
         pg_conn,
     )
-    assert col_type[0][0] != map_type_name
-    assert "float8" in col_type[0][0] or "double" in col_type[0][0].lower()
+    assert col_type[0][0] == map_type_name
 
     pg_conn.rollback()
 
@@ -410,14 +409,15 @@ def test_insert_and_read_nested_numeric_in_composite(
     pg_conn.rollback()
 
 
-def test_iceberg_metadata_shows_double_for_nested_numeric(
+def test_iceberg_metadata_for_nested_numeric(
     s3, pg_conn, extension, with_default_location
 ):
-    """Iceberg metadata should show 'double' for unsupported numerics in nested types."""
+    """A numeric no Iceberg decimal can hold is stored as double at every level,
+    in an array and in a composite field alike."""
     location = f"s3://{TEST_BUCKET}/test_nested_num_meta"
     run_command(
         f"""
-        CREATE TYPE test_nested_meta_comp AS (a int, b numeric);
+        CREATE TYPE test_nested_meta_comp AS (a int, b numeric, c numeric(45,5));
         CREATE FOREIGN TABLE test_nested_num_meta (
             id int,
             arr numeric[],
@@ -449,8 +449,14 @@ def test_iceberg_metadata_shows_double_for_nested_numeric(
     assert arr_field["type"]["element"] == "double"
     assert comp_field["type"]["type"] == "struct"
 
+    # the field keeps its declared PostgreSQL type, but neither an unbounded
+    # numeric nor one with precision 45 fits an Iceberg decimal, so both are
+    # stored as double
     comp_b = next(f for f in comp_field["type"]["fields"] if f["name"] == "b")
     assert comp_b["type"] == "double"
+
+    comp_c = next(f for f in comp_field["type"]["fields"] if f["name"] == "c")
+    assert comp_c["type"] == "double"
 
     run_command("DROP FOREIGN TABLE test_nested_num_meta", pg_conn)
     pg_conn.commit()
@@ -480,16 +486,10 @@ def test_insert_and_read_nested_numeric_map(
         pg_conn,
     )
 
-    converted_type = run_query(
-        "SELECT format_type(atttypid, atttypmod) FROM pg_attribute "
-        "WHERE attrelid = 'test_num_map_io'::regclass AND attname = 'vals'",
-        pg_conn,
-    )[0][0]
-
     run_command(
         f"""
         INSERT INTO test_num_map_io VALUES
-            (1, ARRAY[(1, 3.14), (2, -999.5)]::{converted_type});
+            (1, ARRAY[(1, 3.14), (2, -999.5)]::{map_type_name});
     """,
         pg_conn,
     )
@@ -504,7 +504,8 @@ def test_insert_and_read_nested_numeric_map(
 def test_iceberg_metadata_shows_double_for_map_numeric(
     s3, pg_conn, extension, with_default_location
 ):
-    """Iceberg metadata should show 'double' for unsupported numeric in map value."""
+    """A numeric map value keeps its declared type and is stored as a double: a
+    pg_map value carries no typmod, so no map value can be an exact decimal."""
     import json
 
     map_type_name = create_map_type("int", "numeric")
@@ -539,10 +540,10 @@ def test_iceberg_metadata_shows_double_for_map_numeric(
     pg_conn.commit()
 
 
-def test_deeply_nested_unsupported_numeric_converted_to_double(
+def test_deeply_nested_unsupported_numeric_keeps_declared_type(
     s3, pg_conn, extension, with_default_location
 ):
-    """Deep nesting: composite containing numeric[] attribute is converted at creation."""
+    """Deep nesting: a composite two levels down keeps every declared type."""
     run_command(
         """
         CREATE TYPE deep_child AS (x int, y numeric);
@@ -552,49 +553,40 @@ def test_deeply_nested_unsupported_numeric_converted_to_double(
         pg_conn,
     )
 
-    col_type_oid = run_query(
-        "SELECT atttypid FROM pg_attribute "
+    col_type = run_query(
+        "SELECT format_type(atttypid, atttypmod) FROM pg_attribute "
         "WHERE attrelid = 'test_deep'::regclass AND attname = 'val'",
         pg_conn,
-    )[0][0]
+    )
+    assert col_type[0][0] == "deep_parent"
 
     outer_attrs = run_query(
-        f"""
+        """
         SELECT a.attname, format_type(a.atttypid, a.atttypmod)
         FROM pg_attribute a
         JOIN pg_type t ON t.typrelid = a.attrelid
-        WHERE t.oid = {col_type_oid} AND a.attnum > 0
+        WHERE t.typname = 'deep_parent' AND a.attnum > 0
         ORDER BY a.attnum
     """,
         pg_conn,
     )
-
-    assert outer_attrs[0][0] == "id"
-    assert outer_attrs[0][1] == "integer"
-    assert outer_attrs[1][0] == "child"
-    assert outer_attrs[2][0] == "nums"
-    assert outer_attrs[2][1] == "double precision[]"
-
-    child_type_oid = run_query(
-        f"""
-        SELECT a.atttypid FROM pg_attribute a
-        JOIN pg_type t ON t.typrelid = a.attrelid
-        WHERE t.oid = {col_type_oid} AND a.attname = 'child'
-    """,
-        pg_conn,
-    )[0][0]
+    assert outer_attrs == [
+        ["id", "integer"],
+        ["child", "deep_child"],
+        ["nums", "numeric[]"],
+    ]
 
     child_attrs = run_query(
-        f"""
+        """
         SELECT a.attname, format_type(a.atttypid, a.atttypmod)
         FROM pg_attribute a
         JOIN pg_type t ON t.typrelid = a.attrelid
-        WHERE t.oid = {child_type_oid} AND a.attnum > 0
+        WHERE t.typname = 'deep_child' AND a.attnum > 0
         ORDER BY a.attnum
     """,
         pg_conn,
     )
-    assert child_attrs == [["x", "integer"], ["y", "double precision"]]
+    assert child_attrs == [["x", "integer"], ["y", "numeric"]]
 
     pg_conn.rollback()
 
@@ -604,10 +596,10 @@ def test_deeply_nested_unsupported_numeric_converted_to_double(
     ["numeric", "numeric(50,10)"],
     ids=["unbounded", "large_precision"],
 )
-def test_composite_with_numeric_array_converted(
+def test_composite_with_numeric_array_keeps_declared_type(
     s3, pg_conn, extension, with_default_location, numeric_type
 ):
-    """Composite containing a numeric[] attribute is converted at creation."""
+    """A numeric[] attribute of a composite keeps its declared type."""
     run_command(
         f"""
         CREATE TYPE comp_numarr AS (a int, b {numeric_type}[]);
@@ -616,23 +608,24 @@ def test_composite_with_numeric_array_converted(
         pg_conn,
     )
 
-    col_type_oid = run_query(
-        "SELECT atttypid FROM pg_attribute "
+    col_type = run_query(
+        "SELECT format_type(atttypid, atttypmod) FROM pg_attribute "
         "WHERE attrelid = 'test_comp_numarr'::regclass AND attname = 'val'",
         pg_conn,
-    )[0][0]
+    )
+    assert col_type[0][0] == "comp_numarr"
 
     attrs = run_query(
-        f"""
+        """
         SELECT a.attname, format_type(a.atttypid, a.atttypmod)
         FROM pg_attribute a
         JOIN pg_type t ON t.typrelid = a.attrelid
-        WHERE t.oid = {col_type_oid} AND a.attnum > 0
+        WHERE t.typname = 'comp_numarr' AND a.attnum > 0
         ORDER BY a.attnum
     """,
         pg_conn,
     )
-    assert attrs == [["a", "integer"], ["b", "double precision[]"]]
+    assert attrs == [["a", "integer"], ["b", f"{numeric_type}[]"]]
 
     pg_conn.rollback()
 
@@ -642,10 +635,10 @@ def test_composite_with_numeric_array_converted(
     ["numeric", "numeric(50,10)"],
     ids=["unbounded", "large_precision"],
 )
-def test_array_of_composite_with_numeric_converted(
+def test_array_of_composite_with_numeric_keeps_declared_type(
     s3, pg_conn, extension, with_default_location, numeric_type
 ):
-    """Array of composite where composite contains unsupported numeric is converted."""
+    """An array of composite keeps its declared type, the shape from issue #540."""
     run_command(
         f"""
         CREATE TYPE comp_in_arr AS (a int, b {numeric_type});
@@ -660,27 +653,19 @@ def test_array_of_composite_with_numeric_converted(
         pg_conn,
     )[0][0]
 
-    assert col_type.endswith("[]")
-
-    elem_type_oid = run_query(
-        "SELECT typelem FROM pg_type WHERE oid = ("
-        "  SELECT atttypid FROM pg_attribute"
-        "  WHERE attrelid = 'test_arr_comp'::regclass AND attname = 'vals'"
-        ")",
-        pg_conn,
-    )[0][0]
+    assert col_type == "comp_in_arr[]"
 
     attrs = run_query(
-        f"""
+        """
         SELECT a.attname, format_type(a.atttypid, a.atttypmod)
         FROM pg_attribute a
         JOIN pg_type t ON t.typrelid = a.attrelid
-        WHERE t.oid = {elem_type_oid} AND a.attnum > 0
+        WHERE t.typname = 'comp_in_arr' AND a.attnum > 0
         ORDER BY a.attnum
     """,
         pg_conn,
     )
-    assert attrs == [["a", "integer"], ["b", "double precision"]]
+    assert attrs == [["a", "integer"], ["b", numeric_type]]
 
     pg_conn.rollback()
 
@@ -690,10 +675,10 @@ def test_array_of_composite_with_numeric_converted(
     ["numeric", "numeric(50,10)"],
     ids=["unbounded", "large_precision"],
 )
-def test_map_with_numeric_array_value_converted(
+def test_map_with_numeric_array_value_keeps_declared_type(
     s3, pg_conn, extension, with_default_location, numeric_type
 ):
-    """Map type whose value is numeric[] gets value converted to float8[]."""
+    """A map whose value is numeric[] keeps the type the user declared."""
     map_type_name = create_map_type("int", f"{numeric_type}[]")
     run_command(
         f"CREATE TABLE test_map_numarr (id int, vals {map_type_name}) USING iceberg",
@@ -705,8 +690,7 @@ def test_map_with_numeric_array_value_converted(
         "WHERE attrelid = 'test_map_numarr'::regclass AND attname = 'vals'",
         pg_conn,
     )
-    assert col_type[0][0] != map_type_name
-    assert "float8" in col_type[0][0] or "double" in col_type[0][0].lower()
+    assert col_type[0][0] == map_type_name
 
     pg_conn.rollback()
 
@@ -714,13 +698,14 @@ def test_map_with_numeric_array_value_converted(
 @pytest.mark.parametrize(
     "key_type, val_type, expect_key, expect_val",
     [
-        ("numeric", "int", "double precision", "integer"),
-        ("numeric", "numeric", "double precision", "double precision"),
-        ("numeric(50,10)", "text", "double precision", "text"),
+        ("numeric", "int", "numeric", "integer"),
+        ("numeric", "numeric", "numeric", "numeric"),
+        # map_type.create takes regtype arguments, so the typmod is not kept
+        ("numeric(50,10)", "text", "numeric", "text"),
     ],
     ids=["key_only", "key_and_value", "large_precision_key"],
 )
-def test_map_key_converted(
+def test_map_key_keeps_declared_type(
     s3,
     pg_conn,
     extension,
@@ -730,7 +715,7 @@ def test_map_key_converted(
     expect_key,
     expect_val,
 ):
-    """Map type with unsupported numeric key gets key (and possibly value) converted."""
+    """A numeric map key keeps the type the user declared, like a map value."""
     map_type_name = create_map_type(key_type, val_type)
     run_command(
         f"CREATE TABLE test_map_key (id int, vals {map_type_name}) USING iceberg",
@@ -757,8 +742,8 @@ def test_map_key_converted(
         pg_conn,
     )
 
-    assert expect_key in attr_types[0][1]
-    assert expect_val in attr_types[1][1]
+    assert attr_types[0][1] == expect_key
+    assert attr_types[1][1] == expect_val
 
     pg_conn.rollback()
 
@@ -785,6 +770,144 @@ def test_guc_off_nested_unsupported_numeric_errors(
 
     error = run_command(create_sql, pg_conn, raise_error=False)
     assert "not supported" in error
+
+    pg_conn.rollback()
+
+
+def test_ctas_array_of_composite_with_numeric(
+    s3, pg_conn, extension, with_default_location
+):
+    """CREATE TABLE AS from a heap table with an array of composite, issue #540."""
+    run_command(
+        """
+        CREATE TYPE accessorial AS (code text, charges numeric);
+        CREATE TABLE heap_shipment (pro_number int, accessorials accessorial[]);
+        INSERT INTO heap_shipment VALUES (1, array[row('LIFT', 25.00)]::accessorial[]);
+        CREATE TABLE ice_shipment USING iceberg AS SELECT * FROM heap_shipment;
+    """,
+        pg_conn,
+    )
+
+    col_type = run_query(
+        "SELECT format_type(atttypid, atttypmod) FROM pg_attribute "
+        "WHERE attrelid = 'ice_shipment'::regclass AND attname = 'accessorials'",
+        pg_conn,
+    )
+    assert col_type[0][0] == "accessorial[]"
+
+    result = run_query(
+        "SELECT pro_number, (accessorials[1]).code, (accessorials[1]).charges "
+        "FROM ice_shipment",
+        pg_conn,
+    )
+    assert result == [[1, "LIFT", Decimal("25.000000000")]]
+
+    pg_conn.rollback()
+
+
+def test_insert_select_array_of_composite_with_numeric(
+    s3, pg_conn, extension, with_default_location
+):
+    """INSERT..SELECT from a heap table with an array of composite, issue #540."""
+    run_command(
+        """
+        CREATE TYPE accessorial AS (code text, charges numeric);
+        CREATE TABLE heap_shipment (pro_number int, accessorials accessorial[]);
+        INSERT INTO heap_shipment VALUES (1, array[row('LIFT', 25.00)]::accessorial[]);
+        CREATE TABLE ice_shipment (pro_number int, accessorials accessorial[])
+            USING iceberg;
+        INSERT INTO ice_shipment SELECT * FROM heap_shipment;
+    """,
+        pg_conn,
+    )
+
+    result = run_query(
+        "SELECT pro_number, (accessorials[1]).charges FROM ice_shipment",
+        pg_conn,
+    )
+    assert result == [[1, Decimal("25.000000000")]]
+
+    pg_conn.rollback()
+
+
+def test_insert_typed_row_array_of_composite_roundtrip(
+    s3, pg_conn, extension, with_default_location
+):
+    """A typed ROW insert into a column of a user-declared composite type: the
+    declared type is still assignable, and the nested numeric round-trips through
+    the double it is stored as, so digits past double precision are lost."""
+    run_command(
+        """
+        CREATE TYPE accessorial AS (code text, charges numeric);
+        CREATE TABLE ice_shipment (pro_number int, accessorials accessorial[])
+            USING iceberg;
+        INSERT INTO ice_shipment VALUES
+            (1, array[row('LIFT', 25.00)]::accessorial[]),
+            (2, array[row('WAIT', 1234567890.123456789)]::accessorial[]);
+    """,
+        pg_conn,
+    )
+
+    result = run_query(
+        "SELECT pro_number, (accessorials[1]).charges FROM ice_shipment "
+        "ORDER BY pro_number",
+        pg_conn,
+    )
+    assert result == [
+        [1, Decimal("25")],
+        [2, Decimal("1234567890.1234567")],
+    ]
+
+    pg_conn.rollback()
+
+
+def test_nested_numeric_accepts_values_no_decimal_can_hold(
+    s3, pg_conn, extension, with_default_location
+):
+    """Storing the nested numeric as a double is what makes NaN, infinity and a
+    magnitude past 38 digits writable and readable: an Iceberg decimal has room
+    for none of them."""
+    run_command(
+        """
+        CREATE TYPE wide_num AS (label text, amount numeric);
+        CREATE TABLE ice_wide (id int, v wide_num) USING iceberg;
+        INSERT INTO ice_wide VALUES
+            (1, row('nan', 'NaN'::numeric)::wide_num),
+            (2, row('inf', 'Infinity'::numeric)::wide_num),
+            (3, row('-inf', '-Infinity'::numeric)::wide_num),
+            (4, row('big', 1e30::numeric)::wide_num),
+            (5, row('frac', 0.1234567890123::numeric)::wide_num);
+    """,
+        pg_conn,
+    )
+
+    result = run_query("SELECT id, (v).amount FROM ice_wide ORDER BY id", pg_conn)
+
+    assert result[0][1].is_nan()
+    assert result[1][1] == Decimal("Infinity")
+    assert result[2][1] == Decimal("-Infinity")
+    assert result[3][1] == Decimal("1E+30")
+    # more than the 9 fractional digits an Iceberg decimal(38,9) would keep
+    assert result[4][1] == Decimal("0.1234567890123")
+
+    pg_conn.rollback()
+
+
+def test_nested_unsupported_numeric_reports_notice(
+    s3, pg_conn, extension, with_default_location
+):
+    """The declared type keeps saying numeric, so CREATE TABLE says what the
+    storage type actually is."""
+    run_command("CREATE TYPE notice_comp AS (a int, b numeric);", pg_conn)
+    pg_conn.commit()
+
+    cursor = pg_conn.cursor()
+    del pg_conn.notices[:]
+    cursor.execute("CREATE TABLE ice_notice (id int, c notice_comp) USING iceberg")
+
+    notices = "\n".join(pg_conn.notices)
+    assert "contains a nested numeric" in notices
+    assert "storing it as double precision" in notices
 
     pg_conn.rollback()
 
@@ -834,7 +957,7 @@ def test_domain_over_numeric_converted_to_double(
             ) AND a.attnum > 0
             ORDER BY a.attnum
             """,
-            [["a", "integer"], ["b", "double precision"]],
+            [["a", "integer"], ["b", "dom_num"]],
         ),
         (
             "CREATE DOMAIN dom_num AS numeric",
@@ -848,10 +971,10 @@ def test_domain_over_numeric_converted_to_double(
     ],
     ids=["domain_in_composite", "domain_array"],
 )
-def test_domain_over_numeric_in_nested_type_converted(
+def test_domain_over_numeric_in_nested_type(
     s3, pg_conn, extension, with_default_location, setup_sql, col_type, query, expected
 ):
-    """Domain over numeric inside composite or as array is converted to float8."""
+    """A domain over numeric follows its container: rewritten in an array, kept in a composite."""
     run_command(setup_sql, pg_conn)
     run_command(
         f"CREATE TABLE test_dom_nested (id int, val {col_type}) USING iceberg",
