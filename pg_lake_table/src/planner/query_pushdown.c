@@ -797,6 +797,33 @@ ProcessNotShippableExpressionWalker(Node *node, IsShippableContext * context)
 	}
 #endif
 
+	/*
+	 * The SQL/JSON expressions that PostgreSQL gained in version 16 are
+	 * deparsed back into their standard SQL/JSON syntax (e.g. "IS JSON
+	 * OBJECT", "JSON_OBJECT('a' : 1)"), which the DuckDB parser does not
+	 * understand at all, so we cannot push them down.
+	 */
+	switch (nodeTag(node))
+	{
+		case T_JsonValueExpr:
+		case T_JsonConstructorExpr:
+		case T_JsonIsPredicate:
+#if PG_VERSION_NUM >= 170000
+		case T_JsonExpr:
+		case T_JsonBehavior:
+#endif
+			{
+				if (context->stopAtFirstNotShippable)
+					return true;
+
+				RecordNotShippableObject(context, InvalidOid, InvalidOid,
+										 NOT_SHIPPABLE_SQL_JSON_EXPRESSION);
+				break;
+			}
+		default:
+			break;
+	}
+
 	if (ExpressionHasNonShippableObject(node, srfAllowed, context))
 	{
 		if (context->stopAtFirstNotShippable)
