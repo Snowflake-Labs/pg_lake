@@ -199,9 +199,20 @@ ManageCache(void)
 
 	Assert(maxCacheSizeBytes >= 0);
 
-	appendStringInfo(&manageCacheCommand,
-					 "CALL pg_lake_manage_cache(" INT64_FORMAT ", %d)",
-					 maxCacheSizeBytes, MinFreeCacheInodes);
+	/*
+	 * Only pass the inode floor when it differs from the default, since the
+	 * default is also what the one-argument form does. That keeps us working
+	 * against a pgduck_server that predates the second argument, where the
+	 * call would otherwise fail on every round and leave the cache unmanaged.
+	 */
+	if (MinFreeCacheInodes == MIN_FREE_CACHE_INODES_DEFAULT)
+		appendStringInfo(&manageCacheCommand,
+						 "CALL pg_lake_manage_cache(" INT64_FORMAT ")",
+						 maxCacheSizeBytes);
+	else
+		appendStringInfo(&manageCacheCommand,
+						 "CALL pg_lake_manage_cache(" INT64_FORMAT ", %d)",
+						 maxCacheSizeBytes, MinFreeCacheInodes);
 
 	volatile	ManageCacheResult manageCacheResult;
 
