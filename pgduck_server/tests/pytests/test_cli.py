@@ -22,7 +22,6 @@ def assert_common_output(
     max_clients=DEFAULT_MAX_CLIENTS,
     memory_limit=DEFAULT_MEMORY_LIMIT,
     max_cache_on_write=DEFAULT_CACHE_ON_WRITE_SIZE,
-    postgres_scan_max_chunk_size_mb=None,
     extension_installation=True,
     debug=False,
 ):
@@ -34,12 +33,6 @@ def assert_common_output(
     assert f"DuckDB is using database file path: {duckdb_database_file_path}" in stderr
     assert f"{memory_limit}" in stderr
     assert f"Cache on write max size is set to: {max_cache_on_write}" in stderr
-
-    scan_chunk_log = "postgres_scan max chunk size is set to:"
-    if postgres_scan_max_chunk_size_mb is None:
-        assert scan_chunk_log not in stderr
-    else:
-        assert f"{scan_chunk_log} {postgres_scan_max_chunk_size_mb}MB" in stderr
 
     if verbose:
         assert "Verbose mode enabled." in stderr
@@ -91,32 +84,6 @@ def test_cache_on_write_large_value():
     )
     assert returncode == 0
     assert_common_output(stderr, max_cache_on_write="10737418240")
-
-
-def test_postgres_scan_max_chunk_size_mb():
-    returncode, stdout, stderr = run_cli_command(
-        ["--postgres_scan_max_chunk_size_mb", "16"]
-    )
-    assert returncode == 0
-    assert_common_output(stderr, postgres_scan_max_chunk_size_mb=16)
-
-
-def test_postgres_scan_max_chunk_size_mb_zero_keeps_scanner_default():
-    # 0 means "do not override", so the server stays quiet about it
-    returncode, stdout, stderr = run_cli_command(
-        ["--postgres_scan_max_chunk_size_mb", "0"]
-    )
-    assert returncode == 0
-    assert_common_output(stderr)
-
-
-@pytest.mark.parametrize("value", ["-1", "1048577", "notanumber"])
-def test_postgres_scan_max_chunk_size_mb_rejects_bad_values(value):
-    returncode, stdout, stderr = run_cli_command(
-        [f"--postgres_scan_max_chunk_size_mb={value}"]
-    )
-    assert returncode != 0
-    assert "postgres_scan_max_chunk_size_mb" in stderr
 
 
 def test_no_extension_installation():

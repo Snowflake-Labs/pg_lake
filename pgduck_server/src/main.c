@@ -71,7 +71,6 @@ main(int argc, char *argv[])
 												   !options.no_extension_install,
 												   options.memory_limit,
 												   options.cache_on_write_max_size,
-												   options.postgres_scan_max_chunk_size_mb,
 												   options.init_file_path);
 
 	if (duckDbStatus != DUCKDB_SUCCESS)

@@ -12,8 +12,9 @@ Scenarios covered:
 - Wide rows do not blow past the Parquet row group size limit (binary & text
   protocol), which requires bounding the scanner's output chunks by size
 - Mixed row widths, the worst case for that limit, stay within 2x of it
-- Arrays of very short strings, where the 128MB default cap is charged 8x less
-  than the writer counts, and lowering the cap to 16MB restores the bound
+- Arrays of very short strings, where the cap is charged 8x fewer bytes than the
+  writer counts, and where the 16MB default is what still holds the row group
+  size the writer was asked for
 """
 
 from decimal import Decimal
@@ -592,20 +593,22 @@ _CHUNK_CAP_BYTES = 1024 * 1024
 
 # The mixed-width table is written at a limit its ~1KB rows divide into unevenly,
 # which is what walks the writer's buffer close to the limit before the first
-# wide chunk arrives.  The cap is set equal to the limit here because that is how
-# production runs: pg_lake asks for 128MB row groups and the patch defaults the
-# cap to 128MB as well.
+# wide chunk arrives.  The cap is set equal to the limit here because that is the
+# loosest a cap can be and still bound anything: it is the setting the 2x figure
+# belongs to.  The default cap is a fraction of the row group size pg_lake asks
+# for, so production sits below this.
 _MIXED_RG_LIMIT_BYTES = 8 * 1024 * 1024
 # A chunk is closed once it has *reached* the cap, so it overruns by at most the
 # last row - the widest row in the mixed table is ~64KB.
 _MIXED_MAX_ROW_BYTES = 128 * 1024
 
-# The two tests above run at 1/16 and 1/32 scale.  The one below runs at the real
-# 128MB, because what it measures is a ratio between the unit the cap is charged
-# in (Postgres bytes) and the unit the writer thresholds on (DuckDB's in-memory
-# size), and only the shipped default puts a number on that.
-_DEFAULT_RG_LIMIT_BYTES = 128 * 1024 * 1024
-_LOWERED_CHUNK_CAP_BYTES = 16 * 1024 * 1024
+# The two tests above run at 1/16 and 1/32 scale.  The one below runs at the row
+# group size pg_lake actually asks for, because what it measures is the ratio
+# between the unit the cap is charged in (Postgres bytes) and the unit the writer
+# thresholds on (DuckDB's in-memory size) - and it is that ratio, against the real
+# row group size, that decides what the default cap has to be.
+_SMALL_STR_RG_LIMIT_BYTES = 128 * 1024 * 1024
+_DEFAULT_CHUNK_CAP_BYTES = 16 * 1024 * 1024
 # DuckDB holds one string_t per array element no matter how short the element is,
 # so this table's in-memory footprint follows from its row count.  Deriving it
 # that way is necessary because parquet_metadata() cannot show it:
@@ -698,11 +701,12 @@ def test_mixed_row_widths_stay_within_twice_the_row_group_limit(
 ):
     """Cap == row group limit bounds a row group at 2x the limit, not more.
 
-    This is the production configuration - pg_lake asks for 128MB row groups and
-    the cap defaults to 128MB - reproduced at 1/16 scale.  A cap equal to the
-    limit cannot do better than 2x, because the writer only tests its threshold
-    after appending a whole chunk: a buffer sitting just under the limit plus one
-    full chunk is the worst case.  Mixed row widths are what reach it.
+    A cap equal to the limit is the loosest setting that still bounds anything,
+    and it cannot do better than 2x: the writer only tests its threshold after
+    appending a whole chunk, so a buffer sitting just under the limit plus one
+    full chunk is the worst case.  Mixed row widths are what reach it.  Run here
+    at 1/16 scale; the shipped default cap is well under the row group size
+    pg_lake asks for, so production is inside this.
     """
     if use_text_protocol:
         perform_query_on_cursor("SET pg_use_text_protocol = true", pgduck_conn)
@@ -761,18 +765,18 @@ def _largest_row_group_mem_bytes(pgduck_conn, path):
     return rows[0][0] * _SMALL_STR_ROW_MEM_BYTES
 
 
-def test_small_string_arrays_overshoot_the_default_cap_until_it_is_lowered(
+def test_default_cap_holds_small_string_arrays_to_the_row_group_limit(
     pg_tables, pgduck_conn, tmp_path
 ):
-    """The 128MB default holds a 128MB row group to 2x only for wide values.
+    """Arrays of one-character strings are why the default cap is not 128MB.
 
-    Arrays of single-character strings are the other end of the range.  The cap
-    is charged 2 bytes for an element the writer will charge 16 bytes for, so a
-    128MB chunk arrives in the writer's buffer as ~1GB and the very first chunk
-    closes a row group 8x over target.  The bound itself still works - it is
-    being charged in the wrong unit - so lowering the cap to 16MB, which is what
-    pgduck_server's --postgres_scan_max_chunk_size_mb is for, brings the same
-    table and the same 128MB target back to ~1x.
+    The cap is charged Postgres bytes; the writer thresholds on DuckDB's
+    in-memory size.  For a one-character element those are 2 bytes and 16 bytes,
+    so a cap set equal to the 128MB row group size pg_lake asks for lets a chunk
+    arrive in the writer's buffer as ~1GB, and the very first chunk closes a row
+    group 8x over.  The bound works, it is just charged in the smaller unit -
+    which is what the 16MB default leaves room for, bringing the same table and
+    the same row group size back to ~1x.
 
     Text protocol is what makes 8x reachable: 2 bytes is the cheapest an element
     can be spelled there.  Binary spends 4 bytes on a length prefix per element
@@ -786,20 +790,14 @@ def test_small_string_arrays_overshoot_the_default_cap_until_it_is_lowered(
     # deterministic single-threaded.  The bound under test is per buffer.
     run_command("SET threads = 1", pgduck_conn)
     try:
-        # Left at the shipped default, i.e. what an operator gets out of the box.
-        assert (
-            run_query(
-                "SELECT current_setting('pg_max_chunk_size_bytes')::BIGINT",
-                pgduck_conn,
-            )[0][0]
-            == _DEFAULT_RG_LIMIT_BYTES
-        )
+        # A cap equal to the row group size, which is what the two tests above
+        # run at and what holds them to 2x.
         groups, _, num_rows = _write_parquet(
             pgduck_conn,
-            tmp_path / "small_str_default_cap.parquet",
+            tmp_path / "small_str_cap_at_limit.parquet",
             "scanner_small_str_array_tbl",
-            None,
-            _DEFAULT_RG_LIMIT_BYTES,
+            _SMALL_STR_RG_LIMIT_BYTES,
+            _SMALL_STR_RG_LIMIT_BYTES,
         )
         assert num_rows == 1200
         # Guard against passing for the wrong reason: the cap does bind here, at
@@ -807,31 +805,38 @@ def test_small_string_arrays_overshoot_the_default_cap_until_it_is_lowered(
         # be one chunk and so one row group, which would clear the assertion
         # below without the cap having done anything.
         assert groups >= 2
-        default_mem = _largest_row_group_mem_bytes(
-            pgduck_conn, tmp_path / "small_str_default_cap.parquet"
+        at_limit_mem = _largest_row_group_mem_bytes(
+            pgduck_conn, tmp_path / "small_str_cap_at_limit.parquet"
         )
         # A chunk is only closed once it has reached the cap, so at 2 wire bytes
         # per 16-byte element this is 8x by construction rather than by luck.
-        assert default_mem >= 8 * _DEFAULT_RG_LIMIT_BYTES
+        assert at_limit_mem >= 8 * _SMALL_STR_RG_LIMIT_BYTES
 
-        # Same table, same 128MB target, cap lowered to 16MB.
+        # Same table, same row group size, cap left at the shipped default.
+        assert (
+            run_query(
+                "SELECT current_setting('pg_max_chunk_size_bytes')::BIGINT",
+                pgduck_conn,
+            )[0][0]
+            == _DEFAULT_CHUNK_CAP_BYTES
+        )
         groups, _, num_rows = _write_parquet(
             pgduck_conn,
-            tmp_path / "small_str_lowered_cap.parquet",
+            tmp_path / "small_str_default_cap.parquet",
             "scanner_small_str_array_tbl",
-            _LOWERED_CHUNK_CAP_BYTES,
-            _DEFAULT_RG_LIMIT_BYTES,
+            None,
+            _SMALL_STR_RG_LIMIT_BYTES,
         )
         assert num_rows == 1200
         assert groups >= 8
-        lowered_mem = _largest_row_group_mem_bytes(
-            pgduck_conn, tmp_path / "small_str_lowered_cap.parquet"
+        default_mem = _largest_row_group_mem_bytes(
+            pgduck_conn, tmp_path / "small_str_default_cap.parquet"
         )
         # 16MB of wire bytes is ~128MB in the buffer, so a chunk now crosses the
-        # target on its own and the row group closes at ~1x instead of at the 2x
-        # a cap equal to the target would allow.
-        assert lowered_mem <= 2 * _DEFAULT_RG_LIMIT_BYTES
-        assert lowered_mem < default_mem / 5
+        # row group size on its own and the group closes at ~1x rather than at
+        # the 2x a cap equal to the row group size would allow.
+        assert default_mem <= 2 * _SMALL_STR_RG_LIMIT_BYTES
+        assert default_mem < at_limit_mem / 5
     finally:
         run_command("RESET threads", pgduck_conn)
         perform_query_on_cursor("SET pg_use_text_protocol = false", pgduck_conn)
@@ -906,7 +911,7 @@ def test_default_chunk_cap_keeps_full_chunks_for_narrow_rows(
 ):
     """The default cap must not shrink chunks for ordinary row widths.
 
-    128MB over 2048 rows is 64KB per row, so anything narrower still fills a
+    16MB over 2048 rows is 8KB per row, so anything narrower still fills a
     whole chunk and the cap costs nothing.  Writing with a 1-byte row group
     limit turns every chunk into its own row group, which is how the chunk
     sizes the scanner produced are read back out of the Parquet footer.
@@ -935,12 +940,13 @@ def test_default_chunk_cap_keeps_full_chunks_for_narrow_rows(
 
 
 def test_default_chunk_cap_value(pgduck_conn):
-    """pg_max_chunk_size_bytes defaults to the 128MB the patch installs.
+    """pg_max_chunk_size_bytes defaults to the 16MB the patch installs.
 
-    That matches pg_lake's own default row group size, so a row group is bounded
-    at 2x the configured size rather than at an unbounded multiple of it.
+    That is an eighth of pg_lake's default row group size, which leaves room for
+    the cap being charged in Postgres bytes while the writer thresholds on its
+    own in-memory size - up to 8x more for arrays of very short strings.
     """
     rows = run_query(
         "SELECT current_setting('pg_max_chunk_size_bytes')::BIGINT", pgduck_conn
     )
-    assert rows[0][0] == 128 * 1024 * 1024
+    assert rows[0][0] == 16 * 1024 * 1024

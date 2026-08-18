@@ -42,17 +42,19 @@ diff --git a/src/include/postgres_scanner.hpp b/src/include/postgres_scanner.hpp
 index 0f9cda7..65b0cc9 100644
 --- a/src/include/postgres_scanner.hpp
 +++ b/src/include/postgres_scanner.hpp
-@@ -21,6 +21,13 @@ class PostgresTransaction;
+@@ -21,6 +21,15 @@ class PostgresTransaction;
  
  struct PostgresBindData : public FunctionData {
  	static constexpr const idx_t DEFAULT_PAGES_PER_TASK = 1000;
 +	//! Default bound on the payload bytes accumulated into one output chunk. A chunk is
 +	//! the smallest unit the Parquet writer downstream can flush a row group at, so a
 +	//! chunk of 2048 wide rows would otherwise overshoot the configured row group size
-+	//! by an unbounded factor. Bounding it at 128MB bounds a row group at its configured
-+	//! size plus one chunk, i.e. 2x the 128MB pg_lake asks for; it also stays far above
-+	//! the row width of any ordinary table, which therefore still yields full chunks.
-+	static constexpr const idx_t DEFAULT_MAX_CHUNK_SIZE_BYTES = 128ULL * 1024 * 1024;
++	//! by an unbounded factor. Bounding it bounds a row group at its configured size plus
++	//! one chunk. The bound is charged in Postgres bytes, which for arrays of very short
++	//! strings can be 8x smaller than the in-memory size the writer thresholds on, so it
++	//! is kept well below a typical row group size rather than equal to one. 16MB over
++	//! 2048 rows is still 8KB per row, so ordinary tables keep yielding full chunks.
++	static constexpr const idx_t DEFAULT_MAX_CHUNK_SIZE_BYTES = 16ULL * 1024 * 1024;
  
  public:
  	PostgresBindData(ClientContext &context);

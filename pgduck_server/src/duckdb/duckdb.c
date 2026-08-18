@@ -228,7 +228,6 @@ duckdb_global_init(char *databaseFilePath,
 				   bool allowExtensionInstall,
 				   char *memoryLimit,
 				   int64_t cacheOnWriteMaxSize,
-				   int postgresScanMaxChunkSizeMB,
 				   char *initFilePath)
 {
 	if (IsDuckDBInitialized)
@@ -454,26 +453,6 @@ duckdb_global_init(char *databaseFilePath,
 	{
 		if (snprintf(setCommand, 1024, "SET GLOBAL preserve_insertion_order TO false") < 0)
 		{
-			return DUCKDB_INITIALIZATION_ERROR;
-		}
-
-		if (run_command_on_duckdb(setCommand) == DuckDBError)
-			return DUCKDB_INITIALIZATION_ERROR;
-	}
-
-	/*
-	 * A scan's output chunk is the smallest unit the Parquet writer can close
-	 * a row group at, so this bound is what keeps a row group of wide values
-	 * from overshooting its target size.  0 leaves the scanner's own default
-	 * in place; a session can still lower it with SET
-	 * pg_max_chunk_size_bytes.
-	 */
-	if (postgresScanMaxChunkSizeMB > 0)
-	{
-		if (snprintf(setCommand, 1024, "SET GLOBAL pg_max_chunk_size_bytes TO %" PRIu64,
-					 (uint64_t) postgresScanMaxChunkSizeMB * 1024 * 1024) < 0)
-		{
-			PGDUCK_SERVER_ERROR("pg_max_chunk_size_bytes value is too long");
 			return DUCKDB_INITIALIZATION_ERROR;
 		}
 
