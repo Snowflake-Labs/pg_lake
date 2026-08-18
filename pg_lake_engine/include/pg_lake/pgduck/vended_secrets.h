@@ -27,16 +27,18 @@
  * (ultimately from the REST catalog loadTable response).
  *
  * endpoint / urlStyle / useSsl carry the catalog-provided S3 connection
- * settings.  Any of them left NULL is filled in from the pre-existing
- * (non-vended) S3 secret that covers the same bucket, so vended secrets
- * keep working against local S3 mocks (Moto/MinIO) and custom endpoints
- * even when the catalog omits them.  Catalog-provided values always win
- * over the inherited fallback.
+ * settings.  Each of them, left NULL, is filled in on its own from the
+ * pre-existing (non-vended) S3 secret that covers the same bucket, so
+ * vended secrets keep working against local S3 mocks (Moto/MinIO) and
+ * custom endpoints even when the catalog states only part of the
+ * connection.  Catalog-provided values always win over the inherited
+ * fallback.
  */
 typedef struct VendedS3Secret
 {
 	Oid			serverOid;		/* iceberg_catalog server OID */
-	const char *secretKey;		/* stable, principal-scoped identity */
+	const char *secretKey;		/* identity the secret's name is derived from;
+								 * see GenerateVendedSecretName */
 	const char *scope;			/* normalized S3 scope (trailing '/') */
 	const char *accessKeyId;
 	const char *secretAccessKey;
@@ -48,36 +50,27 @@ typedef struct VendedS3Secret
 }			VendedS3Secret;
 
 /*
- * PushVendedSecretToPGDuck creates or replaces a DuckDB scoped secret
- * for vended S3 credentials on the shared pgduck_server instance.  The
- * call is mutating on purpose: it issues CREATE OR REPLACE SECRET, so
- * callers should treat this as a write, not a getter.
+ * PushVendedSecretToPGDuckOnConnection creates or replaces a DuckDB
+ * scoped secret for vended S3 credentials on the shared pgduck_server
+ * instance, over a connection the caller already holds.  The call is
+ * mutating on purpose: it issues CREATE OR REPLACE SECRET, so callers
+ * should treat this as a write, not a getter.
  *
  * The secret name is deterministic (see GenerateVendedSecretName).
  * Keeping the name independent of the S3 scope makes CREATE OR REPLACE
- * idempotent as credentials rotate and lets DropVendedSecretFromPGDuck
- * reconstruct the name without the credentials.  The secret's SCOPE is
- * set to secret->scope (the table's storage location) so DuckDB's secret
+ * idempotent as credentials rotate and lets the drop below reconstruct
+ * the name without the credentials.  The secret's SCOPE is set to
+ * secret->scope (what the credential is good for) so DuckDB's secret
  * manager automatically selects it for matching URLs.
- */
-extern PGDLLEXPORT void PushVendedSecretToPGDuck(const VendedS3Secret * secret);
-
-/*
- * PushVendedSecretToPGDuckOnConnection is like PushVendedSecretToPGDuck
- * but sends the CREATE SECRET on an already-open pgduck connection
- * rather than acquiring a fresh one.  Use this when the caller batches
- * several secret operations onto one connection.
  */
 extern PGDLLEXPORT void PushVendedSecretToPGDuckOnConnection(PGDuckConnection * conn,
 															 const VendedS3Secret * secret);
 
 /*
- * DropVendedSecretFromPGDuck removes a previously-created vended secret
- * from DuckDB.  Safe to call even if the secret does not exist.
- * The *OnConnection variant reuses an already-open connection.
+ * DropVendedSecretFromPGDuckOnConnection removes a previously-created
+ * vended secret from DuckDB.  Safe to call even if the secret does not
+ * exist.
  */
-extern PGDLLEXPORT void DropVendedSecretFromPGDuck(Oid serverOid,
-												   const char *secretKey);
 extern PGDLLEXPORT void DropVendedSecretFromPGDuckOnConnection(PGDuckConnection * conn,
 															   Oid serverOid,
 															   const char *secretKey);

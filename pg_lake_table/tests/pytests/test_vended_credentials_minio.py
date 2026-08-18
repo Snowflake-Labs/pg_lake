@@ -801,6 +801,89 @@ def test_minio_vended_secret_dropped_with_read_only_table(
 
 
 @requires_minio
+@pytest.mark.parametrize("vended_config_keys", ["endpoint_only", "endpoint_and_style"])
+def test_minio_catalog_supplied_endpoint_still_reaches_the_store(
+    superuser_conn,
+    pgduck_conn,
+    extension,
+    installcheck,
+    minio_server,
+    vended_config_keys,
+):
+    """A catalog that states its endpoint must still produce a usable secret.
+
+    Stating an endpoint is what an S3-compatible deployment does; stating
+    the addressing style as well is optional, and most catalogs leave it
+    out.  Whatever the catalog does not say has to keep coming from the
+    secret that already serves the prefix, because a vended secret with
+    an endpoint but no URL_STYLE sends DuckDB to ``<bucket>.<host>``,
+    which resolves nowhere.  Only a real scan shows this: the secret is
+    created either way and looks right in ``duckdb_secrets()``.
+    """
+    if installcheck or not _HAVE_PYICEBERG:
+        return
+
+    server = minio_server
+    schema = "mv_endpoint"
+    table = f"vc_ep_{vended_config_keys}"
+
+    meta_loc, location, prefix = _materialize_iceberg_table(server, schema, table, 10)
+
+    server.create_scoped_user(
+        f"mv_meta_ep_{vended_config_keys}",
+        "mv_meta_ep_secret",
+        [f"{prefix}/metadata"],
+        actions=("s3:GetObject", "s3:ListBucket"),
+    )
+    server.create_scoped_user(
+        f"mv_data_ep_{vended_config_keys}", "mv_data_ep_secret", [prefix]
+    )
+
+    vended_config = {
+        "s3.access-key-id": f"mv_data_ep_{vended_config_keys}",
+        "s3.secret-access-key": "mv_data_ep_secret",
+        "client.region": server.region,
+        "s3.endpoint": server.endpoint_url,
+    }
+    if vended_config_keys == "endpoint_and_style":
+        vended_config["s3.path-style-access"] = "true"
+
+    tables = {
+        table: {
+            "metadata_location": meta_loc,
+            "location": location,
+            "vended": {"prefix": location + "/", "config": vended_config},
+        }
+    }
+
+    _create_static_minio_secret(
+        pgduck_conn, server, f"mv_meta_ep_{vended_config_keys}", "mv_meta_ep_secret"
+    )
+    httpd, thread = _serve_mock_catalog(tables, enable_vended=True, conn=superuser_conn)
+
+    try:
+        run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
+        superuser_conn.commit()
+        run_command(
+            f"""CREATE TABLE {schema}.{table} ()
+                USING iceberg
+                WITH (catalog='rest', read_only=True, catalog_table_name='{table}')""",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        result = run_query(f"SELECT count(*) FROM {schema}.{table}", superuser_conn)
+        superuser_conn.commit()
+        assert result[0][0] == 10
+
+    finally:
+        run_command(f"DROP TABLE IF EXISTS {schema}.{table}", superuser_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
+        superuser_conn.commit()
+        _stop_mock_catalog(httpd, thread, conn=superuser_conn)
+
+
+@requires_minio
 def test_minio_data_only_credential_serves_repeated_scans(
     superuser_conn, pgduck_conn, extension, installcheck, minio_server
 ):

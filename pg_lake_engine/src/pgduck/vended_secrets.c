@@ -39,10 +39,11 @@
  * GenerateVendedSecretName produces a deterministic name for a vended
  * secret: pglake_vended_<dbOid>_<serverOid>_<hash(secretKey)>.
  *
- * secretKey is a stable, principal-scoped identity (e.g.
- * "<userMappingOid>/catalog/ns/table"), so the name stays constant as
- * the underlying credentials and their S3 scope rotate, keeping CREATE
- * OR REPLACE SECRET idempotent.  The database OID is included because a
+ * secretKey is a stable identity that names both the principal and what
+ * the credential is good for (e.g.
+ * "<userMappingOid>/catalog/ns/table/<scope>"), so the name stays
+ * constant as the underlying credentials rotate, keeping CREATE OR
+ * REPLACE SECRET idempotent.  The database OID is included because a
  * single pgduck_server is shared by all databases in the cluster, and a
  * 64-bit hash is used so distinct identities do not collide on the
  * shared secret namespace.
@@ -155,17 +156,22 @@ ExtractFieldFromSecretString(const char *secretString, const char *key)
  * is likely this very secret from an earlier push.
  *
  * This is what lets a vended secret reach an S3-compatible store whose
- * catalog does not state an endpoint: without it DuckDB would fall back
- * to real-AWS defaults and the scan would leave the deployment
- * entirely.  It is consulted only in that case -- a catalog that names
- * an endpoint is taken at its word (see PushVendedSecretOnConnection),
- * so credentials are never sent somewhere a secret in a namespace other
- * tenants can write to has pointed us.
+ * catalog states only part of the connection: without it DuckDB falls
+ * back to real-AWS defaults and the scan leaves the deployment
+ * entirely.  What it cannot do is move a credential somewhere the
+ * catalog did not point: the caller keeps every value the catalog
+ * stated, so a secret in a namespace other tenants can write to can
+ * only supply a setting nobody else has.
  */
 static S3InheritedSettings
 LookupInheritedS3Settings(PGDuckConnection * conn, const char *s3Prefix)
 {
 	S3InheritedSettings settings = {0};
+
+	/* Without a prefix there is no secret to inherit from. */
+	if (s3Prefix == NULL || s3Prefix[0] == '\0')
+		return settings;
+
 	char	   *escapedPrefix = EscapeSingleQuotes(s3Prefix);
 	char	   *query =
 		psprintf("SELECT secret_string FROM ("
@@ -290,9 +296,17 @@ BuildCreateSecretSQL(const char *secretName,
  * creates the vended secret on conn.
  *
  * The catalog is the authority on where its own storage lives, so its
- * values are taken as given.  Only when it names no endpoint at all do
- * we look at what is already configured for this prefix -- which also
- * means a catalog that states an endpoint costs no extra round-trip.
+ * values are taken as given.  Each setting is resolved on its own,
+ * though: a catalog that states an endpoint but not an addressing style
+ * is the ordinary case for an S3-compatible store, and dropping the
+ * URL_STYLE that the existing secret carries leaves DuckDB addressing
+ * the bucket as a subdomain of a host that has no such name.
+ *
+ * Inheriting cannot redirect the credentials: an endpoint the catalog
+ * stated is never overwritten, and SSL is already pinned by that
+ * endpoint's scheme, so the fallback only fills in what nobody has
+ * stated.  The query itself is skipped entirely when there is nothing
+ * left to fill in.
  */
 static void
 PushVendedSecretOnConnection(PGDuckConnection * conn,
@@ -303,13 +317,13 @@ PushVendedSecretOnConnection(PGDuckConnection * conn,
 	const char *urlStyle = secret->urlStyle;
 	const char *useSsl = secret->useSsl;
 
-	if (endpoint == NULL)
+	if (endpoint == NULL || urlStyle == NULL || useSsl == NULL)
 	{
 		S3InheritedSettings inherited =
 			LookupInheritedS3Settings(conn, secret->scope);
 
-		endpoint = inherited.endpoint;
-
+		if (endpoint == NULL)
+			endpoint = inherited.endpoint;
 		if (urlStyle == NULL)
 			urlStyle = inherited.urlStyle;
 		if (useSsl == NULL)
@@ -342,23 +356,6 @@ PushVendedSecretOnConnection(PGDuckConnection * conn,
  * relation onto a single connection to keep that cost minimal.)
  */
 void
-PushVendedSecretToPGDuck(const VendedS3Secret * secret)
-{
-	PGDuckConnection *conn = GetPGDuckConnection();
-
-	PG_TRY();
-	{
-		PushVendedSecretToPGDuckOnConnection(conn, secret);
-	}
-	PG_FINALLY();
-	{
-		ReleasePGDuckConnection(conn);
-	}
-	PG_END_TRY();
-}
-
-
-void
 PushVendedSecretToPGDuckOnConnection(PGDuckConnection * conn,
 									 const VendedS3Secret * secret)
 {
@@ -370,23 +367,6 @@ PushVendedSecretToPGDuckOnConnection(PGDuckConnection * conn,
 	PushVendedSecretOnConnection(conn, secretName, secret);
 
 	pfree(secretName);
-}
-
-
-void
-DropVendedSecretFromPGDuck(Oid serverOid, const char *secretKey)
-{
-	PGDuckConnection *conn = GetPGDuckConnection();
-
-	PG_TRY();
-	{
-		DropVendedSecretFromPGDuckOnConnection(conn, serverOid, secretKey);
-	}
-	PG_FINALLY();
-	{
-		ReleasePGDuckConnection(conn);
-	}
-	PG_END_TRY();
 }
 
 
