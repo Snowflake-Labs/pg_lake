@@ -863,8 +863,12 @@ duckdb_session_run_command(DuckDBSession * duckSession, const char *queryString,
 		}
 		else
 		{
+			char		queryForLog[QUERY_LOG_BUF_SIZE];
+
 			PGDUCK_SERVER_WARN("query on duckdb failed: %s; query: %.500s",
-							   duckdbError, queryString);
+							   duckdbError,
+							   QueryStringForLog(queryString, queryForLog,
+												 sizeof(queryForLog)));
 			status = DUCKDB_QUERY_ERROR;
 		}
 
@@ -1036,9 +1040,12 @@ duckdb_session_execute_prepared(DuckDBSession * duckSession,
 		}
 		else
 		{
+			char		queryForLog[QUERY_LOG_BUF_SIZE];
+
 			PGDUCK_SERVER_WARN("could not execute prepared statement: %s; query: %.500s",
 							   duckdbError,
-							   duckSession->clientSession->pgSessionPreparedStmt.queryString);
+							   QueryStringForLog(duckSession->clientSession->pgSessionPreparedStmt.queryString,
+												 queryForLog, sizeof(queryForLog)));
 			status = DUCKDB_QUERY_ERROR;
 		}
 
@@ -1326,9 +1333,12 @@ process_and_send_data_chunks(DuckDBQueryResult * duckdb_query_result,
 				}
 				else
 				{
+					char		queryForLog[QUERY_LOG_BUF_SIZE];
+
 					PGDUCK_SERVER_WARN("query on duckdb failed during execution: %s; query: %.500s",
 									   duckdbError,
-									   clientSession->pgSessionPreparedStmt.queryString);
+									   QueryStringForLog(clientSession->pgSessionPreparedStmt.queryString,
+														 queryForLog, sizeof(queryForLog)));
 					status = DUCKDB_QUERY_ERROR;
 				}
 

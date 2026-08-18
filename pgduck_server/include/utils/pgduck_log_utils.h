@@ -67,4 +67,13 @@ extern bool IsOutputVerbose;
 
 void		iso8601_timestamp(char *buf);
 
+/*
+ * Enough for the verb and the secret's name; the argument list that
+ * follows is what QueryStringForLog leaves out.
+ */
+#define QUERY_LOG_BUF_SIZE 256
+
+const char *QueryStringForLog(const char *queryString, char *buf,
+							  size_t bufSize);
+
 #endif							/* // PG_DUCK_LOG_UTILS_H */
