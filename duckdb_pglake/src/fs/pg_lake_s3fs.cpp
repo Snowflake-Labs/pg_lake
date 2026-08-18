@@ -731,6 +731,11 @@ PgLakeS3FileSystem::List(const string &glob_pattern, bool is_glob, FileOpener *o
 		// Repeat requests until the keys of all common prefixes are parsed.
 		auto common_prefixes = AWSListObjectV2::ParseCommonPrefix(response_str);
 		while (!common_prefixes.empty()) {
+			// ListObjectsV2 is called with encoding-type=url, so the prefixes come back
+			// percent-encoded while AWSListObjectV2::Request encodes the path again.
+			// Decode here or the follow-up request lists a prefix that does not exist,
+			// e.g. a partition directory named "a b" becomes "a%2520b". Upstream does the
+			// same decode for its common prefixes in S3GlobResult.
 			auto prefix_path = S3FileSystem::UrlDecode(
 			    parsed_s3_url.prefix + parsed_s3_url.bucket + '/' + common_prefixes.back());
 			common_prefixes.pop_back();

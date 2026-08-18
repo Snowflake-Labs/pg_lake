@@ -289,6 +289,15 @@ PGLakeCachingFileSystem::Glob(const string &urlPattern, FileOpener *opener)
 	 *
 	 * When the path has glob characters, check whether it refers to an
 	 * actual file first. If it does, return it directly without globbing.
+	 *
+	 * The existence check costs one HEAD, but only for paths that contain glob
+	 * characters: ordinary data file paths return false from HasGlob and go
+	 * straight to the glob below. For the paths that do reach it, the HEAD
+	 * replaces or accompanies a ListObjects call, so it is not the dominant
+	 * cost. We check before globbing rather than only when the glob comes back
+	 * empty so that an existing file always wins over a wildcard expansion of
+	 * its own name, which could otherwise pull in files from sibling
+	 * directories.
 	 */
 	if (HasGlob(url) && remoteFs->FileExists(url, opener))
 	{

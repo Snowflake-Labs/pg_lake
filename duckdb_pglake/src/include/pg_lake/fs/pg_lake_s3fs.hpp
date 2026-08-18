@@ -69,6 +69,19 @@ protected:
 	                                        optional_ptr<FileOpener> opener) override;
 
 private:
+	/*
+	 * Post/PutRequest used to take the FileHandle, which let us cast to
+	 * PgLakeS3FileHandle and read its context. They now take an HTTPInput, which
+	 * has no way back to the ClientContext, so we keep the association here.
+	 *
+	 * It has to be a map rather than a single member because one file system
+	 * serves all sessions: requests from different queries, each with their own
+	 * ClientContext, are in flight at the same time.
+	 *
+	 * Entries are keyed by raw pointer and hold a weak_ptr to the same HTTPInput
+	 * so RegisterContext can tell a live entry from one whose input is gone and
+	 * whose address may since have been reused.
+	 */
 	mutable mutex context_mutex_;
 	struct ContextEntry {
 		weak_ptr<HTTPInput> input_ref;
