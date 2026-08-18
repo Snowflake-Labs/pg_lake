@@ -616,7 +616,13 @@ WithoutTrailingSlash(const string &path)
  * all its files were evicted.
  *
  * rmdir fails when the directory is not empty, which includes the case where a
- * concurrent operation added a file to it, so we simply stop pruning then.
+ * concurrent operation added a file to it, so we simply stop pruning then. The
+ * one window that remains is a concurrent cache write that created its
+ * directory but has not created its staging file in it yet, and therefore loses
+ * the directory under it. Both paths that get there on their own report that as
+ * a file they could not cache and carry on (ADD_FAILED in ManageCache,
+ * cache-on-write in PGLakeCachingFileSystem::OpenFile), and the file becomes a
+ * cache candidate again the next time it is read.
  *
  * The StartsWith check is what keeps us inside the cache directory.
  */
