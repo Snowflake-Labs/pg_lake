@@ -36,6 +36,21 @@
 
 
 /*
+ * Connection settings carried over from the secret that was already
+ * serving this prefix.  A vended secret takes over from it by having a
+ * more specific SCOPE, so anything it does not state itself -- where
+ * the store actually is, above all -- would otherwise revert to
+ * real-AWS defaults and leave the deployment.
+ */
+typedef struct S3InheritedSettings
+{
+	char	   *endpoint;
+	char	   *urlStyle;
+	char	   *useSsl;
+}			S3InheritedSettings;
+
+
+/*
  * GenerateVendedSecretName produces a deterministic name for a vended
  * secret: pglake_vended_<dbOid>_<serverOid>_<hash(secretKey)>.
  *
@@ -85,21 +100,6 @@ EscapeSingleQuotes(const char *input)
 
 	return escaped.data;
 }
-
-
-/*
- * Connection settings carried over from the secret that was already
- * serving this prefix.  A vended secret takes over from it by having a
- * more specific SCOPE, so anything it does not state itself -- where
- * the store actually is, above all -- would otherwise revert to
- * real-AWS defaults and leave the deployment.
- */
-typedef struct S3InheritedSettings
-{
-	char	   *endpoint;
-	char	   *urlStyle;
-	char	   *useSsl;
-}			S3InheritedSettings;
 
 
 /*
