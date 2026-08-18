@@ -475,8 +475,10 @@ TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod)
 	 * An unbounded numeric, or one wider than DuckDB's DECIMAL, has no DuckDB
 	 * type that preserves it.  Iceberg tables convert those columns to float8
 	 * at CREATE TABLE time (see
-	 * MaybeConvertUnsupportedNumericColumnsToDouble), so they only reach here
-	 * on other pg_lake tables.
+	 * MaybeConvertUnsupportedNumericColumnsToDouble), so on Iceberg tables
+	 * they only reach here nested in a composite type or a map, where we keep
+	 * the declared type and store a double.  On other pg_lake tables they stay
+	 * numeric at any level.
 	 */
 	if (typeId == NUMERICOID && IsUnsupportedNumericForIceberg(typeId, typmod))
 	{
