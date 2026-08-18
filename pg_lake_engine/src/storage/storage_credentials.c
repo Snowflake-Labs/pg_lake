@@ -286,6 +286,13 @@ ReconcileSecretsOnConnection(Oid relationId, List *toPush, List *toDrop)
  * same prefix.  Sweeping costs nothing on the common path -- there is
  * usually nothing to sweep, and when there is, the caller already has
  * pgduck work to do.
+ *
+ * The table is backend-local, so this only sweeps what this backend
+ * orphaned: a backend that exits between the DROP and the expiry leaves
+ * its orphan on pgduck_server until that server restarts.  Nothing can
+ * read through it once its credentials lapse, but a table recreated
+ * under the same prefix would be shadowed by it, and would have to be
+ * read from another backend or after a restart.
  */
 static List *
 CollectExpiredOrphans(List *toDrop, TimestampTz now)
@@ -349,7 +356,23 @@ EnsureStorageCredentialsForRelation(Oid relationId)
 	HASH_SEQ_STATUS seq;
 	PushedSecretEntry *entry;
 
+	/*
+	 * InvalidOid is what an orphan records as its relation, so ensuring it
+	 * would treat every orphan as belonging to the caller and hand the same
+	 * entry to the sweep below twice.
+	 */
+	if (!OidIsValid(relationId))
+		return;
+
 	creds = ResolveStorageCredentials(relationId);
+
+	/*
+	 * A backend that has never held a vended secret and is not being given
+	 * one now has nothing to reconcile, and no reason to build the table that
+	 * tracks them.
+	 */
+	if (creds == NIL && PushedSecrets == NULL)
+		return;
 
 	InitPushedSecretsIfNeeded();
 	now = GetCurrentTimestamp();

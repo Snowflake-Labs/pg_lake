@@ -68,10 +68,11 @@
  * "storage-credentials" array can yield several of these per table, so
  * the provider returns a List<StorageCredential *>.
  *
- * secretKey is the stable, principal-scoped identity used to name the
- * pgduck_server secret.  It MUST incorporate the user-mapping OID so two
- * roles that are vended different credentials for the same table do not
- * collide on a single secret.
+ * secretKey is the stable identity used to name the pgduck_server
+ * secret.  It MUST incorporate the user-mapping OID, so that two roles
+ * vended different credentials for the same table do not collide on a
+ * single secret, and the scope, so that two credentials of the same
+ * table do not overwrite each other.
  *
  * The provider must return freshly-allocated copies (not pointers into
  * any credential cache), because the caller may run syscache lookups
@@ -80,8 +81,8 @@
 typedef struct StorageCredential
 {
 	Oid			serverOid;		/* iceberg_catalog server OID */
-	char	   *secretKey;		/* principal-scoped identity, e.g.
-								 * "<umOid>/<catalog>/<ns>/<table>" */
+	char	   *secretKey;		/* identity, e.g.
+								 * "<umOid>/<catalog>/<ns>/<table>/<scope>" */
 	char	   *scopePrefix;	/* normalized S3 scope, trailing '/' */
 	char	   *accessKeyId;
 	char	   *secretAccessKey;
