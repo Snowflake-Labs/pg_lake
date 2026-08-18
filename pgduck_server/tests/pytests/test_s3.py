@@ -245,3 +245,222 @@ def test_s3_get_region_invalid(pgduck_conn):
         "Could not establish connection error" in error
         or "server closed the connection" in error
     )
+
+    # The failed statement above aborts the transaction on this module-scoped
+    # connection; roll back so the following tests start clean.
+    pgduck_conn.rollback()
+
+
+def test_pg_lake_remove_file_glob_recursive(s3, pgduck_conn):
+    """The glob + pg_lake_remove_file form that DeleteRemotePrefix uses deletes
+    every object under a prefix, recursing into sub-prefixes, and leaves objects
+    outside the pattern untouched.
+
+    The call goes in WHERE rather than the select list because DuckDB prunes a
+    projection that nothing reads, and count(*) reads none of it."""
+    prefix = "test_remove_files/tbl"
+
+    keys = [
+        f"{prefix}/metadata/v1.metadata.json",
+        f"{prefix}/metadata/snap.avro",
+        f"{prefix}/data/a.parquet",
+        f"{prefix}/data/nested/b.parquet",
+    ]
+    for key in keys:
+        s3.put_object(Bucket=TEST_BUCKET, Key=key, Body=b"x")
+
+    # a sibling object outside the pattern must survive
+    survivor = "test_remove_files/other/keep.parquet"
+    s3.put_object(Bucket=TEST_BUCKET, Key=survivor, Body=b"x")
+
+    results = perform_query_on_cursor(
+        f"SELECT count(*) FROM glob('s3://{TEST_BUCKET}/{prefix}/**') "
+        "WHERE pg_lake_remove_file(file)",
+        pgduck_conn,
+    )
+    assert results[0][0] == len(keys)
+
+    assert list_objects(s3, TEST_BUCKET, f"{prefix}/") == []
+    assert list_objects(s3, TEST_BUCKET, survivor) == [survivor]
+
+    # cleanup
+    s3.delete_object(Bucket=TEST_BUCKET, Key=survivor)
+    pgduck_conn.rollback()
+
+
+def test_pg_lake_remove_file_glob_batches_over_1000(s3, pgduck_conn):
+    """More than 1000 matched objects must all be deleted: the DeleteObjects
+    request caps at 1000 keys, so this crosses the batch boundary and exercises
+    the multi-batch loop."""
+    prefix = "test_remove_files_batch"
+    count = 1001
+
+    for i in range(count):
+        s3.put_object(Bucket=TEST_BUCKET, Key=f"{prefix}/f{i}.parquet", Body=b"x")
+
+    results = perform_query_on_cursor(
+        f"SELECT count(*) FROM glob('s3://{TEST_BUCKET}/{prefix}/**') "
+        "WHERE pg_lake_remove_file(file)",
+        pgduck_conn,
+    )
+    assert results[0][0] == count
+
+    # nothing left under the prefix (list_objects_v2 caps a page at 1000, so a
+    # non-empty first page would already prove leftovers)
+    assert list_objects(s3, TEST_BUCKET, f"{prefix}/") == []
+
+    pgduck_conn.rollback()
+
+
+def test_pg_lake_remove_file_glob_xml_special_chars(s3, pgduck_conn):
+    """S3 allows '&', '<' and '>' in object keys. Those have to be escaped in the
+    DeleteObjects XML body: unescaped, the body is malformed XML and S3 rejects
+    the whole batch, so a table whose location prefix contains one of them would
+    never be cleaned up."""
+    prefix = "test_remove_files_xml"
+
+    keys = [
+        f"{prefix}/a&b/data.parquet",
+        f"{prefix}/c<d>e/data.parquet",
+        f"{prefix}/plain/data.parquet",
+    ]
+    for key in keys:
+        s3.put_object(Bucket=TEST_BUCKET, Key=key, Body=b"x")
+
+    results = perform_query_on_cursor(
+        f"SELECT count(*) FROM glob('s3://{TEST_BUCKET}/{prefix}/**') "
+        "WHERE pg_lake_remove_file(file)",
+        pgduck_conn,
+    )
+    assert results[0][0] == len(keys)
+
+    assert list_objects(s3, TEST_BUCKET, f"{prefix}/") == []
+
+    pgduck_conn.rollback()
+
+
+def test_pg_lake_remove_file_glob_empty(s3, pgduck_conn):
+    """A prefix with nothing under it is not an error: dropping a table whose
+    files are already gone, or that never wrote any, still has to succeed."""
+    results = perform_query_on_cursor(
+        f"SELECT count(*) FROM glob('s3://{TEST_BUCKET}/test_remove_files_empty/**') "
+        "WHERE pg_lake_remove_file(file)",
+        pgduck_conn,
+    )
+    assert results[0][0] == 0
+
+    pgduck_conn.rollback()
+
+
+def test_pg_lake_remove_file_multiple_rows(s3, pgduck_conn):
+    """pg_lake_remove_file is a scalar function, but DuckDB calls it with a whole
+    vector at a time, so a multi-row statement deletes a set of files that share
+    no common glob -- and the ones that live in the same bucket go out in a single
+    DeleteObjects request rather than one request each."""
+    keys = [
+        "test_remove_file_rows/a/one.parquet",
+        "test_remove_file_rows/b/two.parquet",
+        "test_remove_file_rows/deep/nested/three.parquet",
+        "test_remove_file_rows_elsewhere/four.parquet",
+    ]
+    for key in keys:
+        s3.put_object(Bucket=TEST_BUCKET, Key=key, Body=b"x")
+
+    # a sibling object that no row names must survive
+    survivor = "test_remove_file_rows/a/keep.parquet"
+    s3.put_object(Bucket=TEST_BUCKET, Key=survivor, Body=b"x")
+
+    values = ", ".join(f"('s3://{TEST_BUCKET}/{key}')" for key in keys)
+    results = perform_query_on_cursor(
+        f"SELECT count(*) FROM (VALUES {values}) v(f) WHERE pg_lake_remove_file(f)",
+        pgduck_conn,
+    )
+    assert results[0][0] == len(keys)
+
+    assert list_objects(s3, TEST_BUCKET, "test_remove_file_rows") == [survivor]
+
+    # cleanup
+    s3.delete_object(Bucket=TEST_BUCKET, Key=survivor)
+    pgduck_conn.rollback()
+
+
+def test_pg_lake_remove_file_rows_over_1000(s3, pgduck_conn):
+    """A multi-row pg_lake_remove_file batches at 1000 keys per DeleteObjects
+    request, and DuckDB's vector size is not a multiple of that, so the rows of a
+    single vector can straddle a batch boundary.
+
+    The call sits in WHERE rather than the select list because DuckDB prunes a
+    projection that nothing reads, and count(*) reads none of it."""
+    prefix = "test_remove_file_rows_batch"
+    count = 2500
+
+    for i in range(count):
+        s3.put_object(Bucket=TEST_BUCKET, Key=f"{prefix}/f{i}.parquet", Body=b"x")
+
+    results = perform_query_on_cursor(
+        f"""
+        SELECT count(*) FROM generate_series(0,{count - 1}) t(i)
+        WHERE pg_lake_remove_file('s3://{TEST_BUCKET}/{prefix}/f' || i || '.parquet')
+        """,
+        pgduck_conn,
+    )
+    assert results[0][0] == count
+
+    assert list_objects(s3, TEST_BUCKET, f"{prefix}/") == []
+
+    pgduck_conn.rollback()
+
+
+def test_pg_lake_remove_file_already_gone(s3, pgduck_conn):
+    """Removing a file that is not there is not an error -- a retry after a partly
+    completed cleanup has to be able to finish -- and it must not stop the other
+    files in the same vector from being deleted."""
+    prefix = "test_remove_file_gone"
+
+    present = f"{prefix}/present.parquet"
+    s3.put_object(Bucket=TEST_BUCKET, Key=present, Body=b"x")
+
+    values = ", ".join(
+        f"('s3://{TEST_BUCKET}/{key}')"
+        for key in [f"{prefix}/missing.parquet", present]
+    )
+    perform_query(
+        f"SELECT pg_lake_remove_file(f) FROM (VALUES {values}) v(f)",
+        pgduck_conn,
+    )
+
+    assert list_objects(s3, TEST_BUCKET, f"{prefix}/") == []
+
+    # and again, now that nothing is left
+    perform_query(
+        f"SELECT pg_lake_remove_file('s3://{TEST_BUCKET}/{present}')", pgduck_conn
+    )
+
+    pgduck_conn.rollback()
+
+
+def test_pg_lake_remove_file_azure(azure, pgduck_conn):
+    """Only S3 has a batch delete API, so every other back end takes the fallback
+    that removes one file at a time through the file system the ClientContext hands
+    out. Nothing else covers that branch.
+
+    That file system is an OpenerFileSystem: it pushes its own opener into each
+    call and rejects one from the caller with "OpenerFileSystem cannot take an
+    opener". Since that is an InternalException, getting it wrong does not fail the
+    statement -- it terminates the server, and every later test with it."""
+    prefix = "test_remove_file_azure"
+
+    keys = [f"{prefix}/a.parquet", f"{prefix}/b.parquet"]
+    for key in keys:
+        azure.upload_blob(name=key, data=b"x")
+
+    values = ", ".join(f"('az://{TEST_BUCKET}/{key}')" for key in keys)
+    results = perform_query_on_cursor(
+        f"SELECT count(*) FROM (VALUES {values}) v(f) WHERE pg_lake_remove_file(f)",
+        pgduck_conn,
+    )
+    assert results[0][0] == len(keys)
+
+    assert list(azure.list_blobs(name_starts_with=f"{prefix}/")) == []
+
+    pgduck_conn.rollback()

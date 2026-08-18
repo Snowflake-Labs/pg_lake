@@ -17,6 +17,7 @@
 
 #include "duckdb.hpp"
 
+#include "pg_lake/fs/caching_file_system.hpp"
 #include "pg_lake/fs/file_cache_manager.hpp"
 #include "pg_lake/fs/file_utils.hpp"
 #include "pg_lake/fs/functions.hpp"
@@ -557,16 +558,29 @@ FileSizeScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
 
 /*
  * Implementation of the pg_lake_remove_file scalar function.
+ *
+ * DuckDB hands us a whole vector at a time, so we collect the chunk's paths
+ * first and then remove them in one go. That way a query that deletes a list of
+ * unrelated files -- something a glob cannot express -- still gets the batched
+ * DeleteObjects requests, at up to STANDARD_VECTOR_SIZE files per request round
+ * instead of one request per file.
  */
 static void
 RemoveFileScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &fileNameVector = args.data[0];
+	vector<string> paths;
 
+	paths.reserve(args.size());
+
+	/*
+	 * Collect rather than remove in the lambda: UnaryExecutor gives us NULL
+	 * propagation and constant-vector handling for free, and it is also what
+	 * decides which rows are live.
+	 */
 	UnaryExecutor::Execute<string_t, bool>(
 		fileNameVector, result, args.size(),
 		[&](string_t fileName) {
-			FileSystem &fs = FileSystem::GetFileSystem(state.GetContext());
-			fs.RemoveFile(fileName.GetString());
+			paths.push_back(fileName.GetString());
 
 			/*
 			 * Ideally we would return whether the file existed before removal.
@@ -576,6 +590,8 @@ RemoveFileScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
 			return true;
 		}
 	);
+
+	PGLakeCachingFileSystem::RemoveFiles(state.GetContext(), paths);
 }
 
 
@@ -780,7 +796,6 @@ PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
 
 	    loader.RegisterFunction(pg_lake_list_files);
 	}
-
 
 	/* pg_lake_file_size function definition */
 	{

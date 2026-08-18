@@ -32,6 +32,7 @@
 #include "pg_lake/fs/caching_file_system.hpp"
 #include "pg_lake/fs/file_cache_manager.hpp"
 #include "pg_lake/fs/file_utils.hpp"
+#include "pg_lake/fs/region_aware_s3fs.hpp"
 #include "pg_lake/utils/pgduck_log_utils.h"
 
 namespace duckdb {
@@ -327,6 +328,32 @@ PGLakeCachingFileSystem::ListFiles(const string &directory,
 
 
 /*
+ * RemoveCachedCopy drops the local cache entry for a file that has been removed
+ * from the remote file system.
+ *
+ * Even if the file no longer exists remotely, we always remove from cache,
+ * since we may have failed to do so last time.
+ *
+ * If the file is not cached then this is a noop.
+ */
+static void
+RemoveCachedCopy(ClientContext &context, const string &filename,
+				 optional_ptr<FileOpener> opener)
+{
+	shared_ptr<FileCacheManager> cacheManager = FileCacheManager::Get(context);
+	string cacheDir;
+	string cacheFilePath;
+
+	if (cacheManager->TryGetCacheDir(opener, cacheDir) &&
+		cacheManager->TryGetCacheFilePath(cacheDir, filename, cacheFilePath))
+	{
+		bool waitForLock = true;
+		cacheManager->RemoveCacheFile(context, filename, waitForLock);
+	}
+}
+
+
+/*
  * RemoveFile ensures that a file is also removed from cached after
  * removal from the remote file system.
  */
@@ -335,24 +362,81 @@ PGLakeCachingFileSystem::RemoveFile(const string &filename,
 							  optional_ptr<FileOpener> opener)
 {
 	optional_ptr<ClientContext> context = opener->TryGetClientContext();
-	shared_ptr<FileCacheManager> cacheManager = FileCacheManager::Get(*context);
-	string cacheDir;
-	string cacheFilePath;
 
 	remoteFs->RemoveFile(filename, opener);
 
-	/*
-	 * Even if the file no longer exists, we always remove from cache,
-	 * since we may have failed to do so last time.
-	 *
-	 * If the file is not cached then this is a noop.
-	 */
-	if (cacheManager->TryGetCacheDir(opener, cacheDir) &&
-		cacheManager->TryGetCacheFilePath(cacheDir, filename, cacheFilePath))
+	RemoveCachedCopy(*context, filename, opener);
+}
+
+
+/*
+ * RemoveFiles removes many files, batching the requests where the back end
+ * supports it.
+ *
+ * It is declared static in the class (C++ does not let the definition repeat
+ * that): a caller holding only a ClientContext cannot reach the
+ * PGLakeCachingFileSystem instance registered in the virtual file system, so
+ * this looks up what it needs from the context, as the file system functions in
+ * functions.cpp do.
+ */
+void
+PGLakeCachingFileSystem::RemoveFiles(ClientContext &context, const vector<string> &paths)
+{
+	if (paths.empty())
+		return;
+
+	FileOpener *opener = context.client_data->file_opener.get();
+	DatabaseInstance &db = DatabaseInstance::GetDatabase(context);
+	RegionAwareS3FileSystem s3fs(BufferManager::GetBufferManager(db));
+	FileSystem &virtualFs = FileSystem::GetFileSystem(context);
+
+	vector<string> s3Paths;
+
+	for (const string &path : paths)
 	{
-		bool waitForLock = true;
-		cacheManager->RemoveCacheFile(*context, filename, waitForLock);
+		/*
+		 * Only S3 has a bulk delete API. Everything else -- Azure, HTTP, local
+		 * -- goes through the ordinary per-file RemoveFile, which is one round
+		 * trip each and evicts the cache on the way out. Paths that opt out of
+		 * caching land here too: s3fs does not recognize the prefix, and the
+		 * virtual file system strips it.
+		 *
+		 * No opener here, unlike the s3fs call below: what a ClientContext hands
+		 * out is a ClientContextFileSystem, an OpenerFileSystem, which pushes
+		 * its own opener into every call and rejects one from the caller with
+		 * "OpenerFileSystem cannot take an opener". That is an InternalException,
+		 * which takes the whole server down rather than failing the statement.
+		 */
+		if (s3fs.CanHandleFile(path))
+			s3Paths.push_back(path);
+		else
+			virtualFs.RemoveFile(path);
 	}
+
+	if (s3Paths.empty())
+		return;
+
+	/*
+	 * The batch delete goes straight to S3 rather than through this wrapper, so
+	 * evict the cache entries here instead, both before and after.
+	 *
+	 * Before, because RemoveFiles sends the keys in batches and throws as soon as
+	 * one batch reports an error: evicting only afterwards would leave the
+	 * already-deleted batches holding a local copy, which is the stale cache this
+	 * is meant to prevent. Dropping the copy of a file whose delete then fails
+	 * only costs a re-download.
+	 *
+	 * After, because a concurrent reader can cache the file again in the window
+	 * between the eviction and the delete. Eviction of an uncached file is a
+	 * cheap no-op, so the second pass costs little.
+	 */
+	for (const string &path : s3Paths)
+		RemoveCachedCopy(context, path, opener);
+
+	s3fs.RemoveFiles(s3Paths, opener);
+
+	for (const string &path : s3Paths)
+		RemoveCachedCopy(context, path, opener);
 }
 
 

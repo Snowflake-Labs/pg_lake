@@ -165,6 +165,18 @@ public:
 	bool ShouldCacheOnWrite(CachingFSFileHandle &pg_lakeHandle, int64_t additionalByteCount);
 	void CleanUpCacheOnWriteFile(CachingFSFileHandle &pg_lakeHandle);
 
+	/*
+	 * RemoveFiles is the bulk counterpart of RemoveFile: it removes many files
+	 * in as few round trips as it can -- for S3, batched DeleteObjects requests
+	 * -- and evicts the local cache entry for each of them.
+	 *
+	 * It is static because a caller holding a ClientContext cannot get at the
+	 * PGLakeCachingFileSystem instances registered in the virtual file system;
+	 * it looks up what it needs from the context, as the file system functions
+	 * in functions.cpp do.
+	 */
+	static void RemoveFiles(ClientContext &context, const vector<string> &paths);
+
 	/* Custom overrides */
 	duckdb::unique_ptr<FileHandle> OpenFile(const string &path, FileOpenFlags openFlags,
 	                                        optional_ptr<FileOpener> opener = nullptr) override;

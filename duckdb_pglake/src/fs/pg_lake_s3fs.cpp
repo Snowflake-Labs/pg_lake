@@ -41,6 +41,17 @@ namespace duckdb {
 static constexpr idx_t MD5_HASH_LENGTH_BASE64 = 24;
 
 /*
+ * S3 DeleteObjects accepts at most 1000 keys in a single request.
+ */
+static constexpr idx_t S3_DELETE_OBJECTS_MAX_KEYS = 1000;
+
+/*
+ * A DeleteObjects response can report an error per key, so up to 1000 of them.
+ * Name the first few in the error we throw and only count the rest.
+ */
+static constexpr idx_t S3_DELETE_OBJECTS_MAX_REPORTED_ERRORS = 3;
+
+/*
  * Name of the setting that specifies the location of pg_lake managed storage bucket.
  */
 const string MANAGED_STORAGE_BUCKET_SETTING = "pg_lake_managed_storage_bucket";
@@ -126,8 +137,168 @@ PgLakeS3FileSystem::RemoveFile(const string &filename,
 
 
 /*
- * RemoveFileFromS3 deletes set of keys from a bucket using the batch
- * deletion API and returns the deleted path.
+ * EscapeXmlText escapes a string for use as XML character data. S3 object keys
+ * may contain any UTF-8, including '&' and '<', so a key cannot be pasted into
+ * a request body verbatim: an unescaped '&' makes the whole DeleteObjects body
+ * malformed XML and S3 rejects the batch, and a key holding '<' could otherwise
+ * inject elements and change which objects the request targets.
+ *
+ * Not handled: S3 also allows bytes 0x00-0x1f in a key, and XML 1.0 cannot
+ * represent those at all, not even as a character reference. Such a key makes
+ * the body malformed and so takes its whole batch down with it, where the
+ * one-key-per-request version only failed its own delete.
+ */
+static string
+EscapeXmlText(const string &text)
+{
+	string escaped;
+	escaped.reserve(text.size());
+
+	for (char c : text)
+	{
+		switch (c)
+		{
+			case '&':
+				escaped += "&amp;";
+				break;
+			case '<':
+				escaped += "&lt;";
+				break;
+			case '>':
+				escaped += "&gt;";
+				break;
+			default:
+				escaped += c;
+				break;
+		}
+	}
+
+	return escaped;
+}
+
+
+/*
+ * ExtractXmlElementText returns the character data of the first <tag>...</tag>
+ * in xml, or an empty string if there is none.
+ *
+ * This is not an XML parser: we only use it on the elements of a DeleteResult
+ * body, which S3 generates and which carry no attributes or CDATA sections. The
+ * text comes back as S3 escaped it.
+ */
+static string
+ExtractXmlElementText(const string &xml, const string &tag)
+{
+	string openTag = "<" + tag + ">";
+	string closeTag = "</" + tag + ">";
+
+	size_t textStart = xml.find(openTag);
+
+	if (textStart == string::npos)
+		return string();
+
+	textStart += openTag.size();
+
+	size_t textEnd = xml.find(closeTag, textStart);
+
+	if (textEnd == string::npos)
+		return string();
+
+	return xml.substr(textStart, textEnd - textStart);
+}
+
+
+/*
+ * PostDeleteObjects issues a single S3 DeleteObjects request for the keys in
+ * [begin, end). s3Handle must already be pointed at "<prefix><bucket>/" so the
+ * POST targets /?delete, and every key must live in that bucket. The caller is
+ * responsible for keeping the range within S3_DELETE_OBJECTS_MAX_KEYS.
+ *
+ * Throws on a malformed response or if S3 reports per-key <Error> entries.
+ * Deleting a key that does not exist is not an error in S3, so a well-formed
+ * DeleteResult that still carries an <Error> means a real failure (e.g. access
+ * denied) that we must surface rather than silently dropping keys.
+ *
+ * The response also lists the keys that were deleted, but for a request without
+ * errors that is simply the keys we asked for, and when there are errors we
+ * throw. So we only read the <Error> entries.
+ */
+static void
+PostDeleteObjects(PgLakeS3FileSystem &fs, S3FileHandle *s3Handle,
+				  const vector<string> &keys, idx_t begin, idx_t end)
+{
+	/*
+	 * Following S3FileSystem::FinalizeMultipartUpload
+	 */
+	std::stringstream ss;
+	ss << "<Delete xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">";
+	for (idx_t i = begin; i < end; i++)
+		ss << "<Object><Key>" << EscapeXmlText(keys[i]) << "</Key></Object>";
+	ss << "</Delete>";
+	string body = ss.str();
+
+	/* PostRequest assigns the response body, so it needs no room up front */
+	string responseBuffer;
+
+	/* Perform the batch deletion */
+	unique_ptr<HTTPResponse> postResponse =
+		fs.PostRequest(*s3Handle, s3Handle->path, {}, responseBuffer,
+					   (char *) body.c_str(), body.length(), "delete=");
+
+	/* Body of the POST response */
+	const string &result = responseBuffer;
+
+	if (result.find("<DeleteResult", 0) == string::npos)
+		throw HTTPException(*postResponse,
+							"Unexpected response during S3 DeleteObjects: %d\n\n%s",
+							postResponse->status,
+		                    result);
+
+	/*
+	 * Name the keys that failed and why, instead of handing the caller a body
+	 * that can hold a thousand entries.
+	 */
+	idx_t errorCount = 0;
+	string errorDetails;
+
+	for (size_t errorPos = result.find("<Error>");
+		 errorPos != string::npos;
+		 errorPos = result.find("<Error>", errorPos + 1))
+	{
+		errorCount++;
+
+		if (errorCount > S3_DELETE_OBJECTS_MAX_REPORTED_ERRORS)
+			continue;
+
+		/* limit the search to this entry, in case one of the elements is absent */
+		size_t errorEnd = result.find("</Error>", errorPos);
+		string errorEntry = result.substr(errorPos, errorEnd == string::npos
+												   ? string::npos : errorEnd - errorPos);
+
+		if (!errorDetails.empty())
+			errorDetails += ", ";
+
+		errorDetails += StringUtil::Format("%s: %s (%s)",
+										   ExtractXmlElementText(errorEntry, "Key"),
+										   ExtractXmlElementText(errorEntry, "Code"),
+										   ExtractXmlElementText(errorEntry, "Message"));
+	}
+
+	if (errorCount > 0)
+	{
+		if (errorCount > S3_DELETE_OBJECTS_MAX_REPORTED_ERRORS)
+			errorDetails += StringUtil::Format(", and %llu more",
+											   (uint64_t) (errorCount - S3_DELETE_OBJECTS_MAX_REPORTED_ERRORS));
+
+		throw HTTPException(*postResponse,
+							"S3 DeleteObjects failed for %llu of %llu keys: %s",
+							(uint64_t) errorCount, (uint64_t) (end - begin), errorDetails);
+	}
+}
+
+
+/*
+ * RemoveFileFromS3 deletes a single key from a bucket using the batch
+ * deletion API.
  */
 void
 PgLakeS3FileSystem::RemoveFileFromS3(string path, optional_ptr<FileOpener> opener)
@@ -142,19 +313,8 @@ PgLakeS3FileSystem::RemoveFileFromS3(string path, optional_ptr<FileOpener> opene
 
 	/* get the s3://<bucket name> */
 	string bucketUrl = parsedUrl.prefix + parsedUrl.bucket;
-	string key = parsedUrl.key;
 
-	/*
-	 * Following S3FileSystem::FinalizeMultipartUpload
-	 */
-	std::stringstream ss;
-	ss << "<Delete xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">";
-	ss << "<Object><Key>" << key << "</Key></Object>";
-	ss << "</Delete>";
-	string body = ss.str();
-
-	/* Initialize buffer at 1000 characters (will get resized if needed) */
-	string responseBuffer(1000, '\0');
+	vector<string> keys = {parsedUrl.key};
 
 	/*
 	 * Open the file via the regular (region-aware) file system.
@@ -181,19 +341,7 @@ PgLakeS3FileSystem::RemoveFileFromS3(string path, optional_ptr<FileOpener> opene
 	/* Change the file handle to / to POST to /?delete */
 	s3Handle->path = bucketUrl + "/";
 
-	/* Perform the "batch" deletion */
-	unique_ptr<HTTPResponse> postResponse =
-		PostRequest(*s3Handle, s3Handle->path, {}, responseBuffer,
-		            (char *) body.c_str(), body.length(), "delete=");
-
-	/* Construct body of the POST response */
-	string result(responseBuffer);
-
-	if (result.find("<DeleteResult", 0) == string::npos)
-		throw HTTPException(*postResponse,
-							"Unexpected response during S3 DeleteObjects: %d\n\n%s",
-							postResponse->status,
-		                    result);
+	PostDeleteObjects(*this, s3Handle, keys, 0, keys.size());
 
 	/*
 	 * Remove the file from HTTP metadata cache now that it has been deleted.
@@ -206,6 +354,120 @@ PgLakeS3FileSystem::RemoveFileFromS3(string path, optional_ptr<FileOpener> opene
 	 */
 	optional_ptr<HTTPMetadataCache> metadataCache = GetGlobalCache();
 	metadataCache->Erase(regionResolvedPath);
+}
+
+
+/*
+ * RemoveFilesFromS3 deletes many keys using the S3 DeleteObjects batch API,
+ * sending up to S3_DELETE_OBJECTS_MAX_KEYS keys per request instead of one key
+ * per request. It is the bulk counterpart of RemoveFileFromS3 and is meant for
+ * removing a whole prefix's worth of objects (e.g. a dropped Iceberg table).
+ *
+ * The request goes to bucketUrl, which is the only URL involved: the keys
+ * travel in the request body. So bucketUrl is the one that has to carry the
+ * query arguments the request needs, region included, and the paths can be
+ * plain s3:// URLs. RegionAwareS3FileSystem::RemoveFiles groups them by bucket
+ * and resolves the region.
+ */
+void
+PgLakeS3FileSystem::RemoveFilesFromS3(const string &bucketUrl,
+									  const vector<string> &paths,
+									  optional_ptr<FileOpener> opener)
+{
+	if (paths.empty())
+		return;
+
+	optional_ptr<HTTPMetadataCache> metadataCache = GetGlobalCache();
+
+	/*
+	 * Read the auth parameters once instead of per path: ReadFrom does a dozen
+	 * secret manager and setting lookups, all paths are in the same bucket, and
+	 * the only field the bucket/key split reads is s3_url_compatibility_mode.
+	 */
+	FileOpenerInfo s3UrlInfo = {bucketUrl};
+	S3AuthParams authParams = S3AuthParams::ReadFrom(opener, s3UrlInfo);
+
+	ParsedS3Url parsedBucketUrl = S3UrlParse(bucketUrl, authParams);
+	string bareBucketUrl = parsedBucketUrl.prefix + parsedBucketUrl.bucket;
+
+	vector<string> keys;
+
+	keys.reserve(paths.size());
+
+	for (const string &path : paths)
+	{
+		ParsedS3Url parsedUrl = S3UrlParse(path, authParams);
+
+		if (parsedUrl.prefix + parsedUrl.bucket != bareBucketUrl)
+			throw InternalException("cannot delete %s in a DeleteObjects request for %s",
+									path, bareBucketUrl);
+
+		keys.push_back(parsedUrl.key);
+	}
+
+	/*
+	 * Build one POST-capable handle and reuse it for every batch. It comes from
+	 * the bucket URL, which is where the request goes and which carries the
+	 * region the caller resolved.
+	 *
+	 * CreateHandle rather than OpenFile: we only need the auth and HTTP
+	 * parameters, and OpenFile would additionally HEAD the URL, which costs a
+	 * round trip and, on a bucket URL, has nothing to report anyway.
+	 */
+	unique_ptr<HTTPFileHandle> fileHandle =
+		CreateHandle(bucketUrl, FileFlags::FILE_FLAGS_READ, opener);
+
+	S3FileHandle *s3Handle = (S3FileHandle *) fileHandle.get();
+
+	/*
+	 * Point the handle at / to POST to /?delete. The query arguments can come
+	 * off here: PostRequest signs with the handle's auth parameters, which
+	 * CreateHandle already read them into.
+	 */
+	s3Handle->path = bareBucketUrl + "/";
+
+	/*
+	 * Best-effort HTTP metadata cache hygiene, as in RemoveFileFromS3: drop any
+	 * cached entry for the deleted objects so a stale entry cannot make a
+	 * removed file look readable. Reads inject ?s3_region from cache, so evict
+	 * both the bare URL and the region-resolved form, which is the bucket URL's
+	 * query string on the key.
+	 */
+	string querySuffix;
+	auto queryPos = bucketUrl.find('?');
+	if (queryPos != string::npos)
+		querySuffix = bucketUrl.substr(queryPos);
+
+	auto evictBatch = [&](idx_t begin, idx_t end) {
+		for (idx_t i = begin; i < end; i++)
+		{
+			string fullUrl = bareBucketUrl + "/" + keys[i];
+
+			metadataCache->Erase(fullUrl);
+			if (!querySuffix.empty())
+				metadataCache->Erase(fullUrl + querySuffix);
+		}
+	};
+
+	for (idx_t begin = 0; begin < keys.size(); begin += S3_DELETE_OBJECTS_MAX_KEYS)
+	{
+		idx_t end = MinValue(begin + S3_DELETE_OBJECTS_MAX_KEYS, keys.size());
+
+		/*
+		 * Evict per batch rather than once at the end, and both before and after
+		 * the request, for the same reasons the file cache does it in
+		 * PGLakeCachingFileSystem::RemoveFiles: PostDeleteObjects throws when S3
+		 * reports a per-key error, and the keys it did delete are gone whether or
+		 * not we get to the second eviction; a concurrent reader can also cache
+		 * an entry again in the window between the eviction and the delete.
+		 * Evicting an entry for a file that is still there only costs a HEAD.
+		 */
+		evictBatch(begin, end);
+
+		PostDeleteObjects(*this, s3Handle, keys, begin, end);
+
+		evictBatch(begin, end);
+	}
 }
 
 /*

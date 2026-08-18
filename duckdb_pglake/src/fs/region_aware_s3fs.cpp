@@ -231,8 +231,8 @@ RegionAwareS3FileSystem::OpenFile(const string &url,
  * Same shape as the old OpenFile: try once (with cached region or bare URL),
  * and if the error looks like a region mismatch, look up the actual region
  * and retry. All region-aware entry points (OpenFile, FileExists,
- * DirectoryExists, RemoveFile) go through here so the retry + cache logic
- * lives in one place.
+ * DirectoryExists, RemoveFile, RemoveFiles) go through here so the retry +
+ * cache logic lives in one place.
  */
 void
 RegionAwareS3FileSystem::WithResolvedRegion(const string &url,
@@ -598,6 +598,55 @@ RegionAwareS3FileSystem::GetBucketRegionFromS3(const string &url, optional_ptr<F
 		return string();
 
 	return response->headers.GetHeaderValue("x-amz-bucket-region");
+}
+
+
+/*
+ * RemoveFiles deletes many files, using a batched DeleteObjects request per
+ * bucket instead of one request per file.
+ */
+void
+RegionAwareS3FileSystem::RemoveFiles(const vector<string> &paths,
+									 optional_ptr<FileOpener> opener)
+{
+	/*
+	 * DeleteObjects targets one bucket at a time, and the region is a property
+	 * of the bucket, so group the paths by bucket URL.
+	 *
+	 * WithResolvedRegion adds s3_region and s3_endpoint, so we skip it for URLs
+	 * that set either one explicitly, and for anything that is not S3, and use
+	 * the simpler single-file path.
+	 */
+	map<string, vector<string>> pathsByBucket;
+
+	for (const string &path : paths)
+	{
+		if (!StringUtil::StartsWith(path, "s3://") ||
+			UrlHasQueryArgument(path, "s3_region") ||
+			UrlHasQueryArgument(path, "s3_endpoint"))
+		{
+			RemoveFile(path, opener);
+			continue;
+		}
+
+		pathsByBucket[GetBucketUrl(path, opener)].push_back(path);
+	}
+
+	/*
+	 * The keys travel in the body of the POST to <bucket>/?delete, so the bucket
+	 * URL is the only one we make a request to and the only one that needs a
+	 * region. Resolve it the way every other entry point does: it gets the
+	 * cached region, and a mismatch refreshes the region and retries the batch.
+	 */
+	for (auto &bucket : pathsByBucket)
+	{
+		const vector<string> &bucketPaths = bucket.second;
+
+		WithResolvedRegion(bucket.first + "/", opener,
+						   [&](const string &resolvedBucketUrl) {
+							   s3fs.RemoveFilesFromS3(resolvedBucketUrl, bucketPaths, opener);
+						   });
+	}
 }
 
 } // namespace duckdb

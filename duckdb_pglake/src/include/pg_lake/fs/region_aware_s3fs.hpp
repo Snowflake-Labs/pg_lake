@@ -64,6 +64,14 @@ public:
 	vector<OpenFileInfo> List(const string &globPattern, bool isGlob, FileOpener *opener);
 
 	/*
+	 * RemoveFiles deletes many files in as few requests as possible: for S3 it
+	 * batches keys into DeleteObjects requests (up to 1000 keys each), resolving
+	 * the region once per bucket. Paths that carry their own region or endpoint,
+	 * and non-S3 paths, fall back to per-file RemoveFile.
+	 */
+	void RemoveFiles(const vector<string> &paths, optional_ptr<FileOpener> opener);
+
+	/*
 	 * Resolve the region for url (cache or S3 headers), then call s3Operation
 	 * with the region-adjusted URL. If s3Operation throws a 400/301 that
 	 * looks like a region mismatch, look up the actual region and retry
