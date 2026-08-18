@@ -1124,8 +1124,14 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize,
 	 * Report inode pressure separately, since it is an unusual situation that
 	 * operators may need to act on (e.g. by giving the cache its own volume, or
 	 * a file system with dynamically allocated inodes).
+	 *
+	 * Pressure lasts until somebody fixes it, and we run every few seconds, so
+	 * we report the rounds that say something new: the start of an episode, the
+	 * rounds in which we evicted or skipped something, and the recovery. A
+	 * round that finds the same pressure and can do nothing about it is silent.
 	 */
-	if (inodePressure)
+	if (inodePressure && (!wasLowOnInodes || inodesFreed > 0 ||
+						  skippedInodePressure > 0))
 	{
 		/*
 		 * Ask the file system again rather than reporting our own bookkeeping,
@@ -1159,6 +1165,18 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize,
 						  ", cache files alone cannot free enough inodes so "
 						  "nothing was added" : "");
 	}
+	else if (wasLowOnInodes && !inodePressure && inodeFloor > 0)
+	{
+		PGDUCK_SERVER_LOG("cache directory %s is no longer low on inodes: %"
+						  PRIu64 "/%" PRIu64 " available, keeping %" PRIu64
+						  " available",
+						  cacheDir.c_str(),
+						  (uint64_t) freeInodes,
+						  (uint64_t) totalInodes,
+						  (uint64_t) inodeFloor);
+	}
+
+	wasLowOnInodes = inodePressure;
 
 	return actions;
 }

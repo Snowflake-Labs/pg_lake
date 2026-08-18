@@ -289,6 +289,14 @@ private:
 	*/
 	mutex manageCacheLock;
 
+	/*
+	 * Whether the previous ManageCache call found the cache file system low on
+	 * inodes, so that we can report the start and the end of an episode instead
+	 * of repeating the same message on every round. Only accessed while holding
+	 * manageCacheLock.
+	 */
+	bool wasLowOnInodes = false;
+
 	shared_ptr<FileCacheActivity> GetFileCacheActivity(const string& path);
 	unique_lock<mutex> TryAcquireCachePathLock(const string& path, bool waitForLock, bool &acquired);
 
