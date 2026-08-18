@@ -73,7 +73,8 @@ static char *AppendIcebergPartitionSpecForRestCatalog(List *partitionSpecs);
  * credentials to different principals: without it, a backend that
  * changes role mid-session would serve one principal's credentials under
  * the other's name.  The identity hash is 64-bit, matching the secret
- * name, so distinct tables do not collide.
+ * name; the entry also keeps the identity it was taken of, so a
+ * collision is a miss rather than the wrong table's credentials.
  *
  * Entries expire based on the REST catalog's credential TTL.  The cache
  * is invalidated on ALTER/DROP SERVER alongside the token cache.
@@ -88,6 +89,7 @@ typedef struct VendedCredentialsCacheKey
 typedef struct VendedCredentialsCacheEntry
 {
 	VendedCredentialsCacheKey key;	/* hash key */
+	char	   *identity;		/* what identityHash was taken of */
 	List	   *credentials;	/* one per vended scope */
 	TimestampTz expiryTime;		/* earliest expiry across the list */
 }			VendedCredentialsCacheEntry;
@@ -117,11 +119,12 @@ static List *LookupVendedCredentialsInCache(Oid serverOid,
 											const char *restCatalogName,
 											const char *namespaceName,
 											const char *tableName);
+static char *BuildVendedCredentialsIdentity(const char *restCatalogName,
+											const char *namespaceName,
+											const char *tableName);
 static VendedCredentialsCacheKey BuildVendedCredentialsCacheKey(Oid serverOid,
 																Oid userMappingOid,
-																const char *restCatalogName,
-																const char *namespaceName,
-																const char *tableName);
+																const char *identity);
 
 
 /*
@@ -504,14 +507,25 @@ FreeCachedVendedCredentialsList(List *credentials)
 }
 
 
-static VendedCredentialsCacheKey
-BuildVendedCredentialsCacheKey(Oid serverOid, Oid userMappingOid,
-							   const char *restCatalogName,
+/*
+ * BuildVendedCredentialsIdentity names the table a credential belongs
+ * to.  Kept whole in the entry as well as hashed into the key, because
+ * a hash alone cannot tell a hit from a collision, and the price of
+ * getting that wrong is serving one table's credentials for another.
+ */
+static char *
+BuildVendedCredentialsIdentity(const char *restCatalogName,
 							   const char *namespaceName,
 							   const char *tableName)
 {
-	char	   *identity = psprintf("%s/%s/%s", restCatalogName,
-									namespaceName, tableName);
+	return psprintf("%s/%s/%s", restCatalogName, namespaceName, tableName);
+}
+
+
+static VendedCredentialsCacheKey
+BuildVendedCredentialsCacheKey(Oid serverOid, Oid userMappingOid,
+							   const char *identity)
+{
 	VendedCredentialsCacheKey cacheKey;
 
 	/* Zero the padding too: the whole struct is hashed as the key. */
@@ -521,8 +535,6 @@ BuildVendedCredentialsCacheKey(Oid serverOid, Oid userMappingOid,
 	cacheKey.identityHash =
 		hash_bytes_extended((const unsigned char *) identity,
 							strlen(identity), 0);
-
-	pfree(identity);
 
 	return cacheKey;
 }
@@ -547,12 +559,23 @@ StoreVendedCredentialsInCache(List *credentials,
 		return;
 
 	VendedCredentials *first = linitial(credentials);
+	char	   *identity = BuildVendedCredentialsIdentity(restCatalogName,
+														  namespaceName,
+														  relationName);
 	VendedCredentialsCacheKey cacheKey =
 		BuildVendedCredentialsCacheKey(first->serverOid, userMappingOid,
-									   restCatalogName, namespaceName,
-									   relationName);
+									   identity);
 
 	InitVendedCredsCacheIfNeeded();
+
+	/*
+	 * Own the identity before the entry can reference it, so a failure to
+	 * allocate it cannot leave a live entry pointing at freed memory.
+	 */
+	char	   *ownedIdentity = MemoryContextStrdup(VendedCredsCacheCtx,
+													identity);
+
+	pfree(identity);
 
 	bool		found = false;
 	VendedCredentialsCacheEntry *entry =
@@ -566,9 +589,21 @@ StoreVendedCredentialsInCache(List *credentials,
 	 */
 	if (!found)
 	{
+		entry->identity = NULL;
 		entry->credentials = NIL;
 		entry->expiryTime = 0;
 	}
+
+	/*
+	 * On the vanishing chance that another table hashed to this key, take the
+	 * entry over rather than append to it: the lookup compares identities, so
+	 * the table left without a cached entry re-fetches instead of being
+	 * served these credentials.
+	 */
+	if (entry->identity != NULL)
+		pfree(entry->identity);
+
+	entry->identity = ownedIdentity;
 
 	MemoryContext oldCtx = MemoryContextSwitchTo(VendedCredsCacheCtx);
 	List	   *cachedList = NIL;
@@ -1076,10 +1111,12 @@ LookupVendedCredentialsInCache(Oid serverOid,
 							   const char *namespaceName,
 							   const char *tableName)
 {
+	char	   *identity = BuildVendedCredentialsIdentity(restCatalogName,
+														  namespaceName,
+														  tableName);
 	VendedCredentialsCacheKey cacheKey =
-		BuildVendedCredentialsCacheKey(serverOid, userMappingOid,
-									   restCatalogName, namespaceName,
-									   tableName);
+		BuildVendedCredentialsCacheKey(serverOid, userMappingOid, identity);
+	bool		mine;
 
 	InitVendedCredsCacheIfNeeded();
 
@@ -1087,7 +1124,17 @@ LookupVendedCredentialsInCache(Oid serverOid,
 	VendedCredentialsCacheEntry *entry =
 		hash_search(VendedCredsCache, &cacheKey, HASH_FIND, &found);
 
-	if (!found || entry->credentials == NIL)
+	mine = found && entry->identity != NULL &&
+		strcmp(entry->identity, identity) == 0;
+
+	pfree(identity);
+
+	/*
+	 * Anything but our own entry is a miss.  Two tables whose identities hash
+	 * alike would otherwise be served each other's credentials, which a fresh
+	 * loadTable is a cheap price to avoid.
+	 */
+	if (!mine || entry->credentials == NIL)
 		return NIL;
 
 	TimestampTz now = GetCurrentTimestamp();
@@ -1098,11 +1145,13 @@ LookupVendedCredentialsInCache(Oid serverOid,
 		/*
 		 * Evict the stale entry so a fresh loadTable can repopulate it and
 		 * the cache does not grow with dead entries in long-lived backends.
-		 * Removing the entry only recycles the entry itself, so release the
-		 * credentials it owns first.
+		 * Removing the entry only recycles the entry itself, so release what
+		 * it owns first.
 		 */
 		FreeCachedVendedCredentialsList(entry->credentials);
 		entry->credentials = NIL;
+		pfree(entry->identity);
+		entry->identity = NULL;
 		hash_search(VendedCredsCache, &cacheKey, HASH_REMOVE, NULL);
 		return NIL;
 	}
