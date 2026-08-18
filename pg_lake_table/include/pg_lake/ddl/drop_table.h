@@ -21,9 +21,11 @@
 
 extern bool SkipDropAccessHook;
 extern bool DeferDropFileCleanup;
+extern bool FastDropFileCleanup;
 
 extern void InitializeDropTableHandler(void);
 extern PGDLLEXPORT bool CheckIfTypeIsUsedInTables(Oid typeId, const char *tableSetSubquery);
 extern bool CheckIfTypeIsUsedInInternalIcebergTable(Oid typeId);
 extern bool ProcessDropPgLakeTable(ProcessUtilityParams * params, void *arg);
 extern void TryMarkAllReferencedFilesForDeletion(Oid relationId);
+extern bool TryMarkTablePrefixForDeletion(Oid relationId);

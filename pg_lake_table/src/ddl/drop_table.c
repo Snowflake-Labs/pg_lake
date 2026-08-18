@@ -73,6 +73,15 @@ bool		SkipDropAccessHook = false;
  */
 bool		DeferDropFileCleanup = false;
 
+/*
+ * pg_lake_table.fast_drop_file_cleanup GUC. When set, dropping a writable,
+ * default-location Iceberg table queues its whole location prefix for VACUUM
+ * to remove instead of reading Iceberg metadata to enumerate files.
+ * Custom-location tables fall back to per-file cleanup; see
+ * TryMarkTablePrefixForDeletion.
+ */
+bool		FastDropFileCleanup = false;
+
 #define INTERNAL_ICEBERG_TABLES_SUBQUERY \
 	"SELECT c.oid AS relid " \
 	"FROM lake_iceberg.tables_internal tbl " \
@@ -455,6 +464,31 @@ CheckIfTypeIsUsedInInternalIcebergTable(Oid typeId)
 		return false;
 
 	return CheckIfTypeIsUsedInTables(typeId, INTERNAL_ICEBERG_TABLES_SUBQUERY);
+}
+
+
+/*
+* TryMarkTablePrefixForDeletion queues the table's whole location prefix for
+* deletion, skipping the metadata.json -> manifest list -> manifest -> data
+* file walk that dominates the cost of dropping a table with many files.
+*
+* Managed tables live under a unique per-table prefix
+* (.../<table>/<relationId>), so deleting the prefix is exact. A custom
+* location may be shared with other tables, so we decline it and leave the
+* caller to fall back to per-file cleanup.
+*/
+bool
+TryMarkTablePrefixForDeletion(Oid relationId)
+{
+	if (HasCustomLocation(relationId))
+		return false;
+
+	char	   *queryArguments = "";
+	char	   *tableLocation = GetWritableTableLocation(relationId, &queryArguments);
+
+	InsertPrefixDeletionRecord(tableLocation, GetCurrentTransactionStartTimestamp());
+
+	return true;
 }
 
 

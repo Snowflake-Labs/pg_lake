@@ -1,3 +1,5 @@
+import time
+
 import pytest
 from utils_pytest import *
 
@@ -1074,6 +1076,194 @@ def test_custom_location_is_also_deferred(
 
     run_command("DROP SCHEMA IF EXISTS defer_drop_custom CASCADE", pg_conn)
     pg_conn.commit()
+
+
+FAST_GUC = "pg_lake_table.fast_drop_file_cleanup"
+
+
+def _drop_fast(conn, drop_sql, commit=True):
+    """Run drop_sql with fast file cleanup enabled. SET LOCAL scopes the GUC to
+    this transaction, so it never leaks to later tests."""
+    run_command(f"SET LOCAL {FAST_GUC} = on", conn)
+    run_command(drop_sql, conn)
+    if commit:
+        conn.commit()
+
+
+def test_fast_drop_queues_prefix(
+    s3, pg_conn, superuser_conn, extension, with_default_location
+):
+    """Dropping a default-location table queues one is_prefix row for the whole
+    location, with no per-file or resolve_metadata rows, and VACUUM then removes
+    the prefix."""
+    run_command("CREATE SCHEMA IF NOT EXISTS fast_drop_prefix", pg_conn)
+    run_command(
+        """
+        CREATE TABLE fast_drop_prefix.t USING iceberg
+        WITH (autovacuum_enabled='false')
+        AS SELECT i AS id, 'pg_lake' AS name FROM generate_series(1, 10) i
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # a second snapshot, so a metadata walk would be real work if reached
+    run_command(
+        "INSERT INTO fast_drop_prefix.t SELECT i, 'pg_lake' FROM generate_series(11, 20) i",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    location = _writable_location(pg_conn, "fast_drop_prefix.t")
+
+    files_before = run_query(
+        f"SELECT count(*) FROM lake_file.list('{location}/**')", pg_conn
+    )[0][0]
+    assert files_before > 0
+
+    _drop_fast(pg_conn, "DROP TABLE fast_drop_prefix.t")
+
+    # table is gone
+    assert (
+        run_query(
+            "SELECT count(*) FROM pg_class "
+            "WHERE relname = 't' AND relnamespace = 'fast_drop_prefix'::regnamespace",
+            superuser_conn,
+        )[0][0]
+        == 0
+    )
+
+    assert _count_prefix_records(superuser_conn, location) == 1
+    assert _count_data_file_records(superuser_conn, location) == 0
+    assert _count_resolve_records(superuser_conn, location) == 0
+
+    # the drop itself deletes nothing; VACUUM does the removal
+    assert (
+        run_query(f"SELECT count(*) FROM lake_file.list('{location}/**')", pg_conn)[0][
+            0
+        ]
+        > 0
+    )
+
+    _assert_vacuum_drains(superuser_conn, location)
+
+    run_command("DROP SCHEMA IF EXISTS fast_drop_prefix CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_fast_drop_custom_location_falls_back(
+    s3, pg_conn, superuser_conn, extension, with_default_location
+):
+    """A custom location may be shared with other tables, so the prefix path is
+    declined even with fast drop enabled: per-file rows, no prefix row."""
+    custom_location = f"s3://{TEST_BUCKET}/fast_custom_location/mytable"
+
+    run_command("CREATE SCHEMA IF NOT EXISTS fast_drop_custom", pg_conn)
+    run_command(
+        f"""
+        CREATE TABLE fast_drop_custom.t USING iceberg
+        WITH (autovacuum_enabled='false', location='{custom_location}')
+        AS SELECT i AS id, 'pg_lake' AS name FROM generate_series(1, 10) i
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    location = _writable_location(pg_conn, "fast_drop_custom.t")
+
+    _drop_fast(pg_conn, "DROP TABLE fast_drop_custom.t")
+
+    # fell back to per-file enumeration
+    assert _count_prefix_records(superuser_conn, location) == 0
+    assert _count_data_file_records(superuser_conn, location) > 0
+    assert _count_resolve_records(superuser_conn, location) == 0
+
+    _assert_vacuum_drains(superuser_conn, location)
+
+    run_command("DROP SCHEMA IF EXISTS fast_drop_custom CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_fast_drop_prefix_reclaimed_by_autovacuum(
+    s3, pg_conn, superuser_conn, extension, installcheck, with_default_location
+):
+    """The autovacuum worker reclaims a fast drop's prefix on its own.
+
+    InsertPrefixDeletionRecord stores table_name = 0, so no per-table pass ever
+    claims the row -- only the dropped-table pass does. That pass has to run in
+    the worker for the storage to come back without someone issuing
+    VACUUM (ICEBERG) by hand.
+    """
+    if installcheck:
+        return
+
+    naptime_seconds = 2
+    deadline_seconds = 60
+
+    run_command("CREATE SCHEMA IF NOT EXISTS fast_drop_autovacuum", pg_conn)
+    run_command(
+        """
+        CREATE TABLE fast_drop_autovacuum.t USING iceberg
+        WITH (autovacuum_enabled='false')
+        AS SELECT i AS id, 'pg_lake' AS name FROM generate_series(1, 10) i
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    location = _writable_location(pg_conn, "fast_drop_autovacuum.t")
+
+    files_before = run_query(
+        f"SELECT count(*) FROM lake_file.list('{location}/**')", pg_conn
+    )[0][0]
+    assert files_before > 0
+
+    # the drop stamps orphaned_at, so the row is not eligible until the
+    # retention period passes. Both GUCs have to be set at the system level
+    # because the worker is a separate backend.
+    run_command_outside_tx(
+        [
+            f"ALTER SYSTEM SET pg_lake_iceberg.autovacuum_naptime TO '{naptime_seconds}s'",
+            "ALTER SYSTEM SET pg_lake_engine.orphaned_file_retention_period TO 0",
+            "SELECT pg_reload_conf()",
+        ]
+    )
+
+    try:
+        _drop_fast(pg_conn, "DROP TABLE fast_drop_autovacuum.t")
+
+        remaining = 1
+        files_left = None
+        deadline = time.monotonic() + deadline_seconds
+
+        while time.monotonic() < deadline:
+            remaining = _count_prefix_records(superuser_conn, location)
+            files_left = run_query(
+                f"SELECT count(*) FROM lake_file.list('{location}/**')",
+                superuser_conn,
+            )[0][0]
+            superuser_conn.commit()
+
+            if remaining == 0 and files_left == 0:
+                break
+
+            time.sleep(0.5)
+
+        assert remaining == 0, (
+            f"prefix row still queued after {deadline_seconds}s; "
+            "the worker is not running the dropped-table pass"
+        )
+        assert files_left == 0, f"{files_left} files still under the prefix"
+    finally:
+        run_command_outside_tx(
+            [
+                "ALTER SYSTEM RESET pg_lake_iceberg.autovacuum_naptime",
+                "ALTER SYSTEM RESET pg_lake_engine.orphaned_file_retention_period",
+                "SELECT pg_reload_conf()",
+            ]
+        )
+        run_command("DROP SCHEMA IF EXISTS fast_drop_autovacuum CASCADE", pg_conn)
+        pg_conn.commit()
 
 
 def test_flush_deletion_queue_drains_dropped_table_files(
