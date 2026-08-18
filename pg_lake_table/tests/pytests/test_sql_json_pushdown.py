@@ -13,11 +13,13 @@ json_expressions = [
     (160000, "col IS JSON SCALAR"),
     (160000, "col IS JSON WITH UNIQUE KEYS"),
     (160000, "col IS JSON WITHOUT UNIQUE KEYS"),
-    (160000, "JSON(col)"),
-    (160000, "JSON_SCALAR(col)"),
-    (160000, "JSON_SERIALIZE(col::json)"),
     (160000, "JSON_OBJECT('key' VALUE col)"),
     (160000, "JSON_ARRAY(col)"),
+    # JSON(), JSON_SCALAR() and JSON_SERIALIZE() only became SQL/JSON
+    # expressions in PG17; in PG16 "JSON(col)" is a function-style cast.
+    (170000, "JSON(col)"),
+    (170000, "JSON_SCALAR(col)"),
+    (170000, "JSON_SERIALIZE(col::json)"),
     (170000, "JSON_EXISTS(col::json, '$.key')"),
     (170000, "JSON_VALUE(col::json, '$.key')"),
     (170000, "JSON_QUERY(col::json, '$.key')"),
