@@ -192,7 +192,8 @@ ReadIcebergTableMetadataFromJson(JsonbContainer *json, IcebergTableMetadata * me
 	 * and next-row-id are ignored, which costs a reader nothing that it can
 	 * observe in the rows themselves.
 	 *
-	 * Writing still produces v2 (see CreateIcebergTableMetadata).
+	 * Writing still produces v2 (see GenerateEmptyTableMetadata), and a table
+	 * read as v3 is refused a write (see WriteIcebergTableMetadataToJson).
 	 */
 	if (metadata->format_version != 2 && metadata->format_version != 3)
 	{
