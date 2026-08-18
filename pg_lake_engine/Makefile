@@ -7,6 +7,9 @@ SOURCES := $(wildcard src/*.c) $(wildcard src/*/*.c)
 OBJS := $(patsubst %.c,%.o,$(sort $(SOURCES)))
 SHLIB_LINK_INTERNAL = $(libpq)
 
+# zlib, for compressing the temporary exchange CSVs (see src/csv/csv_compression.c)
+SHLIB_LINK += -lz
+
 PG_LAKE_DELTA_SUPPORT ?= 0
 
 PG_CPPFLAGS = -I$(libpq_srcdir) -Iinclude -I../pg_extension_base/include -std=gnu99 -g -DPG_LAKE_DELTA_SUPPORT=$(PG_LAKE_DELTA_SUPPORT)

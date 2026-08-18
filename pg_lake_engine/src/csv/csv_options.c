@@ -21,6 +21,7 @@
 #include "postgres.h"
 
 #include "commands/defrem.h"
+#include "pg_lake/csv/csv_compression.h"
 #include "pg_lake/csv/csv_options.h"
 #include "nodes/makefuncs.h"
 
@@ -57,13 +58,17 @@ InternalCSVOptions(bool includeHeader)
  * InternalCSVReadOptions returns the options to use when reading an
  * internal/temporary CSV back through DuckDB's read_csv().
  *
- * It is InternalCSVOptions() plus a synthetic allow_quoted_nulls=false
- * option.  That option is not a real COPY option (ProcessCopyOptions would
- * reject it on the write side), so it lives only on the read path, where
- * CopyOptionsToReadCSVParams translates it into the read_csv() argument.
- * We need it because the CSV writer force-quotes any value that matches the
- * null sentinel (\N); disabling allow_quoted_nulls keeps a quoted "\N" from
- * being collapsed back to SQL NULL.
+ * It is InternalCSVOptions() plus synthetic allow_quoted_nulls and compression
+ * options.  Neither is a real COPY option (ProcessCopyOptions would reject
+ * them on the write side), so they live only on the read path, where
+ * CopyOptionsToReadCSVParams translates them into read_csv() arguments.
+ *
+ * We need allow_quoted_nulls=false because the CSV writer force-quotes any
+ * value that matches the null sentinel (\N); disabling it keeps a quoted "\N"
+ * from being collapsed back to SQL NULL.
+ *
+ * compression has to be stated explicitly because temporary file paths carry
+ * no extension for DuckDB to infer the codec from.
  */
 List *
 InternalCSVReadOptions(bool includeHeader)
@@ -73,6 +78,17 @@ InternalCSVReadOptions(bool includeHeader)
 	options = lappend(options,
 					  makeDefElem("allow_quoted_nulls",
 								  (Node *) makeBoolean(false), -1));
+
+	CopyDataCompression compression = InternalCSVCompression();
+
+	if (compression != DATA_COMPRESSION_NONE)
+	{
+		char	   *compressionName = pstrdup(CopyDataCompressionToName(compression));
+
+		options = lappend(options,
+						  makeDefElem("compression",
+									  (Node *) makeString(compressionName), -1));
+	}
 
 	return options;
 }

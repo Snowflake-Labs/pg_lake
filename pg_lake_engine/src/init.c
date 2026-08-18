@@ -26,6 +26,7 @@
 
 #include "pg_lake/cleanup/deletion_queue.h"
 #include "pg_lake/copy/copy_format.h"
+#include "pg_lake/csv/csv_compression.h"
 #include "pg_lake/ddl/utility_hook.h"
 #include "pg_lake/extensions/btree_gist.h"
 #include "pg_lake/extensions/pg_lake_benchmark.h"
@@ -62,6 +63,13 @@ bool		EnableHeavyAsserts = false;
 
 /* pg_lake.stage_location setting */
 char	   *PgLakeStageLocation = NULL;
+
+/* allowed values of pg_lake_engine.temp_file_compression */
+static const struct config_enum_entry TempFileCompressionOptions[] = {
+	{"none", DATA_COMPRESSION_NONE, false},
+	{"gzip", DATA_COMPRESSION_GZIP, false},
+	{NULL, 0, false}
+};
 
 
 /*
@@ -203,6 +211,31 @@ _PG_init(void)
 							DEFAULT_MAX_PARALLEL_FILE_UPLOADS /* default */ ,
 							1,
 							256,
+							PGC_USERSET,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomEnumVariable("pg_lake_engine.temp_file_compression",
+							 gettext_noop("Compression to apply to the temporary CSV files that "
+										  "carry rows between PostgreSQL and the query engine."),
+							 gettext_noop("The exchange CSV is several times the size of the "
+										  "Parquet it becomes, so compressing it saves temporary "
+										  "space and I/O at the cost of CPU on both ends."),
+							 &TempFileCompression,
+							 DATA_COMPRESSION_NONE,
+							 TempFileCompressionOptions,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
+
+	DefineCustomIntVariable("pg_lake_engine.temp_file_compression_level",
+							gettext_noop("Compression level for temporary CSV files."),
+							gettext_noop("These files live for the length of one statement, so the "
+										 "default favours throughput over ratio."),
+							&TempFileCompressionLevel,
+							1,
+							1,
+							9,
 							PGC_USERSET,
 							0,
 							NULL, NULL, NULL);
