@@ -702,8 +702,13 @@ ChooseDuckDBEngineTypeForWrite(PGType postgresType,
 	 *
 	 * This happens before we look for an array type, because a domain over an
 	 * array type (e.g. CREATE DOMAIN ints AS int[]) is an array itself, which
-	 * get_element_type would not see. Map types are domains too, but carry
-	 * special semantics and are left alone by ResolveDomainBaseTypeAndTypmod.
+	 * get_element_type would not see.
+	 *
+	 * Map types are domains too, and ResolveDomainBaseTypeAndTypmod leaves
+	 * them alone only while the map type is the outermost type. A domain over
+	 * a map still resolves past it to the underlying key/value array, so it
+	 * is stored as a list of structs rather than an Iceberg map; see the note
+	 * on stepwise resolution in compatibility_mode.c.
 	 *
 	 * The type modifier comes along, because a domain column has atttypmod -1
 	 * and a domain over numeric(10,2) would otherwise look unbounded.

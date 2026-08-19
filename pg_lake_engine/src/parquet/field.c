@@ -470,7 +470,7 @@ TypeHasStorageDivergentLeaf(Oid typeOid, int32 typmod, Field * storageField)
 	if (typtype == TYPTYPE_DOMAIN)
 	{
 		int32		baseTypmod = typmod;
-		Oid			baseType = getBaseTypeAndTypmod(typeOid, &baseTypmod);
+		Oid			baseType = ResolveDomainBaseTypeAndTypmod(typeOid, &baseTypmod);
 
 		return TypeHasStorageDivergentLeaf(baseType, baseTypmod, storageField);
 	}
