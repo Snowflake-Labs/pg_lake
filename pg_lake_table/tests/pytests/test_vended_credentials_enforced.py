@@ -1,44 +1,54 @@
-"""Enforcement tests for REST-catalog vended credentials, backed by MinIO.
+"""Enforcement tests for REST-catalog vended credentials.
 
-Unlike the Moto-backed tests (which cannot deny a request), these tests
-use a real MinIO server with a real policy engine so we can prove that the
-vended credential is genuinely *load-bearing* for a data scan:
+These tests prove the vended credential is genuinely *load-bearing* for a
+data scan, which needs an S3 mock that can actually deny a request.  Moto
+can: it implements IAM policy evaluation for S3 and the enforcement switch
+can be flipped at runtime, so ``helpers/moto_iam_storage.py`` runs a moto
+server that is permissive during setup and enforcing during the assertion.
 
-  * ``test_minio_vended_credentials_required_for_scan``
-        With vending enabled, the catalog vends a data-scoped credential;
-        pg_lake pushes it to pgduck_server as a ``pglake_vended_*`` secret
-        and the SELECT succeeds.  The pre-existing static secret is scoped
-        to *metadata only*, so the scan can only succeed via the vended
-        credential.
+The shape of every test is the same.  The pre-existing static secret can
+read the table's *metadata* only; a successful data scan therefore has to
+come from the credential the catalog vended.
 
-  * ``test_minio_scan_denied_without_vended_credentials``
-        With vending disabled (catalog returns no credentials), the data
-        scan falls back to the metadata-only static secret and MinIO
-        denies it -- proving the static secret alone is insufficient.
+  * ``test_moto_vended_credentials_required_for_scan``
+        vending on -> the scan succeeds and a ``pglake_vended_*`` secret
+        scoped to the table location is present on pgduck_server.
 
-  * ``test_minio_vended_credentials_wrong_scope_denied``
-        The catalog vends a credential scoped to the *wrong* prefix, so
-        DuckDB never applies it to the target table's data path and the
-        scan is denied -- proving the scope string must be correct.
+  * ``test_moto_scan_denied_without_vended_credentials``
+        the catalog delegates nothing -> the data scan falls back to the
+        metadata-only static secret and is denied.
 
-  * ``test_minio_columnless_attach_does_not_read_storage``
-        ``CREATE TABLE t ()`` learns the columns from the metadata the
-        catalog inlines in its loadTable response.  The static secret
-        cannot reach the table at all, so an attach that reads
-        metadata.json off the store is denied -- which is what happens
-        when inference goes to storage before the relation exists.
+  * ``test_moto_vended_credentials_wrong_scope_denied``
+        the credential is labeled with a foreign prefix -> the scan is
+        denied, and nothing is registered under that foreign scope where it
+        would shadow the secret another table depends on.
 
-  * ``test_minio_vended_secret_dropped_when_revoked``
-        With vending on, a scan pushes the data-capable secret and
-        succeeds.  Vending is then turned off (the catalog stops
-        delegating); the next scan on the same backend resolves no
-        credentials, *drops* the secret it previously pushed, and the data
-        scan is denied.  This proves the resolver's headline behavior: a
-        stale credential cannot linger on the shared pgduck_server once the
-        catalog stops vending it.
+  * ``test_moto_columnless_attach_does_not_read_storage``
+        ``CREATE TABLE t ()`` learns its columns from the metadata the
+        catalog inlines.  The static secret cannot reach the table at all,
+        so an attach that goes to storage is denied.
 
-The whole module is skipped when MinIO (server binary + Python admin SDK)
-is not available, mirroring the skip-if-absent pattern of the e2e suites.
+  * ``test_moto_vended_secret_dropped_when_revoked``
+        vending is turned off after a successful scan; the next scan must
+        drop the secret it pushed, so the identical read is denied.
+
+  * ``test_moto_two_principals_get_their_own_credentials``
+        two roles on one backend are vended different credentials; serving
+        the second role the first one's would let a denied scan through.
+
+  * ``test_moto_vended_secret_dropped_with_read_only_table``
+        a read-only table's secret goes away with the table.
+
+  * ``test_moto_catalog_supplied_endpoint_still_reaches_the_store``
+        a catalog that states its endpoint (with or without the addressing
+        style) must still produce a usable secret.
+
+  * ``test_moto_data_only_credential_serves_repeated_scans``
+        a ``.../data/`` credential must not become the one DuckDB picks for
+        the metadata beside it.
+
+  * ``test_moto_unrelated_table_still_reads_through_the_static_secret``
+        vending for one table leaves every other path alone.
 
 Architecture recap (why the static/vended split works):
   - REST loadTable runs in PostgreSQL over HTTP (mock catalog here).
@@ -49,7 +59,7 @@ Architecture recap (why the static/vended split works):
     vended credential is cached).
   - The vended secret inherits ENDPOINT/URL_STYLE/USE_SSL from the static
     secret whose scope best-matches the vended scope, so pointing the
-    static secret at MinIO is what makes vended secrets reach MinIO too.
+    static secret at the mock is what makes vended secrets reach it too.
 """
 
 import base64
@@ -69,26 +79,24 @@ try:
     from pyiceberg.catalog.sql import SqlCatalog
 
     _HAVE_PYICEBERG = True
-except Exception as _exc:  # pragma: no cover - depends on environment
+except Exception:  # pragma: no cover - depends on environment
     _HAVE_PYICEBERG = False
+
+# Everything these tests read is read-only; the metadata-only principals
+# additionally need ListBucket to resolve a prefix.
+_READ_ACTIONS = ("s3:GetObject", "s3:ListBucket")
 
 
 # ---------------------------------------------------------------------------
-# Iceberg table materialization on MinIO (via pyiceberg)
+# Iceberg table materialization (via pyiceberg, with the full-access user)
 # ---------------------------------------------------------------------------
 
 
 def _materialize_iceberg_table(server, namespace, table, rows):
-    """Create a real Iceberg table with ``rows`` rows on MinIO.
-
-    Returns ``(metadata_location, table_location, key_prefix)`` where
-    ``key_prefix`` is the table's key prefix inside the bucket (e.g.
-    ``wh/ns/tbl``).
-    """
     warehouse = f"s3://{server.bucket}/wh"
-    sqlite_dir = tempfile.mkdtemp(prefix="pgl_minio_cat_")
+    sqlite_dir = tempfile.mkdtemp(prefix="pgl_moto_cat_")
     catalog = SqlCatalog(
-        "minio_materialize",
+        "moto_materialize",
         **{
             "uri": f"sqlite:///{sqlite_dir}/catalog.db",
             "warehouse": warehouse,
@@ -120,15 +128,19 @@ def _materialize_iceberg_table(server, namespace, table, rows):
 
 
 # ---------------------------------------------------------------------------
-# Mock Iceberg REST catalog (data-driven by a table -> response map)
+# Mock Iceberg REST catalog
 # ---------------------------------------------------------------------------
 
 
 def _read_metadata_document(server, metadata_location):
-    """Read a table's metadata.json off MinIO with root credentials."""
+    """Read a table's metadata.json with the full-access principal.
+
+    The catalog has its own access to the store, so this stays valid once
+    enforcement is on.
+    """
     key = metadata_location.split(f"s3://{server.bucket}/", 1)[1]
-    body = server.client().get_object(Bucket=server.bucket, Key=key)["Body"].read()
-    return json.loads(body)
+    client = server.client(server.root_user, server.root_password)
+    return json.loads(client.get_object(Bucket=server.bucket, Key=key)["Body"].read())
 
 
 def _make_handler(tables, server):
@@ -145,8 +157,8 @@ def _make_handler(tables, server):
     loadTable knows which principal it is answering.
 
     loadTable inlines the table's real metadata document, as the Iceberg
-    REST spec requires and as Polaris and Horizon both do.  It is what
-    lets a columnless CREATE TABLE learn the schema without reaching for
+    REST spec requires and as Polaris and Horizon both do.  It is what lets
+    a columnless CREATE TABLE learn the schema without reaching for
     storage, so a stub here would hide whether that works.
     """
 
@@ -156,8 +168,6 @@ def _make_handler(tables, server):
             body = self.rfile.read(length) if length > 0 else b""
 
             if "/oauth/tokens" in self.path:
-                # The client id arrives either as a form field or as HTTP
-                # basic auth, depending on how the client was configured.
                 form = urllib.parse.parse_qs(body.decode())
                 client_id = (form.get("client_id") or [""])[0]
                 auth = self.headers.get("Authorization", "")
@@ -178,8 +188,6 @@ def _make_handler(tables, server):
                 self.end_headers()
                 return
 
-            # Namespace-exists check (GET .../namespaces/<ns>) done during
-            # read-only CREATE TABLE: report the namespace as present.
             if (
                 "/namespaces/" in self.path
                 and "/tables" not in self.path
@@ -253,6 +261,14 @@ def _find_free_port():
         return s.getsockname()[1]
 
 
+_CATALOG_GUCS = (
+    "pg_lake_iceberg.rest_catalog_host",
+    "pg_lake_iceberg.rest_catalog_client_id",
+    "pg_lake_iceberg.rest_catalog_client_secret",
+    "pg_lake_iceberg.rest_catalog_enable_vended_credentials",
+)
+
+
 def _start_mock_catalog(tables, server):
     """Start the mock catalog, leaving it to the caller to point at it."""
     port = _find_free_port()
@@ -262,22 +278,14 @@ def _start_mock_catalog(tables, server):
     return httpd, thread, port
 
 
-_CATALOG_GUCS = (
-    "pg_lake_iceberg.rest_catalog_host",
-    "pg_lake_iceberg.rest_catalog_client_id",
-    "pg_lake_iceberg.rest_catalog_client_secret",
-    "pg_lake_iceberg.rest_catalog_enable_vended_credentials",
-)
-
-
 def _serve_mock_catalog(tables, server, enable_vended, conn=None):
     """Start the mock catalog and point the REST GUCs at it.
 
-    ``conn`` is the connection about to use the catalog.  ALTER SYSTEM
-    alone is not enough for it: the SIGHUP it triggers is processed at an
-    unpredictable command boundary, so the very next statement may still
-    run against the previous test's (reset) settings.  A session-level
-    SET on that connection takes effect immediately.
+    ``conn`` is the connection about to use the catalog.  ALTER SYSTEM alone
+    is not enough for it: the SIGHUP it triggers is processed at an
+    unpredictable command boundary, so the very next statement may still run
+    against the previous test's (reset) settings.  A session-level SET on
+    that connection takes effect immediately.
     """
     httpd, thread, port = _start_mock_catalog(tables, server)
 
@@ -289,17 +297,14 @@ def _serve_mock_catalog(tables, server, enable_vended, conn=None):
             "true" if enable_vended else "false"
         ),
     }
-
     run_command_outside_tx(
         [f"ALTER SYSTEM SET {name} TO '{value}'" for name, value in settings.items()]
         + ["SELECT pg_reload_conf()"]
     )
-
     if conn is not None:
         for name, value in settings.items():
             run_command(f"SET {name} TO '{value}'", conn)
         conn.commit()
-
     return httpd, thread
 
 
@@ -316,16 +321,15 @@ def _stop_mock_catalog(httpd, thread, conn=None):
         conn.commit()
 
 
-def _create_static_minio_secret(pgduck_conn, server, access_key, secret_key):
-    """Create the pre-existing static S3 secret that points pgduck at MinIO.
+def _create_static_secret(pgduck_conn, server, access_key, secret_key):
+    """The pre-existing static secret that points pgduck at this moto server.
 
-    Its scope covers the whole test bucket, so vended secrets (which have a
-    more specific per-table scope) inherit MinIO's ENDPOINT/URL_STYLE/SSL
-    from it.
+    Scoped to the whole test bucket, so vended secrets (more specific
+    per-table scope) inherit ENDPOINT / URL_STYLE / USE_SSL from it.
     """
     run_command(
         f"""
-        CREATE OR REPLACE SECRET s3minio (
+        CREATE OR REPLACE SECRET s3motoproto (
             TYPE S3,
             KEY_ID '{access_key}',
             SECRET '{secret_key}',
@@ -351,48 +355,65 @@ def _denied(text):
 # ---------------------------------------------------------------------------
 
 
-@requires_minio
-def test_minio_vended_credentials_required_for_scan(
-    superuser_conn, pgduck_conn, extension, installcheck, minio_server
+def _reader(server, name, prefixes):
+    """A read-only principal restricted to ``prefixes`` inside the bucket.
+
+    Returns the ``(access_key_id, secret_access_key)`` moto generated for it.
+    """
+    return server.create_scoped_user(name, prefixes, actions=_READ_ACTIONS)
+
+
+def _vended(location, credential, region, suffix="/"):
+    """The storage-credentials entry a catalog returns for ``location``."""
+    return {
+        "prefix": location + suffix,
+        "config": {
+            "s3.access-key-id": credential[0],
+            "s3.secret-access-key": credential[1],
+            "client.region": region,
+        },
+    }
+
+
+def _vended_secrets_for(pgduck_conn, location):
+    rows = run_query(
+        "SELECT name, scope FROM duckdb_secrets() WHERE name LIKE 'pglake_vended_%'",
+        pgduck_conn,
+    )
+    pgduck_conn.commit()
+    return [r for r in rows if r[1] and location in r[1]]
+
+
+def test_moto_vended_credentials_required_for_scan(
+    superuser_conn, pgduck_conn, extension, installcheck, moto_enforcing_server
 ):
     if installcheck or not _HAVE_PYICEBERG:
         return
 
-    server = minio_server
-    schema = "mv_required"
+    server = moto_enforcing_server
+    schema = "mvm_required"
     table = "vc_ok"
 
     meta_loc, location, prefix = _materialize_iceberg_table(server, schema, table, 10)
 
-    # Static credential can read *metadata* only; vended credential can read
-    # the whole table prefix (metadata + data).
-    server.create_scoped_user(
-        "mv_meta_ok",
-        "mv_meta_ok_secret",
-        [f"{prefix}/metadata"],
-        actions=("s3:GetObject", "s3:ListBucket"),
-    )
-    server.create_scoped_user("mv_data_ok", "mv_data_ok_secret", [prefix])
+    # The static credential can read *metadata* only; the vended credential
+    # can read the whole table prefix (metadata + data).
+    static = _reader(server, "meta_ok", [f"{prefix}/metadata"])
+    data = _reader(server, "data_ok", [prefix])
 
     tables = {
         table: {
             "metadata_location": meta_loc,
             "location": location,
-            "vended": {
-                "prefix": location + "/",
-                "config": {
-                    "s3.access-key-id": "mv_data_ok",
-                    "s3.secret-access-key": "mv_data_ok_secret",
-                    "client.region": server.region,
-                },
-            },
+            "vended": _vended(location, data, server.region),
         }
     }
 
-    _create_static_minio_secret(pgduck_conn, server, "mv_meta_ok", "mv_meta_ok_secret")
+    _create_static_secret(pgduck_conn, server, static[0], static[1])
     httpd, thread = _serve_mock_catalog(
         tables, server, enable_vended=True, conn=superuser_conn
     )
+    server.enforce()
 
     try:
         run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
@@ -411,51 +432,42 @@ def test_minio_vended_credentials_required_for_scan(
 
         # The vended secret must have been pushed to pgduck with the table's
         # storage prefix as its scope.
-        secrets = run_query(
-            "SELECT name, scope FROM duckdb_secrets() WHERE name LIKE 'pglake_vended_%'",
-            pgduck_conn,
-        )
-        assert any(
-            s[1] and location in s[1] for s in secrets
-        ), f"expected a pglake_vended_* secret scoped to {location}, got {secrets}"
+        assert _vended_secrets_for(
+            pgduck_conn, location
+        ), f"expected a pglake_vended_* secret scoped to {location}"
 
     finally:
+        server.relax()
         run_command(f"DROP TABLE IF EXISTS {schema}.{table}", superuser_conn)
         run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
         superuser_conn.commit()
         _stop_mock_catalog(httpd, thread, conn=superuser_conn)
 
 
-@requires_minio
-def test_minio_scan_denied_without_vended_credentials(
-    superuser_conn, pgduck_conn, extension, installcheck, minio_server
+def test_moto_scan_denied_without_vended_credentials(
+    superuser_conn, pgduck_conn, extension, installcheck, moto_enforcing_server
 ):
     if installcheck or not _HAVE_PYICEBERG:
         return
 
-    server = minio_server
-    schema = "mv_denied"
-    table = "vc_novend"
+    server = moto_enforcing_server
+    schema = "mvm_denied"
+    table = "vc_no"
 
     meta_loc, location, prefix = _materialize_iceberg_table(server, schema, table, 10)
+    static = _reader(server, "meta_nv", [f"{prefix}/metadata"])
 
-    server.create_scoped_user(
-        "mv_meta_nv",
-        "mv_meta_nv_secret",
-        [f"{prefix}/metadata"],
-        actions=("s3:GetObject", "s3:ListBucket"),
-    )
-
-    # No "vended" entry -> catalog returns no credentials even though the
+    # No "vended" entry -> the catalog returns no credentials even though the
     # delegation header is sent.
     tables = {
         table: {"metadata_location": meta_loc, "location": location, "vended": None}
     }
 
-    _create_static_minio_secret(pgduck_conn, server, "mv_meta_nv", "mv_meta_nv_secret")
+    _create_static_secret(pgduck_conn, server, static[0], static[1])
     httpd, thread = _serve_mock_catalog(
         tables, server, enable_vended=True, conn=superuser_conn
     )
+    server.enforce()
 
     try:
         run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
@@ -468,8 +480,8 @@ def test_minio_scan_denied_without_vended_credentials(
         )
         superuser_conn.commit()
 
-        # Metadata read (static secret) succeeds; the data scan falls back to
-        # the metadata-only static secret and MinIO denies it.
+        # The metadata read (static secret) succeeds; the data scan falls back
+        # to the metadata-only static secret and moto denies it.
         err = run_query(
             f"SELECT count(*) FROM {schema}.{table}",
             superuser_conn,
@@ -479,53 +491,207 @@ def test_minio_scan_denied_without_vended_credentials(
         assert _denied(err), f"expected an access-denied error, got: {err!r}"
 
     finally:
+        server.relax()
         run_command(f"DROP TABLE IF EXISTS {schema}.{table}", superuser_conn)
         run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
         superuser_conn.commit()
         _stop_mock_catalog(httpd, thread, conn=superuser_conn)
 
 
-@requires_minio
-def test_minio_vended_secret_dropped_when_revoked(
-    superuser_conn, pgduck_conn, extension, installcheck, minio_server
+def test_moto_vended_credentials_wrong_scope_denied(
+    superuser_conn, pgduck_conn, extension, installcheck, moto_enforcing_server
 ):
+    """A credential labeled with a foreign prefix must not be trusted there.
+
+    We clamp a scope that falls outside the table root back to the table
+    root, so this secret *is* applied to this table's data path -- and then
+    the store denies it, because the credential has no rights there.
+    Clamping keeps a mislabeled credential from registering under the
+    foreign scope, where it would shadow the secret that prefix depends on.
+    """
     if installcheck or not _HAVE_PYICEBERG:
         return
 
-    server = minio_server
-    schema = "mv_revoke"
-    table = "vc_revoke"
+    server = moto_enforcing_server
+    schema = "mvm_scope"
+    table = "vc_wrongscope"
 
     meta_loc, location, prefix = _materialize_iceberg_table(server, schema, table, 10)
+    static = _reader(server, "meta_ws", [f"{prefix}/metadata"])
 
-    # metadata-only static credential; data-capable vended credential.
-    server.create_scoped_user(
-        "mv_meta_rv",
-        "mv_meta_rv_secret",
-        [f"{prefix}/metadata"],
-        actions=("s3:GetObject", "s3:ListBucket"),
-    )
-    server.create_scoped_user("mv_data_rv", "mv_data_rv_secret", [prefix])
+    # The vended credential belongs to a different table: it can read
+    # wh/some-other-table and nothing else.  The catalog labels it with that
+    # same foreign prefix.
+    data = _reader(server, "data_ws", ["wh/some-other-table"])
 
+    wrong_scope = f"s3://{server.bucket}/wh/some-other-table/"
     tables = {
         table: {
             "metadata_location": meta_loc,
             "location": location,
             "vended": {
-                "prefix": location + "/",
+                "prefix": wrong_scope,
                 "config": {
-                    "s3.access-key-id": "mv_data_rv",
-                    "s3.secret-access-key": "mv_data_rv_secret",
+                    "s3.access-key-id": data[0],
+                    "s3.secret-access-key": data[1],
                     "client.region": server.region,
                 },
             },
         }
     }
 
-    _create_static_minio_secret(pgduck_conn, server, "mv_meta_rv", "mv_meta_rv_secret")
+    _create_static_secret(pgduck_conn, server, static[0], static[1])
     httpd, thread = _serve_mock_catalog(
         tables, server, enable_vended=True, conn=superuser_conn
     )
+    server.enforce()
+
+    try:
+        run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
+        superuser_conn.commit()
+        run_command(
+            f"""CREATE TABLE {schema}.{table} ()
+                USING iceberg
+                WITH (catalog='rest', read_only=True, catalog_table_name='{table}')""",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        err = run_query(
+            f"SELECT count(*) FROM {schema}.{table}",
+            superuser_conn,
+            raise_error=False,
+        )
+        superuser_conn.rollback()
+        assert _denied(err), f"expected an access-denied error, got: {err!r}"
+
+        # Nothing may be registered under the foreign scope.  A secret there
+        # would be selected for wh/some-other-table's own scans and shadow
+        # whatever that table legitimately uses.
+        shadowing = _vended_secrets_for(pgduck_conn, "some-other-table")
+        assert not shadowing, f"secret registered under a foreign scope: {shadowing}"
+
+    finally:
+        server.relax()
+        run_command(f"DROP TABLE IF EXISTS {schema}.{table}", superuser_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
+        superuser_conn.commit()
+        _stop_mock_catalog(httpd, thread, conn=superuser_conn)
+
+
+def test_moto_columnless_attach_does_not_read_storage(
+    superuser_conn, pgduck_conn, extension, installcheck, moto_enforcing_server
+):
+    """Attaching a table without naming its columns must not touch storage.
+
+    ``CREATE TABLE t ()`` is how an existing catalog table is normally
+    attached; spelling out its columns is the workaround.  Inference used to
+    read metadata.json off the store, which cannot work on a catalog that
+    only vends: the relation does not exist yet, and credentials are
+    resolved per relation, so nothing can have pushed a secret for it.
+
+    Here the static credential is barred from the table entirely, so a
+    CREATE that reaches for storage is denied.  Vending then covers the
+    whole table root, which is what makes the scan afterwards work.
+    """
+    if installcheck or not _HAVE_PYICEBERG:
+        return
+
+    server = moto_enforcing_server
+    schema = "mvm_attach"
+    table = "vc_attach"
+
+    meta_loc, location, prefix = _materialize_iceberg_table(server, schema, table, 10)
+
+    # Reaches somewhere else in the bucket, and nothing of this table.
+    static = _reader(server, "static_at", ["elsewhere"])
+    data = _reader(server, "data_at", [prefix])
+
+    tables = {
+        table: {
+            "metadata_location": meta_loc,
+            "location": location,
+            "vended": _vended(location, data, server.region),
+        }
+    }
+
+    _create_static_secret(pgduck_conn, server, static[0], static[1])
+    httpd, thread = _serve_mock_catalog(
+        tables, server, enable_vended=True, conn=superuser_conn
+    )
+    server.enforce()
+
+    try:
+        run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
+        superuser_conn.commit()
+
+        err = run_command(
+            f"""CREATE TABLE {schema}.{table} ()
+                USING iceberg
+                WITH (catalog='rest', read_only=True, catalog_table_name='{table}')""",
+            superuser_conn,
+            raise_error=False,
+        )
+        assert not _denied(err), f"columnless attach went to storage: {err!r}"
+        assert err is None, f"columnless attach failed: {err!r}"
+        superuser_conn.commit()
+
+        columns = run_query(
+            f"""SELECT attname, atttypid::regtype::text
+                  FROM pg_attribute
+                 WHERE attrelid = '{schema}.{table}'::regclass AND attnum > 0
+                 ORDER BY attnum""",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+        assert [tuple(c) for c in columns] == [("id", "bigint"), ("val", "text")]
+
+        result = run_query(f"SELECT count(*) FROM {schema}.{table}", superuser_conn)
+        superuser_conn.commit()
+        assert result[0][0] == 10
+
+    finally:
+        server.relax()
+        run_command(f"DROP TABLE IF EXISTS {schema}.{table}", superuser_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
+        superuser_conn.commit()
+        _stop_mock_catalog(httpd, thread, conn=superuser_conn)
+
+
+def test_moto_vended_secret_dropped_when_revoked(
+    superuser_conn, pgduck_conn, extension, installcheck, moto_enforcing_server
+):
+    """A stale credential cannot linger once the catalog stops vending it.
+
+    With vending on, a scan pushes the data-capable secret and succeeds.
+    Vending is then turned off; the next scan on the same backend resolves
+    no credentials, *drops* the secret it previously pushed, and the data
+    scan is denied.
+    """
+    if installcheck or not _HAVE_PYICEBERG:
+        return
+
+    server = moto_enforcing_server
+    schema = "mvm_revoke"
+    table = "vc_revoke"
+
+    meta_loc, location, prefix = _materialize_iceberg_table(server, schema, table, 10)
+    static = _reader(server, "meta_rv", [f"{prefix}/metadata"])
+    data = _reader(server, "data_rv", [prefix])
+
+    tables = {
+        table: {
+            "metadata_location": meta_loc,
+            "location": location,
+            "vended": _vended(location, data, server.region),
+        }
+    }
+
+    _create_static_secret(pgduck_conn, server, static[0], static[1])
+    httpd, thread = _serve_mock_catalog(
+        tables, server, enable_vended=True, conn=superuser_conn
+    )
+    server.enforce()
 
     try:
         run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
@@ -542,26 +708,15 @@ def test_minio_vended_secret_dropped_when_revoked(
         result = run_query(f"SELECT count(*) FROM {schema}.{table}", superuser_conn)
         superuser_conn.commit()
         assert result[0][0] == 10
-
-        def _vended_secrets_for_this_table():
-            rows = run_query(
-                "SELECT name, scope FROM duckdb_secrets() "
-                "WHERE name LIKE 'pglake_vended_%'",
-                pgduck_conn,
-            )
-            return [r for r in rows if r[1] and location in r[1]]
-
-        assert (
-            _vended_secrets_for_this_table()
+        assert _vended_secrets_for(
+            pgduck_conn, location
         ), "expected a vended secret to be pushed while vending is on"
 
         # Step 2: revoke by turning vending off for this session.  A
-        # session-level SET (PGC_SUSET) takes effect on the very next query
-        # in this same backend -- deterministically, unlike an ALTER SYSTEM
-        # + pg_reload_conf whose SIGHUP is only processed at the *following*
-        # command boundary.  The next scan then resolves no credentials and
-        # must drop the secret it pushed above, leaving only the
-        # metadata-only static secret so MinIO denies the data scan.
+        # session-level SET (PGC_SUSET) takes effect on the very next query in
+        # this same backend -- deterministically, unlike an ALTER SYSTEM +
+        # pg_reload_conf whose SIGHUP is only processed at the *following*
+        # command boundary.
         run_command(
             "SET pg_lake_iceberg.rest_catalog_enable_vended_credentials = false",
             superuser_conn,
@@ -573,8 +728,8 @@ def test_minio_vended_secret_dropped_when_revoked(
         # pushed: if the drop had not taken effect, the still-present
         # data-capable vended secret would have served this identical read.
         # (We deliberately assert on the scan result rather than on a peer
-        # connection's duckdb_secrets() view, whose reflection of a drop
-        # made on another pgduck connection is not deterministic.)
+        # connection's duckdb_secrets() view, whose reflection of a drop made
+        # on another pgduck connection is not deterministic.)
         err = run_query(
             f"SELECT count(*) FROM {schema}.{table}",
             superuser_conn,
@@ -584,6 +739,7 @@ def test_minio_vended_secret_dropped_when_revoked(
         assert _denied(err), f"expected access-denied after revocation, got: {err!r}"
 
     finally:
+        server.relax()
         run_command(
             "RESET pg_lake_iceberg.rest_catalog_enable_vended_credentials",
             superuser_conn,
@@ -594,66 +750,122 @@ def test_minio_vended_secret_dropped_when_revoked(
         _stop_mock_catalog(httpd, thread, conn=superuser_conn)
 
 
-@requires_minio
-def test_minio_two_principals_get_their_own_credentials(
-    superuser_conn, pgduck_conn, extension, installcheck, minio_server
+def test_moto_vended_secret_dropped_with_read_only_table(
+    superuser_conn, pgduck_conn, extension, installcheck, moto_enforcing_server
 ):
-    """Two roles reading one table are each served their own credential.
+    """A read-only table's secret goes away with the table.
 
-    A catalog vends per principal, so a backend that changes role must
-    not hand the second role what the first was given.  The two vended
-    credentials here differ in what they can actually do -- one reads the
-    table's data, the other only its metadata -- so reusing the first
-    one is not a subtle difference: the second scan would succeed where
-    MinIO must deny it.
+    A read-only table owns none of the files it reads, so its drop queues no
+    deletes and nothing is left for the secret to authorize.  Leaving it
+    behind would not be harmless: secrets outlive the backend that pushed
+    them and DuckDB picks one by longest matching scope, so a leftover would
+    keep answering for that prefix -- with credentials that expire -- for
+    the rest of the server's life.
     """
     if installcheck or not _HAVE_PYICEBERG:
         return
 
-    server = minio_server
-    schema = "mv_two_princ"
+    server = moto_enforcing_server
+    schema = "mvm_ro_drop"
+    table = "vc_ro_drop"
+
+    meta_loc, location, prefix = _materialize_iceberg_table(server, schema, table, 10)
+    static = _reader(server, "meta_rd", [f"{prefix}/metadata"])
+    data = _reader(server, "data_rd", [prefix])
+
+    tables = {
+        table: {
+            "metadata_location": meta_loc,
+            "location": location,
+            "vended": _vended(location, data, server.region),
+        }
+    }
+
+    _create_static_secret(pgduck_conn, server, static[0], static[1])
+    httpd, thread = _serve_mock_catalog(
+        tables, server, enable_vended=True, conn=superuser_conn
+    )
+    server.enforce()
+
+    try:
+        run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
+        superuser_conn.commit()
+        run_command(
+            f"""CREATE TABLE {schema}.{table} ()
+                USING iceberg
+                WITH (catalog='rest', read_only=True, catalog_table_name='{table}')""",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        result = run_query(f"SELECT count(*) FROM {schema}.{table}", superuser_conn)
+        superuser_conn.commit()
+        assert result[0][0] == 10
+        assert _vended_secrets_for(
+            pgduck_conn, location
+        ), "expected the scan to push a vended secret before the drop"
+
+        run_command(f"DROP TABLE {schema}.{table}", superuser_conn)
+        superuser_conn.commit()
+
+        leftover = _vended_secrets_for(pgduck_conn, location)
+        assert not leftover, f"vended secret outlived its read-only table: {leftover}"
+
+    finally:
+        server.relax()
+        run_command(f"DROP TABLE IF EXISTS {schema}.{table}", superuser_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
+        superuser_conn.commit()
+        _stop_mock_catalog(httpd, thread, conn=superuser_conn)
+
+
+def test_moto_two_principals_get_their_own_credentials(
+    superuser_conn, pgduck_conn, extension, installcheck, moto_enforcing_server
+):
+    """Two roles reading one table are each served their own credential.
+
+    A catalog vends per principal, so a backend that changes role must not
+    hand the second role what the first was given.  The two vended
+    credentials here differ in what they can actually do -- one reads the
+    table's data, the other only its metadata -- so reusing the first one is
+    not a subtle difference: the second scan would succeed where the store
+    must deny it.
+    """
+    if installcheck or not _HAVE_PYICEBERG:
+        return
+
+    server = moto_enforcing_server
+    schema = "mvm_two_princ"
     table = "vc_two_princ"
-    fdw_server = "mv_two_princ_srv"
-    role_a = "mv_princ_a"
-    role_b = "mv_princ_b"
+    fdw_server = "mvm_two_princ_srv"
+    role_a = "mvm_princ_a"
+    role_b = "mvm_princ_b"
 
     meta_loc, location, prefix = _materialize_iceberg_table(server, schema, table, 10)
 
     # The static secret reaches metadata only, so any successful data scan
     # below has to come from a vended credential.
-    server.create_scoped_user(
-        "mv_meta_2p",
-        "mv_meta_2p_secret",
-        [f"{prefix}/metadata"],
-        actions=("s3:GetObject", "s3:ListBucket"),
-    )
-    server.create_scoped_user("mv_data_2p", "mv_data_2p_secret", [prefix])
+    static = _reader(server, "meta_2p", [f"{prefix}/metadata"])
+    data = _reader(server, "data_2p", [prefix])
 
-    data_config = {
-        "s3.access-key-id": "mv_data_2p",
-        "s3.secret-access-key": "mv_data_2p_secret",
-        "client.region": server.region,
-    }
-    meta_config = {
-        "s3.access-key-id": "mv_meta_2p",
-        "s3.secret-access-key": "mv_meta_2p_secret",
-        "client.region": server.region,
-    }
+    data_vended = _vended(location, data, server.region)
+    meta_vended = _vended(location, static, server.region)
 
     tables = {
         table: {
             "metadata_location": meta_loc,
             "location": location,
             "vended_by_client": {
-                "princ_root": {"prefix": location + "/", "config": data_config},
-                "princ_a": {"prefix": location + "/", "config": data_config},
-                "princ_b": {"prefix": location + "/", "config": meta_config},
+                "princ_root": data_vended,
+                "princ_a": data_vended,
+                "princ_b": meta_vended,
             },
         }
     }
 
-    _create_static_minio_secret(pgduck_conn, server, "mv_meta_2p", "mv_meta_2p_secret")
+    _create_static_secret(pgduck_conn, server, static[0], static[1])
     httpd, thread, port = _start_mock_catalog(tables, server)
+    server.enforce()
 
     try:
         run_command(f"DROP SERVER IF EXISTS {fdw_server} CASCADE", superuser_conn)
@@ -721,6 +933,7 @@ def test_minio_two_principals_get_their_own_credentials(
         )
 
     finally:
+        server.relax()
         superuser_conn.rollback()
         run_command("RESET ROLE", superuser_conn)
         superuser_conn.commit()
@@ -736,103 +949,13 @@ def test_minio_two_principals_get_their_own_credentials(
         thread.join(timeout=5)
 
 
-@requires_minio
-def test_minio_vended_secret_dropped_with_read_only_table(
-    superuser_conn, pgduck_conn, extension, installcheck, minio_server
-):
-    """A read-only table's secret goes away with the table.
-
-    A read-only table owns none of the files it reads, so its drop queues
-    no deletes and nothing is left for the secret to authorize.  Leaving
-    it behind would not be harmless: secrets outlive the backend that
-    pushed them and DuckDB picks one by longest matching scope, so a
-    leftover would keep answering for that prefix -- with credentials
-    that expire -- for the rest of the server's life.
-    """
-    if installcheck or not _HAVE_PYICEBERG:
-        return
-
-    server = minio_server
-    schema = "mv_ro_drop"
-    table = "vc_ro_drop"
-
-    meta_loc, location, prefix = _materialize_iceberg_table(server, schema, table, 10)
-
-    server.create_scoped_user(
-        "mv_meta_rd",
-        "mv_meta_rd_secret",
-        [f"{prefix}/metadata"],
-        actions=("s3:GetObject", "s3:ListBucket"),
-    )
-    server.create_scoped_user("mv_data_rd", "mv_data_rd_secret", [prefix])
-
-    tables = {
-        table: {
-            "metadata_location": meta_loc,
-            "location": location,
-            "vended": {
-                "prefix": location + "/",
-                "config": {
-                    "s3.access-key-id": "mv_data_rd",
-                    "s3.secret-access-key": "mv_data_rd_secret",
-                    "client.region": server.region,
-                },
-            },
-        }
-    }
-
-    _create_static_minio_secret(pgduck_conn, server, "mv_meta_rd", "mv_meta_rd_secret")
-    httpd, thread = _serve_mock_catalog(
-        tables, server, enable_vended=True, conn=superuser_conn
-    )
-
-    def _vended_secrets_for_this_table():
-        rows = run_query(
-            "SELECT name, scope FROM duckdb_secrets() WHERE name LIKE 'pglake_vended_%'",
-            pgduck_conn,
-        )
-        pgduck_conn.commit()
-        return [r for r in rows if r[1] and location in r[1]]
-
-    try:
-        run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
-        superuser_conn.commit()
-        run_command(
-            f"""CREATE TABLE {schema}.{table} ()
-                USING iceberg
-                WITH (catalog='rest', read_only=True, catalog_table_name='{table}')""",
-            superuser_conn,
-        )
-        superuser_conn.commit()
-
-        result = run_query(f"SELECT count(*) FROM {schema}.{table}", superuser_conn)
-        superuser_conn.commit()
-        assert result[0][0] == 10
-        assert (
-            _vended_secrets_for_this_table()
-        ), "expected the scan to push a vended secret before the drop"
-
-        run_command(f"DROP TABLE {schema}.{table}", superuser_conn)
-        superuser_conn.commit()
-
-        leftover = _vended_secrets_for_this_table()
-        assert not leftover, f"vended secret outlived its read-only table: {leftover}"
-
-    finally:
-        run_command(f"DROP TABLE IF EXISTS {schema}.{table}", superuser_conn)
-        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
-        superuser_conn.commit()
-        _stop_mock_catalog(httpd, thread, conn=superuser_conn)
-
-
-@requires_minio
 @pytest.mark.parametrize("vended_config_keys", ["endpoint_only", "endpoint_and_style"])
-def test_minio_catalog_supplied_endpoint_still_reaches_the_store(
+def test_moto_catalog_supplied_endpoint_still_reaches_the_store(
     superuser_conn,
     pgduck_conn,
     extension,
     installcheck,
-    minio_server,
+    moto_enforcing_server,
     vended_config_keys,
 ):
     """A catalog that states its endpoint must still produce a usable secret.
@@ -840,53 +963,40 @@ def test_minio_catalog_supplied_endpoint_still_reaches_the_store(
     Stating an endpoint is what an S3-compatible deployment does; stating
     the addressing style as well is optional, and most catalogs leave it
     out.  Whatever the catalog does not say has to keep coming from the
-    secret that already serves the prefix, because a vended secret with
-    an endpoint but no URL_STYLE sends DuckDB to ``<bucket>.<host>``,
-    which resolves nowhere.  Only a real scan shows this: the secret is
-    created either way and looks right in ``duckdb_secrets()``.
+    secret that already serves the prefix, because a vended secret with an
+    endpoint but no URL_STYLE sends DuckDB to ``<bucket>.<host>``, which
+    resolves nowhere.  Only a real scan shows this: the secret is created
+    either way and looks right in ``duckdb_secrets()``.
     """
     if installcheck or not _HAVE_PYICEBERG:
         return
 
-    server = minio_server
-    schema = "mv_endpoint"
+    server = moto_enforcing_server
+    schema = "mvm_endpoint"
     table = f"vc_ep_{vended_config_keys}"
 
     meta_loc, location, prefix = _materialize_iceberg_table(server, schema, table, 10)
+    static = _reader(server, f"meta_ep_{vended_config_keys}", [f"{prefix}/metadata"])
+    data = _reader(server, f"data_ep_{vended_config_keys}", [prefix])
 
-    server.create_scoped_user(
-        f"mv_meta_ep_{vended_config_keys}",
-        "mv_meta_ep_secret",
-        [f"{prefix}/metadata"],
-        actions=("s3:GetObject", "s3:ListBucket"),
-    )
-    server.create_scoped_user(
-        f"mv_data_ep_{vended_config_keys}", "mv_data_ep_secret", [prefix]
-    )
-
-    vended_config = {
-        "s3.access-key-id": f"mv_data_ep_{vended_config_keys}",
-        "s3.secret-access-key": "mv_data_ep_secret",
-        "client.region": server.region,
-        "s3.endpoint": server.endpoint_url,
-    }
+    vended = _vended(location, data, server.region)
+    vended["config"]["s3.endpoint"] = server.endpoint_url
     if vended_config_keys == "endpoint_and_style":
-        vended_config["s3.path-style-access"] = "true"
+        vended["config"]["s3.path-style-access"] = "true"
 
     tables = {
         table: {
             "metadata_location": meta_loc,
             "location": location,
-            "vended": {"prefix": location + "/", "config": vended_config},
+            "vended": vended,
         }
     }
 
-    _create_static_minio_secret(
-        pgduck_conn, server, f"mv_meta_ep_{vended_config_keys}", "mv_meta_ep_secret"
-    )
+    _create_static_secret(pgduck_conn, server, static[0], static[1])
     httpd, thread = _serve_mock_catalog(
         tables, server, enable_vended=True, conn=superuser_conn
     )
+    server.enforce()
 
     try:
         run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
@@ -904,15 +1014,15 @@ def test_minio_catalog_supplied_endpoint_still_reaches_the_store(
         assert result[0][0] == 10
 
     finally:
+        server.relax()
         run_command(f"DROP TABLE IF EXISTS {schema}.{table}", superuser_conn)
         run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
         superuser_conn.commit()
         _stop_mock_catalog(httpd, thread, conn=superuser_conn)
 
 
-@requires_minio
-def test_minio_data_only_credential_serves_repeated_scans(
-    superuser_conn, pgduck_conn, extension, installcheck, minio_server
+def test_moto_data_only_credential_serves_repeated_scans(
+    superuser_conn, pgduck_conn, extension, installcheck, moto_enforcing_server
 ):
     """A credential covering only the data files still serves every scan.
 
@@ -928,45 +1038,28 @@ def test_minio_data_only_credential_serves_repeated_scans(
     if installcheck or not _HAVE_PYICEBERG:
         return
 
-    server = minio_server
-    schema = "mv_data_only"
+    server = moto_enforcing_server
+    schema = "mvm_data_only"
     table = "vc_data_only"
 
     meta_loc, location, prefix = _materialize_iceberg_table(server, schema, table, 10)
-
-    server.create_scoped_user(
-        "mv_meta_do",
-        "mv_meta_do_secret",
-        [f"{prefix}/metadata"],
-        actions=("s3:GetObject", "s3:ListBucket"),
-    )
-    server.create_scoped_user(
-        "mv_data_do",
-        "mv_data_do_secret",
-        [f"{prefix}/data"],
-        actions=("s3:GetObject", "s3:ListBucket"),
-    )
+    static = _reader(server, "meta_do", [f"{prefix}/metadata"])
+    data = _reader(server, "data_do", [f"{prefix}/data"])
 
     tables = {
         table: {
             "metadata_location": meta_loc,
             "location": location,
             # narrower than the table root, and preserved as such
-            "vended": {
-                "prefix": location + "/data/",
-                "config": {
-                    "s3.access-key-id": "mv_data_do",
-                    "s3.secret-access-key": "mv_data_do_secret",
-                    "client.region": server.region,
-                },
-            },
+            "vended": _vended(location, data, server.region, suffix="/data/"),
         }
     }
 
-    _create_static_minio_secret(pgduck_conn, server, "mv_meta_do", "mv_meta_do_secret")
+    _create_static_secret(pgduck_conn, server, static[0], static[1])
     httpd, thread = _serve_mock_catalog(
         tables, server, enable_vended=True, conn=superuser_conn
     )
+    server.enforce()
 
     try:
         run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
@@ -984,86 +1077,69 @@ def test_minio_data_only_credential_serves_repeated_scans(
             superuser_conn.commit()
             assert result[0][0] == 10, f"{attempt} scan did not read the data files"
 
-        scopes = [
-            s[1]
-            for s in run_query(
-                "SELECT name, scope FROM duckdb_secrets() "
-                "WHERE name LIKE 'pglake_vended_%'",
-                pgduck_conn,
-            )
-            if s[1] and location in s[1]
-        ]
-        pgduck_conn.commit()
+        scopes = [s[1] for s in _vended_secrets_for(pgduck_conn, location)]
         assert scopes, "expected a vended secret for this table"
         assert all(
             "/data/" in s for s in scopes
         ), f"data-only scope was widened to the table root: {scopes}"
 
     finally:
+        server.relax()
         run_command(f"DROP TABLE IF EXISTS {schema}.{table}", superuser_conn)
         run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
         superuser_conn.commit()
         _stop_mock_catalog(httpd, thread, conn=superuser_conn)
 
 
-@requires_minio
-def test_minio_unrelated_table_still_reads_through_the_static_secret(
-    superuser_conn, pgduck_conn, extension, installcheck, minio_server
+def test_moto_unrelated_table_still_reads_through_the_static_secret(
+    superuser_conn, pgduck_conn, extension, installcheck, moto_enforcing_server
 ):
     """Vending for one table leaves every other path alone.
 
-    The vended secret is the most specific match for its own prefix, and
-    for nothing else.  A plain parquet table sitting elsewhere in the same
-    bucket has to keep reading through the static secret it always used --
-    otherwise turning vending on for one Iceberg table would break
-    unrelated tables across the whole deployment.
+    The vended secret is the most specific match for its own prefix, and for
+    nothing else.  A plain parquet table sitting elsewhere in the same bucket
+    has to keep reading through the static secret it always used --
+    otherwise turning vending on for one Iceberg table would break unrelated
+    tables across the whole deployment.
     """
     if installcheck or not _HAVE_PYICEBERG:
         return
 
-    server = minio_server
-    schema = "mv_unrelated"
+    server = moto_enforcing_server
+    schema = "mvm_unrelated"
     table = "vc_unrelated"
 
     meta_loc, location, prefix = _materialize_iceberg_table(server, schema, table, 10)
 
     # A plain parquet file outside the Iceberg table's prefix, written with
-    # root credentials so its contents do not depend on this test's users.
+    # the full-access principal so its contents do not depend on this test's
+    # scoped users.
     outside_key = "outside/plain/rows.parquet"
     with tempfile.NamedTemporaryFile(suffix=".parquet") as tmp:
         pq.write_table(pa.table({"id": list(range(4))}), tmp.name)
-        server.client().upload_file(tmp.name, server.bucket, outside_key)
+        server.client(server.root_user, server.root_password).upload_file(
+            tmp.name, server.bucket, outside_key
+        )
     outside_url = f"s3://{server.bucket}/{outside_key}"
 
     # The static credential reads the Iceberg metadata and the unrelated
     # file; the vended one reads only the Iceberg table's own prefix.
-    server.create_scoped_user(
-        "mv_meta_un",
-        "mv_meta_un_secret",
-        [f"{prefix}/metadata", "outside"],
-        actions=("s3:GetObject", "s3:ListBucket"),
-    )
-    server.create_scoped_user("mv_data_un", "mv_data_un_secret", [prefix])
+    static = _reader(server, "meta_un", [f"{prefix}/metadata", "outside"])
+    data = _reader(server, "data_un", [prefix])
 
     tables = {
         table: {
             "metadata_location": meta_loc,
             "location": location,
-            "vended": {
-                "prefix": location + "/",
-                "config": {
-                    "s3.access-key-id": "mv_data_un",
-                    "s3.secret-access-key": "mv_data_un_secret",
-                    "client.region": server.region,
-                },
-            },
+            "vended": _vended(location, data, server.region),
         }
     }
 
-    _create_static_minio_secret(pgduck_conn, server, "mv_meta_un", "mv_meta_un_secret")
+    _create_static_secret(pgduck_conn, server, static[0], static[1])
     httpd, thread = _serve_mock_catalog(
         tables, server, enable_vended=True, conn=superuser_conn
     )
+    server.enforce()
 
     try:
         run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
@@ -1094,193 +1170,8 @@ def test_minio_unrelated_table_still_reads_through_the_static_secret(
         assert result[0][0] == 4, "unrelated parquet table stopped reading"
 
     finally:
+        server.relax()
         run_command(f"DROP FOREIGN TABLE IF EXISTS {schema}.plain", superuser_conn)
-        run_command(f"DROP TABLE IF EXISTS {schema}.{table}", superuser_conn)
-        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
-        superuser_conn.commit()
-        _stop_mock_catalog(httpd, thread, conn=superuser_conn)
-
-
-@requires_minio
-def test_minio_columnless_attach_does_not_read_storage(
-    superuser_conn, pgduck_conn, extension, installcheck, minio_server
-):
-    """Attaching a table without naming its columns must not touch storage.
-
-    ``CREATE TABLE t ()`` is how an existing catalog table is normally
-    attached; spelling out its columns is the workaround.  Inference used
-    to read metadata.json off the store, which cannot work on a catalog
-    that only vends: the relation does not exist yet, and credentials are
-    resolved per relation, so nothing can have pushed a secret for it.
-
-    Here the static credential is barred from the table entirely, so a
-    CREATE that reaches for storage is denied.  Vending then covers the
-    whole table root, which is what makes the scan afterwards work.
-    """
-    if installcheck or not _HAVE_PYICEBERG:
-        return
-
-    server = minio_server
-    schema = "mv_attach"
-    table = "vc_attach"
-
-    meta_loc, location, prefix = _materialize_iceberg_table(server, schema, table, 10)
-
-    # Reaches somewhere else in the bucket, and nothing of this table.
-    server.create_scoped_user(
-        "mv_static_at",
-        "mv_static_at_secret",
-        ["elsewhere"],
-        actions=("s3:GetObject", "s3:ListBucket"),
-    )
-    server.create_scoped_user("mv_data_at", "mv_data_at_secret", [prefix])
-
-    tables = {
-        table: {
-            "metadata_location": meta_loc,
-            "location": location,
-            "vended": {
-                "prefix": location + "/",
-                "config": {
-                    "s3.access-key-id": "mv_data_at",
-                    "s3.secret-access-key": "mv_data_at_secret",
-                    "client.region": server.region,
-                },
-            },
-        }
-    }
-
-    _create_static_minio_secret(
-        pgduck_conn, server, "mv_static_at", "mv_static_at_secret"
-    )
-    httpd, thread = _serve_mock_catalog(
-        tables, server, enable_vended=True, conn=superuser_conn
-    )
-
-    try:
-        run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
-        superuser_conn.commit()
-
-        err = run_command(
-            f"""CREATE TABLE {schema}.{table} ()
-                USING iceberg
-                WITH (catalog='rest', read_only=True, catalog_table_name='{table}')""",
-            superuser_conn,
-            raise_error=False,
-        )
-        assert not _denied(err), f"columnless attach went to storage: {err!r}"
-        assert err is None, f"columnless attach failed: {err!r}"
-        superuser_conn.commit()
-
-        columns = run_query(
-            f"""SELECT attname, atttypid::regtype::text
-                  FROM pg_attribute
-                 WHERE attrelid = '{schema}.{table}'::regclass AND attnum > 0
-                 ORDER BY attnum""",
-            superuser_conn,
-        )
-        superuser_conn.commit()
-        assert [tuple(c) for c in columns] == [("id", "bigint"), ("val", "text")]
-
-        result = run_query(f"SELECT count(*) FROM {schema}.{table}", superuser_conn)
-        superuser_conn.commit()
-        assert result[0][0] == 10
-
-    finally:
-        run_command(f"DROP TABLE IF EXISTS {schema}.{table}", superuser_conn)
-        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
-        superuser_conn.commit()
-        _stop_mock_catalog(httpd, thread, conn=superuser_conn)
-
-
-@requires_minio
-def test_minio_vended_credentials_wrong_scope_denied(
-    superuser_conn, pgduck_conn, extension, installcheck, minio_server
-):
-    if installcheck or not _HAVE_PYICEBERG:
-        return
-
-    server = minio_server
-    schema = "mv_scope"
-    table = "vc_wrongscope"
-
-    meta_loc, location, prefix = _materialize_iceberg_table(server, schema, table, 10)
-
-    server.create_scoped_user(
-        "mv_meta_ws",
-        "mv_meta_ws_secret",
-        [f"{prefix}/metadata"],
-        actions=("s3:GetObject", "s3:ListBucket"),
-    )
-    # The vended credential belongs to a different table: it can read
-    # wh/some-other-table and nothing else.  The catalog labels it with that
-    # same foreign prefix.
-    #
-    # We clamp a scope that falls outside the table root back to the table
-    # root, so this secret *is* applied to this table's data path -- and then
-    # MinIO denies it, because the credential has no rights there.  Clamping
-    # keeps a mislabeled credential from registering under the foreign scope,
-    # where it would shadow the secret wh/some-other-table depends on.
-    server.create_scoped_user(
-        "mv_data_ws", "mv_data_ws_secret", ["wh/some-other-table"]
-    )
-
-    wrong_scope = f"s3://{server.bucket}/wh/some-other-table/"
-    tables = {
-        table: {
-            "metadata_location": meta_loc,
-            "location": location,
-            "vended": {
-                "prefix": wrong_scope,
-                "config": {
-                    "s3.access-key-id": "mv_data_ws",
-                    "s3.secret-access-key": "mv_data_ws_secret",
-                    "client.region": server.region,
-                },
-            },
-        }
-    }
-
-    _create_static_minio_secret(pgduck_conn, server, "mv_meta_ws", "mv_meta_ws_secret")
-    httpd, thread = _serve_mock_catalog(
-        tables, server, enable_vended=True, conn=superuser_conn
-    )
-
-    try:
-        run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
-        superuser_conn.commit()
-        run_command(
-            f"""CREATE TABLE {schema}.{table} ()
-                USING iceberg
-                WITH (catalog='rest', read_only=True, catalog_table_name='{table}')""",
-            superuser_conn,
-        )
-        superuser_conn.commit()
-
-        err = run_query(
-            f"SELECT count(*) FROM {schema}.{table}",
-            superuser_conn,
-            raise_error=False,
-        )
-        superuser_conn.rollback()
-        assert _denied(err), f"expected an access-denied error, got: {err!r}"
-
-        # Nothing may be registered under the foreign scope.  A secret there
-        # would be selected for wh/some-other-table's own scans and shadow
-        # whatever that table legitimately uses.
-        registered = run_query(
-            """
-            SELECT name, scope
-              FROM duckdb_secrets()
-             WHERE name LIKE 'pglake_vended_%'
-            """,
-            pgduck_conn,
-        )
-        pgduck_conn.commit()
-        shadowing = [r for r in registered if r[1] and "some-other-table" in r[1]]
-        assert not shadowing, f"secret registered under a foreign scope: {shadowing}"
-
-    finally:
         run_command(f"DROP TABLE IF EXISTS {schema}.{table}", superuser_conn)
         run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
         superuser_conn.commit()

@@ -72,7 +72,7 @@ OPTIONS:
     --skip-vcpkg                Skip vcpkg and Azure SDK installation
     --skip-pg-lake              Skip building pg_lake extensions
 
-    --with-test-deps            Install optional test dependencies (PostGIS, pgAudit, pg_cron, azurite, minio)
+    --with-test-deps            Install optional test dependencies (PostGIS, pgAudit, pg_cron, azurite)
 
     -h, --help                  Show this help message
 
@@ -675,40 +675,6 @@ install_test_deps() {
         export PATH="$NPM_PREFIX/bin:$PATH"
     fi
 
-    # MinIO server (used by the credential-enforcing vended-credentials tests).
-    # Only the server binary is required; scoped users/policies are managed
-    # from Python via the `minio` SDK (installed by `pipenv install --dev`).
-    MINIO_BIN_DIR="$PGLAKE_DEPS_DIR/bin"
-    if command -v minio &>/dev/null; then
-        print_info "minio already installed"
-    elif [[ -x "$MINIO_BIN_DIR/minio" ]]; then
-        print_info "minio already installed at $MINIO_BIN_DIR/minio"
-    else
-        print_info "Installing minio server..."
-        case $OS in
-            macos)
-                brew install minio || brew install minio/stable/minio
-                ;;
-            debian|rhel)
-                mkdir -p "$MINIO_BIN_DIR"
-                minio_arch=$(uname -m)
-                case $minio_arch in
-                    x86_64|amd64) minio_arch=amd64 ;;
-                    aarch64|arm64) minio_arch=arm64 ;;
-                esac
-                curl -fsSL \
-                    "https://dl.min.io/server/minio/release/linux-${minio_arch}/minio" \
-                    -o "$MINIO_BIN_DIR/minio"
-                chmod +x "$MINIO_BIN_DIR/minio"
-                ;;
-        esac
-    fi
-
-    # Add minio to PATH for this session
-    if [[ -x "$MINIO_BIN_DIR/minio" ]]; then
-        export PATH="$MINIO_BIN_DIR:$PATH"
-    fi
-
     # Python/pipenv
     if ! command -v pipenv &>/dev/null; then
         print_info "Installing pipenv..."
@@ -897,9 +863,6 @@ print_summary() {
             NPM_PREFIX="$PGLAKE_DEPS_DIR/npm-global"
             if [[ -d "$NPM_PREFIX/bin" ]]; then
                 echo "   export PATH=$NPM_PREFIX/bin:\$PATH  # azurite (required for Azure tests)"
-            fi
-            if [[ -x "$PGLAKE_DEPS_DIR/bin/minio" ]]; then
-                echo "   export PATH=$PGLAKE_DEPS_DIR/bin:\$PATH  # minio (required for vended-credential enforcement tests)"
             fi
             JDBC_DIR="$PGLAKE_DEPS_DIR/jdbc"
             JDBC_VERSION="42.7.10"

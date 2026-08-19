@@ -1,22 +1,23 @@
 """Vended-credential tests against a real Iceberg REST catalog (Apache Polaris).
 
-These complement the MinIO suite rather than duplicating it.
+These complement ``test_vended_credentials_enforced.py`` rather than
+duplicating it.
 
-The MinIO suite proves a vended credential is genuinely *load-bearing* --
-a real policy engine denies the scan without it -- against a catalog that
-is a mock.  These tests use a real catalog instead, where a table is
+That suite proves a vended credential is genuinely *load-bearing* -- an
+enforcing S3 mock denies the scan without it -- against a catalog that is
+itself a mock.  These tests use a real catalog instead, where a table is
 registered by Polaris itself and attached read-only afterwards, which is
 the shape a production REST catalog actually serves.
 
-Storage here is moto, which accepts any credential and never denies a
-request.  So these tests assert the *resolver's* observable behavior --
-that the correctly scoped secret is pushed to pgduck_server when the
-catalog vends one, and that it is not pushed when it should not be --
-rather than that access fails without it.  Between the two suites:
+Storage here is the shared moto fixture, which accepts any credential and
+never denies a request.  So these tests assert the *resolver's* observable
+behavior -- that the correctly scoped secret is pushed to pgduck_server
+when the catalog vends one, and that it is not pushed when it should not
+be -- rather than that access fails without it.  Between the two suites:
 
-    MinIO   -> the credential is load-bearing
-    Polaris -> the credential is resolved against a real catalog, and
-               withheld from writable tables
+    Enforced -> the credential is load-bearing
+    Polaris  -> the credential is resolved against a real catalog, and
+                withheld from writable tables
 
 Vending is restricted to read-only tables, so the writable case is
 covered here as a *negative*: pg_lake owns a writable table's files and

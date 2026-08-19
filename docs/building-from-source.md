@@ -228,7 +228,7 @@ Run `./install.sh --help` to see all available options:
 --skip-vcpkg                Skip vcpkg and Azure SDK installation
 --skip-pg-lake              Skip building pg_lake extensions
 
---with-test-deps            Install optional test dependencies (PostGIS, pgAudit, pg_cron, azurite, minio)
+--with-test-deps            Install optional test dependencies (PostGIS, pgAudit, pg_cron, azurite)
 ```
 
 ## Manual Development Environment Setup
@@ -555,9 +555,6 @@ To run the full test suite, you need to install additional dependencies. These a
 - **Java 21+** (for Spark verification tests and Polaris catalog tests)
 - **PostgreSQL JDBC driver** (for Spark tests)
 - **azurite** (for Azure storage tests)
-- **minio** (for the credential-enforcing vended-credentials tests; only the
-  server binary is needed — scoped users/policies are managed from Python via
-  the `minio` SDK, which `pipenv install --dev` installs)
 
 The automated installation script can install these for you:
 
@@ -626,25 +623,6 @@ brew install node
 
 # Install azurite
 npm install -g azurite
-```
-
-### Install minio (for vended-credential enforcement tests)
-
-The vended-credentials enforcement tests use a real MinIO server so that S3
-access is actually authorized/denied by a real policy engine (unlike the
-permissive Moto mock). Only the `minio` server binary is required; the scoped
-users and policies are created from Python via the `minio` SDK, which
-`pipenv install --dev` installs. These tests skip automatically when the
-`minio` binary is not on `PATH`.
-
-```bash
-# macOS
-brew install minio
-
-# Linux (use linux-arm64 on ARM machines)
-wget https://dl.min.io/server/minio/release/linux-amd64/minio
-chmod +x minio
-sudo mv minio /usr/local/bin/
 ```
 
 ### Java and JDBC Driver
