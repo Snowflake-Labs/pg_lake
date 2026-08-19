@@ -178,14 +178,7 @@ RemoteFileExists(char *path)
 *
 * pg_lake_remove_file gets a whole vector of file names at a time and, for S3,
 * deletes them in batched DeleteObjects requests (up to 1000 keys each) rather
-* than one request per file.
-*
-* The call goes in WHERE rather than the select list so that we get a single
-* count back instead of a row per file, without DuckDB pruning a projection
-* that nothing reads. DeleteRemoteFiles writes the same call in the select list
-* because there the paths going out dwarf a boolean per path coming back. Here
-* nothing goes out but the pattern, so a row per object under the prefix is the
-* whole response.
+* than one request per file, the same as in DeleteRemoteFiles.
 */
 bool
 DeleteRemotePrefix(char *path)
@@ -197,7 +190,7 @@ DeleteRemotePrefix(char *path)
 	StringInfo	query = makeStringInfo();
 
 	appendStringInfo(query,
-					 "SELECT count(*) FROM glob(%s) WHERE pg_lake_remove_file(file)",
+					 "SELECT pg_lake_remove_file(file) FROM glob(%s)",
 					 quote_literal_cstr(recursivePath->data));
 
 	return ExecuteOptionalCommandInPGDuck(query->data);
