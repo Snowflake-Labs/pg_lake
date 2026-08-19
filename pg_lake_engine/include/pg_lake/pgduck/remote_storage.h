@@ -21,6 +21,13 @@
 #include "nodes/pg_list.h"
 
 /*
+ * Number of files removed per object-store request by DeleteRemoteFileBatch.
+ * 1000 is the largest batch S3 accepts in a single DeleteObjects call, so a
+ * fuller batch would only be split up again one level down.
+ */
+#define FILE_DELETION_BATCH_SIZE 1000
+
+/*
  * RemoteFileDesc holds a descriptions of a remote file.
  */
 typedef struct RemoteFileDesc
@@ -42,4 +49,7 @@ extern PGDLLEXPORT List *ListRemoteFileDescriptions(char *pattern);
 extern PGDLLEXPORT List *ListRemoteFileNames(char *pattern);
 extern PGDLLEXPORT bool RemoteFileExists(char *path);
 extern PGDLLEXPORT bool DeleteRemoteFile(char *path);
+extern PGDLLEXPORT bool DeleteRemoteFiles(List *paths);
+extern PGDLLEXPORT void DeleteRemoteFileBatch(List *paths, List **deletedPaths,
+											  List **failedPaths);
 extern PGDLLEXPORT bool DeleteRemotePrefix(char *path);

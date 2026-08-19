@@ -29,7 +29,6 @@
 #include "pg_lake/pgduck/remote_storage.h"
 #include "pg_lake/util/array_utils.h"
 #include "pg_extension_base/spi_helpers.h"
-#include "pg_lake/util/string_utils.h"
 #include "datatype/timestamp.h"
 #include "storage/procarray.h"
 
@@ -41,6 +40,7 @@ int			OrphanedFileRetentionPeriod = 60 * 60 * 24 * 10;	/* 10 days */
 
 /* managed by GUC, not exposed to the users */
 int			VacuumFileRemoveMaxRetries = 145;
+int			VacuumFileRemoveRetryInterval = 600;	/* 10 minutes */
 
 /*
  * DeletionQueueEntry represents a deletion entry from the
@@ -58,7 +58,7 @@ typedef struct DeletionQueueEntry
 static void RemoveDeletionQueuePathsFromCatalog(List *filePaths);
 static void IncrementDeletionQueueRetryCount(List *failedRemovalPaths);
 static bool ExpandMetadataResolveRecord(char *metadataPath);
-static bool DeleteQueuedObject(char *path, bool isPrefix, bool isVerbose);
+static bool DeleteQueuedPrefix(char *path, bool isVerbose);
 
 
 PG_FUNCTION_INFO_V1(flush_deletion_queue);
@@ -79,9 +79,11 @@ flush_deletion_queue(PG_FUNCTION_ARGS)
 	/* remove all */
 	bool		isFull = true;
 	bool		isVerbose = false;
-	List	   *deletionQueueRecords = GetDeletionQueueRecords(relationId, isFull);
+	List	   *deletionQueueRecords = GetDeletionQueueRecords(relationId, isFull,
+															   PER_LOOP_FILE_CLEANUP_LIMIT);
 
-	RemoveDeletionQueueRecords(deletionQueueRecords, isVerbose);
+	/* removes everything it can, so there is no budget to report back on */
+	RemoveDeletionQueueRecords(deletionQueueRecords, isVerbose, NULL);
 
 	ListCell   *fileCell = NULL;
 
@@ -101,9 +103,15 @@ flush_deletion_queue(PG_FUNCTION_ARGS)
 /*
  * RemoveDeletionQueueRecords removes all files that are no longer referenced .
  * Returns true if at least one file was successfully removed.
+ *
+ * When filesRemoved is given it reports how many of the records were actually
+ * removed, which is fewer than the number of records whenever a removal failed.
+ * Callers that spend a budget on this count what they removed, not what they
+ * claimed, so paths that can never be removed do not consume the budget over
+ * and over.
  */
 bool
-RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose)
+RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose, int *filesRemoved)
 {
 	List	   *deletedFilePathList = NIL;
 	List	   *failedFilePathList = NIL;
@@ -129,7 +137,15 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose)
 	 * so the expensive metadata walk is paid once: each file then gets the
 	 * normal retry_count budget and batching, and an interrupted VACUUM
 	 * resumes from committed rows.
+	 *
+	 * Plain file rows are not deleted one by one. They are collected into
+	 * batches of FILE_DELETION_BATCH_SIZE and removed with one object-store
+	 * request per batch, because a request per file made draining a large
+	 * queue take time proportional to the number of files -- with the whole
+	 * vacuum cycle, and therefore catalog publication, waiting behind it.
 	 */
+	List	   *deletionBatch = NIL;
+
 	foreach(cleanupRecordCell, deletionQueueRecords)
 	{
 		DeletionQueueEntry *entry = lfirst(cleanupRecordCell);
@@ -154,11 +170,41 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose)
 			continue;
 		}
 
-		if (DeleteQueuedObject(entry->path, entry->isPrefix, isVerbose))
-			deletedFilePathList = lappend(deletedFilePathList, entry->path);
-		else
-			failedFilePathList = lappend(failedFilePathList, entry->path);
+		if (entry->isPrefix)
+		{
+			/*
+			 * A prefix row expands into an unbounded listing plus delete, so
+			 * it stays a request of its own.
+			 */
+			if (DeleteQueuedPrefix(entry->path, isVerbose))
+				deletedFilePathList = lappend(deletedFilePathList, entry->path);
+			else
+				failedFilePathList = lappend(failedFilePathList, entry->path);
+
+			continue;
+		}
+
+		ereport(isVerbose ? INFO : LOG,
+				(errmsg("deleting expired file %s", entry->path)));
+
+		deletionBatch = lappend(deletionBatch, entry->path);
+
+		if (list_length(deletionBatch) >= FILE_DELETION_BATCH_SIZE)
+		{
+			DeleteRemoteFileBatch(deletionBatch, &deletedFilePathList,
+								  &failedFilePathList);
+			deletionBatch = NIL;
+
+			/*
+			 * A batch is a long-running request; give the caller a chance to
+			 * cancel the drain between batches.
+			 */
+			CHECK_FOR_INTERRUPTS();
+		}
 	}
+
+	/* whatever did not fill a batch */
+	DeleteRemoteFileBatch(deletionBatch, &deletedFilePathList, &failedFilePathList);
 
 	if (list_length(deletedFilePathList) > 0)
 	{
@@ -170,6 +216,11 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose)
 		IncrementDeletionQueueRetryCount(failedFilePathList);
 	}
 
+	if (filesRemoved != NULL)
+	{
+		*filesRemoved = list_length(deletedFilePathList);
+	}
+
 	/*
 	 * Keep draining if we deleted something, or if we produced new per-file
 	 * rows that the next pass still has to delete.
@@ -179,22 +230,17 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose)
 
 
 /*
- * DeleteQueuedObject removes the object(s) named by a direct deletion-queue
- * row -- a single file, or the whole tree under a prefix when isPrefix is set
- * -- and reports whether the removal succeeded.
+ * DeleteQueuedPrefix removes the whole tree under the prefix named by a
+ * deletion-queue row with is_prefix set, and reports whether the removal
+ * succeeded.
  */
 static bool
-DeleteQueuedObject(char *path, bool isPrefix, bool isVerbose)
+DeleteQueuedPrefix(char *path, bool isVerbose)
 {
 	ereport(isVerbose ? INFO : LOG,
-			(errmsg("deleting expired %s %s",
-					isPrefix ? "prefix" : "file",
-					path)));
+			(errmsg("deleting expired prefix %s", path)));
 
-	if (isPrefix)
-		return DeleteRemotePrefix(path);
-
-	return DeleteRemoteFile(path);
+	return DeleteRemotePrefix(path);
 }
 
 
@@ -329,7 +375,9 @@ RemoveDeletionQueuePathsFromCatalog(List *filePaths)
 
 /*
 * IncrementDeletionQueueRetryCount increments the retry count
-* for the given paths in the deletion queue.
+* for the given paths in the deletion queue, and records when the failed
+* attempt happened so the next one can be held off for
+* VacuumFileRemoveRetryInterval (see GetDeletionQueueRecords).
 */
 static void
 IncrementDeletionQueueRetryCount(List *failedRemovalPaths)
@@ -339,7 +387,7 @@ IncrementDeletionQueueRetryCount(List *failedRemovalPaths)
 
 	char	   *updateQuery =
 		"UPDATE " DELETION_QUEUE_TABLE " "
-		"SET retry_count = retry_count + 1 "
+		"SET retry_count = retry_count + 1, last_attempt_at = pg_catalog.now() "
 		"WHERE path OPERATOR(pg_catalog.=) ANY($1) ";
 
 	DECLARE_SPI_ARGS(1);
@@ -358,9 +406,27 @@ IncrementDeletionQueueRetryCount(List *failedRemovalPaths)
 /*
  * GetDeletionQueueRecords gets a list of paths that are eligible for
  * deletion, meaning delete_after condition is met on DELETION_QUEUE_TABLE.
+ *
+ * Unless isFull is set, at most maxRecords rows are claimed, capped at
+ * PER_LOOP_FILE_CLEANUP_LIMIT so that one pass cannot hold a transaction open
+ * for an unbounded amount of work no matter what the caller asks for. Callers
+ * that drain in a loop under a budget of their own pass what is left of that
+ * budget, so the budget is respected exactly rather than to the nearest pass.
+ *
+ * A row that failed within the last VacuumFileRemoveRetryInterval is also left
+ * alone, so a path that cannot be removed is retried on a clock rather than
+ * once per pass. Without it a pass rate the callers do not control decides both
+ * halves of the retry budget: the path is re-claimed by every pass, each of
+ * those passes pays the cost of finding out which path in its batch failed,
+ * and retry_count reaches VacuumFileRemoveMaxRetries in whatever time that many
+ * passes take -- minutes when a drain is catching up on a backlog, rather than
+ * the day the default is sized for.
+ *
+ * isFull skips the backoff: that is the manual flush, where the caller is
+ * asking to try everything now.
  */
 List *
-GetDeletionQueueRecords(Oid relationId, bool isFull)
+GetDeletionQueueRecords(Oid relationId, bool isFull, int maxRecords)
 {
 	MemoryContext callerContext = CurrentMemoryContext;
 	List	   *result = NIL;
@@ -376,9 +442,15 @@ GetDeletionQueueRecords(Oid relationId, bool isFull)
 						 "    SELECT ctid, path, orphaned_at, retry_count, is_prefix, resolve_metadata "
 						 "    FROM " DELETION_QUEUE_TABLE " "
 						 "    WHERE (orphaned_at IS NULL or pg_catalog.now() OPERATOR(pg_catalog.>=) (orphaned_at OPERATOR(pg_catalog.+) INTERVAL '%d seconds')) AND "
-						 "		  table_name OPERATOR(pg_catalog.=) %d AND retry_count OPERATOR(pg_catalog.<=) %d  FOR UPDATE",
+						 "		  table_name OPERATOR(pg_catalog.=) %d AND retry_count OPERATOR(pg_catalog.<=) %d ",
 						 OrphanedFileRetentionPeriod, relationId, VacuumFileRemoveMaxRetries);
 
+		if (!isFull)
+			appendStringInfo(query,
+							 "      AND (last_attempt_at IS NULL OR pg_catalog.now() OPERATOR(pg_catalog.>=) (last_attempt_at OPERATOR(pg_catalog.+) INTERVAL '%d seconds')) ",
+							 VacuumFileRemoveRetryInterval);
+
+		appendStringInfoString(query, " FOR UPDATE");
 	}
 	else
 	{
@@ -392,15 +464,28 @@ GetDeletionQueueRecords(Oid relationId, bool isFull)
 						 "    FROM " DELETION_QUEUE_TABLE " del "
 						 "    LEFT JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) del.table_name "
 						 "    WHERE (del.orphaned_at IS NULL or pg_catalog.now() OPERATOR(pg_catalog.>=) (del.orphaned_at OPERATOR(pg_catalog.+) INTERVAL '%d seconds')) AND "
-						 "          c.oid IS NULL  AND retry_count OPERATOR(pg_catalog.<=) %d FOR UPDATE OF del",
+						 "          c.oid IS NULL  AND retry_count OPERATOR(pg_catalog.<=) %d ",
 						 OrphanedFileRetentionPeriod, VacuumFileRemoveMaxRetries);
 
+		if (!isFull)
+			appendStringInfo(query,
+							 "      AND (del.last_attempt_at IS NULL OR pg_catalog.now() OPERATOR(pg_catalog.>=) (del.last_attempt_at OPERATOR(pg_catalog.+) INTERVAL '%d seconds')) ",
+							 VacuumFileRemoveRetryInterval);
+
+		appendStringInfoString(query, " FOR UPDATE OF del");
 	}
 
 	if (!isFull)
 	{
+		/*
+		 * Clamp at 0 as well as at the per-pass limit. No caller asks for
+		 * fewer than 0 rows today, but a negative LIMIT is an error rather
+		 * than an empty result, and the callers that compute a remaining
+		 * budget do so in another module.
+		 */
 		appendStringInfo(query,
-						 "    LIMIT " PG_LAKE_TOSTRING(PER_LOOP_FILE_CLEANUP_LIMIT));
+						 "    LIMIT %d",
+						 Max(Min(maxRecords, PER_LOOP_FILE_CLEANUP_LIMIT), 0));
 	}
 
 	appendStringInfo(query,

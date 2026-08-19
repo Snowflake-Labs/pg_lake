@@ -159,6 +159,12 @@ def test_vacuum_without_s3_access(
         "SET pg_lake_engine.orphaned_file_retention_period TO '0s';",
         superuser_conn,
     )
+    # a failed path is otherwise left alone until the retry interval elapses, so
+    # the back-to-back VACUUMs below would claim nothing after the first one
+    run_command(
+        "SET pg_lake_engine.vacuum_file_remove_retry_interval TO 0;",
+        superuser_conn,
+    )
 
     superuser_conn.commit()
     for retry in range(1, test_retry_range + 1):
@@ -217,6 +223,9 @@ def test_vacuum_without_s3_access(
     run_command("RESET pg_lake_engine.vacuum_file_remove_max_retries", superuser_conn)
     run_command("RESET pg_lake_iceberg.max_snapshot_age;", superuser_conn)
     run_command("RESET pg_lake_engine.orphaned_file_retention_period;", superuser_conn)
+    run_command(
+        "RESET pg_lake_engine.vacuum_file_remove_retry_interval;", superuser_conn
+    )
     run_command("RESET client_min_messages;", superuser_conn)
     run_command("DROP SCHEMA test_vacuum_without_s3_access CASCADE;", superuser_conn)
     superuser_conn.commit()

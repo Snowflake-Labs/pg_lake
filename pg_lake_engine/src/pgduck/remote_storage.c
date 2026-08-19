@@ -16,6 +16,7 @@
  */
 
 #include "postgres.h"
+#include "miscadmin.h"
 
 #include "pg_lake/data_file/data_file_stats.h"
 #include "pg_lake/parquet/leaf_field.h"
@@ -26,7 +27,6 @@
 
 #include "utils/builtins.h"
 #include "utils/timestamp.h"
-
 
 /*
  * GetRemoteFileSize gets the size of a remote file.
@@ -178,11 +178,7 @@ RemoteFileExists(char *path)
 *
 * pg_lake_remove_file gets a whole vector of file names at a time and, for S3,
 * deletes them in batched DeleteObjects requests (up to 1000 keys each) rather
-* than one request per file.
-*
-* The call goes in WHERE rather than the select list so that we get a single
-* count back instead of a row per file, without DuckDB pruning a projection
-* that nothing reads.
+* than one request per file, the same as in DeleteRemoteFiles.
 */
 bool
 DeleteRemotePrefix(char *path)
@@ -194,7 +190,7 @@ DeleteRemotePrefix(char *path)
 	StringInfo	query = makeStringInfo();
 
 	appendStringInfo(query,
-					 "SELECT count(*) FROM glob(%s) WHERE pg_lake_remove_file(file)",
+					 "SELECT pg_lake_remove_file(file) FROM glob(%s)",
 					 quote_literal_cstr(recursivePath->data));
 
 	return ExecuteOptionalCommandInPGDuck(query->data);
@@ -210,4 +206,113 @@ DeleteRemoteFile(char *path)
 								 quote_literal_cstr(path));
 
 	return ExecuteOptionalCommandInPGDuck(query);
+}
+
+
+/*
+ * DeleteRemoteFiles deletes the given files in a single pgduck request and
+ * reports whether the request succeeded.
+ *
+ * Deleting an arbitrary set of files used to cost one request per file, which
+ * made cleanup of a large backlog take as long as the backlog was long. One
+ * statement over a VALUES list arrives as a single vector instead, so
+ * pg_lake_remove_file collapses it into one bulk delete against the object
+ * store.
+ *
+ * Callers are expected to keep a batch within FILE_DELETION_BATCH_SIZE: the
+ * point of batching is to bound the work behind one request, not to move an
+ * unbounded delete from Postgres into pgduck.
+ */
+bool
+DeleteRemoteFiles(List *paths)
+{
+	if (paths == NIL)
+		return true;
+
+	/* keep the single-file case on the plain, cheaper statement */
+	if (list_length(paths) == 1)
+		return DeleteRemoteFile((char *) linitial(paths));
+
+	StringInfo	query = makeStringInfo();
+
+	appendStringInfoString(query, "SELECT pg_lake_remove_file(file) FROM (VALUES ");
+
+	ListCell   *pathCell = NULL;
+
+	foreach(pathCell, paths)
+	{
+		char	   *path = lfirst(pathCell);
+
+		if (pathCell != list_head(paths))
+			appendStringInfoChar(query, ',');
+
+		appendStringInfo(query, "(%s)", quote_literal_cstr(path));
+	}
+
+	appendStringInfoString(query, ") AS batch(file)");
+
+	return ExecuteOptionalCommandInPGDuck(query->data);
+}
+
+
+/*
+ * DeleteRemoteFileBatch deletes the given files in one pgduck request and
+ * records the per-path outcome: paths that were removed are appended to
+ * *deletedPaths and paths that were not to *failedPaths. Either output list
+ * may be NULL when the caller does not track that outcome.
+ *
+ * pgduck reports one status for the whole request and does not say which path
+ * was at fault, so a failed batch is retried one path at a time. Without that,
+ * a single unreachable object would charge its failure to every path that
+ * shared its request, so a caller that retires paths by failure count (such as
+ * the deletion queue) would eventually retire a whole batch of healthy ones.
+ * Removing a file twice is a no-op, so re-issuing paths the failed batch had
+ * already deleted is safe.
+ *
+ * A request per path is the cost batching exists to avoid, but only a failed
+ * batch pays it, and a path that failed is not claimed again for
+ * VacuumFileRemoveRetryInterval (see GetDeletionQueueRecords), so the retry is
+ * repeated on that clock rather than by every pass.
+ *
+ * A caller that tracks neither outcome has nothing to tell apart, so it skips
+ * the retry entirely: producing a verdict nobody reads is the per-file cost this
+ * batching exists to remove.
+ */
+void
+DeleteRemoteFileBatch(List *paths, List **deletedPaths, List **failedPaths)
+{
+	if (paths == NIL)
+		return;
+
+	if (DeleteRemoteFiles(paths))
+	{
+		if (deletedPaths != NULL)
+			*deletedPaths = list_concat(*deletedPaths, paths);
+
+		return;
+	}
+
+	if (deletedPaths == NULL && failedPaths == NULL)
+	{
+		/* no outcome to record, so no reason to find out which path failed */
+		return;
+	}
+
+	ListCell   *pathCell = NULL;
+
+	foreach(pathCell, paths)
+	{
+		char	   *path = lfirst(pathCell);
+
+		if (DeleteRemoteFile(path))
+		{
+			if (deletedPaths != NULL)
+				*deletedPaths = lappend(*deletedPaths, path);
+		}
+		else if (failedPaths != NULL)
+			*failedPaths = lappend(*failedPaths, path);
+
+		/* a retried batch is a request per path, so stay cancellable */
+		CHECK_FOR_INTERRUPTS();
+	}
 }

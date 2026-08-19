@@ -77,6 +77,16 @@ int			MaxCompactionsPerVacuum = 100;
 /* managed by a GUC, not exposed to the user, see note in VacuumRemoveInProgressFiles */
 int			MaxFileRemovalsPerVacuum = 100000;
 
+/*
+ * Set when a file removal loop stopped at MaxFileRemovalsPerVacuum with files
+ * still queued, meaning the backlog outlives this cycle. The autovacuum loop
+ * reads it to keep removing files without napping for
+ * pg_lake_iceberg.autovacuum_naptime (10 minutes by default) while there is
+ * known work pending. A VACUUM issued by a client sets it in its own backend,
+ * where nothing reads it.
+ */
+static bool VacuumStoppedWithFilesQueued = false;
+
 
 PG_FUNCTION_INFO_V1(pg_lake_iceberg_vacuum);
 
@@ -84,6 +94,7 @@ PG_FUNCTION_INFO_V1(pg_lake_iceberg_vacuum);
 static void VacuumRegisterMissingFieldsForAllTables(MemoryContext outOfTransactionMemoryContext);
 static void PgLakeIcebergVacuumForTables(MemoryContext outOfTransactionMemoryContext,
 										 bool firstLoop);
+static void PgLakeIcebergRemoveFilesForTables(MemoryContext outOfTransactionMemoryContext);
 static bool IsVacuumLakeTable(VacuumStmt *vacuumStmt);
 static List *GetAutoVacuumEnabledTables(List *relationIdList);
 static bool IsAutoVacuumEnabled(Oid relationId);
@@ -100,6 +111,7 @@ static void PgLakeIcebergVacuumForRelation(Oid relationId, bool firstLoop);
 static void VacuumTableInSeparateXacts(Oid relationId, bool isFull, bool isVerbose,
 									   bool isAutoVacuum);
 static void VacuumDroppedPgLakeIcebergTables(VacuumStmt *vacuumStmt);
+static void VacuumRemoveDroppedTableFiles(void);
 static char *GetMetadataLocationPrefixForRelationId(Oid relationId);
 static void VacuumConsumeTrackedIcebergMetadataChanges(bool isVerbose);
 
@@ -157,6 +169,8 @@ pg_lake_iceberg_vacuum(PG_FUNCTION_ARGS)
 			TimestampDifferenceExceeds(lastVacuumTime, currentTime,
 									   IcebergAutovacuumNaptime * 1000))
 		{
+			VacuumStoppedWithFilesQueued = false;
+
 			START_TRANSACTION();
 			{
 				PgLakeIcebergVacuumForTables(outOfTransactionMemoryContext, firstLoop);
@@ -167,6 +181,28 @@ pg_lake_iceberg_vacuum(PG_FUNCTION_ARGS)
 
 			/* we wait for nap time _after_ vacuum completed */
 			lastVacuumTime = GetCurrentTimestamp();
+		}
+		else if (IcebergAutovacuumEnabled && VacuumStoppedWithFilesQueued)
+		{
+			/*
+			 * The last pass stopped on MaxFileRemovalsPerVacuum with files
+			 * still queued, so we keep removing files without waiting a
+			 * naptime first: a queue that grows faster than one naptime
+			 * drains it never catches up.
+			 *
+			 * Only the file removal stages run here. A long deletion queue
+			 * says nothing about how badly the data files need rewriting, and
+			 * running the whole cycle back to back would compact much more
+			 * often than the naptime asks for. lastVacuumTime is left alone
+			 * for the same reason, so the other stages keep their schedule.
+			 */
+			VacuumStoppedWithFilesQueued = false;
+
+			START_TRANSACTION();
+			{
+				PgLakeIcebergRemoveFilesForTables(outOfTransactionMemoryContext);
+			}
+			END_TRANSACTION_NO_THROW(WARNING);
 		}
 
 		if (EnableObjectStoreCatalog &&
@@ -213,10 +249,77 @@ PgLakeIcebergVacuumForTables(MemoryContext outOfTransactionMemoryContext,
 
 	MemoryContextSwitchTo(oldctx);
 
+	/*
+	 * Ahead of the per-table loop: these are the rows no per-table pass
+	 * claims, nothing below depends on them being gone, and the drain can run
+	 * for minutes, so an error it raises rather than handles takes the rest
+	 * of the pass with it. Going first makes the drain the part of a cycle
+	 * most likely to complete.
+	 */
+	VacuumRemoveDroppedTableFiles();
+
 	foreach_oid(relationId, vacuumRelationIdList)
 	{
 		/* vacuum the iceberg table */
 		PgLakeIcebergVacuumForRelation(relationId, firstLoop);
+
+		/*
+		 * This loop could take a long time, so we check for interrupts on
+		 * each iteration.
+		 */
+		CHECK_FOR_INTERRUPTS();
+	}
+}
+
+
+/*
+* PgLakeIcebergRemoveFilesForTables runs the file removal stages of VACUUM, and
+* only those, for every table autovacuum covers plus the tables that were
+* dropped. The autovacuum worker uses it to work off a backlog that a previous
+* pass left behind (see VacuumStoppedWithFilesQueued) without pulling the other
+* stages forward with it.
+*/
+static void
+PgLakeIcebergRemoveFilesForTables(MemoryContext outOfTransactionMemoryContext)
+{
+	MemoryContext oldctx = MemoryContextSwitchTo(outOfTransactionMemoryContext);
+	List	   *relationIdList = GetAllInternalIcebergRelationIds();
+
+	List	   *vacuumRelationIdList = GetAutoVacuumEnabledTables(relationIdList);
+
+	MemoryContextSwitchTo(oldctx);
+
+	bool		isFull = false;
+	bool		isVerbose = false;
+
+	/* first, for the same reasons as in PgLakeIcebergVacuumForTables */
+	VacuumRemoveDroppedTableFiles();
+
+	foreach_oid(relationId, vacuumRelationIdList)
+	{
+		if (!ActiveSnapshotSet())
+			PushActiveSnapshot(GetTransactionSnapshot());
+
+		if (!SearchSysCacheExists1(RELOID, ObjectIdGetDatum(relationId)))
+		{
+			/*
+			 * Table dropped since we built the list. Whatever it left queued
+			 * is claimed by the next cycle's VacuumRemoveDroppedTableFiles.
+			 */
+			continue;
+		}
+
+		if (IsReadOnlyIcebergTable(relationId))
+		{
+			/*
+			 * Read-only tables are skipped by the regular cycle too, which
+			 * already warned about them.
+			 */
+			continue;
+		}
+
+		VacuumRemoveDeletionQueueRecords(relationId, isFull, isVerbose);
+		VacuumRemoveInProgressFiles(relationId, isFull, isVerbose);
 
 		/*
 		 * This loop could take a long time, so we check for interrupts on
@@ -882,6 +985,30 @@ VacuumDroppedPgLakeIcebergTables(VacuumStmt *vacuumStmt)
 
 
 /*
+* VacuumRemoveDroppedTableFiles removes the queued files of tables that no
+* longer exist. The autovacuum worker calls it ahead of the per-table passes,
+* which cannot reach those rows: a row for a dropped table points at an oid
+* that is gone from pg_class, so it is only claimed by the InvalidOid pass.
+* Without this, a dropped table would keep its files (and its share of the
+* queue, which every other drain has to page through) until someone ran
+* VACUUM (ICEBERG) by hand.
+*
+* Only the deletion queue is drained here. The in-progress file cleanup for
+* dropped tables works off an empty location prefix, so it covers every table
+* rather than the dropped ones, and it stays with the manual command.
+*/
+static void
+VacuumRemoveDroppedTableFiles(void)
+{
+	Oid			relationId = InvalidOid;
+	bool		isFull = false;
+	bool		isVerbose = false;
+
+	VacuumRemoveDeletionQueueRecords(relationId, isFull, isVerbose);
+}
+
+
+/*
 * Looping until we have removed the maximum number of files per vacuum
 * or until there are no more files to remove.
 *
@@ -890,7 +1017,15 @@ VacuumDroppedPgLakeIcebergTables(VacuumStmt *vacuumStmt)
 static void
 VacuumRemoveDeletionQueueRecords(Oid relationId, bool isFull, bool isVerbose)
 {
-	int			totalFilesRemoved = 0;
+	/*
+	 * Files this VACUUM removed, and what it has spent of its per-vacuum
+	 * budget. The two only differ for a pass that resolved dropped-table
+	 * metadata: such a pass removes nothing but converts rows that the next
+	 * pass deletes, so it is charged a unit of budget to keep this loop
+	 * finite without showing up in the count we report.
+	 */
+	volatile int totalFilesRemoved = 0;
+	volatile int budgetSpent = 0;
 
 	volatile bool hasRemainingFiles = true;
 	MemoryContext savedContext = CurrentMemoryContext;
@@ -912,10 +1047,40 @@ VacuumRemoveDeletionQueueRecords(Oid relationId, bool isFull, bool isVerbose)
 		{
 			INJECTION_POINT_COMPAT("deletion-queue");
 
-			/* do cleanup */
-			deletionQueueRecords = GetDeletionQueueRecords(relationId, isFull);
+			/*
+			 * Claim no more rows than this VACUUM has left in its budget. A
+			 * drain pass claims up to PER_LOOP_FILE_CLEANUP_LIMIT rows, which
+			 * is well above MaxFileRemovalsPerVacuum's smaller settings, and
+			 * the loop condition below can only be checked once a pass has
+			 * already deleted what it claimed.
+			 */
+			int			remainingBudget = MaxFileRemovalsPerVacuum - budgetSpent;
 
-			hasRemainingFiles = RemoveDeletionQueueRecords(deletionQueueRecords, isVerbose);
+			/* do cleanup */
+			deletionQueueRecords = GetDeletionQueueRecords(relationId, isFull,
+														   remainingBudget);
+
+			int			filesRemoved = 0;
+			bool		madeProgress = RemoveDeletionQueueRecords(deletionQueueRecords,
+																  isVerbose,
+																  &filesRemoved);
+
+			/*
+			 * Charge the budget for what came off the queue, not for what was
+			 * claimed. Charging claims would let a block of rows that failed
+			 * spend the whole budget without removing anything, take the loop
+			 * to its limit, and leave the worker thinking it stopped
+			 * mid-progress, so it would come straight back and try the same
+			 * rows again.
+			 *
+			 * A pass that removed nothing but resolved dropped-table metadata
+			 * did make progress, so it is charged one to keep the loop
+			 * finite.
+			 */
+			totalFilesRemoved += filesRemoved;
+			budgetSpent += (filesRemoved > 0) ? filesRemoved : (madeProgress ? 1 : 0);
+
+			hasRemainingFiles = madeProgress;
 
 			VacuumConsumeTrackedIcebergMetadataChanges(isVerbose);
 
@@ -944,7 +1109,6 @@ VacuumRemoveDeletionQueueRecords(Oid relationId, bool isFull, bool isVerbose)
 		}
 		PG_END_TRY();
 
-		totalFilesRemoved += list_length(deletionQueueRecords);
 		hasRemainingFiles = hasRemainingFiles ? list_length(deletionQueueRecords) > 0 : false;
 
 		/* rotate into a new transaction to release locks and save progress */
@@ -953,8 +1117,11 @@ VacuumRemoveDeletionQueueRecords(Oid relationId, bool isFull, bool isVerbose)
 		StartTransactionCommand();
 	}
 	while (!isFull				/* when isFull, we'll remove all files */
-		   && totalFilesRemoved < MaxFileRemovalsPerVacuum	/* per-vacuum limit */
+		   && budgetSpent < MaxFileRemovalsPerVacuum	/* per-vacuum limit */
 		   && hasRemainingFiles /* no more files to remove */ );
+
+	if (hasRemainingFiles && budgetSpent >= MaxFileRemovalsPerVacuum)
+		VacuumStoppedWithFilesQueued = true;
 
 	if (totalFilesRemoved > 0)
 	{
@@ -1035,6 +1202,14 @@ VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose)
 		}
 		PG_END_TRY();
 
+		/*
+		 * Rows claimed, unlike the deletion queue loop, which charges rows
+		 * removed. Safe here because RemoveInProgressFiles drops the catalog
+		 * row whatever the remote outcome, so a claimed row is gone from the
+		 * queue either way: an in-progress path cannot fail forever, cannot
+		 * be re-claimed by the next pass, and so cannot spend a budget
+		 * without making progress.
+		 */
 		totalFilesRemoved += list_length(removedFiles);
 
 		/* rotate into a new transaction to release locks and save progress */
@@ -1045,6 +1220,9 @@ VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose)
 	while (!isFull				/* when isFull, we'll remove all files */
 		   && totalFilesRemoved < MaxFileRemovalsPerVacuum	/* per-vacuum limit */
 		   && hasRemainingFiles /* no more files to remove */ );
+
+	if (hasRemainingFiles && totalFilesRemoved >= MaxFileRemovalsPerVacuum)
+		VacuumStoppedWithFilesQueued = true;
 
 	if (totalFilesRemoved > 0)
 	{

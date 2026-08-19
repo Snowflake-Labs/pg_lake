@@ -647,11 +647,14 @@ def _count_file_records(superuser_conn, location):
 
 def _vacuum_iceberg_now():
     """Force VACUUM to immediately drain the deletion queue and delete the
-    referenced object-store files (retention + snapshot age set to 0)."""
+    referenced object-store files (retention, snapshot age and the retry
+    interval set to 0, so a row a previous VACUUM failed on is tried again now
+    rather than left alone until the interval elapses)."""
     run_command_outside_tx(
         [
             "SET pg_lake_engine.orphaned_file_retention_period = 0",
             "SET pg_lake_iceberg.max_snapshot_age TO 0",
+            "SET pg_lake_engine.vacuum_file_remove_retry_interval = 0",
             "VACUUM (ICEBERG)",
         ]
     )

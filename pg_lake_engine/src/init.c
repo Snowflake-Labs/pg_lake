@@ -148,14 +148,34 @@ _PG_init(void)
 										 "with vacuum. Once this number of retries is reached, "
 										 "the file will be removed from the deletion queue and "
 										 "won't be retried to remove."),
-							NULL,
+							gettext_noop("Retries are spaced by "
+										 "pg_lake_engine.vacuum_file_remove_retry_interval, so this "
+										 "bounds how long we keep trying a file rather than how "
+										 "many vacuum passes happen to reach it."),
 							&VacuumFileRemoveMaxRetries,
-							145 /* With the default vacuum naptime, we try up
-							  * to 1 day */ ,
+							145 /* At the default retry interval, we try for
+							  * at least 1 day */ ,
 							0,
 							INT32_MAX,
 							PGC_SUSET,
 							GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("pg_lake_engine.vacuum_file_remove_retry_interval",
+							gettext_noop("The minimum time to wait before vacuum tries to remove "
+										 "a file that it failed to remove before."),
+							gettext_noop("A file that cannot be removed is otherwise retried by "
+										 "every vacuum pass that reaches it, which spends "
+										 "pg_lake_engine.vacuum_file_remove_max_retries at "
+										 "whatever rate those passes happen to run at. Set to 0 "
+										 "to retry on every pass."),
+							&VacuumFileRemoveRetryInterval,
+							600 /* the default
+							  * pg_lake_iceberg.autovacuum_naptime */ ,
+							0,
+							INT32_MAX,
+							PGC_SUSET,
+							GUC_UNIT_S | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
 
 	/*
