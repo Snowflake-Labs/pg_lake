@@ -976,7 +976,11 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 			if (catalogTableName)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("\"catalog_table_name\" option is only valid for read-only rest and object_store catalog tables")));
+						 errmsg("\"catalog_table_name\" option is only valid for read-only rest and object_store catalog tables"),
+						 errdetail("pg_lake writes only to Iceberg tables it created itself, "
+								   "and names those after the database, schema and table."),
+						 errhint("Add read_only=True to query the existing table \"%s\".",
+								 catalogTableName)));
 
 		}
 	}
