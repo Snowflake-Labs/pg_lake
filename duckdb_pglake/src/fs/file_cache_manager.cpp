@@ -44,6 +44,12 @@ const string CACHE_DIR_SETTING = "pg_lake_cache_dir";
 */
 const string CACHE_ON_WRITE_MAX_SIZE = "pg_lake_cache_on_write_max_size";
 
+/*
+ * Number of inodes that cache management keeps available on the cache file
+ * system, or MIN_FREE_INODES_AUTO to derive it from the file system.
+ */
+const string MIN_FREE_CACHE_INODES_SETTING = "pg_lake_min_free_cache_inodes";
+
 
 /*
  * The file cache is shared across clients by retrieving a global instance
@@ -76,6 +82,51 @@ FileCacheManager::TryGetCacheDir(optional_ptr<FileOpener> opener, string &cacheD
 		cacheDir += "/";
 
 	return true;
+}
+
+
+/*
+ * CheckMinFreeInodes rejects values of pg_lake_min_free_cache_inodes that we
+ * cannot act on, at SET time rather than on the next round of cache management.
+ *
+ * MIN_FREE_INODES_AUTO is itself negative, so the other negative values are
+ * rejected explicitly instead of silently turning inode management off.
+ */
+void
+FileCacheManager::CheckMinFreeInodes(ClientContext &context, SetScope scope,
+									 Value &value)
+{
+	if (value.IsNull())
+		throw InvalidInputException(MIN_FREE_CACHE_INODES_SETTING +
+									" cannot be NULL");
+
+	int64_t minFreeInodes = value.GetValue<int64_t>();
+
+	if (minFreeInodes < 0 && minFreeInodes != MIN_FREE_INODES_AUTO)
+		throw InvalidInputException(MIN_FREE_CACHE_INODES_SETTING +
+									" must be >= 0, or " +
+									to_string(MIN_FREE_INODES_AUTO) +
+									" to derive it from the cache file system");
+}
+
+
+/*
+ * GetMinFreeInodes returns the number of inodes to keep available on the cache
+ * file system according to pg_lake_min_free_cache_inodes.
+ *
+ * The setting has a default, so the lookup only fails if somebody managed to
+ * unset it; fall back to deriving the number in that case.
+ */
+static int64_t
+GetMinFreeInodes(ClientContext &context)
+{
+	Value setting;
+
+	if (!context.TryGetCurrentSetting(MIN_FREE_CACHE_INODES_SETTING, setting) ||
+		setting.IsNull())
+		return MIN_FREE_INODES_AUTO;
+
+	return setting.GetValue<int64_t>();
 }
 
 
@@ -497,8 +548,8 @@ FileCacheManager::RemoveCacheFileInternal(FileSystem &file_system, string finalC
  * freed so far.
  *
  * A floor of 0 means we manage the cache by size only, either because the file
- * system does not report inode counts we can use, or because minFreeInodes
- * turned inode management off.
+ * system does not report inode counts we can use, or because
+ * pg_lake_min_free_cache_inodes turned inode management off.
  */
 struct InodeBudget
 {
@@ -747,14 +798,16 @@ CountMissingCacheDirectories(FileSystem &fileSystem, const string &cacheDir,
  * part of the reservation.
  */
 static InodeBudget
-GetInodeBudget(FileSystem &fileSystem, const string &cacheDir,
-			   int64_t minFreeInodes, const vector<CacheItem> &cacheFiles)
+GetInodeBudget(ClientContext &context, FileSystem &fileSystem,
+			   const string &cacheDir, const vector<CacheItem> &cacheFiles)
 {
 	InodeBudget budget;
 
 	if (!TryGetInodeStats(cacheDir, budget.freeInodes, budget.totalInodes))
 		/* manage the cache by size only */
 		return budget;
+
+	int64_t minFreeInodes = GetMinFreeInodes(context);
 
 	budget.floor = minFreeInodes == MIN_FREE_INODES_AUTO ?
 		DeriveInodeFloor(budget.totalInodes) : minFreeInodes;
@@ -927,16 +980,16 @@ LogInodePressure(const string &cacheDir, InodeBudget budget,
  * files, so on a file system with a fixed inode table (e.g. ext4) we can run
  * out of inodes long before we reach maxCacheSize, at which point writes to
  * the cache start failing. We therefore also evict when the number of
- * available inodes drops below minFreeInodes, which is derived from the cache
- * file system when set to MIN_FREE_INODES_AUTO, and switched off by 0.
+ * available inodes drops below pg_lake_min_free_cache_inodes, which is derived
+ * from the cache file system when set to MIN_FREE_INODES_AUTO, and switched off
+ * by 0.
  *
  * We only evict for inodes when the cache itself holds enough of them to get
  * back above the floor, since the file system is usually shared and we cannot
  * fix somebody else's inode use by emptying our cache.
  */
 vector<CacheAction>
-FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize,
-							  int64_t minFreeInodes)
+FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize)
 {
 	lock_guard<mutex> lock(manageCacheLock);
 
@@ -1058,7 +1111,7 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize,
 	}
 
 	InodeBudget inodes =
-		GetInodeBudget(file_system, cacheDir, minFreeInodes, cacheFiles);
+		GetInodeBudget(context, file_system, cacheDir, cacheFiles);
 
 	int64_t inodesNeeded = inodes.Deficit();
 	bool inodePressure = inodesNeeded > 0;

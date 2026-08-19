@@ -358,8 +358,8 @@ def test_pg_lake_manage_cache_inode_pressure(s3, pgduck_conn):
     every write to the cache fails.
 
     The number of inodes to keep available is normally derived from the cache
-    file system, but pg_lake_manage_cache takes it as an optional argument so
-    that this test can ask for a floor that the cache itself can reach.
+    file system, but pg_lake_min_free_cache_inodes can name it, so that this
+    test can ask for a floor that the cache itself can reach.
     """
     # Start from an empty cache, so the file under test is the oldest thing in
     # it and the inode counts below are about our own files
@@ -401,8 +401,9 @@ def test_pg_lake_manage_cache_inode_pressure(s3, pgduck_conn):
         )
 
     # Without an inode floor, the file stays in the cache
+    run_command("SET pg_lake_min_free_cache_inodes TO 0;", pgduck_conn)
     results = run_query(
-        f"FROM pg_lake_manage_cache({cache_size}, 0) WHERE url = '{url}'", pgduck_conn
+        f"FROM pg_lake_manage_cache({cache_size}) WHERE url = '{url}'", pgduck_conn
     )
     assert len(results) == 0
     assert cached_path.exists()
@@ -414,8 +415,11 @@ def test_pg_lake_manage_cache_inode_pressure(s3, pgduck_conn):
     reachable_free_inodes = stats.f_favail + padding_count // 2
 
     # Under inode pressure, the file is evicted even though it fits in the budget
+    run_command(
+        f"SET pg_lake_min_free_cache_inodes TO {reachable_free_inodes};", pgduck_conn
+    )
     results = run_query(
-        f"FROM pg_lake_manage_cache({cache_size}, {reachable_free_inodes}) WHERE url = '{url}'",
+        f"FROM pg_lake_manage_cache({cache_size}) WHERE url = '{url}'",
         pgduck_conn,
     )
     assert len(results) == 1
@@ -444,8 +448,11 @@ def test_pg_lake_manage_cache_inode_pressure(s3, pgduck_conn):
     assert padding_paths != []
 
     # We do not add files while we are low on inodes
+    run_command(
+        f"SET pg_lake_min_free_cache_inodes TO {unreachable_free_inodes};", pgduck_conn
+    )
     results = run_query(
-        f"FROM pg_lake_manage_cache({cache_size}, {unreachable_free_inodes}) WHERE url = '{url}'",
+        f"FROM pg_lake_manage_cache({cache_size}) WHERE url = '{url}'",
         pgduck_conn,
     )
     assert len(results) == 1
@@ -458,8 +465,9 @@ def test_pg_lake_manage_cache_inode_pressure(s3, pgduck_conn):
 
     # Once there is no floor to meet, the file is cached
     run_query(f"SELECT count(*) FROM '{url}'", pgduck_conn)
+    run_command("SET pg_lake_min_free_cache_inodes TO 0;", pgduck_conn)
     results = run_query(
-        f"FROM pg_lake_manage_cache({cache_size}, 0) WHERE url = '{url}'", pgduck_conn
+        f"FROM pg_lake_manage_cache({cache_size}) WHERE url = '{url}'", pgduck_conn
     )
     assert len(results) == 1
     assert results[0][2] == "added"
@@ -468,17 +476,32 @@ def test_pg_lake_manage_cache_inode_pressure(s3, pgduck_conn):
     # Wipe the cache
     run_query("CALL pg_lake_manage_cache(0)", pgduck_conn)
 
+    run_command("RESET pg_lake_min_free_cache_inodes;", pgduck_conn)
+
     pgduck_conn.rollback()
 
 
-def test_pg_lake_manage_cache_invalid_min_free_inodes(pgduck_conn):
-    """-1 asks for the floor to be derived from the cache file system, so the
-    other negative values are rejected rather than quietly turning inode
-    management off."""
-    with pytest.raises(psycopg2.Error) as exc_info:
-        run_query("FROM pg_lake_manage_cache(0, -2)", pgduck_conn)
+def test_min_free_cache_inodes_setting(pgduck_conn):
+    """The default derives the floor from the cache file system, so that cache
+    management is inode-aware without anybody configuring it.
 
-    assert "min_free_inodes must be >= 0" in str(exc_info.value)
+    -1 is the only negative value that means anything, so the others are
+    rejected rather than quietly turning inode management off. pgduck_server
+    reports success for a SET it could not apply, so the rejection shows up as
+    an aborted transaction and a setting that kept the value it had.
+    """
+    results = run_query(
+        "SELECT current_setting('pg_lake_min_free_cache_inodes')", pgduck_conn
+    )
+    assert results[0][0] == -1
+
+    run_command("SET pg_lake_min_free_cache_inodes TO -2;", pgduck_conn)
+    pgduck_conn.rollback()
+
+    results = run_query(
+        "SELECT current_setting('pg_lake_min_free_cache_inodes')", pgduck_conn
+    )
+    assert results[0][0] == -1
 
     pgduck_conn.rollback()
 

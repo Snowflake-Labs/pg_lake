@@ -25,6 +25,7 @@ namespace duckdb {
 
 extern const string CACHE_DIR_SETTING;
 extern const string CACHE_ON_WRITE_MAX_SIZE;
+extern const string MIN_FREE_CACHE_INODES_SETTING;
 extern const string NO_CACHE_PREFIX;
 
 /*
@@ -46,9 +47,9 @@ const int64_t LOCK_CANNOT_BE_ACQUIRED = -1;
 const int64_t DIRECTORY_CANNOT_CREATED = -2;
 
 /*
- * Passed as minFreeInodes to ManageCache to derive the number of inodes to
- * keep available on the cache file system from the file system itself. Any
- * other negative value is rejected, and 0 turns inode management off.
+ * Value of pg_lake_min_free_cache_inodes that derives the number of inodes to
+ * keep available on the cache file system from the file system itself. Any other
+ * negative value is rejected, and 0 turns inode management off.
  */
 const int64_t MIN_FREE_INODES_AUTO = -1;
 
@@ -239,13 +240,14 @@ public:
 	static shared_ptr<FileCacheManager> Get(ClientContext &context);
 
 	bool TryGetCacheDir(optional_ptr<FileOpener> opener, string &cacheDir);
+	static void CheckMinFreeInodes(ClientContext &context, SetScope scope,
+								   Value &value);
 	bool TryGetCacheFilePath(string cacheDir, string url, string &cache_path);
 	bool IsCacheableURL(string cacheDir, string url);
 	int64_t CacheFile(ClientContext &context, string url, bool force, bool waitForLock);
 	CacheRemoveStatus RemoveCacheFile(ClientContext &context, string url, bool waitForLock);
 	CacheRemoveStatus RemoveCacheFileInternal(FileSystem& file_system, string filePath, string finalCacheFilePath, bool waitForLock);
-	vector<CacheAction> ManageCache(ClientContext &context, int64_t maxCacheSize,
-									int64_t minFreeInodes = MIN_FREE_INODES_AUTO);
+	vector<CacheAction> ManageCache(ClientContext &context, int64_t maxCacheSize);
 	vector<CacheItem> ListCache(ClientContext &context);
 	void ErrorIfPathHasGlob(ClientContext &context, string url);
 	string GetURLForCacheFilePath(string &cacheDir, const string &cacheFilePath);

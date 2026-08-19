@@ -242,7 +242,6 @@ struct ManageCacheFunctionData : public TableFunctionData
 {
 	/* Function arguments */
 	int64_t max_cache_size;
-	int64_t min_free_inodes;
 
 	/* Function state */
 	vector<CacheAction> actions;
@@ -262,24 +261,6 @@ static unique_ptr<FunctionData> ManageCacheBind(ClientContext &context,
 	/* Get the arguments */
 	auto functionData = make_uniq<ManageCacheFunctionData>();
 	functionData->max_cache_size = input.inputs[0].GetValue<int64_t>();
-
-	/*
-	 * The number of inodes to keep available on the cache file system is
-	 * optional, and derived from the file system when not specified.
-	 */
-	functionData->min_free_inodes =
-		input.inputs.size() > 1 ? input.inputs[1].GetValue<int64_t>()
-								: MIN_FREE_INODES_AUTO;
-
-	/*
-	 * MIN_FREE_INODES_AUTO is itself negative, so reject the other negative
-	 * values instead of letting them silently turn inode management off.
-	 */
-	if (functionData->min_free_inodes < 0 &&
-		functionData->min_free_inodes != MIN_FREE_INODES_AUTO)
-		throw InvalidInputException("min_free_inodes must be >= 0, or " +
-									to_string(MIN_FREE_INODES_AUTO) +
-									" to derive it from the cache file system");
 
 	/* Set the return type */
 	return_types.emplace_back(LogicalType::VARCHAR);
@@ -305,8 +286,7 @@ static void ManageCacheExec(ClientContext &context, TableFunctionInput &data_p, 
 	if (functionData.actionOffset == 0)
 	{
 		shared_ptr<FileCacheManager> cacheManager = FileCacheManager::Get(context);
-		functionData.actions = cacheManager->ManageCache(context, functionData.max_cache_size,
-														functionData.min_free_inodes);
+		functionData.actions = cacheManager->ManageCache(context, functionData.max_cache_size);
 	}
 
 	/* Set return values */
@@ -793,11 +773,6 @@ PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
 			TableFunction({LogicalTypeId::BIGINT},
 						  ManageCacheExec, ManageCacheBind));
 
-		/* pg_lake_manage_cache(max_cache_size bigint, min_free_inodes bigint) */
-		pg_lake_manage_cache.AddFunction(
-			TableFunction({LogicalTypeId::BIGINT, LogicalTypeId::BIGINT},
-						  ManageCacheExec, ManageCacheBind));
-
 	    loader.RegisterFunction(pg_lake_manage_cache);
 	}
 
@@ -917,6 +892,11 @@ PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
 	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
 	config.AddExtensionOption(CACHE_DIR_SETTING, "PgLake Cache Directory", LogicalType::VARCHAR);
 	config.AddExtensionOption(CACHE_ON_WRITE_MAX_SIZE, "PgLake cache-on-write max size", LogicalType::BIGINT);
+	config.AddExtensionOption(MIN_FREE_CACHE_INODES_SETTING,
+							  "Inodes that cache management keeps available on the cache file system, "
+							  "or -1 to derive the number from the file system",
+							  LogicalType::BIGINT, Value::BIGINT(MIN_FREE_INODES_AUTO),
+							  FileCacheManager::CheckMinFreeInodes);
 	config.AddExtensionOption(PG_LAKE_REGION_SETTING, "The region of the server", LogicalType::VARCHAR);
 	config.AddExtensionOption(MANAGED_STORAGE_BUCKET_SETTING, "PgLake managed storage bucket location", LogicalType::VARCHAR);
 	config.AddExtensionOption(MANAGED_STORAGE_KEY_ID_SETTING, "PgLake managed storage customer key ID", LogicalType::VARCHAR);
