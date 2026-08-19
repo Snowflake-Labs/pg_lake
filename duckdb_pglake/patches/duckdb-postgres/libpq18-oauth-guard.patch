@@ -1,0 +1,52 @@
+diff --git a/src/postgres_oauth.cpp b/src/postgres_oauth.cpp
+index 619532a..757de6a 100644
+--- a/src/postgres_oauth.cpp
++++ b/src/postgres_oauth.cpp
+@@ -9,14 +9,23 @@ extern "C" {
+ #include "libpq-fe.h"
+ }
+ 
++// libpq gained the auth data hook used for OAUTHBEARER in PostgreSQL 18.
++// pg_lake links the system libpq of the PostgreSQL it is built for, which may
++// be older than that, so the hook is only compiled in when libpq provides it.
++#ifdef LIBPQ_HAS_PROMPT_OAUTH_DEVICE
++#define PGLAKE_LIBPQ_HAS_AUTH_DATA_HOOK 1
++#endif
++
+ namespace duckdb {
+ 
++#ifdef PGLAKE_LIBPQ_HAS_AUTH_DATA_HOOK
+ //! Previous hook in the chain (if any)
+ static PQauthDataHook_type prev_hook = nullptr;
+ 
+ struct OAuthTokenState {
+ 	char *token_copy;
+ };
++#endif
+ 
+ //! Managed by SetThreadLocalOAuthTokenFromSessionOption
+ static thread_local std::string oauth_token;
+@@ -35,6 +44,8 @@ OAuthTokenHolder::~OAuthTokenHolder() {
+ 	}
+ }
+ 
++#ifdef PGLAKE_LIBPQ_HAS_AUTH_DATA_HOOK
++
+ static void OAuthTokenCleanup(PGconn *conn, PGoauthBearerRequest *request) {
+ 	auto *ts = static_cast<OAuthTokenState *>(request->user);
+ 	if (ts) {
+@@ -97,6 +108,14 @@ void PostgresInitOAuthHook() {
+ 	PQsetAuthDataHook(OAuthBearerTokenHook);
+ }
+ 
++#else
++
++void PostgresInitOAuthHook() {
++	// libpq is too old to inject a bearer token, nothing to hook
++}
++
++#endif
++
+ OAuthTokenHolder SetThreadLocalOAuthTokenFromSessionOption(ClientContext &ctx) {
+ 	Value val;
+ 	if (ctx.TryGetCurrentSetting("pg_oauth_token", val) && !val.IsNull()) {
