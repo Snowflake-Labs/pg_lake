@@ -107,23 +107,6 @@ _PG_init(void)
 							NULL, NULL, NULL);
 
 	DefineCustomIntVariable(
-							"pg_lake_engine.min_free_cache_inodes",
-							gettext_noop("The cache manager will evict cache files "
-										 "to keep this many inodes available on the "
-										 "cache file system."),
-							gettext_noop("A cache of many small files can run a file "
-										 "system with a fixed inode table out of "
-										 "inodes long before it reaches "
-										 "pg_lake_engine.max_cache_size. -1 derives "
-										 "the number from the cache file system, 0 "
-										 "manages the cache by size only."),
-							&MinFreeCacheInodes,
-							MIN_FREE_CACHE_INODES_DEFAULT, -1, INT_MAX,
-							PGC_SUSET,
-							0,
-							NULL, NULL, NULL);
-
-	DefineCustomIntVariable(
 							"pg_lake_engine.cache_manager_interval",
 							gettext_noop("Configures the frequency with which the "
 										 "cache manager runs by specifying the delay "

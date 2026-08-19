@@ -64,9 +64,6 @@ bool		EnableCacheManager = true;
 /* pg_lake_engine.max_cache_size_mb setting */
 int			MaxCacheSizeMB = MAX_CACHE_SIZE_MB_DEFAULT;
 
-/* pg_lake_engine.min_free_cache_inodes setting */
-int			MinFreeCacheInodes = MIN_FREE_CACHE_INODES_DEFAULT;
-
 /* pg_lake_engine.cache_manager_interval setting */
 int			CacheManagerIntervalMs = CACHE_MANAGER_INTERVAL_MS_DEFAULT;
 
@@ -213,26 +210,6 @@ ManageCache(void)
 	StartTransactionCommand();
 
 	PGDuckConnection *pgDuckConn = GetPGDuckConnection();
-
-	/*
-	 * We get a new session on every round, so the inode floor has to be set
-	 * again each time. Only do so when it differs from the default, which is
-	 * also the default of pg_lake_min_free_cache_inodes: a pgduck_server that
-	 * predates the setting ignores the SET, but it does log a warning, and
-	 * there is no reason to make it do that on every round.
-	 */
-	if (MinFreeCacheInodes != MIN_FREE_CACHE_INODES_DEFAULT)
-	{
-		StringInfoData setCommand;
-
-		initStringInfo(&setCommand);
-		appendStringInfo(&setCommand,
-						 "SET pg_lake_min_free_cache_inodes TO %d",
-						 MinFreeCacheInodes);
-
-		PQclear(ExecuteQueryOnPGDuckConnection(pgDuckConn, setCommand.data));
-	}
-
 	PGresult   *result =
 		ExecuteQueryOnPGDuckConnection(pgDuckConn, manageCacheCommand.data);
 
