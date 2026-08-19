@@ -21,7 +21,7 @@ index ffbb68dc5..5bb2ee699 100644
  avro_file_reader_get_writer_schema(avro_file_reader_t reader);
  
 diff --git a/lang/c/src/datafile.c b/lang/c/src/datafile.c
-index c9d4dfeb6..a2c9d54b1 100644
+index c9d4dfeb6..8dc775eb5 100644
 --- a/lang/c/src/datafile.c
 +++ b/lang/c/src/datafile.c
 @@ -73,7 +73,7 @@ static int write_sync(avro_file_writer_t w)
@@ -118,7 +118,44 @@ index c9d4dfeb6..a2c9d54b1 100644
  	if (rval) {
  		avro_codec_reset(w->codec);
  		avro_freet(struct avro_codec_t_, w->codec);
-@@ -541,6 +568,93 @@ int avro_file_reader_fp(FILE *fp, const char *path, int should_close,
+@@ -452,6 +479,36 @@ static int file_read_block_count(avro_file_reader_t r)
+ 	check_prefix(rval, enc->read_long(r->reader, &len),
+ 		     "Cannot read file block size: ");
+ 
++	/*
++	 * Both counts come straight off the wire as zigzag varints, so a corrupt
++	 * or misaligned file can decode them to anything, including negatives.
++	 * Neither is meaningful below zero, and letting them through does real
++	 * damage:
++	 *
++	 *   - a negative len reaches avro_malloc(len) as a size_t, which is a
++	 *     nonsensically huge allocation request (embedders that route
++	 *     avro_malloc to their own allocator see it as such);
++	 *   - or, when current_blockdata is already allocated, a negative len is
++	 *     not greater than current_blocklen, so no buffer is resized, the
++	 *     "len > 0" read and decode below are both skipped, and block_reader
++	 *     is re-pointed at the *previous* block's decompressed bytes. The
++	 *     caller then happily re-reads stale records, silently returning data
++	 *     that is not in the file;
++	 *   - a negative blocks_total makes blocks_read == blocks_total never
++	 *     true, so the sync marker is never checked again.
++	 *
++	 * Fail the read instead, so a damaged file is reported as damaged.
++	 */
++	if (r->blocks_total < 0) {
++		avro_set_error("Invalid file block count %" PRId64, r->blocks_total);
++		return EILSEQ;
++	}
++
++	if (len < 0) {
++		avro_set_error("Invalid file block size %" PRId64, len);
++		return EILSEQ;
++	}
++
+ 	if (r->current_blockdata && len > r->current_blocklen) {
+ 		r->current_blockdata = (char *) avro_realloc(r->current_blockdata, r->current_blocklen, len);
+ 		r->current_blocklen = len;
+@@ -541,6 +598,93 @@ int avro_file_reader_fp(FILE *fp, const char *path, int should_close,
  	return 0;
  }
  
