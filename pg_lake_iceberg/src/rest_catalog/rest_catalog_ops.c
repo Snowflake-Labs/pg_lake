@@ -104,7 +104,7 @@ static MemoryContext VendedCredsCacheCtx = NULL;
  */
 #define VENDED_CREDS_DEFAULT_TTL_SECS 3300
 
-static List *ExtractVendedCredentials(const char *responseBody,
+static List *ExtractVendedCredentials(Jsonb *response,
 									  RestCatalogOptions * opts);
 static void InitVendedCredsCacheIfNeeded(void);
 static void FreeCachedVendedCredentials(VendedCredentials * creds);
@@ -194,9 +194,13 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId)
 	 * If the stage-create response includes vended credentials, cache them
 	 * for subsequent writes to this table's S3 prefix.
 	 */
-	if (opts->enableVendedCredentials && httpResult.body != NULL)
+	if (opts->enableVendedCredentials && httpResult.body != NULL &&
+		*httpResult.body != '\0')
 	{
-		List	   *credentials = ExtractVendedCredentials(httpResult.body, opts);
+		Datum		bodyDatum = DirectFunctionCall1(jsonb_in,
+													CStringGetDatum(httpResult.body));
+		List	   *credentials =
+			ExtractVendedCredentials(DatumGetJsonbP(bodyDatum), opts);
 
 		StoreVendedCredentialsInCache(credentials, opts->userMappingOid,
 									  catalogName, namespaceName,
@@ -667,8 +671,9 @@ StoreVendedCredentialsInCache(List *credentials,
 /*
  * LoadTableFromRestCatalog issues a GET loadTable request to the REST
  * catalog, requesting vended credentials if enabled.  Returns a result
- * struct containing the metadata location and optional vended storage
- * credentials extracted from the response's "config" map.
+ * struct containing the metadata location, the inlined table metadata
+ * document, and optional vended storage credentials extracted from the
+ * response's "config" map.
  *
  * If vended credentials are obtained, they are also stored in the
  * vended credentials cache, so a resolve triggered later in the same
@@ -702,9 +707,19 @@ LoadTableFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogName,
 		ereport(ERROR,
 				(errmsg("key \"metadata-location\" missing in json response")));
 
+	/*
+	 * A loadTable response carries the table's whole metadata document, and
+	 * both the schema and a credential are read out of it a field at a time,
+	 * so it is parsed once here and navigated from there.
+	 */
+	Datum		bodyDatum = DirectFunctionCall1(jsonb_in, CStringGetDatum(hr.body));
+	Jsonb	   *body = DatumGetJsonbP(bodyDatum);
+
+	result.metadata = JsonbGetObject(body, "metadata");
+
 	if (opts->enableVendedCredentials)
 	{
-		result.vendedCredentials = ExtractVendedCredentials(hr.body, opts);
+		result.vendedCredentials = ExtractVendedCredentials(body, opts);
 
 		StoreVendedCredentialsInCache(result.vendedCredentials,
 									  opts->userMappingOid,
@@ -984,19 +999,10 @@ ResolveVendedScope(const char *scopePrefix, char *tableRoot)
  * Returns NIL when the response carries no usable credential.
  */
 static List *
-ExtractVendedCredentials(const char *responseBody, RestCatalogOptions * opts)
+ExtractVendedCredentials(Jsonb *response, RestCatalogOptions * opts)
 {
-	if (responseBody == NULL || *responseBody == '\0')
+	if (response == NULL)
 		return NIL;
-
-	/*
-	 * A loadTable response carries the table's whole metadata document, and a
-	 * credential is read out of it a dozen fields at a time, so it is parsed
-	 * once here and navigated from there.
-	 */
-	Datum		responseDatum = DirectFunctionCall1(jsonb_in,
-													CStringGetDatum(responseBody));
-	Jsonb	   *response = DatumGetJsonbP(responseDatum);
 
 	char	   *tableRoot = TableRootFromLoadTableResponse(response);
 	List	   *credentials = NIL;

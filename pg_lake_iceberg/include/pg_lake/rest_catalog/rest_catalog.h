@@ -68,13 +68,22 @@ typedef struct VendedCredentials
 
 
 /*
- * Result of loading a table from a REST catalog.  Contains both the
- * metadata location and optional vended credentials from the response's
- * "config" map.
+ * Result of loading a table from a REST catalog.  Contains the metadata
+ * location, the table metadata document the catalog inlined alongside
+ * it, and optional vended credentials from the response's "config" map.
  */
 typedef struct RestCatalogLoadTableResult
 {
 	char	   *metadataLocation;
+
+	/*
+	 * The "metadata" object of the loadTable response: the same document that
+	 * lives at metadataLocation, which the catalog hands us for free. Reading
+	 * it here saves a round-trip to storage, and is the only way to see the
+	 * schema before the relation exists, since storage credentials are
+	 * resolved per relation.  NULL if the catalog omitted it.
+	 */
+	Jsonb	   *metadata;
 
 	/*
 	 * One VendedCredentials per storage-credential the catalog returned, each
@@ -219,6 +228,8 @@ typedef struct JsonbArrayElement
 	char	   *stringValue;	/* may be NULL when the field is absent */
 	Jsonb	   *object;
 }			JsonbArrayElement;
+
+Jsonb	   *JsonbGetObject(Jsonb *jb, const char *key);
 
 List	   *JsonbGetArrayElementObjects(Jsonb *jb, const char *arrayKey,
 										const char *objectKey,

@@ -372,6 +372,38 @@ JsonbGetOptionalString(Jsonb *jb, int nkeys,...)
 
 
 /*
+ * JsonbGetObject returns the nested object stored under a top-level key
+ * as a document of its own, or NULL when the key is absent or does not
+ * hold an object.
+ */
+Jsonb *
+JsonbGetObject(Jsonb *jb, const char *key)
+{
+	if (jb == NULL)
+		return NULL;
+
+	JsonbContainer *root = &jb->root;
+
+	if (!JsonContainerIsObject(root))
+		return NULL;
+
+	JsonbValue	keyVal;
+
+	keyVal.type = jbvString;
+	keyVal.val.string.val = (char *) key;
+	keyVal.val.string.len = strlen(key);
+
+	JsonbValue *val = findJsonbValueFromContainer(root, JB_FOBJECT, &keyVal);
+
+	if (val == NULL || val->type != jbvBinary ||
+		!JsonContainerIsObject(val->val.binary.data))
+		return NULL;
+
+	return JsonbValueToJsonb(val);
+}
+
+
+/*
  * JsonbGetArrayElementObjects navigates a top-level object key
  * `arrayKey` that holds a JSON array and returns one JsonbArrayElement
  * per array element, in order.  Each element's `objectKey` nested

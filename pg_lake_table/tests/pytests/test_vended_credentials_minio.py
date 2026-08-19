@@ -21,6 +21,13 @@ vended credential is genuinely *load-bearing* for a data scan:
         DuckDB never applies it to the target table's data path and the
         scan is denied -- proving the scope string must be correct.
 
+  * ``test_minio_columnless_attach_does_not_read_storage``
+        ``CREATE TABLE t ()`` learns the columns from the metadata the
+        catalog inlines in its loadTable response.  The static secret
+        cannot reach the table at all, so an attach that reads
+        metadata.json off the store is denied -- which is what happens
+        when inference goes to storage before the relation exists.
+
   * ``test_minio_vended_secret_dropped_when_revoked``
         With vending on, a scan pushes the data-capable secret and
         succeeds.  Vending is then turned off (the catalog stops
@@ -117,7 +124,14 @@ def _materialize_iceberg_table(server, namespace, table, rows):
 # ---------------------------------------------------------------------------
 
 
-def _make_handler(tables):
+def _read_metadata_document(server, metadata_location):
+    """Read a table's metadata.json off MinIO with root credentials."""
+    key = metadata_location.split(f"s3://{server.bucket}/", 1)[1]
+    body = server.client().get_object(Bucket=server.bucket, Key=key)["Body"].read()
+    return json.loads(body)
+
+
+def _make_handler(tables, server):
     """Build a mock REST catalog handler.
 
     ``tables`` maps table-name -> dict with:
@@ -129,6 +143,11 @@ def _make_handler(tables):
 
     Tokens carry the client_id that asked for them, which is how a
     loadTable knows which principal it is answering.
+
+    loadTable inlines the table's real metadata document, as the Iceberg
+    REST spec requires and as Polaris and Horizon both do.  It is what
+    lets a columnless CREATE TABLE learn the schema without reaching for
+    storage, so a stub here would hide whether that works.
     """
 
     class _Handler(BaseHTTPRequestHandler):
@@ -180,11 +199,9 @@ def _make_handler(tables):
                 delegation = self.headers.get("X-Iceberg-Access-Delegation", "")
                 resp = {
                     "metadata-location": info["metadata_location"],
-                    "metadata": {
-                        "format-version": 2,
-                        "table-uuid": str(uuid.uuid4()),
-                        "location": info["location"],
-                    },
+                    "metadata": _read_metadata_document(
+                        server, info["metadata_location"]
+                    ),
                 }
 
                 vended = info.get("vended")
@@ -236,10 +253,10 @@ def _find_free_port():
         return s.getsockname()[1]
 
 
-def _start_mock_catalog(tables):
+def _start_mock_catalog(tables, server):
     """Start the mock catalog, leaving it to the caller to point at it."""
     port = _find_free_port()
-    httpd = HTTPServer(("127.0.0.1", port), _make_handler(tables))
+    httpd = HTTPServer(("127.0.0.1", port), _make_handler(tables, server))
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     return httpd, thread, port
@@ -253,7 +270,7 @@ _CATALOG_GUCS = (
 )
 
 
-def _serve_mock_catalog(tables, enable_vended, conn=None):
+def _serve_mock_catalog(tables, server, enable_vended, conn=None):
     """Start the mock catalog and point the REST GUCs at it.
 
     ``conn`` is the connection about to use the catalog.  ALTER SYSTEM
@@ -262,7 +279,7 @@ def _serve_mock_catalog(tables, enable_vended, conn=None):
     run against the previous test's (reset) settings.  A session-level
     SET on that connection takes effect immediately.
     """
-    httpd, thread, port = _start_mock_catalog(tables)
+    httpd, thread, port = _start_mock_catalog(tables, server)
 
     settings = {
         "pg_lake_iceberg.rest_catalog_host": f"http://127.0.0.1:{port}",
@@ -373,7 +390,9 @@ def test_minio_vended_credentials_required_for_scan(
     }
 
     _create_static_minio_secret(pgduck_conn, server, "mv_meta_ok", "mv_meta_ok_secret")
-    httpd, thread = _serve_mock_catalog(tables, enable_vended=True, conn=superuser_conn)
+    httpd, thread = _serve_mock_catalog(
+        tables, server, enable_vended=True, conn=superuser_conn
+    )
 
     try:
         run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
@@ -434,7 +453,9 @@ def test_minio_scan_denied_without_vended_credentials(
     }
 
     _create_static_minio_secret(pgduck_conn, server, "mv_meta_nv", "mv_meta_nv_secret")
-    httpd, thread = _serve_mock_catalog(tables, enable_vended=True, conn=superuser_conn)
+    httpd, thread = _serve_mock_catalog(
+        tables, server, enable_vended=True, conn=superuser_conn
+    )
 
     try:
         run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
@@ -502,7 +523,9 @@ def test_minio_vended_secret_dropped_when_revoked(
     }
 
     _create_static_minio_secret(pgduck_conn, server, "mv_meta_rv", "mv_meta_rv_secret")
-    httpd, thread = _serve_mock_catalog(tables, enable_vended=True, conn=superuser_conn)
+    httpd, thread = _serve_mock_catalog(
+        tables, server, enable_vended=True, conn=superuser_conn
+    )
 
     try:
         run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
@@ -630,7 +653,7 @@ def test_minio_two_principals_get_their_own_credentials(
     }
 
     _create_static_minio_secret(pgduck_conn, server, "mv_meta_2p", "mv_meta_2p_secret")
-    httpd, thread, port = _start_mock_catalog(tables)
+    httpd, thread, port = _start_mock_catalog(tables, server)
 
     try:
         run_command(f"DROP SERVER IF EXISTS {fdw_server} CASCADE", superuser_conn)
@@ -759,7 +782,9 @@ def test_minio_vended_secret_dropped_with_read_only_table(
     }
 
     _create_static_minio_secret(pgduck_conn, server, "mv_meta_rd", "mv_meta_rd_secret")
-    httpd, thread = _serve_mock_catalog(tables, enable_vended=True, conn=superuser_conn)
+    httpd, thread = _serve_mock_catalog(
+        tables, server, enable_vended=True, conn=superuser_conn
+    )
 
     def _vended_secrets_for_this_table():
         rows = run_query(
@@ -859,7 +884,9 @@ def test_minio_catalog_supplied_endpoint_still_reaches_the_store(
     _create_static_minio_secret(
         pgduck_conn, server, f"mv_meta_ep_{vended_config_keys}", "mv_meta_ep_secret"
     )
-    httpd, thread = _serve_mock_catalog(tables, enable_vended=True, conn=superuser_conn)
+    httpd, thread = _serve_mock_catalog(
+        tables, server, enable_vended=True, conn=superuser_conn
+    )
 
     try:
         run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
@@ -937,7 +964,9 @@ def test_minio_data_only_credential_serves_repeated_scans(
     }
 
     _create_static_minio_secret(pgduck_conn, server, "mv_meta_do", "mv_meta_do_secret")
-    httpd, thread = _serve_mock_catalog(tables, enable_vended=True, conn=superuser_conn)
+    httpd, thread = _serve_mock_catalog(
+        tables, server, enable_vended=True, conn=superuser_conn
+    )
 
     try:
         run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
@@ -1032,7 +1061,9 @@ def test_minio_unrelated_table_still_reads_through_the_static_secret(
     }
 
     _create_static_minio_secret(pgduck_conn, server, "mv_meta_un", "mv_meta_un_secret")
-    httpd, thread = _serve_mock_catalog(tables, enable_vended=True, conn=superuser_conn)
+    httpd, thread = _serve_mock_catalog(
+        tables, server, enable_vended=True, conn=superuser_conn
+    )
 
     try:
         run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
@@ -1064,6 +1095,98 @@ def test_minio_unrelated_table_still_reads_through_the_static_secret(
 
     finally:
         run_command(f"DROP FOREIGN TABLE IF EXISTS {schema}.plain", superuser_conn)
+        run_command(f"DROP TABLE IF EXISTS {schema}.{table}", superuser_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
+        superuser_conn.commit()
+        _stop_mock_catalog(httpd, thread, conn=superuser_conn)
+
+
+@requires_minio
+def test_minio_columnless_attach_does_not_read_storage(
+    superuser_conn, pgduck_conn, extension, installcheck, minio_server
+):
+    """Attaching a table without naming its columns must not touch storage.
+
+    ``CREATE TABLE t ()`` is how an existing catalog table is normally
+    attached; spelling out its columns is the workaround.  Inference used
+    to read metadata.json off the store, which cannot work on a catalog
+    that only vends: the relation does not exist yet, and credentials are
+    resolved per relation, so nothing can have pushed a secret for it.
+
+    Here the static credential is barred from the table entirely, so a
+    CREATE that reaches for storage is denied.  Vending then covers the
+    whole table root, which is what makes the scan afterwards work.
+    """
+    if installcheck or not _HAVE_PYICEBERG:
+        return
+
+    server = minio_server
+    schema = "mv_attach"
+    table = "vc_attach"
+
+    meta_loc, location, prefix = _materialize_iceberg_table(server, schema, table, 10)
+
+    # Reaches somewhere else in the bucket, and nothing of this table.
+    server.create_scoped_user(
+        "mv_static_at",
+        "mv_static_at_secret",
+        ["elsewhere"],
+        actions=("s3:GetObject", "s3:ListBucket"),
+    )
+    server.create_scoped_user("mv_data_at", "mv_data_at_secret", [prefix])
+
+    tables = {
+        table: {
+            "metadata_location": meta_loc,
+            "location": location,
+            "vended": {
+                "prefix": location + "/",
+                "config": {
+                    "s3.access-key-id": "mv_data_at",
+                    "s3.secret-access-key": "mv_data_at_secret",
+                    "client.region": server.region,
+                },
+            },
+        }
+    }
+
+    _create_static_minio_secret(
+        pgduck_conn, server, "mv_static_at", "mv_static_at_secret"
+    )
+    httpd, thread = _serve_mock_catalog(
+        tables, server, enable_vended=True, conn=superuser_conn
+    )
+
+    try:
+        run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
+        superuser_conn.commit()
+
+        err = run_command(
+            f"""CREATE TABLE {schema}.{table} ()
+                USING iceberg
+                WITH (catalog='rest', read_only=True, catalog_table_name='{table}')""",
+            superuser_conn,
+            raise_error=False,
+        )
+        assert not _denied(err), f"columnless attach went to storage: {err!r}"
+        assert err is None, f"columnless attach failed: {err!r}"
+        superuser_conn.commit()
+
+        columns = run_query(
+            f"""SELECT attname, atttypid::regtype::text
+                  FROM pg_attribute
+                 WHERE attrelid = '{schema}.{table}'::regclass AND attnum > 0
+                 ORDER BY attnum""",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+        assert [tuple(c) for c in columns] == [("id", "bigint"), ("val", "text")]
+
+        result = run_query(f"SELECT count(*) FROM {schema}.{table}", superuser_conn)
+        superuser_conn.commit()
+        assert result[0][0] == 10
+
+    finally:
         run_command(f"DROP TABLE IF EXISTS {schema}.{table}", superuser_conn)
         run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
         superuser_conn.commit()
@@ -1119,7 +1242,9 @@ def test_minio_vended_credentials_wrong_scope_denied(
     }
 
     _create_static_minio_secret(pgduck_conn, server, "mv_meta_ws", "mv_meta_ws_secret")
-    httpd, thread = _serve_mock_catalog(tables, enable_vended=True, conn=superuser_conn)
+    httpd, thread = _serve_mock_catalog(
+        tables, server, enable_vended=True, conn=superuser_conn
+    )
 
     try:
         run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)

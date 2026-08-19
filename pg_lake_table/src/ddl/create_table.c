@@ -826,6 +826,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 									  "from the source table in the external catalog.")));
 
 		char	   *metadataLocation = NULL;
+		Jsonb	   *catalogTableMetadata = NULL;
 		char	   *catalogNamespace = NULL;
 		char	   *catalogTableName = NULL;
 		char	   *catalogName = NULL;
@@ -900,8 +901,12 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 
 			ErrorIfRestNamespaceDoesNotExist(opts, catalogName, catalogNamespace);
 
-			metadataLocation =
-				LoadRestCatalogMetadataLocation(opts, catalogName, catalogNamespace, catalogTableName);
+			RestCatalogLoadTableResult loadResult =
+				LoadTableFromRestCatalog(opts, catalogName, catalogNamespace,
+										 catalogTableName);
+
+			metadataLocation = loadResult.metadataLocation;
+			catalogTableMetadata = loadResult.metadata;
 		}
 		else if (hasObjectStoreCatalogOption && hasExternalCatalogReadOnlyOption)
 		{
@@ -946,7 +951,17 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		}
 		else if (createStmt->base.tableElts == NIL && hasExternalCatalogReadOnlyOption)
 		{
+			/*
+			 * Infer the columns from the metadata the catalog inlined in its
+			 * loadTable response when it sent one.  Reading metadata.json
+			 * from storage instead would fail on a catalog that only vends
+			 * credentials: the relation does not exist yet, and credentials
+			 * are resolved per relation, so nothing can push a secret for it.
+			 */
 			List	   *dataFileColumns =
+				catalogTableMetadata != NULL ?
+				DescribeColumnsFromIcebergMetadata(ParseIcebergTableMetadata(catalogTableMetadata),
+												   false) :
 				DescribeColumnsFromIcebergMetadataURI(metadataLocation, false);
 
 			createStmt->base.tableElts = dataFileColumns;

@@ -18,12 +18,15 @@
 #pragma once
 
 #include "pg_lake/copy/copy_format.h"
+#include "pg_lake/iceberg/metadata_spec.h"
 #include "nodes/pg_list.h"
 
 extern PGDLLEXPORT List *DescribeColumnsForURL(char *url, CopyDataFormat format,
 											   CopyDataCompression compression,
 											   List *copyOptions);
 extern PGDLLEXPORT List *DescribeColumnsFromIcebergMetadataURI(char *uri, bool emitFilename);
+extern PGDLLEXPORT List *DescribeColumnsFromIcebergMetadata(IcebergTableMetadata * metadata,
+															bool emitFilename);
 char	   *MakeSimpleColumnName(char *columnName, CopyDataFormat format);
 
 extern PGDLLEXPORT List *SniffCSVOptions(char *url, CopyDataCompression compression,

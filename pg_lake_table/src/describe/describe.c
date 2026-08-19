@@ -166,9 +166,19 @@ DescribeColumnsForURL(char *url,
 List *
 DescribeColumnsFromIcebergMetadataURI(char *uri, bool emitFilename)
 {
-	List	   *columns = NIL;
+	return DescribeColumnsFromIcebergMetadata(ReadIcebergTableMetadata(uri),
+											  emitFilename);
+}
 
-	IcebergTableMetadata *metadata = ReadIcebergTableMetadata(uri);
+
+/*
+ * DescribeColumnsFromIcebergMetadata retrieves the columns described by
+ * an already-read Iceberg metadata document.
+ */
+List *
+DescribeColumnsFromIcebergMetadata(IcebergTableMetadata * metadata, bool emitFilename)
+{
+	List	   *columns = NIL;
 
 	if (metadata == NULL)
 	{

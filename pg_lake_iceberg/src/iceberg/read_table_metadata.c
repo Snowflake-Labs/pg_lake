@@ -68,9 +68,21 @@ ReadIcebergTableMetadata(const char *tableMetadataPath)
 	Datum		jsonbDatum = DirectFunctionCall1(jsonb_in, PointerGetDatum(tableMetadataText));
 	Jsonb	   *jsonb = DatumGetJsonbP(jsonbDatum);
 
+	return ParseIcebergTableMetadata(jsonb);
+}
+
+
+/*
+ * ParseIcebergTableMetadata reads an already-parsed metadata document,
+ * for callers holding one that never came from storage -- a REST
+ * catalog inlines the whole document in its loadTable response.
+ */
+IcebergTableMetadata *
+ParseIcebergTableMetadata(Jsonb *tableMetadataJson)
+{
 	IcebergTableMetadata *metadata = palloc0(sizeof(IcebergTableMetadata));
 
-	ReadIcebergTableMetadataFromJson(&jsonb->root, metadata);
+	ReadIcebergTableMetadataFromJson(&tableMetadataJson->root, metadata);
 
 	return metadata;
 }
