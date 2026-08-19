@@ -945,6 +945,69 @@ def test_cache_on_write_abort_removes_stage_file(s3, pgduck_conn):
         assert not stage_path.exists(), f"{ext}: orphaned staging file not cleaned up"
 
 
+def test_cache_on_write_truncates_orphaned_stage_file(s3, pgduck_conn):
+    """Reusing a .pgl-stage file left by a crash must truncate it first.
+
+    ~CachingFSFileHandle() removes the staging file on a caught abort, but a
+    hard crash or kill skips the destructor entirely and leaves one on disk at a
+    fully deterministic path. Opening that file with O_CREAT alone writes the new
+    contents over its prefix and leaves whatever of the older, longer file
+    extends past them; FileSync()/Close() then renames the hybrid in as a
+    finalized cache entry. Nothing revalidates a finalized entry against object
+    storage, so every later read of that URL gets the wrong bytes until it is
+    evicted -- for an Avro manifest, a trailing fragment past the final sync
+    marker is read as another block header.
+
+    The orphan is written directly here because that is precisely the on-disk
+    state a crash leaves behind, and the one state the destructor cannot cover.
+    """
+    test_dir = Path(
+        f"{server_params.PGDUCK_CACHE_DIR}/s3/{TEST_BUCKET}"
+        f"/test_cache_on_write_truncates_orphaned_stage_file"
+    )
+
+    # A small limit left over from another test would disable write-through
+    # caching, so pin it back to the 1GB default.
+    run_command(
+        "SET GLOBAL pg_lake_cache_on_write_max_size TO '1073741824';", pgduck_conn
+    )
+
+    # Far larger than the file about to be written, so a surviving tail is
+    # unmistakable rather than a handful of bytes.
+    filler = b"ORPHAN.." * (128 * 1024)
+
+    for ext in ("parquet", "csv"):
+        url = (
+            f"s3://{TEST_BUCKET}"
+            f"/test_cache_on_write_truncates_orphaned_stage_file/data.{ext}"
+        )
+        cached_path = test_dir / f"{CACHE_FILE_PREFIX}data.{ext}"
+        stage_path = test_dir / f"{CACHE_FILE_PREFIX}data.{ext}.pgl-stage"
+
+        test_dir.mkdir(parents=True, exist_ok=True)
+        cached_path.unlink(missing_ok=True)
+        stage_path.write_bytes(filler)
+
+        run_command(
+            f"COPY (SELECT s AS s, s * 2 AS d FROM generate_series(1, 100) g(s)) "
+            f"TO '{url}' (format '{ext}');",
+            pgduck_conn,
+        )
+
+        assert cached_path.exists(), f"{ext}: write-through cache file is missing"
+        assert not stage_path.exists(), f"{ext}: staging file was not finalized"
+
+        cached_bytes = cached_path.read_bytes()
+        assert b"ORPHAN" not in cached_bytes, (
+            f"{ext}: content of the orphaned staging file survived into the "
+            f"finalized cache entry ({len(cached_bytes)} bytes cached)"
+        )
+        assert len(cached_bytes) == pg_lake_file_size(f"nocache{url}", pgduck_conn), (
+            f"{ext}: finalized cache entry ({len(cached_bytes)} bytes) disagrees "
+            f"with the object in storage"
+        )
+
+
 # we cannot cache the same file concurrently
 def test_copy_concurrently(s3, pgduck_conn):
     url_1 = f"s3://{TEST_BUCKET}/test_copy_concurrently/file_1.csv"

@@ -174,9 +174,22 @@ PGLakeCachingFileSystem::OpenFile(const string &fullUrl,
 				{
 					try
 					{
+						/*
+						 * FILE_FLAGS_FILE_CREATE_NEW (O_CREAT|O_TRUNC), not
+						 * FILE_FLAGS_FILE_CREATE (O_CREAT): a staging file
+						 * orphaned by a hard crash or kill -- the case
+						 * ~CachingFSFileHandle() cannot cover -- may still sit
+						 * at this exact path. Without O_TRUNC we write the new
+						 * contents over its prefix and leave whatever of the
+						 * older, longer file extends past them, then rename
+						 * that hybrid in as a complete cache entry. Readers
+						 * trust a finalized cache file without revalidating it
+						 * against object storage, so that poisons every later
+						 * read of this URL until the entry is evicted.
+						 */
 						cacheOnWriteHandle =
 							localfs.OpenFile(cacheFilePath + cacheManager->STAGING_SUFFIX,
-											 FileOpenFlags::FILE_FLAGS_WRITE | FileOpenFlags::FILE_FLAGS_FILE_CREATE);
+											 FileOpenFlags::FILE_FLAGS_WRITE | FileOpenFlags::FILE_FLAGS_FILE_CREATE_NEW);
 
 						cacheOnWritePath = cacheFilePath;
 					}
