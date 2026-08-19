@@ -113,12 +113,33 @@ PGLakeCachingFileSystem::OpenFile(const string &fullUrl,
 								 openFlags.Lock(),
 								 openFlags.Compression());
 
-		/* create a handle for the file in cache */
-		wrappedHandle = localfs.OpenFile(cacheFilePath, localFlags);
+		/*
+		 * Nothing holds the per-path cache lock across the decision above and
+		 * this open, so the entry can stop being usable in between -- cache
+		 * management evicting it under pressure is the ordinary case, and the
+		 * check itself only establishes that a regular file owned by us was
+		 * there a moment ago. Fall back to the remote file rather than failing
+		 * the statement: a re-read costs a download, whereas propagating the
+		 * open failure kills a query over an object that is perfectly readable
+		 * in storage, and reports it as a bare "Cannot open file" naming an
+		 * internal cache path.
+		 */
+		try
+		{
+			/* create a handle for the file in cache */
+			wrappedHandle = localfs.OpenFile(cacheFilePath, localFlags);
 
-		PGDUCK_SERVER_DEBUG("using local cache for %s", cacheFilePath.c_str());
+			PGDUCK_SERVER_DEBUG("using local cache for %s", cacheFilePath.c_str());
+		}
+		catch (std::exception &ex)
+		{
+			PGDUCK_SERVER_DEBUG("cannot use local cache for %s, reading from "
+								"the remote file instead: %s",
+								cacheFilePath.c_str(), ex.what());
+		}
 	}
-	else
+
+	if (wrappedHandle == nullptr)
 	{
 		/* create a handle for the remote file */
 		try

@@ -91,6 +91,64 @@ def test_cache_rejects_non_regular_file(s3, pgduck_conn, tmp_path):
     pgduck_conn.rollback()
 
 
+def test_unusable_cache_file_falls_back_to_remote(s3, pgduck_conn):
+    """A cache entry that cannot be opened must not fail the read.
+
+    OpenFile() decides to read from the cache with IsOwnedByCurrentUser() and
+    then opens the file, and nothing holds the per-path cache lock across those
+    two steps. So the entry can stop being usable in between -- cache management
+    evicting it under pressure is the ordinary case, and the check only
+    establishes that a regular file owned by us was there a moment ago. The open
+    used to propagate, killing the statement with a bare
+    "IO Error: Cannot open file <cache path>" for an object that is still
+    perfectly readable in object storage.
+
+    A cache file owned by us but with no read permission reaches the same open
+    failure deterministically, without having to win a race: lstat() still
+    reports a regular file owned by the effective UID, so the cache branch is
+    taken, and only then does the open fail.
+    """
+    key = "test_unusable_cache_file_falls_back_to_remote/data.csv"
+    url = f"s3://{TEST_BUCKET}/{key}"
+    cached_path = Path(
+        f"{server_params.PGDUCK_CACHE_DIR}/s3/{TEST_BUCKET}"
+        f"/test_unusable_cache_file_falls_back_to_remote/{CACHE_FILE_PREFIX}data.csv"
+    )
+
+    run_command(
+        f"COPY (SELECT * FROM generate_series(1,10)) TO '{url}' WITH (header false);",
+        pgduck_conn,
+    )
+    run_command(f"CALL pg_lake_cache_file('{url}');", pgduck_conn)
+    assert cached_path.is_file(), "file was not cached, nothing to exercise"
+
+    remote_size = pg_lake_file_size(f"nocache{url}", pgduck_conn)
+    original_mode = cached_path.stat().st_mode & 0o777
+
+    cached_path.chmod(0o000)
+    try:
+        result = run_query(
+            f"SELECT octet_length(content) AS size FROM read_blob('{url}')",
+            pgduck_conn,
+            raise_error=False,
+        )
+    finally:
+        cached_path.chmod(original_mode)
+
+    # run_query hands back the error string rather than rows when it fails.
+    assert not isinstance(result, str), (
+        f"an unusable cache entry failed the read instead of falling back to "
+        f"object storage: {result}"
+    )
+    assert int(result[0]["size"]) == remote_size, (
+        f"fell back but returned {result[0]['size']} bytes for a "
+        f"{remote_size}-byte object"
+    )
+
+    run_query(f"CALL pg_lake_uncache_file('{url}');", pgduck_conn)
+    pgduck_conn.rollback()
+
+
 def test_pg_lake_cache_file(s3, gcs, azure, pgduck_conn):
     run_pg_lake_cache_file_test_for_protocol("s3", TEST_BUCKET, pgduck_conn, s3)
     run_pg_lake_cache_file_test_for_protocol("gs", TEST_BUCKET_GCS, pgduck_conn, gcs)
