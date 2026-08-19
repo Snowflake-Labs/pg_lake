@@ -596,6 +596,77 @@ RemoveFileScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
 
 
 /*
+ * Implementation of the pg_lake_try_remove_file scalar function.
+ *
+ * It removes the same files pg_lake_remove_file does, but reports the outcome per
+ * row instead of failing the statement: a path that is gone comes back as NULL
+ * and a path that could not be removed comes back as the reason. So a caller can
+ * delete a list of unrelated files in one request and still tell which ones it
+ * has to try again, which is what the deletion queue needs: the alternative is
+ * charging one poison path's failure to the up to 1000 healthy paths that shared
+ * its request, or narrowing the batch down with a series of further requests.
+ *
+ * pg_lake_remove_file keeps failing the statement. A caller that deletes a set of
+ * files that belong together has nothing to attribute and would have to check a
+ * result it does not otherwise read.
+ */
+static void
+TryRemoveFileScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
+	UnifiedVectorFormat fileNames;
+
+	args.data[0].ToUnifiedFormat(args.size(), fileNames);
+
+	auto fileNameData = UnifiedVectorFormat::GetData<string_t>(fileNames);
+
+	vector<string> paths;
+	vector<idx_t> pathRows;
+
+	paths.reserve(args.size());
+	pathRows.reserve(args.size());
+
+	/*
+	 * Collect the chunk's paths first and remove them in one go, as
+	 * RemoveFileScalarFun does, so that the whole chunk costs one batch of
+	 * DeleteObjects requests rather than one request per row. Hence the unified
+	 * format rather than UnaryExecutor: the result of a row is not known until
+	 * every row has been collected.
+	 */
+	for (idx_t row = 0; row < args.size(); row++)
+	{
+		idx_t entry = fileNames.sel->get_index(row);
+
+		if (!fileNames.validity.RowIsValid(entry))
+			continue;
+
+		paths.push_back(fileNameData[entry].GetString());
+		pathRows.push_back(row);
+	}
+
+	vector<string> pathErrors;
+
+	PGLakeCachingFileSystem::RemoveFiles(state.GetContext(), paths, &pathErrors);
+
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+
+	/* a removed file has nothing to report, and neither does a NULL path */
+	FlatVector::Validity(result).SetAllInvalid(args.size());
+
+	auto resultData = FlatVector::GetData<string_t>(result);
+
+	for (idx_t pathIndex = 0; pathIndex < paths.size(); pathIndex++)
+	{
+		if (pathErrors[pathIndex].empty())
+			continue;
+
+		idx_t row = pathRows[pathIndex];
+
+		resultData[row] = StringVector::AddString(result, pathErrors[pathIndex]);
+		FlatVector::Validity(result).SetValid(row);
+	}
+}
+
+
+/*
  * AddS3ExpressRegionEndpointScalarFun is a wrapper around AddS3ExpressRegionEndpoint
  * for testing purposes.
  */
@@ -817,6 +888,17 @@ PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
 						   RemoveFileScalarFun);
 
 		loader.RegisterFunction(pg_lake_remove_file);
+	}
+
+	/* pg_lake_try_remove_file function definition */
+	{
+		ScalarFunction pg_lake_try_remove_file =
+			ScalarFunction("pg_lake_try_remove_file",
+						   {LogicalType::VARCHAR},
+						   LogicalType::VARCHAR,
+						   TryRemoveFileScalarFun);
+
+		loader.RegisterFunction(pg_lake_try_remove_file);
 	}
 
 	/* pg_lake_test_add_s3_express(text) function definition */

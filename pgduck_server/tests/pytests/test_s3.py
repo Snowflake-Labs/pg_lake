@@ -464,3 +464,126 @@ def test_pg_lake_remove_file_azure(azure, pgduck_conn):
     assert list(azure.list_blobs(name_starts_with=f"{prefix}/")) == []
 
     pgduck_conn.rollback()
+
+
+def try_remove_files(paths, pgduck_conn):
+    """Runs pg_lake_try_remove_file over the given paths in one statement and
+    returns what it said about each of them, keyed by path."""
+    values = ", ".join("(NULL)" if path is None else f"('{path}')" for path in paths)
+    results = perform_query_on_cursor(
+        f"SELECT f, pg_lake_try_remove_file(f) FROM (VALUES {values}) v(f)",
+        pgduck_conn,
+    )
+
+    return {path: error for path, error in results}
+
+
+def test_pg_lake_try_remove_file_reports_each_path(s3, pgduck_conn):
+    """pg_lake_try_remove_file reports an outcome per path instead of failing the
+    statement: NULL for a path that is gone, a reason for one that could not be
+    removed.
+
+    A caller deleting an arbitrary set of files needs that. With one status for the
+    whole request, a single path it cannot remove charges its failure to every path
+    that shared the request, and a caller that gives up on a path after so many
+    failures eventually gives up on healthy ones."""
+    prefix = "test_try_remove_file"
+
+    keys = [f"{prefix}/a.parquet", f"{prefix}/b.parquet"]
+    for key in keys:
+        s3.put_object(Bucket=TEST_BUCKET, Key=key, Body=b"x")
+
+    paths = [f"s3://{TEST_BUCKET}/{key}" for key in keys]
+
+    # removing a file that is already gone is not a failure, so it reports NULL
+    paths.append(f"s3://{TEST_BUCKET}/{prefix}/missing.parquet")
+
+    # a scheme no file system claims cannot be removed, so it reports why
+    paths.append("nosuchfs://bucket/c.parquet")
+
+    outcomes = try_remove_files(paths, pgduck_conn)
+
+    assert outcomes[paths[0]] is None
+    assert outcomes[paths[1]] is None
+    assert outcomes[paths[2]] is None
+    assert outcomes[paths[3]] is not None
+
+    # the path it could not remove did not hold up the ones it could
+    assert list_objects(s3, TEST_BUCKET, f"{prefix}/") == []
+
+    pgduck_conn.rollback()
+
+
+def test_pg_lake_try_remove_file_isolates_failing_bucket(s3, pgduck_conn):
+    """A batch is one DeleteObjects request per bucket, and a request that does not
+    complete says nothing about any of its keys. The keys of the buckets that did
+    answer still get their own outcome.
+
+    Reporting a failure the object store never mentioned is the safe direction: a
+    removal is idempotent, so a path wrongly reported as failed costs one more
+    attempt, while a path wrongly reported as removed loses a file that is still
+    there."""
+    prefix = "test_try_remove_file_bucket"
+
+    key = f"{prefix}/a.parquet"
+    s3.put_object(Bucket=TEST_BUCKET, Key=key, Body=b"x")
+
+    good = f"s3://{TEST_BUCKET}/{key}"
+    bad = f"s3://{TEST_BUCKET}-does-not-exist/{prefix}/b.parquet"
+
+    outcomes = try_remove_files([bad, good], pgduck_conn)
+
+    assert outcomes[good] is None
+    assert outcomes[bad] is not None
+
+    assert list_objects(s3, TEST_BUCKET, f"{prefix}/") == []
+
+    pgduck_conn.rollback()
+
+
+def test_pg_lake_try_remove_file_null_path(s3, pgduck_conn):
+    """A NULL path has no outcome of its own, and it must not shift the outcomes of
+    the paths around it: the rows going in and the outcomes coming out are matched
+    up by position."""
+    prefix = "test_try_remove_file_null"
+
+    key = f"{prefix}/a.parquet"
+    s3.put_object(Bucket=TEST_BUCKET, Key=key, Body=b"x")
+
+    good = f"s3://{TEST_BUCKET}/{key}"
+    bad = "nosuchfs://bucket/b.parquet"
+
+    outcomes = try_remove_files([None, bad, None, good, None], pgduck_conn)
+
+    assert outcomes[None] is None
+    assert outcomes[good] is None
+    assert outcomes[bad] is not None
+
+    assert list_objects(s3, TEST_BUCKET, f"{prefix}/") == []
+
+    pgduck_conn.rollback()
+
+
+def test_pg_lake_try_remove_file_over_1000(s3, pgduck_conn):
+    """The keys of a batch go out 1000 at a time, and each request only answers for
+    its own slice of the batch. Every path of a batch that spans more than one
+    request still has to end up with the outcome of the request that carried it."""
+    prefix = "test_try_remove_file_batch"
+    count = 1001
+
+    for i in range(count):
+        s3.put_object(Bucket=TEST_BUCKET, Key=f"{prefix}/f{i}.parquet", Body=b"x")
+
+    results = perform_query_on_cursor(
+        f"""
+        SELECT count(*) FROM generate_series(0,{count - 1}) t(i)
+        WHERE pg_lake_try_remove_file(
+                  's3://{TEST_BUCKET}/{prefix}/f' || i || '.parquet') IS NULL
+        """,
+        pgduck_conn,
+    )
+    assert results[0][0] == count
+
+    assert list_objects(s3, TEST_BUCKET, f"{prefix}/") == []
+
+    pgduck_conn.rollback()

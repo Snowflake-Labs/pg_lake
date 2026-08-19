@@ -380,8 +380,12 @@ PGLakeCachingFileSystem::RemoveFile(const string &filename,
  * functions.cpp do.
  */
 void
-PGLakeCachingFileSystem::RemoveFiles(ClientContext &context, const vector<string> &paths)
+PGLakeCachingFileSystem::RemoveFiles(ClientContext &context, const vector<string> &paths,
+									 vector<string> *pathErrors)
 {
+	if (pathErrors != nullptr)
+		pathErrors->assign(paths.size(), string());
+
 	if (paths.empty())
 		return;
 
@@ -392,8 +396,13 @@ PGLakeCachingFileSystem::RemoveFiles(ClientContext &context, const vector<string
 
 	vector<string> s3Paths;
 
-	for (const string &path : paths)
+	/* which path each entry of s3Paths came from, to report an outcome per path */
+	vector<idx_t> s3PathIndexes;
+
+	for (idx_t pathIndex = 0; pathIndex < paths.size(); pathIndex++)
 	{
+		const string &path = paths[pathIndex];
+
 		/*
 		 * Only S3 has a bulk delete API. Everything else -- Azure, HTTP, local
 		 * -- goes through the ordinary per-file RemoveFile, which is one round
@@ -408,9 +417,23 @@ PGLakeCachingFileSystem::RemoveFiles(ClientContext &context, const vector<string
 		 * which takes the whole server down rather than failing the statement.
 		 */
 		if (s3fs.CanHandleFile(path))
+		{
 			s3Paths.push_back(path);
-		else
+			s3PathIndexes.push_back(pathIndex);
+			continue;
+		}
+
+		try
+		{
 			virtualFs.RemoveFile(path);
+		}
+		catch (std::exception &e)
+		{
+			if (pathErrors == nullptr)
+				throw;
+
+			(*pathErrors)[pathIndex] = e.what();
+		}
 	}
 
 	if (s3Paths.empty())
@@ -420,11 +443,11 @@ PGLakeCachingFileSystem::RemoveFiles(ClientContext &context, const vector<string
 	 * The batch delete goes straight to S3 rather than through this wrapper, so
 	 * evict the cache entries here instead, both before and after.
 	 *
-	 * Before, because RemoveFiles sends the keys in batches and throws as soon as
-	 * one batch reports an error: evicting only afterwards would leave the
-	 * already-deleted batches holding a local copy, which is the stale cache this
-	 * is meant to prevent. Dropping the copy of a file whose delete then fails
-	 * only costs a re-download.
+	 * Before, because RemoveFiles sends the keys in batches and a batch can
+	 * delete some of its keys and fail on the rest: evicting only afterwards
+	 * would leave the deleted ones holding a local copy, which is the stale cache
+	 * this is meant to prevent. Dropping the copy of a file whose delete then
+	 * fails only costs a re-download.
 	 *
 	 * After, because a concurrent reader can cache the file again in the window
 	 * between the eviction and the delete. Eviction of an uncached file is a
@@ -433,7 +456,19 @@ PGLakeCachingFileSystem::RemoveFiles(ClientContext &context, const vector<string
 	for (const string &path : s3Paths)
 		RemoveCachedCopy(context, path, opener);
 
-	s3fs.RemoveFiles(s3Paths, opener);
+	if (pathErrors == nullptr)
+	{
+		s3fs.RemoveFiles(s3Paths, opener);
+	}
+	else
+	{
+		vector<string> s3PathErrors;
+
+		s3fs.RemoveFiles(s3Paths, opener, &s3PathErrors);
+
+		for (idx_t s3PathIndex = 0; s3PathIndex < s3Paths.size(); s3PathIndex++)
+			(*pathErrors)[s3PathIndexes[s3PathIndex]] = s3PathErrors[s3PathIndex];
+	}
 
 	for (const string &path : s3Paths)
 		RemoveCachedCopy(context, path, opener);

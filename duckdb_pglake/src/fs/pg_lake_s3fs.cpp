@@ -213,18 +213,25 @@ ExtractXmlElementText(const string &xml, const string &tag)
  * POST targets /?delete, and every key must live in that bucket. The caller is
  * responsible for keeping the range within S3_DELETE_OBJECTS_MAX_KEYS.
  *
- * Throws on a malformed response or if S3 reports per-key <Error> entries.
- * Deleting a key that does not exist is not an error in S3, so a well-formed
- * DeleteResult that still carries an <Error> means a real failure (e.g. access
- * denied) that we must surface rather than silently dropping keys.
+ * Throws on a malformed response. Deleting a key that does not exist is not an
+ * error in S3, so a well-formed DeleteResult that still carries an <Error> means
+ * a real failure (e.g. access denied) that we must surface rather than silently
+ * dropping keys.
  *
- * The response also lists the keys that were deleted, but for a request without
- * errors that is simply the keys we asked for, and when there are errors we
- * throw. So we only read the <Error> entries.
+ * How the per-key <Error> entries are surfaced depends on outcomes. Without it
+ * they are collected into one exception, since a caller that gets a single
+ * status has no use for a verdict per key. With it every key in [begin, end)
+ * gets its own entry, so a caller can tell a poison key from the ones that went
+ * with it in the same request.
+ *
+ * The response also lists the keys that were deleted, but that is simply the
+ * keys we asked for minus the ones it reported an error for. So we only read the
+ * <Error> entries.
  */
 static void
 PostDeleteObjects(PgLakeS3FileSystem &fs, S3FileHandle *s3Handle,
-				  const vector<string> &keys, idx_t begin, idx_t end)
+				  const vector<string> &keys, idx_t begin, idx_t end,
+				  vector<FileRemovalOutcome> *outcomes)
 {
 	/*
 	 * Following S3FileSystem::FinalizeMultipartUpload
@@ -260,13 +267,20 @@ PostDeleteObjects(PgLakeS3FileSystem &fs, S3FileHandle *s3Handle,
 	idx_t errorCount = 0;
 	string errorDetails;
 
+	/* why S3 refused a key, for the caller that reports an outcome per key */
+	unordered_map<string, string> errorByKey;
+
 	for (size_t errorPos = result.find("<Error>");
 		 errorPos != string::npos;
 		 errorPos = result.find("<Error>", errorPos + 1))
 	{
 		errorCount++;
 
-		if (errorCount > S3_DELETE_OBJECTS_MAX_REPORTED_ERRORS)
+		/*
+		 * The cap is on what one exception says, so it does not apply when every
+		 * key carries its own reason.
+		 */
+		if (outcomes == nullptr && errorCount > S3_DELETE_OBJECTS_MAX_REPORTED_ERRORS)
 			continue;
 
 		/* limit the search to this entry, in case one of the elements is absent */
@@ -274,13 +288,40 @@ PostDeleteObjects(PgLakeS3FileSystem &fs, S3FileHandle *s3Handle,
 		string errorEntry = result.substr(errorPos, errorEnd == string::npos
 												   ? string::npos : errorEnd - errorPos);
 
+		string key = ExtractXmlElementText(errorEntry, "Key");
+		string reason = StringUtil::Format("%s (%s)",
+										   ExtractXmlElementText(errorEntry, "Code"),
+										   ExtractXmlElementText(errorEntry, "Message"));
+
+		if (outcomes != nullptr)
+		{
+			errorByKey[key] = reason;
+			continue;
+		}
+
 		if (!errorDetails.empty())
 			errorDetails += ", ";
 
-		errorDetails += StringUtil::Format("%s: %s (%s)",
-										   ExtractXmlElementText(errorEntry, "Key"),
-										   ExtractXmlElementText(errorEntry, "Code"),
-										   ExtractXmlElementText(errorEntry, "Message"));
+		errorDetails += StringUtil::Format("%s: %s", key, reason);
+	}
+
+	if (outcomes != nullptr)
+	{
+		/*
+		 * Everything S3 did not refuse it deleted, so the keys that are absent
+		 * from the errors are the ones that are gone.
+		 */
+		for (idx_t i = begin; i < end; i++)
+		{
+			auto errorEntry = errorByKey.find(keys[i]);
+
+			if (errorEntry == errorByKey.end())
+				(*outcomes)[i].removed = true;
+			else
+				(*outcomes)[i].error = errorEntry->second;
+		}
+
+		return;
 	}
 
 	if (errorCount > 0)
@@ -341,7 +382,7 @@ PgLakeS3FileSystem::RemoveFileFromS3(string path, optional_ptr<FileOpener> opene
 	/* Change the file handle to / to POST to /?delete */
 	s3Handle->path = bucketUrl + "/";
 
-	PostDeleteObjects(*this, s3Handle, keys, 0, keys.size());
+	PostDeleteObjects(*this, s3Handle, keys, 0, keys.size(), nullptr);
 
 	/*
 	 * Remove the file from HTTP metadata cache now that it has been deleted.
@@ -368,14 +409,33 @@ PgLakeS3FileSystem::RemoveFileFromS3(string path, optional_ptr<FileOpener> opene
  * query arguments the request needs, region included, and the paths can be
  * plain s3:// URLs. RegionAwareS3FileSystem::RemoveFiles groups them by bucket
  * and resolves the region.
+ *
+ * When outcomes is given it must have an entry per path, and a key S3 refuses is
+ * recorded there instead of throwing. A request that fails as a whole still
+ * throws: the keys of the batch it was carrying keep their empty outcome, so the
+ * caller can tell them apart from the ones S3 named.
  */
 void
 PgLakeS3FileSystem::RemoveFilesFromS3(const string &bucketUrl,
 									  const vector<string> &paths,
-									  optional_ptr<FileOpener> opener)
+									  optional_ptr<FileOpener> opener,
+									  vector<FileRemovalOutcome> *outcomes)
 {
 	if (paths.empty())
 		return;
+
+	/*
+	 * Start every key from "nothing happened to it yet". WithResolvedRegion
+	 * re-runs its callback when the region turns out to be wrong, so the
+	 * outcomes of the attempt that hit the mismatch must not be left standing.
+	 */
+	if (outcomes != nullptr)
+	{
+		D_ASSERT(outcomes->size() == paths.size());
+
+		for (FileRemovalOutcome &outcome : *outcomes)
+			outcome = FileRemovalOutcome();
+	}
 
 	optional_ptr<HTTPMetadataCache> metadataCache = GetGlobalCache();
 
@@ -456,15 +516,15 @@ PgLakeS3FileSystem::RemoveFilesFromS3(const string &bucketUrl,
 		/*
 		 * Evict per batch rather than once at the end, and both before and after
 		 * the request, for the same reasons the file cache does it in
-		 * PGLakeCachingFileSystem::RemoveFiles: PostDeleteObjects throws when S3
-		 * reports a per-key error, and the keys it did delete are gone whether or
+		 * PGLakeCachingFileSystem::RemoveFiles: a batch can delete some of its
+		 * keys and fail on the rest, and the ones it deleted are gone whether or
 		 * not we get to the second eviction; a concurrent reader can also cache
 		 * an entry again in the window between the eviction and the delete.
 		 * Evicting an entry for a file that is still there only costs a HEAD.
 		 */
 		evictBatch(begin, end);
 
-		PostDeleteObjects(*this, s3Handle, keys, begin, end);
+		PostDeleteObjects(*this, s3Handle, keys, begin, end, outcomes);
 
 		evictBatch(begin, end);
 	}

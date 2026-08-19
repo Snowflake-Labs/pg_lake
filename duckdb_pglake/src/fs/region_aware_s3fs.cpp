@@ -604,11 +604,20 @@ RegionAwareS3FileSystem::GetBucketRegionFromS3(const string &url, optional_ptr<F
 /*
  * RemoveFiles deletes many files, using a batched DeleteObjects request per
  * bucket instead of one request per file.
+ *
+ * pathErrors, when given, has an entry per path: empty for a path that was
+ * removed and the reason otherwise. Nothing throws in that mode, so a caller
+ * that removes files on behalf of many independent owners can charge each
+ * failure to the path it belongs to rather than to the request they shared.
  */
 void
 RegionAwareS3FileSystem::RemoveFiles(const vector<string> &paths,
-									 optional_ptr<FileOpener> opener)
+									 optional_ptr<FileOpener> opener,
+									 vector<string> *pathErrors)
 {
+	if (pathErrors != nullptr)
+		pathErrors->assign(paths.size(), string());
+
 	/*
 	 * DeleteObjects targets one bucket at a time, and the region is a property
 	 * of the bucket, so group the paths by bucket URL.
@@ -619,17 +628,37 @@ RegionAwareS3FileSystem::RemoveFiles(const vector<string> &paths,
 	 */
 	map<string, vector<string>> pathsByBucket;
 
-	for (const string &path : paths)
-	{
-		if (!StringUtil::StartsWith(path, "s3://") ||
-			UrlHasQueryArgument(path, "s3_region") ||
-			UrlHasQueryArgument(path, "s3_endpoint"))
-		{
-			RemoveFile(path, opener);
-			continue;
-		}
+	/* which path each bucket's keys came from, to report an outcome per path */
+	map<string, vector<idx_t>> pathIndexesByBucket;
 
-		pathsByBucket[GetBucketUrl(path, opener)].push_back(path);
+	for (idx_t pathIndex = 0; pathIndex < paths.size(); pathIndex++)
+	{
+		const string &path = paths[pathIndex];
+
+		try
+		{
+			if (!StringUtil::StartsWith(path, "s3://") ||
+				UrlHasQueryArgument(path, "s3_region") ||
+				UrlHasQueryArgument(path, "s3_endpoint"))
+			{
+				RemoveFile(path, opener);
+				continue;
+			}
+
+			string bucketUrl = GetBucketUrl(path, opener);
+
+			pathsByBucket[bucketUrl].push_back(path);
+
+			if (pathErrors != nullptr)
+				pathIndexesByBucket[bucketUrl].push_back(pathIndex);
+		}
+		catch (std::exception &e)
+		{
+			if (pathErrors == nullptr)
+				throw;
+
+			(*pathErrors)[pathIndex] = e.what();
+		}
 	}
 
 	/*
@@ -642,10 +671,52 @@ RegionAwareS3FileSystem::RemoveFiles(const vector<string> &paths,
 	{
 		const vector<string> &bucketPaths = bucket.second;
 
-		WithResolvedRegion(bucket.first + "/", opener,
-						   [&](const string &resolvedBucketUrl) {
-							   s3fs.RemoveFilesFromS3(resolvedBucketUrl, bucketPaths, opener);
-						   });
+		vector<FileRemovalOutcome> outcomes(bucketPaths.size());
+		string requestError;
+
+		try
+		{
+			WithResolvedRegion(bucket.first + "/", opener,
+							   [&](const string &resolvedBucketUrl) {
+								   s3fs.RemoveFilesFromS3(resolvedBucketUrl, bucketPaths,
+														  opener, pathErrors == nullptr
+																  ? nullptr : &outcomes);
+							   });
+		}
+		catch (std::exception &e)
+		{
+			if (pathErrors == nullptr)
+				throw;
+
+			/*
+			 * A request that fails as a whole says nothing about its keys, so
+			 * this covers whatever S3 did not confirm. That includes the keys of
+			 * an earlier batch to the same bucket when a later one failed:
+			 * removal is idempotent, so reporting a deleted key as failed costs
+			 * the caller one more attempt, while the other way around loses a
+			 * file that is still there.
+			 */
+			requestError = e.what();
+		}
+
+		if (pathErrors == nullptr)
+			continue;
+
+		const vector<idx_t> &pathIndexes = pathIndexesByBucket[bucket.first];
+
+		for (idx_t keyIndex = 0; keyIndex < outcomes.size(); keyIndex++)
+		{
+			const FileRemovalOutcome &outcome = outcomes[keyIndex];
+
+			if (outcome.removed)
+				continue;
+
+			const string &error = !outcome.error.empty() ? outcome.error
+														 : requestError;
+
+			(*pathErrors)[pathIndexes[keyIndex]] =
+				error.empty() ? "the object store did not report an outcome" : error;
+		}
 	}
 }
 

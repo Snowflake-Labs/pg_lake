@@ -16,7 +16,6 @@
  */
 
 #include "postgres.h"
-#include "miscadmin.h"
 
 #include "pg_lake/data_file/data_file_stats.h"
 #include "pg_lake/parquet/leaf_field.h"
@@ -28,8 +27,8 @@
 #include "utils/builtins.h"
 #include "utils/timestamp.h"
 
-static void AttributeFailedDeletion(List *paths, List **deletedPaths,
-									List **failedPaths);
+static void DeleteRemoteFilesReportingOutcomes(List *paths, List **deletedPaths,
+											   List **failedPaths);
 
 
 /*
@@ -272,24 +271,17 @@ DeleteRemoteFiles(List *paths)
  * *deletedPaths and paths that were not to *failedPaths. Either output list
  * may be NULL when the caller does not track that outcome.
  *
- * pgduck reports one status for the whole request and does not say which path
- * was at fault, so a failed batch has to be narrowed down. Without that, a
- * single unreachable object would charge its failure to every path that shared
- * its request, so a caller that retires paths by failure count (such as the
- * deletion queue) would eventually retire a whole batch of healthy ones.
- * Removing a file twice is a no-op, so replaying paths the failed batch had
- * already deleted is safe.
+ * A batch of paths that have nothing to do with each other needs an outcome per
+ * path. Without one, a single unreachable object charges its failure to every
+ * path that shared its request, so a caller that retires paths by failure count
+ * (such as the deletion queue) would eventually retire a whole batch of healthy
+ * ones. pg_lake_try_remove_file reports the outcome per row rather than failing
+ * the statement, so one request answers for the whole batch.
  *
- * The narrowing bisects rather than walking the batch, because a path that
- * cannot be removed is claimed again by every following pass, so whatever a
- * failed batch costs is paid once per pass until retry_count retires the row.
- * Walking makes that a request per path; bisecting finds k bad paths out of n
- * in O(k log n) requests, so the usual case of one poison path in a full batch
- * costs about 20 requests instead of 1000.
- *
- * A caller that tracks neither outcome has nothing to tell apart, so it skips
- * the narrowing entirely: producing a verdict nobody reads is the per-file cost
- * this batching exists to remove.
+ * A caller that tracks neither outcome has nothing to attribute, so it takes the
+ * cheaper statement that reports a single status: a boolean per path is more than
+ * it needs coming back, and a verdict nobody reads is the per-file cost this
+ * batching exists to remove.
  */
 void
 DeleteRemoteFileBatch(List *paths, List **deletedPaths, List **failedPaths)
@@ -297,67 +289,163 @@ DeleteRemoteFileBatch(List *paths, List **deletedPaths, List **failedPaths)
 	if (paths == NIL)
 		return;
 
-	if (DeleteRemoteFiles(paths))
-	{
-		if (deletedPaths != NULL)
-			*deletedPaths = list_concat(*deletedPaths, paths);
-
-		return;
-	}
-
 	if (deletedPaths == NULL && failedPaths == NULL)
 	{
-		/* no outcome to record, so no reason to find out which path failed */
+		DeleteRemoteFiles(paths);
 		return;
 	}
 
-	AttributeFailedDeletion(paths, deletedPaths, failedPaths);
+	MemoryContext savedContext = CurrentMemoryContext;
+	volatile bool outcomesReported = false;
+
+	PG_TRY();
+	{
+		DeleteRemoteFilesReportingOutcomes(paths, deletedPaths, failedPaths);
+		outcomesReported = true;
+	}
+	PG_CATCH();
+	{
+		/*
+		 * continue with a warning unless it was a cancellation, as
+		 * ExecuteOptionalCommandInPGDuck does
+		 */
+		MemoryContextSwitchTo(savedContext);
+
+		ErrorData  *edata = CopyErrorData();
+
+		FlushErrorState();
+
+		if (edata->sqlerrcode != ERRCODE_QUERY_CANCELED)
+			edata->elevel = WARNING;
+
+		ThrowErrorData(edata);
+	}
+	PG_END_TRY();
+
+	if (outcomesReported)
+		return;
+
+	/*
+	 * A request that did not complete says nothing about any of its paths, so
+	 * none of them is accounted for. Report them all as failed: a path the
+	 * request did remove is claimed again by the next pass, and removing a
+	 * file twice is a no-op, while the other way around loses a file that is
+	 * still there.
+	 */
+	if (failedPaths != NULL)
+		*failedPaths = list_concat(*failedPaths, paths);
 }
 
 
 /*
- * AttributeFailedDeletion works out which of the paths of a failed batch could
- * not be removed, by halving the batch and re-issuing each half. A half that
- * succeeds accounts for all of its paths in one request; only a half that fails
- * is split further, so the requests spent follow the number of bad paths rather
- * than the size of the batch.
+ * DeleteRemoteFilesReportingOutcomes deletes the given files in a single pgduck
+ * request and reads back what became of each one: pg_lake_try_remove_file returns
+ * NULL for a path that is gone and the reason for a path that could not be
+ * removed. Throws if the request itself did not complete, in which case the
+ * output lists are left untouched.
+ *
+ * The reason is only reported here, since the deletion queue records how often a
+ * path failed and not why. It is the same reason a failed removal used to raise,
+ * so a batch that partially fails still says as much about it as one that failed
+ * outright.
  */
 static void
-AttributeFailedDeletion(List *paths, List **deletedPaths, List **failedPaths)
+DeleteRemoteFilesReportingOutcomes(List *paths, List **deletedPaths,
+								   List **failedPaths)
 {
-	if (list_length(paths) == 1)
+	StringInfo	query = makeStringInfo();
+
+	appendStringInfoString(query,
+						   "SELECT file, pg_lake_try_remove_file(file) AS error "
+						   "FROM (VALUES ");
+
+	ListCell   *pathCell = NULL;
+
+	foreach(pathCell, paths)
 	{
-		char	   *path = linitial(paths);
+		char	   *path = lfirst(pathCell);
 
-		/*
-		 * A single path is its own verdict: the batch we just failed was this
-		 * one request, so there is nothing left to re-issue.
-		 */
-		if (failedPaths != NULL)
-			*failedPaths = lappend(*failedPaths, path);
+		if (pathCell != list_head(paths))
+			appendStringInfoChar(query, ',');
 
-		return;
+		appendStringInfo(query, "(%s)", quote_literal_cstr(path));
 	}
 
-	int			halfLength = list_length(paths) / 2;
-	List	   *halves[] = {
-		list_truncate(list_copy(paths), halfLength),
-		list_copy_tail(paths, halfLength)
-	};
+	appendStringInfoString(query, ") AS batch(file)");
 
-	for (int halfIndex = 0; halfIndex < 2; halfIndex++)
+	PGDuckConnection *pgDuckConn = GetPGDuckConnection();
+
+	List	   *volatile removedPaths = NIL;
+	List	   *volatile unremovedPaths = NIL;
+	char	   *volatile firstError = NULL;
+	char	   *volatile firstFailedPath = NULL;
+
+	/*
+	 * Release the connection whichever way we leave, because our caller turns
+	 * an error here into a warning and carries on: a connection left behind
+	 * would be one more per pass.
+	 */
+	PGresult   *volatile resultToClear = NULL;
+
+	PG_TRY();
 	{
-		List	   *half = halves[halfIndex];
+		PGresult   *result = ExecuteQueryOnPGDuckConnection(pgDuckConn, query->data);
 
-		if (DeleteRemoteFiles(half))
+		/* throws, having cleared the result, if the request failed */
+		CheckPGDuckResult(pgDuckConn, result);
+
+		resultToClear = result;
+
+		if (PQntuples(result) != list_length(paths))
 		{
-			if (deletedPaths != NULL)
-				*deletedPaths = list_concat(*deletedPaths, half);
+			ereport(ERROR,
+					(errmsg("query engine reported %d outcomes for a batch of %d files",
+							PQntuples(result), list_length(paths))));
 		}
-		else
-			AttributeFailedDeletion(half, deletedPaths, failedPaths);
 
-		/* narrowing a batch is a sequence of requests, so stay cancellable */
-		CHECK_FOR_INTERRUPTS();
+		for (int rowIndex = 0; rowIndex < PQntuples(result); rowIndex++)
+		{
+			char	   *path = pstrdup(PQgetvalue(result, rowIndex, 0));
+
+			if (PQgetisnull(result, rowIndex, 1))
+			{
+				removedPaths = lappend(removedPaths, path);
+				continue;
+			}
+
+			char	   *error = pstrdup(PQgetvalue(result, rowIndex, 1));
+
+			unremovedPaths = lappend(unremovedPaths, path);
+
+			ereport(DEBUG1, (errmsg("could not remove %s: %s", path, error)));
+
+			if (firstFailedPath == NULL)
+			{
+				firstFailedPath = path;
+				firstError = error;
+			}
+		}
 	}
+	PG_FINALLY();
+	{
+		if (resultToClear != NULL)
+			PQclear(resultToClear);
+
+		ReleasePGDuckConnection(pgDuckConn);
+	}
+	PG_END_TRY();
+
+	if (unremovedPaths != NIL)
+	{
+		ereport(WARNING,
+				(errmsg("could not remove %d of %d files from object storage",
+						list_length(unremovedPaths), list_length(paths)),
+				 errdetail("%s: %s", firstFailedPath, firstError)));
+	}
+
+	if (deletedPaths != NULL)
+		*deletedPaths = list_concat(*deletedPaths, removedPaths);
+
+	if (failedPaths != NULL)
+		*failedPaths = list_concat(*failedPaths, unremovedPaths);
 }

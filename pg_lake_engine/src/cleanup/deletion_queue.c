@@ -415,12 +415,11 @@ IncrementDeletionQueueRetryCount(List *failedRemovalPaths)
  *
  * A row that failed within the last VacuumFileRemoveRetryInterval is also left
  * alone, so a path that cannot be removed is retried on a clock rather than
- * once per pass. Without it a pass rate the callers do not control decides both
- * halves of the retry budget: the path is re-claimed by every pass, each of
- * those passes pays the cost of finding out which path in its batch failed,
- * and retry_count reaches VacuumFileRemoveMaxRetries in whatever time that many
- * passes take -- minutes when a drain is catching up on a backlog, rather than
- * the day the default is sized for.
+ * once per pass. Without it a pass rate the callers do not control decides how
+ * long we keep trying a path: it is re-claimed by every pass, so retry_count
+ * reaches VacuumFileRemoveMaxRetries in whatever time that many passes take --
+ * minutes when a drain is catching up on a backlog, rather than the day the
+ * default is sized for.
  *
  * isFull skips the backoff: that is the manual flush, where the caller is
  * asking to try everything now.

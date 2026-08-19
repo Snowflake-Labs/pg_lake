@@ -30,6 +30,22 @@ extern const string MANAGED_STORAGE_KEY_ID_SETTING;
 
 
 /*
+ * FileRemovalOutcome is what a bulk removal has to say about one of its paths.
+ *
+ * A DeleteObjects request can partially succeed: S3 reports an <Error> per key
+ * it refused and silently deletes the rest, so a batch has as many outcomes as
+ * it has keys. removed says the object store confirmed this key, error says why
+ * it refused. Neither set means the request never got far enough to say
+ * anything about this key, and the caller that catches the exception is the one
+ * that knows why.
+ */
+struct FileRemovalOutcome {
+	bool removed = false;
+	string error;
+};
+
+
+/*
  * PgLakeS3FileSystem extends S3FileSystem to override certain functions
  * with the goal of injecting customer headers.
  */
@@ -41,7 +57,8 @@ public:
 	/* Custom functions */
 	void RemoveFileFromS3(string path, optional_ptr<FileOpener> opener);
 	void RemoveFilesFromS3(const string &bucketUrl, const vector<string> &paths,
-						   optional_ptr<FileOpener> opener);
+						   optional_ptr<FileOpener> opener,
+						   vector<FileRemovalOutcome> *outcomes = nullptr);
 	int64_t Download(ClientContext &context, FileHandle &inputHandle, FileHandle &outputHandle);
 	vector<OpenFileInfo> List(const string &glob_pattern, bool is_glob, FileOpener *opener);
 

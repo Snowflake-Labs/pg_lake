@@ -68,8 +68,13 @@ public:
 	 * batches keys into DeleteObjects requests (up to 1000 keys each), resolving
 	 * the region once per bucket. Paths that carry their own region or endpoint,
 	 * and non-S3 paths, fall back to per-file RemoveFile.
+	 *
+	 * Without pathErrors the first failure throws. With it nothing throws and
+	 * every path that was not removed gets its reason in the matching entry,
+	 * which is what a caller that has to say which path to try again needs.
 	 */
-	void RemoveFiles(const vector<string> &paths, optional_ptr<FileOpener> opener);
+	void RemoveFiles(const vector<string> &paths, optional_ptr<FileOpener> opener,
+					 vector<string> *pathErrors = nullptr);
 
 	/*
 	 * Resolve the region for url (cache or S3 headers), then call s3Operation

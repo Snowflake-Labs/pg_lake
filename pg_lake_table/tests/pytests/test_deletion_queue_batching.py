@@ -92,11 +92,10 @@ def test_deletion_queue_drains_multiple_batches(s3, superuser_conn, extension):
 def test_deletion_queue_batch_isolates_failing_path(s3, superuser_conn, extension):
     """One unremovable path does not take its batch down with it.
 
-    A batch is one request and its failure does not say which path was at
-    fault, so a failed batch is re-issued in halves until it does. Without that,
-    the healthy paths sharing the request would collect retry_count for a
-    failure that was never theirs and eventually be abandoned at
-    VacuumFileRemoveMaxRetries.
+    A batch is one request, and the request reports an outcome per path rather
+    than one status for all of them. Without that, the healthy paths sharing the
+    request would collect retry_count for a failure that was never theirs and
+    eventually be abandoned at VacuumFileRemoveMaxRetries.
     """
     prefix = f"s3://{TEST_BUCKET}/{TEST_PREFIX}/isolate"
 
@@ -140,9 +139,7 @@ def test_unremovable_path_is_retried_on_a_clock(s3, superuser_conn, extension):
     retry_count is spent against vacuum_file_remove_max_retries, so if every
     pass reaching a failing row charged it, how long we keep trying a path would
     be decided by how often passes happen to run -- minutes while a drain works
-    through a backlog, rather than the day the default is sized for. Re-claiming
-    the row also makes every one of those passes pay for finding out which path
-    in its batch failed.
+    through a backlog, rather than the day the default is sized for.
     """
     prefix = f"nosuchfs://{TEST_PREFIX}/clock"
     bad_path = f"{prefix}/f.parquet"

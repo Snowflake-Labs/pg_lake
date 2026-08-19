@@ -174,8 +174,13 @@ public:
 	 * PGLakeCachingFileSystem instances registered in the virtual file system;
 	 * it looks up what it needs from the context, as the file system functions
 	 * in functions.cpp do.
+	 *
+	 * Without pathErrors a failure throws, which is one status for the whole
+	 * call. With it nothing throws and every path that was not removed gets its
+	 * reason in the matching entry.
 	 */
-	static void RemoveFiles(ClientContext &context, const vector<string> &paths);
+	static void RemoveFiles(ClientContext &context, const vector<string> &paths,
+							vector<string> *pathErrors = nullptr);
 
 	/* Custom overrides */
 	duckdb::unique_ptr<FileHandle> OpenFile(const string &path, FileOpenFlags openFlags,
