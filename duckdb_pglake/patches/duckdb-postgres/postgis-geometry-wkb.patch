@@ -13,9 +13,10 @@ Note: ST_AsBinary drops the SRID. If SRID preservation is needed, a separate
 column or in-reader EWKB stripping would be required.
 
 diff --git a/src/include/postgres_utils.hpp b/src/include/postgres_utils.hpp
+index 4acdfdb..9d9cdc3 100644
 --- a/src/include/postgres_utils.hpp
 +++ b/src/include/postgres_utils.hpp
-@@ -35,7 +35,8 @@ enum class PostgresTypeAnnotation {
+@@ -39,7 +39,8 @@ enum class PostgresTypeAnnotation {
  	GEOM_BOX,
  	GEOM_PATH,
  	GEOM_POLYGON,
@@ -23,25 +24,13 @@ diff --git a/src/include/postgres_utils.hpp b/src/include/postgres_utils.hpp
 +	GEOM_CIRCLE,
 +	POSTGIS_GEOMETRY
  };
-
+ 
  struct PostgresType {
-diff --git a/src/postgres_utils.cpp b/src/postgres_utils.cpp
---- a/src/postgres_utils.cpp
-+++ b/src/postgres_utils.cpp
-@@ -155,7 +155,8 @@ LogicalType PostgresUtils::TypeToLogicalType(optional_ptr<PostgresTransaction> t
- 		postgres_type.info = PostgresTypeAnnotation::JSONB;
- 		return LogicalType::VARCHAR;
- 	} else if (pgtypename == "geometry") {
--		return LogicalType::GEOMETRY();
-+		postgres_type.info = PostgresTypeAnnotation::POSTGIS_GEOMETRY;
-+		return LogicalType::GEOMETRY();
- 	} else if (pgtypename == "date") {
- 		return LogicalType::DATE;
- 	} else if (pgtypename == "bytea") {
 diff --git a/src/postgres_scanner.cpp b/src/postgres_scanner.cpp
+index 7e94099..eb0aa47 100644
 --- a/src/postgres_scanner.cpp
 +++ b/src/postgres_scanner.cpp
-@@ -242,7 +242,15 @@ static void PostgresInitInternal(ClientContext &context, const PostgresBindData
+@@ -252,7 +252,15 @@ static void PostgresInitInternal(ClientContext &context, const PostgresBindData
  				col_names += "ctid";
  			}
  		} else {
@@ -58,3 +47,15 @@ diff --git a/src/postgres_scanner.cpp b/src/postgres_scanner.cpp
  			if (bind_data->postgres_types[column_id].info == PostgresTypeAnnotation::CAST_TO_VARCHAR) {
  				col_names += "::VARCHAR";
  			} else if (bind_data->types[column_id].id() == LogicalTypeId::LIST) {
+diff --git a/src/postgres_utils.cpp b/src/postgres_utils.cpp
+index 15ef34a..6872d6b 100644
+--- a/src/postgres_utils.cpp
++++ b/src/postgres_utils.cpp
+@@ -267,6 +267,7 @@ LogicalType PostgresUtils::TypeToLogicalType(optional_ptr<PostgresTransaction> t
+ 		postgres_type.info = PostgresTypeAnnotation::JSONB;
+ 		return LogicalType::VARCHAR;
+ 	} else if (pgtypename == "geometry") {
++		postgres_type.info = PostgresTypeAnnotation::POSTGIS_GEOMETRY;
+ 		return LogicalType::GEOMETRY();
+ 	} else if (pgtypename == "date") {
+ 		return LogicalType::DATE;

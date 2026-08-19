@@ -1,5 +1,5 @@
 diff --git a/src/include/postgres_scanner.hpp b/src/include/postgres_scanner.hpp
-index 3e0162c..7c8fa19 100644
+index 3bf4bd5..447ed8e 100644
 --- a/src/include/postgres_scanner.hpp
 +++ b/src/include/postgres_scanner.hpp
 @@ -50,6 +50,8 @@ public:
@@ -34,10 +34,10 @@ index f999617..771427c 100644
  	init_global = scan_function.init_global;
  	init_local = scan_function.init_local;
 diff --git a/src/postgres_scanner.cpp b/src/postgres_scanner.cpp
-index eb4360a..3de7dbe 100644
+index c0ea75e..7e94099 100644
 --- a/src/postgres_scanner.cpp
 +++ b/src/postgres_scanner.cpp
-@@ -67,9 +67,10 @@ private:
+@@ -68,9 +68,10 @@ private:
  static void PostgresGetSnapshot(ClientContext &context, PostgresVersion version, const PostgresBindData &bind_data,
                                  PostgresGlobalState &gstate) {
  	unique_ptr<PostgresResult> result;
@@ -51,7 +51,7 @@ index eb4360a..3de7dbe 100644
  		return;
  	}
  	if (version.type_v == PostgresInstanceType::AURORA) {
-@@ -93,7 +94,6 @@ static void PostgresGetSnapshot(ClientContext &context, PostgresVersion version,
+@@ -99,7 +100,6 @@ static void PostgresGetSnapshot(ClientContext &context, PostgresVersion version,
  	    context, "SELECT pg_is_in_recovery(), pg_export_snapshot(), (select count(*) from pg_stat_wal_receiver)");
  	if (result) {
  		auto in_recovery = result->GetBool(0, 0) || result->GetInt64(0, 2) > 0;
@@ -59,7 +59,7 @@ index eb4360a..3de7dbe 100644
  		if (!in_recovery) {
  			gstate.snapshot = result->GetString(0, 1);
  		}
-@@ -182,6 +182,15 @@ static unique_ptr<FunctionData> PostgresBind(ClientContext &context, TableFuncti
+@@ -192,6 +192,15 @@ static unique_ptr<FunctionData> PostgresBind(ClientContext &context, TableFuncti
  	bind_data->table_name = input.inputs[2].GetValue<string>();
  	bind_data->attach_path = bind_data->dsn;
  
@@ -75,7 +75,7 @@ index eb4360a..3de7dbe 100644
  	auto con = PostgresConnection::Open(bind_data->dsn, bind_data->attach_path);
  	auto version = con.GetPostgresVersion(context);
  	// query the table schema so we can interpret the bits in the pages
-@@ -315,6 +324,9 @@ static unique_ptr<GlobalTableFunctionState> PostgresInitGlobalState(ClientContex
+@@ -336,6 +345,9 @@ static unique_ptr<GlobalTableFunctionState> PostgresInitGlobalState(ClientContex
  	auto &bind_data = input.bind_data->Cast<PostgresBindData>();
  	auto result = make_uniq<PostgresGlobalState>(PostgresMaxThreads(context, input.bind_data.get()));
  	auto pg_catalog = bind_data.GetCatalog();
@@ -85,16 +85,17 @@ index eb4360a..3de7dbe 100644
  	if (pg_catalog) {
  		auto &transaction = Transaction::Get(context, *pg_catalog).Cast<PostgresTransaction>();
  		auto &con =
-@@ -323,7 +335,7 @@ static unique_ptr<GlobalTableFunctionState> PostgresInitGlobalState(ClientContex
+@@ -344,7 +356,8 @@ static unique_ptr<GlobalTableFunctionState> PostgresInitGlobalState(ClientContex
  	} else {
  		auto con = PostgresConnection::Open(bind_data.dsn, bind_data.attach_path);
  		if (bind_data.use_transaction) {
--			PostgresScanConnect(context, con, string());
-+			PostgresScanConnect(context, con, result->snapshot);
+-			PostgresScanConnect(context, con, string(), AccessMode::READ_ONLY, PostgresIsolationLevel::REPEATABLE_READ);
++			PostgresScanConnect(context, con, result->snapshot, AccessMode::READ_ONLY,
++			                    PostgresIsolationLevel::REPEATABLE_READ);
  		}
  		result->SetConnection(std::move(con));
  	}
-@@ -559,6 +571,8 @@ PostgresScanFunction::PostgresScanFunction()
+@@ -595,6 +608,8 @@ PostgresScanFunction::PostgresScanFunction()
  	get_bind_info = PostgresGetBindInfo;
  	projection_pushdown = true;
  	global_initialization = TableFunctionInitialization::INITIALIZE_ON_SCHEDULE;
@@ -103,7 +104,7 @@ index eb4360a..3de7dbe 100644
  }
  
  PostgresScanFunctionFilterPushdown::PostgresScanFunctionFilterPushdown()
-@@ -574,6 +588,8 @@ PostgresScanFunctionFilterPushdown::PostgresScanFunctionFilterPushdown()
+@@ -610,6 +625,8 @@ PostgresScanFunctionFilterPushdown::PostgresScanFunctionFilterPushdown()
  	projection_pushdown = true;
  	filter_pushdown = true;
  	global_initialization = TableFunctionInitialization::INITIALIZE_ON_SCHEDULE;

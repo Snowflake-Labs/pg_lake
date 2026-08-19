@@ -1,8 +1,8 @@
-diff --git a/src/include/postgres_binary_reader.hpp b/src/include/postgres_binary_reader.hpp
-index f4bc336..79ab24e 100644
---- a/src/include/postgres_binary_reader.hpp
-+++ b/src/include/postgres_binary_reader.hpp
-@@ -136,9 +136,17 @@ protected:
+diff --git a/src/include/postgres_binary_parser.hpp b/src/include/postgres_binary_parser.hpp
+index 0a1e386..c82da4d 100644
+--- a/src/include/postgres_binary_parser.hpp
++++ b/src/include/postgres_binary_parser.hpp
+@@ -141,9 +141,17 @@ private:
  	PostgresDecimalConfig ReadDecimalConfig();
  
  	template <class T, class OP = DecimalConversionInteger>
@@ -36,11 +36,11 @@ index 391429e..f9049eb 100644
  };
  
  struct PostgresConversion {
-diff --git a/src/postgres_binary_reader.cpp b/src/postgres_binary_reader.cpp
-index 86ebe30..4dbccc2 100644
---- a/src/postgres_binary_reader.cpp
-+++ b/src/postgres_binary_reader.cpp
-@@ -136,7 +136,10 @@ PostgresDecimalConfig PostgresBinaryReader::ReadDecimalConfig() {
+diff --git a/src/postgres_binary_parser.cpp b/src/postgres_binary_parser.cpp
+index 20215d0..41881a3 100644
+--- a/src/postgres_binary_parser.cpp
++++ b/src/postgres_binary_parser.cpp
+@@ -75,7 +75,10 @@ PostgresDecimalConfig PostgresBinaryParser::ReadDecimalConfig() {
  	      sign == NUMERIC_NEG)) {
  		throw NotImplementedException("Postgres numeric NA/Inf");
  	}
@@ -52,11 +52,9 @@ index 86ebe30..4dbccc2 100644
  	config.scale = ReadInteger<uint16_t>();
  
  	return config;
-@@ -247,9 +250,19 @@ void PostgresBinaryReader::ReadValue(const LogicalType &type, const PostgresType
- 		FlatVector::GetData<float>(out_vec)[output_offset] = ReadFloat();
+@@ -182,7 +185,18 @@ void PostgresBinaryParser::ReadValue(const LogicalType &type, const PostgresType
  		break;
  	case LogicalTypeId::DOUBLE: {
--		// this was an unbounded decimal, read params from value and cast to double
  		if (postgres_type.info == PostgresTypeAnnotation::NUMERIC_AS_DOUBLE) {
 -			FlatVector::GetData<double>(out_vec)[output_offset] = ReadDecimal<double, DecimalConversionDouble>();
 +			bool is_nan = false;
@@ -74,7 +72,7 @@ index 86ebe30..4dbccc2 100644
  			break;
  		}
  		D_ASSERT(value_len == sizeof(double));
-@@ -284,22 +297,28 @@ void PostgresBinaryReader::ReadValue(const LogicalType &type, const PostgresType
+@@ -226,22 +240,29 @@ void PostgresBinaryParser::ReadValue(const LogicalType &type, const PostgresType
  		if (value_len < sizeof(uint16_t) * 4) {
  			throw InvalidInputException("Need at least 8 bytes to read a Postgres decimal. Got %d", value_len);
  		}
@@ -96,7 +94,8 @@ index 86ebe30..4dbccc2 100644
  			break;
  		case PhysicalType::INT128:
 -			FlatVector::GetData<hugeint_t>(out_vec)[output_offset] = ReadDecimal<hugeint_t, DecimalConversionHugeint>();
-+			FlatVector::GetData<hugeint_t>(out_vec)[output_offset] = ReadDecimal<hugeint_t, DecimalConversionHugeint>(&is_nan, &is_pinf, &is_ninf);
++			FlatVector::GetData<hugeint_t>(out_vec)[output_offset] =
++			    ReadDecimal<hugeint_t, DecimalConversionHugeint>(&is_nan, &is_pinf, &is_ninf);
  			break;
  		default:
  			throw InvalidInputException("Unsupported decimal storage type");
@@ -108,10 +107,10 @@ index 86ebe30..4dbccc2 100644
  	}
  
 diff --git a/src/postgres_text_reader.cpp b/src/postgres_text_reader.cpp
-index 066e072..e3cfa67 100644
+index c4d81fe..3d865b4 100644
 --- a/src/postgres_text_reader.cpp
 +++ b/src/postgres_text_reader.cpp
-@@ -378,6 +378,23 @@ void PostgresTextReader::ConvertVector(Vector &source, Vector &target, const Pos
+@@ -378,6 +378,22 @@ void PostgresTextReader::ConvertVector(Vector &source, Vector &target, const Pos
  	case LogicalTypeId::BLOB:
  		ConvertBlob(source, target, count);
  		break;
@@ -122,8 +121,7 @@ index 066e072..e3cfa67 100644
 +				auto str = strings[i];
 +				auto sz = str.GetSize();
 +				auto ptr = str.GetData();
-+				if ((sz == 3 && memcmp(ptr, "NaN", 3) == 0) ||
-+				    (sz == 8 && memcmp(ptr, "Infinity", 8) == 0) ||
++				if ((sz == 3 && memcmp(ptr, "NaN", 3) == 0) || (sz == 8 && memcmp(ptr, "Infinity", 8) == 0) ||
 +				    (sz == 9 && memcmp(ptr, "-Infinity", 9) == 0)) {
 +					FlatVector::SetNull(source, i, true);
 +				}
