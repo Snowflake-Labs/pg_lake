@@ -40,6 +40,7 @@ int			OrphanedFileRetentionPeriod = 60 * 60 * 24 * 10;	/* 10 days */
 
 /* managed by GUC, not exposed to the users */
 int			VacuumFileRemoveMaxRetries = 145;
+int			VacuumFileRemoveRetryInterval = 600;	/* 10 minutes */
 
 /*
  * DeletionQueueEntry represents a deletion entry from the
@@ -82,9 +83,7 @@ flush_deletion_queue(PG_FUNCTION_ARGS)
 															   PER_LOOP_FILE_CLEANUP_LIMIT);
 
 	/* removes everything it can, so there is no budget to report back on */
-	int		   *filesRemoved = NULL;
-
-	RemoveDeletionQueueRecords(deletionQueueRecords, isVerbose, filesRemoved);
+	RemoveDeletionQueueRecords(deletionQueueRecords, isVerbose, NULL);
 
 	ListCell   *fileCell = NULL;
 
@@ -376,7 +375,9 @@ RemoveDeletionQueuePathsFromCatalog(List *filePaths)
 
 /*
 * IncrementDeletionQueueRetryCount increments the retry count
-* for the given paths in the deletion queue.
+* for the given paths in the deletion queue, and records when the failed
+* attempt happened so the next one can be held off for
+* VacuumFileRemoveRetryInterval (see GetDeletionQueueRecords).
 */
 static void
 IncrementDeletionQueueRetryCount(List *failedRemovalPaths)
@@ -386,7 +387,7 @@ IncrementDeletionQueueRetryCount(List *failedRemovalPaths)
 
 	char	   *updateQuery =
 		"UPDATE " DELETION_QUEUE_TABLE " "
-		"SET retry_count = retry_count + 1 "
+		"SET retry_count = retry_count + 1, last_attempt_at = pg_catalog.now() "
 		"WHERE path OPERATOR(pg_catalog.=) ANY($1) ";
 
 	DECLARE_SPI_ARGS(1);
@@ -411,6 +412,18 @@ IncrementDeletionQueueRetryCount(List *failedRemovalPaths)
  * for an unbounded amount of work no matter what the caller asks for. Callers
  * that drain in a loop under a budget of their own pass what is left of that
  * budget, so the budget is respected exactly rather than to the nearest pass.
+ *
+ * A row that failed within the last VacuumFileRemoveRetryInterval is also left
+ * alone, so a path that cannot be removed is retried on a clock rather than
+ * once per pass. Without it a pass rate the callers do not control decides both
+ * halves of the retry budget: the path is re-claimed by every pass, each of
+ * those passes pays the cost of finding out which path in its batch failed,
+ * and retry_count reaches VacuumFileRemoveMaxRetries in whatever time that many
+ * passes take -- minutes when a drain is catching up on a backlog, rather than
+ * the day the default is sized for.
+ *
+ * isFull skips the backoff: that is the manual flush, where the caller is
+ * asking to try everything now.
  */
 List *
 GetDeletionQueueRecords(Oid relationId, bool isFull, int maxRecords)
@@ -429,9 +442,15 @@ GetDeletionQueueRecords(Oid relationId, bool isFull, int maxRecords)
 						 "    SELECT ctid, path, orphaned_at, retry_count, is_prefix, resolve_metadata "
 						 "    FROM " DELETION_QUEUE_TABLE " "
 						 "    WHERE (orphaned_at IS NULL or pg_catalog.now() OPERATOR(pg_catalog.>=) (orphaned_at OPERATOR(pg_catalog.+) INTERVAL '%d seconds')) AND "
-						 "		  table_name OPERATOR(pg_catalog.=) %d AND retry_count OPERATOR(pg_catalog.<=) %d  FOR UPDATE",
+						 "		  table_name OPERATOR(pg_catalog.=) %d AND retry_count OPERATOR(pg_catalog.<=) %d ",
 						 OrphanedFileRetentionPeriod, relationId, VacuumFileRemoveMaxRetries);
 
+		if (!isFull)
+			appendStringInfo(query,
+							 "      AND (last_attempt_at IS NULL OR pg_catalog.now() OPERATOR(pg_catalog.>=) (last_attempt_at OPERATOR(pg_catalog.+) INTERVAL '%d seconds')) ",
+							 VacuumFileRemoveRetryInterval);
+
+		appendStringInfoString(query, " FOR UPDATE");
 	}
 	else
 	{
@@ -445,9 +464,15 @@ GetDeletionQueueRecords(Oid relationId, bool isFull, int maxRecords)
 						 "    FROM " DELETION_QUEUE_TABLE " del "
 						 "    LEFT JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) del.table_name "
 						 "    WHERE (del.orphaned_at IS NULL or pg_catalog.now() OPERATOR(pg_catalog.>=) (del.orphaned_at OPERATOR(pg_catalog.+) INTERVAL '%d seconds')) AND "
-						 "          c.oid IS NULL  AND retry_count OPERATOR(pg_catalog.<=) %d FOR UPDATE OF del",
+						 "          c.oid IS NULL  AND retry_count OPERATOR(pg_catalog.<=) %d ",
 						 OrphanedFileRetentionPeriod, VacuumFileRemoveMaxRetries);
 
+		if (!isFull)
+			appendStringInfo(query,
+							 "      AND (del.last_attempt_at IS NULL OR pg_catalog.now() OPERATOR(pg_catalog.>=) (del.last_attempt_at OPERATOR(pg_catalog.+) INTERVAL '%d seconds')) ",
+							 VacuumFileRemoveRetryInterval);
+
+		appendStringInfoString(query, " FOR UPDATE OF del");
 	}
 
 	if (!isFull)

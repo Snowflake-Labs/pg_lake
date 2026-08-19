@@ -28,10 +28,15 @@
 
 /*
  * Upper bound on the queue rows claimed per drain pass. Each pass runs in its
- * own transaction, so this bounds how long the deletion queue holds a
- * transaction (and its xmin) open before the caller gets control back and can
- * let the rest of the vacuum cycle -- including the object-store catalog
- * export -- have a turn.
+ * own transaction, so this is what makes a pass end at all: the caller gets
+ * control back and can let the rest of the vacuum cycle -- including the
+ * object-store catalog export -- have a turn.
+ *
+ * It is a row count, not a duration. Two row kinds still cost unbounded work,
+ * so a pass holding this many of them can run for an unbounded time with the
+ * claim's FOR UPDATE held on all of them: a resolve_metadata row is a metadata
+ * walk over a dropped table, and an is_prefix row is a listing of everything
+ * under a prefix. Bounding those is tracked in #538.
  *
  * A caller that has its own budget for the whole cycle asks for fewer rows via
  * the maxRecords argument of GetDeletionQueueRecords.
@@ -42,6 +47,7 @@
 /* managed by a GUC */
 extern int	OrphanedFileRetentionPeriod;
 extern int	VacuumFileRemoveMaxRetries;
+extern int	VacuumFileRemoveRetryInterval;
 
 extern PGDLLEXPORT List *GetDeletionQueueRecords(Oid relationId, bool isFull, int maxRecords);
 extern PGDLLEXPORT bool RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose,

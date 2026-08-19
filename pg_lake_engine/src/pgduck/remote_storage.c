@@ -16,6 +16,7 @@
  */
 
 #include "postgres.h"
+#include "miscadmin.h"
 
 #include "pg_lake/data_file/data_file_stats.h"
 #include "pg_lake/parquet/leaf_field.h"
@@ -26,6 +27,9 @@
 
 #include "utils/builtins.h"
 #include "utils/timestamp.h"
+
+static void AttributeFailedDeletion(List *paths, List **deletedPaths,
+									List **failedPaths);
 
 
 /*
@@ -179,6 +183,13 @@ RemoteFileExists(char *path)
 * pg_lake_remove_file gets a whole vector of file names at a time and, for S3,
 * deletes them in batched DeleteObjects requests (up to 1000 keys each) rather
 * than one request per file.
+*
+* The call goes in WHERE rather than the select list so that we get a single
+* count back instead of a row per file, without DuckDB pruning a projection
+* that nothing reads. DeleteRemoteFiles writes the same call in the select list
+* because there the paths going out dwarf a boolean per path coming back. Here
+* nothing goes out but the pattern, so a row per object under the prefix is the
+* whole response.
 */
 bool
 DeleteRemotePrefix(char *path)
@@ -190,7 +201,7 @@ DeleteRemotePrefix(char *path)
 	StringInfo	query = makeStringInfo();
 
 	appendStringInfo(query,
-					 "SELECT pg_lake_remove_file(file) FROM glob(%s)",
+					 "SELECT count(*) FROM glob(%s) WHERE pg_lake_remove_file(file)",
 					 quote_literal_cstr(recursivePath->data));
 
 	return ExecuteOptionalCommandInPGDuck(query->data);
@@ -262,17 +273,23 @@ DeleteRemoteFiles(List *paths)
  * may be NULL when the caller does not track that outcome.
  *
  * pgduck reports one status for the whole request and does not say which path
- * was at fault, so a failed batch is retried one file at a time. Without that,
- * a single unreachable object would charge its failure to every path that
- * shared its request, so a caller that retires paths by failure count (such as
- * the deletion queue) would eventually retire a whole batch of healthy ones.
+ * was at fault, so a failed batch has to be narrowed down. Without that, a
+ * single unreachable object would charge its failure to every path that shared
+ * its request, so a caller that retires paths by failure count (such as the
+ * deletion queue) would eventually retire a whole batch of healthy ones.
  * Removing a file twice is a no-op, so replaying paths the failed batch had
  * already deleted is safe.
  *
+ * The narrowing bisects rather than walking the batch, because a path that
+ * cannot be removed is claimed again by every following pass, so whatever a
+ * failed batch costs is paid once per pass until retry_count retires the row.
+ * Walking makes that a request per path; bisecting finds k bad paths out of n
+ * in O(k log n) requests, so the usual case of one poison path in a full batch
+ * costs about 20 requests instead of 1000.
+ *
  * A caller that tracks neither outcome has nothing to tell apart, so it skips
- * the retry: paying up to FILE_DELETION_BATCH_SIZE individual requests to
- * produce a verdict nobody reads is the per-file cost this batching exists to
- * remove.
+ * the narrowing entirely: producing a verdict nobody reads is the per-file cost
+ * this batching exists to remove.
  */
 void
 DeleteRemoteFileBatch(List *paths, List **deletedPaths, List **failedPaths)
@@ -280,7 +297,13 @@ DeleteRemoteFileBatch(List *paths, List **deletedPaths, List **failedPaths)
 	if (paths == NIL)
 		return;
 
-	bool		batchSucceeded = DeleteRemoteFiles(paths);
+	if (DeleteRemoteFiles(paths))
+	{
+		if (deletedPaths != NULL)
+			*deletedPaths = list_concat(*deletedPaths, paths);
+
+		return;
+	}
 
 	if (deletedPaths == NULL && failedPaths == NULL)
 	{
@@ -288,19 +311,53 @@ DeleteRemoteFileBatch(List *paths, List **deletedPaths, List **failedPaths)
 		return;
 	}
 
-	ListCell   *pathCell = NULL;
+	AttributeFailedDeletion(paths, deletedPaths, failedPaths);
+}
 
-	foreach(pathCell, paths)
+
+/*
+ * AttributeFailedDeletion works out which of the paths of a failed batch could
+ * not be removed, by halving the batch and re-issuing each half. A half that
+ * succeeds accounts for all of its paths in one request; only a half that fails
+ * is split further, so the requests spent follow the number of bad paths rather
+ * than the size of the batch.
+ */
+static void
+AttributeFailedDeletion(List *paths, List **deletedPaths, List **failedPaths)
+{
+	if (list_length(paths) == 1)
 	{
-		char	   *path = lfirst(pathCell);
-		bool		deleted = batchSucceeded || DeleteRemoteFile(path);
+		char	   *path = linitial(paths);
 
-		if (deleted)
+		/*
+		 * A single path is its own verdict: the batch we just failed was this
+		 * one request, so there is nothing left to re-issue.
+		 */
+		if (failedPaths != NULL)
+			*failedPaths = lappend(*failedPaths, path);
+
+		return;
+	}
+
+	int			halfLength = list_length(paths) / 2;
+	List	   *halves[] = {
+		list_truncate(list_copy(paths), halfLength),
+		list_copy_tail(paths, halfLength)
+	};
+
+	for (int halfIndex = 0; halfIndex < 2; halfIndex++)
+	{
+		List	   *half = halves[halfIndex];
+
+		if (DeleteRemoteFiles(half))
 		{
 			if (deletedPaths != NULL)
-				*deletedPaths = lappend(*deletedPaths, path);
+				*deletedPaths = list_concat(*deletedPaths, half);
 		}
-		else if (failedPaths != NULL)
-			*failedPaths = lappend(*failedPaths, path);
+		else
+			AttributeFailedDeletion(half, deletedPaths, failedPaths);
+
+		/* narrowing a batch is a sequence of requests, so stay cancellable */
+		CHECK_FOR_INTERRUPTS();
 	}
 }

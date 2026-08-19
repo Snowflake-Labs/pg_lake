@@ -43,13 +43,21 @@ def _existing_files(superuser_conn, prefix):
     )[0][0]
 
 
-def _vacuum_dropped_tables():
-    run_command_outside_tx(
-        [
-            "SET pg_lake_engine.orphaned_file_retention_period = 0",
-            "VACUUM (ICEBERG)",
-        ]
-    )
+def _vacuum_dropped_tables(retry_interval=None):
+    """Run the dropped-table drain, optionally with a retry interval in seconds.
+
+    A failed path is left alone until pg_lake_engine.vacuum_file_remove_retry_interval
+    has passed, so a test that cares about what a second pass does has to say
+    which side of that it wants.
+    """
+    settings = ["SET pg_lake_engine.orphaned_file_retention_period = 0"]
+
+    if retry_interval is not None:
+        settings.append(
+            f"SET pg_lake_engine.vacuum_file_remove_retry_interval = {retry_interval}"
+        )
+
+    run_command_outside_tx(settings + ["VACUUM (ICEBERG)"])
 
 
 def test_deletion_queue_drains_multiple_batches(s3, superuser_conn, extension):
@@ -85,9 +93,10 @@ def test_deletion_queue_batch_isolates_failing_path(s3, superuser_conn, extensio
     """One unremovable path does not take its batch down with it.
 
     A batch is one request and its failure does not say which path was at
-    fault, so a failed batch is retried per file. Without that, the healthy
-    paths sharing the request would collect retry_count for a failure that was
-    never theirs and eventually be abandoned at VacuumFileRemoveMaxRetries.
+    fault, so a failed batch is re-issued in halves until it does. Without that,
+    the healthy paths sharing the request would collect retry_count for a
+    failure that was never theirs and eventually be abandoned at
+    VacuumFileRemoveMaxRetries.
     """
     prefix = f"s3://{TEST_BUCKET}/{TEST_PREFIX}/isolate"
 
@@ -123,6 +132,58 @@ def test_deletion_queue_batch_isolates_failing_path(s3, superuser_conn, extensio
         superuser_conn,
     )
     superuser_conn.commit()
+
+
+def test_unremovable_path_is_retried_on_a_clock(s3, superuser_conn, extension):
+    """A path that cannot be removed is retried on a clock, not once per pass.
+
+    retry_count is spent against vacuum_file_remove_max_retries, so if every
+    pass reaching a failing row charged it, how long we keep trying a path would
+    be decided by how often passes happen to run -- minutes while a drain works
+    through a backlog, rather than the day the default is sized for. Re-claiming
+    the row also makes every one of those passes pay for finding out which path
+    in its batch failed.
+    """
+    prefix = f"nosuchfs://{TEST_PREFIX}/clock"
+    bad_path = f"{prefix}/f.parquet"
+
+    def retry_count():
+        rows = _queued_rows(superuser_conn, prefix)
+        superuser_conn.commit()
+
+        assert len(rows) == 1, f"{len(rows)} rows queued under {prefix}, expected 1"
+
+        return rows[0][1]
+
+    _queue_paths(superuser_conn, [bad_path])
+
+    try:
+        # the first pass has nothing to wait out, so it tries the path and
+        # charges the failure
+        _vacuum_dropped_tables(retry_interval=3600)
+        assert retry_count() == 1
+
+        # the passes after it fall well inside the interval
+        for _ in range(2):
+            _vacuum_dropped_tables(retry_interval=3600)
+
+        after_more_passes = retry_count()
+
+        assert after_more_passes == 1, (
+            f"retry_count reached {after_more_passes} over three passes inside "
+            f"one retry interval, so the path is retried per pass rather than on "
+            f"a clock"
+        )
+
+        # with no interval left to wait out, the next pass tries it again
+        _vacuum_dropped_tables(retry_interval=0)
+        assert retry_count() == 2
+    finally:
+        run_command(
+            f"DELETE FROM lake_engine.deletion_queue WHERE path LIKE '{prefix}%'",
+            superuser_conn,
+        )
+        superuser_conn.commit()
 
 
 def test_autovacuum_removes_files_for_dropped_tables(
@@ -197,10 +258,14 @@ def test_autovacuum_does_not_spin_on_unremovable_paths(
     a pass has to charge its budget for files it removed rather than rows it
     claimed. A permanently failing path is claimed by every pass, so charging
     claims would take any pass with such a path to its limit, and the worker
-    would then run file removal every second. That is not just wasted work: each
-    of those passes increments retry_count, so the failing rows would pass
-    vacuum_file_remove_max_retries in minutes instead of the day that default is
-    sized for, and be abandoned.
+    would then run file removal every second for as long as the path stays
+    unremovable.
+
+    retry_count is how we count those passes, which needs the retry interval out
+    of the way: at its default the failing rows are claimed once and then left
+    alone, so retry_count would stand still whether the worker is spinning or
+    not. The interval is what stops a spin from burning
+    vacuum_file_remove_max_retries; this test is about the spin itself.
     """
     if installcheck:
         return
@@ -227,6 +292,9 @@ def test_autovacuum_does_not_spin_on_unremovable_paths(
             # limit if failures are charged for
             f"ALTER SYSTEM SET pg_lake_table.max_file_removals_per_vacuum TO {good_count + bad_count - 1}",
             f"ALTER SYSTEM SET pg_lake_iceberg.autovacuum_naptime TO '{naptime_seconds}s'",
+            # so retry_count counts the passes that reached the failing rows,
+            # see the docstring
+            "ALTER SYSTEM SET pg_lake_engine.vacuum_file_remove_retry_interval TO 0",
             "SELECT pg_reload_conf()",
         ]
     )
@@ -296,6 +364,7 @@ def test_autovacuum_does_not_spin_on_unremovable_paths(
             [
                 "ALTER SYSTEM RESET pg_lake_table.max_file_removals_per_vacuum",
                 "ALTER SYSTEM RESET pg_lake_iceberg.autovacuum_naptime",
+                "ALTER SYSTEM RESET pg_lake_engine.vacuum_file_remove_retry_interval",
                 "SELECT pg_reload_conf()",
             ]
         )

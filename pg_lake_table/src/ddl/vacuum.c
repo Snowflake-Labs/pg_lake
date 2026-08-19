@@ -249,6 +249,15 @@ PgLakeIcebergVacuumForTables(MemoryContext outOfTransactionMemoryContext,
 
 	MemoryContextSwitchTo(oldctx);
 
+	/*
+	 * Ahead of the per-table loop: these are the rows no per-table pass
+	 * claims, nothing below depends on them being gone, and the loop can run
+	 * for minutes and abort the rest of the pass if anything escapes a
+	 * stage's subtransaction. Going first makes the drain the part of a cycle
+	 * most likely to complete.
+	 */
+	VacuumRemoveDroppedTableFiles();
+
 	foreach_oid(relationId, vacuumRelationIdList)
 	{
 		/* vacuum the iceberg table */
@@ -260,8 +269,6 @@ PgLakeIcebergVacuumForTables(MemoryContext outOfTransactionMemoryContext,
 		 */
 		CHECK_FOR_INTERRUPTS();
 	}
-
-	VacuumRemoveDroppedTableFiles();
 }
 
 
@@ -285,6 +292,9 @@ PgLakeIcebergRemoveFilesForTables(MemoryContext outOfTransactionMemoryContext)
 	bool		isFull = false;
 	bool		isVerbose = false;
 
+	/* first, for the same reasons as in PgLakeIcebergVacuumForTables */
+	VacuumRemoveDroppedTableFiles();
+
 	foreach_oid(relationId, vacuumRelationIdList)
 	{
 		if (!ActiveSnapshotSet())
@@ -294,7 +304,7 @@ PgLakeIcebergRemoveFilesForTables(MemoryContext outOfTransactionMemoryContext)
 		{
 			/*
 			 * Table dropped since we built the list. Whatever it left queued
-			 * is claimed by VacuumRemoveDroppedTableFiles below.
+			 * is claimed by the next cycle's VacuumRemoveDroppedTableFiles.
 			 */
 			continue;
 		}
@@ -317,8 +327,6 @@ PgLakeIcebergRemoveFilesForTables(MemoryContext outOfTransactionMemoryContext)
 		 */
 		CHECK_FOR_INTERRUPTS();
 	}
-
-	VacuumRemoveDroppedTableFiles();
 }
 
 
@@ -978,7 +986,7 @@ VacuumDroppedPgLakeIcebergTables(VacuumStmt *vacuumStmt)
 
 /*
 * VacuumRemoveDroppedTableFiles removes the queued files of tables that no
-* longer exist. The autovacuum worker calls it after the per-table passes,
+* longer exist. The autovacuum worker calls it ahead of the per-table passes,
 * which cannot reach those rows: a row for a dropped table points at an oid
 * that is gone from pg_class, so it is only claimed by the InvalidOid pass.
 * Without this, a dropped table would keep its files (and its share of the
@@ -1059,13 +1067,11 @@ VacuumRemoveDeletionQueueRecords(Oid relationId, bool isFull, bool isVerbose)
 
 			/*
 			 * Charge the budget for what came off the queue, not for what was
-			 * claimed: a path that can never be removed is claimed by every
-			 * pass, and charging those would let a block of them spend the
-			 * whole budget, take the loop to its limit, and leave the worker
-			 * thinking it stopped mid-progress. It would then come straight
-			 * back and charge them again, so the failing rows would reach
-			 * VacuumFileRemoveMaxRetries in minutes rather than the day that
-			 * limit is sized for.
+			 * claimed. Charging claims would let a block of rows that failed
+			 * spend the whole budget without removing anything, take the loop
+			 * to its limit, and leave the worker thinking it stopped
+			 * mid-progress, so it would come straight back and try the same
+			 * rows again.
 			 *
 			 * A pass that removed nothing but resolved dropped-table metadata
 			 * did make progress, so it is charged one to keep the loop
@@ -1196,6 +1202,14 @@ VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose)
 		}
 		PG_END_TRY();
 
+		/*
+		 * Rows claimed, unlike the deletion queue loop, which charges rows
+		 * removed. Safe here because RemoveInProgressFiles drops the catalog
+		 * row whatever the remote outcome, so a claimed row is gone from the
+		 * queue either way: an in-progress path cannot fail forever, cannot
+		 * be re-claimed by the next pass, and so cannot spend a budget
+		 * without making progress.
+		 */
 		totalFilesRemoved += list_length(removedFiles);
 
 		/* rotate into a new transaction to release locks and save progress */
