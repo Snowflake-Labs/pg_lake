@@ -251,9 +251,9 @@ PgLakeIcebergVacuumForTables(MemoryContext outOfTransactionMemoryContext,
 
 	/*
 	 * Ahead of the per-table loop: these are the rows no per-table pass
-	 * claims, nothing below depends on them being gone, and the loop can run
-	 * for minutes and abort the rest of the pass if anything escapes a
-	 * stage's subtransaction. Going first makes the drain the part of a cycle
+	 * claims, nothing below depends on them being gone, and the drain can run
+	 * for minutes, so an error it raises rather than handles takes the rest
+	 * of the pass with it. Going first makes the drain the part of a cycle
 	 * most likely to complete.
 	 */
 	VacuumRemoveDroppedTableFiles();
