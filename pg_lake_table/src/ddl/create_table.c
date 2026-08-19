@@ -1165,13 +1165,19 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		 * FinalizeStagingCreateRestCatalogIcebergTable finalizes it in
 		 * post-commit, once the local creation has succeeded.
 		 *
-		 * We stage before settling on a location, because we propose a
-		 * location here and the catalog may answer with a different one.
+		 * We stage before settling on a location, because the catalog answers
+		 * with the one it assigned and that answer is where the table lives.
+		 * We ask for a location only when the user named one, since a catalog
+		 * is free to reject what it is asked for, and a layout we invented is
+		 * not worth failing a create over.
+		 *
 		 * Staging this early also gets us the vended credentials for the rest
 		 * of the transaction: a CTAS, for one, writes data before it commits.
 		 */
 		catalogAssignedLocation =
-			StartStageRestCatalogIcebergTableCreate(relationId, proposedLocation);
+			StartStageRestCatalogIcebergTableCreate(relationId,
+													locationOption != NULL ?
+													proposedLocation : NULL);
 
 		/*
 		 * Record the create table operation in the rest catalog. Note that
@@ -1185,13 +1191,19 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 	}
 
 	/*
-	 * A catalog that manages its own storage overrules the location we asked
-	 * for and answers with the one it assigned.  Its credentials reach only
-	 * there, so that answer, not our proposal, is where this table lives.
+	 * A catalog only assigns a location inside storage it controls, so an
+	 * assignment tells us both where the table lives and whose files those
+	 * are.  We take it as given: it is the one place the catalog's
+	 * credentials reach, and the one place it will look when asked to remove
+	 * the table.
+	 *
+	 * A user who named a location asked for something specific, so we
+	 * proposed it above; the catalog echoing it back leaves the storage ours.
 	 */
 	bool		locationIsCatalogManaged =
 		catalogAssignedLocation != NULL &&
-		!SameStorageLocation(catalogAssignedLocation, proposedLocation);
+		(locationOption == NULL ||
+		 !SameStorageLocation(catalogAssignedLocation, proposedLocation));
 
 	char	   *location;
 

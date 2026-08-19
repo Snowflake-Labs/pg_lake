@@ -78,11 +78,12 @@ flush_deletion_queue(PG_FUNCTION_ARGS)
 
 	/*
 	 * The deletes below reach object storage under whatever secrets
-	 * pgduck_server already holds, which is all a queued file ever needs: it
-	 * belongs to a table whose storage we manage, and that storage is reached
-	 * with the standing credentials.  Storage a catalog manages queues
-	 * nothing on DROP -- the catalog removes those files itself -- and while
-	 * such a table is alive, VACUUM resolves its credentials before draining.
+	 * pgduck_server already holds.  For a writable table that is the standing
+	 * credential its storage is reached with, and while the table is alive
+	 * VACUUM resolves credentials before it drains.  Files queued from
+	 * storage a catalog vends for are the open case: the drop takes the table
+	 * out of the catalog that could vend again, so the deletes outlive their
+	 * access.
 	 *
 	 * Resolving here instead is not possible without the engine knowing what
 	 * a catalog is, and would not help the case that matters anyway: an "all

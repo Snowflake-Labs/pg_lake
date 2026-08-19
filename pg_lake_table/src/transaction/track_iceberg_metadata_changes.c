@@ -316,13 +316,9 @@ PostAllRestCatalogRequests(void)
 			}
 			else if (dropTableRequest != NULL)
 			{
-				char	   *dropUrl = dropTableRequest->purgeRequested ?
-					psprintf("%s?purgeRequested=true", requestPerTable->tableRestUrl) :
-					requestPerTable->tableRestUrl;
-
 				HttpResult	httpResult =
 					SendRequestToRestCatalog(PgLakeXactRestCatalog->catalogOpts, HTTP_DELETE,
-											 dropUrl, NULL,
+											 requestPerTable->tableRestUrl, NULL,
 											 DeleteHeadersWithAuth(PgLakeXactRestCatalog->catalogOpts));
 
 				if (httpResult.status != 204)
@@ -827,13 +823,6 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 	}
 	else if (operationType == REST_CATALOG_DROP_TABLE)
 	{
-		/*
-		 * The catalog placed this table's files, so it is the one to remove
-		 * them; we queued no deletes for it. Ask while the relation still
-		 * exists to be asked about.
-		 */
-		request->purgeRequested = HasCatalogManagedLocation(relationId);
-
 		requestPerTable->dropTableRequest = request;
 	}
 	else if (operationType == REST_CATALOG_ADD_SNAPSHOT ||

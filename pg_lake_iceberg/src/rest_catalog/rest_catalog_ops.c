@@ -138,12 +138,12 @@ static VendedCredentialsCacheKey BuildVendedCredentialsCacheKey(Oid serverOid,
 * The main reason for staging early is to be able to get the vended credentials
 * for writable tables.
 *
-* proposedLocation is where we would like the table to live.  A catalog that
-* manages its own storage -- a Snowflake-managed external volume, say -- picks
-* the location itself and answers with the one it picked; the credentials it
-* vends reach only there, so writing anywhere else fails whatever we later
-* record in the catalog.  Returns the location in the answer, which the caller
-* compares against what it proposed to learn whether it was overruled.
+* proposedLocation asks for a particular location and is normally NULL: a
+* catalog places the tables it stores, and one that manages its own storage --
+* a Snowflake-managed external volume, say -- vends credentials that reach only
+* the location it picked, so writing anywhere else fails whatever we later
+* record in the catalog.  Returns the location the catalog assigned, or NULL if
+* it assigned none and the placement is therefore ours to make.
 */
 char *
 StartStageRestCatalogIcebergTableCreate(Oid relationId, const char *proposedLocation)
@@ -283,39 +283,39 @@ FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSche
 	appendStringInfoChar(body, '}');	/* finish add-sort-order */
 
 	/*
-	 * Tell the catalog where the table lives -- but only when we are the ones
-	 * who decided.  A catalog that manages its own storage assigned the
-	 * location at stage-create and we adopted it, so there is nothing to set,
-	 * and setting it would only invite a server that forbids relocating a
-	 * managed table to reject the whole create.
+	 * Tell the catalog where the table lives.  A staged table holds no state
+	 * of its own -- the location the catalog reported when it staged the
+	 * create is a proposal it discards -- so the create has to state it, or
+	 * the table is registered with no location at all.
 	 *
 	 * The location we send is the one the table actually carries, rather than
 	 * one rebuilt from the prefix: those two agree only until a database,
 	 * schema or table name needs URL-encoding, and disagreeing would point
-	 * the catalog at a directory we never write to.
+	 * the catalog at a directory we never write to.  For storage the catalog
+	 * manages, what the table carries is what the catalog assigned, so this
+	 * hands its own answer back to it.
 	 */
-	if (!HasCatalogManagedLocation(relationId))
-	{
-		char	   *queryArguments = "";
-		char	   *location = GetWritableTableLocation(relationId, &queryArguments);
+	char	   *queryArguments = "";
+	char	   *location = GetWritableTableLocation(relationId, &queryArguments);
 
-		appendStringInfoString(body, ", ");
-		appendStringInfoChar(body, '{');	/* start set-location */
-		appendJsonString(body, "action", "set-location");
-		appendStringInfoChar(body, ',');
-		appendJsonString(body, "location", location);
-		appendStringInfoChar(body, '}');	/* end set-location */
-	}
-
-	/* add partition spec */
+	appendStringInfoString(body, ", ");
+	appendStringInfoChar(body, '{');	/* start set-location */
+	appendJsonString(body, "action", "set-location");
 	appendStringInfoChar(body, ',');
+	appendJsonString(body, "location", location);
+	appendStringInfoChar(body, '}');	/* end set-location */
 
+	/*
+	 * add partition spec.  Every element from here on opens with its own
+	 * separator, since the elements before it are not all unconditional.
+	 */
 	ListCell   *partitionSpecCell = NULL;
 
 	foreach(partitionSpecCell, partitionSpecs)
 	{
 		IcebergPartitionSpec *spec = (IcebergPartitionSpec *) lfirst(partitionSpecCell);
 
+		appendStringInfoString(body, ", ");
 		appendStringInfoChar(body, '{');	/* start add-partition-spec */
 		appendJsonString(body, "action", "add-spec");
 		appendStringInfoString(body, ", ");
@@ -323,12 +323,9 @@ FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSche
 		appendStringInfoString(body, AppendIcebergPartitionSpecForRestCatalog(list_make1(spec)));
 
 		appendStringInfoChar(body, '}');	/* finish add-partition-spec */
-		appendStringInfoString(body, ", ");
 	}
 
-	if (list_length(partitionSpecs) == 0)
-		appendStringInfoChar(body, ',');
-
+	appendStringInfoString(body, ", ");
 	appendStringInfoChar(body, '{');	/* start set-default-spec */
 	appendJsonString(body, "action", "set-default-spec");
 	appendStringInfoString(body, ", ");

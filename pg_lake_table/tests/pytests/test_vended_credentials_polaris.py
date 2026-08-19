@@ -162,7 +162,7 @@ def test_polaris_read_only_table_is_vended_on_a_cold_cache(
         _set_vending(superuser_conn, False)
 
 
-def test_polaris_writable_table_is_not_vended(
+def test_polaris_writable_table_in_catalog_storage_is_vended(
     pg_conn,
     superuser_conn,
     pgduck_conn,
@@ -172,14 +172,11 @@ def test_polaris_writable_table_is_not_vended(
     with_default_location,
     installcheck,
 ):
-    """A writable REST table gets no vended credential, even with vending on.
+    """A writable table the catalog placed is vended, on every path it has.
 
-    pg_lake owns a writable table's files, and owning them means deleting
-    them: a DROP only queues its files, and the queue holds them for
-    ``orphaned_file_retention_period`` (10 days by default) -- long after
-    any vended credential has expired and the table has left the catalog
-    that could vend another.  Until that has an answer, writable tables
-    reach storage exactly as they do without vending.
+    Polaris assigns the location when it stages the create, so the table
+    lives in storage the catalog knows about and vends for.  Writes, reads
+    and truncates all have to reach it through that credential.
     """
     if installcheck:
         return
@@ -213,10 +210,21 @@ def test_polaris_writable_table_is_not_vended(
         run_command(f"TRUNCATE {schema}.{table}", superuser_conn)
         superuser_conn.commit()
 
+        options = run_query(
+            f"""SELECT ftoptions FROM pg_foreign_table
+                WHERE ftrelid = '{schema}.{table}'::regclass""",
+            superuser_conn,
+        )[0][0]
+        superuser_conn.commit()
+
+        assert (
+            "catalog_managed_location=true" in options
+        ), f"expected the catalog to have placed the table, got {options}"
+
         secrets = _vended_secrets_for(pgduck_conn, schema, table)
-        assert not secrets, (
-            f"vending is restricted to read-only tables, but a writable one "
-            f"was pushed a secret: {secrets}"
+        assert secrets, (
+            "expected a vended secret for a table living in the catalog's "
+            "own storage"
         )
 
     finally:

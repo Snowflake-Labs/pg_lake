@@ -1202,11 +1202,12 @@ def test_minio_managed_catalog_places_and_serves_a_writable_table(
         )
         superuser_conn.commit()
 
-        # We proposed a location of our own, and were overruled.
+        # We asked for nothing, so the catalog was free to place the table.
         proposed = calls.get("proposed_locations", [])
-        assert len(proposed) == 1 and proposed[0].startswith(
-            f"s3://{server.bucket}/{client_prefix}/"
-        ), f"expected one proposal under the client prefix, got {proposed}"
+        assert proposed == [None], (
+            f"a catalog places the tables it stores, so the create should name "
+            f"no location, got {proposed}"
+        )
 
         options = run_query(
             f"""SELECT ftoptions FROM pg_foreign_table
@@ -1236,22 +1237,17 @@ def test_minio_managed_catalog_places_and_serves_a_writable_table(
         superuser_conn.commit()
         assert result[0][0] == 5
 
-        # Dropping hands the files back to the catalog: we queue no deletes
-        # of our own for storage we do not own, and ask it to purge.
+        # A catalog that places files does not necessarily remove them, so the
+        # drop takes the table out of the catalog and leaves the files to us.
         run_command(f"DROP TABLE {schema}.{table}", superuser_conn)
         superuser_conn.commit()
 
-        assert any(
-            "purgeRequested=true" in path for path in calls.get("drops", [])
-        ), f"expected the drop to ask the catalog to purge, got {calls.get('drops')}"
-
-        queued = run_query(
-            f"""SELECT count(*) FROM lake_engine.deletion_queue
-                WHERE path LIKE '{managed_location}%'""",
-            superuser_conn,
+        drops = calls.get("drops", [])
+        assert len(drops) == 1, f"expected one drop request, got {drops}"
+        assert not any("purgeRequested" in path for path in drops), (
+            f"a catalog that places files does not promise to remove them, so "
+            f"the drop must not rely on it, got {drops}"
         )
-        superuser_conn.commit()
-        assert queued[0][0] == 0, "queued deletes for storage the catalog owns"
 
     finally:
         run_command(f"DROP TABLE IF EXISTS {schema}.{table}", superuser_conn)

@@ -154,14 +154,12 @@ ApplyDDLCatalogChanges(Oid relationId, List *ddlOperations,
 			 * Also, for read-only tables, we will not mark the files for
 			 * deletion.
 			 *
-			 * Nor for a table whose location its catalog assigned: those
-			 * files sit in storage the catalog manages, and it removes them
-			 * when the table leaves it. Queueing them here would have us
-			 * deleting from a location we were only ever lent access to, days
-			 * after the credentials that reached it expired.
+			 * A table whose location its catalog assigned is queued like any
+			 * other: a catalog that places files does not necessarily remove
+			 * them -- Polaris refuses to purge unless configured for it -- so
+			 * leaving them to the catalog would leak them.
 			 */
-			if (IsWritableIcebergTable(relationId) &&
-				!HasCatalogManagedLocation(relationId))
+			if (IsWritableIcebergTable(relationId))
 			{
 				/*
 				 * metadata is not pushed yet if table is created in current
