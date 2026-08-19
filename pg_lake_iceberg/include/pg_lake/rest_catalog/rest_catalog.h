@@ -251,10 +251,9 @@ extern PGDLLEXPORT char *GetMetadataLocationForRestCatalogForIcebergTable(Oid re
 extern PGDLLEXPORT bool RestCatalogVendingEnabledForRelation(Oid relationId);
 
 /*
- * Provider for the engine's storage-credential resolver hook
- * (PgLakeStorageCredentialProviderHook).  Returns a
- * List<StorageCredential *> for the relation's REST-catalog vended
- * credentials, or NIL.  Installed at _PG_init.
+ * Resolves a relation's REST-catalog vended credentials, returning a
+ * List<StorageCredential *> or NIL.  Called by ResolveStorageCredentials
+ * (storage/storage_credentials.c) on the way to pgduck_server.
  */
 extern PGDLLEXPORT List *IcebergProvideStorageCredentials(Oid relationId);
 extern PGDLLEXPORT void InvalidateVendedCredentialsCache(void);

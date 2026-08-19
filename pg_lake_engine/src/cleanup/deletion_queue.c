@@ -78,11 +78,10 @@ flush_deletion_queue(PG_FUNCTION_ARGS)
 
 	/*
 	 * The deletes below reach object storage under whatever secrets
-	 * pgduck_server already holds.  On a REST catalog's vended-only storage
-	 * that is the secret pushed by the operation that queued these files:
-	 * VACUUM resolves credentials before it drains, and a DROP leaves its
-	 * secret in place precisely so that its queued deletes still work (see
-	 * OrphanStorageCredentials in pg_lake_iceberg).
+	 * pgduck_server already holds, which for these files is the standing
+	 * configuration rather than anything vended: credentials are vended only
+	 * for read-only tables, and a read-only table owns none of the files it
+	 * reads, so it never queues a delete here.
 	 *
 	 * Resolving here instead is not possible without the engine knowing what
 	 * a catalog is, and would not help the case that matters anyway: an "all
