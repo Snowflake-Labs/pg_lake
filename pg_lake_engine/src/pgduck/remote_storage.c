@@ -28,10 +28,6 @@
 #include "utils/builtins.h"
 #include "utils/timestamp.h"
 
-static void AttributeFailedDeletion(List *paths, List **deletedPaths,
-									List **failedPaths);
-
-
 /*
  * GetRemoteFileSize gets the size of a remote file.
  */
@@ -273,23 +269,21 @@ DeleteRemoteFiles(List *paths)
  * may be NULL when the caller does not track that outcome.
  *
  * pgduck reports one status for the whole request and does not say which path
- * was at fault, so a failed batch has to be narrowed down. Without that, a
- * single unreachable object would charge its failure to every path that shared
- * its request, so a caller that retires paths by failure count (such as the
- * deletion queue) would eventually retire a whole batch of healthy ones.
- * Removing a file twice is a no-op, so replaying paths the failed batch had
+ * was at fault, so a failed batch is retried one path at a time. Without that,
+ * a single unreachable object would charge its failure to every path that
+ * shared its request, so a caller that retires paths by failure count (such as
+ * the deletion queue) would eventually retire a whole batch of healthy ones.
+ * Removing a file twice is a no-op, so re-issuing paths the failed batch had
  * already deleted is safe.
  *
- * The narrowing bisects rather than walking the batch, because a path that
- * cannot be removed is claimed again by every following pass, so whatever a
- * failed batch costs is paid once per pass until retry_count retires the row.
- * Walking makes that a request per path; bisecting finds k bad paths out of n
- * in O(k log n) requests, so the usual case of one poison path in a full batch
- * costs about 20 requests instead of 1000.
+ * A request per path is the cost batching exists to avoid, but only a failed
+ * batch pays it, and a path that failed is not claimed again for
+ * VacuumFileRemoveRetryInterval (see GetDeletionQueueRecords), so the retry is
+ * repeated on that clock rather than by every pass.
  *
  * A caller that tracks neither outcome has nothing to tell apart, so it skips
- * the narrowing entirely: producing a verdict nobody reads is the per-file cost
- * this batching exists to remove.
+ * the retry entirely: producing a verdict nobody reads is the per-file cost this
+ * batching exists to remove.
  */
 void
 DeleteRemoteFileBatch(List *paths, List **deletedPaths, List **failedPaths)
@@ -311,53 +305,21 @@ DeleteRemoteFileBatch(List *paths, List **deletedPaths, List **failedPaths)
 		return;
 	}
 
-	AttributeFailedDeletion(paths, deletedPaths, failedPaths);
-}
+	ListCell   *pathCell = NULL;
 
-
-/*
- * AttributeFailedDeletion works out which of the paths of a failed batch could
- * not be removed, by halving the batch and re-issuing each half. A half that
- * succeeds accounts for all of its paths in one request; only a half that fails
- * is split further, so the requests spent follow the number of bad paths rather
- * than the size of the batch.
- */
-static void
-AttributeFailedDeletion(List *paths, List **deletedPaths, List **failedPaths)
-{
-	if (list_length(paths) == 1)
+	foreach(pathCell, paths)
 	{
-		char	   *path = linitial(paths);
+		char	   *path = lfirst(pathCell);
 
-		/*
-		 * A single path is its own verdict: the batch we just failed was this
-		 * one request, so there is nothing left to re-issue.
-		 */
-		if (failedPaths != NULL)
-			*failedPaths = lappend(*failedPaths, path);
-
-		return;
-	}
-
-	int			halfLength = list_length(paths) / 2;
-	List	   *halves[] = {
-		list_truncate(list_copy(paths), halfLength),
-		list_copy_tail(paths, halfLength)
-	};
-
-	for (int halfIndex = 0; halfIndex < 2; halfIndex++)
-	{
-		List	   *half = halves[halfIndex];
-
-		if (DeleteRemoteFiles(half))
+		if (DeleteRemoteFile(path))
 		{
 			if (deletedPaths != NULL)
-				*deletedPaths = list_concat(*deletedPaths, half);
+				*deletedPaths = lappend(*deletedPaths, path);
 		}
-		else
-			AttributeFailedDeletion(half, deletedPaths, failedPaths);
+		else if (failedPaths != NULL)
+			*failedPaths = lappend(*failedPaths, path);
 
-		/* narrowing a batch is a sequence of requests, so stay cancellable */
+		/* a retried batch is a request per path, so stay cancellable */
 		CHECK_FOR_INTERRUPTS();
 	}
 }

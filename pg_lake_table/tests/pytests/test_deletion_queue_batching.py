@@ -93,9 +93,9 @@ def test_deletion_queue_batch_isolates_failing_path(s3, superuser_conn, extensio
     """One unremovable path does not take its batch down with it.
 
     A batch is one request and its failure does not say which path was at
-    fault, so a failed batch is re-issued in halves until it does. Without that,
-    the healthy paths sharing the request would collect retry_count for a
-    failure that was never theirs and eventually be abandoned at
+    fault, so a failed batch is retried one path at a time. Without that, the
+    healthy paths sharing the request would collect retry_count for a failure
+    that was never theirs and eventually be abandoned at
     VacuumFileRemoveMaxRetries.
     """
     prefix = f"s3://{TEST_BUCKET}/{TEST_PREFIX}/isolate"
