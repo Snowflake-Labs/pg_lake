@@ -525,7 +525,7 @@ CREATE TABLE measurements (device_id bigint, value float8)
 USING iceberg WITH (catalog = 'my_rest_catalog');
 ```
 
-Where such a table's files go depends on the catalog. Normally pg_lake places them under `pg_lake_iceberg.default_location_prefix`. A catalog that manages its own storage — a Snowflake-managed external volume, for instance — assigns the location itself; pg_lake then puts the table where the catalog said and records this in the table's `catalog_managed_location` option. Storage the catalog assigned is storage the catalog owns, so dropping such a table asks the catalog to remove its files rather than queueing them for pg_lake's own [vacuum](#vacuuming-an-iceberg-table) to delete. Because the catalog decides, an explicit `location` option is rejected for these tables.
+Where such a table's files go depends on the catalog. Normally pg_lake places them under `pg_lake_iceberg.default_location_prefix`. A catalog that manages its own storage — a Snowflake-managed external volume, for instance — assigns the location itself; pg_lake then puts the table where the catalog said and records this in the table's `catalog_managed_location` option. Because the catalog decides, creating such a table with an explicit `location` fails, telling you where the catalog placed it instead. Dropping it queues its files for pg_lake's own [vacuum](#vacuuming-an-iceberg-table) to delete, like any other table pg_lake created: a catalog that places files does not necessarily remove them.
 
 **Tables that already exist in the catalog.** A table created by something else is attached with `read_only`, naming it as it is known to the catalog:
 
