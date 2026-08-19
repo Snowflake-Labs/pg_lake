@@ -68,6 +68,29 @@ GetIcebergCatalogType(Oid relationId)
 
 
 /*
+ * HasCatalogManagedLocation returns true if the table's storage location was
+ * assigned by its catalog rather than chosen by us.
+ *
+ * A catalog that manages its own storage -- a Snowflake-managed external
+ * volume, say -- picks where the table lives and vends credentials that reach
+ * only there.  We record that at CREATE, because it changes who owns the
+ * files: the catalog placed them, the catalog removes them, and pg_lake
+ * neither queues their deletion nor needs standing access to them.
+ */
+bool
+HasCatalogManagedLocation(Oid relationId)
+{
+	if (!IsPgLakeIcebergForeignTableById(relationId))
+		return false;
+
+	ForeignTable *foreignTable = GetForeignTable(relationId);
+
+	return GetBoolOption(foreignTable->options, CATALOG_MANAGED_LOCATION_OPTION,
+						 false);
+}
+
+
+/*
  * HasRestCatalogTableOption returns true if the catalog option indicates a
  * REST catalog: either the literal value 'rest' or the name of an
  * iceberg_catalog foreign server with TYPE 'rest'.

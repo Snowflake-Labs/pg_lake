@@ -2240,6 +2240,14 @@ postgresBeginForeignModify(ModifyTableState *mtstate,
 
 	BindRelationToXactRestCatalog(modifyRelId);
 
+	/*
+	 * Resolve storage credentials for the write target before any data goes
+	 * to pgduck_server.  Best-effort: if the catalog cannot vend credentials
+	 * right now this does not abort the statement (the write / commit fails
+	 * authoritatively on its own).
+	 */
+	EnsureStorageCredentialsForRelation(modifyRelId);
+
 	/* Construct an execution state. */
 	fmstate = create_foreign_modify(resultRelInfo->ri_RelationDesc,
 									resultRelInfo->ri_RangeTableIndex,
@@ -4649,6 +4657,9 @@ postgresExecForeignTruncate(List *relations,
 			PgLakeModifyValidityCheckHook(relationId);
 
 		BindRelationToXactRestCatalog(relationId);
+
+		/* Truncate deletes objects, so credentials must be in place. */
+		EnsureStorageCredentialsForRelation(relationId);
 
 		RemoveAllDataFilesFromTable(relationId);
 	}

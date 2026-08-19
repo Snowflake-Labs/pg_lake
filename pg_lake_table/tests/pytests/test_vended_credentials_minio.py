@@ -117,18 +117,25 @@ def _materialize_iceberg_table(server, namespace, table, rows):
 # ---------------------------------------------------------------------------
 
 
-def _make_handler(tables):
+def _make_handler(tables, calls=None):
     """Build a mock REST catalog handler.
 
     ``tables`` maps table-name -> dict with:
         metadata_location : str
         location          : str
+        assigns_location  : optional bool.  When set, the catalog manages
+                            its own storage: a staged create is answered
+                            with ``location`` whatever the client proposed,
+                            the way a Snowflake-managed volume does.
         vended            : optional dict {"prefix": str, "config": dict}
         vended_by_client  : optional dict client_id -> {"prefix", "config"},
                             for catalogs that vend per principal
 
     Tokens carry the client_id that asked for them, which is how a
     loadTable knows which principal it is answering.
+
+    ``calls`` , when given, collects what the catalog was asked to do, so a
+    test can assert on requests that have no visible answer -- a drop, say.
     """
 
     class _Handler(BaseHTTPRequestHandler):
@@ -177,30 +184,71 @@ def _make_handler(tables):
                     self._error()
                     return
 
-                delegation = self.headers.get("X-Iceberg-Access-Delegation", "")
-                resp = {
-                    "metadata-location": info["metadata_location"],
-                    "metadata": {
-                        "format-version": 2,
-                        "table-uuid": str(uuid.uuid4()),
-                        "location": info["location"],
-                    },
-                }
+                self._json(self._load_table_response(info, info["location"]))
+                return
 
-                vended = info.get("vended")
-                by_client = info.get("vended_by_client")
-                if by_client:
-                    token = self.headers.get("Authorization", "").split(" ")[-1]
-                    vended = by_client.get(token.split(".", 1)[0])
+            # Staged create of a writable table.  A catalog that manages its
+            # own storage answers with the location it assigned; one that
+            # does not takes the location the client proposed.
+            if self.path.rstrip("/").endswith("/tables") and self.command == "POST":
+                request = json.loads(body or b"{}")
+                info = tables.get(request.get("name"))
+                if info is None:
+                    self._error()
+                    return
 
-                if delegation == "vended-credentials" and vended:
-                    resp["storage-credentials"] = [
-                        {"prefix": vended["prefix"], "config": vended["config"]}
-                    ]
-                self._json(resp)
+                location = (
+                    info["location"]
+                    if info.get("assigns_location")
+                    else request.get("location", info["location"])
+                )
+                if calls is not None:
+                    calls.setdefault("proposed_locations", []).append(
+                        request.get("location")
+                    )
+                self._json(self._load_table_response(info, location))
+                return
+
+            # Finishing the staged create, and committing snapshots: the
+            # catalog records them, and has nothing to say back.
+            if self.command == "POST" and (
+                "/tables/" in self.path or "/transactions/commit" in self.path
+            ):
+                self._json({})
+                return
+
+            if "/tables/" in self.path and self.command == "DELETE":
+                if calls is not None:
+                    calls.setdefault("drops", []).append(self.path)
+                self.send_response(204)
+                self.end_headers()
                 return
 
             self._error()
+
+        def _load_table_response(self, info, location):
+            resp = {
+                "metadata-location": info["metadata_location"],
+                "metadata": {
+                    "format-version": 2,
+                    "table-uuid": str(uuid.uuid4()),
+                    "location": location,
+                },
+            }
+
+            vended = info.get("vended")
+            by_client = info.get("vended_by_client")
+            if by_client:
+                token = self.headers.get("Authorization", "").split(" ")[-1]
+                vended = by_client.get(token.split(".", 1)[0])
+
+            delegation = self.headers.get("X-Iceberg-Access-Delegation", "")
+            if delegation == "vended-credentials" and vended:
+                resp["storage-credentials"] = [
+                    {"prefix": vended["prefix"], "config": vended["config"]}
+                ]
+
+            return resp
 
         def _json(self, obj):
             body = json.dumps(obj).encode()
@@ -236,10 +284,10 @@ def _find_free_port():
         return s.getsockname()[1]
 
 
-def _start_mock_catalog(tables):
+def _start_mock_catalog(tables, calls=None):
     """Start the mock catalog, leaving it to the caller to point at it."""
     port = _find_free_port()
-    httpd = HTTPServer(("127.0.0.1", port), _make_handler(tables))
+    httpd = HTTPServer(("127.0.0.1", port), _make_handler(tables, calls))
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     return httpd, thread, port
@@ -253,7 +301,7 @@ _CATALOG_GUCS = (
 )
 
 
-def _serve_mock_catalog(tables, enable_vended, conn=None):
+def _serve_mock_catalog(tables, enable_vended, conn=None, calls=None):
     """Start the mock catalog and point the REST GUCs at it.
 
     ``conn`` is the connection about to use the catalog.  ALTER SYSTEM
@@ -262,7 +310,7 @@ def _serve_mock_catalog(tables, enable_vended, conn=None):
     run against the previous test's (reset) settings.  A session-level
     SET on that connection takes effect immediately.
     """
-    httpd, thread, port = _start_mock_catalog(tables)
+    httpd, thread, port = _start_mock_catalog(tables, calls)
 
     settings = {
         "pg_lake_iceberg.rest_catalog_host": f"http://127.0.0.1:{port}",
@@ -327,6 +375,16 @@ def _denied(text):
     if text is None:
         return False
     return "Access Denied" in text or "AccessDenied" in text or "HTTP 403" in text
+
+
+def _bucket_keys(server):
+    """Every object key currently in the test bucket."""
+    paginator = server.client().get_paginator("list_objects_v2")
+    return [
+        obj["Key"]
+        for page in paginator.paginate(Bucket=server.bucket)
+        for obj in page.get("Contents", [])
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1066,6 +1124,139 @@ def test_minio_unrelated_table_still_reads_through_the_static_secret(
         run_command(f"DROP FOREIGN TABLE IF EXISTS {schema}.plain", superuser_conn)
         run_command(f"DROP TABLE IF EXISTS {schema}.{table}", superuser_conn)
         run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
+        superuser_conn.commit()
+        _stop_mock_catalog(httpd, thread, conn=superuser_conn)
+
+
+@requires_minio
+def test_minio_managed_catalog_places_and_serves_a_writable_table(
+    superuser_conn, pgduck_conn, extension, installcheck, minio_server
+):
+    """A catalog that owns its storage decides where a new table goes.
+
+    pg_lake proposes a location built from its own prefix; this catalog
+    overrules it, the way a Snowflake-managed external volume does, and
+    answers with the location it assigned plus credentials that reach only
+    there.  The table has to end up in that location: the credentials do
+    not reach anywhere else, and the prefix pg_lake would have picked is
+    barred to it here, so writing to the wrong one cannot silently pass.
+    """
+    if installcheck or not _HAVE_PYICEBERG:
+        return
+
+    server = minio_server
+    schema = "mv_managed"
+    table = "vc_managed"
+
+    managed_prefix = f"managed/{schema}/{table}"
+    managed_location = f"s3://{server.bucket}/{managed_prefix}"
+    client_prefix = "clientside"
+
+    # The static credential reaches only the prefix pg_lake would have
+    # chosen; the vended one reaches only the location the catalog assigned.
+    server.create_scoped_user("mv_mg_static", "mv_mg_static_secret", [client_prefix])
+    server.create_scoped_user("mv_mg_vended", "mv_mg_vended_secret", [managed_prefix])
+
+    calls = {}
+    tables = {
+        table: {
+            "metadata_location": f"{managed_location}/metadata/v1.metadata.json",
+            "location": managed_location,
+            "assigns_location": True,
+            "vended": {
+                "prefix": managed_location + "/",
+                "config": {
+                    "s3.access-key-id": "mv_mg_vended",
+                    "s3.secret-access-key": "mv_mg_vended_secret",
+                    "client.region": server.region,
+                },
+            },
+        }
+    }
+
+    _create_static_minio_secret(
+        pgduck_conn, server, "mv_mg_static", "mv_mg_static_secret"
+    )
+    httpd, thread = _serve_mock_catalog(
+        tables, enable_vended=True, conn=superuser_conn, calls=calls
+    )
+
+    try:
+        run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
+        run_command(
+            f"SET pg_lake_iceberg.default_location_prefix TO 's3://{server.bucket}/{client_prefix}'",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        # Create and fill in one transaction: the table's first snapshot is
+        # then built from what we have in hand, with no metadata to fetch.
+        run_command(
+            f"""CREATE TABLE {schema}.{table} (id int, val text)
+                USING iceberg WITH (catalog='rest')""",
+            superuser_conn,
+        )
+        run_command(
+            f"INSERT INTO {schema}.{table} SELECT i, 'v' || i FROM generate_series(1, 5) i",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        # We proposed a location of our own, and were overruled.
+        proposed = calls.get("proposed_locations", [])
+        assert len(proposed) == 1 and proposed[0].startswith(
+            f"s3://{server.bucket}/{client_prefix}/"
+        ), f"expected one proposal under the client prefix, got {proposed}"
+
+        options = run_query(
+            f"""SELECT ftoptions FROM pg_foreign_table
+                WHERE ftrelid = '{schema}.{table}'::regclass""",
+            superuser_conn,
+        )[0][0]
+        superuser_conn.commit()
+
+        assert (
+            f"location={managed_location}" in options
+        ), f"expected the table to live where the catalog put it, got {options}"
+        assert (
+            "catalog_managed_location=true" in options
+        ), f"expected the table to be marked catalog-managed, got {options}"
+
+        # The data went where the catalog said, reachable only through the
+        # credential it vended for that location.
+        keys = _bucket_keys(server)
+        assert any(
+            k.startswith(f"{managed_prefix}/data/") for k in keys
+        ), f"no data files under the catalog's location, got {keys}"
+        assert not any(
+            k.startswith(f"{client_prefix}/") for k in keys
+        ), f"data files landed under the prefix pg_lake proposed, got {keys}"
+
+        result = run_query(f"SELECT count(*) FROM {schema}.{table}", superuser_conn)
+        superuser_conn.commit()
+        assert result[0][0] == 5
+
+        # Dropping hands the files back to the catalog: we queue no deletes
+        # of our own for storage we do not own, and ask it to purge.
+        run_command(f"DROP TABLE {schema}.{table}", superuser_conn)
+        superuser_conn.commit()
+
+        assert any(
+            "purgeRequested=true" in path for path in calls.get("drops", [])
+        ), f"expected the drop to ask the catalog to purge, got {calls.get('drops')}"
+
+        queued = run_query(
+            f"""SELECT count(*) FROM lake_engine.deletion_queue
+                WHERE path LIKE '{managed_location}%'""",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+        assert queued[0][0] == 0, "queued deletes for storage the catalog owns"
+
+    finally:
+        run_command(f"DROP TABLE IF EXISTS {schema}.{table}", superuser_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
+        run_command("RESET pg_lake_iceberg.default_location_prefix", superuser_conn)
         superuser_conn.commit()
         _stop_mock_catalog(httpd, thread, conn=superuser_conn)
 

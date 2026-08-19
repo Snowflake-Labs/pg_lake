@@ -1623,6 +1623,20 @@ HandleIcebergOptionsChanges(Oid relationId, AlterTableStmt *alterStmt)
 								newOption->defname)));
 
 			/*
+			 * catalog_managed_location records what the catalog told us when
+			 * it created the table: whether the files there are its to remove
+			 * or ours. Changing it later would not move a single file, only
+			 * our belief about who owns them.
+			 */
+			if (strcmp(newOption->defname, CATALOG_MANAGED_LOCATION_OPTION) == 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("Changing option \"%s\" is not supported",
+								newOption->defname),
+						 errdetail("The catalog decided where this table lives "
+								   "when it was created.")));
+
+			/*
 			 * compatibility_mode decides the per-leaf storage mapping once,
 			 * at registration. Changing it on an existing table would desync
 			 * the persisted mapping (field_storage_pg_type) from the data

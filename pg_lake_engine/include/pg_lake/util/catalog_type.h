@@ -78,7 +78,14 @@ typedef enum IcebergCatalogType
 	OBJECT_STORE_READ_WRITE = 5
 } IcebergCatalogType;
 
+/*
+ * Foreign table option recording that the catalog, not pg_lake, chose where
+ * the table's files live.  Set by pg_lake when a catalog assigns a location.
+ */
+#define CATALOG_MANAGED_LOCATION_OPTION "catalog_managed_location"
+
 extern PGDLLEXPORT IcebergCatalogType GetIcebergCatalogType(Oid relationId);
+extern PGDLLEXPORT bool HasCatalogManagedLocation(Oid relationId);
 extern PGDLLEXPORT bool HasRestCatalogTableOption(List *options);
 extern PGDLLEXPORT bool HasObjectStoreCatalogTableOption(List *options);
 extern PGDLLEXPORT bool HasReadOnlyOption(List *options);

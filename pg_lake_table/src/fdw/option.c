@@ -575,6 +575,7 @@ InitPgLakeIcebergOptions(void)
 		{"catalog_name", ForeignTableRelationId},
 		{"catalog_table_name", ForeignTableRelationId},
 		{"catalog_namespace", ForeignTableRelationId},
+		{CATALOG_MANAGED_LOCATION_OPTION, ForeignTableRelationId},
 
 		/*
 		 * out-of-range value handling during writes: 'error' (default) or
@@ -673,6 +674,7 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 	/* if not provided, assume postgres catalog */
 	IcebergCatalogType icebergCatalogType = POSTGRES_CATALOG;
 	bool		readOnlyExternalCatalogTable = false;
+	bool		catalogManagedLocation = false;
 	char	   *catalogName = NULL;
 	char	   *catalogTableName = NULL;
 	char	   *catalogNamespace = NULL;
@@ -824,6 +826,12 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 		{
 			catalogName = defGetString(def);
 		}
+		else if (catalog == ForeignTableRelationId &&
+				 strcmp(def->defname, CATALOG_MANAGED_LOCATION_OPTION) == 0)
+		{
+			/* only accept boolean */
+			catalogManagedLocation = defGetBoolean(def);
+		}
 		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "row_ids") == 0)
 		{
 			/* only accept boolean */
@@ -931,6 +939,18 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("\"read_only\" option is only valid for catalog=\"rest\" or catalog=\"object_store\"")));
 
+	/*
+	 * Only a REST catalog assigns a location today, and only for the tables
+	 * it creates on our behalf. pg_lake sets this itself when a catalog does;
+	 * it is not something to turn on by hand.
+	 */
+	if (catalog == ForeignTableRelationId && catalogManagedLocation &&
+		icebergCatalogType != REST_CATALOG_READ_WRITE)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("\"%s\" option is only valid for writable rest catalog tables",
+						CATALOG_MANAGED_LOCATION_OPTION)));
+
 	if (catalog == ForeignTableRelationId)
 	{
 		if (icebergCatalogType == REST_CATALOG_READ_ONLY || icebergCatalogType == OBJECT_STORE_READ_ONLY)
@@ -976,7 +996,11 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 			if (catalogTableName)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("\"catalog_table_name\" option is only valid for read-only rest and object_store catalog tables")));
+						 errmsg("\"catalog_table_name\" option is only valid for read-only rest and object_store catalog tables"),
+						 errdetail("pg_lake writes only to Iceberg tables it created itself, "
+								   "and names those after the database, schema and table."),
+						 errhint("Add read_only=True to query the existing table \"%s\".",
+								 catalogTableName)));
 
 		}
 	}

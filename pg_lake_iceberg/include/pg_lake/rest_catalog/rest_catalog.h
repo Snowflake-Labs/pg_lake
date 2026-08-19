@@ -164,6 +164,14 @@ typedef struct RestCatalogRequest
 	 * holds the full request body.
 	 */
 	char	   *body;
+
+	/*
+	 * DROP table only: ask the catalog to remove the table's files as well.
+	 * We do that for storage the catalog manages, where the files are its to
+	 * remove and we queue no deletes of our own.  The relation is gone by the
+	 * time the request is sent, so the answer is recorded when the drop is.
+	 */
+	bool		purgeRequested;
 }			RestCatalogRequest;
 
 
@@ -225,7 +233,8 @@ List	   *JsonbGetArrayElementObjects(Jsonb *jb, const char *arrayKey,
 										const char *elementStringKey);
 
 extern PGDLLEXPORT void RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName);
-extern PGDLLEXPORT void StartStageRestCatalogIcebergTableCreate(Oid relationId);
+extern PGDLLEXPORT char *StartStageRestCatalogIcebergTableCreate(Oid relationId,
+																 const char *proposedLocation);
 extern PGDLLEXPORT char *FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSchema * dataFileSchema, List *partitionSpecs);
 extern PGDLLEXPORT void ErrorIfRestNamespaceDoesNotExist(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName);
 extern PGDLLEXPORT char *GetRestCatalogName(Oid relationId);

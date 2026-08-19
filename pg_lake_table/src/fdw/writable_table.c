@@ -1199,6 +1199,13 @@ AddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc,
 
 	BindRelationToXactRestCatalog(relationId);
 
+	/*
+	 * Resolve storage credentials before the result is written out to object
+	 * storage via pgduck_server.  Covers INSERT..SELECT, COPY FROM and
+	 * compaction, which all funnel here.
+	 */
+	EnsureStorageCredentialsForRelation(relationId);
+
 	int64		rowsProcessed = 0;
 	ForeignTable *foreignTable = GetForeignTable(relationId);
 	List	   *options = foreignTable->options;

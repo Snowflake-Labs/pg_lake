@@ -56,6 +56,7 @@
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/storage/storage_credentials.h"
 #include "pg_lake/util/catalog_type.h"
+#include "pg_lake/util/rel_utils.h"
 #include "pg_lake/util/temporal_utils.h"
 #include "pg_lake/util/url_encode.h"
 
@@ -136,9 +137,16 @@ static VendedCredentialsCacheKey BuildVendedCredentialsCacheKey(Oid serverOid,
 * a table. The schema will be updated when we make this table visible/committed.
 * The main reason for staging early is to be able to get the vended credentials
 * for writable tables.
+*
+* proposedLocation is where we would like the table to live.  A catalog that
+* manages its own storage -- a Snowflake-managed external volume, say -- picks
+* the location itself and answers with the one it picked; the credentials it
+* vends reach only there, so writing anywhere else fails whatever we later
+* record in the catalog.  Returns the location in the answer, which the caller
+* compares against what it proposed to learn whether it was overruled.
 */
-void
-StartStageRestCatalogIcebergTableCreate(Oid relationId)
+char *
+StartStageRestCatalogIcebergTableCreate(Oid relationId, const char *proposedLocation)
 {
 	const char *relationName = GetRestCatalogTableName(relationId);
 
@@ -160,6 +168,12 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId)
 
 	appendStringInfoChar(body, '}');	/* close schema object */
 	appendStringInfoString(body, ", ");
+
+	if (proposedLocation != NULL)
+	{
+		appendJsonString(body, "location", proposedLocation);
+		appendStringInfoString(body, ", ");
+	}
 
 	appendJsonString(body, "stage-create", "true");
 
@@ -202,6 +216,11 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId)
 									  catalogName, namespaceName,
 									  relationName);
 	}
+
+	if (httpResult.body == NULL)
+		return NULL;
+
+	return JsonbGetOptionalStringByPath(httpResult.body, 2, "metadata", "location");
 }
 
 
@@ -263,21 +282,30 @@ FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSche
 	appendJsonInt32(body, "sort-order-id", 0);
 	appendStringInfoChar(body, '}');	/* finish add-sort-order */
 
-	appendStringInfoString(body, ", ");
-	appendStringInfoChar(body, '{');	/* start set-location */
-	appendJsonString(body, "action", "set-location");
-	appendStringInfoChar(body, ',');
+	/*
+	 * Tell the catalog where the table lives -- but only when we are the ones
+	 * who decided.  A catalog that manages its own storage assigned the
+	 * location at stage-create and we adopted it, so there is nothing to set,
+	 * and setting it would only invite a server that forbids relocating a
+	 * managed table to reject the whole create.
+	 *
+	 * The location we send is the one the table actually carries, rather than
+	 * one rebuilt from the prefix: those two agree only until a database,
+	 * schema or table name needs URL-encoding, and disagreeing would point
+	 * the catalog at a directory we never write to.
+	 */
+	if (!HasCatalogManagedLocation(relationId))
+	{
+		char	   *queryArguments = "";
+		char	   *location = GetWritableTableLocation(relationId, &queryArguments);
 
-	/* construct location */
-	StringInfo	location = makeStringInfo();
-	const char *catalogName = GetRestCatalogName(relationId);
-	const char *namespaceName = GetRestCatalogNamespace(relationId);
-	const char *relationName = GetRestCatalogTableName(relationId);
-	RestCatalogOptions *opts = GetRestCatalogOptionsForRelation(relationId);
-
-	appendStringInfo(location, "%s/%s/%s/%s/%d", opts->locationPrefix, catalogName, namespaceName, relationName, relationId);
-	appendJsonString(body, "location", location->data);
-	appendStringInfoChar(body, '}');	/* end set-location */
+		appendStringInfoString(body, ", ");
+		appendStringInfoChar(body, '{');	/* start set-location */
+		appendJsonString(body, "action", "set-location");
+		appendStringInfoChar(body, ',');
+		appendJsonString(body, "location", location);
+		appendStringInfoChar(body, '}');	/* end set-location */
+	}
 
 	/* add partition spec */
 	appendStringInfoChar(body, ',');
@@ -1180,17 +1208,24 @@ LookupVendedCredentialsInCache(Oid serverOid,
  *    vended different credentials for the same table get distinct secrets
  *    rather than clobbering one another.
  *
- * Only read-only REST tables are served.  pg_lake owns the files of a
- * writable table, and owning files means deleting them: a DROP only
- * queues its files, and the queue holds them for
- * pg_lake_engine.orphaned_file_retention_period (10 days by default),
- * long after any vended credential has expired and the table has left
- * the catalog that could vend another.  Until that lifecycle has an
- * answer, writable tables keep reaching storage the way they do without
+ * Served for a REST table whose files the catalog owns: a read-only
+ * table, or a writable one the catalog placed in storage it manages.
+ * What those have in common is that dropping them queues nothing --
+ * whoever owns the files removes them -- so the credential only has to
+ * outlive the statement using it.
+ *
+ * A writable table in storage of our own choosing is a different
+ * lifecycle and is not served.  pg_lake owns those files, and owning
+ * files means deleting them: a DROP only queues the deletes, and the
+ * queue holds them for pg_lake_engine.orphaned_file_retention_period (10
+ * days by default), long after any vended credential has expired and the
+ * table has left the catalog that could vend another.  Until that has an
+ * answer, such tables keep reaching storage the way they do without
  * vending, and are no worse off than before.
  *
- * Returns NIL for non-REST tables, writable REST tables, when vending is
- * disabled, or when the catalog vends no credentials.
+ * Returns NIL for non-REST tables, for writable REST tables in our own
+ * storage, when vending is disabled, or when the catalog vends no
+ * credentials.
  */
 List *
 IcebergProvideStorageCredentials(Oid relationId)
@@ -1205,7 +1240,9 @@ IcebergProvideStorageCredentials(Oid relationId)
 	ListCell   *credsCell = NULL;
 	StorageCredential *sc;
 
-	if (catalogType != REST_CATALOG_READ_ONLY)
+	if (catalogType != REST_CATALOG_READ_ONLY &&
+		!(catalogType == REST_CATALOG_READ_WRITE &&
+		  HasCatalogManagedLocation(relationId)))
 		return NIL;
 
 	/*

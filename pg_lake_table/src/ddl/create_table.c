@@ -115,10 +115,20 @@ static void EnsureSupportedIcebergTableColumnDefinitions(List *columnDefList);
 static void ErrorIfTableContainsVirtualColumns(List *columnDefList);
 #endif
 static void ErrorIfTableContainsUnsupportedTypes(List *columnDefList);
-static char *SetIcebergTableLocationOptionFromDefaultPrefix(Oid relationId,
-															const char *defaultLocationPrefix,
-															char *databaseName,
-															char *schemaName, char *tableName);
+static void SetIcebergTableOptions(List *optionDefs, char *schemaName,
+								   char *tableName);
+static char *BuildIcebergTableLocationFromDefaultPrefix(Oid relationId,
+														const char *defaultLocationPrefix,
+														char *databaseName,
+														char *schemaName,
+														char *tableName);
+static bool SameStorageLocation(const char *left, const char *right);
+static char *SetIcebergTableLocationOption(Oid relationId, char *location,
+										   char *schemaName, char *tableName);
+static char *SetIcebergTableCatalogAssignedLocationOption(Oid relationId,
+														  char *location,
+														  char *schemaName,
+														  char *tableName);
 
 /*
 * CreatePgLakeTableCheckUnsupportedFeaturesPostProcess is a utility statement handler
@@ -921,14 +931,24 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 			 * table name.  Explicit catalog options on the table are
 			 * rejected, and the server must not have catalog_name set either,
 			 * since that would conflict with the derived values.
+			 *
+			 * Whether the catalog manages the location is likewise not the
+			 * user's to declare: we learn it from the catalog when we create
+			 * the table there, and record what we learned.
 			 */
 			if (catalogNamespaceProvided != NULL ||
 				catalogTableNameProvided != NULL ||
-				catalogNameProvided != NULL)
+				catalogNameProvided != NULL ||
+				GetOption(createStmt->options, CATALOG_MANAGED_LOCATION_OPTION) != NULL)
 			{
 				ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 								errmsg("writable %s catalog iceberg tables do not "
-									   "allow explicit catalog options", hasObjectStoreCatalogOption ? OBJECT_STORE_CATALOG_NAME : REST_CATALOG_NAME)));
+									   "allow explicit catalog options", hasObjectStoreCatalogOption ? OBJECT_STORE_CATALOG_NAME : REST_CATALOG_NAME),
+								errdetail("pg_lake writes only to Iceberg tables it created "
+										  "itself, and names those after the database, schema "
+										  "and table. A table that already exists in the "
+										  "catalog can be attached for reading."),
+								errhint("Add read_only=True to attach an existing table.")));
 			}
 
 			if (hasRestCatalogOption)
@@ -1081,7 +1101,13 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 	/* Keep in sync with the read-only-table call above. */
 	RecordIcebergCatalogServerDependency(relationId, createStmt->options);
 
-	char	   *location;
+	/*
+	 * Where we intend the table to live, before the catalog has a say. An
+	 * explicit location option is already on the table; otherwise we derive
+	 * one from the prefix, but only record it below, once we know whether the
+	 * catalog accepts it.
+	 */
+	char	   *proposedLocation;
 
 	if (locationOption != NULL)
 	{
@@ -1091,32 +1117,21 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		 */
 		char	   *queryArguments = "";
 
-		location = GetWritableTableLocation(relationId, &queryArguments);
+		proposedLocation = GetWritableTableLocation(relationId, &queryArguments);
 	}
 	else
 	{
-		/*
-		 * replace default placeholder uri with the actual default uri for the
-		 * table
-		 */
 		Assert(defaultLocationPrefix != NULL);
 
-		char	   *databaseName = get_database_name(MyDatabaseId);
-		char	   *tableName = createStmt->base.relation->relname;
-		char	   *schemaName = createStmt->base.relation->schemaname;
-
-		location = SetIcebergTableLocationOptionFromDefaultPrefix(relationId,
-																  defaultLocationPrefix,
-																  databaseName,
-																  schemaName, tableName);
+		proposedLocation =
+			BuildIcebergTableLocationFromDefaultPrefix(relationId,
+													   defaultLocationPrefix,
+													   get_database_name(MyDatabaseId),
+													   createStmt->base.relation->schemaname,
+													   createStmt->base.relation->relname);
 	}
 
-	/* we do not allow non-empty locations */
-	ErrorIfLocationIsNotEmpty(location);
-
-	/* we currently only allow Iceberg tables in the managed storage region */
-	ErrorIfNotInManagedStorageRegion(location);
-
+	char	   *catalogAssignedLocation = NULL;
 
 	if (hasRestCatalogOption)
 	{
@@ -1125,9 +1140,8 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 
 		/*
 		 * For writable rest catalog iceberg tables, we register the namespace
-		 * in the rest catalog. We do that later in the command processing so
-		 * that any previous errors (e.g., table creation failures) prevents
-		 * us from registering the namespace.
+		 * in the rest catalog. We do that after the table is created locally,
+		 * so that a failure there stops us from registering the namespace.
 		 *
 		 * Note that registering a namespace is not a transactional operation
 		 * from pg_lake's perspective. If the subsequent table creation fails,
@@ -1144,7 +1158,86 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 
 		RegisterNamespaceToRestCatalog(opts, get_database_name(MyDatabaseId),
 									   get_namespace_name(namespaceId));
+
+		/*
+		 * Staging happens in two steps: this one creates the table in the
+		 * rest catalog with a "staging" status, and
+		 * FinalizeStagingCreateRestCatalogIcebergTable finalizes it in
+		 * post-commit, once the local creation has succeeded.
+		 *
+		 * We stage before settling on a location, because we propose a
+		 * location here and the catalog may answer with a different one.
+		 * Staging this early also gets us the vended credentials for the rest
+		 * of the transaction: a CTAS, for one, writes data before it commits.
+		 */
+		catalogAssignedLocation =
+			StartStageRestCatalogIcebergTableCreate(relationId, proposedLocation);
+
+		/*
+		 * Record the create table operation in the rest catalog. Note that
+		 * this is not the final registration of the table in the tx, we'll
+		 * update this record in
+		 * FinalizeStagingCreateRestCatalogIcebergTableCreate. We prefer to
+		 * record it here such if table is dropped before commit, we can track
+		 * the creation of the table properly.
+		 */
+		RecordRestCatalogRequestInTx(relationId, REST_CATALOG_CREATE_TABLE, "");
 	}
+
+	/*
+	 * A catalog that manages its own storage overrules the location we asked
+	 * for and answers with the one it assigned.  Its credentials reach only
+	 * there, so that answer, not our proposal, is where this table lives.
+	 */
+	bool		locationIsCatalogManaged =
+		catalogAssignedLocation != NULL &&
+		!SameStorageLocation(catalogAssignedLocation, proposedLocation);
+
+	char	   *location;
+
+	if (locationIsCatalogManaged)
+	{
+		if (locationOption != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("catalog \"%s\" assigns the location of its tables",
+							GetStringOption(createStmt->options, "catalog", false)),
+					 errdetail("The catalog placed this table at %s, not at the "
+							   "requested %s.",
+							   catalogAssignedLocation, proposedLocation),
+					 errhint("Create the table without the \"location\" option.")));
+
+		location = SetIcebergTableCatalogAssignedLocationOption(relationId,
+																catalogAssignedLocation,
+																createStmt->base.relation->schemaname,
+																createStmt->base.relation->relname);
+	}
+	else if (locationOption != NULL)
+	{
+		location = proposedLocation;
+	}
+	else
+	{
+		/*
+		 * replace default placeholder uri with the actual default uri for the
+		 * table
+		 */
+		location = SetIcebergTableLocationOption(relationId, proposedLocation,
+												 createStmt->base.relation->schemaname,
+												 createStmt->base.relation->relname);
+	}
+
+	/*
+	 * We do not allow non-empty locations -- but a location the catalog just
+	 * assigned to a table it just created is empty by construction, and
+	 * listing it would only ask storage to confirm what the catalog already
+	 * decided.
+	 */
+	if (!locationIsCatalogManaged)
+		ErrorIfLocationIsNotEmpty(location);
+
+	/* we currently only allow Iceberg tables in the managed storage region */
+	ErrorIfNotInManagedStorageRegion(location);
 
 	bool		hasRowIds = GetBoolOption(createStmt->options, "row_ids", false);
 
@@ -1161,45 +1254,19 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 	Assert(list_length(GetRestrictedColumnDefList(columnDefList)) == list_length(columnDefList));
 
 
-	if (hasRestCatalogOption)
-	{
-		/* this code-path only deals with writable rest catalog tables */
-		Assert(!HasReadOnlyOption(createStmt->options));
-
-		/*
-		 * We have to start staging create table for writable rest catalog
-		 * tables here, because initial staging allows us to get the vended
-		 * credentials for this transaction. For example, if the rest catalog
-		 * table is created via CTAS, the CTAS command may need to read/write
-		 * data to S3 using the vended credentials. Also note that staging
-		 * consists of two steps: 1.
-		 * StartStagingCreateRestCatalogIcebergTable: which creates the table
-		 * in the rest catalog with a "staging" status. 2.
-		 * FinalizeStagingCreateRestCatalogIcebergTable: which finalizes the
-		 * table creation in the rest catalog after the local table creation
-		 * is successful in post-commit.
-		 */
-		StartStageRestCatalogIcebergTableCreate(relationId);
-
-		/*
-		 * Record the create table operation in the rest catalog. Note that
-		 * this is not the final registration of the table in the tx, we'll
-		 * update this record in
-		 * FinalizeStagingCreateRestCatalogIcebergTableCreate. We prefer to
-		 * record it here such if table is dropped before commit, we can track
-		 * the creation of the table properly.
-		 */
-		RecordRestCatalogRequestInTx(relationId, REST_CATALOG_CREATE_TABLE, "");
-	}
-
-
 	List	   *ddlOps = NIL;
 
 	IcebergDDLOperation *createDDLOp = palloc0(sizeof(IcebergDDLOperation));
 
 	createDDLOp->type = DDL_TABLE_CREATE;
 	createDDLOp->columnDefs = columnDefList;
-	createDDLOp->hasCustomLocation = (locationOption != NULL);
+
+	/*
+	 * A location we did not derive ourselves is one whose storage we do not
+	 * manage, whether the user named it or the catalog assigned it.
+	 */
+	createDDLOp->hasCustomLocation =
+		(locationOption != NULL || locationIsCatalogManaged);
 
 	ddlOps = lappend(ddlOps, createDDLOp);
 
@@ -1700,38 +1767,23 @@ ExpandTableLikeClause(TableLikeClause *table_like_clause)
 
 
 /*
- * SetIcebergTableLocationOptionFromDefaultPrefix sets the location option for
- * given iceberg table via internal api. Location will be in the format of
- * "<database>/<schema>/<table>/<relationId>"
+ * SetIcebergTableOptions applies the given options to an iceberg table that
+ * was just created, via internal api.  Each option carries its own action:
+ * DEFELEM_SET for one the table already has, the default for a new one.
  */
-static char *
-SetIcebergTableLocationOptionFromDefaultPrefix(Oid relationId,
-											   const char *defaultLocationPrefix,
-											   char *databaseName,
-											   char *schemaName, char *tableName)
+static void
+SetIcebergTableOptions(List *optionDefs, char *schemaName, char *tableName)
 {
-	Assert(IsPgLakeIcebergForeignTableById(relationId));
+	AlterTableCmd *setOptionsCmd = makeNode(AlterTableCmd);
 
-	StringInfo	location = makeStringInfo();
-
-	appendStringInfo(location, "%s/%s/%s/%s/%u", defaultLocationPrefix,
-					 URLEncodePath(databaseName), URLEncodePath(schemaName),
-					 URLEncodePath(tableName), relationId);
-
-	DefElem    *locationOption = makeDefElem("location", (Node *) makeString(location->data), -1);
-
-	locationOption->defaction = DEFELEM_SET;
-
-	AlterTableCmd *setLocationOptionCmd = makeNode(AlterTableCmd);
-
-	setLocationOptionCmd->subtype = AT_GenericOptions;
-	setLocationOptionCmd->def = (Node *) list_make1(locationOption);
+	setOptionsCmd->subtype = AT_GenericOptions;
+	setOptionsCmd->def = (Node *) optionDefs;
 
 	AlterTableStmt *alterTable = makeNode(AlterTableStmt);
 
 	alterTable->relation = makeRangeVar(schemaName, tableName, -1);
 	alterTable->objtype = OBJECT_FOREIGN_TABLE;
-	alterTable->cmds = list_make1(setLocationOptionCmd);
+	alterTable->cmds = list_make1(setOptionsCmd);
 
 	PlannedStmt *plannedStmt = makeNode(PlannedStmt);
 
@@ -1745,8 +1797,103 @@ SetIcebergTableLocationOptionFromDefaultPrefix(Oid relationId,
 	 */
 	standard_ProcessUtility(plannedStmt, "ALTER FOREIGN TABLE", false,
 							PROCESS_UTILITY_QUERY, NULL, NULL, None_Receiver, NULL);
+}
+
+
+/*
+ * BuildIcebergTableLocationFromDefaultPrefix returns the location we would
+ * give an iceberg table absent any other instruction, in the format
+ * "<prefix>/<database>/<schema>/<table>/<relationId>".
+ */
+static char *
+BuildIcebergTableLocationFromDefaultPrefix(Oid relationId,
+										   const char *defaultLocationPrefix,
+										   char *databaseName,
+										   char *schemaName, char *tableName)
+{
+	StringInfo	location = makeStringInfo();
+
+	appendStringInfo(location, "%s/%s/%s/%s/%u", defaultLocationPrefix,
+					 URLEncodePath(databaseName), URLEncodePath(schemaName),
+					 URLEncodePath(tableName), relationId);
 
 	return location->data;
+}
+
+
+/*
+ * SameStorageLocation compares two locations as storage prefixes, where a
+ * trailing separator says nothing about which directory is meant.
+ */
+static bool
+SameStorageLocation(const char *left, const char *right)
+{
+	size_t		leftLength = strlen(left);
+	size_t		rightLength = strlen(right);
+
+	while (leftLength > 0 && left[leftLength - 1] == '/')
+		leftLength--;
+
+	while (rightLength > 0 && right[rightLength - 1] == '/')
+		rightLength--;
+
+	return leftLength == rightLength &&
+		strncmp(left, right, leftLength) == 0;
+}
+
+
+/*
+ * SetIcebergTableLocationOption sets the location option for the given
+ * iceberg table via internal api.
+ */
+static char *
+SetIcebergTableLocationOption(Oid relationId, char *location,
+							  char *schemaName, char *tableName)
+{
+	Assert(IsPgLakeIcebergForeignTableById(relationId));
+
+	DefElem    *locationOption =
+		makeDefElem("location", (Node *) makeString(location), -1);
+
+	/* the table carries the placeholder location until we replace it */
+	locationOption->defaction = DEFELEM_SET;
+
+	SetIcebergTableOptions(list_make1(locationOption), schemaName, tableName);
+
+	return location;
+}
+
+
+/*
+ * SetIcebergTableCatalogAssignedLocationOption records a location the catalog
+ * chose for the table, and marks it as such: from here on the storage belongs
+ * to the catalog, which placed the files and will remove them.
+ */
+static char *
+SetIcebergTableCatalogAssignedLocationOption(Oid relationId, char *location,
+											 char *schemaName, char *tableName)
+{
+	Assert(IsPgLakeIcebergForeignTableById(relationId));
+
+	if (!IsSupportedURL(location))
+		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg("pg_lake_iceberg: unsupported URL: \"%s\" assigned by the catalog",
+							   location)));
+
+	DefElem    *locationOption =
+		makeDefElem("location", (Node *) makeString(location), -1);
+	DefElem    *managedOption =
+		makeDefElem(CATALOG_MANAGED_LOCATION_OPTION, (Node *) makeString("true"), -1);
+
+	/* the table carries the placeholder location until we replace it */
+	locationOption->defaction = DEFELEM_SET;
+
+	SetIcebergTableOptions(list_make2(locationOption, managedOption),
+						   schemaName, tableName);
+
+	char	   *queryArguments = "";
+
+	return GetWritableTableLocation(relationId, &queryArguments);
 }
 
 #if PG_VERSION_NUM >= 180000
