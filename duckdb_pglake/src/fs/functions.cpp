@@ -17,6 +17,7 @@
 
 #include "duckdb.hpp"
 
+#include "pg_lake/fs/cache_inode_budget.hpp"
 #include "pg_lake/fs/caching_file_system.hpp"
 #include "pg_lake/fs/file_cache_manager.hpp"
 #include "pg_lake/fs/file_utils.hpp"
@@ -896,7 +897,7 @@ PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
 							  "Inodes that cache management keeps available on the cache file system, "
 							  "or AUTO to derive the number from the file system",
 							  LogicalType::VARCHAR, Value(MIN_FREE_CACHE_INODES_AUTO),
-							  FileCacheManager::CheckMinFreeInodes);
+							  CheckMinFreeCacheInodes);
 	config.AddExtensionOption(PG_LAKE_REGION_SETTING, "The region of the server", LogicalType::VARCHAR);
 	config.AddExtensionOption(MANAGED_STORAGE_BUCKET_SETTING, "PgLake managed storage bucket location", LogicalType::VARCHAR);
 	config.AddExtensionOption(MANAGED_STORAGE_KEY_ID_SETTING, "PgLake managed storage customer key ID", LogicalType::VARCHAR);

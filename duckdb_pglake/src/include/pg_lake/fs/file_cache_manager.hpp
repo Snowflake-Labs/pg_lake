@@ -25,8 +25,6 @@ namespace duckdb {
 
 extern const string CACHE_DIR_SETTING;
 extern const string CACHE_ON_WRITE_MAX_SIZE;
-extern const string MIN_FREE_CACHE_INODES_SETTING;
-extern const string MIN_FREE_CACHE_INODES_AUTO;
 extern const string NO_CACHE_PREFIX;
 
 /*
@@ -46,24 +44,6 @@ const string CACHE_FILE_PREFIX = "pgl-cache.";
 /* special values for cache file return code */
 const int64_t LOCK_CANNOT_BE_ACQUIRED = -1;
 const int64_t DIRECTORY_CANNOT_CREATED = -2;
-
-/*
- * How AUTO is represented once pg_lake_min_free_cache_inodes has been parsed, so
- * that the number of inodes to keep available is a single int64_t. Not a value
- * anybody can set: the setting takes AUTO or a non-negative number of inodes,
- * where 0 turns inode management off.
- */
-const int64_t MIN_FREE_INODES_AUTO = -1;
-
-/*
- * By default, we keep 1/DEFAULT_FREE_INODE_FRACTION of the inodes on the cache
- * file system available, bounded by DEFAULT_MIN_FREE_INODES and
- * DEFAULT_MAX_FREE_INODES, and never more than half of the inodes on the file
- * system.
- */
-const int64_t DEFAULT_FREE_INODE_FRACTION = 100;
-const int64_t DEFAULT_MIN_FREE_INODES = 1000;
-const int64_t DEFAULT_MAX_FREE_INODES = 100000;
 
 /*
  * CacheItem represents a file in cache or the cache queue.
@@ -242,8 +222,6 @@ public:
 	static shared_ptr<FileCacheManager> Get(ClientContext &context);
 
 	bool TryGetCacheDir(optional_ptr<FileOpener> opener, string &cacheDir);
-	static void CheckMinFreeInodes(ClientContext &context, SetScope scope,
-								   Value &value);
 	bool TryGetCacheFilePath(string cacheDir, string url, string &cache_path);
 	bool IsCacheableURL(string cacheDir, string url);
 	int64_t CacheFile(ClientContext &context, string url, bool force, bool waitForLock);
