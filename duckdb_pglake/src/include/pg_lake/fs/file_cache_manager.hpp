@@ -26,6 +26,7 @@ namespace duckdb {
 extern const string CACHE_DIR_SETTING;
 extern const string CACHE_ON_WRITE_MAX_SIZE;
 extern const string MIN_FREE_CACHE_INODES_SETTING;
+extern const string MIN_FREE_CACHE_INODES_AUTO;
 extern const string NO_CACHE_PREFIX;
 
 /*
@@ -47,9 +48,10 @@ const int64_t LOCK_CANNOT_BE_ACQUIRED = -1;
 const int64_t DIRECTORY_CANNOT_CREATED = -2;
 
 /*
- * Value of pg_lake_min_free_cache_inodes that derives the number of inodes to
- * keep available on the cache file system from the file system itself. Any other
- * negative value is rejected, and 0 turns inode management off.
+ * How AUTO is represented once pg_lake_min_free_cache_inodes has been parsed, so
+ * that the number of inodes to keep available is a single int64_t. Not a value
+ * anybody can set: the setting takes AUTO or a non-negative number of inodes,
+ * where 0 turns inode management off.
  */
 const int64_t MIN_FREE_INODES_AUTO = -1;
 

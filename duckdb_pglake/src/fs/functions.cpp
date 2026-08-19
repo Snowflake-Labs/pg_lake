@@ -894,8 +894,8 @@ PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
 	config.AddExtensionOption(CACHE_ON_WRITE_MAX_SIZE, "PgLake cache-on-write max size", LogicalType::BIGINT);
 	config.AddExtensionOption(MIN_FREE_CACHE_INODES_SETTING,
 							  "Inodes that cache management keeps available on the cache file system, "
-							  "or -1 to derive the number from the file system",
-							  LogicalType::BIGINT, Value::BIGINT(MIN_FREE_INODES_AUTO),
+							  "or AUTO to derive the number from the file system",
+							  LogicalType::VARCHAR, Value(MIN_FREE_CACHE_INODES_AUTO),
 							  FileCacheManager::CheckMinFreeInodes);
 	config.AddExtensionOption(PG_LAKE_REGION_SETTING, "The region of the server", LogicalType::VARCHAR);
 	config.AddExtensionOption(MANAGED_STORAGE_BUCKET_SETTING, "PgLake managed storage bucket location", LogicalType::VARCHAR);

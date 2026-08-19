@@ -25,6 +25,7 @@
 
 #include "duckdb.hpp"
 #include "duckdb/common/local_file_system.hpp"
+#include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/common/unordered_set.hpp"
 
 #include "pg_lake/fs/file_cache_manager.hpp"
@@ -46,9 +47,10 @@ const string CACHE_ON_WRITE_MAX_SIZE = "pg_lake_cache_on_write_max_size";
 
 /*
  * Number of inodes that cache management keeps available on the cache file
- * system, or MIN_FREE_INODES_AUTO to derive it from the file system.
+ * system, or MIN_FREE_CACHE_INODES_AUTO to derive it from the file system.
  */
 const string MIN_FREE_CACHE_INODES_SETTING = "pg_lake_min_free_cache_inodes";
+const string MIN_FREE_CACHE_INODES_AUTO = "AUTO";
 
 
 /*
@@ -86,11 +88,29 @@ FileCacheManager::TryGetCacheDir(optional_ptr<FileOpener> opener, string &cacheD
 
 
 /*
+ * TryParseMinFreeInodes interprets a value of pg_lake_min_free_cache_inodes: the
+ * string AUTO, which comes back as MIN_FREE_INODES_AUTO, or a non-negative
+ * number of inodes. Anything else is not a floor we can act on.
+ */
+static bool
+TryParseMinFreeInodes(const string &value, int64_t &minFreeInodes)
+{
+	if (StringUtil::CIEquals(value, MIN_FREE_CACHE_INODES_AUTO))
+	{
+		minFreeInodes = MIN_FREE_INODES_AUTO;
+		return true;
+	}
+
+	if (!TryCast::Operation<string_t, int64_t>(string_t(value), minFreeInodes))
+		return false;
+
+	return minFreeInodes >= 0;
+}
+
+
+/*
  * CheckMinFreeInodes rejects values of pg_lake_min_free_cache_inodes that we
  * cannot act on, at SET time rather than on the next round of cache management.
- *
- * MIN_FREE_INODES_AUTO is itself negative, so the other negative values are
- * rejected explicitly instead of silently turning inode management off.
  */
 void
 FileCacheManager::CheckMinFreeInodes(ClientContext &context, SetScope scope,
@@ -100,12 +120,12 @@ FileCacheManager::CheckMinFreeInodes(ClientContext &context, SetScope scope,
 		throw InvalidInputException(MIN_FREE_CACHE_INODES_SETTING +
 									" cannot be NULL");
 
-	int64_t minFreeInodes = value.GetValue<int64_t>();
+	int64_t minFreeInodes;
 
-	if (minFreeInodes < 0 && minFreeInodes != MIN_FREE_INODES_AUTO)
+	if (!TryParseMinFreeInodes(value.ToString(), minFreeInodes))
 		throw InvalidInputException(MIN_FREE_CACHE_INODES_SETTING +
-									" must be >= 0, or " +
-									to_string(MIN_FREE_INODES_AUTO) +
+									" must be a non-negative number of inodes, or " +
+									MIN_FREE_CACHE_INODES_AUTO +
 									" to derive it from the cache file system");
 }
 
@@ -114,19 +134,22 @@ FileCacheManager::CheckMinFreeInodes(ClientContext &context, SetScope scope,
  * GetMinFreeInodes returns the number of inodes to keep available on the cache
  * file system according to pg_lake_min_free_cache_inodes.
  *
- * The setting has a default, so the lookup only fails if somebody managed to
- * unset it; fall back to deriving the number in that case.
+ * The setting has a default and its values are checked at SET time, so we only
+ * get here without a number when somebody managed to unset it; derive the floor
+ * from the file system in that case.
  */
 static int64_t
 GetMinFreeInodes(ClientContext &context)
 {
 	Value setting;
+	int64_t minFreeInodes;
 
 	if (!context.TryGetCurrentSetting(MIN_FREE_CACHE_INODES_SETTING, setting) ||
-		setting.IsNull())
+		setting.IsNull() ||
+		!TryParseMinFreeInodes(setting.ToString(), minFreeInodes))
 		return MIN_FREE_INODES_AUTO;
 
-	return setting.GetValue<int64_t>();
+	return minFreeInodes;
 }
 
 
@@ -981,7 +1004,7 @@ LogInodePressure(const string &cacheDir, InodeBudget budget,
  * out of inodes long before we reach maxCacheSize, at which point writes to
  * the cache start failing. We therefore also evict when the number of
  * available inodes drops below pg_lake_min_free_cache_inodes, which is derived
- * from the cache file system when set to MIN_FREE_INODES_AUTO, and switched off
+ * from the cache file system when set to AUTO (the default), and switched off
  * by 0.
  *
  * We only evict for inodes when the cache itself holds enough of them to get

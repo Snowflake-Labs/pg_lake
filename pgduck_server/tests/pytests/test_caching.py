@@ -485,23 +485,34 @@ def test_min_free_cache_inodes_setting(pgduck_conn):
     """The default derives the floor from the cache file system, so that cache
     management is inode-aware without anybody configuring it.
 
-    -1 is the only negative value that means anything, so the others are
-    rejected rather than quietly turning inode management off. pgduck_server
-    reports success for a SET it could not apply, so the rejection shows up as
-    an aborted transaction and a setting that kept the value it had.
+    Anything other than AUTO or a non-negative number of inodes is rejected,
+    rather than quietly turning inode management off. pgduck_server reports
+    success for a SET it could not apply, so the rejection shows up as an
+    aborted transaction and a setting that kept the value it had.
     """
     results = run_query(
         "SELECT current_setting('pg_lake_min_free_cache_inodes')", pgduck_conn
     )
-    assert results[0][0] == -1
+    assert results[0][0] == "AUTO"
 
-    run_command("SET pg_lake_min_free_cache_inodes TO -2;", pgduck_conn)
-    pgduck_conn.rollback()
+    for rejected in ("-2", "'not a number'"):
+        run_command(f"SET pg_lake_min_free_cache_inodes TO {rejected};", pgduck_conn)
+        pgduck_conn.rollback()
+
+        results = run_query(
+            "SELECT current_setting('pg_lake_min_free_cache_inodes')", pgduck_conn
+        )
+        assert results[0][0] == "AUTO"
+
+    # A number of inodes is what an operator would put in the init file
+    run_command("SET pg_lake_min_free_cache_inodes TO 100000;", pgduck_conn)
 
     results = run_query(
         "SELECT current_setting('pg_lake_min_free_cache_inodes')", pgduck_conn
     )
-    assert results[0][0] == -1
+    assert results[0][0] == "100000"
+
+    run_command("RESET pg_lake_min_free_cache_inodes;", pgduck_conn)
 
     pgduck_conn.rollback()
 
