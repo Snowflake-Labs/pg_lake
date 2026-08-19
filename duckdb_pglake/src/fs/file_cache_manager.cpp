@@ -22,6 +22,7 @@
 #include "duckdb.hpp"
 #include "duckdb/common/local_file_system.hpp"
 
+#include "pg_lake/fs/cache_inode_budget.hpp"
 #include "pg_lake/fs/file_cache_manager.hpp"
 #include "pg_lake/fs/file_utils.hpp"
 #include "pg_lake/utils/pgduck_log_utils.h"
@@ -486,9 +487,114 @@ FileCacheManager::RemoveCacheFileInternal(FileSystem &file_system, string finalC
 
 
 /*
+ * SkipQueuedDownloads gives up on the candidates we were going to download
+ * because the cache file system is low on inodes, and releases the space we
+ * reserved for them.
+ *
+ * Adding a file to the cache takes an inode, so when we cannot get back above
+ * the floor we only evict in this round. The next round can add files again.
+ */
+static void
+SkipQueuedDownloads(vector<CacheItem> &cacheFiles, vector<CacheAction> &actions,
+					uint64_t &queueSize, InodeBudget &budget)
+{
+	for (CacheItem& cacheFile : cacheFiles)
+	{
+		if (!cacheFile.needsDownload)
+			continue;
+
+		cacheFile.needsDownload = false;
+
+		actions.push_back({
+			.url = cacheFile.url,
+			.fileSize = cacheFile.fileSize,
+			.action = SKIPPED_INODE_PRESSURE
+		});
+	}
+
+	queueSize = 0;
+	budget.reserved = 0;
+}
+
+
+/*
+ * CacheActionCounts summarises what a round of cache management did, for the
+ * log message at the end of it.
+ */
+struct CacheActionCounts
+{
+	int64_t added = 0;
+	int64_t addedBytes = 0;
+	int64_t removed = 0;
+	int64_t removedBytes = 0;
+	int64_t skippedTooLarge = 0;
+	int64_t skippedTooOld = 0;
+	int64_t skippedConcurrent = 0;
+	int64_t skippedInodePressure = 0;
+	int64_t addFailed = 0;
+};
+
+
+/*
+ * CountCacheActions tallies the actions a round of cache management took.
+ */
+static CacheActionCounts
+CountCacheActions(const vector<CacheAction> &actions)
+{
+	CacheActionCounts counts;
+
+	for (const CacheAction &action : actions)
+	{
+		switch (action.action)
+		{
+			case ADDED:
+				counts.added++;
+				counts.addedBytes += action.fileSize;
+				break;
+			case REMOVED:
+				counts.removed++;
+				counts.removedBytes += action.fileSize;
+				break;
+			case SKIPPED_TOO_LARGE:
+				counts.skippedTooLarge++;
+				break;
+			case SKIPPED_TOO_OLD:
+				counts.skippedTooOld++;
+				break;
+			case SKIPPED_CONCURRENT_MODIFY:
+				counts.skippedConcurrent++;
+				break;
+			case SKIPPED_INODE_PRESSURE:
+				counts.skippedInodePressure++;
+				break;
+			case ADD_FAILED:
+				counts.addFailed++;
+				break;
+			default:
+				break;
+		}
+	}
+
+	return counts;
+}
+
+
+/*
  * ManageCache implements a simple cache management approach where we prune
  * the least recently used files, until there is enough space for all recently
  * accessed candidates, and then we download them one by one.
+ *
+ * Space is both bytes and inodes: the cache can hold a large number of small
+ * files, so on a file system with a fixed inode table (e.g. ext4) we can run
+ * out of inodes long before we reach maxCacheSize, at which point writes to
+ * the cache start failing. We therefore also evict when the number of
+ * available inodes drops below pg_lake_min_free_cache_inodes, which is derived
+ * from the cache file system when set to AUTO (the default), and switched off
+ * by 0.
+ *
+ * We only evict for inodes when the cache itself holds enough of them to get
+ * back above the floor, since the file system is usually shared and we cannot
+ * fix somebody else's inode use by emptying our cache.
  */
 vector<CacheAction>
 FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize)
@@ -612,18 +718,68 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize)
 		totalCacheSize += cachedFile.fileSize;
 	}
 
+	InodeBudget inodes =
+		GetInodeBudget(context, file_system, cacheDir, cacheFiles);
+
+	int64_t inodesNeeded = inodes.Deficit();
+	bool inodePressure = inodesNeeded > 0;
+
+	/*
+	 * The cache normally shares a file system with other things, so the inodes
+	 * can also run out for reasons that have nothing to do with us. Evicting
+	 * the whole cache does not help then: it throws away a cache we can still
+	 * read from and leaves us just as far below the floor. So we only evict for
+	 * inodes when our own cache files can close the gap, and otherwise leave
+	 * the cache alone and stop adding to it.
+	 */
+	bool canRelieveInodePressure =
+		inodePressure && inodes.evictableFiles >= inodesNeeded;
+	bool skipDownloads = inodePressure && !canRelieveInodePressure;
+
+	if (skipDownloads)
+		SkipQueuedDownloads(cacheFiles, actions, queueSize, inodes);
+
 	/* sort from oldest to newest access time */
 	std::sort(cacheFiles.begin(), cacheFiles.end());
+
+	int64_t prunedDirectories = 0;
+
+	/*
+	 * Cache files we have not looked at yet, and could therefore still evict.
+	 * We count down as we go, so that we can tell when the floor moved out of
+	 * reach.
+	 */
+	int64_t remainingEvictableFiles = inodes.evictableFiles;
 
 	/* remove items until we have enough space for all candidates */
 	for (CacheItem& cacheFile : cacheFiles)
 	{
-		if (totalCacheSize + queueSize < maxCacheSize)
+		bool needBytes = totalCacheSize + queueSize >= maxCacheSize;
+
+		/*
+		 * How many inodes we still have to free, derived from the queue the way
+		 * needBytes is, so that a candidate we skip below also releases the
+		 * inode it reserved.
+		 *
+		 * We also keep applying the check we did before the loop, now against
+		 * what we have actually freed and what is left to evict, because an
+		 * eviction that loses the race for the cache file lock frees no inode: a
+		 * round that can no longer reach the floor stops rather than emptying the
+		 * cache on its way there. Pruning directories can free more than we count
+		 * here, which only makes us stop a little early.
+		 */
+		int64_t inodesStillNeeded = inodes.Deficit();
+		bool needInodes = canRelieveInodePressure && inodesStillNeeded > 0 &&
+			remainingEvictableFiles >= inodesStillNeeded;
+
+		if (!needBytes && !needInodes)
 			/* we have enough space to fit our queue */
 			break;
 
 		if (!cacheFile.isCandidate)
 		{
+			remainingEvictableFiles--;
+
 			PGDUCK_SERVER_DEBUG("removing %s from cache (%" PRIu64 \
 							    " bytes)", cacheFile.cacheFilePath.c_str(), cacheFile.fileSize);
 
@@ -641,6 +797,22 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize)
 			else
 			{
 				totalCacheSize -= cacheFile.fileSize;
+
+				/*
+				 * Directories also hold inodes, so reclaim the ones that no
+				 * longer have any cache files in them. We do this regardless of
+				 * why we are evicting, since a cache that saw many prefixes
+				 * would otherwise keep holding those inodes until it does run
+				 * low on them.
+				 */
+				int64_t pruned =
+					PruneEmptyCacheDirectory(cacheDir,
+											 FileUtils::ExtractDirName(cacheFile.cacheFilePath));
+
+				prunedDirectories += pruned;
+
+				/* removing the file freed up its inode, plus any directories */
+				inodes.freed += 1 + pruned;
 			}
 
 			actions.push_back({
@@ -655,12 +827,32 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize)
 			cacheFile.needsDownload = false;
 			queueSize -= cacheFile.fileSize;
 
+			/*
+			 * Give back the inode we reserved for the file. We keep the ones
+			 * reserved for its directories, since another candidate may still
+			 * need them, and reserving too many only costs us an eviction.
+			 */
+			if (inodes.reserved > 0)
+				inodes.reserved--;
+
 			actions.push_back({
 				.url = cacheFile.url,
 				.fileSize = cacheFile.fileSize,
 				.action = SKIPPED_TOO_OLD
 			});
 		}
+	}
+
+	/*
+	 * The loop can also run out of inodes to free, since an eviction that loses
+	 * the race for the cache file lock frees none. Downloading files while we
+	 * are still below the floor would only push us further down, so hold off on
+	 * the candidates in that case too.
+	 */
+	if (inodePressure && !skipDownloads && inodes.Deficit() > 0)
+	{
+		SkipQueuedDownloads(cacheFiles, actions, queueSize, inodes);
+		skipDownloads = true;
 	}
 
 	/* download all the remaining candidates */
@@ -705,42 +897,55 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize)
 		}
 	}
 
-	int64_t added = 0, addedBytes = 0;
-	int64_t removed = 0, removedBytes = 0;
-	int64_t skippedTooLarge = 0, skippedTooOld = 0;
-	int64_t skippedConcurrent = 0, addFailed = 0;
+	CacheActionCounts counts = CountCacheActions(actions);
 
-	for (const CacheAction &a : actions)
-	{
-		switch (a.action)
-		{
-			case ADDED:             added++; addedBytes += a.fileSize; break;
-			case REMOVED:           removed++; removedBytes += a.fileSize; break;
-			case SKIPPED_TOO_LARGE: skippedTooLarge++; break;
-			case SKIPPED_TOO_OLD:   skippedTooOld++; break;
-			case SKIPPED_CONCURRENT_MODIFY: skippedConcurrent++; break;
-			case ADD_FAILED:        addFailed++; break;
-			default:                break;
-		}
-	}
-
-	if (added > 0 || removed > 0 || skippedTooOld > 0 ||
-		skippedTooLarge > 0 || addFailed > 0)
+	if (counts.added > 0 || counts.removed > 0 || counts.skippedTooOld > 0 ||
+		counts.skippedTooLarge > 0 || counts.addFailed > 0 ||
+		counts.skippedInodePressure > 0)
 	{
 		PGDUCK_SERVER_LOG("cache pressure: added %" PRIu64 " files (%" PRIu64
 						  " bytes), evicted %" PRIu64 " files (%" PRIu64 " bytes), "
 						  "skipped %" PRIu64 " (too old), %" PRIu64 " (too large), "
-						  "%" PRIu64 " (concurrent), %" PRIu64 " (add failed); "
+						  "%" PRIu64 " (concurrent), %" PRIu64 " (add failed), "
+						  "%" PRIu64 " (low on inodes); "
 						  "cache now %" PRIu64 "/%" PRIu64 " bytes",
-						  (uint64_t) added, (uint64_t) addedBytes,
-						  (uint64_t) removed, (uint64_t) removedBytes,
-						  (uint64_t) skippedTooOld,
-						  (uint64_t) skippedTooLarge,
-						  (uint64_t) skippedConcurrent,
-						  (uint64_t) addFailed,
+						  (uint64_t) counts.added, (uint64_t) counts.addedBytes,
+						  (uint64_t) counts.removed, (uint64_t) counts.removedBytes,
+						  (uint64_t) counts.skippedTooOld,
+						  (uint64_t) counts.skippedTooLarge,
+						  (uint64_t) counts.skippedConcurrent,
+						  (uint64_t) counts.addFailed,
+						  (uint64_t) counts.skippedInodePressure,
 						  (uint64_t) totalCacheSize,
 						  (uint64_t) maxCacheSize);
 	}
+
+	/*
+	 * Report inode pressure separately from the cache pressure above.
+	 *
+	 * Pressure lasts until somebody fixes it, and we run every few seconds, so
+	 * we report the rounds that say something new: the start of an episode, the
+	 * rounds in which we evicted or skipped something, and the recovery. A
+	 * round that finds the same pressure and can do nothing about it is silent.
+	 */
+	if (inodePressure && (!wasLowOnInodes || inodes.freed > 0 ||
+						  counts.skippedInodePressure > 0))
+	{
+		LogInodePressure(cacheDir, inodes, counts.removed, prunedDirectories,
+						 skipDownloads);
+	}
+	else if (wasLowOnInodes && !inodePressure && inodes.floor > 0)
+	{
+		PGDUCK_SERVER_LOG("cache directory %s is no longer low on inodes: %"
+						  PRIu64 "/%" PRIu64 " available, keeping %" PRIu64
+						  " available",
+						  cacheDir.c_str(),
+						  (uint64_t) inodes.freeInodes,
+						  (uint64_t) inodes.totalInodes,
+						  (uint64_t) inodes.floor);
+	}
+
+	wasLowOnInodes = inodePressure;
 
 	return actions;
 }

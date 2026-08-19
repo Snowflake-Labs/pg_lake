@@ -348,6 +348,175 @@ def test_pg_lake_manage_cache(s3, pgduck_conn):
     pgduck_conn.rollback()
 
 
+def test_pg_lake_manage_cache_inode_pressure(s3, pgduck_conn):
+    """Cache management must also evict when the cache file system is low on
+    inodes, not only when the cache exceeds its byte budget.
+
+    The cache mirrors the object store layout, so a workload with many small
+    files can use up all the inodes of a file system with a fixed inode table
+    (e.g. ext4) while using a tiny fraction of the byte budget, after which
+    every write to the cache fails.
+
+    The number of inodes to keep available is normally derived from the cache
+    file system, but pg_lake_min_free_cache_inodes can name it, so that this
+    test can ask for a floor that the cache itself can reach.
+    """
+    # Start from an empty cache, so the file under test is the oldest thing in
+    # it and the inode counts below are about our own files
+    run_query("CALL pg_lake_manage_cache(0)", pgduck_conn)
+
+    url = f"s3://{TEST_BUCKET}/test_manage_cache_inodes/data.csv"
+    cached_path = Path(
+        f"{server_params.PGDUCK_CACHE_DIR}/s3/{TEST_BUCKET}/test_manage_cache_inodes/{CACHE_FILE_PREFIX}data.csv"
+    )
+
+    # A byte budget the cache never comes close to
+    cache_size = 20 * 1024 * 1024 * 1024
+
+    run_command(
+        f"COPY (SELECT s FROM generate_series(1,100) as g(s)) TO '{url}';",
+        pgduck_conn,
+    )
+    assert cached_path.exists()
+
+    # The cache directory exists now that it holds a file, so we can ask its
+    # file system whether it has a fixed inode table at all
+    if os.statvfs(server_params.PGDUCK_CACHE_DIR).f_files == 0:
+        pytest.skip(
+            "cache file system does not have a fixed inode table, so it does "
+            f"not report inode counts: {server_params.PGDUCK_CACHE_DIR}"
+        )
+
+    # Cache management only evicts for inodes when its own files can get the
+    # file system back above the floor, so pad the cache with files it can free.
+    # The padding prefix sorts after the one under test, which stays the oldest
+    # and is therefore evicted first.
+    padding_count = 16
+
+    for i in range(padding_count):
+        padding_url = f"s3://{TEST_BUCKET}/test_manage_cache_inodes_zpad/pad{i}.csv"
+        run_command(
+            f"COPY (SELECT s FROM generate_series(1,10) as g(s)) TO '{padding_url}';",
+            pgduck_conn,
+        )
+
+    # Without an inode floor, the file stays in the cache
+    run_command("SET pg_lake_min_free_cache_inodes TO 0;", pgduck_conn)
+    results = run_query(
+        f"FROM pg_lake_manage_cache({cache_size}) WHERE url = '{url}'", pgduck_conn
+    )
+    assert len(results) == 0
+    assert cached_path.exists()
+
+    # A floor a few inodes above what is available, which the padding leaves
+    # plenty of room to reach. The slack is there because other processes share
+    # the file system, so the count can move between here and the call.
+    stats = os.statvfs(server_params.PGDUCK_CACHE_DIR)
+    reachable_free_inodes = stats.f_favail + padding_count // 2
+
+    # Under inode pressure, the file is evicted even though it fits in the budget
+    run_command(
+        f"SET pg_lake_min_free_cache_inodes TO {reachable_free_inodes};", pgduck_conn
+    )
+    results = run_query(
+        f"FROM pg_lake_manage_cache({cache_size}) WHERE url = '{url}'",
+        pgduck_conn,
+    )
+    assert len(results) == 1
+    assert results[0][2] == "removed"
+    assert not cached_path.exists()
+
+    # Directories hold inodes too, so empty cache directories are reclaimed
+    assert not cached_path.parent.exists()
+
+    # but pruning never goes past the cache directory itself
+    assert Path(server_params.PGDUCK_CACHE_DIR).is_dir()
+
+    # Reading the file makes it a cache candidate again
+    run_query(f"SELECT count(*) FROM '{url}'", pgduck_conn)
+
+    # A floor the cache cannot reach, which means something other than the cache
+    # is using up the inodes
+    stats = os.statvfs(server_params.PGDUCK_CACHE_DIR)
+    unreachable_free_inodes = stats.f_files + stats.f_favail + 1
+
+    padding_paths = list(
+        Path(
+            f"{server_params.PGDUCK_CACHE_DIR}/s3/{TEST_BUCKET}/test_manage_cache_inodes_zpad"
+        ).glob(f"{CACHE_FILE_PREFIX}*")
+    )
+    assert padding_paths != []
+
+    # We do not add files while we are low on inodes
+    run_command(
+        f"SET pg_lake_min_free_cache_inodes TO {unreachable_free_inodes};", pgduck_conn
+    )
+    results = run_query(
+        f"FROM pg_lake_manage_cache({cache_size}) WHERE url = '{url}'",
+        pgduck_conn,
+    )
+    assert len(results) == 1
+    assert results[0][2] == "skipped (cache file system is low on inodes)"
+    assert not cached_path.exists()
+
+    # and we do not throw away a cache that cannot get us above the floor
+    # anyway, since we can still read from it
+    assert all(padding_path.exists() for padding_path in padding_paths)
+
+    # Once there is no floor to meet, the file is cached
+    run_query(f"SELECT count(*) FROM '{url}'", pgduck_conn)
+    run_command("SET pg_lake_min_free_cache_inodes TO 0;", pgduck_conn)
+    results = run_query(
+        f"FROM pg_lake_manage_cache({cache_size}) WHERE url = '{url}'", pgduck_conn
+    )
+    assert len(results) == 1
+    assert results[0][2] == "added"
+    assert cached_path.exists()
+
+    # Wipe the cache
+    run_query("CALL pg_lake_manage_cache(0)", pgduck_conn)
+
+    run_command("RESET pg_lake_min_free_cache_inodes;", pgduck_conn)
+
+    pgduck_conn.rollback()
+
+
+def test_min_free_cache_inodes_setting(pgduck_conn):
+    """The default derives the floor from the cache file system, so that cache
+    management is inode-aware without anybody configuring it.
+
+    Anything other than AUTO or a non-negative number of inodes is rejected,
+    rather than quietly turning inode management off. pgduck_server reports
+    success for a SET it could not apply, so the rejection shows up as an
+    aborted transaction and a setting that kept the value it had.
+    """
+    results = run_query(
+        "SELECT current_setting('pg_lake_min_free_cache_inodes')", pgduck_conn
+    )
+    assert results[0][0] == "AUTO"
+
+    for rejected in ("-2", "'not a number'"):
+        run_command(f"SET pg_lake_min_free_cache_inodes TO {rejected};", pgduck_conn)
+        pgduck_conn.rollback()
+
+        results = run_query(
+            "SELECT current_setting('pg_lake_min_free_cache_inodes')", pgduck_conn
+        )
+        assert results[0][0] == "AUTO"
+
+    # A number of inodes is what an operator would put in the init file
+    run_command("SET pg_lake_min_free_cache_inodes TO 100000;", pgduck_conn)
+
+    results = run_query(
+        "SELECT current_setting('pg_lake_min_free_cache_inodes')", pgduck_conn
+    )
+    assert results[0][0] == "100000"
+
+    run_command("RESET pg_lake_min_free_cache_inodes;", pgduck_conn)
+
+    pgduck_conn.rollback()
+
+
 def test_pg_lake_manage_cache_invalid_url(s3, pgduck_conn):
     # Invalid URL should not get cached
     key = "test_pg_lake_manage_cache_invalid_url/data.csv"

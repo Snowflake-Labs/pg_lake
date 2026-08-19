@@ -17,6 +17,7 @@
 
 #include "duckdb.hpp"
 
+#include "pg_lake/fs/cache_inode_budget.hpp"
 #include "pg_lake/fs/caching_file_system.hpp"
 #include "pg_lake/fs/file_cache_manager.hpp"
 #include "pg_lake/fs/file_utils.hpp"
@@ -318,6 +319,9 @@ static void ManageCacheExec(ClientContext &context, TableFunctionInput &data_p, 
 				break;
 			case SKIPPED_DIRECTORY_DOES_NOT_EXIST:
 				output.SetValue(2, rowInChunk, Value("skipped (cannot create directory)"));
+				break;
+			case SKIPPED_INODE_PRESSURE:
+				output.SetValue(2, rowInChunk, Value("skipped (cache file system is low on inodes)"));
 				break;
 
 		}
@@ -889,6 +893,11 @@ PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
 	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
 	config.AddExtensionOption(CACHE_DIR_SETTING, "PgLake Cache Directory", LogicalType::VARCHAR);
 	config.AddExtensionOption(CACHE_ON_WRITE_MAX_SIZE, "PgLake cache-on-write max size", LogicalType::BIGINT);
+	config.AddExtensionOption(MIN_FREE_CACHE_INODES_SETTING,
+							  "Inodes that cache management keeps available on the cache file system, "
+							  "or AUTO to derive the number from the file system",
+							  LogicalType::VARCHAR, Value(MIN_FREE_CACHE_INODES_AUTO),
+							  CheckMinFreeCacheInodes);
 	config.AddExtensionOption(PG_LAKE_REGION_SETTING, "The region of the server", LogicalType::VARCHAR);
 	config.AddExtensionOption(MANAGED_STORAGE_BUCKET_SETTING, "PgLake managed storage bucket location", LogicalType::VARCHAR);
 	config.AddExtensionOption(MANAGED_STORAGE_KEY_ID_SETTING, "PgLake managed storage customer key ID", LogicalType::VARCHAR);
