@@ -451,7 +451,14 @@ PgLakeS3FileSystem::RemoveFilesFromS3(const string &bucketUrl,
 
 	for (idx_t begin = 0; begin < keys.size(); begin += S3_DELETE_OBJECTS_MAX_KEYS)
 	{
-		idx_t end = MinValue(begin + S3_DELETE_OBJECTS_MAX_KEYS, keys.size());
+		/*
+		 * Both arguments must be the same type for MinValue to deduce one: idx_t
+		 * is uint64_t, which is "unsigned long long" on macOS/arm64 but
+		 * "unsigned long" -- the same type vector::size_type already is -- on
+		 * Linux/x86_64, so leaving keys.size() unconverted only compiles there.
+		 */
+		idx_t end = MinValue<idx_t>(begin + S3_DELETE_OBJECTS_MAX_KEYS,
+									static_cast<idx_t>(keys.size()));
 
 		/*
 		 * Evict per batch rather than once at the end, and both before and after

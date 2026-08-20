@@ -113,12 +113,42 @@ PGLakeCachingFileSystem::OpenFile(const string &fullUrl,
 								 openFlags.Lock(),
 								 openFlags.Compression());
 
-		/* create a handle for the file in cache */
-		wrappedHandle = localfs.OpenFile(cacheFilePath, localFlags);
+		/*
+		 * Nothing holds the per-path cache lock across the decision above and
+		 * this open, so the entry can stop being usable in between -- cache
+		 * management evicting it under pressure is the ordinary case, and the
+		 * check itself only establishes that a regular file owned by us was
+		 * there a moment ago. Fall back to the remote file rather than failing
+		 * the statement: a re-read costs a download, whereas propagating the
+		 * open failure kills a query over an object that is perfectly readable
+		 * in storage, and reports it as a bare "Cannot open file" naming an
+		 * internal cache path.
+		 */
+		try
+		{
+			/* create a handle for the file in cache */
+			wrappedHandle = localfs.OpenFile(cacheFilePath, localFlags);
 
-		PGDUCK_SERVER_DEBUG("using local cache for %s", cacheFilePath.c_str());
+			PGDUCK_SERVER_DEBUG("using local cache for %s", cacheFilePath.c_str());
+		}
+		catch (IOException &ex)
+		{
+			/*
+			 * Only IOException: that is what LocalFileSystem::OpenFile raises
+			 * when open() fails, which is the case worth absorbing. Anything
+			 * else out of this call -- an InternalException, an unsupported
+			 * compression type -- is a bug rather than a lost race, and
+			 * quietly turning it into a remote read would hide it.
+			 */
+			ErrorData error(ex);
+
+			PGDUCK_SERVER_DEBUG("cannot use local cache for %s, reading from "
+								"the remote file instead: %s",
+								cacheFilePath.c_str(), error.Message().c_str());
+		}
 	}
-	else
+
+	if (wrappedHandle == nullptr)
 	{
 		/* create a handle for the remote file */
 		try
@@ -174,9 +204,32 @@ PGLakeCachingFileSystem::OpenFile(const string &fullUrl,
 				{
 					try
 					{
+						/*
+						 * FILE_FLAGS_FILE_CREATE_NEW (O_CREAT|O_TRUNC), not
+						 * FILE_FLAGS_FILE_CREATE (O_CREAT): a staging file
+						 * orphaned by an earlier write may still sit at this
+						 * exact path, and the path is fully deterministic.
+						 * Without O_TRUNC we write the new contents over its
+						 * prefix and leave whatever of the older, longer file
+						 * extends past them, then rename that hybrid in as a
+						 * complete cache entry. Readers trust a finalized cache
+						 * file without revalidating it against object storage,
+						 * so that poisons every later read of this URL until
+						 * the entry is evicted.
+						 *
+						 * Do not assume orphans are rare. ~CachingFSFileHandle()
+						 * only removes one when it actually runs, so a hard
+						 * crash or kill escapes it -- and before that cleanup
+						 * existed, so did every ordinary caught abort: a
+						 * runtime error mid-write, a cancellation, or an ENOSPC
+						 * that DuckDB throws and pgduck_server catches. That
+						 * leaves an orphan with the process still running and
+						 * its pid unchanged, which is what was observed in the
+						 * field.
+						 */
 						cacheOnWriteHandle =
 							localfs.OpenFile(cacheFilePath + cacheManager->STAGING_SUFFIX,
-											 FileOpenFlags::FILE_FLAGS_WRITE | FileOpenFlags::FILE_FLAGS_FILE_CREATE);
+											 FileOpenFlags::FILE_FLAGS_WRITE | FileOpenFlags::FILE_FLAGS_FILE_CREATE_NEW);
 
 						cacheOnWritePath = cacheFilePath;
 					}

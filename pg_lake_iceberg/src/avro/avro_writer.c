@@ -35,7 +35,8 @@ typedef struct ExtraMetadata
 }			ExtraMetadata;
 
 static AvroWriter * AvroWriterCreate(const char *filePath, avro_schema_t schema, avro_value_t * meta);
-static void AvroFileWriterClose(AvroWriter * writer);
+static bool AvroFileWriterClose(AvroWriter * writer);
+static void AvroFileWriterCloseCallback(void *arg);
 static void AvroPrepareSetNullable(avro_value_t * record, char *fieldName, avro_value_t * innerValue, bool isSet);
 static void WriteExtraMetadataToAvro(avro_value_t * record, ExtraMetadata * metadata);
 static avro_value_t * CreateAvroExtraMetadata(const char *schemaJson);
@@ -116,7 +117,7 @@ AvroWriterCreate(const char *filePath, avro_schema_t schema, avro_value_t * meta
 	MemoryContextCallback *cb = MemoryContextAllocZero(CurrentMemoryContext,
 													   sizeof(MemoryContextCallback));
 
-	cb->func = (MemoryContextCallbackFunction) AvroFileWriterClose;
+	cb->func = AvroFileWriterCloseCallback;
 	cb->arg = writer;
 	MemoryContextRegisterResetCallback(CurrentMemoryContext, cb);
 
@@ -146,20 +147,48 @@ GetSchemaFromJson(const char *schemaJson)
 
 
 /*
- * AvroFileWriterClose is called via a MemoryContextCallback to make sure we
- * close the Avro file writer. Even though we use a custom allocator, it
- * does not propagate to some the libraries that libavro calls (e.g. libz).
+ * AvroFileWriterClose closes the Avro file writer, and returns whether it
+ * managed to. It is also called via a MemoryContextCallback to make sure we
+ * close the writer. Even though we use a custom allocator, it does not
+ * propagate to some the libraries that libavro calls (e.g. libz).
  */
-static void
+static bool
 AvroFileWriterClose(AvroWriter * writer)
 {
+	bool		succeeded = true;
+
 	if (writer->initializedDataWriter)
 	{
-		avro_file_writer_flush(writer->dataWriter);
-		avro_file_writer_close(writer->dataWriter);
+		/* clear first, so the callback does not touch a half-closed writer */
+		writer->initializedDataWriter = false;
+
+		/*
+		 * Do not close after a failed flush: avro_file_writer_close() flushes
+		 * again, and file_write_block() does not reset the pending block when
+		 * it fails, so the retry appends a second copy of it. Either way the
+		 * writer's own allocations go with its memory context.
+		 */
+		if (avro_file_writer_flush(writer->dataWriter) != 0)
+			succeeded = false;
+		else if (avro_file_writer_close(writer->dataWriter) != 0)
+			succeeded = false;
 	}
 
-	writer->initializedDataWriter = false;
+	return succeeded;
+}
+
+
+/*
+ * AvroFileWriterCloseCallback closes the writer from a memory context reset.
+ *
+ * The result is ignored: a reset callback must not throw, and this only runs
+ * ahead of AvroWriterClose() when the transaction is failing anyway, in which
+ * case the file is discarded with it.
+ */
+static void
+AvroFileWriterCloseCallback(void *arg)
+{
+	(void) AvroFileWriterClose((AvroWriter *) arg);
 }
 
 
@@ -251,12 +280,36 @@ AvroWriterWriteRecord(AvroWriter * writer, AvroSerializeFunction serializeFn, vo
 
 /*
  * AvroWriterClose releases all Avro-related resources.
+ *
+ * Nothing here may fail quietly. Records are buffered until a block fills and
+ * the block goes through stdio, so for a manifest of ordinary size none of it
+ * has reached the file system until now, and the caller takes the file's length
+ * with GetLocalFileSize() once we return -- so a short file yields a
+ * manifest_length that agrees with it and nothing downstream can tell.
  */
 void
 AvroWriterClose(AvroWriter * writer)
 {
-	AvroFileWriterClose(writer);
-	FreeFile(writer->avroFile);
+	bool		succeeded = AvroFileWriterClose(writer);
+
+	if (!succeeded)
+		ereport(ERROR, (errmsg("could not write avro file: %s",
+							   avro_strerror())));
+
+	/*
+	 * libavro's avro_writer_flush() is declared void and discards fflush()'s
+	 * result, so the flush above can fail while still reporting success, and
+	 * once it has consumed the buffer fclose() succeeds too. ferror() reports
+	 * it regardless, because the stream's error indicator is sticky.
+	 */
+	if (fflush(writer->avroFile) != 0 || ferror(writer->avroFile))
+		ereport(ERROR, (errcode_for_file_access(),
+						errmsg("could not write avro file: %m")));
+
+	if (FreeFile(writer->avroFile) != 0)
+		ereport(ERROR, (errcode_for_file_access(),
+						errmsg("could not close avro file: %m")));
+
 	MemoryContextDelete(writer->memoryContext);
 }
 
