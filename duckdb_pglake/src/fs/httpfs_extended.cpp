@@ -81,6 +81,12 @@ PgLakeHTTPFileSystem::Download(ClientContext &context, FileHandle &inputHandle, 
 
 	hfh.StoreClient(std::move(http_client));
 
+	/*
+	 * The byte count is verified by FileUtils::CopyFile, which does it for every
+	 * transfer rather than only the ones that come through here. Note that a
+	 * request reporting success does not mean the whole body arrived: see the
+	 * comment there.
+	 */
 	return total_request_bytes;
 }
 
