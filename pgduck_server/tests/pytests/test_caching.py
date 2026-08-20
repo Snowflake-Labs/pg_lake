@@ -91,6 +91,69 @@ def test_cache_rejects_non_regular_file(s3, pgduck_conn, tmp_path):
     pgduck_conn.rollback()
 
 
+@pytest.mark.skipif(
+    os.geteuid() == 0,
+    reason="mode 0 does not deny root, so the cache open succeeds and this "
+    "would pass with or without the fallback",
+)
+def test_unusable_cache_file_falls_back_to_remote(s3, pgduck_conn):
+    """A cache entry that cannot be opened must not fail the read.
+
+    OpenFile() decides to read from the cache with IsOwnedByCurrentUser() and
+    then opens the file, and nothing holds the per-path cache lock across those
+    two steps. So the entry can stop being usable in between -- cache management
+    evicting it under pressure is the ordinary case, and the check only
+    establishes that a regular file owned by us was there a moment ago. The open
+    used to propagate, killing the statement with a bare
+    "IO Error: Cannot open file <cache path>" for an object that is still
+    perfectly readable in object storage.
+
+    A cache file owned by us but with no read permission reaches the same open
+    failure deterministically, without having to win a race: lstat() still
+    reports a regular file owned by the effective UID, so the cache branch is
+    taken, and only then does the open fail.
+    """
+    key = "test_unusable_cache_file_falls_back_to_remote/data.csv"
+    url = f"s3://{TEST_BUCKET}/{key}"
+    cached_path = Path(
+        f"{server_params.PGDUCK_CACHE_DIR}/s3/{TEST_BUCKET}"
+        f"/test_unusable_cache_file_falls_back_to_remote/{CACHE_FILE_PREFIX}data.csv"
+    )
+
+    run_command(
+        f"COPY (SELECT * FROM generate_series(1,10)) TO '{url}' WITH (header false);",
+        pgduck_conn,
+    )
+    run_command(f"CALL pg_lake_cache_file('{url}');", pgduck_conn)
+    assert cached_path.is_file(), "file was not cached, nothing to exercise"
+
+    remote_size = pg_lake_file_size(f"nocache{url}", pgduck_conn)
+    original_mode = cached_path.stat().st_mode & 0o777
+
+    cached_path.chmod(0o000)
+    try:
+        result = run_query(
+            f"SELECT octet_length(content) AS size FROM read_blob('{url}')",
+            pgduck_conn,
+            raise_error=False,
+        )
+    finally:
+        cached_path.chmod(original_mode)
+
+    # run_query hands back the error string rather than rows when it fails.
+    assert not isinstance(result, str), (
+        f"an unusable cache entry failed the read instead of falling back to "
+        f"object storage: {result}"
+    )
+    assert int(result[0]["size"]) == remote_size, (
+        f"fell back but returned {result[0]['size']} bytes for a "
+        f"{remote_size}-byte object"
+    )
+
+    run_query(f"CALL pg_lake_uncache_file('{url}');", pgduck_conn)
+    pgduck_conn.rollback()
+
+
 def test_pg_lake_cache_file(s3, gcs, azure, pgduck_conn):
     run_pg_lake_cache_file_test_for_protocol("s3", TEST_BUCKET, pgduck_conn, s3)
     run_pg_lake_cache_file_test_for_protocol("gs", TEST_BUCKET_GCS, pgduck_conn, gcs)
@@ -943,6 +1006,69 @@ def test_cache_on_write_abort_removes_stage_file(s3, pgduck_conn):
         # After the abort neither the finalized file nor the staging file remain.
         assert not cached_path.exists(), f"{ext}: unexpected finalized cache file"
         assert not stage_path.exists(), f"{ext}: orphaned staging file not cleaned up"
+
+
+def test_cache_on_write_truncates_orphaned_stage_file(s3, pgduck_conn):
+    """Reusing a .pgl-stage file left by a crash must truncate it first.
+
+    ~CachingFSFileHandle() removes the staging file on a caught abort, but a
+    hard crash or kill skips the destructor entirely and leaves one on disk at a
+    fully deterministic path. Opening that file with O_CREAT alone writes the new
+    contents over its prefix and leaves whatever of the older, longer file
+    extends past them; FileSync()/Close() then renames the hybrid in as a
+    finalized cache entry. Nothing revalidates a finalized entry against object
+    storage, so every later read of that URL gets the wrong bytes until it is
+    evicted -- for an Avro manifest, a trailing fragment past the final sync
+    marker is read as another block header.
+
+    The orphan is written directly here because that is precisely the on-disk
+    state a crash leaves behind, and the one state the destructor cannot cover.
+    """
+    test_dir = Path(
+        f"{server_params.PGDUCK_CACHE_DIR}/s3/{TEST_BUCKET}"
+        f"/test_cache_on_write_truncates_orphaned_stage_file"
+    )
+
+    # A small limit left over from another test would disable write-through
+    # caching, so pin it back to the 1GB default.
+    run_command(
+        "SET GLOBAL pg_lake_cache_on_write_max_size TO '1073741824';", pgduck_conn
+    )
+
+    # Far larger than the file about to be written, so a surviving tail is
+    # unmistakable rather than a handful of bytes.
+    filler = b"ORPHAN.." * (128 * 1024)
+
+    for ext in ("parquet", "csv"):
+        url = (
+            f"s3://{TEST_BUCKET}"
+            f"/test_cache_on_write_truncates_orphaned_stage_file/data.{ext}"
+        )
+        cached_path = test_dir / f"{CACHE_FILE_PREFIX}data.{ext}"
+        stage_path = test_dir / f"{CACHE_FILE_PREFIX}data.{ext}.pgl-stage"
+
+        test_dir.mkdir(parents=True, exist_ok=True)
+        cached_path.unlink(missing_ok=True)
+        stage_path.write_bytes(filler)
+
+        run_command(
+            f"COPY (SELECT s AS s, s * 2 AS d FROM generate_series(1, 100) g(s)) "
+            f"TO '{url}' (format '{ext}');",
+            pgduck_conn,
+        )
+
+        assert cached_path.exists(), f"{ext}: write-through cache file is missing"
+        assert not stage_path.exists(), f"{ext}: staging file was not finalized"
+
+        cached_bytes = cached_path.read_bytes()
+        assert b"ORPHAN" not in cached_bytes, (
+            f"{ext}: content of the orphaned staging file survived into the "
+            f"finalized cache entry ({len(cached_bytes)} bytes cached)"
+        )
+        assert len(cached_bytes) == pg_lake_file_size(f"nocache{url}", pgduck_conn), (
+            f"{ext}: finalized cache entry ({len(cached_bytes)} bytes) disagrees "
+            f"with the object in storage"
+        )
 
 
 # we cannot cache the same file concurrently

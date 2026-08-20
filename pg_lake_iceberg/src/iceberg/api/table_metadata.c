@@ -395,7 +395,18 @@ WriteMetadataJsonToTemporaryFile(IcebergTableMetadata * metadata, FILE *file)
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("Failed to write metadata file to temporary file")));
 	}
-	fflush(file);
+
+	/*
+	 * fwrite may have only filled the stdio buffer, so the flush is where a
+	 * write error surfaces. ferror() is sticky, so it also reports one whose
+	 * flush already consumed the buffer.
+	 */
+	if (fflush(file) != 0 || ferror(file))
+	{
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not write metadata file to temporary file: %m")));
+	}
 }
 
 /*
@@ -423,7 +434,14 @@ UploadTableMetadataToURI(IcebergTableMetadata * tableMetadata, char *metadataURI
 
 	ScheduleFileCopyToS3WithCleanup(localFilePath, metadataURI, autoDeleteRecord);
 
-	FreeFile(localFile);
+	/*
+	 * The final fclose() can still fail; unchecked, a truncated metadata.json
+	 * would be uploaded and committed as the table's current metadata.
+	 */
+	if (FreeFile(localFile) != 0)
+		ereport(ERROR, (errcode_for_file_access(),
+						errmsg("could not close file \"%s\": %m",
+							   localFilePath)));
 }
 
 /*
