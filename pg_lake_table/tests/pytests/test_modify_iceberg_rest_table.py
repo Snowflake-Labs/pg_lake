@@ -413,7 +413,7 @@ def set_polaris_gucs(
 
         run_command_outside_tx(
             [
-                f"""ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_host TO '{server_params.POLARIS_HOSTNAME}:{server_params.POLARIS_PORT}'""",
+                f"""ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_host TO '{server_params.POLARIS_HOSTNAME}:{server_params.POLARIS_PORT}/api/catalog'""",
                 f"""ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_id TO '{client_id}'""",
                 f"""ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_secret TO '{client_secret}'""",
                 "SELECT pg_reload_conf()",
@@ -729,6 +729,89 @@ def test_server_option_overrides_guc(
 
     if guc_name is not None:
         run_command(f"RESET {guc_name}", superuser_conn)
+        superuser_conn.commit()
+
+
+# Only the explicit endpoint style is tested: rest_endpoint must include
+# the full catalog mount path (e.g. "/api/catalog" for Polaris).
+@pytest.mark.parametrize("endpoint_style", ["explicit"])
+def test_rest_endpoint_path_is_honored(
+    installcheck,
+    superuser_conn,
+    pg_conn,
+    s3,
+    extension,
+    polaris_session,
+    create_http_helper_functions,
+    endpoint_style,
+):
+    """rest_endpoint that includes the catalog mount path must be used
+    verbatim, producing a working REST catalog against Polaris."""
+    if installcheck:
+        return
+
+    creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
+    client_id = creds["credentials"]["clientId"]
+    client_secret = creds["credentials"]["clientSecret"]
+
+    host = f"http://localhost:{server_params.POLARIS_PORT}"
+    endpoint = f"{host}/api/catalog" if endpoint_style == "explicit" else host
+
+    SERVER_NAME = f"rest_endpoint_path_{endpoint_style}"
+    SCHEMA_NAME = f"rest_endpoint_path_{endpoint_style}"
+    TABLE_NAME = "t"
+    VALID_PREFIX = f"s3://{TEST_BUCKET}/"
+
+    run_command(
+        f"""
+        CREATE SERVER {SERVER_NAME} TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint '{endpoint}', location_prefix '{VALID_PREFIX}')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        f"""
+        CREATE USER MAPPING FOR PUBLIC SERVER {SERVER_NAME}
+            OPTIONS (client_id '{client_id}', client_secret '{client_secret}')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        f"GRANT USAGE ON FOREIGN SERVER {SERVER_NAME} TO PUBLIC",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    run_command(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA_NAME}", pg_conn)
+    pg_conn.commit()
+
+    try:
+        run_command(
+            f"CREATE TABLE {SCHEMA_NAME}.{TABLE_NAME} (id bigint, value text) "
+            f"USING iceberg WITH (catalog='{SERVER_NAME}')",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        run_command(
+            f"INSERT INTO {SCHEMA_NAME}.{TABLE_NAME} "
+            f"SELECT i, i::text FROM generate_series(1, 10) i",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        # Read back: exercises the REST GET-table path
+        # (GetMetadataLocationFromRestCatalog) plus the commit-time
+        # transaction path, both of which build URLs from the base URI.
+        results = run_query(f"SELECT count(*) FROM {SCHEMA_NAME}.{TABLE_NAME}", pg_conn)
+        assert results[0][0] == 10
+    finally:
+        pg_conn.rollback()
+        run_command(f"DROP SCHEMA IF EXISTS {SCHEMA_NAME} CASCADE", pg_conn)
+        pg_conn.commit()
+        superuser_conn.rollback()
+        run_command(f"DROP SERVER IF EXISTS {SERVER_NAME} CASCADE", superuser_conn)
         superuser_conn.commit()
 
 
