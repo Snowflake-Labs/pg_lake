@@ -21,7 +21,7 @@ index ffbb68dc5..5bb2ee699 100644
  avro_file_reader_get_writer_schema(avro_file_reader_t reader);
  
 diff --git a/lang/c/src/datafile.c b/lang/c/src/datafile.c
-index c9d4dfeb6..8dc775eb5 100644
+index c9d4dfeb6..4a1fdb25f 100644
 --- a/lang/c/src/datafile.c
 +++ b/lang/c/src/datafile.c
 @@ -73,7 +73,7 @@ static int write_sync(avro_file_writer_t w)
@@ -155,7 +155,35 @@ index c9d4dfeb6..8dc775eb5 100644
  	if (r->current_blockdata && len > r->current_blocklen) {
  		r->current_blockdata = (char *) avro_realloc(r->current_blockdata, r->current_blocklen, len);
  		r->current_blocklen = len;
-@@ -541,6 +598,93 @@ int avro_file_reader_fp(FILE *fp, const char *path, int should_close,
+@@ -466,6 +523,27 @@ static int file_read_block_count(avro_file_reader_t r)
+ 
+ 		check_prefix(rval, avro_codec_decode(r->codec, r->current_blockdata, len),
+ 			     "Cannot decode file block: ");
++	} else {
++		/*
++		 * Nothing was read, so nothing was decoded, and the codec still holds
++		 * the *previous* block's decompressed bytes. Handing those to
++		 * block_reader below would satisfy this block's record count out of
++		 * stale data, so the caller silently receives records that are not in
++		 * the file. Report an empty block instead, and a count that cannot be
++		 * satisfied from it fails the read.
++		 *
++		 * Only used_size may be cleared here. block_data is owned by codecs
++		 * that allocate an output buffer -- deflate frees it in its reset --
++		 * and it aliases current_blockdata for the null codec, so clearing the
++		 * pointer would either leak or double free.
++		 *
++		 * A zero length is not rejected outright because it is representable in
++		 * a well-formed file: a record schema with no fields encodes to zero
++		 * bytes per record, so with the null codec a block of N such records
++		 * legitimately carries a count of N and a size of 0, and libavro's own
++		 * writer emits exactly that.
++		 */
++		r->codec->used_size = 0;
+ 	}
+ 
+ 	avro_reader_memory_set_source(r->block_reader, (const char *) r->codec->block_data, r->codec->used_size);
+@@ -541,6 +619,93 @@ int avro_file_reader_fp(FILE *fp, const char *path, int should_close,
  	return 0;
  }
  
