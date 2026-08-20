@@ -91,6 +91,11 @@ def test_cache_rejects_non_regular_file(s3, pgduck_conn, tmp_path):
     pgduck_conn.rollback()
 
 
+@pytest.mark.skipif(
+    os.geteuid() == 0,
+    reason="mode 0 does not deny root, so the cache open succeeds and this "
+    "would pass with or without the fallback",
+)
 def test_unusable_cache_file_falls_back_to_remote(s3, pgduck_conn):
     """A cache entry that cannot be opened must not fail the read.
 

@@ -131,11 +131,20 @@ PGLakeCachingFileSystem::OpenFile(const string &fullUrl,
 
 			PGDUCK_SERVER_DEBUG("using local cache for %s", cacheFilePath.c_str());
 		}
-		catch (std::exception &ex)
+		catch (IOException &ex)
 		{
+			/*
+			 * Only IOException: that is what LocalFileSystem::OpenFile raises
+			 * when open() fails, which is the case worth absorbing. Anything
+			 * else out of this call -- an InternalException, an unsupported
+			 * compression type -- is a bug rather than a lost race, and
+			 * quietly turning it into a remote read would hide it.
+			 */
+			ErrorData error(ex);
+
 			PGDUCK_SERVER_DEBUG("cannot use local cache for %s, reading from "
 								"the remote file instead: %s",
-								cacheFilePath.c_str(), ex.what());
+								cacheFilePath.c_str(), error.Message().c_str());
 		}
 	}
 
@@ -198,15 +207,25 @@ PGLakeCachingFileSystem::OpenFile(const string &fullUrl,
 						/*
 						 * FILE_FLAGS_FILE_CREATE_NEW (O_CREAT|O_TRUNC), not
 						 * FILE_FLAGS_FILE_CREATE (O_CREAT): a staging file
-						 * orphaned by a hard crash or kill -- the case
-						 * ~CachingFSFileHandle() cannot cover -- may still sit
-						 * at this exact path. Without O_TRUNC we write the new
-						 * contents over its prefix and leave whatever of the
-						 * older, longer file extends past them, then rename
-						 * that hybrid in as a complete cache entry. Readers
-						 * trust a finalized cache file without revalidating it
-						 * against object storage, so that poisons every later
-						 * read of this URL until the entry is evicted.
+						 * orphaned by an earlier write may still sit at this
+						 * exact path, and the path is fully deterministic.
+						 * Without O_TRUNC we write the new contents over its
+						 * prefix and leave whatever of the older, longer file
+						 * extends past them, then rename that hybrid in as a
+						 * complete cache entry. Readers trust a finalized cache
+						 * file without revalidating it against object storage,
+						 * so that poisons every later read of this URL until
+						 * the entry is evicted.
+						 *
+						 * Do not assume orphans are rare. ~CachingFSFileHandle()
+						 * only removes one when it actually runs, so a hard
+						 * crash or kill escapes it -- and before that cleanup
+						 * existed, so did every ordinary caught abort: a
+						 * runtime error mid-write, a cancellation, or an ENOSPC
+						 * that DuckDB throws and pgduck_server catches. That
+						 * leaves an orphan with the process still running and
+						 * its pid unchanged, which is what was observed in the
+						 * field.
 						 */
 						cacheOnWriteHandle =
 							localfs.OpenFile(cacheFilePath + cacheManager->STAGING_SUFFIX,
