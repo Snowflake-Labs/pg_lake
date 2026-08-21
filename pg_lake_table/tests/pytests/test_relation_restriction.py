@@ -8,6 +8,50 @@ import pytest
 from utils_pytest import *
 
 
+def test_debug_print_plan_with_lake_table(
+    pg_conn, s3, extension, with_default_location
+):
+    run_command(
+        """
+        CREATE SCHEMA test_debug_print_plan;
+        CREATE TABLE test_debug_print_plan.test(i int) USING iceberg;
+        SET LOCAL client_min_messages TO LOG;
+        SET LOCAL debug_print_plan TO ON;
+        """,
+        pg_conn,
+    )
+
+    queries = [
+        "SELECT count(*) FROM test_debug_print_plan.test",
+        "SELECT count(*) FROM test_debug_print_plan.test WHERE i = 1",
+    ]
+
+    expected_plan_nodes = {
+        "on": "Custom Scan (Query Pushdown)",
+        "off": "Foreign Scan",
+    }
+
+    for full_pushdown, expected_plan_node in expected_plan_nodes.items():
+        run_command(
+            f"SET LOCAL pg_lake_table.enable_full_query_pushdown TO {full_pushdown}",
+            pg_conn,
+        )
+
+        for query in queries:
+            explain = run_query(f"EXPLAIN {query}", pg_conn)
+            assert expected_plan_node in str(explain)
+
+            pg_conn.notices.clear()
+            assert run_query(query, pg_conn) == [[0]]
+
+            debug_plan = "\n".join(pg_conn.notices)
+            assert "PlannerRelationRestriction" in debug_plan
+            assert ":rte" in debug_plan
+            assert ":baseRestrictionList" in debug_plan
+
+    pg_conn.rollback()
+
+
 def test_restrictions_on_table(pg_conn, s3, extension, with_default_location):
 
     run_command("CREATE SCHEMA test_restrictions;", pg_conn)
