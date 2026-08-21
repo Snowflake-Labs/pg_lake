@@ -36,6 +36,7 @@
 #include "pg_lake/fdw/data_files_catalog.h"
 #include "pg_lake/fdw/row_ids.h"
 #include "pg_lake/fdw/writable_table.h"
+#include "pg_lake/storage/storage_credentials.h"
 #include "pg_lake/fdw/partition_pushdown.h"
 #include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"

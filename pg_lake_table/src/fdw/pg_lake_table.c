@@ -91,6 +91,7 @@
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/permissions/roles.h"
 #include "pg_extension_base/pg_compat.h"
+#include "pg_lake/storage/storage_credentials.h"
 #include "pg_lake/pgduck/array_conversion.h"
 #include "pg_lake/pgduck/iceberg_datum_validation.h"
 #include "pg_lake/pgduck/client.h"
@@ -1730,7 +1731,11 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 	 */
 	bool		includeChildren = false;
 
-	/* find the files to scan for each relation */
+	/*
+	 * find the files to scan for each relation.  Storage credentials are
+	 * resolved per relation inside CreatePgLakeScanSnapshot ->
+	 * CreateTableScanForRelation, so this path needs no push of its own.
+	 */
 	fsstate->scanSnapshot =
 		CreatePgLakeScanSnapshot(rteList, restrictionList, paramListInfo,
 								 includeChildren, fsstate->resultRelationId);
@@ -2231,7 +2236,9 @@ postgresBeginForeignModify(ModifyTableState *mtstate,
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
 		return;
 
-	BindRelationToXactRestCatalog(RelationGetRelid(resultRelInfo->ri_RelationDesc));
+	Oid			modifyRelId = RelationGetRelid(resultRelInfo->ri_RelationDesc);
+
+	BindRelationToXactRestCatalog(modifyRelId);
 
 	/* Construct an execution state. */
 	fmstate = create_foreign_modify(resultRelInfo->ri_RelationDesc,

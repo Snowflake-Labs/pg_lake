@@ -38,6 +38,7 @@
 #include "pg_extension_base/pg_compat.h"
 #include "pg_lake/pgduck/remote_storage.h"
 #include "pg_lake/planner/restriction_collector.h"
+#include "pg_lake/storage/storage_credentials.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/fdw/data_file_pruning.h"
@@ -270,6 +271,17 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 	}
 	else if (IsExternalIcebergTable(relationId))
 	{
+		/*
+		 * Single choke point for storage credentials on the read path: both
+		 * the plain FDW scan path and the query-pushdown path funnel through
+		 * CreatePgLakeScanSnapshot -> here, and a table pg_lake did not
+		 * create is the only kind whose files a catalog vends credentials
+		 * for.  It has to happen before the metadata read just below, which
+		 * is itself a read of that storage.  The resolver no-ops for
+		 * everything but a read-only REST-catalog table.
+		 */
+		EnsureStorageCredentialsForRelation(relationId);
+
 		char	   *path = GetIcebergMetadataLocation(relationId, false);
 
 		IcebergTableMetadata *metadata = ReadIcebergTableMetadata(path);

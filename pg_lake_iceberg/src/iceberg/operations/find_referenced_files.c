@@ -36,6 +36,7 @@
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/operations/find_referenced_files.h"
+#include "pg_lake/storage/storage_credentials.h"
 #include "pg_lake/util/array_utils.h"
 #include "pg_lake/util/injection_points.h"
 #include "pg_lake/util/path_hash.h"
@@ -110,6 +111,13 @@ find_all_referenced_files_via_snapshot_ids(PG_FUNCTION_ARGS)
 {
 	Oid			relationId = PG_GETARG_OID(0);
 	ArrayType  *snapshotIds = PG_GETARG_ARRAYTYPE_P(1);
+
+	/*
+	 * Reading the metadata and manifests below goes through object storage,
+	 * so a REST-catalog table that is only reachable with vended credentials
+	 * needs them resolved first.  No-op for every other kind of table.
+	 */
+	EnsureStorageCredentialsForRelation(relationId);
 
 	HTAB	   *fileHash = CreateFilesHash();
 
@@ -205,6 +213,9 @@ find_unreferenced_files_via_snapshot_ids(PG_FUNCTION_ARGS)
 
 	List	   *prevSnapshotIdList = Int64ArrayToList(prevSnapshotIds);
 	List	   *currentSnapshotIdList = Int64ArrayToList(currentSnapshotIds);
+
+	/* see find_all_referenced_files_via_snapshot_ids */
+	EnsureStorageCredentialsForRelation(relationId);
 
 	char	   *currentMetadataPath = GetIcebergMetadataLocation(relationId, false);
 	IcebergTableMetadata *metadata = ReadIcebergTableMetadata(currentMetadataPath);

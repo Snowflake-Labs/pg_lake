@@ -1450,6 +1450,11 @@ QueryPushdownBeginScan(CustomScanState *node, EState *estate, int eflags)
 	/* if there are child tables, include them in the snapshot */
 	bool		includeChildren = true;
 
+	/*
+	 * Storage credentials are resolved per relation inside
+	 * CreatePgLakeScanSnapshot -> CreateTableScanForRelation, so this path
+	 * needs no push of its own.
+	 */
 	PgLakeScanSnapshot *snapshot =
 		CreatePgLakeScanSnapshot(rteList, relationRestrictionsList, paramListInfo,
 								 includeChildren, InvalidOid);
