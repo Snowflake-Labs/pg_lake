@@ -47,6 +47,7 @@
 #include "pg_lake/iceberg/operations/manifest_merge.h"
 #include "pg_lake/iceberg/operations/vacuum.h"
 #include "pg_lake/parsetree/options.h"
+#include "pg_lake/storage/storage_credentials.h"
 #include "pg_lake/transaction/transaction_hooks.h"
 #include "pg_lake/util/injection_points.h"
 #include "pg_lake/util/rel_utils.h"

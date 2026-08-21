@@ -41,6 +41,7 @@
 #include "pg_lake/cleanup/deletion_queue.h"
 #include "pg_lake/fdw/data_files_catalog.h"
 #include "pg_lake/fdw/data_file_stats_catalog.h"
+#include "pg_lake/storage/storage_credentials.h"
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/fdw/row_ids.h"
 #include "pg_lake/fdw/schema_operations/field_id_mapping_catalog.h"
@@ -308,6 +309,8 @@ DropTableAccessHook(ObjectAccessType access, Oid classId, Oid objectId,
 			/* Cleanup rowid sequence, if we have it */
 			DropRowIdSequenceForRelation(objectId);
 
+			IcebergCatalogType catalogType = GetIcebergCatalogType(objectId);
+
 			IcebergDDLOperation *ddlOperation = palloc0(sizeof(IcebergDDLOperation));
 
 			ddlOperation->type = DDL_TABLE_DROP;
@@ -316,11 +319,20 @@ DropTableAccessHook(ObjectAccessType access, Oid classId, Oid objectId,
 
 			TriggerCatalogExportIfObjectStoreTable(objectId);
 
-			IcebergCatalogType catalogType = GetIcebergCatalogType(objectId);
-
 			if (catalogType == REST_CATALOG_READ_WRITE)
 				RecordRestCatalogRequestInTx(objectId, REST_CATALOG_DROP_TABLE, NULL);
 		}
+	}
+	else if (!isColumn && IsAnyLakeForeignTableById(objectId))
+	{
+		/*
+		 * A read-only lake table owns none of the files it reads, so the drop
+		 * queues no deletes and the secrets this backend pushed for it are
+		 * dead weight the moment it is gone.  Left behind, an expired one
+		 * would still win DuckDB's longest-scope match for everything under
+		 * that prefix.
+		 */
+		ForgetStorageCredentials(objectId);
 	}
 	else if (get_rel_type_id(objectId) != InvalidOid && subId != 0)
 	{
