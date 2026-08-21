@@ -1,0 +1,115 @@
+diff --git a/src/postgres_binary_reader.cpp b/src/postgres_binary_reader.cpp
+index 86ebe30..fea0b5f 100644
+--- a/src/postgres_binary_reader.cpp
++++ b/src/postgres_binary_reader.cpp
+@@ -83,12 +83,16 @@ bool PostgresBinaryReader::Next() {
+ 		return false;
+ 	}
+ 
++	// take ownership of the buffer before validating it, so that a short read
++	// does not leak it - PQgetCopyData allocates even when it returns a length
++	// we cannot use
++	buffer = new_buffer;
++
+ 	// len -2 is error
+ 	// we expect at least 2 bytes in each message for the tuple count
+ 	if (!new_buffer || len < sizeof(int16_t)) {
+ 		throw IOException("Unable to read binary COPY data from Postgres: %s", string(PQerrorMessage(con.GetConn())));
+ 	}
+-	buffer = new_buffer;
+ 	buffer_ptr = buffer;
+ 	end = buffer + len;
+ 	return true;
+diff --git a/src/postgres_connection.cpp b/src/postgres_connection.cpp
+index 4baf81b..5334d41 100644
+--- a/src/postgres_connection.cpp
++++ b/src/postgres_connection.cpp
+@@ -103,6 +103,7 @@ vector<unique_ptr<PostgresResult>> PostgresConnection::ExecuteQueries(const stri
+ 		throw std::runtime_error("Failed to execute query \"" + queries + "\": " + string(PQerrorMessage(GetConn())));
+ 	}
+ 	vector<unique_ptr<PostgresResult>> results;
++	string error_message;
+ 	while (true) {
+ 		auto res = PQgetResult(GetConn());
+ 		if (!res) {
+@@ -110,14 +111,22 @@ vector<unique_ptr<PostgresResult>> PostgresConnection::ExecuteQueries(const stri
+ 		}
+ 		auto result = make_uniq<PostgresResult>(res);
+ 		if (ResultHasError(res)) {
+-			throw std::runtime_error("Failed to execute query \"" + queries +
+-			                         "\": " + string(PQresultErrorMessage(res)));
++			// keep draining - throwing here would leave the remaining results
++			// queued on the connection, which then rejects the next PQsendQuery
++			// with "another command is already in progress"
++			if (error_message.empty()) {
++				error_message = "Failed to execute query \"" + queries + "\": " + string(PQresultErrorMessage(res));
++			}
++			continue;
+ 		}
+ 		if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+ 			continue;
+ 		}
+ 		results.push_back(std::move(result));
+ 	}
++	if (!error_message.empty()) {
++		throw std::runtime_error(error_message);
++	}
+ 	return results;
+ }
+ 
+diff --git a/src/postgres_copy_from.cpp b/src/postgres_copy_from.cpp
+index 7108ae2..28b40c3 100644
+--- a/src/postgres_copy_from.cpp
++++ b/src/postgres_copy_from.cpp
+@@ -7,7 +7,8 @@ void PostgresConnection::BeginCopyFrom(const string &query, ExecStatusType expec
+ 	PostgresResult pg_res(PQExecute(query.c_str()));
+ 	auto result = pg_res.res;
+ 	if (!result || PQresultStatus(result) != expected_result) {
+-		throw std::runtime_error("Failed to prepare COPY \"" + query + "\": " + string(PQresultErrorMessage(result)));
++		auto error = result ? PQresultErrorMessage(result) : PQerrorMessage(GetConn());
++		throw std::runtime_error("Failed to prepare COPY \"" + query + "\": " + string(error));
+ 	}
+ }
+ 
+diff --git a/src/postgres_copy_to.cpp b/src/postgres_copy_to.cpp
+index a235b45..498e325 100644
+--- a/src/postgres_copy_to.cpp
++++ b/src/postgres_copy_to.cpp
+@@ -59,7 +59,8 @@ void PostgresConnection::BeginCopyTo(ClientContext &context, PostgresCopyState &
+ 	PostgresResult pg_res(PQExecute(query.c_str()));
+ 	auto result = pg_res.res;
+ 	if (!result || PQresultStatus(result) != PGRES_COPY_IN) {
+-		throw std::runtime_error("Failed to prepare COPY \"" + query + "\": " + string(PQresultErrorMessage(result)));
++		auto error = result ? PQresultErrorMessage(result) : PQerrorMessage(GetConn());
++		throw std::runtime_error("Failed to prepare COPY \"" + query + "\": " + string(error));
+ 	}
+ 	if (state.format == PostgresCopyFormat::BINARY) {
+ 		// binary copy requires a header
+@@ -108,8 +109,8 @@ void PostgresConnection::FinishCopyTo(PostgresCopyState &state) {
+ 	PostgresResult pg_res(PQgetResult(GetConn()));
+ 	auto result = pg_res.res;
+ 	if (!result || PQresultStatus(result) != PGRES_COMMAND_OK) {
+-		string error_msg(PQresultErrorMessage(result));
+-		throw std::runtime_error("Failed to copy data: " + error_msg);
++		auto error = result ? PQresultErrorMessage(result) : PQerrorMessage(GetConn());
++		throw std::runtime_error("Failed to copy data: " + string(error));
+ 	}
+ }
+ 
+diff --git a/src/postgres_utils.cpp b/src/postgres_utils.cpp
+index 90490a0..0f6794f 100644
+--- a/src/postgres_utils.cpp
++++ b/src/postgres_utils.cpp
+@@ -14,7 +14,11 @@ PGconn *PostgresUtils::PGConnect(const string &dsn, const string &attach_path) {
+ 
+ 	// both PQStatus and PQerrorMessage check for nullptr
+ 	if (PQstatus(conn) == CONNECTION_BAD) {
+-		throw IOException("Unable to connect to Postgres at \"%s\": %s", attach_path, string(PQerrorMessage(conn)));
++		// PQconnectdb allocates the PGconn even when the connection fails, so it
++		// still has to be handed back with PQfinish
++		string error_message(PQerrorMessage(conn));
++		PQfinish(conn);
++		throw IOException("Unable to connect to Postgres at \"%s\": %s", attach_path, error_message);
+ 	}
+ 	PQsetNoticeProcessor(conn, PGNoticeProcessor, nullptr);
+ 	return conn;
