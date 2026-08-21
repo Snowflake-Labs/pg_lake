@@ -202,7 +202,7 @@ detect_os() {
         . /etc/os-release
         if [[ "$ID" == "debian" ]] || [[ "$ID" == "ubuntu" ]] || [[ "$ID_LIKE" == *"debian"* ]]; then
             OS="debian"
-        elif [[ "$ID" == "rhel" ]] || [[ "$ID" == "almalinux" ]] || [[ "$ID" == "rocky" ]] || [[ "$ID_LIKE" == *"rhel"* ]]; then
+        elif [[ "$ID" == "rhel" ]] || [[ "$ID" == "fedora" ]] || [[ "$ID" == "almalinux" ]] || [[ "$ID" == "rocky" ]] || [[ "$ID_LIKE" == *"rhel"* ]]; then
             OS="rhel"
         else
             print_error "Unsupported Linux distribution: $ID"
