@@ -37,6 +37,7 @@
 #include "pg_lake/iceberg/operations/vacuum.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
+#include "pg_lake/storage/storage_credentials.h"
 #include "pg_lake/util/catalog_type.h"
 #include "access/xact.h"
 
@@ -345,13 +346,15 @@ _PG_init(void)
 							   NULL, NULL, NULL);
 
 	DefineCustomBoolVariable("pg_lake_iceberg.rest_catalog_enable_vended_credentials",
-							 gettext_noop("Enable requesting vended credentials from REST catalog."),
-							 gettext_noop("When disabled, the X-Iceberg-Access-Delegation header is not sent. "
-										  "Disable this for S3-compatible storage that does not support AWS STS."),
+							 gettext_noop("Request vended (STS) credentials from the Iceberg REST catalog."),
+							 gettext_noop("When enabled, the X-Iceberg-Access-Delegation header is sent and the "
+										  "catalog-vended, table-scoped S3 credentials are pushed to pgduck_server. "
+										  "Opt-in: leave disabled for S3-compatible storage that does not support "
+										  "AWS STS, or when a static S3 secret already grants access."),
 							 &RestCatalogEnableVendedCredentials,
-							 true,
+							 false,
 							 PGC_SUSET,
-							 GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							 GUC_SUPERUSER_ONLY | GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 
 	DefineCustomBoolVariable("pg_lake_iceberg.unsupported_numeric_as_double",

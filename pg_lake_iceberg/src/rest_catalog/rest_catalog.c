@@ -28,6 +28,7 @@
 
 #include "postgres.h"
 
+#include "commands/defrem.h"
 #include "foreign/foreign.h"
 #include "utils/memutils.h"
 
@@ -44,7 +45,7 @@ char	   *RestCatalogClientId = NULL;
 char	   *RestCatalogClientSecret = NULL;
 char	   *RestCatalogScope = "PRINCIPAL_ROLE:ALL";
 int			RestCatalogAuthType = REST_CATALOG_AUTH_TYPE_OAUTH2;
-bool		RestCatalogEnableVendedCredentials = true;
+bool		RestCatalogEnableVendedCredentials = false;
 
 
 /*
@@ -307,6 +308,41 @@ GetRestCatalogServerIdForRelation(Oid relationId)
 				 errmsg("catalog option is not set for relation %u", relationId)));
 
 	return ResolveRestCatalogServerId(catalog);
+}
+
+
+/*
+ * RestCatalogVendingEnabledForRelation reports whether vended credentials
+ * are enabled for the relation's catalog: the server's own option when it
+ * sets one, otherwise the GUC.  This mirrors what full option resolution
+ * would conclude, without performing it.
+ *
+ * Resolving full options validates the user mapping and throws when the
+ * mapping was dropped in the same transaction as the table (DROP TABLE
+ * right after DROP USER MAPPING).  The answer here is usually "off", and
+ * in that case nothing about the table's credentials should be resolved
+ * at all -- so the cheap, credential-free lookup has to come first.
+ */
+bool
+RestCatalogVendingEnabledForRelation(Oid relationId)
+{
+	Oid			serverOid = GetRestCatalogServerIdForRelation(relationId);
+	ForeignServer *server = GetForeignServerExtended(serverOid, FSV_MISSING_OK);
+
+	if (server != NULL)
+	{
+		ListCell   *optionCell;
+
+		foreach(optionCell, server->options)
+		{
+			DefElem    *option = (DefElem *) lfirst(optionCell);
+
+			if (strcmp(option->defname, "enable_vended_credentials") == 0)
+				return defGetBoolean(option);
+		}
+	}
+
+	return RestCatalogEnableVendedCredentials;
 }
 
 
