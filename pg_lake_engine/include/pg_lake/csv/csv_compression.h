@@ -22,6 +22,14 @@
 
 #include "pg_lake/copy/copy_format.h"
 
+/*
+ * Bounds of pg_lake_engine.temp_file_compression_level: the union of what the
+ * codecs accept, since one setting serves both.  Each codec clamps the level
+ * into its own range, so gzip stops at 9 and only zstd sees the rest.
+ */
+#define PG_LAKE_MIN_TEMP_FILE_COMPRESSION_LEVEL (-22)
+#define PG_LAKE_MAX_TEMP_FILE_COMPRESSION_LEVEL 22
+
 /* pg_lake_engine.temp_file_compression setting */
 extern PGDLLEXPORT int TempFileCompression;
 
@@ -32,6 +40,8 @@ extern PGDLLEXPORT int TempFileCompressionLevel;
 typedef struct CSVCompressor CSVCompressor;
 
 extern PGDLLEXPORT CopyDataCompression InternalCSVCompression(void);
+extern PGDLLEXPORT void CSVCompressionLevelRange(CopyDataCompression method,
+												 int *minLevel, int *maxLevel);
 extern PGDLLEXPORT CSVCompressor * CSVCompressorCreate(FILE *file,
 													   CopyDataCompression method,
 													   int level);

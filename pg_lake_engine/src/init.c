@@ -64,10 +64,15 @@ bool		EnableHeavyAsserts = false;
 /* pg_lake.stage_location setting */
 char	   *PgLakeStageLocation = NULL;
 
-/* allowed values of pg_lake_engine.temp_file_compression */
+/*
+ * Allowed values of pg_lake_engine.temp_file_compression.  gzip and zstd are
+ * the only codecs both ends of the exchange CSV understand; see
+ * src/csv/csv_compression.c.
+ */
 static const struct config_enum_entry TempFileCompressionOptions[] = {
 	{"none", DATA_COMPRESSION_NONE, false},
 	{"gzip", DATA_COMPRESSION_GZIP, false},
+	{"zstd", DATA_COMPRESSION_ZSTD, false},
 	{NULL, 0, false}
 };
 
@@ -220,7 +225,8 @@ _PG_init(void)
 										  "carry rows between PostgreSQL and the query engine."),
 							 gettext_noop("The exchange CSV is several times the size of the "
 										  "Parquet it becomes, so compressing it saves temporary "
-										  "space and I/O at the cost of CPU on both ends."),
+										  "space and I/O at the cost of CPU on both ends.  zstd "
+										  "reaches a given ratio for less CPU than gzip does."),
 							 &TempFileCompression,
 							 DATA_COMPRESSION_NONE,
 							 TempFileCompressionOptions,
@@ -231,11 +237,14 @@ _PG_init(void)
 	DefineCustomIntVariable("pg_lake_engine.temp_file_compression_level",
 							gettext_noop("Compression level for temporary CSV files."),
 							gettext_noop("These files live for the length of one statement, so the "
-										 "default favours throughput over ratio."),
+										 "default favours throughput over ratio.  gzip accepts 1 "
+										 "through 9; zstd also accepts negative levels, which are "
+										 "its fast modes.  A level outside the active codec's "
+										 "range is clamped into it."),
 							&TempFileCompressionLevel,
 							1,
-							1,
-							9,
+							PG_LAKE_MIN_TEMP_FILE_COMPRESSION_LEVEL,
+							PG_LAKE_MAX_TEMP_FILE_COMPRESSION_LEVEL,
 							PGC_USERSET,
 							0,
 							NULL, NULL, NULL);

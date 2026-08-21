@@ -317,7 +317,7 @@ EndCopy(CopyToState cstate)
 		CopySendEndOfRow(cstate);
 	}
 
-	/* the gzip trailer has to be written before the file is closed */
+	/* the codec has to close its container before the file is closed */
 	if (cstate->compressor != NULL)
 	{
 		CSVCompressorFinish(cstate->compressor);

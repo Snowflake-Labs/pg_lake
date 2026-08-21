@@ -6,7 +6,8 @@ from utils_pytest import *
 # compressed (pg_lake_engine.temp_file_compression).  It is an internal exchange
 # format, so the setting must make no difference to anything a user can observe.
 
-COMPRESSION_MODES = ["none", "gzip"]
+COMPRESSION_MODES = ["none", "gzip", "zstd"]
+COMPRESSED_MODES = [mode for mode in COMPRESSION_MODES if mode != "none"]
 
 # Values chosen to stress the CSV dialect rather than the type system: embedded
 # delimiters and quotes, the literal null sentinel next to a real NULL, an empty
@@ -26,9 +27,11 @@ ADVERSARIAL_QUERY = r"""
 """
 
 
-def write_parquet(conn, tmp_path, mode, name):
+def write_parquet(conn, tmp_path, mode, name, level=None):
     """COPY the adversarial rows out as Parquet with the given compression mode."""
     run_command(f"SET pg_lake_engine.temp_file_compression TO '{mode}'", conn)
+    if level is not None:
+        run_command(f"SET pg_lake_engine.temp_file_compression_level TO {level}", conn)
 
     parquet_path = tmp_path / f"{name}.parquet"
     copy_to_file(
@@ -90,7 +93,40 @@ def test_temp_file_compression_matches_uncompressed(pg_conn, duckdb_conn, tmp_pa
         duckdb_conn.execute("SELECT * FROM read_parquet($1) ORDER BY id", [str(path)])
         contents[mode] = duckdb_conn.fetchall()
 
-    assert contents["gzip"] == contents["none"]
+    for mode in COMPRESSED_MODES:
+        assert contents[mode] == contents["none"], mode
+
+    pg_conn.rollback()
+
+
+# One setting carries the level for both codecs, so it spans the union of their
+# ranges: gzip's 1 to 9, and zstd's negative fast modes through 22.  A level the
+# active codec cannot use is clamped, not rejected.
+@pytest.mark.parametrize(
+    "mode,level",
+    [
+        ("gzip", 1),
+        ("gzip", 9),
+        ("gzip", 22),
+        ("gzip", -22),
+        ("zstd", -22),
+        ("zstd", -3),
+        ("zstd", 1),
+        ("zstd", 19),
+        ("zstd", 22),
+    ],
+)
+def test_temp_file_compression_levels(pg_conn, duckdb_conn, tmp_path, mode, level):
+    parquet_path = write_parquet(
+        pg_conn, tmp_path, mode, f"level_{mode}_{level}", level=level
+    )
+
+    duckdb_conn.execute(
+        "SELECT count(*), count(DISTINCT whitespace) FROM read_parquet($1)",
+        [str(parquet_path)],
+    )
+
+    assert duckdb_conn.fetchall() == [(2000, 1)]
 
     pg_conn.rollback()
 
