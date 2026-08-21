@@ -341,7 +341,12 @@ FileCacheManager::CacheFileInternal(ClientContext &context, string url, bool for
 	/* prefix the URL with nocache to prevent copying an already-cached file to itself */
 	string sourceUrl = NO_CACHE_PREFIX + url;
 
-	/* first, copy the file from the URL into a staging file */
+	/*
+	 * First, copy the file from the URL into a staging file. A failure here
+	 * leaves the staging file behind on purpose: unwinding releases the cache
+	 * lock, so the sweep at the top of ManageCache reclaims it on its next run,
+	 * and cleaning up here would only duplicate that.
+	 */
 	string stagingCacheFilePath = finalCacheFilePath + STAGING_SUFFIX;
 	int64_t size = FileUtils::CopyFile(context, sourceUrl, stagingCacheFilePath);
 
