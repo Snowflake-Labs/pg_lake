@@ -32,7 +32,7 @@ static bool GetFieldValue(avro_value_t * record, char *fieldName, AvroFieldRequi
 static bool GetFieldArrayValue(avro_value_t * record, char *fieldName, AvroFieldRequired required,
 							   avro_value_t * fieldValue, size_t *itemCount);
 static bool AvroPrepareGetNullable(avro_value_t * record, char *fieldName,
-								   avro_value_t * innerValue);
+								   AvroFieldRequired required, avro_value_t * innerValue);
 static avro_type_t AvroGetUnionNotNullType(avro_value_t * unionValue);
 
 
@@ -188,11 +188,12 @@ AvroGetInt32Field(avro_value_t * record, char *fieldName, AvroFieldRequired requ
 
 
 void
-AvroGetNullableInt32Field(avro_value_t * record, char *fieldName, int32_t *intPointer, bool *isSet)
+AvroGetNullableInt32Field(avro_value_t * record, char *fieldName, AvroFieldRequired required,
+						  int32_t *intPointer, bool *isSet)
 {
 	avro_value_t fieldValue;
 
-	if ((*isSet = AvroPrepareGetNullable(record, fieldName, &fieldValue)))
+	if ((*isSet = AvroPrepareGetNullable(record, fieldName, required, &fieldValue)))
 	{
 		if (avro_value_get_int(&fieldValue, intPointer) != 0)
 		{
@@ -221,11 +222,12 @@ AvroGetInt64Field(avro_value_t * record, char *fieldName, AvroFieldRequired requ
 
 
 void
-AvroGetNullableInt64Field(avro_value_t * record, char *fieldName, int64_t *longPointer, bool *isSet)
+AvroGetNullableInt64Field(avro_value_t * record, char *fieldName, AvroFieldRequired required,
+						  int64_t *longPointer, bool *isSet)
 {
 	avro_value_t fieldValue;
 
-	if ((*isSet = AvroPrepareGetNullable(record, fieldName, &fieldValue)))
+	if ((*isSet = AvroPrepareGetNullable(record, fieldName, required, &fieldValue)))
 	{
 		if (avro_value_get_long(&fieldValue, longPointer) != 0)
 		{
@@ -256,13 +258,13 @@ AvroGetStringField(avro_value_t * record, char *fieldName, AvroFieldRequired req
 
 
 void
-AvroGetNullableStringField(avro_value_t * record, char *fieldName,
+AvroGetNullableStringField(avro_value_t * record, char *fieldName, AvroFieldRequired required,
 						   const char **stringPointer, size_t *lengthPointer,
 						   bool *isSet)
 {
 	avro_value_t fieldValue;
 
-	if ((*isSet = AvroPrepareGetNullable(record, fieldName, &fieldValue)))
+	if ((*isSet = AvroPrepareGetNullable(record, fieldName, required, &fieldValue)))
 	{
 		if (avro_value_get_string(&fieldValue, stringPointer, lengthPointer) != 0)
 		{
@@ -293,13 +295,13 @@ AvroGetBinaryField(avro_value_t * record, char *fieldName, AvroFieldRequired req
 
 
 void
-AvroGetNullableBinaryField(avro_value_t * record, char *fieldName,
+AvroGetNullableBinaryField(avro_value_t * record, char *fieldName, AvroFieldRequired required,
 						   const void **bytesPointer, size_t *lengthPointer,
 						   bool *isSet)
 {
 	avro_value_t fieldValue;
 
-	if ((*isSet = AvroPrepareGetNullable(record, fieldName, &fieldValue)))
+	if ((*isSet = AvroPrepareGetNullable(record, fieldName, required, &fieldValue)))
 	{
 		if (avro_value_get_bytes(&fieldValue, bytesPointer, lengthPointer) != 0)
 		{
@@ -680,15 +682,26 @@ GetFieldArrayValue(avro_value_t * record, char *fieldName, AvroFieldRequired req
 /*
  * AvroPrepareGetNullable is a helper function for getting the value
  * from a [null,?] union.
+ *
+ * Nullable and present are separate questions: a writer may leave an
+ * optional field out of the schema entirely rather than write it as null.
+ * An absent AVRO_FIELD_OPTIONAL field reads as "not set", same as an
+ * explicit null.
  */
 static bool
-AvroPrepareGetNullable(avro_value_t * record, char *fieldName, avro_value_t * innerValue)
+AvroPrepareGetNullable(avro_value_t * record, char *fieldName, AvroFieldRequired required,
+					   avro_value_t * innerValue)
 {
 	avro_value_t unionValue;
 
 	if (avro_value_get_by_name(record, fieldName, &unionValue, NULL) != 0)
 	{
-		ereport(ERROR, (errmsg("%s not found in schema", fieldName)));
+		if (required == AVRO_FIELD_REQUIRED)
+		{
+			ereport(ERROR, (errmsg("%s not found in schema", fieldName)));
+		}
+
+		return false;
 	}
 
 	if (avro_value_get_type(&unionValue) != AVRO_UNION)

@@ -236,9 +236,12 @@ ReadIcebergManifestEntryFromAvro(avro_value_t * record, IcebergManifestEntry * e
 {
 	memset(entry, '\0', sizeof(IcebergManifestEntry));
 	AvroGetInt32Field(record, "status", AVRO_FIELD_REQUIRED, (int32_t *) &entry->status);
-	AvroGetNullableInt64Field(record, "snapshot_id", &entry->snapshot_id, &entry->has_snapshot_id);
-	AvroGetNullableInt64Field(record, "sequence_number", &entry->sequence_number, &entry->has_sequence_number);
-	AvroGetNullableInt64Field(record, "file_sequence_number", &entry->file_sequence_number, &entry->has_file_sequence_number);
+	AvroGetNullableInt64Field(record, "snapshot_id", AVRO_FIELD_OPTIONAL,
+							  &entry->snapshot_id, &entry->has_snapshot_id);
+	AvroGetNullableInt64Field(record, "sequence_number", AVRO_FIELD_OPTIONAL,
+							  &entry->sequence_number, &entry->has_sequence_number);
+	AvroGetNullableInt64Field(record, "file_sequence_number", AVRO_FIELD_OPTIONAL,
+							  &entry->file_sequence_number, &entry->has_file_sequence_number);
 	AvroGetRecordField(record, "data_file", AVRO_FIELD_REQUIRED, (AvroParseFunction) ReadDataFileFromAvro, &entry->data_file, context);
 }
 
@@ -265,6 +268,26 @@ ReadDataFileFromAvro(avro_value_t * record, DataFile * dataFile, ManifestReaderC
 						 "storage scheme (s3://, azure://, etc.).")));
 
 	AvroGetStringField(record, "file_format", AVRO_FIELD_REQUIRED, &dataFile->file_format, &dataFile->file_format_length);
+
+	/*
+	 * Iceberg v3 replaces positional delete files with deletion vectors,
+	 * which appear here as position deletes carried in a Puffin blob rather
+	 * than a Parquet file.  We would hand that path to DuckDB as if it were
+	 * Parquet, so refuse it by name: reporting the deletes we cannot apply is
+	 * the difference between a clear failure and silently returning rows the
+	 * table considers deleted.
+	 */
+	if (dataFile->content == ICEBERG_DATA_FILE_CONTENT_POSITION_DELETES &&
+		dataFile->file_format != NULL &&
+		pg_strcasecmp(dataFile->file_format, "PUFFIN") == 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("pg_lake_iceberg: deletion vectors are not supported"),
+				 errdetail("Table references the Puffin deletion vector \"%s\".",
+						   dataFile->file_path),
+				 errhint("Deletion vectors are an Iceberg v3 feature; rewrite "
+						 "the table with positional delete files to read it.")));
+
 	AvroGetRecordField(record, "partition", AVRO_FIELD_REQUIRED, (AvroParseFunction) ReadPartitionFromAvro, &dataFile->partition, context);
 	AvroGetInt64Field(record, "record_count", AVRO_FIELD_REQUIRED, &dataFile->record_count);
 	AvroGetInt64Field(record, "file_size_in_bytes", AVRO_FIELD_REQUIRED, &dataFile->file_size_in_bytes);
@@ -304,7 +327,7 @@ ReadDataFileFromAvro(avro_value_t * record, DataFile * dataFile, ManifestReaderC
 						   &dataFile->split_offsets, &dataFile->split_offsets_length);
 	AvroGetInt32ArrayField(record, "equality_ids", AVRO_FIELD_OPTIONAL,
 						   &dataFile->equality_ids, &dataFile->equality_ids_length);
-	AvroGetNullableInt32Field(record, "sort_order_id",
+	AvroGetNullableInt32Field(record, "sort_order_id", AVRO_FIELD_OPTIONAL,
 							  &dataFile->sort_order_id, &dataFile->has_sort_order_id);
 }
 

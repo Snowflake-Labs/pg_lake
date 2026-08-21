@@ -56,6 +56,21 @@ WriteIcebergTableMetadataToJson(IcebergTableMetadata * metadata)
 {
 	StringInfo	command = makeStringInfo();
 
+	/*
+	 * A v3 table is read on the strength of its metadata being a superset of
+	 * v2's, which says nothing about writing one back.  This serializer emits
+	 * a v2 document under whatever version number it is handed, so a v3 table
+	 * would be rewritten without the fields v3 requires -- valid to nobody,
+	 * including the catalog that produced it.
+	 */
+	if (metadata->format_version != 2)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot write iceberg metadata in format version %d",
+						metadata->format_version),
+				 errdetail("pg_lake writes iceberg format version 2."),
+				 errhint("Attach the table read-only to query it.")));
+
 	appendStringInfoString(command, "{");
 
 	/* Append format_version */
