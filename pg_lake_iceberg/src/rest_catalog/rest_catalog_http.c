@@ -281,3 +281,214 @@ JsonbGetStringByPath(const char *jsonb_text, int nkeys,...)
 	va_end(variableArgList);
 	ereport(ERROR, (errmsg("unexpected json path handling error")));
 }
+
+
+/*
+ * StringByPathFromContainer walks nkeys object keys from container and
+ * returns the string it arrives at, or NULL if any step is missing or
+ * is not of the expected shape.  The caller owns ap.
+ */
+static char *
+StringByPathFromContainer(JsonbContainer *container, int nkeys, va_list ap)
+{
+	for (int i = 0; i < nkeys; i++)
+	{
+		const char *key = va_arg(ap, const char *);
+		JsonbValue	keyVal;
+		JsonbValue *val;
+
+		if (!JsonContainerIsObject(container))
+			return NULL;
+
+		keyVal.type = jbvString;
+		keyVal.val.string.val = (char *) key;
+		keyVal.val.string.len = strlen(key);
+
+		val = findJsonbValueFromContainer(container, JB_FOBJECT, &keyVal);
+		if (val == NULL)
+			return NULL;
+
+		if (i < nkeys - 1)
+		{
+			if (val->type != jbvBinary ||
+				!JsonContainerIsObject(val->val.binary.data))
+				return NULL;
+
+			container = val->val.binary.data;
+		}
+		else if (val->type == jbvString)
+			return pnstrdup(val->val.string.val, val->val.string.len);
+	}
+
+	return NULL;
+}
+
+
+/*
+ * JsonbGetOptionalStringByPath works like JsonbGetStringByPath, but
+ * returns NULL instead of raising an ERROR when a key is missing or
+ * a mid-level value is not an object.
+ */
+char *
+JsonbGetOptionalStringByPath(const char *jsonb_text, int nkeys,...)
+{
+	if (nkeys <= 0 || jsonb_text == NULL || *jsonb_text == '\0')
+		return NULL;
+
+	Datum		jsonbDatum = DirectFunctionCall1(jsonb_in,
+												 CStringGetDatum(jsonb_text));
+	Jsonb	   *jb = DatumGetJsonbP(jsonbDatum);
+	va_list		ap;
+	char	   *result;
+
+	va_start(ap, nkeys);
+	result = StringByPathFromContainer(&jb->root, nkeys, ap);
+	va_end(ap);
+
+	return result;
+}
+
+
+/*
+ * JsonbGetOptionalString is JsonbGetOptionalStringByPath over an
+ * already-parsed document, for callers that read several fields out of
+ * one response and should not pay to parse it again for each of them.
+ */
+char *
+JsonbGetOptionalString(Jsonb *jb, int nkeys,...)
+{
+	if (nkeys <= 0 || jb == NULL)
+		return NULL;
+
+	va_list		ap;
+	char	   *result;
+
+	va_start(ap, nkeys);
+	result = StringByPathFromContainer(&jb->root, nkeys, ap);
+	va_end(ap);
+
+	return result;
+}
+
+
+/*
+ * JsonbGetObject returns the nested object stored under a top-level key
+ * as a document of its own, or NULL when the key is absent or does not
+ * hold an object.
+ */
+Jsonb *
+JsonbGetObject(Jsonb *jb, const char *key)
+{
+	if (jb == NULL)
+		return NULL;
+
+	JsonbContainer *root = &jb->root;
+
+	if (!JsonContainerIsObject(root))
+		return NULL;
+
+	JsonbValue	keyVal;
+
+	keyVal.type = jbvString;
+	keyVal.val.string.val = (char *) key;
+	keyVal.val.string.len = strlen(key);
+
+	JsonbValue *val = findJsonbValueFromContainer(root, JB_FOBJECT, &keyVal);
+
+	if (val == NULL || val->type != jbvBinary ||
+		!JsonContainerIsObject(val->val.binary.data))
+		return NULL;
+
+	return JsonbValueToJsonb(val);
+}
+
+
+/*
+ * JsonbGetArrayElementObjects navigates a top-level object key
+ * `arrayKey` that holds a JSON array and returns one JsonbArrayElement
+ * per array element, in order.  Each element's `objectKey` nested
+ * object is returned as a document of its own, along with the
+ * element's `elementStringKey` string field.  Elements that are not
+ * objects, or that carry no such nested object, are skipped.  Returns
+ * NIL when the array is absent or yields nothing usable.
+ *
+ * This parses the Iceberg REST `storage-credentials` array, whose
+ * elements look like { "prefix": "s3://...", "config": { ... } }.  A
+ * catalog may vend several, for instance one credential for the data
+ * files and another for the metadata directory.
+ */
+List *
+JsonbGetArrayElementObjects(Jsonb *jb, const char *arrayKey,
+							const char *objectKey, const char *elementStringKey)
+{
+	List	   *elements = NIL;
+
+	if (jb == NULL)
+		return NIL;
+
+	JsonbContainer *root = &jb->root;
+
+	if (!JsonContainerIsObject(root))
+		return NIL;
+
+	JsonbValue	keyVal;
+
+	keyVal.type = jbvString;
+	keyVal.val.string.val = (char *) arrayKey;
+	keyVal.val.string.len = strlen(arrayKey);
+
+	JsonbValue *arrVal = findJsonbValueFromContainer(root, JB_FOBJECT, &keyVal);
+
+	if (arrVal == NULL || arrVal->type != jbvBinary ||
+		!JsonContainerIsArray(arrVal->val.binary.data))
+		return NIL;
+
+	JsonbContainer *arrContainer = arrVal->val.binary.data;
+	uint32		elementCount = JsonContainerSize(arrContainer);
+
+	for (uint32 i = 0; i < elementCount; i++)
+	{
+		JsonbValue *elem = getIthJsonbValueFromContainer(arrContainer, i);
+
+		if (elem == NULL || elem->type != jbvBinary ||
+			!JsonContainerIsObject(elem->val.binary.data))
+			continue;
+
+		JsonbContainer *elemContainer = elem->val.binary.data;
+		JsonbValue	oKey;
+
+		oKey.type = jbvString;
+		oKey.val.string.val = (char *) objectKey;
+		oKey.val.string.len = strlen(objectKey);
+
+		JsonbValue *oVal = findJsonbValueFromContainer(elemContainer, JB_FOBJECT, &oKey);
+
+		if (oVal == NULL || oVal->type != jbvBinary ||
+			!JsonContainerIsObject(oVal->val.binary.data))
+			continue;
+
+		JsonbArrayElement *element = palloc0(sizeof(JsonbArrayElement));
+
+		element->object = JsonbValueToJsonb(oVal);
+
+		if (elementStringKey != NULL)
+		{
+			JsonbValue	sKey;
+
+			sKey.type = jbvString;
+			sKey.val.string.val = (char *) elementStringKey;
+			sKey.val.string.len = strlen(elementStringKey);
+
+			JsonbValue *sVal = findJsonbValueFromContainer(elemContainer,
+														   JB_FOBJECT, &sKey);
+
+			if (sVal != NULL && sVal->type == jbvString)
+				element->stringValue = pnstrdup(sVal->val.string.val,
+												sVal->val.string.len);
+		}
+
+		elements = lappend(elements, element);
+	}
+
+	return elements;
+}
