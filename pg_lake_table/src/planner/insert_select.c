@@ -426,30 +426,16 @@ TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod, CopyDataFormat sourc
 	 * block pushdown and let the non-pushdown path clamp or reject NaN via
 	 * IcebergErrorOrClampSlotInPlace / IcebergErrorOrClampDatum.
 	 *
-	 * - Unbounded or precision > 38: on Iceberg tables these are converted to
-	 * float8 at CREATE TABLE time by
+	 * - Unbounded or precision > 38: on Iceberg tables a top-level column of
+	 * that type is converted to float8 at CREATE TABLE time by
 	 * MaybeConvertUnsupportedNumericColumnsToDouble (or rejected if that GUC
-	 * is off), so they never appear as NUMERICOID at pushdown time. On
-	 * non-Iceberg tables, they remain NUMERICOID and are blocked here for the
+	 * is off), so it only reaches here nested in a composite type or a map,
+	 * where we keep the declared type and store a double. On non-Iceberg
+	 * tables it stays NUMERICOID at any level. Blocked either way for the
 	 * same NaN reason.
 	 */
 	if (typeId == NUMERICOID)
 	{
-#ifdef USE_ASSERT_CHECKING
-		if (sourceFormat == DATA_FORMAT_ICEBERG)
-		{
-			Assert(!IsUnboundedNumeric(typeId, typmod));
-
-			int			precision = -1;
-			int			scale = -1;
-
-			GetDuckdbAdjustedPrecisionAndScaleFromNumericTypeMod(typmod,
-																 &precision,
-																 &scale);
-			Assert(precision <= DUCKDB_MAX_NUMERIC_PRECISION);
-		}
-#endif
-
 		ereport(DEBUG4,
 				(errmsg("Numeric type is not pushdownable")));
 
