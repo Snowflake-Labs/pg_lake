@@ -513,6 +513,30 @@ create table users (userid bigint, username text, email text);
 
 It can be useful to assign `default_table_access_method` to a specific database user for tools that are unaware of Iceberg (see below). However, some PostgreSQL features such as temporary and unlogged tables stop working unless you explicitly add using heap.
 
+## Iceberg tables in a REST catalog
+
+An Iceberg table can live in an external REST catalog rather than in PostgreSQL, so that other engines see it through the catalog they already use. Which of the two roles a table has is decided when you create it, and cannot be changed afterwards.
+
+**Tables pg_lake creates.** Without `read_only`, pg_lake creates the table in the catalog and owns it: it writes the data and metadata, and names the table in the catalog after the database, schema and table you used. Its files go under `pg_lake_iceberg.default_location_prefix` unless you name a `location`.
+
+```sql
+-- pg_lake creates measurements in the catalog and can write to it
+CREATE TABLE measurements (device_id bigint, value float8)
+USING iceberg WITH (catalog = 'my_rest_catalog');
+```
+
+**Tables that already exist in the catalog.** A table created by something else is attached with `read_only`, naming it as it is known to the catalog:
+
+```sql
+-- attach an existing catalog table for querying
+CREATE TABLE sales () USING iceberg
+WITH (catalog = 'my_rest_catalog', read_only = true,
+      catalog_name = 'analytics', catalog_namespace = 'public',
+      catalog_table_name = 'sales');
+```
+
+Such a table can be queried but not written to, and the catalog options that name it are only accepted together with `read_only`. Writing would mean taking over a table's metadata, field-id mappings and file inventory from whatever produced them, which pg_lake does not do: it writes only to tables it created itself. To move existing data under pg_lake, create a table as above and copy into it.
+
 ## Copy external PostgreSQL tables to Iceberg
 A big advantage of being able to change the `default_table_access_method` to Iceberg is that it can significantly simplify data migrations.
 
