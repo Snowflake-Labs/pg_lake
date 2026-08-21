@@ -150,6 +150,100 @@ inline void InitcapPG(DataChunk &args, ExpressionState &state, Vector &result)
 
 
 /*
+ * GetRawUuidUpper returns the first 8 bytes of a UUID as a big-endian
+ * integer.  DuckDB stores UUIDs as hugeint with the most significant bit
+ * flipped to preserve sort order, so flip it back.
+ */
+static inline uint64_t GetRawUuidUpper(hugeint_t value)
+{
+	return static_cast<uint64_t>(value.upper) ^ (uint64_t(1) << 63);
+}
+
+
+/*
+ * IsRfc9562Variant reports whether the UUID has the RFC 9562 variant, which
+ * Postgres requires before extracting any field.  The variant bits are the
+ * top two bits of byte 8, the first byte of the lower half.
+ */
+static inline bool IsRfc9562Variant(hugeint_t value)
+{
+	return ((value.lower >> 56) & 0xC0) == 0x80;
+}
+
+
+/*
+ * UuidExtractVersionPG implements Postgres' uuid_extract_version(uuid):
+ * the version nibble for RFC 9562 variant UUIDs, NULL otherwise.  DuckDB's
+ * built-in uuid_extract_version skips the variant check, so for example a
+ * nil UUID yields 0 instead of NULL.
+ */
+inline void UuidExtractVersionPG(DataChunk &args, ExpressionState &state, Vector &result)
+{
+	auto &input_vector = args.data[0];
+
+	UnaryExecutor::ExecuteWithNulls<hugeint_t, int16_t>(
+		input_vector, result, args.size(),
+		[&](hugeint_t value, ValidityMask &mask, idx_t idx) -> int16_t {
+			if (!IsRfc9562Variant(value)) {
+				mask.SetInvalid(idx);
+				return 0;
+			}
+
+			return static_cast<int16_t>((GetRawUuidUpper(value) >> 12) & 0x0F);
+		});
+}
+
+
+/*
+ * UuidExtractTimestampPG implements Postgres' uuid_extract_timestamp(uuid):
+ * a timestamp for version 1 and version 7 RFC 9562 UUIDs, NULL otherwise.
+ * DuckDB's built-in uuid_extract_timestamp errors for any version other
+ * than 7, where Postgres returns the embedded timestamp for version 1 and
+ * NULL for the rest.
+ */
+inline void UuidExtractTimestampPG(DataChunk &args, ExpressionState &state, Vector &result)
+{
+	auto &input_vector = args.data[0];
+
+	/* microseconds between the Gregorian epoch (1582-10-15) and 1970-01-01 */
+	constexpr int64_t GREGORIAN_TO_UNIX_EPOCH_US = 12219292800000000LL;
+
+	UnaryExecutor::ExecuteWithNulls<hugeint_t, timestamp_tz_t>(
+		input_vector, result, args.size(),
+		[&](hugeint_t value, ValidityMask &mask, idx_t idx) -> timestamp_tz_t {
+			if (!IsRfc9562Variant(value)) {
+				mask.SetInvalid(idx);
+				return timestamp_tz_t(0);
+			}
+
+			uint64_t upper = GetRawUuidUpper(value);
+			uint64_t version = (upper >> 12) & 0x0F;
+
+			if (version == 1) {
+				/* 60-bit count of 100-ns intervals since the Gregorian epoch */
+				uint64_t time_low = upper >> 32;
+				uint64_t time_mid = (upper >> 16) & 0xFFFF;
+				uint64_t time_hi = upper & 0x0FFF;
+				uint64_t tms = (time_hi << 48) | (time_mid << 32) | time_low;
+
+				return timestamp_tz_t(static_cast<int64_t>(tms / 10) -
+									  GREGORIAN_TO_UNIX_EPOCH_US);
+			}
+
+			if (version == 7) {
+				/* 48-bit count of milliseconds since the Unix epoch */
+				uint64_t tms = upper >> 16;
+
+				return timestamp_tz_t(static_cast<int64_t>(tms) * 1000);
+			}
+
+			mask.SetInvalid(idx);
+			return timestamp_tz_t(0);
+		});
+}
+
+
+/*
 * Postgres and DuckDB have different behavior for the SUBSTRING function when
 * the length or offset is negative. This function implements the Postgres
 * behavior for the SUBSTRING function.
@@ -664,6 +758,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	auto initcap_function = ScalarFunction("initcap_pg", {LogicalType::VARCHAR}, LogicalType::VARCHAR, InitcapPG);
 	loader.RegisterFunction(initcap_function);
+
+	auto uuid_extract_timestamp_function = ScalarFunction("uuid_extract_timestamp_pg", {LogicalType::UUID}, LogicalType::TIMESTAMP_TZ, UuidExtractTimestampPG);
+	loader.RegisterFunction(uuid_extract_timestamp_function);
+
+	auto uuid_extract_version_function = ScalarFunction("uuid_extract_version_pg", {LogicalType::UUID}, LogicalType::SMALLINT, UuidExtractVersionPG);
+	loader.RegisterFunction(uuid_extract_version_function);
 
 	auto nullify_any_type = ScalarFunction("nullify_any_type", {LogicalType::ANY}, LogicalType::SQLNULL, NullifyAnyType);
 	loader.RegisterFunction(nullify_any_type);
