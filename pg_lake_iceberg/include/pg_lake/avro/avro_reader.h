@@ -57,15 +57,19 @@ void		AvroReaderClose(AvroReader * reader);
 bool		AvroFieldExists(avro_value_t * record, char *fieldName);
 void		AvroGetBoolField(avro_value_t * record, char *fieldName, AvroFieldRequired required, bool *boolPointer);
 void		AvroGetInt32Field(avro_value_t * record, char *fieldName, AvroFieldRequired required, int32_t *valPointer);
-void		AvroGetNullableInt32Field(avro_value_t * record, char *fieldName, int32_t *intPointer, bool *isSet);
+void		AvroGetNullableInt32Field(avro_value_t * record, char *fieldName, AvroFieldRequired required,
+									  int32_t *intPointer, bool *isSet);
 void		AvroGetInt64Field(avro_value_t * record, char *fieldName, AvroFieldRequired required, int64_t *valPointer);
-void		AvroGetNullableInt64Field(avro_value_t * record, char *fieldName, int64_t *longPointer, bool *isSet);
+void		AvroGetNullableInt64Field(avro_value_t * record, char *fieldName, AvroFieldRequired required,
+									  int64_t *longPointer, bool *isSet);
 void		AvroGetStringField(avro_value_t * record, char *fieldName, AvroFieldRequired required,
 							   const char **stringPointer, size_t *lengthPointer);
-void		AvroGetNullableStringField(avro_value_t * record, char *fieldName, const char **stringPointer, size_t *lengthPointer, bool *isSet);
+void		AvroGetNullableStringField(avro_value_t * record, char *fieldName, AvroFieldRequired required,
+									   const char **stringPointer, size_t *lengthPointer, bool *isSet);
 void		AvroGetBinaryField(avro_value_t * record, char *fieldName, AvroFieldRequired required,
 							   const void **bytesPointer, size_t *lengthPointer);
-void		AvroGetNullableBinaryField(avro_value_t * record, char *fieldName, const void **bytesPointer, size_t *lengthPointer, bool *isSet);
+void		AvroGetNullableBinaryField(avro_value_t * record, char *fieldName, AvroFieldRequired required,
+									   const void **bytesPointer, size_t *lengthPointer, bool *isSet);
 void		AvroGetRecordField(avro_value_t * record, char *fieldName, AvroFieldRequired required,
 							   AvroParseFunction parseFn, void *entry, void *context);
 void		AvroGetObjectArrayField(avro_value_t * record, char *fieldName, AvroFieldRequired required,

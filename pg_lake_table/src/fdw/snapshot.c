@@ -403,12 +403,35 @@ ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata)
 	/* if field counts do not match, a DDL happened */
 	if (icebergTableSchema->fields_length != list_length(postgresColumnMappings))
 	{
+		StringInfo	unmatched = makeStringInfo();
+
+		/*
+		 * Mappings are built by looking up each Iceberg field name among the
+		 * relation's columns, and a read-only table silently skips the ones
+		 * that find no column.  A short count is therefore just as likely to
+		 * mean the names differ as it is to mean a concurrent DDL, and the
+		 * two call for opposite responses, so name the fields that did not
+		 * match instead of leaving it to be guessed.
+		 */
+		for (int i = 0; i < icebergTableSchema->fields_length; i++)
+		{
+			const char *fieldName = icebergTableSchema->fields[i].name;
+
+			if (fieldName != NULL &&
+				get_attnum(relationId, fieldName) == InvalidAttrNumber)
+				appendStringInfo(unmatched, "%s\"%s\"",
+								 unmatched->len > 0 ? ", " : "", fieldName);
+		}
+
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("Schema mismatch between Iceberg and Postgres for relation \"%s\": field count %zu vs %d",
 						get_rel_name(relationId),
 						icebergTableSchema->fields_length,
 						list_length(postgresColumnMappings)),
+				 unmatched->len > 0 ?
+				 errdetail("Iceberg fields with no matching Postgres column: %s",
+						   unmatched->data) : 0,
 				 errhint("Please drop and recreate the table \"%s\"", get_rel_name(relationId))));
 	}
 
