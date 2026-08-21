@@ -515,6 +515,17 @@ GetDuckDBTypeForPGType(PGType postgresType)
 const char *
 GetFullDuckDBTypeNameForPGType(PGType postgresType, CopyDataFormat format)
 {
+	/*
+	 * Resolve a domain to its base type and modifier before anything else,
+	 * for the same reason the write path does (see
+	 * ChooseDuckDBEngineTypeForWrite): a domain over an array is an array
+	 * itself, so the DUCKDB_TYPE_LIST branch below would not recognise it and
+	 * the whole column would be named VARCHAR.
+	 */
+	postgresType.postgresTypeOid =
+		ResolveDomainBaseTypeAndTypmod(postgresType.postgresTypeOid,
+									   &postgresType.postgresTypeMod);
+
 	DuckDBType	myType = GetDuckDBTypeForPGType(postgresType);
 
 	/*

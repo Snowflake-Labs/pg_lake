@@ -98,3 +98,148 @@ def test_domain_iceberg_field_type(extension, pg_conn, s3, with_default_location
     pg_conn.rollback()
     run_command("drop schema if exists test_domain_field_type cascade;", pg_conn)
     pg_conn.commit()
+
+
+def test_domain_over_array(extension, pg_conn, s3, with_default_location):
+    """A domain over an array type is an array itself and must be written as a list.
+
+    Domains can be stacked arbitrarily deep, and getBaseType() walks the whole
+    stack, so nesting resolves to the same list type.
+    """
+    run_command(
+        """
+        create schema test_domain_over_array;
+        set search_path to test_domain_over_array;
+        create domain int_list as int[];
+        create domain time_list as timetz[];
+        create domain positive as int check (value > 0);
+        -- domains can be stacked, both above and below the array type
+        create domain nested_int_list as int_list;
+        create domain still_positive as positive;
+        -- a domain over an array whose element type is itself a domain
+        create domain positive_list as positive[];
+        create table domain_arrays (
+            i int_list,
+            t time_list,
+            p positive[],
+            n nested_int_list,
+            s still_positive[],
+            d positive_list
+        ) using iceberg;
+        insert into domain_arrays values (
+            array[1, 2]::int_list,
+            array['09:00:00+04'::timetz]::time_list,
+            array[3, 4]::positive[],
+            array[5, 6]::nested_int_list,
+            array[7, 8]::still_positive[],
+            array[9, 10]::positive_list
+        );
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        "SELECT i, t::text AS t, p::text AS p, n, s::text AS s, d::text AS d"
+        " FROM domain_arrays",
+        pg_conn,
+    )
+    assert result[0]["i"] == [1, 2]
+    assert result[0]["p"] == "{3,4}"
+    # timetz is stored UTC-normalized because Iceberg has no timetz type
+    assert result[0]["t"] == "{05:00:00+00}"
+    assert result[0]["n"] == [5, 6]
+    assert result[0]["s"] == "{7,8}"
+    assert result[0]["d"] == "{9,10}"
+
+    results = run_query(
+        "SELECT metadata_location FROM lake_iceberg.tables"
+        " WHERE table_name = 'domain_arrays'"
+        " AND table_namespace = 'test_domain_over_array'",
+        pg_conn,
+    )
+    parsed = json.loads(read_s3_operations(s3, results[0][0]))
+    fields = {f["name"]: f["type"] for f in parsed["schemas"][0]["fields"]}
+    assert fields["i"]["element"] == "int"
+    assert fields["t"]["element"] == "time"
+    assert fields["p"]["element"] == "int"
+    assert fields["n"]["element"] == "int"
+    assert fields["s"]["element"] == "int"
+    assert fields["d"]["element"] == "int"
+
+    pg_conn.rollback()
+    run_command("drop schema if exists test_domain_over_array cascade;", pg_conn)
+    pg_conn.commit()
+
+
+def _array_text(value):
+    """Normalize an array column to PostgreSQL array text.
+
+    psycopg parses a domain over int[] into a list, but an array of a domain
+    has an unknown element OID and comes back as text, so tests that cover both
+    shapes need to compare them in the same form.
+    """
+    if isinstance(value, list):
+        return "{" + ",".join(str(element) for element in value) + "}"
+    return str(value)
+
+
+def test_domain_over_numeric(extension, pg_conn, s3, with_default_location):
+    """A numeric domain must keep its precision and scale.
+
+    A column whose type is a domain has atttypmod -1: the modifier belongs to
+    the domain, not to the column. Without resolving it, numeric(10,2) behind a
+    domain is written as an unbounded decimal(38,9), and for the array shapes
+    the Iceberg schema and the DuckDB write type disagree, which breaks reads.
+    """
+    run_command(
+        """
+        create schema test_domain_numeric;
+        set search_path to test_domain_numeric;
+        create domain price as numeric(10,2);
+        -- the modifier can sit above or below the array type
+        create domain price_array as numeric(10,2)[];
+        create domain price_list as price[];
+        -- stacked domains: getBaseTypeAndTypmod walks to the bottom
+        create domain price_again as price;
+        create table domain_numerics (
+            p price,
+            a price_array,
+            l price_list,
+            e price[],
+            s price_again
+        ) using iceberg;
+        insert into domain_numerics values (
+            1.25,
+            array[1.25, 2.5]::price_array,
+            array[1.25, 2.5]::price_list,
+            array[1.25, 2.5]::price[],
+            2.5
+        );
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    results = run_query(
+        "SELECT metadata_location FROM lake_iceberg.tables"
+        " WHERE table_name = 'domain_numerics'"
+        " AND table_namespace = 'test_domain_numeric'",
+        pg_conn,
+    )
+    parsed = json.loads(read_s3_operations(s3, results[0][0]))
+    fields = {f["name"]: f["type"] for f in parsed["schemas"][0]["fields"]}
+    assert fields["p"] == "decimal(10,2)"
+    assert fields["s"] == "decimal(10,2)"
+    for name in ("a", "l", "e"):
+        assert fields[name]["element"] == "decimal(10,2)", f"column {name}"
+
+    result = run_query("SELECT p, a, l, e, s FROM domain_numerics", pg_conn)
+    assert str(result[0]["p"]) == "1.25"
+    assert str(result[0]["s"]) == "2.50"
+    for name in ("a", "l", "e"):
+        assert _array_text(result[0][name]) == "{1.25,2.50}", f"column {name}"
+
+    pg_conn.rollback()
+    run_command("drop schema if exists test_domain_numeric cascade;", pg_conn)
+    pg_conn.commit()
