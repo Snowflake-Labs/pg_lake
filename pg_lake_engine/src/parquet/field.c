@@ -469,8 +469,18 @@ TypeHasStorageDivergentLeaf(Oid typeOid, int32 typmod, Field * storageField)
 
 	if (typtype == TYPTYPE_DOMAIN)
 	{
-		int32		baseTypmod = typmod;
-		Oid			baseType = ResolveDomainBaseTypeAndTypmod(typeOid, &baseTypmod);
+		/*
+		 * Unwrap the domain and keep walking.  This deliberately uses
+		 * getBaseTypeAndTypmod rather than ResolveDomainBaseTypeAndTypmod: a
+		 * map type is a domain over an array of key/value structs, and the
+		 * storage tree has that array shape, so leaving the map type as-is
+		 * here would recurse on an unchanged type id and never terminate.
+		 */
+		int32		baseTypmod = -1;
+		Oid			baseType = getBaseTypeAndTypmod(typeOid, &baseTypmod);
+
+		if (baseTypmod == -1)
+			baseTypmod = typmod;
 
 		return TypeHasStorageDivergentLeaf(baseType, baseTypmod, storageField);
 	}
