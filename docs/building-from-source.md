@@ -751,7 +751,7 @@ pg_lake heavily relies on S3 storage. However, using real S3 can introduce signi
 # macOS
 brew install minio
 
-# Linux - download from https://min.io/download
+# Linux - download from https://min.io/download (linux-arm64 on ARM machines)
 wget https://dl.min.io/server/minio/release/linux-amd64/minio
 chmod +x minio
 sudo mv minio /usr/local/bin/

@@ -517,6 +517,13 @@ def test_register_existing_table(
         raise_error=False,
     )
     assert "Schema mismatch between Iceberg and Postgres" in str(err)
+    # The table was declared with "looong" instead of "long", so the error has
+    # to name the Iceberg field that found no column: a read-only table skips
+    # unmatched fields, which leaves a bare field count that looks identical to
+    # a concurrent DDL and points at the wrong fix.  Which other fields go
+    # unmatched varies with the column names this test is parametrized over.
+    assert "Iceberg fields with no matching Postgres column:" in str(err)
+    assert '"long"' in str(err)
     pg_conn.rollback()
 
     if external_catalog_names:

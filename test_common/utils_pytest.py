@@ -8,6 +8,7 @@ to work without modification.
 from helpers.pytest_config import *
 from helpers import server_params
 from helpers.cloud_storage import *
+from helpers.moto_iam_storage import *
 from helpers.db import *
 from helpers.server import *
 from helpers.comparisons import *
