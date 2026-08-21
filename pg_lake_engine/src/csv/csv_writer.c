@@ -33,6 +33,7 @@
 #include "catalog/pg_type_d.h"
 #include "commands/copy.h"
 #include "commands/defrem.h"
+#include "pg_lake/csv/csv_compression.h"
 #include "pg_lake/csv/csv_writer.h"
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/pgduck/numeric.h"
@@ -133,6 +134,14 @@ typedef struct CopyToStateData
 	int			maxLineSize;
 	bool		quoteEmptyLines;
 	CopyDataFormat targetFormat;
+
+	/*
+	 * Compression applied to the file, and the live compressor once the file
+	 * is open.  Both are unset when compression is off, in which case rows go
+	 * straight to stdio.
+	 */
+	CopyDataCompression compression;
+	CSVCompressor *compressor;
 
 	/* whether the CSV writer should survive multiple transactions */
 	bool		sessionLifetime;
@@ -235,9 +244,14 @@ CopySendEndOfRow(CopyToState cstate)
 #endif
 			}
 
-			if (fwrite(fe_msgbuf->data, fe_msgbuf->len, 1,
-					   cstate->copy_file) != 1 ||
-				ferror(cstate->copy_file))
+			if (cstate->compressor != NULL)
+			{
+				CSVCompressorWrite(cstate->compressor, fe_msgbuf->data,
+								   fe_msgbuf->len);
+			}
+			else if (fwrite(fe_msgbuf->data, fe_msgbuf->len, 1,
+							cstate->copy_file) != 1 ||
+					 ferror(cstate->copy_file))
 			{
 				ereport(ERROR,
 						(errcode_for_file_access(),
@@ -250,7 +264,11 @@ CopySendEndOfRow(CopyToState cstate)
 			break;
 	}
 
-	/* Update the progress */
+	/*
+	 * Update the progress.  This counts CSV bytes, not bytes landed on disk,
+	 * so the write-file rotation threshold keeps measuring the same thing
+	 * when compression is on.
+	 */
 	cstate->bytes_processed += fe_msgbuf->len;
 
 	resetStringInfo(fe_msgbuf);
@@ -297,6 +315,13 @@ EndCopy(CopyToState cstate)
 		CopySendInt16(cstate, -1);
 		/* Need to flush out the trailer */
 		CopySendEndOfRow(cstate);
+	}
+
+	/* the codec has to close its container before the file is closed */
+	if (cstate->compressor != NULL)
+	{
+		CSVCompressorFinish(cstate->compressor);
+		cstate->compressor = NULL;
 	}
 
 	if (cstate->filename != NULL)
@@ -383,6 +408,13 @@ CreateCopyToState(char *filename, List *copyOptions)
 	cstate->maxLineSize = 0;
 	cstate->bytes_processed = 0;
 
+	/*
+	 * Every file this writer produces is an internal exchange CSV that is
+	 * read back through InternalCSVReadOptions(), so the two ends agree on
+	 * the codec by both consulting the setting.
+	 */
+	cstate->compression = InternalCSVCompression();
+
 	MemoryContextSwitchTo(oldContext);
 
 	return cstate;
@@ -441,6 +473,10 @@ StartCopyTo(CopyToState cstate, TupleDesc tupDesc)
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("\"%s\" is a directory", cstate->filename)));
 
+	if (cstate->compression != DATA_COMPRESSION_NONE)
+		cstate->compressor = CSVCompressorCreate(cstate->copy_file,
+												 cstate->compression,
+												 TempFileCompressionLevel);
 
 	/* get the attribute names from the tuple descriptor */
 	List	   *attnamelist = TupleDescColumnNameList(tupDesc);
