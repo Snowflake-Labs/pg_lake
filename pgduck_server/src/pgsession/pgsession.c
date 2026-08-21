@@ -378,8 +378,12 @@ process_query_message(PGSession * pgSession, StringInfo inputMessage)
 		return COMM_ERROR;
 	}
 
+	char		queryForLog[QUERY_LOG_BUF_SIZE];
+
 	PGDUCK_SERVER_DEBUG("connection %d sent query: %s",
-						pgSession->pgClient->clientSocket, queryString);
+						pgSession->pgClient->clientSocket,
+						QueryStringForLog(queryString, queryForLog,
+										  sizeof(queryForLog)));
 
 	ResponseFormat responseFormat = {
 		.isTransmit = is_transmit_query(queryString)
@@ -562,10 +566,13 @@ process_parse_message(PGSession * pgSession, StringInfo inputMessage)
 		/* we have to raise errors to the client */
 		int			sentErrorMsg = handle_pgsession_error_message(status, pgSession, errorMessage);
 
+		char		queryForLog[QUERY_LOG_BUF_SIZE];
+
 		PGDUCK_SERVER_WARN("query from client %d failed during parse: %s; query: %.500s",
 						   pgSession->pgClient->clientSocket,
 						   errorMessage,
-						   queryStringCopy);
+						   QueryStringForLog(queryStringCopy, queryForLog,
+											 sizeof(queryForLog)));
 
 		/* free error message allocated by duckdb_session_prepare */
 		pfree(errorMessage);
@@ -714,10 +721,13 @@ process_bind_message(PGSession * pgSession, StringInfo inputMessage)
 		{
 			int			sentResult = handle_pgsession_error_message(bindResult, pgSession, errorMessage);
 
+			char		queryForLog[QUERY_LOG_BUF_SIZE];
+
 			PGDUCK_SERVER_WARN("query from client %d failed during bind: %s; query: %.500s",
 							   pgSession->pgClient->clientSocket,
 							   errorMessage,
-							   pgSession->pgSessionPreparedStmt.queryString);
+							   QueryStringForLog(pgSession->pgSessionPreparedStmt.queryString,
+												 queryForLog, sizeof(queryForLog)));
 
 			/* free error message allocated by duckdb_session_bind_varchar */
 			pfree(errorMessage);
