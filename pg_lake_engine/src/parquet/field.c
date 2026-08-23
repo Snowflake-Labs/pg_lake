@@ -267,14 +267,18 @@ PGTypeRequiresConversionToIcebergString(Field * field, PGType pgType)
  * on the mapping without re-implementing it.
  *
  * Domains are unwrapped to their base type so a domain over e.g. bytea maps to
- * "binary" rather than falling through to the "string" default. The field
- * builder already resolves domains before reaching here, so this is a no-op for
- * that caller, but the codecs hand us raw attribute type ids and rely on it.
+ * "binary" rather than falling through to the "string" default. The type
+ * modifier is taken from the domain as well, because a domain column has
+ * atttypmod -1 and a domain over numeric(10,2) would otherwise look unbounded.
+ * The field builder already resolves domains before reaching here, so this is a
+ * no-op for that caller, but the codecs hand us raw attribute type ids and rely
+ * on it.
  */
 char *
 PostgresBaseTypeIdToIcebergTypeName(PGType pgType)
 {
-	pgType.postgresTypeOid = ResolveDomainBaseType(pgType.postgresTypeOid);
+	pgType.postgresTypeOid = ResolveDomainBaseTypeAndTypmod(pgType.postgresTypeOid,
+															&pgType.postgresTypeMod);
 
 	switch (pgType.postgresTypeOid)
 	{
@@ -465,8 +469,18 @@ TypeHasStorageDivergentLeaf(Oid typeOid, int32 typmod, Field * storageField)
 
 	if (typtype == TYPTYPE_DOMAIN)
 	{
-		int32		baseTypmod = typmod;
+		/*
+		 * Unwrap the domain and keep walking.  This deliberately uses
+		 * getBaseTypeAndTypmod rather than ResolveDomainBaseTypeAndTypmod: a
+		 * map type is a domain over an array of key/value structs, and the
+		 * storage tree has that array shape, so leaving the map type as-is
+		 * here would recurse on an unchanged type id and never terminate.
+		 */
+		int32		baseTypmod = -1;
 		Oid			baseType = getBaseTypeAndTypmod(typeOid, &baseTypmod);
+
+		if (baseTypmod == -1)
+			baseTypmod = typmod;
 
 		return TypeHasStorageDivergentLeaf(baseType, baseTypmod, storageField);
 	}

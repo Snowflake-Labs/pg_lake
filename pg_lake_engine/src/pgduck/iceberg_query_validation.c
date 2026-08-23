@@ -1359,7 +1359,7 @@ AppendRewriteExpression(StringInfo buf, const char *expr,
 
 	if (typtype == TYPTYPE_DOMAIN)
 	{
-		Oid			baseType = getBaseTypeAndTypmod(typeOid, &typmod);
+		Oid			baseType = ResolveDomainBaseTypeAndTypmod(typeOid, &typmod);
 
 		return AppendRewriteExpression(buf, expr, baseType, typmod, depth,
 									   rewriteKinds, storageField);
