@@ -97,7 +97,8 @@ enum CacheActionType
 	SKIPPED_TOO_OLD,
 	SKIPPED_TOO_LARGE,
 	SKIPPED_CONCURRENT_MODIFY,
-	SKIPPED_DIRECTORY_DOES_NOT_EXIST
+	SKIPPED_DIRECTORY_DOES_NOT_EXIST,
+	SKIPPED_INODE_PRESSURE
 };
 
 /*
@@ -269,6 +270,14 @@ private:
 	* for the cache size. For now, we prefer to keep it simple.
 	*/
 	mutex manageCacheLock;
+
+	/*
+	 * Whether the previous ManageCache call found the cache file system low on
+	 * inodes, so that we can report the start and the end of an episode instead
+	 * of repeating the same message on every round. Only accessed while holding
+	 * manageCacheLock.
+	 */
+	bool wasLowOnInodes = false;
 
 	shared_ptr<FileCacheActivity> GetFileCacheActivity(const string& path);
 	unique_lock<mutex> TryAcquireCachePathLock(const string& path, bool waitForLock, bool &acquired);
