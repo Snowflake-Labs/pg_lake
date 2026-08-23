@@ -569,19 +569,12 @@ GetFullDuckDBTypeNameForPGType(PGType postgresType, CopyDataFormat format)
 	if (myType == DUCKDB_TYPE_DECIMAL)
 	{
 		/*
-		 * An Iceberg table stores a numeric that no decimal can hold as a
-		 * double (see PostgresBaseTypeIdToIcebergTypeName), so the type we
-		 * exchange the value in has to be DOUBLE as well: it has to carry
-		 * every value the column accepts in both directions, and
-		 * DECIMAL(38,9) rejects NaN, +/-Infinity and anything past 29
-		 * integral digits.
-		 *
 		 * Deliberately not gated on unsupported_numeric_as_double: turning
 		 * the GUC off does not change how an existing table is stored, so the
 		 * exchange type must not change either.
 		 */
 		if (format == DATA_FORMAT_ICEBERG &&
-			IsUnsupportedNumericForIceberg(ResolveDomainBaseType(postgresType.postgresTypeOid),
+			IsUnsupportedNumericForIceberg(postgresType.postgresTypeOid,
 										   postgresType.postgresTypeMod))
 			return GetDuckDBTypeName(DUCKDB_TYPE_DOUBLE);
 

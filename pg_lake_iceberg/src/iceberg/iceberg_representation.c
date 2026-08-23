@@ -48,7 +48,7 @@ IcebergStoredPostgresType(PGType type)
 	if (!UnsupportedNumericAsDouble)
 		return type;
 
-	PGType		converted = MaybeConvertType(type, NULL);
+	PGType		converted = MaybeConvertType(type, NULL, NULL);
 
 	return OidIsValid(converted.postgresTypeOid) ? converted : type;
 }

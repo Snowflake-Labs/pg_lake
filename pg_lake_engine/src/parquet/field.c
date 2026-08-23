@@ -316,19 +316,10 @@ PostgresBaseTypeIdToIcebergTypeName(PGType pgType)
 		case NUMERICOID:
 			{
 				/*
-				 * A numeric that cannot be stored as an Iceberg decimal at
-				 * all -- unbounded, or a precision/scale beyond the 38 digits
-				 * DuckDB supports -- is stored as a double.  That is the same
-				 * storage a top-level column of that type gets, since
-				 * MaybeConvertUnsupportedNumericColumnsToDouble rewrites the
-				 * column to float8.  A nested one keeps the declared
-				 * PostgreSQL type (rewriting a composite field would mean
-				 * declaring a composite type the user never wrote), so this
-				 * is the only place its storage type is decided.
-				 *
-				 * The GUC check mirrors that rewrite: with the GUC off CREATE
-				 * rejects such a numeric at any level instead of storing it
-				 * in some other shape, so there is no double storage either.
+				 * The GUC check mirrors
+				 * MaybeConvertUnsupportedNumericColumnsToDouble: with the GUC
+				 * off CREATE rejects such a numeric at any level instead of
+				 * storing it in some other shape.
 				 */
 				if (UnsupportedNumericAsDouble &&
 					IsUnsupportedNumericForIceberg(NUMERICOID,
