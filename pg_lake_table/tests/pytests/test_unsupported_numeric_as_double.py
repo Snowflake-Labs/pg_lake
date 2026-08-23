@@ -985,3 +985,64 @@ def test_domain_over_numeric_in_nested_type(
     assert result == expected
 
     pg_conn.rollback()
+
+
+@pytest.mark.parametrize(
+    "domain_def, insert_val, expected",
+    [
+        ("CREATE DOMAIN dom_x AS numeric", "1e30", Decimal("1E+30")),
+        ("CREATE DOMAIN dom_x AS numeric(50,10)", "1e30", Decimal("1E+30")),
+        # 38 digits, more than a double keeps: only an exact decimal exchange
+        # type returns this unchanged
+        (
+            "CREATE DOMAIN dom_x AS numeric(38,2)",
+            "123456789012345678901234567890123456.78",
+            Decimal("123456789012345678901234567890123456.78"),
+        ),
+    ],
+    ids=["unbounded", "precision_above_38", "bounded"],
+)
+def test_domain_in_composite_roundtrips(
+    s3, pg_conn, extension, with_default_location, domain_def, insert_val, expected
+):
+    """The exchange type is picked from the domain's base type and modifier, so a
+    domain over a numeric no decimal can hold is exchanged as a double, while a
+    bounded one still gets its exact decimal."""
+    run_command(
+        f"""
+        {domain_def};
+        CREATE TYPE dom_comp AS (label text, amount dom_x);
+        CREATE TABLE ice_dom_comp (id int, v dom_comp) USING iceberg;
+        INSERT INTO ice_dom_comp VALUES (1, row('a', {insert_val}::dom_x)::dom_comp);
+    """,
+        pg_conn,
+    )
+
+    result = run_query("SELECT (v).amount FROM ice_dom_comp", pg_conn)
+    assert result[0][0] == expected
+
+    pg_conn.rollback()
+
+
+def test_array_of_composite_with_domain_roundtrips(
+    s3, pg_conn, extension, with_default_location
+):
+    """An array element is visited by the same walk, so a domain nested two
+    containers deep is stored and read as a double."""
+    run_command(
+        """
+        CREATE DOMAIN dom_y AS numeric;
+        CREATE TYPE dom_elem AS (label text, amount dom_y);
+        CREATE TABLE ice_dom_arr (id int, v dom_elem[]) USING iceberg;
+        INSERT INTO ice_dom_arr VALUES
+            (1, ARRAY[row('a', 1e30::dom_y)::dom_elem,
+                      row('b', 'NaN'::dom_y)::dom_elem]);
+    """,
+        pg_conn,
+    )
+
+    result = run_query("SELECT (v[1]).amount, (v[2]).amount FROM ice_dom_arr", pg_conn)
+    assert result[0][0] == Decimal("1E+30")
+    assert result[0][1].is_nan()
+
+    pg_conn.rollback()

@@ -519,55 +519,23 @@ ConvertTypeTree(Oid typeOid, int32 typeMod, int level,
 /*
  * NumericLeafToDouble is the ConvertTypeTree leaf rule for the unsupported
  * numeric -> float8 pass.  Numeric is never a container, so it applies at any
- * nesting level; level and context are unused.
+ * nesting level; level is unused.  context is an optional bool * set when such
+ * a leaf is seen, which is not the same as the walk rewriting anything: the
+ * container branches discard the rewrite of a nested leaf.
  */
 static bool
 NumericLeafToDouble(Oid typeOid, int32 typeMod, int level, void *context,
 					Oid *outOid, int32 *outMod)
 {
-	if (IsUnsupportedNumericForIceberg(typeOid, typeMod))
-	{
-		*outOid = FLOAT8OID;
-		*outMod = -1;
-		return true;
-	}
+	if (!IsUnsupportedNumericForIceberg(typeOid, typeMod))
+		return false;
 
-	return false;
-}
-
-
-/*
- * UnsupportedNumericLeafProbe is the ConvertTypeTree leaf rule that only
- * records whether an unsupported numeric leaf exists, without rewriting
- * anything.  context points at the bool to set.
- */
-static bool
-UnsupportedNumericLeafProbe(Oid typeOid, int32 typeMod, int level, void *context,
-							Oid *outOid, int32 *outMod)
-{
-	if (IsUnsupportedNumericForIceberg(typeOid, typeMod))
+	if (context != NULL)
 		*((bool *) context) = true;
 
-	return false;
-}
-
-
-/*
- * TypeContainsUnsupportedNumeric returns true when any leaf of the type cannot
- * be stored as an Iceberg decimal, at any nesting level.
- */
-static bool
-TypeContainsUnsupportedNumeric(PGType type)
-{
-	bool		found = false;
-	Oid			unusedOid;
-	int32		unusedMod;
-
-	ConvertTypeTree(type.postgresTypeOid, type.postgresTypeMod, 0,
-					UnsupportedNumericLeafProbe, &found,
-					&unusedOid, &unusedMod);
-
-	return found;
+	*outOid = FLOAT8OID;
+	*outMod = -1;
+	return true;
 }
 
 
@@ -576,15 +544,20 @@ TypeContainsUnsupportedNumeric(PGType type)
  * numerics.  Returns a PGType with the replacement OID, or with InvalidOid
  * when no conversion is needed.  Thin wrapper over ConvertTypeTree with the
  * numeric leaf rule; columnName is retained for call-site readability.
+ *
+ * containsUnsupportedNumeric, when not NULL, is set if any leaf cannot be
+ * stored as an Iceberg decimal, including the nested ones this leaves alone.
  */
 PGType
-MaybeConvertType(PGType type, char *columnName)
+MaybeConvertType(PGType type, char *columnName,
+				 bool *containsUnsupportedNumeric)
 {
 	Oid			convOid;
 	int32		convMod;
 
 	if (ConvertTypeTree(type.postgresTypeOid, type.postgresTypeMod, 0,
-						NumericLeafToDouble, NULL, &convOid, &convMod))
+						NumericLeafToDouble, containsUnsupportedNumeric,
+						&convOid, &convMod))
 		return MakePGType(convOid, convMod);
 
 	return MakePGTypeOid(InvalidOid);
@@ -637,8 +610,10 @@ MaybeConvertUnsupportedNumericColumnsToDouble(List *columnDefList)
 		typeOid = ((Form_pg_type) GETSTRUCT(tup))->oid;
 		ReleaseSysCache(tup);
 
+		bool		containsUnsupportedNumeric = false;
 		PGType		converted = MaybeConvertType(MakePGType(typeOid, typmod),
-												 columnDef->colname);
+												 columnDef->colname,
+												 &containsUnsupportedNumeric);
 
 		if (!OidIsValid(converted.postgresTypeOid))
 		{
@@ -648,7 +623,7 @@ MaybeConvertUnsupportedNumericColumnsToDouble(List *columnDefList)
 			 * as a double.  Say so at DDL time: \d keeps showing numeric, and
 			 * nothing later in the life of the table points this out.
 			 */
-			if (TypeContainsUnsupportedNumeric(MakePGType(typeOid, typmod)))
+			if (containsUnsupportedNumeric)
 				ereport(NOTICE,
 						(errmsg("column \"%s\" contains a nested numeric that "
 								"cannot be stored as an Iceberg decimal, "
