@@ -23,6 +23,7 @@ from utils_pytest import (
     AWS_ROLE_ARN,
     run_command_outside_tx,
     stop_process_via_pidfile,
+    wait_for_reloaded_settings,
 )
 
 
@@ -204,39 +205,68 @@ def polaris_session(installcheck) -> requests.Session:
     return sess
 
 
+def apply_polaris_gucs(conns, app_user, credentials_file):
+    """Point the REST catalog GUCs at the local Polaris server.
+
+    The GUCs go in via ALTER SYSTEM + pg_reload_conf(), which the
+    already-connected backends behind ``conns`` only pick up once they
+    have processed their SIGHUP -- so wait for them before returning,
+    or the first statement of the first test can still run without any
+    REST credentials.
+
+    The three GUCs are GUC_SUPERUSER_ONLY, so the application user cannot
+    SHOW them while waiting.  Grant it pg_read_all_settings, which is the
+    read-only role Postgres points at in that error.
+    """
+    creds = json.loads(Path(credentials_file).read_text())
+    client_id = creds["credentials"]["clientId"]
+    client_secret = creds["credentials"]["clientSecret"]
+    host = f"{server_params.POLARIS_HOSTNAME}:{server_params.POLARIS_PORT}"
+
+    run_command_outside_tx(
+        [
+            f"""GRANT pg_read_all_settings TO {app_user}""",
+            f"""ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_host TO '{host}'""",
+            f"""ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_id TO '{client_id}'""",
+            f"""ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_secret TO '{client_secret}'""",
+            "SELECT pg_reload_conf()",
+        ]
+    )
+    wait_for_reloaded_settings(
+        conns,
+        {
+            "pg_lake_iceberg.rest_catalog_host": host,
+            "pg_lake_iceberg.rest_catalog_client_id": client_id,
+            "pg_lake_iceberg.rest_catalog_client_secret": client_secret,
+        },
+    )
+
+
+def reset_polaris_gucs(app_user):
+    run_command_outside_tx(
+        [
+            f"""REVOKE pg_read_all_settings FROM {app_user}""",
+            """ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_host""",
+            """ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_id""",
+            """ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_secret""",
+            "SELECT pg_reload_conf()",
+        ]
+    )
+
+
 @pytest.fixture(scope="module")
 def set_polaris_gucs(
+    pg_conn,
     superuser_conn,
+    app_user,
     iceberg_extension,
     installcheck,
     credentials_file: str = server_params.POLARIS_PRINCIPAL_CREDS_FILE,
 ):
     if not installcheck:
-
-        creds = json.loads(Path(credentials_file).read_text())
-        client_id = creds["credentials"]["clientId"]
-        client_secret = creds["credentials"]["clientSecret"]
-
-        run_command_outside_tx(
-            [
-                f"""ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_host TO '{server_params.POLARIS_HOSTNAME}:{server_params.POLARIS_PORT}'""",
-                f"""ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_id TO '{client_id}'""",
-                f"""ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_secret TO '{client_secret}'""",
-                "SELECT pg_reload_conf()",
-            ],
-            superuser_conn,
-        )
+        apply_polaris_gucs([pg_conn, superuser_conn], app_user, credentials_file)
 
     yield
 
     if not installcheck:
-
-        run_command_outside_tx(
-            [
-                f"""ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_host""",
-                f"""ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_id""",
-                f"""ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_secret""",
-                "SELECT pg_reload_conf()",
-            ],
-            superuser_conn,
-        )
+        reset_polaris_gucs(app_user)
