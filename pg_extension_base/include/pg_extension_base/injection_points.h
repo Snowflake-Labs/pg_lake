@@ -19,12 +19,25 @@
 
 #include "postgres.h"
 
+/*
+ * IS_INJECTION_POINT_ATTACHED_COMPAT lets a test steer a branch that cannot be
+ * reached by running code -- for instance a return value that only the kernel
+ * refusing to fork can produce.  Only Postgres 18 can answer the question, so
+ * on older versions it is constant false and the branch is unreachable; a test
+ * that relies on it has to skip.  Either way it compiles to nothing unless the
+ * server was built with --enable-injection-points, so it costs a regular build
+ * neither code nor a check.
+ */
+
 #if PG_VERSION_NUM >= 180000
 
 #include "utils/injection_point.h"
 
 #define INJECTION_POINT_COMPAT(name) \
     INJECTION_POINT(name, NULL)
+
+#define IS_INJECTION_POINT_ATTACHED_COMPAT(name) \
+    IS_INJECTION_POINT_ATTACHED(name)
 
 #elif PG_VERSION_NUM >= 170000
 
@@ -33,9 +46,15 @@
 #define INJECTION_POINT_COMPAT(name) \
     INJECTION_POINT(name)
 
+#define IS_INJECTION_POINT_ATTACHED_COMPAT(name) \
+    (false)
+
 #else
 
 #define INJECTION_POINT_COMPAT(name) \
     ((void) name)
+
+#define IS_INJECTION_POINT_ATTACHED_COMPAT(name) \
+    (false)
 
 #endif

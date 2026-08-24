@@ -112,6 +112,10 @@ extern int	WorkerRestartBackoffInitialMs;
 extern int	WorkerRestartBackoffMaxMs;
 extern int	WorkerRestartHealthyMs;
 
+/* pg_extension_base.worker_startup_timeout setting */
+#define DEFAULT_WORKER_STARTUP_TIMEOUT_MS (60000)
+extern int	WorkerStartupTimeoutMs;
+
 void		BaseWorkerSharedMemoryInit(void);
 size_t		BaseWorkerSharedMemorySize(void);
 
