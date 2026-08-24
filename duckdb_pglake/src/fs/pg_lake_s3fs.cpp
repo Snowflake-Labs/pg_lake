@@ -159,7 +159,8 @@ PgLakeS3FileSystem::RemoveFile(const string &filename,
 /*
  * TryRemoveFile removes a file from S3 and reports whether it was there to
  * begin with, so that a caller deleting a file that is already gone does not
- * have to treat that as a failure.
+ * have to treat that as a failure. Every other error, a permissions error in
+ * particular, is still raised.
  */
 bool
 PgLakeS3FileSystem::TryRemoveFile(const string &filename,
@@ -176,16 +177,10 @@ PgLakeS3FileSystem::TryRemoveFile(const string &filename,
 		PGDUCK_SERVER_DEBUG("Remove failed: %s", error.Message().c_str());
 
 		/*
-		 * If the file is not found, we can consider it removed, but still
-		 * clear the cache below.
-		 *
-		 * The reason is that the last invocation may have failed before
-		 * removing from cache, so if we return here then the file would
-		 * remain readable no matter how many times we try to remove it.
-		 *
-		 * Checking for 404 error is cheaper and more reliable than FileExists,
-		 * which opens the file and returns false in case of any exception,
-		 * but we do want to surface permissions errors.
+		 * A file that is not found counts as removed, so the caller does not
+		 * treat it as a failure. Checking the status code is cheaper and more
+		 * reliable than FileExists, which opens the file and returns false on
+		 * any exception, but we do want to surface permissions errors.
 		 */
 		if (!IsNotFoundError(error))
 			throw;
