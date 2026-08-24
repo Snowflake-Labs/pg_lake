@@ -322,7 +322,7 @@ typedef enum StartDatabaseStarterResult
 	 * up on the remaining databases for this pass rather than repeat the
 	 * failure for each one.
 	 */
-	DATABASE_STARTER_NO_WORKER_SLOT,
+	DATABASE_STARTER_OUT_OF_SLOTS,
 
 	/*
 	 * We registered the launch, but the postmaster reported that the child
@@ -331,7 +331,7 @@ typedef enum StartDatabaseStarterResult
 	 * with the other databases; the entry has been reset for a retry on the
 	 * next pass.
 	 */
-	DATABASE_STARTER_NEVER_RAN
+	DATABASE_STARTER_START_FAILED
 }			StartDatabaseStarterResult;
 
 /*
@@ -349,11 +349,11 @@ typedef enum StartBaseWorkerResult
 	/* one already ran to completion and does not need to run again */
 	BASE_WORKER_DONE,
 
-	/* see DATABASE_STARTER_NO_WORKER_SLOT */
-	BASE_WORKER_NO_WORKER_SLOT,
+	/* see DATABASE_STARTER_OUT_OF_SLOTS */
+	BASE_WORKER_OUT_OF_SLOTS,
 
-	/* see DATABASE_STARTER_NEVER_RAN */
-	BASE_WORKER_NEVER_RAN,
+	/* see DATABASE_STARTER_START_FAILED */
+	BASE_WORKER_START_FAILED,
 
 	/* its restart backoff has not elapsed yet */
 	BASE_WORKER_START_BLOCKED
@@ -861,7 +861,7 @@ StartDatabaseStarters(List *databaseList)
 		CommitTransactionCommand();
 		MemoryContextSwitchTo(outerContext);
 
-		if (startResult == DATABASE_STARTER_NO_WORKER_SLOT)
+		if (startResult == DATABASE_STARTER_OUT_OF_SLOTS)
 		{
 			/* no slots left, so the remaining databases will not start either */
 			ereport(LOG, (errmsg("failed to start pg base extension database starter in database %s",
@@ -870,7 +870,7 @@ StartDatabaseStarters(List *databaseList)
 
 			return;
 		}
-		else if (startResult == DATABASE_STARTER_NEVER_RAN)
+		else if (startResult == DATABASE_STARTER_START_FAILED)
 		{
 			/*
 			 * The launch was registered but never actually ran. The entry has
@@ -1193,7 +1193,7 @@ StartDatabaseStarter(Oid databaseId, char *databaseName)
 		 * next time, hoping that another background worker stopped.
 		 */
 		LWLockRelease(&BaseWorkerControl->lock);
-		return DATABASE_STARTER_NO_WORKER_SLOT;
+		return DATABASE_STARTER_OUT_OF_SLOTS;
 	}
 
 	/*
@@ -1229,10 +1229,12 @@ StartDatabaseStarter(Oid databaseId, char *databaseName)
 	{
 		/*
 		 * The postmaster never actually ran the child (fork() failure). Reset
-		 * the entry so the next pass retries rather than believing a starter
-		 * is running that never existed; without this the entry stays wedged
-		 * at WORKER_STARTING/pid=0 forever, since only the child's own
-		 * cleanup handler otherwise clears it.
+		 * the entry so the next pass retries: only the child's own cleanup
+		 * handler would otherwise clear it, so the entry would sit at
+		 * WORKER_STARTING with pid 0 forever.  The status only catches a
+		 * failed fork; a child that dies after the postmaster published its
+		 * pid still reports BGWH_STARTED, which is what the
+		 * worker_startup_timeout check above covers.
 		 */
 		LWLockAcquire(&BaseWorkerControl->lock, LW_EXCLUSIVE);
 		starterEntry->workerPid = 0;
@@ -1244,7 +1246,7 @@ StartDatabaseStarter(Oid databaseId, char *databaseName)
 								 "did not start",
 								 quote_identifier(databaseName))));
 
-		return DATABASE_STARTER_NEVER_RAN;
+		return DATABASE_STARTER_START_FAILED;
 	}
 
 	return DATABASE_STARTER_STARTED;
@@ -1641,7 +1643,7 @@ StartAllBaseWorkers(List *workerRegistrationList)
 			StartBaseWorker(registration->workerId, registration->extensionId,
 							registration->entryPointFunctionId);
 
-		if (startResult == BASE_WORKER_NO_WORKER_SLOT)
+		if (startResult == BASE_WORKER_OUT_OF_SLOTS)
 		{
 			ereport(LOG, (errmsg("failed to start base worker %s in database %d",
 								 registration->workerName, MyDatabaseId)),
@@ -1650,7 +1652,7 @@ StartAllBaseWorkers(List *workerRegistrationList)
 			/* no slots left, so the remaining workers will not start either */
 			return false;
 		}
-		else if (startResult == BASE_WORKER_NEVER_RAN)
+		else if (startResult == BASE_WORKER_START_FAILED)
 		{
 			ereport(LOG, (errmsg("base worker %s in database %d did not start, "
 								 "will retry",
@@ -1878,7 +1880,7 @@ StartBaseWorker(int workerId, Oid extensionId, Oid entryPointFunctionId)
 							 MyDatabaseId),
 					  errhint("You may need to increase max_worker_processes.")));
 
-		return BASE_WORKER_NO_WORKER_SLOT;
+		return BASE_WORKER_OUT_OF_SLOTS;
 	}
 
 	/*
@@ -1933,7 +1935,7 @@ StartBaseWorker(int workerId, Oid extensionId, Oid entryPointFunctionId)
 								 "did not start",
 								 workerId, MyDatabaseId)));
 
-		return BASE_WORKER_NEVER_RAN;
+		return BASE_WORKER_START_FAILED;
 	}
 
 	return BASE_WORKER_STARTED;

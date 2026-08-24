@@ -5,9 +5,8 @@ import time
 from utils_pytest import *
 
 
-# Long enough that the reclaim cannot fire by accident between two polls, short
-# enough that the test does not wait out the 60s production default.
-STARTUP_TIMEOUT_MS = 400
+# The GUC minimum, so the test does not wait out the 60s production default.
+STARTUP_TIMEOUT_MS = 1000
 
 # Either recovery path may win the race below, so accept both messages: the
 # postmaster publishes the child's pid before the child loads our library, so

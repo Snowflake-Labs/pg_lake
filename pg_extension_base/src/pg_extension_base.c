@@ -172,7 +172,7 @@ _PG_init(void)
 							NULL,
 							&WorkerStartupTimeoutMs,
 							DEFAULT_WORKER_STARTUP_TIMEOUT_MS,
-							0,
+							MIN_WORKER_STARTUP_TIMEOUT_MS,
 							INT32_MAX,
 							PGC_SIGHUP,
 							GUC_UNIT_MS | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
