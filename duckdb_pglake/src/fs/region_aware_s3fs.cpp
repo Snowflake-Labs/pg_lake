@@ -52,6 +52,7 @@ static std::regex S3_EXPRESS_URL_PATTERN("s3://[a-z0-9-]+-([a-z0-9]+)-([a-z0-9]+
 static bool UrlHasQueryArgument(const string &url, const string &queryArgument);
 static string AddQueryArgumentToUrl(const string &url, const string &name, const string &value);
 static string RemoveQueryArgumentFromUrl(string url, const string &name);
+static bool LooksLikeRegionMismatch(const ErrorData &error);
 
 
 /*
@@ -133,18 +134,13 @@ RegionAwareS3FileSystem::List(const string &urlPattern, bool isGlob, FileOpener 
 			if (error.Type() != ExceptionType::HTTP)
 				throw;
 
-			/*
-			 * Slightly hacky to check for error messages, but we don't get
-			 * detailed error codes.
-			 */
-			if (error.Message().find("HTTP 400") != std::string::npos ||
-				error.Message().find("no list response") != std::string::npos ||
-				error.Message().find("301") != std::string::npos)
+			if (LooksLikeRegionMismatch(error) ||
+				error.Message().find("no list response") != std::string::npos)
 			{
 				PGDUCK_SERVER_DEBUG("Glob failed: %s", error.Message().c_str());
 
 				/* get the actual region from S3 headers */
-				string actualRegion = GetBucketRegionFromS3(urlPattern, opener);
+				string actualRegion = TryGetBucketRegionFromS3(urlPattern, opener);
 
 				/* could not determine region, fall back to original error */
 				if (actualRegion.empty())
@@ -296,19 +292,13 @@ RegionAwareS3FileSystem::WithResolvedRegion(const string &url,
 		if (error.Type() != ExceptionType::HTTP)
 			throw;
 
-		/*
-		 * A 400 error usually indicates wrong region, we get slightly different
-		 * errors for GET and PUT.
-		 */
-		if (error.Message().find("HTTP 400") == std::string::npos &&
-			error.Message().find("400 (Bad Request)") == std::string::npos &&
-			error.Message().find("301") == std::string::npos)
+		if (!LooksLikeRegionMismatch(error))
 			throw;
 
 		PGDUCK_SERVER_DEBUG("S3 operation failed (retrying with refreshed region): %s", error.Message().c_str());
 
 		/* get the actual region from S3 headers */
-		string actualRegion = GetBucketRegionFromS3(url, opener);
+		string actualRegion = TryGetBucketRegionFromS3(url, opener);
 
 		/* could not determine region, fall back to original error */
 		if (actualRegion.empty())
@@ -320,6 +310,37 @@ RegionAwareS3FileSystem::WithResolvedRegion(const string &url,
 		/* retry with the actual region (and hope for the best) */
 		s3Operation(AddQueryArgumentToUrl(url, "s3_region", actualRegion));
 	}
+}
+
+
+/*
+ * LooksLikeRegionMismatch determines whether an HTTP error is one that S3
+ * returns when the request went to the wrong region: 400 for the legacy
+ * endpoint, 301 for a redirect to the right one.
+ *
+ * httpfs attaches the status code to the error, so use that when it is there.
+ * Some error paths only give us a message, in which case we have to look for
+ * the status in the text. That text also contains the URL we tried to read, so
+ * the patterns have to be specific enough not to match an object key: a bare
+ * "301" matches roughly 1 in 100 of the uuid-named data files that Iceberg
+ * writes, and misreading an "access denied" as a region mismatch replaces it
+ * with whatever the region probe happens to return.
+ */
+static bool
+LooksLikeRegionMismatch(const ErrorData &error)
+{
+	const unordered_map<string, string> &extraInfo = error.ExtraInfo();
+	auto statusCode = extraInfo.find("status_code");
+
+	if (statusCode != extraInfo.end())
+		return statusCode->second == "400" || statusCode->second == "301";
+
+	const string &message = error.Message();
+
+	return message.find("HTTP 400") != std::string::npos ||
+		   message.find("400 (Bad Request)") != std::string::npos ||
+		   message.find("HTTP 301") != std::string::npos ||
+		   message.find("301 (Moved Permanently)") != std::string::npos;
 }
 
 
@@ -591,13 +612,39 @@ RegionAwareS3FileSystem::GetBucketRegionFromS3(const string &url, optional_ptr<F
 	unique_ptr<HTTPClient> client = httpUtil.InitializeClient(*httpParams, baseUrl);
 
 	HTTPHeaders requestHeaders;
-	HeadRequestInfo headRequest(baseUrl + "/", requestHeaders, *httpParams);
+
+	/* HeadRequestInfo keeps a reference to the URL, so it has to outlive the request */
+	string bucketRootUrl = baseUrl + "/";
+
+	HeadRequestInfo headRequest(bucketRootUrl, requestHeaders, *httpParams);
 	unique_ptr<HTTPResponse> response = httpUtil.Request(headRequest, client);
 
 	if (!response->headers.HasHeader("x-amz-bucket-region"))
 		return string();
 
 	return response->headers.GetHeaderValue("x-amz-bucket-region");
+}
+
+
+/*
+ * TryGetBucketRegionFromS3 is GetBucketRegionFromS3 for callers that are
+ * recovering from an error they still hold: it reports an unknown region when
+ * the probe itself fails, so that the caller rethrows the error that made it
+ * ask instead of one about the probe. The probe is unauthenticated and can fail
+ * for reasons of its own, up to the endpoint not allowing it at all.
+ */
+string
+RegionAwareS3FileSystem::TryGetBucketRegionFromS3(const string &url, optional_ptr<FileOpener> opener)
+{
+	try
+	{
+		return GetBucketRegionFromS3(url, opener);
+	}
+	catch (std::exception &ex)
+	{
+		PGDUCK_SERVER_DEBUG("could not determine region of %s: %s", url.c_str(), ex.what());
+		return string();
+	}
 }
 
 

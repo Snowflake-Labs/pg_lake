@@ -239,17 +239,15 @@ def test_s3_express(pgduck_conn):
     pgduck_conn.rollback()
 
 
-# This test outputs a bad host name that seems like some sort of memory corruption at play
 def test_s3_get_region_invalid(pgduck_conn):
+    """A bucket whose host does not resolve reports the connection failure, with
+    the URL it failed on."""
     error = run_command(
         "select pg_lake_get_bucket_region('s3://.../abc/') test",
         pgduck_conn,
         raise_error=False,
     )
-    assert (
-        "Could not resolve hostname error" in error
-        or "server closed the connection" in error
-    )
+    assert "Could not resolve hostname error for HTTP HEAD to 'https://" in error
 
     # The failed statement above aborts the transaction on this module-scoped
     # connection; roll back so the following tests start clean.

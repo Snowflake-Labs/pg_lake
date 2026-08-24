@@ -60,6 +60,7 @@ public:
 	void ClearCachedRegion(const string &bucketUrl,
 						   optional_ptr<FileOpener> opener);
 	string GetBucketRegionFromS3(const string &url, optional_ptr<FileOpener> opener);
+	string TryGetBucketRegionFromS3(const string &url, optional_ptr<FileOpener> opener);
 	string GetBucketRegion(const string &url, optional_ptr<FileOpener> opener);
 	vector<OpenFileInfo> List(const string &globPattern, bool isGlob, FileOpener *opener);
 
