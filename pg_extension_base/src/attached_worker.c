@@ -33,6 +33,7 @@
 #include "catalog/pg_authid.h"
 #include "commands/dbcommands.h"
 #include "pg_extension_base/attached_worker.h"
+#include "pg_extension_base/injection_points.h"
 #include "pg_extension_base/pg_compat.h"
 #include "libpq/pqformat.h"
 #include "libpq/pqmq.h"
@@ -89,7 +90,7 @@ static AttachedWorker * StartAttachedWorkerInternal(char *command, char *databas
 static void RunAttachedWorker(char *command, char *databaseName, char *userName, ReturnSetInfo *rsinfo);
 static void RunAttachedWorkerReturning(char *command, char *databaseName,
 									   char *userName, ReturnSetInfo *rsinfo);
-static char *ProcessProtocolMessages(shm_mq_handle *queue, bool nowait,
+static char *ProcessProtocolMessages(AttachedWorker * worker, bool nowait,
 									 TupleDesc *resultDesc);
 static void ValidateWorkerTupleDesc(TupleDesc workerDesc, TupleDesc expectedDesc);
 static void ExecuteSqlString(const char *sql, shm_mq_handle *tupleQueue);
@@ -427,8 +428,24 @@ StartAttachedWorkerInternal(char *command, char *databaseName, char *userName,
 						errhint("You might need to increase max_worker_processes.")));
 	}
 
-	/* wait for the background worker to start */
-	pid_t		pid;
+	/*
+	 * Associate the queues with the worker. Without a handle, shm_mq cannot
+	 * tell a worker that has not attached yet from one that will never
+	 * attach, so a blocking receive on the queue of a worker that failed to
+	 * start or died during startup waits forever.
+	 */
+	shm_mq_set_handle(outputQueueHandle, workerHandle);
+	if (tupleQueueHandle != NULL)
+		shm_mq_set_handle(tupleQueueHandle, workerHandle);
+
+	/*
+	 * Wait for the background worker to start. BGWH_STOPPED is not
+	 * necessarily a failure, since a short command can run to completion
+	 * before we get here and its output is still in the queue. It is the
+	 * queue handles set above that catch a worker which exited without
+	 * finishing the command.
+	 */
+	pid_t		pid = 0;
 	BgwHandleStatus status = WaitForBackgroundWorkerStartup(workerHandle, &pid);
 
 	if (status != BGWH_STARTED && status != BGWH_STOPPED)
@@ -461,10 +478,12 @@ StartAttachedWorkerInternal(char *command, char *databaseName, char *userName,
  * message arrives.
  *
  * Returns the command tag on CommandComplete, or NULL when the queue
- * is exhausted or detached.
+ * is exhausted or detached. A queue that detaches before the worker sent
+ * ReadyForQuery means the worker died with the command unfinished, which is
+ * reported as an error.
  */
 static char *
-ProcessProtocolMessages(shm_mq_handle *queue, bool nowait,
+ProcessProtocolMessages(AttachedWorker * worker, bool nowait,
 						TupleDesc *resultDesc)
 {
 	StringInfoData msg;
@@ -477,8 +496,15 @@ ProcessProtocolMessages(shm_mq_handle *queue, bool nowait,
 
 		Size		messageLength;
 		void	   *data;
-		shm_mq_result res = shm_mq_receive(queue, &messageLength,
+		shm_mq_result res = shm_mq_receive(worker->outputQueue, &messageLength,
 										   &data, nowait);
+
+		if (res == SHM_MQ_DETACHED && !worker->workerFinished)
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("attached worker exited before finishing the command"),
+					 errhint("The worker may have failed to start. Look for its "
+							 "error in the server log.")));
 
 		if (res != SHM_MQ_SUCCESS)
 			break;
@@ -546,12 +572,20 @@ ProcessProtocolMessages(shm_mq_handle *queue, bool nowait,
 					}
 					break;
 				}
+			case 'Z':
+				{
+					/*
+					 * ReadyForQuery is the last message the worker sends, so
+					 * from here on a detached queue is an orderly exit.
+					 */
+					worker->workerFinished = true;
+					break;
+				}
 			case 'A':
 			case 'D':
 			case 'G':
 			case 'H':
 			case 'W':
-			case 'Z':
 				break;
 			default:
 				elog(WARNING, "unknown message type: %c (%zu bytes)",
@@ -572,7 +606,7 @@ ProcessProtocolMessages(shm_mq_handle *queue, bool nowait,
 char *
 ReadFromAttachedWorker(AttachedWorker * worker, bool wait)
 {
-	return ProcessProtocolMessages(worker->outputQueue, !wait, NULL);
+	return ProcessProtocolMessages(worker, !wait, NULL);
 }
 
 
@@ -637,7 +671,7 @@ ReadResultsFromAttachedWorker(AttachedWorker * worker, Tuplestorestate *store,
 		 */
 		TupleDesc	workerDesc = NULL;
 
-		ProcessProtocolMessages(worker->outputQueue, true, &workerDesc);
+		ProcessProtocolMessages(worker, true, &workerDesc);
 
 		if (workerDesc != NULL)
 		{
@@ -679,7 +713,7 @@ ReadResultsFromAttachedWorker(AttachedWorker * worker, Tuplestorestate *store,
 	DestroyTupleQueueReader(reader);
 
 	/* Final drain to catch any trailing errors or notices */
-	ProcessProtocolMessages(worker->outputQueue, true, NULL);
+	ProcessProtocolMessages(worker, true, NULL);
 }
 
 
@@ -763,6 +797,12 @@ AttachedWorkerMain(Datum mainArg)
 								 (*flagsPtr & ATTACHED_WORKER_FLAG_RETURN_RESULTS) != 0);
 	bool		callerWritable = (flagsPtr != NULL &&
 								  (*flagsPtr & ATTACHED_WORKER_FLAG_CALLER_WRITABLE) != 0);
+
+	/*
+	 * Lets a test exercise a worker that dies before it attaches to the
+	 * queues, which is what the parent cannot see without a queue handle.
+	 */
+	INJECTION_POINT_COMPAT("attached-worker-before-queue-attach");
 
 	/* Attach to the response queue (protocol messages: errors, command tags) */
 	shm_mq_set_sender(messageQueue, MyProc);

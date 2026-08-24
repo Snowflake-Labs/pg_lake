@@ -603,3 +603,46 @@ def test_returning_more_columns_expected(superuser_conn, pg_extension_base):
     # session should still be alive
     result = run_query("SELECT 1 as alive", superuser_conn)
     assert result[0]["alive"] == 1
+
+
+def test_worker_dies_before_attaching(
+    superuser_conn, pg_extension_base, create_injection_extension
+):
+    # A worker that exits before it attaches to the queues used to leave the
+    # caller waiting forever, since shm_mq cannot see the worker die without a
+    # queue handle. The caller should get an error instead.
+
+    if get_pg_version_num(superuser_conn) < 170000:
+        pytest.skip("Injection points not available (requires PostgreSQL 17+)")
+
+    run_command(
+        "SELECT injection_points_attach('attached-worker-before-queue-attach', 'error')",
+        superuser_conn,
+    )
+
+    try:
+        for command in [
+            "SELECT * FROM extension_base.run_attached($$SELECT 1$$)",
+            "SELECT * FROM extension_base.run_attached_returning($$SELECT 1$$) AS t(x int)",
+        ]:
+            # bound the wait so a regression fails the test instead of hanging
+            run_command("SET statement_timeout = '60s'", superuser_conn)
+
+            error = run_command(command, superuser_conn, raise_error=False)
+            superuser_conn.rollback()
+
+            assert error is not None
+            assert "attached worker exited before finishing the command" in error
+    finally:
+        run_command(
+            "SELECT injection_points_detach('attached-worker-before-queue-attach')",
+            superuser_conn,
+            raise_error=False,
+        )
+        superuser_conn.commit()
+
+    # session should still be alive, and workers should work again
+    result = run_query(
+        "SELECT * FROM extension_base.run_attached($$SELECT 1$$)", superuser_conn
+    )
+    assert result[0]["command_tag"] == "SELECT 1"
