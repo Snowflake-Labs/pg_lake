@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Snowflake Inc.
+ * Copyright 2026 Snowflake Inc.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,8 +17,25 @@
 
 #pragma once
 
-/*
- * INJECTION_POINT_COMPAT moved to pg_extension_base so that extension can use
- * it as well. This header remains as the pg_lake spelling of the same macro.
- */
-#include "pg_extension_base/injection_points.h"
+#include "postgres.h"
+
+#if PG_VERSION_NUM >= 180000
+
+#include "utils/injection_point.h"
+
+#define INJECTION_POINT_COMPAT(name) \
+    INJECTION_POINT(name, NULL)
+
+#elif PG_VERSION_NUM >= 170000
+
+#include "utils/injection_point.h"
+
+#define INJECTION_POINT_COMPAT(name) \
+    INJECTION_POINT(name)
+
+#else
+
+#define INJECTION_POINT_COMPAT(name) \
+    ((void) name)
+
+#endif
