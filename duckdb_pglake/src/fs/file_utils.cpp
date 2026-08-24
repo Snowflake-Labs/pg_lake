@@ -210,31 +210,29 @@ FileUtils::CopyFile(ClientContext &context,
 	}
 
 	/*
-	 * Check before finalizing, so a transfer that did not deliver the whole
-	 * source is never published. For a cache fill the staging file is simply
-	 * left for the sweep at the top of ManageCache; for an upload the object
-	 * never appears, because the multipart upload is completed by Sync().
+	 * A transfer that reports success is not the same as one that delivered
+	 * everything: a retried http/s3 body can leave a partial attempt followed by
+	 * a complete one, and the generic loop stops at the first zero-length read.
+	 * Since the result may be renamed into the cache, and nothing revalidates a
+	 * cache entry afterwards, either shape would be served from then on.
 	 *
-	 * The reason this is not left to each backend: a transfer that reports
-	 * success is not the same as one that delivered everything. The clearest
-	 * case is the http/s3 path above. A transport failure part way through the
-	 * body is retried by HTTPUtil::SendRequest, which re-runs the content
-	 * handler from the start of the body -- and that handler appends, while the
-	 * output file still holds whatever the previous attempt delivered. So a
-	 * retry that succeeds leaves the partial attempt followed by a complete one:
-	 * longer than the source, with no error raised. The generic loop below
-	 * cannot double count that way, because Read() is positional, but it stops
-	 * at the first zero-length read and equally does not check what it got.
-	 *
-	 * Since FileCacheManager::CacheFileInternal renames the result into the
-	 * cache, and nothing revalidates a cache entry afterwards, either shape
-	 * would be served for every later read of that URL.
+	 * Checked before finalizing, so nothing bad is published: a cache fill
+	 * leaves its staging file for the sweep in ManageCache, and an upload never
+	 * appears because Sync() is what completes the multipart upload.
 	 */
 	if (sourceSize > 0 && (idx_t) totalBytesWritten != sourceSize)
+	{
+		/* a cache fill asks for nocache<url>, which is no use to the reader */
+		string reportedPath =
+			StringUtil::StartsWith(sourcePath, NO_CACHE_PREFIX)
+			? sourcePath.substr(NO_CACHE_PREFIX.length())
+			: sourcePath;
+
 		throw IOException("Copied %llu bytes of '%s' but it is %llu bytes; the "
 						  "transfer was incomplete or was retried",
-						  (unsigned long long) totalBytesWritten, sourcePath,
+						  (unsigned long long) totalBytesWritten, reportedPath,
 						  (unsigned long long) sourceSize);
+	}
 
 	destinationHandle->Sync();
 	destinationHandle->Close();

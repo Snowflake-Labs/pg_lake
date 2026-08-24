@@ -702,6 +702,15 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize)
 		}
 		catch (std::exception &ex)
 		{
+			/*
+			 * The summary below only counts these, and the same counter ticks
+			 * for an ordinary timeout, so without the reason a fill that was
+			 * rejected because it did not match the object looks like any other
+			 * transient failure.
+			 */
+			PGDUCK_SERVER_WARN("could not add %s to cache: %.500s",
+							   cacheFile.url.c_str(), ex.what());
+
 			actions.push_back({
 				.url = cacheFile.url,
 				.fileSize = cacheFile.fileSize,
