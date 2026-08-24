@@ -115,8 +115,8 @@
  * so a worker that runs fine and later hits a transient error backs off from the
  * initial delay again instead of inheriting a stale, long delay.
  *
- * We do not currently wake up the server and database starters, so the total
- * wait can be up to WorkerStarterSleepTimeSec longer than the computed delay.
+ * A failing worker wakes the starter that can bring it back, so the restart
+ * happens when the backoff elapses rather than at the next poll.
  */
 
 #define PG_EXTENSION_BASE_EXTENSION_NAME "pg_extension_base"
@@ -1554,13 +1554,13 @@ PgExtensionBaseDatabaseStarterSharedMemoryExit(int code, Datum arg)
  * ComputeNextWakeTimeMs computes the minimum sleep time based on pending
  * worker restarts in the current database.
  *
- * Returns the number of milliseconds until the next worker restart is due,
- * or 10 seconds if no restarts are pending.
+ * Returns the number of milliseconds until the next worker restart is due, or
+ * worker_starter_sleep_time if no restarts are pending.
  */
 static int64
 ComputeNextWakeTimeMs(void)
 {
-	int64		minSleepMs = WorkerStarterSleepTimeSec;
+	int64		minSleepMs = WorkerStarterSleepTimeSec * INT64CONST(1000);
 
 	if (BaseWorkerHash == NULL)
 	{
@@ -2424,17 +2424,6 @@ PgExtensionBaseWorkerSharedMemoryExit(int code, Datum arg)
 			 * needsRestart being false means that we got killed due to an
 			 * internal error. Bring back the database starter to restore us.
 			 */
-			bool		isFound = false;
-			DatabaseStarterEntry *starterEntry = GetDatabaseStarterEntry(databaseId, &isFound);
-
-			if (isFound)
-			{
-				/*
-				 * Signal to the server starter that the database starter is
-				 * needed.
-				 */
-				starterEntry->needsRestart = true;
-			}
 
 			/*
 			 * If the worker had been running for a while before it failed,
@@ -2466,6 +2455,15 @@ PgExtensionBaseWorkerSharedMemoryExit(int code, Datum arg)
 							"a row; delaying restart by %ld ms",
 							workerId, databaseId, workerEntry->failureCount,
 							(long) backoffMs)));
+
+			/*
+			 * Wake whoever can bring us back: the database starter if it is
+			 * still running, otherwise the server starter so that it launches
+			 * one.  Setting needsRestart alone would leave the restart
+			 * waiting for the next poll, which is up to
+			 * worker_starter_sleep_time away however short the backoff is.
+			 */
+			SignalDatabaseStarterLocked(databaseId);
 		}
 	}
 	else
