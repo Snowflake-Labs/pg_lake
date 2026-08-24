@@ -3101,10 +3101,26 @@ BaseWorkerTransactionCallback(XactEvent event, void *arg)
 /*
  * GetBaseWorkerPid returns the PID of a running base worker given its worker
  * ID, or 0 if the worker is not found in the current database.
+ *
+ * Never raises, so it can be called from places where an error would be
+ * promoted to PANIC, such as an XACT_EVENT_COMMIT callback.  That is why an
+ * uninitialized hash reads as "not found" here, instead of raising the way
+ * StartBaseWorker does on the same check.
+ *
+ * The returned PID is only good for reporting, or for comparing against a PID
+ * observed earlier (see WaitForBaseWorkerExit).  Do not use it to look the
+ * worker's PGPROC up: a PID is only unique while the process is alive, so the
+ * worker can exit and an unrelated backend can be handed the same PID before
+ * BackendPidGetProc runs.  Signaling a base worker safely needs a stable handle
+ * recorded alongside the PID and read under BaseWorkerControl->lock, the way
+ * the database starter wakeup uses procno; this function is not that.
  */
 pid_t
 GetBaseWorkerPid(int32 workerId)
 {
+	if (BaseWorkerHash == NULL)
+		return 0;
+
 	pid_t		workerPid = 0;
 
 	LWLockAcquire(&BaseWorkerControl->lock, LW_SHARED);
