@@ -40,7 +40,7 @@
 
 
 /* determined by GUC */
-char	   *RestCatalogHost = "http://localhost:8181";
+char	   *RestCatalogHost = "http://localhost:8181/api/catalog";
 char	   *RestCatalogOauthHostPath = "";
 char	   *RestCatalogClientId = NULL;
 char	   *RestCatalogClientSecret = NULL;
