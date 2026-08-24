@@ -403,8 +403,16 @@ PGLakeCachingFileSystem::ListFiles(const string &directory,
  * RemoveCachedCopy drops the local cache entry for a file that has been removed
  * from the remote file system.
  *
- * Even if the file no longer exists remotely, we always remove from cache,
- * since we may have failed to do so last time.
+ * Even if the file no longer exists remotely, we always attempt to remove it
+ * from the cache, since we may have failed to do so last time.
+ *
+ * The eviction must not wait for the per-path cache lock. A cache-on-write
+ * abort reaches here from ~CopyToFunctionGlobalState while the write-through
+ * handle for this same path is still alive and holds that lock; the lock is
+ * only released once the handle destructs, which is sequenced after the
+ * destructor body that called us. Blocking on it would deadlock. A held lock
+ * means another operation owns the entry and will clean it up itself, so
+ * skipping is both safe and correct.
  *
  * If the file is not cached then this is a noop.
  */
@@ -419,24 +427,9 @@ RemoveCachedCopy(ClientContext &context, const string &filename,
 	if (cacheManager->TryGetCacheDir(opener, cacheDir) &&
 		cacheManager->TryGetCacheFilePath(cacheDir, filename, cacheFilePath))
 	{
-		bool waitForLock = true;
+		bool waitForLock = false;
 		cacheManager->RemoveCacheFile(context, filename, waitForLock);
 	}
-}
-
-
-/*
- * IsAzureUrl returns whether a URL is handled by the azure extension. Matching
- * on the scheme rather than asking the file system keeps this usable without an
- * instance of it, which is what the static RemoveFiles below has.
- */
-static bool
-IsAzureUrl(const string &url)
-{
-	return StringUtil::StartsWith(url, "azure://") ||
-		   StringUtil::StartsWith(url, "az://") ||
-		   StringUtil::StartsWith(url, "abfss://") ||
-		   StringUtil::StartsWith(url, "abfs://");
 }
 
 
@@ -448,11 +441,34 @@ void
 PGLakeCachingFileSystem::RemoveFile(const string &filename,
 							  optional_ptr<FileOpener> opener)
 {
+	TryRemoveFile(filename, opener);
+}
+
+
+/*
+ * TryRemoveFile removes a file and its cache entry and reports whether the file
+ * was there to begin with.
+ *
+ * This goes through the remote file system's TryRemoveFile rather than
+ * RemoveFile so that a file that is already gone is not an error: the deletion
+ * queue reaches this path with objects a previous, interrupted attempt already
+ * removed, and Azure (unlike S3) raises BlobNotFound for those.
+ *
+ * That also keeps the cache eviction below reachable. An attempt that deleted
+ * the object but failed before evicting has to be able to finish the job on the
+ * next attempt, and it cannot if the missing object throws first.
+ */
+bool
+PGLakeCachingFileSystem::TryRemoveFile(const string &filename,
+									   optional_ptr<FileOpener> opener)
+{
 	optional_ptr<ClientContext> context = opener->TryGetClientContext();
 
-	remoteFs->RemoveFile(filename, opener);
+	bool removed = remoteFs->TryRemoveFile(filename, opener);
 
 	RemoveCachedCopy(*context, filename, opener);
+
+	return removed;
 }
 
 
@@ -488,6 +504,12 @@ PGLakeCachingFileSystem::RemoveFiles(ClientContext &context, const vector<string
 		 * caching land here too: s3fs does not recognize the prefix, and the
 		 * virtual file system strips it.
 		 *
+		 * RemoveFile, not TryRemoveFile: the remote file systems are registered
+		 * wrapped in this class, so an object that is already gone is tolerated
+		 * by the RemoveFile above. Asking the virtual file system to try instead
+		 * would also swallow a path that no remote file system claims, which
+		 * falls through to the local file system and is a real failure.
+		 *
 		 * No opener here, unlike the s3fs call below: what a ClientContext hands
 		 * out is a ClientContextFileSystem, an OpenerFileSystem, which pushes
 		 * its own opener into every call and rejects one from the caller with
@@ -496,16 +518,6 @@ PGLakeCachingFileSystem::RemoveFiles(ClientContext &context, const vector<string
 		 */
 		if (s3fs.CanHandleFile(path))
 			s3Paths.push_back(path);
-		else if (IsAzureUrl(path))
-			/*
-			 * On Azure, an object that is already gone counts as removed, the
-			 * same as for the S3 batch delete below, so that a deletion queue
-			 * record for an externally removed object gets retired instead of
-			 * retried. TryRemoveFile is DeleteIfExists there, so it costs no
-			 * extra request. Other back ends keep RemoveFile, whose failure is
-			 * what makes an unremovable path retryable.
-			 */
-			virtualFs.TryRemoveFile(path);
 		else
 			virtualFs.RemoveFile(path);
 	}

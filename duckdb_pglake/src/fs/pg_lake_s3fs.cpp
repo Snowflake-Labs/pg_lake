@@ -152,6 +152,19 @@ void
 PgLakeS3FileSystem::RemoveFile(const string &filename,
 								optional_ptr<FileOpener> opener)
 {
+	TryRemoveFile(filename, opener);
+}
+
+
+/*
+ * TryRemoveFile removes a file from S3 and reports whether it was there to
+ * begin with, so that a caller deleting a file that is already gone does not
+ * have to treat that as a failure.
+ */
+bool
+PgLakeS3FileSystem::TryRemoveFile(const string &filename,
+								  optional_ptr<FileOpener> opener)
+{
 	try
 	{
 		RemoveFileFromS3(filename, opener);
@@ -176,7 +189,11 @@ PgLakeS3FileSystem::RemoveFile(const string &filename,
 		 */
 		if (!IsNotFoundError(error))
 			throw;
+
+		return false;
 	}
+
+	return true;
 }
 
 

@@ -179,6 +179,13 @@ public:
 			[&](const string &regionUrl) { s3fs.RemoveFile(regionUrl, opener); });
 	}
 
+	bool TryRemoveFile(const string &filename, optional_ptr<FileOpener> opener = nullptr) override {
+		bool result = false;
+		WithResolvedRegion(filename, opener,
+			[&](const string &regionUrl) { result = s3fs.TryRemoveFile(regionUrl, opener); });
+		return result;
+	}
+
 	bool IsPipe(const string &filename, optional_ptr<FileOpener> opener = nullptr) override {
 		return s3fs.IsPipe(filename, opener);
 	}

@@ -58,6 +58,7 @@ public:
 
 	/* Overrides that are not in S3FileSystem */
 	void RemoveFile(const string &filename, optional_ptr<FileOpener> opener = nullptr) override;
+	bool TryRemoveFile(const string &filename, optional_ptr<FileOpener> opener = nullptr) override;
 
 	string GetName() const override {
 		return "PgLakeS3FileSystem";
