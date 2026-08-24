@@ -38,6 +38,13 @@ typedef struct AttachedWorker
 	/* background worker handle */
 	pid_t		workerPid;
 	BackgroundWorkerHandle *workerHandle;
+
+	/*
+	 * Set once the worker sent ReadyForQuery, which is the last thing it does
+	 * before exiting. Until then, a detached queue means the worker died with
+	 * the command unfinished.
+	 */
+	bool		workerFinished;
 }			AttachedWorker;
 
 extern PGDLLEXPORT AttachedWorker * StartAttachedWorker(char *command);
