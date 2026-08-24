@@ -1142,6 +1142,13 @@ static int
 pgsession_destroy(PGSession * pgSession)
 {
 	pg_free(pgSession->pqSendBuffer);
+
+	/*
+	 * Take the connection out of the thread pool before disconnecting it, so
+	 * that a concurrent cancellation cannot interrupt a freed connection.
+	 */
+	pgclient_threadpool_clear_duckdb_conn(pgSession->pgClient->threadIndex);
+
 	duckdb_session_destroy(&pgSession->duckSession);
 	return OK;
 }

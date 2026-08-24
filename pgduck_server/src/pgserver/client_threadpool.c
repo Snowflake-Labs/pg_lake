@@ -55,7 +55,14 @@ typedef struct PgClientThreadState
 	int32		cancellationToken;
 #endif
 
-	/* DuckDB connection to interrupt */
+	/*
+	 * DuckDB connection to interrupt.
+	 *
+	 * The cancel paths call duckdb_interrupt() on this pointer, so it must be
+	 * NULL whenever the connection behind it is not alive.  The thread owning
+	 * the slot has to clear it with pgclient_threadpool_clear_duckdb_conn()
+	 * *before* it disconnects, not when it frees the slot.
+	 */
 	duckdb_connection duckdbConnection;
 
 }			PgClientThreadState;
@@ -337,6 +344,29 @@ pgclient_threadpool_set_duckdb_conn(int threadIndex, duckdb_connection conn)
 	threadState->duckdbConnection = conn;
 
 	pthread_rwlock_unlock(&rwlock);
+}
+
+
+/*
+ * pgclient_threadpool_clear_duckdb_conn removes the DuckDB connection of a
+ * thread from the pool.
+ *
+ * A client thread must call this before disconnecting its DuckDB connection.
+ * The cancel paths read the pointer and call duckdb_interrupt() on it while
+ * holding the lock, so a connection that is left in the pool after
+ * duckdb_disconnect() gets interrupted after it has been freed: an incoming
+ * cancel request, or cancel_all() during shutdown, then dereferences freed
+ * memory and crashes the server.  Clearing under the write lock closes that
+ * window -- a cancel either runs before this call and finds a live
+ * connection, or after it and finds NULL.
+ *
+ * The slot itself stays reserved; it is released by
+ * pgclient_threadpool_free_slot() once the thread is done.
+ */
+void
+pgclient_threadpool_clear_duckdb_conn(int threadIndex)
+{
+	pgclient_threadpool_set_duckdb_conn(threadIndex, NULL);
 }
 
 
