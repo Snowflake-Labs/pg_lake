@@ -3,6 +3,7 @@
 import subprocess
 import threading
 import queue
+import time
 
 import psycopg2
 import psycopg2.extras
@@ -178,6 +179,39 @@ def run_command_outside_tx(query_list, raise_error=True):
     finally:
         conn.close()
 
+
+def wait_for_reloaded_settings(conns, expected, timeout=30):
+    """Wait until every connection in ``conns`` observes ``expected``.
+
+    ``pg_reload_conf()`` only signals the postmaster, so it returns before
+    the postmaster has re-read ``postgresql.auto.conf`` and before any
+    already-connected backend has processed its SIGHUP.  A statement sent
+    on an open connection right after ``ALTER SYSTEM SET`` can therefore
+    still see the old value.  Call this after the reload to make the new
+    values visible to the connections the test is about to use.
+
+    ``expected`` maps setting names to the values ``SHOW`` should report.
+    The roles behind ``conns`` must be able to read those settings; for a
+    GUC_SUPERUSER_ONLY setting that means superuser or pg_read_all_settings.
+
+    The transaction the polling opens is committed before returning, so the
+    caller is not left idle in transaction -- psycopg2 refuses to flip
+    autocommit on a connection with a transaction in progress.
+    """
+    deadline = time.monotonic() + timeout
+    for conn in conns:
+        for name, value in expected.items():
+            while True:
+                current = run_query(f"SHOW {name}", conn)[0][0]
+                if current == value:
+                    break
+                if time.monotonic() > deadline:
+                    raise AssertionError(
+                        f"{name} still reads {current!r} instead of {value!r} "
+                        f"{timeout}s after pg_reload_conf()"
+                    )
+                time.sleep(0.01)
+        conn.commit()
 
 
 # Example usage for thread_run_query() and thread_run_command():

@@ -4742,40 +4742,22 @@ def get_current_manifests(pg_conn, tbl_namespace, tbl_name):
 
 @pytest.fixture(scope="module")
 def set_polaris_gucs(
+    pg_conn,
     superuser_conn,
+    app_user,
     extension,
     installcheck,
     credentials_file: str = server_params.POLARIS_PRINCIPAL_CREDS_FILE,
 ):
+    # Same as the helpers.polaris fixture of this name, but hung off the
+    # pg_lake `extension` fixture rather than `iceberg_extension`.
     if not installcheck:
-
-        creds = json.loads(Path(credentials_file).read_text())
-        client_id = creds["credentials"]["clientId"]
-        client_secret = creds["credentials"]["clientSecret"]
-
-        run_command_outside_tx(
-            [
-                f"""ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_host TO '{server_params.POLARIS_HOSTNAME}:{server_params.POLARIS_PORT}'""",
-                f"""ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_id TO '{client_id}'""",
-                f"""ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_secret TO '{client_secret}'""",
-                "SELECT pg_reload_conf()",
-            ],
-            superuser_conn,
-        )
+        apply_polaris_gucs([pg_conn, superuser_conn], app_user, credentials_file)
 
     yield
 
     if not installcheck:
-
-        run_command_outside_tx(
-            [
-                f"""ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_host""",
-                f"""ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_id""",
-                f"""ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_secret""",
-                "SELECT pg_reload_conf()",
-            ],
-            superuser_conn,
-        )
+        reset_polaris_gucs(app_user)
 
 
 @pytest.fixture(scope="module")
