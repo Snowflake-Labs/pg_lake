@@ -307,8 +307,9 @@ def test_polaris_server_option_enables_vending_with_guc_off(
     creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
     client_id = creds["credentials"]["clientId"]
     client_secret = creds["credentials"]["clientSecret"]
-    # rest_endpoint wants a scheme, unlike the rest_catalog_host GUC.
-    endpoint = f"http://{server_params.POLARIS_HOSTNAME}:{server_params.POLARIS_PORT}"
+    # rest_endpoint wants a scheme and the full catalog mount path,
+    # which is "/api/catalog" on Polaris.
+    endpoint = f"http://{server_params.POLARIS_HOSTNAME}:{server_params.POLARIS_PORT}/api/catalog"
 
     # Only the server opts in; the GUC stays off.
     _set_vending(superuser_conn, False)
