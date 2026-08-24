@@ -617,6 +617,12 @@ RegionAwareS3FileSystem::GetBucketRegionFromS3(const string &url, optional_ptr<F
 	string bucketRootUrl = baseUrl + "/";
 
 	HeadRequestInfo headRequest(bucketRootUrl, requestHeaders, *httpParams);
+
+	/*
+	 * The request is unauthenticated, so S3 answers 403, or 301 when the
+	 * endpoint belongs to another region. httpfs returns those rather than
+	 * throwing, and the region header comes with them.
+	 */
 	unique_ptr<HTTPResponse> response = httpUtil.Request(headRequest, client);
 
 	if (!response->headers.HasHeader("x-amz-bucket-region"))
@@ -627,11 +633,10 @@ RegionAwareS3FileSystem::GetBucketRegionFromS3(const string &url, optional_ptr<F
 
 
 /*
- * TryGetBucketRegionFromS3 is GetBucketRegionFromS3 for callers that are
- * recovering from an error they still hold: it reports an unknown region when
- * the probe itself fails, so that the caller rethrows the error that made it
- * ask instead of one about the probe. The probe is unauthenticated and can fail
- * for reasons of its own, up to the endpoint not allowing it at all.
+ * TryGetBucketRegionFromS3 is GetBucketRegionFromS3 for callers that still hold
+ * the error that made them ask. The probe can fail for reasons of its own, up to
+ * the endpoint not allowing it at all, and an unknown region makes those callers
+ * rethrow their own error instead of one about the probe.
  */
 string
 RegionAwareS3FileSystem::TryGetBucketRegionFromS3(const string &url, optional_ptr<FileOpener> opener)
