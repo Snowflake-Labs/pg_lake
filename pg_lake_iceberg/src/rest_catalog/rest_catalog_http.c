@@ -59,14 +59,16 @@ typedef enum RestCatalogRequestRetryAction
 
 
 /*
- * UpdateAuthorizationHeader finds the "Authorization: Bearer ..." entry in the
- * header list and replaces it with a new one carrying the given token.  If no
- * matching header is found the function is a no-op (defensive).
+ * UpdateAuthorizationHeader finds the "Authorization: ..." entry in the header
+ * list and replaces it with a new one carrying the given value.  The value
+ * includes its own scheme, since a credential provider may authenticate with
+ * something other than a bearer token.  If no matching header is found the
+ * function is a no-op (defensive).
  */
 static void
-UpdateAuthorizationHeader(List *headers, const char *token)
+UpdateAuthorizationHeader(List *headers, const char *authorization)
 {
-	const char *prefix = "Authorization: Bearer ";
+	const char *prefix = "Authorization: ";
 	ListCell   *lc;
 
 	foreach(lc, headers)
@@ -75,7 +77,7 @@ UpdateAuthorizationHeader(List *headers, const char *token)
 
 		if (strncmp(header, prefix, strlen(prefix)) == 0)
 		{
-			lfirst(lc) = psprintf("Authorization: Bearer %s", token);
+			lfirst(lc) = psprintf("Authorization: %s", authorization);
 			return;
 		}
 	}
@@ -147,14 +149,14 @@ SendRequestToRestCatalog(RestCatalogOptions * opts, HttpMethod method, const cha
 			case REST_CATALOG_RETRY_REFRESH_AUTH:
 				{
 					/*
-					 * Force-refresh the cached token and update the
+					 * Force-refresh the cached credential and update the
 					 * Authorization header so the retried request carries the
-					 * new token.
+					 * new one.
 					 */
 					bool		forceRefreshToken = true;
-					char	   *freshToken = GetRestCatalogAccessToken(opts, forceRefreshToken);
+					char	   *fresh = GetRestCatalogAuthorization(opts, forceRefreshToken);
 
-					UpdateAuthorizationHeader(headers, freshToken);
+					UpdateAuthorizationHeader(headers, fresh);
 					continue;
 				}
 

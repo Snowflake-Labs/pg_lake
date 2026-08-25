@@ -213,6 +213,40 @@ extern PGDLLEXPORT Oid ResolveRestCatalogServerId(const char *catalog);
 extern PGDLLEXPORT Oid GetRestCatalogServerIdForRelation(Oid relationId);
 
 /*
+ * Credential handed back by PgLakeRestCatalogAuthHook.
+ *
+ * authorization is the complete Authorization header value including its
+ * scheme, e.g. "Bearer eyJ...".  Providers supply the scheme themselves so
+ * that catalogs authenticating with something other than a bearer token do
+ * not require a change here.
+ *
+ * expiresIn is the credential's remaining lifetime in seconds.  Zero means
+ * "do not cache": the hook is consulted again on the next request, which is
+ * what a provider wants when it reads a credential that is rotated
+ * underneath it rather than minting one with a known lifetime.
+ */
+typedef struct RestCatalogAuthMaterial
+{
+	char	   *authorization;
+	int			expiresIn;
+}			RestCatalogAuthMaterial;
+
+/*
+ * Hook letting another extension supply REST catalog credentials, for
+ * catalogs whose authentication pg_lake has no built-in support for.
+ *
+ * Returning false means "not mine, fall back to the built-in OAuth2 flow",
+ * so a provider can claim some servers and ignore others.  Returning true
+ * without filling in material->authorization is an error.  pg_lake keeps
+ * ownership of caching, refresh and header construction either way.
+ */
+typedef bool (*PgLakeRestCatalogAuthHookType) (RestCatalogOptions * opts,
+											   bool forceRefresh,
+											   RestCatalogAuthMaterial * material);
+
+extern PGDLLEXPORT PgLakeRestCatalogAuthHookType PgLakeRestCatalogAuthHook;
+
+/*
  * Module-internal helpers shared across the rest_catalog_*.c files.
  *
  * Declared here (rather than in a private header) only so the split
@@ -223,7 +257,7 @@ void		ApplyServerOptionOverrides(RestCatalogOptions * opts, ForeignServer *serve
 void		ApplyUserMappingOverrides(RestCatalogOptions * opts, ForeignServer *server);
 void		ApplyUserMappingOptionsList(RestCatalogOptions * opts, List *options, Oid umOid);
 List	   *LookupUserMappingOptionsByOid(Oid umOid, Oid *serverOidOut);
-char	   *GetRestCatalogAccessToken(RestCatalogOptions * opts, bool forceRefreshToken);
+char	   *GetRestCatalogAuthorization(RestCatalogOptions * opts, bool forceRefreshToken);
 List	   *GetHeadersWithAuth(RestCatalogOptions * opts);
 char	   *JsonbGetStringByPath(const char *jsonb_text, int nkeys,...);
 char	   *JsonbGetOptionalStringByPath(const char *jsonb_text, int nkeys,...);

@@ -23,6 +23,7 @@
 #include "funcapi.h"
 #include "lib/stringinfo.h"
 #include "utils/builtins.h"
+#include "utils/memutils.h"
 
 #include "pg_lake/rest_catalog/rest_catalog.h"
 
@@ -30,6 +31,9 @@ PG_FUNCTION_INFO_V1(register_namespace_to_rest_catalog);
 PG_FUNCTION_INFO_V1(get_rest_metadata_location);
 PG_FUNCTION_INFO_V1(get_rest_vended_credentials);
 PG_FUNCTION_INFO_V1(resolve_rest_catalog_base_uri);
+PG_FUNCTION_INFO_V1(install_test_rest_catalog_auth_hook);
+PG_FUNCTION_INFO_V1(remove_test_rest_catalog_auth_hook);
+PG_FUNCTION_INFO_V1(test_rest_catalog_auth_hook_calls);
 
 /*
 * register_namespace_to_rest_catalog is a test function that registers
@@ -139,4 +143,83 @@ resolve_rest_catalog_base_uri(PG_FUNCTION_ARGS)
 	char	   *endpoint = text_to_cstring(PG_GETARG_TEXT_P(0));
 
 	PG_RETURN_TEXT_P(cstring_to_text(ResolveRestCatalogBaseUri(endpoint)));
+}
+
+
+/*
+ * Stand-in for the credential provider an external extension would
+ * register, letting tests drive PgLakeRestCatalogAuthHook without one.
+ *
+ * The canned response lives in TopMemoryContext because the hook is
+ * consulted long after install_test_rest_catalog_auth_hook's own call
+ * context is gone.
+ */
+static char *TestAuthHookAuthorization = NULL;
+static int	TestAuthHookExpiresIn = 0;
+static bool TestAuthHookClaimsCatalog = true;
+static int	TestAuthHookCallCount = 0;
+
+
+static bool
+TestRestCatalogAuthHook(RestCatalogOptions * opts, bool forceRefresh,
+						RestCatalogAuthMaterial * material)
+{
+	TestAuthHookCallCount++;
+
+	/* declining sends pg_lake back to its built-in OAuth2 grant */
+	if (!TestAuthHookClaimsCatalog)
+		return false;
+
+	material->authorization = pstrdup(TestAuthHookAuthorization);
+	material->expiresIn = TestAuthHookExpiresIn;
+
+	return true;
+}
+
+
+/*
+ * install_test_rest_catalog_auth_hook(authorization, expires_in, claims)
+ * registers the stub provider above.  Pass claims = false to check that a
+ * declining provider falls back to the built-in flow, and expires_in = 0
+ * to check that an uncacheable credential is re-fetched per request.
+ */
+Datum
+install_test_rest_catalog_auth_hook(PG_FUNCTION_ARGS)
+{
+	char	   *authorization = text_to_cstring(PG_GETARG_TEXT_P(0));
+
+	if (TestAuthHookAuthorization != NULL)
+		pfree(TestAuthHookAuthorization);
+
+	TestAuthHookAuthorization = MemoryContextStrdup(TopMemoryContext, authorization);
+	TestAuthHookExpiresIn = PG_GETARG_INT32(1);
+	TestAuthHookClaimsCatalog = PG_GETARG_BOOL(2);
+	TestAuthHookCallCount = 0;
+
+	PgLakeRestCatalogAuthHook = TestRestCatalogAuthHook;
+
+	PG_RETURN_VOID();
+}
+
+
+/*
+ * test_rest_catalog_auth_hook_calls returns how many times the stub
+ * provider has been consulted since it was installed.
+ */
+Datum
+test_rest_catalog_auth_hook_calls(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT32(TestAuthHookCallCount);
+}
+
+
+/*
+ * remove_test_rest_catalog_auth_hook unregisters the stub provider.
+ */
+Datum
+remove_test_rest_catalog_auth_hook(PG_FUNCTION_ARGS)
+{
+	PgLakeRestCatalogAuthHook = NULL;
+
+	PG_RETURN_VOID();
 }

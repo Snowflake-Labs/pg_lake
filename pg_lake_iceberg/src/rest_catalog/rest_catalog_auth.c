@@ -55,7 +55,7 @@
  *     (built-in pg_lake_rest_catalog, or a user-created server falling
  *     back to GUCs).
  *
- * Should always be accessed via GetRestCatalogAccessToken().
+ * Should always be accessed via GetRestCatalogAuthorization().
  */
 typedef struct RestCatalogTokenCacheKey
 {
@@ -66,8 +66,8 @@ typedef struct RestCatalogTokenCacheKey
 typedef struct RestCatalogTokenCacheEntry
 {
 	RestCatalogTokenCacheKey key;	/* hash key */
-	char	   *accessToken;
-	TimestampTz accessTokenExpiry;
+	char	   *authorization;	/* full header value, scheme included */
+	TimestampTz authorizationExpiry;
 }			RestCatalogTokenCacheEntry;
 
 static HTAB *RestCatalogTokenCache = NULL;
@@ -82,7 +82,12 @@ static MemoryContext RestTokenCacheCtx = NULL;
 static bool TokenCacheCallbackRegistered = false;
 
 
-static void FetchRestCatalogAccessToken(RestCatalogOptions * opts, char **accessToken, int *expiresIn);
+PgLakeRestCatalogAuthHookType PgLakeRestCatalogAuthHook = NULL;
+
+
+static void FetchRestCatalogAuthorization(RestCatalogOptions * opts, bool forceRefresh,
+										  char **authorization, int *expiresIn);
+static void FetchOAuth2AccessToken(RestCatalogOptions * opts, char **accessToken, int *expiresIn);
 static char *EncodeBasicAuth(const char *clientId, const char *clientSecret);
 
 
@@ -150,14 +155,15 @@ InitTokenCacheIfNeeded(void)
 
 
 /*
- * Gets an access token from rest catalog.  Caches the token per
- * (server, user-mapping) pair so that different SET ROLEs in the same
- * backend each see the credentials of their own user mapping (or
- * PUBLIC), while still letting the built-in pg_lake_rest_catalog share
- * a single (server, InvalidOid) slot across all sessions and roles.
+ * Gets the Authorization header value for a rest catalog, including its
+ * scheme.  Caches it per (server, user-mapping) pair so that different
+ * SET ROLEs in the same backend each see the credentials of their own
+ * user mapping (or PUBLIC), while still letting the built-in
+ * pg_lake_rest_catalog share a single (server, InvalidOid) slot across
+ * all sessions and roles.
  */
 char *
-GetRestCatalogAccessToken(RestCatalogOptions * opts, bool forceRefreshToken)
+GetRestCatalogAuthorization(RestCatalogOptions * opts, bool forceRefreshToken)
 {
 	if (opts == NULL)
 		ereport(ERROR,
@@ -189,40 +195,81 @@ GetRestCatalogAccessToken(RestCatalogOptions * opts, bool forceRefreshToken)
 
 	if (!found)
 	{
-		entry->accessToken = NULL;
-		entry->accessTokenExpiry = 0;
+		entry->authorization = NULL;
+		entry->authorizationExpiry = 0;
 	}
 
 	/*
-	 * Calling initial time or token will expire in 1 minute, fetch a new
-	 * token.
+	 * Calling initial time or credential will expire in 1 minute, fetch a new
+	 * one.  A provider reporting expiresIn = 0 lands its expiry at "now",
+	 * which fails this check on every subsequent call, so an uncacheable
+	 * credential is re-fetched per request without a special case here.
 	 */
 	TimestampTz now = GetCurrentTimestamp();
 	const int	MINUTE_IN_MSECS = 60 * 1000;
 
-	if (forceRefreshToken || entry->accessTokenExpiry == 0 ||
-		!TimestampDifferenceExceeds(now, entry->accessTokenExpiry, MINUTE_IN_MSECS))
+	if (forceRefreshToken || entry->authorizationExpiry == 0 ||
+		!TimestampDifferenceExceeds(now, entry->authorizationExpiry, MINUTE_IN_MSECS))
 	{
-		if (entry->accessToken)
+		if (entry->authorization)
 		{
-			pfree(entry->accessToken);
-			entry->accessToken = NULL;
-			entry->accessTokenExpiry = 0;
+			pfree(entry->authorization);
+			entry->authorization = NULL;
+			entry->authorizationExpiry = 0;
 		}
 
-		char	   *accessToken = NULL;
+		char	   *authorization = NULL;
 		int			expiresIn = 0;
 
-		FetchRestCatalogAccessToken(opts, &accessToken, &expiresIn);
+		FetchRestCatalogAuthorization(opts, forceRefreshToken, &authorization, &expiresIn);
 
-		entry->accessToken = MemoryContextStrdup(RestTokenCacheCtx, accessToken);
-		entry->accessTokenExpiry = now + (int64_t) expiresIn * 1000000; /* expiresIn is in
-																		 * seconds */
+		entry->authorization = MemoryContextStrdup(RestTokenCacheCtx, authorization);
+		entry->authorizationExpiry = now + (int64_t) expiresIn * 1000000;	/* expiresIn is in
+																			 * seconds */
 	}
 
-	Assert(entry->accessToken != NULL);
+	Assert(entry->authorization != NULL);
 
-	return entry->accessToken;
+	return entry->authorization;
+}
+
+
+/*
+ * Produces the Authorization header value for a catalog, either from a
+ * registered provider or from pg_lake's own OAuth2 client-credentials
+ * grant.
+ */
+static void
+FetchRestCatalogAuthorization(RestCatalogOptions * opts, bool forceRefresh,
+							  char **authorization, int *expiresIn)
+{
+	if (PgLakeRestCatalogAuthHook != NULL)
+	{
+		RestCatalogAuthMaterial material = {0};
+
+		if (PgLakeRestCatalogAuthHook(opts, forceRefresh, &material))
+		{
+			if (material.authorization == NULL || *material.authorization == '\0')
+				ereport(ERROR,
+						(errcode(ERRCODE_INTERNAL_ERROR),
+						 errmsg("REST catalog credential provider returned an empty authorization")));
+
+			if (material.expiresIn < 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_INTERNAL_ERROR),
+						 errmsg("REST catalog credential provider returned a negative lifetime")));
+
+			*authorization = material.authorization;
+			*expiresIn = material.expiresIn;
+			return;
+		}
+	}
+
+	char	   *accessToken = NULL;
+
+	FetchOAuth2AccessToken(opts, &accessToken, expiresIn);
+
+	*authorization = psprintf("Bearer %s", accessToken);
 }
 
 
@@ -230,7 +277,7 @@ GetRestCatalogAccessToken(RestCatalogOptions * opts, bool forceRefreshToken)
 * Fetches an access token from rest catalog using the given options.
 */
 static void
-FetchRestCatalogAccessToken(RestCatalogOptions * opts, char **accessToken, int *expiresIn)
+FetchOAuth2AccessToken(RestCatalogOptions * opts, char **accessToken, int *expiresIn)
 {
 	Assert(opts->baseUri != NULL && opts->baseUri[0] != '\0');
 
@@ -300,7 +347,7 @@ FetchRestCatalogAccessToken(RestCatalogOptions * opts, char **accessToken, int *
 	/*
 	 * Pass NULL opts so SendRequestToRestCatalog skips the 419 token-refresh
 	 * retry branch.  Otherwise a 419 here would call
-	 * GetRestCatalogAccessToken -> FetchRestCatalogAccessToken ->
+	 * GetRestCatalogAuthorization -> FetchOAuth2AccessToken ->
 	 * SendRequestToRestCatalog in an infinite loop.
 	 */
 	HttpResult	httpResponse = SendRequestToRestCatalog(NULL, HTTP_POST, accessTokenUrl,
@@ -367,7 +414,7 @@ PostHeadersWithAuth(RestCatalogOptions * opts)
 {
 	bool		forceRefreshToken = false;
 
-	return list_make3(psprintf("Authorization: Bearer %s", GetRestCatalogAccessToken(opts, forceRefreshToken)),
+	return list_make3(psprintf("Authorization: %s", GetRestCatalogAuthorization(opts, forceRefreshToken)),
 					  pstrdup("Accept: application/json"),
 					  pstrdup("Content-Type: application/json"));
 }
@@ -381,7 +428,7 @@ DeleteHeadersWithAuth(RestCatalogOptions * opts)
 {
 	bool		forceRefreshToken = false;
 
-	return list_make1(psprintf("Authorization: Bearer %s", GetRestCatalogAccessToken(opts, forceRefreshToken)));
+	return list_make1(psprintf("Authorization: %s", GetRestCatalogAuthorization(opts, forceRefreshToken)));
 }
 
 
@@ -393,6 +440,6 @@ GetHeadersWithAuth(RestCatalogOptions * opts)
 {
 	bool		forceRefreshToken = false;
 
-	return list_make2(psprintf("Authorization: Bearer %s", GetRestCatalogAccessToken(opts, forceRefreshToken)),
+	return list_make2(psprintf("Authorization: %s", GetRestCatalogAuthorization(opts, forceRefreshToken)),
 					  pstrdup("Accept: application/json"));
 }
