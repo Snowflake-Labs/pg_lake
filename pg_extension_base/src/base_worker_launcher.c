@@ -107,6 +107,13 @@
 #define MAX_WORKER_NAME_LENGTH (255)
 
 /*
+ * How long the server starter sleeps while a database starter it could not
+ * launch is still flagged for restart, e.g. because max_worker_processes was
+ * exhausted.
+ */
+#define DATABASE_STARTER_RETRY_SLEEP_MS (1000)
+
+/*
  * When a base worker fails with an error we delay its restart to avoid a tight
  * crash loop.  The delay grows exponentially with the number of consecutive
  * failures: WorkerRestartBackoffInitialMs on the first failure, doubling on
@@ -433,6 +440,7 @@ static bool ExtensionExists(char *extensionName);
 static TimestampTz GetDelayedTimestamp(int64 millis);
 static int64 ComputeRestartBackoffMs(int failureCount);
 static void SignalDatabaseStarterLocked(Oid databaseId);
+static bool DatabaseStarterRestartPendingLocked(void);
 static void DatabaseStarterNeedsRestart(Oid databaseId);
 static void PrepareForDrop(Oid databaseId, Oid extensionId);
 
@@ -1551,10 +1559,11 @@ PgExtensionBaseDatabaseStarterSharedMemoryExit(int code, Datum arg)
 
 
 /*
- * ComputeNextWakeTimeMs computes the minimum sleep time based on pending
- * worker restarts in the current database.
+ * ComputeNextWakeTimeMs computes the minimum sleep time based on the restarts
+ * the calling starter is the one able to carry out: base workers in its own
+ * database for a database starter, database starters for the server starter.
  *
- * Returns the number of milliseconds until the next worker restart is due, or
+ * Returns the number of milliseconds until the next restart is due, or
  * worker_starter_sleep_time if no restarts are pending.
  */
 static int64
@@ -1570,6 +1579,22 @@ ComputeNextWakeTimeMs(void)
 	TimestampTz now = GetCurrentTimestamp();
 
 	LWLockAcquire(&BaseWorkerControl->lock, LW_SHARED);
+
+	/*
+	 * The server starter connects to shared catalogs only, so MyDatabaseId is
+	 * invalid and the base worker loop below never matches for it.  What it
+	 * can act on is a database starter awaiting a restart, so shorten its
+	 * sleep on that instead.
+	 *
+	 * SignalDatabaseStarterLocked also sends a latch, but recovery cannot
+	 * rest on it alone: WaitForBackgroundWorkerStartup does its own WaitLatch
+	 * and ResetLatch and can swallow the wake, and a launch that ran out of
+	 * worker slots leaves needsRestart set with nobody left to send one.
+	 */
+	if (!OidIsValid(MyDatabaseId) && DatabaseStarterRestartPendingLocked())
+	{
+		minSleepMs = Min(minSleepMs, DATABASE_STARTER_RETRY_SLEEP_MS);
+	}
 
 	HASH_SEQ_STATUS status;
 
@@ -2420,10 +2445,7 @@ PgExtensionBaseWorkerSharedMemoryExit(int code, Datum arg)
 		}
 		else if (!workerEntry->needsRestart)
 		{
-			/*
-			 * needsRestart being false means that we got killed due to an
-			 * internal error. Bring back the database starter to restore us.
-			 */
+			/* needsRestart being false means an internal error killed us */
 
 			/*
 			 * If the worker had been running for a while before it failed,
@@ -2443,9 +2465,6 @@ PgExtensionBaseWorkerSharedMemoryExit(int code, Datum arg)
 
 			int64		backoffMs = ComputeRestartBackoffMs(workerEntry->failureCount);
 
-			/*
-			 * Also tell the database starter that we want to restart
-			 */
 			workerEntry->needsRestart = true;
 			workerEntry->state = WORKER_RESTARTING;
 			workerEntry->restartAfter = GetDelayedTimestamp(backoffMs);
@@ -3383,6 +3402,37 @@ SignalDatabaseStarterLocked(Oid databaseId)
 	{
 		ProcSendSignal(BaseWorkerControl->serverStarterProcno);
 	}
+}
+
+
+/*
+ * DatabaseStarterRestartPendingLocked returns whether some database starter is
+ * flagged for restart and not already running, meaning StartDatabaseStarters
+ * would try to launch it.
+ *
+ * Must be called while holding the BaseWorkerControl->lock.
+ */
+static bool
+DatabaseStarterRestartPendingLocked(void)
+{
+	HASH_SEQ_STATUS status;
+
+	hash_seq_init(&status, DatabaseStarterHash);
+
+	DatabaseStarterEntry *starterEntry;
+
+	while ((starterEntry = (DatabaseStarterEntry *) hash_seq_search(&status)) != NULL)
+	{
+		if (!starterEntry->needsRestart)
+			continue;
+		if (starterEntry->workerPid != 0 || starterEntry->state == WORKER_STARTING)
+			continue;
+
+		hash_seq_term(&status);
+		return true;
+	}
+
+	return false;
 }
 
 
