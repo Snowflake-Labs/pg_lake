@@ -6,7 +6,9 @@ has no built-in support for.
 A mock HTTP server stands in for the catalog.  It records the
 Authorization header of every non-token request and counts how often the
 OAuth2 token endpoint was hit, which is what separates "the provider
-supplied the credential" from "pg_lake fell back to its own grant".
+supplied the credential" from "pg_lake fell back to its own grant".  It
+can also answer 401, which is how the refresh-on-rejection path is
+exercised.
 
 Each test runs on its own connection because the credential cache is
 backend-local, so a credential cached by one test would otherwise be
@@ -57,6 +59,10 @@ def _make_handler_class():
         token_requests = 0
         data_request_auths = []
 
+        # Number of upcoming catalog requests to answer with 401, or -1 to
+        # reject every one of them.
+        reject_data_requests = 0
+
         def _handle(self):
             if "/oauth/tokens" in self.path:
                 _Handler.token_requests += 1
@@ -76,6 +82,26 @@ def _make_handler_class():
             _Handler.data_request_auths.append(
                 self.headers.get("Authorization", "<missing>")
             )
+
+            if _Handler.reject_data_requests != 0:
+                if _Handler.reject_data_requests > 0:
+                    _Handler.reject_data_requests -= 1
+
+                body = json.dumps(
+                    {
+                        "error": {
+                            "message": "credential is not authorized",
+                            "type": "NotAuthorizedException",
+                            "code": 401,
+                        }
+                    }
+                )
+                self.send_response(401)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body.encode())
+                return
+
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -242,3 +268,54 @@ def test_declining_provider_falls_back_to_builtin_oauth2(
         handler_class.token_requests == 1
     ), "pg_lake did not fall back to its own OAuth2 grant"
     assert handler_class.data_request_auths[0].startswith("Bearer ")
+
+
+def test_catalog_401_refreshes_the_credential(
+    iceberg_extension, installcheck, catalog_and_conn
+):
+    """
+    A 401 re-fetches the credential and retries.
+
+    A cached credential can lapse before the catalog sees it, and catalogs
+    behind an OAuth2 token exchange report that as 401 rather than the
+    non-standard 419 that Polaris uses.  Without this the request would
+    fail even though a usable credential was one exchange away.
+    """
+    if installcheck:
+        return
+
+    handler_class, conn = catalog_and_conn
+    handler_class.reject_data_requests = 1
+
+    _install_hook(conn, "Bearer cacheable-credential", 3600, "true")
+    _touch_catalog(conn, "myns")
+
+    assert len(handler_class.data_request_auths) == 2, "the 401 was not retried"
+    assert _hook_calls(conn) == 2, "the 401 did not re-fetch the credential"
+
+
+def test_persistent_401_is_reported_after_one_refresh(
+    iceberg_extension, installcheck, catalog_and_conn
+):
+    """
+    A credential that is genuinely unauthorized gets one refresh, not every
+    retry slot, so the failure surfaces promptly instead of after three
+    round trips.
+    """
+    if installcheck:
+        return
+
+    handler_class, conn = catalog_and_conn
+    handler_class.reject_data_requests = -1
+
+    _install_hook(conn, "Bearer rejected-credential", 3600, "true")
+
+    with pytest.raises(Exception, match="credential is not authorized"):
+        _touch_catalog(conn, "myns")
+
+    conn.rollback()
+
+    assert (
+        len(handler_class.data_request_auths) == 2
+    ), "a persistent 401 consumed more than its one refresh"
+    assert _hook_calls(conn) == 2

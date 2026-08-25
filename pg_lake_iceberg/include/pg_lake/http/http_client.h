@@ -56,6 +56,7 @@ extern char *HttpClientTlsCaFile;
 extern char *HttpClientTlsCertFile;
 extern char *HttpClientTlsKeyFile;
 
+#define HTTP_STATUS_UNAUTHORIZED		401
 #define HTTP_STATUS_TOKEN_EXPIRED		419
 #define HTTP_STATUS_TOO_MANY_REQUESTS	429
 #define HTTP_STATUS_SERVICE_UNAVAILABLE	503
