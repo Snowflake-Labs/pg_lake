@@ -171,6 +171,15 @@ CurlSetOptions(CURL *curl, const char *url, HttpMethod method,
 	if (HttpClientTlsKeyFile != NULL && HttpClientTlsKeyFile[0] != '\0')
 		CURL_SETOPT(curl, CURLOPT_SSLKEY, HttpClientTlsKeyFile);
 
+	/*
+	 * These match libcurl's defaults, and are stated outright because peer
+	 * and host verification is the part of this setup worth being unambiguous
+	 * about: a future reader should not have to know the defaults to see that
+	 * certificates are checked.
+	 */
+	CURL_SETOPT(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+	CURL_SETOPT(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+
 	/* Connect the progress callback for interrupt support */
 #if CURL_AT_LEAST_VERSION(7, 32, 0)
 	CURL_SETOPT(curl, CURLOPT_XFERINFOFUNCTION, CurlProgressCallback);
