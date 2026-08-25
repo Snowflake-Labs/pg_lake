@@ -290,7 +290,7 @@ def create_iceberg_user_server_rest_table(
     creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
     client_id = creds["credentials"]["clientId"]
     client_secret = creds["credentials"]["clientSecret"]
-    endpoint = f"http://{server_params.POLARIS_HOSTNAME}:{server_params.POLARIS_PORT}"
+    endpoint = f"http://{server_params.POLARIS_HOSTNAME}:{server_params.POLARIS_PORT}/api/catalog"
 
     # Credentials live on a PUBLIC user mapping so the fixture is
     # usable by the unprivileged test role; client_id and client_secret

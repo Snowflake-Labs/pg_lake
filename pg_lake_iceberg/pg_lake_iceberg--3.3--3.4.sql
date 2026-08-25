@@ -25,7 +25,7 @@
  * User-defined catalog example:
  *   CREATE SERVER my_polaris TYPE 'rest'
  *     FOREIGN DATA WRAPPER iceberg_catalog
- *     OPTIONS (rest_endpoint 'https://polaris.example.com');
+ *     OPTIONS (rest_endpoint 'https://polaris.example.com/api/catalog');
  *
  *   CREATE USER MAPPING FOR user1 SERVER my_polaris
  *     OPTIONS (client_id '...', client_secret '...');

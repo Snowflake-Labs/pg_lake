@@ -137,7 +137,7 @@ def test_token_refresh_on_419_retry(
 
     run_command_outside_tx(
         [
-            f"ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_host TO 'http://127.0.0.1:{port}'",
+            f"ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_host TO 'http://127.0.0.1:{port}/api/catalog'",
             "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_id TO 'test_id'",
             "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_secret TO 'test_secret'",
             "SELECT pg_reload_conf()",
