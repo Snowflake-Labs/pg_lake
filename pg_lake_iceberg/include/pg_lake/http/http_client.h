@@ -45,6 +45,17 @@ typedef struct
 
 extern bool HttpClientTraceTraffic;
 
+/*
+ * Client-certificate material for outbound HTTPS.  Empty means "not
+ * configured", in which case libcurl keeps its defaults and no client
+ * certificate is presented.  Catalogs that sit behind an mTLS edge need
+ * these even when the request itself is authorized by a bearer token,
+ * because the certificate governs admission rather than identity.
+ */
+extern char *HttpClientTlsCaFile;
+extern char *HttpClientTlsCertFile;
+extern char *HttpClientTlsKeyFile;
+
 #define HTTP_STATUS_TOKEN_EXPIRED		419
 #define HTTP_STATUS_TOO_MANY_REQUESTS	429
 #define HTTP_STATUS_SERVICE_UNAVAILABLE	503

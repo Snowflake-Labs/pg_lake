@@ -28,6 +28,7 @@
 #include "pg_lake/avro/avro_writer.h"
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/ddl/utility_hook.h"
+#include "pg_lake/http/http_client.h"
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/iceberg/catalog.h"
@@ -184,6 +185,37 @@ _PG_init(void)
 							 PGC_USERSET,
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
+
+
+	DefineCustomStringVariable("pg_lake_iceberg.tls_ca_file",
+							   gettext_noop("Path to the CA bundle used to verify REST "
+											"catalog servers. Empty uses the system bundle."),
+							   NULL,
+							   &HttpClientTlsCaFile,
+							   "",
+							   PGC_SIGHUP,
+							   GUC_NO_SHOW_ALL | GUC_SUPERUSER_ONLY | GUC_NOT_IN_SAMPLE,
+							   NULL, NULL, NULL);
+
+	DefineCustomStringVariable("pg_lake_iceberg.tls_cert_file",
+							   gettext_noop("Path to the client certificate presented to REST "
+											"catalog servers that require mutual TLS."),
+							   NULL,
+							   &HttpClientTlsCertFile,
+							   "",
+							   PGC_SIGHUP,
+							   GUC_NO_SHOW_ALL | GUC_SUPERUSER_ONLY | GUC_NOT_IN_SAMPLE,
+							   NULL, NULL, NULL);
+
+	DefineCustomStringVariable("pg_lake_iceberg.tls_key_file",
+							   gettext_noop("Path to the private key for "
+											"pg_lake_iceberg.tls_cert_file."),
+							   NULL,
+							   &HttpClientTlsKeyFile,
+							   "",
+							   PGC_SIGHUP,
+							   GUC_NO_SHOW_ALL | GUC_SUPERUSER_ONLY | GUC_NOT_IN_SAMPLE,
+							   NULL, NULL, NULL);
 
 
 	DefineCustomStringVariable("pg_lake_iceberg.default_location_prefix",

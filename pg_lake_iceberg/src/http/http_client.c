@@ -79,6 +79,10 @@ static bool curlInitialized = false;
 
 bool		HttpClientTraceTraffic = false;
 
+char	   *HttpClientTlsCaFile = "";
+char	   *HttpClientTlsCertFile = "";
+char	   *HttpClientTlsKeyFile = "";
+
 
 /*
  * CurlGloballyInitIfNotInitialized globally initiates curl state if not initialized.
@@ -151,6 +155,21 @@ CurlSetOptions(CURL *curl, const char *url, HttpMethod method,
 	CURL_SETOPT(curl, CURLOPT_FOLLOWLOCATION, 1L);
 	CURL_SETOPT(curl, CURLOPT_CONNECTTIMEOUT_MS, CONNECT_TIMEOUT_MS);
 	CURL_SETOPT(curl, CURLOPT_TIMEOUT_MS, TOTAL_TIMEOUT_MS);
+
+	/*
+	 * Client certificate material, when configured.  Each option is set only
+	 * when a path was supplied: CURLOPT_CAINFO replaces the default CA bundle
+	 * outright, so passing an empty path here would leave the handle unable
+	 * to verify any peer.
+	 */
+	if (HttpClientTlsCaFile != NULL && HttpClientTlsCaFile[0] != '\0')
+		CURL_SETOPT(curl, CURLOPT_CAINFO, HttpClientTlsCaFile);
+
+	if (HttpClientTlsCertFile != NULL && HttpClientTlsCertFile[0] != '\0')
+		CURL_SETOPT(curl, CURLOPT_SSLCERT, HttpClientTlsCertFile);
+
+	if (HttpClientTlsKeyFile != NULL && HttpClientTlsKeyFile[0] != '\0')
+		CURL_SETOPT(curl, CURLOPT_SSLKEY, HttpClientTlsKeyFile);
 
 	/* Connect the progress callback for interrupt support */
 #if CURL_AT_LEAST_VERSION(7, 32, 0)
