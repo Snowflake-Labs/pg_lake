@@ -192,6 +192,14 @@ typedef struct DatabaseStarterEntry
 
 	/* process number for signaling via ProcSendSignal */
 	int			procno;
+
+	/*
+	 * When the current launch attempt was issued (state set to
+	 * WORKER_STARTING).  Used to detect a launch that never actually ran
+	 * (e.g. the postmaster could not fork it) so we do not stay wedged at
+	 * WORKER_STARTING forever with workerPid still 0.
+	 */
+	TimestampTz launchedAt;
 }			DatabaseStarterEntry;
 
 
@@ -239,6 +247,15 @@ typedef struct BaseWorkerEntry
 
 	/* when the worker last started running (for the healthy-uptime reset) */
 	TimestampTz startTime;
+
+	/*
+	 * When the current launch attempt was issued (state set to
+	 * WORKER_STARTING).  Unlike startTime, this is set unconditionally at
+	 * launch time, so it lets us detect a launch that never actually ran
+	 * (e.g. the postmaster could not fork it) even though startTime itself
+	 * stays 0 forever in that case.
+	 */
+	TimestampTz launchedAt;
 }			BaseWorkerEntry;
 
 
@@ -283,11 +300,38 @@ typedef struct BaseWorkerRegistration
  */
 typedef enum StartDatabaseStarterResult
 {
+	/* we registered a launch and the postmaster ran it */
 	DATABASE_STARTER_STARTED,
+
+	/* one is already running, or its launch is still in flight */
 	DATABASE_STARTER_EXISTS,
+
+	/* one already ran to completion and does not need to run again */
 	DATABASE_STARTER_DONE,
+
+	/*
+	 * A concurrent DROP DATABASE/EXTENSION holds the database starter lock,
+	 * so we backed off; needsRestart stays set and the next pass deals with
+	 * the database.
+	 */
 	DATABASE_STARTER_BLOCKED,
-	DATABASE_STARTER_FAILED
+
+	/*
+	 * We could not even register the launch, because max_worker_processes is
+	 * exhausted.  That is a server-wide condition, so the caller should give
+	 * up on the remaining databases for this pass rather than repeat the
+	 * failure for each one.
+	 */
+	DATABASE_STARTER_OUT_OF_SLOTS,
+
+	/*
+	 * We registered the launch, but the postmaster reported that the child
+	 * never actually ran (e.g. it could not fork it).  This is specific to
+	 * one launch rather than server-wide, so the caller should keep going
+	 * with the other databases; the entry has been reset for a retry on the
+	 * next pass.
+	 */
+	DATABASE_STARTER_START_FAILED
 }			StartDatabaseStarterResult;
 
 /*
@@ -296,10 +340,22 @@ typedef enum StartDatabaseStarterResult
  */
 typedef enum StartBaseWorkerResult
 {
+	/* we registered a launch and the postmaster ran it */
 	BASE_WORKER_STARTED,
+
+	/* one is already running, or its launch is still in flight */
 	BASE_WORKER_EXISTS,
+
+	/* one already ran to completion and does not need to run again */
 	BASE_WORKER_DONE,
+
+	/* see DATABASE_STARTER_OUT_OF_SLOTS */
+	BASE_WORKER_OUT_OF_SLOTS,
+
+	/* see DATABASE_STARTER_START_FAILED */
 	BASE_WORKER_START_FAILED,
+
+	/* its restart backoff has not elapsed yet */
 	BASE_WORKER_START_BLOCKED
 }			StartBaseWorkerResult;
 
@@ -318,6 +374,7 @@ static void PgBaseExtensionServerStarterSharedMemoryExit(int code, Datum arg);
 static void StartDatabaseStarters(List *databaseList);
 static List *GetDatabaseList(void);
 static void RemoveWorkerEntriesNotInDatabaseList(List *databaseList);
+static void ReclaimStaleBaseWorkerLaunches(void);
 static bool DatabaseExistsInList(List *databaseList, Oid databaseId);
 static StartDatabaseStarterResult StartDatabaseStarter(Oid databaseId,
 													   char *databaseName);
@@ -423,6 +480,9 @@ int32		MyBaseWorkerId = InvalidOid;
 int			WorkerRestartBackoffInitialMs = DEFAULT_WORKER_RESTART_BACKOFF_INITIAL_MS;
 int			WorkerRestartBackoffMaxMs = DEFAULT_WORKER_RESTART_BACKOFF_MAX_MS;
 int			WorkerRestartHealthyMs = DEFAULT_WORKER_RESTART_HEALTHY_MS;
+
+/* pg_extension_base.worker_startup_timeout */
+int			WorkerStartupTimeoutMs = DEFAULT_WORKER_STARTUP_TIMEOUT_MS;
 
 /*
  * InitializeBaseWorkerLauncher sets up hooks used by the base worker launcher.
@@ -725,6 +785,14 @@ PgExtensionServerStarterMain(Datum arg)
 		 */
 		RemoveWorkerEntriesNotInDatabaseList(databaseList);
 
+		/*
+		 * Reclaim base worker launches that never actually ran. This has to
+		 * happen here rather than only in StartBaseWorker: a database starter
+		 * exits as soon as every launch it issued reported success, so once
+		 * it is gone nothing else would ever revisit those entries.
+		 */
+		ReclaimStaleBaseWorkerLaunches();
+
 		/* start database starters when needed */
 		StartDatabaseStarters(databaseList);
 
@@ -779,11 +847,8 @@ StartDatabaseStarters(List *databaseList)
 		Oid			databaseId = entry->databaseId;
 
 		/*
-		 * StartDatabaseStarter conditionally acquires a lock that a
-		 * concurrent DROP DATABASE/EXTENSION holds, and skips the database if
-		 * it cannot get it. We hold the lock until leaving the function and
-		 * committing below, which keeps such a DROP out of the way while we
-		 * register the database starter.
+		 * Run in a transaction so the lock StartDatabaseStarter takes is held
+		 * until we commit below.
 		 */
 		StartTransactionCommand();
 
@@ -793,14 +858,26 @@ StartDatabaseStarters(List *databaseList)
 		CommitTransactionCommand();
 		MemoryContextSwitchTo(outerContext);
 
-		if (startResult == DATABASE_STARTER_FAILED)
+		if (startResult == DATABASE_STARTER_OUT_OF_SLOTS)
 		{
-			/* failed to start, bail out for now */
+			/* no slots left, so the remaining databases will not start either */
 			ereport(LOG, (errmsg("failed to start pg base extension database starter in database %s",
 								 quote_identifier(entry->databaseName)),
 						  errhint("You may need to increase max_worker_processes.")));
 
 			return;
+		}
+		else if (startResult == DATABASE_STARTER_START_FAILED)
+		{
+			/*
+			 * The launch was registered but never actually ran. The entry has
+			 * already been reset so the next pass will retry; this is
+			 * unrelated to other databases, so keep going instead of bailing
+			 * out of the whole loop.
+			 */
+			ereport(LOG, (errmsg("pg base extension database starter in database %s "
+								 "did not start, will retry",
+								 quote_identifier(entry->databaseName))));
 		}
 	}
 }
@@ -887,6 +964,79 @@ RemoveWorkerEntriesNotInDatabaseList(List *databaseList)
 
 
 /*
+ * ReclaimStaleBaseWorkerLaunches resets base worker entries that have been
+ * sitting in WORKER_STARTING with no pid for longer than
+ * worker_startup_timeout.
+ *
+ * That state means the child never ran any of our code -- the postmaster
+ * could not fork it, or it died before reaching the before_shmem_exit handler
+ * that is otherwise the only thing that ever clears WORKER_STARTING. Note
+ * that WaitForBackgroundWorkerStartup cannot catch the latter: the postmaster
+ * publishes the child's pid before the child loads our library, so the launch
+ * reports BGWH_STARTED either way.
+ *
+ * Resetting the entry alone is not enough to get the worker running again,
+ * because only a database starter can launch base workers, so we also flag
+ * the owning database's starter for restart.
+ */
+static void
+ReclaimStaleBaseWorkerLaunches(void)
+{
+	if (BaseWorkerHash == NULL)
+	{
+		return;
+	}
+
+	TimestampTz now = GetCurrentTimestamp();
+
+	LWLockAcquire(&BaseWorkerControl->lock, LW_EXCLUSIVE);
+
+	HASH_SEQ_STATUS status;
+
+	hash_seq_init(&status, BaseWorkerHash);
+
+	BaseWorkerEntry *workerEntry;
+
+	while ((workerEntry = (BaseWorkerEntry *) hash_seq_search(&status)) != NULL)
+	{
+		if (workerEntry->state != WORKER_STARTING || workerEntry->workerPid > 0)
+		{
+			continue;
+		}
+
+		if (!TimestampDifferenceExceeds(workerEntry->launchedAt, now,
+										WorkerStartupTimeoutMs))
+		{
+			continue;
+		}
+
+		ereport(WARNING, (errmsg("pg base extension worker %d in database %d "
+								 "appears to have never started (stuck in "
+								 "starting state for over %d ms); retrying",
+								 workerEntry->key.workerId,
+								 workerEntry->key.databaseId,
+								 WorkerStartupTimeoutMs)));
+
+		workerEntry->state = WORKER_STOPPED;
+		workerEntry->needsRestart = true;
+		workerEntry->restartAfter = 0;
+
+		bool		starterFound = false;
+		DatabaseStarterEntry *starterEntry =
+			hash_search(DatabaseStarterHash, &workerEntry->key.databaseId,
+						HASH_FIND, &starterFound);
+
+		if (starterFound)
+		{
+			starterEntry->needsRestart = true;
+		}
+	}
+
+	LWLockRelease(&BaseWorkerControl->lock);
+}
+
+
+/*
  * DatabaseExistsInList returns whether databaseList contains a
  * DatabaseEntry for the database with OID databaseId.
  */
@@ -923,7 +1073,10 @@ StartDatabaseStarter(Oid databaseId, char *databaseName)
 	/*
 	 * A concurrent DROP DATABASE/EXTENSION that affects this database holds
 	 * this lock in ExclusiveLock mode until it commits or aborts, so we back
-	 * off and let the next iteration deal with the database.
+	 * off and let the next iteration deal with the database. When we do get
+	 * the lock, the caller holds it until its transaction commits, which
+	 * keeps such a DROP out of the way while we register the database
+	 * starter.
 	 *
 	 * In case of DROP DATABASE, proceeding would create a database starter
 	 * that connects to a database the DROP is waiting to become idle. The
@@ -960,13 +1113,40 @@ StartDatabaseStarter(Oid databaseId, char *databaseName)
 
 	if (isFound)
 	{
-		if (starterEntry->workerPid > 0 || starterEntry->state == WORKER_STARTING)
+		if (starterEntry->workerPid > 0)
 		{
 			/* database starter is already running */
 			LWLockRelease(&BaseWorkerControl->lock);
 			return DATABASE_STARTER_EXISTS;
 		}
-		else if (!starterEntry->needsRestart)
+		else if (starterEntry->state == WORKER_STARTING)
+		{
+			if (!TimestampDifferenceExceeds(starterEntry->launchedAt,
+											GetCurrentTimestamp(),
+											WorkerStartupTimeoutMs))
+			{
+				/* launch is still within its startup grace period */
+				LWLockRelease(&BaseWorkerControl->lock);
+				return DATABASE_STARTER_EXISTS;
+			}
+
+			/*
+			 * The launch has been stuck at WORKER_STARTING with no pid for
+			 * longer than worker_startup_timeout, which means the child never
+			 * ran (e.g. the postmaster could not fork it) and thus never
+			 * reached the cleanup handler that would otherwise reset our
+			 * state.  Reclaim the entry and fall through to retry the launch
+			 * below rather than staying wedged forever.
+			 */
+			ereport(WARNING, (errmsg("pg base extension database starter in database %s "
+									 "appears to have never started (stuck in starting "
+									 "state for over %d ms); retrying",
+									 quote_identifier(databaseName), WorkerStartupTimeoutMs)));
+			starterEntry->state = WORKER_STOPPED;
+			starterEntry->needsRestart = true;
+		}
+
+		if (!starterEntry->needsRestart)
 		{
 			/*
 			 * database starter is already finished and does not need a
@@ -1013,7 +1193,7 @@ StartDatabaseStarter(Oid databaseId, char *databaseName)
 		 * next time, hoping that another background worker stopped.
 		 */
 		LWLockRelease(&BaseWorkerControl->lock);
-		return DATABASE_STARTER_FAILED;
+		return DATABASE_STARTER_OUT_OF_SLOTS;
 	}
 
 	/*
@@ -1022,6 +1202,7 @@ StartDatabaseStarter(Oid databaseId, char *databaseName)
 	 */
 	starterEntry->needsRestart = false;
 	starterEntry->state = WORKER_STARTING;
+	starterEntry->launchedAt = GetCurrentTimestamp();
 
 	LWLockRelease(&BaseWorkerControl->lock);
 
@@ -1030,8 +1211,43 @@ StartDatabaseStarter(Oid databaseId, char *databaseName)
 	 * creation. We let the process set its own PID.
 	 */
 	pid_t		workerPid = 0;
+	BgwHandleStatus status = WaitForBackgroundWorkerStartup(handle, &workerPid);
 
-	WaitForBackgroundWorkerStartup(handle, &workerPid);
+	Assert(status != BGWH_NOT_YET_STARTED);
+
+	/*
+	 * In production the branch below is reached when the postmaster could not
+	 * fork the child at all, which a test cannot arrange.  Let it say so
+	 * instead, having killed the child at
+	 * database-starter-before-exit-handler so that no starter is left running
+	 * behind our back.
+	 */
+	if (IS_INJECTION_POINT_ATTACHED_COMPAT("database-starter-launch-reported-stopped"))
+		status = BGWH_STOPPED;
+
+	if (status != BGWH_STARTED)
+	{
+		/*
+		 * The postmaster never actually ran the child (fork() failure). Reset
+		 * the entry so the next pass retries: only the child's own cleanup
+		 * handler would otherwise clear it, so the entry would sit at
+		 * WORKER_STARTING with pid 0 forever.  The status only catches a
+		 * failed fork; a child that dies after the postmaster published its
+		 * pid still reports BGWH_STARTED, which is what the
+		 * worker_startup_timeout check above covers.
+		 */
+		LWLockAcquire(&BaseWorkerControl->lock, LW_EXCLUSIVE);
+		starterEntry->workerPid = 0;
+		starterEntry->state = WORKER_STOPPED;
+		starterEntry->needsRestart = true;
+		LWLockRelease(&BaseWorkerControl->lock);
+
+		ereport(WARNING, (errmsg("pg base extension database starter in database %s "
+								 "did not start",
+								 quote_identifier(databaseName))));
+
+		return DATABASE_STARTER_START_FAILED;
+	}
 
 	return DATABASE_STARTER_STARTED;
 }
@@ -1045,6 +1261,13 @@ void
 PgExtensionBaseDatabaseStarterMain(Datum databaseIdDatum)
 {
 	Oid			databaseId = DatumGetObjectId(databaseIdDatum);
+
+	/*
+	 * Lets a test exercise a launch whose child dies before it registers the
+	 * exit handler below, which is the only thing that would otherwise move
+	 * the entry out of WORKER_STARTING.
+	 */
+	INJECTION_POINT_COMPAT("database-starter-before-exit-handler");
 
 	/* Establish signal handlers before unblocking signals. */
 	pqsignal(SIGHUP, HandleSighup);
@@ -1420,13 +1643,26 @@ StartAllBaseWorkers(List *workerRegistrationList)
 			StartBaseWorker(registration->workerId, registration->extensionId,
 							registration->entryPointFunctionId);
 
-		if (startResult == BASE_WORKER_START_FAILED)
+		if (startResult == BASE_WORKER_OUT_OF_SLOTS)
 		{
 			ereport(LOG, (errmsg("failed to start base worker %s in database %d",
 								 registration->workerName, MyDatabaseId)),
 					errhint("You may need to increase max_worker_processes."));
 
-			/* failed to start, bail out for now */
+			/* no slots left, so the remaining workers will not start either */
+			return false;
+		}
+		else if (startResult == BASE_WORKER_START_FAILED)
+		{
+			ereport(LOG, (errmsg("base worker %s in database %d did not start, "
+								 "will retry",
+								 registration->workerName, MyDatabaseId)));
+
+			/*
+			 * The entry has been reset for a retry. Report that not
+			 * everything is up so we stay alive and come back to it, rather
+			 * than exiting as if all the launches had succeeded.
+			 */
 			return false;
 		}
 		else if (startResult == BASE_WORKER_START_BLOCKED)
@@ -1556,13 +1792,25 @@ StartBaseWorker(int workerId, Oid extensionId, Oid entryPointFunctionId)
 		 * same effect of the worker not getting started again.
 		 */
 
-		if (workerEntry->workerPid > 0 || workerEntry->state == WORKER_STARTING)
+		if (workerEntry->workerPid > 0)
 		{
 			/* base worker is already running */
 			LWLockRelease(&BaseWorkerControl->lock);
 			return BASE_WORKER_EXISTS;
 		}
-		else if (!workerEntry->needsRestart)
+		else if (workerEntry->state == WORKER_STARTING)
+		{
+			/*
+			 * A launch is in flight. If it never actually runs, the server
+			 * starter's ReclaimStaleBaseWorkerLaunches sweep resets the entry
+			 * after worker_startup_timeout -- it has to be the sweep and not
+			 * us, because we exit as soon as every launch reports success.
+			 */
+			LWLockRelease(&BaseWorkerControl->lock);
+			return BASE_WORKER_EXISTS;
+		}
+
+		if (!workerEntry->needsRestart)
 		{
 			/* base worker is already finished and does not need a restart */
 			LWLockRelease(&BaseWorkerControl->lock);
@@ -1632,7 +1880,7 @@ StartBaseWorker(int workerId, Oid extensionId, Oid entryPointFunctionId)
 							 MyDatabaseId),
 					  errhint("You may need to increase max_worker_processes.")));
 
-		return BASE_WORKER_START_FAILED;
+		return BASE_WORKER_OUT_OF_SLOTS;
 	}
 
 	/*
@@ -1643,6 +1891,7 @@ StartBaseWorker(int workerId, Oid extensionId, Oid entryPointFunctionId)
 	workerEntry->needsRestart = false;
 	workerEntry->state = WORKER_STARTING;
 	workerEntry->restartAfter = 0;
+	workerEntry->launchedAt = GetCurrentTimestamp();
 
 	/*
 	 * Clear the last-run start time until the worker actually reaches
@@ -1661,8 +1910,33 @@ StartBaseWorker(int workerId, Oid extensionId, Oid entryPointFunctionId)
 	 * creation. We let the process set its own PID.
 	 */
 	pid_t		workerPid = 0;
+	BgwHandleStatus status = WaitForBackgroundWorkerStartup(handle, &workerPid);
 
-	WaitForBackgroundWorkerStartup(handle, &workerPid);
+	Assert(status != BGWH_NOT_YET_STARTED);
+
+	/* see StartDatabaseStarter */
+	if (IS_INJECTION_POINT_ATTACHED_COMPAT("base-worker-launch-reported-stopped"))
+		status = BGWH_STOPPED;
+
+	if (status != BGWH_STARTED)
+	{
+		/*
+		 * The postmaster never actually ran the child (fork() failure). Reset
+		 * the entry so the next pass retries rather than believing a worker
+		 * is running that never existed.
+		 */
+		LWLockAcquire(&BaseWorkerControl->lock, LW_EXCLUSIVE);
+		workerEntry->workerPid = 0;
+		workerEntry->state = WORKER_STOPPED;
+		workerEntry->needsRestart = true;
+		LWLockRelease(&BaseWorkerControl->lock);
+
+		ereport(WARNING, (errmsg("pg base extension worker %d in database %d "
+								 "did not start",
+								 workerId, MyDatabaseId)));
+
+		return BASE_WORKER_START_FAILED;
+	}
 
 	return BASE_WORKER_STARTED;
 }
@@ -1892,6 +2166,13 @@ PgExtensionBaseWorkerMain(Datum arg)
 
 	/* record our worker id in a global */
 	MyBaseWorkerId = workerId;
+
+	/*
+	 * Lets a test exercise a launch whose child dies before it registers the
+	 * exit handler below, which is the only thing that would otherwise move
+	 * the entry out of WORKER_STARTING.
+	 */
+	INJECTION_POINT_COMPAT("base-worker-before-exit-handler");
 
 	/* Establish signal handlers before unblocking signals. */
 	pqsignal(SIGHUP, HandleSighup);

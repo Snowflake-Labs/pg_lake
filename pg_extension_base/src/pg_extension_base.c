@@ -165,6 +165,21 @@ _PG_init(void)
 							NULL,
 							NULL);
 
+	DefineCustomIntVariable("pg_extension_base.worker_startup_timeout",
+							"Sets how long a launch may sit in the starting state with "
+							"no pid before it is treated as never having run (e.g. the "
+							"postmaster could not fork the child) and retried.",
+							NULL,
+							&WorkerStartupTimeoutMs,
+							DEFAULT_WORKER_STARTUP_TIMEOUT_MS,
+							MIN_WORKER_STARTUP_TIMEOUT_MS,
+							INT32_MAX,
+							PGC_SIGHUP,
+							GUC_UNIT_MS | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							NULL,
+							NULL,
+							NULL);
+
 	/*
 	 * Install our ProcessUtility hook for ALTER EXTENSION ... UPDATE
 	 * dependency walking BEFORE preloading other extensions.  Postgres
