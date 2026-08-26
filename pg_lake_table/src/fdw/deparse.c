@@ -70,6 +70,7 @@
 #include "optimizer/tlist.h"
 #include "parser/parsetree.h"
 #include "utils/builtins.h"
+#include "utils/numeric.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
@@ -449,6 +450,16 @@ foreign_expr_walker(Node *node,
 #endif
 
 				/*
+				 * A NaN numeric constant cannot be represented by a DuckDB
+				 * DECIMAL: the cast would error before the Iceberg NaN guard
+				 * runs, bypassing the out_of_range_values policy.  Keep such
+				 * expressions on the PostgreSQL side.
+				 */
+				if (!c->constisnull && c->consttype == NUMERICOID &&
+					numeric_is_nan(DatumGetNumeric(c->constvalue)))
+					return false;
+
+				/*
 				 * If the constant has nondefault collation, either it's of a
 				 * non-builtin type, or it reflects folding of a CollateExpr.
 				 * It's unsafe to send to the remote unless it's used in a
@@ -547,6 +558,15 @@ foreign_expr_walker(Node *node,
 				 * semantics on remote side.
 				 */
 				if (!is_shippable(fe->funcid, ProcedureRelationId, node))
+					return false;
+
+				/*
+				 * A float-to-numeric cast can produce NaN, which DuckDB's
+				 * DECIMAL cast rejects before the Iceberg NaN guard applies;
+				 * keep such casts on the PostgreSQL side so
+				 * out_of_range_values semantics hold.
+				 */
+				if (fe->funcid == F_NUMERIC_FLOAT8 || fe->funcid == F_NUMERIC_FLOAT4)
 					return false;
 
 				/*
