@@ -1,7 +1,8 @@
 """
-Tests for PgLakeRestCatalogAuthHook, the seam that lets another extension
-supply REST catalog credentials for catalogs whose authentication pg_lake
-has no built-in support for.
+Tests for the credential provider seam, which lets another extension supply
+REST catalog credentials for catalogs whose authentication pg_lake has no
+built-in support for.  The provider is named by
+pg_lake_iceberg.rest_catalog_auth_provider and resolved by name on first use.
 
 A mock HTTP server stands in for the catalog.  It records the
 Authorization header of every non-token request and counts how often the
@@ -25,22 +26,22 @@ from utils_pytest import *
 
 
 _HOOK_FNS = """
-CREATE OR REPLACE FUNCTION install_test_rest_catalog_auth_hook(TEXT, INT, BOOL)
+CREATE OR REPLACE FUNCTION set_test_rest_catalog_auth_response(TEXT, INT, BOOL)
 RETURNS void LANGUAGE C VOLATILE STRICT
-AS 'pg_lake_iceberg', 'install_test_rest_catalog_auth_hook';
+AS 'pg_lake_iceberg', 'set_test_rest_catalog_auth_response';
 
-CREATE OR REPLACE FUNCTION test_rest_catalog_auth_hook_calls()
+CREATE OR REPLACE FUNCTION test_rest_catalog_auth_provider_calls()
 RETURNS int LANGUAGE C VOLATILE
-AS 'pg_lake_iceberg', 'test_rest_catalog_auth_hook_calls';
-
-CREATE OR REPLACE FUNCTION remove_test_rest_catalog_auth_hook()
-RETURNS void LANGUAGE C VOLATILE
-AS 'pg_lake_iceberg', 'remove_test_rest_catalog_auth_hook';
+AS 'pg_lake_iceberg', 'test_rest_catalog_auth_provider_calls';
 
 CREATE OR REPLACE FUNCTION register_namespace_to_rest_catalog(TEXT,TEXT)
 RETURNS void LANGUAGE C VOLATILE STRICT
 AS 'pg_lake_iceberg', 'register_namespace_to_rest_catalog';
 """
+
+# The stub provider lives in pg_lake_iceberg itself, which is what a real
+# provider extension would be named here instead.
+_TEST_PROVIDER = "pg_lake_iceberg:test_rest_catalog_auth_provider"
 
 
 def _find_free_port():
@@ -137,6 +138,7 @@ def catalog_and_conn(postgres):
             f"ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_host TO 'http://127.0.0.1:{port}'",
             "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_id TO 'test_id'",
             "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_secret TO 'test_secret'",
+            f"ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_auth_provider TO '{_TEST_PROVIDER}'",
             "SELECT pg_reload_conf()",
         ]
     )
@@ -157,6 +159,7 @@ def catalog_and_conn(postgres):
             "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_host",
             "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_id",
             "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_secret",
+            "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_auth_provider",
             "SELECT pg_reload_conf()",
         ]
     )
@@ -164,7 +167,7 @@ def catalog_and_conn(postgres):
 
 def _install_hook(conn, authorization, expires_in, claims):
     run_command(
-        f"SELECT install_test_rest_catalog_auth_hook("
+        f"SELECT set_test_rest_catalog_auth_response("
         f"'{authorization}', {expires_in}, {claims})",
         conn,
     )
@@ -172,7 +175,7 @@ def _install_hook(conn, authorization, expires_in, claims):
 
 
 def _hook_calls(conn):
-    result = run_query("SELECT test_rest_catalog_auth_hook_calls()", conn)
+    result = run_query("SELECT test_rest_catalog_auth_provider_calls()", conn)
     conn.commit()
     return result[0][0]
 
@@ -268,6 +271,34 @@ def test_declining_provider_falls_back_to_builtin_oauth2(
         handler_class.token_requests == 1
     ), "pg_lake did not fall back to its own OAuth2 grant"
     assert handler_class.data_request_auths[0].startswith("Bearer ")
+
+
+def test_malformed_provider_name_is_rejected(
+    iceberg_extension, installcheck, catalog_and_conn
+):
+    """
+    A provider name that is not "library:symbol" is reported when a catalog
+    is contacted, since that is when the name is resolved.
+    """
+    if installcheck:
+        return
+
+    run_command_outside_tx(
+        [
+            "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_auth_provider TO 'missing_symbol'",
+            "SELECT pg_reload_conf()",
+        ]
+    )
+
+    # A backend opened after the reload starts with the new setting, which
+    # avoids racing the reload against the query below.
+    conn = open_pg_conn()
+
+    try:
+        with pytest.raises(Exception, match="invalid value for parameter"):
+            _touch_catalog(conn, "myns")
+    finally:
+        conn.close()
 
 
 def test_catalog_401_refreshes_the_credential(

@@ -217,6 +217,17 @@ _PG_init(void)
 							   GUC_NO_SHOW_ALL | GUC_SUPERUSER_ONLY | GUC_NOT_IN_SAMPLE,
 							   NULL, NULL, NULL);
 
+	DefineCustomStringVariable("pg_lake_iceberg.rest_catalog_auth_provider",
+							   gettext_noop("Extension supplying REST catalog credentials, "
+											"as \"library:symbol\". Empty uses pg_lake's own "
+											"OAuth2 client-credentials grant."),
+							   NULL,
+							   &RestCatalogAuthProviderName,
+							   "",
+							   PGC_SIGHUP,
+							   GUC_NO_SHOW_ALL | GUC_SUPERUSER_ONLY | GUC_NOT_IN_SAMPLE,
+							   NULL, AssignRestCatalogAuthProvider, NULL);
+
 
 	DefineCustomStringVariable("pg_lake_iceberg.default_location_prefix",
 							   gettext_noop("Specifies the default location prefix for "

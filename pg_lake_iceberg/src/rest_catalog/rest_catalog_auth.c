@@ -30,6 +30,7 @@
 #include "postgres.h"
 
 #include "common/base64.h"
+#include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "utils/builtins.h"
 #include "utils/hsearch.h"
@@ -82,9 +83,20 @@ static MemoryContext RestTokenCacheCtx = NULL;
 static bool TokenCacheCallbackRegistered = false;
 
 
-PgLakeRestCatalogAuthHookType PgLakeRestCatalogAuthHook = NULL;
+/*
+ * Provider named by pg_lake_iceberg.rest_catalog_auth_provider, in
+ * "library:symbol" form, empty when no provider is configured.  Resolution is
+ * deferred to first use and then cached for the life of the backend, so a
+ * misconfigured name is reported when a catalog is actually contacted rather
+ * than at load time.
+ */
+char	   *RestCatalogAuthProviderName = "";
+
+static PgLakeRestCatalogAuthProvider RestCatalogAuthProvider = NULL;
+static bool RestCatalogAuthProviderResolved = false;
 
 
+static PgLakeRestCatalogAuthProvider ResolveRestCatalogAuthProvider(void);
 static void FetchRestCatalogAuthorization(RestCatalogOptions * opts, bool forceRefresh,
 										  char **authorization, int *expiresIn);
 static void FetchOAuth2AccessToken(RestCatalogOptions * opts, char **accessToken, int *expiresIn);
@@ -235,19 +247,74 @@ GetRestCatalogAuthorization(RestCatalogOptions * opts, bool forceRefreshToken)
 
 
 /*
+ * AssignRestCatalogAuthProvider drops a previously resolved provider so the
+ * next lookup honours the new setting.  The library itself stays loaded, as
+ * Postgres never unloads one, but that only costs an unused mapping.
+ */
+void
+AssignRestCatalogAuthProvider(const char *newval, void *extra)
+{
+	RestCatalogAuthProvider = NULL;
+	RestCatalogAuthProviderResolved = false;
+}
+
+
+/*
+ * ResolveRestCatalogAuthProvider looks up the configured provider, returning
+ * NULL when none is set.
+ */
+static PgLakeRestCatalogAuthProvider
+ResolveRestCatalogAuthProvider(void)
+{
+	if (RestCatalogAuthProviderResolved)
+		return RestCatalogAuthProvider;
+
+	if (RestCatalogAuthProviderName != NULL && RestCatalogAuthProviderName[0] != '\0')
+	{
+		char	   *spec = pstrdup(RestCatalogAuthProviderName);
+
+		/*
+		 * Split on the last colon so a library given as a path is not
+		 * mistaken for a library/symbol pair.
+		 */
+		char	   *separator = strrchr(spec, ':');
+
+		if (separator == NULL || separator == spec || separator[1] == '\0')
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("invalid value for parameter \"pg_lake_iceberg.rest_catalog_auth_provider\": \"%s\"",
+							RestCatalogAuthProviderName),
+					 errhint("Expected \"library:symbol\", for example "
+							 "\"snowflake_auth:pg_lake_rest_catalog_auth\".")));
+
+		*separator = '\0';
+
+		RestCatalogAuthProvider = (PgLakeRestCatalogAuthProvider)
+			load_external_function(spec, separator + 1, true /* signalNotFound */ , NULL);
+	}
+
+	RestCatalogAuthProviderResolved = true;
+
+	return RestCatalogAuthProvider;
+}
+
+
+/*
  * Produces the Authorization header value for a catalog, either from a
- * registered provider or from pg_lake's own OAuth2 client-credentials
+ * configured provider or from pg_lake's own OAuth2 client-credentials
  * grant.
  */
 static void
 FetchRestCatalogAuthorization(RestCatalogOptions * opts, bool forceRefresh,
 							  char **authorization, int *expiresIn)
 {
-	if (PgLakeRestCatalogAuthHook != NULL)
+	PgLakeRestCatalogAuthProvider provider = ResolveRestCatalogAuthProvider();
+
+	if (provider != NULL)
 	{
 		RestCatalogAuthMaterial material = {0};
 
-		if (PgLakeRestCatalogAuthHook(opts, forceRefresh, &material))
+		if (provider(opts, forceRefresh, &material))
 		{
 			if (material.authorization == NULL || *material.authorization == '\0')
 				ereport(ERROR,

@@ -213,7 +213,7 @@ extern PGDLLEXPORT Oid ResolveRestCatalogServerId(const char *catalog);
 extern PGDLLEXPORT Oid GetRestCatalogServerIdForRelation(Oid relationId);
 
 /*
- * Credential handed back by PgLakeRestCatalogAuthHook.
+ * Credential handed back by a REST catalog credential provider.
  *
  * authorization is the complete Authorization header value including its
  * scheme, e.g. "Bearer eyJ...".  Providers supply the scheme themselves so
@@ -221,9 +221,9 @@ extern PGDLLEXPORT Oid GetRestCatalogServerIdForRelation(Oid relationId);
  * not require a change here.
  *
  * expiresIn is the credential's remaining lifetime in seconds.  Zero means
- * "do not cache": the hook is consulted again on the next request, which is
- * what a provider wants when it reads a credential that is rotated
- * underneath it rather than minting one with a known lifetime.
+ * "do not cache": the provider is consulted again on the next request, which
+ * is what it wants when it reads a credential that is rotated underneath it
+ * rather than minting one with a known lifetime.
  */
 typedef struct RestCatalogAuthMaterial
 {
@@ -232,19 +232,33 @@ typedef struct RestCatalogAuthMaterial
 }			RestCatalogAuthMaterial;
 
 /*
- * Hook letting another extension supply REST catalog credentials, for
- * catalogs whose authentication pg_lake has no built-in support for.
+ * Signature of a credential provider, letting another extension supply REST
+ * catalog credentials for catalogs whose authentication pg_lake has no
+ * built-in support for.
  *
  * Returning false means "not mine, fall back to the built-in OAuth2 flow",
  * so a provider can claim some servers and ignore others.  Returning true
  * without filling in material->authorization is an error.  pg_lake keeps
  * ownership of caching, refresh and header construction either way.
+ *
+ * A provider is named by pg_lake_iceberg.rest_catalog_auth_provider as
+ * "library:symbol" and resolved on first use.  It is looked up by name
+ * rather than assigning a hook variable because a provider extension is
+ * typically loaded from shared_preload_libraries, whereas pg_lake_iceberg is
+ * loaded on first use of the extension: at the only point the provider runs
+ * init code, there is no pg_lake symbol yet to assign to.  Resolving by name
+ * also keeps the dependency pointing from pg_lake to the provider, and only
+ * when one is configured.
+ *
+ * The symbol must be exported (PGDLLEXPORT), since extensions are typically
+ * built with hidden visibility.
  */
-typedef bool (*PgLakeRestCatalogAuthHookType) (RestCatalogOptions * opts,
+typedef bool (*PgLakeRestCatalogAuthProvider) (RestCatalogOptions * opts,
 											   bool forceRefresh,
 											   RestCatalogAuthMaterial * material);
 
-extern PGDLLEXPORT PgLakeRestCatalogAuthHookType PgLakeRestCatalogAuthHook;
+extern char *RestCatalogAuthProviderName;
+extern void AssignRestCatalogAuthProvider(const char *newval, void *extra);
 
 /*
  * Module-internal helpers shared across the rest_catalog_*.c files.
