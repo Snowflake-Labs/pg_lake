@@ -98,6 +98,7 @@
 #include "tcop/utility.h"
 
 #include "pg_extension_base/base_workers.h"
+#include "pg_extension_base/injection_points.h"
 #include "pg_extension_base/pg_extension_base_ids.h"
 #include "pg_extension_base/pg_compat.h"
 #include "pg_extension_base/spi_helpers.h"
@@ -1127,6 +1128,14 @@ PgExtensionBaseDatabaseStarterMain(Datum databaseIdDatum)
 	MemoryContext outerContext = CurrentMemoryContext;
 
 	StartTransactionCommand();
+
+	/*
+	 * Tests park a starter here to get the state that made DROP DATABASE
+	 * fail: connected, so it counts as a session in the database, and not yet
+	 * in the main loop, so only a SIGTERM that terminates immediately gets
+	 * rid of it.
+	 */
+	INJECTION_POINT_COMPAT("database-starter-before-lock");
 
 	/*
 	 * We take the LockDatabaseStarter lock here to wait for any concurrent

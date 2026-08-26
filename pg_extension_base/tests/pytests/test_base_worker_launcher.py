@@ -450,6 +450,70 @@ def test_no_starter_connects_while_a_drop_holds_the_lock(superuser_conn):
     superuser_conn.autocommit = False
 
 
+def test_drop_database_force_removes_a_starting_starter(
+    superuser_conn, create_injection_extension
+):
+    # A starter that already connected but has not reached its main loop counts
+    # as a session in the database and cannot act on a SIGTERM flag, so
+    # DROP DATABASE ... WITH (FORCE) used to fail with "database is being
+    # accessed by other users". It should terminate the starter instead.
+
+    if get_pg_version_num(superuser_conn) < 170000:
+        pytest.skip("Injection points not available (requires PostgreSQL 17+)")
+
+    superuser_conn.rollback()
+    superuser_conn.autocommit = True
+
+    run_command(
+        "SELECT injection_points_attach('database-starter-before-lock', 'wait')",
+        superuser_conn,
+    )
+
+    own_pid = run_query("SELECT pg_backend_pid()", superuser_conn)[0]["pg_backend_pid"]
+
+    try:
+        # the server starter starts a database starter for every new database,
+        # which then parks in the injection point
+        run_command("CREATE DATABASE other", superuser_conn)
+
+        assert (
+            wait_until_equal(
+                lambda: count_other_backends_in_database(
+                    superuser_conn, "other", own_pid
+                ),
+                1,
+            )
+            == 1
+        )
+
+        run_command("DROP DATABASE other WITH (FORCE)", superuser_conn)
+    finally:
+        # release any starter still parked, so a failure above does not leave
+        # one behind for the next test
+        run_command(
+            "SELECT injection_points_wakeup('database-starter-before-lock')",
+            superuser_conn,
+            raise_error=False,
+        )
+        run_command(
+            "SELECT injection_points_detach('database-starter-before-lock')",
+            superuser_conn,
+            raise_error=False,
+        )
+        run_command(
+            "DROP DATABASE IF EXISTS other WITH (FORCE)",
+            superuser_conn,
+            raise_error=False,
+        )
+
+    assert (
+        wait_until_equal(lambda: count_pg_extension_base_workers(superuser_conn), 0)
+        == 0
+    )
+
+    superuser_conn.autocommit = False
+
+
 def test_oneshot_worker_completes(superuser_conn):
     run_command("LISTEN oneshot", superuser_conn)
     superuser_conn.commit()
