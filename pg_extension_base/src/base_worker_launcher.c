@@ -847,11 +847,8 @@ StartDatabaseStarters(List *databaseList)
 		Oid			databaseId = entry->databaseId;
 
 		/*
-		 * StartDatabaseStarter conditionally acquires a lock that a
-		 * concurrent DROP DATABASE/EXTENSION holds, and skips the database if
-		 * it cannot get it. We hold the lock until leaving the function and
-		 * committing below, which keeps such a DROP out of the way while we
-		 * register the database starter.
+		 * Run in a transaction so the lock StartDatabaseStarter takes is held
+		 * until we commit below.
 		 */
 		StartTransactionCommand();
 
@@ -1076,7 +1073,10 @@ StartDatabaseStarter(Oid databaseId, char *databaseName)
 	/*
 	 * A concurrent DROP DATABASE/EXTENSION that affects this database holds
 	 * this lock in ExclusiveLock mode until it commits or aborts, so we back
-	 * off and let the next iteration deal with the database.
+	 * off and let the next iteration deal with the database. When we do get
+	 * the lock, the caller holds it until its transaction commits, which
+	 * keeps such a DROP out of the way while we register the database
+	 * starter.
 	 *
 	 * In case of DROP DATABASE, proceeding would create a database starter
 	 * that connects to a database the DROP is waiting to become idle. The
