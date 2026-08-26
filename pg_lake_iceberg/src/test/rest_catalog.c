@@ -165,7 +165,7 @@ static int	TestAuthProviderCallCount = 0;
  * hidden visibility, exactly as a real provider extension would be.
  */
 extern PGDLLEXPORT bool test_rest_catalog_auth_provider(const RestCatalogAuthRequest * request,
-													    RestCatalogAuthMaterial * material);
+														RestCatalogAuthMaterial * material);
 
 bool
 test_rest_catalog_auth_provider(const RestCatalogAuthRequest * request,
