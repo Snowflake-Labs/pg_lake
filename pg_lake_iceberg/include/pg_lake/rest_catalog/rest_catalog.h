@@ -258,6 +258,7 @@ extern PGDLLEXPORT char *LoadRestCatalogMetadataLocation(RestCatalogOptions * op
 														 const char *relationName);
 extern PGDLLEXPORT RestCatalogLoadTableResult LoadTableFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogName,
 																	   const char *namespaceName, const char *relationName);
+extern PGDLLEXPORT RestCatalogLoadTableResult LoadTableFromRestCatalogForIcebergTable(Oid relationId);
 extern PGDLLEXPORT char *GetMetadataLocationForRestCatalogForIcebergTable(Oid relationId);
 extern PGDLLEXPORT bool RestCatalogVendingEnabledForRelation(Oid relationId);
 

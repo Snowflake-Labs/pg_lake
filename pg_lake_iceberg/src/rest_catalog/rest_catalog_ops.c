@@ -450,10 +450,12 @@ ErrorIfRestNamespaceDoesNotExist(RestCatalogOptions * opts, const char *catalogN
 
 
 /*
-* Gets the metadata location for a relation from the external rest catalog.
-*/
-char *
-GetMetadataLocationForRestCatalogForIcebergTable(Oid relationId)
+ * LoadTableFromRestCatalogForIcebergTable performs a loadTable request for
+ * an existing relation and returns the whole response, including the inlined
+ * metadata document.
+ */
+RestCatalogLoadTableResult
+LoadTableFromRestCatalogForIcebergTable(Oid relationId)
 {
 	const char *restCatalogName = GetRestCatalogName(relationId);
 	const char *relationName = GetRestCatalogTableName(relationId);
@@ -461,7 +463,17 @@ GetMetadataLocationForRestCatalogForIcebergTable(Oid relationId)
 
 	RestCatalogOptions *opts = GetRestCatalogOptionsForRelation(relationId);
 
-	return LoadRestCatalogMetadataLocation(opts, restCatalogName, namespaceName, relationName);
+	return LoadTableFromRestCatalog(opts, restCatalogName, namespaceName, relationName);
+}
+
+
+/*
+* Gets the metadata location for a relation from the external rest catalog.
+*/
+char *
+GetMetadataLocationForRestCatalogForIcebergTable(Oid relationId)
+{
+	return LoadTableFromRestCatalogForIcebergTable(relationId).metadataLocation;
 }
 
 

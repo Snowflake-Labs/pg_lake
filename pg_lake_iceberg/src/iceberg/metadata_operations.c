@@ -205,14 +205,23 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 	}
 	else
 	{
-		metadataPath = GetIcebergMetadataLocation(relationId, forUpdate);
-
-		/*
-		 * metadata for writable rest catalog is intended to be read-only in
-		 * the remaining of the function, given the authoritative source is
-		 * the rest catalog.
-		 */
-		metadata = ReadIcebergTableMetadata(metadataPath);
+		if (writableRestCatalogTable)
+		{
+			/*
+			 * metadata for writable rest catalog is intended to be read-only
+			 * in the remaining of the function, given the authoritative
+			 * source is the rest catalog. Concurrent writers are already
+			 * serialized by the catalog row lock
+			 * TrackIcebergMetadataChangesInTx() took at DML time, which is
+			 * held until end of transaction.
+			 */
+			metadata = GetWritableRestCatalogTableMetadata(relationId, &metadataPath);
+		}
+		else
+		{
+			metadataPath = GetIcebergMetadataLocation(relationId, forUpdate);
+			metadata = ReadIcebergTableMetadata(metadataPath);
+		}
 
 		/*
 		 * for writable rest catalog tables, the metadata state is on the REST
@@ -1357,6 +1366,33 @@ HasCreateTableOperation(List *metadataOperations)
 	}
 
 	return false;
+}
+
+
+/*
+ * GetWritableRestCatalogTableMetadata returns the current iceberg metadata of a
+ * writable rest catalog table, and reports where the catalog says that metadata
+ * lives in *metadataLocation, which may be NULL if the caller does not need it.
+ *
+ * A loadTable response inlines the whole metadata document, so no read from
+ * storage is needed. That matters beyond the saved round-trip: resolving the
+ * location and then fetching it are two steps, and the file can be deleted in
+ * between.
+ */
+IcebergTableMetadata *
+GetWritableRestCatalogTableMetadata(Oid relationId, char **metadataLocation)
+{
+	RestCatalogLoadTableResult result =
+		LoadTableFromRestCatalogForIcebergTable(relationId);
+
+	if (metadataLocation != NULL)
+		*metadataLocation = result.metadataLocation;
+
+	/* the field is required, but a catalog that omits it still works */
+	if (result.metadata == NULL)
+		return ReadIcebergTableMetadata(result.metadataLocation);
+
+	return ParseIcebergTableMetadata(result.metadata);
 }
 
 
