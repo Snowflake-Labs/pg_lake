@@ -55,7 +55,14 @@ typedef struct PgClientThreadState
 	int32		cancellationToken;
 #endif
 
-	/* DuckDB connection to interrupt */
+	/*
+	 * DuckDB connection to interrupt.
+	 *
+	 * The cancel paths call duckdb_interrupt() on this pointer, so it must be
+	 * NULL whenever the connection behind it is not alive.  The thread owning
+	 * the slot has to clear it (set_duckdb_conn with NULL) *before* it
+	 * disconnects, not when it frees the slot.
+	 */
 	duckdb_connection duckdbConnection;
 
 }			PgClientThreadState;

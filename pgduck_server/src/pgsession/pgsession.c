@@ -1142,6 +1142,16 @@ static int
 pgsession_destroy(PGSession * pgSession)
 {
 	pg_free(pgSession->pqSendBuffer);
+
+	/*
+	 * Clear the connection in the thread pool before disconnecting it, so
+	 * that a concurrent cancellation cannot call duckdb_interrupt() on a
+	 * freed connection. Setting it under the write lock means a cancel either
+	 * runs before this and finds a live connection, or after it and finds
+	 * NULL.
+	 */
+	pgclient_threadpool_set_duckdb_conn(pgSession->pgClient->threadIndex, NULL);
+
 	duckdb_session_destroy(&pgSession->duckSession);
 	return OK;
 }
