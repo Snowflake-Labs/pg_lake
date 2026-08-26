@@ -232,6 +232,39 @@ typedef struct RestCatalogAuthMaterial
 }			RestCatalogAuthMaterial;
 
 /*
+ * What a credential provider is told about the catalog it is being asked to
+ * authenticate.
+ *
+ * This is deliberately small and self-contained rather than RestCatalogOptions
+ * itself.  A provider lives in a separately built extension, so everything
+ * here is an ABI contract: RestCatalogOptions is an internal struct that will
+ * keep changing, and it carries the client secret, which a provider has no
+ * business seeing.  Fields are added to the end, and version lets a provider
+ * refuse a pg_lake newer than it understands rather than misread the struct.
+ *
+ * catalogBaseUri is the catalog's base URI as configured in rest_endpoint,
+ * normalized but otherwise verbatim, so it already carries any mount path the
+ * deployment uses ("https://host/polaris/api/catalog", say).  A provider that
+ * needs to reach the catalog's own token endpoint should append only the REST
+ * path to it -- assuming a mount path instead produces a doubled one.
+ *
+ * authType is the configured REST_CATALOG_AUTH_TYPE_* value, and scope is
+ * NULL when unset.  forceRefresh says the cached credential was rejected, so
+ * a provider that caches must mint a new one rather than return what it has.
+ */
+typedef struct RestCatalogAuthRequest
+{
+	int			version;
+	const char *catalogBaseUri;
+	const char *catalogName;
+	const char *scope;
+	int			authType;
+	bool		forceRefresh;
+}			RestCatalogAuthRequest;
+
+#define REST_CATALOG_AUTH_REQUEST_VERSION 1
+
+/*
  * Signature of a credential provider, letting another extension supply REST
  * catalog credentials for catalogs whose authentication pg_lake has no
  * built-in support for.
@@ -253,8 +286,7 @@ typedef struct RestCatalogAuthMaterial
  * The symbol must be exported (PGDLLEXPORT), since extensions are typically
  * built with hidden visibility.
  */
-typedef bool (*PgLakeRestCatalogAuthProvider) (RestCatalogOptions * opts,
-											   bool forceRefresh,
+typedef bool (*PgLakeRestCatalogAuthProvider) (const RestCatalogAuthRequest * request,
 											   RestCatalogAuthMaterial * material);
 
 extern char *RestCatalogAuthProviderName;

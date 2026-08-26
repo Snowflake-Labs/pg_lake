@@ -164,15 +164,21 @@ static int	TestAuthProviderCallCount = 0;
  * Exported so load_external_function can find it: this library is built with
  * hidden visibility, exactly as a real provider extension would be.
  */
-extern PGDLLEXPORT bool test_rest_catalog_auth_provider(RestCatalogOptions * opts,
-														bool forceRefresh,
-														RestCatalogAuthMaterial * material);
+extern PGDLLEXPORT bool test_rest_catalog_auth_provider(const RestCatalogAuthRequest * request,
+													    RestCatalogAuthMaterial * material);
 
 bool
-test_rest_catalog_auth_provider(RestCatalogOptions * opts, bool forceRefresh,
+test_rest_catalog_auth_provider(const RestCatalogAuthRequest * request,
 								RestCatalogAuthMaterial * material)
 {
 	TestAuthProviderCallCount++;
+
+	/*
+	 * A provider that cannot read the struct it was handed must decline
+	 * rather than guess at the layout.
+	 */
+	if (request->version != REST_CATALOG_AUTH_REQUEST_VERSION)
+		return false;
 
 	/*
 	 * Declining sends pg_lake back to its built-in OAuth2 grant.  An unprimed

@@ -312,9 +312,17 @@ FetchRestCatalogAuthorization(RestCatalogOptions * opts, bool forceRefresh,
 
 	if (provider != NULL)
 	{
+		RestCatalogAuthRequest request = {
+			.version = REST_CATALOG_AUTH_REQUEST_VERSION,
+			.catalogBaseUri = opts->baseUri,
+			.catalogName = opts->catalogName,
+			.scope = opts->scope,
+			.authType = opts->authType,
+			.forceRefresh = forceRefresh,
+		};
 		RestCatalogAuthMaterial material = {0};
 
-		if (provider(opts, forceRefresh, &material))
+		if (provider(&request, &material))
 		{
 			if (material.authorization == NULL || *material.authorization == '\0')
 				ereport(ERROR,
