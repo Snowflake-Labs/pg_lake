@@ -18,6 +18,7 @@
 #pragma once
 
 #include "postgres.h"
+#include "nodes/parsenodes.h"
 #include "utils/hsearch.h"
 
 extern bool EnableStrictPushdown;
@@ -56,5 +57,6 @@ typedef struct NotShippableObject
 extern bool is_builtin(Oid objectId);
 extern bool is_shippable(Oid objectId, Oid classId, Node *expr);
 extern bool is_non_shippable_udt_context(Node *node);
+extern bool IsGDALGeometryVar(Var *var, List *rtable);
 extern PGDLLEXPORT const char *GetNotShippableDescription(NotShippableReason reason, Oid classId, Oid objectId);
 extern PGDLLEXPORT HTAB *CollectNotShippableObjects(Node *node);

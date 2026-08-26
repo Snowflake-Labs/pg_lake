@@ -20,9 +20,45 @@
 #include "commands/defrem.h"
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/parsetree/options.h"
+#include "pg_lake/pgduck/client.h"
 #include "pg_lake/pgduck/gdal.h"
 #include "nodes/pg_list.h"
 #include "utils/builtins.h"
+
+static void ValidateGDALLayer(char *pathExpression, char *layerName);
+
+
+/*
+ * ValidateGDALLayer errors out when the layer option does not name a layer in
+ * the file. st_read terminates pgduck_server on a layer that does not exist,
+ * so ask st_read_meta for the layer list first.
+ */
+static void
+ValidateGDALLayer(char *pathExpression, char *layerName)
+{
+	char	   *layerExists =
+		GetSingleValueFromPGDuck(psprintf("SELECT list_contains("
+										  "list_transform(layers, l -> l.name), %s) "
+										  "FROM st_read_meta(%s)",
+										  quote_literal_cstr(layerName),
+										  pathExpression));
+
+	if (layerExists != NULL && strcmp(layerExists, "t") == 0)
+		return;
+
+	char	   *layerNames =
+		GetSingleValueFromPGDuck(psprintf("SELECT list_aggregate("
+										  "list_transform(layers, l -> l.name), "
+										  "'string_agg', ', ') "
+										  "FROM st_read_meta(%s)",
+										  pathExpression));
+
+	ereport(ERROR,
+			(errcode(ERRCODE_UNDEFINED_OBJECT),
+			 errmsg("layer \"%s\" could not be found", layerName),
+			 errdetail("Available layers are: %s",
+					   layerNames != NULL ? layerNames : "none")));
+}
 
 
 /*
@@ -40,8 +76,10 @@ GDALReadFunctionCall(char *path, CopyDataCompression compression, List *options,
 		filenameOption != NULL ? defGetBoolean(filenameOption) : false;
 
 	StringInfoData stRead;
+	StringInfoData pathExpression;
 
 	initStringInfo(&stRead);
+	initStringInfo(&pathExpression);
 
 	/*
 	 * Add an extra _filename column if specified. Not particularly useful,
@@ -56,7 +94,7 @@ GDALReadFunctionCall(char *path, CopyDataCompression compression, List *options,
 	if (compression == DATA_COMPRESSION_ZIP)
 	{
 		/* add vsizip for .zip files with { } syntax */
-		appendStringInfo(&stRead,
+		appendStringInfo(&pathExpression,
 						 "'/vsizip/{'||pg_lake_cache_file_local_path(%s)||'}'",
 						 quote_literal_cstr(path));
 
@@ -71,24 +109,26 @@ GDALReadFunctionCall(char *path, CopyDataCompression compression, List *options,
 			if (zipPath[0] != '/')
 				zipPath = psprintf("/%s", zipPath);
 
-			appendStringInfo(&stRead, "||%s",
+			appendStringInfo(&pathExpression, "||%s",
 							 quote_literal_cstr(zipPath));
 		}
 	}
 	else if (compression == DATA_COMPRESSION_GZIP)
 	{
 		/* vsigzip for .gz */
-		appendStringInfo(&stRead,
+		appendStringInfo(&pathExpression,
 						 "'/vsigzip/'||pg_lake_cache_file_local_path(%s)",
 						 quote_literal_cstr(path));
 	}
 	else
 	{
 		/* just use the local path */
-		appendStringInfo(&stRead,
+		appendStringInfo(&pathExpression,
 						 "pg_lake_cache_file_local_path(%s)",
 						 quote_literal_cstr(path));
 	}
+
+	appendStringInfoString(&stRead, pathExpression.data);
 
 	/* whether to preserve WKB as a raw byte array */
 	DefElem    *keepWKBOption = GetOption(options, "keep_wkb");
@@ -100,8 +140,14 @@ GDALReadFunctionCall(char *path, CopyDataCompression compression, List *options,
 	DefElem    *layerOption = GetOption(options, "layer");
 
 	if (layerOption != NULL)
+	{
+		char	   *layerName = defGetString(layerOption);
+
+		ValidateGDALLayer(pathExpression.data, layerName);
+
 		appendStringInfo(&stRead, ", layer=%s",
-						 quote_literal_cstr(defGetString(layerOption)));
+						 quote_literal_cstr(layerName));
+	}
 
 	/* close st_read */
 	appendStringInfoString(&stRead, ")");

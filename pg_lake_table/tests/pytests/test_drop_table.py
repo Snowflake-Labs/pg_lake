@@ -1164,6 +1164,49 @@ def test_flush_deletion_queue_drains_dropped_table_files(
     pg_conn.commit()
 
 
+@pytest.mark.parametrize(
+    "query_arg", ["", "?s3_region=us-east-1"], ids=["plain", "region"]
+)
+def test_flush_deletion_queue_drops_already_absent_file(
+    s3, superuser_conn, extension, with_default_location, query_arg
+):
+    """A queued file that is no longer in object storage is done, not failed.
+    Cleanup re-sends paths a previous pass may have already deleted, so the
+    flush has to delete the queue row instead of counting a retry until the row
+    exceeds vacuum_file_remove_max_retries and is orphaned for good.
+
+    The region variant is the one that regressed: a path carrying s3_region
+    skips the batch DeleteObjects (which ignores missing keys) and takes the
+    single-file path, which reads the file to resolve the region first."""
+    path = f"s3://{TEST_BUCKET}/test_flush_absent/never_written.parquet{query_arg}"
+
+    run_command(
+        f"""
+        INSERT INTO lake_engine.deletion_queue (path, orphaned_at)
+        VALUES ('{path}', pg_catalog.now())
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    run_command_outside_tx(
+        [
+            "SET pg_lake_engine.orphaned_file_retention_period = 0",
+            "SELECT lake_engine.flush_deletion_queue(0)",
+        ]
+    )
+
+    # the row is gone, rather than left behind with a bumped retry_count
+    assert (
+        run_query(
+            f"SELECT retry_count FROM lake_engine.deletion_queue WHERE path = '{path}'",
+            superuser_conn,
+        )
+        == []
+    )
+    superuser_conn.commit()
+
+
 @pytest.fixture(scope="module")
 def create_test_helper_functions(superuser_conn, s3, extension):
     # lake_iceberg.find_all_referenced_files is installed by pg_lake_iceberg,

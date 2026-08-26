@@ -39,6 +39,7 @@ static bool IsComparisonWithDefaultGridSize(Node *node);
 static bool IsLastArgConst(Node *node);
 static bool IsPointDistanceSpheroid(Node *node);
 static bool IsPointGeometry(Node *node);
+static bool HasNoSridInTypemod(Node *node);
 
 
 static const PGDuckShippableFunction ShippableSpatialProcs[] =
@@ -145,7 +146,7 @@ static const PGDuckShippableFunction ShippableSpatialProcs[] =
 	{POSTGIS_SCHEMA "st_shortestline", 'f', 2, {POSTGIS_SCHEMA "geometry", POSTGIS_SCHEMA "geometry"}, NULL},
 	{POSTGIS_SCHEMA "st_simplify", 'f', 2, {POSTGIS_SCHEMA "geometry", "float8"}, NULL},
 	{POSTGIS_SCHEMA "st_simplifypreservetopology", 'f', 2, {POSTGIS_SCHEMA "geometry", "float8"}, NULL},
-	{POSTGIS_SCHEMA "st_srid", 'f', 1, {POSTGIS_SCHEMA "geometry"}, NULL},
+	{POSTGIS_SCHEMA "st_srid", 'f', 1, {POSTGIS_SCHEMA "geometry"}, HasNoSridInTypemod},
 	{POSTGIS_SCHEMA "st_startpoint", 'f', 1, {POSTGIS_SCHEMA "geometry"}, NULL},
 	{POSTGIS_SCHEMA "st_touches", 'f', 2, {POSTGIS_SCHEMA "geometry", POSTGIS_SCHEMA "geometry"}, NULL},
 	{POSTGIS_SCHEMA "st_transform", 'f', 3, {POSTGIS_SCHEMA "geometry", "text", "text"}, NULL},
@@ -386,4 +387,28 @@ IsPointGeometry(Node *node)
 	int			typemod = exprTypmod(node);
 
 	return GEOMETRY_GET_TYPE(typemod) == GEOMETRY_TYPE_POINT;
+}
+
+
+/*
+ * HasNoSridInTypemod determines whether the argument of a single-argument
+ * geometry function has no SRID in its typemod.
+ *
+ * We send geometry to pgduck_server without a CRS, so st_srid is rewritten to
+ * a constant 0. That only matches what Postgres computes locally when the
+ * result has no SRID either, and a typemod such as geometry(point,4326) makes
+ * PostGIS put the SRID back. So keep st_srid local in that case.
+ */
+static bool
+HasNoSridInTypemod(Node *node)
+{
+	FuncExpr   *funcExpr = castNode(FuncExpr, node);
+	Node	   *firstArg = linitial(funcExpr->args);
+	int			typemod = exprTypmod(firstArg);
+
+	/* a geometry column without typemod (-1) carries the SRID of its value */
+	if (typemod < 0)
+		return true;
+
+	return GEOMETRY_GET_SRID(typemod) == 0;
 }

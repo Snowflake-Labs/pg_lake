@@ -1681,8 +1681,8 @@ GuessStorageType(DuckDBTypeInfo engineType, CopyDataFormat sourceFormat)
 	{
 		/*
 		 * For Parquet/Iceberg, keep GEOMETRY as-is so DuckDB reads it
-		 * natively via GeoParquet. For old files without GeoParquet metadata,
-		 * DuckDB casts BLOB to GEOMETRY automatically.
+		 * natively via GeoParquet. Old files without GeoParquet metadata are
+		 * read as BLOB instead, which BuildColumnProjection handles.
 		 *
 		 * JSON and CSV store geometry as text (GeoJSON / WKT), so we override
 		 * to VARCHAR here and convert via spatial functions in
@@ -1782,8 +1782,16 @@ BuildColumnProjection(char *columnName,
 			 * SRID preservation for the output relies on PostGIS applying the
 			 * column typmod (e.g. geometry(point,4326)) when the FDW converts
 			 * the result to PostgreSQL format.
+			 *
+			 * Files we write ourselves, and any file without GeoParquet
+			 * metadata, have no geometry column to begin with: the values
+			 * arrive as a WKB BLOB. Accept both, since neither type casts to
+			 * the other. Only one of the two TRY_CASTs yields a value, the
+			 * other one is NULL.
 			 */
-			return psprintf("ST_SetCRS(%s, '')%s",
+			return psprintf("ST_SetCRS(COALESCE(ST_GeomFromWKB(TRY_CAST(%s AS BLOB)), "
+							"TRY_CAST(%s AS GEOMETRY)), '')%s",
+							duckdb_quote_identifier(columnName),
 							duckdb_quote_identifier(columnName),
 							columnAliasString);
 		}
@@ -1796,19 +1804,39 @@ BuildColumnProjection(char *columnName,
 			return psprintf("ST_GeomFromGeoJSON(%s)%s", duckdb_quote_identifier(columnName),
 							columnAliasString);
 
-
 		/*
 		 * GDAL data scans always use keep_wkb=true so geometry arrives as raw
-		 * WKB BLOB. The hex(TRY_CAST(... AS BLOB)) path converts it directly.
+		 * WKB BLOB, and hex(TRY_CAST(... AS BLOB)) hands it to PostGIS
+		 * unparsed. That is deliberate: DuckDB's GEOMETRY has no
+		 * representation for the curve types GDAL sources use (a MultiCurve
+		 * makes st_read itself fail with "Unsupported geometry type in WKB"),
+		 * while PostGIS reads them. The cost is that the projection is
+		 * VARCHAR, so a pushed-down spatial function on the column does not
+		 * bind in DuckDB, which is why geometry columns of a GDAL table are
+		 * not shippable.
+		 *
 		 * The ST_AsHexWKB fallback exists for safety but should not be
 		 * reached.
 		 */
 		if (sourceFormat == DATA_FORMAT_GDAL)
 			return psprintf("COALESCE(hex(TRY_CAST(%s AS BLOB)), ST_AsHexWKB(TRY_CAST(%s AS GEOMETRY)))%s",
-							quote_identifier(columnName),
-							quote_identifier(columnName),
+							duckdb_quote_identifier(columnName),
+							duckdb_quote_identifier(columnName),
 							columnAliasString);
 	}
+
+	/*
+	 * A bytea column over a GeoParquet file arrives as GEOMETRY, which would
+	 * be sent as hex text. Ask for its WKB instead so the column keeps
+	 * returning bytes. Iceberg pins the column to BLOB via the schema option,
+	 * so only plain Parquet needs this.
+	 */
+	if (engineType.typeId == DUCKDB_TYPE_BLOB && !engineType.isArrayType &&
+		sourceFormat == DATA_FORMAT_PARQUET)
+		return psprintf("COALESCE(TRY_CAST(%s AS BLOB), ST_AsWKB(TRY_CAST(%s AS GEOMETRY)))%s",
+						duckdb_quote_identifier(columnName),
+						duckdb_quote_identifier(columnName),
+						columnAliasString);
 
 	if (sourceFormat == DATA_FORMAT_LOG)
 	{

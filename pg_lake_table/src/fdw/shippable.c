@@ -44,6 +44,7 @@
 #include "catalog/pg_type.h"
 #include "catalog/pg_type_d.h"
 #include "nodes/nodeFuncs.h"
+#include "parser/parsetree.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/hsearch.h"
@@ -64,6 +65,7 @@
 #include "pg_lake/pgduck/shippable_spatial_operators.h"
 #include "pg_lake/pgduck/type.h"
 #include "pg_lake/extensions/postgis.h"
+#include "pg_lake/util/rel_utils.h"
 
 
 /* pg_lake_table.enable_strict_pushdown setting */
@@ -681,6 +683,35 @@ is_shippable(Oid objectId, Oid classId, Node *expr)
 
 	/* Built-in objects are presumed shippable in non-strict mode */
 	return is_builtin(objectId);
+}
+
+
+/*
+ * IsGDALGeometryVar
+ *	   Is this Var a geometry column of a foreign table read through GDAL?
+ *
+ * A GDAL scan asks st_read for raw WKB and passes it on hex-encoded, because
+ * DuckDB's GEOMETRY cannot represent the curve types those sources use. The
+ * column is therefore VARCHAR on the DuckDB side and no spatial function over
+ * it binds, so expressions on it have to be evaluated locally.
+ */
+bool
+IsGDALGeometryVar(Var *var, List *rtable)
+{
+	/* varno may be a special value, or refer to an outer query's range table */
+	if (var->varlevelsup > 0 || var->varno == 0 ||
+		var->varno > (Index) list_length(rtable))
+		return false;
+
+	if (!IsGeometryTypeId(var->vartype))
+		return false;
+
+	RangeTblEntry *rte = rt_fetch(var->varno, rtable);
+
+	if (rte->rtekind != RTE_RELATION || !IsPgLakeForeignTableById(rte->relid))
+		return false;
+
+	return GetPgLakeTableProperties(rte->relid).format == DATA_FORMAT_GDAL;
 }
 
 

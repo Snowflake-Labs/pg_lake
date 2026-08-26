@@ -59,6 +59,8 @@ typedef struct DuckDBTypeInfo
 
 extern DuckDBTypeInfo * find_duck_type_info(duckdb_type duckType);
 
+extern const char *duck_type_error_name(duckdb_type duckType);
+
 extern Oid	duckdb_type_to_pg_oid(duckdb_type duckType);
 
 #endif
