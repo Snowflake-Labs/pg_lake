@@ -579,6 +579,21 @@ InsertMetadataResolveRecord(char *metadataPath, Oid relationId, TimestampTz orph
 * a record into the deletion queue. is_prefix marks a whole-prefix delete and
 * resolve_metadata marks a metadata.json to be resolved into referenced files
 * by VACUUM; the two are mutually exclusive.
+*
+* The queue is a set of paths, so queueing a path that is already queued has
+* to be a no-op rather than a primary key violation: the callers run inside
+* user DML and DDL, and a duplicate would abort the user's statement (an
+* INSERT into a writable REST catalog table, a DROP TABLE) over a file that is
+* already scheduled for deletion. Paths repeat for several reasons -- the
+* metadata location a write is based on can still be the location the catalog
+* reports afterwards, previous_metadata rotation can queue a path a later drop
+* queues again, and two dropped tables can share a file.
+*
+* ON CONFLICT (path) DO UPDATE ... WHERE excluded.resolve_metadata keeps the
+* existing row's retention in every ordinary case, and upgrades it to a
+* resolve_metadata row when that is what the caller is queueing: a deferred
+* drop must still have VACUUM resolve the metadata.json into the files it
+* references, and silently dropping that intent would leak them.
 */
 void
 InsertDeletionQueueRecordExtended(char *path, Oid relationId, TimestampTz orphanedAt,
@@ -587,7 +602,10 @@ InsertDeletionQueueRecordExtended(char *path, Oid relationId, TimestampTz orphan
 	char	   *query =
 		"insert into " DELETION_QUEUE_TABLE " "
 		"(path, table_name, orphaned_at, is_prefix, resolve_metadata) "
-		"values ($1,$2,$3,$4,$5)";
+		"values ($1,$2,$3,$4,$5) "
+		"on conflict (path) do update "
+		"set resolve_metadata = true, table_name = excluded.table_name "
+		"where excluded.resolve_metadata";
 
 	DECLARE_SPI_ARGS(5);
 	SPI_ARG_VALUE(1, TEXTOID, path, false);
