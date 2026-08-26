@@ -149,6 +149,8 @@ static void AddManifestEntryToHash(HTAB *hash, int32 partitionSpecId,
 								   IcebergManifestEntry * entry);
 static bool HasCreateTableOperation(List *metadataOperations);
 static void DeleteInProgressManifests(Oid relationId, List *manifests);
+static IcebergTableMetadata * GetWritableRestCatalogTableMetadataForUpdate(Oid relationId,
+																		   char **metadataLocation);
 
 
 /*
@@ -205,14 +207,26 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 	}
 	else
 	{
-		metadataPath = GetIcebergMetadataLocation(relationId, forUpdate);
-
-		/*
-		 * metadata for writable rest catalog is intended to be read-only in
-		 * the remaining of the function, given the authoritative source is
-		 * the rest catalog.
-		 */
-		metadata = ReadIcebergTableMetadata(metadataPath);
+		if (writableRestCatalogTable)
+		{
+			/*
+			 * metadata for writable rest catalog is intended to be read-only
+			 * in the remaining of the function, given the authoritative
+			 * source is the rest catalog. Take it from the loadTable response
+			 * rather than reading metadataPath back from storage: a write
+			 * queues the version it was based on for deletion, so a drain of
+			 * the deletion queue can remove that file while it is still the
+			 * location the catalog reports, and a resolve-then-read would
+			 * fail with a 404.
+			 */
+			metadata = GetWritableRestCatalogTableMetadataForUpdate(relationId,
+																	&metadataPath);
+		}
+		else
+		{
+			metadataPath = GetIcebergMetadataLocation(relationId, forUpdate);
+			metadata = ReadIcebergTableMetadata(metadataPath);
+		}
 
 		/*
 		 * for writable rest catalog tables, the metadata state is on the REST
@@ -1357,6 +1371,39 @@ HasCreateTableOperation(List *metadataOperations)
 	}
 
 	return false;
+}
+
+
+/*
+ * GetWritableRestCatalogTableMetadataForUpdate returns the current iceberg
+ * metadata of a writable rest catalog table, and reports where the catalog
+ * says that metadata lives in *metadataLocation.
+ *
+ * A loadTable response inlines the whole metadata document, so no read from
+ * storage is needed. That matters beyond the saved round-trip: resolving the
+ * location and then fetching it are two steps, and the file can be deleted in
+ * between.
+ *
+ * The catalog row is locked as GetIcebergMetadataLocation(forUpdate = true)
+ * would, to serialize concurrent writers to the same table.
+ */
+static IcebergTableMetadata *
+GetWritableRestCatalogTableMetadataForUpdate(Oid relationId, char **metadataLocation)
+{
+	LockIcebergPgLakeCatalogForUpdate(relationId);
+
+	RestCatalogLoadTableResult result =
+		LoadTableFromRestCatalogForIcebergTable(relationId);
+
+	if (result.metadata == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+				 errmsg("rest catalog did not return the metadata of table %s",
+						get_rel_name(relationId))));
+
+	*metadataLocation = result.metadataLocation;
+
+	return ParseIcebergTableMetadata(result.metadata);
 }
 
 
