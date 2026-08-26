@@ -13,16 +13,11 @@ ARG PG16_VERSION=16.15
 ARG PG17_VERSION=17.11
 ARG PG18_VERSION=18.6
 ARG PG19_VERSION=19beta3
-ARG POSTGIS_VERSION=3.6.0
+ARG POSTGIS_VERSION=3.6.4
 ARG PGAUDIT16_VERSION=REL_16_STABLE
 ARG PGAUDIT17_VERSION=REL_17_STABLE
 ARG PGAUDIT18_VERSION=REL_18_STABLE
-# pgaudit has no PG19 release yet, so build the maintainer's PG19 support branch
-# (dwsteele/pgaudit#317, dev-pg19). It now fixes the SQL/PGQ graph_table audit
-# crash (commit ffbae89), so pgaudit can stay preloaded on PG19 like the other
-# versions. Switch to REL_19_STABLE once it is tagged.
-ARG PGAUDIT19_REPO=dwsteele/pgaudit
-ARG PGAUDIT19_VERSION=dev-pg19
+ARG PGAUDIT19_VERSION=REL_19_STABLE
 
 # Install build dependencies
 RUN if [ "$BASE_IMAGE_OS" = "almalinux" ]; then \
@@ -175,7 +170,7 @@ RUN wget https://ftp.postgresql.org/pub/source/v$PG16_VERSION/postgresql-$PG16_V
     wget https://github.com/pgaudit/pgaudit/archive/refs/heads/$PGAUDIT16_VERSION.tar.gz && \
     wget https://github.com/pgaudit/pgaudit/archive/refs/heads/$PGAUDIT17_VERSION.tar.gz && \
     wget https://github.com/pgaudit/pgaudit/archive/refs/heads/$PGAUDIT18_VERSION.tar.gz && \
-    wget https://github.com/$PGAUDIT19_REPO/archive/refs/heads/$PGAUDIT19_VERSION.tar.gz && \
+    wget https://github.com/pgaudit/pgaudit/archive/refs/heads/$PGAUDIT19_VERSION.tar.gz && \
     tar -xzf postgresql-$PG16_VERSION.tar.gz && rm postgresql-$PG16_VERSION.tar.gz && \
     tar -xzf postgresql-$PG17_VERSION.tar.gz && rm postgresql-$PG17_VERSION.tar.gz && \
     tar -xzf postgresql-$PG18_VERSION.tar.gz && rm postgresql-$PG18_VERSION.tar.gz && \

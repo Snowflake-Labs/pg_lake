@@ -159,9 +159,9 @@ case $PG_VERSION in
     17) PG_BRANCH="REL_17_STABLE" ;;
     18) PG_BRANCH="REL_18_STABLE" ;;
     # PG19 has no stable branch yet; pin the beta tag so local builds match
-    # CI (which builds from the 19beta1 release tarball) instead of tracking
+    # CI (which builds from the 19beta3 release tarball) instead of tracking
     # the moving master branch.
-    19) PG_BRANCH="REL_19_BETA1" ;;
+    19) PG_BRANCH="REL_19_BETA3" ;;
 esac
 
 # Determine PostgreSQL installation paths
