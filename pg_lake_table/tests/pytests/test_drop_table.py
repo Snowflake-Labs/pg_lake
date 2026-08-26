@@ -426,7 +426,7 @@ def test_drop_without_s3_access_cached(
         pg_conn,
         raise_error=False,
     )
-    assert "Could not establish connection error" in result
+    assert "Could not connect to server error" in result
     pg_conn.rollback()
 
     # still, we can drop the table/schema
@@ -522,7 +522,7 @@ def test_drop_without_s3_access_not_cached(
         pg_conn,
         raise_error=False,
     )
-    assert "Could not establish connection error" in result
+    assert "Could not connect to server error" in result
     pg_conn.rollback()
 
     # still, we can drop the table/schema

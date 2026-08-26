@@ -91,8 +91,13 @@ def test_pg_lake_iceberg_snapshots(
 
     install_duckdb_extension(duckdb_conn, "iceberg")
 
-    duckdb_query = f"SELECT * FROM iceberg_snapshots('{metadata_location}') ORDER BY 1"
-    pg_query = f"SELECT * FROM lake_iceberg.snapshots('{metadata_location}') ORDER BY 1"
+    # duckdb 1.5.5 added an operation column to iceberg_snapshots() that
+    # lake_iceberg.snapshots() does not return, so compare the shared columns
+    columns = "sequence_number, snapshot_id, timestamp_ms, manifest_list"
+    duckdb_query = (
+        f"SELECT {columns} FROM iceberg_snapshots('{metadata_location}') ORDER BY 1"
+    )
+    pg_query = f"SELECT {columns} FROM lake_iceberg.snapshots('{metadata_location}') ORDER BY 1"
 
     assert_query_result_on_duckdb_and_pg(
         duckdb_conn, superuser_conn, duckdb_query, pg_query

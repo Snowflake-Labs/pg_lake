@@ -144,9 +144,13 @@ def test_iceberg_add_file(
     results = run_query("SELECT count(*) FROM test_iceberg_add_file.ft1", pg_conn)
     assert results[0][0] == 30 + 10 + 100 + 250
 
-    # now compare the snapshots
-    duckdb_query = f"SELECT * FROM iceberg_snapshots('{metadata_location}') ORDER BY 1"
-    pg_query = f"SELECT * FROM lake_iceberg.snapshots('{metadata_location}') ORDER BY 1"
+    # now compare the snapshots, on the columns both readers have: duckdb 1.5.5
+    # added an operation column to iceberg_snapshots()
+    columns = "sequence_number, snapshot_id, timestamp_ms, manifest_list"
+    duckdb_query = (
+        f"SELECT {columns} FROM iceberg_snapshots('{metadata_location}') ORDER BY 1"
+    )
+    pg_query = f"SELECT {columns} FROM lake_iceberg.snapshots('{metadata_location}') ORDER BY 1"
     result = assert_query_result_on_duckdb_and_pg(
         duckdb_conn, pg_conn, duckdb_query, pg_query
     )

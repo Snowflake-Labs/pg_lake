@@ -1,14 +1,14 @@
 diff --git a/src/storage/postgres_table_set.cpp b/src/storage/postgres_table_set.cpp
-index 61b74cd..cc99bd5 100644
+index 9f5e7fc..1456608 100644
 --- a/src/storage/postgres_table_set.cpp
 +++ b/src/storage/postgres_table_set.cpp
-@@ -21,7 +21,8 @@ PostgresTableSet::PostgresTableSet(PostgresSchemaEntry &schema, unique_ptr<Postg
+@@ -27,7 +27,8 @@ string PostgresTableSet::GetInitializeQuery(const string &schema, const string &
  
- string PostgresTableSet::GetInitializeQuery(const string &schema, const string &table) {
+ string PostgresTableSet::GetInitializeQuery(const vector<string> &schemas, const string &table) {
  	string base_query = R"(
 -SELECT pg_namespace.oid AS namespace_id, relname, relpages, attname,
 +SELECT pg_namespace.oid AS namespace_id, relname,
 +    pg_relation_size(pg_class.oid) / current_setting('block_size')::bigint AS relpages, attname,
      pg_type.typname type_name, atttypmod type_modifier, pg_attribute.attndims ndim,
-     atttypid type_oid, attnum, pg_attribute.attnotnull AS notnull, NULL constraint_id,
-     NULL constraint_type, NULL constraint_key
+     attnum, pg_attribute.attnotnull AS notnull, NULL constraint_id,
+     NULL constraint_type, NULL constraint_key, type_ns.nspname AS type_schema,

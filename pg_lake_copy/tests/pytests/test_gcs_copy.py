@@ -59,7 +59,7 @@ def test_gcs_copy_from_parquet_notexists(pg_conn, gcs):
         pg_conn,
         raise_error=False,
     )
-    assert error.startswith("ERROR:  HTTP Error: Unable to connect to URL ")
+    assert error.startswith("ERROR:  HTTP Error:")
 
     pg_conn.rollback()
 
@@ -76,9 +76,9 @@ def test_gcs_copy_from_parquet_invalid(pg_conn, gcs):
         pg_conn,
         raise_error=False,
     )
-    assert (
-        error.startswith("ERROR:  HTTP Error: HTTP GET error")
-        or "Unable to connect to URL" in error
-    )
+    # since duckdb 1.5.5 httpfs reports this as "HTTP error on '<url>' (HTTP 403
+    # Forbidden)", it used to start with "HTTP GET error"
+    assert error.startswith("ERROR:  HTTP Error:")
+    assert "403" in error or "Unable to connect to URL" in error
 
     pg_conn.rollback()

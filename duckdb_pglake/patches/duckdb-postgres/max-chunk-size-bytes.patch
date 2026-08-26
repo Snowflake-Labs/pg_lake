@@ -1,48 +1,60 @@
+diff --git a/src/include/postgres_binary_parser.hpp b/src/include/postgres_binary_parser.hpp
+index c82da4d..72816a8 100644
+--- a/src/include/postgres_binary_parser.hpp
++++ b/src/include/postgres_binary_parser.hpp
+@@ -20,7 +20,11 @@ public:
+ 	PostgresBinaryParser(vector<LogicalType> types, vector<PostgresType> postgres_types);
+ 
+ 	void SetBuffer(data_ptr_t buf, idx_t len);
+-	bool ReadChunk(DataChunk &output, const vector<column_t> &column_ids);
++	//! Reads rows into output until it is full, the buffer runs out, or (when limit is
++	//! given) the accumulated payload bytes reach the bound. Returns false only when the
++	//! buffer ran out, i.e. when the caller has to hand us the next one.
++	bool ReadChunk(DataChunk &output, const vector<column_t> &column_ids,
++	               optional_ptr<PostgresChunkSizeLimit> limit = nullptr);
+ 	void CheckHeader();
+ 
+ private:
 diff --git a/src/include/postgres_result_reader.hpp b/src/include/postgres_result_reader.hpp
-index 2b452ec..3c2629b 100644
+index 1915c3b..7aba891 100644
 --- a/src/include/postgres_result_reader.hpp
 +++ b/src/include/postgres_result_reader.hpp
-@@ -34,10 +34,35 @@ public:
- 	virtual void BeginCopy(const string &sql) = 0;
+@@ -34,10 +34,30 @@ public:
+ 	virtual void BeginCopy(ClientContext &context, const string &sql) = 0;
  	virtual PostgresReadResult Read(DataChunk &result) = 0;
  
 +	//! Bound on the number of payload bytes we accumulate into a single output chunk.
 +	//! Zero means unbounded, i.e. a chunk is only bounded by STANDARD_VECTOR_SIZE rows.
 +	void SetMaxChunkSizeBytes(idx_t bytes) {
-+		max_chunk_size_bytes = bytes;
++		chunk_size_limit.max_bytes = bytes;
 +	}
 +	//! Called by the scan whenever the executor hands us a fresh output chunk
 +	void ResetChunkSize() {
-+		chunk_size_bytes = 0;
++		chunk_size_limit.bytes = 0;
 +	}
-+	//! Whether the current output chunk has reached the byte bound. Rows are only ever
-+	//! added while this is false, so a chunk always holds at least one row - a single
-+	//! row larger than the bound is emitted on its own rather than being rejected.
++	//! Whether the current output chunk has reached the byte bound
 +	bool ChunkSizeLimitReached() const {
-+		return max_chunk_size_bytes > 0 && chunk_size_bytes >= max_chunk_size_bytes;
++		return chunk_size_limit.Reached();
 +	}
 +
 +protected:
 +	void AddChunkSizeBytes(idx_t bytes) {
-+		chunk_size_bytes += bytes;
++		chunk_size_limit.Add(bytes);
 +	}
 +
  protected:
  	PostgresConnection &con;
  	const vector<column_t> &column_ids;
  	const PostgresBindData &bind_data;
-+
-+private:
-+	idx_t max_chunk_size_bytes = 0;
-+	idx_t chunk_size_bytes = 0;
++	PostgresChunkSizeLimit chunk_size_limit;
  };
  
  } // namespace duckdb
 diff --git a/src/include/postgres_scanner.hpp b/src/include/postgres_scanner.hpp
-index 0f9cda7..65b0cc9 100644
+index 447ed8e..257100d 100644
 --- a/src/include/postgres_scanner.hpp
 +++ b/src/include/postgres_scanner.hpp
-@@ -21,6 +21,15 @@ class PostgresTransaction;
+@@ -22,6 +22,15 @@ class PostgresTransaction;
  
  struct PostgresBindData : public FunctionData {
  	static constexpr const idx_t DEFAULT_PAGES_PER_TASK = 1000;
@@ -58,7 +70,7 @@ index 0f9cda7..65b0cc9 100644
  
  public:
  	PostgresBindData(ClientContext &context);
-@@ -37,6 +43,7 @@ public:
+@@ -39,6 +48,7 @@ public:
  	vector<LogicalType> types;
  
  	idx_t pages_per_task = DEFAULT_PAGES_PER_TASK;
@@ -66,46 +78,94 @@ index 0f9cda7..65b0cc9 100644
  	string dsn;
  	string attach_path;
  
+diff --git a/src/include/postgres_utils.hpp b/src/include/postgres_utils.hpp
+index 9d9cdc3..156b5ee 100644
+--- a/src/include/postgres_utils.hpp
++++ b/src/include/postgres_utils.hpp
+@@ -59,6 +59,24 @@ struct PostgresCopyState {
+ 	void Initialize(ClientContext &context);
+ };
+ 
++//! Byte accounting for the output chunk currently being filled. Rows are only ever added
++//! while Reached() is false, so a chunk always holds at least one row - a single row larger
++//! than the bound is emitted on its own rather than being rejected.
++struct PostgresChunkSizeLimit {
++	//! Bound on the payload bytes accumulated into a single output chunk. Zero means
++	//! unbounded, i.e. a chunk is only bounded by STANDARD_VECTOR_SIZE rows.
++	idx_t max_bytes = 0;
++	//! Payload bytes accumulated into the current output chunk
++	idx_t bytes = 0;
++
++	void Add(idx_t n) {
++		bytes += n;
++	}
++	bool Reached() const {
++		return max_bytes > 0 && bytes >= max_bytes;
++	}
++};
++
+ enum class PostgresIsolationLevel { READ_COMMITTED, REPEATABLE_READ, SERIALIZABLE };
+ 
+ class PostgresUtils {
+diff --git a/src/postgres_binary_parser.cpp b/src/postgres_binary_parser.cpp
+index 41881a3..2a29254 100644
+--- a/src/postgres_binary_parser.cpp
++++ b/src/postgres_binary_parser.cpp
+@@ -12,12 +12,17 @@ void PostgresBinaryParser::SetBuffer(data_ptr_t buf, idx_t len) {
+ 	end = buf + len;
+ }
+ 
+-bool PostgresBinaryParser::ReadChunk(DataChunk &output, const vector<column_t> &column_ids) {
++bool PostgresBinaryParser::ReadChunk(DataChunk &output, const vector<column_t> &column_ids,
++                                     optional_ptr<PostgresChunkSizeLimit> limit) {
+ 	while (output.size() < STANDARD_VECTOR_SIZE) {
++		if (limit && limit->Reached()) {
++			return true;
++		}
+ 		if (!Ready()) {
+ 			return false;
+ 		}
+ 
++		auto row_start = buffer_ptr;
+ 		auto tuple_count = ReadInteger<int16_t>();
+ 		if (tuple_count <= 0) {
+ 			// tuple_count of -1 signifies the file trailer (i.e. footer)
+@@ -41,6 +46,12 @@ bool PostgresBinaryParser::ReadChunk(DataChunk &output, const vector<column_t> &
+ 				ReadValue(types[col_idx], postgres_types[col_idx], out_vec, output_offset);
+ 			}
+ 		}
++		if (limit) {
++			// The bytes this row occupied on the wire are a close proxy for the bytes it
++			// occupies in the output chunk, which is what bounds the row group we end up
++			// writing downstream.
++			limit->Add(idx_t(buffer_ptr - row_start));
++		}
+ 		output.SetCardinality(output_offset + 1);
+ 	}
+ 	return true;
 diff --git a/src/postgres_binary_reader.cpp b/src/postgres_binary_reader.cpp
-index 86ebe30..cfbb321 100644
+index c006175..14ab35a 100644
 --- a/src/postgres_binary_reader.cpp
 +++ b/src/postgres_binary_reader.cpp
-@@ -21,7 +21,7 @@ void PostgresBinaryReader::BeginCopy(const string &sql) {
+@@ -21,8 +21,8 @@ void PostgresBinaryReader::BeginCopy(ClientContext &context, const string &sql)
  }
  
  PostgresReadResult PostgresBinaryReader::Read(DataChunk &output) {
 -	while (output.size() < STANDARD_VECTOR_SIZE) {
+-		if (parser.ReadChunk(output, column_ids)) {
 +	while (output.size() < STANDARD_VECTOR_SIZE && !ChunkSizeLimitReached()) {
- 		while (!Ready()) {
- 			if (!Next()) {
- 				// finished this batch
-@@ -30,6 +30,7 @@ PostgresReadResult PostgresBinaryReader::Read(DataChunk &output) {
++		if (parser.ReadChunk(output, column_ids, chunk_size_limit)) {
+ 			return PostgresReadResult::HAVE_MORE_TUPLES;
  		}
- 
- 		// read a row
-+		auto row_start = buffer_ptr;
- 		auto tuple_count = ReadInteger<int16_t>();
- 		if (tuple_count <= 0) {
- 			// tuple_count of -1 signifies the file trailer (i.e. footer) - reset and skip
-@@ -54,6 +55,10 @@ PostgresReadResult PostgresBinaryReader::Read(DataChunk &output) {
- 				ReadValue(bind_data.types[col_idx], bind_data.postgres_types[col_idx], out_vec, output_offset);
- 			}
- 		}
-+		// The bytes this row occupied on the wire are a close proxy for the bytes it
-+		// occupies in the output chunk, which is what bounds the row group we end up
-+		// writing downstream.
-+		AddChunkSizeBytes(idx_t(buffer_ptr - row_start));
- 		Reset();
- 		output.SetCardinality(output_offset + 1);
- 	}
+ 		FreeBuffer();
 diff --git a/src/postgres_extension.cpp b/src/postgres_extension.cpp
-index 4246555..69599ef 100644
+index 07119bd..61bc942 100644
 --- a/src/postgres_extension.cpp
 +++ b/src/postgres_extension.cpp
-@@ -183,6 +183,13 @@ static void LoadInternal(ExtensionLoader &loader) {
- 	                          LogicalType::VARCHAR, Value(), SetPostgresNullByteReplacement);
- 	config.AddExtensionOption("pg_debug_show_queries", "DEBUG SETTING: print all queries sent to Postgres to stdout",
- 	                          LogicalType::BOOLEAN, Value::BOOLEAN(false), SetPostgresDebugQueryPrint);
+@@ -204,6 +204,13 @@ static void LoadInternal(ExtensionLoader &loader) {
+ 	                          "OAuth bearer token for PostgreSQL OAUTHBEARER authentication. "
+ 	                          "Takes priority over the PGOAUTHTOKEN environment variable",
+ 	                          LogicalType::VARCHAR, Value(), nullptr, SetScope::SESSION);
 +	config.AddExtensionOption("pg_max_chunk_size_bytes",
 +	                          "Approximate upper bound on the payload bytes read into a single output chunk. "
 +	                          "Chunks are still capped at 2048 rows; this additionally caps them by size so that "
@@ -117,10 +177,10 @@ index 4246555..69599ef 100644
  	                          "Whether or not to use TEXT protocol to read data. This is slower, but provides better "
  	                          "compatibility with non-Postgres systems",
 diff --git a/src/postgres_scanner.cpp b/src/postgres_scanner.cpp
-index bb4136f..e10ff33 100644
+index eb0aa47..3a71dca 100644
 --- a/src/postgres_scanner.cpp
 +++ b/src/postgres_scanner.cpp
-@@ -142,6 +142,10 @@ PostgresBindData::PostgresBindData(ClientContext &context) {
+@@ -152,6 +152,10 @@ PostgresBindData::PostgresBindData(ClientContext &context) {
  			use_text_protocol = true;
  		}
  	}
@@ -131,7 +191,7 @@ index bb4136f..e10ff33 100644
  }
  
  void PostgresBindData::SetTablePages(idx_t approx_num_pages) {
-@@ -452,7 +456,11 @@ void PostgresLocalState::ScanChunk(ClientContext &context, const PostgresBindDat
+@@ -503,7 +507,11 @@ void PostgresLocalState::ScanChunk(ClientContext &context, const PostgresBindDat
  		} else {
  			reader = make_uniq<PostgresBinaryReader>(connection, column_ids, bind_data);
  		}
@@ -142,8 +202,8 @@ index bb4136f..e10ff33 100644
 +	reader->ResetChunkSize();
  	while (true) {
  		if (done && !PostgresParallelStateNext(context, &bind_data, *this, gstate)) {
- 			return;
-@@ -466,7 +474,7 @@ void PostgresLocalState::ScanChunk(ClientContext &context, const PostgresBindDat
+ 			no_connection = true;
+@@ -518,7 +526,7 @@ void PostgresLocalState::ScanChunk(ClientContext &context, const PostgresBindDat
  			done = true;
  			continue;
  		}
@@ -153,10 +213,10 @@ index bb4136f..e10ff33 100644
  		}
  	}
 diff --git a/src/postgres_text_reader.cpp b/src/postgres_text_reader.cpp
-index 066e072..b2e0d55 100644
+index 3d865b4..a61ac3a 100644
 --- a/src/postgres_text_reader.cpp
 +++ b/src/postgres_text_reader.cpp
-@@ -339,8 +339,10 @@ PostgresReadResult PostgresTextReader::Read(DataChunk &output) {
+@@ -415,8 +415,10 @@ PostgresReadResult PostgresTextReader::Read(DataChunk &output) {
  		scan_chunk.Initialize(context, types);
  	}
  	scan_chunk.Reset();
@@ -168,7 +228,7 @@ index 066e072..b2e0d55 100644
  		for (idx_t output_idx = 0; output_idx < output.ColumnCount(); output_idx++) {
  			auto col_idx = column_ids[output_idx];
  			auto &out_vec = scan_chunk.data[output_idx];
-@@ -349,9 +351,11 @@ PostgresReadResult PostgresTextReader::Read(DataChunk &output) {
+@@ -425,9 +427,11 @@ PostgresReadResult PostgresTextReader::Read(DataChunk &output) {
  				continue;
  			}
  			auto col_data = FlatVector::GetData<string_t>(out_vec);
