@@ -422,8 +422,13 @@ TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod, CopyDataFormat sourc
 	 * Numeric type handling varies by precision:
 	 *
 	 * - Bounded (precision <= 38): maps to DuckDB DECIMAL, which cannot
-	 * represent NaN. PostgreSQL allows NaN in any numeric column, so we must
-	 * block pushdown and let the non-pushdown path clamp or reject NaN via
+	 * represent NaN.  Parquet and Iceberg sources cannot contain a decimal
+	 * NaN, and a NaN arriving through a floating-point source column is
+	 * caught by the vectorized isnan() guard the validation wrapper emits
+	 * (see AppendIcebergValidationExpression), so pushdown is safe for
+	 * Parquet-based sources.  Other sources (e.g. CSV text parsing, which
+	 * can produce NaN numerics with PostgreSQL semantics) stay on the
+	 * non-pushdown path, which clamps or rejects NaN via
 	 * IcebergErrorOrClampSlotInPlace / IcebergErrorOrClampDatum.
 	 *
 	 * - Unbounded or precision > 38: on Iceberg tables these are converted to
@@ -450,10 +455,13 @@ TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod, CopyDataFormat sourc
 		}
 #endif
 
-		ereport(DEBUG4,
-				(errmsg("Numeric type is not pushdownable")));
+		if (!FormatUsesParquet(sourceFormat))
+		{
+			ereport(DEBUG4,
+					(errmsg("Numeric type is not pushdownable for non-Parquet sources")));
 
-		return true;
+			return true;
+		}
 	}
 
 	/*

@@ -2618,7 +2618,7 @@ TupleDescNeedsIcebergValidation(TupleDesc tupleDesc)
 		if (attr->attisdropped)
 			continue;
 
-		if (TypeNeedsIcebergValidation(attr->atttypid, attr->atttypmod, false))
+		if (TypeNeedsIcebergValidation(attr->atttypid, attr->atttypmod))
 			return true;
 	}
 
@@ -2668,7 +2668,7 @@ IcebergErrorOrClampSlotInPlace(TupleTableSlot *slot, TupleDesc tupleDesc,
 		if (attr->attisdropped || slot->tts_isnull[i])
 			continue;
 
-		if (!TypeNeedsIcebergValidation(attr->atttypid, attr->atttypmod, false))
+		if (!TypeNeedsIcebergValidation(attr->atttypid, attr->atttypmod))
 			continue;
 
 		bool		isNull = false;

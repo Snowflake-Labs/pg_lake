@@ -319,11 +319,13 @@ def test_insert_select_pushdown_unsupported(
     )
     assert "Custom Scan (Query Pushdown)" not in str(results)
 
+    # bounded numeric is pushdownable; the validation wrapper's vectorized
+    # isnan() guard enforces the NaN policy on the DuckDB side
     results = run_query(
         "EXPLAIN ANALYZE INSERT INTO numeric_table SELECT random()*0.01 FROM generate_series(0,10)i",
         pg_conn,
     )
-    assert "Custom Scan (Query Pushdown)" not in str(results)
+    assert "Custom Scan (Query Pushdown)" in str(results)
 
     results = run_query(
         "EXPLAIN ANALYZE INSERT INTO table_use_sequence(value) SELECT i FROM generate_series(0,10)i",
@@ -1328,7 +1330,6 @@ def test_nan_arithmetic_clamp(
 ):
     """NaN produced by arithmetic on bounded numeric is clamped to NULL."""
     schema = "test_nan_arith_clamp"
-
     run_command(f"CREATE SCHEMA {schema};", pg_conn)
     run_command(f"SET search_path TO {schema};", pg_conn)
 
@@ -1381,6 +1382,87 @@ def test_nan_arithmetic_error(
         )
         assert "NaN is not supported for Iceberg decimal" in str(err)
         pg_conn.rollback()
+    finally:
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
+def test_numeric_insert_select_pushdown(
+    pg_conn,
+    extension,
+    s3,
+    with_default_location,
+):
+    """Bounded numeric columns are pushdownable; NaN policy is enforced by the
+    wrapper's vectorized isnan() guard, and NaN constants fall back to the
+    non-pushdown path."""
+    schema = "test_numeric_pushdown"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+
+    try:
+        run_command(
+            """
+            CREATE TABLE num_src (id bigint, amt numeric(38,10)) USING iceberg;
+            INSERT INTO num_src SELECT i, i * 1.1 FROM generate_series(1, 1000) i;
+            CREATE TABLE num_tgt (id bigint, amt numeric(38,10)) USING iceberg;
+            CREATE TABLE dbl_src (id bigint, val float8) USING iceberg;
+            INSERT INTO dbl_src VALUES (1, 1.5), (2, 'NaN');
+            CREATE TABLE num_clamp (id bigint, val numeric(10,2)) USING iceberg
+                WITH (out_of_range_values = 'clamp');
+            CREATE TABLE num_err (id bigint, val numeric(10,2)) USING iceberg
+                WITH (out_of_range_values = 'error');
+        """,
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        # iceberg-to-iceberg decimal copy is pushed down and exact
+        results = run_query(
+            "EXPLAIN ANALYZE INSERT INTO num_tgt SELECT * FROM num_src",
+            pg_conn,
+        )
+        assert "Custom Scan (Query Pushdown)" in str(results)
+
+        run_command("INSERT INTO num_tgt SELECT * FROM num_src;", pg_conn)
+        pg_conn.commit()
+
+        result = run_query(
+            "SELECT count(*), sum(amt) FROM num_tgt", pg_conn
+        )
+        assert result[0][0] == 1000
+        assert result == run_query("SELECT count(*), sum(amt) FROM num_src", pg_conn)
+
+        # NaN arriving through a float8 source column is clamped to NULL
+        run_command(
+            "INSERT INTO num_clamp SELECT id, val FROM dbl_src;", pg_conn
+        )
+        pg_conn.commit()
+
+        result = run_query(
+            "SELECT val::text FROM num_clamp ORDER BY id", pg_conn
+        )
+        assert result[0][0] is not None
+        assert result[1][0] is None
+
+        # ... and raises under the error policy
+        err = run_command(
+            "INSERT INTO num_err SELECT id, val FROM dbl_src;",
+            pg_conn,
+            raise_error=False,
+        )
+        assert "NaN is not supported for Iceberg decimal" in str(err)
+        pg_conn.rollback()
+
+        # a NaN numeric constant is not shippable, so the statement falls back
+        # to the non-pushdown path and the existing datum-level policy applies
+        results = run_query(
+            "EXPLAIN INSERT INTO num_clamp SELECT 3, 'NaN'::numeric(10,2)",
+            pg_conn,
+        )
+        assert "Custom Scan (Query Pushdown)" not in str(results)
     finally:
         run_command("RESET search_path;", pg_conn)
         run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)

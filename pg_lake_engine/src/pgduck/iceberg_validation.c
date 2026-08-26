@@ -95,17 +95,19 @@ IsTemporalType(Oid typeOid)
  *
  * Validation covers: temporal boundaries (date/timestamp/timestamptz),
  * multidimensional array rejection (any array type), and bounded
- * numeric NaN (non-pushdown only, since numeric blocks pushdown).
+ * numeric NaN.  On the non-pushdown path numeric NaN is handled by
+ * IcebergErrorOrClampDatum; on the pushdown path by the vectorized
+ * isnan() guard AppendIcebergValidationExpression emits.
  * Unbounded and large-precision numerics are mapped to float8 on
  * Iceberg tables, so NaN is valid for those and no validation is needed.
  */
 bool
-TypeNeedsIcebergValidation(Oid typeOid, int32 typmod, bool isPushdown)
+TypeNeedsIcebergValidation(Oid typeOid, int32 typmod)
 {
 	if (IsTemporalType(typeOid))
 		return true;
 
-	if (!isPushdown && typeOid == NUMERICOID &&
+	if (typeOid == NUMERICOID &&
 		!IsUnsupportedNumericForIceberg(typeOid, typmod))
 		return true;
 
@@ -131,9 +133,9 @@ TypeNeedsIcebergValidation(Oid typeOid, int32 typmod, bool isPushdown)
 		PGType		valType = GetMapValueType(typeOid);
 
 		return TypeNeedsIcebergValidation(keyType.postgresTypeOid,
-										  keyType.postgresTypeMod, isPushdown) ||
+										  keyType.postgresTypeMod) ||
 			TypeNeedsIcebergValidation(valType.postgresTypeOid,
-									   valType.postgresTypeMod, isPushdown);
+									   valType.postgresTypeMod);
 	}
 
 	char		typtype = get_typtype(typeOid);
@@ -143,7 +145,7 @@ TypeNeedsIcebergValidation(Oid typeOid, int32 typmod, bool isPushdown)
 		int32		baseTypmod = typmod;
 		Oid			baseType = getBaseTypeAndTypmod(typeOid, &baseTypmod);
 
-		return TypeNeedsIcebergValidation(baseType, baseTypmod, isPushdown);
+		return TypeNeedsIcebergValidation(baseType, baseTypmod);
 	}
 
 	if (typtype == TYPTYPE_COMPOSITE)
@@ -158,8 +160,7 @@ TypeNeedsIcebergValidation(Oid typeOid, int32 typmod, bool isPushdown)
 			if (attr->attisdropped)
 				continue;
 
-			if (TypeNeedsIcebergValidation(attr->atttypid, attr->atttypmod,
-										   isPushdown))
+			if (TypeNeedsIcebergValidation(attr->atttypid, attr->atttypmod))
 			{
 				found = true;
 				break;
