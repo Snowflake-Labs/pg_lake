@@ -1380,9 +1380,10 @@ GetLastPushedIcebergMetadata(const TableMetadataOperationTracker * opTracker)
 	Oid			relationId = opTracker->relationId;
 
 	/*
-	 * A writable rest catalog inlines the metadata in its loadTable response,
-	 * which is the same request we would resolve the location with, so take
-	 * it from there instead of reading the file back from storage.
+	 * Any rest catalog inlines the metadata in its loadTable response, and
+	 * resolving the location takes that same request, so take it from there
+	 * rather than reading the file back from storage. Only writable tables
+	 * reach this write-tracking path.
 	 */
 	if (GetIcebergCatalogType(relationId) == REST_CATALOG_READ_WRITE)
 		return GetWritableRestCatalogTableMetadata(relationId, NULL);
