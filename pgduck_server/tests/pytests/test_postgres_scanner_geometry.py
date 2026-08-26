@@ -92,15 +92,15 @@ def test_geometry_count(pg_geom_tables, pgduck_conn):
 
 def test_geometry_roundtrip_to_wkt(pg_geom_tables, pgduck_conn):
     """
-    DuckDB spatial parses the bytes via ST_GeomFromWKB and round-trips them
-    to WKT. Anything other than canonical WKB would either fail to parse or
-    produce malformed text — either way the assert below catches it.
+    DuckDB spatial parses the canonical WKB into GEOMETRY and ST_AsText
+    round-trips to WKT. Anything other than valid WKB would fail to parse
+    or produce malformed text.
 
     Note: ST_AsBinary drops SRID, so we compare WKT geometry only.
     """
     scan = _scan("scanner_geom_basic")
     rows = perform_query_on_cursor(
-        f"SELECT id, ST_AsText(ST_GeomFromWKB(g)) " f"FROM {scan} ORDER BY id",
+        f"SELECT id, ST_AsText(g) FROM {scan} ORDER BY id",
         pgduck_conn,
     )
     assert rows == [
@@ -118,7 +118,7 @@ def test_geometry_typed_column(pg_geom_tables, pgduck_conn):
     """Typed geometry(Point,4326) columns round-trip the same way."""
     scan = _scan("scanner_geom_typed")
     rows = perform_query_on_cursor(
-        f"SELECT id, ST_AsText(ST_GeomFromWKB(g)) " f"FROM {scan} ORDER BY id",
+        f"SELECT id, ST_AsText(g) FROM {scan} ORDER BY id",
         pgduck_conn,
     )
     assert rows == [
@@ -128,19 +128,19 @@ def test_geometry_typed_column(pg_geom_tables, pgduck_conn):
 
 
 def test_geometry_blob_alias(pg_geom_tables, pgduck_conn):
-    """The scanned column is a blob (WKB bytes), not a struct or text."""
+    """The scanned column is a recognized geometry type, not a struct or text."""
     scan = _scan("scanner_geom_typed")
     rows = perform_query_on_cursor(f"SELECT typeof(g) FROM {scan} LIMIT 1", pgduck_conn)
-    # postgres-scanner exposes geometry as a BLOB aliased "WKB_BLOB";
-    # DuckDB reports the alias as the type name.
-    assert rows[0][0] in ("WKB_BLOB", "BLOB")
+    # DuckDB 1.5+ reports geometry columns as GEOMETRY; older versions used
+    # the BLOB-backed WKB_BLOB alias.
+    assert rows[0][0] in ("GEOMETRY", "WKB_BLOB", "BLOB")
 
 
 def test_geometry_filter_pushdown(pg_geom_tables, pgduck_conn):
     """Projection rewrite must coexist with a non-geometry WHERE filter."""
     scan = _scan("scanner_geom_basic")
     rows = perform_query_on_cursor(
-        f"SELECT id, ST_AsText(ST_GeomFromWKB(g)) " f"FROM {scan} WHERE id = 2",
+        f"SELECT id, ST_AsText(g) FROM {scan} WHERE id = 2",
         pgduck_conn,
     )
     assert rows == [(2, "POINT (3 4)")]

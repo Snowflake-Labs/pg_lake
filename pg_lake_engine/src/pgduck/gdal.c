@@ -32,7 +32,8 @@
  * See https://gdal.org/user/virtual_file_systems.html for compression syntax.
  */
 char *
-GDALReadFunctionCall(char *path, CopyDataCompression compression, List *options)
+GDALReadFunctionCall(char *path, CopyDataCompression compression, List *options,
+					 bool forceKeepWKB)
 {
 	DefElem    *filenameOption = GetOption(options, "filename");
 	bool		emitFilename =
@@ -92,7 +93,7 @@ GDALReadFunctionCall(char *path, CopyDataCompression compression, List *options)
 	/* whether to preserve WKB as a raw byte array */
 	DefElem    *keepWKBOption = GetOption(options, "keep_wkb");
 
-	if (keepWKBOption != NULL && defGetBoolean(keepWKBOption))
+	if (forceKeepWKB || (keepWKBOption != NULL && defGetBoolean(keepWKBOption)))
 		appendStringInfoString(&stRead, ", keep_wkb=true");
 
 	/* select a specific layer */

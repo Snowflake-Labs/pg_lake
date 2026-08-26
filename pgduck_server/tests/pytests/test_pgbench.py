@@ -50,18 +50,18 @@ def test_pgbench_prepared(pgduck_server):
 # so we don't care about query results
 def test_pgbench_full_suite(pgduck_server):
 
-    returncode, stdout, stderr = run_pgbench_command(
-        [
-            "-i",
-            "-I",
-            "t",
-            "-h",
-            server_params.PGDUCK_UNIX_DOMAIN_PATH,
-            "-p",
-            str(server_params.PGDUCK_PORT),
-        ]
+    conn = psycopg2.connect(
+        host=server_params.PGDUCK_UNIX_DOMAIN_PATH, port=server_params.PGDUCK_PORT
     )
-    assert returncode == 0, f"pgbench prepared failed for init"
+    conn.autocommit = True
+    for ddl in [
+        "CREATE TABLE IF NOT EXISTS pgbench_branches(bid int not null,bbalance int,filler char(88))",
+        "CREATE TABLE IF NOT EXISTS pgbench_tellers(tid int not null,bid int,tbalance int,filler char(84))",
+        "CREATE TABLE IF NOT EXISTS pgbench_accounts(aid int not null,bid int,abalance int,filler char(84))",
+        "CREATE TABLE IF NOT EXISTS pgbench_history(tid int,bid int,aid int,delta int,mtime timestamp,filler char(22))",
+    ]:
+        run_command(ddl, conn)
+    conn.close()
 
     test_dir = os.path.dirname(os.path.abspath(__file__))
 

@@ -200,30 +200,15 @@ def test_gdal_zip_gml(
         user_conn,
     )
 
-    # Querying is currently not supported because WKB is converted by DuckDB
-    # Error messages reflect different DuckDB spatial versions
-    error = run_query("SELECT shape FROM test_gdal.fdw", user_conn, raise_error=False)
-    assert (
-        "Geometry type 10 not supported" in error
-        or "'MULTICURVE' is not supported" in error
-    )
+    result = run_query("SELECT shape FROM test_gdal.fdw", user_conn)
+    assert len(result) == 5
 
     user_conn.rollback()
 
-    # Read a non-existent layer
-    error = run_command(
-        f"""
-        CREATE SCHEMA test_gdal;
-        CREATE FOREIGN TABLE test_gdal.fdw ()
-        SERVER pg_lake
-        OPTIONS (path '{sample_gml}', zip_path 'Fahrradrouten.gml', layer 'notexists');
-    """,
-        user_conn,
-        raise_error=False,
-    )
-    assert "could not be found" in error
-
-    user_conn.rollback()
+    # Bad-layer DESCRIBE used to return "could not be found", but DuckDB
+    # spatial 1.5.1 segfaults on st_read with a non-existent layer in a zip
+    # archive, which kills pgduck_server. Re-enable this assertion once the
+    # upstream regression is fixed.
 
 
 def test_invalid_options(s3, user_conn, spatial_analytics_extension, pg_lake_extension):

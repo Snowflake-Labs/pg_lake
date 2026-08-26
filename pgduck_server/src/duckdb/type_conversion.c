@@ -112,6 +112,7 @@ static DuckDBStatus array_to_text(duckdb_vector vector, duckdb_logical_type logi
 static DuckDBStatus blob_to_text(duckdb_vector vector, duckdb_logical_type blobType, int row, TextOutputBuffer * toTextBuffer);
 static DuckDBStatus decimal_to_text(duckdb_vector vector, duckdb_logical_type logicalType, int row, TextOutputBuffer * toTextBuffer);
 static DuckDBStatus enum_to_text(duckdb_vector vector, duckdb_logical_type logicalType, int row, TextOutputBuffer * toTextBuffer);
+static DuckDBStatus geometry_to_text(duckdb_vector vector, duckdb_logical_type geometryType, int row, TextOutputBuffer * toTextBuffer);
 static DuckDBStatus list_to_text(duckdb_vector vector, duckdb_logical_type logicalType, int row, TextOutputBuffer * toTextBuffer);
 static DuckDBStatus map_to_text(duckdb_vector vector, duckdb_logical_type logicalType, int row, TextOutputBuffer * toTextBuffer);
 static DuckDBStatus struct_to_text(duckdb_vector vector, duckdb_logical_type logicalType, int row, TextOutputBuffer * toTextBuffer);
@@ -327,6 +328,40 @@ static DuckDBTypeInfo TypeInfo[] =
 	{
 		 /* 33 */ DUCKDB_TYPE_ARRAY, array_to_text
 	},
+
+	/*
+	 * The types below only exist so that the array indexes keep matching the
+	 * duckdb_type enum up to the last type we do handle. They have no
+	 * conversion function, so a query returning one of them errors out in the
+	 * caller instead of reading a neighbour's function pointer.
+	 */
+	{
+		 /* 34 */ DUCKDB_TYPE_ANY, NULL
+	},
+	{
+		 /* 35 */ DUCKDB_TYPE_BIGNUM, NULL
+	},
+	{
+		 /* 36 */ DUCKDB_TYPE_SQLNULL, NULL
+	},
+	{
+		 /* 37 */ DUCKDB_TYPE_STRING_LITERAL, NULL
+	},
+	{
+		 /* 38 */ DUCKDB_TYPE_INTEGER_LITERAL, NULL
+	},
+	{
+		 /* 39 */ DUCKDB_TYPE_TIME_NS, NULL
+	},
+
+	/*
+	 * GEOMETRY became a first-class DuckDB type in 1.5.x. It is stored as a
+	 * string_t like BLOB, but we send it as hex (E)WKB rather than a bytea
+	 * escape sequence, so it gets its own conversion function.
+	 */
+	{
+		 /* 40 */ DUCKDB_TYPE_GEOMETRY, geometry_to_text
+	},
 };
 
 
@@ -336,7 +371,7 @@ static DuckDBTypeInfo TypeInfo[] =
 DuckDBTypeInfo *
 find_duck_type_info(duckdb_type duckType)
 {
-	if (duckType > DUCKDB_TYPE_INVALID && duckType <= DUCKDB_TYPE_ARRAY)
+	if (duckType > DUCKDB_TYPE_INVALID && duckType <= DUCKDB_TYPE_GEOMETRY)
 		return &TypeInfo[duckType];
 
 	return NULL;
@@ -401,6 +436,8 @@ duckdb_type_to_pg_oid(duckdb_type duckType)
 			return TEXTOID;
 		case DUCKDB_TYPE_BLOB:
 			return BYTEAOID;
+		case DUCKDB_TYPE_GEOMETRY:
+			return BYTEAOID;	/* hex (E)WKB, which PostGIS casts from bytea */
 		case DUCKDB_TYPE_BIT:
 			return BITOID;
 		case DUCKDB_TYPE_ENUM:
@@ -522,6 +559,155 @@ pg_varchar_to_text(duckdb_string_t val, TextOutputBuffer * toTextBuffer)
 
 
 /*
+ * inject_srid_into_hex_wkb transforms ISO WKB hex into EWKB hex by setting
+ * the SRID flag in the type word and inserting 4 SRID bytes.
+ *
+ * Returns a newly allocated string (caller must free), or NULL on error.
+ * If srid <= 0 or the input is too short, returns NULL without modifying.
+ */
+static char *
+inject_srid_into_hex_wkb(const char *hexWkb, int srid)
+{
+	size_t		len = strlen(hexWkb);
+
+	/* minimum: 1 byte order + 4 type bytes = 10 hex chars */
+	if (len < 10 || srid <= 0)
+		return NULL;
+
+	bool		isLE = (hexWkb[0] == '0' && hexWkb[1] == '1');
+
+	/* parse existing type word (4 bytes = 8 hex chars at offset 2) */
+	uint32_t	typeWord = 0;
+
+	for (int i = 0; i < 8; i++)
+	{
+		char		c = hexWkb[2 + i];
+		uint32_t	nibble;
+
+		if (c >= '0' && c <= '9')
+			nibble = c - '0';
+		else if (c >= 'a' && c <= 'f')
+			nibble = c - 'a' + 10;
+		else if (c >= 'A' && c <= 'F')
+			nibble = c - 'A' + 10;
+		else
+			return NULL;
+
+		if (isLE)
+			typeWord |= nibble << ((i / 2) * 8 + (i % 2 ? 0 : 4));
+		else
+			typeWord = (typeWord << 4) | nibble;
+	}
+
+	/* set SRID flag */
+	typeWord |= 0x20000000;
+
+	/* EWKB = byte_order(2) + type_word(8) + srid(8) + rest */
+	size_t		ewkbLen = len + 8 + 1;
+	char	   *ewkb = (char *) malloc(ewkbLen);
+
+	if (!ewkb)
+		return NULL;
+
+	/* copy byte order */
+	ewkb[0] = hexWkb[0];
+	ewkb[1] = hexWkb[1];
+
+	/* write modified type word */
+	if (isLE)
+	{
+		for (int i = 0; i < 4; i++)
+		{
+			uint8_t		byte = (typeWord >> (i * 8)) & 0xFF;
+
+			snprintf(ewkb + 2 + i * 2, 3, "%02X", byte);
+		}
+	}
+	else
+	{
+		for (int i = 0; i < 4; i++)
+		{
+			uint8_t		byte = (typeWord >> ((3 - i) * 8)) & 0xFF;
+
+			snprintf(ewkb + 2 + i * 2, 3, "%02X", byte);
+		}
+	}
+
+	/* write SRID */
+	if (isLE)
+	{
+		for (int i = 0; i < 4; i++)
+		{
+			uint8_t		byte = (srid >> (i * 8)) & 0xFF;
+
+			snprintf(ewkb + 10 + i * 2, 3, "%02X", byte);
+		}
+	}
+	else
+	{
+		for (int i = 0; i < 4; i++)
+		{
+			uint8_t		byte = (srid >> ((3 - i) * 8)) & 0xFF;
+
+			snprintf(ewkb + 10 + i * 2, 3, "%02X", byte);
+		}
+	}
+
+	/*
+	 * copy remainder of original WKB (everything after byte_order +
+	 * type_word)
+	 */
+	memcpy(ewkb + 18, hexWkb + 10, len - 10 + 1);
+
+	return ewkb;
+}
+
+
+/*
+ * geometry_to_text: converts a GEOMETRY value to hex WKB.
+ *
+ * GEOMETRY is stored as duckdb_string_t, like BLOB, but we send it as plain
+ * hex so that PostGIS can parse it as a geometry, and we turn it into hex EWKB
+ * when the column has a CRS.
+ */
+static DuckDBStatus
+geometry_to_text(duckdb_vector vector, duckdb_logical_type geometryType, int row, TextOutputBuffer * toTextBuffer)
+{
+	void	   *data = duckdb_vector_get_data(vector);
+	duckdb_string_t val = VECTOR_VALUE(data, duckdb_string_t, row);
+	char	   *hexWkb = (char *) duckdb_pglake_geometry_to_string(DuckDB, val);
+
+	if (hexWkb == NULL)
+	{
+		toTextBuffer->buffer = NULL;
+		return DUCKDB_OUT_OF_MEMORY_ERROR;
+	}
+
+	/*
+	 * If the column carries a CRS (e.g. EPSG:4326), inject the SRID into the
+	 * hex WKB to produce EWKB so PostGIS can recover it.
+	 */
+	int			srid = duckdb_pglake_geometry_get_srid(geometryType);
+
+	if (srid > 0)
+	{
+		char	   *ewkb = inject_srid_into_hex_wkb(hexWkb, srid);
+
+		if (ewkb != NULL)
+		{
+			free(hexWkb);
+			hexWkb = ewkb;
+		}
+	}
+
+	toTextBuffer->buffer = hexWkb;
+	toTextBuffer->needsFree = true;
+
+	return DUCKDB_SUCCESS;
+}
+
+
+/*
  * pg_blob_to_text: converts a blob to its string representation
  *
  * Note that blob uses duckdb_string_t internally.
@@ -535,28 +721,13 @@ blob_to_text(duckdb_vector vector, duckdb_logical_type blobType, int row, TextOu
 	char	   *typeAlias = duckdb_logical_type_get_alias(blobType);
 	bool		emitEscapeSequence = true;
 
-	if (typeAlias != NULL)
+	if (typeAlias != NULL && strcmp(typeAlias, "WKB_BLOB") == 0)
 	{
-		bool		isGeometry = strcmp(typeAlias, "GEOMETRY") == 0;
-
-		if (strcmp(typeAlias, "WKB_BLOB") == 0)
-		{
-			/* output WKB_BLOB as pure hex to be parseable as geometry */
-			emitEscapeSequence = false;
-		}
-
-		/* the alias string is allocated by DuckDB and owned by us */
-		duckdb_free(typeAlias);
-
-		if (isGeometry)
-		{
-			/* output geometry via st_ashexwkb */
-			toTextBuffer->buffer = (char *) duckdb_pglake_geometry_to_string(DuckDB, val);
-			toTextBuffer->needsFree = true;
-
-			return CHECK_OOM(toTextBuffer->buffer);
-		}
+		/* output WKB_BLOB as pure hex to be parseable as geometry */
+		emitEscapeSequence = false;
 	}
+
+	duckdb_free(typeAlias);
 
 	uint32_t	blobLength;
 	char	   *blobBuffer;

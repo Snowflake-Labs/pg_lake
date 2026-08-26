@@ -431,16 +431,6 @@ duckdb_global_init(char *databaseFilePath,
 	}
 
 	{
-		if (snprintf(setCommand, 1024, "SET GLOBAL enable_geoparquet_conversion TO 'false'") < 0)
-		{
-			return DUCKDB_INITIALIZATION_ERROR;
-		}
-
-		if (run_command_on_duckdb(setCommand) == DuckDBError)
-			return DUCKDB_INITIALIZATION_ERROR;
-	}
-
-	{
 		if (snprintf(setCommand, 1024, "SET GLOBAL enable_object_cache TO true") < 0)
 		{
 			return DUCKDB_INITIALIZATION_ERROR;
@@ -1251,7 +1241,7 @@ duckdb_query_result_send_column_metadata(DuckDBQueryResult * duckdb_query_result
 		AttrNumber	originalColumnNumber = 0;
 		DuckDBTypeInfo *typeInfo = find_duck_type_info(duckType);
 
-		if (typeInfo == NULL)
+		if (typeInfo == NULL || typeInfo->to_text == NULL)
 		{
 			PGDUCK_SERVER_ERROR("could not convert DuckDB type to text: %d", duckType);
 			return DUCKDB_TYPE_CONVERSION_ERROR;

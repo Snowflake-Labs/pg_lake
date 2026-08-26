@@ -17,6 +17,9 @@
 
 #pragma once
 
+#include <mutex>
+#include <unordered_map>
+
 #include "duckdb.hpp"
 #include "duckdb/common/local_file_system.hpp"
 
@@ -46,13 +49,12 @@ public:
 	vector<OpenFileInfo> List(const string &glob_pattern, bool is_glob, FileOpener *opener);
 
 	/* Custom replacement for S3FileSystem functions */
-	unique_ptr<HTTPResponse> PostRequest(FileHandle &handle, string s3_url, HTTPHeaders header_map,
-										 string &buffer_out,
-											char *buffer_in, idx_t buffer_in_len,
-											string http_params = "") override;
-	unique_ptr<HTTPResponse> PutRequest(FileHandle &handle, string s3_url, HTTPHeaders header_map,
-	                                       char *buffer_in, idx_t buffer_in_len,
-	                                       string http_params = "") override;
+	unique_ptr<HTTPResponse> PostRequest(HTTPInput &input, string s3_url, HTTPHeaders header_map,
+	                                     string &buffer_out, char *buffer_in, idx_t buffer_in_len,
+	                                     string http_params = "") override;
+	unique_ptr<HTTPResponse> PutRequest(HTTPInput &input, string s3_url, HTTPHeaders header_map,
+	                                    char *buffer_in, idx_t buffer_in_len,
+	                                    string http_params = "") override;
 
 	/* Overrides that are not in S3FileSystem */
 	void RemoveFile(const string &filename, optional_ptr<FileOpener> opener = nullptr) override;
@@ -61,9 +63,33 @@ public:
 		return "PgLakeS3FileSystem";
 	}
 
+	void RegisterContext(const shared_ptr<HTTPInput> &input, optional_ptr<ClientContext> context);
+	optional_ptr<ClientContext> LookupContext(HTTPInput *input);
+
 protected:
 	unique_ptr<HTTPFileHandle> CreateHandle(const OpenFileInfo &path, FileOpenFlags flags,
 	                                        optional_ptr<FileOpener> opener) override;
+
+private:
+	/*
+	 * Post/PutRequest used to take the FileHandle, which let us cast to
+	 * PgLakeS3FileHandle and read its context. They now take an HTTPInput, which
+	 * has no way back to the ClientContext, so we keep the association here.
+	 *
+	 * It has to be a map rather than a single member because one file system
+	 * serves all sessions: requests from different queries, each with their own
+	 * ClientContext, are in flight at the same time.
+	 *
+	 * Entries are keyed by raw pointer and hold a weak_ptr to the same HTTPInput
+	 * so RegisterContext can tell a live entry from one whose input is gone and
+	 * whose address may since have been reused.
+	 */
+	mutable mutex context_mutex_;
+	struct ContextEntry {
+		weak_ptr<HTTPInput> input_ref;
+		optional_ptr<ClientContext> context;
+	};
+	unordered_map<HTTPInput *, ContextEntry> context_map_;
 };
 
 class PgLakeS3FileHandle : public S3FileHandle {
