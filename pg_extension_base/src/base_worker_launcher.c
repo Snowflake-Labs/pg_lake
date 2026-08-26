@@ -3423,10 +3423,22 @@ BaseWorkerResourceReleaseCallback(ResourceReleasePhase phase, bool isCommit,
 /*
  * GetBaseWorkerPid returns the PID of a running base worker given its worker
  * ID, or 0 if the worker is not found in the current database.
+ *
+ * Never raises, so it is safe from an XACT_EVENT_COMMIT callback where an error
+ * would become a PANIC.  Hence an uninitialized hash reads as "not found" here
+ * rather than raising the way StartBaseWorker does.
+ *
+ * Use the PID for reporting or to compare against one observed earlier (see
+ * WaitForBaseWorkerExit), not to find the worker's PGPROC: the worker can exit
+ * and an unrelated backend can be handed the same PID before BackendPidGetProc
+ * runs.
  */
 pid_t
 GetBaseWorkerPid(int32 workerId)
 {
+	if (BaseWorkerHash == NULL)
+		return 0;
+
 	pid_t		workerPid = 0;
 
 	LWLockAcquire(&BaseWorkerControl->lock, LW_SHARED);
