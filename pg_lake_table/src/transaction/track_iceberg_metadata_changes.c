@@ -1377,8 +1377,18 @@ GetLastPushedIcebergMetadata(const TableMetadataOperationTracker * opTracker)
 	if (opTracker->relationCreated)
 		return NULL;
 
+	Oid			relationId = opTracker->relationId;
+
+	/*
+	 * A writable rest catalog inlines the metadata in its loadTable response,
+	 * which is the same request we would resolve the location with, so take
+	 * it from there instead of reading the file back from storage.
+	 */
+	if (GetIcebergCatalogType(relationId) == REST_CATALOG_READ_WRITE)
+		return GetWritableRestCatalogTableMetadata(relationId, NULL);
+
 	/* read the most recently pushed iceberg metadata for the table */
-	char	   *metadataPath = GetIcebergMetadataLocation(opTracker->relationId, false);
+	char	   *metadataPath = GetIcebergMetadataLocation(relationId, false);
 
 	return ReadIcebergTableMetadata(metadataPath);
 }
