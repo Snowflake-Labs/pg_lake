@@ -1164,6 +1164,117 @@ def test_flush_deletion_queue_drains_dropped_table_files(
     pg_conn.commit()
 
 
+def _metadata_location(conn, namespace, table):
+    """The metadata.json the iceberg catalog currently points at."""
+    return run_query(
+        f"SELECT metadata_location FROM lake_iceberg.tables "
+        f"WHERE table_namespace = '{namespace}' AND table_name = '{table}'",
+        conn,
+    )[0][0]
+
+
+def _queue_path(superuser_conn, path):
+    """Put a path in the deletion queue the way an earlier write would have."""
+    run_command(
+        f"INSERT INTO lake_engine.deletion_queue "
+        f"(path, table_name, orphaned_at, is_prefix, resolve_metadata) "
+        f"VALUES ('{path}', NULL, pg_catalog.now(), false, false)",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+
+def _count_path_records(superuser_conn, path):
+    return run_query(
+        f"SELECT count(*) FROM lake_engine.deletion_queue WHERE path = '{path}'",
+        superuser_conn,
+    )[0][0]
+
+
+def test_drop_when_a_referenced_file_is_already_queued(
+    s3, pg_conn, superuser_conn, extension, with_default_location
+):
+    """A DROP must not fail because a file it queues is queued already.
+
+    The queue is a set of paths, and paths legitimately repeat: the metadata
+    location a write is based on can still be the location the catalog reports
+    afterwards, previous_metadata rotation queues a path a later drop queues
+    again, and two dropped tables can share a file. A plain INSERT hit the
+    primary key and aborted the user's DROP."""
+    run_command("CREATE SCHEMA IF NOT EXISTS drop_requeue", pg_conn)
+    run_command(
+        """
+        CREATE TABLE drop_requeue.t USING iceberg
+        WITH (autovacuum_enabled='false')
+        AS SELECT i AS id, 'pg_lake' AS name FROM generate_series(1, 10) i
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    location = _writable_location(pg_conn, "drop_requeue.t")
+    metadata_location = _metadata_location(pg_conn, "drop_requeue", "t")
+
+    # the drop enumerates the referenced files and queues each of them, the
+    # metadata.json included -- so queue that one up front
+    _queue_path(superuser_conn, metadata_location)
+
+    run_command("DROP TABLE drop_requeue.t", pg_conn)
+    pg_conn.commit()
+
+    # one row for the path, not a second one, and the eager per-file rows for
+    # the rest of the table are there as usual
+    assert _count_path_records(superuser_conn, metadata_location) == 1
+    assert _count_data_file_records(superuser_conn, location) > 0
+    assert _count_prefix_records(superuser_conn, location) == 0
+    superuser_conn.commit()
+
+    # VACUUM still deletes the referenced files and drains the queue
+    _assert_vacuum_drains(superuser_conn, location)
+
+    run_command("DROP SCHEMA IF EXISTS drop_requeue CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_deferred_drop_upgrades_an_already_queued_metadata(
+    s3, pg_conn, superuser_conn, extension, with_default_location
+):
+    """A deferred drop of a metadata.json that is already queued as a plain
+    file row must upgrade that row to a resolve_metadata row, not leave it as
+    is: VACUUM has to resolve the metadata into the files it references, and
+    losing that intent would leak every one of them."""
+    run_command("CREATE SCHEMA IF NOT EXISTS defer_drop_requeue", pg_conn)
+    run_command(
+        """
+        CREATE TABLE defer_drop_requeue.t USING iceberg
+        WITH (autovacuum_enabled='false')
+        AS SELECT i AS id, 'pg_lake' AS name FROM generate_series(1, 10) i
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    location = _writable_location(pg_conn, "defer_drop_requeue.t")
+    metadata_location = _metadata_location(pg_conn, "defer_drop_requeue", "t")
+
+    _queue_path(superuser_conn, metadata_location)
+
+    _drop_deferred(pg_conn, "DROP TABLE defer_drop_requeue.t")
+
+    # still a single row for the metadata.json, now flagged for resolution
+    assert _count_path_records(superuser_conn, metadata_location) == 1
+    assert _count_resolve_records(superuser_conn, location) == 1
+    assert _count_data_file_records(superuser_conn, location) == 0
+    assert _count_prefix_records(superuser_conn, location) == 0
+    superuser_conn.commit()
+
+    # and resolution happens, so the data files are deleted rather than leaked
+    _assert_vacuum_drains(superuser_conn, location)
+
+    run_command("DROP SCHEMA IF EXISTS defer_drop_requeue CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 @pytest.fixture(scope="module")
 def create_test_helper_functions(superuser_conn, s3, extension):
     # lake_iceberg.find_all_referenced_files is installed by pg_lake_iceberg,
