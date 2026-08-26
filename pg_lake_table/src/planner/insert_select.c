@@ -426,8 +426,8 @@ TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod, CopyDataFormat sourc
 	 * NaN, and a NaN arriving through a floating-point source column is
 	 * caught by the vectorized isnan() guard the validation wrapper emits
 	 * (see AppendIcebergValidationExpression), so pushdown is safe for
-	 * Parquet-based sources.  Other sources (e.g. CSV text parsing, which
-	 * can produce NaN numerics with PostgreSQL semantics) stay on the
+	 * Parquet-based sources.  Other sources (e.g. CSV text parsing, which can
+	 * produce NaN numerics with PostgreSQL semantics) stay on the
 	 * non-pushdown path, which clamps or rejects NaN via
 	 * IcebergErrorOrClampSlotInPlace / IcebergErrorOrClampDatum.
 	 *

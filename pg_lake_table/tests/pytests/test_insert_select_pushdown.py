@@ -255,7 +255,6 @@ def test_insert_select_pushdown_unsupported(
 		CREATE DOMAIN simple_text AS TEXT CHECK (LENGTH(VALUE) <= 50);
 		CREATE TABLE table_with_domain (id INT, description simple_text) USING iceberg;
 
-        -- scale>precision: neutralized to ::text in the query tree, validated by wrapper
 		CREATE TABLE numeric_table (value numeric(25,26)) USING iceberg;
 
         -- plain numeric is safe to pushdown
@@ -319,13 +318,14 @@ def test_insert_select_pushdown_unsupported(
     )
     assert "Custom Scan (Query Pushdown)" not in str(results)
 
-    # bounded numeric is pushdownable; the validation wrapper's vectorized
-    # isnan() guard enforces the NaN policy on the DuckDB side
+    # a float-to-numeric cast (random() is float8) can produce NaN, which a
+    # DuckDB DECIMAL cast rejects before the Iceberg NaN guard runs, so deparse
+    # marks it unshippable and the insert stays on the non-pushdown path
     results = run_query(
         "EXPLAIN ANALYZE INSERT INTO numeric_table SELECT random()*0.01 FROM generate_series(0,10)i",
         pg_conn,
     )
-    assert "Custom Scan (Query Pushdown)" in str(results)
+    assert "Custom Scan (Query Pushdown)" not in str(results)
 
     results = run_query(
         "EXPLAIN ANALYZE INSERT INTO table_use_sequence(value) SELECT i FROM generate_series(0,10)i",
@@ -1419,9 +1419,11 @@ def test_numeric_insert_select_pushdown(
         )
         pg_conn.commit()
 
-        # iceberg-to-iceberg decimal copy is pushed down and exact
+        # iceberg-to-iceberg decimal copy is pushed down and exact.  Use plain
+        # EXPLAIN here: EXPLAIN ANALYZE would execute the INSERT and double the
+        # row count checked below.
         results = run_query(
-            "EXPLAIN ANALYZE INSERT INTO num_tgt SELECT * FROM num_src",
+            "EXPLAIN INSERT INTO num_tgt SELECT * FROM num_src",
             pg_conn,
         )
         assert "Custom Scan (Query Pushdown)" in str(results)
@@ -1429,21 +1431,15 @@ def test_numeric_insert_select_pushdown(
         run_command("INSERT INTO num_tgt SELECT * FROM num_src;", pg_conn)
         pg_conn.commit()
 
-        result = run_query(
-            "SELECT count(*), sum(amt) FROM num_tgt", pg_conn
-        )
+        result = run_query("SELECT count(*), sum(amt) FROM num_tgt", pg_conn)
         assert result[0][0] == 1000
         assert result == run_query("SELECT count(*), sum(amt) FROM num_src", pg_conn)
 
         # NaN arriving through a float8 source column is clamped to NULL
-        run_command(
-            "INSERT INTO num_clamp SELECT id, val FROM dbl_src;", pg_conn
-        )
+        run_command("INSERT INTO num_clamp SELECT id, val FROM dbl_src;", pg_conn)
         pg_conn.commit()
 
-        result = run_query(
-            "SELECT val::text FROM num_clamp ORDER BY id", pg_conn
-        )
+        result = run_query("SELECT val::text FROM num_clamp ORDER BY id", pg_conn)
         assert result[0][0] is not None
         assert result[1][0] is None
 
