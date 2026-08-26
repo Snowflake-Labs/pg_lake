@@ -260,8 +260,17 @@ Before committing changes to install.sh:
   - Macros/constants: `UPPER_CASE_WITH_UNDERSCORES`
   - Structs/enums: `CamelCase`
   - Global variables: Prefix with module identifier (e.g., `IcebergTableCache`)
-- **Comments**: Focus on "why" not "what"; use block comments for complex algorithms
+- **Comments**: See [Commenting guidance](#commenting-guidance) below
 - **Typedefs**: Download from buildfarm via `make typedefs` for pgindent
+
+### Commenting guidance
+- Keep comments at call sites succinct; add one only when it carries a truly relevant detail that the code cannot.
+- Put the detailed documentation for an API on its function header, not at the call site. Even there, restrict comments to context that adds real detail — explain something genuinely tricky in-line, but assume the reader is fluent in backend C and does not need help following ordinary local logic.
+- Before writing an extended explanation in the code, consider whether the user documentation is the more appropriate place for it.
+- For GUCs, keep the full documentation in the appropriate user documentation and leave only a one-or-two-sentence summary in the GUC declaration itself.
+- Do not add comments that restate the code or otherwise add no meaning or value.
+- Reserve historical context for commit messages, and even then describe the change itself — do not narrate attempts made and discarded during development.
+- Never reference other projects as motivation or context for a change, in either code comments or commit messages. This is a public repository that also supports several internal projects, and those internal projects must not be named or alluded to.
 
 ### Python code
 - **Formatting**: Use `black` (see `make reindent` or `pipenv run black`)
@@ -275,6 +284,8 @@ make reindent
 # Check formatting
 make check-indent
 ```
+
+- Sign off every commit (`git commit -s`); CI runs a DCO check that fails any commit without a `Signed-off-by:` trailer.
 
 ## Local Development with MinIO
 
