@@ -252,6 +252,24 @@ def test_spatial_function_pushdown(
     )
 
 
+def test_st_srid_not_pushed_down_with_typemod(
+    create_test_spatial_function_pushdown_table, user_conn
+):
+    # We send geometry without a CRS, so a pushed down ST_SRID would return 0
+    # while postgres returns the SRID from the typemod.
+    for query in [
+        "SELECT ST_SRID(col_point_typemod) FROM test_spatial_function_pushdown.tbl",
+        "SELECT * FROM test_spatial_function_pushdown.tbl WHERE ST_SRID(col_point_typemod) = 4326",
+    ]:
+        assert_remote_query_not_contains_expression(query, "ELSE 0", user_conn)
+        assert_query_results_on_tables(
+            query,
+            user_conn,
+            ["test_spatial_function_pushdown.tbl"],
+            ["test_spatial_function_pushdown.heap_tbl"],
+        )
+
+
 def test_agg_function_pushdown(create_test_spatial_function_pushdown_table, user_conn):
 
     # try with one column and one constant

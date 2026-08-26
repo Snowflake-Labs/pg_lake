@@ -93,6 +93,9 @@ typedef struct IsShippableContext
 
 	/* map of not shippable objects */
 	HTAB	   *notShippableObjects;
+
+	/* range table of the query currently being walked, NIL outside a query */
+	List	   *rtable;
 }			IsShippableContext;
 
 
@@ -629,7 +632,11 @@ ProcessNotShippableExpressionWalker(Node *node, IsShippableContext * context)
 	if (IsA(node, Query))
 	{
 		bool		prevHasUnnest = context->hasUnnest;
+		List	   *prevRtable = context->rtable;
 		Query	   *query = (Query *) node;
+
+		/* so that a Var below can be resolved to the relation it comes from */
+		context->rtable = query->rtable;
 
 		if (query->hasForUpdate)
 		{
@@ -674,6 +681,7 @@ ProcessNotShippableExpressionWalker(Node *node, IsShippableContext * context)
 		}
 
 		context->hasUnnest = prevHasUnnest;
+		context->rtable = prevRtable;
 
 		return false;
 	}
@@ -860,6 +868,16 @@ ProcessNotShippableExpressionWalker(Node *node, IsShippableContext * context)
 	{
 		if (context->stopAtFirstNotShippable)
 			return true;
+	}
+
+	if (IsA(node, Var) && context->rtable != NIL &&
+		IsGDALGeometryVar((Var *) node, context->rtable))
+	{
+		if (context->stopAtFirstNotShippable)
+			return true;
+
+		TryRecordNotShippableObject(context, GeometryTypeId(), TypeRelationId,
+									NOT_SHIPPABLE_TYPE);
 	}
 
 	return expression_tree_walker(node,

@@ -378,6 +378,43 @@ find_duck_type_info(duckdb_type duckType)
 }
 
 /*
+ * duck_type_error_name returns a name to report a type by when we cannot
+ * convert it, so that the client learns which type to cast away rather than
+ * only that some column was unsupported.
+ *
+ * Only the types without a conversion function need a name, including the ones
+ * past the end of TypeInfo. For anything else, and for a type a later DuckDB
+ * release adds, it returns NULL and the caller reports the duckdb_type value.
+ */
+const char *
+duck_type_error_name(duckdb_type duckType)
+{
+	switch (duckType)
+	{
+		case DUCKDB_TYPE_UNION:
+			return "UNION";
+		case DUCKDB_TYPE_BIT:
+			return "BIT";
+		case DUCKDB_TYPE_ANY:
+			return "ANY";
+		case DUCKDB_TYPE_BIGNUM:
+			return "BIGNUM";
+		case DUCKDB_TYPE_SQLNULL:
+			return "SQLNULL";
+		case DUCKDB_TYPE_STRING_LITERAL:
+			return "STRING_LITERAL";
+		case DUCKDB_TYPE_INTEGER_LITERAL:
+			return "INTEGER_LITERAL";
+		case DUCKDB_TYPE_TIME_NS:
+			return "TIME_NS";
+		case DUCKDB_TYPE_VARIANT:
+			return "VARIANT";
+		default:
+			return NULL;
+	}
+}
+
+/*
  * duckdb_type_to_pg_oid: maps a DuckDB type to its closest PostgreSQL OID.
  *
  * For types with no direct PG equivalent (e.g. UBIGINT, HUGEINT, UHUGEINT,

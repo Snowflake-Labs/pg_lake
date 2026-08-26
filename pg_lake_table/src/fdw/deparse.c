@@ -381,6 +381,13 @@ foreign_expr_walker(Node *node,
 						var->varattno != SelfItemPointerAttributeNumber)
 						return false;
 
+					/*
+					 * A GDAL scan projects geometry as hex-encoded WKB text,
+					 * so nothing can be evaluated on top of it remotely.
+					 */
+					if (IsGDALGeometryVar(var, glob_cxt->root->parse->rtable))
+						return false;
+
 					/* Else check the collation */
 					collation = var->varcollid;
 					state = OidIsValid(collation) ? FDW_COLLATE_SAFE : FDW_COLLATE_NONE;

@@ -86,6 +86,51 @@ def test_gdal_read(
     user_conn.rollback()
 
 
+def test_gdal_spatial_function(
+    pgduck_conn,
+    user_conn,
+    s3,
+    spatial_analytics_extension,
+    pg_lake_extension,
+    tmp_path,
+):
+    """A GDAL scan projects geometry as hex-encoded WKB, so spatial functions
+    on the column cannot be pushed down and have to run locally."""
+    file_key = "test_gdal_spatial_function/data.geojson"
+    url = f"s3://{TEST_BUCKET}/{file_key}"
+    local_file_path = tmp_path / "data.geojson"
+
+    run_command(
+        f"""
+        COPY (SELECT 'POINT(52.1 4.2)'::geometry AS geom)
+        TO '{local_file_path}' WITH (format GDAL, driver 'GeoJSON')
+    """,
+        pgduck_conn,
+    )
+    s3.upload_file(local_file_path, TEST_BUCKET, file_key)
+
+    run_command(
+        f"""
+        CREATE SCHEMA test_gdal;
+        CREATE FOREIGN TABLE test_gdal.fdw ()
+        SERVER pg_lake OPTIONS (path '{url}');
+    """,
+        user_conn,
+    )
+
+    result = run_query("SELECT ST_AsText(geom) FROM test_gdal.fdw", user_conn)
+    assert result[0]["st_astext"] == "POINT(52.1 4.2)"
+
+    # also when the function appears in a qual, which takes the FDW deparse path
+    result = run_query(
+        "SELECT count(*) FROM test_gdal.fdw WHERE ST_AsText(geom) LIKE 'POINT%'",
+        user_conn,
+    )
+    assert result[0]["count"] == 1
+
+    user_conn.rollback()
+
+
 def test_gdal_zip_shapefile(
     user_conn, sample_shapefile, spatial_analytics_extension, pg_lake_extension
 ):
@@ -205,10 +250,38 @@ def test_gdal_zip_gml(
 
     user_conn.rollback()
 
-    # Bad-layer DESCRIBE used to return "could not be found", but DuckDB
-    # spatial 1.5.1 segfaults on st_read with a non-existent layer in a zip
-    # archive, which kills pgduck_server. Re-enable this assertion once the
-    # upstream regression is fixed.
+    # Read a non-existent layer. st_read terminates pgduck_server on a layer
+    # that does not exist, so pg_lake rejects it before the scan.
+    error = run_command(
+        f"""
+        CREATE SCHEMA test_gdal;
+        CREATE FOREIGN TABLE test_gdal.fdw ()
+        SERVER pg_lake
+        OPTIONS (path '{sample_gml}', zip_path 'Fahrradrouten.gml', layer 'notexists');
+    """,
+        user_conn,
+        raise_error=False,
+    )
+    assert "could not be found" in error
+
+    user_conn.rollback()
+
+    # pgduck_server survived, so a valid layer still reads
+    run_command(
+        f"""
+        CREATE SCHEMA test_gdal;
+        CREATE FOREIGN TABLE test_gdal.fdw ()
+        SERVER pg_lake
+        OPTIONS (path '{sample_gml}', zip_path 'Fahrradrouten.gml',
+                 layer 'Radfernweg_Hamburg_Bremen');
+    """,
+        user_conn,
+    )
+
+    result = run_query("SELECT shape FROM test_gdal.fdw", user_conn)
+    assert len(result) == 2
+
+    user_conn.rollback()
 
 
 def test_invalid_options(s3, user_conn, spatial_analytics_extension, pg_lake_extension):

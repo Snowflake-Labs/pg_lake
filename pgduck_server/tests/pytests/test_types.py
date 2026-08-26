@@ -1305,8 +1305,24 @@ def test_unsupported(setup_table, pgduck_conn):
         query = f"SELECT {type_name}_col FROM duckdb_unsupported_types_table WHERE {type_name}_col IS NOT NULL"
         error = run_query(query, pgduck_conn, raise_error=False)
 
-        # Expect errors for all unsupported types
-        assert "Unsupported type" in error
+        # Expect errors for all unsupported types, naming type and column
+        assert (
+            f'Unsupported type {type_name.upper()} in column "{type_name}_col"' in error
+        )
+
+
+def test_unsupported_variant(pgduck_conn):
+    """VARIANT arrived with DuckDB 1.5 and has no conversion function, so the
+    error has to name it: casting the one column is the only way forward, and a
+    bare "Unsupported type" does not say which column to cast."""
+    variant = "CAST('{\"a\": 1}' AS JSON)::VARIANT"
+
+    error = run_query(f"SELECT {variant} AS v", pgduck_conn, raise_error=False)
+    assert 'Unsupported type VARIANT in column "v"' in error
+
+    # the cast the error points at does work
+    result = run_query(f"SELECT CAST({variant} AS TEXT) AS v", pgduck_conn)
+    assert len(result) == 1 and result[0]["v"] == "{'a': 1}"
 
 
 def perform_transmit_query(command, pgduck_conn, tmp_path):
