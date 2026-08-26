@@ -92,11 +92,13 @@
 #include "utils/fmgrprotos.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/resowner.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 #include "tcop/utility.h"
 
 #include "pg_extension_base/base_workers.h"
+#include "pg_extension_base/injection_points.h"
 #include "pg_extension_base/pg_extension_base_ids.h"
 #include "pg_extension_base/pg_compat.h"
 #include "pg_extension_base/spi_helpers.h"
@@ -284,6 +286,7 @@ typedef enum StartDatabaseStarterResult
 	DATABASE_STARTER_STARTED,
 	DATABASE_STARTER_EXISTS,
 	DATABASE_STARTER_DONE,
+	DATABASE_STARTER_BLOCKED,
 	DATABASE_STARTER_FAILED
 }			StartDatabaseStarterResult;
 
@@ -377,7 +380,8 @@ static void DatabaseStarterNeedsRestart(Oid databaseId);
 static void PrepareForDrop(Oid databaseId, Oid extensionId);
 
 /* functions called by transaction end */
-static void BaseWorkerTransactionCallback(XactEvent event, void *arg);
+static void BaseWorkerResourceReleaseCallback(ResourceReleasePhase phase, bool isCommit,
+											  bool isTopLevel, void *arg);
 
 /* SQL-callable functions */
 PG_FUNCTION_INFO_V1(pg_extension_base_register_worker);
@@ -451,7 +455,7 @@ InitializeBaseWorkerLauncher(void)
 	PreviousObjectAccessHook = object_access_hook;
 	object_access_hook = BaseWorkerObjectAccessHook;
 
-	RegisterXactCallback(BaseWorkerTransactionCallback, NULL);
+	RegisterResourceReleaseCallback(BaseWorkerResourceReleaseCallback, NULL);
 
 	StartServerStarter();
 }
@@ -775,9 +779,11 @@ StartDatabaseStarters(List *databaseList)
 		Oid			databaseId = entry->databaseId;
 
 		/*
-		 * StartDatabaseStarter acquires a lock to wait for concurrent DROP
-		 * DATABASE commands to finish. We hold this lock until leaving the
-		 * function and committing below.
+		 * StartDatabaseStarter conditionally acquires a lock that a
+		 * concurrent DROP DATABASE/EXTENSION holds, and skips the database if
+		 * it cannot get it. We hold the lock until leaving the function and
+		 * committing below, which keeps such a DROP out of the way while we
+		 * register the database starter.
 		 */
 		StartTransactionCommand();
 
@@ -915,26 +921,36 @@ StartDatabaseStarter(Oid databaseId, char *databaseName)
 	}
 
 	/*
-	 * In case of a concurrent DROP DATABASE/EXTENSION that affects this
-	 * database (which takes ExclusiveLock), we wait for it to finish.
+	 * A concurrent DROP DATABASE/EXTENSION that affects this database holds
+	 * this lock in ExclusiveLock mode until it commits or aborts, so we back
+	 * off and let the next iteration deal with the database.
 	 *
-	 * Otherwise, in case of DROP DATABASE, we might proceed to create a
-	 * database starter for a database that is gone by the time the worker is
-	 * up and running, which causes an error in the log every time someone
-	 * drops a database.
+	 * In case of DROP DATABASE, proceeding would create a database starter
+	 * that connects to a database the DROP is waiting to become idle. The
+	 * starter then blocks below on this very lock, and since it counts as a
+	 * session in the database, DROP DATABASE fails with "database is being
+	 * accessed by other users" once it gives up waiting -- even with FORCE,
+	 * because a SIGTERM only sets a flag the starter cannot act on while it
+	 * is waiting for the lock.
 	 *
-	 * Or, in case of DROP EXTENSION, we might proceed to restart workers for
-	 * an extension that is about to be dropped.
+	 * In case of DROP EXTENSION, proceeding would restart workers for an
+	 * extension that is about to be dropped.
+	 *
+	 * Backing off is safe because we leave needsRestart set, and the DROP
+	 * signals the server starter when its transaction ends either way.
 	 *
 	 * In case of CREATE EXTENSION (which takes ShareLock), we do not back
 	 * off.
-	 *
-	 * We prefer to block here instead of wait for the next server starter
-	 * iteration to promptly react to DROP+CREATE EXTENSION operations.
 	 */
 	bool		waitForLock = false;
 
-	LockDatabaseStarter(databaseId, ShareLock, waitForLock);
+	if (LockDatabaseStarter(databaseId, ShareLock, waitForLock) == LOCKACQUIRE_NOT_AVAIL)
+	{
+		ereport(DEBUG2, (errmsg("not starting pg base extension database starter in "
+								"database %s because a drop is in progress",
+								quote_identifier(databaseName))));
+		return DATABASE_STARTER_BLOCKED;
+	}
 
 	LWLockAcquire(&BaseWorkerControl->lock, LW_EXCLUSIVE);
 
@@ -1033,7 +1049,17 @@ PgExtensionBaseDatabaseStarterMain(Datum databaseIdDatum)
 	/* Establish signal handlers before unblocking signals. */
 	pqsignal(SIGHUP, HandleSighup);
 	pqsignal(SIGINT, SIG_IGN);
-	pqsignal(SIGTERM, HandleSigterm);
+
+	/*
+	 * Until we reach the main loop we cannot react to a SIGTERM flag, because
+	 * we connect to the database and wait for locks along the way. That
+	 * matters for DROP DATABASE, which SIGTERMs the sessions in the database
+	 * and then waits a few seconds for them to go away: a starter that
+	 * connected and is waiting for a lock keeps the database busy and fails
+	 * the DROP. Die immediately instead, like the base workers do, and let
+	 * the server starter bring us back if the DROP does not commit.
+	 */
+	pqsignal(SIGTERM, die);
 
 	/* Set our exit handler before any calls to proc_exit */
 	before_shmem_exit(PgExtensionBaseDatabaseStarterSharedMemoryExit,
@@ -1102,6 +1128,14 @@ PgExtensionBaseDatabaseStarterMain(Datum databaseIdDatum)
 	MemoryContext outerContext = CurrentMemoryContext;
 
 	StartTransactionCommand();
+
+	/*
+	 * Tests park a starter here to get the state that made DROP DATABASE
+	 * fail: connected, so it counts as a session in the database, and not yet
+	 * in the main loop, so only a SIGTERM that terminates immediately gets
+	 * rid of it.
+	 */
+	INJECTION_POINT_COMPAT("database-starter-before-lock");
 
 	/*
 	 * We take the LockDatabaseStarter lock here to wait for any concurrent
@@ -1193,6 +1227,13 @@ PgExtensionBaseDatabaseStarterMain(Datum databaseIdDatum)
 													  ALLOCSET_DEFAULT_MAXSIZE);
 
 	MemoryContextSwitchTo(loopContext);
+
+	/*
+	 * From here on we check TerminationRequested between iterations, so we
+	 * can shut down gracefully and let the server starter tell a SIGTERM
+	 * apart from a graceful exit.
+	 */
+	pqsignal(SIGTERM, HandleSigterm);
 
 	while (!TerminationRequested)
 	{
@@ -3067,33 +3108,33 @@ SignalDatabaseStarterLocked(Oid databaseId)
 
 
 /*
- * BaseWorkerTransactionCallback is a transaction callback that
- * signals the server starter after a transaction completed.
+ * BaseWorkerResourceReleaseCallback signals the server starter after a
+ * transaction completed.
  *
  * This speeds up recovery in cases where we killed a background
  * worker and then rolled back, or created a database from a template
  * that contains a base worker registration.
+ *
+ * We deliberately do this in the after-locks phase rather than in a
+ * transaction callback: the transaction callbacks still run while we hold the
+ * database starter lock, so the server starter would find the database locked
+ * and skip it, and then only get to it on its next regular wake-up.
  */
 static void
-BaseWorkerTransactionCallback(XactEvent event, void *arg)
+BaseWorkerResourceReleaseCallback(ResourceReleasePhase phase, bool isCommit,
+								  bool isTopLevel, void *arg)
 {
-	switch (event)
+	if (phase != RESOURCE_RELEASE_AFTER_LOCKS || !isTopLevel)
 	{
-		case XACT_EVENT_COMMIT:
-		case XACT_EVENT_ABORT:
-			{
-				if (SignalServerStarter)
-				{
-					LWLockAcquire(&BaseWorkerControl->lock, LW_SHARED);
-					ProcSendSignal(BaseWorkerControl->serverStarterProcno);
-					LWLockRelease(&BaseWorkerControl->lock);
-					SignalServerStarter = false;
-				}
-				break;
-			}
+		return;
+	}
 
-		default:
-			break;
+	if (SignalServerStarter)
+	{
+		LWLockAcquire(&BaseWorkerControl->lock, LW_SHARED);
+		ProcSendSignal(BaseWorkerControl->serverStarterProcno);
+		LWLockRelease(&BaseWorkerControl->lock);
+		SignalServerStarter = false;
 	}
 }
 

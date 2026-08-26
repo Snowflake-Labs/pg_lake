@@ -368,6 +368,152 @@ def test_failed_drop_database(superuser_conn):
     superuser_conn.autocommit = False
 
 
+def count_other_backends_in_database(conn, datname, own_pid):
+    query = f"""
+        SELECT count(*) FROM pg_stat_activity
+        WHERE datname = '{datname}' AND pid <> {own_pid}
+    """
+    return run_query(query, conn)[0]["count"]
+
+
+def test_no_starter_connects_while_a_drop_holds_the_lock(superuser_conn):
+    """A DROP that stops the workers of a database also blocks new database
+    starters for it until it is done.
+
+    Otherwise the server starter connects a database starter to a database that
+    a concurrent DROP DATABASE is waiting to become idle. The starter then
+    blocks on the same lock the DROP holds, and because it counts as a session
+    in the database, the DROP fails with "database is being accessed by other
+    users" once it stops waiting -- FORCE does not help, since the SIGTERM it
+    sends only sets a flag that a starter waiting for a lock cannot act on.
+
+    We hold the lock with an uncommitted DROP EXTENSION rather than with a
+    DROP DATABASE, which cannot run inside a transaction block.
+    """
+    superuser_conn.autocommit = True
+
+    run_command("CREATE DATABASE other", superuser_conn)
+
+    other_conn_str = f"dbname=other user={server_params.PG_USER} password={server_params.PG_PASSWORD} port={server_params.PG_PORT} host={server_params.PG_HOST}"
+    other_conn = psycopg2.connect(other_conn_str)
+    run_command("CREATE EXTENSION pg_extension_base_test_scheduler CASCADE", other_conn)
+    other_conn.commit()
+
+    assert (
+        wait_until_equal(lambda: count_pg_extension_base_workers(superuser_conn), 1)
+        == 1
+    )
+
+    other_pid = run_query("SELECT pg_backend_pid()", other_conn)[0]["pg_backend_pid"]
+
+    # take the lock and mark the database starter for restart, without
+    # committing, which is the state a DROP DATABASE is in while it waits
+    run_command("DROP EXTENSION pg_extension_base_test_scheduler CASCADE", other_conn)
+
+    # CREATE DATABASE wakes up the server starter, so it iterates over the
+    # databases while we hold the lock rather than at its own pace
+    run_command("CREATE DATABASE other_wakeup", superuser_conn)
+
+    # no database starter may connect to other for as long as we hold the lock
+    assert (
+        wait_until_equal(
+            lambda: count_other_backends_in_database(
+                superuser_conn, "other", other_pid
+            ),
+            1,
+            timeout=3.0,
+        )
+        == 0
+    )
+
+    # rolling back has to bring the worker back, so the back-off above may not
+    # simply drop the pending restart
+    other_conn.rollback()
+
+    assert (
+        wait_until_equal(lambda: count_pg_extension_base_workers(superuser_conn), 1)
+        == 1
+    )
+
+    run_command("DROP EXTENSION pg_extension_base_test_scheduler CASCADE", other_conn)
+    other_conn.commit()
+    other_conn.close()
+
+    run_command("DROP DATABASE other", superuser_conn)
+    run_command("DROP DATABASE other_wakeup", superuser_conn)
+
+    assert (
+        wait_until_equal(lambda: count_pg_extension_base_workers(superuser_conn), 0)
+        == 0
+    )
+
+    superuser_conn.autocommit = False
+
+
+def test_drop_database_force_removes_a_starting_starter(
+    superuser_conn, create_injection_extension
+):
+    # A starter that already connected but has not reached its main loop counts
+    # as a session in the database and cannot act on a SIGTERM flag, so
+    # DROP DATABASE ... WITH (FORCE) used to fail with "database is being
+    # accessed by other users". It should terminate the starter instead.
+
+    if get_pg_version_num(superuser_conn) < 170000:
+        pytest.skip("Injection points not available (requires PostgreSQL 17+)")
+
+    superuser_conn.rollback()
+    superuser_conn.autocommit = True
+
+    run_command(
+        "SELECT injection_points_attach('database-starter-before-lock', 'wait')",
+        superuser_conn,
+    )
+
+    own_pid = run_query("SELECT pg_backend_pid()", superuser_conn)[0]["pg_backend_pid"]
+
+    try:
+        # the server starter starts a database starter for every new database,
+        # which then parks in the injection point
+        run_command("CREATE DATABASE other", superuser_conn)
+
+        assert (
+            wait_until_equal(
+                lambda: count_other_backends_in_database(
+                    superuser_conn, "other", own_pid
+                ),
+                1,
+            )
+            == 1
+        )
+
+        run_command("DROP DATABASE other WITH (FORCE)", superuser_conn)
+    finally:
+        # release any starter still parked, so a failure above does not leave
+        # one behind for the next test
+        run_command(
+            "SELECT injection_points_wakeup('database-starter-before-lock')",
+            superuser_conn,
+            raise_error=False,
+        )
+        run_command(
+            "SELECT injection_points_detach('database-starter-before-lock')",
+            superuser_conn,
+            raise_error=False,
+        )
+        run_command(
+            "DROP DATABASE IF EXISTS other WITH (FORCE)",
+            superuser_conn,
+            raise_error=False,
+        )
+
+    assert (
+        wait_until_equal(lambda: count_pg_extension_base_workers(superuser_conn), 0)
+        == 0
+    )
+
+    superuser_conn.autocommit = False
+
+
 def test_oneshot_worker_completes(superuser_conn):
     run_command("LISTEN oneshot", superuser_conn)
     superuser_conn.commit()
