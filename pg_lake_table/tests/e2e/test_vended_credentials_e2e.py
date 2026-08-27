@@ -25,18 +25,45 @@ Cloudflare R2 Data Catalog, ...).  The test below is written to be
 catalog-agnostic for that reason.
 
 --------------------------------------------------------------------------
+Snowflake Horizon Catalog
+--------------------------------------------------------------------------
+Horizon is an OAuth2 catalog that vends credentials, so it fits this test,
+but it differs from a stock Polaris deployment in three ways, all of which
+``rest_auth_type 'horizon'`` already accounts for:
+
+* the secret is a programmatic access token, presented as ``client_secret``
+  and exchanged for a short-lived access token -- it is not usable as a
+  bearer token directly;
+* a non-empty ``client_id`` is rejected, so leave ``PGLAKE_E2E_CLIENT_ID``
+  unset;
+* the catalog is a database created with ``CATALOG = 'SNOWFLAKE'``, named
+  to pg_lake via ``PGLAKE_E2E_CATALOG_NAME``, and the scope names a role
+  (``session:role:<ROLE>``).
+
+The endpoint stops at the catalog root -- pg_lake appends ``/api/catalog``
+and the REST path itself.
+
+--------------------------------------------------------------------------
 Environment variables
 --------------------------------------------------------------------------
 Required:
   PGLAKE_E2E_REST_ENDPOINT   REST catalog base URL (e.g. https://host/iceberg)
-  PGLAKE_E2E_CLIENT_ID       OAuth2 client id
-  PGLAKE_E2E_CLIENT_SECRET   OAuth2 client secret
+  PGLAKE_E2E_CLIENT_SECRET   OAuth2 client secret, or a Horizon access token
   PGLAKE_E2E_NAMESPACE       existing namespace holding the table
   PGLAKE_E2E_TABLE           existing table name to read
 
+Required for rest_auth_type 'oauth2' only:
+  PGLAKE_E2E_CLIENT_ID       OAuth2 client id
+
+Required for rest_auth_type 'horizon' only:
+  PGLAKE_E2E_CATALOG_NAME    catalog database, uppercase if created unquoted
+  PGLAKE_E2E_SCOPE           session:role:<ROLE>
+
 Optional:
+  PGLAKE_E2E_AUTH_TYPE       rest_auth_type to use (default: oauth2)
   PGLAKE_E2E_OAUTH_ENDPOINT  OAuth2 token endpoint (if not the catalog default)
   PGLAKE_E2E_SCOPE           OAuth2 scope (default: PRINCIPAL_ROLE:ALL)
+  PGLAKE_E2E_CATALOG_NAME    REST catalog prefix (default: the database name)
   PGLAKE_E2E_EXPECTED_COUNT  exact row count to assert (default: assert >= 0)
 
 The AWS credentials pgduck_server uses to *reach* object storage come from
@@ -50,12 +77,17 @@ import os
 import pytest
 from utils_pytest import *
 
+_AUTH_TYPE = os.getenv("PGLAKE_E2E_AUTH_TYPE", "oauth2").lower()
+
 _REQUIRED_ENV = (
     "PGLAKE_E2E_REST_ENDPOINT",
-    "PGLAKE_E2E_CLIENT_ID",
     "PGLAKE_E2E_CLIENT_SECRET",
     "PGLAKE_E2E_NAMESPACE",
     "PGLAKE_E2E_TABLE",
+) + (
+    ("PGLAKE_E2E_CATALOG_NAME", "PGLAKE_E2E_SCOPE")
+    if _AUTH_TYPE == "horizon"
+    else ("PGLAKE_E2E_CLIENT_ID",)
 )
 
 requires_e2e_catalog = pytest.mark.skipif(
@@ -71,10 +103,11 @@ requires_e2e_catalog = pytest.mark.skipif(
 def test_vended_credentials_e2e_read(superuser_conn, pgduck_conn, extension):
     """Read a real table whose data access is authorized by vended creds."""
     endpoint = os.environ["PGLAKE_E2E_REST_ENDPOINT"]
-    client_id = os.environ["PGLAKE_E2E_CLIENT_ID"]
+    client_id = os.getenv("PGLAKE_E2E_CLIENT_ID")
     client_secret = os.environ["PGLAKE_E2E_CLIENT_SECRET"]
     namespace = os.environ["PGLAKE_E2E_NAMESPACE"]
     table = os.environ["PGLAKE_E2E_TABLE"]
+    catalog_name = os.getenv("PGLAKE_E2E_CATALOG_NAME")
     oauth_endpoint = os.getenv("PGLAKE_E2E_OAUTH_ENDPOINT")
     scope = os.getenv("PGLAKE_E2E_SCOPE", "PRINCIPAL_ROLE:ALL")
     expected_count = os.getenv("PGLAKE_E2E_EXPECTED_COUNT")
@@ -84,13 +117,22 @@ def test_vended_credentials_e2e_read(superuser_conn, pgduck_conn, extension):
 
     options = [
         f"rest_endpoint '{endpoint}'",
-        "rest_auth_type 'oauth2'",
+        f"rest_auth_type '{_AUTH_TYPE}'",
         f"scope '{scope}'",
         "enable_vended_credentials 'true'",
     ]
+    if catalog_name:
+        options.append(f"catalog_name '{catalog_name}'")
     if oauth_endpoint:
         options.append(f"oauth_endpoint '{oauth_endpoint}'")
     options_sql = ",\n                ".join(options)
+
+    # Horizon rejects a non-empty client id, so the mapping carries only the
+    # secret unless a client id was configured.
+    mapping_options = [f"client_secret '{client_secret}'"]
+    if client_id:
+        mapping_options.insert(0, f"client_id '{client_id}'")
+    mapping_options_sql = ", ".join(mapping_options)
 
     try:
         run_command(f"DROP SERVER IF EXISTS {server_name} CASCADE", superuser_conn)
@@ -107,7 +149,7 @@ def test_vended_credentials_e2e_read(superuser_conn, pgduck_conn, extension):
         run_command(
             f"""
             CREATE USER MAPPING FOR CURRENT_USER SERVER {server_name}
-                OPTIONS (client_id '{client_id}', client_secret '{client_secret}')
+                OPTIONS ({mapping_options_sql})
             """,
             superuser_conn,
         )
