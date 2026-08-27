@@ -52,6 +52,7 @@
 #include "pg_lake/fs/file_cache_manager.hpp"
 #include "pg_lake/fs/functions.hpp"
 #include "pg_lake/fs/caching_file_system.hpp"
+#include "pg_lake/fs/httpfs_extended.hpp"
 #include "pg_lake/fs/region_aware_s3fs.hpp"
 #include "pg_lake/query_listener.hpp"
 #include "pg_lake/utility_functions.hpp"
@@ -793,7 +794,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	fs.UnregisterSubSystem("HTTPFileSystem");
 	fs.RegisterSubSystem(
 		make_uniq<PGLakeCachingFileSystem>(
-			make_uniq<HTTPFileSystem>()
+			make_uniq<PgLakeHTTPFileSystem>()
 		)
 	);
 

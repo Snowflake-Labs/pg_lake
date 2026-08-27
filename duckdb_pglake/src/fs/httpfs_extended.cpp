@@ -40,6 +40,24 @@ initialize_http_headers(HTTPHeaders &header_map)
 }
 
 /*
+ * GetHTTPError describes a failed request.
+ *
+ * When a response callback throws, HTTPUtil::RunRequestWithRetry replaces the
+ * response with a synthetic one whose status is INVALID (0) and keeps the
+ * original message in request_error. Reporting that status instead would turn
+ * an HTTP 401 or 403 into "HTTP 0 Internal Server Error".
+ */
+HTTPException
+PgLakeHTTPFileSystem::GetHTTPError(FileHandle &handle, const HTTPResponse &response, const string &url)
+{
+	if (response.status == HTTPStatusCode::INVALID && response.HasRequestError()) {
+		return HTTPException(response, "%s", response.GetRequestError());
+	}
+
+	return HTTPFileSystem::GetHTTPError(handle, response, url);
+}
+
+/*
  * Download performs similar logic to GetRequest, except writing the output
  * to a destination file rather than an in-memory buffer.
  *
@@ -62,9 +80,7 @@ PgLakeHTTPFileSystem::Download(ClientContext &context, FileHandle &inputHandle, 
 							   inputUrl, headerMap, hfh.http_params,
 							   [&](const HTTPResponse &response) {
 								   if (static_cast<int>(response.status) >= 400) {
-									                   string error =
-														   "HTTP GET error on '" + inputUrl + "' (HTTP " + to_string(static_cast<int>(response.status)) + ")";
-													   throw HTTPException(error);
+									   throw GetHTTPError(inputHandle, response, inputUrl);
 								   }
 								   return true;
 							   },

@@ -260,6 +260,64 @@ def test_retried_download_is_not_cached(
     ), f"sweep did not reclaim the staging file: {stage_path}"
 
 
+@pytest.fixture
+def status_http_server():
+    """Answer every request with the status code named in the request path."""
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def _respond(self):
+            self.send_response(int(Path(self.path).stem))
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        do_HEAD = _respond
+        do_GET = _respond
+
+        def log_message(self, *args):
+            pass
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+
+    server = HTTPServer(("127.0.0.1", port), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    yield port
+
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=10)
+
+
+@pytest.mark.parametrize(
+    "status,reason",
+    [(401, "Unauthorized"), (403, "Forbidden"), (404, "Not Found")],
+)
+def test_http_error_reports_status(status, reason, status_http_server, pgduck_conn):
+    """A failed http read has to name the status the server returned.
+
+    401 and 403 are the codes that are neither retryable nor handled by
+    HTTPFileHandle::Initialize, so they fall back to a range request whose
+    response callback throws. HTTPUtil::RunRequestWithRetry turns that into a
+    response with status 0 and moves the message to request_error, so reporting
+    the status alone would describe an expired presigned URL or a permission
+    problem as "HTTP 0 Internal Server Error".
+    """
+    url = f"http://127.0.0.1:{status_http_server}/{status}.parquet"
+
+    error = run_query(
+        f"SELECT count(*) FROM read_parquet('{url}');", pgduck_conn, raise_error=False
+    )
+    pgduck_conn.rollback()
+
+    assert isinstance(error, str), f"reading {url} did not fail"
+    assert f"HTTP {status} {reason}" in error, error
+
+
 def test_azure_download_is_length_checked(azure, pgduck_conn):
     """Azure goes through the same length check, and is not tripped up by it.
 

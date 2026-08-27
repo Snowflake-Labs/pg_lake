@@ -24,11 +24,13 @@ namespace duckdb {
 
 /*
  * PgLakeHTTPFileSystem extends HTTPFileSystem to add an efficient download
- * function.
+ * function and to report the status code that a failed request returned.
  */
 class PgLakeHTTPFileSystem : public HTTPFileSystem {
 public:
 	int64_t Download(ClientContext &context, FileHandle &inputHandle, string sourceUrl, HTTPHeaders headerMap, FileHandle &outputHandle);
+
+	HTTPException GetHTTPError(FileHandle &handle, const HTTPResponse &response, const string &url) override;
 };
 
 } // namespace duckdb
