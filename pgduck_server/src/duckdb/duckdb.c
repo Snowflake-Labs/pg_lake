@@ -433,6 +433,22 @@ duckdb_global_init(char *databaseFilePath,
 
 	{
 		/*
+		 * Keep GeoParquet columns as WKB blobs. The reader otherwise runs
+		 * ST_GeomFromWKB while scanning, which throws for a geometry DuckDB
+		 * cannot represent (CIRCULARSTRING and the other curve types) and
+		 * leaves no way to read the bytes, not even TRY_CAST(col AS BLOB).
+		 */
+		if (snprintf(setCommand, 1024, "SET GLOBAL enable_geoparquet_conversion TO 'false'") < 0)
+		{
+			return DUCKDB_INITIALIZATION_ERROR;
+		}
+
+		if (run_command_on_duckdb(setCommand) == DuckDBError)
+			return DUCKDB_INITIALIZATION_ERROR;
+	}
+
+	{
+		/*
 		 * Pin the current axis order. DuckDB warns that it will flip the
 		 * default in a later release, and its warnings do not reach the
 		 * client through pgduck_server.
