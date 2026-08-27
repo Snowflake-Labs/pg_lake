@@ -715,12 +715,13 @@ SetEncryptionFields(optional_ptr<ClientContext> context, ParsedS3Url &parsed_s3_
 	/*
 	 * Without the context we cannot tell whether this write goes to managed
 	 * storage, nor which key it should use. Writing unencrypted would be worse
-	 * than failing.
+	 * than failing. This has to stay an IOException: an INTERNAL one invalidates
+	 * the database, which pgduck_server shares across all its sessions.
 	 */
 	if (context == nullptr)
-		throw InternalException("cannot determine encryption settings for write to %s: "
-								"no client context registered for the file handle",
-								parsed_s3_url.bucket);
+		throw IOException("cannot determine encryption settings for write to %s: "
+						  "no client context registered for the file handle",
+						  parsed_s3_url.bucket);
 
 	Value setting;
 
