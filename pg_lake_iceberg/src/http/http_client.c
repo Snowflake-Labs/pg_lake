@@ -28,8 +28,11 @@
 #include "postgres.h"
 #include "miscadmin.h"
 #include "storage/ipc.h"
+#include "utils/guc.h"
 #include "utils/memutils.h"
 #include "pg_lake/http/http_client.h"
+
+#include <unistd.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -82,6 +85,35 @@ bool		HttpClientTraceTraffic = false;
 char	   *HttpClientTlsCaFile = "";
 char	   *HttpClientTlsCertFile = "";
 char	   *HttpClientTlsKeyFile = "";
+
+
+/*
+ * CheckHttpClientTlsFile rejects a TLS path the server cannot read.
+ *
+ * These settings are global while catalogs are not, and curl loads the files
+ * when it builds the TLS context rather than when a server asks for a
+ * certificate.  An unreadable path therefore fails every REST catalog,
+ * including those not using mutual TLS at all, and it fails them on the next
+ * request rather than here.  Checking at assignment keeps a typo from taking
+ * out catalogs that have nothing to do with it.
+ *
+ * Readability now is not a promise for later -- the file can be replaced
+ * during a rotation -- so the request path still reports what curl says.
+ */
+bool
+CheckHttpClientTlsFile(char **newval, void **extra, GucSource source)
+{
+	if (*newval == NULL || **newval == '\0')
+		return true;
+
+	if (access(*newval, R_OK) != 0)
+	{
+		GUC_check_errdetail("Cannot read file \"%s\": %m.", *newval);
+		return false;
+	}
+
+	return true;
+}
 
 
 /*

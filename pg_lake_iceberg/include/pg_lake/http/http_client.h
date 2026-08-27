@@ -23,6 +23,7 @@
 
 #include "postgres.h"
 #include "nodes/pg_list.h"
+#include "utils/guc.h"
 
 typedef enum
 {
@@ -55,6 +56,8 @@ extern bool HttpClientTraceTraffic;
 extern char *HttpClientTlsCaFile;
 extern char *HttpClientTlsCertFile;
 extern char *HttpClientTlsKeyFile;
+
+extern bool CheckHttpClientTlsFile(char **newval, void **extra, GucSource source);
 
 #define HTTP_STATUS_UNAUTHORIZED		401
 #define HTTP_STATUS_TOKEN_EXPIRED		419

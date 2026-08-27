@@ -195,7 +195,7 @@ _PG_init(void)
 							   "",
 							   PGC_SIGHUP,
 							   GUC_NO_SHOW_ALL | GUC_SUPERUSER_ONLY | GUC_NOT_IN_SAMPLE,
-							   NULL, NULL, NULL);
+							   CheckHttpClientTlsFile, NULL, NULL);
 
 	DefineCustomStringVariable("pg_lake_iceberg.tls_cert_file",
 							   gettext_noop("Path to the client certificate presented to REST "
@@ -205,7 +205,7 @@ _PG_init(void)
 							   "",
 							   PGC_SIGHUP,
 							   GUC_NO_SHOW_ALL | GUC_SUPERUSER_ONLY | GUC_NOT_IN_SAMPLE,
-							   NULL, NULL, NULL);
+							   CheckHttpClientTlsFile, NULL, NULL);
 
 	DefineCustomStringVariable("pg_lake_iceberg.tls_key_file",
 							   gettext_noop("Path to the private key for "
@@ -215,7 +215,7 @@ _PG_init(void)
 							   "",
 							   PGC_SIGHUP,
 							   GUC_NO_SHOW_ALL | GUC_SUPERUSER_ONLY | GUC_NOT_IN_SAMPLE,
-							   NULL, NULL, NULL);
+							   CheckHttpClientTlsFile, NULL, NULL);
 
 	DefineCustomStringVariable("pg_lake_iceberg.rest_catalog_auth_provider",
 							   gettext_noop("Extension supplying REST catalog credentials, "
