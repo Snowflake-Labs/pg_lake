@@ -315,6 +315,7 @@ FetchRestCatalogAuthorization(RestCatalogOptions * opts, bool forceRefresh,
 		RestCatalogAuthRequest request = {
 			.version = REST_CATALOG_AUTH_REQUEST_VERSION,
 			.catalogBaseUri = opts->baseUri,
+			.oauthEndpoint = opts->oauthHostPath,
 			.catalogName = opts->catalogName,
 			.scope = opts->scope,
 			.authType = opts->authType,

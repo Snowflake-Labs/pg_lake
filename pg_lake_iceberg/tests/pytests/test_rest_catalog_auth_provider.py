@@ -34,6 +34,10 @@ CREATE OR REPLACE FUNCTION test_rest_catalog_auth_provider_calls()
 RETURNS int LANGUAGE C VOLATILE
 AS 'pg_lake_iceberg', 'test_rest_catalog_auth_provider_calls';
 
+CREATE OR REPLACE FUNCTION test_rest_catalog_auth_provider_endpoints()
+RETURNS text LANGUAGE C VOLATILE
+AS 'pg_lake_iceberg', 'test_rest_catalog_auth_provider_endpoints';
+
 CREATE OR REPLACE FUNCTION register_namespace_to_rest_catalog(TEXT,TEXT)
 RETURNS void LANGUAGE C VOLATILE STRICT
 AS 'pg_lake_iceberg', 'register_namespace_to_rest_catalog';
@@ -180,11 +184,69 @@ def _hook_calls(conn):
     return result[0][0]
 
 
+def _provider_endpoints(conn):
+    result = run_query("SELECT test_rest_catalog_auth_provider_endpoints()", conn)
+    conn.commit()
+    return result[0][0].split("|")
+
+
 def _touch_catalog(conn, namespace):
     run_command(
         f"SELECT register_namespace_to_rest_catalog('mycat', '{namespace}')", conn
     )
     conn.commit()
+
+
+def test_the_provider_is_told_how_the_catalog_is_addressed(
+    iceberg_extension, installcheck, catalog_and_conn
+):
+    """
+    A provider mints credentials for a catalog it knows nothing else about, so
+    pg_lake passes on how that catalog is addressed rather than leaving it to be
+    reconstructed: the base URI as configured, mount path and all, plus an
+    explicit oauth_endpoint when the deployment authenticates somewhere other
+    than the catalog itself.  A provider left to reconstruct either one has to
+    guess, and a wrong guess fails as a 404 that reads like a missing table.
+    """
+    handler_class, conn = catalog_and_conn
+
+    # an uncacheable credential, so the provider is consulted on every request
+    _install_hook(conn, "Bearer from-provider", 0, "true")
+
+    _touch_catalog(conn, f"ns_{uuid.uuid4().hex[:8]}")
+    base_uri, oauth_endpoint = _provider_endpoints(conn)
+
+    assert base_uri.startswith("http://127.0.0.1:")
+    assert oauth_endpoint == ""
+
+    configured = "http://127.0.0.1:9/idp/oauth/tokens"
+
+    run_command_outside_tx(
+        [
+            "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_oauth_host_path TO "
+            f"'{configured}'",
+            "SELECT pg_reload_conf()",
+        ]
+    )
+    try:
+        # a fresh backend, so the reloaded setting is in force for the request
+        # the provider is consulted for
+        reloaded = open_pg_conn()
+        try:
+            _install_hook(reloaded, "Bearer from-provider", 0, "true")
+            _touch_catalog(reloaded, f"ns_{uuid.uuid4().hex[:8]}")
+            _, oauth_endpoint = _provider_endpoints(reloaded)
+
+            assert oauth_endpoint == configured
+        finally:
+            reloaded.close()
+    finally:
+        run_command_outside_tx(
+            [
+                "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_oauth_host_path",
+                "SELECT pg_reload_conf()",
+            ]
+        )
 
 
 def test_provider_supplies_authorization_verbatim(

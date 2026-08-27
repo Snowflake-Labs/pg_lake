@@ -248,6 +248,14 @@ typedef struct RestCatalogAuthMaterial
  * needs to reach the catalog's own token endpoint should append only the REST
  * path to it -- assuming a mount path instead produces a doubled one.
  *
+ * oauthEndpoint is the oauth_endpoint server option: a fully-qualified token
+ * URL to be used as given, or NULL when unset.  It is separate from
+ * catalogBaseUri because the token endpoint is frequently not on the catalog
+ * at all.  A provider that mints its own credential should prefer it when
+ * present and fall back to deriving one from catalogBaseUri, so that a
+ * deployment can point authentication somewhere else without the provider
+ * needing to know the deployment exists.
+ *
  * authType is the configured REST_CATALOG_AUTH_TYPE_* value, and scope is
  * NULL when unset.  forceRefresh says the cached credential was rejected, so
  * a provider that caches must mint a new one rather than return what it has.
@@ -256,6 +264,7 @@ typedef struct RestCatalogAuthRequest
 {
 	int			version;
 	const char *catalogBaseUri;
+	const char *oauthEndpoint;
 	const char *catalogName;
 	const char *scope;
 	int			authType;

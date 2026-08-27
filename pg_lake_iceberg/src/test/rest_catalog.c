@@ -33,6 +33,7 @@ PG_FUNCTION_INFO_V1(get_rest_vended_credentials);
 PG_FUNCTION_INFO_V1(resolve_rest_catalog_base_uri);
 PG_FUNCTION_INFO_V1(set_test_rest_catalog_auth_response);
 PG_FUNCTION_INFO_V1(test_rest_catalog_auth_provider_calls);
+PG_FUNCTION_INFO_V1(test_rest_catalog_auth_provider_endpoints);
 
 /*
 * register_namespace_to_rest_catalog is a test function that registers
@@ -161,6 +162,13 @@ static bool TestAuthProviderClaimsCatalog = true;
 static int	TestAuthProviderCallCount = 0;
 
 /*
+ * What the provider was last handed, so tests can assert on how pg_lake
+ * addresses a catalog rather than only on what it does with the answer.
+ */
+static char *TestAuthProviderBaseUri = NULL;
+static char *TestAuthProviderOauthEndpoint = NULL;
+
+/*
  * Exported so load_external_function can find it: this library is built with
  * hidden visibility, exactly as a real provider extension would be.
  */
@@ -179,6 +187,18 @@ test_rest_catalog_auth_provider(const RestCatalogAuthRequest * request,
 	 */
 	if (request->version != REST_CATALOG_AUTH_REQUEST_VERSION)
 		return false;
+
+	if (TestAuthProviderBaseUri != NULL)
+		pfree(TestAuthProviderBaseUri);
+	if (TestAuthProviderOauthEndpoint != NULL)
+		pfree(TestAuthProviderOauthEndpoint);
+
+	TestAuthProviderBaseUri = request->catalogBaseUri
+		? MemoryContextStrdup(TopMemoryContext, request->catalogBaseUri)
+		: NULL;
+	TestAuthProviderOauthEndpoint = request->oauthEndpoint
+		? MemoryContextStrdup(TopMemoryContext, request->oauthEndpoint)
+		: NULL;
 
 	/*
 	 * Declining sends pg_lake back to its built-in OAuth2 grant.  An unprimed
@@ -225,4 +245,21 @@ Datum
 test_rest_catalog_auth_provider_calls(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_INT32(TestAuthProviderCallCount);
+}
+
+
+/*
+ * test_rest_catalog_auth_provider_endpoints reports how the catalog was
+ * addressed on the last call, as "<base uri>|<oauth endpoint>", with an unset
+ * oauth endpoint rendered as the empty string.
+ */
+Datum
+test_rest_catalog_auth_provider_endpoints(PG_FUNCTION_ARGS)
+{
+	if (TestAuthProviderCallCount == 0)
+		PG_RETURN_NULL();
+
+	PG_RETURN_TEXT_P(cstring_to_text(psprintf("%s|%s",
+											  TestAuthProviderBaseUri ? TestAuthProviderBaseUri : "",
+											  TestAuthProviderOauthEndpoint ? TestAuthProviderOauthEndpoint : "")));
 }
