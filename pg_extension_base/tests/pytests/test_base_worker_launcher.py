@@ -1,3 +1,4 @@
+import os
 import pytest
 import psycopg2
 import select
@@ -15,6 +16,18 @@ def wait_until_equal(fn, expected, timeout=5.0, interval=0.05):
         time.sleep(interval)
         value = fn()
     return value
+
+
+def log_end_offset():
+    with open(f"{server_params.PG_DIR}/logfile", "r") as f:
+        f.seek(0, os.SEEK_END)
+        return f.tell()
+
+
+def count_new_log_lines(offset, needle):
+    with open(f"{server_params.PG_DIR}/logfile", "r") as f:
+        f.seek(offset)
+        return f.read().count(needle)
 
 
 def test_server_start(superuser_conn):
@@ -448,6 +461,104 @@ def test_no_starter_connects_while_a_drop_holds_the_lock(superuser_conn):
     )
 
     superuser_conn.autocommit = False
+
+
+# The server starter logs this once per pass that finds the database starter lock
+# held by a drop.
+BLOCKED_BY_DROP_LOG = "because a drop is in progress"
+
+# How long we hold the drop open while counting those passes.
+DROP_HELD_SECONDS = 5
+
+
+def test_server_starter_polls_at_the_configured_seconds(superuser_conn):
+    """The server starter's poll interval has to track worker_starter_sleep_time
+    as seconds, and a pending restart it cannot act on may not shorten it.
+
+    A DROP EXTENSION holding the database starter lock is such a restart: the
+    entry stays marked for restart for as long as that transaction runs, and no
+    pass can launch anything. Each blocked pass logs at DEBUG2, which makes the
+    rate observable. At 1s only a handful of passes fit in the window, whereas
+    reading the value as milliseconds, or letting the blocked entry pull the
+    sleep down, floors it at 100ms and gives an order of magnitude more.
+
+    The counterpart to the ceiling is the rollback below: sleeping for the
+    configured time may not be paid for by a slower recovery.
+    """
+    superuser_conn.autocommit = True
+
+    run_command("ALTER SYSTEM SET log_min_messages = debug2", superuser_conn)
+    run_command(
+        "ALTER SYSTEM SET pg_extension_base.worker_starter_sleep_time = '1s'",
+        superuser_conn,
+    )
+    run_command("SELECT pg_reload_conf()", superuser_conn)
+
+    other_conn = None
+    try:
+        run_command("CREATE DATABASE starter_poll", superuser_conn)
+
+        other_conn_str = f"dbname=starter_poll user={server_params.PG_USER} password={server_params.PG_PASSWORD} port={server_params.PG_PORT} host={server_params.PG_HOST}"
+        other_conn = psycopg2.connect(other_conn_str)
+        run_command(
+            "CREATE EXTENSION pg_extension_base_test_scheduler CASCADE", other_conn
+        )
+        other_conn.commit()
+
+        assert (
+            wait_until_equal(lambda: count_pg_extension_base_workers(superuser_conn), 1)
+            == 1
+        )
+
+        # take the lock and mark the database starter for restart, without
+        # committing
+        run_command(
+            "DROP EXTENSION pg_extension_base_test_scheduler CASCADE", other_conn
+        )
+
+        offset = log_end_offset()
+
+        # CREATE DATABASE wakes up the server starter, so the window below starts
+        # with a pass that is already blocked rather than mid-sleep
+        run_command("CREATE DATABASE starter_poll_wakeup", superuser_conn)
+
+        time.sleep(DROP_HELD_SECONDS)
+
+        blocked_passes = count_new_log_lines(offset, BLOCKED_BY_DROP_LOG)
+
+        # rolling back has to bring the worker back without waiting out a sleep
+        other_conn.rollback()
+
+        assert (
+            wait_until_equal(
+                lambda: count_pg_extension_base_workers(superuser_conn), 1, timeout=1.0
+            )
+            == 1
+        )
+
+        assert blocked_passes >= 1, "the server starter never made a blocked pass"
+        assert blocked_passes <= 3 * DROP_HELD_SECONDS, (
+            f"{blocked_passes} blocked passes in {DROP_HELD_SECONDS}s is far more "
+            "than a 1s poll interval allows"
+        )
+    finally:
+        if other_conn is not None:
+            run_command(
+                "DROP EXTENSION IF EXISTS pg_extension_base_test_scheduler CASCADE",
+                other_conn,
+            )
+            other_conn.commit()
+            other_conn.close()
+
+        run_command("DROP DATABASE IF EXISTS starter_poll", superuser_conn)
+        run_command("DROP DATABASE IF EXISTS starter_poll_wakeup", superuser_conn)
+        run_command(
+            "ALTER SYSTEM RESET pg_extension_base.worker_starter_sleep_time",
+            superuser_conn,
+        )
+        run_command("ALTER SYSTEM RESET log_min_messages", superuser_conn)
+        run_command("SELECT pg_reload_conf()", superuser_conn)
+        superuser_conn.autocommit = False
 
 
 def test_drop_database_force_removes_a_starting_starter(
