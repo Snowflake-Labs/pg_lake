@@ -170,30 +170,48 @@ GetPGDuckConnection(void)
 
 /*
  * ReleasePGDuckConnection closes the current connection to the
- * pgduck_server, if any.
+ * pgduck_server, if any. Releasing a connection that was already released
+ * is a no-op.
  */
 void
 ReleasePGDuckConnection(PGDuckConnection * pgDuckConnection)
 {
+	/*
+	 * GetPGDuckConnection never hands out an entry with a NULL conn, so a
+	 * NULL here means this connection was already released.
+	 */
+	if (pgDuckConnection->conn == NULL)
+		return;
+
 	uint32		connectionId = pgDuckConnection->connectionId;
 	bool		found = false;
 	PgDuckServerConnectionHashEntry *entry =
-		hash_search(PgDuckConnectionHash, &connectionId, HASH_REMOVE, &found);
+		hash_search(PgDuckConnectionHash, &connectionId, HASH_FIND, &found);
 
 	if (!found)
 	{
-		elog(WARNING, "closing untracked connection to query engine");
-
-		if (pgDuckConnection->conn != NULL)
-			PQfinish(pgDuckConnection->conn);
-
-		pgDuckConnection->conn = NULL;
-
+		/*
+		 * A released entry goes back to dynahash's freelist while the caller
+		 * still points into it, so a handle we cannot find in the hash may
+		 * already be closed or may belong to a newer connection that reused
+		 * the entry. Leak it rather than risk closing the wrong connection.
+		 */
+		elog(WARNING, "ignoring release of untracked connection to query engine");
 		return;
 	}
 
-	if (entry->pgDuckConnection.conn != NULL)
-		PQfinish(entry->pgDuckConnection.conn);
+	PGconn	   *conn = entry->pgDuckConnection.conn;
+
+	/*
+	 * Clear the handle before removing the entry: HASH_REMOVE returns a
+	 * dangling pointer, so this is the last point at which the entry, and
+	 * with it the caller's PGDuckConnection, can be marked as released.
+	 */
+	entry->pgDuckConnection.conn = NULL;
+
+	hash_search(PgDuckConnectionHash, &connectionId, HASH_REMOVE, NULL);
+
+	PQfinish(conn);
 }
 
 
