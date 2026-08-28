@@ -1509,6 +1509,144 @@ def test_flush_deletion_queue_retries_past_max_retries(
     pg_conn.commit()
 
 
+def _queued_metadata_path(superuser_conn, location):
+    path = run_query(
+        f"SELECT path FROM lake_engine.deletion_queue "
+        f"WHERE resolve_metadata AND path LIKE '{location}%'",
+        superuser_conn,
+    )[0][0]
+    superuser_conn.commit()
+
+    return path
+
+
+def test_resolve_deletion_queue_path(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+):
+    """An operator can aim an unresolvable row at a prefix cleanup would not pick
+    itself -- here a custom location, which is never remembered as a fallback."""
+    custom_location = f"s3://{TEST_BUCKET}/manual_resolve/mytable"
+
+    run_command("CREATE SCHEMA IF NOT EXISTS manual_resolve", pg_conn)
+    run_command(
+        f"""
+        CREATE TABLE manual_resolve.t USING iceberg
+        WITH (autovacuum_enabled='false', location='{custom_location}')
+        AS SELECT i AS id FROM generate_series(1, 10) i
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    location = _writable_location(pg_conn, "manual_resolve.t")
+
+    _drop_deferred(pg_conn, "DROP TABLE manual_resolve.t")
+    queued = _queued_metadata_path(superuser_conn, location)
+
+    # a prefix the queued path does not lie under is refused, so a typo cannot
+    # delete an unrelated table (or the whole bucket)
+    with pytest.raises(Exception) as exc:
+        run_command(
+            f"SELECT lake_engine.resolve_deletion_queue_path("
+            f"'{queued}', 's3://{TEST_BUCKET}/somewhere_else')",
+            superuser_conn,
+        )
+    superuser_conn.rollback()
+    assert "is not under" in str(exc.value)
+
+    with pytest.raises(Exception) as exc:
+        run_command(
+            f"SELECT lake_engine.resolve_deletion_queue_path("
+            f"'{location}/metadata/no-such.json', '{location}')",
+            superuser_conn,
+        )
+    superuser_conn.rollback()
+    assert "is not in the deletion queue" in str(exc.value)
+
+    run_command(
+        f"SELECT lake_engine.resolve_deletion_queue_path('{queued}', '{location}/')",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    assert _count_resolve_records(superuser_conn, location) == 0
+    assert _count_prefix_records(superuser_conn, location) == 1
+
+    # the prefix row is ordinary from here on, so the queue drains as usual
+    _assert_vacuum_drains(superuser_conn, location)
+
+    run_command("DROP SCHEMA IF EXISTS manual_resolve CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_forget_deletion_queue_path(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+):
+    """Giving up on a queued path leaves its files in object storage for the
+    operator to deal with."""
+    run_command("CREATE SCHEMA IF NOT EXISTS manual_forget", pg_conn)
+    run_command(
+        """
+        CREATE TABLE manual_forget.t USING iceberg
+        WITH (autovacuum_enabled='false')
+        AS SELECT i AS id FROM generate_series(1, 10) i
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    location = _writable_location(pg_conn, "manual_forget.t")
+
+    _drop_deferred(pg_conn, "DROP TABLE manual_forget.t")
+    queued = _queued_metadata_path(superuser_conn, location)
+
+    with pytest.raises(Exception) as exc:
+        run_command(
+            f"SELECT lake_engine.forget_deletion_queue_path("
+            f"'{location}/metadata/no-such.json')",
+            superuser_conn,
+        )
+    superuser_conn.rollback()
+    assert "is not in the deletion queue" in str(exc.value)
+
+    # it deletes queue rows for any table, so table owners do not get it
+    with pytest.raises(Exception) as exc:
+        run_command(
+            f"SELECT lake_engine.forget_deletion_queue_path('{queued}')", pg_conn
+        )
+    pg_conn.rollback()
+    assert "permission denied" in str(exc.value)
+
+    run_command(
+        f"SELECT lake_engine.forget_deletion_queue_path('{queued}')", superuser_conn
+    )
+    superuser_conn.commit()
+
+    assert _count_resolve_records(superuser_conn, location) == 0
+    files = run_query(
+        f"SELECT count(*) FROM lake_file.list('{location}/**')", superuser_conn
+    )[0][0]
+    superuser_conn.commit()
+    assert files > 0
+
+    run_command("SET pg_lake_table.enable_delete_file_function = on", superuser_conn)
+    run_command(
+        f"SELECT lake_file.delete(path) FROM lake_file.list('{location}/**')",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+    run_command("DROP SCHEMA IF EXISTS manual_forget CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 @pytest.fixture(scope="module")
 def create_test_helper_functions(superuser_conn, s3, extension):
     # lake_iceberg.find_all_referenced_files is installed by pg_lake_iceberg,

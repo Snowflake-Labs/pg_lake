@@ -61,10 +61,15 @@ static void RemoveDeletionQueuePathsFromCatalog(List *filePaths);
 static void IncrementDeletionQueueRetryCount(List *failedRemovalPaths);
 static bool ExpandMetadataResolveRecord(char *metadataPath, bool bestEffort);
 static void EscalateResolveRecordToPrefix(char *metadataPath, char *fallbackPrefix);
+static void ReplaceResolveRecordWithPrefix(char *metadataPath, char *prefix);
+static void ErrorPathNotQueued(char *path);
+static bool DeletionQueueLookup(char *path, bool *isResolveRecord);
 static bool DeleteQueuedPrefix(char *path, bool isVerbose);
 
 
 PG_FUNCTION_INFO_V1(flush_deletion_queue);
+PG_FUNCTION_INFO_V1(resolve_deletion_queue_path);
+PG_FUNCTION_INFO_V1(forget_deletion_queue_path);
 
 
 /*
@@ -115,6 +120,92 @@ flush_deletion_queue(PG_FUNCTION_ARGS)
 
 	PG_RETURN_VOID();
 }
+
+/*
+ * ErrorPathNotQueued reports a path the deletion queue does not hold.
+ */
+static void
+ErrorPathNotQueued(char *path)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_UNDEFINED_OBJECT),
+			 errmsg("%s is not in the deletion queue", path)));
+}
+
+
+/*
+ * resolve_deletion_queue_path re-aims a resolve_metadata row at an
+ * operator-supplied prefix: the row is replaced by an is_prefix row, so the next
+ * drain pass removes everything under the prefix instead of walking the
+ * metadata.
+ *
+ * This is for a row cleanup cannot resolve and has no remembered prefix to fall
+ * back on -- a custom location, or a row queued before the prefix was recorded.
+ * The prefix has to contain the queued path, which rules out aiming at an
+ * unrelated prefix or at the whole bucket, but whether it holds anything besides
+ * the dropped table is the operator's judgement.
+ */
+Datum
+resolve_deletion_queue_path(PG_FUNCTION_ARGS)
+{
+	char	   *queuedPath = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	char	   *prefix = text_to_cstring(PG_GETARG_TEXT_PP(1));
+
+	int			prefixLength = strlen(prefix);
+
+	while (prefixLength > 0 && prefix[prefixLength - 1] == '/')
+		prefixLength--;
+
+	prefix = pnstrdup(prefix, prefixLength);
+
+	if (prefixLength == 0 ||
+		strncmp(queuedPath, prefix, prefixLength) != 0 ||
+		queuedPath[prefixLength] != '/')
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("%s is not under %s", queuedPath, prefix),
+				 errhint("Only the prefix a queued path lies under can replace it.")));
+	}
+
+	bool		isResolveRecord = false;
+
+	if (!DeletionQueueLookup(queuedPath, &isResolveRecord))
+		ErrorPathNotQueued(queuedPath);
+
+	if (!isResolveRecord)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("%s is not queued as metadata to resolve", queuedPath),
+				 errhint("Only a resolve_metadata row can be replaced by a prefix.")));
+	}
+
+	ReplaceResolveRecordWithPrefix(queuedPath, prefix);
+
+	PG_RETURN_VOID();
+}
+
+
+/*
+ * forget_deletion_queue_path drops a path from the deletion queue without
+ * removing anything from object storage, for a row that will never succeed and
+ * whose files the operator takes over.
+ */
+Datum
+forget_deletion_queue_path(PG_FUNCTION_ARGS)
+{
+	char	   *queuedPath = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	bool		isResolveRecord = false;
+
+	if (!DeletionQueueLookup(queuedPath, &isResolveRecord))
+		ErrorPathNotQueued(queuedPath);
+
+	RemoveDeletionQueuePathsFromCatalog(list_make1(queuedPath));
+
+	PG_RETURN_VOID();
+}
+
 
 /*
  * RemoveDeletionQueueRecords removes all files that are no longer referenced .
@@ -419,6 +510,18 @@ EscalateResolveRecordToPrefix(char *metadataPath, char *fallbackPrefix)
 			 errdetail("Queued %s to be removed as a whole instead.",
 					   fallbackPrefix)));
 
+	ReplaceResolveRecordWithPrefix(metadataPath, fallbackPrefix);
+}
+
+
+/*
+ * ReplaceResolveRecordWithPrefix swaps a resolve_metadata row for an is_prefix
+ * row over the given prefix. The caller decides that the prefix holds nothing
+ * but the dropped table.
+ */
+static void
+ReplaceResolveRecordWithPrefix(char *metadataPath, char *prefix)
+{
 	char	   *query =
 		"WITH removed AS ("
 		"    DELETE FROM " DELETION_QUEUE_TABLE " "
@@ -432,7 +535,7 @@ EscalateResolveRecordToPrefix(char *metadataPath, char *fallbackPrefix)
 
 	DECLARE_SPI_ARGS(2);
 	SPI_ARG_VALUE(1, TEXTOID, metadataPath, false);
-	SPI_ARG_VALUE(2, TEXTOID, fallbackPrefix, false);
+	SPI_ARG_VALUE(2, TEXTOID, prefix, false);
 
 	/* switch to schema owner, we assume callers checked permissions */
 	SPI_START_EXTENSION_OWNER(PgLakeTable);
@@ -442,6 +545,41 @@ EscalateResolveRecordToPrefix(char *metadataPath, char *fallbackPrefix)
 	SPI_EXECUTE(query, readOnly);
 
 	SPI_END();
+}
+
+
+/*
+ * DeletionQueueLookup returns whether the queue holds a row for the given path,
+ * and if so whether it is a resolve_metadata row.
+ */
+static bool
+DeletionQueueLookup(char *path, bool *isResolveRecord)
+{
+	char	   *query =
+		"SELECT resolve_metadata FROM " DELETION_QUEUE_TABLE " "
+		"WHERE path OPERATOR(pg_catalog.=) $1";
+
+	DECLARE_SPI_ARGS(1);
+	SPI_ARG_VALUE(1, TEXTOID, path, false);
+
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
+
+	bool		readOnly = true;
+
+	SPI_EXECUTE(query, readOnly);
+
+	bool		found = SPI_processed == 1;
+
+	if (found)
+	{
+		bool		isNull;
+
+		*isResolveRecord = GET_SPI_VALUE(BOOLOID, 0, 1, &isNull);
+	}
+
+	SPI_END();
+
+	return found;
 }
 
 
