@@ -164,6 +164,20 @@ _PG_init(void)
 							GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							NULL, NULL, NULL);
 
+	DefineCustomBoolVariable("pg_lake_engine.deletion_queue_tolerate_dead_pointers",
+							 gettext_noop("Whether cleanup of a dropped table may proceed when the "
+										  "table's Iceberg metadata references something that is no "
+										  "longer in object storage."),
+							 gettext_noop("When enabled, such a table's remaining files are removed "
+										  "and the unreachable ones are reported. When disabled, "
+										  "nothing is removed until the metadata can be walked in "
+										  "full again."),
+							 &DeletionQueueTolerateDeadPointers,
+							 true,
+							 PGC_SUSET,
+							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
 	DefineCustomIntVariable("pg_lake_engine.vacuum_file_remove_retry_interval",
 							gettext_noop("The minimum time to wait before vacuum tries to remove "
 										 "a file that it failed to remove before."),

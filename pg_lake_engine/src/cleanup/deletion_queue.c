@@ -41,6 +41,7 @@ int			OrphanedFileRetentionPeriod = 60 * 60 * 24 * 10;	/* 10 days */
 /* managed by GUC, not exposed to the users */
 int			VacuumFileRemoveMaxRetries = 145;
 int			VacuumFileRemoveRetryInterval = 600;	/* 10 minutes */
+bool		DeletionQueueTolerateDeadPointers = true;
 
 /*
  * DeletionQueueEntry represents a deletion entry from the
@@ -58,7 +59,7 @@ typedef struct DeletionQueueEntry
 
 static void RemoveDeletionQueuePathsFromCatalog(List *filePaths);
 static void IncrementDeletionQueueRetryCount(List *failedRemovalPaths);
-static bool ExpandMetadataResolveRecord(char *metadataPath);
+static bool ExpandMetadataResolveRecord(char *metadataPath, bool bestEffort);
 static void EscalateResolveRecordToPrefix(char *metadataPath, char *fallbackPrefix);
 static bool DeleteQueuedPrefix(char *path, bool isVerbose);
 
@@ -171,7 +172,9 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose, int *file
 					(errmsg("resolving referenced files of dropped table metadata %s",
 							entry->path)));
 
-			if (ExpandMetadataResolveRecord(entry->path))
+			bool		bestEffort = false;
+
+			if (ExpandMetadataResolveRecord(entry->path, bestEffort))
 				producedNewDeletionRows = true;
 			else if (entry->retryCount > 0 && entry->fallbackPrefix != NULL)
 			{
@@ -184,6 +187,16 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose, int *file
 				 * and is only remembered for tables whose storage we manage.
 				 */
 				EscalateResolveRecordToPrefix(entry->path, entry->fallbackPrefix);
+				producedNewDeletionRows = true;
+			}
+			else if (entry->retryCount > 0 && DeletionQueueTolerateDeadPointers &&
+					 ExpandMetadataResolveRecord(entry->path, true))
+			{
+				/*
+				 * No prefix to fall back on, so reclaim whatever the metadata
+				 * still reaches rather than nothing at all. What hung off a
+				 * dead pointer is reported and left in object storage.
+				 */
 				producedNewDeletionRows = true;
 			}
 			else
@@ -287,6 +300,11 @@ DeleteQueuedPrefix(char *path, bool isVerbose)
  * we roll back and return false so the caller retries this row later without
  * aborting the rest of the drain.
  *
+ * bestEffort switches to the variant that walks past pointers that object
+ * storage says are gone instead of throwing. That reclaims what is still
+ * reachable, so it only makes sense once the strict walk has failed more than
+ * once, and it leaves behind whatever hung off a skipped pointer.
+ *
  * The queue may already hold some of these paths (the metadata.json's own row
  * for sure, plus any previous_metadata/rotation leftovers or files shared with
  * another dropped table), so a plain INSERT would hit the primary key and
@@ -298,7 +316,7 @@ DeleteQueuedPrefix(char *path, bool isVerbose)
  * would drop the metadata.json.)
  */
 static bool
-ExpandMetadataResolveRecord(char *metadataPath)
+ExpandMetadataResolveRecord(char *metadataPath, bool bestEffort)
 {
 	MemoryContext savedContext = CurrentMemoryContext;
 	volatile bool resolved = true;
@@ -325,14 +343,19 @@ ExpandMetadataResolveRecord(char *metadataPath)
 		 * leaving their retention untouched.
 		 */
 		{
-			char	   *insertQuery =
-				"INSERT INTO " DELETION_QUEUE_TABLE " "
-				"(path, table_name, orphaned_at, is_prefix, resolve_metadata) "
-				"SELECT f.path, NULL, NULL, false, false "
-				"FROM lake_iceberg.find_all_referenced_files($1) f "
-				"ON CONFLICT (path) DO UPDATE "
-				"SET resolve_metadata = false, orphaned_at = NULL "
-				"WHERE deletion_queue.path OPERATOR(pg_catalog.=) $1";
+			char	   *resolveFunction = bestEffort ?
+				"lake_iceberg.find_all_referenced_files_best_effort" :
+				"lake_iceberg.find_all_referenced_files";
+
+			char	   *insertQuery = psprintf(
+											   "INSERT INTO " DELETION_QUEUE_TABLE " "
+											   "(path, table_name, orphaned_at, is_prefix, resolve_metadata) "
+											   "SELECT f.path, NULL, NULL, false, false "
+											   "FROM %s($1) f "
+											   "ON CONFLICT (path) DO UPDATE "
+											   "SET resolve_metadata = false, orphaned_at = NULL "
+											   "WHERE deletion_queue.path OPERATOR(pg_catalog.=) $1",
+											   resolveFunction);
 
 			DECLARE_SPI_ARGS(1);
 			SPI_ARG_VALUE(1, TEXTOID, metadataPath, false);

@@ -48,6 +48,7 @@
 extern int	OrphanedFileRetentionPeriod;
 extern int	VacuumFileRemoveMaxRetries;
 extern int	VacuumFileRemoveRetryInterval;
+extern bool DeletionQueueTolerateDeadPointers;
 
 extern PGDLLEXPORT List *GetDeletionQueueRecords(Oid relationId, bool isFull, int maxRecords);
 extern PGDLLEXPORT bool RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose,

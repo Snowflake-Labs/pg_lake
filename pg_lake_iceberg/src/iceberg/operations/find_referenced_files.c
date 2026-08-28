@@ -36,6 +36,7 @@
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/operations/find_referenced_files.h"
+#include "pg_lake/pgduck/remote_storage.h"
 #include "pg_lake/storage/storage_credentials.h"
 #include "pg_lake/util/array_utils.h"
 #include "pg_lake/util/injection_points.h"
@@ -43,14 +44,19 @@
 #include "pg_lake/util/s3_reader_utils.h"
 
 PG_FUNCTION_INFO_V1(find_all_referenced_files);
+PG_FUNCTION_INFO_V1(find_all_referenced_files_best_effort);
 PG_FUNCTION_INFO_V1(find_unreferenced_files);
 
 PG_FUNCTION_INFO_V1(find_all_referenced_files_via_snapshot_ids);
 PG_FUNCTION_INFO_V1(find_unreferenced_files_via_snapshot_ids);
 
 
-static void IcebergMetadataAddAllReferencedFiles(char *metadataPath, HTAB *fileHash);
-static void IcebergSnapshotAddAllReferencedFiles(IcebergSnapshot * snapshot, HTAB *fileHash);
+static Datum ReturnReferencedFilesOfMetadata(FunctionCallInfo fcinfo, char *metadataPath,
+											 bool bestEffort);
+static void IcebergMetadataAddAllReferencedFiles(char *metadataPath, HTAB *fileHash,
+												 bool bestEffort);
+static void IcebergSnapshotAddAllReferencedFiles(IcebergSnapshot * snapshot, HTAB *fileHash,
+												 bool bestEffort);
 static List *FindUnreferencedFiles(List *prevMetadataList, char *currentMetadataPath);
 static IcebergSnapshot * GetIcebergSnapshotsViaSnapshotIdList(IcebergTableMetadata * metadata, List *snapshotIdList);
 
@@ -71,9 +77,53 @@ find_all_referenced_files(PG_FUNCTION_ARGS)
 	 */
 	INJECTION_POINT_COMPAT("iceberg-find-referenced-files-udf");
 
+	bool		bestEffort = false;
+
+	return ReturnReferencedFilesOfMetadata(fcinfo, metadataPath, bestEffort);
+}
+
+
+/*
+* find_all_referenced_files_best_effort is find_all_referenced_files for a
+* metadata.json that can no longer be walked in full because something it
+* references has gone missing out of band. The strict walk throws in that case,
+* which reclaims nothing at all; this one reports what it can still reach and
+* names what it had to skip.
+*
+* A pointer is skipped only when object storage says it is not there. Its parent
+* was just read successfully, so the store is reachable and the credentials
+* work, and that is what makes a negative existence probe mean "gone" rather
+* than "cannot tell": RemoteFileExists answers false for any failure, a denied
+* request included. The metadata.json itself is read strictly -- if that cannot
+* be read there is nothing to be partial about.
+*
+* Files reachable only through a skipped pointer stay in object storage.
+*/
+Datum
+find_all_referenced_files_best_effort(PG_FUNCTION_ARGS)
+{
+	char	   *metadataPath = text_to_cstring(PG_GETARG_TEXT_PP(0));
+
+	/* an unreachable store fails either walk, so both share the point */
+	INJECTION_POINT_COMPAT("iceberg-find-referenced-files-udf");
+
+	bool		bestEffort = true;
+
+	return ReturnReferencedFilesOfMetadata(fcinfo, metadataPath, bestEffort);
+}
+
+
+/*
+* ReturnReferencedFilesOfMetadata walks the metadata file and returns the files
+* it references as a set of rows.
+*/
+static Datum
+ReturnReferencedFilesOfMetadata(FunctionCallInfo fcinfo, char *metadataPath,
+								bool bestEffort)
+{
 	HTAB	   *fileHash = CreateFilesHash();
 
-	IcebergMetadataAddAllReferencedFiles(metadataPath, fileHash);
+	IcebergMetadataAddAllReferencedFiles(metadataPath, fileHash, bestEffort);
 
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 
@@ -132,7 +182,9 @@ find_all_referenced_files_via_snapshot_ids(PG_FUNCTION_ARGS)
 		int64	   *snapshotId = (int64 *) lfirst(snapshotIdCell);
 		IcebergSnapshot *snapshot = GetIcebergSnapshotViaId(metadata, *snapshotId);
 
-		IcebergSnapshotAddAllReferencedFiles(snapshot, fileHash);
+		bool		bestEffort = false;
+
+		IcebergSnapshotAddAllReferencedFiles(snapshot, fileHash, bestEffort);
 	}
 
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
@@ -292,17 +344,20 @@ FindUnreferencedFiles(List *prevMetadataList, char *currentMetadataPath)
 {
 	HTAB	   *prevReferencedFileHash = CreateFilesHash();
 	ListCell   *metadataPathCell = NULL;
+	bool		bestEffort = false;
 
 	foreach(metadataPathCell, prevMetadataList)
 	{
 		char	   *prevMetadataPath = lfirst(metadataPathCell);
 
-		IcebergMetadataAddAllReferencedFiles(prevMetadataPath, prevReferencedFileHash);
+		IcebergMetadataAddAllReferencedFiles(prevMetadataPath, prevReferencedFileHash,
+											 bestEffort);
 	}
 
 	HTAB	   *currentReferencedFileHash = CreateFilesHash();
 
-	IcebergMetadataAddAllReferencedFiles(currentMetadataPath, currentReferencedFileHash);
+	IcebergMetadataAddAllReferencedFiles(currentMetadataPath, currentReferencedFileHash,
+										 bestEffort);
 
 	List	   *unreferencedFiles = FindUnreferencedFilesAmongHTABs(prevReferencedFileHash, currentReferencedFileHash);
 
@@ -319,6 +374,7 @@ FindUnreferencedFilesForSnapshots(IcebergSnapshot * prevSnapshots, int prevSnaps
 								  IcebergSnapshot * currentSnapshots, int currentSnapshotCount)
 {
 	HTAB	   *prevReferencedFileHash = CreateFilesHash();
+	bool		bestEffort = false;
 
 	int			snapshotIndex = 0;
 
@@ -326,7 +382,7 @@ FindUnreferencedFilesForSnapshots(IcebergSnapshot * prevSnapshots, int prevSnaps
 	{
 		IcebergSnapshot *snapshot = &prevSnapshots[snapshotIndex];
 
-		IcebergSnapshotAddAllReferencedFiles(snapshot, prevReferencedFileHash);
+		IcebergSnapshotAddAllReferencedFiles(snapshot, prevReferencedFileHash, bestEffort);
 	}
 
 	HTAB	   *currentReferencedFileHash = CreateFilesHash();
@@ -335,7 +391,7 @@ FindUnreferencedFilesForSnapshots(IcebergSnapshot * prevSnapshots, int prevSnaps
 	{
 		IcebergSnapshot *snapshot = &currentSnapshots[snapshotIndex];
 
-		IcebergSnapshotAddAllReferencedFiles(snapshot, currentReferencedFileHash);
+		IcebergSnapshotAddAllReferencedFiles(snapshot, currentReferencedFileHash, bestEffort);
 	}
 
 	return FindUnreferencedFilesAmongHTABs(prevReferencedFileHash, currentReferencedFileHash);
@@ -391,8 +447,9 @@ IcebergFindAllReferencedFiles(char *metadataPath)
 	INJECTION_POINT_COMPAT("iceberg-find-referenced-files");
 
 	HTAB	   *fileHash = CreateFilesHash();
+	bool		bestEffort = false;
 
-	IcebergMetadataAddAllReferencedFiles(metadataPath, fileHash);
+	IcebergMetadataAddAllReferencedFiles(metadataPath, fileHash, bestEffort);
 
 	List	   *referencedFiles = NIL;
 	HASH_SEQ_STATUS status;
@@ -414,7 +471,8 @@ IcebergFindAllReferencedFiles(char *metadataPath)
 * returns a list of files that are referenced in the metadata file.
 */
 static void
-IcebergMetadataAddAllReferencedFiles(char *metadataPath, HTAB *fileHash)
+IcebergMetadataAddAllReferencedFiles(char *metadataPath, HTAB *fileHash,
+									 bool bestEffort)
 {
 	/* read the metadata file */
 	IcebergTableMetadata *metadata = ReadIcebergTableMetadata(metadataPath);
@@ -433,7 +491,7 @@ IcebergMetadataAddAllReferencedFiles(char *metadataPath, HTAB *fileHash)
 	{
 		IcebergSnapshot *snapshot = &metadata->snapshots[snapshotIndex];
 
-		IcebergSnapshotAddAllReferencedFiles(snapshot, fileHash);
+		IcebergSnapshotAddAllReferencedFiles(snapshot, fileHash, bestEffort);
 	}
 }
 
@@ -443,8 +501,19 @@ IcebergMetadataAddAllReferencedFiles(char *metadataPath, HTAB *fileHash)
 * in the snapshot to the hash table.
 */
 static void
-IcebergSnapshotAddAllReferencedFiles(IcebergSnapshot * snapshot, HTAB *fileHash)
+IcebergSnapshotAddAllReferencedFiles(IcebergSnapshot * snapshot, HTAB *fileHash,
+									 bool bestEffort)
 {
+	if (bestEffort && !RemoteFileExists(snapshot->manifest_list))
+	{
+		ereport(WARNING,
+				(errmsg("skipping manifest list %s, which is no longer in object storage",
+						snapshot->manifest_list),
+				 errdetail("Files that only this manifest list references cannot be "
+						   "found and are left behind.")));
+		return;
+	}
+
 	bool		fileAlreadyExists = AppendFileToHash(snapshot->manifest_list, fileHash);
 
 	if (fileAlreadyExists)
@@ -469,6 +538,16 @@ IcebergSnapshotAddAllReferencedFiles(IcebergSnapshot * snapshot, HTAB *fileHash)
 	foreach(manifestCell, manifests)
 	{
 		IcebergManifest *manifest = lfirst(manifestCell);
+
+		if (bestEffort && !RemoteFileExists(manifest->manifest_path))
+		{
+			ereport(WARNING,
+					(errmsg("skipping manifest %s, which is no longer in object storage",
+							manifest->manifest_path),
+					 errdetail("The data files it references cannot be found and are "
+							   "left behind.")));
+			continue;
+		}
 
 		fileAlreadyExists = AppendFileToHash(manifest->manifest_path, fileHash);
 		if (fileAlreadyExists)
