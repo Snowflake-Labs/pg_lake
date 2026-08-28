@@ -146,12 +146,15 @@ _PG_init(void)
 	DefineCustomIntVariable("pg_lake_engine.vacuum_file_remove_max_retries",
 							gettext_noop("The maximum number of retries to remove a file "
 										 "with vacuum. Once this number of retries is reached, "
-										 "the file will be removed from the deletion queue and "
-										 "won't be retried to remove."),
+										 "the file stays in the deletion queue but no vacuum "
+										 "pass claims it again."),
 							gettext_noop("Retries are spaced by "
 										 "pg_lake_engine.vacuum_file_remove_retry_interval, so this "
 										 "bounds how long we keep trying a file rather than how "
-										 "many vacuum passes happen to reach it."),
+										 "many vacuum passes happen to reach it. "
+										 "lake_engine.flush_deletion_queue() ignores the limit, so "
+										 "a file that ran out of retries can still be retried on "
+										 "demand."),
 							&VacuumFileRemoveMaxRetries,
 							145 /* At the default retry interval, we try for
 							  * at least 1 day */ ,

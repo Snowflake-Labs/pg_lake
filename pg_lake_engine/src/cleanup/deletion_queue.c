@@ -391,6 +391,11 @@ RemoveDeletionQueuePathsFromCatalog(List *filePaths)
 * for the given paths in the deletion queue, and records when the failed
 * attempt happened so the next one can be held off for
 * VacuumFileRemoveRetryInterval (see GetDeletionQueueRecords).
+*
+* A path whose new count is past VacuumFileRemoveMaxRetries is out of automatic
+* retries: it stays queued but no vacuum pass will claim it again, so say so
+* once rather than leaving it to be noticed by whoever eventually reads the
+* queue.
 */
 static void
 IncrementDeletionQueueRetryCount(List *failedRemovalPaths)
@@ -401,7 +406,8 @@ IncrementDeletionQueueRetryCount(List *failedRemovalPaths)
 	char	   *updateQuery =
 		"UPDATE " DELETION_QUEUE_TABLE " "
 		"SET retry_count = retry_count + 1, last_attempt_at = pg_catalog.now() "
-		"WHERE path OPERATOR(pg_catalog.=) ANY($1) ";
+		"WHERE path OPERATOR(pg_catalog.=) ANY($1) "
+		"RETURNING path, retry_count";
 
 	DECLARE_SPI_ARGS(1);
 
@@ -411,6 +417,24 @@ IncrementDeletionQueueRetryCount(List *failedRemovalPaths)
 	SPI_START_EXTENSION_OWNER(PgLakeTable);
 
 	SPI_EXECUTE(updateQuery, readOnly);
+
+	for (int rowIndex = 0; rowIndex < SPI_processed; rowIndex++)
+	{
+		bool		isNull;
+		int			retryCount = GET_SPI_VALUE(INT4OID, rowIndex, 2, &isNull);
+
+		if (retryCount != VacuumFileRemoveMaxRetries + 1)
+			continue;
+
+		char	   *path = GET_SPI_VALUE(TEXTOID, rowIndex, 1, &isNull);
+
+		ereport(WARNING,
+				(errmsg("giving up on removing %s after %d attempts",
+						path, retryCount),
+				 errdetail("The path stays in the deletion queue but is no "
+						   "longer retried automatically."),
+				 errhint("Use lake_engine.flush_deletion_queue() to retry it.")));
+	}
 
 	SPI_END();
 }
@@ -435,8 +459,9 @@ IncrementDeletionQueueRetryCount(List *failedRemovalPaths)
  * passes take -- minutes when a drain is catching up on a backlog, rather than
  * the day the default is sized for.
  *
- * isFull skips the backoff: that is the manual flush, where the caller is
- * asking to try everything now.
+ * isFull skips both the backoff and the retry ceiling: that is the manual flush,
+ * where the caller is asking to try everything now, including the paths that ran
+ * out of automatic retries.
  */
 List *
 GetDeletionQueueRecords(Oid relationId, bool isFull, int maxRecords)
@@ -455,13 +480,14 @@ GetDeletionQueueRecords(Oid relationId, bool isFull, int maxRecords)
 						 "    SELECT ctid, path, orphaned_at, retry_count, is_prefix, resolve_metadata "
 						 "    FROM " DELETION_QUEUE_TABLE " "
 						 "    WHERE (orphaned_at IS NULL or pg_catalog.now() OPERATOR(pg_catalog.>=) (orphaned_at OPERATOR(pg_catalog.+) INTERVAL '%d seconds')) AND "
-						 "		  table_name OPERATOR(pg_catalog.=) %d AND retry_count OPERATOR(pg_catalog.<=) %d ",
-						 OrphanedFileRetentionPeriod, relationId, VacuumFileRemoveMaxRetries);
+						 "		  table_name OPERATOR(pg_catalog.=) %d ",
+						 OrphanedFileRetentionPeriod, relationId);
 
 		if (!isFull)
 			appendStringInfo(query,
+							 "      AND retry_count OPERATOR(pg_catalog.<=) %d "
 							 "      AND (last_attempt_at IS NULL OR pg_catalog.now() OPERATOR(pg_catalog.>=) (last_attempt_at OPERATOR(pg_catalog.+) INTERVAL '%d seconds')) ",
-							 VacuumFileRemoveRetryInterval);
+							 VacuumFileRemoveMaxRetries, VacuumFileRemoveRetryInterval);
 
 		appendStringInfoString(query, " FOR UPDATE");
 	}
@@ -477,13 +503,14 @@ GetDeletionQueueRecords(Oid relationId, bool isFull, int maxRecords)
 						 "    FROM " DELETION_QUEUE_TABLE " del "
 						 "    LEFT JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) del.table_name "
 						 "    WHERE (del.orphaned_at IS NULL or pg_catalog.now() OPERATOR(pg_catalog.>=) (del.orphaned_at OPERATOR(pg_catalog.+) INTERVAL '%d seconds')) AND "
-						 "          c.oid IS NULL  AND retry_count OPERATOR(pg_catalog.<=) %d ",
-						 OrphanedFileRetentionPeriod, VacuumFileRemoveMaxRetries);
+						 "          c.oid IS NULL ",
+						 OrphanedFileRetentionPeriod);
 
 		if (!isFull)
 			appendStringInfo(query,
+							 "      AND retry_count OPERATOR(pg_catalog.<=) %d "
 							 "      AND (del.last_attempt_at IS NULL OR pg_catalog.now() OPERATOR(pg_catalog.>=) (del.last_attempt_at OPERATOR(pg_catalog.+) INTERVAL '%d seconds')) ",
-							 VacuumFileRemoveRetryInterval);
+							 VacuumFileRemoveMaxRetries, VacuumFileRemoveRetryInterval);
 
 		appendStringInfoString(query, " FOR UPDATE OF del");
 	}

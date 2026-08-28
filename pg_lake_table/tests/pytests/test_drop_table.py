@@ -660,6 +660,31 @@ def _vacuum_iceberg_now():
     )
 
 
+def _vacuum_no_retry_budget():
+    """Like _vacuum_iceberg_now, but with no retry budget at all: a row that
+    fails once is immediately past vacuum_file_remove_max_retries."""
+    run_command_outside_tx(
+        [
+            "SET pg_lake_engine.orphaned_file_retention_period = 0",
+            "SET pg_lake_iceberg.max_snapshot_age TO 0",
+            "SET pg_lake_engine.vacuum_file_remove_retry_interval = 0",
+            "SET pg_lake_engine.vacuum_file_remove_max_retries = 0",
+            "VACUUM (ICEBERG)",
+        ]
+    )
+
+
+def _resolve_retry_count(superuser_conn, location):
+    count = run_query(
+        f"SELECT max(retry_count) FROM lake_engine.deletion_queue "
+        f"WHERE resolve_metadata AND path LIKE '{location}%'",
+        superuser_conn,
+    )[0][0]
+    superuser_conn.commit()
+
+    return count
+
+
 def _assert_vacuum_drains(superuser_conn, location):
     """Run VACUUM and assert it actually removed all queue rows (prefix,
     per-file, and any deferred resolve_metadata row) and the underlying
@@ -1161,6 +1186,88 @@ def test_flush_deletion_queue_drains_dropped_table_files(
     superuser_conn.commit()
 
     run_command("DROP SCHEMA IF EXISTS defer_drop_flush CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_flush_deletion_queue_retries_past_max_retries(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    create_injection_extension,
+):
+    """A path that spent vacuum_file_remove_max_retries is out of automatic
+    retries, but flush_deletion_queue must still claim it -- otherwise nothing
+    can ever remove it again. A custom location keeps this about the retry
+    ceiling alone: it has no prefix to fall back to, so the row cannot be
+    escalated out from under the test."""
+    if get_pg_version_num(pg_conn) < 170000:
+        return
+
+    custom_location = f"s3://{TEST_BUCKET}/retry_ceiling/mytable"
+
+    run_command("CREATE SCHEMA IF NOT EXISTS retry_ceiling", pg_conn)
+    run_command(
+        f"""
+        CREATE TABLE retry_ceiling.t USING iceberg
+        WITH (autovacuum_enabled='false', location='{custom_location}')
+        AS SELECT i AS id FROM generate_series(1, 10) i
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    location = _writable_location(pg_conn, "retry_ceiling.t")
+
+    _drop_deferred(pg_conn, "DROP TABLE retry_ceiling.t")
+    assert _count_resolve_records(superuser_conn, location) == 1
+
+    # spend the whole budget: with the ceiling at 0, one failed attempt is
+    # already one too many
+    _attach_injection_error(superuser_conn, RESOLVE_REFERENCED_FILES_INJECTION_POINT)
+    try:
+        _vacuum_no_retry_budget()
+        spent = _resolve_retry_count(superuser_conn, location)
+        assert spent > 0
+
+        # no vacuum pass claims it anymore, so retry_count stands still
+        _vacuum_no_retry_budget()
+        assert _resolve_retry_count(superuser_conn, location) == spent
+
+        # the manual flush ignores the ceiling and tries again
+        run_command_outside_tx(
+            [
+                "SET pg_lake_engine.orphaned_file_retention_period = 0",
+                "SET pg_lake_engine.vacuum_file_remove_max_retries = 0",
+                "SELECT lake_engine.flush_deletion_queue(0)",
+            ]
+        )
+        assert _resolve_retry_count(superuser_conn, location) > spent
+    finally:
+        _detach_injection(superuser_conn, RESOLVE_REFERENCED_FILES_INJECTION_POINT)
+
+    # and once resolution can succeed again, the flush drains it for real
+    for _ in range(5):
+        run_command_outside_tx(
+            [
+                "SET pg_lake_engine.orphaned_file_retention_period = 0",
+                "SET pg_lake_engine.vacuum_file_remove_max_retries = 0",
+                "SELECT lake_engine.flush_deletion_queue(0)",
+            ]
+        )
+        if _count_file_records(superuser_conn, location) == 0:
+            break
+    assert _count_resolve_records(superuser_conn, location) == 0
+    assert (
+        run_query(
+            f"SELECT count(*) FROM lake_file.list('{location}/**')", superuser_conn
+        )[0][0]
+        == 0
+    )
+    superuser_conn.commit()
+
+    run_command("DROP SCHEMA IF EXISTS retry_ceiling CASCADE", pg_conn)
     pg_conn.commit()
 
 
