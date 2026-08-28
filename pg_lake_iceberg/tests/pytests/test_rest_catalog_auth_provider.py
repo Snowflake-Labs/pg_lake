@@ -335,6 +335,74 @@ def test_declining_provider_falls_back_to_builtin_oauth2(
     assert handler_class.data_request_auths[0].startswith("Bearer ")
 
 
+def _without_stored_secret(conn_setup):
+    """
+    Runs conn_setup on a backend started after the stored client secret is
+    removed, which is the shape of a catalog authenticated by a provider.
+    """
+    run_command_outside_tx(
+        [
+            "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_secret",
+            "SELECT pg_reload_conf()",
+        ]
+    )
+
+    conn = open_pg_conn()
+    try:
+        conn_setup(conn)
+    finally:
+        conn.close()
+
+
+def test_a_provider_catalog_needs_no_stored_secret(
+    iceberg_extension, installcheck, catalog_and_conn
+):
+    """
+    A catalog whose credential comes from a provider has no secret to store:
+    a workload identity exchange mints one from an attestation instead.
+    Requiring a secret anyway would reject such a catalog before the provider
+    was ever asked, and the error would name credentials that do not exist.
+    """
+    if installcheck:
+        return
+
+    handler_class, _ = catalog_and_conn
+
+    def _run(conn):
+        _install_hook(conn, "Snowflake-WIF from-attestation", 3600, "true")
+        _touch_catalog(conn, "myns")
+
+    _without_stored_secret(_run)
+
+    assert handler_class.data_request_auths == ["Snowflake-WIF from-attestation"]
+    assert (
+        handler_class.token_requests == 0
+    ), "pg_lake ran its own OAuth2 grant for a catalog the provider claimed"
+
+
+def test_a_declining_provider_still_reports_the_missing_secret(
+    iceberg_extension, installcheck, catalog_and_conn
+):
+    """
+    Deferring the credential check must not lose it.  A provider that declines
+    leaves pg_lake's own grant in charge, and that grant needs the secret which
+    is not configured, so the omission still has to be reported rather than
+    sent to the catalog as an empty credential.
+    """
+    if installcheck:
+        return
+
+    def _run(conn):
+        _install_hook(conn, "Snowflake-WIF unused", 3600, "false")
+
+        with pytest.raises(Exception, match="client_secret is not configured"):
+            _touch_catalog(conn, "myns")
+
+        conn.rollback()
+
+    _without_stored_secret(_run)
+
+
 def test_malformed_provider_name_is_rejected(
     iceberg_extension, installcheck, catalog_and_conn
 ):

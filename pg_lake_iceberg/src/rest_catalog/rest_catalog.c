@@ -115,6 +115,10 @@ ApplyGUCDefaults(RestCatalogOptions * opts, bool isBuiltin)
  *   Horizon: client_secret only (carried in the form body;
  *            client_id is intentionally ignored).
  *
+ * They do not apply at all when a credential provider is configured, since
+ * the provider may mint the credential from something other than a stored
+ * secret.
+ *
  * The hint differs by server kind because the credential surfaces
  * differ: GUCs feed only the built-in catalog, user mappings feed
  * only user-created servers.  See BuildRestCatalogOptionsFromServer
@@ -138,6 +142,20 @@ ValidateRestCatalogOptions(const RestCatalogOptions * opts,
 				 errhint("Set the pg_lake_iceberg.rest_catalog_host GUC (e.g. "
 						 "\"http://localhost:8181/api/catalog\" for Polaris) or "
 						 "the \"rest_endpoint\" option on the server.")));
+
+	/*
+	 * A catalog authenticated by workload identity has no client secret to
+	 * configure: the provider mints the credential from an attestation.
+	 * Requiring one here would make such a catalog impossible to configure
+	 * without a secret that is never read.
+	 *
+	 * Whether the provider claims this particular catalog is only known once
+	 * it is called, so the requirement is deferred rather than dropped.  A
+	 * provider that declines falls back to the OAuth2 grant, which reports
+	 * the missing credential before sending anything.
+	 */
+	if (RestCatalogAuthProviderName != NULL && RestCatalogAuthProviderName[0] != '\0')
+		return;
 
 	bool		missingSecret = (opts->clientSecret == NULL || opts->clientSecret[0] == '\0');
 	bool		missingId = (opts->authType != REST_CATALOG_AUTH_TYPE_HORIZON) &&
