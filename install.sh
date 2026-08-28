@@ -270,7 +270,8 @@ install_system_deps() {
             ;;
         rhel)
             sudo dnf -y update
-            sudo dnf -y install epel-release
+            # Fedora ships no epel-release and no crb repo; both are RHEL-only.
+            sudo dnf -y install epel-release || true
             sudo dnf config-manager --enable crb 2>/dev/null || sudo dnf config-manager --set-enabled crb 2>/dev/null || true
             sudo dnf -y install \
                 cmake \
