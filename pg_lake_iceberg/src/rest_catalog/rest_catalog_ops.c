@@ -1030,6 +1030,19 @@ ExtractVendedCredentials(Jsonb *response, RestCatalogOptions * opts)
 									"config", "prefix");
 	ListCell   *elementCell = NULL;
 
+	/*
+	 * A credential says which keys to use, not where the store is, so some
+	 * catalogs state the region once in the table's own config rather than
+	 * repeating it in every credential.  Read without it, S3 is addressed at
+	 * a host with an empty region in it, which fails to resolve at scan time
+	 * and long after the response that omitted it.
+	 */
+	char	   *tableRegion = GetVendedConfigString(response, "config",
+													"client.region");
+
+	if (tableRegion == NULL)
+		tableRegion = GetVendedConfigString(response, "config", "s3.region");
+
 	foreach(elementCell, elements)
 	{
 		JsonbArrayElement *element = lfirst(elementCell);
@@ -1038,6 +1051,9 @@ ExtractVendedCredentials(Jsonb *response, RestCatalogOptions * opts)
 
 		if (creds == NULL)
 			continue;
+
+		if (creds->region == NULL)
+			creds->region = tableRegion;
 
 		creds->scope = ResolveVendedScope(element->stringValue, tableRoot);
 

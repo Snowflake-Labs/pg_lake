@@ -1222,6 +1222,84 @@ def test_vended_credentials_storage_credentials_array(
         _stop(httpd, thread)
 
 
+def test_vended_credentials_region_falls_back_to_table_config(
+    superuser_conn, iceberg_extension, installcheck
+):
+    """
+    A credential says which keys to use, not where the store is, so a catalog
+    may state the region once in the table's own config rather than repeating
+    it in every storage credential.  Read only from the credential, the region
+    is lost, and S3 is later addressed at a host with an empty region in it --
+    a failure at scan time, far from the response that omitted it.
+    """
+    if installcheck:
+        return
+
+    def _make_handler():
+        class _Handler(BaseHTTPRequestHandler):
+            def _handle(self):
+                length = int(self.headers.get("Content-Length", 0))
+                if length > 0:
+                    self.rfile.read(length)
+                if _oauth_or_none(self):
+                    return
+                if "/tables/" in self.path and self.command == "GET":
+                    _reply(
+                        self,
+                        {
+                            "metadata-location": "s3://rg-bucket/ns/tbl/metadata/v1.metadata.json",
+                            "metadata": {
+                                "format-version": 2,
+                                "table-uuid": str(uuid.uuid4()),
+                                "location": "s3://rg-bucket/ns/tbl",
+                            },
+                            # stated once for the table, not per credential
+                            "config": {
+                                "client.region": "us-west-2",
+                            },
+                            "storage-credentials": [
+                                {
+                                    "prefix": "s3://rg-bucket/ns/tbl/",
+                                    "config": {
+                                        "s3.access-key-id": "RG_ACCESS_KEY",
+                                        "s3.secret-access-key": "RG_SECRET_KEY",
+                                        "s3.session-token": "RG_TOKEN",
+                                    },
+                                }
+                            ],
+                        },
+                    )
+                    return
+                self.send_response(404)
+                self.end_headers()
+
+            do_GET = _handle
+            do_POST = _handle
+
+            def log_message(self, fmt, *args):
+                pass
+
+        return _Handler
+
+    httpd, thread = _serve(_make_handler())
+    try:
+        summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
+
+        access_key, scope, has_token, expiry, region, endpoint, url_style, use_ssl = (
+            summary.split("|")
+        )
+        assert access_key == "RG_ACCESS_KEY"
+        assert region == "us-west-2"
+
+    finally:
+        run_command(
+            "DROP FUNCTION IF EXISTS get_rest_vended_credentials(TEXT, TEXT, TEXT)",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+        _stop(httpd, thread)
+
+
 def test_vended_credentials_expiry_from_config(
     superuser_conn, iceberg_extension, installcheck
 ):
