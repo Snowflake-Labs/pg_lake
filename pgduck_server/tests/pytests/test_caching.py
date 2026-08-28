@@ -1,4 +1,5 @@
 import os
+import psycopg2
 import pytest
 import socket
 import threading
@@ -1419,25 +1420,41 @@ def test_copy_concurrently(s3, pgduck_conn):
     )
     stage_path_1 = path_1 + ".pgl-stage"
 
-    # first, run the first pg_lake_cache_file
-    # and wait until the stage file shows up
-    t1 = thread_run_command(
-        f"""
-        COPY (SELECT s, 'hello-'||s as h FROM generate_series(1,10000) as g(s)) TO '{url_1}';
-    """,
-        pgduck_conn,
+    # Each COPY needs its own connection: a single connection serializes the
+    # queries sent from both threads, so they would never reach the server at
+    # the same time and either one could end up running last.
+    conn_1 = psycopg2.connect(
+        host=server_params.PGDUCK_UNIX_DOMAIN_PATH, port=server_params.PGDUCK_PORT
+    )
+    conn_2 = psycopg2.connect(
+        host=server_params.PGDUCK_UNIX_DOMAIN_PATH, port=server_params.PGDUCK_PORT
     )
 
-    # copy into the same file will be blocked
-    t2 = thread_run_command(
-        f"""
-        COPY (SELECT s, 'hello-'||s as h FROM generate_series(1,2000) as g(s)) TO '{url_1}';
-    """,
-        pgduck_conn,
-    )
+    try:
+        # first, run the first COPY and wait until the stage file shows up,
+        # which means it holds the cache-on-write lock for this path
+        t1 = thread_run_command(
+            f"""
+            COPY (SELECT s, 'hello-'||s as h FROM generate_series(1,10000) as g(s)) TO '{url_1}';
+        """,
+            conn_1,
+        )
 
-    t1.join()
-    t2.join()
+        assert check_file_exist(stage_path_1), "the first COPY is not staged"
+
+        # copy into the same file will be blocked
+        t2 = thread_run_command(
+            f"""
+            COPY (SELECT s, 'hello-'||s as h FROM generate_series(1,2000) as g(s)) TO '{url_1}';
+        """,
+            conn_2,
+        )
+
+        t1.join()
+        t2.join()
+    finally:
+        conn_1.close()
+        conn_2.close()
 
     assert check_file_exist(path_1), "final file is not showing up as expected"
 
