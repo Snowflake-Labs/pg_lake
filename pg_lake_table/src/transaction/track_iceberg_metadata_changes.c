@@ -25,6 +25,7 @@
 #include "pg_lake/fdw/data_file_stats_catalog.h"
 #include "pg_lake/fdw/data_files_catalog.h"
 #include "pg_lake/fdw/partition_transform.h"
+#include "pg_lake/fdw/schema_operations/field_id_mapping_catalog.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/iceberg/catalog.h"
@@ -1081,28 +1082,31 @@ ShouldRunCommitTimeAnalyze(HTAB *trackedRelations)
 
 
 /*
- * EnsureFreshStatsForCommitTimeDiff runs ANALYZE on the high-cardinality
- * pg_lake_table catalogs that the commit-time data-file diff joins:
+ * EnsureFreshStatsForCommitTimeDiff runs ANALYZE on the pg_lake_table
+ * catalogs that GetTableDataFilesHashFromCatalog joins:
  *
  *   - lake_table.files
  *   - lake_table.data_file_partition_values
+ *   - lake_table.partition_fields
  *   - lake_table.data_file_column_stats
+ *   - lake_table.field_id_mappings
  *
  * Autovacuum cannot run inside the current transaction, so on a tx that
  * has just inserted many thousand rows into these catalogs the planner's
  * estimate of their size is whatever it was at the start of the tx
  * (often zero, for a freshly created iceberg table, or stale for one
  * with frequent DROP/CREATE churn). The diff query
- * GetTableDataFilesHashFromCatalog joins files LEFT JOIN
- * data_file_partition_values, and LoadColumnStatsForFiles joins
- * data_file_column_stats against pg_attribute via field_id_mappings.
+ * GetTableDataFilesHashFromCatalog joins files against
+ * data_file_partition_values/partition_fields, and
+ * data_file_column_stats/field_id_mappings against pg_attribute.
  * With wrong row estimates the planner happily picks nested loops, which
  * become quadratic as the catalogs grow within the transaction.
  *
- * The lower-cardinality catalogs (partition_fields, field_id_mappings)
- * are intentionally skipped: they're small enough that even bad
- * estimates don't change plan shape, and analyzing them per-commit adds
- * latency without observable benefit.
+ * field_id_mappings and partition_fields are lower-cardinality, but stale
+ * estimates on them still flip the plan: a FOR UPDATE-planned DML that
+ * reads through this same join can get a whole-catalog seq scan of
+ * field_id_mappings feeding a nested loop, whose cost scales with every
+ * tracked relation's mappings rather than the one relation being touched.
  *
  * Cost: ANALYZE samples up to default_statistics_target * 300 rows; on
  * these catalogs that's well under 50ms total even when there's nothing
@@ -1115,7 +1119,9 @@ EnsureFreshStatsForCommitTimeDiff(void)
 		"ANALYZE "
 		DATA_FILES_TABLE_QUALIFIED ", "
 		DATA_FILE_PARTITION_VALUES_TABLE_QUALIFIED ", "
-		DATA_FILE_COLUMN_STATS_TABLE_QUALIFIED;
+		PARTITION_FIELDS_TABLE_QUALIFIED ", "
+		DATA_FILE_COLUMN_STATS_TABLE_QUALIFIED ", "
+		MAPPING_TABLE_NAME;
 
 	SPI_START_EXTENSION_OWNER(PgLakeTable);
 
