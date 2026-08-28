@@ -255,9 +255,14 @@ RUN git clone https://github.com/CrunchyData/pg_incremental.git && \
 # Install vcpkg as postgres user
 ARG VCPKG_VERSION=2025.10.17
 
+# Only installed/ is consumed via VCPKG_TOOLCHAIN_PATH; the rest is build
+# byproducts.  Cleaned in this same RUN so the layer never carries them.
 RUN git clone https://github.com/Microsoft/vcpkg.git -b $VCPKG_VERSION /home/postgres/vcpkg && \
     ./vcpkg/bootstrap-vcpkg.sh && \
-    ./vcpkg/vcpkg install azure-identity-cpp azure-storage-blobs-cpp azure-storage-files-datalake-cpp openssl
+    ./vcpkg/vcpkg install --clean-after-build azure-identity-cpp azure-storage-blobs-cpp azure-storage-files-datalake-cpp openssl && \
+    rm -rf /home/postgres/vcpkg/downloads \
+           /home/postgres/vcpkg/buildtrees \
+           /home/postgres/vcpkg/packages
 
 ENV VCPKG_TOOLCHAIN_PATH="/home/postgres/vcpkg/scripts/buildsystems/vcpkg.cmake"
 
