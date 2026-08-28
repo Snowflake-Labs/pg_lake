@@ -769,20 +769,6 @@ ProcessNotShippableExpressionWalker(Node *node, IsShippableContext * context)
 		 */
 		if (funcExpr->funcid == F_UNNEST_ANYARRAY)
 			context->hasUnnest = true;
-
-		/*
-		 * A float-to-numeric cast can produce NaN, which DuckDB's DECIMAL
-		 * cast rejects before the Iceberg NaN guard applies; keep such casts
-		 * on the PostgreSQL side so out_of_range_values semantics hold.
-		 */
-		if (funcExpr->funcid == F_NUMERIC_FLOAT8 || funcExpr->funcid == F_NUMERIC_FLOAT4)
-		{
-			if (context->stopAtFirstNotShippable)
-				return true;
-
-			RecordNotShippableObject(context, InvalidOid, InvalidOid,
-									 NOT_SHIPPABLE_NUMERIC_NAN);
-		}
 	}
 
 	/*
@@ -810,26 +796,6 @@ ProcessNotShippableExpressionWalker(Node *node, IsShippableContext * context)
 		}
 	}
 #endif
-
-	/*
-	 * A NaN numeric constant cannot be represented by a DuckDB DECIMAL and
-	 * would error in the cast before the Iceberg NaN guard runs, bypassing
-	 * the out_of_range_values policy; keep it on the PostgreSQL side.
-	 */
-	if (IsA(node, Const))
-	{
-		Const	   *constExpr = (Const *) node;
-
-		if (!constExpr->constisnull && constExpr->consttype == NUMERICOID &&
-			numeric_is_nan(DatumGetNumeric(constExpr->constvalue)))
-		{
-			if (context->stopAtFirstNotShippable)
-				return true;
-
-			RecordNotShippableObject(context, InvalidOid, InvalidOid,
-									 NOT_SHIPPABLE_NUMERIC_NAN);
-		}
-	}
 
 	/*
 	 * The SQL/JSON expressions that PostgreSQL gained in version 16 are

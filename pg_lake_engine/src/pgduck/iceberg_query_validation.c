@@ -49,7 +49,6 @@
 #include "pg_lake/pgduck/iceberg_query_validation.h"
 #include "pg_lake/pgduck/keywords.h"
 #include "pg_lake/pgduck/map.h"
-#include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/pgduck/type.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
@@ -106,7 +105,7 @@ TupleDescNeedsValidation(TupleDesc tupleDesc)
 		if (attr->attisdropped)
 			continue;
 
-		if (TypeNeedsIcebergValidation(attr->atttypid, attr->atttypmod))
+		if (TypeNeedsIcebergValidation(attr->atttypid, attr->atttypmod, true))
 			return true;
 	}
 
@@ -232,43 +231,6 @@ AppendIcebergValidationExpression(StringInfo buf, const char *expr,
 	}
 
 	/*
-	 * Scalar bounded numeric: Iceberg decimals cannot represent NaN.  A
-	 * DECIMAL-typed source can never produce one (the guard folds to a
-	 * constant-false branch), but a floating-point source column being
-	 * written into a decimal target can, so clamp it to NULL or error
-	 * according to the policy.  This is the vectorized counterpart of
-	 * IcebergErrorOrClampNumericDatum on the non-pushdown path.
-	 */
-	if (typeOid == NUMERICOID)
-	{
-		if (policy == ICEBERG_OOR_CLAMP)
-		{
-			appendStringInfo(buf,
-							 "CASE WHEN isnan(CAST(%s AS DOUBLE)) THEN NULL ELSE %s END",
-							 expr, expr);
-		}
-		else
-		{
-			int			precision = -1;
-			int			scale = -1;
-
-			/*
-			 * The cast only types the (never-returning) error branch so the
-			 * CASE unifies; widening from a lost element typmod is harmless.
-			 */
-			GetDuckdbAdjustedPrecisionAndScaleFromNumericTypeMod(typmod,
-																 &precision,
-																 &scale);
-			appendStringInfo(buf,
-							 "CASE WHEN isnan(CAST(%s AS DOUBLE)) "
-							 "THEN CAST(error('NaN is not supported for Iceberg decimal') AS DECIMAL(%d,%d)) "
-							 "ELSE %s END",
-							 expr, precision, scale, expr);
-		}
-		return true;
-	}
-
-	/*
 	 * Array types: clamp (nullify) or reject multidimensional arrays
 	 * depending on the policy, then optionally validate elements via
 	 * list_transform when the element type needs temporal validation.
@@ -281,7 +243,7 @@ AppendIcebergValidationExpression(StringInfo buf, const char *expr,
 			? "pg_nullify_nested_list"
 			: "pg_error_nested_list";
 
-		if (TypeNeedsIcebergValidation(elemType, typmod))
+		if (TypeNeedsIcebergValidation(elemType, typmod, true))
 		{
 			char	   *lambdaVar = psprintf("_x%d", depth);
 
@@ -305,9 +267,9 @@ AppendIcebergValidationExpression(StringInfo buf, const char *expr,
 		PGType		keyType = GetMapKeyType(typeOid);
 		PGType		valType = GetMapValueType(typeOid);
 		bool		keyNeedsValidation = TypeNeedsIcebergValidation(keyType.postgresTypeOid,
-																	keyType.postgresTypeMod);
+																	keyType.postgresTypeMod, true);
 		bool		valNeedsValidation = TypeNeedsIcebergValidation(valType.postgresTypeOid,
-																	valType.postgresTypeMod);
+																	valType.postgresTypeMod, true);
 
 		if (!keyNeedsValidation && !valNeedsValidation)
 			return false;
@@ -368,7 +330,8 @@ AppendIcebergValidationExpression(StringInfo buf, const char *expr,
 			if (attr->attisdropped)
 				continue;
 
-			if (TypeNeedsIcebergValidation(attr->atttypid, attr->atttypmod))
+			if (TypeNeedsIcebergValidation(attr->atttypid, attr->atttypmod,
+										   true))
 			{
 				anyFieldNeedsTransform = true;
 				break;

@@ -255,6 +255,7 @@ def test_insert_select_pushdown_unsupported(
 		CREATE DOMAIN simple_text AS TEXT CHECK (LENGTH(VALUE) <= 50);
 		CREATE TABLE table_with_domain (id INT, description simple_text) USING iceberg;
 
+        -- scale>precision: neutralized to ::text in the query tree, validated by wrapper
 		CREATE TABLE numeric_table (value numeric(25,26)) USING iceberg;
 
         -- plain numeric is safe to pushdown
@@ -318,9 +319,6 @@ def test_insert_select_pushdown_unsupported(
     )
     assert "Custom Scan (Query Pushdown)" not in str(results)
 
-    # a float-to-numeric cast (random() is float8) can produce NaN, which a
-    # DuckDB DECIMAL cast rejects before the Iceberg NaN guard runs, so deparse
-    # marks it unshippable and the insert stays on the non-pushdown path
     results = run_query(
         "EXPLAIN ANALYZE INSERT INTO numeric_table SELECT random()*0.01 FROM generate_series(0,10)i",
         pg_conn,
@@ -1330,6 +1328,7 @@ def test_nan_arithmetic_clamp(
 ):
     """NaN produced by arithmetic on bounded numeric is clamped to NULL."""
     schema = "test_nan_arith_clamp"
+
     run_command(f"CREATE SCHEMA {schema};", pg_conn)
     run_command(f"SET search_path TO {schema};", pg_conn)
 
@@ -1394,10 +1393,12 @@ def test_numeric_insert_select_pushdown(
     s3,
     with_default_location,
 ):
-    """Bounded numeric columns are pushdownable; NaN policy is enforced by the
-    wrapper's vectorized isnan() guard, and NaN constants fall back to the
-    non-pushdown path."""
+    """A bounded numeric column is pushdownable only when every value feeding
+    it is read from a decimal column of a Parquet-based source, which cannot
+    encode NaN.  Anything that could yield a NaN stays on the non-pushdown
+    path, where out_of_range_values is applied per datum."""
     schema = "test_numeric_pushdown"
+    csv_url = f"s3://{TEST_BUCKET}/{schema}/src.csv"
 
     run_command(f"CREATE SCHEMA {schema};", pg_conn)
     run_command(f"SET search_path TO {schema};", pg_conn)
@@ -1408,8 +1409,14 @@ def test_numeric_insert_select_pushdown(
             CREATE TABLE num_src (id bigint, amt numeric(38,10)) USING iceberg;
             INSERT INTO num_src SELECT i, i * 1.1 FROM generate_series(1, 1000) i;
             CREATE TABLE num_tgt (id bigint, amt numeric(38,10)) USING iceberg;
+            CREATE TABLE int_tgt (id bigint) USING iceberg;
+
             CREATE TABLE dbl_src (id bigint, val float8) USING iceberg;
             INSERT INTO dbl_src VALUES (1, 1.5), (2, 'NaN');
+
+            CREATE TABLE txt_src (id bigint, val text) USING iceberg;
+            INSERT INTO txt_src VALUES (1, '1.5'), (2, 'NaN');
+
             CREATE TABLE num_clamp (id bigint, val numeric(10,2)) USING iceberg
                 WITH (out_of_range_values = 'clamp');
             CREATE TABLE num_err (id bigint, val numeric(10,2)) USING iceberg
@@ -1419,46 +1426,91 @@ def test_numeric_insert_select_pushdown(
         )
         pg_conn.commit()
 
-        # iceberg-to-iceberg decimal copy is pushed down and exact.  Use plain
-        # EXPLAIN here: EXPLAIN ANALYZE would execute the INSERT and double the
-        # row count checked below.
+        # a decimal column of an Iceberg source is pushed down, and exactly.
+        # Plain EXPLAIN: EXPLAIN ANALYZE would run the INSERT and double the
+        # row count compared below.
         results = run_query(
-            "EXPLAIN INSERT INTO num_tgt SELECT * FROM num_src",
-            pg_conn,
+            "EXPLAIN INSERT INTO num_tgt SELECT * FROM num_src", pg_conn
         )
         assert "Custom Scan (Query Pushdown)" in str(results)
 
         run_command("INSERT INTO num_tgt SELECT * FROM num_src;", pg_conn)
         pg_conn.commit()
 
-        result = run_query("SELECT count(*), sum(amt) FROM num_tgt", pg_conn)
-        assert result[0][0] == 1000
-        assert result == run_query("SELECT count(*), sum(amt) FROM num_src", pg_conn)
+        assert run_query(
+            "SELECT count(*), sum(amt) FROM num_tgt", pg_conn
+        ) == run_query("SELECT count(*), sum(amt) FROM num_src", pg_conn)
 
-        # NaN arriving through a float8 source column is clamped to NULL
+        # a float8 source column can hold NaN, so this is not pushed down and
+        # the clamp policy turns the NaN into NULL
+        results = run_query(
+            "EXPLAIN INSERT INTO num_clamp SELECT id, val FROM dbl_src", pg_conn
+        )
+        assert "Custom Scan (Query Pushdown)" not in str(results)
+
         run_command("INSERT INTO num_clamp SELECT id, val FROM dbl_src;", pg_conn)
         pg_conn.commit()
 
         result = run_query("SELECT val::text FROM num_clamp ORDER BY id", pg_conn)
-        assert result[0][0] is not None
+        assert result[0][0] == "1.50"
         assert result[1][0] is None
 
-        # ... and raises under the error policy
+        run_command("DELETE FROM num_clamp;", pg_conn)
+        pg_conn.commit()
+
+        # so can a text-to-numeric cast, in either spelling: a DuckDB DECIMAL
+        # cast would reject the NaN before any policy could be applied
+        for cast in ("val::numeric(10,2)", "CAST(val AS numeric(10,2))"):
+            results = run_query(
+                f"EXPLAIN INSERT INTO num_clamp SELECT id, {cast} FROM txt_src",
+                pg_conn,
+            )
+            assert "Custom Scan (Query Pushdown)" not in str(results)
+
+        run_command(
+            "INSERT INTO num_clamp SELECT id, val::numeric(10,2) FROM txt_src;",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        result = run_query("SELECT val::text FROM num_clamp ORDER BY id", pg_conn)
+        assert result[0][0] == "1.50"
+        assert result[1][0] is None
+
         err = run_command(
-            "INSERT INTO num_err SELECT id, val FROM dbl_src;",
+            "INSERT INTO num_err SELECT id, val::numeric(10,2) FROM txt_src;",
             pg_conn,
             raise_error=False,
         )
         assert "NaN is not supported for Iceberg decimal" in str(err)
         pg_conn.rollback()
 
-        # a NaN numeric constant is not shippable, so the statement falls back
-        # to the non-pushdown path and the existing datum-level policy applies
+        # a NaN constant is not a decimal source column either
         results = run_query(
-            "EXPLAIN INSERT INTO num_clamp SELECT 3, 'NaN'::numeric(10,2)",
-            pg_conn,
+            "EXPLAIN INSERT INTO num_clamp SELECT 3, 'NaN'::numeric(10,2)", pg_conn
         )
         assert "Custom Scan (Query Pushdown)" not in str(results)
+
+        # a CSV source parses numerics with PostgreSQL semantics, which admit
+        # NaN, so its decimal columns do not qualify
+        run_command(f"COPY (SELECT 1 AS id, 1.5 AS amt) TO '{csv_url}';", pg_conn)
+        run_command(
+            f"""CREATE FOREIGN TABLE csv_src (id bigint, amt numeric(38,10))
+                SERVER pg_lake OPTIONS (path '{csv_url}');""",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        results = run_query(
+            "EXPLAIN INSERT INTO num_tgt SELECT * FROM csv_src", pg_conn
+        )
+        assert "Custom Scan (Query Pushdown)" not in str(results)
+
+        # the same CSV source is pushed down when no numeric column is involved
+        results = run_query(
+            "EXPLAIN INSERT INTO int_tgt SELECT id FROM csv_src", pg_conn
+        )
+        assert "Custom Scan (Query Pushdown)" in str(results)
     finally:
         run_command("RESET search_path;", pg_conn)
         run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)

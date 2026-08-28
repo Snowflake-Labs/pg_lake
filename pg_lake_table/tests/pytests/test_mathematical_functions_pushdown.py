@@ -72,15 +72,13 @@ test_agg_cases = [
     ("round(col_int8)", "WHERE round(col_int8, 5) > 0", '"round"(', True),
     ("round(numeric)", "WHERE round(col_numeric, 5) > 0", '"round"(', True),
     ("round(numeric_3_1)", "WHERE round(col_numeric_1, -1) <= 0", '"round"(', True),
-    # A float-to-numeric cast can yield NaN, which DuckDB's DECIMAL cast
-    # rejects, so these stay on the PostgreSQL side (see deparse.c).
-    ("round(real)", "WHERE round(col_real::numeric, 10) > 0", None, False),
-    ("round(col_float)", "WHERE round(col_float::numeric, 5) > 0", None, False),
+    ("round(real)", "WHERE round(col_real::numeric, 10) > 0", '"round"(', True),
+    ("round(col_float)", "WHERE round(col_float::numeric, 5) > 0", '"round"(', True),
     (
         "round(double precision)",
         "WHERE round(col_double::numeric, 5) > 0",
-        None,
-        False,
+        '"round"(',
+        True,
     ),
     ("sqrt(double)", "WHERE col_double > 0 and sqrt(col_double) > 0", '"sqrt"(', True),
     (

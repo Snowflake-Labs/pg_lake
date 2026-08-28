@@ -668,7 +668,12 @@ IsCopyFromPushdownable(Relation relation, List *columnNameList,
 	if (!RelationSuitableForPushdown(relation, allowDefaultConsts))
 		return false;
 
-	if (!RelationColumnsSuitableForPushdown(relation, sourceFormat))
+	/*
+	 * A bounded numeric target would need the source file's own column type
+	 * to rule out NaN, which is not available here.
+	 */
+	if (!RelationColumnsSuitableForPushdown(relation, sourceFormat,
+											NUMERIC_PUSHDOWN_MAY_BE_NAN))
 		return false;
 
 	/*

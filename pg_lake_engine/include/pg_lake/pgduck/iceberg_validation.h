@@ -63,9 +63,10 @@ extern PGDLLEXPORT bool IsTemporalType(Oid typeOid);
  *
  * Validation covers: temporal boundaries (date/timestamp/timestamptz),
  * multidimensional array rejection (any array type), and bounded
- * numeric NaN.
+ * numeric NaN (non-pushdown only, since numeric blocks pushdown).
  */
-extern PGDLLEXPORT bool TypeNeedsIcebergValidation(Oid typeOid, int32 typmod);
+extern PGDLLEXPORT bool TypeNeedsIcebergValidation(Oid typeOid, int32 typmod,
+												   bool isPushdown);
 
 /* Temporal boundary year constants shared by datum and query-level validation */
 #define TEMPORAL_DATE_MIN_YEAR		(-4712)

@@ -625,7 +625,7 @@ IcebergErrorOrClampNestedDatum(Datum value, Oid typeOid, int32 typmod,
 		ArrayType  *array = DatumGetArrayTypeP(value);
 		bool		needsMultidimClamp = ARR_NDIM(array) > 1;
 		bool		needsElementValidation =
-			TypeNeedsIcebergValidation(elemType, typmod);
+			TypeNeedsIcebergValidation(elemType, typmod, false);
 
 		if (!needsMultidimClamp && !needsElementValidation)
 			return value;
@@ -737,7 +737,8 @@ IcebergErrorOrClampNestedDatum(Datum value, Oid typeOid, int32 typmod,
 			if (attr->attisdropped || attrNulls[i])
 				continue;
 
-			if (!TypeNeedsIcebergValidation(attr->atttypid, attr->atttypmod))
+			if (!TypeNeedsIcebergValidation(attr->atttypid, attr->atttypmod,
+											false))
 				continue;
 
 			bool		attrIsNull = false;

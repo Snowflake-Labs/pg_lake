@@ -712,8 +712,6 @@ GetNotShippableDescription(NotShippableReason reason, Oid classId, Oid objectId)
 			return "infinite interval constant";
 		case NOT_SHIPPABLE_SQL_JSON_EXPRESSION:
 			return "SQL/JSON expression";
-		case NOT_SHIPPABLE_NUMERIC_NAN:
-			return "NaN-capable numeric expression";
 		default:
 			return NULL;
 	}

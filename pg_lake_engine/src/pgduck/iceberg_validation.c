@@ -95,19 +95,17 @@ IsTemporalType(Oid typeOid)
  *
  * Validation covers: temporal boundaries (date/timestamp/timestamptz),
  * multidimensional array rejection (any array type), and bounded
- * numeric NaN.  On the non-pushdown path numeric NaN is handled by
- * IcebergErrorOrClampDatum; on the pushdown path by the vectorized
- * isnan() guard AppendIcebergValidationExpression emits.
+ * numeric NaN (non-pushdown only, since numeric blocks pushdown).
  * Unbounded and large-precision numerics are mapped to float8 on
  * Iceberg tables, so NaN is valid for those and no validation is needed.
  */
 bool
-TypeNeedsIcebergValidation(Oid typeOid, int32 typmod)
+TypeNeedsIcebergValidation(Oid typeOid, int32 typmod, bool isPushdown)
 {
 	if (IsTemporalType(typeOid))
 		return true;
 
-	if (typeOid == NUMERICOID &&
+	if (!isPushdown && typeOid == NUMERICOID &&
 		!IsUnsupportedNumericForIceberg(typeOid, typmod))
 		return true;
 
@@ -133,9 +131,9 @@ TypeNeedsIcebergValidation(Oid typeOid, int32 typmod)
 		PGType		valType = GetMapValueType(typeOid);
 
 		return TypeNeedsIcebergValidation(keyType.postgresTypeOid,
-										  keyType.postgresTypeMod) ||
+										  keyType.postgresTypeMod, isPushdown) ||
 			TypeNeedsIcebergValidation(valType.postgresTypeOid,
-									   valType.postgresTypeMod);
+									   valType.postgresTypeMod, isPushdown);
 	}
 
 	char		typtype = get_typtype(typeOid);
@@ -145,7 +143,7 @@ TypeNeedsIcebergValidation(Oid typeOid, int32 typmod)
 		int32		baseTypmod = typmod;
 		Oid			baseType = getBaseTypeAndTypmod(typeOid, &baseTypmod);
 
-		return TypeNeedsIcebergValidation(baseType, baseTypmod);
+		return TypeNeedsIcebergValidation(baseType, baseTypmod, isPushdown);
 	}
 
 	if (typtype == TYPTYPE_COMPOSITE)
@@ -160,7 +158,8 @@ TypeNeedsIcebergValidation(Oid typeOid, int32 typmod)
 			if (attr->attisdropped)
 				continue;
 
-			if (TypeNeedsIcebergValidation(attr->atttypid, attr->atttypmod))
+			if (TypeNeedsIcebergValidation(attr->atttypid, attr->atttypmod,
+										   isPushdown))
 			{
 				found = true;
 				break;
