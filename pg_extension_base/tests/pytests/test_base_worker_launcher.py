@@ -24,10 +24,10 @@ def log_end_offset():
         return f.tell()
 
 
-def count_new_log_lines(offset, needle):
+def read_new_log_lines(offset):
     with open(f"{server_params.PG_DIR}/logfile", "r") as f:
         f.seek(offset)
-        return f.read().count(needle)
+        return f.readlines()
 
 
 def test_server_start(superuser_conn):
@@ -463,95 +463,70 @@ def test_no_starter_connects_while_a_drop_holds_the_lock(superuser_conn):
     superuser_conn.autocommit = False
 
 
-# The server starter logs this once per pass that finds the database starter lock
-# held by a drop.
-BLOCKED_BY_DROP_LOG = "because a drop is in progress"
+# The server starter logs the sleep it computed once per pass.
+STARTER_SLEEP_LOG = "pg base extension server starter sleeping for"
 
-# How long we hold the drop open while counting those passes.
-DROP_HELD_SECONDS = 5
+# What we set worker_starter_sleep_time to, and the milliseconds an idle pass
+# then has to report. Read as milliseconds the same value lands on the 100ms
+# floor instead.
+STARTER_SLEEP_SECONDS = 2
+STARTER_SLEEP_MS = STARTER_SLEEP_SECONDS * 1000
 
 
-def test_server_starter_polls_at_the_configured_seconds(superuser_conn):
-    """The server starter's poll interval has to track worker_starter_sleep_time
-    as seconds, and a pending restart it cannot act on may not shorten it.
+def test_server_starter_sleeps_the_configured_seconds(superuser_conn):
+    """worker_starter_sleep_time is a seconds GUC, so an idle server starter has
+    to sleep 1000 times its value in milliseconds.
 
-    A DROP EXTENSION holding the database starter lock is such a restart: the
-    entry stays marked for restart for as long as that transaction runs, and no
-    pass can launch anything. Each blocked pass logs at DEBUG2, which makes the
-    rate observable. At 1s only a handful of passes fit in the window, whereas
-    reading the value as milliseconds, or letting the blocked entry pull the
-    sleep down, floors it at 100ms and gives an order of magnitude more.
+    Nothing else in the suite pins that conversion. The restart tests all rely on
+    the wake signal, which keeps working whatever the poll interval is, so with
+    the multiplication removed all 28 launcher tests still passed. Every value
+    below the 100ms floor collapses onto the floor, which is close enough to the
+    old busy poll that nothing noticed.
 
-    The counterpart to the ceiling is the rollback below: sleeping for the
-    configured time may not be paid for by a slower recovery.
+    The sleep the starter logs is the only place the interval is observable from
+    outside, and an idle pass is the only state that reports the configured value:
+    a pending restart deliberately pulls the sleep down to the floor.
     """
     superuser_conn.autocommit = True
 
     run_command("ALTER SYSTEM SET log_min_messages = debug2", superuser_conn)
     run_command(
-        "ALTER SYSTEM SET pg_extension_base.worker_starter_sleep_time = '1s'",
+        "ALTER SYSTEM SET pg_extension_base.worker_starter_sleep_time = "
+        f"'{STARTER_SLEEP_SECONDS}s'",
         superuser_conn,
     )
     run_command("SELECT pg_reload_conf()", superuser_conn)
 
-    other_conn = None
     try:
-        run_command("CREATE DATABASE starter_poll", superuser_conn)
-
-        other_conn_str = f"dbname=starter_poll user={server_params.PG_USER} password={server_params.PG_PASSWORD} port={server_params.PG_PORT} host={server_params.PG_HOST}"
-        other_conn = psycopg2.connect(other_conn_str)
-        run_command(
-            "CREATE EXTENSION pg_extension_base_test_scheduler CASCADE", other_conn
-        )
-        other_conn.commit()
-
-        assert (
-            wait_until_equal(lambda: count_pg_extension_base_workers(superuser_conn), 1)
-            == 1
-        )
-
-        # take the lock and mark the database starter for restart, without
-        # committing
-        run_command(
-            "DROP EXTENSION pg_extension_base_test_scheduler CASCADE", other_conn
-        )
-
         offset = log_end_offset()
 
-        # CREATE DATABASE wakes up the server starter, so the window below starts
-        # with a pass that is already blocked rather than mid-sleep
-        run_command("CREATE DATABASE starter_poll_wakeup", superuser_conn)
+        # CREATE DATABASE signals the server starter, so it re-reads the GUC and
+        # makes a pass now rather than at the end of the sleep it is already in
+        run_command("CREATE DATABASE starter_sleep", superuser_conn)
 
-        time.sleep(DROP_HELD_SECONDS)
+        # the pass that launches the new database's starter may still report the
+        # floor, so allow for a few passes before the idle one
+        deadline = time.time() + 4 * STARTER_SLEEP_SECONDS
+        sleeps = []
 
-        blocked_passes = count_new_log_lines(offset, BLOCKED_BY_DROP_LOG)
+        while time.time() < deadline:
+            sleeps = [
+                line.split(STARTER_SLEEP_LOG)[1].strip()
+                for line in read_new_log_lines(offset)
+                if STARTER_SLEEP_LOG in line
+            ]
 
-        # rolling back has to bring the worker back without waiting out a sleep
-        other_conn.rollback()
+            if f"{STARTER_SLEEP_MS} ms" in sleeps:
+                break
 
-        assert (
-            wait_until_equal(
-                lambda: count_pg_extension_base_workers(superuser_conn), 1, timeout=1.0
-            )
-            == 1
-        )
+            time.sleep(0.05)
 
-        assert blocked_passes >= 1, "the server starter never made a blocked pass"
-        assert blocked_passes <= 3 * DROP_HELD_SECONDS, (
-            f"{blocked_passes} blocked passes in {DROP_HELD_SECONDS}s is far more "
-            "than a 1s poll interval allows"
+        assert f"{STARTER_SLEEP_MS} ms" in sleeps, (
+            f"no idle pass slept {STARTER_SLEEP_MS} ms for a "
+            f"{STARTER_SLEEP_SECONDS}s worker_starter_sleep_time, only {sleeps}"
         )
     finally:
-        if other_conn is not None:
-            run_command(
-                "DROP EXTENSION IF EXISTS pg_extension_base_test_scheduler CASCADE",
-                other_conn,
-            )
-            other_conn.commit()
-            other_conn.close()
-
-        run_command("DROP DATABASE IF EXISTS starter_poll", superuser_conn)
-        run_command("DROP DATABASE IF EXISTS starter_poll_wakeup", superuser_conn)
+        run_command("DROP DATABASE IF EXISTS starter_sleep", superuser_conn)
         run_command(
             "ALTER SYSTEM RESET pg_extension_base.worker_starter_sleep_time",
             superuser_conn,

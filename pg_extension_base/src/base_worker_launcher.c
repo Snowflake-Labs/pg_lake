@@ -193,14 +193,6 @@ typedef struct DatabaseStarterEntry
 	/* whether to start the database starter */
 	bool		needsRestart;
 
-	/*
-	 * Whether the last launch attempt found a DROP DATABASE / DROP EXTENSION
-	 * holding the database starter lock.  Such an entry keeps needsRestart
-	 * set without being launchable, so the server starter must not shorten
-	 * its sleep for it.
-	 */
-	bool		blockedByDrop;
-
 	/* process number for signaling via ProcSendSignal */
 	int			procno;
 
@@ -811,7 +803,13 @@ PgExtensionServerStarterMain(Datum arg)
 		/* clean up any allocated memory */
 		MemoryContextReset(loopContext);
 
-		LightSleep(ServerStarterNextWakeTimeMs());
+		int64		sleepMs = ServerStarterNextWakeTimeMs();
+
+		/* the only place the poll interval is visible from outside */
+		ereport(DEBUG2, (errmsg("pg base extension server starter sleeping for "
+								INT64_FORMAT " ms", sleepMs)));
+
+		LightSleep(sleepMs);
 	}
 
 	ereport(LOG, (errmsg("pg base extension server starter restarting")));
@@ -1115,25 +1113,6 @@ StartDatabaseStarter(Oid databaseId, char *databaseName)
 								"database %s because a drop is in progress",
 								quote_identifier(databaseName))));
 
-		/*
-		 * Record that the pending restart is out of reach, so the server
-		 * starter sleeps normally instead of retrying at the floor for as
-		 * long as the DROP's transaction lasts.  It gets signaled when that
-		 * transaction ends.
-		 */
-		LWLockAcquire(&BaseWorkerControl->lock, LW_EXCLUSIVE);
-
-		bool		blockedIsFound = false;
-		DatabaseStarterEntry *blockedEntry =
-			GetDatabaseStarterEntry(databaseId, &blockedIsFound);
-
-		if (blockedIsFound)
-		{
-			blockedEntry->blockedByDrop = true;
-		}
-
-		LWLockRelease(&BaseWorkerControl->lock);
-
 		return DATABASE_STARTER_BLOCKED;
 	}
 
@@ -1142,9 +1121,6 @@ StartDatabaseStarter(Oid databaseId, char *databaseName)
 	bool		isFound = false;
 	DatabaseStarterEntry *starterEntry =
 		GetOrCreateDatabaseStarterEntry(databaseId, &isFound);
-
-	/* we hold the lock, so no drop is in progress for this database */
-	starterEntry->blockedByDrop = false;
 
 	if (isFound)
 	{
@@ -1594,10 +1570,6 @@ PgExtensionBaseDatabaseStarterSharedMemoryExit(int code, Datum arg)
  * cannot rest on that alone: WaitForBackgroundWorkerStartup does its own
  * WaitLatch and ResetLatch and can swallow the wake, and a launch that ran out
  * of worker slots leaves needsRestart set with nobody left to send one.
- *
- * A restart that a DROP is holding the lock on does not count: retrying it
- * cannot succeed before that transaction ends, and the DROP signals us when it
- * does.
  */
 static int64
 ServerStarterNextWakeTimeMs(void)
@@ -1623,8 +1595,6 @@ ServerStarterNextWakeTimeMs(void)
 		if (!starterEntry->needsRestart)
 			continue;
 		if (starterEntry->workerPid > 0 || starterEntry->state == WORKER_STARTING)
-			continue;
-		if (starterEntry->blockedByDrop)
 			continue;
 
 		sleepMs = 0;
