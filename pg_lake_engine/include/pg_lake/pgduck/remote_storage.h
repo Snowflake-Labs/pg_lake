@@ -47,7 +47,7 @@ extern PGDLLEXPORT int64 GetRemoteFileSize(char *path);
 extern PGDLLEXPORT int64 GetRemoteParquetFileRowCount(char *path);
 extern PGDLLEXPORT List *ListRemoteFileDescriptions(char *pattern);
 extern PGDLLEXPORT List *ListRemoteFileNames(char *pattern);
-extern PGDLLEXPORT bool RemoteFileExists(char *path);
+extern PGDLLEXPORT bool RemoteFileExists(const char *path);
 extern PGDLLEXPORT bool DeleteRemoteFile(char *path);
 extern PGDLLEXPORT bool DeleteRemoteFiles(List *paths);
 extern PGDLLEXPORT void DeleteRemoteFileBatch(List *paths, List **deletedPaths,
