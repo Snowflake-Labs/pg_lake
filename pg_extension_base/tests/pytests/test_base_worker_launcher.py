@@ -998,3 +998,43 @@ def test_worker_restart_backoff_resets_after_healthy_uptime(superuser_conn):
         )
         superuser_conn.commit()
         reset_backoff_gucs(superuser_conn)
+
+
+def test_database_starter_lock_is_outside_the_database_lock_space(superuser_conn):
+    """
+    The server starter takes the database starter lock while connected to no
+    database, so the lock belongs to no database's advisory lock space.  A
+    session listing the advisory locks of its own database has to find only the
+    ones it took itself, because that is what PostgreSQL's own advisory_lock
+    regression test asserts about the database it runs in.
+    """
+    run_command(
+        "CREATE EXTENSION pg_extension_base_test_scheduler CASCADE", superuser_conn
+    )
+    superuser_conn.commit()
+
+    # deregister_worker takes the same lock and holds it until the transaction
+    # ends, so there is no need to catch a starter in the act
+    run_command(
+        "SELECT extension_base.deregister_worker('pg_extension_base_test_scheduler_main_worker')",
+        superuser_conn,
+    )
+
+    assert [[1, 0]] == run_query(
+        """
+        SELECT count(*),
+               count(*) FILTER (
+                   WHERE database = (SELECT oid FROM pg_database
+                                     WHERE datname = current_database()))
+        FROM pg_locks
+        WHERE locktype = 'advisory' AND pid = pg_backend_pid()
+        """,
+        superuser_conn,
+    )
+
+    superuser_conn.rollback()
+
+    run_command(
+        "DROP EXTENSION pg_extension_base_test_scheduler CASCADE", superuser_conn
+    )
+    superuser_conn.commit()

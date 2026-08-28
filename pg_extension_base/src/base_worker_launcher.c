@@ -142,9 +142,17 @@
                          (uint32) workerId, \
                          (uint32) 0, \
                          ADV_LOCKTAG_CLASS_BASE_WORKER)
-#define SET_LOCKTAG_DATABASE_STARTER(tag, db, databaseId) \
+
+/*
+ * The database starter lock is not part of any database's advisory lock space:
+ * the server starter takes it while connected to no database at all, so the
+ * database it is about goes in the second field and the first stays InvalidOid.
+ * Putting the database in the first field instead would list the lock in that
+ * database's pg_locks, where sessions expect to see only their own.
+ */
+#define SET_LOCKTAG_DATABASE_STARTER(tag, databaseId) \
     SET_LOCKTAG_ADVISORY(tag, \
-                         db, \
+                         InvalidOid, \
                          (uint32) databaseId, \
                          (uint32) 0, \
                          ADV_LOCKTAG_CLASS_DATABASE_STARTER)
@@ -2028,7 +2036,7 @@ LockDatabaseStarter(Oid databaseId, LOCKMODE lockMode, bool waitForLock)
 	LOCKTAG		tag;
 	const bool	sessionLock = false;
 
-	SET_LOCKTAG_DATABASE_STARTER(tag, databaseId, databaseId);
+	SET_LOCKTAG_DATABASE_STARTER(tag, databaseId);
 
 	return LockAcquire(&tag, lockMode, sessionLock, !waitForLock);
 }
