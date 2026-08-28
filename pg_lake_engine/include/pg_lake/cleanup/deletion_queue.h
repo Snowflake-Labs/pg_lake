@@ -55,6 +55,7 @@ extern PGDLLEXPORT bool RemoveDeletionQueueRecords(List *deletionQueueRecords, b
 extern PGDLLEXPORT void InsertDeletionQueueRecord(char *path, Oid relationId, TimestampTz deleteAfterTime);
 extern PGDLLEXPORT void InsertPrefixDeletionRecord(char *path, TimestampTz orphanedAt);
 extern PGDLLEXPORT void InsertMetadataResolveRecord(char *metadataPath, Oid relationId,
-													TimestampTz orphanedAt);
+													TimestampTz orphanedAt, char *fallbackPrefix);
 extern PGDLLEXPORT void InsertDeletionQueueRecordExtended(char *path, Oid relationId, TimestampTz orphanedAt,
-														  bool isPrefix, bool resolveMetadata);
+														  bool isPrefix, bool resolveMetadata,
+														  char *fallbackPrefix);

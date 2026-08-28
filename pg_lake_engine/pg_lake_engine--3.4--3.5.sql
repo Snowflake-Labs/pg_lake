@@ -6,3 +6,9 @@
 -- than how many VACUUM passes happen to reach it.
 ALTER TABLE lake_engine.deletion_queue
     ADD COLUMN last_attempt_at timestamptz;
+
+-- Where to delete from when a resolve_metadata row cannot be resolved into the
+-- files it references. Only set for a table at its default managed location,
+-- where nothing else may be stored under the prefix; NULL for every other row.
+ALTER TABLE lake_engine.deletion_queue
+    ADD COLUMN fallback_prefix text;
