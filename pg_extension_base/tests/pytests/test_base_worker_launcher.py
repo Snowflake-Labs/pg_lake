@@ -1,3 +1,4 @@
+import os
 import pytest
 import psycopg2
 import select
@@ -15,6 +16,18 @@ def wait_until_equal(fn, expected, timeout=5.0, interval=0.05):
         time.sleep(interval)
         value = fn()
     return value
+
+
+def log_end_offset():
+    with open(f"{server_params.PG_DIR}/logfile", "r") as f:
+        f.seek(0, os.SEEK_END)
+        return f.tell()
+
+
+def read_new_log_lines(offset):
+    with open(f"{server_params.PG_DIR}/logfile", "r") as f:
+        f.seek(offset)
+        return f.readlines()
 
 
 def test_server_start(superuser_conn):
@@ -450,6 +463,79 @@ def test_no_starter_connects_while_a_drop_holds_the_lock(superuser_conn):
     superuser_conn.autocommit = False
 
 
+# The server starter logs the sleep it computed once per pass.
+STARTER_SLEEP_LOG = "pg base extension server starter sleeping for"
+
+# What we set worker_starter_sleep_time to, and the milliseconds an idle pass
+# then has to report. Read as milliseconds the same value lands on the 100ms
+# floor instead.
+STARTER_SLEEP_SECONDS = 2
+STARTER_SLEEP_MS = STARTER_SLEEP_SECONDS * 1000
+
+
+def test_server_starter_sleeps_the_configured_seconds(superuser_conn):
+    """worker_starter_sleep_time is a seconds GUC, so an idle server starter has
+    to sleep 1000 times its value in milliseconds.
+
+    Nothing else in the suite pins that conversion. The restart tests all rely on
+    the wake signal, which keeps working whatever the poll interval is, so with
+    the multiplication removed all 28 launcher tests still passed. Every value
+    below the 100ms floor collapses onto the floor, which is close enough to the
+    old busy poll that nothing noticed.
+
+    The sleep the starter logs is the only place the interval is observable from
+    outside, and an idle pass is the only state that reports the configured value:
+    a pending restart deliberately pulls the sleep down to the floor.
+    """
+    superuser_conn.autocommit = True
+
+    run_command("ALTER SYSTEM SET log_min_messages = debug2", superuser_conn)
+    run_command(
+        "ALTER SYSTEM SET pg_extension_base.worker_starter_sleep_time = "
+        f"'{STARTER_SLEEP_SECONDS}s'",
+        superuser_conn,
+    )
+    run_command("SELECT pg_reload_conf()", superuser_conn)
+
+    try:
+        offset = log_end_offset()
+
+        # CREATE DATABASE signals the server starter, so it re-reads the GUC and
+        # makes a pass now rather than at the end of the sleep it is already in
+        run_command("CREATE DATABASE starter_sleep", superuser_conn)
+
+        # the pass that launches the new database's starter may still report the
+        # floor, so allow for a few passes before the idle one
+        deadline = time.time() + 4 * STARTER_SLEEP_SECONDS
+        sleeps = []
+
+        while time.time() < deadline:
+            sleeps = [
+                line.split(STARTER_SLEEP_LOG)[1].strip()
+                for line in read_new_log_lines(offset)
+                if STARTER_SLEEP_LOG in line
+            ]
+
+            if f"{STARTER_SLEEP_MS} ms" in sleeps:
+                break
+
+            time.sleep(0.05)
+
+        assert f"{STARTER_SLEEP_MS} ms" in sleeps, (
+            f"no idle pass slept {STARTER_SLEEP_MS} ms for a "
+            f"{STARTER_SLEEP_SECONDS}s worker_starter_sleep_time, only {sleeps}"
+        )
+    finally:
+        run_command("DROP DATABASE IF EXISTS starter_sleep", superuser_conn)
+        run_command(
+            "ALTER SYSTEM RESET pg_extension_base.worker_starter_sleep_time",
+            superuser_conn,
+        )
+        run_command("ALTER SYSTEM RESET log_min_messages", superuser_conn)
+        run_command("SELECT pg_reload_conf()", superuser_conn)
+        superuser_conn.autocommit = False
+
+
 def test_drop_database_force_removes_a_starting_starter(
     superuser_conn, create_injection_extension
 ):
@@ -715,13 +801,18 @@ def hibernate_worker_failure_count(conn):
     return rows[0]["failure_count"] if rows else None
 
 
-def set_backoff_gucs(conn, initial_ms, max_ms, healthy_ms, fail_after_ms):
+def set_backoff_gucs(
+    conn, initial_ms, max_ms, healthy_ms, fail_after_ms, starter_sleep=None
+):
     """
     Configure the restart-backoff GUCs and the hibernate worker's fault
     injection, then reload so freshly (re)started workers pick them up.
 
     fail_after lives in the hibernate test library, so LOAD it into this
     backend first to make the placeholder known to ALTER SYSTEM.
+
+    starter_sleep overrides worker_starter_sleep_time, for tests that need
+    restarts to happen without help from the starter poll.
     """
     # End any transaction a prior test left open; autocommit can't be toggled
     # while one is in progress.
@@ -745,6 +836,11 @@ def set_backoff_gucs(conn, initial_ms, max_ms, healthy_ms, fail_after_ms):
             f"ALTER SYSTEM SET pg_extension_base_test_hibernate.fail_after = '{fail_after_ms}ms'",
             conn,
         )
+        if starter_sleep is not None:
+            run_command(
+                f"ALTER SYSTEM SET pg_extension_base.worker_starter_sleep_time = '{starter_sleep}'",
+                conn,
+            )
         run_command("SELECT pg_reload_conf()", conn)
     finally:
         conn.autocommit = False
@@ -765,6 +861,9 @@ def reset_backoff_gucs(conn):
         )
         run_command(
             "ALTER SYSTEM RESET pg_extension_base_test_hibernate.fail_after", conn
+        )
+        run_command(
+            "ALTER SYSTEM RESET pg_extension_base.worker_starter_sleep_time", conn
         )
         run_command("SELECT pg_reload_conf()", conn)
     finally:
@@ -810,6 +909,51 @@ def test_worker_restart_backoff_escalates(superuser_conn):
         # loop hundreds of times in the same window, so a modest ceiling proves
         # the restart is actually being throttled.
         assert max(counts) < 100, f"restarts were not throttled: {counts}"
+    finally:
+        run_command(
+            "DROP EXTENSION pg_extension_base_test_hibernate CASCADE", superuser_conn
+        )
+        superuser_conn.commit()
+        reset_backoff_gucs(superuser_conn)
+
+
+def test_worker_restart_does_not_wait_for_the_starter_poll(superuser_conn):
+    """
+    A failing worker comes back on its own backoff, not on the starter poll
+    interval, because the starters are woken when a restart falls due.
+
+    worker_starter_sleep_time is an hour here, far past the test window, so a
+    restart that needed the next poll would never happen. The sibling test above
+    cannot tell the two apart: at the default poll it would also catch a missing
+    wake, but it would stop catching it the moment the default got shorter,
+    which is how the missing wake stayed hidden in the first place.
+    """
+    set_backoff_gucs(
+        superuser_conn,
+        initial_ms=100,
+        max_ms=400,
+        healthy_ms=30000,
+        fail_after_ms=0,
+        starter_sleep="1h",
+    )
+
+    run_command(
+        "CREATE EXTENSION pg_extension_base_test_hibernate CASCADE", superuser_conn
+    )
+    superuser_conn.commit()
+
+    try:
+        counts = []
+        for _ in range(32):  # ~8s
+            time.sleep(0.25)
+            fc = hibernate_worker_failure_count(superuser_conn)
+            if fc is not None:
+                counts.append(fc)
+            if counts and counts[-1] >= 3:
+                break
+
+        assert counts, "hibernate worker was never registered"
+        assert max(counts) >= 3, f"failure count did not escalate: {counts}"
     finally:
         run_command(
             "DROP EXTENSION pg_extension_base_test_hibernate CASCADE", superuser_conn

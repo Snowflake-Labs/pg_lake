@@ -106,6 +106,9 @@
 #define INVALID_WORKER_ID (0)
 #define MAX_WORKER_NAME_LENGTH (255)
 
+/* floor on a starter's sleep, so a due restart cannot become a tight loop */
+#define MIN_STARTER_SLEEP_MS (100)
+
 /*
  * When a base worker fails with an error we delay its restart to avoid a tight
  * crash loop.  The delay grows exponentially with the number of consecutive
@@ -115,8 +118,8 @@
  * so a worker that runs fine and later hits a transient error backs off from the
  * initial delay again instead of inheriting a stale, long delay.
  *
- * We do not currently wake up the server and database starters, so the total
- * wait can be up to WorkerStarterSleepTimeSec longer than the computed delay.
+ * A failing worker wakes the starter that can bring it back, so the restart
+ * happens when the backoff elapses rather than at the next poll.
  */
 
 #define PG_EXTENSION_BASE_EXTENSION_NAME "pg_extension_base"
@@ -378,6 +381,7 @@ static void ReclaimStaleBaseWorkerLaunches(void);
 static bool DatabaseExistsInList(List *databaseList, Oid databaseId);
 static StartDatabaseStarterResult StartDatabaseStarter(Oid databaseId,
 													   char *databaseName);
+static int64 ServerStarterNextWakeTimeMs(void);
 
 /* shared memory bookkeeping */
 static DatabaseStarterEntry * GetDatabaseStarterEntry(Oid databaseId, bool *isFound);
@@ -392,7 +396,7 @@ static bool BaseWorkerExistsInRegistrationList(List *workerRegistrationList,
 
 /* functions called by database starter */
 static void PgExtensionBaseDatabaseStarterSharedMemoryExit(int code, Datum arg);
-static int64 ComputeNextWakeTimeMs(void);
+static int64 DatabaseStarterNextWakeTimeMs(void);
 static bool StartAllBaseWorkers(List *workerRegistrationList);
 static List *GetBaseWorkerRegistrationList(void);
 static StartBaseWorkerResult StartBaseWorker(int workerId, Oid extensionId,
@@ -799,7 +803,13 @@ PgExtensionServerStarterMain(Datum arg)
 		/* clean up any allocated memory */
 		MemoryContextReset(loopContext);
 
-		LightSleep(ComputeNextWakeTimeMs());
+		int64		sleepMs = ServerStarterNextWakeTimeMs();
+
+		/* the only place the poll interval is visible from outside */
+		ereport(DEBUG2, (errmsg("pg base extension server starter sleeping for "
+								INT64_FORMAT " ms", sleepMs)));
+
+		LightSleep(sleepMs);
 	}
 
 	ereport(LOG, (errmsg("pg base extension server starter restarting")));
@@ -1102,6 +1112,7 @@ StartDatabaseStarter(Oid databaseId, char *databaseName)
 		ereport(DEBUG2, (errmsg("not starting pg base extension database starter in "
 								"database %s because a drop is in progress",
 								quote_identifier(databaseName))));
+
 		return DATABASE_STARTER_BLOCKED;
 	}
 
@@ -1497,7 +1508,7 @@ PgExtensionBaseDatabaseStarterMain(Datum databaseIdDatum)
 		MemoryContextReset(loopContext);
 
 		/* try again later, respecting pending restart delays */
-		LightSleep(ComputeNextWakeTimeMs());
+		LightSleep(DatabaseStarterNextWakeTimeMs());
 	}
 
 	ereport(LOG, (errmsg("pg_extension_base database starter for database %s restarting",
@@ -1551,16 +1562,61 @@ PgExtensionBaseDatabaseStarterSharedMemoryExit(int code, Datum arg)
 
 
 /*
- * ComputeNextWakeTimeMs computes the minimum sleep time based on pending
- * worker restarts in the current database.
+ * ServerStarterNextWakeTimeMs returns how long the server starter should sleep:
+ * worker_starter_sleep_time, or the floor while a database starter is still
+ * waiting to be launched.
  *
- * Returns the number of milliseconds until the next worker restart is due,
- * or 10 seconds if no restarts are pending.
+ * The starters are also woken by a latch when a restart falls due, but recovery
+ * cannot rest on that alone: WaitForBackgroundWorkerStartup does its own
+ * WaitLatch and ResetLatch and can swallow the wake, and a launch that ran out
+ * of worker slots leaves needsRestart set with nobody left to send one.
  */
 static int64
-ComputeNextWakeTimeMs(void)
+ServerStarterNextWakeTimeMs(void)
 {
-	int64		minSleepMs = WorkerStarterSleepTimeSec;
+	int64		sleepMs = WorkerStarterSleepTimeSec * INT64CONST(1000);
+
+	if (DatabaseStarterHash == NULL)
+	{
+		return sleepMs;
+	}
+
+	LWLockAcquire(&BaseWorkerControl->lock, LW_SHARED);
+
+	HASH_SEQ_STATUS status;
+
+	hash_seq_init(&status, DatabaseStarterHash);
+
+	DatabaseStarterEntry *starterEntry;
+
+	while ((starterEntry = (DatabaseStarterEntry *) hash_seq_search(&status)) != NULL)
+	{
+		/* mirrors what StartDatabaseStarter considers worth launching */
+		if (!starterEntry->needsRestart)
+			continue;
+		if (starterEntry->workerPid > 0 || starterEntry->state == WORKER_STARTING)
+			continue;
+
+		sleepMs = 0;
+		hash_seq_term(&status);
+		break;
+	}
+
+	LWLockRelease(&BaseWorkerControl->lock);
+
+	return Max(sleepMs, MIN_STARTER_SLEEP_MS);
+}
+
+
+/*
+ * DatabaseStarterNextWakeTimeMs returns how long the calling database starter
+ * should sleep: the time until the next pending base worker restart in its own
+ * database, or worker_starter_sleep_time if none is pending.
+ */
+static int64
+DatabaseStarterNextWakeTimeMs(void)
+{
+	int64		minSleepMs = WorkerStarterSleepTimeSec * INT64CONST(1000);
 
 	if (BaseWorkerHash == NULL)
 	{
@@ -1613,8 +1669,7 @@ ComputeNextWakeTimeMs(void)
 
 	LWLockRelease(&BaseWorkerControl->lock);
 
-	/* Add small buffer to avoid tight loops */
-	return Max(minSleepMs, 100);
+	return Max(minSleepMs, MIN_STARTER_SLEEP_MS);
 }
 
 
@@ -2420,21 +2475,7 @@ PgExtensionBaseWorkerSharedMemoryExit(int code, Datum arg)
 		}
 		else if (!workerEntry->needsRestart)
 		{
-			/*
-			 * needsRestart being false means that we got killed due to an
-			 * internal error. Bring back the database starter to restore us.
-			 */
-			bool		isFound = false;
-			DatabaseStarterEntry *starterEntry = GetDatabaseStarterEntry(databaseId, &isFound);
-
-			if (isFound)
-			{
-				/*
-				 * Signal to the server starter that the database starter is
-				 * needed.
-				 */
-				starterEntry->needsRestart = true;
-			}
+			/* needsRestart being false means an internal error killed us */
 
 			/*
 			 * If the worker had been running for a while before it failed,
@@ -2454,9 +2495,6 @@ PgExtensionBaseWorkerSharedMemoryExit(int code, Datum arg)
 
 			int64		backoffMs = ComputeRestartBackoffMs(workerEntry->failureCount);
 
-			/*
-			 * Also tell the database starter that we want to restart
-			 */
 			workerEntry->needsRestart = true;
 			workerEntry->state = WORKER_RESTARTING;
 			workerEntry->restartAfter = GetDelayedTimestamp(backoffMs);
@@ -2466,6 +2504,15 @@ PgExtensionBaseWorkerSharedMemoryExit(int code, Datum arg)
 							"a row; delaying restart by %ld ms",
 							workerId, databaseId, workerEntry->failureCount,
 							(long) backoffMs)));
+
+			/*
+			 * Wake whoever can bring us back: the database starter if it is
+			 * still running, otherwise the server starter so that it launches
+			 * one.  Setting needsRestart alone would leave the restart
+			 * waiting for the next poll, which is up to
+			 * worker_starter_sleep_time away however short the backoff is.
+			 */
+			SignalDatabaseStarterLocked(databaseId);
 		}
 	}
 	else

@@ -102,6 +102,9 @@ extern bool EnableBaseWorkerLauncher;
 
 /* pg_extension_base.worker_starter_sleep_time setting */
 #define DEFAULT_WORKER_STARTER_SLEEP_TIME (10)
+
+/* the sleep reaches WaitEventSetWaitBlock as an int number of milliseconds */
+#define MAX_WORKER_STARTER_SLEEP_TIME (INT32_MAX / 1000)
 extern int	WorkerStarterSleepTimeSec;
 
 /* pg_extension_base.worker_restart_backoff_* settings */

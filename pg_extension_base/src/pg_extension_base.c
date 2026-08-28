@@ -114,7 +114,7 @@ _PG_init(void)
 							&WorkerStarterSleepTimeSec,
 							DEFAULT_WORKER_STARTER_SLEEP_TIME,
 							0,
-							INT32_MAX,
+							MAX_WORKER_STARTER_SLEEP_TIME,
 							PGC_USERSET,
 							GUC_UNIT_S | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							NULL,
