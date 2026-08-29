@@ -258,7 +258,8 @@ PGTypeRequiresConversionToIcebergString(Field * field, PGType pgType)
 /*
  * PostgresBaseTypeIdToIcebergTypeName returns the Iceberg scalar type name a
  * PostgreSQL base (non-container) type maps to, e.g. uuid -> "uuid", bytea ->
- * "binary", an oversized numeric or any unknown type -> "string".
+ * "binary", a numeric that no Iceberg decimal can hold -> "double", any unknown
+ * type -> "string".
  *
  * This is the single source of truth for the surface PostgreSQL -> Iceberg
  * scalar name mapping. It lives in the engine so both the Iceberg field
@@ -314,6 +315,17 @@ PostgresBaseTypeIdToIcebergTypeName(PGType pgType)
 			return "binary";
 		case NUMERICOID:
 			{
+				/*
+				 * The GUC check mirrors
+				 * MaybeConvertUnsupportedNumericColumnsToDouble: with the GUC
+				 * off CREATE rejects such a numeric at any level instead of
+				 * storing it in some other shape.
+				 */
+				if (UnsupportedNumericAsDouble &&
+					IsUnsupportedNumericForIceberg(NUMERICOID,
+												   pgType.postgresTypeMod))
+					return "double";
+
 				/*
 				 * Follow similar logic as in ChooseCompatibleDuckDBType
 				 */
@@ -411,8 +423,8 @@ StorageStructFieldByName(Field * storageStruct, const char *name)
  * against the persisted storage name, so it is type-agnostic and matches the
  * registration-time divergence decision exactly: intrinsic representation
  * differences that keep the same Iceberg name (geometry/bytea -> "binary",
- * oversized numeric -> "string") are NOT divergences, while a genuine
- * compatibility remap (uuid -> "string") is.
+ * a numeric no decimal can hold -> "double") are NOT divergences, while a
+ * genuine compatibility remap (uuid -> "string") is.
  */
 bool
 ScalarLeafStorageDiverges(Field * storageField, Oid surfaceOid, int32 surfaceTypmod)

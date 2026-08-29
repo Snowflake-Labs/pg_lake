@@ -1990,9 +1990,11 @@ ErrorIfTypeUnsupportedForIcebergTablesInternal(Oid typeOid, int32 typmod, int le
  * ErrorIfTypeUnsupportedNumericForIcebergTables throws an error if the given
  * numeric type is unsupported for Iceberg tables.
  *
- * When unsupported_numeric_as_double GUC is on, all unsupported numerics
- * (including nested ones) are converted to float8 at CREATE TABLE time by
- * MaybeConvertUnsupportedNumericColumnsToDouble, so no error is needed.
+ * When unsupported_numeric_as_double GUC is on, a top-level unsupported
+ * numeric is converted to float8 at CREATE TABLE time by
+ * MaybeConvertUnsupportedNumericColumnsToDouble, and one nested in a composite
+ * type or a map keeps its declared type but is stored as an Iceberg double, so
+ * no error is needed either way.
  */
 void
 ErrorIfTypeUnsupportedNumericForIcebergTables(int32 typmod, char *columnName)

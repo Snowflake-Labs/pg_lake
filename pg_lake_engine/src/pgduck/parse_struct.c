@@ -1217,17 +1217,22 @@ GetCompositeTypeForPGType(Oid postgresType)
 
 		Oid			rawTypid = attr->atttypid;
 
-		if (!IsMapTypeOid(rawTypid))
-			rawTypid = getBaseType(rawTypid);
-
-		col->colType = GetRelatedTypeOid(rawTypid, false);
-		col->isArray = rawTypid != col->colType;
-
 		/*
 		 * atttypmod already refers to the element type for an array
 		 * attribute, so it pairs with the unwrapped colType either way.
 		 */
 		col->colTypeMod = attr->atttypmod;
+
+		/*
+		 * Resolve the domain and its modifier together: a domain attribute
+		 * has atttypmod -1 because the modifier belongs to the domain, so
+		 * unwrapping the type alone would leave a domain over numeric(p,s)
+		 * looking unbounded.
+		 */
+		rawTypid = ResolveDomainBaseTypeAndTypmod(rawTypid, &col->colTypeMod);
+
+		col->colType = GetRelatedTypeOid(rawTypid, false);
+		col->isArray = rawTypid != col->colType;
 
 		/*
 		 * We need more info about this type than just the name, so already

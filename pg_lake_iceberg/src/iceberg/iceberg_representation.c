@@ -48,7 +48,7 @@ IcebergStoredPostgresType(PGType type)
 	if (!UnsupportedNumericAsDouble)
 		return type;
 
-	PGType		converted = MaybeConvertType(type, NULL);
+	PGType		converted = MaybeConvertType(type, NULL, NULL);
 
 	return OidIsValid(converted.postgresTypeOid) ? converted : type;
 }
@@ -146,10 +146,8 @@ TypeHasUnrepresentableLeaf(PGType type, bool nestedOnly)
 /*
  * UnsupportedNumericLeafProbe is the ConvertTypeTree leaf rule behind
  * TypeHasUnrepresentableLeaf.  It records what it sees and always returns
- * false, i.e. never requests a rewrite, which keeps ConvertTypeTree's composite
- * and map branches short of FindOrCreateCompositeTypeFromColumnDefs and
- * GetOrCreatePGMapType: the probe walks the same structure the real rewrite
- * would, and materializes nothing.
+ * false, i.e. never requests a rewrite, so the probe walks the same structure
+ * the real rewrite would and changes nothing.
  */
 static bool
 UnsupportedNumericLeafProbe(Oid typeOid, int32 typeMod, int level,

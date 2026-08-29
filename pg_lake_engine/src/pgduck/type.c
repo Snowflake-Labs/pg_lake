@@ -569,6 +569,16 @@ GetFullDuckDBTypeNameForPGType(PGType postgresType, CopyDataFormat format)
 	if (myType == DUCKDB_TYPE_DECIMAL)
 	{
 		/*
+		 * Deliberately not gated on unsupported_numeric_as_double: turning
+		 * the GUC off does not change how an existing table is stored, so the
+		 * exchange type must not change either.
+		 */
+		if (format == DATA_FORMAT_ICEBERG &&
+			IsUnsupportedNumericForIceberg(postgresType.postgresTypeOid,
+										   postgresType.postgresTypeMod))
+			return GetDuckDBTypeName(DUCKDB_TYPE_DOUBLE);
+
+		/*
 		 * Decide the DECIMAL width exactly as the top-level column path does
 		 * (see ChooseDuckDBEngineTypeForWrite), so a numeric nested in a
 		 * struct, list or map is stored the same way as the same numeric in a
