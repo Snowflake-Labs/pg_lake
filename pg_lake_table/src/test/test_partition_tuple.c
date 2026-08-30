@@ -97,19 +97,19 @@ get_partition_tuple(PG_FUNCTION_ARGS)
 		/* corresponding transform for partition field */
 		IcebergPartitionTransform *transform = list_nth(transforms, i);
 
-		AttrNumber	attnum = get_attnum(relationId, transform->columnName);
+		AttrNumber	attnum = get_attnum(relationId, transform->parsedTransform.columnName);
 
 		if (attnum == InvalidAttrNumber)
 		{
 			ereport(ERROR,
 					(errcode(ERRCODE_UNDEFINED_COLUMN),
 					 errmsg("column %s does not exist in relation %u",
-							transform->columnName, relationId)));
+							transform->parsedTransform.columnName, relationId)));
 		}
 
 		PGType		pgType = transform->resultPgType;
 
-		values[i] = PartitionValueToDatum(transform->type, field->value, field->value_length, pgType, &nulls[i]);
+		values[i] = PartitionValueToDatum(transform->parsedTransform.type, field->value, field->value_length, pgType, &nulls[i]);
 	}
 
 	ExecDropSingleTupleTableSlot(slot);
@@ -201,7 +201,7 @@ get_partition_summary(PG_FUNCTION_ARGS)
 																			 partitionSummary->lower_bound_length,
 																			 transform);
 
-				values[2] = AdjustFieldSummaryTextToSpark(lowerBoundText, sourceType, transform->type);
+				values[2] = AdjustFieldSummaryTextToSpark(lowerBoundText, sourceType, transform->parsedTransform.type);
 				nulls[2] = false;
 			}
 			else
@@ -215,7 +215,7 @@ get_partition_summary(PG_FUNCTION_ARGS)
 																			 partitionSummary->upper_bound_length,
 																			 transform);
 
-				values[3] = AdjustFieldSummaryTextToSpark(upperBoundText, sourceType, transform->type);
+				values[3] = AdjustFieldSummaryTextToSpark(upperBoundText, sourceType, transform->parsedTransform.type);
 				nulls[3] = false;
 			}
 			else
@@ -296,12 +296,12 @@ EnsureTupleDescMatchTransforms(TupleDesc tupledesc, List *transforms)
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("attribute %s's type %s in tupledesc does not match transform %s's type %s",
 							attname, format_type_be(column->atttypid),
-							transform->columnName, format_type_be(transformResultPgType.postgresTypeOid))));
+							transform->parsedTransform.columnName, format_type_be(transformResultPgType.postgresTypeOid))));
 
 		if (column->atttypmod != transformResultPgType.postgresTypeMod)
 			ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 							errmsg("attribute %s's typmod %d in tupledesc does not match transform %s's typmod %d",
-								   attname, column->atttypmod, transform->columnName,
+								   attname, column->atttypmod, transform->parsedTransform.columnName,
 								   transformResultPgType.postgresTypeMod)));
 	}
 }
