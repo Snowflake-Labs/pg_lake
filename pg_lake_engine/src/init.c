@@ -47,12 +47,15 @@
 #include "pg_lake/pgduck/iceberg_validation.h"
 #include "pg_lake/util/s3_writer_utils.h"
 #include "utils/guc.h"
+#include "utils/varlena.h"
 
 PG_MODULE_MAGIC;
 
 /* function declarations */
 void		_PG_init(void);
 static bool PgLakeStageLocationCheckHook(char **newvalue, void **extra, GucSource source);
+static bool PgLakeAllowedAzureHostSuffixesCheckHook(char **newvalue, void **extra,
+													GucSource source);
 
 /* pg_lake_engine.enabled setting */
 static bool QueryEngineEnabled = true;
@@ -62,6 +65,9 @@ bool		EnableHeavyAsserts = false;
 
 /* pg_lake.stage_location setting */
 char	   *PgLakeStageLocation = NULL;
+
+/* pg_lake.allowed_azure_host_suffixes setting */
+char	   *PgLakeAllowedAzureHostSuffixes = NULL;
 
 
 /*
@@ -218,6 +224,21 @@ _PG_init(void)
 							   PgLakeStageLocationCheckHook,
 							   NULL, NULL);
 
+	DefineCustomStringVariable(
+							   "pg_lake.allowed_azure_host_suffixes",
+							   gettext_noop("Comma-separated list of host suffixes a user-supplied "
+											"Azure URL may name a storage endpoint under"),
+							   gettext_noop("Azure URLs carry the storage endpoint in the host, so "
+											"an unrestricted host is an SSRF vector.  An empty list "
+											"rejects every URL that names a host; the endpoint from "
+											"the Azure secret is always allowed."),
+							   &PgLakeAllowedAzureHostSuffixes,
+							   DEFAULT_ALLOWED_AZURE_HOST_SUFFIXES,
+							   PGC_SUSET,
+							   GUC_LIST_INPUT,
+							   PgLakeAllowedAzureHostSuffixesCheckHook,
+							   NULL, NULL);
+
 	if (QueryEngineEnabled)
 	{
 		InitializePgLakeEngineIdCache();
@@ -276,4 +297,31 @@ PgLakeStageLocationCheckHook(char **newvalue, void **extra, GucSource source)
 	}
 
 	return true;
+}
+
+
+/*
+ * PgLakeAllowedAzureHostSuffixesCheckHook validates the
+ * pg_lake.allowed_azure_host_suffixes GUC value.  The suffix list is read on
+ * every user-supplied Azure URL, so reject a list that does not parse here
+ * rather than at the first URL that needs it.
+ */
+static bool
+PgLakeAllowedAzureHostSuffixesCheckHook(char **newvalue, void **extra, GucSource source)
+{
+	if (*newvalue == NULL)
+		return true;
+
+	char	   *suffixList = pstrdup(*newvalue);
+	List	   *suffixes = NIL;
+	bool		parsed = SplitIdentifierString(suffixList, ',', &suffixes);
+
+	if (!parsed)
+		GUC_check_errdetail("pg_lake.allowed_azure_host_suffixes must be a "
+							"comma-separated list of host suffixes");
+
+	list_free(suffixes);
+	pfree(suffixList);
+
+	return parsed;
 }

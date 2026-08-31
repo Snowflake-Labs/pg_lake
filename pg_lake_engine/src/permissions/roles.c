@@ -24,8 +24,10 @@
 #include <string.h>
 
 #include "pg_lake/copy/copy_format.h"
+#include "pg_lake/extensions/pg_lake_engine.h"
 #include "pg_lake/permissions/roles.h"
 #include "utils/acl.h"
+#include "utils/varlena.h"
 
 #define lake_read_ROLE_NAME "lake_read"
 #define lake_write_ROLE_NAME "lake_write"
@@ -33,6 +35,10 @@
 
 static void CheckUserSuppliedURL(const char *url);
 static bool IsAllowedQueryParamKey(const char *param, size_t paramLen);
+static void CheckAzureURLHost(const char *url);
+static const char *AzureURLPrefix(const char *url);
+static bool IsAllowedAzureHost(const char *host, size_t hostLen);
+static const char *AllowedAzureHostSuffixes(void);
 
 
 /*
@@ -171,10 +177,8 @@ CheckURLWriteAccess(const char *url)
  * http(s):// URLs are exempt entirely: '?' is a normal query-string
  * separator there and the s3_endpoint trick does not apply.
  *
- * NOTE: this does not cover Azure (abfss://, az://).  Those schemes encode
- * the storage endpoint in the URL host (<account>.<endpoint>), not the
- * query string, so abfss://c@account.<internal-host>/... bypasses this
- * check.  A separate host check is needed to close that.
+ * The Azure schemes carry the endpoint in the URL host rather than the query
+ * string, so they get their own check, see CheckAzureURLHost().
  */
 static void
 CheckUserSuppliedURL(const char *url)
@@ -185,6 +189,8 @@ CheckUserSuppliedURL(const char *url)
 	if (strncmp(url, HTTP_URL_PREFIX, strlen(HTTP_URL_PREFIX)) == 0 ||
 		strncmp(url, HTTPS_URL_PREFIX, strlen(HTTPS_URL_PREFIX)) == 0)
 		return;
+
+	CheckAzureURLHost(url);
 
 	const char *queryStart = strchr(url, '?');
 
@@ -247,4 +253,154 @@ IsAllowedQueryParamKey(const char *param, size_t paramLen)
 	}
 
 	return false;
+}
+
+
+/*
+ * CheckAzureURLHost is the Azure counterpart of the query-parameter check.
+ * DuckDB's azure filesystem derives the request target from the URL host:
+ * az://<account>.<endpoint>/<container>/<path> and
+ * abfss://<container>@<account>.<endpoint>/<path> both send the request to
+ * https://<account>.<endpoint>, so a lake_read user can point the server at
+ * any host and read the response back as query rows.  Require the host to
+ * end in one of the suffixes in pg_lake.allowed_azure_host_suffixes.
+ *
+ * A host with no dot in it is not an endpoint: DuckDB then takes both the
+ * account and the endpoint from the configured secret, which only an admin
+ * can create, so az://<container>/<path> stays allowed.
+ */
+static void
+CheckAzureURLHost(const char *url)
+{
+	const char *prefix = AzureURLPrefix(url);
+
+	if (prefix == NULL)
+		return;
+
+	const char *authority = url + strlen(prefix);
+	const char *pathStart = strchr(authority, '/');
+	size_t		authorityLen = pathStart != NULL ? (size_t) (pathStart - authority)
+		: strlen(authority);
+	const char *host = authority;
+	size_t		hostLen = authorityLen;
+	const char *atSign = memchr(authority, '@', authorityLen);
+
+	if (atSign != NULL)
+	{
+		size_t		containerLen = (size_t) (atSign - authority);
+
+		host = atSign + 1;
+		hostLen = authorityLen - containerLen - 1;
+
+		/*
+		 * Azure container names cannot contain a dot or an '@', and DuckDB's
+		 * URL parser splits the host elsewhere when they do, which is a way
+		 * to reach a host this check would otherwise reject.
+		 */
+		if (memchr(authority, '.', containerLen) != NULL ||
+			memchr(host, '@', hostLen) != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("pg_lake: malformed Azure URL: \"%s\"", url),
+					 errhint("Use %s<container>@<account>.<endpoint>/<path> with a container name that contains no '.' or '@'.",
+							 prefix)));
+	}
+
+	if (memchr(host, '.', hostLen) == NULL)
+		return;
+
+	if (!IsAllowedAzureHost(host, hostLen))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("pg_lake: Azure storage host \"%.*s\" is not permitted",
+						(int) hostLen, host),
+				 errdetail("URL contains a host outside pg_lake.allowed_azure_host_suffixes: \"%s\".", url),
+				 errhint("Use a host under one of: %s, or omit the host to use the endpoint from the Azure secret.",
+						 AllowedAzureHostSuffixes())));
+}
+
+
+/*
+ * AzureURLPrefix returns the Azure scheme prefix url starts with, or NULL if
+ * url is not an Azure URL.  Only the schemes IsSupportedURL() accepts are
+ * listed; abfs:// (plaintext) is rejected before this runs.
+ */
+static const char *
+AzureURLPrefix(const char *url)
+{
+	static const char *const azurePrefixes[] = {
+		AZURE_URL_PREFIX,
+		AZURE_BLOB_URL_PREFIX,
+		AZURE_DLS_URL_PREFIX,
+		NULL,
+	};
+
+	for (const char *const *prefix = azurePrefixes; *prefix; prefix++)
+	{
+		if (strncmp(url, *prefix, strlen(*prefix)) == 0)
+			return *prefix;
+	}
+
+	return NULL;
+}
+
+
+/*
+ * IsAllowedAzureHost returns whether host ends in one of the suffixes in
+ * pg_lake.allowed_azure_host_suffixes.  The match has to fall on a label
+ * boundary and leave at least one character of storage account name, so
+ * neither "evilblob.core.windows.net" nor "blob.core.windows.net" itself
+ * passes for the suffix ".blob.core.windows.net".
+ */
+static bool
+IsAllowedAzureHost(const char *host, size_t hostLen)
+{
+	char	   *suffixList = pstrdup(AllowedAzureHostSuffixes());
+	List	   *suffixes = NIL;
+	ListCell   *suffixCell = NULL;
+	bool		allowed = false;
+
+	if (!SplitIdentifierString(suffixList, ',', &suffixes))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("pg_lake.allowed_azure_host_suffixes does not parse as a "
+						"comma-separated list of host suffixes")));
+
+	foreach(suffixCell, suffixes)
+	{
+		const char *suffix = (const char *) lfirst(suffixCell);
+		size_t		suffixLen = strlen(suffix);
+
+		if (suffixLen == 0 || hostLen <= suffixLen)
+			continue;
+
+		if (pg_strncasecmp(host + hostLen - suffixLen, suffix, suffixLen) != 0)
+			continue;
+
+		/* a suffix given without a leading dot still only matches a label */
+		if (suffix[0] != '.' && host[hostLen - suffixLen - 1] != '.')
+			continue;
+
+		allowed = true;
+		break;
+	}
+
+	list_free(suffixes);
+	pfree(suffixList);
+
+	return allowed;
+}
+
+
+/*
+ * AllowedAzureHostSuffixes returns the configured suffix list, treating an
+ * empty setting as "no Azure host may be named in a URL".
+ */
+static const char *
+AllowedAzureHostSuffixes(void)
+{
+	if (PgLakeAllowedAzureHostSuffixes == NULL)
+		return "";
+
+	return PgLakeAllowedAzureHostSuffixes;
 }
