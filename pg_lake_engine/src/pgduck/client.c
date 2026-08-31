@@ -52,6 +52,8 @@ static bool StartCancelQuery(PGconn *conn);
 static bool FinishCancelQuery(PGconn *conn, TimestampTz endtime, bool consume_input);
 static bool WaitForLastResultWithTimeout(PGconn *conn, TimestampTz endtime,
 										 PGresult **result, bool *timed_out);
+static const char *ClassifyPGDuckErrorMessage(const char *message);
+static void LogPGDuckErrorClass(const char *errorClass);
 
 /* query engine settings */
 char	   *PgduckServerConninfo = DEFAULT_PGDUCK_SERVER_CONNINFO;
@@ -219,6 +221,7 @@ SendQueryToPGDuck(PGDuckConnection * pgDuckConnection, char *query)
 
 	if (sentQuery == 0)
 	{
+		LogPGDuckErrorClass("lost_connection");
 		ereport(ERROR, (errmsg("lost connection to query engine")));
 	}
 }
@@ -375,7 +378,10 @@ ExecuteQueryOnPGDuckConnection(PGDuckConnection * pgDuckConnection,
 #endif
 
 	if (PQsendQuery(conn, query) == 0)
+	{
+		LogPGDuckErrorClass("lost_connection");
 		ereport(ERROR, (errmsg("lost connection to query engine")));
+	}
 
 	return WaitForLastResult(pgDuckConnection);
 }
@@ -426,6 +432,7 @@ WaitForResult(PGDuckConnection * pgDuckConnection)
 				 * Releasing here would risk a double-free or PQfinish() of a
 				 * connection the caller still holds a pointer to.
 				 */
+				LogPGDuckErrorClass("lost_connection");
 				ereport(ERROR, (errmsg("lost connection to query engine")));
 			}
 		}
@@ -500,6 +507,69 @@ CheckPGDuckResult(PGDuckConnection * pgDuckConnection, PGresult *result)
 
 
 /*
+ * PGDUCK_ENGINE_ERROR_PREFIX marks LOG lines that are guaranteed to be
+ * free of customer data, so any log-forwarding or monitoring setup can
+ * safely match on this prefix. The text after the prefix must always come
+ * from a fixed, hand-written literal set (see ClassifyPGDuckErrorMessage)
+ * -- never interpolate DuckDB/query message text, row values, or paths
+ * into it. A new canned class may only be added for text that
+ * pgduck_server already sends unconditionally (verified against
+ * handle_pgsession_error_message in pgsession.c), never text reachable via
+ * customer-influenced substitution.
+ */
+#define PGDUCK_ENGINE_ERROR_PREFIX "pgduck_engine_error: "
+
+/*
+ * ClassifyPGDuckErrorMessage maps a pgduck_server error message to a
+ * PII-free error class. Only matches literal, developer-controlled text
+ * that pgduck_server already sends verbatim for non-fatal, non-query
+ * statuses (see handle_pgsession_error_message in pgsession.c) -- never
+ * matches arbitrary DuckDB/query error text, which may embed customer SQL,
+ * row values, or S3 paths. Anything that doesn't match exactly is "other":
+ * unclassified, but zero raw text leaked.
+ */
+static const char *
+ClassifyPGDuckErrorMessage(const char *message)
+{
+	static const struct
+	{
+		const char *text;
+		const char *errorClass;
+	}			knownMessages[] = {
+		{"Initialization Error", "initialization_error"},
+		{"Session Initialization Error", "session_initialization_error"},
+		{"Unsupported type", "unsupported_type"},
+		{"Out of Memory", "out_of_memory"},
+		{"Unknown Error", "unknown_error"},
+		{"lost connection to query engine", "lost_connection"},
+	};
+
+	if (message != NULL)
+	{
+		for (int i = 0; i < lengthof(knownMessages); i++)
+		{
+			if (strcmp(message, knownMessages[i].text) == 0)
+				return knownMessages[i].errorClass;
+		}
+	}
+
+	return "other";
+}
+
+
+/*
+ * LogPGDuckErrorClass emits a fixed, non-interpolated LOG line carrying only
+ * the error class -- never the underlying message text -- so it is
+ * guaranteed to be free of customer data.
+ */
+static void
+LogPGDuckErrorClass(const char *errorClass)
+{
+	elog(LOG, PGDUCK_ENGINE_ERROR_PREFIX "%s", errorClass);
+}
+
+
+/*
  * PGDuckResultHasError returns true when the result carries an error status.
  * Use this when you need a non-throwing check (e.g. deciding whether to retry
  * before calling ThrowIfPGDuckResultHasError on the final attempt).
@@ -544,6 +614,8 @@ ThrowIfPGDuckResultHasError(PGDuckConnection * pgDuckConnection, PGresult *resul
 	{
 		message = pchomp(PQerrorMessage(pgDuckConnection->conn));
 	}
+
+	LogPGDuckErrorClass(ClassifyPGDuckErrorMessage(message));
 
 	ereport(ERROR, (errcode(sqlState),
 					errmsg("%s", message),
@@ -966,6 +1038,7 @@ SendQueryWithParams(PGDuckConnection * pgduckConn, char *queryString,
 	if (!PQsendQueryParams(conn, queryString, numParams,
 						   NULL, parameterValues, NULL, NULL, 0))
 	{
+		LogPGDuckErrorClass("lost_connection");
 		ereport(ERROR, (errcode(ERRCODE_IO_ERROR),
 						errmsg("lost connection to query engine")));
 	}
