@@ -65,7 +65,7 @@ static HttpResult CurlReturnError(CURL *curl, struct curl_slist *headerList,
 								  CURLcode curlCode, const char *errorMsg);
 static const char *HttpRequestMethodToString(HttpMethod method);
 static char *StrCaseStr(char *haystack, const char *needle);
-static bool IsKeyStartBoundary(char c);
+static bool IsKeyStartBoundary(char precedingChar);
 static char *RedactValueInPlace(char *valueStart);
 
 #define CURL_SETOPT(curl, opt, value) do { \
@@ -673,10 +673,10 @@ StrCaseStr(char *haystack, const char *needle)
 {
 	size_t		needleLength = strlen(needle);
 
-	for (char *p = haystack; *p != '\0'; p++)
+	for (char *cursor = haystack; *cursor != '\0'; cursor++)
 	{
-		if (pg_strncasecmp(p, needle, needleLength) == 0)
-			return p;
+		if (pg_strncasecmp(cursor, needle, needleLength) == 0)
+			return cursor;
 	}
 
 	return NULL;
@@ -684,16 +684,18 @@ StrCaseStr(char *haystack, const char *needle)
 
 
 /*
- * IsKeyStartBoundary returns true if c can immediately precede a key name.
- * Requiring a boundary keeps "token" from matching the tail of an unrelated
- * identifier such as "csrf_token_name", while still recognising both
+ * IsKeyStartBoundary returns true if precedingChar can immediately precede a
+ * key name.  Requiring a boundary keeps "token" from matching the tail of an
+ * unrelated identifier such as "csrf_token_name", while still recognising both
  * "token": (JSON) and &token= (form encoding).
  */
 static bool
-IsKeyStartBoundary(char c)
+IsKeyStartBoundary(char precedingChar)
 {
-	return c == '"' || c == '\'' || c == '{' || c == ',' ||
-		c == '&' || c == '?' || c == ';' || isspace((unsigned char) c);
+	return precedingChar == '"' || precedingChar == '\'' ||
+		precedingChar == '{' || precedingChar == ',' ||
+		precedingChar == '&' || precedingChar == '?' ||
+		precedingChar == ';' || isspace((unsigned char) precedingChar);
 }
 
 
@@ -704,25 +706,25 @@ IsKeyStartBoundary(char c)
 static char *
 RedactValueInPlace(char *valueStart)
 {
-	char	   *v = valueStart;
+	char	   *cursor = valueStart;
 
-	while (*v && isspace((unsigned char) *v))
-		v++;
+	while (*cursor && isspace((unsigned char) *cursor))
+		cursor++;
 
-	if (*v == '"')
+	if (*cursor == '"')
 	{
-		v++;					/* first character of the quoted value */
+		cursor++;				/* first character of the quoted value */
 
-		while (*v && *v != '"')
+		while (*cursor && *cursor != '"')
 		{
 			/*
 			 * Mask a backslash escape as a unit so that a value containing \"
 			 * is not mistaken for the closing quote.
 			 */
-			if (*v == '\\' && v[1] != '\0')
-				*v++ = '*';
+			if (*cursor == '\\' && cursor[1] != '\0')
+				*cursor++ = '*';
 
-			*v++ = '*';
+			*cursor++ = '*';
 		}
 	}
 	else
@@ -734,12 +736,12 @@ RedactValueInPlace(char *valueStart)
 		 * is "Bearer <token>", so stopping at the space would leave the token
 		 * in the clear.
 		 */
-		while (*v && *v != ',' && *v != '}' && *v != '&' &&
-			   *v != '\r' && *v != '\n')
-			*v++ = '*';
+		while (*cursor && *cursor != ',' && *cursor != '}' && *cursor != '&' &&
+			   *cursor != '\r' && *cursor != '\n')
+			*cursor++ = '*';
 	}
 
-	return v;
+	return cursor;
 }
 
 
@@ -761,16 +763,16 @@ RedactSensitiveText(char *input)
 	{
 		const char *key = sensitiveKeys[keyIndex];
 		size_t		keyLength = strlen(key);
-		char	   *p = redacted;
+		char	   *match = redacted;
 
-		while ((p = StrCaseStr(p, key)) != NULL)
+		while ((match = StrCaseStr(match, key)) != NULL)
 		{
-			char	   *afterKey = p + keyLength;
+			char	   *afterKey = match + keyLength;
 
 			/* the match has to be a whole key, not the tail of a longer one */
-			if (p > redacted && !IsKeyStartBoundary(p[-1]))
+			if (match > redacted && !IsKeyStartBoundary(match[-1]))
 			{
-				p = afterKey;
+				match = afterKey;
 				continue;
 			}
 
@@ -785,11 +787,11 @@ RedactSensitiveText(char *input)
 			if (*separator != ':' && *separator != '=')
 			{
 				/* not a key-value pair, skip */
-				p = afterKey;
+				match = afterKey;
 				continue;
 			}
 
-			p = RedactValueInPlace(separator + 1);
+			match = RedactValueInPlace(separator + 1);
 		}
 	}
 
