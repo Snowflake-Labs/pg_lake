@@ -67,6 +67,7 @@ static const char *HttpRequestMethodToString(HttpMethod method);
 static char *StrCaseStr(char *haystack, const char *needle);
 static bool IsKeyStartBoundary(char precedingChar);
 static char *RedactValueInPlace(char *valueStart);
+static void RedactUrlUserinfoInPlace(char *text);
 
 #define CURL_SETOPT(curl, opt, value) do { \
 	curlCode = curl_easy_setopt((curl), (opt), (value)); \
@@ -540,8 +541,14 @@ HttpCommonNoThrows(HttpMethod method, const char *url, const char *postData, con
 			appendStringInfo(postDataInfo, ", body: {%s}", postData);
 		}
 
+		/*
+		 * The URL needs redacting too: oauth_endpoint is used exactly as
+		 * configured, so an IdP that takes the client_secret as a query
+		 * parameter would otherwise put it straight into the trace.
+		 */
 		ereport(INFO, (errmsg("making %s request to URL %s%s",
-							  HttpRequestMethodToString(method), url,
+							  HttpRequestMethodToString(method),
+							  RedactSensitiveText(url),
 							  postDataInfo ? RedactSensitiveText(postDataInfo->data) : "")));
 	}
 
@@ -727,6 +734,46 @@ RedactValueInPlace(char *valueStart)
 			*cursor++ = '*';
 		}
 	}
+	else if (*cursor == '[' || *cursor == '{')
+	{
+		/*
+		 * A composite value such as the storage-credentials array has to be
+		 * masked as one unit, because stopping at the first ',' would leave
+		 * its closing brackets behind and trace as malformed JSON.
+		 */
+		char	   *compositeStart = cursor;
+		int			depth = 0;
+		bool		inString = false;
+
+		while (*cursor != '\0')
+		{
+			if (inString)
+			{
+				if (*cursor == '\\' && cursor[1] != '\0')
+					*cursor++ = '*';
+				else if (*cursor == '"')
+					inString = false;
+			}
+			else if (*cursor == '"')
+				inString = true;
+			else if (*cursor == '[' || *cursor == '{')
+				depth++;
+			else if (*cursor == ']' || *cursor == '}')
+				depth--;
+
+			*cursor++ = '*';
+
+			if (!inString && depth == 0)
+				break;
+		}
+
+		/* re-quote the mask so the traced line stays parseable */
+		if (cursor - compositeStart >= 2)
+		{
+			*compositeStart = '"';
+			cursor[-1] = '"';
+		}
+	}
 	else
 	{
 		/*
@@ -746,18 +793,56 @@ RedactValueInPlace(char *valueStart)
 
 
 /*
+ * RedactUrlUserinfoInPlace masks everything between "://" and the '@' that
+ * closes the authority.  libcurl accepts https://user:password@host/..., a
+ * credential spelling no key=value rule sees.
+ */
+static void
+RedactUrlUserinfoInPlace(char *text)
+{
+	char	   *scheme = text;
+
+	while ((scheme = strstr(scheme, "://")) != NULL)
+	{
+		char	   *authority = scheme + 3;
+		char	   *authorityEnd = authority;
+		char	   *userinfoEnd = authority;
+
+		while (*authorityEnd != '\0' && *authorityEnd != '/' &&
+			   *authorityEnd != '?' && *authorityEnd != '#' &&
+			   !isspace((unsigned char) *authorityEnd))
+			authorityEnd++;
+
+		/* the rightmost '@' is the one that separates userinfo from the host */
+		for (char *cursor = authority; cursor < authorityEnd; cursor++)
+		{
+			if (*cursor == '@')
+				userinfoEnd = cursor;
+		}
+
+		for (char *cursor = authority; cursor < userinfoEnd; cursor++)
+			*cursor = '*';
+
+		scheme = authorityEnd;
+	}
+}
+
+
+/*
  * RedactSensitiveText returns a copy of input in which the value of every
  * sensitiveKeys entry is replaced by '*' characters.  Both "key": value and
  * key=value spellings are recognised.
  */
 char *
-RedactSensitiveText(char *input)
+RedactSensitiveText(const char *input)
 {
 	if (input == NULL)
 		return "NULL";
 
 	/* never touch the original input string, redact a copy */
 	char	   *redacted = pstrdup(input);
+
+	RedactUrlUserinfoInPlace(redacted);
 
 	for (int keyIndex = 0; sensitiveKeys[keyIndex] != NULL; keyIndex++)
 	{

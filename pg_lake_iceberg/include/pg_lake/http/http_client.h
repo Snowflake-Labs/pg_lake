@@ -62,4 +62,4 @@ extern PGDLLEXPORT HttpResult SendHttpRequest(HttpMethod method, const char *url
 extern PGDLLEXPORT HttpResult SendHttpRequestWithRetry(HttpMethod method, const char *url, const char *body,
 													   List *headers, HttpRetryFn retryFn, int maxRetry);
 extern PGDLLEXPORT int LinearBackoffSleepMs(int baseMs, int retryNo);
-extern PGDLLEXPORT char *RedactSensitiveText(char *input);
+extern PGDLLEXPORT char *RedactSensitiveText(const char *input);

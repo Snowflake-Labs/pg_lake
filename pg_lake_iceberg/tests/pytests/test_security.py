@@ -2,6 +2,7 @@
 Security regression tests for pg_lake_iceberg Avro parsing vulnerabilities.
 """
 
+import json
 import tempfile
 import pytest
 from utils_pytest import *
@@ -443,3 +444,75 @@ def test_redaction_covers_form_encoded_credentials(
     redacted = redact('{"token_type": "Bearer", "not_a_password": "plain"}')
     assert "Bearer" in redacted, redacted
     assert "plain" in redacted, redacted
+
+
+def test_redaction_covers_credentials_carried_in_a_url(
+    superuser_conn, extension, create_redact_helper_function
+):
+    """
+    Regression test for: the request trace printed the URL verbatim, so any
+    credential carried in the URL rather than in the body went out in the
+    clear.  oauth_endpoint is used exactly as configured, so an IdP that takes
+    the client_secret as a query parameter, or a URL written with libcurl's
+    https://user:password@host/ form, both reach the trace.
+    """
+    secret = "URL-BORNE-SECRET"
+
+    def redact(text):
+        cursor = superuser_conn.cursor()
+        try:
+            cursor.execute("SELECT lake_iceberg.redact_sensitive_text(%s)", (text,))
+            return cursor.fetchone()[0]
+        finally:
+            cursor.close()
+
+    redacted = redact(f"https://idp.example/v1/tokens?client_secret={secret}&scope=ALL")
+    assert secret not in redacted, redacted
+    # The host and the harmless parameters stay legible.
+    assert "https://idp.example/v1/tokens" in redacted, redacted
+    assert "scope=ALL" in redacted, redacted
+
+    redacted = redact(f"https://client-id:{secret}@catalog.example/v1/config")
+    assert secret not in redacted, redacted
+    assert "client-id" not in redacted, redacted
+    assert "@catalog.example/v1/config" in redacted, redacted
+
+    # A URL without userinfo must survive untouched, otherwise every traced
+    # request line loses its host.
+    plain_url = "https://catalog.example:8181/v1/namespaces"
+    assert redact(plain_url) == plain_url
+
+
+def test_redaction_masks_a_composite_value_as_one_unit(
+    superuser_conn, extension, create_redact_helper_function
+):
+    """
+    A loadTable response carries storage-credentials as an array of objects.
+    Masking only up to the first comma left the closing brackets behind, so the
+    traced line was malformed JSON.
+    """
+    key_id = "AKIAEXAMPLEKEYID"
+    secret = "COMPOSITE-SECRET"
+
+    cursor = superuser_conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT lake_iceberg.redact_sensitive_text(%s)",
+            (
+                '{"storage-credentials": [{"prefix": "s3://bucket", "config": '
+                f'{{"s3.access-key-id": "{key_id}", '
+                f'"s3.secret-access-key": "{secret}"}}}}], "expires": 60}}',
+            ),
+        )
+        redacted = cursor.fetchone()[0]
+    finally:
+        cursor.close()
+
+    assert key_id not in redacted, redacted
+    assert secret not in redacted, redacted
+    # Nothing of the array structure may survive the mask.
+    assert "prefix" not in redacted, redacted
+    assert "}]" not in redacted, redacted
+    # Fields after the array are still readable, and the line still parses.
+    assert '"expires": 60' in redacted, redacted
+    json.loads(redacted)

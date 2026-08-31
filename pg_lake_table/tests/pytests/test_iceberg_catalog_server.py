@@ -941,6 +941,62 @@ def test_create_table_with_server_catalog(
     superuser_conn.commit()
 
 
+def test_trace_redacts_a_credential_in_the_request_url(
+    superuser_conn, s3, extension, with_default_location
+):
+    """The HTTP trace reports the request URL, and oauth_endpoint is used
+    exactly as configured, so an IdP that takes the client_secret as a query
+    parameter must not end up with it in the client's notices."""
+    secret = "url-sentinel-secret"
+    run_command(
+        f"""
+        CREATE SERVER test_trace_url_srv TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://127.0.0.1:1',
+                     rest_auth_type 'OAuth2',
+                     oauth_endpoint
+                         'http://127.0.0.1:1/oauth/tokens?client_secret={secret}')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        """
+        CREATE USER MAPPING FOR PUBLIC SERVER test_trace_url_srv
+            OPTIONS (client_id 'id', client_secret 'body-sentinel-secret')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    try:
+        run_command(
+            "SET pg_lake_iceberg.http_client_trace_traffic TO on", superuser_conn
+        )
+        superuser_conn.notices.clear()
+        # The endpoint is a dead port, so the token POST fails -- but it is
+        # traced before libcurl ever connects, which is all this test needs.
+        run_command(
+            """
+            CREATE TABLE test_trace_url_tbl ()
+                USING iceberg
+                WITH (catalog = 'test_trace_url_srv', read_only = 'true',
+                      catalog_namespace = 'ns', catalog_table_name = 'tbl')
+            """,
+            superuser_conn,
+            raise_error=False,
+        )
+        notices = "\n".join(superuser_conn.notices)
+        superuser_conn.rollback()
+
+        # Without the traced token request the secret assertion is vacuous.
+        assert "/oauth/tokens?client_secret=" in notices, notices
+        assert secret not in notices, notices
+        assert "body-sentinel-secret" not in notices, notices
+    finally:
+        run_command("DROP SERVER IF EXISTS test_trace_url_srv CASCADE", superuser_conn)
+        superuser_conn.commit()
+
+
 def test_create_table_requires_usage_on_catalog_server(
     pg_conn, superuser_conn, s3, extension, with_default_location
 ):
