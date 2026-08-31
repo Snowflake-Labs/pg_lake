@@ -142,11 +142,24 @@ patch_duckdb: $(shell find patches -type f -name '*.patch')
 			git apply --ignore-whitespace "$$patch"; \
 		done;) \
 	done
+	# Out-of-tree extensions are fetched by CMake, which applies the patches it
+	# finds in the DuckDB source tree, so copy ours there before building.
+	for extdir in patches/extensions/*/ ; do \
+		[ -d "$$extdir" ] || continue ; \
+		ext=$$(basename $$extdir) ; \
+		echo "staging patches for extension $$ext" ; \
+		mkdir -p duckdb/.github/patches/extensions/$$ext && \
+		cp $$extdir*.patch duckdb/.github/patches/extensions/$$ext/ ; \
+	done
 
 clean_patches:
 	for patchdir in duckdb duckdb-postgres ; do \
 		(cd $$patchdir && \
 		git checkout -f . ); \
+	done
+	for extdir in patches/extensions/*/ ; do \
+		[ -d "$$extdir" ] || continue ; \
+		rm -rf duckdb/.github/patches/extensions/$$(basename $$extdir) ; \
 	done
 
 format:

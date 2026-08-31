@@ -3,7 +3,6 @@ duckdb_extension_load(httpfs
     GIT_URL https://github.com/duckdb/duckdb-httpfs
     GIT_TAG 13f8a814d41a978c3f19eb1dc76069489652ea6f
     INCLUDE_DIR src/include
-    ADD_PATCHES
 )
 
 duckdb_extension_load(aws
@@ -14,6 +13,7 @@ duckdb_extension_load(aws
 duckdb_extension_load(azure
     GIT_URL https://github.com/duckdb/duckdb-azure
     GIT_TAG 7e1ac3333d946a6bf5b4552722743e03f30a47cd
+    APPLY_PATCHES
 )
 
 # Extension from this repo
