@@ -142,6 +142,14 @@ FileUtils::CopyFile(ClientContext &context,
 
 	int64_t totalBytesWritten = 0L;
 
+	/*
+	 * Taken before the copy so it can be compared against what we actually
+	 * transferred. Zero means the source does not report a size -- an http
+	 * server that sends no Content-Length, for instance -- in which case there
+	 * is nothing to compare against.
+	 */
+	idx_t sourceSize = sourceHandle->GetFileSize();
+
 	if (sourceHandle->file_system.GetName() == "HTTPFileSystem")
 	{
 		/* when opening http(s), we go through CachedFileSystem */
@@ -199,6 +207,31 @@ FileUtils::CopyFile(ClientContext &context,
 		{
 			totalBytesWritten += destinationHandle->Write(buffer.get(), bytesRead);
 		}
+	}
+
+	/*
+	 * A transfer that reports success is not the same as one that delivered
+	 * everything: a retried http/s3 body can leave a partial attempt followed by
+	 * a complete one, and the generic loop stops at the first zero-length read.
+	 * Since the result may be renamed into the cache, and nothing revalidates a
+	 * cache entry afterwards, either shape would be served from then on.
+	 *
+	 * Checked before finalizing, so nothing bad is published: a cache fill
+	 * leaves its staging file for the sweep in ManageCache, and an upload never
+	 * appears because Sync() is what completes the multipart upload.
+	 */
+	if (sourceSize > 0 && (idx_t) totalBytesWritten != sourceSize)
+	{
+		/* a cache fill asks for nocache<url>, which is no use to the reader */
+		string reportedPath =
+			StringUtil::StartsWith(sourcePath, NO_CACHE_PREFIX)
+			? sourcePath.substr(NO_CACHE_PREFIX.length())
+			: sourcePath;
+
+		throw IOException("Copied %llu bytes of '%s' but it is %llu bytes; the "
+						  "transfer was incomplete or was retried",
+						  (unsigned long long) totalBytesWritten, reportedPath,
+						  (unsigned long long) sourceSize);
 	}
 
 	destinationHandle->Sync();

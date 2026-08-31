@@ -1,8 +1,10 @@
 import os
 import pytest
+import socket
 import threading
 import time
 from decimal import Decimal
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from utils_pytest import *
 
 CACHE_FILE_PREFIX = "pgl-cache."
@@ -86,6 +88,236 @@ def test_cache_rejects_non_regular_file(s3, pgduck_conn, tmp_path):
     assert cached_path.is_file() and not cached_path.is_symlink()
     assert cached_path.stat().st_size == real_size
     assert (cached_path.stat().st_mode & 0o777) == 0o600
+
+    run_query(f"CALL pg_lake_uncache_file('{url}');", pgduck_conn)
+    pgduck_conn.rollback()
+
+
+TRUNCATED_BODY_SIZE = 64 * 1024
+TRUNCATED_BODY_SENT = 4 * 1024
+
+
+@pytest.fixture(scope="module")
+def flaky_http_server():
+    """Truncate the first GET of the body, then serve it in full.
+
+    This is the case that corrupts silently. A body that is *always* short ends
+    up failing anyway, because HTTPUtil::SendRequest runs out of retries and
+    throws -- so it proves nothing about the download path. Truncating only the
+    first attempt lets the retry succeed, and a successful retry is what leaves
+    the partial attempt and the complete one both in the output file.
+
+    The handler keeps its own state so that a re-run does not inherit a counter.
+    """
+
+    state = {"gets": 0}
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def _headers(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(TRUNCATED_BODY_SIZE))
+            self.send_header("Accept-Ranges", "bytes")
+            self.end_headers()
+
+        def do_HEAD(self):
+            self._headers()
+
+        def do_GET(self):
+            state["gets"] += 1
+            first = state["gets"] == 1
+            self._headers()
+            self.wfile.write(
+                b"x" * (TRUNCATED_BODY_SENT if first else TRUNCATED_BODY_SIZE)
+            )
+            self.wfile.flush()
+            if first:
+                self.close_connection = True
+
+        def log_message(self, *args):
+            pass
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+
+    server = HTTPServer(("127.0.0.1", port), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    yield port, state
+
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=10)
+
+
+def test_retried_download_is_not_cached(flaky_http_server, pgduck_conn):
+    """A download whose retry succeeded must still match the object.
+
+    HTTPUtil::SendRequest retries a request error by re-running the content
+    handler from the start of the body, and the handler appends to an output
+    file that still holds whatever the previous attempt delivered. So a retry
+    that succeeds leaves a partial copy followed by a complete one: longer than
+    the object, with no exception, and reported as success.
+
+    Nothing revalidates a finalized cache entry against object storage, so that
+    entry would be served for every later read of the URL. For an Avro manifest
+    the second copy begins exactly where the reader looks for the next block
+    header, which is the shape that produces the corruption in #550.
+    """
+    port, state = flaky_http_server
+    url = f"http://127.0.0.1:{port}/flaky.bin"
+    cached_path = Path(
+        f"{server_params.PGDUCK_CACHE_DIR}/http/127.0.0.1:{port}"
+        f"/{CACHE_FILE_PREFIX}flaky.bin"
+    )
+    stage_path = Path(f"{cached_path}.pgl-stage")
+
+    error = run_query(
+        f"CALL pg_lake_cache_file('{url}');", pgduck_conn, raise_error=False
+    )
+    pgduck_conn.rollback()
+
+    # Guards against the test passing for the wrong reason: the request has to
+    # have been retried, otherwise this is just a plain failed download.
+    assert state["gets"] >= 2, (
+        f"the download was not retried ({state['gets']} GET(s)), so the "
+        f"accumulation this test is about never happened"
+    )
+
+    cached_size = cached_path.stat().st_size if cached_path.exists() else None
+    assert isinstance(error, str), (
+        f"a retried download was cached as {cached_size} bytes for a "
+        f"{TRUNCATED_BODY_SIZE}-byte object"
+    )
+    assert not cached_path.exists(), f"over-long download was published: {cached_path}"
+
+    # The rejected download stays staged, which is deliberate: the sweep at the
+    # top of ManageCache reclaims it. Nothing races us for it here -- this suite
+    # talks to pgduck_server directly, so there is no cache worker running, and
+    # unwinding out of CacheFile released the lock the sweep needs.
+    assert stage_path.exists(), (
+        f"expected the rejected download to stay staged for the sweep to "
+        f"reclaim: {stage_path}"
+    )
+
+    # A budget far above the cache contents, so this only exercises the staging
+    # sweep and does not evict anything another test cached.
+    run_command("SELECT count(*) FROM pg_lake_manage_cache(21474836480);", pgduck_conn)
+    pgduck_conn.rollback()
+
+    assert (
+        not stage_path.exists()
+    ), f"sweep did not reclaim the staging file: {stage_path}"
+
+
+def test_azure_download_is_length_checked(azure, pgduck_conn):
+    """Azure goes through the same length check, and is not tripped up by it.
+
+    The check lives in FileUtils::CopyFile rather than in the http/s3 download
+    helper, because CopyFile dispatches on the file system name and only
+    HTTPFileSystem and RegionAwareS3FileSystem use that helper. Azure registers
+    as AzureBlobStorageFileSystem / AzureDfsStorageFileSystem, so it takes the
+    generic Read/Write loop and would otherwise be left unverified.
+
+    A truncated Azure body cannot be provoked here -- azurite serves what it is
+    given -- so the truncation case is covered by the http test above, where the
+    server is ours. What this pins down is that the generic branch is subject to
+    the check and that a healthy transfer satisfies it, byte for byte, which is
+    what a wrong expected-size would break.
+    """
+    key = "test_azure_download_is_length_checked/data.csv"
+    url = f"az://{TEST_BUCKET}/{key}"
+    cached_path = Path(
+        f"{server_params.PGDUCK_CACHE_DIR}/az/{TEST_BUCKET}"
+        f"/test_azure_download_is_length_checked/{CACHE_FILE_PREFIX}data.csv"
+    )
+
+    run_command(
+        f"COPY (SELECT * FROM generate_series(1,5000)) TO '{url}' WITH (header false);",
+        pgduck_conn,
+    )
+
+    remote_size = pg_lake_file_size(f"nocache{url}", pgduck_conn)
+
+    # Writing the blob populated the cache on the way out, so drop that entry
+    # first. Without this, pg_lake_cache_file finds the file already cached and
+    # returns without copying anything, and the check would never be reached.
+    run_query(f"CALL pg_lake_uncache_file('{url}');", pgduck_conn)
+    assert not cached_path.exists(), "cache entry survived the uncache"
+
+    run_command(f"CALL pg_lake_cache_file('{url}');", pgduck_conn)
+
+    assert cached_path.exists(), f"azure blob was not cached: {cached_path}"
+    assert local_file_size(str(cached_path)) == remote_size, (
+        f"cache entry is {local_file_size(str(cached_path))} bytes for a "
+        f"{remote_size}-byte blob"
+    )
+
+    run_query(f"CALL pg_lake_uncache_file('{url}');", pgduck_conn)
+    pgduck_conn.rollback()
+
+
+@pytest.mark.skipif(
+    os.geteuid() == 0,
+    reason="mode 0 does not deny root, so the cache open succeeds and this "
+    "would pass with or without the fallback",
+)
+def test_unusable_cache_file_falls_back_to_remote(s3, pgduck_conn):
+    """A cache entry that cannot be opened must not fail the read.
+
+    OpenFile() decides to read from the cache with IsOwnedByCurrentUser() and
+    then opens the file, and nothing holds the per-path cache lock across those
+    two steps. So the entry can stop being usable in between -- cache management
+    evicting it under pressure is the ordinary case, and the check only
+    establishes that a regular file owned by us was there a moment ago. The open
+    used to propagate, killing the statement with a bare
+    "IO Error: Cannot open file <cache path>" for an object that is still
+    perfectly readable in object storage.
+
+    A cache file owned by us but with no read permission reaches the same open
+    failure deterministically, without having to win a race: lstat() still
+    reports a regular file owned by the effective UID, so the cache branch is
+    taken, and only then does the open fail.
+    """
+    key = "test_unusable_cache_file_falls_back_to_remote/data.csv"
+    url = f"s3://{TEST_BUCKET}/{key}"
+    cached_path = Path(
+        f"{server_params.PGDUCK_CACHE_DIR}/s3/{TEST_BUCKET}"
+        f"/test_unusable_cache_file_falls_back_to_remote/{CACHE_FILE_PREFIX}data.csv"
+    )
+
+    run_command(
+        f"COPY (SELECT * FROM generate_series(1,10)) TO '{url}' WITH (header false);",
+        pgduck_conn,
+    )
+    run_command(f"CALL pg_lake_cache_file('{url}');", pgduck_conn)
+    assert cached_path.is_file(), "file was not cached, nothing to exercise"
+
+    remote_size = pg_lake_file_size(f"nocache{url}", pgduck_conn)
+    original_mode = cached_path.stat().st_mode & 0o777
+
+    cached_path.chmod(0o000)
+    try:
+        result = run_query(
+            f"SELECT octet_length(content) AS size FROM read_blob('{url}')",
+            pgduck_conn,
+            raise_error=False,
+        )
+    finally:
+        cached_path.chmod(original_mode)
+
+    # run_query hands back the error string rather than rows when it fails.
+    assert not isinstance(result, str), (
+        f"an unusable cache entry failed the read instead of falling back to "
+        f"object storage: {result}"
+    )
+    assert int(result[0]["size"]) == remote_size, (
+        f"fell back but returned {result[0]['size']} bytes for a "
+        f"{remote_size}-byte object"
+    )
 
     run_query(f"CALL pg_lake_uncache_file('{url}');", pgduck_conn)
     pgduck_conn.rollback()
@@ -943,6 +1175,69 @@ def test_cache_on_write_abort_removes_stage_file(s3, pgduck_conn):
         # After the abort neither the finalized file nor the staging file remain.
         assert not cached_path.exists(), f"{ext}: unexpected finalized cache file"
         assert not stage_path.exists(), f"{ext}: orphaned staging file not cleaned up"
+
+
+def test_cache_on_write_truncates_orphaned_stage_file(s3, pgduck_conn):
+    """Reusing a .pgl-stage file left by a crash must truncate it first.
+
+    ~CachingFSFileHandle() removes the staging file on a caught abort, but a
+    hard crash or kill skips the destructor entirely and leaves one on disk at a
+    fully deterministic path. Opening that file with O_CREAT alone writes the new
+    contents over its prefix and leaves whatever of the older, longer file
+    extends past them; FileSync()/Close() then renames the hybrid in as a
+    finalized cache entry. Nothing revalidates a finalized entry against object
+    storage, so every later read of that URL gets the wrong bytes until it is
+    evicted -- for an Avro manifest, a trailing fragment past the final sync
+    marker is read as another block header.
+
+    The orphan is written directly here because that is precisely the on-disk
+    state a crash leaves behind, and the one state the destructor cannot cover.
+    """
+    test_dir = Path(
+        f"{server_params.PGDUCK_CACHE_DIR}/s3/{TEST_BUCKET}"
+        f"/test_cache_on_write_truncates_orphaned_stage_file"
+    )
+
+    # A small limit left over from another test would disable write-through
+    # caching, so pin it back to the 1GB default.
+    run_command(
+        "SET GLOBAL pg_lake_cache_on_write_max_size TO '1073741824';", pgduck_conn
+    )
+
+    # Far larger than the file about to be written, so a surviving tail is
+    # unmistakable rather than a handful of bytes.
+    filler = b"ORPHAN.." * (128 * 1024)
+
+    for ext in ("parquet", "csv"):
+        url = (
+            f"s3://{TEST_BUCKET}"
+            f"/test_cache_on_write_truncates_orphaned_stage_file/data.{ext}"
+        )
+        cached_path = test_dir / f"{CACHE_FILE_PREFIX}data.{ext}"
+        stage_path = test_dir / f"{CACHE_FILE_PREFIX}data.{ext}.pgl-stage"
+
+        test_dir.mkdir(parents=True, exist_ok=True)
+        cached_path.unlink(missing_ok=True)
+        stage_path.write_bytes(filler)
+
+        run_command(
+            f"COPY (SELECT s AS s, s * 2 AS d FROM generate_series(1, 100) g(s)) "
+            f"TO '{url}' (format '{ext}');",
+            pgduck_conn,
+        )
+
+        assert cached_path.exists(), f"{ext}: write-through cache file is missing"
+        assert not stage_path.exists(), f"{ext}: staging file was not finalized"
+
+        cached_bytes = cached_path.read_bytes()
+        assert b"ORPHAN" not in cached_bytes, (
+            f"{ext}: content of the orphaned staging file survived into the "
+            f"finalized cache entry ({len(cached_bytes)} bytes cached)"
+        )
+        assert len(cached_bytes) == pg_lake_file_size(f"nocache{url}", pgduck_conn), (
+            f"{ext}: finalized cache entry ({len(cached_bytes)} bytes) disagrees "
+            f"with the object in storage"
+        )
 
 
 # we cannot cache the same file concurrently

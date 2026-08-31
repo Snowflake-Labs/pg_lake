@@ -135,7 +135,18 @@ WriteStringToFile(char *content, FILE *file)
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("failed to write to file")));
 	}
-	fflush(file);
+
+	/*
+	 * fwrite may have only filled the stdio buffer, so the flush is where a
+	 * write error surfaces. ferror() is sticky, so it also reports one whose
+	 * flush already consumed the buffer.
+	 */
+	if (fflush(file) != 0 || ferror(file))
+	{
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("failed to write to file: %m")));
+	}
 }
 
 
@@ -155,5 +166,10 @@ WriteStringToFilePath(char *content, char *localFilePath)
 	}
 
 	WriteStringToFile(content, localFile);
-	FreeFile(localFile);
+
+	/* the final fclose() can still fail, e.g. out of space */
+	if (FreeFile(localFile) != 0)
+		ereport(ERROR, (errcode_for_file_access(),
+						errmsg("could not close file \"%s\": %m",
+							   localFilePath)));
 }
