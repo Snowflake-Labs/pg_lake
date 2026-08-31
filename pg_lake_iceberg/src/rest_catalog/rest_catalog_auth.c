@@ -421,13 +421,13 @@ FetchOAuth2AccessToken(RestCatalogOptions * opts, char **accessToken, int *expir
 	headers = lappend(headers, "Content-Type: application/x-www-form-urlencoded");
 
 	/*
-	 * Pass NULL opts so SendRequestToRestCatalog skips the 419 token-refresh
-	 * retry branch.  Otherwise a 419 here would call
+	 * This request is the refresh, so it is sent as one that cannot be
+	 * retried by refreshing: otherwise a 419 here would call
 	 * GetRestCatalogAuthorization -> FetchOAuth2AccessToken ->
-	 * SendRequestToRestCatalog in an infinite loop.
+	 * SendRestCatalogRequest in an infinite loop.
 	 */
-	HttpResult	httpResponse = SendRequestToRestCatalog(NULL, HTTP_POST, accessTokenUrl,
-														body.data, headers);
+	HttpResult	httpResponse = SendCredentialRequestToRestCatalog(opts, accessTokenUrl,
+																  body.data, headers);
 
 	if (httpResponse.status != 200)
 		ereport(ERROR,

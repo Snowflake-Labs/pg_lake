@@ -52,10 +52,32 @@ extern bool HttpClientTraceTraffic;
  * certificate is presented.  Catalogs that sit behind an mTLS edge need
  * these even when the request itself is authorized by a bearer token,
  * because the certificate governs admission rather than identity.
+ *
+ * The settings describe the deployment, not any one catalog, so a request
+ * states whether it is addressed to that edge (see HttpTlsClientAuth) rather
+ * than every request carrying them.
  */
 extern char *HttpClientTlsCaFile;
 extern char *HttpClientTlsCertFile;
 extern char *HttpClientTlsKeyFile;
+
+/*
+ * Whether a request may present the deployment's client certificate.
+ *
+ * Only requests addressed to the edge that issued it may, and the certificate
+ * authority above travels with it: it identifies that edge and replaces the
+ * default bundle outright, so a request carrying it cannot verify a catalog
+ * with an ordinary publicly-signed certificate.  Sending them separately gets
+ * this wrong in both directions, which is why one value governs both.
+ *
+ * The default is to send neither, so a catalog reached some new way does not
+ * silently inherit them.
+ */
+typedef enum HttpTlsClientAuth
+{
+	HTTP_TLS_NO_CLIENT_CERT = 0,
+	HTTP_TLS_DEPLOYMENT_CLIENT_CERT
+}			HttpTlsClientAuth;
 
 extern bool CheckHttpClientTlsFile(char **newval, void **extra, GucSource source);
 
@@ -73,7 +95,8 @@ extern PGDLLEXPORT HttpResult HttpHead(const char *url, List *headers);
 extern PGDLLEXPORT HttpResult HttpPost(const char *url, const char *body, List *headers);
 extern PGDLLEXPORT HttpResult HttpDelete(const char *url, List *headers);
 extern PGDLLEXPORT HttpResult HttpPut(const char *url, const char *body, List *headers);
-extern PGDLLEXPORT HttpResult SendHttpRequest(HttpMethod method, const char *url, const char *body, List *headers);
+extern PGDLLEXPORT HttpResult SendHttpRequest(HttpMethod method, const char *url, const char *body, List *headers,
+											  HttpTlsClientAuth clientAuth);
 extern PGDLLEXPORT HttpResult SendHttpRequestWithRetry(HttpMethod method, const char *url, const char *body,
 													   List *headers, HttpRetryFn retryFn, int maxRetry);
 extern PGDLLEXPORT int LinearBackoffSleepMs(int baseMs, int retryNo);

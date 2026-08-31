@@ -188,8 +188,9 @@ _PG_init(void)
 
 
 	DefineCustomStringVariable("pg_lake_iceberg.tls_ca_file",
-							   gettext_noop("Path to the CA bundle used to verify REST "
-											"catalog servers. Empty uses the system bundle."),
+							   gettext_noop("Path to the CA bundle used to verify catalogs "
+											"reached with rest_auth_type 'horizon'. Empty, "
+											"and every other catalog, uses the system bundle."),
 							   NULL,
 							   &HttpClientTlsCaFile,
 							   "",
@@ -198,8 +199,9 @@ _PG_init(void)
 							   CheckHttpClientTlsFile, NULL, NULL);
 
 	DefineCustomStringVariable("pg_lake_iceberg.tls_cert_file",
-							   gettext_noop("Path to the client certificate presented to REST "
-											"catalog servers that require mutual TLS."),
+							   gettext_noop("Path to the client certificate presented to catalogs "
+											"reached with rest_auth_type 'horizon'. It is not "
+											"presented to any other catalog."),
 							   NULL,
 							   &HttpClientTlsCertFile,
 							   "",

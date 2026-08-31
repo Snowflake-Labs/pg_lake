@@ -47,7 +47,7 @@
 
 
 static HttpResult HttpCommonNoThrows(HttpMethod method, const char *url, const char *postData,
-									 const List *headers);
+									 const List *headers, HttpTlsClientAuth clientAuth);
 static bool CheckMinCurlVersion(const curl_version_info_data *versionInfo);
 static size_t CurlResponseBodyWriteCallback(void *ptr, size_t size, size_t nmemb, void *userdata);
 static size_t CurlResponseHeaderWriteCallback(void *ptr, size_t size, size_t nmemb, void *userdata);
@@ -60,7 +60,8 @@ static void CurlLogError(CURLcode curlCode, const char *error_buffer);
 static CURLcode CurlGloballyInitIfNotInitialized(void);
 static CURLcode CurlSetErrorBuffer(CURL *curl, char **errorBuffer);
 static CURLcode CurlSetOptions(CURL *curl, const char *url, HttpMethod method,
-							   const char *postData, HttpResult * httpResult);
+							   const char *postData, HttpResult * httpResult,
+							   HttpTlsClientAuth clientAuth);
 static CURLcode CurlSetHeaders(CURL *curl, const List *headers, struct curl_slist **headerList);
 static void CurlGlobalCleanup(int code, Datum arg);
 static void CurlCleanup(CURL *curl, struct curl_slist *headerList);
@@ -90,12 +91,10 @@ char	   *HttpClientTlsKeyFile = "";
 /*
  * CheckHttpClientTlsFile rejects a TLS path the server cannot read.
  *
- * These settings are global while catalogs are not, and curl loads the files
- * when it builds the TLS context rather than when a server asks for a
- * certificate.  An unreadable path therefore fails every REST catalog,
- * including those not using mutual TLS at all, and it fails them on the next
- * request rather than here.  Checking at assignment keeps a typo from taking
- * out catalogs that have nothing to do with it.
+ * curl loads these files when it builds the TLS context rather than when a
+ * server asks for a certificate, so an unreadable path fails every catalog
+ * that presents them, and fails it on some later request rather than here.
+ * Checking at assignment reports the typo where it was made.
  *
  * Readability now is not a promise for later -- the file can be replaced
  * during a rotation -- so the request path still reports what curl says.
@@ -169,7 +168,8 @@ CurlSetErrorBuffer(CURL *curl, char **errorBuffer)
  */
 static CURLcode
 CurlSetOptions(CURL *curl, const char *url, HttpMethod method,
-			   const char *postData, HttpResult * res)
+			   const char *postData, HttpResult * res,
+			   HttpTlsClientAuth clientAuth)
 {
 	ereport(DEBUG4, (errmsg("setting libcurl options")));
 
@@ -189,19 +189,22 @@ CurlSetOptions(CURL *curl, const char *url, HttpMethod method,
 	CURL_SETOPT(curl, CURLOPT_TIMEOUT_MS, TOTAL_TIMEOUT_MS);
 
 	/*
-	 * Client certificate material, when configured.  Each option is set only
-	 * when a path was supplied: CURLOPT_CAINFO replaces the default CA bundle
-	 * outright, so passing an empty path here would leave the handle unable
-	 * to verify any peer.
+	 * Client certificate material, for requests addressed to the edge that
+	 * issued it.  Each option is set only when a path was supplied:
+	 * CURLOPT_CAINFO replaces the default CA bundle outright, so passing an
+	 * empty path here would leave the handle unable to verify any peer.
 	 */
-	if (HttpClientTlsCaFile != NULL && HttpClientTlsCaFile[0] != '\0')
-		CURL_SETOPT(curl, CURLOPT_CAINFO, HttpClientTlsCaFile);
+	if (clientAuth == HTTP_TLS_DEPLOYMENT_CLIENT_CERT)
+	{
+		if (HttpClientTlsCaFile != NULL && HttpClientTlsCaFile[0] != '\0')
+			CURL_SETOPT(curl, CURLOPT_CAINFO, HttpClientTlsCaFile);
 
-	if (HttpClientTlsCertFile != NULL && HttpClientTlsCertFile[0] != '\0')
-		CURL_SETOPT(curl, CURLOPT_SSLCERT, HttpClientTlsCertFile);
+		if (HttpClientTlsCertFile != NULL && HttpClientTlsCertFile[0] != '\0')
+			CURL_SETOPT(curl, CURLOPT_SSLCERT, HttpClientTlsCertFile);
 
-	if (HttpClientTlsKeyFile != NULL && HttpClientTlsKeyFile[0] != '\0')
-		CURL_SETOPT(curl, CURLOPT_SSLKEY, HttpClientTlsKeyFile);
+		if (HttpClientTlsKeyFile != NULL && HttpClientTlsKeyFile[0] != '\0')
+			CURL_SETOPT(curl, CURLOPT_SSLKEY, HttpClientTlsKeyFile);
+	}
 
 	/*
 	 * These match libcurl's defaults, and are stated outright because peer
@@ -344,7 +347,7 @@ SendHttpRequestWithRetry(HttpMethod method, const char *url, const char *body,
 
 	for (int retryNo = 1; retryNo <= maxRetry; retryNo++)
 	{
-		result = SendHttpRequest(method, url, body, headers);
+		result = SendHttpRequest(method, url, body, headers, HTTP_TLS_NO_CLIENT_CERT);
 
 		if (retryFn != NULL && retryFn(result.status, maxRetry, retryNo))
 			continue;
@@ -357,39 +360,12 @@ SendHttpRequestWithRetry(HttpMethod method, const char *url, const char *body,
 
 
 HttpResult
-SendHttpRequest(HttpMethod method, const char *url, const char *body, List *headers)
+SendHttpRequest(HttpMethod method, const char *url, const char *body, List *headers,
+				HttpTlsClientAuth clientAuth)
 {
-	HttpResult	result;
+	Assert(body == NULL || method == HTTP_POST || method == HTTP_PUT);
 
-	if (method == HTTP_GET)
-	{
-		Assert(body == NULL);
-		result = HttpGet(url, headers);
-	}
-	else if (method == HTTP_HEAD)
-	{
-		Assert(body == NULL);
-		result = HttpHead(url, headers);
-	}
-	else if (method == HTTP_POST)
-	{
-		result = HttpPost(url, body, headers);
-	}
-	else if (method == HTTP_PUT)
-	{
-		result = HttpPut(url, body, headers);
-	}
-	else if (method == HTTP_DELETE)
-	{
-		Assert(body == NULL);
-		result = HttpDelete(url, headers);
-	}
-	else
-	{
-		pg_unreachable();
-	}
-
-	return result;
+	return HttpCommonNoThrows(method, url, body, headers, clientAuth);
 }
 
 
@@ -417,18 +393,21 @@ LinearBackoffSleepMs(int baseMs, int retryNo)
 /*
  * HttpGet performs a simple HTTP GET request.
  * Returns an HttpResult with status, body, and headers.
+ *
+ * This and the other verb-named entry points below present no client
+ * certificate.  Use SendHttpRequest to reach a host that asks for one.
  */
 HttpResult
 HttpGet(const char *url, List *headers)
 {
-	return HttpCommonNoThrows(HTTP_GET, url, NULL, headers);
+	return HttpCommonNoThrows(HTTP_GET, url, NULL, headers, HTTP_TLS_NO_CLIENT_CERT);
 }
 
 HttpResult
 HttpHead(const char *url, List *headers)
 {
 	/* HEAD never carries a body */
-	return HttpCommonNoThrows(HTTP_HEAD, url, NULL, headers);
+	return HttpCommonNoThrows(HTTP_HEAD, url, NULL, headers, HTTP_TLS_NO_CLIENT_CERT);
 }
 
 /*
@@ -438,21 +417,21 @@ HttpHead(const char *url, List *headers)
 HttpResult
 HttpPost(const char *url, const char *body, List *headers)
 {
-	return HttpCommonNoThrows(HTTP_POST, url, body, headers);
+	return HttpCommonNoThrows(HTTP_POST, url, body, headers, HTTP_TLS_NO_CLIENT_CERT);
 }
 
 
 HttpResult
 HttpPut(const char *url, const char *body, List *headers)
 {
-	return HttpCommonNoThrows(HTTP_PUT, url, body, headers);
+	return HttpCommonNoThrows(HTTP_PUT, url, body, headers, HTTP_TLS_NO_CLIENT_CERT);
 }
 
 
 HttpResult
 HttpDelete(const char *url, List *headers)
 {
-	return HttpCommonNoThrows(HTTP_DELETE, url, NULL, headers);
+	return HttpCommonNoThrows(HTTP_DELETE, url, NULL, headers, HTTP_TLS_NO_CLIENT_CERT);
 }
 
 
@@ -582,7 +561,8 @@ CheckMinCurlVersion(const curl_version_info_data *versionInfo)
  * post-commit hook.
  */
 static HttpResult
-HttpCommonNoThrows(HttpMethod method, const char *url, const char *postData, const List *headers)
+HttpCommonNoThrows(HttpMethod method, const char *url, const char *postData, const List *headers,
+				   HttpTlsClientAuth clientAuth)
 {
 	CURL	   *curl = NULL;
 	struct curl_slist *curlHeaders = NULL;
@@ -631,7 +611,7 @@ HttpCommonNoThrows(HttpMethod method, const char *url, const char *postData, con
 	/* set curl options */
 	HttpResult	res = {0};
 
-	curlCode = CurlSetOptions(curl, url, method, postData, &res);
+	curlCode = CurlSetOptions(curl, url, method, postData, &res, clientAuth);
 
 	if (curlCode != CURLE_OK)
 		return CurlReturnError(curl, curlHeaders, curlCode, curlErrorBuffer);

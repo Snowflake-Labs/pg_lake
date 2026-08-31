@@ -127,7 +127,7 @@ ClassifyRestCatalogRequestRetry(long status, int maxRetry, int retryNo,
 
 
 /*
- * SendRequestToRestCatalog sends an HTTP request to the rest catalog
+ * SendRestCatalogRequest sends an HTTP request to the rest catalog
  * with retry logic for retriable errors, attempting up to
  * MAX_HTTP_RETRY_FOR_REST_CATALOG times.
  *
@@ -136,29 +136,37 @@ ClassifyRestCatalogRequestRetry(long status, int maxRetry, int retryNo,
  * so normally we wouldn't want any errors to happen, but then
  * Postgres already prevents post-commit backends to receive signals.
  *
- * When opts is non-NULL the retry callback can force-refresh the
- * credential and patch the Authorization header on a 419 or 401
- * response.  Pass opts = NULL for the credential request itself, both to
- * avoid recursion and so that its own 401 is reported as the
- * authentication failure it is.
+ * canRefreshCredential is false only for the credential request itself
+ * (see SendCredentialRequestToRestCatalog), both to avoid recursion and so
+ * that its own 401 is reported as the authentication failure it is.
  */
-HttpResult
-SendRequestToRestCatalog(RestCatalogOptions * opts, HttpMethod method, const char *url,
-						 const char *body, List *headers)
+static HttpResult
+SendRestCatalogRequest(RestCatalogOptions * opts, bool canRefreshCredential,
+					   HttpMethod method, const char *url,
+					   const char *body, List *headers)
 {
 	const int	MAX_HTTP_RETRY_FOR_REST_CATALOG = 3;
 
-	bool		authRefreshable = (opts != NULL);
 	bool		authAlreadyRefreshed = false;
+
+	/*
+	 * Only a catalog reached through the deployment's own edge is addressed
+	 * by the certificate that edge issued.  A third-party catalog gets an
+	 * ordinary TLS handshake, so it neither sees an identity that means
+	 * nothing to it nor has to be verified against a private authority.
+	 */
+	HttpTlsClientAuth clientAuth =
+		opts->authType == REST_CATALOG_AUTH_TYPE_HORIZON ?
+		HTTP_TLS_DEPLOYMENT_CLIENT_CERT : HTTP_TLS_NO_CLIENT_CERT;
 
 	HttpResult	result;
 
 	for (int retryNo = 1; retryNo <= MAX_HTTP_RETRY_FOR_REST_CATALOG; retryNo++)
 	{
-		result = SendHttpRequest(method, url, body, headers);
+		result = SendHttpRequest(method, url, body, headers, clientAuth);
 
 		switch (ClassifyRestCatalogRequestRetry(result.status, MAX_HTTP_RETRY_FOR_REST_CATALOG,
-												retryNo, authRefreshable, authAlreadyRefreshed))
+												retryNo, canRefreshCredential, authAlreadyRefreshed))
 		{
 			case REST_CATALOG_RETRY_BACKOFF_SHORT:
 				LightSleep(LinearBackoffSleepMs(500, retryNo));
@@ -189,6 +197,35 @@ SendRequestToRestCatalog(RestCatalogOptions * opts, HttpMethod method, const cha
 	}
 
 	return result;
+}
+
+
+/*
+ * SendRequestToRestCatalog sends a request carrying the catalog's current
+ * credential, which it will refresh and retry with once if the catalog
+ * rejects it as expired.
+ */
+HttpResult
+SendRequestToRestCatalog(RestCatalogOptions * opts, HttpMethod method, const char *url,
+						 const char *body, List *headers)
+{
+	bool		canRefreshCredential = true;
+
+	return SendRestCatalogRequest(opts, canRefreshCredential, method, url, body, headers);
+}
+
+
+/*
+ * SendCredentialRequestToRestCatalog sends the request that obtains the
+ * credential the requests above carry.
+ */
+HttpResult
+SendCredentialRequestToRestCatalog(RestCatalogOptions * opts, const char *url,
+								   const char *body, List *headers)
+{
+	bool		canRefreshCredential = false;
+
+	return SendRestCatalogRequest(opts, canRefreshCredential, HTTP_POST, url, body, headers);
 }
 
 
