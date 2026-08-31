@@ -34,6 +34,7 @@
 #include "utils/date.h"
 #include "utils/lsyscache.h"
 #include "utils/timestamp.h"
+#include "utils/uuid.h"
 
 #ifdef WORDS_BIGENDIAN
 #define ToLittleEndian32(val) pg_bswap32(val)
@@ -52,7 +53,52 @@
 #endif
 
 
+/*
+ * FixedWidthBinaryLength is the serialized width of one Iceberg primitive.
+ *
+ * promotedFromLen is the narrower width the spec still allows, because column
+ * metrics keep the type the data file was written with: after an int -> long or
+ * float -> double promotion, older files carry 4-byte values for a type that is
+ * now 8 bytes wide. Zero means no narrower form is accepted.
+ *
+ * Types with no fixed width (text, bytea, numeric, and anything Iceberg encodes
+ * as a string) are deliberately absent and bounded by their own branch instead.
+ */
+typedef struct FixedWidthBinaryLength
+{
+	Oid			postgresTypeOid;
+	size_t		expectedLen;
+	size_t		promotedFromLen;
+}			FixedWidthBinaryLength;
+
+static const FixedWidthBinaryLength FixedWidthBinaryLengths[] = {
+	{BOOLOID, 1, 0},
+	/* iceberg does not have int16 type. we store them as int32. */
+	{INT2OID, sizeof(int32), 0},
+	{INT4OID, sizeof(int32), 0},
+	{INT8OID, sizeof(int64), sizeof(int32)},
+	{FLOAT4OID, sizeof(float4), 0},
+	{FLOAT8OID, sizeof(float8), sizeof(float4)},
+	{DATEOID, sizeof(DateADT), 0},
+	{TIMEOID, sizeof(TimeADT), 0},
+	/* timetz is stored as iceberg time, i.e. UTC microseconds */
+	{TIMETZOID, sizeof(int64), 0},
+	{TIMESTAMPOID, sizeof(Timestamp), 0},
+	{TIMESTAMPTZOID, sizeof(TimestampTz), 0},
+	{UUIDOID, UUID_LEN, 0},
+};
+
+
 static unsigned char *PGIcebergBinarySerialize(Datum datum, Field * field, PGType pgType, bool addNullTerminator, size_t *binaryLen);
+static void ErrorIfUnexpectedBinaryLength(size_t binaryLen, Field * field, PGType pgType);
+static int32 ReadLittleEndianInt32(const unsigned char *binaryValue);
+static int64 ReadLittleEndianInt64(const unsigned char *binaryValue);
+static float4 ReadLittleEndianFloat4(const unsigned char *binaryValue);
+static float8 ReadLittleEndianFloat8(const unsigned char *binaryValue);
+static unsigned char *WriteLittleEndianInt32(int32 value);
+static unsigned char *WriteLittleEndianInt64(int64 value);
+static unsigned char *WriteLittleEndianFloat4(float4 value);
+static unsigned char *WriteLittleEndianFloat8(float8 value);
 
 
 /*
@@ -131,33 +177,21 @@ PGIcebergBinarySerialize(Datum datum, Field * field, PGType pgType, bool addNull
 		int32		shortValue = DatumGetInt16(datum);
 
 		*binaryLen = sizeof(int32);
-
-		binaryValue = palloc0(*binaryLen);
-		memcpy(binaryValue, (unsigned char *) &shortValue, *binaryLen);
-
-		binaryValue = ToLittleEndian32(binaryValue);
+		binaryValue = WriteLittleEndianInt32(shortValue);
 	}
 	else if (pgType.postgresTypeOid == INT4OID)
 	{
 		int32		intValue = DatumGetInt32(datum);
 
 		*binaryLen = sizeof(int32);
-
-		binaryValue = palloc0(*binaryLen);
-		memcpy(binaryValue, (unsigned char *) &intValue, *binaryLen);
-
-		binaryValue = ToLittleEndian32(binaryValue);
+		binaryValue = WriteLittleEndianInt32(intValue);
 	}
 	else if (pgType.postgresTypeOid == INT8OID)
 	{
 		int64		longValue = DatumGetInt64(datum);
 
 		*binaryLen = sizeof(int64);
-
-		binaryValue = palloc0(*binaryLen);
-		memcpy(binaryValue, (unsigned char *) &longValue, *binaryLen);
-
-		binaryValue = ToLittleEndian64(binaryValue);
+		binaryValue = WriteLittleEndianInt64(longValue);
 	}
 	else if (pgType.postgresTypeOid == FLOAT4OID)
 	{
@@ -183,11 +217,7 @@ PGIcebergBinarySerialize(Datum datum, Field * field, PGType pgType, bool addNull
 		}
 
 		*binaryLen = sizeof(float4);
-
-		binaryValue = palloc0(*binaryLen);
-		memcpy(binaryValue, (unsigned char *) &floatValue, *binaryLen);
-
-		binaryValue = ToLittleEndian32(binaryValue);
+		binaryValue = WriteLittleEndianFloat4(floatValue);
 	}
 	else if (pgType.postgresTypeOid == FLOAT8OID)
 	{
@@ -213,11 +243,7 @@ PGIcebergBinarySerialize(Datum datum, Field * field, PGType pgType, bool addNull
 		}
 
 		*binaryLen = sizeof(float8);
-
-		binaryValue = palloc0(*binaryLen);
-		memcpy(binaryValue, (unsigned char *) &doubleValue, *binaryLen);
-
-		binaryValue = ToLittleEndian64(binaryValue);
+		binaryValue = WriteLittleEndianFloat8(doubleValue);
 	}
 	else if (pgType.postgresTypeOid == DATEOID)
 	{
@@ -226,11 +252,7 @@ PGIcebergBinarySerialize(Datum datum, Field * field, PGType pgType, bool addNull
 		dateValue = AdjustDateFromPostgresToUnix(dateValue);
 
 		*binaryLen = sizeof(DateADT);
-
-		binaryValue = palloc0(*binaryLen);
-		memcpy(binaryValue, (unsigned char *) &dateValue, *binaryLen);
-
-		binaryValue = ToLittleEndian32(binaryValue);
+		binaryValue = WriteLittleEndianInt32(dateValue);
 	}
 	else if (pgType.postgresTypeOid == TIMESTAMPOID)
 	{
@@ -239,11 +261,7 @@ PGIcebergBinarySerialize(Datum datum, Field * field, PGType pgType, bool addNull
 		timestampValue = AdjustTimestampFromPostgresToUnix(timestampValue);
 
 		*binaryLen = sizeof(Timestamp);
-
-		binaryValue = palloc0(*binaryLen);
-		memcpy(binaryValue, (unsigned char *) &timestampValue, *binaryLen);
-
-		binaryValue = ToLittleEndian64(binaryValue);
+		binaryValue = WriteLittleEndianInt64(timestampValue);
 	}
 	else if (pgType.postgresTypeOid == TIMESTAMPTZOID)
 	{
@@ -252,22 +270,14 @@ PGIcebergBinarySerialize(Datum datum, Field * field, PGType pgType, bool addNull
 		timestampTzValue = AdjustTimestampFromPostgresToUnix(timestampTzValue);
 
 		*binaryLen = sizeof(TimestampTz);
-
-		binaryValue = palloc0(*binaryLen);
-		memcpy(binaryValue, (unsigned char *) &timestampTzValue, *binaryLen);
-
-		binaryValue = ToLittleEndian64(binaryValue);
+		binaryValue = WriteLittleEndianInt64(timestampTzValue);
 	}
 	else if (pgType.postgresTypeOid == TIMEOID)
 	{
 		TimeADT		timeValue = DatumGetTimeADT(datum);
 
 		*binaryLen = sizeof(TimeADT);
-
-		binaryValue = palloc0(*binaryLen);
-		memcpy(binaryValue, (unsigned char *) &timeValue, *binaryLen);
-
-		binaryValue = ToLittleEndian64(binaryValue);
+		binaryValue = WriteLittleEndianInt64(timeValue);
 	}
 	else if (pgType.postgresTypeOid == TIMETZOID)
 	{
@@ -279,11 +289,7 @@ PGIcebergBinarySerialize(Datum datum, Field * field, PGType pgType, bool addNull
 		TimeADT		utcMicros = TimeTzGetUTCMicros(timetz);
 
 		*binaryLen = sizeof(int64);
-
-		binaryValue = palloc0(*binaryLen);
-		memcpy(binaryValue, (unsigned char *) &utcMicros, *binaryLen);
-
-		binaryValue = ToLittleEndian64(binaryValue);
+		binaryValue = WriteLittleEndianInt64(utcMicros);
 	}
 	else if (pgType.postgresTypeOid == TEXTOID)
 	{
@@ -358,6 +364,8 @@ PGIcebergBinaryDeserialize(unsigned char *binaryValue, size_t binaryLen, Field *
 	Assert(field && field->type == FIELD_TYPE_SCALAR);
 	Assert(binaryValue);
 
+	ErrorIfUnexpectedBinaryLength(binaryLen, field, pgType);
+
 	Datum		datum = 0;
 
 	if (PGTypeRequiresConversionToIcebergString(field, pgType))
@@ -387,17 +395,14 @@ PGIcebergBinaryDeserialize(unsigned char *binaryValue, size_t binaryLen, Field *
 	}
 	else if (pgType.postgresTypeOid == INT2OID)
 	{
-		binaryValue = FromLittleEndian32(binaryValue);
-
 		/* iceberg does not have int16 type. we store them as int32. */
-		int16		shortValue = (int16) *((int32 *) binaryValue);
+		int16		shortValue = (int16) ReadLittleEndianInt32(binaryValue);
 
 		datum = Int16GetDatum(shortValue);
 	}
 	else if (pgType.postgresTypeOid == INT4OID)
 	{
-		binaryValue = FromLittleEndian32(binaryValue);
-		int32		intValue = *((int32 *) binaryValue);
+		int32		intValue = ReadLittleEndianInt32(binaryValue);
 
 		datum = Int32GetDatum(intValue);
 	}
@@ -414,23 +419,20 @@ PGIcebergBinaryDeserialize(unsigned char *binaryValue, size_t binaryLen, Field *
 		 */
 		if (binaryLen == sizeof(int32))
 		{
-			binaryValue = FromLittleEndian32(binaryValue);
-			int32		intValue = *((int32 *) binaryValue);
+			int32		intValue = ReadLittleEndianInt32(binaryValue);
 
 			datum = Int64GetDatum((int64) intValue);
 		}
 		else
 		{
-			binaryValue = FromLittleEndian64(binaryValue);
-			int64		longValue = *((int64 *) binaryValue);
+			int64		longValue = ReadLittleEndianInt64(binaryValue);
 
 			datum = Int64GetDatum(longValue);
 		}
 	}
 	else if (pgType.postgresTypeOid == FLOAT4OID)
 	{
-		binaryValue = FromLittleEndian32(binaryValue);
-		float4		floatValue = *((float4 *) binaryValue);
+		float4		floatValue = ReadLittleEndianFloat4(binaryValue);
 
 		datum = Float4GetDatum(floatValue);
 	}
@@ -443,24 +445,20 @@ PGIcebergBinaryDeserialize(unsigned char *binaryValue, size_t binaryLen, Field *
 		 */
 		if (binaryLen == sizeof(float4))
 		{
-			binaryValue = FromLittleEndian32(binaryValue);
-			float4		floatValue = *((float4 *) binaryValue);
+			float4		floatValue = ReadLittleEndianFloat4(binaryValue);
 
 			datum = Float8GetDatum((float8) floatValue);
 		}
 		else
 		{
-			binaryValue = FromLittleEndian64(binaryValue);
-			float8		doubleValue = *((float8 *) binaryValue);
+			float8		doubleValue = ReadLittleEndianFloat8(binaryValue);
 
 			datum = Float8GetDatum(doubleValue);
 		}
 	}
 	else if (pgType.postgresTypeOid == DATEOID)
 	{
-		binaryValue = FromLittleEndian32(binaryValue);
-
-		DateADT		dateValue = *((DateADT *) binaryValue);
+		DateADT		dateValue = ReadLittleEndianInt32(binaryValue);
 
 		dateValue = AdjustDateFromUnixToPostgres(dateValue);
 
@@ -468,9 +466,7 @@ PGIcebergBinaryDeserialize(unsigned char *binaryValue, size_t binaryLen, Field *
 	}
 	else if (pgType.postgresTypeOid == TIMESTAMPOID)
 	{
-		binaryValue = FromLittleEndian64(binaryValue);
-
-		Timestamp	timestampValue = *((Timestamp *) binaryValue);
+		Timestamp	timestampValue = ReadLittleEndianInt64(binaryValue);
 
 		timestampValue = AdjustTimestampFromUnixToPostgres(timestampValue);
 
@@ -478,9 +474,7 @@ PGIcebergBinaryDeserialize(unsigned char *binaryValue, size_t binaryLen, Field *
 	}
 	else if (pgType.postgresTypeOid == TIMESTAMPTZOID)
 	{
-		binaryValue = FromLittleEndian64(binaryValue);
-
-		TimestampTz timestampTzValue = *((TimestampTz *) binaryValue);
+		TimestampTz timestampTzValue = ReadLittleEndianInt64(binaryValue);
 
 		timestampTzValue = AdjustTimestampFromUnixToPostgres(timestampTzValue);
 
@@ -488,9 +482,7 @@ PGIcebergBinaryDeserialize(unsigned char *binaryValue, size_t binaryLen, Field *
 	}
 	else if (pgType.postgresTypeOid == TIMEOID)
 	{
-		binaryValue = FromLittleEndian64(binaryValue);
-
-		TimeADT		timeValue = *((TimeADT *) binaryValue);
+		TimeADT		timeValue = ReadLittleEndianInt64(binaryValue);
 
 		datum = TimeADTGetDatum(timeValue);
 	}
@@ -500,9 +492,7 @@ PGIcebergBinaryDeserialize(unsigned char *binaryValue, size_t binaryLen, Field *
 		 * Iceberg stores time as UTC microseconds since midnight. Deserialize
 		 * into a TimeTzADT at UTC (zone = 0).
 		 */
-		binaryValue = FromLittleEndian64(binaryValue);
-
-		int64		utcMicros = *((int64 *) binaryValue);
+		int64		utcMicros = ReadLittleEndianInt64(binaryValue);
 
 		TimeTzADT  *timetz = palloc(sizeof(TimeTzADT));
 
@@ -549,4 +539,141 @@ PGIcebergBinaryDeserialize(unsigned char *binaryValue, size_t binaryLen, Field *
 	}
 
 	return datum;
+}
+
+
+/*
+ * ErrorIfUnexpectedBinaryLength rejects a fixed-width value that is not exactly
+ * as wide as its type. The bytes are Avro "bytes" of arbitrary length taken from
+ * a manifest we did not necessarily write, so without this every fixed-width
+ * read in PGIcebergBinaryDeserialize is an out-of-bounds read waiting for a
+ * short value.
+ */
+static void
+ErrorIfUnexpectedBinaryLength(size_t binaryLen, Field * field, PGType pgType)
+{
+	/* string-encoded types carry a value of any length, e.g. geometry */
+	if (PGTypeRequiresConversionToIcebergString(field, pgType))
+		return;
+
+	for (int i = 0; i < lengthof(FixedWidthBinaryLengths); i++)
+	{
+		if (FixedWidthBinaryLengths[i].postgresTypeOid != pgType.postgresTypeOid)
+			continue;
+
+		size_t		expectedLen = FixedWidthBinaryLengths[i].expectedLen;
+		size_t		promotedFromLen = FixedWidthBinaryLengths[i].promotedFromLen;
+
+		if (binaryLen == expectedLen ||
+			(promotedFromLen > 0 && binaryLen == promotedFromLen))
+			return;
+
+		char	   *expectedLengths = promotedFromLen > 0 ?
+			psprintf("%zu or %zu", promotedFromLen, expectedLen) :
+			psprintf("%zu", expectedLen);
+
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("Iceberg value of type %s has invalid serialized length %zu",
+						format_type_be(pgType.postgresTypeOid), binaryLen),
+				 errdetail("Expected %s bytes.", expectedLengths)));
+	}
+}
+
+
+/*
+ * Iceberg serializes fixed-width primitives little-endian. Go through a memcpy
+ * in both directions rather than a cast: the byte swap has to apply to the value
+ * and not to the pointer, and a value read out of an Avro buffer has no
+ * alignment guarantee.
+ */
+static int32
+ReadLittleEndianInt32(const unsigned char *binaryValue)
+{
+	uint32		rawValue;
+
+	memcpy(&rawValue, binaryValue, sizeof(rawValue));
+
+	return (int32) FromLittleEndian32(rawValue);
+}
+
+
+static int64
+ReadLittleEndianInt64(const unsigned char *binaryValue)
+{
+	uint64		rawValue;
+
+	memcpy(&rawValue, binaryValue, sizeof(rawValue));
+
+	return (int64) FromLittleEndian64(rawValue);
+}
+
+
+static float4
+ReadLittleEndianFloat4(const unsigned char *binaryValue)
+{
+	int32		rawValue = ReadLittleEndianInt32(binaryValue);
+	float4		floatValue;
+
+	memcpy(&floatValue, &rawValue, sizeof(floatValue));
+
+	return floatValue;
+}
+
+
+static float8
+ReadLittleEndianFloat8(const unsigned char *binaryValue)
+{
+	int64		rawValue = ReadLittleEndianInt64(binaryValue);
+	float8		doubleValue;
+
+	memcpy(&doubleValue, &rawValue, sizeof(doubleValue));
+
+	return doubleValue;
+}
+
+
+static unsigned char *
+WriteLittleEndianInt32(int32 value)
+{
+	uint32		rawValue = ToLittleEndian32((uint32) value);
+	unsigned char *binaryValue = palloc(sizeof(rawValue));
+
+	memcpy(binaryValue, &rawValue, sizeof(rawValue));
+
+	return binaryValue;
+}
+
+
+static unsigned char *
+WriteLittleEndianInt64(int64 value)
+{
+	uint64		rawValue = ToLittleEndian64((uint64) value);
+	unsigned char *binaryValue = palloc(sizeof(rawValue));
+
+	memcpy(binaryValue, &rawValue, sizeof(rawValue));
+
+	return binaryValue;
+}
+
+
+static unsigned char *
+WriteLittleEndianFloat4(float4 value)
+{
+	int32		rawValue;
+
+	memcpy(&rawValue, &value, sizeof(rawValue));
+
+	return WriteLittleEndianInt32(rawValue);
+}
+
+
+static unsigned char *
+WriteLittleEndianFloat8(float8 value)
+{
+	int64		rawValue;
+
+	memcpy(&rawValue, &value, sizeof(rawValue));
+
+	return WriteLittleEndianInt64(rawValue);
 }

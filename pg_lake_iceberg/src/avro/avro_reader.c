@@ -581,10 +581,21 @@ AvroExtractNullableFieldFromRecordByIndex(avro_value_t * record, int index,
 	}
 	else if (fieldType == AVRO_BOOLEAN)
 	{
-		/* avro_value_get_boolean requires int */
-		*value = palloc0(sizeof(int));
-		*valueLength = sizeof(int);
-		rc = avro_value_get_boolean(&fieldValue, (int *) *value);
+		/*
+		 * The caller reads the value we hand back as an Iceberg binary single
+		 * value, where a boolean is the one byte 0x00 or 0x01.
+		 * avro_value_get_boolean wants an int, so hand back the one byte
+		 * rather than the 4-byte int: its first byte is the wrong end of it
+		 * on a big-endian host, and a 4-byte boolean is not a length the
+		 * deserializer accepts.
+		 */
+		int			boolValue = 0;
+
+		rc = avro_value_get_boolean(&fieldValue, &boolValue);
+
+		*value = palloc0(1);
+		*valueLength = 1;
+		*((unsigned char *) *value) = (boolValue != 0) ? 0x01 : 0x00;
 	}
 	else
 	{

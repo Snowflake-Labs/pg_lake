@@ -369,6 +369,72 @@ def test_pg_lake_serde_timetz(
     superuser_conn.rollback()
 
 
+def test_pg_lake_deserialize_value_rejects_invalid_length(
+    superuser_conn,
+    iceberg_extension,
+    create_helper_functions,
+):
+    # Bounds and partition values are Avro "bytes", so their length comes from the
+    # manifest and not from us. A value narrower than its type used to be read as
+    # if it were the full width.
+    invalid_lengths = [
+        ("boolean", "false::boolean", "\\x"),
+        # the 4 byte int libavro hands us for an Avro boolean is not a boolean;
+        # AvroExtractNullableFieldFromRecordByIndex narrows it to one byte
+        ("boolean", "false::boolean", "\\x01000000"),
+        ("int", "0::int", "\\x0102"),
+        ("long", "0::bigint", "\\x0102"),
+        ("float", "0::float4", "\\x0102"),
+        ("double", "0::float8", "\\x0102"),
+        ("date", "'1970-01-01'::date", "\\x0102"),
+        ("time", "'00:00:00'::time", "\\x0102"),
+        ("timestamp", "'1970-01-01'::timestamp", "\\x0102"),
+        ("timestamptz", "'1970-01-01+00'::timestamptz", "\\x0102"),
+        ("uuid", "'00000000-0000-0000-0000-000000000000'::uuid", "\\x0102"),
+        # a longer value is just as wrong, and for decimal it would have made the
+        # sign extension write before its 16 byte buffer
+        ("int", "0::int", "\\x0102030405060708"),
+        ("decimal(10,2)", "0::numeric(10,2)", "\\x"),
+        ("decimal(10,2)", "0::numeric(10,2)", "\\x000102030405060708090a0b0c0d0e0f10"),
+    ]
+
+    for iceberg_type, target, binary_value in invalid_lengths:
+        pg_query = f"SELECT lake_iceberg.deserialize_value({target}, '{iceberg_type}', '{binary_value}'::bytea);"
+
+        with pytest.raises(Exception, match="invalid serialized length"):
+            run_query(pg_query, superuser_conn)
+
+        superuser_conn.rollback()
+
+    # the accepted widths still deserialize, including the two type promotions the
+    # spec allows: an int bound left behind in a file written before an int -> long
+    # promotion, and likewise float -> double
+    valid_lengths = [
+        ("boolean", "false::boolean", "\\x01", True),
+        ("boolean", "false::boolean", "\\x00", False),
+        ("int", "0::int", "\\x01000000", 1),
+        ("long", "0::bigint", "\\x0100000000000000", 1),
+        ("long", "0::bigint", "\\x01000000", 1),
+        ("float", "0::float4", "\\x0000803f", 1.0),
+        ("double", "0::float8", "\\x000000000000f03f", 1.0),
+        ("double", "0::float8", "\\x0000803f", 1.0),
+        ("decimal(10,2)", "0::numeric(10,2)", "\\x01", Decimal("0.01")),
+        (
+            "decimal(10,2)",
+            "0::numeric(10,2)",
+            "\\x00000000000000000000000000000001",
+            Decimal("0.01"),
+        ),
+    ]
+
+    for iceberg_type, target, binary_value, expected in valid_lengths:
+        pg_query = f"SELECT lake_iceberg.deserialize_value({target}, '{iceberg_type}', '{binary_value}'::bytea);"
+        result = run_query(pg_query, superuser_conn)
+        assert result[0][0] == expected, pg_query
+
+    superuser_conn.rollback()
+
+
 @pytest.fixture(scope="module")
 def create_helper_functions(superuser_conn, s3, iceberg_extension):
 
@@ -378,6 +444,16 @@ def create_helper_functions(superuser_conn, s3, iceberg_extension):
         RETURNS anyelement
         LANGUAGE C STRICT
         AS 'pg_lake_iceberg', $$pg_lake_serde_value$$;
+""",
+        superuser_conn,
+    )
+
+    run_command(
+        f"""
+        CREATE OR REPLACE FUNCTION lake_iceberg.deserialize_value(target anyelement, iceberg_scalar_type text, binary_value bytea)
+        RETURNS anyelement
+        LANGUAGE C STRICT
+        AS 'pg_lake_iceberg', $$pg_lake_deserialize_value$$;
 """,
         superuser_conn,
     )
@@ -392,6 +468,13 @@ def create_helper_functions(superuser_conn, s3, iceberg_extension):
     run_command(
         f"""
         DROP FUNCTION IF EXISTS lake_iceberg.serde_value
+""",
+        superuser_conn,
+    )
+
+    run_command(
+        f"""
+        DROP FUNCTION IF EXISTS lake_iceberg.deserialize_value
 """,
         superuser_conn,
     )
