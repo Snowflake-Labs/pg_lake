@@ -306,10 +306,17 @@ FetchRestCatalogAccessToken(RestCatalogOptions * opts, char **accessToken, int *
 	HttpResult	httpResponse = SendRequestToRestCatalog(NULL, HTTP_POST, accessTokenUrl,
 														body.data, headers);
 
+	/*
+	 * The upstream body goes to the client, so it has to be redacted even
+	 * though tracing is off: an endpoint that echoes the request, or that
+	 * returns a token inside an error envelope, would otherwise disclose
+	 * credentials to whoever ran the statement.
+	 */
 	if (httpResponse.status != 200)
 		ereport(ERROR,
 				(errmsg("Rest Catalog OAuth token request failed (HTTP %ld)", httpResponse.status),
-				 httpResponse.body ? errdetail_internal("%s", httpResponse.body) : 0));
+				 httpResponse.body ?
+				 errdetail_internal("%s", RedactSensitiveText(httpResponse.body)) : 0));
 
 	if (!httpResponse.body || !*httpResponse.body)
 		ereport(ERROR, (errmsg("Rest Catalog OAuth token response body is empty")));

@@ -178,10 +178,13 @@ _PG_init(void)
 	DefineCustomBoolVariable(
 							 "pg_lake_iceberg.http_client_trace_traffic",
 							 gettext_noop("When set to true, HTTP client logging is enabled."),
-							 NULL,
+							 gettext_noop("The trace reports request URLs and bodies of catalog "
+										  "traffic to the client, so it is restricted to "
+										  "superusers.  Delegate it with GRANT SET ON PARAMETER "
+										  "if a non-superuser needs to debug catalog calls."),
 							 &HttpClientTraceTraffic,
 							 false,
-							 PGC_USERSET,
+							 PGC_SUSET,
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 

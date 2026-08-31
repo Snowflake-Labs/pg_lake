@@ -1105,7 +1105,6 @@ def test_multi_table_single_transaction_on_same_server(
 def test_token_cache_reuses_token_across_catalog_ops(
     installcheck,
     superuser_conn,
-    pg_conn,
     s3,
     extension,
     with_default_location,
@@ -1128,45 +1127,45 @@ def test_token_cache_reuses_token_across_catalog_ops(
     SCHEMA_NAME = TABLE_NAMESPACE
     TABLE_NAME = "token_cache_test"
 
-    run_command(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA_NAME}", pg_conn)
-    pg_conn.commit()
+    run_command(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA_NAME}", superuser_conn)
+    superuser_conn.commit()
 
     run_command(
         "SET pg_lake_iceberg.http_client_trace_traffic TO on",
-        pg_conn,
+        superuser_conn,
     )
-    pg_conn.notices.clear()
+    superuser_conn.notices.clear()
 
     run_command(
         f"CREATE TABLE {SCHEMA_NAME}.{TABLE_NAME} (id bigint, value text) "
         f"USING iceberg WITH (catalog='rest')",
-        pg_conn,
+        superuser_conn,
     )
-    pg_conn.commit()
+    superuser_conn.commit()
 
     for i in range(3):
         run_command(
             f"INSERT INTO {SCHEMA_NAME}.{TABLE_NAME} VALUES ({i}, 'v')",
-            pg_conn,
+            superuser_conn,
         )
-        pg_conn.commit()
+        superuser_conn.commit()
 
     token_fetches = sum(
-        1 for n in pg_conn.notices if "oauth/tokens" in n and "POST" in n
+        1 for n in superuser_conn.notices if "oauth/tokens" in n and "POST" in n
     )
     assert token_fetches == 1, (
         f"Expected exactly 1 OAuth token fetch (cached), got {token_fetches}. "
-        f"Notices:\n" + "\n".join(pg_conn.notices)
+        f"Notices:\n" + "\n".join(superuser_conn.notices)
     )
 
     run_command(
         "RESET pg_lake_iceberg.http_client_trace_traffic",
-        pg_conn,
+        superuser_conn,
     )
 
-    pg_conn.rollback()
-    run_command(f"DROP SCHEMA {SCHEMA_NAME} CASCADE", pg_conn)
-    pg_conn.commit()
+    superuser_conn.rollback()
+    run_command(f"DROP SCHEMA {SCHEMA_NAME} CASCADE", superuser_conn)
+    superuser_conn.commit()
 
 
 def test_alter_user_mapping_credentials_invalidates_token_cache(

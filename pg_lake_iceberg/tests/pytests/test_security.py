@@ -329,3 +329,117 @@ def test_data_file_local_path_in_manifest_is_rejected(pg_conn, superuser_conn, s
     assert "root:" not in str(error) and "nobody:" not in str(
         error
     ), "SECURITY REGRESSION: /etc/passwd content leaked in the error message."
+
+
+@pytest.fixture(scope="module")
+def create_redact_helper_function(superuser_conn):
+    run_command(
+        """
+        CREATE OR REPLACE FUNCTION lake_iceberg.redact_sensitive_text(input TEXT)
+        RETURNS text
+         LANGUAGE C
+         IMMUTABLE STRICT
+        AS 'pg_lake_iceberg', $function$test_redact_sensitive_text$function$;
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+    yield
+    run_command("DROP FUNCTION lake_iceberg.redact_sensitive_text;", superuser_conn)
+    superuser_conn.commit()
+
+
+def test_http_client_trace_traffic_is_superuser_only(pg_conn, extension):
+    """
+    Regression test for: any role could turn on the HTTP client trace and read
+    the REST catalog OAuth credentials out of its own client notices.
+
+    pg_lake_iceberg.http_client_trace_traffic was PGC_USERSET, and the trace is
+    emitted at INFO, which PostgreSQL delivers to the client.  A plain role
+    could therefore SET the GUC, touch any Iceberg REST table, and collect the
+    client_secret from the traced OAuth token request body -- credentials that
+    are otherwise readable only by a superuser (the GUCs that hold them are all
+    GUC_SUPERUSER_ONLY).
+
+    Fix: the GUC is PGC_SUSET.  A superuser can still delegate it with
+    GRANT SET ON PARAMETER when a non-superuser needs to debug catalog calls.
+    """
+    error = run_command(
+        "SET pg_lake_iceberg.http_client_trace_traffic TO on",
+        pg_conn,
+        raise_error=False,
+    )
+    pg_conn.rollback()
+
+    assert error is not None, (
+        "SECURITY REGRESSION: a non-superuser was allowed to SET "
+        "pg_lake_iceberg.http_client_trace_traffic. The trace is reported to "
+        "the client at INFO and contains the REST catalog OAuth request body, "
+        "so the GUC must be PGC_SUSET."
+    )
+    assert (
+        "permission denied" in str(error).lower()
+    ), f"Expected a permission error, got: {error}"
+
+
+def test_redaction_covers_form_encoded_credentials(
+    superuser_conn, extension, create_redact_helper_function
+):
+    """
+    Regression test for: the trace redaction only understood JSON, so the OAuth
+    client_secret went out in cleartext.
+
+    The old RedactSensitiveJson() anchored on '"client_secret"' -- a quoted JSON
+    key followed by ':'.  The OAuth token request body that carries the secret
+    is application/x-www-form-urlencoded (client_secret=<secret>), so it matched
+    nothing and the secret was traced verbatim.
+
+    Fix: RedactSensitiveText() matches the bare key name case-insensitively and
+    accepts both ':' and '=' as the separator, so JSON bodies, form-encoded
+    bodies and header-style text are all covered.
+    """
+    secret = "SUPER-SECRET-CLIENT-VALUE"
+
+    def redact(text):
+        cur = superuser_conn.cursor()
+        try:
+            cur.execute("SELECT lake_iceberg.redact_sensitive_text(%s)", (text,))
+            return cur.fetchone()[0]
+        finally:
+            cur.close()
+
+    # The exact shape of the body built by FetchRestCatalogAccessToken() for
+    # the horizon auth type.
+    form_body = (
+        f"grant_type=client_credentials&scope=PRINCIPAL_ROLE%3AALL"
+        f"&client_secret={secret}"
+    )
+    redacted = redact(form_body)
+    assert secret not in redacted, (
+        "SECURITY REGRESSION: the form-encoded client_secret survived "
+        f"redaction: {redacted}"
+    )
+    # Non-sensitive parameters must still be legible, otherwise the trace is
+    # useless for debugging.
+    assert "grant_type=client_credentials" in redacted, redacted
+    assert "scope=PRINCIPAL_ROLE%3AALL" in redacted, redacted
+
+    # JSON spelling must keep working (no regression on the original behaviour).
+    json_body = f'{{"client_secret": "{secret}", "grant_type": "client_credentials"}}'
+    redacted = redact(json_body)
+    assert secret not in redacted, redacted
+    assert "client_credentials" in redacted, redacted
+
+    # A bearer token in a response body, and a header-style Authorization line.
+    redacted = redact(f'{{"access_token": "{secret}", "expires_in": 3600}}')
+    assert secret not in redacted, redacted
+    assert "3600" in redacted, redacted
+
+    redacted = redact(f"Authorization: Bearer {secret}")
+    assert secret not in redacted, redacted
+
+    # Keys that merely end in a sensitive name must not swallow their value:
+    # over-redaction would hide the fields a trace is read for.
+    redacted = redact('{"token_type": "Bearer", "not_a_password": "plain"}')
+    assert "Bearer" in redacted, redacted
+    assert "plain" in redacted, redacted
