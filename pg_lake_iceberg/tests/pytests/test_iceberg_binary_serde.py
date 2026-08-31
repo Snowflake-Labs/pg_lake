@@ -379,6 +379,9 @@ def test_pg_lake_deserialize_value_rejects_invalid_length(
     # if it were the full width.
     invalid_lengths = [
         ("boolean", "false::boolean", "\\x"),
+        # the 4 byte int libavro hands us for an Avro boolean is not a boolean;
+        # AvroExtractNullableFieldFromRecordByIndex narrows it to one byte
+        ("boolean", "false::boolean", "\\x01000000"),
         ("int", "0::int", "\\x0102"),
         ("long", "0::bigint", "\\x0102"),
         ("float", "0::float4", "\\x0102"),
@@ -408,6 +411,7 @@ def test_pg_lake_deserialize_value_rejects_invalid_length(
     # promotion, and likewise float -> double
     valid_lengths = [
         ("boolean", "false::boolean", "\\x01", True),
+        ("boolean", "false::boolean", "\\x00", False),
         ("int", "0::int", "\\x01000000", 1),
         ("long", "0::bigint", "\\x0100000000000000", 1),
         ("long", "0::bigint", "\\x01000000", 1),

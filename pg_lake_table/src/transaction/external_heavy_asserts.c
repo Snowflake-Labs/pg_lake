@@ -504,34 +504,24 @@ AssertInternalAndExternalIcebergStatsMatchForAllDataFiles(Oid relationId, bool d
 										 externalPartitionField->value_length,
 										 &normalizedValue, &normalizedLen);
 
-			/*
-			 * we serialize boolean 1 byte per spec but spark serializes it as
-			 * 4 bytes (int)
-			 */
-			bool		mismatchBoolLength = internalPartitionField->value_type.physical_type == ICEBERG_AVRO_PHYSICAL_TYPE_BOOL &&
-				internalPartitionField->value_length == 1 && externalPartitionField->value_length == 4;
-
-			if (!mismatchBoolLength)
+			if (internalPartitionField->value_length != normalizedLen)
 			{
-				if (internalPartitionField->value_length != normalizedLen)
-				{
-					ereport(ERROR,
-							(errcode(ERRCODE_INTERNAL_ERROR),
-							 errmsg("internal and external iceberg data file partition field value length mismatch %zu %zu for %s",
-									internalPartitionField->value_length,
-									normalizedLen,
-									internalPartitionField->field_name)));
-				}
+				ereport(ERROR,
+						(errcode(ERRCODE_INTERNAL_ERROR),
+						 errmsg("internal and external iceberg data file partition field value length mismatch %zu %zu for %s",
+								internalPartitionField->value_length,
+								normalizedLen,
+								internalPartitionField->field_name)));
+			}
 
-				if (memcmp(internalPartitionField->value,
-						   normalizedValue,
-						   internalPartitionField->value_length) != 0)
-				{
-					ereport(ERROR,
-							(errcode(ERRCODE_INTERNAL_ERROR),
-							 errmsg("internal and external iceberg data file partition field value mismatch for %s",
-									internalPartitionField->field_name)));
-				}
+			if (memcmp(internalPartitionField->value,
+					   normalizedValue,
+					   internalPartitionField->value_length) != 0)
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_INTERNAL_ERROR),
+						 errmsg("internal and external iceberg data file partition field value mismatch for %s",
+								internalPartitionField->field_name)));
 			}
 		}
 	}
