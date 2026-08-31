@@ -232,6 +232,9 @@ static const PGDuckShippableFunction ShippableBuiltinProcs[] =
 	{"timetz", 'f', 1, {"timestamptz"}, NULL},
 
 	{"length", 'f', 1, {"text"}, NULL},
+	{"char_length", 'f', 1, {"text"}, NULL},
+	{"character_length", 'f', 1, {"text"}, NULL},
+	{"translate", 'f', 3, {"text", "text", "text"}, NULL},
 
 	{"to_date", 'f', 1, {"float8"}, NULL},
 	{"to_timestamp", 'f', 1, {"float8"}, NULL},
@@ -258,6 +261,11 @@ static const PGDuckShippableFunction ShippableBuiltinProcs[] =
 	{"date_trunc", 'f', 2, {"text", "timestamptz"}, NULL},
 
 	{"now", 'f', 0, {}, NULL},
+
+	{"age", 'f', 2, {"timestamp", "timestamp"}, NULL},
+	{"isfinite", 'f', 1, {"date"}, NULL},
+	{"isfinite", 'f', 1, {"timestamp"}, NULL},
+	{"isfinite", 'f', 1, {"timestamptz"}, NULL},
 
 	{"to_char", 'f', 2, {"timestamp", "text"}, IsConvertibleToChar},
 	{"to_char", 'f', 2, {"timestamptz", "text"}, IsConvertibleToChar},

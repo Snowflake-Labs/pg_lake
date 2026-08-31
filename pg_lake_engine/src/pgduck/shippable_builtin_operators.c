@@ -376,6 +376,8 @@ static const PGDuckShippableOperator PGDuckShippableTimeOperators[] = {
 	{"<=", "pg_catalog", "time_le", 2, {"time", "time"}, NULL},
 	{">", "pg_catalog", "time_gt", 2, {"time", "time"}, NULL},
 	{">=", "pg_catalog", "time_ge", 2, {"time", "time"}, NULL},
+	{"+", "pg_catalog", "time_pl_interval", 2, {"time", "interval"}, NULL},
+	{"-", "pg_catalog", "time_mi_interval", 2, {"time", "interval"}, NULL},
 };
 
 /* Timetz operators */
@@ -386,6 +388,8 @@ static const PGDuckShippableOperator PGDuckShippableTimeTzOperators[] = {
 	{"<=", "pg_catalog", "timetz_le", 2, {"timetz", "timetz"}, NULL},
 	{">", "pg_catalog", "timetz_gt", 2, {"timetz", "timetz"}, NULL},
 	{">=", "pg_catalog", "timetz_ge", 2, {"timetz", "timetz"}, NULL},
+	{"+", "pg_catalog", "timetz_pl_interval", 2, {"timetz", "interval"}, NULL},
+	{"-", "pg_catalog", "timetz_mi_interval", 2, {"timetz", "interval"}, NULL},
 };
 
 /* Timestamp operators */
@@ -454,6 +458,9 @@ static const PGDuckShippableOperator PGDuckShippableIntervalOperators[] = {
 	{">=", "pg_catalog", "interval_ge", 2, {"interval", "interval"}, NULL},
 	{"+", "pg_catalog", "interval_pl", 2, {"interval", "interval"}, NULL},
 	{"-", "pg_catalog", "interval_mi", 2, {"interval", "interval"}, NULL},
+	{"-", "pg_catalog", "interval_um", 1, {"interval"}, NULL},
+	{"*", "pg_catalog", "interval_mul", 2, {"interval", "float8"}, NULL},
+	{"*", "pg_catalog", "mul_d_interval", 2, {"float8", "interval"}, NULL},
 };
 
 /* UUID operators */

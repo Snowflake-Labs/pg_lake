@@ -179,6 +179,19 @@ test_cases = [
     # initcap
     ("initcap_text", "WHERE initcap(col_text) = 'Test'", "initcap_pg", True),
     ("initcap_varchar", "WHERE initcap(col_varchar) = 'Test'", "initcap_pg", True),
+    (
+        "translate",
+        "WHERE translate(col_text, 'lo', 'LO') <> col_text",
+        "translate",
+        True,
+    ),
+    ("char_length", "WHERE char_length(col_text) >= 0", "char_length", True),
+    (
+        "character_length",
+        "WHERE character_length(col_text) >= 0",
+        "character_length",
+        True,
+    ),
 ]
 
 
