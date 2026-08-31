@@ -64,7 +64,10 @@ static void CurlCleanup(CURL *curl, struct curl_slist *headerList);
 static HttpResult CurlReturnError(CURL *curl, struct curl_slist *headerList,
 								  CURLcode curlCode, const char *errorMsg);
 static const char *HttpRequestMethodToString(HttpMethod method);
-static char *RedactSensitiveJson(char *s);
+static char *StrCaseStr(char *haystack, const char *needle);
+static bool IsKeyStartBoundary(char precedingChar);
+static char *RedactValueInPlace(char *valueStart);
+static void RedactUrlUserinfoInPlace(char *text);
 
 #define CURL_SETOPT(curl, opt, value) do { \
 	curlCode = curl_easy_setopt((curl), (opt), (value)); \
@@ -538,9 +541,15 @@ HttpCommonNoThrows(HttpMethod method, const char *url, const char *postData, con
 			appendStringInfo(postDataInfo, ", body: {%s}", postData);
 		}
 
+		/*
+		 * The URL needs redacting too: oauth_endpoint is used exactly as
+		 * configured, so an IdP that takes the client_secret as a query
+		 * parameter would otherwise put it straight into the trace.
+		 */
 		ereport(INFO, (errmsg("making %s request to URL %s%s",
-							  HttpRequestMethodToString(method), url,
-							  postDataInfo ? RedactSensitiveJson(postDataInfo->data) : "")));
+							  HttpRequestMethodToString(method),
+							  RedactSensitiveText(url),
+							  postDataInfo ? RedactSensitiveText(postDataInfo->data) : "")));
 	}
 
 	if (!CheckMinCurlVersion(curl_version_info(CURLVERSION_NOW)))
@@ -607,7 +616,7 @@ HttpCommonNoThrows(HttpMethod method, const char *url, const char *postData, con
 	if (HttpClientTraceTraffic && message_level_is_interesting(INFO))
 	{
 		ereport(INFO, (errmsg("received response with status code %ld, body: %s",
-							  res.status, res.body ? RedactSensitiveJson(res.body) : "<empty>")));
+							  res.status, res.body ? RedactSensitiveText(res.body) : "<empty>")));
 	}
 
 	return res;
@@ -636,99 +645,240 @@ HttpRequestMethodToString(HttpMethod method)
 
 
 /*
- * RedactSensitiveJson
- *   In-place redaction of token-looking values in JSON-ish text.
+ * Key names whose value must never appear in a trace line or an error
+ * detail.  Matched case-insensitively and without surrounding punctuation,
+ * so one list covers JSON objects ("client_secret": "..."), form-encoded
+ * bodies (client_secret=...) and header-style text (Authorization: ...).
+ *
+ * Anchoring on the bare name rather than on '"<name>"' is deliberate: the
+ * OAuth token request body is application/x-www-form-urlencoded, so a
+ * JSON-only matcher let the client_secret through in cleartext.
+ */
+static const char *const sensitiveKeys[] = {
+	"access_token",
+	"refresh_token",
+	"id_token",
+	"session_token",
+	"token",
+	"client_secret",
+	"password",
+	"authorization",
+	"s3.access-key-id",
+	"s3.secret-access-key",
+	"s3.session-token",
+	"storage-credentials",
+	NULL
+};
+
+
+/*
+ * StrCaseStr is a case-insensitive strstr().  strcasestr() is a GNU
+ * extension, so spell it out to stay portable.
  */
 static char *
-RedactSensitiveJson(char *input)
+StrCaseStr(char *haystack, const char *needle)
+{
+	size_t		needleLength = strlen(needle);
+
+	for (char *cursor = haystack; *cursor != '\0'; cursor++)
+	{
+		if (pg_strncasecmp(cursor, needle, needleLength) == 0)
+			return cursor;
+	}
+
+	return NULL;
+}
+
+
+/*
+ * IsKeyStartBoundary returns true if precedingChar can immediately precede a
+ * key name.  Requiring a boundary keeps "token" from matching the tail of an
+ * unrelated identifier such as "csrf_token_name", while still recognising both
+ * "token": (JSON) and &token= (form encoding).
+ */
+static bool
+IsKeyStartBoundary(char precedingChar)
+{
+	return precedingChar == '"' || precedingChar == '\'' ||
+		precedingChar == '{' || precedingChar == ',' ||
+		precedingChar == '&' || precedingChar == '?' ||
+		precedingChar == ';' || isspace((unsigned char) precedingChar);
+}
+
+
+/*
+ * RedactValueInPlace overwrites the value starting at valueStart with '*'
+ * and returns the first character past it.
+ */
+static char *
+RedactValueInPlace(char *valueStart)
+{
+	char	   *cursor = valueStart;
+
+	while (*cursor && isspace((unsigned char) *cursor))
+		cursor++;
+
+	if (*cursor == '"')
+	{
+		cursor++;				/* first character of the quoted value */
+
+		while (*cursor && *cursor != '"')
+		{
+			/*
+			 * Mask a backslash escape as a unit so that a value containing \"
+			 * is not mistaken for the closing quote.
+			 */
+			if (*cursor == '\\' && cursor[1] != '\0')
+				*cursor++ = '*';
+
+			*cursor++ = '*';
+		}
+	}
+	else if (*cursor == '[' || *cursor == '{')
+	{
+		/*
+		 * A composite value such as the storage-credentials array has to be
+		 * masked as one unit, because stopping at the first ',' would leave
+		 * its closing brackets behind and trace as malformed JSON.
+		 */
+		char	   *compositeStart = cursor;
+		int			depth = 0;
+		bool		inString = false;
+
+		while (*cursor != '\0')
+		{
+			if (inString)
+			{
+				if (*cursor == '\\' && cursor[1] != '\0')
+					*cursor++ = '*';
+				else if (*cursor == '"')
+					inString = false;
+			}
+			else if (*cursor == '"')
+				inString = true;
+			else if (*cursor == '[' || *cursor == '{')
+				depth++;
+			else if (*cursor == ']' || *cursor == '}')
+				depth--;
+
+			*cursor++ = '*';
+
+			if (!inString && depth == 0)
+				break;
+		}
+
+		/* re-quote the mask so the traced line stays parseable */
+		if (cursor - compositeStart >= 2)
+		{
+			*compositeStart = '"';
+			cursor[-1] = '"';
+		}
+	}
+	else
+	{
+		/*
+		 * Unquoted: stop only at what genuinely ends a value -- ',' or '}' in
+		 * JSON, '&' in a form-encoded body, end of line in header-style text.
+		 * Whitespace is deliberately not a terminator: an Authorization value
+		 * is "Bearer <token>", so stopping at the space would leave the token
+		 * in the clear.
+		 */
+		while (*cursor && *cursor != ',' && *cursor != '}' && *cursor != '&' &&
+			   *cursor != '\r' && *cursor != '\n')
+			*cursor++ = '*';
+	}
+
+	return cursor;
+}
+
+
+/*
+ * RedactUrlUserinfoInPlace masks everything between "://" and the '@' that
+ * closes the authority.  libcurl accepts https://user:password@host/..., a
+ * credential spelling no key=value rule sees.
+ */
+static void
+RedactUrlUserinfoInPlace(char *text)
+{
+	char	   *scheme = text;
+
+	while ((scheme = strstr(scheme, "://")) != NULL)
+	{
+		char	   *authority = scheme + 3;
+		char	   *authorityEnd = authority;
+		char	   *userinfoEnd = authority;
+
+		while (*authorityEnd != '\0' && *authorityEnd != '/' &&
+			   *authorityEnd != '?' && *authorityEnd != '#' &&
+			   !isspace((unsigned char) *authorityEnd))
+			authorityEnd++;
+
+		/* the rightmost '@' is the one that separates userinfo from the host */
+		for (char *cursor = authority; cursor < authorityEnd; cursor++)
+		{
+			if (*cursor == '@')
+				userinfoEnd = cursor;
+		}
+
+		for (char *cursor = authority; cursor < userinfoEnd; cursor++)
+			*cursor = '*';
+
+		scheme = authorityEnd;
+	}
+}
+
+
+/*
+ * RedactSensitiveText returns a copy of input in which the value of every
+ * sensitiveKeys entry is replaced by '*' characters.  Both "key": value and
+ * key=value spellings are recognised.
+ */
+char *
+RedactSensitiveText(const char *input)
 {
 	if (input == NULL)
 		return "NULL";
 
-	/*
-	 * Never touch the original input string, make a copy to redact.
-	 */
-	char	   *copyOfinput = pstrdup(input);
+	/* never touch the original input string, redact a copy */
+	char	   *redacted = pstrdup(input);
 
-	const char *keys[] = {
-		"\"access_token\"",
-		"\"refresh_token\"",
-		"\"id_token\"",
-		"\"session_token\"",
-		"\"token\"",
-		"\"client_secret\"",
-		"\"authorization\"",
-		"\"Authorization\"",
-		"\"s3.access-key-id\"",
-		"\"s3.secret-access-key\"",
-		"\"s3.session-token\"",
-		"\"storage-credentials\""
-	};
-	const int	keyCount = sizeof(keys) / sizeof(keys[0]);
+	RedactUrlUserinfoInPlace(redacted);
 
-	for (int i = 0; i < keyCount; i++)
+	for (int keyIndex = 0; sensitiveKeys[keyIndex] != NULL; keyIndex++)
 	{
-		const char *key = keys[i];
-		char	   *p = copyOfinput;
+		const char *key = sensitiveKeys[keyIndex];
+		size_t		keyLength = strlen(key);
+		char	   *match = redacted;
 
-		while ((p = strstr(p, key)) != NULL)
+		while ((match = StrCaseStr(match, key)) != NULL)
 		{
-			/* Move to the colon after the key */
-			char	   *colon = strchr(p + strlen(key), ':');
+			char	   *afterKey = match + keyLength;
 
-			if (colon == NULL)
+			/* the match has to be a whole key, not the tail of a longer one */
+			if (match > redacted && !IsKeyStartBoundary(match[-1]))
 			{
-				/* No colon? then this isn't a key-value pair, skip */
-				p += strlen(key);
+				match = afterKey;
 				continue;
 			}
 
-			char	   *v = colon + 1;	/* start of value (maybe spaces /
-										 * quote) */
+			char	   *separator = afterKey;
 
-			/* Skip whitespace */
-			while (*v && isspace((unsigned char) *v))
-				v++;
+			if (*separator == '"')
+				separator++;	/* closing quote of a JSON key */
 
-			int			quoted = 0;
+			while (*separator && isspace((unsigned char) *separator))
+				separator++;
 
-			if (!v)
-				return copyOfinput;
-
-			if (*v == '"')
+			if (*separator != ':' && *separator != '=')
 			{
-				quoted = 1;
-				v++;			/* move to first character of value */
+				/* not a key-value pair, skip */
+				match = afterKey;
+				continue;
 			}
 
-			char	   *q = v;
-
-			if (quoted)
-			{
-				/* Redact until the closing quote */
-				while (*q && *q != '"')
-				{
-					*q = '*';
-					q++;
-				}
-			}
-			else
-			{
-				/* Redact until comma, closing brace, or whitespace */
-				while (*q &&
-					   *q != ',' &&
-					   *q != '}' &&
-					   !isspace((unsigned char) *q))
-				{
-					*q = '*';
-					q++;
-				}
-			}
-
-			/* Continue search after the value we just redacted */
-			p = q;
+			match = RedactValueInPlace(separator + 1);
 		}
 	}
 
-	return copyOfinput;
+	return redacted;
 }

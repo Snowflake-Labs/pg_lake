@@ -30,6 +30,7 @@ PG_FUNCTION_INFO_V1(test_http_delete);
 PG_FUNCTION_INFO_V1(test_http_post);
 PG_FUNCTION_INFO_V1(test_http_put);
 PG_FUNCTION_INFO_V1(test_http_with_retry);
+PG_FUNCTION_INFO_V1(test_redact_sensitive_text);
 
 
 static Datum build_http_result(FunctionCallInfo fcinfo, const HttpResult * r);
@@ -135,6 +136,19 @@ test_http_with_retry(PG_FUNCTION_ARGS)
 											 MAX_HTTP_RETRY_FOR_REST_CATALOG);
 
 	PG_RETURN_DATUM(build_http_result(fcinfo, &r));
+}
+
+
+/*
+ * test_redact_sensitive_text exposes the trace redaction helper so that the
+ * masking of credentials can be tested without a live catalog.
+ */
+Datum
+test_redact_sensitive_text(PG_FUNCTION_ARGS)
+{
+	char	   *input = text_to_cstring(PG_GETARG_TEXT_PP(0));
+
+	PG_RETURN_TEXT_P(cstring_to_text(RedactSensitiveText(input)));
 }
 
 
