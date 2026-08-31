@@ -38,10 +38,12 @@ static List *DeserializeDataFileColumnBounds(List *leafFields, ColumnBound * col
 static List *SerializeDataFileColumnBounds(List *leafFields, List *columnIdDatums, List *boundDatums, List **columnTypes);
 static Datum DeserializeColumnBound(ColumnBound * bound, LeafField * leafField);
 static Datum DataFileColumnBoundsToJsonDatum(List *boundDatums, List *columnIdDatums, List *columnTypes);
+static Field * MakeScalarFieldAndPGType(const char *icebergScalarTypeName, Oid typoid, PGType * pgType);
 
 PG_FUNCTION_INFO_V1(pg_lake_read_data_file_stats);
 PG_FUNCTION_INFO_V1(pg_lake_reserialize_data_file_stats);
 PG_FUNCTION_INFO_V1(pg_lake_serde_value);
+PG_FUNCTION_INFO_V1(pg_lake_deserialize_value);
 
 /*
  * FindColumnBoundByColumnId finds ColumnBound by column id.
@@ -406,47 +408,10 @@ pg_lake_serde_value(PG_FUNCTION_ARGS)
 	const char *icebergScalarTypeName = text_to_cstring(PG_GETARG_TEXT_P(1));
 
 	Oid			typoid = get_fn_expr_argtype(fcinfo->flinfo, 0);
-	int32		typmod = -1;
 
-	Field	   *field = palloc0(sizeof(Field));
-
-	field->type = FIELD_TYPE_SCALAR;
-	field->field.scalar.typeName = pstrdup(icebergScalarTypeName);
-
-	PGType		pgType = MakePGType(typoid, typmod);
-
-	if (pgType.postgresTypeOid == NUMERICOID)
-	{
-		/* set typmod properly for numeric types */
-		int			precision = 0;
-		int			scale = 0;
-
-		if (sscanf(icebergScalarTypeName, "decimal(%d,%d)", &precision, &scale) == 2)
-		{
-			pgType.postgresTypeMod = make_numeric_typmod(precision, scale);
-		}
-	}
-
-	/* check if iceberg type and pg type matches */
-	PGType		pgTypeFromIceberg = IcebergFieldToPostgresType(field);
-
-	/*
-	 * TimeTZ is stored as Iceberg "time" (UTC-normalized), so the Iceberg
-	 * type resolves to TIMEOID while the input is TIMETZOID.  Allow this
-	 * expected mismatch.
-	 */
-	bool		isTimeTzToTime = (pgType.postgresTypeOid == TIMETZOID &&
-								  pgTypeFromIceberg.postgresTypeOid == TIMEOID);
-
-	if (pgTypeFromIceberg.postgresTypeOid != pgType.postgresTypeOid &&
-		!isTimeTzToTime &&
-		!PGTypeRequiresConversionToIcebergString(field, pgType))
-	{
-		ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
-						errmsg("expected %s type, got %s type",
-							   format_type_be(pgTypeFromIceberg.postgresTypeOid),
-							   format_type_be(pgType.postgresTypeOid))));
-	}
+	PGType		pgType;
+	Field	   *field = MakeScalarFieldAndPGType(icebergScalarTypeName, typoid,
+												 &pgType);
 
 	size_t		binaryLen = 0;
 
@@ -458,4 +423,82 @@ pg_lake_serde_value(PG_FUNCTION_ARGS)
 	}
 
 	return PGIcebergBinaryDeserialize(binaryValue, binaryLen, field, pgType);
+}
+
+
+/*
+ * pg_lake_deserialize_value deserializes a raw binary value into the type of its
+ * first argument, which is ignored. Serialization always produces a value of the
+ * right width, so this is the only way for a test to hand the deserializer the
+ * arbitrary-length bytes a manifest can actually contain.
+ */
+Datum
+pg_lake_deserialize_value(PG_FUNCTION_ARGS)
+{
+	const char *icebergScalarTypeName = text_to_cstring(PG_GETARG_TEXT_P(1));
+	bytea	   *binary = PG_GETARG_BYTEA_PP(2);
+
+	Oid			typoid = get_fn_expr_argtype(fcinfo->flinfo, 0);
+
+	PGType		pgType;
+	Field	   *field = MakeScalarFieldAndPGType(icebergScalarTypeName, typoid,
+												 &pgType);
+
+	return PGIcebergBinaryDeserialize((unsigned char *) VARDATA_ANY(binary),
+									  VARSIZE_ANY_EXHDR(binary), field, pgType);
+}
+
+
+/*
+ * MakeScalarFieldAndPGType builds the scalar Field and the PGType that the
+ * single value binary serde takes for the given Iceberg type name and Postgres
+ * type, and errors if the two do not describe the same type.
+ */
+static Field *
+MakeScalarFieldAndPGType(const char *icebergScalarTypeName, Oid typoid,
+						 PGType * pgType)
+{
+	int32		typmod = -1;
+
+	Field	   *field = palloc0(sizeof(Field));
+
+	field->type = FIELD_TYPE_SCALAR;
+	field->field.scalar.typeName = pstrdup(icebergScalarTypeName);
+
+	*pgType = MakePGType(typoid, typmod);
+
+	if (pgType->postgresTypeOid == NUMERICOID)
+	{
+		/* set typmod properly for numeric types */
+		int			precision = 0;
+		int			scale = 0;
+
+		if (sscanf(icebergScalarTypeName, "decimal(%d,%d)", &precision, &scale) == 2)
+		{
+			pgType->postgresTypeMod = make_numeric_typmod(precision, scale);
+		}
+	}
+
+	/* check if iceberg type and pg type matches */
+	PGType		pgTypeFromIceberg = IcebergFieldToPostgresType(field);
+
+	/*
+	 * TimeTZ is stored as Iceberg "time" (UTC-normalized), so the Iceberg
+	 * type resolves to TIMEOID while the input is TIMETZOID.  Allow this
+	 * expected mismatch.
+	 */
+	bool		isTimeTzToTime = (pgType->postgresTypeOid == TIMETZOID &&
+								  pgTypeFromIceberg.postgresTypeOid == TIMEOID);
+
+	if (pgTypeFromIceberg.postgresTypeOid != pgType->postgresTypeOid &&
+		!isTimeTzToTime &&
+		!PGTypeRequiresConversionToIcebergString(field, *pgType))
+	{
+		ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+						errmsg("expected %s type, got %s type",
+							   format_type_be(pgTypeFromIceberg.postgresTypeOid),
+							   format_type_be(pgType->postgresTypeOid))));
+	}
+
+	return field;
 }

@@ -90,6 +90,19 @@ PGNumericIcebergBinaryDeserialize(unsigned char *numericBinary, size_t binaryLen
 	GetDuckdbAdjustedPrecisionAndScaleFromNumericTypeMod(pgType.postgresTypeMod,
 														 &precision, &scale);
 
+	/*
+	 * Iceberg stores a decimal as the minimum number of two's complement
+	 * bytes, so any length up to the 16 bytes of a decimal(38,s) is valid.
+	 * Reject the rest: an empty value reads a byte that is not there, and a
+	 * longer one makes SignExtendNumericBinary write before its 16-byte
+	 * buffer.
+	 */
+	if (binaryLen == 0 || binaryLen > 16)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("Iceberg decimal has invalid serialized length %zu", binaryLen),
+				 errdetail("Expected 1 to 16 bytes.")));
+
 	bool		isNegative = (numericBinary[0] & 0x80) != 0;
 
 	unsigned char *adjustedNumericBinary = SignExtendNumericBinary(numericBinary, binaryLen);

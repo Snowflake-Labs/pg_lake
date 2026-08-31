@@ -1088,9 +1088,25 @@ PartitionValueToDatum(IcebergPartitionTransformType transformType, void *value, 
 			 transformType == PARTITION_TRANSFORM_HOUR ||
 			 transformType == PARTITION_TRANSFORM_BUCKET)
 	{
+		/*
+		 * These transforms all produce an Iceberg int, and the value comes
+		 * from a manifest as Avro "bytes" of arbitrary length, so a shorter
+		 * value would read past the end of it.
+		 */
+		if (valueLength != sizeof(int32))
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("partition value for transform %d has invalid serialized "
+							"length %zu", transformType, valueLength),
+					 errdetail("Expected %zu bytes.", sizeof(int32))));
+
 		*isNull = false;
 
-		return Int32GetDatum(*(int32_t *) value);
+		int32		intValue;
+
+		memcpy(&intValue, value, sizeof(intValue));
+
+		return Int32GetDatum(intValue);
 	}
 	else
 	{

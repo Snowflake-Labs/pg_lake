@@ -34,6 +34,7 @@
 #include "utils/date.h"
 #include "utils/lsyscache.h"
 #include "utils/timestamp.h"
+#include "utils/uuid.h"
 
 #ifdef WORDS_BIGENDIAN
 #define ToLittleEndian32(val) pg_bswap32(val)
@@ -52,7 +53,44 @@
 #endif
 
 
+/*
+ * FixedWidthBinaryLength is the serialized width of one Iceberg primitive.
+ *
+ * promotedFromLen is the narrower width the spec still allows, because column
+ * metrics keep the type the data file was written with: after an int -> long or
+ * float -> double promotion, older files carry 4-byte values for a type that is
+ * now 8 bytes wide. Zero means no narrower form is accepted.
+ *
+ * Types with no fixed width (text, bytea, numeric, and anything Iceberg encodes
+ * as a string) are deliberately absent and bounded by their own branch instead.
+ */
+typedef struct FixedWidthBinaryLength
+{
+	Oid			postgresTypeOid;
+	size_t		expectedLen;
+	size_t		promotedFromLen;
+}			FixedWidthBinaryLength;
+
+static const FixedWidthBinaryLength FixedWidthBinaryLengths[] = {
+	{BOOLOID, 1, 0},
+	/* iceberg does not have int16 type. we store them as int32. */
+	{INT2OID, sizeof(int32), 0},
+	{INT4OID, sizeof(int32), 0},
+	{INT8OID, sizeof(int64), sizeof(int32)},
+	{FLOAT4OID, sizeof(float4), 0},
+	{FLOAT8OID, sizeof(float8), sizeof(float4)},
+	{DATEOID, sizeof(DateADT), 0},
+	{TIMEOID, sizeof(TimeADT), 0},
+	/* timetz is stored as iceberg time, i.e. UTC microseconds */
+	{TIMETZOID, sizeof(int64), 0},
+	{TIMESTAMPOID, sizeof(Timestamp), 0},
+	{TIMESTAMPTZOID, sizeof(TimestampTz), 0},
+	{UUIDOID, UUID_LEN, 0},
+};
+
+
 static unsigned char *PGIcebergBinarySerialize(Datum datum, Field * field, PGType pgType, bool addNullTerminator, size_t *binaryLen);
+static void ErrorIfUnexpectedBinaryLength(size_t binaryLen, Field * field, PGType pgType);
 static int32 ReadLittleEndianInt32(const unsigned char *binaryValue);
 static int64 ReadLittleEndianInt64(const unsigned char *binaryValue);
 static float4 ReadLittleEndianFloat4(const unsigned char *binaryValue);
@@ -326,6 +364,8 @@ PGIcebergBinaryDeserialize(unsigned char *binaryValue, size_t binaryLen, Field *
 	Assert(field && field->type == FIELD_TYPE_SCALAR);
 	Assert(binaryValue);
 
+	ErrorIfUnexpectedBinaryLength(binaryLen, field, pgType);
+
 	Datum		datum = 0;
 
 	if (PGTypeRequiresConversionToIcebergString(field, pgType))
@@ -368,9 +408,27 @@ PGIcebergBinaryDeserialize(unsigned char *binaryValue, size_t binaryLen, Field *
 	}
 	else if (pgType.postgresTypeOid == INT8OID)
 	{
-		int64		longValue = ReadLittleEndianInt64(binaryValue);
+		/*
+		 * Per the Iceberg spec, column metrics are serialized using the type
+		 * at the time the data file was written. After an int -> long type
+		 * promotion, existing data files retain 4-byte int bounds while the
+		 * current schema expects 8-byte long. Widen on read.
+		 *
+		 * See:
+		 * https://iceberg.apache.org/spec/#binary-single-value-serialization
+		 */
+		if (binaryLen == sizeof(int32))
+		{
+			int32		intValue = ReadLittleEndianInt32(binaryValue);
 
-		datum = Int64GetDatum(longValue);
+			datum = Int64GetDatum((int64) intValue);
+		}
+		else
+		{
+			int64		longValue = ReadLittleEndianInt64(binaryValue);
+
+			datum = Int64GetDatum(longValue);
+		}
 	}
 	else if (pgType.postgresTypeOid == FLOAT4OID)
 	{
@@ -380,9 +438,23 @@ PGIcebergBinaryDeserialize(unsigned char *binaryValue, size_t binaryLen, Field *
 	}
 	else if (pgType.postgresTypeOid == FLOAT8OID)
 	{
-		float8		doubleValue = ReadLittleEndianFloat8(binaryValue);
+		/*
+		 * Same as int -> long above: after a float -> double type promotion,
+		 * existing data files retain 4-byte float bounds while the current
+		 * schema expects 8-byte double. Widen on read.
+		 */
+		if (binaryLen == sizeof(float4))
+		{
+			float4		floatValue = ReadLittleEndianFloat4(binaryValue);
 
-		datum = Float8GetDatum(doubleValue);
+			datum = Float8GetDatum((float8) floatValue);
+		}
+		else
+		{
+			float8		doubleValue = ReadLittleEndianFloat8(binaryValue);
+
+			datum = Float8GetDatum(doubleValue);
+		}
 	}
 	else if (pgType.postgresTypeOid == DATEOID)
 	{
@@ -467,6 +539,45 @@ PGIcebergBinaryDeserialize(unsigned char *binaryValue, size_t binaryLen, Field *
 	}
 
 	return datum;
+}
+
+
+/*
+ * ErrorIfUnexpectedBinaryLength rejects a fixed-width value that is not exactly
+ * as wide as its type. The bytes are Avro "bytes" of arbitrary length taken from
+ * a manifest we did not necessarily write, so without this every fixed-width
+ * read in PGIcebergBinaryDeserialize is an out-of-bounds read waiting for a
+ * short value.
+ */
+static void
+ErrorIfUnexpectedBinaryLength(size_t binaryLen, Field * field, PGType pgType)
+{
+	/* string-encoded types carry a value of any length, e.g. geometry */
+	if (PGTypeRequiresConversionToIcebergString(field, pgType))
+		return;
+
+	for (int i = 0; i < lengthof(FixedWidthBinaryLengths); i++)
+	{
+		if (FixedWidthBinaryLengths[i].postgresTypeOid != pgType.postgresTypeOid)
+			continue;
+
+		size_t		expectedLen = FixedWidthBinaryLengths[i].expectedLen;
+		size_t		promotedFromLen = FixedWidthBinaryLengths[i].promotedFromLen;
+
+		if (binaryLen == expectedLen ||
+			(promotedFromLen > 0 && binaryLen == promotedFromLen))
+			return;
+
+		char	   *expectedLengths = promotedFromLen > 0 ?
+			psprintf("%zu or %zu", promotedFromLen, expectedLen) :
+			psprintf("%zu", expectedLen);
+
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("Iceberg value of type %s has invalid serialized length %zu",
+						format_type_be(pgType.postgresTypeOid), binaryLen),
+				 errdetail("Expected %s bytes.", expectedLengths)));
+	}
 }
 
 
