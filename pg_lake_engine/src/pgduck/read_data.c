@@ -57,6 +57,7 @@ static char *ReadDataSourceFunction(List *sourcePaths,
 									bool emitRowId);
 static char *BuildParquetSchema(DataFileSchema * schema, bool emitRowId);
 static char *GetSchemaType(Field * mapping);
+static const char *IcebergScalarTypeNameToDuckDBTypeName(const char *icebergTypeName);
 static char *ReadEmptyDataSource(TupleDesc tupleDesc, CopyDataFormat format,
 								 bool preferVarchar,
 								 ReadRowLocationMode emitRowLocation);
@@ -639,9 +640,13 @@ GetSchemaType(Field * field)
 	switch (field->type)
 	{
 		case FIELD_TYPE_SCALAR:
-			/* For scalar types, simply append the type name */
-			appendStringInfoString(&str, field->field.scalar.typeName);
-			break;
+			{
+				const char *typeName =
+					IcebergScalarTypeNameToDuckDBTypeName(field->field.scalar.typeName);
+
+				appendStringInfoString(&str, typeName);
+				break;
+			}
 
 		case FIELD_TYPE_LIST:
 			{
@@ -695,6 +700,24 @@ GetSchemaType(Field * field)
 
 	/* Return the constructed type string */
 	return str.data;
+}
+
+
+/*
+ * IcebergScalarTypeNameToDuckDBTypeName maps an Iceberg scalar type name to the
+ * DuckDB type name used in the read_parquet() schema option.
+ *
+ * The Iceberg names we store double as DuckDB type names, so they are passed
+ * through as-is. The exception is fixed[L], which DuckDB parses as an array of
+ * L "fixed" values instead of a fixed-length binary.
+ */
+static const char *
+IcebergScalarTypeNameToDuckDBTypeName(const char *icebergTypeName)
+{
+	if (strncmp(icebergTypeName, "fixed", strlen("fixed")) == 0)
+		return "BLOB";
+
+	return icebergTypeName;
 }
 
 
