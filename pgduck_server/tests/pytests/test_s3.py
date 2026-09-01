@@ -283,21 +283,23 @@ def test_denied_key_containing_301_keeps_its_own_error(
         "region301_reader", [f"{prefix}_allowed"]
     )
 
-    perform_query(
-        f"""
+    # DuckDB holds secrets in a transactional catalog set, and a denied read
+    # aborts the transaction it ran in -- so the rollback that clears the abort
+    # takes the secret with it. Re-assert it before each read; without it the
+    # second read has no endpoint and goes to the real s3.amazonaws.com.
+    create_secret = f"""
         CREATE OR REPLACE SECRET region301 (
             TYPE S3, KEY_ID '{access_key_id}', SECRET '{secret_access_key}',
             REGION '{server.region}', ENDPOINT '{server.endpoint}',
             SCOPE 's3://{server.bucket}/{prefix}',
             URL_STYLE 'path', USE_SSL false
         );
-        """,
-        pgduck_conn,
-    )
+        """
     server.enforce()
 
     try:
         for key in keys:
+            perform_query(create_secret, pgduck_conn)
             error = run_command(
                 f"SELECT count(*) FROM read_parquet('s3://{server.bucket}/{key}')",
                 pgduck_conn,
@@ -307,6 +309,9 @@ def test_denied_key_containing_301_keeps_its_own_error(
 
             assert error is not None, f"the read of {key} was not denied"
             assert "403" in error, f"expected a denial for {key}, got: {error}"
+            # a read that lost the secret leaves for the real S3, which can deny
+            # it too -- for having no credentials, which proves nothing here
+            assert server.endpoint in error, f"{key} missed moto: {error}"
             assert key in error, f"{key}: the error is about another request: {error}"
     finally:
         server.relax()
