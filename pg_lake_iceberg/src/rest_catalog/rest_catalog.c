@@ -153,8 +153,12 @@ ValidateRestCatalogOptions(const RestCatalogOptions * opts,
 	 * it is called, so the requirement is deferred rather than dropped.  A
 	 * provider that declines falls back to the OAuth2 grant, which reports
 	 * the missing credential before sending anything.
+	 *
+	 * Only the built-in catalog is ever offered to the provider, so a
+	 * user-created server must still produce its own credentials.
 	 */
-	if (RestCatalogAuthProviderName != NULL && RestCatalogAuthProviderName[0] != '\0')
+	if (isBuiltin &&
+		RestCatalogAuthProviderName != NULL && RestCatalogAuthProviderName[0] != '\0')
 		return;
 
 	bool		missingSecret = (opts->clientSecret == NULL || opts->clientSecret[0] == '\0');
@@ -230,6 +234,7 @@ BuildRestCatalogOptionsFromServer(const char *serverName,
 	opts->serverOid = server->serverid;
 	opts->userMappingOid = InvalidOid;
 	opts->catalog = pstrdup(userVisibleCatalog);
+	opts->isBuiltin = isBuiltin;
 	ApplyGUCDefaults(opts, isBuiltin);
 	ApplyServerOptionOverrides(opts, server);
 
@@ -413,6 +418,7 @@ CopyRestCatalogOptions(MemoryContext dst, const RestCatalogOptions * src)
 	copy->catalogName = src->catalogName ? pstrdup(src->catalogName) : NULL;
 	copy->authType = src->authType;
 	copy->enableVendedCredentials = src->enableVendedCredentials;
+	copy->isBuiltin = src->isBuiltin;
 
 	MemoryContextSwitchTo(oldctx);
 	return copy;

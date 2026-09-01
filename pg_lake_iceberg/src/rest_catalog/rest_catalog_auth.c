@@ -303,12 +303,22 @@ ResolveRestCatalogAuthProvider(void)
  * Produces the Authorization header value for a catalog, either from a
  * configured provider or from pg_lake's own OAuth2 client-credentials
  * grant.
+ *
+ * The provider is offered only the built-in catalog.  It mints a
+ * deployment-wide credential from the machine's own identity rather than from
+ * anything the caller supplied, so it is subject to the same rule as the
+ * credential GUCs: it may not be spent on an endpoint a server owner chose.
+ * Any role with USAGE on the FDW can CREATE SERVER and name its
+ * rest_endpoint, so consulting the provider there would hand that role a
+ * token minted for the deployment.  User-created servers authenticate with
+ * their own user mapping credentials instead.
  */
 static void
 FetchRestCatalogAuthorization(RestCatalogOptions * opts, bool forceRefresh,
 							  char **authorization, int *expiresIn)
 {
-	PgLakeRestCatalogAuthProvider provider = ResolveRestCatalogAuthProvider();
+	PgLakeRestCatalogAuthProvider provider =
+		opts->isBuiltin ? ResolveRestCatalogAuthProvider() : NULL;
 
 	if (provider != NULL)
 	{

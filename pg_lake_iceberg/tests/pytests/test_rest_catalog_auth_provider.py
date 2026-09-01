@@ -16,6 +16,7 @@ backend-local, so a credential cached by one test would otherwise be
 reused by the next.
 """
 
+import contextlib
 import json
 import socket
 import threading
@@ -41,6 +42,10 @@ AS 'pg_lake_iceberg', 'test_rest_catalog_auth_provider_endpoints';
 CREATE OR REPLACE FUNCTION register_namespace_to_rest_catalog(TEXT,TEXT)
 RETURNS void LANGUAGE C VOLATILE STRICT
 AS 'pg_lake_iceberg', 'register_namespace_to_rest_catalog';
+
+CREATE OR REPLACE FUNCTION register_namespace_to_named_catalog(TEXT,TEXT,TEXT)
+RETURNS void LANGUAGE C VOLATILE STRICT
+AS 'pg_lake_iceberg', 'register_namespace_to_named_catalog';
 """
 
 # The stub provider lives in pg_lake_iceberg itself, which is what a real
@@ -132,6 +137,7 @@ def catalog_and_conn(postgres):
     """
     port = _find_free_port()
     handler_class = _make_handler_class()
+    handler_class.port = port
     httpd = HTTPServer(("127.0.0.1", port), handler_class)
 
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -195,6 +201,48 @@ def _touch_catalog(conn, namespace):
         f"SELECT register_namespace_to_rest_catalog('mycat', '{namespace}')", conn
     )
     conn.commit()
+
+
+def _touch_named_catalog(conn, catalog, namespace):
+    run_command(
+        f"SELECT register_namespace_to_named_catalog('{catalog}', 'mycat', '{namespace}')",
+        conn,
+    )
+    conn.commit()
+
+
+@contextlib.contextmanager
+def _user_created_server(conn, port, with_credentials=True):
+    """
+    A REST catalog server of the kind any role with USAGE on the FDW can
+    create, pointing wherever its creator likes.  Credentials, when it has
+    any, come from its own user mapping.
+    """
+    server = f"user_srv_{uuid.uuid4().hex[:8]}"
+
+    run_command(
+        f"""
+        CREATE SERVER {server} TYPE 'rest' FOREIGN DATA WRAPPER iceberg_catalog
+        OPTIONS (rest_endpoint 'http://127.0.0.1:{port}')
+        """,
+        conn,
+    )
+    if with_credentials:
+        run_command(
+            f"""
+            CREATE USER MAPPING FOR CURRENT_USER SERVER {server}
+            OPTIONS (client_id 'own_id', client_secret 'own_secret')
+            """,
+            conn,
+        )
+    conn.commit()
+
+    try:
+        yield server
+    finally:
+        conn.rollback()
+        run_command(f"DROP SERVER IF EXISTS {server} CASCADE", conn)
+        conn.commit()
 
 
 def test_the_provider_is_told_how_the_catalog_is_addressed(
@@ -429,6 +477,64 @@ def test_malformed_provider_name_is_rejected(
             _touch_catalog(conn, "myns")
     finally:
         conn.close()
+
+
+def test_a_user_created_server_is_never_offered_the_provider(
+    iceberg_extension, installcheck, catalog_and_conn
+):
+    """
+    A provider mints its credential from the deployment's own identity, not
+    from anything the caller supplied, which puts it under the same rule as
+    the credential GUCs: it may not be spent on an endpoint a server owner
+    chose.  Any role with USAGE on the FDW can CREATE SERVER and name its
+    rest_endpoint, so consulting the provider there would hand that role a
+    credential minted for the deployment.  Such a server authenticates with
+    its own user mapping instead.
+    """
+    if installcheck:
+        return
+
+    handler_class, conn = catalog_and_conn
+
+    _install_hook(conn, "Snowflake-WIF deployment-credential", 3600, "true")
+
+    with _user_created_server(conn, handler_class.port) as server:
+        _touch_named_catalog(conn, server, "myns")
+
+    assert (
+        _hook_calls(conn) == 0
+    ), "the provider was consulted for a user-created server"
+    assert (
+        handler_class.token_requests == 1
+    ), "the server did not authenticate with its own credentials"
+    assert handler_class.data_request_auths[0].startswith("Bearer ")
+
+
+def test_a_user_created_server_still_needs_its_own_credentials(
+    iceberg_extension, installcheck, catalog_and_conn
+):
+    """
+    The credential check is deferred while a provider is configured, because
+    only the call tells us whether the provider claims the catalog.  That
+    reasoning does not reach a user-created server, which is never offered to
+    the provider, so its missing credentials must still be reported rather
+    than sent to the catalog as an empty one.
+    """
+    if installcheck:
+        return
+
+    handler_class, conn = catalog_and_conn
+
+    _install_hook(conn, "Snowflake-WIF deployment-credential", 3600, "true")
+
+    with _user_created_server(
+        conn, handler_class.port, with_credentials=False
+    ) as server:
+        with pytest.raises(Exception, match="no credentials found"):
+            _touch_named_catalog(conn, server, "myns")
+        conn.rollback()
+
+    assert handler_class.data_request_auths == []
 
 
 def test_catalog_401_refreshes_the_credential(

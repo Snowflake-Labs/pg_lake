@@ -28,6 +28,7 @@
 #include "pg_lake/rest_catalog/rest_catalog.h"
 
 PG_FUNCTION_INFO_V1(register_namespace_to_rest_catalog);
+PG_FUNCTION_INFO_V1(register_namespace_to_named_catalog);
 PG_FUNCTION_INFO_V1(get_rest_metadata_location);
 PG_FUNCTION_INFO_V1(get_rest_vended_credentials);
 PG_FUNCTION_INFO_V1(resolve_rest_catalog_base_uri);
@@ -46,6 +47,25 @@ register_namespace_to_rest_catalog(PG_FUNCTION_ARGS)
 	char	   *namespaceName = text_to_cstring(PG_GETARG_TEXT_P(1));
 
 	RestCatalogOptions *opts = ResolveRestCatalogOptions(REST_CATALOG_NAME);
+
+	RegisterNamespaceToRestCatalog(opts, catalogName, namespaceName);
+	PG_RETURN_VOID();
+}
+
+
+/*
+ * register_namespace_to_named_catalog is the same as above for a catalog the
+ * caller names, which is how a test reaches a user-created server rather than
+ * the built-in one.
+ */
+Datum
+register_namespace_to_named_catalog(PG_FUNCTION_ARGS)
+{
+	char	   *catalog = text_to_cstring(PG_GETARG_TEXT_P(0));
+	char	   *catalogName = text_to_cstring(PG_GETARG_TEXT_P(1));
+	char	   *namespaceName = text_to_cstring(PG_GETARG_TEXT_P(2));
+
+	RestCatalogOptions *opts = ResolveRestCatalogOptions(catalog);
 
 	RegisterNamespaceToRestCatalog(opts, catalogName, namespaceName);
 	PG_RETURN_VOID();

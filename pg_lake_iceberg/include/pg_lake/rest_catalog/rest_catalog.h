@@ -135,6 +135,9 @@ typedef struct RestCatalogOptions
 	char	   *catalogName;	/* REST API catalog prefix; defaults to dbname */
 	int			authType;
 	bool		enableVendedCredentials;
+	bool		isBuiltin;		/* the extension-owned built-in server, whose
+								 * endpoint no user can choose; gates every
+								 * deployment-wide credential */
 }			RestCatalogOptions;
 
 /*
