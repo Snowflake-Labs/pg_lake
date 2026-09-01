@@ -1942,46 +1942,18 @@ RewriteFuncExprToHex(Node *node, void *context)
 		castExpr->args = list_make1(arg);
 		castExpr->location = -1;
 
-		Const	   *maskConst = makeConst(INT8OID, -1, InvalidOid, sizeof(int64),
-										   Int64GetDatum(INT64CONST(4294967295)),
-										   false, true);
-
-		Oid			andOpNo = OpernameGetOprid(list_make1(makeString("&")),
-												INT8OID, INT8OID);
-
-		if (!OidIsValid(andOpNo))
-			return node;
-
-		OpExpr	   *andExpr = makeNode(OpExpr);
-
-		andExpr->opno = andOpNo;
-		andExpr->opfuncid = F_INT8AND;
-		andExpr->opresulttype = INT8OID;
-		andExpr->opretset = false;
-		andExpr->args = list_make2(castExpr, maskConst);
-		andExpr->location = -1;
+		Node	   *maskExpr = MakeOpExpr((Node *) castExpr, "pg_catalog", "&",
+										   (Node *) MakeInt64Const(INT64CONST(4294967295)));
 
 		funcExpr->funcid = F_TO_HEX_INT8;
-		funcExpr->args = list_make1(andExpr);
+		funcExpr->args = list_make1(maskExpr);
 	}
 	else if (funcExpr->funcid != F_TO_HEX_INT8)
 	{
 		elog(ERROR, "unexpected function ID in rewrite %d", funcExpr->funcid);
 	}
 
-	FuncExpr   *lowerExpr = makeNode(FuncExpr);
-
-	lowerExpr->funcid = F_LOWER_TEXT;
-	lowerExpr->funcresulttype = TEXTOID;
-	lowerExpr->funcretset = false;
-	lowerExpr->funcvariadic = false;
-	lowerExpr->funcformat = COERCE_EXPLICIT_CALL;
-	lowerExpr->funccollid = funcExpr->funccollid;
-	lowerExpr->inputcollid = funcExpr->funccollid;
-	lowerExpr->args = list_make1((Node *) funcExpr);
-	lowerExpr->location = -1;
-
-	return (Node *) lowerExpr;
+	return MakeLowerCaseExpr((Node *) funcExpr);
 }
 
 
