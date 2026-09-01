@@ -195,3 +195,53 @@ def test_special_values_across_float_and_numeric_types(
         pg_conn.rollback()
         run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
         pg_conn.commit()
+
+
+def test_nan_numeric_conversions_not_pushed_down(
+    s3, pg_conn, extension, with_default_location
+):
+    """A float-to-numeric cast and a NaN numeric constant are evaluated in
+    PostgreSQL rather than DuckDB.
+
+    PostgreSQL casts a float to numeric by rounding the shortest decimal text
+    that round-trips the float, DuckDB rounds the binary value itself, so
+    1.005::float8::numeric(10,2) is 1.01 in PostgreSQL and 1.00 in DuckDB.
+    DuckDB's DECIMAL also has no NaN, so a NaN fails the cast where PostgreSQL
+    yields NaN.
+    """
+    schema = "test_nan_numeric_conversions"
+
+    run_command(
+        f"""
+        CREATE SCHEMA {schema};
+        CREATE TABLE {schema}.t (id int, f4 float4, f8 float8) USING iceberg;
+        INSERT INTO {schema}.t VALUES (1, 1.005, 1.005), (2, 'NaN', 'NaN');
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    try:
+        for column in ("f4", "f8"):
+            query = f"SELECT {column}::numeric(10,2) FROM {schema}.t ORDER BY id"
+
+            results = run_query("EXPLAIN " + query, pg_conn)
+            assert "Custom Scan (Query Pushdown)" not in str(results)
+
+            rows = run_query(query, pg_conn)
+            assert rows[0][0] == Decimal("1.01"), f"{column} rounded like DuckDB"
+            assert rows[1][0].is_nan(), f"{column} NaN did not survive the cast"
+
+        # the constant is folded before planning, so the value itself is what
+        # makes the query unshippable
+        query = f"SELECT 'NaN'::numeric(10,2) FROM {schema}.t WHERE id = 1"
+
+        results = run_query("EXPLAIN " + query, pg_conn)
+        assert "Custom Scan (Query Pushdown)" not in str(results)
+
+        assert run_query(query, pg_conn)[0][0].is_nan()
+
+    finally:
+        pg_conn.rollback()
+        run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
+        pg_conn.commit()

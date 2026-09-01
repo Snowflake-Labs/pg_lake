@@ -95,7 +95,9 @@ IsTemporalType(Oid typeOid)
  *
  * Validation covers: temporal boundaries (date/timestamp/timestamptz),
  * multidimensional array rejection (any array type), and bounded
- * numeric NaN (non-pushdown only, since numeric blocks pushdown).
+ * numeric NaN.  The latter is non-pushdown only: a bounded numeric is
+ * pushed down only when the query cannot produce a NaN for it, so there
+ * is nothing left to validate on that path.
  * Unbounded and large-precision numerics are mapped to float8 on
  * Iceberg tables, so NaN is valid for those and no validation is needed.
  */

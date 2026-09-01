@@ -28,9 +28,7 @@
 #include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/util/rel_utils.h"
-#include "miscadmin.h"
 #include "nodes/makefuncs.h"
-#include "optimizer/tlist.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/parsenodes.h"
 #include "parser/parsetree.h"
@@ -38,19 +36,14 @@
 #include "utils/lsyscache.h"
 #include "utils/typcache.h"
 
-/* bounds the subquery nesting ExprIsNanFreeNumeric descends through */
-#define MAX_NAN_FREE_NESTING 8
 
 static RangeTblEntry *GetSelectRteFromInsertSelect(Query *query);
 static RangeTblEntry *GetInsertRteFromInsertSelect(Query *query);
 static bool TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod,
 											  CopyDataFormat sourceFormat,
 											  NumericPushdownSafety numericSafety);
-static NumericPushdownSafety InsertSelectNumericSafety(Query *query,
-													   Relation insertRelation);
-static bool SetOperationIsNanFreeNumeric(Node *setOperation,
-										 Query *setOperationQuery,
-										 AttrNumber columnNumber, int depth);
+static bool QueryIntroducesNanNumeric(Node *node, void *context);
+static NumericPushdownSafety InsertSelectNumericSafety(Query *query);
 
 /* pg_lake_table.enable_insert_select_pushdown setting */
 bool		EnableInsertSelectPushdown = true;
@@ -126,8 +119,7 @@ IsPushdownableInsertSelectQuery(Query *query)
 	PgLakeTableProperties properties =
 		GetPgLakeTableProperties(insertIntoRelid);
 
-	NumericPushdownSafety numericSafety =
-		InsertSelectNumericSafety(query, insertRelation);
+	NumericPushdownSafety numericSafety = InsertSelectNumericSafety(query);
 
 	if (!RelationColumnsSuitableForPushdown(insertRelation, properties.format,
 											numericSafety))
@@ -414,166 +406,50 @@ RelationSuitableForPushdown(Relation relation, bool allowDefaultConsts)
 
 
 /*
- * ExprIsNanFreeNumeric returns whether expr, resolved in the context of
- * query, can only yield a numeric that is not NaN.
+ * QueryIntroducesNanNumeric returns whether the query can put a NaN into a
+ * numeric column of the insert target.
  *
- * The only expression accepted is a reference to a bounded numeric column of
- * an Iceberg table pg_lake manages itself: pg_lake wrote the data files, so
- * the column really is a Parquet DECIMAL, and that encoding has no NaN.
- * Everything else -- casts, arithmetic, constants, other sources -- is treated
- * as NaN-capable.  Accepting only what is known to be safe is deliberate:
- * rejecting only what is known to be unsafe would have to enumerate every
- * spelling that can introduce a NaN (numeric(float8), CoerceViaIO from text,
- * division, ...) and would silently admit the ones it missed.
+ * Float-to-numeric casts and NaN numeric constants are not shippable, so a query
+ * containing one never reaches pushdown.  Two sources of a NaN remain:
+ *
+ *   - text-to-numeric, because PostgreSQL parses 'NaN' out of text
+ *   - a numeric parameter, whose value is not known when we plan
+ *
+ * Anything else is NaN-free: only pg_lake tables are shippable as a source, and a
+ * numeric column of one is either read as a DECIMAL, which has no NaN encoding,
+ * or was converted to float8 at CREATE TABLE time and needs a cast to get back
+ * to numeric.  DuckDB decimal arithmetic cannot produce a NaN either.
  */
 static bool
-ExprIsNanFreeNumeric(Node *expr, Query *query, int depth)
+QueryIntroducesNanNumeric(Node *node, void *context)
 {
-	/* guards against a pathological or cyclic subquery nest */
-	if (expr == NULL || depth > MAX_NAN_FREE_NESTING)
+	if (node == NULL)
 		return false;
 
-	if (!IsA(expr, Var))
-		return false;
+	if (IsA(node, Query))
+		return query_tree_walker((Query *) node, QueryIntroducesNanNumeric,
+								 context, 0);
 
-	Var		   *var = (Var *) expr;
+	if (IsA(node, CoerceViaIO) &&
+		((CoerceViaIO *) node)->resulttype == NUMERICOID)
+		return true;
 
-	/* an outer reference cannot be resolved against this query's rtable */
-	if (var->varlevelsup != 0 || var->varattno < 1)
-		return false;
+	if (IsA(node, Param) && ((Param *) node)->paramtype == NUMERICOID)
+		return true;
 
-	if (var->vartype != NUMERICOID)
-		return false;
-
-	if (var->varno < 1 || var->varno > list_length(query->rtable))
-		return false;
-
-	RangeTblEntry *rte = rt_fetch(var->varno, query->rtable);
-
-	if (rte->rtekind == RTE_SUBQUERY)
-	{
-		Query	   *subquery = rte->subquery;
-
-		/*
-		 * PostgreSQL builds the target list of a set operation from its
-		 * leftmost leaf, so the Vars reachable from here never mention the
-		 * other branches.  Those have to be visited through the set operation
-		 * tree instead.
-		 */
-		if (subquery->setOperations != NULL)
-			return SetOperationIsNanFreeNumeric(subquery->setOperations,
-												subquery, var->varattno,
-												depth + 1);
-
-		TargetEntry *targetEntry =
-			get_tle_by_resno(subquery->targetList, var->varattno);
-
-		if (targetEntry == NULL || targetEntry->resjunk)
-			return false;
-
-		return ExprIsNanFreeNumeric((Node *) targetEntry->expr, subquery,
-									depth + 1);
-	}
-
-	if (rte->rtekind != RTE_RELATION)
-		return false;
-
-	/*
-	 * A declared numeric column only guarantees a Parquet DECIMAL underneath
-	 * when pg_lake wrote the data files.  Over a foreign table the
-	 * declaration can sit on a physically DOUBLE column, which does carry
-	 * NaN, and a CSV or JSON source is parsed with PostgreSQL semantics,
-	 * which accept NaN.
-	 */
-	if (!IsInternalIcebergTable(rte->relid))
-		return false;
-
-	return !IsUnsupportedNumericForIceberg(var->vartype, var->vartypmod);
+	return expression_tree_walker(node, QueryIntroducesNanNumeric, context);
 }
 
 
 /*
- * SetOperationIsNanFreeNumeric returns whether column columnNumber of every
- * leaf of setOperation can only yield a numeric that is not NaN.
- *
- * The leaves all project the same columns in the same order, so one column
- * number applies to all of them.
- */
-static bool
-SetOperationIsNanFreeNumeric(Node *setOperation, Query *setOperationQuery,
-							 AttrNumber columnNumber, int depth)
-{
-	check_stack_depth();
-
-	if (setOperation == NULL)
-		return false;
-
-	if (IsA(setOperation, SetOperationStmt))
-	{
-		SetOperationStmt *setOperationStmt = (SetOperationStmt *) setOperation;
-
-		return SetOperationIsNanFreeNumeric(setOperationStmt->larg,
-											setOperationQuery, columnNumber,
-											depth) &&
-			SetOperationIsNanFreeNumeric(setOperationStmt->rarg,
-										 setOperationQuery, columnNumber,
-										 depth);
-	}
-
-	if (!IsA(setOperation, RangeTblRef))
-		return false;
-
-	RangeTblRef *rangeTblRef = (RangeTblRef *) setOperation;
-
-	if (rangeTblRef->rtindex < 1 ||
-		rangeTblRef->rtindex > list_length(setOperationQuery->rtable))
-		return false;
-
-	RangeTblEntry *leafRte = rt_fetch(rangeTblRef->rtindex,
-									  setOperationQuery->rtable);
-
-	if (leafRte->rtekind != RTE_SUBQUERY)
-		return false;
-
-	TargetEntry *targetEntry = get_tle_by_resno(leafRte->subquery->targetList,
-												columnNumber);
-
-	if (targetEntry == NULL || targetEntry->resjunk)
-		return false;
-
-	return ExprIsNanFreeNumeric((Node *) targetEntry->expr, leafRte->subquery,
-								depth + 1);
-}
-
-
-/*
- * InsertSelectNumericSafety reports whether every bounded numeric column of
- * the insert target is fed by a value that cannot be NaN.
+ * InsertSelectNumericSafety reports whether a NaN can reach a bounded numeric
+ * column of the insert target.
  */
 static NumericPushdownSafety
-InsertSelectNumericSafety(Query *query, Relation insertRelation)
+InsertSelectNumericSafety(Query *query)
 {
-	TupleDesc	tupleDesc = RelationGetDescr(insertRelation);
-	ListCell   *targetEntryCell = NULL;
-
-	foreach(targetEntryCell, query->targetList)
-	{
-		TargetEntry *targetEntry = lfirst(targetEntryCell);
-
-		if (targetEntry->resjunk)
-			continue;
-
-		if (targetEntry->resno < 1 || targetEntry->resno > tupleDesc->natts)
-			return NUMERIC_PUSHDOWN_MAY_BE_NAN;
-
-		Form_pg_attribute column = TupleDescAttr(tupleDesc, targetEntry->resno - 1);
-
-		if (column->attisdropped || column->atttypid != NUMERICOID)
-			continue;
-
-		if (!ExprIsNanFreeNumeric((Node *) targetEntry->expr, query, 0))
-			return NUMERIC_PUSHDOWN_MAY_BE_NAN;
-	}
+	if (QueryIntroducesNanNumeric((Node *) query, NULL))
+		return NUMERIC_PUSHDOWN_MAY_BE_NAN;
 
 	return NUMERIC_PUSHDOWN_NAN_FREE;
 }
@@ -601,42 +477,34 @@ TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod,
 		return true;
 	}
 
-	/*
-	 * Numeric type handling varies by precision:
-	 *
-	 * - Bounded (precision <= 38): maps to DuckDB DECIMAL, which has no NaN
-	 * representation.  A NaN reaching DuckDB fails the cast to DECIMAL rather
-	 * than honouring out_of_range_values, and the failure happens inside the
-	 * projection that performs the cast, so no wrapper around the query can
-	 * intercept it.  Pushdown therefore requires the caller to have
-	 * established that no value feeding such a column can be NaN; otherwise
-	 * the write stays on the non-pushdown path, which clamps or rejects NaN
-	 * via IcebergErrorOrClampSlotInPlace / IcebergErrorOrClampDatum.
-	 *
-	 * - Unbounded or precision > 38: on Iceberg tables these are converted to
-	 * float8 at CREATE TABLE time by
-	 * MaybeConvertUnsupportedNumericColumnsToDouble (or rejected if that GUC
-	 * is off), so they never appear as NUMERICOID at pushdown time. On
-	 * non-Iceberg tables, they remain NUMERICOID and are blocked here for the
-	 * same NaN reason.
-	 */
 	if (typeId == NUMERICOID)
 	{
-#ifdef USE_ASSERT_CHECKING
-		if (sourceFormat == DATA_FORMAT_ICEBERG)
+		/*
+		 * An unbounded numeric, or one wider than DuckDB's DECIMAL, has no
+		 * DuckDB type that preserves it.  Iceberg tables convert those
+		 * columns to float8 at CREATE TABLE time (see
+		 * MaybeConvertUnsupportedNumericColumnsToDouble), so they only reach
+		 * here on other pg_lake tables.
+		 */
+		if (IsUnsupportedNumericForIceberg(typeId, typmod))
 		{
-			Assert(!IsUnboundedNumeric(typeId, typmod));
+			ereport(DEBUG4,
+					(errmsg("Numeric type without a DuckDB decimal equivalent "
+							"is not pushdownable")));
 
-			int			precision = -1;
-			int			scale = -1;
-
-			GetDuckdbAdjustedPrecisionAndScaleFromNumericTypeMod(typmod,
-																 &precision,
-																 &scale);
-			Assert(precision <= DUCKDB_MAX_NUMERIC_PRECISION);
+			return true;
 		}
-#endif
 
+		/*
+		 * A bounded numeric maps to DuckDB DECIMAL, which has no NaN.  A NaN
+		 * reaching DuckDB fails the cast to DECIMAL rather than honouring
+		 * out_of_range_values, and it fails inside the projection that
+		 * performs the cast, so no wrapper around the query can intercept it.
+		 * The caller has to have established that no value feeding the column
+		 * can be NaN; otherwise the write stays on the non-pushdown path,
+		 * which clamps or rejects NaN via IcebergErrorOrClampSlotInPlace /
+		 * IcebergErrorOrClampDatum.
+		 */
 		if (numericSafety != NUMERIC_PUSHDOWN_NAN_FREE)
 		{
 			ereport(DEBUG4,
@@ -659,10 +527,10 @@ TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod,
 
 		return TypeContainsUnsuitableForPushdown(keyType.postgresTypeOid,
 												 keyType.postgresTypeMod, sourceFormat,
-												 NUMERIC_PUSHDOWN_MAY_BE_NAN) ||
+												 numericSafety) ||
 			TypeContainsUnsuitableForPushdown(valType.postgresTypeOid,
 											  valType.postgresTypeMod, sourceFormat,
-											  NUMERIC_PUSHDOWN_MAY_BE_NAN);
+											  numericSafety);
 	}
 
 	/*
@@ -683,7 +551,7 @@ TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod,
 		Oid			elemType = get_element_type(typeId);
 
 		return TypeContainsUnsuitableForPushdown(elemType, typmod, sourceFormat,
-												 NUMERIC_PUSHDOWN_MAY_BE_NAN);
+												 numericSafety);
 	}
 
 	/* Recurse into composite type fields */
@@ -700,7 +568,7 @@ TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod,
 
 			if (TypeContainsUnsuitableForPushdown(attr->atttypid, attr->atttypmod,
 												  sourceFormat,
-												  NUMERIC_PUSHDOWN_MAY_BE_NAN))
+												  numericSafety))
 			{
 				ReleaseTupleDesc(tupdesc);
 				return true;
