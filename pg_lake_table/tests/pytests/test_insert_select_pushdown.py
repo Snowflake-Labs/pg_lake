@@ -1394,11 +1394,12 @@ def test_numeric_insert_select_pushdown(
     with_default_location,
 ):
     """A bounded numeric column is pushdownable only when every value feeding
-    it is read from a decimal column of a Parquet-based source, which cannot
-    encode NaN.  Anything that could yield a NaN stays on the non-pushdown
-    path, where out_of_range_values is applied per datum."""
+    it is read from a decimal column of an Iceberg table pg_lake wrote itself,
+    which cannot encode NaN.  Anything that could yield a NaN stays on the
+    non-pushdown path, where out_of_range_values is applied per datum."""
     schema = "test_numeric_pushdown"
     csv_url = f"s3://{TEST_BUCKET}/{schema}/src.csv"
+    parquet_url = f"s3://{TEST_BUCKET}/{schema}/dbl.parquet"
 
     run_command(f"CREATE SCHEMA {schema};", pg_conn)
     run_command(f"SET search_path TO {schema};", pg_conn)
@@ -1416,6 +1417,9 @@ def test_numeric_insert_select_pushdown(
 
             CREATE TABLE txt_src (id bigint, val text) USING iceberg;
             INSERT INTO txt_src VALUES (1, '1.5'), (2, 'NaN');
+
+            CREATE TABLE small_src (id bigint, val numeric(10,2)) USING iceberg;
+            INSERT INTO small_src VALUES (1, 1.5);
 
             CREATE TABLE num_clamp (id bigint, val numeric(10,2)) USING iceberg
                 WITH (out_of_range_values = 'clamp');
@@ -1511,6 +1515,62 @@ def test_numeric_insert_select_pushdown(
             "EXPLAIN INSERT INTO int_tgt SELECT id FROM csv_src", pg_conn
         )
         assert "Custom Scan (Query Pushdown)" in str(results)
+
+        # a set operation takes its target list from the leftmost leaf, so the
+        # other branches have to be checked in their own right
+        union_of_leaves = (
+            "SELECT id, val FROM small_src "
+            "UNION ALL SELECT id, val::numeric(10,2) FROM txt_src"
+        )
+        results = run_query(f"EXPLAIN INSERT INTO num_clamp {union_of_leaves}", pg_conn)
+        assert "Custom Scan (Query Pushdown)" not in str(results)
+
+        run_command("DELETE FROM num_clamp;", pg_conn)
+        run_command(f"INSERT INTO num_clamp {union_of_leaves};", pg_conn)
+        pg_conn.commit()
+
+        # three rows in, and only the 'NaN' one clamped to NULL
+        counts = run_query("SELECT count(*), count(val) FROM num_clamp", pg_conn)[0]
+        assert counts[0] == 3
+        assert counts[1] == 2
+
+        # a set operation whose every leaf is a decimal column is still
+        # pushed down
+        results = run_query(
+            "EXPLAIN INSERT INTO num_clamp SELECT id, val FROM small_src"
+            " UNION ALL SELECT id, val FROM small_src",
+            pg_conn,
+        )
+        assert "Custom Scan (Query Pushdown)" in str(results)
+
+        # a Parquet source pg_lake did not write can declare numeric over a
+        # column that is physically DOUBLE, and DOUBLE does carry NaN
+        run_command(
+            f"COPY (SELECT 2::bigint AS id, 'NaN'::float8 AS val) TO '{parquet_url}';",
+            pg_conn,
+        )
+        run_command(
+            f"""CREATE FOREIGN TABLE dbl_parquet_src (id bigint, val numeric(10,2))
+                SERVER pg_lake OPTIONS (path '{parquet_url}');""",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        results = run_query(
+            "EXPLAIN INSERT INTO num_clamp SELECT id, val FROM dbl_parquet_src",
+            pg_conn,
+        )
+        assert "Custom Scan (Query Pushdown)" not in str(results)
+
+        run_command("DELETE FROM num_clamp;", pg_conn)
+        run_command(
+            "INSERT INTO num_clamp SELECT id, val FROM dbl_parquet_src;", pg_conn
+        )
+        pg_conn.commit()
+
+        clamped = run_query("SELECT val FROM num_clamp", pg_conn)
+        assert len(clamped) == 1
+        assert clamped[0][0] is None
     finally:
         run_command("RESET search_path;", pg_conn)
         run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)

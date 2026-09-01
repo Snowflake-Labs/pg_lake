@@ -28,6 +28,7 @@
 #include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/util/rel_utils.h"
+#include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "optimizer/tlist.h"
 #include "nodes/nodeFuncs.h"
@@ -37,6 +38,8 @@
 #include "utils/lsyscache.h"
 #include "utils/typcache.h"
 
+/* bounds the subquery nesting ExprIsNanFreeNumeric descends through */
+#define MAX_NAN_FREE_NESTING 8
 
 static RangeTblEntry *GetSelectRteFromInsertSelect(Query *query);
 static RangeTblEntry *GetInsertRteFromInsertSelect(Query *query);
@@ -45,6 +48,9 @@ static bool TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod,
 											  NumericPushdownSafety numericSafety);
 static NumericPushdownSafety InsertSelectNumericSafety(Query *query,
 													   Relation insertRelation);
+static bool SetOperationIsNanFreeNumeric(Node *setOperation,
+										 Query *setOperationQuery,
+										 AttrNumber columnNumber, int depth);
 
 /* pg_lake_table.enable_insert_select_pushdown setting */
 bool		EnableInsertSelectPushdown = true;
@@ -412,10 +418,11 @@ RelationSuitableForPushdown(Relation relation, bool allowDefaultConsts)
  * query, can only yield a numeric that is not NaN.
  *
  * The only expression accepted is a reference to a bounded numeric column of
- * a Parquet-based pg_lake table: the Parquet DECIMAL encoding has no NaN, so
- * such a column cannot produce one.  Everything else -- casts, arithmetic,
- * constants, non-Parquet sources -- is treated as NaN-capable.  This is
- * deliberately a whitelist: a blacklist would have to enumerate every
+ * an Iceberg table pg_lake manages itself: pg_lake wrote the data files, so
+ * the column really is a Parquet DECIMAL, and that encoding has no NaN.
+ * Everything else -- casts, arithmetic, constants, other sources -- is treated
+ * as NaN-capable.  Accepting only what is known to be safe is deliberate:
+ * rejecting only what is known to be unsafe would have to enumerate every
  * spelling that can introduce a NaN (numeric(float8), CoerceViaIO from text,
  * division, ...) and would silently admit the ones it missed.
  */
@@ -423,7 +430,7 @@ static bool
 ExprIsNanFreeNumeric(Node *expr, Query *query, int depth)
 {
 	/* guards against a pathological or cyclic subquery nest */
-	if (expr == NULL || depth > 8)
+	if (expr == NULL || depth > MAX_NAN_FREE_NESTING)
 		return false;
 
 	if (!IsA(expr, Var))
@@ -445,29 +452,97 @@ ExprIsNanFreeNumeric(Node *expr, Query *query, int depth)
 
 	if (rte->rtekind == RTE_SUBQUERY)
 	{
+		Query	   *subquery = rte->subquery;
+
+		/*
+		 * PostgreSQL builds the target list of a set operation from its
+		 * leftmost leaf, so the Vars reachable from here never mention the
+		 * other branches.  Those have to be visited through the set operation
+		 * tree instead.
+		 */
+		if (subquery->setOperations != NULL)
+			return SetOperationIsNanFreeNumeric(subquery->setOperations,
+												subquery, var->varattno,
+												depth + 1);
+
 		TargetEntry *targetEntry =
-			get_tle_by_resno(rte->subquery->targetList, var->varattno);
+			get_tle_by_resno(subquery->targetList, var->varattno);
 
 		if (targetEntry == NULL || targetEntry->resjunk)
 			return false;
 
-		return ExprIsNanFreeNumeric((Node *) targetEntry->expr, rte->subquery,
+		return ExprIsNanFreeNumeric((Node *) targetEntry->expr, subquery,
 									depth + 1);
 	}
 
-	if (rte->rtekind != RTE_RELATION || !IsAnyLakeForeignTableById(rte->relid))
+	if (rte->rtekind != RTE_RELATION)
 		return false;
 
 	/*
-	 * A numeric column of a CSV or JSON source is parsed with PostgreSQL
-	 * semantics, which accept NaN.
+	 * A declared numeric column only guarantees a Parquet DECIMAL underneath
+	 * when pg_lake wrote the data files.  Over a foreign table the
+	 * declaration can sit on a physically DOUBLE column, which does carry
+	 * NaN, and a CSV or JSON source is parsed with PostgreSQL semantics,
+	 * which accept NaN.
 	 */
-	PgLakeTableProperties sourceProperties = GetPgLakeTableProperties(rte->relid);
-
-	if (!FormatUsesParquet(sourceProperties.format))
+	if (!IsInternalIcebergTable(rte->relid))
 		return false;
 
 	return !IsUnsupportedNumericForIceberg(var->vartype, var->vartypmod);
+}
+
+
+/*
+ * SetOperationIsNanFreeNumeric returns whether column columnNumber of every
+ * leaf of setOperation can only yield a numeric that is not NaN.
+ *
+ * The leaves all project the same columns in the same order, so one column
+ * number applies to all of them.
+ */
+static bool
+SetOperationIsNanFreeNumeric(Node *setOperation, Query *setOperationQuery,
+							 AttrNumber columnNumber, int depth)
+{
+	check_stack_depth();
+
+	if (setOperation == NULL)
+		return false;
+
+	if (IsA(setOperation, SetOperationStmt))
+	{
+		SetOperationStmt *setOperationStmt = (SetOperationStmt *) setOperation;
+
+		return SetOperationIsNanFreeNumeric(setOperationStmt->larg,
+											setOperationQuery, columnNumber,
+											depth) &&
+			SetOperationIsNanFreeNumeric(setOperationStmt->rarg,
+										 setOperationQuery, columnNumber,
+										 depth);
+	}
+
+	if (!IsA(setOperation, RangeTblRef))
+		return false;
+
+	RangeTblRef *rangeTblRef = (RangeTblRef *) setOperation;
+
+	if (rangeTblRef->rtindex < 1 ||
+		rangeTblRef->rtindex > list_length(setOperationQuery->rtable))
+		return false;
+
+	RangeTblEntry *leafRte = rt_fetch(rangeTblRef->rtindex,
+									  setOperationQuery->rtable);
+
+	if (leafRte->rtekind != RTE_SUBQUERY)
+		return false;
+
+	TargetEntry *targetEntry = get_tle_by_resno(leafRte->subquery->targetList,
+												columnNumber);
+
+	if (targetEntry == NULL || targetEntry->resjunk)
+		return false;
+
+	return ExprIsNanFreeNumeric((Node *) targetEntry->expr, leafRte->subquery,
+								depth + 1);
 }
 
 
