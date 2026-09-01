@@ -98,6 +98,15 @@ def test_iceberg_nested_types(pg_conn, bids_table, extension):
     assert result[0]["created_by"] == "joe"
     assert result[1]["created_by"] == "john"
 
+    # binary and fixed-length binary columns must be projectable, not just
+    # visible in the table definition
+    result = run_query("select data, fixed_data from bids order by bid", pg_conn)
+    assert len(result) == 4
+    assert bytes(result[0]["data"]) == b"tt5678"
+    assert bytes(result[0]["fixed_data"]) == b"bbbbbbbbbbbbbbbb"
+    assert bytes(result[1]["data"]) == b"1"
+    assert bytes(result[1]["fixed_data"]) == b"aaaaaaaaaaaaaaaa"
+
     pg_conn.rollback()
 
 
@@ -253,7 +262,7 @@ def bids_table(iceberg_catalog):
                 "ask": 1.0,
                 "details": {"created_by": "john"},
                 "data": b"1",
-                "fixed_data": b"1234567890123456",
+                "fixed_data": b"aaaaaaaaaaaaaaaa",
             },
             {
                 "datetime": datetime(2024, 1, 2),
@@ -262,7 +271,7 @@ def bids_table(iceberg_catalog):
                 "ask": 1.1,
                 "details": {"created_by": "joe"},
                 "data": b"tt5678",
-                "fixed_data": b"1234567890123456",
+                "fixed_data": b"bbbbbbbbbbbbbbbb",
             },
             {
                 "datetime": datetime(2024, 1, 3),
@@ -271,7 +280,7 @@ def bids_table(iceberg_catalog):
                 "ask": 1.2,
                 "details": {"created_by": "jack"},
                 "data": b"90f12",
-                "fixed_data": b"1234567890123456",
+                "fixed_data": b"cccccccccccccccc",
             },
             {
                 "datetime": datetime(2024, 1, 4),
@@ -280,7 +289,7 @@ def bids_table(iceberg_catalog):
                 "ask": 1.3,
                 "details": {"created_by": "jim"},
                 "data": b"34asd56",
-                "fixed_data": b"1234567890123456",
+                "fixed_data": b"dddddddddddddddd",
             },
         ],
         schema=arrow_schema,
