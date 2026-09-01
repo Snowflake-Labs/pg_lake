@@ -39,11 +39,8 @@
 
 static RangeTblEntry *GetSelectRteFromInsertSelect(Query *query);
 static RangeTblEntry *GetInsertRteFromInsertSelect(Query *query);
-static bool TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod,
-											  CopyDataFormat sourceFormat,
-											  NumericPushdownSafety numericSafety);
+static bool TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod);
 static bool QueryIntroducesNanNumeric(Node *node, void *context);
-static NumericPushdownSafety InsertSelectNumericSafety(Query *query);
 
 /* pg_lake_table.enable_insert_select_pushdown setting */
 bool		EnableInsertSelectPushdown = true;
@@ -119,10 +116,7 @@ IsPushdownableInsertSelectQuery(Query *query)
 	PgLakeTableProperties properties =
 		GetPgLakeTableProperties(insertIntoRelid);
 
-	NumericPushdownSafety numericSafety = InsertSelectNumericSafety(query);
-
-	if (!RelationColumnsSuitableForPushdown(insertRelation, properties.format,
-											numericSafety))
+	if (!RelationColumnsSuitableForPushdown(insertRelation, properties.format))
 	{
 		ereport(DEBUG4, (errmsg("INSERT..SELECT columns are not suitable for pushdown")));
 
@@ -156,6 +150,14 @@ IsPushdownableInsertSelectQuery(Query *query)
 	}
 
 	RelationClose(insertRelation);
+
+	if (QueryIntroducesNanNumeric((Node *) query, NULL))
+	{
+		ereport(DEBUG4,
+				(errmsg("INSERT..SELECT that can produce a NaN numeric is not "
+						"pushdownable")));
+		return false;
+	}
 
 	/* check whether SELECT is pushdownable */
 	RangeTblEntry *selectRte = GetSelectRteFromInsertSelect(query);
@@ -406,8 +408,9 @@ RelationSuitableForPushdown(Relation relation, bool allowDefaultConsts)
 
 
 /*
- * QueryIntroducesNanNumeric returns whether the query can put a NaN into a
- * numeric column of the insert target.
+ * QueryIntroducesNanNumeric returns whether the query can produce a NaN numeric.
+ * A DuckDB DECIMAL cannot represent one, and the cast fails inside the projection
+ * rather than returning a value the out_of_range_values policy could act on.
  *
  * Float-to-numeric casts and NaN numeric constants are not shippable, so a query
  * containing one never reaches pushdown.  Two sources of a NaN remain:
@@ -442,29 +445,13 @@ QueryIntroducesNanNumeric(Node *node, void *context)
 
 
 /*
- * InsertSelectNumericSafety reports whether a NaN can reach a bounded numeric
- * column of the insert target.
- */
-static NumericPushdownSafety
-InsertSelectNumericSafety(Query *query)
-{
-	if (QueryIntroducesNanNumeric((Node *) query, NULL))
-		return NUMERIC_PUSHDOWN_MAY_BE_NAN;
-
-	return NUMERIC_PUSHDOWN_NAN_FREE;
-}
-
-
-/*
  * TypeContainsUnsuitableForPushdown recursively checks whether the given type
  * (or any type nested within it) is unsuitable for pushdown.
  *
  * Returns true if the type is unsuitable (i.e., pushdown should be blocked).
  */
 static bool
-TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod,
-								  CopyDataFormat sourceFormat,
-								  NumericPushdownSafety numericSafety)
+TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod)
 {
 	/*
 	 * The current pushdown implementation does not convert geometry to the
@@ -477,42 +464,20 @@ TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod,
 		return true;
 	}
 
-	if (typeId == NUMERICOID)
+	/*
+	 * An unbounded numeric, or one wider than DuckDB's DECIMAL, has no DuckDB
+	 * type that preserves it.  Iceberg tables convert those columns to float8
+	 * at CREATE TABLE time (see
+	 * MaybeConvertUnsupportedNumericColumnsToDouble), so they only reach here
+	 * on other pg_lake tables.
+	 */
+	if (typeId == NUMERICOID && IsUnsupportedNumericForIceberg(typeId, typmod))
 	{
-		/*
-		 * An unbounded numeric, or one wider than DuckDB's DECIMAL, has no
-		 * DuckDB type that preserves it.  Iceberg tables convert those
-		 * columns to float8 at CREATE TABLE time (see
-		 * MaybeConvertUnsupportedNumericColumnsToDouble), so they only reach
-		 * here on other pg_lake tables.
-		 */
-		if (IsUnsupportedNumericForIceberg(typeId, typmod))
-		{
-			ereport(DEBUG4,
-					(errmsg("Numeric type without a DuckDB decimal equivalent "
-							"is not pushdownable")));
+		ereport(DEBUG4,
+				(errmsg("Numeric type without a DuckDB decimal equivalent "
+						"is not pushdownable")));
 
-			return true;
-		}
-
-		/*
-		 * A bounded numeric maps to DuckDB DECIMAL, which has no NaN.  A NaN
-		 * reaching DuckDB fails the cast to DECIMAL rather than honouring
-		 * out_of_range_values, and it fails inside the projection that
-		 * performs the cast, so no wrapper around the query can intercept it.
-		 * The caller has to have established that no value feeding the column
-		 * can be NaN; otherwise the write stays on the non-pushdown path,
-		 * which clamps or rejects NaN via IcebergErrorOrClampSlotInPlace /
-		 * IcebergErrorOrClampDatum.
-		 */
-		if (numericSafety != NUMERIC_PUSHDOWN_NAN_FREE)
-		{
-			ereport(DEBUG4,
-					(errmsg("Numeric type is not pushdownable unless every "
-							"value feeding it is known not to be NaN")));
-
-			return true;
-		}
+		return true;
 	}
 
 	/*
@@ -526,11 +491,9 @@ TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod,
 		PGType		valType = GetMapValueType(typeId);
 
 		return TypeContainsUnsuitableForPushdown(keyType.postgresTypeOid,
-												 keyType.postgresTypeMod, sourceFormat,
-												 numericSafety) ||
+												 keyType.postgresTypeMod) ||
 			TypeContainsUnsuitableForPushdown(valType.postgresTypeOid,
-											  valType.postgresTypeMod, sourceFormat,
-											  numericSafety);
+											  valType.postgresTypeMod);
 	}
 
 	/*
@@ -550,8 +513,7 @@ TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod,
 	{
 		Oid			elemType = get_element_type(typeId);
 
-		return TypeContainsUnsuitableForPushdown(elemType, typmod, sourceFormat,
-												 numericSafety);
+		return TypeContainsUnsuitableForPushdown(elemType, typmod);
 	}
 
 	/* Recurse into composite type fields */
@@ -566,9 +528,7 @@ TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod,
 			if (attr->attisdropped)
 				continue;
 
-			if (TypeContainsUnsuitableForPushdown(attr->atttypid, attr->atttypmod,
-												  sourceFormat,
-												  numericSafety))
+			if (TypeContainsUnsuitableForPushdown(attr->atttypid, attr->atttypmod))
 			{
 				ReleaseTupleDesc(tupdesc);
 				return true;
@@ -587,8 +547,7 @@ TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod,
 * are suitable for pushdown.
 */
 bool
-RelationColumnsSuitableForPushdown(Relation relation, CopyDataFormat sourceFormat,
-								   NumericPushdownSafety numericSafety)
+RelationColumnsSuitableForPushdown(Relation relation, CopyDataFormat sourceFormat)
 {
 	TupleDesc	tableDescriptor = RelationGetDescr(relation);
 
@@ -617,8 +576,7 @@ RelationColumnsSuitableForPushdown(Relation relation, CopyDataFormat sourceForma
 			}
 		}
 
-		if (TypeContainsUnsuitableForPushdown(typeId, column->atttypmod, sourceFormat,
-											  numericSafety))
+		if (TypeContainsUnsuitableForPushdown(typeId, column->atttypmod))
 			return false;
 	}
 

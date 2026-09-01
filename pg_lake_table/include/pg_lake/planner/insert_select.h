@@ -26,18 +26,6 @@ extern bool EnableInsertSelectPushdown;
 /* pg_lake_table.enable_partitioned_write_pushdown setting */
 extern PGDLLEXPORT bool EnablePartitionedWritePushdown;
 
-/*
- * A DuckDB DECIMAL cannot represent NaN, and the cast that would produce one
- * fails inside the projection rather than returning a value the
- * out_of_range_values policy could act on.  Bounded numeric columns are
- * therefore only pushdownable when the caller can prove no NaN reaches them.
- */
-typedef enum NumericPushdownSafety
-{
-	NUMERIC_PUSHDOWN_MAY_BE_NAN,
-	NUMERIC_PUSHDOWN_NAN_FREE
-}			NumericPushdownSafety;
-
 bool		IsPushdownableInsertSelectQuery(Query *query);
 bool		IsInsertSelectQuery(Query *query);
 Oid			GetInsertRelidFromInsertSelect(Query *query);
@@ -45,6 +33,5 @@ void		TransformPushdownableInsertSelect(Query *query);
 
 /* logic shared with COPY pushdown */
 extern PGDLLEXPORT bool RelationColumnsSuitableForPushdown(Relation relation,
-														   CopyDataFormat sourceFormat,
-														   NumericPushdownSafety numericSafety);
+														   CopyDataFormat sourceFormat);
 extern PGDLLEXPORT bool RelationSuitableForPushdown(Relation relation, bool allowDefaultConsts);
