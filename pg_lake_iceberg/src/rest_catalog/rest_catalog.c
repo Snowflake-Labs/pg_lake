@@ -156,8 +156,8 @@ ValidateRestCatalogOptions(const RestCatalogOptions * opts,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("client certificate for REST catalog \"%s\" is only partly configured",
 						catalog),
-				 errhint("Set pg_lake_iceberg.tls_ca_file, pg_lake_iceberg.tls_cert_file "
-						 "and pg_lake_iceberg.tls_key_file together, or leave all three empty.")));
+				 errhint("Set pg_lake_iceberg.horizon_tls_ca_file, pg_lake_iceberg.horizon_tls_cert_file "
+						 "and pg_lake_iceberg.horizon_tls_key_file together, or leave all three empty.")));
 
 	/*
 	 * A catalog authenticated by workload identity has no client secret to

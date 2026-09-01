@@ -21,9 +21,9 @@ from utils_pytest import *
 # tests pin the check that turns that into an error where the mistake is made.
 
 TLS_SETTINGS = [
-    "pg_lake_iceberg.tls_ca_file",
-    "pg_lake_iceberg.tls_cert_file",
-    "pg_lake_iceberg.tls_key_file",
+    "pg_lake_iceberg.horizon_tls_ca_file",
+    "pg_lake_iceberg.horizon_tls_cert_file",
+    "pg_lake_iceberg.horizon_tls_key_file",
 ]
 
 
@@ -211,7 +211,7 @@ def _use_catalog(conn, port, tls_material, auth_type, tls_files=_ALL_TLS_FILES):
     host = f"https://127.0.0.1:{port}/api/catalog"
 
     tls_settings = {
-        f"pg_lake_iceberg.tls_{setting}": (
+        f"pg_lake_iceberg.horizon_tls_{setting}": (
             str(tls_material[key]) if key in tls_files else ""
         )
         for key, setting in zip(_ALL_TLS_FILES, ("ca_file", "cert_file", "key_file"))
@@ -248,9 +248,9 @@ def _stop_using_catalog():
             "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_auth_type",
             "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_id",
             "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_secret",
-            "ALTER SYSTEM RESET pg_lake_iceberg.tls_ca_file",
-            "ALTER SYSTEM RESET pg_lake_iceberg.tls_cert_file",
-            "ALTER SYSTEM RESET pg_lake_iceberg.tls_key_file",
+            "ALTER SYSTEM RESET pg_lake_iceberg.horizon_tls_ca_file",
+            "ALTER SYSTEM RESET pg_lake_iceberg.horizon_tls_cert_file",
+            "ALTER SYSTEM RESET pg_lake_iceberg.horizon_tls_key_file",
             "SELECT pg_reload_conf()",
         ]
     )
