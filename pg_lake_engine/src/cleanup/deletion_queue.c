@@ -41,6 +41,7 @@ int			OrphanedFileRetentionPeriod = 60 * 60 * 24 * 10;	/* 10 days */
 /* managed by GUC, not exposed to the users */
 int			VacuumFileRemoveMaxRetries = 145;
 int			VacuumFileRemoveRetryInterval = 600;	/* 10 minutes */
+bool		DeletionQueueTolerateDeadPointers = true;
 
 /*
  * DeletionQueueEntry represents a deletion entry from the
@@ -53,15 +54,22 @@ typedef struct DeletionQueueEntry
 	int			retryCount;
 	bool		isPrefix;
 	bool		resolveMetadata;
+	char	   *fallbackPrefix;
 }			DeletionQueueEntry;
 
 static void RemoveDeletionQueuePathsFromCatalog(List *filePaths);
 static void IncrementDeletionQueueRetryCount(List *failedRemovalPaths);
-static bool ExpandMetadataResolveRecord(char *metadataPath);
+static bool ExpandMetadataResolveRecord(char *metadataPath, bool bestEffort);
+static void EscalateResolveRecordToPrefix(char *metadataPath, char *fallbackPrefix);
+static void ReplaceResolveRecordWithPrefix(char *metadataPath, char *prefix);
+static void ErrorPathNotQueued(char *path);
+static bool DeletionQueueLookup(char *path, bool *isResolveRecord);
 static bool DeleteQueuedPrefix(char *path, bool isVerbose);
 
 
 PG_FUNCTION_INFO_V1(flush_deletion_queue);
+PG_FUNCTION_INFO_V1(resolve_deletion_queue_path);
+PG_FUNCTION_INFO_V1(forget_deletion_queue_path);
 
 
 /*
@@ -112,6 +120,92 @@ flush_deletion_queue(PG_FUNCTION_ARGS)
 
 	PG_RETURN_VOID();
 }
+
+/*
+ * ErrorPathNotQueued reports a path the deletion queue does not hold.
+ */
+static void
+ErrorPathNotQueued(char *path)
+{
+	ereport(ERROR,
+			(errcode(ERRCODE_UNDEFINED_OBJECT),
+			 errmsg("%s is not in the deletion queue", path)));
+}
+
+
+/*
+ * resolve_deletion_queue_path re-aims a resolve_metadata row at an
+ * operator-supplied prefix: the row is replaced by an is_prefix row, so the next
+ * drain pass removes everything under the prefix instead of walking the
+ * metadata.
+ *
+ * This is for a row cleanup cannot resolve and has no remembered prefix to fall
+ * back on -- a custom location, or a row queued before the prefix was recorded.
+ * The prefix has to contain the queued path, which rules out aiming at an
+ * unrelated prefix or at the whole bucket, but whether it holds anything besides
+ * the dropped table is the operator's judgement.
+ */
+Datum
+resolve_deletion_queue_path(PG_FUNCTION_ARGS)
+{
+	char	   *queuedPath = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	char	   *prefix = text_to_cstring(PG_GETARG_TEXT_PP(1));
+
+	int			prefixLength = strlen(prefix);
+
+	while (prefixLength > 0 && prefix[prefixLength - 1] == '/')
+		prefixLength--;
+
+	prefix = pnstrdup(prefix, prefixLength);
+
+	if (prefixLength == 0 ||
+		strncmp(queuedPath, prefix, prefixLength) != 0 ||
+		queuedPath[prefixLength] != '/')
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("%s is not under %s", queuedPath, prefix),
+				 errhint("Only the prefix a queued path lies under can replace it.")));
+	}
+
+	bool		isResolveRecord = false;
+
+	if (!DeletionQueueLookup(queuedPath, &isResolveRecord))
+		ErrorPathNotQueued(queuedPath);
+
+	if (!isResolveRecord)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("%s is not queued as metadata to resolve", queuedPath),
+				 errhint("Only a resolve_metadata row can be replaced by a prefix.")));
+	}
+
+	ReplaceResolveRecordWithPrefix(queuedPath, prefix);
+
+	PG_RETURN_VOID();
+}
+
+
+/*
+ * forget_deletion_queue_path drops a path from the deletion queue without
+ * removing anything from object storage, for a row that will never succeed and
+ * whose files the operator takes over.
+ */
+Datum
+forget_deletion_queue_path(PG_FUNCTION_ARGS)
+{
+	char	   *queuedPath = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	bool		isResolveRecord = false;
+
+	if (!DeletionQueueLookup(queuedPath, &isResolveRecord))
+		ErrorPathNotQueued(queuedPath);
+
+	RemoveDeletionQueuePathsFromCatalog(list_make1(queuedPath));
+
+	PG_RETURN_VOID();
+}
+
 
 /*
  * RemoveDeletionQueueRecords removes all files that are no longer referenced .
@@ -169,8 +263,33 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose, int *file
 					(errmsg("resolving referenced files of dropped table metadata %s",
 							entry->path)));
 
-			if (ExpandMetadataResolveRecord(entry->path))
+			bool		bestEffort = false;
+
+			if (ExpandMetadataResolveRecord(entry->path, bestEffort))
 				producedNewDeletionRows = true;
+			else if (entry->retryCount > 0 && entry->fallbackPrefix != NULL)
+			{
+				/*
+				 * Resolution has now failed more than once, so this is more
+				 * likely a metadata.json we will never be able to walk (a
+				 * manifest removed out of band, say) than a store that
+				 * happens to be unreachable. Delete the table's prefix
+				 * instead: it covers everything the walk would have found,
+				 * and is only remembered for tables whose storage we manage.
+				 */
+				EscalateResolveRecordToPrefix(entry->path, entry->fallbackPrefix);
+				producedNewDeletionRows = true;
+			}
+			else if (entry->retryCount > 0 && DeletionQueueTolerateDeadPointers &&
+					 ExpandMetadataResolveRecord(entry->path, true))
+			{
+				/*
+				 * No prefix to fall back on, so reclaim whatever the metadata
+				 * still reaches rather than nothing at all. What hung off a
+				 * dead pointer is reported and left in object storage.
+				 */
+				producedNewDeletionRows = true;
+			}
 			else
 			{
 				/*
@@ -272,6 +391,11 @@ DeleteQueuedPrefix(char *path, bool isVerbose)
  * we roll back and return false so the caller retries this row later without
  * aborting the rest of the drain.
  *
+ * bestEffort switches to the variant that walks past pointers that object
+ * storage says are gone instead of throwing. That reclaims what is still
+ * reachable, so it only makes sense once the strict walk has failed more than
+ * once, and it leaves behind whatever hung off a skipped pointer.
+ *
  * The queue may already hold some of these paths (the metadata.json's own row
  * for sure, plus any previous_metadata/rotation leftovers or files shared with
  * another dropped table), so a plain INSERT would hit the primary key and
@@ -283,7 +407,7 @@ DeleteQueuedPrefix(char *path, bool isVerbose)
  * would drop the metadata.json.)
  */
 static bool
-ExpandMetadataResolveRecord(char *metadataPath)
+ExpandMetadataResolveRecord(char *metadataPath, bool bestEffort)
 {
 	MemoryContext savedContext = CurrentMemoryContext;
 	volatile bool resolved = true;
@@ -310,14 +434,19 @@ ExpandMetadataResolveRecord(char *metadataPath)
 		 * leaving their retention untouched.
 		 */
 		{
-			char	   *insertQuery =
-				"INSERT INTO " DELETION_QUEUE_TABLE " "
-				"(path, table_name, orphaned_at, is_prefix, resolve_metadata) "
-				"SELECT f.path, NULL, NULL, false, false "
-				"FROM lake_iceberg.find_all_referenced_files($1) f "
-				"ON CONFLICT (path) DO UPDATE "
-				"SET resolve_metadata = false, orphaned_at = NULL "
-				"WHERE deletion_queue.path OPERATOR(pg_catalog.=) $1";
+			char	   *resolveFunction = bestEffort ?
+				"lake_iceberg.find_all_referenced_files_best_effort" :
+				"lake_iceberg.find_all_referenced_files";
+
+			char	   *insertQuery = psprintf(
+											   "INSERT INTO " DELETION_QUEUE_TABLE " "
+											   "(path, table_name, orphaned_at, is_prefix, resolve_metadata) "
+											   "SELECT f.path, NULL, NULL, false, false "
+											   "FROM %s($1) f "
+											   "ON CONFLICT (path) DO UPDATE "
+											   "SET resolve_metadata = false, orphaned_at = NULL "
+											   "WHERE deletion_queue.path OPERATOR(pg_catalog.=) $1",
+											   resolveFunction);
 
 			DECLARE_SPI_ARGS(1);
 			SPI_ARG_VALUE(1, TEXTOID, metadataPath, false);
@@ -359,6 +488,102 @@ ExpandMetadataResolveRecord(char *metadataPath)
 
 
 /*
+ * EscalateResolveRecordToPrefix replaces a resolve_metadata row that cannot be
+ * expanded with an is_prefix row for the dropped table's location, which a
+ * following drain pass removes wholesale.
+ *
+ * The prefix is what was recorded when the row was queued, and is only recorded
+ * for a table at its default managed location, so nothing outside the dropped
+ * table can be under it. Deriving it here from the metadata.json path instead
+ * would risk a custom location or a prefix shared with another table.
+ *
+ * The metadata.json is under the prefix, so dropping its row loses nothing: the
+ * prefix delete covers it. A prefix row may already exist -- the eager drop path
+ * queues one for the same location when its own walk fails -- in which case
+ * there is nothing to add.
+ */
+static void
+EscalateResolveRecordToPrefix(char *metadataPath, char *fallbackPrefix)
+{
+	ereport(WARNING,
+			(errmsg("could not resolve the files referenced by %s", metadataPath),
+			 errdetail("Queued %s to be removed as a whole instead.",
+					   fallbackPrefix)));
+
+	ReplaceResolveRecordWithPrefix(metadataPath, fallbackPrefix);
+}
+
+
+/*
+ * ReplaceResolveRecordWithPrefix swaps a resolve_metadata row for an is_prefix
+ * row over the given prefix. The caller decides that the prefix holds nothing
+ * but the dropped table.
+ */
+static void
+ReplaceResolveRecordWithPrefix(char *metadataPath, char *prefix)
+{
+	char	   *query =
+		"WITH removed AS ("
+		"    DELETE FROM " DELETION_QUEUE_TABLE " "
+		"    WHERE path OPERATOR(pg_catalog.=) $1 "
+		"    RETURNING 1"
+		") "
+		"INSERT INTO " DELETION_QUEUE_TABLE " "
+		"(path, table_name, orphaned_at, is_prefix, resolve_metadata) "
+		"SELECT $2, NULL, NULL, true, false FROM removed "
+		"ON CONFLICT (path) DO NOTHING";
+
+	DECLARE_SPI_ARGS(2);
+	SPI_ARG_VALUE(1, TEXTOID, metadataPath, false);
+	SPI_ARG_VALUE(2, TEXTOID, prefix, false);
+
+	/* switch to schema owner, we assume callers checked permissions */
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
+
+	bool		readOnly = false;
+
+	SPI_EXECUTE(query, readOnly);
+
+	SPI_END();
+}
+
+
+/*
+ * DeletionQueueLookup returns whether the queue holds a row for the given path,
+ * and if so whether it is a resolve_metadata row.
+ */
+static bool
+DeletionQueueLookup(char *path, bool *isResolveRecord)
+{
+	char	   *query =
+		"SELECT resolve_metadata FROM " DELETION_QUEUE_TABLE " "
+		"WHERE path OPERATOR(pg_catalog.=) $1";
+
+	DECLARE_SPI_ARGS(1);
+	SPI_ARG_VALUE(1, TEXTOID, path, false);
+
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
+
+	bool		readOnly = true;
+
+	SPI_EXECUTE(query, readOnly);
+
+	bool		found = SPI_processed == 1;
+
+	if (found)
+	{
+		bool		isNull;
+
+		*isResolveRecord = GET_SPI_VALUE(BOOLOID, 0, 1, &isNull);
+	}
+
+	SPI_END();
+
+	return found;
+}
+
+
+/*
 * RemoveDeletionQueuePathsFromCatalog removes the given paths from the
 * deletion queue catalog.
 */
@@ -391,6 +616,11 @@ RemoveDeletionQueuePathsFromCatalog(List *filePaths)
 * for the given paths in the deletion queue, and records when the failed
 * attempt happened so the next one can be held off for
 * VacuumFileRemoveRetryInterval (see GetDeletionQueueRecords).
+*
+* A path whose new count is past VacuumFileRemoveMaxRetries is out of automatic
+* retries: it stays queued but no vacuum pass will claim it again, so say so
+* once rather than leaving it to be noticed by whoever eventually reads the
+* queue.
 */
 static void
 IncrementDeletionQueueRetryCount(List *failedRemovalPaths)
@@ -401,7 +631,8 @@ IncrementDeletionQueueRetryCount(List *failedRemovalPaths)
 	char	   *updateQuery =
 		"UPDATE " DELETION_QUEUE_TABLE " "
 		"SET retry_count = retry_count + 1, last_attempt_at = pg_catalog.now() "
-		"WHERE path OPERATOR(pg_catalog.=) ANY($1) ";
+		"WHERE path OPERATOR(pg_catalog.=) ANY($1) "
+		"RETURNING path, retry_count";
 
 	DECLARE_SPI_ARGS(1);
 
@@ -411,6 +642,24 @@ IncrementDeletionQueueRetryCount(List *failedRemovalPaths)
 	SPI_START_EXTENSION_OWNER(PgLakeTable);
 
 	SPI_EXECUTE(updateQuery, readOnly);
+
+	for (int rowIndex = 0; rowIndex < SPI_processed; rowIndex++)
+	{
+		bool		isNull;
+		int			retryCount = GET_SPI_VALUE(INT4OID, rowIndex, 2, &isNull);
+
+		if (retryCount != VacuumFileRemoveMaxRetries + 1)
+			continue;
+
+		char	   *path = GET_SPI_VALUE(TEXTOID, rowIndex, 1, &isNull);
+
+		ereport(WARNING,
+				(errmsg("giving up on removing %s after %d attempts",
+						path, retryCount),
+				 errdetail("The path stays in the deletion queue but is no "
+						   "longer retried automatically."),
+				 errhint("Use lake_engine.flush_deletion_queue() to retry it.")));
+	}
 
 	SPI_END();
 }
@@ -435,8 +684,9 @@ IncrementDeletionQueueRetryCount(List *failedRemovalPaths)
  * passes take -- minutes when a drain is catching up on a backlog, rather than
  * the day the default is sized for.
  *
- * isFull skips the backoff: that is the manual flush, where the caller is
- * asking to try everything now.
+ * isFull skips both the backoff and the retry ceiling: that is the manual flush,
+ * where the caller is asking to try everything now, including the paths that ran
+ * out of automatic retries.
  */
 List *
 GetDeletionQueueRecords(Oid relationId, bool isFull, int maxRecords)
@@ -452,16 +702,17 @@ GetDeletionQueueRecords(Oid relationId, bool isFull, int maxRecords)
 	if (OidIsValid(relationId))
 	{
 		appendStringInfo(query,
-						 "    SELECT ctid, path, orphaned_at, retry_count, is_prefix, resolve_metadata "
+						 "    SELECT ctid, path, orphaned_at, retry_count, is_prefix, resolve_metadata, fallback_prefix "
 						 "    FROM " DELETION_QUEUE_TABLE " "
 						 "    WHERE (orphaned_at IS NULL or pg_catalog.now() OPERATOR(pg_catalog.>=) (orphaned_at OPERATOR(pg_catalog.+) INTERVAL '%d seconds')) AND "
-						 "		  table_name OPERATOR(pg_catalog.=) %d AND retry_count OPERATOR(pg_catalog.<=) %d ",
-						 OrphanedFileRetentionPeriod, relationId, VacuumFileRemoveMaxRetries);
+						 "		  table_name OPERATOR(pg_catalog.=) %d ",
+						 OrphanedFileRetentionPeriod, relationId);
 
 		if (!isFull)
 			appendStringInfo(query,
+							 "      AND retry_count OPERATOR(pg_catalog.<=) %d "
 							 "      AND (last_attempt_at IS NULL OR pg_catalog.now() OPERATOR(pg_catalog.>=) (last_attempt_at OPERATOR(pg_catalog.+) INTERVAL '%d seconds')) ",
-							 VacuumFileRemoveRetryInterval);
+							 VacuumFileRemoveMaxRetries, VacuumFileRemoveRetryInterval);
 
 		appendStringInfoString(query, " FOR UPDATE");
 	}
@@ -473,17 +724,18 @@ GetDeletionQueueRecords(Oid relationId, bool isFull, int maxRecords)
 		 * any existing table.
 		 */
 		appendStringInfo(query,
-						 "    SELECT del.ctid, del.path, del.orphaned_at, del.retry_count, del.is_prefix, del.resolve_metadata "
+						 "    SELECT del.ctid, del.path, del.orphaned_at, del.retry_count, del.is_prefix, del.resolve_metadata, del.fallback_prefix "
 						 "    FROM " DELETION_QUEUE_TABLE " del "
 						 "    LEFT JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) del.table_name "
 						 "    WHERE (del.orphaned_at IS NULL or pg_catalog.now() OPERATOR(pg_catalog.>=) (del.orphaned_at OPERATOR(pg_catalog.+) INTERVAL '%d seconds')) AND "
-						 "          c.oid IS NULL  AND retry_count OPERATOR(pg_catalog.<=) %d ",
-						 OrphanedFileRetentionPeriod, VacuumFileRemoveMaxRetries);
+						 "          c.oid IS NULL ",
+						 OrphanedFileRetentionPeriod);
 
 		if (!isFull)
 			appendStringInfo(query,
+							 "      AND retry_count OPERATOR(pg_catalog.<=) %d "
 							 "      AND (del.last_attempt_at IS NULL OR pg_catalog.now() OPERATOR(pg_catalog.>=) (del.last_attempt_at OPERATOR(pg_catalog.+) INTERVAL '%d seconds')) ",
-							 VacuumFileRemoveRetryInterval);
+							 VacuumFileRemoveMaxRetries, VacuumFileRemoveRetryInterval);
 
 		appendStringInfoString(query, " FOR UPDATE OF del");
 	}
@@ -503,7 +755,7 @@ GetDeletionQueueRecords(Oid relationId, bool isFull, int maxRecords)
 
 	appendStringInfo(query,
 					 ") "
-					 "SELECT path, orphaned_at, retry_count, is_prefix, resolve_metadata FROM del");
+					 "SELECT path, orphaned_at, retry_count, is_prefix, resolve_metadata, fallback_prefix FROM del");
 
 	/* switch to schema owner, we assume callers checked permissions */
 	SPI_START_EXTENSION_OWNER(PgLakeTable);
@@ -525,6 +777,10 @@ GetDeletionQueueRecords(Oid relationId, bool isFull, int maxRecords)
 		entry->isPrefix = GET_SPI_VALUE(BOOLOID, rowIndex, 4, &isNull);
 		entry->resolveMetadata = GET_SPI_VALUE(BOOLOID, rowIndex, 5, &isNull);
 
+		Datum		fallbackPrefix = GET_SPI_DATUM(rowIndex, 6, &isNull);
+
+		entry->fallbackPrefix = isNull ? NULL : TextDatumGetCString(fallbackPrefix);
+
 		result = lappend(result, entry);
 
 		MemoryContextSwitchTo(spiContext);
@@ -544,7 +800,7 @@ GetDeletionQueueRecords(Oid relationId, bool isFull, int maxRecords)
 void
 InsertPrefixDeletionRecord(char *path, TimestampTz orphanedAt)
 {
-	InsertDeletionQueueRecordExtended(path, InvalidOid, orphanedAt, true, false);
+	InsertDeletionQueueRecordExtended(path, InvalidOid, orphanedAt, true, false, NULL);
 }
 
 
@@ -555,7 +811,7 @@ InsertPrefixDeletionRecord(char *path, TimestampTz orphanedAt)
 void
 InsertDeletionQueueRecord(char *path, Oid relationId, TimestampTz orphanedAt)
 {
-	InsertDeletionQueueRecordExtended(path, relationId, orphanedAt, false, false);
+	InsertDeletionQueueRecordExtended(path, relationId, orphanedAt, false, false, NULL);
 }
 
 
@@ -563,38 +819,46 @@ InsertDeletionQueueRecord(char *path, Oid relationId, TimestampTz orphanedAt)
  * InsertMetadataResolveRecord queues a dropped table's metadata.json for
  * deferred resolution: VACUUM later resolves it into the exact referenced
  * files and deletes them (see ExpandMetadataResolveRecord).
+ *
+ * fallbackPrefix is where to delete from if that resolution turns out to be
+ * impossible, and must be given only for a location the caller knows holds
+ * nothing but this table (see EscalateResolveRecordToPrefix).
  */
 void
-InsertMetadataResolveRecord(char *metadataPath, Oid relationId, TimestampTz orphanedAt)
+InsertMetadataResolveRecord(char *metadataPath, Oid relationId, TimestampTz orphanedAt,
+							char *fallbackPrefix)
 {
 	bool		isPrefix = false;
 	bool		resolveMetadata = true;
 
 	InsertDeletionQueueRecordExtended(metadataPath, relationId, orphanedAt,
-									  isPrefix, resolveMetadata);
+									  isPrefix, resolveMetadata, fallbackPrefix);
 }
 
 /*
 * InsertDeletionQueueRecordExtended is the internal function to insert
 * a record into the deletion queue. is_prefix marks a whole-prefix delete and
 * resolve_metadata marks a metadata.json to be resolved into referenced files
-* by VACUUM; the two are mutually exclusive.
+* by VACUUM; the two are mutually exclusive. fallback_prefix only means anything
+* for a resolve_metadata row.
 */
 void
 InsertDeletionQueueRecordExtended(char *path, Oid relationId, TimestampTz orphanedAt,
-								  bool isPrefix, bool resolveMetadata)
+								  bool isPrefix, bool resolveMetadata,
+								  char *fallbackPrefix)
 {
 	char	   *query =
 		"insert into " DELETION_QUEUE_TABLE " "
-		"(path, table_name, orphaned_at, is_prefix, resolve_metadata) "
-		"values ($1,$2,$3,$4,$5)";
+		"(path, table_name, orphaned_at, is_prefix, resolve_metadata, fallback_prefix) "
+		"values ($1,$2,$3,$4,$5,$6)";
 
-	DECLARE_SPI_ARGS(5);
+	DECLARE_SPI_ARGS(6);
 	SPI_ARG_VALUE(1, TEXTOID, path, false);
 	SPI_ARG_VALUE(2, OIDOID, relationId, false);
 	SPI_ARG_VALUE(3, TIMESTAMPTZOID, orphanedAt, orphanedAt == 0);
 	SPI_ARG_VALUE(4, BOOLOID, isPrefix, false);
 	SPI_ARG_VALUE(5, BOOLOID, resolveMetadata, false);
+	SPI_ARG_VALUE(6, TEXTOID, fallbackPrefix, fallbackPrefix == NULL);
 
 	/* switch to schema owner, we assume callers checked permissions */
 	SPI_START_EXTENSION_OWNER(PgLakeTable);

@@ -660,6 +660,31 @@ def _vacuum_iceberg_now():
     )
 
 
+def _vacuum_no_retry_budget():
+    """Like _vacuum_iceberg_now, but with no retry budget at all: a row that
+    fails once is immediately past vacuum_file_remove_max_retries."""
+    run_command_outside_tx(
+        [
+            "SET pg_lake_engine.orphaned_file_retention_period = 0",
+            "SET pg_lake_iceberg.max_snapshot_age TO 0",
+            "SET pg_lake_engine.vacuum_file_remove_retry_interval = 0",
+            "SET pg_lake_engine.vacuum_file_remove_max_retries = 0",
+            "VACUUM (ICEBERG)",
+        ]
+    )
+
+
+def _resolve_retry_count(superuser_conn, location):
+    count = run_query(
+        f"SELECT max(retry_count) FROM lake_engine.deletion_queue "
+        f"WHERE resolve_metadata AND path LIKE '{location}%'",
+        superuser_conn,
+    )[0][0]
+    superuser_conn.commit()
+
+    return count
+
+
 def _assert_vacuum_drains(superuser_conn, location):
     """Run VACUUM and assert it actually removed all queue rows (prefix,
     per-file, and any deferred resolve_metadata row) and the underlying
@@ -954,6 +979,244 @@ def test_deferred_drop_resolution_failure_retries(
     pg_conn.commit()
 
 
+def _delete_out_of_band(superuser_conn, path):
+    """Remove an object behind pg_lake's back, the way a lifecycle rule or
+    external tooling would."""
+    run_command("SET pg_lake_table.enable_delete_file_function = on", superuser_conn)
+    run_command(f"SELECT lake_file.delete('{path}')", superuser_conn)
+    superuser_conn.commit()
+
+
+def _flush_queue_once(superuser_conn, tolerate_dead_pointers=True):
+    """One drain pass over the whole queue, unlike VACUUM which keeps passing
+    until a pass achieves nothing -- so a test can say what each attempt on a
+    row does."""
+    run_command("SET pg_lake_engine.orphaned_file_retention_period = 0", superuser_conn)
+    run_command(
+        f"SET pg_lake_engine.deletion_queue_tolerate_dead_pointers = "
+        f"{'on' if tolerate_dead_pointers else 'off'}",
+        superuser_conn,
+    )
+    run_command("SELECT lake_engine.flush_deletion_queue(0)", superuser_conn)
+    superuser_conn.commit()
+
+
+def _first_manifest_list(superuser_conn, location):
+    path = run_query(
+        f"SELECT path FROM lake_file.list('{location}/metadata/**') "
+        f"WHERE path LIKE '%/snap-%.avro' ORDER BY path LIMIT 1",
+        superuser_conn,
+    )[0][0]
+    superuser_conn.commit()
+
+    return path
+
+
+def _first_manifest(superuser_conn, location):
+    path = run_query(
+        f"SELECT path FROM lake_file.list('{location}/metadata/**') "
+        f"WHERE path LIKE '%.avro' AND path NOT LIKE '%/snap-%' "
+        f"ORDER BY path LIMIT 1",
+        superuser_conn,
+    )[0][0]
+    superuser_conn.commit()
+
+    return path
+
+
+def test_deferred_drop_dead_pointer_escalates_to_prefix(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+):
+    """A queued metadata.json that references an object which no longer exists
+    can never be resolved, and resolution is all-or-nothing, so on its own it
+    would reclaim nothing at all. VACUUM must fall back to removing the dropped
+    table's location, which is remembered on the row because the table sat at
+    its default managed location."""
+    run_command("CREATE SCHEMA IF NOT EXISTS defer_drop_deadptr", pg_conn)
+    run_command(
+        """
+        CREATE TABLE defer_drop_deadptr.t USING iceberg
+        WITH (autovacuum_enabled='false')
+        AS SELECT i AS id, 'pg_lake' AS name FROM generate_series(1, 10) i
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # a second commit, so the walk has more than one manifest list to follow
+    run_command("INSERT INTO defer_drop_deadptr.t SELECT 11, 'more'", pg_conn)
+    pg_conn.commit()
+
+    location = _writable_location(pg_conn, "defer_drop_deadptr.t")
+    doomed = _first_manifest_list(superuser_conn, location)
+
+    _drop_deferred(pg_conn, "DROP TABLE defer_drop_deadptr.t")
+    assert _count_resolve_records(superuser_conn, location) == 1
+
+    _delete_out_of_band(superuser_conn, doomed)
+
+    # the first failure is indistinguishable from an unreachable store, so the
+    # row is only retried
+    _flush_queue_once(superuser_conn)
+    assert _count_resolve_records(superuser_conn, location) == 1
+    assert _count_prefix_records(superuser_conn, location) == 0
+    assert _resolve_retry_count(superuser_conn, location) > 0
+
+    # failing again escalates the row to the table's location
+    _flush_queue_once(superuser_conn)
+    assert _count_resolve_records(superuser_conn, location) == 0
+    assert _count_prefix_records(superuser_conn, location) == 1
+
+    # which the next pass removes, files and all
+    _flush_queue_once(superuser_conn)
+    assert _count_prefix_records(superuser_conn, location) == 0
+    assert _count_file_records(superuser_conn, location) == 0
+    assert (
+        run_query(
+            f"SELECT count(*) FROM lake_file.list('{location}/**')", superuser_conn
+        )[0][0]
+        == 0
+    )
+    superuser_conn.commit()
+
+    run_command("DROP SCHEMA IF EXISTS defer_drop_deadptr CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_deferred_drop_custom_location_does_not_escalate(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+):
+    """A custom location may hold other tables, so an unresolvable row there
+    must never turn into a prefix delete however often it fails. With dead
+    pointers not tolerated either, the row simply stays queued."""
+    custom_location = f"s3://{TEST_BUCKET}/defer_drop_custom_deadptr/mytable"
+
+    run_command("CREATE SCHEMA IF NOT EXISTS defer_drop_custom_deadptr", pg_conn)
+    run_command(
+        f"""
+        CREATE TABLE defer_drop_custom_deadptr.t USING iceberg
+        WITH (autovacuum_enabled='false', location='{custom_location}')
+        AS SELECT i AS id FROM generate_series(1, 10) i
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+    run_command("INSERT INTO defer_drop_custom_deadptr.t SELECT 11", pg_conn)
+    pg_conn.commit()
+
+    location = _writable_location(pg_conn, "defer_drop_custom_deadptr.t")
+    doomed = _first_manifest_list(superuser_conn, location)
+
+    _drop_deferred(pg_conn, "DROP TABLE defer_drop_custom_deadptr.t")
+    _delete_out_of_band(superuser_conn, doomed)
+
+    for _ in range(3):
+        _flush_queue_once(superuser_conn, tolerate_dead_pointers=False)
+
+    assert _count_resolve_records(superuser_conn, location) == 1
+    assert _count_prefix_records(superuser_conn, location) == 0
+    assert (
+        run_query(
+            f"SELECT count(*) FROM lake_engine.deletion_queue "
+            f"WHERE resolve_metadata AND path LIKE '{location}%' "
+            f"AND fallback_prefix IS NULL",
+            superuser_conn,
+        )[0][0]
+        == 1
+    )
+    superuser_conn.commit()
+
+    run_command(
+        f"DELETE FROM lake_engine.deletion_queue WHERE path LIKE '{location}%'",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+    run_command("SET pg_lake_table.enable_delete_file_function = on", superuser_conn)
+    run_command(
+        f"SELECT lake_file.delete(path) FROM lake_file.list('{location}/**')",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+    run_command("DROP SCHEMA IF EXISTS defer_drop_custom_deadptr CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_deferred_drop_dead_pointer_resolves_best_effort(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+):
+    """A custom location has no prefix to fall back on, so the only way to
+    reclaim anything from a metadata.json with a dead pointer is to walk what is
+    still there. The files behind the dead pointer are unreachable and stay."""
+    custom_location = f"s3://{TEST_BUCKET}/defer_drop_besteffort/mytable"
+
+    run_command("CREATE SCHEMA IF NOT EXISTS defer_drop_besteffort", pg_conn)
+    run_command(
+        f"""
+        CREATE TABLE defer_drop_besteffort.t USING iceberg
+        WITH (autovacuum_enabled='false', location='{custom_location}')
+        AS SELECT i AS id FROM generate_series(1, 10) i
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+    run_command("INSERT INTO defer_drop_besteffort.t SELECT 11", pg_conn)
+    pg_conn.commit()
+
+    location = _writable_location(pg_conn, "defer_drop_besteffort.t")
+
+    # a manifest, not a manifest list: the data files it names become
+    # unreachable, so what best-effort resolution cannot reach is observable
+    doomed = _first_manifest(superuser_conn, location)
+    stranded = run_query(
+        f"SELECT count(*) FROM lake_file.list('{location}/data/**')", superuser_conn
+    )[0][0]
+    superuser_conn.commit()
+    assert stranded > 0
+
+    _drop_deferred(pg_conn, "DROP TABLE defer_drop_besteffort.t")
+    _delete_out_of_band(superuser_conn, doomed)
+
+    # first attempt only retries, the second resolves what it can reach
+    _flush_queue_once(superuser_conn)
+    assert _count_resolve_records(superuser_conn, location) == 1
+
+    _flush_queue_once(superuser_conn)
+    assert _count_resolve_records(superuser_conn, location) == 0
+    assert _count_prefix_records(superuser_conn, location) == 0
+    assert _count_file_records(superuser_conn, location) > 0
+
+    # everything reachable is now removed, and the queue is done with this table
+    _flush_queue_once(superuser_conn)
+    assert _count_file_records(superuser_conn, location) == 0
+
+    remaining = run_query(
+        f"SELECT count(*) FROM lake_file.list('{location}/**')", superuser_conn
+    )[0][0]
+    superuser_conn.commit()
+    assert 0 < remaining <= stranded
+
+    run_command("SET pg_lake_table.enable_delete_file_function = on", superuser_conn)
+    run_command(
+        f"SELECT lake_file.delete(path) FROM lake_file.list('{location}/**')",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+    run_command("DROP SCHEMA IF EXISTS defer_drop_besteffort CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 def test_deferred_drop_rollback_is_clean(
     s3,
     pg_conn,
@@ -1161,6 +1424,226 @@ def test_flush_deletion_queue_drains_dropped_table_files(
     superuser_conn.commit()
 
     run_command("DROP SCHEMA IF EXISTS defer_drop_flush CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_flush_deletion_queue_retries_past_max_retries(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    create_injection_extension,
+):
+    """A path that spent vacuum_file_remove_max_retries is out of automatic
+    retries, but flush_deletion_queue must still claim it -- otherwise nothing
+    can ever remove it again. A custom location keeps this about the retry
+    ceiling alone: it has no prefix to fall back to, so the row cannot be
+    escalated out from under the test."""
+    if get_pg_version_num(pg_conn) < 170000:
+        return
+
+    custom_location = f"s3://{TEST_BUCKET}/retry_ceiling/mytable"
+
+    run_command("CREATE SCHEMA IF NOT EXISTS retry_ceiling", pg_conn)
+    run_command(
+        f"""
+        CREATE TABLE retry_ceiling.t USING iceberg
+        WITH (autovacuum_enabled='false', location='{custom_location}')
+        AS SELECT i AS id FROM generate_series(1, 10) i
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    location = _writable_location(pg_conn, "retry_ceiling.t")
+
+    _drop_deferred(pg_conn, "DROP TABLE retry_ceiling.t")
+    assert _count_resolve_records(superuser_conn, location) == 1
+
+    # spend the whole budget: with the ceiling at 0, one failed attempt is
+    # already one too many
+    _attach_injection_error(superuser_conn, RESOLVE_REFERENCED_FILES_INJECTION_POINT)
+    try:
+        _vacuum_no_retry_budget()
+        spent = _resolve_retry_count(superuser_conn, location)
+        assert spent > 0
+
+        # no vacuum pass claims it anymore, so retry_count stands still
+        _vacuum_no_retry_budget()
+        assert _resolve_retry_count(superuser_conn, location) == spent
+
+        # the manual flush ignores the ceiling and tries again
+        run_command_outside_tx(
+            [
+                "SET pg_lake_engine.orphaned_file_retention_period = 0",
+                "SET pg_lake_engine.vacuum_file_remove_max_retries = 0",
+                "SELECT lake_engine.flush_deletion_queue(0)",
+            ]
+        )
+        assert _resolve_retry_count(superuser_conn, location) > spent
+    finally:
+        _detach_injection(superuser_conn, RESOLVE_REFERENCED_FILES_INJECTION_POINT)
+
+    # and once resolution can succeed again, the flush drains it for real
+    for _ in range(5):
+        run_command_outside_tx(
+            [
+                "SET pg_lake_engine.orphaned_file_retention_period = 0",
+                "SET pg_lake_engine.vacuum_file_remove_max_retries = 0",
+                "SELECT lake_engine.flush_deletion_queue(0)",
+            ]
+        )
+        if _count_file_records(superuser_conn, location) == 0:
+            break
+    assert _count_resolve_records(superuser_conn, location) == 0
+    assert (
+        run_query(
+            f"SELECT count(*) FROM lake_file.list('{location}/**')", superuser_conn
+        )[0][0]
+        == 0
+    )
+    superuser_conn.commit()
+
+    run_command("DROP SCHEMA IF EXISTS retry_ceiling CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def _queued_metadata_path(superuser_conn, location):
+    path = run_query(
+        f"SELECT path FROM lake_engine.deletion_queue "
+        f"WHERE resolve_metadata AND path LIKE '{location}%'",
+        superuser_conn,
+    )[0][0]
+    superuser_conn.commit()
+
+    return path
+
+
+def test_resolve_deletion_queue_path(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+):
+    """An operator can aim an unresolvable row at a prefix cleanup would not pick
+    itself -- here a custom location, which is never remembered as a fallback."""
+    custom_location = f"s3://{TEST_BUCKET}/manual_resolve/mytable"
+
+    run_command("CREATE SCHEMA IF NOT EXISTS manual_resolve", pg_conn)
+    run_command(
+        f"""
+        CREATE TABLE manual_resolve.t USING iceberg
+        WITH (autovacuum_enabled='false', location='{custom_location}')
+        AS SELECT i AS id FROM generate_series(1, 10) i
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    location = _writable_location(pg_conn, "manual_resolve.t")
+
+    _drop_deferred(pg_conn, "DROP TABLE manual_resolve.t")
+    queued = _queued_metadata_path(superuser_conn, location)
+
+    # a prefix the queued path does not lie under is refused, so a typo cannot
+    # delete an unrelated table (or the whole bucket)
+    with pytest.raises(Exception) as exc:
+        run_command(
+            f"SELECT lake_engine.resolve_deletion_queue_path("
+            f"'{queued}', 's3://{TEST_BUCKET}/somewhere_else')",
+            superuser_conn,
+        )
+    superuser_conn.rollback()
+    assert "is not under" in str(exc.value)
+
+    with pytest.raises(Exception) as exc:
+        run_command(
+            f"SELECT lake_engine.resolve_deletion_queue_path("
+            f"'{location}/metadata/no-such.json', '{location}')",
+            superuser_conn,
+        )
+    superuser_conn.rollback()
+    assert "is not in the deletion queue" in str(exc.value)
+
+    run_command(
+        f"SELECT lake_engine.resolve_deletion_queue_path('{queued}', '{location}/')",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    assert _count_resolve_records(superuser_conn, location) == 0
+    assert _count_prefix_records(superuser_conn, location) == 1
+
+    # the prefix row is ordinary from here on, so the queue drains as usual
+    _assert_vacuum_drains(superuser_conn, location)
+
+    run_command("DROP SCHEMA IF EXISTS manual_resolve CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_forget_deletion_queue_path(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+):
+    """Giving up on a queued path leaves its files in object storage for the
+    operator to deal with."""
+    run_command("CREATE SCHEMA IF NOT EXISTS manual_forget", pg_conn)
+    run_command(
+        """
+        CREATE TABLE manual_forget.t USING iceberg
+        WITH (autovacuum_enabled='false')
+        AS SELECT i AS id FROM generate_series(1, 10) i
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    location = _writable_location(pg_conn, "manual_forget.t")
+
+    _drop_deferred(pg_conn, "DROP TABLE manual_forget.t")
+    queued = _queued_metadata_path(superuser_conn, location)
+
+    with pytest.raises(Exception) as exc:
+        run_command(
+            f"SELECT lake_engine.forget_deletion_queue_path("
+            f"'{location}/metadata/no-such.json')",
+            superuser_conn,
+        )
+    superuser_conn.rollback()
+    assert "is not in the deletion queue" in str(exc.value)
+
+    # it deletes queue rows for any table, so table owners do not get it
+    with pytest.raises(Exception) as exc:
+        run_command(
+            f"SELECT lake_engine.forget_deletion_queue_path('{queued}')", pg_conn
+        )
+    pg_conn.rollback()
+    assert "permission denied" in str(exc.value)
+
+    run_command(
+        f"SELECT lake_engine.forget_deletion_queue_path('{queued}')", superuser_conn
+    )
+    superuser_conn.commit()
+
+    assert _count_resolve_records(superuser_conn, location) == 0
+    files = run_query(
+        f"SELECT count(*) FROM lake_file.list('{location}/**')", superuser_conn
+    )[0][0]
+    superuser_conn.commit()
+    assert files > 0
+
+    run_command("SET pg_lake_table.enable_delete_file_function = on", superuser_conn)
+    run_command(
+        f"SELECT lake_file.delete(path) FROM lake_file.list('{location}/**')",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+    run_command("DROP SCHEMA IF EXISTS manual_forget CASCADE", pg_conn)
     pg_conn.commit()
 
 

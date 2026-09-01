@@ -868,6 +868,31 @@ drop table measurements;
 
 When you drop an Iceberg table, the files that make up the Iceberg table will be added to the “deletion queue”, but are not immediately deleted. This allows for restoring a backup if you need to revert to a previous point in time (see Point-in-time recoveries). When you run `VACUUM (iceberg);`, any files that have been in the deletion queue for more than 10 days will be deleted.
 
+### When a dropped table's files cannot be found
+
+Instead of listing a dropped table's files right away, pg_lake may queue a single row naming the table's `metadata.json` and let `VACUUM (iceberg)` expand it into those files later. If something the metadata points at — a manifest or a manifest list — is no longer in object storage, that expansion cannot list the files. This happens when object storage is changed outside pg_lake: a lifecycle rule, a restore that shares a prefix, or manual cleanup after a failed drop.
+
+VACUUM recovers on its own where it can:
+
+- for a table at the default location prefix, it removes everything under the table's own prefix, which covers every file the expansion would have found;
+- otherwise it removes what the metadata still reaches and reports each pointer it skipped as a warning. Set `pg_lake_engine.deletion_queue_tolerate_dead_pointers` to `off` to keep the row queued untouched instead.
+
+That leaves the files of a table at a custom location that are only reachable through the missing manifest. Two superuser functions finish the job:
+
+```sql
+-- remove everything under a prefix instead of walking the metadata. The prefix
+-- must contain the queued path, and should hold nothing but the dropped table.
+select lake_engine.resolve_deletion_queue_path(
+    's3://mybucket/mytable/metadata/00003-b8e1.metadata.json',
+    's3://mybucket/mytable');
+
+-- give up on a queued path and take over its files yourself
+select lake_engine.forget_deletion_queue_path(
+    's3://mybucket/mytable/metadata/00003-b8e1.metadata.json');
+```
+
+`lake_engine.flush_deletion_queue(0)` retries every queued path immediately, including one that has spent `pg_lake_engine.vacuum_file_remove_max_retries` and that VACUUM therefore no longer picks up.
+
 ## Backups
 
 When an Iceberg table is modified, the files that make up the previous version of the Iceberg table remain in object storage until they are explicitly deleted (by VACUUM). Our default policy is to keep files for at least 10 days to allow past versions to be restored.

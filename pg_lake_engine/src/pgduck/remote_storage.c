@@ -156,7 +156,7 @@ ListRemoteFileNames(char *pattern)
  * RemoteFileExists returns whether the given file exists in the remote storage.
  */
 bool
-RemoteFileExists(char *path)
+RemoteFileExists(const char *path)
 {
 	char	   *query = psprintf("SELECT pg_lake_file_exists(%s)",
 								 quote_literal_cstr(path));

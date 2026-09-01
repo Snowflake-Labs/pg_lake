@@ -397,7 +397,7 @@ DropAndQueueEmptyDataFiles(Oid relationId, StatsCollector * statsCollector)
 		if (stats->rowCount == 0)
 		{
 			InsertDeletionQueueRecordExtended(stats->dataFilePath, relationId,
-											  orphanedAt, false, false);
+											  orphanedAt, false, false, NULL);
 			continue;
 		}
 
