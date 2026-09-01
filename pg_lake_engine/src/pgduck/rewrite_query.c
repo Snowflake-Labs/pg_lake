@@ -1943,7 +1943,7 @@ RewriteFuncExprToHex(Node *node, void *context)
 		castExpr->location = -1;
 
 		Node	   *maskExpr = MakeOpExpr((Node *) castExpr, "pg_catalog", "&",
-										   (Node *) MakeInt64Const(INT64CONST(4294967295)));
+										  (Node *) MakeInt64Const(INT64CONST(4294967295)));
 
 		funcExpr->funcid = F_TO_HEX_INT8;
 		funcExpr->args = list_make1(maskExpr);
