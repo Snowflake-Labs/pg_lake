@@ -79,6 +79,22 @@ typedef enum HttpTlsClientAuth
 	HTTP_TLS_DEPLOYMENT_CLIENT_CERT
 }			HttpTlsClientAuth;
 
+/*
+ * The three settings above are one credential and are only usable together: a
+ * certificate cannot be offered without its key, and offering it while
+ * verifying the peer against the public bundle would hand the deployment's
+ * identity to any publicly-signed host a catalog happens to name.  So a
+ * request presents all three or none, and a partial configuration is a
+ * mistake to report rather than a state to work around.
+ */
+typedef enum HttpClientTlsMaterial
+{
+	HTTP_TLS_MATERIAL_ABSENT = 0,
+	HTTP_TLS_MATERIAL_COMPLETE,
+	HTTP_TLS_MATERIAL_PARTIAL
+}			HttpClientTlsMaterial;
+
+extern PGDLLEXPORT HttpClientTlsMaterial GetHttpClientTlsMaterial(void);
 extern bool CheckHttpClientTlsFile(char **newval, void **extra, GucSource source);
 
 #define HTTP_STATUS_UNAUTHORIZED		401

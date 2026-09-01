@@ -32,6 +32,7 @@
 #include "foreign/foreign.h"
 #include "utils/memutils.h"
 
+#include "pg_lake/http/http_client.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
@@ -142,6 +143,21 @@ ValidateRestCatalogOptions(const RestCatalogOptions * opts,
 				 errhint("Set the pg_lake_iceberg.rest_catalog_host GUC (e.g. "
 						 "\"http://localhost:8181/api/catalog\" for Polaris) or "
 						 "the \"rest_endpoint\" option on the server.")));
+
+	/*
+	 * A horizon catalog is the one kind reached through the deployment's own
+	 * edge, so it is where a half-configured client certificate shows up.
+	 * Requests refuse to present an incomplete one, and saying so here beats
+	 * leaving the operator to read it out of a TLS handshake failure.
+	 */
+	if (opts->authType == REST_CATALOG_AUTH_TYPE_HORIZON &&
+		GetHttpClientTlsMaterial() == HTTP_TLS_MATERIAL_PARTIAL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("client certificate for REST catalog \"%s\" is only partly configured",
+						catalog),
+				 errhint("Set pg_lake_iceberg.tls_ca_file, pg_lake_iceberg.tls_cert_file "
+						 "and pg_lake_iceberg.tls_key_file together, or leave all three empty.")));
 
 	/*
 	 * A catalog authenticated by workload identity has no client secret to

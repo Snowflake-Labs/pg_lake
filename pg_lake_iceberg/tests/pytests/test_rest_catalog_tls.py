@@ -199,8 +199,23 @@ def mtls_catalog_server(tls_material):
     thread.join(timeout=5)
 
 
-def _use_catalog(conn, port, tls_material, auth_type):
+_ALL_TLS_FILES = ("ca", "client_cert", "client_key")
+
+
+def _use_catalog(conn, port, tls_material, auth_type, tls_files=_ALL_TLS_FILES):
+    """
+    Point the built-in catalog at the test server.  tls_files names which of
+    the three pieces of client-certificate material to configure, so a test
+    can leave one out.
+    """
     host = f"https://127.0.0.1:{port}/api/catalog"
+
+    tls_settings = {
+        f"pg_lake_iceberg.tls_{setting}": (
+            str(tls_material[key]) if key in tls_files else ""
+        )
+        for key, setting in zip(_ALL_TLS_FILES, ("ca_file", "cert_file", "key_file"))
+    }
 
     run_command_outside_tx(
         [
@@ -208,11 +223,12 @@ def _use_catalog(conn, port, tls_material, auth_type):
             f"ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_auth_type TO '{auth_type}'",
             "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_id TO 'test_id'",
             "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_secret TO 'test_secret'",
-            f"ALTER SYSTEM SET pg_lake_iceberg.tls_ca_file TO '{tls_material['ca']}'",
-            f"ALTER SYSTEM SET pg_lake_iceberg.tls_cert_file TO '{tls_material['client_cert']}'",
-            f"ALTER SYSTEM SET pg_lake_iceberg.tls_key_file TO '{tls_material['client_key']}'",
-            "SELECT pg_reload_conf()",
         ]
+        + [
+            f"ALTER SYSTEM SET {name} TO '{value}'"
+            for name, value in tls_settings.items()
+        ]
+        + ["SELECT pg_reload_conf()"]
     )
 
     wait_for_reloaded_settings(
@@ -220,7 +236,7 @@ def _use_catalog(conn, port, tls_material, auth_type):
         {
             "pg_lake_iceberg.rest_catalog_host": host,
             "pg_lake_iceberg.rest_catalog_auth_type": auth_type,
-            "pg_lake_iceberg.tls_cert_file": str(tls_material["client_cert"]),
+            **tls_settings,
         },
     )
 
@@ -293,6 +309,37 @@ def test_a_third_party_catalog_is_not_shown_the_certificate(
 
     try:
         with pytest.raises(psycopg2.Error):
+            _register_namespace(superuser_conn)
+
+        assert handler.peer_common_names == []
+    finally:
+        superuser_conn.rollback()
+        _stop_using_catalog()
+
+
+def test_a_half_configured_certificate_is_refused(
+    superuser_conn, iceberg_extension, installcheck, tls_material, mtls_catalog_server
+):
+    """
+    The certificate and the authority that signed the edge are one credential.
+    Presenting the certificate while verifying the peer against the public
+    bundle would offer the deployment's identity to any publicly signed host a
+    catalog names, so half a configuration is reported rather than half used.
+    """
+    if installcheck:
+        return
+
+    port, handler = mtls_catalog_server
+    _use_catalog(
+        superuser_conn,
+        port,
+        tls_material,
+        "horizon",
+        tls_files=("client_cert", "client_key"),
+    )
+
+    try:
+        with pytest.raises(psycopg2.Error, match="only partly configured"):
             _register_namespace(superuser_conn)
 
         assert handler.peer_common_names == []

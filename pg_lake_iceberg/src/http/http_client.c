@@ -89,6 +89,35 @@ char	   *HttpClientTlsKeyFile = "";
 
 
 /*
+ * GetHttpClientTlsMaterial reports whether the deployment's client
+ * certificate, its key and the authority that signed the edge are all
+ * configured.  They cannot be validated against each other at assignment,
+ * since a GUC is checked without reference to its siblings and the three
+ * arrive in whatever order the configuration file lists them.
+ */
+HttpClientTlsMaterial
+GetHttpClientTlsMaterial(void)
+{
+	int			configured = 0;
+
+	if (HttpClientTlsCaFile != NULL && HttpClientTlsCaFile[0] != '\0')
+		configured++;
+	if (HttpClientTlsCertFile != NULL && HttpClientTlsCertFile[0] != '\0')
+		configured++;
+	if (HttpClientTlsKeyFile != NULL && HttpClientTlsKeyFile[0] != '\0')
+		configured++;
+
+	if (configured == 0)
+		return HTTP_TLS_MATERIAL_ABSENT;
+
+	if (configured == 3)
+		return HTTP_TLS_MATERIAL_COMPLETE;
+
+	return HTTP_TLS_MATERIAL_PARTIAL;
+}
+
+
+/*
  * CheckHttpClientTlsFile rejects a TLS path the server cannot read.
  *
  * curl loads these files when it builds the TLS context rather than when a
@@ -190,20 +219,16 @@ CurlSetOptions(CURL *curl, const char *url, HttpMethod method,
 
 	/*
 	 * Client certificate material, for requests addressed to the edge that
-	 * issued it.  Each option is set only when a path was supplied:
-	 * CURLOPT_CAINFO replaces the default CA bundle outright, so passing an
-	 * empty path here would leave the handle unable to verify any peer.
+	 * issued it.  An incomplete configuration presents nothing at all: the
+	 * handshake then fails at the edge, which is a better outcome than
+	 * offering the certificate to a peer verified by the public bundle.
 	 */
-	if (clientAuth == HTTP_TLS_DEPLOYMENT_CLIENT_CERT)
+	if (clientAuth == HTTP_TLS_DEPLOYMENT_CLIENT_CERT &&
+		GetHttpClientTlsMaterial() == HTTP_TLS_MATERIAL_COMPLETE)
 	{
-		if (HttpClientTlsCaFile != NULL && HttpClientTlsCaFile[0] != '\0')
-			CURL_SETOPT(curl, CURLOPT_CAINFO, HttpClientTlsCaFile);
-
-		if (HttpClientTlsCertFile != NULL && HttpClientTlsCertFile[0] != '\0')
-			CURL_SETOPT(curl, CURLOPT_SSLCERT, HttpClientTlsCertFile);
-
-		if (HttpClientTlsKeyFile != NULL && HttpClientTlsKeyFile[0] != '\0')
-			CURL_SETOPT(curl, CURLOPT_SSLKEY, HttpClientTlsKeyFile);
+		CURL_SETOPT(curl, CURLOPT_CAINFO, HttpClientTlsCaFile);
+		CURL_SETOPT(curl, CURLOPT_SSLCERT, HttpClientTlsCertFile);
+		CURL_SETOPT(curl, CURLOPT_SSLKEY, HttpClientTlsKeyFile);
 	}
 
 	/*
