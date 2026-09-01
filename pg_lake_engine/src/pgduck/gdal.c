@@ -65,6 +65,11 @@ ValidateGDALLayer(char *pathExpression, char *layerName)
  * GDALReadFunctionCall constructs the st_read function call for the given
  * path and compression.
  *
+ * GDAL sources can hold curve types (CIRCULARSTRING, MULTICURVE) that DuckDB's
+ * GEOMETRY cannot represent, so scans pass forceKeepWKB to keep geometry as raw
+ * WKB and cast it in Postgres; DESCRIBE clears it so the column comes back typed
+ * geometry rather than bytea.
+ *
  * See https://gdal.org/user/virtual_file_systems.html for compression syntax.
  */
 char *

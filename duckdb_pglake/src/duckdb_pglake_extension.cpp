@@ -912,14 +912,6 @@ DUCKDB_EXTENSION_API const char * duckdb_pglake_geometry_to_string(duckdb_databa
 	return strdup(hexWKB.ToString().c_str());
 }
 
-DUCKDB_EXTENSION_API bool duckdb_pglake_is_geometry_type(duckdb_logical_type type) {
-	if (!type) {
-		return false;
-	}
-	auto *logical_type = reinterpret_cast<duckdb::LogicalType *>(type);
-	return logical_type->id() == duckdb::LogicalTypeId::GEOMETRY;
-}
-
 DUCKDB_EXTENSION_API int duckdb_pglake_geometry_get_srid(duckdb_logical_type type) {
 	if (!type) {
 		return 0;
