@@ -84,19 +84,11 @@ static bool TokenCacheCallbackRegistered = false;
 
 
 /*
- * Provider named by pg_lake_iceberg.rest_catalog_auth_provider, in
- * "library:symbol" form, empty when no provider is configured.  Resolution is
- * deferred to first use and then cached for the life of the backend, so a
- * misconfigured name is reported when a catalog is actually contacted rather
- * than at load time.
+ * The registered credential provider, NULL when no extension supplies one.
  */
-char	   *RestCatalogAuthProviderName = "";
-
 static PgLakeRestCatalogAuthProvider RestCatalogAuthProvider = NULL;
-static bool RestCatalogAuthProviderResolved = false;
 
 
-static PgLakeRestCatalogAuthProvider ResolveRestCatalogAuthProvider(void);
 static void FetchRestCatalogAuthorization(RestCatalogOptions * opts, bool forceRefresh,
 										  char **authorization, int *expiresIn);
 static void FetchOAuth2AccessToken(RestCatalogOptions * opts, char **accessToken, int *expiresIn);
@@ -247,62 +239,34 @@ GetRestCatalogAuthorization(RestCatalogOptions * opts, bool forceRefreshToken)
 
 
 /*
- * AssignRestCatalogAuthProvider drops a previously resolved provider so the
- * next lookup honours the new setting.  The library itself stays loaded, as
- * Postgres never unloads one, but that only costs an unused mapping.
+ * PgLakeRegisterRestCatalogAuthProvider installs the provider an extension
+ * supplies, or clears it when passed NULL.  Registering replaces whatever was
+ * there before, so an extension can withdraw its provider as readily as it
+ * offered one.
  *
- * Tokens the old provider minted go with it: they are cached per catalog, not
- * per provider, so leaving them behind would keep sending a credential from a
- * provider that is no longer configured.  Both caches only reset a memory
- * context, which an assign hook may do because it cannot fail.
+ * Whatever the outgoing provider minted goes with it: credentials are cached
+ * per catalog rather than per provider, so leaving them behind would keep
+ * sending a credential from a provider that is no longer in charge.
  */
 void
-AssignRestCatalogAuthProvider(const char *newval, void *extra)
+PgLakeRegisterRestCatalogAuthProvider(PgLakeRestCatalogAuthProvider provider)
 {
-	RestCatalogAuthProvider = NULL;
-	RestCatalogAuthProviderResolved = false;
+	RestCatalogAuthProvider = provider;
 
 	InvalidateRestTokenCache((Datum) 0, 0, 0);
 }
 
 
 /*
- * ResolveRestCatalogAuthProvider looks up the configured provider, returning
- * NULL when none is set.
+ * RestCatalogAuthProviderIsRegistered reports whether some extension has
+ * offered to supply credentials, which decides whether a catalog with no
+ * stored secret is a misconfiguration or a catalog authenticated some other
+ * way.
  */
-static PgLakeRestCatalogAuthProvider
-ResolveRestCatalogAuthProvider(void)
+bool
+RestCatalogAuthProviderIsRegistered(void)
 {
-	if (RestCatalogAuthProviderResolved)
-		return RestCatalogAuthProvider;
-
-	if (RestCatalogAuthProviderName != NULL && RestCatalogAuthProviderName[0] != '\0')
-	{
-		char	   *spec = pstrdup(RestCatalogAuthProviderName);
-
-		/*
-		 * Split on the last colon so a library given as a path is not
-		 * mistaken for a library/symbol pair.
-		 */
-		char	   *separator = strrchr(spec, ':');
-
-		if (separator == NULL || separator == spec || separator[1] == '\0')
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("invalid value for parameter \"pg_lake_iceberg.rest_catalog_auth_provider\": \"%s\"",
-							RestCatalogAuthProviderName),
-					 errhint("Expected \"library:symbol\", for example "
-							 "\"snowflake_auth:pg_lake_rest_catalog_auth\".")));
-
-		*separator = '\0';
-
-		RestCatalogAuthProvider = (PgLakeRestCatalogAuthProvider)
-			load_external_function(spec, separator + 1, true /* signalNotFound */ , NULL);
-	}
-
-	RestCatalogAuthProviderResolved = true;
-
-	return RestCatalogAuthProvider;
+	return RestCatalogAuthProvider != NULL;
 }
 
 
@@ -325,7 +289,7 @@ FetchRestCatalogAuthorization(RestCatalogOptions * opts, bool forceRefresh,
 							  char **authorization, int *expiresIn)
 {
 	PgLakeRestCatalogAuthProvider provider =
-		opts->isBuiltin ? ResolveRestCatalogAuthProvider() : NULL;
+		opts->isBuiltin ? RestCatalogAuthProvider : NULL;
 
 	if (provider != NULL)
 	{

@@ -286,23 +286,28 @@ typedef struct RestCatalogAuthRequest
  * without filling in material->authorization is an error.  pg_lake keeps
  * ownership of caching, refresh and header construction either way.
  *
- * A provider is named by pg_lake_iceberg.rest_catalog_auth_provider as
- * "library:symbol" and resolved on first use.  It is looked up by name
- * rather than assigning a hook variable because a provider extension is
- * typically loaded from shared_preload_libraries, whereas pg_lake_iceberg is
- * loaded on first use of the extension: at the only point the provider runs
- * init code, there is no pg_lake symbol yet to assign to.  Resolving by name
- * also keeps the dependency pointing from pg_lake to the provider, and only
- * when one is configured.
+ * A provider registers itself by calling
+ * PgLakeRegisterRestCatalogAuthProvider below, so the function pointer pg_lake
+ * ends up calling is one the compiler has already checked against this
+ * signature.  Registration is per backend and lasts for its lifetime.
  *
- * The symbol must be exported (PGDLLEXPORT), since extensions are typically
- * built with hidden visibility.
+ * pg_lake_iceberg is loaded on first use of the extension, whereas a provider
+ * extension is typically loaded from shared_preload_libraries, so at the point
+ * the provider runs its init code there is usually no pg_lake symbol to call
+ * yet.  A provider therefore resolves this function for itself, which is also
+ * what keeps the dependency pointing from the provider to pg_lake rather than
+ * requiring pg_lake to know anything about it:
+ *
+ *   void (*register_provider) (PgLakeRestCatalogAuthProvider) =
+ *       load_external_function("pg_lake_iceberg",
+ *                              "PgLakeRegisterRestCatalogAuthProvider",
+ *                              true, NULL);
+ *   register_provider(my_provider);
  */
 typedef bool (*PgLakeRestCatalogAuthProvider) (const RestCatalogAuthRequest * request,
 											   RestCatalogAuthMaterial * material);
 
-extern char *RestCatalogAuthProviderName;
-extern void AssignRestCatalogAuthProvider(const char *newval, void *extra);
+extern PGDLLEXPORT void PgLakeRegisterRestCatalogAuthProvider(PgLakeRestCatalogAuthProvider provider);
 
 /*
  * Module-internal helpers shared across the rest_catalog_*.c files.
@@ -315,6 +320,7 @@ void		ApplyServerOptionOverrides(RestCatalogOptions * opts, ForeignServer *serve
 void		ApplyUserMappingOverrides(RestCatalogOptions * opts, ForeignServer *server);
 void		ApplyUserMappingOptionsList(RestCatalogOptions * opts, List *options, Oid umOid);
 List	   *LookupUserMappingOptionsByOid(Oid umOid, Oid *serverOidOut);
+bool		RestCatalogAuthProviderIsRegistered(void);
 char	   *GetRestCatalogAuthorization(RestCatalogOptions * opts, bool forceRefreshToken);
 List	   *GetHeadersWithAuth(RestCatalogOptions * opts);
 char	   *JsonbGetStringByPath(const char *jsonb_text, int nkeys,...);

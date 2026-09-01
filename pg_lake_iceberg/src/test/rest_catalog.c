@@ -32,6 +32,7 @@ PG_FUNCTION_INFO_V1(register_namespace_to_named_catalog);
 PG_FUNCTION_INFO_V1(get_rest_metadata_location);
 PG_FUNCTION_INFO_V1(get_rest_vended_credentials);
 PG_FUNCTION_INFO_V1(resolve_rest_catalog_base_uri);
+PG_FUNCTION_INFO_V1(set_test_rest_catalog_auth_provider);
 PG_FUNCTION_INFO_V1(set_test_rest_catalog_auth_response);
 PG_FUNCTION_INFO_V1(test_rest_catalog_auth_provider_calls);
 PG_FUNCTION_INFO_V1(test_rest_catalog_auth_provider_endpoints);
@@ -231,6 +232,32 @@ test_rest_catalog_auth_provider(const RestCatalogAuthRequest * request,
 	material->expiresIn = TestAuthProviderExpiresIn;
 
 	return true;
+}
+
+
+/*
+ * set_test_rest_catalog_auth_provider(enabled) registers the stub above with
+ * pg_lake, or withdraws it.
+ *
+ * The registration function is resolved by name rather than called directly,
+ * even though it lives in this same library, so that the test covers what a
+ * real provider has to do: find an exported symbol in a library built with
+ * hidden visibility.
+ */
+Datum
+set_test_rest_catalog_auth_provider(PG_FUNCTION_ARGS)
+{
+	bool		enabled = PG_GETARG_BOOL(0);
+
+	void		(*registerProvider) (PgLakeRestCatalogAuthProvider) =
+		(void (*) (PgLakeRestCatalogAuthProvider))
+		load_external_function("pg_lake_iceberg",
+							   "PgLakeRegisterRestCatalogAuthProvider",
+							   true /* signalNotFound */ , NULL);
+
+	registerProvider(enabled ? test_rest_catalog_auth_provider : NULL);
+
+	PG_RETURN_VOID();
 }
 
 

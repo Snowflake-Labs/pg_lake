@@ -1,8 +1,8 @@
 """
 Tests for the credential provider seam, which lets another extension supply
 REST catalog credentials for catalogs whose authentication pg_lake has no
-built-in support for.  The provider is named by
-pg_lake_iceberg.rest_catalog_auth_provider and resolved by name on first use.
+built-in support for.  A provider registers itself with pg_lake, per backend,
+by calling PgLakeRegisterRestCatalogAuthProvider.
 
 A mock HTTP server stands in for the catalog.  It records the
 Authorization header of every non-token request and counts how often the
@@ -27,6 +27,10 @@ from utils_pytest import *
 
 
 _HOOK_FNS = """
+CREATE OR REPLACE FUNCTION set_test_rest_catalog_auth_provider(BOOL)
+RETURNS void LANGUAGE C VOLATILE STRICT
+AS 'pg_lake_iceberg', 'set_test_rest_catalog_auth_provider';
+
 CREATE OR REPLACE FUNCTION set_test_rest_catalog_auth_response(TEXT, INT, BOOL)
 RETURNS void LANGUAGE C VOLATILE STRICT
 AS 'pg_lake_iceberg', 'set_test_rest_catalog_auth_response';
@@ -47,10 +51,6 @@ CREATE OR REPLACE FUNCTION register_namespace_to_named_catalog(TEXT,TEXT,TEXT)
 RETURNS void LANGUAGE C VOLATILE STRICT
 AS 'pg_lake_iceberg', 'register_namespace_to_named_catalog';
 """
-
-# The stub provider lives in pg_lake_iceberg itself, which is what a real
-# provider extension would be named here instead.
-_TEST_PROVIDER = "pg_lake_iceberg:test_rest_catalog_auth_provider"
 
 
 def _find_free_port():
@@ -148,7 +148,6 @@ def catalog_and_conn(postgres):
             f"ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_host TO 'http://127.0.0.1:{port}'",
             "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_id TO 'test_id'",
             "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_secret TO 'test_secret'",
-            f"ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_auth_provider TO '{_TEST_PROVIDER}'",
             "SELECT pg_reload_conf()",
         ]
     )
@@ -169,18 +168,27 @@ def catalog_and_conn(postgres):
             "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_host",
             "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_id",
             "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_secret",
-            "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_auth_provider",
             "SELECT pg_reload_conf()",
         ]
     )
 
 
 def _install_hook(conn, authorization, expires_in, claims):
+    """
+    Prime the stub provider and register it with pg_lake.  Registration is per
+    backend, so every connection a test drives the catalog from needs it.
+    """
     run_command(
         f"SELECT set_test_rest_catalog_auth_response("
         f"'{authorization}', {expires_in}, {claims})",
         conn,
     )
+    run_command("SELECT set_test_rest_catalog_auth_provider(true)", conn)
+    conn.commit()
+
+
+def _withdraw_provider(conn):
+    run_command("SELECT set_test_rest_catalog_auth_provider(false)", conn)
     conn.commit()
 
 
@@ -451,32 +459,22 @@ def test_a_declining_provider_still_reports_the_missing_secret(
     _without_stored_secret(_run)
 
 
-def test_malformed_provider_name_is_rejected(
+def test_a_catalog_with_no_provider_uses_the_builtin_grant(
     iceberg_extension, installcheck, catalog_and_conn
 ):
     """
-    A provider name that is not "library:symbol" is reported when a catalog
-    is contacted, since that is when the name is resolved.
+    A backend where nothing registered a provider runs pg_lake's own OAuth2
+    grant, which is every deployment that installs no such extension.
     """
     if installcheck:
         return
 
-    run_command_outside_tx(
-        [
-            "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_auth_provider TO 'missing_symbol'",
-            "SELECT pg_reload_conf()",
-        ]
-    )
+    handler_class, conn = catalog_and_conn
 
-    # A backend opened after the reload starts with the new setting, which
-    # avoids racing the reload against the query below.
-    conn = open_pg_conn()
+    _touch_catalog(conn, "myns")
 
-    try:
-        with pytest.raises(Exception, match="invalid value for parameter"):
-            _touch_catalog(conn, "myns")
-    finally:
-        conn.close()
+    assert handler_class.token_requests == 1
+    assert handler_class.data_request_auths[0].startswith("Bearer ")
 
 
 def test_a_user_created_server_is_never_offered_the_provider(
@@ -537,12 +535,12 @@ def test_a_user_created_server_still_needs_its_own_credentials(
     assert handler_class.data_request_auths == []
 
 
-def test_reconfiguring_the_provider_drops_what_it_minted(
+def test_withdrawing_the_provider_drops_what_it_minted(
     iceberg_extension, installcheck, catalog_and_conn
 ):
     """
     Credentials are cached per catalog rather than per provider, so a
-    provider that is replaced or removed would otherwise leave its
+    provider that is replaced or withdrawn would otherwise leave its
     credential behind for whatever takes over to keep sending.
     """
     if installcheck:
@@ -555,15 +553,7 @@ def test_reconfiguring_the_provider_drops_what_it_minted(
 
     assert handler_class.data_request_auths == ["Snowflake-WIF cached-credential"]
 
-    run_command_outside_tx(
-        [
-            "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_auth_provider",
-            "SELECT pg_reload_conf()",
-        ]
-    )
-    wait_for_reloaded_settings(
-        [conn], {"pg_lake_iceberg.rest_catalog_auth_provider": ""}
-    )
+    _withdraw_provider(conn)
 
     _touch_catalog(conn, "ns_two")
 
@@ -572,7 +562,7 @@ def test_reconfiguring_the_provider_drops_what_it_minted(
     ), "a credential outlived the provider that minted it"
     assert (
         handler_class.token_requests == 1
-    ), "pg_lake did not fall back to its own OAuth2 grant once the provider was gone"
+    ), "pg_lake did not fall back to its own OAuth2 grant once the provider was withdrawn"
 
 
 def test_catalog_401_refreshes_the_credential(

@@ -173,8 +173,7 @@ ValidateRestCatalogOptions(const RestCatalogOptions * opts,
 	 * Only the built-in catalog is ever offered to the provider, so a
 	 * user-created server must still produce its own credentials.
 	 */
-	if (isBuiltin &&
-		RestCatalogAuthProviderName != NULL && RestCatalogAuthProviderName[0] != '\0')
+	if (isBuiltin && RestCatalogAuthProviderIsRegistered())
 		return;
 
 	bool		missingSecret = (opts->clientSecret == NULL || opts->clientSecret[0] == '\0');
