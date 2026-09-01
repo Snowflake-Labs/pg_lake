@@ -125,7 +125,7 @@ ApplyGUCDefaults(RestCatalogOptions * opts, bool isBuiltin)
  * only user-created servers.  See BuildRestCatalogOptionsFromServer
  * for the resolution rules.
  *
- * FetchRestCatalogAccessToken still re-checks the fields it actually
+ * FetchOAuth2AccessToken still re-checks the fields it actually
  * dereferences.  Those late checks are defense in depth in case any
  * future code path constructs RestCatalogOptions without going
  * through this resolver.
