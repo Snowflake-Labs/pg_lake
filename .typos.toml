@@ -39,6 +39,8 @@ GetRowsProcesseed = "GetRowsProcesseed"
 [default.extend-words]
 inh = "inh"
 opf = "opf"
+# SetOperationStmt's left argument field, named by PostgreSQL
+larg = "larg"
 IYE = "IYE"
 IY = "IY"
 abd = "abd"
