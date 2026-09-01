@@ -254,6 +254,66 @@ def test_s3_get_region_invalid(pgduck_conn):
     pgduck_conn.rollback()
 
 
+def test_denied_key_containing_301_keeps_its_own_error(
+    enforcing_s3_server, pgduck_conn
+):
+    """A denied read reports the denial, on an object whose key happens to
+    contain a substring that reads like a redirect status.
+
+    RegionAwareS3FileSystem retries against a freshly probed region when a
+    request looks like it went to the wrong one, and it used to decide that by
+    searching the error text for "301". That text carries the URL of the object,
+    and Iceberg names data files after a uuid, so about one key in a hundred
+    turned an unrelated failure into a region probe -- whose own error then
+    replaced the denial the caller was about to report.
+
+    The second key is the control: it differs only in not containing "301"."""
+    server = enforcing_s3_server
+    prefix = "region_mismatch_classification"
+    keys = [
+        f"{prefix}/00000-0-3016a9de-0e0f-4a1b-9f0e-3b0d1e2f4a5b.parquet",
+        f"{prefix}/00000-0-7c4a9de0-0e0f-4a1b-9f0e-3b0d1e2f4a5b.parquet",
+    ]
+
+    for key in keys:
+        server.client().put_object(Bucket=server.bucket, Key=key, Body=b"denied")
+
+    # allowed under a sibling prefix only, so every read below is denied
+    access_key_id, secret_access_key = server.create_scoped_user(
+        "region301_reader", [f"{prefix}_allowed"]
+    )
+
+    perform_query(
+        f"""
+        CREATE OR REPLACE SECRET region301 (
+            TYPE S3, KEY_ID '{access_key_id}', SECRET '{secret_access_key}',
+            REGION '{server.region}', ENDPOINT '{server.endpoint}',
+            SCOPE 's3://{server.bucket}/{prefix}',
+            URL_STYLE 'path', USE_SSL false
+        );
+        """,
+        pgduck_conn,
+    )
+    server.enforce()
+
+    try:
+        for key in keys:
+            error = run_command(
+                f"SELECT count(*) FROM read_parquet('s3://{server.bucket}/{key}')",
+                pgduck_conn,
+                raise_error=False,
+            )
+            pgduck_conn.rollback()
+
+            assert error is not None, f"the read of {key} was not denied"
+            assert "403" in error, f"expected a denial for {key}, got: {error}"
+            assert key in error, f"{key}: the error is about another request: {error}"
+    finally:
+        server.relax()
+        perform_query("DROP SECRET IF EXISTS region301", pgduck_conn)
+        pgduck_conn.rollback()
+
+
 def test_pg_lake_remove_file_glob_recursive(s3, pgduck_conn):
     """The glob + pg_lake_remove_file form that DeleteRemotePrefix uses deletes
     every object under a prefix, recursing into sub-prefixes, and leaves objects
