@@ -250,12 +250,19 @@ GetRestCatalogAuthorization(RestCatalogOptions * opts, bool forceRefreshToken)
  * AssignRestCatalogAuthProvider drops a previously resolved provider so the
  * next lookup honours the new setting.  The library itself stays loaded, as
  * Postgres never unloads one, but that only costs an unused mapping.
+ *
+ * Tokens the old provider minted go with it: they are cached per catalog, not
+ * per provider, so leaving them behind would keep sending a credential from a
+ * provider that is no longer configured.  Both caches only reset a memory
+ * context, which an assign hook may do because it cannot fail.
  */
 void
 AssignRestCatalogAuthProvider(const char *newval, void *extra)
 {
 	RestCatalogAuthProvider = NULL;
 	RestCatalogAuthProviderResolved = false;
+
+	InvalidateRestTokenCache((Datum) 0, 0, 0);
 }
 
 

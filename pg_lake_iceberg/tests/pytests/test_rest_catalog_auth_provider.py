@@ -537,6 +537,44 @@ def test_a_user_created_server_still_needs_its_own_credentials(
     assert handler_class.data_request_auths == []
 
 
+def test_reconfiguring_the_provider_drops_what_it_minted(
+    iceberg_extension, installcheck, catalog_and_conn
+):
+    """
+    Credentials are cached per catalog rather than per provider, so a
+    provider that is replaced or removed would otherwise leave its
+    credential behind for whatever takes over to keep sending.
+    """
+    if installcheck:
+        return
+
+    handler_class, conn = catalog_and_conn
+
+    _install_hook(conn, "Snowflake-WIF cached-credential", 3600, "true")
+    _touch_catalog(conn, "ns_one")
+
+    assert handler_class.data_request_auths == ["Snowflake-WIF cached-credential"]
+
+    run_command_outside_tx(
+        [
+            "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_auth_provider",
+            "SELECT pg_reload_conf()",
+        ]
+    )
+    wait_for_reloaded_settings(
+        [conn], {"pg_lake_iceberg.rest_catalog_auth_provider": ""}
+    )
+
+    _touch_catalog(conn, "ns_two")
+
+    assert (
+        handler_class.data_request_auths[1] != "Snowflake-WIF cached-credential"
+    ), "a credential outlived the provider that minted it"
+    assert (
+        handler_class.token_requests == 1
+    ), "pg_lake did not fall back to its own OAuth2 grant once the provider was gone"
+
+
 def test_catalog_401_refreshes_the_credential(
     iceberg_extension, installcheck, catalog_and_conn
 ):
