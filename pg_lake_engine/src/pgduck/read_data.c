@@ -483,8 +483,14 @@ ReadDataSourceFunction(List *sourcePaths,
 				}
 
 				char	   *path = (char *) linitial(sourcePaths);
+
+				/*
+				 * Force keep_wkb so geometry stays as raw WKB BLOB. This
+				 * avoids DuckDB's strict Arrow-to-GEOMETRY conversion that
+				 * throws on types like MULTICURVE.
+				 */
 				char	   *stReadCall =
-					GDALReadFunctionCall(path, sourceCompression, formatOptions);
+					GDALReadFunctionCall(path, sourceCompression, formatOptions, true);
 
 				appendStringInfoString(&command, stReadCall);
 				break;
@@ -1764,6 +1770,26 @@ BuildColumnProjection(char *columnName,
 		if (sourceFormat == DATA_FORMAT_JSON)
 			/* assume geometry in JSON is stored as GeoJSON */
 			return psprintf("ST_GeomFromGeoJSON(%s)%s", duckdb_quote_identifier(columnName),
+							columnAliasString);
+
+		/*
+		 * GDAL data scans always use keep_wkb=true so geometry arrives as raw
+		 * WKB BLOB, and hex(TRY_CAST(... AS BLOB)) hands it to PostGIS
+		 * unparsed. That is deliberate: DuckDB's GEOMETRY has no
+		 * representation for the curve types GDAL sources use (a MultiCurve
+		 * makes st_read itself fail with "Unsupported geometry type in WKB"),
+		 * while PostGIS reads them. The cost is that the projection is
+		 * VARCHAR, so a pushed-down spatial function on the column does not
+		 * bind in DuckDB, which is why geometry columns of a GDAL table are
+		 * not shippable.
+		 *
+		 * The ST_AsHexWKB fallback exists for safety but should not be
+		 * reached.
+		 */
+		if (sourceFormat == DATA_FORMAT_GDAL)
+			return psprintf("COALESCE(hex(TRY_CAST(%s AS BLOB)), ST_AsHexWKB(TRY_CAST(%s AS GEOMETRY)))%s",
+							duckdb_quote_identifier(columnName),
+							duckdb_quote_identifier(columnName),
 							columnAliasString);
 	}
 

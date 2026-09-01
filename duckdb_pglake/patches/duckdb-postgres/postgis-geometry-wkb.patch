@@ -9,13 +9,19 @@ type-resolution time, and rewrite the projection in the COPY query to wrap
 those columns in ST_AsBinary(...), which returns canonical ISO WKB as bytea.
 The existing BLOB reader path then transports the bytes unchanged.
 
+We also keep mapping geometry to a BLOB aliased WKB_BLOB, the way
+duckdb-postgres did up to v1.4.4 before it switched to LogicalType::GEOMETRY.
+A BLOB is handed on without being parsed, so PostGIS types DuckDB does not
+implement (CIRCULARSTRING, COMPOUNDCURVE and the other SQL/MM curve and
+surface types) keep scanning instead of failing to parse.
+
 Note: ST_AsBinary drops the SRID. If SRID preservation is needed, a separate
 column or in-reader EWKB stripping would be required.
 
 diff --git a/src/include/postgres_utils.hpp b/src/include/postgres_utils.hpp
 --- a/src/include/postgres_utils.hpp
 +++ b/src/include/postgres_utils.hpp
-@@ -35,7 +35,8 @@ enum class PostgresTypeAnnotation {
+@@ -37,7 +37,8 @@ enum class PostgresTypeAnnotation {
  	GEOM_BOX,
  	GEOM_PATH,
  	GEOM_POLYGON,
@@ -28,18 +34,42 @@ diff --git a/src/include/postgres_utils.hpp b/src/include/postgres_utils.hpp
 diff --git a/src/postgres_utils.cpp b/src/postgres_utils.cpp
 --- a/src/postgres_utils.cpp
 +++ b/src/postgres_utils.cpp
-@@ -157,6 +157,7 @@ LogicalType PostgresUtils::TypeToLogicalType(optional_ptr<PostgresTransaction> t
+@@ -52,12 +52,21 @@ string PostgresUtils::TypeToString(const LogicalType &input) {
+ 	}
+ }
+
++LogicalType GetGeometryType() {
++	auto blob_type = LogicalType(LogicalTypeId::BLOB);
++	blob_type.SetAlias("WKB_BLOB");
++	return blob_type;
++}
++
+ LogicalType PostgresUtils::RemoveAlias(const LogicalType &type) {
+ 	if (!type.HasAlias()) {
+ 		return type;
+ 	}
+ 	if (StringUtil::CIEquals(type.GetAlias(), "json")) {
+ 		return type;
+ 	}
++	if (StringUtil::CIEquals(type.GetAlias(), "geometry")) {
++		return GetGeometryType();
++	}
+ 	switch (type.id()) {
+ 	case LogicalTypeId::STRUCT: {
+@@ -256,7 +265,8 @@ LogicalType PostgresUtils::TypeToLogicalType(optional_ptr<PostgresTransaction> t
+ 	} else if (pgtypename == "jsonb") {
  		postgres_type.info = PostgresTypeAnnotation::JSONB;
  		return LogicalType::VARCHAR;
  	} else if (pgtypename == "geometry") {
+-		return LogicalType::GEOMETRY();
 +		postgres_type.info = PostgresTypeAnnotation::POSTGIS_GEOMETRY;
- 		return GetGeometryType();
++		return GetGeometryType();
  	} else if (pgtypename == "date") {
  		return LogicalType::DATE;
 diff --git a/src/postgres_scanner.cpp b/src/postgres_scanner.cpp
 --- a/src/postgres_scanner.cpp
 +++ b/src/postgres_scanner.cpp
-@@ -242,7 +242,15 @@ static void PostgresInitInternal(ClientContext &context, const PostgresBindData
+@@ -243,7 +243,15 @@ static void PostgresInitInternal(ClientContext &context, const PostgresBindData
  				col_names += "ctid";
  			}
  		} else {

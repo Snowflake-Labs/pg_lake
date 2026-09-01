@@ -125,30 +125,35 @@ def test_copy_to_parquet_azure_long_prefix(azure, pgduck_conn):
     pgduck_conn.rollback()
 
 
-def test_copy_to_azure_multiple_appends(azure, pgduck_conn, tmp_path):
-    """A file that does not fit in the write buffer is written as multiple appends,
-    and each append tells Azure the offset it expects to be written at, so check that
-    such a file still ends up with exactly the bytes we wrote."""
-    key = "test_copy_to_azure_multiple_appends/data.csv"
+def test_copy_to_azure_multiple_blocks(azure, pgduck_conn, tmp_path):
+    """A file that does not fit in one write block is staged as several blocks that are
+    committed together, so check that such a file still ends up with exactly the bytes we
+    wrote. The block size is lowered rather than the file grown, so the test stays small.
+    """
+    key = "test_copy_to_azure_multiple_blocks/data.csv"
     local_path = tmp_path / "data.csv"
 
     perform_query(
         f"""
+        SET azure_write_block_size = 1048576;
         CREATE TABLE bigtable AS
         SELECT i, repeat('x', 100) padding FROM generate_series(1,20000) t(i);
         COPY bigtable TO '{local_path}';
         COPY bigtable TO 'az://{TEST_BUCKET}/{key}';
+        SET azure_write_block_size = 0;
     """,
         pgduck_conn,
     )
 
-    properties = azure.get_blob_client(key).get_blob_properties()
+    blob_client = azure.get_blob_client(key)
 
-    # more than one append went into this blob
-    assert properties.append_blob_committed_block_count > 1
+    # more than one block went into this blob, and none was left uncommitted
+    committed, uncommitted = blob_client.get_block_list(block_list_type="all")
+    assert len(committed) > 1
+    assert uncommitted == []
 
     # and the blob is exactly as long as the same data written locally
-    assert properties.size == os.path.getsize(local_path)
+    assert blob_client.get_blob_properties().size == os.path.getsize(local_path)
 
     perform_query(
         f"""
@@ -242,7 +247,7 @@ def test_s3_get_region_invalid(pgduck_conn):
         raise_error=False,
     )
     assert (
-        "Could not establish connection error" in error
+        "Could not resolve hostname error" in error
         or "server closed the connection" in error
     )
 

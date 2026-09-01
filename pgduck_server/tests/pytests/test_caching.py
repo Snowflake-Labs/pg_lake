@@ -97,7 +97,7 @@ TRUNCATED_BODY_SIZE = 64 * 1024
 TRUNCATED_BODY_SENT = 4 * 1024
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def flaky_http_server():
     """Truncate the first GET of the body, then serve it in full.
 
@@ -107,7 +107,8 @@ def flaky_http_server():
     first attempt lets the retry succeed, and a successful retry is what leaves
     the partial attempt and the complete one both in the output file.
 
-    The handler keeps its own state so that a re-run does not inherit a counter.
+    The handler keeps its own state so that a re-run does not inherit a counter,
+    and the fixture is per-test so each test sees a fresh first attempt.
     """
 
     state = {"gets": 0}
@@ -153,14 +154,60 @@ def flaky_http_server():
     thread.join(timeout=10)
 
 
-def test_retried_download_is_not_cached(flaky_http_server, pgduck_conn):
+@pytest.fixture
+def httplib_http_client(pgduck_conn):
+    """Run the test on the httplib client instead of the default curl one.
+
+    The setting callback replaces the HTTPUtil on the DBConfig, so it applies to
+    the whole server and has to be put back afterwards.
+    """
+    run_command("SET httpfs_client_implementation='httplib';", pgduck_conn)
+    yield
+    run_command("SET httpfs_client_implementation='default';", pgduck_conn)
+    pgduck_conn.rollback()
+
+
+def test_retried_download_starts_clean(flaky_http_server, pgduck_conn):
+    """On the default client, a retry replaces the partial attempt.
+
+    The curl client collects the whole body in memory and only hands it to the
+    content handler once the transfer came back CURLE_OK, so a truncated attempt
+    writes nothing and the retry starts from an empty output file. The size check
+    still guards the outcome, which is what this asserts: the entry that gets
+    published is the object, byte for byte.
+    """
+    port, state = flaky_http_server
+    url = f"http://127.0.0.1:{port}/flaky.bin"
+    cached_path = Path(
+        f"{server_params.PGDUCK_CACHE_DIR}/http/127.0.0.1:{port}"
+        f"/{CACHE_FILE_PREFIX}flaky.bin"
+    )
+    stage_path = Path(f"{cached_path}.pgl-stage")
+
+    run_command(f"CALL pg_lake_cache_file('{url}');", pgduck_conn)
+    pgduck_conn.rollback()
+
+    assert state["gets"] >= 2, (
+        f"the download was not retried ({state['gets']} GET(s)), so the "
+        f"retry behaviour this test is about never happened"
+    )
+
+    assert cached_path.exists(), f"the retried download was not cached: {cached_path}"
+    assert cached_path.read_bytes() == b"x" * TRUNCATED_BODY_SIZE
+    assert not stage_path.exists(), f"staging file was left behind: {stage_path}"
+
+
+def test_retried_download_is_not_cached(
+    flaky_http_server, httplib_http_client, pgduck_conn
+):
     """A download whose retry succeeded must still match the object.
 
-    HTTPUtil::SendRequest retries a request error by re-running the content
-    handler from the start of the body, and the handler appends to an output
-    file that still holds whatever the previous attempt delivered. So a retry
-    that succeeds leaves a partial copy followed by a complete one: longer than
-    the object, with no exception, and reported as success.
+    On the httplib client, HTTPUtil::SendRequest retries a request error by
+    re-running the content handler from the start of the body, and the handler
+    appends to an output file that still holds whatever the previous attempt
+    delivered. So a retry that succeeds leaves a partial copy followed by a
+    complete one: longer than the object, with no exception, and reported as
+    success.
 
     Nothing revalidates a finalized cache entry against object storage, so that
     entry would be served for every later read of the URL. For an Avro manifest
@@ -211,6 +258,64 @@ def test_retried_download_is_not_cached(flaky_http_server, pgduck_conn):
     assert (
         not stage_path.exists()
     ), f"sweep did not reclaim the staging file: {stage_path}"
+
+
+@pytest.fixture
+def status_http_server():
+    """Answer every request with the status code named in the request path."""
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def _respond(self):
+            self.send_response(int(Path(self.path).stem))
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        do_HEAD = _respond
+        do_GET = _respond
+
+        def log_message(self, *args):
+            pass
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+
+    server = HTTPServer(("127.0.0.1", port), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    yield port
+
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=10)
+
+
+@pytest.mark.parametrize(
+    "status,reason",
+    [(401, "Unauthorized"), (403, "Forbidden"), (404, "Not Found")],
+)
+def test_http_error_reports_status(status, reason, status_http_server, pgduck_conn):
+    """A failed http read has to name the status the server returned.
+
+    401 and 403 are the codes that are neither retryable nor handled by
+    HTTPFileHandle::Initialize, so they fall back to a range request whose
+    response callback throws. HTTPUtil::RunRequestWithRetry turns that into a
+    response with status 0 and moves the message to request_error, so reporting
+    the status alone would describe an expired presigned URL or a permission
+    problem as "HTTP 0 Internal Server Error".
+    """
+    url = f"http://127.0.0.1:{status_http_server}/{status}.parquet"
+
+    error = run_query(
+        f"SELECT count(*) FROM read_parquet('{url}');", pgduck_conn, raise_error=False
+    )
+    pgduck_conn.rollback()
+
+    assert isinstance(error, str), f"reading {url} did not fail"
+    assert f"HTTP {status} {reason}" in error, error
 
 
 def test_azure_download_is_length_checked(azure, pgduck_conn):
@@ -446,7 +551,7 @@ def test_invalid_url(s3, pgduck_conn):
     error = run_command(
         f"CALL pg_lake_cache_file('{url_notexists}');", pgduck_conn, raise_error=False
     )
-    assert "NOT FOUND" in error
+    assert "NOT FOUND" in error.upper()
 
     pgduck_conn.rollback()
 
@@ -760,7 +865,7 @@ def test_pg_lake_manage_cache_invalid_url(s3, pgduck_conn):
 
     # Read from non-existent URL
     error = run_command(f"SELECT count(*) FROM '{url}'", pgduck_conn, raise_error=False)
-    assert "NOT FOUND" in error
+    assert "NOT FOUND" in error.upper()
 
     pgduck_conn.rollback()
 

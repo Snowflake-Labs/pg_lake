@@ -336,19 +336,38 @@ PGLakeCachingFileSystem::CleanUpCacheOnWriteFile(CachingFSFileHandle &pg_lakeHan
 vector<OpenFileInfo>
 PGLakeCachingFileSystem::Glob(const string &urlPattern, FileOpener *opener)
 {
-	if (StringUtil::StartsWith(urlPattern, NO_CACHE_PREFIX))
+	string url = urlPattern;
+	bool noCache = false;
+
+	if (StringUtil::StartsWith(url, NO_CACHE_PREFIX))
 	{
-		/* do the Glob without the prefix */
-		vector<OpenFileInfo> result = remoteFs->Glob(urlPattern.substr(NO_CACHE_PREFIX.length()), opener);
-
-		/* add the prefix back to the results to pass nocache through */
-		for (OpenFileInfo& url : result)
-			url.path = NO_CACHE_PREFIX + url.path;
-
-		return result;
+		url = url.substr(NO_CACHE_PREFIX.length());
+		noCache = true;
 	}
-	else
-		return remoteFs->Glob(urlPattern, opener);
+
+	vector<OpenFileInfo> result = remoteFs->Glob(url, opener);
+
+	/*
+	 * Iceberg partition paths can contain glob characters like * as literal
+	 * characters in directory names (e.g., "specialChars!@#$%^&*()_+").
+	 * DuckDB's glob machinery interprets these as wildcards, causing S3
+	 * ListObjects to search with a truncated prefix and find nothing.
+	 *
+	 * Only when the glob found nothing, check whether the pattern refers to
+	 * an actual file. A pattern that expands to at least one file keeps its
+	 * usual meaning, and ordinary paths without glob characters never pay for
+	 * the extra existence check.
+	 */
+	if (result.empty() && HasGlob(url) && remoteFs->FileExists(url, opener))
+		result.push_back(OpenFileInfo(url));
+
+	if (noCache)
+	{
+		for (OpenFileInfo& fileInfo : result)
+			fileInfo.path = NO_CACHE_PREFIX + fileInfo.path;
+	}
+
+	return result;
 }
 
 
@@ -403,6 +422,21 @@ RemoveCachedCopy(ClientContext &context, const string &filename,
 		bool waitForLock = true;
 		cacheManager->RemoveCacheFile(context, filename, waitForLock);
 	}
+}
+
+
+/*
+ * IsAzureUrl returns whether a URL is handled by the azure extension. Matching
+ * on the scheme rather than asking the file system keeps this usable without an
+ * instance of it, which is what the static RemoveFiles below has.
+ */
+static bool
+IsAzureUrl(const string &url)
+{
+	return StringUtil::StartsWith(url, "azure://") ||
+		   StringUtil::StartsWith(url, "az://") ||
+		   StringUtil::StartsWith(url, "abfss://") ||
+		   StringUtil::StartsWith(url, "abfs://");
 }
 
 
@@ -462,6 +496,16 @@ PGLakeCachingFileSystem::RemoveFiles(ClientContext &context, const vector<string
 		 */
 		if (s3fs.CanHandleFile(path))
 			s3Paths.push_back(path);
+		else if (IsAzureUrl(path))
+			/*
+			 * On Azure, an object that is already gone counts as removed, the
+			 * same as for the S3 batch delete below, so that a deletion queue
+			 * record for an externally removed object gets retired instead of
+			 * retried. TryRemoveFile is DeleteIfExists there, so it costs no
+			 * extra request. Other back ends keep RemoveFile, whose failure is
+			 * what makes an unremovable path retryable.
+			 */
+			virtualFs.TryRemoveFile(path);
 		else
 			virtualFs.RemoveFile(path);
 	}

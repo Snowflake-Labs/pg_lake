@@ -37,6 +37,7 @@
 #include "duckdb/function/scalar/string_common.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/main/extension_helper.hpp"
+#include "duckdb/common/types/geometry_crs.hpp"
 
 #include "httpfs.hpp"
 #include "s3fs.hpp"
@@ -51,6 +52,7 @@
 #include "pg_lake/fs/file_cache_manager.hpp"
 #include "pg_lake/fs/functions.hpp"
 #include "pg_lake/fs/caching_file_system.hpp"
+#include "pg_lake/fs/httpfs_extended.hpp"
 #include "pg_lake/fs/region_aware_s3fs.hpp"
 #include "pg_lake/query_listener.hpp"
 #include "pg_lake/utility_functions.hpp"
@@ -792,7 +794,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	fs.UnregisterSubSystem("HTTPFileSystem");
 	fs.RegisterSubSystem(
 		make_uniq<PGLakeCachingFileSystem>(
-			make_uniq<HTTPFileSystem>()
+			make_uniq<PgLakeHTTPFileSystem>()
 		)
 	);
 
@@ -908,6 +910,38 @@ DUCKDB_EXTENSION_API const char * duckdb_pglake_geometry_to_string(duckdb_databa
 	duckdb::Value hexWKB = PgLakeGeometryToHexWKB(db, data);
 
 	return strdup(hexWKB.ToString().c_str());
+}
+
+DUCKDB_EXTENSION_API int duckdb_pglake_geometry_get_srid(duckdb_logical_type type) {
+	if (!type) {
+		return 0;
+	}
+	auto *logical_type = reinterpret_cast<duckdb::LogicalType *>(type);
+	if (logical_type->id() != duckdb::LogicalTypeId::GEOMETRY) {
+		return 0;
+	}
+	if (!duckdb::GeoType::HasCRS(*logical_type)) {
+		return 0;
+	}
+	auto &crs = duckdb::GeoType::GetCRS(*logical_type);
+	auto &identifier = crs.GetIdentifier();
+
+	// Handle AUTHORITY:NUMERIC_CODE format (e.g. "EPSG:4326")
+	auto colon = identifier.find(':');
+	if (colon != std::string::npos) {
+		try {
+			return std::stoi(identifier.substr(colon + 1));
+		} catch (...) {
+			// Not a numeric code, fall through to well-known identifier check
+		}
+	}
+
+	// Handle well-known non-numeric CRS identifiers
+	if (identifier == "OGC:CRS84") {
+		return 4326;
+	}
+
+	return 0;
 }
 
 DUCKDB_EXTENSION_API void duckdb_pglake_set_output_verbose(bool verbose) {

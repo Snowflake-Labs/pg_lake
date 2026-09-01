@@ -910,7 +910,14 @@ handle_pgsession_error_message(DuckDBStatus status, PGSession * pgSession, char 
 			errorRes = pgsession_send_postgres_error(pgSession, ERROR, "Session Initialization Error");
 			break;
 		case DUCKDB_TYPE_CONVERSION_ERROR:
-			errorRes = pgsession_send_postgres_error(pgSession, ERROR, "Unsupported type");
+
+			/*
+			 * The metadata path names the type and the column it came from.
+			 * The per-value path has no message to pass on, so it still falls
+			 * back to the generic text.
+			 */
+			errorRes = pgsession_send_postgres_error(pgSession, ERROR,
+													 errorMessage != NULL ? errorMessage : "Unsupported type");
 			break;
 		case DUCKDB_OUT_OF_MEMORY_ERROR:
 			errorRes = pgsession_send_postgres_error(pgSession, ERROR, "Out of Memory");

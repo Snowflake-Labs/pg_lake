@@ -1,0 +1,16 @@
+diff --git a/src/storage/postgres_secret_storage.cpp b/src/storage/postgres_secret_storage.cpp
+index 302b78a..70f0268 100644
+--- a/src/storage/postgres_secret_storage.cpp
++++ b/src/storage/postgres_secret_storage.cpp
+@@ -172,7 +172,10 @@ unique_ptr<const BaseSecret> PostgresSecretStorage::DeserializeSecret(PostgresCa
+ 	auto secret = secret_manager.DeserializeSecret(deserializer, secret_name);
+ 	deserializer.End();
+ 
+-	return secret;
++	// Converting unique_ptr<BaseSecret> to unique_ptr<const BaseSecret> on return
++	// is only an implicit move under C++20 (P1825). pg_lake builds duckdb
++	// extensions at C++14, where gcc rejects it, so move explicitly.
++	return std::move(secret);
+ }
+ 
+ unique_ptr<SecretEntry> PostgresSecretStorage::StoreSecret(unique_ptr<const BaseSecret> secret,

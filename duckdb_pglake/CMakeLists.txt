@@ -26,6 +26,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 project(${TARGET_NAME})
 include_directories(src/include
                     duckdb-postgres/src/include
+                    duckdb-postgres/database-connector/src/include
                     duckdb/third_party/httplib
                     ${PG_INCLUDEDIR}
                     ${OPENSSL_INCLUDE_DIR}

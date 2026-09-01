@@ -132,7 +132,8 @@ static void duckdb_query_result_init(DuckDBQueryResult * duckdb_query_result,
 									 duckdb_result * duckResult);
 static DuckDBStatus duckdb_query_result_send_column_metadata(DuckDBQueryResult * duckdb_query_result,
 															 PGSession * clientSession,
-															 ResponseFormat * responseFormat);
+															 ResponseFormat * responseFormat,
+															 char **errorMessage);
 static DuckDBStatus process_and_send_data_chunks(DuckDBQueryResult * duckdb_query_result,
 												 PGSession * clientSession,
 												 ResponseFormat * responseFormat,
@@ -431,7 +432,28 @@ duckdb_global_init(char *databaseFilePath,
 	}
 
 	{
+		/*
+		 * Keep GeoParquet columns as WKB blobs. The reader otherwise runs
+		 * ST_GeomFromWKB while scanning, which throws for a geometry DuckDB
+		 * cannot represent (CIRCULARSTRING and the other curve types) and
+		 * leaves no way to read the bytes, not even TRY_CAST(col AS BLOB).
+		 */
 		if (snprintf(setCommand, 1024, "SET GLOBAL enable_geoparquet_conversion TO 'false'") < 0)
+		{
+			return DUCKDB_INITIALIZATION_ERROR;
+		}
+
+		if (run_command_on_duckdb(setCommand) == DuckDBError)
+			return DUCKDB_INITIALIZATION_ERROR;
+	}
+
+	{
+		/*
+		 * Pin the current axis order. DuckDB warns that it will flip the
+		 * default in a later release, and its warnings do not reach the
+		 * client through pgduck_server.
+		 */
+		if (snprintf(setCommand, 1024, "SET GLOBAL geometry_always_xy TO false") < 0)
 		{
 			return DUCKDB_INITIALIZATION_ERROR;
 		}
@@ -1082,7 +1104,8 @@ return_query_result_to_pgsession(DuckDBSession * duckSession, duckdb_result duck
 	DuckDBStatus sendMetadataResult =
 		duckdb_query_result_send_column_metadata(&duckdb_query_result,
 												 duckSession->clientSession,
-												 responseFormat);
+												 responseFormat,
+												 errorMessage);
 
 	if (sendMetadataResult != DUCKDB_SUCCESS)
 	{
@@ -1220,7 +1243,8 @@ duckdb_query_result_init(DuckDBQueryResult * duckdb_query_result, duckdb_result 
 static DuckDBStatus
 duckdb_query_result_send_column_metadata(DuckDBQueryResult * duckdb_query_result,
 										 PGSession * clientSession,
-										 ResponseFormat * responseFormat)
+										 ResponseFormat * responseFormat,
+										 char **errorMessage)
 {
 	StringInfoData *buf = &duckdb_query_result->buf;
 	duckdb_result *duckResult = duckdb_query_result->duckResult;
@@ -1251,9 +1275,31 @@ duckdb_query_result_send_column_metadata(DuckDBQueryResult * duckdb_query_result
 		AttrNumber	originalColumnNumber = 0;
 		DuckDBTypeInfo *typeInfo = find_duck_type_info(duckType);
 
-		if (typeInfo == NULL)
+		if (typeInfo == NULL || typeInfo->to_text == NULL)
 		{
-			PGDUCK_SERVER_ERROR("could not convert DuckDB type to text: %d", duckType);
+			/*
+			 * Name the type and the column rather than only reporting that
+			 * some type was unsupported: the caller can then cast that one
+			 * column, which is the only way forward for a type we cannot
+			 * convert.
+			 */
+			const char *typeName = duck_type_error_name(duckType);
+			StringInfoData message;
+
+			initStringInfo(&message);
+
+			if (typeName != NULL)
+				appendStringInfo(&message, "Unsupported type %s in column \"%s\"",
+								 typeName, columnName);
+			else
+				appendStringInfo(&message, "Unsupported type %d in column \"%s\"",
+								 duckType, columnName);
+
+			PGDUCK_SERVER_ERROR("%s", message.data);
+
+			if (errorMessage != NULL)
+				*errorMessage = message.data;
+
 			return DUCKDB_TYPE_CONVERSION_ERROR;
 		}
 

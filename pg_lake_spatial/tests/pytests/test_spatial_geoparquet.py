@@ -2,6 +2,7 @@ import pytest
 from utils_pytest import *
 import pyarrow as pa
 import pyarrow.parquet as pq
+import struct
 import tempfile
 
 url = f"s3://{TEST_BUCKET}/test_geoparquet/data.parquet"
@@ -188,3 +189,110 @@ def geoparquet_file(s3):
     s3.upload_file(saved_path.name, TEST_BUCKET, "test_geoparquet/data.parquet")
 
     yield
+
+
+def wkb_point(x, y):
+    """WKB of POINT(x y), little endian"""
+    return struct.pack("<BIdd", 1, 1, x, y)
+
+
+def wkb_circularstring(points):
+    """WKB of CIRCULARSTRING(...), little endian"""
+    return struct.pack("<BII", 1, 8, len(points)) + b"".join(
+        struct.pack("<dd", x, y) for x, y in points
+    )
+
+
+CURVE_POINTS = [(0, 0), (1, 1), (2, 0)]
+curve_url = f"s3://{TEST_BUCKET}/test_geoparquet_curve/data.parquet"
+
+
+@pytest.fixture(scope="module")
+def curve_geoparquet_file(s3):
+    """Creates a geoparquet file whose WKB holds a curve type"""
+
+    # DuckDB's GEOMETRY has no representation for curves, so if the Parquet
+    # reader converts the column then reading it fails and the bytes are not
+    # recoverable. PostGIS does read them, so the column has to keep arriving
+    # as WKB.
+
+    metadata = {
+        b"geo": json.dumps(
+            {
+                "version": "1.0.0",
+                "primary_column": "geom",
+                "columns": {
+                    "geom": {
+                        "encoding": "WKB",
+                        "geometry_types": [],
+                    },
+                },
+            }
+        ).encode("utf-8")
+    }
+
+    schema = pa.schema(
+        [
+            ("id", pa.int32()),
+            ("geom", pa.binary()),
+        ]
+    ).with_metadata(metadata)
+
+    table = pa.Table.from_arrays(
+        [
+            pa.array([1, 2], type=pa.int32()),
+            pa.array(
+                [wkb_point(3, 4), wkb_circularstring(CURVE_POINTS)], type=pa.binary()
+            ),
+        ],
+        schema=schema,
+    )
+
+    saved_path = tempfile.NamedTemporaryFile()
+    pq.write_table(table, saved_path.name)
+
+    s3.upload_file(saved_path.name, TEST_BUCKET, "test_geoparquet_curve/data.parquet")
+
+    yield
+
+
+def test_geoparquet_curve_readable_as_bytea(
+    user_conn, spatial_analytics_extension, curve_geoparquet_file
+):
+    run_command(
+        f"""
+        CREATE FOREIGN TABLE test_geoparquet_curve (id int, geom bytea)
+        SERVER pg_lake OPTIONS (path '{curve_url}');
+    """,
+        user_conn,
+    )
+
+    result = run_query(
+        "SELECT id, geom FROM test_geoparquet_curve ORDER BY 1", user_conn
+    )
+
+    assert [bytes(row["geom"]) for row in result] == [
+        wkb_point(3, 4),
+        wkb_circularstring(CURVE_POINTS),
+    ]
+
+    # and the bytes are still WKB PostGIS can parse. Copy them into a local
+    # table first, otherwise ST_GeomFromWKB is pushed down to DuckDB, which
+    # cannot parse a curve either.
+    run_command(
+        """
+        CREATE TEMP TABLE test_curve_wkb AS
+        SELECT id, geom FROM test_geoparquet_curve;
+    """,
+        user_conn,
+    )
+
+    result = run_query(
+        "SELECT ST_AsText(ST_GeomFromWKB(geom)) AS wkt FROM test_curve_wkb ORDER BY id",
+        user_conn,
+    )
+
+    assert result[0]["wkt"] == "POINT(3 4)"
+    assert result[1]["wkt"] == "CIRCULARSTRING(0 0,1 1,2 0)"
+
+    user_conn.rollback()

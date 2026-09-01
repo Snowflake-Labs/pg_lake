@@ -59,7 +59,8 @@ def test_r2_copy_from_parquet_notexists(pg_conn, r2):
         pg_conn,
         raise_error=False,
     )
-    assert error.startswith("ERROR:  HTTP Error: Unable to connect to URL ")
+    assert error.startswith("ERROR:  HTTP Error:")
+    assert "404" in error
 
     pg_conn.rollback()
 

@@ -64,6 +64,18 @@ def pg_geom_tables(postgres, postgis_extension):
         "(2, ST_SetSRID(ST_MakePoint(-1.5, 47.0), 4326))"
     )
 
+    # SQL/MM curve types PostGIS supports and DuckDB does not implement.
+    cur.execute("DROP TABLE IF EXISTS scanner_geom_curves")
+    cur.execute(
+        "CREATE TABLE scanner_geom_curves (" "  id int PRIMARY KEY," "  g geometry" ")"
+    )
+    cur.execute(
+        "INSERT INTO scanner_geom_curves VALUES "
+        "(1, ST_GeomFromText('CIRCULARSTRING(0 0, 1 1, 2 0)', 4326)),"
+        "(2, ST_GeomFromText("
+        "     'COMPOUNDCURVE(CIRCULARSTRING(0 0, 1 1, 2 0), (2 0, 3 0))', 4326))"
+    )
+
     cur.close()
     conn.close()
 
@@ -74,6 +86,7 @@ def pg_geom_tables(postgres, postgis_extension):
     cur = conn.cursor()
     cur.execute("DROP TABLE IF EXISTS scanner_geom_basic")
     cur.execute("DROP TABLE IF EXISTS scanner_geom_typed")
+    cur.execute("DROP TABLE IF EXISTS scanner_geom_curves")
     cur.close()
     conn.close()
 
@@ -134,6 +147,29 @@ def test_geometry_blob_alias(pg_geom_tables, pgduck_conn):
     # postgres-scanner exposes geometry as a BLOB aliased "WKB_BLOB";
     # DuckDB reports the alias as the type name.
     assert rows[0][0] in ("WKB_BLOB", "BLOB")
+
+
+def test_geometry_curve_types(pg_geom_tables, pgduck_conn):
+    """
+    The scanner keeps geometry as a WKB blob, so PostGIS types DuckDB cannot
+    parse still scan: the bytes are transported unchanged. Mapping the column
+    to GEOMETRY instead makes these rows fail or come back NULL.
+    """
+    conn = open_pg_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, upper(encode(ST_AsBinary(g), 'hex')) "
+        "FROM scanner_geom_curves ORDER BY id"
+    )
+    expected = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    scan = _scan("scanner_geom_curves")
+    rows = perform_query_on_cursor(
+        f"SELECT id, hex(g) FROM {scan} ORDER BY id", pgduck_conn
+    )
+    assert rows == expected
 
 
 def test_geometry_filter_pushdown(pg_geom_tables, pgduck_conn):
