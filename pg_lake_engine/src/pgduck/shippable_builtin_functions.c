@@ -333,6 +333,8 @@ static const PGDuckShippableFunction ShippableBuiltinProcs[] =
 	{"sqrt", 'f', 1, {"numeric"}, NULL},
 	{"trunc", 'f', 1, {"float8"}, NULL},
 	{"trunc", 'f', 1, {"numeric"}, NULL},
+	{"to_hex", 'f', 1, {"int4"}, NULL},
+	{"to_hex", 'f', 1, {"int8"}, NULL},
 
 	/* Random functions */
 	{"random", 'f', 0, {}, NULL},

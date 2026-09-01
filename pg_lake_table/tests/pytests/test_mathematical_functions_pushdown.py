@@ -89,6 +89,18 @@ test_agg_cases = [
     ),
     ("trunc(double)", "WHERE trunc(col_double) = 1.0", '"trunc"(', True),
     ("trunc(numeric)", "WHERE trunc(col_numeric) = 1.0", '"trunc"(', True),
+    (
+        "to_hex(col_int4)",
+        "WHERE to_hex(col_int4) = to_hex(col_int4)",
+        '"lower"("to_hex"(',
+        True,
+    ),
+    (
+        "to_hex(col_int8)",
+        "WHERE to_hex(col_int8) = to_hex(col_int8)",
+        '"lower"("to_hex"(',
+        True,
+    ),
     # Trigonometry operators, input must be in the range [-1,1]
     (
         "acos",
@@ -367,4 +379,62 @@ def test_hyperbolic_functions_specific_values(
         pg_conn,
         f"(SELECT {func}(col_val) FROM hyperbolic_vals.fdw_tbl) fdw",
         f"(SELECT {func}(col_val) FROM hyperbolic_vals.heap_tbl) heap",
+    )
+
+
+@pytest.fixture(scope="module")
+def create_to_hex_values_table(pg_conn, s3, extension):
+    url = f"s3://{TEST_BUCKET}/to_hex_values_test/data.parquet"
+    run_command(
+        f"""
+        COPY (
+            SELECT NULL::int4 AS col_int4, NULL::int8 AS col_int8
+            UNION ALL SELECT 0, 0
+            UNION ALL SELECT 1, 1
+            UNION ALL SELECT -1, -1
+            UNION ALL SELECT -2147483648, -9223372036854775808
+            UNION ALL SELECT 2147483647, 9223372036854775807
+        ) TO '{url}' WITH (FORMAT 'parquet');
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        CREATE SCHEMA to_hex_vals;
+        CREATE FOREIGN TABLE to_hex_vals.fdw_tbl (col_int4 int4, col_int8 int8)
+        SERVER pg_lake OPTIONS (format 'parquet', path '{url}');
+        CREATE TABLE to_hex_vals.heap_tbl (col_int4 int4, col_int8 int8);
+        COPY to_hex_vals.heap_tbl FROM '{url}';
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    yield
+
+    run_command("DROP SCHEMA to_hex_vals CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+@pytest.mark.parametrize(
+    "col",
+    ["col_int4", "col_int8"],
+)
+def test_to_hex_specific_values(create_to_hex_values_table, pg_conn, col):
+    """Verify to_hex(int4)/to_hex(int8) pushdown returns the same results as
+    Postgres for NULL, 0, 1, -1, and both the int4 and int8 extremes.
+
+    Covers the two correctness fixes the pushdown rewrite applies: DuckDB's
+    to_hex() is uppercase where Postgres's is lowercase, and DuckDB has no
+    INTEGER overload so an int4 argument is otherwise sign-extended to
+    BIGINT rather than zero-extended as Postgres does.
+    """
+    query = f"SELECT to_hex({col}) FROM to_hex_vals.fdw_tbl"
+    assert_remote_query_contains_expression(query, '"lower"("to_hex"(', pg_conn)
+    assert_table_contents_match(
+        pg_conn,
+        f"(SELECT to_hex({col}) FROM to_hex_vals.fdw_tbl) fdw",
+        f"(SELECT to_hex({col}) FROM to_hex_vals.heap_tbl) heap",
     )

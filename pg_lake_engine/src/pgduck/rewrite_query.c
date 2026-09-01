@@ -177,6 +177,7 @@ static Node *RewriteFuncExprInitcap(Node *node, void *context);
 static Node *RewriteFuncExprJsonbArrayLength(Node *node, void *context);
 static Node *RewriteFuncExprEncode(Node *node, void *context);
 static Node *RewriteFuncExprDecode(Node *node, void *context);
+static Node *RewriteFuncExprToHex(Node *node, void *context);
 static Node *RewriteFuncExprToZeroOrNullConst(Node *node, void *context);
 static Node *RewriteFuncExprPostgisTransform(Node *node, void *context);
 static Node *RewriteFuncExprPostgisTransformGeometry(Node *node, void *context);
@@ -356,6 +357,11 @@ static FunctionCallRewriteRuleByName BuiltinFunctionCallRewriteRulesByName[] =
 	},
 	{
 		"pg_catalog", "decode", RewriteFuncExprDecode, 0
+	},
+
+	/* to_hex */
+	{
+		"pg_catalog", "to_hex", RewriteFuncExprToHex, 0
 	},
 
 };
@@ -1902,6 +1908,80 @@ RewriteFuncExprDecode(Node *node, void *context)
 	funcExpr->args = list_make1(linitial(funcExpr->args));
 
 	return (Node *) funcExpr;
+}
+
+
+/*
+ * RewriteFuncExprToHex rewrites to_hex(int4)/to_hex(int8) so the expression
+ * pushed to DuckDB matches Postgres's semantics: DuckDB's to_hex() produces
+ * uppercase hex digits, and has no INTEGER overload, so an int4 argument is
+ * implicitly widened to BIGINT by sign-extension rather than the
+ * zero-extension Postgres's to_hex(int4) performs. We fix the int4 case by
+ * masking off the sign-extended upper bits after widening, and fix the case
+ * mismatch for both overloads by wrapping the result in lower(..).
+ */
+static Node *
+RewriteFuncExprToHex(Node *node, void *context)
+{
+	FuncExpr   *funcExpr = castNode(FuncExpr, node);
+
+	if (list_length(funcExpr->args) != 1)
+		return node;
+
+	if (funcExpr->funcid == F_TO_HEX_INT4)
+	{
+		Node	   *arg = (Node *) linitial(funcExpr->args);
+
+		FuncExpr   *castExpr = makeNode(FuncExpr);
+
+		castExpr->funcid = F_INT8_INT4;
+		castExpr->funcresulttype = INT8OID;
+		castExpr->funcretset = false;
+		castExpr->funcvariadic = false;
+		castExpr->funcformat = COERCE_EXPLICIT_CAST;
+		castExpr->args = list_make1(arg);
+		castExpr->location = -1;
+
+		Const	   *maskConst = makeConst(INT8OID, -1, InvalidOid, sizeof(int64),
+										   Int64GetDatum(INT64CONST(4294967295)),
+										   false, true);
+
+		Oid			andOpNo = OpernameGetOprid(list_make1(makeString("&")),
+												INT8OID, INT8OID);
+
+		if (!OidIsValid(andOpNo))
+			return node;
+
+		OpExpr	   *andExpr = makeNode(OpExpr);
+
+		andExpr->opno = andOpNo;
+		andExpr->opfuncid = F_INT8AND;
+		andExpr->opresulttype = INT8OID;
+		andExpr->opretset = false;
+		andExpr->args = list_make2(castExpr, maskConst);
+		andExpr->location = -1;
+
+		funcExpr->funcid = F_TO_HEX_INT8;
+		funcExpr->args = list_make1(andExpr);
+	}
+	else if (funcExpr->funcid != F_TO_HEX_INT8)
+	{
+		elog(ERROR, "unexpected function ID in rewrite %d", funcExpr->funcid);
+	}
+
+	FuncExpr   *lowerExpr = makeNode(FuncExpr);
+
+	lowerExpr->funcid = F_LOWER_TEXT;
+	lowerExpr->funcresulttype = TEXTOID;
+	lowerExpr->funcretset = false;
+	lowerExpr->funcvariadic = false;
+	lowerExpr->funcformat = COERCE_EXPLICIT_CALL;
+	lowerExpr->funccollid = funcExpr->funccollid;
+	lowerExpr->inputcollid = funcExpr->funccollid;
+	lowerExpr->args = list_make1((Node *) funcExpr);
+	lowerExpr->location = -1;
+
+	return (Node *) lowerExpr;
 }
 
 
