@@ -72,6 +72,7 @@
 #include "parser/parse_relation.h"
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
+#include "utils/numeric.h"
 #include "utils/ruleutils.h"
 #include "utils/timestamp.h"
 #include "utils/typcache.h"
@@ -798,6 +799,25 @@ ProcessNotShippableExpressionWalker(Node *node, IsShippableContext * context)
 #endif
 
 	/*
+	 * DuckDB's DECIMAL has no NaN, so a NaN numeric constant fails the cast
+	 * to DECIMAL where PostgreSQL evaluates it without complaint.
+	 */
+	if (IsA(node, Const))
+	{
+		Const	   *constExpr = (Const *) node;
+
+		if (!constExpr->constisnull && constExpr->consttype == NUMERICOID &&
+			numeric_is_nan(DatumGetNumeric(constExpr->constvalue)))
+		{
+			if (context->stopAtFirstNotShippable)
+				return true;
+
+			RecordNotShippableObject(context, InvalidOid, InvalidOid,
+									 NOT_SHIPPABLE_NAN_CONST_VALUE);
+		}
+	}
+
+	/*
 	 * The SQL/JSON expressions that PostgreSQL gained in version 16 are
 	 * deparsed back into their standard SQL/JSON syntax (e.g. "IS JSON
 	 * OBJECT", "JSON_OBJECT('a' : 1)"), which the DuckDB parser does not
@@ -865,6 +885,20 @@ ExpressionHasNonShippableObject(Node *node, bool srfAllowed, IsShippableContext 
 		 * though unnest has special handling.
 		 */
 		if (funcExpr->funcretset && !srfAllowed && funcExpr->funcid != F_UNNEST_ANYARRAY)
+		{
+			TryRecordNotShippableObject(context, funcExpr->funcid, ProcedureRelationId, NOT_SHIPPABLE_FUNCTION);
+			return true;
+		}
+
+		/*
+		 * PostgreSQL casts a float to numeric by rounding the shortest
+		 * decimal text that round-trips the float, DuckDB rounds the binary
+		 * value itself, so 1.005::float8::numeric(10,2) is 1.01 in PostgreSQL
+		 * and 1.00 in DuckDB.  DECIMAL also has no NaN, so a NaN float fails
+		 * the cast in DuckDB where PostgreSQL yields NaN.
+		 */
+		if (funcExpr->funcid == F_NUMERIC_FLOAT4 ||
+			funcExpr->funcid == F_NUMERIC_FLOAT8)
 		{
 			TryRecordNotShippableObject(context, funcExpr->funcid, ProcedureRelationId, NOT_SHIPPABLE_FUNCTION);
 			return true;

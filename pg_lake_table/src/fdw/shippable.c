@@ -710,6 +710,8 @@ GetNotShippableDescription(NotShippableReason reason, Oid classId, Oid objectId)
 			return "UNNEST with GROUP BY or window function";
 		case NOT_SHIPPABLE_INFINITE_CONST_VALUE:
 			return "infinite interval constant";
+		case NOT_SHIPPABLE_NAN_CONST_VALUE:
+			return "NaN numeric constant";
 		case NOT_SHIPPABLE_SQL_JSON_EXPRESSION:
 			return "SQL/JSON expression";
 		default:

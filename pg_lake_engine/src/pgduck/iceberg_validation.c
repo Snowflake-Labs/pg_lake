@@ -95,7 +95,10 @@ IsTemporalType(Oid typeOid)
  *
  * Validation covers: temporal boundaries (date/timestamp/timestamptz),
  * multidimensional array rejection (any array type), and bounded
- * numeric NaN (non-pushdown only, since numeric blocks pushdown).
+ * numeric NaN.  The latter is non-pushdown only: pushdown refuses a
+ * query that can produce a NaN numeric, and a value DuckDB reads into a
+ * DECIMAL column never is one, so there is nothing left to validate on
+ * that path.
  * Unbounded and large-precision numerics are mapped to float8 on
  * Iceberg tables, so NaN is valid for those and no validation is needed.
  */

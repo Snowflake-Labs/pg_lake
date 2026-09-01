@@ -1387,6 +1387,190 @@ def test_nan_arithmetic_error(
         pg_conn.commit()
 
 
+def test_numeric_insert_select_pushdown(
+    pg_conn,
+    extension,
+    s3,
+    with_default_location,
+):
+    """A bounded numeric column is pushdownable unless the query can produce a
+    NaN for it, which DuckDB's DECIMAL cannot represent.
+
+    Float-to-numeric casts and NaN numeric constants are not shippable at all,
+    so the cases left to check here are a text-to-numeric cast, which parses
+    'NaN' out of text, and a numeric parameter, whose value is unknown when we
+    plan.  Such a write stays on the non-pushdown path, where
+    out_of_range_values is applied per datum."""
+    schema = "test_numeric_pushdown"
+    csv_url = f"s3://{TEST_BUCKET}/{schema}/src.csv"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+
+    try:
+        run_command(
+            """
+            CREATE TABLE num_src (id bigint, amt numeric(38,10)) USING iceberg;
+            INSERT INTO num_src SELECT i, i * 1.1 FROM generate_series(1, 1000) i;
+            CREATE TABLE num_tgt (id bigint, amt numeric(38,10)) USING iceberg;
+
+            CREATE TABLE dbl_src (id bigint, val float8) USING iceberg;
+            INSERT INTO dbl_src VALUES (1, 1.5), (2, 'NaN');
+
+            CREATE TABLE txt_src (id bigint, val text) USING iceberg;
+            INSERT INTO txt_src VALUES (1, '1.5'), (2, 'NaN');
+
+            CREATE TABLE small_src (id bigint, val numeric(10,2)) USING iceberg;
+            INSERT INTO small_src VALUES (1, 1.5);
+
+            CREATE TABLE num_clamp (id bigint, val numeric(10,2)) USING iceberg
+                WITH (out_of_range_values = 'clamp');
+            CREATE TABLE num_err (id bigint, val numeric(10,2)) USING iceberg
+                WITH (out_of_range_values = 'error');
+        """,
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        # a decimal column of an Iceberg source is pushed down, and exactly.
+        # Plain EXPLAIN: EXPLAIN ANALYZE would run the INSERT and double the
+        # row count compared below.
+        results = run_query(
+            "EXPLAIN INSERT INTO num_tgt SELECT * FROM num_src", pg_conn
+        )
+        assert "Custom Scan (Query Pushdown)" in str(results)
+
+        run_command("INSERT INTO num_tgt SELECT * FROM num_src;", pg_conn)
+        pg_conn.commit()
+
+        assert run_query(
+            "SELECT count(*), sum(amt) FROM num_tgt", pg_conn
+        ) == run_query("SELECT count(*), sum(amt) FROM num_src", pg_conn)
+
+        # the float-to-numeric cast this needs is not shippable, so it is not
+        # pushed down and the clamp policy turns the NaN into NULL
+        results = run_query(
+            "EXPLAIN INSERT INTO num_clamp SELECT id, val FROM dbl_src", pg_conn
+        )
+        assert "Custom Scan (Query Pushdown)" not in str(results)
+
+        run_command("INSERT INTO num_clamp SELECT id, val FROM dbl_src;", pg_conn)
+        pg_conn.commit()
+
+        result = run_query("SELECT val::text FROM num_clamp ORDER BY id", pg_conn)
+        assert result[0][0] == "1.50"
+        assert result[1][0] is None
+
+        run_command("DELETE FROM num_clamp;", pg_conn)
+        pg_conn.commit()
+
+        # a text-to-numeric cast parses 'NaN' out of text, in either spelling:
+        # a DuckDB DECIMAL cast would reject it before any policy is applied
+        for cast in ("val::numeric(10,2)", "CAST(val AS numeric(10,2))"):
+            results = run_query(
+                f"EXPLAIN INSERT INTO num_clamp SELECT id, {cast} FROM txt_src",
+                pg_conn,
+            )
+            assert "Custom Scan (Query Pushdown)" not in str(results)
+
+        run_command(
+            "INSERT INTO num_clamp SELECT id, val::numeric(10,2) FROM txt_src;",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        result = run_query("SELECT val::text FROM num_clamp ORDER BY id", pg_conn)
+        assert result[0][0] == "1.50"
+        assert result[1][0] is None
+
+        err = run_command(
+            "INSERT INTO num_err SELECT id, val::numeric(10,2) FROM txt_src;",
+            pg_conn,
+            raise_error=False,
+        )
+        assert "NaN is not supported for Iceberg decimal" in str(err)
+        pg_conn.rollback()
+
+        # a NaN numeric constant is not shippable either
+        results = run_query(
+            "EXPLAIN INSERT INTO num_clamp SELECT 3, 'NaN'::numeric(10,2)", pg_conn
+        )
+        assert "Custom Scan (Query Pushdown)" not in str(results)
+
+        # a CSV source is pushed down too: DuckDB parses the file with its own
+        # auto-detected types, so a NaN in the file fails the read rather than
+        # arriving at the decimal column
+        run_command(f"COPY (SELECT 1 AS id, 1.5 AS amt) TO '{csv_url}';", pg_conn)
+        run_command(
+            f"""CREATE FOREIGN TABLE csv_src (id bigint, amt numeric(38,10))
+                SERVER pg_lake OPTIONS (path '{csv_url}');""",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        results = run_query(
+            "EXPLAIN INSERT INTO num_tgt SELECT * FROM csv_src", pg_conn
+        )
+        assert "Custom Scan (Query Pushdown)" in str(results)
+
+        # a set operation takes its target list from the leftmost leaf, so the
+        # other branches have to be checked in their own right
+        union_of_leaves = (
+            "SELECT id, val FROM small_src "
+            "UNION ALL SELECT id, val::numeric(10,2) FROM txt_src"
+        )
+        results = run_query(f"EXPLAIN INSERT INTO num_clamp {union_of_leaves}", pg_conn)
+        assert "Custom Scan (Query Pushdown)" not in str(results)
+
+        run_command("DELETE FROM num_clamp;", pg_conn)
+        run_command(f"INSERT INTO num_clamp {union_of_leaves};", pg_conn)
+        pg_conn.commit()
+
+        # three rows in, and only the 'NaN' one clamped to NULL
+        counts = run_query("SELECT count(*), count(val) FROM num_clamp", pg_conn)[0]
+        assert counts[0] == 3
+        assert counts[1] == 2
+
+        # a set operation whose every leaf is a decimal column is still
+        # pushed down
+        results = run_query(
+            "EXPLAIN INSERT INTO num_clamp SELECT id, val FROM small_src"
+            " UNION ALL SELECT id, val FROM small_src",
+            pg_conn,
+        )
+        assert "Custom Scan (Query Pushdown)" in str(results)
+
+        # so is arithmetic over a decimal column, which DuckDB cannot turn into
+        # a NaN, even though the aggregate loses the typmod
+        results = run_query(
+            "EXPLAIN INSERT INTO num_clamp SELECT id, sum(val) FROM small_src"
+            " GROUP BY id",
+            pg_conn,
+        )
+        assert "Custom Scan (Query Pushdown)" in str(results)
+
+        # a parameter value is unknown at planning time, so it could be a NaN
+        run_command(
+            "PREPARE write_param(numeric) AS INSERT INTO num_clamp SELECT id, $1"
+            " FROM small_src;",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        results = run_query("EXPLAIN EXECUTE write_param('NaN')", pg_conn)
+        assert "Custom Scan (Query Pushdown)" not in str(results)
+
+        run_command("DELETE FROM num_clamp;", pg_conn)
+        run_command("EXECUTE write_param('NaN');", pg_conn)
+        pg_conn.commit()
+
+        assert run_query("SELECT val FROM num_clamp", pg_conn) == [[None]]
+    finally:
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
 @pytest.mark.parametrize(
     "col_type,policy,expected_pattern",
     [

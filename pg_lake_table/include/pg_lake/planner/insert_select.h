@@ -32,5 +32,6 @@ Oid			GetInsertRelidFromInsertSelect(Query *query);
 void		TransformPushdownableInsertSelect(Query *query);
 
 /* logic shared with COPY pushdown */
-extern PGDLLEXPORT bool RelationColumnsSuitableForPushdown(Relation relation, CopyDataFormat sourceFormat);
+extern PGDLLEXPORT bool RelationColumnsSuitableForPushdown(Relation relation,
+														   CopyDataFormat sourceFormat);
 extern PGDLLEXPORT bool RelationSuitableForPushdown(Relation relation, bool allowDefaultConsts);
