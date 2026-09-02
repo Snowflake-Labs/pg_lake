@@ -76,6 +76,7 @@
 #include "pg_lake/csv/csv_writer.h"
 #include "pg_lake/duckdb/transform_query_to_duckdb.h"
 #include "pg_lake/fdw/deparse_ruleutils.h"
+#include "pg_lake/fdw/data_files_catalog.h"
 #include "pg_lake/fdw/pg_lake_table.h"
 #include "pg_lake/fdw/shippable.h"
 #include "pg_lake/fdw/snapshot.h"
@@ -745,6 +746,30 @@ postgresGetForeignRelSize(PlannerInfo *root,
 	fpinfo->retrieved_rows = -1;
 	fpinfo->rel_startup_cost = -1;
 	fpinfo->rel_total_cost = -1;
+
+	/*
+	 * For iceberg tables, the data files catalog knows the exact live row
+	 * count and total size without touching object storage, so seed the
+	 * planner with real numbers.  set_baserel_size_estimates then derives
+	 * baserel->rows by applying restriction selectivity, which
+	 * estimate_path_cost_size prefers over ESTIMATED_ROW_COUNT.
+	 */
+	if (IsPgLakeIcebergForeignTableById(foreigntableid))
+	{
+		int64		tableSize = 0;
+		int64		fileCount = 0;
+		int64		liveRowCount = 0;
+
+		GetTableFileStatsFromCatalog(foreigntableid, &tableSize, &fileCount,
+									 &liveRowCount);
+
+		baserel->tuples = (double) liveRowCount;
+		baserel->pages = (BlockNumber) Max(tableSize / BLCKSZ, 1);
+
+		set_baserel_size_estimates(root, baserel);
+
+		fpinfo->width = baserel->reltarget->width;
+	}
 
 	/*
 	 * If the table or the server is configured to use remote estimates,
@@ -3229,11 +3254,25 @@ estimate_path_cost_size(PlannerInfo *root,
 	PgLakeRelationInfo *fpinfo = (PgLakeRelationInfo *) foreignrel->fdw_private;
 
 	/*
-	 * We hard code the expected row count from the top-level foreign scan
-	 * node. See comments on ESTIMATED_ROW_COUNT for the reasoning.
+	 * Prefer the planner's own row estimate when one exists: for base rels it
+	 * is seeded from the data files catalog in postgresGetForeignRelSize, and
+	 * for join rels it is computed by core from those seeds.  Fall back to the
+	 * hardcoded ESTIMATED_ROW_COUNT when no estimate is available (e.g. upper
+	 * rels, or tables absent from the data files catalog).
 	 */
-	double		rows = ESTIMATED_ROW_COUNT;
+	double		rows = foreignrel->rows > 0 ? foreignrel->rows : ESTIMATED_ROW_COUNT;
 	double		retrieved_rows = rows;
+
+	/*
+	 * A remote LIMIT bounds the rows that cross the FDW boundary, so cap the
+	 * estimates accordingly; otherwise the pushed-limit path is costed as if
+	 * it transferred the whole relation and loses to sort-only pushdown.
+	 */
+	if (fpextra && fpextra->has_limit && fpextra->limit_tuples > 0)
+	{
+		rows = Min(rows, fpextra->limit_tuples);
+		retrieved_rows = rows;
+	}
 	int			width = fpinfo->width;
 	int			disabled_nodes = 0;
 	Cost		startup_cost = fpinfo->startup_cost;
