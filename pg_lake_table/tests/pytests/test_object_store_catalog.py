@@ -1134,6 +1134,13 @@ def test_object_store_catalog_location_prefix_is_validated(
             in str(error)
         )
     finally:
+        # A rejected ALTER SYSTEM writes nothing, so this is only here to keep a
+        # regression in the check hook from leaving the bad value behind and
+        # failing every later test in the module instead of just this one.
+        run_command(
+            "ALTER SYSTEM RESET pg_lake_iceberg.object_store_catalog_location_prefix",
+            superuser_conn,
+        )
         superuser_conn.autocommit = False
 
 
@@ -1162,10 +1169,17 @@ def test_object_store_table_without_default_location_prefix(
     pg_conn.commit()
     wait_until_object_store_writable_table_pushed(pg_conn, schema, "tbl")
 
+    # Read both halves of the expected anchor from the server rather than
+    # restating what adjust_object_store_settings happens to set, so the
+    # assertion keeps testing the composition if that fixture ever moves.
+    catalog_root = run_query(
+        "SHOW pg_lake_iceberg.object_store_catalog_location_prefix", superuser_conn
+    )[0][0]
     catalog_prefix = run_query(
         "SHOW pg_lake_iceberg.internal_object_store_catalog_prefix", superuser_conn
     )[0][0]
     superuser_conn.commit()
+    assert catalog_root and catalog_prefix
 
     table_oid = run_query(
         f"SELECT oid FROM pg_class WHERE oid = '{schema}.tbl'::regclass", pg_conn
@@ -1177,7 +1191,7 @@ def test_object_store_table_without_default_location_prefix(
     )[0][0]
 
     assert metadata_location.startswith(
-        f"s3://{TEST_BUCKET}/{catalog_prefix}/tables/{dbname}/{schema}/tbl/{table_oid}/"
+        f"{catalog_root}/{catalog_prefix}/tables/{dbname}/{schema}/tbl/{table_oid}/"
     ), metadata_location
     assert run_query(f"SELECT count(*) FROM {schema}.tbl", pg_conn) == [[2]]
 
