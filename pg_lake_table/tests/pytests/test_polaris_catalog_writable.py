@@ -32,6 +32,7 @@ def test_writable_rest_basic_flow(
         return
 
     run_command(f"""CREATE SCHEMA test_writable_rest_basic_flow""", pg_conn)
+
     run_command(
         f"""CREATE TABLE test_writable_rest_basic_flow.writable_rest USING iceberg WITH (catalog='REST') AS SELECT 100 AS a""",
         pg_conn,
@@ -411,6 +412,10 @@ def test_writable_rest_vacuum(
     with_default_location,
     installcheck,
     create_http_helper_functions,
+    # The VACUUM below goes through run_command_outside_tx, which opens its own
+    # connection, so the compaction threshold this test needs has to come from the
+    # cluster-wide setting rather than from the SET on pg_conn.
+    set_auto_vacuum_params,
     vacuum_syntax,
 ):
 
@@ -5025,9 +5030,13 @@ def compare_fields(expected, actual):
         ), f"Value mismatch: expected {expected} but got {actual}"
 
 
-# run tests faster
-@pytest.fixture(autouse=True, scope="function")
-def set_auto_vacuum_params(superuser_conn):
+# Makes the autovacuum worker compact aggressively: a 1 s naptime, and a single
+# input file is enough to compact. Both are ALTER SYSTEM, so they apply to every
+# table in the cluster for as long as the test using this runs -- which is why
+# it is opt-in. A test that does not need it gains nothing from a compaction
+# landing in the middle of its own writes.
+@pytest.fixture(scope="function")
+def set_auto_vacuum_params(pg_conn, superuser_conn):
     run_command_outside_tx(
         [
             "ALTER SYSTEM SET pg_lake_table.vacuum_compact_min_input_files = 1;",
@@ -5036,6 +5045,11 @@ def set_auto_vacuum_params(superuser_conn):
         ],
         superuser_conn,
     )
+    # pg_conn is already connected, so it only picks the new values up once it has
+    # processed its SIGHUP. Wait on the naptime alone: it is PGC_SIGHUP, so no test
+    # can have shadowed it with a session-level SET the way one does with
+    # vacuum_compact_min_input_files, and both arrive in the same reload.
+    wait_for_reloaded_settings([pg_conn], {"pg_lake_iceberg.autovacuum_naptime": "1s"})
     yield
     run_command_outside_tx(
         [
