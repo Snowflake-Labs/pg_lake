@@ -52,7 +52,6 @@ static bool StartCancelQuery(PGconn *conn);
 static bool FinishCancelQuery(PGconn *conn, TimestampTz endtime, bool consume_input);
 static bool WaitForLastResultWithTimeout(PGconn *conn, TimestampTz endtime,
 										 PGresult **result, bool *timed_out);
-static const char *ClassifyPGDuckErrorMessage(const char *message);
 static void LogPGDuckErrorClass(const char *errorClass);
 
 /* query engine settings */
@@ -556,7 +555,7 @@ CheckPGDuckResult(PGDuckConnection * pgDuckConnection, PGresult *result)
  * the fixed label in front of it. Anything that doesn't match either table
  * is "other": unclassified, but zero raw text leaked.
  */
-static const char *
+const char *
 ClassifyPGDuckErrorMessage(const char *message)
 {
 	static const struct
