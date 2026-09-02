@@ -2,10 +2,76 @@
 Security regression tests for pg_lake_iceberg Avro parsing vulnerabilities.
 """
 
+import io
 import json
 import tempfile
+
+import fastavro
 import pytest
 from utils_pytest import *
+
+
+AZURE_NESTED_SSRF_URL = "abfss://c@account.internal.example.com/file.avro"
+
+
+def upload_rewritten_avro(s3, source_path, key, rewrite_record):
+    with open(source_path, "rb") as source_file:
+        reader = fastavro.reader(source_file)
+        writer_schema = reader.writer_schema
+        metadata = {
+            name: value
+            for name, value in reader.metadata.items()
+            if not name.startswith("avro.")
+        }
+        records = list(reader)
+
+    rewrite_record(records[0])
+
+    output = io.BytesIO()
+    fastavro.writer(output, writer_schema, records, metadata=metadata)
+    s3.put_object(Bucket=TEST_BUCKET, Key=key, Body=output.getvalue())
+
+    return f"s3://{TEST_BUCKET}/{key}"
+
+
+def upload_metadata_with_manifest_list(s3, key, manifest_list_url):
+    metadata = {
+        "format-version": 2,
+        "table-uuid": "00000000-0000-0000-0000-000000000000",
+        "location": f"s3://{TEST_BUCKET}/sec_nested_test",
+        "last-sequence-number": 1,
+        "last-updated-ms": 0,
+        "last-column-id": 1,
+        "schemas": [{"type": "struct", "fields": [], "schema-id": 0}],
+        "current-schema-id": 0,
+        "partition-specs": [{"spec-id": 0, "fields": []}],
+        "default-spec-id": 0,
+        "last-partition-id": 999,
+        "sort-orders": [{"order-id": 0, "fields": []}],
+        "default-sort-order-id": 0,
+        "snapshots": [
+            {
+                "snapshot-id": 1,
+                "sequence-number": 1,
+                "timestamp-ms": 0,
+                "manifest-list": manifest_list_url,
+                "summary": {"operation": "append"},
+                "schema-id": 0,
+            }
+        ],
+        "current-snapshot-id": 1,
+        "refs": {"main": {"snapshot-id": 1, "type": "branch"}},
+        "snapshot-log": [],
+        "metadata-log": [],
+    }
+
+    s3.put_object(
+        Bucket=TEST_BUCKET,
+        Key=key,
+        Body=json.dumps(metadata).encode("utf-8"),
+    )
+
+    return f"s3://{TEST_BUCKET}/{key}"
 
 
 def test_avro_int32_array_with_equality_ids_parses_correctly(
@@ -220,46 +286,8 @@ def test_iceberg_files_nested_manifest_list_local_path_is_rejected(
     the error is 'unsupported manifest-list URL'; on vulnerable code DuckDB
     tries to open the local path.
     """
-    import json
-
-    # Craft a minimal Iceberg v2 metadata.json with a local manifest-list path.
-    crafted_metadata = {
-        "format-version": 2,
-        "table-uuid": "00000000-0000-0000-0000-000000000000",
-        "location": f"s3://{TEST_BUCKET}/sec_nested_test",
-        "last-sequence-number": 1,
-        "last-updated-ms": 0,
-        "last-column-id": 1,
-        "schemas": [{"type": "struct", "fields": [], "schema-id": 0}],
-        "current-schema-id": 0,
-        "partition-specs": [{"spec-id": 0, "fields": []}],
-        "default-spec-id": 0,
-        "last-partition-id": 999,
-        "sort-orders": [{"order-id": 0, "fields": []}],
-        "default-sort-order-id": 0,
-        "snapshots": [
-            {
-                "snapshot-id": 1,
-                "sequence-number": 1,
-                "timestamp-ms": 0,
-                "manifest-list": "/etc/passwd",  # ← attacker-controlled local path
-                "summary": {"operation": "append"},
-                "schema-id": 0,
-            }
-        ],
-        "current-snapshot-id": 1,
-        "refs": {"main": {"snapshot-id": 1, "type": "branch"}},
-        "snapshot-log": [],
-        "metadata-log": [],
-    }
-
     key = "sec_test/crafted_nested_metadata.json"
-    s3.put_object(
-        Bucket=TEST_BUCKET,
-        Key=key,
-        Body=json.dumps(crafted_metadata).encode("utf-8"),
-    )
-    metadata_url = f"s3://{TEST_BUCKET}/{key}"
+    metadata_url = upload_metadata_with_manifest_list(s3, key, "/etc/passwd")
 
     error = run_command(
         f"SELECT * FROM lake_iceberg.files('{metadata_url}')",
@@ -284,6 +312,81 @@ def test_iceberg_files_nested_manifest_list_local_path_is_rejected(
         "SECURITY REGRESSION: /etc/passwd content appeared in the error, "
         "meaning DuckDB opened the local file before the URI check ran."
     )
+
+
+def test_nested_azure_manifest_list_host_is_rejected(pg_conn, s3, extension):
+    metadata_url = upload_metadata_with_manifest_list(
+        s3,
+        "sec_test/azure_manifest_list_metadata.json",
+        AZURE_NESTED_SSRF_URL,
+    )
+
+    error = run_command(
+        f"SELECT * FROM lake_iceberg.files('{metadata_url}')",
+        pg_conn,
+        raise_error=False,
+    )
+    pg_conn.rollback()
+
+    assert "not permitted" in str(error).lower(), error
+
+
+def test_nested_azure_manifest_host_is_rejected(pg_conn, s3, extension):
+    manifest_list_url = upload_rewritten_avro(
+        s3,
+        sampledata_filepath(
+            "iceberg/test_types/metadata/"
+            "snap-1852021276567276625-1-38be813e-9b78-4704-a06e-894398332366.avro"
+        ),
+        "sec_test/azure_manifest_path.avro",
+        lambda record: record.update({"manifest_path": AZURE_NESTED_SSRF_URL}),
+    )
+    metadata_url = upload_metadata_with_manifest_list(
+        s3,
+        "sec_test/azure_manifest_metadata.json",
+        manifest_list_url,
+    )
+
+    error = run_command(
+        f"SELECT * FROM lake_iceberg.files('{metadata_url}')",
+        pg_conn,
+        raise_error=False,
+    )
+    pg_conn.rollback()
+
+    assert "not permitted" in str(error).lower(), error
+
+
+def test_nested_azure_data_file_host_is_rejected(pg_conn, s3, extension):
+    manifest_url = upload_rewritten_avro(
+        s3,
+        sample_avro_filepath("equality-ids-manifest.avro"),
+        "sec_test/azure_data_file_manifest.avro",
+        lambda record: record["data_file"].update({"file_path": AZURE_NESTED_SSRF_URL}),
+    )
+    manifest_list_url = upload_rewritten_avro(
+        s3,
+        sampledata_filepath(
+            "iceberg/test_types/metadata/"
+            "snap-1852021276567276625-1-38be813e-9b78-4704-a06e-894398332366.avro"
+        ),
+        "sec_test/azure_data_file_manifest_list.avro",
+        lambda record: record.update({"manifest_path": manifest_url}),
+    )
+    metadata_url = upload_metadata_with_manifest_list(
+        s3,
+        "sec_test/azure_data_file_metadata.json",
+        manifest_list_url,
+    )
+
+    error = run_command(
+        f"SELECT * FROM lake_iceberg.files('{metadata_url}')",
+        pg_conn,
+        raise_error=False,
+    )
+    pg_conn.rollback()
+
+    assert "not permitted" in str(error).lower(), error
 
 
 def test_data_file_local_path_in_manifest_is_rejected(pg_conn, superuser_conn, s3):
