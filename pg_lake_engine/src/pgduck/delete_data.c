@@ -130,13 +130,21 @@ DeleteFromParquetQuery(char *sourceDataFilePath, List *positionDeleteFiles,
 	appendStringInfo(&command,
 					 "%s %s file_row_number NOT IN ("
 					 "  SELECT pos "
-					 "  FROM read_csv(%s"
-					 ", header=true, delim=',', quote='\"', escape='\"', nullstr='\\N'"
-					 ", columns={'file_path':'varchar', 'pos':'bigint', 'row':'varchar'}))",
+					 "  FROM ",
 					 readFileQuery,
 	/* position delete files adds a WHERE clause, so then we should use AND */
-					 positionDeleteFiles != NIL ? "AND" : "WHERE",
-					 quote_literal_cstr(deletionFilePath));
+					 positionDeleteFiles != NIL ? "AND" : "WHERE");
+
+	/*
+	 * The deletion file is an internal exchange CSV, so read it back through
+	 * the shared builder rather than spelling out the dialect here; that is
+	 * what keeps the reader in step with whatever the writer did.
+	 */
+	AppendReadCSVClause(&command, deletionFilePath, -1,
+						"{'file_path':'varchar', 'pos':'bigint', 'row':'varchar'}",
+						InternalCSVReadOptions(true));
+
+	appendStringInfoString(&command, ")");
 
 	return command.data;
 }

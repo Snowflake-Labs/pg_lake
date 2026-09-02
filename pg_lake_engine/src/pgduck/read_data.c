@@ -1964,6 +1964,18 @@ CopyOptionsToReadCSVParams(List *copyOptions)
 			appendStringInfo(&command, ", allow_quoted_nulls=%s",
 							 allow_quoted_nulls ? "true" : "false");
 		}
+		else if (strcmp(option->defname, "compression") == 0)
+		{
+			/*
+			 * Also synthetic.  Temporary file names have no extension, so
+			 * DuckDB's own detection cannot see that the writer compressed
+			 * the file and we have to name the codec.
+			 */
+			char	   *compression = defGetString(option);
+
+			appendStringInfo(&command, ", compression=%s",
+							 quote_literal_cstr(compression));
+		}
 	}
 
 	return command.data;

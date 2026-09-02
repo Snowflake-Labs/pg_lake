@@ -263,6 +263,7 @@ apt-get install -y \
     uuid-dev \
     libossp-uuid-dev \
     liblz4-dev \
+    libzstd-dev \
     liblzma-dev \
     libsnappy-dev \
     perl \
@@ -304,6 +305,7 @@ dnf -y install \
     protobuf-c-devel \
     uuid-devel \
     lz4-devel \
+    libzstd-devel \
     xz-devel \
     snappy-devel \
     perl \
@@ -345,6 +347,7 @@ brew install \
     json-c \
     protobuf-c \
     lz4 \
+    zstd \
     xz \
     snappy \
     jansson \

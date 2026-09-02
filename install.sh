@@ -248,6 +248,7 @@ install_system_deps() {
                 uuid-dev \
                 libossp-uuid-dev \
                 liblz4-dev \
+                libzstd-dev \
                 liblzma-dev \
                 libsnappy-dev \
                 perl \
@@ -290,6 +291,7 @@ install_system_deps() {
                 protobuf-c-devel \
                 uuid-devel \
                 lz4-devel \
+                libzstd-devel \
                 xz-devel \
                 snappy-devel \
                 perl \
@@ -332,6 +334,7 @@ install_system_deps() {
                 json-c \
                 protobuf-c \
                 lz4 \
+                zstd \
                 xz \
                 snappy \
                 jansson \

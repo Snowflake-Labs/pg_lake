@@ -45,6 +45,7 @@ RUN if [ "$BASE_IMAGE_OS" = "almalinux" ]; then \
             protobuf-c-devel \
             uuid-devel \
             lz4-devel \
+            libzstd-devel \
             xz-devel \
             snappy-devel \
             perl \
@@ -93,6 +94,7 @@ RUN if [ "$BASE_IMAGE_OS" = "debian" ]; then \
             uuid-dev \
             libossp-uuid-dev \
             liblz4-dev \
+            libzstd-dev \
             liblzma-dev \
             libsnappy-dev \
             perl \
@@ -335,6 +337,7 @@ RUN if [ "$BASE_IMAGE_OS" = "almalinux" ]; then \
     protobuf-c \
     uuid \
     lz4 \
+    libzstd \
     xz \
     snappy \
     perl \
@@ -361,6 +364,7 @@ RUN if [ "$BASE_IMAGE_OS" = "debian" ]; then \
     uuid-runtime \
     libossp-uuid16 \
     liblz4-1 \
+    libzstd1 \
     liblzma5 \
     libsnappy1v5 \
     perl \
