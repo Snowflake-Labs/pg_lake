@@ -150,13 +150,16 @@ SendRestCatalogRequest(RestCatalogOptions * opts, bool canRefreshCredential,
 	bool		authAlreadyRefreshed = false;
 
 	/*
-	 * Only a catalog reached through the deployment's own edge is addressed
-	 * by the certificate that edge issued.  A third-party catalog gets an
-	 * ordinary TLS handshake, so it neither sees an identity that means
-	 * nothing to it nor has to be verified against a private authority.
+	 * Only the built-in catalog, reached through the deployment's own edge,
+	 * is addressed by the certificate that edge issued.  A third-party
+	 * catalog gets an ordinary TLS handshake, so it neither sees an identity
+	 * that means nothing to it nor has to be verified against a private
+	 * authority. Resolution already refuses horizon on a user-created server;
+	 * gating on isBuiltin here keeps the deployment certificate off any
+	 * endpoint a server owner chose even if that ever changes.
 	 */
 	HttpTlsClientAuth clientAuth =
-		opts->authType == REST_CATALOG_AUTH_TYPE_HORIZON ?
+		(opts->isBuiltin && opts->authType == REST_CATALOG_AUTH_TYPE_HORIZON) ?
 		HTTP_TLS_DEPLOYMENT_CLIENT_CERT : HTTP_TLS_NO_CLIENT_CERT;
 
 	HttpResult	result;

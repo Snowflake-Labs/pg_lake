@@ -298,6 +298,12 @@ typedef struct RestCatalogAuthRequest
  * use, and report nothing, which is how a broken credential source stays
  * unnoticed.
  *
+ * So a provider that recognises the built-in catalog takes over its
+ * authentication rather than layering over the OAuth2 grant: once such a
+ * provider is registered, a raise is the failure, not a fall back to
+ * rest_catalog_client_secret.  A provider meant to leave that grant intact
+ * must decline the catalog rather than raise for it.
+ *
  * A provider registers itself by storing its function in the rendezvous
  * variable named below, which pg_lake reads whenever it needs a credential.
  * Registration is per backend and takes effect from the next request:

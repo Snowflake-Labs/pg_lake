@@ -274,6 +274,70 @@ def _register_namespace(superuser_conn):
     superuser_conn.commit()
 
 
+def _register_named_namespace(conn, catalog):
+    run_command(
+        """
+        CREATE OR REPLACE FUNCTION register_namespace_to_named_catalog(TEXT,TEXT,TEXT)
+        RETURNS void
+        LANGUAGE C VOLATILE STRICT
+        AS 'pg_lake_iceberg', 'register_namespace_to_named_catalog';
+        """,
+        conn,
+    )
+    conn.commit()
+
+    run_command(
+        f"SELECT register_namespace_to_named_catalog('{catalog}', 'mycat', 'myns')",
+        conn,
+    )
+    conn.commit()
+
+
+def test_a_user_created_server_does_not_inherit_the_horizon_certificate(
+    superuser_conn, iceberg_extension, installcheck, tls_material, mtls_catalog_server
+):
+    """
+    The deployment auth-type GUC configures the built-in catalog, not every
+    server.  With it set to horizon, a user-created server pointed at the same
+    edge still gets an ordinary handshake: it never inherits horizon, so it is
+    not shown the deployment certificate and the mutual-TLS server refuses it,
+    having recorded no peer.
+    """
+    if installcheck:
+        return
+
+    port, handler = mtls_catalog_server
+    _use_catalog(superuser_conn, port, tls_material, "horizon")
+
+    server = f"user_srv_{port}"
+    try:
+        run_command(
+            f"""
+            CREATE SERVER {server} TYPE 'rest' FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'https://127.0.0.1:{port}/api/catalog')
+            """,
+            superuser_conn,
+        )
+        run_command(
+            f"""
+            CREATE USER MAPPING FOR CURRENT_USER SERVER {server}
+            OPTIONS (client_id 'own_id', client_secret 'own_secret')
+            """,
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        with pytest.raises(psycopg2.Error):
+            _register_named_namespace(superuser_conn, server)
+
+        assert handler.peer_common_names == []
+    finally:
+        superuser_conn.rollback()
+        run_command(f"DROP SERVER IF EXISTS {server} CASCADE", superuser_conn)
+        superuser_conn.commit()
+        _stop_using_catalog()
+
+
 def test_a_horizon_catalog_completes_a_mutual_handshake(
     superuser_conn, iceberg_extension, installcheck, tls_material, mtls_catalog_server
 ):

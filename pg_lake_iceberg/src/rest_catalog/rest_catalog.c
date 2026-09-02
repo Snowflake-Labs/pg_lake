@@ -75,11 +75,12 @@ ResolveRestCatalogBaseUri(const char *endpoint)
  * All string fields are pstrdup'd so the struct is self-contained.
  *
  * isBuiltin gates the credential GUCs (rest_catalog_client_id /
- * rest_catalog_client_secret): they seed opts only when the resolver
- * is building options for the built-in pg_lake_rest_catalog.
- * User-created servers receive every other GUC default but must supply
- * credentials through pg_user_mapping -- see
- * BuildRestCatalogOptionsFromServer for the security rationale.
+ * rest_catalog_client_secret) and the auth-type GUC: they seed opts only
+ * when the resolver is building options for the built-in
+ * pg_lake_rest_catalog.  User-created servers receive every other GUC
+ * default but must supply credentials through pg_user_mapping, and never
+ * inherit horizon -- see BuildRestCatalogOptionsFromServer and
+ * ValidateRestCatalogOptions for the security rationale.
  */
 static void
 ApplyGUCDefaults(RestCatalogOptions * opts, bool isBuiltin)
@@ -96,7 +97,15 @@ ApplyGUCDefaults(RestCatalogOptions * opts, bool isBuiltin)
 	}
 
 	opts->scope = RestCatalogScope ? pstrdup(RestCatalogScope) : NULL;
-	opts->authType = RestCatalogAuthType;
+
+	/*
+	 * horizon is the deployment's own edge, reached with the deployment
+	 * client certificate; that identity belongs to the built-in catalog
+	 * alone.  A user-created server must not inherit it from the auth-type
+	 * GUC, or flipping that GUC would point every user server at the
+	 * deployment edge with a certificate its owner never asked for.
+	 */
+	opts->authType = isBuiltin ? RestCatalogAuthType : REST_CATALOG_AUTH_TYPE_OAUTH2;
 	opts->enableVendedCredentials = RestCatalogEnableVendedCredentials;
 	opts->locationPrefix = defaultLocationPrefix ? pstrdup(defaultLocationPrefix) : NULL;
 }
@@ -145,12 +154,29 @@ ValidateRestCatalogOptions(const RestCatalogOptions * opts,
 						 "the \"rest_endpoint\" option on the server.")));
 
 	/*
+	 * horizon applies only to the built-in catalog (see ApplyGUCDefaults).  A
+	 * user-created server does not inherit it, but can still name
+	 * rest_auth_type 'horizon' explicitly.  Refuse that here rather than
+	 * present the deployment certificate at an endpoint its owner chose, and
+	 * with a message its owner can act on instead of the superuser-only GUC
+	 * hint the certificate check gives below.
+	 */
+	if (!isBuiltin && opts->authType == REST_CATALOG_AUTH_TYPE_HORIZON)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("rest_auth_type \"horizon\" is not supported on user-created REST catalog \"%s\"",
+						catalog),
+				 errhint("\"horizon\" authenticates through the deployment's own edge "
+						 "and applies only to the built-in \"rest\" catalog.")));
+
+	/*
 	 * A horizon catalog is the one kind reached through the deployment's own
 	 * edge, so it is where a half-configured client certificate shows up.
 	 * Requests refuse to present an incomplete one, and saying so here beats
-	 * leaving the operator to read it out of a TLS handshake failure.
+	 * leaving the operator to read it out of a TLS handshake failure.  Only
+	 * the built-in catalog reaches horizon, so only it is checked.
 	 */
-	if (opts->authType == REST_CATALOG_AUTH_TYPE_HORIZON &&
+	if (isBuiltin && opts->authType == REST_CATALOG_AUTH_TYPE_HORIZON &&
 		GetHttpClientTlsMaterial() == HTTP_TLS_MATERIAL_PARTIAL)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),

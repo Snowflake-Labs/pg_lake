@@ -220,18 +220,23 @@ def _touch_named_catalog(conn, catalog, namespace):
 
 
 @contextlib.contextmanager
-def _user_created_server(conn, port, with_credentials=True):
+def _user_created_server(conn, port, with_credentials=True, extra_options=""):
     """
     A REST catalog server of the kind any role with USAGE on the FDW can
     create, pointing wherever its creator likes.  Credentials, when it has
-    any, come from its own user mapping.
+    any, come from its own user mapping.  extra_options names further server
+    options (e.g. rest_auth_type) to append.
     """
     server = f"user_srv_{uuid.uuid4().hex[:8]}"
+
+    options = f"rest_endpoint 'http://127.0.0.1:{port}'"
+    if extra_options:
+        options += f", {extra_options}"
 
     run_command(
         f"""
         CREATE SERVER {server} TYPE 'rest' FOREIGN DATA WRAPPER iceberg_catalog
-        OPTIONS (rest_endpoint 'http://127.0.0.1:{port}')
+        OPTIONS ({options})
         """,
         conn,
     )
@@ -251,6 +256,32 @@ def _user_created_server(conn, port, with_credentials=True):
         conn.rollback()
         run_command(f"DROP SERVER IF EXISTS {server} CASCADE", conn)
         conn.commit()
+
+
+def test_a_user_created_server_cannot_be_horizon(
+    iceberg_extension, installcheck, catalog_and_conn
+):
+    """
+    horizon authenticates through the deployment's own edge with the
+    deployment client certificate, an identity that belongs to the built-in
+    catalog alone.  A user-created server that names rest_auth_type 'horizon'
+    is refused at resolution -- before any request -- with a message its owner
+    can act on rather than the superuser-only TLS GUCs the built-in
+    certificate check would name.
+    """
+    if installcheck:
+        return
+
+    handler_class, conn = catalog_and_conn
+
+    with _user_created_server(
+        conn, handler_class.port, extra_options="rest_auth_type 'horizon'"
+    ) as server:
+        with pytest.raises(Exception, match="not supported on user-created"):
+            _touch_named_catalog(conn, server, "myns")
+        conn.rollback()
+
+    assert handler_class.data_request_auths == []
 
 
 def test_the_provider_is_told_how_the_catalog_is_addressed(
