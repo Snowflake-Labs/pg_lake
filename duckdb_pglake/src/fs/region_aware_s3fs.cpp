@@ -221,7 +221,7 @@ RegionAwareS3FileSystem::OpenFile(const string &url,
 
 /*
  * WithResolvedRegion runs s3Operation against an S3 URL, picking the region
- * from cache when available and falling back to GetBucketRegionFromS3 on a
+ * from cache when available and falling back to TryGetBucketRegionFromS3 on a
  * 400/301.
  *
  * Same shape as the old OpenFile: try once (with cached region or bare URL),
