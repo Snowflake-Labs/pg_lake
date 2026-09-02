@@ -428,6 +428,10 @@ AZURE_SSRF_URLS = [
     # a dot in the container name makes DuckDB's parser split the host
     # somewhere else, reaching a single-label internal host
     "abfss://c.d@internal-service/data.csv",
+    # a bracketed IPv6 literal is an explicit endpoint with no dot, so it must
+    # not slip past the host check the way a dotless secret-derived host does
+    "abfss://c@[::1]/data.csv",
+    "az://[fd00::1]/c/data.csv",
 ]
 
 

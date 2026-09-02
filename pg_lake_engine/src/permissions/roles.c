@@ -319,7 +319,13 @@ CheckAzureURLHost(const char *url)
 							 prefix)));
 	}
 
-	if (memchr(host, '.', hostLen) == NULL)
+	/*
+	 * A host with no dot is not an endpoint: DuckDB takes both the account
+	 * and the endpoint from the secret, so az://<container>/<path> stays
+	 * allowed. A bracketed IPv6 literal ([::1], [fd00::1]) carries no dot
+	 * either but is an explicit endpoint, so it must not take this exit.
+	 */
+	if (memchr(host, '.', hostLen) == NULL && (hostLen == 0 || host[0] != '['))
 		return;
 
 	if (!IsAllowedAzureHost(host, hostLen))
