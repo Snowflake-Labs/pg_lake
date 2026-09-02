@@ -291,6 +291,13 @@ typedef struct RestCatalogAuthRequest
  * without filling in material->authorization is an error.  pg_lake keeps
  * ownership of caching, refresh and header construction either way.
  *
+ * Declining is for catalogs that are not the provider's business, not for
+ * ones it cannot currently serve: a provider that recognises a catalog and
+ * fails to mint a credential for it should raise.  Falling back then would
+ * authenticate with something other than what the catalog was configured to
+ * use, and report nothing, which is how a broken credential source stays
+ * unnoticed.
+ *
  * A provider registers itself by storing its function in the rendezvous
  * variable named below, which pg_lake reads whenever it needs a credential.
  * Registration is per backend and takes effect from the next request:
