@@ -25,9 +25,20 @@
 #define PG_LAKE_READ_TABLE "__lake_read_table"
 #define IN_PROGRESS_FILES_TABLE "in_progress_files"
 
+/*
+ * Storage endpoints a user-supplied Azure URL may name in its host, as host
+ * suffixes.  Covers the public, US Government and China clouds, for both the
+ * Data Lake Storage (dfs) and blob endpoints.
+ */
+#define DEFAULT_ALLOWED_AZURE_HOST_SUFFIXES \
+	".dfs.core.windows.net,.blob.core.windows.net," \
+	".dfs.core.usgovcloudapi.net,.blob.core.usgovcloudapi.net," \
+	".dfs.core.chinacloudapi.cn,.blob.core.chinacloudapi.cn"
+
 
 extern PGDLLEXPORT bool EnableHeavyAsserts;
 extern PGDLLEXPORT char *PgLakeStageLocation;
+extern PGDLLEXPORT char *PgLakeAllowedAzureHostSuffixes;
 
 /* cached extension IDs for pg_lake_engine */
 extern PGDLLEXPORT CachedExtensionIds * PgLakeEngine;
