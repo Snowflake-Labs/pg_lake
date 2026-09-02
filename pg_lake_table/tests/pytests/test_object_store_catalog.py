@@ -945,6 +945,209 @@ def test_create_table_with_default_location_object_store(
     pg_conn.commit()
 
 
+# Every other fixture points both candidate anchors at the same bucket, which
+# makes them indistinguishable. These pull them apart. Both stay writable, so a
+# regression fails on the recorded location rather than on S3 permissions.
+OBJECT_STORE_MANAGED_PATH = "object_store_managed_root"
+OBJECT_STORE_MANAGED_ROOT = f"s3://{TEST_BUCKET}/{OBJECT_STORE_MANAGED_PATH}"
+OBJECT_STORE_DIVERTED_ROOT = f"s3://{TEST_BUCKET}/object_store_diverted_root"
+OBJECT_STORE_DIVERTED_CATALOG_PREFIX = "tmp_divert"
+
+
+@pytest.fixture(scope="function")
+def diverted_default_location_prefix(pg_conn, superuser_conn, s3, extension):
+    superuser_conn.autocommit = True
+    for guc, value in (
+        ("object_store_catalog_location_prefix", OBJECT_STORE_MANAGED_ROOT),
+        ("internal_object_store_catalog_prefix", OBJECT_STORE_DIVERTED_CATALOG_PREFIX),
+        ("external_object_store_catalog_prefix", OBJECT_STORE_DIVERTED_CATALOG_PREFIX),
+    ):
+        run_command(
+            f"ALTER SYSTEM SET pg_lake_iceberg.{guc} = '{value}'", superuser_conn
+        )
+    run_command("SELECT pg_reload_conf()", superuser_conn)
+    # bg workers need a moment to pick up the reload
+    run_command("SELECT pg_sleep(0.2)", superuser_conn)
+    superuser_conn.autocommit = False
+
+    for conn in (pg_conn, superuser_conn):
+        run_command(
+            f"SET pg_lake_iceberg.default_location_prefix TO '{OBJECT_STORE_DIVERTED_ROOT}'",
+            conn,
+        )
+        conn.commit()
+
+    yield
+
+    for conn in (pg_conn, superuser_conn):
+        conn.rollback()
+        run_command("RESET pg_lake_iceberg.default_location_prefix", conn)
+        conn.commit()
+
+    superuser_conn.autocommit = True
+    for guc in (
+        "object_store_catalog_location_prefix",
+        "internal_object_store_catalog_prefix",
+        "external_object_store_catalog_prefix",
+    ):
+        run_command(f"ALTER SYSTEM RESET pg_lake_iceberg.{guc}", superuser_conn)
+    run_command("SELECT pg_reload_conf()", superuser_conn)
+    run_command("SELECT pg_sleep(0.2)", superuser_conn)
+    superuser_conn.autocommit = False
+
+
+# catalog.json records absolute metadata locations, so an object_store table has
+# to land under the catalog's own root. Were it to follow
+# default_location_prefix, the published catalog would hand out pointers to
+# storage its readers are not authorized for.
+def test_object_store_table_ignores_diverted_default_location_prefix(
+    pg_conn, superuser_conn, s3, extension, diverted_default_location_prefix
+):
+    schema = "object_store_sc1"
+    dbname = run_query("SELECT current_database()", pg_conn)[0][0]
+
+    run_command(f"CREATE SCHEMA {schema}", pg_conn)
+    run_command(
+        f"CREATE TABLE {schema}.tbl(a int) USING iceberg WITH (catalog='object_store')",
+        pg_conn,
+    )
+    run_command(f"INSERT INTO {schema}.tbl VALUES (1),(2),(3)", pg_conn)
+    pg_conn.commit()
+    wait_until_object_store_writable_table_pushed(pg_conn, schema, "tbl")
+
+    table_oid = run_query(
+        f"SELECT oid FROM pg_class WHERE oid = '{schema}.tbl'::regclass", pg_conn
+    )[0][0]
+    metadata_location = run_query(
+        f"""SELECT metadata_location FROM iceberg_tables
+            WHERE table_namespace = '{schema}' AND table_name = 'tbl'""",
+        pg_conn,
+    )[0][0]
+
+    expected_prefix = (
+        f"{OBJECT_STORE_MANAGED_ROOT}/{OBJECT_STORE_DIVERTED_CATALOG_PREFIX}/tables/"
+        f"{dbname}/{schema}/tbl/{table_oid}/"
+    )
+    assert metadata_location.startswith(expected_prefix), (
+        f"object_store table should be anchored to the catalog root "
+        f"{expected_prefix}, got {metadata_location}"
+    )
+    assert OBJECT_STORE_DIVERTED_ROOT not in metadata_location
+
+    # The catalog file and the table it points at must share a root, and the
+    # published entry has to be the location asserted above.
+    catalog_key = (
+        f"{OBJECT_STORE_MANAGED_PATH}/{OBJECT_STORE_DIVERTED_CATALOG_PREFIX}"
+        f"/catalog/{dbname}/catalog.json"
+    )
+    catalog = json.loads(
+        s3.get_object(Bucket=TEST_BUCKET, Key=catalog_key)["Body"].read()
+    )
+    entry = next(t for t in catalog["tables"] if t["table-name"] == "tbl")
+    assert entry["metadata-location"] == metadata_location
+
+    assert run_query(f"SELECT count(*) FROM {schema}.tbl", pg_conn) == [[3]]
+
+    run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+# Control for the test above: the postgres catalog has no object-store root to
+# anchor to, so default_location_prefix stays the right base there. This test
+# can only pass if the fixture genuinely diverted the GUC, which is what keeps
+# the assertion above from being vacuously green.
+def test_postgres_catalog_table_follows_default_location_prefix(
+    pg_conn, superuser_conn, s3, extension, diverted_default_location_prefix
+):
+    schema = "object_store_sc2"
+
+    run_command(f"CREATE SCHEMA {schema}", pg_conn)
+    # Name the catalog rather than relying on pg_lake_iceberg.default_catalog,
+    # which another test in this module may have left pointing elsewhere.
+    run_command(
+        f"CREATE TABLE {schema}.tbl(a int) USING iceberg WITH (catalog='postgres')",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    metadata_location = run_query(
+        f"""SELECT metadata_location FROM iceberg_tables
+            WHERE table_namespace = '{schema}' AND table_name = 'tbl'""",
+        pg_conn,
+    )[0][0]
+
+    assert metadata_location.startswith(f"{OBJECT_STORE_DIVERTED_ROOT}/")
+    assert OBJECT_STORE_MANAGED_ROOT not in metadata_location
+
+    run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+# The object store root is the base of every composed table location, so it is
+# validated like default_location_prefix: a '?' would otherwise land mid-path.
+@pytest.mark.parametrize(
+    "location", ["invalid_loc/", f"s3://{TEST_BUCKET}/managed/?region=us-west-2"]
+)
+def test_object_store_catalog_location_prefix_is_validated(
+    superuser_conn, s3, extension, location
+):
+    superuser_conn.autocommit = True
+    try:
+        error = run_command(
+            f"ALTER SYSTEM SET pg_lake_iceberg.object_store_catalog_location_prefix = '{location}'",
+            superuser_conn,
+            raise_error=False,
+        )
+        assert (
+            'invalid value for parameter "pg_lake_iceberg.object_store_catalog_location_prefix"'
+            in str(error)
+        )
+    finally:
+        superuser_conn.autocommit = False
+
+
+# The object store root is the only prefix an object_store table needs; the
+# create path used to compose the location from default_location_prefix and so
+# produced a garbage base whenever that GUC was unset.
+def test_object_store_table_without_default_location_prefix(
+    pg_conn, superuser_conn, s3, extension, adjust_object_store_settings
+):
+    schema = "object_store_sc1"
+    dbname = run_query("SELECT current_database()", pg_conn)[0][0]
+
+    run_command("RESET pg_lake_iceberg.default_location_prefix", pg_conn)
+    run_command(f"CREATE SCHEMA {schema}", pg_conn)
+    run_command(
+        f"CREATE TABLE {schema}.tbl(a int) USING iceberg WITH (catalog='object_store')",
+        pg_conn,
+    )
+    run_command(f"INSERT INTO {schema}.tbl VALUES (1),(2)", pg_conn)
+    pg_conn.commit()
+    wait_until_object_store_writable_table_pushed(pg_conn, schema, "tbl")
+
+    catalog_prefix = run_query(
+        "SHOW pg_lake_iceberg.internal_object_store_catalog_prefix", superuser_conn
+    )[0][0]
+    superuser_conn.commit()
+
+    table_oid = run_query(
+        f"SELECT oid FROM pg_class WHERE oid = '{schema}.tbl'::regclass", pg_conn
+    )[0][0]
+    metadata_location = run_query(
+        f"""SELECT metadata_location FROM iceberg_tables
+            WHERE table_namespace = '{schema}' AND table_name = 'tbl'""",
+        pg_conn,
+    )[0][0]
+
+    assert metadata_location.startswith(
+        f"s3://{TEST_BUCKET}/{catalog_prefix}/tables/{dbname}/{schema}/tbl/{table_oid}/"
+    ), metadata_location
+    assert run_query(f"SELECT count(*) FROM {schema}.tbl", pg_conn) == [[2]]
+
+    run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 def test_complex_types_object_store(
     pg_conn, s3, extension, with_default_location, adjust_object_store_settings
 ):

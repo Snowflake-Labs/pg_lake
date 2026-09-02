@@ -550,7 +550,7 @@ GetExternalObjectStoreCatalogFilePath(const char *catalogName)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				 errmsg("pg_lake_iceberg.external_object_store_prefix is not set"),
+				 errmsg("pg_lake_iceberg.external_object_store_catalog_prefix is not set"),
 				 errdetail("Set the GUC to use catalog=" OBJECT_STORE_CATALOG_NAME)));
 	}
 
@@ -575,7 +575,7 @@ GetInternalObjectStoreCatalogFilePath(const char *catalogName)
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				 errmsg("pg_lake_iceberg.internal_object_store_prefix is not set"),
+				 errmsg("pg_lake_iceberg.internal_object_store_catalog_prefix is not set"),
 				 errdetail("Set the GUC to use catalog=" OBJECT_STORE_CATALOG_NAME)));
 	}
 
