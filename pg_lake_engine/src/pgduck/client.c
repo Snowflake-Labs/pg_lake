@@ -510,23 +510,51 @@ CheckPGDuckResult(PGDuckConnection * pgDuckConnection, PGresult *result)
  * PGDUCK_ENGINE_ERROR_PREFIX marks LOG lines that are guaranteed to be
  * free of customer data, so any log-forwarding or monitoring setup can
  * safely match on this prefix. The text after the prefix must always come
- * from a fixed, hand-written literal set (see ClassifyPGDuckErrorMessage)
- * -- never interpolate DuckDB/query message text, row values, or paths
- * into it. A new canned class may only be added for text that
+ * from a fixed, hand-written label in ClassifyPGDuckErrorMessage -- never
+ * interpolate DuckDB/query message text, row values, or paths into it. A
+ * new class may be added two ways: (1) an exact-match literal that
  * pgduck_server already sends unconditionally (verified against
- * handle_pgsession_error_message in pgsession.c), never text reachable via
- * customer-influenced substitution.
+ * handle_pgsession_error_message in pgsession.c), or (2) an anchored
+ * prefix match on a fixed, DuckDB-owned exception-category label (verified
+ * against real pgduck_server output, e.g. "Out of Memory Error: "). Either
+ * way, only ever compare/return the fixed label -- never a substring of, or
+ * anything past, the message itself, since the detail after a DuckDB
+ * category prefix can carry customer SQL, row values, or object-store
+ * paths. Both tables below are limited to entries confirmed against real
+ * production pgduck_server/Postgres logs -- not every literal that
+ * pgsession.c/duckdb.c could theoretically emit, only the ones actually
+ * seen in the wild.
  */
 #define PGDUCK_ENGINE_ERROR_PREFIX "pgduck_engine_error: "
 
 /*
  * ClassifyPGDuckErrorMessage maps a pgduck_server error message to a
- * PII-free error class. Only matches literal, developer-controlled text
- * that pgduck_server already sends verbatim for non-fatal, non-query
- * statuses (see handle_pgsession_error_message in pgsession.c) -- never
- * matches arbitrary DuckDB/query error text, which may embed customer SQL,
- * row values, or S3 paths. Anything that doesn't match exactly is "other":
- * unclassified, but zero raw text leaked.
+ * PII-free error class.
+ *
+ * knownMessages holds exact-match literals: fixed, developer-controlled
+ * text that pgduck_server already sends verbatim for non-fatal, non-query
+ * statuses (see handle_pgsession_error_message in pgsession.c). Confirmed
+ * in production: "lost connection to query engine" (115 occurrences in a
+ * single measured incident window).
+ *
+ * knownPrefixes holds anchored-prefix matches, following DuckDB's own
+ * exception convention, "<Category> Error: <detail>", where <Category>
+ * comes from DuckDB's fixed internal exception-type vocabulary -- never
+ * customer-influenced -- while <detail> may embed a query fragment, row
+ * value, or object-store path. Matching only the "<Category> Error: "
+ * prefix, and never anything past it, lets us classify the raw
+ * DUCKDB_QUERY_ERROR/DUCKDB_FATAL_ERROR text pgduck_server forwards
+ * verbatim (duckdb_session_run_command in duckdb.c) without risking the
+ * PII-bearing detail after it. Confirmed in production: "Out of Memory
+ * Error: Failed to allocate block of ... bytes (bad allocation)" / "...
+ * could not allocate block of size ... (.../... used)" / "... Allocation
+ * failure", "IO Error: AzureBlobStorageFileSystem Delete of azure://..." /
+ * "... could not open file", "HTTP Error: HTTP GET error reading
+ * 's3://...'", "Invalid Error: Invalid header name: content-length".
+ *
+ * Neither table matches arbitrary DuckDB/query error text itself -- only
+ * the fixed label in front of it. Anything that doesn't match either table
+ * is "other": unclassified, but zero raw text leaked.
  */
 static const char *
 ClassifyPGDuckErrorMessage(const char *message)
@@ -536,12 +564,18 @@ ClassifyPGDuckErrorMessage(const char *message)
 		const char *text;
 		const char *errorClass;
 	}			knownMessages[] = {
-		{"Initialization Error", "initialization_error"},
-		{"Session Initialization Error", "session_initialization_error"},
-		{"Unsupported type", "unsupported_type"},
-		{"Out of Memory", "out_of_memory"},
-		{"Unknown Error", "unknown_error"},
 		{"lost connection to query engine", "lost_connection"},
+	};
+
+	static const struct
+	{
+		const char *prefix;
+		const char *errorClass;
+	}			knownPrefixes[] = {
+		{"Out of Memory Error: ", "out_of_memory"},
+		{"IO Error: ", "io_error"},
+		{"HTTP Error: ", "http_error"},
+		{"Invalid Error: ", "invalid_error"},
 	};
 
 	if (message != NULL)
@@ -550,6 +584,13 @@ ClassifyPGDuckErrorMessage(const char *message)
 		{
 			if (strcmp(message, knownMessages[i].text) == 0)
 				return knownMessages[i].errorClass;
+		}
+
+		for (int i = 0; i < lengthof(knownPrefixes); i++)
+		{
+			if (strncmp(message, knownPrefixes[i].prefix,
+						strlen(knownPrefixes[i].prefix)) == 0)
+				return knownPrefixes[i].errorClass;
 		}
 	}
 
