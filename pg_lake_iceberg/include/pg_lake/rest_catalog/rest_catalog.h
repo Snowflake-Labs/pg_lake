@@ -286,28 +286,31 @@ typedef struct RestCatalogAuthRequest
  * without filling in material->authorization is an error.  pg_lake keeps
  * ownership of caching, refresh and header construction either way.
  *
- * A provider registers itself by calling
- * PgLakeRegisterRestCatalogAuthProvider below, so the function pointer pg_lake
- * ends up calling is one the compiler has already checked against this
- * signature.  Registration is per backend and lasts for its lifetime.
+ * A provider registers itself by storing its function in the rendezvous
+ * variable named below, which pg_lake reads whenever it needs a credential.
+ * Registration is per backend and takes effect from the next request:
  *
- * pg_lake_iceberg is loaded on first use of the extension, whereas a provider
- * extension is typically loaded from shared_preload_libraries, so at the point
- * the provider runs its init code there is usually no pg_lake symbol to call
- * yet.  A provider therefore resolves this function for itself, which is also
- * what keeps the dependency pointing from the provider to pg_lake rather than
- * requiring pg_lake to know anything about it:
+ *   PgLakeRestCatalogAuthProvider provider = my_provider;
+ *   void	  **slot = find_rendezvous_variable(PG_LAKE_REST_CATALOG_AUTH_PROVIDER);
  *
- *   void (*register_provider) (PgLakeRestCatalogAuthProvider) =
- *       load_external_function("pg_lake_iceberg",
- *                              "PgLakeRegisterRestCatalogAuthProvider",
- *                              true, NULL);
- *   register_provider(my_provider);
+ *   *slot = (void *) provider;
+ *
+ * A rendezvous variable rather than a function either side calls, because
+ * neither module can rely on the other being loaded when it runs its own init
+ * code.  pg_lake_iceberg is loaded on first use of the extension, whereas a
+ * provider extension is typically loaded from shared_preload_libraries; and
+ * pg_lake_iceberg cannot simply be loaded early, since it resolves symbols
+ * from pg_lake_engine, which the preloader has not reached yet.  Rendezvous
+ * makes the order irrelevant: whichever module looks first creates the slot.
+ *
+ * Assigning through a variable of this type, as above, is what has the
+ * provider's own compiler check the signature; the cast to void * that
+ * follows only satisfies the slot.
  */
+#define PG_LAKE_REST_CATALOG_AUTH_PROVIDER "pg_lake_iceberg.rest_catalog_auth_provider"
+
 typedef bool (*PgLakeRestCatalogAuthProvider) (const RestCatalogAuthRequest * request,
 											   RestCatalogAuthMaterial * material);
-
-extern PGDLLEXPORT void PgLakeRegisterRestCatalogAuthProvider(PgLakeRestCatalogAuthProvider provider);
 
 /*
  * Module-internal helpers shared across the rest_catalog_*.c files.

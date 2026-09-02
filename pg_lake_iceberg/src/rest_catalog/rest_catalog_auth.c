@@ -84,12 +84,18 @@ static bool TokenCacheCallbackRegistered = false;
 
 
 /*
- * The registered credential provider, NULL when no extension supplies one.
+ * The rendezvous slot a provider registers in, resolved once per backend.
+ * RestCatalogAuthProviderLastSeen is what was in it when the credential cache
+ * was last known to agree with it.
  */
-static PgLakeRestCatalogAuthProvider RestCatalogAuthProvider = NULL;
+static void **RestCatalogAuthProviderSlot = NULL;
+static PgLakeRestCatalogAuthProvider RestCatalogAuthProviderLastSeen = NULL;
 
 
-static void FetchRestCatalogAuthorization(RestCatalogOptions * opts, bool forceRefresh,
+static PgLakeRestCatalogAuthProvider GetRestCatalogAuthProvider(void);
+static void FetchRestCatalogAuthorization(RestCatalogOptions * opts,
+										  PgLakeRestCatalogAuthProvider provider,
+										  bool forceRefresh,
 										  char **authorization, int *expiresIn);
 static void FetchOAuth2AccessToken(RestCatalogOptions * opts, char **accessToken, int *expiresIn);
 static char *EncodeBasicAuth(const char *clientId, const char *clientSecret);
@@ -184,6 +190,12 @@ GetRestCatalogAuthorization(RestCatalogOptions * opts, bool forceRefreshToken)
 	 */
 	Assert(OidIsValid(opts->serverOid));
 
+	/*
+	 * Ahead of the cache, since a provider that changed since the last
+	 * request drops what it minted, and this is where that is noticed.
+	 */
+	PgLakeRestCatalogAuthProvider provider = GetRestCatalogAuthProvider();
+
 	InitTokenCacheIfNeeded();
 
 	RestCatalogTokenCacheKey key;
@@ -225,7 +237,8 @@ GetRestCatalogAuthorization(RestCatalogOptions * opts, bool forceRefreshToken)
 		char	   *authorization = NULL;
 		int			expiresIn = 0;
 
-		FetchRestCatalogAuthorization(opts, forceRefreshToken, &authorization, &expiresIn);
+		FetchRestCatalogAuthorization(opts, provider, forceRefreshToken,
+									  &authorization, &expiresIn);
 
 		entry->authorization = MemoryContextStrdup(RestTokenCacheCtx, authorization);
 		entry->authorizationExpiry = now + (int64_t) expiresIn * 1000000;	/* expiresIn is in
@@ -239,21 +252,31 @@ GetRestCatalogAuthorization(RestCatalogOptions * opts, bool forceRefreshToken)
 
 
 /*
- * PgLakeRegisterRestCatalogAuthProvider installs the provider an extension
- * supplies, or clears it when passed NULL.  Registering replaces whatever was
- * there before, so an extension can withdraw its provider as readily as it
- * offered one.
+ * GetRestCatalogAuthProvider reads whatever provider is registered, NULL when
+ * none is.
  *
- * Whatever the outgoing provider minted goes with it: credentials are cached
- * per catalog rather than per provider, so leaving them behind would keep
- * sending a credential from a provider that is no longer in charge.
+ * A provider that changed since the last look takes its credentials with it:
+ * they are cached per catalog rather than per provider, so leaving them behind
+ * would keep sending a credential minted by a provider no longer in charge.
  */
-void
-PgLakeRegisterRestCatalogAuthProvider(PgLakeRestCatalogAuthProvider provider)
+static PgLakeRestCatalogAuthProvider
+GetRestCatalogAuthProvider(void)
 {
-	RestCatalogAuthProvider = provider;
+	if (RestCatalogAuthProviderSlot == NULL)
+		RestCatalogAuthProviderSlot =
+			find_rendezvous_variable(PG_LAKE_REST_CATALOG_AUTH_PROVIDER);
 
-	InvalidateRestTokenCache((Datum) 0, 0, 0);
+	void	   *registered = *RestCatalogAuthProviderSlot;
+	PgLakeRestCatalogAuthProvider provider =
+		(PgLakeRestCatalogAuthProvider) registered;
+
+	if (provider != RestCatalogAuthProviderLastSeen)
+	{
+		RestCatalogAuthProviderLastSeen = provider;
+		InvalidateRestTokenCache((Datum) 0, 0, 0);
+	}
+
+	return provider;
 }
 
 
@@ -266,7 +289,7 @@ PgLakeRegisterRestCatalogAuthProvider(PgLakeRestCatalogAuthProvider provider)
 bool
 RestCatalogAuthProviderIsRegistered(void)
 {
-	return RestCatalogAuthProvider != NULL;
+	return GetRestCatalogAuthProvider() != NULL;
 }
 
 
@@ -285,13 +308,12 @@ RestCatalogAuthProviderIsRegistered(void)
  * their own user mapping credentials instead.
  */
 static void
-FetchRestCatalogAuthorization(RestCatalogOptions * opts, bool forceRefresh,
+FetchRestCatalogAuthorization(RestCatalogOptions * opts,
+							  PgLakeRestCatalogAuthProvider provider,
+							  bool forceRefresh,
 							  char **authorization, int *expiresIn)
 {
-	PgLakeRestCatalogAuthProvider provider =
-		opts->isBuiltin ? RestCatalogAuthProvider : NULL;
-
-	if (provider != NULL)
+	if (opts->isBuiltin && provider != NULL)
 	{
 		RestCatalogAuthRequest request = {
 			.version = REST_CATALOG_AUTH_REQUEST_VERSION,
