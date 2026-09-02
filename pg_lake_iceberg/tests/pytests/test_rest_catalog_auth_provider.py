@@ -258,11 +258,12 @@ def test_the_provider_is_told_how_the_catalog_is_addressed(
 ):
     """
     A provider mints credentials for a catalog it knows nothing else about, so
-    pg_lake passes on how that catalog is addressed rather than leaving it to be
-    reconstructed: the base URI as configured, mount path and all, plus an
-    explicit oauth_endpoint when the deployment authenticates somewhere other
-    than the catalog itself.  A provider left to reconstruct either one has to
-    guess, and a wrong guess fails as a 404 that reads like a missing table.
+    pg_lake passes on which catalog it is and how that catalog is addressed
+    rather than leaving either to be reconstructed: the name the user typed,
+    the base URI as configured, mount path and all, plus an explicit
+    oauth_endpoint when the deployment authenticates somewhere other than the
+    catalog itself.  A provider left to reconstruct any of them has to guess,
+    and a wrong guess fails as a 404 that reads like a missing table.
     """
     handler_class, conn = catalog_and_conn
 
@@ -270,7 +271,12 @@ def test_the_provider_is_told_how_the_catalog_is_addressed(
     _install_hook(conn, "Bearer from-provider", 0, "true")
 
     _touch_catalog(conn, f"ns_{uuid.uuid4().hex[:8]}")
-    base_uri, oauth_endpoint = _provider_endpoints(conn)
+    catalog, base_uri, oauth_endpoint = _provider_endpoints(conn)
+
+    # the built-in catalog carries no catalog_name server option, so a request
+    # built from that option rather than from the name the user typed arrives
+    # empty and leaves a provider with nothing to name in its own errors
+    assert catalog == "rest"
 
     assert base_uri.startswith("http://127.0.0.1:")
     assert oauth_endpoint == ""
@@ -291,7 +297,7 @@ def test_the_provider_is_told_how_the_catalog_is_addressed(
         try:
             _install_hook(reloaded, "Bearer from-provider", 0, "true")
             _touch_catalog(reloaded, f"ns_{uuid.uuid4().hex[:8]}")
-            _, oauth_endpoint = _provider_endpoints(reloaded)
+            _, _, oauth_endpoint = _provider_endpoints(reloaded)
 
             assert oauth_endpoint == configured
         finally:

@@ -259,6 +259,11 @@ typedef struct RestCatalogAuthMaterial
  * deployment can point authentication somewhere else without the provider
  * needing to know the deployment exists.
  *
+ * catalog is the name the user typed, which is what a provider should name in
+ * its own errors.  It is the identifier a reader can act on, unlike the REST
+ * API's catalog prefix, which is a per-relation server option the built-in
+ * catalog does not carry at all.
+ *
  * authType is the configured REST_CATALOG_AUTH_TYPE_* value, and scope is
  * NULL when unset.  forceRefresh says the cached credential was rejected, so
  * a provider that caches must mint a new one rather than return what it has.
@@ -268,7 +273,7 @@ typedef struct RestCatalogAuthRequest
 	int			version;
 	const char *catalogBaseUri;
 	const char *oauthEndpoint;
-	const char *catalogName;
+	const char *catalog;
 	const char *scope;
 	int			authType;
 	bool		forceRefresh;

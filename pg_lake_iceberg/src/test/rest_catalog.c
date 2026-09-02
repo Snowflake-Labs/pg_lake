@@ -186,6 +186,7 @@ static int	TestAuthProviderCallCount = 0;
  * What the provider was last handed, so tests can assert on how pg_lake
  * addresses a catalog rather than only on what it does with the answer.
  */
+static char *TestAuthProviderCatalog = NULL;
 static char *TestAuthProviderBaseUri = NULL;
 static char *TestAuthProviderOauthEndpoint = NULL;
 
@@ -209,11 +210,16 @@ test_rest_catalog_auth_provider(const RestCatalogAuthRequest * request,
 	if (request->version != REST_CATALOG_AUTH_REQUEST_VERSION)
 		return false;
 
+	if (TestAuthProviderCatalog != NULL)
+		pfree(TestAuthProviderCatalog);
 	if (TestAuthProviderBaseUri != NULL)
 		pfree(TestAuthProviderBaseUri);
 	if (TestAuthProviderOauthEndpoint != NULL)
 		pfree(TestAuthProviderOauthEndpoint);
 
+	TestAuthProviderCatalog = request->catalog
+		? MemoryContextStrdup(TopMemoryContext, request->catalog)
+		: NULL;
 	TestAuthProviderBaseUri = request->catalogBaseUri
 		? MemoryContextStrdup(TopMemoryContext, request->catalogBaseUri)
 		: NULL;
@@ -288,9 +294,10 @@ test_rest_catalog_auth_provider_calls(PG_FUNCTION_ARGS)
 
 
 /*
- * test_rest_catalog_auth_provider_endpoints reports how the catalog was
- * addressed on the last call, as "<base uri>|<oauth endpoint>", with an unset
- * oauth endpoint rendered as the empty string.
+ * test_rest_catalog_auth_provider_endpoints reports which catalog was named
+ * on the last call and how it was addressed, as
+ * "<catalog>|<base uri>|<oauth endpoint>", with anything unset rendered as
+ * the empty string.
  */
 Datum
 test_rest_catalog_auth_provider_endpoints(PG_FUNCTION_ARGS)
@@ -298,7 +305,8 @@ test_rest_catalog_auth_provider_endpoints(PG_FUNCTION_ARGS)
 	if (TestAuthProviderCallCount == 0)
 		PG_RETURN_NULL();
 
-	PG_RETURN_TEXT_P(cstring_to_text(psprintf("%s|%s",
+	PG_RETURN_TEXT_P(cstring_to_text(psprintf("%s|%s|%s",
+											  TestAuthProviderCatalog ? TestAuthProviderCatalog : "",
 											  TestAuthProviderBaseUri ? TestAuthProviderBaseUri : "",
 											  TestAuthProviderOauthEndpoint ? TestAuthProviderOauthEndpoint : "")));
 }
