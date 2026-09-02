@@ -55,4 +55,10 @@ extern PGDLLEXPORT char *GetSingleValueFromPGDuck(char *query);
 extern PGDLLEXPORT void SendQueryWithParams(PGDuckConnection * pgduckConn, char *queryString,
 											int numParams, const char **parameterValues);
 
+/*
+ * Exported only so a src/test/ helper in a dependent extension can
+ * unit-test it directly -- not part of the production SQL API.
+ */
+extern PGDLLEXPORT const char *ClassifyPGDuckErrorMessage(const char *message);
+
 #endif
