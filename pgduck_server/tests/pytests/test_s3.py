@@ -239,21 +239,84 @@ def test_s3_express(pgduck_conn):
     pgduck_conn.rollback()
 
 
-# This test outputs a bad host name that seems like some sort of memory corruption at play
 def test_s3_get_region_invalid(pgduck_conn):
+    """A bucket whose host does not resolve reports the connection failure, with
+    the URL it failed on."""
     error = run_command(
         "select pg_lake_get_bucket_region('s3://.../abc/') test",
         pgduck_conn,
         raise_error=False,
     )
-    assert (
-        "Could not resolve hostname error" in error
-        or "server closed the connection" in error
-    )
+    assert "Could not resolve hostname error for HTTP HEAD to 'https://" in error
 
     # The failed statement above aborts the transaction on this module-scoped
     # connection; roll back so the following tests start clean.
     pgduck_conn.rollback()
+
+
+def test_denied_key_containing_301_keeps_its_own_error(
+    enforcing_s3_server, pgduck_conn
+):
+    """A denied read reports the denial, on an object whose key happens to
+    contain a substring that reads like a redirect status.
+
+    RegionAwareS3FileSystem retries against a freshly probed region when a
+    request looks like it went to the wrong one, and it used to decide that by
+    searching the error text for "301". That text carries the URL of the object,
+    and Iceberg names data files after a uuid, so about one key in a hundred
+    turned an unrelated failure into a region probe -- whose own error then
+    replaced the denial the caller was about to report.
+
+    The second key is the control: it differs only in not containing "301"."""
+    server = enforcing_s3_server
+    prefix = "region_mismatch_classification"
+    keys = [
+        f"{prefix}/00000-0-3016a9de-0e0f-4a1b-9f0e-3b0d1e2f4a5b.parquet",
+        f"{prefix}/00000-0-7c4a9de0-0e0f-4a1b-9f0e-3b0d1e2f4a5b.parquet",
+    ]
+
+    for key in keys:
+        server.client().put_object(Bucket=server.bucket, Key=key, Body=b"denied")
+
+    # allowed under a sibling prefix only, so every read below is denied
+    access_key_id, secret_access_key = server.create_scoped_user(
+        "region301_reader", [f"{prefix}_allowed"]
+    )
+
+    # DuckDB holds secrets in a transactional catalog set, and a denied read
+    # aborts the transaction it ran in -- so the rollback that clears the abort
+    # takes the secret with it. Re-assert it before each read; without it the
+    # second read has no endpoint and goes to the real s3.amazonaws.com.
+    create_secret = f"""
+        CREATE OR REPLACE SECRET region301 (
+            TYPE S3, KEY_ID '{access_key_id}', SECRET '{secret_access_key}',
+            REGION '{server.region}', ENDPOINT '{server.endpoint}',
+            SCOPE 's3://{server.bucket}/{prefix}',
+            URL_STYLE 'path', USE_SSL false
+        );
+        """
+    server.enforce()
+
+    try:
+        for key in keys:
+            perform_query(create_secret, pgduck_conn)
+            error = run_command(
+                f"SELECT count(*) FROM read_parquet('s3://{server.bucket}/{key}')",
+                pgduck_conn,
+                raise_error=False,
+            )
+            pgduck_conn.rollback()
+
+            assert error is not None, f"the read of {key} was not denied"
+            assert "403" in error, f"expected a denial for {key}, got: {error}"
+            # a read that lost the secret leaves for the real S3, which can deny
+            # it too -- for having no credentials, which proves nothing here
+            assert server.endpoint in error, f"{key} missed moto: {error}"
+            assert key in error, f"{key}: the error is about another request: {error}"
+    finally:
+        server.relax()
+        perform_query("DROP SECRET IF EXISTS region301", pgduck_conn)
+        pgduck_conn.rollback()
 
 
 def test_pg_lake_remove_file_glob_recursive(s3, pgduck_conn):
