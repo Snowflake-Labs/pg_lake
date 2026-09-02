@@ -99,11 +99,7 @@ CheckURLReadAccess(const char *url)
 	if (url == NULL)
 		return;
 
-	if (!IsSupportedURL(url))
-		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						errmsg("pg_lake: unsupported URL: \"%s\"", url)));
-
-	CheckUserSuppliedURL(url);
+	ValidateStorageURL(url);
 }
 
 
@@ -154,6 +150,23 @@ CheckURLWriteAccess(const char *url)
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("pg_lake: writes to http:// or https:// URLs are not permitted"),
 				 errhint("Use a cloud storage URL (s3://, gs://, az://, ...) instead.")));
+
+	CheckUserSuppliedURL(url);
+}
+
+
+/*
+ * ValidateStorageURL applies the scheme and URL restrictions without the
+ * lake_read role check, for a URL pg_lake read out of table data (an Iceberg
+ * manifest or data-file path) where the role check already ran on the URL the
+ * user named.
+ */
+void
+ValidateStorageURL(const char *url)
+{
+	if (!IsSupportedURL(url))
+		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg("pg_lake: unsupported URL: \"%s\"", url)));
 
 	CheckUserSuppliedURL(url);
 }

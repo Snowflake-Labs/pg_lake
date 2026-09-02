@@ -85,7 +85,7 @@ static IcebergScalarAvroType IcebergAvroTypeFromString(const char *physicalTypeN
 List *
 ReadIcebergManifests(const char *manifestListPath)
 {
-	CheckURLReadAccess(manifestListPath);
+	ValidateStorageURL(manifestListPath);
 
 	size_t		contentLength = 0;
 	char	   *manifestListBlob = GetBlobFromURI(manifestListPath, &contentLength);
@@ -135,7 +135,7 @@ ReadIcebergManifests(const char *manifestListPath)
 List *
 ReadManifestEntries(const char *manifestPath)
 {
-	CheckURLReadAccess(manifestPath);
+	ValidateStorageURL(manifestPath);
 
 	size_t		contentLength = 0;
 	char	   *manifestBlob = GetBlobFromURI(manifestPath, &contentLength);
@@ -258,7 +258,7 @@ ReadDataFileFromAvro(avro_value_t * record, DataFile * dataFile, ManifestReaderC
 	AvroGetInt32Field(record, "content", AVRO_FIELD_REQUIRED, (int32_t *) &dataFile->content);
 	AvroGetStringField(record, "file_path", AVRO_FIELD_REQUIRED, &dataFile->file_path, &dataFile->file_path_length);
 
-	CheckURLReadAccess(dataFile->file_path);
+	ValidateStorageURL(dataFile->file_path);
 
 	AvroGetStringField(record, "file_format", AVRO_FIELD_REQUIRED, &dataFile->file_format, &dataFile->file_format_length);
 

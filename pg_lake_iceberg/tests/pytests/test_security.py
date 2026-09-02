@@ -389,6 +389,44 @@ def test_nested_azure_data_file_host_is_rejected(pg_conn, s3, extension):
     assert "not permitted" in str(error).lower(), error
 
 
+def test_manifest_url_check_does_not_require_lake_read(
+    pg_conn, superuser_conn, s3, extension
+):
+    """
+    Rewriting a snapshot reads a manifest pg_lake wrote itself, so validating
+    those URLs must not turn into a lake_read check.  Every other fixture here
+    holds lake_read_write, which would hide that.
+    """
+    reader_role = "manifest_reader_without_lake_read"
+
+    run_command(f"DROP ROLE IF EXISTS {reader_role}", superuser_conn)
+    run_command(f"CREATE USER {reader_role}", superuser_conn)
+    superuser_conn.commit()
+
+    run_command(
+        f"SET pg_lake_iceberg.default_location_prefix TO 's3://{TEST_BUCKET}'", pg_conn
+    )
+    run_command("CREATE TABLE lake_read_free (id int) USING iceberg", pg_conn)
+    run_command("INSERT INTO lake_read_free VALUES (1), (2)", pg_conn)
+    run_command(f"GRANT SELECT, DELETE ON lake_read_free TO {reader_role}", pg_conn)
+    pg_conn.commit()
+
+    reader_conn = open_pg_conn(user=reader_role)
+
+    try:
+        run_command("DELETE FROM lake_read_free WHERE id = 1", reader_conn)
+        reader_conn.commit()
+
+        remaining = run_query("SELECT count(*) FROM lake_read_free", reader_conn)
+        assert remaining[0][0] == 1
+    finally:
+        reader_conn.close()
+        run_command("DROP TABLE lake_read_free", pg_conn)
+        pg_conn.commit()
+        run_command(f"DROP ROLE {reader_role}", superuser_conn)
+        superuser_conn.commit()
+
+
 def test_data_file_local_path_in_manifest_is_rejected(pg_conn, superuser_conn, s3):
     """
     Regression test for: second-order URI in data_file.file_path -> DuckDB
