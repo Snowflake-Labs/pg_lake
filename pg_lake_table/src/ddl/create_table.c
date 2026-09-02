@@ -1028,7 +1028,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		{
 			ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 							errmsg(OBJECT_STORE_CATALOG_NAME " catalog iceberg tables require "
-								   "pg_lake_iceberg.internal_iceberg_storage_prefix "
+								   "pg_lake_iceberg.internal_object_store_catalog_prefix "
 								   "to be set")));
 		}
 
@@ -1036,11 +1036,16 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		Assert(!HasReadOnlyOption(createStmt->options));
 
 		/*
-		 * For hasObjectStoreCatalogOption, we also append
-		 * InternalObjectStorePrefix/tables to the location
+		 * Anchor the table under the object store catalog's own root rather
+		 * than pg_lake_iceberg.default_location_prefix.  catalog.json is
+		 * composed from this root and records absolute metadata locations, so
+		 * any other anchor publishes a catalog that points outside its own
+		 * storage, and a reader authorized for the catalog's root then fails
+		 * on every data read.  The "tables" segment keeps the tables siblings
+		 * of the "catalog" segment.
 		 */
 		defaultLocationPrefix = psprintf("%s/%s/%s",
-										 defaultLocationPrefix,
+										 objectStoreCatalogLocationPrefix,
 										 InternalObjectStorePrefix,
 										 "tables");
 	}

@@ -56,7 +56,7 @@ int			IcebergAutovacuumLogMinDuration = 600000;
 
 static bool DeprecatedEnableStatsCollectionForNestedTypes;
 
-static bool IcebergDefaultLocationCheckHook(char **newvalue, void **extra, GucSource source);
+static bool IcebergLocationPrefixCheckHook(char **newvalue, void **extra, GucSource source);
 static bool IcebergDefaultCatalogCheckHook(char **newvalue, void **extra, GucSource source);
 
 /* function declarations */
@@ -199,7 +199,7 @@ _PG_init(void)
 							   NULL,
 							   PGC_SUSET,
 							   0,
-							   IcebergDefaultLocationCheckHook, NULL, NULL);
+							   IcebergLocationPrefixCheckHook, NULL, NULL);
 
 	DefineCustomStringVariable("pg_lake_iceberg.default_catalog",
 							   gettext_noop("Specifies the default catalog for "
@@ -214,14 +214,17 @@ _PG_init(void)
 							   IcebergDefaultCatalogCheckHook, NULL, NULL);
 
 	DefineCustomStringVariable("pg_lake_iceberg.object_store_catalog_location_prefix",
-							   gettext_noop("Specifies the location prefix for "
-											"object store catalog files."),
-							   NULL,
+							   gettext_noop("Specifies the storage root of the "
+											OBJECT_STORE_CATALOG_NAME " catalog."),
+							   gettext_noop("Both the catalog files and the tables the catalog "
+											"describes are placed under this prefix, so a reader "
+											"authorized for it can resolve the catalog and read "
+											"every table the catalog references."),
 							   &ObjectStoreCatalogLocationPrefix,
 							   NULL,
 							   PGC_SIGHUP,
 							   0,
-							   NULL, NULL, NULL);
+							   IcebergLocationPrefixCheckHook, NULL, NULL);
 
 	DefineCustomBoolVariable("pg_lake_iceberg.enable_manifest_merge_on_write",
 							 "Enables merging manifest files after each data modification.",
@@ -387,28 +390,37 @@ _PG_init(void)
 }
 
 
+/*
+ * IcebergLocationPrefixCheckHook validates a GUC that pg_lake uses as the base
+ * of a composed table location.  PostgreSQL already names the offending
+ * parameter in the primary error, so the details stay generic.
+ */
 static bool
-IcebergDefaultLocationCheckHook(char **newvalue, void **extra, GucSource source)
+IcebergLocationPrefixCheckHook(char **newvalue, void **extra, GucSource source)
 {
 	char	   *newLocationPrefix = *newvalue;
 
 	if (newLocationPrefix == NULL)
 	{
-		/* default location not set */
+		/* prefix not set */
 		return true;
 	}
 
 	if (!IsSupportedURL(newLocationPrefix))
 	{
-		GUC_check_errdetail("pg_lake_iceberg: unsupported URL for default location prefix: \"%s\"",
+		GUC_check_errdetail("pg_lake_iceberg: unsupported URL for location prefix: \"%s\"",
 							newLocationPrefix);
 		return false;
 	}
 
+	/*
+	 * A '?' would land mid-path once pg_lake appends the table path onto the
+	 * prefix.
+	 */
 	if (strchr(newLocationPrefix, '?') != NULL)
 	{
 		GUC_check_errdetail("pg_lake_iceberg: s3 configuration parameters are not allowed "
-							"in the default location prefix");
+							"in a location prefix");
 		return false;
 	}
 
