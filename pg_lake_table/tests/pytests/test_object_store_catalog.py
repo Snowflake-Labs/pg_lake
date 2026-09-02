@@ -947,11 +947,45 @@ def test_create_table_with_default_location_object_store(
 
 # Every other fixture points both candidate anchors at the same bucket, which
 # makes them indistinguishable. These pull them apart. Both stay writable, so a
-# regression fails on the recorded location rather than on S3 permissions.
+# regression fails on the recorded location rather than on S3 permissions. The
+# internal and external catalog prefixes are distinct too, so resolving either
+# path through the wrong one is caught rather than hidden by a shared value.
 OBJECT_STORE_MANAGED_PATH = "object_store_managed_root"
 OBJECT_STORE_MANAGED_ROOT = f"s3://{TEST_BUCKET}/{OBJECT_STORE_MANAGED_PATH}"
 OBJECT_STORE_DIVERTED_ROOT = f"s3://{TEST_BUCKET}/object_store_diverted_root"
-OBJECT_STORE_DIVERTED_CATALOG_PREFIX = "tmp_divert"
+OBJECT_STORE_INTERNAL_CATALOG_PREFIX = "tmp_divert_internal"
+OBJECT_STORE_EXTERNAL_CATALOG_PREFIX = "tmp_divert_external"
+
+
+def wait_for_internal_catalog_entry(s3, key, table_name, timeout=15.0):
+    """Poll the internal catalog.json in storage until it lists table_name.
+
+    Deliberately reads storage rather than going through
+    lake_iceberg.list_object_store_tables(), which gates even an internal
+    listing on the external catalog file existing and so cannot be used while
+    the two catalog prefixes differ.
+    """
+    deadline = time.monotonic() + timeout
+    last_seen = None
+
+    while time.monotonic() < deadline:
+        try:
+            last_seen = json.loads(
+                s3.get_object(Bucket=TEST_BUCKET, Key=key)["Body"].read()
+            )
+        except s3.exceptions.NoSuchKey:
+            time.sleep(0.1)
+            continue
+
+        for table in last_seen.get("tables", []):
+            if table["table-name"] == table_name:
+                return table
+
+        time.sleep(0.1)
+
+    raise AssertionError(
+        f"{table_name} never appeared in {key}; last read: {last_seen}"
+    )
 
 
 @pytest.fixture(scope="function")
@@ -959,8 +993,8 @@ def diverted_default_location_prefix(pg_conn, superuser_conn, s3, extension):
     superuser_conn.autocommit = True
     for guc, value in (
         ("object_store_catalog_location_prefix", OBJECT_STORE_MANAGED_ROOT),
-        ("internal_object_store_catalog_prefix", OBJECT_STORE_DIVERTED_CATALOG_PREFIX),
-        ("external_object_store_catalog_prefix", OBJECT_STORE_DIVERTED_CATALOG_PREFIX),
+        ("internal_object_store_catalog_prefix", OBJECT_STORE_INTERNAL_CATALOG_PREFIX),
+        ("external_object_store_catalog_prefix", OBJECT_STORE_EXTERNAL_CATALOG_PREFIX),
     ):
         run_command(
             f"ALTER SYSTEM SET pg_lake_iceberg.{guc} = '{value}'", superuser_conn
@@ -1013,7 +1047,15 @@ def test_object_store_table_ignores_diverted_default_location_prefix(
     )
     run_command(f"INSERT INTO {schema}.tbl VALUES (1),(2),(3)", pg_conn)
     pg_conn.commit()
-    wait_until_object_store_writable_table_pushed(pg_conn, schema, "tbl")
+
+    # The catalog file and the table it points at must share a root, so read
+    # the catalog from the managed root and require the published entry to be
+    # the location asserted below.
+    catalog_key = (
+        f"{OBJECT_STORE_MANAGED_PATH}/{OBJECT_STORE_INTERNAL_CATALOG_PREFIX}"
+        f"/catalog/{dbname}/catalog.json"
+    )
+    entry = wait_for_internal_catalog_entry(s3, catalog_key, "tbl")
 
     table_oid = run_query(
         f"SELECT oid FROM pg_class WHERE oid = '{schema}.tbl'::regclass", pg_conn
@@ -1025,7 +1067,7 @@ def test_object_store_table_ignores_diverted_default_location_prefix(
     )[0][0]
 
     expected_prefix = (
-        f"{OBJECT_STORE_MANAGED_ROOT}/{OBJECT_STORE_DIVERTED_CATALOG_PREFIX}/tables/"
+        f"{OBJECT_STORE_MANAGED_ROOT}/{OBJECT_STORE_INTERNAL_CATALOG_PREFIX}/tables/"
         f"{dbname}/{schema}/tbl/{table_oid}/"
     )
     assert metadata_location.startswith(expected_prefix), (
@@ -1033,17 +1075,6 @@ def test_object_store_table_ignores_diverted_default_location_prefix(
         f"{expected_prefix}, got {metadata_location}"
     )
     assert OBJECT_STORE_DIVERTED_ROOT not in metadata_location
-
-    # The catalog file and the table it points at must share a root, and the
-    # published entry has to be the location asserted above.
-    catalog_key = (
-        f"{OBJECT_STORE_MANAGED_PATH}/{OBJECT_STORE_DIVERTED_CATALOG_PREFIX}"
-        f"/catalog/{dbname}/catalog.json"
-    )
-    catalog = json.loads(
-        s3.get_object(Bucket=TEST_BUCKET, Key=catalog_key)["Body"].read()
-    )
-    entry = next(t for t in catalog["tables"] if t["table-name"] == "tbl")
     assert entry["metadata-location"] == metadata_location
 
     assert run_query(f"SELECT count(*) FROM {schema}.tbl", pg_conn) == [[3]]
@@ -1116,6 +1147,12 @@ def test_object_store_table_without_default_location_prefix(
     dbname = run_query("SELECT current_database()", pg_conn)[0][0]
 
     run_command("RESET pg_lake_iceberg.default_location_prefix", pg_conn)
+    # RESET restores the reset value, not necessarily NULL, so confirm the GUC
+    # really is unset -- otherwise this asserts nothing about the unset case.
+    assert (
+        run_query("SHOW pg_lake_iceberg.default_location_prefix", pg_conn)[0][0] == ""
+    )
+
     run_command(f"CREATE SCHEMA {schema}", pg_conn)
     run_command(
         f"CREATE TABLE {schema}.tbl(a int) USING iceberg WITH (catalog='object_store')",
