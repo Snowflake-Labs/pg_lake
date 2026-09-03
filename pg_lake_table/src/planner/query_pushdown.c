@@ -678,26 +678,6 @@ ProcessNotShippableExpressionWalker(Node *node, IsShippableContext * context)
 			RecordNotShippableObject(context, InvalidOid, InvalidOid, NOT_SHIPPABLE_SQL_EMPTY_TARGET_LIST);
 		}
 
-#if PG_VERSION_NUM >= 190000
-
-		/*
-		 * Both PostgreSQL (PG19+) and DuckDB accept GROUP BY ALL, but they
-		 * infer the grouping columns from the target list independently and
-		 * the two algorithms diverge (e.g. DuckDB rejects "SELECT b, count(*)
-		 * ... GROUP BY ALL" that PostgreSQL accepts). Deparsing preserves the
-		 * literal GROUP BY ALL, so pushing it down would let DuckDB silently
-		 * re-infer a different grouping. Run such queries locally instead;
-		 * PostgreSQL has already resolved the grouping at parse time.
-		 */
-		if (query->groupByAll)
-		{
-			if (context->stopAtFirstNotShippable)
-				return true;
-
-			RecordNotShippableObject(context, InvalidOid, InvalidOid, NOT_SHIPPABLE_SQL_GROUP_BY_ALL);
-		}
-#endif
-
 		if (query_tree_walker(query, ProcessNotShippableExpressionWalker, context, QTW_EXAMINE_RTES_BEFORE))
 			return true;
 

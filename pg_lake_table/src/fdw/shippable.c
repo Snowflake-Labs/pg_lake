@@ -739,8 +739,6 @@ GetNotShippableDescription(NotShippableReason reason, Oid classId, Oid objectId)
 			return "JOIN with merged columns and alias";
 		case NOT_SHIPPABLE_SQL_UNNEST_GROUP_BY_OR_WINDOW:
 			return "UNNEST with GROUP BY or window function";
-		case NOT_SHIPPABLE_SQL_GROUP_BY_ALL:
-			return "GROUP BY ALL";
 		case NOT_SHIPPABLE_INFINITE_CONST_VALUE:
 			return "infinite interval constant";
 		case NOT_SHIPPABLE_NAN_CONST_VALUE:
