@@ -410,9 +410,11 @@ PGLakeCachingFileSystem::ListFiles(const string &directory,
  * abort reaches here from ~CopyToFunctionGlobalState while the write-through
  * handle for this same path is still alive and holds that lock; the lock is
  * only released once the handle destructs, which is sequenced after the
- * destructor body that called us. Blocking on it would deadlock. A held lock
- * means another operation owns the entry and will clean it up itself, so
- * skipping is both safe and correct.
+ * destructor body that called us, so waiting deadlocks. A held lock therefore
+ * skips the eviction, which the cache manager logs: on that abort there is no
+ * finalized cache file to drop, but a cache download of the same path racing
+ * the removal can leave a cache entry for an object that is already gone,
+ * until size-based eviction drops it.
  *
  * If the file is not cached then this is a noop.
  */
