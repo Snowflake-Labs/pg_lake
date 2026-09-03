@@ -8,7 +8,9 @@ spec:
   # Controls this repository actually implements.  Each one is described, with a
   # file:line citation, in the document named next to it.
   control_ids:
-    - lake-read-write-roles                  # trust-boundaries.md
+    - lake-read-write-roles                  # architecture.md
+    - table-privileges-govern-dml            # architecture.md
+    - suset-default-location-prefix          # architecture.md
     - url-scheme-allowlist                   # trust-boundaries.md
     - url-query-parameter-allowlist          # trust-boundaries.md
     - azure-host-suffix-allowlist            # trust-boundaries.md
@@ -31,7 +33,7 @@ spec:
   documents:
     - path: architecture.md
       kind: context
-      description: "What pg_lake is made of: the extension set inside PostgreSQL, pgduck_server as a separate DuckDB process reached over a unix socket, the temp-file directory the two share, object storage as the actual table storage, the three built-in Iceberg catalog servers, and the file cache, deletion queue and cache-manager worker that touch storage outside a user query."
+      description: "What pg_lake is made of: the extension set inside PostgreSQL, pgduck_server as a separate DuckDB process reached over a unix socket, the temp-file directory the two share, object storage as the actual table storage, the three built-in Iceberg catalog servers with PostgreSQL itself as the default catalog, and the file cache, deletion queue and cache-manager worker that touch storage outside a user query.  Also the permission model in full: the lake roles gate naming a storage location, ordinary table privileges govern every read and write afterwards, and the default location prefix is a superuser-set GUC so a user cannot choose where their table lands."
     - path: trust-boundaries.md
       kind: threat-model
       description: "Every place untrusted input reaches privileged code: a SQL user naming a URL, the roles and allowlists that gate it, the COPY path that reaches the local filesystem, and the Postgres-to-pgduck_server boundary, which has no authentication and is held only by filesystem permissions on the socket."

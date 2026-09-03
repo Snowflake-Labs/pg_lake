@@ -11,8 +11,19 @@ they are for and where the gaps are.
 
 The assumed attacker is a PostgreSQL user who holds `lake_read` or `lake_write`
 and nothing more, unless a threat says otherwise. A user without either role
-cannot name a URL at all, and a superuser is not an attacker in this model
-because a PostgreSQL superuser can run arbitrary code by design.
+cannot name a URL at all, though they can still query and modify any lake table
+their ordinary table privileges cover (`architecture.md`). A superuser is not an
+attacker in this model because a PostgreSQL superuser can run arbitrary code by
+design.
+
+Holding a lake role is worth more than any table privilege, and that is the first
+thing to get right when granting one. `lake_read` reads any object the
+pgduck_server credentials can reach, which includes the files behind tables its
+holder has no `SELECT` on, and `pg_catalog.iceberg_tables` is world-readable and
+gives the paths. Treat the lake roles as a property of the person who defines
+tables, not as the way to let someone query them.
+
+**Basis:** code-verified Snowflake-Labs/pg_lake `pg_lake_engine/src/permissions/roles.c:79-103`, `pg_lake_iceberg/pg_lake_iceberg--3.0.sql:69-72` @ 031d6f58798d (2026-09-03)
 
 ## T1: a local process connects to pgduck_server directly
 

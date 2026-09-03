@@ -39,13 +39,20 @@ metadata functions, the `lake_file` utility functions, and the manifest reader.
 That list is the whole set: at this commit there is no other caller of the three
 gate functions anywhere in the tree.
 
+The check is on the statement that names the location, which in practice means
+`CREATE`. Querying and modifying an existing lake table afterwards needs only
+ordinary PostgreSQL table privileges, and no lake role at all; the permission
+model is set out in `architecture.md`.
+
 **Bounded by:** this is a per-URL check, not a per-object one. `lake_read` is
 all-or-nothing: a user who holds it may read every object the pgduck_server
 credentials can reach, in any bucket, for any tenant those credentials cover.
 pg_lake has no notion of which prefixes a given PostgreSQL role may touch. The
 blast radius of `lake_read` is therefore exactly the reach of the credentials
 configured in pgduck_server, which is an operator decision made outside this
-repository.
+repository. It follows that `lake_read` outranks any table `GRANT`: its holder can
+read the files behind a table they cannot `SELECT`, and
+`pg_catalog.iceberg_tables` tells them where those files are.
 
 ### The scheme allowlist
 
