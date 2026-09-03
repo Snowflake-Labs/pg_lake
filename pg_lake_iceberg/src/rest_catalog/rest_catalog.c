@@ -32,6 +32,7 @@
 #include "foreign/foreign.h"
 #include "utils/memutils.h"
 
+#include "pg_lake/http/http_client.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
@@ -74,11 +75,12 @@ ResolveRestCatalogBaseUri(const char *endpoint)
  * All string fields are pstrdup'd so the struct is self-contained.
  *
  * isBuiltin gates the credential GUCs (rest_catalog_client_id /
- * rest_catalog_client_secret): they seed opts only when the resolver
- * is building options for the built-in pg_lake_rest_catalog.
- * User-created servers receive every other GUC default but must supply
- * credentials through pg_user_mapping -- see
- * BuildRestCatalogOptionsFromServer for the security rationale.
+ * rest_catalog_client_secret) and the auth-type GUC: they seed opts only
+ * when the resolver is building options for the built-in
+ * pg_lake_rest_catalog.  User-created servers receive every other GUC
+ * default but must supply credentials through pg_user_mapping, and never
+ * inherit horizon -- see BuildRestCatalogOptionsFromServer and
+ * ValidateRestCatalogOptions for the security rationale.
  */
 static void
 ApplyGUCDefaults(RestCatalogOptions * opts, bool isBuiltin)
@@ -95,7 +97,15 @@ ApplyGUCDefaults(RestCatalogOptions * opts, bool isBuiltin)
 	}
 
 	opts->scope = RestCatalogScope ? pstrdup(RestCatalogScope) : NULL;
-	opts->authType = RestCatalogAuthType;
+
+	/*
+	 * horizon is the deployment's own edge, reached with the deployment
+	 * client certificate; that identity belongs to the built-in catalog
+	 * alone.  A user-created server must not inherit it from the auth-type
+	 * GUC, or flipping that GUC would point every user server at the
+	 * deployment edge with a certificate its owner never asked for.
+	 */
+	opts->authType = isBuiltin ? RestCatalogAuthType : REST_CATALOG_AUTH_TYPE_OAUTH2;
 	opts->enableVendedCredentials = RestCatalogEnableVendedCredentials;
 	opts->locationPrefix = defaultLocationPrefix ? pstrdup(defaultLocationPrefix) : NULL;
 }
@@ -115,12 +125,16 @@ ApplyGUCDefaults(RestCatalogOptions * opts, bool isBuiltin)
  *   Horizon: client_secret only (carried in the form body;
  *            client_id is intentionally ignored).
  *
+ * They do not apply at all when a credential provider is configured, since
+ * the provider may mint the credential from something other than a stored
+ * secret.
+ *
  * The hint differs by server kind because the credential surfaces
  * differ: GUCs feed only the built-in catalog, user mappings feed
  * only user-created servers.  See BuildRestCatalogOptionsFromServer
  * for the resolution rules.
  *
- * FetchRestCatalogAccessToken still re-checks the fields it actually
+ * FetchOAuth2AccessToken still re-checks the fields it actually
  * dereferences.  Those late checks are defense in depth in case any
  * future code path constructs RestCatalogOptions without going
  * through this resolver.
@@ -138,6 +152,55 @@ ValidateRestCatalogOptions(const RestCatalogOptions * opts,
 				 errhint("Set the pg_lake_iceberg.rest_catalog_host GUC (e.g. "
 						 "\"http://localhost:8181/api/catalog\" for Polaris) or "
 						 "the \"rest_endpoint\" option on the server.")));
+
+	/*
+	 * horizon applies only to the built-in catalog (see ApplyGUCDefaults).  A
+	 * user-created server does not inherit it, but can still name
+	 * rest_auth_type 'horizon' explicitly.  Refuse that here rather than
+	 * present the deployment certificate at an endpoint its owner chose, and
+	 * with a message its owner can act on instead of the superuser-only GUC
+	 * hint the certificate check gives below.
+	 */
+	if (!isBuiltin && opts->authType == REST_CATALOG_AUTH_TYPE_HORIZON)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("rest_auth_type \"horizon\" is not supported on user-created REST catalog \"%s\"",
+						catalog),
+				 errhint("\"horizon\" authenticates through the deployment's own edge "
+						 "and applies only to the built-in \"rest\" catalog.")));
+
+	/*
+	 * A horizon catalog is the one kind reached through the deployment's own
+	 * edge, so it is where a half-configured client certificate shows up.
+	 * Requests refuse to present an incomplete one, and saying so here beats
+	 * leaving the operator to read it out of a TLS handshake failure.  Only
+	 * the built-in catalog reaches horizon, so only it is checked.
+	 */
+	if (isBuiltin && opts->authType == REST_CATALOG_AUTH_TYPE_HORIZON &&
+		GetHttpClientTlsMaterial() == HTTP_TLS_MATERIAL_PARTIAL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("client certificate for REST catalog \"%s\" is only partly configured",
+						catalog),
+				 errhint("Set pg_lake_iceberg.horizon_tls_ca_file, pg_lake_iceberg.horizon_tls_cert_file "
+						 "and pg_lake_iceberg.horizon_tls_key_file together, or leave all three empty.")));
+
+	/*
+	 * A catalog authenticated by workload identity has no client secret to
+	 * configure: the provider mints the credential from an attestation.
+	 * Requiring one here would make such a catalog impossible to configure
+	 * without a secret that is never read.
+	 *
+	 * Whether the provider claims this particular catalog is only known once
+	 * it is called, so the requirement is deferred rather than dropped.  A
+	 * provider that declines falls back to the OAuth2 grant, which reports
+	 * the missing credential before sending anything.
+	 *
+	 * Only the built-in catalog is ever offered to the provider, so a
+	 * user-created server must still produce its own credentials.
+	 */
+	if (isBuiltin && RestCatalogAuthProviderIsRegistered())
+		return;
 
 	bool		missingSecret = (opts->clientSecret == NULL || opts->clientSecret[0] == '\0');
 	bool		missingId = (opts->authType != REST_CATALOG_AUTH_TYPE_HORIZON) &&
@@ -212,6 +275,7 @@ BuildRestCatalogOptionsFromServer(const char *serverName,
 	opts->serverOid = server->serverid;
 	opts->userMappingOid = InvalidOid;
 	opts->catalog = pstrdup(userVisibleCatalog);
+	opts->isBuiltin = isBuiltin;
 	ApplyGUCDefaults(opts, isBuiltin);
 	ApplyServerOptionOverrides(opts, server);
 
@@ -395,6 +459,7 @@ CopyRestCatalogOptions(MemoryContext dst, const RestCatalogOptions * src)
 	copy->catalogName = src->catalogName ? pstrdup(src->catalogName) : NULL;
 	copy->authType = src->authType;
 	copy->enableVendedCredentials = src->enableVendedCredentials;
+	copy->isBuiltin = src->isBuiltin;
 
 	MemoryContextSwitchTo(oldctx);
 	return copy;

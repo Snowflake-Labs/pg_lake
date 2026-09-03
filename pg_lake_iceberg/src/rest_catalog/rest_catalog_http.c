@@ -20,8 +20,8 @@
  *
  * SendRequestToRestCatalog wraps SendHttpRequest with REST-catalog-
  * specific retry classification: 429 (short backoff), 503 (long
- * backoff), and 419 (force-refresh the OAuth token via the auth layer
- * and patch the Authorization header before retrying).
+ * backoff), and 419 or a first 401 (force-refresh the credential via the
+ * auth layer and patch the Authorization header before retrying).
  *
  * ReportHTTPError translates a non-200 HttpResult into a Postgres
  * ereport, parsing the standard REST-catalog error envelope:
@@ -54,19 +54,21 @@ typedef enum RestCatalogRequestRetryAction
 	REST_CATALOG_RETRY_STOP,
 	REST_CATALOG_RETRY_BACKOFF_SHORT,	/* 429 Too Many Requests */
 	REST_CATALOG_RETRY_BACKOFF_LONG,	/* 503 Service Unavailable */
-	REST_CATALOG_RETRY_REFRESH_AUTH /* 419 Token Expired */
+	REST_CATALOG_RETRY_REFRESH_AUTH /* 419 Token Expired, or a first 401 */
 }			RestCatalogRequestRetryAction;
 
 
 /*
- * UpdateAuthorizationHeader finds the "Authorization: Bearer ..." entry in the
- * header list and replaces it with a new one carrying the given token.  If no
- * matching header is found the function is a no-op (defensive).
+ * UpdateAuthorizationHeader finds the "Authorization: ..." entry in the header
+ * list and replaces it with a new one carrying the given value.  The value
+ * includes its own scheme, since a credential provider may authenticate with
+ * something other than a bearer token.  If no matching header is found the
+ * function is a no-op (defensive).
  */
 static void
-UpdateAuthorizationHeader(List *headers, const char *token)
+UpdateAuthorizationHeader(List *headers, const char *authorization)
 {
-	const char *prefix = "Authorization: Bearer ";
+	const char *prefix = "Authorization: ";
 	ListCell   *lc;
 
 	foreach(lc, headers)
@@ -75,7 +77,7 @@ UpdateAuthorizationHeader(List *headers, const char *token)
 
 		if (strncmp(header, prefix, strlen(prefix)) == 0)
 		{
-			lfirst(lc) = psprintf("Authorization: Bearer %s", token);
+			lfirst(lc) = psprintf("Authorization: %s", authorization);
 			return;
 		}
 	}
@@ -85,9 +87,14 @@ UpdateAuthorizationHeader(List *headers, const char *token)
 /*
  * ClassifyRestCatalogRequestRetry decides whether to retry and, if so, what
  * kind of action the caller should take.
+ *
+ * authRefreshable is false for the credential request itself, which has no
+ * credential to refresh.  authAlreadyRefreshed records whether this request
+ * has spent its one 401 refresh.
  */
 static RestCatalogRequestRetryAction
-ClassifyRestCatalogRequestRetry(long status, int maxRetry, int retryNo)
+ClassifyRestCatalogRequestRetry(long status, int maxRetry, int retryNo,
+								bool authRefreshable, bool authAlreadyRefreshed)
 {
 	if (retryNo > maxRetry)
 		return REST_CATALOG_RETRY_STOP;
@@ -101,7 +108,18 @@ ClassifyRestCatalogRequestRetry(long status, int maxRetry, int retryNo)
 		return REST_CATALOG_RETRY_BACKOFF_LONG;
 
 	/* token expired, retry after refreshing token */
-	if (status == HTTP_STATUS_TOKEN_EXPIRED)
+	if (status == HTTP_STATUS_TOKEN_EXPIRED && authRefreshable)
+		return REST_CATALOG_RETRY_REFRESH_AUTH;
+
+	/*
+	 * 401 does not say whether the credential lapsed or was never authorized
+	 * in the first place, so it earns a single refresh: enough to recover
+	 * from one that expired between minting and use, while a genuine
+	 * authorization failure still surfaces on the next response rather than
+	 * consuming every retry slot.  Catalogs behind an OAuth2 token exchange
+	 * answer 401 here, where Polaris answers the non-standard 419.
+	 */
+	if (status == HTTP_STATUS_UNAUTHORIZED && authRefreshable && !authAlreadyRefreshed)
 		return REST_CATALOG_RETRY_REFRESH_AUTH;
 
 	return REST_CATALOG_RETRY_STOP;
@@ -109,7 +127,7 @@ ClassifyRestCatalogRequestRetry(long status, int maxRetry, int retryNo)
 
 
 /*
- * SendRequestToRestCatalog sends an HTTP request to the rest catalog
+ * SendRestCatalogRequest sends an HTTP request to the rest catalog
  * with retry logic for retriable errors, attempting up to
  * MAX_HTTP_RETRY_FOR_REST_CATALOG times.
  *
@@ -118,23 +136,40 @@ ClassifyRestCatalogRequestRetry(long status, int maxRetry, int retryNo)
  * so normally we wouldn't want any errors to happen, but then
  * Postgres already prevents post-commit backends to receive signals.
  *
- * When opts is non-NULL the retry callback can force-refresh the
- * access token and patch the Authorization header on a 419 response.
- * Pass opts = NULL for the token-fetch request itself to avoid recursion.
+ * canRefreshCredential is false only for the credential request itself
+ * (see SendCredentialRequestToRestCatalog), both to avoid recursion and so
+ * that its own 401 is reported as the authentication failure it is.
  */
-HttpResult
-SendRequestToRestCatalog(RestCatalogOptions * opts, HttpMethod method, const char *url,
-						 const char *body, List *headers)
+static HttpResult
+SendRestCatalogRequest(RestCatalogOptions * opts, bool canRefreshCredential,
+					   HttpMethod method, const char *url,
+					   const char *body, List *headers)
 {
 	const int	MAX_HTTP_RETRY_FOR_REST_CATALOG = 3;
+
+	bool		authAlreadyRefreshed = false;
+
+	/*
+	 * Only the built-in catalog, reached through the deployment's own edge,
+	 * is addressed by the certificate that edge issued.  A third-party
+	 * catalog gets an ordinary TLS handshake, so it neither sees an identity
+	 * that means nothing to it nor has to be verified against a private
+	 * authority. Resolution already refuses horizon on a user-created server;
+	 * gating on isBuiltin here keeps the deployment certificate off any
+	 * endpoint a server owner chose even if that ever changes.
+	 */
+	HttpTlsClientAuth clientAuth =
+		(opts->isBuiltin && opts->authType == REST_CATALOG_AUTH_TYPE_HORIZON) ?
+		HTTP_TLS_DEPLOYMENT_CLIENT_CERT : HTTP_TLS_NO_CLIENT_CERT;
 
 	HttpResult	result;
 
 	for (int retryNo = 1; retryNo <= MAX_HTTP_RETRY_FOR_REST_CATALOG; retryNo++)
 	{
-		result = SendHttpRequest(method, url, body, headers);
+		result = SendHttpRequest(method, url, body, headers, clientAuth);
 
-		switch (ClassifyRestCatalogRequestRetry(result.status, MAX_HTTP_RETRY_FOR_REST_CATALOG, retryNo))
+		switch (ClassifyRestCatalogRequestRetry(result.status, MAX_HTTP_RETRY_FOR_REST_CATALOG,
+												retryNo, canRefreshCredential, authAlreadyRefreshed))
 		{
 			case REST_CATALOG_RETRY_BACKOFF_SHORT:
 				LightSleep(LinearBackoffSleepMs(500, retryNo));
@@ -147,14 +182,15 @@ SendRequestToRestCatalog(RestCatalogOptions * opts, HttpMethod method, const cha
 			case REST_CATALOG_RETRY_REFRESH_AUTH:
 				{
 					/*
-					 * Force-refresh the cached token and update the
+					 * Force-refresh the cached credential and update the
 					 * Authorization header so the retried request carries the
-					 * new token.
+					 * new one.
 					 */
 					bool		forceRefreshToken = true;
-					char	   *freshToken = GetRestCatalogAccessToken(opts, forceRefreshToken);
+					char	   *fresh = GetRestCatalogAuthorization(opts, forceRefreshToken);
 
-					UpdateAuthorizationHeader(headers, freshToken);
+					UpdateAuthorizationHeader(headers, fresh);
+					authAlreadyRefreshed = true;
 					continue;
 				}
 
@@ -164,6 +200,35 @@ SendRequestToRestCatalog(RestCatalogOptions * opts, HttpMethod method, const cha
 	}
 
 	return result;
+}
+
+
+/*
+ * SendRequestToRestCatalog sends a request carrying the catalog's current
+ * credential, which it will refresh and retry with once if the catalog
+ * rejects it as expired.
+ */
+HttpResult
+SendRequestToRestCatalog(RestCatalogOptions * opts, HttpMethod method, const char *url,
+						 const char *body, List *headers)
+{
+	bool		canRefreshCredential = true;
+
+	return SendRestCatalogRequest(opts, canRefreshCredential, method, url, body, headers);
+}
+
+
+/*
+ * SendCredentialRequestToRestCatalog sends the request that obtains the
+ * credential the requests above carry.
+ */
+HttpResult
+SendCredentialRequestToRestCatalog(RestCatalogOptions * opts, const char *url,
+								   const char *body, List *headers)
+{
+	bool		canRefreshCredential = false;
+
+	return SendRestCatalogRequest(opts, canRefreshCredential, HTTP_POST, url, body, headers);
 }
 
 

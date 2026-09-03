@@ -135,6 +135,9 @@ typedef struct RestCatalogOptions
 	char	   *catalogName;	/* REST API catalog prefix; defaults to dbname */
 	int			authType;
 	bool		enableVendedCredentials;
+	bool		isBuiltin;		/* the extension-owned built-in server, whose
+								 * endpoint no user can choose; gates every
+								 * deployment-wide credential */
 }			RestCatalogOptions;
 
 /*
@@ -213,6 +216,121 @@ extern PGDLLEXPORT Oid ResolveRestCatalogServerId(const char *catalog);
 extern PGDLLEXPORT Oid GetRestCatalogServerIdForRelation(Oid relationId);
 
 /*
+ * Credential handed back by a REST catalog credential provider.
+ *
+ * authorization is the complete Authorization header value including its
+ * scheme, e.g. "Bearer eyJ...".  Providers supply the scheme themselves so
+ * that catalogs authenticating with something other than a bearer token do
+ * not require a change here.
+ *
+ * expiresIn is the credential's remaining lifetime in seconds.  Zero means
+ * "do not cache": the provider is consulted again on the next request, which
+ * is what it wants when it reads a credential that is rotated underneath it
+ * rather than minting one with a known lifetime.
+ */
+typedef struct RestCatalogAuthMaterial
+{
+	char	   *authorization;
+	int			expiresIn;
+}			RestCatalogAuthMaterial;
+
+/*
+ * What a credential provider is told about the catalog it is being asked to
+ * authenticate.
+ *
+ * This is deliberately small and self-contained rather than RestCatalogOptions
+ * itself.  A provider lives in a separately built extension, so everything
+ * here is an ABI contract: RestCatalogOptions is an internal struct that will
+ * keep changing, and it carries the client secret, which a provider has no
+ * business seeing.  Fields are added to the end, and version lets a provider
+ * refuse a pg_lake newer than it understands rather than misread the struct.
+ *
+ * catalogBaseUri is the catalog's base URI as configured in rest_endpoint,
+ * normalized but otherwise verbatim, so it already carries any mount path the
+ * deployment uses ("https://host/polaris/api/catalog", say).  A provider that
+ * needs to reach the catalog's own token endpoint should append only the REST
+ * path to it -- assuming a mount path instead produces a doubled one.
+ *
+ * oauthEndpoint is the oauth_endpoint server option: a fully-qualified token
+ * URL to be used as given, or NULL when unset.  It is separate from
+ * catalogBaseUri because the token endpoint is frequently not on the catalog
+ * at all.  A provider that mints its own credential should prefer it when
+ * present and fall back to deriving one from catalogBaseUri, so that a
+ * deployment can point authentication somewhere else without the provider
+ * needing to know the deployment exists.
+ *
+ * catalog is the name the user typed, which is what a provider should name in
+ * its own errors.  It is the identifier a reader can act on, unlike the REST
+ * API's catalog prefix, which is a per-relation server option the built-in
+ * catalog does not carry at all.
+ *
+ * authType is the configured REST_CATALOG_AUTH_TYPE_* value, and scope is
+ * NULL when unset.  forceRefresh says the cached credential was rejected, so
+ * a provider that caches must mint a new one rather than return what it has.
+ */
+typedef struct RestCatalogAuthRequest
+{
+	int			version;
+	const char *catalogBaseUri;
+	const char *oauthEndpoint;
+	const char *catalog;
+	const char *scope;
+	int			authType;
+	bool		forceRefresh;
+}			RestCatalogAuthRequest;
+
+#define REST_CATALOG_AUTH_REQUEST_VERSION 1
+
+/*
+ * Signature of a credential provider, letting another extension supply REST
+ * catalog credentials for catalogs whose authentication pg_lake has no
+ * built-in support for.
+ *
+ * Returning false means "not mine, fall back to the built-in OAuth2 flow",
+ * so a provider can claim some servers and ignore others.  Returning true
+ * without filling in material->authorization is an error.  pg_lake keeps
+ * ownership of caching, refresh and header construction either way.
+ *
+ * Declining is for catalogs that are not the provider's business, not for
+ * ones it cannot currently serve: a provider that recognises a catalog and
+ * fails to mint a credential for it should raise.  Falling back then would
+ * authenticate with something other than what the catalog was configured to
+ * use, and report nothing, which is how a broken credential source stays
+ * unnoticed.
+ *
+ * So a provider that recognises the built-in catalog takes over its
+ * authentication rather than layering over the OAuth2 grant: once such a
+ * provider is registered, a raise is the failure, not a fall back to
+ * rest_catalog_client_secret.  A provider meant to leave that grant intact
+ * must decline the catalog rather than raise for it.
+ *
+ * A provider registers itself by storing its function in the rendezvous
+ * variable named below, which pg_lake reads whenever it needs a credential.
+ * Registration is per backend and takes effect from the next request:
+ *
+ *   PgLakeRestCatalogAuthProvider provider = my_provider;
+ *   void	  **slot = find_rendezvous_variable(PG_LAKE_REST_CATALOG_AUTH_PROVIDER);
+ *
+ *   *slot = (void *) provider;
+ *
+ * A rendezvous variable rather than a function either side calls, because
+ * neither module can rely on the other being loaded when it runs its own init
+ * code.  pg_lake_iceberg is loaded on first use of the extension, whereas a
+ * provider extension is typically loaded from shared_preload_libraries; and
+ * pg_lake_iceberg cannot simply be loaded early, since it resolves symbols
+ * from pg_lake_engine, which the preloader has not reached yet.  Rendezvous
+ * makes the order irrelevant: whichever module looks first creates the slot.
+ *
+ * Assigning through a variable of this type, as above, is what has the
+ * provider's own compiler check the signature; the cast to void * that
+ * follows only satisfies the slot.
+ */
+#define PG_LAKE_REST_CATALOG_AUTH_PROVIDER "pg_lake_iceberg.rest_catalog_auth_provider"
+
+typedef bool (*PgLakeRestCatalogAuthProvider) (const RestCatalogAuthRequest * request,
+											   RestCatalogAuthMaterial * material);
+
+/*
  * Module-internal helpers shared across the rest_catalog_*.c files.
  *
  * Declared here (rather than in a private header) only so the split
@@ -223,7 +341,8 @@ void		ApplyServerOptionOverrides(RestCatalogOptions * opts, ForeignServer *serve
 void		ApplyUserMappingOverrides(RestCatalogOptions * opts, ForeignServer *server);
 void		ApplyUserMappingOptionsList(RestCatalogOptions * opts, List *options, Oid umOid);
 List	   *LookupUserMappingOptionsByOid(Oid umOid, Oid *serverOidOut);
-char	   *GetRestCatalogAccessToken(RestCatalogOptions * opts, bool forceRefreshToken);
+bool		RestCatalogAuthProviderIsRegistered(void);
+char	   *GetRestCatalogAuthorization(RestCatalogOptions * opts, bool forceRefreshToken);
 List	   *GetHeadersWithAuth(RestCatalogOptions * opts);
 char	   *JsonbGetStringByPath(const char *jsonb_text, int nkeys,...);
 char	   *JsonbGetOptionalStringByPath(const char *jsonb_text, int nkeys,...);
@@ -272,7 +391,10 @@ extern PGDLLEXPORT void InvalidateVendedCredentialsCache(void);
 extern PGDLLEXPORT void ReportHTTPError(HttpResult httpResult, int level);
 extern PGDLLEXPORT List *PostHeadersWithAuth(RestCatalogOptions * opts);
 extern PGDLLEXPORT List *DeleteHeadersWithAuth(RestCatalogOptions * opts);
-extern PGDLLEXPORT HttpResult SendRequestToRestCatalog(RestCatalogOptions * opts, HttpMethod method, const char *url, const char *body, List *headers);
+extern PGDLLEXPORT HttpResult SendRequestToRestCatalog(RestCatalogOptions * opts, HttpMethod method,
+													   const char *url, const char *body, List *headers);
+extern PGDLLEXPORT HttpResult SendCredentialRequestToRestCatalog(RestCatalogOptions * opts, const char *url,
+																 const char *body, List *headers);
 extern PGDLLEXPORT RestCatalogRequest * GetAddSnapshotCatalogRequest(IcebergSnapshot * newSnapshot, Oid relationId);
 extern PGDLLEXPORT RestCatalogRequest * GetAddSchemaCatalogRequest(Oid relationId, DataFileSchema * dataFileSchema);
 extern PGDLLEXPORT RestCatalogRequest * GetSetCurrentSchemaCatalogRequest(Oid relationId, int32_t schemaId);

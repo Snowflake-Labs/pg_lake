@@ -28,6 +28,7 @@
 #include "pg_lake/avro/avro_writer.h"
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/ddl/utility_hook.h"
+#include "pg_lake/http/http_client.h"
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/iceberg/catalog.h"
@@ -188,6 +189,38 @@ _PG_init(void)
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 
+
+	DefineCustomStringVariable("pg_lake_iceberg.horizon_tls_ca_file",
+							   gettext_noop("Path to the CA bundle used to verify catalogs "
+											"reached with rest_auth_type 'horizon'. Empty, "
+											"and every other catalog, uses the system bundle."),
+							   NULL,
+							   &HttpClientTlsCaFile,
+							   "",
+							   PGC_SIGHUP,
+							   GUC_NO_SHOW_ALL | GUC_SUPERUSER_ONLY | GUC_NOT_IN_SAMPLE,
+							   CheckHttpClientTlsFile, NULL, NULL);
+
+	DefineCustomStringVariable("pg_lake_iceberg.horizon_tls_cert_file",
+							   gettext_noop("Path to the client certificate presented to catalogs "
+											"reached with rest_auth_type 'horizon'. It is not "
+											"presented to any other catalog."),
+							   NULL,
+							   &HttpClientTlsCertFile,
+							   "",
+							   PGC_SIGHUP,
+							   GUC_NO_SHOW_ALL | GUC_SUPERUSER_ONLY | GUC_NOT_IN_SAMPLE,
+							   CheckHttpClientTlsFile, NULL, NULL);
+
+	DefineCustomStringVariable("pg_lake_iceberg.horizon_tls_key_file",
+							   gettext_noop("Path to the private key for "
+											"pg_lake_iceberg.horizon_tls_cert_file."),
+							   NULL,
+							   &HttpClientTlsKeyFile,
+							   "",
+							   PGC_SIGHUP,
+							   GUC_NO_SHOW_ALL | GUC_SUPERUSER_ONLY | GUC_NOT_IN_SAMPLE,
+							   CheckHttpClientTlsFile, NULL, NULL);
 
 	DefineCustomStringVariable("pg_lake_iceberg.default_location_prefix",
 							   gettext_noop("Specifies the default location prefix for "
