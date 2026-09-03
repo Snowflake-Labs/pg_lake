@@ -187,6 +187,7 @@ public:
 
 	/* Overrides that are not in s3fs */
 	void RemoveFile(const string &filename, optional_ptr<FileOpener> opener = nullptr) override;
+	bool TryRemoveFile(const string &filename, optional_ptr<FileOpener> opener = nullptr) override;
 
     /* pass through to wrapped handle */
 	void Read(FileHandle &handle, void *buffer, int64_t byteCount, idx_t location) override {

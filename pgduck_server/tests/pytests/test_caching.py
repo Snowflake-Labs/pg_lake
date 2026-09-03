@@ -1603,6 +1603,59 @@ def run_test_pg_lake_remove_file(query_arg, s3, pgduck_conn):
     )
 
 
+def test_pg_lake_remove_file_azure_missing_blob(azure, pgduck_conn):
+    """Removing an Azure blob that is already gone is not an error.
+
+    Azure raises BlobNotFound where S3 answers a plain 404 that the S3 file
+    system treats as removed, so cleanup of an object a previous attempt already
+    deleted used to fail the whole statement. Deleting the blob out of band
+    reaches the same state as an interrupted delete and also checks that the
+    cache entry is still evicted, which is the reason a missing object cannot be
+    allowed to throw before the eviction runs.
+    """
+    key = "test_remove_file_azure_missing/data.parquet"
+    url = f"az://{TEST_BUCKET}/{key}"
+    cached_path = Path(
+        f"{server_params.PGDUCK_CACHE_DIR}/az/{TEST_BUCKET}"
+        f"/test_remove_file_azure_missing/{CACHE_FILE_PREFIX}data.parquet"
+    )
+
+    run_command(
+        f"""
+        COPY (SELECT s AS s FROM generate_series(1,100) as g(s)) TO '{url}' (format 'parquet');
+    """,
+        pgduck_conn,
+    )
+
+    assert cached_path.exists()
+
+    run_command(f"SELECT pg_lake_remove_file('{url}');", pgduck_conn)
+
+    assert not cached_path.exists()
+    assert not any(azure.list_blobs(name_starts_with=key))
+
+    # Removing twice does not give an error
+    run_command(f"SELECT pg_lake_remove_file('{url}');", pgduck_conn)
+
+    # A blob deleted out of band still gets its cache entry evicted
+    run_command(
+        f"""
+        COPY (SELECT s AS s FROM generate_series(1,100) as g(s)) TO '{url}' (format 'parquet');
+    """,
+        pgduck_conn,
+    )
+
+    assert cached_path.exists()
+
+    azure.get_blob_client(key).delete_blob()
+
+    run_command(f"SELECT pg_lake_remove_file('{url}');", pgduck_conn)
+
+    assert not cached_path.exists()
+
+    pgduck_conn.rollback()
+
+
 # Test that query arguments are included in the path
 def test_http_query_args(s3, pgduck_conn):
     key = "test_http_query_args/data.parquet"
