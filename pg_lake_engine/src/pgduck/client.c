@@ -506,54 +506,24 @@ CheckPGDuckResult(PGDuckConnection * pgDuckConnection, PGresult *result)
 
 
 /*
- * PGDUCK_ENGINE_ERROR_PREFIX marks LOG lines that are guaranteed to be
- * free of customer data, so any log-forwarding or monitoring setup can
- * safely match on this prefix. The text after the prefix must always come
- * from a fixed, hand-written label in ClassifyPGDuckErrorMessage -- never
- * interpolate DuckDB/query message text, row values, or paths into it. A
- * new class may be added two ways: (1) an exact-match literal that
- * pgduck_server already sends unconditionally (verified against
- * handle_pgsession_error_message in pgsession.c), or (2) an anchored
- * prefix match on a fixed, DuckDB-owned exception-category label (verified
- * against real pgduck_server output, e.g. "Out of Memory Error: "). Either
- * way, only ever compare/return the fixed label -- never a substring of, or
- * anything past, the message itself, since the detail after a DuckDB
- * category prefix can carry customer SQL, row values, or object-store
- * paths. Both tables below are limited to entries confirmed against real
- * production pgduck_server/Postgres logs -- not every literal that
- * pgsession.c/duckdb.c could theoretically emit, only the ones actually
- * seen in the wild.
+ * PGDUCK_ENGINE_ERROR_PREFIX marks LOG lines guaranteed to be free of customer
+ * data, so log forwarding and monitoring can safely match on this prefix. The
+ * text after it must always be a fixed label from ClassifyPGDuckErrorMessage,
+ * never interpolated message text.
  */
 #define PGDUCK_ENGINE_ERROR_PREFIX "pgduck_engine_error: "
 
 /*
- * ClassifyPGDuckErrorMessage maps a pgduck_server error message to a
- * PII-free error class.
+ * ClassifyPGDuckErrorMessage maps a pgduck_server error message to a PII-free
+ * error class.
  *
- * knownMessages holds exact-match literals: fixed, developer-controlled
- * text that pgduck_server already sends verbatim for non-fatal, non-query
- * statuses (see handle_pgsession_error_message in pgsession.c). Confirmed
- * in production: "lost connection to query engine" (115 occurrences in a
- * single measured incident window).
- *
- * knownPrefixes holds anchored-prefix matches, following DuckDB's own
- * exception convention, "<Category> Error: <detail>", where <Category>
- * comes from DuckDB's fixed internal exception-type vocabulary -- never
- * customer-influenced -- while <detail> may embed a query fragment, row
- * value, or object-store path. Matching only the "<Category> Error: "
- * prefix, and never anything past it, lets us classify the raw
- * DUCKDB_QUERY_ERROR/DUCKDB_FATAL_ERROR text pgduck_server forwards
- * verbatim (duckdb_session_run_command in duckdb.c) without risking the
- * PII-bearing detail after it. Confirmed in production: "Out of Memory
- * Error: Failed to allocate block of ... bytes (bad allocation)" / "...
- * could not allocate block of size ... (.../... used)" / "... Allocation
- * failure", "IO Error: AzureBlobStorageFileSystem Delete of azure://..." /
- * "... could not open file", "HTTP Error: HTTP GET error reading
- * 's3://...'", "Invalid Error: Invalid header name: content-length".
- *
- * Neither table matches arbitrary DuckDB/query error text itself -- only
- * the fixed label in front of it. Anything that doesn't match either table
- * is "other": unclassified, but zero raw text leaked.
+ * knownMessages matches fixed, developer-controlled text that pgduck_server
+ * sends verbatim (see handle_pgsession_error_message in pgsession.c).
+ * knownPrefixes matches DuckDB's "<Category> Error: " exception labels, where
+ * the category is DuckDB-owned but the detail after it can embed customer SQL,
+ * row values, or paths -- so we only ever compare and return the prefix, never
+ * anything past it. Both tables list only classes seen in production logs;
+ * anything else is "other".
  */
 const char *
 ClassifyPGDuckErrorMessage(const char *message)
