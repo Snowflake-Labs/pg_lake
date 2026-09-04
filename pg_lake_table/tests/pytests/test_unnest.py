@@ -102,17 +102,14 @@ test_cases = [
     (
         "window_function_unnest",
         """
-            SELECT 
-                id, 
+            SELECT
+                id,
                 unnest(fruits) AS fruit_name,
-                row_number() OVER (
-                    PARTITION BY id 
-                    ORDER BY unnest(fruits)
-                ) AS fruit_index
+                count(*) OVER (PARTITION BY id) AS fruits_per_id
             FROM untest
-            ORDER BY id, fruit_index;
+            ORDER BY id, fruit_name;
         """,
-        False,  # DuckDB does not allow unnest in window function
+        True,  # unnest alongside a plain window function is pushed down
     ),
     (
         "distinct_unnest",
