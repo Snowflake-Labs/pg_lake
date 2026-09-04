@@ -55,6 +55,21 @@ test_cases = [
         "WHERE col_interval - INTERVAL '1 day' = INTERVAL '1 day'",
         "WHERE ((\"col_interval\" - '1 day'::interval) = '1 day'::interval)",
     ),
+    (
+        "interval_um",
+        "WHERE - col_interval = INTERVAL '-1 day'",
+        "WHERE ((- \"col_interval\") = '-1 days'::interval)",
+    ),
+    (
+        "interval_mul",
+        "WHERE col_interval * 2 = INTERVAL '2 days'",
+        "WHERE ((\"col_interval\" * (2)::double precision) = '2 days'::interval)",
+    ),
+    (
+        "mul_d_interval",
+        "WHERE 2 * col_interval = INTERVAL '2 days'",
+        "WHERE (((2)::double precision * \"col_interval\") = '2 days'::interval)",
+    ),
 ]
 
 

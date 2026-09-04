@@ -55,6 +55,16 @@ test_cases = [
         "WHERE col_time >= '17:00:00'::time",
         "WHERE (\"col_time\" >= '17:00:00'::time without time zone)",
     ),
+    (
+        "time_pl_interval",
+        "WHERE col_time + col_interval = '13:00:00'::time",
+        'WHERE (("col_time" + "col_interval") = \'13:00:00\'::time without time zone)',
+    ),
+    (
+        "time_mi_interval",
+        "WHERE col_time - col_interval = '23:59:59'::time",
+        'WHERE (("col_time" - "col_interval") = \'23:59:59\'::time without time zone)',
+    ),
 ]
 
 

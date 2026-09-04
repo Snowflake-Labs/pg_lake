@@ -177,6 +177,7 @@ static Node *RewriteFuncExprInitcap(Node *node, void *context);
 static Node *RewriteFuncExprJsonbArrayLength(Node *node, void *context);
 static Node *RewriteFuncExprEncode(Node *node, void *context);
 static Node *RewriteFuncExprDecode(Node *node, void *context);
+static Node *RewriteFuncExprToHex(Node *node, void *context);
 static Node *RewriteFuncExprToZeroOrNullConst(Node *node, void *context);
 static Node *RewriteFuncExprPostgisTransform(Node *node, void *context);
 static Node *RewriteFuncExprPostgisTransformGeometry(Node *node, void *context);
@@ -356,6 +357,11 @@ static FunctionCallRewriteRuleByName BuiltinFunctionCallRewriteRulesByName[] =
 	},
 	{
 		"pg_catalog", "decode", RewriteFuncExprDecode, 0
+	},
+
+	/* to_hex */
+	{
+		"pg_catalog", "to_hex", RewriteFuncExprToHex, 0
 	},
 
 };
@@ -1902,6 +1908,52 @@ RewriteFuncExprDecode(Node *node, void *context)
 	funcExpr->args = list_make1(linitial(funcExpr->args));
 
 	return (Node *) funcExpr;
+}
+
+
+/*
+ * RewriteFuncExprToHex rewrites to_hex(int4)/to_hex(int8) so the expression
+ * pushed to DuckDB matches Postgres's semantics: DuckDB's to_hex() produces
+ * uppercase hex digits, and has no INTEGER overload, so an int4 argument is
+ * implicitly widened to BIGINT by sign-extension rather than the
+ * zero-extension Postgres's to_hex(int4) performs. We fix the int4 case by
+ * masking off the sign-extended upper bits after widening, and fix the case
+ * mismatch for both overloads by wrapping the result in lower(..).
+ */
+static Node *
+RewriteFuncExprToHex(Node *node, void *context)
+{
+	FuncExpr   *funcExpr = castNode(FuncExpr, node);
+
+	if (list_length(funcExpr->args) != 1)
+		return node;
+
+	if (funcExpr->funcid == F_TO_HEX_INT4)
+	{
+		Node	   *arg = (Node *) linitial(funcExpr->args);
+
+		FuncExpr   *castExpr = makeNode(FuncExpr);
+
+		castExpr->funcid = F_INT8_INT4;
+		castExpr->funcresulttype = INT8OID;
+		castExpr->funcretset = false;
+		castExpr->funcvariadic = false;
+		castExpr->funcformat = COERCE_EXPLICIT_CAST;
+		castExpr->args = list_make1(arg);
+		castExpr->location = -1;
+
+		Node	   *maskExpr = MakeOpExpr((Node *) castExpr, "pg_catalog", "&",
+										  (Node *) MakeInt64Const(INT64CONST(4294967295)));
+
+		funcExpr->funcid = F_TO_HEX_INT8;
+		funcExpr->args = list_make1(maskExpr);
+	}
+	else if (funcExpr->funcid != F_TO_HEX_INT8)
+	{
+		elog(ERROR, "unexpected function ID in rewrite %d", funcExpr->funcid);
+	}
+
+	return MakeLowerCaseExpr((Node *) funcExpr);
 }
 
 

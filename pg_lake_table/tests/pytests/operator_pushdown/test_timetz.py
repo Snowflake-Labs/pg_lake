@@ -35,6 +35,16 @@ test_cases = [
     ("timetz_le", "WHERE col_timetz <= '15:00:00'::timetz", 'WHERE ("col_timetz" <= '),
     ("timetz_gt", "WHERE col_timetz > '16:00:00'::timetz", 'WHERE ("col_timetz" > '),
     ("timetz_ge", "WHERE col_timetz >= '17:00:00'::timetz", 'WHERE ("col_timetz" >= '),
+    (
+        "timetz_pl_interval",
+        "WHERE col_timetz + col_interval = '13:00:00+00'::timetz",
+        'WHERE (("col_timetz" + "col_interval") = ',
+    ),
+    (
+        "timetz_mi_interval",
+        "WHERE col_timetz - col_interval = '23:59:59+00'::timetz",
+        'WHERE (("col_timetz" - "col_interval") = ',
+    ),
 ]
 
 

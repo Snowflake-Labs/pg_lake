@@ -92,6 +92,29 @@ test_cases += [
     for ex in date_trunc_cases
 ]
 
+test_cases += [
+    (
+        "age(timestamp,timestamp)",
+        "WHERE age(col_timestamp, '2019-01-01'::timestamp) IS NOT NULL",
+        "age",
+    ),
+    (
+        "isfinite(date)",
+        "WHERE isfinite(col_date)",
+        "isfinite",
+    ),
+    (
+        "isfinite(timestamp)",
+        "WHERE isfinite(col_timestamp)",
+        "isfinite",
+    ),
+    (
+        "isfinite(timestamptz)",
+        "WHERE isfinite(col_timestamptz)",
+        "isfinite",
+    ),
+]
+
 
 # Use the first element of each tuple for the ids parameter by extracting it with a list comprehension
 @pytest.mark.parametrize(
