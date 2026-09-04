@@ -64,6 +64,37 @@ typedef struct PgClientThreadInitState
 		snprintf(path, sizeof(path), "%s/.s.PGSQL.%d", \
 				 (sockdir), (port))
 
+/*
+ * When the OS refuses a new client thread (typically pthread_create returning
+ * EAGAIN under thread or memory pressure) the accept loop pauses before it
+ * accepts again.  The pause is deliberate backpressure: without it the loop
+ * spins accept()->pthread_create()->EAGAIN, pinning the host and never letting
+ * the detached client threads exit to free their resources.  The delay grows
+ * on consecutive failures and resets as soon as a thread starts.
+ */
+#define THREAD_CREATE_BACKOFF_MIN_US (10 * 1000)
+#define THREAD_CREATE_BACKOFF_MAX_US (1000 * 1000)
+
+/*
+ * Stack size for each client thread.  A client thread runs the wire protocol
+ * and drives DuckDB through its C API; queries themselves execute on DuckDB's
+ * own scheduler threads, so the client thread's stack needs are modest.  We
+ * set an explicit size, rather than inherit the platform default (8 MB on
+ * glibc), so the per-connection address-space reservation is bounded and
+ * predictable while still leaving generous headroom over PostgreSQL's 2 MB
+ * max_stack_depth convention.
+ */
+#define CLIENT_THREAD_STACK_SIZE (4 * 1024 * 1024)
+
+/*
+ * Upper bound on the listen() backlog.  MaxThreads can be very large (the
+ * default max_clients of 10000 makes it 20000), and a huge backlog just lets
+ * more connections queue up under a flood only to time out on the startup
+ * read.  Cap it at a sane value; the kernel further clamps this to
+ * net.core.somaxconn regardless.
+ */
+#define LISTEN_BACKLOG_MAX 1024
+
 static int	create_and_bind_unix_socket(PGServer * server, char *unixSocketPath,
 										char *unixSocketOwningGroup,
 										int unixSocketPermissions,
@@ -217,7 +248,7 @@ create_and_bind_unix_socket(PGServer * server,
 		return STATUS_ERROR;
 	}
 
-	const int	listenQueueSize = MaxThreads;
+	const int	listenQueueSize = Min(MaxThreads, LISTEN_BACKLOG_MAX);
 
 	if (listen(server->listeningSocket, listenQueueSize) != STATUS_OK)
 	{
@@ -418,6 +449,9 @@ pgserver_run(PGServer * pgServer)
 	if (install_shutdown_signal_handlers() != STATUS_OK)
 		return STATUS_ERROR;
 
+	/* current accept-loop backpressure delay after a failed thread creation */
+	long		threadCreateBackoffUs = 0;
+
 	while (running)
 	{
 		PGClient   *client = (PGClient *) pg_malloc0(sizeof(PGClient));
@@ -492,7 +526,9 @@ pgserver_run(PGServer * pgServer)
 		if (disable_shutdown_signals() != STATUS_OK)
 			exit(STATUS_ERROR);
 
-		if (pgserver_create_client_thread(initState) != OK)
+		bool		threadCreated = pgserver_create_client_thread(initState) == OK;
+
+		if (!threadCreated)
 		{
 			PGDUCK_SERVER_ERROR("Thread creation failed for client %d", client->clientSocket);
 
@@ -513,6 +549,26 @@ pgserver_run(PGServer * pgServer)
 
 		if (enable_shutdown_signals() != STATUS_OK)
 			exit(STATUS_ERROR);
+
+		if (threadCreated)
+		{
+			/* served a client, so drop any accumulated backpressure delay */
+			threadCreateBackoffUs = 0;
+		}
+		else
+		{
+			/*
+			 * Sleep before accepting again so the loop yields the CPU and
+			 * lets thread resources free up.  We are past enable_shutdown_
+			 * signals(), so a SIGTERM interrupts the sleep and exits
+			 * promptly.
+			 */
+			threadCreateBackoffUs = threadCreateBackoffUs == 0
+				? THREAD_CREATE_BACKOFF_MIN_US
+				: Min(threadCreateBackoffUs * 2, THREAD_CREATE_BACKOFF_MAX_US);
+
+			pg_usleep(threadCreateBackoffUs);
+		}
 	}
 
 	return STATUS_OK;
@@ -573,6 +629,11 @@ pgserver_create_client_thread(const PgClientThreadInitState * initState)
 
 	pthread_attr_init(&threadAttr);
 	pthread_attr_setdetachstate(&threadAttr, PTHREAD_CREATE_DETACHED);
+
+	/* non-fatal: on failure the thread just keeps the platform default stack */
+	if (pthread_attr_setstacksize(&threadAttr, CLIENT_THREAD_STACK_SIZE) != 0)
+		PGDUCK_SERVER_ERROR("could not set client thread stack size to %d bytes",
+							CLIENT_THREAD_STACK_SIZE);
 
 	int			isThreadCreated = pthread_create(&threadId,
 												 &threadAttr,
