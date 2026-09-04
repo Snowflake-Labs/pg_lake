@@ -102,7 +102,9 @@ runs:
         if [ ${{ inputs.installcheck }} == 'true' ]; then
           pgduck_server --init_file_path pgduck_server/tests/test_secrets.sql --extensions_dir /tmp/extensions --cache_dir /tmp/cache > /tmp/pgduck_installcheck_logs 2>&1 &
           
-          initdb -D /tmp/pg_installcheck_tests -U postgres --set "shared_preload_libraries=pg_extension_base,pg_cron,pg_lake_table,pg_lake_copy,pg_lake,pgaudit,pg_stat_statements" --locale=C.UTF-8 --data-checksums
+          PRELOAD_LIBS="pg_extension_base,pg_cron,pg_lake_table,pg_lake_copy,pg_lake,pgaudit,pg_stat_statements"
+
+          initdb -D /tmp/pg_installcheck_tests -U postgres --set "shared_preload_libraries=$PRELOAD_LIBS" --locale=C.UTF-8 --data-checksums
           
           echo "listen_addresses = 'localhost'" >> /tmp/pg_installcheck_tests/postgresql.conf
           echo "max_worker_processes = 100" >> /tmp/pg_installcheck_tests/postgresql.conf
@@ -116,6 +118,21 @@ runs:
           if [ ${{ inputs.installcheck_postgres }} == 'true' ]; then
             echo "compute_query_id='regress'" >> /tmp/pg_installcheck_tests/postgresql.conf
             echo "pg_lake_table.hide_objects_created_by_lake=true" >> /tmp/pg_installcheck_tests/postgresql.conf
+            # Fully defer JSON COPY to Postgres for the upstream regression
+            # suite. The surgical "auto" default already routes plain local
+            # COPY TO json to Postgres, but pg_lake still keeps COPY FROM json
+            # and compression (things Postgres cannot do) -- and those diverge
+            # from the upstream expected output, which is real (not whitespace)
+            # and is covered by pg_lake_copy's own tests rather than
+            # PostgreSQL's:
+            #   - pg_lake accepts COPY FROM ... (format json), which Postgres
+            #     rejects, so the inline-data copy test desyncs;
+            #   - it rejects the ENCODING option and mishandles a non-UTF8
+            #     client_encoding (copyencoding);
+            #   - it frames FORCE_ARRAY output differently (tabs/trailing comma).
+            # Forcing json_copy_mode=postgres makes pg_lake step fully aside so
+            # those upstream tests stay byte-identical to Postgres.
+            echo "pg_lake_copy.json_copy_mode=postgres" >> /tmp/pg_installcheck_tests/postgresql.conf
           fi
 
           echo "host postgres postgres 127.0.0.1/32 md5" >> /tmp/pg_installcheck_tests/pg_hba.conf

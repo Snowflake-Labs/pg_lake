@@ -8,7 +8,7 @@ OBJS := $(patsubst %.c,%.o,$(sort $(SOURCES)))
 
 HEADERS = $(wildcard include/pg_extension_base/*.h)
 
-PG_CPPFLAGS = -Iinclude -std=gnu99 -Wall -Wextra -Wno-unused-parameter
+PG_CPPFLAGS = -Iinclude -std=gnu11 -Wall -Wextra -Wno-unused-parameter
 override CFLAGS := $(filter-out -Wdeclaration-after-statement,$(CFLAGS))
 
 PG_CONFIG ?= pg_config

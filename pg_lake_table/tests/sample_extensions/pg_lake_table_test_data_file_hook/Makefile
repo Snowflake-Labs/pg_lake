@@ -6,7 +6,7 @@ DATA = $(EXTENSION)--1.0.sql
 SOURCES := $(wildcard src/*.c)
 OBJS := $(patsubst %.c,%.o,$(sort $(SOURCES)))
 
-PG_CPPFLAGS = -Iinclude -I../../../include -I../../../../pg_extension_base/include -I../../../../pg_lake_engine/include -I../../../../pg_lake_iceberg/include -I$(shell $(PG_CONFIG) --includedir) -std=gnu99
+PG_CPPFLAGS = -Iinclude -I../../../include -I../../../../pg_extension_base/include -I../../../../pg_lake_engine/include -I../../../../pg_lake_iceberg/include -I$(shell $(PG_CONFIG) --includedir) -std=gnu11
 override CFLAGS := $(filter-out -Wdeclaration-after-statement,$(CFLAGS))
 
 PG_CONFIG ?= pg_config

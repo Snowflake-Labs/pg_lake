@@ -154,3 +154,57 @@ def test_grouping_sets_pushdown2(pg_conn, with_default_location):
             assert_remote_query_contains_expression(query, "ROLLUP", pg_conn), query
         else:
             assert False
+
+
+# PG19 commit 415100aa6 relaxed parse analysis so that references to a non-Var
+# GROUP BY *expression* (and GROUPING()) inside a subquery at the grouping
+# query level are accepted instead of being rejected with "subquery uses
+# ungrouped column from outer query". These shapes only parse on PG19+, so the
+# value here is that pg_lake returns results identical to a heap baseline (the
+# query may push down or run locally; either way it must be correct).
+_PG19_GROUPING_SUBQUERY_QUERIES = [
+    # grouping-EXPRESSION (id + v) referenced inside a correlated sublink
+    "SELECT id + v AS g, (SELECT max(s.id) FROM gstest5 s WHERE s.id = (t.id + t.v)) "
+    "FROM gstest5 t GROUP BY id + v ORDER BY 1;",
+    # the outer grouping expression referenced inside the subquery's WHERE,
+    # mirroring the commit's tenk1/int4_tbl regression query
+    "SELECT id + v AS g, (SELECT count(*) FROM gstest5 s WHERE s.v < (t.id + t.v)) AS c "
+    "FROM gstest5 t GROUP BY id + v ORDER BY 1;",
+    # GROUPING() and grouping columns referenced inside subqueries, with
+    # grouping sets (the commit's groupingsets.sql regression case)
+    "SELECT (SELECT t.id) AS a, (SELECT t.v) AS b, (SELECT GROUPING(t.id, t.v)) AS g, "
+    "(SELECT SUM(t.id)) AS s FROM gstest5 t GROUP BY GROUPING SETS ((id, v), ()) "
+    "ORDER BY 1, 2, 3;",
+]
+
+
+def test_pg19_grouping_ref_in_subquery(pg_conn, with_default_location):
+    """PG19 415100aa6: grouping-expression / GROUPING() references inside
+    subqueries must yield results identical to a heap baseline on iceberg
+    tables. Skipped pre-PG19 where the parser rejects these queries."""
+    if get_pg_version_num(pg_conn) < 190000:
+        pytest.skip("PG19 relaxed grouping-expression references in subqueries")
+
+    run_command(
+        """
+        DROP TABLE IF EXISTS gstest5;
+        DROP TABLE IF EXISTS gstest5_pg;
+        create table gstest5(id integer, v integer) USING iceberg;
+        insert into gstest5 select i, i % 3 from generate_series(1,8) i;
+        create table gstest5_pg(id integer, v integer);
+        insert into gstest5_pg select i, i % 3 from generate_series(1,8) i;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    for query in _PG19_GROUPING_SUBQUERY_QUERIES:
+        print(query)
+        # Single-element lists: assert_query_results_on_tables applies one
+        # string replace per entry, and "gstest5" is a substring of
+        # "gstest5_pg", so a duplicated entry would corrupt the heap query.
+        assert_query_results_on_tables(query, pg_conn, ["gstest5"], ["gstest5_pg"])
+
+    run_command("DROP TABLE IF EXISTS gstest5", pg_conn)
+    run_command("DROP TABLE IF EXISTS gstest5_pg", pg_conn)
+    pg_conn.commit()

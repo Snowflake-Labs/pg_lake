@@ -24,6 +24,7 @@
  * via VACUUM.
  */
 #include "postgres.h"
+#include "catalog/pg_type_d.h"
 #include "funcapi.h"
 #include "miscadmin.h"
 
@@ -42,11 +43,13 @@
 #include "pg_lake/util/plan_cache.h"
 #include "pg_lake/util/string_utils.h"
 #include "datatype/timestamp.h"
+#include "storage/lock.h"
 #include "storage/procarray.h"
 #include "utils/fmgroids.h"
 #include "utils/memutils.h"
 #include "utils/lsyscache.h"
 #include "utils/snapmgr.h"
+#include "utils/tuplestore.h"
 
 #define OPERATION_ID_SEQUENCE "operationid_seq"
 

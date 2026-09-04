@@ -16,6 +16,7 @@
  */
 
 #include "postgres.h"
+#include "catalog/pg_type_d.h"
 
 #include "executor/executor.h"
 #include "pg_lake/data_file/data_files.h"

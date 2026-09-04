@@ -4,7 +4,7 @@ This guide covers installing pg_lake from source. For Docker-based setup, see [d
 
 ## Add pg_lake to an Existing PostgreSQL Installation
 
-If you already have PostgreSQL 16, 17, or 18 installed, you can add pg_lake extensions using the automated installation script:
+If you already have PostgreSQL 16, 17, 18, or 19 installed, you can add pg_lake extensions using the automated installation script:
 
 ```bash
 # Clone the repository
@@ -31,7 +31,7 @@ psql -c "CREATE EXTENSION pg_lake CASCADE;"
 **Note:** System build dependencies are skipped by default (assuming they're installed if PostgreSQL exists). Use `--with-system-deps` if needed.
 
 **Prerequisites:**
-- PostgreSQL 16, 17, or 18 installed with `pg_config` in your PATH
+- PostgreSQL 16, 17, 18, or 19 installed with `pg_config` in your PATH
 - `shared_preload_libraries = 'pg_extension_base'` in postgresql.conf ([see setup](#configure-postgresql))
 
 For manual installation steps, see [Manual Installation to Existing PostgreSQL](#manual-installation-to-existing-postgresql).
@@ -66,7 +66,7 @@ For more options and control, see [Development Environment Options](#development
 ## Prerequisites
 
 **For adding to existing PostgreSQL:**
-- PostgreSQL 16, 17, or 18 with `pg_config` in PATH
+- PostgreSQL 16, 17, 18, or 19 with `pg_config` in PATH
 - Git, C/C++ compiler, CMake, Ninja
 - Internet connection
 
@@ -219,7 +219,7 @@ Run `./install.sh --help` to see all available options:
 
 ```
 --build-postgres            Build PostgreSQL from source and initialize database
---pg-version VERSION        PostgreSQL version to build (16, 17, or 18) [default: 18]
+--pg-version VERSION        PostgreSQL version to build (16, 17, 18, or 19) [default: 18]
 --prefix DIR                PostgreSQL installation prefix [default: auto-detect or $HOME/pgsql]
 --deps-dir DIR              Directory for dependencies [default: $HOME/pg_lake-deps]
 --jobs N                    Number of parallel build jobs [default: nproc]
@@ -376,7 +376,7 @@ export PKG_CONFIG_PATH="/opt/homebrew/opt/icu4c/lib/pkgconfig:/opt/homebrew/opt/
 
 ### Build PostgreSQL from Source
 
-pg_lake is supported with PostgreSQL 16, 17, and 18. For development, we recommend building PostgreSQL from source to get debug symbols and assertions.
+pg_lake is supported with PostgreSQL 16, 17, 18, and 19. For development, we recommend building PostgreSQL from source to get debug symbols and assertions.
 
 ```bash
 # Clone PostgreSQL (version 18 example)

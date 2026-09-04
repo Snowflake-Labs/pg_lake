@@ -24,6 +24,7 @@
 *       that Postgres planner knows about.
 */
 #include "postgres.h"
+#include "utils/hsearch.h"
 #include "funcapi.h"
 #include "miscadmin.h"
 
@@ -526,7 +527,16 @@ GenerateSyntheticTestQueryForRestrictInfo(int logLevel, RangeTblEntry *rte,
 	 * We'll only have a single RTE in the query, so we can set varno and
 	 * varnosyn to 1.
 	 */
-	List	   *varList = pull_var_clause((Node *) copyOfRestrictClauses, 0);
+
+	/*
+	 * Recurse into aggregate arguments so we still rewrite the Vars inside
+	 * them. PG19's planner can leave Aggrefs inside FDW-pushdown restriction
+	 * clauses where earlier majors did not, and pull_var_clause(... 0)
+	 * elog()s when it sees an Aggref.
+	 */
+	List	   *varList = pull_var_clause((Node *) copyOfRestrictClauses,
+										  PVC_RECURSE_AGGREGATES |
+										  PVC_RECURSE_PLACEHOLDERS);
 	ListCell   *cell = NULL;
 
 	foreach(cell, varList)

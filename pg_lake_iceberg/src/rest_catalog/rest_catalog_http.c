@@ -35,6 +35,8 @@
 
 #include "postgres.h"
 
+#include "pg_extension_base/pg_compat.h"
+
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "utils/builtins.h"
