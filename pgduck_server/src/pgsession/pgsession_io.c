@@ -457,6 +457,13 @@ pgsession_receive(PGSession * pgSession)
 				continue;		/* Ok if interrupted */
 			}
 
+			/* SO_RCVTIMEO fired (e.g. startup packet never arrived) */
+			if (errno == EAGAIN || errno == EWOULDBLOCK)
+			{
+				PGDUCK_SERVER_DEBUG("timed out receiving data from client");
+				return EOF;
+			}
+
 			PGDUCK_SERVER_ERROR("could not receive data from client");
 			return EOF;
 		}
