@@ -44,6 +44,7 @@
 #include <arpa/inet.h>
 #include <lib/stringinfo.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <common/ip.h>
 #include <common/fe_memutils.h>
 #include <port/pg_bswap.h>
@@ -68,6 +69,15 @@
  */
 #define TRANSMIT_PREFIX "transmit "
 #define TRANSMIT_PREFIX_LENGTH (strlen(TRANSMIT_PREFIX))
+
+/*
+ * How long to wait for a client to send its startup packet before dropping the
+ * connection.  A connected-but-silent client would otherwise hold its thread
+ * slot indefinitely; under a connection flood that keeps the pool exhausted.
+ * The timeout covers only the startup read and is cleared once the session is
+ * established, so it never interrupts a normal (possibly long-idle) session.
+ */
+#define STARTUP_PACKET_READ_TIMEOUT_SECONDS 10
 
 /*
  * Convenience macro for pgsession_handle_connection to terminate
@@ -105,6 +115,8 @@ static int	pgsession_send_client_encoding(PGSession * pgSession, const char *cli
 static int	pgsession_send_extra_float_digits(PGSession * pgSession, const char *extra_float_digits);
 static int	pgsession_send_ready_for_query(PGSession * pgSession);
 static int	pgsession_init(PGSession * pgSession, PGClient * pgClient);
+static int	pgsession_init_duckdb(PGSession * pgSession);
+static void set_client_recv_timeout(int clientSocket, int seconds);
 static int	pgsession_destroy(PGSession * pgSession);
 static void pgsession_prepared_statement_deallocate(PGSession * pgSession);
 static void pgsession_log_client_info(PGClient * pgClient);
@@ -150,11 +162,8 @@ pgsession_handle_connection(void *input)
 	/* follow through the protocol setup */
 	check(pgsession_init(&pgSession, pgClient), pgSession, "failed to initialize connection");
 
-	/*
-	 * Tell the thread pool about our DuckDB connection, such that it can do
-	 * duckdb_interrupt() to cancel a query on a thread.
-	 */
-	pgclient_threadpool_set_duckdb_conn(pgClient->threadIndex, pgSession.duckSession.connection);
+	/* reap clients that connect but never send their startup packet */
+	set_client_recv_timeout(pgClient->clientSocket, STARTUP_PACKET_READ_TIMEOUT_SECONDS);
 
 	check(pgsession_read_startup_packet(&pgSession), pgSession, "failed to read startup packet");
 
@@ -164,10 +173,27 @@ pgsession_handle_connection(void *input)
 	 * request to cancel an ongoing client.
 	 *
 	 * If this session is one of those cancellation sessions, we should not
-	 * proceed with the normal protocol.
+	 * proceed with the normal protocol.  It has done its work in
+	 * pgsession_read_startup_packet() and never needs a DuckDB connection.
 	 */
 	if (pgSession.isCancelSession)
 		goto finally;
+
+	/* established session: drop the startup timeout for its whole lifetime */
+	set_client_recv_timeout(pgClient->clientSocket, 0);
+
+	/*
+	 * Only now, for a real client, connect to DuckDB.  Deferring it past the
+	 * startup packet keeps cancel probes and half-open sockets from
+	 * allocating a DuckDB connection they never use.
+	 */
+	check(pgsession_init_duckdb(&pgSession), pgSession, "failed to initialize DuckDB session");
+
+	/*
+	 * Tell the thread pool about our DuckDB connection, such that it can do
+	 * duckdb_interrupt() to cancel a query on a thread.
+	 */
+	pgclient_threadpool_set_duckdb_conn(pgClient->threadIndex, pgSession.duckSession.connection);
 
 	check(pgsession_send_auth_ok(&pgSession), pgSession, "failed to send authentication info");
 #if PG_VERSION_NUM >= 180000
@@ -1133,12 +1159,40 @@ pgsession_init(PGSession * pgSession, PGClient * pgClient)
 	pgSession->lastReportedSendErrno = 0;
 	pgSession->clientConnectionLost = false;
 
+	return OK;
+}
+
+
+/*
+ * pgsession_init_duckdb opens the DuckDB connection for an established session.
+ *
+ * Kept separate from pgsession_init so the connection is only created once we
+ * know the client is a real (non-cancel) session; see
+ * pgsession_handle_connection.
+ */
+static int
+pgsession_init_duckdb(PGSession * pgSession)
+{
 	if (duckdb_session_init(&pgSession->duckSession, pgSession) != DUCKDB_SUCCESS)
-	{
 		return INIT_ERROR;
-	}
 
 	return OK;
+}
+
+
+/*
+ * set_client_recv_timeout sets (seconds > 0) or clears (seconds == 0) a receive
+ * timeout on the client socket.  Best effort: a missing timeout only weakens
+ * the startup-read guard, so failure is logged and otherwise ignored.
+ */
+static void
+set_client_recv_timeout(int clientSocket, int seconds)
+{
+	struct timeval tv = {.tv_sec = seconds,.tv_usec = 0};
+
+	if (setsockopt(clientSocket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) != 0)
+		PGDUCK_SERVER_DEBUG("could not set receive timeout on connection %d: %m",
+							clientSocket);
 }
 
 
