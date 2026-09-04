@@ -68,6 +68,16 @@ _PG_init(void)
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 
+	DefineCustomBoolVariable(
+							 "pg_lake_copy.include_generated_columns",
+							 gettext_noop("Include generated columns in COPY TO output"),
+							 gettext_noop("When off, generated columns are excluded from COPY TO output so the result can be reloaded with COPY FROM, matching core PostgreSQL behavior"),
+							 &PgLakeCopyIncludeGeneratedColumns,
+							 true,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
+
 	RegisterUtilityStatementHandler(CreateTableFromFileHandler, NULL);
 	RegisterUtilityStatementHandler(PgLakeCopyHandler, NULL);
 }

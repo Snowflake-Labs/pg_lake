@@ -140,6 +140,7 @@ PG_FUNCTION_INFO_V1(pg_lake_last_copy_pushed_down_test);
 /* settings */
 bool		EnablePgLakeCopy = true;
 bool		EnablePgLakeCopyJson = true;
+bool		PgLakeCopyIncludeGeneratedColumns = true;
 
 /*
  * For COPY .. FROM, we convert incoming tuples into CSV format via a callback.
@@ -1254,6 +1255,22 @@ ErrorIfCopyFromWithRowLevelSecurityEnabled(PlannedStmt *plannedStmt, Relation re
 
 
 /*
+ * MakeColumnResTarget builds a ResTarget wrapping a target-list expression.
+ */
+static ResTarget *
+MakeColumnResTarget(Node *val)
+{
+	ResTarget  *target = makeNode(ResTarget);
+
+	target->name = NULL;
+	target->indirection = NIL;
+	target->val = val;
+	target->location = -1;
+	return target;
+}
+
+
+/*
  * CreateQueryForCopyToCommand is based on a section of DoCopy in PostgreSQL
  * to build a query to use in place of a relation when a row-level security
  * policy is in effect.
@@ -1265,7 +1282,6 @@ CreateQueryForCopyToCommand(PlannedStmt *plannedStmt, Relation relation)
 
 	SelectStmt *select;
 	ColumnRef  *cr;
-	ResTarget  *target;
 	RangeVar   *from;
 	List	   *targetList = NIL;
 
@@ -1273,8 +1289,10 @@ CreateQueryForCopyToCommand(PlannedStmt *plannedStmt, Relation relation)
 	 * Build target list
 	 *
 	 * If no columns are specified in the attribute list of the COPY command,
-	 * then the target list is 'all' columns. Therefore, '*' should be used as
-	 * the target list for the resulting SELECT statement.
+	 * build the target list based on the pg_lake_copy.include_generated_columns
+	 * GUC. If true (default), use '*' to preserve existing pg_lake behavior.
+	 * If false, build an explicit list of non-dropped, non-generated columns
+	 * to match core PostgreSQL's COPY TO behavior (CopyGetAttnums).
 	 *
 	 * In the case that columns are specified in the attribute list, create a
 	 * ColumnRef and ResTarget for each column and add them to the target list
@@ -1282,17 +1300,36 @@ CreateQueryForCopyToCommand(PlannedStmt *plannedStmt, Relation relation)
 	 */
 	if (!copyStmt->attlist)
 	{
-		cr = makeNode(ColumnRef);
-		cr->fields = list_make1(makeNode(A_Star));
-		cr->location = -1;
+		if (!PgLakeCopyIncludeGeneratedColumns)
+		{
+			TupleDesc	tupDesc = RelationGetDescr(relation);
+			int			attr_count = tupDesc->natts;
 
-		target = makeNode(ResTarget);
-		target->name = NULL;
-		target->indirection = NIL;
-		target->val = (Node *) cr;
-		target->location = -1;
+			for (int i = 0; i < attr_count; i++)
+			{
+				Form_pg_attribute att = TupleDescAttr(tupDesc, i);
 
-		targetList = list_make1(target);
+				if (att->attisdropped)
+					continue;
+
+				if (att->attgenerated)
+					continue;
+
+				cr = makeNode(ColumnRef);
+				cr->fields = list_make1(makeString(pstrdup(NameStr(att->attname))));
+				cr->location = -1;
+
+				targetList = lappend(targetList, MakeColumnResTarget((Node *) cr));
+			}
+		}
+		else
+		{
+			cr = makeNode(ColumnRef);
+			cr->fields = list_make1(makeNode(A_Star));
+			cr->location = -1;
+
+			targetList = list_make1(MakeColumnResTarget((Node *) cr));
+		}
 	}
 	else
 	{
@@ -1309,15 +1346,7 @@ CreateQueryForCopyToCommand(PlannedStmt *plannedStmt, Relation relation)
 			cr->fields = list_make1(lfirst(lc));
 			cr->location = -1;
 
-			/* Build the ResTarget and add the ColumnRef to it. */
-			target = makeNode(ResTarget);
-			target->name = NULL;
-			target->indirection = NIL;
-			target->val = (Node *) cr;
-			target->location = -1;
-
-			/* Add each column to the SELECT statement's target list */
-			targetList = lappend(targetList, target);
+			targetList = lappend(targetList, MakeColumnResTarget((Node *) cr));
 		}
 	}
 
