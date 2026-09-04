@@ -64,6 +64,17 @@ typedef struct PgClientThreadInitState
 		snprintf(path, sizeof(path), "%s/.s.PGSQL.%d", \
 				 (sockdir), (port))
 
+/*
+ * When the OS refuses a new client thread (typically pthread_create returning
+ * EAGAIN under thread or memory pressure) the accept loop pauses before it
+ * accepts again.  The pause is deliberate backpressure: without it the loop
+ * spins accept()->pthread_create()->EAGAIN, pinning the host and never letting
+ * the detached client threads exit to free their resources.  The delay grows
+ * on consecutive failures and resets as soon as a thread starts.
+ */
+#define THREAD_CREATE_BACKOFF_MIN_US (10 * 1000)
+#define THREAD_CREATE_BACKOFF_MAX_US (1000 * 1000)
+
 static int	create_and_bind_unix_socket(PGServer * server, char *unixSocketPath,
 										char *unixSocketOwningGroup,
 										int unixSocketPermissions,
@@ -418,6 +429,9 @@ pgserver_run(PGServer * pgServer)
 	if (install_shutdown_signal_handlers() != STATUS_OK)
 		return STATUS_ERROR;
 
+	/* current accept-loop backpressure delay after a failed thread creation */
+	long		threadCreateBackoffUs = 0;
+
 	while (running)
 	{
 		PGClient   *client = (PGClient *) pg_malloc0(sizeof(PGClient));
@@ -492,7 +506,9 @@ pgserver_run(PGServer * pgServer)
 		if (disable_shutdown_signals() != STATUS_OK)
 			exit(STATUS_ERROR);
 
-		if (pgserver_create_client_thread(initState) != OK)
+		bool		threadCreated = pgserver_create_client_thread(initState) == OK;
+
+		if (!threadCreated)
 		{
 			PGDUCK_SERVER_ERROR("Thread creation failed for client %d", client->clientSocket);
 
@@ -513,6 +529,26 @@ pgserver_run(PGServer * pgServer)
 
 		if (enable_shutdown_signals() != STATUS_OK)
 			exit(STATUS_ERROR);
+
+		if (threadCreated)
+		{
+			/* served a client, so drop any accumulated backpressure delay */
+			threadCreateBackoffUs = 0;
+		}
+		else
+		{
+			/*
+			 * Sleep before accepting again so the loop yields the CPU and
+			 * lets thread resources free up.  We are past enable_shutdown_
+			 * signals(), so a SIGTERM interrupts the sleep and exits
+			 * promptly.
+			 */
+			threadCreateBackoffUs = threadCreateBackoffUs == 0
+				? THREAD_CREATE_BACKOFF_MIN_US
+				: Min(threadCreateBackoffUs * 2, THREAD_CREATE_BACKOFF_MAX_US);
+
+			pg_usleep(threadCreateBackoffUs);
+		}
 	}
 
 	return STATUS_OK;
