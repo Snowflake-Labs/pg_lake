@@ -22,6 +22,7 @@
  *
  * Copyright (c) 2025 Snowflake Computing, Inc. All rights reserved.
  */
+#include "catalog/pg_type_d.h"
 #include "c.h"
 
 #include "postgres_fe.h"

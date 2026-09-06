@@ -43,7 +43,9 @@
 #include "mb/pg_wchar.h"
 #include "nodes/execnodes.h"
 #include "nodes/makefuncs.h"
+#include "pg_extension_base/pg_compat.h"
 #include "port/pg_bswap.h"
+#include "storage/fd.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
@@ -225,7 +227,7 @@ CopySendEndOfRow(CopyToState cstate)
 	switch (cstate->copy_dest)
 	{
 		case COPY_FILE:
-			if (!cstate->opts.binary)
+			if (!CopyOptsIsBinary(cstate->opts))
 			{
 				/* Default line termination depends on platform */
 #ifndef WIN32
@@ -291,7 +293,7 @@ CopySendInt16(CopyToState cstate, int16 val)
 static void
 EndCopy(CopyToState cstate)
 {
-	if (cstate->opts.binary)
+	if (CopyOptsIsBinary(cstate->opts))
 	{
 		/* Generate trailer for a binary copy */
 		CopySendInt16(cstate, -1);
@@ -492,7 +494,7 @@ StartCopyTo(CopyToState cstate, TupleDesc tupDesc)
 		bool		isvarlena;
 		Form_pg_attribute attr = TupleDescAttr(tupDesc, attnum - 1);
 
-		if (cstate->opts.binary)
+		if (CopyOptsIsBinary(cstate->opts))
 			getTypeBinaryOutputInfo(attr->atttypid,
 									&out_func_oid,
 									&isvarlena);
@@ -527,7 +529,7 @@ StartCopyTo(CopyToState cstate, TupleDesc tupDesc)
 											   "COPY TO",
 											   ALLOCSET_DEFAULT_SIZES);
 
-	if (cstate->opts.binary)
+	if (CopyOptsIsBinary(cstate->opts))
 	{
 		/* Generate header for a binary copy */
 		int32		tmp;
@@ -568,7 +570,7 @@ StartCopyTo(CopyToState cstate, TupleDesc tupDesc)
 
 				colname = NameStr(TupleDescAttr(tupDesc, attnum - 1)->attname);
 
-				if (cstate->opts.csv_mode)
+				if (CopyOptsIsCsvMode(cstate->opts))
 					CopyAttributeOutCSV(cstate, colname, false,
 										list_length(cstate->attnumlist) == 1);
 				else
@@ -919,7 +921,7 @@ CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot)
 	MemoryContextReset(cstate->rowcontext);
 	oldcontext = MemoryContextSwitchTo(cstate->rowcontext);
 
-	if (cstate->opts.binary)
+	if (CopyOptsIsBinary(cstate->opts))
 	{
 		/* Binary per-tuple header */
 		CopySendInt16(cstate, list_length(cstate->attnumlist));
@@ -934,7 +936,7 @@ CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot)
 		Datum		value = slot->tts_values[attnum - 1];
 		bool		isnull = slot->tts_isnull[attnum - 1];
 
-		if (!cstate->opts.binary)
+		if (!CopyOptsIsBinary(cstate->opts))
 		{
 			if (need_delim)
 				CopySendChar(cstate, cstate->opts.delim[0]);
@@ -943,14 +945,14 @@ CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot)
 
 		if (isnull)
 		{
-			if (!cstate->opts.binary)
+			if (!CopyOptsIsBinary(cstate->opts))
 				CopySendString(cstate, cstate->opts.null_print_client);
 			else
 				CopySendInt32(cstate, -1);
 		}
 		else
 		{
-			if (!cstate->opts.binary)
+			if (!CopyOptsIsBinary(cstate->opts))
 			{
 				if (cstate->useDuckSerialization[attnum - 1])
 				{
@@ -993,7 +995,7 @@ CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot)
 				}
 
 
-				if (cstate->opts.csv_mode)
+				if (CopyOptsIsCsvMode(cstate->opts))
 					CopyAttributeOutCSV(cstate, string,
 										cstate->opts.force_quote_flags[attnum - 1],
 										list_length(cstate->attnumlist) == 1);

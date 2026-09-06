@@ -6,6 +6,11 @@ import math
 from utils_pytest import *
 
 
+def _skip_if_partitioned_copy_unsupported(conn):
+    if get_pg_version_num(conn) < 190000:
+        pytest.skip("COPY <partitioned_table> TO requires PG19+")
+
+
 def test_types(pg_conn, duckdb_conn, superuser_conn, tmp_path, app_user):
     parquet_path = tmp_path / "test_types.parquet"
 
@@ -756,15 +761,288 @@ def test_partitioned(pg_conn, duckdb_conn, tmp_path):
     assert result[0]["count"] == 4
     assert result[0]["distinct"] == 2
 
-    result = run_command(
+    if get_pg_version_num(pg_conn) >= 190000:
+        # PG19 allows COPY <partitioned_table> TO directly: it must descend
+        # into the partitions and stream every row out, then round-trip back.
+        direct_path = tmp_path / "test_direct.parquet"
+        run_command(
+            f"COPY test_partitioned TO '{direct_path}' WITH (format 'parquet')",
+            pg_conn,
+        )
+        run_command(
+            "CREATE TABLE test_partitioned_rt (t date, data text)",
+            pg_conn,
+        )
+        run_command(
+            f"COPY test_partitioned_rt FROM '{direct_path}' WITH (format 'parquet')",
+            pg_conn,
+        )
+        rt = run_query(
+            "SELECT count(*) AS count, count(distinct data) AS distinct "
+            "FROM test_partitioned_rt",
+            pg_conn,
+        )
+        assert rt[0]["count"] == 4
+        assert rt[0]["distinct"] == 2
+    else:
+        result = run_command(
+            f"""
+        COPY test_partitioned TO '{parquet_path}' WITH (format 'parquet');
+        """,
+            pg_conn,
+            raise_error=False,
+        )
+
+        assert "cannot copy from partitioned table" in result
+
+    pg_conn.rollback()
+
+
+def test_copy_to_all_heap_partitioned(pg_conn, tmp_path):
+    """PG19: COPY <partitioned parent> TO with all-heap partitions streams
+    every partition's rows out, and round-trips into a plain table."""
+    _skip_if_partitioned_copy_unsupported(pg_conn)
+
+    out_path = tmp_path / "all_heap.parquet"
+    run_command(
+        """
+        DROP TABLE IF EXISTS p19_heap_parent CASCADE;
+        DROP TABLE IF EXISTS p19_heap_dst;
+        CREATE TABLE p19_heap_parent (id int, v text) PARTITION BY RANGE (id);
+        CREATE TABLE p19_heap_p1 PARTITION OF p19_heap_parent
+            FOR VALUES FROM (0) TO (100);
+        CREATE TABLE p19_heap_p2 PARTITION OF p19_heap_parent
+            FOR VALUES FROM (100) TO (200);
+        INSERT INTO p19_heap_parent
+            SELECT g, 'v' || g FROM generate_series(0, 199) g;
+        """,
+        pg_conn,
+    )
+
+    run_command(
+        f"COPY p19_heap_parent TO '{out_path}' WITH (format 'parquet')",
+        pg_conn,
+    )
+
+    run_command("CREATE TABLE p19_heap_dst (id int, v text)", pg_conn)
+    run_command(
+        f"COPY p19_heap_dst FROM '{out_path}' WITH (format 'parquet')",
+        pg_conn,
+    )
+
+    src = run_query("SELECT id, v FROM p19_heap_parent ORDER BY id", pg_conn)
+    dst = run_query("SELECT id, v FROM p19_heap_dst ORDER BY id", pg_conn)
+    assert [dict(r) for r in src] == [dict(r) for r in dst]
+    assert len(dst) == 200
+
+    pg_conn.rollback()
+
+
+def test_copy_to_mixed_partition_tree(pg_conn, s3, extension, tmp_path):
+    """PG19 HEADLINE: COPY <partitioned parent> TO where leaves are a mix of a
+    heap partition and a pg_lake foreign-table partition (parquet on s3). The
+    inh=true descent must read the foreign child through the FDW so ALL rows
+    appear in the output."""
+    _skip_if_partitioned_copy_unsupported(pg_conn)
+
+    ft_url = f"s3://{TEST_BUCKET}/test_copy_mixed/ft_child.parquet"
+    out_url = f"s3://{TEST_BUCKET}/test_copy_mixed/parent_out.parquet"
+
+    # Write the parquet backing the foreign-table partition (ids 100..199).
+    run_command(
         f"""
-    COPY test_partitioned TO '{parquet_path}' WITH (format 'parquet');
-    """,
+        COPY (SELECT g AS id, 'v' || g AS v
+              FROM generate_series(100, 199) g)
+        TO '{ft_url}' WITH (format 'parquet')
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        """
+        DROP TABLE IF EXISTS p19_mixed_parent CASCADE;
+        DROP TABLE IF EXISTS p19_mixed_dst;
+        CREATE TABLE p19_mixed_parent (id int, v text) PARTITION BY RANGE (id);
+        CREATE TABLE p19_mixed_heap PARTITION OF p19_mixed_parent
+            FOR VALUES FROM (0) TO (100);
+        INSERT INTO p19_mixed_heap
+            SELECT g, 'v' || g FROM generate_series(0, 99) g;
+        """,
+        pg_conn,
+    )
+    run_command(
+        f"""
+        CREATE FOREIGN TABLE p19_mixed_ft
+            PARTITION OF p19_mixed_parent FOR VALUES FROM (100) TO (200)
+        SERVER pg_lake OPTIONS (format 'parquet', path '{ft_url}')
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"COPY p19_mixed_parent TO '{out_url}' WITH (format 'parquet')",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command("CREATE TABLE p19_mixed_dst (id int, v text)", pg_conn)
+    run_command(
+        f"COPY p19_mixed_dst FROM '{out_url}' WITH (format 'parquet')",
+        pg_conn,
+    )
+
+    src = run_query("SELECT id, v FROM p19_mixed_parent ORDER BY id", pg_conn)
+    dst = run_query("SELECT id, v FROM p19_mixed_dst ORDER BY id", pg_conn)
+    assert [dict(r) for r in src] == [dict(r) for r in dst]
+    # 100 heap rows + 100 foreign-table rows must all be present.
+    assert len(dst) == 200
+    assert dst[0]["id"] == 0 and dst[-1]["id"] == 199
+
+    run_command("DROP TABLE IF EXISTS p19_mixed_parent CASCADE", pg_conn)
+    run_command("DROP TABLE IF EXISTS p19_mixed_dst", pg_conn)
+    pg_conn.commit()
+
+
+def test_copy_to_mixed_tree_with_iceberg_child(
+    pg_conn, s3, with_default_location, tmp_path
+):
+    """PG19: like the mixed-tree test but one leaf is an iceberg child created
+    via PARTITION OF ... USING iceberg. Proves the descent reads iceberg
+    partitions through the FDW too."""
+    _skip_if_partitioned_copy_unsupported(pg_conn)
+
+    out_url = f"s3://{TEST_BUCKET}/test_copy_iceberg/parent_out.parquet"
+
+    run_command(
+        """
+        DROP TABLE IF EXISTS p19_ice_parent CASCADE;
+        DROP TABLE IF EXISTS p19_ice_dst;
+        CREATE TABLE p19_ice_parent (id int, v text) PARTITION BY RANGE (id);
+        CREATE TABLE p19_ice_heap PARTITION OF p19_ice_parent
+            FOR VALUES FROM (0) TO (100);
+        """,
+        pg_conn,
+    )
+    run_command(
+        """
+        CREATE TABLE p19_ice_child PARTITION OF p19_ice_parent
+            FOR VALUES FROM (100) TO (200) USING iceberg
+        """,
+        pg_conn,
+    )
+    run_command(
+        """
+        INSERT INTO p19_ice_parent
+            SELECT g, 'v' || g FROM generate_series(0, 199) g;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"COPY p19_ice_parent TO '{out_url}' WITH (format 'parquet')",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command("CREATE TABLE p19_ice_dst (id int, v text)", pg_conn)
+    run_command(
+        f"COPY p19_ice_dst FROM '{out_url}' WITH (format 'parquet')",
+        pg_conn,
+    )
+
+    src = run_query("SELECT id, v FROM p19_ice_parent ORDER BY id", pg_conn)
+    dst = run_query("SELECT id, v FROM p19_ice_dst ORDER BY id", pg_conn)
+    assert [dict(r) for r in src] == [dict(r) for r in dst]
+    assert len(dst) == 200
+
+    run_command("DROP TABLE IF EXISTS p19_ice_parent CASCADE", pg_conn)
+    run_command("DROP TABLE IF EXISTS p19_ice_dst", pg_conn)
+    pg_conn.commit()
+
+
+def test_copy_to_column_subset(pg_conn, tmp_path):
+    """PG19: COPY parent (col_a, col_b) TO ... must descend into partitions and
+    project only the requested columns."""
+    _skip_if_partitioned_copy_unsupported(pg_conn)
+
+    out_path = tmp_path / "subset.parquet"
+    run_command(
+        """
+        DROP TABLE IF EXISTS p19_sub_parent CASCADE;
+        DROP TABLE IF EXISTS p19_sub_dst;
+        CREATE TABLE p19_sub_parent (id int, a text, b int)
+            PARTITION BY RANGE (id);
+        CREATE TABLE p19_sub_p1 PARTITION OF p19_sub_parent
+            FOR VALUES FROM (0) TO (100);
+        CREATE TABLE p19_sub_p2 PARTITION OF p19_sub_parent
+            FOR VALUES FROM (100) TO (200);
+        INSERT INTO p19_sub_parent
+            SELECT g, 'a' || g, g * 10 FROM generate_series(0, 199) g;
+        """,
+        pg_conn,
+    )
+
+    run_command(
+        f"COPY p19_sub_parent (id, b) TO '{out_path}' WITH (format 'parquet')",
+        pg_conn,
+    )
+
+    run_command("CREATE TABLE p19_sub_dst (id int, b int)", pg_conn)
+    run_command(
+        f"COPY p19_sub_dst FROM '{out_path}' WITH (format 'parquet')",
+        pg_conn,
+    )
+
+    src = run_query("SELECT id, b FROM p19_sub_parent ORDER BY id", pg_conn)
+    dst = run_query("SELECT id, b FROM p19_sub_dst ORDER BY id", pg_conn)
+    assert [dict(r) for r in src] == [dict(r) for r in dst]
+    assert len(dst) == 200
+
+    pg_conn.rollback()
+
+
+def test_copy_only_parent_yields_zero_rows(pg_conn, tmp_path):
+    """PG19: COPY ONLY <partitioned parent> TO ... honors ONLY semantics -- the
+    parent itself holds no rows, so the output is empty even though the
+    partitions are populated."""
+    _skip_if_partitioned_copy_unsupported(pg_conn)
+
+    out_path = tmp_path / "only_parent.parquet"
+    run_command(
+        """
+        DROP TABLE IF EXISTS p19_only_parent CASCADE;
+        DROP TABLE IF EXISTS p19_only_dst;
+        CREATE TABLE p19_only_parent (id int, v text) PARTITION BY RANGE (id);
+        CREATE TABLE p19_only_p1 PARTITION OF p19_only_parent
+            FOR VALUES FROM (0) TO (100);
+        INSERT INTO p19_only_parent
+            SELECT g, 'v' || g FROM generate_series(0, 99) g;
+        """,
+        pg_conn,
+    )
+
+    err = run_command(
+        f"COPY ONLY p19_only_parent TO '{out_path}' WITH (format 'parquet')",
         pg_conn,
         raise_error=False,
     )
 
-    assert "cannot copy from partitioned table" in result
+    if err is not None:
+        # COPY ONLY on a partitioned parent may be rejected by core/pg_lake
+        # before reaching our path; in that case ONLY semantics are moot.
+        pg_conn.rollback()
+        pytest.skip(f"COPY ONLY on partitioned parent not accepted: {err!r}")
+
+    run_command("CREATE TABLE p19_only_dst (id int, v text)", pg_conn)
+    run_command(
+        f"COPY p19_only_dst FROM '{out_path}' WITH (format 'parquet')",
+        pg_conn,
+    )
+    dst = run_query("SELECT count(*) AS n FROM p19_only_dst", pg_conn)
+    assert int(dst[0]["n"]) == 0
 
     pg_conn.rollback()
 

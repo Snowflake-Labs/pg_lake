@@ -103,7 +103,7 @@ docker-compose exec pgduck-server psql -p 5332 -h /home/postgres/pgduck_socket_d
 
 ### Key Optimizations
 
-✅ **Single Runner PostgreSQL Version**: Builds only PG 16, 17, or 18 (not all 3)  
+✅ **Single Runner PostgreSQL Version**: Builds only PG 16, 17, 18, or 19 (not all 4)  
 ✅ **Separate Build Stages**: Compilation happens in builder stages  
 ✅ **Minimal Runtime**: Final images contain only binaries and libraries  
 ✅ **Network Retry Logic**: Handles vcpkg download failures  

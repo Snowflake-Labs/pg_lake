@@ -16,6 +16,7 @@
  */
 
 #include "postgres.h"
+#include "pg_extension_base/pg_compat.h"
 #include "mb/pg_wchar.h"
 #include "utils/builtins.h"
 #include "utils/fmgrprotos.h"

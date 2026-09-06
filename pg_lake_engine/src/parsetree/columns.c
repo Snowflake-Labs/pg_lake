@@ -16,6 +16,9 @@
  */
 
 #include "postgres.h"
+
+#include "pg_extension_base/pg_compat.h"
+
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "nodes/primnodes.h"
@@ -79,6 +82,8 @@ BuildTupleDescriptorForTargetList(List *targetList)
 
 		attributeNumber++;
 	}
+
+	TupleDescFinalize(tupleDesc);
 
 	return tupleDesc;
 }

@@ -16,6 +16,7 @@
  */
 
 #include "postgres.h"
+#include "utils/hsearch.h"
 #include "fmgr.h"
 #include "access/xact.h"
 #include "common/hashfn.h"

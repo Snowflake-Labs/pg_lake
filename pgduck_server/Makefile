@@ -12,9 +12,11 @@ PGXS := $(shell $(PG_CONFIG) --pgxs)
 
 PG_LAKE_DELTA_SUPPORT ?= 0
 
-# compile with C11 option to use modern C
+# compile with C11 option to use modern C; use GNU dialect so that
+# typeof / static_assert resolve when including PG19's c.h, which
+# uses both unconditionally
 # use duckdb.h from the duckdb submodule
-PG_CPPFLAGS = -std=c11 -I$(PG_INCLUDEDIR) -Iinclude -DPG_LAKE_DELTA_SUPPORT=$(PG_LAKE_DELTA_SUPPORT)
+PG_CPPFLAGS = -std=gnu11 -I$(PG_INCLUDEDIR) -Iinclude -DPG_LAKE_DELTA_SUPPORT=$(PG_LAKE_DELTA_SUPPORT)
 
 # Add dependencies
 SHLIB_LINK_INTERNAL = $(libpq)

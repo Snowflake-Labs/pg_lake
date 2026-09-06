@@ -18,6 +18,7 @@
 #include "postgres.h"
 
 #include "common/fe_memutils.h"
+#include "pg_extension_base/pg_compat.h"
 #include "pg_lake/json/json_reader.h"
 #include "utils/builtins.h"
 #include "utils/jsonb.h"

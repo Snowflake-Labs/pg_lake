@@ -16,6 +16,7 @@
  */
 
 #include "postgres.h"
+#include "utils/hsearch.h"
 #include "access/xact.h"
 #include "common/int.h"
 #include "utils/memutils.h"

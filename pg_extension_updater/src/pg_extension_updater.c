@@ -22,6 +22,7 @@
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
+#include "catalog/pg_type_d.h"
 #include "fmgr.h"
 #include "miscadmin.h"
 

@@ -68,6 +68,33 @@ _PG_init(void)
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 
+	/*
+	 * Hidden, test-only knob controlling who handles a JSON COPY. We follow
+	 * the same rule as CSV: Postgres gets precedence whenever it natively
+	 * supports the case, and pg_lake covers the rest.
+	 *
+	 * auto     - surgical default: defer to Postgres only for the cases it
+	 * supports (PG19+ uncompressed COPY TO a local file/STDOUT); pg_lake
+	 * handles remote targets, COPY FROM json, and compression. postgres -
+	 * always defer to Postgres (used by the upstream PostgreSQL regression
+	 * suite so its expected output/error wording is reproduced verbatim).
+	 * pglake   - always handle in pg_lake (used by pg_lake's own pytest suite
+	 * to exercise the DuckDB JSON path).
+	 *
+	 * Before PG19 Postgres had no native JSON COPY, so pg_lake always handles
+	 * it regardless of this setting.
+	 */
+	DefineCustomEnumVariable(
+							 "pg_lake_copy.json_copy_mode",
+							 gettext_noop("Controls whether JSON COPY is handled by Postgres or pg_lake (test-only)"),
+							 NULL,
+							 &JsonCopyMode,
+							 JSON_COPY_MODE_AUTO,
+							 json_copy_mode_options,
+							 PGC_USERSET,
+							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
 	RegisterUtilityStatementHandler(CreateTableFromFileHandler, NULL);
 	RegisterUtilityStatementHandler(PgLakeCopyHandler, NULL);
 }

@@ -6,7 +6,7 @@ DATA = $(wildcard $(EXTENSION)--*--*.sql) $(EXTENSION)--1.1.sql
 SOURCES := $(wildcard *.c) $(wildcard */*.c)
 OBJS := $(patsubst %.c,%.o,$(sort $(SOURCES)))
 
-PG_CPPFLAGS = -Iinclude -std=gnu99 -I../pg_extension_base/include
+PG_CPPFLAGS = -Iinclude -std=gnu11 -I../pg_extension_base/include
 override CFLAGS := $(filter-out -Wdeclaration-after-statement,$(CFLAGS))
 
 UNAME_S := $(shell uname -s)

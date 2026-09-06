@@ -1,5 +1,11 @@
 import struct
 
+# Wire protocol version numbers (major << 16 | minor).
+PG_PROTOCOL_3_0 = (3 << 16) | 0  # 196608, the only version pgduck_server speaks
+PG_PROTOCOL_3_2 = (3 << 16) | 2  # 196610, latest minor as of PG18/PG19
+PG_PROTOCOL_GREASE = (3 << 16) | 9999  # 206607, value PG18+ libpq probes with
+PG_PROTOCOL_4_0 = (4 << 16) | 0  # 262144, an unsupported major version
+
 
 def pack_message(message_type, payload):
     """Pack a message with the given type and payload for PostgreSQL protocol."""
@@ -12,10 +18,86 @@ def send_message(sock, message_type, payload=b""):
     sock.sendall(message)
 
 
-def send_startup_message(sock):
-    """Send startup message to PostgreSQL."""
-    payload = struct.pack("!I", 196608)  # protocol version number
+def send_startup_message(sock, protocol_version=PG_PROTOCOL_3_0, params=None):
+    """Send a startup message to PostgreSQL.
+
+    With the defaults this reproduces the historical behaviour (a bare protocol
+    version with no parameters). Pass a higher protocol_version and/or a params
+    dict to exercise NegotiateProtocolVersion (PG18+ wire protocol 3.2 / GREASE
+    / _pq_.* protocol options).
+    """
+    if protocol_version == PG_PROTOCOL_3_0 and params is None:
+        # Keep the exact bytes the other protocol tests have always sent.
+        send_message(sock, "", struct.pack("!I", protocol_version))
+        return
+
+    payload = struct.pack("!I", protocol_version)
+    for key, value in (params or {}).items():
+        payload += key.encode() + b"\x00" + value.encode() + b"\x00"
+    payload += b"\x00"  # final empty name terminates the parameter list
     send_message(sock, "", payload)
+
+
+def recv_exact(sock, n):
+    """Read exactly n bytes, or fewer if the connection closes first."""
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            break
+        buf += chunk
+    return buf
+
+
+def read_backend_message(sock):
+    """Read one backend message.
+
+    Returns (type_char, payload_bytes), or (None, b"") if the connection closed
+    before a full message could be read.
+    """
+    header = recv_exact(sock, 5)
+    if len(header) < 5:
+        return None, b""
+    msg_type = chr(header[0])
+    length = struct.unpack("!I", header[1:5])[0]
+    payload = recv_exact(sock, length - 4)
+    return msg_type, payload
+
+
+def read_until(sock, target_type, max_messages=50):
+    """Read backend messages until one of `target_type` is seen.
+
+    Returns the list of (type, payload) tuples read, including the target.
+    Raises AssertionError if the connection closes first or the target never
+    arrives within max_messages.
+    """
+    seen = []
+    for _ in range(max_messages):
+        msg_type, payload = read_backend_message(sock)
+        if msg_type is None:
+            raise AssertionError(
+                f"connection closed before {target_type!r}; saw {[m[0] for m in seen]}"
+            )
+        seen.append((msg_type, payload))
+        if msg_type == target_type:
+            return seen
+    raise AssertionError(f"did not see {target_type!r} within {max_messages} messages")
+
+
+def parse_negotiate_protocol_version(payload):
+    """Parse a NegotiateProtocolVersion ('v') message payload.
+
+    Returns (negotiated_version:int, [unrecognized_option_names]).
+    """
+    version = struct.unpack("!I", payload[0:4])[0]
+    count = struct.unpack("!I", payload[4:8])[0]
+    names = []
+    rest = payload[8:]
+    for _ in range(count):
+        nul = rest.index(b"\x00")
+        names.append(rest[:nul].decode())
+        rest = rest[nul + 1 :]
+    return version, names
 
 
 def send_termination(sock):

@@ -16,6 +16,7 @@
  */
 
 #include "postgres.h"
+#include "storage/fd.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "libpq-fe.h"

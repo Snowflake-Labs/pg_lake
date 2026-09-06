@@ -16,6 +16,10 @@
  */
 
 #include "postgres.h"
+
+#include <math.h>
+
+#include "catalog/pg_type_d.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "libpq-fe.h"

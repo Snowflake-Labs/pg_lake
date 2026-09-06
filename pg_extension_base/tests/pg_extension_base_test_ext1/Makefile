@@ -6,7 +6,7 @@ DATA = $(wildcard $(EXTENSION)--*--*.sql) $(EXTENSION)--1.0.sql
 SOURCES := $(wildcard *.c) $(wildcard */*.c)
 OBJS := $(patsubst %.c,%.o,$(sort $(SOURCES)))
 
-PG_CPPFLAGS = -Iinclude -std=gnu99
+PG_CPPFLAGS = -Iinclude -std=gnu11
 override CFLAGS := $(filter-out -Wdeclaration-after-statement,$(CFLAGS))
 
 PG_CONFIG ?= pg_config

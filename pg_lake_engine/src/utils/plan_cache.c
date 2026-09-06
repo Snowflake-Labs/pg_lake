@@ -26,6 +26,7 @@
  * consider the cache size and eviction policy.
  */
 #include "postgres.h"
+#include "utils/hsearch.h"
 #include "fmgr.h"
 #include "miscadmin.h"
 

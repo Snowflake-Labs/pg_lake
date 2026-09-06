@@ -16,6 +16,8 @@
  */
 
 #include "postgres.h"
+#include "utils/hsearch.h"
+#include "access/htup_details.h"
 #include "miscadmin.h"
 
 #include "access/genam.h"

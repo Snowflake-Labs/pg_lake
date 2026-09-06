@@ -28,6 +28,36 @@
 extern bool EnablePgLakeCopy;
 extern bool EnablePgLakeCopyJson;
 
+/*
+ * JsonCopyMode controls who handles a JSON COPY. It is a hidden, test-only knob
+ * (see pg_lake_copy.json_copy_mode); normal users never set it and rely on the
+ * "auto" default. We follow the same rule as CSV: Postgres gets precedence
+ * whenever it natively supports the case, and pg_lake covers the rest.
+ *
+ *   JSON_COPY_MODE_AUTO     - surgical default: defer to Postgres only for the
+ *                             cases it supports (uncompressed COPY TO a local
+ *                             file/STDOUT); pg_lake handles remote targets,
+ *                             COPY FROM json, and compression.
+ *   JSON_COPY_MODE_POSTGRES - always defer to Postgres (used by the upstream
+ *                             PostgreSQL regression suite so its expected
+ *                             output/error wording is reproduced verbatim).
+ *   JSON_COPY_MODE_PGLAKE   - always handle in pg_lake (used by pg_lake's own
+ *                             pytest suite to exercise the DuckDB JSON path).
+ */
+typedef enum JsonCopyModeType
+{
+	JSON_COPY_MODE_AUTO,
+	JSON_COPY_MODE_POSTGRES,
+	JSON_COPY_MODE_PGLAKE,
+}			JsonCopyModeType;
+
+/* GUC storage for an enum is an int (holds a JsonCopyModeType value) */
+extern int	JsonCopyMode;
+
+/* allowed values for the pg_lake_copy.json_copy_mode enum GUC (defined in copy.c) */
+struct config_enum_entry;
+extern const struct config_enum_entry json_copy_mode_options[];
+
 bool		PgLakeCopyHandler(ProcessUtilityParams * params, void *arg);
 void		ProcessPgLakeCopy(ParseState *pstate, PlannedStmt *plannedStmt,
 							  const char *queryString, uint64 *rowsProcessed);

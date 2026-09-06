@@ -16,11 +16,14 @@
  */
 
 #include "postgres.h"
+#include "access/htup_details.h"
+#include "catalog/pg_type_d.h"
 #include "funcapi.h"
 #include "access/relation.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/tuplestore.h"
 
 #include "pg_lake/partitioning/partition_spec_catalog.h"
 #include "pg_lake/fdw/partition_transform.h"

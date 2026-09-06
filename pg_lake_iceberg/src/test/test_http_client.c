@@ -16,6 +16,7 @@
  */
 
 #include "postgres.h"
+#include "access/htup_details.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "utils/array.h"

@@ -44,24 +44,46 @@ step "s2-select-all"
     SELECT * FROM test_iceberg_rr ORDER BY key;
 }
 
+# s2 is always the losing session in these permutations. PG19 distinguishes
+# "concurrent update" from "concurrent delete" in the serialization-failure
+# message (and pg_lake's copy-on-write makes an UPDATE look like a delete to a
+# concurrent reader), so the raw text differs across versions. Trap the failure
+# by SQLSTATE (40001) and re-raise one canonical message so a single expected
+# file matches every PostgreSQL version.
 step "s2-insert"
 {
-    INSERT INTO test_iceberg_rr VALUES (5, 50);
+    DO $$ BEGIN
+        INSERT INTO test_iceberg_rr VALUES (5, 50);
+    EXCEPTION WHEN serialization_failure THEN
+        RAISE EXCEPTION 'could not serialize access' USING ERRCODE = 'serialization_failure';
+    END $$;
 }
 
 step "s2-update"
 {
-    UPDATE test_iceberg_rr SET value = 88 WHERE key = 1;
+    DO $$ BEGIN
+        UPDATE test_iceberg_rr SET value = 88 WHERE key = 1;
+    EXCEPTION WHEN serialization_failure THEN
+        RAISE EXCEPTION 'could not serialize access' USING ERRCODE = 'serialization_failure';
+    END $$;
 }
 
 step "s2-delete"
 {
-    DELETE FROM test_iceberg_rr WHERE key = 2;
+    DO $$ BEGIN
+        DELETE FROM test_iceberg_rr WHERE key = 2;
+    EXCEPTION WHEN serialization_failure THEN
+        RAISE EXCEPTION 'could not serialize access' USING ERRCODE = 'serialization_failure';
+    END $$;
 }
 
 step "s2-delete-key-1"
 {
-    DELETE FROM test_iceberg_rr WHERE key = 1;
+    DO $$ BEGIN
+        DELETE FROM test_iceberg_rr WHERE key = 1;
+    EXCEPTION WHEN serialization_failure THEN
+        RAISE EXCEPTION 'could not serialize access' USING ERRCODE = 'serialization_failure';
+    END $$;
 }
 
 step "s2-commit"

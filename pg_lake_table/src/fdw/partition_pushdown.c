@@ -24,6 +24,7 @@
  */
 #include "postgres.h"
 
+#include "catalog/pg_type_d.h"
 #include "executor/executor.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
