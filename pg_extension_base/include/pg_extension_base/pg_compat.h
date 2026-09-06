@@ -32,10 +32,7 @@
  * the function, so define a no-op shim there and let callers always finalize.
  */
 #if PG_VERSION_NUM < 190000
-static inline void
-TupleDescFinalize(TupleDesc tupdesc)
-{
-}
+#define TupleDescFinalize(tupdesc)
 #endif
 
 /*
