@@ -255,10 +255,7 @@ RUN cd postgis-$POSTGIS_VERSION && \
     cd .. && rm -rf postgis-$POSTGIS_VERSION*
 
 # Compile and install pg_cron
-# Use CyberDem0n's postgresql-19 branch (PR citusdata/pg_cron#430) until the
-# PG19 support patch is merged upstream. The patch is backward compatible
-# with PG 16/17/18, so we can build all four from the same source.
-RUN git clone -b postgresql-19 https://github.com/CyberDem0n/pg_cron.git && \
+RUN git clone https://github.com/citusdata/pg_cron.git && \
     cd pg_cron && \
     make install PG_CONFIG=$PGBASEDIR/pgsql-16/bin/pg_config && make clean PG_CONFIG=$PGBASEDIR/pgsql-16/bin/pg_config && \
     make install PG_CONFIG=$PGBASEDIR/pgsql-17/bin/pg_config && make clean PG_CONFIG=$PGBASEDIR/pgsql-17/bin/pg_config && \
