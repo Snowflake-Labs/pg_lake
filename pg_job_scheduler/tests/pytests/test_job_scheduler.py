@@ -123,6 +123,57 @@ def cleanup_jobs(conn):
     conn.commit()
 
 
+def set_retention(seconds):
+    """Set pg_job_scheduler.run_retention and make the worker pick it up.
+
+    The GUC is PGC_SIGHUP, so a session SET would never reach the worker's own
+    process, and ALTER SYSTEM cannot run inside a transaction block -- hence
+    the autocommit connection. The value is a bare number of seconds, which is
+    what GUC_UNIT_S means."""
+    run_command_outside_tx(
+        [
+            f"ALTER SYSTEM SET pg_job_scheduler.run_retention = {seconds}",
+            "SELECT pg_reload_conf()",
+        ]
+    )
+
+
+def reset_retention():
+    run_command_outside_tx(
+        [
+            "ALTER SYSTEM RESET pg_job_scheduler.run_retention",
+            "SELECT pg_reload_conf()",
+        ]
+    )
+
+
+def insert_finished_run(conn, job_id, completed_ago):
+    """Insert a run that finished `completed_ago` in the past, as retention
+    would see it. Written directly rather than produced by the scheduler,
+    because backdating is the whole point."""
+    result = run_query(
+        f"INSERT INTO job_scheduler.job_runs "
+        f"(job_id, command, database_name, user_name, status, "
+        f" started_at, completed_at) "
+        f"VALUES ({job_id}, 'SELECT 1', current_database(), current_user, "
+        f"        'succeeded', now() - interval '{completed_ago}', "
+        f"        now() - interval '{completed_ago}') "
+        f"RETURNING run_id",
+        conn,
+    )
+    conn.commit()
+    return result[0]["run_id"]
+
+
+def run_exists(conn, run_id):
+    result = run_query(
+        f"SELECT count(*) FROM job_scheduler.job_runs WHERE run_id = {run_id}",
+        conn,
+    )
+    conn.commit()
+    return result[0]["count"] == 1
+
+
 @pytest.fixture(autouse=True)
 def clean_queue(superuser_conn, pg_job_scheduler):
     """Start every test with an empty queue, so a recurring job left behind by
@@ -607,6 +658,87 @@ def test_deleting_a_job_leaves_its_runs(superuser_conn):
     superuser_conn.commit()
 
     assert len(get_runs(superuser_conn, job_id)) == 1
+
+
+# ---------------------------------------------------------------------------
+# retention
+# ---------------------------------------------------------------------------
+
+
+def test_retention_deletes_runs_past_their_age(superuser_conn):
+    """Run history older than pg_job_scheduler.run_retention is swept away, and
+    history inside the window is left alone."""
+    job_id = submit_job(superuser_conn, "SELECT 1", schedule_interval="1 hour")
+
+    old_run = insert_finished_run(superuser_conn, job_id, "2 hours")
+    recent_run = insert_finished_run(superuser_conn, job_id, "10 seconds")
+
+    try:
+        set_retention(60)
+
+        assert wait_for(
+            lambda: not run_exists(superuser_conn, old_run), timeout=15
+        ), "the expired run was not deleted"
+
+        assert run_exists(
+            superuser_conn, recent_run
+        ), "a run inside the retention window must be kept"
+    finally:
+        reset_retention()
+
+
+def test_retention_never_deletes_a_run_in_flight(superuser_conn):
+    """A run still going has no completed_at, so no age-based sweep can reach
+    it however long it has been running."""
+    job_id = submit_job(superuser_conn, "SELECT pg_sleep(6)")
+
+    runs = wait_for_run_count(superuser_conn, job_id, 1)
+    assert runs is not None
+    run_id = runs[0]["run_id"]
+
+    # backdate its start well past any retention window
+    run_command(
+        f"UPDATE job_scheduler.job_runs "
+        f"SET started_at = now() - interval '1 day' WHERE run_id = {run_id}",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    try:
+        set_retention(1)
+
+        # give the sweep several passes to wrongly take it
+        time.sleep(4)
+        assert run_exists(superuser_conn, run_id), "an in-flight run was deleted"
+        assert (
+            run_query(
+                f"SELECT status FROM job_scheduler.job_runs WHERE run_id = {run_id}",
+                superuser_conn,
+            )[0]["status"]
+            == "running"
+        )
+        superuser_conn.commit()
+    finally:
+        reset_retention()
+
+    assert wait_for_run_status(superuser_conn, job_id, "succeeded", timeout=25)
+
+
+def test_retention_can_be_disabled(superuser_conn):
+    """A negative retention keeps everything, for anyone who wants to manage
+    the history themselves."""
+    job_id = submit_job(superuser_conn, "SELECT 1", schedule_interval="1 hour")
+    ancient_run = insert_finished_run(superuser_conn, job_id, "30 days")
+
+    try:
+        set_retention(-1)
+
+        time.sleep(4)
+        assert run_exists(
+            superuser_conn, ancient_run
+        ), "retention is disabled, so nothing should have been deleted"
+    finally:
+        reset_retention()
 
 
 def test_submit_rejects_an_invalid_cron_expression(superuser_conn):

@@ -133,6 +133,13 @@ CREATE INDEX job_runs_job_id_idx ON job_scheduler.job_runs (job_id);
 CREATE INDEX job_runs_running_idx ON job_scheduler.job_runs (job_id)
 	WHERE status = 'running';
 
+/*
+ * Retention deletes the oldest completed runs first, so it wants to find them
+ * in completed_at order. Rows still running have a NULL completed_at and are
+ * never visited by that scan, which is also what keeps them from being deleted.
+ */
+CREATE INDEX job_runs_completed_at_idx ON job_scheduler.job_runs (completed_at);
+
 ALTER TABLE job_scheduler.job_runs REPLICA IDENTITY FULL;
 
 /* run history churns fast enough to want its own analyze thresholds */

@@ -78,6 +78,18 @@
  */
 #define JOB_SCHEDULER_SLEEP_MS 1000
 
+/* default pg_job_scheduler.run_retention: keep a week of run history */
+#define DEFAULT_RUN_RETENTION_SEC (7 * 24 * 60 * 60)
+
+/*
+ * How many expired runs one pass may delete. Retention runs on every pass
+ * rather than on a timer of its own, which is affordable because the scan is an
+ * ordered index scan that finds nothing the moment there is nothing to delete.
+ * The cap is what keeps a first sweep over a long-neglected history from doing
+ * it all in a single transaction; it spreads over passes instead.
+ */
+#define JOB_SCHEDULER_RETENTION_BATCH 1000
+
 /* columns returned by the claim query */
 #define CLAIM_COL_JOB_ID	1
 #define CLAIM_COL_COMMAND	2
@@ -93,8 +105,9 @@
 
 PG_MODULE_MAGIC;
 
-/* GUC variable */
+/* GUC variables */
 int			JobSchedulerMaxWorkers = 4;
+int			JobSchedulerRunRetentionSec = DEFAULT_RUN_RETENTION_SEC;
 
 /* function declarations */
 void		_PG_init(void);
@@ -161,6 +174,20 @@ _PG_init(void)
 							GUC_STANDARD,
 							NULL, NULL, NULL);
 
+	DefineCustomIntVariable(
+							"pg_job_scheduler.run_retention",
+							gettext_noop("How long to keep the record of a finished job run"),
+							gettext_noop("Runs that completed longer ago than this are deleted. "
+										 "A negative value keeps every run forever, which leaves "
+										 "job_scheduler.job_runs to grow without bound."),
+							&JobSchedulerRunRetentionSec,
+							DEFAULT_RUN_RETENTION_SEC,
+							-1,
+							INT32_MAX,
+							PGC_SIGHUP,
+							GUC_UNIT_S,
+							NULL, NULL, NULL);
+
 	InitializeJobSchedulerIdCache();
 }
 
@@ -219,6 +246,53 @@ ResetOrphanedRuns(void)
 					"AND schedule_interval IS NULL AND schedule_cron IS NULL "
 					"AND NOT atomic",
 					false, 0);
+
+		SPI_finish();
+	}
+	END_TRANSACTION();
+}
+
+
+/*
+ * PurgeExpiredRuns deletes run history that has aged past
+ * pg_job_scheduler.run_retention, oldest first and at most
+ * JOB_SCHEDULER_RETENTION_BATCH rows per call.
+ *
+ * Only finished runs are eligible: a run still in flight has a NULL
+ * completed_at, which no "completed_at < cutoff" scan will ever match, so an
+ * in-flight run cannot be deleted out from under its worker however long it
+ * has been going.
+ */
+static void
+PurgeExpiredRuns(void)
+{
+	if (JobSchedulerRunRetentionSec < 0)
+		return;
+
+	TimestampTz cutoff = GetCurrentTimestamp() -
+		(int64) JobSchedulerRunRetentionSec * USECS_PER_SEC;
+
+	START_TRANSACTION();
+	{
+		SPI_connect();
+
+		DECLARE_SPI_ARGS(2);
+
+		SPI_ARG_DATUM(1, TIMESTAMPTZOID, TimestampTzGetDatum(cutoff));
+		SPI_ARG_DATUM(2, INT4OID, Int32GetDatum(JOB_SCHEDULER_RETENTION_BATCH));
+
+		SPI_EXECUTE("WITH expired AS ("
+					"  SELECT run_id FROM " JOB_SCHEDULER_SCHEMA ".job_runs "
+					"  WHERE completed_at < $1 "
+					"  ORDER BY completed_at "
+					"  LIMIT $2) "
+					"DELETE FROM " JOB_SCHEDULER_SCHEMA ".job_runs "
+					"WHERE run_id IN (SELECT run_id FROM expired)",
+					false);
+
+		if (SPI_processed > 0)
+			elog(DEBUG1, "job scheduler: deleted %lu expired run(s)",
+				 (unsigned long) SPI_processed);
 
 		SPI_finish();
 	}
@@ -770,7 +844,10 @@ pg_job_scheduler_main(PG_FUNCTION_ARGS)
 			}
 		}
 
-		/* Step 4: sleep, wake on signals */
+		/* Step 4: age out run history that has outlived its retention */
+		PurgeExpiredRuns();
+
+		/* Step 5: sleep, wake on signals */
 		MemoryContextReset(loopContext);
 
 		LightSleep(JOB_SCHEDULER_SLEEP_MS);
