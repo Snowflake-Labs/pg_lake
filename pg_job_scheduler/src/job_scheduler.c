@@ -59,17 +59,22 @@
 #define GUC_STANDARD 0
 
 /*
- * How long the main loop sleeps between passes.
+ * How long the main loop sleeps between passes, when nothing wakes it sooner.
  *
- * This is deliberately a flat poll rather than a sleep derived from the
- * earliest next_run_at, tempting though that is when the next job is hours
- * away. Nothing can wake this worker early: pg_extension_base exports no way
- * for a backend to signal a specific base worker (MyBaseWorkerId is only set
- * inside the worker itself), and an attached worker finishing does not set our
- * latch either. So the sleep is also the upper bound on how long a job
- * submitted to run now waits before it starts, and on how long a finished run
- * sits before its outcome is recorded. Sleeping until the next deadline needs
- * a wake-up mechanism to land first.
+ * A running job does wake us: we are the receiver of its attached worker's
+ * message queue, and shm_mq sets the receiver's latch when the sender writes,
+ * so LightSleep returns as soon as a worker reports anything. That is what
+ * keeps throughput up -- a backlog of quick jobs drains at a couple of hundred
+ * a second with only four workers, rather than four per pass.
+ *
+ * What does not wake us is a job being *submitted*: nothing signals a base
+ * worker, since pg_extension_base exports no way for a backend to reach one
+ * (MyBaseWorkerId is only set inside the worker itself). So this interval is
+ * the upper bound on how long a job submitted to run now waits before it
+ * starts, measured at about a second. That is the reason the sleep is a flat
+ * poll rather than derived from the earliest next_run_at, tempting though the
+ * latter is when the next job is hours away: sleeping to the deadline needs a
+ * way to be woken by a submit first.
  */
 #define JOB_SCHEDULER_SLEEP_MS 1000
 
