@@ -1,5 +1,5 @@
 # pg_lake_timeseries extension
-comment = 'Time-series tables backed by a heap delta merged over an Iceberg base'
+comment = 'Time-series tables that keep recent data in PostgreSQL and history in Iceberg'
 default_version = '3.4'
 module_pathname = '$libdir/pg_lake_timeseries'
 relocatable = false

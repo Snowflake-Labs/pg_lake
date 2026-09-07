@@ -49,6 +49,7 @@ PG_MODULE_MAGIC;
 /* GUCs */
 bool		EnablePgLakeTimeseries = true;
 bool		ExpandTieredTables = true;
+bool		TimeseriesCopyViaPushdown = true;
 int			PgLakeTimeseriesNaptimeMs = 10000;
 
 /* function declarations */
@@ -86,6 +87,20 @@ _PG_init(void)
 										  "authority boundary. Intended for inspecting the tiers "
 										  "separately; it does not change what maintenance does."),
 							 &ExpandTieredTables,
+							 true,
+							 PGC_USERSET,
+							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+							 "pg_lake_timeseries.copy_via_pushdown",
+							 gettext_noop("Lets the query engine read a partition directly when copying it to Iceberg"),
+							 gettext_noop("Maintenance copies a hot partition into the Iceberg tier with "
+										  "INSERT INTO <iceberg> SELECT * FROM <partition>. When on, the "
+										  "engine connects back to PostgreSQL and scans the partition "
+										  "itself. When off, the rows travel through the extension one "
+										  "at a time, which is slower but does not need a connection back."),
+							 &TimeseriesCopyViaPushdown,
 							 true,
 							 PGC_USERSET,
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,

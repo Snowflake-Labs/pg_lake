@@ -449,6 +449,71 @@ COMMENT ON FUNCTION timeseries.add_partitions(regclass, timestamptz)
 	IS 'Extend the partition frontier of a tiered table up to a point in time.';
 
 /*
+ * Replace the Iceberg copy of one partition's range with the partition's rows.
+ *
+ * Both maintenance operations that copy a partition go through here: sync() to
+ * refresh a copy that is not authoritative yet, seal() to write the final one
+ * before dropping the partition. The range is overwritten rather than appended
+ * to, because the copy has to be repeatable, and the predicate prunes the cold
+ * side to the one range.
+ *
+ * The rows are read from the partition and not from the relation, which the
+ * planner would expand into both tiers -- reading the table being written, to add
+ * rows that are by definition not in this range.
+ *
+ * With pg_lake_timeseries.copy_via_pushdown on, the engine connects back to
+ * PostgreSQL and scans the partition itself, which turns the copy into one bulk
+ * write instead of a row-at-a-time transfer through the extension. That takes two
+ * pg_lake_table settings: enable_heap_query_pushdown to read the partition, and
+ * enable_partitioned_write_pushdown to write the Iceberg tier, which is always
+ * partitioned by the time column. Both are set locally and put back, because they
+ * change how unrelated queries in the same transaction run. If the partition or
+ * the tier turns out not to be shippable, pg_lake_table falls back to the
+ * row-at-a-time path on its own.
+ *
+ * The SHARE lock is what makes the copy correct rather than fast: it stops
+ * writers for the duration, so no row can land in the range between the copy's
+ * snapshot and the DROP TABLE in seal(). It does not conflict with the
+ * AccessShareLock the engine's own connection takes to read the partition.
+ */
+CREATE FUNCTION timeseries.copy_range(cold_table regclass, partition regclass,
+									  time_column name,
+									  part_start timestamptz, part_end timestamptz)
+RETURNS void
+LANGUAGE plpgsql STRICT AS $$
+DECLARE
+	prev_read	text;
+	prev_write	text;
+BEGIN
+	EXECUTE format('LOCK TABLE %s IN SHARE MODE', partition::text);
+
+	IF current_setting('pg_lake_timeseries.copy_via_pushdown')::bool THEN
+		prev_read := current_setting('pg_lake_table.enable_heap_query_pushdown');
+		prev_write := current_setting('pg_lake_table.enable_partitioned_write_pushdown');
+
+		PERFORM set_config('pg_lake_table.enable_heap_query_pushdown', 'on', true);
+		PERFORM set_config('pg_lake_table.enable_partitioned_write_pushdown',
+						   'on', true);
+	END IF;
+
+	EXECUTE format('DELETE FROM %s WHERE %I >= %L AND %I < %L',
+				   cold_table::text, time_column, part_start,
+				   time_column, part_end);
+	EXECUTE format('INSERT INTO %s SELECT * FROM %s',
+				   cold_table::text, partition::text);
+
+	IF prev_read IS NOT NULL THEN
+		PERFORM set_config('pg_lake_table.enable_heap_query_pushdown',
+						   prev_read, true);
+		PERFORM set_config('pg_lake_table.enable_partitioned_write_pushdown',
+						   prev_write, true);
+	END IF;
+END;
+$$;
+COMMENT ON FUNCTION timeseries.copy_range(regclass, regclass, name, timestamptz, timestamptz)
+	IS 'Overwrite one partition-sized range of a tiered table''s Iceberg tier with the partition''s rows.';
+
+/*
  * Refresh the Iceberg copy of partitions that are entirely in the past.
  *
  * These rows are still authoritative in PostgreSQL -- the boundary does not move
@@ -488,19 +553,8 @@ BEGIN
 				OR s.synced_at IS NULL OR s.synced_at < h.part_end)
 		 ORDER BY h.part_start
 	LOOP
-		/*
-		 * Overwrite the range rather than append to it: the copy has to be
-		 * repeatable, and the predicate prunes the cold side to the one range.
-		 *
-		 * The rows are read from the partition and not from the relation, which
-		 * the planner would expand into both tiers -- reading the table being
-		 * written, to add rows that are by definition not in this range.
-		 */
-		EXECUTE format('DELETE FROM %s WHERE %I >= %L AND %I < %L',
-					   t.cold_table::text, t.time_column, r.part_start,
-					   t.time_column, r.part_end);
-		EXECUTE format('INSERT INTO %s SELECT * FROM %s',
-					   t.cold_table::text, r.partition::text);
+		PERFORM timeseries.copy_range(t.cold_table, r.partition, t.time_column,
+									  r.part_start, r.part_end);
 
 		PERFORM timeseries.record_sync(sync.relation, r.part_start, r.part_end);
 
@@ -568,11 +622,8 @@ BEGIN
 			EXIT;
 		END IF;
 
-		EXECUTE format('DELETE FROM %s WHERE %I >= %L AND %I < %L',
-					   t.cold_table::text, t.time_column, r.part_start,
-					   t.time_column, r.part_end);
-		EXECUTE format('INSERT INTO %s SELECT * FROM %s',
-					   t.cold_table::text, r.partition::text);
+		PERFORM timeseries.copy_range(t.cold_table, r.partition, t.time_column,
+									  r.part_start, r.part_end);
 
 		EXECUTE format('DROP TABLE %s', r.partition::text);
 

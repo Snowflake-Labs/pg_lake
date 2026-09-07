@@ -211,7 +211,8 @@ def test_writing_transaction_falls_back(tiered_tables, pg_conn):
         expected = single_row(SPANNING_QUERY, pg_conn)
 
         # an exported snapshot hides the exporting transaction's own writes, so
-        # once we have written we plan the query the ordinary way instead
+        # once we have written to the table being read we plan the query the
+        # ordinary way instead
         run_command(
             "INSERT INTO hot_events VALUES ('2024-01-12', 3, 5)",
             pg_conn,
@@ -228,6 +229,97 @@ def test_writing_transaction_falls_back(tiered_tables, pg_conn):
     finally:
         pg_conn.rollback()
         disable_heap_pushdown(pg_conn)
+
+
+def test_writing_elsewhere_still_pushes_down(tiered_tables, pg_conn):
+    # only writes to the tables being read can be missed, and a transaction that
+    # writes before it reads is the normal case for maintenance that copies one
+    # table into another
+    run_command(
+        """
+        DROP TABLE IF EXISTS hot_unrelated;
+        CREATE TABLE hot_unrelated (value int);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    enable_heap_pushdown(pg_conn)
+    try:
+        expected = single_row(SPANNING_QUERY, pg_conn)
+
+        run_command("INSERT INTO hot_unrelated VALUES (1)", pg_conn)
+
+        assert_query_pushdownable(SPANNING_QUERY, pg_conn)
+        assert tuple(run_query(SPANNING_QUERY, pg_conn)[0]) == expected
+        pg_conn.commit()
+    finally:
+        pg_conn.rollback()
+        disable_heap_pushdown(pg_conn)
+        run_command("DROP TABLE IF EXISTS hot_unrelated", pg_conn)
+        pg_conn.commit()
+
+
+def test_copy_heap_table_into_lake_table(tiered_tables, pg_conn, with_default_location):
+    # tiering a table means copying a PostgreSQL table into a lake table, which
+    # is an INSERT ... SELECT whose only source is a heap relation: pgduck_server
+    # reads the heap side back and writes the Parquet, instead of the rows being
+    # shipped one at a time
+    run_command(
+        """
+        DROP TABLE IF EXISTS copied_events;
+        CREATE TABLE copied_events (event_day date, device_id int, value int)
+            USING iceberg;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    copy = "INSERT INTO copied_events SELECT * FROM hot_events"
+
+    enable_heap_pushdown(pg_conn)
+    try:
+        plan = str(run_query("EXPLAIN (VERBOSE) " + copy, pg_conn))
+        assert "Custom Scan (Query Pushdown)" in plan
+        assert "Foreign Scan" not in plan
+        pg_conn.commit()
+
+        run_command(copy, pg_conn)
+        pg_conn.commit()
+
+        assert (
+            single_row(
+                """
+            SELECT count(*), sum(value)::bigint FROM copied_events
+            """,
+                pg_conn,
+            )
+            == single_row(
+                """
+            SELECT count(*), sum(value)::bigint FROM hot_events
+            """,
+                pg_conn,
+            )
+        )
+
+        # the same copy through the row-at-a-time path has to produce the same rows
+        disable_heap_pushdown(pg_conn)
+        run_command("DELETE FROM copied_events", pg_conn)
+        assert_query_not_pushdownable(copy, pg_conn)
+        run_command(copy, pg_conn)
+        pg_conn.commit()
+
+        assert_query_results_on_tables(
+            "SELECT * FROM copied_events ORDER BY event_day, device_id, value",
+            pg_conn,
+            ["copied_events"],
+            ["hot_events"],
+        )
+        pg_conn.commit()
+    finally:
+        disable_heap_pushdown(pg_conn)
+        run_command("DROP TABLE IF EXISTS copied_events", pg_conn)
+        pg_conn.commit()
 
 
 def test_partitioned_hot_tier(tiered_tables, pg_conn):

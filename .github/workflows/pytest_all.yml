@@ -161,6 +161,7 @@ jobs:
           - 'check-pg_lake_benchmark'
           - 'check-pg_extension_base'
           - 'check-pg_map'
+          - 'check-pg_lake_timeseries'
 
     steps:
       - uses: actions/checkout@v4
@@ -229,6 +230,7 @@ jobs:
           - 'installcheck-pg_lake_benchmark'
           - 'installcheck-pg_extension_base'
           - 'installcheck-pg_map'
+          - 'installcheck-pg_lake_timeseries'
 
     steps:
       - uses: actions/checkout@v4

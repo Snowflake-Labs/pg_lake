@@ -267,6 +267,65 @@ def test_sync_overwrites_the_range_it_copies(tiered, pg_conn):
     assert count_in(pg_conn, "metrics_cold WHERE device = 7") == ROWS_PER_PARTITION
 
 
+def test_the_two_copy_paths_agree(tiered, pg_conn):
+    """Whichever way a partition is copied, the Iceberg tier ends up the same.
+
+    copy_via_pushdown lets the query engine read the partition itself instead of
+    the rows travelling through the extension one at a time (DESIGN.md section
+    9.2). It is a copy of the same statement either way, so the two have to be
+    indistinguishable in the result -- which is what makes the setting safe to
+    turn off when the engine cannot connect back.
+    """
+    stage(tiered, pg_conn)
+
+    def cold_rows():
+        return run_query(
+            "SELECT * FROM metrics_cold ORDER BY ts, device, value", pg_conn
+        )
+
+    run_command("SET pg_lake_timeseries.copy_via_pushdown TO on", pg_conn)
+    assert run_query("SELECT timeseries.sync('metrics')", pg_conn)[0][0] == (
+        PAST_PARTITIONS
+    )
+    pg_conn.commit()
+
+    pushed_down = cold_rows()
+
+    assert len(pushed_down) == PAST_PARTITIONS * ROWS_PER_PARTITION
+
+    # the copy of one partition is the whole of an INSERT ... SELECT over it, and
+    # for the partition of a tiered table that statement is one the engine can
+    # take over -- reading the partition and writing the partitioned tier are two
+    # separate settings, and the assertions about what it then sends are in
+    # pg_lake_table
+    run_command("SET pg_lake_table.enable_heap_query_pushdown TO on", pg_conn)
+    run_command("SET pg_lake_table.enable_partitioned_write_pushdown TO on", pg_conn)
+    assert_query_pushdownable(
+        f"INSERT INTO metrics_cold SELECT * FROM {heap_ranges(pg_conn)[0]['partition']}",
+        pg_conn,
+    )
+    run_command("RESET pg_lake_table.enable_heap_query_pushdown", pg_conn)
+    run_command("RESET pg_lake_table.enable_partitioned_write_pushdown", pg_conn)
+    pg_conn.commit()
+
+    # re-copy every range the other way; each overwrites the range it copies
+    run_command("SET pg_lake_timeseries.copy_via_pushdown TO off", pg_conn)
+    for part_start in [row["part_start"] for row in synced_ranges(pg_conn)]:
+        assert (
+            run_query(
+                f"SELECT timeseries.sync('metrics', only_start => '{part_start}')",
+                pg_conn,
+            )[0][0]
+            == 1
+        )
+        pg_conn.commit()
+
+    assert cold_rows() == pushed_down
+
+    run_command("RESET pg_lake_timeseries.copy_via_pushdown", pg_conn)
+    pg_conn.commit()
+
+
 def test_seal_advances_the_boundary_and_drops_the_partition(tiered, pg_conn):
     stage(tiered, pg_conn)
 

@@ -437,12 +437,52 @@ Each range is overwritten (`DELETE` + `INSERT`) rather than appended to, and the
 rows are read **from the partition**, not from the relation: reading the relation
 would go through the hook's own expansion, i.e. read the table it is writing.
 
+Both this and `seal()` copy through one function, `timeseries.copy_range()`, and
+two things about it are worth stating separately from what either caller does.
+
+It takes a `SHARE` lock on the partition first. That is what makes `seal()`'s
+copy-then-drop lossless: without it, a row committed between the copy's snapshot
+and the `DROP TABLE` would be dropped without ever having been copied. `SHARE`
+conflicts with `ROW EXCLUSIVE`, so it stops writers for the duration, and is
+deliberately no stronger than that — `ACCESS EXCLUSIVE` would also lock out the
+loopback connection of the next paragraph, which would deadlock in a way
+PostgreSQL cannot detect.
+
+With `pg_lake_timeseries.copy_via_pushdown` on (the default), the copy sets two
+`pg_lake_table` settings for the duration — `enable_heap_query_pushdown` to read
+the partition and `enable_partitioned_write_pushdown` to write the tier, which is
+always partitioned by the time column (§7.1) — which together turn
+`INSERT INTO <iceberg> SELECT * FROM <partition>` into a pushed-down write:
+pgduck_server reads the partition back over a loopback connection at this
+transaction's exported snapshot (§13) and writes the Parquet itself, instead of
+the rows travelling through the FDW one at a time. This is a copy, so there is
+nothing to compute and no vectorization to win — what it saves is the per-row
+round trip, which is most of the cost: sealing a 1,000,000-row partition takes
+0.61 s pushed down against 1.71 s row at a time when it lands in one Iceberg
+partition, and 0.81 s against 4.23 s when it spreads over 120 daily ones.
+
+Turning it off leaves a correct, slower copy, which is also what happens on its
+own if the partition is not shippable (a dropped column, a type pg_lake does not
+write): the pushdown declines at planning time and the ordinary path runs. The
+one thing given up is that a pushed-down write does not split output by
+`file_size_bytes`; partition granularity is what bounds file size instead, so
+this is a reason to size `partition_interval` for the file size wanted rather
+than a reason to turn the pushdown off.
+
+Two properties of the pushdown matter here and are the reason `copy_range()` may
+use it at all. The loopback connection cannot see this transaction's own writes,
+so pg_lake refuses to push down a relation the transaction has written to — the
+partition is only ever read here, never written, while the relation that *is*
+written is the Iceberg one, which is not read back. And a `sync()` or `seal()`
+pass writes metadata before it copies, which is why that refusal is per relation
+rather than "this transaction has written".
+
 ### 9.3 `seal(relation, upto)`
 
 The only operation that moves `B`. For each partition ending at or before
 `partition_start(coalesce(upto, now() - hot_retention))`, in order:
 
-1. overwrite the range in Iceberg;
+1. overwrite the range in Iceberg (`copy_range()`, §9.2);
 2. `DROP TABLE` the heap partition;
 3. advance `B` to `part_end` and record `sealed_at`.
 
@@ -481,8 +521,9 @@ was already copied is copied once more before it is dropped, which is what makes
 the copy complete rather than merely recent.
 
 GUCs, all defined in `src/init.c`: `pg_lake_timeseries.enable` (default on),
-`pg_lake_timeseries.maintenance_naptime`, and
-`pg_lake_timeseries.expand_tiered_tables` (§7).
+`pg_lake_timeseries.maintenance_naptime`,
+`pg_lake_timeseries.expand_tiered_tables` (§7) and
+`pg_lake_timeseries.copy_via_pushdown` (§9.2).
 
 ---
 
@@ -495,12 +536,15 @@ GUCs, all defined in `src/init.c`: `pg_lake_timeseries.enable` (default on),
   masked. `sync()` deliberately creates rows that exist in both tiers, and
   `test_the_iceberg_copy_of_a_hot_partition_is_not_returned_twice` asserts the
   count is unchanged.
-- **No row is lost by a move.** `seal()` copies before dropping, atomically.
+- **No row is lost by a move.** `seal()` copies before dropping, atomically, and
+  holds `SHARE` on the partition across both, so nothing can be written into the
+  range in between (§9.2).
 - **A cached plan cannot outlive its boundary** (§7.3).
-- **Concurrency.** `seal()` holds `ACCESS EXCLUSIVE` on the partition it drops
-  (`DROP TABLE`) and updates the boundary row; a reader that planned with the old
-  `B` holds `ACCESS SHARE` on that partition, so the drop waits for it. The
-  invalidation is broadcast on commit, so plans built afterwards use the new `B`.
+- **Concurrency.** `seal()` holds `SHARE` and then `ACCESS EXCLUSIVE` on the
+  partition it drops (`DROP TABLE`) and updates the boundary row; a reader that
+  planned with the old `B` holds `ACCESS SHARE` on that partition, so the drop
+  waits for it. The invalidation is broadcast on commit, so plans built afterwards
+  use the new `B`.
 - **Snapshot consistency under pushdown** is pg_lake's: the heap side is read back
   over a loopback connection at an exported snapshot of the driving transaction
   (§13), and pg_lake reads the latest Iceberg snapshot.
@@ -574,6 +618,7 @@ The functions are maintenance and introspection.
 | `seal(relation, upto)` | hand ranges to Iceberg and advance `B` (§9.3) |
 | `apply_retention(relation)` | expire cold history (§9.4) |
 | `maintain(relation)` | one pass of all four (§9.5) |
+| `copy_range(cold, partition, column, start, end)` | the copy `sync()` and `seal()` share (§9.2) |
 | `is_tiered(relation)`, `tiered_table(relation)`, `tiered_tables()` | what is registered |
 | `synced_ranges(relation)`, `heap_ranges(relation)` | what Iceberg has a copy of, and what the heap has |
 | `partition_start(ts, interval)` | floor a timestamp to a partition bound |
@@ -627,9 +672,22 @@ What was then built, in `pg_lake_table`:
    statements: under `READ COMMITTED` each statement gets a fresh snapshot, and
    reusing an older one would read stale rows. Two states make an export useless
    rather than merely unavailable, and both fall back to the local plan — inside a
-   subtransaction (an importer cannot tell it is still running), and after the
-   transaction has been assigned an XID (an exported snapshot shows the exporter as
-   in-progress, so the loopback would not see the driving transaction's writes).
+   subtransaction (an importer cannot tell it is still running), and when the
+   transaction has already written to one of the relations being pushed down (an
+   exported snapshot shows the exporter as in-progress, so the loopback would not
+   see those writes). The second is deliberately per relation rather than per
+   transaction: a maintenance pass that writes metadata, or copies one table into
+   another, is a transaction with an XID whose reads are still exactly what the
+   loopback returns. Uncommitted DML is detected from the relcache entry's
+   statistics (`pgstat_info->trans`, the transaction-level entry a write creates
+   and the end of the transaction clears -- not the counts, which accumulate
+   across transactions until they are flushed, and not `find_tabstat_entry`,
+   which hands out a copy with that field cleared), a `TRUNCATE` or
+   rewriting `ALTER TABLE` from the relcache's new-relfilelocator fields; other
+   uncommitted DDL needs no check, because the deparsed query names relations and
+   columns as this transaction's catalogs have them, so the loopback errors out
+   instead of answering differently. With `pgstat_track_counts = off` there is no
+   signal, and pushdown is refused outright.
 4. **Reverse connection.** The loopback DSN is built from the running cluster — the
    first `unix_socket_directories` entry, or `localhost` if empty, plus port,
    database and current user — unless `heap_pushdown_dsn` overrides it. That makes
@@ -850,11 +908,12 @@ deterministic; one test re-enables it.
 | `test_timeseries_maintenance.py` | 12 | the frontier, `sync()` being repeatable and non-authoritative, `seal()` advancing `B` and stopping at a gap, retention bounded by `B`, one `maintain()` pass, the worker, and the ownership/registration refusals |
 
 The pushdown side is tested in `pg_lake_table`:
-`test_heap_query_pushdown.py` (12 cases — default-off, one vectorised plan for a
+`test_heap_query_pushdown.py` (14 cases — default-off, one vectorised plan for a
 spanning query, a cross-tier join, a heap-only query left untouched, the snapshot
-honoured under `REPEATABLE READ`, the writing-transaction fallback, a partitioned
-heap tier with and without partitions, and the four ineligibility paths) and
-`test_lake_partitioned_parent.py` (4 cases).
+honoured under `REPEATABLE READ`, the fallback after writing to the table being
+read and the pushdown that survives writing to another one, the copy of a heap
+table into a lake table, a partitioned heap tier with and without partitions, and
+the four ineligibility paths) and `test_lake_partitioned_parent.py` (4 cases).
 
 ---
 
@@ -867,9 +926,6 @@ heap tier with and without partitions, and the four ineligibility paths) and
   place the boundary somewhere other than `-infinity`, which nothing does today.
 - **Compaction** of the cold tier beyond `apply_retention()`.
 - **Plan-time file pruning** for a pushed-down hot-window query (§13.2).
-- **`seal()`'s copy is row-at-a-time.** `INSERT INTO <iceberg> SELECT ... FROM
-  <heap>` uses the FDW path; the heap pushdown admits read-only queries only
-  (`FullQueryIsPushdownable` rejects anything that is not a plain `SELECT`).
 - **Freshness in Iceberg for external readers.** `sync()` (§9.2) copies only
   partitions that are entirely in the past, and re-copies one only when the copy
   predates the partition closing (`synced_at < part_end`), so two things are missing

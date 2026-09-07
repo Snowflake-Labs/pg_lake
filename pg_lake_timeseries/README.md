@@ -103,6 +103,26 @@ SELECT timeseries.seal('metrics');            -- hand aged ranges over; move the
 SELECT timeseries.apply_retention('metrics'); -- expire cold history
 ```
 
+`sync()` and `seal()` copy a partition with `INSERT INTO metrics_cold SELECT * FROM
+<partition>`, holding `SHARE` on the partition so no writer can add a row to a range
+being handed over. By default the query engine connects back to PostgreSQL and reads
+the partition itself, so the rows do not travel through the extension one at a time —
+worth 3-5x on a million-row partition:
+
+```sql
+SET pg_lake_timeseries.copy_via_pushdown TO off;  -- if it cannot connect back
+```
+
+That needs the engine to be able to connect back and authenticate: the DSN is this
+cluster's own socket, port, database and current user unless
+`pg_lake_table.heap_pushdown_dsn` overrides it, so `pg_hba.conf` decides whether it
+works. For a partition the engine cannot read — one with a dropped column, say — the
+copy falls back to the row-at-a-time path on its own.
+
+A partition copied this way is written as one Parquet file per Iceberg partition,
+without splitting on `file_size_bytes`. Size `partition_interval` for the files
+wanted rather than turning the pushdown off.
+
 State is in the catalogs, and in the functions that read them for a table's owner:
 
 ```sql
@@ -194,7 +214,8 @@ FROM generate_series(now() - interval '120 days', now(),
 
 CREATE INDEX ON metrics (device, ts);
 
-SELECT timeseries.seal('metrics');   -- 4.3 s; moves the boundary to 2026-08-06
+SELECT timeseries.seal('metrics');   -- 0.8 s (4.2 s with copy_via_pushdown off);
+                                     -- moves the boundary to 2026-08-06
 ANALYZE metrics;                     -- a partitioned parent has relpages = -1 until
                                      -- it is analyzed, and pg_lake needs the estimate
 ```
@@ -357,10 +378,12 @@ enable globally.
   DuckDB, so PostgreSQL no longer prunes the cold tier for a `WHERE ts >= <recent>`
   query. The answer is the same, but the cold Parquet files are opened to get it
   ([`DESIGN.md`](DESIGN.md) §13.2).
-- **Pushdown is skipped in a writing transaction.** The loopback connection reads an
-  exported snapshot, which cannot see the driving transaction's own uncommitted
-  writes, so a transaction that has already written falls back to the normal plan.
-  Same inside a subtransaction.
+- **Pushdown is skipped for a table this transaction has written to.** The loopback
+  connection reads an exported snapshot, which cannot see the driving transaction's
+  own uncommitted writes, so a query over a table this transaction has already
+  written to falls back to the normal plan. Writing to *other* tables is fine, which
+  is what lets maintenance copy a partition. Pushdown is also skipped inside a
+  subtransaction, since a snapshot cannot be exported from one.
 - **The Iceberg copy lags.** It is only as fresh as the last `sync()`, and the
   boundary only moves on `seal()`. That does not affect answers — everything at or
   above the boundary is served from the authoritative heap — but the Iceberg table

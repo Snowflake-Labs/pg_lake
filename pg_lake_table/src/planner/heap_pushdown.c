@@ -44,8 +44,8 @@
  *   original plan's range table and permission infos.
  *
  * The cost is that the driving transaction's own uncommitted writes are
- * invisible to the loopback connection, which is why we refuse to run once
- * the transaction has written anything.
+ * invisible to the loopback connection, which is why we refuse to push down a
+ * relation this transaction has written to.
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
@@ -62,6 +62,7 @@
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "postmaster/postmaster.h"
+#include "pgstat.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
@@ -85,8 +86,11 @@ bool		EnableHeapQueryPushdown = false;
 char	   *HeapPushdownDSN = "";
 
 static bool HeapPushdownSnapshotAvailable(void);
+static bool HeapRteIsUnmodifiedInThisTransaction(RangeTblEntry *rte);
+static bool HeapRelationIsUnmodifiedInThisTransaction(Oid relationId);
 static bool HeapRelationIsPushdownable(Oid relationId);
 static bool ReplaceHeapTableWalker(Node *node, List **heapRteList);
+static void EnsureHeapPushdownStillPossible(List *heapRteList);
 static char *BuildHeapScanQuery(Oid relationId, char *connectionString,
 								char *snapshotName);
 static char *BuildPartitionedHeapScanQuery(Oid relationId, char *connectionString,
@@ -100,33 +104,124 @@ static char *HeapPushdownConnectionString(void);
 
 /*
  * HeapPushdownSnapshotAvailable determines whether we can currently export a
- * snapshot that the loopback connection can use and that gives the same
- * answers as a local scan.
+ * snapshot for the loopback connection to use.
  *
- * - ExportSnapshot cannot run in a subtransaction, because an importer has no
- *   way to tell that the same subtransaction is still running.
- * - An exported snapshot shows the exporting transaction as still running, so
- *   the loopback connection would not see writes the driving transaction has
- *   already made. We therefore refuse once an XID has been assigned.
+ * ExportSnapshot cannot run in a subtransaction, because an importer has no
+ * way to tell that the same subtransaction is still running. An assigned XID
+ * is fine: an exported snapshot shows the exporting transaction as still
+ * running, so what matters is not whether this transaction has written, but
+ * whether it has written to the relations we are about to push down. That is a
+ * per-relation question, answered by
+ * HeapRelationIsUnmodifiedInThisTransaction.
  */
 static bool
 HeapPushdownSnapshotAvailable(void)
 {
-	if (!IsTransactionState() || IsSubTransaction())
-		return false;
+	return IsTransactionState() && !IsSubTransaction();
+}
 
-	if (GetTopTransactionIdIfAny() != InvalidTransactionId)
-		return false;
+
+/*
+ * HeapRteIsUnmodifiedInThisTransaction determines whether the current
+ * transaction has left the relations behind an RTE alone, and so whether the
+ * loopback connection reading them at our exported snapshot returns the same
+ * rows a local scan would.
+ */
+static bool
+HeapRteIsUnmodifiedInThisTransaction(RangeTblEntry *rte)
+{
+	/* a transaction that has not written cannot have written to them */
+	if (GetTopTransactionIdIfAny() == InvalidTransactionId)
+		return true;
+
+	List	   *relationIdList = list_make1_oid(rte->relid);
+
+	if (rte->relkind == RELKIND_PARTITIONED_TABLE)
+	{
+		/* the rows come from the leaf partitions, so they are what counts */
+		relationIdList = find_all_inheritors(rte->relid, NoLock, NULL);
+	}
+
+	ListCell   *relationIdCell = NULL;
+
+	foreach(relationIdCell, relationIdList)
+	{
+		Oid			relationId = lfirst_oid(relationIdCell);
+
+		if (!HeapRelationIsUnmodifiedInThisTransaction(relationId))
+			return false;
+	}
 
 	return true;
 }
 
 
 /*
+ * HeapRelationIsUnmodifiedInThisTransaction determines whether the current
+ * transaction has written to a relation.
+ *
+ * The loopback connection sees our transaction as still running, so anything
+ * it wrote to the relation is invisible there: pushing the scan down would
+ * silently return the rows as they were before. We therefore have to be able
+ * to tell, and refuse when we cannot.
+ *
+ * Uncommitted DDL is not covered here, and does not have to be. The deparsed
+ * query names relations and columns as they are in our catalogs, so a relation
+ * created or a column added or renamed in this transaction makes the loopback
+ * connection fail with an error rather than return a different answer. A
+ * rewrite is the exception -- the name still resolves, to the rows the rewrite
+ * replaced -- so we do check for that.
+ */
+static bool
+HeapRelationIsUnmodifiedInThisTransaction(Oid relationId)
+{
+	/*
+	 * Writes are counted per relation in the transaction's own statistics. If
+	 * those are not collected, we have no way to tell.
+	 */
+	if (!pgstat_track_counts)
+		return false;
+
+	Relation	relation = RelationIdGetRelation(relationId);
+
+	if (!RelationIsValid(relation))
+		return false;
+
+	/*
+	 * Created in this transaction (the loopback connection would not find it
+	 * at all), or given new storage by a TRUNCATE or a rewriting ALTER TABLE
+	 * (the loopback connection would read the storage that was replaced).
+	 */
+	bool		unmodified = (relation->rd_createSubid == InvalidSubTransactionId &&
+							  relation->rd_newRelfilelocatorSubid == InvalidSubTransactionId &&
+							  relation->rd_firstRelfilelocatorSubid == InvalidSubTransactionId);
+
+	/*
+	 * A relation this transaction has inserted, updated, deleted or truncated
+	 * rows in has a transaction-level statistics entry hanging off its
+	 * statistics entry, which is created on the first such write and cleared
+	 * when the transaction ends. Its presence is the signal; the counts are
+	 * not, since those accumulate across transactions until they are flushed.
+	 *
+	 * We read it through the relcache entry rather than find_tabstat_entry(),
+	 * which hands out a copy with this field deliberately cleared. A relation
+	 * with no statistics entry at all cannot have been written to here.
+	 */
+	if (relation->pgstat_info != NULL && relation->pgstat_info->trans != NULL)
+		unmodified = false;
+
+	RelationClose(relation);
+
+	return unmodified;
+}
+
+
+/*
  * HeapRteIsPushdownable determines whether the given RTE is a plain
  * PostgreSQL relation that we should admit into whole-query pushdown. This is
- * the planner-side question, so it also covers the setting and whether we can
- * export a snapshot at all.
+ * the planner-side question, so it also covers the setting, whether we can
+ * export a snapshot at all, and whether reading the relation back at that
+ * snapshot would miss writes of our own.
  */
 bool
 HeapRteIsPushdownable(RangeTblEntry *rte)
@@ -137,7 +232,10 @@ HeapRteIsPushdownable(RangeTblEntry *rte)
 	if (!HeapPushdownSnapshotAvailable())
 		return false;
 
-	return HeapRteIsRelationPushdownable(rte);
+	if (!HeapRteIsRelationPushdownable(rte))
+		return false;
+
+	return HeapRteIsUnmodifiedInThisTransaction(rte);
 }
 
 
@@ -431,6 +529,8 @@ ReplaceHeapTableFunctionCalls(char *query, List *heapRteList,
 
 	if (!explainRequested)
 	{
+		EnsureHeapPushdownStillPossible(heapRteList);
+
 		connectionString = HeapPushdownConnectionString();
 		snapshotName = HeapPushdownExportSnapshot();
 	}
@@ -451,6 +551,54 @@ ReplaceHeapTableFunctionCalls(char *query, List *heapRteList,
 	}
 
 	return query;
+}
+
+
+/*
+ * EnsureHeapPushdownStillPossible errors out if the conditions the plan was
+ * admitted under no longer hold.
+ *
+ * This is reachable with a cached plan: it was planned in a transaction that
+ * had not written to these relations, and is now executed in one that has, or
+ * inside a subtransaction. Returning rows that miss the transaction's own
+ * writes would be worse than refusing.
+ */
+static void
+EnsureHeapPushdownStillPossible(List *heapRteList)
+{
+	if (!HeapPushdownSnapshotAvailable())
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot push down a query over plain PostgreSQL tables "
+						"in this transaction"),
+				 errdetail("pgduck_server reads those tables back over a "
+						   "separate connection, which cannot see "
+						   "subtransactions of the current transaction."),
+				 errhint("Set pg_lake_table.enable_heap_query_pushdown to off, "
+						 "or run the query in its own transaction.")));
+	}
+
+	ListCell   *rteCell = NULL;
+
+	foreach(rteCell, heapRteList)
+	{
+		RangeTblEntry *rte = (RangeTblEntry *) lfirst(rteCell);
+
+		if (HeapRteIsUnmodifiedInThisTransaction(rte))
+			continue;
+
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot push down a query over plain PostgreSQL tables "
+						"in this transaction"),
+				 errdetail("The current transaction has written to \"%s\", and "
+						   "pgduck_server reads that table back over a separate "
+						   "connection, which cannot see those writes.",
+						   GetQualifiedRelationName(rte->relid)),
+				 errhint("Set pg_lake_table.enable_heap_query_pushdown to off, "
+						 "or run the query in its own transaction.")));
+	}
 }
 
 
@@ -615,26 +763,6 @@ HeapRelationProjectionList(TupleDesc tupleDesc)
 static char *
 HeapPushdownExportSnapshot(void)
 {
-	if (!HeapPushdownSnapshotAvailable())
-	{
-		/*
-		 * The plan admitted heap relations, but we can no longer export a
-		 * snapshot that would give the right answer. This is reachable with a
-		 * cached plan: it was planned in a transaction that had not written
-		 * yet, and is now executed in one that has. Returning rows that miss
-		 * the transaction's own writes would be worse than refusing.
-		 */
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("cannot push down a query over plain PostgreSQL tables "
-						"in this transaction"),
-				 errdetail("pgduck_server reads those tables back over a "
-						   "separate connection, which cannot see writes or "
-						   "subtransactions of the current transaction."),
-				 errhint("Set pg_lake_table.enable_heap_query_pushdown to off, "
-						 "or run the query in its own transaction.")));
-	}
-
 	return ExportSnapshot(GetActiveSnapshot());
 }
 
