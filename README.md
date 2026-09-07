@@ -8,6 +8,7 @@ At a high level, `pg_lake` lets you:
 - **Query and import data files in object storage** in [Parquet](https://parquet.apache.org/), CSV, JSON, and Iceberg format
 - **Export query results back to object storage** in Parquet, CSV, or JSON formats using COPY commands
 - **Read geospatial formats** supported by GDAL, such as GeoJSON and Shapefiles
+- **[Attach Snowflake tables](./docs/snowflake-tables.md)**, including hybrid tables, and query them in place
 - **Use the built-in [map type](./pg_map/README.md)** for semi-structured or key–value data  
 - **Combine heap, Iceberg, and external Parquet/CSV/JSON** files in the same SQL queries and modifications — all with full transactional guarantees and no SQL limitations  
 - **Infer table columns and types** from external data sources such as Iceberg, Parquet, JSON, and CSV files

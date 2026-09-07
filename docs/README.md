@@ -8,6 +8,7 @@ Welcome to the documentation hub. This section provides everything you need — 
 - [**Data Lake Import & Export**](./data-lake-import-export.md)  
 - [**File Formats Reference**](./file-formats-reference.md) 
 - [**Geospatial features**](./spatial.md) 
+- [**Snowflake Tables**](./snowflake-tables.md)  
 - [**DBT Integration**](./dbt.md)  
 - [**Use Case: Log Management**](./use-case-log-management.md)  
 
