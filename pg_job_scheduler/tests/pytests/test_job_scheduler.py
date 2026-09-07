@@ -85,8 +85,9 @@ def submit_job(
 ):
     """Submit a job and return its job_id.
 
-    max_attempts defaults to 1 here, not to the extension's 3, so that a test
-    about something other than retrying does not silently get retries."""
+    max_attempts defaults to 1 here, not to the extension's own default, so
+    that a test about something other than retrying does not silently get
+    retries. test_submit_job_defaults covers the real default."""
     interval_arg = (
         f"'{schedule_interval}'::interval" if schedule_interval else "NULL::interval"
     )
@@ -696,6 +697,24 @@ def test_deleting_a_job_leaves_its_runs(superuser_conn):
 # ---------------------------------------------------------------------------
 # retrying a failed one-shot
 # ---------------------------------------------------------------------------
+
+
+def test_submit_job_defaults(superuser_conn):
+    """The defaults a caller gets when they name only a command. Asserted here
+    because every other test passes max_attempts explicitly, so nothing else
+    would notice the default changing."""
+    job_id = run_query(
+        "SELECT job_scheduler.submit_job('SELECT pg_sleep(30)') AS job_id",
+        superuser_conn,
+    )[0]["job_id"]
+    superuser_conn.commit()
+
+    job = get_job(superuser_conn, job_id)
+    assert job["max_attempts"] == 30
+    assert job["failed_attempts"] == 0
+    assert job["atomic"] is True
+    assert job["schedule_interval"] is None
+    assert job["schedule_cron"] is None
 
 
 def test_failed_one_shot_is_retried_up_to_max_attempts(superuser_conn):

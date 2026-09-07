@@ -49,6 +49,12 @@ CREATE TABLE job_scheduler.jobs (
 	 * How many times a one-shot job may be attempted before it is given up on,
 	 * counting the first attempt. 1 means never retry.
 	 *
+	 * The default is generous because the retry delay doubles and then caps, so
+	 * the attempts are not spent quickly: with the default backoff of 5 seconds
+	 * doubling to an hour, 30 attempts span about 20 hours before the job is
+	 * failed. The intent is that a job survives a night of some dependency
+	 * being down, rather than that it is tried 30 times in a hurry.
+	 *
 	 * Retrying a run that *errored* is safe whether or not the job is atomic:
 	 * the command's transaction rolled back either way, so nothing was left
 	 * half-done. The unsafe case is a run whose outcome is unknown because the
@@ -59,7 +65,7 @@ CREATE TABLE job_scheduler.jobs (
 	 * scheduled one, which is the retry; firing "0 3 * * *" again at 03:01
 	 * because 03:00 failed is not what a cron schedule asks for.
 	 */
-	max_attempts int NOT NULL DEFAULT 3
+	max_attempts int NOT NULL DEFAULT 30
 		CONSTRAINT positive_max_attempts CHECK (max_attempts >= 1),
 
 	/*
@@ -225,7 +231,7 @@ CREATE FUNCTION job_scheduler.submit_job(command text,
 										 schedule_interval interval DEFAULT NULL,
 										 schedule_cron text DEFAULT NULL,
 										 atomic boolean DEFAULT true,
-										 max_attempts int DEFAULT 3)
+										 max_attempts int DEFAULT 30)
  RETURNS bigint
  LANGUAGE c
 AS 'MODULE_PATHNAME', $function$pg_job_scheduler_submit_job$function$;
