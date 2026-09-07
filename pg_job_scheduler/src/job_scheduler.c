@@ -18,10 +18,15 @@
 /*
  * job_scheduler.c
  *
- * A job scheduler that uses attached workers to execute SQL commands
- * from a job queue table. A base worker polls job_scheduler.jobs for
- * pending jobs and launches attached workers to run them, up to a
- * configurable concurrency limit.
+ * A job scheduler that uses attached workers to execute SQL commands from a
+ * job queue. Two tables back it: job_scheduler.jobs holds the definitions
+ * (what to run and when to run it next) and job_scheduler.job_runs holds one
+ * row per execution.
+ *
+ * A base worker polls for jobs whose next_run_at has fallen due and launches
+ * attached workers to run them, up to a configurable concurrency limit. A job
+ * with no schedule runs once; a job with schedule_interval or schedule_cron
+ * has its next_run_at advanced when a run starts, so it recurs.
  *
  * The main loop follows the pg_cron pattern: the scheduler runs outside
  * any transaction, opens short-lived transactions only to read/write
@@ -51,6 +56,20 @@
 
 #define GUC_STANDARD 0
 #define JOB_SCHEDULER_SCHEMA "job_scheduler"
+
+/*
+ * How long the main loop sleeps between passes.
+ *
+ * This is deliberately a flat poll rather than a sleep derived from the
+ * earliest next_run_at, tempting though that is when the next job is hours
+ * away. Nothing can wake this worker early: pg_extension_base exports no way
+ * for a backend to signal a specific base worker (MyBaseWorkerId is only set
+ * inside the worker itself), and an attached worker finishing does not set our
+ * latch either. So the sleep is also the upper bound on how long a job
+ * submitted to run now waits before it starts, and on how long a finished run
+ * sits before its outcome is recorded. Sleeping until the next deadline needs
+ * a wake-up mechanism to land first.
+ */
 #define JOB_SCHEDULER_SLEEP_MS 1000
 
 /* columns returned by the claim query */
@@ -59,8 +78,9 @@
 #define CLAIM_COL_DATABASE	3
 #define CLAIM_COL_USERNAME	4
 
-/* columns returned by the list query */
-#define LIST_COL_COUNT		10
+/* columns returned by the list queries */
+#define LIST_JOBS_COL_COUNT 9
+#define LIST_JOB_RUNS_COL_COUNT 7
 
 PG_MODULE_MAGIC;
 
@@ -74,23 +94,26 @@ void		_PG_init(void);
 typedef struct RunningJob
 {
 	int64		jobId;			/* hash key */
+	int64		runId;
 	AttachedWorker *worker;
 	char	   *lastCommandTag;
 }			RunningJob;
 
-/* info about a finished job, collected during scan for deferred processing */
-typedef struct FinishedJob
+/* info about a finished run, collected during scan for deferred processing */
+typedef struct FinishedRun
 {
 	int64		jobId;
+	int64		runId;
 	AttachedWorker *worker;
 	char	   *lastCommandTag;
 	char	   *errorMessage;
-}			FinishedJob;
+}			FinishedRun;
 
 /* claimed job info copied out of SPI context */
 typedef struct ClaimedJob
 {
 	int64		jobId;
+	int64		runId;
 	char	   *command;
 	char	   *databaseName;
 	char	   *userName;
@@ -100,6 +123,7 @@ typedef struct ClaimedJob
 PG_FUNCTION_INFO_V1(pg_job_scheduler_main);
 PG_FUNCTION_INFO_V1(pg_job_scheduler_submit_job);
 PG_FUNCTION_INFO_V1(pg_job_scheduler_list_jobs);
+PG_FUNCTION_INFO_V1(pg_job_scheduler_list_job_runs);
 
 
 /*
@@ -124,24 +148,39 @@ _PG_init(void)
 
 
 /*
- * ResetOrphanedJobs marks any jobs left in 'running' state as 'pending'.
- * This handles the case where the scheduler crashed while jobs were in flight.
+ * ResetOrphanedRuns cleans up after a scheduler that died with runs in
+ * flight. Their attached workers went down with it, so the runs are marked
+ * failed, and any one-shot job whose only run was orphaned is made due again
+ * rather than being silently lost.
  */
 static void
-ResetOrphanedJobs(void)
+ResetOrphanedRuns(void)
 {
 	START_TRANSACTION();
 	{
 		SPI_connect();
 
-		SPI_execute("UPDATE " JOB_SCHEDULER_SCHEMA ".jobs "
-					"SET status = 'pending', started_at = NULL "
+		SPI_execute("UPDATE " JOB_SCHEDULER_SCHEMA ".job_runs "
+					"SET status = 'failed', completed_at = now(), "
+					"error_message = 'the job scheduler restarted while this "
+					"run was in progress' "
 					"WHERE status = 'running'",
 					false, 0);
 
 		if (SPI_processed > 0)
-			elog(LOG, "job scheduler: reset %lu orphaned job(s) to pending",
+			elog(LOG, "job scheduler: failed %lu orphaned run(s)",
 				 (unsigned long) SPI_processed);
+
+		/*
+		 * A one-shot job clears next_run_at when it is claimed and only moves
+		 * off 'active' when its run finishes, so an active one-shot with no
+		 * next_run_at is exactly one whose run we just orphaned.
+		 */
+		SPI_execute("UPDATE " JOB_SCHEDULER_SCHEMA ".jobs "
+					"SET next_run_at = now() "
+					"WHERE status = 'active' AND next_run_at IS NULL "
+					"AND schedule_interval IS NULL AND schedule_cron IS NULL",
+					false, 0);
 
 		SPI_finish();
 	}
@@ -150,14 +189,14 @@ ResetOrphanedJobs(void)
 
 
 /*
- * ClaimPendingJobs claims up to maxJobs pending jobs by atomically
- * setting their status to 'running'. Returns a list of ClaimedJob
- * structs allocated in CurrentMemoryContext.
+ * SelectDueJobs returns up to maxJobs jobs whose next_run_at has fallen due,
+ * as ClaimedJob structs allocated in resultContext. The runId field is not
+ * filled in yet; ClaimJob does that.
  */
 static List *
-ClaimPendingJobs(int maxJobs, MemoryContext resultContext)
+SelectDueJobs(int maxJobs, MemoryContext resultContext)
 {
-	List	   *claimedJobs = NIL;
+	List	   *dueJobs = NIL;
 
 	if (maxJobs <= 0)
 		return NIL;
@@ -169,110 +208,199 @@ ClaimPendingJobs(int maxJobs, MemoryContext resultContext)
 		DECLARE_SPI_ARGS(1);
 
 		SPI_ARG_DATUM(1, INT4OID, Int32GetDatum(maxJobs));
+
+		/*
+		 * The NOT EXISTS keeps a recurring job from overlapping itself when a
+		 * run outlives its own interval: the next run is skipped rather than
+		 * started alongside the one still going.
+		 */
 		SPI_EXECUTE("SELECT job_id, command, database_name, user_name "
 					"FROM " JOB_SCHEDULER_SCHEMA ".jobs "
-					"WHERE status = 'pending' "
-					"ORDER BY job_id "
+					"WHERE status = 'active' AND next_run_at <= now() "
+					"AND NOT EXISTS ("
+					"  SELECT 1 FROM " JOB_SCHEDULER_SCHEMA ".job_runs "
+					"  WHERE job_id = jobs.job_id AND status = 'running') "
+					"ORDER BY next_run_at "
 					"FOR UPDATE SKIP LOCKED "
 					"LIMIT $1",
 					false);
 
-		for (uint64 i = 0; i < SPI_processed; i++)
+		for (uint64 rowIndex = 0; rowIndex < SPI_processed; rowIndex++)
 		{
 			bool		isNull = false;
-			int64		jobId = DatumGetInt64(GET_SPI_DATUM(i, CLAIM_COL_JOB_ID, &isNull));
-			char	   *command = TextDatumGetCString(GET_SPI_DATUM(i, CLAIM_COL_COMMAND, &isNull));
-			char	   *dbName = TextDatumGetCString(GET_SPI_DATUM(i, CLAIM_COL_DATABASE, &isNull));
-			char	   *userName = TextDatumGetCString(GET_SPI_DATUM(i, CLAIM_COL_USERNAME, &isNull));
+			int64		jobId = DatumGetInt64(GET_SPI_DATUM(rowIndex, CLAIM_COL_JOB_ID, &isNull));
+			char	   *command = TextDatumGetCString(GET_SPI_DATUM(rowIndex, CLAIM_COL_COMMAND, &isNull));
+			char	   *dbName = TextDatumGetCString(GET_SPI_DATUM(rowIndex, CLAIM_COL_DATABASE, &isNull));
+			char	   *userName = TextDatumGetCString(GET_SPI_DATUM(rowIndex, CLAIM_COL_USERNAME, &isNull));
 
 			MemoryContext spiContext = MemoryContextSwitchTo(resultContext);
 
-			ClaimedJob *job = palloc(sizeof(ClaimedJob));
+			ClaimedJob *job = palloc0(sizeof(ClaimedJob));
 
 			job->jobId = jobId;
 			job->command = pstrdup(command);
 			job->databaseName = pstrdup(dbName);
 			job->userName = pstrdup(userName);
-			claimedJobs = lappend(claimedJobs, job);
+			dueJobs = lappend(dueJobs, job);
 
 			MemoryContextSwitchTo(spiContext);
 		}
 
-		/* mark claimed jobs as running */
-		if (SPI_processed > 0)
+		SPI_finish();
+	}
+	END_TRANSACTION();
+
+	return dueJobs;
+}
+
+
+/*
+ * ClaimJob opens a run for the given job and advances the job's next_run_at,
+ * filling in job->runId.
+ *
+ * Returns false and sets *errorMessage if the job's schedule could not be
+ * evaluated. That is kept per-job rather than batched so a single unusable
+ * schedule cannot stall every other job in the queue.
+ */
+static bool
+ClaimJob(ClaimedJob * job, MemoryContext errorContext, char **errorMessage)
+{
+	*errorMessage = NULL;
+
+	PG_TRY();
+	{
+		START_TRANSACTION();
 		{
-			DECLARE_SPI_ARGS(1);
+			SPI_connect();
 
-			ListCell   *lc;
-
-			foreach(lc, claimedJobs)
 			{
-				ClaimedJob *job = (ClaimedJob *) lfirst(lc);
+				DECLARE_SPI_ARGS(1);
 
 				SPI_ARG_DATUM(1, INT8OID, Int64GetDatum(job->jobId));
-				SPI_EXECUTE("UPDATE " JOB_SCHEDULER_SCHEMA ".jobs "
-							"SET status = 'running', started_at = now() "
+				SPI_EXECUTE("INSERT INTO " JOB_SCHEDULER_SCHEMA ".job_runs (job_id) "
+							"VALUES ($1) RETURNING run_id",
+							false);
+
+				if (SPI_processed != 1)
+					ereport(ERROR, (errmsg("failed to open a run for job %ld",
+										   (long) job->jobId)));
+
+				bool		isNull = false;
+
+				job->runId = DatumGetInt64(GET_SPI_DATUM(0, 1, &isNull));
+			}
+
+			{
+				DECLARE_SPI_ARGS(1);
+
+				SPI_ARG_DATUM(1, INT8OID, Int64GetDatum(job->jobId));
+
+				/*
+				 * next_run_at advances from now() rather than from the old
+				 * next_run_at, so a scheduler that was down for a while does
+				 * not come back to a backlog of missed runs to catch up on. A
+				 * job with no schedule gets NULL and never runs again.
+				 */
+				SPI_EXECUTE("UPDATE " JOB_SCHEDULER_SCHEMA ".jobs SET next_run_at = "
+							"  CASE WHEN schedule_interval IS NOT NULL "
+							"         THEN now() + schedule_interval "
+							"       WHEN schedule_cron IS NOT NULL "
+							"         THEN " JOB_SCHEDULER_SCHEMA ".next_cron_run("
+							"                 schedule_cron, now()) "
+							"       ELSE NULL END "
 							"WHERE job_id = $1",
 							false);
 			}
+
+			SPI_finish();
+		}
+		END_TRANSACTION();
+	}
+	PG_CATCH();
+	{
+		MemoryContext oldContext = MemoryContextSwitchTo(errorContext);
+		ErrorData  *edata = CopyErrorData();
+
+		*errorMessage = pstrdup(edata->message);
+
+		MemoryContextSwitchTo(oldContext);
+		FreeErrorData(edata);
+		FlushErrorState();
+
+		return false;
+	}
+	PG_END_TRY();
+
+	return true;
+}
+
+
+/*
+ * FailJobDefinition marks a job itself as failed, for the case where the job
+ * could not be started at all. Without this the job would stay due forever
+ * and the scheduler would retry it on every iteration.
+ */
+static void
+FailJobDefinition(int64 jobId)
+{
+	START_TRANSACTION();
+	{
+		SPI_connect();
+
+		DECLARE_SPI_ARGS(1);
+
+		SPI_ARG_DATUM(1, INT8OID, Int64GetDatum(jobId));
+		SPI_EXECUTE("UPDATE " JOB_SCHEDULER_SCHEMA ".jobs "
+					"SET status = 'failed', next_run_at = NULL "
+					"WHERE job_id = $1",
+					false);
+
+		SPI_finish();
+	}
+	END_TRANSACTION();
+}
+
+
+/*
+ * FinishRun records the outcome of one run, and for a one-shot job also
+ * closes out the definition. A recurring job stays 'active' whatever its
+ * individual runs do, so there is always somewhere for the next run to go.
+ */
+static void
+FinishRun(int64 runId, int64 jobId, bool succeeded, char *commandTag,
+		  char *errorMessage)
+{
+	START_TRANSACTION();
+	{
+		SPI_connect();
+
+		{
+			DECLARE_SPI_ARGS(4);
+
+			SPI_ARG_DATUM(1, INT8OID, Int64GetDatum(runId));
+			SPI_ARG_DATUM(2, BOOLOID, BoolGetDatum(succeeded));
+			SPI_ARG_VALUE(3, TEXTOID, commandTag, commandTag == NULL);
+			SPI_ARG_VALUE(4, TEXTOID, errorMessage, errorMessage == NULL);
+
+			SPI_EXECUTE("UPDATE " JOB_SCHEDULER_SCHEMA ".job_runs "
+						"SET status = CASE WHEN $2 THEN 'succeeded' ELSE 'failed' END, "
+						"completed_at = now(), result = $3, error_message = $4 "
+						"WHERE run_id = $1",
+						false);
 		}
 
-		SPI_finish();
-	}
-	END_TRANSACTION();
+		{
+			DECLARE_SPI_ARGS(2);
 
-	return claimedJobs;
-}
+			SPI_ARG_DATUM(1, INT8OID, Int64GetDatum(jobId));
+			SPI_ARG_DATUM(2, BOOLOID, BoolGetDatum(succeeded));
 
-
-/*
- * MarkJobCompleted updates a job's status to 'completed' with the
- * given command tag as result.
- */
-static void
-MarkJobCompleted(int64 jobId, char *commandTag)
-{
-	START_TRANSACTION();
-	{
-		SPI_connect();
-
-		DECLARE_SPI_ARGS(2);
-
-		SPI_ARG_DATUM(1, INT8OID, Int64GetDatum(jobId));
-		SPI_ARG_VALUE(2, TEXTOID, commandTag, commandTag == NULL);
-
-		SPI_EXECUTE("UPDATE " JOB_SCHEDULER_SCHEMA ".jobs "
-					"SET status = 'completed', completed_at = now(), result = $2 "
-					"WHERE job_id = $1",
-					false);
-
-		SPI_finish();
-	}
-	END_TRANSACTION();
-}
-
-
-/*
- * MarkJobFailed updates a job's status to 'failed' with the given
- * error message.
- */
-static void
-MarkJobFailed(int64 jobId, char *errorMessage)
-{
-	START_TRANSACTION();
-	{
-		SPI_connect();
-
-		DECLARE_SPI_ARGS(2);
-
-		SPI_ARG_DATUM(1, INT8OID, Int64GetDatum(jobId));
-		SPI_ARG_VALUE(2, TEXTOID, errorMessage, errorMessage == NULL);
-
-		SPI_EXECUTE("UPDATE " JOB_SCHEDULER_SCHEMA ".jobs "
-					"SET status = 'failed', completed_at = now(), "
-					"error_message = $2 "
-					"WHERE job_id = $1",
-					false);
+			SPI_EXECUTE("UPDATE " JOB_SCHEDULER_SCHEMA ".jobs "
+						"SET status = CASE WHEN $2 THEN 'completed' ELSE 'failed' END "
+						"WHERE job_id = $1 "
+						"AND schedule_interval IS NULL AND schedule_cron IS NULL",
+						false);
+		}
 
 		SPI_finish();
 	}
@@ -369,8 +497,8 @@ pg_job_scheduler_main(PG_FUNCTION_ARGS)
 										  &hashInfo,
 										  HASH_ELEM | HASH_FUNCTION | HASH_CONTEXT);
 
-	/* crash recovery: reset any orphaned running jobs */
-	ResetOrphanedJobs();
+	/* crash recovery: close out runs left behind by a dead scheduler */
+	ResetOrphanedRuns();
 
 	MemoryContextSwitchTo(loopContext);
 
@@ -383,11 +511,11 @@ pg_job_scheduler_main(PG_FUNCTION_ARGS)
 		 *
 		 * We must not start transactions during the hash scan because
 		 * CommitTransactionCommand terminates active hash scans. So we
-		 * collect finished jobs during the scan and process them after.
+		 * collect finished runs during the scan and process them after.
 		 */
 		HASH_SEQ_STATUS hashStatus;
 		RunningJob *entry;
-		List	   *finishedJobs = NIL;
+		List	   *finishedRuns = NIL;
 
 		hash_seq_init(&hashStatus, runningJobs);
 
@@ -406,65 +534,75 @@ pg_job_scheduler_main(PG_FUNCTION_ARGS)
 				}
 
 				/* save info for deferred processing */
-				MemoryContext oldCtx = MemoryContextSwitchTo(schedulerContext);
-				FinishedJob *fj = palloc(sizeof(FinishedJob));
+				MemoryContext oldContext = MemoryContextSwitchTo(schedulerContext);
+				FinishedRun *finished = palloc(sizeof(FinishedRun));
 
-				fj->jobId = entry->jobId;
-				fj->worker = entry->worker;
-				fj->lastCommandTag = entry->lastCommandTag;
-				fj->errorMessage = errorMessage;
-				finishedJobs = lappend(finishedJobs, fj);
-				MemoryContextSwitchTo(oldCtx);
+				finished->jobId = entry->jobId;
+				finished->runId = entry->runId;
+				finished->worker = entry->worker;
+				finished->lastCommandTag = entry->lastCommandTag;
+				finished->errorMessage = errorMessage;
+				finishedRuns = lappend(finishedRuns, finished);
+				MemoryContextSwitchTo(oldContext);
 			}
 		}
 
-		/* process finished jobs now that the hash scan is complete */
+		/* process finished runs now that the hash scan is complete */
 		{
-			ListCell   *lc;
+			ListCell   *finishedCell;
 
-			foreach(lc, finishedJobs)
+			foreach(finishedCell, finishedRuns)
 			{
-				FinishedJob *fj = (FinishedJob *) lfirst(lc);
+				FinishedRun *finished = (FinishedRun *) lfirst(finishedCell);
 
-				EndAttachedWorker(fj->worker);
+				EndAttachedWorker(finished->worker);
 
-				if (fj->errorMessage != NULL)
-				{
-					MarkJobFailed(fj->jobId, fj->errorMessage);
-					pfree(fj->errorMessage);
-				}
-				else
-				{
-					MarkJobCompleted(fj->jobId, fj->lastCommandTag);
-				}
+				FinishRun(finished->runId, finished->jobId,
+						  finished->errorMessage == NULL,
+						  finished->lastCommandTag,
+						  finished->errorMessage);
 
-				if (fj->lastCommandTag != NULL)
-					pfree(fj->lastCommandTag);
+				if (finished->errorMessage != NULL)
+					pfree(finished->errorMessage);
 
-				hash_search(runningJobs, &fj->jobId, HASH_REMOVE, NULL);
-				pfree(fj);
+				if (finished->lastCommandTag != NULL)
+					pfree(finished->lastCommandTag);
+
+				hash_search(runningJobs, &finished->jobId, HASH_REMOVE, NULL);
+				pfree(finished);
 			}
 		}
 
-		/* Step 2: claim pending jobs if we have available slots */
+		/* Step 2: claim due jobs if we have available slots */
 		int			runningCount = hash_get_num_entries(runningJobs);
 		int			availableSlots = JobSchedulerMaxWorkers - runningCount;
 
 		if (availableSlots > 0)
 		{
-			List	   *claimed = ClaimPendingJobs(availableSlots, loopContext);
-			ListCell   *lc;
+			List	   *dueJobs = SelectDueJobs(availableSlots, loopContext);
+			ListCell   *dueCell;
 
 			/* Step 3: launch attached workers outside the transaction */
-			foreach(lc, claimed)
+			foreach(dueCell, dueJobs)
 			{
-				ClaimedJob *job = (ClaimedJob *) lfirst(lc);
+				ClaimedJob *job = (ClaimedJob *) lfirst(dueCell);
+				char	   *claimError = NULL;
 				bool		found;
+
+				if (!ClaimJob(job, loopContext, &claimError))
+				{
+					elog(LOG, "job scheduler: could not claim job %ld: %s",
+						 (long) job->jobId, claimError);
+
+					FailJobDefinition(job->jobId);
+					continue;
+				}
 
 				MemoryContextSwitchTo(schedulerContext);
 				RunningJob *runEntry = hash_search(runningJobs, &job->jobId,
 												   HASH_ENTER, &found);
 
+				runEntry->runId = job->runId;
 				runEntry->lastCommandTag = NULL;
 
 				PG_TRY();
@@ -487,7 +625,7 @@ pg_job_scheduler_main(PG_FUNCTION_ARGS)
 					elog(LOG, "job scheduler: failed to launch worker for job %ld: %s",
 						 (long) job->jobId, edata->message);
 
-					MarkJobFailed(job->jobId, edata->message);
+					FinishRun(job->runId, job->jobId, false, NULL, edata->message);
 					FreeErrorData(edata);
 				}
 				PG_END_TRY();
@@ -497,9 +635,9 @@ pg_job_scheduler_main(PG_FUNCTION_ARGS)
 		}
 
 		/* Step 4: sleep, wake on signals */
-		LightSleep(JOB_SCHEDULER_SLEEP_MS);
-
 		MemoryContextReset(loopContext);
+
+		LightSleep(JOB_SCHEDULER_SLEEP_MS);
 	}
 
 	/* clean shutdown: terminate any still-running workers */
@@ -512,7 +650,8 @@ pg_job_scheduler_main(PG_FUNCTION_ARGS)
 		while ((entry = (RunningJob *) hash_seq_search(&hashStatus)) != NULL)
 		{
 			EndAttachedWorker(entry->worker);
-			MarkJobFailed(entry->jobId, "job scheduler shutting down");
+			FinishRun(entry->runId, entry->jobId, false, NULL,
+					  "job scheduler shutting down");
 		}
 	}
 
@@ -529,21 +668,52 @@ pg_job_scheduler_main(PG_FUNCTION_ARGS)
 Datum
 pg_job_scheduler_submit_job(PG_FUNCTION_ARGS)
 {
-	char	   *command = text_to_cstring(PG_GETARG_TEXT_PP(0));
-	char	   *databaseName = text_to_cstring(PG_GETARG_TEXT_PP(1));
-	char	   *userName = text_to_cstring(PG_GETARG_TEXT_PP(2));
+	if (PG_ARGISNULL(0))
+		ereport(ERROR, (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+						errmsg("command cannot be null")));
+
+	if (PG_ARGISNULL(1) || PG_ARGISNULL(2))
+		ereport(ERROR, (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+						errmsg("database name and user name cannot be null")));
 
 	SPI_START();
 
-	DECLARE_SPI_ARGS(3);
+	DECLARE_SPI_ARGS(5);
 
-	SPI_ARG_DATUM(1, TEXTOID, CStringGetTextDatum(command));
-	SPI_ARG_DATUM(2, TEXTOID, CStringGetTextDatum(databaseName));
-	SPI_ARG_DATUM(3, TEXTOID, CStringGetTextDatum(userName));
+	SPI_ARG_DATUM(1, TEXTOID, PG_GETARG_DATUM(0));
+	SPI_ARG_DATUM(2, TEXTOID, PG_GETARG_DATUM(1));
+	SPI_ARG_DATUM(3, TEXTOID, PG_GETARG_DATUM(2));
 
+	if (PG_ARGISNULL(3))
+	{
+		SPI_ARG_NULL(4, INTERVALOID);
+	}
+	else
+	{
+		SPI_ARG_DATUM(4, INTERVALOID, PG_GETARG_DATUM(3));
+	}
+
+	if (PG_ARGISNULL(4))
+	{
+		SPI_ARG_NULL(5, TEXTOID);
+	}
+	else
+	{
+		SPI_ARG_DATUM(5, TEXTOID, PG_GETARG_DATUM(4));
+	}
+
+	/*
+	 * A cron job starts at its first matching time, which also validates the
+	 * expression here rather than leaving behind a job that can never be
+	 * claimed. Everything else is due immediately.
+	 */
 	SPI_EXECUTE("INSERT INTO " JOB_SCHEDULER_SCHEMA ".jobs "
-				"(command, database_name, user_name) "
-				"VALUES ($1, $2, $3) "
+				"(command, database_name, user_name, schedule_interval, "
+				" schedule_cron, next_run_at) "
+				"VALUES ($1, $2, $3, $4, $5, "
+				"        CASE WHEN $5 IS NOT NULL "
+				"               THEN " JOB_SCHEDULER_SCHEMA ".next_cron_run($5, now()) "
+				"             ELSE now() END) "
 				"RETURNING job_id",
 				false);
 
@@ -560,7 +730,7 @@ pg_job_scheduler_submit_job(PG_FUNCTION_ARGS)
 
 
 /*
- * pg_job_scheduler_list_jobs returns all jobs from the queue table.
+ * pg_job_scheduler_list_jobs returns all job definitions.
  */
 Datum
 pg_job_scheduler_list_jobs(PG_FUNCTION_ARGS)
@@ -571,20 +741,70 @@ pg_job_scheduler_list_jobs(PG_FUNCTION_ARGS)
 
 	SPI_START();
 
-	SPI_execute("SELECT job_id, command, database_name, user_name, status, "
-				"created_at, started_at, completed_at, result, error_message "
+	SPI_execute("SELECT job_id, command, database_name, user_name, "
+				"schedule_interval, schedule_cron, status, next_run_at, created_at "
 				"FROM " JOB_SCHEDULER_SCHEMA ".jobs "
 				"ORDER BY job_id",
 				true, 0);
 
-	for (uint64 i = 0; i < SPI_processed; i++)
+	for (uint64 rowIndex = 0; rowIndex < SPI_processed; rowIndex++)
 	{
-		Datum		values[LIST_COL_COUNT];
-		bool		nulls[LIST_COL_COUNT];
+		Datum		values[LIST_JOBS_COL_COUNT];
+		bool		nulls[LIST_JOBS_COL_COUNT];
 
-		for (int col = 0; col < LIST_COL_COUNT; col++)
+		for (int column = 0; column < LIST_JOBS_COL_COUNT; column++)
 		{
-			values[col] = GET_SPI_DATUM(i, col + 1, &nulls[col]);
+			values[column] = GET_SPI_DATUM(rowIndex, column + 1, &nulls[column]);
+		}
+
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+	}
+
+	SPI_END();
+
+	PG_RETURN_VOID();
+}
+
+
+/*
+ * pg_job_scheduler_list_job_runs returns the run history, optionally
+ * restricted to a single job.
+ */
+Datum
+pg_job_scheduler_list_job_runs(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+
+	InitMaterializedSRF(fcinfo, 0);
+
+	SPI_START();
+
+	DECLARE_SPI_ARGS(1);
+
+	if (PG_ARGISNULL(0))
+	{
+		SPI_ARG_NULL(1, INT8OID);
+	}
+	else
+	{
+		SPI_ARG_DATUM(1, INT8OID, PG_GETARG_DATUM(0));
+	}
+
+	SPI_EXECUTE("SELECT run_id, job_id, status, started_at, completed_at, "
+				"result, error_message "
+				"FROM " JOB_SCHEDULER_SCHEMA ".job_runs "
+				"WHERE $1 IS NULL OR job_id = $1 "
+				"ORDER BY run_id",
+				true);
+
+	for (uint64 rowIndex = 0; rowIndex < SPI_processed; rowIndex++)
+	{
+		Datum		values[LIST_JOB_RUNS_COL_COUNT];
+		bool		nulls[LIST_JOB_RUNS_COL_COUNT];
+
+		for (int column = 0; column < LIST_JOB_RUNS_COL_COUNT; column++)
+		{
+			values[column] = GET_SPI_DATUM(rowIndex, column + 1, &nulls[column]);
 		}
 
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);

@@ -19,7 +19,7 @@ def postgres(installcheck):
 
 
 @pytest.fixture(scope="module")
-def pg_job_scheduler():
+def pg_job_scheduler(postgres):
     superuser_conn = open_pg_conn()
 
     run_command(
