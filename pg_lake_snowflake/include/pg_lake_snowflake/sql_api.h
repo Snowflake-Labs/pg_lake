@@ -51,6 +51,13 @@ typedef struct SnowflakeStatement
 	int			partitionCount;
 	int64		totalRowCount;
 
+	/*
+	 * Rows the statement changed, from the stats of the response. Snowflake
+	 * reports insert, update and delete counts separately and only one of
+	 * them is ever set by one statement, so they are summed into one number.
+	 */
+	int64		affectedRowCount;
+
 	/* cursor state */
 	int			currentPartition;
 	int			rowCountInPartition;
@@ -73,3 +80,9 @@ extern void SnowflakeStatementClose(SnowflakeStatement * statement);
 
 /* run a statement and return the first column of the first row, or NULL */
 extern char *SnowflakeExecuteScalar(SnowflakeConnection * connection, const char *sql);
+
+/*
+ * Warn, once per transaction, that a write about to happen inside a transaction
+ * block will not be undone by rolling that block back.
+ */
+extern void SnowflakeWarnIfWriteIsNotTransactional(void);

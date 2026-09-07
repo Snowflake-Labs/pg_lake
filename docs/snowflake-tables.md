@@ -13,7 +13,9 @@ Snowflake-managed Iceberg tables and views. Nothing is copied and no data files
 are read directly, which is what makes hybrid tables reachable at all: they have
 no file layout for a lake reader to open.
 
-Attached tables are read-only.
+Attached tables can be read and written: `INSERT`, `COPY`, `UPDATE`, `DELETE` and
+`TRUNCATE` all work, with the limits described under
+[Writing](#writing) below.
 
 ## Setting up
 
@@ -60,6 +62,8 @@ SELECT lake_snowflake.test_connection('sf');
 | `role` | Role the statements run as. |
 | `statement_timeout` | Seconds Snowflake may spend on one statement. Overrides `pg_lake_snowflake.statement_timeout`. |
 | `enable_aggregate_pushdown` | Set to `false` to keep grouping and aggregation local for this server. |
+| `batch_size` | Rows one `INSERT` sends. Defaults to `pg_lake_snowflake.batch_size`. |
+| `updatable` | Set to `false` to make every table on this server read-only. |
 
 ### User mapping options
 
@@ -77,6 +81,16 @@ shows up as `Snowflake rejected the credentials of server "sf"`. Key-pair
 authentication needs the public key registered on the Snowflake user with
 `ALTER USER ... SET RSA_PUBLIC_KEY = '...'`; the JWT is signed locally and cached
 for the session.
+
+### Foreign table options
+
+| Option | Meaning |
+| --- | --- |
+| `database`, `schema_name`, `table_name` | Which Snowflake table this is. |
+| `row_estimate` | Rows to assume for planning, instead of analyzing. |
+| `batch_size` | Rows one `INSERT` sends, overriding the server. |
+| `updatable` | Set to `false` to make this table read-only. |
+| `column_name` (per column) | The Snowflake name of a column, when it is not the upper-case of the Postgres one. |
 
 ## Attaching tables
 
@@ -175,7 +189,9 @@ Pushed down:
   rows it keeps,
 - `GROUP BY` with `COUNT`, `SUM`, `MIN`, `MAX`, and `HAVING`,
 - parameters of a prepared statement, which are spliced into the statement when
-  it runs.
+  it runs,
+- the whole of an `UPDATE`, a `DELETE` or a `TRUNCATE`, which is the only way
+  those run at all (see [Writing](#writing)).
 
 Deliberately not pushed down, because Snowflake would answer differently rather
 than fail:
@@ -192,6 +208,103 @@ than fail:
 
 Everything else is evaluated by PostgreSQL after the rows arrive, so a query
 always returns the same answer with pushdown as without it.
+
+## Writing
+
+```sql
+INSERT INTO orders (o_orderkey, o_totalprice) VALUES (1, 9.99), (2, 12.50);
+INSERT INTO orders SELECT * FROM local_orders;
+COPY orders (o_orderkey, o_totalprice) FROM '/tmp/orders.csv' WITH (format csv);
+
+UPDATE orders SET o_totalprice = o_totalprice * 2 WHERE o_orderkey = 1;
+DELETE FROM orders WHERE o_orderkey > 100;
+TRUNCATE orders;
+```
+
+### Writes are not part of your transaction
+
+Snowflake's SQL API has no session that spans requests, so **each statement
+commits on its own**. A `ROLLBACK` does not undo a write that already went out,
+and a statement that fails half way through a multi-statement load leaves the
+batches before it in place. Writing inside a transaction block warns about this
+once per transaction; set
+`pg_lake_snowflake.warn_on_write_in_transaction_block` to `off` if you would
+rather not hear it.
+
+That is a property of the transport, not a setting: nothing here can make a
+Snowflake write participate in a PostgreSQL transaction.
+
+### INSERT and COPY
+
+Rows are sent as batched `INSERT` statements, `pg_lake_snowflake.batch_size` rows
+per statement (500 by default, or the `batch_size` option of the table or
+server). A batch is also split when its text would grow past what Snowflake
+accepts, so a wide table does not need a smaller setting than a narrow one. One
+statement is one round trip, so the batch size is what decides how fast a load
+runs.
+
+Two details worth knowing:
+
+- A column your `INSERT` does not mention is left out of the statement, so the
+  `DEFAULT` or the `AUTOINCREMENT` that Snowflake has for it applies. A column
+  that has a PostgreSQL default on the foreign table is sent, because then the
+  value in the row *is* that default.
+- `COPY` cannot see which columns you listed, so it sends all of them and the
+  ones you left out arrive as NULL rather than as the Snowflake default.
+
+`RETURNING` is not supported: Snowflake answers a modification with a row count
+rather than with the rows it changed. Neither is `ON CONFLICT`.
+
+### UPDATE and DELETE
+
+An `UPDATE` or a `DELETE` is only ever sent as one statement that Snowflake
+evaluates in full:
+
+```sql
+EXPLAIN (VERBOSE, COSTS OFF) UPDATE ht SET name = 'x' WHERE id = 2;
+--  Update on ht
+--    ->  Foreign Update on ht
+--          Snowflake SQL: UPDATE "DB"."PUBLIC"."HT" SET "NAME" = 'x' WHERE (("ID" = 2))
+```
+
+There is no row-by-row fallback, and that is deliberate. PostgreSQL modifies rows
+it has already read, identified by a row identifier the wrapper carries along, and
+a Snowflake table exposes nothing that identifies a row: no `ctid`, no rowid, and
+a primary key only on a hybrid table. Matching rows by value instead would change
+the wrong number of rows as soon as two of them are equal.
+
+So the statement is refused when any part of it would have to be evaluated here:
+
+```sql
+UPDATE ht SET name = 'x' WHERE name > 'a';
+-- ERROR:  cannot update the Snowflake table "ht" one row at a time
+-- DETAIL:  A Snowflake table has no row identifier, so the whole statement has to
+--          be one Snowflake can evaluate: its conditions and its assignments must
+--          refer only to "ht" and be of a kind that is pushed down.
+```
+
+The way out is to make the condition one Snowflake can evaluate — see
+[What runs in Snowflake](#what-runs-in-snowflake) for which ones those are. A
+condition that names another table, a subquery, or an ordering comparison over
+text all keep the statement local and therefore refuse it.
+
+### TRUNCATE
+
+`TRUNCATE` becomes Snowflake's own `TRUNCATE TABLE`, one statement per table.
+`RESTART IDENTITY` is refused, because Snowflake does not expose the state of a
+column's sequence. `CASCADE` is not passed on: there is nothing in Snowflake for
+it to mean, and a hybrid table with dependents refuses the truncation itself.
+
+### Making a table read-only
+
+A credential that is not supposed to write is best described to PostgreSQL, so
+that it reports the refusal without a round trip:
+
+```sql
+ALTER SERVER sf OPTIONS (ADD updatable 'false');
+ALTER FOREIGN TABLE orders OPTIONS (ADD updatable 'false');
+-- ERROR:  foreign table "orders" does not allow inserts
+```
 
 ## Statistics
 
@@ -213,6 +326,8 @@ the `row_estimate` option of the table if it has one.
 | `pg_lake_snowflake.statement_timeout` | `300s` | Seconds Snowflake may spend on one statement. |
 | `pg_lake_snowflake.enable_aggregate_pushdown` | `on` | Whether grouping and aggregation may run remotely. |
 | `pg_lake_snowflake.log_remote_sql` | `off` | Log every statement sent to Snowflake. |
+| `pg_lake_snowflake.batch_size` | `500` | Rows one `INSERT` statement sends. |
+| `pg_lake_snowflake.warn_on_write_in_transaction_block` | `on` | Warn once per transaction that a write inside a transaction block will not be rolled back. |
 | `pg_lake_snowflake.allow_plain_http` | `off` | Allow an `account_url` that is not https. For tests against a local mock of the SQL API. |
 
 ## Running statements directly
@@ -228,8 +343,9 @@ foreign server.
 
 ## Limitations
 
-- Attached tables are read-only. `INSERT`, `UPDATE`, `DELETE` and `COPY` into
-  Snowflake are not supported.
+- A write is not part of your transaction, an `UPDATE` or a `DELETE` has to be one
+  Snowflake can evaluate in full, and `RETURNING` and `ON CONFLICT` are not
+  supported. See [Writing](#writing).
 - Joins are not pushed down: a join between two Snowflake tables reads both and
   joins them in PostgreSQL.
 - `ORDER BY` is not pushed down.

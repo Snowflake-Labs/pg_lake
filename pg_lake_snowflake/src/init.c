@@ -38,6 +38,8 @@ int			SnowflakeStatementTimeoutSeconds = 300;
 bool		SnowflakeEnableAggregatePushdown = true;
 bool		SnowflakeLogRemoteSql = false;
 bool		SnowflakeAllowPlainHttp = false;
+int			SnowflakeDefaultBatchSize = 500;
+bool		SnowflakeWarnOnWriteInTransactionBlock = true;
 
 void		_PG_init(void);
 
@@ -120,6 +122,34 @@ DefineSnowflakeSettings(void)
 							 &SnowflakeAllowPlainHttp,
 							 false,
 							 PGC_SUSET,
+							 0,
+							 NULL, NULL, NULL);
+
+	DefineCustomIntVariable(
+							"pg_lake_snowflake.batch_size",
+							gettext_noop("Rows an INSERT sends to Snowflake in one "
+										 "statement."),
+							gettext_noop("A statement is one round trip, so this is "
+										 "what decides the speed of a load. The "
+										 "batch_size option of a table or a server "
+										 "overrides it."),
+							&SnowflakeDefaultBatchSize,
+							500, 1, 100000,
+							PGC_USERSET,
+							0,
+							NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+							 "pg_lake_snowflake.warn_on_write_in_transaction_block",
+							 gettext_noop("Warn when a Snowflake table is written "
+										  "inside a transaction block."),
+							 gettext_noop("Snowflake commits each statement on its "
+										  "own, so a ROLLBACK cannot undo a write. "
+										  "The warning is issued once per "
+										  "transaction."),
+							 &SnowflakeWarnOnWriteInTransactionBlock,
+							 true,
+							 PGC_USERSET,
 							 0,
 							 NULL, NULL, NULL);
 

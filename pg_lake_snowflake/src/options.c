@@ -87,6 +87,12 @@ static SnowflakeOption SnowflakeOptions[] =
 	{
 		"enable_aggregate_pushdown", ForeignServerRelationId, false
 	},
+	{
+		"batch_size", ForeignServerRelationId, false
+	},
+	{
+		"updatable", ForeignServerRelationId, false
+	},
 
 	/* user mapping options */
 	{
@@ -120,6 +126,12 @@ static SnowflakeOption SnowflakeOptions[] =
 	},
 	{
 		"row_estimate", ForeignTableRelationId, false
+	},
+	{
+		"batch_size", ForeignTableRelationId, false
+	},
+	{
+		"updatable", ForeignTableRelationId, false
 	},
 
 	/* column options */
@@ -241,6 +253,30 @@ pg_lake_snowflake_validator(PG_FUNCTION_ARGS)
 								"not \"%s\"", optionValue)));
 			}
 		}
+		else if (strcmp(optionName, "batch_size") == 0)
+		{
+			int			batchSize = 0;
+
+			if (!parse_int(optionValue, &batchSize, 0, NULL) || batchSize < 1)
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
+						 errmsg("\"batch_size\" must be a positive number of rows, "
+								"not \"%s\"", optionValue)));
+			}
+		}
+		else if (strcmp(optionName, "updatable") == 0)
+		{
+			bool		isUpdatable = false;
+
+			if (!parse_bool(optionValue, &isUpdatable))
+			{
+				ereport(ERROR,
+						(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
+						 errmsg("\"updatable\" must be a boolean, not \"%s\"",
+								optionValue)));
+			}
+		}
 		else if (strcmp(optionName, "authenticator") == 0)
 		{
 			if (AuthMethodFromName(optionValue) == SNOWFLAKE_AUTH_UNSPECIFIED)
@@ -308,7 +344,7 @@ pg_lake_snowflake_validator(PG_FUNCTION_ARGS)
 static SnowflakeOption *
 FindSnowflakeOption(const char *optionName, Oid catalogId)
 {
-	for (const SnowflakeOption * option = SnowflakeOptions; option->optionName; option++)
+	for (SnowflakeOption * option = SnowflakeOptions; option->optionName; option++)
 	{
 		if (option->catalogId == catalogId && strcmp(option->optionName, optionName) == 0)
 			return option;
@@ -897,6 +933,43 @@ SnowflakeQualifiedTableName(SnowflakeTable * table)
 					SnowflakeQuoteIdentifier(table->database, table->databaseFromOption),
 					SnowflakeQuoteIdentifier(table->schemaName, table->schemaNameFromOption),
 					SnowflakeQuoteIdentifier(table->tableName, table->tableNameFromOption));
+}
+
+
+/*
+ * SnowflakeTableOption returns an option of a foreign table, falling back to the
+ * same option on its server, or NULL when neither sets it.
+ */
+char *
+SnowflakeTableOption(Oid relationId, const char *optionName)
+{
+	ForeignTable *foreignTable = GetForeignTable(relationId);
+	char	   *value = FindOption(foreignTable->options, optionName);
+
+	if (value != NULL)
+		return value;
+
+	ForeignServer *server = GetForeignServer(foreignTable->serverid);
+
+	return FindOption(server->options, optionName);
+}
+
+
+/*
+ * SnowflakeTableIsUpdatable returns whether statements may write to a foreign
+ * table. A server or a table marked read-only is how a read-only credential is
+ * described to Postgres, so that it reports the refusal itself.
+ */
+bool
+SnowflakeTableIsUpdatable(Oid relationId)
+{
+	char	   *option = SnowflakeTableOption(relationId, "updatable");
+	bool		isUpdatable = true;
+
+	if (option != NULL)
+		(void) parse_bool(option, &isUpdatable);
+
+	return isUpdatable;
 }
 
 

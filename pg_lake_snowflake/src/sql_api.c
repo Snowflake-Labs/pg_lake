@@ -62,6 +62,9 @@
 static List *SnowflakeRunningStatements = NIL;
 static bool SnowflakeXactCallbackRegistered = false;
 
+/* whether this transaction has already been told that its writes will stand */
+static bool SnowflakeWarnedAboutTransactionBlock = false;
+
 static void SnowflakeXactCallback(XactEvent event, void *arg);
 static void RegisterRunningStatement(SnowflakeStatement * statement);
 static void ForgetRunningStatement(SnowflakeStatement * statement);
@@ -380,6 +383,18 @@ PollUntilComplete(SnowflakeStatement * statement, Jsonb **response)
 static void
 ReadResultSetMetadata(SnowflakeStatement * statement, JsonbContainer *response)
 {
+	JsonbValue *statistics = FindJsonField(response, "stats");
+
+	if (statistics != NULL && statistics->type == jbvBinary)
+	{
+		JsonbContainer *statisticsContainer = statistics->val.binary.data;
+
+		statement->affectedRowCount =
+			JsonFieldAsInt64(statisticsContainer, "numRowsInserted", 0) +
+			JsonFieldAsInt64(statisticsContainer, "numRowsUpdated", 0) +
+			JsonFieldAsInt64(statisticsContainer, "numRowsDeleted", 0);
+	}
+
 	JsonbValue *metadata = FindJsonField(response, "resultSetMetaData");
 
 	if (metadata == NULL || metadata->type != jbvBinary)
@@ -726,6 +741,37 @@ SnowflakeXactCallback(XactEvent event, void *arg)
 		/* SnowflakeStatementClose removes the statement from the list */
 		SnowflakeStatementClose(statement);
 	}
+
+	SnowflakeWarnedAboutTransactionBlock = false;
+}
+
+
+/*
+ * SnowflakeWarnIfWriteIsNotTransactional warns that a write inside a transaction
+ * block is not part of that transaction.
+ *
+ * The SQL API has no session that spans requests, so each statement commits on
+ * its own and a ROLLBACK afterwards leaves it in place. Outside a transaction
+ * block there is nothing to mislead anyone, so the warning is only for the case
+ * where the surrounding block suggests otherwise, and only once for it.
+ */
+void
+SnowflakeWarnIfWriteIsNotTransactional(void)
+{
+	if (!SnowflakeWarnOnWriteInTransactionBlock)
+		return;
+
+	if (SnowflakeWarnedAboutTransactionBlock || !IsTransactionBlock())
+		return;
+
+	SnowflakeWarnedAboutTransactionBlock = true;
+
+	ereport(WARNING,
+			(errmsg("a write to a Snowflake table is not part of this transaction"),
+			 errdetail("Snowflake commits each statement on its own, so ROLLBACK "
+					   "will not undo it."),
+			 errhint("Set pg_lake_snowflake.warn_on_write_in_transaction_block to "
+					 "off to silence this.")));
 }
 
 

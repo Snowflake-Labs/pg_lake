@@ -546,3 +546,219 @@ def test_a_missing_user_mapping_says_what_to_do(snowflake, sf_conn):
     assert "CREATE USER MAPPING" in error
 
     run_command("DROP SERVER no_mapping CASCADE", sf_conn)
+
+
+def test_insert_sends_one_statement_per_batch(snowflake, sf_conn):
+    attach(
+        snowflake,
+        sf_conn,
+        [column("ID", "fixed", precision=5, scale=0), column("NAME", "text")],
+        [[]],
+    )
+    snowflake.route("INSERT INTO", [column("STATUS", "text")], [[["4"]]])
+
+    run_command("SET pg_lake_snowflake.batch_size TO 3", sf_conn)
+    run_command(
+        "INSERT INTO t (id, name) SELECT i, 'row_' || i FROM generate_series(1, 8) i",
+        sf_conn,
+    )
+
+    inserts = [s for s in snowflake.statements if s.startswith("INSERT INTO")]
+
+    # 8 rows in batches of 3
+    assert len(inserts) == 3
+    assert inserts[0].count("(") - inserts[0].count("((") >= 3
+    assert '"ID", "NAME"' in inserts[0]
+    assert "(1, 'row_1')" in inserts[0]
+    assert "(8, 'row_8')" in inserts[-1]
+
+
+def test_insert_leaves_unmentioned_columns_to_snowflake(snowflake, sf_conn):
+    """A column the statement did not mention keeps its Snowflake default."""
+    attach(
+        snowflake,
+        sf_conn,
+        [
+            column("ID", "fixed", precision=5, scale=0),
+            column("NAME", "text"),
+            column("CREATED", "timestamp_ntz", scale=9),
+        ],
+        [[]],
+    )
+    snowflake.route("INSERT INTO", [column("STATUS", "text")], [[["1"]]])
+
+    run_command("INSERT INTO t (id) VALUES (7)", sf_conn)
+
+    statement = snowflake.statement_containing("INSERT INTO")
+    assert '("ID")' in statement
+    assert "CREATED" not in statement
+
+
+def test_insert_converts_semi_structured_and_binary(snowflake, sf_conn):
+    """Snowflake takes only constants in VALUES, so conversions move to a SELECT."""
+    attach(
+        snowflake,
+        sf_conn,
+        [
+            column("DOC", "variant"),
+            column("BLOB", "binary"),
+            column("N", "fixed", precision=5, scale=0),
+        ],
+        [[]],
+    )
+    snowflake.route("INSERT INTO", [column("STATUS", "text")], [[["2"]]])
+
+    run_command(
+        """
+        INSERT INTO t (doc, blob, n)
+        VALUES ('{"a": 1}', '\\xdeadbeef', 1), (NULL, NULL, 2)
+        """,
+        sf_conn,
+    )
+
+    statement = snowflake.statement_containing("INSERT INTO")
+
+    assert "SELECT PARSE_JSON(column1), TO_BINARY(column2, 'HEX'), column3" in statement
+    assert "FROM VALUES" in statement
+    assert "('{\"a\": 1}', 'deadbeef', 1)" in statement
+    # an all-NULL column would leave the conversion nothing to resolve against
+    assert "(NULL::VARCHAR, NULL::VARCHAR, 2)" in statement
+
+
+def test_copy_from_inserts_every_column(snowflake, sf_conn):
+    attach(
+        snowflake,
+        sf_conn,
+        [column("ID", "fixed", precision=5, scale=0), column("NAME", "text")],
+        [[]],
+    )
+    snowflake.route("INSERT INTO", [column("STATUS", "text")], [[["2"]]])
+
+    cursor = sf_conn.cursor()
+    try:
+        cursor.copy_expert(
+            "COPY t (id, name) FROM STDIN",
+            __import__("io").StringIO("1\tone\n2\ttwo\n"),
+        )
+    finally:
+        cursor.close()
+
+    statement = snowflake.statement_containing("INSERT INTO")
+    assert "(1, 'one')" in statement
+    assert "(2, 'two')" in statement
+
+
+def test_update_is_pushed_down_whole(snowflake, sf_conn):
+    attach(
+        snowflake,
+        sf_conn,
+        [column("ID", "fixed", precision=5, scale=0), column("NAME", "text")],
+        [[]],
+    )
+    snowflake.route("UPDATE ", [column("STATUS", "text")], [[["1"]]])
+
+    plan = run_query(
+        "EXPLAIN (VERBOSE, COSTS OFF) UPDATE t SET name = 'x' WHERE id = 2", sf_conn
+    )
+    plan_text = "\n".join(row[0] for row in plan)
+
+    assert "Foreign Update" in plan_text
+    assert (
+        'UPDATE "MOCKDB"."PUBLIC"."T" SET "NAME" = \'x\' WHERE (("ID" = 2))'
+        in plan_text
+    )
+
+    run_command("UPDATE t SET name = 'x' WHERE id = 2", sf_conn)
+
+    assert "\"NAME\" = 'x'" in snowflake.statement_containing("UPDATE ")
+
+
+def test_delete_is_pushed_down_whole(snowflake, sf_conn):
+    attach(snowflake, sf_conn, [column("ID", "fixed", precision=5, scale=0)], [[]])
+    snowflake.route("DELETE FROM", [column("STATUS", "text")], [[["3"]]])
+
+    run_command("DELETE FROM t WHERE id > 5", sf_conn)
+
+    assert 'DELETE FROM "MOCKDB"."PUBLIC"."T" WHERE (("ID" > 5))' in (
+        snowflake.statement_containing("DELETE FROM")
+    )
+
+
+def test_update_and_delete_refuse_local_conditions(snowflake, sf_conn):
+    """A condition Snowflake cannot evaluate would decide which rows change."""
+    attach(snowflake, sf_conn, [column("NAME", "text")], [[]])
+
+    for statement in (
+        "UPDATE t SET name = 'x' WHERE name > 'a'",
+        "DELETE FROM t WHERE name > 'a'",
+    ):
+        error = run_command(statement, sf_conn, raise_error=False)
+
+        assert "one row at a time" in error
+        assert "no row identifier" in error
+
+
+def test_returning_is_refused(snowflake, sf_conn):
+    attach(snowflake, sf_conn, [column("ID", "fixed", precision=5, scale=0)], [[]])
+
+    error = run_command(
+        "INSERT INTO t (id) VALUES (1) RETURNING id", sf_conn, raise_error=False
+    )
+
+    assert "RETURNING is not supported" in error
+
+
+def test_truncate_empties_the_remote_table(snowflake, sf_conn):
+    attach(snowflake, sf_conn, [column("ID", "fixed", precision=5, scale=0)], [[]])
+    snowflake.route("TRUNCATE", [column("STATUS", "text")], [[["ok"]]])
+
+    run_command("TRUNCATE t", sf_conn)
+
+    assert snowflake.statement_containing("TRUNCATE") == (
+        'TRUNCATE TABLE "MOCKDB"."PUBLIC"."T"'
+    )
+
+
+def test_truncate_refuses_restart_identity(snowflake, sf_conn):
+    attach(snowflake, sf_conn, [column("ID", "fixed", precision=5, scale=0)], [[]])
+
+    error = run_command("TRUNCATE t RESTART IDENTITY", sf_conn, raise_error=False)
+
+    assert "RESTART IDENTITY is not supported" in error
+
+
+def test_a_read_only_table_refuses_every_write(snowflake, sf_conn):
+    attach(snowflake, sf_conn, [column("ID", "fixed", precision=5, scale=0)], [[]])
+    run_command("ALTER FOREIGN TABLE t OPTIONS (ADD updatable 'false')", sf_conn)
+
+    for statement, message in (
+        ("INSERT INTO t (id) VALUES (1)", "does not allow inserts"),
+        ("UPDATE t SET id = 1 WHERE id = 2", "does not allow updates"),
+        ("DELETE FROM t WHERE id = 2", "does not allow deletes"),
+        ("TRUNCATE t", "does not allow truncates"),
+    ):
+        error = run_command(statement, sf_conn, raise_error=False)
+
+        assert message in error
+
+
+def test_a_write_in_a_transaction_block_warns_once(snowflake, sf_conn):
+    attach(snowflake, sf_conn, [column("ID", "fixed", precision=5, scale=0)], [[]])
+    snowflake.route("INSERT INTO", [column("STATUS", "text")], [[["1"]]])
+
+    notices = []
+    sf_conn.autocommit = False
+
+    try:
+        cursor = sf_conn.cursor()
+        cursor.execute("INSERT INTO t (id) VALUES (1)")
+        cursor.execute("INSERT INTO t (id) VALUES (2)")
+        cursor.close()
+        notices = list(sf_conn.notices)
+        sf_conn.rollback()
+    finally:
+        sf_conn.autocommit = True
+
+    warnings = [n for n in notices if "not part of this transaction" in n]
+
+    assert len(warnings) == 1

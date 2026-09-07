@@ -142,6 +142,7 @@ static void SnowflakeNaturalDatum(const char *value, SnowflakeResultColumn * col
 static char *OutputDatum(Datum value, Oid typeId);
 static int64 ParseFractionalSeconds(const char *value, int64 *wholeSeconds);
 static char *FormatSnowflakeStringLiteral(const char *value);
+static char *FormatLiteral(Datum value, Oid typeId, bool forValuesClause);
 
 
 /*
@@ -464,6 +465,18 @@ SnowflakeTypeIsPushdownSafe(Oid typeId)
 
 
 /*
+ * SnowflakeTypeIsWritable returns whether a value of this Postgres type can be
+ * written into a Snowflake column as a literal.
+ */
+bool
+SnowflakeTypeIsWritable(Oid typeId)
+{
+	return SnowflakeTypeIsPushdownSafe(typeId) ||
+		typeId == JSONBOID || typeId == JSONOID;
+}
+
+
+/*
  * SnowflakeFormatLiteral writes a Datum as a Snowflake literal.
  *
  * Every literal that is not a plain number is written with an explicit cast, so
@@ -472,6 +485,60 @@ SnowflakeTypeIsPushdownSafe(Oid typeId)
  */
 char *
 SnowflakeFormatLiteral(Datum value, Oid typeId)
+{
+	return FormatLiteral(value, typeId, false);
+}
+
+
+/*
+ * SnowflakeFormatValuesLiteral writes a Datum as a constant that is accepted in
+ * a VALUES clause, leaving any conversion to
+ * SnowflakeValuesColumnExpression.
+ */
+char *
+SnowflakeFormatValuesLiteral(Datum value, Oid typeId)
+{
+	return FormatLiteral(value, typeId, true);
+}
+
+
+/*
+ * SnowflakeTypeNeedsValuesExpression returns whether a value of this type has to
+ * be converted outside the VALUES clause.
+ */
+bool
+SnowflakeTypeNeedsValuesExpression(Oid typeId)
+{
+	return typeId == JSONBOID || typeId == JSONOID || typeId == BYTEAOID;
+}
+
+
+/*
+ * SnowflakeValuesColumnExpression returns the SELECT list expression that turns
+ * one column of a VALUES clause into the value to insert.
+ */
+char *
+SnowflakeValuesColumnExpression(Oid typeId, int columnNumber)
+{
+	switch (typeId)
+	{
+		case JSONBOID:
+		case JSONOID:
+			return psprintf("PARSE_JSON(column%d)", columnNumber);
+		case BYTEAOID:
+			return psprintf("TO_BINARY(column%d, 'HEX')", columnNumber);
+		default:
+			return psprintf("column%d", columnNumber);
+	}
+}
+
+
+/*
+ * FormatLiteral writes a Datum as a Snowflake expression, or as a plain constant
+ * when it has to stand in a VALUES clause.
+ */
+static char *
+FormatLiteral(Datum value, Oid typeId, bool forValuesClause)
 {
 	switch (typeId)
 	{
@@ -562,6 +629,22 @@ SnowflakeFormatLiteral(Datum value, Oid typeId)
 								FormatSnowflakeStringLiteral(psprintf("%s+00:00", utcText)));
 			}
 
+		case JSONBOID:
+		case JSONOID:
+			{
+				char	   *documentText =
+					FormatSnowflakeStringLiteral(OutputDatum(value, typeId));
+
+				if (forValuesClause)
+					return documentText;
+
+				/*
+				 * PARSE_JSON produces a VARIANT, which Snowflake accepts for
+				 * an OBJECT or an ARRAY column as well.
+				 */
+				return psprintf("PARSE_JSON(%s)", documentText);
+			}
+
 		case BYTEAOID:
 			{
 				char	   *hexText = OutputDatum(value, BYTEAOID);
@@ -569,6 +652,9 @@ SnowflakeFormatLiteral(Datum value, Oid typeId)
 				/* bytea_out produces the "\x<hex>" form */
 				if (hexText[0] == '\\' && hexText[1] == 'x')
 					hexText += 2;
+
+				if (forValuesClause)
+					return FormatSnowflakeStringLiteral(hexText);
 
 				return psprintf("TO_BINARY(%s, 'HEX')",
 								FormatSnowflakeStringLiteral(hexText));

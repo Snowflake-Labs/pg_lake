@@ -98,7 +98,28 @@ extern void SnowflakeDeparseSelect(PlannerInfo *root,
 								   SnowflakeRelationInfo * relationInfo,
 								   SnowflakeDeparsedQuery * query);
 
+/*
+ * An UPDATE or a DELETE is only ever sent as one statement that Snowflake
+ * evaluates in full, because a Snowflake table has no row identifier that a
+ * row-by-row modification could name.
+ */
+extern void SnowflakeDeparseDirectUpdate(PlannerInfo *root,
+										 SnowflakeRelationInfo * relationInfo,
+										 List *targetAttrs, List *setExpressions,
+										 SnowflakeDeparsedQuery * query);
+extern void SnowflakeDeparseDirectDelete(PlannerInfo *root,
+										 SnowflakeRelationInfo * relationInfo,
+										 SnowflakeDeparsedQuery * query);
+
 extern bool SnowflakeIsShippableExpression(Expr *expr,
+										   SnowflakeRelationInfo * relationInfo);
+
+/*
+ * Whether an expression can be assigned to a column remotely. A plain value of
+ * a writable type qualifies even when comparing that type would not, since
+ * writing it is not the operation whose meaning differs.
+ */
+extern bool SnowflakeIsShippableAssignment(Expr *expr,
 										   SnowflakeRelationInfo * relationInfo);
 
 /* fragments joined with $1, $2, ... in the holes, for EXPLAIN and logging */

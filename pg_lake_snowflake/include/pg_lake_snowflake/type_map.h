@@ -85,4 +85,21 @@ extern void SnowflakeInitTypeConversion(SnowflakeTypeConversion * conversion,
 extern Datum SnowflakeValueToDatum(const char *value, SnowflakeResultColumn * column,
 								   SnowflakeTypeConversion * conversion);
 extern bool SnowflakeTypeIsPushdownSafe(Oid typeId);
+
+/*
+ * A value that can be written faithfully, which is a wider set than the one that
+ * can be compared faithfully: json and jsonb become Snowflake semi-structured
+ * values on the way in, but comparing them is not the same operation on both
+ * sides.
+ */
+extern bool SnowflakeTypeIsWritable(Oid typeId);
+
+/*
+ * Snowflake accepts only constants in a VALUES clause, so a value whose type
+ * needs a function call to be built is written as a plain constant there and the
+ * call is applied in the SELECT list of an INSERT ... SELECT ... FROM VALUES.
+ */
+extern bool SnowflakeTypeNeedsValuesExpression(Oid typeId);
+extern char *SnowflakeFormatValuesLiteral(Datum value, Oid typeId);
+extern char *SnowflakeValuesColumnExpression(Oid typeId, int columnNumber);
 extern char *SnowflakeFormatLiteral(Datum value, Oid typeId);

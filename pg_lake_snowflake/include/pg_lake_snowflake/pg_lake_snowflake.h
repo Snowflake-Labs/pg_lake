@@ -38,6 +38,12 @@ extern bool SnowflakeLogRemoteSql;
 /* pg_lake_snowflake.allow_plain_http */
 extern bool SnowflakeAllowPlainHttp;
 
+/* pg_lake_snowflake.batch_size */
+extern int	SnowflakeDefaultBatchSize;
+
+/* pg_lake_snowflake.warn_on_write_in_transaction_block */
+extern bool SnowflakeWarnOnWriteInTransactionBlock;
+
 /*
  * A statement is one round trip to a warehouse, which no local cost can
  * compete with, so the startup cost is deliberately far above

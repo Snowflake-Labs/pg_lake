@@ -63,6 +63,7 @@
 
 #include "pg_lake_snowflake/deparse.h"
 #include "pg_lake_snowflake/import_schema.h"
+#include "pg_lake_snowflake/modify.h"
 #include "pg_lake_snowflake/options.h"
 #include "pg_lake_snowflake/pg_lake_snowflake.h"
 #include "pg_lake_snowflake/sql_api.h"
@@ -159,6 +160,29 @@ pg_lake_snowflake_handler(PG_FUNCTION_ARGS)
 	routine->AnalyzeForeignTable = SnowflakeAnalyzeForeignTable;
 	routine->GetForeignUpperPaths = SnowflakeGetForeignUpperPaths;
 	routine->ImportForeignSchema = SnowflakeImportForeignSchema;
+
+	/*
+	 * Writes. There is deliberately no AddForeignUpdateTargets: a Snowflake
+	 * table has no row identifier, so an UPDATE or a DELETE is only ever the
+	 * one statement that PlanDirectModify builds.
+	 */
+	routine->IsForeignRelUpdatable = SnowflakeIsForeignRelUpdatable;
+	routine->PlanForeignModify = SnowflakePlanForeignModify;
+	routine->BeginForeignModify = SnowflakeBeginForeignModify;
+	routine->ExecForeignInsert = SnowflakeExecForeignInsert;
+	routine->ExecForeignBatchInsert = SnowflakeExecForeignBatchInsert;
+	routine->GetForeignModifyBatchSize = SnowflakeGetForeignModifyBatchSize;
+	routine->ExecForeignUpdate = SnowflakeExecForeignUpdate;
+	routine->ExecForeignDelete = SnowflakeExecForeignDelete;
+	routine->EndForeignModify = SnowflakeEndForeignModify;
+	routine->BeginForeignInsert = SnowflakeBeginForeignInsert;
+	routine->EndForeignInsert = SnowflakeEndForeignInsert;
+	routine->PlanDirectModify = SnowflakePlanDirectModify;
+	routine->BeginDirectModify = SnowflakeBeginDirectModify;
+	routine->IterateDirectModify = SnowflakeIterateDirectModify;
+	routine->EndDirectModify = SnowflakeEndDirectModify;
+	routine->ExplainDirectModify = SnowflakeExplainDirectModify;
+	routine->ExecForeignTruncate = SnowflakeExecForeignTruncate;
 
 	PG_RETURN_POINTER(routine);
 }

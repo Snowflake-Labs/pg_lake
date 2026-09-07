@@ -12,6 +12,7 @@ Skipped unless the account is configured in the environment:
 The tests create their own schema, so the account needs rights to create one.
 """
 
+import io
 import os
 
 import pytest
@@ -266,3 +267,96 @@ def test_import_foreign_schema(sf_account):
     assert [(row[0], row[1]) for row in columns] == [("a", "integer"), ("b", "text")]
 
     run_command("DROP SCHEMA e2e_imported CASCADE", sf_account)
+
+
+def test_writes_round_trip(sf_account):
+    execute(
+        sf_account,
+        f"""
+        CREATE OR REPLACE TABLE {TEST_SCHEMA}.WRITTEN (
+          id number(10,0), name varchar(50), doc variant, blob binary,
+          d date, ts timestamp_ntz
+        )
+        """,
+    )
+    run_command(
+        "CREATE FOREIGN TABLE e2e_written () SERVER e2e_sf "
+        "OPTIONS (table_name 'WRITTEN')",
+        sf_account,
+    )
+
+    run_command(
+        """
+        INSERT INTO e2e_written (id, name, doc, blob, d, ts)
+        VALUES (1, 'one', '{"a": [1, 2]}', '\\xdeadbeef', '2021-03-19',
+                '2021-03-19 12:34:56.123'),
+               (2, NULL, NULL, NULL, NULL, NULL);
+        INSERT INTO e2e_written (id, name)
+        SELECT i, 'row_' || i FROM generate_series(3, 12) i;
+        """,
+        sf_account,
+    )
+
+    rows = run_query("SELECT count(*) AS c FROM e2e_written", sf_account)
+    assert rows[0]["c"] == 12
+
+    first = run_query("SELECT * FROM e2e_written WHERE id = 1", sf_account)[0]
+    assert first["name"] == "one"
+    assert first["doc"] == {"a": [1, 2]}
+    assert bytes(first["blob"]) == b"\xde\xad\xbe\xef"
+    assert str(first["d"]) == "2021-03-19"
+    assert str(first["ts"]) == "2021-03-19 12:34:56.123000"
+
+    # a pushed-down UPDATE, and its row count
+    cursor = sf_account.cursor()
+    cursor.execute("UPDATE e2e_written SET name = name || '!' WHERE id <= 3")
+    assert cursor.rowcount == 3
+    cursor.execute("DELETE FROM e2e_written WHERE id > 10")
+    assert cursor.rowcount == 2
+    cursor.close()
+
+    assert (
+        run_query("SELECT name FROM e2e_written WHERE id = 3", sf_account)[0]["name"]
+        == "row_3!"
+    )
+    assert run_query("SELECT count(*) AS c FROM e2e_written", sf_account)[0]["c"] == 10
+
+    # COPY, which goes through the same batched insert
+    cursor = sf_account.cursor()
+    cursor.copy_expert(
+        "COPY e2e_written (id, name) FROM STDIN",
+        io.StringIO("100\thundred\n101\thundred-one\n"),
+    )
+    cursor.close()
+
+    assert run_query("SELECT count(*) AS c FROM e2e_written", sf_account)[0]["c"] == 12
+
+    run_command("TRUNCATE e2e_written", sf_account)
+
+    assert run_query("SELECT count(*) AS c FROM e2e_written", sf_account)[0]["c"] == 0
+
+    run_command("DROP FOREIGN TABLE e2e_written", sf_account)
+
+
+def test_a_batched_load_sends_one_statement_per_batch(sf_account):
+    execute(
+        sf_account,
+        f"CREATE OR REPLACE TABLE {TEST_SCHEMA}.LOADED (id number(10,0), pad varchar(100))",
+    )
+    run_command(
+        "CREATE FOREIGN TABLE e2e_loaded () SERVER e2e_sf OPTIONS "
+        "(table_name 'LOADED', batch_size '250')",
+        sf_account,
+    )
+
+    run_command(
+        """
+        INSERT INTO e2e_loaded (id, pad)
+        SELECT i, repeat('x', 50) FROM generate_series(1, 1000) i
+        """,
+        sf_account,
+    )
+
+    assert run_query("SELECT count(*) AS c FROM e2e_loaded", sf_account)[0]["c"] == 1000
+
+    run_command("DROP FOREIGN TABLE e2e_loaded", sf_account)

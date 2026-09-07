@@ -93,6 +93,12 @@ extern SnowflakeTable * MakeSnowflakeTable(SnowflakeConnection * connection,
 										   const char *schemaName, bool schemaNameFromOption,
 										   const char *tableName, bool tableNameFromOption);
 
+/* the value of an option of a foreign table, or of its server, or NULL */
+extern char *SnowflakeTableOption(Oid relationId, const char *optionName);
+
+/* whether writes to a foreign table are allowed, from the updatable option */
+extern bool SnowflakeTableIsUpdatable(Oid relationId);
+
 extern char *SnowflakeIdentifierName(const char *identifier, bool verbatim);
 extern char *SnowflakeQuoteIdentifier(const char *identifier, bool verbatim);
 extern char *SnowflakeQualifiedTableName(SnowflakeTable * table);

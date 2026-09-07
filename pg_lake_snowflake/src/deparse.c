@@ -190,6 +190,84 @@ SnowflakeDeparseSelect(PlannerInfo *root, SnowflakeRelationInfo * relationInfo,
 
 
 /*
+ * SnowflakeDeparseDirectUpdate builds the UPDATE that Snowflake will run, with
+ * the assignments of the statement and the conditions that were found shippable.
+ */
+void
+SnowflakeDeparseDirectUpdate(PlannerInfo *root, SnowflakeRelationInfo * relationInfo,
+							 List *targetAttrs, List *setExpressions,
+							 SnowflakeDeparsedQuery * query)
+{
+	DeparseContext context = {
+		.root = root,
+		.relationInfo = relationInfo,
+		.buffer = makeStringInfo(),
+		.sqlFragments = &query->sqlFragments,
+		.paramExprs = &query->paramExprs
+	};
+	ListCell   *attributeCell = NULL;
+	ListCell   *expressionCell = NULL;
+	bool		isFirst = true;
+
+	query->sqlFragments = NIL;
+	query->paramExprs = NIL;
+	query->retrievedAttrs = NIL;
+
+	appendStringInfo(context.buffer, "UPDATE %s SET ",
+					 SnowflakeQualifiedTableName(relationInfo->table));
+
+	forboth(attributeCell, targetAttrs, expressionCell, setExpressions)
+	{
+		AttrNumber	attributeNumber = (AttrNumber) lfirst_int(attributeCell);
+		TargetEntry *targetEntry = (TargetEntry *) lfirst(expressionCell);
+
+		if (!isFirst)
+			appendStringInfoString(context.buffer, ", ");
+
+		isFirst = false;
+
+		appendStringInfo(context.buffer, "%s = ",
+						 SnowflakeColumnName(relationInfo->relationId, attributeNumber));
+		DeparseExpression((Node *) targetEntry->expr, &context);
+	}
+
+	DeparseConditions(relationInfo->remoteConds, "WHERE", &context);
+
+	query->sqlFragments = lappend(query->sqlFragments,
+								  makeString(pstrdup(context.buffer->data)));
+}
+
+
+/*
+ * SnowflakeDeparseDirectDelete builds the DELETE that Snowflake will run.
+ */
+void
+SnowflakeDeparseDirectDelete(PlannerInfo *root, SnowflakeRelationInfo * relationInfo,
+							 SnowflakeDeparsedQuery * query)
+{
+	DeparseContext context = {
+		.root = root,
+		.relationInfo = relationInfo,
+		.buffer = makeStringInfo(),
+		.sqlFragments = &query->sqlFragments,
+		.paramExprs = &query->paramExprs
+	};
+
+	query->sqlFragments = NIL;
+	query->paramExprs = NIL;
+	query->retrievedAttrs = NIL;
+
+	appendStringInfo(context.buffer, "DELETE FROM %s",
+					 SnowflakeQualifiedTableName(relationInfo->table));
+
+	DeparseConditions(relationInfo->remoteConds, "WHERE", &context);
+
+	query->sqlFragments = lappend(query->sqlFragments,
+								  makeString(pstrdup(context.buffer->data)));
+}
+
+
+/*
  * DeparseTargetList writes the columns a base relation scan needs, and records
  * which attribute each result column belongs to.
  *
@@ -566,6 +644,28 @@ bool
 SnowflakeIsShippableExpression(Expr *expr, SnowflakeRelationInfo * relationInfo)
 {
 	return IsShippableNode((Node *) expr, relationInfo, NULL);
+}
+
+
+/*
+ * SnowflakeIsShippableAssignment returns whether an expression can be assigned
+ * to a column by Snowflake.
+ */
+bool
+SnowflakeIsShippableAssignment(Expr *expr, SnowflakeRelationInfo * relationInfo)
+{
+	/*
+	 * A bare value of a writable type is assignable even when it is not
+	 * comparable: a json document written into a semi-structured column is
+	 * the same document, while comparing one is not the same comparison.
+	 */
+	if (IsA(expr, Const) && SnowflakeTypeIsWritable(((Const *) expr)->consttype))
+		return true;
+
+	if (IsA(expr, Param) && SnowflakeTypeIsWritable(((Param *) expr)->paramtype))
+		return true;
+
+	return SnowflakeIsShippableExpression(expr, relationInfo);
 }
 
 
