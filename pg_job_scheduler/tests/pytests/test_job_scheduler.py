@@ -75,8 +75,18 @@ def wait_for_scheduler(conn, timeout=15):
     return wait_for(check, timeout=timeout) is not None
 
 
-def submit_job(conn, command, schedule_interval=None, schedule_cron=None, atomic=True):
-    """Submit a job and return its job_id."""
+def submit_job(
+    conn,
+    command,
+    schedule_interval=None,
+    schedule_cron=None,
+    atomic=True,
+    max_attempts=1,
+):
+    """Submit a job and return its job_id.
+
+    max_attempts defaults to 1 here, not to the extension's 3, so that a test
+    about something other than retrying does not silently get retries."""
     interval_arg = (
         f"'{schedule_interval}'::interval" if schedule_interval else "NULL::interval"
     )
@@ -87,11 +97,34 @@ def submit_job(conn, command, schedule_interval=None, schedule_cron=None, atomic
         f"  command => $cmd${command}$cmd$, "
         f"  schedule_interval => {interval_arg}, "
         f"  schedule_cron => {cron_arg}, "
-        f"  atomic => {str(atomic).lower()})",
+        f"  atomic => {str(atomic).lower()}, "
+        f"  max_attempts => {max_attempts})",
         conn,
     )
     conn.commit()
     return result[0][0]
+
+
+def set_retry_backoff(initial_ms, max_ms=None):
+    """Shorten the retry backoff so a retry test does not wait the default 5s."""
+    run_command_outside_tx(
+        [
+            f"ALTER SYSTEM SET pg_job_scheduler.retry_backoff_initial = '{initial_ms}ms'",
+            f"ALTER SYSTEM SET pg_job_scheduler.retry_backoff_max = "
+            f"'{max_ms if max_ms is not None else initial_ms}ms'",
+            "SELECT pg_reload_conf()",
+        ]
+    )
+
+
+def reset_retry_backoff():
+    run_command_outside_tx(
+        [
+            "ALTER SYSTEM RESET pg_job_scheduler.retry_backoff_initial",
+            "ALTER SYSTEM RESET pg_job_scheduler.retry_backoff_max",
+            "SELECT pg_reload_conf()",
+        ]
+    )
 
 
 def get_job(conn, job_id):
@@ -658,6 +691,132 @@ def test_deleting_a_job_leaves_its_runs(superuser_conn):
     superuser_conn.commit()
 
     assert len(get_runs(superuser_conn, job_id)) == 1
+
+
+# ---------------------------------------------------------------------------
+# retrying a failed one-shot
+# ---------------------------------------------------------------------------
+
+
+def test_failed_one_shot_is_retried_up_to_max_attempts(superuser_conn):
+    """Three attempts means three runs and then 'failed', not one."""
+    try:
+        set_retry_backoff(200)
+        job_id = submit_job(superuser_conn, "SELECT 1/0", max_attempts=3)
+
+        assert wait_for_job_status(
+            superuser_conn, job_id, "failed", timeout=30
+        ), "the job never gave up"
+
+        runs = get_runs(superuser_conn, job_id)
+        assert len(runs) == 3, f"expected 3 attempts, got {len(runs)}"
+        assert all(run["status"] == "failed" for run in runs)
+
+        job = get_job(superuser_conn, job_id)
+        assert job["failed_attempts"] == 3
+        assert job["max_attempts"] == 3
+        assert job["next_run_at"] is None
+    finally:
+        reset_retry_backoff()
+
+
+def test_max_attempts_of_one_does_not_retry(superuser_conn):
+    """Opting out of retries gets the single attempt it asks for."""
+    job_id = submit_job(superuser_conn, "SELECT 1/0", max_attempts=1)
+
+    assert wait_for_job_status(superuser_conn, job_id, "failed")
+
+    time.sleep(3)
+    superuser_conn.commit()
+
+    runs = get_runs(superuser_conn, job_id)
+    assert len(runs) == 1, f"expected no retry, got {len(runs)} runs"
+    assert get_job(superuser_conn, job_id)["failed_attempts"] == 1
+
+
+def test_retry_waits_for_the_backoff(superuser_conn):
+    """After a failure the job is still active but not due yet, so the retry is
+    delayed rather than firing on the next pass."""
+    try:
+        set_retry_backoff(10000)
+        job_id = submit_job(superuser_conn, "SELECT 1/0", max_attempts=3)
+
+        assert wait_for_run_count(superuser_conn, job_id, 1, status="failed")
+
+        def has_future_retry():
+            superuser_conn.commit()
+            job = get_job(superuser_conn, job_id)
+            return job["failed_attempts"] == 1 and job["next_run_at"] is not None
+
+        assert wait_for(has_future_retry), "the retry was not scheduled"
+
+        job = get_job(superuser_conn, job_id)
+        assert job["status"] == "active", "a job with attempts left stays active"
+
+        result = run_query(
+            f"SELECT next_run_at > now() + interval '5 seconds' AS backed_off "
+            f"FROM job_scheduler.list_jobs() WHERE job_id = {job_id}",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+        assert result[0]["backed_off"], "the retry was not backed off"
+
+        # and it has not run again in the meantime
+        assert len(get_runs(superuser_conn, job_id)) == 1
+    finally:
+        reset_retry_backoff()
+
+
+def test_retry_succeeding_resets_the_attempt_count(superuser_conn):
+    """A job that fails and then succeeds ends up completed, with the failure
+    count cleared rather than left behind."""
+    run_command("DROP TABLE IF EXISTS appears_late", superuser_conn)
+    superuser_conn.commit()
+
+    try:
+        set_retry_backoff(1000)
+        job_id = submit_job(
+            superuser_conn,
+            "INSERT INTO appears_late VALUES (1)",
+            max_attempts=10,
+            atomic=False,
+        )
+
+        # it fails while the table is missing
+        assert wait_for_run_count(superuser_conn, job_id, 1, status="failed")
+
+        # create the table, and the next attempt should succeed
+        run_command("CREATE TABLE appears_late (x int)", superuser_conn)
+        superuser_conn.commit()
+
+        assert wait_for_job_status(
+            superuser_conn, job_id, "completed", timeout=30
+        ), "the job did not succeed once its table existed"
+
+        assert get_job(superuser_conn, job_id)["failed_attempts"] == 0
+    finally:
+        reset_retry_backoff()
+        run_command("DROP TABLE IF EXISTS appears_late", superuser_conn)
+        superuser_conn.commit()
+
+
+def test_recurring_job_failures_do_not_consume_attempts(superuser_conn):
+    """A recurring job's retry is its next scheduled occurrence, so failures
+    leave it active and do not count against max_attempts."""
+    job_id = submit_job(
+        superuser_conn, "SELECT 1/0", schedule_interval="2 seconds", max_attempts=1
+    )
+
+    assert wait_for_run_count(
+        superuser_conn, job_id, 2, status="failed", timeout=30
+    ), "the recurring job stopped after its first failure"
+
+    job = get_job(superuser_conn, job_id)
+    assert job["status"] == "active"
+    assert job["failed_attempts"] == 0, (
+        "max_attempts is for one-shots; a recurring job must not accumulate "
+        "failures against it"
+    )
 
 
 # ---------------------------------------------------------------------------

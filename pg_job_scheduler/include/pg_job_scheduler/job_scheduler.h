@@ -28,6 +28,10 @@ extern int	JobSchedulerMaxWorkers;
 /* how long a finished run is kept, in seconds; negative keeps them forever */
 extern int	JobSchedulerRunRetentionSec;
 
+/* delay before retrying a failed one-shot job, doubling up to the maximum */
+extern int	JobSchedulerRetryBackoffInitialMs;
+extern int	JobSchedulerRetryBackoffMaxMs;
+
 /*
  * Cached IDs for our own extension. The bookkeeping writes run as the
  * extension owner, because the command itself runs as the job's user_name,

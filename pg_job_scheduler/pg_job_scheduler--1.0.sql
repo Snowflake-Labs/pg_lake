@@ -46,6 +46,32 @@ CREATE TABLE job_scheduler.jobs (
 	atomic boolean NOT NULL DEFAULT true,
 
 	/*
+	 * How many times a one-shot job may be attempted before it is given up on,
+	 * counting the first attempt. 1 means never retry.
+	 *
+	 * Retrying a run that *errored* is safe whether or not the job is atomic:
+	 * the command's transaction rolled back either way, so nothing was left
+	 * half-done. The unsafe case is a run whose outcome is unknown because the
+	 * scheduler died mid-flight, and that is governed by `atomic` instead --
+	 * see ResetOrphanedRuns.
+	 *
+	 * Recurring jobs ignore this. A failed occurrence is followed by the next
+	 * scheduled one, which is the retry; firing "0 3 * * *" again at 03:01
+	 * because 03:00 failed is not what a cron schedule asks for.
+	 */
+	max_attempts int NOT NULL DEFAULT 3
+		CONSTRAINT positive_max_attempts CHECK (max_attempts >= 1),
+
+	/*
+	 * Consecutive failed attempts, reset by a success. This is counted here
+	 * rather than derived from job_scheduler.job_runs because retention deletes
+	 * run history, so counting rows there would forget attempts over time and
+	 * retry forever.
+	 */
+	failed_attempts int NOT NULL DEFAULT 0
+		CONSTRAINT non_negative_failed_attempts CHECK (failed_attempts >= 0),
+
+	/*
 	 * Lifecycle of the definition: whether the scheduler should still consider
 	 * this job at all. This is *not* the outcome of any run.
 	 *
@@ -59,6 +85,10 @@ CREATE TABLE job_scheduler.jobs (
 	 * 'completed' and 'failed' are only reachable for a one-shot job, and
 	 * 'completed' only for a non-atomic one: an atomic one-shot deletes its
 	 * definition when it succeeds, so success is the absence of a row.
+	 *
+	 * A one-shot whose run failed but has attempts left stays 'active' with
+	 * next_run_at set to when the retry is due; it only reaches 'failed' once
+	 * max_attempts is spent.
 	 */
 	status text NOT NULL DEFAULT 'active'
 		CONSTRAINT valid_status CHECK (status IN ('active', 'paused', 'completed', 'failed')),
@@ -194,23 +224,24 @@ CREATE FUNCTION job_scheduler.submit_job(command text,
 										 user_name text DEFAULT current_user,
 										 schedule_interval interval DEFAULT NULL,
 										 schedule_cron text DEFAULT NULL,
-										 atomic boolean DEFAULT true)
+										 atomic boolean DEFAULT true,
+										 max_attempts int DEFAULT 3)
  RETURNS bigint
  LANGUAGE c
 AS 'MODULE_PATHNAME', $function$pg_job_scheduler_submit_job$function$;
 
-COMMENT ON FUNCTION job_scheduler.submit_job(text, text, text, interval, text, boolean)
+COMMENT ON FUNCTION job_scheduler.submit_job(text, text, text, interval, text, boolean, int)
  IS 'submit a job to the job scheduler queue';
 
-REVOKE ALL ON FUNCTION job_scheduler.submit_job(text, text, text, interval, text, boolean)
+REVOKE ALL ON FUNCTION job_scheduler.submit_job(text, text, text, interval, text, boolean, int)
  FROM public;
 
 /* list all job definitions */
 CREATE FUNCTION job_scheduler.list_jobs(
 	OUT job_id bigint, OUT command text, OUT database_name text,
 	OUT user_name text, OUT schedule_interval interval, OUT schedule_cron text,
-	OUT atomic boolean, OUT status text,
-	OUT last_run_status text, OUT last_run_at timestamptz,
+	OUT atomic boolean, OUT max_attempts int, OUT failed_attempts int,
+	OUT status text, OUT last_run_status text, OUT last_run_at timestamptz,
 	OUT next_run_at timestamptz, OUT created_at timestamptz)
  RETURNS SETOF record
  LANGUAGE c

@@ -90,6 +90,15 @@
  */
 #define JOB_SCHEDULER_RETENTION_BATCH 1000
 
+/*
+ * Delay before retrying a failed one-shot job, doubling with each consecutive
+ * failure and capped. Retrying immediately would spend every attempt inside a
+ * few seconds, which is no use against the transient failures -- a lock wait, a
+ * deadlock, an unreachable remote -- that retrying is for.
+ */
+#define DEFAULT_RETRY_BACKOFF_INITIAL_MS (5000)
+#define DEFAULT_RETRY_BACKOFF_MAX_MS (60 * 60 * 1000)
+
 /* columns returned by the claim query */
 #define CLAIM_COL_JOB_ID	1
 #define CLAIM_COL_COMMAND	2
@@ -100,7 +109,7 @@
 #define CLAIM_COL_ATOMIC	7
 
 /* columns returned by the list queries */
-#define LIST_JOBS_COL_COUNT 12
+#define LIST_JOBS_COL_COUNT 14
 #define LIST_JOB_RUNS_COL_COUNT 10
 
 PG_MODULE_MAGIC;
@@ -108,6 +117,8 @@ PG_MODULE_MAGIC;
 /* GUC variables */
 int			JobSchedulerMaxWorkers = 4;
 int			JobSchedulerRunRetentionSec = DEFAULT_RUN_RETENTION_SEC;
+int			JobSchedulerRetryBackoffInitialMs = DEFAULT_RETRY_BACKOFF_INITIAL_MS;
+int			JobSchedulerRetryBackoffMaxMs = DEFAULT_RETRY_BACKOFF_MAX_MS;
 
 /* function declarations */
 void		_PG_init(void);
@@ -188,6 +199,31 @@ _PG_init(void)
 							GUC_UNIT_S,
 							NULL, NULL, NULL);
 
+	DefineCustomIntVariable(
+							"pg_job_scheduler.retry_backoff_initial",
+							gettext_noop("Delay before retrying a job after its first failure"),
+							gettext_noop("The delay doubles with each consecutive failure, up to "
+										 "pg_job_scheduler.retry_backoff_max."),
+							&JobSchedulerRetryBackoffInitialMs,
+							DEFAULT_RETRY_BACKOFF_INITIAL_MS,
+							0,
+							INT32_MAX,
+							PGC_SIGHUP,
+							GUC_UNIT_MS,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable(
+							"pg_job_scheduler.retry_backoff_max",
+							gettext_noop("Longest delay before retrying a job that keeps failing"),
+							NULL,
+							&JobSchedulerRetryBackoffMaxMs,
+							DEFAULT_RETRY_BACKOFF_MAX_MS,
+							0,
+							INT32_MAX,
+							PGC_SIGHUP,
+							GUC_UNIT_MS,
+							NULL, NULL, NULL);
+
 	InitializeJobSchedulerIdCache();
 }
 
@@ -226,9 +262,17 @@ ResetOrphanedRuns(void)
 		 * a definition that is still here proves the work did not commit, and
 		 * running it again cannot duplicate anything. That is what makes an
 		 * atomic one-shot run exactly once.
+		 *
+		 * The orphaned attempt is counted against max_attempts like any other
+		 * failure. Without that, a job whose command takes the whole worker
+		 * down with it would be re-armed after every crash forever.
 		 */
-		SPI_execute("UPDATE " JOB_SCHEDULER_SCHEMA ".jobs "
-					"SET next_run_at = now() "
+		SPI_execute("UPDATE " JOB_SCHEDULER_SCHEMA ".jobs SET "
+					"failed_attempts = failed_attempts + 1, "
+					"status = CASE WHEN failed_attempts + 1 < max_attempts "
+					"                THEN 'active' ELSE 'failed' END, "
+					"next_run_at = CASE WHEN failed_attempts + 1 < max_attempts "
+					"                     THEN now() ELSE NULL END "
 					"WHERE status = 'active' AND next_run_at IS NULL "
 					"AND schedule_interval IS NULL AND schedule_cron IS NULL "
 					"AND atomic",
@@ -585,13 +629,37 @@ FinishRun(int64 runId, int64 jobId, bool succeeded, char *commandTag,
 		}
 
 		{
-			DECLARE_SPI_ARGS(2);
+			DECLARE_SPI_ARGS(4);
 
 			SPI_ARG_DATUM(1, INT8OID, Int64GetDatum(jobId));
 			SPI_ARG_DATUM(2, BOOLOID, BoolGetDatum(succeeded));
+			SPI_ARG_DATUM(3, INT4OID, Int32GetDatum(JobSchedulerRetryBackoffInitialMs));
+			SPI_ARG_DATUM(4, INT4OID, Int32GetDatum(JobSchedulerRetryBackoffMaxMs));
 
-			SPI_EXECUTE("UPDATE " JOB_SCHEDULER_SCHEMA ".jobs "
-						"SET status = CASE WHEN $2 THEN 'completed' ELSE 'failed' END "
+			/*
+			 * A failed one-shot with attempts left goes back to 'active' with
+			 * next_run_at set to when the retry is due, so the ordinary claim
+			 * path picks it up again; only once its attempts are spent does
+			 * it reach 'failed'.
+			 *
+			 * failed_attempts still holds the count from before this run, so
+			 * "failed_attempts + 1" is the number of attempts including this
+			 * one, and 2 ^ failed_attempts doubles the delay per failure: the
+			 * first failure waits the initial backoff, the second twice that.
+			 */
+			SPI_EXECUTE("UPDATE " JOB_SCHEDULER_SCHEMA ".jobs SET "
+						"failed_attempts = CASE WHEN $2 THEN 0 "
+						"                       ELSE failed_attempts + 1 END, "
+						"status = CASE WHEN $2 THEN 'completed' "
+						"              WHEN failed_attempts + 1 < max_attempts THEN 'active' "
+						"              ELSE 'failed' END, "
+						"next_run_at = CASE "
+						"    WHEN $2 THEN NULL "
+						"    WHEN failed_attempts + 1 < max_attempts "
+						"      THEN now() + make_interval(secs => "
+						"             least($3::float8 * 2 ^ failed_attempts, "
+						"                   $4::float8) / 1000.0) "
+						"    ELSE NULL END "
 						"WHERE job_id = $1 "
 						"AND schedule_interval IS NULL AND schedule_cron IS NULL",
 						false);
@@ -893,9 +961,13 @@ pg_job_scheduler_submit_job(PG_FUNCTION_ARGS)
 		ereport(ERROR, (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
 						errmsg("atomic cannot be null")));
 
+	if (PG_ARGISNULL(6))
+		ereport(ERROR, (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+						errmsg("max_attempts cannot be null")));
+
 	SPI_START();
 
-	DECLARE_SPI_ARGS(6);
+	DECLARE_SPI_ARGS(7);
 
 	SPI_ARG_DATUM(1, TEXTOID, PG_GETARG_DATUM(0));
 	SPI_ARG_DATUM(2, TEXTOID, PG_GETARG_DATUM(1));
@@ -920,6 +992,7 @@ pg_job_scheduler_submit_job(PG_FUNCTION_ARGS)
 	}
 
 	SPI_ARG_DATUM(6, BOOLOID, PG_GETARG_DATUM(5));
+	SPI_ARG_DATUM(7, INT4OID, PG_GETARG_DATUM(6));
 
 	/*
 	 * A cron job starts at its first matching time, which also validates the
@@ -928,8 +1001,8 @@ pg_job_scheduler_submit_job(PG_FUNCTION_ARGS)
 	 */
 	SPI_EXECUTE("INSERT INTO " JOB_SCHEDULER_SCHEMA ".jobs "
 				"(command, database_name, user_name, schedule_interval, "
-				" schedule_cron, atomic, next_run_at) "
-				"VALUES ($1, $2, $3, $4, $5, $6, "
+				" schedule_cron, atomic, max_attempts, next_run_at) "
+				"VALUES ($1, $2, $3, $4, $5, $6, $7, "
 				"        CASE WHEN $5 IS NOT NULL "
 				"               THEN " JOB_SCHEDULER_SCHEMA ".next_cron_run($5, now()) "
 				"             ELSE now() END) "
@@ -969,7 +1042,8 @@ pg_job_scheduler_list_jobs(PG_FUNCTION_ARGS)
 	 */
 	SPI_execute("SELECT jobs.job_id, jobs.command, jobs.database_name, "
 				"jobs.user_name, jobs.schedule_interval, jobs.schedule_cron, "
-				"jobs.atomic, jobs.status, last_run.status, last_run.started_at, "
+				"jobs.atomic, jobs.max_attempts, jobs.failed_attempts, "
+				"jobs.status, last_run.status, last_run.started_at, "
 				"jobs.next_run_at, jobs.created_at "
 				"FROM " JOB_SCHEDULER_SCHEMA ".jobs "
 				"LEFT JOIN LATERAL ("
