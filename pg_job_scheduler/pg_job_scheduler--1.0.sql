@@ -1,6 +1,15 @@
 CREATE SCHEMA job_scheduler;
 
 /*
+ * A job runs as its own user_name, and that user has to be able to call
+ * job_scheduler.run_job, so the schema itself is reachable by anyone. Nothing
+ * in it is granted by default: the tables hold command text, which can carry
+ * anything the submitter put there, and every function below is revoked from
+ * public except run_job, which authorizes its caller itself.
+ */
+GRANT USAGE ON SCHEMA job_scheduler TO public;
+
+/*
  * A job definition: what to run, and when to run it next.
  *
  * A job is either a one-shot (both schedule columns NULL) or recurring, in
@@ -21,10 +30,35 @@ CREATE TABLE job_scheduler.jobs (
 	schedule_cron text,
 
 	/*
-	 * Lifecycle of the definition, not the outcome of any one run: whether the
-	 * scheduler should still consider this job at all. 'completed' and 'failed'
-	 * are only reachable for a one-shot job, since a recurring job is never
-	 * done. Per-run outcomes live in job_scheduler.job_runs.status.
+	 * Whether to run the command and record its outcome in one transaction, so
+	 * that a crash can never leave work committed but unrecorded. This is what
+	 * makes a one-shot job run exactly once: the definition is deleted in the
+	 * same transaction as the work, so a job that is still here provably has
+	 * not run, and retrying it is safe.
+	 *
+	 * The cost is that the command must be able to run inside a transaction
+	 * block. VACUUM, CREATE DATABASE, CREATE INDEX CONCURRENTLY and friends
+	 * cannot, and neither can anything doing its own transaction control, so
+	 * such a job needs atomic = false and gets the weaker guarantee: its
+	 * outcome is recorded separately afterwards, and a crash in between means
+	 * it is never retried rather than possibly run twice.
+	 */
+	atomic boolean NOT NULL DEFAULT true,
+
+	/*
+	 * Lifecycle of the definition: whether the scheduler should still consider
+	 * this job at all. This is *not* the outcome of any run.
+	 *
+	 * For a recurring job it stays 'active' no matter how its runs go -- every
+	 * run failing does not make the job 'failed', because the schedule is still
+	 * live and the next run is still due. So this is the wrong column to read to
+	 * find out whether a recurring job is actually working; read the last run's
+	 * status for that, which job_scheduler.list_jobs() reports as
+	 * last_run_status alongside last_run_at.
+	 *
+	 * 'completed' and 'failed' are only reachable for a one-shot job, and
+	 * 'completed' only for a non-atomic one: an atomic one-shot deletes its
+	 * definition when it succeeds, so success is the absence of a row.
 	 */
 	status text NOT NULL DEFAULT 'active'
 		CONSTRAINT valid_status CHECK (status IN ('active', 'paused', 'completed', 'failed')),
@@ -50,18 +84,27 @@ CREATE INDEX jobs_next_run_at_idx ON job_scheduler.jobs (next_run_at)
 
 ALTER TABLE job_scheduler.jobs REPLICA IDENTITY FULL;
 
-GRANT SELECT ON job_scheduler.jobs TO public;
-
 
 /*
  * One row per execution of a job. Recurring jobs accumulate one row per run,
  * so this is the high-churn table of the two.
+ *
+ * There is deliberately no foreign key to job_scheduler.jobs. A one-shot job
+ * deletes its own definition when it succeeds, which is what makes it run
+ * exactly once, so the run is the durable record and has to outlive the
+ * definition. It therefore carries its own copy of what it ran.
  */
 CREATE TABLE job_scheduler.job_runs (
 	run_id bigserial
 		CONSTRAINT job_runs_pk PRIMARY KEY,
 
+	/* the job this ran for; the definition may since have been deleted */
 	job_id bigint NOT NULL,
+
+	/* what ran, copied from the definition so this row stands alone */
+	command text NOT NULL,
+	database_name text NOT NULL,
+	user_name text NOT NULL,
 
 	/* outcome of this single execution */
 	status text NOT NULL DEFAULT 'running'
@@ -72,14 +115,10 @@ CREATE TABLE job_scheduler.job_runs (
 
 	/* command tag of the last statement, e.g. 'SELECT 1' */
 	result text,
-	error_message text,
-
-	/* a run has no meaning without its job */
-	CONSTRAINT job_id_fk FOREIGN KEY (job_id)
-		REFERENCES job_scheduler.jobs (job_id) ON DELETE CASCADE
+	error_message text
 );
 
-/* without this, deleting a job rescans the whole history to cascade */
+/* list_job_runs filters on this, and the claim query probes it per job */
 CREATE INDEX job_runs_job_id_idx ON job_scheduler.job_runs (job_id);
 
 ALTER TABLE job_scheduler.job_runs REPLICA IDENTITY FULL;
@@ -89,8 +128,6 @@ ALTER TABLE job_scheduler.job_runs SET (
 	autovacuum_analyze_scale_factor = 0.05,
 	autovacuum_analyze_threshold = 500
 );
-
-GRANT SELECT ON job_scheduler.job_runs TO public;
 
 
 /*
@@ -108,26 +145,54 @@ COMMENT ON FUNCTION job_scheduler.next_cron_run(text, timestamptz)
 
 REVOKE ALL ON FUNCTION job_scheduler.next_cron_run(text, timestamptz) FROM public;
 
+/*
+ * run_job executes a job's command and records the outcome in the caller's
+ * transaction, so that the two cannot disagree. The job scheduler's attached
+ * worker calls this instead of the command itself when the job is atomic; it
+ * is not meant to be called by hand, and it authorizes its caller rather than
+ * trusting its arguments.
+ */
+CREATE FUNCTION job_scheduler.run_job(job_id bigint, run_id bigint)
+ RETURNS void
+ LANGUAGE c STRICT
+AS 'MODULE_PATHNAME', $function$pg_job_scheduler_run_job$function$;
+
+COMMENT ON FUNCTION job_scheduler.run_job(bigint, bigint)
+ IS 'run a claimed job and record its outcome in the same transaction';
+
+/*
+ * Callable by anyone, because a job runs as its own user_name and that user is
+ * the one that has to call this. It is safe because it takes no command: it
+ * reads the command from the job it was given, and refuses unless the caller
+ * is that job's user_name and the run is one the scheduler has just opened.
+ */
+REVOKE ALL ON FUNCTION job_scheduler.run_job(bigint, bigint) FROM public;
+GRANT EXECUTE ON FUNCTION job_scheduler.run_job(bigint, bigint) TO public;
+
 /* submit a job to the queue */
 CREATE FUNCTION job_scheduler.submit_job(command text,
 										 database_name text DEFAULT current_database(),
 										 user_name text DEFAULT current_user,
 										 schedule_interval interval DEFAULT NULL,
-										 schedule_cron text DEFAULT NULL)
+										 schedule_cron text DEFAULT NULL,
+										 atomic boolean DEFAULT true)
  RETURNS bigint
  LANGUAGE c
 AS 'MODULE_PATHNAME', $function$pg_job_scheduler_submit_job$function$;
 
-COMMENT ON FUNCTION job_scheduler.submit_job(text, text, text, interval, text)
+COMMENT ON FUNCTION job_scheduler.submit_job(text, text, text, interval, text, boolean)
  IS 'submit a job to the job scheduler queue';
 
-REVOKE ALL ON FUNCTION job_scheduler.submit_job(text, text, text, interval, text) FROM public;
+REVOKE ALL ON FUNCTION job_scheduler.submit_job(text, text, text, interval, text, boolean)
+ FROM public;
 
 /* list all job definitions */
 CREATE FUNCTION job_scheduler.list_jobs(
 	OUT job_id bigint, OUT command text, OUT database_name text,
 	OUT user_name text, OUT schedule_interval interval, OUT schedule_cron text,
-	OUT status text, OUT next_run_at timestamptz, OUT created_at timestamptz)
+	OUT atomic boolean, OUT status text,
+	OUT last_run_status text, OUT last_run_at timestamptz,
+	OUT next_run_at timestamptz, OUT created_at timestamptz)
  RETURNS SETOF record
  LANGUAGE c
 AS 'MODULE_PATHNAME', $function$pg_job_scheduler_list_jobs$function$;
@@ -140,7 +205,8 @@ REVOKE ALL ON FUNCTION job_scheduler.list_jobs() FROM public;
 /* list job runs, optionally for a single job */
 CREATE FUNCTION job_scheduler.list_job_runs(
 	for_job_id bigint DEFAULT NULL,
-	OUT run_id bigint, OUT job_id bigint, OUT status text,
+	OUT run_id bigint, OUT job_id bigint, OUT command text,
+	OUT database_name text, OUT user_name text, OUT status text,
 	OUT started_at timestamptz, OUT completed_at timestamptz,
 	OUT result text, OUT error_message text)
  RETURNS SETOF record

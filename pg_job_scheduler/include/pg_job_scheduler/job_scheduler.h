@@ -17,5 +17,19 @@
 
 #pragma once
 
+#include "pg_extension_base/extension_ids.h"
+
+#define PG_JOB_SCHEDULER_NAME "pg_job_scheduler"
+#define JOB_SCHEDULER_SCHEMA "job_scheduler"
+
 /* maximum number of concurrent job workers */
 extern int	JobSchedulerMaxWorkers;
+
+/*
+ * Cached IDs for our own extension. The bookkeeping writes run as the
+ * extension owner, because the command itself runs as the job's user_name,
+ * who has no privileges on our tables.
+ */
+extern CachedExtensionIds * PgJobScheduler;
+
+extern void InitializeJobSchedulerIdCache(void);

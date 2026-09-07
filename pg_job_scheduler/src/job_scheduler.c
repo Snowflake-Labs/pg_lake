@@ -45,6 +45,7 @@
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/hsearch.h"
+#include "utils/fmgrprotos.h"
 #include "utils/memutils.h"
 #include "utils/snapmgr.h"
 #include "utils/timestamp.h"
@@ -52,10 +53,10 @@
 #include "pg_extension_base/attached_worker.h"
 #include "pg_extension_base/base_workers.h"
 #include "pg_extension_base/spi_helpers.h"
+#include "pg_job_scheduler/cron_schedule.h"
 #include "pg_job_scheduler/job_scheduler.h"
 
 #define GUC_STANDARD 0
-#define JOB_SCHEDULER_SCHEMA "job_scheduler"
 
 /*
  * How long the main loop sleeps between passes.
@@ -77,10 +78,13 @@
 #define CLAIM_COL_COMMAND	2
 #define CLAIM_COL_DATABASE	3
 #define CLAIM_COL_USERNAME	4
+#define CLAIM_COL_INTERVAL	5
+#define CLAIM_COL_CRON		6
+#define CLAIM_COL_ATOMIC	7
 
 /* columns returned by the list queries */
-#define LIST_JOBS_COL_COUNT 9
-#define LIST_JOB_RUNS_COL_COUNT 7
+#define LIST_JOBS_COL_COUNT 12
+#define LIST_JOB_RUNS_COL_COUNT 10
 
 PG_MODULE_MAGIC;
 
@@ -117,6 +121,13 @@ typedef struct ClaimedJob
 	char	   *command;
 	char	   *databaseName;
 	char	   *userName;
+
+	/* whether the job records its own outcome; see run_job.c */
+	bool		atomic;
+
+	/* when this job should run again, computed before any of the writes */
+	TimestampTz nextRunAt;
+	bool		nextRunIsNull;
 }			ClaimedJob;
 
 
@@ -144,6 +155,8 @@ _PG_init(void)
 							PGC_SIGHUP,
 							GUC_STANDARD,
 							NULL, NULL, NULL);
+
+	InitializeJobSchedulerIdCache();
 }
 
 
@@ -175,11 +188,31 @@ ResetOrphanedRuns(void)
 		 * A one-shot job clears next_run_at when it is claimed and only moves
 		 * off 'active' when its run finishes, so an active one-shot with no
 		 * next_run_at is exactly one whose run we just orphaned.
+		 *
+		 * Retrying it is only safe when the job was atomic. Such a job
+		 * deletes its own definition in the same transaction as its work, so
+		 * a definition that is still here proves the work did not commit, and
+		 * running it again cannot duplicate anything. That is what makes an
+		 * atomic one-shot run exactly once.
 		 */
 		SPI_execute("UPDATE " JOB_SCHEDULER_SCHEMA ".jobs "
 					"SET next_run_at = now() "
 					"WHERE status = 'active' AND next_run_at IS NULL "
-					"AND schedule_interval IS NULL AND schedule_cron IS NULL",
+					"AND schedule_interval IS NULL AND schedule_cron IS NULL "
+					"AND atomic",
+					false, 0);
+
+		/*
+		 * A non-atomic one-shot gets no such proof: its command may well have
+		 * committed before we died, with nothing to say so. Retrying could
+		 * run it twice, so it is failed instead. That is the weaker bargain
+		 * such a job accepted by opting out.
+		 */
+		SPI_execute("UPDATE " JOB_SCHEDULER_SCHEMA ".jobs "
+					"SET status = 'failed' "
+					"WHERE status = 'active' AND next_run_at IS NULL "
+					"AND schedule_interval IS NULL AND schedule_cron IS NULL "
+					"AND NOT atomic",
 					false, 0);
 
 		SPI_finish();
@@ -189,14 +222,63 @@ ResetOrphanedRuns(void)
 
 
 /*
- * SelectDueJobs returns up to maxJobs jobs whose next_run_at has fallen due,
- * as ClaimedJob structs allocated in resultContext. The runId field is not
- * filled in yet; ClaimJob does that.
+ * NextRunAfter computes when a job should next run, given its schedule and the
+ * time the current run is starting. A job with no schedule reports NULL
+ * through *isNull and never runs again.
+ *
+ * The calculation lives here rather than in the claim SQL so that an
+ * unevaluatable schedule fails one job instead of aborting the whole claim
+ * transaction. Neither the cron code nor interval arithmetic touches the
+ * database, so the caller can catch an error from this and carry on.
+ */
+static TimestampTz
+NextRunAfter(Datum scheduleInterval, bool hasInterval, char *scheduleCron,
+			 TimestampTz startTime, bool *isNull)
+{
+	*isNull = false;
+
+	if (hasInterval)
+		return DatumGetTimestampTz(
+								   DirectFunctionCall2(timestamptz_pl_interval,
+													   TimestampTzGetDatum(startTime),
+													   scheduleInterval));
+
+	if (scheduleCron != NULL)
+	{
+		CronSchedule schedule;
+
+		ParseCronSchedule(scheduleCron, &schedule);
+
+		return CronScheduleNextRun(&schedule, startTime);
+	}
+
+	*isNull = true;
+	return 0;
+}
+
+
+/*
+ * ClaimDueJobs finds up to maxJobs jobs whose next_run_at has fallen due, opens
+ * a run for each, and advances each job's next_run_at. It returns the claimed
+ * jobs as ClaimedJob structs allocated in resultContext.
+ *
+ * All of that happens in one transaction, while FOR UPDATE SKIP LOCKED still
+ * holds the rows. Splitting the claim across two transactions would let two
+ * schedulers -- briefly possible while a base worker is being relaunched --
+ * each select the same job and each open a run for it, since neither would see
+ * the other's uncommitted run row.
+ *
+ * Jobs whose schedule could not be evaluated are not claimed; their ids are
+ * appended to *unschedulableJobIds for the caller to fail outside this
+ * transaction, so one unusable schedule cannot stall the rest of the queue.
  */
 static List *
-SelectDueJobs(int maxJobs, MemoryContext resultContext)
+ClaimDueJobs(int maxJobs, MemoryContext resultContext,
+			 List **unschedulableJobIds)
 {
-	List	   *dueJobs = NIL;
+	List	   *claimedJobs = NIL;
+
+	*unschedulableJobIds = NIL;
 
 	if (maxJobs <= 0)
 		return NIL;
@@ -205,133 +287,161 @@ SelectDueJobs(int maxJobs, MemoryContext resultContext)
 	{
 		SPI_connect();
 
-		DECLARE_SPI_ARGS(1);
+		{
+			DECLARE_SPI_ARGS(1);
 
-		SPI_ARG_DATUM(1, INT4OID, Int32GetDatum(maxJobs));
+			SPI_ARG_DATUM(1, INT4OID, Int32GetDatum(maxJobs));
+
+			/*
+			 * The NOT EXISTS keeps a recurring job from overlapping itself
+			 * when a run outlives its own interval: the next run is skipped
+			 * rather than started alongside the one still going.
+			 */
+			SPI_EXECUTE("SELECT job_id, command, database_name, user_name, "
+						"schedule_interval, schedule_cron, atomic "
+						"FROM " JOB_SCHEDULER_SCHEMA ".jobs "
+						"WHERE status = 'active' AND next_run_at <= now() "
+						"AND NOT EXISTS ("
+						"  SELECT 1 FROM " JOB_SCHEDULER_SCHEMA ".job_runs "
+						"  WHERE job_id = jobs.job_id AND status = 'running') "
+						"ORDER BY next_run_at "
+						"FOR UPDATE SKIP LOCKED "
+						"LIMIT $1",
+						false);
+		}
+
+		uint64		dueCount = SPI_processed;
+		TimestampTz startTime = GetCurrentTimestamp();
 
 		/*
-		 * The NOT EXISTS keeps a recurring job from overlapping itself when a
-		 * run outlives its own interval: the next run is skipped rather than
-		 * started alongside the one still going.
+		 * Copy every due row out before writing anything. Each SPI_EXECUTE
+		 * below replaces SPI_tuptable, so reading the claim columns after the
+		 * first insert would read them out of that insert's result instead.
 		 */
-		SPI_EXECUTE("SELECT job_id, command, database_name, user_name "
-					"FROM " JOB_SCHEDULER_SCHEMA ".jobs "
-					"WHERE status = 'active' AND next_run_at <= now() "
-					"AND NOT EXISTS ("
-					"  SELECT 1 FROM " JOB_SCHEDULER_SCHEMA ".job_runs "
-					"  WHERE job_id = jobs.job_id AND status = 'running') "
-					"ORDER BY next_run_at "
-					"FOR UPDATE SKIP LOCKED "
-					"LIMIT $1",
-					false);
-
-		for (uint64 rowIndex = 0; rowIndex < SPI_processed; rowIndex++)
+		for (uint64 rowIndex = 0; rowIndex < dueCount; rowIndex++)
 		{
 			bool		isNull = false;
 			int64		jobId = DatumGetInt64(GET_SPI_DATUM(rowIndex, CLAIM_COL_JOB_ID, &isNull));
 			char	   *command = TextDatumGetCString(GET_SPI_DATUM(rowIndex, CLAIM_COL_COMMAND, &isNull));
 			char	   *dbName = TextDatumGetCString(GET_SPI_DATUM(rowIndex, CLAIM_COL_DATABASE, &isNull));
 			char	   *userName = TextDatumGetCString(GET_SPI_DATUM(rowIndex, CLAIM_COL_USERNAME, &isNull));
+			bool		atomic = DatumGetBool(GET_SPI_DATUM(rowIndex, CLAIM_COL_ATOMIC, &isNull));
+
+			bool		intervalIsNull = false;
+			Datum		scheduleInterval = GET_SPI_DATUM(rowIndex, CLAIM_COL_INTERVAL,
+														 &intervalIsNull);
+
+			bool		cronIsNull = false;
+			Datum		cronDatum = GET_SPI_DATUM(rowIndex, CLAIM_COL_CRON, &cronIsNull);
+			char	   *scheduleCron = cronIsNull ? NULL : TextDatumGetCString(cronDatum);
+
+			/*
+			 * next_run_at advances from now() rather than from the old
+			 * next_run_at, so a scheduler that was down for a while does not
+			 * come back to a backlog of missed runs to catch up on.
+			 *
+			 * This is computed here, while the schedule columns are still to
+			 * hand and before any writes, precisely so that a schedule we
+			 * cannot evaluate costs one job rather than the whole claim
+			 * transaction.
+			 */
+			TimestampTz nextRunAt = 0;
+			bool		nextRunIsNull = false;
+			bool		scheduleFailed = false;
+
+			PG_TRY();
+			{
+				nextRunAt = NextRunAfter(scheduleInterval, !intervalIsNull,
+										 scheduleCron, startTime, &nextRunIsNull);
+			}
+			PG_CATCH();
+			{
+				FlushErrorState();
+				scheduleFailed = true;
+			}
+			PG_END_TRY();
 
 			MemoryContext spiContext = MemoryContextSwitchTo(resultContext);
 
-			ClaimedJob *job = palloc0(sizeof(ClaimedJob));
+			if (scheduleFailed)
+			{
+				*unschedulableJobIds = lappend_int(*unschedulableJobIds, (int) jobId);
+			}
+			else
+			{
+				ClaimedJob *job = palloc0(sizeof(ClaimedJob));
 
-			job->jobId = jobId;
-			job->command = pstrdup(command);
-			job->databaseName = pstrdup(dbName);
-			job->userName = pstrdup(userName);
-			dueJobs = lappend(dueJobs, job);
+				job->jobId = jobId;
+				job->command = pstrdup(command);
+				job->databaseName = pstrdup(dbName);
+				job->userName = pstrdup(userName);
+				job->atomic = atomic;
+				job->nextRunAt = nextRunAt;
+				job->nextRunIsNull = nextRunIsNull;
+				claimedJobs = lappend(claimedJobs, job);
+			}
 
 			MemoryContextSwitchTo(spiContext);
 		}
 
-		SPI_finish();
-	}
-	END_TRANSACTION();
+		/* now open a run for each and advance its schedule */
+		ListCell   *claimedCell;
 
-	return dueJobs;
-}
-
-
-/*
- * ClaimJob opens a run for the given job and advances the job's next_run_at,
- * filling in job->runId.
- *
- * Returns false and sets *errorMessage if the job's schedule could not be
- * evaluated. That is kept per-job rather than batched so a single unusable
- * schedule cannot stall every other job in the queue.
- */
-static bool
-ClaimJob(ClaimedJob * job, MemoryContext errorContext, char **errorMessage)
-{
-	*errorMessage = NULL;
-
-	PG_TRY();
-	{
-		START_TRANSACTION();
+		foreach(claimedCell, claimedJobs)
 		{
-			SPI_connect();
+			ClaimedJob *job = (ClaimedJob *) lfirst(claimedCell);
 
 			{
-				DECLARE_SPI_ARGS(1);
+				DECLARE_SPI_ARGS(4);
 
 				SPI_ARG_DATUM(1, INT8OID, Int64GetDatum(job->jobId));
-				SPI_EXECUTE("INSERT INTO " JOB_SCHEDULER_SCHEMA ".job_runs (job_id) "
-							"VALUES ($1) RETURNING run_id",
+				SPI_ARG_DATUM(2, TEXTOID, CStringGetTextDatum(job->command));
+				SPI_ARG_DATUM(3, TEXTOID, CStringGetTextDatum(job->databaseName));
+				SPI_ARG_DATUM(4, TEXTOID, CStringGetTextDatum(job->userName));
+
+				/*
+				 * The run carries its own copy of what it ran, because a
+				 * one-shot job deletes its definition when it succeeds.
+				 */
+				SPI_EXECUTE("INSERT INTO " JOB_SCHEDULER_SCHEMA ".job_runs "
+							"(job_id, command, database_name, user_name) "
+							"VALUES ($1, $2, $3, $4) RETURNING run_id",
 							false);
 
 				if (SPI_processed != 1)
 					ereport(ERROR, (errmsg("failed to open a run for job %ld",
 										   (long) job->jobId)));
 
-				bool		isNull = false;
+				bool		runIdIsNull = false;
 
-				job->runId = DatumGetInt64(GET_SPI_DATUM(0, 1, &isNull));
+				job->runId = DatumGetInt64(GET_SPI_DATUM(0, 1, &runIdIsNull));
 			}
 
 			{
-				DECLARE_SPI_ARGS(1);
+				DECLARE_SPI_ARGS(2);
 
 				SPI_ARG_DATUM(1, INT8OID, Int64GetDatum(job->jobId));
 
-				/*
-				 * next_run_at advances from now() rather than from the old
-				 * next_run_at, so a scheduler that was down for a while does
-				 * not come back to a backlog of missed runs to catch up on. A
-				 * job with no schedule gets NULL and never runs again.
-				 */
-				SPI_EXECUTE("UPDATE " JOB_SCHEDULER_SCHEMA ".jobs SET next_run_at = "
-							"  CASE WHEN schedule_interval IS NOT NULL "
-							"         THEN now() + schedule_interval "
-							"       WHEN schedule_cron IS NOT NULL "
-							"         THEN " JOB_SCHEDULER_SCHEMA ".next_cron_run("
-							"                 schedule_cron, now()) "
-							"       ELSE NULL END "
-							"WHERE job_id = $1",
+				if (job->nextRunIsNull)
+				{
+					SPI_ARG_NULL(2, TIMESTAMPTZOID);
+				}
+				else
+				{
+					SPI_ARG_DATUM(2, TIMESTAMPTZOID, TimestampTzGetDatum(job->nextRunAt));
+				}
+
+				SPI_EXECUTE("UPDATE " JOB_SCHEDULER_SCHEMA ".jobs "
+							"SET next_run_at = $2 WHERE job_id = $1",
 							false);
 			}
-
-			SPI_finish();
 		}
-		END_TRANSACTION();
+
+		SPI_finish();
 	}
-	PG_CATCH();
-	{
-		MemoryContext oldContext = MemoryContextSwitchTo(errorContext);
-		ErrorData  *edata = CopyErrorData();
+	END_TRANSACTION();
 
-		*errorMessage = pstrdup(edata->message);
-
-		MemoryContextSwitchTo(oldContext);
-		FreeErrorData(edata);
-		FlushErrorState();
-
-		return false;
-	}
-	PG_END_TRY();
-
-	return true;
+	return claimedJobs;
 }
 
 
@@ -365,6 +475,12 @@ FailJobDefinition(int64 jobId)
  * FinishRun records the outcome of one run, and for a one-shot job also
  * closes out the definition. A recurring job stays 'active' whatever its
  * individual runs do, so there is always somewhere for the next run to go.
+ *
+ * An atomic job has already recorded its own success inside its transaction,
+ * and deleted its definition if it was a one-shot. Both statements below are
+ * written so that they are no-ops in that case rather than contradicting what
+ * already committed: the run is only updated while it is still 'running', and
+ * the definition is only updated if the row is still there.
  */
 static void
 FinishRun(int64 runId, int64 jobId, bool succeeded, char *commandTag,
@@ -385,7 +501,7 @@ FinishRun(int64 runId, int64 jobId, bool succeeded, char *commandTag,
 			SPI_EXECUTE("UPDATE " JOB_SCHEDULER_SCHEMA ".job_runs "
 						"SET status = CASE WHEN $2 THEN 'succeeded' ELSE 'failed' END, "
 						"completed_at = now(), result = $3, error_message = $4 "
-						"WHERE run_id = $1",
+						"WHERE run_id = $1 AND status = 'running'",
 						false);
 		}
 
@@ -576,27 +692,31 @@ pg_job_scheduler_main(PG_FUNCTION_ARGS)
 		/* Step 2: claim due jobs if we have available slots */
 		int			runningCount = hash_get_num_entries(runningJobs);
 		int			availableSlots = JobSchedulerMaxWorkers - runningCount;
+		List	   *unschedulableJobIds = NIL;
 
 		if (availableSlots > 0)
 		{
-			List	   *dueJobs = SelectDueJobs(availableSlots, loopContext);
-			ListCell   *dueCell;
+			List	   *claimedJobs = ClaimDueJobs(availableSlots, loopContext,
+												   &unschedulableJobIds);
+			ListCell   *claimedCell;
+			ListCell   *unschedulableCell;
+
+			/* a schedule we cannot evaluate would otherwise stay due forever */
+			foreach(unschedulableCell, unschedulableJobIds)
+			{
+				int64		jobId = (int64) lfirst_int(unschedulableCell);
+
+				elog(LOG, "job scheduler: job %ld has a schedule that cannot be "
+					 "evaluated; marking it failed", (long) jobId);
+
+				FailJobDefinition(jobId);
+			}
 
 			/* Step 3: launch attached workers outside the transaction */
-			foreach(dueCell, dueJobs)
+			foreach(claimedCell, claimedJobs)
 			{
-				ClaimedJob *job = (ClaimedJob *) lfirst(dueCell);
-				char	   *claimError = NULL;
+				ClaimedJob *job = (ClaimedJob *) lfirst(claimedCell);
 				bool		found;
-
-				if (!ClaimJob(job, loopContext, &claimError))
-				{
-					elog(LOG, "job scheduler: could not claim job %ld: %s",
-						 (long) job->jobId, claimError);
-
-					FailJobDefinition(job->jobId);
-					continue;
-				}
 
 				MemoryContextSwitchTo(schedulerContext);
 				RunningJob *runEntry = hash_search(runningJobs, &job->jobId,
@@ -605,10 +725,21 @@ pg_job_scheduler_main(PG_FUNCTION_ARGS)
 				runEntry->runId = job->runId;
 				runEntry->lastCommandTag = NULL;
 
+				/*
+				 * An atomic job runs through run_job() so that its command
+				 * and the record of it commit together; see run_job.c.
+				 * Anything else runs its command directly and has its outcome
+				 * recorded afterwards by FinishRun.
+				 */
+				char	   *workerCommand = job->atomic
+					? psprintf("SELECT %s.run_job(" INT64_FORMAT ", " INT64_FORMAT ")",
+							   JOB_SCHEDULER_SCHEMA, job->jobId, job->runId)
+					: job->command;
+
 				PG_TRY();
 				{
 					runEntry->worker = StartAttachedWorkerInDatabase(
-																	 job->command,
+																	 workerCommand,
 																	 job->databaseName,
 																	 job->userName);
 				}
@@ -676,9 +807,13 @@ pg_job_scheduler_submit_job(PG_FUNCTION_ARGS)
 		ereport(ERROR, (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
 						errmsg("database name and user name cannot be null")));
 
+	if (PG_ARGISNULL(5))
+		ereport(ERROR, (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+						errmsg("atomic cannot be null")));
+
 	SPI_START();
 
-	DECLARE_SPI_ARGS(5);
+	DECLARE_SPI_ARGS(6);
 
 	SPI_ARG_DATUM(1, TEXTOID, PG_GETARG_DATUM(0));
 	SPI_ARG_DATUM(2, TEXTOID, PG_GETARG_DATUM(1));
@@ -702,6 +837,8 @@ pg_job_scheduler_submit_job(PG_FUNCTION_ARGS)
 		SPI_ARG_DATUM(5, TEXTOID, PG_GETARG_DATUM(4));
 	}
 
+	SPI_ARG_DATUM(6, BOOLOID, PG_GETARG_DATUM(5));
+
 	/*
 	 * A cron job starts at its first matching time, which also validates the
 	 * expression here rather than leaving behind a job that can never be
@@ -709,8 +846,8 @@ pg_job_scheduler_submit_job(PG_FUNCTION_ARGS)
 	 */
 	SPI_EXECUTE("INSERT INTO " JOB_SCHEDULER_SCHEMA ".jobs "
 				"(command, database_name, user_name, schedule_interval, "
-				" schedule_cron, next_run_at) "
-				"VALUES ($1, $2, $3, $4, $5, "
+				" schedule_cron, atomic, next_run_at) "
+				"VALUES ($1, $2, $3, $4, $5, $6, "
 				"        CASE WHEN $5 IS NOT NULL "
 				"               THEN " JOB_SCHEDULER_SCHEMA ".next_cron_run($5, now()) "
 				"             ELSE now() END) "
@@ -741,10 +878,23 @@ pg_job_scheduler_list_jobs(PG_FUNCTION_ARGS)
 
 	SPI_START();
 
-	SPI_execute("SELECT job_id, command, database_name, user_name, "
-				"schedule_interval, schedule_cron, status, next_run_at, created_at "
+	/*
+	 * last_run_status and last_run_at are derived rather than stored, so they
+	 * cannot drift from job_runs. They exist because status answers a
+	 * different question: for a recurring job it stays 'active' however its
+	 * runs go, so it is the wrong column to look at to find out whether the
+	 * job is working.
+	 */
+	SPI_execute("SELECT jobs.job_id, jobs.command, jobs.database_name, "
+				"jobs.user_name, jobs.schedule_interval, jobs.schedule_cron, "
+				"jobs.atomic, jobs.status, last_run.status, last_run.started_at, "
+				"jobs.next_run_at, jobs.created_at "
 				"FROM " JOB_SCHEDULER_SCHEMA ".jobs "
-				"ORDER BY job_id",
+				"LEFT JOIN LATERAL ("
+				"  SELECT status, started_at FROM " JOB_SCHEDULER_SCHEMA ".job_runs "
+				"  WHERE job_runs.job_id = jobs.job_id "
+				"  ORDER BY run_id DESC LIMIT 1) AS last_run ON true "
+				"ORDER BY jobs.job_id",
 				true, 0);
 
 	for (uint64 rowIndex = 0; rowIndex < SPI_processed; rowIndex++)
@@ -790,8 +940,8 @@ pg_job_scheduler_list_job_runs(PG_FUNCTION_ARGS)
 		SPI_ARG_DATUM(1, INT8OID, PG_GETARG_DATUM(0));
 	}
 
-	SPI_EXECUTE("SELECT run_id, job_id, status, started_at, completed_at, "
-				"result, error_message "
+	SPI_EXECUTE("SELECT run_id, job_id, command, database_name, user_name, "
+				"status, started_at, completed_at, result, error_message "
 				"FROM " JOB_SCHEDULER_SCHEMA ".job_runs "
 				"WHERE $1 IS NULL OR job_id = $1 "
 				"ORDER BY run_id",
